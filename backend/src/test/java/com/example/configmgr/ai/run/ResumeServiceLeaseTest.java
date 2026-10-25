@@ -238,15 +238,18 @@ class ResumeServiceLeaseTest {
 		verify(this.executor, never()).execute(any(Runnable.class));
 	}
 
-	// ── I4：Redis 不可用 ⇒ 无租约降级（不得报 LEASE_HELD_ELSEWHERE） ────────
+	// ── 续租 fencing 收口：设施不可确认 ⇒ 只读、不推进（取代 I4 的"降级放行"） ──────
 
 	/**
-	 * 租约设施不可用时，旧签名必须<b>放行</b>（按 {@code leaseService == null} 的同一条口径走进程内互斥），
-	 * 而不是把"抢不到"误报成"别人持有"—— 那会让 Redis 抖一下就把启动续跑/运维续跑全部卡死。
-	 * 降级是否发生由 {@code leaseOk()} 可观测。
+	 * 租约设施不可用时，续跑必须<b>只读、不推进</b>：既写不了快照，也执行不了工具（认领被拒），
+	 * 放行只会跑出一轮"答得出、存不下"的幽灵续跑。
+	 *
+	 * <p>这是"从未持租且设施正常才允许原普通写"的另一面：<b>设施不正常</b>时连"从未持租"也不放行
+	 * （无法证明没有别的实例持有这一轮）。无租约设施（{@code leaseService == null}，单测/降级装配）
+	 * 仍走普通写 —— 那不是"设施坏了"，而是"没有租约语义"。
 	 */
 	@Test
-	void redisOutageDegradesToTheInProcessMutexInsteadOfRefusingTheResume() {
+	void redisOutageIsReadOnlyInsteadOfDrivingWithoutWriteAuthority() {
 		StringRedisTemplate broken = mock(StringRedisTemplate.class);
 		when(broken.execute(any(org.springframework.data.redis.core.script.RedisScript.class),
 				org.mockito.ArgumentMatchers.anyList(), any(Object[].class)))
@@ -257,10 +260,13 @@ class ResumeServiceLeaseTest {
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-		assertThat(result.outcome()).as("Redis 不可用 ⇒ 无租约降级放行（不是 LEASE_HELD_ELSEWHERE）")
-			.isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(result.outcome()).as("设施不可确认 ⇒ 只读不推进（不是降级开跑）")
+			.isEqualTo(ResumeService.Outcome.STATE_UNKNOWN);
+		assertThat(result.body()).containsEntry("reason", "LEASE_UNAVAILABLE");
+		assertThat(this.store.get(RUN_ID).getStatus()).as("不得先写 RUNNING 再失败")
+			.isEqualTo(RunSnapshot.SUSPENDED);
+		verify(this.executor, never()).execute(any(Runnable.class));
 		assertThat(brokenLeases.leaseOk()).as("降级必须可观测").isFalse();
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(), eq(this.emitter));
 	}
 
 	// ── 并发同主双抢：谁创建谁释放（harness lease-scripts 实锤缺陷） ──────────

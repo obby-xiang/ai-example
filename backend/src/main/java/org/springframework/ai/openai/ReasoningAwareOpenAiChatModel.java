@@ -2,6 +2,7 @@ package org.springframework.ai.openai;
 
 import java.util.List;
 
+import com.example.configmgr.ai.memory.ReasoningOrigin;
 import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +35,14 @@ import org.springframework.util.CollectionUtils;
  * 版本面（2026-10-22）：本类与 {@code ChatCompletionMessage} 在 1.1.7 / 1.1.8 上字节码逐字节
  * 一致（javap 全量比对，见任务看板「批·合规依赖批」），故两版同缺口、补丁副本无需按版本分叉。
  * 升级 Spring AI 版本后应评审官方是否已修复并移除本补丁。
+ *
+ * <h2>跨供应方推理元数据隔离（本批）</h2>
+ * 第 9 组件不是"无条件的字段"：只有当 assistant 消息的<b>来源标记</b>
+ * （{@link ReasoningOrigin}，随 metadata 存）与<b>当前供应方</b>一致时才回放。
+ * 于是"用户在 A 上产生的推理"在换到 B 之后不会进入 B 的请求；而<b>存储面不动</b> ——
+ * 历史在快照/记忆里仍是原文（切回 A 或同供应方续跑时照常回放）。
+ * 本类只清理<b>本协议层真正会外发的那一个字段</b>（reasoningContent），不碰其它 metadata。
+ * 来源缺失（本批之前的旧数据）按 {@link ReasoningOrigin#replayAllowed} 的声明兼容策略处理。
  */
 public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 
@@ -41,15 +50,41 @@ public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 
 	private final ToolCallingManager toolCallingManager;
 
+	/**
+	 * 当前实例所属供应方的主键（DB 供应方 id；env 合成行为 {@code null}）。
+	 *
+	 * <p>用于对比消息 metadata 里的 {@link ReasoningOrigin}：只有同供应方才回放 reasoning_content。
+	 * {@code null} = 未接线（旧构造器/直接构造的单测）：<b>有标记</b>的消息因此判为"当前未知"
+	 * 而不回放（fail-closed），<b>无标记</b>的旧数据仍按声明兼容策略回放 —— 见
+	 * {@link ReasoningOrigin#replayAllowed}。
+	 */
+	private final Long currentProviderId;
+
 	public ReasoningAwareOpenAiChatModel(OpenAiApi openAiApi, OpenAiChatOptions defaultOptions,
 			ToolCallingManager toolCallingManager, RetryTemplate retryTemplate,
 			ObservationRegistry observationRegistry) {
+		// 旧签名（单测/非 registry 装配）：不携带当前供应方身份，隔离判定按 fail-closed 处理
+		this(openAiApi, defaultOptions, toolCallingManager, retryTemplate, observationRegistry, null);
+	}
+
+	public ReasoningAwareOpenAiChatModel(OpenAiApi openAiApi, OpenAiChatOptions defaultOptions,
+			ToolCallingManager toolCallingManager, RetryTemplate retryTemplate,
+			ObservationRegistry observationRegistry, Long currentProviderId) {
 		super(openAiApi, defaultOptions, toolCallingManager, retryTemplate, observationRegistry);
 		this.toolCallingManager = toolCallingManager;
+		this.currentProviderId = currentProviderId;
+	}
+
+	/** 当前实例的供应方主键（诊断/接线断言用；{@code null} = 未接线）。 */
+	public Long currentProviderId() {
+		return this.currentProviderId;
 	}
 
 	/**
 	 * 复制父类实现，唯一差异：ASSISTANT 分支传播 properties 中的 reasoningContent（父类硬编码 null）。
+	 *
+	 * <p>本批：传播前先过<b>来源隔离</b> —— 消息的来源标记与当前供应方不一致时，本字段置 null
+	 * （正文 / toolCalls / 后续 role:tool 一律不动）。
 	 */
 	@Override
 	ChatCompletionRequest createRequest(Prompt prompt, boolean stream) {
@@ -69,9 +104,17 @@ public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 						return new ToolCall(toolCall.id(), toolCall.type(), function);
 					}).toList();
 				}
-				// 补丁要点：回放 metadata 中的 reasoningContent（父类第 9 组件恒为 null）
+				// 补丁要点：回放 metadata 中的 reasoningContent（父类第 9 组件恒为 null）。
+				// 跨供应方隔离：来源标记与当前供应方一致才回放（无标记 = 旧数据，按声明策略回放）。
 				Object reasoning = assistantMessage.getMetadata().get("reasoningContent");
-				String reasoningContent = reasoning instanceof String s ? s : null;
+				boolean replay = ReasoningOrigin.replayAllowed(assistantMessage.getMetadata(),
+						this.currentProviderId);
+				String reasoningContent = replay && reasoning instanceof String s ? s : null;
+				if (!replay && reasoning instanceof String) {
+					// 只影响请求体；历史原文仍在快照/记忆里（隔离不删字）
+					logger.debug("跨供应方隔离：不回放非本供应方的 reasoningContent（当前 providerId={}）",
+							this.currentProviderId);
+				}
 				return List.of(new ChatCompletionMessage(assistantMessage.getText(),
 						ChatCompletionMessage.Role.ASSISTANT, null, null, toolCalls, null, null, null,
 						reasoningContent));

@@ -31,7 +31,12 @@ class RedisAvailabilityDegradationTest {
 				RedisDegradation.A5_CANCEL_READ, RedisDegradation.A6_DECISION_GUARD_READ,
 				RedisDegradation.L139_RENEW_KEY, RedisDegradation.L139_RENEW_NOT_ATTEMPTED,
 				RedisDegradation.B3_ATTACHMENT_REGISTER, RedisDegradation.B3_ATTACHMENT_READ,
-				RedisDegradation.B3_ATTACHMENT_CONSUME, RedisDegradation.B3_ATTACHMENT_TOMBSTONE);
+				RedisDegradation.B3_ATTACHMENT_CONSUME, RedisDegradation.B3_ATTACHMENT_TOMBSTONE,
+				// 容量治理（Redis 容量专项 A）与记忆写回（B）：新事件必须在同一可见面上，
+				// 否则"计数写了但运维看不到"等同于没接线。
+				RedisDegradation.C1_STREAM_BYTE_CAP, RedisDegradation.C1_STREAM_BYTE_FLOOR,
+				RedisDegradation.C1_STREAM_REPLAY_GAP, RedisDegradation.C1_RUN_INDEX_PRUNE,
+				RedisDegradation.W1_MEMORY_WRITE);
 	}
 
 	@Test

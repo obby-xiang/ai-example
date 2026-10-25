@@ -66,6 +66,8 @@ export interface AiFetchModelsResult {
 /** `GET/PUT /api/ai/settings/defaults`（null = 未设置；PUT 是整体替换）。 */
 export interface AiDefaults {
   modelId: string | null
+  /** 与 modelId 成对的默认目标 provider（旧配置可能为 null/缺省） */
+  providerId: number | null
   temperature: number | null
   topP: number | null
   maxTokens: number | null
@@ -103,6 +105,8 @@ export interface AiModelWriteBody {
 
 export interface AiDefaultsWriteBody {
   modelId?: string | null
+  /** 默认目标所属 provider（与 modelId 成对提交；同名模型靠它区分） */
+  providerId?: number | null
   temperature?: number | null
   topP?: number | null
   maxTokens?: number | null

@@ -45,6 +45,28 @@ class ResultBudgetPropertiesTest {
             .hasMessageContaining("app.ai.result-budget.ui.max-frame-bytes");
     }
 
+    /**
+     * 拆帧专项：{@code max-frame-bytes} 有<b>启动下限 1024</b>。
+     *
+     * <p>低于 1KiB 时"拆帧"会把一条正常正文切成成百上千片（帧数爆炸、前端逐帧渲染成本失控），
+     * 而极小值（例如 64）连一个最小合法帧都装不下 ⇒ 正文被清空。两者都不是"性能降级"，
+     * 而是运行面事实被配置面改写，故 fail-fast 并点名键与当前值。
+     */
+    @Test
+    void tooSmallUiFrameBudgetFailsFastWithTheLowerBound() {
+        AiProperties below = new AiProperties();
+        below.getResultBudget().getUi().setMaxFrameBytes(AiProperties.ResultBudget.Ui.MIN_FRAME_BYTES - 1);
+        assertThatThrownBy(below::verifyResultBudget)
+            .as("低于 1KiB ⇒ 帧数爆炸或正文被清空")
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("app.ai.result-budget.ui.max-frame-bytes")
+            .hasMessageContaining(String.valueOf(AiProperties.ResultBudget.Ui.MIN_FRAME_BYTES));
+
+        AiProperties atFloor = new AiProperties();
+        atFloor.getResultBudget().getUi().setMaxFrameBytes(AiProperties.ResultBudget.Ui.MIN_FRAME_BYTES);
+        assertThatCode(atFloor::verifyResultBudget).doesNotThrowAnyException();
+    }
+
     @Test
     void nonPositiveDefaultCharsFailsFast() {
         AiProperties properties = new AiProperties();

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tools;
 
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,9 +23,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>覆盖三类容易在改动中悄悄失守的事：
  * <ol>
- * <li><b>通道与风险（S4.4d；R3-02 修订）</b>：4 个向导动作必须是 {@code FRONTEND} 通道（后端只挂起、不执行副作用）；
- * 其中 {@code confirm_step} 会经导入向导第 1 步的 flush 写回服务端文件，风险按事实标 {@code WRITE}
- * （仍不得升级成 DANGER —— FRONTEND 通道优先，WRITE 不会多走确认门）；其余三个动作为 {@code READ}；</li>
+ * <li><b>通道与风险（S4.4d；R3-02 + 工具安全边界批修订）</b>：4 个向导动作必须是 {@code FRONTEND} 通道
+ * （后端只挂起、不执行副作用）；{@code confirm_step}（导入第 1 步 flush 写回服务端文件）、
+ * {@code select_definitions}（勾选即落任务项）、{@code set_condition}（条件 PUT 落库）三个动作
+ * 按事实标 {@code WRITE}，{@code navigate_to} 保持 {@code READ}（只改路由/任务绑定，可逆且无持久写）；
+ * <b>不得</b>升级成 DANGER —— FRONTEND 通道优先，且这些动作的后果由下游 {@code start_*} 确认门兜底，
+ * 多一道确认卡只会变成无意义弹窗（用户 2026-10-25 裁决）；</li>
  * <li><b>披露边界</b>：向导动作在任务中心与对应任务类型下披露，非向导页面（配置定义/数据浏览）
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
  * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
@@ -88,19 +92,56 @@ class ToolRegistryDisclosureTest {
     @Autowired
     private AiTools aiTools;
 
+    @Autowired
+    private List<FrontendToolGuard> frontendGuards;
+
+    /** 会落服务端的向导动作（工具安全边界批 2026-10-25 裁决：WRITE，不是 READ）。 */
+    private static final List<String> WIZARD_WRITE_TOOLS = List.of("select_definitions", "set_condition",
+            "confirm_step");
+
     @Test
     void wizardToolsUseFrontendChannelAndHonestRisk() {
         for (String name : FRONTEND_TOOLS) {
             assertThat(toolRegistry.channelOf(name))
                     .as("%s 的执行通道", name)
                     .isEqualTo(ToolMeta.Channel.FRONTEND);
-            ToolMeta.RiskLevel expected = "confirm_step".equals(name)
+            ToolMeta.RiskLevel expected = WIZARD_WRITE_TOOLS.contains(name)
                     ? ToolMeta.RiskLevel.WRITE
                     : ToolMeta.RiskLevel.READ;
             assertThat(toolRegistry.riskOf(name))
-                    .as("%s 的风险等级（confirm_step 会写回服务端文件；FRONTEND 通道优先，仍不进确认门）", name)
+                    .as("%s 的风险等级（三个向导动作都会落服务端：条件 PUT / 勾选 / 步骤推进；"
+                            + "FRONTEND 通道优先，风险档只用于如实披露，不新增确认门）", name)
                     .isEqualTo(expected);
             assertThat(toolRegistry.getMeta(name)).as("%s 已注册元数据", name).isNotNull();
+        }
+    }
+
+    /**
+     * 确认边界（用户 2026-10-25 裁决）：三个向导动作的"实际后果"不足以进确认门，但**必须**
+     * 走 {@code FRONTEND} 挂起（等前端回执），而不是被风险档误判成后端确认卡；
+     * DANGER 只留给四个 {@code start_*}（后端执行、可造成业务数据落库/发布）。
+     */
+    @Test
+    void wizardWritesAreNeverDanger() {
+        for (String name : WIZARD_WRITE_TOOLS) {
+            assertThat(toolRegistry.riskOf(name)).as(name).isEqualTo(ToolMeta.RiskLevel.WRITE);
+        }
+        for (String name : GATED_START_TOOLS) {
+            assertThat(toolRegistry.riskOf(name)).as(name).isEqualTo(ToolMeta.RiskLevel.DANGER);
+        }
+    }
+
+    /**
+     * 守卫接线（工具安全边界批）：两个向导写的复核器必须真的进了挂起链路，
+     * 且同一工具名只被一个复核器认领（多个认领会让"第一个命中即返回"变成顺序彩票）。
+     */
+    @Test
+    void wizardActionGuardIsWiredAndClaimsEachToolExactlyOnce() {
+        assertThat(this.frontendGuards).as("生产装配里的前端复核器")
+                .anyMatch(com.example.configmgr.ai.tool.WizardActionGuard.class::isInstance);
+        for (String name : List.of("set_condition", "select_definitions", "undo_last_sheet_edit")) {
+            long claims = this.frontendGuards.stream().filter(guard -> guard.supports(name)).count();
+            assertThat(claims).as("%s 的复核器数量", name).isEqualTo(1);
         }
     }
 

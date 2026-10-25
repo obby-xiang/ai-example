@@ -240,7 +240,7 @@ class LanguageDirectiveWiringTest {
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<Message>> history = ArgumentCaptor.forClass(List.class);
 		verify(this.store).create(eq(runId), eq(SESSION_ID), any(AiContext.class), history.capture(),
-				any(MessageJsonCodec.class), any(), any());
+				any(MessageJsonCodec.class), any(), any(), any());
 		return history.getValue();
 	}
 

@@ -5,8 +5,9 @@
  *
  * 1. **预览 → 应用**：`frontend_tool_request` 建卡 ⇒ 明细档上预览色（零写）⇒ 点应用 ⇒
  *    预览色先撤、`writeCells` 真写、已应用色上屏、回灌 `succeeded` + `sheetMeta`；
- * 2. **应用 → 撤销**：`undo_last_sheet_edit` 走**真实前端工具通道**（`executeFrontendTool`，
- *    与模型调用同一条 dispatch 路径）⇒ 反向补丁写回、回执报「剩余可撤销 N 层」；
+ * 2. **应用 → 撤销**：`undo_last_sheet_edit` 走**人围栏**（`frontend_tool_request` → 预览卡 → 点应用；
+ *    工具安全边界批 2026-10-25：撤销会覆盖表格数据，未经确认不执行）⇒ 反向补丁写回、
+ *    回执报「剩余可撤销 N 层」；
  * 3. **深度 3 → 空**：连做三次应用后连撤三次逐层回到对应前态，第 4 次如实回「没有可撤销」，
  *    每次撤销后已应用色全清（`clearMarks()` 无参），不留浅蓝残影。
  *
@@ -19,9 +20,9 @@ import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
-import { executeFrontendTool } from '@/utils/frontend-tools'
 import { applyFrameToParts } from '@/utils/parts'
-import { sheetUndoDepth } from '@/utils/sheet-tools'
+import { resolveSheetContext } from '@/utils/frontend-tools'
+import { applyUndoPlan, planUndo, sheetUndoDepth } from '@/utils/sheet-tools'
 import { field, makeFakeSheet, type FakeSheet } from './sheet-fixtures'
 
 const api = vi.hoisted(() => ({
@@ -98,14 +99,28 @@ async function previewAndApply(
   return toolCallId
 }
 
+/**
+ * 走**确认面**撤销（工具安全边界批 2026-10-25：撤销会覆盖表格数据 ⇒ 必须经预览卡「应用」）：
+ * 帧 → 建卡 → 点应用，回执文本取自回灌体。
+ */
 async function undo(): Promise<string> {
-  const execution = await executeFrontendTool({
-    name: 'undo_last_sheet_edit',
-    args: { defCode: 'DEMO' },
-    budgetMs: 5_000
-  })
-  expect(execution.outcome).toBe('ok')
-  return execution.result
+  const store = useAiStore()
+  toolSeq += 1
+  const toolCallId = `u${toolSeq}`
+  store.handleFrame({ type: 'start', runId: `run-u${toolSeq}`, sessionId: store.sessionId, seq: 1 })
+  const message = store.appendAssistantMessage()
+  const frame = {
+    type: 'frontend_tool_request', toolCallId, name: 'undo_last_sheet_edit',
+    args: JSON.stringify({ defCode: 'DEMO' }), runId: `run-u${toolSeq}`, seq: 2
+  } as Extract<SseFrame, { type: 'frontend_tool_request' }>
+  applyFrameToParts(message, frame)
+  api.frontendToolResult.mockClear()
+  await store.openWritePreview(message, frame)
+  if (store.activePreview?.toolCallId === toolCallId) {
+    await store.confirmWritePreview()
+  }
+  const posted = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result?: string } | undefined
+  return posted?.result ?? ''
 }
 
 beforeEach(() => {
@@ -232,7 +247,7 @@ describe('B13-03 深度 3 → 空：三层逐层回退，第 4 次如实说「�
 })
 
 describe('B13-04 预览色不参与撤销链：撤销只清「已应用」那一层留下的颜色', () => {
-  it('应用后再做一次预览（未应用）→ 撤销：只清已应用色，预览计划与其高亮都保留', async () => {
+  it('另有一张待应用预览时，撤销请求被拒（不挤掉那张卡）、零写、预览色不被误伤', async () => {
     instrument(sheet)
     const store = useAiStore()
     await previewAndApply(store, step1Args)
@@ -249,13 +264,33 @@ describe('B13-04 预览色不参与撤销链：撤销只清「已应用」那一
     await store.openWritePreview(message, frame)
     expect(marks.at(-1)!.tone).toBe('preview')
 
+    // 工具安全边界批：撤销卡不得静默覆盖一张仍在等人决策的预览卡
+    const writesBefore = sheet.writes.length
     const result = await undo()
-    expect(result).toContain('已撤销')
-    // 撤销只回滚已应用那一层；预览计划仍在（用户可继续应用或取消），预览色不得被顺手抹掉
+    expect(result).toContain('预览卡待你处理')
+    expect(sheet.writes).toHaveLength(writesBefore)
+    expect(sheet.rows.map((row) => row.status)).toEqual(['启用', '禁用', '禁用'])
+    // 预览计划仍在（用户可继续应用或取消），预览色不得被顺手抹掉
     expect(store.activePreview?.toolCallId).toBe('t9')
-    expect(sheet.rows.map((row) => row.status)).toEqual(['启用', '停用', '停用'])
-    expect(clears.length).toBeGreaterThan(before)
-    expect(clears.at(-1)).toBe('applied')
+    expect(clears.length).toBe(before)
+  })
+
+  it('撤销落笔只清已应用色：预览色由预览计划自己管（纯函数面）', async () => {
+    instrument(sheet)
+    const store = useAiStore()
+    await previewAndApply(store, step1Args)
+
+    const resolved = await resolveSheetContext('DEMO')
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) return
+    const planned = planUndo(resolved.ctx, { defCode: 'DEMO' }, 'undo-color')
+    expect(planned.ok).toBe(true)
+    if (!planned.ok) return
+
+    const clearsBefore = clears.length
+    const outcome = applyUndoPlan(resolved.ctx, planned.plan)
+    expect(outcome.ok).toBe(true)
+    expect(clears.slice(clearsBefore)).toEqual(['applied'])
     expect(clears).not.toContain(undefined)
   })
 })

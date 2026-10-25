@@ -53,14 +53,20 @@ public final class HardTrim {
 		if (messages == null || messages.isEmpty()) {
 			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}
-		List<ConversationTurns.Segment> segments = ConversationTurns.split(messages);
-		int cut = ConversationTurns.firstPinnedTurn(messages, segments, keepRecentTurns, protectedToolCallIds);
+		// 续跑保 system 批：SYSTEM 前缀不参与硬截断（它不是 turn，丢了模型就没人设/工作区约束）。
+		List<Message> system = SystemMessages.leading(messages);
+		List<Message> body = SystemMessages.body(messages);
+		if (body.isEmpty()) {
+			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
+		}
+		List<ConversationTurns.Segment> segments = ConversationTurns.split(body);
+		int cut = ConversationTurns.firstPinnedTurn(body, segments, keepRecentTurns, protectedToolCallIds);
 		if (cut <= 0) {
 			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}
 		int cutIndex = segments.get(cut).startIndex();
-		List<Message> dropped = messages.subList(0, cutIndex);
-		List<Message> kept = new ArrayList<>(messages.subList(cutIndex, messages.size()));
+		List<Message> dropped = body.subList(0, cutIndex);
+		List<Message> kept = new ArrayList<>(SystemMessages.reattach(system, body.subList(cutIndex, body.size())));
 		return new Plan(kept, cut, ContextEstimator.estimateMessages(dropped), REASON_HARD_TRIM);
 	}
 

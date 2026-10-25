@@ -188,6 +188,34 @@ public class AppProperties {
     @Data
     public static class FileStorage {
         private String storagePath = "./data/files";
+
+        /**
+         * 显式多实例开关（{@code app.file.multi-instance}，默认 false）。
+         *
+         * <p>置 true 时，无论是否激活多实例 profile，都要求 {@link #storagePath} 为绝对路径
+         * （否则各实例按自己的 JVM 工作目录解析同一个相对键 → A 写 B 读不到）。
+         * 默认 false：单实例本地开发继续允许相对路径，行为不变。
+         *
+         * <p>多实例 profile（{@code cluster} / {@code multi-instance} / {@code h2tcp} /
+         * {@code postgresql}）即使不配置本键，也会被
+         * {@link com.example.configmgr.file.FileStorageMultiInstanceGuard} 视为多实例部署。
+         */
+        private boolean multiInstance = false;
+
+        /**
+         * 历史绝对路径 → 相对存储键的显式迁移（{@code app.file.key-migration.*}）。
+         *
+         * <p><b>默认关闭、绝不自动启动</b>：迁移会复制文件并改写 {@code task_files} 行，属运维动作；
+         * 只有显式把 {@code app.file.key-migration.enabled} 置 true 才由
+         * {@link com.example.configmgr.file.FileKeyMigrationRunner} 在启动时执行一次。
+         * 多实例同时打开时通过 Redis 单飞锁（{@code SET NX PX}）保证只有一个实例执行。
+         */
+        private KeyMigration keyMigration = new KeyMigration();
+
+        @Data
+        public static class KeyMigration {
+            private boolean enabled = false;
+        }
     }
 
     /** 任务域配置（{@code app.task.*}）。 */

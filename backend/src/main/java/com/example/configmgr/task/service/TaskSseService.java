@@ -4,6 +4,8 @@ import com.example.configmgr.common.sse.SseWriteBudget;
 import com.example.configmgr.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -11,7 +13,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * 任务级别的 SSE 事件推送服务。
@@ -48,10 +56,26 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code synchronized}，被卡住的写仍持有 emitter 监视器，就地 complete 会把调用线程再挂住。
  * 该 emitter 已移出推送表，由它自己的生命周期（客户端断开 / 120s 写超时先把那次写打断 /
  * 5m 容器超时 → onError/onTimeout）收尾 —— 回调里的 {@link #remove} 幂等。
+ *
+ * <h2>多实例 job 接管批：跨实例扇出（{@link TaskEventBus}）</h2>
+ * 作业跑在 A、浏览器连在 B 是常态，因此 {@code publish} 有两条路：
+ * <ol>
+ * <li><b>本机直投</b>：{@link #deliverJson}（写预算/摘除口径与包②完全一致）；</li>
+ * <li><b>跨实例</b>：{@link TaskEventBus#publish} → 别的实例收到后<b>复用同一个</b>
+ *     {@link #deliverJson} 落到它的订阅者。总线只搬"已序列化的帧原文"，是 at-most-once 通知；
+ *     权威状态仍在数据库（前端 3s 快照轮询兜底），所以 Redis 抖动丢一帧<b>不丢状态</b>。</li>
+ * </ol>
+ * 订阅生命周期：<b>首订阅注册</b>（{@link TaskEventBus#subscribe}）、<b>末订阅退订</b>
+ * （{@link TaskEventBus#unsubscribe}）；订阅失败时本机投递照常（明确降级），并由
+ * <b>一次性延迟重试</b>（10s 退避，复用仓内受控调度器）与 publish 路径双向兜底，Redis 恢复后
+ * 自动补上 —— 只对仍有本机 emitter 的任务重试，末订阅即取消，不残留任务。
  */
 @Slf4j
 @Service
 public class TaskSseService {
+
+    /** 跨实例订阅失败后的重试退避（publish 路径轻量重试，避免每帧都打 Redis）。 */
+    private static final long REMOTE_SUBSCRIBE_RETRY_NANOS = TimeUnit.SECONDS.toNanos(10);
 
     private final ObjectMapper objectMapper;
     private final Map<Long, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
@@ -62,8 +86,70 @@ public class TaskSseService {
     /** 订阅者生命周期超时（必须非 0；{@code app.task.sse.emitter-timeout}）。 */
     private final long emitterTimeoutMillis;
 
+    /** 跨实例传输（多实例 job 接管批）：本机直投之外的那条路。 */
+    private final TaskEventBus eventBus;
+
+    /** 已完成跨实例注册的任务（首订阅加入、末订阅移除）。 */
+    private final Set<Long> remoteSubscribed = ConcurrentHashMap.newKeySet();
+
+    /** 每个任务的订阅状态机锁（首订阅/末退订与回调并发时只做一次注册/退订）。 */
+    private final ConcurrentMap<Long, SubscriptionLock> subscriptionLocks = new ConcurrentHashMap<>();
+
+    /** 任务 → 下次允许重试跨实例订阅的时刻（可注入的纳秒时钟，生产 = {@code System.nanoTime}）。 */
+    private final ConcurrentMap<Long, Long> remoteRetryAtNanos = new ConcurrentHashMap<>();
+
+    /** 已挂起一次性延迟重试的任务（防重复排期；末订阅/成功即撤销）。 */
+    private final Set<Long> retryPending = ConcurrentHashMap.newKeySet();
+
+    /** 任务 → 已排期的重试句柄（末订阅时可取消，不残留任务）。 */
+    private final ConcurrentMap<Long, ScheduledFuture<?>> retryFutures = new ConcurrentHashMap<>();
+
+    /**
+     * 退避判据的时钟（<b>最小测试接缝</b>）：生产 = {@link System#nanoTime()}；
+     * 单测注入可控时钟，把"10s 退避"从真实等待里解放出来。
+     */
+    private final LongSupplier retryNanoClock;
+
+    /**
+     * 延迟重试的调度器（<b>复用仓内已有受控调度器</b>：{@code aiStreamWatchdog} 的 2 条守护线程，
+     * 不新增线程、不新造无限线程池）。
+     *
+     * <p>为什么需要它：作业在 A、浏览器只订阅 B 时，<b>B 从不 publish</b>，原先"失败只在
+     * publish 时重试"的路径永不发生，跨实例进度只剩快照轮询兜底。这里每个失败的注册挂<b>一次</b>
+     * 一次性重试（10s 退避，失败再排下一次），只对仍有 emitter 的任务执行；末订阅即取消。
+     * 直接 {@code new TaskSseService(...)} 的单测/非 Spring 装配传 {@code null}（保持 publish 重试口径）。
+     */
+    private final ScheduledExecutorService retryScheduler;
+
+    /** 单测/非 Spring 装配：无跨实例传输（本机扇出照常）。 */
     public TaskSseService(ObjectMapper objectMapper, AppProperties appProperties) {
+        this(objectMapper, appProperties, TaskEventBus.inProcess(), System::nanoTime, null);
+    }
+
+    /** 单测/非 Spring 装配：无延迟重试调度器（由 publish 路径兜底重试）。 */
+    public TaskSseService(ObjectMapper objectMapper, AppProperties appProperties, TaskEventBus eventBus) {
+        this(objectMapper, appProperties, eventBus, System::nanoTime, null);
+    }
+
+    /** Spring 生产装配：注入仓内既有受控调度器（一次性轻量重试，不新增线程）。 */
+    @Autowired
+    public TaskSseService(ObjectMapper objectMapper, AppProperties appProperties, TaskEventBus eventBus,
+                          @Qualifier("aiStreamWatchdog") ScheduledExecutorService retryScheduler) {
+        this(objectMapper, appProperties, eventBus, System::nanoTime, retryScheduler);
+    }
+
+    /** 包内可见：仅供单测注入退避时钟（不新增模块、不暴露配置）。 */
+    TaskSseService(ObjectMapper objectMapper, AppProperties appProperties, TaskEventBus eventBus,
+                   LongSupplier retryNanoClock) {
+        this(objectMapper, appProperties, eventBus, retryNanoClock, null);
+    }
+
+    TaskSseService(ObjectMapper objectMapper, AppProperties appProperties, TaskEventBus eventBus,
+                   LongSupplier retryNanoClock, ScheduledExecutorService retryScheduler) {
         this.objectMapper = objectMapper;
+        this.eventBus = eventBus;
+        this.retryNanoClock = retryNanoClock;
+        this.retryScheduler = retryScheduler;
         AppProperties.Task.Sse sse = appProperties.getTask().getSse();
         this.writeBudget = SseWriteBudget.on(SseWriteBudget.sharedElasticWriterPool(),
                 sse.getWriteTimeout().toMillis());
@@ -84,23 +170,26 @@ public class TaskSseService {
         emitter.onTimeout(() -> remove(taskId, emitter));
         emitter.onError(e -> remove(taskId, emitter));
 
+        // 首订阅注册跨实例频道（已有订阅则幂等；失败只降级，不影响本机）。
+        reconcileRemoteSubscription(taskId);
+
         // Send initial heartbeat
         sendEvent(taskId, emitter, "HEARTBEAT", Map.of());
         return emitter;
     }
 
     /**
-     * 推送一条任务级事件（包②：锁内只快照、锁外带预算写出）。
+     * 推送一条任务级事件（包②：锁内只快照、锁外带预算写出；多实例：本机 + 跨实例两条路）。
      *
      * <p>
-     * 序列化只做一次（修复前在"每个 emitter 的循环体内"各序列化一次，N 订阅者 = N 次 JSON 编码）。
-     * 序列化失败即整体不推（记住口径：这是服务端自己的数据问题，不是某个订阅者的连接问题）。
+     * 序列化只做一次（修复前在"每个 emitter 的循环体内"各序列化一次，N 订阅者 = N 次 JSON 编码），
+     * 本机直投与跨实例发布共用这一份帧原文。
+     *
+     * <p>
+     * <b>本机没有订阅者也必须发到总线</b>（多实例接管批）：作业在本实例、浏览器连在别的实例是
+     * 常态，早退会让跨实例进度永远到不了。
      */
     public void publish(Long taskId, String type, Object data) {
-        List<SseEmitter> list = emitters.get(taskId);
-        if (list == null) {
-            return;
-        }
         final String json;
         try {
             json = objectMapper.writeValueAsString(Map.of("type", type, "data", data));
@@ -109,33 +198,8 @@ public class TaskSseService {
             return;
         }
 
-        // 锁内只快照：此后所有网络写都在锁外，单条慢连接不再把同任务的其它推送挡在锁上。
-        List<SseEmitter> snapshot;
-        synchronized (list) {
-            snapshot = new ArrayList<>(list);
-        }
-        if (snapshot.isEmpty()) {
-            return;
-        }
-
-        List<SseEmitter> dead = null;
-        for (SseEmitter emitter : snapshot) {
-            if (!sendFrame(emitter, json, "taskId=" + taskId + " type=" + type)) {
-                if (dead == null) {
-                    dead = new ArrayList<>();
-                }
-                dead.add(emitter);
-            }
-        }
-        if (dead != null) {
-            // 与 subscribe/remove 同键原子：摘元素的同时清掉空表条目（修复前只删元素不删 key，
-            // 每个 taskId 永久留一个空 list）。
-            List<SseEmitter> deadList = dead;
-            emitters.computeIfPresent(taskId, (key, current) -> {
-                current.removeAll(deadList);
-                return current.isEmpty() ? null : current;
-            });
-        }
+        deliverJson(taskId, json, "taskId=" + taskId + " type=" + type);
+        publishCrossInstance(taskId, json);
     }
 
     /**
@@ -176,10 +240,197 @@ public class TaskSseService {
     }
 
     /**
+     * 把一帧原文扇出到本任务的本地订阅者（<b>本机直投与跨实例接收共用</b>）。
+     *
+     * <p>
+     * 锁内只快照，锁外逐个带预算写出；写超时/失败的 emitter 在锁外批量摘除（同键原子，
+     * 空表条目一并清理）。序列化已在调用方完成 —— 跨实例路径拿到的就是线上帧原文，
+     * 不再二次编码（帧形态 {@code {"type":..,"data":..}} 不变）。
+     */
+    private void deliverJson(Long taskId, String json, String context) {
+        List<SseEmitter> list = emitters.get(taskId);
+        if (list == null) {
+            return;
+        }
+
+        // 锁内只快照：此后所有网络写都在锁外，单条慢连接不再把同任务的其它推送挡在锁上。
+        List<SseEmitter> snapshot;
+        synchronized (list) {
+            snapshot = new ArrayList<>(list);
+        }
+        if (snapshot.isEmpty()) {
+            return;
+        }
+
+        List<SseEmitter> dead = null;
+        for (SseEmitter emitter : snapshot) {
+            if (!sendFrame(emitter, json, context)) {
+                if (dead == null) {
+                    dead = new ArrayList<>();
+                }
+                dead.add(emitter);
+            }
+        }
+        if (dead != null) {
+            // 与 subscribe/remove 同键原子：摘元素的同时清掉空表条目（修复前只删元素不删 key，
+            // 每个 taskId 永久留一个空 list）。
+            List<SseEmitter> deadList = dead;
+            emitters.computeIfPresent(taskId, (key, current) -> {
+                current.removeAll(deadList);
+                return current.isEmpty() ? null : current;
+            });
+            // 订阅者可能因写超时/失败全部摘除 ⇒ 该任务的跨实例频道要跟着退订。
+            reconcileRemoteSubscription(taskId);
+        }
+    }
+
+    /** 本机直投之外的跨实例发布；订阅曾降级时按退避重试注册（Redis 恢复后自动补上）。 */
+    private void publishCrossInstance(Long taskId, String json) {
+        if (emitters.containsKey(taskId) && !this.remoteSubscribed.contains(taskId)) {
+            reconcileRemoteSubscription(taskId);
+        }
+        this.eventBus.publish(taskId, json);
+    }
+
+    /**
+     * 订阅状态机：<b>首订阅注册、末订阅退订</b>（幂等、按任务串行）。
+     *
+     * <p>以"本地是否还有订阅者"为唯一意图来源，每次挂载/摘除后对齐一次 —— 挂/摘与回调并发时
+     * 只会得到"已订阅"或"已退订"两种稳态，不会出现"退订把刚挂上的订阅者踢掉"。
+     * 注册失败时记 {@code remoteRetryAtNanos} 退避，并挂一次<b>一次性延迟重试</b>
+     * （{@link #scheduleRemoteRetry}，复用受控调度器；publish 路径仍可提前成功）。
+     *
+     * <h2>锁的回收（复审必修项 2 的竞态修正）</h2>
+     * 旧实现在 {@code synchronized(lock)} <b>内部</b>就 {@code subscriptionLocks.remove(taskId, lock)}：
+     * 锁从 map 上摘掉后，另一线程会立刻 {@code computeIfAbsent} 出一个<b>新锁</b>并与仍持旧锁的
+     * 临界区并发进入 —— 退订/订阅可能交错，"刚注册的订阅"被在途退订吞掉。
+     *
+     * <p>现在改为<b>引用计数 + 临界区外回收</b>：进入前在 CHM {@code compute} 里把 {@code holders+1}
+     * （与回收判定同一原子步），临界区结束、<b>退出 synchronized 之后</b>才 {@code holders-1}，
+     * 只有 {@code holders == 0} 时摘锁。于是：
+     * <ul>
+     * <li>任何持有/等待该锁的线程都使 {@code holders > 0} ⇒ 锁不会被摘掉；</li>
+     * <li>摘锁只发生在没有线程使用该锁时 ⇒ 新旧锁不可能同时进入临界区；</li>
+     * <li>任务空闲后锁即回收（不是"永久保留所有 task 锁"）。</li>
+     * </ul>
+     */
+    private void reconcileRemoteSubscription(Long taskId) {
+        SubscriptionLock lock = this.subscriptionLocks.compute(taskId, (key, existing) -> {
+            SubscriptionLock target = existing != null ? existing : new SubscriptionLock();
+            target.holders++;
+            return target;
+        });
+        try {
+            synchronized (lock) {
+                reconcileLocked(taskId);
+            }
+        } finally {
+            this.subscriptionLocks.compute(taskId, (key, existing) -> {
+                if (existing != lock) {
+                    return existing;
+                }
+                lock.holders--;
+                return lock.holders == 0 ? null : existing;
+            });
+        }
+    }
+
+    /** 调用方必须持有该任务的 {@link SubscriptionLock}。 */
+    private void reconcileLocked(Long taskId) {
+        boolean want = this.emitters.containsKey(taskId);
+        boolean have = this.remoteSubscribed.contains(taskId);
+        if (want && !have) {
+            Long retryAt = this.remoteRetryAtNanos.get(taskId);
+            if (retryAt != null && this.retryNanoClock.getAsLong() < retryAt) {
+                return;
+            }
+            boolean subscribed = this.eventBus.subscribe(taskId,
+                    frame -> deliverJson(taskId, frame, "跨实例 taskId=" + taskId));
+            if (subscribed) {
+                this.remoteSubscribed.add(taskId);
+                this.remoteRetryAtNanos.remove(taskId);
+                cancelRemoteRetry(taskId);
+            } else {
+                this.remoteRetryAtNanos.put(taskId,
+                        this.retryNanoClock.getAsLong() + REMOTE_SUBSCRIBE_RETRY_NANOS);
+                // 有界延迟重试：作业在 A、浏览器只订阅 B 时 B 不会 publish，必须由调度器兜底重试。
+                scheduleRemoteRetry(taskId, REMOTE_SUBSCRIBE_RETRY_NANOS);
+            }
+        } else if (!want && have) {
+            this.eventBus.unsubscribe(taskId);
+            this.remoteSubscribed.remove(taskId);
+            this.remoteRetryAtNanos.remove(taskId);
+            cancelRemoteRetry(taskId);
+        } else if (!want) {
+            this.remoteRetryAtNanos.remove(taskId);
+            cancelRemoteRetry(taskId);
+        }
+    }
+
+    /**
+     * 挂一次<b>一次性</b>延迟重试（已有待触发则不重复排期）。
+     *
+     * <p>只由注册失败触发；到期后只对"仍本机有 emitter"的任务执行一次
+     * {@link #reconcileRemoteSubscription}（失败会再排下一次，节奏 ≥ 退避窗）。
+     * 无调度器（直接构造）时退化为原有的 publish 路径重试。
+     */
+    private void scheduleRemoteRetry(Long taskId, long delayNanos) {
+        if (this.retryScheduler == null) {
+            return;
+        }
+        if (!this.retryPending.add(taskId)) {
+            return;
+        }
+        try {
+            ScheduledFuture<?> future = this.retryScheduler.schedule(
+                    () -> runRemoteRetry(taskId), Math.max(0L, delayNanos), TimeUnit.NANOSECONDS);
+            this.retryFutures.put(taskId, future);
+        } catch (RuntimeException e) {
+            // 调度器拒绝（关停中）：撤销排期标记，后续 publish 仍能重试
+            this.retryPending.remove(taskId);
+            log.debug("任务 SSE 跨实例注册重试排期失败 taskId={}：{}", taskId, e.getMessage());
+        }
+    }
+
+    /** 延迟重试到期：只对仍有本机 emitter 的任务走一次既有状态机（末订阅后不残留）。 */
+    private void runRemoteRetry(Long taskId) {
+        this.retryPending.remove(taskId);
+        this.retryFutures.remove(taskId);
+        if (!this.emitters.containsKey(taskId)) {
+            return; // 末订阅已断开：不重试、不留任务
+        }
+        if (this.remoteSubscribed.contains(taskId)) {
+            return;
+        }
+        Long retryAt = this.remoteRetryAtNanos.get(taskId);
+        long now = this.retryNanoClock.getAsLong();
+        if (retryAt != null && now < retryAt) {
+            // 早到（调度抖动/测试注入）：只补足剩余退避，不无条件 subscribe
+            scheduleRemoteRetry(taskId, retryAt - now);
+            return;
+        }
+        reconcileRemoteSubscription(taskId);
+    }
+
+    /** 撤销待触发的重试（订阅成功 / 末订阅断开）。 */
+    private void cancelRemoteRetry(Long taskId) {
+        this.retryPending.remove(taskId);
+        ScheduledFuture<?> future = this.retryFutures.remove(taskId);
+        if (future != null) {
+            future.cancel(false);
+        }
+    }
+
+    /** 任务级订阅锁（{@code holders} = 持有/等待该锁的线程数；只在 CHM {@code compute} 内改）。 */
+    private static final class SubscriptionLock {
+        private int holders;
+    }
+
+    /**
      * 单 emitter 写出（包②写预算的唯一落点）。返回 false = 该 emitter 已不可用，应从推送表摘除。
      *
      * <p>
-     * 两个调用点都按本契约处置：{@link #publish} 收集 {@code dead} 批量摘除（锁外、同键原子），
+     * 两个调用点都按本契约处置：{@link #deliverJson} 收集 {@code dead} 批量摘除（锁外、同键原子），
      * {@link #sendEvent} 首帧失败即 {@link #remove}。
      *
      * <p>
@@ -210,12 +461,19 @@ public class TaskSseService {
         };
     }
 
-    private void remove(Long taskId, SseEmitter emitter) {
+    /**
+     * 摘除一个订阅者（回调与首帧失败共用出口，幂等），并同步跨实例订阅状态
+     * （末订阅 ⇒ 退订频道）。
+     *
+     * <p><b>包内可见</b>供单测驱动订阅生命周期（真实 emitter 的收尾回调不可从外部确定性触发）。
+     */
+    void remove(Long taskId, SseEmitter emitter) {
         // 原子收尾：元素摘掉后若表为空则连条目一起摘（修复前只删元素不删 key ⇒ 每个 taskId 永久留一个
         // 空 list）。与 subscribe 的 compute 同键互斥，故不会摘掉"刚挂上新订阅者"的表。
         emitters.computeIfPresent(taskId, (key, list) -> {
             list.remove(emitter);
             return list.isEmpty() ? null : list;
         });
+        reconcileRemoteSubscription(taskId);
     }
 }

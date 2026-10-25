@@ -473,6 +473,11 @@ export interface SseDoneFrame extends SseFrameBase {
    */
   paramsLocked?: boolean
   /**
+   * 上游以 `finish_reason=length` 收尾（达到 max_tokens）：本轮已有正文被截断，后端不重试。
+   * additive 可选键；缺键 = 未截断（旧后端），"没说"与"没截断"因此可区分。
+   */
+  truncated?: boolean
+  /**
    * 安全事件摘要（防护批③ B3-4；**additive 可选键**，帧类型集仍是 16）。
    *
    * `{redacted, rules, blocked}`：本轮正文里被脱敏的处数、命中的规则 id、是否被阻断。

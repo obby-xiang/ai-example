@@ -4,10 +4,12 @@ import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelTemplateBuilder;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.entity.TaskItem;
@@ -19,10 +21,12 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -100,16 +104,18 @@ public class FileController {
             throw new IllegalArgumentException(
                     "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传");
         }
-        String storagePath = fileStorage.store(file.getInputStream(), originalName);
+        StoredFile stored = fileStorage.store(file.getInputStream(), originalName);
+        // 落库失败之外还有"提交期回滚"（外层事务回滚/提交失败）：新文件不能永久残留。
+        fileStorage.deleteAfterRollback(stored.key());
         try {
-            saveUploadFile(taskId, defCode, originalName, storagePath);
+            saveUploadFile(taskId, defCode, originalName, stored.key());
         } catch (DataIntegrityViolationException e) {
             // 预检后任务被并发删除：FK 拒绝落行，清理刚写入的文件并返回 404 语义。
-            fileStorage.delete(storagePath);
+            fileStorage.delete(stored.key());
             throw ResourceNotFoundException.of("任务", taskId);
         } catch (RuntimeException e) {
             // 其它落库失败同样清理本次新文件（避免“库没写、盘上多一份”）。
-            fileStorage.delete(storagePath);
+            fileStorage.delete(stored.key());
             throw e;
         }
 
@@ -121,30 +127,37 @@ public class FileController {
     }
 
     private String storeUploadFile(Long taskId, String defCode, String fileName, byte[] content) throws IOException {
-        String storagePath = fileStorage.store(new java.io.ByteArrayInputStream(content), fileName);
+        StoredFile stored = fileStorage.store(new ByteArrayInputStream(content), fileName);
+        // 整包任一条目失败都会回滚本事务：新文件按回滚回收（见下方 catch 的即时清理）。
+        fileStorage.deleteAfterRollback(stored.key());
         try {
-            saveUploadFile(taskId, defCode, fileName, storagePath);
+            saveUploadFile(taskId, defCode, fileName, stored.key());
         } catch (DataIntegrityViolationException e) {
-            fileStorage.delete(storagePath);
+            fileStorage.delete(stored.key());
             throw ResourceNotFoundException.of("任务", taskId);
         } catch (RuntimeException e) {
-            fileStorage.delete(storagePath);
+            fileStorage.delete(stored.key());
             throw e;
         }
-        return storagePath;
+        return stored.key();
     }
 
-    private void saveUploadFile(Long taskId, String defCode, String fileName, String storagePath) {
+    private void saveUploadFile(Long taskId, String defCode, String fileName, String storageKey) {
         Optional<TaskFile> existing = taskFileRepository
                 .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
         TaskFile tf = existing.orElseGet(TaskFile::new);
+        String previousKey = existing.map(TaskFile::getStoragePath).orElse(null);
         tf.setTaskId(taskId);
         tf.setDefCode(defCode);
         tf.setFileType("UPLOAD");
-        tf.setStoragePath(storagePath);
-        tf.setOriginalPath(storagePath);
+        tf.setStoragePath(storageKey);
+        tf.setOriginalPath(storageKey);
         tf.setFileName(fileName);
         taskFileRepository.save(tf);
+        // 换引用的旧件只在本次投递提交成功后清（失败/回滚时旧件仍是当前引用的兜底）。
+        if (previousKey != null && !previousKey.equals(storageKey)) {
+            fileStorage.deleteAfterCommit(previousKey);
+        }
     }
 
     /**
@@ -161,7 +174,7 @@ public class FileController {
 
     private List<ZipFileEntry> extractZip(byte[] zipBytes, Charset charset) throws IOException {
         List<ZipFileEntry> result = new ArrayList<>();
-        try (ZipInputStream zis = new ZipInputStream(new java.io.ByteArrayInputStream(zipBytes), charset)) {
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes), charset)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 if (entry.isDirectory()) continue;
@@ -207,26 +220,41 @@ public class FileController {
         }
         TaskFile tf;
         boolean createdNew = fileOpt.isEmpty();
+        String previousKey = null;
         if (createdNew) {
             tf = new TaskFile();
             tf.setTaskId(taskId);
             tf.setDefCode(defCode);
             tf.setFileType("EXPORT");
-            String storagePath = fileStorage.newPath(".xlsx");
-            tf.setStoragePath(storagePath);
         } else {
             tf = fileOpt.get();
+            previousKey = tf.getStoragePath();
         }
-        fileStorage.write(tf.getStoragePath(), data);
+        // 一律写新键再换引用：就地覆盖会让"回滚"回到不了旧内容（盘上是新内容、库是旧元数据）。
+        StoredFile stored = fileStorage.allocate(".xlsx");
+        // 先登记回滚回收、再写盘：写盘中途 IOException 留下的半截文件同样要被回收（M3）。
+        fileStorage.deleteAfterRollback(stored.key());
+        fileStorage.write(stored.path(), data);
+        tf.setStoragePath(stored.key());
+        if (previousKey != null && previousKey.equals(tf.getOriginalPath())) {
+            // originalPath 原本指向即将被删的旧件：让它跟随存活件，别留悬空引用（M4）。
+            tf.setOriginalPath(stored.key());
+        }
         try {
-            taskFileRepository.save(tf);
+            // 显式 flush：与在途导出作业撞 @Version 时异常在这里发生，才能映射成 409 而不是提交期 500。
+            taskFileRepository.saveAndFlush(tf);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            // 版本冲突 = 并发写同一行（典型：导出作业刚更新了该 EXPORT 行）。数据面无一行落库，
+            // 新件随回滚回收、旧件与旧引用原样保留；给客户端可重试的 409。
+            throw new ConflictException(ErrorCodes.ILLEGAL_STATE,
+                    "文件正被并发写入（可能有导出作业正在生成该配置项），请稍后重试");
         } catch (DataIntegrityViolationException e) {
-            // 预检后任务被并发删除：FK 拒绝落行。新建文件删掉；复用旧行时只有确认任务已不存在
-            // 才删盘（否则可能是其它完整性异常，删盘会破坏既有导出件）。
-            if (createdNew || !taskRepository.existsById(taskId)) {
-                fileStorage.delete(tf.getStoragePath());
-            }
+            // 预检后任务被并发删除：FK 拒绝落行。新件从未被引用，直接删；旧件未动。
+            fileStorage.delete(stored.key());
             throw ResourceNotFoundException.of("任务", taskId);
+        }
+        if (previousKey != null && !previousKey.equals(stored.key())) {
+            fileStorage.deleteAfterCommit(previousKey);
         }
         return ApiResponse.ok();
     }

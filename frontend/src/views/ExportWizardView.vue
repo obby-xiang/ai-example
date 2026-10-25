@@ -560,6 +560,8 @@ let inFlightBinding: { taskId: number; promise: Promise<TaskLoadOutcome> } | nul
  * 在紧随的动作里等待（R1）。
  */
 async function applyTaskBinding(id: number, preloaded?: Task): Promise<TaskLoadOutcome> {
+  // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
+  useAiStore().onSheetPageLeft()
   resetTaskScopedState()
   stopJobWatchForTaskSwitch()
   taskId.value = id
@@ -772,6 +774,8 @@ async function startExport(): Promise<void> {
   try {
     const job = await jobsApi.createJob(taskId.value, 'EXPORT')
     exportJob.value = job
+    // 重跑导出 ⇒ 结果表格将被新文件替换：旧预览立即失效（硬闸仍是 previewId/loadGeneration）
+    useAiStore().onSheetPageLeft()
     exportResults.value = []
     loadedGrids.clear()
     ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
@@ -925,6 +929,8 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
     if (missingHeaders.length > 0) {
       ElMessage.warning(t('views.export.msg.missingHeaders', { code, headers: missingHeaders.join(', ') }))
     }
+    // 交互专项：重跑导出 / 换任务重载 ⇒ 旧预览立即失效（硬闸仍是 previewId）
+    useAiStore().onSheetReloaded(code)
     return { ok: true, error: '' }
   } catch (error) {
     loadedGrids.delete(code)

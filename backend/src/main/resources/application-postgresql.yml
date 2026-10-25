@@ -1,0 +1,68 @@
+# PostgreSQL 生产 profile（多实例共享库形态）。
+#
+# 用法：`--spring.profiles.active=postgresql`（可与 cluster 叠加：postgresql,cluster）。
+# **不带该 profile 时行为与改造前完全一致**（H2 文件库、db/migration 的 H2 迁移集）。
+#
+# 为什么单独成 profile（而不是改默认 datasource）：
+#   · 方言与迁移集不同（PG 需要 db/postgresql 的方言副本，见该目录 V1 头注）；
+#   · 生产库的连接参数（URL/账号/池）必须由环境注入，不能有"漏配就静默连本机 H2 文件库"的默认值；
+#   · 单实例本地开发（H2 文件库 + 控制台）不应被生产口径的参数（graceful shutdown 等）牵连。
+spring:
+  config:
+    activate:
+      on-profile: postgresql
+
+  datasource:
+    # **故意不写默认值**：漏配 APP_DB_URL 时占位符解析失败发生在绑定阶段，启动直接 fail-fast，
+    # 而不是悄悄回落到 application.yml 的 H2 文件库（那会变成"生产起了一份本地库"的假绿）。
+    url: ${APP_DB_URL}
+    driver-class-name: org.postgresql.Driver
+    username: ${APP_DB_USER}
+    password: ${APP_DB_PASSWORD:}
+    hikari:
+      # 与 application.yml 同口径：池上限取 HikariCP 官方默认 10（不按并发数放大）。
+      # 多实例时**库侧总连接数 = 实例数 × 10**，须与该库的 max_connections（含运维预留）一并核对。
+      maximum-pool-size: 10
+      # 取连接上限 5s（默认 30s）：本 profile 下 /health/ready 的 DB 探针与业务查询共用本池，
+      # 池被占满时探针必须在 LB 的探测超时内给出结论，而不是把探测线程吊在 30s 上。
+      connection-timeout: 5s
+      validation-timeout: 2s
+      # 会话级**锁等待**上限 60s，与 H2 的 LOCK_TIMEOUT=60000 同一上界（种子单飞的等待方要能等
+      # 完整一轮播种，但不能无限等：PG 缺省 lock_timeout=0 会一直挂着）。
+      # 只限"等锁"，不限语句执行时长（不设 statement_timeout：本仓没有把慢查询升级成失败的裁决，
+      # 那会把导出/导入这类长作业误杀）。
+      # 用 connection-init-sql 而不是在 Java 里 SET：H2 没有 lock_timeout 语法，PG 专属设置必须
+      # 留在 PG profile 的配置面（不在 Java 中给 H2 强加 PG 语法）。
+      connection-init-sql: "SET lock_timeout = '60s'"
+
+  jpa:
+    hibernate:
+      # PG 与 H2 同一口径：schema 由 Flyway 拥有，Hibernate 只校验不改结构。
+      # CLOB→TEXT 的映射兼容性说明见 db/postgresql/V1__schema.sql 头注（校验按 String→VARCHAR
+      # 与 PG text 的 JDBC type code 比较，因此 validate 可用）。
+      ddl-auto: validate
+
+  flyway:
+    # PG 用方言副本目录；**不能**与 classpath:db/migration 同时列出（同版本号会被 Flyway 拒绝）。
+    locations: classpath:db/postgresql
+    # 生产库必须是空 schema 交给 Flyway 建：关掉 baseline-on-migrate，
+    # 避免"库里有别人的对象"时被静默 baseline（迁移未真正执行却记成成功）。
+    # 这里只迁移结构，不搬迁既有 H2 业务数据。仅限新装或已由运维另行迁完数据的 PG；
+    # 空库仍按既有 seed 写示例数据，不能直接顶替存量 H2；真实 PG/存量迁移未验证。
+    baseline-on-migrate: false
+
+  h2:
+    console:
+      # H2 控制台在生产 profile 下一律关闭（它是 H2 专属入口，且默认允许远端访问）。
+      enabled: false
+
+  lifecycle:
+    # 优雅停机的在途请求收尾上限（与 server.shutdown=graceful 配套）。
+    timeout-per-shutdown-phase: 20s
+
+server:
+  # readiness 摘除 → 优雅停机：先让 /health/ready 变 503（ReadinessService 在 ContextClosedEvent
+  # 置 draining），再由容器停止接收新请求、等在途请求收尾。
+  # 注意：LB/网关侧的"发现 503 到真正摘流"有一段探测间隔，部署侧仍需 preStop/deregistration delay
+  # 覆盖它（本仓没有 K8s 清单，这一段留运维侧配置）。
+  shutdown: graceful

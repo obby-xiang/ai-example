@@ -84,6 +84,8 @@ const REQUIRED_CASE_IDS = Object.freeze([
   'proxy-no-sticky',
   'same-tcp-across-abc',
   'reattach-any-instance',
+  'history-pagination',
+  'session-purge-cross-instance',
   'seq-cross-instance',
   'suspend-cross-instance',
   'idempotency-cross-instance',
@@ -204,7 +206,7 @@ function configureRun() {
   RUN.proxyUrl = argString('proxy-url', RUN.proxyUrl)
   RUN.statsUrl = argString('stats-url', RUN.statsUrl)
   RUN.readyTimeoutMs = argNumber('ready-timeout', 180) * 1000
-  RUN.jobFailTimeoutMs = argNumber('job-fail-timeout', 90) * 1000
+  RUN.jobFailTimeoutMs = argNumber('job-fail-timeout', 130) * 1000
   RUN.killTakeoverTimeoutMs = argNumber('kill-takeover-timeout', 120) * 1000
   const ports = argString('ports', '')
   if (ports) {
@@ -919,12 +921,15 @@ function instanceEnv(apiKey = PLACEHOLDER_KEY) {
 function instanceArgs(key, { apiKey = PLACEHOLDER_KEY, extraArgs = [] } = {}) {
   const inst = INSTANCES.find((i) => i.key === key)
   check(inst, `未知实例 ${key}`)
-  const dbUrl = `jdbc:h2:tcp://127.0.0.1:${RUN.ports.h2}/./cluster3;DB_CLOSE_DELAY=-1`
+  // h2tcp profile 提供共享库形态的固定口径（graceful shutdown、H2 console 关闭、10 连接池）；
+  // LOCK_TIMEOUT 与 profile 默认值同口径（60s）：种子单飞的等待方要能等完整一轮播种。
+  const dbUrl = `jdbc:h2:tcp://127.0.0.1:${RUN.ports.h2}/./cluster3;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=60000`
   const args = [
     '-Xms96m',
     '-Xmx640m',
     '-jar',
     RUN.jar,
+    '--spring.profiles.active=h2tcp',
     `--server.port=${inst.port}`,
     `--spring.datasource.url=${dbUrl}`,
     '--spring.datasource.username=sa',
@@ -932,6 +937,8 @@ function instanceArgs(key, { apiKey = PLACEHOLDER_KEY, extraArgs = [] } = {}) {
     `--spring.data.redis.host=127.0.0.1`,
     `--spring.data.redis.port=${RUN.ports.redis}`,
     `--app.file.storage-path=${RUN.sharedFiles}`,
+    // 真实 XFF 只来自 HAProxy（127.0.0.1 host 网络）；其余来源一律按 RemoteAddr。
+    '--app.web.trusted-proxies=127.0.0.1/32',
     ...COMMON_JAVA_ARGS,
     ...extraArgs
   ]
@@ -976,16 +983,39 @@ async function healthOf(key, { timeoutMs = 4000 } = {}) {
   return { record, body }
 }
 
+/** 进程级就绪（`/health/ready`）：硬依赖（DB/存储/种子）+ draining。AI key 只是 capability。 */
+async function readinessOf(key, { timeoutMs = 4000, agent } = {}) {
+  const record = await httpRequest(`${baseOf(key)}/health/ready`, {
+    timeoutMs,
+    agent,
+    routeKind: 'ready',
+    directNode: directNode(key)
+  })
+  let body = null
+  try {
+    body = jsonOf(record, `instance-${key} /health/ready`)
+  } catch {
+    body = null
+  }
+  return { record, body }
+}
+
+/**
+ * 基线就绪 = `/health/ready` ready=true（硬依赖）**且** `/api/ai/health` 可用（本网的用例要跑 AI 链路）。
+ * 两者分工：进程 ready 不看 AI key（无 key 时仍 200），AI capability 单独由 /api/ai/health 报。
+ */
 async function isReady(key) {
   try {
-    const { record, body } = await healthOf(key)
-    return record.status === 200 && body && body.available === true && body.redis && body.redis.available === true
+    const [health, ready] = await Promise.all([healthOf(key), readinessOf(key)])
+    return health.record.status === 200 && health.body && health.body.available === true
+      && health.body.redis && health.body.redis.available === true
+      && ready.record.status === 200 && ready.body && ready.body.ready === true
   } catch {
     return false
   }
 }
 
-async function waitReady(key, timeoutMs = RUN.readyTimeoutMs) {
+async function waitReady(key, timeoutMs = RUN.readyTimeoutMs, { requireAi = true } = {}) {
   const deadline = Date.now() + timeoutMs
   const child = STATE.procs.get(key)
   let last = ''
@@ -997,12 +1027,22 @@ async function waitReady(key, timeoutMs = RUN.readyTimeoutMs) {
       throw new Error(`实例 ${key} 启动失败（exit=${child.exitCode} signal=${child.signalCode}）；日志尾部：\n${tailFile(instanceLogPath(key))}`)
     }
     try {
-      const { record, body } = await healthOf(key, { timeoutMs: 3000 })
-      last = `HTTP ${record.status} available=${body ? body.available : '?'} redis=${body && body.redis ? body.redis.available : '?'}`
-      if (record.status === 200 && body && body.available === true && body.redis && body.redis.available === true) {
-        STATE.instanceIds[key] = body.instanceId
-        caseLog(`实例 ${key} 就绪：instanceId=${body.instanceId} leaseOk=${body.leaseOk}`)
-        return body
+      const [health, ready] = await Promise.all([
+        healthOf(key, { timeoutMs: 3000 }),
+        readinessOf(key, { timeoutMs: 3000 })
+      ])
+      const healthOk = health.record.status === 200 && health.body && health.body.available === true
+        && health.body.redis && health.body.redis.available === true
+      const readyOk = ready.record.status === 200 && ready.body && ready.body.ready === true
+      last = `health HTTP ${health.record.status} available=${health.body ? health.body.available : '?'}`
+        + ` redis=${health.body && health.body.redis ? health.body.redis.available : '?'}`
+        + `；ready HTTP ${ready.record.status} ready=${ready.body ? ready.body.ready : '?'}`
+        + ` draining=${ready.body ? ready.body.draining : '?'}`
+      if (readyOk && (!requireAi || healthOk)) {
+        if (health.body && health.body.instanceId) STATE.instanceIds[key] = health.body.instanceId
+        caseLog(`实例 ${key} 就绪：instanceId=${health.body ? health.body.instanceId : '?'}`
+          + ` leaseOk=${health.body ? health.body.leaseOk : '?'}${requireAi ? '' : '（无 AI key，仅进程就绪）'}`)
+        return health.body
       }
     } catch (e) {
       last = e.message
@@ -1037,7 +1077,8 @@ async function waitSeeded(key, timeoutMs = 60000) {
   throw new Error(`实例 ${key} 在 ${timeoutMs}ms 内配置定义未达 15（最后：${last}）`)
 }
 
-async function waitUnavailable(key, timeoutMs = RUN.readyTimeoutMs) {
+/** 无 AI key 时的 capability 面：`/api/ai/health` 503 + available=false（**不是**实例 readiness）。 */
+async function waitAiUnavailable(key, timeoutMs = RUN.readyTimeoutMs) {
   const deadline = Date.now() + timeoutMs
   const child = STATE.procs.get(key)
   let last = ''
@@ -1053,7 +1094,7 @@ async function waitUnavailable(key, timeoutMs = RUN.readyTimeoutMs) {
       last = `HTTP ${record.status} code=${body ? body.code : '?'} available=${body ? body.available : '?'}`
       if (record.status === 503 && body && body.available === false) {
         STATE.instanceIds[key] = body.instanceId
-        caseLog(`实例 ${key} 已就绪但 AI 不可用（readiness 信号）：code=${body.code} instanceId=${body.instanceId}`)
+        caseLog(`实例 ${key} 进程可用但 AI capability 不可用：code=${body.code} instanceId=${body.instanceId}`)
         return body
       }
     } catch (e) {
@@ -1061,7 +1102,7 @@ async function waitUnavailable(key, timeoutMs = RUN.readyTimeoutMs) {
     }
     await sleep(500)
   }
-  throw new Error(`实例 ${key} 在 ${timeoutMs}ms 内未呈现 503 readiness（最后：${last}）`)
+  throw new Error(`实例 ${key} 在 ${timeoutMs}ms 内未呈现 /api/ai/health 503（最后：${last}）`)
 }
 
 async function stopInstance(key, { timeoutMs = 20000 } = {}) {
@@ -1103,6 +1144,54 @@ async function killInstance(key) {
   logLine(`实例 ${key} 已被 kill：pid=${pid} exit=${JSON.stringify(exited)} portClosed=${closed}`)
   if (!closed) throw new Error(`实例 ${key} 被 kill 后端口 ${inst.port} 仍在监听`)
   return { pid, ...exited }
+}
+
+/**
+ * 暂停/恢复实例（只用于「在途 run 的取消无法被处理」取证）。
+ * SIGSTOP 只冻结进程，不结束它；任何失败路径都必须在 finally 里 SIGCONT，
+ * 绝不允许把实例留在暂停态。
+ */
+function pauseInstance(key) {
+  const child = STATE.procs.get(key)
+  check(child && child.pid, `实例 ${key} 不是本探针启动的，拒绝 SIGSTOP`)
+  check(processAlive(child.pid), `实例 ${key} 已退出，拒绝 SIGSTOP`)
+  process.kill(child.pid, 'SIGSTOP')
+  // SIGSTOP 已生效后不得再抛出（否则调用方来不及置“已暂停”标记、finally 不会 SIGCONT）。
+  try {
+    caseLog(`SIGSTOP 实例 ${key} pid=${child.pid}（冻结其取消处理）`)
+  } catch {
+    /* 证据写失败不影响暂停语义 */
+  }
+  return child.pid
+}
+
+function resumeInstance(key) {
+  const child = STATE.procs.get(key)
+  if (!child || !child.pid) return false
+  const pid = child.pid
+  if (!processAlive(pid)) return false
+  let lastError = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      process.kill(pid, 'SIGCONT')
+    } catch (e) {
+      lastError = e
+      continue
+    }
+    try {
+      caseLog(`SIGCONT 实例 ${key} pid=${pid}`)
+    } catch {
+      /* 证据写失败不影响恢复语义 */
+    }
+    return true
+  }
+  // SIGCONT 连续失败：宁可 SIGKILL 也绝不留下暂停进程（后续 ensureUp 会重启）。
+  try {
+    child.kill('SIGKILL')
+  } catch {
+    /* ignore */
+  }
+  throw new Error(`SIGCONT 实例 ${key} 失败（${lastError ? lastError.message : '未知'}）：已尝试 SIGKILL，避免暂停残留`)
 }
 
 async function ensureUp(keys = ['a', 'b', 'c']) {
@@ -1276,6 +1365,24 @@ async function putJson(key, apiPath, body, { timeoutMs = 20000 } = {}) {
   return { record, body: parsed }
 }
 
+async function deleteJson(key, apiPath, { timeoutMs = 20000 } = {}) {
+  const record = await httpRequest(directUrl(key, apiPath), {
+    method: 'DELETE',
+    timeoutMs,
+    routeKind: 'api',
+    directNode: directNode(key)
+  })
+  let parsed = null
+  if (record.text) {
+    try {
+      parsed = jsonOf(record, `${key} DELETE ${apiPath}`)
+    } catch {
+      parsed = null
+    }
+  }
+  return { record, body: parsed }
+}
+
 function uniqueId(prefix) {
   return `${prefix}-${crypto.randomBytes(4).toString('hex')}`
 }
@@ -1339,6 +1446,51 @@ async function currentRun(key, sessionId) {
 async function historyOf(key, sessionId) {
   const { record, body } = await getJson(key, `/api/ai/history/${encodeURIComponent(sessionId)}`)
   return { record, body }
+}
+
+/** 完整历史游标页（`/history/{sid}/messages`；afterSeq/beforeSeq 二选一，limit 1..200）。 */
+async function fullHistoryPage(key, sessionId, { afterSeq = null, beforeSeq = null, limit = 50 } = {}) {
+  const params = new URLSearchParams()
+  if (afterSeq !== null && afterSeq !== undefined) params.set('afterSeq', String(afterSeq))
+  if (beforeSeq !== null && beforeSeq !== undefined) params.set('beforeSeq', String(beforeSeq))
+  if (limit !== null && limit !== undefined) params.set('limit', String(limit))
+  const query = params.toString()
+  const { record, body } = await getJson(key, `/api/ai/history/${encodeURIComponent(sessionId)}/messages${query ? `?${query}` : ''}`)
+  return { record, body }
+}
+
+/** 等完整历史落齐（终态后 recorder 异步补齐；轮询到至少 minCount 条）。 */
+/** 等完整历史落齐（终态后 recorder 异步补齐；按 seq 正序轮询到至少 minCount 条）。 */
+async function waitFullHistory(key, sessionId, minCount = 2, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const page = await fullHistoryPage(key, sessionId, { afterSeq: 0, limit: 50 })
+    last = page
+    const data = page.body && page.body.success === true ? page.body.data : null
+    if (page.record.status === 200 && data && Array.isArray(data.messages) && data.messages.length >= minCount) {
+      return data
+    }
+    await sleep(500)
+  }
+  throw new Error(`完整历史（${key}）在 ${timeoutMs}ms 内不足 ${minCount} 条；最后响应=${last && last.record ? last.record.text.slice(0, 500) : '无'}`)
+}
+
+/** 等 run 落终态（DONE/FAILED/CANCELLED）。 */
+async function waitRunTerminal(key, runId, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    try {
+      last = await runDetail(key, runId)
+      const status = last.snapshot ? last.snapshot.status : null
+      if (['DONE', 'FAILED', 'CANCELLED'].includes(status)) return last
+    } catch {
+      /* 继续轮询 */
+    }
+    await sleep(500)
+  }
+  throw new Error(`run ${runId} 在 ${timeoutMs}ms 内未到终态（最后：${JSON.stringify(last && last.snapshot ? last.snapshot.status : last).slice(0, 400)}）`)
 }
 
 async function definitionsOf(key) {
@@ -1465,15 +1617,17 @@ const CASES = [
   { id: 'proxy-no-sticky', title: '无 cookie/IP 粘滞（固定 Cookie + 固定 XFF，30 请求覆盖 A/B/C）', fn: caseProxyNoSticky },
   { id: 'same-tcp-across-abc', title: '同一条 keep-alive TCP 连接连续请求覆盖 A/B/C（代理日志佐证）', fn: caseSameTcpAcrossAbc },
   { id: 'reattach-any-instance', title: '任意实例 reattach（B 全量 / C 差量）与 history', fn: caseReattachAnyInstance },
+  { id: 'history-pagination', title: '完整历史游标分页：B/C 跨实例正序翻页（afterSeq/limit、hasMore/nextCursor、seq 连续）', fn: caseHistoryPagination },
   { id: 'seq-cross-instance', title: '跨实例 seq：实时流 / 增量重挂 / 全量回放同号同序', fn: caseSeqCrossInstance },
   { id: 'suspend-cross-instance', title: '挂起在 A → B/C 重挂 → C 决策 → 两连接都收到续跑终帧', fn: caseSuspendCrossInstance },
   { id: 'idempotency-cross-instance', title: '跨实例幂等：重复决策 409 + 并发双决策恰一胜 + 副作用恰一次', fn: caseIdempotencyCrossInstance },
+  { id: 'session-purge-cross-instance', title: '跨实例会话销毁：B 删 → C 验无残留；在途慢流 deferred → 终态重试 complete', fn: caseSessionPurgeCrossInstance },
   { id: 'config-hot-reload', title: '配置热更新：A 写入 → B/C 在 reload 周期内看到新版本与新值', fn: caseConfigHotReload },
   { id: 'shared-file-download', title: '共享文件：A 上传 → B/C/代理下载字节一致', fn: caseSharedFileDownload },
   { id: 'suspend-kill-a', title: '挂起态 kill A → B 决策接管执行（台账 executedBy=B）→ C history', fn: caseSuspendKillA },
   { id: 'streaming-kill-a', title: '流式中 kill A → 僵尸扫描接管 → 跨实例补帧到终帧（seq 无洞）', fn: caseStreamingKillA },
   { id: 'job-kill-a', title: '作业中 kill A → 幸存实例看门狗收敛 FAILED → 重启清理后 B 重试成功', fn: caseJobKillA },
-  { id: 'readiness-removal', title: 'readiness 摘除：A 无 key（/health 503）→ 代理摘除 → 恢复后重新纳入', fn: caseReadinessRemoval },
+  { id: 'readiness-removal', title: 'readiness 摘除：无 key 不摘 A；SIGTERM/draining 摘 A 并由 B/C 接管；重启后重新纳入', fn: caseReadinessRemoval },
   { id: 'redis-outage-recovery', title: 'Redis 故障恢复：暂停期间 503/业务可用 → 恢复后跨实例健康与对话可用', fn: caseRedisOutageRecovery }
 ]
 
@@ -1621,6 +1775,7 @@ function assertProxyConfigHasNoStickiness() {
   check(!/^\s*cookie\s/m.test(cfg), '代理配置出现 cookie 粘滞')
   check(!/^\s*balance\s+source\s/m.test(cfg), '代理配置出现 balance source（IP 粘滞）')
   check(/^\s*http-check\s+expect\s+status\s+200\s*$/m.test(cfg), '代理缺少 http-check expect status 200（readiness 判据）')
+  check(/^\s*option\s+httpchk\s+GET\s+\/health\/ready\s*$/m.test(cfg), '代理 readiness 探针必须是 GET /health/ready（不能用 /api/ai/health）')
   check(/^backend\s+be_cluster3\s*$/m.test(cfg), '代理缺少 backend be_cluster3')
 }
 
@@ -1727,8 +1882,8 @@ async function caseSameTcpAcrossAbc() {
 
 // ── 用例 4：任意实例 reattach + history ────────────────────────────────────
 
-async function runPlainChat(key, prefix, extraMessage = '') {
-  const sessionId = uniqueId(prefix)
+async function runPlainChat(key, prefix, extraMessage = '', { sessionId: fixedSessionId } = {}) {
+  const sessionId = fixedSessionId || uniqueId(prefix)
   const message = `scenario=PLAIN ${extraMessage || '三实例连通性'}`.trim()
   const stream = await chatOn(key, { sessionId, message })
   try {
@@ -1807,6 +1962,144 @@ async function caseReattachAnyInstance() {
   caseLog(`runId=${run.runId} 帧数=${run.seqs.length}；B 全量同号同序；C 差量 lastSeq=${cut} 不重不漏；三实例 history total=${historyA.total}`)
 }
 
+// ── 用例 4b：完整历史游标分页（跨实例正序）─────────────────────────────────
+
+async function caseHistoryPagination() {
+  await ensureUp()
+  const ROUNDS = 21
+  const sessionId = uniqueId('cluster3-history')
+  const runs = []
+  for (let i = 1; i <= ROUNDS; i += 1) {
+    runs.push(await runPlainChat('a', 'cluster3-history', `history-round-${i}`, { sessionId }))
+  }
+  const expectedTotal = ROUNDS * 2
+  const all = await waitFullHistory('b', sessionId, expectedTotal, 180000)
+  const allOnC = dataOf((await fullHistoryPage('c', sessionId, { afterSeq: 0, limit: 200 })).record,
+    'C 完整历史全量')
+  checkGe(all.messages.length, 41, `同会话必须 >40 条真实消息（实得 ${all.messages.length}）`)
+  checkEq(all.messages.length, expectedTotal, '完整历史条数（21 轮 = 42 条）')
+  checkEq(allOnC.count, all.messages.length, 'C 全量条数与 B 一致')
+
+  const tuple = (message) => `${message.seq}|${message.runId}|${message.messageId}`
+  checkEq(JSON.stringify(allOnC.messages.map(tuple)), JSON.stringify(all.messages.map(tuple)),
+    'B/C 全量 (seq,runId,messageId) 必须逐条同源')
+
+  const first = all.messages[0]
+  checkEq(first.seq, 1, '完整历史首条 seq')
+  checkEq(first.type, 'USER', '完整历史首条类型（正序从 user 开始）')
+  checkIncludes(first.text, 'history-round-1', '完整历史首条文本（首条仍在）')
+  checkEq(first.runId, runs[0].runId, '完整历史首条 runId 与第 1 轮实时流同源')
+
+  const last = all.messages[all.messages.length - 1]
+  checkEq(last.seq, expectedTotal, '完整历史末条 seq')
+  checkEq(last.type, 'ASSISTANT', '完整历史末条类型')
+  checkEq(last.runId, runs[ROUNDS - 1].runId, '完整历史末条 runId 与最后一轮实时流同源')
+
+  for (let i = 0; i < ROUNDS; i += 1) {
+    const user = all.messages[i * 2]
+    const assistant = all.messages[i * 2 + 1]
+    checkEq(user.type, 'USER', `第 ${i + 1} 轮 user 类型`)
+    checkEq(assistant.type, 'ASSISTANT', `第 ${i + 1} 轮 assistant 类型`)
+    checkEq(user.runId, runs[i].runId, `第 ${i + 1} 轮 user runId 同源`)
+    checkEq(assistant.runId, runs[i].runId, `第 ${i + 1} 轮 assistant runId 同源`)
+    checkIncludes(user.text, `history-round-${i + 1}`, `第 ${i + 1} 轮 user 文本`)
+    check(user.messageId && assistant.messageId && user.messageId !== assistant.messageId,
+      `第 ${i + 1} 轮 messageId 必须存在且互异`)
+  }
+  const messageIds = all.messages.map((message) => message.messageId)
+  checkEq(new Set(messageIds).size, messageIds.length, '完整历史 messageId 不得重复')
+  const ascendingSeqs = all.messages.map((message) => message.seq)
+  checkStrictlyIncreasing(ascendingSeqs, '完整历史全量 seq（afterSeq=0 正序）')
+
+  // afterSeq 跨实例翻页（B/C 交替）：>40 条全量可读，游标接续不重不漏。
+  const afterSeqs = []
+  const afterTuples = []
+  let afterCursor = 0
+  let hop = 0
+  while (true) {
+    const key = hop % 2 === 0 ? 'b' : 'c'
+    const page = dataOf((await fullHistoryPage(key, sessionId, { afterSeq: afterCursor, limit: 20 })).record,
+      `${key} afterSeq=${afterCursor} 页`)
+    checkEq(page.direction, 'after', `afterSeq 翻页方向（${key}）`)
+    checkLe(page.messages.length, 20, 'afterSeq 页大小')
+    afterSeqs.push(...page.messages.map((message) => message.seq))
+    afterTuples.push(...page.messages.map(tuple))
+    if (!page.hasMore) {
+      checkEq(page.nextCursor, null, 'afterSeq 末页 nextCursor 必须 null')
+      break
+    }
+    check(page.nextCursor !== null && page.nextCursor !== undefined, 'afterSeq hasMore=true 时 nextCursor 不得为空')
+    check(page.nextCursor > afterCursor, `afterSeq nextCursor 必须前进（${afterCursor} → ${page.nextCursor}）`)
+    afterCursor = page.nextCursor
+    hop += 1
+    check(hop <= 10, 'afterSeq 翻页次数异常（可能游标未前进）')
+  }
+  checkEq(JSON.stringify(afterSeqs), JSON.stringify(ascendingSeqs), 'afterSeq 跨实例翻页覆盖全部 seq（无重不漏）')
+  checkEq(JSON.stringify(afterTuples), JSON.stringify(all.messages.map(tuple)), 'afterSeq 翻页消息元组与全量一致')
+
+  // beforeSeq 从最新向最早翻页（C/B 交替），同样无重不漏。
+  const beforeSeqs = []
+  const beforeTuples = []
+  let beforeCursor = null
+  let backHop = 0
+  while (true) {
+    const key = backHop % 2 === 0 ? 'c' : 'b'
+    const page = dataOf((await fullHistoryPage(key, sessionId, { beforeSeq: beforeCursor, limit: 13 })).record,
+      `${key} beforeSeq=${beforeCursor === null ? '(最新)' : beforeCursor} 页`)
+    checkEq(page.direction, 'before', `beforeSeq 翻页方向（${key}）`)
+    checkLe(page.messages.length, 13, 'beforeSeq 页大小')
+    beforeSeqs.push(...page.messages.map((message) => message.seq))
+    beforeTuples.push(...page.messages.map(tuple))
+    if (!page.hasMore) {
+      checkEq(page.nextCursor, null, 'beforeSeq 末页 nextCursor 必须 null')
+      break
+    }
+    check(page.nextCursor !== null && page.nextCursor !== undefined, 'beforeSeq hasMore=true 时 nextCursor 不得为空')
+    check(beforeCursor === null || page.nextCursor < beforeCursor, `beforeSeq nextCursor 必须向更早推进（${beforeCursor} → ${page.nextCursor}）`)
+    beforeCursor = page.nextCursor
+    backHop += 1
+    check(backHop <= 10, 'beforeSeq 翻页次数异常（可能游标未前进）')
+  }
+  for (let i = 1; i < beforeSeqs.length; i += 1) {
+    if (!(beforeSeqs[i] < beforeSeqs[i - 1])) {
+      throw new Error(`beforeSeq 翻页必须严格递减（${beforeSeqs[i - 1]} → ${beforeSeqs[i]}）`)
+    }
+  }
+  checkEq(new Set(beforeSeqs).size, beforeSeqs.length, 'beforeSeq 翻页 seq 不得重复')
+  checkEq(beforeSeqs.length, expectedTotal, 'beforeSeq 翻页条数')
+  checkEq(beforeSeqs[beforeSeqs.length - 1], 1, 'beforeSeq 必须翻到最早一条')
+  checkEq(JSON.stringify(beforeSeqs.slice().reverse()), JSON.stringify(ascendingSeqs), 'beforeSeq 逆序 = afterSeq 正序（无重不漏）')
+  checkEq(JSON.stringify(beforeTuples.slice().reverse()), JSON.stringify(all.messages.map(tuple)),
+    'beforeSeq 翻页消息元组与 afterSeq 全量一致')
+
+  // beforeSeq 与 afterSeq 同传必须 400（产品契约，不靠客户端兜底）。
+  const both = await fullHistoryPage('c', sessionId, { afterSeq: 10, beforeSeq: 20, limit: 1 })
+  checkEq(both.record.status, 400, `beforeSeq+afterSeq 同传必须 400（实得 ${both.record.status}）`)
+
+  // 旧 /history 仍是 40 条记忆窗口：42 条完整历史下必须只回 40 条，且不含完整历史游标字段。
+  const legacy = await historyOf('c', sessionId)
+  checkEq(legacy.record.status, 200, '旧 /history HTTP')
+  const legacyData = dataOf(legacy.record, '旧 /history')
+  checkEq(legacyData.count, legacyData.total, '旧 /history 默认全量窗口：count=total')
+  checkEq(legacyData.hasMore, false, '旧 /history 默认 hasMore=false')
+  check(!Object.prototype.hasOwnProperty.call(legacyData, 'nextCursor'), '旧 /history 不得混入完整历史的 nextCursor 字段')
+  checkEq(legacyData.total, 40, '旧 /history 必须仍是 40 条记忆窗口（42 条完整历史下）')
+  checkEq(legacyData.messages.length, 40, '旧 /history messages 长度 = 40 窗口')
+
+  saveEvidence('history-pagination.json', {
+    sessionId,
+    rounds: ROUNDS,
+    expectedTotal,
+    fullCount: all.messages.length,
+    first: { seq: first.seq, runId: first.runId, messageId: first.messageId },
+    last: { seq: last.seq, runId: last.runId, messageId: last.messageId },
+    afterSeqs,
+    beforeSeqs,
+    bothStatus: both.record.status,
+    legacy: { count: legacyData.count, total: legacyData.total, hasMore: legacyData.hasMore }
+  })
+  caseLog(`会话 ${sessionId} 共 ${expectedTotal} 条消息；afterSeq 跨 B/C 覆盖 1..${expectedTotal}；beforeSeq 从最新翻回 1；旧 /history 仍 40 窗口；before+after 同传=400`)
+}
 // ── 用例 5：跨实例 seq（实时流 / 增量重挂 / 全量回放）─────────────────────
 
 async function caseSeqCrossInstance() {
@@ -1977,6 +2270,153 @@ async function caseIdempotencyCrossInstance() {
   caseLog(`重复决策 409（${dup.body.code}）；并发双决策 [${statuses.join(',')}]；两轮副作用均恰一次`)
 }
 
+// ── 用例 7b：跨实例会话销毁（完整清理 + 在途 deferred）─────────────────────
+
+async function caseSessionPurgeCrossInstance() {
+  await ensureUp()
+  const task = await createTask('a', 'EXPORT', `cluster3-purge-${uniqueId('t')}`)
+  await selectDefs('a', task.id, ['CURRENCY'])
+  const keep = await runPlainChat('a', 'cluster3-purge-keep')
+  const target = await runPlainChat('a', 'cluster3-purge-target')
+  await waitFullHistory('b', target.sessionId, 2)
+  await historyStable('c', target.sessionId, '三实例连通性')
+  const beforeFull = await waitFullHistory('c', target.sessionId, 2)
+  checkEq(beforeFull.messages[0].runId, target.runId, '销毁前完整历史 runId 与目标轮一致')
+
+  // ① 普通完成会话：B 删 → C 验证旧 history / 完整 history / runs/current 均无残留。
+  const del = await deleteJson('b', `/api/ai/session/${encodeURIComponent(target.sessionId)}`)
+  checkEq(del.record.status, 200, `B 侧 DELETE /session HTTP：${del.record.text.slice(0, 400)}`)
+  check(del.body && del.body.complete === true, `非在途会话销毁必须 complete=true：${del.record.text.slice(0, 600)}`)
+  checkEq(del.body.aborted, false, '非在途会话销毁不得 aborted=true')
+  checkEq(del.body.deleted, true, '非在途会话销毁 deleted 必须 true')
+  checkEq((del.body.deferred || []).length, 0, `非在途会话销毁不得有 deferred：${JSON.stringify(del.body.deferred)}`)
+
+  const legacyAfter = await historyOf('c', target.sessionId)
+  checkEq(legacyAfter.record.status, 200, 'C 侧旧 /history HTTP（幂等）')
+  const legacyAfterData = dataOf(legacyAfter.record, 'C 侧旧 /history（销毁后）')
+  checkEq(legacyAfterData.messages.length, 0, 'C 侧旧 /history 销毁后 messages 必须为空')
+  checkEq(legacyAfterData.total, 0, 'C 侧旧 /history 销毁后 total 必须为 0')
+
+  const fullAfter = await fullHistoryPage('c', target.sessionId, { limit: 50 })
+  const fullAfterData = dataOf(fullAfter.record, 'C 侧完整历史（销毁后）')
+  checkEq(fullAfterData.count, 0, 'C 侧完整历史销毁后 count 必须为 0')
+  checkEq(fullAfterData.messages.length, 0, 'C 侧完整历史销毁后 messages 必须为空')
+
+  const currentAfter = await currentRun('c', target.sessionId)
+  checkEq(currentAfter.found, false, 'C 侧 runs/current 销毁后必须 found=false')
+
+  // 另一个会话不受影响。
+  const keepHistory = await historyStable('c', keep.sessionId, '三实例连通性')
+  checkGe(keepHistory.total, 2, '销毁目标会话后，另一个会话的 history 仍完整')
+  const keepFull = await waitFullHistory('c', keep.sessionId, 2)
+  checkEq(keepFull.messages[0].runId, keep.runId, '另一个会话的完整历史 runId 不变')
+  // 业务 task 不被会话销毁波及。
+  const taskAfter = await getTask('c', task.id)
+  checkEq(taskAfter.id, task.id, '会话销毁后业务 task 仍可读取')
+
+  saveEvidence('purge-complete.json', {
+    target: { sessionId: target.sessionId, runId: target.runId },
+    purge: del.body,
+    legacyAfter: { total: legacyAfterData.total, messages: legacyAfterData.messages.length },
+    fullAfter: { count: fullAfterData.count },
+    runsCurrent: currentAfter.found,
+    keep: { sessionId: keep.sessionId, total: keepHistory.total },
+    taskId: task.id
+  })
+
+  // ② 在途慢流：SIGSTOP 冻结 A 的取消处理，B 删除必须 deferred（不赌 watchdog 时序）。
+  const activeSession = uniqueId('cluster3-purge-active')
+  const slow = await chatOn('a', { sessionId: activeSession, message: 'scenario=PLAIN stall-frames=4000 purge-active' })
+  let activeRunId = null
+  let aPaused = false
+  let pausedPid = null
+  let cleanupError = null
+  try {
+    const start = await slow.waitType('start', { timeoutMs: 30000 })
+    activeRunId = start.runId
+    await slow.waitFor((f) => typeof f.seq === 'number' && f.seq >= 2, { timeoutMs: 30000, label: '等待在途慢流第 2 帧' })
+    check(!slow.ended, 'DELETE 前慢流不应已结束')
+
+    // 冻结 A：它无法处理取消标志，purge 的 1.5s 等待窗口内 run 必然仍是活跃态 ⇒ deferred。
+    pausedPid = pauseInstance('a')
+    aPaused = true
+    caseLog(`在途 run ${activeRunId} 已冻结实例 A（pid=${pausedPid}），准备由 B 删除会话`)
+
+    const activeDel = await deleteJson('b', `/api/ai/session/${encodeURIComponent(activeSession)}`, { timeoutMs: 60000 })
+    checkEq(activeDel.record.status, 200, `在途会话 DELETE HTTP：${activeDel.record.text.slice(0, 400)}`)
+    check(activeDel.body && activeDel.body.complete === false, `在途会话销毁不得 complete=true：${activeDel.record.text.slice(0, 800)}`)
+    checkEq(activeDel.body.aborted, false, '在途会话销毁不得 aborted=true（应为 deferred）')
+    checkEq(activeDel.body.deleted, false, '在途会话销毁 deleted 必须 false（deferred 不等于删净）')
+    const deferred = Array.isArray(activeDel.body.deferred) ? activeDel.body.deferred : []
+    check(deferred.length > 0, '在途会话销毁必须给出 deferred 明细')
+    check(deferred.some((item) => item.runId === activeRunId), `deferred 必须指明在途 runId=${activeRunId}：${JSON.stringify(deferred)}`)
+    saveEvidence('purge-active-deferred.json', { purge: activeDel.body, pausedPid, runId: activeRunId })
+    caseLog(`在途会话 ${activeSession} DELETE → complete=false, deferred=${JSON.stringify(deferred)}（A 处于 SIGSTOP）`)
+  } finally {
+    // 必须恢复 A：失败路径也不能把实例留在暂停态。
+    if (aPaused) {
+      try {
+        resumeInstance('a')
+      } catch (e) {
+        cleanupError = e
+        caseLog(`恢复 A（SIGCONT）失败：${e.message}`)
+      }
+      aPaused = false
+    }
+    slow.close()
+  }
+  if (cleanupError) throw cleanupError
+
+  // 等跨实例看到终态后，不手动补删：另一实例的自动重试必须清掉 durable pending。
+  await waitRunTerminal('c', activeRunId, RUN.killTakeoverTimeoutMs)
+  const automaticPurgeRecovery = async () => {
+    const pendingKey = `ai:purge:pending:${activeSession}`
+    const deadline = Date.now() + 90000
+    while (redisExists(pendingKey)) {
+      if (Date.now() >= deadline) {
+        throw new Error(`自动销毁重试 90s 内未清掉 ${pendingKey}；不得以手动 DELETE 掩盖`)
+      }
+      await sleep(500)
+    }
+  }
+  await automaticPurgeRecovery()
+  check(!redisExists(`ai:purge:pending:${activeSession}`), '自动销毁重试必须移除 durable pending')
+
+  // 再 DELETE 只验证幂等；它不是上面的自动清理证据。
+  const retry = await deleteJson('c', `/api/ai/session/${encodeURIComponent(activeSession)}`)
+  checkEq(retry.record.status, 200, `在途终态后 C 侧重试 DELETE HTTP：${retry.record.text.slice(0, 400)}`)
+  check(retry.body && retry.body.complete === true, `终态后重试必须 complete=true：${retry.record.text.slice(0, 800)}`)
+  checkEq(retry.body.deleted, true, '终态后重试 deleted 必须 true')
+  checkEq((retry.body.deferred || []).length, 0, `终态后重试不得再有 deferred：${JSON.stringify(retry.body.deferred)}`)
+
+  // 给异步写回一个窗口，确认历史没有复活（销毁守卫 + 删除必须真的生效）。
+  await sleep(2000)
+  const revivedLegacy = await historyOf('b', activeSession)
+  const revivedLegacyData = dataOf(revivedLegacy.record, '在途会话销毁后的旧 /history')
+  checkEq(revivedLegacyData.messages.length, 0, '在途会话销毁后旧 /history 不得复活')
+  const revivedFull = await fullHistoryPage('b', activeSession, { limit: 50 })
+  const revivedFullData = dataOf(revivedFull.record, '在途会话销毁后的完整历史')
+  checkEq(revivedFullData.count, 0, '在途会话销毁后完整历史不得复活')
+  const revivedCurrent = await currentRun('b', activeSession)
+  checkEq(revivedCurrent.found, false, '在途会话销毁后 runs/current 必须 found=false')
+  const taskStillThere = await getTask('b', task.id)
+  checkEq(taskStillThere.id, task.id, '在途会话销毁后业务 task 仍可读取（不得删业务数据）')
+  const purgedChat = await postJson('c', '/api/ai/chat', { sessionId: activeSession, message: '不得复活旧会话' })
+  checkEq(purgedChat.record.status, 410, '销毁后的旧 sessionId 必须返回 410，不得重新开轮')
+  checkEq(purgedChat.body && purgedChat.body.code, 'SESSION_PURGED', '销毁后的旧 sessionId 错误码')
+
+  saveEvidence('purge-active-retry.json', {
+    sessionId: activeSession,
+    runId: activeRunId,
+    automaticPurgeRecovery: true,
+    retry: retry.body,
+    purgedChat: purgedChat.body,
+    revived: { legacyMessages: revivedLegacyData.messages.length, fullCount: revivedFullData.count, runsCurrent: revivedCurrent.found },
+    taskId: task.id
+  })
+  caseLog('在途会话由自动重试清理 complete=true；旧/完整 history 均未复活；旧会话 410；业务 task 保留')
+}
+
 function terminalType(frames) {
   const done = frames.find((f) => f.type === 'done')
   if (done) return 'done'
@@ -1994,19 +2434,49 @@ async function defaultsOf(key) {
   return body.data
 }
 
+/** 面板可用模型（含 providerId/modelId 二元组；不假设具体 provider 名称）。 */
+async function availableModelsOf(key) {
+  const { record, body } = await getJson(key, '/api/ai/models')
+  checkEq(record.status, 200, `GET /api/ai/models（${key}）HTTP`)
+  check(body && body.success === true && Array.isArray(body.data), `可用模型列表异常：${record.text.slice(0, 400)}`)
+  return body.data
+}
+
 async function caseConfigHotReload() {
   await ensureUp()
   const before = {}
-  for (const inst of INSTANCES) before[inst.key] = await defaultsOf(inst.key)
+  const healthBefore = {}
+  for (const inst of INSTANCES) {
+    before[inst.key] = await defaultsOf(inst.key)
+    healthBefore[inst.key] = await healthOf(inst.key)
+  }
   checkEq(new Set(Object.values(before).map((d) => d.version)).size, 1, `三实例配置版本起点不一致：${JSON.stringify({
     a: before.a.version, b: before.b.version, c: before.c.version
   })}`)
+
+  // 二元绑定取当前配置；未绑定（旧配置）时从真实可用模型里选，绝不写死 provider 名称。
+  let binding = { providerId: before.a.providerId, modelId: before.a.modelId }
+  if (binding.providerId === null || binding.providerId === undefined || !binding.modelId) {
+    const models = await availableModelsOf('a')
+    const preferred = binding.modelId ? models.find((row) => row.modelId === binding.modelId && row.providerId !== null && row.providerId !== undefined) : null
+    const row = preferred
+      || models.find((item) => item.isDefault && item.providerId !== null && item.providerId !== undefined)
+      || models.find((item) => item.providerId !== null && item.providerId !== undefined)
+    check(row, `没有可绑定的 (providerId, modelId) 二元组：${JSON.stringify(models).slice(0, 600)}`)
+    binding = { providerId: row.providerId, modelId: row.modelId }
+  }
+  check(binding.modelId, '默认目标缺少 modelId')
+  const bindingProviderId = Number(binding.providerId)
+  const bindingModelId = binding.modelId
+
   const pidsBefore = { ...STATE.pids }
   const redisVersionBefore = redisGet('ai:cfg:ver')
   const base = before.a.temperature === null || before.a.temperature === undefined ? 0.2 : Number(before.a.temperature)
   const nextTemperature = Number((base === 0.2 ? 0.21 : 0.2).toFixed(4))
+  // 与 AiConfigWriter.DefaultsCommand 当前 DTO 逐字段一致（providerId 是二元绑定的另一半）。
   const command = {
-    modelId: before.a.modelId,
+    modelId: bindingModelId,
+    providerId: bindingProviderId,
     temperature: nextTemperature,
     topP: before.a.topP,
     maxTokens: before.a.maxTokens,
@@ -2014,7 +2484,9 @@ async function caseConfigHotReload() {
   }
   const put = await putJson('a', '/api/ai/settings/defaults', command)
   checkEq(put.record.status, 200, 'PUT settings/defaults HTTP')
-  check(put.body && put.body.success === true, `PUT settings/defaults 失败：${put.record.text.slice(0, 400)}`)
+  check(put.body && put.body.success === true && put.body.data, `PUT settings/defaults 失败：${put.record.text.slice(0, 400)}`)
+  checkEq(Number(put.body.data.providerId), bindingProviderId, '保存后回显的 providerId（二元绑定）')
+  checkEq(put.body.data.modelId, bindingModelId, '保存后回显的 modelId（二元绑定）')
   const putAt = Date.now()
 
   const observed = {}
@@ -2024,7 +2496,10 @@ async function caseConfigHotReload() {
     for (const key of ['b', 'c']) {
       const current = await defaultsOf(key)
       observed[key] = current
-      if (!(Number(current.version) > Number(before.a.version) && Number(current.temperature) === nextTemperature)) {
+      if (!(Number(current.version) > Number(before.a.version)
+        && Number(current.temperature) === nextTemperature
+        && Number(current.providerId) === bindingProviderId
+        && current.modelId === bindingModelId)) {
         done = false
       }
     }
@@ -2034,7 +2509,20 @@ async function caseConfigHotReload() {
   for (const key of ['b', 'c']) {
     checkGe(Number(observed[key] && observed[key].version), Number(before.a.version) + 1, `实例 ${key} 配置版本未推进`)
     checkEq(Number(observed[key].temperature), nextTemperature, `实例 ${key} 热更新后的 temperature`)
+    checkEq(Number(observed[key].providerId), bindingProviderId, `实例 ${key} 热更新后的 providerId`)
+    checkEq(observed[key].modelId, bindingModelId, `实例 ${key} 热更新后的 modelId`)
   }
+
+  // 运行时二元绑定：/api/ai/health 的 resolved providerId/defaultModelId 必须等于保存的那一对。
+  const healthAfter = {}
+  for (const key of ['b', 'c']) {
+    const health = await healthOf(key)
+    healthAfter[key] = { status: health.record.status, providerId: health.body ? health.body.providerId : null, defaultModelId: health.body ? health.body.defaultModelId : null }
+    checkEq(health.record.status, 200, `实例 ${key} /api/ai/health HTTP（热更新后）`)
+    checkEq(Number(health.body.providerId), bindingProviderId, `实例 ${key} 运行时 providerId 与保存的二元绑定`)
+    checkEq(health.body.defaultModelId, bindingModelId, `实例 ${key} 运行时 defaultModelId 与保存的二元绑定`)
+  }
+
   const pidsAfter = { ...STATE.pids }
   checkEq(JSON.stringify(pidsAfter), JSON.stringify(pidsBefore), '配置热更新不应重启任何实例（pid 变化）')
 
@@ -2047,18 +2535,29 @@ async function caseConfigHotReload() {
   try {
     await putJson('a', '/api/ai/settings/defaults', {
       modelId: before.a.modelId,
+      providerId: before.a.providerId,
       temperature: before.a.temperature,
       topP: before.a.topP,
       maxTokens: before.a.maxTokens,
       allowUserParams: before.a.allowUserParams
     })
   } catch (e) {
-    caseLog(`还原 temperature 失败（不影响断言）：${e.message}`)
+    caseLog(`还原默认目标/参数失败（不影响断言）：${e.message}`)
   }
   saveEvidence('config-reload.json', {
-    before, observed, nextTemperature, redisVersionBefore, redisVersion, latencyMs: latency, pidsBefore, pidsAfter
+    before,
+    binding,
+    healthBefore,
+    healthAfter,
+    observed,
+    nextTemperature,
+    redisVersionBefore,
+    redisVersion,
+    latencyMs: latency,
+    pidsBefore,
+    pidsAfter
   })
-  caseLog(`配置版本 ${before.a.version} → ${observed.b.version}；B/C 在 ${latency}ms 内看到 temperature=${nextTemperature}；pid 未变`)
+  caseLog(`配置版本 ${before.a.version} → ${observed.b.version}；二元绑定=${binding.providerId}/${binding.modelId}；B/C 在 ${latency}ms 内看到新 temperature；运行时 resolved 对一致；pid 未变`)
 }
 
 // ── 用例 9：共享文件下载 ───────────────────────────────────────────────────
@@ -2144,19 +2643,51 @@ async function caseSharedFileDownload() {
 
 // ── 用例 10：挂起态 kill A → B 接管执行 ────────────────────────────────────
 
-async function redownloadAfterKill(label) {
-  const record = await downloadFile(label, CTX.file.taskId, 'CURRENCY')
+/**
+ * 独立文件 fixture：不依赖 shared-file-download 用例的成功（该用例失败时本用例仍要能跑到挂起接管）。
+ * 返回 taskId + 上传件 sha256，A 死亡后由 B/C 重新下载比对。
+ */
+async function createUploadedFixture(prefix) {
+  const task = await createTask('a', 'EXPORT', `${prefix}-${uniqueId('t')}`)
+  await selectDefs('a', task.id, ['CURRENCY'])
+  const template = await httpRequest(directUrl('a', `/api/tasks/${task.id}/files/templates?codes=CURRENCY`), {
+    timeoutMs: 30000,
+    routeKind: 'template',
+    directNode: directNode('a')
+  })
+  checkEq(template.status, 200, `fixture 模板下载 HTTP（${prefix}）`)
+  checkGe(template.body.length, 1, `fixture 模板字节数（${prefix}）`)
+  const upload = multipartBody('file', 'CURRENCY.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', template.body)
+  const uploaded = await httpRequest(directUrl('a', `/api/tasks/${task.id}/files/upload`), {
+    method: 'POST',
+    headers: {
+      'Content-Type': `multipart/form-data; boundary=${upload.boundary}`,
+      'Content-Length': String(upload.body.length)
+    },
+    body: upload.body,
+    timeoutMs: 30000,
+    routeKind: 'upload',
+    directNode: directNode('a')
+  })
+  checkEq(uploaded.status, 200, `fixture 文件上传 HTTP（${prefix}）：${uploaded.text.slice(0, 400)}`)
+  const uploadBody = jsonOf(uploaded, `fixture 上传响应（${prefix}）`)
+  check(uploadBody && uploadBody.success === true, `fixture 上传响应 success !== true：${uploaded.text.slice(0, 400)}`)
+  checkEq(Number(uploadBody.data.count), 1, `fixture 上传匹配文件数（${prefix}）`)
+  return { taskId: task.id, sha256: sha256(template.body), bytes: template.body.length }
+}
+
+async function redownloadAfterKill(label, fixture) {
+  const record = await downloadFile(label, fixture.taskId, 'CURRENCY')
   checkEq(record.status, 200, `A 死亡后共享文件下载（${label}）HTTP`)
-  checkEq(sha256(record.body), CTX.file.sha256, `A 死亡后共享文件下载（${label}）sha256`)
+  checkEq(sha256(record.body), fixture.sha256, `A 死亡后共享文件下载（${label}）sha256`)
 }
 
 async function caseSuspendKillA() {
   await ensureUp()
-  check(CTX.file, '共享文件用例未产出 file 上下文，无法验证 A 死亡后的跨实例下载')
-  const task = await createTask('a', 'EXPORT', `cluster3-suspend-kill-${uniqueId('t')}`)
-  await selectDefs('a', task.id, ['CURRENCY'])
-  const run = await createSuspendedRun('a', { prefix: 'cluster3-suspend-kill', taskId: task.id, messageSuffix: ` ${uniqueId('sk')}` })
-  caseLog(`挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id}`)
+  const fixture = await createUploadedFixture('cluster3-suspend-kill')
+  const taskId = fixture.taskId
+  const run = await createSuspendedRun('a', { prefix: 'cluster3-suspend-kill', taskId, messageSuffix: ` ${uniqueId('sk')}` })
+  caseLog(`挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${taskId}（独立文件 fixture）`)
   const killedAt = Date.now()
   const kill = await killInstance('a')
   saveEvidence('kill-a.json', kill)
@@ -2194,13 +2725,13 @@ async function caseSuspendKillA() {
     checkEq(ledger[0].executedBy, STATE.instanceIds.b, '台账 executedBy 必须是接管实例 B（共享库形态）')
     checkEq(ledger[0].outcome, 'ok', '台账 outcome 必须是成功（ok）')
 
-    const jobs = await jobsOf('c', task.id)
+    const jobs = await jobsOf('c', taskId)
     checkEq(jobs.length, 1, '接管执行后作业数恰 1')
     const history = await historyStable('c', run.sessionId, 'start_export')
     checkGe(history.total, 2, 'A 死亡后 C 侧 history 至少 user + assistant')
 
-    await redownloadAfterKill('b')
-    await redownloadAfterKill('c')
+    await redownloadAfterKill('b', fixture)
+    await redownloadAfterKill('c', fixture)
 
     saveFrames('B-takeover.jsonl', streamB.frames)
     saveFrames('C-full.jsonl', full)
@@ -2212,7 +2743,8 @@ async function caseSuspendKillA() {
       ledgerCounts: detail.ledgerCounts,
       ledger,
       jobs: jobs.length,
-      historyTotal: history.total
+      historyTotal: history.total,
+      fixture
     })
     caseLog(`kill A → B 接管：outcome=${confirm.body.resumeOutcome}，${takeoverMs}ms 收到 done；台账 executedBy=B；A 死后 B/C 仍能下载共享文件`)
   } finally {
@@ -2433,11 +2965,11 @@ async function waitAllStatsUp(timeoutMs = 25000) {
   }
 }
 
-async function sampleProxyHealth(count) {
+async function sampleProxyHealth(count, { statuses = [200] } = {}) {
   const nodes = []
   for (let i = 0; i < count; i += 1) {
     const record = await httpRequest(`${RUN.proxyUrl}/api/ai/health`, { timeoutMs: 10000, routeKind: 'proxy-health' })
-    checkEq(record.status, 200, `代理健康采样第 ${i + 1} 次 HTTP`)
+    checkIn(record.status, statuses, `代理健康采样第 ${i + 1} 次 HTTP（允许 ${JSON.stringify(statuses)}）`)
     const node = record.headers['x-cluster-node']
     check(node, `代理健康采样第 ${i + 1} 次缺少 X-Cluster-Node`)
     nodes.push(node)
@@ -2456,17 +2988,23 @@ async function caseReadinessRemoval() {
   checkEq(before.stats.a.status, 'UP', 'readiness 用例起点：A 必须是 UP')
   saveEvidence('stats-before.csv', (await haproxyStats()).raw)
 
-  // A 以空 AI key 启动：进程健康，但产品 readiness（/api/ai/health）为 503。
+  // ── ① 无 AI key：/api/ai/health 503 只是 capability；/health/ready 仍 200，代理不得摘 A ──
   await stopInstance('a')
-  startInstance('a', { apiKey: '', note: 'readiness-empty-key' })
-  const unavailable = await waitUnavailable('a')
+  startInstance('a', { apiKey: '', note: 'readiness-no-key' })
+  await waitReady('a', RUN.readyTimeoutMs, { requireAi: false })
   checkEq(STATE.instanceIds.a === before.ids.a, false, 'A 重启后 instanceId 应变化（新进程）')
-  await waitStatsStatus('a', 'DOWN', 25000)
-  const excluded = await sampleProxyHealth(12)
-  check(!excluded.includes('node-a'), `readiness 已 503 但代理仍把流量打到 A：${JSON.stringify(excluded)}`)
-  check(excluded.includes('node-b') && excluded.includes('node-c'), `摘除 A 后流量应覆盖 B/C：${JSON.stringify(excluded)}`)
+  const unavailable = await waitAiUnavailable('a')
+  const readyNoKey = await readinessOf('a')
+  checkEq(readyNoKey.record.status, 200, `无 key 时 /health/ready 必须 200（实得 ${readyNoKey.record.status}）：${readyNoKey.record.text.slice(0, 400)}`)
+  check(readyNoKey.body && readyNoKey.body.ready === true, `无 key 时 /health/ready ready 必须 true：${readyNoKey.record.text.slice(0, 400)}`)
+  checkEq(readyNoKey.body.capabilities && readyNoKey.body.capabilities.ai ? readyNoKey.body.capabilities.ai.configured : null, false, '无 key 时 capabilities.ai.configured 必须 false')
 
-  // 无 key 时 /chat 在开流前 503；这里用普通 HTTP 取状态与 code（不解析 SSE）。
+  await waitStatsStatus('a', 'UP', 25000)
+  const stillIncluded = await sampleProxyHealth(12, { statuses: [200, 503] })
+  check(stillIncluded.includes('node-a'), `无 key（ready 仍 true）时代理不得摘 A：${JSON.stringify(stillIncluded)}`)
+  check(stillIncluded.includes('node-b') && stillIncluded.includes('node-c'), `无 key 时流量仍应覆盖 B/C：${JSON.stringify(stillIncluded)}`)
+
+  // 无 key 时 /chat 在开流前 503 AI_UNAVAILABLE（能力面，不是实例就绪面）。
   const readinessChat = await httpRequest(directUrl('a', '/api/ai/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
@@ -2478,14 +3016,151 @@ async function caseReadinessRemoval() {
   const chatStatus = readinessChat.status
   const readinessChatBody = jsonOf(readinessChat, 'readiness /chat 响应')
   checkEq(chatStatus, 503, `A 无 key 时直连 /chat 必须 503（实得 ${chatStatus}）`)
-  checkEq(readinessChatBody.available === false || readinessChatBody.code !== undefined, true, 'readiness /chat 响应必须带不可用信号')
+  checkIn(readinessChatBody.code, ['AI_UNAVAILABLE', 'AI_KEY_MISSING', 'AI_KEY_UNREADABLE'],
+    'A 无 key 时 /chat code（合法分档：AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE）')
 
   await stopInstance('a')
-  startInstance('a', { note: 'readiness-restore' })
+  startInstance('a', { note: 'readiness-restore-key' })
   await waitReady('a')
   await waitStatsStatus('a', 'UP', 25000)
-  const included = await sampleProxyHealth(12)
-  check(included.includes('node-a'), `A 恢复后代理未重新纳入：${JSON.stringify(included)}`)
+  const includedAfterKey = await sampleProxyHealth(12)
+  check(includedAfterKey.includes('node-a'), `A 恢复 key 后代理未重新纳入：${JSON.stringify(includedAfterKey)}`)
+
+  // ── ② 真实在途慢流 + SIGTERM：ready=false/draining → 代理摘 A → B/C 接管 ──
+  const slowSession = uniqueId('cluster3-draining')
+  const slow = await chatOn('a', { sessionId: slowSession, message: 'scenario=PLAIN stall-frames=4000 readiness-draining' })
+  // 预热一条 keep-alive 连接：SIGTERM 后 Tomcat 可能不再接受**新**连接，但既有连接上的
+  // 请求仍要走完优雅停机；用同一条连接轮询 readiness，才拿得到 draining=true 的响应。
+  const readyAgent = new http.Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
+  let runId = null
+  let lastSeq = 0
+  let drainingBody = null
+  let liveDuringDrain = null
+  let excludedDuringDrain = null
+  let takeoverNode = null
+  let takeoverTerminal = null
+  let inFlightStillOpen = false
+  let inFlightTerminal = null
+  let inFlightBoundary = null
+  try {
+    const start = await slow.waitType('start', { timeoutMs: 30000 })
+    runId = start.runId
+    await slow.waitFor((f) => typeof f.seq === 'number' && f.seq >= 2, { timeoutMs: 30000, label: '等待在途慢流第 2 帧' })
+    lastSeq = slow.lastSeq()
+    caseLog(`在途慢流 runId=${runId} lastSeq=${lastSeq}；准备 SIGTERM A`)
+    const warm = await readinessOf('a', { timeoutMs: 3000, agent: readyAgent })
+    checkEq(warm.record.status, 200, 'SIGTERM 前 keep-alive 预热 /health/ready HTTP')
+
+    const childA = STATE.procs.get('a')
+    check(childA && childA.pid, 'A 的子进程句柄缺失（SIGTERM 前必须保留）')
+    const pidA = childA.pid
+    const termAt = Date.now()
+    childA.kill('SIGTERM')
+
+    // draining 窗口可能很短（Tomcat 优雅停机后连接器不再收新请求）：50ms 紧轮询，
+    // 拿到 ready=false/draining=true 才算证据；拿不到就如实 FAIL，不改成宽松断言。
+    const observations = []
+    const deadline = Date.now() + 15000
+    while (Date.now() < deadline) {
+      try {
+        const snapshot = await readinessOf('a', { timeoutMs: 1000, agent: readyAgent })
+        observations.push({ ms: Date.now() - termAt, status: snapshot.record.status, body: snapshot.body })
+        if (snapshot.record.status === 503 && snapshot.body && snapshot.body.draining === true && snapshot.body.ready === false) {
+          drainingBody = snapshot.body
+          break
+        }
+      } catch (e) {
+        observations.push({ ms: Date.now() - termAt, error: e.message })
+      }
+      await sleep(50)
+    }
+    saveEvidence('draining-observations.json', observations)
+    check(drainingBody, `SIGTERM 后 15s 内未捕获 /health/ready 的 draining 证据（ready=false/draining=true）；`
+      + `观测=${JSON.stringify(observations.slice(-8))}；日志尾部：\n${tailFile(instanceLogPath('a'), 40)}`)
+    checkEq(drainingBody.draining, true, 'draining 响应 draining 字段')
+    checkEq(drainingBody.ready, false, 'draining 响应 ready 字段')
+
+    try {
+      liveDuringDrain = await httpRequest(directUrl('a', '/health/live'), { timeoutMs: 2000, routeKind: 'live', directNode: 'node-a' })
+    } catch (e) {
+      liveDuringDrain = { error: e.message }
+    }
+
+    await waitStatsStatus('a', 'DOWN', 25000)
+    excludedDuringDrain = await sampleProxyHealth(12)
+    check(!excludedDuringDrain.includes('node-a'), `draining 后代理仍把新流量打到 A：${JSON.stringify(excludedDuringDrain)}`)
+    check(excludedDuringDrain.includes('node-b') && excludedDuringDrain.includes('node-c'), `摘除 A 后新流量应覆盖 B/C：${JSON.stringify(excludedDuringDrain)}`)
+    check(!slow.ended, 'draining 证据窗口内，在途慢流被提前切断（graceful shutdown 未等待在途请求）')
+    inFlightStillOpen = !slow.ended
+
+    // B/C 接管新流量：经统一代理再起一轮，必须由 B/C 之一完成。
+    const takeover = await chatOn(null, { sessionId: uniqueId('cluster3-draining-takeover'), message: 'scenario=PLAIN draining-takeover' }, { viaProxy: true })
+    try {
+      takeoverTerminal = await takeover.waitTerminal(90000)
+      checkEq(takeoverTerminal.type, 'done', 'draining 后经代理的新对话终帧')
+      takeoverNode = takeover.node
+      check(takeoverNode && takeoverNode !== 'node-a', `draining 后新对话仍落在 A：${takeoverNode}`)
+      checkIn(takeoverNode, ['node-b', 'node-c'], 'draining 后新对话的接管节点')
+      checkStrictlyIncreasing(takeover.seqs(), 'draining 后新对话 seq')
+    } finally {
+      takeover.close()
+    }
+
+    // 尽量收齐在途终帧；收不到就明确证据边界，绝不把“连接没断”当成优雅收尾完成。
+    try {
+      inFlightTerminal = await slow.waitTerminal(35000)
+      checkIn(inFlightTerminal.type, ['done', 'error'], '在途慢流终帧类型')
+      if (inFlightTerminal.type === 'done') {
+        checkStrictlyIncreasing(slow.seqs(), '在途慢流 seq（graceful draining）')
+      }
+      caseLog(`在途慢流在 draining 窗口内收到终帧：${inFlightTerminal.type}（seq=${inFlightTerminal.seq ?? 'n/a'}）`)
+    } catch (e) {
+      inFlightBoundary = {
+        reason: 'NO_TERMINAL_FRAME_WITHIN_DRAIN_WINDOW',
+        error: e.message,
+        aAlive: processAlive(pidA),
+        elapsedMs: Date.now() - termAt
+      }
+      caseLog(`在途慢流未在 35s 内收终帧；证据边界=${JSON.stringify(inFlightBoundary)}（不宣称优雅收尾完成）`)
+    }
+
+    saveEvidence('draining-summary.json', {
+      pidA,
+      termAt,
+      runId,
+      lastSeq,
+      draining: drainingBody,
+      live: liveDuringDrain && liveDuringDrain.status ? { status: liveDuringDrain.status, text: liveDuringDrain.text.slice(0, 300) } : liveDuringDrain,
+      excludedDuringDrain,
+      inFlightStillOpen,
+      inFlightTerminal: inFlightTerminal ? { type: inFlightTerminal.type, seq: inFlightTerminal.seq ?? null } : null,
+      inFlightBoundary,
+      takeoverNode,
+      takeoverType: takeoverTerminal ? takeoverTerminal.type : null
+    })
+    caseLog(`SIGTERM A：ready=false/draining=true（${Date.now() - termAt}ms 内捕获）；代理摘 A；新对话由 ${takeoverNode} 接管；`
+      + (inFlightTerminal ? `在途慢流收到终帧 ${inFlightTerminal.type}` : '在途慢流终帧未收齐（已记录证据边界，不宣称优雅收尾完成）'))
+  } finally {
+    slow.close()
+    readyAgent.destroy()
+    // 清理：保留句柄到证据落盘之后，再 kill；随后重启 A 并重新纳入。
+    try {
+      await killInstance('a')
+    } catch (e) {
+      caseLog(`A 清理 kill 失败（转 stopInstance 兜底）：${e.message}`)
+      try {
+        await stopInstance('a')
+      } catch (fallback) {
+        caseLog(`A 兜底停止也失败（继续尝试重启）：${fallback.message}`)
+      }
+    }
+  }
+
+  await startInstance('a', { note: 'readiness-restore-after-drain' })
+  await waitReady('a')
+  await waitStatsStatus('a', 'UP', 25000)
+  const reincluded = await sampleProxyHealth(12)
+  check(reincluded.includes('node-a'), `A 重启后代理未重新纳入：${JSON.stringify(reincluded)}`)
 
   checkEq(STATE.pids.b, before.pids.b, 'B 的 pid 不应变化')
   checkEq(STATE.pids.c, before.pids.c, 'C 的 pid 不应变化')
@@ -2494,15 +3169,29 @@ async function caseReadinessRemoval() {
 
   const after = (await haproxyStats()).map
   saveEvidence('readiness.json', {
-    unavailableCode: unavailable.code,
+    noKey: {
+      unavailableCode: unavailable.code,
+      ready: { status: readyNoKey.record.status, body: readyNoKey.body },
+      stillIncluded,
+      chatStatus
+    },
+    draining: {
+      instanceIdBefore: before.ids.a,
+      draining: drainingBody,
+      live: liveDuringDrain && liveDuringDrain.status ? { status: liveDuringDrain.status } : liveDuringDrain,
+      excludedDuringDrain,
+      takeoverNode,
+      inFlightStillOpen,
+      inFlightTerminal: inFlightTerminal ? { type: inFlightTerminal.type } : null,
+      inFlightBoundary
+    },
+    includedAfterKey,
+    reincluded,
     before: before.stats,
-    excluded,
-    chatStatus,
-    included,
     after,
     instanceIds: { ...STATE.instanceIds }
   })
-  caseLog(`A 无 key → stats DOWN → 12 次代理请求只到 B/C；恢复后 stats UP 且重新出现 node-a`)
+  caseLog(`无 key：/api/ai/health 503 但 /health/ready 200，代理不摘 A；SIGTERM：draining 摘 A 且 B/C 接管；重启 A 后重新纳入`)
 }
 
 // ── 用例 14：Redis 故障恢复 ────────────────────────────────────────────────
@@ -2545,6 +3234,14 @@ async function caseRedisOutageRecovery() {
     check(health.body && health.body.redis && health.body.redis.available === false, `Redis 故障时 redis.available 必须为 false：${health.record.text.slice(0, 400)}`)
     checkEq(health.body.leaseOk, false, 'Redis 故障时 leaseOk 必须为 false')
 
+    // Redis 是**降级维度**：/health/ready 仍 200/ready=true，但 checks.redis=DOWN 且 degraded 含 redis。
+    const ready = await readinessOf('c', { timeoutMs: 15000 })
+    checkEq(ready.record.status, 200, `Redis 故障时 /health/ready 必须 200（Redis 不摘流）：${ready.record.text.slice(0, 500)}`)
+    check(ready.body && ready.body.ready === true, `Redis 故障时 /health/ready ready 必须 true：${ready.record.text.slice(0, 500)}`)
+    checkEq(ready.body.checks && ready.body.checks.redis ? ready.body.checks.redis.status : null, 'DOWN', 'Redis 故障时 checks.redis.status 必须 DOWN')
+    checkEq(ready.body.checks.redis && ready.body.checks.redis.required !== undefined ? ready.body.checks.redis.required : null, false, 'Redis 维度必须声明 required=false（降级维度）')
+    check(Array.isArray(ready.body.degraded) && ready.body.degraded.includes('redis'), `Redis 故障时 degraded 必须包含 redis：${JSON.stringify(ready.body.degraded)}`)
+
     const chatStart = Date.now()
     const chat = await httpRequest(directUrl('c', '/api/ai/chat'), {
       method: 'POST',
@@ -2564,6 +3261,13 @@ async function caseRedisOutageRecovery() {
     checkEq(definitions.status, 200, 'Redis 故障时业务 API /api/definitions 仍应可用')
     const defBody = jsonOf(definitions, 'Redis 故障时 definitions')
     check(defBody && defBody.success === true, 'Redis 故障时 definitions 响应异常')
+
+    // 统一代理也必须可用（Redis 故障不能把业务面从路由上摘掉）。
+    const definitionsProxy = await httpRequest(proxyUrl('/api/definitions'), { timeoutMs: 15000, routeKind: 'api' })
+    checkEq(definitionsProxy.status, 200, `Redis 故障时经代理 /api/definitions 仍应可用（实得 ${definitionsProxy.status}）：${definitionsProxy.text.slice(0, 300)}`)
+    const defProxyBody = jsonOf(definitionsProxy, 'Redis 故障时经代理 definitions')
+    check(defProxyBody && defProxyBody.success === true, 'Redis 故障时经代理 definitions 响应异常')
+    check(Array.isArray(defProxyBody.data) && defProxyBody.data.length >= 15, 'Redis 故障时经代理 definitions 数据量')
 
     const events = await httpRequest(directUrl('b', `/api/ai/events/${CTX.plainRun.runId}?lastSeq=0`), {
       timeoutMs: 15000,
@@ -2615,6 +3319,8 @@ async function caseRedisOutageRecovery() {
 
     saveEvidence('redis-outage.json', {
       healthLatencyMs: healthLatency,
+      readyDuringOutage: { status: ready.record.status, ready: ready.body && ready.body.ready, checks: ready.body && ready.body.checks, degraded: ready.body && ready.body.degraded },
+      definitionsProxyStatus: definitionsProxy.status,
       chatStatus: chat.status,
       chatCode: chatBody.code,
       chatLatencyMs: chatLatency,
@@ -2622,7 +3328,7 @@ async function caseRedisOutageRecovery() {
       recoveryMs,
       stats
     })
-    caseLog(`Redis 暂停期间 /chat=${chatBody.code}（${chatLatency}ms），definitions 仍 200；恢复 ${recoveryMs}ms 后三实例健康、代理对话完成`)
+    caseLog(`Redis 暂停期间 /health/ready 仍 ready=true（checks.redis=DOWN，degraded 含 redis）；/chat=${chatBody.code}（${chatLatency}ms），definitions 直连与代理均 200；恢复 ${recoveryMs}ms 后三实例健康、代理对话完成`)
   } finally {
     // 无论断言是否失败，都必须解除暂停，避免后续用例全红。
     try {
@@ -3044,6 +3750,10 @@ function selfTestCaseRegistry() {
     check(ids.includes(required), `缺少必需用例：${required}`)
   }
   checkEq(ids.length, REQUIRED_CASE_IDS.length, '用例数量与必需清单')
+  for (const def of CASES) {
+    check(typeof def.fn === 'function', `用例 ${def.id} 没有实现函数`)
+    check(typeof def.title === 'string' && def.title.length > 0, `用例 ${def.id} 缺少标题`)
+  }
   check(!JSON.stringify(RESULT_STATUSES).includes('SKIP'), '结果状态不得包含 SKIP')
   checkEq(RESULT_STATUSES.join(','), 'PASS,FAIL', '结果状态集合')
   return ids.length
@@ -3061,11 +3771,33 @@ function selfTestProductContract() {
     '@GetMapping(value = "/events/{runId}"',
     '@RequestParam(required = false) Long lastSeq',
     '@GetMapping("/history/{sessionId}")',
+    '@GetMapping("/history/{sessionId}/messages")',
+    '@RequestParam(name = "afterSeq", required = false) Long afterSeq',
+    'body.put("nextCursor"',
+    'body.put("hasMore"',
     '@GetMapping("/runs/current")',
     'body.put("snapshotStatus"',
     'body.put("awaitingExternal"',
     '@PostMapping("/startup-resume/scan")',
     '@PostMapping(value = "/runs/{runId}/resume"'
+  ])
+  // 进程级健康：类级 /health + 方法级 /live、/ready（不要写成 @GetMapping("/health/live")）。
+  assertSourceContains('backend/src/main/java/com/example/configmgr/health/HealthController.java', [
+    '@RequestMapping("/health")',
+    '@GetMapping("/live")',
+    '@GetMapping("/ready")'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/health/ReadinessProbe.java', [
+    'default boolean required()'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/web/AiSessionPurgeController.java', [
+    '@DeleteMapping({ "/session/{sessionId}", "/history/{sessionId}" })',
+    'body.put("deleted", result.complete())',
+    'body.put("activeRunId"'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/session/AiSessionPurgeService.java', [
+    'body.put("complete", this.complete)',
+    'body.put("deferred", this.deferred.stream()'
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/job/controller/JobController.java', [
     '@PostMapping("/tasks/{taskId}/jobs")',
@@ -3078,7 +3810,15 @@ function selfTestProductContract() {
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/ai/web/AiConfigController.java', [
     '@PutMapping("/settings/defaults")',
+    '@GetMapping("/models")',
     'defaults.version()'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java', [
+    'record DefaultsCommand(String modelId',
+    'Long providerId'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/web/dto/DefaultsView.java', [
+    'Long providerId'
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java', [
     'out.put("snapshot"',
@@ -3088,7 +3828,7 @@ function selfTestProductContract() {
   assertSourceContains('backend/src/main/java/com/example/configmgr/job/service/JobHeartbeatRegistry.java', [
     '"job:runner-active:"'
   ])
-  return 'AiController / JobController / FileController / AiConfigController / ResumeService / JobHeartbeatRegistry'
+  return 'AiController / HealthController / ReadinessProbe / AiSessionPurgeController / JobController / FileController / AiConfigController / ResumeService / JobHeartbeatRegistry'
 }
 
 function selfTestStubContract() {
@@ -3101,6 +3841,46 @@ function selfTestStubContract() {
   checkEq(exportRoute.tool, 'start_export', 'TC16-EXPORT 工具名')
   check(typeof routes.convergence.maxCallsPerTurn === 'number', 'stub convergence.maxCallsPerTurn 缺失')
   return `routes=${routes.routes.length}`
+}
+
+/** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段。 */
+function selfTestInstanceArgs() {
+  const args = instanceArgs('a')
+  const dbArg = args.find((arg) => arg.startsWith('--spring.datasource.url='))
+  checkIncludes(args.join(' '), '--spring.profiles.active=h2tcp', '实例启动参数 profile')
+  check(dbArg && dbArg.includes('LOCK_TIMEOUT=60000'), `H2 JDBC URL 必须带 LOCK_TIMEOUT=60000：${dbArg}`)
+  checkIncludes(args.join(' '), '--app.web.trusted-proxies=127.0.0.1/32', '可信代理网段')
+  return 'h2tcp + LOCK_TIMEOUT + trusted-proxies'
+}
+
+/** 三条复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、>40 分页、二元绑定删回去）。 */
+function selfTestReviewContracts() {
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  // 先剔除本函数自身，避免“检查项里自带这些字符串”造成恒真。
+  const start = source.indexOf('function selfTestReviewContracts')
+  const body = start >= 0 ? source.slice(0, start) : source
+  const clusterRun = fs.readFileSync(productFile('scripts/ci/cluster3-run.sh'), 'utf8')
+  const needles = [
+    "pauseInstance('a')",
+    "resumeInstance('a')",
+    'SIGSTOP',
+    'SIGCONT',
+    "'AI_KEY_MISSING'",
+    'const ROUNDS = 21',
+    'beforeSeq: beforeCursor',
+    '必须 400',
+    'providerId: bindingProviderId',
+    '运行时 providerId',
+    'NO_TERMINAL_FRAME_WITHIN_DRAIN_WINDOW',
+    "job-fail-timeout', 130",
+    'ai:purge:pending:',
+    'automaticPurgeRecovery'
+  ]
+  for (const needle of needles) {
+    checkIncludes(body, needle, `复审契约 ${needle}`)
+  }
+  checkIncludes(clusterRun, '--job-fail-timeout 130', '作业判死预算覆盖 90s TTL + 10s 扫描 + 30s 余量')
+  return `${needles.length + 1} 项`
 }
 
 function selfTestHygiene() {
@@ -3125,7 +3905,7 @@ function selfTestHygiene() {
 
 async function selfCheckMain() {
   console.log('cluster3-probe --self-check（不启动 Java/Docker、不连接任何端口）\n')
-  selfCheck('用例注册覆盖用户清单（14 条）', selfTestCaseRegistry)
+  selfCheck('用例注册覆盖用户清单（16 条）', selfTestCaseRegistry)
   selfCheck('结果状态只有 PASS/FAIL（无 SKIP）', () => RESULT_STATUSES.join(',') === 'PASS,FAIL' ? 'PASS/FAIL' : (() => { throw new Error(RESULT_STATUSES.join(',')) })())
   selfCheck('端口段 231xx 且禁用端口不出现', selfTestPortHygiene)
   selfCheck('静态 import 全部为 node: 内置模块', selfTestStaticImports)
@@ -3133,6 +3913,8 @@ async function selfCheckMain() {
   selfCheck('HAProxy stats CSV 解析', selfTestStatsCsv)
   selfCheck('产品端点/字段静态契约', selfTestProductContract)
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)
+  selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
+  selfCheck('复审契约（SIGSTOP/deferred / 分档码 / >40 分页 / providerId 绑定）', selfTestReviewContracts)
   selfCheck('三个交付文件的卫生（LF/无盘符/无密钥/无禁用端口）', selfTestHygiene)
   await selfCheckAsync('SSE 解析器（任意 chunk 边界 / CRLF / 多行 data / [DONE]）', selfTestSseParser)
   await selfCheckAsync('keep-alive 单连接判定（同客户端端口覆盖 3 节点）', selfTestKeepAlive)

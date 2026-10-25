@@ -24,8 +24,12 @@
       <div class="mt-[2px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-rules">
         {{ t('ai.sheetCard.rules', { rules: plan.rulesText }) }}
       </div>
+      <!-- 同文件后写可覆盖（用户 2026-10-25 口径）：不做逐格 CAS，但必须让用户知道会盖掉当前内容 -->
+      <div class="mt-[3px] text-[11.9px] leading-[1.6] text-[#8a5a00]" data-testid="sheet-preview-overwrite">
+        {{ t('ai.sheetCard.overwriteNotice') }}
+      </div>
 
-      <div class="mt-[7px] flex items-center gap-[6px]" data-testid="sheet-preview-levels">
+      <div v-if="!isUndoPlan" class="mt-[7px] flex items-center gap-[6px]" data-testid="sheet-preview-levels">
         <button
           v-for="option in LEVELS"
           :key="option.value"
@@ -72,7 +76,7 @@
             v-for="(change, index) in pageChanges"
             :key="index"
             class="text-[11.7px] leading-[1.7] text-[#57606a]"
-          ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>第 {{ change.row + 2 }} 行 列 {{ change.col + 1 }}「{{ display(change.oldValue) }}」→「{{ display(change.newValue) }}」</div>
+          ><span :class="CELL_CHIP" :data-testid="'sheet-preview-cell'">{{ addressOf(change) }}</span>{{ t('ai.sheetCard.rowCol', { row: change.row + 2, col: change.col + 1, from: display(change.oldValue), to: display(change.newValue) }) }}</div>
         </div>
         <div class="mt-[5px] flex items-center gap-[8px] text-[11.5px] text-[#8b949e]">
           <button type="button" class="border-0 bg-transparent p-0 text-[#57606a] disabled:text-[#c0c4cc]" :disabled="page === 0" @click="page -= 1">{{ t('ai.sheetCard.prevPage') }}</button>
@@ -158,6 +162,12 @@ const { t } = useI18n()
 const distribution = computed(() => props.plan?.distribution ?? null)
 /** 渲染开关与数据同源：模板里只用 `groups`，避免"有块没组"的半渲染。 */
 const distributionGroups = computed(() => distribution.value?.groups ?? [])
+
+/**
+ * 撤销计划（工具安全边界批）：反向补丁本来就是全量明细，没有"计数/样例/全量"三档可言
+ * ⇒ 不渲染档位按钮（点了也只会是空操作）。
+ */
+const isUndoPlan = computed(() => props.plan?.tool === 'undo_last_sheet_edit')
 
 /** 长 key 截断到 12 字符（全量走 title，避免卡片被一个长业务值撑开）。 */
 function truncateKey(key: string): string {

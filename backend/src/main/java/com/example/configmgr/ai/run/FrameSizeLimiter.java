@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * SSE 单帧上限的<b>字段级</b>降采样器（T3-10 裁定；G5 起上限来自
@@ -25,7 +26,17 @@ import java.util.Map;
  * {@code truncatedReason} 保留为 {@code notice} 的兼容别名（旧客户端仍读它）；
  * 新客户端按 {@code noticeCode} + 数字本地化，{@code notice} 只作旧客户端英文降级。
  * <b>语义边界</b>：本键是"单帧字节上限"，超限时产出的仍是一份<b>完整合法的帧</b>
- * （字段级降采样 + 标记），<b>不做跨帧分片</b>；分片/续帧协议与超大结果 spill 一并挂账。
+ * （字段级降采样 + 标记）。它表达"这一帧没给全"，因此只用于<b>无法跨帧续接</b>的字段
+ * （{@code tool_result.result} 等）。
+ *
+ * <h2>跨帧分片（2026-10-25 截断专项）</h2>
+ * 可续接的流式正文（{@code delta.text}，含 {@code kind=reasoning}）<b>不走</b>字段级截断：
+ * 超限时由 {@link #splitStringValue} 按"整帧 JSON ≤ 上限"切成若干片段，写出器把它们发成
+ * <b>同一 {@code messageId} 的多条既有 {@code delta}</b>（不新增帧型）——
+ * 于是实时拼接、归档回放、完成后历史三处都不丢字，也无需任何截断标记。
+ * 判据是本类既有的转义后字节口径（{@link #escapedLength}），CJK / emoji / 代理对不会被切半。
+ * 上限小到无法安全分片（骨架/单码点放不下）时<b>抛 {@link IllegalStateException}</b>，
+ * 由轮次的既有失败面收尾 —— 绝不回落字段截断或空串（那等于静默丢字）。
  *
  * <h2>结构化结果不做字符截断</h2>
  * {@code result} 是 JSON 字符串时（后端工具结果常见形态），按字符切会得到非法 JSON。
@@ -55,6 +66,18 @@ public final class FrameSizeLimiter {
 
 	/** 兼容别名（= {@link TruncationContract#NOTICE_FIELD}）。 */
 	public static final String TRUNCATED_REASON_FIELD = TruncationContract.LEGACY_REASON_FIELD;
+
+	/**
+	 * 单帧上限的<b>运行期下限</b>（字节）。
+	 *
+	 * <p>
+	 * 低于该值时，一个 {@code delta} 帧的骨架（type/atMs/messageId/runId/seq）加上一个最坏码点
+	 * （emoji 在 JSON 里转义为 12 字节）就放不下，<b>无法安全分片</b>；若允许这样的配置，
+	 * 唯一出路只能是字段截断（正文永久少字）或空串，两者都被本专项明确禁止。
+	 * 因此：装配期（{@link SseChatEmitter} 构造器）直接失败，配置面（{@code AiProperties}）
+	 * 的启动下限由主会话按同一数值接线。
+	 */
+	public static final int MIN_FRAME_BYTES = 1024;
 
 	private FrameSizeLimiter() {
 	}
@@ -116,6 +139,130 @@ public final class FrameSizeLimiter {
 		log.warn("SSE 单帧超限且不可截字段占主导 type={} original={} limit={} fields={} —— 已挂标记但未达上限",
 				frame.get("type"), full.length, maxBytes, String.join(",", fields));
 		return serialize(frame, mapper);
+	}
+
+	/**
+	 * 把帧里的一个字符串字段切成若干片段，使<b>每一次</b>"该帧换成这一片"的整帧 JSON 都不超过
+	 * {@code maxBytes}；片段按序拼接 === 原值（保原文、保顺序、不切代理对）。
+	 *
+	 * <p>
+	 * 只给<b>可跨帧续接</b>的流式字段用（{@code delta.text}）：调用方把每个片段发成一条同
+	 * {@code messageId} 的既有 {@code delta}。{@code result} 这类"一帧一份"的字段仍走
+	 * {@link #apply} 的字段级降采样（截断标记语义不同：那是"内容没给全"）。
+	 *
+	 * <p>
+	 * <b>为什么能保证上限</b>：JSON 对象里字段值的字节数 = 值转义后字节数，因此以
+	 * "同骨架 + 空值"的序列化长度为基准，按 {@link #takeChars} 的转义字节口径切分即可。
+	 * 调用方负责把<b>尚未写入的字段</b>也放进骨架（{@code seq} 用上界 {@link Long#MAX_VALUE}、
+	 * {@code runId} 用真值）—— 实际帧只会更短，不会更长。
+	 *
+	 * <p>
+	 * <b>失败语义（复审 C1/I1）</b>：上限小到放不下帧骨架、放不下一个码点、或复测收缩仍超限时，
+	 * <b>抛 {@link IllegalStateException}</b>（消息含 {@code type/key/limit/originalChars}）——
+	 * 绝不回落字段截断、绝不返回空串或超限片。理由是流式正文一旦被截断就<b>永久少字</b>
+	 * （实时、归档、完成后历史三处同时缺失，重挂差量也补不回来）；宁可让本轮走既有失败面
+	 * （error 帧 + 可重试/可观测），也不能静默交出一份"看起来成功但内容缺半"的回答。
+	 * 生产默认 64KB 与运行期下限 {@value #MIN_FRAME_BYTES} 字节保证这条分支不可达。
+	 *
+	 * @param frame    帧骨架（含该字段的完整值；方法内部会用空值重算骨架开销）
+	 * @param field    字段名（流式正文 = {@code text}）
+	 * @param mapper   与出帧同一个序列化器
+	 * @param maxBytes 单帧上限（UTF-8 字节；必须 {@code > 0}）
+	 * @return 非空片段列表（原值为空串时返回单元素列表）
+	 * @throws IllegalStateException    骨架/单码点放不下，或复测收缩仍超限
+	 * @throws IllegalArgumentException {@code maxBytes <= 0} 或字段不是 String
+	 */
+	static List<String> splitStringValue(Map<String, Object> frame, String field, ObjectMapper mapper, int maxBytes) {
+		Objects.requireNonNull(frame, "frame");
+		Objects.requireNonNull(field, "field");
+		Objects.requireNonNull(mapper, "mapper");
+		Object raw = frame.get(field);
+		if (!(raw instanceof String value)) {
+			throw new IllegalArgumentException("字段必须是 String：field=" + field + "，当前 = "
+					+ (raw == null ? "null" : raw.getClass().getName()));
+		}
+		if (maxBytes <= 0) {
+			// 拆分器的契约是"必须给上限"；"<= 0 = 不限制"只存在于 apply 的兼容路径，
+			// 流式正文不允许走那条路（那等于关掉单帧上限）。
+			throw new IllegalArgumentException("maxBytes 必须 > 0（当前 = " + maxBytes + "）：流式正文不允许无上限");
+		}
+		Map<String, Object> probe = new LinkedHashMap<>(frame);
+		probe.put(field, "");
+		byte[] empty = serialize(probe, mapper);
+		if (empty == null) {
+			throw new IllegalStateException("帧骨架序列化失败：type=" + frame.get("type") + " key=" + field
+					+ " limit=" + maxBytes + " originalChars=" + value.length());
+		}
+		int budget = maxBytes - empty.length;
+		if (budget <= 0) {
+			throw tooSmall(frame, field, maxBytes, empty.length, value.length(), null, "帧骨架已占满单帧上限");
+		}
+		if (value.isEmpty()) {
+			return List.of(value);
+		}
+		// 整帧字节 = 空值骨架 + 该片段的转义后字节（两侧引号已在骨架里），故预算即 budget。
+		List<String> chunks = new ArrayList<>();
+		int offset = 0;
+		while (offset < value.length()) {
+			String rest = value.substring(offset);
+			chunks.add(fitChunk(rest, frame, field, probe, mapper, maxBytes, budget, empty.length, value.length()));
+			offset += chunks.get(chunks.size() - 1).length();
+		}
+		return chunks;
+	}
+
+	/**
+	 * 取不超过 {@code budget} 转义字节的片段，并按整帧复测收缩（最多 4 轮）。
+	 *
+	 * <p>
+	 * 任何一步无法产出<b>既非空又不超限</b>的片段都直接抛 {@link IllegalStateException}：
+	 * 空片段会让调用方陷入死循环或交出"丢了这段正文"的空串，超限片段会被下游
+	 * {@link #apply} 截断 —— 两者都是本专项明确禁止的静默丢字。
+	 */
+	private static String fitChunk(String rest, Map<String, Object> frame, String field,
+			Map<String, Object> probe, ObjectMapper mapper, int maxBytes, int budget, int skeletonBytes,
+			int originalChars) {
+		String chunk = takeChars(rest, budget, mapper);
+		for (int i = 0; i <= 4; i++) {
+			if (chunk.isEmpty()) {
+				int firstCodePoint = rest.codePointAt(0);
+				int needed = escapedLength(new String(Character.toChars(firstCodePoint)), mapper);
+				throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, needed,
+						"预算放不下一个码点（codePoint=U+" + Integer.toHexString(firstCodePoint).toUpperCase()
+								+ "）");
+			}
+			Map<String, Object> candidate = new LinkedHashMap<>(probe);
+			candidate.put(field, chunk);
+			byte[] bytes = serialize(candidate, mapper);
+			if (bytes == null) {
+				throw new IllegalStateException("分片骨架序列化失败：type=" + frame.get("type") + " key=" + field
+						+ " limit=" + maxBytes + " originalChars=" + originalChars);
+			}
+			int over = bytes.length - maxBytes;
+			if (over <= 0) {
+				return chunk;
+			}
+			chunk = takeChars(chunk, escapedLength(chunk, mapper) - over, mapper);
+		}
+		throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, null, "复测收缩 5 轮后仍超限");
+	}
+
+	/** 统一的"配置/输入无法安全分片"失败：带 type/key/limit/originalChars 等可定位信息。 */
+	private static IllegalStateException tooSmall(Map<String, Object> frame, String field,
+			int maxBytes, int skeletonBytes, int originalChars, Integer firstCodePointBytes, String reason) {
+		StringBuilder message = new StringBuilder("单帧上限过小，流式正文拒绝截断/空串兜底：reason=")
+				.append(reason)
+				.append(" type=").append(frame.get("type"))
+				.append(" key=").append(field)
+				.append(" limit=").append(maxBytes)
+				.append(" originalChars=").append(originalChars)
+				.append(" skeletonBytes=").append(skeletonBytes);
+		if (firstCodePointBytes != null) {
+			message.append(" firstCodePointBytes=").append(firstCodePointBytes);
+		}
+		message.append("（请提高 app.ai.result-budget.ui.max-frame-bytes，运行期下限 ")
+				.append(MIN_FRAME_BYTES).append("）");
+		return new IllegalStateException(message.toString());
 	}
 
 	/**
@@ -262,12 +409,20 @@ public final class FrameSizeLimiter {
 	}
 
 	/** 按<b>字符</b>截断到不超过 byteBudget 的转义字节数（二分 + 代理对保护）。 */
+	/**
+	 * 按<b>字符</b>截断到不超过 byteBudget 的转义字节数（二分 + 代理对保护）。
+	 *
+	 * <p>
+	 * 上界直接收到 {@code min(value.length(), byteBudget)}：JSON 里每个 code unit 至少占 1 字节，
+	 * 因此任何超过 {@code byteBudget} 个 code unit 的前缀必然超预算。长文本（大输入）里这避免了
+	 * 每片都对<b>整段余串</b>做二分探测（旧上界 = 余串长度）；结果与旧实现逐字相同。
+	 */
 	static String takeChars(String value, int byteBudget, ObjectMapper mapper) {
 		if (value == null || value.isEmpty() || byteBudget <= 0) {
 			return "";
 		}
 		int lo = 0;
-		int hi = value.length();
+		int hi = Math.min(value.length(), byteBudget);
 		while (lo < hi) {
 			int mid = (lo + hi + 1) >>> 1;
 			if (escapedLength(value.substring(0, mid), mapper) <= byteBudget) {

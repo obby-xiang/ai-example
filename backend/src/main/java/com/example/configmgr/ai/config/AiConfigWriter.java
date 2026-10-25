@@ -19,6 +19,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,14 +29,16 @@ import java.util.regex.Pattern;
  * 配置<b>写路径</b>（模型配置专项 §3.4 / §3.5 的批②）：新建/更新/删除 provider、模型 allowlist、
  * 全局默认参数。
  *
- * <h2>一次写 = 四件事，顺序固定</h2>
+ * <h2>一次写 = 五件事，顺序固定</h2>
  * <ol>
  * <li><b>先校验、先加密</b>（都在事务外）：baseUrl 过 {@link AiEndpointGuard}、数值过范围、key 用
  * {@link AiKeyCipher} 加密。KEK 缺失时<b>表里不留半行</b>（B5）；</li>
  * <li><b>一个事务</b>：数据行 + {@code ai_setting['config.version']}+1 + 审计行（同一提交点，
  * 不存在"改了数据但版本没动"或"有审计没改动"的中间态）；</li>
  * <li><b>提交后</b> {@code INCR ai:cfg:ver}（跨实例失效信号；Redis 不可用只 WARN，DB 版本号仍是真源）；</li>
- * <li><b>提交后</b> {@link AiConfigService#reload()}：本实例立刻用新配置（写的那个人不该等 1s 节流窗）。</li>
+ * <li><b>提交后</b> {@link AiConfigService#reload()}：本实例立刻用新配置（写的那个人不该等 1s 节流窗）；</li>
+ * <li><b>提交后</b> {@link AiProviderRegistry#evictAll()}：默认参数（temperature/topP/maxTokens）烙在
+ * 已缓存的运行态 options 上，不淘汰缓存就等于"保存了但下一轮还用旧值"。</li>
  * </ol>
  *
  * <h2>key 的三种语义（PUT）</h2>
@@ -150,10 +153,16 @@ public class AiConfigWriter {
 
     private final ObjectMapper objectMapper;
 
+    /**
+     * 运行态缓存（热生效的落点）：默认参数（temperature/topP/maxTokens）烙在已缓存的实例 options 上，
+     * 改完配置必须淘汰缓存，否则下一轮仍用旧值。可为 null（单测/未装配）⇒ 跳过淘汰。
+     */
+    private final AiProviderRegistry runtimeRegistry;
+
     public AiConfigWriter(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
             AiEndpointGuard guard, StringRedisTemplate redis, PlatformTransactionManager transactionManager,
-            AiConfigService configService, ObjectMapper objectMapper) {
+            AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.settingRepository = settingRepository;
@@ -167,6 +176,7 @@ public class AiConfigWriter {
                         + "写路径的“数据行 + 版本号 + 审计行”必须同一提交点"));
         this.configService = configService;
         this.objectMapper = objectMapper;
+        this.runtimeRegistry = runtimeRegistry;
     }
 
     // ── 请求命令（controller 的 @RequestBody 直接反序列化成这三条 record） ──────────
@@ -202,11 +212,21 @@ public class AiConfigWriter {
      * 全局默认参数命令：<b>整体替换语义</b>（设置页第三段是一个表单，提交即整段）。
      *
      * <p>
-     * null = 清掉该项（回到"未设置"，读侧再按模型/环境缺省回落）。范围：temperature [0,2]、
+     * null = 清掉该项（回到"未设置"，读侧再按该 provider 自己的模型缺省回落）。范围：temperature [0,2]、
      * top_p [0,1]、max_tokens [1,200000] 且不超过所选模型的 {@code maxOutput}。
+     *
+     * @param providerId 默认目标所属 provider（与 {@code modelId} 成对；显式给出时该 provider 必须
+     * 已启用且模型在其 enabled allowlist 中。省略时按模型唯一归属推断，<b>推断只认已启用的供应方</b>，
+     * 旧客户端只提交 {@code modelId} 仍可写；同名歧义只允许"原样回写旧配置"）
      */
     public record DefaultsCommand(String modelId, Double temperature, Double topP, Integer maxTokens,
-            Boolean allowUserParams) {
+            Boolean allowUserParams, Long providerId) {
+
+        /** 兼容旧调用（不带 provider 绑定）。 */
+        public DefaultsCommand(String modelId, Double temperature, Double topP, Integer maxTokens,
+                Boolean allowUserParams) {
+            this(modelId, temperature, topP, maxTokens, allowUserParams, null);
+        }
     }
 
     // ── provider ────────────────────────────────────────────────────────────
@@ -496,22 +516,18 @@ public class AiConfigWriter {
                     + command.maxTokens() + "）");
         }
         String modelId = trimToNull(command.modelId());
+        Long providerId = resolveDefaultProvider(command.providerId(), modelId);
         if (modelId != null) {
-            requireKnownModel(modelId);
-            Integer ceiling = this.configService.current()
-                .models()
-                .stream()
-                .filter(model -> modelId.equals(model.getModelId()))
-                .map(AiProviderModel::getMaxOutput)
-                .filter(java.util.Objects::nonNull)
-                .findFirst()
-                .orElse(null);
+            Integer ceiling = maxOutputOf(providerId, modelId);
             if (ceiling != null && command.maxTokens() != null && command.maxTokens() > ceiling) {
                 throw invalidParam("max_tokens 不能超过所选模型的 max_output（" + ceiling + "）");
             }
         }
 
+        Long boundProviderId = providerId;
         executeInTransaction(() -> {
+            putSetting(AiSetting.DEFAULT_PROVIDER_ID,
+                    boundProviderId == null ? null : String.valueOf(boundProviderId));
             putSetting(AiSetting.DEFAULT_MODEL_ID, modelId);
             putSetting(AiSetting.DEFAULT_TEMPERATURE, command.temperature() == null ? null
                     : String.valueOf(command.temperature()));
@@ -522,12 +538,124 @@ public class AiConfigWriter {
                     command.allowUserParams() == null ? null : String.valueOf(command.allowUserParams()));
             bumpVersion();
             audit(ACTION_DEFAULTS_UPDATE, "setting", "defaults",
-                    diffOf("modelId", modelId, "temperature", command.temperature(), "topP", command.topP(),
-                            "maxTokens", command.maxTokens(), "allowUserParams", command.allowUserParams()));
+                    diffOf("providerId", boundProviderId, "modelId", modelId, "temperature", command.temperature(),
+                            "topP", command.topP(), "maxTokens", command.maxTokens(), "allowUserParams",
+                            command.allowUserParams()));
             return null;
         });
         afterCommit();
         return this.configService.defaults();
+    }
+
+    /**
+     * 把"默认目标"归一成 {@code (providerId, modelId)}。
+     *
+     * <h2>为什么写路径也要绑 provider</h2>
+     * 只存 {@code modelId} 时，读路径只能猜"排序第一的可用 provider"——设置页里选的是 B 的模型，
+     * 运行时却发给 A（同名模型时静默错配）。所以这里落库时就把归属定下来：
+     * <ul>
+     * <li>显式 {@code providerId} ⇒ provider 必须<b>已启用</b>，且给的模型必须在它的 enabled
+     * allowlist 里（fail-closed：停用端点/停用模型不许成为默认目标）；</li>
+     * <li>旧客户端只提交 {@code modelId} ⇒ 唯一所有者才自动绑定（同名模型跨 provider ⇒
+     * {@code INVALID_PARAM}，文案给出可操作路径，不替用户选边）；<b>自动归属只认已启用的供应方</b>
+     * —— 模型行的 {@code enabled} 与供应方的 {@code enabled} 是两个维度，只按模型判断会把默认目标
+     * 硬绑到已停用的供应方（此后整条 AI 变 503）；</li>
+     * <li>两者都为空 ⇒ 清空绑定（读侧回到"该 provider 自己的默认模型"）。</li>
+     * </ul>
+     *
+     * <p>停用供应方的模型<b>不参与</b>所有者推断。因此"旧配置原样回写"（见
+     * {@link #isUnchangedLegacyDefault}）落在"无启用所有者"分支时仍保持未绑定 —— 读侧按既有回退
+     * 用可用供应方自己的模型，既不改写用户的默认模型名，也不替用户改选供应方；非原样回写则按
+     * {@code MODEL_NOT_FOUND} 拒绝（不静默落到别家模型）。
+     */
+    private Long resolveDefaultProvider(Long requestedProviderId, String modelId) {
+        if (requestedProviderId != null) {
+            AiProvider provider = requireProvider(requestedProviderId);
+            if (!provider.isEnabled()) {
+                throw invalidParam("默认供应商已停用：请先在「设置 → AI」启用它，或改选其他默认模型");
+            }
+            if (modelId != null && !hasEnabledModel(requestedProviderId, modelId)) {
+                throw new AiConfigException(CODE_MODEL_NOT_FOUND,
+                        "模型不在该供应商的 allowlist 中或已停用：" + requestedProviderId + "/" + modelId);
+            }
+            return requestedProviderId;
+        }
+        if (modelId == null) {
+            return null;
+        }
+        AiConfigService.ConfigSnapshot snapshot = this.configService.current();
+        // 自动归属的供应方启用闸：与显式 providerId 分支同一把尺（停用供应方不许成为默认目标）。
+        List<Long> enabledProviders = snapshot.providers()
+            .stream()
+            .filter(AiProvider::isEnabled)
+            .map(AiProvider::getId)
+            .filter(Objects::nonNull)
+            .toList();
+        List<Long> owners = snapshot.models()
+            .stream()
+            .filter(model -> modelId.equals(model.getModelId()))
+            .filter(AiProviderModel::isEnabled)
+            .map(AiProviderModel::getProviderId)
+            .filter(Objects::nonNull)
+            .filter(enabledProviders::contains)
+            .distinct()
+            .toList();
+        if (owners.isEmpty()) {
+            if (isUnchangedLegacyDefault(modelId)) {
+                // 旧配置指向一个已删除/未登记的模型，或该模型的供应方已全部停用：只改温度等参数时
+                // 保留原值（仍不绑定），读侧按既有回退用可用供应方自己的模型；不阻断保存、不改绑
+                return null;
+            }
+            throw new AiConfigException(CODE_MODEL_NOT_FOUND,
+                    "默认模型不在任何供应商的 allowlist 中：" + modelId + "（先把模型加进来）");
+        }
+        if (owners.size() > 1) {
+            if (isUnchangedLegacyDefault(modelId)) {
+                // 旧配置本身就是"同名模型未绑定"：原样保留（读侧按所有者顺序解析），
+                // 用户只改温度时不该被迫先做一次 provider 选择。
+                return null;
+            }
+            throw invalidParam("模型 " + modelId + " 属于多个供应商，请指定 providerId（设置页：在"
+                    + "「默认模型」下拉中重新选择该模型所属的供应商后保存）");
+        }
+        return owners.get(0);
+    }
+
+    /** 提交的 (null, modelId) 是否就是库里已有的旧配置（未绑定 provider）——原样回写不算歧义。 */
+    private boolean isUnchangedLegacyDefault(String modelId) {
+        java.util.Map<String, String> settings = this.configService.current().settings();
+        return modelId.equals(trimToNull(settings.get(AiSetting.DEFAULT_MODEL_ID)))
+                && trimToNull(settings.get(AiSetting.DEFAULT_PROVIDER_ID)) == null;
+    }
+
+    private boolean hasEnabledModel(Long providerId, String modelId) {
+        return this.configService.current()
+            .models()
+            .stream()
+            .filter(model -> providerId.equals(model.getProviderId()))
+            .filter(AiProviderModel::isEnabled)
+            .anyMatch(model -> modelId.equals(model.getModelId()));
+    }
+
+    /**
+     * 所选模型的 max_output 上限；没有设置/找不到时返回 null（不设上限）。
+     *
+     * <p>{@code providerId} 为空 = 旧配置未绑定（同名模型可能属于多家）⇒ 取所有同名模型
+     * {@code max_output} 的<b>最小值</b>：宁可保守拒绝，也不因为"没绑定"放宽校验。
+     */
+    private Integer maxOutputOf(Long providerId, String modelId) {
+        if (modelId == null) {
+            return null;
+        }
+        return this.configService.current()
+            .models()
+            .stream()
+            .filter(model -> providerId == null || providerId.equals(model.getProviderId()))
+            .filter(model -> modelId.equals(model.getModelId()))
+            .map(AiProviderModel::getMaxOutput)
+            .filter(Objects::nonNull)
+            .min(Integer::compare)
+            .orElse(null);
     }
 
     // ── 内部：事务/版本/审计 ──────────────────────────────────────────────────
@@ -591,6 +719,12 @@ public class AiConfigWriter {
             }
         }
         this.configService.reload();
+        // 热生效：默认参数（temperature/topP/maxTokens）烙在已缓存的运行态 options 上。
+        // 不淘汰 ⇒ 下一轮仍用旧值（设置页显示已保存，实际行为没变）。淘汰代价只是下一次请求
+        // 重建一个实例（复用同一套装配），远小于"改完不生效"。
+        if (this.runtimeRegistry != null) {
+            this.runtimeRegistry.evictAll();
+        }
     }
 
     private void audit(String action, String targetType, String targetId, Map<String, Object> diff) {
@@ -657,17 +791,6 @@ public class AiConfigWriter {
         }
         return this.providerRepository.findById(providerId)
             .orElseThrow(() -> new AiConfigException(CODE_PROVIDER_NOT_FOUND, "provider 不存在：" + providerId));
-    }
-
-    private void requireKnownModel(String modelId) {
-        boolean exists = this.configService.current()
-            .models()
-            .stream()
-            .anyMatch(model -> modelId.equals(model.getModelId()));
-        if (!exists) {
-            throw new AiConfigException(CODE_MODEL_NOT_FOUND,
-                    "默认模型不在任何 provider 的 allowlist 中：" + modelId + "（先把模型加进来）");
-        }
     }
 
     private static String requireCode(String code) {

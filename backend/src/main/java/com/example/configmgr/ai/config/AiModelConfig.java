@@ -61,8 +61,8 @@ public class AiModelConfig {
 	@Bean
 	@ConditionalOnMissingBean
 	public ChatMemoryRepository chatMemoryRepository(StringRedisTemplate redisTemplate, MessageJsonCodec codec,
-			AiProperties properties) {
-		return new RedisChatMemoryRepository(redisTemplate, codec, properties.getSessionTtl());
+			AiProperties properties, com.example.configmgr.ai.session.SessionPurgeGuard purgeGuard) {
+		return new RedisChatMemoryRepository(redisTemplate, codec, properties.getSessionTtl(), purgeGuard);
 	}
 
 	@Bean

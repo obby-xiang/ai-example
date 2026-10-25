@@ -1,0 +1,45 @@
+# 共享 H2（TCP）profile —— 多实例**本机/测试**形态的数据库底座。
+#
+# 用法：`--spring.profiles.active=h2tcp`，三个实例（不同 --server.port）连到**同一个 H2 TCP 服务**：
+#   java -cp <h2.jar> org.h2.tools.Server -tcp -tcpPort 9092 -ifNotExists
+# 例：java -jar config-mgr.jar --spring.profiles.active=h2tcp --server.port=8081
+#     java -jar config-mgr.jar --spring.profiles.active=h2tcp --server.port=8082
+#     java -jar config-mgr.jar --spring.profiles.active=h2tcp --server.port=8083
+#
+# 为什么必须 TCP 而不能沿用默认文件库：
+#   H2 的 `jdbc:h2:file:` 库**同一时刻只允许一个进程打开**（库级文件锁），第二个实例要么连接失败，
+#   要么各自持有一份不同的库文件 —— 那等于"每 JVM 一个库"，种子单飞/唯一约束/行锁全都测不到。
+#   TCP 模式把库放在**服务进程**里（mem: 库随服务存活），各实例只是客户端，才是真正的共享库。
+#
+# 与生产 profile 的关系：本 profile 只替换 datasource（方言仍 H2、迁移集仍 db/migration）；
+# Redis 拓扑、作业登记存储等其余口径与默认配置一致（多实例仍需共享 Redis）。
+spring:
+  config:
+    activate:
+      on-profile: h2tcp
+
+  datasource:
+    # APP_H2_TCP_DB 缺省 `mem:config_mgr_shared`：库随 TCP 服务进程存活（服务停 = 库消失，
+    # 适合反复起停的真三实例冒烟）。需要跨服务重启保留数据时改成文件路径（如 `./data/shared`），
+    # 但**路径是相对 H2 服务进程的工作目录**，不是各实例的。
+    url: jdbc:h2:tcp://${APP_H2_TCP_HOST:127.0.0.1}:${APP_H2_TCP_PORT:9092}/${APP_H2_TCP_DB:mem:config_mgr_shared};DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=60000
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+    hikari:
+      # 与默认口径一致（10）。三个实例 = 30 条连接，H2 服务侧无 max_connections 限制，可接受。
+      maximum-pool-size: 10
+      connection-timeout: 5s
+
+  h2:
+    console:
+      # 共享库形态下控制台对每个实例都开着会互相踩；统一关掉，需要查库时用 H2 服务自带的控制台。
+      enabled: false
+
+server:
+  # 与生产 profile 同口径：readiness 变 503 后优雅停机，验证"摘流 → 在途请求收尾"这条链
+  # 在共享库形态下也成立（三实例冒烟时 kill 一个实例不应打断另一实例的在途请求）。
+  shutdown: graceful
+
+# 行锁等待上限（LOCK_TIMEOUT=60s，见上面 URL）：种子单飞的等待方要能等完整一轮播种，
+# H2 缺省 1s 会在第二个实例上直接抛 "Timeout trying to lock table"。

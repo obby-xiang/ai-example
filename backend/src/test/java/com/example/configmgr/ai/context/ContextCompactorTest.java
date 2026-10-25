@@ -59,7 +59,7 @@ class ContextCompactorTest {
 
 	private ContextCompactor.Request request(List<Message> messages, int usedTokens, List<String> messageJsonBefore) {
 		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages, messageJsonBefore,
-				usedTokens, 0, 0, 0, 3000, 4000, Set.of());
+				usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
 	}
 
 	/** 越线 ⇒ L1 执行：归档 + 台账 + 真值重置为估算基线。 */
@@ -270,7 +270,7 @@ class ContextCompactorTest {
 	private ContextCompactor.Request requestWith(List<Message> messages, int usedTokens, int completionTokens,
 			Set<String> protectedIds) {
 		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages, List.of("{}"),
-				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds);
+				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds, TestProviderRuntime.runtime());
 	}
 
 	private ContextCompactor compactorWith(RollingSummarizer.Summarizer summarizer) {
@@ -293,16 +293,19 @@ class ContextCompactorTest {
 
 		// 第二棒：L1 + 82.6% ⇒ L2（摘要 3 轮）
 		seed("L1", 70000);
-		ContextCompactor.Outcome second = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+		ContextCompactor.Outcome second = compactorWith((system, user, runtime) -> "摘要正文").compact(requestWith(longTurns(), 70000,
 				25000, Set.of()));
 		assertThat(second.level()).isEqualTo(ContextTrigger.Level.L2);
 		assertThat(second.turns()).isEqualTo(3);
-		assertThat(second.messages()).hasSize(2 + 6 * 2);
+		assertThat(second.messages()).as("L2 只落一条摘要（不再伪造 user+assistant 两件套）").hasSize(1 + 6 * 2);
+		assertThat(second.messages().get(0).getText()).startsWith(RollingSummarizer.SUMMARY_PREFIX)
+			.contains(RollingSummarizer.SUMMARY_OPEN)
+			.contains(RollingSummarizer.SUMMARY_CLOSE);
 		assertThat(ContextBreakdown.isCompacted(second.messages().get(0))).isTrue();
 
 		// 第三棒：L2 + 95.7% ⇒ L3（按 Turn 丢最旧 3 轮）
 		seed("L2", 70000);
-		ContextCompactor.Outcome third = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+		ContextCompactor.Outcome third = compactorWith((system, user, runtime) -> "摘要正文").compact(requestWith(longTurns(), 70000,
 				40000, Set.of()));
 		assertThat(third.level()).isEqualTo(ContextTrigger.Level.L3);
 		assertThat(third.turns()).isEqualTo(3);
@@ -318,7 +321,7 @@ class ContextCompactorTest {
 			.withFuse(CompactionFuse.OPEN, 3, now + java.time.Duration.ofMinutes(10).toMillis());
 		this.store.write(SESSION_ID, opened);
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> {
 			throw new IllegalStateException("不该被调用");
 		}).compact(requestWith(turns(6), 70000, 25000, Set.of()));
 
@@ -333,7 +336,7 @@ class ContextCompactorTest {
 		seed("L1", 70000);
 		java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger();
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文").compact(
 				requestWith(longTurns(), 70000, 25000, Set.of()), progress::incrementAndGet);
 
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
@@ -346,7 +349,7 @@ class ContextCompactorTest {
 		seed("L1", 70000);
 		java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger();
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> {
 			throw new IllegalStateException("摘要失败");
 		}).compact(requestWith(longTurns(), 70000, 25000, Set.of()), progress::incrementAndGet);
 
@@ -359,7 +362,7 @@ class ContextCompactorTest {
 	void suspendedSessionOnlyAllowsL1() {
 		seed("L1", 70000);
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文")
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文")
 			.compact(requestWith(turns(6), 70000, 25000, Set.of("pending-x")));
 
 		assertThat(outcome.changed()).isTrue();
@@ -371,7 +374,7 @@ class ContextCompactorTest {
 	void l2ArchivesAndRecordsLedgerWithTurns() {
 		seed("L1", 70000);
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文").compact(requestWith(longTurns(), 70000,
 				25000, Set.of()));
 
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
@@ -398,7 +401,7 @@ class ContextCompactorTest {
 		seed("L1", 70000);
 		List<Message> messages = longTurns();
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> {
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> {
 			throw new IllegalStateException("上游 500");
 		}).compact(requestWith(messages, 70000, 25000, Set.of()));
 
@@ -409,12 +412,33 @@ class ContextCompactorTest {
 		assertThat(this.store.read(SESSION_ID).fuseFails()).isEqualTo(1);
 	}
 
+	/**
+	 * 摘要链最小统一：没有本轮 runtime ⇒ L2 按「摘要不可用」失败，<b>历史逐字不变</b>。
+	 *
+	 * <p>这条锁的是"不回落全局默认"：宁可这一轮不压，也不许拿另一家/另一个模型的全局默认去摘要。
+	 */
+	@Test
+	void l2WithoutTurnRuntimeFailsWithoutReplacingHistory() {
+		seed("L1", 70000);
+		List<Message> messages = longTurns();
+		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				messages, List.of("{}"), 70000, 25000, 0, 0, 3000, 4000, Set.of(), null);
+
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "不该被调用").compact(request);
+
+		assertThat(outcome.changed()).isFalse();
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_SUMMARY_UNAVAILABLE);
+		assertThat(outcome.messages()).isSameAs(messages);
+		assertThat(this.store.archiveCount()).isZero();
+		assertThat(this.store.read(SESSION_ID).fuseFails()).isEqualTo(1);
+	}
+
 	/** 帧契约冻结：`context` 帧载荷键集不变，turns/lostTokens 从恒 0 改为如实值。 */
 	@Test
 	void contextFramePayloadKeepsItsFrozenKeySet() {
 		seed("L1", 70000);
 
-		ContextCompactor.Outcome outcome = compactorWith(prompt -> "摘要正文").compact(requestWith(longTurns(), 70000,
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文").compact(requestWith(longTurns(), 70000,
 				25000, Set.of()));
 
 		Map<String, Object> payload = ContextCompactor.framePayload(outcome);

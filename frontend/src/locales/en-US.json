@@ -86,6 +86,18 @@
         "keyUnreadable": {
           "title": "The API key cannot be decrypted",
           "guide": "Open Settings → AI and re-enter the key, or ask the administrator to restore the encryption configuration."
+        },
+        "noModel": {
+          "title": "The default model is unavailable",
+          "guide": "Open Settings → AI, add and enable a model for the default provider, then choose the default model again."
+        },
+        "authFailed": {
+          "title": "The AI provider rejected the API key",
+          "guide": "Open Settings → AI and check whether the API key is correct and still valid."
+        },
+        "rejected": {
+          "title": "The AI provider rejected the request",
+          "guide": "Check the model parameters and provider settings, then try again."
         }
       }
     },
@@ -101,9 +113,10 @@
       "chatRequestFailed": "Chat request failed",
       "poolSaturated": "The suspended-run pool is full. Please try again later.",
       "poolSaturatedWithSize": "The suspended-run pool is full (capacity {size}). Please try again later.",
-      "aiDisabled": "AI is not enabled. Configure a provider and API key in Settings → AI.",
+      "aiDisabled": "AI is not enabled, or the default provider is unavailable. Check provider status, API key and default model in Settings → AI.",
       "keyMissing": "AI has no usable API key. Add a provider key in Settings → AI and retry.",
       "keyUnreadable": "The API key cannot be decrypted. Re-enter it in Settings → AI, or ask the administrator to restore the encryption configuration.",
+      "noModelConfigured": "The default AI model is unavailable. Add a model in Settings → AI and select it as the default.",
       "redisUnavailable": "The AI service is temporarily unavailable (Redis). Please try again later.",
       "healthProbeFailed": "AI availability check failed",
       "decisionPending": "Decision submitted, but not yet confirmed by the backend (refresh later to check).",
@@ -119,6 +132,8 @@
       "noUiUndo": "No UI action to undo",
       "sheetLargePlan": "This changes {rows} rows / {cells} cells (more than 200 rows): tick \"I understand the impact\" before applying.",
       "memoryDeleteFailed": "Failed to delete the old session memory (the new conversation is unaffected)",
+      "sessionPurgeIncomplete": "The old session's AI data has not been fully deleted (the new conversation is unaffected)",
+      "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Upstream connection interrupted, retrying (no content produced yet this turn)",
       "turnError": "Error this turn: {message}",
@@ -132,6 +147,8 @@
       "formSubmitFailed": "Submission failed: {message} (retry or cancel)",
       "formSubmitFailedPlain": "Submission failed; retry or click \"Cancel\"",
       "formCancelFailed": "Cancellation receipt was not delivered ({message}); the backend will close it on timeout",
+      "formResultTooLarge": "The form content exceeds the limit ({chars} / {max} characters): nothing was sent and your input is kept. Please shorten it and retry.",
+      "formResultTooLargeRejected": "The form content exceeds the limit (the suspended run is still waiting): shorten it and submit again; your input is kept.",
       "networkError": "Network error"
     },
     "workspace": {
@@ -220,6 +237,8 @@
         "allowUserParams": "Let regular users adjust",
         "defaultValueModel": "Default model",
         "defaultValueModelNone": "(not set)",
+        "defaultValueModelUnbound": "legacy · provider not bound",
+        "defaultValueModelUnavailable": "currently unavailable",
         "saved": "Saved",
         "probeOk": "Connected, models:",
         "probeFailed": "Failed"
@@ -234,7 +253,7 @@
         "PROVIDER_IN_USE": "This endpoint still has models and cannot be deleted; delete the models first, or disable it instead.",
         "PROVIDER_EXISTS": "This identifier (code) is already in use; choose another one.",
         "CODE_IMMUTABLE": "The endpoint identifier cannot be changed after creation; create another endpoint instead.",
-        "MODEL_NOT_FOUND": "Model not found: fetch the model list first, or add the model manually.",
+        "MODEL_NOT_FOUND": "The model does not exist or is disabled. Fetch or enable it first, then choose the default model again.",
         "MODEL_EXISTS": "This model is already in the list.",
         "MODEL_TOOLCALL_UNSUPPORTED": "This model does not support tool calling.",
         "MODELS_UNSUPPORTED": "This endpoint does not implement /models; enter the model ID manually.",
@@ -244,7 +263,7 @@
         "PROVIDER_DISABLED": "This endpoint is disabled.",
         "PROVIDER_GONE": "This endpoint has been deleted.",
         "PARAMS_LOCKED": "The current configuration does not allow adjusting parameters.",
-        "INVALID_PARAM": "A parameter is out of range; check it and retry.",
+        "INVALID_PARAM": "A parameter is out of range, or the default target is invalid. Check the range and reselect the provider in the Default model dropdown, then retry.",
         "INVALID_MODEL": "Invalid model ID: it must not be empty or contain spaces.",
         "NETWORK_ERROR": "The backend is unreachable; make sure the service is running.",
         "UNKNOWN_ERROR": "Operation failed; please retry."
@@ -254,7 +273,9 @@
     "round": {
       "stop": "Stop generating",
       "stopping": "Stopping…",
-      "stopped": "Stopped"
+      "stopped": "Stopped",
+      "truncated": "Truncated",
+      "truncatedHint": "The answer hit the model's length limit and may be incomplete."
     },
     "suggestions": {
       "ariaLabel": "Suggested follow-ups",
@@ -455,6 +476,7 @@
       "impact": "Affects {rows} rows / {cells} cells",
       "scope": "Scope: {scope}",
       "rules": "Rules: {rules}",
+      "overwriteNotice": "Apply or undo overwrites the current sheet (this operation wins for the same file); manual edits you made may be overwritten.",
       "skipped": "{count} cells skipped (rejected by the validator)",
       "distribution": "Distribution (by {by}, top {count} groups):",
       "groupItem": "{rows} rows / {cells} cells",
@@ -782,6 +804,9 @@
   },
   "sheet": {
     "readOnlyWriteBlocked": "Task finished; read-only. Write actions were not executed and the sheet was not modified.",
+    "undoScopeSummary": "Undo the changes in plan #{planId}",
+    "undoRulesText": "Restore the values from before this AI edit ({cells} cells in this batch; {layers} undo levels available)",
+    "undoPreviewBusy": "Another sheet preview card is waiting for your action ({tool}); this undo did not create a card and did not run. Apply or cancel that card first, then retry the undo.",
     "preview": {
       "countLevel": "Count-only preview: totals and distribution only, no per-cell listing. Click \"View samples\" to see the first 3 (samples are returned as tool results).",
       "detailPending": "Details not loaded (count-only preview): click \"View samples\" or \"Full diff\" to compute them cell by cell.",

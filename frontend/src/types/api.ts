@@ -58,9 +58,16 @@ export const ErrorCode = {
   ILLEGAL_STATE: 'ILLEGAL_STATE',
   RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
   SESSION_BUSY: 'SESSION_BUSY',
+  SESSION_PURGED: 'SESSION_PURGED',
   UNKNOWN_RUN: 'UNKNOWN_RUN',
   UNKNOWN_TOOL_CALL: 'UNKNOWN_TOOL_CALL',
   DUPLICATE_TOOL_CALL_ID: 'DUPLICATE_TOOL_CALL_ID',
+  /**
+   * 入口 kind 校验（409）：toolCallId 存在，但不属于这条入口
+   * （`/confirm` 只收 CONFIRM，`/frontend-tool-result` 只收 FRONTEND）。
+   * 条目与状态都未改变；前端应按 `expectedKind` 改走另一条接口。
+   */
+  TOOL_KIND_MISMATCH: 'TOOL_KIND_MISMATCH',
   SUSPEND_POOL_SATURATED: 'SUSPEND_POOL_SATURATED',
   AI_UNAVAILABLE: 'AI_UNAVAILABLE',
   AI_REDIS_UNAVAILABLE: 'AI_REDIS_UNAVAILABLE',
@@ -82,6 +89,8 @@ export const ErrorCode = {
   TOOL_TIMEOUT: 'TOOL_TIMEOUT',
   /** 工具调用步数到顶（超时面治理批②；skipped 结局，本轮部分完成收尾） */
   TOOL_STEP_LIMIT: 'TOOL_STEP_LIMIT',
+  /** 轮内上下文预算耗尽（armed 后新工具不执行，skipped 结局） */
+  TOOL_BUDGET_EXHAUSTED: 'TOOL_BUDGET_EXHAUSTED',
   RUN_CANCELLED: 'RUN_CANCELLED',
   /** 前端工具条目终态：用户取消/渲染器不可用（结局帧 status 口径，展示态登记） */
   FRONTEND_CANCELLED: 'FRONTEND_CANCELLED',
@@ -97,6 +106,13 @@ export const ErrorCode = {
   TOOL_ENVELOPE_PARSE_FAILED: 'TOOL_ENVELOPE_PARSE_FAILED',
   TOOL_RESULT_OUTCOME_MISMATCH: 'TOOL_RESULT_OUTCOME_MISMATCH',
   FORM_RESULT_REJECTED: 'FORM_RESULT_REJECTED',
+  /**
+   * 结构化前端回灌体超限（本地预检 + 后端兜底，用户 2026-10-25）。
+   *
+   * <p>与 `FORM_RESULT_REJECTED` 分开：后者是"值不符 schema"（改值可重试），本码只表达
+   * "体积超过 max-chars"（缩短可重试）。前端在发送前用同一上限预检，正常情况下不会发出。
+   */
+  FRONTEND_RESULT_TOO_LARGE: 'FRONTEND_RESULT_TOO_LARGE',
   FORM_SCHEMA_REJECTED: 'FORM_SCHEMA_REJECTED',
   PRECHECK_NOT_PASSED: 'PRECHECK_NOT_PASSED',
   PRECHECK_STALE: 'PRECHECK_STALE',
@@ -127,6 +143,8 @@ export const ErrorCode = {
   PROVIDER_EXISTS: 'PROVIDER_EXISTS',
   PROVIDER_IN_USE: 'PROVIDER_IN_USE',
   MODEL_NOT_FOUND: 'MODEL_NOT_FOUND',
+  /** 503：provider/key 都在，但默认目标没有该 provider 自己的模型（不借别家的模型名） */
+  NO_MODEL_CONFIGURED: 'NO_MODEL_CONFIGURED',
   MODEL_EXISTS: 'MODEL_EXISTS',
   MODELS_INVALID: 'MODELS_INVALID',
   MODELS_UNSUPPORTED: 'MODELS_UNSUPPORTED',
@@ -160,6 +178,16 @@ export const ErrorCode = {
   UPSTREAM_CONNECTION_BROKEN: 'UPSTREAM_CONNECTION_BROKEN',
   /** SSE error 帧：上下文超出模型窗口（重试无效，需压缩或新会话） */
   CONTEXT_OVERFLOW: 'CONTEXT_OVERFLOW',
+  /** SSE error 帧：上游按"请求本身不成立"拒绝（400/404/409/422 等 4xx；不重试） */
+  UPSTREAM_REJECTED: 'UPSTREAM_REJECTED',
+  /** SSE error 帧：上游鉴权失败（401/403）；不重试，需检查/更新 API Key */
+  UPSTREAM_AUTH_FAILED: 'UPSTREAM_AUTH_FAILED',
+  /** SSE error 帧：上游限流（429）；有界重试并遵守 Retry-After */
+  UPSTREAM_RATE_LIMITED: 'UPSTREAM_RATE_LIMITED',
+  /** SSE error 帧：上游暂时不可用（408/5xx/网络层）；有界重试 */
+  UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
+  /** SSE error 帧：上游以 finish_reason=content_filter 收尾（明确失败，不重试） */
+  CONTENT_FILTERED: 'CONTENT_FILTERED',
   /** 终局失败派生码（R-09）：基础码 + 已产出正文/工具副作用；用户文案沿基础码，码保留诊断 */
   UPSTREAM_STREAM_ERROR_AFTER_PARTIAL: 'UPSTREAM_STREAM_ERROR_AFTER_PARTIAL',
   UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT: 'UPSTREAM_STREAM_ERROR_AFTER_TOOL_SIDE_EFFECT',
@@ -190,6 +218,15 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode]
 
+/**
+ * 结构化前端回灌体的字符上限（用户 2026-10-25「同一 max-chars 预检」）。
+ *
+ * <p>与后端同一把尺：`GenerativeFormRules.MAX_RESULT_CHARS`（8000）与
+ * `app.result-budget.callback.max-chars`（默认 8000）。前端只做「不发出注定被拒的请求」，
+ * 真正的拒绝仍在后端（本值不放大任何一侧）。
+ */
+export const STRUCTURED_RESULT_MAX_CHARS = 8000
+
 /** 409 SESSION_BUSY 的响应体形态（ADR-5：必须携进行中轮的 runId）。 */
 export interface SessionBusyConflict {
   code: typeof ErrorCode.SESSION_BUSY
@@ -202,6 +239,15 @@ export interface SessionBusyConflict {
   reattach: string
 }
 
+/** 410 SESSION_PURGED：旧 sessionId 已销毁，必须走既有新建对话路径。 */
+export interface SessionPurgedConflict {
+  code: typeof ErrorCode.SESSION_PURGED
+  message: string
+  sessionId: string
+  action: 'NEW_SESSION'
+  note?: string
+}
+
 /** 503 SUSPEND_POOL_SATURATED 的响应体形态。 */
 export interface SuspendPoolSaturated {
   code: typeof ErrorCode.SUSPEND_POOL_SATURATED
@@ -210,13 +256,14 @@ export interface SuspendPoolSaturated {
   poolSize: number
 }
 
-/** 503 AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE / AI_REDIS_UNAVAILABLE 的响应体形态。 */
+/** 503 AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE / AI_REDIS_UNAVAILABLE / NO_MODEL_CONFIGURED 的响应体形态。 */
 export interface AiUnavailableBody {
   code:
     | typeof ErrorCode.AI_UNAVAILABLE
     | typeof ErrorCode.AI_KEY_MISSING
     | typeof ErrorCode.AI_KEY_UNREADABLE
     | typeof ErrorCode.AI_REDIS_UNAVAILABLE
+    | typeof ErrorCode.NO_MODEL_CONFIGURED
   message: string
   /** 仅 AI_REDIS_UNAVAILABLE：安全探活事实（不含 lastError —— 原始诊断只在 /health 与日志） */
   redis?: Record<string, unknown>

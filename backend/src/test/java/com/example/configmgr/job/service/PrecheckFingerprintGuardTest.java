@@ -5,6 +5,7 @@ import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
@@ -216,9 +217,9 @@ class PrecheckFingerprintGuardTest {
 
     private String writeXlsx(String defCode, List<Map<String, Object>> rows) throws Exception {
         ConfigDefinition def = definitionService.findByCode(defCode);
-        String path = fileStorage.newPath(".xlsx");
-        excelWriter.write(def, rows, path);
-        return path;
+        StoredFile stored = fileStorage.allocate(".xlsx");
+        excelWriter.write(def, rows, stored.pathString());
+        return stored.key();
     }
 
     private void putFile(long taskId, String defCode, String fileType, String path, int rowCount) {

@@ -387,10 +387,10 @@ class ChatTurnFrameSequenceConformanceTest {
 
 		List<Map<String, Object>> frames = clientView(wire);
 		Map<String, Object> error = FrameContract.oneOfType(frames, "error");
-		assertThat(error).containsEntry("code", StreamViolationException.STREAM_ERROR);
+		assertThat(error).containsEntry("code", com.example.configmgr.common.ErrorCodes.UPSTREAM_AUTH_FAILED);
 		assertThat(String.valueOf(error.get("message")))
 				.as("用户面 = 白名单短句（不含原始 body / 异常类名 / key）")
-				.isEqualTo("AI 服务返回异常，请稍后重试。")
+				.isEqualTo("上游鉴权失败：请到「设置 → AI」检查 API Key。")
 				.doesNotContain(secret)
 				.doesNotContain("\"error\"")
 				.doesNotContain("WebClientResponseException");

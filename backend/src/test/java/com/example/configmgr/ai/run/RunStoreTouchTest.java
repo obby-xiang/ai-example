@@ -104,6 +104,37 @@ class RunStoreTouchTest {
 	}
 
 	/**
+	 * <b>I5：读侧 touch 只在"等人类"状态写活动锚点</b>。
+	 *
+	 * <p>为什么必须分状态：{@code ai:activity} 是僵尸判据的输入。若 RUNNING 也被读侧刷新，
+	 * "界面一直轮询、进程里的轮其实已卡死"就会被永远养年轻 —— 读侧续期（TTL）与"业务在前进"
+	 * 是两件事，不能混。SUSPENDED（等人）没有业务帧，读侧 touch 才是"还有人管"的合法证据。
+	 */
+	@Test
+	void runningRoundIsNotKeptYoungByReadSideTouches() {
+		this.fake.strings.put(this.store.activityKey(RUN_ID), "7000");
+
+		assertThat(this.store.touchActiveRun(RUN_ID)).isTrue();
+
+		assertThat(this.store.lastActivityAtMs(RUN_ID))
+			.as("RUNNING：读侧只续 TTL，不得刷新业务活动锚点").isEqualTo(7000L);
+	}
+
+	@Test
+	void suspendedRoundReadSideTouchRefreshesTheActivityAnchor() {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		this.store.save(snapshot);
+		this.fake.strings.put(this.store.activityKey(RUN_ID), "7000");
+		long before = System.currentTimeMillis();
+
+		assertThat(this.store.touchActiveRun(RUN_ID)).isTrue();
+
+		assertThat(this.store.lastActivityAtMs(RUN_ID))
+			.as("SUSPENDED（等人）：读/决策/重挂就是'还有人管'的证据").isGreaterThanOrEqualTo(before);
+	}
+
+	/**
 	 * 超时面治理批① 第 11 项：取消信号并入读侧续期面（用户裁：取消信号随会话共亡）。
 	 *
 	 * <p>原状态：{@code ai:cancel:} 的 TTL 自己算（{@code total-budget × 2 = 600s}）且<b>不在任何

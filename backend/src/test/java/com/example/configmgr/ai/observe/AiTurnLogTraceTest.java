@@ -226,7 +226,7 @@ class AiTurnLogTraceTest {
 	 */
 	@Test
 	void retryCarriesAttemptDurationFirstByteAndPerAttemptTokens() {
-		this.upstream.set(Flux.error(new IllegalStateException("upstream stream error")));
+		this.upstream.set(Flux.error(new java.io.IOException("upstream stream error")));
 
 		runTurn();
 
@@ -276,7 +276,7 @@ class AiTurnLogTraceTest {
 
 	@Test
 	void failedTurnEmitsRetryAndFailedTurnEnd() {
-		this.upstream.set(Flux.error(new IllegalStateException("upstream stream error")));
+		this.upstream.set(Flux.error(new java.io.IOException("upstream stream error")));
 
 		runTurn();
 

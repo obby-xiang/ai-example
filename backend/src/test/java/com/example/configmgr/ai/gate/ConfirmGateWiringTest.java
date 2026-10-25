@@ -289,7 +289,7 @@ class ConfirmGateWiringTest {
     private PendingToolCall persistedSuspension() {
         ArgumentCaptor<List<PendingToolCall>> persisted = ArgumentCaptor.forClass(List.class);
         verify(this.store).saveSuspended(eq(RUN_ID), nullable(String.class), persisted.capture(),
-                any(List.class), any(MessageJsonCodec.class));
+                any(List.class), any(MessageJsonCodec.class), any());
         return persisted.getValue().get(0);
     }
 

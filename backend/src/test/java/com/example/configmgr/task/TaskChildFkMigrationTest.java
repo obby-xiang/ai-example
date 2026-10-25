@@ -26,7 +26,9 @@ class TaskChildFkMigrationTest {
         Flyway flyway = flyway(url);
         flyway.migrate();
 
-        // 模拟“约束已建、版本未记”的半完成态：删掉 V6 的历史行后重跑。
+        // 模拟“约束已建、版本未记”的半完成态：只删掉 V6 的历史行后重跑。
+        // V7 之后（app_lock / 完整历史表）V6 缺失而更高版本已应用属于**测试里的预期乱序**：
+        // 生产仍严格顺序，这里只对测试实例开 outOfOrder（见 flyway(url)）。
         try (Connection c = DriverManager.getConnection(url, "sa", "");
              Statement s = c.createStatement()) {
             s.executeUpdate("DELETE FROM \"flyway_schema_history\" WHERE \"version\" = '6'");
@@ -81,6 +83,10 @@ class TaskChildFkMigrationTest {
         return Flyway.configure()
                 .dataSource(url, "sa", "")
                 .locations("classpath:db/migration")
+                // 本用例模拟“V6 约束已建、版本历史行丢失”。V7 之后（app_lock / 完整历史表），
+                // V6 缺失而后续版本已应用是<b>预期中的乱序</b>；outOfOrder 只让测试里的 V6 重跑
+                // （V6 自身幂等），生产 application.yml 的 Flyway 仍保持严格顺序校验。
+                .outOfOrder(true)
                 .load();
     }
 

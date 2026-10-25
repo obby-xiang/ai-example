@@ -7,6 +7,7 @@ import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
+import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -71,17 +72,21 @@ import java.util.concurrent.TimeUnit;
  * <b>S5c-6 补充</b>：三件事的次序固定为 <b>落库 → 发回执帧 → 唤醒</b>（且同一把锁内），
  * 否则被唤醒的等待方会先于回执帧产出"后果帧"（{@code tool_result} 等）。
  *
- * <h2>挂起期心跳保活</h2>
+ * <h2>挂起期心跳保活（仅 park 关闭时）</h2>
  * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数）：
  * ① 保活 SSE；② 续期轮键与 session 索引；③ 实测证据里"挂起期确实还有帧"由此可证。
  * 心跳<b>不再携带</b>等待上限（确认门/表单卡没有到期时刻，前端据此不武装倒计时）。
+ * <b>park 开启（生产）时没有等待线程</b>：请求帧公布 + 收流后本轮执行即结束，
+ * 不心跳、不续租、不进看门狗；恢复由决策落库后的续跑负责。
  *
  * <h2>刷新恢复口径（L0，2026-10-21 用户直裁）</h2>
- * 一批多调用的请求帧是<b>逐条</b>发的，{@code saveSuspended} 却把整批条目一起外置 ⇒「条目存在」不等于
- * 「卡已送达」。两条口径由此而定：①<b>发帧前先置位</b>（{@link RunStore#markRequestEmitted} 落
- * {@code req=true} + 时刻），前端刷新只为 {@code req=true} 的 {@code CONFIRM}/{@code FRONTEND} 条目建卡；
+ * {@code saveSuspended} 把整批条目一起外置 ⇒「条目存在」不等于「卡已送达」。两条口径由此而定：
+ * ①<b>发帧前先置位</b>（{@link RunStore#markRequestEmitted} 落 {@code req=true} + 时刻），
+ * 前端刷新只为 {@code req=true} 的 {@code CONFIRM}/{@code FRONTEND} 条目建卡；
  * ②<b>已决则不补发</b>（{@link #reserveRequestSlot}）：条目在到达 {@code await} 前已被决策时，跳过请求帧
  * 与挂起断连、直接消费既有决策 —— 否则前端会把已收敛的卡瞬时复活再被收敛。实时路径（发帧与 handler）不受影响。
+ * <b>C1</b>：park 开启时整批请求帧由 {@link #publishRequestsForParkedBatch} 一次公布
+ * （逐条发会让 park 后的第二张卡永远没有请求帧，也就永远无法被决策驱动）。
  *
  * <h2>执行的幂等（SP-02 E2 语义）</h2>
  * 本类只负责"决策落库"，<b>不在</b>决策写入时执行工具 —— 执行与"已执行"标记的关系见
@@ -210,6 +215,17 @@ public class ConfirmGate {
 	 * 跨进程轮询路径会把同一个窗口重新打开。
 	 */
 	private final Object submitLock = new Object();
+
+	/**
+	 * 派发失败的有界重试计数（park 批，按 runId）。
+	 *
+	 * <p>为什么需要：park 之后"推进这一轮"的责任在派发方。续跑池饱和（{@code POOL_SATURATED}）
+	 * 或会话门被另一轮占着（{@code SESSION_BUSY}）时，如果只记一条日志，用户已经批准的卡会停在
+	 * "已决 + 无人执行"。这里按 {@code app.ai.park.max-dispatch-retries} 有界重派发；
+	 * 成功/其它结局即清零，用尽不再重排（避免死卡永久占用调度线程），并 ERROR 留痕。
+	 */
+	private final Map<String, java.util.concurrent.atomic.AtomicInteger> dispatchRetries =
+			new ConcurrentHashMap<>();
 
 	/**
 	 * 续跑权租约设施（B23L1 批②b）。<b>可为 null</b>：6/8 参兼容构造器（单测、局部装配）
@@ -426,6 +442,56 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * <b>C1：park 前把本批每张卡的请求帧都公布出去</b>。
+	 *
+	 * <p>缺陷形态：帧原本是在各卡的 {@code await} 里<b>逐条</b>发的，而 park 让第一张卡的
+	 * {@code await} 直接结束本次执行 —— 第二张卡既没发过请求帧、也没置 {@code req}，
+	 * 前端永远看不到它，即便它被决策也无从驱动（"批准了却卡死"）。
+	 *
+	 * <p>因此 {@code SpToolCallingManager} 在 {@code suspended} 帧之后、执行循环之前调用本方法：
+	 * 对每个仍 {@code PENDING} 的 {@code CONFIRM}/{@code FRONTEND} 条目<b>先置 {@code req} 再发帧</b>
+	 * （与 {@link #reserveRequestSlot} 同序、同一把提交锁），并在内存副本上置 {@code req}
+	 * —— 随后 {@code await} 看到 {@code req} 已置就不再重复发帧（见 {@code await} 的 {@code prePublished}）。
+	 *
+	 * <p>已决条目<b>不补发</b>：{@code markRequestEmitted} 之前的重判与 {@code await} 的 L0 口径一致，
+	 * 避免把已收敛的卡瞬时复活。幂等：{@code req} 已置的条目直接跳过。
+	 */
+	public void publishRequestsForParkedBatch(String runId, List<PendingToolCall> pendings) {
+		if (runId == null || pendings == null || pendings.isEmpty()
+				|| !this.properties.getPark().isEnabled()) {
+			return;
+		}
+		SseChatEmitter out = this.registry.of(runId);
+		for (PendingToolCall pending : pendings) {
+			boolean confirm = PendingToolCall.KIND_CONFIRM.equals(pending.getKind());
+			if (!confirm && !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+				continue;
+			}
+			if (Boolean.TRUE.equals(pending.getReq())) {
+				continue;
+			}
+			long atMs = System.currentTimeMillis();
+			PendingToolCall marked;
+			synchronized (this.submitLock) {
+				PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+				if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
+					// 已决/已消失：交给 await 的 L0 分支直接消费既有决策，这里不补发
+					continue;
+				}
+				marked = this.store.markRequestEmitted(runId, pending.getToolCallId(), atMs);
+			}
+			pending.setReq(Boolean.TRUE);
+			pending.setReqAtMs(marked == null || marked.getReqAtMs() == 0L ? atMs : marked.getReqAtMs());
+			if (confirm) {
+				out.confirmRequest(pending);
+			}
+			else {
+				out.frontendToolRequest(pending, suspendWaitSeconds(pending));
+			}
+		}
+	}
+
+	/**
 	 * 确认门：阻塞等人工决策，返回 Redis 里的<b>最终条目</b>（调用方据此决定执行与否）。
 	 *
 	 * <p><b>无上限</b>：一直等到批准 / 拒绝 / 取消（用户裁决 2026-10-20 第 1 条）。
@@ -443,6 +509,10 @@ public class ConfirmGate {
 	}
 
 	private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
+		// ===== C1：本批请求帧可能已在 park 前由 publishRequestsForParkedBatch 整批公布 =====
+		// 那个入口已置 req 并发过帧；这里只登记闸门/收流/结束执行，<b>不重复发帧</b>
+		// （否则重挂或续跑的重建执行会把同一张卡再弹一次）。
+		boolean prePublished = this.properties.getPark().isEnabled() && Boolean.TRUE.equals(pending.getReq());
 		// ===== L0（2026-10-21 裁决 A/C）：先判已决，再给请求帧"发车位" =====
 		// ①已决（另一页签/旧客户端早已提交该 toolCallId）：<b>不补发请求帧</b>、不断流，直接消费既有决策
 		//   —— 旧行为是无条件 emit，前端会把已收敛的卡瞬时复活成 pending、再被随后的结局帧收敛；
@@ -478,13 +548,15 @@ public class ConfirmGate {
 		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
-		if (confirm) {
-			// 确认卡不再有到期时刻（裁决第 1 条）：帧里不带 timeoutSeconds/expiresAt，
-			// 前端据此不武装倒计时、不把按钮置灰。
-			out.confirmRequest(pending);
-		}
-		else {
-			out.frontendToolRequest(pending, timeoutSeconds);
+		if (!prePublished) {
+			if (confirm) {
+				// 确认卡不再有到期时刻（裁决第 1 条）：帧里不带 timeoutSeconds/expiresAt，
+				// 前端据此不武装倒计时、不把按钮置灰。
+				out.confirmRequest(pending);
+			}
+			else {
+				out.frontendToolRequest(pending, timeoutSeconds);
+			}
 		}
 		// ===== B1（2026-10-20 裁决 1）：请求帧发出之后、进入阻塞等待之前，主动完成本 run 的全部订阅 =====
 		// 流派 B（挂起即断）：人机等待期不再占用 SSE 连接，连接在"卡已送达"这一刻收尾；
@@ -497,15 +569,45 @@ public class ConfirmGate {
 		// 为什么不会截断本帧：completeSubscriptions 复用到"排空队列后才 complete"的收尾路径，
 		// 刚 emit 的请求帧先写出、再关连接。
 		//
-		// 一批多 toolCall 的真实发射流（实测）：帧是**逐条**发的 —— suspended 帧一次列出本批全部
-		// 条目，随后 SpToolCallingManager 逐个进 await；每个 await 各自发自己那张卡的请求帧，
-		// 发完即断，然后阻塞等人。于是第 N 张卡的请求帧是在第 N-1 张卡决策之后、重新连上的
-		// 订阅里发出的（重连帧序：决策 → 续跑 → tool_start(cardN) → 请求帧(cardN) → 再次收流）。
-		// 任何一张卡的请求帧都落在"该帧 emit 之后"的断连点之后，不会被截断。
+		// 一批多 toolCall 的实施口径（C1 起）：park 开启时，整批请求帧由
+		// {@link #publishRequestsForParkedBatch} 在 suspended 帧之后、执行循环之前<b>一次性公布</b>
+		// （本方法看到 req 已置就不再重复发）—— 逐条发会让 park 后的第二张卡永远收不到请求帧。
+		// park 关闭时仍按旧口径逐条发：每张卡在它自己的 await 里发帧，发完即断，然后阻塞等人。
 		out.completeSubscriptions();
 		long startedAt = System.currentTimeMillis();
 		// T2b-D#1：挂起期续期 session→current 索引用的 sessionId（快照可能缺失，取一次缓存并判空）
 		String sessionId = snapshotSessionId(runId);
+		// ===== 人工等待 <b>park</b>（用户裁决 2026-10-25）=====
+		// 请求帧已投递、本轮订阅已收流：此刻"等人"这件事没有任何本进程要做的事 ——
+		// 决策会经 HTTP 落 Redis，届时由 ResumeService 重建执行（与跨实例续跑同一条通路）。
+		// 因此<b>结束本次执行</b>：交还驱动租约（驱动方重抢）、不登记 latch 等待、不心跳、不续租、
+		// 不进看门狗等待；快照保持 SUSPENDED（pending/req/decided/帧归档就是合法恢复状态）。
+		//
+		// 主动 stop 优先：取消标志已在 ⇒ 走取消终态（"普通断线/刷新只 park，主动 stop 才取消"）。
+		// 注意异常出口：RunParkedException 由 SpToolCallingManager 原样穿出、ResilientChatService
+		// 识别后直接退出（不写终帧、不判失败）。
+		if (this.properties.getPark().isEnabled()) {
+			if (this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED) {
+				return cancel(runId, pending, confirm, startedAt);
+			}
+			AiTrace.eventOn(runId, sessionId, "approval_park", "toolCallId", pending.getToolCallId(), "tool",
+					pending.getName(), "kind", confirm ? "confirm" : "frontend");
+			log.info("人工等待 park runId={} toolCallId={} tool={} kind={}（请求帧已投递并收流；线程交还，"
+					+ "决策后由续跑重建执行）", runId, pending.getToolCallId(), pending.getName(),
+					confirm ? "confirm" : "frontend");
+			// ===== I4：park 之后即时前端工具的到期收敛 =====
+			// 即时类前端工具（navigate_to 等）有回执上限；旧实现靠<b>等待线程</b>到期后写 TIMEOUT。
+			// park 后没有等待线程 ⇒ 条目会永远 PENDING。这里按 expiresAt 排一次收敛：
+			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧；<b>不触发续跑</b>
+			// （无人时不得继续下一段模型调用）。确认门无上限（timeoutSeconds == null）不排。
+			// 交还驱动租约：park 期间本进程不是驱动方；决策到达后触发方会重新抢租。
+			if (!confirm && timeoutSeconds != null) {
+				scheduleParkedFrontendExpiry(runId, pending, timeoutSeconds);
+			}
+			releaseWaitingLease(lease, runId);
+			lease = null;
+			throw new RunParkedException(runId, pending.getToolCallId(), pending.getKind());
+		}
 		// 人机预算分离（裁决第 3 条）：等待窗口内的时间累计到信标上，总预算判据据此扣除
 		this.beacon.beginGateWait(runId);
 		// 日志链路批：等待期间的心跳/续租/取消都是这条线程产的 —— 锚点在这里续上，
@@ -848,6 +950,46 @@ public class ConfirmGate {
 		return fresh;
 	}
 
+	/**
+	 * <b>I4：park 之后按 {@code expiresAt} 排一次前端回执到期收敛</b>。
+	 *
+	 * <p>park 把等待线程交还了，到期判定不能随之消失：即时类前端工具（有
+	 * {@code app.ai.hitl.frontend-tool-timeout} 上限）到点仍 {@code PENDING} ⇒ 走
+	 * {@link #expireFrontend}（{@code TIMEOUT} + 结局帧 + 落库），但<b>不触发续跑</b> ——
+	 * 无人时不得替用户继续下一段模型调用；轮保持 {@code SUSPENDED}，由下一次交互/启动扫描推进。
+	 */
+	private void scheduleParkedFrontendExpiry(String runId, PendingToolCall pending, int timeoutSeconds) {
+		long atMs = pending.getAtMs() == null || pending.getAtMs() <= 0 ? System.currentTimeMillis() : pending.getAtMs();
+		Long expiresAt = pending.getExpiresAt();
+		long deadlineMs = expiresAt == null || expiresAt <= 0 ? atMs + timeoutSeconds * 1000L : expiresAt;
+		long delayMs = Math.max(0L, deadlineMs - System.currentTimeMillis());
+		String toolCallId = pending.getToolCallId();
+		String toolName = pending.getName();
+		try {
+			this.retryScheduler.schedule(() -> {
+				try {
+					PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
+					if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
+						return;
+					}
+					expireFrontend(runId, fresh, timeoutSeconds);
+					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
+							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
+					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
+							+ "（不触发续跑；轮保持 SUSPENDED）", runId, toolCallId, toolName, timeoutSeconds);
+				}
+				catch (RuntimeException ex) {
+					log.warn("park 后的前端回执到期收敛失败 runId={} toolCallId={}：{}", runId, toolCallId,
+							ex.getMessage());
+				}
+			}, Duration.ofMillis(delayMs));
+		}
+		catch (RuntimeException ex) {
+			log.warn("park 后的前端回执到期收敛未排上 runId={} toolCallId={}：{}", runId, toolCallId,
+					ex.getMessage());
+		}
+	}
+
 	private Map<String, Object> heartbeatData(String runId, PendingToolCall pending, boolean confirm,
 			Integer timeoutSeconds, long waitedSeconds) {
 		Map<String, Object> data = new LinkedHashMap<>();
@@ -867,6 +1009,15 @@ public class ConfirmGate {
 	public enum Outcome {
 
 		ACCEPTED, DUPLICATE, NOT_FOUND,
+
+		/**
+		 * 错入口（入口 kind 校验批）：条目存在，但 {@code kind} 与本入口要求的种类不符
+		 * （{@code /confirm} 只收 {@code CONFIRM}，{@code /frontend-tool-result} 只收 {@code FRONTEND}）。
+		 *
+		 * <p><b>什么都没变</b>：不写状态、不占决策 guard、不发回执帧、不唤醒 —— 错入口的请求
+		 * 不该在条目上留下任何痕迹（否则"人没点过"会被写成"人批准了"）。
+		 */
+		TOOL_KIND_MISMATCH,
 
 		/**
 		 * 回灌被安全闸拒绝（DC-15）：状态<b>未变</b>（仍 {@code PENDING}），挂起继续等待
@@ -940,6 +1091,11 @@ public class ConfirmGate {
 	 * 人工决策：<b>抢决策 guard</b> → 先写 Redis，再发回执帧，最后唤醒（帧先于它唤起的后果）。
 	 * 重复提交按状态幂等拒绝（SP-01d V-d2B）。
 	 *
+	 * <p><b>入口 kind（入口 kind 校验批）</b>：本入口只改写 {@code kind=CONFIRM} 的条目。
+	 * 前端工具的 toolCallId 发到这里 ⇒ {@link Outcome#TOOL_KIND_MISMATCH}，条目不变
+	 * （详见 {@link #kindMismatch}）；判定在 PENDING 之前，故"错入口 + 已决"报 mismatch，
+	 * "正确 kind + 已决"仍是 DUPLICATE。
+	 *
 	 * <h2>R4（B23L1 批②b）：全集群唯一写者</h2>
 	 * 过去"读 PENDING → 判 → 改写 → 落库"只由 {@code submitLock} 串行化，而那是<b>实例内</b>的锁：
 	 * 两个实例（两个 JVM / 两次请求落在不同实例）会各读一次 PENDING、各改一版、各自落库 ——
@@ -963,6 +1119,9 @@ public class ConfirmGate {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
+		}
+		if (kindMismatch(pending, PendingToolCall.KIND_CONFIRM, "confirm")) {
+			return new Submission(Outcome.TOOL_KIND_MISMATCH, pending, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
@@ -1072,6 +1231,38 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 入口 kind 校验（入口 kind 校验批）：<b>服务端条目</b>声明的种类是否与本入口要求相符。
+	 *
+	 * <ul>
+	 * <li>条目带 kind 且不符 ⇒ {@code true}（调用方回 {@link Outcome#TOOL_KIND_MISMATCH}，
+	 *     条目一个字节都不改）；</li>
+	 * <li>旧数据（{@code kind=null}，字段引入前写入）⇒ {@code false} + <b>WARN</b>：
+	 *     升级瞬间在途的挂起不能因为缺少元数据而被判成"错入口"（否则人永远提交不了）；</li>
+	 * <li>相符 ⇒ {@code false}。</li>
+	 * </ul>
+	 *
+	 * <p>位置刻意在 {@code PENDING} 判定<b>之前</b>：错入口是比"重复提交"更根本的事实 ——
+	 * 一个已决的前端条目被发到 {@code /confirm} 时，报 mismatch 才能让调用方知道该换接口，
+	 * 报 DUPLICATE 只会让它继续发错。而<b>正确</b> kind 的重复提交照旧 DUPLICATE（幂等口径不变）。
+	 *
+	 * @param endpoint 入口名（只进日志，便于定位是谁把哪张卡发错了）
+	 */
+	private boolean kindMismatch(PendingToolCall pending, String expectedKind, String endpoint) {
+		if (!pending.hasKind()) {
+			log.warn("旧数据缺 kind，按兼容口径放行 toolCallId={} name={} endpoint={} expected={}"
+					+ "（kind 字段引入前写入的挂起，不做种类判定）", pending.getToolCallId(), pending.getName(), endpoint,
+					expectedKind);
+			return false;
+		}
+		if (pending.isKind(expectedKind)) {
+			return false;
+		}
+		log.warn("入口与条目种类不匹配 toolCallId={} name={} kind={} endpoint={} expected={}（不写状态、不占 guard、不发帧）",
+				pending.getToolCallId(), pending.getName(), pending.getKind(), endpoint, expectedKind);
+		return true;
+	}
+
+	/**
 	 * guard 已被别的写者抢到时的收敛路径（R4 的"恰一次"）：结论已定 ⇒ 按幂等回 {@code DUPLICATE}。
 	 *
 	 * <h2>WAL 修复（不补帧，刻意）</h2>
@@ -1161,6 +1352,10 @@ public class ConfirmGate {
 	 * <p>次序刻意是"取消 &gt; 复核"：放弃是用户的兜底出口，不该因为"值不合规"而被挡住
 	 * （否则用户关掉一张填错一半的表单也被拒，挂起只能等到超时）。
 	 *
+	 * <p><b>入口 kind 永远第一</b>（入口 kind 校验批）：本入口只改写 {@code kind=FRONTEND} 的条目，
+	 * 确认门条目的 toolCallId 发到这里 ⇒ {@link Outcome#TOOL_KIND_MISMATCH}（连
+	 * {@code cancelled=true} 也拦 —— 它同样会改写状态）。旧数据 {@code kind=null} 放行 + WARN。
+	 *
 	 * @param cancelled 前端是否报告"用户主动放弃"（关闭表单/取消对话框）
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
@@ -1231,6 +1426,11 @@ public class ConfirmGate {
 		PendingToolCall pending = pendingForWrite(runId, toolCallId);
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
+		}
+		// 入口 kind 校验（与 submitDecision 同一把尺）：错入口在"取消/复核/写 guard"之前就返回 ——
+		// 放弃（cancelled=true）也一样，否则确认门条目会被写成"用户放弃了前端表单"。
+		if (kindMismatch(pending, PendingToolCall.KIND_FRONTEND, "frontend-tool-result")) {
+			return new Submission(Outcome.TOOL_KIND_MISMATCH, pending, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
@@ -1468,6 +1668,72 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 派发失败的一次<b>有界</b>重试（{@code POOL_SATURATED} / {@code SESSION_BUSY}），
+	 * 间隔按<b>指数退避</b>（I3）。
+	 *
+	 * <p>与 {@link #scheduleLeaseRetry} 的区别：那条救的是"holder 死了但没释放租约"（等 TTL），
+	 * 本条救的是"决策已落库、驱动权暂时拿不到"（池满 / 同会话另一轮在跑）—— 两者都用同一个
+	 * 一次性调度器，但计数独立、目的不同。
+	 *
+	 * <p><b>为什么必须指数退避</b>：一次正常轮可以跑到 {@code app.ai.resilience.total-budget}
+	 * （300s），固定 {@code 500ms × 3}（1.5s）覆盖不到任何一次真实轮的收尾 ⇒ 用户已批准的卡
+	 * 等于"批准了但永久不执行"。本方法按 {@code dispatch-retry-delay} 起、每次翻倍、
+	 * {@code dispatch-retry-max-delay} 封顶（缺省 2s→…→30s，15 次 ≈ 360s，覆盖 300s 轮预算）。
+	 *
+	 * <p><b>边界</b>：重试用尽仍失败只 ERROR 留痕，不无限重排（死卡会永久占用调度线程）；
+	 * 计数随即清零，于是<b>下一次触发</b>（决策/重挂/启动扫描）重新计数 —— 不是"只留一条 ERROR"。
+	 */
+	private void retryDispatch(String runId) {
+		int max = this.properties.getPark().getMaxDispatchRetries();
+		if (max <= 0) {
+			return;
+		}
+		java.util.concurrent.atomic.AtomicInteger counter = this.dispatchRetries.computeIfAbsent(runId,
+				ignored -> new java.util.concurrent.atomic.AtomicInteger());
+		int attempt = counter.incrementAndGet();
+		if (attempt > max) {
+			this.dispatchRetries.remove(runId);
+			log.error("续跑派发在 {} 次有界重试后仍未成功 runId={}（决策已落库；卡保持 SUSPENDED，"
+					+ "下一次交互/启动扫描会再触发）", max, runId);
+			return;
+		}
+		Duration delay = dispatchRetryDelay(attempt);
+		try {
+			this.retryScheduler.schedule(() -> {
+				try {
+					triggerResume(runId, false, false);
+				}
+				catch (Exception ex) {
+					log.warn("续跑重派发异常 runId={}：{}", runId, ex.getMessage());
+				}
+			}, delay);
+			log.info("续跑派发失败（池满/会话占用），第 {}/{} 次有界重试已排期 runId={} delay={}ms", attempt, max,
+					runId, delay.toMillis());
+		}
+		catch (Exception ex) {
+			log.warn("续跑有界重试未排上 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/** 第 {@code attempt} 次重派发的间隔：{@code base × 2^(attempt-1)}，按 {@code max-delay} 封顶。 */
+	private Duration dispatchRetryDelay(int attempt) {
+		Duration base = this.properties.getPark().getDispatchRetryDelay();
+		if (base == null || base.isNegative() || base.isZero()) {
+			base = Duration.ofSeconds(2);
+		}
+		Duration cap = this.properties.getPark().getDispatchRetryMaxDelay();
+		if (cap == null || cap.isNegative() || cap.isZero()) {
+			cap = Duration.ofSeconds(30);
+		}
+		long capMs = Math.max(1L, cap.toMillis());
+		long delayMs = Math.max(1L, base.toMillis());
+		for (int i = 1; i < attempt && delayMs < capMs; i++) {
+			delayMs = Math.min(capMs, delayMs * 2);
+		}
+		return Duration.ofMillis(delayMs);
+	}
+
+	/**
 	 * 抢租失败后的一次性延迟重试（{@code app.ai.lease.retry-delay}，默认 35s = TTL + 5s 余量）。
 	 *
 	 * <p>救的是"holder 已经死了但它没来得及释放"的场景：TTL 到期后本实例就能接管。
@@ -1529,6 +1795,14 @@ public class ConfirmGate {
 			}
 			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId,
 					result == null ? null : result.outcome(), result == null ? null : result.body());
+			// park 批：池饱和 / 会话被占 = "决策已落库但这一拍没有驱动者" ⇒ 有界重派发。
+			if (result != null && (result.outcome() == ResumeService.Outcome.POOL_SATURATED
+					|| result.outcome() == ResumeService.Outcome.SESSION_BUSY)) {
+				retryDispatch(runId);
+			}
+			else {
+				this.dispatchRetries.remove(runId);
+			}
 			if (lease == null) {
 				return;
 			}
@@ -1600,6 +1874,20 @@ public class ConfirmGate {
 		}
 		latch.signal();
 		return true;
+	}
+
+	/**
+	 * <b>park 批</b>：人工等待 park 之后本进程没有等待方，主动 stop / 运维催办必须能推动收敛。
+	 *
+	 * <p>走的就是死卡兜底同一条判定（{@code woke=false}）：快照仍 SUSPENDED 才派发续跑；
+	 * 续跑侧会先看到取消标志（{@code ResumeService} 的早退分支）把快照收敛成
+	 * {@code CANCELLED} 并取消未决条目 —— 于是"停"不必等下一次用户交互才生效。
+	 *
+	 * <p>幂等/安全：没有可派发对象（非 SUSPENDED / 无续跑服务 / 租约在别处）时只返回 skipped，
+	 * 不改任何状态。
+	 */
+	public ResumeTrigger triggerResumeForParked(String runId) {
+		return triggerResume(runId, false, true);
 	}
 
 	/** 供诊断/取证：当前进程内有几个挂起闸门。 */

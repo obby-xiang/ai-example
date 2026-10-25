@@ -63,10 +63,33 @@ public class SheetWriteGuard implements FrontendToolGuard {
     }
 
     /**
-     * 扩展点入口（框架只传原文）：按入参形状推断细分工具后统一校验。
+     * 扩展点入口（框架传入真名，工具安全边界批起）：**按工具名声明的分支校验**，
+     * 不再靠入参形状反推（少一个必填键会被"错校验"放行的窄缝由此关闭）。
+     */
+    @Override
+    public Verdict inspectArguments(String toolName, String argumentsJson) {
+        if (!supports(toolName)) {
+            return Verdict.accept();
+        }
+        JsonNode root;
+        try {
+            root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
+        }
+        catch (Exception error) {
+            return reject("入参不是合法 JSON：" + error.getMessage());
+        }
+        if (root == null || !root.isObject()) {
+            return reject("入参必须是对象。");
+        }
+        return inspectFor(toolName, root);
+    }
+
+    /**
+     * 兼容入口（无工具名的旧调用方）：按入参形状推断细分工具后统一校验。
      *
      * <p>`search` ⇒ replace_values、`set` ⇒ update_rows、`rules` ⇒ normalize_column、其余 ⇒ 撤销
      * （只有 defCode）。形状推断是安全的：三者的必填字段互斥，且真正的事实源是后续的逐项校验。
+     * <b>框架路径不走这里</b>（{@code SpToolCallingManager} 调带工具名的重载）。
      */
     @Override
     public Verdict inspectArguments(String argumentsJson) {
@@ -88,21 +111,8 @@ public class SheetWriteGuard implements FrontendToolGuard {
     }
 
     /** 按工具名细分校验（测试与显式调用方使用；不接受未知工具名）。 */
-    public Verdict inspectArguments(String toolName, String argumentsJson) {
-        if (!supports(toolName)) {
-            return Verdict.accept();
-        }
-        JsonNode root;
-        try {
-            root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
-        }
-        catch (Exception error) {
-            return reject("入参不是合法 JSON：" + error.getMessage());
-        }
-        if (root == null || !root.isObject()) {
-            return reject("入参必须是对象。");
-        }
-        return inspectFor(toolName, root);
+    public Verdict inspectArgumentsFor(String toolName, String argumentsJson) {
+        return inspectArguments(toolName, argumentsJson);
     }
 
     private Verdict inspectFor(String toolName, JsonNode root) {
@@ -110,6 +120,20 @@ public class SheetWriteGuard implements FrontendToolGuard {
         String defCode = text(root.get("defCode"));
         if (defCode == null || defCode.isBlank()) {
             reasons.add("defCode 必填（要操作哪个配置的表格）。");
+        }
+        if ("undo_last_sheet_edit".equals(toolName)) {
+            // 撤销只认 defCode：带了写工具的参数说明工具名用错（或模型在猜）——
+            // 旧实现会把它当"撤销"静默放行，随后前端才拒，属"闸门放行非法入参"的窄缝。
+            for (String key : List.of("set", "search", "rules", "columnCodes", "commit", "match", "predicate",
+                    "scope", "preview")) {
+                if (root.has(key)) {
+                    reasons.add("undo_last_sheet_edit 只接受 defCode，不接受 `" + key
+                            + "`（本次未下发；要改表格请用 replace_values / update_rows / normalize_column）。");
+                    break;
+                }
+            }
+            return reasons.isEmpty() ? Verdict.accept()
+                    : Verdict.reject("SHEET_ARGUMENTS_REJECTED", "表格写工具入参不合法，未下发前端、未挂起。", reasons);
         }
         String scope = text(root.get("scope"));
         if (scope != null && !scope.isBlank() && !SCOPES.contains(scope)) {

@@ -82,8 +82,8 @@ class CompactionPairingTest {
 	void l2SummaryKeepsPairing() {
 		List<Message> messages = turns(9);
 
-		RollingSummarizer.Plan plan = RollingSummarizer.plan(messages, 3, 8000, Set.of(), prompt -> "摘要",
-				1_700_000_000_000L);
+		RollingSummarizer.Plan plan = RollingSummarizer.plan(messages, 3, 8000, Set.of(),
+				TestProviderRuntime.runtime(), (system, user, runtime) -> "摘要", 1_700_000_000_000L);
 
 		assertThat(plan.changed()).isTrue();
 		assertPaired(plan.messages());

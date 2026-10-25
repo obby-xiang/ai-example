@@ -2,6 +2,7 @@ package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -90,14 +91,13 @@ class SpToolCallingManagerGateArmTest {
             new ToolResultLimiter(new AiProperties()), List.of());
 
     @Test
-    void saveSuspendedFailureDisarmsPreRegisteredGate() {
-        stubRun();
+    void saveSuspendedFailureDisarmsPreRegisteredGate() {        stubRun();
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
         when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
         doThrow(new IllegalStateException("redis down"))
             .when(this.store)
-            .saveSuspended(anyString(), any(), anyList(), anyList(), any());
+            .saveSuspended(anyString(), any(), anyList(), anyList(), any(), any());
 
         assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
             .isInstanceOf(IllegalStateException.class)
@@ -105,6 +105,33 @@ class SpToolCallingManagerGateArmTest {
 
         assertThat(this.gate.hasActiveLatch(RUN_ID)).as("异常路径不留预登记闸门").isFalse();
         assertThat(this.gate.pendingGates()).isZero();
+    }
+
+    /**
+     * 跨供应方推理隔离（来源标记面）：挂起外置的 assistant metadata 必须带中性 origin。
+     *
+     * <p>续跑侧原样恢复这份 metadata，请求层再按"origin 与当前供应方是否一致"决定回放 ——
+     * 因此"挂起那一刻打标记"是隔离链的起点；漏了它，续跑重建的 assistant 就是"来源未知"，
+     * 只能走兼容策略（fail-open）。标记来源 = 快照的冻结身份（providerId/modelId），不依赖当前全局默认。
+     */
+    @Test
+    void suspendedAssistantMetadataCarriesTheNeutralOrigin() {
+        stubRun();
+        when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+        AtomicReference<Map<String, Object>> metadata = new AtomicReference<>();
+        doAnswer(invocation -> {
+            metadata.set(invocation.getArgument(5));
+            throw new IllegalStateException("stop");
+        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any(), any());
+
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(metadata.get()).as("挂起消息的来源标记 = 快照身份（中性，不含密钥/端点）")
+            .containsEntry(ReasoningOrigin.KEY_PROVIDER_ID, 7L)
+            .containsEntry(ReasoningOrigin.KEY_MODEL_ID, "model-a");
     }
 
     @Test
@@ -172,7 +199,7 @@ class SpToolCallingManagerGateArmTest {
         doAnswer(invocation -> {
             captured.set(invocation.getArgument(2));
             throw new IllegalStateException("stop");
-        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any());
+        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any(), any());
 
         assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_publish"), response("start_publish")))
             .isInstanceOf(IllegalStateException.class);
@@ -195,7 +222,7 @@ class SpToolCallingManagerGateArmTest {
         doAnswer(invocation -> {
             captured.set(invocation.getArgument(2));
             throw new IllegalStateException("stop");
-        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any());
+        }).when(this.store).saveSuspended(anyString(), any(), anyList(), anyList(), any(), any());
 
         assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import"), response("start_import")))
             .isInstanceOf(IllegalStateException.class);
@@ -222,6 +249,9 @@ class SpToolCallingManagerGateArmTest {
         snapshot.setSessionId("s-gate-arm");
         snapshot.setStatus(RunSnapshot.RUNNING);
         snapshot.setContext(AiContext.of("import", "IMPORT", "IMPORT", 7L, null).toMap());
+        // 跨供应方推理隔离：快照的冻结身份是 assistant 消息 origin 的唯一来源
+        snapshot.setProviderId(7L);
+        snapshot.setModelId("model-a");
         return snapshot;
     }
 

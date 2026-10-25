@@ -6,11 +6,15 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.stream.Stream;
 
 /**
@@ -33,6 +37,20 @@ import java.util.stream.Stream;
  * <h2>失败姿态</h2>
  * 任何异常只 WARN，不影响启动：知识库仍按目录现状加载（缺 manifest 时 fail-open 到"加载中"）。
  * 播种先写同目录下的临时 staging 再整体换入，失败不会留下"半份语料 + manifest"。
+ *
+ * <h2>多实例（同一台机 / 同一挂载卷）</h2>
+ * 知识目录是<b>文件系统共享</b>的，"目录为空"判据在三个实例同时启动时同样会全为真
+ * （这与数据库种子的先查后写是同一类竞态）。故播种前在父目录上取一把<b>跨进程文件锁</b>
+ * （{@code .kb-samples-seed.lock} 的 {@link java.nio.channels.FileLock}）：
+ * <ul>
+ * <li>抢到锁的实例<b>重新判空</b>后再播（另一实例可能刚播完并释放）；</li>
+ * <li>抢不到锁（另一实例正在播）⇒ 直接跳过，不等待 —— 知识库是 fail-open 面，
+ * 目录最终会被持锁方填满，跳过方按目录现状加载即可；</li>
+ * <li>锁文件<b>不删除</b>（删掉会让等待方各自打开新 inode，等于锁失效），它是隐藏名、
+ * 不在 {@code *.md} 语料命名空间内，不会被知识源扫描。</li>
+ * </ul>
+ * 同一 JVM 内另一个线程持锁时 {@code tryLock} 抛 {@link java.nio.channels.OverlappingFileLockException}，
+ * 同样按"有人在播"处理。
  */
 @Slf4j
 public final class KbSampleSeeder {
@@ -41,6 +59,9 @@ public final class KbSampleSeeder {
     static final String CLASSPATH_ROOT = "kb-samples";
 
     private static final String MANIFEST = "manifest.json";
+
+    /** 跨实例播种锁（放在知识目录的父目录，与 staging 同级；不参与语料扫描）。 */
+    private static final String LOCK_FILE = ".kb-samples-seed.lock";
 
     private final Path targetDir;
 
@@ -72,6 +93,48 @@ public final class KbSampleSeeder {
         if (!needsSeed()) {
             return false;
         }
+        Path parent = this.targetDir.getParent();
+        if (parent == null) {
+            log.warn("知识库目录没有父目录，无法安全播种：{}", this.targetDir);
+            return false;
+        }
+        try {
+            Files.createDirectories(parent);
+        }
+        catch (IOException e) {
+            log.warn("知识库目录创建失败（不影响启动，按目录现状加载）：{}：{}", parent, safeMessage(e));
+            return false;
+        }
+        try (FileChannel channel = FileChannel.open(parent.resolve(LOCK_FILE),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock lock = tryLock(channel)) {
+            if (lock == null) {
+                log.info("另一实例正在播种知识库样例，本实例跳过：dir={}", this.targetDir);
+                return false;
+            }
+            // 抢锁后重判：持锁方可能刚播完并释放
+            if (!needsSeed()) {
+                return false;
+            }
+            return doSeed(parent);
+        }
+        catch (IOException e) {
+            log.warn("知识库样例播种锁不可用（不影响启动，按目录现状加载）：{}", safeMessage(e));
+            return false;
+        }
+    }
+
+    /** 非阻塞抢文件锁；同 JVM 已有线程持锁时按"别人在播"处理（而不是抛给调用方）。 */
+    private static FileLock tryLock(FileChannel channel) throws IOException {
+        try {
+            return channel.tryLock();
+        }
+        catch (OverlappingFileLockException e) {
+            return null;
+        }
+    }
+
+    private boolean doSeed(Path parent) {
         Path staging = null;
         try {
             String manifestText = MarkdownChunker.normalize(readText(MANIFEST));
@@ -79,11 +142,6 @@ public final class KbSampleSeeder {
                     manifestText.getBytes(StandardCharsets.UTF_8), this.mapper);
             manifest.validate();
 
-            Path parent = this.targetDir.getParent();
-            if (parent == null) {
-                throw new IOException("知识库目录没有父目录，无法安全播种：" + this.targetDir);
-            }
-            Files.createDirectories(parent);
             staging = Files.createTempDirectory(parent, ".kb-samples-seed-");
             for (KbDocMeta meta : manifest.docs()) {
                 Path out = staging.resolve(meta.effectiveFile()).normalize();

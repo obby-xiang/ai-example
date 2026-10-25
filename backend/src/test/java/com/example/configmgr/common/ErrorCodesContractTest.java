@@ -105,15 +105,16 @@ class ErrorCodesContractTest {
     }
 
     /**
-     * I-2 / I-3 强化：可用性三档（+ Redis 503）必须同时存在于后端、前端镜像与双 locale。
+     * I-2 / I-3 强化：可用性四档（+ Redis 503）必须同时存在于后端、前端镜像与双 locale。
      *
      * <p>{@link #frontendMirrorMatchesBackendCodes()} 已做全量差集；这里单独锁"会用错码/漏映射"
-     * 的四个可用性出口，避免以后新增一档只改后端。
+     * 的五个可用性出口，避免以后新增一档只改后端。
      */
     @Test
     void availabilityTiersAreMirroredInFrontendAndMessages() throws IOException {
         Set<String> tiers = Set.of(ErrorCodes.AI_UNAVAILABLE, ErrorCodes.AI_KEY_MISSING,
-                ErrorCodes.AI_KEY_UNREADABLE, ErrorCodes.AI_REDIS_UNAVAILABLE);
+                ErrorCodes.AI_KEY_UNREADABLE, ErrorCodes.NO_MODEL_CONFIGURED,
+                ErrorCodes.AI_REDIS_UNAVAILABLE);
         Set<String> frontend = parseFrontendErrorCodes();
         Set<String> zh = parseMessageKeys("messages_zh.properties");
         Set<String> en = parseMessageKeys("messages_en.properties");

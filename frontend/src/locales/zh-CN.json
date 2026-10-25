@@ -86,6 +86,18 @@
         "keyUnreadable": {
           "title": "API Key 无法解密",
           "guide": "请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。"
+        },
+        "noModel": {
+          "title": "默认模型不可用",
+          "guide": "请到「设置 → AI」为默认供应商添加并启用模型，然后重新选择默认模型。"
+        },
+        "authFailed": {
+          "title": "上游鉴权失败",
+          "guide": "请到「设置 → AI」检查 API Key 是否正确、是否已过期。"
+        },
+        "rejected": {
+          "title": "上游拒绝了本次请求",
+          "guide": "请检查模型参数与供应商配置后重试。"
         }
       }
     },
@@ -101,9 +113,10 @@
       "chatRequestFailed": "对话请求失败",
       "poolSaturated": "挂起池已饱和，请稍后重试。",
       "poolSaturatedWithSize": "挂起池已饱和（容量 {size}），请稍后重试。",
-      "aiDisabled": "AI 功能未启用：请到「设置 → AI」配置供应商与 API Key。",
+      "aiDisabled": "AI 功能未启用或默认供应商不可用：请到「设置 → AI」检查供应商启用状态、API Key 与默认模型。",
       "keyMissing": "AI 缺少可用的 API Key：请到「设置 → AI」为供应商录入密钥后重试。",
       "keyUnreadable": "API Key 无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。",
+      "noModelConfigured": "AI 默认模型不可用：请到「设置 → AI」为供应商添加模型并选择默认模型。",
       "redisUnavailable": "AI 服务暂不可用（Redis），请稍后重试。",
       "healthProbeFailed": "AI 可用性探测失败",
       "decisionPending": "确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。",
@@ -119,6 +132,8 @@
       "noUiUndo": "没有可撤销的界面操作",
       "sheetLargePlan": "本次将修改 {rows} 行 / {cells} 格（超过 200 行）：请先勾选「我了解影响范围」再点「应用」。",
       "memoryDeleteFailed": "旧会话记忆删除失败（不影响新对话）",
+      "sessionPurgeIncomplete": "旧会话的 AI 数据尚未删净（不影响新对话）",
+      "sessionPurged": "这个会话已在服务端销毁，已为你新建对话。刚才那条消息没有发出，内容已留在输入框，请再点一次发送。",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
       "upstreamRetry": "上游连接中断，正在重试（本轮尚未产出内容）",
       "turnError": "本轮出错：{message}",
@@ -132,6 +147,8 @@
       "formSubmitFailed": "提交失败：{message}（可重试或点「取消」放弃）",
       "formSubmitFailedPlain": "提交失败，请重试或点「取消」放弃",
       "formCancelFailed": "取消回灌未送达（{message}），后端将在超时后自动收尾",
+      "formResultTooLarge": "表单内容超出上限（{chars} / {max} 字符）：本次未发出，填写已保留；请缩短后重试。",
+      "formResultTooLargeRejected": "表单内容超出上限（挂起仍在等待）：请缩短后重新提交，填写已保留。",
       "networkError": "网络异常"
     },
     "workspace": {
@@ -220,6 +237,8 @@
         "allowUserParams": "允许普通用户调整",
         "defaultValueModel": "默认模型",
         "defaultValueModelNone": "（未设置）",
+        "defaultValueModelUnbound": "旧配置·未绑定供应商",
+        "defaultValueModelUnavailable": "当前不可用",
         "saved": "已保存",
         "probeOk": "连通，模型数",
         "probeFailed": "失败"
@@ -234,7 +253,7 @@
         "PROVIDER_IN_USE": "该端点下仍有模型，不能删除；可以先删除模型，或改用停用。",
         "PROVIDER_EXISTS": "这个标识（code）已被占用，换一个。",
         "CODE_IMMUTABLE": "端点标识创建后不可修改，请另建一个端点。",
-        "MODEL_NOT_FOUND": "模型不存在：请先拉取模型或手填该模型。",
+        "MODEL_NOT_FOUND": "模型不存在或已停用：请先拉取或启用该模型，再重新选择默认模型。",
         "MODEL_EXISTS": "该模型已经在清单里了。",
         "MODEL_TOOLCALL_UNSUPPORTED": "该模型不支持工具调用。",
         "MODELS_UNSUPPORTED": "该端点没有实现 /models，请手填模型 ID。",
@@ -244,7 +263,7 @@
         "PROVIDER_DISABLED": "该端点已停用。",
         "PROVIDER_GONE": "该端点已被删除。",
         "PARAMS_LOCKED": "当前配置不允许调整参数。",
-        "INVALID_PARAM": "参数不在允许范围内，请检查后重试。",
+        "INVALID_PARAM": "参数不在允许范围，或默认目标不合法：请检查取值范围，并在「默认模型」下拉中重新选择供应商后重试。",
         "INVALID_MODEL": "模型 ID 不合法：不能为空、不能含空格。",
         "NETWORK_ERROR": "后端不可达，请确认服务已启动。",
         "UNKNOWN_ERROR": "操作失败，请重试。"
@@ -254,7 +273,9 @@
     "round": {
       "stop": "停止生成",
       "stopping": "停止中…",
-      "stopped": "已停止"
+      "stopped": "已停止",
+      "truncated": "已截断",
+      "truncatedHint": "回答达到模型长度上限被截断，内容可能不完整。"
     },
     "suggestions": {
       "ariaLabel": "后续建议",
@@ -455,6 +476,7 @@
       "impact": "将影响 {rows} 行 / {cells} 格",
       "scope": "范围：{scope}",
       "rules": "规则：{rules}",
+      "overwriteNotice": "应用或撤销都会覆盖当前表格内容（同一文件以本次操作为准）；你在表格里的手改可能被这次操作覆盖。",
       "skipped": "跳过 {count} 格（校验器拒绝）",
       "distribution": "分布（按 {by}，前 {count} 组）：",
       "groupItem": "{rows} 行 / {cells} 格",
@@ -782,6 +804,9 @@
   },
   "sheet": {
     "readOnlyWriteBlocked": "任务已结束，仅供查看；写操作未执行，未对表格做任何修改。",
+    "undoScopeSummary": "撤销 plan #{planId} 这一批改动",
+    "undoRulesText": "回退到这次 AI 修改之前的值（本批 {cells} 格；可撤销层数 {layers}）",
+    "undoPreviewBusy": "另有一张表格操作预览卡待你处理（{tool}），本次撤销未建卡、未执行。请先在那张卡上点「应用」或「取消」，再重新发起撤销。",
     "preview": {
       "countLevel": "计数级预览：只算总数与分布，不逐格展示。点“看样例”可查看前 3 条（样例会作为工具结果回传）。",
       "detailPending": "明细未加载（计数级预览）：点「看样例」或「全量 diff」才会逐格计算。",

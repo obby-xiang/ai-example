@@ -23,7 +23,7 @@ import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
-import { executeFrontendTool, resolveSheetContext } from '@/utils/frontend-tools'
+import { resolveSheetContext } from '@/utils/frontend-tools'
 import { applyFrameToParts } from '@/utils/parts'
 import { sheetUndoDepth } from '@/utils/sheet-tools'
 import { field } from './sheet-fixtures'
@@ -292,19 +292,31 @@ describe('L-74 预览 → 应用 → 摘要：页面重解析上下文后「AI �
   })
 })
 
-describe('L-74 撤销：重解析上下文后仍能撤回这一批', () => {
-  it('undo_last_sheet_edit 走真实工具通道 ⇒ 值回到「停用」且报剩余 0 层', async () => {
+describe('L-74 撤销：重解析上下文后仍能撤回这一批（且必须经预览卡确认）', () => {
+  it('undo_last_sheet_edit 帧 → 建卡 → 点应用 ⇒ 值回到「停用」且报剩余 0 层', async () => {
     const store = useAiStore()
     await previewAndApply(store)
 
-    const execution = await executeFrontendTool({
+    store.handleFrame({ type: 'start', runId: 'run-undo', sessionId: store.sessionId, seq: 1 })
+    const message = store.appendAssistantMessage()
+    const frame = {
+      type: 'frontend_tool_request',
+      toolCallId: 'u1',
       name: 'undo_last_sheet_edit',
-      args: { defCode: 'DEMO' },
-      budgetMs: 5_000
-    })
-    expect(execution.outcome).toBe('ok')
-    expect(execution.result).toContain('已撤销 2 格')
-    expect(execution.result).toContain('剩余可撤销 0 层')
+      args: JSON.stringify({ defCode: 'DEMO' }),
+      runId: 'run-undo',
+      seq: 2
+    } as Extract<SseFrame, { type: 'frontend_tool_request' }>
+    applyFrameToParts(message, frame)
+    await store.openWritePreview(message, frame)
+    // 工具安全边界批：建卡 ≠ 执行 —— 没点「应用」前表格不动
+    expect(store.activePreview?.tool).toBe('undo_last_sheet_edit')
+    expect(sheetRows.map((row) => row[2])).toEqual(['status', '启用', '禁用', '禁用'])
+
+    await store.confirmWritePreview()
+    const posted = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result?: string } | undefined
+    expect(posted?.result).toContain('已撤销 2 格')
+    expect(posted?.result).toContain('剩余可撤销 0 层')
     expect(sheetRows.map((row) => row[2])).toEqual(['status', '启用', '停用', '停用'])
   })
 })

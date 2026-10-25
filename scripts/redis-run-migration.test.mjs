@@ -884,6 +884,11 @@ test('排除键族一律不搬：fence/lease/epoch/ai:runs/session/beat/cancel/l
 		'ai:lease:epoch:{run:run-1}',
 		'ai:runs',
 		'ai:session:current:sess-1',
+		'ai:session:runs:sess-1',
+		'ai:purge:guard:sess-1',
+		'ai:purge:pending:sess-1',
+		'ai:purge:retry:queue',
+		'ai:purge:retry:lock',
 		'ai:beat:run-1',
 		'ai:cancel:run-1',
 		'ai:lock:task:7',
@@ -1160,8 +1165,13 @@ test('Cluster nodes(master) 为空 → 直接失败，不回落单节点扫描',
 	await assert.rejects(() => migration.discoverRunIds(cluster, {}), /master/i);
 });
 
-test('排除审计清单包含 activity/resume/ctx/safety/cfg/rate/migrate-lock', () => {
+test('排除审计清单包含运行态索引、销毁墓碑与 activity/resume/ctx/safety/cfg/rate/migrate-lock', () => {
 	for (const prefix of [
+		'ai:session:runs:',
+		'ai:purge:guard:',
+		'ai:purge:pending:',
+		'ai:purge:retry:queue',
+		'ai:purge:retry:lock',
 		'ai:activity:',
 		'ai:resume:lock:',
 		'ai:ctx:',

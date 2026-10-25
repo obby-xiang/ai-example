@@ -9,6 +9,7 @@ import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.definition.service.DependencyResolver;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.JobRepository;
@@ -357,8 +358,8 @@ class ImportFlowJobTest {
      */
     private void upload(Long taskId, String defCode, List<Map<String, Object>> rows) throws Exception {
         ConfigDefinition def = definitionService.findByCode(defCode);
-        String path = fileStorage.newPath(".xlsx");
-        excelWriter.write(def, rows, path);
+        StoredFile stored = fileStorage.allocate(".xlsx");
+        excelWriter.write(def, rows, stored.pathString());
 
         TaskFile file = taskFileRepository
                 .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD")
@@ -366,8 +367,8 @@ class ImportFlowJobTest {
         file.setTaskId(taskId);
         file.setDefCode(defCode);
         file.setFileType("UPLOAD");
-        file.setStoragePath(path);
-        file.setOriginalPath(path);
+        file.setStoragePath(stored.key());
+        file.setOriginalPath(stored.key());
         file.setFileName(defCode + ".xlsx");
         file.setRowCount(rows.size());
         taskFileRepository.save(file);

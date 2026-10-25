@@ -2,6 +2,7 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.example.configmgr.file.FileStorageService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -42,19 +43,33 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 */
 	private final FormAttachmentStore attachments;
 
+	/**
+	 * 物理文件存储（可为 null：只做 schema/值校验的单元路径）。非 null 时，附件
+	 * {@code consume} 成功后删除落盘文件（一次性件不会再有第二次读取机会）。
+	 */
+	private final FileStorageService fileStorage;
+
 	public GenerativeFormGuard(ObjectMapper objectMapper) {
 		this(objectMapper, (FormAttachmentStore) null);
 	}
 
 	@org.springframework.beans.factory.annotation.Autowired
 	public GenerativeFormGuard(ObjectMapper objectMapper,
-			ObjectProvider<FormAttachmentStore> attachmentsProvider) {
-		this(objectMapper, attachmentsProvider == null ? null : attachmentsProvider.getIfAvailable());
+			ObjectProvider<FormAttachmentStore> attachmentsProvider,
+			ObjectProvider<FileStorageService> fileStorageProvider) {
+		this(objectMapper, attachmentsProvider == null ? null : attachmentsProvider.getIfAvailable(),
+				fileStorageProvider == null ? null : fileStorageProvider.getIfAvailable());
 	}
 
 	GenerativeFormGuard(ObjectMapper objectMapper, FormAttachmentStore attachments) {
+		this(objectMapper, attachments, null);
+	}
+
+	GenerativeFormGuard(ObjectMapper objectMapper, FormAttachmentStore attachments,
+			FileStorageService fileStorage) {
 		this.objectMapper = objectMapper;
 		this.attachments = attachments;
+		this.fileStorage = fileStorage;
 	}
 
 	@Override
@@ -213,11 +228,37 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return true;
 		}
 		for (AttachmentRef ref : attachmentRefs(form, values)) {
+			// 物理路径必须在消费前取（消费会删掉登记条目）；取不到不影响一次性判定。
+			FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
 			if (!this.attachments.consume(ref.fileId())) {
 				return false;
 			}
+			deleteConsumedFile(stored);
 		}
 		return true;
+	}
+
+	/**
+	 * 一次性件被消费后已无第二次读取机会：删除落盘文件，避免附件目录只增不减。
+	 *
+	 * <p>登记簿里存的是<b>相对存储键</b>（新上传件）或历史绝对路径（迁移前登记）：两者都交给
+	 * {@code FileStorageService#delete} 经 {@code resolve} 还原成本实例路径，调用方不拼路径。
+	 *
+	 * <p>删盘失败只告警、不回滚"已消费"结论（登记已删、墓碑已置位，重试也拿不回文件）；
+	 * 反过来，消费失败（返回 false）时<b>不</b>删盘 —— 文件仍属可用登记。
+	 */
+	private void deleteConsumedFile(FormAttachmentStore.Attachment stored) {
+		if (this.fileStorage == null || stored == null || stored.storagePath() == null
+				|| stored.storagePath().isBlank()) {
+			return;
+		}
+		try {
+			this.fileStorage.delete(stored.storagePath());
+		}
+		catch (RuntimeException ex) {
+			log.warn("附件消费后删除落盘文件失败 fileId={} storageKey={}：{}", stored.fileId(),
+					stored.storagePath(), ex.getMessage());
+		}
 	}
 
 	/** 本轮回灌里实际带了值的 attachment 字段（只收 fileId 形状合法的值）。 */

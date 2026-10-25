@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.form;
 
+import java.util.List;
+
 /**
  * 生成式表单 attachment 字段的<b>上传件登记簿</b>（G-E）。
  *
@@ -34,6 +36,28 @@ public interface FormAttachmentStore {
 	 * 实现可以只保留短期墓碑（TTL 与登记同量级）。
 	 */
 	boolean wasConsumed(String fileId);
+
+	/**
+	 * 该会话仍在册的附件（会话销毁的枚举面；不存在/无 sessionId 归属的登记不返回）。
+	 *
+	 * <p>默认空表是给"只实现最小语义"的测试替身/轻量实现用的：它们没有会话索引，
+	 * 销毁时自然看不到这些登记。生产实现 {@code RedisFormAttachmentStore} 维护
+	 * {@code ai:form:att:sess:<sessionId>} 索引并覆盖本方法。<b>读失败必须抛出</b>
+	 * （销毁流程要求"先枚举报废面，失败不半删"），不得折成空表。
+	 */
+	default List<Attachment> findBySessionId(String sessionId) {
+		return List.of();
+	}
+
+	/**
+	 * 删除一条登记（会话销毁用；返回被删的登记，包含删除文件所必需的 {@code storagePath}）。
+	 *
+	 * <p>与 {@link #consume(String)} 的区别：不置"已消费"墓碑（销毁不是消费），
+	 * 幂等（不存在返回 null）。默认实现没有撤销登记的能力，返回 null；生产实现覆盖。
+	 */
+	default Attachment deleteRegistration(String fileId) {
+		return null;
+	}
 
 	/**
 	 * 一次上传的登记信息（只有元数据，<b>没有文件内容</b>）。

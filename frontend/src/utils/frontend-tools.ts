@@ -78,7 +78,7 @@ import {
   type UiToolOutcome
 } from '@/utils/ai-dom-tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
-import { listAiRegions } from '@/utils/ai-regions'
+import { currentAiEpoch, listAiRegions } from '@/utils/ai-regions'
 import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
 import type { ConfigField } from '@/types/definition'
 import {
@@ -89,7 +89,6 @@ import {
   readSheetSummary,
   reviewCells,
   sheetReadOnlyWriteBlocked,
-  undoLastSheetEdit,
   type SheetAdapter,
   type SheetContext,
   type SheetToolOutcome
@@ -574,7 +573,11 @@ function toolDisplayName(name: string): string {
 
 /** 四条路由的统一派发（不含预算；预算包在 {@link executeFrontendTool} 外层）。 */
 async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
-  const previous = previousSameCall(call)
+  // 槽位在**执行前**取定：键里的 epoch 就是本次执行观察到的现场（`ui_snapshot` 遍历的正是这份
+  // DOM）。执行期间现场若又推进（如 `navigate_to` 触发目标页挂载 → 区域注册推 epoch），
+  // 结果仍归旧现场，不会被记到新现场名下（见 rememberSameCall）。
+  const slot = dedupeSlotOf(call)
+  const previous = previousSameCall(slot)
   if (previous) {
     return makeExecution({
       outcome: previous.outcome,
@@ -584,11 +587,11 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
     })
   }
   const execution = await dispatchFrontendToolInner(call)
-  rememberSameCall(call, execution)
+  rememberSameCall(slot, execution)
   return execution
 }
 
-// ── 同参去重（批 A / D4-②） ──────────────────────────────────────────────────
+// ── 同参去重（批 A / D4-②；第 7 项：绑定页面 epoch） ────────────────────────────
 
 /**
  * 去重白名单：只读类（`ui_snapshot` / `ui_scroll` / `ui_highlight`）+ 导航（`navigate_to`）。
@@ -596,34 +599,72 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
  */
 const DEDUPE_TOOL_NAMES: ReadonlySet<string> = new Set(['ui_snapshot', 'ui_scroll', 'ui_highlight', 'navigate_to'])
 
-let dedupeRunId = ''
+/**
+ * 去重作用域 = `runId + 页面 epoch`；完整键 = 作用域 + 工具名 + 规范化 args。
+ *
+ * <h2>为什么 epoch 必须进键（第 7 项）</h2>
+ * `ui_snapshot` 的结果是对**某一份 DOM 现场**的描述，而 ref 的生命周期由 epoch 定义：
+ * 换页（`noteAiPage`）、区域注册/注销、显式 `bumpAiEpoch` 都会推进 `currentAiEpoch()`。
+ * 键里不带 epoch 时，同一轮里换页后再取快照会命中旧条目 —— 模型拿回的是**旧 epoch 的快照**
+ * （连头行的 epoch 都是旧的），据此操作旧 ref 必被元素围栏以「epoch 不匹配」拒执，白跑一轮；
+ * 更糟的是它没有任何理由怀疑这份"成功"的快照已过期。
+ *
+ * <h2>为什么作用域一变就整表清空</h2>
+ * 旧 epoch 的条目按定义不可达（键里带着 epoch），留着只是内存垃圾；清表也让
+ * "换页 / 注册 / 注销 / 显式推进 ⇒ 新现场，同参也要重新遍历 DOM"这条语义在代码里可读。
+ * 同 epoch 同参仍走去重（不因绑定 epoch 而丢掉既有的去重能力）。
+ */
+let dedupeScope = ''
 const dedupeCache = new Map<string, FrontendToolExecution>()
 
-function sameCallKey(call: FrontendToolCall): string {
-  const sorted: Record<string, unknown> = {}
-  for (const key of Object.keys(call.args).sort()) {
-    sorted[key] = call.args[key]
-  }
-  return `${call.name}|${JSON.stringify(sorted)}`
+/** 一次去重的槽位：`scope` 用于判定现场是否换过，`key` 是完整去重键。 */
+interface DedupeSlot {
+  /** `runId|epoch` */
+  scope: string
+  /** `runId|epoch|工具名|规范化 args` */
+  key: string
 }
 
-function previousSameCall(call: FrontendToolCall): FrontendToolExecution | null {
+function dedupeSlotOf(call: FrontendToolCall): DedupeSlot | null {
+  // 缺 runId（旧调用方 / 单测直调）⇒ 不去重（宁可多执行一次，也不跨轮误杀）。
   if (call.runId === undefined || call.runId === '' || !DEDUPE_TOOL_NAMES.has(call.name)) {
     return null
   }
-  if (call.runId !== dedupeRunId) {
-    dedupeRunId = call.runId
+  const scope = `${call.runId}|${currentAiEpoch()}`
+  return { scope, key: `${scope}|${call.name}|${stableArgsKey(call.args)}` }
+}
+
+/** args 的稳定序列化（键排序，避免同参不同书写顺序被当成两次调用）。 */
+function stableArgsKey(args: Record<string, unknown>): string {
+  const sorted: Record<string, unknown> = {}
+  for (const key of Object.keys(args).sort()) {
+    sorted[key] = args[key]
+  }
+  return JSON.stringify(sorted)
+}
+
+function previousSameCall(slot: DedupeSlot | null): FrontendToolExecution | null {
+  if (slot === null) {
+    return null
+  }
+  if (slot.scope !== dedupeScope) {
+    dedupeScope = slot.scope
     dedupeCache.clear()
     return null
   }
-  return dedupeCache.get(sameCallKey(call)) ?? null
+  return dedupeCache.get(slot.key) ?? null
 }
 
-function rememberSameCall(call: FrontendToolCall, execution: FrontendToolExecution): void {
-  if (call.runId === undefined || call.runId === '' || !DEDUPE_TOOL_NAMES.has(call.name)) {
+function rememberSameCall(slot: DedupeSlot | null, execution: FrontendToolExecution): void {
+  if (slot === null) {
     return
   }
-  dedupeCache.set(sameCallKey(call), execution)
+  // 执行期间现场已换过（epoch 推进 / 换轮）：本条结果描述的是旧现场，不记到新现场名下
+  // —— 记下去就等于"新 epoch 有了旧现场的结果"，正是本项要根治的错配。
+  if (slot.scope !== dedupeScope) {
+    return
+  }
+  dedupeCache.set(slot.key, execution)
 }
 
 /** 四条路由的派发本体。 */
@@ -1160,7 +1201,14 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
           : normalizeSuggest(ctx, args)
         break
       case 'undo_last_sheet_edit':
-        outcome = undoLastSheetEdit(ctx)
+        // 工具安全边界批（2026-10-25 裁决）：撤销会覆盖当前表格数据 ⇒ 必须经用户在预览卡上确认。
+        // 帧路径已由 needsSheetPreview 特判到 openWritePreview；走到这里说明有人绕过了确认面
+        // （旧客户端 / 直接调用执行器）—— fail-closed，一格都不写。
+        outcome = {
+          ok: false,
+          reason: '撤销会覆盖当前表格数据，必须由用户在预览卡上确认后执行（本次未做任何修改）。'
+            + '请重新发起 undo_last_sheet_edit，用户点「应用」后才会写回。'
+        }
         break
       default:
         outcome = { ok: false, reason: `未知的表格工具 ${name}。` }

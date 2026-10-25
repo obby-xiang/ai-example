@@ -49,16 +49,16 @@ public class ContextConfig {
 	}
 
 	/**
-	 * 摘要模型（L2 递归摘要用；D3：{@code summary-model} 空 = 主模型）。
+	 * 摘要模型（L2 递归摘要用；摘要链最小统一：本轮同一供应商同一模型）。
 	 *
 	 * <p>
-	 * 走 {@link ContextSummaryClient#production}：直接取 provider 的 {@code ChatModel}，不挂记忆 advisor
-	 * —— 摘要是一次旁路请求，不能读写主会话记忆。
+	 * 走 {@link ContextSummaryClient#production}：每次调用的 provider/model/options 由本轮
+	 * {@code ProviderRuntime} 传入，不持有注册表也不读全局默认；直接取 runtime 的 {@code ChatModel}，
+	 * 不挂记忆 advisor —— 摘要是一次旁路请求，不能读写主会话记忆。
 	 */
 	@Bean
-	public ContextSummaryClient contextSummaryClient(AiProperties properties,
-			ObjectProvider<com.example.configmgr.ai.config.AiProviderRegistry> providerRegistry) {
-		return ContextSummaryClient.production(properties, providerRegistry);
+	public ContextSummaryClient contextSummaryClient(AiProperties properties) {
+		return ContextSummaryClient.production(properties);
 	}
 
 	@Bean

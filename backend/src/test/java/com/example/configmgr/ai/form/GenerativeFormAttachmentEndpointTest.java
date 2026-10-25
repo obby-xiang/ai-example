@@ -5,6 +5,7 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
 
@@ -56,7 +57,8 @@ class GenerativeFormAttachmentEndpointTest {
 	@Test
 	void uploadReturnsFileIdAndMetadataOnly() throws Exception {
 		waitingForm("run-1", "call-1");
-		when(this.storage.store(any(), eq("evidence.pdf"))).thenReturn("/data/evidence.pdf");
+		when(this.storage.store(any(), eq("evidence.pdf")))
+			.thenReturn(new StoredFile("stored-evidence.pdf", java.nio.file.Path.of("/data/evidence.pdf")));
 
 		MockMultipartFile file = new MockMultipartFile("file", "evidence.pdf", "application/pdf",
 				"pdf-bytes".getBytes());
@@ -70,13 +72,17 @@ class GenerativeFormAttachmentEndpointTest {
 		assertThat(data).doesNotContainKey("storagePath");
 		assertThat(data.values()).noneMatch(value -> String.valueOf(value).contains("/data/"));
 		assertThat(this.attachments.find((String) data.get("fileId")).runId()).isEqualTo("run-1");
+		assertThat(this.attachments.find((String) data.get("fileId")).storagePath())
+			.as("登记簿只存相对存储键，不存本机路径")
+			.isEqualTo("stored-evidence.pdf");
 	}
 
 	/** I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。 */
 	@Test
 	void uploadDeletesTheStoredFileWhenRegistrationFails() throws Exception {
 		waitingForm("run-1", "call-1");
-		when(this.storage.store(any(), eq("evidence.pdf"))).thenReturn("/data/orphan-evidence.pdf");
+		when(this.storage.store(any(), eq("evidence.pdf")))
+			.thenReturn(new StoredFile("orphan-evidence.pdf", java.nio.file.Path.of("/data/orphan-evidence.pdf")));
 		FormAttachmentStore failing = new FormAttachmentStore() {
 			@Override
 			public Attachment register(String runId, String toolCallId, String sessionId, String fileName, long size,
@@ -106,7 +112,7 @@ class GenerativeFormAttachmentEndpointTest {
 
 		assertThatThrownBy(() -> failingController.upload(file, "run-1", "call-1", "sess-1"))
 			.isInstanceOf(AiStateUnavailableException.class);
-		verify(this.storage).delete("/data/orphan-evidence.pdf");
+		verify(this.storage).delete("orphan-evidence.pdf");
 	}
 
 	@Test
@@ -160,7 +166,8 @@ class GenerativeFormAttachmentEndpointTest {
 	@Test
 	void endpointsAreMappedOnTheDocumentedPaths() throws Exception {
 		waitingForm("run-1", "call-1");
-		when(this.storage.store(any(), eq("evidence.pdf"))).thenReturn("/data/evidence.pdf");
+		when(this.storage.store(any(), eq("evidence.pdf")))
+			.thenReturn(new StoredFile("route-evidence.pdf", java.nio.file.Path.of("/data/evidence.pdf")));
 		org.springframework.test.web.servlet.MockMvc mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
 			.standaloneSetup(this.controller)
 			.build();

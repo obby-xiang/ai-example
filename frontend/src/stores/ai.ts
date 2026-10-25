@@ -48,6 +48,7 @@ import { aiHighlight, clearUiHighlights } from '@/utils/ai-dom-tools'
 import type { UiUndoEntry } from '@/utils/ai-dom-tools'
 import {
   applySheetPlan,
+  applyUndoPlan,
   clearPreviewMarks,
   markPreviewCells,
   needsSheetPreview,
@@ -75,9 +76,9 @@ import {
   upsertToolPart as writeToolPart,
   writeSubmittedValuesToMessage
 } from '@/utils/parts'
-import { ErrorCode, type SuspendPoolSaturated } from '@/types/api'
+import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormValueIssue } from '@/types/form-schema'
 import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -112,6 +113,35 @@ let currentAbort: AbortController | null = null
  * 收口时直接用它把颜色擦掉（与 `activePreview` 同寿，任何清空 activePreview 的路径都同步清它）。
  */
 let previewSheetCtx: SheetContext | null = null
+/**
+ * 预览决策单飞令牌（交互专项 2026-10-25）：同一张卡的应用/取消/撤销只消费一次。
+ *
+ * <p>为什么需要它：`confirmWritePreview` 里有 `await resolveSheetContext()`，双击会在第一次
+ * 尚未落笔时进来第二次 —— 两次都读到同一个 `activePreview`，就会把同一批写入执行两遍、
+ * 回灌两次。令牌在首个 `await` 之前同步置位；第二击直接空操作。它是**模块级**的：
+ * 同一页签内多个 store 实例（跨实例重复确认）也共用这一次消费。
+ */
+let previewDecisionInFlight: string | null = null
+
+function previewDecisionKey(plan: SheetWritePlan): string {
+  return plan.previewId ?? `${plan.toolCallId}:${plan.planId}`
+}
+
+/** 尝试占用决策权（false = 同一张卡已有决策在途）。 */
+function beginPreviewDecision(plan: SheetWritePlan): boolean {
+  const key = previewDecisionKey(plan)
+  if (previewDecisionInFlight === key) {
+    return false
+  }
+  previewDecisionInFlight = key
+  return true
+}
+
+function endPreviewDecision(plan: SheetWritePlan): void {
+  if (previewDecisionInFlight === previewDecisionKey(plan)) {
+    previewDecisionInFlight = null
+  }
+}
 /**
  * 当前轮的宿主助手消息 id（模块级：与 `currentAbort` 同为"这一轮"的身份判据）。
  *
@@ -229,7 +259,26 @@ function gateReceiptOfStatus(status: unknown): { decision?: 'approved' | 'reject
  *    ⇒ 该会话已被另一页签持有 ⇒ **本页签是复制品** ⇒ 起新会话，不接管原会话。
  *    锁是浏览器按**文档（页签）**维护的资源，不依赖任何前端启发式。
  * ③ **BroadcastChannel**（`ai-session-ownership`）：`claim` / `released` 两种广播 ——
- *    原页签 `pagehide` 时广播 `released` 并释放锁，被判为复制品的**空白**页签接手该会话。
+ *    原页签 `pagehide` 时广播 `released`（**让渡意向**），被判为复制品的**空白**页签在
+ *    {@link OWNERSHIP_RELEASE_GRACE_MS} 宽限后**再探一次锁**才接手；原页签在这段期间重新广播
+ *    `claim`（刷新回来拿到同一把锁）⇒ 副本撤销接手。
+ *
+ * <h3>为什么 `released` 不是"立刻交接"（收口）</h3>
+ * 旧实现 `pagehide` 一到就 `released` + 释放锁：刷新 / 慢重载时空白副本会立刻接手，原页签的新文档
+ * 回来反被判成复制品并清屏。现在 `pagehide` 只广播意向、**不**同步释放锁（锁的真实归属由浏览器在
+ * 文档销毁时裁决），并给副本一段**有界宽限**：
+ * <ul>
+ * <li>宽限是**顺序辅助**，不是"某毫秒能证明所有浏览器/任意慢重载"——锁始终是唯一裁决；</li>
+ * <li>确实关掉的页签：文档销毁 ⇒ 锁释放 ⇒ 副本宽限后探活拿到锁，照旧接手（现有意图保留）；</li>
+ * <li>比宽限还慢的重载：副本可能先接手。回来的原页签凭 `pagehide` 写下的**返回意向**
+ *   （{@link RETURN_INTENT_KEY}，一次性、按 pageId + 时效校验）认出自己不是复制品，只把角色
+ *   降级为 'duplicate'，**不清会话、不清屏**（复制页签没有这份意向，仍走"换新会话 + 清镜像"）。</li>
+ * </ul>
+ *
+ * <h3>bfcache</h3>
+ * `pagehide.persisted === true` = 文档进 bfcache（还会回来）⇒ **不广播、不释放**；`pageshow`
+ * 恢复后做一次**有界重认领**：锁仍归我 ⇒ 重播 `claim`；锁已归别人 ⇒ 角色降级为 'duplicate'，
+ * 但不清会话（清屏在 bfcache 恢复时是灾难），也不再自认 owner（不双广播）。
  *
  * 环境不支持 Web Locks（旧浏览器 / jsdom）⇒ 判 'unsupported'，按**恢复**处理（保守：不丢现场，
  * 与 R-166 时代"读不到导航条目按恢复"同一兜底方向）。
@@ -244,6 +293,16 @@ export const OWNERSHIP_CHANNEL_NAME = 'ai-session-ownership'
 /** 锁探活次数与间隔（RC-4 ②）：刷新时旧文档的锁可能尚未随文档销毁释放，限次重试再判"被占"。 */
 export const LOCK_PROBE_ATTEMPTS = 3
 export const LOCK_PROBE_RETRY_MS = 150
+/**
+ * 让渡宽限（毫秒）：副本收到 `released` 后等这么久再探活/接手，给原页签的新文档留出"拿回同一把锁
+ * 并重播 claim"的窗口（`claim` 会撤销待接手）。取 1500ms 只是常见刷新时长的折中，**不是正确性证明**
+ * —— 真正的裁决仍是锁；慢于宽限的重载由 {@link RETURN_INTENT_KEY} 的降级路兜住"不清屏"。
+ */
+export const OWNERSHIP_RELEASE_GRACE_MS = 1500
+/** 「本页签刚从 pagehide 回来」的一次性意向键（慢重载时用来区分"回来的原页签"与"复制页签"）。 */
+export const RETURN_INTENT_KEY = 'ai-session-return-intent'
+/** 返回意向的有效期：过期的意向不再可信（避免旧值把后续复制页签误判成原页签）。 */
+export const RETURN_INTENT_TTL_MS = 60_000
 
 /** 本页签的会话所有权角色（RC-4）：'duplicate' = 由复制产生、已换新会话且尚未接手原会话；
  *  'unsupported' = 环境无 Web Locks（旧浏览器）⇒ 按恢复处理（终态，不再探活）。 */
@@ -267,7 +326,18 @@ export interface OwnershipMessage {
 let heldLock: { name: string; release: () => void } | null = null
 let ownedSessionId: string | null = null
 let ownershipChannel: OwnershipChannel | null = null
-let pageHideBound = false
+let ownershipLifecycleBound = false
+/** 本页签曾在 pagehide 里"离开"过（bfcache 冻结 / 卸载）——`pageshow` 只在此时重认领。 */
+let ownershipHidden = false
+/** 待接手的让渡（`released` 之后的宽限计时器）；`claim` 到达即撤销。 */
+let pendingTakeover: { sessionId: string; timer: ReturnType<typeof setTimeout> } | null = null
+/** 生命周期监听只绑一次，回调里的 store 面由最近一次 `ensureTabOwnership` 的实例提供。 */
+let tabStore: TabOwnershipSink | null = null
+
+/** 生命周期回调需要的 store 最小面（避免闭包捕获某一个 pinia 实例）。 */
+interface TabOwnershipSink {
+  revalidateTabOwnership(): Promise<void>
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -411,6 +481,76 @@ function releaseSessionLock(): void {
 }
 
 /**
+ * 只释放「本页签文档持有、且确实属于 `sessionId` 这把锁」的会话锁 —— 换会话 id 前用。
+ *
+ * <p>换 id 不释放旧锁会让 `heldLock` 被随后的新锁覆盖：旧锁的 `release` 句柄丢失，锁一直占着
+ * 到文档销毁（别的页签在此期间探活会被误判"原页签还活着"）。反向约束同样重要：**不碰别人的锁**
+ * —— 账本不一致时只清归属、不做释放（宁可少释放，也不误放别人的）。
+ *
+ * <p>两种环境：**supported**（有 Web Locks）按上面的账本释放；**unsupported**（旧浏览器 /
+ * jsdom，`ownedSessionId` 恒为 null）两者都是空操作 —— 没有锁可泄漏，也不需要额外分支。
+ */
+function releaseOwnLock(sessionId: string): void {
+  if (ownedSessionId !== sessionId) {
+    return
+  }
+  if (heldLock !== null && heldLock.name !== SESSION_LOCK_PREFIX + sessionId) {
+    ownedSessionId = null
+    return
+  }
+  releaseSessionLock()
+}
+
+/** 撤销待接手的让渡（`claim` 到达 / 重新判定角色 / 换会话时）。 */
+function cancelPendingTakeover(): void {
+  if (pendingTakeover === null) {
+    return
+  }
+  clearTimeout(pendingTakeover.timer)
+  pendingTakeover = null
+}
+
+/** 记下"本页签刚从 pagehide 离开"的意向（刷新/慢重载回来后据此认出自己不是复制品）。 */
+function rememberReturnIntent(sessionId: string): void {
+  try {
+    sessionStorage.setItem(
+      RETURN_INTENT_KEY,
+      JSON.stringify({ sessionId, pageId: readPageId(), at: Date.now() })
+    )
+  } catch {
+    // 隐私模式/配额：写不进去只是少一条降级保护，不影响所有权判定
+  }
+}
+
+/**
+ * 读取并**消费**返回意向：一次性（读到即删），且必须同会话 + 同 pageId + 未过期。
+ * 任何不自洽的意向都当不存在 —— 复制页签继承了旧意向时，最多退化成"不清屏"的无害降级。
+ */
+function takeReturnIntent(sessionId: string): boolean {
+  let raw: string | null = null
+  try {
+    raw = sessionStorage.getItem(RETURN_INTENT_KEY)
+    if (raw !== null) {
+      sessionStorage.removeItem(RETURN_INTENT_KEY)
+    }
+  } catch {
+    return false
+  }
+  if (raw === null) {
+    return false
+  }
+  try {
+    const value = JSON.parse(raw) as { sessionId?: unknown; pageId?: unknown; at?: unknown }
+    return value.sessionId === sessionId
+      && value.pageId === readPageId()
+      && typeof value.at === 'number'
+      && Date.now() - value.at <= RETURN_INTENT_TTL_MS
+  } catch {
+    return false
+  }
+}
+
+/**
  * 三层握手的判定入口（RC-4）：锁被占**限次重试**（`LOCK_PROBE_ATTEMPTS` × `LOCK_PROBE_RETRY_MS`）
  * —— 刷新场景里旧文档的锁可能尚未随文档销毁释放，早判会把刷新误判成复制品。
  */
@@ -430,18 +570,44 @@ async function resolveTabOwnership(sessionId: string): Promise<TabOwnership> {
   return 'duplicate'
 }
 
-/** 离开页面时广播让渡 + 释放锁（RC-4 ③）。只绑一次；`pagehide` 覆盖关闭/刷新/前后退。 */
-function bindOwnershipRelease(): void {
-  if (pageHideBound) {
+/**
+ * 页签生命周期（RC-4 ③）：`pagehide` 广播**让渡意向**，`pageshow` 重新探活。只绑一次。
+ *
+ * <p>`pagehide` 不再同步释放锁 —— 刷新场景里新的文档要能立刻重新拿到同一把锁（浏览器在文档
+ * 销毁时才释放）。宽限到期仍未销毁的文档自己做一次清理，避免长期占着"已让渡"的锁。
+ *
+ * <p>`pagehide.persisted === true`（进 bfcache）连意向都不发：文档还活着，锁与会话都在，
+ * 广播只会让空白副本接手一个还会回来的页签。
+ */
+function bindOwnershipLifecycle(): void {
+  if (ownershipLifecycleBound) {
     return
   }
-  pageHideBound = true
-  window.addEventListener('pagehide', () => {
+  ownershipLifecycleBound = true
+  window.addEventListener('pagehide', (event) => {
     if (ownedSessionId === null) {
       return
     }
-    postOwnership('released', ownedSessionId)
-    releaseSessionLock()
+    ownershipHidden = true
+    if ((event as PageTransitionEvent).persisted === true) {
+      return
+    }
+    const sid = ownedSessionId
+    postOwnership('released', sid)
+    rememberReturnIntent(sid)
+    // 卸载路径上这个计时器不会跑（文档先销毁，锁由浏览器释放）；跑得到说明文档还活着 ⇒ 释放不占着
+    setTimeout(() => {
+      if (ownedSessionId === sid) {
+        releaseSessionLock()
+      }
+    }, OWNERSHIP_RELEASE_GRACE_MS)
+  })
+  window.addEventListener('pageshow', () => {
+    if (!ownershipHidden) {
+      return
+    }
+    ownershipHidden = false
+    void tabStore?.revalidateTabOwnership()
   })
 }
 
@@ -665,6 +831,7 @@ function writeMirror(
       lastRunId,
       // 批G · G4：在途标记 + 帧序号 —— 刷新后据此决定"静默续收"，以及能否只补差量。
       // `stopped` 一并入镜像（S3/S4）：停止标记必须活过刷新，否则半截正文刷新后变成"完整答案"。
+      // `truncated`（截断专项）同理：长度截断是持久事实，刷新后仍要提示"这不是完整答案"。
       inFlight: extra.inFlight === true,
       runSeq: extra.runSeq ? { ...extra.runSeq } : undefined,
       // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）；
@@ -677,7 +844,8 @@ function writeMirror(
         reasoning: message.reasoning,
         toolRuns: message.toolRuns,
         pendingCall: message.pendingCall,
-        ...(message.stopped ? { stopped: true } : {})
+        ...(message.stopped ? { stopped: true } : {}),
+        ...(message.truncated ? { truncated: true } : {})
       }))
     }
     sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify(mirror))
@@ -750,10 +918,17 @@ function roleOf(type: string): ChatMessage['role'] {
  *
  * <p>两条来源：① `toolResponses[]` —— 后端从持久化信封里取回
  * `truncated/noticeCode/originalChars/returnedChars/strategy/truncatedReason`；② 历史条目自身
- * （additive，文本段可携带同名字段；当前后端不产该键，仅为未来载荷/镜像前向兼容）。缺键一律不写，保证旧历史重建后的段形状
- * 与既有实现逐字一致（不回退出 `undefined` 键）。
+ * （additive，文本段可携带同名字段；当前后端仅对 `toolResponses` 产出）。缺键一律不写，保证旧历史
+ * 重建后的段形状与既有实现逐字一致（不回退出 `undefined` 键）。
+ *
+ * <p><b>消息级 vs 段级同名键（截断专项）</b>：只有裸 `truncated` 时按消息级长度截断处理，
+ * 走 {@link ChatMessage.truncated} + 面板徽标；若同时有 noticeCode/字符数/策略/旧原因等段级
+ * 元数据，则是旧帧的段级截断，必须保留 truncated 及其余字段，刷新后角标不能丢。
  */
-function historyTruncationFields(source: unknown): Partial<MessageTruncationFields> {
+function historyTruncationFields(
+  source: unknown,
+  options: { includeTruncated?: boolean } = {}
+): Partial<MessageTruncationFields> {
   if (source === null || typeof source !== 'object') {
     return {}
   }
@@ -766,7 +941,7 @@ function historyTruncationFields(source: unknown): Partial<MessageTruncationFiel
     truncatedReason?: unknown
   }
   const fields: Partial<MessageTruncationFields> = {}
-  if (typeof value.truncated === 'boolean') {
+  if (options.includeTruncated !== false && typeof value.truncated === 'boolean') {
     fields.truncated = value.truncated
   }
   if (value.noticeCode === 'frame_truncated' || value.noticeCode === 'frame_limit_unreached'
@@ -984,6 +1159,44 @@ function clearNotice(sink: NoticeSink): void {
   sink.noticeCode = null
   sink.noticeArgs = null
   sink.notice = null
+}
+
+/**
+ * 精确清理旧会话的浏览器残留（服务端 `clientCleanup` 的唯一消费点）。
+ *
+ * <p>只删两处：<b>该会话</b>的镜像键 `ai-mirror:<sid>`（响应值必须与期望键一致，否则回落期望键，
+ * 防止服务端字段异常删到别的键）与<b>枚举到的</b> `draftToolCallIds` 对应草稿键（由
+ * `clearFormDraft` 固定拼 `cm.ai.form.draft.<id>`）。<b>严禁</b> `sessionStorage.clear()` 或前缀
+ * 通配：同一页签可能已换到新会话，其它页签/业务状态也在同一 sessionStorage 里。
+ *
+ * <p>响应缺字段（旧后端/旧版本）时仍清该会话镜像；草稿只在有 id 时清（当前活动表单已由
+ * `adoptFreshSession` 的 `dropActiveForm` 清掉）。
+ */
+function cleanupSessionLocalArtifacts(sessionId: string, payload: SessionPurgeResponse | null): void {
+  const expectedMirror = MIRROR_PREFIX + sessionId
+  const cleanup = payload?.clientCleanup
+  const mirrorKey = cleanup?.mirrorKey === expectedMirror ? cleanup.mirrorKey : expectedMirror
+  try {
+    sessionStorage.removeItem(mirrorKey)
+  } catch {
+    // 隐私模式/存储被禁用：清不掉不影响主流程（新会话已换 id）
+  }
+  const draftIds = Array.isArray(cleanup?.draftToolCallIds) ? cleanup.draftToolCallIds : []
+  for (const toolCallId of draftIds) {
+    if (typeof toolCallId === 'string' && toolCallId.length > 0) {
+      clearFormDraft(toolCallId)
+    }
+  }
+}
+
+/** `complete=false` 的三种形态（含字段缺失兼容：旧后端没有 complete 时按完成处理）。 */
+function purgeWasIncomplete(payload: SessionPurgeResponse | null): boolean {
+  if (!payload) {
+    return false
+  }
+  const deferred = Array.isArray(payload.deferred) ? payload.deferred : []
+  const errors = Array.isArray(payload.errors) ? payload.errors : []
+  return payload.complete === false || payload.aborted === true || deferred.length > 0 || errors.length > 0
 }
 
 export const useAiStore = defineStore('ai', {
@@ -1581,9 +1794,19 @@ export const useAiStore = defineStore('ai', {
         const calls = item.toolCalls ?? []
         const blankText = (item.text ?? '').trim() === ''
         const hasTextPart = !blankText || calls.length === 0
+        const hasTextFrameTruncation = item.noticeCode !== undefined
+          || item.originalChars !== undefined || item.returnedChars !== undefined
+          || item.strategy !== undefined || item.truncatedReason !== undefined
         const parts: MessagePart[] = [
           ...(hasTextPart
-            ? [{ kind: 'text', seg: 0, text: item.text ?? '', streaming: false, ...historyTruncationFields(item) } as MessagePart]
+            ? [{
+              kind: 'text',
+              seg: 0,
+              text: item.text ?? '',
+              streaming: false,
+              // 裸 truncated 是消息级长度截断；有段级元数据时则保留旧帧的段级截断标记。
+              ...historyTruncationFields(item, { includeTruncated: hasTextFrameTruncation })
+            } as MessagePart]
             : []),
           ...calls.map((call, toolIndex): ToolPart => {
             const name = call.name ?? '未知工具'
@@ -1672,7 +1895,9 @@ export const useAiStore = defineStore('ai', {
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
           // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
-          ...(item.stopped === true ? { stopped: true } : {})
+          ...(item.stopped === true ? { stopped: true } : {}),
+          // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
+          ...(item.truncated === true ? { truncated: true } : {})
         }
         deriveProjections(message)
         return [message]
@@ -2362,7 +2587,22 @@ export const useAiStore = defineStore('ai', {
         outcome = settleOutcome(sawErrorTerminal ? 'error' : 'ok')
       } catch (error) {
         const busyConflict = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
-        if (isCurrentRound()) {
+        const sessionPurged = error instanceof ApiError && error.code === ErrorCode.SESSION_PURGED
+        /** 410 是否由本处做了本地恢复（决定收尾口径与乐观气泡的去向）。 */
+        let purgedRecovered = false
+        if (sessionPurged) {
+          // 410 SESSION_PURGED = 服务端已销毁该 sessionId（`/chat` 开新轮前的销毁守卫）。
+          // 唯一出路是**本地**换新 id：复用 adoptFreshSession（换 id + 清现场：镜像/乐观气泡/在途轮），
+          // 不再 DELETE 已销毁的会话、不自动重发；用户原稿由面板既有的"失败回稿"留在输入框一处。
+          if (isCurrentRound()) {
+            this.adoptFreshSession()
+            // 新 id 的锁归本页签（随机新 id 必然空闲）—— 与 resetSession 同口径，别让本页签
+            // 换完 id 却不持锁（否则页签生命周期的重认领/让渡对它全部失灵）。
+            void this.claimSessionOwnership(this.sessionId)
+            setNotice(this, 'ai.notice.sessionPurged')
+            purgedRecovered = true
+          }
+        } else if (isCurrentRound()) {
           this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
         } else if (busyConflict) {
           // R-04 真机回归（2026-10-23）：409 与刷新恢复竞态时，本轮身份已在恢复路径上被换掉
@@ -2378,7 +2618,9 @@ export const useAiStore = defineStore('ai', {
             (message) => message.id !== assistant.id && message.id !== userMessageId
           )
         }
-        outcome = settleOutcome('error')
+        // 410 恢复换了会话 ⇒ 这次发送**确实失败**（不是"被别的轮打断"）：outcome 必须是 'error'，
+        // 面板据此回稿且不把已清空的旧消息设成编辑锚点。其余情形仍按"是否还是本轮"判定。
+        outcome = purgedRecovered ? 'error' : settleOutcome('error')
       } finally {
         if (isCurrentRound()) {
           // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
@@ -2421,7 +2663,8 @@ export const useAiStore = defineStore('ai', {
               || error.code === ErrorCode.AI_UNAVAILABLE
               || error.code === ErrorCode.AI_REDIS_UNAVAILABLE
               || error.code === ErrorCode.AI_KEY_MISSING
-              || error.code === ErrorCode.AI_KEY_UNREADABLE)
+              || error.code === ErrorCode.AI_KEY_UNREADABLE
+              || error.code === ErrorCode.NO_MODEL_CONFIGURED)
           const literal = error instanceof Error && !localizedElsewhere
             ? translate('ai.panel.sendNotSentInline', { message: error.message })
             : null
@@ -2481,6 +2724,11 @@ export const useAiStore = defineStore('ai', {
           break
         case ErrorCode.AI_KEY_UNREADABLE:
           setNotice(this, 'ai.notice.keyUnreadable')
+          void this.probeHealth()
+          break
+        case ErrorCode.NO_MODEL_CONFIGURED:
+          // 默认目标缺模型/绑定模型失效：专门文案 + 专门错误卡，不打后端中文原文。
+          setNotice(this, 'ai.notice.noModelConfigured')
           void this.probeHealth()
           break
         case ErrorCode.AI_REDIS_UNAVAILABLE:
@@ -2931,6 +3179,8 @@ export const useAiStore = defineStore('ai', {
       issues?: FormValueIssue[]
       /** G-A：改对后可否重试（code 决定） */
       retryable?: boolean
+      /** 结构化回灌体超限（FRONTEND_RESULT_TOO_LARGE）：表单回到可编辑态、保留输入 */
+      tooLarge?: boolean
     }> {
       // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
@@ -2976,6 +3226,18 @@ export const useAiStore = defineStore('ai', {
           setNotice(this, cancelled ? 'ai.notice.toolTerminal' : 'ai.notice.toolAlreadySubmitted')
           return { ok: false, duplicate: true }
         }
+        if (error instanceof ApiError && error.code === ErrorCode.FRONTEND_RESULT_TOO_LARGE) {
+          // 结构化回灌体超限（本地预检漏网 / 旧客户端 / 上限下调）：与 FORM_RESULT_REJECTED 同形，
+          // 但语义是"缩短可重试"——挂起仍在等待，表单不得被吞成终态失败。
+          const body = error.bodyAs<{ message?: unknown; reasons?: unknown }>()
+          const reasons = body?.reasons
+          const detail = Array.isArray(reasons) && reasons.length > 0
+            ? reasons.map((item) => String(item)).join('；')
+            : typeof body?.message === 'string' && body.message !== ''
+              ? body.message
+              : error.message
+          return { ok: false, rejected: detail, issues: [], retryable: true, tooLarge: true }
+        }
         if (error instanceof ApiError && error.code === ErrorCode.FORM_RESULT_REJECTED) {
           // 400 + status:"PENDING"：挂起仍在等待 —— 不置 notice 打断填写，由表单卡展示拒绝原因，
           // 用户改值后用同一 toolCallId 重发，或改发取消
@@ -2998,7 +3260,10 @@ export const useAiStore = defineStore('ai', {
             ok: false,
             rejected: detail,
             issues,
-            retryable: body?.retryable !== false
+            retryable: body?.retryable !== false,
+            // 兼容现行后端：FORM_RESULT_REJECTED 内层 issue code = RESULT_TOO_LARGE 时
+            // 与 FRONTEND_RESULT_TOO_LARGE 同语义（体积超限 ⇒ 缩短可重试）
+            ...(issues.some((issue) => issue.code === 'RESULT_TOO_LARGE') ? { tooLarge: true } : {})
           }
         }
         const message = error instanceof Error ? error.message : translate('ai.notice.toolSubmitFailed')
@@ -3122,6 +3387,15 @@ export const useAiStore = defineStore('ai', {
         deriveProjections(message)
         await this.submitFrontendToolResult(toolCallId, reason, 'frontend-executor', false, runId, 'failed')
       }
+      // 撤销的新卡不得静默挤掉一张仍在等人决策的预览卡（工具安全边界批）：那张卡的 plan 会被覆盖，
+      // 用户再也点不到「应用」，而它的 toolCallId 会悬到超时 —— 宁可拒不建卡，如实让模型先收口。
+      if (frame.name === 'undo_last_sheet_edit' && this.activePreview
+        && this.activePreview.toolCallId !== toolCallId) {
+        // i18n（本批范围）：这条回执同时进用户结果与模型回灌，按当前界面语言取文案（既有
+        // `sheet.readOnlyWriteBlocked` 同模式）；不把新增中文继续堆进残留基线。
+        await fail(translate('sheet.undoPreviewBusy', { tool: this.activePreview.tool }))
+        return
+      }
       const resolved = await resolveSheetContext(args.defCode)
       if (!resolved.ok) {
         await fail(resolved.reason)
@@ -3141,10 +3415,19 @@ export const useAiStore = defineStore('ai', {
         await fail(planned.reason)
         return
       }
+      // 旧卡的计划即将被新计划替换：先撤掉旧预览的屏幕色，并把旧 toolCallId 记为"已失效"——
+      // 卡面据此变成「预览已失效 + 放弃」，而放弃键按 part.toolCallId 回灌 cancelled，
+      // 不会出现"plan=null、放弃键点不动、写工具又无超时"的死键挂死（本轮 M2）。
+      const previousPreview = this.activePreview && this.activePreview.toolCallId !== toolCallId
+        ? this.activePreview
+        : null
+      if (previousPreview && previewSheetCtx) {
+        clearPreviewMarks(previewSheetCtx)
+      }
       this.activePreview = { ...planned.plan, runId }
       // 收口用的上下文引用（见模块级 previewSheetCtx 注释）：与 activePreview 同寿
       previewSheetCtx = resolved.ctx
-      this.stalePreviewToolCallId = null
+      this.stalePreviewToolCallId = previousPreview ? previousPreview.toolCallId : null
       // 预览态高亮（L-23）：计数档没有逐格明细 ⇒ 这里通常是 0 格；切到明细档时再上色。
       markPreviewCells(resolved.ctx, this.activePreview)
       this.upsertToolPart(message, {
@@ -3522,6 +3805,10 @@ export const useAiStore = defineStore('ai', {
       if (!plan || plan.preview === level) {
         return
       }
+      // 撤销没有"明细档"（反向补丁本身就是全量明细）⇒ 切档是空操作，不改计划、不动高亮
+      if (plan.tool === 'undo_last_sheet_edit') {
+        return
+      }
       if (level === 'count' || plan.detail === 'full') {
         this.activePreview = { ...plan, preview: level }
         if (level === 'count') {
@@ -3607,81 +3894,97 @@ export const useAiStore = defineStore('ai', {
         setNotice(this, 'ai.notice.sheetLargePlan', { rows: plan.rowsCount, cells: plan.cellsCount })
         return
       }
-      const resolved = await resolveSheetContext(plan.defCode)
-      if (!resolved.ok) {
-        this.activePreview = null
-        previewSheetCtx = null
-        await this.finishSheetTool({
-          toolCallId: plan.toolCallId,
-          name: plan.tool,
-          runId: plan.runId,
-          status: 'failed',
-          result: resolved.reason
-        })
+      // 恰好一次：双击/跨实例重复确认在首个 await 之前就被这里挡住（第二次是空操作）
+      if (!beginPreviewDecision(plan)) {
         return
       }
-      previewSheetCtx = resolved.ctx
-      // 计数档没有逐格新值 ⇒ 落笔前必须先物化明细（§6.2）。这一步是"应用"的必要前提：
-      // 没有它就只能"改 0 格"，那是谎。物化超硬上限 ⇒ 如实回灌失败，不静默降级。
-      let applied = plan
-      if (plan.detail === 'none') {
-        const materialized = replanSheet(resolved.ctx, plan, 'sample-diff')
-        if (!materialized.ok) {
+      // 异步期间可能已有新卡到来：只清自己这张
+      const clearOwnPreview = (): void => {
+        if (this.activePreview?.planId === plan.planId) {
           this.activePreview = null
           previewSheetCtx = null
+        }
+      }
+      try {
+        const resolved = await resolveSheetContext(plan.defCode)
+        if (!resolved.ok) {
+          clearOwnPreview()
           await this.finishSheetTool({
             toolCallId: plan.toolCallId,
             name: plan.tool,
             runId: plan.runId,
             status: 'failed',
-            result: materialized.reason
+            result: resolved.reason
           })
           return
         }
-        // 关键：指纹/目标行沿用**预览时**那一份。物化是按"此刻"的表状态重算的，若把重算出的
-        // 指纹当成预览指纹，就等于把改动后的状态认成预览时的状态 —— 行指纹这道闸会被自己绕过。
-        applied = {
-          ...materialized.plan,
-          targetRows: plan.targetRows,
-          fingerprint: plan.fingerprint
+        previewSheetCtx = resolved.ctx
+        // 计数档没有逐格新值 ⇒ 落笔前必须先物化明细（§6.2）。这一步是"应用"的必要前提：
+        // 没有它就只能"改 0 格"，那是谎。物化超硬上限 ⇒ 如实回灌失败，不静默降级。
+        let applied = plan
+        if (plan.detail === 'none') {
+          const materialized = replanSheet(resolved.ctx, plan, 'sample-diff')
+          if (!materialized.ok) {
+            clearOwnPreview()
+            await this.finishSheetTool({
+              toolCallId: plan.toolCallId,
+              name: plan.tool,
+              runId: plan.runId,
+              status: 'failed',
+              result: materialized.reason
+            })
+            return
+          }
+          // 关键：指纹/目标行沿用**预览时**那一份。物化是按"此刻"的表状态重算的，若把重算出的
+          // 指纹当成预览指纹，就等于把改动后的状态认成预览时的状态 —— 行指纹这道闸会被自己绕过。
+          applied = {
+            ...materialized.plan,
+            targetRows: plan.targetRows,
+            fingerprint: plan.fingerprint
+          }
+          this.activePreview = applied
         }
-        this.activePreview = applied
-      }
-      // 预览色先撤：同一格不该同时挂两种底色（已应用色由 applySheetPlan 上）
-      clearPreviewMarks(resolved.ctx)
-      const outcome = applySheetPlan(resolved.ctx, applied)
-      this.activePreview = null
-      previewSheetCtx = null
-      if (!outcome.ok) {
+        // 预览色先撤：同一格不该同时挂两种底色（已应用色由 applySheetPlan 上）
+        clearPreviewMarks(resolved.ctx)
+        // 撤销走自己的落笔函数：身份校验（栈顶仍是本计划要撤的那一层）+ 冲突复核 + 反向补丁，
+        // 从而"同一次撤销恰好一次"（applySheetPlan 会反向入栈，撤销不能走它）。
+        const outcome = applied.tool === 'undo_last_sheet_edit'
+          ? applyUndoPlan(resolved.ctx, applied)
+          : applySheetPlan(resolved.ctx, applied)
+        clearOwnPreview()
+        if (!outcome.ok) {
+          await this.finishSheetTool({
+            toolCallId: applied.toolCallId,
+            name: applied.tool,
+            runId: applied.runId,
+            status: 'failed',
+            result: outcome.reason
+          })
+          return
+        }
         await this.finishSheetTool({
           toolCallId: applied.toolCallId,
           name: applied.tool,
           runId: applied.runId,
-          status: 'failed',
-          result: outcome.reason
+          status: 'succeeded',
+          result: outcome.text,
+          // 写侧元数据（§4.2 planId / previewLevel）：样例对数是"回灌了几处业务值"的度量，
+          // >0 即 D2 —— 写路径本来就是 D2 通道（§0 结论 2）
+          sheetMeta: {
+            dataClass: applied.samples.length > 0 ? 'D2' : 'D1',
+            // 只报"回灌了几处样例"；写侧不回给字符数（没有可靠的度量源，宁缺不造）
+            sampleRows: applied.samples.length,
+            planId: applied.planId,
+            previewLevel: applied.preview,
+            sheetVer: applied.sheetVer,
+            defCode: applied.defCode
+          }
         })
-        return
+        // 卡面一行「AI 改动 N 格（可撤销，深度 3 中第 L 层）」（§5.4；不新增工具，也不新增帧字段）
+        this.sheetApplied = sheetAppliedSummary(resolved.ctx)
+      } finally {
+        endPreviewDecision(plan)
       }
-      await this.finishSheetTool({
-        toolCallId: applied.toolCallId,
-        name: applied.tool,
-        runId: applied.runId,
-        status: 'succeeded',
-        result: outcome.text,
-        // 写侧元数据（§4.2 planId / previewLevel）：样例对数是"回灌了几处业务值"的度量，
-        // >0 即 D2 —— 写路径本来就是 D2 通道（§0 结论 2）
-        sheetMeta: {
-          dataClass: applied.samples.length > 0 ? 'D2' : 'D1',
-          // 只报"回灌了几处样例"；写侧不回给字符数（没有可靠的度量源，宁缺不造）
-          sampleRows: applied.samples.length,
-          planId: applied.planId,
-          previewLevel: applied.preview,
-          sheetVer: applied.sheetVer,
-          defCode: applied.defCode
-        }
-      })
-      // 卡面一行「AI 改动 N 格（可撤销，深度 3 中第 L 层）」（§5.4；不新增工具，也不新增帧字段）
-      this.sheetApplied = sheetAppliedSummary(resolved.ctx)
     },
 
     /** 用户点“取消”：零写 + `cancelled=true` ⇒ 后端 `FRONTEND_CANCELLED`。 */
@@ -3690,20 +3993,28 @@ export const useAiStore = defineStore('ai', {
       if (!plan) {
         return
       }
+      // 与「应用」共用同一张卡的决策权：应用在途时取消不再抢跑（一次决策只有一种结局）
+      if (!beginPreviewDecision(plan)) {
+        return
+      }
       this.activePreview = null
       previewSheetCtx = null
-      const resolved = await resolveSheetContext(plan.defCode)
-      if (resolved.ok) {
-        clearPreviewMarks(resolved.ctx)
+      try {
+        const resolved = await resolveSheetContext(plan.defCode)
+        if (resolved.ok) {
+          clearPreviewMarks(resolved.ctx)
+        }
+        await this.finishSheetTool({
+          toolCallId: plan.toolCallId,
+          name: plan.tool,
+          runId: plan.runId,
+          status: 'cancelled',
+          result: planCancelledText(),
+          cancelled: true
+        })
+      } finally {
+        endPreviewDecision(plan)
       }
-      await this.finishSheetTool({
-        toolCallId: plan.toolCallId,
-        name: plan.tool,
-        runId: plan.runId,
-        status: 'cancelled',
-        result: planCancelledText(),
-        cancelled: true
-      })
     },
 
     /**
@@ -3729,7 +4040,7 @@ export const useAiStore = defineStore('ai', {
      * @param reason `session` / `stop` = 整轮或整会话结束，卡不再需要"失效"提示；
      *   其余 = 上下文变了但轮次还在 ⇒ 卡面转「预览已失效（可放弃）」，让用户知道为什么不能应用了。
      */
-    dropSheetPreview(reason: 'session' | 'page' | 'tab' | 'selection' | 'stop' = 'page'): void {
+    dropSheetPreview(reason: 'session' | 'page' | 'tab' | 'selection' | 'stop' | 'reload' = 'page'): void {
       const plan = this.activePreview
       if (reason === 'session' || reason === 'stop') {
         // 整轮/整会话结束：卡面不再需要「预览已失效」提示，旧失效标记一并清
@@ -3775,6 +4086,21 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 程序化载入收口（交互专项 2026-10-25）：上传新文件 / 重跑导出 / 换任务重载后，
+     * 该配置项的旧预览必须立即失效。
+     *
+     * <p>页面在载入成功后调用；真正的硬闸仍是 `previewId`（loadGeneration + instanceId）——
+     * 即使页面漏调，旧计划也会在应用时被拒。这里做的是"提前把卡面切到失效态"。
+     */
+    onSheetReloaded(defCode: string): void {
+      const plan = this.activePreview
+      if (!plan || plan.defCode !== defCode) {
+        return
+      }
+      this.dropSheetPreview('reload')
+    },
+
+    /**
      * 离开承载表格的页面（B12）：预览计划已不可达（`sheet.current` handler 随卸载摘掉），
      * 收口为「预览已失效」，卡面给「放弃」入口；屏幕色同步撤掉（组件卸载前最后一帧）。
      */
@@ -3782,22 +4108,38 @@ export const useAiStore = defineStore('ai', {
       this.dropSheetPreview('page')
     },
 
-    /** 用户对“预览已失效”卡点“放弃”：回灌 `cancelled=true`，让模型重新发起。 */
-    async abandonStalePreview(): Promise<void> {
-      const toolCallId = this.stalePreviewToolCallId
-      if (!toolCallId) {
+    /**
+     * 用户对“预览已失效”卡点“放弃”：回灌 `cancelled=true`，让模型重新发起。
+     *
+     * @param toolCallId 卡面所属的 toolCallId（卡面显式传入；缺省回落 {@link stalePreviewToolCallId}）。
+     *   必须由卡面传入的原因：多张卡先后失效时单一 `stalePreviewToolCallId` 记不住全部，
+     *   旧卡会变成"plan=null、放弃键点不动"的死键 —— 而写工具等的是人（无超时），一挂就是永久。
+     */
+    async abandonStalePreview(toolCallId?: string): Promise<void> {
+      const id = toolCallId && toolCallId !== '' ? toolCallId : this.stalePreviewToolCallId
+      if (!id) {
         return
       }
-      this.stalePreviewToolCallId = null
+      if (this.stalePreviewToolCallId === id) {
+        this.stalePreviewToolCallId = null
+      }
+      // 只有"被放弃的就是当前活动计划"时才清活动态（刷新路径）；不得误撤另一张仍在等人的卡
+      if (this.activePreview?.toolCallId === id) {
+        if (previewSheetCtx) {
+          clearPreviewMarks(previewSheetCtx)
+        }
+        this.activePreview = null
+        previewSheetCtx = null
+      }
       const part = this.messages
-        .map((item) => findToolPart(item, toolCallId))
+        .map((item) => findToolPart(item, id))
         .find((value) => value !== null) ?? null
       await this.finishSheetTool({
-        toolCallId,
+        toolCallId: id,
         name: part?.name ?? 'replace_values',
         runId: this.activeRunId ?? undefined,
         status: 'cancelled',
-        result: '预览已失效（页面刷新导致），已放弃本次调用，未改动任何单元格。请让 AI 重新发起。',
+        result: '预览已失效（页面刷新或已被新的表格操作取代），已放弃本次调用，未改动任何单元格。请让 AI 重新发起。',
         cancelled: true
       })
     },
@@ -3856,10 +4198,20 @@ export const useAiStore = defineStore('ai', {
         form.error = problems.join('；')
         return
       }
+      // 结构化回灌体的发送前预检（用户 2026-10-25）：与后端同一 max-chars（8000）。
+      // 超限 = 零请求；挂起保持 PENDING、status 仍 filling、完整输入不清空，用户改小后可重试。
+      const resultText = JSON.stringify(values)
+      if (resultText.length > STRUCTURED_RESULT_MAX_CHARS) {
+        form.error = translate('ai.notice.formResultTooLarge', {
+          chars: resultText.length,
+          max: STRUCTURED_RESULT_MAX_CHARS
+        })
+        return
+      }
       form.status = 'submitting'
       form.error = null
       form.fieldErrors = []
-      const outcome = await this.submitFrontendToolResult(form.toolCallId, JSON.stringify(values), 'http-post', false, form.runId)
+      const outcome = await this.submitFrontendToolResult(form.toolCallId, resultText, 'http-post', false, form.runId)
       if (outcome.ok || outcome.duplicate) {
         // G-B：提交成功 ⇒ 草稿镜像即清（草稿只是"未提交"的浏览器临时态）
         clearFormDraft(form.toolCallId)
@@ -3888,6 +4240,11 @@ export const useAiStore = defineStore('ai', {
         const unkeyed = issues.filter((issue) => issue.key === '')
         form.status = 'filling'
         form.fieldErrors = keyed
+        if (outcome.tooLarge) {
+          // 体积问题不是字段值问题：不点亮字段、不把输入判成错值；缩短后同一 toolCallId 重试
+          form.error = translate('ai.notice.formResultTooLargeRejected')
+          return
+        }
         form.error = unkeyed.length > 0
           ? unkeyed.map((issue) => issue.message).join('；')
           : issues.length > 0
@@ -4136,6 +4493,12 @@ export const useAiStore = defineStore('ai', {
      */
     adoptFreshSession(): string {
       const oldSessionId = this.sessionId
+      // 收口（③）：换 id 前只释放**本页签文档持有、且属于旧会话**的锁 —— 否则新会话的锁随后
+      // 覆盖 `heldLock`，旧锁的释放句柄丢失，会一直占着到文档销毁（别的页签探活被误判"原页签还在"）。
+      // 不广播 `released`：旧会话可能已被本页签销毁（新建对话），邀请别人接手只会接到一个空壳。
+      releaseOwnLock(oldSessionId)
+      // 待接手的让渡属于"上一身份"，换会话即作废
+      cancelPendingTakeover()
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
       roundEpoch += 1
       // M-2b：旧会话的快照串行队列不得落进新会话
@@ -4201,7 +4564,10 @@ export const useAiStore = defineStore('ai', {
      *   一个 microtask，既有挂载时序一格不动；
      * - **复制页签**（锁被原页签持有）⇒ `adoptFreshSession()` 起新会话 + 轮换 pageId：
      *   **不接管**原会话、**不删**原会话的后端记忆；让渡监听随之装上（原页签关闭后由
-     *   `onOwnershipMessage` 决定是否接手）。
+     *   `onOwnershipMessage` 决定是否接手）；
+     * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
+     *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
+     *   那条兜底 —— 会话确实不归本页签了，但用户眼前的记录不该被当成复制品抹掉。
      *
      * 幂等：判定过一次（角色非 'unknown'）即不再重复探活。
      *
@@ -4211,14 +4577,20 @@ export const useAiStore = defineStore('ai', {
       if (this.tabOwnership !== 'unknown') {
         return null
       }
+      // 生命周期监听只绑一次，回调里的 store 面取**最近一次**判定的实例（pinia 可能被换掉）
+      tabStore = this
+      // 上一身份的待接手一律作废（重新判定角色 = 从头谈）
+      cancelPendingTakeover()
       ensurePageId()
       openOwnershipChannel((message) => this.onOwnershipMessage(message))
-      bindOwnershipRelease()
+      bindOwnershipLifecycle()
       if (!lockManager()) {
         this.tabOwnership = 'unsupported'
         return null
       }
       const sid = this.sessionId
+      // 返回意向一次性消费：无论这次判成 owner 还是 duplicate，都不能留到下一次刷新
+      const returning = takeReturnIntent(sid)
       return (async (): Promise<void> => {
         const role = await resolveTabOwnership(sid)
         if (this.sessionId !== sid) {
@@ -4232,6 +4604,10 @@ export const useAiStore = defineStore('ai', {
           return
         }
         if (role === 'duplicate') {
+          if (returning) {
+            // 回来的原页签：会话已被别人接手 —— 降级但不清场（见方法注释）
+            return
+          }
           // 复制页签：先清掉从原页签**继承**来的镜像引用，再起新会话；pageId 轮换（同源广播里
           // 两个页签的 pageId 必须可区分）。
           clearMirrorRefs()
@@ -4240,6 +4616,44 @@ export const useAiStore = defineStore('ai', {
           await this.claimSessionOwnership(this.sessionId)
         }
       })()
+    },
+
+    /**
+     * RC-4 ④：`pageshow` 后的有界重认领 / 降级（bfcache 恢复时角色可能已过期）。
+     *
+     * <p>只在"本页签自认 owner"时动作，且以锁为唯一裁决（`resolveTabOwnership` 限次重试）：
+     * 锁仍归我 ⇒ 重新广播 `claim`（别的页签此间可能已把本页签当"离开"）；锁已归别人 ⇒ 角色降级为
+     * 'duplicate' 并**停止自认 owner**（不再广播 claim），但**不清会话、不清屏** ——
+     * bfcache 恢复不是"新建对话"，清屏会把用户刚恢复的记录抹掉。
+     *
+     * <p>取舍：账本里的 `heldLock` 无法证明浏览器在冻结期间是否仍替我们持锁（自持锁的
+     * `ifAvailable` 探活会短路成 granted），所以这里**先释放、再真探**。释放到重新认领之间有一个
+     * 微任务级窗口：真有别的页签在此刻抢先，它按锁就是新 owner，本页签降级 —— 这正是"以锁为准"，
+     * 比"两个页签同时自认 owner"安全。
+     */
+    async revalidateTabOwnership(): Promise<void> {
+      const sid = this.sessionId
+      if (sid === null || this.tabOwnership !== 'owner' || ownedSessionId !== sid) {
+        return
+      }
+      // bfcache 冻结期间浏览器可能已经释放了本页签的锁，而账本里的 `heldLock` 仍是旧引用
+      // （自持锁的 ifAvailable 探活会因短路而谎报 granted）⇒ 先扔掉账本、再**真**探一次。
+      // 仍然空闲 ⇒ 锁还是我们的（重新认领）；已被别人拿走 ⇒ 对方就是新 owner（降级）。
+      releaseSessionLock()
+      const role = await resolveTabOwnership(sid)
+      // 探活在途期间现场已变（换会话 / 已降级）⇒ 不落任何结论
+      if (this.sessionId !== sid || this.tabOwnership !== 'owner') {
+        return
+      }
+      if (role === 'owner') {
+        ownedSessionId = sid
+        postOwnership('claim', sid)
+        return
+      }
+      if (role === 'duplicate') {
+        this.tabOwnership = 'duplicate'
+        cancelPendingTakeover()
+      }
     },
 
     /** RC-4 ②：为本页签会话认领所有权锁（新会话 id 必然空闲），拿到后广播 `claim`。 */
@@ -4255,12 +4669,21 @@ export const useAiStore = defineStore('ai', {
     /**
      * RC-4 ③：所有权广播处理。
      *
-     * 只有"被判为复制品、且自己这边**还没产生任何内容**"的页签接手让渡（`released`）——
-     * 已经在自己会话里说过话的页签不换会话（换掉会让用户眼前内容跳变）。
-     * 其余消息（自己的 `claim` 回声 / 别人的会话 id）一律忽略。
+     * - `claim`：原页签（刷新回来的新文档）重新认领 ⇒ 撤销本页签待接手的让渡（宽限的意义所在）；
+     * - `released`：**让渡意向**，不是"立刻交接" —— 空白副本等 {@link OWNERSHIP_RELEASE_GRACE_MS}
+     *   再探活接手（`takeOverSession` 内的探活仍是最终裁决）。
+     *
+     * 只有"被判为复制品、且自己这边**还没产生任何内容**"的页签接手 —— 已经在自己会话里说过话的
+     * 页签不换会话（换掉会让用户眼前内容跳变）。其余消息（自己的回声 / 别人的会话 id）一律忽略。
      */
     onOwnershipMessage(message: OwnershipMessage): void {
-      if (message.kind !== 'released' || message.sessionId === this.sessionId) {
+      if (message.sessionId === this.sessionId) {
+        return
+      }
+      if (message.kind === 'claim') {
+        if (pendingTakeover?.sessionId === message.sessionId) {
+          cancelPendingTakeover()
+        }
         return
       }
       if (this.tabOwnership !== 'duplicate') {
@@ -4269,26 +4692,49 @@ export const useAiStore = defineStore('ai', {
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
         return
       }
-      void this.takeOverSession(message.sessionId)
+      // 宽限后再探活：原页签在此期间重播 claim（刷新回来）⇒ 计时器已撤销，本页签不抢
+      cancelPendingTakeover()
+      const sessionId = message.sessionId
+      const timer = setTimeout(() => {
+        pendingTakeover = null
+        // 宽限期间角色可能已被换掉（用户新建对话 / 接管完成 / 降级）：只有仍是"空白复制品"才接手
+        if (this.tabOwnership !== 'duplicate') {
+          return
+        }
+        void this.takeOverSession(sessionId)
+      }, OWNERSHIP_RELEASE_GRACE_MS)
+      pendingTakeover = { sessionId, timer }
     },
 
     /**
      * RC-4 ③：接手让渡过来的会话 —— **以锁为准**：先探活（原页签的锁随文档销毁释放，探到才认账），
      * 再换 id + 读回该会话历史。二次判据同 `onOwnershipMessage`（探活是异步的，期间可能已说话）。
+     *
+     * <p>账本口径：`probeSessionLock` 一拿到锁就**就地覆盖** `heldLock`/`ownedSessionId`（这是"本页签
+     * 只持一把锁"的记账方式），所以旧空白会话那把锁的释放句柄必须在探活**之前**捕获 —— 否则句柄被
+     * 覆盖后再也没有释放点，会挂到文档销毁。二次判据拒绝接手时同样要把刚探到的锁还回去，
+     * 保持"本页签只持自己会话的锁"。
      */
     async takeOverSession(sessionId: string): Promise<void> {
+      const previous = this.sessionId
+      const previousLock = ownedSessionId === previous ? heldLock : null
       const verdict = await probeSessionLock(sessionId)
       if (verdict !== 'granted') {
         return
       }
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
+        // 探活已把账本换成"待接手"的锁，但二次判据不允许接手 ⇒ 立刻还回去（不占别人的会话）
+        releaseOwnLock(sessionId)
         return
       }
-      const previous = this.sessionId
-      if (ownedSessionId === previous) {
+      if (previousLock !== null) {
         // 放弃本页签那个空白会话：把它的所有权一并让出去（不占着不再使用的锁）
         postOwnership('released', previous)
-        releaseSessionLock()
+        try {
+          previousLock.release()
+        } catch {
+          // 释放失败只影响让渡时序
+        }
       }
       this.sessionId = sessionId
       try {
@@ -4304,24 +4750,23 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+     * 新建对话（页签内重置会话）：立即清屏 + 换新 sessionId + 完整销毁旧会话。
      *
-     * 顺序（苞 A 项 1 裁决）：
+     * 顺序（苞 A 项 1 裁决 + 2026-10-25 会话销毁口径）：
      * 1. 先在跑的轮次 `abort`（R5①）——否则 loading 不复位、后续帧会写进已清空的 messages；
      * 2. 立刻换 id 并清状态（**同步完成**：点击=立即清屏，不等后端）；
-     * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置，
-     *    口径同 `stop()`）；
-     * 4. **最后** `DELETE /api/ai/history/{oldSessionId}` 删旧记忆（失败只提示，不影响新对话；
-     *    提示带「仍是本轮」守卫，见函数末尾与复核 F5）。
+     * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置）；
+     * 4. **最后**调销毁端点（前端走 `DELETE /api/ai/session/{oldSessionId}`，后端旧
+     *    `DELETE /api/ai/history/{oldSessionId}` 也映射到同一 purge）：删除该会话全部 AI 数据，
+     *    同时用响应 `clientCleanup` 精确清浏览器镜像/草稿。
      *
-     * 已知代价（施工卡 §5.2，登记；口径按复核 F2 订正为如实版）：旧轮终局的记忆收敛（整窗 `saveAll`）
-     * 会把窗口整体写回同名键，而 `cancel` 只是「置取消标志 + 唤醒收尾」、轮次收盘是异步的
-     * ⇒ **在飞路径下 DELETE 必然先于收盘重写**（顺序必然，不是概率竞态；先 cancel 再 delete 也
-     * 缩不小这个窗口），即旧键必被写回、残留至 TTL 到期。旧 id 已被前端丢弃，故残留期间无人读取
-     * （用户不可见）。更强的保证（端点 409 硬拒）已被明确否掉 —— 「新建对话」不能变成可能失败的动作。
+     * <p>口径更新：旧实现的"只删记忆窗口 + 在飞轮终局可能写回"已被服务端 purge guard 关闭
+     * （记忆 `saveAll` 与完整历史 append 在守卫命中/不可知时都拒绝写回）。前端只在
+     * `complete=false`（deferred/errors/aborted）时用 `sessionPurgeIncomplete` 提示"整会话未删净"，
+     * 仍不阻断新对话；`complete` 字段缺失时按完成兼容。
      */
     async resetSession(): Promise<void> {
-      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于删旧记忆与删旧镜像
+      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于销毁与清本地残留
       const oldSessionId = this.sessionId
       const oldRunId = this.activeRunId
       const nextId = this.adoptFreshSession()
@@ -4336,8 +4781,7 @@ export const useAiStore = defineStore('ai', {
           // 忽略：取消请求失败只意味着后端可能多跑一轮，不影响新建对话
         }
       }
-      // 删除放最后：**顺序不缩小复活窗口**（口径订正：复核 F2）—— `cancel` 只置取消标志 + 唤醒收尾，
-      // 轮次收盘异步 ⇒ 在飞路径下本 DELETE 必然先于收盘重写；此处的顺序只为"尽量早地把旧记忆清掉"。
+      // 销毁放最后：服务端先 cancel/守卫再删；前端只消费精确清理指令。
       // F5（复核收口）：失败提示是**异步落地**的（后端不可达时最坏要等到 HTTP 超时），故必须带
       // 「仍是本轮」守卫 —— 这只在本次新建对话换出的会话里、且其间没有发生任何轮次时才允许写提示；
       // 否则这条过期提示会盖掉新会话/新轮的 notice（store 其余异步落盘点都用 isCurrentRound 同族守卫，
@@ -4345,11 +4789,17 @@ export const useAiStore = defineStore('ai', {
       // （send 会同步 record 用户消息，故 messages 非空 ⇔ 新会话里已经起过轮次）。
       const isCurrentRound = (): boolean => this.sessionId === nextId && this.messages.length === 0
       try {
-        await aiApi.deleteHistory(oldSessionId)
+        const purge = await aiApi.deleteHistory(oldSessionId)
+        cleanupSessionLocalArtifacts(oldSessionId, purge)
+        // complete=false（含 deferred/errors/aborted）不得当成功：只提示，不阻塞新对话
+        if (purgeWasIncomplete(purge) && isCurrentRound()) {
+          setNotice(this, 'ai.notice.sessionPurgeIncomplete')
+        }
       } catch {
-        // 删除失败不阻断新对话（旧会话记忆到期自然清理）
+        // 请求失败：旧会话可能未删净；镜像仍按精确键清一次（草稿 id 未知，当前活动表单已清）
+        cleanupSessionLocalArtifacts(oldSessionId, null)
         if (isCurrentRound()) {
-          setNotice(this, 'ai.notice.memoryDeleteFailed')
+          setNotice(this, 'ai.notice.sessionPurgeIncomplete')
         }
       }
     },
@@ -4716,6 +5166,11 @@ export const useAiStore = defineStore('ai', {
               message.stopped = true
             }
             this.lastRoundOutcome = 'cancelled'
+          }
+          // 截断专项：`done.extra.truncated` 只在 finish_reason=length 时出现（后端口径）。
+          // 消息级标记 —— 面板据此显示「已截断」，刷新后由历史/镜像恢复；取消轮不写（cancelled 优先）。
+          if (!frame.cancelled && frame.truncated === true) {
+            message.truncated = true
           }
           // 批 E · E2：取消的轮次不算"正常完成"—— 建议条只在非取消的 done 后出现
           this.followupReady = !frame.cancelled

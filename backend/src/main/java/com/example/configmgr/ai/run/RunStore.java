@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 挂起态与台账的 Redis 外置存储（S4.2 §2 {@code run/RunStore}，移植自 SP-02 同名实现）。
@@ -49,7 +50,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  * <li>{@code ai:run:<runId>} STRING（JSON）—— {@link RunSnapshot}：完整请求历史 +
  * 挂起中的 {@code assistant(tool_calls)} + 状态 + 上下文；</li>
- * <li>{@code ai:runs} SET —— runId 索引（重启后"发现待续跑轮次"的入口）；</li>
+ * <li>{@code ai:runs} SET —— runId 索引（重启后"发现待续跑轮次"的入口）。
+ * <b>不带 TTL、也不给整键 EXPIRE</b>（Redis 容量专项 A）：SET 无法按成员过期，整键过期会把活跃轮的
+ * 发现面一起删掉；改为<b>惰性清理</b> —— 快照键已不在的成员由 {@link #pruneRunIndex()} 剔除
+ * （启动扫描 {@link #allRunIds()} 与 {@code create} 的节流机会式清理两处触发）；
+ * 空 SET 由 Redis 自己消失，因此不会留空壳键；</li>
  * <li>{@code ai:pending:<runId>} HASH（field=toolCallId）—— {@link PendingToolCall}
  * （确认门/前端工具的输入落点，重启后仍可读）；</li>
  * <li>{@code ai:claim:<runId>} HASH（field=toolCallId，value=<b>{@code <epoch>|<instanceId>}</b>）——
@@ -208,6 +213,33 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public static final String SESSION_CURRENT_PREFIX = "ai:session:current:";
 
+	/**
+	 * 会话 → 该会话全部 runId 的轻量索引（{@code ai:session:runs:<sessionId>}，SET，TTL 与会话同寿）。
+	 *
+	 * <p>为什么要它：会话销毁要枚举"本会话的轮次"，而 {@code ai:runs} 是全局集合；
+	 * 只靠它就得对所有快照逐个反序列化再比对 sessionId（生产上可能是成百上千轮）。
+	 * 本索引让销毁只读本会话候选；<b>老数据没有这个索引时</b>，销毁方必须回退全局扫描
+	 * （索引是加速面，不是唯一事实源）。
+	 *
+	 * <p>生命周期：{@link #create} SADD + 设 TTL，{@link #deleteRun} SREM；空 SET 由 Redis 自动消失。
+	 * TTL 续期随快照写（{@link #save}）滑动；索引过期/SADD 失败只影响快路径，不影响回退正确性。
+	 */
+	public static final String SESSION_RUNS_PREFIX = "ai:session:runs:";
+
+	/**
+	 * 会话→run 索引的“已回填”内部标记（同一 SET 内的 sentinel）。
+	 *
+	 * <p>为什么需要：升级前的老 session 在全局 {@code ai:runs} 有 run，却没有本索引；
+	 * 升级后 {@code create} 只把<b>新</b> run SADD 进来 —— 若把“SET 非空”当成“索引完整”，
+	 * 老 run 就会被漏删。只有完成一次按 sessionId 过滤的全局枚举并成功回填后，才写入本标记；
+	 * 读侧必须同时看到标记才信任快路径。
+	 *
+	 * <p>本值不是 runId：{@link #sessionRunIndex} 会把它从返回的 runId 集合中剔除，
+	 * 任何“按 run 操作”的调用方都不会拿到它（runId 是 UUID，不会与之冲突）。
+	 * 与索引同键、同 TTL：索引过期标记一起过期。
+	 */
+	public static final String SESSION_RUNS_COMPLETE = "__session_runs_complete__";
+
 	/** 心跳帧的类型名（T7：唯一不落归档的帧类型）。 */
 	public static final String HEARTBEAT_TYPE = "heartbeat";
 
@@ -243,7 +275,18 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	private final Set<String> fenceAheadWarned = ConcurrentHashMap.newKeySet();
 
+	/** "丢租/不可用 ⇒ 已拒绝推进"的告警节流（每个 runId 一条，避免逐帧逐写刷屏）。 */
+	private final Set<String> readOnlyWarned = ConcurrentHashMap.newKeySet();
+
 	private static final int FENCE_AHEAD_WARNED_CAP = 512;
+
+	/**
+	 * 上次<b>机会式</b>{@code ai:runs} 索引清理的时刻（毫秒；Redis 容量专项 A）。
+	 *
+	 * <p>0 = 本进程还没清过 ⇒ 重启后的第一次 {@code create} 会清一拍（顺手把崩溃前留下的残留剔掉）。
+	 * 用 CAS 抢占"这一拍由我清"，多实例并发创建时不会每个实例都扫一遍全表。
+	 */
+	private final AtomicLong indexPrunedAtMs = new AtomicLong();
 
 	/**
 	 * 租约设施（B23L1 批②a）。<b>可为 null</b>：非 Spring 路径（单测、{@code InMemoryRunStore}）
@@ -578,6 +621,24 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId) {
+		return create(runId, sessionId, context, history, codec, providerId, modelId, null);
+	}
+
+	/**
+	 * 建立一轮的外置快照并<b>冻结本轮的生效参数</b>（L-26）。
+	 *
+	 * <p>为什么冻结在"创建"这一笔：同一 run 的续跑可能落在几分钟甚至几天之后，此间用户可能改了
+	 * 全局默认温度/默认模型。续跑重算会让同一轮前后半段跑在不同参数上，而历史与 {@code done.model}
+	 * 都说"同一轮"。因此生效值随第一笔快照固化，续跑只读不改。
+	 *
+	 * <p><b>{@code frozen = null} = 不冻结</b>（旧签名的行为，写出的快照 {@code paramsVersion=0}）——
+	 * 该旧行为供既有用例与"批③ 之前的调用方"使用；生产路径（{@code ResilientChatService#chat}）
+	 * 永远传非 null（<b>全 null 的 FrozenParams 也是一次冻结</b>：null 本身就是当时的生效值）。
+	 *
+	 * @param frozen 生效参数（可为全部 null）
+	 */
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
@@ -586,26 +647,42 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		snapshot.setMessageJson(codec.serializeAll(history));
 		snapshot.setProviderId(providerId);
 		snapshot.setModelId(modelId);
+		snapshot.freezeParams(frozen);
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
 		save(snapshot);
 		this.redis.opsForSet().add(RUN_INDEX, runId);
+		if (sessionId != null && !sessionId.isBlank()) {
+			String sessionRunsKey = sessionRunsKey(sessionId);
+			try {
+				this.redis.opsForSet().add(sessionRunsKey, runId);
+				this.redis.expire(sessionRunsKey, ttlFor(runId));
+			}
+			catch (Exception ex) {
+				// 可选索引只是加速面：写失败不影响本轮，销毁仍回退全局索引。
+				log.warn("维护会话→run 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			}
+		}
+		maybePruneRunIndex();
 		return snapshot;
 	}
 
 	/**
 	 * 写入轮次快照（唯一写口）。
 	 *
-	 * <h2>fence 写（B23L1 批②a）</h2>
-	 * 持租（{@code heldRunEpoch > 0}）时走 Lua fence 写：{@code ai:fence:run:<runId>} 记"已落库的最大
-	 * epoch"，本次 epoch 必须 {@code ≥ fence} 才允许落库，并在同一步把 fence 推到本次 epoch。
-	 * 陈旧 epoch（换主后的旧主人）因此写不进去 —— 拒绝只记 {@code STALE_EPOCH} 日志、不抛异常：
-	 * 这个线程已经不再是本轮的续跑主人，抛出去只会把它正在收尾的流程打断，而它<b>没有</b>写权限
-	 * 这件事本就是预期结果。
-	 *
-	 * <p><b>红线 E3</b>：{@code heldRunEpoch == 0}（无租约设施 / 未持租 / Redis 降级）时保持原样
-	 * plain {@code SET}，TTL 仍是 {@code app.ai.session-ttl}（24h）。"无租约不拒写"是刻意的：
-	 * 租约设施故障不能让单实例/降级路径全面停写。
+	 * <h2>写权限（续租 fencing 收口批）</h2>
+	 * 先问 {@link #runLeaseAuthority(String)}：
+	 * <ul>
+	 * <li>{@code HELD} ⇒ 走 Lua fence 写（{@code ai:fence:run:<runId>} 记"已落库的最大 epoch"，
+	 *     本次 epoch 必须 {@code ≥ fence} 才允许落库，并在同一步把 fence 推到本次 epoch）。
+	 *     陈旧 epoch（换主后的旧主人）因此写不进去 —— 拒绝只记 {@code STALE_EPOCH} 日志、不抛异常；</li>
+	 * <li>{@code LOST} / {@code UNAVAILABLE} ⇒ <b>只读</b>：这一笔不落库、不释放租约、不动 session
+	 *     索引，只留一条 WARN。<b>这才是"丢租后 A 的终态不得覆盖 B 的 DONE"的落点</b> ——
+	 *     旧实现把 {@code heldRunEpoch == 0} 当"无租约 ⇒ plain SET"，而丢租后视图正好是 0；</li>
+	 * <li>{@code NEVER_HELD} ⇒ 保留红线 E3 的 plain {@code SET}（无租约设施 / 首轮 / 单实例降级），
+	 *     TTL 仍是 {@code app.ai.session-ttl}。"从未持租"必须与"持过但已丢"区分开，且只有前者
+	 *     才允许普通写。</li>
+	 * </ul>
 	 *
 	 * <p>写终态时 best-effort 释放本实例持有的续跑租约（{@link #releaseRunLease}）—— 正常收尾的轮
 	 * 不该让下一个实例等 TTL。
@@ -613,6 +690,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		String runId = snapshot.getRunId();
+		// 续租 fencing 收口批：写权限由 authority 判定，不再用 epoch==0 当"可写"。
+		// LOST（确定丢租）/ UNAVAILABLE（设施异常，无法确认）⇒ 只读：这一笔不落库。
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "轮次快照");
+			return;
+		}
 		long epoch = heldRunEpoch(runId);
 		if (epoch > 0L) {
 			snapshot.setRunEpoch(epoch);
@@ -653,15 +737,29 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			clearSessionCurrent(snapshot.getSessionId(), runId);
 			releaseRunLease(runId);
 		}
+		// 会话→run 索引随快照滑动续期：挂起可长达一个 session-ttl，索引不能先于快照消失。
+		// 失败只影响快路径（销毁仍有全局回退），不阻断本轮。
+		String sessionId = snapshot.getSessionId();
+		if (sessionId != null && !sessionId.isBlank()) {
+			try {
+				this.redis.expire(sessionRunsKey(sessionId), ttlFor(runId));
+			}
+			catch (Exception ex) {
+				log.debug("续期会话→run 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			}
+		}
 	}
 
 	/**
-	 * E3 分支（{@code heldRunEpoch == 0}，plain SET）的旁路观测（M2）。
+	 * plain SET 分支（{@code NEVER_HELD} 且设施自证正常）的旁路观测（M2）。
 	 *
 	 * <p>不持租却要写、而 {@code ai:fence:run:<runId>} 已经推进到更高 epoch —— 典型成因是
-	 * "本实例曾持租、租约已被别人接管，但进程内视图还没被续租失败清掉"或"降级路径上位"。
-	 * 按红线 E3 <b>仍然照写</b>（"无租约不拒写"是刻意选择：租约设施故障不能让单实例/降级路径全面停写），
-	 * 但这种情况值得 WARN：它意味着这一笔写回在语义上属于"没有续跑权的写"。
+	 * "本实例从未参与这一轮的租约，但轮次已被别处接管过"。按"从未持租 + 设施正常 ⇒ 原普通写"
+	 * 仍照写（单实例/无租约语义路径不能被旁路观测挡死），但这种情况值得 WARN：它意味着这一笔写回
+	 * 在语义上属于"没有续跑权的写"。
+	 *
+	 * <p><b>注意</b>：{@code LOST} / {@code UNAVAILABLE} 在 {@link #save} 入口就已返回，到不了这里；
+	 * 本方法只服务"确实没有租约语义"的那条分支。
 	 */
 	private void warnIfFenceIsAhead(String runId) {
 		try {
@@ -729,6 +827,87 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 索引键名（诊断/取证可直读）。 */
 	public String sessionCurrentKey(String sessionId) {
 		return SESSION_CURRENT_PREFIX + sessionId;
+	}
+
+	/** 会话→全部 runId 的轻量索引键名（{@code ai:session:runs:<sessionId>}）。 */
+	public String sessionRunsKey(String sessionId) {
+		return SESSION_RUNS_PREFIX + sessionId;
+	}
+
+	/**
+	 * 本会话候选 runId（只读，不触发全量快照反序列化）。
+	 *
+	 * <p>空集 = 没有索引/老数据；调用方（会话销毁）必须回退 {@code ai:runs} 全局扫描，
+	 * 不能把"索引为空"当成"没有轮次"。
+	 */
+	public Set<String> sessionRunIds(String sessionId) {
+		return sessionRunIndex(sessionId).runIds();
+	}
+
+	/**
+	 * 会话→run 索引的快照（含“是否已完整回填”与“本次读取是否成功”）。
+	 *
+	 * @param runIds    已剔除 sentinel 的 runId 集合；读取失败为空集
+	 * @param complete  是否看到 {@link #SESSION_RUNS_COMPLETE} 回填标记
+	 * @param readable  本次读取是否成功（false = 调用方必须回退全局，不得按空集处理）
+	 */
+	public record SessionRunIndex(Set<String> runIds, boolean complete, boolean readable) {
+	}
+
+	/**
+	 * 读会话→run 索引并区分“空”“未回填”“读失败”三种状态。
+	 *
+	 * <p>为什么不能只返回集合：老数据索引非空但只含升级后的新 run —— 只按“非空”判断会漏删老 run。
+	 * 只有 {@code complete=true} 才允许信任快路径；读取失败必须让调用方回退全局。
+	 */
+	public SessionRunIndex sessionRunIndex(String sessionId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return new SessionRunIndex(Set.of(), false, true);
+		}
+		try {
+			Set<String> members = this.redis.opsForSet().members(sessionRunsKey(sessionId));
+			if (members == null || members.isEmpty()) {
+				return new SessionRunIndex(Set.of(), false, true);
+			}
+			boolean complete = members.contains(SESSION_RUNS_COMPLETE);
+			Set<String> ids = new java.util.LinkedHashSet<>(members);
+			ids.remove(SESSION_RUNS_COMPLETE);
+			return new SessionRunIndex(Set.copyOf(ids), complete, true);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
+			log.warn("读取会话→run 索引失败 sessionId={}（调用方必须回退全局扫描）：{}", sessionId, ex.getMessage());
+			return new SessionRunIndex(Set.of(), false, false);
+		}
+	}
+
+	/**
+	 * 全局枚举成功后回填本会话索引 + 完整性标记（只在候选非空时调用）。
+	 *
+	 * <p>顺序刻意是 <b>SADD runIds → EXPIRE → SADD sentinel</b>：标记永远不早于 TTL 出现，
+	 * 避免“标记永久存在、索引已过期”的假完整。写失败只 WARN（本次销毁仍用刚枚举出的候选），
+	 * 下一轮会再次回退全局，不会误信不完整索引。
+	 */
+	public void backfillSessionRuns(String sessionId, Set<String> runIds) {
+		if (sessionId == null || sessionId.isBlank() || runIds == null || runIds.isEmpty()) {
+			return;
+		}
+		String key = sessionRunsKey(sessionId);
+		try {
+			String[] values = runIds.stream()
+				.filter(id -> id != null && !id.isBlank() && !SESSION_RUNS_COMPLETE.equals(id))
+				.toArray(String[]::new);
+			if (values.length == 0) {
+				return;
+			}
+			this.redis.opsForSet().add(key, values);
+			this.redis.expire(key, this.properties.getSessionTtl());
+			this.redis.opsForSet().add(key, SESSION_RUNS_COMPLETE);
+		}
+		catch (Exception ex) {
+			log.warn("回填会话→run 索引失败 sessionId={}（本轮仍用全局枚举候选；下轮继续回退）：{}", sessionId,
+					ex.getMessage());
+		}
 	}
 
 	/** 续期：仅当值仍是自己这一轮的 runId 才 {@code EXPIRE}（同会话锁 watchdog 语义）。 */
@@ -850,6 +1029,14 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	public void deleteRun(String runId) {
 		// 先放掉本进程持有的租约：删键之后脚本再比对就会扑空，进程内视图会成为幽灵所有权
 		releaseRunLease(runId);
+		// 会话→run 轻量索引需要 sessionId；删键前读一次快照（读不到只留 stale 成员，销毁方仍可过滤）。
+		RunSnapshot snapshot = null;
+		try {
+			snapshot = get(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("删除轮次前读快照失败 runId={}（会话索引成员留待 TTL/对账清理）：{}", runId, ex.getMessage());
+		}
 		// B23L1 批②a：租约 / fence / req 位 / decided guard 同属"本轮的全部键"——
 		// 留着它们会让下一轮同 id 的运行继承前任的 fence 与决策（且 fence 只增不减 ⇒ 新租约写不进去）。
 		// 批③a：幂等索引随台账一起删（索引是台账的指针，台账没了它只会指向空气）。
@@ -863,6 +1050,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				idemKey(runId), eventsKey(runId), seqKey(runId), xeventsKey(runId), runLeaseKey(runId),
 				fenceKey(runId), reqKey(runId), decidedKey(runId), runLeaseEpochKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
+		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
+			try {
+				this.redis.opsForSet().remove(sessionRunsKey(snapshot.getSessionId()), runId);
+			}
+			catch (Exception ex) {
+				// 只留 stale 成员：会话销毁会按快照归属过滤，不会误删他会话。
+				log.warn("清理会话→run 索引成员失败 sessionId={} runId={}（stale 成员待 TTL/对账）：{}",
+						snapshot.getSessionId(), runId, ex.getMessage());
+			}
+		}
 	}
 
 	// ── 续跑权租约（B23L1 批②a；ResumeService 接线归批②b） ──────────────────
@@ -912,6 +1109,42 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return this.leaseService == null ? 0L : this.leaseService.heldEpoch(runLeaseKey(runId));
 	}
 
+	/**
+	 * 本轮<b>写权限的权威判定</b>（续租 fencing 收口批）：{@code HELD / LOST / UNAVAILABLE / NEVER_HELD}。
+	 *
+	 * <p>这是 {@link #save}、出帧（{@code SseChatEmitter}）、认领（{@link #tryClaimExecution}）与
+	 * 台账（{@link #appendLedger}）共用的唯一判据 —— 四处各写一套 {@code epoch == 0} 判断，
+	 * 就会出现"快照拒写、但帧还在落档"的半只读状态。
+	 *
+	 * <p>无租约设施（单测/进程内替身/降级装配）⇒ {@code NEVER_HELD}（没有租约语义，保持原普通写）。
+	 */
+	public LeaseService.LeaseAuthority runLeaseAuthority(String runId) {
+		LeaseService facility = leaseService();
+		if (facility == null) {
+			return LeaseService.LeaseAuthority.NEVER_HELD;
+		}
+		LeaseService.LeaseAuthority authority = facility.authority(runLeaseKey(runId));
+		// 替身/测试子类可能给出 null（"没意见"）：按"无租约语义"放行，不让判定本身 NPE。
+		return authority == null ? LeaseService.LeaseAuthority.NEVER_HELD : authority;
+	}
+
+	/** 只读拒绝的节流 WARN（每个 runId 第一条点名动作，其后 debug）。 */
+	private void warnReadOnly(String runId, LeaseService.LeaseAuthority authority, String action) {
+		if (this.readOnlyWarned.size() > FENCE_AHEAD_WARNED_CAP) {
+			this.readOnlyWarned.clear();
+		}
+		String detail = authority == LeaseService.LeaseAuthority.LOST
+				? "确定丢租（续租返回 0 / 归属校验失败：另一实例已接管）"
+				: "租约设施不可用（无法确认是否仍持有）";
+		if (this.readOnlyWarned.add(runId)) {
+			log.warn("续跑权只读：拒绝{} runId={}（{}）。本实例不再推进这一轮，恢复/接管由新主人负责", action,
+					runId, detail);
+		}
+		else {
+			log.debug("续跑权只读：拒绝{} runId={}（{}，本 run 已告警过）", action, runId, detail);
+		}
+	}
+
 	/** 租约设施（可观测/批②b 接线用；无租约设施时为 null）。 */
 	public LeaseService leaseService() {
 		return this.leaseService;
@@ -928,7 +1161,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return runScopedKey(XEVENTS_PREFIX, runId);
 	}
 
-	/** 全部仍存活的 runId（索引里已过期的惰性剔除）。 */
+	/**
+	 * 全部仍存活的 runId（索引里已过期的惰性剔除）。
+	 *
+	 * <p>与 {@link #pruneRunIndex()} 共用同一条"活/死"判据（快照键是否存在），差别只是本方法
+	 * 还要返回活成员清单：启动扫描用它，因此启动一次就把索引与快照对齐。
+	 */
 	public List<String> allRunIds() {
 		Set<String> ids = this.redis.opsForSet().members(RUN_INDEX);
 		if (ids == null || ids.isEmpty()) {
@@ -944,11 +1182,92 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				dead.add(id);
 			}
 		}
-		if (!dead.isEmpty()) {
-			this.redis.opsForSet().remove(RUN_INDEX, dead.toArray());
-		}
+		dropFromIndex(dead);
+		// 本次已经做过一次全量"活/死"判定：把机会式清理的节流锚点前移，避免启动扫描之后
+		// 紧接着的第一次 create 再全表扫一遍（两处判据同源，没必要重复）。
+		this.indexPrunedAtMs.set(System.currentTimeMillis());
 		live.sort(String::compareTo);
 		return live;
+	}
+
+	/**
+	 * {@code ai:runs} 索引的<b>惰性清理</b>（Redis 容量专项 A）：剔除快照键已不存在的成员，返回剔除条数。
+	 *
+	 * <h2>为什么不是"给索引一个 TTL"</h2>
+	 * {@code ai:runs} 是 SET，<b>无法按成员过期</b>；对整键 {@code EXPIRE} 会把
+	 * <b>活跃</b>轮次的发现面一起删掉 —— 挂起等人没有上限（确认门/生成式表单），一个挂起数天的
+	 * 活轮在"索引不再被写"的窗口里就会消失，重启后无法自动续跑（比"索引留垃圾"坏得多）。
+	 * 故只做按成员的剔除：判据 = 快照键 {@code ai:run:<runId>} 是否还在（与 {@link #allRunIds()} 同源）。
+	 * 空 SET 由 Redis 自己删除（不存在"空索引键"），因此索引不会永久留一个空壳。
+	 *
+	 * <p><b>不做"终态即删"</b>：终态轮次可能还要被 {@code /events} 回放/诊断（索引是
+	 * {@code ResumeService.listRuns} 的入口，快照 TTL 到期后才是真正的死亡）。清理只认
+	 * "快照已不在"，不猜业务状态。
+	 *
+	 * <p><b>失败不抛</b>：清理是运维卫生动作，不能让它挡住 {@code create}（调用点在创建路径上）。
+	 * 失败计入 {@link RedisDegradation#C1_RUN_INDEX_PRUNE} 并 WARN，下一拍重试。
+	 *
+	 * <p>成本 = 一次 {@code SMEMBERS} + 逐成员 {@code EXISTS}（O(索引大小)，全部单键命令 ⇒ Cluster 安全）。
+	 * 调用方 {@link #create} 路径上带节流（{@code app.ai.stream.index-prune-interval}）。
+	 */
+	public int pruneRunIndex() {
+		if (this.redis == null) {
+			// 进程内替身（InMemoryRunStore）没有索引键面；保持"无索引可清"的语义，不记降级。
+			return 0;
+		}
+		try {
+			Set<String> ids = this.redis.opsForSet().members(RUN_INDEX);
+			if (ids == null || ids.isEmpty()) {
+				return 0;
+			}
+			List<String> dead = new ArrayList<>();
+			for (String id : ids) {
+				if (!Boolean.TRUE.equals(this.redis.hasKey(runKey(id)))) {
+					dead.add(id);
+				}
+			}
+			return dropFromIndex(dead);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
+			log.warn("ai:runs 索引惰性清理失败（本轮跳过，残留项留待下一拍；不影响轮次本身）：{}", ex.toString());
+			return 0;
+		}
+	}
+
+	/** 剔除索引里的死成员（{@code SREM}；空 SET 由 Redis 自动消失）。返回剔除条数。 */
+	private int dropFromIndex(List<String> dead) {
+		if (dead == null || dead.isEmpty()) {
+			return 0;
+		}
+		this.redis.opsForSet().remove(RUN_INDEX, dead.toArray());
+		log.info("ai:runs 索引惰性清理：剔除 {} 条已无快照的 runId（索引项随快照 TTL 到期收敛）", dead.size());
+		return dead.size();
+	}
+
+	/**
+	 * 创建路径上的<b>机会式</b>索引清理（节流）：距上次清理不足 {@code index-prune-interval} 时直接返回。
+	 *
+	 * <p>为什么节流而不是每次都扫：{@code create} 在每次 {@code /chat} 的热路径上，而清理是
+	 * O(索引大小) 的 {@code SMEMBERS + EXISTS}。{@code interval = 0} = 关闭机会式清理（只剩
+	 * 启动扫描）；负值由启动期守卫拦下（{@link AiProperties#verifyStream()}）。
+	 */
+	private void maybePruneRunIndex() {
+		Duration interval = this.properties == null || this.properties.getStream() == null ? null
+				: this.properties.getStream().getIndexPruneInterval();
+		if (interval == null || interval.isZero() || interval.isNegative()) {
+			return;
+		}
+		long now = System.currentTimeMillis();
+		long last = this.indexPrunedAtMs.get();
+		if (now - last < interval.toMillis()) {
+			return;
+		}
+		// CAS 抢占"这一拍由我来清"：多实例/并发 create 不必每人都扫一遍全表。
+		if (!this.indexPrunedAtMs.compareAndSet(last, now)) {
+			return;
+		}
+		pruneRunIndex();
 	}
 
 	// ── 挂起（硬规范①的落点） ──────────────────────────────────────────────
@@ -960,6 +1279,23 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec) {
+		saveSuspended(runId, assistantContent, pendings, history, codec, null);
+	}
+
+	/**
+	 * 硬规范①（推理元数据版）：把挂起中那条 assistant 的<b>完整 metadata</b> 一并外置。
+	 *
+	 * <p>为什么必须带上：续跑侧 {@code ResumeService#rebuildAssistant} 重建的是
+	 * {@code assistant(tool_calls)}，只存正文/tool_calls 会让 {@code reasoningContent} 之外的
+	 * 推理字段（{@code encrypted_content} / {@code signature} / {@code thinking} / 厂商私有键）
+	 * 在这一轮续跑时全部丢失 —— 只认一个键就把协议绑死在某个 provider 上。
+	 *
+	 * <p>结构<b>不透明</b>：整份 map 原样写 JSON、原样读回，<b>不解析、不截断、不筛选键</b>。
+	 *
+	 * @param assistantMetadata 上游 assistant 的 metadata（null = 没有；空 map 与 null 不混同）
+	 */
+	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
+			List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
 		for (PendingToolCall pending : pendings) {
 			// 只给真正挂起的条目打"请求时刻"：预检失败等已结算条目（非 PENDING）在挂起前就写了
 			// requestedAtMs/resolvedAtMs，这里再覆写会造出 resolvedAtMs < requestedAtMs 的时间倒挂。
@@ -974,6 +1310,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			throw new IllegalStateException("挂起前找不到轮次快照 " + runId);
 		}
 		snapshot.setAssistantContent(assistantContent);
+		snapshot.setAssistantMetadata(assistantMetadata == null ? null : new LinkedHashMap<>(assistantMetadata));
 		snapshot.setInFlightToolCalls(pendings);
 		snapshot.setMessageJson(codec.serializeAll(history));
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
@@ -1349,6 +1686,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 两个失败分支语义不同 —— 见 {@link ClaimOutcome}。
 	 */
 	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
+		// 续租 fencing 收口批：新工具执行是"不可撤销副作用"的入口 —— 丢租/设施不可确认时一律拒。
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "新工具认领");
+			return new ClaimResult(ClaimOutcome.STALE_FENCE, heldRunEpoch(runId), 0L);
+		}
 		long epoch = heldRunEpoch(runId);
 		long fence = 0L;
 		if (epoch > 0L) {
@@ -1515,6 +1858,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 因此索引<b>缺失</b>只影响快慢，不影响"是否已执行"的判定。
 	 */
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
+		// 续租 fencing 收口批：台账是"已执行"的跨进程判据 —— 丢租后不得追加（B 的台账才是真值），
+		// 否则 A 的迟到执行会让续跑回放出一个新主人没有执行过的结果。
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "工具执行台账落档");
+			return;
+		}
 		long atMs = System.currentTimeMillis();
 		String toolCallId = pending.getToolCallId();
 		String idemField = idemField(runId, toolCallId);
@@ -1775,6 +2125,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			touchActivity(runId);
 			return;
 		}
+		// 续租 fencing 收口批：兼容写口也要过权威判定 —— 丢租/设施不可确认时不得落档
+		// （生产出帧已在 SseChatEmitter#emit 拦截；这里是"绕过发射器直塞帧"的第二道闸）。
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "事件帧落档");
+			return;
+		}
 		frame.putIfAbsent("atMs", System.currentTimeMillis());
 		// R1-09：任何业务帧（不限于 delta）都推进业务活动锚点；读取侧还会与事件日志尾部取 max，
 		// 因此这里即使写失败，归档本身仍是可见的活动证据。
@@ -1823,6 +2180,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 宕机下重号风险登记为观察项。
 	 */
 	public void recordIssuedSeq(String runId, long seq) {
+		// 续租 fencing 收口批：丢租后不得再取/登记业务号（新主人从自己的号锚续号，
+		// 旧主人继续推进会把 seq 空间搅乱，且意味着还在落档）。
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "业务序号登记");
+			return;
+		}
 		try {
 			this.redis.opsForValue().set(seqKey(runId), String.valueOf(seq), ttlFor(runId));
 		}
@@ -1987,7 +2351,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return touchActiveRun(snapshot);
 	}
 
-	/** 读侧续期的省一次读重载（调用方刚从 Redis 读到快照）。 */
+	/**
+	 * 读侧续期的省一次读重载（调用方刚从 Redis 读到快照）。
+	 *
+	 * <p><b>I5：业务活动锚点只在 {@code SUSPENDED} 时刷新。</b>读侧 touch 证明"还有人管这一轮"
+	 * 只对<b>等人</b>成立（{@code /runs/current}、决策、重挂都是 park 期的正常动作）。
+	 * {@code RUNNING} 轮的活证只能是它自己的业务帧/心跳；让读侧也刷新锚点，等于把"卡死的 RUNNING 轮"
+	 * 越读越年轻 —— 僵尸判定（{@link com.example.configmgr.ai.config.AiProperties.Resume#getZombieAge()}）
+	 * 永远等不到接管，跨实例的双驱动防线被读流量绕过。TTL 续期不受影响（读侧仍养着挂起数据）。
+	 */
 	public boolean touchActiveRun(RunSnapshot snapshot) {
 		if (snapshot == null || snapshot.getRunId() == null) {
 			return false;
@@ -2002,6 +2374,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
 		// I-3 起单键失败已在 renew 内隔离，这里不再需要整面 try/catch。
 		renew(runId, ttl, SessionKeyRegistry.Renewal.READ);
+		// 读侧 touch 也是"还有人管这一轮"的证据（人工等待 park 批）：会话门判死（RunLiveness）
+		// 不得只看自写心跳/空 emitter；有人在读（/runs/current、决策、重挂）就刷新业务活动锚点。
+		// 注意写的是 <b>ai:activity</b>（业务活动锚点）而不是 ai:beat —— 后者只证明进程活着；
+		// 而且只对 SUSPENDED 写（I5）：RUNNING 轮的活动证据只能来自它自己的业务帧/心跳。
+		if (RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			touchBusinessActivity(runId, System.currentTimeMillis());
+		}
 		return true;
 	}
 

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.observe.AiTrace;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -92,10 +93,12 @@ public final class ContextCompactor {
 	 * @param systemTokens            人设 + 工作区快照估算
 	 * @param toolsTokens             本轮披露 schema 估算
 	 * @param protectedToolCallIds    未决 HITL 条目（永不清除）
+	 * @param runtime                 本轮运行态（摘要的 provider/model/options 唯一来源；null = 摘要不可用）
 	 */
 	public record Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
 			List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
-			int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds) {
+			int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
+			ProviderRuntime runtime) {
 	}
 
 	/**
@@ -262,11 +265,12 @@ public final class ContextCompactor {
 			if (target == ContextTrigger.Level.L2) {
 				reason = RollingSummarizer.REASON_SUMMARY;
 				RollingSummarizer.Summarizer summarizer = withProgress(this.summarizer, onSummaryProgress);
-				if (summarizer == null) {
+				if (summarizer == null || request.runtime() == null) {
+					// 摘要只使用本轮 provider/model/options：没有本轮 runtime 就不压，绝不回落全局默认
 					return failSummary(request, state, fuse, now, before, limit, decision, REASON_SUMMARY_UNAVAILABLE);
 				}
 				RollingSummarizer.Plan summary = RollingSummarizer.plan(current, config.getKeepRecentTurns(),
-						config.getChunkTokens(), request.protectedToolCallIds(), summarizer, now);
+						config.getChunkTokens(), request.protectedToolCallIds(), request.runtime(), summarizer, now);
 				if (!summary.changed()) {
 					if (!RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE.equals(summary.reason())) {
 						return failSummary(request, state, fuse, now, before, limit, decision, REASON_SUMMARY_FAILED);
@@ -465,9 +469,9 @@ public final class ContextCompactor {
 		if (delegate == null || hook == null) {
 			return delegate;
 		}
-		return prompt -> {
+		return (systemPrompt, userPrompt, runtime) -> {
 			try {
-				return delegate.summarize(prompt);
+				return delegate.summarize(systemPrompt, userPrompt, runtime);
 			}
 			finally {
 				try {

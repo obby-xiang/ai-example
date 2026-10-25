@@ -1,6 +1,7 @@
 package com.example.configmgr.task.controller;
 
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.entity.TaskItem;
@@ -86,7 +87,8 @@ class FileControllerTaskGoneTest {
     @Test
     void uploadFkConflictCleansWrittenFileAndReturns404() throws Exception {
         long taskId = taskWithItem();
-        when(fileStorage.store(any(InputStream.class), anyString())).thenReturn("/tmp/r113-upload.xlsx");
+        when(fileStorage.store(any(InputStream.class), anyString()))
+                .thenReturn(new StoredFile("r113-upload-key.xlsx", java.nio.file.Path.of("/tmp/r113-upload.xlsx")));
         when(taskFileRepository.findByTaskIdAndDefCodeAndFileType(anyLong(), anyString(), anyString()))
                 .thenReturn(Optional.empty());
         when(taskFileRepository.save(any(TaskFile.class)))
@@ -99,16 +101,17 @@ class FileControllerTaskGoneTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("RESOURCE_NOT_FOUND"));
 
-        verify(fileStorage).delete("/tmp/r113-upload.xlsx");
+        verify(fileStorage).delete("r113-upload-key.xlsx");
     }
 
     @Test
     void putFkConflictCleansNewFileAndReturns404() throws Exception {
         long taskId = taskWithItem();
-        when(fileStorage.newPath(".xlsx")).thenReturn("/tmp/r113-put.xlsx");
+        when(fileStorage.allocate(".xlsx"))
+                .thenReturn(new StoredFile("r113-put-key.xlsx", java.nio.file.Path.of("/tmp/r113-put.xlsx")));
         when(taskFileRepository.findByTaskIdAndDefCodeAndFileType(anyLong(), anyString(), anyString()))
                 .thenReturn(Optional.empty());
-        when(taskFileRepository.save(any(TaskFile.class)))
+        when(taskFileRepository.saveAndFlush(any(TaskFile.class)))
                 .thenThrow(new DataIntegrityViolationException("fk: task deleted"));
 
         mockMvc.perform(put("/api/tasks/{id}/files/{defCode}", taskId, DEF_CODE)
@@ -117,7 +120,7 @@ class FileControllerTaskGoneTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("RESOURCE_NOT_FOUND"));
 
-        verify(fileStorage).delete("/tmp/r113-put.xlsx");
+        verify(fileStorage).delete("r113-put-key.xlsx");
     }
 
     private long taskWithItem() {

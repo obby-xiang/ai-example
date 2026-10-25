@@ -6,6 +6,7 @@ import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.resultview.ListTasksResultViewProvider;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
@@ -100,6 +101,29 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
 			.andExpect(jsonPath("$.data.messages[0].text").value(""))
 			.andExpect(jsonPath("$.data.messages[0].toolCalls[0].id").value("tc-1"));
+	}
+
+	/**
+	 * 截断专项：旧 {@code /history}（记忆窗口）以 additive 可选 {@code truncated} 字段回显
+	 * {@code finish_reason=length} 的持久标记；未截断/其他角色不产该键（"没说" ≠ "没截断"）。
+	 */
+	@Test
+	void truncatedAssistantExposesAdditiveFlagOnOldHistoryEndpoint() throws Exception {
+		AssistantMessage truncated = AssistantMessage.builder()
+			.content("被截断的回答")
+			.properties(Map.of(ResilientChatService.TRUNCATED_KEY, true))
+			.build();
+		AssistantMessage complete = AssistantMessage.builder().content("完整回答").build();
+		UserMessage user = new UserMessage("问题");
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(user, truncated, complete));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].truncated").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[1].type").value("ASSISTANT"))
+			.andExpect(jsonPath("$.data.messages[1].truncated").value(true))
+			.andExpect(jsonPath("$.data.messages[1].stopped").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[2].truncated").doesNotExist());
 	}
 
 	/**

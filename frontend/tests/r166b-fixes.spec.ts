@@ -8,21 +8,31 @@
  *       替换 R-166 口径⑤的 navigation type 判据（真机复制页签 = back_forward，判据作废）。
  *
  * 风格照抄 frontend-tool-result-terminal.spec.ts：只驱动真实 store / 真实前端工具入口，不挂载面板。
- * jsdom 无 Web Locks 与 BroadcastChannel 实现 ⇒ 两者都用下面最小桩接管（桩语义照规范：`ifAvailable`
- * 命中占用即以 `null` 回调）。
+ * jsdom 无 Web Locks 与 BroadcastChannel 实现 ⇒ 两者都用 tests/tab-ownership-fixtures.ts 的最小桩
+ * 接管（桩语义照规范：`ifAvailable` 命中占用即以 `null` 回调）。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import {
+  LOCK_PROBE_ATTEMPTS,
+  LOCK_PROBE_RETRY_MS,
   MIRROR_PREFIX,
   OWNERSHIP_CHANNEL_NAME,
+  OWNERSHIP_RELEASE_GRACE_MS,
   PAGE_ID_KEY,
   SESSION_ID_KEY,
   SESSION_LOCK_PREFIX,
   useAiStore
 } from '@/stores/ai'
+import {
+  channels,
+  FakeBroadcastChannel,
+  FakeLockManager,
+  seedTab,
+  wait
+} from './tab-ownership-fixtures'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { ApiError } from '@/api/http'
@@ -51,74 +61,13 @@ vi.mock('@/router', () => ({
 }))
 
 /**
- * Web Locks 桩：`held` = **别的页签**已持有的锁名（原页签存活时就该在里面）。
- * `ifAvailable` 命中占用 → 以 `null` 回调（规范语义）；空闲 → 持有到回调返回的 promise 落地。
+ * Web Locks / BroadcastChannel 桩统一放在 tests/tab-ownership-fixtures.ts（本批新增的页签生命周期
+ * 用例共用同一份语义，避免两处桩漂移）。
  */
-class FakeLockManager {
-  private readonly held = new Set<string>()
-  private readonly mine = new Set<string>()
-
-  /** 模拟"别人占着这把锁"（原页签存活）。 */
-  hold(name: string): void {
-    this.held.add(name)
-  }
-
-  /** 模拟"别人关掉页签"：锁随之释放。 */
-  release(name: string): void {
-    this.held.delete(name)
-  }
-
-  request(
-    name: string,
-    options: { ifAvailable?: boolean },
-    callback: (lock: { name: string } | null) => unknown
-  ): Promise<unknown> {
-    if (this.held.has(name) || this.mine.has(name)) {
-      return options?.ifAvailable === true ? Promise.resolve(callback(null)) : new Promise(() => {})
-    }
-    this.mine.add(name)
-    const held = Promise.resolve(callback({ name }))
-    return held.then(
-      () => this.mine.delete(name),
-      () => this.mine.delete(name)
-    )
-  }
-}
-
-/** 同页签组的 BroadcastChannel 桩（同进程同步投递，便于断言）。 */
-const channels = new Set<FakeBroadcastChannel>()
-
-class FakeBroadcastChannel {
-  onmessage: ((event: { data: unknown }) => void) | null = null
-  readonly name: string
-
-  constructor(name: string) {
-    this.name = name
-    channels.add(this)
-  }
-
-  postMessage(data: unknown): void {
-    for (const channel of [...channels]) {
-      if (channel !== this && channel.name === this.name) {
-        channel.onmessage?.({ data })
-      }
-    }
-  }
-
-  close(): void {
-    channels.delete(this)
-  }
-}
 
 let locks: FakeLockManager
-
-/** 预置一个"已有存量会话"的页签现场（sessionStorage 被复制页签继承的原样）。 */
-function seedTab(sessionId: string, withMirror = true): void {
-  sessionStorage.setItem(SESSION_ID_KEY, sessionId)
-  if (withMirror) {
-    sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
-  }
-}
+/** 探活重试的最坏耗时 + 余量（`resolveTabOwnership` 是 3 × 150ms）。 */
+const PROBE_BUDGET_MS = LOCK_PROBE_ATTEMPTS * LOCK_PROBE_RETRY_MS + 400
 
 /** 造一条前端工具段（不依赖真实帧路，RC-1/RC-2 之外的断言用不到）。 */
 function toolPartsOf(message: ChatMessage): ToolPart[] {
@@ -624,7 +573,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-nolocks')).not.toBeNull()
   })
 
-  it('③ 原页签关闭广播 ⇒ 空白复制页签接手原会话（换回原 id + 读回历史）', async () => {
+  it('③ 原页签关闭广播 ⇒ 空白复制页签**宽限后**接手原会话（换回原 id + 读回历史）', async () => {
     seedTab('tab-handover')
     locks.hold(SESSION_LOCK_PREFIX + 'tab-handover')
 
@@ -641,7 +590,12 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
       sessionId: 'tab-handover',
       pageId: 'page-original'
     })
+    // 宽限内不抢：原页签可能只是刷新，回来后会重播 claim（见 tab-ownership-lifecycle.spec.ts）
     await flushPromises()
+    expect(store.sessionId).toBe(ownSession)
+
+    // 宽限到期 → 二次探活拿到锁 → 接手
+    await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
     expect(store.sessionId).toBe('tab-handover')
     expect(store.tabOwnership).toBe('owner')
@@ -650,7 +604,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     expect(api.history).toHaveBeenCalledWith('tab-handover')
   })
 
-  it('③ 锁仍被占 ⇒ 广播不可信，复制页签不接管原会话', async () => {
+  it('③ 锁仍被占 ⇒ 广播不可信，复制页签不接管原会话（宽限之后也不接管）', async () => {
     seedTab('tab-locked')
     locks.hold(SESSION_LOCK_PREFIX + 'tab-locked')
 
@@ -664,7 +618,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
       sessionId: 'tab-locked',
       pageId: 'page-original'
     })
-    await flushPromises()
+    await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
     expect(store.sessionId).toBe(ownSession)
     expect(store.tabOwnership).toBe('duplicate')
@@ -686,13 +640,13 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
       sessionId: 'tab-content',
       pageId: 'page-original'
     })
-    await flushPromises()
+    await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
     expect(store.sessionId).toBe(ownSession)
     expect(store.tabOwnership).toBe('duplicate')
   })
 
-  it('③ 原页签离开（pagehide）⇒ 广播 released 并释放锁', async () => {
+  it('③ 原页签离开（pagehide）⇒ 广播 released；锁不在 pagehide 同步释放（刷新要能立刻认领）', async () => {
     seedTab('tab-leave')
     const witness = new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME)
     const seen: unknown[] = []
@@ -706,8 +660,13 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     await flushPromises()
     expect(seen).toHaveLength(2)
     expect(seen[1]).toMatchObject({ kind: 'released', sessionId: 'tab-leave' })
+    // 刷新场景：新文档要能马上拿到同一把锁 ⇒ 旧文档不在这里同步释放
+    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'tab-leave')).toBe(true)
 
-    // 锁已释放：另一个页签（新 store、同 sessionStorage）可以接手同一个会话
+    // 文档真销毁（等价面：宽限到期后旧文档自己的清理）⇒ 另一个页签可以接手同一个会话
+    await wait(OWNERSHIP_RELEASE_GRACE_MS + 200)
+    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'tab-leave')).toBe(false)
+
     setActivePinia(createPinia())
     const next = useAiStore()
     await next.ensureTabOwnership()

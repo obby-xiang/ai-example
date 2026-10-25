@@ -6,6 +6,7 @@ import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -100,17 +101,17 @@ public class GenerativeFormAttachmentController {
 					"附件 MIME 与扩展名不符：" + contentType + "（." + ext + " 允许 " + String.join("/", mimes) + "）");
 		}
 		assertFormIsWaiting(runId, toolCallId);
-		String storagePath = this.fileStorage.store(file.getInputStream(), originalName);
+		StoredFile storedFile = this.fileStorage.store(file.getInputStream(), originalName);
 		FormAttachmentStore.Attachment stored;
 		try {
 			stored = this.attachments.register(runId, toolCallId, sessionId,
-					originalName, file.getSize(), contentType, storagePath);
+					originalName, file.getSize(), contentType, storedFile.key());
 		}
 		catch (RuntimeException ex) {
 			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
-			this.fileStorage.delete(storagePath);
-			log.warn("附件登记失败，已清理落盘文件 runId={} toolCallId={} path={}：{}", runId, toolCallId,
-					storagePath, ex.getMessage());
+			this.fileStorage.delete(storedFile.key());
+			log.warn("附件登记失败，已清理落盘文件 runId={} toolCallId={} key={}：{}", runId, toolCallId,
+					storedFile.key(), ex.getMessage());
 			throw ex;
 		}
 		Map<String, Object> data = new LinkedHashMap<>();

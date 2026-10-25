@@ -69,13 +69,32 @@ final class RetryBackoff {
 
 	/** 抖动源的确定性重载（单测直接给 `[0,1)` 的样本，绕开随机数）。 */
 	static long delayMs(int retryNo, long remainingBudgetMs, double sample) {
+		return delayMsWithRetryAfter(retryNo, remainingBudgetMs, null, sample);
+	}
+
+	/**
+	 * 带 {@code Retry-After} 的退避（429）：等待 = max(抖动退避, Retry-After)，再按剩余预算收缩。
+	 *
+	 * <p>为什么取 max：退避是"给同一条劣化链路一点恢复时间"的下限，{@code Retry-After} 是上游
+	 * 明确要求的下限；两者同时存在时取更长者才不会"刚被限流就立刻再打一次"。
+	 * 预算约束不变：无论如何都不把时间睡到"刚醒就超预算"。
+	 *
+	 * @param retryAfterMillis 上游要求的最短等待（null = 没有/不可解析）
+	 */
+	static long delayMsWithRetryAfter(int retryNo, long remainingBudgetMs, Long retryAfterMillis, double sample) {
 		long usable = remainingBudgetMs - BUDGET_MARGIN_MS;
 		if (usable <= 0) {
 			return 0L;
 		}
 		double factor = 1d - JITTER_RATIO + 2 * JITTER_RATIO * clamp01(sample);
 		long jittered = Math.round(baseMs(retryNo) * factor);
-		return Math.max(0L, Math.min(jittered, usable));
+		long target = retryAfterMillis == null ? jittered : Math.max(jittered, Math.max(0L, retryAfterMillis));
+		return Math.max(0L, Math.min(target, usable));
+	}
+
+	/** 带 {@code Retry-After}、使用默认抖动源的便捷入口。 */
+	static long delayMsWithRetryAfter(int retryNo, long remainingBudgetMs, Long retryAfterMillis) {
+		return delayMsWithRetryAfter(retryNo, remainingBudgetMs, retryAfterMillis, new Random().nextDouble());
 	}
 
 	/** 便捷入口：给"默认抖动源"的调用点。 */

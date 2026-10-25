@@ -80,13 +80,19 @@ const CODE_CARD_TEXT: Record<string, { title: string; guide: string }> = {
   UPSTREAM_STREAM_INCOMPLETE: { title: 'ai.card.error.interrupted.title', guide: 'ai.card.error.interrupted.guide' },
   UPSTREAM_CONNECTION_BROKEN: { title: 'ai.card.error.connection.title', guide: 'ai.card.error.connection.guide' },
   UPSTREAM_STREAM_ERROR: { title: 'ai.card.error.upstream.title', guide: 'ai.card.error.upstream.guide' },
+  UPSTREAM_UNAVAILABLE: { title: 'ai.card.error.upstream.title', guide: 'ai.card.error.upstream.guide' },
+  UPSTREAM_AUTH_FAILED: { title: 'ai.card.error.authFailed.title', guide: 'ai.card.error.authFailed.guide' },
+  UPSTREAM_REJECTED: { title: 'ai.card.error.rejected.title', guide: 'ai.card.error.rejected.guide' },
   AI_KEY_MISSING: { title: 'ai.card.error.keyMissing.title', guide: 'ai.card.error.keyMissing.guide' },
-  AI_KEY_UNREADABLE: { title: 'ai.card.error.keyUnreadable.title', guide: 'ai.card.error.keyUnreadable.guide' }
+  AI_KEY_UNREADABLE: { title: 'ai.card.error.keyUnreadable.title', guide: 'ai.card.error.keyUnreadable.guide' },
+  NO_MODEL_CONFIGURED: { title: 'ai.card.error.noModel.title', guide: 'ai.card.error.noModel.guide' }
 }
 
-/** 有专属色族/动作的码（上下文超限走蓝族"开新会话"，文案沿用三变体表）。 */
+/** 有专属色族/动作的码（上下文超限走蓝族"开新会话"，限流走红族，内容过滤走灰族）。 */
 const CODE_VARIANT: Record<string, ErrorCardVariant> = {
-  CONTEXT_OVERFLOW: 'context'
+  CONTEXT_OVERFLOW: 'context',
+  UPSTREAM_RATE_LIMITED: 'quota',
+  CONTENT_FILTERED: 'filter'
 }
 
 /** 三变体文案（demo v7.7 裁决区 08 逐字；`detail` 由调用方喂现实文案）。
@@ -137,8 +143,8 @@ export function buildErrorCard(code: string, message: string): ErrorCard | null 
     return null
   }
   const forcedVariant = CODE_VARIANT[base]
-  if (forcedVariant === 'context') {
-    const text = VARIANT_TEXT_KEY.context
+  if (forcedVariant !== undefined && forcedVariant !== 'generic') {
+    const text = VARIANT_TEXT_KEY[forcedVariant]
     return {
       variant: forcedVariant,
       title: translate(text.title),

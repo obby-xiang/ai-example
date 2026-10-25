@@ -73,6 +73,8 @@ const COPY_KEYS = {
   allowUserParams: 'ai.settings.copy.allowUserParams',
   defaultValueModel: 'ai.settings.copy.defaultValueModel',
   defaultValueModelNone: 'ai.settings.copy.defaultValueModelNone',
+  defaultValueModelUnbound: 'ai.settings.copy.defaultValueModelUnbound',
+  defaultValueModelUnavailable: 'ai.settings.copy.defaultValueModelUnavailable',
   saved: 'ai.settings.copy.saved',
   probeOk: 'ai.settings.copy.probeOk',
   probeFailed: 'ai.settings.copy.probeFailed'

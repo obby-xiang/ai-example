@@ -261,6 +261,33 @@ class RunnerActiveMultiInstanceTest {
         taskService.delete(taskId);
     }
 
+    @Test
+    void watchdogRevokeClearsSharedKeysAndReleasesDeleteGateForAnotherInstance() {
+        long taskId = terminalTask();
+        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
+        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        instanceA.beginRunner(jobId);
+        instanceA.beat(jobId);
+        assertThat(redisStore).containsKeys(
+                JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId,
+                JobHeartbeatRegistry.BEAT_PREFIX + jobId);
+
+        assertThatThrownBy(() -> taskService.delete(taskId))
+                .as("A 的 runner 未退出：B 删除必须 409")
+                .isInstanceOf(ConflictException.class);
+        assertThat(taskRepository.existsById(taskId)).isTrue();
+
+        // 看门狗判死成功后在 B 侧撤销 runner 登记（A 已失联，不会再有 endRunner）
+        instanceB.revokeRunner(jobId);
+
+        assertThat(redisStore).as("判死清 runner-active + 共享心跳，删除闸门立即释放（不等 30m/65m TTL）")
+                .doesNotContainKeys(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId,
+                        JobHeartbeatRegistry.BEAT_PREFIX + jobId);
+        taskService.delete(taskId);
+        assertThat(taskRepository.existsById(taskId)).isFalse();
+        assertThat(jobRepository.findByTaskId(taskId)).isEmpty();
+    }
+
     private long terminalTask() {
         Task task = taskService.create(Task.TaskType.EXPORT, "R113-MULTI");
         Job job = new Job();

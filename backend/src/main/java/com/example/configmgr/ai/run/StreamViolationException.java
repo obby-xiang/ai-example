@@ -14,7 +14,8 @@ import lombok.Getter;
  * <ul>
  * <li><b>看门狗判定</b>（{@link StreamWatchdog}）：首包超时 / 事件间静默 / 总预算 / 取消；</li>
  * <li><b>管道自身报错</b>（上游连接被重置、TCP 静默 FIN 后过早结束等）：
- * 由 {@code ResilientChatService} 归类成 {@code UPSTREAM_CONNECTION_BROKEN} 等 code 后再抛。</li>
+ * 由 {@link UpstreamErrorClassifier} 先按异常类型/HTTP 状态归类，{@code ResilientChatService}
+ * 再包成本类（携带 {@code UPSTREAM_CONNECTION_BROKEN} 等 code）。</li>
  * </ul>
  */
 @Getter
@@ -67,11 +68,18 @@ public class StreamViolationException extends RuntimeException {
 		this.code = code;
 	}
 
-	/** 是否为"断流"类失败（可进入重试判定的那些）。 */
+	/**
+	 * 是否为"断流"类失败（可进入重试判定的那些）。
+	 *
+	 * <p>第 10 项起 {@link #STREAM_ERROR} <b>不再</b>算可重试：它是"未定性的异常"的兜底码，
+	 * 而重试只给 408/429/5xx/网络与"已确认断流"的几类。真正的断流在
+	 * {@code UpstreamErrorClassifier} 里按异常类型归到 {@link #CONNECTION_BROKEN}/
+	 * {@link #INCOMPLETE}，不会落到这个兜底码上。
+	 */
 	public boolean brokenStream() {
 		return FIRST_BYTE_TIMEOUT.equals(this.code) || SILENT_TIMEOUT.equals(this.code)
 				|| INCOMPLETE.equals(this.code) || CONNECTION_BROKEN.equals(this.code)
-				|| STREAM_ERROR.equals(this.code) || STATE_UNAVAILABLE.equals(this.code);
+				|| STATE_UNAVAILABLE.equals(this.code);
 	}
 
 }

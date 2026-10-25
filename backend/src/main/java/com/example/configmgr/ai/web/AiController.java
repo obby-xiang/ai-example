@@ -13,8 +13,10 @@ import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
+import com.example.configmgr.ai.history.AiChatHistoryService;
+import com.example.configmgr.ai.history.AiChatHistoryService.ChatPage;
+import com.example.configmgr.ai.history.AiChatHistoryService.MessageView;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
-import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.FrameStore;
@@ -35,6 +37,7 @@ import com.example.configmgr.ai.tool.SheetSwitches;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -56,7 +59,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.util.StringUtils;
-import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -86,17 +88,20 @@ import java.util.concurrent.RejectedExecutionException;
  * <tr><td>{@code POST /api/ai/confirm}</td><td>确认门决策（放行/拒绝）；重复 toolCallId →
  * 409 DUPLICATE_TOOL_CALL_ID，未知 id → 409 UNKNOWN_TOOL_CALL</td></tr>
  * <tr><td>{@code POST /api/ai/frontend-tool-result}</td><td>前端工具结果回灌（同一套幂等口径）；
- * 被安全闸拒绝 → <b>400</b> 携机器可读码 + 原因清单（挂起不消费，可重试）；{@code cancelled:true}
- * → 用户取消终态（DC-15）</td></tr>
+ * 被安全闸拒绝 → <b>400</b> 携机器可读码 + 原因清单（挂起不消费，可重试）；
+ * <b>结构化结果</b>超 {@code app.ai.result-budget.callback.max-chars} → <b>400
+ * FRONTEND_RESULT_TOO_LARGE</b>（不截断、不调 submit、不落库，客户端改小后重试；普通文本超限仍截断 + 标记）；
+ * {@code cancelled:true} → 用户取消终态（DC-15）</td></tr>
  * <tr><td>{@code GET /api/ai/events/{runId}}</td><td>reattach：回放该轮状态类帧 + 继续收实时帧
  * （ADR-5 补记 CH-P4）</td></tr>
  * <tr><td>{@code GET /api/ai/runs} / {@code GET /api/ai/runs/{runId}}</td><td>重启后的
  * "发现待续跑轮次"与单轮明细（台账/待决/历史角色）</td></tr>
  * <tr><td>{@code POST /api/ai/runs/{runId}/resume}</td><td>续跑（重建完整历史 → 官方循环）</td></tr>
  * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
- * <tr><td>{@code DELETE /api/ai/history/{sessionId}}</td><td>删该会话的记忆面（前端「新建对话」）；
- * <b>幂等</b>：不存在也 200；不查 AI key，Redis 不可用 503；会话在跑时只报告 {@code runActive}，
- * <b>不 409</b></td></tr>
+ * <tr><td>{@code DELETE /api/ai/history/{sessionId}} / {@code DELETE /api/ai/session/{sessionId}}</td>
+ * <td><b>完整会话销毁</b>（旧路径保留兼容，统一委托 purge）：删除该会话全部 AI 数据（记忆/run 13 键/
+ * 上下文/附件/反馈/完整历史/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
+ * 有活跃 run 时先取消、其 13 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
  * <tr><td>{@code GET /api/ai/health}</td><td>AI 可用性/模型名/记忆后端（供前端降级提示）</td></tr>
  * </table>
  *
@@ -174,6 +179,15 @@ public class AiController {
 	private AiRateLimiter aiRateLimiter;
 
 	/**
+	 * 多实例专项：来源 IP 解析（可信代理网段内的 X-Forwarded-For 才认）。
+	 *
+	 * <p>字段注入的理由同本类其余可选组件：构造器签名不变 ⇒ 既有 {@code new AiController(...)}
+	 * 的单测零触碰；未注入（standalone 单测）时回落 {@code RemoteAddr}，与改造前逐字一致。
+	 */
+	@Autowired(required = false)
+	private com.example.configmgr.config.ClientIpResolver clientIpResolver;
+
+	/**
 	 * 防护批③ B2-5：{@code context} 形状闸（白名单化 + 降级不回显）。未注入时退化为"不闸"。
 	 */
 	@Autowired(required = false)
@@ -184,6 +198,16 @@ public class AiController {
 	 */
 	@Autowired(required = false)
 	private SecurityEvents securityEvents;
+
+	/**
+	 * 会话销毁守卫（销毁专项复审）：{@code /chat} 在创建新 run 前查一次。
+	 *
+	 * <p>字段注入的理由同本类其余可选组件：构造器签名不变 ⇒ 既有 {@code new AiController(...)}
+	 * 单测零触碰。未注入（局部的 standalone 单测）时跳过本闸；生产装配必有该 bean。
+	 * 守卫读失败<b>不</b>放行（fail-closed），按 Redis 不可用 503 处理。
+	 */
+	@Autowired(required = false)
+	private com.example.configmgr.ai.session.SessionPurgeGuard sessionPurgeGuard;
 
 	/**
 	 * AI 表格工具治理批：表格开关（{@code /health.sheet} 的配置面）。未注入时少该键。
@@ -215,6 +239,13 @@ public class AiController {
 
 	@Autowired(required = false)
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
+
+	/**
+	 * 完整对话历史存储（第二阶段）。字段注入保持构造器与既有 {@code new AiController(...)} 用例零改动；
+	 * 未注入（局部上下文）时新端点如实 503，既有 40 条记忆窗口端点不受影响。
+	 */
+	@Autowired(required = false)
+	private AiChatHistoryService aiChatHistoryService;
 
 	/**
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
@@ -360,13 +391,32 @@ public class AiController {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.INVALID_PARAM, sessionId, null, "reason", paramsRejection);
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.INVALID_PARAM, paramsRejection));
 		}
+		// 会话销毁守卫（复审 #3）：已销毁的 sessionId 不得再开新轮 —— 否则 run 能建、记忆/历史
+		// 却被守卫拒绝写，表现为"能聊天但不留痕"的静默复活。必须在创建 runId / 占会话门之前。
+		// 守卫读失败 fail-closed：按 Redis 不可用 503，绝不按"未销毁"放行。
+		if (this.sessionPurgeGuard != null) {
+			boolean purged;
+			try {
+				purged = this.sessionPurgeGuard.isArmed(sessionId);
+			}
+			catch (AiStateUnavailableException ex) {
+				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
+						"purge_guard_unreadable");
+				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+			}
+			if (purged) {
+				deny(HttpStatus.GONE, ErrorCodes.SESSION_PURGED, sessionId, null, "action", "NEW_SESSION");
+				return json(HttpStatus.GONE, sessionPurged(sessionId));
+			}
+		}
 		String runId = UUID.randomUUID().toString();
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
 		// 批G · G6：僵尸轮放行 —— 上一轮所在进程死了，会话门却还留着他的 runId 时，用户会永远
 		// 409（只能刷新）。判据见 RunLiveness（无租约 + 本进程无活连接 + 活动早已超出僵尸窗口）。
 		if (busy != null && isDeadRound(busy.runId())) {
 			log.warn("会话门被死轮占着，放行新发送 sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
-			this.sessionGate.release(sessionId, busy.runId());
+			// 死轮已判定不再推进：按 runId 强释放，仅当会话门仍属于这个死轮才生效。
+			this.sessionGate.releaseDeadHeld(sessionId, busy.runId());
 			busy = this.sessionGate.acquire(sessionId, runId);
 		}
 		if (busy != null) {
@@ -486,6 +536,16 @@ public class AiController {
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
 		this.runStore.touchActiveRun(request.runId());
+		// 只接受服务端 kind=CONFIRM；错入口在进闸门前拒绝，不改变任何条目。
+		PendingToolCall entry = this.runStore.pendingLenient(request.runId(), request.toolCallId());
+		PendingToolCall wrongKind = wrongKindEntry(entry, PendingToolCall.KIND_CONFIRM);
+		if (wrongKind != null) {
+			deny(HttpStatus.CONFLICT, ErrorCodes.TOOL_KIND_MISMATCH, null, request.runId(),
+					"kind", wrongKind.getKind(), "expected", PendingToolCall.KIND_CONFIRM,
+					"name", wrongKind.getName());
+			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
+					PendingToolCall.KIND_CONFIRM));
+		}
 		boolean approved = Boolean.TRUE.equals(request.approved());
 		ConfirmGate.Submission submission;
 		// 日志链路批：决策落在 HTTP 线程上 —— 装锚点，使 approval_decided 与"决策触发的续跑任务"
@@ -500,6 +560,11 @@ public class AiController {
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
+		}
+		if (submission.outcome() == ConfirmGate.Outcome.TOOL_KIND_MISMATCH) {
+			// 入口预读不可用时由闸门判定，仍统一为 409，而不是"已受理"。
+			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(),
+					submission.pending(), PendingToolCall.KIND_CONFIRM));
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.DUPLICATE) {
 			return json(HttpStatus.CONFLICT,
@@ -531,15 +596,43 @@ public class AiController {
 		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
+		// 只接受服务端 kind=FRONTEND；同一条目供 kind 与结构化判定共用，避免重复读取。
+		// kind 先于体积判断；cancelled=true 也先校验，因为取消同样改变状态。
+		PendingToolCall entry = this.runStore.pendingLenient(request.runId(), request.toolCallId());
+		PendingToolCall wrongKind = wrongKindEntry(entry, PendingToolCall.KIND_FRONTEND);
+		if (wrongKind != null) {
+			deny(HttpStatus.CONFLICT, ErrorCodes.TOOL_KIND_MISMATCH, null, request.runId(),
+					"kind", wrongKind.getKind(), "expected", PendingToolCall.KIND_FRONTEND,
+					"name", wrongKind.getName(), "cancelled", cancelled);
+			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
+					PendingToolCall.KIND_FRONTEND));
+		}
 		// 防护批③ B2-7：回灌载荷闸 —— 机器数据超限**截断并标记**（不像用户输入那样 400：
 		// 表格摘要本来就可能很长，拒绝回灌会让前端工具永远无法收尾）。
 		// G5：上限来自 app.ai.result-budget.callback.max-chars（不再是类内常量），
 		// 截断标记计入预算，响应体与工具结果帧共用同一套截断字段（truncated/strategy/
 		// originalChars/returnedChars/notice）。
+		// 结构化回灌超限拒绝批：**结构化结果**（JSON 对象/数组、表格写结果）是这条闸门的例外 ——
+		// substring 截断会切坏 JSON、切掉表格「共 N 格」尾行，落库的会是半截数据。这类超限在
+		// 进入确认门**之前**以 400 FRONTEND_RESULT_TOO_LARGE 拒绝：不调 submit、不写条目、
+		// pending 原样留着，客户端把结果改小后重试（与 /chat 的超长输入同一姿态：拒绝不截断）。
 		int callbackMaxChars = this.properties.getResultBudget().getCallback().getMaxChars();
 		String result = request.result();
-		boolean truncated = false;
 		int originalChars = result == null ? 0 : result.length();
+		if (!cancelled && result != null && originalChars > callbackMaxChars) {
+			PendingToolCall pending = entry;
+			if (structuredOversize(pending, result)) {
+				deny(HttpStatus.BAD_REQUEST, ErrorCodes.FRONTEND_RESULT_TOO_LARGE, null, request.runId(),
+						"chars", originalChars, "limit", callbackMaxChars, "name", pending.getName(),
+						"kind", pending.getKind());
+				log.info("结构化回灌结果超限，拒绝且不落库 runId={} toolCallId={} name={} 原长度={} 上限={}",
+						request.runId(), request.toolCallId(), pending.getName(), originalChars, callbackMaxChars);
+				return json(HttpStatus.BAD_REQUEST,
+						frontendResultTooLarge(request.runId(), request.toolCallId(), pending, originalChars,
+								callbackMaxChars));
+			}
+		}
+		boolean truncated = false;
 		int returnedChars = originalChars;
 		String notice = null;
 		if (result != null && result.length() > callbackMaxChars) {
@@ -586,6 +679,11 @@ public class AiController {
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
+		}
+		if (submission.outcome() == ConfirmGate.Outcome.TOOL_KIND_MISMATCH) {
+			// 入口预读不可用时由闸门判定，统一映射为 409。
+			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(),
+					submission.pending(), PendingToolCall.KIND_FRONTEND));
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.DUPLICATE) {
 			return json(HttpStatus.CONFLICT,
@@ -660,6 +758,10 @@ public class AiController {
 		SseChatEmitter out = this.runRegistry.of(runId);
 		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
 		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
+		// park 的挂起轮没有驱动方：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
+		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			out.completeSubscriptions();
+		}
 		return ResponseEntity.ok(emitter);
 	}
 
@@ -693,17 +795,19 @@ public class AiController {
 			log.debug("读取续跑租约失败 runId={}：{}", heldRunId, ex.getMessage());
 			leaseHeld = true;
 		}
-		boolean liveInProcess = this.runRegistry.find(heldRunId) != null;
+		// 空写出器不算活跃：只有真实订阅才保留会话门。
+		boolean liveInProcess = this.runRegistry.hasLiveSubscriber(heldRunId);
 		String status = snapshot == null ? null : snapshot.getStatus();
 		long updatedAtMs = snapshot == null ? 0L : snapshot.getUpdatedAtMs();
-		// R1-09：两种状态的"活动"口径不同 ——
-		// · RUNNING：判据是<b>业务</b>是否还在前进，心跳不得掩盖卡死（只认 lastActivityAtMs）；
-		// · SUSPENDED：等人期间本来就没有业务帧，2s 心跳是"还在等"的唯一证据（认 lastEventAtMs）。
-		long lastActivityAtMs = RunSnapshot.SUSPENDED.equals(status)
-				? this.runStore.lastEventAtMs(heldRunId) : this.runStore.lastActivityAtMs(heldRunId);
+		// 两种状态统一看业务活动：RUNNING 的心跳不能养僵尸，SUSPENDED 的读侧 touch 才算活动。
+		long lastActivityAtMs = this.runStore.lastActivityAtMs(heldRunId);
 		long thresholdMs = this.properties.getResume().getZombieAge().toMillis();
-		return RunLiveness.isDead(status, updatedAtMs, lastActivityAtMs, leaseHeld, liveInProcess, thresholdMs,
-				System.currentTimeMillis());
+		boolean dead = RunLiveness.isDead(status, updatedAtMs, lastActivityAtMs, leaseHeld, liveInProcess,
+				thresholdMs, System.currentTimeMillis());
+		if (dead) {
+			this.runRegistry.recycleIfIdle(heldRunId);
+		}
+		return dead;
 	}
 
 	// ── 取消（韧性棒：ADR-8 修正③） ────────────────────────────────────────
@@ -738,7 +842,16 @@ public class AiController {
 		body.put("runExists", snapshot != null);
 		body.put("statusBeforeCancel", snapshot == null ? null : snapshot.getStatus());
 		body.put("storedBy", this.runStore.instanceId());
-		body.put("note", "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
+		// park 的挂起轮没有等待线程：取消必须触发续跑收敛，而不是只留一个取消标志。
+		if (this.properties.getPark().isEnabled() && snapshot != null
+				&& RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			ConfirmGate.ResumeTrigger parked = this.confirmGate.triggerResumeForParked(runId);
+			body.put("parkedResume", parked == null ? null : parked.outcome());
+			body.put("note", "取消以 Redis 标志为准；挂起中的轮已触发一次收敛派发（parkedResume）");
+		}
+		else {
+			body.put("note", "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
+		}
 		return ResponseEntity.ok(body);
 	}
 
@@ -980,6 +1093,18 @@ public class AiController {
 				: this.errorBodyFactory.message(code, fallbackMessage, null, ErrorBodyFactory.requestLocale());
 	}
 
+	/** 410：已销毁会话继续以同 id 开新轮（复审 #3）。明确提示换新 sessionId，不静默改 id。 */
+	private Map<String, Object> sessionPurged(String sessionId) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", ErrorCodes.SESSION_PURGED);
+		body.put("message", localize(ErrorCodes.SESSION_PURGED,
+				"该会话已被销毁，不能继续以同一 sessionId 对话；请新建对话（使用新的 sessionId）后重试"));
+		body.put("sessionId", sessionId);
+		body.put("action", "NEW_SESSION");
+		body.put("note", "会话销毁后旧 sessionId 不可复用；前端「新建对话」会生成新 id。");
+		return body;
+	}
+
 	/**
 	 * 请求被<b>拒绝</b>时的结构化出口（AI 日志最小补齐批）：{@code event=turn_denied}。
 	 *
@@ -1066,14 +1191,21 @@ public class AiController {
 	}
 
 	/**
-	 * 限流用的来源 IP：只认 {@code RemoteAddr}。
+	 * 限流用的来源 IP：交给 {@link com.example.configmgr.config.ClientIpResolver}（多实例专项）。
 	 *
-	 * <p>{@code X-Forwarded-For} 可被客户端任意伪造，本仓没有前置代理，读它等于把"算谁的额度"
-	 * 交给请求方自己声明。将来若上代理，须在代理层覆写并在此显式放开（M3 事项）。
+	 * <p>口径未变的安全前提：**只有 RemoteAddr 落在 {@code app.web.trusted-proxies} 内才看
+	 * {@code X-Forwarded-For}**（默认网段为空 ⇒ 只回 RemoteAddr，与改造前逐字一致）。
+	 * 无条件读 XFF 等于把"算谁的额度"交给请求方自己声明；而完全读不到 XFF，则 LB 后的
+	 * 全站用户会共用同一个 {@code ai:rate:ip:<LB-IP>} 桶 —— 一个用户刷满 60/分即全员 429。
+	 *
+	 * <p>未装配 resolver（standalone 单测直接 {@code new AiController(...)}）时回落 RemoteAddr。
 	 */
-	private static String clientIp(HttpServletRequest httpRequest) {
+	private String clientIp(HttpServletRequest httpRequest) {
 		if (httpRequest == null) {
 			return "unknown";
+		}
+		if (this.clientIpResolver != null) {
+			return this.clientIpResolver.resolve(httpRequest);
 		}
 		String remote = httpRequest.getRemoteAddr();
 		return StringUtils.hasText(remote) ? remote : "unknown";
@@ -1110,6 +1242,64 @@ public class AiController {
 		return ApiResponse.ok(body);
 	}
 
+	/**
+	 * 完整对话历史（第二阶段新增；<b>不改变</b>上面 40 条记忆窗口端点的语义）。
+	 *
+	 * <p>游标分页：
+	 * <ul>
+	 * <li>{@code beforeSeq}：向更早翻，返回 seq 倒序（新→旧）；不传 = 从最新开始；</li>
+	 * <li>{@code afterSeq}：向更新翻，返回 seq 正序（旧→新）；不传/0 = 从第一条开始；</li>
+	 * <li>两者只能二选一；{@code limit} 1..200，默认 50。</li>
+	 * </ul>
+	 * <p>条目复用现有 {@code /history} 的 {@code toHistoryItem}（同一份文本/工具信封/视图口径），
+	 * 额外带 {@code seq/runId/messageId/createdAt} 便于前端做稳定 key 与增量合并。
+	 */
+	@GetMapping("/history/{sessionId}/messages")
+	public ResponseEntity<?> fullHistory(@PathVariable String sessionId,
+			@RequestParam(name = "beforeSeq", required = false) Long beforeSeq,
+			@RequestParam(name = "afterSeq", required = false) Long afterSeq,
+			@RequestParam(name = "limit", required = false) Integer limit) {
+		if (this.aiChatHistoryService == null) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE,
+					errorBody(ErrorCodes.AI_CONTEXT_UNAVAILABLE, "完整历史存储未装配"));
+		}
+		if (beforeSeq != null && afterSeq != null) {
+			throw new IllegalArgumentException("beforeSeq 与 afterSeq 只能二选一");
+		}
+		int size = limit == null ? AiChatHistoryService.DEFAULT_LIMIT : limit;
+		ChatPage page = afterSeq != null
+				? this.aiChatHistoryService.pageAfter(sessionId, afterSeq, size)
+				: this.aiChatHistoryService.pageBefore(sessionId, beforeSeq, size);
+		List<Map<String, Object>> messages = new ArrayList<>(page.items().size());
+		for (MessageView view : page.items()) {
+			Message message = this.aiChatHistoryService.toMessage(view);
+			Map<String, Object> item = toHistoryItem(message);
+			item.put("seq", view.seq());
+			item.put("runId", view.runId());
+			item.put("messageId", view.messageId());
+			if (!item.containsKey("stopped") && view.stopped()) {
+				item.put("stopped", true);
+			}
+			if (!item.containsKey("timestamp") && view.createdAt() != null) {
+				item.put("timestamp", view.createdAt().toString());
+			}
+			if (view.createdAt() != null) {
+				item.put("createdAt", view.createdAt().toString());
+			}
+			messages.add(item);
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("sessionId", sessionId);
+		body.put("count", messages.size());
+		body.put("messages", messages);
+		body.put("hasMore", page.hasMore());
+		body.put("nextCursor", page.nextCursor());
+		body.put("direction", afterSeq != null ? "after" : "before");
+		body.put("beforeSeq", beforeSeq);
+		body.put("afterSeq", afterSeq);
+		return ResponseEntity.ok(ApiResponse.ok(body));
+	}
+
 	/** R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。 */
 	private Map<String, Object> toHistoryItem(Message message) {
 		Map<String, Object> item = new LinkedHashMap<>();
@@ -1130,6 +1320,10 @@ public class AiController {
 		if (message instanceof AssistantMessage assistant
 				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY))) {
 			item.put("stopped", true);
+		}
+		if (message instanceof AssistantMessage assistant
+				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.TRUNCATED_KEY))) {
+			item.put(ResilientChatService.TRUNCATED_KEY, true);
 		}
 		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
 		if (timestamp != null) {
@@ -1308,74 +1502,6 @@ public class AiController {
 	}
 
 	/**
-	 * 删除该会话的记忆窗口（前端「新建对话」：把旧会话的服务端记忆清掉）。
-	 *
-	 * <h2>语义（R-100 裁决：与读侧同资源异动词）</h2>
-	 * <ul>
-	 * <li><b>幂等且不 404</b>：删除不存在的会话、或重复删除，都返回 <b>200</b> —— 键本来就会自然
-	 * TTL 过期，"已不存在"是正常终态而非错误（对齐 {@code /cancel} 的 {@code runExists} 风格）；
-	 * 前端「新建对话」绝不能因为旧键已过期而报错。</li>
-	 * <li><b>不加鉴权</b>（DC-10：本期无认证鉴权，与全仓 AI 端点一致）；<b>不查 AI key</b>
-	 * （与 {@code /history} 同类：记忆是纯 Redis 操作，无 key 时 {@code chatMemory} bean 依然存在）。</li>
-	 * <li><b>Redis 不可用 → 503</b> {@code AI_REDIS_UNAVAILABLE}（R4 口径：删不掉就如实失败，
-	 * 不假装成功）。</li>
-	 * <li><b>删除范围 = 只删记忆面</b>：走官方 {@code ChatMemory#clear}（DC-05），
-	 * {@code MessageWindowChatMemory} 落到仓储的 {@code deleteByConversationId}
-	 * = tagged 单键 DEL + legacy 单键 DEL + 索引单键 SREM（SREM 失败只 WARN，由
-	 * {@code findConversationIds} 的惰性剔除与 {@code isConversationIndexed} 的数据键存活判定兜底）。
-	 * <b>不删</b> {@code ai:session:<sessionId>}（会话滑动 TTL，{@code AiSessionService} 维护）
-	 * 与 {@code ai:run:*}（轮次台账/快照，删了会让重启续跑与取证失去依据）—— 两者各有自己的 TTL。</li>
-	 * </ul>
-	 *
-	 * <h2>会话门：只报告，不阻塞</h2>
-	 * 该会话若仍有在跑轮次，该轮终局会做记忆收敛（{@code ResilientChatService#convergeMemory}
-	 * 的整窗 {@code saveAll}）把窗口整体写回，故本次删除可能被覆盖。这个事实以
-	 * {@code runActive} / {@code activeRunId} 报告并留 WARN 日志，
-	 * <b>不返回 409</b> —— 硬拒绝会把「新建对话」变成可能失败的动作，破坏「点了就干净」的心智。
-	 * <b>前端顺序不关闭该覆盖</b>（口径订正：复核 F2）：{@code cancel} 只是置取消标志 + 唤醒收尾，
-	 * 轮次收盘是异步的 ⇒ 在飞路径下本 DELETE <b>必然先于</b>收盘重写（不是概率竞态，顺序收口
-	 * 也缩不小该窗口）；残留由会话 TTL 约束，且旧 id 已被前端丢弃（用户不可见）。
-	 *
-	 * @param sessionId 会话 id（前端页签级；路径参数，与 {@code GET /history/{sessionId}} 同资源）
-	 * @return 裸 {@code Map}（不套 {@code ApiResponse} 信封，与最近的幂等先例 {@code /cancel} 同族）
-	 */
-	@DeleteMapping("/history/{sessionId}")
-	public ResponseEntity<Map<String, Object>> deleteHistory(@PathVariable String sessionId) {
-		if (!StringUtils.hasText(sessionId)) {
-			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 必填"));
-		}
-		if (!this.redisAvailability.isAvailable()) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-		}
-		// 会话门只读一次：只用于报告（不 acquire、不拒绝）
-		String activeRunId = this.sessionGate.currentRunId(sessionId);
-		List<Message> existing = this.chatMemory.get(sessionId);
-		boolean existed = existing != null && !existing.isEmpty();
-		if (activeRunId != null) {
-			log.warn("删除会话记忆时该会话仍有在跑轮次（记忆可能被该轮收尾的收敛写回）sessionId={} activeRunId={}",
-					sessionId, activeRunId);
-		}
-		// 先取"实际可读键"再删：迁移期只有 legacy 键时，报 tagged 会指向一个不存在的键。
-		String dataKey = memoryKey(sessionId);
-		this.chatMemory.clear(sessionId);
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("sessionId", sessionId);
-		// deleted 恒为 true：幂等语义 = "已处于删除状态"（上面已 clear，故不再复核一次读取）
-		body.put("deleted", true);
-		body.put("existed", existed);
-		body.put("memoryKey", dataKey);
-		// 判存量只问"这一个 id 在不在索引里"：SISMEMBER + 数据键 EXISTS（tagged/legacy），不拉全量索引
-		body.put("removedFromIndex", !isConversationIndexed(sessionId));
-		body.put("runActive", activeRunId != null);
-		body.put("activeRunId", activeRunId);
-		body.put("storedBy", this.runStore.instanceId());
-		body.put("note", "数据键已删除，索引按存活/惰性口径清理；不删 ai:session:<sessionId> 与 ai:run:*（两者各有自己的 TTL）。"
-				+ "删除不存在的会话同样 200（幂等）。runActive=true 表示该会话仍有在跑轮次，"
-				+ "该轮收尾的记忆收敛可能把窗口重新写回同名键。");
-		return ResponseEntity.ok(body);
-	}
-
-	/**
 	 * 会话上下文占用（上下文统计与压缩专项批①；设计稿 §3.4(b)）。
 	 *
 	 * <h2>为什么必须是一个端点（而不是把七项都塞进 done 帧）</h2>
@@ -1419,47 +1545,6 @@ public class AiController {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		return ResponseEntity.ok(this.contextBreakdownService.snapshot(sessionId, memory, Boolean.TRUE.equals(ledger)));
-	}
-
-	/**
-	 * 该会话数据键的<b>实际拼写</b>（响应字段 {@code memoryKey}）。
-	 *
-	 * <p>生产仓储的键形带 Redis hash tag（{@code chat:mem:{<escapedId>}}），迁移期还可能只有
-	 * legacy {@code chat:mem:<raw id>}。因此用
-	 * {@link RedisChatMemoryRepository#readableKeyFor(String)} 返回<b>实际可读</b>的键
-	 * （tagged 存活 → tagged；仅 legacy → legacy；都不存在 → 规范 tagged）。
-	 * 非该实现的测试桩/将来实现回落到旧拼写（纯展示字段）。
-	 */
-	private String memoryKey(String sessionId) {
-		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
-			return redisRepository.readableKeyFor(sessionId);
-		}
-		return RedisChatMemoryRepository.KEY_PREFIX + sessionId;
-	}
-
-	/**
-	 * 该会话 id 是否仍在记忆仓储的会话 id 索引内 —— {@code removedFromIndex} 的唯一判据。
-	 *
-	 * <p>
-	 * 生产装配是 {@link RedisChatMemoryRepository}（索引键 {@code chat:mem:__ids__}），走
-	 * {@code SISMEMBER} + 数据键 {@code EXISTS}（tagged 优先、缺失回落 legacy）。此前的写法是 {@code findConversationIds().contains(sessionId)}，而那个 SPI
-	 * 方法的语义面是"列出**全部**存活 id"（{@code SMEMBERS} + 逐 id 一次 {@code EXISTS} + 惰性清理），
-	 * 拿它做单点判定会引入 N 倍 Redis 往返（复核 F4）。语义等价：本端点在上面刚做过
-	 * {@code chatMemory.clear()}（删除数据键），故此刻成员只可能被在跑轮次收尾的整窗
-	 * {@code saveAll} 重新写回（那个 {@code saveAll} 同时建数据键），两种写法在此处判定一致。
-	 *
-	 * <p>
-	 * 非 {@link RedisChatMemoryRepository} 的实现（测试桩 / 将来换实现）回落到 SPI 的通用契约面。
-	 *
-	 * <p>
-	 * 口径（复核 F3，登记知悉）：本字段是<b>响应时点</b>事实 —— {@code true} 只表示"此刻已不在索引里"，
-	 * 不保证随后不被在跑轮次的收盘重写。
-	 */
-	private boolean isConversationIndexed(String sessionId) {
-		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
-			return redisRepository.isConversationIndexed(sessionId);
-		}
-		return this.chatMemoryRepository.findConversationIds().contains(sessionId);
 	}
 
 	/** AI 可用性（N5）：前端据此决定 AI 面板启用/降级提示，无需先发一次对话才知道。 */
@@ -1662,6 +1747,93 @@ public class AiController {
 		body.put("status", status);
 		body.put("duplicate", true);
 		body.put("instanceId", this.runStore.instanceId());
+		return body;
+	}
+
+	/** 错入口条目；旧 kind=null 数据放行，未知条目交给闸门回 UNKNOWN。 */
+	private static PendingToolCall wrongKindEntry(PendingToolCall pending, String expectedKind) {
+		if (pending == null || !pending.hasKind() || pending.isKind(expectedKind)) {
+			return null;
+		}
+		return pending;
+	}
+
+	/** 错入口统一 409：状态和条目不被修改，调用方应改用对应接口。 */
+	private Map<String, Object> toolKindMismatch(String runId, String toolCallId, PendingToolCall pending,
+			String expectedKind) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", ErrorCodes.TOOL_KIND_MISMATCH);
+		body.put("message", localize(ErrorCodes.TOOL_KIND_MISMATCH,
+				"该工具调用不属于本入口（服务端 kind = " + (pending == null ? "未知" : pending.getKind())
+						+ "，本接口只接受 " + expectedKind + "）；请改用对应的接口，状态未变"));
+		body.put("runId", runId);
+		body.put("toolCallId", toolCallId);
+		body.put("name", pending == null ? null : pending.getName());
+		body.put("kind", pending == null ? null : pending.getKind());
+		body.put("expectedKind", expectedKind);
+		body.put("status", pending == null ? null : pending.getStatus());
+		body.put("accepted", false);
+		body.put("duplicate", false);
+		body.put("instanceId", this.runStore.instanceId());
+		body.put("note", "确认门决策走 /api/ai/confirm（kind=CONFIRM），前端工具回灌走 "
+				+ "/api/ai/frontend-tool-result（kind=FRONTEND）；本次请求未改动任何条目");
+		return body;
+	}
+
+	/**
+	 * 超限回灌是否为「结构化结果」（结构化回灌超限拒绝批）。
+	 *
+	 * <p>只有<b>仍待前端回灌</b>的条目才参与判定：未知 id（{@code null}）、已决条目（重复提交）、
+	 * 非前端 kind（确认门条目）一律<b>不接管</b> —— 它们的既有语义是 409 UNKNOWN/DUPLICATE，
+	 * 不能被一条新的尺寸判据吞成 400。
+	 *
+	 * <p>判定本体见 {@link FrontendToolGuard#structuredResult}：表格写四件按工具名，其余按
+	 * "能解析成 JSON 对象/数组"的形状。普通超长文本（含以 <code>{</code> 开头但不是 JSON 的）
+	 * 仍走既有的截断 + 标记路径。
+	 *
+	 * <p>读条目的是<b>非抛读口</b>（{@code pendingLenient}）：Redis 抖动时退回"只看形状"的旧路径，
+	 * 不把一次读失败升级成回灌失败（真正写路径上的 fail-closed 仍在确认门里）。
+	 */
+	private boolean structuredOversize(PendingToolCall pending, String result) {
+		if (pending == null || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
+				|| !PendingToolCall.PENDING.equals(pending.getStatus())) {
+			return false;
+		}
+		return FrontendToolGuard.structuredResult(pending.getName(), this.objectMapper, result);
+	}
+
+	/**
+	 * 400 {@code FRONTEND_RESULT_TOO_LARGE}（结构化回灌超限拒绝批）。
+	 *
+	 * <p>与 {@code MESSAGE_TOO_LONG} 同一形状：稳定码 + 两枚数字（{@code originalChars} /
+	 * {@code limit}），<b>不回显结果原文</b>（结构化结果可能含业务数据）。
+	 * 语义补充：{@code truncated=false} 明确"后端一个字符都没落"，
+	 * {@code status=PENDING} + {@code retryable=true} 明确"挂起还在等，改小后可重试"。
+	 *
+	 * <p>I-1：{@code message} 走 {@code localize()} —— 中文逐字取调用方原文，非中文取
+	 * {@code messages_en} 的 {@code error.FRONTEND_RESULT_TOO_LARGE}。
+	 */
+	private Map<String, Object> frontendResultTooLarge(String runId, String toolCallId, PendingToolCall pending,
+			int originalChars, int limit) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", ErrorCodes.FRONTEND_RESULT_TOO_LARGE);
+		body.put("message", localize(ErrorCodes.FRONTEND_RESULT_TOO_LARGE,
+				"结构化结果 " + originalChars + " 字符，超过回灌上限 " + limit
+						+ " 字符；后端不做截断（截断会切坏 JSON / 表格尾行），请在客户端缩小结果后重试"));
+		body.put("runId", runId);
+		body.put("toolCallId", toolCallId);
+		body.put("name", pending.getName());
+		body.put("kind", pending.getKind());
+		body.put("status", pending.getStatus());
+		body.put("originalChars", originalChars);
+		body.put("limit", limit);
+		body.put("structured", true);
+		body.put("truncated", false);
+		body.put("accepted", false);
+		body.put("duplicate", false);
+		body.put("retryable", true);
+		body.put("instanceId", this.runStore.instanceId());
+		body.put("note", "结果未落库、挂起未消费（状态仍是 PENDING）：把结果改小后重试；用户放弃请带 cancelled=true");
 		return body;
 	}
 

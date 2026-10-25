@@ -73,6 +73,23 @@ public class ToolActivityBeacon {
 
 	private final Map<String, Map<String, Object>> lastFinished = new ConcurrentHashMap<>();
 
+	/**
+	 * runId → 轮内上下文预算进入"收尾"（armed）的时刻（毫秒；0/缺失 = 未武装）。
+	 *
+	 * <p>为什么放在信标：武装的判据在<b>工具循环线程</b>上读、又在<b>同一线程</b>的上一批写；
+	 * 与段预算同一族"进程内加速态"。它<b>不</b>承载可恢复状态：跨进程续跑读不到 armed 时，
+	 * 下一批会按真值/估算重新判一次预算（最坏情况是重判一次，不会漏判）。
+	 */
+	private final ConcurrentMap<String, AtomicLong> budgetArmedAtMs = new ConcurrentHashMap<>();
+
+	/**
+	 * runId → armed 之后被拦下的工具批次数（{@code TurnBudgetPlan#MAX_ARMED_BATCHES} 的输入）。
+	 *
+	 * <p>收尾指令是软约束：模型可以不理。计数让"反复请求工具"有确定的上界 ——
+	 * 到顶按 {@code CONTEXT_OVERFLOW} 收尾（先落定、后报错），而不是交给 300s 看门狗。
+	 */
+	private final ConcurrentMap<String, AtomicLong> budgetSkippedBatches = new ConcurrentHashMap<>();
+
 	/** 工具开始执行：置活跃 + 记锚点 + 计数。 */
 	public void enter(String runId, String toolName, String kind) {
 		Activity activity = new Activity(toolName, kind);
@@ -221,6 +238,30 @@ public class ToolActivityBeacon {
 		return anchor == null ? 0L : anchor.get();
 	}
 
+	/** 武装本轮（轮内上下文预算达收尾线）：此后工具调用只结算"未执行"，不再产生新副作用。 */
+	public void armBudget(String runId) {
+		this.budgetArmedAtMs.computeIfAbsent(runId, key -> new AtomicLong())
+			.set(System.currentTimeMillis());
+	}
+
+	/** 本轮是否已武装（收尾中）。 */
+	public boolean budgetArmed(String runId) {
+		AtomicLong armedAt = this.budgetArmedAtMs.get(runId);
+		return armedAt != null && armedAt.get() > 0L;
+	}
+
+	/** armed 之后已被拦下的工具批次数（未武装返回 0）。 */
+	public int budgetSkippedBatches(String runId) {
+		AtomicLong count = this.budgetSkippedBatches.get(runId);
+		return count == null ? 0 : count.intValue();
+	}
+
+	/** 记一批"武装后仍请求工具"（返回累计批次数）。 */
+	public int markBudgetSkippedBatch(String runId) {
+		long count = this.budgetSkippedBatches.computeIfAbsent(runId, key -> new AtomicLong()).incrementAndGet();
+		return count > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) count;
+	}
+
 	/** 轮终态清理（进程内状态随轮结束释放）。 */
 	public void clear(String runId) {
 		this.active.remove(runId);
@@ -230,6 +271,8 @@ public class ToolActivityBeacon {
 		this.gateWaitSinceMs.remove(runId);
 		this.segmentStartedAtMs.remove(runId);
 		// lastActivityAtMs 故意保留：重试判定要看退出时刻（TTL 由轮的生命周期兜住）
+		this.budgetArmedAtMs.remove(runId);
+		this.budgetSkippedBatches.remove(runId);
 	}
 
 	public Map<String, Object> snapshot() {

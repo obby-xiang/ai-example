@@ -73,4 +73,30 @@ class RetryBackoffTest {
 		assertThat(RetryBackoff.delayMs(1, 300_000L, 0.5d)).isEqualTo(500L);
 	}
 
+	// ── 429 Retry-After：等待取 max(退避, Retry-After)，仍受剩余预算裁剪 ─────
+
+	@Test
+	void retryAfterWinsWhenItIsLongerThanTheJitteredBackoff() {
+		assertThat(RetryBackoff.delayMsWithRetryAfter(1, 300_000L, 3_000L, 0.5d)).as("max(500ms, 3s)").isEqualTo(3_000L);
+	}
+
+	@Test
+	void jitteredBackoffWinsWhenRetryAfterIsShorter() {
+		assertThat(RetryBackoff.delayMsWithRetryAfter(2, 300_000L, 100L, 0.5d)).as("max(1000ms, 100ms)")
+			.isEqualTo(1_000L);
+	}
+
+	@Test
+	void retryAfterIsAlsoShrunkByTheRemainingBudget() {
+		// 剩余 3.2s ⇒ 可用 2.2s（扣 1s 余量）⇒ 10s 的 Retry-After 被收缩
+		assertThat(RetryBackoff.delayMsWithRetryAfter(1, 3_200L, 10_000L, 0.5d)).isEqualTo(2_200L);
+		// 没有可用预算 ⇒ 不睡（调用方在此之前已判"不重试"）
+		assertThat(RetryBackoff.delayMsWithRetryAfter(1, 500L, 10_000L, 0.5d)).isZero();
+	}
+
+	@Test
+	void nullRetryAfterKeepsThePlainBackoff() {
+		assertThat(RetryBackoff.delayMsWithRetryAfter(1, 300_000L, null, 0.5d)).isEqualTo(500L);
+	}
+
 }

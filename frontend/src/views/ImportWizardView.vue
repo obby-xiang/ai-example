@@ -634,6 +634,8 @@ async function uploadOne(file: File): Promise<string> {
       uploadedFiles[item.defCode] = item.fileName
       savedDefs.add(item.defCode)
       editorLoaded.delete(item.defCode)
+      // 上传新文件 ⇒ 该配置项的旧预览立即失效（内容即将被新文件替换）
+      aiStore.onSheetReloaded(item.defCode)
     }
     if (result.unmatchedFiles && result.unmatchedFiles.length > 0) {
       // 多条目须换行展示：ElMessageBox 的 message 支持 VNode，用 Tailwind whitespace-pre-line 还原 \n
@@ -721,6 +723,8 @@ async function loadEditorsNow(force: boolean): Promise<void> {
         await grid.loadFromJson(json, def.fields)
       }
       editorLoaded.add(def.code)
+      // 交互专项：程序化载入（新文件/重载）⇒ 旧预览立即失效（硬闸仍是 previewId）
+      aiStore.onSheetReloaded(def.code)
     } catch (error) {
       ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.editorLoadFailed', { code: def.code }))
     }
@@ -1666,6 +1670,8 @@ watch(
     if (id === null || id === taskId.value) {
       return
     }
+    // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
+    aiStore.onSheetPageLeft()
     taskId.value = id
     workspace.setTaskId(id, 'IMPORT', null)
     await loadTask()

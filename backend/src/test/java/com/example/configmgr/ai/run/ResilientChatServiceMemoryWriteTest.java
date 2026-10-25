@@ -7,6 +7,7 @@ import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
@@ -15,6 +16,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -54,10 +58,17 @@ import static org.mockito.Mockito.when;
  * <ol>
  * <li>普通收尾：一次 {@code saveAll(整窗)}，{@link ChatMemory} 的 {@code clear/add} 零调用；</li>
  * <li>{@code saveAll} 失败：旧历史保持可读（staging + RENAME 的失败安全），本轮仍正常收尾；</li>
+ * <li>{@code saveAll} 失败只 WARN 的旧口径保留，但<b>同时</b>进统一降级计数
+ * （{@link RedisDegradation#W1_MEMORY_WRITE}，{@code /api/ai/health} 的
+ * {@code redis.degradations} 可见）—— 刷新可能丢本轮历史，不能只留一行会被轮询刷掉的日志；</li>
  * <li>空窗：仍走 {@code saveAll(empty)}（= 删除），不把"空"当成"不写"；</li>
  * <li>窗口裁剪/思考元数据语义不变（沿用 {@code trimKeepingToolPairs} / maxMessages）。</li>
  * </ol>
+ *
+ * <p><b>不重试、不改写协议</b>：一次失败的写只记一次计数（在 {@code persistMemory} 的唯一 catch 里），
+ * 不重放、不改变 {@link ChatMemoryRepository#saveAll} 的调用形态。
  */
+@ExtendWith(OutputCaptureExtension.class)
 class ResilientChatServiceMemoryWriteTest {
 
 	private static final String RUN_ID = "run-memory-write";
@@ -160,6 +171,40 @@ class ResilientChatServiceMemoryWriteTest {
 		assertThat(this.repository.ops).containsExactly("saveAll");
 		assertThat(this.store.get(RUN_ID).getStatus()).as("记忆写失败不得让本轮对话失败").isEqualTo(RunSnapshot.DONE);
 		verify(this.chatMemory, never()).clear(anyString());
+	}
+
+	/**
+	 * 记忆写回失败必须<b>同时</b>满足两条：WARN 保留（现场可读）与统一降级计数恰好 +1（/health 可见）。
+	 *
+	 * <p>旧口径只有 WARN：日志会被轮询节拍刷掉，且无法按事件聚合 —— 而这里的失败意味着
+	 * <b>刷新可能丢掉本轮历史</b>，属于必须可观测的降级。
+	 *
+	 * <p>kill：在 catch 之外再计一次（或同时计 WARN/计数两处）⇒ 计数变成 2，本用例变红。
+	 */
+	@Test
+	void failedSaveAllIsCountedExactlyOnceAndStillWarns(CapturedOutput output) {
+		this.repository.failOnSave = true;
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("新答案"), terminal("stop")));
+		long before = RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE);
+
+		runTurn();
+
+		assertThat(RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE))
+			.as("一次失败的整窗写 = 一次降级计数（不重试、不重复计）").isEqualTo(before + 1);
+		assertThat(output.getAll()).as("WARN 必须保留（带 stage 与 sessionId）")
+			.contains("记忆收敛失败")
+			.contains(SESSION_ID);
+	}
+
+	/** 正常写回不得把降级计数打脏（"从没失败过"与"计数面没接线"必须可区分）。 */
+	@Test
+	void successfulSaveAllDoesNotTouchTheDegradationCounter() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("答案"), terminal("stop")));
+		long before = RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE);
+
+		runTurn();
+
+		assertThat(RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE)).isEqualTo(before);
 	}
 
 	@Test

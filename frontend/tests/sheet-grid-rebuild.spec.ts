@@ -188,6 +188,8 @@ type Adapter = {
   header(col: number): string
   getCell(row: number, col: number): unknown
   getArray(row: number, col: number, rows: number, cols: number): unknown[][]
+  instanceId?(): string
+  loadGeneration?(): number
 }
 
 type GridVm = {
@@ -262,6 +264,22 @@ describe('L-115 工作表重建：重建前取到的适配器必须跟到活着�
     expect(after.getCell(0, 0)).toBe('AUD')
     // 同一张表（未重建）重复取仍是同一对象（L-74 的身份约束不能被本修破坏）
     expect(grid.getSheetAdapter()).toBe(after)
+  })
+
+  it('每次程序化载入（loadFromJson）都递增 loadGeneration；重建同时更换 instanceId', async () => {
+    engine.nextRows = [['code', 'name', 'status'], ['CNY', '人民币', '启用']]
+    await grid.loadFromJson('{}', fields)
+    const adapter = grid.getSheetAdapter()
+    const generation = adapter.loadGeneration?.()
+    const instance = adapter.instanceId?.()
+    expect(typeof generation).toBe('number')
+    expect(instance).toBeTruthy()
+
+    engine.nextRows = [['code', 'name', 'status'], ['AUD', '澳元', '启用']]
+    await grid.loadFromJson('{}', fields)
+
+    expect(adapter.loadGeneration?.()).toBe((generation ?? 0) + 1)
+    expect(adapter.instanceId?.()).not.toBe(instance)
   })
 })
 

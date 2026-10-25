@@ -15,6 +15,7 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tool.WizardActionGuard;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -195,6 +196,129 @@ class SpToolCallingManagerScopeGuardTest {
         verify(this.emitter).toolResult(any(PendingToolCall.class), eq(true), eq(true), frameText.capture());
         assertThat(frameText.getValue()).isEqualTo(big);
         assertThat(frameText.getValue()).doesNotContain(ToolResultLimiter.TRUNCATION_MARKER);
+    }
+
+    // ── 工具安全边界批（2026-10-25 裁决）：只读无确认 / 向导写不误入确认门 ──────────
+
+    /**
+     * 只读前端工具越界：仍然"零副作用 + 不发请求帧"。
+     *
+     * <p>与 DANGER 的差别正是本批要守住的边界：只读工具<b>从不</b>产生确认卡，
+     * 它的唯一防线是 scope（披露 + 执行兜底同源）。
+     */
+    @Test
+    void outOfScopeReadFrontendToolIsBlockedWithoutRequestFrame() {
+        stubRun();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("tasks", null, null, null, null)));
+        when(this.toolRegistry.channelOf("find_rows")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("find_rows")).thenReturn(ToolMeta.RiskLevel.READ);
+        when(this.toolRegistry.matchesContext(eq("find_rows"), any(AiContext.class))).thenReturn(false);
+        String args = "{\"defCode\":\"CURRENCY\",\"search\":\"CNY\"}";
+
+        ToolExecutionResult result = this.manager.executeToolCalls(prompt("find_rows", args),
+                response("find_rows", args));
+
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.BLOCKED.wire());
+        assertThat(envelope.code()).isEqualTo(SpToolCallingManager.SCOPE_VIOLATION_CODE);
+        // 不挂起（既不等确认，也不发前端请求）、不认领、不记台账
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        verify(this.gate, never()).awaitFrontendResult(anyString(), any(PendingToolCall.class));
+        verify(this.emitter, never()).frontendToolRequest(any(PendingToolCall.class), any());
+        verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
+        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.BLOCKED);
+    }
+
+    /**
+     * 向导写（WRITE / FRONTEND）在范围内：走前端挂起等回执，<b>不会</b>变成后端确认卡。
+     *
+     * <p>这条锁住"风险档只用于如实披露"的口径：把 {@code set_condition} 标成 WRITE 后，
+     * 若哪天有人顺手把通道优先级改成"风险优先"，确认门就会拦住一次表单状态写 —— 那是无意义弹窗。
+     */
+    @Test
+    void inScopeWizardWriteSuspendsAsFrontendWithoutConfirmCard() {
+        stubRun();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "QUERY_COND", 7L, null)));
+        when(this.toolRegistry.channelOf("set_condition")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("set_condition")).thenReturn(ToolMeta.RiskLevel.WRITE);
+        when(this.toolRegistry.matchesContext(eq("set_condition"), any(AiContext.class))).thenReturn(true);
+        when(this.gate.awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+            pending.setResultText("已设置查询条件（CURRENCY）");
+            return pending;
+        });
+        String args = "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":"
+                + "[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+
+        this.manager.executeToolCalls(prompt("set_condition", args), response("set_condition", args));
+
+        // 请求帧由 ConfirmGate 发（此处 gate 是替身），本类能断言的是"确实进入了前端等待、
+        // 而不是确认门等待"—— 这正是"WRITE 档不新增无意义确认卡"的接线证据。
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        verify(this.gate).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+    }
+
+    /**
+     * 新守卫接上之后：非法入参<b>不挂起、不下发</b>，只回填结构化错误（fail-closed）。
+     *
+     * <p>这是"参数畸形不得进入执行面"的落地断言 —— 与只读/写的分级无关，任何分级都先过这道闸。
+     */
+    @Test
+    void rejectedWizardArgumentsNeverSuspendOrReachTheFrontend() {
+        stubRun();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "QUERY_COND", 7L, null)));
+        when(this.toolRegistry.channelOf("set_condition")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("set_condition")).thenReturn(ToolMeta.RiskLevel.WRITE);
+        when(this.toolRegistry.matchesContext(eq("set_condition"), any(AiContext.class))).thenReturn(true);
+        var definitions = mock(com.example.configmgr.definition.service.DefinitionService.class);
+        var guarded = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
+                this.beacon, this.cancellations, this.limiter,
+                List.of(new WizardActionGuard(definitions)));
+        // conditions 缺失 ⇒ 前端会补成 {}（空条件 = 导出全部），必须在挂起前拒
+        String args = "{\"defCode\":\"CURRENCY\"}";
+
+        ToolExecutionResult result = guarded.executeToolCalls(prompt("set_condition", args),
+                response("set_condition", args));
+
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.ok()).isFalse();
+        assertThat(envelope.code()).isEqualTo(WizardActionGuard.REJECTED_CODE);
+        assertThat(envelope.message()).contains("conditions");
+        verify(this.gate, never()).awaitFrontendResult(anyString(), any(PendingToolCall.class));
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        verify(this.emitter, never()).frontendToolRequest(any(PendingToolCall.class), any());
+        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
+    }
+
+    /**
+     * 工具名必须参与复核：{@code update_rows} 漏了 {@code set} 时不得被形状推断成"撤销"而放行。
+     *
+     * <p>旧实现只把 {@code argumentsJson} 交给复核器，{@code SheetWriteGuard} 按"有 search /
+     * 有 set / 有 rules / 其余 = 撤销"反推工具名 —— 少一个必填键就会落到"撤销只要求 defCode"
+     * 的分支并被放行，闸门形同虚设。本用例锁住"按真名复核"这条接线。
+     */
+    @Test
+    void updateRowsWithoutSetIsRejectedInsteadOfBeingGuessedAsUndo() {
+        stubRun();
+        when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "EXPORT", 7L, null)));
+        when(this.toolRegistry.channelOf("update_rows")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("update_rows")).thenReturn(ToolMeta.RiskLevel.WRITE);
+        when(this.toolRegistry.matchesContext(eq("update_rows"), any(AiContext.class))).thenReturn(true);
+        var guarded = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
+                this.beacon, this.cancellations, this.limiter,
+                List.of(new com.example.configmgr.ai.tool.SheetWriteGuard()));
+        String args = "{\"defCode\":\"CURRENCY\"}";
+
+        ToolExecutionResult result = guarded.executeToolCalls(prompt("update_rows", args),
+                response("update_rows", args));
+
+        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
+        assertThat(envelope.ok()).isFalse();
+        assertThat(envelope.code()).isEqualTo("SHEET_ARGUMENTS_REJECTED");
+        assertThat(envelope.message()).contains("set");
+        verify(this.gate, never()).awaitFrontendResult(anyString(), any(PendingToolCall.class));
+        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
     }
 
     // ── 桩与辅助 ────────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.form.FormIssue;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,6 +47,20 @@ public interface FrontendToolGuard {
 	Verdict inspectArguments(String argumentsJson);
 
 	/**
+	 * 下发前的入参复核（带<b>工具名</b>，工具安全边界批）。
+	 *
+	 * <p>默认实现忽略工具名、退回单参版本（既有复核器零改动）。但"按入参形状反推工具名"
+	 * 是已知窄缝（{@code update_rows} 漏了 {@code set} 会被当成"撤销"校验通过）——
+	 * 新/改复核器应覆写本方法并按真名分支；框架侧无条件调用本方法。
+	 *
+	 * @param toolName      模型给出的工具名原文（与 {@code @Tool(name=...)} 同名）
+	 * @param argumentsJson 该次调用的入参原文
+	 */
+	default Verdict inspectArguments(String toolName, String argumentsJson) {
+		return inspectArguments(argumentsJson);
+	}
+
+	/**
 	 * 回灌前的结果复核。
 	 *
 	 * @param argumentsJson 该次调用的入参原文（挂起时外置在待决条目里，即"当初下发的那份 schema"）
@@ -66,6 +82,54 @@ public interface FrontendToolGuard {
 	 */
 	default Verdict inspectResult(String runId, String toolCallId, String argumentsJson, String resultJson) {
 		return inspectResult(argumentsJson, resultJson);
+	}
+
+	/**
+	 * 回灌结果是否按<b>结构化</b>整体处置（结构化回灌超限拒绝批）。
+	 *
+	 * <p>用途只有一个：回灌端点（{@code AiController#frontendToolResult}）在超限时决定
+	 * "截断 + 标记"还是"400 拒绝"。两类判据任一为真即结构化：
+	 * <ol>
+	 * <li><b>结果契约就是结构化文本的工具</b>（{@link SheetWriteGuard#SUPPORTED 表格写四件}）：
+	 * 它们的回灌是"已应用…\n共 N 格"这种<b>带尾行的文本</b>，头部截断会切掉尾行；
+	 * 随后的结果复核只会报"缺共 N 尾行"，把"结果太大"误诊成"格式不对"；</li>
+	 * <li><b>明确的 JSON 形状</b>（能解析成对象/数组）：生成式表单的填写值以及任何以 JSON 回灌的
+	 * 前端工具都在此列 —— 字符级截断必然产生坏 JSON。</li>
+	 * </ol>
+	 *
+	 * <p>为什么不按"首字符是 { 或 ["判 JSON：普通文本完全可能以花括号开头（页面结构说明、
+	 * 代码片段、日志），只看首字符会把普通文本误伤成结构化结果。<b>必须解析成功</b>才算。
+	 *
+	 * @param toolName   挂起条目的工具名原文（可空：拿不到条目时只看形状）
+	 * @param mapper     JSON 解析器（调用方注入，便于与端点共用同一份配置）
+	 * @param resultJson 前端回灌的 {@code result} 原文（可空 = 不是结构化）
+	 */
+	static boolean structuredResult(String toolName, ObjectMapper mapper, String resultJson) {
+		if (toolName != null && SheetWriteGuard.SUPPORTED.contains(toolName)) {
+			return true;
+		}
+		if (mapper == null || resultJson == null) {
+			return false;
+		}
+		int start = 0;
+		while (start < resultJson.length() && Character.isWhitespace(resultJson.charAt(start))) {
+			start++;
+		}
+		if (start >= resultJson.length()) {
+			return false;
+		}
+		char first = resultJson.charAt(start);
+		if (first != '{' && first != '[') {
+			return false;
+		}
+		try {
+			JsonNode root = mapper.readTree(resultJson);
+			return root != null && (root.isObject() || root.isArray());
+		}
+		catch (Exception notJson) {
+			// 坏 JSON / 超深嵌套 / 超长字符串：一律按普通文本处理（旧路径仍可用）
+			return false;
+		}
 	}
 
 	/**

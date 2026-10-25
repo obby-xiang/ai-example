@@ -136,12 +136,11 @@ public class ContextBuilder {
      * {@code </tool_result>}/{@code </knowledge>} 是下游工具结果的 —— 客户端值里出现任意一个，
      * 都等于在最高信任位留了一个"提前收口、把后续文本顶到定界之外"的写入口。
      *
-     * <p>空白面用 {@code [\s\p{Z}]}：{@code \s} 只覆盖 ASCII，NBSP / {@code U+2007} /
-     * {@code U+3000} / {@code U+2028} 等 Unicode 分隔符在 {@code \p{Z}} 里，两者都要兜住
-     * （{@code safeField} 会先归一/剥离，这里是正则兜底）。
+     * <p>标签识别与中和口径收敛在 {@link PromptDelimiters}（与结果信封、{@code KbText} 共用一份实现）；
+     * 本段只声明自己关心的三个闭标签，不改变既有输出形态（{@code ＜/workspace_state＞}）。
      */
-    private static final Pattern CLOSING_DELIMITER = Pattern.compile(
-            "(?i)</[\\s\\p{Z}]*(workspace_state|tool_result|knowledge)[\\s\\p{Z}]*>");
+    private static final Pattern CLOSING_DELIMITER = PromptDelimiters.closingTags(
+            "workspace_state", "tool_result", "knowledge");
 
     private final TaskService taskService;
 
@@ -401,11 +400,12 @@ public class ContextBuilder {
         return neutralizeClosingDelimiters(safeField(raw, maxChars));
     }
 
-    /** 收口标签中和：改成全角尖括号（模型侧不是标签），长度不变或更短，不吃额外预算。 */
+    /**
+     * 收口标签中和：改成全角尖括号（模型侧不是标签），长度不变或更短，不吃额外预算。
+     *
+     * <p>实现见 {@link PromptDelimiters#neutralizeClosing}（与结果信封、{@code KbText} 同源）。
+     */
     static String neutralizeClosingDelimiters(String text) {
-        if (text == null || text.isEmpty()) {
-            return "";
-        }
-        return CLOSING_DELIMITER.matcher(text).replaceAll("＜/$1＞");
+        return PromptDelimiters.neutralizeClosing(text, CLOSING_DELIMITER);
     }
 }

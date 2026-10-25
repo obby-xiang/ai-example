@@ -91,7 +91,7 @@ class AiCompactionLogTraceTest {
 
 	private ContextCompactor.Request request(List<Message> messages, int usedTokens) {
 		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "test-model", 1L, messages,
-				List.of("[{\"m\":1}]"), usedTokens, 0, 0, 0, 3000, 4000, Set.of());
+				List.of("[{\"m\":1}]"), usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
 	}
 
 	private static List<Message> turns(int pairs) {

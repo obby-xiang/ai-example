@@ -13,7 +13,8 @@
  * 9 个 Registry 键 + claim = 10 族。`claim` 不在 Registry 13 键里，不能混写。
  *
  * 明确不搬：ai:fence:run: / ai:lease:run: / ai:lease:epoch:（含旧全局
- * ai:lease:epoch）、ai:runs、ai:session:current:、ai:beat:、ai:cancel:、ai:lock:、
+ * ai:lease:epoch）、ai:runs、ai:session:current:、ai:session:runs:、ai:purge:guard:、
+ * ai:purge:pending:、ai:purge:retry:queue、ai:purge:retry:lock、ai:beat:、ai:cancel:、ai:lock:、
  * ai:activity:、ai:resume:lock:（历史键）、ai:ctx:、ai:safety:、ai:cfg:ver、ai:rate:；
  * chat:mem legacy 由新仓储回退读 + saveAll 自然迁移，本工具不碰。
  *
@@ -79,6 +80,11 @@ export const EXCLUDED_KEY_PREFIXES = Object.freeze([
 	'ai:lease:epoch',
 	'ai:runs',
 	'ai:session:current:',
+	'ai:session:runs:',
+	'ai:purge:guard:',
+	'ai:purge:pending:',
+	'ai:purge:retry:queue',
+	'ai:purge:retry:lock',
 	'ai:beat:',
 	'ai:cancel:',
 	'ai:lock:',

@@ -135,10 +135,13 @@ class AiControllerFrontendResultTest {
 	}
 
 	/**
-	 * 防护批③ B2-T11：回灌载荷超限<b>截断 + 标记</b>，不是 400。
+	 * 防护批③ B2-T11：<b>普通文本</b>回灌超限<b>截断 + 标记</b>，不是 400。
 	 *
 	 * <p>理由：前端工具结果是机器数据（表格摘要本来就长），拒绝回灌会让这一轮永久挂起；
 	 * 而用户输入超限仍是 400（截断会让模型基于半句话下结论）—— 两个方向刻意不同。
+	 *
+	 * <p>结构化结果（JSON 对象/数组、表格写结果）是例外：截断会切坏 JSON 与表格尾行，
+	 * 故超限走 400 {@code FRONTEND_RESULT_TOO_LARGE}（见 {@code FrontendResultTooLargeTest}）。
 	 */
 	@Test
 	void overlongResultIsTruncatedAndMarkedInsteadOfRejected() throws Exception {

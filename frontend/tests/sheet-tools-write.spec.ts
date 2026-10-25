@@ -2,7 +2,8 @@
  * AI 表格操作专项 批②：写侧三工具 + 撤销 + 预览三档 + 指纹 + 只读守卫。
  *
  * 链路按设计稿 §3.4 选项 A：写工具不进 `executeFrontendTool`（不受 60s 预算），
- * 由 store 的 `openWritePreview` 建预览、用户“应用/取消”后才回灌；读工具与撤销仍走执行器。
+ * 由 store 的 `openWritePreview` 建预览、用户“应用/取消”后才回灌。
+ * 读工具走执行器；**撤销也走预览卡**（工具安全边界批 2026-10-25：撤销会覆盖表格数据）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -11,7 +12,6 @@ import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { applyFrameToParts } from '@/utils/parts'
-import { executeFrontendTool } from '@/utils/frontend-tools'
 import { field, makeFakeSheet, type FakeSheet } from './sheet-fixtures'
 
 const api = vi.hoisted(() => ({
@@ -314,8 +314,8 @@ describe('T-15/T-24/T-25/T-26/T-29/T-31/T-32 参数与守卫', () => {
   })
 })
 
-describe('T-16 撤销：反向补丁深度 1', () => {
-  it('应用 → undo 写回原值；再撤一次如实回“没有可撤销的 AI 修改”', async () => {
+describe('T-16 撤销：反向补丁逐层回退（必须经预览卡确认）', () => {
+  it('应用 → 撤销（帧 → 建卡 → 点应用）写回原值；再撤一次如实回“没有可撤销的 AI 修改”', async () => {
     const store = useAiStore()
     const { message, frame } = armWrite(store, 'replace_values', {
       defCode: 'DEMO',
@@ -328,12 +328,18 @@ describe('T-16 撤销：反向补丁深度 1', () => {
     await store.confirmWritePreview()
     expect(sheet.ctx.adapter.getCell(1, 2)).toBe('禁用')
 
-    const first = await executeFrontendTool({ name: 'undo_last_sheet_edit', args: { defCode: 'DEMO' }, budgetMs: 5_000 })
-    expect(first.outcome).toBe('ok')
-    expect(first.result).toContain('已撤销')
+    const undoFrame = armWrite(store, 'undo_last_sheet_edit', { defCode: 'DEMO' }, 't-undo')
+    await store.openWritePreview(undoFrame.message, undoFrame.frame)
+    // 工具安全边界批：撤销只建卡，未点「应用」前零写
+    expect(sheet.writes).toHaveLength(1)
+    expect(sheet.ctx.adapter.getCell(1, 2)).toBe('禁用')
+    await store.confirmWritePreview()
+    expect(lastSubmittedResult()).toContain('已撤销')
     expect(sheet.ctx.adapter.getCell(1, 2)).toBe('停用')
 
-    const second = await executeFrontendTool({ name: 'undo_last_sheet_edit', args: { defCode: 'DEMO' }, budgetMs: 5_000 })
-    expect(second.result).toContain('没有可撤销的 AI 修改')
+    const again = armWrite(store, 'undo_last_sheet_edit', { defCode: 'DEMO' }, 't-undo-2')
+    await store.openWritePreview(again.message, again.frame)
+    expect(store.activePreview).toBeNull()
+    expect(lastSubmittedResult()).toContain('没有可撤销的 AI 修改')
   })
 })

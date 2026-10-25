@@ -230,6 +230,13 @@ public class SseChatEmitter {
 	 * 超限帧按<b>字段级</b>降采样并挂统一截断字段（{@code truncated/noticeCode/strategy/
 	 * originalChars/returnedChars/notice}，{@code truncatedReason} 为兼容别名），
 	 * 归档与投递拿到的是同一份截断后帧（重挂回放与实时流不会分叉）。
+	 *
+	 * <p><b>截断专项（2026-10-25）</b>：流式正文（{@code delta.text}，含 {@code kind=reasoning}）
+	 * <b>不进</b>这条字段级截断 —— 它在 {@link #emitDeltaText} 里先按本上限拆成多条既有
+	 * {@code delta}（原文/顺序保留，不挂截断标记）；拆分保证每片 ≤ 本上限，{@code apply}
+	 * 对所有帧仍是最终守卫（对本路径是 no-op）。装配期下限见
+	 * {@link FrameSizeLimiter#MIN_FRAME_BYTES}。{@code tool_result.result} 等不可跨帧续接的
+	 * 字段口径不变。
 	 */
 	private final int maxFrameBytes;
 
@@ -332,6 +339,9 @@ public class SseChatEmitter {
 	 */
 	private final AtomicBoolean terminating = new AtomicBoolean(false);
 
+	/** "续跑权只读 ⇒ 已丢弃业务帧"的告警节流（每轮一条，避免逐帧刷屏）。 */
+	private final AtomicBoolean readOnlyWarned = new AtomicBoolean();
+
 	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper) {
 		this(runId, store, objectMapper, Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
 				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
@@ -414,6 +424,14 @@ public class SseChatEmitter {
 		this.objectMapper = objectMapper.copy().setSerializationInclusion(JsonInclude.Include.ALWAYS);
 		this.deliveryExecutor = deliveryExecutor;
 		this.queueCapacity = queueCapacity;
+		// 复审 I2：运行期 fail-fast 必须<b>独立于 AiProperties 的启动校验</b>成立 ——
+		// 装配方（Spring 或测试/非 Spring 路径）只要把上限配到下限以下，这里立刻失败，
+		// 而不是等到某一轮正文超限时才发现"无法安全分片"（那时只能截断/空串，两者都被禁止）。
+		if (maxFrameBytes < FrameSizeLimiter.MIN_FRAME_BYTES) {
+			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 >= "
+					+ FrameSizeLimiter.MIN_FRAME_BYTES + "（当前 = " + maxFrameBytes
+					+ "）：低于下限时 delta 帧骨架加一个多字节码点都放不下，正文无法安全分片（拒绝截断/空串兜底）");
+		}
 		this.maxFrameBytes = maxFrameBytes;
 		this.writeBudget = writeBudget != null ? writeBudget : SseWriteBudget.direct();
 		this.assistantMessageId = "assistant-" + runId;
@@ -882,10 +900,7 @@ public class SseChatEmitter {
 	}
 
 	public void delta(String text) {
-		Map<String, Object> frame = frame("delta");
-		frame.put("messageId", this.assistantMessageId);
-		frame.put("text", text);
-		emit(frame);
+		emitDeltaText(null, text);
 	}
 
 	/**
@@ -913,15 +928,79 @@ public class SseChatEmitter {
 		if (text == null || text.isEmpty()) {
 			return;
 		}
-		if (this.reasoningSegmentOpen.compareAndSet(false, true)) {
-			this.reasoningChars.set(0L);
-			messageBoundary("start", "reasoning", null);
+		// 段开合与分片同锁：并发出帧时"message_start → 各分片 delta → message_end"的先后不错乱。
+		synchronized (this.emitLock) {
+			if (this.reasoningSegmentOpen.compareAndSet(false, true)) {
+				this.reasoningChars.set(0L);
+				messageBoundary("start", "reasoning", null);
+			}
+			// chars 口径 = 原文长度（分片只改变帧数，不改变文本）：message_end.chars 因此等于
+			// 前端按到达顺序拼接的思考文本长度。
+			this.reasoningChars.addAndGet(text.length());
+			emitDeltaText("reasoning", text);
 		}
+	}
+
+	/**
+	 * 正文/思考 delta 的唯一出口：超单帧字节上限时<b>拆成多条既有 {@code delta}</b>（不新增帧型）。
+	 *
+	 * <p>
+	 * 旧口径（T3-10）把超限 {@code text} 按字段降采样并挂截断标记 —— 那是"内容没给全"的语义，
+	 * 对流式正文意味着<b>实时、归档、完成后历史三处都永久少字</b>，且重挂差量补不回来
+	 * （少的那段从未被发出）。现在同一 {@code messageId} 下按 {@code maxFrameBytes} 切片，
+	 * 每片仍走 {@link #emit} 的完整出帧路径（取号 → 落档 → 扇出），因此：
+	 * <ul>
+	 * <li>每帧仍满足单帧上限（帧体没有变大，只是变多）；</li>
+	 * <li>{@code seq} 逐片递增、归档连续，{@code lastSeq} 落在任一片边界都能差量续收；</li>
+	 * <li>前端消费假设不变：它本来就按"顺序拼接 delta.text"渲染；</li>
+	 * <li>不挂 {@code truncated/noticeCode} 等标记 —— 拆帧后没有内容缺失，标记只留给真缺失的字段
+	 * （如 {@code tool_result.result}）。</li>
+	 * </ul>
+	 *
+	 * <p>
+	 * 锁内完成拆分 + 连发：分片之间不得插进别的帧（否则同一段文本在 seq 上被切开，前端拼接顺序
+	 * 就不再等于原文）。{@link #emit} 对本锁可重入。
+	 *
+	 * <p>
+	 * <b>失败语义（复审 C1/I1）</b>：拆分器在"上限放不下骨架/单码点"时抛
+	 * {@link IllegalStateException}（带 type/key/limit/originalChars），本方法<b>不吞</b>它 ——
+	 * 异常沿本轮既有失败面（error 帧/失败快照）收尾。装配期已由
+	 * {@link FrameSizeLimiter#MIN_FRAME_BYTES} 拦住坏配置，所以这是"永不静默丢字"的最后一道守卫。
+	 *
+	 * @param kind {@code null} = 正文（不写 {@code kind} 键，老客户端零影响）；
+	 *             {@code "reasoning"} = 思考段
+	 */
+	private void emitDeltaText(String kind, String text) {
+		synchronized (this.emitLock) {
+			if (text == null) {
+				emitDeltaFrame(kind, null);
+				return;
+			}
+			// 骨架：除 text 值以外的全部字段（含 emit 阶段才补的 runId/seq），seq 取上界 ——
+			// 于是每一片的"整帧字节"判定与真实出帧同口径，且真实帧只会更短。
+			Map<String, Object> skeleton = frame("delta");
+			skeleton.put("messageId", this.assistantMessageId);
+			if (kind != null) {
+				skeleton.put("kind", kind);
+			}
+			skeleton.put("text", text);   // 拆分器内部会用空值重算骨架开销
+			skeleton.put("runId", this.runId);
+			skeleton.put("seq", Long.MAX_VALUE);
+			for (String chunk : FrameSizeLimiter.splitStringValue(skeleton, "text", this.objectMapper,
+					this.maxFrameBytes)) {
+				emitDeltaFrame(kind, chunk);
+			}
+		}
+	}
+
+	/** 单条 delta 帧（键集合与截断专项之前逐字一致；思考段只多一个 {@code kind}）。 */
+	private void emitDeltaFrame(String kind, String text) {
 		Map<String, Object> frame = frame("delta");
 		frame.put("messageId", this.assistantMessageId);
-		frame.put("kind", "reasoning");
+		if (kind != null) {
+			frame.put("kind", kind);
+		}
 		frame.put("text", text);
-		this.reasoningChars.addAndGet(text.length());
 		emit(frame);
 	}
 
@@ -931,13 +1010,21 @@ public class SseChatEmitter {
 	 * <p>
 	 * 调用点由"段互斥"隐式保证：{@link #textStart()}（正文段开始前）与 {@link #textEnd(int)}
 	 * （本轮收尾 / 纯思考轮）都会先收口思考段，因此<b>不存在</b>"正文段开了、思考段还开着"的形态。
+	 *
+	 * <p>
+	 * <b>复审 I4</b>：CAS 关段、{@code chars} 的读取清零、{@code message_end} 的落档/扇出
+	 * <b>必须同处 {@code emitLock}</b>。否则并发的 {@link #reasoningDelta} 可以落在"关段之后、
+	 * message_end 之前"（前端看到 end 后还有 delta）或"chars 已读、delta 还没算进 chars"
+	 * （{@code message_end.chars} 小于实际拼接长度）。锁与 {@link #emit} 可重入。
 	 */
 	public boolean reasoningEnd() {
-		if (!this.reasoningSegmentOpen.compareAndSet(true, false)) {
-			return false;
+		synchronized (this.emitLock) {
+			if (!this.reasoningSegmentOpen.compareAndSet(true, false)) {
+				return false;
+			}
+			messageBoundary("end", "reasoning", Map.of("chars", this.reasoningChars.getAndSet(0)));
+			return true;
 		}
-		messageBoundary("end", "reasoning", Map.of("chars", this.reasoningChars.getAndSet(0)));
-		return true;
 	}
 
 	/**
@@ -965,25 +1052,32 @@ public class SseChatEmitter {
 
 	/** 正文段 start（同一条消息只开一次；重复调用无副作用）。 */
 	public boolean textStart() {
-		// L-91：段互斥 —— 正文开始前思考段必须先闭合（前端按段分流 delta，两段不得交叠）
-		reasoningEnd();
-		if (!this.textSegmentOpen.compareAndSet(false, true)) {
-			return false;
+		// L-91：段互斥 —— 正文开始前思考段必须先闭合（前端按段分流 delta，两段不得交叠）。
+		// 复审 I4：关思考段与开正文段必须同锁，否则并发的 reasoningDelta 可以插在
+		// message_end(reasoning) 与 message_start(text) 之间（前端看到"两段交叠"）。
+		synchronized (this.emitLock) {
+			reasoningEnd();
+			if (!this.textSegmentOpen.compareAndSet(false, true)) {
+				return false;
+			}
+			messageBoundary("start", "text", null);
+			return true;
 		}
-		messageBoundary("start", "text", null);
-		return true;
 	}
 
 	/** 正文段 end（带本段字符数，便于前端与 done 帧对账）；未开过段则不发（幂等）。 */
 	public boolean textEnd(int chars) {
 		// L-91：收尾同样先闭合思考段 —— 纯思考轮（一个字正文都没出）若只靠 textEnd 收尾，
 		// 思考段会永远停在"开着"的状态（前端会看到一段永不封口的段）。
-		reasoningEnd();
-		if (!this.textSegmentOpen.compareAndSet(true, false)) {
-			return false;
+		// 复审 I4：与 reasoningEnd 同锁，避免并发的思考 delta 落在正文收尾之后。
+		synchronized (this.emitLock) {
+			reasoningEnd();
+			if (!this.textSegmentOpen.compareAndSet(true, false)) {
+				return false;
+			}
+			messageBoundary("end", "text", Map.of("chars", chars));
+			return true;
 		}
-		messageBoundary("end", "text", Map.of("chars", chars));
-		return true;
 	}
 
 	/** 挂起公告：快照已外置（带 Redis 键名与写入者实例，供前端"可重挂"提示）。 */
@@ -1302,6 +1396,36 @@ public class SseChatEmitter {
 	 */
 	private void emit(Map<String, Object> frame) {
 		frame.putIfAbsent("runId", this.runId);
+		// 续租 fencing 收口批：丢租（LOST）/ 设施不可确认（UNAVAILABLE）⇒ 只读恢复。
+		// 业务帧一律不取号、不落档、不发布、不扇出 —— 终帧（done/error）也在其中：这一轮已由
+		// 新主人接管，旧主人再发终帧会让前端提前收敛到一份作废的回答。
+		// 心跳豁免：它不写业务状态（只留"进程还活着"的戳），断了反而让重挂/判活失去证据。
+		// null = 未装配租约设施（测试替身 mock 未打桩），按既有语义放行；<b>异常不是 null</b> ——
+		// "判定不可读"属于不可知，必须按 UNAVAILABLE 处理（见下面的 catch）。
+		String frameType = String.valueOf(frame.get("type"));
+		if (!RunStore.HEARTBEAT_TYPE.equals(frameType)) {
+			LeaseService.LeaseAuthority authority;
+			try {
+				authority = this.store.runLeaseAuthority(this.runId);
+			}
+			catch (RuntimeException ex) {
+				// 判定本身失败（租约视图/Redis 抖动）≠ 持有 ≠ 从未持租：按"不可知 ⇒ 只读"处理。
+				// 放行的代价是旧主人在事件日志里继续写业务帧、唤醒其它实例、给本地订阅者发终帧 ——
+				// 正是 fencing 要拦的那一类写；宁可这一拍不发，也不能吞成 NEVER_HELD / null 放行。
+				authority = LeaseService.LeaseAuthority.UNAVAILABLE;
+				if (this.readOnlyWarned.compareAndSet(false, true)) {
+					log.warn("续跑权判定不可读 runId={}（按 UNAVAILABLE 只读恢复，业务帧不落档）：{}", this.runId,
+							ex.getMessage());
+				}
+			}
+			if (authority != null && authority.readOnly()) {
+				if (this.readOnlyWarned.compareAndSet(false, true)) {
+					log.warn("续跑权 {}：丢弃本轮业务帧（含终帧）runId={} type={} —— 本轮已由新主人接管，"
+							+ "本实例只读恢复", authority, this.runId, frameType);
+				}
+				return;
+			}
+		}
 		// T4-3 后半：atMs 已在 frame() 里定型（帧构造时刻），故这一份帧的序列化原文与落档副本
 		// atMs 同值；EventStore 落档侧的 putIfAbsent 只对"绕过 frame() 的直塞帧"生效（兜底）。
 		// S5c-3：取号 → 落档 → 入队在同一把锁内完成 —— 多线程（运行线程的心跳 / HTTP 线程的
@@ -1334,6 +1458,8 @@ public class SseChatEmitter {
 				// 判定口径是<b>整帧</b>（含 seq）的 UTF-8 字节数（A19），故必须先补 seq 再判；
 				// 落档与投递据此拿到同一份帧（否则重挂回放与实时流会分叉）。
 				// 返回值即最终负载（未超限时复用同一次序列化，不重复算）。
+				// 流式正文（delta.text）已在 emitDeltaText 里按同一上限拆成多条 delta，这里对本路径
+				// 只会是 no-op（拆分保证每片 ≤ 上限）；非 delta 帧（如 tool_result.result）仍按字段降采样。
 				// 心跳帧不在此列：它没有 text/result，负载由常量字段构成（事件载荷固定小）。
 				payloadBytes = FrameSizeLimiter.apply(frame, this.objectMapper, this.maxFrameBytes);
 				if (payloadBytes == null) {

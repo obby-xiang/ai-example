@@ -214,7 +214,7 @@ export interface AiCancelResult {
 }
 
 /** 会话历史消息（GET /api/ai/history/{sessionId} → data.messages 元素）。 */
-export interface AiHistoryMessage {
+export interface AiHistoryMessage extends MessageTruncationFields {
   /** Spring AI MessageType 名称：USER / ASSISTANT / SYSTEM / TOOL */
   type: string
   text: string
@@ -259,6 +259,14 @@ export interface AiHistoryMessage {
    * 前端据此渲染「已停止」，而不是把半句话当完整答案。
    */
   stopped?: boolean
+  /**
+   * 截断专项：这一条 assistant 因模型输出达到长度上限（{@code finish_reason=length}）而不完整
+   * （后端 assistant metadata 的 {@code truncated=true} 经历史通道透出）。
+   *
+   * <p>与 {@link stopped} 区分：停止是用户决定，截断是上游上限。缺键 = 未截断（旧数据/正常完成），
+   * 因此"没说"与"没截断"可区分，前端不得把缺键当 {@code false} 写进段或提示。
+   */
+  truncated?: boolean
 }
 
 /** 会话历史响应（GET /api/ai/history/{sessionId} 的 data）。 */
@@ -266,6 +274,30 @@ export interface AiHistory {
   sessionId: string
   count: number
   messages: AiHistoryMessage[]
+}
+
+/**
+ * 会话销毁响应的**客户端清理指令**（DELETE /api/ai/session/{sessionId} 或旧 /history）。
+ *
+ * <p>服务端删不了浏览器 sessionStorage：只回报精确键，前端按此清理。缺字段兼容旧后端。
+ */
+export interface SessionPurgeClientCleanup {
+  mirrorKey?: string
+  draftPrefix?: string
+  draftToolCallIds?: string[]
+}
+
+/**
+ * 会话销毁响应（裸对象）。旧字段（deleted/existed/memoryKey/removedFromIndex/runActive/
+ * activeRunId/storedBy/note）保留；complete/deferred/errors/aborted/clientCleanup 为新增。
+ * `complete=false`（含 deferred/errors/aborted）表示没删净，前端必须提示而不是当成功。
+ */
+export interface SessionPurgeResponse extends Record<string, unknown> {
+  complete?: boolean
+  aborted?: boolean
+  deferred?: unknown[]
+  errors?: unknown[]
+  clientCleanup?: SessionPurgeClientCleanup
 }
 
 /** 待续跑轮次的台账描述（GET /api/ai/runs/{runId} 的 data，字段随实现演进，故为宽松映射）。 */
@@ -355,6 +387,15 @@ export interface ChatMessage {
    * 都写这个字段；**入镜像**（刷新后标记仍在），不入历史载荷之外的任何持久化。
    */
   stopped?: boolean
+  /**
+   * 截断专项：本轮回答因上游 {@code finish_reason=length} 被截断（**不是**用户停止）。
+   *
+   * <p>
+   * 实时路由 `done{truncated:true}` 写入；刷新路（历史 `truncated` / 会话镜像）恢复。
+   * 与 {@link stopped} 语义正交：一条回答可以只截断、只停止或（理论上）都没有。
+   * **入镜像**（刷新后仍能提示"这不是完整答案"）；缺键 = 未截断，不写 {@code false}。
+   */
+  truncated?: boolean
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -525,6 +566,21 @@ export interface SheetWritePlan {
   level: 'small' | 'large'
   preview: SheetPreviewLevel
   /**
+   * 预览身份（用户 2026-10-25「同文件后写可覆盖」口径）：
+   * `toolCallId + sheetInstanceId + loadGeneration + scope`。
+   *
+   * <p>上传新文件 / 重跑导出 / 程序化重载（`loadGeneration++`）/ 换任务 / 换选区后，
+   * 这份身份与当前表格对不上 ⇒ 应用与撤销一律拒绝。**不是**逐格 CAS：同一文件内的后续
+   * 手改允许被本次计划覆盖（仍保留既有行指纹）。
+   *
+   * <p>可选只为兼容手搭计划与旧载荷；由 `makePlan` 产出的真实计划恒有值。
+   */
+  previewId?: string
+  /** 生成 `previewId` 时的表格实例身份（诊断/测试；缺省 = 不可判） */
+  sheetInstanceId?: string
+  /** 生成 `previewId` 时的程序化载入代数（诊断/测试；缺省 = 0） */
+  loadGeneration?: number
+  /**
    * 作用域（B12 收口判据）：`selection` = 用户亲手框选算出来的计划 —— 选区一变，计划即失效；
    * 其余作用域（sheet / columns / rows / predicate）与选区无关，不得因选区变化被误伤。
    * 可选：旧载荷 / 手搭计划缺省 = 不可判，收口函数按"非选区"保守处理。
@@ -676,7 +732,7 @@ export interface AiSessionMirror {
   /** 镜像结构版本（缺省 = v1 旧镜像，需迁移） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**

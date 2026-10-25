@@ -258,6 +258,6 @@ public class AiConfigController {
 
     private static DefaultsView toView(AiConfigService.Defaults defaults) {
         return new DefaultsView(defaults.modelId(), defaults.temperature(), defaults.topP(), defaults.maxTokens(),
-                defaults.allowUserParams(), defaults.version());
+                defaults.allowUserParams(), defaults.version(), defaults.providerId());
     }
 }

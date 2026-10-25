@@ -634,7 +634,7 @@
                             :plan="sheetPreviewFor(part)"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
-                            @abandon="onSheetPreviewAbandon"
+                            @abandon="onSheetPreviewAbandon(part.toolCallId)"
                             @level="ai.setPreviewLevel"
                           />
                         </div>
@@ -740,6 +740,18 @@
             >
               <span class="block h-[6px] w-[6px] rounded-[1px] bg-[#8b949e]" aria-hidden="true"></span>
               {{ t('ai.round.stopped') }}
+            </span>
+            <!-- 截断专项：模型输出达到长度上限（finish_reason=length）⇒ 这条回答不完整。
+                 可见徽标用既有 warning 色调（与工具卡 warning 状态同族），sr-only 补全语义供读屏；
+                 不使用 live region（持久状态，读屏顺读即可，不做打断式播报）。 -->
+            <span
+              v-if="m.role === 'assistant' && m.truncated"
+              :data-testid="'msg-truncated-' + m.id"
+              class="inline-flex items-center gap-[4px] rounded-[6px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#b45309]"
+            >
+              <span class="block h-[6px] w-[6px] rounded-[1px] bg-[#b45309]" aria-hidden="true"></span>
+              {{ t('ai.round.truncated') }}
+              <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
             <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发当前语言的「继续」（A3-Y8） -->
             <button
@@ -1086,7 +1098,7 @@
  * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
  * - 409/503/断流三类降级提示（批G 起不再有「一键重挂」：在途轮刷新即静默续收）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
- *   （旧会话的服务端记忆由 `DELETE /api/ai/history/{sessionId}` 删除）—— 蓝本无"重开"入口；
+ *   （旧会话由 `DELETE /api/ai/session/{sessionId}` 完整销毁；旧 `/history` 路径同语义）—— 蓝本无"重开"入口；
  * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
  *   因 `vite.config.ts` 的 `host: '0.0.0.0'` 存在经内网 http 访问的**非安全上下文**面
  *   （`navigator.clipboard` 为 undefined），保留 `document.execCommand('copy')` 回退；
@@ -1840,11 +1852,14 @@ function isBreathing(message: ChatMessage): boolean {
  * 批G · S14（真机回归）：「已停止」chip 住在这一行里，所以**被停掉的轮必须有位置** ——
  * GF/确认卡轮的宿主可能只有卡、没有正文段（`streaming` 也已收口），按"有正文或流式中"就会
  * 把 chip 一起藏掉（真机 4/4 缺）。停止是消息级事实，与有没有正文无关。
+ * 截断专项：「已截断」chip 同理，`truncated` 是消息级事实（长度截断必有正文，但仍按消息级
+ * 判据给位置，避免正文被清空/渲染失败时标记消失）。
  */
 function showMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || isBreathing(message)
     || message.stopped === true
+    || message.truncated === true
 }
 
 /**
@@ -2770,8 +2785,8 @@ function onSheetPreviewCancel(): void {
   void ai.cancelWritePreview()
 }
 
-function onSheetPreviewAbandon(): void {
-  void ai.abandonStalePreview()
+function onSheetPreviewAbandon(toolCallId: string): void {
+  void ai.abandonStalePreview(toolCallId)
 }
 
 /** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；已决只读卡恒有；普通工具卡有卡体才有。 */
@@ -3437,7 +3452,8 @@ async function copyMessage(m: ChatMessage): Promise<void> {
 }
 
 /**
- * 新建对话（苞 A 项 1）：立即清屏 + 换新 sessionId + 删旧会话的服务端记忆。
+ * 新建对话（苞 A 项 1 + 2026-10-25 会话销毁口径）：立即清屏 + 换新 sessionId +
+ * 完整销毁旧会话（服务端 purge；前端按响应 clientCleanup 精确清镜像/草稿）。
  * 无二次确认（裁决）：点了就干净；进行中的轮次由 store 内先 abort + POST cancel 收口。
  */
 function newChat(): void {

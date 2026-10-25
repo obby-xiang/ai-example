@@ -89,15 +89,16 @@ class AiMdcPropagationTest {
 	void summaryCallRunsWithTheCallerAnchor() throws Exception {		AiProperties properties = new AiProperties();
 		AtomicReference<String> runIdSeenBySummary = new AtomicReference<>();
 		AtomicReference<String> sessionIdSeenBySummary = new AtomicReference<>();
-		ContextSummaryClient client = new ContextSummaryClient(properties, (prompt, model) -> {
+		ContextSummaryClient client = new ContextSummaryClient(properties, (system, user, runtime) -> {
 			runIdSeenBySummary.set(MDC.get(AiTrace.RUN_ID));
 			sessionIdSeenBySummary.set(MDC.get(AiTrace.SESSION_ID));
-			return "摘要";
+			return "<conversation_summary>摘要</conversation_summary>";
 		});
 		try {
 			AiTrace.bind(RUN_ID, SESSION_ID);
 
-			assertThat(client.summarize("请压缩")).isEqualTo("摘要");
+			assertThat(client.summarize("系统", "请压缩", com.example.configmgr.ai.context.TestProviderRuntime.runtime()))
+				.isEqualTo("摘要");
 
 			assertThat(runIdSeenBySummary.get()).as("摘要旁路线程同样带着这一轮的锚点").isEqualTo(RUN_ID);
 			assertThat(sessionIdSeenBySummary.get()).isEqualTo(SESSION_ID);

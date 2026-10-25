@@ -5396,6 +5396,23 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     }
   })
 
+  it('M1 开流前 503 NO_MODEL_CONFIGURED：本地通知 + 专属卡，不回显后端中文', async () => {
+    const store = useAiStore()
+    const { ApiError } = await import('@/api/http')
+    const message = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
+    message.id = 'no-model'
+    store.messages = [message]
+    const backendMessage = 'AI 默认模型未配置：请在「设置 → AI」为供应商添加模型并选择默认模型'
+
+    store.handleChatError(new ApiError(backendMessage, 503, 'NO_MODEL_CONFIGURED', null), 'no-model')
+
+    expect(store.noticeText).toContain('默认模型')
+    expect(store.noticeText).not.toContain(backendMessage)
+    expect(message.errorCard?.title).toBe('默认模型不可用')
+    expect(message.errorCard?.code).toBe('NO_MODEL_CONFIGURED')
+    expect(message.parts.some((part) => part.kind === 'text' && part.text !== '')).toBe(false)
+  })
+
   it('store：SSE error 帧按 code 分派并把卡挂到**本轮这条消息**上（lastRoundOutcome 与 notice 口径不变）', async () => {
     const { useAiStore: useStore } = await import('@/stores/ai')
     const store = useStore()

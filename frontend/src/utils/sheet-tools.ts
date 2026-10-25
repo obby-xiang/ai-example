@@ -107,6 +107,20 @@ export interface SheetAdapter {
    *   预览收口只传 `preview`（互不误伤）
    */
   clearMarks?(tone?: SheetMarkTone): void
+  /**
+   * 表格实例身份（可选）：同一工作表实例稳定，`fromJSON` 重建 / 换文件后变化。
+   *
+   * <p>预览身份（{@link SheetWritePlan#previewId}）的一部分：适配器若持有旧实例，
+   * 身份变化即说明"这张表已经不是你预览时的那张"。
+   */
+  instanceId?(): string
+  /**
+   * 程序化载入代数（可选）：每次 `fromJSON` / 程序化落数据递增。
+   *
+   * <p>同一实例内也会递增（重跑导出、上传新文件、换任务重载都可能复用同一工作表对象）；
+   * 只靠 `instanceId` 抓不到这种"同表换内容"。
+   */
+  loadGeneration?(): number
 }
 
 /** 表格上下文（页面能力 `sheet.current` 的返回值）。 */
@@ -118,6 +132,19 @@ export interface SheetContext {
   fields: readonly ConfigField[]
   /** 工作区数据版本号（模型见版本变化即知摘要过期） */
   version: number
+  /**
+   * 表格实例身份（可选；缺省时由适配器方法/前端兜底派生）。
+   *
+   * <p>预览身份的一部分：换文件 / 引擎重建后变化。
+   */
+  sheetInstanceId?: string
+  /**
+   * 程序化载入代数（可选；缺省 = 0）：上传新文件 / 重跑导出 / 程序化重载时递增。
+   *
+   * <p>为什么单列：同一工作表实例也会被重新填内容（`loadFromJson`），`instanceId` 不变，
+   * 但预览算出的行值与此刻表格已不是同一份数据。
+   */
+  loadGeneration?: number
 }
 
 export type SheetToolOutcome = { ok: true; text: string; meta?: SheetToolMeta } | { ok: false; reason: string }
@@ -1396,6 +1423,84 @@ function nextPlanId(toolCallId: string): string {
   return `${toolCallId || 'plan'}-${planSequence}`
 }
 
+// ── 预览身份（用户 2026-10-25「同文件后写可覆盖」口径） ──────────────────────
+//
+// previewId 只回答一件事：**这张卡还是不是当前这张表、这份内容的卡**。
+// 不逐格比对（那是另一套 CAS），也不引入 summaryHash —— 身份由四个已有事实拼成：
+// toolCallId（哪次调用）+ sheetInstanceId（哪张表）+ loadGeneration（第几次程序化载入）
+// + scope（按什么范围算的）。上传新文件 / 重跑导出 / 程序化重载 / 换任务 / 换选区
+// 都会让其中至少一项变化，应用与撤销因此 fail-closed。
+
+let fallbackInstanceSequence = 0
+const fallbackInstanceIds = new WeakMap<SheetAdapter, string>()
+
+/** 当前表格实例身份（适配器方法优先；缺省用入参快照，再缺省按适配器身份兜底）。 */
+export function sheetInstanceIdOf(ctx: SheetContext): string {
+  if (typeof ctx.adapter.instanceId === 'function') {
+    try {
+      const value = ctx.adapter.instanceId()
+      if (typeof value === 'string' && value !== '') {
+        return value
+      }
+    } catch {
+      // 适配器已不可用：回落到快照（随后 apply 会因代数/指纹不符拒绝）
+    }
+  }
+  if (typeof ctx.sheetInstanceId === 'string' && ctx.sheetInstanceId !== '') {
+    return ctx.sheetInstanceId
+  }
+  let fallback = fallbackInstanceIds.get(ctx.adapter)
+  if (!fallback) {
+    fallbackInstanceSequence += 1
+    fallback = `adapter-${fallbackInstanceSequence}`
+    fallbackInstanceIds.set(ctx.adapter, fallback)
+  }
+  return fallback
+}
+
+/** 当前程序化载入代数（适配器方法优先；缺省用入参快照，再缺省 0）。 */
+export function sheetLoadGenerationOf(ctx: SheetContext): number {
+  if (typeof ctx.adapter.loadGeneration === 'function') {
+    try {
+      const value = ctx.adapter.loadGeneration()
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value
+      }
+    } catch {
+      // 同上：回落到快照
+    }
+  }
+  if (typeof ctx.loadGeneration === 'number' && Number.isFinite(ctx.loadGeneration)) {
+    return ctx.loadGeneration
+  }
+  return 0
+}
+
+/** 预览身份（toolCallId + sheetInstanceId + loadGeneration + scope）。 */
+export function previewIdentityOf(
+  toolCallId: string,
+  ctx: SheetContext,
+  scope?: SheetWritePlan['scope']
+): string {
+  return `${toolCallId}::${sheetInstanceIdOf(ctx)}::${sheetLoadGenerationOf(ctx)}::${scope ?? 'sheet'}`
+}
+
+/**
+ * 计划身份是否已与当前表格对不上。
+ *
+ * <p>缺 `previewId` 的手搭/旧载荷不在此拒绝（没有可判身份），真实计划恒有值。
+ */
+function previewIdentityMismatch(plan: SheetWritePlan, ctx: SheetContext): boolean {
+  if (!plan.previewId) {
+    return false
+  }
+  return plan.previewId !== previewIdentityOf(plan.toolCallId, ctx, plan.scope)
+}
+
+const PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未应用任何改动。请重新发起。'
+const UNDO_PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未执行撤销。请重新发起。'
+const STALE_PREVIEW_REASON = '预览已失效（表格在此期间被修改），未产出新的明细。请让 AI 重新发起。'
+
 function makePlan(input: {
   ctx: SheetContext
   tool: string
@@ -1423,6 +1528,8 @@ function makePlan(input: {
   const rows = new Set(input.changes.map((change) => change.row))
   const rowsCount = input.counts?.rowsCount ?? rows.size
   const cellsCount = input.counts?.cellsCount ?? input.changes.length
+  const sheetInstanceId = sheetInstanceIdOf(input.ctx)
+  const loadGeneration = sheetLoadGenerationOf(input.ctx)
   return {
     planId: input.planId ?? nextPlanId(input.toolCallId),
     toolCallId: input.toolCallId,
@@ -1431,6 +1538,10 @@ function makePlan(input: {
     level: rowsCount > SHEET_WRITE_LARGE_ROW_THRESHOLD || cellsCount > SHEET_WRITE_SMALL_DIFF_MAX_CELLS ? 'large' : 'small',
     preview: input.preview,
     ...(input.scope ? { scope: input.scope } : {}),
+    // 预览身份：与当前表/代数/范围绑定（缺省 scope = sheet，与 apply 侧同口径）
+    previewId: previewIdentityOf(input.toolCallId, input.ctx, input.scope),
+    sheetInstanceId,
+    loadGeneration,
     scopeSummary: input.scopeSummary,
     predicateSummary: input.predicateSummary,
     rowsCount,
@@ -2465,8 +2576,12 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   if (plan.defCode !== ctx.defCode) {
     return { ok: false, reason: `表格已切换（当前 ${ctx.defCode}，预览属于 ${plan.defCode}），本次未应用任何改动。请重新发起。` }
   }
+  // 身份闸（换文件/程序化重载/换任务/换选区）：与逐格 CAS 无关，只看"还是不是这张表的这份内容"
+  if (previewIdentityMismatch(plan, ctx)) {
+    return { ok: false, reason: PREVIEW_INVALID_REASON }
+  }
   if (plan.status !== 'pending') {
-    return { ok: false, reason: '该预览已失效或已处理，本次未应用任何改动。请重新发起。' }
+    return { ok: false, reason: PREVIEW_INVALID_REASON }
   }
   if (plan.detail === 'none') {
     return { ok: false, reason: '计数级预览没有逐格明细，无法应用。请先切到「看样例」或「全量 diff」把明细算出来再点应用。' }
@@ -2511,6 +2626,8 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
     // —— 后者会污染 toWorkbookJson() 产物（导出走 collectRows()，只读值，故底色进不了文件）。
     ctx.adapter.markCells?.(plan.changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
   }
+  // 消费计划（恰好一次）：第二次直接 apply 同一份计划 ⇒ 身份闸/状态闸拒执，不再写一格。
+  plan.status = 'applied'
   return { ok: true, text: planAppliedText(plan, ctx), cells: plan.changes.length }
 }
 
@@ -2538,6 +2655,42 @@ export function clearPreviewMarks(ctx: SheetContext): void {
   ctx.adapter.clearMarks?.('preview')
 }
 
+/** 撤销计划的 id 前缀：`undo:<被撤销计划的 planId>`（幂等判据 = 栈顶是否仍是那一层）。 */
+const UNDO_PLAN_PREFIX = 'undo:'
+
+/** 撤销的可撤销层（栈顶条目 + 冲突计数）；不可撤时给如实原因。 */
+type UndoTop =
+  | { ok: true; stack: SheetUndoEntry[]; entry: SheetUndoEntry; conflicts: number }
+  | { ok: false; reason: string }
+
+function undoTop(ctx: SheetContext): UndoTop {
+  const stack = undoStack.get(ctx.adapter)
+  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  if (!stack || !entry || entry.defCode !== ctx.defCode || entry.changes.length === 0) {
+    return { ok: false, reason: '没有可撤销的 AI 修改（AI 改动只在本次页面有效，刷新后不可撤）。\n共 0 格' }
+  }
+  // 冲突判定：逐格比对"应用时的新值"与当前值
+  let conflicts = 0
+  for (let index = 0; index < entry.changes.length; index += 1) {
+    const change = entry.changes[index]
+    if (!change) continue
+    if (cellDisplay(ctx.adapter.getCell(change.row, change.col)) !== cellDisplay(entry.appliedValues[index])) {
+      conflicts += 1
+    }
+  }
+  return { ok: true, stack, entry, conflicts }
+}
+
+/** 撤销的反向补丁：`oldValue` = 当前值（应用时的新值），`newValue` = 修改前的值。 */
+function undoReverseChanges(entry: SheetUndoEntry): SheetChange[] {
+  return entry.changes.map((change, index) => ({
+    row: change.row,
+    col: change.col,
+    oldValue: entry.appliedValues[index],
+    newValue: change.oldValue
+  }))
+}
+
 /**
  * 撤销最近一次 AI 修改（深度 3，反向补丁；§5.2/§5.3/§5.6）。
  *
@@ -2550,30 +2703,29 @@ export function clearPreviewMarks(ctx: SheetContext): void {
  * 让用户不必猜；</li>
  * <li><b>不承诺 Ctrl+Z</b>：本栈与用户撤销栈完全独立（共用就回答不了"哪一笔记的是 AI"）。</li>
  * </ol>
+ *
+ * <p><b>工具安全边界批（2026-10-25 裁决）</b>：本函数是"低层执行"，<b>不是</b>可被模型直接触发的入口 ——
+ * 撤销会覆盖当前表格数据，必须经用户在预览卡上确认（{@link planUndo} → {@link applyUndoPlan}）。
+ * 前端工具执行器（{@code frontend-tools.ts}）因此不再直接调用本函数。
  */
 export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
   const readOnly = requireReadable(ctx)
   if (readOnly) return { ok: false, reason: readOnly }
-  const stack = undoStack.get(ctx.adapter)
-  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
-  if (!stack || !entry || entry.defCode !== ctx.defCode || entry.changes.length === 0) {
-    return { ok: true, text: '没有可撤销的 AI 修改（AI 改动只在本次页面有效，刷新后不可撤）。\n共 0 格' }
+  const top = undoTop(ctx)
+  if (!top.ok) {
+    return { ok: true, text: `${top.reason}\n共 0 格` }
   }
-  // 冲突判定：逐格比对"应用时的新值"与当前值
-  let conflicts = 0
-  for (let index = 0; index < entry.changes.length; index += 1) {
-    const change = entry.changes[index]
-    if (!change) continue
-    if (cellDisplay(ctx.adapter.getCell(change.row, change.col)) !== cellDisplay(entry.appliedValues[index])) {
-      conflicts += 1
-    }
-  }
-  if (conflicts > 0) {
+  if (top.conflicts > 0) {
     return {
       ok: true,
-      text: `未撤销：这批改动之后有 ${conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`
+      text: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`
     }
   }
+  return applyUndoEntry(ctx, top.stack, top.entry)
+}
+
+/** 反向补丁落笔 + 弹栈 + 清已应用色（撤销的唯一写入点；调用方须已判定无冲突）。 */
+function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: SheetUndoEntry): ApplySheetPlanOutcome {
   const reverse: SheetCellUpdate[] = entry.changes.map((change) => ({
     row: change.row,
     col: change.col,
@@ -2591,12 +2743,109 @@ export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
   ctx.adapter.clearMarks?.('applied')
   return {
     ok: true,
-    text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`
+    text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`,
+    cells: entry.cellsCount
   }
 }
 
 /**
- * 三个写工具的统一分发（预览入口与切档重算共用：同一个工具名只能落到同一个确定性函数）。
+ * 撤销的<b>确认计划</b>（工具安全边界批）：把"将要回滚的逐格 diff"算成一张预览计划，
+ * 等用户在预览卡上点「应用」才写（{@link applyUndoPlan}）。
+ *
+ * <p>为什么撤销也要预览：它会覆盖当前表格数据（不是只读、也不是"无后果"），而模型单方面就能触发；
+ * 卡片把"哪几格、从什么回到什么"摆出来，用户的一次点击就是本仓既有的<b>人围栏</b>
+ * （与三个写工具同一条链，无新帧型）。没有可撤销层 / 有人工改动时<b>不建卡</b>，直接如实回执。
+ */
+export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+  const readOnly = requireReadable(ctx)
+  if (readOnly) return { ok: false, reason: readOnly }
+  const top = undoTop(ctx)
+  if (!top.ok) return { ok: false, reason: top.reason }
+  if (top.conflicts > 0) {
+    return {
+      ok: false,
+      reason: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`
+    }
+  }
+  const { entry, stack } = top
+  const reverse = undoReverseChanges(entry)
+  return {
+    ok: true,
+    plan: makePlan({
+      ctx,
+      tool: 'undo_last_sheet_edit',
+      toolCallId,
+      // 撤销要求用户核对**全部**反向变更（不是样例）⇒ 直接全量 diff（卡面分页；不产 0 行进模型）
+      preview: 'full-diff',
+      scope: 'sheet',
+      // i18n（本批范围）：撤销卡的两句用户可见文案走 locale，不再新增中文残留。
+      scopeSummary: i18n.global.t('sheet.undoScopeSummary', { planId: entry.planId }),
+      predicateSummary: '',
+      targetRows: [...new Set(reverse.map((change) => change.row))],
+      changes: reverse,
+      skippedCount: 0,
+      rulesText: i18n.global.t('sheet.undoRulesText', {
+        cells: entry.cellsCount,
+        layers: stack.length
+      }),
+      warnings: [],
+      // 计划身份绑定"要撤销的那一层"：栈顶变了 ⇒ 计划自动失效（不会撤到别的一层，也不会撤两次）
+      planId: `${UNDO_PLAN_PREFIX}${entry.planId}`
+    })
+  }
+}
+
+/**
+ * 应用撤销计划（用户已确认）：身份校验 → 冲突复核 → 反向补丁 → 弹栈。
+ *
+ * <p><b>恰好一次</b>：判据是"栈顶仍是本计划要撤的那一层"（{@link UNDO_PLAN_PREFIX} + planId）。
+ * 第一次成功后栈顶被弹出，第二次（双击/重放/重复回灌）必然对不上 ⇒ 如实拒绝，不会再写一格。
+ */
+export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
+  const readOnly = requireReadable(ctx)
+  if (readOnly) return { ok: false, reason: readOnly }
+  if (plan.tool !== 'undo_last_sheet_edit' || !plan.planId.startsWith(UNDO_PLAN_PREFIX)) {
+    return { ok: false, reason: '这不是撤销计划，本次未做任何修改。请重新发起。' }
+  }
+  if (plan.defCode !== ctx.defCode) {
+    return { ok: false, reason: `表格已切换（当前 ${ctx.defCode}，预览属于 ${plan.defCode}），本次未执行撤销。请重新发起。` }
+  }
+  // 身份闸：撤销同样绑定"预览时那张表/那份内容"（换文件/程序化重载后不得回滚新数据）
+  if (previewIdentityMismatch(plan, ctx)) {
+    return { ok: false, reason: UNDO_PREVIEW_INVALID_REASON }
+  }
+  const targetPlanId = plan.planId.slice(UNDO_PLAN_PREFIX.length)
+  const stack = undoStack.get(ctx.adapter)
+  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  if (!stack || !entry || entry.planId !== targetPlanId) {
+    return { ok: false, reason: '这次撤销已执行或撤销栈已变化（同一次撤销不会执行第二次），本次未做任何修改。' }
+  }
+  if (plan.status !== 'pending') {
+    return { ok: false, reason: UNDO_PREVIEW_INVALID_REASON }
+  }
+  if (entry.defCode !== ctx.defCode || entry.changes.length === 0) {
+    return { ok: false, reason: '这次撤销的目标已不可用（表格或撤销栈已变化），本次未做任何修改。请重新发起。' }
+  }
+  const top = undoTop(ctx)
+  if (!top.ok) {
+    return { ok: false, reason: top.reason }
+  }
+  if (top.conflicts > 0) {
+    return {
+      ok: false,
+      reason: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。本次未做任何修改。`
+    }
+  }
+  const outcome = applyUndoEntry(ctx, top.stack, top.entry)
+  if (outcome.ok) {
+    // 消费撤销计划（栈已弹出；计划状态同步落定，重放同一对象也不会再进写路径）
+    plan.status = 'applied'
+  }
+  return outcome
+}
+
+/**
+ * 写工具 + 撤销的统一分发（预览入口与切档重算共用：同一个工具名只能落到同一个确定性函数）。
  */
 export function planSheetWithLevel(
   ctx: SheetContext,
@@ -2607,6 +2856,8 @@ export function planSheetWithLevel(
   if (tool === 'replace_values') return planReplace(ctx, args, toolCallId)
   if (tool === 'update_rows') return planUpdate(ctx, args, toolCallId)
   if (tool === 'normalize_column') return planNormalize(ctx, args, toolCallId)
+  // 撤销也要预览（工具安全边界批）：会覆盖当前表格数据 ⇒ 必须由用户在卡上确认
+  if (tool === 'undo_last_sheet_edit') return planUndo(ctx, args, toolCallId)
   return null
 }
 
@@ -2622,11 +2873,19 @@ export function replanSheet(
   plan: SheetWritePlan,
   level: SheetPreviewLevel
 ): SheetPlanOutcome {
+  if (plan.tool === 'undo_last_sheet_edit') {
+    // 撤销没有"明细档"：反向补丁本身就是全量明细 ⇒ 切档不重算、计划身份不变
+    return { ok: true, plan }
+  }
   if (!plan.args) {
     return { ok: false, reason: '预览缺少入参快照，无法重算明细。请让 AI 重新发起。' }
   }
   if (plan.sheetVer !== undefined && plan.sheetVer !== ctx.version) {
-    return { ok: false, reason: '预览已失效（表格在此期间被修改），未产出新的明细。请让 AI 重新发起。' }
+    return { ok: false, reason: STALE_PREVIEW_REASON }
+  }
+  if (previewIdentityMismatch(plan, ctx)) {
+    // 程序化重载（loadGeneration 变）不一定会 bump workspace.dataVersion ⇒ 必须单独比对身份
+    return { ok: false, reason: STALE_PREVIEW_REASON }
   }
   const args: SheetArgs = { ...plan.args, preview: level }
   const replanned = planSheetWithLevel(ctx, plan.tool, args, plan.toolCallId)
@@ -2649,9 +2908,11 @@ export function replanSheet(
   }
 }
 
-/** 写工具名 → 是否需要预览（normalize 只有 commit=true 才走预览）。 *//** 写工具名 → 是否需要预览（normalize 只有 commit=true 才走预览）。 */
+/** 写工具名 → 是否需要人围栏预览（normalize 只有 commit=true；撤销恒需要 —— 工具安全边界批）。 */
 export function needsSheetPreview(name: string, args: SheetArgs): boolean {
   if (name === 'replace_values' || name === 'update_rows') return true
   if (name === 'normalize_column') return args.commit === true
+  // 撤销会覆盖当前表格数据，不能当成"无后果的即时动作"（用户 2026-10-25 裁决）
+  if (name === 'undo_last_sheet_edit') return true
   return false
 }

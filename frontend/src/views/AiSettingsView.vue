@@ -54,7 +54,8 @@ const createForm = reactive({ code: '', displayName: '', baseUrl: '', apiKey: ''
 const manualForm = reactive({ modelId: '', maxContext: '', maxOutput: '' })
 
 const defaultsForm = reactive({
-  modelId: '',
+  /** 默认模型下拉的选中值 = `${providerId}::${modelId}`（同名模型靠 providerId 区分） */
+  target: '',
   temperature: '',
   topP: '',
   maxTokens: '',
@@ -69,7 +70,9 @@ const selectedProvider = computed(
 )
 
 const allModels = computed(() =>
-  providers.value.flatMap((p) => p.models.filter((m) => m.enabled).map((m) => ({ provider: p, model: m })))
+  providers.value
+    .filter((p) => p.enabled)
+    .flatMap((p) => p.models.filter((m) => m.enabled).map((m) => ({ provider: p, model: m })))
 )
 
 const isEmpty = computed(() => providers.value.length === 0)
@@ -99,9 +102,94 @@ function fillForms(): void {
   }
 }
 
+/** 默认模型选项的值：providerId + modelId 的二元组（同名模型不会串台）。 */
+function modelTargetKey(providerId: number, modelId: string): string {
+  return `${providerId}::${modelId}`
+}
+
+/** 旧配置（只有 modelId、无法唯一归属）的临时选项前缀：保留原值，保存时按未绑定提交。 */
+const LEGACY_TARGET_PREFIX = 'legacy::'
+
+/** 已失效绑定（provider 停用/不存在或模型停用/删除）的临时选项前缀：显式展示，不空选中。 */
+const INVALID_TARGET_PREFIX = 'invalid::'
+
+/** 绑定的目标当前是否真的可选（provider 已启用 + 模型已启用）。 */
+function isSelectableTarget(providerId: number, modelId: string): boolean {
+  const provider = providers.value.find((item) => item.id === providerId)
+  return provider?.enabled === true && provider.models.some((model) => model.enabled && model.modelId === modelId)
+}
+
+/**
+ * 回显时把 `(providerId?, modelId?)` 还原成下拉值。
+ *
+ * - 绑定了 provider：目标不可选（provider 停用/不存在、模型停用/删除）⇒ 显式的"失效"选项；
+ * - 旧配置只有 modelId：唯一所有者 ⇒ 直接映射；两家同名/已不存在 ⇒ 显式的"未绑定"选项。
+ * 两种情况都不替用户猜边，也不在只改温度时把默认模型静默清掉。
+ */
+function defaultTargetKeyOf(providerId: number | null | undefined, modelId: string | null | undefined): string {
+  if (!modelId) {
+    return ''
+  }
+  if (providerId != null) {
+    return isSelectableTarget(providerId, modelId)
+      ? modelTargetKey(providerId, modelId)
+      : `${INVALID_TARGET_PREFIX}${providerId}::${modelId}`
+  }
+  const owners = providers.value.filter((provider) =>
+    provider.enabled && provider.models.some((model) => model.enabled && model.modelId === modelId)
+  )
+  return owners.length === 1
+    ? modelTargetKey(owners[0].id, modelId)
+    : `${LEGACY_TARGET_PREFIX}${modelId}`
+}
+
+/** 当前回显是否停在"旧配置、未绑定"的临时选项上（模板据此渲染那一行）。 */
+const legacyDefaultModelId = computed(() => {
+  if (defaultsForm.target.startsWith(LEGACY_TARGET_PREFIX)) {
+    return defaultsForm.target.slice(LEGACY_TARGET_PREFIX.length)
+  }
+  return ''
+})
+
+/** 当前回显是否停在"绑定已失效"的临时选项上；失效项的保存由后端 fail-closed 拒绝。 */
+const invalidDefaultTarget = computed(() => {
+  if (!defaultsForm.target.startsWith(INVALID_TARGET_PREFIX)) {
+    return null
+  }
+  const rest = defaultsForm.target.slice(INVALID_TARGET_PREFIX.length)
+  const separator = rest.indexOf('::')
+  const providerId = Number(rest.slice(0, separator))
+  const modelId = rest.slice(separator + 2)
+  const provider = providers.value.find((item) => item.id === providerId)
+  const providerName = provider?.displayName ?? `#${providerId}`
+  return { key: defaultsForm.target, modelId, providerName }
+})
+
+/** 下拉值 → 提交二元组（空 = 两项都清掉）。 */
+function splitDefaultTarget(target: string): { providerId: number | null; modelId: string | null } {
+  if (target === '') {
+    return { providerId: null, modelId: null }
+  }
+  if (target.startsWith(LEGACY_TARGET_PREFIX)) {
+    return { providerId: null, modelId: target.slice(LEGACY_TARGET_PREFIX.length) }
+  }
+  const raw = target.startsWith(INVALID_TARGET_PREFIX)
+    ? target.slice(INVALID_TARGET_PREFIX.length)
+    : target
+  const separator = raw.indexOf('::')
+  if (separator < 0) {
+    return { providerId: null, modelId: raw }
+  }
+  const providerId = Number(raw.slice(0, separator))
+  return {
+    providerId: Number.isFinite(providerId) ? providerId : null,
+    modelId: raw.slice(separator + 2)
+  }
+}
+
 function fillDefaults(): void {
   const current = defaults.value
-  defaultsForm.modelId = current?.modelId ?? ''
+  defaultsForm.target = defaultTargetKeyOf(current?.providerId, current?.modelId)
   defaultsForm.temperature = current?.temperature == null ? '' : String(current.temperature)
   defaultsForm.topP = current?.topP == null ? '' : String(current.topP)
   defaultsForm.maxTokens = current?.maxTokens == null ? '' : String(current.maxTokens)
@@ -442,8 +530,10 @@ function numberOrNull(raw: string): number | null {
 async function saveDefaults(): Promise<void> {
   await withBusy('defaults', async () => {
     try {
+      const target = splitDefaultTarget(defaultsForm.target)
       defaults.value = await aiConfigApi.updateDefaults({
-        modelId: defaultsForm.modelId === '' ? null : defaultsForm.modelId,
+        providerId: target.providerId,
+        modelId: target.modelId,
         temperature: numberOrNull(defaultsForm.temperature),
         topP: numberOrNull(defaultsForm.topP),
         maxTokens: numberOrNull(defaultsForm.maxTokens),
@@ -696,9 +786,19 @@ async function confirm(message: string): Promise<boolean> {
         <div class="grid grid-cols-2 gap-2 text-[12px]">
           <label class="flex items-center gap-2">
             <span class="text-[#909399] w-24 shrink-0">{{ T.defaultValueModel }}</span>
-            <select v-model="defaultsForm.modelId" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="default-model">
+            <select v-model="defaultsForm.target" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="default-model">
               <option value="">{{ T.defaultValueModelNone }}</option>
-              <option v-for="item in allModels" :key="`${item.provider.id}-${item.model.modelId}`" :value="item.model.modelId">
+              <option v-if="legacyDefaultModelId" :value="`${LEGACY_TARGET_PREFIX}${legacyDefaultModelId}`">
+                {{ legacyDefaultModelId }}（{{ T.defaultValueModelUnbound }}）
+              </option>
+              <option v-if="invalidDefaultTarget" :value="invalidDefaultTarget.key">
+                {{ invalidDefaultTarget.modelId }}（{{ invalidDefaultTarget.providerName }}·{{ T.defaultValueModelUnavailable }}）
+              </option>
+              <option
+                v-for="item in allModels"
+                :key="modelTargetKey(item.provider.id, item.model.modelId)"
+                :value="modelTargetKey(item.provider.id, item.model.modelId)"
+              >
                 {{ item.model.modelId }}（{{ item.provider.displayName }}）
               </option>
             </select>

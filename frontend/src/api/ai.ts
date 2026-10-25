@@ -14,6 +14,7 @@ import type {
   AiHealth,
   ContextSnapshot,
   AiHistory,
+  SessionPurgeResponse,
   AiRunCurrent,
   ConfirmRequest,
   ConfirmResult,
@@ -146,14 +147,16 @@ export function getContext(sessionId: string, ledger = false): Promise<ContextSn
 }
 
 /**
- * DELETE /api/ai/history/{sessionId}（「新建对话」：删该会话的服务端记忆）。
+ * DELETE /api/ai/session/{sessionId}（「新建对话」= 完整会话销毁）。
  *
+ * 旧 `DELETE /api/ai/history/{sessionId}` 在后端也映射到同一 purge 语义；前端走新路径。
  * 幂等：会话不存在 / 重复删除也返回 200（裸 Map，不套 ApiResponse 信封），故调用方不需要
- * 区分"删过没删过"，也不需要处理 404。响应体字段（sessionId/deleted/existed/memoryKey/
- * removedFromIndex/runActive/activeRunId/storedBy/note）供诊断与取证用，前端不依赖。
+ * 区分"删过没删过"，也不需要处理 404。旧字段（sessionId/deleted/existed/memoryKey/
+ * removedFromIndex/runActive/activeRunId/storedBy/note）保留，新增 complete/deferred/errors/
+ * clientCleanup 由调用方消费：`complete=false` 必须提示"未删净"。
  */
-export function deleteHistory(sessionId: string): Promise<Record<string, unknown>> {
-  return del<Record<string, unknown>>(`/ai/history/${encodeURIComponent(sessionId)}`)
+export function deleteHistory(sessionId: string): Promise<SessionPurgeResponse> {
+  return del<SessionPurgeResponse>(`/ai/session/${encodeURIComponent(sessionId)}`)
 }
 
 /**

@@ -10,6 +10,7 @@ import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
@@ -24,6 +25,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.*;
 
@@ -77,6 +81,24 @@ public class ExportJobRunner {
         final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
 
+        // 回滚收敛口径（仅 EXPORT）：进度/终态写走 REQUIRES_NEW，数据面事务回滚时它们已经独立提交，
+        // 作业会停在 RUNNING（进度满格）等看门狗 30min 判死。故登记一个 afterCompletion：
+        // 非提交结局一律补写 FAILED（finish 的 PENDING/RUNNING 守卫保证不覆盖既有终态，也不会写 COMPLETED）。
+        RunSnapshot snapshot = new RunSnapshot();
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                        return;
+                    }
+                    log.warn("导出作业 #{} 的数据面事务回滚，补写 FAILED 终态（避免停在 RUNNING）", jobId);
+                    terminalWriter.completeNow(job, Job.JobStatus.FAILED, snapshot.errors, 0,
+                            snapshot.processed, snapshot.total, doneEvent(job, Job.JobStatus.FAILED));
+                }
+            });
+        }
+
         boolean cancelled = false;
         int errorCount = 0;
         int processedRows = 0;   // 已扫描行数（已完成配置项合计 + 当前配置项已扫描）
@@ -104,11 +126,17 @@ public class ExportJobRunner {
                     cancelled = true;
                     break;
                 }
+                // 回滚收敛用的分片边界快照（本项开工时的已落库进度）
+                snapshot.processed = processedRows;
+                snapshot.total = totalRows;
+                snapshot.errors = errorCount;
                 String defCode = item.getDefCode();
                 Long itemId = progressService.startItem(jobId, defCode);
                 startedItems++;
                 int defTotal = 0;
                 int rowsSeen = 0;
+                String storageKey = null;
+                boolean persisted = false;
 
                 try {
                     ConfigDefinition def = definitionService.findByCode(defCode);
@@ -124,7 +152,11 @@ public class ExportJobRunner {
                     // 任一段都可能远超 90s 判死窗 —— hold 覆盖「载入→过滤→finishItem/snapshot→写」，
                     // finally 释放（幂等）；区段内的 snapshot/finishItem 是快 DB 写，被 hold 覆盖无副作用。
                     // 30min 绝对上限不受影响，泄漏也有上限兜底；项级 catch 在更外层，异常语义不变。
-                    String storagePath = fileStorage.newPath(".xlsx");
+                    StoredFile storedFile = fileStorage.allocate(".xlsx");
+                    storageKey = storedFile.key();
+                    // 本项若在提交期回滚（含外层回滚），这次新写的导出件按回滚回收；
+                    // 提交成功则保留（旧件由下面的 deleteAfterCommit 清理）。
+                    fileStorage.deleteAfterRollback(storageKey);
                     List<Map<String, Object>> filtered = new ArrayList<>();
                     heartbeatRegistry.hold(jobId);
                     try {
@@ -170,8 +202,8 @@ public class ExportJobRunner {
                         progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
                         progressService.snapshot(jobId, processedRows, totalRows);
 
-                        // Write Excel（本慢临界段的尾段）
-                        excelWriter.write(def, filtered, storagePath);
+                        // Write Excel（本慢临界段的尾段；ExcelWriter 签名保持字符串路径）
+                        excelWriter.write(def, filtered, storedFile.pathString());
                     } finally {
                         heartbeatRegistry.release(jobId);
                     }
@@ -180,18 +212,44 @@ public class ExportJobRunner {
                     Optional<TaskFile> existing = taskFileRepository
                             .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
                     TaskFile tf = existing.orElseGet(TaskFile::new);
+                    String previousKey = existing.map(TaskFile::getStoragePath).orElse(null);
                     tf.setTaskId(taskId);
                     tf.setDefCode(defCode);
                     tf.setFileType("EXPORT");
-                    tf.setStoragePath(storagePath);
-                    tf.setOriginalPath(storagePath);
+                    tf.setStoragePath(storageKey);
+                    tf.setOriginalPath(storageKey);
                     tf.setFileName(defCode + "_" + def.getName() + ".xlsx");
                     tf.setRowCount(filtered.size());
                     taskFileRepository.save(tf);
+                    persisted = true;
+                    if (previousKey != null && !previousKey.equals(storageKey)) {
+                        // 旧导出件在本次提交成功后回收（失败/回滚时保持原引用可用）
+                        fileStorage.deleteAfterCommit(previousKey);
+                    }
 
                     taskService.updateItemStatus(taskId, defCode, "COMPLETED");
 
                 } catch (Exception e) {
+                    // 新件从未成为 task_files 的引用（save 未成功/未写盘）时它是纯孤儿：立即回收。
+                    if (!persisted && storageKey != null) {
+                        fileStorage.delete(storageKey);
+                    }
+                    // 数据面事务已被标记回滚（典型：内层参与事务抛错）：后续每项都只会白写盘、
+                    // 提交时整批丢弃。立即抛出，交给外层 catch + 回滚收敛统一收尾。
+                    if (rollbackOnly()) {
+                        // 条目是 startItem 在 REQUIRES_NEW 里提交的，数据面回滚带不走它；若失败发生在
+                        // finishItem 之前，直接抛会留下 jobs=FAILED + job_items=RUNNING。补偿本身是独立事务，
+                        // 回滚后仍能落库；补偿失败只挂 suppressed，不得顶掉原始异常。
+                        try {
+                            progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
+                        }
+                        catch (RuntimeException compensationFailure) {
+                            e.addSuppressed(compensationFailure);
+                            log.warn("导出项 {} 回滚前的条目补偿失败（保留原异常）：{}", defCode,
+                                    compensationFailure.toString());
+                        }
+                        throw e;
+                    }
                     log.error("Export failed for def {}: {}", defCode, e.getMessage(), e);
                     saveIssue(jobId, defCode, issueMessage(e));
                     errorCount++;
@@ -206,10 +264,17 @@ public class ExportJobRunner {
             }
         } catch (Exception e) {
             log.error("Export job failed: {}", e.getMessage(), e);
-            saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage(e));
             errorCount++;
-            terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
-                    processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
+            snapshot.processed = processedRows;
+            snapshot.total = totalRows;
+            snapshot.errors = errorCount;
+            // 事务已被标记回滚时，本方法内的任何写（issue/终态）都会在提交期被整批丢弃，
+            // 终态交给 afterCompletion 的回滚收敛补写（FAILED）。
+            if (!rollbackOnly()) {
+                saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage(e));
+                terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
+                        processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
+            }
             return;
         }
 
@@ -219,8 +284,33 @@ public class ExportJobRunner {
         // 无条件直写 updateStatus(COMPLETED)+goToStep 是取消竞态翻写点——取消胜出时这里仍会执行）。
         // 终态分母回归"真实工作量"（= 预估/已发现行数，未开工预留清零）：全部扫完时 processed==total→100%
         totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
+        snapshot.processed = processedRows;
+        snapshot.total = totalRows;
+        snapshot.errors = errorCount;
         terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
                 doneEvent(job, status), "EXPORT");
+    }
+
+    /** 当前事务是否已标记回滚（此时提交会被整批丢弃，继续跑只是白写）。 */
+    private static boolean rollbackOnly() {
+        return TransactionSynchronizationManager.isActualTransactionActive()
+                && TransactionAspectSupport.currentTransactionStatus().isRollbackOnly();
+    }
+
+    /**
+     * 回滚收敛用的进度/计数快照（lambda 不能捕获可变局部量）。
+     *
+     * <p>只在分片边界更新：回滚时用的是"最后一次已完成项"的数字，与 {@code job_items} 的已提交
+     * 进度可能相差当前项 —— 收敛要的是终态与可读数字，不是逐行精确。
+     */
+    private static final class RunSnapshot {
+
+        private int processed;
+
+        private int total;
+
+        private int errors;
+
     }
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status) {

@@ -92,10 +92,13 @@ public class PendingToolCall {
 	 */
 	public static final String SHEET_DISABLED = "SHEET_DISABLED";
 
-	/** 挂起种类：确认门（DANGER 风险）。 */
+	/** 挂起种类：确认门（DANGER 风险）。只有 {@code /api/ai/confirm} 能结算它。 */
 	public static final String KIND_CONFIRM = "CONFIRM";
 
-	/** 挂起种类：前端工具。 */
+	/**
+	 * 挂起种类：前端工具。只有 {@code /api/ai/frontend-tool-result} 能结算它
+	 * （{@code APPROVED} 对本 kind 无意义：那是"历史假批准"，续跑会显式结算成 blocked）。
+	 */
 	public static final String KIND_FRONTEND = "FRONTEND";
 
 	/** 挂起种类：后端直接执行（不挂起，仅留台账）。 */
@@ -253,6 +256,25 @@ public class PendingToolCall {
 			case SHEET_DISABLED -> ToolOutcome.CODE_SHEET_DISABLED;
 			default -> null;
 		};
+	}
+
+	/**
+	 * 该条目是否带挂起种类（入口 kind 校验批）。
+	 *
+	 * <p>{@code kind} 是后加的字段：旧数据反序列化后为 {@code null}。这类条目<b>不做种类判定</b>
+	 * （放行 + WARN），否则升级瞬间在途的挂起会全部变成"错入口"，人反而提交不了。
+	 */
+	public boolean hasKind() {
+		return this.kind != null && !this.kind.isBlank();
+	}
+
+	/**
+	 * 该条目是否属于给定挂起种类（调用前先判 {@link #hasKind()}：旧数据一律 {@code false}）。
+	 *
+	 * <p>入口校验只认这个值 —— 它是<b>服务端写入</b>的事实，客户端传来的任何 kind/字段都不参与。
+	 */
+	public boolean isKind(String expected) {
+		return expected != null && expected.equals(this.kind);
 	}
 
 	public Map<String, Object> asMap() {

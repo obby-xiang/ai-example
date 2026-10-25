@@ -80,6 +80,7 @@ const providersFixture = () => [
 
 const defaultsFixture = () => ({
   modelId: 'deepseek-flash',
+  providerId: 7,
   temperature: 0.3,
   topP: 0.9,
   maxTokens: 1024,
@@ -323,6 +324,130 @@ describe('F2 密钥掩码与「留空不改」', () => {
 
     expect(confirmMock).toHaveBeenCalled()
     expect(api.updateProvider).not.toHaveBeenCalled()
+  })
+})
+
+describe('F4 默认目标是 (providerId, modelId) 二元组', () => {
+  /** 两家 provider 都有同名模型：下拉选项与提交体都必须能区分。 */
+  const twoProvidersWithSameModel = () => {
+    const primary = providersFixture()[0]
+    const secondary = {
+      ...primary,
+      id: 8,
+      code: 'backup',
+      displayName: 'Backup',
+      baseUrl: 'https://backup.example.com',
+      models: primary.models.map((model) => ({ ...model, id: 12 }))
+    }
+    return [primary, secondary]
+  }
+
+  it('同名模型不冲突：选项值带 providerId，保存提交二元组', async () => {
+    api.listProviders.mockResolvedValue(twoProvidersWithSameModel())
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: 7 })
+    api.updateDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: 8 })
+
+    const wrapper = await mountView()
+    const select = wrapper.find('[data-testid="default-model"]')
+
+    // 回显按 providerId 选中 A；两个同名模型是两条不同的 option value
+    expect((select.element as HTMLSelectElement).value).toBe('7::deepseek-flash')
+    const values = select.findAll('option').map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toContain('8::deepseek-flash')
+    expect(new Set(values).size).toBe(values.length)
+
+    await select.setValue('8::deepseek-flash')
+    await wrapper.find('[data-testid="save-defaults"]').trigger('click')
+    await flushPromises()
+
+    expect(api.updateDefaults).toHaveBeenCalledTimes(1)
+    expect(api.updateDefaults.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ providerId: 8, modelId: 'deepseek-flash' })
+    )
+    // 回显：用后端返回的二元组还原选中项（不是"猜排序第一的 provider"）
+    expect((wrapper.find('[data-testid="default-model"]').element as HTMLSelectElement).value).toBe(
+      '8::deepseek-flash'
+    )
+  })
+
+  it('旧配置只有 modelId：唯一所有者时仍能回显并保存为绑定后的二元组', async () => {
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: null })
+    api.updateDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: 7 })
+
+    const wrapper = await mountView()
+
+    expect((wrapper.find('[data-testid="default-model"]').element as HTMLSelectElement).value).toBe(
+      '7::deepseek-flash'
+    )
+    await wrapper.find('[data-testid="save-defaults"]').trigger('click')
+    await flushPromises()
+    expect(api.updateDefaults.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ providerId: 7, modelId: 'deepseek-flash' })
+    )
+  })
+
+  it('旧配置同名模型无法唯一归属 ⇒ 显示「未绑定」而不是静默清空', async () => {
+    api.listProviders.mockResolvedValue(twoProvidersWithSameModel())
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: null })
+
+    const wrapper = await mountView()
+    const select = wrapper.find('[data-testid="default-model"]')
+
+    expect((select.element as HTMLSelectElement).value).toBe('legacy::deepseek-flash')
+    expect(wrapper.text()).toContain('未绑定供应商')
+
+    await wrapper.find('[data-testid="save-defaults"]').trigger('click')
+    await flushPromises()
+    expect(api.updateDefaults.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ providerId: null, modelId: 'deepseek-flash' })
+    )
+  })
+
+  it('已停用 provider 不作为可选目标；失效绑定显式显示，保存仍按二元组提交', async () => {
+    const list = twoProvidersWithSameModel()
+    list[1].enabled = false
+    api.listProviders.mockResolvedValue(list)
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: 8 })
+
+    const wrapper = await mountView()
+    const select = wrapper.find('[data-testid="default-model"]')
+    const values = select.findAll('option').map((option) => (option.element as HTMLOptionElement).value)
+
+    expect(values).not.toContain('8::deepseek-flash')
+    expect((select.element as HTMLSelectElement).value).toBe('invalid::8::deepseek-flash')
+    expect(wrapper.text()).toContain('当前不可用')
+
+    await wrapper.find('[data-testid="save-defaults"]').trigger('click')
+    await flushPromises()
+    expect(api.updateDefaults.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ providerId: 8, modelId: 'deepseek-flash' })
+    )
+  })
+
+  it('绑定模型停用同样显式显示为不可用（不换同 provider 的其他模型）', async () => {
+    const list = providersFixture()
+    list[0].models = [{ ...list[0].models[0], enabled: false }]
+    api.listProviders.mockResolvedValue(list)
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: 7 })
+
+    const wrapper = await mountView()
+
+    const select = wrapper.find('[data-testid="default-model"]')
+    expect((select.element as HTMLSelectElement).value).toBe('invalid::7::deepseek-flash')
+    expect(wrapper.text()).toContain('当前不可用')
+  })
+
+  it('清空默认模型 ⇒ providerId 与 modelId 一起清掉', async () => {
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: null, modelId: null })
+    api.updateDefaults.mockResolvedValue({ ...defaultsFixture(), providerId: null, modelId: null })
+
+    const wrapper = await mountView()
+    await wrapper.find('[data-testid="save-defaults"]').trigger('click')
+    await flushPromises()
+
+    expect(api.updateDefaults.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ providerId: null, modelId: null })
+    )
   })
 })
 

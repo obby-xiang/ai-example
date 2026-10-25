@@ -33,10 +33,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li>回放 seq 无洞（超限帧照旧占号）。</li>
  * </ol>
  *
- * <p>观测面说明：B1（2026-10-20）起 {@code delta} 也入归档，但 {@code text} 字段的断言仍走
- * "投递给订阅者的负载原文"（{@link FrameWire#payloads()}）—— 实时与归档两条通道共用同一个
- * 截断点（{@code emit} 锁内），断言哪一条都等价，这里保留原观测面以免掩盖投递侧回归；
- * {@code result} 字段的断言直接打在归档上（{@code tool_result} 帧入档）。
+ * <p>观测面说明：B1（2026-10-20）起 {@code delta} 也入归档，但 {@code text} 的断言走
+ * "投递给订阅者的负载原文"（{@link FrameWire#payloads()}）—— 实时与归档两条通道共用同一段
+ * 出帧逻辑（{@code emit} 锁内），断言哪一条都等价，这里保留原观测面以免掩盖投递侧回归；
+ * {@code result} 的断言直接打在归档上（{@code tool_result} 帧入档）。
+ *
+ * <p><b>截断专项（2026-10-25）：{@code delta} 的 {@code text} 不再走字段级截断</b> ——
+ * 超限时拆成同一 {@code messageId} 的多条既有 {@code delta}（原文与顺序保留），
+ * 详见 {@link DeltaFrameSplitTest}；{@code tool_result.result} 的字段级降采样/标记口径不变。
  */
 class SseFrameSizeLimitTest {
 
@@ -72,20 +76,32 @@ class SseFrameSizeLimitTest {
 				.containsEntry("toolCallId", "call-1");
 	}
 
-	// ── ①′ 同一截断点也覆盖 delta 的 text 字段（投递通道） ──
+	// ── ①′ delta 的 text 超限 = 拆成多条既有 delta，绝不截断正文 ──
 
+	/**
+	 * 截断专项（2026-10-25 反转）：旧行为"超限 delta 按字段截断"会让 assistant 正文<b>永久少字</b>
+	 * —— 实时与归档都只剩头部，重挂也补不回来。现口径：同一 {@code messageId} 下拆成多条
+	 * <b>既有</b> {@code delta}（不新增帧型），每帧 ≤ 上限，拼接仍等于原文，且不挂截断标记
+	 * （{@code truncated/noticeCode}…是"内容缺失"的信号，拆帧后并未缺失）。
+	 */
 	@Test
-	void oversizeDeltaPayloadIsTruncatedToo() throws Exception {
+	void oversizeDeltaIsSplitIntoExistingDeltasInsteadOfTruncated() throws Exception {
 		FrameWire wire = FrameWire.attachTo(this.out);
 		String huge = "y".repeat(20_000);
 		this.out.delta(huge);
 
-		assertThat(wire.payloads()).hasSize(1);
-		Map<String, Object> payload = this.mapper.readValue(wire.payloads().get(0), Map.class);
-		assertThat(payload).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true);
-		assertThat((String) payload.get("text")).hasSizeLessThan(huge.length());
-		assertThat(wire.payloads().get(0).getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
-				.isLessThanOrEqualTo(LIMIT);
+		assertThat(wire.payloads()).as("超限正文拆成多条 delta").hasSizeGreaterThan(1);
+		StringBuilder concatenated = new StringBuilder();
+		for (String raw : wire.payloads()) {
+			Map<String, Object> payload = this.mapper.readValue(raw, Map.class);
+			assertThat(payload).containsEntry("type", "delta")
+					.containsEntry("messageId", "assistant-" + RUN_ID)
+					.doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD)
+					.doesNotContainKey(TruncationContract.NOTICE_CODE_FIELD);
+			assertThat(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8).length).isLessThanOrEqualTo(LIMIT);
+			concatenated.append(payload.get("text"));
+		}
+		assertThat(concatenated.toString()).as("拼接 = 原文（一字不丢、顺序不变）").isEqualTo(huge);
 	}
 
 	// ── ② 标记字段 ──
@@ -228,11 +244,12 @@ class SseFrameSizeLimitTest {
 		assertThat(payload).doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD);
 	}
 
-	// ── ④ 边界：恰好 = 上限不截断；上限 + 1 触发 ──
+	// ── ④ 边界：恰好 = 上限不拆分；上限 + 1 触发拆分（仍不截断） ──
 
 	@Test
-	void boundaryAtExactLimitIsNotTruncatedButOneByteOverIs() throws Exception {
-		int base = this.mapper.writeValueAsBytes(emptyTextFrame()).length;
+	void boundaryAtExactLimitIsNotSplitButOneByteOverIs() throws Exception {
+		// 拆分判定用"最坏 seq"（19 位）的骨架：实际帧只会更短，因此这是拆分决策的保守边界。
+		int base = this.mapper.writeValueAsBytes(emptyTextFrame(Long.MAX_VALUE)).length;
 		int exactChars = LIMIT - base;
 		assertThat(exactChars).as("用例自洽：上限需大于帧骨架").isGreaterThan(100);
 
@@ -241,14 +258,23 @@ class SseFrameSizeLimitTest {
 		this.out.delta("z".repeat(exactChars + 1));
 
 		Map<String, Object> exact = this.mapper.readValue(wire.payloads().get(0), Map.class);
-		assertThat(exact).as("恰好等于上限（" + LIMIT + " 字节）不得触发截断")
+		assertThat(exact).as("最坏 seq 骨架下恰好等于上限（" + LIMIT + " 字节）不得拆分/截断")
 				.doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD);
 		assertThat((String) exact.get("text")).hasSize(exactChars);
 
-		Map<String, Object> over = this.mapper.readValue(wire.payloads().get(1), Map.class);
-		assertThat(over).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true);
-		assertThat(wire.payloads().get(1).getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
-				.as("截后复测：仍超则迭代收缩到满足").isLessThanOrEqualTo(LIMIT);
+		StringBuilder split = new StringBuilder();
+		boolean splitSeen = false;
+		for (String raw : wire.payloads().subList(1, wire.payloads().size())) {
+			Map<String, Object> payload = this.mapper.readValue(raw, Map.class);
+			assertThat(payload).doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD);
+			assertThat(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8).length).isLessThanOrEqualTo(LIMIT);
+			split.append(payload.get("text"));
+			splitSeen = true;
+		}
+		assertThat(splitSeen).as("上限 + 1 必须触发拆分").isTrue();
+		assertThat(split.length()).as("拆分后仍保原文（不截断）").isEqualTo(exactChars + 1);
+		assertThat(split.toString()).isEqualTo("z".repeat(exactChars + 1));
+		assertThat(wire.payloads().size()).as("上限 + 1 ⇒ 至少两片").isGreaterThan(2);
 	}
 
 	// ── ⑤ 回放 seq 无洞（超限帧照旧占号） ──
@@ -322,15 +348,17 @@ class SseFrameSizeLimitTest {
 	 * <p>
 	 * 必须与 {@code SseChatEmitter#frame} 的骨架逐字段同形（T4-3 后半起该骨架含 {@code atMs}，
 	 * 服务端钟 13 位毫秒）；少一个字段就会把"恰好等于上限"算小，边界用例误判为超限。
+	 * {@code seq} 取调用方给的值：拆帧判定以 {@link Long#MAX_VALUE}（19 位）为最坏骨架，
+	 * 实际帧号只会更短。
 	 */
-	private Map<String, Object> emptyTextFrame() {
+	private Map<String, Object> emptyTextFrame(long seq) {
 		Map<String, Object> frame = new LinkedHashMap<>();
 		frame.put("type", "delta");
 		frame.put("atMs", System.currentTimeMillis());
 		frame.put("messageId", "assistant-" + RUN_ID);
 		frame.put("text", "");
 		frame.put("runId", RUN_ID);
-		frame.put("seq", 1L);
+		frame.put("seq", seq);
 		return frame;
 	}
 

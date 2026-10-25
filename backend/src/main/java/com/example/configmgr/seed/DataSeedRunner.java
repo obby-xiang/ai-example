@@ -15,6 +15,8 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.*;
 
@@ -28,19 +30,57 @@ public class DataSeedRunner implements ApplicationRunner {
     private final DefinitionService definitionService;
     private final ConfigDataService dataService;
     private final ObjectMapper objectMapper;
+    private final SeedLock seedLock;
+    private final SeedStatus seedStatus;
 
+    /**
+     * 基座种子播种（多实例单飞）。
+     *
+     * <p>判重从"进方法先 count"改为"<b>抢到 app_lock 行锁后</b>再 count"：三个实例同时启动时，
+     * 只有第一个进临界区播种，其余在锁上等待，拿到锁后看到已提交的 regions 直接跳过
+     * （原实现三者都读到 0，随后在 {@code regions.code} 唯一约束上互相冲突）。锁与本次播种事务同界，
+     * 提交即释放 —— 见 {@link SeedLock}。
+     *
+     * <p>{@code markAfterCommit}：状态在**提交之后**才置终态，避免 /health/ready 在数据真正可见前
+     * 报 ready（提交前的失败会落到 afterCompletion 的 FAILED 分支；那条路径下应用本来也会退出）。
+     */
     @Override
     @Transactional
     public void run(ApplicationArguments args) throws Exception {
+        this.seedStatus.markRunning(SeedStatus.Seed.BASE);
+        this.seedLock.lock(SeedLock.SEED_LOCK);
         if (regionRepository.count() > 0) {
             log.info("Seed data already exists, skipping");
+            markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.SKIPPED, "regions 已有数据（他实例已播种）");
             return;
         }
         log.info("Seeding initial data...");
         seedRegions();
         seedProjects();
         seedDefinitions();
+        markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.DONE, "首次播种完成");
         log.info("Seed data complete");
+    }
+
+    /** 把种子终态挂到当前事务的提交点（无事务时立即落）。 */
+    private void markAfterCommit(SeedStatus.Seed seed, SeedStatus.State state, String detail) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            this.seedStatus.mark(seed, state, detail);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                seedStatus.mark(seed, state, detail);
+            }
+
+            @Override
+            public void afterCompletion(int status) {
+                if (status != STATUS_COMMITTED) {
+                    seedStatus.markFailed(seed, new IllegalStateException("播种事务回滚（status=" + status + "）"));
+                }
+            }
+        });
     }
 
     private void seedRegions() {

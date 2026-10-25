@@ -84,6 +84,12 @@ public enum ToolOutcome {
 	/** 工具调用步数到顶（{@code app.ai.resilience.max-tool-steps}）：未执行，结局 {@link #SKIPPED}。 */
 	public static final String CODE_TOOL_STEP_LIMIT = ErrorCodes.TOOL_STEP_LIMIT;
 
+	/**
+	 * 轮内上下文预算耗尽（工具轮内上下文预算批）：本轮已进入收尾（armed）后模型仍请求工具，
+	 * 调用未执行、结局 {@link #SKIPPED}。
+	 */
+	public static final String CODE_TOOL_BUDGET_EXHAUSTED = ErrorCodes.TOOL_BUDGET_EXHAUSTED;
+
 	public static final String CODE_RUN_CANCELLED = ErrorCodes.RUN_CANCELLED;
 
 	public static final String CODE_FRONTEND_CANCELLED = ErrorCodes.FRONTEND_CANCELLED;
@@ -126,6 +132,16 @@ public enum ToolOutcome {
 	 * 但一个"等会儿再来就好"（可重试），一个"换目标再来"（不可重试）。
 	 */
 	public static final String CODE_TARGET_INVALID = ErrorCodes.TARGET_INVALID;
+
+	/**
+	 * 错入口批准（入口 kind 校验批）：{@code kind=FRONTEND} 的条目被写成 {@code APPROVED}
+	 * （历史假批准 / 旧代码不校验入口时留下的数据）。<b>后端不执行前端工具的桩体、不写执行台账</b>，
+	 * 结局 {@link #BLOCKED}、{@code executed=false}，不可重试（要重来得走前端回灌入口）。
+	 *
+	 * <p>为什么不是 {@code failed}：这不是"执行出错"，而是"这个调用根本不该由后端执行" ——
+	 * 与 {@link #CODE_TARGET_INVALID} 同族（blocked 且不可重试），但语义更硬：连执行都不该发生。
+	 */
+	public static final String CODE_TOOL_KIND_MISMATCH = ErrorCodes.TOOL_KIND_MISMATCH;
 
 	/** "改数据后可重试"的失败码（预检查未通过/过期/预检不通过/预检暂不可用；其余失败码一律不可重试）。 */
 	private static final Set<String> RETRYABLE_FAILURE_CODES = Set.of(ErrorCodes.PRECHECK_NOT_PASSED, ErrorCodes.PRECHECK_STALE,

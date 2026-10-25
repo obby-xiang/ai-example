@@ -5,12 +5,16 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,6 +41,15 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	/** 已消费墓碑（只用于把"用过了"与"不存在"分开；TTL 与登记同量级）。 */
 	private static final String CONSUMED_PREFIX = "ai:form:att:used:";
+
+	/**
+	 * 会话 → 附件登记 id 索引（{@code ai:form:att:sess:<sessionId>}，SET，TTL 与登记同量级）。
+	 *
+	 * <p>为什么必须单独建索引：会话销毁要"只按登记删文件"，就得先枚举该会话的登记；
+	 * 而登记本体是按 {@code fileId} 存的单键，没有索引就只能扫全键空间（会误伤/拖垮生产）。
+	 * 索引成员只是 fileId，值里没有文件内容；消费/销毁时同步 SREM，空 SET 由 Redis 自动消失。
+	 */
+	static final String SESSION_INDEX_PREFIX = "ai:form:att:sess:";
 
 	private final ObjectProvider<StringRedisTemplate> redisProvider;
 
@@ -74,6 +87,24 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			log.error("附件登记写 Redis 失败 fileId={}（多实例下 fail-closed，不回落进程内）：{}", fileId,
 					ex.getMessage());
 			throw new AiStateUnavailableException("附件登记失败（Redis 不可用；不得回退进程内）", ex);
+		}
+		// 会话销毁的枚举面：登记成功后把它挂进该会话的索引。
+		// 索引失败必须回滚登记（否则销毁时看不到这条登记，文件会成孤儿）：先删数据键再抛出，
+		// 调用方（上传端点）据此删除已落盘文件。
+		try {
+			addToSessionIndex(redis, sessionId, fileId);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
+			log.error("附件登记已写入但会话索引失败 fileId={} sessionId={}（回滚登记，避免销毁时漏删文件）：{}",
+					fileId, sessionId, ex.getMessage());
+			try {
+				redis.delete(KEY_PREFIX + fileId);
+			}
+			catch (Exception cleanup) {
+				log.warn("回滚附件登记失败 fileId={}（登记会在 TTL 后自清）：{}", fileId, cleanup.getMessage());
+			}
+			throw new AiStateUnavailableException("附件登记失败（会话索引不可写；不得留下不可枚举的登记）", ex);
 		}
 		return attachment;
 	}
@@ -113,10 +144,12 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return false;
 		}
 		try {
+			String sessionId = sessionIdOfQuietly(redis, fileId);
 			Boolean deleted = redis.delete(KEY_PREFIX + fileId);
 			if (Boolean.TRUE.equals(deleted)) {
 				redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", TTL);
 				this.memory.remove(fileId);
+				removeFromSessionIndexQuietly(redis, sessionId, fileId);
 				return true;
 			}
 			return false;
@@ -125,6 +158,129 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_CONSUME, ex);
 			log.error("附件消费写 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
 			throw new AiStateUnavailableException("附件消费失败（Redis 不可用；不得回退进程内）", ex);
+		}
+	}
+
+	/**
+	 * 该会话仍在册的附件（销毁枚举面）。
+	 *
+	 * <p>索引成员可能已过期/被并发消费（stale），逐个 {@link #find(String)} 过滤；读失败
+	 * <b>抛出</b>（销毁要求"枚举失败不半删"），不折成空表。索引里混入别的会话 id 时按登记
+	 * 自身的 {@code sessionId} 再判一次，避免索引污染导致跨会话删文件。
+	 */
+	@Override
+	public List<Attachment> findBySessionId(String sessionId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return List.of();
+		}
+		StringRedisTemplate redis = redis();
+		if (redis == null) {
+			return this.memory.values().stream().filter(item -> sessionId.equals(item.sessionId())).toList();
+		}
+		SetOperations<String, String> setOps = redis.opsForSet();
+		if (setOps == null) {
+			return List.of();
+		}
+		Set<String> ids;
+		try {
+			ids = setOps.members(SESSION_INDEX_PREFIX + sessionId);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			throw new AiStateUnavailableException("附件会话索引读取失败（销毁枚举不得按空表处理）", ex);
+		}
+		if (ids == null || ids.isEmpty()) {
+			return List.of();
+		}
+		List<Attachment> out = new ArrayList<>();
+		for (String fileId : ids) {
+			Attachment attachment = find(fileId);
+			if (attachment != null && sessionId.equals(attachment.sessionId())) {
+				out.add(attachment);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 删除一条登记（销毁用）：数据键 + 墓碑键 + 会话索引成员。
+	 *
+	 * <p>返回被删登记（含 {@code storagePath}），调用方据此删文件；不存在返回 null（幂等）。
+	 * 数据键删除失败抛出（由销毁流程记为部分失败，可重试）；索引清理失败只 WARN
+	 * （登记已删，stale 成员会被枚举时的 {@link #find(String)} 过滤掉）。
+	 */
+	@Override
+	public Attachment deleteRegistration(String fileId) {
+		if (fileId == null || fileId.isBlank()) {
+			return null;
+		}
+		StringRedisTemplate redis = redis();
+		if (redis == null) {
+			return this.memory.remove(fileId);
+		}
+		Attachment attachment = find(fileId);
+		try {
+			redis.delete(KEY_PREFIX + fileId);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_CONSUME, ex);
+			throw new AiStateUnavailableException("附件登记删除失败（Redis 不可用；可重试）", ex);
+		}
+		try {
+			redis.delete(CONSUMED_PREFIX + fileId);
+		}
+		catch (Exception ex) {
+			log.warn("清理附件消费墓碑失败 fileId={}（墓碑会在 TTL 后自清）：{}", fileId, ex.getMessage());
+		}
+		removeFromSessionIndexQuietly(redis, attachment == null ? null : attachment.sessionId(), fileId);
+		return attachment;
+	}
+
+	/** 会话索引登记（失败抛出；调用方回滚登记）。sessionId 为空 = 无法归属，跳过（不阻断上传）。 */
+	private static void addToSessionIndex(StringRedisTemplate redis, String sessionId, String fileId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return;
+		}
+		SetOperations<String, String> setOps = redis.opsForSet();
+		if (setOps == null) {
+			return;
+		}
+		setOps.add(SESSION_INDEX_PREFIX + sessionId, fileId);
+		redis.expire(SESSION_INDEX_PREFIX + sessionId, TTL);
+	}
+
+	/** 会话索引清理（best-effort：登记已删时 stale 成员不再指向任何文件）。 */
+	private static void removeFromSessionIndexQuietly(StringRedisTemplate redis, String sessionId, String fileId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return;
+		}
+		try {
+			SetOperations<String, String> setOps = redis.opsForSet();
+			if (setOps != null) {
+				setOps.remove(SESSION_INDEX_PREFIX + sessionId, fileId);
+			}
+		}
+		catch (Exception ex) {
+			log.warn("附件会话索引清理失败 sessionId={} fileId={}（stale 成员会被枚举过滤）：{}", sessionId,
+					fileId, ex.getMessage());
+		}
+	}
+
+	/** 消费路径的会话归属读取：只用于清索引，读不出来不影响消费本身。 */
+	private String sessionIdOfQuietly(StringRedisTemplate redis, String fileId) {
+		try {
+			if (redis.opsForValue() == null) {
+				return null;
+			}
+			String json = redis.opsForValue().get(KEY_PREFIX + fileId);
+			if (json == null) {
+				return null;
+			}
+			Attachment attachment = this.objectMapper.readValue(json, Attachment.class);
+			return attachment.sessionId();
+		}
+		catch (Exception ex) {
+			return null;
 		}
 	}
 

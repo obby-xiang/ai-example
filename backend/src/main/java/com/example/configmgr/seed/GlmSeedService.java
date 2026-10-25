@@ -21,6 +21,10 @@ import java.util.*;
  * glm-5.3 种子并集移植：在基座既有 7 个定义之外追加 glm 的 8 个定义与三层级范围数据。
  * 与基座 {@code DataSeedRunner} 的 7 个定义完全隔离（不改其播种逻辑），
  * 幂等判据为逐定义 {@code existsByCode}，故单定义缺失时可自愈补播。
+ *
+ * <p>多实例：判重前先抢 {@code app_lock} 的种子行（{@link SeedLock}），三个实例同时启动时
+ * 只有一个真正播种，其余在锁内重新判重后跳过 —— 单靠 {@code existsByCode} 是先查后写，
+ * 并发下三者会同时判定"缺 8 个定义"。
  */
 @Slf4j
 @Service
@@ -34,16 +38,27 @@ public class GlmSeedService {
     private final RegionRepository regionRepository;
     private final ProjectRepository projectRepository;
     private final ObjectMapper objectMapper;
+    private final SeedLock seedLock;
 
+    /**
+     * 幂等播种 glm 并集（多实例单飞）。
+     *
+     * <p>判重从"进方法先 existsByCode"改为"<b>抢到 app_lock 行锁后</b>再判"：三实例同时启动时
+     * 只有第一个播种，其余等待后看到定义已存在即跳过（原实现三者都读到"缺 8 个定义"，
+     * 随后在 {@code config_definitions.code} 唯一约束上抛 409/冲突）。锁与本次事务同界。
+     *
+     * @return true = 本次真的写入；false = 判重跳过
+     */
     @Transactional
-    public void seedIfAbsent() throws Exception {
+    public boolean seedIfAbsent() throws Exception {
+        seedLock.lock(SeedLock.SEED_LOCK);
         List<DefSpec> specs = specs();
         List<DefSpec> pending = specs.stream()
                 .filter(s -> !definitionRepository.existsByCode(s.code()))
                 .toList();
         if (pending.isEmpty()) {
             log.info("GLM 种子定义已存在，跳过（{}/{}）", specs.size(), specs.size());
-            return;
+            return false;
         }
         log.info("GLM 种子并集移植：待播种 {}/{} 个定义", pending.size(), specs.size());
 
@@ -61,6 +76,7 @@ public class GlmSeedService {
             seedData(spec);
         }
         log.info("GLM 种子并集移植完成：新增 {} 个定义", pending.size());
+        return true;
     }
 
     private void seedData(DefSpec spec) throws Exception {

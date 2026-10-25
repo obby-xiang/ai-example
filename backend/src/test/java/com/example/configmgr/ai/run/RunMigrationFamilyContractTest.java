@@ -130,6 +130,11 @@ class RunMigrationFamilyContractTest {
 		assertThat(excluded).contains(RunStore.FENCE_RUN_PREFIX, RunStore.LEASE_RUN_PREFIX,
 				LeaseService.EPOCH_PREFIX, RunStore.BEAT_PREFIX, RunStore.ACTIVITY_PREFIX,
 				CancellationRegistry.CANCEL_PREFIX);
+		assertThat(excluded).contains(RunStore.SESSION_RUNS_PREFIX,
+				com.example.configmgr.ai.session.SessionPurgeGuard.KEY_PREFIX,
+				com.example.configmgr.ai.session.SessionPurgePendingStore.PENDING_PREFIX,
+				com.example.configmgr.ai.session.SessionPurgePendingStore.QUEUE_KEY,
+				"ai:purge:retry:lock");
 		assertThat(excluded).as("同一前缀不得既迁移又排除").doesNotContainAnyElementsOf(migrated);
 	}
 

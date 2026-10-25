@@ -145,12 +145,16 @@ public final class MemoryWindow {
 			return new Plan(original, beforeTokens, beforeTokens, beforeCount, beforeCount, 0, 0, false,
 					REASON_UNDER_BUDGET);
 		}
+		// 续跑保 system 批：SYSTEM 不是可裁剪历史 —— 只对系统段之后的 body 做清除/淘汰，
+		// 最后原样复位到最前。预算仍按整份历史计（SYSTEM 的 token 不能被当成"可以省掉的量"）。
+		List<Message> system = SystemMessages.leading(original);
+		List<Message> body = SystemMessages.body(original);
 
 		// ① 先清旧工具结果（越预算才动它：没越线时清掉等于白丢信息）
-		List<Message> current = original;
+		List<Message> current = body;
 		int cleared = 0;
 		if (overBudget) {
-			ToolResultClearing.Plan clear = ToolResultClearing.plan(original, config.keepToolResults(),
+			ToolResultClearing.Plan clear = ToolResultClearing.plan(body, config.keepToolResults(),
 					protectedToolCallIds);
 			if (clear.changed()) {
 				current = clear.messages();
@@ -177,11 +181,12 @@ public final class MemoryWindow {
 			tokens = ContextEstimator.estimateMessages(current);
 		}
 
-		boolean stillOver = config.tokenBudget() > 0 && tokens > config.tokenBudget();
+		List<Message> planned = SystemMessages.reattach(system, current);
+		boolean stillOver = config.tokenBudget() > 0 && ContextEstimator.estimateMessages(planned) > config.tokenBudget();
 		String reason = dropped > 0 ? REASON_TURN_TRIM
 				: (cleared > 0 ? REASON_TOOL_RESULT_CLEARING : REASON_NOTHING_TO_TRIM);
-		return new Plan(current, beforeTokens, tokens, beforeCount, current.size(), cleared, dropped, stillOver,
-				reason);
+		return new Plan(planned, beforeTokens, ContextEstimator.estimateMessages(planned), beforeCount,
+				planned.size(), cleared, dropped, stillOver, reason);
 	}
 
 	/**

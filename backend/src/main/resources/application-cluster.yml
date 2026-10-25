@@ -13,6 +13,10 @@ spring:
     activate:
       on-profile: cluster
 
+  # 多实例提醒：本 profile 同时被 FileStorageMultiInstanceGuard 视为"多实例部署"，
+  # app.file.storage-path 必须是共享存储的**绝对路径**（相对路径随各实例 JVM 工作目录漂移，
+  # 同一存储键会解析到不同目录）；配错即启动失败，而不是静默各写各的盘。
+  #   例：APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
   data:
     redis:
       # 种子节点：Lettuce 从任一种子拉 CLUSTER NODES 得到全拓扑，之后按 MOVED/ASK 重定向。

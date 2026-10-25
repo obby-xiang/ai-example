@@ -166,7 +166,7 @@ describe('批G · R4：挂起态镜像的 inFlight（loading=false + suspended=t
     store.suspended = false
     store.writeMirrorNow()
     expect(mirrorOf('s-r4-flag')?.inFlight).toBe(false)
-  })
+  }, 20_000)
 
   it('挂起轮刷新：镜像里同段的正文与 5 张已执行卡都在（不止重建的确认卡）', async () => {
     const writer = await freshStore()

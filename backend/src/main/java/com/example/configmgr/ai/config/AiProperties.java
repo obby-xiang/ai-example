@@ -49,9 +49,19 @@ public class AiProperties {
 
 	private Resume resume = new Resume();
 
+	/**
+	 * 人工等待 <b>park</b>（等人/等前端时不驻留线程；用户裁决 2026-10-25）。
+	 */
+	private Park park = new Park();
+
 	private Tool tool = new Tool();
 
 	private ResultBudget resultBudget = new ResultBudget();
+
+	/**
+	 * Redis 事件日志/轮次索引的<b>容量治理</b>（Redis 容量专项 A；{@code app.ai.stream.*}）。
+	 */
+	private Stream stream = new Stream();
 
 	private Lease lease = new Lease();
 
@@ -365,16 +375,49 @@ public class AiProperties {
 			}
 		}
 		ResultBudget.Ui ui = budget.getUi();
-		if (ui == null || ui.getMaxFrameBytes() <= 0) {
-			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 > 0（当前 = "
+		if (ui == null || ui.getMaxFrameBytes() < ResultBudget.Ui.MIN_FRAME_BYTES) {
+			// 拆帧专项：低于 1KiB 不是"更省"，而是帧数爆炸（一条正文切成成百上千片）或正文被清空
+			// （连最小合法帧外壳都装不下）。故下限与 >0 合并成同一条 fail-fast，并点名下限值。
+			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 >= "
+					+ ResultBudget.Ui.MIN_FRAME_BYTES + "（当前 = "
 					+ (ui == null ? "段缺失" : ui.getMaxFrameBytes())
-					+ "）：0/负值会被帧侧读成\"不限制\"，单帧上限静默失效");
+					+ "）：0/负值等于'不限制'（单帧上限静默失效），低于 1KiB 则拆分粒度太细"
+					+ "（帧数爆炸）或把正文清空；delta/reasoning 按本值分片，result 仍走字段级降采样");
 		}
 		ResultBudget.Callback callback = budget.getCallback();
 		if (callback == null || callback.getMaxChars() <= 0) {
 			throw new IllegalStateException("app.ai.result-budget.callback.max-chars 必须 > 0（当前 = "
 					+ (callback == null ? "段缺失" : callback.getMaxChars())
 					+ "）：0/负值会把每次前端回灌都截成空（前端工具永远拿不到结果）");
+		}
+	}
+
+	/**
+	 * 启动期校验 {@code app.ai.stream.*}（Redis 容量专项 A；与 {@link #verifyResultBudget()} 同一姿态）。
+	 *
+	 * <p>两个键的坏值都<b>不是</b>"性能降级"：
+	 * <ul>
+	 * <li>{@code byte-budget < 0}：{@code 0} 才是"关闭字节治理"；负值只会让"预算 ÷ 每条上界"
+	 * 变成负数、窗口静默落到下限 —— 配置面写"按字节"，运行面永远不按字节；</li>
+	 * <li>{@code index-prune-interval < 0}：{@code 距上次清理 ≥ 间隔} 恒真 ⇒ 每次 {@code create}
+	 * 都全表扫 {@code ai:runs}（{@code SMEMBERS} + 逐成员 {@code EXISTS}），热路径退化成 O(索引大小)。</li>
+	 * </ul>
+	 * 故启动即失败并点名键与当前值。
+	 */
+	@PostConstruct
+	void verifyStream() {
+		Stream stream = this.stream;
+		if (stream == null) {
+			throw new IllegalStateException("app.ai.stream 段缺失（绑定为 null）：事件日志容量治理无法装配，启动失败");
+		}
+		if (stream.getByteBudget() < 0L) {
+			throw new IllegalStateException("app.ai.stream.byte-budget 不得为负（当前 = "
+					+ stream.getByteBudget() + "）：0 = 关闭字节治理（只按条数窗口），负值没有解释空间");
+		}
+		Duration interval = stream.getIndexPruneInterval();
+		if (interval == null || interval.isNegative()) {
+			throw new IllegalStateException("app.ai.stream.index-prune-interval 不得为负（当前 = " + interval
+					+ "）：负间隔让每次 create 都全表扫 ai:runs；0 = 关闭机会式清理");
 		}
 	}
 
@@ -779,9 +822,64 @@ public class AiProperties {
 		private Duration execTimeout = Duration.ofSeconds(120);
 	}
 
+	/**
+	 * 人工等待 <b>park</b>（等人/等前端时结束本次执行、交还线程；用户裁决 2026-10-25）。
+	 *
+	 * <h2>为什么</h2>
+	 * 确认门 / {@code generative_form} / 表格写·撤销 / 上传交接都是"等人或等前端"的等待：
+	 * 卡送达后 SSE 已按 B1 收流（{@code completeSubscriptions}），人可能在几秒后、也可能在几天后
+	 * 才动。旧实现让一条 {@code aiRunExecutor} 线程<b>驻留</b>在 {@code ConfirmGate#await} 里，
+	 * 同时每 2s 心跳、续期卡片数据、续租、看门狗继续判定 —— 挂起并发上限因此等于线程池容量，
+	 * 而且"一直有心跳"会让会话门/僵尸判据把**没人管**的轮当活轮。
+	 *
+	 * <p>本开关打开后：请求帧发出并收流之后，await 立即通过内部挂起控制信号
+	 * （{@link com.example.configmgr.ai.run.RunParkedException}）结束本次执行，
+	 * 交还驱动租约、不登记 latch、不心跳、不续租、不进看门狗等待；Redis 里的
+	 * 快照/待决/req/decided/帧归档就是<b>合法恢复状态</b>。决策/回灌到达后由
+	 * {@code ResumeService} 重建执行（与跨实例续跑同一条通路），池满时有界重派发。
+	 *
+	 * <h2>两个缺省刻意不一致（与 {@code Resume#on-startup} 同一条纪律）</h2>
+	 * <b>代码缺省 = false</b>：直接 {@code new AiProperties()} 的单测/非 Spring 装配保持
+	 * "阻塞等待"的既有语义（大量 gate/tools 用例以"决策 → 等待方继续执行"为前提）；
+	 * <b>出厂 {@code application.yml} = true</b>：生产（Spring 装配）走 park。
+	 * 判别方法 = {@code app.ai.park.enabled} 是否被显式配置，而不是看字段初值。
+	 */
+	@Data
+	public static class Park {
+
+		/**
+		 * 是否启用人工等待 park（代码缺省 false；出厂 yml true —— 见类注）。
+		 *
+		 * <p>关闭 = 本批之前的阻塞式等待（线程驻留、2s 心跳、续租、看门狗继续判定）。
+		 */
+		private boolean enabled = false;
+
+		/**
+		 * 派发失败（续跑池饱和 / 会话门被别的轮占着）时的<b>有界</b>重派发次数（缺省 15）。
+		 *
+		 * <p>为什么必须有：决策一旦落库，"推进这一轮"的责任就从等待方转给了派发方；
+		 * 池饱和时如果只记一条日志，用户已经批准的卡会停在"已决 + 无人执行"。
+		 *
+		 * <p><b>I3：次数必须覆盖一次正常轮的收尾窗口</b>。一轮可持续到
+		 * {@code app.ai.resilience.total-budget}（300s），固定 500ms×3 的窗口（1.5s）覆盖不到
+		 * 任何一次真实轮次的收尾 ⇒ 等于"批准了但永久不执行"。本批改成<b>指数退避</b>
+		 * （{@link #dispatchRetryDelay} 起、按 {@link #dispatchRetryMaxDelay} 封顶），
+		 * 缺省 15 次 = 2+4+8+16+30×11 ≈ 360s 窗口（覆盖 300s + 60s 余量；10 次只有 210s，
+		 * 短于轮预算本身）；用尽后不再自动重排（死卡不占用调度线程），
+		 * 但<b>可被下一次触发重新计数</b>（决策/重挂/启动扫描），并 ERROR 留痕。
+		 */
+		private int maxDispatchRetries = 15;
+
+		/** 第一次重派发的间隔（缺省 2s；之后按 2 的幂递增，封顶见 {@link #dispatchRetryMaxDelay}）。 */
+		private Duration dispatchRetryDelay = Duration.ofSeconds(2);
+
+		/** 重派发间隔的封顶（缺省 30s；避免指数退避把调度器占成高频轮询）。 */
+		private Duration dispatchRetryMaxDelay = Duration.ofSeconds(30);
+
+	}
+
 	@Data
 	public static class Resume {
-
 		/**
 		 * 启动自动续跑（N3/N8）：应用就绪后扫描 {@link com.example.configmgr.ai.run.RunStore}
 		 * 里仍存活的轮次，把"已有人类决策/后端工具在飞"的那些自动续跑。
@@ -1018,6 +1116,19 @@ public class AiProperties {
 			public static final int DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
 
 			/**
+			 * {@code max-frame-bytes} 的<b>启动下限</b>（拆帧专项发现；1KiB）。
+			 *
+			 * <p>低于本值时：① 拆帧会把一条正常正文切成成百上千片（帧数爆炸、前端逐帧渲染成本失控，
+			 * 事件日志窗口也会被碎片帧迅速吃满）；② 极小值（如 64B）连一个最小合法帧的 JSON 外壳
+			 * 都装不下 ⇒ 正文被"清空"。两者都不是性能降级，而是运行面事实被配置面改写，故启动即失败。
+			 *
+			 * <p>拆帧口径（与 {@code SseChatEmitter}/{@code FrameSizeLimiter} 的实现约定）：
+			 * <b>delta / reasoning 可分片</b>（按本值切分为多帧），<b>result 仍按字段级降采样</b>
+			 * （不跨帧分片，保持既有 {@code truncated/strategy/...} 契约）。
+			 */
+			public static final int MIN_FRAME_BYTES = 1024;
+
+			/**
 			 * 单帧 JSON 的 UTF-8 字节上限（64KB）。
 			 *
 			 * <p>判定口径（A19）：<b>整帧 JSON 的 UTF-8 字节数</b>；超限时对 {@code text}/{@code result}
@@ -1025,9 +1136,10 @@ public class AiProperties {
 			 * <b>严禁</b>帧字节级截断 —— 后者破坏 JSON，坏帧在回放读路径（{@code RunStore#events}）
 			 * 被静默忽略，表现为 seq 洞。
 			 *
-			 * <p>语义边界（G5）：本键是<b>单帧字节上限</b>，不是"结果长度上限"。超限时产出的是
-			 * <b>一份完整合法的帧</b>（字段级降采样/标记），不做跨帧分片；分片协议（续帧/引用 handle）
-			 * 与超大结果 spill 一并挂账，见 {@code ToolResultLimiter} 类注。
+			 * <p><b>拆帧口径（拆帧专项）</b>：{@code delta} / {@code reasoning} 类正文帧<b>可分片</b>
+			 * （按本值切成多帧连续投递，帧型不变），{@code result} 仍<b>只</b>做字段级降采样
+			 * （不做跨帧分片/引用句柄）。故本键是"分片粒度/降采样阈值"，下限
+			 * {@link #MIN_FRAME_BYTES}（1KiB）—— 再小会把正文切碎或清空（见该常量注）。
 			 */
 			private int maxFrameBytes = DEFAULT_MAX_FRAME_BYTES;
 		}
@@ -1041,6 +1153,57 @@ public class AiProperties {
 		}
 	}
 
+
+	/**
+	 * 事件日志与轮次索引的容量治理（Redis 容量专项 A）。
+	 *
+	 * <h2>为什么需要它</h2>
+	 * {@code ai:xevents:<runId>} 此前只有<b>条数</b>预算（{@code XADD MAXLEN ~ 6000}）：单帧上限 64KB
+	 * ⇒ 单轮最坏 6000 × 64KB ≈ 384MB。部署用 {@code maxmemory-policy noeviction}（T3-9：AI 键
+	 * 宁报错不丢帧），容量触顶时<b>所有</b> AI 写入（含别的 run 与会话记忆）一起失败 —— 一条病态
+	 * 长轮可以拖垮整个 AI 面。{@code ai:runs} 索引也没有 TTL，只增不减。
+	 *
+	 * <h2>口径（保守等效，不引入新协议）</h2>
+	 * Redis 5.0 / Cluster 都<b>没有</b>按字节裁剪 Stream（{@code XTRIM} 只按条数/ID），真按字节治理
+	 * 要额外协议（{@code MEMORY USAGE} 采样 + 动态裁剪，且采样本身是 O(N) 或近似）。本批改用
+	 * <b>可证的等效上界</b>：每条落档记录 ≤ 本轮观察到的最大帧载荷 + 固定开销，
+	 * 于是"有效窗口 = clamp(预算 ÷ 每条上界, 下限, 条数窗口)"即可保证"窗口 × 每条上界 ≤ 预算"。
+	 * 观察值是<b>本轮实际见过</b>的最大载荷（不是配置的 64KB 上界），所以正常小帧轮次仍保留
+	 * 6000 条回放深度，只有真出现大帧的轮次才收窄。
+	 *
+	 * <p>取舍（如实登记）：① 这是<b>上界</b>而不是实测字节，Redis 自身的分配器/碎片/keyspace 开销
+	 * 不在内 ⇒ 预算应显著小于 maxmemory；② 跨实例不共享观察值 —— 另一个实例写过大帧时，本实例
+	 * 仍按自己的窗口写，<b>全局上界退化为"各实例观察之和"</b>（要严格全局界需把观察值落共享键 =
+	 * 每帧多一次读写 + 新键族，本批按最小实现不做；多实例同时写同一个 run 的概率极低）；
+	 * ③ 收窄会让"能补回多远"变小 —— 读侧对"游标早于幸存窗口"单独计数
+	 * （{@code c1.streamReplayGap}），不伪装成"没有新帧"。
+	 */
+	@Data
+	public static class Stream {
+
+		/**
+		 * 单轮事件日志的<b>字节软上限</b>（默认 64MiB）。
+		 *
+		 * <p>取值依据：部署 {@code maxmemory} ≈ 16GiB（技术方案 §9）；最坏态 ≈ 挂起池 20 轮
+		 * 同时写满 ⇒ 20 × 64MiB ≈ 1.25GiB ≈ 8%，给会话记忆/台账/业务键留出余量。
+		 * <b>{@code 0} = 关闭字节治理</b>（只按条数窗口，回到本批之前的语义，供压测对照）。
+		 *
+		 * <p>单轮最坏占用因此从 384MB 降到本值；下限窗口 {@code RedisFrameStore#MIN_WINDOW} 保证
+		 * 收窄后仍有可回放窗口（预算连下限都撑不住时计数 + WARN，见 {@code c1.streamByteFloor}）。
+		 */
+		private long byteBudget = 64L * 1024 * 1024;
+
+		/**
+		 * {@code ai:runs} 索引<b>机会式惰性清理</b>的最小间隔（默认 10m；{@code 0} = 关闭）。
+		 *
+		 * <p>索引是 SET，无法按成员过期；整键 {@code EXPIRE} 会在长挂起期把<b>活跃</b>轮的发现面
+		 * 一起删掉（挂起等人没有上限），故只做"快照键已不存在"的成员剔除。
+		 * 清理一次 = 一次 {@code SMEMBERS} + 逐成员 {@code EXISTS}（O(索引大小)），因此必须节流：
+		 * 否则每次 {@code /chat} 的 {@code create} 都要扫全表。启动扫描（{@code allRunIds}）不受本键约束。
+		 */
+		private Duration indexPruneInterval = Duration.ofMinutes(10);
+
+	}
 
 	/**
 	 * 租约（fencing）设施参数（B23L1 批②a；设计稿 §2.2）。
@@ -1222,10 +1385,10 @@ public class AiProperties {
 		private Duration fuseCooldown = Duration.ofMinutes(10);
 
 		/**
-		 * 递归摘要用的模型名（默认空 = 主模型；D3 裁决）。
+		 * 历史键（仅为兼容旧配置保留绑定；<b>不再生效</b>）。
 		 *
-		 * <p>留空即主模型是刻意的：本仓当前只有一套 provider 配置，先主模型 + 超时 + 熔断；
-		 * 模型配置专项落地后可只改本键切到便宜模型（接缝已留，批③ 已消费）。
+		 * <p>摘要链最小统一后，压缩只使用本轮同一供应商、同一模型（{@code ProviderRuntime}），
+		 * 不存在独立摘要模型分支，也不读取本键。
 		 */
 		private String summaryModel = "";
 

@@ -70,8 +70,9 @@ import java.util.function.BooleanSupplier;
  *
  * <h2>进程内视图</h2>
  * {@link #heldEpoch} 是"本进程认为自己持有的租约"，只作<b>短路</b>与 fencing 写判据：
- * 可重入因此不会重复 {@code SET}（L3），{@code RunStore.save} 也据此决定走 fence 写还是 plain SET
- * （E3：无租约不拒写）。视图与 Redis 真值冲突时以 Redis 为准（脚本返回值覆盖视图）。
+ * 可重入因此不会重复 {@code SET}（L3）。写权限本身由 {@link #authority} 的四态给出
+ * （{@code HELD / LOST / UNAVAILABLE / NEVER_HELD}），{@code RunStore.save} 不再按
+ * {@code epoch == 0} 判"可 plain 写"。视图与 Redis 真值冲突时以 Redis 为准（脚本返回值覆盖视图）。
  *
  * <h2>owner 维度（B23L1 批③a；裁决 7）</h2>
  * 租约的持有者不再隐含"＝实例标识"：{@link #acquire(String, Duration, String)} 允许调用方显式给出
@@ -297,6 +298,48 @@ public class LeaseService {
 
 	}
 
+	/**
+	 * 续租三态（续租 fencing 收口批）：{@code RENEWED} 续到了；{@code LOST} <b>确定</b>丢租
+	 * （Lua 返回 0：现值已不是自己那一任）；{@code UNAVAILABLE} 设施不可用（异常，不知道还在不在）。
+	 *
+	 * <p>三者必须分开：{@code LOST} 是"别人已经接管，再写就是覆盖新主人"，{@code UNAVAILABLE}
+	 * 是"这一拍问不出来"。两者都要求<b>停止推进</b>（只读），但恢复路径不同：
+	 * 前者要重新抢租，后者下一拍续上即可复工。
+	 */
+	public enum RenewOutcome {
+
+		RENEWED, LOST, UNAVAILABLE
+
+	}
+
+	/**
+	 * <b>写权限的权威判定</b>（续租 fencing 收口批）：{@link com.example.configmgr.ai.run.RunStore#save}
+	 * 与出帧/认领/台账的唯一判据。
+	 *
+	 * <h2>为什么不能用 {@code epoch == 0} 判"可写"</h2>
+	 * epoch=0 同时表示两件相反的事：<b>从未持租</b>（单实例/降级/首轮）与<b>持过但已丢租</b>
+	 * （续租返回 0 后进程内视图被清）。旧实现把两者都当"无租约 ⇒ plain SET"，于是丢租的 A
+	 * 能把自己迟到的终态盖到新主人 B 的 DONE 上 —— fencing 在最后一笔写回处失效。
+	 *
+	 * <h2>四态</h2>
+	 * <ul>
+	 * <li>{@link #HELD}：仍持租 ⇒ 按 epoch 走 fence 写；</li>
+	 * <li>{@link #LOST}：确定丢租 ⇒ <b>只读</b>（停快照写/取号落档/新工具认领/终帧）；</li>
+	 * <li>{@link #UNAVAILABLE}：设施异常，无法确认 ⇒ <b>只读不推进</b>（恢复后可回到 HELD）；</li>
+	 * <li>{@link #NEVER_HELD}：本进程从未持有这一轮，且设施能自证正常 ⇒ 原普通写。</li>
+	 * </ul>
+	 */
+	public enum LeaseAuthority {
+
+		HELD, LOST, UNAVAILABLE, NEVER_HELD;
+
+		/** 是否必须停止推进（丢租或无法确认）。 */
+		public boolean readOnly() {
+			return this == LOST || this == UNAVAILABLE;
+		}
+
+	}
+
 	/** 恒真存活判据（{@link #markDriving(Lease)} 的默认口径：调用方自己负责在合适的时候 release）。 */
 	private static final BooleanSupplier ALWAYS_ALIVE = () -> true;
 
@@ -338,6 +381,45 @@ public class LeaseService {
 
 	/** 正在续租的租约句柄（{@code key + "\0" + owner} → 关闭器）。 */
 	private final Map<String, AutoCloseable> driving = new ConcurrentHashMap<>();
+
+	/**
+	 * 已结束的租约状态（{@code key + "\0" + owner} → {@link LeaseAuthority#LOST} /
+	 * {@link LeaseAuthority#UNAVAILABLE}）。
+	 *
+	 * <p>为什么必须留"墓碑"：丢租/不可用时 {@link #held} 里的视图会被移除（或被保留等待恢复），
+	 * 若只看 {@code heldEpoch == 0} 就会把"持过但已丢"误判成"从未持租"，写权限随之放大。
+	 * 墓碑只由成功 {@code acquire}（同 owner 重新持有）或成功 {@code release}（自愿归还）清除。
+	 *
+	 * <h2>生命周期边界（如实登记）</h2>
+	 * <ul>
+	 * <li>清除通道只有两条：成功 acquire / 成功 release（见上）；进程退出由 {@code shutdown()} 清空；</li>
+	 * <li><b>没有</b> TTL 到期或容量淘汰：任何"自动放行"都会把 LOST 重新变成可写（plain SET），
+	 * 正是 fencing 要消灭的形态；有界性由"每个 (run, owner) 至多一条 + 只对本进程丢过的租约记账"
+	 * 保证 —— 量级 = 本进程参与过且丢租的轮次数，不是会话/轮次总数；</li>
+	 * <li>{@link com.example.configmgr.ai.run.RunStore#deleteRun} <b>不</b>清墓碑：它只释放"仍持有"
+	 * 的租约（{@code releaseIfHeld}）；丢租的 run 已无视图可放。删键之后仍可能有陈旧写者
+	 * （旧驱动线程）尝试 plain 写，清墓碑等于给它重新开门。当前生产代码没有会话销毁路径调用
+	 * {@code deleteRun}（仅测试/运维清理），故这里选择<b>保留墓碑</b>而不是为省内存牺牲 fencing。</li>
+	 * </ul>
+	 */
+	private final Map<String, LeaseAuthority> ended = new ConcurrentHashMap<>();
+
+	/**
+	 * 租约设施的最近观测健康度（{@link #authority} 的"从未持租"分支用）。
+	 *
+	 * <p>任何一次 Redis 异常都会把它置 false；任何一次成功命令置 true。false 时
+	 * {@link #facilityHealthy()} 会做一次有节流的 {@code PING} 自证 —— 正常路径零额外往返。
+	 */
+	private volatile boolean facilityHealthy = true;
+
+	/** 上次 {@code PING} 自证的时刻（毫秒；{@link #facilityHealthy()} 的节流锚点）。 */
+	private final java.util.concurrent.atomic.AtomicLong lastHealthProbeMs = new java.util.concurrent.atomic.AtomicLong();
+
+	/** 上次 {@code PING} 自证的结论（节流窗口内复用）。 */
+	private volatile boolean lastProbeOk = true;
+
+	/** 设施健康自证的最小间隔（毫秒）：避免断连时每帧/每笔写都等一次 PING 超时。 */
+	private static final long HEALTH_PROBE_INTERVAL_MS = 1000L;
 
 	@Autowired
 	public LeaseService(StringRedisTemplate redis, AiProperties properties) {
@@ -478,6 +560,7 @@ public class LeaseService {
 			return interpret(key, holder, viewKey, raw);
 		}
 		catch (Exception ex) {
+			this.facilityHealthy = false;
 			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
 					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
@@ -487,6 +570,7 @@ public class LeaseService {
 	/** 无 tag 租约（资源锁）：脚本外取号 + 单键 GET/SET（其 epoch 不参与 fencing，乱序无害）。 */
 	private AcquireResult acquireUntagged(String key, String holder, String viewKey, Duration effective) {
 		String current = this.redis.opsForValue().get(key);
+		this.facilityHealthy = true;
 		if (current != null) {
 			Lease present = parse(key, current);
 			if (present == null) {
@@ -498,6 +582,7 @@ public class LeaseService {
 			}
 			// 视图丢失但 Redis 里仍是自己那一任：重入，created=false（没有释放权）
 			this.held.put(viewKey, present);
+			this.ended.remove(viewKey);
 			return new AcquireResult(AcquireOutcome.ACQUIRED, present, false);
 		}
 		long epoch = nextEpoch();
@@ -523,6 +608,8 @@ public class LeaseService {
 			return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
 		}
 		this.held.put(viewKey, current);
+		this.ended.remove(viewKey);
+		this.facilityHealthy = true;
 		return new AcquireResult(AcquireOutcome.ACQUIRED, current, createdFlag(raw));
 	}
 
@@ -546,40 +633,78 @@ public class LeaseService {
 			return Hold.LOST;
 		}
 		String holder = owner(owner);
+		String viewKey = viewKey(key, holder);
 		try {
 			Long held = this.redis.execute(VERIFY_SCRIPT, List.of(key), epoch + "|" + holder);
+			this.facilityHealthy = true;
 			if (held != null && held > 0L) {
+				this.ended.remove(viewKey);
 				return Hold.HELD;
 			}
+			// 续租 fencing 收口批：校验失败 = <b>确定</b>丢租 —— 留下墓碑，后续写权限一律只读，
+			// 否则进程内视图被清后 epoch=0 又会把"持过但已丢"当成"从未持租"。
+			markEnded(viewKey, LeaseAuthority.LOST);
 			// 现值已不是自己那一任：只摘<b>匹配的那一任</b>（R3）—— 若视图已经换成更新的 epoch，
 			// 这次校验说明的是"被校验的那一任没了"，不能顺手把当前那一任也作废。
-			Lease local = this.held.get(viewKey(key, holder));
+			Lease local = this.held.get(viewKey);
 			if (local != null && local.epoch() == epoch) {
-				this.held.remove(viewKey(key, holder), local);
+				this.held.remove(viewKey, local);
 			}
 			return Hold.LOST;
 		}
 		catch (Exception ex) {
-			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 按无租约处理）：{}", key, holder,
+			this.facilityHealthy = false;
+			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 只读，不推进）：{}", key, holder,
 					epoch, ex.getMessage());
 			return Hold.UNAVAILABLE;
 		}
 	}
 
-	/** 续租：只有现值仍是自己那一任（epoch + owner）才续。 */
+	/**
+	 * 续租：只有现值仍是自己那一任（epoch + owner）才续。
+	 *
+	 * <p>兼容口（既有调用方只关心 true/false）。需要区分"确定丢租"与"设施不可用"的调用方用
+	 * {@link #renewState} —— 两者在布尔面上都是 false，但可写性/恢复路径不同。
+	 */
 	public boolean renew(Lease lease, Duration ttl) {
+		return renewState(lease, ttl) == RenewOutcome.RENEWED;
+	}
+
+	/**
+	 * 续租并给出<b>三态</b>（续租 fencing 收口批）。
+	 *
+	 * <ul>
+	 * <li>Lua 返回 1 ⇒ {@link RenewOutcome#RENEWED}；清掉墓碑（设施此刻确实是自己的）；</li>
+	 * <li>Lua 返回 0 ⇒ {@link RenewOutcome#LOST}：<b>确定</b>丢租，留下 LOST 墓碑 ⇒ 写权限只读；</li>
+	 * <li>异常 ⇒ {@link RenewOutcome#UNAVAILABLE}：不知道还在不在，留 UNAVAILABLE 墓碑 ⇒
+	 *     只读不推进；下一拍续上即恢复 HELD（不是永久毒化）。</li>
+	 * </ul>
+	 *
+	 * <p>返回值不抛异常：续租是后台/等待循环动作，单拍失败由调用方决定重试节奏。
+	 */
+	public RenewOutcome renewState(Lease lease, Duration ttl) {
 		if (lease == null) {
-			return false;
+			return RenewOutcome.UNAVAILABLE;
 		}
 		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? this.properties.getLease().getTtl() : ttl;
+		String viewKey = viewKey(lease.key(), lease.owner());
 		try {
 			Long renewed = this.redis.execute(RENEW_SCRIPT, List.of(lease.key()), lease.token(),
 					String.valueOf(effective.toMillis()));
-			return renewed != null && renewed > 0L;
+			this.facilityHealthy = true;
+			if (renewed != null && renewed > 0L) {
+				this.ended.remove(viewKey);
+				return RenewOutcome.RENEWED;
+			}
+			markEnded(viewKey, LeaseAuthority.LOST);
+			return RenewOutcome.LOST;
 		}
 		catch (Exception ex) {
+			this.facilityHealthy = false;
+			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			log.debug("租约续期失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
-			return false;
+			return RenewOutcome.UNAVAILABLE;
 		}
 	}
 
@@ -590,6 +715,7 @@ public class LeaseService {
 		}
 		try {
 			Long released = this.redis.execute(RELEASE_SCRIPT, List.of(lease.key()), lease.token());
+			this.facilityHealthy = true;
 			// R3：<b>条件删除</b> —— 只有"本进程的视图仍是这一任"才摘视图、才停续租任务。
 			// 旧实现入口就无条件 stopDriving、失败分支无条件 held.remove(key)：一个迟到的
 			// release(旧租约) 会把本进程<b>当前</b>那一任的视图与续租任务一起误杀（新主人于是
@@ -600,9 +726,15 @@ public class LeaseService {
 			if (this.held.remove(viewKey, lease)) {
 				stopDrivingExact(viewKey);
 			}
+			if (released != null && released > 0L) {
+				// 自愿归还：这一任已经结束，墓碑一并清掉（之后若还有迟到写，那是调用方 bug，
+				// 由 RunStore 的"终态之后不再写"契约兜底；保留墓碑会让正常的下一任被误判只读）。
+				this.ended.remove(viewKey);
+			}
 			return released != null && released > 0L;
 		}
 		catch (Exception ex) {
+			this.facilityHealthy = false;
 			log.debug("租约释放失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;
 		}
@@ -638,6 +770,83 @@ public class LeaseService {
 	/** 带 owner 的 {@link #heldLease(String)}。 */
 	public Optional<Lease> heldLease(String key, String owner) {
 		return Optional.ofNullable(key == null ? null : this.held.get(viewKey(key, owner(owner))));
+	}
+
+	// ── 写权限的权威判定（续租 fencing 收口批） ─────────────────────────────
+
+	/** 本实例在 {@code key} 上的写权限（owner 缺省 = 本实例标识）。 */
+	public LeaseAuthority authority(String key) {
+		return authority(key, this.instanceId);
+	}
+
+	/**
+	 * <b>写权限的权威判定</b>：{@link LeaseAuthority} 四态（判据见枚举注）。
+	 *
+	 * <p>顺序刻意是<b>墓碑 → 视图 → 从未持租</b>：
+	 * <ol>
+	 * <li>LOST 是终局（别人已接管，重新持租前一律只读）；</li>
+	 * <li>UNAVAILABLE 优先于"视图还在"：续租异常时视图刻意保留（下一拍续上即可复工），
+	 *     但那一拍不能写；</li>
+	 * <li>视图在 ⇒ HELD；</li>
+	 * <li>没有墓碑也没有视图 ⇒ 从未持租：仅当设施能自证正常时放行普通写
+	 *     （{@link #facilityHealthy()}）。</li>
+	 * </ol>
+	 *
+	 * <p>本方法<b>不抛异常</b>：它被热路径（每帧/每笔写）调用，判定必须总能给出结论。
+	 */
+	public LeaseAuthority authority(String key, String owner) {
+		if (key == null) {
+			return LeaseAuthority.NEVER_HELD;
+		}
+		String viewKey = viewKey(key, owner(owner));
+		LeaseAuthority endedState = this.ended.get(viewKey);
+		if (endedState == LeaseAuthority.LOST) {
+			return LeaseAuthority.LOST;
+		}
+		if (endedState == LeaseAuthority.UNAVAILABLE) {
+			return LeaseAuthority.UNAVAILABLE;
+		}
+		if (this.held.containsKey(viewKey)) {
+			return LeaseAuthority.HELD;
+		}
+		return facilityHealthy() ? LeaseAuthority.NEVER_HELD : LeaseAuthority.UNAVAILABLE;
+	}
+
+	/**
+	 * 设施是否"能自证正常"（{@link #authority} 的从未持租分支）。
+	 *
+	 * <p>正常路径零额外往返（上一次成功命令已把 {@code facilityHealthy} 置真）。只有观测到失败后
+	 * 才做一次有节流的 {@code PING}：断连时每帧都等 PING 超时会把流式路径拖垮。
+	 * {@code PING} 成功即恢复"正常"——Redis 恢复后不需要重启进程。
+	 */
+	private boolean facilityHealthy() {
+		if (this.facilityHealthy) {
+			return true;
+		}
+		long now = System.currentTimeMillis();
+		long last = this.lastHealthProbeMs.get();
+		if (now - last < HEALTH_PROBE_INTERVAL_MS) {
+			return this.lastProbeOk;
+		}
+		if (!this.lastHealthProbeMs.compareAndSet(last, now)) {
+			return this.lastProbeOk;
+		}
+		boolean ok = leaseOk();
+		this.lastProbeOk = ok;
+		if (ok) {
+			this.facilityHealthy = true;
+			log.info("租约设施自证恢复（PING 成功）：写权限回到「从未持租 ⇒ 普通写」口径");
+		}
+		return ok;
+	}
+
+	/** 记一次"这一任已结束"的墓碑；LOST 是终局，不会被随后的 UNAVAILABLE 覆盖。 */
+	private void markEnded(String viewKey, LeaseAuthority state) {
+		if (viewKey == null || state == null) {
+			return;
+		}
+		this.ended.merge(viewKey, state, (existing, incoming) -> existing == LeaseAuthority.LOST
+				? LeaseAuthority.LOST : incoming);
 	}
 
 	// ── 续租调度 ────────────────────────────────────────────────────────────
@@ -719,13 +928,21 @@ public class LeaseService {
 				stopDriving(lease.key(), lease.owner());
 				return;
 			}
-			if (renew(lease, this.properties.getLease().getTtl())) {
+			RenewOutcome outcome = renewState(lease, this.properties.getLease().getTtl());
+			if (outcome == RenewOutcome.RENEWED) {
 				return;
 			}
-			log.warn("续租失败，放弃本进程的租约视图 key={} owner={} epoch={}（另一实例可以接管）", lease.key(),
+			if (outcome == RenewOutcome.LOST) {
+				log.warn("续租失败，放弃本进程的租约视图 key={} owner={} epoch={}（另一实例已接管：本进程转只读）",
+						lease.key(), lease.owner(), lease.epoch());
+				this.held.remove(viewKey(lease.key(), lease.owner()), lease);
+				stopDriving(lease.key(), lease.owner());
+				return;
+			}
+			// UNAVAILABLE：不知道租约还在不在 —— 视图与续租任务都保留（下一拍续上即可复工），
+			// 但 authority() 已是 UNAVAILABLE ⇒ 这一拍只读不推进。
+			log.warn("续租不可用 key={} owner={} epoch={}（设施异常 ⇒ 本拍只读，下一拍重试）", lease.key(),
 					lease.owner(), lease.epoch());
-			this.held.remove(viewKey(lease.key(), lease.owner()), lease);
-			stopDriving(lease.key(), lease.owner());
 		}
 		catch (Exception ex) {
 			// 续租是后台动作：单拍失败不杀任务，下一拍再试（TTL 三倍于间隔，容忍两拍失败）
@@ -767,9 +984,14 @@ public class LeaseService {
 	public boolean leaseOk() {
 		try {
 			String pong = this.redis.execute((RedisCallback<String>) RedisConnection::ping);
-			return pong != null && "PONG".equalsIgnoreCase(pong);
+			boolean ok = pong != null && "PONG".equalsIgnoreCase(pong);
+			if (ok) {
+				this.facilityHealthy = true;
+			}
+			return ok;
 		}
 		catch (Exception ex) {
+			this.facilityHealthy = false;
 			log.debug("租约探针失败：{}", ex.getMessage());
 			return false;
 		}
@@ -784,6 +1006,9 @@ public class LeaseService {
 		for (Lease lease : List.copyOf(this.held.values())) {
 			release(lease);
 		}
+		// 进程正在退出：墓碑随进程一起消失。不做 TTL 到期/容量淘汰式的"自动放行"——
+		// 那会把 LOST 重新变成可写（见 ended 字段注）。
+		this.ended.clear();
 		if (this.ownExecutor != null) {
 			this.ownExecutor.shutdownNow();
 		}

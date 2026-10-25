@@ -79,7 +79,7 @@ class ResumeProviderGoneTest {
 	@Test
 	void deletedProviderYieldsProviderGone() {
 		seedSnapshot(7L, "deepseek-flash");
-		when(this.configService.resolveChatTarget("deepseek-flash")).thenReturn(Optional.empty());
+		when(this.configService.resolveChatTarget(7L, "deepseek-flash")).thenReturn(Optional.empty());
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
@@ -95,8 +95,8 @@ class ResumeProviderGoneTest {
 	@Test
 	void resumeKeepsTheSnapshotModelIdentity() {
 		seedSnapshot(7L, "deepseek-flash");
-		// 用户已经把默认模型改成 pro：解析出的目标仍是快照那一行（provider 相同、模型名以快照为准）
-		when(this.configService.resolveChatTarget("deepseek-flash")).thenReturn(Optional.of(target(7L,
+		// 用户已经把默认模型改成 pro：解析仍以快照 providerId + 快照模型为准
+		when(this.configService.resolveChatTarget(7L, "deepseek-flash")).thenReturn(Optional.of(target(7L,
 				"deepseek-flash")));
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
@@ -108,6 +108,7 @@ class ResumeProviderGoneTest {
 				org.mockito.ArgumentMatchers.<List<Message>>any(), providerId.capture(), modelId.capture(), any());
 		assertThat(providerId.getValue()).isEqualTo(7L);
 		assertThat(modelId.getValue()).as("续跑用的是快照模型，不是此刻的默认模型").isEqualTo("deepseek-flash");
+		verify(this.configService, never()).resolveChatTarget(anyString());
 	}
 
 	@Test
@@ -126,14 +127,16 @@ class ResumeProviderGoneTest {
 	@Test
 	void providerSwitchOfTheSameModelYieldsProviderGone() {
 		seedSnapshot(7L, "deepseek-flash");
-		// 同一个模型名现在挂在另一个 provider 上（旧端点被删后重建）⇒ 仍是"快照的 provider 没了"
-		when(this.configService.resolveChatTarget("deepseek-flash")).thenReturn(Optional.of(target(9L,
-				"deepseek-flash")));
+		// 同一模型名现在只挂在另一个 provider 上（旧端点被删后重建）：
+		// 精确绑定只认快照那一家（7）⇒ 7 已不可用 ⇒ GONE；按名字猜会拿到 9（旧缺陷）
+		when(this.configService.resolveChatTarget(7L, "deepseek-flash")).thenReturn(Optional.empty());
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertThat(result.outcome()).as("换了端点就不是'原样续跑'：历史里的 provider 已不存在")
 			.isEqualTo(ResumeService.Outcome.PROVIDER_GONE);
+		verify(this.configService).resolveChatTarget(7L, "deepseek-flash");
+		verify(this.configService, never()).resolveChatTarget(anyString());
 	}
 
 	// ── 装配 ────────────────────────────────────────────────────────────────

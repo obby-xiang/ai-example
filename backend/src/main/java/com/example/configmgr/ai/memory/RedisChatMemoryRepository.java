@@ -14,6 +14,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
+import com.example.configmgr.ai.session.SessionPurgeGuard;
+
 /**
  * 基于 Spring Data Redis 普通数据结构实现的官方 {@link ChatMemoryRepository} SPI 扩展（SP-01c）。
  *
@@ -121,12 +123,28 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 
 	private final MessageJsonCodec codec;
 
+	/**
+	 * 会话销毁守卫（可空）：非空且该会话已销毁时，{@link #saveAll} 拒绝写回。
+	 *
+	 * <p>为什么守卫放在写口而不是删口：销毁端点清掉记忆后，在跑轮次的终局仍会整窗
+	 * {@code saveAll}（{@code ResilientChatService#convergeMemory}）。不拦这一笔，用户刚销毁的
+	 * 会话会在几秒后“复活”。读/删除不受影响 —— 销毁流程自己必须能删、重复销毁必须幂等。
+	 * 单测/非 Spring 装配保持三参构造（守卫为 null），语义与本批之前一致。
+	 */
+	private final SessionPurgeGuard purgeGuard;
+
 	private volatile Duration ttl;
 
 	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl) {
+		this(redis, codec, ttl, null);
+	}
+
+	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl,
+			SessionPurgeGuard purgeGuard) {
 		this.redis = redis;
 		this.codec = codec;
 		this.ttl = ttl;
+		this.purgeGuard = purgeGuard;
 	}
 
 	/** 运行期覆盖默认 TTL（V-c2 短 TTL 实验使用）。 */
@@ -285,6 +303,14 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	@Override
 	public void saveAll(String conversationId, List<Message> messages) {
 		String finalKey = key(conversationId); // 先校验 id：空白 id 在序列化/Redis 之前失败
+		// 会话销毁后的写回守卫：在跑轮次终局的整窗收敛会走到这里，命中即拒绝（否则刚销毁的会话复活）。
+		// 守卫读失败会抛出（fail-closed，见 SessionPurgeGuard）：宁可本次记忆写失败并 WARN，
+		// 也不能在"守卫状态不可知"时把已销毁会话的历史悄悄写回来。
+		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
+			log.warn("会话已销毁（purge guard 生效），拒绝写回记忆 conversationId={} key={}（销毁后不可复活）",
+					conversationId, finalKey);
+			return;
+		}
 		String legacyKey = legacyKey(conversationId);
 		if (messages == null || messages.isEmpty()) {
 			deleteByConversationId(conversationId);

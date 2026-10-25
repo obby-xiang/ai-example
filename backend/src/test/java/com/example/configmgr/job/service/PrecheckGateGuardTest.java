@@ -5,6 +5,7 @@ import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelWriter;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
@@ -228,19 +229,19 @@ class PrecheckGateGuardTest {
      */
     private String writeUpload(long taskId, String defCode) throws Exception {
         ConfigDefinition def = definitionService.findByCode(defCode);
-        String path = fileStorage.newPath(".xlsx");
+        StoredFile stored = fileStorage.allocate(".xlsx");
         excelWriter.write(def, List.of(row("paramKey", "s5f.key.1", "paramValue", "v1",
-                "paramType", "STRING", "editable", "true")), path);
+                "paramType", "STRING", "editable", "true")), stored.pathString());
         TaskFile file = new TaskFile();
         file.setTaskId(taskId);
         file.setDefCode(defCode);
         file.setFileType("UPLOAD");
-        file.setStoragePath(path);
-        file.setOriginalPath(path);
+        file.setStoragePath(stored.key());
+        file.setOriginalPath(stored.key());
         file.setFileName(defCode + ".xlsx");
         file.setRowCount(1);
         taskFileRepository.save(file);
-        return path;
+        return stored.key();
     }
 
     /** 与上传件一致的<b>真实</b>指纹摘要（走生产侧的流式 digest，不手抄 sha256）。 */

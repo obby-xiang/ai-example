@@ -103,6 +103,19 @@ public class RedisAvailability {
 		}
 	}
 
+	/**
+	 * <b>只读</b>已知可用性（<b>不触发探活、不发命令</b>）：返回上一次
+	 * {@link #isAvailable()} 的缓存结论。
+	 *
+	 * <p>专供非 AI 热路径（任务 SSE 跨实例发布）在"已知 Redis DOWN"时快速降级 ——
+	 * 否则每一帧都要等 {@code spring.data.redis.timeout} 才失败，作业事务线程随分片线性变慢。
+	 * 本方法不刷新 {@code checkedAt}：恢复仍由下一次 {@link #isAvailable()} 探活感知
+	 * （调用方按 {@link #NEGATIVE_TTL_MS} 节奏重探，避免每帧探活）。
+	 */
+	public boolean isKnownUnavailable() {
+		return !this.available;
+	}
+
 	/** 探活态（仅供 {@code GET /api/ai/health} 与证据）：含原始 {@code lastError} 与统一降级计数。 */
 	public Map<String, Object> describe() {
 		Map<String, Object> out = describeForResponse();

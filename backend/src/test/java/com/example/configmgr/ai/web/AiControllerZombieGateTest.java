@@ -81,14 +81,14 @@ class AiControllerZombieGateTest {
 		when(this.runStore.runLeaseKey(deadRun)).thenReturn("ai:lease:run:" + deadRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
 		when(this.leases.isHeld("ai:lease:run:" + deadRun)).thenReturn(false);
-		when(this.runRegistry.find(deadRun)).thenReturn(null);
+		when(this.runRegistry.hasLiveSubscriber(deadRun)).thenReturn(false);
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(deadRun, false), null);
 
 		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "继续问", null), null);
 
 		assertThat(response.getStatusCode()).as("死轮不拦发送").isEqualTo(HttpStatus.OK);
-		verify(this.sessionGate).release(SESSION, deadRun);
+		verify(this.sessionGate).releaseDeadHeld(SESSION, deadRun);
 	}
 
 	@Test
@@ -100,7 +100,7 @@ class AiControllerZombieGateTest {
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		when(this.runStore.get(liveRun)).thenReturn(snapshot);
-		when(this.runRegistry.find(liveRun)).thenReturn(this.out);
+		when(this.runRegistry.hasLiveSubscriber(liveRun)).thenReturn(true);
 		when(this.runStore.runLeaseKey(liveRun)).thenReturn("ai:lease:run:" + liveRun);
 		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy(liveRun, false));
 
@@ -129,21 +129,26 @@ class AiControllerZombieGateTest {
 		when(this.runStore.runLeaseKey(stalledRun)).thenReturn("ai:lease:run:" + stalledRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
 		when(this.leases.isHeld("ai:lease:run:" + stalledRun)).thenReturn(false);
-		when(this.runRegistry.find(stalledRun)).thenReturn(null);
+		when(this.runRegistry.hasLiveSubscriber(stalledRun)).thenReturn(false);
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(stalledRun, false), null);
 
 		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "重新问", null), null);
 
 		assertThat(response.getStatusCode()).as("心跳不得掩盖 RUNNING 的业务卡死").isEqualTo(HttpStatus.OK);
-		verify(this.sessionGate).release(SESSION, stalledRun);
+		verify(this.sessionGate).releaseDeadHeld(SESSION, stalledRun);
 	}
 
 	/**
-	 * I-4 / R1-09：SUSPENDED 等人期间本来就没有业务帧 —— 新鲜心跳必须保留 409（不能放第二个轮进来）。
+	 * <b>park 批（2026-10-25）口径变更</b>：SUSPENDED 的活动证据只认<b>真实订阅</b>与
+	 * <b>业务活动锚点</b>（含读侧 touch）—— 自写 {@code ai:beat} 心跳与空写出器条目不再算活。
+	 *
+	 * <p>为什么改：park 之后等人期间既没有等待线程也不再心跳；旧判据"新鲜心跳 = 还在等"会让
+	 * 一个没有任何人管的挂起轮<b>永久 409</b>。而真正有人连着的轮由
+	 * {@code AiControllerParkWiringTest#liveSubscriberStillKeepsTheSessionBusy} 锁住（仍 409）。
 	 */
 	@Test
-	void suspendedRoundWithFreshHeartbeatIsKept() {
+	void suspendedRoundWithOnlyAHeartbeatIsReleased() {
 		String waitingRun = "run-waiting";
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(waitingRun);
@@ -156,14 +161,15 @@ class AiControllerZombieGateTest {
 		when(this.runStore.runLeaseKey(waitingRun)).thenReturn("ai:lease:run:" + waitingRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
 		when(this.leases.isHeld("ai:lease:run:" + waitingRun)).thenReturn(false);
-		when(this.runRegistry.find(waitingRun)).thenReturn(null);
-		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy(waitingRun, false));
+		when(this.runRegistry.hasLiveSubscriber(waitingRun)).thenReturn(false);
+		when(this.sessionGate.acquire(eq(SESSION), anyString()))
+			.thenReturn(new SessionGate.Busy(waitingRun, false), null);
 
 		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "插队", null), null);
 
-		assertThat(response.getStatusCode()).as("挂起等人靠心跳证明还在等，不能被放行成双跑")
-			.isEqualTo(HttpStatus.CONFLICT);
-		verify(this.sessionGate, never()).release(any(), any());
+		assertThat(response.getStatusCode()).as("没有真实订阅/业务活动 ⇒ park 的挂起轮不得永久占着会话门")
+			.isEqualTo(HttpStatus.OK);
+		verify(this.sessionGate).releaseDeadHeld(SESSION, waitingRun);
 	}
 
 	@SuppressWarnings("unchecked")

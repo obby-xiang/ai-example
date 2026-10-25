@@ -21,6 +21,10 @@ import java.util.Map;
  * 崩溃发生在这一轮中间时，凭这两项 + {@code ai:pending:<runId>} 的条目即可重建
  * {@code assistant(tool_calls)} 与 {@code role:tool} 消息继续跑；</li>
  * <li>{@link #context}：披露上下文（页面/任务/步骤），续跑据此重建同一份工具子集；</li>
+ * <li>{@link #assistantMetadata}：挂起中那条 assistant 的<b>完整 metadata</b>（不透明；
+ * 推理相关键与厂商私有未知键一并保真，续跑原样挂回）；</li>
+ * <li>{@link #paramsVersion} 与 {@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}：
+ * <b>L-26 的生效参数冻结</b>（同一 run 续跑不移志；新 run 才读新全局默认）；</li>
  * <li>{@link #status}：RUNNING / SUSPENDED / DONE / FAILED —— 供重启后的发现与幂等判定。</li>
  * </ul>
  */
@@ -127,6 +131,49 @@ public class RunSnapshot {
 	/** 本轮使用的模型名（请求体 {@code model} 的原值；{@code null} = 旧快照）。 */
 	private String modelId;
 
+	/** 生效参数冻结的<b>版本号</b>（L-26）：0 = 未冻结的旧快照；1 = 已冻结。 */
+	public static final int PARAMS_VERSION_FROZEN = 1;
+
+	/**
+	 * 生效参数冻结版本（L-26 / 业界裁决）。
+	 *
+	 * <p><b>为什么需要版本号而不是"看字段是否为空"</b>：冻结值允<b>为 null</b>（首轮当时就没有
+	 * temperature，或 {@code providerId=null} 的 env 合成行）。全局 Jackson 是 {@code non_null}
+	 * ⇒ 冻结的 null 在 JSON 里根本不存在，与"旧快照从来没有这些字段"逐字节同形。
+	 * 于是"冻结过"只能由本字段表达：{@code 0} = 旧快照（续跑按当前默认 + WARN），
+	 * {@code >=1} = 这些字段（含 null）就是当时的生效值，续跑必须照抄。
+	 */
+	private int paramsVersion;
+
+	/** 冻结的生效 temperature（{@code paramsVersion=1} 时 null 也是冻结值）。 */
+	private Double temperature;
+
+	/** 冻结的生效 top_p。 */
+	private Double topP;
+
+	/** 冻结的生效 max_tokens。 */
+	private Integer maxTokens;
+
+	/** 冻结的"参数被策略锁住"标记（续跑轮的 {@code done.paramsLocked} 不许改口）。 */
+	private Boolean paramsLocked;
+
+	/**
+	 * 冻结的生效参数（L-26）。三值可为 null —— 那是"当时该项没有值"，不是"没冻结"。
+	 */
+	public record FrozenParams(Double temperature, Double topP, Integer maxTokens, boolean paramsLocked) {
+	}
+
+	/**
+	 * 挂起中那一轮 assistant 的<b>完整 metadata</b>（不透明结构；Redis 容量/推理恢复批）。
+	 *
+	 * <p>挂起只外置正文与 tool_calls 时，续跑重建的那条 {@code assistant(tool_calls)} 会丢掉
+	 * 推理相关元数据（{@code reasoningContent} 之外还可能有 {@code encrypted_content} /
+	 * {@code signature} / {@code thinking} 等厂商私有键）。这里整份 map 原样保存、原样恢复，
+	 * <b>不解析、不截断、不按 provider 分支</b>；未知键也因此不会丢。
+	 * {@code null} = 挂起时上游没有 metadata（旧快照/旧调用方）。
+	 */
+	private Map<String, Object> assistantMetadata;
+
 	/**
 	 * 写入本条快照的<b>租约 epoch</b>（B23L1 批②a）：0 = 无租约写入（单实例/降级路径/旧数据）。
 	 *
@@ -134,6 +181,29 @@ public class RunSnapshot {
 	 * 一次写回是否已被后来者超越（陈旧写不得覆盖新主人的状态）。旧 JSON 没有本字段 ⇒ 0。
 	 */
 	private long runEpoch;
+
+	/**
+	 * 冻结本轮生效参数（L-26）：<b>只在首轮创建快照时调用</b>，续跑不得再写。
+	 *
+	 * <p>不变量：{@code paramsVersion = 1} 之后，三值与 {@code paramsLocked} 就是这一轮的
+	 * "当时生效值" —— 包括 null。续跑按它派生运行态（{@link #paramsFrozen()} 的消费方：
+	 * {@code ResilientChatService#runtimeForSnapshot}），因此新 run 改全局默认不会改到旧 run。
+	 */
+	public void freezeParams(FrozenParams frozen) {
+		if (frozen == null) {
+			return;
+		}
+		this.paramsVersion = PARAMS_VERSION_FROZEN;
+		this.temperature = frozen.temperature();
+		this.topP = frozen.topP();
+		this.maxTokens = frozen.maxTokens();
+		this.paramsLocked = frozen.paramsLocked();
+	}
+
+	/** 本快照是否冻结过生效参数（{@code false} = L-26 之前的旧快照，续跑走旧行为 + WARN）。 */
+	public boolean paramsFrozen() {
+		return this.paramsVersion >= PARAMS_VERSION_FROZEN;
+	}
 
 	/** 取证视图（不含 messageJson 正文）。 */
 	public Map<String, Object> asMap() {
@@ -158,6 +228,12 @@ public class RunSnapshot {
 		// 模型身份（模型配置专项批①，additive）：旧快照为 null，取证口径与 runEpoch 一致
 		out.put("providerId", this.providerId);
 		out.put("modelId", this.modelId);
+		// L-26 生效参数（additive）：paramsVersion=0 = 旧快照（未冻结）；>=1 时四值是当时的生效值
+		out.put("paramsVersion", this.paramsVersion);
+		out.put("temperature", this.temperature);
+		out.put("topP", this.topP);
+		out.put("maxTokens", this.maxTokens);
+		out.put("paramsLocked", this.paramsLocked);
 		return out;
 	}
 

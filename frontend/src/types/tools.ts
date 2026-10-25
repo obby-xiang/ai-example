@@ -22,8 +22,8 @@
  * | open_export_file_editor | `task:EXPORT/EXPORT` | READ | FRONTEND |
  * | download_export_files | `task:EXPORT/EXPORT` | READ | FRONTEND |
  * | navigate_to | `*` | READ | FRONTEND |
- * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | READ | FRONTEND |
- * | set_condition | `page:tasks`, `task:EXPORT` | READ | FRONTEND |
+ * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（勾选即改任务项；不进确认门） | FRONTEND |
+ * | set_condition | `page:tasks`, `task:EXPORT` | **WRITE**（条件 PUT 落库；不进确认门） | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（自动执行，不进确认门） | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
  * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells / find_rows | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
@@ -36,7 +36,11 @@
  * DC-15 起 `generative_form` 亦然（前端接入已落地：GF-B 在 `stores/ai.ts` 对 `frontend_tool_request`
  * 特判 + AiPanel 的 `FormRenderer` 渲染）。
  * ③ `confirm_step` 曾标 READ；R3-02 起按事实标 **WRITE**（导入向导离开第 1 步会整表写回服务端文件）。
- * 它仍是 FRONTEND 通道，通道判定优先于风险等级 ⇒ 不会因此新增确认门。
+ * `select_definitions` / `set_condition` 同理（工具安全边界批，2026-10-25 用户裁决）：前者改任务项勾选、
+ * 后者把条件 PUT 落库 —— 都是"改变后续动作的工作选择"的写，不能再自称 READ。
+ * 三者仍是 FRONTEND 通道，通道判定优先于风险等级 ⇒ 不会因此新增确认门；
+ * 它们的人围栏就是下游 `start_*` 的 DANGER 确认卡（撤销例外：撤销走前端预览卡确认，
+ * 见 `SHEET_PREVIEW_TOOLS`）。
  * 增量执行兜底（DC-14 T1）：越 scope 的调用即使被上游发起，后端也会拦截并回灌结构化错误
  * （帧里 `tool_result.status=BLOCKED`）。
  */
@@ -103,11 +107,15 @@ export const SHEET_WRITE_TOOLS: ReadonlySet<string> = new Set<SheetToolName>([
   'undo_last_sheet_edit'
 ])
 
-/** 需要“人围栏”预览的写工具（`normalize_column` 仅 commit=true 档；撤销不预览）。 */
+/**
+ * 需要“人围栏”预览的写工具（`normalize_column` 仅 commit=true 档；撤销**也**预览 ——
+ * 它会覆盖当前表格数据，不能当"无后果的即时动作"，用户 2026-10-25 裁决）。
+ */
 export const SHEET_PREVIEW_TOOLS: ReadonlySet<string> = new Set<string>([
   'replace_values',
   'update_rows',
-  'normalize_column'
+  'normalize_column',
+  'undo_last_sheet_edit'
 ])
 
 /** 前端工具名（与后端 @Tool(name=...) 严格同名）。 */
@@ -307,7 +315,8 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'undo_last_sheet_edit',
     displayName: '撤销 AI 表格修改',
-    description: '撤销最近一次 AI 对当前表格的修改（反向补丁，深度 1；回灌最多 20 行说明）；不改服务端数据',
+    description: '撤销最近一次 AI 对当前表格的修改（反向补丁，最多 3 层；执行前由用户在预览卡上确认；'
+      + '回灌最多 20 行说明）；不改服务端数据',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
     scopePatterns: SHEET_SCOPE_PATTERNS,

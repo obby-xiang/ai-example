@@ -62,9 +62,37 @@ public final class RedisDegradation {
 	/** B3：附件墓碑读取失败（wasConsumed）。 */
 	public static final String B3_ATTACHMENT_TOMBSTONE = "b3.attachmentTombstone";
 
+	/**
+	 * C1：事件日志的<b>字节预算</b>成为实际约束（有效窗口 &lt; 条数窗口，流被裁得更短）。
+	 *
+	 * <p>Redis 容量专项 A：{@code ai:xevents} 的条数窗口（6000）在单帧上限 64KB 下并不封顶字节。
+	 * 本事件每次"被字节预算约束的落档"计一次（量级 = 有多少写入被容量治理限制过），
+	 * 日志每轮只 WARN 一次。运维据 {@code /api/ai/health} 的 {@code redis.degradations} 判断
+	 * 是否要调 {@code app.ai.stream.byte-budget}。
+	 */
+	public static final String C1_STREAM_BYTE_CAP = "c1.streamByteCap";
+
+	/** C1：预算连下限窗口（{@code RedisFrameStore#MIN_WINDOW}）都撑不住 —— 保守界不可兑现，显式可见。 */
+	public static final String C1_STREAM_BYTE_FLOOR = "c1.streamByteFloor";
+
+	/** C1：回放的 {@code afterSeq} 早于幸存窗口（本次回放跳过了一段），不得伪装成"没有新帧"。 */
+	public static final String C1_STREAM_REPLAY_GAP = "c1.streamReplayGap";
+
+	/** C1：{@code ai:runs} 索引惰性清理失败（快照键探测/成员剔除），本轮跳过、下一拍重试。 */
+	public static final String C1_RUN_INDEX_PRUNE = "c1.runIndexPrune";
+
+	/**
+	 * W1：会话记忆<b>整窗写回</b>失败（{@code ChatMemoryRepository#saveAll} 或旧 {@code ChatMemory} 通道）。
+	 *
+	 * <p>此前只有 WARN：刷新后可能丢掉本轮历史，属于必须可观测的降级。一次失败的写只计一次
+	 * （不重试、不改变写协议）；WARN 原文保留（带 stage 与 sessionId）。
+	 */
+	public static final String W1_MEMORY_WRITE = "w1.memoryWrite";
+
 	private static final String[] KNOWN = { A1_FENCE_READ, A3_FRAME_RANGE_READ, A4_FRAME_TAIL_READ, A5_CANCEL_READ,
 			A5_CANCEL_UNKNOWN, A6_DECISION_GUARD_READ, A6_PENDING_READ, L139_RENEW_KEY, L139_RENEW_NOT_ATTEMPTED,
-			B3_ATTACHMENT_REGISTER, B3_ATTACHMENT_READ, B3_ATTACHMENT_CONSUME, B3_ATTACHMENT_TOMBSTONE };
+			B3_ATTACHMENT_REGISTER, B3_ATTACHMENT_READ, B3_ATTACHMENT_CONSUME, B3_ATTACHMENT_TOMBSTONE,
+			C1_STREAM_BYTE_CAP, C1_STREAM_BYTE_FLOOR, C1_STREAM_REPLAY_GAP, C1_RUN_INDEX_PRUNE, W1_MEMORY_WRITE };
 
 	private static final Map<String, Counter> COUNTERS = new ConcurrentHashMap<>();
 

@@ -122,10 +122,12 @@ class AiConfigWritePersistenceTest {
 		assertThat(this.jdbcTemplate.queryForObject(
 				"SELECT value_json FROM ai_setting WHERE setting_key='config.version'", String.class)).isEqualTo("2");
 
-		// 读路径快照立刻可用（写路径主动 reload）—— 不等下一个节流窗
-		assertThat(this.configService.availability().available()).isTrue();
+		// 读路径快照立刻可用 —— 但默认目标还缺"这一家自己的模型"：明确 NO_MODEL_CONFIGURED，
+		// 不借 env / 别家的模型名。
+		assertThat(this.configService.availability().available()).isFalse();
+		assertThat(this.configService.availability().code()).isEqualTo("NO_MODEL_CONFIGURED");
 		assertThat(this.configService.current().providers()).extracting(AiProvider::getCode).contains("custom-1");
-		assertThat(this.registry.tryCurrent()).isPresent();
+		assertThat(this.registry.tryCurrent()).isEmpty();
 
 		// allowlist 一行（后续默认参数与硬删闸都依赖它存在）
 		this.mockMvc
@@ -133,6 +135,8 @@ class AiConfigWritePersistenceTest {
 				.content("{\"modelId\":\"m-1\",\"maxContext\":8000,\"maxOutput\":2048}"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.modelId").value("m-1"));
+		assertThat(this.configService.availability().available()).isTrue();
+		assertThat(this.registry.tryCurrent()).isPresent();
 	}
 
 	@Test
@@ -169,16 +173,19 @@ class AiConfigWritePersistenceTest {
 	@Test
 	@Order(6)
 	void defaultsRoundTripThroughTheSettingsEndpoint() throws Exception {
+		// 旧客户端只提交 modelId：写路径按唯一所有者推断并落 default.providerId
 		this.mockMvc
 			.perform(put("/api/ai/settings/defaults").contentType(MediaType.APPLICATION_JSON)
 				.content("{\"modelId\":\"m-1\",\"temperature\":0.3,\"topP\":0.9,\"maxTokens\":1024,"
 						+ "\"allowUserParams\":false}"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.modelId").value("m-1"));
+			.andExpect(jsonPath("$.data.modelId").value("m-1"))
+			.andExpect(jsonPath("$.data.providerId").value(providerId));
 
 		this.mockMvc.perform(get("/api/ai/settings/defaults"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.modelId").value("m-1"))
+			.andExpect(jsonPath("$.data.providerId").value(providerId))
 			.andExpect(jsonPath("$.data.temperature").value(0.3))
 			.andExpect(jsonPath("$.data.topP").value(0.9))
 			.andExpect(jsonPath("$.data.maxTokens").value(1024))

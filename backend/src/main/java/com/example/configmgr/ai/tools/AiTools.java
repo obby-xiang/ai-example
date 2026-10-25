@@ -431,9 +431,23 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
+    /**
+     * 选择配置项（勾选态写入）。
+     *
+     * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：本工具改的是任务的
+     * 工作选择 —— 勾选结果决定后续导出/导入处理哪些配置项（handler 缺失时还会回落
+     * {@code select_defs} 直接落库）。它<b>可逆、可见、可重选</b>，且真正的数据出口
+     * （{@code start_export}/{@code start_import}/{@code start_publish}）各有 DANGER 确认门，
+     * 因此按实际后果分级为 {@code WRITE}、<b>不进确认门</b>（多弹一次卡只是无意义打扰；
+     * 且 FRONTEND 通道优先，DANGER 在这里也只会变成"标注了却不生效"的失真）。
+     *
+     * <p><b>下发前的硬校验</b>（{@code ai/tool/WizardActionGuard}）：未知顶层键、空 {@code codes}、
+     * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
+     * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
+     */
     @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导）")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
-    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String selectDefinitions(
@@ -459,10 +473,23 @@ public class AiTools {
      * <p>顺序约束（前端/后端的既有事实，不是本工具的约束）：{@code set_condition} 只对<b>已勾选</b>
      * 的配置项有效 —— 未选中时表单里没有该卡片（页面 handler 只写表单模型），
      * 而落库（{@code conditionJson}）发生在向导推进步骤时（前端 {@code persistStepData}）。
+     *
+     * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：导出向导的
+     * {@code export.setConditions} handler 会立即 {@code PUT} 落库，{@code conditionJson} 是导出作业的
+     * 唯一条件来源 —— 它改变的是"后续动作的工作选择"，不能再用 {@code READ}（"no side effects"）的语义。
+     * 但它可逆、可在条件表单里看见，且真正的数据出口仍有 {@code start_export} 的 DANGER 确认门，
+     * 故按实际后果分级为 {@code WRITE}、不进确认门。
+     *
+     * <p><b>空条件一律拒（{@code ai/tool/WizardActionGuard}）</b>：前端 {@code normalizeActionArgs}
+     * 会把缺失的 {@code conditions} 补成 {@code {}}，而 {@code {}} 的语义是"不设条件 = 导出全部" ——
+     * 这正是"工具调用成功、条件却是空的"的来源。因此 {@code conditions} 缺失、或既无
+     * {@code scopeKeys} 又无有效 {@code fields} 时<b>不挂起、不下发</b>，并把"要导出全部就不要调本工具"
+     * 写进拒绝原因。未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
-    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（不设条件即导出全部；需已导航到导出向导并已勾选该配置项）")
+    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
+            + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项）")
     @ToolScope({ "page:tasks", "task:EXPORT" })
-    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String setCondition(
@@ -858,8 +885,22 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "undo_last_sheet_edit", description = "撤销最近一次 AI 对当前表格的修改（反向补丁、深度 1；"
-            + "回灌说明最多 20 行），不改服务端数据；没有可撤销修改时如实回“没有可撤销的 AI 修改”")
+    /**
+     * 撤销最近一次 AI 表格修改（前端有撤销栈，深度 3）。
+     *
+     * <p><b>风险档 {@code WRITE} + 必须经前端预览卡确认</b>（工具安全边界批，用户 2026-10-25 裁决）：
+     * 撤销会覆盖当前表格数据（反向补丁），不能当成"无后果"的动作。它走的是本仓既有的
+     * <b>人围栏</b>（{@code frontend_tool_request} → 预览卡「应用/取消」，与三个写工具同一条链）——
+     * 未经用户点「应用」<b>不写任何一格</b>；用户取消则以 {@code cancelled=true} 收口。
+     * 契约层直接调用（{@code frontend-tools.ts} 的执行器）一律拒执，堵住"绕过确认"的旁路。
+     *
+     * <p>为什么不做成后端确认门：本工具是 {@code FRONTEND} 通道，后端方法体是哨兵桩，
+     * 确认门放行后只会执行桩体（{@link #FRONTEND_STUB}）—— 对前端写操作而言那是一张只有打扰、
+     * 没有保护力的卡（{@code kindOf} 的通道优先判定即为此）。
+     */
+    @Tool(name = "undo_last_sheet_edit", description = "撤销最近一次 AI 对当前表格的修改（反向补丁、最多 3 层；"
+            + "执行前由用户在预览卡上确认；回灌说明最多 20 行），不改服务端数据；"
+            + "没有可撤销修改时如实回“没有可撤销的 AI 修改”")
     @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)

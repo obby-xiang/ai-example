@@ -45,12 +45,32 @@ public final class ErrorCodes {
     public static final String RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
     /** 409：同 sessionId 已有一轮在进行中。 */
     public static final String SESSION_BUSY = "SESSION_BUSY";
+    /**
+     * 410：该 sessionId 已被会话销毁，不能继续以同 id 开新轮。
+     *
+     * <p>与 {@link #SESSION_BUSY}（409，进行中可重挂）区分：410 是终态，唯一出路是新建对话换新 id。
+     * 判定在创建 runId / 占会话门之前，命中时不写任何运行态。
+     */
+    public static final String SESSION_PURGED = "SESSION_PURGED";
     /** 409：未知或已过期的 runId。 */
     public static final String UNKNOWN_RUN = "UNKNOWN_RUN";
     /** 409：未知或已过期的 toolCallId。 */
     public static final String UNKNOWN_TOOL_CALL = "UNKNOWN_TOOL_CALL";
     /** 409：同一 toolCallId 重复决策/回灌（幂等拒绝）。 */
     public static final String DUPLICATE_TOOL_CALL_ID = "DUPLICATE_TOOL_CALL_ID";
+    /**
+     * 409：外部输入走错了入口（入口 kind 校验批）。
+     *
+     * <p>两条人工入口写的是<b>同一张</b> {@code ai:pending} 表：{@code /api/ai/confirm} 只应改写
+     * {@code kind=CONFIRM} 的条目，{@code /api/ai/frontend-tool-result} 只应改写 {@code kind=FRONTEND}
+     * 的条目。错入口会把人根本没点过的确认卡写成"前端已回灌"，或把前端条目写成"已批准"
+     * （续跑时被当成人批准过）。判据取<b>服务端条目</b>上的 {@code kind}，客户端传什么都不信；
+     * 旧数据 {@code kind=null} 兼容放行（见各入口的 WARN）。
+     *
+     * <p>与 {@link #UNKNOWN_TOOL_CALL}/{@link #DUPLICATE_TOOL_CALL_ID} 分工：那两个是"id 不存在/已决"，
+     * 本码是"id 存在但不属于这条入口" —— 状态与条目一个字节都没变。
+     */
+    public static final String TOOL_KIND_MISMATCH = "TOOL_KIND_MISMATCH";
     /** 503：挂起专用线程池饱和。 */
     public static final String SUSPEND_POOL_SATURATED = "SUSPEND_POOL_SATURATED";
     /** 503：无 AI key，模型侧未装配。 */
@@ -65,6 +85,16 @@ public final class ErrorCodes {
     public static final String MESSAGE_TOO_LONG = "MESSAGE_TOO_LONG";
     /** 400：拒绝原因超长（决策回灌；只回数字，不回显原因原文）。 */
     public static final String REASON_TOO_LONG = "REASON_TOO_LONG";
+    /**
+     * 400：前端工具回灌的<b>结构化结果</b>超过单条字符上限
+     * （{@code app.ai.result-budget.callback.max-chars}）。
+     *
+     * <p>与 {@link #MESSAGE_TOO_LONG} 同一姿态（拒绝不截断），但拒绝面不同：普通文本回灌超限
+     * 仍是<b>截断 + 标记</b>（拒绝回灌会让这一轮永久挂起），只有结构化结果（JSON 对象/数组、
+     * 表格写工具的结果文本）超限才走本码 —— 字符级截断会切坏 JSON 结构、切掉表格「共 N 格」尾行，
+     * 半截结果落库比"让客户端改小重试"危险得多。挂起保持 {@code PENDING}、不落任何条目。
+     */
+    public static final String FRONTEND_RESULT_TOO_LARGE = "FRONTEND_RESULT_TOO_LARGE";
     /** 503：上下文计量不可用。 */
     public static final String AI_CONTEXT_UNAVAILABLE = "AI_CONTEXT_UNAVAILABLE";
     /** 500：未捕获异常。 */
@@ -108,6 +138,12 @@ public final class ErrorCodes {
      * 本轮降级成「部分完成收尾」。
      */
     public static final String TOOL_STEP_LIMIT = "TOOL_STEP_LIMIT";
+    /**
+     * 轮内上下文预算耗尽：armed 后请求的工具未执行，结局 skipped，使用已有信息收尾。
+     *
+     * <p>与 {@link #TOOL_STEP_LIMIT} 区分：一个是步数耗尽，一个是上下文放不下了。
+     */
+    public static final String TOOL_BUDGET_EXHAUSTED = "TOOL_BUDGET_EXHAUSTED";
     /** 轮次被取消。 */
     public static final String RUN_CANCELLED = "RUN_CANCELLED";
     /** 前端工具被用户取消。 */
@@ -195,6 +231,14 @@ public final class ErrorCodes {
     public static final String PROVIDER_EXISTS = "PROVIDER_EXISTS";
     public static final String PROVIDER_IN_USE = "PROVIDER_IN_USE";
     public static final String MODEL_NOT_FOUND = "MODEL_NOT_FOUND";
+    /**
+     * 503：provider 与 key 都在，但默认目标解析不出<b>该 provider 自己的</b>模型。
+     *
+     * <p>与 {@link #MODEL_NOT_FOUND}（请求侧显式模型不可用，400）刻意分开：本码是"没配置默认模型/
+     * 默认模型已被停用或删除"，入口在开流之前 503，用户去设置页补模型即可。绝不回落到别家
+     * provider 的模型名（那正是"选 B 却打 A"的成因）。
+     */
+    public static final String NO_MODEL_CONFIGURED = "NO_MODEL_CONFIGURED";
     public static final String MODEL_EXISTS = "MODEL_EXISTS";
     public static final String MODELS_INVALID = "MODELS_INVALID";
     public static final String MODELS_UNSUPPORTED = "MODELS_UNSUPPORTED";
@@ -239,6 +283,35 @@ public final class ErrorCodes {
     public static final String UPSTREAM_CONNECTION_BROKEN = "UPSTREAM_CONNECTION_BROKEN";
     /** SSE error 帧：上下文超出模型窗口（重试无效，需压缩或新会话）。 */
     public static final String CONTEXT_OVERFLOW = "CONTEXT_OVERFLOW";
+    /**
+     * SSE error 帧：上游按"请求本身不成立"拒绝（400/404/409/422 及其它未列 4xx）。
+     *
+     * <p>与 {@link #CONTEXT_OVERFLOW} 分工：越窗有专属压缩路径；本码是"同一份请求再发一次
+     * 只会再被拒"的其余 4xx —— 不重试，用户需要改参数/配置。
+     */
+    public static final String UPSTREAM_REJECTED = "UPSTREAM_REJECTED";
+    /** SSE error 帧：上游鉴权失败（401/403）；不重试，用户需要检查/更新 API Key。 */
+    public static final String UPSTREAM_AUTH_FAILED = "UPSTREAM_AUTH_FAILED";
+    /**
+     * SSE error 帧：上游限流（429）。
+     *
+     * <p>有界重试，且遵守响应头 {@code Retry-After}（秒或 HTTP-date）：等待时长取
+     * max(指数退避, Retry-After)，再由"未产出 / 无副作用 / 剩余预算"三条件裁剪。
+     */
+    public static final String UPSTREAM_RATE_LIMITED = "UPSTREAM_RATE_LIMITED";
+    /**
+     * SSE error 帧：上游暂时不可用（408 / 5xx / 网络层）。
+     *
+     * <p>与 {@link #UPSTREAM_CONNECTION_BROKEN} 分工：后者是"流已在途但连接断了"，
+     * 本码是"这一轮请求根本没拿到可用响应"（网关超时/服务端 5xx）。
+     */
+    public static final String UPSTREAM_UNAVAILABLE = "UPSTREAM_UNAVAILABLE";
+    /**
+     * SSE error 帧：上游以 {@code finish_reason=content_filter} 收尾 —— 明确失败，不重试。
+     *
+     * <p>即便已有半截正文也按失败收尾：被安全策略拦截的内容不应被当作"完成"。
+     */
+    public static final String CONTENT_FILTERED = "CONTENT_FILTERED";
 
     // ---- 终局失败派生码（R-09）：基础码 + 已产出/副作用后缀 ----
     //

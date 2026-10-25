@@ -373,6 +373,8 @@ function applyLoad(fieldDefs: readonly ConfigField[], rows: readonly Record<stri
     return
   }
   fields = fieldDefs
+  // 程序化落数据（模板/换任务重载/加载占位）同样算一次内容代际
+  sheetLoadGeneration += 1
   restoring = true
   sheet.suspendPaint()
   try {
@@ -432,6 +434,8 @@ async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Pr
     if (!instance || !spreadNs) {
       throw new Error('表格引擎尚未就绪')
     }
+    // 程序化载入 ⇒ 新一代（旧预览/旧适配器持有者据此判定内容已换）
+    sheetLoadGeneration += 1
     restoring = true
     try {
       instance.fromJSON(json)
@@ -533,6 +537,30 @@ function selectionOf(
  * 而重建前取走的适配器由 {@link buildSheetAdapter} 的 live 绑定跟到新实例（见该函数说明）。
  */
 const sheetAdapters = new WeakMap<SpreadWorksheet, SheetAdapter>()
+
+/**
+ * 程序化载入代数（交互专项 2026-10-25）：每次 `fromJSON` / 程序化落数据递增。
+ *
+ * <p>为什么需要它：预览计划的行值是按"载入完成那一刻"的表格算的；`fromJSON` 可能复用
+ * 同一工作表对象之外的路径（重跑导出、上传新文件、换任务重载），仅靠实例身份抓不到
+ * "同表换内容"。页面能力把该值交给 AI 侧，`previewId` 与当前代数对不上即拒绝应用。
+ */
+let sheetLoadGeneration = 0
+
+/** 工作表实例身份（重建换实例 ⇒ 换 id；同一实例稳定）。 */
+let sheetInstanceSequence = 0
+const sheetInstanceIds = new WeakMap<object, string>()
+
+function sheetInstanceIdOf(sheet: object): string {
+  const cached = sheetInstanceIds.get(sheet)
+  if (cached) {
+    return cached
+  }
+  sheetInstanceSequence += 1
+  const next = `sheet-${sheetInstanceSequence}`
+  sheetInstanceIds.set(sheet, next)
+  return next
+}
 
 /** 表格适配器（AI 表格操作专项 §3.6 的窄接口）：只暴露纯数据面，不把 SpreadJS 类型漏进 store。 */
 function getSheetAdapter(): SheetAdapter {
@@ -649,6 +677,9 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
       emit('data-changed')
     },
     selection: (): SheetSelection | null => selectionOf(live().getSelections()),
+    // 预览身份（交互专项）：实例身份跟随 live()；代数读组件级计数。
+    instanceId: (): string => sheetInstanceIdOf(live()),
+    loadGeneration: (): number => sheetLoadGeneration,
     // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
     // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
     markCells: (cells, tone) => {

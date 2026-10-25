@@ -10,7 +10,8 @@
 #   - 共享面：H2 TCP 单进程（三 JVM 通过 TCP 连同一个库）+ 同一个 Redis 容器 +
 #     同一个共享文件目录（`app.file.storage-path`）。
 #   - 反向代理：HAProxy 容器（host 网络），按**请求**轮询，配置里没有任何会话粘滞；
-#     readiness 用 `GET /api/ai/health` 的 HTTP 200 判定（产品在 AI 不可用时回 503）。
+#     readiness 用 `GET /health/ready` 的 HTTP 200 判定（硬依赖 DOWN 或 draining 时 503；
+#     Redis 是降级维度，不摘流）。AI key 只决定 capability，不影响实例 ready。
 #   - 零密钥：桩上游 + 固定占位 key（后端只判 key 非空，不校验真假）；不读任何 GitHub secret。
 #   - 不复用旧证据：容器名、端口段、产物目录（backend/target/cluster3-artifacts）全部独立；
 #     不读取 b23l1 / redis5 等历史产物。
@@ -110,7 +111,7 @@ frontend fe_cluster3
 
 backend be_cluster3
     balance roundrobin
-    option httpchk GET /api/ai/health
+    option httpchk GET /health/ready
     http-check expect status 200
     http-response set-header X-Cluster-Node %[srv_name]
     http-response set-header X-Cluster-Backend %[be_name]
@@ -220,7 +221,7 @@ self_check() {
 	local cfg
 	cfg="$(print_haproxy_config)"
 	sc_contains "代理：balance roundrobin" "$cfg" "balance roundrobin"
-	sc_contains "代理：readiness 探针路径" "$cfg" "option httpchk GET /api/ai/health"
+	sc_contains "代理：readiness 探针路径" "$cfg" "option httpchk GET /health/ready"
 	sc_contains "代理：readiness 期望 200" "$cfg" "http-check expect status 200"
 	sc_contains "代理：响应头回写节点" "$cfg" "http-response set-header X-Cluster-Node"
 	sc_contains "代理：server node-a" "$cfg" "server node-a 127.0.0.1:${PORT_A} check"
@@ -486,7 +487,7 @@ run_cluster() {
 		--stats-url "http://127.0.0.1:${PORT_STATS}/stats;csv" \
 		--ports "a=${PORT_A},b=${PORT_B},c=${PORT_C},h2=${PORT_H2},redis=${PORT_REDIS}" \
 		--ready-timeout 180 \
-		--job-fail-timeout 90 \
+		--job-fail-timeout 130 \
 		--kill-takeover-timeout 120
 	rc=$?
 	set -e

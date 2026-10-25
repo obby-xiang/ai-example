@@ -35,8 +35,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link RunStore#runScopedKey(String, String)}）：它们与快照/台账等同属 {@code deleteRun} 的
  * "一轮 13 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
  * <ul>
- * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ 6000 <seq>-0
- * seq <n> frame <json>}（近似裁剪 {@link #STREAM_WINDOW}；<b>entry ID = {@code seq}-0</b>），
+ * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ <窗口> <seq>-0
+ * seq <n> frame <json>}（近似裁剪；<b>窗口 = min(条数窗口 {@link #STREAM_WINDOW}, 字节预算推导的等效窗口)</b>，
+ * 见 {@link #windowForPayload(long)}；<b>entry ID = {@code seq}-0</b>），
  * 字段 {@code seq} + {@code frame}（帧 JSON 原文，已含截断结果，与实时投递同一份）；
  * 每次追加后 {@code EXPIRE}= session-ttl（滑动续期，与 {@code ai:run:} / {@code ai:events:} 同寿）；</li>
  * <li>{@code ai:seq:<runId>} STRING —— 业务序号发放口（{@code INCR}，跨实例原子）；
@@ -61,6 +62,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h2>降级</h2>
  * Redis 抖动时：落档失败只记日志（帧照常实时投递）；取号失败降级为进程内单调计数（WARN 一次/轮），
  * 与既有 S2-4"韧性优先"同口径 —— 该降级<b>不是</b>续号锚点，只是保证流不断。
+ *
+ * <p><b>容量治理（Redis 容量专项 A）</b>：条数窗口（6000）在单帧 64KB 上界下并不封顶字节，
+ * {@code noeviction} 触顶会让所有 AI 写入一起失败。本类按"字节预算 ÷ 本轮观察到的最大帧载荷"
+ * 收窄窗口（{@link #windowForPayload(long)}），并把三种情形落到
+ * {@link RedisDegradation}：{@code c1.streamByteCap}（预算成为约束）、
+ * {@code c1.streamByteFloor}（预算连下限窗口都撑不住）、{@code c1.streamReplayGap}
+ * （回放游标早于幸存窗口）。裁剪仍是 {@code MAXLEN ~}（近似），<b>没有</b>引入新命令或按字节裁剪协议。
  */
 @Slf4j
 @Component
@@ -71,6 +79,29 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 事件日志窗口（近似裁剪；B1 登记的风险从 LIST 的 3000 翻倍缓解，仍非根治）。 */
 	public static final int STREAM_WINDOW = 6000;
+
+	/**
+	 * 按字节治理时允许的<b>最窄</b>窗口（条）（Redis 容量专项 A）。
+	 *
+	 * <p>取值依据：与实时投递队列的缺省容量
+	 * ({@link AiProperties.Sse#DEFAULT_DELIVERY_QUEUE_CAPACITY} = 256) 同量级 —— 回放窗口比
+	 * 一次重连能吸收的实时队列还短，回放就不再承担"补回断连期内容"的职责。
+	 * 当 {@code byte-budget ÷ 每条上界} 低于本值时，窗口取本值（不再继续收窄），
+	 * 并计 {@link RedisDegradation#C1_STREAM_BYTE_FLOOR}：<b>保守界兑现不了就必须可见</b>。
+	 */
+	public static final int MIN_WINDOW = 256;
+
+	/**
+	 * 每条 Stream 记录的<b>固定开销</b>估算（字节；Redis 容量专项 A）。
+	 *
+	 * <p>构成：entry ID（22B 文本 + listpack 头）+ 两个字段名 {@code seq}/{@code frame} 的
+	 * 主条目摊薄 + 整数编码/长度前缀的余量。取 <b>256B</b>（明显大于实测，保守方向 = 多裁而非超预算）。
+	 *
+	 * <p>字节预算的等效口径：{@code 有效窗口 × (本轮最大帧载荷 + 本值) ≤ byte-budget}。
+	 * 除 Stream 自身开销外，Redis 的分配器碎片/keyspace 开销不在内 —— 见
+	 * {@code AiProperties.Stream#byteBudget} 的取舍段。
+	 */
+	public static final long ENTRY_OVERHEAD_BYTES = 256L;
 
 	/** 末号探测读取的末尾条数（见 {@code streamTailSeq}：乱序兜底态下物理末位可能是低号帧）。 */
 	static final int TAIL_PROBE = 16;
@@ -94,6 +125,27 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 已就"显式 ID 落档被拒"告警过的轮（同一轮只吼一次，避免乱序期刷日志）。 */
 	private final Set<String> outOfOrderWarned = ConcurrentHashMap.newKeySet();
+
+	/**
+	 * 每轮<b>观察到的最大帧载荷字节数</b>（Redis 容量专项 A 的"每条上界"输入）。
+	 *
+	 * <p>为什么是"观察到的"而不是配置的 64KB 上界：静态按 64KB 折算会把所有轮次的窗口从 6000
+	 * 压到 ~1000（正常小帧轮次的白白损失）；按实际见过的最大帧折算，小帧轮次保持既有回放深度，
+	 * 只有真出现大帧的轮次才收窄。上界仍是<b>可证</b>的：此后每条记录都 ≤ 本值 + 固定开销。
+	 *
+	 * <p>进程内口径、与 {@link #fallbackSeqs} 同姿态（不跨实例共享）。界因此是
+	 * <b>单实例可证</b>的：同一实例的后续落档都按它收窄；<b>多实例</b>交叉写大帧时，另一个实例
+	 * （没观察过那个大帧）仍按自己的窗口写，全局字节上界退化为"各实例各自观察之和"。
+	 * 要严格全局界就得把观察值落共享键（每帧多一次读写 + 新键族），本批按"最小实现"不做 ——
+	 * 共享观察值的收益（多实例同时写同一 run 的概率极低）不抵它的成本。
+	 */
+	private final Map<String, AtomicLong> observedPayloadBytes = new ConcurrentHashMap<>();
+
+	/** 已就"字节预算成为约束"告警过的轮。 */
+	private final Set<String> byteCapWarned = ConcurrentHashMap.newKeySet();
+
+	/** 已就"预算不足以下限窗口"告警过的轮。 */
+	private final Set<String> byteFloorWarned = ConcurrentHashMap.newKeySet();
 
 	@Autowired
 	public RedisFrameStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties) {
@@ -206,8 +258,12 @@ public class RedisFrameStore implements FrameStore {
 			return;
 		}
 		long ttlSeconds = Math.max(1L, ttl().toSeconds());
+		// 容量治理（Redis 容量专项 A）：先落"本轮见过的最大载荷"，再据它算本条落档用的窗口 ——
+		// 于是本条自身也落在裁剪后的窗口内，不会留下"先写大帧、下一帧才收窄"的超预算窗口。
+		int window = windowForPayload(recordPayloadBytes(runId, payload.length));
+		noteByteGovernance(runId, window);
 		try {
-			xadd(key, seq + "-0", seq, payload, ttlSeconds);
+			xadd(key, seq + "-0", seq, payload, ttlSeconds, window);
 		}
 		catch (Exception ex) {
 			// 显式 ID 被拒 = 物理序已经越过这个号（跨实例并发出帧 / 降级号回退）。帧不能丢：
@@ -217,7 +273,7 @@ public class RedisFrameStore implements FrameStore {
 						runId, seq, ex.getMessage());
 			}
 			try {
-				xadd(key, "*", seq, payload, ttlSeconds);
+				xadd(key, "*", seq, payload, ttlSeconds, window);
 			}
 			catch (Exception retryEx) {
 				// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
@@ -236,12 +292,18 @@ public class RedisFrameStore implements FrameStore {
 	 * 物理序恒等于 seq 序（自动 ID 兜底态除外），于是"按 {@code XRANGE <afterSeq+1>-0 +} 读差量"既完整又只要 O(差量) ——
 	 * 这是 I-2（物理序 ≠ seq 序时低号帧永久不可读）的根治口径。{@code MAXLEN ~} 仍走近似裁剪。
 	 *
+	 * <p><b>MAXLEN 的窗口</b>由 {@link #windowForPayload(long)} 给出（Redis 容量专项 A）：条数窗口
+	 * {@link #STREAM_WINDOW} 与字节预算推导出的等效窗口取小；命令行仍是 {@code MAXLEN ~ n}（近似裁剪），
+	 * 语义与 5.0 / Cluster 完全兼容 —— 没有引入新命令，也没有按字节裁剪（那需要 {@code MEMORY USAGE}
+	 * 之类的额外协议）。
+	 *
 	 * @param idToken 显式 ID（{@code "<seq>-0"}）或 {@code "*"}（乱序兜底）
+	 * @param window  本条落档用的 MAXLEN 窗口（&gt; 0）
 	 */
-	private void xadd(byte[] key, String idToken, long seq, byte[] payload, long ttlSeconds) {
+	private void xadd(byte[] key, String idToken, long seq, byte[] payload, long ttlSeconds, int window) {
 		this.redis.execute((RedisCallback<Object>) connection -> {
 			connection.execute("XADD", key,
-					bytes("MAXLEN"), bytes("~"), bytes(String.valueOf(this.streamWindow)),
+					bytes("MAXLEN"), bytes("~"), bytes(String.valueOf(window)),
 					bytes(idToken),
 					bytes(FIELD_SEQ), bytes(String.valueOf(seq)),
 					bytes(FIELD_FRAME), payload);
@@ -328,16 +390,30 @@ public class RedisFrameStore implements FrameStore {
 	 *
 	 * <p>{@code afterSeq >= tail − 窗口} 时夹取不改变下限（走差量），因此热路径的 O(差量) 不变；
 	 * 代价是每次读多一次 {@code XREVRANGE COUNT 1}（取 {@code tailSeq}）。
+	 *
+	 * <p><b>窗口口径与写侧同源</b>（Redis 容量专项 A）：{@code 窗口}取自
+	 * {@link #effectiveWindow(String)}（条数窗口与字节预算推导出的等效窗口取小），不是常量
+	 * {@link #STREAM_WINDOW} —— 写侧按字节预算裁得更短时，读侧若仍按 6000 夹取，会把"已经不存在
+	 * 的区间"当成应读区间，缺口就伪装成"没有更多帧"。
 	 */
 	private FrameStore.ReadResult streamFramesAbove(String runId, long afterSeq) {
 		StreamTail tail = streamTailSeq(runId);
+		int window = effectiveWindow(runId);
 		boolean degraded = !tail.ok();
 		long from;
 		if (tail.ok()) {
 			if (tail.seq() <= afterSeq) {
 				return new FrameStore.ReadResult(List.of(), false);
 			}
-			from = Math.max(afterSeq, tail.seq() - this.streamWindow);
+			from = Math.max(afterSeq, tail.seq() - window);
+			if (afterSeq > 0L && from > afterSeq) {
+				// 游标早于幸存窗口：本次回放<B>确实跳过</B>了一段。degraded 的语义是"读失败/不可回 503"，
+				// 不能拿来表达"落后了"，故这里只计数 + debug 留痕（客户端可见的缺口标记需要 emitter/协议
+				// 配合，本批禁改 SseChatEmitter）；至少不许把"跳过了"说成"没有新帧"。
+				RedisDegradation.record(RedisDegradation.C1_STREAM_REPLAY_GAP);
+				log.debug("事件日志回放跳过已裁区间 runId={} afterSeq={} from={} 有效窗口={}", runId, afterSeq, from,
+						window);
+			}
 		}
 		else if (afterSeq <= 0L) {
 			// I-1：afterSeq=0 是"全量回放"最典型的形态。末号未知时无界 XRANGE 会拿**最旧**窗口
@@ -359,7 +435,7 @@ public class RedisFrameStore implements FrameStore {
 			byte[] key = bytes(streamKey(runId));
 			this.redis.execute((RedisCallback<Object>) connection -> {
 				List<ByteRecord> records = connection.xRange(key, range,
-						org.springframework.data.redis.connection.Limit.limit().count(this.streamWindow));
+						org.springframework.data.redis.connection.Limit.limit().count(window));
 				if (records == null) {
 					return null;
 				}
@@ -574,6 +650,90 @@ public class RedisFrameStore implements FrameStore {
 			log.debug("事件日志单条坏损（跳过）：{}", ex.getMessage());
 			return null;
 		}
+	}
+
+	// ── 容量治理（Redis 容量专项 A） ──────────────────────────────────────────
+
+	/**
+	 * 载荷字节 → 本条落档可用的窗口（条）。<b>纯函数</b>，写侧读侧共用同一口径。
+	 *
+	 * <p>口径：{@code clamp(byte-budget ÷ (载荷 + 固定开销), 下限, 条数窗口)}。
+	 * 证明：此后每条记录 ≤ {@code 载荷 + 固定开销} ⇒ {@code 窗口 × 每条上界 ≤ byte-budget}
+	 * （{@code MAXLEN ~} 的近似裁剪还会多留几条，量级 ≤ 宏节点条数；取舍见
+	 * {@link #ENTRY_OVERHEAD_BYTES}）。
+	 *
+	 * <p><b>{@code byte-budget = 0} = 关闭字节治理</b>（只按条数窗口）：显式逃生门，
+	 * 不是"静默按 0 裁剪"（0 若参与除法会让窗口恒落下限）。
+	 */
+	int windowForPayload(long payloadBytes) {
+		long budget = byteBudget();
+		if (budget <= 0L) {
+			return this.streamWindow;
+		}
+		long perEntry = Math.max(0L, payloadBytes) + ENTRY_OVERHEAD_BYTES;
+		long byBudget = budget / perEntry;
+		if (byBudget >= this.streamWindow) {
+			return this.streamWindow;
+		}
+		return (int) Math.max(minWindow(), byBudget);
+	}
+
+	/** 本轮的读侧窗口（与写侧同源：用同一份"观察到的最大载荷"）；未见过落档 = 只按条数窗口。 */
+	private int effectiveWindow(String runId) {
+		AtomicLong observed = this.observedPayloadBytes.get(runId);
+		return windowForPayload(observed == null ? 0L : observed.get());
+	}
+
+	/** 记下本轮见过的最大载荷并返回它（XADD 的 seq 单调递增，故载荷长度随号缓慢变化）。 */
+	private long recordPayloadBytes(String runId, long payloadBytes) {
+		return this.observedPayloadBytes.computeIfAbsent(runId, id -> new AtomicLong())
+			.accumulateAndGet(payloadBytes, Math::max);
+	}
+
+	/**
+	 * 字节预算成为实际约束时留痕（降级计数 + 每轮一次 WARN）。
+	 *
+	 * <p>两类事件分开计：
+	 * <ul>
+	 * <li>{@link RedisDegradation#C1_STREAM_BYTE_CAP}：预算把窗口压到条数窗口以下（正常治理，
+	 * 代价 = 回放深度变小）；</li>
+	 * <li>{@link RedisDegradation#C1_STREAM_BYTE_FLOOR}：预算连下限窗口都撑不住（
+	 * 单帧 &gt; 预算/下限）—— 保守界<b>兑现不了</b>，必须让运维看见（调 byte-budget 或查单帧超限）。</li>
+	 * </ul>
+	 * 计数按"被约束的落档次数"累加（量级可读），日志按轮去重（避免一个长轮刷几千行）。
+	 */
+	private void noteByteGovernance(String runId, int window) {
+		if (window >= this.streamWindow) {
+			return;
+		}
+		AtomicLong observed = this.observedPayloadBytes.get(runId);
+		long observedMax = observed == null ? 0L : observed.get();
+		long byBudget = byteBudget() / Math.max(1L, observedMax + ENTRY_OVERHEAD_BYTES);
+		if (byBudget < minWindow()) {
+			RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_FLOOR);
+			if (this.byteFloorWarned.add(runId)) {
+				log.warn("事件日志容量预算不足以下限窗口 runId={} 预算={}B 本轮最大帧={}B 下限窗口={}（仍保留 {} 条，"
+						+ "单轮字节会超出预算；请调大 app.ai.stream.byte-budget 或核查单帧上限）", runId,
+						byteBudget(), observedMax, minWindow(), window);
+			}
+			return;
+		}
+		RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_CAP);
+		if (this.byteCapWarned.add(runId)) {
+			log.warn("事件日志按字节预算裁剪 runId={} 预算={}MiB 本轮最大帧={}B 有效窗口={}（条数窗口 {}）："
+					+ "更早的帧不再可回放（增量读取不受影响）", runId, byteBudget() / (1024 * 1024), observedMax, window,
+					this.streamWindow);
+		}
+	}
+
+	private long byteBudget() {
+		AiProperties.Stream config = this.properties == null ? null : this.properties.getStream();
+		return config == null ? 0L : config.getByteBudget();
+	}
+
+	/** 下限窗口：不得把条数窗口放大（测试用的小窗口 8 仍是 8）。 */
+	private int minWindow() {
+		return Math.min(MIN_WINDOW, this.streamWindow);
 	}
 
 	// ── 内部 ────────────────────────────────────────────────────────────────

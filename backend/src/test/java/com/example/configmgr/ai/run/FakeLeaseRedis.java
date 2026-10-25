@@ -191,6 +191,14 @@ public final class FakeLeaseRedis {
 	volatile boolean down;
 
 	/**
+	 * 置 true = <b>只有续租脚本</b>抛异常（其它命令正常）。
+	 *
+	 * <p>用于"续租不可用"与"确定丢租（脚本返回 0）"的区分：前者是"不知道租约还在不在"，
+	 * 后者是"确实不是自己的了"。两者都要求停止推进，但恢复路径不同（前者下一拍续上即可复工）。
+	 */
+	volatile boolean renewUnavailable;
+
+	/**
 	 * 置 true = 按<b>原生 Cluster</b> 口径判槽：多键脚本与多键 {@code DEL} 的键必须同槽，
 	 * 否则抛 {@link CrossSlotException}（真 Redis 回 {@code CROSSSLOT}）。
 	 *
@@ -284,26 +292,43 @@ public final class FakeLeaseRedis {
 		}).when(this.listOps).trim(anyString(), anyLong(), anyLong());
 		when(this.setOps.remove(anyString(), any(Object[].class))).thenAnswer(invocation -> {
 			checkAlive();
-			Set<String> members = this.setsByKey.computeIfAbsent((String) invocation.getArgument(0),
+			String key = invocation.getArgument(0);
+			Set<String> members = this.setsByKey.computeIfAbsent(key,
 					ignored -> ConcurrentHashMap.newKeySet());
 			long removed = 0L;
-			Object[] raw = invocation.getArguments();
-			Object[] values;
-			if (raw.length == 2 && raw[1] instanceof Object[] packed) {
-				values = packed;
-			}
-			else {
-				values = new Object[raw.length - 1];
-				for (int i = 1; i < raw.length; i++) {
-					values[i - 1] = raw[i];
-				}
-			}
-			for (Object value : values) {
+			for (Object value : varargs(invocation.getArguments(), 1)) {
 				if (members.remove(String.valueOf(value))) {
 					removed++;
 				}
 			}
+			// Redis 语义：SET 的最后一个成员被移除时键自动消失（索引不会留下"空键"）。
+			if (members.isEmpty()) {
+				this.setsByKey.remove(key);
+			}
 			return removed;
+		});
+		when(this.setOps.add(anyString(), any(String[].class))).thenAnswer(invocation -> {
+			checkAlive();
+			String key = invocation.getArgument(0);
+			Set<String> members = this.setsByKey.computeIfAbsent(key,
+					ignored -> ConcurrentHashMap.newKeySet());
+			long added = 0L;
+			for (Object value : varargs(invocation.getArguments(), 1)) {
+				if (members.add(String.valueOf(value))) {
+					added++;
+				}
+			}
+			return added;
+		});
+		when(this.setOps.members(anyString())).thenAnswer(invocation -> {
+			checkAlive();
+			Set<String> members = this.setsByKey.get(invocation.getArgument(0));
+			return members == null ? Set.of() : new java.util.LinkedHashSet<>(members);
+		});
+		when(this.setOps.size(anyString())).thenAnswer(invocation -> {
+			checkAlive();
+			Set<String> members = this.setsByKey.get(invocation.getArgument(0));
+			return members == null ? 0L : (long) members.size();
 		});
 		when(this.redis.expire(anyString(), any(Duration.class))).thenAnswer(invocation -> {
 			touchTtl(invocation.getArgument(0), invocation.getArgument(1));
@@ -312,7 +337,8 @@ public final class FakeLeaseRedis {
 		when(this.redis.hasKey(anyString()))
 				.thenAnswer(invocation -> this.strings.containsKey((String) invocation.getArgument(0))
 						|| this.hashTables.containsKey((String) invocation.getArgument(0))
-						|| this.lists.containsKey((String) invocation.getArgument(0)));
+						|| this.lists.containsKey((String) invocation.getArgument(0))
+						|| this.setsByKey.containsKey((String) invocation.getArgument(0)));
 		when(this.redis.delete(anyString())).thenAnswer(invocation -> {
 			this.templateDeletes.incrementAndGet();
 			String key = invocation.getArgument(0);
@@ -530,6 +556,9 @@ public final class FakeLeaseRedis {
 					Duration.ofMillis(Long.parseLong(str(args.get(2)))));
 		}
 		if (body.contains(RENEW_MARK)) {
+			if (this.renewUnavailable) {
+				throw new IllegalStateException("Redis 续租不可用（模拟）");
+			}
 			return renew(str(keys.get(0)), str(args.get(0)), Duration.ofMillis(Long.parseLong(str(args.get(1)))));
 		}
 		if (body.contains(VERIFY_MARK)) {
@@ -816,6 +845,7 @@ public final class FakeLeaseRedis {
 		this.strings.remove(key);
 		this.hashTables.remove(key);
 		this.lists.remove(key);
+		this.setsByKey.remove(key);
 		this.expiries.remove(key);
 		this.deadlines.remove(key);
 	}
@@ -841,6 +871,11 @@ public final class FakeLeaseRedis {
 	/** 恢复可用（{@link #goDown()} 的逆操作）。 */
 	public void heal() {
 		this.down = false;
+	}
+
+	/** 让续租脚本单独失败（见 {@link #renewUnavailable}）；{@code false} = 恢复。 */
+	public void failRenew(boolean fail) {
+		this.renewUnavailable = fail;
 	}
 
 	int getCount(String key) {
@@ -897,6 +932,7 @@ public final class FakeLeaseRedis {
 		boolean existed = this.strings.remove(key) != null;
 		existed = this.hashTables.remove(key) != null || existed;
 		existed = this.lists.remove(key) != null || existed;
+		existed = this.setsByKey.remove(key) != null || existed;
 		this.expiries.remove(key);
 		this.deadlines.remove(key);
 		return existed;
@@ -912,6 +948,20 @@ public final class FakeLeaseRedis {
 	private static List<Object> trailingArguments(Object[] raw) {
 		List<Object> out = new ArrayList<>();
 		for (int i = 2; i < raw.length; i++) {
+			if (raw[i] instanceof Object[] packed) {
+				out.addAll(List.of(packed));
+			}
+			else {
+				out.add(raw[i]);
+			}
+		}
+		return out;
+	}
+
+	/** 同上，但从第 {@code from} 个实参起摊平（SET 的 {@code add/remove} 在 key 之后）。 */
+	private static List<Object> varargs(Object[] raw, int from) {
+		List<Object> out = new ArrayList<>();
+		for (int i = from; i < raw.length; i++) {
 			if (raw[i] instanceof Object[] packed) {
 				out.addAll(List.of(packed));
 			}

@@ -52,7 +52,8 @@ class AiConfigServiceTest {
 	void dbKeyWithTheRightKekResolvesToTheDecryptedValue() {
 		String envelope = new AiKeyCipher(AiConfigTestFixture.KEK_A).encrypt("db-key-probe-abcd", "deepseek",
 				AiProvider.KEY_REF_DB);
-		this.fixture.addDbProvider("deepseek", "http://db-endpoint", envelope);
+		AiProvider provider = this.fixture.addDbProvider("deepseek", "http://db-endpoint", envelope);
+		this.fixture.addModel(provider.getId(), "db-model", true);
 		AiConfigService service = this.fixture.service(AiConfigTestFixture.KEK_A);
 
 		assertThat(service.resolveDefault()).get().satisfies(resolved -> {
@@ -129,7 +130,7 @@ class AiConfigServiceTest {
 	}
 
 	@Test
-	void firstEnabledModelWinsWhenNoDefaultFlagAndSettingsComeAfter() {
+	void firstEnabledModelWinsAndMissingOwnModelsDoNotFallBackAcrossProviders() {
 		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://env-endpoint:1234");
 		this.fixture.addModel(provider.getId(), "disabled-model", false, false);
 		this.fixture.addModel(provider.getId(), "enabled-model", false);
@@ -137,18 +138,19 @@ class AiConfigServiceTest {
 		assertThat(service.resolveDefault()).get().extracting(AiConfigService.ResolvedProvider::modelId)
 			.isEqualTo("enabled-model");
 
-		// 全部停用 ⇒ 落到 ai_setting['default.modelId']（写路径会 +1 版本号 ⇒ 读路径重载快照）
+		// 全部停用且 default.modelId 不是这一家的模型 ⇒ 不再借别家/env 的模型名，明确"缺模型"
 		this.fixture.models.forEach(model -> model.setEnabled(false));
 		this.fixture.settings.put(AiSetting.DEFAULT_MODEL_ID, "setting-model");
 		this.fixture.bumpVersion();
-		assertThat(service.resolveDefault()).get().extracting(AiConfigService.ResolvedProvider::modelId)
-			.isEqualTo("setting-model");
+		assertThat(service.resolveDefault()).isEmpty();
+		assertThat(service.availability().code()).isEqualTo(AiConfigService.CODE_NO_MODEL_CONFIGURED);
 
-		// 设置也没有 ⇒ 落到 env AI_MODEL（今天的行为）
-		this.fixture.settings.remove(AiSetting.DEFAULT_MODEL_ID);
+		// 把 setting-model 登记成这一家自己的模型后，default.modelId 才能在这家生效
+		this.fixture.addModel(provider.getId(), "setting-model", false);
 		this.fixture.bumpVersion();
 		assertThat(service.resolveDefault()).get().extracting(AiConfigService.ResolvedProvider::modelId)
-			.isEqualTo("deepseek-flash");
+			.isEqualTo("setting-model");
+		assertThat(service.availability().available()).as("自己的模型回来了 ⇒ 恢复可用").isTrue();
 	}
 
 	@Test

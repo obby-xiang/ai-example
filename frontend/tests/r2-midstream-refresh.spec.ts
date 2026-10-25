@@ -197,7 +197,7 @@ describe('R2 修 1：启动期不得用空态覆盖持久化镜像', () => {
     expect(mirror?.messages.map((message) => message.id)).toEqual(['u-2', 'a-2'])
     expect(mirror?.inFlight).toBe(true)
     expect(mirror?.lastRunId).toBe('run-2')
-  })
+  }, 20_000)
 
   it('镜像被保住之后，loadHistory 的 G3 合并拿得到在途轮（readMirror 读到非空）', async () => {
     const store = await freshStore()

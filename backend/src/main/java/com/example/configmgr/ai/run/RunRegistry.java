@@ -157,6 +157,34 @@ public class RunRegistry {
 		return this.emitters.get(runId);
 	}
 
+	/**
+	 * 本进程是否仍有该轮的<b>真实订阅者</b>（活连接）。
+	 *
+	 * <p>与 {@link #find} 的区别：写出器条目本身<b>不是</b>活着的证据 —— 每次 {@code of(runId)}
+	 * 都会造一个（帧发出后按 B1 收流、订阅归零），把"表里有条目"当活跃会让会话门永久 409、
+	 * 让僵尸判据永远判活。人工等待 park 批起，会话门/存活判定一律用本方法。
+	 */
+	public boolean hasLiveSubscriber(String runId) {
+		SseChatEmitter emitter = this.emitters.get(runId);
+		return emitter != null && emitter.subscriberCount() > 0;
+	}
+
+	/**
+	 * 无真实订阅者的写出器条目<b>回收</b>（park 批）：条目只在有连接时才有意义。
+	 *
+	 * <p>回收是安全的：正在驱动的线程持有自己的 {@link SseChatEmitter} 引用，帧照旧取号/落档；
+	 * 之后的重挂会按 runId 新建写出器并从事件日志回放（跨实例唤醒也按 Redis 广播，不依赖本地条目）。
+	 *
+	 * @return 是否真的移除了条目
+	 */
+	public boolean recycleIfIdle(String runId) {
+		SseChatEmitter emitter = this.emitters.get(runId);
+		if (emitter == null || emitter.subscriberCount() > 0) {
+			return false;
+		}
+		return this.emitters.remove(runId, emitter);
+	}
+
 	/** 轮终态：完成全部订阅者并把写出器移出注册表。 */
 	public void close(String runId) {
 		SseChatEmitter emitter = this.emitters.remove(runId);

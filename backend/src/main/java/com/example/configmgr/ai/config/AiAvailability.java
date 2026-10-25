@@ -3,11 +3,15 @@ package com.example.configmgr.ai.config;
 /**
  * AI 可用性判定（Q2 → 模型配置专项 §3.4 动态化）。
  *
- * <h2>判据变更（批①）</h2>
+ * <h2>判据变更（批① / 默认目标硬绑定复审）</h2>
  * 旧判据 = 构造期把 {@code spring.ai.openai.api-key} 快照进字段（"env 有 key"）；新判据 =
- * <b>存在 ≥1 个 enabled 且 key 可解析的 provider</b>（{@link AiConfigService#availability()}，
- * O(1) 读内存快照）。三档机器码：{@code AI_UNAVAILABLE}（无 provider）/ {@code AI_KEY_MISSING}
- * （有 provider 但都没 key）/ {@code AI_KEY_UNREADABLE}（DB 托管 key 解不开）。
+ * 默认目标能解析成一个真实运行的 {@code (providerId, modelId)}（{@link AiConfigService#availability()}，
+ * 读内存快照）。四档机器码：{@code AI_UNAVAILABLE}（无 provider，或硬绑定的 provider 已停用/不存在）/
+ * {@code AI_KEY_MISSING}（key 缺失）/ {@code AI_KEY_UNREADABLE}（DB 托管 key 解不开）/
+ * {@code NO_MODEL_CONFIGURED}（provider 与 key 都在，但没有该 provider 自己的可用模型）。
+ *
+ * <p>硬绑定（{@code default.providerId} 存在）时不看其他 provider：绑定行不可用即整条 AI 不可用，
+ * 不静默换家。未绑定的旧配置才保留"任一 enabled+key 的 provider"的兼容判定。
  *
  * <h2>为什么对外行为不变</h2>
  * 端点（{@code AiController}）仍按本类判空后<b>在进入流式管道之前</b>返回 503：不建 SSE 连接、

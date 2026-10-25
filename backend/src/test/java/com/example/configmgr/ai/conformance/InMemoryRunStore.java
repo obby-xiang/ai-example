@@ -195,6 +195,12 @@ public class InMemoryRunStore extends RunStore {
 	@Override
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId) {
+		return create(runId, sessionId, context, history, codec, providerId, modelId, null);
+	}
+
+	@Override
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
@@ -203,6 +209,8 @@ public class InMemoryRunStore extends RunStore {
 		// 模型配置专项批①：与真实实现同口径固化模型身份（additive 字段）
 		snapshot.setProviderId(providerId);
 		snapshot.setModelId(modelId);
+		// L-26：与真实实现同口径冻结生效参数（null FrozenParams = 不冻结 = 旧签名语义）
+		snapshot.freezeParams(frozen);
 		snapshot.setCreatedBy(instanceId());
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
 		save(snapshot);
@@ -212,6 +220,11 @@ public class InMemoryRunStore extends RunStore {
 	@Override
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
+		// 续租 fencing 收口批：与真实 RunStore 同口径 —— LOST/UNAVAILABLE ⇒ 只读，不得覆盖新主人的终态。
+		com.example.configmgr.ai.run.LeaseService.LeaseAuthority authority = runLeaseAuthority(snapshot.getRunId());
+		if (authority.readOnly()) {
+			return;
+		}
 		// B23L1 批②a：与真实 RunStore 同语义 —— 持租走 fence 写（陈旧 epoch 拒写、fence 推进），
 		// 不持租保持 plain 写（E3 红线：无租约不拒写）。
 		long epoch = heldRunEpoch(snapshot.getRunId());
@@ -365,6 +378,12 @@ public class InMemoryRunStore extends RunStore {
 	@Override
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> items,
 			List<Message> history, MessageJsonCodec codec) {
+		saveSuspended(runId, assistantContent, items, history, codec, null);
+	}
+
+	@Override
+	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> items,
+			List<Message> history, MessageJsonCodec codec, java.util.Map<String, Object> assistantMetadata) {
 		for (PendingToolCall pending : items) {
 			// 与真实 RunStore 同口径：已结算条目（如预检失败）不改写 requestedAtMs，避免时间倒挂
 			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
@@ -378,6 +397,8 @@ public class InMemoryRunStore extends RunStore {
 			throw new IllegalStateException("挂起前找不到轮次快照 " + runId);
 		}
 		snapshot.setAssistantContent(assistantContent);
+		// 推理元数据：与真实实现同口径——整份不透明 map 原样保存（null = 没有）
+		snapshot.setAssistantMetadata(assistantMetadata == null ? null : new java.util.LinkedHashMap<>(assistantMetadata));
 		snapshot.setInFlightToolCalls(new ArrayList<>(items));
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		save(snapshot);
@@ -529,6 +550,11 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
+		// 续租 fencing 收口批：丢租/设施不可确认 ⇒ 不得执行新工具（与真实 RunStore 同口径）。
+		com.example.configmgr.ai.run.LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			return new ClaimResult(ClaimOutcome.STALE_FENCE, heldRunEpoch(runId), 0L);
+		}
 		// B23L1 批②a/③a：值与真实实现同形（<epoch>|<instanceId>），claimedBy 剥前缀；
 		// 持租时先对 fence 复核（与真实实现同口径：fence > epoch ⇒ STALE_FENCE，
 		// 无租约 epoch == 0 不看 fence —— E3 红线）。
@@ -563,6 +589,9 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
+		if (runLeaseAuthority(runId).readOnly()) {
+			return;
+		}
 		String idemField = idemField(runId, pending.getToolCallId());
 		Map<String, Object> record = new LinkedHashMap<>();
 		record.put("atMs", System.currentTimeMillis());
@@ -739,6 +768,9 @@ public class InMemoryRunStore extends RunStore {
 
 	@Override
 	public void recordIssuedSeq(String runId, long seq) {
+		if (runLeaseAuthority(runId).readOnly()) {
+			return;
+		}
 		this.issuedSeqs.merge(runId, seq, Math::max);
 	}
 

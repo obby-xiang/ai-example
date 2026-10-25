@@ -3,11 +3,19 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.context.ContextEstimator;
+import com.example.configmgr.ai.context.ContextLimitResolver;
+import com.example.configmgr.ai.context.ContextMeter;
+import com.example.configmgr.ai.context.ToolResultClearing;
+import com.example.configmgr.ai.context.TurnBudgetPlan;
 
+import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -30,6 +38,7 @@ import com.example.configmgr.common.ResourceNotFoundException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -47,6 +56,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -66,7 +76,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 协议、循环、工具 Schema、入参解析全部由 Spring AI 负责
  * （{@code OpenAiChatModel} 内部 isToolExecutionRequired → executeToolCalls → 回填 → 再请求模型）；
  * 本类<b>组合</b>官方 {@link ToolCallingManager#builder() DefaultToolCallingManager}
- * 作为 delegate，只在每一次工具执行处插入四件事：
+ * 作为 delegate，只在每一次工具执行处插入五件事
  * <ul>
  * <li><b>可见性钩子</b>：{@code tool_start} / {@code tool_result} 帧 —— 官方循环在
  * {@code returnDirect=false} 时<b>不把中间工具轮放进客户端流</b>（S4.2-P1 §4.4-3 实测：5 轮 10 次上游
@@ -85,6 +95,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 另有<b>第五件事</b>：声明了复核器的前端工具（{@link FrontendToolGuard}，DC-15）在<b>挂起之前</b>
  * 先过一道入参安全闸 —— 不合法就<b>不挂起、不下发</b>，只把结构化错误结果回填模型
  * （见 {@link #awaitFrontend}）。</li>
+ * <li><b>轮内上下文预算</b>（工具轮内上下文预算批）：每批工具结束、下一次上游调用之前，
+ * 用 {@link TurnBudgetPlan} 判一次"下一发请求会不会越窗" —— 达 L1 线只清旧工具结果
+ * （本地动作，无模型调用），达收尾线追加收尾指令并<b>武装</b>本轮（此后工具一律不执行），
+ * 估算已吃掉整窗时<b>先 settle 已执行记录、再报 {@code CONTEXT_OVERFLOW}</b>，不发注定失败的那一发。
+ * 轮首的压缩语义不变（{@code ContextCompactor} 仍是唯一的轮首入口）。</li>
  * </ul>
  *
  * <h2>结果的两条通道（DC-14 T2）</h2>
@@ -138,6 +153,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <p>到顶<b>不判整轮失败</b>：把指令追加到历史末尾，让模型用已有信息收尾（部分完成也要说清缺什么）。
 	 */
 	public static final String STEP_LIMIT_WRAP_UP = "已达到本轮工具调用步数上限（app.ai.resilience.max-tool-steps）。"
+			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
+
+	/**
+	 * 轮内上下文预算达收尾线时的指令（工具轮内上下文预算批）。
+	 *
+	 * <p>与 {@link #STEP_LIMIT_WRAP_UP} 同形（不判整轮失败：让模型用已有信息作答并说明缺什么），
+	 * 但触发条件不同 —— 步数是"调用次数"，本指令是"下一发请求会越窗"。措辞里的
+	 * "不要再次调用工具"同时是给模型的软约束；硬约束由 {@code ToolActivityBeacon#budgetArmed}
+	 * 承担（armed 后工具一律不执行）。
+	 */
+	public static final String TURN_BUDGET_WRAP_UP = "本轮上下文已接近模型窗口上限（app.ai.context.limit-tokens）。"
 			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
 
 	/**
@@ -214,6 +240,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 	private final AiProperties properties;
 
 	/**
+	 * 轮内上下文预算的分母取数点（工具轮内上下文预算批）。null = 不判轮内预算（轻装配面 / 单测）。
+	 *
+	 * <p>与轮首压缩<b>同一个</b> {@link ContextLimitResolver}（唯一取数点），因此"显示的上限"
+	 * 与"轮内判定的上限"不会各用一套分母（L-89 的教训）。生产由容器注入唯一实例。
+	 */
+	private ContextLimitResolver contextLimitResolver;
+
+	/** 可选注入：轮内预算的分母。缺失 = 轮内不判（既有单测/轻装配面行为一字不变）。 */
+	@Autowired(required = false)
+	public void setContextLimitResolver(ContextLimitResolver resolver) {
+		this.contextLimitResolver = resolver;
+	}
+
+	/**
 	 * 表格采样/改动审计面（AI 表格工具治理批）。null = 未注入（轻装配面 / 单元测试）——
 	 * 此时只是少了计数与台账，日志字段照常发射（字段来自条目自身的 {@code sheetMeta}）。
 	 */
@@ -226,6 +266,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * （帧上连 {@code resultView} 键都不出现，旧卡面零变化）。
 	 */
 	private List<ToolResultViewProvider> resultViewProviders = List.of();
+
+	/**
+	 * 完整对话历史写入适配器（第二阶段）。可选注入：缺席（单测直接 new）时只跳过历史写入，
+	 * 工具执行/挂起/落定语义不变。
+	 */
+	@Autowired(required = false)
+	private AiChatHistoryRecorder historyRecorder;
 
 	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
 	@Autowired(required = false)
@@ -313,6 +360,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 
 		SseChatEmitter out = this.registry.of(runId);
+		// 跨供应方推理隔离：给上游产出的 assistant 打中性来源标记（快照的冻结身份）。
+		// 此后无论走挂起（saveSuspended 外置 metadata）还是落定（settle 进历史），都带着这份来源；
+		// 续跑重建时原样恢复，请求层据此只对同供应方回放 reasoningContent。
+		assistant = ReasoningOrigin.stamp(assistant, snapshot.getProviderId(), snapshot.getModelId());
 		List<PendingToolCall> pendings = newPendings(assistant);
 		// 步数笼（超时面治理批② 第 2 项 / 决策看板 :14）：起点来自**外置快照**而不是进程内计数 ——
 		// 挂起后的续跑可能落在另一个进程上，进程内计数会被重置（"跨挂起不重置"只有外置才能成立）。
@@ -322,6 +373,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
 
+		// ===== 轮内上下文预算（工具轮内上下文预算批）：本批已进入收尾（armed） =====
+		// armed 的语义只有一条：此后<b>不再产生新副作用</b>。因此预检（只读但重）、确认卡外置、
+		// 闸门登记统统不做 —— 直接把这些调用结算成 skipped/TOOL_BUDGET_EXHAUSTED，让模型用
+		// 已有信息作答。计数用于"模型反复请求工具"的硬上界（TurnBudgetPlan#MAX_ARMED_BATCHES）。
+		boolean budgetArmed = this.beacon.budgetArmed(runId);
+		if (budgetArmed) {
+			this.beacon.markBudgetSkippedBatch(runId);
+		}
+
 		// ===== F5：确认门之前先跑只读预检（不通过者根本不进门） =====
 		// 用户 2026-10-20 直裁：预检不通过 → 不进确认门、不弹卡；结构化失败回给模型，由 AI 用普通消息
 		// 说明原因与建议。因此"不通过"的条目在这里就地结算成 PRECHECK_FAILED（code 同名、
@@ -329,7 +389,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		List<PendingToolCall> suspended = new ArrayList<>(pendings.size());
 		Set<String> preflightBlocked = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
-			if (this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+			if (!budgetArmed && this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& ToolPreflightService.supports(pending.getName())
 					// MINOR-1：防线③先于预检 —— 越 scope 的调用本就不该读任务/产出预检报告，
 					// 跳过预检，交给执行循环里的既有 blockOutOfScope（SCOPE_NOT_DISCLOSED）。
@@ -367,11 +427,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 确认门与 generative_form 现在无上限（等人填/等人决策），故<b>不写</b>到期时刻：
 		// 写了一个假的到期点，前端就会按它置灰按钮 —— 上限的口径只有一处（ConfirmGate#suspendWaitSeconds）。
 		long suspendedAtMs = System.currentTimeMillis();
-		for (PendingToolCall pending : suspended) {
-			Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
-			if (waitSeconds != null && waitSeconds > 0) {
-				pending.setAtMs(suspendedAtMs);
-				pending.setExpiresAt(suspendedAtMs + waitSeconds * 1000L);
+		if (!budgetArmed) {
+			for (PendingToolCall pending : suspended) {
+				Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
+				if (waitSeconds != null && waitSeconds > 0) {
+					pending.setAtMs(suspendedAtMs);
+					pending.setExpiresAt(suspendedAtMs + waitSeconds * 1000L);
+				}
 			}
 		}
 
@@ -381,19 +443,27 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// CONFIRM 与 FRONTEND 两个通道都经 ConfirmGate.await 登记闸门，故两者一并预登记；
 		// 正常路径由 await 的 finally 逐个回收，这里只兜住异常/提前返回（取消、越 scope、
 		// 前端入参被拒、saveSuspended 抛错等）留下的未消费闸门，否则 hasActiveLatch 会永真。
-		List<String> gateWaitIds = gateWaitToolCallIds(suspended);
+		// armed 时本批一个等待都不会发生（见下方跳过分支），故不预登记。
+		List<String> gateWaitIds = budgetArmed ? List.of() : gateWaitToolCallIds(suspended);
 		this.gate.arm(runId, gateWaitIds);
 		try {
 			// ===== 硬规范①：先把 assistant(tool_calls) 与待决条目外置，再进入任何等待 =====
 			// 外置的是<b>本批全部</b>条目（含预检未通过的那些，它们已是终态），但帧只公告真正挂起的：
 			// 预检未通过的条目不出现在 suspended.toolCalls[] 里，因而不会渲染成确认卡；
 			// 全部都不通过时连 suspended 帧都不存在 —— 这正是"不进确认门、不弹卡"在帧面上的形态。
-			if (!suspended.isEmpty()) {
+			// armed 时没有挂起，也就不外置挂起态（历史由下面的 settle 落定）。
+			if (!budgetArmed && !suspended.isEmpty()) {
 				// 步数先落快照再挂起：跨进程续跑读的就是这份累计值（saveSuspended 会重新 get 快照）
 				persistToolSteps(runId, stepsUsed);
-				this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec);
+				this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec,
+						assistant.getMetadata());
 				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
 						this.store.instanceId());
+				// ===== C1：park 前把本批每张卡的请求帧都公布 =====
+				// 逐条发（在各卡自己的 await 里）会让 park 后的第二张卡永远收不到请求帧：
+				// 它既没 req 也没帧，前端不会渲染，也就永远没人能决策它。
+				// park 关闭时本方法内部直接返回（阻塞等待的老口径不变）。
+				this.gate.publishRequestsForParkedBatch(runId, suspended);
 			}
 
 			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
@@ -410,6 +480,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
 				// 逐个工具执行前先看一次权威标志，命中即终止整轮（终态 done{cancelled:true}）。
 				checkCancelled(runId);
+				// 轮内上下文预算：armed 之后新工具<b>一律不执行</b>（副作用到此为止）。
+				// 帧照发（前端能看到"这步为什么没跑"），回填模型的是统一信封 + 未执行说明。
+				if (budgetArmed) {
+					out.toolStart(pending);
+					responses.add(skipAsBudgetExhausted(runId, pending));
+					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+					log.warn("轮内上下文预算已耗尽，本调用不再执行 runId={} tool={} toolCallId={}", runId,
+							pending.getName(), pending.getToolCallId());
+					continue;
+				}
 				// F5：预检未通过的条目没有确认卡（没有 suspended/confirm_request），只有一张
 				// "未执行"的失败工具卡 + 一条结局帧：前端据此显示原因，模型据此向用户解释。
 				// 它不在"首错即停"的判据内（retryable=true，见 ToolOutcome#retryable）—— 用户修好可重试。
@@ -463,6 +543,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 					}
 				}
 				catch (RuntimeException ex) {
+					// park 批：人工等待 park 是控制流，不是工具失败 —— 条目仍 PENDING，
+					// 不能写"工具异常"的结局行（否则台账/日志会把"等人在决定"说成"执行炸了"）。
+					if (ex instanceof RunParkedException parked) {
+						AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_park",
+								"toolCallId", pending.getToolCallId(), "tool", pending.getName(),
+								"kind", pending.getKind(), "parkKind", parked.kind());
+						throw ex;
+					}
 					// 执行段抛错（挂起态外置失败 / 等待被打断 / 执行器异常）：先补 end 行再让异常穿出去
 					traceToolAborted(runId, snapshot.getSessionId(), pending, toolStartedAtMs, ex);
 					throw ex;
@@ -553,11 +641,28 @@ public class SpToolCallingManager implements ToolCallingManager {
 			history.add(assistant);
 			history.add(toolMessage);
 			// 步数到顶 ⇒ 降级「部分完成收尾」：追加一条收尾指令（不抛错、不判整轮失败）
-			if (stepsUsed >= maxToolSteps) {
+			boolean stepWrapped = stepsUsed >= maxToolSteps;
+			if (stepWrapped) {
 				history.add(new UserMessage(STEP_LIMIT_WRAP_UP));
 			}
+			// ===== 轮内上下文预算：每批工具结束、下一次上游调用之前判一次 =====
+			// 只做本地 L1（清旧工具结果）+ 收尾 + 硬停；不做 L2/L3 摘要调用（见 TurnBudgetPlan 类注）。
+			TurnBudgetOutcome budget = applyTurnBudget(runId, snapshot, prompt, chatResponse, assistant, history,
+					budgetArmed, stepWrapped);
+			history = budget.history();
 			persistToolSteps(runId, stepsUsed);
+			// 先写完整历史再写快照：崩溃在两者之间时快照仍有 in-flight，重启 resume 按同一 messageId 幂等命中。
+			if (this.historyRecorder != null) {
+				this.historyRecorder.recordToolRound(snapshot.getSessionId(), runId, assistant, toolMessage);
+			}
+			// 已执行记录全部落定后，才允许越窗失败穿出去。
 			settle(runId, history);
+			if (budget.overflow()) {
+				throw new StreamViolationException(StreamViolationException.CONTEXT_OVERFLOW,
+						"轮内上下文预算判定：下一跳请求将超出上下文窗口（nextEst=" + budget.decision().nextEst()
+								+ " >= limit=" + budget.decision().limitTokens() + "，reason="
+								+ budget.decision().reason() + "），已落定已执行记录后终止本轮");
+			}
 
 			return ToolExecutionResult.builder().conversationHistory(history).build();
 		}
@@ -652,6 +757,186 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.registry.of(runId).toolResult(pending, false, false, message);
 		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 				modelData(pending, message));
+	}
+
+	/**
+	 * 轮内上下文预算 armed 之后的调用：结算成 {@code skipped/TOOL_BUDGET_EXHAUSTED}
+	 * （未执行、不占认领、不记台账），帧照发。
+	 *
+	 * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：与步数笼同一条理由 ——
+	 * 这不是"执行出错"，而是"上下文放不下了"。用 failed 会触发批次首错即停，把
+	 * "部分完成收尾"变成"整批作废"。
+	 */
+	public ToolResponseMessage.ToolResponse skipAsBudgetExhausted(String runId, PendingToolCall pending) {
+		String message = "未执行：本轮上下文预算已耗尽（工具轮内上下文预算）。"
+				+ "请直接用已经获得的信息给出结论，并说明哪些部分未完成。";
+		pending.setStatus(PendingToolCall.SKIPPED);
+		pending.setOutcome(ToolOutcome.SKIPPED.wire());
+		pending.setCode(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+		pending.setReason(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(message);
+		this.store.putPending(runId, pending);
+		this.registry.of(runId).toolResult(pending, false, false, message);
+		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+				modelData(pending, message));
+	}
+
+	// ── 轮内上下文预算（工具轮内上下文预算批） ───────────────────────────────
+
+	/**
+	 * 轮内预算的执行面：判一次 → 按动作执行本地 L1 / 收尾 → 变更后<b>重新估算</b>再判。
+	 *
+	 * <p><b>为什么变更后要重新估算</b>：真值 {@code usage} 描述的是"上一发请求"，
+	 * 清掉工具结果或追加指令之后，上一发的 usage 已不再代表下一发。故每次本地变更都按
+	 * <b>省下/新增的估算量</b>递推判据值（而不是丢掉真值重算整包）：清掉 3000 token 的旧结果，
+	 * 下一发就少 3000 —— 真值仍是同一个基线的真值。
+	 *
+	 * <p>至多两轮变更（清一次 + 收尾一次），构造上不会死循环。
+	 */
+	private TurnBudgetOutcome applyTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt,
+			ChatResponse chatResponse, AssistantMessage assistant, List<Message> history, boolean armed,
+			boolean stepWrapped) {
+		int limit = turnBudgetLimit(snapshot);
+		if (limit <= 0) {
+			// 降级态（上限未知）：不判比例、不清结果 —— 与轮首压缩同一姿态
+			return new TurnBudgetOutcome(history, false, null);
+		}
+		AiProperties.Context config = this.properties.getContext();
+		ContextMeter meter = new ContextMeter();
+		meter.accept(chatResponse);
+		int before = estimateRequestTokens(prompt, history);
+		int delta = Math.max(0, ContextEstimator.estimateMessages(history)
+				- ContextEstimator.estimateMessages(prompt.getInstructions())
+				- ContextEstimator.estimateMessage(assistant));
+		Set<String> protectedIds = pendingToolCallIds(runId).orElse(null);
+		List<Message> current = history;
+		int cleared = 0;
+		boolean armedNow = armed;
+		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt,
+				history, delta, armedNow, runId));
+		// 判据值（真值优先；无真值时就是整包估算）。之后的每次本地变更都原地递推它。
+		int nextEst = decision.nextEst();
+		boolean needRejudge = false;
+		for (int pass = 0; pass < 2; pass++) {
+			if (pass > 0) {
+				decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, config.getReserveTokens(),
+						config.getL1Percent(), config.getL3Percent(), false, 0, 0, nextEst, 0, armedNow,
+						this.beacon.budgetSkippedBatches(runId)));
+			}
+			needRejudge = false;
+			if (decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS && protectedIds != null) {
+				ToolResultClearing.Plan plan = ToolResultClearing.plan(current, config.getKeepToolPairs(),
+						protectedIds);
+				if (plan.changed()) {
+					current = plan.messages();
+					cleared += plan.cleared().size();
+					nextEst = Math.max(0, nextEst - plan.savedTokens());
+					needRejudge = true;
+					continue;
+				}
+				break;
+			}
+			if (decision.action() == TurnBudgetPlan.Action.WRAP_UP && !armedNow && !stepWrapped) {
+				List<Message> wrapped = new ArrayList<>(current);
+				wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
+				current = wrapped;
+				this.beacon.armBudget(runId);
+				armedNow = true;
+				nextEst += ContextEstimator.estimate(TURN_BUDGET_WRAP_UP);
+				needRejudge = true;
+				continue;
+			}
+			break;
+		}
+		// 变更之后按最终形态再判一次。没有变更时保留原判定：真值口径的结论不该被估算口径覆盖
+		// （否则真值说 3000、估算说 7000 时会被误判成越窗，白白掐掉一次本可成功的请求）。
+		if (needRejudge) {
+			decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, config.getReserveTokens(),
+					config.getL1Percent(), config.getL3Percent(), false, 0, 0, nextEst, 0, armedNow,
+					this.beacon.budgetSkippedBatches(runId)));
+		}
+		int after = estimateRequestTokens(prompt, current);
+		if ((decision.triggered() && !(decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS && cleared == 0))
+				|| cleared > 0) {
+			AiTrace.eventOn(runId, snapshot.getSessionId(), "turn_budget", "action", decision.action().name(),
+					"reason", decision.reason(), "ratio", String.format(Locale.ROOT, "%.3f", decision.ratio()),
+					"nextEst", decision.nextEst(), "limit", decision.limitTokens(), "reserve",
+					decision.reserveTokens(), "before", before, "after", after, "clearedPairs", cleared, "armed",
+					armedNow, "usage", meter.measured());
+			log.info("轮内上下文预算 runId={} action={} reason={} ratio={} nextEst={} limit={} clearedPairs={} "
+					+ "armed={}", runId, decision.action(), decision.reason(),
+					String.format(Locale.ROOT, "%.3f", decision.ratio()), decision.nextEst(), limit, cleared,
+					armedNow);
+		}
+		return new TurnBudgetOutcome(current, decision.action() == TurnBudgetPlan.Action.OVERFLOW, decision);
+	}
+
+	/**
+	 * 首轮判定输入：真值 {@code usage}（若本跳有）与整包估算一起交给 {@link TurnBudgetPlan}，
+	 * 由它按"真值优先"选判据值。
+	 */
+	private TurnBudgetPlan.Request turnBudgetRequest(int limit, AiProperties.Context config, ContextMeter meter,
+			Prompt prompt, List<Message> history, int delta, boolean armed, String runId) {
+		return new TurnBudgetPlan.Request(limit, config.getReserveTokens(), config.getL1Percent(),
+				config.getL3Percent(), meter.measured(), meter.promptTokens(), meter.completionTokens(),
+				estimateRequestTokens(prompt, history), delta, armed, this.beacon.budgetSkippedBatches(runId));
+	}
+
+	/**
+	 * 本轮分母（唯一取数点：与轮首压缩、{@code /context}、健康检查同一个 resolver）。
+	 *
+	 * <p>未注入 resolver ⇒ 返回 0（降级态，不判轮内预算）：既有单测/轻装配面因此行为一字不变；
+	 * 生产由容器注入，不存在"漏装配就不判"的静默降级（bean 恒存在）。
+	 */
+	private int turnBudgetLimit(RunSnapshot snapshot) {
+		if (this.contextLimitResolver == null || snapshot == null) {
+			return 0;
+		}
+		try {
+			return this.contextLimitResolver.resolve(snapshot.getProviderId(), snapshot.getModelId());
+		}
+		catch (RuntimeException ex) {
+			log.warn("轮内上下文预算解析上限失败 runId={}：{}（本批不判）", snapshot.getRunId(), ex.getMessage());
+			return 0;
+		}
+	}
+
+	/** 下一发请求的整包估算：system（估算器按消息类型跳过）+ tools schema + 历史含本批。 */
+	private static int estimateRequestTokens(Prompt prompt, List<Message> history) {
+		int system = 0;
+		for (Message message : prompt.getInstructions()) {
+			if (message instanceof SystemMessage systemMessage) {
+				system += ContextEstimator.estimate(systemMessage.getText());
+			}
+		}
+		int tools = prompt.getOptions() instanceof ToolCallingChatOptions options
+				? ContextEstimator.estimateToolSchemas(options.getToolCallbacks()) : 0;
+		return system + tools + ContextEstimator.estimateMessages(history);
+	}
+
+	/** 未决 HITL 条目的 toolCallId（工具结果永不清除：用户还要在卡片上复核"批的是什么"）。 */
+	private java.util.Optional<Set<String>> pendingToolCallIds(String runId) {
+		try {
+			Set<String> ids = new HashSet<>();
+			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+				if (PendingToolCall.PENDING.equals(pending.getStatus()) && pending.getToolCallId() != null) {
+					ids.add(pending.getToolCallId());
+				}
+			}
+			return java.util.Optional.of(ids);
+		}
+		catch (RuntimeException ex) {
+			// 读不出来 ⇒ 本次不清（宁可不省 token，也不清掉用户可能正在复核的那一条）
+			log.debug("读取未决条目失败 runId={}（本次跳过 L1 清除）：{}", runId, ex.getMessage());
+			return java.util.Optional.empty();
+		}
+	}
+
+	/** 一次轮内预算的结局（历史 + 是否越窗 + 判定）。 */
+	private record TurnBudgetOutcome(List<Message> history, boolean overflow, TurnBudgetPlan.Decision decision) {
 	}
 
 	/**
@@ -929,7 +1214,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending) {
 		for (FrontendToolGuard guard : this.frontendGuards) {
 			if (guard.supports(pending.getName())) {
-				return guard.inspectArguments(pending.getArguments());
+				// 工具安全边界批：按**真名**复核 —— 只传 json 会让复核器靠"入参形状"猜工具名，
+				// 少一个必填键就会落到别的分支被放行（update_rows 漏 set ⇒ 被当成撤销）。
+				return guard.inspectArguments(pending.getName(), pending.getArguments());
 			}
 		}
 		return null;
@@ -976,6 +1263,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public static final String RESOURCE_LOCKED_TEXT = ToolOutcome.CODE_RESOURCE_LOCKED
 			+ "：该任务已有作业在执行，本次未执行。请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
 
+	/**
+	 * 错入口批准（{@code APPROVED + FRONTEND}）的固定口径：显式 blocked、未执行。
+	 *
+	 * <p>措辞必须同时说清三件事：<b>哪个码</b>（模型/排障可检索）、<b>没执行</b>（不能说成失败或成功）、
+	 * <b>正确出口</b>（前端结果只能经回灌端点回来）。
+	 */
+	public static final String KIND_MISMATCH_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+			+ "：该调用是前端通道工具（kind=FRONTEND），后端不执行它的桩体、也不写执行台账；"
+			+ "本次未执行（blocked）。前端结果只能经 /api/ai/frontend-tool-result 回灌。";
+
 	/** 工具被"目标资源不成立"挡下时的固定口径（细节由 {@link ToolTargetResolver} 给出）。 */
 	public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
 		String detail = verdict == null || verdict.detail() == null || verdict.detail().isBlank() ? "目标资源不成立"
@@ -988,6 +1285,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 后端执行（含放行后的敏感工具）：<b>对账/重放 → 目标校验 → 资源锁 → 认领 → 执行 → 台账</b>。
 	 *
 	 * <ol>
+	 * <li><b>入口 kind 硬闸</b>（入口 kind 校验批）：{@code kind=FRONTEND} 一律不执行（前端通道工具的
+	 * 桩体永不由后端跑）⇒ {@code blocked}/{@code TOOL_KIND_MISMATCH}，<b>在台账重放与认领之前</b>；</li>
 	 * <li><b>对账/重放</b>：{@code ai:idem:<runId>} 命中即回台账原结果（不取锁、不认领、不执行、无副作用）；
 	 * 命中的结局是 {@code unknown} 就<b>保持 unknown</b>（B23L1 批③b U4：旧实现把它当成功重放）；</li>
 	 * <li><b>目标资源硬校验</b>（F2）：不成立 → {@code blocked/TARGET_INVALID}，<b>不占认领</b>；</li>
@@ -1003,6 +1302,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
+		// ⓪ 入口 kind 硬闸（入口 kind 校验批）：前端通道工具的桩体永不由后端执行。
+		// 位置在台账重放与认领<b>之前</b>：既不能"重放"一条历史成功台账把假执行说成成功，
+		// 也不能占认领、写新台账。正常路径走不到这里（FRONTEND 走 awaitFrontend），本闸是兜底。
+		if (PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+			log.warn("拒绝后端执行前端通道工具 runId={} toolCallId={} name={} status={}（显式 blocked，不写台账）",
+					runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
+			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
+		}
+
 		// ① 对账/重放：命中台账 ⇒ 原结果复用（三面同源），任何副作用都不发生
 		Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
 		if (ledger != null) {
@@ -1427,7 +1735,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <ul>
 	 * <li>{@code PENDING} + {@code BACKEND}：后端工具不需要外部输入，直接补执行（进程死在
 	 * "已写条目、未执行"之间时的正常路径）；</li>
-	 * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；</li>
+	 * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；<b>但 {@code APPROVED + FRONTEND} 例外</b>
+	 * —— 那是历史假批准（人没点过、前端也没执行过），显式结算成 {@code blocked}/
+	 * {@code TOOL_KIND_MISMATCH}，<b>不执行后端桩、不写台账</b>（见 {@link #KIND_MISMATCH_TEXT}）；</li>
 	 * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}/
 	 * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}/{@code PRECHECK_FAILED}）：
 	 * 一律复用 {@code resultText}，<b>不执行</b>。</li>
@@ -1437,6 +1747,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
 		String status = pending.getStatus();
+		// 入口 kind 校验（续跑假批准）：APPROVED + FRONTEND 是"人根本没点过、前端也没执行过"的
+		// 假批准（旧代码/错入口留下的数据）。它<b>绝不能</b>进 executeOnce —— 那会把前端工具的
+		// 后端哨兵桩跑一遍并写成功台账。这里显式结算成 blocked（不认领、不写台账、executed=false）。
+		if (PendingToolCall.APPROVED.equals(status) && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+			log.warn("续跑发现 APPROVED+FRONTEND（历史假批准/错入口决策）runId={} toolCallId={} name={}："
+					+ "显式 blocked，不执行后端桩、不写台账", runId, pending.getToolCallId(), pending.getName());
+			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
+		}
 		boolean shouldExecute = PendingToolCall.APPROVED.equals(status)
 				|| (PendingToolCall.PENDING.equals(status) && PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
 				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());

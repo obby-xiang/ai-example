@@ -167,7 +167,7 @@ class ReasoningMemoryConvergenceTest {
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.concat(Flux.just(reasoning("想了第一步，"), chunk("半截")),
 				Flux.error(new StreamViolationException(StreamViolationException.CANCELLED, "本轮对话已被取消"))));
 
-		runTurn();
+		FrameWire wire = runTurn();
 
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
 		AssistantMessage assistant = lastMemoryAssistant();
@@ -175,6 +175,43 @@ class ReasoningMemoryConvergenceTest {
 		assertThat(assistant.getMetadata()).as("取消半截：stopped 与思考全文并存")
 			.containsEntry(ResilientChatService.STOPPED_KEY, true)
 			.containsEntry(ResilientChatService.REASONING_METADATA_KEY, "想了第一步，");
+		assertThat(assistant.getMetadata()).as("取消不是截断：不得误标 truncated").doesNotContainKey(
+				ResilientChatService.TRUNCATED_KEY);
+		Map<String, Object> done = doneFrame(wire);
+		assertThat(done).containsEntry("cancelled", true);
+		assertThat(done).as("取消终帧不得出现 truncated（缺键 = 未截断）")
+			.doesNotContainKey(ResilientChatService.TRUNCATED_KEY);
+	}
+
+	// ── ②′ 模型输出截断（finish_reason=length）：实时 + 持久两面同判据 ─────────
+
+	@Test
+	void finishWithLengthMarksTruncatedInMemorySnapshotAndDoneFrame() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(reasoning("先想"), chunk("半截回答"),
+				terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		AssistantMessage assistant = lastMemoryAssistant();
+		assertThat(assistant.getText()).as("正文不被截断改写").isEqualTo("半截回答");
+		assertThat(assistant.getMetadata()).as("length 截断是持久事实：最终 assistant metadata")
+			.containsEntry(ResilientChatService.TRUNCATED_KEY, true)
+			.containsEntry(ResilientChatService.REASONING_METADATA_KEY, "先想");
+		assertThat(lastSnapshotAssistant().getMetadata()).as("快照与记忆同源").containsEntry(
+				ResilientChatService.TRUNCATED_KEY, true);
+		assertThat(doneFrame(wire)).containsEntry("truncated", true);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	@Test
+	void finishWithStopDoesNotMarkTruncated() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("完整回答"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(lastMemoryAssistant().getMetadata()).doesNotContainKey(ResilientChatService.TRUNCATED_KEY);
+		assertThat(lastSnapshotAssistant().getMetadata()).doesNotContainKey(ResilientChatService.TRUNCATED_KEY);
+		assertThat(doneFrame(wire)).as("正常 stop 不是截断").doesNotContainKey(ResilientChatService.TRUNCATED_KEY);
 	}
 
 	// ── ③ 记忆整体覆盖写路径（convergeMemory）不许吃掉元数据 ──────────────────
@@ -204,13 +241,22 @@ class ReasoningMemoryConvergenceTest {
 
 	// ───────────────────────── 辅助 ─────────────────────────
 
-	private void runTurn() {
+	private FrameWire runTurn() {
 		this.store.seedArchive(RUN_ID, FrameContract.fixture("start", 1L, "runId", RUN_ID, "sessionId", SESSION_ID));
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("1+1 为什么等于 2？")),
 				out);
 		wire.frames();
+		return wire;
+	}
+
+	/** 终帧（done），断言本轮确实产出终态；缺帧直接失败。 */
+	private static Map<String, Object> doneFrame(FrameWire wire) {
+		return wire.frames().stream()
+			.filter(frame -> "done".equals(frame.get("type")))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("本轮没有 done 终帧：" + wire.types()));
 	}
 
 	@SuppressWarnings("unchecked")

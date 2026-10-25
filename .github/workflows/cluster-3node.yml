@@ -2,9 +2,10 @@ name: 三实例集群验证网（A/B/C · 共享 Redis/H2-TCP/文件 · 统一�
 
 # 目的：在**真实**三实例拓扑（JVM A/B/C）上验证多实例适配面：
 #   - 连接层无状态：同一 TCP 连接连续请求、固定 Cookie/XFF 都覆盖 A/B/C（代理按请求轮询，无粘滞）；
-#   - 任意实例可 reattach / confirm / history；跨实例 seq 同号同序、幂等副作用恰一次；
+#   - 任意实例可 reattach / confirm / history；完整历史游标分页（afterSeq/limit、hasMore/nextCursor）跨实例同源；
+#   - 跨实例 seq 同号同序、幂等副作用恰一次；跨实例会话销毁（完整清理 + 在途 deferred → 终态重试）；
 #   - 流式 kill A、挂起 kill A、作业中 kill A 的接管/收敛；
-#   - 共享文件下载、配置热更新、三实例冷启动、Redis 故障恢复、readiness 摘除。
+#   - 共享文件下载、配置热更新、三实例冷启动、Redis 故障恢复（ready 降级不摘流）、readiness 摘除（无 key 不摘、draining 摘）。
 #
 # 触发口径：只开 workflow_dispatch。
 #   - 本网要起 3 个 JVM + H2 TCP + Redis 容器 + HAProxy 容器，并主动 SIGKILL 实例、暂停 Redis；

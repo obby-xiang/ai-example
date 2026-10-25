@@ -187,7 +187,7 @@ app:
       # 熔断（批③ 已消费）：连续 3 次失败 open；冷却 10m 后半开重试一次。
       fuse-threshold: 3
       fuse-cooldown: 10m
-      # 摘要模型：空 = 主模型（D3 裁决）；模型配置的 provider 表落地后可只改本键切换。
+      # 历史键（兼容绑定，不再生效）：摘要统一使用本轮同一供应商、同一模型。
       summary-model: ""
     hitl:
       # 挂起等待上限（2026-10-20 用户裁决第 1/2 条后只剩一个键）：
@@ -247,6 +247,24 @@ app:
       # 容量小 + 队列有界 + 饱和拒绝：resume 内部还会向挂起池提交一次，同池提交即嵌套占用。
       trigger-pool-size: 2
       trigger-queue-capacity: 16
+    # ── 人工等待 park（用户裁决 2026-10-25）────────────────────────────────────────
+    # 确认门 / generative_form / 表格写·撤销 / 上传交接这类"等人或等前端"的等待：
+    #   请求帧发出 + 本轮订阅收流（B1）之后，**不再驻留工作线程**，也不心跳/续租/看门狗等待 ——
+    #   await 用内部挂起控制信号结束本次执行，交还驱动租约与会话门；
+    #   Redis 快照/pending/req/decided/帧归档 = 合法恢复状态；决策/回灌到达后由 ResumeService 重建执行。
+    # 代码缺省 false、本文件 true 是**刻意不一致**（同 app.ai.resume.on-startup 的纪律）：
+    #   直接 new AiProperties() 的非 Spring/单测装配保持"阻塞等待"的既有语义（大量 gate/tools 用例
+    #   以"决策 → 等待方继续执行"为前提）；生产（Spring 装配）走 park。
+    park:
+      enabled: true
+      # 续跑池饱和 / 会话门被另一轮占着时的有界重派发（决策已落库 ⇒ 不能停在"已决无人执行"）。
+      # I3：必须覆盖一次正常轮的收尾窗口（total-budget 300s），固定 500ms×3（1.5s）等于"批准了但永久不执行"。
+      # 指数退避：2s→4s→…→30s 封顶，15 次 = 2+4+8+16+30×11 ≈ 360s（覆盖 300s + 60s 余量；
+      # 10 次只有 210s，短于轮预算本身）；用尽只 ERROR 留痕，卡保持 SUSPENDED，
+      # 下一次触发（决策/重挂/启动扫描）重新计数。
+      max-dispatch-retries: 15
+      dispatch-retry-delay: 2s
+      dispatch-retry-max-delay: 30s
     session:
       lock:
         # 会话锁的有效期（超时面治理批① 第 8③ 项订正自述）：这是**互斥窗口上界**，不是"轮上限"——
@@ -306,6 +324,23 @@ app:
         read-timeout: 10s
         # 鉴权头的值只从该环境变量读取（整段作为 Authorization 头），不写配置文件、不进日志。
         auth-env: KB_HTTP_AUTH
+    # ── Redis 容量治理（Redis 容量专项 A）：事件日志字节预算 + ai:runs 惰性清理 ──────────
+    # 为什么需要：ai:xevents 原只有条数窗口（6000 条），单帧上限 64KB ⇒ 单轮最坏 ~384MB；
+    #   maxmemory-policy = noeviction（T3-9：AI 键宁报错不丢帧）⇒ 触顶时所有 AI 写入一起失败。
+    #   本段把"每轮字节占用"收敛为可证的等效上界（窗口 × (本轮最大帧 + 每条约 256B 开销) ≤ 预算）。
+    # 为什么不是真正的按字节：Redis 5.0 / Cluster 没有按字节裁剪 Stream（MEMORY USAGE 需要额外协议），
+    #   本批改用"预算 ÷ 每条上界"的条数等效窗口（MAXLEN ~ n 不变），并配降级计数
+    #   c1.streamByteCap / c1.streamByteFloor / c1.streamReplayGap（/api/ai/health 的 redis.degradations）。
+    stream:
+      # 单轮事件日志的字节软上限（默认 64MiB = 67108864 字节；0 = 关闭字节治理，只按条数窗口）。
+      # 取值：部署 maxmemory ≈ 16GiB；最坏态 ≈ 挂起池 20 轮同时写满 ⇒ 20 × 64MiB ≈ 1.25GiB（~8%）。
+      # 收窄后仍保留 MIN_WINDOW=256 条可回放窗口；预算连 256 条都撑不住时计数 + WARN（不静默超预算）。
+      # 注意：本键是 **long 字节数**（不是 DataSize），单位需自己写清：65536 = 64KiB。
+      byte-budget: 67108864
+      # ai:runs 索引的机会式惰性清理间隔（默认 10m；0 = 关闭，只剩启动扫描）。
+      # 索引是 SET、无法按成员过期；整键 EXPIRE 会删掉活跃轮的发现面（挂起等人无上限），故只剔
+      # "快照键已不存在"的成员。清理 = SMEMBERS + 逐成员 EXISTS（O(索引大小)），因此必须节流。
+      index-prune-interval: 10m
     result-budget:
       # G5 双通道对齐：工具结果的预算**只在这里配**（模型侧字符 / UI 单帧字节 / 回灌端点三条
       # 阈值独立可调、同源可查）。旧键 app.ai.tool-result.* 与 app.ai.frame.max-bytes 已退役，
@@ -324,11 +359,11 @@ app:
         per-tool: {}
       ui:
         # T3-10：SSE 单帧 JSON 的 UTF-8 字节上限 64KB（判定 = 整帧字节数）。
-        # 超限对 text/result 做**字段级**降采样并挂统一截断字段
-        # （truncated/strategy/originalChars/returnedChars/notice；truncatedReason 为兼容别名），
-        # 严禁字节级截断；结构化结果（JSON）整体标记而非字符切。
-        # 语义边界（G5）：这是"单帧字节上限"，超限产出仍是一份完整合法帧，不做跨帧分片；
-        # 分片/续帧协议与超大结果 spill 挂账（见 ToolResultLimiter 类注）。必须 > 0。
+        # 拆帧专项口径（2026-10）：delta / reasoning 类正文帧**可分片**（按本值切多帧连续投递）；
+        # result 仍**只**做字段级降采样（text/result 头部截断 + truncated/strategy/... 统一字段，
+        # 结构化 JSON 整体标记），严禁字节级截断；result 的跨帧分片仍挂账（见 ToolResultLimiter 类注）。
+        # 启动下限 = 1024（AiProperties.ResultBudget.Ui#MIN_FRAME_BYTES）：再小会把正文切碎（帧数爆炸）
+        # 甚至清空（连最小合法帧外壳都装不下）—— 低于下限启动失败。
         max-frame-bytes: 65536
       callback:
         # 前端工具结果回灌端点（POST /api/ai/frontend-tool-result）的单条字符上限。
@@ -418,7 +453,46 @@ app:
       dead-multiplier: 3
     max-execution-time: 30m
   file:
+    # 文件存储基目录（上传件/导出件/表单附件）。
+    # 库里只存 UUID 相对键（uuid.xlsx），实际路径每次由本键解析 —— 换工作目录/换机器不再让历史引用失效。
+    # 多实例判据（任一成立即**必须配绝对路径**）：app.file.multi-instance=true，或激活以下 profile：
+    #   cluster（Redis Cluster）/ multi-instance / h2tcp（H2 TCP 共享库）/ postgresql（共享库切换）。
+    # 相对路径按各实例 JVM 工作目录解析，同一键在 A/B 会落到不同目录（A 写、B 读不到）。
+    # 启动期由 file/FileStorageMultiInstanceGuard fail-fast；默认单实例开发不校验，相对路径照旧可用。
+    # 环境变量：APP_FILE_STORAGE_PATH
     storage-path: ./data/files
+    # 显式多实例开关（默认 false）：没有多实例 profile 的部署用本键开启同样的绝对路径校验。
+    multi-instance: false
+    # 历史绝对路径 → 相对键迁移（**显式 opt-in，默认关闭**，绝不自动启动）。
+    # 打开后 FileKeyMigrationRunner 在启动时执行一次：复制不移动、目标已存在不覆盖、源文件缺失不改行、可重复执行。
+    # 多实例同时打开时经 Redis 单飞锁（app:lock:file-key-migration，SET NX PX）保证只有一个实例执行。
+    key-migration:
+      enabled: false
+  # ── 入站流量的信任边界（多实例专项）──────────────────────────────────────────
+  # trusted-proxies：可信代理网段（CIDR 或单 IP，IPv4/IPv6）。**空 = 只认 RemoteAddr**（默认，
+  #   直连形态，与改造前逐字一致）。
+  #   为什么需要它：LB/网关之后 RemoteAddr 恒为 LB 地址 ⇒ 全站用户共用同一个
+  #   ai:rate:ip:<LB-IP> 桶（60/分），一个用户刷满即全员 429。填上 LB 网段后，只有
+  #   **RemoteAddr 在该网段内**才解析 X-Forwarded-For（从右往左跳过可信跳，取第一个不可信地址）；
+  #   直连客户端自填的 XFF 一律忽略（否则等于让调用方自选限流桶）。
+  #   非 CIDR/IP 字面量会在启动期 fail-fast（静默忽略 = "以为配了、实际没配"的假绿）。
+  #   例：trusted-proxies: 10.0.0.0/8,192.168.0.0/16
+  web:
+    trusted-proxies: []
+  # ── 就绪探测的有界执行（多实例专项 · 启动底座）────────────────────────────────
+  # 三个键都是"让 /health/ready 按期给结论"的护栏（非功能开关）：
+  #   probe-timeout：一次判定的**共享**总时限（所有维度合计，不是每维度各一份）。缺省 2s ——
+  #     LB/编排器探测超时通常 1–5s，留代理侧余量。超时的维度记 DOWN，端点按期返回；
+  #     Java 无法杀死阻塞在不可中断 native I/O 上的线程，所以止损点是"调用方有界"而不是"I/O 被终止"。
+  #   probe-threads：固定 daemon 线程池大小（不随探测次数增长），应 >= 探针维度数（当前 4）。
+  #   probe-queue-capacity：等待队列容量（必须 > 0）；池满 + 队列满 ⇒ 该维度直接记 DOWN（saturated），
+  #     **不改用调用线程执行**（那会重新变回无界等待）。
+  # 三项都必须 probe-timeout>0 / probe-threads>0 / probe-queue-capacity>0，启动期 fail-fast（ReadinessProperties）。
+  health:
+    readiness:
+      probe-timeout: 2s
+      probe-threads: 4
+      probe-queue-capacity: 8
 
 logging:
   level:
