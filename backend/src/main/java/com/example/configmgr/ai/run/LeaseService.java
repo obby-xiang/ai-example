@@ -407,8 +407,12 @@ public class LeaseService {
 	/**
 	 * 租约设施的最近观测健康度（{@link #authority} 的"从未持租"分支用）。
 	 *
-	 * <p>任何一次 Redis 异常都会把它置 false；任何一次成功命令置 true。false 时
+	 * <p>任何一次<b>设施级</b> Redis 异常都会把它置 false；任何一次成功命令置 true。false 时
 	 * {@link #facilityHealthy()} 会做一次有节流的 {@code PING} 自证 —— 正常路径零额外往返。
+	 *
+	 * <p><b>本线程被取消/中断</b>引起的失败<b>不</b>动这位：那是线程局部信号，不是"设施坏了"
+	 * （见 {@link #isLocalThreadInterrupt(Throwable)}）。把它记到共享位上，一个被取消的轮次就能
+	 * 让同实例别的正常轮次在本拍被判成只读。
 	 */
 	private volatile boolean facilityHealthy = true;
 
@@ -566,7 +570,24 @@ public class LeaseService {
 			return interpret(key, holder, viewKey, raw);
 		}
 		catch (Exception ex) {
-			markFacilityUnhealthy();
+			if (isLocalThreadInterrupt(ex)) {
+				// 本线程被取消/中断（取消一轮会 dispose 上游，boundedElastic 工具线程真的会被 interrupt）：
+				// 这一任"还在不在"确实不可知 ⇒ 本轮只读（不得继续本次写）。但不能把这个<b>线程局部</b>信号
+				// 记成整个实例的设施故障：那会让同实例另一个正常轮次在 1s 节流窗口里被连坐判成
+				// UNAVAILABLE，终态/终帧被写门跳过。
+				//
+				// 墓碑只给 run 租约（有 fence）：写门（RunStore#permittedToWrite）读 authority 的正是这条路径。
+				// 资源锁（fenceKey == null）的调用方不读 authority，失败的 acquire 也没有 release/verify
+				// 去清墓碑 —— 在这里落墓碑等于往无 TTL 的 ended 里留一条永久垃圾；资源锁的失败语义
+				// 本来由调用方按"没拿到锁"降级（同一个 UNAVAILABLE 结论）。
+				if (fenceKey != null) {
+					markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+				}
+				log.warn("租约抢用被本线程中断 key={} owner={}（局部取消，非设施故障 ⇒ 本轮只读，不推进）：{}", key,
+						holder, ex.getMessage());
+				return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
+			}
+			markFacilityUnhealthy(ex);
 			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
 					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
@@ -659,7 +680,8 @@ public class LeaseService {
 			return Hold.LOST;
 		}
 		catch (Exception ex) {
-			markFacilityUnhealthy();
+			// 局部中断只让"这一任"降级（墓碑已经钉住只读），不动设施健康位。
+			markFacilityUnhealthy(ex);
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 只读，不推进）：{}", key, holder,
 					epoch, ex.getMessage());
@@ -707,7 +729,8 @@ public class LeaseService {
 			return RenewOutcome.LOST;
 		}
 		catch (Exception ex) {
-			markFacilityUnhealthy();
+			// 局部中断只影响这一拍（UNAVAILABLE 墓碑已经钉住只读），不动设施健康位。
+			markFacilityUnhealthy(ex);
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			log.debug("租约续期失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
 			return RenewOutcome.UNAVAILABLE;
@@ -740,7 +763,9 @@ public class LeaseService {
 			return released != null && released > 0L;
 		}
 		catch (Exception ex) {
-			markFacilityUnhealthy();
+			// 局部中断不宣布"设施坏了"：release 失败时进程内视图仍在（authority 仍按 HELD 回答），
+			// 唯一会受影响的是"同实例别的未持租轮次"，那正是本判据要保护的对象。
+			markFacilityUnhealthy(ex);
 			log.debug("租约释放失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;
 		}
@@ -825,10 +850,15 @@ public class LeaseService {
 	 * 才做一次有节流的 {@code PING}：断连时每帧都等 PING 超时会把流式路径拖垮。
 	 * {@code PING} 成功即恢复"正常"——Redis 恢复后不需要重启进程。
 	 *
-	 * <p><b>节流窗口内复用的结论永远不会比最后一次观测更乐观</b>：任何一次观测到失败都会把
-	 * {@code lastProbeOk} 一起作废（{@link #markFacilityUnhealthy}），所以这里不可能返回一个
+	 * <p><b>节流窗口内复用的结论永远不会比最后一次观测更乐观</b>：任何一次<b>设施级</b>失败都会把
+	 * {@code lastProbeOk} 一起作废（{@link #markFacilityUnhealthy(Throwable)}），所以这里不可能返回一个
 	 * "设施其实刚刚已经坏了"的 {@code true}。探针在飞时（抢不到节流令牌 / 未出结论）同样返回
 	 * 缓存值 —— 此时缓存已被失败观测置假，结果是"状态不可知 ⇒ 只读"，不会放大成可写。
+	 *
+	 * <p><b>唯一的例外</b>：探针被<b>本线程的中断</b>打断（{@link #probeFacility()} 返回 {@code null}）。
+	 * 那不是设施结论，既不写 {@code lastProbeOk} 也不留在节流窗口里 —— 只放掉节流令牌让下一个
+	 * 调用方（通常是别的线程）立刻重探，本次仍回答"不可知 ⇒ 只读"。否则一个被取消的线程就能
+	 * 替整个实例宣布"设施坏了"。
 	 */
 	private boolean facilityHealthy() {
 		if (this.facilityHealthy) {
@@ -842,7 +872,13 @@ public class LeaseService {
 		if (!this.lastHealthProbeMs.compareAndSet(last, now)) {
 			return this.lastProbeOk;
 		}
-		boolean ok = leaseOk();
+		Boolean ok = probeFacility();
+		if (ok == null) {
+			// 探针被本线程中断打断：不是设施结论。放掉节流令牌（下一个调用方立刻重探），
+			// 本次按"状态不可知 ⇒ 只读"回答。
+			this.lastHealthProbeMs.compareAndSet(now, 0L);
+			return false;
+		}
 		this.lastProbeOk = ok;
 		if (ok) {
 			this.facilityHealthy = true;
@@ -856,10 +892,51 @@ public class LeaseService {
 	 *
 	 * <p>只清前者不够：探针结论有 1s 节流，若仍留下上一次的 {@code true}，节流窗口内的
 	 * {@link #authority} 会把"设施刚刚已经坏了"读成 {@code NEVER_HELD}（可写）。
+	 *
+	 * <p><b>窄分类</b>：{@code facilityHealthy} 是整个 {@code LeaseService} 实例共享的位，只有
+	 * <b>设施级</b>失败才配动它。{@link #isLocalThreadInterrupt(Throwable)} 为真时这次失败只是
+	 * 本线程被取消/中断（Redis 本身没事），降级范围收敛到"本次调用 / 这一任"，不动共享位。
 	 */
-	private void markFacilityUnhealthy() {
+	private void markFacilityUnhealthy(Throwable cause) {
+		if (isLocalThreadInterrupt(cause)) {
+			log.debug("设施健康位不动：本次失败由线程中断引起（局部信号，不是设施故障）：{}", cause.getMessage());
+			return;
+		}
 		this.facilityHealthy = false;
 		this.lastProbeOk = false;
+	}
+
+	/**
+	 * 这条异常是否只是<b>本线程被取消/中断</b>的局部后果（不是设施故障）。
+	 *
+	 * <p>判据是<b>因果链里有 {@link InterruptedException}</b>。这条链按 Lettuce / Spring 的包装形态
+	 * 推断，并由用例逐层复刻（{@code LeaseLocalInterruptHealthTest}）：
+	 * {@code org.springframework.data.redis.RedisSystemException("Redis command interrupted")} ←
+	 * {@code io.lettuce.core.RedisCommandInterruptedException} ← {@code java.lang.InterruptedException}
+	 * （{@code LettuceExceptionConverter} 折外层时<b>保留 cause</b>）。
+	 *
+	 * <p><b>证据口径（勿过度引用）</b>：CI 日志里<b>租约降级那一行只有顶层 message</b>
+	 * （{@code RedisSystemException: Redis command interrupted}），<b>没有</b>逐层 cause；内层两级
+	 * 是按上述包装形态推断 + 用例复刻的，不是"从 CI 日志逐层核对到"的。同一次 CI 里其它 Redis 命令
+	 * （如 {@code SessionPurgeGuard} 的 {@code hasKey}）的堆栈才打印了完整链 —— 那是另一条命令，
+	 * 只能佐证包装形态，不能当作本行的日志事实。
+	 *
+	 * <p><b>为什么不能用"catch 现场 interrupt 位还在"</b>：Lettuce 的同步等待就是
+	 * {@code CompletableFuture.get()}，中断时它<b>先清掉中断位</b>再抛 {@code InterruptedException}
+	 * （{@code Thread.interrupted()}）⇒ catch 现场 {@code isInterrupted()} 通常是假，按它判会得到一个
+	 * 永远不触发的死条件。因果链才是可靠证据。
+	 *
+	 * <p><b>为什么不会误吞真故障</b>：{@code RedisConnectionFailureException}、
+	 * {@code QueryTimeoutException}、CROSSSLOT 等设施级失败的链上没有 {@code InterruptedException}，
+	 * 仍走原有的 fail-closed 分支（{@link #markFacilityUnhealthy(Throwable)} 照旧作废共享健康位）。
+	 */
+	static boolean isLocalThreadInterrupt(Throwable ex) {
+		for (Throwable t = ex; t != null && t != t.getCause(); t = t.getCause()) {
+			if (t instanceof InterruptedException) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 记一次"这一任已结束"的墓碑；LOST 是终局，不会被随后的 UNAVAILABLE 覆盖。 */
@@ -1001,9 +1078,21 @@ public class LeaseService {
 	 * 租约设施自检（{@code /health} 的 {@code leaseOk} 观测面）。
 	 *
 	 * <p>每次调用都真的打一次 {@code PING}：报告的是"现在能不能用"，而不是"上一次用的时候行不行"
-	 * （Redis 恢复后需要能自己回绿）。
+	 * （Redis 恢复后需要能自己回绿）。中断线程上的失败同样只回答"这次探不出来"，不宣布设施坏。
 	 */
 	public boolean leaseOk() {
+		return Boolean.TRUE.equals(probeFacility());
+	}
+
+	/**
+	 * 一次 {@code PING} 自证：{@link Boolean#TRUE} 正常；{@link Boolean#FALSE} 设施级失败；
+	 * {@code null} = <b>这次失败只是本线程被中断</b>（局部信号，不作设施结论，见
+	 * {@link #isLocalThreadInterrupt(Throwable)}）。
+	 *
+	 * <p>为什么要三态：探针的结论会被 {@link #facilityHealthy()} 写进 1s 节流的 {@code lastProbeOk}。
+	 * 把"中断线程上的 PING 失败"当成设施结论，等于让一个被取消的线程替整个实例宣布"设施坏了"。
+	 */
+	private Boolean probeFacility() {
 		try {
 			String pong = this.redis.execute((RedisCallback<String>) RedisConnection::ping);
 			boolean ok = pong != null && "PONG".equalsIgnoreCase(pong);
@@ -1013,9 +1102,9 @@ public class LeaseService {
 			return ok;
 		}
 		catch (Exception ex) {
-			markFacilityUnhealthy();
+			markFacilityUnhealthy(ex);
 			log.debug("租约探针失败：{}", ex.getMessage());
-			return false;
+			return isLocalThreadInterrupt(ex) ? null : Boolean.FALSE;
 		}
 	}
 

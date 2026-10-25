@@ -741,6 +741,42 @@ public class SseChatEmitter {
 	}
 
 	/**
+	 * 归档里是否已有终帧（{@code done}/{@code error}）—— <b>取消收尾的幂等判据</b>。
+	 *
+	 * <p><b>为什么不能用快照状态代替</b>（L-143 同一事实）：{@code store.save(CANCELLED)} 与
+	 * {@code out.done(...)} 是两个存储、两次写。save 成功而 done 被写门/投递丢弃时，快照已终态、
+	 * 归档里却没有终帧 —— "快照终态"因此<b>不能</b>证明"终帧已发"（{@code boot.log:6740/6741}
+	 * 正是同一判据同时拒绝了两者）。判据只能是归档本身。
+	 *
+	 * @return {@code TRUE} 已落档 / {@code FALSE} 确认没有 / {@code null} 读不出来（读降级或未装配
+	 *         帧存储）。调用方<b>不得</b>把 {@code null} 折叠成任何一侧：取消收尾按"继续收尾"处理
+	 *         （写门会再拦一次），交棒侧按"未落定"重试。
+	 */
+	public Boolean terminalFrameArchived() {
+		if (this.frames == null) {
+			return null;
+		}
+		FrameStore.ReadResult read;
+		try {
+			read = this.frames.readFromWithStatus(this.runId, 0L, 0);
+		}
+		catch (RuntimeException ex) {
+			log.debug("终帧归档探测失败 runId={}：{}", this.runId, ex.getMessage());
+			return null;
+		}
+		if (read == null || read.degraded()) {
+			return null;
+		}
+		for (Map<String, Object> frame : read.frames()) {
+			String type = String.valueOf(frame.get("type"));
+			if ("done".equals(type) || "error".equals(type)) {
+				return Boolean.TRUE;
+			}
+		}
+		return Boolean.FALSE;
+	}
+
+	/**
 	 * 把外置帧回放给一个新订阅者（不入订阅表，回放发完即 complete）。
 	 *
 	 * <p>

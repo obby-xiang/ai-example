@@ -1,0 +1,266 @@
+package com.example.configmgr.ai.run;
+
+import com.example.configmgr.ai.config.AiProperties;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * <b>取消收尾的接管者</b>：把"已确认取消、但写权限这一拍不可确认"的收尾交棒给一个
+ * <b>不被本轮驱动线程（Reactor 上游已 dispose）牵连</b>的执行体，由它<b>重新取租</b>后走
+ * 既有的 {@link ResumeService#cancelConfirmed(String)}（→ {@code cancelParked} → 取消终态）。
+ *
+ * <h2>为什么需要独立执行体</h2>
+ * 主 CI run 40211303032 / AIE2E-W-30：用户在首个 {@code FRONTEND} 工具刚收到请求帧时取消，
+ * 取消从 {@code ConfirmGate#await} 的等待循环出来（该轮<b>没有</b> {@code approval_park}/
+ * {@code tool_call_park}）。日志只证明一件事：<b>一次在飞的 Redis 命令被打断</b>
+ * （{@code Redis command interrupted}，工具线程），它把 {@code LeaseService} 的
+ * <b>整实例</b>健康位打假，而自证恢复探针有 1s 节流 —— 4ms 之后的驱动线程
+ * {@code cancelTerminal} 因此必然读到 {@link LeaseService.LeaseAuthority#UNAVAILABLE}
+ * 而被写门拒绝，终帧被同一判据丢弃；之后<b>没有任何执行体再试一次</b>
+ * ⇒ 快照停在 SUSPENDED、前端没有终帧。
+ *
+ * <p><b>不要把它读成"Redis 故障"</b>：同一进程 7ms 前的另一轮刚打过
+ * {@code 租约设施自证恢复（PING 成功）}。本类不假设 Redis 坏掉，也不改通用健康检查；
+ * 只把"一次不可确认的拒写被当成最终结论"改成<b>有界重试的交棒</b>。
+ *
+ * <h2>红线（不允许被本类放宽）</h2>
+ * <ul>
+ * <li>只做取消收尾：入口 {@link ResumeService#cancelConfirmed(String)} 在取消事实不成立或
+ *     不可见时<b>直接返回</b>（交回本类按未知重试），不读历史、不重建、<b>不发起模型/工具</b>；</li>
+ * <li>租约在别的实例手里（{@code LEASE_HELD_ELSEWHERE}）⇒ 不抢、不覆盖，按 TTL 之后再试；</li>
+ * <li>有界：次数沿用 {@code app.ai.park.max-dispatch-retries}；指数退避走
+ *     {@code app.ai.park.dispatch-retry-delay}，租约在别处时走 {@code app.ai.lease.retry-delay}
+ *     （缺省 35s ⇒ 15 次上限的实际窗口约 525s；有终态保护，这段窗口不会造成改写）。用尽只 ERROR 留痕；</li>
+ * <li>同一 run 同时只有一次交棒在飞（{@link #inFlight}），避免重试风暴与双终帧。</li>
+ * </ul>
+ */
+@Slf4j
+@Component
+public class CancelledRunFinalizer {
+
+	/** 取消收尾交棒的既有触发原因（日志/取证用；不参与判定）。 */
+	public static final String CAUSE_PERSIST_DENIED = "CANCEL_PERSIST_DENIED";
+
+	/** park 退出时写权限已不可确认（{@code ConfirmGate} 的交棒原因）。 */
+	public static final String CAUSE_PARK_EXIT = "PARK_CANCEL_UNWRITABLE";
+
+	/**
+	 * 延迟重试的调度缝（默认 = 守护线程单线程调度器）。
+	 *
+	 * <p>为什么是接口：用例要断言"这一拍不可确认 ⇒ 排一次重试；恢复后重试成功"，
+	 * 真线程只能 sleep 真实时间（慢且不稳）。生产路径就是
+	 * {@code schedule(task, 2s/4s/…/30s)}（与续跑派发同一个 {@code app.ai.park.*} 口径）。
+	 */
+	interface Scheduler {
+
+		AutoCloseable schedule(Runnable task, Duration delay);
+
+	}
+
+	private static final Scheduler DEFAULT_SCHEDULER = defaultScheduler();
+
+	private static Scheduler defaultScheduler() {
+		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "ai-cancel-finalize-retry");
+			thread.setDaemon(true);
+			return thread;
+		});
+		return (task, delay) -> {
+			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
+			var future = executor.schedule(task, millis, TimeUnit.MILLISECONDS);
+			return () -> future.cancel(false);
+		};
+	}
+
+	/**
+	 * 取消收尾的进程内互斥（按 runId 分条）。
+	 *
+	 * <p>为什么需要：交棒执行体与驱动线程可能同时收尾同一轮（交棒刚取到租，驱动线程的写门又恰好
+	 * 恢复）。判据必须是"读快照判终态"与"写终态"的<b>原子</b>组合，否则两边都读到 SUSPENDED
+	 * ⇒ 两条终帧。条带化（而不是 Map）避免"每 run 一个监视器"的常驻增长。
+	 */
+	private static final int MONITOR_STRIPES = 64;
+
+	private final Object[] finalizeMonitors = new Object[MONITOR_STRIPES];
+
+	private final ObjectProvider<ResumeService> resumeServiceProvider;
+
+	private final Executor executor;
+
+	private final Scheduler scheduler;
+
+	private final AiProperties properties;
+
+	/** 在飞的交棒（同一 run 只允许一次；重试任务通过同一集合自我续命）。 */
+	private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+
+	/** 已尝试次数（用尽即停，不无限重排）。 */
+	private final Map<String, AtomicInteger> attempts = new ConcurrentHashMap<>();
+
+	@Autowired
+	public CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider,
+			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties) {
+		this(resumeServiceProvider, executor, properties, DEFAULT_SCHEDULER);
+	}
+
+	/** 包内构造（用例注入可手动推进的调度器；不改生产装配形状）。 */
+	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
+			AiProperties properties, Scheduler scheduler) {
+		this.resumeServiceProvider = resumeServiceProvider;
+		this.executor = executor;
+		this.properties = properties;
+		this.scheduler = scheduler == null ? DEFAULT_SCHEDULER : scheduler;
+		for (int i = 0; i < MONITOR_STRIPES; i++) {
+			this.finalizeMonitors[i] = new Object();
+		}
+	}
+
+	/** 取消收尾的进程内互斥对象（同一 run 恒返回同一个）。 */
+	public Object finalizeMonitor(String runId) {
+		int hash = runId == null ? 0 : runId.hashCode();
+		return this.finalizeMonitors[(hash & 0x7fffffff) % MONITOR_STRIPES];
+	}
+
+	/**
+	 * 交棒一次取消收尾。
+	 *
+	 * <p>幂等/去重：同一 run 已有交棒在飞时返回 {@code false}（不重复派发；正在飞的那次会自己
+	 * 决定"成功 / 重试 / 用尽"）。交棒本身不阻塞调用线程，也不读快照。
+	 *
+	 * @return 本次是否真的派发了一次
+	 */
+	public boolean handOff(String runId, String cause) {
+		if (runId == null || runId.isBlank()) {
+			return false;
+		}
+		if (!this.inFlight.add(runId)) {
+			log.debug("取消收尾已在交棒中，本次不重复派发 runId={} cause={}", runId, cause);
+			return false;
+		}
+		this.attempts.put(runId, new AtomicInteger());
+		submit(runId, cause);
+		return true;
+	}
+
+	private void submit(String runId, String cause) {
+		try {
+			this.executor.execute(() -> attempt(runId, cause));
+		}
+		catch (RejectedExecutionException ex) {
+			// 触发池饱和：交棒动作本身很短，排一次重试即可 —— 但同样受 maxDispatchRetries 约束
+			// （M-3：旧实现这条路径绕过上限，池满时会无界重排）。
+			log.warn("取消收尾交棒未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
+			rescheduleOrGiveUp(runId, cause, false);
+		}
+		catch (RuntimeException ex) {
+			log.warn("取消收尾交棒派发失败 runId={}：{}", runId, ex.getMessage());
+			rescheduleOrGiveUp(runId, cause, false);
+		}
+	}
+
+	private void attempt(String runId, String cause) {
+		ResumeService service = this.resumeServiceProvider == null ? null
+				: this.resumeServiceProvider.getIfAvailable();
+		if (service == null) {
+			log.info("取消收尾交棒放弃 runId={}（本实例无续跑服务：无 AI key 的降级装配）", runId);
+			finish(runId);
+			return;
+		}
+		ResumeService.CancelFinalize outcome;
+		try {
+			outcome = service.cancelConfirmed(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("取消收尾交棒执行异常 runId={} cause={}：{}", runId, cause, ex.getMessage());
+			rescheduleOrGiveUp(runId, cause, false);
+			return;
+		}
+		if (outcome == null) {
+			rescheduleOrGiveUp(runId, cause, false);
+			return;
+		}
+		switch (outcome) {
+			case FINALIZED, ALREADY_TERMINAL, NO_RUN -> {
+				log.info("取消收尾交棒完成 runId={} outcome={} cause={}", runId, outcome, cause);
+				finish(runId);
+			}
+			// 租约在别的实例手里：不抢、不覆盖；按租约 TTL 之后再确认一次（holder 死了也能接管）。
+			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, cause, true);
+			// 取消事实不可见 / 取消状态不可读 / 设施不可用 / 同进程已有执行体 / 会话门被占 /
+			// 写门仍拒写：一律"这拍没落定"，有界重试；**绝不**宣告完成（M-6），**绝不**驱动。
+			default -> rescheduleOrGiveUp(runId, cause, false);
+		}
+	}
+
+	private void rescheduleOrGiveUp(String runId, String cause, boolean leaseHeldElsewhere) {
+		int attempt = nextAttempt(runId);
+		int max = this.properties.getPark().getMaxDispatchRetries();
+		if (max <= 0 || attempt > max) {
+			this.inFlight.remove(runId);
+			this.attempts.remove(runId);
+			log.error("取消收尾在 {} 次交棒后仍未落定 runId={} cause={}（取消事实仍在 ai:cancel:<runId>；"
+					+ "下一次取消/续跑/启动扫描会重新触发）", max, runId, cause);
+			return;
+		}
+		reschedule(runId, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt));
+	}
+
+	private void reschedule(String runId, String cause, Duration delay) {
+		try {
+			this.scheduler.schedule(() -> attempt(runId, cause), delay);
+		}
+		catch (RuntimeException ex) {
+			this.inFlight.remove(runId);
+			this.attempts.remove(runId);
+			log.warn("取消收尾重试未排上 runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	private void finish(String runId) {
+		this.inFlight.remove(runId);
+		this.attempts.remove(runId);
+	}
+
+	private int nextAttempt(String runId) {
+		AtomicInteger counter = this.attempts.computeIfAbsent(runId, ignored -> new AtomicInteger());
+		return counter.incrementAndGet();
+	}
+
+	/** 与续跑派发同一套指数退避（{@code app.ai.park.dispatch-retry-delay/max-delay}）。 */
+	private Duration delayFor(int attempt) {
+		Duration base = this.properties.getPark().getDispatchRetryDelay();
+		Duration cap = this.properties.getPark().getDispatchRetryMaxDelay();
+		if (base == null) {
+			base = Duration.ofSeconds(2);
+		}
+		if (cap == null) {
+			cap = Duration.ofSeconds(30);
+		}
+		long capMs = Math.max(1L, cap.toMillis());
+		long delayMs = Math.max(1L, base.toMillis());
+		for (int i = 1; i < attempt && delayMs < capMs; i++) {
+			delayMs = Math.min(capMs, delayMs * 2);
+		}
+		return Duration.ofMillis(delayMs);
+	}
+
+	/** 租约在别处时的重试间隔 = 租约 TTL + 余量（与 {@code ConfirmGate#scheduleLeaseRetry} 同口径）。 */
+	private Duration leaseRetryDelay() {
+		return this.properties.getLease().getRetryDelay();
+	}
+
+}

@@ -299,6 +299,57 @@ public class ResumeService {
 	public record ResumeResult(Outcome outcome, Map<String, Object> body) {
 	}
 
+	/**
+	 * <b>取消收尾窄入口</b>（{@link #cancelConfirmed(String)}）的三态以上结局。
+	 *
+	 * <p>与 {@link Outcome} 分开：那条枚举是"续跑/驱动"的用户面结局（HTTP 状态码映射在
+	 * {@code AiController} 的 switch 上）。本枚举只服务"已确认取消的收尾"，多出来的
+	 * {@link #PERSIST_DENIED} / {@link #UNAVAILABLE} 的含义是"这拍没落定，稍后再来"，
+	 * 绝不能混进续跑结局表（否则一次抖动会被对外报成终局）。
+	 */
+	public enum CancelFinalize {
+
+		/** 本次把终态与终帧补齐（取消事实成立，收尾已落定）。 */
+		FINALIZED,
+
+		/**
+		 * 终态轮次无可收尾：<b>DONE/FAILED</b> 直接判终态（绝不改写）；<b>CANCELLED</b> 仅在
+		 * 终帧已归档时幂等跳过（归档里没有终帧 ⇒ 仍需补齐）。
+		 *
+		 * <p><b>DONE/FAILED 也走这里</b>：延迟交棒绝不能把已经完成的轮次改写成 CANCELLED
+		 * （{@code RunStore#save} 只查租约写权限、不查原状态）。
+		 */
+		ALREADY_TERMINAL,
+
+		/**
+		 * 取消事实此刻不成立（{@code ai:cancel} 看不到）而快照仍非终态：<b>不可知</b>，
+		 * 交棒按有界重试处理；<b>绝不</b>因此驱动这一轮（不重建、不发起模型/工具）。
+		 */
+		CANCEL_FACT_UNCONFIRMED,
+
+		/** 取消状态读不出来（Redis 故障/退避）：这拍不推进，交给有界重试。 */
+		CANCEL_UNKNOWN,
+
+		/** 轮不存在（已删除）：没有可收尾的对象。 */
+		NO_RUN,
+
+		/** 续跑租约在别的实例手里（或已过期）：不抢、不覆盖。 */
+		LEASE_HELD_ELSEWHERE,
+
+		/** 租约设施不可用：无法取得写权限，这拍不写。 */
+		UNAVAILABLE,
+
+		/** 本进程已有续跑/取消收尾在推进这一轮（{@code resuming} 互斥被占）：这拍不并发，稍后重试。 */
+		IN_PROGRESS,
+
+		/** 同 sessionId 的单值门被另一轮占着：这拍不推进，稍后重试。 */
+		SESSION_BUSY,
+
+		/** 收尾跑了但终帧仍未归档（写门仍拒写/读不可知）：等恢复后重试。 */
+		PERSIST_DENIED;
+
+	}
+
 	/** 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口）。 */
 	public List<Map<String, Object>> listRuns() {
 		List<Map<String, Object>> out = new ArrayList<>();
@@ -1176,6 +1227,146 @@ public class ResumeService {
 			return loaded;
 		}
 		return SystemMessages.reattach(systems, rest);
+	}
+
+	/**
+	 * <b>取消收尾的窄入口</b>（写权限不可确认时的交棒目标，见 {@link CancelledRunFinalizer}）：
+	 * <b>只</b>把"已确认取消"的一轮收敛成终态，绝不发起模型/工具。
+	 *
+	 * <h2>与 {@code resumeInternal} 同一套准入（I-3）</h2>
+	 * <ol>
+	 * <li><b>进程内互斥</b>：与续跑共用 {@code resuming} 表 —— 同进程已有执行体在推进这一轮
+	 *     ⇒ {@link CancelFinalize#IN_PROGRESS}（交棒侧有界重试），绝不并发写/并发驱动；</li>
+	 * <li><b>会话门</b>：同 sessionId 单值门，带<b>一次性 token</b> 取、按同一 token 精确释放
+	 *     （与 {@code resumeInternal} 同形；首轮/交棒都不得误删别人的锁）。被别的轮占着 ⇒
+	 *     {@link CancelFinalize#SESSION_BUSY}；</li>
+	 * <li><b>跨实例续跑权</b>：{@code acquireRunLease}（生产 = 三键 {@code acquireFenced}）+
+	 *     {@code verifyHeld} 对 Redis 真值校验；别人持有/确定丢租 ⇒
+	 *     {@link CancelFinalize#LEASE_HELD_ELSEWHERE}，设施不可确认 ⇒ {@link CancelFinalize#UNAVAILABLE}。
+	 *     <b>不换 owner、不强行推进新 epoch、不释放调用方（原驱动）的租约</b>：{@code fresh=false}
+	 *     一律不释放。这里也不声称"隔离了原驱动"——同 owner 重入拿的是同一 epoch，隔离靠的是
+	 *     上面的 {@code resuming} 互斥与本进程的取消收尾监视器。</li>
+	 * </ol>
+	 *
+	 * <h2>终态与幂等（I-1 / I-2）</h2>
+	 * <ul>
+	 * <li>快照已是 <b>DONE/FAILED</b> ⇒ {@link CancelFinalize#ALREADY_TERMINAL}，<b>绝不改写</b>；</li>
+	 * <li>取消事实不成立而快照非终态 ⇒ {@link CancelFinalize#CANCEL_FACT_UNCONFIRMED}
+	 *     （不可知：交棒按有界重试，仍不驱动）；</li>
+	 * <li>幂等判据 = <b>归档里有没有终帧</b>（{@code cancelTerminalArchived}），不是快照状态：
+	 *     已归档 ⇒ {@code ALREADY_TERMINAL}（不重写、不重发）；未归档 ⇒ 调
+	 *     {@link ResilientChatService#cancelParked(String)} 补齐（快照已 CANCELLED 但 done 缺失的
+	 *     边界因此可恢复），收尾后再复核归档。</li>
+	 * </ul>
+	 */
+	public CancelFinalize cancelConfirmed(String runId) {
+		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
+			log.info("取消收尾暂缓：本进程已有执行体在推进这一轮 runId={}（交棒侧有界重试）", runId);
+			return CancelFinalize.IN_PROGRESS;
+		}
+		boolean gateHeld = false;
+		String gateSessionId = null;
+		// 一次性 token：与续跑同纪律（首轮那条迟到 finally 的 token=runId 不会误删本持有者）。
+		String gateToken = UUID.randomUUID().toString();
+		LeaseService leases = this.store.leaseService();
+		LeaseService.Lease lease = null;
+		boolean fresh = false;
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				return CancelFinalize.NO_RUN;
+			}
+			if (RunSnapshot.isTerminal(snapshot.getStatus())
+					&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+				// I-1：延迟交棒绝不能把 DONE/FAILED 改写成 CANCELLED
+				return CancelFinalize.ALREADY_TERMINAL;
+			}
+			CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+			if (state == CancellationRegistry.CancelState.UNKNOWN) {
+				return CancelFinalize.CANCEL_UNKNOWN;
+			}
+			if (state != CancellationRegistry.CancelState.CANCELLED) {
+				// M-6：取消事实此刻不可见 ⇒ 不可知。快照终态无可收尾（上面已返回），非终态交回
+				// 交棒侧有界重试 —— 绝不因为"读到 NOT_CANCELLED"就驱动这一轮。
+				return CancelFinalize.CANCEL_FACT_UNCONFIRMED;
+			}
+			// 幂等判据 = 归档里有没有终帧（不是快照状态：save 与 done 是两个存储）
+			Boolean archived = this.chatService.cancelTerminalArchived(runId);
+			if (Boolean.TRUE.equals(archived)) {
+				return CancelFinalize.ALREADY_TERMINAL;
+			}
+			// 会话门（与 resumeInternal 同形：抢不到就不是这一拍的事）
+			if (this.sessionGate != null) {
+				SessionGate.Busy busy = this.sessionGate.acquire(snapshot.getSessionId(), runId, gateToken);
+				if (busy != null && !runId.equals(busy.runId())) {
+					log.info("取消收尾暂缓：会话门被另一轮占着 runId={} heldBy={}（交棒侧有界重试）", runId,
+							busy.runId());
+					return CancelFinalize.SESSION_BUSY;
+				}
+				gateHeld = true;
+				gateSessionId = snapshot.getSessionId();
+			}
+			if (leases != null) {
+				LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+				if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+					return CancelFinalize.LEASE_HELD_ELSEWHERE;
+				}
+				if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
+					return CancelFinalize.UNAVAILABLE;
+				}
+				lease = acquired.lease();
+				fresh = acquired.created();
+				if (lease != null) {
+					LeaseService.Hold hold = leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
+					if (hold == LeaseService.Hold.LOST) {
+						return CancelFinalize.LEASE_HELD_ELSEWHERE;
+					}
+					// hold == UNAVAILABLE：这一拍证明不了"我仍是主人"；继续也只是让写门再拒一次，
+					// 收尾后的复核会把它如实报成 PERSIST_DENIED（不伪装成功）。
+				}
+			}
+			this.chatService.cancelParked(runId);
+			Boolean after = this.chatService.cancelTerminalArchived(runId);
+			if (Boolean.TRUE.equals(after)) {
+				return CancelFinalize.FINALIZED;
+			}
+			RunSnapshot latest = this.store.get(runId);
+			if (latest != null && RunSnapshot.isTerminal(latest.getStatus())
+					&& !RunSnapshot.CANCELLED.equals(latest.getStatus())) {
+				// 并发方把它收成了 DONE/FAILED（合法终态）：没有终帧可补，也绝不改写
+				return CancelFinalize.ALREADY_TERMINAL;
+			}
+			return CancelFinalize.PERSIST_DENIED;
+		}
+		catch (RuntimeException ex) {
+			log.warn("取消收尾执行异常 runId={}（按未落定处理，交给有界重试）：{}", runId, ex.getMessage());
+			return CancelFinalize.PERSIST_DENIED;
+		}
+		finally {
+			if (gateHeld && gateSessionId != null && this.sessionGate != null) {
+				try {
+					this.sessionGate.release(gateSessionId, runId, gateToken);
+				}
+				catch (RuntimeException ex) {
+					log.debug("取消收尾释放会话门失败 sessionId={} runId={}：{}", gateSessionId, runId,
+							ex.getMessage());
+				}
+			}
+			// 只还"本次创建"的租约（fresh=false = 原驱动/等待方在用那一任，绝不释放）
+			if (fresh && lease != null) {
+				releaseQuietly(leases, lease);
+			}
+			this.resuming.remove(runId);
+		}
+	}
+
+	private static void releaseQuietly(LeaseService leases, LeaseService.Lease lease) {
+		try {
+			leases.release(lease);
+		}
+		catch (RuntimeException ex) {
+			log.debug("取消收尾还租失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+		}
 	}
 
 	/** 续跑入口与每次工具派发前共用的取消门；null = 可以继续。 */

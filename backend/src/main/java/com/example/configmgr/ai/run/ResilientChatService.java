@@ -327,6 +327,43 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 取消收尾的交棒执行体（写权限不可确认时的接管者；见 {@link CancelledRunFinalizer}）。
+	 *
+	 * <p><b>为什么字段注入（可选 setter）</b>：与 {@link #parkSettlement} 同因 —— 本类构造器被多份
+	 * conformance/run 用例直接 {@code new}，改签名等于要求它们跟改；轻装配面没有交棒器时行为与
+	 * 引入之前逐字同形（拒写即退出），不会因为"没装配"而改变取消语义。
+	 *
+	 * <p><b>为什么必须存在</b>：主 CI run 40211303032 的 W-30 —— 取消事实已成立，但驱动线程的写门
+	 * 这一拍不可确认 ⇒ 拒写 + 丢弃终帧 ⇒ 快照停在 SUSPENDED、无人再试。交棒把它变成"有界重试的
+	 * 重新取租"，写权限一恢复就落 CANCELLED（fencing 不绕过）。
+	 */
+	private CancelledRunFinalizer cancelFinalizer;
+
+	/** 可选注入（取消收尾的接管通路；缺失时退化为"拒写即退出"的旧口径）。 */
+	@Autowired(required = false)
+	public void setCancelFinalizer(CancelledRunFinalizer finalizer) {
+		this.cancelFinalizer = finalizer;
+	}
+
+	/**
+	 * 取消终态无法写入时的一次交棒（不阻塞、不重试由交棒方负责）。
+	 *
+	 * @return 本次是否真的派发了（已有一份在飞 / 未装配交棒器 ⇒ false）
+	 */
+	private boolean handOffDeniedFinalization(String runId) {
+		if (this.cancelFinalizer == null) {
+			return false;
+		}
+		try {
+			return this.cancelFinalizer.handOff(runId, CancelledRunFinalizer.CAUSE_PERSIST_DENIED);
+		}
+		catch (RuntimeException ex) {
+			log.warn("取消收尾交棒失败 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/**
 	 * <b>L-91 / L-98</b>：思考文本在 {@code AssistantMessage} metadata 里的键名。
 	 *
 	 * <p>
@@ -1292,6 +1329,28 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 归档里是否已有终帧（{@code done}/{@code error}）—— 取消收尾的<b>幂等判据</b>（见
+	 * {@link SseChatEmitter#terminalFrameArchived()}）。
+	 *
+	 * <p>给 {@link ResumeService#cancelConfirmed(String)} 用：交棒入口必须靠"归档有没有终帧"判
+	 * 幂等，而不是"快照是否 CANCELLED"（两个存储不同步时后者会说谎）。
+	 *
+	 * @return {@code TRUE}/{@code FALSE}/{@code null}=不可知（读降级）—— 调用方不得把 null 折叠成任一侧
+	 */
+	public Boolean cancelTerminalArchived(String runId) {
+		if (runId == null) {
+			return null;
+		}
+		try {
+			return this.registry.of(runId).terminalFrameArchived();
+		}
+		catch (RuntimeException ex) {
+			log.debug("取消终帧归档探测失败 runId={}：{}", runId, ex.getMessage());
+			return null;
+		}
+	}
+
+	/**
 	 * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），
 	 * 半截正文**写进记忆并带 {@code stopped} 标记**（S4），终帧 {@code done{cancelled:true}}。
 	 *
@@ -1302,10 +1361,48 @@ public class ResilientChatService {
 	 */
 	private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
+		// 交棒执行体与本驱动线程可能同时收尾同一轮（交棒刚取到租、本线程的写门又恰好恢复）：
+		// "读快照判终态"与"写终态"必须原子，否则两边都读到 SUSPENDED ⇒ 两条终帧。
+		// 未装配交棒器（轻装配/直接 new 的单测）时不加锁，与引入本批之前逐字同形。
+		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
+		if (monitor == null) {
+			cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn);
+			return;
+		}
+		synchronized (monitor) {
+			cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn);
+		}
+	}
+
+	private void cancelTerminalLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
 		String partial = accumulator != null ? accumulator.text()
 				: snapshot == null ? "" : snapshot.getAssistantContent();
 		int partialChars = partial == null ? 0 : partial.length();
+		// ===== 幂等判据：归档里有没有终帧（不是快照状态）=====
+		// save(CANCELLED) 与 out.done 是两个存储、两次写：save 成功而终帧被写门/投递丢弃时，
+		// 快照终态并不能证明"终帧已发"（W-30 的 boot.log:6740/6741 就是同一判据同时拒绝了两者）。
+		// 故判据只认归档；读不出来（null）时按"未归档"继续收尾 —— 写门会再拦一次，且这条路径
+		// 必须保持"快照已 CANCELLED 但 done 缺失时能被补上"，不能把不可恢复性做大。
+		Boolean archived = out.terminalFrameArchived();
+		if (Boolean.TRUE.equals(archived)) {
+			log.info("取消终帧已归档，跳过重复收尾 runId={}（不重写快照、不重发终帧）", runId);
+			return;
+		}
+		if (archived == null) {
+			log.warn("取消终帧归档状态不可读，按未归档继续收尾 runId={}（写门会再拦一次；交棒侧重试）", runId);
+		}
+		// ===== 终态保护（I-1）：取消收尾绝不改写 DONE/FAILED =====
+		// RunStore#save 只查租约写权限、不查原状态；延迟交棒（LEASE_HELD_ELSEWHERE 会按租约 TTL
+		// 反复重排）期间另一实例可以合法接管并把这一轮跑成 DONE 并释放租约 —— 下一次交棒能全新
+		// 抢到租约并通过 verifyHeld，若这里不判终态就会把 DONE 改写成 CANCELLED 并补第二个 done。
+		if (snapshot != null && RunSnapshot.isTerminal(snapshot.getStatus())
+				&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+			log.warn("取消收尾拒绝改写终态 runId={} status={}（DONE/FAILED 不是取消：不重写、不出帧）", runId,
+					snapshot.getStatus());
+			return;
+		}
 		// L-75：**先**把未决条目收敛成 CANCELLED，再写记忆 —— 否则记忆里的段级状态可能是
 		// 「条目仍 PENDING + 轮次已 CANCELLED」的混合态：状态会经快照终态兜底成 cancelled，
 		// 但 `decision` 取自**条目态**（只认 CANCELLED）⇒ 刷新后卡面读成「已超时」而不是「已取消」。
@@ -1330,13 +1427,27 @@ public class ResilientChatService {
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
 			// 完整历史：取消半截 + 配对 tool 响应按原落定点写入；stopped 由消息 metadata 决定。
 			// RT-20：同样是 first-write-wins 的答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
-			if (persistAllowed(runId, "取消态 DB 历史/快照/记忆")) {
+			boolean persisted = persistAllowed(runId, "取消态 DB 历史/快照/记忆");
+			if (persisted) {
 				if (this.historyRecorder != null) {
 					this.historyRecorder.recordStopped(sessionId, runId, stoppedMessages);
 				}
 				this.store.save(snapshot);
 				convergeMemory(runId, sessionId, history);
 			}
+			else if (this.cancelFinalizer != null) {
+				// 写权限这一拍不可确认（一次在飞的 Redis 命令被打断 ⇒ 全局健康位 + 1s 节流；
+				// 也覆盖已被接管 / fence 越过本进程）：不能把"取消已确认"留成 SUSPENDED/RUNNING
+				// 且无人管（主 CI run 40211303032 · W-30）。交棒给非驱动执行器：它重新取租
+				// （fencing 不绕过）后只做取消收尾，不发起模型/工具。
+				// 本线程随即退出：不落快照、不出帧（此刻出帧也会被同一判据丢弃），终帧由交棒侧恰发一次。
+				boolean handed = handOffDeniedFinalization(runId);
+				log.warn("取消终态写权限不可确认，已交棒非驱动执行器收尾 runId={} handed={}（本线程不再出帧；"
+						+ "交棒侧重新取租后补写 CANCELLED + 终帧）", runId, handed);
+				return;
+			}
+			// 未装配交棒器（轻装配/直接 new 的单测）：保持旧口径继续走 —— 出帧仍会被写门丢弃，
+			// 结算/轮末照发，行为与引入本批之前逐字同形。
 		}
 		emitCancelOutcomes(runId, this.store, out, pendingsBeforeCancel);
 		// park 结算（独立复审 M-2′）：取消是这些卡的终局 —— 批循环早在 park 处穿出，这条

@@ -185,6 +185,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci/stub-upstream.mjs --self-check
 
+      - name: 桩用例标记隔离回归（G-09…G-12 首请连续到达的请求顺序）
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ci/stub-upstream-order.test.mjs
+
       - name: 启动桩上游（127.0.0.1:18399）
         working-directory: ${{ github.workspace }}
         run: |

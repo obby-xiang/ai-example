@@ -5,6 +5,7 @@ import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CancelledRunFinalizer;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
@@ -348,6 +349,22 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 取消收尾的交棒执行体（park 退出时"取消事实已成立、但本线程已无写权限"的接管者）。
+	 *
+	 * <p>{@code null} = 未注入（轻装配/单测）：行为与引入之前逐字同形 —— 只把本卡落 CANCELLED，
+	 * 整轮快照的终态仍由驱动线程随后的 {@code cancelTerminal} 负责。生产装配必有它
+	 * （{@link CancelledRunFinalizer} 是 {@code @Component}），于是"写权限不可确认"不再等于
+	 * "这一轮没人管"（主 CI run 40211303032 · W-30）。
+	 */
+	private CancelledRunFinalizer cancelFinalizer;
+
+	/** 可选注入（取消收尾的接管通路；缺失时退化为"本线程负责收尾"的旧口径）。 */
+	@Autowired(required = false)
+	public void setCancelFinalizer(CancelledRunFinalizer finalizer) {
+		this.cancelFinalizer = finalizer;
+	}
+
+	/**
 	 * 实际使用的租约设施：构造参数优先，其次 {@code RunStore} 持有的那个。
 	 *
 	 * <p>为什么要兜底：Spring 路径两者是同一个 bean；但测试里 {@code RunStore} 替身可能装配了
@@ -629,7 +646,15 @@ public class ConfirmGate {
 		// 识别后直接退出（不写终帧、不判失败）。
 		if (this.properties.getPark().isEnabled()) {
 			if (this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED) {
-				return cancel(runId, pending, confirm, startedAt);
+				// 主动 stop：先把本卡的结局落到条目上（未执行），再判"本线程能不能把整轮写进终态"。
+				// 本进程此刻若已无写权限（租约设施抖动 / 已被接管 / fence 越过），本线程随后在
+				// ResilientChatService#cancelTerminal 里的写会被同一判据拒绝 —— 于是"取消已确认"
+				// 会停在 SUSPENDED 且无人再试（主 CI run 40211303032 · W-30）。这里就把收尾交棒给
+				// 非驱动执行器（它重新取租，fencing 不绕过）；写权限正常时<b>不</b>交棒，仍由本线程
+				// 随后的 cancelTerminal 收尾（不产生第二条终帧）。
+				PendingToolCall cancelled = cancel(runId, pending, confirm, startedAt);
+				handOffCancelFinalizationIfUnwritable(runId);
+				return cancelled;
 			}
 			// ===== park 退出 = 一次原子生命周期切换（与决策写共用 submitLock）=====
 			// 缺陷形态（主 CI run 40174289141 / H-01）：旧实现在"预登记闸门之后、还租之前"无锁地做
@@ -1010,6 +1035,38 @@ public class ConfirmGate {
 		log.info("条目已决，跳过请求帧发射 runId={} toolCallId={} status={}（直接消费既有决策）", runId, toolCallId,
 				decided.getStatus());
 		return decided;
+	}
+
+	/**
+	 * park 退出时的取消收尾交棒：<b>只有</b>本进程这一拍已无法写（租约不可确认 / 确定丢租 /
+	 * fence 越过本进程）才交棒。
+	 *
+	 * <p>判据复用唯一写门 {@link RunStore#permittedToWrite(String, String)}（与快照、帧、台账
+	 * 同一套）：写权限正常的 park 取消<b>不</b>交棒 —— 本线程随后的 {@code cancelTerminal} 会落
+	 * CANCELLED 并补终帧，再交棒就是第二条终帧。
+	 */
+	private void handOffCancelFinalizationIfUnwritable(String runId) {
+		if (this.cancelFinalizer == null) {
+			return;
+		}
+		boolean writable;
+		try {
+			writable = this.store.permittedToWrite(runId, "取消交棒");
+		}
+		catch (RuntimeException ex) {
+			writable = false;
+		}
+		if (writable) {
+			return;
+		}
+		try {
+			boolean handed = this.cancelFinalizer.handOff(runId, CancelledRunFinalizer.CAUSE_PARK_EXIT);
+			log.warn("park 取消时本进程已无写权限，已交棒取消收尾 runId={} handed={}（交棒侧重新取租后补写"
+					+ " CANCELLED + 终帧；本线程不再重复出帧）", runId, handed);
+		}
+		catch (RuntimeException ex) {
+			log.warn("park 取消时交棒失败 runId={}：{}（取消事实仍在 ai:cancel:<runId>）", runId, ex.getMessage());
+		}
 	}
 
 	/**

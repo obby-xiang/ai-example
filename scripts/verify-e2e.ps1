@@ -3467,7 +3467,7 @@ Add-AiCase 'G-09' 'P1' 'visibleWhen 联动结构原样透出（op 在闭集，�
 
 Add-AiCase 'G-10' 'P1' 'requiredWhen 条件必填由后端同判（kind=A1 缺 detail 被 400 拒）' {
     $sid = Ai-NewSid 'g10'
-    $s = Ai-FormSuspend $sid 'gf-linkage'
+    $s = Ai-FormSuspend $sid 'gf-linkage（G-10 requiredWhen）'
     $note = $s.form.fields | Where-Object { $_.key -eq 'note' }
     if ($null -eq $note.disabledWhen) { throw 'note 的 disabledWhen 在透出链路里丢了' }
     $r1 = Ai-FormPost $s.runId $s.toolCallId '{"kind":"A1","note":"N"}'
@@ -3496,7 +3496,7 @@ Add-AiCase 'G-11' 'P1' 'optionsFrom 闭集：级联选项透出且越集值被 4
 
 Add-AiCase 'G-12' 'P2' 'defaultFrom 映射透出（默认值来源可读、与字段类型一致）' {
     $sid = Ai-NewSid 'g12'
-    $s = Ai-FormSuspend $sid 'gf-options-from'
+    $s = Ai-FormSuspend $sid 'gf-options-from（G-12 defaultFrom）'
     $amount = $s.form.fields | Where-Object { $_.key -eq 'amount' }
     if (-not $amount) { throw '表单缺 amount 字段' }
     if ($null -eq $amount.defaultFrom) { throw 'amount 的 defaultFrom 在透出链路里丢了' }
@@ -5152,6 +5152,17 @@ Add-AiCase 'W-30' 'P1' '前端工具挂起中停止：迟到回灌 409 + 同会�
     $late = Ai-FePost $req.runId $req.toolCallId '迟到的回灌' $null
     if ($late.ok) { throw '停止后的迟到回灌被接受（停止后零执行被破坏）' }
     if ($late.status -ne 409) { throw "迟到回灌 HTTP $($late.status)，期望 409" }
+    # 取消终态的**真实归档**：done{cancelled:true} 恰 1 条、是最后一帧、seq 严格递增。
+    # 收尾的落档是异步的（快照先变、归档后到），先沿用既有有界等待（Ai-WaitArchivedDone 内部即有界轮询），
+    # 再整读归档断言。整读必须传**空 stopOn**：Ai-Events 的 stopOn 命中即 break，用 @('done') 读到的
+    # 帧集按构造就以第一个 done 结尾 —— 那种帧集上的"done 是最后一帧"是同义反复，证不了归档尾部。
+    # 终态轮的回放在排空后由服务端收尾（SseChatEmitter 的 L-143 判据），故空 stopOn 会读完整个归档即 EOF。
+    $null = Ai-WaitArchivedDone $req.runId
+    $archive = Ai-Events $req.runId 0 @()
+    $cancelDone = Ai-Done $archive
+    if ($cancelDone.cancelled -ne $true) { throw "取消终帧未带 cancelled=true（实际 $($cancelDone.cancelled)）" }
+    Ai-DoneIsLast $archive
+    Ai-SeqStrict $archive
     $next = Ai-ChatRaw $sid '【AIE2E】继续：挂起停止后的下一条。' @{ page = 'tasks' }
     if ($next.status -eq 409) { throw '挂起停止后同会话再发被 409 拦（会话锁死）' }
     if (-not $next.ok) { throw "再发 HTTP $($next.status)" }
