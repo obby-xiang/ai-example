@@ -348,6 +348,8 @@
         "VALUE_FORMAT_MISMATCH": "「{label}」不符合 {format} 格式",
         "VALUE_OUT_OF_RANGE": "「{label}」超出允许范围",
         "VALUE_STEP_MISMATCH": "「{label}」必须按步长取值",
+        "FIELD_STEP_INVALID": "「{label}」的步长设置不可用，请重新生成表单",
+        "FIELD_NUMBER_BOUND_INVALID": "「{label}」的数值范围设置不可用，请重新生成表单",
         "VALUE_NOT_INTEGER": "「{label}」必须是整数",
         "VALUE_TOO_FEW_ITEMS": "「{label}」选择过少（至少 {min} 项）",
         "VALUE_TOO_MANY_ITEMS": "「{label}」选择过多（最多 {max} 项）",

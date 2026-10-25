@@ -125,6 +125,30 @@ public class KbService {
     /** 最近一次观察到的缓存版本（版本轮询用；-1 = 尚未同步）。 */
     private volatile long lastObservedVersion = -1L;
 
+    /**
+     * 同一版本最多自动重建几次（版本轮询通道）。用完即停，把该版本交回 10m 定时刷新 ——
+     * 否则"manifest 改了但建索引必失败"的故障会变成每 30s 一次全量回源 + 全量重建 + 一条 WARN。
+     */
+    static final int MAX_VERSION_REBUILD_ATTEMPTS = 3;
+
+    /** 连续失败满几次再打一条 WARN（其余降到 DEBUG：排障看得到、日志不被刷）。 */
+    private static final int FAILURE_WARN_EVERY = 4;
+
+    // 下面三个字段只在 kb-refresh 单线程（pollVersionQuietly）里读写，故不加同步；
+    // 与 refreshNow（管理端点线程也会调）共享的只有 lastError / consecutiveFailures。
+
+    /** 正在退避重试的缓存版本（-1 = 没有在重试）。 */
+    private long retryVersion = -1L;
+
+    /** 该版本已被自动重试失败了几次（0 = 尚未失败）。 */
+    private int retryAttempts;
+
+    /** 下一次允许重试该版本的时刻（{@link System#nanoTime()} 基准：单调时钟，不受墙钟跳变影响）。 */
+    private long retryNotBeforeNanos;
+
+    /** 连续刷新失败次数（WARN 节流用；任一成功路径清零）。管理端点线程也会调 refreshNow，故 volatile。 */
+    private volatile int consecutiveFailures;
+
     private ScheduledExecutorService scheduler;
 
     @Getter
@@ -151,12 +175,8 @@ public class KbService {
             thread.setDaemon(true);
             return thread;
         });
-        this.scheduler.submit(() -> {
-            refreshQuietly();
-            if (this.source instanceof CachedKbSource cached) {
-                this.lastObservedVersion = cached.cachedVersion();
-            }
-        });
+        // 首版索引由 refreshNow 的成功路径自己记 lastObservedVersion；失败时**不**记（下一拍重试同一版本）
+        this.scheduler.submit(this::refreshQuietly);
         long interval = Math.max(1, this.properties.getKb().getRefreshInterval().toMillis());
         this.scheduler.scheduleWithFixedDelay(this::refreshQuietly, interval, interval, TimeUnit.MILLISECONDS);
         if (this.source instanceof CachedKbSource) {
@@ -174,7 +194,10 @@ public class KbService {
         if (this.scheduler != null) {
             this.scheduler.shutdownNow();
         }
+        // 先摘引用再退休：acquire() 的循环读的就是这个字段，留着已退休的快照 ⇒ tryAcquire 恒 false
+        // 且快照引用不变 ⇒ 循环永不退出（停机期间的检索/读取请求 100% CPU 自旋）。
         Snapshot current = this.snapshot;
+        this.snapshot = null;
         if (current != null) {
             current.retire();
         }
@@ -199,6 +222,15 @@ public class KbService {
     /**
      * 版本号轮询（追加 3）：其它实例 {@code INCR kb:cache:manifest:version} 后，本实例在
      * 一个轮询周期内发现并触发"从缓存增量重建"，不需要等 10m 的定时刷新。
+     *
+     * <p><b>只把重建成功的版本记为已见</b>：{@code refreshNow} 在成功路径上落
+     * {@code lastObservedVersion}；失败时保持旧值，同一版本还能重试（否则一次磁盘/Lucene
+     * 失败会让这个版本永久沉默，最长要等 10m 定时刷新）。
+     *
+     * <p><b>但重试是有界的</b>：同一版本最多自动重建 {@value #MAX_VERSION_REBUILD_ATTEMPTS} 次，
+     * 且失败后退避（{@code poll × 次数}，封顶定时刷新间隔）。用完即静默交回 10m 定时刷新，
+     * 换新版本（{@code INCR} 之后）又能立刻重试 —— 既不会"一次失败后永久沉默"，也不会
+     * "每 30s 一次全量回源 + 全量重建 + 一条 WARN"。
      */
     private void pollVersionQuietly() {
         if (!(this.source instanceof CachedKbSource cached)) {
@@ -208,8 +240,40 @@ public class KbService {
         if (version < 0 || version == this.lastObservedVersion) {
             return;
         }
-        this.lastObservedVersion = version;
+        if (version != this.retryVersion) {
+            // 新版本：重置重试预算（旧版本的连续失败不牵连新版本）
+            this.retryVersion = version;
+            this.retryAttempts = 0;
+            this.retryNotBeforeNanos = 0L;
+        }
+        if (this.retryAttempts >= MAX_VERSION_REBUILD_ATTEMPTS) {
+            return;
+        }
+        if (System.nanoTime() < this.retryNotBeforeNanos) {
+            return;
+        }
         refreshQuietly();
+        if (this.lastObservedVersion == version) {
+            // 成功（重建或"整份未变"短路都会记版本）：预算清零，本版本不再因轮询而重建
+            this.retryVersion = -1L;
+            this.retryAttempts = 0;
+            this.retryNotBeforeNanos = 0L;
+            return;
+        }
+        this.retryAttempts++;
+        this.retryNotBeforeNanos = System.nanoTime() + backoffMillis(this.retryAttempts) * 1_000_000L;
+        if (this.retryAttempts >= MAX_VERSION_REBUILD_ATTEMPTS) {
+            log.warn("知识库版本 {} 连续 {} 次重建失败，暂停自动重试（保留旧索引；改由 {} 定时刷新或新版本触发）：{}",
+                    version, this.retryAttempts, this.properties.getKb().getRefreshInterval(),
+                    this.lastError);
+        }
+    }
+
+    /** 第 {@code attempt} 次失败后的退避：{@code poll × attempt}，封顶定时刷新间隔（都用既有配置口径）。 */
+    private long backoffMillis(int attempt) {
+        long poll = Math.max(1L, this.properties.getKb().getCache().getVersionPollInterval().toMillis());
+        long cap = Math.max(poll, this.properties.getKb().getRefreshInterval().toMillis());
+        return Math.min(cap, poll * Math.max(1, attempt));
     }
 
     // ---------------------------------------------------------------- refresh
@@ -240,6 +304,7 @@ public class KbService {
                 if (fetched.etag() != null) {
                     this.lastEtag = fetched.etag();
                 }
+                this.consecutiveFailures = 0;
                 this.lastError = "";
                 return false;
             }
@@ -275,6 +340,7 @@ public class KbService {
                     && Objects.equals(old.manifest.version(), manifest.version())) {
                 // 文档集合/元数据/版本都没变：不重建索引（本地源每次都会重算 sha，这里做整份短路）
                 this.lastEtag = fetched.etag();
+                this.consecutiveFailures = 0;
                 this.lastError = "";
                 if (this.source instanceof CachedKbSource cached) {
                     this.lastObservedVersion = cached.cachedVersion();
@@ -287,6 +353,7 @@ public class KbService {
             Snapshot previous = this.snapshot;
             this.snapshot = built;
             this.lastEtag = fetched.etag();
+            this.consecutiveFailures = 0;
             this.lastError = "";
             if (this.source instanceof CachedKbSource cached) {
                 this.lastObservedVersion = cached.cachedVersion();
@@ -300,7 +367,17 @@ public class KbService {
         }
         catch (Exception e) {
             this.lastError = safeMessage(e);
-            log.warn("知识库刷新失败（保留旧索引，不变更检索面）：{}", this.lastError);
+            this.consecutiveFailures++;
+            // WARN 节流：第一条（1）与之后每 FAILURE_WARN_EVERY 条（5/9…）留 WARN，其余降 DEBUG ——
+            // 排障看得到，日志也不会被 30s 的重试节奏刷屏；lastError/status 始终是最新原因。
+            if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
+                log.warn("知识库刷新失败（保留旧索引，不变更检索面，连续第 {} 次）：{}",
+                        this.consecutiveFailures, this.lastError);
+            }
+            else {
+                log.debug("知识库刷新仍失败（保留旧索引，连续第 {} 次）：{}", this.consecutiveFailures,
+                        this.lastError);
+            }
             if (buildDir != null) {
                 deleteRecursively(buildDir);
             }
@@ -789,13 +866,23 @@ public class KbService {
 
     // ---------------------------------------------------------------- snapshot
 
+    /**
+     * 取一份可用快照（引用计数 +1，用完必须 {@link Snapshot#release()}）。
+     *
+     * <p>循环条件是"还有快照可试"，且<b>停机即退出</b>：{@code tryAcquire()} 只在快照已退休时返回
+     * false，而 {@code this.snapshot} 只会指向活的快照或 null（{@link #stop()} 先摘引用再退休）。
+     * 少了这两个前提（停机后仍留着已退休快照），失败分支重读到的还是同一个 retired 快照 ⇒ 死循环。
+     */
     private Snapshot acquire() {
-        Snapshot current = this.snapshot;
-        while (current != null) {
+        while (!this.stopped) {
+            Snapshot current = this.snapshot;
+            if (current == null) {
+                return null;
+            }
             if (current.tryAcquire()) {
                 return current;
             }
-            current = this.snapshot;
+            // 读到的是刚被热重载替换掉的快照：重读一次（新快照可继续用；停机则下一轮退出）
         }
         return null;
     }

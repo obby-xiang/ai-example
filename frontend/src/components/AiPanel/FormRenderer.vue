@@ -263,6 +263,7 @@ import {
   isFieldRequired,
   isFieldVisible,
   isRetryableIssue,
+  pruneCascadeValues,
   resolveFieldOptions,
   visibleValues,
   type FormFieldOption,
@@ -554,9 +555,12 @@ function numberValue(key: string): number | string {
  * 改值：写模型 → 套用 defaultFrom（父值变化时给未被碰过的子字段补默认）→ 抛 draft。
  */
 function setValue(key: string, value: FormModelValue): void {
-  model.value = { ...model.value, [key]: value }
+  // 级联裁剪（I2）：父值一变，依赖它的子值里"按新选项已经不合法"的先清掉 —— 否则多选级联的
+  // 复选框整组消失后模型仍带旧值，用户连取消勾选都做不到（提交必被判不在选项内）。
+  const changed = pruneCascadeValues(props.schema, { ...model.value, [key]: value }, key)
+  model.value = changed as Record<string, FormModelValue>
   touched.add(key)
-  const withDefaults = applyDefaultFrom(props.schema, model.value, key, { touched })
+  const withDefaults = applyDefaultFrom(props.schema, changed, key, { touched })
   model.value = withDefaults as Record<string, FormModelValue>
   delete uploadErrors[key]
   delete attachmentRejections[key]

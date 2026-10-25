@@ -44,8 +44,13 @@ public record KbManifest(
         }
     }
 
-    /** 校验 manifest 自身的一致性（id 非空且唯一、标题非空）；返回可行动的中文原因。 */
+    /** 校验 manifest 自身的一致性（docs 非空、id 非空且唯一、标题非空）；返回可行动的中文原因。 */
     public void validate() throws KbSourceException {
+        if (docs.isEmpty()) {
+            // 空清单不是"空知识库"：一次发布/同步故障就会把线上检索面清空，
+            // 调用方按源不可用处理（保留旧索引 + WARN），就绪态不得成立。
+            throw new KbSourceException("manifest.json 里没有任何文档（docs 为空）：按源不可用处理，保留旧索引");
+        }
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (KbDocMeta doc : docs) {
             if (doc == null || doc.id() == null || doc.id().isBlank()) {

@@ -348,6 +348,8 @@
         "VALUE_FORMAT_MISMATCH": "\"{label}\" is not a valid {format}",
         "VALUE_OUT_OF_RANGE": "\"{label}\" is out of the allowed range",
         "VALUE_STEP_MISMATCH": "\"{label}\" must match the allowed step",
+        "FIELD_STEP_INVALID": "\"{label}\" has an unusable step setting; please regenerate the form",
+        "FIELD_NUMBER_BOUND_INVALID": "\"{label}\" has an unusable numeric range setting; please regenerate the form",
         "VALUE_NOT_INTEGER": "\"{label}\" must be an integer",
         "VALUE_TOO_FEW_ITEMS": "\"{label}\" needs at least {min} selections",
         "VALUE_TOO_MANY_ITEMS": "\"{label}\" allows at most {max} selections",

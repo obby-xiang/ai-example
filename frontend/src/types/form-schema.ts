@@ -536,21 +536,44 @@ export function isFieldDisabled(field: FormFieldSpec, values: Record<string, unk
 /**
  * 解析字段当前可见的选项：静态 options → optionsFrom.map 的父值分支 → 外部数据源结果。
  * `external` 按**字段 key** 提供（组件取到 sourceId 的分支后回填；数据源闭集由后端把关）。
+ *
+ * 解析不出选项时返回**空数组**（渲染口径：控件只剩占位项）。
  */
 export function resolveFieldOptions(
   field: FormFieldSpec,
   values: Record<string, unknown>,
   external?: Record<string, FormFieldOption[]>
 ): FormFieldOption[] {
+  return resolvableOptions(field, values, external) ?? []
+}
+
+/**
+ * 与 {@link resolveFieldOptions} 同源，但**区分"空集"与"无法枚举"**：
+ * - 能枚举的选项源（静态 options / optionsFrom.map）解析不出选项时返回空数组 ——
+ *   级联语义：父值没选、或父值没有对应分支，子选项就不存在，提交任何值都是"不在选项内"；
+ * - 规则层无法枚举的选项源（optionsFrom.sourceId，选项在后端数据源里、还没取到）返回 null ——
+ *   调用方据此**跳过**成员校验（与后端 `GenerativeFormRules.runtimeOptionValues` 同口径）。
+ *
+ * 两者混用会让"空集"被当成"不用校验"，级联子值就能任意通过。
+ */
+function resolvableOptions(
+  field: FormFieldSpec,
+  values: Record<string, unknown>,
+  external?: Record<string, FormFieldOption[]>
+): FormFieldOption[] | null {
   if (field.options) {
     return field.options
   }
-  if (external?.[field.key]) {
-    return external[field.key]
+  const resolved = external?.[field.key]
+  if (resolved && resolved.length > 0) {
+    return resolved
+  }
+  if (field.optionsFrom?.sourceId) {
+    return null
   }
   const from = field.optionsFrom
   if (!from?.map) {
-    return []
+    return null
   }
   const parentValue = values[from.dependsOn]
   if (parentValue === undefined || parentValue === null || parentValue === '') {
@@ -585,6 +608,85 @@ export function applyDefaultFrom(
     }
   }
   return next
+}
+
+// ── 级联裁剪（父值变化后清掉不再合法的子值） ──────────────────────────────
+
+/**
+ * 级联裁剪（I2）：父值变化后，把依赖它的子字段里"按新的可解析选项已经不合法"的值清掉。
+ *
+ * <p>为什么必须有：多选的复选框只渲染**当前**选项（`FormRenderer` 的 `optionsOf`），父值一改成
+ * 没有对应分支的值，整组复选框就消失了，而模型里仍留着旧值 ⇒ 提交被判
+ * `VALUE_OUT_OF_OPTIONS`，用户既无法取消勾选、也无法重交（只能把父值改回去或重开卡片）。
+ * enum 靠空白占位项能人工清空，但同一条判据一并裁掉 —— 否则控件显示"未选"、模型仍带旧值，
+ * 提交仍被拒（显示与提交两套状态）。
+ *
+ * <p>口径：
+ * - 只碰**选项级联**字段（`optionsFrom.dependsOn`），且只清"不再合法"的值；
+ * - enum ⇒ `''`（未选）；multi_select ⇒ 保留仍合法的子集（子集为空即 `[]`）；
+ * - 无法枚举的选项源（`optionsFrom.sourceId` 且外部选项还没取到）不动 —— 判不了就不猜；
+ * - 值未变就不下探它的下游（它的分支键没变，下游不受影响）；值变了才继续递归（A→B→C）。
+ *
+ * 纯函数：返回新对象，不原地改；`values` 里应已带上本次父值的新值。
+ */
+export function pruneCascadeValues(
+  spec: FormSpec,
+  values: Record<string, unknown>,
+  changedKey: string
+): Record<string, unknown> {
+  const next = { ...values }
+  const queue: string[] = [changedKey]
+  const visited = new Set<string>([changedKey])
+  while (queue.length > 0) {
+    const parent = queue.shift() as string
+    for (const field of spec.fields) {
+      if (field.optionsFrom?.dependsOn !== parent || visited.has(field.key)) {
+        continue
+      }
+      const current = next[field.key]
+      const pruned = prunedCascadeValue(field, current, next)
+      if (sameValue(pruned, current)) {
+        continue
+      }
+      next[field.key] = pruned
+      visited.add(field.key)
+      queue.push(field.key)
+    }
+  }
+  return next
+}
+
+/** 单个级联字段的值裁剪：不合法 ⇒ 清空；合法或无法判定 ⇒ 原样返回。 */
+function prunedCascadeValue(
+  field: FormFieldSpec,
+  value: unknown,
+  values: Record<string, unknown>
+): unknown {
+  if (field.type !== 'enum' && field.type !== 'multi_select') {
+    return value
+  }
+  if (!isFilled(value)) {
+    return value
+  }
+  const options = resolvableOptions(field, values)
+  if (options === null) {
+    return value
+  }
+  const allowed = new Set(options.map((option) => option.value))
+  if (field.type === 'enum') {
+    return typeof value === 'string' && allowed.has(value) ? value : ''
+  }
+  if (!Array.isArray(value)) {
+    return value
+  }
+  return value.filter((item): item is string => typeof item === 'string' && allowed.has(item))
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (!Array.isArray(left) || !Array.isArray(right)) {
+    return left === right
+  }
+  return left.length === right.length && left.every((item, index) => item === right[index])
 }
 
 // ── 取值校验（与后端同源判据） ─────────────────────────────────────────────
@@ -734,22 +836,22 @@ function fieldValueIssues(
       break
     }
     case 'enum': {
-      const options = resolveFieldOptions(field, values)
+      const options = resolvableOptions(field, values)
       if (typeof value !== 'string') {
         push('VALUE_TYPE_MISMATCH', `「${field.label}」应为单选值`)
-      } else if (options.length > 0 && !options.some((option) => option.value === value)) {
+      } else if (options !== null && !options.some((option) => option.value === value)) {
         push('VALUE_OUT_OF_OPTIONS', `「${field.label}」的取值不在选项内`)
       }
       break
     }
     case 'multi_select': {
-      const options = resolveFieldOptions(field, values)
+      const options = resolvableOptions(field, values)
       if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
         push('VALUE_TYPE_MISMATCH', `「${field.label}」应为多选值数组`)
         break
       }
       const list = value as string[]
-      if (options.length > 0 && list.some((item) => !options.some((option) => option.value === item))) {
+      if (options !== null && list.some((item) => !options.some((option) => option.value === item))) {
         push('VALUE_OUT_OF_OPTIONS', `「${field.label}」的取值应在选项内`)
       }
       if (new Set(list).size !== list.length) {

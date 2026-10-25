@@ -584,21 +584,21 @@ public final class GenerativeFormRules {
 	private static List<FormIssue> numberBoundIssues(String at, String key, JsonNode min, JsonNode max,
 			JsonNode step, JsonNode integer) {
 		List<FormIssue> issues = new ArrayList<>();
-		Double minValue = doubleOrNull(min);
-		Double maxValue = doubleOrNull(max);
+		Double minValue = finiteOrNull(min);
+		Double maxValue = finiteOrNull(max);
 		if ((min != null && minValue == null) || (max != null && maxValue == null)) {
 			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
-					at + ".min/max 必须是数字"));
+					at + ".min/max 必须是有限数字（NaN/Infinity/1e999 这类值不接受）"));
 		}
 		else if (minValue != null && maxValue != null && minValue > maxValue) {
 			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
 					at + ".min 不得大于 max（" + minValue + " > " + maxValue + "）"));
 		}
 		if (step != null) {
-			Double stepValue = doubleOrNull(step);
+			Double stepValue = finiteOrNull(step);
 			if (stepValue == null || stepValue <= 0) {
 				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_STEP_INVALID,
-						at + ".step 必须是正数（实际 " + step + "）"));
+						at + ".step 必须是有限的正数（实际 " + step + "）"));
 			}
 		}
 		if (integer != null && !integer.isBoolean()) {
@@ -1048,7 +1048,7 @@ public final class GenerativeFormRules {
 		List<FormIssue> issues = new ArrayList<>();
 		String type = field.path("type").asText("");
 		// enum/multi_select 的可选集按**当前回灌值**解析（静态 options 或 optionsFrom.map 的父值分支）；
-		// sourceId 级联在规则层无法枚举，交由后端数据源在渲染期解析，这里不做成员校验。
+		// null = 规则层无法枚举（sourceId 级联，选项在后端数据源里）⇒ 不做成员校验。
 		List<String> options = switch (type) {
 			case "enum", "multi_select" -> runtimeOptionValues(field, values);
 			default -> List.of();
@@ -1096,9 +1096,20 @@ public final class GenerativeFormRules {
 					break;
 				}
 				double number = value.asDouble();
-				Double min = doubleOrNull(field.get("min"));
-				Double max = doubleOrNull(field.get("max"));
-				if ((min != null && number < min) || (max != null && number > max)) {
+				if (!Double.isFinite(number)) {
+					// JSON 的 1e999 会解析成 Infinity：后续 BigDecimal 步长计算会抛 NumberFormatException（线上 = 500）
+					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+							"字段 " + key + " 期望有限数字（NaN/Infinity 不接受），实际是 " + value));
+					break;
+				}
+				Double min = finiteOrNull(field.get("min"));
+				Double max = finiteOrNull(field.get("max"));
+				boolean boundsBroken = (field.has("min") && min == null) || (field.has("max") && max == null);
+				if (boundsBroken) {
+					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
+							"字段 " + key + " 的 schema min/max 不是有限数字，无法复核取值范围（请重新生成表单）"));
+				}
+				else if ((min != null && number < min) || (max != null && number > max)) {
 					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
 							"字段 " + key + " 超出范围：" + number + "（允许 " + (min == null ? "-∞" : min)
 									+ ".." + (max == null ? "+∞" : max) + "）"));
@@ -1107,8 +1118,14 @@ public final class GenerativeFormRules {
 					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_NOT_INTEGER,
 							"字段 " + key + " 必须是整数（实际 " + number + "）"));
 				}
-				Double step = doubleOrNull(field.get("step"));
-				if (step != null && step > 0) {
+				Double step = finiteOrNull(field.get("step"));
+				if (field.has("step") && step == null) {
+					// 非有限 step 只可能来自旧版闸门放行的待决表单：给字段错误，不做步长算术（会抛异常）
+					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_STEP_INVALID,
+							"字段 " + key + " 的 schema step 不是有限正数（" + field.get("step")
+									+ "），无法按步长复核（请重新生成表单）"));
+				}
+				else if (step != null && step > 0) {
 					double base = min == null ? 0 : min;
 					BigDecimal units = BigDecimal.valueOf(number - base)
 						.divide(BigDecimal.valueOf(step), 8, java.math.RoundingMode.HALF_UP);
@@ -1146,10 +1163,9 @@ public final class GenerativeFormRules {
 							"字段 " + key + " 期望字符串（单选值），实际是" + typeName(value)));
 					break;
 				}
-				if (!options.isEmpty() && !options.contains(value.asText())) {
+				if (options != null && !options.contains(value.asText())) {
 					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
-							"字段 " + key + " 的值 \"" + value.asText() + "\" 不在选项内（"
-									+ String.join("/", options) + "）"));
+							"字段 " + key + " 的值 \"" + value.asText() + "\" 不在选项内（" + optionsHint(options) + "）"));
 				}
 			}
 			case "multi_select" -> {
@@ -1174,10 +1190,9 @@ public final class GenerativeFormRules {
 				}
 				Set<String> seen = new LinkedHashSet<>();
 				for (JsonNode element : value) {
-					if (!element.isTextual() || (!options.isEmpty() && !options.contains(element.asText()))) {
+					if (!element.isTextual() || (options != null && !options.contains(element.asText()))) {
 						issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
-								"字段 " + key + " 含不在选项内的值：" + element + "（可选："
-										+ String.join("/", options) + "）"));
+								"字段 " + key + " 含不在选项内的值：" + element + "（" + optionsHint(options) + "）"));
 						continue;
 					}
 					if (!seen.add(element.asText())) {
@@ -1343,25 +1358,24 @@ public final class GenerativeFormRules {
 	/**
 	 * 运行期的可取值集合：静态 {@code options}；或 {@code optionsFrom.map} 中<b>当前父值对应</b>的分支。
 	 *
-	 * <p>父值缺失/无对应分支时返回空集 —— 此时提交任何值都应判 {@code VALUE_OUT_OF_OPTIONS}
-	 * （级联语义：父值没选，子选项就不存在）。{@code sourceId} 级联返回空集并跳过成员校验
-	 * （数据源在后端，规则层无法枚举）。
+	 * <p>父值缺失/无对应分支时返回<b>空集</b> —— 此时提交任何值都应判 {@code VALUE_OUT_OF_OPTIONS}
+	 * （级联语义：父值没选，子选项就不存在）。只有 {@code sourceId} 级联返回 {@code null}
+	 * （数据源在后端，规则层无法枚举），调用方据此跳过成员校验 —— 空集与"无法枚举"必须区分开，
+	 * 否则空集会被当成"不用校验"，级联值就能任意通过。
 	 */
 	private static List<String> runtimeOptionValues(JsonNode field, JsonNode values) {
-		List<String> out = new ArrayList<>();
 		JsonNode options = field.get("options");
 		if (options != null) {
+			List<String> out = new ArrayList<>();
 			appendOptionValues(options, out);
 			return out;
 		}
 		JsonNode optionsFrom = field.get("optionsFrom");
-		if (optionsFrom == null || !optionsFrom.isObject()) {
-			return out;
+		if (optionsFrom == null || !optionsFrom.isObject() || !optionsFrom.path("map").isObject()) {
+			return null;
 		}
 		JsonNode map = optionsFrom.get("map");
-		if (map == null || !map.isObject()) {
-			return out;
-		}
+		List<String> out = new ArrayList<>();
 		String parent = textOrNull(optionsFrom.get("dependsOn"));
 		JsonNode parentValue = parent == null || values == null ? null : values.get(parent);
 		if (parentValue == null || parentValue.isNull()) {
@@ -1372,6 +1386,12 @@ public final class GenerativeFormRules {
 			appendOptionValues(branch, out);
 		}
 		return out;
+	}
+
+	/** 选项集合的人读说明（空集 = 级联父值未选/无分支，子选项不存在）。 */
+	private static String optionsHint(List<String> options) {
+		return options.isEmpty() ? "当前没有可选项：级联父值未选，或该父值没有对应分支"
+				: "可选：" + String.join("/", options);
 	}
 
 	private static void appendOptionValues(JsonNode options, List<String> out) {
@@ -1438,8 +1458,18 @@ public final class GenerativeFormRules {
 		return node != null && node.isIntegralNumber() ? node.asInt() : null;
 	}
 
-	private static Double doubleOrNull(JsonNode node) {
-		return node != null && node.isNumber() ? node.asDouble() : null;
+	/**
+	 * JSON 数字 → <b>有限</b> double；非数字与 NaN/±Infinity（如 {@code 1e999}）一律 null。
+	 *
+	 * <p>非有限数不能进数值运算：{@code BigDecimal.valueOf(∞)} 抛 {@code NumberFormatException}，
+	 * 而回灌期的调用点（确认门）没有 catch，一次超大 step/min/max 就是一次 500。
+	 */
+	private static Double finiteOrNull(JsonNode node) {
+		if (node == null || !node.isNumber()) {
+			return null;
+		}
+		double value = node.asDouble();
+		return Double.isFinite(value) ? value : null;
 	}
 
 	private static List<String> names(JsonNode node) {
