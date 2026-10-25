@@ -302,10 +302,20 @@ export async function waitDecisionSettled(
 export async function waitTerminal(runId: string, timeoutMs = 90_000, base = API): Promise<RunDetail> {
   const terminal = ['DONE', 'FAILED', 'CANCELLED', 'REJECTED']
   let detail: RunDetail = {}
-  await waitFor(async () => {
-    detail = await runDetail(runId, base)
-    return terminal.includes(String(detail.snapshot?.status ?? ''))
-  }, timeoutMs, `轮次 ${runId} 收敛到终态`)
+  try {
+    await waitFor(async () => {
+      detail = await runDetail(runId, base)
+      return terminal.includes(String(detail.snapshot?.status ?? ''))
+    }, timeoutMs, `轮次 ${runId} 收敛到终态`)
+  } catch (error) {
+    // 诊断（不改判据/不放宽超时）：超时时把最后读到的快照与条目带出来 ——
+    // "停在 SUSPENDED 没人驱动"与"收敛到别处"必须能从报错上一眼分开。
+    const last = `最后快照 status=${String(detail.snapshot?.status ?? '∅')} `
+      + `error=${String(detail.snapshot?.error ?? '∅')} `
+      + `pending=${JSON.stringify((detail.pending ?? []).map((entry) => entry.status))} `
+      + `ledger=${(detail.ledger ?? []).length}`
+    throw new Error(`${(error as Error).message}；${last}`)
+  }
   return detail
 }
 

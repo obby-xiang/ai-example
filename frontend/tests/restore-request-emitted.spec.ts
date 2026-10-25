@@ -134,6 +134,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(toolSegments(store.messages).map((part) => part.toolCallId)).toEqual(['c1'])
     expect(store.suspended).toBe(true)
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5, awaitingInput: true })
   }, 15000)
 
   it('全 BACKEND 批（awaitingExternal=false）⇒ 不建卡、不置挂起，按在途轮静默全量续收（批G · G2）', async () => {
@@ -155,6 +156,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(store.notice).toBeNull()
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 0 })
+    expect(api.reattachRun.mock.calls[0]?.[2]?.awaitingInput ?? false).toBe(false)
   }, 15000)
 
   it('存在任意 PENDING 条目（全部 req=false）⇒ suspended 仍置位、activeRunId 指向该轮、照常挂流（I-1）', async () => {
@@ -173,7 +175,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(toolSegments(store.messages)).toHaveLength(0)
     // I-1（收口修）：无卡 ≠ 无后续帧 —— 仍以 archiveMaxSeq 挂差量续收，等请求帧实时到达
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
-    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5 })
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5, awaitingInput: false })
   }, 15000)
 
   it('I-1 回归：卡 1 已决 + 卡 2 未发卡的窗口刷新 → 无卡但已挂流，卡 2 请求帧随后到达即渲染', async () => {
@@ -191,6 +193,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(toolSegments(store.messages)).toHaveLength(0)
     expect(store.suspended).toBe(true)
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5, awaitingInput: false })
     const handlers = api.reattachRun.mock.calls[0]?.[1] as {
       onFrame: (frame: Record<string, unknown>) => void
     }

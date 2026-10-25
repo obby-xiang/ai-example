@@ -80,6 +80,8 @@ class KbServiceIndexTest {
     @Test
     void noMatchReturnsSearchedTermsAndNearbyTitles() throws Exception {
         KbService service = KbTestSupport.samplesService();
+        List<String> catalogTitles = service.catalog().stream().map(KbDocMeta::title).toList();
+        List<String> catalogIds = service.catalog().stream().map(KbDocMeta::id).toList();
 
         KbSearchResult result = service.search("火星殖民政策", 5);
 
@@ -87,6 +89,19 @@ class KbServiceIndexTest {
         assertThat(result.hits()).isEmpty();
         assertThat(result.searchedTerms()).isNotEmpty();
         assertThat(result.suggestions()).hasSizeBetween(2, 3);
+        // 候选只给标题文本：拼上 doc_id 会让候选以可引用的 doc_id 形态进入答复（真机 K-10）
+        assertThat(result.suggestions()).allSatisfy(title -> assertThat(catalogTitles).contains(title));
+        assertThat(result.suggestions()).noneMatch(suggestion ->
+                catalogIds.stream().anyMatch(suggestion::contains));
+
+        // 英文未登记表达（K-10 原查询）同样 no_match，候选也不带 doc_id
+        KbSearchResult english = service.search("flurbox quota", 5);
+        assertThat(english.state()).isEqualTo(KbSearchResult.State.NO_MATCH);
+        assertThat(english.hits()).isEmpty();
+        assertThat(english.suggestions()).allSatisfy(title -> assertThat(catalogTitles).contains(title));
+        // 反向守卫：检索本身没被削掉 —— 正常查询仍命中 region-tariff
+        assertThat(service.search("区域费率", 5).hits())
+                .extracting(KbSearchHit::docId).contains("region-tariff");
     }
 
     @Test

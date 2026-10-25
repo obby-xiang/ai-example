@@ -109,6 +109,15 @@ function chronological(ledger: Array<Record<string, unknown>>): Array<Record<str
   return [...ledger].sort((left, right) => Number(left.atMs ?? 0) - Number(right.atMs ?? 0))
 }
 
+/**
+ * 轮内上下文预算的收尾指令（`SpToolCallingManager.TURN_BUDGET_WRAP_UP`）。
+ *
+ * 本文件把分母压到 4500-6000（窗口 17500/19000 − reserve 13000），这个尺度下工具批之后的
+ * **轮内**判定会先撞上 95% 收尾线：产品在工具结果之后追加一条"请收尾"的 user 消息（同一轮、
+ * 同一段历史，不是新一轮对话）⇒ 续轮请求仍然存在，只是末条不再是 `role=tool`。
+ */
+const TURN_WRAP_UP_PREFIX = '本轮上下文已接近模型窗口上限'
+
 /** 本轮的上游请求里"带刚执行完的工具结果"的那一条（L2 的摘要请求会插在它之前，故不能按序号取）。 */
 async function toolRound(sessionId: string, caseId: string, extra = '') {
   const before = maxStubIndex()
@@ -120,8 +129,11 @@ async function toolRound(sessionId: string, caseId: string, extra = '') {
     for (let index = maxStubIndex(); index > before; index -= 1) {
       const record = stubRequest(index)
       if (record === null) continue
-      const last = record.messages[record.messages.length - 1]
-      if (last?.role === 'tool') return { round, continuation: record }
+      // 收尾指令是工具结果**之后**追加的同一跳（判据仍看"末条工具结果"，不看指令）
+      const tail = record.messages.slice()
+      const last = tail[tail.length - 1]
+      if (last?.role === 'user' && String(last.content ?? '').startsWith(TURN_WRAP_UP_PREFIX)) tail.pop()
+      if (tail[tail.length - 1]?.role === 'tool') return { round, continuation: record }
     }
     await sleep(150)
   }

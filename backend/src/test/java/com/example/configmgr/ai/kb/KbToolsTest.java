@@ -121,6 +121,30 @@ class KbToolsTest {
         assertThat(output).contains("建议:");
     }
 
+    /**
+     * K-10 真机泄漏（run 40220039653）：查询 {@code flurbox quota} 0 命中，工具却列出
+     * region-tariff / tariff-boundary / data-quality，模型据此在答复里复述了这些 doc_id。
+     *
+     * <p>成因不是模型编造：{@code suggestTitles} 把 {@code id（title）} 拼成候选串、又只按字面
+     * 二元组排序 —— 英文 query 的 {@code ta/qu/bo} 撞上 id 字母，正好把这三篇顶到前 3。
+     * 候选只用于换词重查，输出里不得出现任何 doc_id。
+     */
+    @Test
+    void noMatchDoesNotLeakCandidateDocIds() throws Exception {
+        KbTools tools = new KbTools(KbTestSupport.samplesService());
+
+        String output = tools.kbSearch("flurbox quota", 5);
+
+        assertThat(output).contains("状态: no_match").contains("可参考的标题:");
+        assertThat(output)
+                .doesNotContain("region-tariff")
+                .doesNotContain("tariff-boundary")
+                .doesNotContain("data-quality")
+                .doesNotContain("doc_id=");
+        // 候选不是命中：工具输出本身要把这条口径说清楚（提示词之外的第二道）
+        assertThat(output).contains("不是命中").contains("不得在答复中列举或引用");
+    }
+
     @Test
     void unknownDocReturnsCandidatesNotException() throws Exception {
         KbTools tools = new KbTools(KbTestSupport.samplesService());

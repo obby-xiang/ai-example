@@ -621,12 +621,28 @@ test.describe('@stub V 可视可操作（12a）', () => {
     expect(mapping.table.unknown).toBe('unknown')
     expect(mapping.table.timeout).not.toBe(mapping.table.unknown)
     expect(mapping.table.rejected).not.toBe(mapping.table.unknown)
-    // L-82（笔 6321424）新增 `UI_DOWNLOAD_TIMEOUT`（下载类工具前置校验有界化）⇒ 闭集 7 → 8 枚，
-    // 逐枚点名（不只数数）钉住新增那一枚。
-    expect(mapping.codes).toHaveLength(8)
-    expect(mapping.codes).toContain('UI_DOWNLOAD_TIMEOUT')
-    expect(mapping.codes).toContain('UI_REF_NOT_SNAPSHOTTED')
-    expect(mapping.codes).toContain('UI_TARGET_DISABLED')
+    // 契约来源：`frontend/src/utils/ui-receipt.ts` 的 `UI_CODES` 闭集（机器码，不进用户文案）。
+    // L-82（笔 6321424）新增 `UI_DOWNLOAD_TIMEOUT`（7 → 8）；
+    // FE-32（Task 5）新增 `UI_TARGET_HIDDEN`（8 → 9），且**与 `UI_TARGET_DISABLED` 分开归因**：
+    // 隐藏的下一步是"切到该步骤 / 展开面板"，禁用的下一步才是"先让控件恢复可用"。
+    // 逐枚点名（不只数数）：闭集被悄悄放宽、改名或换掉新增那一枚都会在这里红。
+    const expectedCodes = [
+      'UI_PAGE_NOT_READY',
+      'UI_REF_NOT_SNAPSHOTTED',
+      'UI_BUDGET_EXHAUSTED',
+      'UI_DOWNLOAD_TIMEOUT',
+      'UI_PRECONDITION_CHANGED',
+      'UI_TARGET_DISABLED',
+      'UI_TARGET_HIDDEN',
+      'UI_ALREADY_ON_PAGE',
+      'UI_ALREADY_EXECUTED'
+    ]
+    expect(mapping.codes).toHaveLength(expectedCodes.length)
+    for (const code of expectedCodes) {
+      expect(mapping.codes).toContain(code)
+    }
+    // 闭集内不重复（同一码两条 = 映射表被复制粘贴污染）
+    expect(new Set(mapping.codes).size).toBe(expectedCodes.length)
 
     // ② 真卡面：成功卡（succeeded）与拒执卡（rejected）各有独立状态与文案。
     //    两轮必须各自独立会话 —— 桩的收敛契约③规定"上下文里已有 role=tool 消息就只发文本"，

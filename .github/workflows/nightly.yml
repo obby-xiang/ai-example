@@ -189,6 +189,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node --test scripts/ci/stub-upstream-order.test.mjs
 
+      - name: KQC 摘要桩协议回归（system 指令头 / 非流式闭合摘要）
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ci/kqc-upstream-summary.test.mjs
+
       - name: 启动桩上游（127.0.0.1:18399）
         working-directory: ${{ github.workspace }}
         run: |
@@ -368,9 +372,14 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: testmap-nightly
+          # raw/ = 两遍各自的**原始**快照（逐类 deps + hits，未做并集修复）。
+          # 为什么要它：map.json 是并集修复后的结果 —— 只被"丢类"污染的那一侧在并集里
+          # 看不出来（补回的边与原边同形），排障时无法区分"真依赖"与"邻类窗口的假边"。
+          # raw 不含请求正文/凭据：只有测试类 FQN、生产类 FQN、hit 标记与 meta（headSha/耗时/版本）。
           path: |
             backend/target/testmap/map.json
             backend/target/testmap/map-run1.json
+            backend/target/testmap/raw/
             backend/target/testmap/selection/
           retention-days: 14
           if-no-files-found: warn

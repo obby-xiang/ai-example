@@ -83,27 +83,112 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     await openPanel(page)
     await seedRound(page, 'N04')
     const sid = await sessionIdOf(page)
+
+    // ① 销毁前：真实存在过的状态（不伪造 —— 都是本用例这一轮真跑出来的）
     const before = await historyOf(request, sid)
     expect(before.count).toBeGreaterThan(0)
-    const ctxBefore = await apiGet<{ usedTokens?: number }>(request, `/api/ai/context/${encodeURIComponent(sid)}`)
+    const fullBefore = await apiGet<{ count: number }>(
+      request,
+      `/api/ai/history/${encodeURIComponent(sid)}/messages?limit=200`
+    )
+    expect(fullBefore.count).toBeGreaterThan(0)
+    const ctxBefore = await apiGet<{ usedTokens?: number; source?: string }>(
+      request,
+      `/api/ai/context/${encodeURIComponent(sid)}`
+    )
     expect(Number(ctxBefore.usedTokens ?? 0)).toBeGreaterThan(0)
+    // 反馈：真点一次赞（与 F-01 同一入口），让"反馈也随会话销毁"有可验证的销毁前状态
+    const messageId = ((await assistantBubbles(page).last().getAttribute('data-testid')) ?? '')
+      .replace('msg-bubble-', '')
+    await page.locator(`[data-testid="feedback-up-${messageId}"]`).click()
+    await expect.poll(async () => (await feedbackList(request)).filter((item) => item.sessionId === sid).length, {
+      timeout: 15_000
+    }).toBeGreaterThan(0)
+    // 会话面/记忆面/上下文面的真键确实在位（Redis DB 13，本域独占）
+    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
+      expect(await redisInt(NFEZUI_REDIS_DB, ['EXISTS', key]), `${key} 销毁前应存在`).toBe(1)
+    }
+    // 业务数据基线：「只删 AI 自有数据」不是"顺手删干净"
+    const tasksBefore = await apiGet<{ totalElements?: number }>(request, '/api/tasks?page=0&size=1')
 
     const first = await apiRaw(request, 'delete', `/api/ai/history/${encodeURIComponent(sid)}`)
     expect(first.status()).toBe(200)
     // DELETE 回的是裸对象（与 /cancel、/context 同姿态，不套 ApiResponse）
-    const removed = (await first.json()) as { deleted?: boolean; existed?: boolean; removedFromIndex?: boolean }
-    expect(removed.deleted).toBe(true)
-    expect(removed.existed).toBe(true)
-    expect(removed.removedFromIndex).toBe(true)
-    expect((await historyOf(request, sid)).count).toBe(0)
-    // 口径如实：DELETE 只删记忆面（后端 note：ai:session / ai:ctx 各有自己的 TTL），
-    // 故 /context 仍可读且 usedTokens 保留；被删掉的是记忆（history），不是上下文计量账本。
-    const ctxAfter = await apiGet<{ usedTokens?: number }>(request, `/api/ai/context/${encodeURIComponent(sid)}`)
-    expect(ctxAfter.usedTokens).toBe(ctxBefore.usedTokens)
+    // 契约来源：`AiController` 的 DELETE 已统一委托 `AiSessionPurgeService`（完整会话销毁）——
+    // 删该会话全部 AI 数据（记忆 / run 13 键 / 上下文 / 附件 / 反馈 / 完整历史 / 会话索引），
+    // 业务数据不碰；旧 `/history` 只是兼容路径，**没有第二套"只清记忆窗口"的语义**。
+    const removed = (await first.json()) as {
+      complete?: boolean
+      found?: boolean
+      aborted?: boolean
+      deleted?: boolean
+      existed?: boolean
+      removedFromIndex?: boolean
+      errors?: string[]
+      deferred?: unknown[]
+      memory?: { existed?: boolean; messages?: number; deleted?: boolean }
+      runs?: Array<{ runId: string; deleted?: boolean; deferred?: boolean }>
+      context?: { deletedKeys?: number }
+      attachments?: { registered?: number; registrationsDeleted?: number; filesDeleted?: number; failedFileIds?: string[] }
+      session?: { currentDeleted?: boolean; recordDeleted?: boolean }
+      database?: {
+        feedbackRows?: number
+        feedbackDeleted?: number
+        chatMessageRows?: number
+        chatMessagesDeleted?: number
+      }
+    }
+    // 销毁完整性：不是"删了点东西就算成功"，而是各面都交代清楚且无残留/无延后
+    expect(removed.complete).toBe(true)
+    expect(removed.aborted).toBe(false)
+    expect(removed.found).toBe(true)
+    expect(removed.deleted).toBe(true) // 兼容字段 = complete
+    expect(removed.existed).toBe(true) // 记忆确实存在过（不是空删）
+    expect(removed.removedFromIndex).toBe(true) // 记忆索引里已没有它
+    expect(removed.errors ?? []).toEqual([])
+    expect(removed.deferred ?? []).toEqual([])
+    expect(removed.memory?.deleted).toBe(true)
+    expect(removed.runs?.every((run) => run.deleted && !run.deferred)).toBe(true)
+    expect(removed.context?.deletedKeys ?? 0).toBeGreaterThan(0)
+    expect(removed.database?.feedbackRows ?? 0).toBeGreaterThan(0)
+    expect(removed.database?.feedbackDeleted).toBe(removed.database?.feedbackRows)
+    expect(removed.database?.chatMessageRows ?? 0).toBeGreaterThan(0)
+    expect(removed.database?.chatMessagesDeleted).toBe(removed.database?.chatMessageRows)
+    // 附件面：N-04 的桩场景没有挂起表单 ⇒ 没有附件实例可造（不伪造）。
+    // 这里只钉"响应必须如实交代附件面、且没有删除失败"；真正的附件删除由 hgta 域用真表单覆盖。
+    expect(removed.attachments?.registrationsDeleted).toBe(removed.attachments?.registered)
+    expect(removed.attachments?.failedFileIds ?? []).toEqual([])
 
-    // 幂等：删一个已不存在的会话仍是 200，不 5xx
+    // ② 销毁后：记忆窗口、完整历史、反馈、上下文计量、会话/记忆/上下文键全部归零/不可读
+    expect((await historyOf(request, sid)).count).toBe(0)
+    const fullAfter = await apiGet<{ count: number }>(
+      request,
+      `/api/ai/history/${encodeURIComponent(sid)}/messages?limit=200`
+    )
+    expect(fullAfter.count).toBe(0)
+    const ctxAfter = await apiGet<{ usedTokens?: number; source?: string }>(
+      request,
+      `/api/ai/context/${encodeURIComponent(sid)}`
+    )
+    // 归零的口径：计量键随会话销毁 ⇒ 读回的是"未测过"（usedTokens=0 且 source=none），
+    // 而不是把旧值留着假装"这轮还很满"。
+    expect(ctxAfter.usedTokens).toBe(0)
+    expect(ctxAfter.source).toBe('none')
+    expect((await feedbackList(request)).filter((item) => item.sessionId === sid)).toEqual([])
+    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`, `ai:session:runs:${sid}`]) {
+      expect(await redisInt(NFEZUI_REDIS_DB, ['EXISTS', key]), `${key} 销毁后应不存在`).toBe(0)
+    }
+    const tasksAfter = await apiGet<{ totalElements?: number }>(request, '/api/tasks?page=0&size=1')
+    expect(tasksAfter.totalElements).toBe(tasksBefore.totalElements)
+
+    // ③ 幂等：删一个已不存在的会话仍是 200，不 5xx；且不再宣称"删掉了记忆"
     const second = await apiRaw(request, 'delete', `/api/ai/history/${encodeURIComponent(sid)}`)
     expect(second.status()).toBe(200)
+    const again = (await second.json()) as { complete?: boolean; found?: boolean; existed?: boolean; deleted?: boolean }
+    expect(again.complete).toBe(true)
+    expect(again.found).toBe(false)
+    expect(again.existed).toBe(false)
+    expect(again.deleted).toBe(true)
   })
 
   test('E2E-N05 会话 id 页签级与刷新沿用：同一 sessionId 沿用、镜像键仍是同一个', async ({ page }) => {

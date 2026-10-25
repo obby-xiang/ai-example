@@ -205,40 +205,72 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
 
   // ── H-04 多卡逐卡决策 ───────────────────────────────────────────────────
 
-  test('E2E-H04 多卡逐卡决策：三条待决台账、闸门逐张揭示、全决前仍挂起全决后解除', async ({ page, request }) => {
+  test('E2E-H04 多卡逐卡决策：整批 park 前公布（全部 req=true）、逐卡决策、全决前仍挂起全决后解除', async ({ page, request }) => {
     const taskId = await createExportStepTask(request)
     await openExportStep(page, taskId)
+    const resumeRequests: string[] = []
+    page.on('request', (request_) => {
+      if (request_.url().includes('/api/ai/events/')) resumeRequests.push(request_.url())
+    })
     await sendMessage(page, `start_export 任务 ${taskId} multi-card=3 多卡-${uniq()}`)
 
     await expect(gate(page).first()).toBeVisible({ timeout: 40_000 })
     const sid = await sidOf(page)
     const run = await currentRun(request, sid)
+    const runId = String(run.runId ?? '')
     const confirms = (run.pendingEntries ?? []).filter(
       (entry) => entry.name === 'start_export' && entry.kind === 'CONFIRM' && entry.entryStatus === 'PENDING'
     )
     // 一批三条待决条目（桩一条消息发 3 个 tool_call，id 互异）
     expect(confirms.length).toBe(3)
     expect(new Set(confirms.map((entry) => entry.toolCallId)).size).toBe(3)
-    // 逐张揭示：此刻只有 1 个条目「请求帧已发」（req=true），前端只对已发帧建卡
-    const emitted = () => confirms.filter((entry) => entry.req === true).length
-    expect(emitted()).toBe(1)
-    await expect(gate(page)).toHaveCount(1)
-    expect(await page.locator('[data-testid="stop-btn"]').count()).toBe(1)
+    // C1（整批公布）：park 之前把本批**每一张**卡的请求帧都公布并置 req=true ——
+    // 不是"决策一张才放一张"。契约来源：`ConfirmGate#publishRequestsForParkedBatch` 类注 C1，
+    // 以及 `HumanWaitParkTest#multiCardBatchPublishesEveryRequestBeforeParking`
+    // （两张卡 req 均为 true、两条 confirm_request 都在 park 前归档）。
+    expect(confirms.filter((entry) => entry.req === true)).toHaveLength(3)
+    const archivedConfirms = (await (await request.get(`${API}/api/ai/events/${runId}`)).text())
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter((payload) => payload.startsWith('{'))
+      .map((payload) => JSON.parse(payload) as { type?: string })
+      .filter((frame) => frame.type === 'confirm_request')
+    expect(archivedConfirms, '整批 3 张卡的请求帧都必须在 park 前公布').toHaveLength(3)
+    // 全决前：本轮仍挂起、仍可被发现（停止钮在）—— 此处**不裁决**屏上并排几张卡（呈现面另案）；
+    // 逐卡决策靠"每次点一张、台账里恰好收敛一条"来证明。
+    await expect(page.locator('[data-testid="stop-btn"]')).toHaveCount(1)
+    await until(async () => {
+      const now = await currentRun(request, sid)
+      return now.snapshotStatus === 'SUSPENDED' && now.awaitingExternal === true
+    }, 30_000, '整批公布后本轮挂起（awaitingExternal=true）')
 
-    // 逐卡拒绝（零执行路径）：每决一张，下一张的请求帧才发出并建卡
+    // 逐卡拒绝（零执行路径）：每点一张只收敛该卡；其余未决 ⇒ 快照仍是 SUSPENDED 且 awaitingExternal=true
+    const decidedIds = new Set<string>()
     for (let i = 1; i <= 3; i += 1) {
       await gateButton(page, '拒绝').first().click()
-      if (i < 3) {
-        // 仍有未决条目 ⇒ 本轮仍挂起 ⇒ 停止钮仍在（不得提前判定收敛）
-        await expect(page.locator('[data-testid="stop-btn"]')).toHaveCount(1, { timeout: 20_000 })
-        await expect(gate(page)).toHaveCount(1, { timeout: 40_000 })
-        const mid = await currentRun(request, sid)
-        expect(mid.snapshotStatus).toBe('SUSPENDED')
-        expect(mid.awaitingExternal).toBe(true)
-        const midReqs = (mid.pendingEntries ?? []).filter((entry) => entry.req === true).length
-        expect(midReqs).toBe(i + 1)
-      } else {
-        await expect(gate(page)).toHaveCount(0, { timeout: 40_000 })
+      await until(async () => {
+        const now = await currentRun(request, sid)
+        const rejected = (now.pendingEntries ?? []).filter(
+          (entry) => entry.name === 'start_export' && entry.entryStatus === 'REJECTED'
+        )
+        rejected.forEach((entry) => decidedIds.add(String(entry.toolCallId)))
+        if (decidedIds.size !== i) return false
+        const stillPending = (now.pendingEntries ?? []).filter(
+          (entry) => entry.name === 'start_export' && entry.entryStatus === 'PENDING'
+        )
+        if (i < 3) {
+          return stillPending.length === 3 - i
+            && now.snapshotStatus === 'SUSPENDED' && now.awaitingExternal === true
+        }
+        return now.awaitingExternal !== true
+      }, 40_000, `第 ${i} 张决策落账${i < 3 ? '且本轮仍挂起' : '且本轮解除'}`)
+      if (i === 1) {
+        // 慢人决策也是正常路径：覆盖原 1/2/4/8s 重试窗口，非末卡只能续收一次且不得误报断流。
+        await page.waitForTimeout(22_000)
+        expect(resumeRequests).toHaveLength(1)
+        expect(resumeRequests[0]).toContain('lastSeq=')
+        await expect(page.locator('[data-testid="notice-bar"]')).toHaveCount(0)
       }
     }
 
@@ -246,8 +278,13 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     const after = await currentRun(request, sid)
     expect(after.awaitingExternal).toBe(false)
     expect(after.snapshotStatus).not.toBe('SUSPENDED')
-    // 三张全拒绝 ⇒ 零作业
+    // 三张全拒绝 ⇒ 零作业、零执行（台账逐条未执行）
     expect(await jobsOf(request, taskId, 'EXPORT')).toHaveLength(0)
+    const ledger = await apiGet<Array<Record<string, unknown>>>(request, `/api/ai/pending/${runId}`)
+    const mine = ledger.filter((entry) => entry.name === 'start_export')
+    expect(mine).toHaveLength(3)
+    expect(mine.every((entry) => entry.status === 'REJECTED')).toBe(true)
+    expect(mine.filter((entry) => entry.executed === true)).toHaveLength(0)
     // 三张已决卡都留在屏上且转只读「已拒绝」
     await expect(page.locator('[data-testid^="ro-badge-"]').filter({ hasText: '已拒绝' })).toHaveCount(3)
   })
@@ -393,42 +430,54 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
   test('E2E-H08 已决只读态：一轮内「已拒绝 + 已批准」双徽标正确、卡体默认折叠可展开', async ({ page, request }) => {
     const taskId = await createExportStepTask(request)
     await openExportStep(page, taskId)
-    // 同一轮出两张卡（桩 multi-card），一张拒绝一张批准 ⇒ 两种终态徽标同屏可比
+    // 同一轮出两张卡（桩 multi-card），一张拒绝一张批准 ⇒ 两种终态徽标同屏可比。
+    // C1 整批公布 ⇒ 两张卡同时可决策，故按 `.first()` 取第一张（不裁决并排张数的呈现面）。
     await sendMessage(page, `start_export 任务 ${taskId} multi-card=2 只读态-${uniq()}`)
-    await expect(gate(page)).toBeVisible({ timeout: 40_000 })
+    await expect(gate(page).first()).toBeVisible({ timeout: 40_000 })
 
     const sid = await sidOf(page)
-    const pendingOf = (run: CurrentRun) => (run.pendingEntries ?? []).filter(
+    const pendingGates = (target: CurrentRun) => (target.pendingEntries ?? []).filter(
       (entry) => entry.name === 'start_export' && entry.kind === 'CONFIRM' && entry.entryStatus === 'PENDING'
     )
     const first = await currentRun(request, sid)
-    expect(pendingOf(first).map((entry) => String(entry.toolCallId))).toHaveLength(2)
-    // 屏上这张卡 = 请求帧已发的那一张（`req=true`，H-04 同一口径）；
-    // 数组顺序不是契约，拿 `pendingIds[0]` 当"第一张"会把决策打到没揭示的卡上。
-    const revealed = pendingOf(first)
-      .filter((entry) => entry.req === true)
-      .map((entry) => String(entry.toolCallId))
-    expect(revealed).toHaveLength(1)
+    const runId = String(first.runId ?? '')
+    expect(pendingGates(first).map((entry) => String(entry.toolCallId))).toHaveLength(2)
+    // C1（整批公布）：两张卡的请求帧都在 park 前发出，因此两条都是 req=true、都可被决策 ——
+    // 不再是"第一张决策后才揭示第二张"。契约来源：`ConfirmGate#publishRequestsForParkedBatch`
+    // 类注 C1 / `HumanWaitParkTest#multiCardBatchPublishesEveryRequestBeforeParking`。
+    // 数组顺序不是契约，决策结果一律以台账回读为准。
+    expect(pendingGates(first).filter((entry) => entry.req === true)).toHaveLength(2)
+    expect(await jobsOf(request, taskId, 'EXPORT')).toHaveLength(0)
 
-    // 卡①拒绝（拒绝永远可用，且拒绝不得被画成「已批准 · 执行失败」）
-    const rejectedId = revealed[0]
+    // 卡①拒绝（拒绝永远可用，且拒绝不得被画成「已批准 · 执行失败」）。
+    // 两张卡同时可决策（C1 整批公布），点哪张不假设 DOM 顺序，决策归属以台账回读为准。
+    let rejectedId = ''
     let approvedId = ''
-    await gateButton(page, '拒绝').click()
-    // 卡②揭示后批准（真实执行）
-    // 决策是异步 POST：点完立刻读 /runs/current 会撞在"拒绝还没落账"的窗口上
-    //（那时第一张仍是 PENDING + req=true，读回来还是同一张）⇒ 等判据本身成立，不写死睡眠。
+    await gateButton(page, '拒绝').first().click()
+    // 决策是异步 POST：点完立刻读 /runs/current 会撞在"拒绝还没落账"的窗口上 ⇒ 等判据本身成立。
+    // 全决前（还剩 1 张未决）本轮必须仍 SUSPENDED 且 awaitingExternal=true（不得提前解除）。
     await until(async () => {
-      const second = await currentRun(request, sid)
-      approvedId = pendingOf(second)
-        .filter((entry) => entry.req === true)
-        .map((entry) => String(entry.toolCallId))[0] ?? ''
-      return approvedId !== '' && approvedId !== rejectedId
-    }, 40_000, '拒绝落账并揭示第二张卡')
-    expect(approvedId).toBeTruthy()
+      const now = await currentRun(request, sid)
+      const rejected = (now.pendingEntries ?? []).filter(
+        (entry) => entry.name === 'start_export' && entry.entryStatus === 'REJECTED'
+      )
+      rejectedId = String(rejected[0]?.toolCallId ?? '')
+      const still = pendingGates(now)
+      approvedId = String(still[0]?.toolCallId ?? '')
+      return rejectedId !== '' && still.length === 1 && approvedId !== rejectedId && approvedId !== ''
+        && now.snapshotStatus === 'SUSPENDED' && now.awaitingExternal === true
+    }, 40_000, '拒绝落账、另一张仍待决且本轮仍挂起')
     expect(approvedId).not.toBe(rejectedId)
+
+    // 卡②批准（真实执行）—— 两张的请求帧都已公布，无需再等"揭示第二张"。
+    // 先等"可批准的唯一一张"成立（已拒绝那张已转只读、无操作按钮），避免点在正在收口的旧卡上。
+    await expect(gateButton(page, '批准')).toHaveCount(1, { timeout: 20_000 })
     await gateButton(page, '批准').click()
     await expect(gate(page)).toHaveCount(0, { timeout: 20_000 })
     await waitRoundSettled(page, 90_000)
+    const after = await currentRun(request, sid)
+    expect(after.awaitingExternal).toBe(false)
+    expect(after.snapshotStatus).not.toBe('SUSPENDED')
 
     // 拒绝终态：✗ 已拒绝 / data-state=rejected
     const rejectedBadge = page.locator(`[data-testid="ro-badge-${rejectedId}"]`)
@@ -449,9 +498,15 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     await expect(page.locator('[data-testid="hitl-gate"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="ro-body-'+rejectedId+'"]').getByRole('button', { name: '批准' })).toHaveCount(0)
 
-    // 真实执行只发生在被批准的那一张：恰好 1 个导出作业
+    // 真实执行只发生在被批准的那一张：恰好 1 个导出作业，且台账里恰好 1 条 executed。
     await until(async () => (await jobsOf(request, taskId, 'EXPORT')).length === 1, 30_000, '批准的那张才执行')
     expect(await jobsOf(request, taskId, 'EXPORT')).toHaveLength(1)
+    const ledger = await apiGet<Array<Record<string, unknown>>>(request, `/api/ai/pending/${runId}`)
+    const mine = ledger.filter((entry) => entry.name === 'start_export')
+    expect(mine).toHaveLength(2)
+    expect(mine.find((entry) => entry.toolCallId === rejectedId)?.status).toBe('REJECTED')
+    expect(mine.filter((entry) => entry.executed === true).map((entry) => String(entry.toolCallId)))
+      .toEqual([approvedId])
     // 两张已决卡同屏（历史卡不被新一轮/刷新吞掉）
     await expect(page.locator('[data-testid^="ro-badge-"]')).toHaveCount(2)
   })

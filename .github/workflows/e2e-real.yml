@@ -172,6 +172,19 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      # harness 的后端 A/B / 桩 / app 日志落在 RUN_DIR（默认 test-results/.e2e-run-<域>，
+      # 点开头）。upload-artifact 默认不传隐藏文件 ⇒ 上面的归档一直缺 "harness 日志"
+      # 那一半（run 40220039653 的 MDO 失败即因此只剩 trace/error-context）。
+      - name: 归档 harness 日志（隐藏目录，单独一包）
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-harness-logs
+          path: frontend/test-results/.e2e-run*/**/*.log
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
   e2e-real:
     name: 真模型 E2E 冒烟（真 key · Chromium）
     if: ${{ inputs.suite == 'real' || inputs.suite == 'both' }}

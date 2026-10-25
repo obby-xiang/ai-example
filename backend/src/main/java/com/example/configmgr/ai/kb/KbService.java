@@ -607,21 +607,28 @@ public class KbService {
         return body;
     }
 
-    /** 0 命中时的近似标题（按字面二元组重合度排序；始终给 2–3 个可读入口）。 */
+    /**
+     * 0 命中时的近似标题（<b>只给标题文本</b>，按字面二元组重合度排序；始终给 2–3 个可读入口）。
+     *
+     * <p>为什么不再拼 {@code id（title）}：真机 run 40220039653 的 K-10 —— 英文查询
+     * {@code flurbox quota} 0 命中，候选串里的 doc_id 字母（{@code ta}/{@code qu}/{@code bo}）
+     * 与 query 的二元组相撞，把 region-tariff / tariff-boundary / data-quality 顶到前 3；
+     * 模型逐字复述了这些候选 doc_id；原文同时明确它们只是近似标题、并非命中。候选只服务"换词重查"，
+     * 不需要也不应该携带可引用的 doc_id。
+     */
     private List<String> suggestTitles(String query) {
         Snapshot current = this.snapshot;
         if (current == null) {
             return List.of();
         }
-        List<String> titles = current.manifest.docs().stream()
-                .map(meta -> meta.id() + "（" + meta.title() + "）").toList();
+        List<String> titles = current.manifest.docs().stream().map(KbDocMeta::title).toList();
         List<String> ranked = new ArrayList<>(titles);
         ranked.sort(Comparator.comparingDouble((String title) -> overlap(query, title)).reversed());
         int count = Math.min(3, ranked.size());
         return count == 0 ? List.of() : new ArrayList<>(ranked.subList(0, count));
     }
 
-    /** 字面二元组重合度（0–1）；用于"近似标题"排序，不参与命中判定。 */
+    /** 字面二元组重合度（0–1）；只对标题计算，用于"近似标题"排序，不参与命中判定。 */
     static double overlap(String query, String title) {
         Set<String> queryGrams = bigrams(KbText.normalizeTerm(query));
         Set<String> titleGrams = bigrams(KbText.normalizeTerm(title));

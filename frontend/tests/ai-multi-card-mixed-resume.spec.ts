@@ -194,8 +194,10 @@ describe('混合卡（CONFIRM + FRONTEND）恢复：决掉一张后其余仍可�
 
     await store.confirm(true, undefined, 'c3')
     expect(store.suspended).toBe(false)
-    // 每一张都恰好一次续流（三张卡 = 三次决策）
+    // 每一张都恰好一次续流；非末卡仍等待输入，末卡必须恢复执行态的重连语义
     expect(api.reattachRun).toHaveBeenCalledTimes(3)
+    expect(api.reattachRun.mock.calls.map((call) => call[2]?.awaitingInput ?? false))
+      .toEqual([true, true, false])
   })
 })
 

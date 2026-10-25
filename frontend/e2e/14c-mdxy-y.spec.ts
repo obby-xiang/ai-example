@@ -127,9 +127,31 @@ test.describe('@stub Y 模型配置页联动', () => {
     const before = await cards.count()
     expect(before).toBeGreaterThanOrEqual(1)
 
-    // ① 必填校验：空 code 提交 ⇒ 后端 400（INVALID_PARAM），卡片数不变
+    // ① 必填校验：空 code 提交 ⇒ 后端 400（INVALID_PARAM），卡片数不变。
+    // 契约来源：`AiConfigWriter.CODE_INVALID_PARAM`（AiConfigWriter.java:82 / invalidParam()）
+    // + 前端键表 `constants/ai-settings-copy.ts` 的 INVALID_PARAM → `ai.settings.errors.INVALID_PARAM`
+    // （zh-CN.json / en-US.json 同键）。
+    // 以**稳定 code** 为主、当前文案为辅：文案已把「参数不在允许范围内」与「默认目标不合法」
+    // 合并成一句（用户可见文案会继续改版），故这里不写死句子 —— 逐字取自 locale 文件的同一键；
+    // 码变了或文案指到别的键才红，纯文案改写不会红。
+    const invalid = await call(request, 'POST', '/providers', { code: '', displayName: '', baseUrl: '' })
+    expect(invalid.status, invalid.text).toBe(400)
+    expect(invalid.json.code).toBe('INVALID_PARAM')
+
+    const readErrors = (locale: string): Record<string, string> => {
+      const json = JSON.parse(readFileSync(join(process.cwd(), 'src', 'locales', locale), 'utf8')) as {
+        ai: { settings: { errors: Record<string, string> } }
+      }
+      return json.ai.settings.errors
+    }
+    const zhInvalidParam = readErrors('zh-CN.json').INVALID_PARAM
+    const enInvalidParam = readErrors('en-US.json').INVALID_PARAM
+    expect(zhInvalidParam).toBeTruthy()
+    expect(enInvalidParam).toBeTruthy()
+
     await page.locator('[data-testid="create-provider-submit"]').click()
-    await expect(page.locator('.el-message').first()).toContainText('参数不在允许范围内')
+    // 界面文案必须来自 INVALID_PARAM 这个键（不是后端 message、也不是别的错误键）
+    await expect(page.locator('.el-message').first()).toHaveText(zhInvalidParam)
     expect(await cards.count()).toBe(before)
 
     // ② 新建：卡片出现、来源标数据库、key 只显示末 4 位

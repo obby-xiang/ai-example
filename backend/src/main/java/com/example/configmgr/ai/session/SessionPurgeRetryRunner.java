@@ -1,8 +1,10 @@
 package com.example.configmgr.ai.session;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.LeaseService;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
@@ -34,7 +36,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <b>耗尽后只重排</b>（owner-CAS 把 nextAt 推到有界未来 + 移到队尾，不再自动执行第 11 次）——
  * 否则"永远 due、永远不执行"的条目会永久占满队头窗口，把其它会话饿死在候选预算之外；</li>
  * <li>启动/队列为空时 SCAN 兜底最多 {@value #MAX_RECOVERY_KEYS} 键；</li>
- * <li>调度周期 {@code 30s}，不做实时轮询。</li>
+ * <li>调度周期 {@code 30s}，不做实时轮询；<b>周期注册本身可关</b>
+ * （{@code app.ai.session.purge-retry.periodic-enabled}，缺省 {@code true} = 生产原样）——
+ * 关掉只停"按周期自动推进"，启动期 SCAN 恢复与 {@link #runOnce()} 同步入口不受影响。</li>
  * </ul>
  *
  * <h2>跨 JVM 单飞</h2>
@@ -76,15 +80,27 @@ public class SessionPurgeRetryRunner {
 
 	private final LeaseService leases;
 
+	private final AiProperties properties;
+
 	private final AtomicBoolean started = new AtomicBoolean();
 
 	private volatile ScheduledExecutorService scheduler;
 
+	/**
+	 * 直接构造（单测）：周期开关取生产缺省，用例一律走 {@link #runOnce()} 同步驱动，不等调度。
+	 */
 	public SessionPurgeRetryRunner(SessionPurgePendingStore pendingStore, AiSessionPurgeService purgeService,
 			LeaseService leases) {
+		this(pendingStore, purgeService, leases, new AiProperties());
+	}
+
+	@Autowired
+	public SessionPurgeRetryRunner(SessionPurgePendingStore pendingStore, AiSessionPurgeService purgeService,
+			LeaseService leases, AiProperties properties) {
 		this.pendingStore = pendingStore;
 		this.purgeService = purgeService;
 		this.leases = leases;
+		this.properties = properties;
 	}
 
 	/** 一轮有界清理的结果（测试/观测；不改变业务语义）。 */
@@ -102,6 +118,12 @@ public class SessionPurgeRetryRunner {
 		}
 		catch (RuntimeException ex) {
 			log.warn("会话销毁 pending 启动恢复失败（不阻塞启动；定时扫描继续）：{}", ex.getMessage());
+		}
+		if (!this.properties.getSession().getPurgeRetry().isPeriodicEnabled()) {
+			// 只停周期注册：启动 SCAN 恢复已在上方完成，runOnce() 仍可由调用方同步驱动。
+			log.info("会话销毁重试周期注册已关闭（app.ai.session.purge-retry.periodic-enabled=false）："
+					+ "启动恢复已执行、runOnce 保持可调用");
+			return;
 		}
 		ScheduledExecutorService svc = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "ai-session-purge-retry");

@@ -3,9 +3,13 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.context.CompactionFuse;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.ContextMeter;
+import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.context.ContextStateStore;
+import com.example.configmgr.ai.context.ContextTrigger;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
@@ -56,6 +60,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -252,6 +257,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 	@Autowired(required = false)
 	public void setContextLimitResolver(ContextLimitResolver resolver) {
 		this.contextLimitResolver = resolver;
+	}
+
+	/**
+	 * 轮内 L1 的记账面（压缩台账 / 归档 / 会话状态）。生产 = {@code RunStore}（它实现
+	 * {@link ContextStateStore}，三键族与轮首压缩同住一处）。
+	 *
+	 * <p><b>为什么可选注入</b>：与 {@link #setContextLimitResolver} 同因 —— 本类构造器被多份
+	 * conformance/run 用例直接 {@code new}，改签名等于要求它们跟改。轻装配面（单测直接 new）没有
+	 * 记账面时，轮内 L1 仍按旧口径只清结果（历史不变、只是少了台账）；<b>生产由容器注入唯一
+	 * {@code RunStore}，不存在"漏装配就没有台账"的静默降级</b>。
+	 */
+	private ContextStateStore contextStateStore;
+
+	/** 可选注入：轮内 L1 的台账/归档/状态。缺失 = 只清结果、不记账（轻装配面）。 */
+	@Autowired(required = false)
+	public void setContextStateStore(ContextStateStore store) {
+		this.contextStateStore = store;
 	}
 
 	/**
@@ -869,9 +891,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 			}
 			needRejudge = false;
 			if (decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS && protectedIds != null) {
+				List<Message> beforeClear = current;
 				ToolResultClearing.Plan plan = ToolResultClearing.plan(current, config.getKeepToolPairs(),
 						protectedIds);
-				if (plan.changed()) {
+				if (plan.changed() && recordTurnClear(runId, snapshot, beforeClear, plan)) {
 					current = plan.messages();
 					cleared += plan.cleared().size();
 					nextEst = Math.max(0, nextEst - plan.savedTokens());
@@ -913,6 +936,121 @@ public class SpToolCallingManager implements ToolCallingManager {
 					armedNow);
 		}
 		return new TurnBudgetOutcome(current, decision.action() == TurnBudgetPlan.Action.OVERFLOW, decision);
+	}
+
+	/**
+	 * 轮内 L1 的记账（与轮首压缩 {@code ContextCompactor#compact} 的 L1 收尾<b>同账</b>）。
+	 *
+	 * <h2>为什么必须记</h2>
+	 * 轮内预算先于轮首压缩命中 L1 是常态（{@code keep-tool-pairs} 把最近 N 对都 pin 住，可清的那一对
+	 * 往往正好是"本批工具结果"落到历史之后才离开 pin 窗口）。只清不记账的结果是：<b>模型看到的上下文
+	 * 真的变了，运维面 {@code ?ledger=1} 与快照 {@code compaction.level} 却仍说"从未压缩"</b> ——
+	 * 同一件事两套口径。
+	 *
+	 * <h2>与轮首的逐项对齐（唯一的差异：谱系已高于 L1 时只记台账/归档、不改状态）</h2>
+	 * <ul>
+	 * <li>顺序同轮首：<b>先归档 → 再写真值 → 再写台账</b>；任一步失败 ⇒ 本批<b>不清</b>（history 原样）。</li>
+	 * <li><b>不宣称原子</b>：三步是三个独立的 Redis 写，没有事务、也没有回滚 —— ②成功而③失败时
+	 * {@code ai:ctx:<sid>} 已落 {@code level=L1/atMs} 而台账缺这一条（{@code /context} 说"压过"、
+	 * {@code ?ledger=1} 说"没压过"）。这是已知的部分失败窗口，靠下一次清除/轮首压缩收敛；不为此新增
+	 * 锁、回滚或新的键协议；</li>
+	 * <li>{@code before/after} 用<b>消息估算</b>（{@code ContextEstimator.estimateMessages}），不是含
+	 * system/tools 的整包估算 —— 与轮首 {@code ledgerEvent} 同一口径；</li>
+	 * <li>{@code level=L1}、{@code turns=0}、{@code lostTokens=0}：L1 只清结果、不折叠轮次（"省了多少"
+	 * 看 before−after，不记在 lostTokens 里）；</li>
+	 * <li>归档内容 = <b>清除前模型看到的那一份</b>（历史里本就是经 {@code ToolResultLimiter} 限流后的
+	 * 文本），不把截断前的上游原文说成"原文"；</li>
+	 * <li>归档键轮号 = {@code state.turnNo() + 1}（本轮，尚未由轮末 {@code recordTurn} 推进）；
+	 * 沿用轮首的键族与 TTL，不另建轮号协议；</li>
+	 * <li><b>只升不降</b>：{@code level} 同时是谱系当前位置（{@code ContextTrigger#advanceTo} 从这里
+	 * 往上推一格）。已到 L2/L3 的会话不因一次轮内 L1 回退成 L1（否则下一轮会重爬 L1→L2、摘要重做），
+	 * 此时只写台账与归档、不改状态；</li>
+	 * <li><b>usage 基线同轮首</b>：写完 {@code level} 立刻把基线置为"清除后规模估算"
+	 * （{@code withUsage(after, …, est=true)}，同 {@code ContextCompactor} 的成功路径）。这不是伪造真值：
+	 * 它是有 {@code est=true} 标记的临时估算，轮末 {@code recordTurn} 仍用上游真值整份覆盖。
+	 * <b>必须写</b>：{@code level} 是 {@code everCompacted()} 的唯一来源，若留着清除前的大的 used，
+	 * 下一轮的轮首压缩会被滞回锁（{@code used/limit ≥ 60%}）整轮挡掉 —— 连只有轮首能做的 L2/L3 也停摆。</li>
+	 * </ul>
+	 *
+	 * <h2>幂等与无法保证的窗口（如实登记）</h2>
+	 * 同一批重复调用不会重复记账：清除后的历史里已是占位符，{@link ToolResultClearing#plan} 不再产出
+	 * 可清条目（{@code plan.changed()=false}）⇒ 根本进不到本方法（前提是调用方喂的是清除后的历史）。
+	 * 同一 run 的并发驱动通常被 run 租约挡住；但上下文台账（{@code appendLedger(sessionId,…)}）没有
+	 * run 围栏，已失去租约的僵尸实例仍可能补写一条。同轮<b>多次</b> L1 清除（后续批次又清掉别的对）
+	 * 会各记一条事件，这是两件真事；但归档键按轮号命名 ⇒ 后一次会覆盖前一次，下一轮轮首压缩也会
+	 * 复用这个键（被覆盖工具结果的原文仍可从 {@code ai:ledger:<runId>} 的工具台账回取）。
+	 * 本方法不引入任何新锁，也不承诺跨进程 exactly-once。
+	 *
+	 * @return 是否允许把清除结果落到历史（{@code false} = 记账失败，本批不清）
+	 */
+	private boolean recordTurnClear(String runId, RunSnapshot snapshot, List<Message> beforeClear,
+			ToolResultClearing.Plan plan) {
+		ContextStateStore store = this.contextStateStore;
+		if (store == null || snapshot == null || snapshot.getSessionId() == null) {
+			// 轻装配面（单测直接 new）：保持"只清结果"的旧口径；生产由容器注入 RunStore
+			return true;
+		}
+		String sessionId = snapshot.getSessionId();
+		long now = System.currentTimeMillis();
+		try {
+			ContextState state = store.read(sessionId);
+			if (state == null) {
+				state = ContextState.EMPTY;
+			}
+			int before = ContextEstimator.estimateMessages(beforeClear);
+			int after = ContextEstimator.estimateMessages(plan.messages());
+			int turnNo = state.turnNo() + 1;
+			// ① 归档清除前原文（与轮首同一个键族 / 同一个 TTL；内容 = 模型当时看到的那份）
+			store.archive(sessionId, turnNo, this.codec.serializeAll(beforeClear));
+			// ② 真值：level 必须被快照看到（否则"清了但显示没压过"）；turns/lostTokens 与轮首 L1 同口径。
+			// 只升不降：`level` 同时是谱系的"当前位置"（ContextTrigger#advanceTo 从这里往上推一格），
+			// 已经到 L2/L3 的会话不能被一次轮内 L1 回退成 L1 —— 那会让下一轮重新爬 L1→L2（摘要重做、
+			// 档位看起来"降级"）。故仅在当前级 ≤ L1 时改写状态；更高的谱系保持原样（台账照记这次 L1 事件）。
+			ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
+			ContextState clearedState = state;
+			if (lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()) {
+				// 与轮首 ContextCompactor 的成功路径同一口径：level + "清除后规模估算"基线一起写。
+				// est=true 明确这是估算；轮末 recordTurn 会用真值覆盖。缺了这一步，下一次轮首压缩会因为
+				// 沿用的旧 used 撞上滞回线（hysteresis_locked）而整轮不做（含 L2/L3）。
+				clearedState = state.withCompaction(ContextTrigger.Level.L1, 0, 0, TurnBudgetPlan.REASON_L1, now)
+					.withUsage(after, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
+							state.systemTokens(), state.toolsTokens(), state.inputTokens());
+				store.write(sessionId, clearedState);
+			}
+			// ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致
+			store.appendLedger(sessionId, turnClearLedgerEvent(before, after, plan, snapshot, now,
+					clearedState.circuit()));
+			log.info("轮内 L1 清除已记账 runId={} sessionId={} turnNo={} before={} after={} clearedPairs={}",
+					runId, sessionId, turnNo, before, after, plan.cleared().size());
+			return true;
+		}
+		catch (RuntimeException ex) {
+			// 三步各自独立写、无事务：此刻归档与 ai:ctx:<sid>（level=L1/atMs）可能已落盘，而台账缺一条。
+			// 本批不清（history 原样）；残留靠下一次清除/轮首压缩收敛 —— 不在这里做回滚。
+			log.warn("轮内 L1 清除未能记账 runId={}：{}（本批不清；归档/状态可能已写、台账缺一条：三步无事务）",
+					runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 轮内 L1 的台账事件（字段与 {@code ContextCompactor#ledgerEvent} 同键同义）。 */
+	private static Map<String, Object> turnClearLedgerEvent(int before, int after, ToolResultClearing.Plan plan,
+			RunSnapshot snapshot, long now, String circuit) {
+		Map<String, Object> event = new LinkedHashMap<>();
+		event.put("level", ContextTrigger.Level.L1.wire());
+		event.put("before", before);
+		event.put("after", after);
+		event.put("turns", 0);
+		event.put("lostTokens", 0);
+		event.put("summaryChars", 0);
+		event.put("model", snapshot.getModelId());
+		event.put("est", false);
+		event.put("atMs", now);
+		event.put("reason", TurnBudgetPlan.REASON_L1);
+		event.put("clearedPairs", plan.cleared().size());
+		event.put("clearedToolCallIds", plan.clearedIds());
+		event.put("circuit", circuit == null ? CompactionFuse.CLOSED : circuit);
+		return event;
 	}
 
 	/**

@@ -944,7 +944,7 @@ ${panelText}`
     expect(sum).toBeLessThanOrEqual(total + 1)
   })
 
-  test('E2E-T07 应用后可撤销：第一层撤销回滚到应用前', async ({ page, request }) => {
+  test('E2E-T07 应用后可撤销：撤销也经预览卡「应用」，第一层回滚到应用前、再撤无第二层', async ({ page, request }) => {
     const taskId = await createSheetImportTask(request)
     await openImportedSheet(page, taskId)
     await sendMessage(page, `scenario=SHEET-UPDATE 用例T07-${uniq()}`)
@@ -967,13 +967,62 @@ ${panelText}`
         }
         return null
       }, DEF)
-    expect(String(await readUsd())).toBe('3')
 
-    // 撤销一层（新会话，桩每会话只发一次工具调用）
+    /** 撤销栈深度（数据面真值：`sheet-tools.sheetUndoDepth`，按工作表实例缓存，与 UI 同源）。 */
+    const undoDepth = async (): Promise<number> =>
+      page.evaluate(async (defCode) => {
+        const ft = (await import('/src/utils/frontend-tools.ts')) as unknown as {
+          resolveSheetContext: (code: string) => Promise<
+            { ok: false; reason: string } | { ok: true; ctx: { adapter: unknown } }
+          >
+        }
+        const tools = (await import('/src/utils/sheet-tools.ts')) as unknown as {
+          sheetUndoDepth: (adapter: unknown) => number
+        }
+        const resolved = await ft.resolveSheetContext(defCode)
+        return resolved.ok ? tools.sheetUndoDepth(resolved.ctx.adapter) : -1
+      }, DEF)
+
+    // 应用后：USD.decimalPlaces = 3、撤销栈深度 1（`applySheetPlan` 反向入栈，深度上限 3）
+    expect(String(await readUsd())).toBe('3')
+    expect(await undoDepth()).toBe(1)
+
+    // 撤销一层（新会话，桩每会话只发一次工具调用）。
+    // 契约（2026-10-25 工具安全边界）：`undo_last_sheet_edit` 是 WRITE / FRONTEND 工具，
+    // 走人围栏 —— `openWritePreview` → `planUndo` 建预览卡（`SheetPreviewCard#isUndoPlan`），
+    // 用户点「应用」才 `applyUndoPlan` 剥栈并回灌；不点应用不写一格。
     await page.locator('[data-testid="new-chat"]').click()
     await expect(page.locator('[data-testid="composer-input"]')).toBeEnabled({ timeout: 30_000 })
     await sendMessage(page, `scenario=SHEET-UNDO 用例T07-撤销-${uniq()}`)
+    const undoCard = page.locator('[data-testid="sheet-preview-card"]')
+    await expect(undoCard).toBeVisible({ timeout: 60_000 })
+    // 预览期零写：预览卡还没点应用，值仍是应用后的 3
+    expect(String(await readUsd())).toBe('3')
+    const undoPosted = watchPost(page, '/api/ai/frontend-tool-result')
+    await undoCard.locator('[data-testid="sheet-preview-apply"]').click()
+    const undoBody = (await undoPosted).postDataJSON() as { outcome?: string; result?: string }
     await waitRoundSettled(page, 60_000)
+
+    // 第一层撤销完成：值回到应用前（2）、回执报「剩余可撤销 0 层」、栈已空
     expect(String(await readUsd())).toBe('2')
+    expect(String(undoBody.outcome ?? '')).toBe('ok')
+    expect(String(undoBody.result ?? '')).toContain('已撤销')
+    expect(String(undoBody.result ?? '')).toContain('剩余可撤销 0 层')
+    expect(await undoDepth()).toBe(0)
+
+    // 再撤不可用 / 无第二层：空栈时 `planUndo` 不建卡、直接如实回执（零写），本轮照常收尾。
+    // 判据 = 无预览卡 + 回灌 outcome=failed 且文案「没有可撤销的 AI 修改」+ 值不变；
+    // 不靠放大超时来掩盖挂死（若空撤销仍建卡，本轮会停在挂起态，waitRoundSettled 会如实失败）。
+    await page.locator('[data-testid="new-chat"]').click()
+    await expect(page.locator('[data-testid="composer-input"]')).toBeEnabled({ timeout: 30_000 })
+    const emptyPosted = watchPost(page, '/api/ai/frontend-tool-result')
+    await sendMessage(page, `scenario=SHEET-UNDO 用例T07-空撤销-${uniq()}`)
+    const emptyBody = (await emptyPosted).postDataJSON() as { outcome?: string; result?: string }
+    await waitRoundSettled(page, 60_000)
+    expect(await page.locator('[data-testid="sheet-preview-card"]').count()).toBe(0)
+    expect(String(emptyBody.outcome ?? '')).toBe('failed')
+    expect(String(emptyBody.result ?? '')).toContain('没有可撤销的 AI 修改')
+    expect(String(await readUsd())).toBe('2')
+    expect(await undoDepth()).toBe(0)
   })
 })

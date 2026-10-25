@@ -2,9 +2,14 @@ package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
+import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.context.ContextTrigger;
+import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.context.ToolResultClearing;
+import com.example.configmgr.ai.context.TurnBudgetPlan;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -77,6 +82,8 @@ class SpToolCallingManagerTurnBudgetTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
+	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
+
 	private final RunRegistry registry = mock(RunRegistry.class);
 
 	private final ConfirmGate gate = mock(ConfirmGate.class);
@@ -118,6 +125,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		// pin 最近 1 对：旧结果可清、本批结果留存（与生产默认 keep=5 同语义，只是窗口更小）
 		this.properties.getContext().setKeepToolPairs(1);
 		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextStateStore(this.contextStore);
 
 		this.store.seedRun(RUN_ID, SESSION_ID);
 		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
@@ -358,6 +366,182 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(bareBeacon.budgetArmed(RUN_ID)).isFalse();
 	}
 
+	// ── 轮内 L1 与轮首同账（台账 / 归档 / 状态，产品一致性批）──────────────────
+
+	/**
+	 * 轮内 L1 清除必须与轮首压缩同账：一条 {@code level=L1} 台账事件，字段口径与
+	 * {@code ContextCompactor#ledgerEvent} 逐键一致（{@code turns/lostTokens} 对 L1 恒 0）。
+	 */
+	@Test
+	void l1ClearWritesCompactionLedgerWithRealAccounting() {
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(historyWithOldResults()),
+				response(7200, 0, "c-1"));
+
+		assertThat(this.contextStore.contextLedger(SESSION_ID)).as("轮内 L1 清除必须留账").hasSize(1);
+		Map<String, Object> event = this.contextStore.contextLedger(SESSION_ID).get(0);
+		assertThat(event.get("level")).isEqualTo("L1");
+		assertThat(event.get("reason")).isEqualTo(TurnBudgetPlan.REASON_L1);
+		assertThat(event.get("turns")).as("L1 不折叠轮次").isEqualTo(0);
+		assertThat(event.get("lostTokens")).as("L1 不丢 token（省下的量看 before-after）").isEqualTo(0);
+		assertThat(event.get("summaryChars")).isEqualTo(0);
+		assertThat(event.get("clearedPairs")).isEqualTo(2);
+		assertThat(idsOf(event)).containsExactly("old-1", "old-2");
+		assertThat(event.get("circuit")).isEqualTo("closed");
+		// before/after = 消息估算（与轮首同一口径），不是含 system/tools 的整包估算：
+		// after 必须等于"清除后那一段历史"的估算；before = after + 两条被清结果省下的量
+		List<Message> postClear = result.conversationHistory();
+		int after = ContextEstimator.estimateMessages(postClear);
+		int saved = 0;
+		for (String id : List.of("old-1", "old-2")) {
+			saved += ContextEstimator.estimate(oldResultText(historyWithOldResults(), id))
+					- ContextEstimator.estimate(oldResultText(postClear, id));
+		}
+		// 语料里的工具结果很小，占位符反而更长 ⇒ saved 可能为负：记账如实相告，不粉饰"省了"
+		assertThat(event.get("after")).isEqualTo(after);
+		assertThat(event.get("before")).isEqualTo(after + saved);
+	}
+
+	/** 归档的是"清除前模型看到的那份内容"（不是上游截断前的无限大原文）。 */
+	@Test
+	void l1ClearArchivesTheContentTheModelActuallyHad() {
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
+
+		assertThat(this.contextStore.archiveCount()).as("一次 L1 清除恰一次归档").isEqualTo(1);
+		List<String> archived = this.contextStore.archived(SESSION_ID, 1);
+		assertThat(archived).as("归档键 = ai:ctx:archive:<sid>:<轮号>（本会话首轮 ⇒ 1）").isNotNull();
+		assertThat(String.join("\n", archived)).contains("旧结果一：任务列表 A").contains("旧结果二：任务列表 B");
+		assertThat(String.join("\n", archived)).as("归档是清除前的内容").doesNotContain(ToolResultClearing.PLACEHOLDER_PREFIX);
+	}
+
+	/** `/context` 快照的 level 必须能看到这次轮内 L1（否则"清了但显示没压过"）。 */
+	@Test
+	void l1ClearMarksTheCompactionStateForSnapshotReaders() {
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
+
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.level()).isEqualTo("L1");
+		assertThat(state.reason()).isEqualTo(TurnBudgetPlan.REASON_L1);
+		assertThat(state.compactedTurns()).isZero();
+		assertThat(state.lostTokens()).isZero();
+		assertThat(state.turnNo()).as("轮号由轮末 recordTurn 推进，轮内不改").isZero();
+	}
+
+	/**
+	 * 轮内 L1 必须按轮首口径重写 usage 基线：只写 {@code level=L1} 而留着旧的高 used，会让下一轮的
+	 * 轮首压缩被<b>滞回锁</b>整轮挡掉（L1/L2/L3 都不再做，而 L2/L3 只有轮首能做）。
+	 *
+	 * <p>判据用的是真实 {@link ContextCompactor} + {@link ContextTrigger}（同一份 AiProperties/分母），
+	 * 不是只对几个字段做形状断言：① 先反证"level=L1 + 高真值"确实锁死；② 再断言轮内清除写下的
+	 * 基线把同一判据放回台面（不是锁死），且基线是估算（{@code est=true}）、轮号不被轮内改写。
+	 */
+	@Test
+	void inRoundClearRewritesTheUsageBaselineSoTheNextRoundIsNotHysteresisLocked() {
+		// ① 反证机制：72% 的真值 + level=L1 ⇒ 轮首压缩 hysteresis_locked（整轮一次都不跑）
+		String legacySession = SESSION_ID + "-legacy";
+		this.contextStore.write(legacySession, ContextState.EMPTY
+			.withCompaction(ContextTrigger.Level.L1, 0, 0, "l1_tool_result_clearing", 1_000L)
+			.withUsage(7200, 100, 3, false, 1_000L, "m", 0, 0, 0));
+		assertThat(roundStart(legacySession, historyWithOldResults(), 7200, 100).reason())
+			.as("旧口径（只写 level、不重写基线）确实会被滞回锁挡掉")
+			.isEqualTo(ContextCompactor.REASON_HYSTERESIS_LOCKED);
+
+		// ② 轮内清除：基线改成"清除后的估算"（与轮首 ContextCompactor 同款），轮号不动
+		this.contextStore.write(SESSION_ID, ContextState.EMPTY
+			.withCompaction(ContextTrigger.Level.L1, 0, 0, "l1_tool_result_clearing", 1_000L)
+			.withUsage(7200, 100, 3, false, 1_000L, "m", 0, 0, 0));
+		List<Message> postClear = this.manager
+			.executeToolCalls(prompt(historyWithOldResults()), response(7200, 100, "c-1"))
+			.conversationHistory();
+
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.usedTokens()).as("基线 = 清除后的估算，不是旧的高真值")
+			.isEqualTo(ContextEstimator.estimateMessages(postClear));
+		assertThat(state.est()).as("估算基线（est=true），不是伪造的上游真值").isTrue();
+		assertThat(state.turnNo()).as("轮号由轮末 recordTurn 推进，轮内不改").isEqualTo(3);
+
+		// ③ 同一套判据在清除后必须被重新评估（不是锁死）
+		assertThat(roundStart(SESSION_ID, postClear, state.usedTokens(), state.completionTokens()).reason())
+			.as("轮内 L1 不得把下一轮整体锁死")
+			.isNotEqualTo(ContextCompactor.REASON_HYSTERESIS_LOCKED);
+	}
+
+	/** 已经到 L2/L3 的谱系不被一次轮内 L1 回退（{@code level} 同时是 advanceTo 的起点）。 */
+	@Test
+	void inRoundClearNeverDowngradesAHigherLineageLevel() {
+		this.contextStore.write(SESSION_ID, ContextState.EMPTY
+			.withCompaction(ContextTrigger.Level.L3, 2, 900, "hard_trim", 1_000L)
+			.withUsage(5000, 100, 3, false, 1_000L, "m", 0, 0, 0));
+
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
+
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.level()).as("轮内 L1 不回退谱系").isEqualTo("L3");
+		assertThat(state.compactedTurns()).isEqualTo(2);
+		assertThat(state.lostTokens()).isEqualTo(900);
+		assertThat(this.contextStore.contextLedger(SESSION_ID)).as("台账照记这次 L1 事件").hasSize(1);
+		assertThat(this.contextStore.contextLedger(SESSION_ID).get(0).get("level")).isEqualTo("L1");
+	}
+
+	/** 重复触发不重复记账：已清成占位符的结果不会再产生一条事件。 */
+	@Test
+	void repeatedBatchesRecordEachRealClearExactlyOnce() {
+		List<Message> first = this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"))
+			.conversationHistory();
+
+		this.manager.executeToolCalls(prompt(first), response(7200, 0, "c-2"));
+
+		List<Map<String, Object>> ledger = this.contextStore.contextLedger(SESSION_ID);
+		assertThat(this.contextStore.ledgerCount()).as("两拍各一次真实清除 ⇒ 恰好两条事件").isEqualTo(2);
+		assertThat(ledger).hasSize(2);
+		// 读回新→旧：最新一条清的是本拍离开 pin 窗口的 c-1；旧拍的两条不会被重记
+		assertThat(idsOf(ledger.get(0))).containsExactly("c-1");
+		assertThat(idsOf(ledger.get(1))).containsExactly("old-1", "old-2");
+	}
+
+	/** 非 L1 分支（未达阈值 / 收尾 / 越窗）不得新增台账与归档。 */
+	@Test
+	void nonL1BranchesWriteNoLedgerOrArchive() {
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(1000, 0, "c-1"));
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(9600, 0, "c-2"));
+		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(historyWithOldResults()), response(LIMIT, 0, "c-3")))
+			.isInstanceOfSatisfying(StreamViolationException.class,
+					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CONTEXT_OVERFLOW));
+
+		assertThat(this.contextStore.ledgerCount()).isZero();
+		assertThat(this.contextStore.archiveCount()).isZero();
+		assertThat(this.contextStore.read(SESSION_ID).level()).isEqualTo("none");
+	}
+
+	/**
+	 * 记账失败 ⇒ 本轮不清；但三步是<b>三个独立 Redis 写、无事务</b>：台账失败之前归档与状态已经落盘。
+	 *
+	 * <p>本用例锁的是这个<b>真实的部分失败窗口</b>（不是"原子回滚"）：history 原样、占位符为 0，
+	 * 与此同时 {@code ai:ctx:<sid>} 已是 {@code level=L1}、归档已写入，而台账缺这一条 ——
+	 * 即 {@code /context} 说"压过"、{@code ?ledger=1} 说"没压过"。不新增锁/回滚协议。
+	 */
+	@Test
+	void ledgerFailureKeepsHistoryUnchanged() {
+		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
+			@Override
+			public void appendLedger(String sessionId, Map<String, Object> event) {
+				throw new IllegalStateException("redis down");
+			}
+		};
+		this.manager.setContextStateStore(broken);
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
+
+		// ① 历史真的没清（模型看到的东西不因记账失败而少一半）
+		assertThat(oldResultText(result.conversationHistory(), "old-1")).isEqualTo("旧结果一：任务列表 A");
+		assertThat(countPlaceholders(result.conversationHistory())).isZero();
+		assertPairing(result.conversationHistory());
+		// ② 但归档与 level=L1 在台账失败之前已经写下 —— 已知窗口，不是回滚
+		assertThat(broken.archiveCount()).as("归档先于台账，已落盘").isEqualTo(1);
+		assertThat(broken.read(SESSION_ID).level()).as("状态先于台账，已写 L1").isEqualTo("L1");
+		assertThat(broken.contextLedger(SESSION_ID)).as("台账缺这一条（/context 与 ?ledger=1 在此窗口不一致）")
+			.isEmpty();
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	/** 旧历史：一条"很大"的工具结果 + 一条本轮输入（用于真值不重复计入的用例）。 */
@@ -454,6 +638,19 @@ class SpToolCallingManagerTurnBudgetTest {
 		return responsesOf(history).stream()
 			.filter(response -> ToolResultClearing.isAlreadyCleared(response.responseData()))
 			.count();
+	}
+
+	/** 用真实 ContextCompactor（同一份 AiProperties/分母/resolver）跑一次"下一轮的轮首压缩"。 */
+	private ContextCompactor.Outcome roundStart(String sessionId, List<Message> history, int used, int completion) {
+		ContextCompactor compactor = new ContextCompactor(this.properties,
+				new ContextLimitResolver(this.properties), this.contextStore);
+		return compactor.compact(new ContextCompactor.Request(sessionId, RUN_ID, "test-model", 1L, history,
+				this.codec.serializeAll(history), used, completion, 0, 0, 0, 0, Set.of(), null));
+	}
+
+	/** 台账事件里的 clearedToolCallIds（JSON 反序列化形态不固定，统一成字符串列表再断言）。 */
+	private static List<String> idsOf(Map<String, Object> event) {
+		return ((List<?>) event.get("clearedToolCallIds")).stream().map(String::valueOf).toList();
 	}
 
 	/** 配对完整性：每个 assistant toolCall 恰有一个 tool 响应，反之亦然（上游 400 的经典成因）。 */

@@ -10,7 +10,8 @@ import java.util.List;
  * <li>{@link State#OK}：≥3 条命中；</li>
  * <li>{@link State#LOW_CONFIDENCE}：1–2 条命中，且所有条目标 {@code match=low}
  * （"只有一两条"本身就是低置信的强信号，不能让模型当成确定答案）；</li>
- * <li>{@link State#NO_MATCH}：0 条 + 分析后的检索词 + 2–3 个近似标题（不是静默空数组）；</li>
+ * <li>{@link State#NO_MATCH}：0 条 + 分析后的检索词 + 2–3 个近似标题（<b>仅标题文本</b>，
+ * 不带 doc_id、不是命中；只用于换词重查，不是静默空数组）；</li>
  * <li>{@link State#ERROR}：检索异常，消息可行动、不含堆栈（fail-open：不打断整轮）；</li>
  * <li>{@link State#NOT_READY}：索引尚未建好（启动异步建索引），工具回"知识库加载中"；</li>
  * <li>{@link State#DISABLED}：{@code app.ai.kb.enabled=false}；</li>

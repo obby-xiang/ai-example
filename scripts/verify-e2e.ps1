@@ -3204,9 +3204,9 @@ Add-AiCase 'H-04' 'P0' '多卡逐卡决策：每卡独立收敛、其余卡未�
     $runId = $first.runId
     $cards = New-Object System.Collections.ArrayList
     $cards.Add($first) | Out-Null
-    # 一批多卡是"逐条发射"的：第 N 张卡在第 N-1 张决策之后才发（ConfirmGate 的挂起投放契约）。
-    # 因此这里必须"决策 → 再收下一张"地滚动，不能"一次性收 3 张再一次决策"——
-    # 后者在真实时序下永远只收到 1 张，剩余 2 张会以 PENDING 留在台账里（旧实现的假红根因）。
+    # C1（2026-10-25 裁决）：park 开启时整批请求帧由 ConfirmGate#publishRequestsForParkedBatch
+    # 在 park **前一次公布**（本批每张卡的 req 都置 true），不再"第 N 张等第 N-1 张决策后才发"。
+    # 本循环只保留"收已公布帧 → 逐条决策"的节奏；判据仍是逐卡独立收敛、全决前 awaitingExternal=true。
     $decided = New-Object System.Collections.ArrayList
     $deadline = (Get-Date).AddSeconds(45)
     while ($decided.Count -lt 3 -and (Get-Date) -lt $deadline) {

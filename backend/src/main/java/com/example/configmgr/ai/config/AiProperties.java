@@ -978,6 +978,27 @@ public class AiProperties {
 			/** watchdog 续期间隔（ADR-5 补记 CH-P4：锁须带续期）。 */
 			private Duration watchdog = Duration.ofSeconds(30);
 		}
+
+		/** 会话销毁 pending 的自动重试闭环（{@code app.ai.session.purge-retry.*}）。 */
+		private PurgeRetry purgeRetry = new PurgeRetry();
+
+		/**
+		 * 自动重试的<b>周期注册</b>开关（缺省 {@code true} = 生产原样）。
+		 *
+		 * <p>只管"是否按周期（30s）把 pending 收敛到 complete"，<b>不</b>碰启动期 SCAN 恢复
+		 * （{@code ApplicationReadyEvent} 先 {@code recoverOrphans}，再由本键决定是否注册周期），
+		 * 也不碰同步入口 {@code SessionPurgeRetryRunner#runOnce()}。
+		 *
+		 * <p>关闭的用途只有一类：单测（{@code src/test/resources/application.properties}）。周期线程在
+		 * Spring 上下文缓存后跨测试类续跑，而倒排录制按"测试类墙钟窗口"归因（线程无关）⇒ 清理触达会被
+		 * 记到邻类窗口，同 tree 两遍录制出现成对假边（nightly 40219310874，diff=58）。单测直接驱动
+		 * {@code runOnce()} 即可覆盖同一批语义。
+		 */
+		@Data
+		public static class PurgeRetry {
+
+			private boolean periodicEnabled = true;
+		}
 	}
 
 	/**

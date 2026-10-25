@@ -114,6 +114,8 @@ export interface SseStreamOptions {
    * 不传 = 全量回放（与 S4.2 时期行为一致）。
    */
   lastSeq?: number
+  /** 快照或剩余待决卡证明本轮仍 park；旧请求帧不会因增量回放再次送达。 */
+  awaitingInput?: boolean
 }
 
 interface StreamState {
@@ -124,7 +126,7 @@ interface StreamState {
   /** 已收到的最大帧序号（T6：重挂时回传，服务端只补增量）。 */
   lastSeq: number | null
   /**
-   * 本连接是否已收到**挂起类请求帧**（`confirm_request` / `frontend_tool_request`）。
+   * 本连接收到挂起类请求帧，或调用方已由快照/剩余待决卡确认本轮仍 park。
    *
    * B1（2026-10-20，挂起即断）：服务端在这类帧之后**主动完成订阅**（流派 B），
    * 因此"连接关闭"在这里是**正常收尾**而不是断流 —— 既不自动重连（否则挂起期
@@ -294,6 +296,10 @@ function consumeFrame(
   if (isSuspendRequestFrame(frame)) {
     // B1：卡面请求帧已送达 ⇒ 服务端随后主动收流（挂起即断）。标记只在本连接内有效。
     state.awaitsInput = true
+  } else if (frame.type === 'delta' || frame.type === 'reasoning' || frame.type === 'message_start'
+    || frame.type === 'retry' || frame.type === 'tool_start' || frame.type === 'tool_result'
+    || frame.type === 'frontend_tool_result') {
+    state.awaitsInput = false
   }
   handlers.onFrame?.(frame)
   if (isTerminalFrame(frame)) {
@@ -582,6 +588,7 @@ export async function reattach(
 ): Promise<StreamCloseInfo> {
   const state = existing ?? newState()
   state.runId = runId
+  state.awaitsInput ||= options.awaitingInput === true
   const maxReconnects = DEFAULT_MAX_RECONNECTS
   const random = options.random ?? Math.random
   const idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
@@ -592,6 +599,7 @@ export async function reattach(
     let connectTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
     let settled = false
+    let connectionEstablished = false
 
     const clearIdle = (): void => {
       if (idleTimer !== null) {
@@ -632,6 +640,7 @@ export async function reattach(
     }
 
     const startIdle = (): void => {
+      connectionEstablished = true
       clearIdle()
       // 连接已被证明活着（onopen / 收到帧），建连看门狗让位
       clearConnect()
@@ -684,13 +693,16 @@ export async function reattach(
         settle(state.terminal, '连接已取消')
         return
       }
-      if (state.awaitsInput) {
-        // B1（2026-10-20 挂起即断）：本连接已收到卡面请求帧 ⇒ 服务端收流属正常收尾。
-        // 不重连（重连会带着 lastSeq 再挂一条连接、在挂起期白占心跳）；下一次连理由决策触发。
+      if (state.awaitsInput && connectionEstablished) {
+        // 请求帧或权威快照都已确认本轮在等人：服务端收流属正常收尾，不做无意义重连。
+        // 后续连接是否允许重连由调用方重新判定；已收到的终帧不会被这个初始状态覆盖。
         settle(false, '挂起等待（服务端已主动收流，决策后带 lastSeq 重连）')
         return
       }
       if (attempts >= maxReconnects) {
+        if (!connectionEstablished) {
+          state.awaitsInput = false
+        }
         settle(state.terminal, `${reason}（重挂已尝试 ${attempts} 次）`)
         return
       }

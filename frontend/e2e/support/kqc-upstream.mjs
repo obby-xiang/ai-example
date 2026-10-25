@@ -79,6 +79,14 @@ function lastUserText(body) {
   return users.length === 0 ? '' : textOf(users[users.length - 1])
 }
 
+/** 系统段正文（摘要指令头在这里；摘要请求的 user 段只是定界 transcript）。 */
+function systemText(body) {
+  return messagesOf(body)
+    .filter((m) => m?.role === 'system')
+    .map(textOf)
+    .join('\n')
+}
+
 function disclosedTools(body) {
   const tools = Array.isArray(body?.tools) ? body.tools : []
   return tools.map((tool) => tool?.function?.name ?? tool?.name ?? '').filter(Boolean)
@@ -135,10 +143,21 @@ function requestToolOf(body) {
 
 const USAGE_SHAPE_MARKER = /\busage-shape=(last|repeat|zero-last|none)\b/
 
+/**
+ * usage 形状是**用例级**开关，跟着用例消息走 —— 不是"最后一条 user"。
+ *
+ * 轮内上下文预算（`SpToolCallingManager.TURN_BUDGET_WRAP_UP`）会在工具结果之后追加一条
+ * 自己的收尾指令（role=user），那一跳的末条 user 里没有标记；只看末条会让续轮掉回 `last`
+ * （prompt=1200），而轮首压缩的判据值取的就是"上一跳的 usage 真值" ⇒ 分母被算成
+ * 1200/6000 ≈ 0.21，L1 再也不触发。故从末条往前找，取最近一条带标记的 user 消息。
+ */
 function usageShapeOf(body) {
-  const text = lastUserText(body)
-  const match = USAGE_SHAPE_MARKER.exec(text ?? '')
-  return match ? match[1] : 'last'
+  const users = messagesOf(body).filter((message) => message?.role === 'user').map(textOf)
+  for (let index = users.length - 1; index >= 0; index -= 1) {
+    const match = USAGE_SHAPE_MARKER.exec(users[index] ?? '')
+    if (match) return match[1]
+  }
+  return 'last'
 }
 
 /** usage 数值唯一取数点 = `scripts/ci/stub-routes.json` 的 `usageShapes`。 */
@@ -292,18 +311,33 @@ const C_DOMAIN_TOOLS = new Set(['get_config_def'])
  * 为什么必须显式区分：摘要请求的正文里带着 transcript（含历史 user 消息的 `tool=` 标记），
  * 若按普通轮判定会把它当成"再来一次工具调用"，摘要器拿到空正文 ⇒ 被产品判成摘要失败。
  * 这里的回执必须是**确定性非空文本**，L2 的"摘要成功"路径才有可断言的面。
+ *
+ * 指令头在 **system 段**（`ContextSummaryClient.production` 固定发 SystemMessage + UserMessage）；
+ * user 段只是不可信的定界 transcript。用 user 段识别会永远不命中，且 transcript 里的历史标记
+ * 会先把请求路由成普通工具轮 —— 非流式请求收到 SSE 帧 ⇒ 产品侧解析失败 ⇒ 摘要恒失败。
  */
 const SUMMARY_REQUEST = /You (summarize an AI assistant conversation|merge partial summaries of one AI assistant conversation)/
 
-/** 摘要回执（六项保留清单与 `RollingSummarizer.REQUIRED_SECTIONS` 同序；文本确定性）。 */
+/**
+ * 摘要回执（六项保留清单与 `RollingSummarizer.REQUIRED_SECTIONS` 同序；文本确定性）。
+ *
+ * 必须闭合在 `<conversation_summary>…</conversation_summary>` 内：产品侧
+ * `ContextSummaryClient#requireClosedSummary` 要求块外无文字，裸正文会按失败处理。
+ */
+const SUMMARY_OPEN = '<conversation_summary>'
+
+const SUMMARY_CLOSE = '</conversation_summary>'
+
 const SUMMARY_TEXT = [
+  SUMMARY_OPEN,
   '（压缩摘要 · 桩）',
   '1) USER GOAL: 反复核对标准费率口径并取工具结果作答。',
   '2) CONFIRMED WORKSPACE AND PAGE OPERATIONS: 任务中心，未做任何页面写操作。',
   '3) EXECUTED IRREVERSIBLE ACTIONS AND RESOURCE IDS: none。',
   '4) UNRESOLVED ERRORS AND NEXT STEPS: none，继续按用户问题作答。',
   '5) PENDING APPROVALS (toolCallId + tool name + argument digest): none。',
-  '6) COMPLETED - DO NOT REDO: 已完成的工具查询不再重跑。'
+  '6) COMPLETED - DO NOT REDO: 已完成的工具查询不再重跑。',
+  SUMMARY_CLOSE
 ].join('\n')
 
 /**
@@ -401,9 +435,10 @@ function handleChat(raw, res) {
   }
   const model = typeof body?.model === 'string' && body.model ? body.model : 'kqc-stub'
   const userText = body ? lastUserText(body) : ''
+  const system = body ? systemText(body) : ''
   const shape = usageShapeOf(body)
-  // 摘要请求：LLM 侧旁路调用（`ContextSummaryClient` 单条 UserMessage，指令头固定）
-  const summaryRequest = SUMMARY_REQUEST.test(userText)
+  // 摘要请求：LLM 侧旁路调用（`ContextSummaryClient` 固定 SystemMessage 指令头 + UserMessage transcript）
+  const summaryRequest = SUMMARY_REQUEST.test(system)
 
   if (/\bcontext-overflow\b/.test(userText) && !summaryRequest) {
     record(index, raw, body ?? {}, { kind: 'error', status: 400, reason: 'context-overflow 注入（越窗 400）' })

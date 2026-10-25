@@ -112,7 +112,8 @@ public class KbTools {
 
     @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/口径/术语类问题先用它）。"
             + "每条返回 doc_id/title/section/snippet/updated_at/match（high/medium/low）；不返回检索分数。"
-            + "空结果状态为 no_match（含检索词与近似标题）或 low_confidence（仅 1–2 条，全部标 low）；"
+            + "空结果状态为 no_match（含检索词与近似标题；近似标题只用于换词重查，不是命中，"
+            + "不得在答复中列举或引用）或 low_confidence（仅 1–2 条，全部标 low）；"
             + "拿到片段后如需条款原文，用 kb_read_doc 读取，不要仅凭片段推测",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
@@ -143,6 +144,9 @@ public class KbTools {
             sb.append("未检索到相关知识。\n");
             if (!result.suggestions().isEmpty()) {
                 sb.append("可参考的标题: ").append(String.join("；", result.suggestions())).append('\n');
+                // 候选只用于换词重查：不带 doc_id（真机 K-10 的泄漏面），且必须说清它不是命中
+                sb.append("提示: 以上仅为近似标题，不是命中；只用于换用同义词/正式名称重查，"
+                        + "不得在答复中列举或引用。\n");
             }
             sb.append("建议: 换用业务口径中的正式名称或同义词再查一次；仍无结果时明确说明“知识库中未找到”，"
                     + "并建议用户联系对应业务负责人。\n");

@@ -287,10 +287,14 @@ test.describe('@stub S 流式稳定', () => {
     const retries = frames.filter((frame) => frame.type === 'retry')
     const done = frames.find((frame) => frame.type === 'done')
 
-    // ① 恰 1 次重试、attempt=2，码为上游流错误（503 落在流错误族）
+    // ① 恰 1 次重试、attempt=2，码为「上游暂时不可用」且可重试。
+    //    契约来源（2026-10-25）：`ErrorCodes#UPSTREAM_UNAVAILABLE`（408/5xx/网络层 ——
+    //    "这一轮请求根本没拿到可用响应"）与 `UpstreamErrorClassifier#byStatus`
+    //    （status 408 或 5xx ⇒ new Outcome(UPSTREAM_UNAVAILABLE, retryable=true, null, status)）。
+    //    能收到 `retry` 帧本身就是"已判为可重试"的实证：不可重试的分支直接走 error 终帧。
     expect(retries).toHaveLength(1)
     expect(Number(retries[0].nextAttempt)).toBe(2)
-    expect(String(retries[0].code)).toBe('UPSTREAM_STREAM_ERROR')
+    expect(String(retries[0].code)).toBe('UPSTREAM_UNAVAILABLE')
 
     // ② 退避可观测：retry 之后到首个正文帧的间隔 ≈ 500ms 档（不是立即重打）
     const firstDelta = frames.find((frame) => frame.type === 'delta')
@@ -356,9 +360,22 @@ test.describe('@stub S 流式稳定', () => {
   })
 
   /**
-   * S-13 单帧 64KB 上限不破坏 JSON：桩 huge-frame=102400 ⇒ 字段级截断后仍合法，前端零解析异常。
+   * S-13 单帧 64KB 上限不破坏 JSON：桩 huge-frame=102400 ⇒ 正文按上限**跨帧分片**
+   * （同一 messageId 的多条既有 delta），不丢字、不挂截断标记，前端零解析异常。
+   *
+   * <p>契约来源（2026-10-25 截断专项）：`FrameSizeLimiter` 类注「跨帧分片」+ `splitStringValue`
+   * + `SseChatEmitter#delta` —— 可续接的 `delta.text` 不再做字段级截断；上限 = `AiProperties`
+   * 的 `app.ai.result-budget.ui.max-frame-bytes`（application.yml = 65536，e2e harness 不覆盖）。
+   * 判据与 `DeltaFrameSplitTest` / `DeltaFrameSplitLimitGuardTest` 同源：每帧整帧 JSON ≤ 上限、
+   * 同一 messageId、按序拼接 == 原文、**不挂** truncated/noticeCode 等截断标记。
+   *
+   * <p>字节口径：`captureChat` 走 Playwright 的 `response.text()`，对 SSE 响应用的是浏览器侧的
+   * 缺省字符集解码（非 UTF-8），把它拿来量 UTF-8 字节会把中文放大（假超限）。因此**字节上限**
+   * 与**原文长度**都从归档原文量：`GET /api/ai/events/{runId}` 由 Node 侧按 UTF-8 取字节，
+   * 与 `SseChatEmitter` 的 `payloadBytes = objectMapper.writeValueAsBytes(frame)` 同一口径；
+   * 实时流只用来对齐帧集（seq/type 逐位相同）与"UI 画出了收到的每一片"。
    */
-  test('E2E-S13 百 KB 大帧：截断后仍是合法 JSON，truncated 契约齐全，前端零解析异常', async ({ page }) => {
+  test('E2E-S13 百 KB 大帧：同 messageId 跨帧分片、每帧合法且 ≤64KB、正文完整、前端零解析异常', async ({ page, request }) => {
     const consoleErrors: string[] = []
     page.on('console', (message) => {
       if (message.type() === 'error') consoleErrors.push(message.text())
@@ -368,29 +385,59 @@ test.describe('@stub S 流式稳定', () => {
     await sendMessage(page, P('turn-text huge-frame=102400 S13'))
     await waitRoundSettled(page, 60_000)
 
-    // ① 能解析出完整帧（解析本身即"JSON 未被截断破坏"的证明）
-    const frames = parseSse(await chat.body())
-    const delta = frames.find((frame) => frame.type === 'delta')
-    expect(delta).toBeTruthy()
-    expect(delta!.truncated).toBe(true)
-    // I-3：新契约 = 稳定展示码 + 结构化数字；旧字段仅作兼容别名，不再承载机器前缀/中文。
-    expect(delta!.noticeCode).toBe('frame_truncated')
-    expect(Number(delta!.originalChars)).toBe(102400)
-    expect(Number(delta!.returnedChars)).toBeGreaterThan(0)
-    expect(Number(delta!.returnedChars)).toBeLessThan(Number(delta!.originalChars))
-    expect(String(delta!.notice ?? '')).not.toBe('')
-    expect(String(delta!.notice ?? '')).toBe(String(delta!.truncatedReason ?? ''))
-    expect(String(delta!.truncatedReason ?? '')).not.toContain('frame-bytes-exceeded')
-    expect(String(delta!.truncatedReason ?? '')).not.toMatch(/[\u4e00-\u9fff]/)
+    const live = parseSse(await chat.body()).filter((frame) => frame.type !== 'heartbeat')
+    expect(live.length).toBeGreaterThan(0)
+    const runId = String(live.find((frame) => frame.type === 'start')?.runId ?? '')
+    expect(runId).not.toBe('')
 
-    // ② 正文渲染长度等于**帧契约里的 returnedChars**（截断口径被 UI 如实兑现），轮次正常收尾。
-    //    只量 `.md-body` 正文，排除截断提示角标/布局空白（角标不是正文的一部分）。
+    // ① 归档原文（Node 侧 UTF-8）：每帧整帧 JSON 的字节数 ≤ 单帧上限（判定含全部字段/转义）。
+    const archivedRaw = (await (await request.get(`${API_BASE}/api/ai/events/${runId}`)).body()).toString('utf8')
+    const archivedPayloads = archivedRaw
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter((payload) => payload.startsWith('{'))
+    const maxFrameBytes = 64 * 1024
+    const oversized = archivedPayloads
+      .map((payload) => Buffer.byteLength(payload, 'utf8'))
+      .filter((bytes) => bytes > maxFrameBytes)
+    expect(oversized).toEqual([])
+
+    // ② 每帧都是合法 JSON（逐行 JSON.parse；任何一帧被字节级腰斩都会在这里抛）。
+    const archived = archivedPayloads
+      .map((payload) => JSON.parse(payload) as { type: string; messageId?: unknown; [key: string]: unknown })
+      .filter((frame) => frame.type !== 'heartbeat')
+    expect(archived.length).toBeGreaterThan(0)
+
+    // ③ 实时 == 归档：同一帧集（seq/type 逐位相同）⇒ 分片在实时通道没有丢帧、没有重发。
+    const shape = (frames: Array<{ type: string; [key: string]: unknown }>) =>
+      frames.map((frame) => `${frame.type}#${String(frame.seq)}`)
+    expect(shape(live)).toEqual(shape(archived))
+
+    // ④ 正文走"同一 messageId 的多帧 delta"：至少 2 片、messageId 唯一、无任何截断标记。
+    const deltas = archived.filter((frame) => frame.type === 'delta')
+    expect(deltas.length).toBeGreaterThan(1)
+    expect(new Set(deltas.map((frame) => String(frame.messageId))).size).toBe(1)
+    for (const frame of [...deltas, ...live.filter((frame) => frame.type === 'delta')]) {
+      expect(frame.truncated).toBeUndefined()
+      expect(frame.noticeCode).toBeUndefined()
+      expect(frame.truncatedReason).toBeUndefined()
+      expect(frame.originalChars).toBeUndefined()
+      expect(frame.returnedChars).toBeUndefined()
+    }
+
+    // ⑤ 拼接正文完整：桩注入 102400 字符，一字不少（分片不得丢字/重字），轮次正常收尾。
+    const text = deltaText(archived)
+    expect(text.length).toBe(102400)
+
+    // ⑥ 渲染长度与归档正文一致（UI 用 TextDecoder('utf-8') 解流，画出的就是这 102400 字）；
+    //    只量 `.md-body` 正文，排除截断提示角标/布局空白。
     const rendered = (await assistantBubble(page).locator('.md-body').last().innerText()).trim()
-    expect(rendered.length).toBe(Number(delta!.returnedChars))
-    expect(rendered.length).toBeGreaterThan(0)
+    expect(rendered.length).toBe(text.length)
+    expect(rendered.length).toBe(102400)
     await expect(page.locator('[data-testid="send-btn"]')).toBeVisible({ timeout: 10_000 })
 
-    // ③ 前端零未捕获异常 / 零解析错误
+    // ⑦ 前端零未捕获异常 / 零解析错误
     expect(consoleErrors).toEqual([])
   })
 
@@ -637,6 +684,10 @@ test.describe('@stub R 刷新恢复', () => {
     await expect(gate).toBeVisible({ timeout: 30_000 })
     const sid = await sessionId(page)
     const bubblesBefore = await page.locator('[data-testid^="msg-bubble-"]').count()
+    const reconnects: string[] = []
+    page.on('request', (request_) => {
+      if (request_.url().includes('/api/ai/events/')) reconnects.push(request_.url())
+    })
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
@@ -652,15 +703,12 @@ test.describe('@stub R 刷新恢复', () => {
     expect(current.found).toBe(true)
     expect(String(current.snapshotStatus)).toBe('SUSPENDED')
 
-    // ③ 刷新后 5s 内不出现「常驻转圈」：待决卡立即回到可操作态（批准钮可用），
-    //    且不出现重连风暴（挂起期不占连接 = 不该反复拉 /events）
-    const reconnects: string[] = []
-    page.on('request', (request_) => {
-      if (request_.url().includes('/api/ai/events/')) reconnects.push(request_.url())
-    })
-    await expect(gate.getByRole('button', { name: '拒绝', exact: true })).toBeEnabled({ timeout: 5_000 })
-    await page.waitForTimeout(5_000)
-    expect(reconnects.length).toBeLessThanOrEqual(1)
+    // ③ 监听必须早于刷新，才能包含第一条恢复连接。22s 覆盖四次重试的最大退避总长，
+    //    期间只允许一次增量恢复；正常挂起收流不得弹重试或"结果可能不完整"假警报。
+    await page.waitForTimeout(22_000)
+    expect(reconnects).toHaveLength(1)
+    expect(reconnects[0]).toContain(`lastSeq=${current.archiveMaxSeq}`)
+    await expect(page.locator('[data-testid="notice-bar"]')).toHaveCount(0)
 
     // ④ 批准后本轮真跑完（拒绝路径已在批① H-02 覆盖，这里走批准）
     await page.locator('[data-testid="gate-ack-box"]').click()

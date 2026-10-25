@@ -279,9 +279,12 @@ app:
     # app.ai.lease.retry-delay             35s     Lease#retryDelay（:573）     抢租失败退避（TTL + 5s 余量）
     # app.ai.lease.resource-ttl            60s     Lease#resourceTtl（:588）    L1 资源互斥锁有效期（不续租）
     # app.ai.lock.enabled                  true    Lock#enabled（:603）         资源互斥总开关（关掉只该用于单实例对照）
+    # app.ai.session.purge-retry.periodic-enabled  true  Session#purgeRetry / PurgeRetry#periodicEnabled（:983 / :1000）
+    #   ↑ 只控"会话销毁 pending 的 30s 自动重试**是否注册**"；启动 SCAN 恢复（recoverOrphans）与
+    #     runOnce() 同步入口都不受它影响。单测在 test classpath 置 false（src/test/resources/application.properties）。
     # app.ai.sse.delivery-pool-size        8       Sse#deliveryPoolSize（:479） 共享投递池线程数（T3-5 压测定值）
     # app.ai.sse.delivery-queue-capacity   256     Sse#deliveryQueueCapacity（:506）  每订阅者实时队列容量
-    # 说明：这 7 个键此前只活在代码里（配置面 grep 不到），运维无从发现"租约 30s / 续租 10s"这类
+    # 说明：这 8 个键此前只活在代码里（配置面 grep 不到），运维无从发现"租约 30s / 续租 10s"这类
     #   时间口径；**本段只做显化，不写出值**（写出来就等于给配置面加了第二份事实源，改键要改两处）。
     # ── 业务知识库（业务知识问答 v1）───────────────────────────────────────────
     # 知识内容 = 业务资料（不是对话数据），落 ./data/kb 或由 HTTP 知识服务提供；

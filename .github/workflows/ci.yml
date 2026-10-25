@@ -188,6 +188,10 @@ jobs:
       - name: 单元测试（vitest run）
         run: yarn test
 
+      - name: KQC 摘要桩协议回归（覆盖仅改桩文件的变更集）
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ci/kqc-upstream-summary.test.mjs
+
       - name: 生产构建（vue-tsc + vite build）
         run: yarn build
 
@@ -280,6 +284,10 @@ jobs:
       - name: 桩用例标记隔离回归（G-09…G-12 首请连续到达的请求顺序）
         working-directory: ${{ github.workspace }}
         run: node --test scripts/ci/stub-upstream-order.test.mjs
+
+      - name: KQC 摘要桩协议回归（system 指令头 / 非流式闭合摘要）
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/ci/kqc-upstream-summary.test.mjs
 
       - name: 启动桩上游（127.0.0.1:18399）
         working-directory: ${{ github.workspace }}

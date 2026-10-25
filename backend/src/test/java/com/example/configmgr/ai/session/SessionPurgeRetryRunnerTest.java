@@ -4,9 +4,15 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.LeaseService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -15,6 +21,7 @@ import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -80,6 +87,65 @@ class SessionPurgeRetryRunnerTest {
 
 	private static String zombie(int index) {
 		return "sess-zombie-" + index;
+	}
+
+	// ── 周期注册开关（app.ai.session.purge-retry.periodic-enabled）────────────────
+	//
+	// 背景：周期线程在 Spring 上下文缓存后跨测试类续跑，倒排录制按"测试类墙钟窗口"归因
+	// （线程无关）⇒ 清理触达会被记到邻类窗口（nightly 40219310874，diff=58）。单测把周期注册
+	// 关掉，只保留同步入口。下面三条锁住"关掉的只是周期注册"与"生产缺省仍是开"。
+	//
+	// 调度是否真的注册，只能看 `scheduler` 字段本身（首拍在 10s 之后，用例早已结束）——
+	// 故用 ReflectionTestUtils 直接断言：关 ⇒ 未注册（null），开 ⇒ 真的注册（非 null）。
+
+	@Test
+	void periodicRegistrationIsOnByProductionDefaultAndBindableOff() {
+		assertThat(new AiProperties().getSession().getPurgeRetry().isPeriodicEnabled())
+			.as("生产缺省 = 行为原样（周期注册开）").isTrue();
+
+		AiProperties bound = new Binder(new MapConfigurationPropertySource(
+				Map.of("app.ai.session.purge-retry.periodic-enabled", "false")))
+			.bind("app.ai", Bindable.of(AiProperties.class)).get();
+		assertThat(bound.getSession().getPurgeRetry().isPeriodicEnabled())
+			.as("键名/绑定口径：application.properties 的关闭必须落到这个开关上").isFalse();
+	}
+
+	@Test
+	void periodicRegistrationOffStillRecoversOrphansOnReady() {
+		SessionPurgePendingStore pending = mock(SessionPurgePendingStore.class);
+		when(pending.recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS)).thenReturn(0);
+		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
+		AiProperties properties = new AiProperties();
+		properties.getSession().getPurgeRetry().setPeriodicEnabled(false);
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(pending, purgeService, null, properties);
+
+		runner.onReady();
+
+		verify(pending).recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS);
+		verifyNoInteractions(purgeService);
+		assertThat(schedulerOf(runner)).as("关闭后调度器不得被注册（不只是日志/不打首拍）").isNull();
+		runner.shutdown();
+	}
+
+	@Test
+	void periodicRegistrationOnKeepsRecoveringOrphansOnReady() {
+		SessionPurgePendingStore pending = mock(SessionPurgePendingStore.class);
+		when(pending.recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS)).thenReturn(0);
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(pending,
+				mock(AiSessionPurgeService.class), null, new AiProperties());
+
+		runner.onReady();
+
+		verify(pending).recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS);
+		Object scheduler = schedulerOf(runner);
+		assertThat(scheduler).as("缺省（开）必须真的注册调度器").isInstanceOf(ScheduledExecutorService.class);
+		assertThat(((ScheduledExecutorService) scheduler).isShutdown())
+			.as("缺省（开）：调度器已创建且仍在跑（周期确实注册了）").isFalse();
+		runner.shutdown();
+	}
+
+	private static Object schedulerOf(SessionPurgeRetryRunner runner) {
+		return ReflectionTestUtils.getField(runner, "scheduler");
 	}
 
 	private static AiSessionPurgeService.PurgeResult completedPurge() {

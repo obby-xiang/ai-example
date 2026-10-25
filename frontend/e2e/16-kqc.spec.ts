@@ -170,6 +170,11 @@ test.describe('@stub 16 K 知识问答', () => {
     expect(body).toContain('知识库中未找到')
     // 空结果不是异常：仍是正常 done 轮（不是 error 帧、不是 5xx）
     expect(round.frames.filter((frame) => frame.type === 'error')).toHaveLength(0)
+    // 近似标题只用于换词重查：no_match 输出里不得出现任何 doc_id（K-10 确定性泄漏面 ——
+    // suggestTitles 曾把 id 拼进候选串，模型在答复里复述了候选 doc_id，同时说明并非命中）
+    const docIds = (await apiData<Array<{ id: string }>>('/api/ai/kb/docs')).map((doc) => doc.id)
+    const leaked = docIds.filter((id) => body.includes(id))
+    expect(leaked, `no_match 输出泄漏了候选 doc_id：${leaked.join(',')}\n工具输出：${body}`).toHaveLength(0)
   })
 
   /**

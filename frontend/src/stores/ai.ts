@@ -2174,6 +2174,7 @@ export const useAiStore = defineStore('ai', {
       // - req：显式 false 的同批条目等实时帧，不进队列（活轮行为不变）。
       // 串行呈现：只建第一张，其余进 `restoredPendingQueue`，决完一张补一张。
       const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
+      const awaitingInput = pendingEntries.every((entry) => entry.kind === 'BACKEND' || entry.req !== false)
       if (pendingEntries.length > 0) {
         // 输入禁用语义只认"还有未决条目"，与 req / kind 无关
         this.suspended = true
@@ -2186,7 +2187,7 @@ export const useAiStore = defineStore('ai', {
 
       if (host) {
         // 增量续收：lastSeq = archiveMaxSeq 只收新帧（见 resumeSnapshotStream）
-        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id)
+        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id, awaitingInput)
         return
       }
       // I-1（2026-10-21 收口修）：**无卡也要挂流** —— 挂起态下"没有可重建的卡"不等于"没有后续帧"。
@@ -2196,15 +2197,16 @@ export const useAiStore = defineStore('ai', {
       // 现在照常以 `archiveMaxSeq` 挂上差量续收：请求帧到达即按实时路径建卡（`confirm_request`
       // handler），不新增任何占位 UI。宿主消息在**首个帧到达时**由 `handleFrame` 惰性取当前助手消息
       // （有则续写、无则创建），故不传 `hostMessageId` —— 空转期间不留空气泡。
+      // req=false 说明还有请求帧可期，不能当成已完成的 park 收流；这类恢复保留断流重连。
       if (!this.suspended || !current.runId) {
         return
       }
       const lastAssistant = [...this.messages].reverse().find((item) => item.role === 'assistant')
       if (lastAssistant) {
-        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, lastAssistant.id)
+        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, lastAssistant.id, awaitingInput)
         return
       }
-      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq)
+      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, undefined, awaitingInput)
     },
 
     /**
@@ -2433,8 +2435,9 @@ export const useAiStore = defineStore('ai', {
      *
      * @param hostMessageId 宿主消息 id；**省略** = 首帧到达时由 `handleFrame` 取当前助手消息
      *   （有则续写、无则创建）—— 供 I-1 的"无卡但挂起"路径使用（不预建空气泡）
+     * @param awaitingInput 快照或剩余待决卡证明本轮仍 park；一旦执行继续必须恢复 false
      */
-    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string): Promise<void> {
+    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string, awaitingInput = false): Promise<void> {
       // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
       // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
       const previous = currentAbort
@@ -2485,7 +2488,7 @@ export const useAiStore = defineStore('ai', {
               }
             }
           },
-          { signal: controller.signal, lastSeq }
+          { signal: controller.signal, lastSeq, awaitingInput }
         )
       } finally {
         if (isCurrentRound()) {
@@ -2541,7 +2544,8 @@ export const useAiStore = defineStore('ai', {
           return
         }
       }
-      void this.resumeSnapshotStream(runId, this.runSeq[runId] ?? 0, host.id)
+      const awaitingInput = this.hasOtherPendingCards(toolCallId)
+      void this.resumeSnapshotStream(runId, this.runSeq[runId] ?? 0, host.id, awaitingInput)
     },
 
     /**

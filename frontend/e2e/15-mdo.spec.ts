@@ -143,6 +143,39 @@ test.describe('@stub M 多实例与跨实例重连', () => {
       '条目离开 PENDING')
     expect(['APPROVED', 'EXECUTED', 'BLOCKED']).toContain(String(settled.status))
     const done = await waitTerminal(runId, 90_000, API)
+    // 诊断（非断言、不改判据）：跨实例决策的结局要能从一次失败里直接读出，不靠猜。
+    //  - confirm.resumeOutcome 是"谁派发了续跑"的唯一凭据（生产 token：SCHEDULED /
+    //    LEASE_HELD_ELSEWHERE / NO_RESUME_SERVICE / SNAPSHOT_NOT_SUSPENDED / EXECUTOR_SATURATED）；
+    //  - snapshot.error 是"这一轮为什么落 FAILED"的唯一权威值（形如 CODE：短句）；
+    //  - 末帧里的 error.code 与 snapshot.error 前缀同源，可与 A/B 后端日志按 runId 对齐。
+    {
+      const frames = await eventsFrames(runId)
+      const diagnostic = {
+        runId,
+        taskId,
+        sessionId,
+        apiA: API,
+        apiB: API_B,
+        bInstance,
+        confirm: decided.body,
+        settled,
+        snapshot: done.snapshot,
+        pending: done.pending,
+        ledger: done.ledger,
+        ledgerCounts: done.ledgerCounts,
+        tail: frames.slice(-8).map((frame) => ({
+          type: frame.type,
+          seq: frame.seq,
+          code: frame.code,
+          message: frame.message
+        }))
+      }
+      console.log(`[M02 diag] ${JSON.stringify(diagnostic)}`)
+      await test.info().attach('m02-diagnostic.json', {
+        body: JSON.stringify(diagnostic, null, 2),
+        contentType: 'application/json'
+      })
+    }
     expect(done.snapshot?.status).toBe('DONE')
     const ledger = done.ledger ?? []
     expect(ledger.length).toBe(1)

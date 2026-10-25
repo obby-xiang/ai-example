@@ -142,3 +142,125 @@ describe('reattach 双看门狗', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 })
+
+describe('reattach 挂起快照恢复', () => {
+  it('已知本轮等待外部输入时，空回放后收流是正常挂起收尾，不重连', async () => {
+    const onReconnect = vi.fn()
+    const pending = reattach('run-parked', { onReconnect }, {
+      lastSeq: 4,
+      awaitingInput: true,
+      random: () => 0.5
+    })
+    const source = FakeEventSource.instances[0]
+    expect(source?.url).toBe('/api/ai/events/run-parked?lastSeq=4')
+    source?.fireOpen()
+    source?.onerror?.()
+
+    const info = await pending
+    expect(info.terminal).toBe(false)
+    expect(info.suspended).toBe(true)
+    expect(info.reconnects).toBe(0)
+    expect(onReconnect).not.toHaveBeenCalled()
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('决策后的续跑不误用挂起状态，断流仍按原退避重连', async () => {
+    const onReconnect = vi.fn()
+    const controller = new AbortController()
+    const pending = reattach('run-resumed', { onReconnect }, {
+      signal: controller.signal,
+      lastSeq: 4,
+      random: () => 0.5
+    })
+    FakeEventSource.instances[0]?.fireOpen()
+    FakeEventSource.instances[0]?.onerror?.()
+    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[1]?.url).toBe('/api/ai/events/run-resumed?lastSeq=4')
+    controller.abort()
+    await pending
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('决策帧本身不证明已离开挂起：回放后正常收流仍不重连', async () => {
+    const onReconnect = vi.fn()
+    const pending = reattach('run-decision', { onReconnect }, { awaitingInput: true, lastSeq: 4 })
+    const source = FakeEventSource.instances[0]
+    source?.fireOpen()
+    source?.onmessage?.({ data: JSON.stringify({
+      type: 'confirm_decision', runId: 'run-decision', toolCallId: 'c1', name: 'start_export',
+      decision: 'REJECTED', status: 'REJECTED', approved: false, seq: 5
+    }) })
+    source?.onerror?.()
+
+    const info = await pending
+    expect(info.suspended).toBe(true)
+    expect(onReconnect).not.toHaveBeenCalled()
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('他端决策后的真实执行帧会清除挂起初态，后续断流仍重连', async () => {
+    const onReconnect = vi.fn()
+    const controller = new AbortController()
+    const pending = reattach('run-progress', { onReconnect }, {
+      signal: controller.signal,
+      awaitingInput: true,
+      lastSeq: 4,
+      random: () => 0.5
+    })
+    const source = FakeEventSource.instances[0]
+    source?.fireOpen()
+    source?.onmessage?.({ data: JSON.stringify({
+      type: 'delta', runId: 'run-progress', messageId: 'm1', seg: 0, text: '继续执行', seq: 5
+    }) })
+    source?.onerror?.()
+    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    controller.abort()
+    const info = await pending
+    expect(info.suspended).toBeFalsy()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('挂起快照不能吞掉建连失败：保留四次退避，耗尽后明确断流', async () => {
+    const onReconnect = vi.fn()
+    const pending = reattach('run-unreachable', { onReconnect }, {
+      awaitingInput: true,
+      lastSeq: 4,
+      random: () => 0.5
+    })
+    for (const delay of [0, 1_000, 2_000, 4_000, 8_000]) {
+      await vi.advanceTimersByTimeAsync(delay)
+      FakeEventSource.instances.at(-1)?.onerror?.()
+    }
+
+    const info = await pending
+    expect(info.terminal).toBe(false)
+    expect(info.suspended).toBeFalsy()
+    expect(info.reason).toContain('重挂连接中断')
+    expect(info.reconnects).toBe(4)
+    expect(onReconnect).toHaveBeenCalledTimes(4)
+    expect(FakeEventSource.instances).toHaveLength(5)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('已有挂起快照也不覆盖终帧：done 仍按终态收尾', async () => {
+    const pending = reattach('run-terminal', {}, { awaitingInput: true, lastSeq: 4 })
+    const source = FakeEventSource.instances[0]
+    source?.fireOpen()
+    source?.onmessage?.({ data: JSON.stringify({ type: 'done', runId: 'run-terminal', status: 'DONE', seq: 5 }) })
+    source?.onerror?.()
+
+    const info = await pending
+    expect(info.terminal).toBe(true)
+    expect(info.suspended).toBeFalsy()
+    expect(info.reconnects).toBe(0)
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})

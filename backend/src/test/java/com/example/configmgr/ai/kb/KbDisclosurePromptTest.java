@@ -39,8 +39,15 @@ class KbDisclosurePromptTest {
             assertThat(category.value()).isEqualTo(ToolMeta.Category.R);
             // 未声明 @ToolChannel ⇒ 默认 BACKEND（不走前端挂起）
             assertThat(method.getAnnotation(com.example.configmgr.ai.tool.ToolChannel.class)).isNull();
-            assertThat(method.getAnnotation(org.springframework.ai.tool.annotation.Tool.class).name()).isEqualTo(name);
+            org.springframework.ai.tool.annotation.Tool tool =
+                    method.getAnnotation(org.springframework.ai.tool.annotation.Tool.class);
+            assertThat(tool.name()).isEqualTo(name);
         }
+        // 工具描述本身要声明"候选不是命中"（提示词之外的第三道防线；K-10）
+        assertThat(toolMethod("kb_search")
+                .getAnnotation(org.springframework.ai.tool.annotation.Tool.class).description())
+                .contains("不是命中")
+                .contains("不得在答复中列举或引用");
     }
 
     @Test
@@ -81,6 +88,29 @@ class KbDisclosurePromptTest {
         assertThat(text).contains("不得仅凭片段推测");
         assertThat(text).contains("不要展示工具名");
         assertThat(text).contains(KbText.NOTICE);
+    }
+
+    /**
+     * K-10：候选/近似标题只用于换词重查，<b>不是命中</b>；答复正文不得列举或引用，
+     * doc_id 只允许出现在真正支撑结论的 {@code [doc_id §章节]} 引用里。
+     *
+     * <p>真机 run 40220039653 的答复忠实复述了工具给的候选 doc_id —— 工具侧已不再输出 id
+     * （{@code KbToolsTest#noMatchDoesNotLeakCandidateDocIds}），本用例锁提示词侧的第二道口径。
+     */
+    @Test
+    void promptForbidsQuotingNearbyTitlesAsEvidence() throws Exception {
+        String text = new KbPromptSection(KbTestSupport.samplesService()).render();
+
+        assertThat(text).as("近似标题不是命中，不得在答复里列举/引用")
+                .contains("可参考的标题/近似标题")
+                .contains("不是命中")
+                .contains("不得在答复正文列举、罗列或引用");
+        assertThat(text).as("doc_id 只在支撑命中的引用里出现")
+                .contains("doc_id 只允许出现在")
+                .contains("[doc_id §章节]");
+        // 规则 4 与规则 5 同口径：工具返回的“候选/近似标题”不属于可引用内容
+        assertThat(text).contains("只引用工具实际返回的命中内容（候选/近似标题除外）")
+                .contains("工具没返回的条款不得引用");
     }
 
     @Test
