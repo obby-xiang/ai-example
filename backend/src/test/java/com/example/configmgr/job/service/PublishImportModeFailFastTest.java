@@ -67,6 +67,9 @@ class PublishImportModeFailFastTest {
         Task task = task("MERGE");
         task.setSettingsJson("{\"importMode\":"); // 截断的坏 JSON：readTree 必抛 ⇒ UNPARSEABLE
         taskRepository.save(task);
+        // 夹具前提：任务必须有 1 个配置项，否则零条目守卫（PublishJobRunner#run 入口，BZ-01）
+        // 会在 doPublish 解析 settings_json 之前就收口 FAILED —— 本用例要守的是"解析失败"这条路径。
+        taskItemRepository.save(item(task, DEF));
 
         Job job = newJob(task);
         publishJobRunner.run(job);
