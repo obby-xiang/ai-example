@@ -35,3 +35,8 @@ backend/config/*
 
 # Playwright E2E 运行产物（trace/截图/自起实例数据）
 frontend/test-results/
+
+# 运行物（防误 add）：本地运行数据 / 根级 E2E 运行产物 / 仓根临时日志
+/data/
+/test-results/
+/_*.log
