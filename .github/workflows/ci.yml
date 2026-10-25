@@ -125,6 +125,12 @@ jobs:
   #   - 禁止项：database: / SELECT / KEYS / FLUSHDB / FLUSHALL / SCAN。
   #   - 脚本先跑 --self-check（命中样例 + SQL / runner.scan(true) / 小写 select 反例），
   #     规则被改窄或改宽都在这里先红，避免"守卫绿着但什么都没查"。
+  #   - Cluster 迁移工具（scripts/redis-run-migration.mjs）的 node:test 全量并入本 job：
+  #     同属 Cluster 面、纯离线（内存 fake cluster，不连真实 Redis）、秒级。放这里而不是
+  #     新立 job 的理由 = 本 job **无条件执行**，不存在"按变更集跳过 ⇒ 用例没跑却报绿"；
+  #     且它不 needs changes，changes job 红不会挡住它（summary 仍会逐 job 记账）。
+  #     产品键名与迁移清单的跨语言对账在 Java 侧（RunMigrationFamilyContractTest，随
+  #     backend job 的 mvn test 跑）；本 job 只跑脚本自身的离线语义用例。
   # ============================================================
   redis-guard:
     name: Redis Cluster 安全守卫（database/SELECT/KEYS/FLUSHDB/SCAN）
@@ -143,6 +149,11 @@ jobs:
 
       - name: 扫描 backend/src/main
         run: node scripts/ci/forbid-redis-cluster-unsafe.mjs
+
+      # 迁移工具的 node:test 全量：键族发现 / 四类型保真 / 幂等 / 冲突不覆盖 /
+      # --delete-source 两阶段 / --rollback / 排除清单 / 锁与临时键 TTL。任一失败即本 job 红。
+      - name: 迁移工具离线全量用例（node --test scripts/redis-run-migration.test.mjs）
+        run: node --test scripts/redis-run-migration.test.mjs
 
   frontend:
     name: 前端类型检查与构建
@@ -553,7 +564,7 @@ jobs:
           judge e2e "$E2E_RESULT" "${E2E_NEEDED:-}" "变更集命中 e2e 面，E2E 全流程"
           judge docs "$DOCS_RESULT" "always" "无条件执行：文档一致性门禁（阻断）"
           judge scan-history "$SCAN_RESULT" "always" "无条件执行：全历史脱敏扫描（报告制，历史命中不使 job 红）"
-          judge redis-guard "$REDIS_GUARD_RESULT" "always" "无条件执行：Redis Cluster 安全守卫（规则自证 + backend/src/main 扫描）"
+          judge redis-guard "$REDIS_GUARD_RESULT" "always" "无条件执行：Redis Cluster 安全守卫（规则自证 + backend/src/main 扫描 + 迁移工具离线全量用例）"
 
           # §5.3 第三行：变更集输出丢失时必须红（空串不能当成"无改动"）。
           if [ "${CHANGES_RESULT:-}" != "success" ]; then
