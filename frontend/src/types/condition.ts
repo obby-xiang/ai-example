@@ -15,6 +15,11 @@
  * - ⑤ 操作符白名单补 `LIKE`（后端 `ConditionEvaluator.matchesOp` 有该 case，与 CONTAINS 等价）；
  * - ⑦ 列表端点 `GET /api/data/{defCode}` 已补 `conditions` 入参（S4.4 后端 P2），
  *   数据浏览页改走后端口径分页，**客户端镜像求值器已删除**（不再有第二套语义）。
+ *
+ * 批次1A（2026-10-26）：压平不再"空即丢弃、静默变全量"。`buildConditionOutcome` 把
+ * **显式清空**（`cleared`，语义不变：无条件 = 全部数据）与 **非法空输入**（`invalid`：
+ * 值算子的空串/纯空白、IN 的空取值）分成两种结局；落库 / 起作业的调用方必须据结局阻断，
+ * 需要抛错口径时用 `assertConditionBuildable`。
  */
 
 import type { ConfigField, FieldType } from './definition'
@@ -159,55 +164,151 @@ export function draftOf(model: ConditionDraftModel, fieldCode: string): Conditio
   return created
 }
 
+/** 压平后"丢弃了字段"的原因：值算子的空值，或 IN 的空取值（表单以逗号串承载，空串即空列表）。 */
+export type ConditionInputIssueCode = 'EMPTY_VALUE' | 'EMPTY_IN'
+
+/** 压平阶段的非法输入问题（`fieldCode` 定位；保留草案算子，便于文案区分 EQ 空值与 IN 空）。 */
+export interface ConditionInputIssue {
+  fieldCode: string
+  operator: DraftOperator
+  code: ConditionInputIssueCode
+  /** 草案里填的值（已 trim；IN 时为空串） */
+  value: string
+}
+
 /**
- * 草案 → 后端条件。
+ * 草案 → 后端条件的三种结局。
  *
- * - EMPTY/NOT_EMPTY 不带值；其余操作符无值即视为"用户未填 → 忽略该字段"；
- * - BETWEEN 展开成 GTE + LTE 两条（同字段多条件，求值器逐条 AND）；
- * - 全部为空时返回 null（调用方据此不提交条件）。
+ * - `ok`：有可提交条件；
+ * - `cleared`：草案里没有任何条件条目 —— **显式清空**，语义仍是"无条件 = 全部数据"（不变）；
+ * - `invalid`：有条目但压平后会被丢弃（值空 / IN 空）—— **非法空输入**，绝不可当成"无条件"，
+ *   调用方必须在落库与起作业之前阻断。
  */
-export function buildFieldConditions(model: ConditionDraftModel): FieldCondition[] {
-  const result: FieldCondition[] = []
+export type ConditionBuildOutcome =
+  | { status: 'ok'; condition: FieldQueryCondition; issues: [] }
+  | { status: 'cleared'; condition: null; issues: [] }
+  | { status: 'invalid'; condition: null; issues: ConditionInputIssue[] }
+
+/**
+ * 以抛出方式阻断非法空输入（fail-closed 调用方用）。
+ *
+ * 消息只是诊断串（`fieldCode:CODE` 列表），**不是用户文案**：面向用户的成文由
+ * `ExportWizardView` 按 `views.export.conditionInput.*` 本地化。本模块不得硬编码中文，
+ * 否则每次新增调用方都会把 i18n 残留基线顶上去。
+ */
+export class InvalidConditionInputError extends Error {
+  readonly issues: ConditionInputIssue[]
+
+  constructor(issues: ConditionInputIssue[]) {
+    super(`invalid condition input: ${issues.map((issue) => `${issue.fieldCode}:${issue.code}`).join(', ')}`)
+    this.name = 'InvalidConditionInputError'
+    this.issues = issues
+  }
+}
+
+/** 逐字段展开；空值 / IN 空不再静默丢弃，而是同时记进 `issues`。 */
+function expandFields(model: ConditionDraftModel): {
+  conditions: FieldCondition[]
+  issues: ConditionInputIssue[]
+} {
+  const conditions: FieldCondition[] = []
+  const issues: ConditionInputIssue[] = []
   for (const [fieldCode, draft] of Object.entries(model.fields)) {
     const operator = draft.operator
     if (!operatorNeedsValue(operator)) {
       if (operator === 'EMPTY' || operator === 'NOT_EMPTY') {
-        result.push({ fieldCode, operator })
+        conditions.push({ fieldCode, operator })
       }
       continue
     }
     if (operator === 'BETWEEN') {
       const from = draft.value.trim()
       const to = draft.value2.trim()
+      if (from === '' && to === '') {
+        issues.push({ fieldCode, operator, code: 'EMPTY_VALUE', value: '' })
+        continue
+      }
       if (from !== '') {
-        result.push({ fieldCode, operator: 'GTE', value: from })
+        conditions.push({ fieldCode, operator: 'GTE', value: from })
       }
       if (to !== '') {
-        result.push({ fieldCode, operator: 'LTE', value: to })
+        conditions.push({ fieldCode, operator: 'LTE', value: to })
       }
       continue
     }
     const value = draft.value.trim()
     if (value === '') {
+      issues.push({
+        fieldCode,
+        operator,
+        code: operator === 'IN' ? 'EMPTY_IN' : 'EMPTY_VALUE',
+        value
+      })
       continue
     }
-    result.push({ fieldCode, operator, value })
+    conditions.push({ fieldCode, operator, value })
   }
-  return result
+  return { conditions, issues }
 }
 
-/** 草案模型 → 后端条件对象（无任何有效条件时返回 null）。 */
-export function buildQueryCondition(model: ConditionDraftModel): FieldQueryCondition | null {
+/**
+ * 草案 → 后端条件（`ConditionForm` 的预览面用；**落库 / 起作业请用 {@link buildConditionOutcome}**）。
+ *
+ * - EMPTY/NOT_EMPTY 不带值；其余操作符无值即视为"用户未填 → 本函数不展开该字段"；
+ * - BETWEEN 展开成 GTE + LTE 两条（同字段多条件，求值器逐条 AND）；两端都空则不展开；
+ * - 被跳过的空值**不是**"无条件"：可提交性由 {@link buildConditionOutcome} 判定，
+ *   不得只凭本函数的返回值决定落库。
+ */
+export function buildFieldConditions(model: ConditionDraftModel): FieldCondition[] {
+  return expandFields(model).conditions
+}
+
+/**
+ * 草案 → 条件结局：显式清空（`cleared`）与非法空输入（`invalid`）分开。
+ *
+ * `invalid` 时 `condition` 恒为 null，但**不能**当成"无条件"使用（那正是导出全量的来源）；
+ * 调用方必须阻断并成文 `issues`。
+ */
+export function buildConditionOutcome(model: ConditionDraftModel): ConditionBuildOutcome {
+  const { conditions, issues } = expandFields(model)
+  if (issues.length > 0) {
+    return { status: 'invalid', condition: null, issues }
+  }
   const condition: FieldQueryCondition = {}
   const scopeKeys = model.scopeKeys.map((key) => key.trim()).filter((key) => key !== '')
   if (scopeKeys.length > 0) {
     condition.scopeKeys = scopeKeys
   }
-  const fields = buildFieldConditions(model)
-  if (fields.length > 0) {
-    condition.fields = fields
+  if (conditions.length > 0) {
+    condition.fields = conditions
   }
-  return condition.scopeKeys || condition.fields ? condition : null
+  return condition.scopeKeys || condition.fields
+    ? { status: 'ok', condition, issues: [] }
+    : { status: 'cleared', condition: null, issues: [] }
+}
+
+/**
+ * 兼容入口：`invalid` 与 `cleared` 都返回 null。
+ *
+ * **不得**把 null 直接当"无条件 = 全部数据"：要区分"非法空输入"和"显式清空"必须看
+ * {@link buildConditionOutcome}（或走 {@link assertConditionBuildable} 的抛错口径）。
+ */
+export function buildQueryCondition(model: ConditionDraftModel): FieldQueryCondition | null {
+  return buildConditionOutcome(model).condition
+}
+
+/**
+ * fail-closed 入口：非法空输入抛 {@link InvalidConditionInputError}，显式清空返回 null。
+ *
+ * 用于"条件一旦丢了就会静默变全量"的提交点（条件落库、起作业）；纯预览可继续用
+ * {@link buildQueryCondition} + {@link buildConditionOutcome}。
+ */
+export function assertConditionBuildable(model: ConditionDraftModel): FieldQueryCondition | null {
+  const outcome = buildConditionOutcome(model)
+  if (outcome.status === 'invalid') {
+    throw new InvalidConditionInputError(outcome.issues)
+  }
+  return outcome.condition
 }
 
 /** 条件草案的本地校验问题（`ConditionForm` 的 `role=alert` 面据此成文）。 */
@@ -240,7 +341,8 @@ function isDateText(text: string): boolean {
  * 条件草案的本地校验（**提交前**的判定点，页面侧 `role=alert` 的数据源）。
  *
  * 只覆盖后端会硬拒的三类：数值字段填非数字、日期字段格式不对、区间上下限倒置。
- * 空值一律不算错 —— 与 {@link buildFieldConditions} 同口径（空 = 该字段未填 → 不提交）。
+ * 空值不在这里报类型错 —— 值空 / IN 空由 {@link buildConditionOutcome} 判为 `invalid`
+ * 并在提交前阻断（不是"未填即忽略"），本函数只报字段类型与区间问题。
  * 返回定位信息而非成文文案：文案走 i18n（双 locale），本函数保持无 UI 依赖。
  */
 export function validateDraftModel(

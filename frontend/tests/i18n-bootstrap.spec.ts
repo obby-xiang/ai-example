@@ -85,6 +85,15 @@ describe('键集与插值契约（B1/B3）', () => {
     expect(mismatched).toEqual([])
   })
 
+  it('B4 导入预检失败文案不再承诺“可直接继续”，改为先修复并重跑预检（双语）', () => {
+    const zhCopy = zh['views.import.precheckFailed']
+    const enCopy = en['views.import.precheckFailed']
+    expect(zhCopy).toContain('重新执行预检查')
+    expect(zhCopy).not.toContain('直接继续')
+    expect(enCopy).toContain('run the pre-check again')
+    expect(enCopy).not.toMatch(/continue/i)
+  })
+
   it('B2 缺 key：渲染 key 原文而非空白（不抛）', () => {
     expect(i18n.global.t('no.such.key.exists')).toBe('no.such.key.exists')
   })

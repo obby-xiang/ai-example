@@ -26,6 +26,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.net.InetAddress;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -203,25 +205,61 @@ class RunnerActiveMultiInstanceTest {
     }
 
     @Test
-    void createBlockedWhileCancelledRunnerStillAlive() {
-        long taskId = terminalTask();
-        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
+    void createBlockedWhileInFlightRunnerStillAlive() {
+        long taskId = taskService.create(Task.TaskType.EXPORT, "R113-RUNNER-ALIVE").getId();
+        // 异类型 + 在途（PRECHECK）：先过同类互斥，验证的是 runner 存活守卫本身
+        Job running = new Job();
+        running.setTaskId(taskId);
+        running.setJobType(Job.JobType.PRECHECK);
+        running.setStatus(Job.JobStatus.RUNNING);
+        Job seeded = jobRepository.saveAndFlush(running);
         JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
-        instanceA.beginRunner(jobId);
+        instanceA.beginRunner(seeded.getId());
 
         assertThatThrownBy(() -> jobService.createAndStart(taskId, Job.JobType.EXPORT))
-                .as("取消但 runner 未退出的旧作业仍阻新建")
+                .as("在途旧作业的 runner 未退出仍阻新建")
                 .isInstanceOf(ConflictException.class)
                 .satisfies(e -> assertThat(e.getMessage()).contains("收尾"));
 
-        instanceA.endRunner(jobId);
+        instanceA.endRunner(seeded.getId());
         Job created = jobService.createAndStart(taskId, Job.JobType.EXPORT);
         assertThat(created.getStatus()).isEqualTo(Job.JobStatus.PENDING);
     }
 
+    /**
+     * FA3-N7 / BZ-34：runner 存活守卫只扫<b>非终态</b>作业 —— 终态作业不再逐条打 Redis
+     * （否则每次建作业按任务历史作业数产生 N 次同步命令、一直持 task 行锁）。
+     * 这里显式断言三条终态作业的 runner 键一次都没被读。
+     */
+    @Test
+    void terminalJobsAreNotProbedForRunnerLiveness() {
+        long taskId = taskService.create(Task.TaskType.EXPORT, "R113-TERMINAL-SKIP").getId();
+        List<Long> terminalIds = new ArrayList<>();
+        for (Job.JobStatus status : List.of(
+                Job.JobStatus.COMPLETED, Job.JobStatus.FAILED, Job.JobStatus.CANCELLED)) {
+            Job terminal = new Job();
+            terminal.setTaskId(taskId);
+            terminal.setJobType(Job.JobType.PRECHECK);
+            terminal.setStatus(status);
+            terminalIds.add(jobRepository.saveAndFlush(terminal).getId());
+        }
+        Job created = jobService.createAndStart(taskId, Job.JobType.EXPORT);
+
+        assertThat(created.getStatus()).isEqualTo(Job.JobStatus.PENDING);
+        for (Long id : terminalIds) {
+            verify(redis, never()).hasKey(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + id);
+        }
+    }
+
     @Test
     void createRedisReadFailureFailsClosed() {
-        long taskId = terminalTask();
+        long taskId = taskService.create(Task.TaskType.EXPORT, "R113-REDIS-DOWN").getId();
+        // 在途作业才会触发共享态读取（终态作业已不扫，见上一条用例）
+        Job running = new Job();
+        running.setTaskId(taskId);
+        running.setJobType(Job.JobType.PRECHECK);
+        running.setStatus(Job.JobStatus.RUNNING);
+        jobRepository.saveAndFlush(running);
         when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("down"));
 
         assertThatThrownBy(() -> jobService.createAndStart(taskId, Job.JobType.EXPORT))

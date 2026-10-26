@@ -187,6 +187,7 @@
             type="button"
             :class="SUGGESTION_CHIP"
             data-testid="suggestion-chip"
+            :disabled="chipDisabled"
             :aria-label="t('ai.suggestions.sendAria', { text: t(`ai.suggestions.${chip}`) })"
             @click="sendPreset(t(`ai.suggestions.${chip}`))"
           >
@@ -873,6 +874,7 @@
           data-testid="followup-suggestion"
           :data-suggestion-id="item.id"
           :class="SUGGESTION_CHIP"
+          :disabled="chipDisabled"
           :aria-label="t('ai.suggestions.sendAria', { text: suggestionText(item) })"
           @click="sendPreset(suggestionText(item))"
         >
@@ -1515,7 +1517,7 @@ function suggestionText(item: FollowupSuggestion): string {
  * 输入/快捷操作都不响应，用户要发就自己先停止）。
  */
 function sendPreset(text: string): void {
-  if (!ai.canSend) {
+  if (chipDisabled.value) {
     return
   }
   void ai.send(text)
@@ -1576,8 +1578,11 @@ const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degrade
  * 问题4 composer v2：输入区硬禁用只看真实不可用 / 挂起 / 待处理工具调用。
  * health 尚未探测（null 且无 healthError）= 未知态，不硬禁用（避免首帧闪禁 / 吞掉输入）；
  * `ai.loading`（流式生成中）**不**硬禁用 —— 生成中仍可继续编辑，发送位换停止钮。
+ *
+ * 这个判据同时是空态快捷 chips 的可用性闸（U3）：chips 点即发，不能绕过 composer 的
+ * health / 挂起 / 待决门；`availabilityGateClosed` 就是两者共用的那一个真值源。
  */
-const composerHardDisabled = computed(
+const availabilityGateClosed = computed(
   () =>
     (ai.health !== null && !ai.health.available) ||
     ai.healthError !== null ||
@@ -1585,10 +1590,18 @@ const composerHardDisabled = computed(
     ai.pendingToolCall !== null
 )
 
+const composerHardDisabled = computed(() => availabilityGateClosed.value)
+
 /** 发送闸只认 health available + 非空 + 未超限；不依赖 loading（流式中的 Enter 在 keydown 层静默）。 */
 const canSubmit = computed(
   () => ai.available && inputText.value.trim().length > 0 && inputText.value.length <= MESSAGE_MAX_CHARS
 )
+
+/**
+ * 空态 chips 的禁用态 = composer 发送闸（health available + 非挂起/待决 + 非在途轮）。
+ * 在途轮（`canSend=false`）保留既有「点击不响应、不提示」口径，但按钮明确禁用。
+ */
+const chipDisabled = computed(() => !ai.available || availabilityGateClosed.value || !ai.canSend)
 
 /**
  * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
@@ -3048,13 +3061,11 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
  *  批G · G5：「一键重挂」/「重挂该轮」按钮退场 —— 在途轮由刷新恢复静默续收，横幅与按钮一并不再存在。 */
 
 /**
- * R-165 S3a（R11 指挥官裁决）：error 级通知判据。
- * store 的 `notice` 是**单槽纯字符串**（无级别字段），本轮以 error 帧收尾时 store 同时置
- * `lastRoundOutcome = 'error'`（stores/ai.ts:2009）—— 这是"这条 notice 来自故障"在本仓
- * 唯一可信的既有信号（S2 §4-R11 实测的上游 503 `UPSTREAM_STREAM_ERROR` 正走此路径）。
- * 局限：HTTP/网络异常（catch 分支，如「对话请求失败」）不置 `lastRoundOutcome`，仍按普通通知呈现。
+ * R-165 S3a（R11 指挥官裁决）→ AR-13：error 级通知判据。
+ * 通知级别由**写入通知时**随 `noticeSeverity` 落库，面板只读它；`lastRoundOutcome` 是轮次状态，
+ * 不能让上一轮的错误把新会话/新轮的一条无害提示染红。
  */
-const noticeIsError = computed(() => ai.notice !== null && ai.lastRoundOutcome === 'error')
+const noticeIsError = computed(() => ai.notice !== null && ai.noticeSeverity === 'error')
 
 /**
  * 通知槽文本（i18n L-69）：store 里 `notice` 是**设定时**的语言快照，`noticeCode/noticeArgs` 才是
@@ -3127,7 +3138,7 @@ function labelWord(labels: Partial<Record<string, string>>, value: string): stri
  */
 
 /** R-165 S2：空态建议词胶囊（v7 `.mini` chips：999px 胶囊 + 细描边 + 悬停蓝）。 */
-const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#cddcff] hover:text-[#2563eb]'
+const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#cddcff] hover:text-[#2563eb] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-[#e3e6ea] disabled:hover:text-[#57606a]'
 
 /**
  * R-165 S2：骨架屏渐变条（demo v7 `.sk`）。v7 的 `animate-shimmer` 是 demo 私有 config 的动画

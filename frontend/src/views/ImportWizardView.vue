@@ -86,7 +86,7 @@
                 :read-only="isReadOnly"
                 :def-code="def.code"
                 :sheet-name="def.name"
-                @data-changed="onGridChanged"
+                @data-changed="onGridChanged(def.code)"
                 @selection-changed="onGridSelectionChanged(def.code)"
               />
             </el-tab-pane>
@@ -255,7 +255,7 @@ import { useI18n } from 'vue-i18n'
  * 3. 进度通道 SSE（JOB_PROGRESS/JOB_DONE）+ 轮询兜底；蓝本是纯轮询。
  */
 import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus'
 import DefSelector from '@/components/wizard/DefSelector.vue'
 import JobProgress from '@/components/JobProgress.vue'
@@ -365,6 +365,19 @@ interface EditorState {
   source: 'file' | 'template'
 }
 const editorState = new Map<string, EditorState>()
+
+/**
+ * 第 1 步编辑区的**未保存改动**标记（按配置项编码）。
+ *
+ * <p>为什么必须记：表格里的字节与「服务端文件」是两回事 —— 整页 `loadEditors(true)`（旧实现里
+ * 勾选/上传都会这么干）、取消勾选（标签页卸载）、换任务复位、离开页面都会用服务端字节
+ * （或空模板）覆盖表格，用户刚改的行就此消失（2026-10-26 审查 P1-1）。有了这份标记，
+ * 重载/复位/卸载前才能"先判脏再决定写回还是确认"。
+ *
+ * <p>置位 = `@data-changed`（真 `SpreadGrid` 在程序化载入/上色期间（`restoring`）不触发该事件，
+ * 所以载入不会把自己标脏）；清零 = 载入成功 / 写回成功 / 上传替换 / 换任务复位。
+ */
+const dirtyDefs = reactive(new Set<string>())
 
 /** 该配置项的编辑区是否已按**当前代次**载入过内容。 */
 function editorReady(code: string): boolean {
@@ -528,7 +541,7 @@ async function loadDefinitions(): Promise<void> {
  * 加载任务详情 + 文件清单 + 作业/暂存面。
  *
  * **顺序纪律（C1 根面）**：文件清单必须在 `selectedDefs` 之前落定。`selectedDefs` 的赋值会
- * 触发 watch → `loadEditors(true)`，而编辑区走"下载服务端文件"还是"构造空模板"取决于
+ * 触发 watch → `loadEditors()`，而编辑区走"下载服务端文件"还是"构造空模板"取决于
  * `uploadedFiles`。若先赋选中集再等清单，编辑区必然先构造出模板并置位"已载入"，
  * 清单回来后**没有任何东西会重载它** ⇒ 第 1 步「下一步」就把模板 PUT 覆盖 B 的真实文件。
  */
@@ -667,6 +680,8 @@ function resetTaskScopedState(): void {
   }
   savedDefs.clear()
   editorState.clear()
+  // 脏标记是任务级状态：换任务时已经结算（写回或用户确认放弃）过，这里清零
+  dirtyDefs.clear()
   // 导入模式是任务设置（settingsJson）：不复位会让 B 继承 A 的模式（界面与 AI 上下文都错）
   importMode.value = 'MERGE'
   // 表格视口里显示的仍是上一个任务的内容：清空，B 的载入成功后才会有内容
@@ -793,6 +808,43 @@ async function downloadTemplates(): Promise<void> {
 }
 
 /**
+ * 未保存编辑的**确认放弃**对话框（批次 1C 的唯一确认入口）。
+ *
+ * <p>只问一件事："这些编辑写不回服务端，你还要继续吗？"——调用方按返回值决定是否维持原状
+ * （勾选/导航/任务都不动，脏标记保留）。文案全部走 locales（`views.import.msg.*`），
+ * 动态内容按完整模板插值（codes / reason / taskId）。
+ *
+ * @returns true = 用户确认放弃这些编辑；false = 用户取消（调用方必须回滚到原状）
+ */
+async function confirmDiscardEdits(title: string, message: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(message, title, { type: 'warning' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 上传前的脏区确认（批次 1C）。
+ *
+ * <p>为什么是"确认"而不是"写回"：上传的文件就是该配置项要落盘的新内容，把编辑区里的旧编辑写回
+ * 只会把刚上传的文件盖回旧数据；所以这里只能让用户明确知道"匹配到的编辑区会被刷新"。
+ * 未匹配到的配置项不受影响（{@link uploadOne} 只重载被替换的编码）。
+ *
+ * @returns false = 用户取消本次上传（调用方必须中止，一个字节都不发）
+ */
+async function confirmDirtyBeforeUpload(): Promise<boolean> {
+  if (dirtyDefs.size === 0) {
+    return true
+  }
+  return await confirmDiscardEdits(
+    t('views.import.dialog.unsavedUploadTitle'),
+    t('views.import.msg.unsavedUploadConfirm', { codes: [...dirtyDefs].join('、') })
+  )
+}
+
+/**
  * AI 可视可操作专项：单个文件的上传（`handleUpload` 与上传交接共用的**唯一**链路）。
  *
  * 抽出来后两条入口（用户手点 el-upload / 交接卡的 `import.receiveFile`）行为完全一致：
@@ -803,6 +855,11 @@ async function uploadOne(file: File): Promise<string> {
   if (taskId.value === null || selectedDefs.value.length === 0) {
     ElMessage.warning(t('views.import.msg.pickDefs'))
     return '未上传：请先勾选配置项'
+  }
+  // 批次 1C：上传会替换匹配项的编辑区内容 ⇒ 有未保存编辑时先明确确认（确认框期间可能换任务，
+  // 故代次/任务号在确认之后才捕获）
+  if (!(await confirmDirtyBeforeUpload())) {
+    return t('views.import.msg.uploadCancelledUnsaved')
   }
   const generation = taskGeneration
   const forTask = taskId.value
@@ -819,6 +876,8 @@ async function uploadOne(file: File): Promise<string> {
       uploadedFiles[item.defCode] = item.fileName
       savedDefs.add(item.defCode)
       editorState.delete(item.defCode)
+      // 该配置项的内容被新文件替换：编辑区里的旧编辑已无意义（确认框已如实告知）
+      dirtyDefs.delete(item.defCode)
       // 上传新文件 ⇒ 该配置项的旧预览立即失效（内容即将被新文件替换）
       aiStore.onSheetReloaded(item.defCode)
     }
@@ -833,7 +892,9 @@ async function uploadOne(file: File): Promise<string> {
     ElMessage.success(t('views.import.msg.uploadedMatched', { count: matched.length }))
     // 用服务端刚存下的文件刷新编辑区（保证"所见即服务端所有"）
     await nextTick()
-    await loadEditors(true)
+    // 批次 1C：**只**重载本次被替换的配置项 —— 整页 `loadEditors(true)` 会把其它配置项
+    // 未保存的编辑一并换成服务端旧文件（这正是不该被上传偷偷带走的数据）
+    await loadEditors(true, matched.map((item) => item.defCode))
     const summary = `已上传并匹配 ${matched.length} 个文件`
     // AI 上传交接联动收口：用户自己点了上传也立即回灌，避免 AI 一直等（无活动交接时是空操作）
     void aiStore.notifyAiUploadDone(summary)
@@ -864,17 +925,22 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
  * <p>**前置条件（C1）**：文件清单必须先落定。清单未知时既不能下载（不知道有没有文件），
  * 更不能构造模板（模板会被当成内容写回）。所以这里先 `ensureFileList()`；拉不到就不载入，
  * 由写回闸如实拦下并提示重试。
+ *
+ * @param force `true` = 已载入的也重载（只有**内容确实被替换**时才该这么用：上传新文件）。
+ *   默认 `false` 只补未载入的 —— 勾选配置项时若整页强制重载，会把其它配置项未保存的编辑
+ *   换成服务端旧文件（2026-10-26 审查 P1-1）。
+ * @param only 只处理这些配置项（`[]` = 一个都不处理）；省略 = 全部 `editorDefs`。
  */
 let editorLoadInFlight: Promise<void> | null = null
 
-async function loadEditors(force = false): Promise<void> {
+async function loadEditors(force = false, only?: readonly string[]): Promise<void> {
   if (editorLoadInFlight !== null) {
     await editorLoadInFlight
     if (!force) {
       return
     }
   }
-  const run = loadEditorsNow(force)
+  const run = loadEditorsNow(force, only)
   editorLoadInFlight = run
   try {
     await run
@@ -885,7 +951,7 @@ async function loadEditors(force = false): Promise<void> {
   }
 }
 
-async function loadEditorsNow(force: boolean): Promise<void> {
+async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise<void> {
   if (stepIndex.value !== 0 || taskId.value === null) {
     return
   }
@@ -901,7 +967,10 @@ async function loadEditorsNow(force: boolean): Promise<void> {
     return
   }
   await nextTick()
-  for (const def of editorDefs.value) {
+  const targets = only === undefined
+    ? editorDefs.value
+    : editorDefs.value.filter((def) => only.includes(def.code))
+  for (const def of targets) {
     // 换任务后本次载入属于旧任务：直接丢弃，不写标记、不画字节
     if (generation !== taskGeneration) {
       return
@@ -940,6 +1009,8 @@ async function loadEditorsNow(force: boolean): Promise<void> {
         }
         editorState.set(def.code, { generation, source: 'template' })
       }
+      // 表格里现在是服务端文件（或模板）的字节：脏标记随载入清零
+      dirtyDefs.delete(def.code)
       // 交互专项：程序化载入（新文件/重载）⇒ 旧预览立即失效（硬闸仍是 previewId）
       aiStore.onSheetReloaded(def.code)
     } catch (error) {
@@ -978,7 +1049,11 @@ async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: s
   return { ok: false, error: '编辑区表格未能载入（请重试，或重新打开该配置的编辑标签页）' }
 }
 
-function onGridChanged(): void {
+function onGridChanged(defCode: string | undefined): void {
+  // 批次 1C：编辑区与「服务端文件」是两回事 —— 记下脏区，重载/换任务/离页前才知道要结算
+  if (defCode) {
+    dirtyDefs.add(defCode)
+  }
   // 契约联动：导入编辑区的内容改动同步进 AI 上下文（表格类改动只递增版本，避免刷爆动作记录）
   workspace.touch('导入编辑区内容已修改（尚未写回服务端文件）')
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
@@ -1082,6 +1157,8 @@ async function flushEditors(): Promise<FlushOutcome> {
       }
       await tasksApi.saveFile(forTask, def.code, await blob.arrayBuffer())
       savedDefs.add(def.code)
+      // 写回成功 = 该配置项与服务端文件重新一致（脏标记清零；否则换任务/离页还会再提醒一次）
+      dirtyDefs.delete(def.code)
       written.push(def.code)
     }
     if (skipped.length > 0) {
@@ -1103,6 +1180,164 @@ async function flushEditors(): Promise<FlushOutcome> {
     busy.value = null
   }
   return { ok, savedDefs: written, reason: failureReason }
+}
+
+/**
+ * 把**脏**编辑区写回服务端文件（"重载/换任务前先结算"的唯一实现，批次 1C）。
+ *
+ * <p>与 {@link flushEditors} 共用同一套写回闸（清单未知不写、内容来源不明不写、本地校验失败不写），
+ * 但**只碰脏区**，也不弹「草稿已保存」的成功提示 —— 它是切换/重载前替用户兜底，不是一次显式保存。
+ *
+ * @param forTask 字节归属的任务号（调用方在改绑前捕获，不能读实时 `taskId`）
+ * @returns `ok:false` 时 `reason` 逐项点名没写回的配置项（可直接给用户看；调用方据此决定"确认放弃"）
+ */
+async function flushDirtyDefs(
+  forTask: number,
+  codes: readonly string[],
+  generation: number
+): Promise<{ ok: boolean; reason?: string }> {
+  if (codes.length === 0) {
+    return { ok: true }
+  }
+  busy.value = 'flush'
+  try {
+    if (!filesOk.value) {
+      const listed = await ensureFileList()
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        return { ok: false, reason: t('views.import.msg.writeBackAbortedOnSwitch') }
+      }
+      if (!listed) {
+        return { ok: false, reason: t('views.import.msg.fileListUnreadable', { taskId: forTask }) }
+      }
+    }
+    const failed: string[] = []
+    for (const code of codes) {
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        return { ok: false, reason: t('views.import.msg.writeBackAbortedOnSwitch') }
+      }
+      const grid = gridRefs[code]
+      if (!grid) {
+        failed.push(t('views.import.msg.editorUnmounted', { code }))
+        continue
+      }
+      const state = editorState.get(code)
+      const current = state !== undefined && state.generation === generation ? state : null
+      const writable = current !== null
+        && (current.source === 'file' || uploadedFiles[code] === undefined)
+      if (!writable) {
+        failed.push(t('views.import.msg.editorSourceUnknown', { code }))
+        continue
+      }
+      const issues = grid.validateLocal()
+      if (issues.length > 0) {
+        const first = issues[0]
+        failed.push(t('views.import.msg.localIssuesDetail', {
+          code,
+          count: issues.length,
+          row: first?.rowIndex ?? '',
+          reason: first?.reason ?? ''
+        }))
+        continue
+      }
+      try {
+        const blob = await grid.toXlsxBlob()
+        if (generation !== taskGeneration || forTask !== taskId.value) {
+          return { ok: false, reason: t('views.import.msg.writeBackAbortedOnSwitch') }
+        }
+        await tasksApi.saveFile(forTask, code, await blob.arrayBuffer())
+        savedDefs.add(code)
+        dirtyDefs.delete(code)
+      } catch (error) {
+        // 单个配置项写失败不拖累其它配置项：能保住几项是几项
+        failed.push(t('views.import.msg.writeBackFailedFor', {
+          code,
+          reason: error instanceof Error ? error.message : String(error)
+        }))
+      }
+    }
+    // 尽量写回后仍失败的那些：把「丢数据」的决定交回用户（reason 逐项点名，不统一甩锅）
+    return failed.length === 0 ? { ok: true } : { ok: false, reason: failed.join('；') }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  } finally {
+    // 与 N1 同一条纪律：只有代次没变时才由本层复位（换任务后由 resetTaskScopedState 清）
+    if (generation === taskGeneration) {
+      busy.value = null
+    }
+  }
+}
+
+/**
+ * 脏区结算（批次 1C 的**统一实现**）：先写回，写不回才让用户明确确认放弃。
+ *
+ * <p>为什么先写回：三条路径（换任务 / 取消勾选 / 离开页面）都会让未保存的编辑失去载体
+ * （复位清屏、标签页卸载、组件销毁），写回是无损的那条路；只有写回真的失败（清单读不到 /
+ * 本地校验不过 / PUT 失败 / 内容来源不明）才把"丢数据"的决定交回用户。
+ *
+ * @param message 由 `reason` 生成正文（各路径文案不同，但都按 locales 完整模板插值）
+ * @returns true = 已写回或用户确认放弃；false = 用户取消（调用方必须维持原状：勾选/导航/任务都不动）
+ */
+async function settleDirtyOrConfirm(
+  forTask: number,
+  codes: readonly string[],
+  title: string,
+  message: (reason: string) => string
+): Promise<boolean> {
+  if (codes.length === 0) {
+    return true
+  }
+  const generation = taskGeneration
+  const outcome = await flushDirtyDefs(forTask, codes, generation)
+  if (outcome.ok) {
+    return true
+  }
+  if (generation !== taskGeneration) {
+    return false
+  }
+  return await confirmDiscardEdits(title, message(outcome.reason ?? t('views.import.msg.unknownReason')))
+}
+
+/**
+ * 换任务前的脏区结算（走 {@link settleDirtyOrConfirm}）。
+ *
+ * @returns false = 用户选择留在原任务（调用方必须中止改绑，连地址栏一起还原）
+ */
+async function settleDirtyBeforeSwitch(from: number): Promise<boolean> {
+  const codes = [...dirtyDefs]
+  return await settleDirtyOrConfirm(
+    from,
+    codes,
+    t('views.import.dialog.unsavedSwitchTitle'),
+    (reason) => t('views.import.msg.unsavedSwitchConfirm', {
+      codes: codes.join('、'),
+      taskId: from,
+      reason
+    })
+  )
+}
+
+/**
+ * 取消勾选前的脏区结算（走 {@link settleDirtyOrConfirm}）。
+ *
+ * <p>为什么必须在这里写回：取消勾选会让标签页卸载、表格引擎销毁 —— 那时连 `toXlsxBlob()`
+ * 都取不到，编辑就真的没了。所以调用方必须**先把勾选回滚**（保持编辑区挂载）再调本函数。
+ *
+ * @returns true = 已写回，或用户确认放弃（调用方清脏后照常应用新勾选）；false = 用户取消（保持原勾选）
+ */
+async function settleDirtyBeforeDeselect(codes: readonly string[]): Promise<boolean> {
+  const forTask = taskId.value
+  if (forTask === null) {
+    return true
+  }
+  return await settleDirtyOrConfirm(
+    forTask,
+    codes,
+    t('views.import.dialog.unsavedDeselectTitle'),
+    (reason) => t('views.import.msg.unsavedDeselectConfirm', {
+      codes: codes.join('、'),
+      reason
+    })
+  )
 }
 
 // ── 步骤导航 ──────────────────────────────────────────────────────────────────
@@ -1818,7 +2053,7 @@ function registerHandlers(): void {
     return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」${syncNote}${writeNote}。`
   })
 
-  registerPageHandler('import.selectDefs', (payload) => {
+  registerPageHandler('import.selectDefs', async (payload) => {
     // 施工卡 §S3e：只读态不改变所选配置项（含收敛工作区与重载编辑区一并短路）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
@@ -1827,8 +2062,18 @@ function registerHandlers(): void {
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
     syncSelectedDefsToWorkspace('AI')
-    activeEditorTab.value = selectedDefs.value[0] ?? ''
-    void loadEditors(true)
+    // 批次 1C：取消勾选含脏项时 watch 会先回滚再结算（写回或确认放弃）。这里等它落定再回灌 ——
+    // 否则用户刚点了"不丢弃"，回执却已经说"已选择配置项：B"（说 A 实际给 B）。
+    await nextTick()
+    if (selectionSettle !== null) {
+      await selectionSettle
+    }
+    // 当前标签页仍被选中就别跳回第一张表；新增的编辑区由 loadEditors() 补齐，
+    // 已载入的**不重载**（整页强制重载会把它们未保存的编辑换成服务端旧文件）
+    if (!selectedDefs.value.includes(activeEditorTab.value)) {
+      activeEditorTab.value = selectedDefs.value[0] ?? ''
+    }
+    void loadEditors()
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
@@ -2087,15 +2332,54 @@ onBeforeUnmount(() => {
   unregisterAiRegion('import.grid')
 })
 
+// ── 批次 1C：离页保护（导航守卫） ──────────────────────────────────────────────
+
 /**
- * 绑定任务（**唯一**的改绑入口）：换代次 → 复位页面态 → 同步工作区 → 拉详情/清单/作业。
+ * 离开本页前结算脏区（`onBeforeRouteLeave`：vue-router 既有机制，无新依赖）。
+ *
+ * <p>为什么不能只靠 `onBeforeUnmount`：卸载钩子跑在**导航已经成立之后** —— 那时只能补一条
+ * toast，用户的数据已经没了，也拦不住导航。守卫在导航提交前执行，可以真写回、也可以中止导航：
+ * - 写回成功（或用户确认放弃）⇒ 放行；
+ * - 用户取消 ⇒ 返回 false 中止导航，页面与编辑区原样保留（脏标记不清）。
+ *
+ * <p>与换任务 / 取消勾选共用同一套结算（{@link settleDirtyOrConfirm} → `flushDirtyDefs`），
+ * 只换文案；同路由 query 变化换任务不会触发本守卫（那条路走 `settleDirtyBeforeSwitch`），
+ * 不会双弹框。
+ */
+onBeforeRouteLeave(async () => {
+  const forTask = taskId.value
+  if (forTask === null || dirtyDefs.size === 0) {
+    return true
+  }
+  const codes = [...dirtyDefs]
+  return await settleDirtyOrConfirm(
+    forTask,
+    codes,
+    t('views.import.dialog.unsavedLeaveTitle'),
+    (reason) => t('views.import.msg.unsavedLeaveConfirm', {
+      codes: codes.join('、'),
+      reason
+    })
+  )
+})
+
+/**
+ * 绑定任务（**唯一**的改绑入口）：结算脏区 → 换代次 → 复位页面态 → 同步工作区 → 拉详情/清单/作业。
  *
  * 路由换任务、新建任务两条入口都走这里 —— 之前 `createAndBindTask` 自己赋值 `taskId` 再
  * `router.replace`，而路由 watch 见到 `id === taskId.value` 直接 return ⇒ 既不复位也不换代次，
  * 旧任务的 `uploadedFiles` / `filesOk` / `importMode` 会残留到新任务（新任务里勾同名配置时
  * 会去下载根本不存在的文件，编辑区永远载不进来）。
+ *
+ * @returns false = 用户在有未保存编辑时选择「留在原任务」（调用方不得改地址栏/继续建任务流程）
  */
-async function bindTask(id: number): Promise<void> {
+async function bindTask(id: number): Promise<boolean> {
+  // 批次 1C：复位会清屏并换文件清单 ⇒ 先把 A 的未保存编辑写回 A（写不回才问用户是否放弃）。
+  // 必须放在 resetTaskScopedState 之前：那之后 gridRefs 已被清、字节也无从取出。
+  const from = taskId.value
+  if (from !== null && from !== id && !(await settleDirtyBeforeSwitch(from))) {
+    return false
+  }
   // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
   aiStore.onSheetPageLeft()
   // 换任务 = 新一代：旧任务的载入态/文件清单/作业跟踪一律作废（否则 A 的字节会写进 B）
@@ -2103,6 +2387,7 @@ async function bindTask(id: number): Promise<void> {
   taskId.value = id
   workspace.setTaskId(id, 'IMPORT', null)
   await loadTask()
+  return true
 }
 
 async function createAndBindTask(): Promise<void> {
@@ -2116,7 +2401,11 @@ async function createAndBindTask(): Promise<void> {
       ElMessage.error(taskStore.actionError ?? t('views.import.msg.taskCreateFailed'))
       return
     }
-    await bindTask(created.id)
+    // 未保存编辑结算被取消 ⇒ 不切任务、不改地址栏（新任务已建出，可在任务中心打开）
+    if (!(await bindTask(created.id))) {
+      ElMessage.info(t('views.import.msg.taskCreated', { id: created.id }))
+      return
+    }
     await router.replace({ name: 'import-wizard', query: { taskId: String(created.id) } })
     ElMessage.success(t('views.import.msg.taskCreated', { id: created.id }))
   } finally {
@@ -2124,11 +2413,74 @@ async function createAndBindTask(): Promise<void> {
   }
 }
 
-// 勾选变化：先收敛进工作区（issue #3，同步调用放在首行，避免被编辑器加载耗时挤后），再补齐编辑区
-watch(selectedDefs, async () => {
+// 勾选变化：先收敛进工作区（issue #3，同步调用放在首行，避免被编辑器加载耗时挤后），再补齐编辑区。
+//
+// 批次 1C 两条纪律：
+// ① **不再整页强制重载** —— 勾选 B 时把 A 的编辑区也用服务端旧文件重画一遍，就是把 A 未保存的
+//    编辑静默丢掉（审查 P1-1）。`loadEditors()` 按 `editorReady` 短路，只补新出现的配置项。
+// ② **取消勾选含脏项 ⇒ 先写回再卸载** —— 标签页卸载后表格引擎销毁，连 `toXlsxBlob()` 都取不到；
+//    所以先同步回滚勾选（DOM 尚未更新 ⇒ 编辑区仍挂载），结算完再决定应用新勾选还是保持原状。
+//
+// 重入：回滚/复原都会再次触发本 watch（`selectionGuardInFlight` 期间的中间态只同步工作区），
+// 不会二次弹框、也不会形成循环。手动勾选（DefSelector v-model）与 AI `import.selectDefs`
+// 都只改 `selectedDefs`，因此走的是同一条保护；`selectionSettle` 让 AI 回执等结算落定
+// （否则会出现"说已勾选、其实用户刚取消"的失真回执）。
+let selectionGuardInFlight = false
+/** 在途的勾选结算（AI handler 在回灌前 await 它）。 */
+let selectionSettle: Promise<void> | null = null
+
+/**
+ * 勾选变化后的视图收口：激活标签页仍被选中就保留（换回第一页会打断正在编辑的那张表），
+ * 否则切到第一个；再补齐未载入的编辑区（`loadEditors()` 只补未载入的，不整页重载）。
+ */
+async function syncEditorsWithSelection(codes: readonly string[]): Promise<void> {
+  if (!codes.includes(activeEditorTab.value)) {
+    activeEditorTab.value = codes[0] ?? ''
+  }
+  await loadEditors()
+}
+
+watch(selectedDefs, async (next, previous) => {
+  if (selectionGuardInFlight) {
+    // 守卫自造的中间态（回滚到 previous / 结算后应用 next）：只收敛工作区，不再走一遍守卫
+    syncSelectedDefsToWorkspace()
+    return
+  }
   syncSelectedDefsToWorkspace()
-  activeEditorTab.value = selectedDefs.value[0] ?? ''
-  await loadEditors(true)
+  const previousCodes = previous ?? []
+  const removedDirty = previousCodes.filter((code) => !next.includes(code) && dirtyDefs.has(code))
+  if (removedDirty.length === 0) {
+    await syncEditorsWithSelection(next)
+    return
+  }
+  if (selectionSettle !== null) {
+    // 已有一次结算在途（用户在确认框未答时又改了勾选）：不叠加守卫，等前一次落定
+    return
+  }
+  // 先回滚勾选：同步赋值 ⇒ 渲染任务拿到的是 previous，被取消的标签页不会卸载（表格仍可用，
+  // 才序列化得出要写回的字节）
+  selectedDefs.value = [...previousCodes]
+  selectionGuardInFlight = true
+  const settle = (async () => {
+    if (!(await settleDirtyBeforeDeselect(removedDirty))) {
+      // 用户取消：保持 previous、脏标记原样保留（编辑内容一行都没动）
+      return
+    }
+    // 已写回，或用户确认放弃 ⇒ 清脏并应用用户真正想要的勾选
+    removedDirty.forEach((code) => dirtyDefs.delete(code))
+    selectedDefs.value = [...next]
+    // 不依赖「复原赋值触发的下一次 watch」：它可能被守卫吞掉（调度先后不确定），这里直接收口
+    await syncEditorsWithSelection(next)
+  })()
+  selectionSettle = settle
+  try {
+    await settle
+  } finally {
+    if (selectionSettle === settle) {
+      selectionSettle = null
+    }
+    selectionGuardInFlight = false
+  }
 })
 
 /**
@@ -2147,7 +2499,15 @@ watch(
     if (id === null || id === taskId.value) {
       return
     }
-    await bindTask(id)
+    const from = taskId.value
+    if (await bindTask(id)) {
+      return
+    }
+    // 用户选择「留在原任务」：地址栏已指向 B，必须还原 —— 否则刷新/复制链接就会跑到 B
+    await router.replace({
+      name: 'import-wizard',
+      query: from === null ? {} : { taskId: String(from) }
+    })
   }
 )
 

@@ -187,3 +187,24 @@ describe('批3③a T7④：export.openEditor handler（残余入口）+ persist 
     expect(execution.result).toContain('selectDefs 注入失败')
   })
 })
+
+describe('批次1B：清单读取失败 ⇒ 下载预检 fail-closed（不得回"没有导出结果"这种假阴性）', () => {
+  it('getFiles reject ⇒ 回执点名清单读取失败并要求先重试，且零下载', async () => {
+    api.getFiles.mockRejectedValue(new Error('GET /files 500'))
+    await mountWizard()
+    useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
+    await flushPromises()
+
+    const execution = await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(execution.ok).toBe(false)
+    expect(String(execution.result)).toContain('导出文件清单读取失败')
+    expect(String(execution.result)).toContain('未触发下载')
+    expect(api.downloadBlob).not.toHaveBeenCalled()
+  })
+})

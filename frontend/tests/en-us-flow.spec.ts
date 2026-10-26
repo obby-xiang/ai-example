@@ -155,7 +155,7 @@ describe('C11-01 en-US 对话主链：空态 → 发送 → 正文 → 建议全
 })
 
 describe('C11-02 en-US 错误码文案：后端英文原文逐字上屏，机器码留在错误卡诊断', () => {
-  it('error 终帧（英文 message）⇒ 通知与错误卡 detail 都是原文，code 原样保留', async () => {
+  it('error 终帧（英文 message）⇒ 只走错误卡，detail 是原文，code 原样保留', async () => {
     applyLocale('en-US')
     api.chat.mockImplementation((_request: unknown, handlers: { onFrame: (frame: SseFrame) => void }) => {
       handlers.onFrame({ type: 'start', runId: 'run-en-err' } as SseFrame)
@@ -176,9 +176,7 @@ describe('C11-02 en-US 错误码文案：后端英文原文逐字上屏，机器
     await wrapper.vm.$nextTick()
 
     expect(store.lastRoundOutcome).toBe('error')
-    expect(store.notice).not.toContain('UPSTREAM_STREAM_ERROR')
-    expect(store.notice).toContain('Error this turn')
-    expect(store.notice).toContain('Upstream stream failed (503 Service Unavailable)')
+    expect(store.notice).toBeNull() // AR-13：关键错误归错误卡，不再进通知条
     const card = store.messages
       .map((message) => message.errorCard)
       .find((candidate) => candidate !== null && candidate !== undefined)

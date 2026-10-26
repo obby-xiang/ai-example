@@ -70,8 +70,14 @@
 
     <!-- ============ 第 3 步：导出 ============ -->
     <div v-show="stepIndex === 2">
+      <el-alert v-if="listsLoadError" type="error" :closable="false" show-icon class="mb-3">
+        <div class="text-[13px]">{{ t('views.export.listsError.text', { reason: listsLoadError }) }}</div>
+        <el-button size="small" type="primary" class="mt-2" :loading="retryingLists" @click="retryLoadLists">
+          {{ t('views.export.listsError.retry') }}
+        </el-button>
+      </el-alert>
       <div class="flex items-center mb-3">
-        <el-button v-if="!isReadOnly" type="primary" :loading="startingExport" :disabled="jobRunning" @click="startExport">
+        <el-button v-if="!isReadOnly" type="primary" :loading="startingExport" :disabled="jobRunning" @click="onStartExportClick">
           {{ exportJob ? t('views.export.reExport') : t('views.export.startExport') }}
         </el-button>
         <template v-if="exportResults.length">
@@ -96,6 +102,10 @@
         @cancel="cancelJob"
       />
 
+      <el-alert v-if="resultsStale" type="warning" :closable="false" show-icon class="my-3">
+        <div class="text-[13px]">{{ staleResultsText }}</div>
+      </el-alert>
+
       <template v-if="exportResults.length">
         <el-alert
           type="info"
@@ -114,7 +124,7 @@
             v-for="item in exportResults"
             :key="item.defCode"
             :name="item.defCode"
-            :label="t('views.export.optionLabel', { name: defName(item.defCode), rows: item.rowCount })"
+            :label="tabLabel(item)"
           >
             <SpreadGrid
               :ref="(el) => setGridRef(item.defCode, el)"
@@ -160,14 +170,18 @@ import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-regions'
 import {
+  assertConditionBuildable,
+  buildConditionOutcome,
   buildQueryCondition,
   draftModelFromCondition,
   emptyDraftModel,
+  InvalidConditionInputError,
   isConditionEmpty,
   conditionSummary,
   parseConditionJson,
   stringifyCondition,
-  type ConditionDraftModel
+  type ConditionDraftModel,
+  type ConditionInputIssue
 } from '@/types/condition'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
@@ -257,6 +271,34 @@ const exportResults = ref<ExportResultItem[]>([])
 const checkedDefs = ref<string[]>([])
 const activeTab = ref('')
 
+/**
+ * 导出批次（代次）与"当前展示的是哪一批"。
+ *
+ * 重导出**不再**在建作业成功时清空结果面（那会让用户在作业跑完前既看不到旧结果、也不知道
+ * 下载到的是哪一批文件）：旧结果继续展示，只把 `jobBatch` 推进；`jobBatch > resultsBatch`
+ * 即"下面是旧结果"，模板据此标明代次，等新作业完成、`refreshResults` 重新铺开文件后追平。
+ */
+const jobBatch = ref(1)
+const resultsBatch = ref(1)
+/**
+ * 清单读取失败（fail-closed 判据 + 可见重试入口）。
+ *
+ * 读取失败此前只落一条 toast（甚至静默吞成空列表）⇒ 页面拿"空结果"当"确实没有文件"，
+ * 接着的保存/建作业会按错误前提写服务端。现在失败即置原因：写入口一律拒绝（禁写），
+ * 模板给出「重试读取」按钮，读成功才清除。
+ */
+const filesLoadError = ref<string | null>(null)
+const jobsLoadError = ref<string | null>(null)
+const retryingLists = ref(false)
+/**
+ * 条件草案被**改过**的配置项编码。
+ *
+ * 为什么必须有：`persistStepData` 此前对每个选中项无条件 `PUT condition`，草案未载入/未改动时
+ * 解析结果是 `{}`，一次切步就把服务端（AI 刚设置的）条件覆盖成"无条件 = 全量导出"。现在未改过的
+ * 草案只在解析出**非空**条件时才写（与 `condition.ts` 的既有接口保持一致，不改该文件）。
+ */
+const touchedConditions = new Set<string>()
+
 const gridRefs: Record<string, GridApi> = {}
 /**
  * **已成功载入**的结果表格（内容字节确实在表格里）。
@@ -293,6 +335,30 @@ let stopWatchJob: (() => void) | null = null
 let gridDirty = false
 
 const jobRunning = computed(() => exportJob.value !== null && ['PENDING', 'RUNNING'].includes(exportJob.value.status))
+
+/** 下面展示的结果是否属于**上一批**（新作业已启动但还没成功换掉文件）。 */
+const resultsStale = computed(() => resultsBatch.value < jobBatch.value)
+/** 旧结果横幅（含代次与作业状态；切语言即重算）。 */
+const staleResultsText = computed(() =>
+  t('views.export.staleResults.text', {
+    batch: resultsBatch.value,
+    count: exportResults.value.length,
+    jobBatch: jobBatch.value,
+    jobId: exportJob.value?.id ?? '—',
+    status: exportJob.value?.status ?? t('views.export.staleResults.unknownStatus')
+  })
+)
+/** 清单读取失败的可见原因（文件清单优先，两处都失败则并列）。 */
+const listsLoadError = computed(() => {
+  const parts: string[] = []
+  if (filesLoadError.value) {
+    parts.push(t('views.export.listsError.files', { reason: filesLoadError.value }))
+  }
+  if (jobsLoadError.value) {
+    parts.push(t('views.export.listsError.jobs', { reason: jobsLoadError.value }))
+  }
+  return parts.length > 0 ? parts.join('; ') : null
+})
 
 const taskSubtitle = computed(() => {
   if (!task.value) {
@@ -382,6 +448,16 @@ function fieldsOf(code: string): readonly ConfigField[] {
   return defOf(code)?.fields ?? []
 }
 
+/**
+ * 结果标签文案：旧批次（新作业已启动、还没换文件）在标签上点明代次，避免把上一批文件当成本次结果。
+ */
+function tabLabel(item: ExportResultItem): string {
+  const base = t('views.export.optionLabel', { name: defName(item.defCode), rows: item.rowCount })
+  return resultsStale.value
+    ? `${base}${t('views.export.staleResults.tabSuffix', { batch: resultsBatch.value })}`
+    : base
+}
+
 function setGridRef(code: string, el: unknown): void {
   if (!el) {
     delete gridRefs[code]
@@ -467,11 +543,22 @@ async function resumeJobs(): Promise<void> {
     return
   }
   const generation = taskGeneration
-  const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
+  let jobs: Job[]
+  try {
+    jobs = await jobsApi.listJobs(taskId.value)
+  } catch (error) {
+    // fail-closed：作业清单读不到就不能"当没有作业"——否则页面上既看不出在跑的作业，
+    // 又允许再建一个（重复导出）。原因落到可见重试入口，写入口据此禁写。
+    if (generation === taskGeneration) {
+      jobsLoadError.value = error instanceof Error ? error.message : t('views.export.msg.jobsListLoadFailed')
+    }
+    return
+  }
   // 旧任务的作业列表晚到：不得挂到新任务的作业面板，更不得为新任务登记旧作业的 watcher
   if (generation !== taskGeneration) {
     return
   }
+  jobsLoadError.value = null
   const job = jobs.filter((item) => item.jobType === 'EXPORT')[0]
   if (!job) {
     return
@@ -493,6 +580,9 @@ async function resumeJobs(): Promise<void> {
     return
   }
   if (job.status === 'PENDING' || job.status === 'RUNNING') {
+    // 恢复的是**在途**作业：服务端此刻仍是上一批文件（作业在终态才写文件）⇒ 推进批次号，
+    // 让 `resultsStale` 成立。否则刷新/重进页面后，旧文件会被当成"本次结果"展示与下载。
+    jobBatch.value = Math.max(jobBatch.value, resultsBatch.value + 1)
     beginWatchJob(jobId, generation)
   }
 }
@@ -523,15 +613,42 @@ async function loadExistingResults(): Promise<boolean> {
         fileName: file.fileName ?? xlsxFileName(file.defCode, defName(file.defCode)),
         rowCount: file.rowCount ?? 0
       }))
+    filesLoadError.value = null
+    // 作业在途时服务端仍是**上一批**文件（导出作业在终态才写文件）：此时读到的是旧批次，
+    // 不能把旧结果贴上"本批"的标签（否则"重导出前保留旧结果 + 标明代次"就名存实亡）。
+    resultsBatch.value = jobRunning.value ? Math.max(1, jobBatch.value - 1) : jobBatch.value
     if (exportResults.value.length > 0 && !activeTab.value) {
       activeTab.value = exportResults.value[0]?.defCode ?? ''
       await nextTick()
       await ensureGridLoaded(activeTab.value)
     }
     return true
-  } catch {
-    // 文件列表失败不影响向导本身（可能只是还没导出过）
+  } catch (error) {
+    // fail-closed：读不到清单 ≠ 没有文件。保留已有结果面（新作业成功前不抹掉旧结果），
+    // 但把原因亮出来并禁止写服务端（保存编辑 / 开始导出），由用户点「重试读取」。
+    if (generation === taskGeneration) {
+      filesLoadError.value = error instanceof Error ? error.message : t('views.export.msg.filesListLoadFailed')
+    }
     return false
+  }
+}
+
+/**
+ * 可见重试（清单读取 fail-closed 的配套出口）：重读作业清单与文件清单。
+ *
+ * 只有读成功才会清掉对应错误（`resumeJobs` / `loadExistingResults` 内部负责），
+ * 失败则原因继续挂在模板上 —— 不允许"点一下就当好了"。
+ */
+async function retryLoadLists(): Promise<void> {
+  if (taskId.value === null) {
+    return
+  }
+  retryingLists.value = true
+  try {
+    await resumeJobs()
+    await loadExistingResults()
+  } finally {
+    retryingLists.value = false
   }
 }
 
@@ -553,6 +670,12 @@ function resetTaskScopedState(): void {
     ElMessage.warning(t('views.export.msg.unsavedDiscarded'))
     gridDirty = false
   }
+  jobBatch.value = 1
+  resultsBatch.value = 1
+  filesLoadError.value = null
+  jobsLoadError.value = null
+  retryingLists.value = false
+  touchedConditions.clear()
   exportResults.value = []
   checkedDefs.value = []
   activeTab.value = ''
@@ -752,6 +875,39 @@ function nextStep(): void {
 }
 
 /**
+ * 非法空输入 → 本地化成文（批次1A）。
+ *
+ * `issues` 只带 fieldCode / issue code，文案全部在 `views.export.conditionInput.*`：
+ * 逐条成文后再由完整模板包住。落库闸与行数预览共用同一套模板，本文件不新增硬编码中文。
+ */
+function describeConditionInputIssues(issues: readonly ConditionInputIssue[]): string {
+  const separator = t('views.export.conditionInput.separator')
+  const rendered = issues
+    .map((issue) =>
+      t('views.export.conditionInput.issue', {
+        field: issue.fieldCode,
+        reason: t(
+          issue.code === 'EMPTY_IN'
+            ? 'views.export.conditionInput.emptyIn'
+            : 'views.export.conditionInput.emptyValue'
+        )
+      })
+    )
+    .join(separator)
+  return t('views.export.conditionInput.invalid', { issues: rendered })
+}
+
+/**
+ * `InvalidConditionInputError` 的成文（落库闸 catch 用）。
+ *
+ * 错误对象只带结构化 `issues`（不硬编码中文）；普通 Error 不走这里 —— 仍按原样透传
+ * `error.message`，行为不变。
+ */
+function describeConditionInputError(error: InvalidConditionInputError): string {
+  return describeConditionInputIssues(error.issues)
+}
+
+/**
  * 选中集与查询条件落库（后端是这两者的权威存储）。返回结构化结局（批3③a D7 阻断判据）。
  *
  * 任务号与代次都在**入口捕获**：落库跨多个 await，实时读 `taskId.value` 会在"落库途中换任务"时
@@ -775,11 +931,21 @@ async function persistStepData(
       if (!model) {
         continue
       }
-      const condition = buildQueryCondition(model)
+      // 批次1A 的 fail-closed 入口：值算子空串 / IN 空取值会被压平成"无条件"。它抛出的
+      // `InvalidConditionInputError` 由下方 catch 统一成文（condErrors + 阻断建作业），
+      // 绝不把"非法空输入"当"全部数据"落库（否则一次切步就变成全量导出）。
+      const condition = assertConditionBuildable(model)
+      // 草案未改且解析为空 ⇒ **什么都不写**。服务端可能已有 AI 设置的条件（页面草案只是
+      // 还没载入/没回填）；这里一度无条件下发 `{}`，等于把"AI 说设了条件"改成"无条件导出全量"。
+      // 草案改过的（用户/AI 动过表单，含"故意清空"）与非空条件照原样落库。
+      if (!touchedConditions.has(code) && isConditionEmpty(condition)) {
+        continue
+      }
       await tasksApi.setCondition(forTask, code, stringifyCondition(condition))
       if (generation !== taskGeneration) {
         return { ok: false, reason: '任务已切换，本次未完成落库（未把上一个任务的条件写到新任务上）' }
       }
+      touchedConditions.delete(code)
     }
     const refreshed = await tasksApi.getTask(forTask)
     if (generation !== taskGeneration) {
@@ -790,7 +956,9 @@ async function persistStepData(
     syncSelectedDefsToWorkspace()
     return { ok: true }
   } catch (error) {
-    const reason = error instanceof Error ? error.message : '保存选择与条件失败'
+    const reason = error instanceof InvalidConditionInputError
+      ? describeConditionInputError(error)
+      : error instanceof Error ? error.message : '保存选择与条件失败'
     if (generation !== taskGeneration) {
       return { ok: false, reason: '任务已切换，本次未完成落库' }
     }
@@ -815,14 +983,33 @@ async function persistStepData(
  */
 function onConditionChange(code: string, value: ConditionDraftModel): void {
   draftModels[code] = value
+  // 改过就登记：即使改成了空条件，也要落库（"故意清空"是用户的显式决定，不能被当成"未改"跳过）
+  touchedConditions.add(code)
   delete condErrors[code]
 }
 
+/**
+ * 行数预览：先判"压平结局"，非法空输入不得按"无条件 = 全部数据"去问服务端。
+ *
+ * - `invalid`（值算子空串 / IN 空取值）：**不发** count 请求；本地化原因落 `condErrors`
+ *   （条件表单区域内 `role=alert` 可读），并清掉上一次的旧行数 —— 否则"全部数据 N 行"
+ *   会把畸形输入说成合法全量；
+ * - `cleared`（显式清空）：语义不变，仍按无条件预览"全部数据 N 行"；
+ * - `ok`：正常计数。
+ */
 async function previewCount(code: string): Promise<void> {
   countLoading[code] = true
   try {
     const model = draftModels[code] ?? emptyDraftModel()
-    const condition = buildQueryCondition(model)
+    const outcome = buildConditionOutcome(model)
+    if (outcome.status === 'invalid') {
+      const reason = describeConditionInputIssues(outcome.issues)
+      condErrors[code] = reason
+      delete counts[code]
+      ElMessage.error(reason)
+      return
+    }
+    const condition = outcome.condition
     const result = await dataApiCount(code, condition)
     counts[code] = result
     delete condErrors[code]
@@ -852,6 +1039,17 @@ async function dataApiCount(code: string, condition: ReturnType<typeof buildQuer
 
 // ── 第 3 步：导出作业 ──────────────────────────────────────────────────────────
 
+/** `startExport` 的结构化结局；`notified` = 失败原因已自行 toast（按钮侧不重复提示）。 */
+interface StartExportOutcome {
+  ok: boolean
+  reason?: string
+  notified?: boolean
+  job?: Job
+  taskId?: number
+  detached?: boolean
+  attachError?: string
+}
+
 /**
  * 启动导出作业（按钮 / `export.start` 页面能力共用）。
  *
@@ -859,26 +1057,37 @@ async function dataApiCount(code: string, condition: ReturnType<typeof buildQuer
  * 导出（旧条件为空 ⇒ 导出全量），而界面会用用户看到的条件去解释结果 —— W-06 的"说 A 实际给 B"。
  * 故 `persistStepData()` 失败时**不建作业**，并把原因如实交给调用方。
  *
+ * **读闸（fail-closed）**：作业/文件清单读不到时无法确认"现有结果与在途作业"，此时建作业可能
+ * 重复导出、也可能把旧结果当成新结果 —— 一律不建，先让用户走「重试读取」。
+ *
+ * **脏闸**：重导出会替换服务端导出文件，表格里未保存的编辑随之丢失。界面入口先确认再带
+ * `discardUnsaved`；AI 入口拿不到确认，故直接失败并给出可行动文案（不静默丢弃）。
+ *
  * **真实性**：`createJob` 一旦成功，后续失败（挂接抛错、建作业期间换任务）都不得退化成"未启动"——
  * 作业已在后端跑，回执必须是"已建在任务 #N、本页未跟踪、请勿重复发起"（`detached`/`attachError`）。
  */
-async function startExport(): Promise<{
-  ok: boolean
-  reason?: string
-  job?: Job
-  taskId?: number
-  detached?: boolean
-  attachError?: string
-}> {
+async function startExport(options: { discardUnsaved?: boolean } = {}): Promise<StartExportOutcome> {
   if (taskId.value === null) {
     const reason = t('views.export.msg.noTaskBound')
     ElMessage.warning(reason)
-    return { ok: false, reason }
+    return { ok: false, reason, notified: true }
   }
   if (selectedDefs.value.length === 0) {
     const reason = t('views.export.msg.pickDefs')
     ElMessage.warning(reason)
-    return { ok: false, reason }
+    return { ok: false, reason, notified: true }
+  }
+  if (listsLoadError.value) {
+    return {
+      ok: false,
+      reason: t('views.export.msg.exportBlockedByLists', { reason: listsLoadError.value })
+    }
+  }
+  if (gridDirty && exportResults.value.length > 0 && options.discardUnsaved !== true) {
+    return {
+      ok: false,
+      reason: t('views.export.msg.exportBlockedByDirty')
+    }
   }
   // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
   // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
@@ -903,10 +1112,10 @@ async function startExport(): Promise<{
       return { ok: true, job, taskId: forTask, detached: true }
     }
     exportJob.value = job
-    // 重跑导出 ⇒ 结果表格将被新文件替换：旧预览立即失效（硬闸仍是 previewId/loadGeneration）
-    useAiStore().onSheetPageLeft()
-    exportResults.value = []
-    loadedGrids.clear()
+    // 新作业成功前**保留旧结果**，只推进批次号：模板据此把下面这批文件标成"第 N 次（旧结果）"，
+    // 作业完成并 `refreshResults` 铺开新文件后自然追平。此前在这里清空结果面 ⇒ 作业跑完前
+    // 页面既无结果也无从判断"下载到的是哪一批"。
+    jobBatch.value += 1
     ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
     beginWatchJob(job.id ?? 0, generation)
     return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
@@ -919,11 +1128,40 @@ async function startExport(): Promise<{
     if (generation === taskGeneration) {
       ElMessage.error(reason)
     }
-    return { ok: false, reason }
+    return { ok: false, reason, notified: true }
   } finally {
     if (generation === taskGeneration) {
       startingExport.value = false
     }
+  }
+}
+
+/**
+ * 界面「开始导出」按钮：先判脏，未保存编辑必须显式确认丢弃才继续。
+ *
+ * 与 AI 入口的分工：`export.start` 拿不到用户确认，脏时一律失败并给出可行动文案；
+ * 用户点击侧多这一步复选框确认（不可撤销：重导出会替换服务端文件）。
+ */
+async function onStartExportClick(): Promise<void> {
+  if (gridDirty && exportResults.value.length > 0) {
+    const confirmed = await confirmIrreversible({
+      title: t('views.export.dialog.dirtyTitle'),
+      message: t('views.export.dialog.dirtyMessage'),
+      ack: t('views.export.dialog.dirtyAck')
+    })
+    if (!confirmed) {
+      ElMessage.info(t('views.export.msg.dirtyCanceled'))
+      return
+    }
+    const outcome = await startExport({ discardUnsaved: true })
+    if (!outcome.ok && outcome.reason && outcome.notified !== true) {
+      ElMessage.warning(outcome.reason)
+    }
+    return
+  }
+  const outcome = await startExport()
+  if (!outcome.ok && outcome.reason && outcome.notified !== true) {
+    ElMessage.warning(outcome.reason)
   }
 }
 
@@ -996,6 +1234,10 @@ function beginWatchJob(jobId: number, generation: number = taskGeneration): void
 async function refreshResults(): Promise<void> {
   const generation = taskGeneration
   loadedGrids.clear()
+  // 结果面被整批重载（作业完成 / 重新进入导出步）⇒ 表格内容会被服务端文件替换，
+  // 之前"未保存"的在线编辑事实上已不存在。脏标记必须同时归零：否则新加的判脏闸会
+  // 把每次重导出都拦成"有未保存编辑"，而用户根本没有可保存的内容。
+  gridDirty = false
   await loadExistingResults()
   if (generation !== taskGeneration) {
     return
@@ -1140,21 +1382,112 @@ function onGridChanged(): void {
   void useAiStore().refreshSheetApplied(activeTab.value)
 }
 
-/** 取某配置项的下载用 xlsx（优先用表格里的**当前内容**，反映在线编辑）。 */
-async function buildXlsx(code: string): Promise<{ blob: Blob; fileName: string }> {
+/**
+ * 一次取字节的结局：字节来源（在线编辑表格 / 服务端导出文件）+ 服务端记录行数。
+ *
+ * `source` 是"真实 0 行 / 未载入 / 失败"三态可区分的载体：
+ * - `grid` = 表格里确实是这个文件（含在线编辑）⇒ 行数以表格为准，`rowCount` 仅作服务端参考；
+ * - `server` = 该标签未载入（或载入失败）⇒ 回落服务端导出文件字节；`rowCount === 0` 是
+ *   **真实的空结果**，不是"没载入"；
+ * - 失败一律 throw（调用方必须显式失败，不允许产出空文件）。
+ */
+interface XlsxSource {
+  blob: Blob
+  fileName: string
+  source: 'grid' | 'server'
+  /** 服务端记录的行数（file.rowCount；缺失记 0） */
+  rowCount: number
+}
+
+/**
+ * 取某配置项的下载用 xlsx：**先确保表格已载入**，载入不了才回落服务端字节。
+ *
+ * 修复面：此前只要表格组件在，就直接 `toXlsxBlob()` —— 未载入的标签返回的是**空工作簿**，
+ * 于是"下载"静默产出空文件（用户以为拿到了导出结果）。现在：
+ * 1. 表格已载入 ⇒ 用表格当前内容（在线编辑不丢）；
+ * 2. 表格未载入/载入失败 ⇒ 回落 `GET /tasks/{id}/files/{code}` 的服务端字节；
+ * 3. 回落也失败 ⇒ 抛错点名"未载入原因 + 回落失败原因"，批量调用方整批不下载。
+ */
+async function buildXlsx(code: string): Promise<XlsxSource> {
+  const item = exportResults.value.find((entry) => entry.defCode === code)
+  const fileName = item?.fileName ?? xlsxFileName(code, defName(code))
+  const rowCount = item?.rowCount ?? 0
+  // 任务号与代次在**入口**捕获：`ensureGridLoaded` / `toXlsxBlob` / 回落下载都是 await，
+  // 期间换任务会把 A 的表格字节（或 A 的结果文件）当成 B 的文件交出去。代次一变即中止。
+  const generation = taskGeneration
+  const forTask = taskId.value
+  const switched = (): boolean => generation !== taskGeneration || forTask !== taskId.value
   const grid = gridRefs[code]
-  const fileName = exportResults.value.find((item) => item.defCode === code)?.fileName ?? xlsxFileName(code, defName(code))
   if (grid) {
-    return { blob: await grid.toXlsxBlob(), fileName }
+    // 在途载入会等同一个结局（L-115）；已载入则立即结算，不会重复下载
+    const loaded = await ensureGridLoaded(code)
+    if (switched()) {
+      throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+    }
+    if (loaded.ok) {
+      const blob = await grid.toXlsxBlob()
+      if (switched()) {
+        throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+      }
+      return { blob, fileName, source: 'grid', rowCount }
+    }
+    const loadReason = loaded.error || t('views.export.msg.gridNotLoaded')
+    if (forTask === null) {
+      throw new Error(t('views.export.msg.downloadNotLoadedNoTask', { code, reason: loadReason }))
+    }
+    let fallback: Blob
+    try {
+      fallback = await tasksApi.downloadFile(forTask, code)
+    } catch (error) {
+      throw new Error(t('views.export.msg.downloadFallbackFailed', {
+        code,
+        reason: loadReason,
+        error: error instanceof Error ? error.message : String(error)
+      }))
+    }
+    if (switched()) {
+      throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+    }
+    return { blob: fallback, fileName, source: 'server', rowCount }
   }
-  if (taskId.value === null) {
-    throw new Error('尚未绑定任务')
+  if (forTask === null) {
+    throw new Error(t('views.export.msg.noTask'))
   }
-  return { blob: await tasksApi.downloadFile(taskId.value, code), fileName }
+  const blob = await tasksApi.downloadFile(forTask, code)
+  if (switched()) {
+    throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+  }
+  return { blob, fileName, source: 'server', rowCount }
+}
+
+/** 逐码的字节来源说明（AI 回执用：发起时即可区分"在线编辑内容 / 回落服务端 / 真实 0 行"）。 */
+function describeDownloadSource(code: string): string {
+  const item = exportResults.value.find((entry) => entry.defCode === code)
+  const rows = item === undefined ? '服务端行数未知' : item.rowCount === 0 ? '服务端记录 0 行（真实空结果，不是未载入）' : `服务端记录 ${item.rowCount} 行`
+  return gridRefs[code] && loadedGrids.has(code) ? `${code} = 在线编辑后的当前表格（${rows}）` : `${code} = 标签未载入，回落服务端导出文件字节（${rows}）`
+}
+
+function describeDownloadSources(codes: readonly string[]): string {
+  return codes.map(describeDownloadSource).join('；')
+}
+
+/** 下载成功 toast 的成文（含字节来源与真实行数 —— 三态可区分，文案全部走 locale）。 */
+function downloadedText(info: XlsxSource): string {
+  return t('views.export.msg.downloadedWithNote', {
+    name: info.fileName,
+    origin: info.source === 'grid'
+      ? t('views.export.msg.sourceGrid')
+      : t('views.export.msg.sourceServerFallback'),
+    rows: info.rowCount === 0
+      ? t('views.export.msg.serverRowsZero')
+      : t('views.export.msg.serverRows', { count: info.rowCount })
+  })
 }
 
 /** 一次下载的结局（确定性面：字节构建 + 交给浏览器下载链路这一步是否成功）。 */
-type DownloadOutcome = { ok: true; fileName: string } | { ok: false; reason: string }
+type DownloadOutcome =
+  | { ok: true; fileName: string; source: 'grid' | 'server'; rowCount: number }
+  | { ok: false; reason: string }
 
 /**
  * 「发起」一次下载（**不吞异常**）：取该配置项的当前内容并交给浏览器下载链路。
@@ -1163,10 +1496,10 @@ type DownloadOutcome = { ok: true; fileName: string } | { ok: false; reason: str
  * 未绑定任务一律向调用方传播），页面态与 toast 由调用方决定 —— 因此既能支撑用户点击侧的
  * 结局 toast，也能支撑 AI 侧「即发即回」（{@link startDownloadInBackground}）。
  */
-async function startDownload(code: string): Promise<{ fileName: string }> {
-  const { blob, fileName } = await buildXlsx(code)
-  downloadBlob(blob, fileName)
-  return { fileName }
+async function startDownload(code: string): Promise<XlsxSource> {
+  const built = await buildXlsx(code)
+  downloadBlob(built.blob, built.fileName)
+  return built
 }
 
 /**
@@ -1187,9 +1520,9 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
   inFlightDownloads.add(code)
   downloading.value = code
   try {
-    const { fileName } = await startDownload(code)
-    ElMessage.success(t('views.export.msg.downloaded', { name: fileName }))
-    return { ok: true, fileName }
+    const built = await startDownload(code)
+    ElMessage.success(downloadedText(built))
+    return { ok: true, fileName: built.fileName, source: built.source, rowCount: built.rowCount }
   } catch (error) {
     const reason = error instanceof Error ? error.message : '下载失败'
     ElMessage.error(reason)
@@ -1217,8 +1550,8 @@ function startDownloadInBackground(code: string): void {
   inFlightDownloads.add(code)
   downloading.value = code
   startDownload(code)
-    .then(({ fileName }) => {
-      ElMessage.success(t('views.export.msg.downloaded', { name: fileName }))
+    .then((built) => {
+      ElMessage.success(downloadedText(built))
     })
     .catch((error: unknown) => {
       ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.downloadFailed'))
@@ -1257,7 +1590,11 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       ElMessage.success(t('views.export.msg.zipDownloaded', { count: batch.length }))
     })
     .catch((error: unknown) => {
-      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
+      // 整批显式失败：不产出残缺 zip、不下载一部分（否则用户以为拿到了全部文件）
+      ElMessage.error(t('views.export.msg.zipBatchFailed', {
+        count: batch.length,
+        reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+      }))
     })
     .finally(() => {
       for (const code of batch) {
@@ -1274,21 +1611,25 @@ async function downloadChecked(): Promise<void> {
     ElMessage.warning(t('views.export.msg.pickZipDefs'))
     return
   }
+  const batch = [...checkedDefs.value]
   downloading.value = 'checked'
   try {
-    if (checkedDefs.value.length === 1) {
+    if (batch.length === 1) {
       // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
-      await downloadOne(checkedDefs.value[0] ?? '')
+      await downloadOne(batch[0] ?? '')
       return
     }
-    const entries = await Promise.all(checkedDefs.value.map(async (code) => {
+    const entries = await Promise.all(batch.map(async (code) => {
       const { blob, fileName } = await buildXlsx(code)
       return { name: fileName, blob }
     }))
     downloadBlob(await zipBlobs(entries), `export-selected-${taskId.value ?? 0}.zip`)
     ElMessage.success(t('views.export.msg.zipDownloaded', { count: entries.length }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
+    ElMessage.error(t('views.export.msg.zipBatchFailed', {
+      count: batch.length,
+      reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+    }))
   } finally {
     if (downloading.value === 'checked') {
       downloading.value = null
@@ -1301,21 +1642,25 @@ async function downloadAll(): Promise<void> {
     ElMessage.warning(t('views.export.msg.noResults'))
     return
   }
+  const batch = exportResults.value.map((item) => item.defCode)
   downloading.value = 'all'
   try {
-    if (exportResults.value.length === 1) {
+    if (batch.length === 1) {
       // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
-      await downloadOne(exportResults.value[0]?.defCode ?? '')
+      await downloadOne(batch[0] ?? '')
       return
     }
-    const entries = await Promise.all(exportResults.value.map(async (item) => {
-      const { blob, fileName } = await buildXlsx(item.defCode)
+    const entries = await Promise.all(batch.map(async (code) => {
+      const { blob, fileName } = await buildXlsx(code)
       return { name: fileName, blob }
     }))
     downloadBlob(await zipBlobs(entries), `export-${taskId.value ?? 0}.zip`)
     ElMessage.success(t('views.export.msg.zipDownloaded', { count: entries.length }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.zipFailed'))
+    ElMessage.error(t('views.export.msg.zipBatchFailed', {
+      count: batch.length,
+      reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+    }))
   } finally {
     if (downloading.value === 'all') {
       downloading.value = null
@@ -1335,17 +1680,38 @@ async function downloadAll(): Promise<void> {
  *
  * **代次闸**：任务号与代次入口捕获，逐项复检 —— `toXlsxBlob()` 是 await，期间换任务时
  * A 的表格字节不得写到 B。
+ *
+ * **结局口径**：只有"每一个结果文件都成功写回"才算成功并清掉脏标记。校验不过、未载入、
+ * 写回失败、任务切换一律算**失败**（如实回报 + 脏标记保留）—— 此前校验失败只是 `continue`，
+ * 最后照样 `gridDirty = false` + 成功 toast，等于把"没保存"说成"已保存"。
  */
-async function saveEdits(): Promise<void> {
+interface SaveOutcome {
+  ok: boolean
+  saved: string[]
+  skipped: string[]
+  invalid: string[]
+  reason?: string
+}
+
+async function saveEdits(): Promise<SaveOutcome> {
   if (taskId.value === null) {
     ElMessage.warning(t('views.export.msg.noTask'))
-    return
+    return { ok: false, saved: [], skipped: [], invalid: [], reason: t('views.export.msg.noTask') }
+  }
+  if (listsLoadError.value) {
+    // fail-closed：清单都没读到，无法确认服务端现有文件是否就是要写的这份
+    const reason = t('views.export.msg.saveBlockedByLists', { reason: listsLoadError.value })
+    ElMessage.warning(reason)
+    return { ok: false, saved: [], skipped: [], invalid: [], reason }
   }
   const generation = taskGeneration
   const forTask = taskId.value
   savingFiles.value = true
+  const saved: string[] = []
   const skipped: string[] = []
+  const invalid: string[] = []
   let aborted = false
+  let failed: string | null = null
   try {
     for (const item of exportResults.value) {
       if (generation !== taskGeneration || forTask !== taskId.value) {
@@ -1359,6 +1725,7 @@ async function saveEdits(): Promise<void> {
       }
       const issues = grid.validateLocal()
       if (issues.length > 0) {
+        invalid.push(item.defCode)
         const first = issues[0]
         ElMessage.warning(t('views.export.msg.localIssues', {
           code: item.defCode,
@@ -1374,26 +1741,44 @@ async function saveEdits(): Promise<void> {
         break
       }
       await tasksApi.saveFile(forTask, item.defCode, await blob.arrayBuffer())
+      saved.push(item.defCode)
     }
-    if (aborted) {
-      ElMessage.warning('任务已切换，本次保存中止（未把上一个任务的内容写到新任务上）')
-      return
-    }
-    if (skipped.length > 0) {
-      ElMessage.warning(`${skipped.join('、')} 的结果表格未载入（文件读取失败、仍在下载或标签页尚未打开），本次未保存 —— 请先打开对应标签页并等载入完成后再保存`)
-      return
-    }
-    gridDirty = false
-    ElMessage.success(t('views.export.msg.savedToServer'))
   } catch (error) {
+    failed = error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed')
     if (generation === taskGeneration) {
-      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed'))
+      ElMessage.error(failed)
     }
   } finally {
     if (generation === taskGeneration) {
       savingFiles.value = false
     }
   }
+  if (aborted) {
+    ElMessage.warning('任务已切换，本次保存中止（未把上一个任务的内容写到新任务上）')
+    return { ok: false, saved, skipped, invalid, reason: t('views.export.msg.saveAborted') }
+  }
+  const incomplete = skipped.length + invalid.length
+  if (failed !== null || incomplete > 0) {
+    const parts: string[] = []
+    if (saved.length > 0) {
+      parts.push(t('views.export.msg.savePartSaved', { count: saved.length, codes: saved.join('、') }))
+    }
+    if (invalid.length > 0) {
+      parts.push(t('views.export.msg.savePartInvalid', { count: invalid.length, codes: invalid.join('、') }))
+    }
+    if (skipped.length > 0) {
+      parts.push(t('views.export.msg.savePartSkipped', { count: skipped.length, codes: skipped.join('、') }))
+    }
+    if (failed !== null) {
+      parts.push(t('views.export.msg.savePartWriteFailed', { reason: failed }))
+    }
+    const reason = t('views.export.msg.saveIncomplete', { parts: parts.join('; ') })
+    ElMessage.warning(reason)
+    return { ok: false, saved, skipped, invalid, reason }
+  }
+  gridDirty = false
+  ElMessage.success(t('views.export.msg.savedToServer'))
+  return { ok: true, saved, skipped: [], invalid: [] }
 }
 
 // ── AI 页面能力（裁剪性：这些登记只影响 AI，手工操作不依赖它） ────────────────
@@ -1532,6 +1917,13 @@ async function preflightDownload(
     return { ok: false, message: `${gate.message}。${defCodes.join('、')} 的导出文件未下载` }
   }
   const available = exportResults.value.map((item) => item.defCode)
+  if (available.length === 0 && filesLoadError.value) {
+    // 清单读取失败 ⇒ "可用码为空"不是事实，禁止据此回"没有导出结果"（假阴性）
+    return {
+      ok: false,
+      message: `任务 #${taskId.value} 的导出文件清单读取失败（${filesLoadError.value}），无法确认 ${defCodes.join('、')} 是否有导出文件。请稍后重试（或让用户点导出向导里的「重试读取」）；本次未触发下载`
+    }
+  }
   const invalid = defCodes.filter((code) => !available.includes(code))
   if (invalid.length > 0) {
     return {
@@ -1671,6 +2063,8 @@ function registerHandlers(): void {
     }
     const condition = parseConditionJson(typeof payload.conditions === 'string' ? payload.conditions : JSON.stringify(payload.conditions ?? {}))
     draftModels[defCode] = draftModelFromCondition(condition)
+    // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此落库（含故意清空为无条件）
+    touchedConditions.add(defCode)
     counts[defCode] = null
     const summary = conditionSummary(condition)
     if (taskId.value === null) {
@@ -1682,6 +2076,8 @@ function registerHandlers(): void {
     // 落库的条件仍是旧的 —— 表现为"AI 说设了但导出全量"。
     try {
       await tasksApi.setCondition(taskId.value, defCode, stringifyCondition(condition))
+      // 已落库 ⇒ 草案与服务端一致，后续切步不必重复写（失败则保留登记，切步时重试）
+      touchedConditions.delete(defCode)
       workspace.setQueryConditions(defCode, condition)
       return `已设置 ${defCode} 的查询条件并落库：${summary}`
     } catch (error) {
@@ -1698,11 +2094,10 @@ function registerHandlers(): void {
     }
     const outcome = await startExport()
     if (!outcome.ok) {
-      // 条件没落库/建作业失败 ⇒ 未建作业：结构化失败 + 重试引导（此时重试是安全的）
-      return {
-        ok: false,
-        reason: `${outcome.reason ?? '导出未启动'}。请提示用户核对网络后重试，或手动在界面上重新设置查询条件`
-      }
+      // 条件没落库 / 清单读不到 / 有未保存编辑 ⇒ 未建作业：结构化失败。
+      // 各闸门的 `reason` 自带可行动指引（先重试读取 / 先保存或确认丢弃），这里不再追加
+      // 通用"重试"话术 —— 那会诱导用户在未处理脏编辑时重复发起。
+      return { ok: false, reason: outcome.reason ?? t('views.export.msg.jobStartFailed') }
     }
     if (outcome.detached || outcome.attachError !== undefined) {
       // 作业**已建**：成功形回执 + 明确"请勿重复发起"（不得再追加重试引导，否则会重复导出）
@@ -1846,6 +2241,9 @@ function registerHandlers(): void {
       throw new Error(preflight.message)
     }
     const { defCodes } = preflight
+    // 内容来源在**发起时**就如实交代（"在线编辑内容 / 标签未载入回落服务端 / 真实 0 行"三态可区分）；
+    // 失败只能落在异步侧（toast 点名"表格未载入 + 回落失败"），回执不预设成败。
+    const sources = describeDownloadSources(defCodes)
     const busy = downloading.value
     if (defCodes.length === 1) {
       const defCode = defCodes[0] ?? ''
@@ -1860,7 +2258,7 @@ function registerHandlers(): void {
           + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
       }
       startDownloadInBackground(defCode)
-      return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（内容为在线编辑后的当前表格）。`
+      return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（${sources}）。`
         + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
         + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
     }
@@ -1880,7 +2278,7 @@ function registerHandlers(): void {
     }
     startBatchDownloadInBackground(defCodes)
     return `已发起打包下载：任务 #${taskId.value} 的 ${defCodes.length} 个导出文件（${codeList}）`
-      + '将合并为单个 zip（内容为在线编辑后的当前表格）。'
+      + `将合并为单个 zip（内容来源：${sources}）。`
       + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
       + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
   })

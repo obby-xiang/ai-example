@@ -113,17 +113,33 @@ const ColumnStub = defineComponent({
     '<span class="col-stub"><template v-for="(row, i) in elTableRows()" :key="i"><slot :row="row" /></template></span>'
 })
 
+/**
+ * 筛选控件/分页用**原生控件形态**的桩：草稿与已应用筛选的分离面要能被测试驱动
+ * （改下拉 ≠ 发请求；翻页/刷新带的是哪一份筛选）。
+ */
 const stubs = {
   'el-alert': true,
   'el-button': { template: '<button v-bind="$attrs"><slot /></button>' },
-  'el-input': true,
-  'el-select': true,
-  'el-option': true,
+  'el-input': {
+    props: ['modelValue'],
+    emits: ['update:modelValue'],
+    template: '<input class="ctl-input" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />'
+  },
+  'el-select': {
+    props: ['modelValue'],
+    emits: ['update:modelValue'],
+    template: '<select class="ctl-select" :value="modelValue" @change="$emit(\'update:modelValue\', $event.target.value)"><slot /></select>'
+  },
+  'el-option': { props: ['label', 'value'], template: '<option :value="value">{{ label }}</option>' },
   'el-table': TableStub,
   'el-table-column': ColumnStub,
   'el-tag': { template: '<span><slot /></span>' },
   'el-progress': true,
-  'el-pagination': { template: '<div class="pager-stub" />' },
+  'el-pagination': {
+    props: ['currentPage', 'pageSize'],
+    emits: ['current-change', 'size-change'],
+    template: '<div class="pager-stub"><button class="pager-next" @click="$emit(\'current-change\', currentPage + 1)">next</button></div>'
+  },
   'el-dialog': { template: '<div><slot /></div>' },
   'el-form': { template: '<form><slot /></form>' },
   'el-form-item': { template: '<div><slot /></div>' },
@@ -188,6 +204,42 @@ describe('views/TaskCenterView.vue · 全静止 + 手动刷新（M1+F2）', () =
     await button.trigger('click')
     await flushPromises()
     expect(api.listTasks).toHaveBeenCalledTimes(2) // refreshNow ⇒ 直拉一次
+    wrapper.unmount()
+  })
+
+  /**
+   * 筛选源单一路径（review-07 P1-5）：控件是**草稿**，改动本身不发请求；
+   * 查询 / 翻页 / 刷新三个入口都必须以同一份「控件当前值」拉取 ——
+   * 不允许出现「下拉显示已完成、列表却按全量翻页」的错位（旧实现翻页/刷新读的是 store 旧筛选）。
+   */
+  it('filter-draft-and-applied-source：草稿与已应用筛选分离，查询/翻页/刷新同源', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    const wrapper = mount(TaskCenterView, { global: { stubs } })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenLastCalledWith({ page: 0, size: 10 })
+
+    // 只改控件（状态=已完成）、不点查询 ⇒ 草稿生效前不发任何请求
+    const statusSelect = wrapper.findAll('select')[1]
+    await statusSelect.setValue('COMPLETED')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(1)
+
+    // 翻页：带控件当前筛选（不是 store 里的旧筛选）
+    await wrapper.find('.pager-next').trigger('click')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenLastCalledWith({ page: 1, size: 10, status: 'COMPLETED' })
+
+    // 刷新：与翻页同一份筛选（页保持不动，筛选不被旧值顶回）
+    await wrapper.find('button[title="刷新"]').trigger('click')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenLastCalledWith({ page: 1, size: 10, status: 'COMPLETED' })
+
+    // 查询：同一份筛选 + 回到第一页（三个入口同源）
+    await wrapper.findAll('button').find((b) => b.text() === '查询')!.trigger('click')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenLastCalledWith({ page: 0, size: 10, status: 'COMPLETED' })
+    expect(api.listTasks).toHaveBeenCalledTimes(4)
+
     wrapper.unmount()
   })
 

@@ -13,6 +13,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { ElMessage } from 'element-plus'
 import ExportWizardView from '@/views/ExportWizardView.vue'
 import { executeFrontendTool, DOWNLOAD_PREFLIGHT_TIMEOUT_MS } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -231,5 +232,47 @@ describe('L-82：前置校验悬挂 ⇒ 显式超时结局（不能再无结局�
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 批次 1B：字节来源可区分 / 整批显式失败（不静默出空文件、不产出残缺 zip）
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('批次1B：回执必须交代字节来源（未载入回落服务端 / 真实 0 行不再混淆）', () => {
+  it('1 码且服务端记录 0 行 ⇒ 回执写明"回落服务端"与"真实空结果"', async () => {
+    api.getFiles.mockResolvedValue([
+      { fileType: 'EXPORT', defCode: 'DEMO', fileName: 'DEMO.xlsx', rowCount: 0 }
+    ])
+    await mountWizard()
+
+    const execution = await runTool({ taskId: 7, defCodes: ['DEMO'] })
+    await flushPromises()
+
+    expect(execution.ok).toBe(true)
+    // 本夹具没有表格组件 ⇒ 字节源是服务端文件（不是在线编辑表格），且 0 行是真实空结果
+    expect(execution.result).toContain('回落服务端导出文件字节')
+    expect(execution.result).toContain('真实空结果')
+  })
+})
+
+describe('批次1B：打包链路上任一码取字节失败 ⇒ 整批显式失败（零 zip / 零下载）', () => {
+  it('2 码中 CURR 回落失败 ⇒ 不合成 zip、不触发浏览器下载，并点名整批未下载', async () => {
+    await mountWizard()
+    api.downloadFile.mockImplementation((_taskId: number, code: string) => (code === 'CURR'
+      ? Promise.reject(new Error('GET /files/CURR 500'))
+      : Promise.resolve(new Blob(['DEMO-BYTES']))))
+
+    const execution = await runTool({ taskId: 7, defCodes: ['DEMO', 'CURR'] })
+    await flushPromises()
+
+    // 回执仍是"已发起"（即发即回），但浏览器侧一个文件都没落下
+    expect(execution.ok).toBe(true)
+    expect(api.zipBlobs).not.toHaveBeenCalled()
+    expect(api.downloadBlob).not.toHaveBeenCalled()
+    expect(ElMessage.error).toHaveBeenCalled()
+    const text = String((ElMessage.error as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0] ?? '')
+    expect(text).toContain('均未下载')
+    expect(text).toContain('CURR')
   })
 })

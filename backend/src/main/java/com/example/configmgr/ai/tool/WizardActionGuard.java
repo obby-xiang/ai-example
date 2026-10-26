@@ -33,7 +33,9 @@ import java.util.Set;
  * <ol>
  * <li><b>参数畸形</b>：非 JSON 对象、未知顶层键、空 {@code codes}、小写 {@code mode}
  *     （前端 {@code args.mode === 'ADD' ? 'ADD' : 'REPLACE'} 会把 {@code "add"} 静默降级成
- *     整表替换）、非数组字段条件 —— 一律拒绝；</li>
+ *     整表替换）、非数组字段条件、非无限定算子的空串/纯空白取值、{@code IN []}、重复
+ *     {@code fieldCode} —— 一律拒绝（后三类经前端压平即"丢弃该字段"，正是静默放大成全量的入口；
+ *     {@code EMPTY}/{@code NOT_EMPTY} 不需要取值，不受此限）；</li>
  * <li><b>未知目标</b>：{@code defCode} / 任一 code 不在定义注册表里 ⇒ 拒绝并点名（不做"静默成功"
  *     —— 那会让条件/勾选落在不存在的配置项上，用户看到的是"设置成功"）；</li>
  * <li><b>空条件不得静默放大成全量</b>：{@code conditions} 缺失或既无 {@code scopeKeys}
@@ -283,6 +285,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             return false;
         }
         Set<String> fieldCodes = definition == null ? Set.of() : fieldCodesOf(definition);
+        Set<String> seenFieldCodes = new LinkedHashSet<>();
         boolean accepted = false;
         int index = 0;
         for (JsonNode field : fields) {
@@ -302,6 +305,11 @@ public class WizardActionGuard implements FrontendToolGuard {
             String fieldCode = text(field.get("fieldCode"));
             if (fieldCode == null || fieldCode.isBlank()) {
                 reasons.add("conditions.fields[" + index + "].fieldCode 必填。");
+                fieldOk = false;
+            }
+            else if (!seenFieldCodes.add(fieldCode.trim())) {
+                reasons.add("conditions.fields[" + index + "].fieldCode 重复：" + fieldCode.trim()
+                        + "（同一字段只能有一条条件；单字段区间用 GTE + LTE 两条，不接受重复字段）。");
                 fieldOk = false;
             }
             else if (definition != null && !fieldCodes.contains(fieldCode.trim())) {
@@ -333,8 +341,30 @@ public class WizardActionGuard implements FrontendToolGuard {
                     + "判断空值请用 EMPTY / NOT_EMPTY）。");
             return false;
         }
-        if ("IN".equals(operator) && !value.isArray()) {
-            reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时必须是数组。");
+        if ("IN".equals(operator)) {
+            if (!value.isArray()) {
+                reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时必须是数组。");
+                return false;
+            }
+            if (value.isEmpty()) {
+                reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时不能是空数组"
+                        + "（空数组在前端压平时会被丢弃，等于“无条件 = 导出全部”；没有可选项请改用 EMPTY / NOT_EMPTY"
+                        + " 或不要设条件）。");
+                return false;
+            }
+            for (JsonNode item : value) {
+                if (item == null || item.isNull() || (item.isTextual() && item.asText().isBlank())) {
+                    reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时每一项都必须是非空字符串"
+                            + "（实际出现：" + item + "）。");
+                    return false;
+                }
+            }
+            return true;
+        }
+        String expect = text(value);
+        if (expect != null && expect.isBlank()) {
+            reasons.add("conditions.fields[" + index + "].value 不能是空串或纯空白（operator=" + operator
+                    + " 需要真实比较值；空值会被前端压平丢弃并放大成导出全部；判断空值请用 EMPTY / NOT_EMPTY）。");
             return false;
         }
         return true;

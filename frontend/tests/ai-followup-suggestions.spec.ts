@@ -334,6 +334,34 @@ describe('E2 建议条（DOM 面）', () => {
     wrapper.unmount()
   })
 
+  it('U3：空态 chips 与 composer 共用 health / 挂起 / 待决可用性闸', async () => {
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+    const chip = () => wrapper.find('[data-testid="suggestion-chip"]')
+
+    // 健康可用：chips 可点（原有行为不退化）
+    expect(chip().attributes('disabled')).toBeUndefined()
+
+    // health 不可用 ⇒ 与 composer 一样关闭发送闸，点击零请求
+    store.health = { ...store.health!, available: false }
+    await wrapper.vm.$nextTick()
+    expect(chip().attributes('disabled')).toBeDefined()
+    await chip().trigger('click')
+    await flushPromises()
+    expect(api.chat).not.toHaveBeenCalled()
+
+    // 挂起/待决等待 ⇒ 同样关闭（pendingToolCall 由消息派生；空态下以挂起态覆盖同一闸）
+    store.health = { ...store.health!, available: true }
+    store.suspended = true
+    await wrapper.vm.$nextTick()
+    expect(chip().attributes('disabled')).toBeDefined()
+    await chip().trigger('click')
+    await flushPromises()
+    expect(api.chat).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
+
   it('英文界面：建议与 chips 走 en-US 文案（双语）', async () => {
     applyLocale('en-US')
     seedCompletedRound()

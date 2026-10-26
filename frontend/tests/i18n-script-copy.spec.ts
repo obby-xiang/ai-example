@@ -137,12 +137,14 @@ describe('L-69-③ notice：code + args 结构化，渲染按当前语言重译'
     expect(store.noticeText).toBe('这条消息没有发出去，请稍后再试。')
   })
 
-  it('turnError 模板只带 message，不展示机器码（码留错误卡诊断）', () => {
+  it('error 终帧归错误卡，detail 原文保留、机器码留诊断（不再进通知条）', () => {
     const store = useAiStore()
     applyLocale('en-US')
     store.handleFrame({ type: 'error', runId: 'r-1', code: 'UPSTREAM_STREAM_ERROR', message: 'Service is too busy' } as never)
-    expect(store.noticeCode).toBe('ai.notice.turnError')
-    expect(store.noticeText).toBe('Error this turn: Service is too busy')
+    expect(store.notice).toBeNull() // AR-13：关键错误归卡
+    const card = store.messages.at(-1)?.errorCard
+    expect(card?.code).toBe('UPSTREAM_STREAM_ERROR')
+    expect(card?.detail).toBe('Service is too busy')
   })
 
   it('后端 message 原文（数据不是文案）不翻译、不带 code', () => {

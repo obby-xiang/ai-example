@@ -1111,6 +1111,24 @@
       },
       "taskBound": "任务 #{id}",
       "jobFailed": "导出作业失败（错误 {count} 条），请查看下方明细",
+      "listsError": {
+        "text": "导出结果/作业清单读取失败（{reason}）：无法确认服务端现有结果与作业状态，已暂停写入（开始导出 / 保存编辑）。",
+        "retry": "重试读取",
+        "files": "导出文件清单：{reason}",
+        "jobs": "作业清单：{reason}"
+      },
+      "staleResults": {
+        "text": "下面显示的是第 {batch} 次导出的结果（旧结果，共 {count} 个文件）；第 {jobBatch} 次导出作业（#{jobId}，{status}）完成并载入新文件后才会替换。在此之前下载 / 保存拿到的是这一批旧文件。",
+        "unknownStatus": "未知",
+        "tabSuffix": " · 第 {batch} 次（旧结果）"
+      },
+      "conditionInput": {
+        "invalid": "查询条件里有未填值的字段：{issues}。这些字段会被丢弃并变成“无条件 = 导出全部”，已阻止保存与开始导出。请补上值或改用「为空 / 不为空」；确实要清空条件请显式清空。",
+        "issue": "{field}（{reason}）",
+        "separator": "；",
+        "emptyValue": "缺少取值",
+        "emptyIn": "包含于的取值列表为空"
+      },
       "msg": {
         "defsLoadFailed": "配置定义加载失败",
         "taskLoadFailed": "任务加载失败",
@@ -1142,12 +1160,37 @@
         "saveToServerFailed": "保存到服务端失败",
         "unsavedEdits": "表格有未保存的在线编辑内容（可用「保存编辑到服务端」写回）",
         "taskCreateFailed": "创建任务失败",
-        "taskCreated": "已创建导出任务 #{id}"
+        "taskCreated": "已创建导出任务 #{id}",
+        "filesListLoadFailed": "导出文件清单读取失败",
+        "jobsListLoadFailed": "导出作业清单读取失败",
+        "dirtyCanceled": "已取消重新导出：未保存的编辑仍在表格里",
+        "exportBlockedByLists": "导出结果/作业清单读取失败（{reason}），无法确认现有结果与在途作业，本次未启动导出作业。请先点「重试读取」，读成功后再重试",
+        "exportBlockedByDirty": "导出结果表格里有尚未保存到服务端的编辑：重新导出完成后，服务端导出文件会被新作业结果替换，这些编辑将丢失。请先点「保存编辑到服务端」，或在界面上确认丢弃后再试",
+        "gridNotLoaded": "结果表格未载入",
+        "taskSwitchedNoDownload": "任务已切换，本次未下载（避免把上一个任务的字节当成新任务的导出文件）",
+        "downloadNotLoadedNoTask": "{code} 的结果表格未载入（{reason}），且当前未绑定任务，无法回落服务端字节；本次未下载",
+        "downloadFallbackFailed": "{code} 的结果表格未载入（{reason}），回落服务端导出文件也失败（{error}）；本次未下载该文件",
+        "downloadedWithNote": "已下载 {name}（{origin}；{rows}）",
+        "sourceGrid": "内容为在线编辑后的当前表格",
+        "sourceServerFallback": "该标签未载入，已回落服务端导出文件",
+        "serverRowsZero": "服务端记录 0 行（真实空结果）",
+        "serverRows": "服务端记录 {count} 行",
+        "zipBatchFailed": "打包下载失败：{count} 个文件均未下载（不会产出残缺 zip）—— {reason}",
+        "saveBlockedByLists": "导出结果/作业清单读取失败（{reason}），无法确认服务端文件，本次未保存任何编辑。请先点「重试读取」，读成功后再保存",
+        "saveAborted": "任务已切换，本次保存中止",
+        "savePartSaved": "已保存 {count} 个（{codes}）",
+        "savePartInvalid": "{count} 个校验未通过（{codes}）",
+        "savePartSkipped": "{count} 个未载入（{codes}，请先打开对应标签页并等载入完成）",
+        "savePartWriteFailed": "写回失败：{reason}",
+        "saveIncomplete": "本次保存未全部完成：{parts}。结果表格的「未保存」标记保留，处理后请重试"
       },
       "dialog": {
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
-        "cancelAck": "确认取消作业，执行后无法恢复"
+        "cancelAck": "确认取消作业，执行后无法恢复",
+        "dirtyTitle": "重新导出会丢弃未保存的编辑",
+        "dirtyMessage": "导出结果表格里有尚未保存到服务端的编辑。\n新作业完成后，服务端导出文件会被替换，这些编辑将无法找回。\n建议先点「保存编辑到服务端」。",
+        "dirtyAck": "确认丢弃这些未保存的编辑并重新导出"
       }
     },
     "import": {
@@ -1156,7 +1199,7 @@
       "uploaded": "已上传",
       "draftSaved": "草稿已存",
       "precheckPassed": "预检查通过，可进入下一步导入。",
-      "precheckFailed": "存在校验错误，可返回第 1 步修改数据后重新检查，或直接继续（导入时会再次校验）。",
+      "precheckFailed": "存在校验错误。请返回第 1 步修改数据，并重新执行预检查；预检查通过后才能启动导入或确认发布。",
       "stagingTitle": "暂存数据核查",
       "mergeMode": "增量合并",
       "replaceMode": "范围内替换",
@@ -1210,6 +1253,18 @@
         "draftSaved": "草稿已保存到服务端（作业将读取该文件）",
         "draftSaveFailed": "草稿保存失败",
         "unsavedEdits": "存在未写回的编辑内容，请先修正后再继续",
+        "unknownReason": "未知原因",
+        "writeBackAbortedOnSwitch": "任务已切换，本次写回中止",
+        "fileListUnreadable": "任务 #{taskId} 的服务端文件清单读取失败（GET /files）",
+        "editorUnmounted": "{code} 的编辑区未挂载",
+        "editorSourceUnknown": "{code} 的编辑区内容来源不明（载入未完成）",
+        "localIssuesDetail": "{code} 存在 {count} 处本地校验问题（如第 {row} 行：{reason}）",
+        "writeBackFailedFor": "{code} 写回失败（{reason}）",
+        "uploadCancelledUnsaved": "未上传：编辑区有未保存的编辑内容，用户取消了本次上传",
+        "unsavedUploadConfirm": "以下配置项的编辑区有未保存的编辑内容：{codes}。上传后按文件名匹配到的配置项会用新文件刷新编辑区，这些配置项里未保存的编辑将随之丢失（未匹配到的配置项不受影响）。",
+        "unsavedSwitchConfirm": "以下配置项的编辑区有未保存的编辑内容：{codes}。写回任务 #{taskId} 的服务端文件失败（{reason}）。继续切换任务将丢失这些改动。",
+        "unsavedDeselectConfirm": "以下配置项的编辑区有未保存的编辑内容：{codes}。写回服务端文件失败（{reason}）。继续取消勾选将丢失这些改动。",
+        "unsavedLeaveConfirm": "以下配置项的编辑区有未保存的编辑内容：{codes}。写回服务端文件失败（{reason}）。离开本页将丢失这些改动。",
         "pickAtLeastOne": "请先选择至少一个配置项",
         "jobStarted": "{kind}作业已启动（作业 #{id}）",
         "jobStartFailed": "作业启动失败",
@@ -1237,6 +1292,10 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
+        "unsavedSwitchTitle": "切换任务",
+        "unsavedDeselectTitle": "取消勾选配置项",
+        "unsavedLeaveTitle": "离开导入向导",
+        "unsavedUploadTitle": "上传文件",
         "publishReplaceTitle": "确认发布（整体替换）",
         "publishReplaceMessage": "发布将按配置项范围内整体替换正式区数据：范围内未被本次导入覆盖的旧行会被删除，执行后无法恢复。",
         "publishReplaceAck": "确认整体替换发布，范围内旧数据将被删除且无法恢复"

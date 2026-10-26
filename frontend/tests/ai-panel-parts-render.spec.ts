@@ -4640,14 +4640,20 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     expect(fab.classes()).toContain('bottom-3')
     expect(fab.classes()).not.toContain('bottom-[76px]')
 
-    // R11：error 级通知走 v7 `.enotice` 红族；普通通知保持灰底虚线
-    store.notice = '本轮出错：Service is too busy'
+    // AR-13：通知级别只认 noticeSeverity；上一轮结局为 error 不得把普通通知染红
+    store.notice = '本轮已取消'
     store.lastRoundOutcome = 'error'
+    store.noticeSeverity = 'info'
     await wrapper.vm.$nextTick()
     const notice = wrapper.find('[data-testid="notice-bar"]')
+    expect(notice.classes()).toEqual(expect.arrayContaining(['border-dashed', 'border-[#e3e6ea]', 'bg-[#f6f7f9]', 'rounded-[10px]']))
+    expect(notice.find('span').text()).toBe('—')
+    // error 级通知仍走 v7 `.enotice` 红族
+    store.noticeSeverity = 'error'
+    await wrapper.vm.$nextTick()
     expect(notice.classes()).toEqual(expect.arrayContaining(['border-solid', 'border-[#f0d5d0]', 'bg-[#fdf1ef]', 'rounded-[9px]']))
     expect(notice.find('span').text()).toBe('!')
-    store.lastRoundOutcome = 'ok'
+    store.noticeSeverity = 'info'
     await wrapper.vm.$nextTick()
     expect(notice.classes()).toEqual(expect.arrayContaining(['border-dashed', 'border-[#e3e6ea]', 'bg-[#f6f7f9]', 'rounded-[10px]']))
     expect(notice.find('span').text()).toBe('—')
@@ -5345,8 +5351,8 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     const m1 = assistant('key-missing')
     store.messages = [m1]
     store.handleChatError(new ApiError('AI 能力未启用：已配置的 provider 均无可用 key', 503, 'AI_KEY_MISSING', null), 'key-missing')
-    expect(store.noticeText).not.toContain('AI 能力未启用')
-    expect(store.noticeText).toContain('设置 → AI')
+    expect(store.notice).toBeNull() // AR-13：关键错误只走错误卡
+    expect(m1.errorCard?.guide).toContain('设置 → AI')
     expect(m1.errorCard?.title).toBe('缺少 API Key')
     expect(m1.errorCard?.code).toBe('AI_KEY_MISSING')
     expect(m1.parts.some((p) => p.kind === 'text' && p.text !== ''), '正文不回显后端中文（防中英叠加）').toBe(false)
@@ -5355,7 +5361,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     store.messages = [m2]
     const unreadableReason = 'AI 能力未启用：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置'
     store.handleChatError(new ApiError(unreadableReason, 503, 'AI_KEY_UNREADABLE', null), 'key-unreadable')
-    expect(store.noticeText).not.toContain('AI 能力未启用')
+    expect(store.notice).toBeNull()
     expect(m2.errorCard?.title).toBe('API Key 无法解密')
     expect(m2.errorCard?.code).toBe('AI_KEY_UNREADABLE')
     expect(m2.errorCard?.detail).toBe(unreadableReason)
@@ -5396,7 +5402,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     }
   })
 
-  it('M1 开流前 503 NO_MODEL_CONFIGURED：本地通知 + 专属卡，不回显后端中文', async () => {
+  it('M1 开流前 503 NO_MODEL_CONFIGURED：只出专属卡，不回显后端中文', async () => {
     const store = useAiStore()
     const { ApiError } = await import('@/api/http')
     const message = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
@@ -5406,14 +5412,14 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
 
     store.handleChatError(new ApiError(backendMessage, 503, 'NO_MODEL_CONFIGURED', null), 'no-model')
 
-    expect(store.noticeText).toContain('默认模型')
-    expect(store.noticeText).not.toContain(backendMessage)
+    expect(store.notice).toBeNull() // AR-13：关键错误只走错误卡
+    expect(message.errorCard?.guide).toContain('默认模型')
     expect(message.errorCard?.title).toBe('默认模型不可用')
     expect(message.errorCard?.code).toBe('NO_MODEL_CONFIGURED')
     expect(message.parts.some((part) => part.kind === 'text' && part.text !== '')).toBe(false)
   })
 
-  it('store：SSE error 帧按 code 分派并把卡挂到**本轮这条消息**上（lastRoundOutcome 与 notice 口径不变）', async () => {
+  it('store：SSE error 帧归错误卡，不再重复进通知条（lastRoundOutcome 仍如实记录）', async () => {
     const { useAiStore: useStore } = await import('@/stores/ai')
     const store = useStore()
     const msg = buildMessage([{ kind: 'text', seg: 0, text: '半截正文', streaming: true }], null, true)
@@ -5425,7 +5431,8 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(msg.errorCard?.detail).toBe('本轮 132k / 128k token')
     expect(msg.streaming).toBe(false)
     expect(store.lastRoundOutcome).toBe('error')
-    expect(store.notice).toBe('本轮出错：本轮 132k / 128k token') // 码不再上屏；错误卡 code 仍保留诊断
+    expect(store.notice).toBeNull() // AR-13：关键错误归卡，通知条不重复
+    expect(store.noticeSeverity).toBe('info')
 
     const msg2 = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
     msg2.id = 'a-err2'

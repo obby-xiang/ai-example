@@ -9,7 +9,7 @@
         </div>
       </div>
       <div>
-        <el-button :icon="Refresh" circle :title="t('views.tasks.refresh')" @click="taskStore.refreshNow()" />
+        <el-button :icon="Refresh" circle :title="t('views.tasks.refresh')" @click="refresh" />
         <el-button type="primary" :icon="Plus" @click="createDialogVisible = true">{{ t('views.tasks.create') }}</el-button>
       </div>
     </div>
@@ -149,6 +149,8 @@ import { useI18n } from 'vue-i18n'
  * 任务中心（五页之①）。
  *
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
+ *   控件值是**草稿**（改动不请求），`commitFilterDraft()` 在查询/翻页/刷新/写后刷新时
+ *   把它提交成 store 的已应用值 —— 三个入口同一份筛选，控件与列表不再错位（P1-5）；
  * - 刷新口径（手动刷新批，M1 + F2）：**无任何周期自刷、零 EventSource 连接** ——
  *   挂载只拉一次列表，此后静止对后端零请求；右上角刷新按钮与写操作成功后的本地 refreshNow()
  *   是唯一更新入口（轮询治理一期步1~步3 的条件自刷与任务级 SSE 订阅池已整体摘除）；
@@ -175,9 +177,9 @@ const taskStore = useTaskStore()
 const workspace = useWorkspaceStore()
 const router = useRouter()
 
-const filterKeyword = ref('')
-const filterType = ref<TaskType | null>(null)
-const filterStatus = ref<TaskStatus | null>(null)
+const filterKeyword = ref(taskStore.filterKeyword)
+const filterType = ref<TaskType | null>(taskStore.filterType)
+const filterStatus = ref<TaskStatus | null>(taskStore.filterStatus)
 
 const createDialogVisible = ref(false)
 const creating = ref(false)
@@ -192,9 +194,37 @@ const lastLoadedText = computed(() => {
   return t('views.tasks.recentLoaded', { time: formatDateTime(new Date(taskStore.lastLoadedAt).toISOString()) })
 })
 
+/**
+ * 筛选控件是**草稿**：改动本身不发请求，与 store 里**已应用**的筛选分开存放
+ * （进页面时草稿从已应用值起步，控件与列表不再各说各话）。
+ *
+ * 查询 / 翻页 / 刷新三个入口都先过这里把草稿提交成已应用值，再拉列表 ——
+ * 三者永远同源，不会出现「下拉显示已完成、列表却按旧筛选翻页」的错位。
+ * 草稿有实质改动时页码回到第一页（否则新筛选可能落在空页上）。
+ */
+function commitFilterDraft(): boolean {
+  const keyword = filterKeyword.value.trim()
+  if (
+    keyword === taskStore.filterKeyword &&
+    filterType.value === taskStore.filterType &&
+    filterStatus.value === taskStore.filterStatus
+  ) {
+    return false
+  }
+  taskStore.$patch({
+    filterKeyword: keyword,
+    filterType: filterType.value,
+    filterStatus: filterStatus.value,
+    page: 0
+  })
+  return true
+}
+
 function applyFilters(): void {
+  const keyword = filterKeyword.value.trim()
+  filterKeyword.value = keyword
   taskStore.applyFilters({
-    keyword: filterKeyword.value,
+    keyword,
     type: filterType.value,
     status: filterStatus.value
   })
@@ -208,11 +238,19 @@ function resetFilters(): void {
 }
 
 function onPageChange(page: number): void {
+  commitFilterDraft()
   taskStore.setPage(page - 1)
 }
 
 function onSizeChange(size: number): void {
+  commitFilterDraft()
   taskStore.setSize(size)
+}
+
+/** 手动刷新：与查询/翻页同一份筛选（草稿有改动时按新筛选从第一页拉）。 */
+function refresh(): void {
+  commitFilterDraft()
+  void taskStore.refreshNow()
 }
 
 function statusType(status: TaskStatus): 'success' | 'danger' | 'info' | 'warning' {
@@ -295,7 +333,8 @@ async function cancelTask(row: TaskSummary): Promise<void> {
     if (outcome.handled) {
       ElMessage.success(outcome.message)
       // 写操作成功后本地刷新一次（F2 手动刷新通道；任务中心无周期表，不刷就看不到取消落地）
-      void taskStore.refreshNow()
+      // 走 refresh() 而非裸 refreshNow()：重载与控件当前筛选同源，不把刚选的筛选顶回旧值
+      refresh()
     } else {
       ElMessage.warning(outcome.message)
     }

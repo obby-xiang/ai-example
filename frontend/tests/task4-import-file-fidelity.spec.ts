@@ -42,6 +42,16 @@ const api = vi.hoisted(() => ({
  */
 const routeHolder = vi.hoisted(() => ({ route: null as unknown as { query: { taskId: string } } }))
 
+/**
+ * 批次 1C：离页守卫（`onBeforeRouteLeave`）必须在**导航真正发生前**结算脏区。
+ * 真守卫依赖 `<router-view>` 的路由记录注入，本 spec 只挂载视图本体 ⇒ 用桩接住注册，
+ * 用例直接调用注册进来的守卫函数（返回值 = 放行/中止），与 vue-router 的调用契约一致。
+ */
+const routerMock = vi.hoisted(() => ({
+  guards: [] as Array<() => unknown>,
+  replace: vi.fn()
+}))
+
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-router')>()
   const { reactive } = await import('vue')
@@ -49,14 +59,18 @@ vi.mock('vue-router', async (importOriginal) => {
   return {
     ...actual,
     useRoute: () => routeHolder.route,
-    useRouter: () => ({ push: vi.fn(), replace: vi.fn() })
+    useRouter: () => ({ push: vi.fn(), replace: routerMock.replace }),
+    onBeforeRouteLeave: (guard: () => unknown) => {
+      routerMock.guards.push(guard)
+    }
   }
 })
 
-vi.mock('element-plus', () => ({
-  ElMessage: { error: vi.fn(), warning: vi.fn(), success: vi.fn(), info: vi.fn() },
-  ElMessageBox: { alert: vi.fn(), confirm: vi.fn() }
-}))
+/** 批次 1C：视图的提示与确认都要能被断言（hoisted ⇒ 用例里可直接控制 resolve/reject）。 */
+const msg = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn(), success: vi.fn(), info: vi.fn() }))
+const box = vi.hoisted(() => ({ alert: vi.fn(), confirm: vi.fn() }))
+
+vi.mock('element-plus', () => ({ ElMessage: msg, ElMessageBox: box }))
 
 // 发布确认窗口（fix3）：把"用户确认"改成可控 Promise，才能确定性地把任务切换插进窗口里
 vi.mock('@/utils/confirm-irreversible', async (importOriginal) => ({
@@ -73,10 +87,12 @@ vi.mock('@/utils/excel', async (importOriginal) => ({
   buildTemplateWorkbookJson: api.buildTemplate
 }))
 
-/** 假 SpreadGrid：`toXlsxBlob()` = 当前载入的字节（没载入过 = 空工作簿）。 */
+/** 假 SpreadGrid：`toXlsxBlob()` = 当前表格里的字节（没载入过 = 空工作簿）。 */
 const grids = vi.hoisted(() => ({
   loaded: {} as Record<string, string>,
-  loads: [] as string[]
+  loads: [] as string[],
+  /** 批次 1C：按配置项留一份 `emit`，用例据此模拟用户手改（`data-changed` 与真组件同一条事件）。 */
+  emits: {} as Record<string, (event: string) => void>
 }))
 
 vi.mock('@/components/SpreadGrid.vue', async () => {
@@ -89,7 +105,9 @@ vi.mock('@/components/SpreadGrid.vue', async () => {
         sheetName: { type: String, default: '' },
         readOnly: { type: Boolean, default: false }
       },
-      setup(props, { expose }) {
+      emits: ['data-changed', 'selection-changed'],
+      setup(props, { expose, emit }) {
+        grids.emits[props.defCode] = (event: string) => emit(event as 'data-changed')
         expose({
           loadFromXlsx: async (blob: Blob) => {
             grids.loaded[props.defCode] = await blob.text()
@@ -146,6 +164,20 @@ const CURRENCY_FIELD = {
 
 const CURRENCY_DEF = { id: 1, code: 'CURRENCY', name: '币种', fields: [CURRENCY_FIELD] }
 
+const COUNTRY_FIELD = {
+  id: 2,
+  defCode: 'COUNTRY',
+  code: 'code',
+  label: '国家编码',
+  fieldType: 'STRING' as const,
+  required: false,
+  key: true,
+  sortOrder: 1,
+  optionsJson: null
+}
+
+const COUNTRY_DEF = { id: 2, code: 'COUNTRY', name: '国家', fields: [COUNTRY_FIELD] }
+
 function task(id: number, defCodes: string[]) {
   return {
     id,
@@ -195,12 +227,48 @@ async function nextStep(): Promise<{ ok: boolean; result: string }> {
   return { ok: execution.ok === true, result: String(execution.result ?? '') }
 }
 
+/**
+ * 批次 1C：模拟用户手改编辑区 —— 与真 `SpreadGrid` 的 `data-changed` 同一条事件，
+ * 同时改掉"表格里的字节"（`toXlsxBlob()` 读的就是它）。
+ */
+async function userEdit(defCode: string, bytes: string): Promise<void> {
+  grids.loaded[defCode] = bytes
+  grids.emits[defCode]?.('data-changed')
+  await flushPromises()
+}
+
+/** 批次 1C：两个配置项、都有 UPLOAD 文件（挂载后两张编辑区都按服务端文件载入）。 */
+async function mountTwoDefs(): Promise<void> {
+  api.listDefinitions.mockResolvedValue([CURRENCY_DEF, COUNTRY_DEF])
+  api.getTask.mockImplementation((id: number) => Promise.resolve(task(id, ['CURRENCY', 'COUNTRY'])))
+  api.getFiles.mockResolvedValue([uploadFile(1, 'CURRENCY'), uploadFile(1, 'COUNTRY')])
+  await mountWizard()
+}
+
+/** 该配置项的编辑区是否仍挂载（取消勾选 ⇒ 标签页卸载 ⇒ 假表格消失）。 */
+function gridMounted(defCode: string): boolean {
+  return mounted.at(-1)?.find(`.grid-stub[data-code="${defCode}"]`).exists() === true
+}
+
+/** 取最近一次注册的离页守卫（返回值 = 放行 / 中止导航）。 */
+async function runLeaveGuard(): Promise<unknown> {
+  const guard = routerMock.guards.at(-1)
+  expect(guard, '组件挂载时应注册 onBeforeRouteLeave 守卫').toBeDefined()
+  return await guard!()
+}
+
 beforeEach(() => {
   pinia = createPinia()
   setActivePinia(pinia)
   vi.clearAllMocks()
   grids.loaded = {}
   grids.loads = []
+  grids.emits = {}
+  routerMock.guards = []
+  routerMock.replace.mockReset()
+  box.confirm.mockReset()
+  box.confirm.mockResolvedValue('confirm')
+  box.alert.mockReset()
   routeHolder.route.query.taskId = '1'
   api.getTask.mockImplementation((id: number) => Promise.resolve(task(id, ['CURRENCY'])))
   api.getFiles.mockResolvedValue([uploadFile(1, 'CURRENCY')])
@@ -617,5 +685,217 @@ describe('作业未创建时回执必须是失败', () => {
     expect(api.createJob).not.toHaveBeenCalled()
     expect(execution.ok).toBe(false)
     expect(String(execution.result)).toContain('未启动导入作业')
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 批次 1C（2026-10-26 审查 P1-1，复核返修）：第 1 步未保存编辑的保全与离页保护
+//
+// 根因：编辑区的字节与「服务端文件」是两回事，而下面五条路径都会用服务端字节（或空模板）
+// 覆盖表格 —— 用户刚改的行就此消失：
+//   ① 勾选配置项（`watch(selectedDefs)` 曾 `loadEditors(true)` 整页强制重载）；
+//   ② 上传文件成功（`uploadOne` 也曾 `loadEditors(true)` 整页强制重载）；
+//   ③ 取消勾选（编辑区随标签页卸载，表格销毁后连写回都取不到字节）；
+//   ④ 换任务（`resetTaskScopedState` 直接清屏）；
+//   ⑤ 离开页面（守卫之前零保护）。
+// 口径：重载/复位/卸载前先判脏 —— 能写回就写回；写不回（或上传会替换文件）才让用户明确确认，
+// 用户取消时必须**保持原状**（勾选/导航/任务都不动，脏标记保留），绝不静默丢弃。
+// 离页用 `onBeforeRouteLeave`（vue-router 既有机制，无新依赖）：先结算，失败再确认，取消即中止导航。
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('1C：勾选配置项 / 上传 / 换任务 / 离开页面都不得静默丢弃第 1 步未保存的编辑', () => {
+  it('1C-① 勾选另一个配置项 ⇒ 已勾选配置项的未保存编辑不被整页强制重载丢弃', async () => {
+    await mountTwoDefs()
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:A-BYTES')
+    expect(grids.loaded.COUNTRY).toBe('COUNTRY:A-BYTES')
+
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    const currencyLoadsBefore = grids.loads.filter((entry) => entry.includes('CURRENCY')).length
+
+    // 用户勾选另一个配置项（与 `DefSelector` 的 v-model、AI 的 select_definitions 同一条链）
+    await executeFrontendTool({
+      name: 'import.selectDefs',
+      args: { defCodes: ['CURRENCY', 'COUNTRY', 'REGION'], mode: 'REPLACE' },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    // 新增的配置项照常载入（这里 REGION 没有定义 ⇒ 不产生编辑区）
+    expect(grids.loaded.COUNTRY).toBe('COUNTRY:A-BYTES')
+    // 修复前（RED）：整页 `loadEditors(true)` ⇒ CURRENCY 被服务端旧文件覆盖回 A-BYTES
+    expect(grids.loads.filter((entry) => entry.includes('CURRENCY')).length).toBe(currencyLoadsBefore)
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+  })
+
+  it('1C-② 上传文件前明确确认；上传后只刷新被替换的配置项，其它配置项的未保存编辑保留', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.uploadFile.mockResolvedValue({
+      matchedFiles: [{ defCode: 'COUNTRY', fileName: 'COUNTRY.xlsx' }],
+      unmatchedFiles: []
+    })
+    const loadsBefore = grids.loads.length
+
+    await executeFrontendTool({
+      name: 'import.receiveFile',
+      args: { file: new File(['x'], 'COUNTRY.xlsx') },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    // 上传会用新文件盖掉匹配项的编辑区 ⇒ 有脏区时必须先确认（不能事后才说）
+    expect(box.confirm).toHaveBeenCalledTimes(1)
+    // 修复前（RED）：`loadEditors(true)` 重载**所有**配置项 ⇒ CURRENCY 的编辑被覆盖回 A-BYTES
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+    const reloaded = grids.loads.slice(loadsBefore)
+    expect(reloaded.length).toBeGreaterThan(0)
+    expect(reloaded.every((entry) => entry.includes('COUNTRY'))).toBe(true)
+  })
+
+  it('1C-②b 上传确认被取消 ⇒ 不上传任何文件（脏编辑原样保留）', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    box.confirm.mockRejectedValue(new Error('cancel'))
+    api.uploadFile.mockResolvedValue({ matchedFiles: [], unmatchedFiles: [] })
+
+    const execution = await executeFrontendTool({
+      name: 'import.receiveFile',
+      args: { file: new File(['x'], 'COUNTRY.xlsx') },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(api.uploadFile).not.toHaveBeenCalled()
+    expect(String(execution.result)).toContain('未上传')
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+  })
+
+  it('1C-③ 换任务前把未保存的编辑写回原任务（不以清屏丢弃）', async () => {
+    await mountTwoDefs()
+    await userEdit('COUNTRY', 'COUNTRY:USER-EDIT')
+    api.saveFile.mockClear()
+    api.getFiles.mockResolvedValue([])
+
+    routeHolder.route.query.taskId = '2'
+    await flushPromises()
+
+    const writes = api.saveFile.mock.calls.map((call) => [call[0], call[1], writtenText(call)])
+    // 修复前（RED）：resetTaskScopedState 直接清屏 ⇒ 零写回，编辑凭空消失
+    expect(writes).toEqual([[1, 'COUNTRY', 'COUNTRY:USER-EDIT']])
+    // 切换照常完成：B 的编辑区按模板载入（不是 A 的残留）
+    expect(grids.loaded.COUNTRY).toBe('{"template":"empty"}')
+  })
+
+  it('1C-④ 换任务写回失败 ⇒ 明确确认；用户取消 ⇒ 留在原任务且编辑不丢', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.saveFile.mockRejectedValue(new Error('PUT /files 500'))
+    box.confirm.mockRejectedValue(new Error('cancel'))
+    api.getFiles.mockClear()
+
+    routeHolder.route.query.taskId = '2'
+    await flushPromises()
+
+    expect(box.confirm).toHaveBeenCalledTimes(1)
+    // 未切换：没有为任务 2 拉清单/任务详情，编辑区内容原样保留
+    expect(api.getFiles).not.toHaveBeenCalled()
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+  })
+
+  it('1C-⑤ 取消勾选含未保存编辑的配置项 ⇒ 先写回；写回失败且用户取消 ⇒ 恢复勾选、编辑不丢', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    // 写回失败 + 用户在确认框里选"不丢弃"
+    api.saveFile.mockRejectedValue(new Error('PUT /files 500'))
+    box.confirm.mockRejectedValue(new Error('cancel'))
+
+    // 用户取消勾选 CURRENCY（与手动勾选、AI 的 select_definitions 走同一条 watch 保护）
+    await executeFrontendTool({
+      name: 'import.selectDefs',
+      args: { defCodes: ['COUNTRY'], mode: 'REPLACE' },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    // ① 先尝试把编辑写回原任务（修复前 RED：当前实现直接 warning + 删脏标记，零写回）
+    expect(api.saveFile).toHaveBeenCalledTimes(1)
+    expect(api.saveFile.mock.calls[0]?.[0]).toBe(1)
+    expect(api.saveFile.mock.calls[0]?.[1]).toBe('CURRENCY')
+    expect(writtenText(api.saveFile.mock.calls[0] ?? [])).toBe('CURRENCY:USER-EDIT')
+    // ② 写回失败 ⇒ 明确确认（不是静默丢弃）
+    expect(box.confirm).toHaveBeenCalledTimes(1)
+    expect(String(box.confirm.mock.calls[0]?.[0] ?? '')).toContain('CURRENCY')
+    // ③ 用户取消 ⇒ 勾选恢复：编辑区仍挂载、内容仍是用户改的（未被重载回服务端旧字节）
+    expect(gridMounted('CURRENCY')).toBe(true)
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+  })
+
+  it('1C-⑤b 取消勾选写回成功 ⇒ 勾选照常生效、不弹确认、脏标记清除（不会重复写回）', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.saveFile.mockResolvedValue({})
+
+    await executeFrontendTool({
+      name: 'import.selectDefs',
+      args: { defCodes: ['COUNTRY'], mode: 'REPLACE' },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(api.saveFile).toHaveBeenCalledTimes(1)
+    expect(box.confirm).not.toHaveBeenCalled()
+    // 勾选生效：CURRENCY 的标签页卸载，COUNTRY 保留
+    expect(gridMounted('CURRENCY')).toBe(false)
+    expect(gridMounted('COUNTRY')).toBe(true)
+  })
+
+  it('1C-⑥ 离页守卫：有脏区先写回，写回成功放行导航', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.saveFile.mockClear()
+
+    const allowed = await runLeaveGuard()
+    await flushPromises()
+
+    // 修复前（RED）：只有 onBeforeUnmount 的事后 toast，导航照走、零写回
+    expect(api.saveFile).toHaveBeenCalledTimes(1)
+    expect(writtenText(api.saveFile.mock.calls[0] ?? [])).toBe('CURRENCY:USER-EDIT')
+    expect(allowed).toBe(true)
+    expect(box.confirm).not.toHaveBeenCalled()
+  })
+
+  it('1C-⑥b 离页守卫：写回失败 ⇒ 明确确认；用户取消 ⇒ 中止导航（编辑不丢）', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.saveFile.mockRejectedValue(new Error('PUT /files 500'))
+    box.confirm.mockRejectedValue(new Error('cancel'))
+
+    const allowed = await runLeaveGuard()
+    await flushPromises()
+
+    expect(box.confirm).toHaveBeenCalledTimes(1)
+    expect(String(box.confirm.mock.calls[0]?.[0] ?? '')).toContain('CURRENCY')
+    expect(allowed).toBe(false)
+    expect(gridMounted('CURRENCY')).toBe(true)
+    expect(grids.loaded.CURRENCY).toBe('CURRENCY:USER-EDIT')
+  })
+
+  it('1C-⑥c 离页守卫：写回失败但用户确认放弃 ⇒ 放行（只弹一次确认）', async () => {
+    await mountTwoDefs()
+    await userEdit('CURRENCY', 'CURRENCY:USER-EDIT')
+    api.saveFile.mockRejectedValue(new Error('PUT /files 500'))
+    box.confirm.mockResolvedValue('confirm')
+
+    expect(await runLeaveGuard()).toBe(true)
+    expect(box.confirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('1C-⑥d 对照：没有未保存编辑时离页守卫直接放行（零写回、零弹框）', async () => {
+    await mountTwoDefs()
+    api.saveFile.mockClear()
+
+    expect(await runLeaveGuard()).toBe(true)
+    expect(api.saveFile).not.toHaveBeenCalled()
+    expect(box.confirm).not.toHaveBeenCalled()
   })
 })

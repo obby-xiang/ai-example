@@ -1111,6 +1111,24 @@
       },
       "taskBound": "Task #{id}",
       "jobFailed": "Export job failed ({count} errors); check the details below",
+      "listsError": {
+        "text": "Failed to read the export results / job list ({reason}): the server-side results and job state cannot be confirmed, so writes are paused (start export / save edits).",
+        "retry": "Retry loading",
+        "files": "Export file list: {reason}",
+        "jobs": "Job list: {reason}"
+      },
+      "staleResults": {
+        "text": "The results below are from export run {batch} (old results, {count} file(s)); they are replaced only after run {jobBatch} (job #{jobId}, {status}) finishes and its files are loaded. Until then, downloads / saves use this old batch.",
+        "unknownStatus": "unknown",
+        "tabSuffix": " · run {batch} (old results)"
+      },
+      "conditionInput": {
+        "invalid": "Some query conditions have no value: {issues}. Those fields would be dropped and the condition would become \"no condition = export everything\", so saving and starting the export were blocked. Fill in a value or use \"is empty / is not empty\"; to clear the condition, clear it explicitly.",
+        "issue": "{field} ({reason})",
+        "separator": "; ",
+        "emptyValue": "missing value",
+        "emptyIn": "empty \"in\" list"
+      },
       "msg": {
         "defsLoadFailed": "Failed to load definitions",
         "taskLoadFailed": "Failed to load the task",
@@ -1142,12 +1160,37 @@
         "saveToServerFailed": "Failed to save to the server",
         "unsavedEdits": "The table has unsaved online edits (use \"Save edits to server\" to write them back)",
         "taskCreateFailed": "Failed to create the task",
-        "taskCreated": "Export task #{id} created"
+        "taskCreated": "Export task #{id} created",
+        "filesListLoadFailed": "Failed to read the export file list",
+        "jobsListLoadFailed": "Failed to read the export job list",
+        "dirtyCanceled": "Re-export cancelled: the unsaved edits are still in the table",
+        "exportBlockedByLists": "Failed to read the export results / job list ({reason}); the existing results and running jobs cannot be confirmed, so no export job was started. Click \"Retry loading\" first, then retry",
+        "exportBlockedByDirty": "The result table has edits that are not saved to the server: once the re-export finishes, the server export file is replaced by the new job result and these edits are lost. Click \"Save edits to server\" first, or confirm discarding them in the UI",
+        "gridNotLoaded": "The result table is not loaded",
+        "taskSwitchedNoDownload": "The task was switched; nothing was downloaded (the previous task's bytes are never used as the new task's export file)",
+        "downloadNotLoadedNoTask": "The result table for {code} is not loaded ({reason}) and no task is bound, so the server bytes cannot be used as a fallback; nothing was downloaded",
+        "downloadFallbackFailed": "The result table for {code} is not loaded ({reason}), and falling back to the server export file also failed ({error}); nothing was downloaded for this file",
+        "downloadedWithNote": "Downloaded {name} ({origin}; {rows})",
+        "sourceGrid": "content is the current table with online edits",
+        "sourceServerFallback": "the tab was not loaded, so the server export file was used",
+        "serverRowsZero": "the server records 0 rows (genuinely empty result)",
+        "serverRows": "the server records {count} rows",
+        "zipBatchFailed": "Packaging failed: none of the {count} files were downloaded (no partial zip is produced) — {reason}",
+        "saveBlockedByLists": "Failed to read the export results / job list ({reason}); the server files cannot be confirmed, so nothing was saved. Click \"Retry loading\" first, then save",
+        "saveAborted": "The task was switched; this save was aborted",
+        "savePartSaved": "saved {count} ({codes})",
+        "savePartInvalid": "{count} failed validation ({codes})",
+        "savePartSkipped": "{count} not loaded ({codes}; open the tab and wait for loading to finish)",
+        "savePartWriteFailed": "write-back failed: {reason}",
+        "saveIncomplete": "This save did not complete: {parts}. The \"unsaved\" flag on the result table is kept; retry after fixing the above"
       },
       "dialog": {
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
-        "cancelAck": "Confirm cancelling the job; this cannot be undone"
+        "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "dirtyTitle": "Re-exporting discards unsaved edits",
+        "dirtyMessage": "The result table has edits that are not saved to the server.\nAfter the new job finishes, the server export file is replaced and these edits cannot be recovered.\nConsider clicking \"Save edits to server\" first.",
+        "dirtyAck": "Confirm discarding these unsaved edits and re-exporting"
       }
     },
     "import": {
@@ -1156,7 +1199,7 @@
       "uploaded": "Uploaded",
       "draftSaved": "Draft saved",
       "precheckPassed": "Pre-check passed; you can proceed to the next import step.",
-      "precheckFailed": "Validation errors exist. Go back to step 1 to fix the data and check again, or continue (validation runs again at import).",
+      "precheckFailed": "Validation errors exist. Return to step 1, fix the data, and run the pre-check again. Import and publishing are available only after the pre-check passes.",
       "stagingTitle": "Staging data check",
       "mergeMode": "Incremental merge",
       "replaceMode": "Replace in scope",
@@ -1210,6 +1253,18 @@
         "draftSaved": "Draft saved to the server (the job will read this file)",
         "draftSaveFailed": "Failed to save the draft",
         "unsavedEdits": "There are edits not written back; fix them before continuing",
+        "unknownReason": "unknown reason",
+        "writeBackAbortedOnSwitch": "The task changed meanwhile; write-back aborted",
+        "fileListUnreadable": "Task #{taskId}: failed to read the server file list (GET /files)",
+        "editorUnmounted": "{code}: the editor is not mounted",
+        "editorSourceUnknown": "{code}: the editor content source is unknown (load not finished)",
+        "localIssuesDetail": "{code} has {count} local validation issue(s) (e.g. row {row}: {reason})",
+        "writeBackFailedFor": "{code}: write-back failed ({reason})",
+        "uploadCancelledUnsaved": "Not uploaded: the editor has unsaved edits and the user cancelled this upload",
+        "unsavedUploadConfirm": "These definitions have unsaved edits in their editors: {codes}. After uploading, matched definitions will be refreshed from the new file and their unsaved edits will be lost (unmatched definitions are unaffected).",
+        "unsavedSwitchConfirm": "These definitions have unsaved edits in their editors: {codes}. Writing them back to task #{taskId} failed ({reason}). Switching tasks will discard these edits.",
+        "unsavedDeselectConfirm": "These definitions have unsaved edits in their editors: {codes}. Writing them back to the server failed ({reason}). Deselecting them will discard these edits.",
+        "unsavedLeaveConfirm": "These definitions have unsaved edits in their editors: {codes}. Writing them back to the server failed ({reason}). Leaving this page will discard these edits.",
         "pickAtLeastOne": "Select at least one definition first",
         "jobStarted": "{kind} job started (job #{id})",
         "jobStartFailed": "Failed to start the job",
@@ -1237,6 +1292,10 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "unsavedSwitchTitle": "Switch task",
+        "unsavedDeselectTitle": "Deselect definitions",
+        "unsavedLeaveTitle": "Leave the import wizard",
+        "unsavedUploadTitle": "Upload files",
         "publishReplaceTitle": "Confirm publish (replace in scope)",
         "publishReplaceMessage": "Publishing replaces production data within each definition's scope: old rows in scope that are not covered by this import will be deleted. This cannot be undone.",
         "publishReplaceAck": "I understand publishing will delete old data in scope and cannot be undone"

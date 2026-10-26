@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { executeFrontendTool } from '@/utils/frontend-tools'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
   getTask: vi.fn(),
@@ -55,8 +56,24 @@ vi.mock('@/api/data', () => ({ dataApi: { countData: api.countData } }))
 /** 假 SpreadGrid：`toXlsxBlob()` = 当前载入的字节（没载入过 = 空工作簿）。 */
 const grids = vi.hoisted(() => ({
   loaded: {} as Record<string, string>,
+  /** 载入失败注入（模拟引擎/格式问题）⇒ `loadFromXlsx` 抛出 */
+  loadFail: {} as Record<string, boolean>,
+  /** 本地校验失败注入（`validateLocal` 返回一条问题） */
+  invalid: {} as Record<string, boolean>,
   /** 序列化闸：设置后 `toXlsxBlob()` 会先挂起，用来把"保存途中换任务"做成确定性时序 */
   toXlsxGate: null as null | (() => Promise<void>)
+}))
+
+/** 浏览器下载 / 打包的真实发起点 spy（ExportWizard 经 utils/excel 落地）。 */
+const downloads = vi.hoisted(() => ({
+  downloadBlob: vi.fn(),
+  zipBlobs: vi.fn(async (entries: Array<{ name: string; blob: Blob }>) => new Blob([`zip:${entries.length}`]))
+}))
+
+vi.mock('@/utils/excel', async (importOriginal) => ({
+  ...(await importOriginal<object>()) as object,
+  downloadBlob: downloads.downloadBlob,
+  zipBlobs: downloads.zipBlobs
 }))
 
 vi.mock('@/components/SpreadGrid.vue', async () => {
@@ -72,6 +89,9 @@ vi.mock('@/components/SpreadGrid.vue', async () => {
       setup(props, { expose }) {
         expose({
           loadFromXlsx: async (blob: Blob) => {
+            if (grids.loadFail[props.defCode]) {
+              throw new Error(`${props.defCode} 工作簿解析失败（注入）`)
+            }
             grids.loaded[props.defCode] = await blob.text()
             return { missingHeaders: [] }
           },
@@ -85,7 +105,9 @@ vi.mock('@/components/SpreadGrid.vue', async () => {
             }
             return new Blob([grids.loaded[props.defCode] ?? '<EMPTY-WORKBOOK>'])
           },
-          validateLocal: () => [],
+          validateLocal: () => (grids.invalid[props.defCode]
+            ? [{ rowIndex: 2, fieldCode: 'monthlyFee', fieldLabel: '月费', value: 'x', reason: '不是数字' }]
+            : []),
           getSheetAdapter: () => ({}),
           whenLoaded: async () => {}
         })
@@ -169,7 +191,12 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   grids.loaded = {}
+  grids.loadFail = {}
+  grids.invalid = {}
   grids.toXlsxGate = null
+  downloads.downloadBlob.mockReset()
+  downloads.zipBlobs.mockReset()
+  downloads.zipBlobs.mockImplementation(async (entries: Array<{ name: string; blob: Blob }>) => new Blob([`zip:${entries.length}`]))
   routeHolder.route.query.taskId = '7'
   api.getTask.mockResolvedValue(exportTask())
   api.getFiles.mockResolvedValue([
@@ -436,5 +463,242 @@ describe('导出作业未创建时回执必须是失败', () => {
     expect(api.createJob).not.toHaveBeenCalled()
     expect(execution.ok).toBe(false)
     expect(String(execution.result)).toContain('未启动导出作业')
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 批次 1B：导出面收口（下载不静默出空文件 / 三态可区分 / 保存失败不清脏 /
+//            清单读取 fail-closed + 可见重试 / 重导出判脏与代次 / 草案未改不覆盖条件）
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** 让页面进入"导出结果"步骤（`download_export_files` 的 @ToolScope 是 task:EXPORT/EXPORT）。 */
+async function enterExportStep(): Promise<void> {
+  useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
+  await flushPromises()
+}
+
+/** 让结果表格标脏（用户/AI 手改了在线表格）。 */
+async function markGridDirty(): Promise<void> {
+  mounted[0]?.findComponent({ name: 'SpreadGridStub' }).vm.$emit('data-changed')
+  await flushPromises()
+}
+
+describe('批次1B①：下载未载入标签不得静默出空文件（先 ensure loaded，失败回落服务端字节）', () => {
+  it('OTHER 标签载入失败 ⇒ 回落服务端字节进 zip，不拿空工作簿充数', async () => {
+    api.getFiles.mockResolvedValue([
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 },
+      { taskId: 7, defCode: 'OTHER', fileType: 'EXPORT', fileName: 'OTHER.xlsx', rowCount: 0 }
+    ])
+    await mountWizard()
+    // 前提：只有首个标签载入过；OTHER 的表格载入会失败（引擎/格式问题）
+    expect(grids.loaded.DEMO).toBe('DEMO-BYTES')
+    expect(grids.loaded.OTHER).toBeUndefined()
+    grids.loadFail.OTHER = true
+    await enterExportStep()
+
+    const execution = await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO', 'OTHER'] },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(execution.ok).toBe(true)
+    // 浏览器侧只发生一次 zip 下载
+    expect(downloads.downloadBlob).toHaveBeenCalledTimes(1)
+    const entries = downloads.zipBlobs.mock.calls[0]?.[0] as Array<{ name: string; blob: Blob }>
+    expect(entries.map((entry) => entry.name)).toEqual(['DEMO.xlsx', 'OTHER.xlsx'])
+    // 修复前（RED）：OTHER 走 toXlsxBlob() ⇒ 空工作簿 '<EMPTY-WORKBOOK>' 被静默打进 zip
+    await expect(entries[0]!.blob.text()).resolves.toBe('DEMO-BYTES')
+    await expect(entries[1]!.blob.text()).resolves.toBe('OTHER-BYTES')
+  })
+
+  it('回落也失败 ⇒ 整批显式失败：零 zip、零下载（不产出残缺/空文件）', async () => {
+    api.getFiles.mockResolvedValue([
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 },
+      { taskId: 7, defCode: 'OTHER', fileType: 'EXPORT', fileName: 'OTHER.xlsx', rowCount: 0 }
+    ])
+    await mountWizard()
+    grids.loadFail.OTHER = true
+    api.downloadFile.mockImplementation((_taskId: number, defCode: string) => (defCode === 'OTHER'
+      ? Promise.reject(new Error('GET /files/OTHER 500'))
+      : Promise.resolve(new Blob(['DEMO-BYTES']))))
+    await enterExportStep()
+
+    await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO', 'OTHER'] },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(downloads.zipBlobs).not.toHaveBeenCalled()
+    expect(downloads.downloadBlob).not.toHaveBeenCalled()
+  })
+})
+
+describe('批次1B②：真实 0 行 / 未载入 / 失败三态可区分', () => {
+  it('服务端记录 0 行且表格已载入 ⇒ 回执写"真实空结果"，不当作未载入或失败', async () => {
+    api.getFiles.mockResolvedValue([
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 0 }
+    ])
+    await mountWizard()
+    await enterExportStep()
+
+    const execution = await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(execution.ok).toBe(true)
+    expect(String(execution.result)).toContain('在线编辑后的当前表格')
+    expect(String(execution.result)).toContain('真实空结果')
+    expect(String(execution.result)).toContain('0 行')
+  })
+
+  it('标签未载入 ⇒ 回执写明"回落服务端导出文件字节"，不与真实 0 行混淆', async () => {
+    api.getFiles.mockResolvedValue([
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 0 }
+    ])
+    // 该标签的表格载入失败（引擎/格式问题）⇒ 页面状态是"未载入"，不是"表格里有 0 行"
+    grids.loadFail.DEMO = true
+    await mountWizard()
+    await enterExportStep()
+
+    const execution = await executeFrontendTool({
+      name: 'download_export_files',
+      args: { taskId: 7, defCodes: ['DEMO'] },
+      budgetMs: 5_000
+    })
+    await flushPromises()
+
+    expect(execution.ok).toBe(true)
+    const text = String(execution.result)
+    expect(text).toContain('标签未载入')
+    expect(text).toContain('回落服务端导出文件字节')
+    expect(text).not.toContain('在线编辑后的当前表格')
+  })
+})
+
+describe('批次1B③：保存校验失败计失败且不清脏', () => {
+  it('validateLocal 有错 ⇒ 零 PUT，脏标记保留（随后重导出被拦，不静默丢弃编辑）', async () => {
+    await mountWizard()
+    await markGridDirty()
+    grids.invalid.DEMO = true
+
+    await saveButton()?.trigger('click')
+    await flushPromises()
+
+    expect(api.saveFile).not.toHaveBeenCalled()
+    // 修复前（RED）：校验失败只 continue，最后仍 gridDirty=false + 成功 toast
+    const blocked = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+    expect(blocked.ok).toBe(false)
+    expect(api.createJob).not.toHaveBeenCalled()
+    expect(String(blocked.result)).toContain('未保存')
+  })
+})
+
+describe('批次1B④：作业/文件清单读取失败 ⇒ fail-closed 禁写 + 可见重试', () => {
+  it('getFiles reject ⇒ 页面出现「重试读取」，export.start 禁写；重试成功后才放行', async () => {
+    api.getFiles.mockRejectedValue(new Error('GET /files 500'))
+    await mountWizard()
+
+    expect(mounted[0]?.text()).toContain('读取失败')
+    expect(mounted[0]?.text()).toContain('重试读取')
+
+    const blocked = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+    expect(blocked.ok).toBe(false)
+    expect(api.createJob).not.toHaveBeenCalled()
+    expect(String(blocked.result)).toContain('未启动导出作业')
+
+    api.getFiles.mockResolvedValue([
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 }
+    ])
+    const retry = mounted[0]
+      ?.findAll('el-button')
+      .find((node) => node.text().includes('重试读取'))
+    expect(retry).toBeTruthy()
+    await retry?.trigger('click')
+    await flushPromises()
+    // 读成功 ⇒ 失败横幅消失（不是"点一下就当好了"）
+    expect(mounted[0]?.text()).not.toContain('重试读取')
+
+    const allowed = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+    expect(allowed.ok).toBe(true)
+    expect(api.createJob).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('批次1B⑤：重导出前判脏，新作业成功前保留旧结果并标明代次', () => {
+  it('有未保存编辑 ⇒ export.start 拒绝建作业并指明"先保存/确认丢弃"', async () => {
+    await mountWizard()
+    await markGridDirty()
+
+    const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+
+    expect(execution.ok).toBe(false)
+    expect(api.createJob).not.toHaveBeenCalled()
+    expect(String(execution.result)).toContain('未保存')
+  })
+
+  it('开始导出后旧结果仍在页面上并标"旧结果/第 1 次"，等新作业成功才替换', async () => {
+    await mountWizard()
+    const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+
+    expect(execution.ok).toBe(true)
+    expect(api.createJob).toHaveBeenCalledTimes(1)
+    // 修复前（RED）：建作业成功即清空 exportResults/loadedGrids ⇒ 作业跑完前页面无旧结果
+    expect(mounted[0]?.text()).toContain('旧结果')
+    expect(mounted[0]?.text()).toContain('第 1 次')
+    expect(mounted[0]?.findAll('.grid-stub')).toHaveLength(1)
+  })
+})
+
+describe('批次1B⑥：草案未改不得用 {} 覆盖 AI 条件', () => {
+  it('任务条目没带条件（草案未载入/未改）⇒ 不发空条件 PUT，也不阻止建作业', async () => {
+    api.getTask.mockResolvedValue({ ...exportTask(), items: [{ id: 1, defCode: 'DEMO', conditionJson: null }] })
+    await mountWizard()
+
+    const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+
+    // 修复前（RED）：persistStepData 无条件下发 '{}' ⇒ 覆盖服务端（AI 设置的）条件
+    const emptyWrites = api.setCondition.mock.calls.filter((call) => String(call[2]) === '{}')
+    expect(emptyWrites).toEqual([])
+    expect(api.createJob).toHaveBeenCalledTimes(1)
+    expect(execution.ok).toBe(true)
+  })
+
+  it('草案里有"选了算子却没填值"（1A 判 invalid）⇒ 阻断建作业，不发 {} 当无条件', async () => {
+    api.getTask.mockResolvedValue({
+      ...exportTask(),
+      items: [{
+        id: 1,
+        defCode: 'DEMO',
+        conditionJson: JSON.stringify({ fields: [{ fieldCode: 'monthlyFee', operator: 'EQ', value: '' }] })
+      }]
+    })
+    await mountWizard()
+
+    const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await flushPromises()
+
+    // 1A 接口（buildConditionOutcome/assertConditionBuildable）把"非法空输入"与"显式清空"分开：
+    // 导出侧必须按 invalid 阻断，绝不能把 {} 写进去当"无条件 = 全部数据"。
+    expect(api.createJob).not.toHaveBeenCalled()
+    expect(execution.ok).toBe(false)
+    // 回执原文由 1A 的错误映射生成：`InvalidConditionInputError.issues`（fieldCode + issue code）
+    // 经 `views.export.conditionInput.*` 本地化，错误对象本身不再带用户文案。
+    expect(String(execution.result)).toContain('monthlyFee')
+    expect(String(execution.result)).toContain('缺少取值')
+    const emptyWrites = api.setCondition.mock.calls.filter((call) => String(call[2]) === '{}')
+    expect(emptyWrites).toEqual([])
   })
 })

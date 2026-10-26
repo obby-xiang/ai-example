@@ -102,6 +102,12 @@ export interface AiSendResult {
   userMessageId: string | null
 }
 
+/**
+ * 通知槽级别（AR-13）：**随通知自身写入**，不从 `lastRoundOutcome` 推断 ——
+ * 换会话/新轮留下的旧结局不得把一条无害提示染红。
+ */
+export type NoticeSeverity = 'info' | 'success' | 'warning' | 'error'
+
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
 /**
@@ -1175,11 +1181,66 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 通知槽的写入面（store 的 `this` 只暴露这三个字段时即可调用）。 */
+/** 通知槽的写入面（store 的 `this` 只暴露这四个字段时即可调用）。 */
 interface NoticeSink {
   notice: string | null
   noticeCode: string | null
   noticeArgs: Record<string, string | number> | null
+  noticeSeverity: NoticeSeverity
+}
+
+/**
+ * 本地模板通知的默认级别（AR-13）：在**写入时**定级并随通知保存。
+ * 未列出的模板退化为 `info`；不要在这里读 `lastRoundOutcome`。
+ */
+const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
+  'ai.notice.sendFailed': 'error',
+  'ai.notice.chatRequestFailed': 'error',
+  'ai.notice.turnError': 'error',
+  'ai.notice.poolSaturated': 'error',
+  'ai.notice.poolSaturatedWithSize': 'error',
+  'ai.notice.aiDisabled': 'error',
+  'ai.notice.keyMissing': 'error',
+  'ai.notice.keyUnreadable': 'error',
+  'ai.notice.noModelConfigured': 'error',
+  'ai.notice.redisUnavailable': 'error',
+  'ai.notice.missingRunId': 'error',
+  'ai.notice.decisionFailed': 'error',
+  'ai.notice.toolSubmitFailed': 'error',
+  'ai.notice.formRejected': 'error',
+  'ai.notice.formSubmitFailed': 'error',
+  'ai.notice.formSubmitFailedPlain': 'error',
+  'ai.notice.formCancelFailed': 'error',
+  'ai.notice.uploadReceiveFailed': 'error',
+  'ai.notice.networkError': 'error',
+  'ai.notice.interruptedSuspended': 'warning',
+  'ai.notice.interruptedKeep': 'warning',
+  'ai.notice.interruptedKeepShort': 'warning',
+  'ai.notice.healthProbeFailed': 'warning',
+  'ai.notice.sessionPurged': 'warning',
+  'ai.notice.sessionPurgeIncomplete': 'warning',
+  'ai.notice.memoryDeleteFailed': 'warning',
+  'ai.notice.decisionPending': 'warning',
+  'ai.notice.decisionSubmitting': 'warning',
+  'ai.notice.decisionIdempotent': 'warning',
+  'ai.notice.ackRequired': 'warning',
+  'ai.notice.sheetLargePlan': 'warning',
+  'ai.notice.formSubmittedElsewhere': 'warning',
+  'ai.notice.formResultTooLarge': 'warning',
+  'ai.notice.formResultTooLargeRejected': 'warning',
+  'ai.notice.uploadNoRegion': 'warning',
+  'ai.notice.uploadPickerUnsupported': 'warning',
+  'ai.notice.uploadPickerCancelled': 'warning',
+  'ai.notice.uploadPickerFailed': 'warning',
+  'ai.notice.uploadNoFile': 'warning',
+  'ai.notice.noPendingDecision': 'warning',
+  'ai.notice.toolTerminal': 'warning',
+  'ai.notice.toolAlreadySubmitted': 'warning',
+  'ai.notice.noUiUndo': 'warning'
+}
+
+function noticeSeverityOf(code: string): NoticeSeverity {
+  return NOTICE_SEVERITY[code] ?? 'info'
 }
 
 /**
@@ -1188,28 +1249,37 @@ interface NoticeSink {
  * <p>
  * 同时落一份**设定时刻**的译文到 `notice` —— 既有消费方（单槽字符串断言 / 面板以外的读点）
  * 不必改；结构化形态才是渲染与切语言的依据（见 store 的 `noticeText` getter）。
+ * 级别随本次写入落 `noticeSeverity`，调用方可用第四参覆盖默认表。
  */
-function setNotice(sink: NoticeSink, code: string, args: Record<string, string | number> = {}): void {
+function setNotice(
+  sink: NoticeSink,
+  code: string,
+  args: Record<string, string | number> = {},
+  severity: NoticeSeverity = noticeSeverityOf(code)
+): void {
   sink.noticeCode = code
   sink.noticeArgs = args
+  sink.noticeSeverity = severity
   sink.notice = translate(code, args)
 }
 
 /**
  * 写一条**原文**通知：后端 `message`（中文兜底，设计稿 §3.5）与测试注入走这里。
  *
- * 不翻译、不带 code —— 原文是数据不是文案（C5 同口径）。
+ * 不翻译、不带 code —— 原文是数据不是文案（C5 同口径）。级别默认 info，调用方可按现场覆盖。
  */
-function setRawNotice(sink: NoticeSink, text: string): void {
+function setRawNotice(sink: NoticeSink, text: string, severity: NoticeSeverity = 'info'): void {
   sink.noticeCode = null
   sink.noticeArgs = null
+  sink.noticeSeverity = severity
   sink.notice = text
 }
 
-/** 清空通知槽（code / args 一并清，否则 getter 会把旧模板重新翻出来）。 */
+/** 清空通知槽（code / args / 级别一并清，否则 getter 会把旧模板重新翻出来）。 */
 function clearNotice(sink: NoticeSink): void {
   sink.noticeCode = null
   sink.noticeArgs = null
+  sink.noticeSeverity = 'info'
   sink.notice = null
 }
 
@@ -1281,6 +1351,11 @@ export const useAiStore = defineStore('ai', {
      */
     noticeCode: null as string | null,
     noticeArgs: null as Record<string, string | number> | null,
+    /**
+     * 通知槽级别（AR-13）：与 `notice` 同时写入、同时清空。
+     * 渲染层只认这个字段，**不**读 `lastRoundOutcome` —— 后者是轮次状态，不是通知属性。
+     */
+    noticeSeverity: 'info' as NoticeSeverity,
     /**
      * 批G · S2：停止请求在途（按钮「停止中」disabled；`stop()` 幂等）。
      * 只由 `stop()` 置位/复位，其它地方不得改写。
@@ -1515,8 +1590,8 @@ export const useAiStore = defineStore('ai', {
      * 写一条**原文**通知（i18n L-69）：调用方已按当前语言取好文案（如面板的即时反馈提示），
      * 或文案本身是后端/工具原文 —— 同时清掉 `noticeCode`，否则旧模板会在渲染时盖掉这条。
      */
-    showRawNotice(text: string): void {
-      setRawNotice(this, text)
+    showRawNotice(text: string, severity: NoticeSeverity = 'info'): void {
+      setRawNotice(this, text, severity)
     },
 
     toggleExpand(): void {
@@ -2755,6 +2830,7 @@ export const useAiStore = defineStore('ai', {
       }
       // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 内联于**出错那一轮的消息**（非顶部固定）。
       // 分类见 utils/error-card.ts；已有专属 Alert 的码返回 null（不重复出卡）。
+      let cardAttached = false
       if (assistantId) {
         const card = error instanceof ApiError
           ? buildErrorCard(error.code, error.message)
@@ -2762,11 +2838,17 @@ export const useAiStore = defineStore('ai', {
         const target = this.messages.find((item) => item.id === assistantId)
         if (target && card !== null) {
           target.errorCard = card
+          cardAttached = true
+          // AR-13：关键错误已由错误卡承载，通知条不再重复同一件事。
+          clearNotice(this)
         }
       }
       if (!(error instanceof ApiError)) {
+        if (cardAttached) {
+          return
+        }
         if (error instanceof Error) {
-          setRawNotice(this, error.message)
+          setRawNotice(this, error.message, 'error')
         } else {
           setNotice(this, 'ai.notice.chatRequestFailed')
         }
@@ -2795,17 +2877,23 @@ export const useAiStore = defineStore('ai', {
           void this.probeHealth()
           break
         case ErrorCode.AI_KEY_MISSING:
-          // R-12：无 key ⇒ 专门文案 + 专门错误卡（见 utils/error-card.ts），不打后端中文原文。
-          setNotice(this, 'ai.notice.keyMissing')
+          // R-12：无 key ⇒ 专门错误卡（见 utils/error-card.ts），不打后端中文原文。
+          if (!cardAttached) {
+            setNotice(this, 'ai.notice.keyMissing')
+          }
           void this.probeHealth()
           break
         case ErrorCode.AI_KEY_UNREADABLE:
-          setNotice(this, 'ai.notice.keyUnreadable')
+          if (!cardAttached) {
+            setNotice(this, 'ai.notice.keyUnreadable')
+          }
           void this.probeHealth()
           break
         case ErrorCode.NO_MODEL_CONFIGURED:
-          // 默认目标缺模型/绑定模型失效：专门文案 + 专门错误卡，不打后端中文原文。
-          setNotice(this, 'ai.notice.noModelConfigured')
+          // 默认目标缺模型/绑定模型失效：专门错误卡，不打后端中文原文。
+          if (!cardAttached) {
+            setNotice(this, 'ai.notice.noModelConfigured')
+          }
           void this.probeHealth()
           break
         case ErrorCode.AI_REDIS_UNAVAILABLE:
@@ -2819,16 +2907,20 @@ export const useAiStore = defineStore('ai', {
         case 'INVALID_PARAM':
         case 'PARAMS_LOCKED':
         case 'PROVIDER_GONE': {
-          const key = aiConfigErrorKey(error.code)
-          if (key) {
-            setNotice(this, key)
-          } else {
-            setRawNotice(this, error.message)
+          if (!cardAttached) {
+            const key = aiConfigErrorKey(error.code)
+            if (key) {
+              setNotice(this, key)
+            } else {
+              setRawNotice(this, error.message, 'error')
+            }
           }
           break
         }
         default:
-          setRawNotice(this, error.message)
+          if (!cardAttached) {
+            setRawNotice(this, error.message, 'error')
+          }
       }
     },
 
@@ -5497,11 +5589,16 @@ export const useAiStore = defineStore('ai', {
           // （`pendingToolCall` 变 null），若 `suspended` 还留在真值，输入区会永久锁在
           // 「正在等待你的确认…」而屏上没有任何可点的卡 —— 只能刷新。
           this.suspended = false
-          // R-09：通知槽只给 message，不再展示机器码与派生后缀；码留在 errorCard.code（诊断/取证）。
-          setNotice(this, 'ai.notice.turnError', { message: frame.message })
-          // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 挂在**本轮这条助手消息**上 ⇒ 面板在
+          // AR-13：关键错误归错误卡（不再进通知条）。卡挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
-          message.errorCard = buildErrorCard(frame.code, frame.message)
+          // 只有专属 Alert 码（buildErrorCard 返回 null）才回落到 error 级通知。
+          const card = buildErrorCard(frame.code, frame.message)
+          message.errorCard = card
+          if (card !== null) {
+            clearNotice(this)
+          } else {
+            setNotice(this, 'ai.notice.turnError', { message: frame.message }, 'error')
+          }
           this.lastRoundOutcome = 'error'
           // 批 E · E2：出错轮不出建议（用户下一步是"继续/重试"，不是换话题）
           this.followupReady = false

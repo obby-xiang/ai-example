@@ -68,7 +68,14 @@ import ConditionForm from '@/components/wizard/ConditionForm.vue'
 import { aiSnapshot, resetUiRuntime } from '@/utils/ai-dom-tools'
 import { resetAiRegions, listAiRegions } from '@/utils/ai-regions'
 import { applyLocale, DEFAULT_LOCALE } from '@/locales'
-import { emptyDraftModel, type ConditionDraftModel } from '@/types/condition'
+import {
+  assertConditionBuildable,
+  buildConditionOutcome,
+  buildQueryCondition,
+  emptyDraftModel,
+  InvalidConditionInputError,
+  type ConditionDraftModel
+} from '@/types/condition'
 import type { ConfigDefinition } from '@/types/definition'
 
 const DEFS: ConfigDefinition[] = [
@@ -253,5 +260,77 @@ describe('L-67-05：修正后告警消失（不留陈旧错误）', () => {
     await nextTick()
     expect(host.findAll('[role="alert"]').length).toBe(0)
     host.unmount()
+  })
+})
+
+/**
+ * 批次1A（Task 1）：压平后为空的两条来源必须可区分 ——
+ * 「用户显式清空」（草案里没有任何条目 ⇒ 无条件 = 全部数据，语义不变）与
+ * 「非法空输入」（有条目但值空 / IN 空 ⇒ 压平即丢弃 ⇒ 绝不能静默当成全量）。
+ */
+describe('批次1A：条件压平结局可区分（非法空输入 ≠ 显式清空）', () => {
+  it('显式清空 ⇒ cleared，仍是“无条件 = 全部数据”', () => {
+    const outcome = buildConditionOutcome(emptyDraftModel())
+    expect(outcome.status).toBe('cleared')
+    expect(outcome.condition).toBeNull()
+    expect(buildQueryCondition(emptyDraftModel())).toBeNull()
+  })
+
+  it('值算子的空串/纯空白 ⇒ invalid（不是全量），并点名到字段', () => {
+    const model = emptyDraftModel()
+    model.fields.code = { operator: 'EQ', value: '   ', value2: '' }
+    const outcome = buildConditionOutcome(model)
+    expect(outcome.status).toBe('invalid')
+    expect(outcome.issues).toEqual([{ fieldCode: 'code', operator: 'EQ', code: 'EMPTY_VALUE', value: '' }])
+    // 兼容口径：buildQueryCondition 仍返回 null，调用方必须看 outcome（或走 assertConditionBuildable），
+    // 不得把 null 直接当“无条件”落库
+    expect(buildQueryCondition(model)).toBeNull()
+    expect(() => assertConditionBuildable(model)).toThrow(InvalidConditionInputError)
+  })
+
+  it('IN 的空取值（压平即空列表）⇒ invalid，与 EQ 空值分开报', () => {
+    const model = emptyDraftModel()
+    model.fields.code = { operator: 'IN', value: '', value2: '' }
+    const outcome = buildConditionOutcome(model)
+    expect(outcome.status).toBe('invalid')
+    expect(outcome.issues.map((issue) => issue.code)).toEqual(['EMPTY_IN'])
+  })
+
+  it('EMPTY / NOT_EMPTY 不受影响（不带取值，照旧产出条件）', () => {
+    const model = emptyDraftModel()
+    model.fields.code = { operator: 'EMPTY', value: '', value2: '' }
+    const outcome = buildConditionOutcome(model)
+    expect(outcome.status).toBe('ok')
+    expect(outcome.condition?.fields).toEqual([{ fieldCode: 'code', operator: 'EMPTY' }])
+    expect(assertConditionBuildable(model)).toEqual({ fields: [{ fieldCode: 'code', operator: 'EMPTY' }] })
+  })
+})
+
+/**
+ * 批次1A 续：行数预览也必须按"压平结局"分流。
+ *
+ * 修复前的失败面：`previewCount` 用 `buildQueryCondition`（invalid 与 cleared 都返回 null）
+ * ⇒ 一次"预览"把畸形空值回答成"全部数据 N 行"，和落库闸的 fail-closed 结论相反。
+ */
+describe('批次1A：行数预览不得把非法空输入当成“全部数据”', () => {
+  it('值算子空值 ⇒ 不发 count 请求、区域内给本地化原因，且不写“全部数据”', async () => {
+    const invalidCondition = JSON.stringify({
+      scopeKeys: [],
+      fields: [{ fieldCode: 'code', operator: 'EQ', value: '' }]
+    })
+    api.getTask.mockResolvedValue(exportTask(invalidCondition))
+    await mountView(ExportWizardView)
+
+    const button = document.querySelector<HTMLElement>('[data-ai-ref="export.cond.CURRENCY.count"]')
+    expect(button).not.toBeNull()
+    button?.click()
+    await flushPromises()
+    await nextTick()
+
+    // 畸形空值不得被问成行数（那等于把"非法空输入"演示成"全部数据"）
+    expect(api.countData).not.toHaveBeenCalled()
+    expect(alertText()).toContain('查询条件里有未填值的字段')
+    expect(alertText()).toContain('code')
+    expect(alertText()).toContain('缺少取值')
   })
 })

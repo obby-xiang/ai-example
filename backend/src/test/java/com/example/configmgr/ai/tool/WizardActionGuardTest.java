@@ -132,6 +132,40 @@ class WizardActionGuardTest {
                 "nope");
     }
 
+    /**
+     * 空值 / 空 IN / 重复字段：这三类都能"过闸后在前端压平"，压平即丢弃该字段，
+     * 而没有其它条件时服务端条件被覆盖成 {@code {}} ⇒ 静默放大成全量
+     * （{@code EQ ""} 原样求值只匹配空串行、{@code IN []} 原样求值是 0 行，压平后都反转成全部）。
+     *
+     * <p>同时锁定"合法 {@code EMPTY / NOT_EMPTY} 不变"：不带取值（即便给了空串）仍然放行。
+     */
+    @Test
+    void rejectsBlankValuesEmptyInAndRepeatedFieldCodes() {
+        assertRejected("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"\"}]}}",
+                "空串或纯空白");
+        assertRejected("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"CONTAINS\",\"value\":\"   \"}]}}",
+                "空串或纯空白");
+        assertRejected("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"IN\",\"value\":[]}]}}",
+                "空数组");
+        assertRejected("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"IN\",\"value\":[\"CNY\",\"  \"]}]}}",
+                "每一项都必须是非空字符串");
+        assertRejected("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":["
+                        + "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"},"
+                        + "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"USD\"}]}}",
+                "重复");
+        // 合法 EMPTY / NOT_EMPTY 不变：不带值即合法（表单/模型也可能给空串，一律忽略）
+        assertThat(this.guard.inspectArguments("set_condition",
+                "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":["
+                        + "{\"fieldCode\":\"code\",\"operator\":\"EMPTY\"},"
+                        + "{\"fieldCode\":\"name\",\"operator\":\"NOT_EMPTY\",\"value\":\"\"}]}}").accepted())
+                .isTrue();
+    }
+
     @Test
     void rejectsUnknownDefCodeWithoutQueryingNothing() {
         assertRejected("set_condition",
