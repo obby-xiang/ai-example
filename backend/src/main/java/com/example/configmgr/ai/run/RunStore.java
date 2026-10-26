@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -3178,6 +3179,35 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	// ── TTL（滑动续期：活跃即续，无绝对上限） ─────────────────────────────────────
+
+	/**
+	 * 该轮运行态键（{@code ai:run:<runId>}）的<b>权威剩余毫秒</b>（AR-10：24h 只可见化）。
+	 *
+	 * <p>
+	 * <b>只读</b>：{@code PTTL} 不改该键、不续期、不延长、不缩短 —— AR-10 第 2 条禁止"顺手加续期"。
+	 * 值直接取自 Redis 对本键的到期判定，因此前端展示剩余时长时<b>不必</b>再用
+	 * {@code app.ai.session-ttl} 常量自算另一套时间（"两套到期时间"是明令禁止的口径）。
+	 *
+	 * <p>
+	 * 只问快照键：它与会话/待决条目/归档同寿，是"这一轮还在不在"的寿命锚点。
+	 *
+	 * @return 剩余毫秒（&gt;0）；键不存在 / 无过期（-1）/ 读失败 ⇒ {@code null}。
+	 *         {@code null} 是"未知"，调用方不得折算成 0 或某个默认 24h。
+	 */
+	public Long runKeyTtlRemainingMs(String runId) {
+		if (runId == null || runId.isEmpty()) {
+			return null;
+		}
+		try {
+			Long remaining = this.redis.getExpire(runKey(runId), TimeUnit.MILLISECONDS);
+			return remaining != null && remaining > 0L ? remaining : null;
+		}
+		catch (Exception ex) {
+			// 可见性失败不该把整页打成 500：返回未知，由前端按"不显示时间"处理
+			log.debug("读取轮次快照剩余 TTL 失败 runId={}：{}", runId, ex.getMessage());
+			return null;
+		}
+	}
 
 	/**
 	 * 本次写入/续期应使用的 TTL：<b>整额 {@code app.ai.session-ttl}（默认 24h）</b>。

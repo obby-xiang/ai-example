@@ -106,13 +106,21 @@ public final class FrameContract {
 	 * <b>为什么"无缺口"是对的</b>：序号在 {@code emit()} 里逐帧自增，且每一帧都要广播给订阅者。
 	 * {@code S5c-1} 修复后<b>只有业务帧占号</b>：心跳走独立的 {@code heartbeatSeq} 空间
 	 * （它不落归档，因此也不参与业务时间线），所以"订阅者视角"与"归档视角"的业务 seq
-	 * 完全一致。含心跳的帧流请先滤掉心跳（{@link #HEARTBEAT}）再喂给本方法 ——
-	 * 心跳带的是另一套号，不属于本规则讨论的业务序号。
+	 * 完全一致。
+	 *
+	 * <p>
+	 * <b>心跳帧按类型跳过（AR-06 / Task 5）</b>：阶段帧（{@code heartbeat{phase}}）也是心跳通道，
+	 * 本来就没有业务 {@code seq}。以前要求调用方先滤心跳；首轮/续跑的压缩阶段帧落地后，
+	 * "未发生压缩就没心跳"不再成立，过滤改成校验器内置 —— 语义不变（业务序列仍然无缺口），
+	 * 只是不再依赖每个用例自己过滤。kill：让心跳去抢业务号 ⇒ 业务帧之间出现缺口，本条仍变红。
 	 */
 	public static List<String> seqContract(List<Map<String, Object>> frames) {
 		List<String> out = new ArrayList<>();
 		long expected = 1L;
 		for (int i = 0; i < frames.size(); i++) {
+			if (HEARTBEAT.equals(type(frames.get(i)))) {
+				continue;
+			}
 			Object seq = frames.get(i).get("seq");
 			if (!(seq instanceof Number number)) {
 				out.add("第 " + i + " 帧（" + type(frames.get(i)) + "）缺 seq");

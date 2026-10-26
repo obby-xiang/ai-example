@@ -244,6 +244,40 @@ class AiControllerRunsCurrentTest {
 	}
 
 	/**
+	 * AR-10（批次3 补齐）：24h <b>只可见化</b> —— 卡面剩余时间只能来自后端对
+	 * {@code ai:run:<runId>} 的只读 {@code PTTL} 推导，前端不得用 24h 常量另算一套。
+	 *
+	 * <p>本用例锁两件事：① 已知剩余寿命 ⇒ 两个 additive 键（剩余毫秒 + 到期时刻）随载荷下发；
+	 * ② 读不到（键刚过期 / 读失败 / 无 TTL）⇒ 键仍在、值为 null（"未知"，不是 0）。
+	 */
+	@Test
+	void snapshotTtlRemainingIsExposedWithoutTouchingTheTtl() throws Exception {
+		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(pending("c-1", PendingToolCall.PENDING,
+				PendingToolCall.KIND_CONFIRM)));
+		when(this.runStore.runKeyTtlRemainingMs("r-1")).thenReturn(3_600_000L);
+
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.found").value(true))
+			.andExpect(jsonPath("$.data.snapshotRemainingMs").value(3_600_000))
+			.andExpect(jsonPath("$.data.snapshotExpiresAt").isNumber());
+
+		// 未知寿命：两键都在、值为 null —— 前端据此"不显示时间"，绝不折算成 0（0 = 引导用户以为已到期）
+		when(this.runStore.runKeyTtlRemainingMs("r-1")).thenReturn(null);
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.snapshotRemainingMs").value(nullValue()))
+			.andExpect(jsonPath("$.data.snapshotExpiresAt").value(nullValue()));
+
+		// 空态分支同样键在值 null（保持形状稳定，前端无需分支判键是否存在）
+		when(this.runStore.sessionCurrentRunId("s-2")).thenReturn(null);
+		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-2"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.snapshotRemainingMs").value(nullValue()))
+			.andExpect(jsonPath("$.data.snapshotExpiresAt").value(nullValue()));
+	}
+
+	/**
 	 * M-3：{@code archiveMaxSeq} 的 <b>FrameStore 生产分支</b>（此前只测了 frameStore=null 的回落分支）。
 	 * 事件日志迁移后新写只进 Stream，末号必须问 FrameStore；回落值 42 必须被 77 覆盖。
 	 */

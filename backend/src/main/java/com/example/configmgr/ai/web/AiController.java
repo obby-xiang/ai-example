@@ -525,7 +525,22 @@ public class AiController {
 	private boolean writeOutsideTurnFailure(String runId, String code) {
 		try {
 			RunSnapshot snapshot = this.runStore.get(runId);
-			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+			if (snapshot == null) {
+				// ===== AR-06：首帧已发、快照未建（请求前压缩窗口）里抛出 =====
+				// 这一段没有快照可写，也<b>禁止</b>为了"有个终态"而新建一份快照（裸 save 会凭空造出
+				// 一个"已失败"的轮，盖住"这一轮还没真正开始"的事实）。但也不能因此不发终帧：
+				// start 已经发给客户端了，没有终帧就成了"永远等不到结局"的悬挂流。
+				// 于是只做两件事：①取消优先（权威取消态已置位 ⇒ 不发 error，取消侧才是终帧）；
+				// ②否则补一条 error 终帧（不写任何快照）。
+				if (isCancelledFlag(runId)) {
+					log.info("环外异常不补终帧 runId={}：取消旗标已置位且快照尚未建立（取消优先）", runId);
+					return false;
+				}
+				log.warn("环外异常发生在快照建立之前 runId={} code={}：不新建快照（禁止裸 save），只补 error 终帧", runId,
+						code);
+				return true;
+			}
+			if (RunSnapshot.isTerminal(snapshot.getStatus())) {
 				return false;
 			}
 			if (snapshot.isCancelled()) {
@@ -804,10 +819,20 @@ public class AiController {
 			@RequestParam(required = false) Long lastSeq) {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {
-			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
+			// ===== AR-06：已 start、快照未建 =====
+			// 首帧（start）已前移到首轮压缩之前 ⇒ 存在这样一段合法窗口：runId 已有、帧面已开、
+			// 快照还没建立。此时重挂<b>不得</b>返回 404 / "轮不存在"（那会把正常压缩显示成失败），
+			// 而应返回"准备中"（可重试 + 已用时间）。判定只认<b>归档</b>这一份跨实例事实。
+			ResponseEntity<?> early = this.preparingOrUnknown(runId);
+			if (early != null) {
+				return early;
+			}
+			// early == null ⇒ 归档里已有终帧（快照被 TTL 先回收）：照常回放，让重挂者拿到终态。
 		}
-		// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
-		this.runStore.touchActiveRun(snapshot);
+		else {
+			// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
+			this.runStore.touchActiveRun(snapshot);
+		}
 		// I-1：回放前先确认事件日志末号可读。末号未知时不得进入"按 0 全量回放"（会拿到最旧窗口、
 		// 拿不到 done）；明确回 503 + degraded，让前端下一拍重试。
 		if (this.frameStore != null && this.frameStore.lastSeqIfKnown(runId).isEmpty()) {
@@ -818,14 +843,19 @@ public class AiController {
 		}
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
-		int replayed = out.replayAndAttach(emitter, lastSeq, isTerminal(snapshot.getStatus()));
-		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId, snapshot.getStatus(), lastSeq, replayed);
+		// 快照缺失但归档已有终帧 ⇒ 按终态回放（归档里有没有终帧才决定"回放完收尾"还是"留挂"，
+		// 见 SseChatEmitter 的 L-143 口径）。
+		int replayed = out.replayAndAttach(emitter, lastSeq,
+				snapshot == null || isTerminal(snapshot.getStatus()));
+		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId,
+				snapshot == null ? "(无快照)" : snapshot.getStatus(), lastSeq, replayed);
 		// park 的挂起轮：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
 		// 只在<b>确实还在等人</b>（仍有 PENDING 条目）时收流：条目已全部结算 ⇒ 决策/回灌已落库、
 		// 续跑在即（快照要等驱动方才能翻 RUNNING），此刻收流会把续跑随后产出的 done/error 挡在
 		// 连接之外 —— E2E 的标准时序正是「POST 决策/回灌 200 → 立刻 GET /events 收终帧」，
 		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
-		if (this.properties.getPark().isEnabled() && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+		if (snapshot != null && this.properties.getPark().isEnabled()
+				&& RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
 			if (stillWaitingForInput(runId)) {
 				out.completeSubscriptions();
 			}
@@ -853,6 +883,134 @@ public class AiController {
 			}
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	/** "准备中"重挂的响应体字段：建议的重试间隔（毫秒）。 */
+	private static final long PREPARING_RETRY_AFTER_MS = 1000L;
+
+	/**
+	 * <b>AR-06："已 start、快照未建"阶段的重挂判定</b>（{@code runId} 已有、快照还没建立）。
+	 *
+	 * <p>证据只取<b>事件归档</b>这一份跨实例事实（不新建 Redis 键族、不加状态位）：
+	 * <ol>
+	 * <li>归档里<b>一帧都没有</b> ⇒ 这确实是一个不存在的轮：404 {@code UNKNOWN_RUN}（既有语义）；</li>
+	 * <li>归档末号<b>读不出来</b> ⇒ Redis 抖动：503 {@code AI_REDIS_UNAVAILABLE}（与快照读失败同一降级
+	 *     口径，让前端下一拍重试，不冒充"没有这一轮"）；</li>
+	 * <li>归档末帧是终帧（{@code done}/{@code error}）⇒ 返回 {@code null}：快照只是被 TTL 先回收了，
+	 *     回放比"准备中"诚实（客户端还能拿到真正的终态）；</li>
+	 * <li>其余（有 start / 有 stage 心跳、没有终帧）⇒ 202"准备中"：可重试、带<b>已用时间</b>，
+	 *     <b>不</b>返回 404、<b>不</b>说"轮不存在"。</li>
+	 * </ol>
+	 *
+	 * <p><b>与取消终态共存</b>：该窗口里收到取消时权威态已是 CANCELLED（Redis 旗标），响应体只加
+	 * additive 键 {@code cancelled=true}（"没说"与"没取消"可区分），不写任何快照 —— 取消的终帧
+	 * 由驱动侧的取消收尾（{@code done{cancelled:true}}）产出，重挂随后按上面的终帧分支回放它。
+	 *
+	 * <p><b>与僵尸判定共存</b>：本方法不判死、不回收、不派发 —— 只读归档；已用时如实回给客户端，
+	 * 由前端看门狗与既有僵尸/死轮判据各自收敛（不在读侧新增定时器）。
+	 *
+	 * @return 需要直接返回的响应；{@code null} = 交给常规回放路径
+	 */
+	private ResponseEntity<?> preparingOrUnknown(String runId) {
+		FrameStore frames = this.frameStore;
+		if (frames == null) {
+			// 无归档设施（非 Spring 装配/单测）：没有"已 start"的证据，维持既有 404
+			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
+		}
+		OptionalLong last = frames.lastSeqIfKnown(runId);
+		if (last.isEmpty()) {
+			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
+					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
+			body.put("degraded", true);
+			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
+		}
+		if (last.getAsLong() <= 0L) {
+			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
+		}
+		if (this.archiveEndsWithTerminal(frames, runId, last.getAsLong())) {
+			return null;
+		}
+		return preparing(runId, this.firstArchivedAtMs(frames, runId));
+	}
+
+	/**
+	 * "准备中"响应体（202）。
+	 *
+	 * <p>为什么是 202 而不是 4xx：这不是错误 —— 这一轮正在<b>正常</b>准备（请求前压缩），
+	 * 客户端该做的是"带 {@code retryAfterMs} 再挂一次"。因此不占用错误码表（不新增
+	 * {@code ErrorCodes} 项），客户端按 {@code preparing=true} 判定。
+	 */
+	private ResponseEntity<?> preparing(String runId, long startedAtMs) {
+		long elapsedMs = startedAtMs > 0L ? Math.max(0L, System.currentTimeMillis() - startedAtMs) : 0L;
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("preparing", true);
+		body.put("runId", runId);
+		// 已用时间（服务端钟，自归档首帧的 atMs 起算）：客户端只显示真实已用，不伪造进度
+		body.put("elapsedMs", elapsedMs);
+		body.put("retryAfterMs", PREPARING_RETRY_AFTER_MS);
+		body.put("reattach", "/api/ai/events/" + runId);
+		body.put("message", preparingMessage());
+		body.put("degraded", false);
+		if (isCancelledFlag(runId)) {
+			body.put("cancelled", true);
+		}
+		log.debug("reattach 命中\"已 start、快照未建\"阶段 runId={} elapsedMs={}", runId, elapsedMs);
+		return json(HttpStatus.ACCEPTED, body);
+	}
+
+	/** "准备中"的用户面短句（双语各一份；不进 messages 键表 —— 它不是错误码）。 */
+	private static String preparingMessage() {
+		return com.example.configmgr.ai.run.ReplyLanguage.current().english()
+				? "The reply is being prepared. Retry shortly."
+				: "这一轮正在准备中（压缩上下文），请稍后重试。";
+	}
+
+	/** 取消旗标（只用于"准备中"响应体的 additive 键；读不出来按未取消处理，不阻断重挂）。 */
+	private boolean isCancelledFlag(String runId) {
+		try {
+			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取取消旗标失败 runId={}（按未取消继续返回准备中）：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 归档首帧的 {@code atMs}（"准备中"的已用时间零点）；读不到返回 0。 */
+	private long firstArchivedAtMs(FrameStore frames, String runId) {
+		try {
+			List<Map<String, Object>> head = frames.readFrom(runId, 0L, 1);
+			if (head == null || head.isEmpty()) {
+				return 0L;
+			}
+			Object atMs = head.get(0).get("atMs");
+			return atMs instanceof Number number ? number.longValue() : 0L;
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取归档首帧失败 runId={}（已用时间按 0 上报）：{}", runId, ex.getMessage());
+			return 0L;
+		}
+	}
+
+	/**
+	 * 归档末帧是否终帧（{@code done}/{@code error}）。
+	 *
+	 * <p>只读末<b>一</b>帧而不是全量扫描（{@code terminalFrameArchived} 会整段读）：终帧之后不得再有
+	 * 业务帧是帧序不变量，所以"末帧不是终帧"就等于"没有终帧"。
+	 */
+	private boolean archiveEndsWithTerminal(FrameStore frames, String runId, long lastSeq) {
+		try {
+			List<Map<String, Object>> tail = frames.readFrom(runId, lastSeq - 1L, 1);
+			if (tail == null || tail.isEmpty()) {
+				return false;
+			}
+			String type = String.valueOf(tail.get(tail.size() - 1).get("type"));
+			return "done".equals(type) || "error".equals(type);
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取归档末帧失败 runId={}（按非终态继续判定「准备中」）：{}", runId, ex.getMessage());
+			return false;
+		}
 	}
 
 	/**
@@ -1154,6 +1312,13 @@ public class AiController {
 	 * <p>
 	 * <b>约束（红队 B2）</b>：索引不承诺同 session 多页签共享 —— 只覆盖
 	 * "挂起可重建"场景，以最后一次挂起为准。
+	 *
+	 * <p>
+	 * <b>AR-10（批次3 补齐，additive）</b>：另透出 {@code snapshotRemainingMs} /
+	 * {@code snapshotExpiresAt} —— 由 {@link RunStore#runKeyTtlRemainingMs(String)} 对
+	 * {@code ai:run:<runId>} 做 <b>只读</b> {@code PTTL} 推导。这是"卡面剩余时间 / 已到期"的
+	 * 唯一权威来源：<b>不改 TTL、不续期、不新增持久化</b>，前端也不必用 session-ttl 常量自算另一套。
+	 * 未知（键刚过期 / 读失败 / 无 TTL）时为 {@code null}，前端按"不显示时间"处理。
 	 */
 	@GetMapping("/runs/current")
 	public ResponseEntity<?> runsCurrent(@RequestParam(required = false) String sessionId) {
@@ -1172,6 +1337,14 @@ public class AiController {
 		body.put("snapshotStatus", snapshot.getStatus());
 		// B23L1 批②b：读侧续期（快照重载，省掉 touch 内部的一次读；终态快照由 RunStore 判掉）
 		this.runStore.touchActiveRun(snapshot);
+		// AR-10（批次3 补齐）：24h 只可见化 —— 快照键的**权威**剩余寿命，用 PTTL 只读推导。
+		// 不改 TTL、不续期、不延长不缩短、不新增持久化；量在 touch 之后取，反映本次响应后的真实寿命。
+		// null = 未知（键刚过期 / 读失败 / 无 TTL）：前端按"不显示时间"处理，不得折算成 0。
+		Long snapshotRemainingMs = this.runStore.runKeyTtlRemainingMs(runId);
+		Long snapshotExpiresAt = snapshotRemainingMs == null ? null
+				: Long.valueOf(System.currentTimeMillis() + snapshotRemainingMs);
+		body.put("snapshotRemainingMs", snapshotRemainingMs);
+		body.put("snapshotExpiresAt", snapshotExpiresAt);
 		// C2：展示/恢复面用非抛读口（guard 读失败不能把整页打成 500）。
 		List<PendingToolCall> pendings = this.runStore.pendingsLenient(runId);
 		List<Map<String, Object>> pendingEntries = new ArrayList<>();
@@ -1250,6 +1423,9 @@ public class AiController {
 		body.put("unresolvedExternal", List.of());
 		body.put("awaitingExternal", false);
 		body.put("archiveMaxSeq", 0L);
+		// AR-10（additive）：空态没有运行态可言 ⇒ 寿命键恒为 null（"未知"，不是 0）
+		body.put("snapshotRemainingMs", null);
+		body.put("snapshotExpiresAt", null);
 		return body;
 	}
 
@@ -1910,7 +2086,9 @@ public class AiController {
 	 * {@code app.ai.sse.delivery-queue-capacity}；T3-5 定值 256，回放初始批豁免）；</li>
 	 * <li>{@code heartbeatIntervalMs}：心跳间隔两值（挂起期 / 流式期），按各自唯一来源常量读出
 	 * ——{@code ConfirmGate#HEARTBEAT_SECONDS} = 2s、{@code ResilientChatService
-	 * #STREAMING_HEARTBEAT_MILLIS} = 5s（T3-5 维持现值，未改）。</li>
+	 * #STREAMING_HEARTBEAT_MILLIS} = 5s（T3-5 维持现值，未改）。批次3 起 5s 这一档同时是
+	 * <b>请求前压缩阶段</b>（{@code phase=compacting}）的节拍 —— 它由 {@code TurnKeepalive} 的
+	 * 独立定时器出帧，故"流式"这一格覆盖"压缩 / 首包等待 / 包间静默 / 慢工具"四类静默。</li>
 	 * </ul>
 	 */
 	private Map<String, Object> sseDeliverySnapshot() {

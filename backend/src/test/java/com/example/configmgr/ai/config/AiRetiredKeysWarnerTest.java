@@ -52,6 +52,25 @@ class AiRetiredKeysWarnerTest {
 			.contains("启动期发现 1 个已退役");
 	}
 
+	/**
+	 * AR-11：`summary-model` 删键后，外部配置仍写该键时给一次退役 WARN（点名"压缩使用主模型"），
+	 * 且重复触发检查不重复刷（同一实例一个启动生命周期内只一条）。
+	 */
+	@Test
+	void summaryModelKeyWarnsOnceAndNamesTheMainModel(CapturedOutput output) {
+		MockEnvironment env = new MockEnvironment()
+			.withProperty("app.ai.context.summary-model", "cheap-summary-model");
+
+		AiRetiredKeysWarner warner = new AiRetiredKeysWarner(env);
+		warner.warnOnRetiredKeys();
+		warner.warnOnRetiredKeys();
+
+		assertThat(output).contains("app.ai.context.summary-model 已退役")
+			.contains("当前配置值 = cheap-summary-model")
+			.contains("压缩只使用本轮主模型")
+			.containsOnlyOnce("app.ai.context.summary-model 已退役");
+	}
+
 	@Test
 	void cleanConfigurationProducesNoWarn(CapturedOutput output) {
 		MockEnvironment env = new MockEnvironment().withProperty("app.ai.session-ttl", "24h");

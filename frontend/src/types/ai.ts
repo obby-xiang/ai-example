@@ -7,6 +7,7 @@
 
 import type {
   SseFrame,
+  SseTimeoutStage,
   PendingToolCallSnapshot,
   PendingStatus,
   ToolKind,
@@ -932,6 +933,11 @@ export interface StreamCloseInfo {
    * 调用方据此不置 `streamInterrupted`、不报「结果可能不完整」；卡仍待用户决策。
    */
   suspended?: boolean
+  /**
+   * 批次3：这次非终态收尾由哪一段超时造成（缺省 = 不是超时，例如用户停止 / 服务端收流）。
+   * 建连超时走 `ApiError.code`（`CHAT_CONNECT_TIMEOUT`），不落本字段。
+   */
+  timeoutStage?: SseTimeoutStage
 }
 
 /** 前端开发期读取 Spring AI 历史时使用的宽松消息快照（供对账比较）。 */
@@ -1021,6 +1027,46 @@ export interface AiRunCurrent {
   awaitingExternal: boolean
   /** 归档流最大帧序号：增量续收（lastSeq）的锚点 */
   archiveMaxSeq: number
+  /**
+   * 批次3 / AR-06：`true` = 本轮**已 start（runId 已知）但快照尚未建立**（首轮压缩窗口）。
+   *
+   * 语义不是"轮不存在"，也不是"失败"：这是可重试的**准备中**。前端据此显示"准备中 · 已用 N 秒"
+   * 并提供手动重试，**不得**封口镜像里的在途轮、**不得**落 `currentError`。
+   * 后端也可用 `snapshotStatus='PREPARING'` 表达同一事实（两键任一命中即按准备中处理）。
+   */
+  preparing?: boolean
+  /** 准备开始时刻（epoch 毫秒，服务端钟）；缺省 = 用 `elapsedMs` 反推或本地收到时刻。 */
+  preparingSinceMs?: number | null
+  /** 已准备毫秒数（服务端钟；存在时优先于 `preparingSinceMs` 用于显示）。 */
+  preparingElapsedMs?: number | null
+  /** 兼容别名：与 `preparingSinceMs` 同义（后端若用通用名 `startedAtMs` 也可直接消费）。 */
+  startedAtMs?: number | null
+  /** 兼容别名：与 `preparingElapsedMs` 同义。 */
+  elapsedMs?: number | null
+  /**
+   * AR-10（批次3 补齐）：本轮运行态键的**权威**剩余毫秒 —— 后端对 `ai:run:<runId>` 做
+   * `PTTL` 的只读推导。只用于卡面可见化（剩余时间 / 已到期），**不改 TTL、不续期**。
+   * `null`/缺键 = 未知（键刚过期、旧后端、读失败）⇒ 前端不显示时间，也不折算成 0。
+   */
+  snapshotRemainingMs?: number | null
+  /** 上述剩余额对应的到期时刻（epoch 毫秒，服务端钟）；与 `snapshotRemainingMs` 同一次取值。 */
+  snapshotExpiresAt?: number | null
+}
+
+/** 批次3：一次压缩的视图阶段（不复用 `contextCompaction` —— 后者是"压了什么"的数据，本类型是"正在做什么"）。 */
+export type CompactionPhase = 'idle' | 'compacting' | 'done'
+
+/**
+ * 批次3：快照未建时的"准备中"现场（可重试，不是错误）。
+ *
+ * `runId` **绝不出现在用户可见文本**：只用于内部重试与动作入参。
+ */
+export interface AiPreparingRun {
+  runId: string
+  /** 准备开始时刻（客户端锚点：收到服务端 elapsed 时按"此刻 − elapsed"折算）。 */
+  startedAtMs: number
+  /** 最近一次服务端已用毫秒（缺省 = null，界面回落本地 elapsed）。 */
+  elapsedMs: number | null
 }
 
 // ── 上下文占用（上下文统计与压缩专项批①：GET /api/ai/context/{sessionId}） ────────────

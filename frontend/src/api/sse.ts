@@ -72,6 +72,31 @@ export function reconnectDelayMs(attempt: number, random: () => number = Math.ra
  */
 export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 
+/**
+ * `POST /api/ai/chat` 的**首帧**阶段上限（批次3 / AR-06）。
+ *
+ * 与建连超时分开计：建连是"响应头都还没回来"，首帧是"连上了但一个帧都没来"。
+ * 批次3 起后端把 `start` 前移到同步压缩之前，`start` 是首帧且应立刻到达，故这条预算
+ * 可以显著短于帧间 45s；压缩期的保活由服务端**独立定时器**发 `heartbeat{phase:'compacting'}`，
+ * 只要心跳到达就算"已有首帧"，后续一律回到 45s 帧间看门狗 —— **45s 本身不放宽**。
+ */
+export const DEFAULT_FIRST_FRAME_TIMEOUT_MS = 30_000
+
+/**
+ * 超时阶段（批次3）：三种失败必须能被调用方区分，不能一律说成"断流"。
+ *
+ * - `connect`：`fetch` 到响应头之间超时（请求可能根本没到后端）；
+ * - `first-frame`：响应已建立，但一个 SSE 帧都没收到；
+ * - `idle`：已经收到过帧，但连续 45s 无任何帧（含阶段心跳）。
+ */
+export type SseTimeoutStage = 'connect' | 'first-frame' | 'idle'
+
+/** 批次3：阶段超时的前端机器码（只用于 store 分派文案，不进用户可见串）。 */
+export const SSE_TIMEOUT_CODES = {
+  connect: 'CHAT_CONNECT_TIMEOUT',
+  firstFrame: 'CHAT_FIRST_FRAME_TIMEOUT'
+} as const
+
 export const SSE_PATHS = {
   chat: '/api/ai/chat',
   /**
@@ -83,6 +108,23 @@ export const SSE_PATHS = {
       ? `/api/ai/events/${encodeURIComponent(runId)}`
       : `/api/ai/events/${encodeURIComponent(runId)}?lastSeq=${Math.max(0, Math.floor(lastSeq))}`
 } as const
+
+/** 批次3：重挂探测得到的"准备中"事实（后端 202 + `preparing=true`）。 */
+export interface PreparingProbe {
+  runId: string
+  /** 服务端钟的真实已用毫秒（只用于显示"已用 N 秒"，不是进度百分比）。 */
+  elapsedMs: number
+  /** 后端建议的下一次重试间隔（毫秒；缺省 = null，调用方自行决定）。 */
+  retryAfterMs: number | null
+}
+
+/** 批次3：重挂探测结果（只读状态，不消费响应体里的流）。 */
+export interface ReattachProbe {
+  /** HTTP 状态；0 = 请求未到达 */
+  status: number
+  /** 202 且 `preparing=true` 时非 null */
+  preparing: PreparingProbe | null
+}
 
 /** 帧回调集合。 */
 export interface SseFrameHandlers {
@@ -98,6 +140,13 @@ export interface SseFrameHandlers {
   onReconnect?: (attempt: number, delayMs: number) => void
   /** 连接层面的错误（HTTP 非 2xx、网络异常） */
   onError?: (error: ApiError) => void
+  /**
+   * 批次3：重挂命中了"已 start、快照未建"（HTTP 202 + `preparing=true`）。
+   * 不是错误，也不触发自动轮询 —— 由调用方显示可重试的准备中阶段。
+   */
+  onPreparing?: (probe: PreparingProbe) => void
+  /** 批次3：探测确认该 runId 在服务端不存在（404）——调用方应封口镜像里的在途轮。 */
+  onUnavailable?: () => void
 }
 
 /** 流选项。 */
@@ -249,6 +298,8 @@ interface ConsumeResult {
   terminal: boolean
   reason?: string
   aborted: boolean
+  /** 批次3：本次中止是否由阶段超时触发（connect 在 fetch 阶段抛出，不走这里）。 */
+  timeoutStage?: SseTimeoutStage
 }
 
 function consumeFrame(
@@ -348,7 +399,8 @@ function finish(
   state: StreamState,
   handlers: SseFrameHandlers,
   terminal: boolean,
-  reason: string | undefined
+  reason: string | undefined,
+  timeoutStage?: SseTimeoutStage
 ): StreamCloseInfo {
   const suspended = !terminal && state.awaitsInput
   const info: StreamCloseInfo = {
@@ -356,7 +408,8 @@ function finish(
     lastFrame: state.lastFrame,
     reconnects: state.reconnects,
     ...(reason === undefined ? {} : { reason }),
-    ...(suspended ? { suspended: true } : {})
+    ...(suspended ? { suspended: true } : {}),
+    ...(timeoutStage === undefined ? {} : { timeoutStage })
   }
   handlers.onClose?.(info)
   return info
@@ -369,7 +422,8 @@ async function readStream(
   state: StreamState,
   handlers: SseFrameHandlers,
   idleTimeoutMs: number,
-  onIdle: () => void
+  firstFrameTimeoutMs: number,
+  onTimeout: (stage: SseTimeoutStage) => void
 ): Promise<ConsumeResult> {
   if (!response.body) {
     return { terminal: false, aborted: false, reason: '响应无流式主体（浏览器不支持 ReadableStream）' }
@@ -378,24 +432,58 @@ async function readStream(
   const decoder = new TextDecoder('utf-8')
   const parser = new SseChunkParser()
 
+  let timeoutStage: SseTimeoutStage | null = null
+  const markTimeout = (stage: SseTimeoutStage): void => {
+    timeoutStage = stage
+    onTimeout(stage)
+    controller.abort()
+  }
+
+  /** 首帧看门狗：收到任意一帧即让位给帧间看门狗（之后 45s 上限/心跳口径不变）。 */
+  let firstFrameTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    firstFrameTimer = null
+    markTimeout('first-frame')
+  }, firstFrameTimeoutMs)
+  const clearFirstFrame = (): void => {
+    if (firstFrameTimer !== null) {
+      clearTimeout(firstFrameTimer)
+      firstFrameTimer = null
+    }
+  }
+
   let idleTimer: ReturnType<typeof setTimeout> | null = null
   const resetIdle = (): void => {
     if (idleTimer !== null) {
       clearTimeout(idleTimer)
     }
     idleTimer = setTimeout(() => {
-      onIdle()
-      controller.abort()
+      markTimeout('idle')
     }, idleTimeoutMs)
   }
   resetIdle()
+
+  const consumePayload = (payload: string): void => {
+    const frame = parseSseFrame(payload)
+    if (!frame) {
+      return
+    }
+    clearFirstFrame()
+    consumeFrame(frame, state, handlers)
+  }
+
+  const abortedResult = (reason: string): ConsumeResult => ({
+    terminal: state.terminal,
+    aborted: true,
+    reason,
+    ...(timeoutStage === null ? {} : { timeoutStage })
+  })
 
   try {
     for (;;) {
       // 批G · S6：**每块前先看中止标志**。abort 只断网络，不会撤回 `reader.read()` 已经返回
       // 的那一整块帧 —— 旧实现会把它全部消费掉（实证 D8：停止后 60ms 内还能新建/改写工具卡）。
       if (controller.signal.aborted) {
-        return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
+        return abortedResult('连接被中止')
       }
       const { done, value } = await reader.read()
       if (done) {
@@ -403,15 +491,12 @@ async function readStream(
       }
       if (controller.signal.aborted) {
         // 读返回与 abort 同一 tick：这块帧属于"停止之后"，一律不落地
-        return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
+        return abortedResult('连接被中止')
       }
       resetIdle()
       const text = decoder.decode(value, { stream: true })
       for (const payload of parser.push(text)) {
-        const frame = parseSseFrame(payload)
-        if (frame) {
-          consumeFrame(frame, state, handlers)
-        }
+        consumePayload(payload)
       }
       // 终帧到达即不再等待服务端关流（后端紧随其后 complete()）
       if (state.terminal) {
@@ -419,27 +504,21 @@ async function readStream(
       }
     }
     if (controller.signal.aborted) {
-      return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
+      return abortedResult('连接被中止')
     }
     const tail = decoder.decode()
     if (tail) {
       for (const payload of parser.push(tail)) {
-        const frame = parseSseFrame(payload)
-        if (frame) {
-          consumeFrame(frame, state, handlers)
-        }
+        consumePayload(payload)
       }
     }
     for (const payload of parser.flush()) {
-      const frame = parseSseFrame(payload)
-      if (frame) {
-        consumeFrame(frame, state, handlers)
-      }
+      consumePayload(payload)
     }
   } catch (error) {
     const aborted = controller.signal.aborted
     if (aborted) {
-      return { terminal: state.terminal, aborted: true, reason: '连接被中止' }
+      return abortedResult('连接被中止')
     }
     return {
       terminal: state.terminal,
@@ -450,6 +529,7 @@ async function readStream(
     if (idleTimer !== null) {
       clearTimeout(idleTimer)
     }
+    clearFirstFrame()
     try {
       reader.releaseLock()
     } catch {
@@ -457,6 +537,67 @@ async function readStream(
     }
   }
   return { terminal: state.terminal, aborted: false }
+}
+
+/**
+ * 批次3 / AR-06：重挂前的**准备中探测**（一次 GET，不建立长期消费）。
+ *
+ * <p>为什么不能直接用 EventSource：`GET /api/ai/events/{runId}` 在"已 start、快照未建"窗口
+ * 返回 **202 + JSON**（`{preparing:true, elapsedMs, retryAfterMs, ...}`），而 EventSource 只能
+ * 把非 200 当 `onerror`，读不到响应体。因此这里用裸 `fetch` 探一次状态：
+ * <ul>
+ * <li>202 + `preparing=true` ⇒ 返回准备中事实（调用方显示"准备中 · 已用 N 秒"）；</li>
+ * <li>200 ⇒ 快照已建/有归档，立即 cancel 这条流（调用方会走正式的 EventSource 重挂）；</li>
+ * <li>404 / 其它状态原样返回，由调用方决定封口或重试。</li>
+ * </ul>
+ * 本函数**不**消费 200 的流，也不重试。
+ */
+export async function probeReattach(runId: string): Promise<ReattachProbe> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DEFAULT_CONNECT_TIMEOUT_MS)
+  try {
+    const response = await fetch(SSE_PATHS.events(runId), {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream', 'Accept-Language': acceptLanguage() },
+      cache: 'no-store',
+      signal: controller.signal
+    })
+    if (response.status === 202) {
+      let body: unknown = null
+      try {
+        body = await response.json()
+      } catch {
+        body = null
+      }
+      if (body && typeof body === 'object' && (body as { preparing?: unknown }).preparing === true) {
+        const candidate = body as { runId?: unknown; elapsedMs?: unknown; retryAfterMs?: unknown }
+        return {
+          status: response.status,
+          preparing: {
+            runId: typeof candidate.runId === 'string' && candidate.runId !== '' ? candidate.runId : runId,
+            elapsedMs: typeof candidate.elapsedMs === 'number' && Number.isFinite(candidate.elapsedMs)
+              ? Math.max(0, candidate.elapsedMs)
+              : 0,
+            retryAfterMs: typeof candidate.retryAfterMs === 'number' && Number.isFinite(candidate.retryAfterMs)
+              ? Math.max(0, candidate.retryAfterMs)
+              : null
+          }
+        }
+      }
+      return { status: response.status, preparing: null }
+    }
+    // 200 = 正式流/归档回放：探测不要留下第二条长期连接
+    try {
+      await response.body?.cancel()
+    } catch {
+      // 已关闭 / 不可取消：忽略
+    }
+    return { status: response.status, preparing: null }
+  } catch {
+    return { status: 0, preparing: null }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -487,10 +628,15 @@ export async function streamChat(
   const state = newState()
   const controller = new AbortController()
   const unlink = linkAbort(options.signal, controller)
-  let idleTriggered = false
+  let timeoutStage: SseTimeoutStage | null = null
 
   try {
     let response: Response
+    let connectTimedOut = false
+    let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      connectTimedOut = true
+      controller.abort()
+    }, DEFAULT_CONNECT_TIMEOUT_MS)
     try {
       response = await fetch(SSE_PATHS.chat, {
         method: 'POST',
@@ -503,6 +649,12 @@ export async function streamChat(
         signal: controller.signal
       })
     } catch (error) {
+      // 批次3：建连阶段超时与"网络没发出去"必须可区分（两者文案与后续动作不同）。
+      if (connectTimedOut && !options.signal?.aborted) {
+        const apiError = new ApiError('连接超时', 0, SSE_TIMEOUT_CODES.connect, null)
+        handlers.onError?.(apiError)
+        throw apiError
+      }
       const apiError = new ApiError(
         error instanceof Error ? error.message : '请求未能发出',
         0,
@@ -511,6 +663,11 @@ export async function streamChat(
       )
       handlers.onError?.(apiError)
       throw apiError
+    } finally {
+      if (connectTimer !== null) {
+        clearTimeout(connectTimer)
+        connectTimer = null
+      }
     }
 
     if (!response.ok) {
@@ -520,21 +677,35 @@ export async function streamChat(
     }
 
     handlers.onOpen?.()
-    const result = await readStream(response, controller, state, handlers, idleTimeoutMs, () => {
-      idleTriggered = true
-    })
+    const result = await readStream(
+      response,
+      controller,
+      state,
+      handlers,
+      idleTimeoutMs,
+      DEFAULT_FIRST_FRAME_TIMEOUT_MS,
+      (stage) => {
+        timeoutStage = stage
+      }
+    )
 
     if (state.terminal) {
       return finish(state, handlers, true, undefined)
     }
     if (result.aborted) {
-      const reason = idleTriggered ? '帧间静默超时，判定断流' : '连接已中止'
-      const reattached = idleTriggered
+      const stage = result.timeoutStage ?? timeoutStage
+      const reason = stage === 'first-frame'
+        ? '首帧超时（已连接但未收到任何帧），判定断流'
+        : stage === 'idle'
+          ? '帧间静默超时，判定断流'
+          : '连接已中止'
+      // 只有"已经收到过帧"的静默才能带 runId 重挂；首帧超时说明连 start 都没有，不能重挂。
+      const reattached = stage === 'idle'
         ? await tryReattach(state, handlers, options)
         : { terminal: false, reason }
       return reattached.terminal
         ? finish(state, handlers, true, undefined)
-        : finish(state, handlers, false, reattached.reason ?? reason)
+        : finish(state, handlers, false, reattached.reason ?? reason, stage ?? undefined)
     }
     if (state.awaitsInput) {
       // B1（2026-10-20 挂起即断）：卡面请求帧已送达 ⇒ 服务端主动收流，这是**正常收尾**。
@@ -600,6 +771,8 @@ export async function reattach(
     let attempts = 0
     let settled = false
     let connectionEstablished = false
+    /** 本次 EventSource 连接是否已做过 202 准备中探测（每次 open 重置，避免重复探测）。 */
+    let probedThisConnection = false
 
     const clearIdle = (): void => {
       if (idleTimer !== null) {
@@ -720,6 +893,7 @@ export async function reattach(
     const open = (): void => {
       // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
       const since = state.lastSeq ?? options.lastSeq
+      probedThisConnection = false
       source = new EventSource(SSE_PATHS.events(runId, since ?? undefined))
       // R-03：看门狗必须在 onopen 之前武装（构造是同步的，首个事件只会在此后的任务里派发，
       // 故此处与构造之间没有可丢失事件的窗口）
@@ -750,6 +924,29 @@ export async function reattach(
         }
         source?.close()
         source = null
+        // 批次3：EventSource 读不到非 200 的响应体 —— 用一次裸 fetch 探测 202"准备中"。
+        // 命中 202 ⇒ 不当作断流、也不自动轮询：交给调用方显示可重试的准备中阶段。
+        if (!connectionEstablished && !probedThisConnection) {
+          probedThisConnection = true
+          void probeReattach(runId).then((probe) => {
+            if (settled) {
+              return
+            }
+            if (probe.preparing) {
+              handlers.onPreparing?.(probe.preparing)
+              settle(false, '准备中（快照未建，可重试）')
+              return
+            }
+            if (probe.status === 404) {
+              // 真不存在：交给调用方封口镜像里的在途轮（不显示"轮不存在"技术文案）
+              handlers.onUnavailable?.()
+              settle(false)
+              return
+            }
+            scheduleReconnect('重挂连接中断')
+          })
+          return
+        }
         scheduleReconnect('重挂连接中断')
       }
     }

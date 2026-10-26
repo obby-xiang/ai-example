@@ -15,7 +15,7 @@
 import { defineStore } from 'pinia'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi } from '@/api/ai'
-import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
+import { SSE_TIMEOUT_CODES, probeReattach, type SseFrameHandlers, type SseStreamOptions } from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
@@ -78,7 +78,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormValueIssue } from '@/types/form-schema'
 import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -88,6 +88,11 @@ import type { WorkspaceActionRecord } from '@/types/tools'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
 import { buildErrorCard } from '@/utils/error-card'
 import { buildPublishConflictView } from '@/utils/resultview'
+import {
+  runExpiryAnchorOf,
+  runExpiryRemainingMs,
+  type RunExpiryAnchor
+} from '@/utils/run-expiry'
 import { translate } from '@/composables/useCopy'
 
 /** sessionStorage 键：会话 id 与镜像前缀。 */
@@ -215,6 +220,9 @@ function disarmAllGateSync(): void {
   gateSyncTimers.clear()
   gateSyncAttempts.clear()
 }
+/** 批次3："准备中"手动重试的单飞令牌（防双击重复探测）。 */
+let preparingRetryInFlight = false
+
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
@@ -266,6 +274,42 @@ function toLoadErrorView(scope: AiLoadErrorScope, error: unknown): AiLoadErrorVi
     return { scope, code: error.code, status: error.status, at: Date.now() }
   }
   return { scope, code: FRONTEND_ERROR_CODES.UNKNOWN_ERROR, status: 0, at: Date.now() }
+}
+
+/**
+ * 批次3 / AR-06：`/runs/current` 是否表示"已 start、快照未建"。
+ *
+ * 两个等价信号（后端择一即可）：显式 `preparing=true`，或 `snapshotStatus='PREPARING'`。
+ * `found` 必须为真且有 runId —— 空态（found=false）仍然是"没有在途轮"，不冒充准备中。
+ */
+function preparingRunOf(current: AiRunCurrent): AiPreparingRun | null {
+  if (!current.found || !current.runId) {
+    return null
+  }
+  const status = (current.snapshotStatus ?? '').toUpperCase()
+  if (current.preparing !== true && status !== 'PREPARING') {
+    return null
+  }
+  const reportedElapsed = current.preparingElapsedMs ?? current.elapsedMs
+  const reportedSince = current.preparingSinceMs ?? current.startedAtMs
+  const elapsedMs = typeof reportedElapsed === 'number' ? Math.max(0, reportedElapsed) : null
+  const startedAtMs = elapsedMs !== null
+    ? Date.now() - elapsedMs
+    : typeof reportedSince === 'number'
+      ? reportedSince
+      : Date.now()
+  return { runId: current.runId, startedAtMs, elapsedMs }
+}
+
+/** 批次3：阶段心跳里的真实已用毫秒（`elapsedMs` 优先，其次整秒兼容字段，缺省 = null）。 */
+function heartbeatElapsedMs(frame: { elapsedMs?: unknown; elapsedSeconds?: unknown }): number | null {
+  if (typeof frame.elapsedMs === 'number' && Number.isFinite(frame.elapsedMs)) {
+    return Math.max(0, frame.elapsedMs)
+  }
+  if (typeof frame.elapsedSeconds === 'number' && Number.isFinite(frame.elapsedSeconds)) {
+    return Math.max(0, Math.round(frame.elapsedSeconds * 1000))
+  }
+  return null
 }
 
 /** 409 回执里的 `reattach` 必须与 `runId` 推出的事件路径一致，否则视为不可信（不指向编造地址）。 */
@@ -1345,6 +1389,7 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.sessionPurgeIncomplete': 'warning',
   'ai.notice.memoryDeleteFailed': 'warning',
   'ai.notice.decisionPending': 'warning',
+  'ai.notice.runExpired': 'warning',
   'ai.notice.decisionSubmitting': 'warning',
   'ai.notice.decisionIdempotent': 'warning',
   'ai.notice.ackRequired': 'warning',
@@ -1463,6 +1508,15 @@ export const useAiStore = defineStore('ai', {
     loading: false,
     /** 当前轮 runId（来自 start 帧） */
     activeRunId: null as string | null,
+    /**
+     * 批次3 补齐 / AR-10：本轮运行态（Redis 24h 滑动保留期）的**只读**寿命锚点。
+     *
+     * <p>只在 `GET /api/ai/runs/current` 明确给出 `snapshotRemainingMs` 时落值（服务端
+     * `PTTL(ai:run:<runId>)` 的权威推导）。前端不拿 24h 常量另算一套：卡面只按
+     * "收到时刻 + 剩余毫秒"递减，到期后转「已失效 + 可达出口」。
+     * `null` = 未知（旧后端 / 键刚过期 / 无锚点）——此时不显示时间，也不猜测。
+     */
+    runExpiry: null as RunExpiryAnchor | null,
     /** 是否处于挂起等待（suspended / confirm_request 帧口径，N6 裁决） */
     suspended: false,
     /** 连接/降级提示（断流、重连、池饱和、无 key 等） */
@@ -1608,8 +1662,30 @@ export const useAiStore = defineStore('ai', {
      */
     contextUsage: null as ContextUsage | null,
     contextBreakdown: null as ContextBreakdownItem[] | null,
-    /** 端点返回的压缩态（提示条/运维面用；批① 只存不渲染） */
+    /** 端点返回的压缩态（"压了什么"的数据；面板另有"正在做什么"的阶段态，见下） */
     contextCompaction: null as ContextCompaction | null,
+    /**
+     * 批次3：压缩**过程**阶段（`idle` / `compacting` / `done`）。
+     *
+     * 与 `contextCompaction` 分工：后者是压缩结果的账（level/before/after），只在 `context` 帧
+     * 到达时写；本组字段是"此刻是否正在压缩"，由 `heartbeat{phase:'compacting'}` 推进，
+     * 供面板显示"正在压缩 · 已用 N 秒"。**不含百分比**——压缩没有可伪造的进度刻度。
+     */
+    compactionPhase: 'idle' as CompactionPhase,
+    /**
+     * 压缩阶段起点（客户端锚点）。收到服务端 `elapsedMs` 时按"此刻 − elapsedMs"折算，
+     * 之后由面板的局部时钟推进；没有服务端数字时退回本地首帧时刻（不编造历史耗时）。
+     */
+    compactionStartedAtMs: null as number | null,
+    /** 最近一次服务端给出的已用毫秒（null = 服务端没给，面板只用本地 elapsed）。 */
+    compactionElapsedMs: null as number | null,
+    /** 压缩完成时刻（`context` 帧或压缩后的 `streaming` 心跳）；null = 未完成。 */
+    compactionCompletedAtMs: null as number | null,
+    /**
+     * 批次3 / AR-06：快照未建的"准备中"现场（可重试，不是错误、不是"轮不存在"）。
+     * `null` = 当前没有该阶段。
+     */
+    preparingRun: null as AiPreparingRun | null,
     /**
      * 批次2：历史对账失败现场（`GET /api/ai/history` 的失败）。`null` = 无失败。
      *
@@ -1776,6 +1852,90 @@ export const useAiStore = defineStore('ai', {
      */
     showRawNotice(text: string, severity: NoticeSeverity = 'info'): void {
       setRawNotice(this, text, severity)
+    },
+
+    /**
+     * 批次3：清零压缩阶段（新轮 / 终态 / 换会话）。**不碰** `contextCompaction`
+     * —— 那是上一轮"压了什么"的账，由会话重置或下一轮 `context` 帧自己更新。
+     */
+    resetCompactionProgress(): void {
+      this.compactionPhase = 'idle'
+      this.compactionStartedAtMs = null
+      this.compactionElapsedMs = null
+      this.compactionCompletedAtMs = null
+    },
+
+    /**
+     * 批次3：消费 `heartbeat{phase:'compacting'}` —— 只记**真实已用时间**，不推进任何百分比。
+     *
+     * <p>起点锚定：服务端给了 `elapsedMs` 就按"此刻 − elapsedMs"回推（首帧心跳即可显示真实
+     * 已用时长）；后续心跳只校正锚点，不重新从 0 计时。服务端没给数字时退回本地首帧时刻。
+     */
+    noteCompactionHeartbeat(frame: { elapsedMs?: unknown; elapsedSeconds?: unknown }): void {
+      const elapsed = heartbeatElapsedMs(frame)
+      if (this.compactionPhase !== 'compacting') {
+        this.compactionStartedAtMs = elapsed !== null ? Date.now() - elapsed : Date.now()
+        this.compactionCompletedAtMs = null
+      } else if (elapsed !== null) {
+        this.compactionStartedAtMs = Date.now() - elapsed
+      }
+      if (elapsed !== null) {
+        this.compactionElapsedMs = elapsed
+      }
+      this.compactionPhase = 'compacting'
+    },
+
+    /** 批次3：`context` 帧（或压缩后的 `streaming` 心跳）落地 = 压缩完成提示的唯一来源。 */
+    markCompactionDone(): void {
+      if (this.compactionPhase !== 'compacting') {
+        return
+      }
+      this.compactionPhase = 'done'
+      this.compactionCompletedAtMs = Date.now()
+    },
+
+    /**
+     * 批次3：消费 `heartbeat{phase:'preparing'}` / 快照准备中信号。
+     * 只存内部 runId 与真实起点；面板**不显示 runId**，也不把它当成错误。
+     */
+    notePreparingHeartbeat(runId: string, elapsedMs: number | null): void {
+      const current = this.preparingRun
+      const startedAtMs = elapsedMs !== null
+        ? Date.now() - elapsedMs
+        : current?.runId === runId
+          ? current.startedAtMs
+          : Date.now()
+      this.preparingRun = {
+        runId,
+        startedAtMs,
+        elapsedMs: elapsedMs ?? (current?.runId === runId ? current.elapsedMs : null)
+      }
+    },
+
+    /** 批次3：清掉"准备中"现场（快照建成 / 新轮 / 终态 / 换会话）。 */
+    clearPreparingRun(): void {
+      this.preparingRun = null
+    },
+
+    /**
+     * 批次3 / AR-06：准备中的**一次性手动重试**（不轮询、不自动重挂）。
+     *
+     * 重跑既有 `runs/current → 恢复` 路径：快照已建成则按批次2 的静默续收接着走；
+     * 仍准备中则重新落准备中（不封口、不报"轮不存在"）；真正空态才交给既有封口逻辑。
+     */
+    async retryPreparing(): Promise<void> {
+      if (!this.preparingRun || preparingRetryInFlight) {
+        return
+      }
+      preparingRetryInFlight = true
+      this.currentError = null
+      this.restoringRecovery = true
+      try {
+        await this.restoreSnapshotGuarded()
+      } finally {
+        this.restoringRecovery = false
+        preparingRetryInFlight = false
+      }
     },
 
     toggleExpand(): void {
@@ -2527,6 +2687,32 @@ export const useAiStore = defineStore('ai', {
         if (this.sessionId !== sid) {
           return // 会话已换：过期失败不落进新会话
         }
+        // 批次3：准备中阶段的读失败**不封口** —— 它仍是可重试的准备中，不是"轮不存在"。
+        // 错误现场照样可见（面板给重试），但镜像里的在途轮保持原状。
+        if (this.preparingRun) {
+          this.currentError = toLoadErrorView('current', error)
+          return
+        }
+        // 批次3 兼容窗口：旧后端在"已 start、快照未建"时可能仍回 404/UNKNOWN_RUN。
+        // 只要本地还有镜像留下的在途轮与 runId，就把这一次 404 当成"准备中"（可重试），
+        // 不封口、不落"轮不存在"；后端提供 preparing 标记后走上面的正路。
+        const missingRun = error instanceof ApiError
+          && (error.status === 404 || error.code === ErrorCode.UNKNOWN_RUN)
+        const hasInFlightHost = this.messages.some((message) => message.role === 'assistant'
+          && !message.done
+          && message.runId !== undefined
+          && message.runId === this.activeRunId)
+        if (missingRun && this.activeRunId && hasInFlightHost) {
+          this.preparingRun = {
+            runId: this.activeRunId,
+            startedAtMs: Date.now(),
+            elapsedMs: null
+          }
+          this.currentError = null
+          this.loading = true
+          this.suspended = false
+          return
+        }
         // 批次2：快照读不到同样必须**可见 + 可重试**，且当场统一封口（镜像里的在途轮不能永久"在流"）。
         // 缺口原因 = 快照不可用（中性事实，不是把这一轮判失败）。
         this.sealRecovery('current', error)
@@ -2537,11 +2723,87 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
         return
       }
+      // 批次3 / AR-06：已 start、快照未建 = "准备中"（可恢复），不是空态、不是轮不存在。
+      // 不封口在途消息、不落 currentError；面板显示"准备中 · 已用 N 秒" + 手动重试。
+      const preparing = preparingRunOf(current)
+      if (preparing) {
+        this.restoredPendingQueue = []
+        this.currentError = null
+        this.preparingRun = preparing
+        this.activeRunId = preparing.runId
+        this.loading = true
+        this.suspended = false
+        this.streamInterrupted = false
+        return
+      }
+      this.clearPreparingRun()
       // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
       this.restoredPendingQueue = []
       // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
       this.currentError = null
+      // AR-10（批次3 补齐）：寿命锚点只认后端 PTTL 的只读推导 —— 有就落、没有就清（不猜 24h）。
+      // 若"上一次已知的锚点已经到期"且这次已拿不到运行态，说明它按保留期消失了：
+      // ① 落一条**可见**通知（不是卡悄悄没了）；② 保留这个"已到期"锚点，让仍在屏上的挂起卡
+      // 继续显示「已失效 + 刷新 / 新会话出口」，而不是变成一张可点却无解释的死卡。
+      const expiryAnchor = runExpiryAnchorOf(current, Date.now())
+      if (expiryAnchor === null && this.runExpiry !== null
+        && runExpiryRemainingMs(this.runExpiry, Date.now()) <= 0) {
+        setNotice(this, 'ai.notice.runExpired')
+        this.runExpiry = { ...this.runExpiry, remainingMs: 0, receivedAtMs: Date.now() }
+      } else {
+        this.runExpiry = expiryAnchor
+      }
       if (!current.found || !current.runId) {
+        // 批次3 / AR-06：`/runs/current` 在"已 start、快照未建"期间同样是 found=false
+        // （索引要等 store.create 才写）。若镜像还留着在途轮与 runId，先探一次重挂端点：
+        // 202+preparing ⇒ 准备中（可重试，不封口）；200 ⇒ 快照已建，转正式重挂；
+        // 404 ⇒ 确实没有这一轮，才走既有封口。
+        // 归属必须可证明：镜像里的在途助手消息带着**同一 runId**（start 帧已落镜像）。
+        // 只有 lastRunId、没有消息归属时不猜 —— 旧镜像的悬空轮仍走既有封口，避免把
+        // 一个说不清归属的轮次探测成"准备中"。
+        const inFlightHost = [...this.messages].reverse().find((item) => item.role === 'assistant'
+          && !item.done
+          && item.runId !== undefined
+          && item.runId !== '')
+        const recoveryRunId = inFlightHost?.runId ?? this.activeRunId
+        if (recoveryRunId && inFlightHost) {
+          const probe = await probeReattach(recoveryRunId)
+          // 探测窗口内的身份对账（与上面同口径；任何 await 之后写回前必须重比）
+          if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
+            return
+          }
+          if (probe.preparing) {
+            this.restoredPendingQueue = []
+            this.notePreparingHeartbeat(probe.preparing.runId, probe.preparing.elapsedMs)
+            this.activeRunId = probe.preparing.runId
+            this.currentError = null
+            this.loading = true
+            this.suspended = false
+            this.streamInterrupted = false
+            return
+          }
+          if (probe.status === 202) {
+            // 202 但缺 preparing 键（旧后端/异常体）：仍按准备中，不把正常压缩判成失败
+            this.restoredPendingQueue = []
+            this.notePreparingHeartbeat(recoveryRunId, 0)
+            this.loading = true
+            this.suspended = false
+            return
+          }
+          if (probe.status === 200) {
+            // 探测期间快照已建立：交给正式重挂（全量回放最稳；镜像正文本就滞后）
+            void this.reattachActive(recoveryRunId, {
+              hostMessageId: inFlightHost.id,
+              lastSeq: this.runSeq[recoveryRunId] ?? 0
+            })
+            return
+          }
+          if (probe.status >= 500) {
+            // 服务端明确不可用：按批次2 的快照失败出口（可见 + 可重试 + 统一封口）。
+            this.sealRecovery('current', new ApiError('重挂探测失败', probe.status, String(probe.status), null))
+            return
+          }
+        }
         // 空态：没有在途轮 —— 镜像若留下"未收尾"的助手消息，就地封口（否则光标永远在流）。
         // 既有历史渲染与空历史 expired 降级规则兜底。
         this.sealLeftoverInFlight()
@@ -3151,6 +3413,11 @@ export const useAiStore = defineStore('ai', {
               if (info.suspended) {
                 return
               }
+              // 批次3："准备中"不是断流 —— 连接收流/重挂耗尽都不该报"结果可能不完整"，
+              // 面板的阶段条已给出可重试出口。
+              if (this.preparingRun) {
+                return
+              }
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
@@ -3252,6 +3519,9 @@ export const useAiStore = defineStore('ai', {
       this.stopped = false
       clearNotice(this)
       this.streamInterrupted = false
+      // 批次3：新轮不继承上一轮的压缩/准备中阶段（首帧到达前也不残留旧提示）
+      this.resetCompactionProgress()
+      this.clearPreparingRun()
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
       // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
       this.followupReady = false
@@ -3302,9 +3572,15 @@ export const useAiStore = defineStore('ai', {
             // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
-            setNotice(this, 'ai.notice.interruptedKeep', {
-              reason: info.reason ?? translate('ai.notice.reasonNoDone')
-            })
+            // 批次3：首帧超时（连 start 都没到）与帧间静默分开说 —— 前者重发通常就能恢复，
+            // 后者要提示"已生成内容保留"。45s 帧间口径本身不变。
+            if (info.timeoutStage === 'first-frame') {
+              setNotice(this, 'ai.notice.firstFrameTimeout')
+            } else {
+              setNotice(this, 'ai.notice.interruptedKeep', {
+                reason: info.reason ?? translate('ai.notice.reasonNoDone')
+              })
+            }
             // 断流不是结局：确认卡/表单仍在等用户动作，activeForm 与待决段必须原样保留
             //（重挂或刷新后由 restoreSuspendedSnapshot 按后端快照续上），只认终帧/取消才收口。
           }
@@ -3494,6 +3770,11 @@ export const useAiStore = defineStore('ai', {
         return
       }
       switch (error.code) {
+        // 批次3：建连超时（POST 已发出但响应头未回）与首帧超时是两件事，必须分开告知。
+        case SSE_TIMEOUT_CODES.connect: {
+          setNotice(this, 'ai.notice.connectTimeout')
+          break
+        }
         case ErrorCode.SESSION_BUSY: {
           // 批G · G5/G6：不再暴露 runId / "重挂"等实现概念 —— 用户看到的只有"这条没发出去"。
           // 乐观气泡的回收在 send() 的 catch 里做（这里只管文案与现场标记）。
@@ -3613,6 +3894,8 @@ export const useAiStore = defineStore('ai', {
       const isCurrentRound = (): boolean => currentAbort === controller
       /** 批次2：归档缺口只按**首帧**判一次（续收锚点 = lastSeq）。 */
       let gapChecked = false
+      /** 批次3：探测确认 runId 不存在 ⇒ 已封口，onClose 不得再报"断流"。 */
+      let unavailableNotified = false
       // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
       previous?.abort()
@@ -3620,6 +3903,25 @@ export const useAiStore = defineStore('ai', {
         await aiApi.reattachRun(
           targetRunId,
           {
+            onPreparing: (probe) => {
+              if (!isCurrentRound()) {
+                return
+              }
+              // 批次3：202 准备中 —— 可重试，不是断流；不暴露 runId。
+              this.notePreparingHeartbeat(probe.runId, probe.elapsedMs)
+              this.currentError = null
+              this.streamInterrupted = false
+              this.loading = true
+              this.suspended = false
+            },
+            onUnavailable: () => {
+              if (!isCurrentRound()) {
+                return
+              }
+              unavailableNotified = true
+              this.clearPreparingRun()
+              this.sealLeftoverInFlight()
+            },
             onFrame: (frame) => {
               if (!gapChecked) {
                 const firstSeq = frameSeq(frame)
@@ -3645,6 +3947,14 @@ export const useAiStore = defineStore('ai', {
               if (info.suspended) {
                 return
               }
+              // 批次3：准备中是可恢复阶段，不按断流提示（面板阶段条自带重试）。
+              if (this.preparingRun) {
+                return
+              }
+              // 批次3：探测已确认 runId 不存在 ⇒ 封口已完成，不再叠一条"断流"。
+              if (unavailableNotified) {
+                return
+              }
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
@@ -3663,7 +3973,8 @@ export const useAiStore = defineStore('ai', {
       } finally {
         if (isCurrentRound()) {
           // R1 同型（issue#5）：被后一次接管/新轮取代的旧连接，其收尾不得复位新轮状态
-          this.loading = false
+          // 批次3：准备中仍在等快照 ⇒ 保持"有在途轮"（输入区禁用），直到重试/终态。
+          this.loading = this.preparingRun !== null
           this.suspended = false
           currentAbort = null
           activeRoundHostId = null
@@ -5405,6 +5716,9 @@ export const useAiStore = defineStore('ai', {
       // 成 interrupted（身份失效），与"用户主动停止"的语义不符。
       this.loading = false
       this.suspended = false
+      // 批次3：停止后压缩/准备中阶段一并收口（否则阶段条会挂在一个已放弃的轮上）
+      this.resetCompactionProgress()
+      this.clearPreparingRun()
       this.dropActiveForm()
       // 停止 = 本轮被放弃：预览与高亮一起撤（B12 收口矩阵的「停止本轮」格）。
       // 用建卡时留的上下文引用同步清色 —— 表格可能在别的页签，异步解析不保证拿得到。
@@ -5563,6 +5877,8 @@ export const useAiStore = defineStore('ai', {
       this.sessionId = nextId
       this.messages = []
       this.activeRunId = null
+      // AR-10：运行态寿命锚点属于旧会话/旧轮 —— 不带走（卡面寿命只对本轮成立）
+      this.runExpiry = null
       clearNotice(this)
       this.stopping = false
       this.poolSaturated = null
@@ -5596,6 +5912,9 @@ export const useAiStore = defineStore('ai', {
       this.contextUsage = null
       this.contextBreakdown = null
       this.contextCompaction = null
+      // 批次3：压缩/准备中阶段是内存态，跨会话不带走
+      this.resetCompactionProgress()
+      this.clearPreparingRun()
       this.historyLoaded = true
       return nextId
     },
@@ -5994,12 +6313,27 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      // 批次3：业务帧一到就说明快照已建、本轮已过"准备中"阶段（心跳不在此列）。
+      if (frame.type !== 'heartbeat' && this.preparingRun) {
+        this.clearPreparingRun()
+      }
+
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
           // 批次2：把 run 归属钉在宿主消息上 —— 「重试本轮」只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
+          }
+          // 批次3：start 仍是首帧（压缩已前移到它之后）—— 新轮的阶段态从零开始；
+          // "已 start、快照未建"随首个 compacting/preparing 心跳重新落位。
+          this.resetCompactionProgress()
+          this.clearPreparingRun()
+          // 批次3 / AR-06：runId 一到就落一次镜像。否则刷新落在节流窗口（300ms）内时，
+          // 本地没有 runId 可探测，压缩窗口会被误判成空态。
+          // 只在本轮历史已就绪时写：loadHistory/回放期间的空态无权覆盖更完整的现场。
+          if (this.historyLoaded) {
+            this.writeMirrorNow()
           }
           clearNotice(this)
           break
@@ -6189,11 +6523,31 @@ export const useAiStore = defineStore('ai', {
             circuit: this.contextUsage?.circuit ?? 'closed',
             fuseFails: 0
           }
+          // 批次3：压缩完成提示只在"本轮确实进过 compacting"时给 —— 重挂回放的旧 `context`
+          // 帧不得在刷新后凭空冒出一条"压缩完成"。
+          this.markCompactionDone()
           break
         }
         case 'heartbeat': {
           // 挂起期/流式期心跳只作保活（keep-alive 由 SSE 层消费）；去超时裁决后前端不再据此
-          // 折算门卡倒计时，故本 case 无状态写入。
+          // 折算门卡倒计时。
+          // 批次3：阶段心跳另带 `phase` —— 这是压缩期/准备期唯一的前端进度来源（帧间 45s
+          // 由心跳自然续命，**不放宽**该上限）。只消费真实已用毫秒，不伪造百分比。
+          if (frame.phase === 'compacting') {
+            // 压缩心跳 = 已在出帧，"准备中"阶段结束（阶段条切到压缩）。
+            this.clearPreparingRun()
+            this.noteCompactionHeartbeat(frame)
+          } else if (frame.phase === 'preparing') {
+            const runId = typeof frame.runId === 'string' && frame.runId !== ''
+              ? frame.runId
+              : this.activeRunId
+            if (runId) {
+              this.notePreparingHeartbeat(runId, heartbeatElapsedMs(frame))
+            }
+          } else if (frame.phase === 'streaming') {
+            // 压缩后恢复上游流：若 compacting 完成帧（context）缺失，以这条心跳作为完成信号。
+            this.markCompactionDone()
+          }
           break
         }
         case 'retry':
@@ -6202,6 +6556,9 @@ export const useAiStore = defineStore('ai', {
         case 'done': {
           // M-d（fix2）：本轮已收口 —— 决策 POST 在途时据此判定"不得再续收"
           roundTerminalSeq += 1
+          // 批次3：轮末清掉阶段态（完成提示不跨轮残留；runId 不随阶段态外溢）
+          this.resetCompactionProgress()
+          this.clearPreparingRun()
           message.streaming = false
           message.done = true
           // o-R1：轮终态封口末尾流式段（否则已完成的消息里仍留着 streaming 段的假态，且会被
@@ -6245,6 +6602,9 @@ export const useAiStore = defineStore('ai', {
         case 'error': {
           // M-d（fix2）：与 done 同口径 —— 收口后不得再续收（不对终态重连）
           roundTerminalSeq += 1
+          // 批次3：终态清掉阶段态；批次2 的 unconfirmed / 错误卡语义不受影响（本处不碰）
+          this.resetCompactionProgress()
+          this.clearPreparingRun()
           message.streaming = false
           message.done = true
           // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级

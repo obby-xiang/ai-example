@@ -151,6 +151,16 @@
       </button>
     </div>
 
+    <!-- 批次3：压缩 / 准备中阶段条 —— 真实已用秒数 + 完成提示，不显示百分比。
+         秒数在子组件内部推进（aria-live 只随阶段变化播一次，不逐秒播报）。 -->
+    <CompactionStatus
+      v-if="stageMode"
+      :mode="stageMode"
+      :started-at-ms="stageStartedAtMs"
+      :elapsed-ms="stageElapsedMs"
+      @retry="ai.retryPreparing()"
+    />
+
     <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
       <div class="flex-1 min-w-0">
@@ -431,6 +441,34 @@
                         :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
                       >›</span>
                     </button>
+                    <!-- 批次3 补齐 / AR-10：本轮运行态（Redis 24h 滑动保留期）只可见化。
+                         剩余时间来自后端 PTTL 的权威推导（store.runExpiry），到期转「已失效」
+                         并给可达出口（刷新状态 / 新建会话）—— **不得**让卡静默消失。
+                         计时文本 `aria-live="off"`：读屏不逐秒播报，只在到期这一次状态变化时由
+                         状态词本身被读到（该行不在任何 polite/assertive 容器内）。 -->
+                    <div
+                      v-if="runExpiryView && part.requiresAction"
+                      class="mx-[11px] mt-[9px] flex flex-wrap items-center gap-x-[8px] gap-y-[4px] text-[11.6px] leading-[1.55] text-[#57606a]"
+                      data-testid="run-expiry-hint"
+                    >
+                      <span v-if="!runExpiryView.expired" data-testid="run-expiry-text" aria-live="off">{{ t(runExpiryView.key, runExpiryView.params) }}</span>
+                      <template v-else>
+                        <span data-testid="run-expiry-expired" class="flex-none text-[#b45309]" aria-live="off">{{ t('ai.panel.runExpiry.expired') }}</span>
+                        <span class="min-w-0 flex-1 break-words" data-testid="run-expiry-expired-hint">{{ t('ai.panel.runExpiry.expiredHint') }}</span>
+                        <button
+                          type="button"
+                          class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.6px] text-[#2563eb]"
+                          data-testid="run-expiry-reload"
+                          @click="refreshExpiredRunState"
+                        ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.runExpiry.reload') }}</span></button>
+                        <button
+                          type="button"
+                          class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.6px] text-[#2563eb]"
+                          data-testid="run-expiry-new-chat"
+                          @click="startNewChatAfterExpiry"
+                        ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.runExpiry.newChat') }}</span></button>
+                      </template>
+                    </div>
                     <div v-if="isReadOnlyCard(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
                       <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
                            字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。
@@ -1338,6 +1376,8 @@ import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRender
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
+import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
+import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
@@ -1350,7 +1390,96 @@ const ai = useAiStore()
 const workspace = useWorkspaceStore()
 
 /**
- * 批次2（store 由并行 agent 维护，本批禁改 stores/ai.ts）·恢复与轮次动作的**唯一适配层**。
+ * 批次3：阶段条的唯一判据（准备中 > 压缩中 > 压缩完成）。
+ *
+ * 直接把 store 的三组字段映射成组件 props；秒数由 `CompactionStatus` 内部时钟推进，
+ * 面板本身不因秒数重渲染。`runId` 只留在 store，绝不进模板。
+ */
+const stageMode = computed<'compacting' | 'preparing' | 'done' | null>(() => {
+  if (ai.preparingRun) {
+    return 'preparing'
+  }
+  if (ai.compactionPhase === 'compacting') {
+    return 'compacting'
+  }
+  return ai.compactionPhase === 'done' ? 'done' : null
+})
+const stageStartedAtMs = computed(() => (stageMode.value === 'preparing'
+  ? ai.preparingRun?.startedAtMs ?? null
+  : ai.compactionStartedAtMs))
+const stageElapsedMs = computed(() => (stageMode.value === 'preparing'
+  ? ai.preparingRun?.elapsedMs ?? null
+  : ai.compactionElapsedMs))
+
+/**
+ * 批次3 补齐 / AR-10：本轮运行态寿命的**本地时钟**（只推进显示，不参与"何时到期"的定义）。
+ *
+ * <p>到期时刻由后端 PTTL 给出（store 的 `runExpiry`）。读秒窗口内按 1s 推进、更长按 30s
+ * 粗粒度刷新（24h 量级不逐秒重渲染整个消息列表）；到 0 即停表并转「已失效」。
+ */
+const runExpiryNowMs = ref(Date.now())
+let runExpiryTimer: ReturnType<typeof setTimeout> | null = null
+
+const RUN_EXPIRY_TICK_MS = 30_000
+const RUN_EXPIRY_COUNTDOWN_TICK_MS = 1_000
+
+function stopRunExpiryTimer(): void {
+  if (runExpiryTimer !== null) {
+    clearTimeout(runExpiryTimer)
+    runExpiryTimer = null
+  }
+}
+
+function scheduleRunExpiryTick(anchor: RunExpiryAnchor): void {
+  stopRunExpiryTimer()
+  const remaining = runExpiryRemainingMs(anchor, Date.now())
+  if (remaining <= 0) {
+    return
+  }
+  const delay = remaining <= RUN_EXPIRY_COUNTDOWN_WINDOW_MS
+    ? RUN_EXPIRY_COUNTDOWN_TICK_MS
+    : Math.min(RUN_EXPIRY_TICK_MS, remaining)
+  runExpiryTimer = setTimeout(() => {
+    runExpiryNowMs.value = Date.now()
+    scheduleRunExpiryTick(anchor)
+  }, delay)
+}
+
+watch(() => ai.runExpiry, (anchor) => {
+  runExpiryNowMs.value = Date.now()
+  if (anchor === null) {
+    stopRunExpiryTimer()
+    return
+  }
+  scheduleRunExpiryTick(anchor)
+}, { immediate: true })
+
+/**
+ * 卡面寿命文案（AR-10 只可见化）：`null` = 没有后端权威锚点（旧后端 / 未知 / 已换轮）。
+ *
+ * <p>归属必须对得上当前轮（`runExpiry.runId === activeRunId`）—— 旧轮的寿命不得落到新轮的卡上。
+ */
+const runExpiryView = computed<RunExpiryLabel | null>(() => {
+  const anchor = ai.runExpiry
+  if (anchor === null || ai.activeRunId === null || anchor.runId !== ai.activeRunId) {
+    return null
+  }
+  return runExpiryLabel(runExpiryRemainingMs(anchor, runExpiryNowMs.value))
+})
+
+/** 到期后的可达出口①：重新拉一次 `runs/current`（不改 TTL，只对账）。 */
+function refreshExpiredRunState(): void {
+  void ai.retryRestoreSnapshot()
+}
+
+/** 到期后的可达出口②：新建会话（旧运行态已按保留期消失，不再假装能续）。 */
+function startNewChatAfterExpiry(): void {
+  newChat()
+}
+
+/**
+ * 批次2 的恢复与轮次动作**唯一适配层**（批次3 起 store 由本批维护；适配层保留，
+ * 继续隔离字段/动作名的变化，避免模板直接拼状态）。
  *
  * <p>面板只经下面这组函数读状态 / 调动作；store 侧字段或 action 名变化时**只改这里**。
  * 已对齐并行落地的实际契约（2026-10-26）：`historyError` / `currentError`（`AiLoadErrorView`，
@@ -2290,6 +2419,9 @@ function isBreathing(message: ChatMessage): boolean {
     && message.streaming
     && waitingKind(message) === null
     && !unconfirmedOf(message)
+    // 批次3：压缩/准备中由阶段条承载（避免同屏两条"正在…"）
+    && stageMode.value !== 'compacting'
+    && stageMode.value !== 'preparing'
 }
 
 /**
@@ -4121,6 +4253,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  stopRunExpiryTimer()
   if (copyTimer !== null) {
     clearTimeout(copyTimer)
     copyTimer = null

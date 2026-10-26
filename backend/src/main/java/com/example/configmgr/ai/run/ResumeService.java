@@ -1502,24 +1502,39 @@ public class ResumeService {
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
 			ContextCompactor.Outcome compaction = null;
 			if (this.contextCompactor != null && !history.isEmpty()) {
-				ContextState state = this.contextCompactor.readState(sessionId);
-				int systemTokens = 0;
-				for (Message message : history) {
-					if (message.getMessageType() == MessageType.SYSTEM) {
-						systemTokens += ContextEstimator.estimate(message.getText());
+				// ===== AR-06 / Task 5 Step 3：续跑压缩同样是零帧窗口 =====
+				// 与首轮同构：阶段开始帧由<b>本线程</b>在进入同步压缩<b>之前</b>发出；压缩调用自身一帧不发；
+				// 压缩期的节拍只由 TurnKeepalive 的独立定时器产生（不依赖上游事件，也不依赖压缩进度回调）。
+				// 保活句柄在压缩段结束处（finally）交出：交棒之后由驱动侧自己排一枚（driveResumed）。
+				TurnKeepalive keepalive = this.chatService == null || this.registry == null ? null
+						: this.chatService.startKeepalive(runId, this.registry.of(runId),
+								TurnKeepalive.PHASE_COMPACTING, true);
+				try {
+					ContextState state = this.contextCompactor.readState(sessionId);
+					int systemTokens = 0;
+					for (Message message : history) {
+						if (message.getMessageType() == MessageType.SYSTEM) {
+							systemTokens += ContextEstimator.estimate(message.getText());
+						}
+					}
+					// 摘要只使用本轮 runtime（与 driveResumed 同一派生口径）；取不到 ⇒ null，L2 按不可用失败、历史不改
+					ProviderRuntime compactionRuntime = this.chatService == null ? null
+							: this.chatService.runtimeForCompaction(runId, snapshot.getProviderId(),
+									snapshot.getModelId());
+					compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
+							runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
+							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
+							this.chatService.disclosedToolTokens(context), protectedIds, compactionRuntime),
+							// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s）。这个回调只刷新<b>业务活动锚点</b>
+							// （避免长压缩被别的实例判成僵尸并接管），它<b>不发帧</b> —— 压缩期的可见性由上面
+							// 那枚独立定时器的 stage 心跳承担（"压缩不伪称持续发帧"）。
+							() -> this.store.touchBusinessActivity(runId, System.currentTimeMillis()));
+				}
+				finally {
+					if (keepalive != null) {
+						keepalive.close();
 					}
 				}
-				// 摘要只使用本轮 runtime（与 driveResumed 同一派生口径）；取不到 ⇒ null，L2 按不可用失败、历史不改
-				ProviderRuntime compactionRuntime = this.chatService == null ? null
-						: this.chatService.runtimeForCompaction(runId, snapshot.getProviderId(),
-								snapshot.getModelId());
-				compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
-						runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
-						state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
-						this.chatService.disclosedToolTokens(context), protectedIds, compactionRuntime),
-						// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s），期间无业务帧/心跳。
-						// 每完成一次摘要就刷新业务锚点，避免长压缩被别的实例判成僵尸并接管。
-						() -> this.store.touchBusinessActivity(runId, System.currentTimeMillis()));
 				if (compaction.changed()) {
 					history = compaction.messages();
 					snapshot.setMessageJson(this.codec.serializeAll(history));

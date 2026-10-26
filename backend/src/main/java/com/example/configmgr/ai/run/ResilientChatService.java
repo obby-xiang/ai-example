@@ -65,7 +65,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntFunction;
 
@@ -113,7 +112,13 @@ import java.util.function.IntFunction;
 @Service
 public class ResilientChatService {
 
-	/** 流式活动心跳的最小间隔（毫秒）：给前端“模型生成中”的节拍，也证明进程还活着（僵尸判据不吃心跳）。 */
+	/**
+	 * 保活心跳的节拍间隔（毫秒）：既是"模型生成中"的节拍，也是压缩期/上游静默期的节拍。
+	 *
+	 * <p><b>Task 5 Step 3 起</b>：节拍由 {@link TurnKeepalive} 的<b>独立定时器</b>产生，不再挂在
+	 * 上游事件回调上（旧口径"每个上游事件至多补一帧"在上游不出事件时就等于没有保活）。
+	 * 心跳仍不占业务 {@code seq}、不落事件归档 —— 与既有心跳契约逐字一致。
+	 */
 	public static final long STREAMING_HEARTBEAT_MILLIS = 5000L;
 
 	/**
@@ -468,59 +473,78 @@ public class ResilientChatService {
 		int systemTokens = ContextEstimator.estimate(systemText);
 		int toolsTokens = ContextEstimator.estimateToolSchemas(tools);
 		int inputTokens = ContextEstimator.estimate(request.message());
-		Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
-				toolsTokens, 0);
-		memory = compaction.memory();
 
-		// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
-		// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
-		List<Message> full = new ArrayList<>(memory.size() + instructions.size());
-		full.add(instructions.get(0));
-		full.addAll(memory);
-		full.add(instructions.get(1));
-		// 压缩若已发生：快照写的就是压缩后的那一份（快照 === 模型看到的；分叉即 SM-01 同族）
-		// L-26：首轮创建即<b>冻结生效参数</b>（provider/model 走既有身份字段，三值 + paramsLocked 走
-		// FrozenParams）。冻结的是 runtime.options() 里的<b>生效值</b>（全局默认 + 本轮请求覆盖 +
-		// "被策略锁住 ⇒ 没生效"三种情形都已体现），不是请求体原文。
-		this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(), runtime.modelId(),
-				frozenParams(runtime, paramsLocked));
-
-		// 完整历史：用户消息在 run 创建后、上游调用前落库（上游失败也不该让用户输入消失）。
-		// 幂等键 = (sessionId, runId, user-<runId>)；重复路径由 converge 的 recordRunTail 兜底补写。
-		if (this.historyRecorder != null) {
-			this.historyRecorder.recordUser(sessionId, runId, instructions.get(1));
-		}
-
+		// ===== AR-06（批次3）：首帧前移到同步压缩之前 =====
+		// 首轮压缩是最大的零帧窗口（L2 的 N 次串行摘要每次最长 60s）。压缩发生在 store.create
+		// <b>之前</b>、runId 已由控制器生成 ⇒ "帧已经有了、只是位置不对"，前移在技术上可行。
+		// 代价是必须同时定义"已 start、快照未建"这段的语义（不能只挪帧）：
+		// · 读侧：同一窗口里的重挂返回"准备中"（可重试 + 已用时间），<b>不</b>返回 404 / "轮不存在"
+		//   （见 AiController#events 的 preparing 分支）；
+		// · 出帧侧：start 仍是首帧；紧随一条 phase=compacting 的<b>心跳阶段帧</b>，由请求线程在进入
+		//   同步压缩<b>之前</b>发出 —— 压缩调用自身一帧不发（不伪称持续发帧）；
+		// · 保活侧：压缩期的节拍由 TurnKeepalive 的独立定时器承担（不依赖上游事件）；
+		// · 异常侧：该窗口里抛错仍走控制器的"取消优先"终态守卫（无快照时禁止裸 save / 新建快照）。
+		// 取消登记一并前移：压缩期收到的取消同样必须生效（权威态在 Redis，登记只是同进程加速通道）。
 		this.cancellations.register(runId);
 		out.start(sessionId);
-		// 压缩即时可见：请求前压的，故必在本轮第一个 delta/tool_start 之前（帧类型 15 → 16 的唯一新增）
-		compaction.emitIfChanged(out);
-
-		// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
-		// 因此 provider/model 只能另起一行，不得插进本行字段之间。
-		log.debug("AI 轮次开始 runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} 首包超时={} 包间超时={} 最大尝试={} 总预算={}",
-				runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
-				this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
-				this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
-		log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
-		// 排队耗时（turn_accepted → turn_start）：在本行<b>发射时</b>取值，窗口与手册字段定义逐字一致
-		long queueMs = queueMs(System.currentTimeMillis());
-		// 日志链路批：成功路径的首条 INFO（此前一轮正常开始/结束在 INFO 级无痕）
-		// AI 日志最小补齐批：resumeReason 一律出现（首轮 = none），续跑四值见手册
-		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
-				"resumed", false, "resumeReason", "none", "context", context.getContextKey(), "tools", tools.size(),
-				"inputEst", inputTokens, "compact", compaction.levelWire(), "newSession", !existed,
-				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
-				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
-
-		// 段级预算（决策看板 :14）：本轮第一段的起点 = 轮起点。恢复点由 beacon.endGateWait 前移。
-		this.beacon.markSegmentStart(runId, turnStartedAtMs);
+		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_COMPACTING, true);
 		try {
+			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
+					toolsTokens, 0);
+			memory = compaction.memory();
+
+			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
+			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
+			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
+			full.add(instructions.get(0));
+			full.addAll(memory);
+			full.add(instructions.get(1));
+			// 压缩若已发生：快照写的就是压缩后的那一份（快照 === 模型看到的；分叉即 SM-01 同族）
+			// L-26：首轮创建即<b>冻结生效参数</b>（provider/model 走既有身份字段，三值 + paramsLocked 走
+			// FrozenParams）。冻结的是 runtime.options() 里的<b>生效值</b>（全局默认 + 本轮请求覆盖 +
+			// "被策略锁住 ⇒ 没生效"三种情形都已体现），不是请求体原文。
+			this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(), runtime.modelId(),
+					frozenParams(runtime, paramsLocked));
+
+			// 完整历史：用户消息在 run 创建后、上游调用前落库（上游失败也不该让用户输入消失）。
+			// 幂等键 = (sessionId, runId, user-<runId>)；重复路径由 converge 的 recordRunTail 兜底补写。
+			if (this.historyRecorder != null) {
+				this.historyRecorder.recordUser(sessionId, runId, instructions.get(1));
+			}
+
+			// 压缩即时可见：请求前压的，故必在本轮第一个 delta/tool_start 之前（帧类型 15 → 16 的唯一新增）。
+			// 位置在 store.create 之后：业务帧（含 context）一旦入档，快照就一定已建立 —— 于是
+			// "归档里有业务帧但没有快照"这段只剩 start + 心跳（即"准备中"窗口），读侧判定因此无歧义。
+			compaction.emitIfChanged(out);
+
+			// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
+			// 因此 provider/model 只能另起一行，不得插进本行字段之间。
+			log.debug("AI 轮次开始 runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} 首包超时={} 包间超时={} 最大尝试={} 总预算={}",
+					runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
+					this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
+					this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
+			log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
+			// 排队耗时（turn_accepted → turn_start）：在本行<b>发射时</b>取值，窗口与手册字段定义逐字一致
+			long queueMs = queueMs(System.currentTimeMillis());
+			// 日志链路批：成功路径的首条 INFO（此前一轮正常开始/结束在 INFO 级无痕）
+			// AI 日志最小补齐批：resumeReason 一律出现（首轮 = none），续跑四值见手册
+			AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
+					"resumed", false, "resumeReason", "none", "context", context.getContextKey(), "tools", tools.size(),
+					"inputEst", inputTokens, "compact", compaction.levelWire(), "newSession", !existed,
+					"maxAttempts", this.properties.getResilience().getMaxAttempts(),
+					"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
+
+			// 段级预算（决策看板 :14）：本轮第一段的起点 = 轮起点。恢复点由 beacon.endGateWait 前移。
+			this.beacon.markSegmentStart(runId, turnStartedAtMs);
 			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
 					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
 					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked,
 					runtime.providerCode(), queueMs);
-			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
+			// 压缩结束、进入模型生成阶段：同一枚定时器切相位（不重排、不抖动），后续节拍由它继续出帧。
+			if (keepalive != null) {
+				keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+			}
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
 					var spec = runtime.chatClient().prompt()
@@ -536,6 +560,9 @@ public class ResilientChatService {
 			});
 		}
 		finally {
+			// 终态/异常/取消/park 四条出口统一在这里兜底停表（runAttempts 在发终帧之前已先停一次，
+			// 这里负责"异常穿透"的那条：无论如何不得让定时器活到轮次之外）。
+			closeKeepalive(keepalive);
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
 			AiTrace.clear();
@@ -599,8 +626,12 @@ public class ResilientChatService {
 				history.size(), "compact", turn.compactionLevel(), "maxAttempts",
 				this.properties.getResilience().getMaxAttempts(),
 				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
+		// 独立保活（AR-06 / Task 5 Step 3）：续跑的上游静默与慢工具同样需要保活。这里<b>不发</b>阶段开始帧
+		// —— 续跑的快照早已建立、start 也早已在归档里，阶段帧只属于"请求前压缩"那段（首轮/续跑压缩
+		// 各由自己的调用方在进入压缩之前发，见 chat() 与 ResumeService）。
+		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 		try {
-			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, attempt -> {
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
 				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
 						history.size());
 				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history);
@@ -608,9 +639,44 @@ public class ResilientChatService {
 			});
 		}
 		finally {
+			closeKeepalive(keepalive);
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
 			AiTrace.clear();
+		}
+	}
+
+	/**
+	 * 排一个<b>独立、可取消</b>的保活定时器（AR-06 / Task 5 Step 3）。
+	 *
+	 * @param announce {@code true} = 立刻由<b>当前调用线程</b>发阶段开始帧。调用方必须保证本方法
+	 * 返回之后才进入同步压缩调用（"阶段开始帧在同步压缩之前"）；{@code false} = 只排节拍
+	 * （续跑/生成阶段：start 早已在归档里，不需要额外的阶段公告）
+	 * @return 定时器句柄（调用方在终态/异常/取消/park 四条出口停表；{@code null} 只在调度器缺失时）
+	 */
+	public TurnKeepalive startKeepalive(String runId, SseChatEmitter out, String phase, boolean announce) {
+		if (this.watchdogExecutor == null || out == null) {
+			return null;
+		}
+		return announce
+				? TurnKeepalive.startWithStageFrame(runId, out, this.watchdogExecutor, STREAMING_HEARTBEAT_MILLIS, phase)
+				: TurnKeepalive.start(runId, out, this.watchdogExecutor, STREAMING_HEARTBEAT_MILLIS, phase);
+	}
+
+	/** 停表（{@code null} 容忍：轻装配/调度器缺失时没有定时器）。 */
+	private static void closeKeepalive(TurnKeepalive keepalive) {
+		if (keepalive != null) {
+			keepalive.close();
+		}
+	}
+
+	/**
+	 * 发终帧之前的停表（终态/异常/取消/park 共用）：终帧之后不得再有心跳，
+	 * 否则"终帧是本轮最后一帧"的帧序不变量当场破掉。
+	 */
+	private static void stopKeepalive(TurnKeepalive keepalive) {
+		if (keepalive != null) {
+			keepalive.stop();
 		}
 	}
 
@@ -769,7 +835,7 @@ public class ResilientChatService {
 	// ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
 	private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
-			TurnContext turn, IntFunction<Flux<ChatResponse>> attemptStream) {
+			TurnContext turn, TurnKeepalive keepalive, IntFunction<Flux<ChatResponse>> attemptStream) {
 		AiProperties.Resilience config = this.properties.getResilience();
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		// 上一次失败带来的 429 Retry-After（只对紧接着的这次重试生效；成功/收尾后自然丢弃）
@@ -786,10 +852,15 @@ public class ResilientChatService {
 					// 第 2 次尝试的请求没有工具结果，桩按"每路由一次"回纯文本，3ms 就正常收尾 ——
 					// 新看门狗一拍都没打（1s 节拍），工具事件边界也不存在，于是取消被吞、finish 写了 DONE。
 					// 这里直接进取消收尾，不赌"下一次尝试会被看门狗收口"。
+					stopKeepalive(keepalive);
 					cancelTerminal(runId, sessionId, null, attempt - 1, null, out, turn);
 					return;
 				}
 				retryAfterMs = null;
+			}
+			// 保活上报本次尝试号（节拍仍由同一定时器出，不因重试重排）
+			if (keepalive != null) {
+				keepalive.attempt(attempt);
 			}
 			long attemptStartedAtMs = System.currentTimeMillis();
 			long beaconBefore = this.beacon.startedCount(runId);
@@ -799,24 +870,14 @@ public class ResilientChatService {
 					this.cancellations, turnStartedAtMs, settled::completeExceptionally);
 			Disposable subscription = null;
 			try {
-				AtomicLong lastStreamingBeatAt = new AtomicLong(System.currentTimeMillis());
-				final int attemptNo = attempt;
 				subscription = attemptStream.apply(attempt)
 					.subscribe(response -> {
 						watchdog.onUpstreamEvent();
-						// 流式活动心跳（R3 的配套）：模型在"只吐 reasoning、不出正文"的阶段
-						// 客户端看不到 delta，前端需要"生成中"的节拍。R1-09 起僵尸判据改看
-						// 业务活动锚点（reasoning delta 会推进它），心跳只证明进程还活着 ——
-						// 这里每 {@value #STREAMING_HEARTBEAT_MILLIS}ms 至多补一帧，仅用于前端/
-						// 会话门活性（reattach 回放默认跳过 heartbeat，不会与实时流重复渲染）。
-						if (System.currentTimeMillis() - lastStreamingBeatAt.get() >= STREAMING_HEARTBEAT_MILLIS) {
-							lastStreamingBeatAt.set(System.currentTimeMillis());
-							Map<String, Object> beat = new LinkedHashMap<>();
-							beat.put("phase", "streaming");
-							beat.put("attempt", attemptNo);
-							beat.put("upstreamEvents", watchdog.upstreamEvents());
-							out.heartbeat(beat);
-						}
+						// ===== Task 5 Step 3：这里不再补心跳 =====
+						// 旧口径在"每条上游事件"上按 {@value #STREAMING_HEARTBEAT_MILLIS}ms 打一帧心跳 ——
+						// 于是上游不出事件（首包等待、包间静默、慢工具）就没有保活。心跳已交给
+						// {@link TurnKeepalive} 的<b>独立定时器</b>：它只看墙钟，不依赖上游事件，
+						// 因此三类静默与本回调是否被调用无关（心跳仍不占业务 seq、不入归档，见 emitter）。
 						consume(response, out, accumulator);
 					}, settled::completeExceptionally, () -> settled.complete(null));
 				watchdog.bind(subscription);
@@ -830,6 +891,10 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
+				// 终态/非终态的分叉在 finish 内部：可再试一次（空回复）时它会发 retry 帧并返回 false。
+				// 先停表再进 finish：finish 若收终帧，终帧之后不得再有心跳（"终帧是本轮最后一帧"）；
+				// 若返回 false（同一轮继续），紧接着重新武装，退避与下一次尝试照样有保活。
+				stopKeepalive(keepalive);
 				boolean handled = finish(runId, sessionId, accumulator, attempt, watchdog, out, turn,
 						attemptStartedAtMs, beaconBefore, emptyReplyRetried);
 				if (handled) {
@@ -837,6 +902,9 @@ public class ResilientChatService {
 				}
 				// 空回复的<b>仅模型步</b>再试一次（AR-05）：不追加用户消息、不改历史切片、
 				// 不重跑任何工具（本轮零副作用已由 emptyReplyRetryable 证明），只是再问模型一次。
+				if (keepalive != null) {
+					keepalive.rearm();
+				}
 				emptyReplyRetried = true;
 				continue;
 			}
@@ -844,6 +912,8 @@ public class ResilientChatService {
 				// 人工等待 park（2026-10-25）：不是失败、不是取消 —— 本次执行到此结束，
 				// 不发终帧、不重试、不写失败态；快照保持/回到 SUSPENDED（合法恢复状态）。
 				if (error instanceof RunParkedException parked) {
+					// park 之后这一轮已交还线程：先停表，再（不写任何帧地）交还
+					stopKeepalive(keepalive);
 					parkTurn(runId, sessionId, parked);
 					return;
 				}
@@ -853,6 +923,7 @@ public class ResilientChatService {
 						watchdog.upstreamEvents());
 				StreamViolationException violation = asViolation(error, outcome);
 				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
+					stopKeepalive(keepalive);
 					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 					return;
 				}
@@ -892,6 +963,7 @@ public class ResilientChatService {
 						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), violation.getMessage(), accumulator.tailSummary());
 				if (!retryable) {
+					stopKeepalive(keepalive);
 					if (parkedToolRound) {
 						handBackParkedToolRound(runId, sessionId, attempt, violation);
 						return;

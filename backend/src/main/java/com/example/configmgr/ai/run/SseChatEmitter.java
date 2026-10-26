@@ -1147,6 +1147,33 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
+	/**
+	 * <b>阶段帧</b>（AR-06 / Task 5）：本轮"准备/生成阶段"的可见性，走<b>心跳通道</b>。
+	 *
+	 * <h2>为什么是心跳而不是新帧型</h2>
+	 * 阶段可见性只需要两件事：这个进程还活着、当前在哪个阶段、这个阶段已经用了多久。前两件
+	 * 心跳本来就有（{@code phase}），第三件是一个 additive 键 —— 于是帧类型集仍是 16
+	 * （{@code FrameTypeSetFrozenTest} 不动），{@code heartbeatSeq} 独立号空间、不落归档的
+	 * 既有口径也原样保留。
+	 *
+	 * <h2>谁发、什么时候发</h2>
+	 * 唯一的发送者是 {@link TurnKeepalive}（独立定时器）与其"阶段开始"那一次同步调用 ——
+	 * <b>同步压缩调用自身不发帧</b>。首轮/续跑的请求前压缩由调用线程在进入压缩之前发一条
+	 * {@code elapsedMs=0} 的阶段开始帧，压缩期的后续节拍只来自定时器（"压缩不伪称持续发帧"）。
+	 *
+	 * @param phase {@link TurnKeepalive#PHASE_COMPACTING}（请求前压缩）/
+	 *            {@link TurnKeepalive#PHASE_STREAMING}（模型生成：含首包等待、包间静默、慢工具）
+	 * @param elapsedMs <b>本阶段</b>已用毫秒（服务端钟；不伪造进度百分比）
+	 * @param attempt 本尝试序号（0 = 尚未进入尝试循环，例如压缩阶段）
+	 */
+	public void stage(String phase, long elapsedMs, int attempt) {
+		Map<String, Object> data = new java.util.LinkedHashMap<>();
+		data.put("phase", phase);
+		data.put("elapsedMs", Math.max(0L, elapsedMs));
+		data.put("attempt", Math.max(0, attempt));
+		heartbeat(data);
+	}
+
 	public void toolStart(PendingToolCall pending) {
 		Map<String, Object> frame = frame("tool_start");
 		frame.put("toolCallId", pending.getToolCallId());

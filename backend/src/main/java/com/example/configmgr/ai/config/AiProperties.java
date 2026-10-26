@@ -1341,6 +1341,13 @@ public class AiProperties {
 	 * <b>启动期校验</b>见 {@link AiProperties#verifyContext()}：与 limit/SSE 两段同一姿态 ——
 	 * 0/负值不是"性能降级"而是语义被静默改写（例如 {@code reserve >= limit} 会让分母变成 1，
 	 * 任何一轮都判"已满"、每轮都压缩）。
+	 *
+	 * <p>
+	 * <b>已删键（AR-11）</b>：{@code app.ai.context.summary-model} 的<b>绑定与出厂 yml 空值行都已删除</b>
+	 * —— 压缩只使用本轮同一供应商、同一模型（{@code ProviderRuntime}），<b>不存在</b>独立摘要模型分支，
+	 * 也不会再加回来。外部配置（部署 yml / 环境变量 / 命令行）仍写该键时，由
+	 * {@link AiRetiredKeysWarner} 给<b>一次</b>退役 WARN（经 {@code Environment} 检测，不依赖本类绑定），
+	 * 不静默吞掉。
 	 */
 	@Data
 	public static class Context {
@@ -1404,14 +1411,6 @@ public class AiProperties {
 
 		/** 熔断冷却窗（批③ 已消费；到点半开重试一次，失败重新计数 —— 不升指数，避免长尾锁死）。 */
 		private Duration fuseCooldown = Duration.ofMinutes(10);
-
-		/**
-		 * 历史键（仅为兼容旧配置保留绑定；<b>不再生效</b>）。
-		 *
-		 * <p>摘要链最小统一后，压缩只使用本轮同一供应商、同一模型（{@code ProviderRuntime}），
-		 * 不存在独立摘要模型分支，也不读取本键。
-		 */
-		private String summaryModel = "";
 
 	}
 

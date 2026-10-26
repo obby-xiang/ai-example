@@ -208,11 +208,16 @@ public final class ContextCompactor {
 	 * 压缩（带"每次摘要完成"进度回调；R1-09 M-1）。
 	 *
 	 * <p>
-	 * 续跑路径在压缩期间既没有业务帧、也没有心跳：L2 的 N 次串行摘要每次最长 60s，累计可能超过
-	 * 僵尸窗口（租约不可用/丢租时会被别的实例接管）。回调在<b>每次</b> {@code summarize} 返回/抛出后
-	 * 执行一次（失败也算"这一轮还在前进"），由调用方刷新业务锚点，把单次静默压回摘要超时上限。
+	 * <b>压缩自身不发任何帧</b>（Task 5 / AR-06 的口径："不伪称持续发帧"）：压缩期的可见性由调用方
+	 * 在进入本次同步调用前发出的阶段帧（{@code heartbeat{phase=compacting}}）与一枚<b>独立定时器</b>
+	 * （{@code TurnKeepalive}）承担，与压缩内部进度无关。
 	 *
-	 * @param onSummaryProgress 每次摘要尝试结束后的回调（null = 不回调）
+	 * <p>
+	 * 本回调仍只做一件事：刷新<b>业务活动锚点</b>。L2 的 N 次串行摘要每次最长 60s，累计可能超过
+	 * 僵尸窗口（租约不可用/丢租时会被别的实例接管）；回调在<b>每次</b> {@code summarize} 返回/抛出后
+	 * 执行一次（失败也算"这一轮还在前进"），把单次静默压回摘要超时上限。
+	 *
+	 * @param onSummaryProgress 每次摘要尝试结束后的回调（null = 不回调；<b>不得</b>用它发帧）
 	 */
 	public Outcome compact(Request request, Runnable onSummaryProgress) {
 		List<Message> original = request.messages() == null ? List.of() : request.messages();

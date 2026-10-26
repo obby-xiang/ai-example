@@ -32,6 +32,9 @@ public class AiRetiredKeysWarner {
 
 	private final Environment environment;
 
+	/** 每个装配实例只告警一次（{@code @PostConstruct} 幂等；重复触发不重复刷日志）。 */
+	private boolean warned;
+
 	public AiRetiredKeysWarner(Environment environment) {
 		this.environment = environment;
 	}
@@ -54,17 +57,27 @@ public class AiRetiredKeysWarner {
 						+ "未知工具兜底档见 fallback-max-chars（8000），逐工具覆盖见 per-tool");
 		keys.put("app.ai.frame.max-bytes",
 				"G5 双通道对齐：改用 app.ai.result-budget.ui.max-frame-bytes（单帧字节上限语义不变）");
+		keys.put("app.ai.context.summary-model",
+				"AR-11：压缩只使用本轮主模型（同一供应商、同一模型、同一 options），不存在独立摘要模型分支、"
+						+ "也不会再恢复；本键不再生效，从配置面删除即可");
 		return keys;
 	}
 
 	/**
 	 * 命中即逐键 WARN（一次启动最多 RETIRED_KEYS.size() 条），并在末尾给一条"共 n 项"的汇总，便于日志检索。
 	 *
+	 * <p>本方法是<b>幂等</b>的：同一实例重复触发只输出第一遍（{@code @PostConstruct} 正常只调一次，
+	 * 这里兜住上下文刷新/重复装配的可能），退役告警不得变成刷屏。
+	 *
 	 * <p>刻意不 fail-fast：这几个键留着不影响正确性（它们只是不再被读），为此拒绝启动会让
 	 * "升级到本版"变成需要先改配置的动作。
 	 */
 	@PostConstruct
 	void warnOnRetiredKeys() {
+		if (this.warned) {
+			return;
+		}
+		this.warned = true;
 		int hits = 0;
 		for (Map.Entry<String, String> entry : RETIRED_KEYS.entrySet()) {
 			String value = this.environment.getProperty(entry.getKey());

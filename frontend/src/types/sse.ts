@@ -416,6 +416,21 @@ export interface SseHeartbeatFrame extends SseFrameBase {
   timeoutSeconds?: number
   /** 已等待秒数（服务端钟；仅对账口径） */
   waitedSeconds?: number
+  /**
+   * 批次3：阶段心跳。`streaming` 是既有的流式保活；`compacting` 是**请求前同步压缩**的
+   * 独立保活（首轮 `start` 之后、压缩完成之前）；`preparing` 用于"已 start、快照未建"的
+   * 重挂窗口。缺键 = 旧后端，按普通保活处理（不进入任何阶段）。
+   */
+  phase?: 'streaming' | 'compacting' | 'preparing' | string
+  /**
+   * 批次3：本阶段**真实已用毫秒数**（服务端钟，单点取值）。
+   *
+   * 前端只用它显示"已用 N 秒"，**不据此折算百分比**；缺键 = 服务端未提供（旧后端 /
+   * 仅保活的心跳），前端不得编造数字。
+   */
+  elapsedMs?: number
+  /** 兼容字段：与 `elapsedMs / 1000` 同义的整秒数（有 `elapsedMs` 时以它为准）。 */
+  elapsedSeconds?: number
   [key: string]: unknown
 }
 

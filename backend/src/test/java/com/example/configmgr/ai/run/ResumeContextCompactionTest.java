@@ -30,7 +30,9 @@ import org.mockito.InOrder;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -242,6 +244,63 @@ class ResumeContextCompactionTest {
 		verify(this.chatService).noteCompaction(RUN_ID, "L1");
 		verify(this.chatService, never()).clearCompaction(any());
 		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(), any(), eq(broken));
+	}
+
+	/**
+	 * <b>AR-06（批次3）：续跑压缩的阶段帧</b> —— 与首轮同构：阶段开始帧由<b>本线程</b>在进入同步压缩
+	 * <b>之前</b>发出，且压缩调用自身不发帧。
+	 *
+	 * <p>这里把驱动侧（{@code chatService}）的 {@code startKeepalive} 桩成"真定时器 + 立即发阶段帧"：
+	 * 于是断言的对象仍是<b>真实帧线</b> —— 阶段帧必须早于 {@code context} 帧（后者在压缩<b>之后</b>发），
+	 * 且它是心跳（不带业务 {@code seq}、不进归档）。kill：把阶段帧挪到压缩调用之后（或让压缩体自己发帧）
+	 * ⇒ 顺序断言变红。
+	 */
+	@Test
+	void resumeCompactionAnnouncesTheCompactingStageBeforeTheSyncCall() {
+		seedSuspendedRun();
+		armCompactingResume();
+		ScheduledExecutorService stageScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "resume-stage-keepalive");
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			when(this.chatService.startKeepalive(eq(RUN_ID), any(SseChatEmitter.class),
+					eq(TurnKeepalive.PHASE_COMPACTING), eq(true)))
+				.thenAnswer(invocation -> TurnKeepalive.startWithStageFrame(RUN_ID,
+						invocation.getArgument(1, SseChatEmitter.class), stageScheduler, 5_000L,
+						invocation.getArgument(2, String.class)));
+			doAnswer(invocation -> {
+				// 交棒后的真实轮次会产出终帧（与上面的用例同形，便于整条流收敛）
+				SseChatEmitter out = invocation.getArgument(4);
+				out.textStart();
+				out.delta("已清理");
+				out.textEnd(3);
+				out.done(Map.of(), "test-model", Map.of("cancelled", false),
+						Map.of("usedTokens", 70000, "limitTokens", 128000, "percent", 54.7, "level", "L1",
+								"est", false, "circuit", "closed"));
+				return null;
+			}).when(this.chatService).driveResumed(any(), any(), any(), any(), any());
+
+			ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+			assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+			List<Map<String, Object>> frames = this.wire.frames();
+			FrameContract.assertConformant(frames);
+			// 阶段帧：start 之后、context 之前，且是心跳（无业务 seq）
+			List<String> types = FrameContract.types(frames);
+			assertThat(types).containsSubsequence("start", "heartbeat", "context", "done");
+			List<Map<String, Object>> stages = FrameContract.ofType(frames, FrameContract.HEARTBEAT);
+			assertThat(stages).hasSize(1);
+			assertThat(stages.get(0)).containsEntry("phase", TurnKeepalive.PHASE_COMPACTING)
+				.containsEntry("elapsedMs", 0L)
+				.doesNotContainKey("seq");
+			assertThat(this.store.events(RUN_ID)).extracting(frame -> frame.get("type"))
+				.as("阶段帧不入归档").doesNotContain(FrameContract.HEARTBEAT);
+		}
+		finally {
+			stageScheduler.shutdownNow();
+		}
 	}
 
 	/** 越线真值 + 压缩设施装配 + 同步执行器（池未饱和的公共前置）。 */

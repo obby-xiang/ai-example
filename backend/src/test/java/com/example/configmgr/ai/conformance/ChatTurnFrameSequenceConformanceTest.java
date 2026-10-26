@@ -15,6 +15,7 @@ import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.web.AiChatRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.api.AfterEach;
@@ -61,6 +62,18 @@ import static org.mockito.Mockito.when;
  * ③ 取消 → 也是 {@code done}（{@code cancelled=true}）终帧，且终帧之后无帧。
  * 另有两条修复后回归：④ 纯空白分片也让"delta 拼接 / message_end.chars / 落定正文"三者相等（S5c-4）、
  * ⑤ 已产出半截正文后失败时先关正文段再发 {@code error} 终帧（S5c-5）。
+ *
+ * <h2>AR-06（批次3）：<b>首轮帧序已变</b>，本类不再声称"旧帧序不变"</h2>
+ * 首帧 {@code start} 前移到请求前压缩之前，且压缩阶段的可见性由一条<b>心跳通道</b>的阶段帧承担
+ * （{@code heartbeat{phase=compacting}}）。于是精确序列变了两处、类型集不变（仍是 16）：
+ * <pre>
+ * 旧（首轮）：[压缩…] start → context? → message_start → delta… → message_end → done
+ * 新（首轮）：start → heartbeat{phase=compacting} → [压缩…] → context? → 正文三段式 → done
+ * </pre>
+ * 续跑（{@code driveResumed}）的形状不变：{@code start} 由原轮发出（归档里），续跑不重发；
+ * 续跑压缩的阶段帧由 {@code ResumeService} 在进入同步压缩之前发（见 {@code ResumeContextCompactionTest}）。
+ * 阶段帧是心跳：不占业务 {@code seq}、不入归档 ⇒ 回放断言里看不到它（"正在压缩"由重挂的
+ * 202"准备中"给出，见 {@code AiControllerEventsPreparingTest}）。
  */
 class ChatTurnFrameSequenceConformanceTest {
 
@@ -81,6 +94,11 @@ class ChatTurnFrameSequenceConformanceTest {
 	private final ChatModel chatModel = mock(ChatModel.class);
 
 	private final ChatClient chatClient = mock(ChatClient.class);
+
+	/** 首轮（{@code chat()}）走的 ChatClient 流式链：逐层返回同一个 spec，末端接 scripted 分片。 */
+	private final ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);
+
+	private final ChatClient.StreamResponseSpec streamSpec = mock(ChatClient.StreamResponseSpec.class);
 
 	/** 模型配置专项批①：模型侧从注册表取用（Runtime 包住 api/model/client）。 */
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
@@ -427,6 +445,64 @@ class ChatTurnFrameSequenceConformanceTest {
 		finally {
 			org.springframework.context.i18n.LocaleContextHolder.resetLocaleContext();
 		}
+	}
+
+	// ── AR-06（批次3）：首轮精确序列（start 前移 + 压缩阶段帧） ────────────────
+
+	/**
+	 * <b>【AR-06】首轮精确序列</b>：{@code start} → {@code heartbeat{phase=compacting}} → 正文三段式 → {@code done}。
+	 *
+	 * <p>与旧帧序的差别只有两处，本用例就是这两处的可执行规格：
+	 * <ol>
+	 * <li>{@code start} 由"压缩之后"前移到"压缩<b>之前</b>"（首帧地位不变）；</li>
+	 * <li>{@code start} 与正文之间多了一条<b>心跳通道</b>的阶段帧 —— 不占业务 {@code seq}、不入归档，
+	 *     因此 16 帧类型集不变、回放里也看不到它。</li>
+	 * </ol>
+	 *
+	 * <p>kill：把 {@code out.start(...)} 挪回 {@code store.create(...)} 之后 ⇒ 第 2 项（heartbeat）变红；
+	 * 把阶段帧改成业务帧 ⇒ 归档里出现 heartbeat、业务 seq 出现洞，replay 断言变红。
+	 */
+	@Test
+	void firstTurnPutsStartThenTheCompactionStageFrameBeforeTheBody() {
+		stubFluentChain();
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+
+		List<Map<String, Object>> frames = wire.frames();
+		assertThat(FrameContract.types(frames)).containsExactly("start", "heartbeat", "message_start", "delta",
+				"message_end", "done");
+		assertThat(frames.get(1)).as("阶段帧走心跳通道：没有业务 seq")
+			.containsEntry("phase", "compacting")
+			.doesNotContainKey("seq");
+		List<Map<String, Object>> business = frames.stream()
+			.filter(frame -> !FrameContract.HEARTBEAT.equals(FrameContract.type(frame)))
+			.toList();
+		// 客户端视角（业务帧）序号连续、帧序不变量成立：心跳插在中间也不改业务时间线
+		FrameContract.assertConformant(business);
+		assertThat(business).extracting(frame -> ((Number) frame.get("seq")).longValue())
+			.containsExactly(1L, 2L, 3L, 4L, 5L);
+
+		// 回放：阶段帧不入归档（心跳口径），重挂者拿到的是完整业务流；
+		// "这一轮正在压缩"由重挂的 202"准备中"给出（阶段帧本身补不回来）
+		FrameWire reattached = new FrameWire();
+		this.registry.of(RUN_ID).replayTo(reattached.emitter(), null);
+		assertThat(FrameContract.types(reattached.frames())).containsExactly("start", "message_start", "delta",
+				"message_end", "done");
+		assertThat(concatenatedDeltas(reattached.frames())).isEqualTo("你好");
+	}
+
+	/** 首轮的 ChatClient 流式链（{@code chat()} 走这条，不走 ChatModel）。 */
+	private void stubFluentChain() {
+		when(this.chatClient.prompt()).thenReturn(this.requestSpec);
+		when(this.requestSpec.system(any(String.class))).thenReturn(this.requestSpec);
+		when(this.requestSpec.user(any(String.class))).thenReturn(this.requestSpec);
+		when(this.requestSpec.advisors(any(java.util.function.Consumer.class))).thenReturn(this.requestSpec);
+		when(this.requestSpec.toolContext(any(java.util.Map.class))).thenReturn(this.requestSpec);
+		when(this.requestSpec.toolCallbacks(any(java.util.List.class))).thenReturn(this.requestSpec);
+		when(this.requestSpec.stream()).thenReturn(this.streamSpec);
+		when(this.streamSpec.chatResponse()).thenReturn(Flux.just(chunk("你好"), terminal("stop")));
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
