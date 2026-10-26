@@ -180,6 +180,21 @@ export type SseFrameType = (typeof SseFrameTypes)[number]
 export const REASONING_FRAME_TYPE = 'reasoning'
 
 /**
+ * 超时阶段（批次3 / AR-06）：三种收尾失败必须能被调用方区分，不能一律说成"断流"。
+ *
+ * - `connect`：`fetch` 到响应头之间超时（请求可能根本没到后端）；
+ * - `first-frame`：响应已建立，但一个 SSE 帧都没收到；
+ * - `idle`：已经收到过帧，但连续 45s 无任何帧（含阶段心跳）。
+ *
+ * <p>
+ * 定义在**契约层**（本文件）：消费方是 `types/ai.ts` 的 `StreamInterrupted.timeoutStage`
+ * （消息级收尾契约），而类型层不得反向依赖 api 层（api 层的看门狗只负责判出阶段，不拥有这个词汇）。
+ * `api/sse.ts` 现仍保留一份同值的本地声明（等价联合，双向可赋值）；收敛时把它改成
+ * `import type` + 再导出即可，本次不动 api 层。
+ */
+export type SseTimeoutStage = 'connect' | 'first-frame' | 'idle'
+
+/**
  * 截断展示码（A10 R-15 I-3，additive 可选键，不是新帧型）。
  *
  * 新客户端据此选 locale 模板；`notice`/`truncatedReason` 只作旧客户端兼容字段。
@@ -475,6 +490,14 @@ export interface SseReasoningFrame {
   runId?: string
   /** 思考链增量文本 */
   text: string
+  /**
+   * 帧的**服务端构造时刻**（epoch 毫秒；与 `SseFrameBase.atMs` 同口径、同钟）。
+   *
+   * 本帧不在 `SseFrameTypes` 白名单里（旧流 / 旧归档形态），故没有继承 `SseFrameBase`；
+   * 但思考计时链（`parts.ts` 的 `noteReasoningFrame` / `sealStreamPart`）要按帧取这个时刻
+   * —— 缺键 = 旧帧，思考段按"无起点"处理，绝不拿本地 now 补造。
+   */
+  atMs?: number
 }
 
 /** 断流重试公告（本轮无正文产出时才会重试）。键集不固定。 */

@@ -286,12 +286,13 @@ describe('批次7B · 新字段与旧镜像兼容', () => {
     // 双写：段是唯一真值，content/toolRuns 投影同时保留（旧读点零改动）。
     expect(saved.content).toBe('答')
     expect(saved.toolRuns).toEqual([])
-    const savedReasoning = (saved.parts as MessagePart[])[0] as Record<string, unknown>
+    const savedParts = saved.parts as MessagePart[]
+    const savedReasoning = savedParts[0] as unknown as Record<string, unknown>
     expect(savedReasoning.startedAt).toBe(1000)
     expect(savedReasoning.endedAt).toBe(2000)
     expect(savedReasoning.lastFrameAt).toBe(2000)
     expect('lastFrameLocalAt' in savedReasoning).toBe(false)
-    const savedTool = (saved.parts as MessagePart[])[1] as Record<string, unknown>
+    const savedTool = savedParts[1] as unknown as Record<string, unknown>
     expect(savedTool.toolCallId).toBe('tc-1')
     expect(savedTool.args).toBe('{"defCode":"CUR"}')
   })

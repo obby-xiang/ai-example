@@ -42,10 +42,17 @@ export function nextSeg(parts: MessagePart[]): number {
  * 先封口 —— 与 {@link sealTrailingStreamPart} 对称。翻转前 `streaming` 标志无人消费（渲染读
  * 旧投影）故漏封不可见；本批起思考链由 parts 渲染、段级状态参与后续状态机（子包③），
  * 不封口会出现"两段同时 streaming"的假态。
+ *
+ * 批次6A：思考段的接收锚（`startedAt` / `lastFrameAt` / `lastFrameLocalAt`）**只在这里**落 ——
+ * 新起段与续写已在流的段都走 {@link noteReasoningFrame}，调用方不必再各自补一次。`atMs` 对
+ * **正文段**只有"封口被中断的上一段"这一个用途，绝不写进正文段（文本段无计时语义）。
  */
 export function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning', atMs?: number): TextPart | ReasoningPart {
   const last = message.parts[message.parts.length - 1]
   if (last && last.kind === kind && last.streaming) {
+    if (last.kind === 'reasoning') {
+      noteReasoningFrame(last, atMs)
+    }
     return last
   }
   if (last && (last.kind === 'text' || last.kind === 'reasoning') && last.streaming) {
@@ -55,16 +62,9 @@ export function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning',
   if (kind === 'reasoning') {
     // 批次6A：起点取**本帧**的服务端 atMs（`message_start{kind:'reasoning'}` 优先；旧帧缺省
     // 则由首个思考 delta 补上）。没有 atMs 就不造起点 —— 面板据此不显示耗时。
-    const part: ReasoningPart = {
-      kind: 'reasoning',
-      seg,
-      text: '',
-      streaming: true,
-      ...(atMs !== undefined
-        ? { startedAt: atMs, lastFrameAt: atMs, lastFrameLocalAt: Date.now() }
-        : {})
-    }
+    const part: ReasoningPart = { kind: 'reasoning', seg, text: '', streaming: true }
     message.parts.push(part)
+    noteReasoningFrame(part, atMs)
     return part
   }
   const part: TextPart = { kind: 'text', seg, text: '', streaming: true }
@@ -671,10 +671,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // 批次6A：思考段边界帧就是**段的起点**（首个思考 delta 之前可能有一段静默，起点不能
       // 从 delta 才起算）。只认服务端 atMs；旧帧没有本键则不造起点。
       if (frame.kind === 'reasoning') {
-        const part = openStreamPart(message, 'reasoning', frame.atMs)
-        if (part.kind === 'reasoning') {
-          noteReasoningFrame(part, frame.atMs)
-        }
+        openStreamPart(message, 'reasoning', frame.atMs)
       }
       break
     }
@@ -705,9 +702,6 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       const part = openStreamPart(message, frame.kind === 'reasoning' ? 'reasoning' : 'text', frame.atMs)
       part.text += frame.text
       part.streaming = true
-      if (part.kind === 'reasoning') {
-        noteReasoningFrame(part, frame.atMs)
-      }
       // A10 R-15：delta 的 text 也可能被单帧字节预算截断（FrameSizeLimiter fields=text）。
       // 旧帧缺省 ⇒ 不新增键；新帧把码/数字透传到段上，由 AiPanel 给角标提示。
       if (frame.truncated !== undefined) part.truncated = frame.truncated
@@ -725,7 +719,6 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       const part = openStreamPart(message, 'reasoning', frame.atMs)
       part.text += frame.text
       part.streaming = true
-      noteReasoningFrame(part, frame.atMs)
       break
     }
     case 'tool_start': {

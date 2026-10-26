@@ -5,6 +5,7 @@
 - 读者：排障值班、开发、评审
 - 定位：**只凭日志就能还原一轮 AI 对话**。帧（SSE）与 Redis 键族仍是真值；日志是本批新增的**可 grep 的骨架**
 - 本批增量（2026-10-22）：新增 3 个事件（`turn_denied` / `turn_exception` / `sse_detach`）、补齐 6 处字段（`turn_end` 的排队/跨段/可信度、`turn_retry` 的单次尝试、`tool_call_end` 的 `execMs`、`approval_decided` 的 `kind/timeoutS/suspendMs`、`turn_start` 的 `resumeReason`、行首第三列 `instanceId`），并订正首版 6 处口径出入（`memory_window` 补登、`upstream_first_byte` 两字段语义、`approval_decided` 与 suspend 分列、`turn_end.status` 取值域、`tool_call` 成对性实况）
+- 本批增量（**2026-10-26**，AI 交互整改批次 0–8 后的文档同步）：**只追加 §8**（`turn_end.status` 五值含 `unconfirmed`、新增 `turn_parked` / `turn_empty_retry`、`turn_accepted.chars` 去 DLP 措辞、三类载体保留期、压缩日志面边界、挂起 / 准备中排障判据）。上文 §0–§7 **未改**；冲突处以 §8 为准。
 
 ---
 
@@ -426,3 +427,110 @@ event=turn_end runId=.. sessionId=.. status=done code=none attempts=1 attempt=1 
               outputTokens=302 totalTokens=5422 est=false frames=3 dirty=0 model=deepseek-chat
               provider=deepseek upstreamEvents=37
 ```
+
+---
+
+## 8. 现行口径更正（2026-10-26）
+
+> **性质**：本节是 **2026-10-26 AI 交互整改（批次 0–8）**后的**日志面追加 / 更正段**。上文（§0–§7）**一字未改、不回改**，它们是 2026-10-22 日志最小补齐批的成文事实。**凡本节与上文冲突处，以本节为准**；本节不改变"只记元数据、不记正文"的安全边界，也不新增帧类型。
+> **依据**：`docs/research/裁决-AI交互整改实施口径-2026-10-26.md` + 各批真实 commit（见 `docs/evidence/ai-interaction-remediation-2026-10-26/README.md`）。
+> **边界**：本节描述的是**已入库代码的现行口径**；本轮**未跑**后端 / 前端全量与真实环境验证，不得把本节当"日志面已验证"。
+
+### 8.1 `turn_end.status` 是**五值**，不是四值（更正 §2.8）
+
+| 取值 | 含义 |
+|---|---|
+| `done` | 正常完成 |
+| `failed` | 失败（含 `EMPTY_REPLY`、上游断流、工具异常等；`code` 给具体码） |
+| `blocked` | 被门 / 策略阻断（未执行） |
+| `cancelled` | 取消 |
+| **`unconfirmed`** | **终态暂不可确认**：成功终局已落库，但权威快照无法确认（如 Redis 不可用）⇒ 不写快照、不发 `done`，用 `error{unconfirmed:true}` 收尾 |
+
+- `unconfirmed` **不是普通失败**：它表达"不知道这一轮最终算不算成功"，前端据此落**中性"状态未确认"**视图（重新载入 / 新开一轮），**不得**包装成"可一键重试"。
+- 判据仍以**显式标记**为准：`error.unconfirmed=true` 或 `turnEnd=unconfirmed`；不要从 `code` 反推（`code` 仍是真实故障码，例如 `AI_REDIS_UNAVAILABLE`）。
+- **`empty_reply` 仍不是 status 值**：空回复 = `failed` + `code=EMPTY_REPLY`（§2.8 原句仍成立）。
+
+### 8.2 新增两个事件：`turn_parked` / `turn_empty_retry`（补 §2）
+
+#### `turn_parked`（INFO，轮进入人工等待挂起态）
+
+| 字段 | 含义 |
+|---|---|
+| `kind` | `CONFIRM`（人工确认）/ `FRONTEND`（前端工具）；另有 `PERSISTED_TOOL_ROUND` = "挂起工具轮已持久化、等 resume 物化" |
+| `toolCallId` | 哪张卡（`PERSISTED_TOOL_ROUND` 行没有该字段） |
+| `attempt` / `code` | 仅 `PERSISTED_TOOL_ROUND` 行有：第几次尝试 / 流式违规码 |
+
+> **读法**：`turn_parked` 是**一轮的正常中间态**，不是失败、不是取消。**之后的日志可能长时间空白**（线程已交还），直到决策落地出现新的 `turn_start(resumed=true)` 或 `approval_decided`。**不要**把"有 `turn_parked`、无 `turn_end`"判成进程死了——这是等人在看卡。
+
+#### `turn_empty_retry`（INFO，空回复的"仅模型步"重试）
+
+| 字段 | 含义 |
+|---|---|
+| `attempt` / `nextAttempt` | 本次空回复的尝试序号 / 下一次序号 |
+| `code` | 恒为 `EMPTY_REPLY` |
+| `elapsedMs` | 本轮已耗时 |
+
+> **与 `turn_retry` 的分工**：`turn_retry` = **上游断流**类可重试失败（三条件：剩余次数 / 未超机器段预算 / 未产出且无副作用）；`turn_empty_retry` = **零产出空回复**的一次"仅模型步重跑"（不重执行工具、不追加用户消息、同模型、同固定历史）。两者**不可互相替代**，也不共用 `code` 语义。
+> 人工触发的 `POST /api/ai/runs/{runId}/retry-model-step` 走**续跑入口**，日志形如 `turn_start(resumed=true, resumeReason=…)`，**不写** `turn_empty_retry`。
+
+### 8.3 `turn_accepted.chars` 不再含 DLP（更正 §2.1）
+
+上文写"归一 + **DLP** 之后的输入字符数"。**DLP 三件套已于 2026-10-24 整体删除**（`AR-01` 明确不恢复），故现行口径 = **归一 / 清洗后的输入字符数**（`modelText.length()`）。事件字段名与位置不变，**不要**再按"DLP 之后"解释该值，也不要据此推断"输入被脱敏过"。
+
+### 8.4 保留期：日志 / 帧面 24h，完整历史 DB 无 TTL（补 §6）
+
+| 载体 | 现行保留期 | 对排障的含义 |
+|---|---|---|
+| 日志（本手册对象） | 由部署侧日志轮转决定，**不属本仓 TTL** | 有日志就能回溯；**没有日志就无法用本手册还原** |
+| Redis 运行态 / 记忆 / 事件日志 | **24h 滑动 TTL**（活跃即续、无绝对上限） | `/api/ai/events/{runId}` 的逐帧回放**只在 24h 内**可用；超期后帧面归零 |
+| 完整历史 DB（`ai_chat_message`） | **无 TTL、无保留期**（本轮维持现状、不扩大） | 24h 后仍可用 `GET /api/ai/history/{sessionId}` 看到对话历史；但**不等于**失败现场：DB 面没有失败写入，也不与帧面逐源 |
+
+> **因此**：§6「需要正文时走 `/api/ai/events/{runId}`（24h 内）或记忆窗口」仍然成立，但**要补一句**：24h 之后仍可看**完整历史**（DB），只是**看不到逐帧现场与失败卡原文**。不得把"历史还在"读成"帧面还在"。
+
+### 8.5 压缩：日志面无"压缩开始"事件（补 §2.7 / §3.8）
+
+- `compaction` 行**仍只在真实发生压缩时**写出（判据不变：没压缩不写，可区分"没发生"与"发生 0 次"）。
+- 本轮首帧前移后，**压缩期的可见性由帧承担**：`out.start` 仍是首帧，紧随 `phase=compacting` 的**阶段心跳帧**，面板显示"正在压缩·已用 N 秒"；**日志面没有新增"压缩开始 / 结束"事件**。
+- **不要**用"日志里没有 `compaction` 行"推断"没有压缩期等待"——零帧窗口的判据是**帧与前端阶段超时**（connect 15s / first-frame 30s / idle 45s），不是日志。
+- `compaction` 行的字段（`level`/`reason`/`before`/`after`/`savedTokens`/`lostTokens`/`turns`/`clearedPairs`/`summaryChars`/`limit`）**不变**；摘要仍使用**主模型**（`summary-model` 已删键，`AR-11`）。
+
+### 8.6 等待上限的字段口径（补 §2.6 / §2.6b）
+
+| 工具 / 卡 | `timeoutS` 取值 | 说明 |
+|---|---|---|
+| 确认门（`CONFIRM`） | **`none`** | 等**人**，**无上限**；`confirm-timeout` 已退役 |
+| `generative_form` 等"等人"前端工具 | **`none`** | 等**人**填表，无上限 |
+| 即时执行类前端工具（`navigate_to` 等） | **`120`** | 等**机器**回执的后端兜底；只决定"系统何时收摊" |
+
+- `approval_suspend.timeoutS=none` **不再**表示"无超时配置"这种异常态，而是**设计口径**；`approval_decided.timeoutS` 与之同尺。
+- `waitedMs` / `suspendMs` 的 `-1` / `none` 分工**不变**（§2.6b）。
+
+### 8.7 挂起 / 准备中在日志上的样子（新增排障判据）
+
+| 现象 | 日志形态 | 判据 |
+|---|---|---|
+| 卡在确认 / 表单上 | `approval_suspend`（或无该行，取决于卡类型）→ **`turn_parked`** → 长时间无终态行 | **正常**：线程已交还，等人在看卡；决策后应出现 `approval_decided` 与新的 `turn_start(resumed=true)` |
+| 决策后没续跑 | `approval_decided` 有，之后**无** `turn_start(resumed=true)` | 续跑没被驱动（看成对：`runId` / `toolCallId`）；对齐 `/api/ai/runs/current` 的待决条目 |
+| "连上了但一个字都没来"（首轮压缩窗口） | 只有 `turn_accepted` / `turn_start`，**没有** `turn_end`；HTTP 侧重挂可能拿到 **202 preparing** | 压缩期零帧窗口；前端阶段超时与独立保活负责可见性；**不要**判成进程死 |
+| 终态"说不清" | `turn_end status=unconfirmed` + `error` 帧带 `unconfirmed=true` | 不是普通失败：不写快照、不发 done；按中性"状态未确认"处理 |
+| 空回复 | `turn_empty_retry` 一次，第二次仍空 ⇒ `turn_end status=failed code=EMPTY_REPLY` | 只在零产出、零副作用时才会看到重试行 |
+
+### 8.8 grep 菜谱补充（接 §3）
+
+```bash
+# 挂起与准备中：这一轮进过几次人工等待
+grep -F "<R>" app.log | grep -E 'event=(turn_parked|approval_suspend|approval_decided)'
+
+# 空回复的仅模型步重试
+grep -F "<R>" app.log | grep 'event=turn_empty_retry'
+
+# 终态不可确认的轮
+grep 'event=turn_end' app.log | grep 'status=unconfirmed'
+```
+
+### 8.9 不得据日志面声称的事项
+
+1. **日志不能替代帧与 DB**：正文 / 工具入参出参仍只在帧与历史里；日志**永远不记**这些内容。
+2. **24h 之后帧面归零**：不能凭"日志还在"声称"这一轮还能逐帧回放"；完整历史仍在 DB，但**失败现场不可恢复**。
+3. **日志面无压缩进度**：`compaction` 行只回答"压过没有、压到哪一级"，不回答"当前正压到哪一步"。
+4. **单点验证 ≠ 全量**：本轮未跑后端 / 前端全量与真实环境；本手册描述的字段与事件不因"代码已入库"而成为"已验证"。

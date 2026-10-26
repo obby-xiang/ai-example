@@ -50,7 +50,7 @@ class IntersectionObserverStub {
   disconnected = false
 
   constructor(
-    private readonly callback: IntersectionObserverCallback,
+    callback: IntersectionObserverCallback,
     options?: IntersectionObserverInit
   ) {
     const instance = this
@@ -85,7 +85,7 @@ class ResizeObserverStub {
   readonly targetList: Element[] = []
   disconnected = false
 
-  constructor(private readonly callback: ResizeObserverCallback) {
+  constructor(callback: ResizeObserverCallback) {
     const instance = this
     observers.ro.push({
       targets: this.targetList,
@@ -322,7 +322,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
   it('ToolPart 派生值按段 WeakMap 复用：同一段只解析一次', async () => {
     const wrapper = await mountPanel([
       messageWith([
-        { kind: 'tool', seg: 0, ...toolPart(), requiresAction: true, kind2: 'CONFIRM', status: 'pending' } as ToolPart
+        toolPart({ requiresAction: true, kind2: 'CONFIRM', status: 'pending' })
       ])
     ])
     const misses = debugOf(wrapper).toolDeriveMisses

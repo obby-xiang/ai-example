@@ -3744,7 +3744,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.sessionId
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
-    deps.push(liveForm, liveForm?.status, liveForm?.error, liveForm?.fieldErrors, liveForm?.values, formHostMessageId.value, ai.queuedForms, formQueuePosition(part.toolCallId))
+    deps.push(liveForm.value, liveForm.value?.status, liveForm.value?.error, liveForm.value?.fieldErrors, liveForm.value?.values, formHostMessageId.value, ai.queuedForms, formQueuePosition(part.toolCallId))
   }
   if (isUploadHandoffPart(part)) {
     deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part))

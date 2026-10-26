@@ -1,7 +1,7 @@
 /**
  * 批次4 集成返修 / 契约：`buildContext()` 必须**顶楼上报 `taskStatus`**。
  *
- * 背景：后端 `AiChatRequest.Context` 六组件为 page/taskType/step/taskId/**taskStatus**/extra，
+ * 背景：后端 `AiChatRequest.Context` 六组件为 page/taskType/step/taskId/`taskStatus`/extra，
  * 且 `ToolRegistry#forContext` 用 `taskStatus` 做终态收窄（COMPLETED 任务不再披露 `start_export`）。
  * 前端此前把它只放进 `snapshot()`，`buildContext()` 里没有 ⇒ 后端永远拿不到终态，
  * 模型会看到"还能导出"的假入口。本文件锁住"顶层、每轮都带、随服务端快照更新"三条。

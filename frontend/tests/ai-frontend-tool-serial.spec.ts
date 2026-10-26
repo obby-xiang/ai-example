@@ -153,7 +153,8 @@ describe('同一助手消息内 frontend_tool_request 串行', () => {
     // 串行：第二条还没开始
     expect(events).toEqual(['start:A'])
 
-    releaseFirst?.()
+    const release = releaseFirst as (() => void) | null
+    release?.()
     await vi.waitFor(() => expect(events).toEqual(['start:A', 'end:A', 'start:B', 'end:B']))
 
     unregisterFrontendToolExecutor('open_export_file_editor')
