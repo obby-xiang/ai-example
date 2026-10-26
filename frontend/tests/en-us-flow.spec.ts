@@ -86,9 +86,12 @@ function completeRound(text: string): void {
   })
 }
 
+let pinia: ReturnType<typeof createPinia>
+
 beforeEach(() => {
   sessionStorage.clear()
-  setActivePinia(createPinia())
+  pinia = createPinia()
+  setActivePinia(pinia)
   document.body.innerHTML = ''
   for (const fn of Object.values(api)) {
     fn.mockReset()
@@ -98,7 +101,7 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue({
     found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], awaitingMaxSeq: 0, archiveMaxSeq: 0
   })
-  const workspace = useWorkspaceStore()
+  const workspace = useWorkspaceStore(pinia)
   workspace.page = 'tasks'
   workspace.pageId = 'tasks'
 })
@@ -109,7 +112,7 @@ afterEach(() => {
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {
   const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
-  const wrapper = mount(AiPanel, { global: { stubs } })
+  const wrapper = mount(AiPanel, { global: { plugins: [pinia], stubs } })
   await wrapper.vm.$nextTick()
   await flushPromises()
   return wrapper
@@ -120,7 +123,7 @@ describe('C11-01 en-US 对话主链：空态 → 发送 → 正文 → 建议全
     applyLocale('en-US')
     completeRound('Here is the summary you asked for.')
     const wrapper = await mountPanel()
-    const store = useAiStore()
+    const store = useAiStore(pinia)
 
     const empty = wrapper.find('[data-testid="empty-state"]')
     expect(empty.text()).toContain('Hello, I am the implementation assistant')
@@ -165,7 +168,7 @@ describe('C11-02 en-US 错误码文案：后端英文原文逐字上屏，机器
       return Promise.resolve({ terminal: true })
     })
     const wrapper = await mountPanel()
-    const store = useAiStore()
+    const store = useAiStore(pinia)
 
     await wrapper.find('[data-testid="composer-input"]').setValue('hello')
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
@@ -191,7 +194,7 @@ describe('C11-02 en-US 错误码文案：后端英文原文逐字上屏，机器
 describe('C11-03 en-US 工具文案：标题 / 摘要 / 状态词在卡面成链（切回 zh 复位）', () => {
   it('en 下工具卡标题与摘要为英文、状态词 done；切回 zh 同一卡变中文', async () => {
     applyLocale('en-US')
-    const store = useAiStore()
+    const store = useAiStore(pinia)
     store.messages = [buildMessage([
       {
         kind: 'tool', seg: 0, toolCallId: 't-sheet', name: 'read_sheet_summary', kind2: 'FRONTEND',
