@@ -25,6 +25,7 @@ import {
 } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { parseToolArgs } from '@/utils/frontend-tools'
+import { translate } from '@/composables/useCopy'
 
 /** 段序列的下一个 seg（单调递增：封口后另起的段不复用旧编号）。 */
 export function nextSeg(parts: MessagePart[]): number {
@@ -42,23 +43,121 @@ export function nextSeg(parts: MessagePart[]): number {
  * 旧投影）故漏封不可见；本批起思考链由 parts 渲染、段级状态参与后续状态机（子包③），
  * 不封口会出现"两段同时 streaming"的假态。
  */
-export function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning'): TextPart | ReasoningPart {
+export function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning', atMs?: number): TextPart | ReasoningPart {
   const last = message.parts[message.parts.length - 1]
   if (last && last.kind === kind && last.streaming) {
     return last
   }
   if (last && (last.kind === 'text' || last.kind === 'reasoning') && last.streaming) {
-    last.streaming = false
+    sealStreamPart(last, atMs)
   }
   const seg = nextSeg(message.parts)
   if (kind === 'reasoning') {
-    const part: ReasoningPart = { kind: 'reasoning', seg, text: '', streaming: true }
+    // 批次6A：起点取**本帧**的服务端 atMs（`message_start{kind:'reasoning'}` 优先；旧帧缺省
+    // 则由首个思考 delta 补上）。没有 atMs 就不造起点 —— 面板据此不显示耗时。
+    const part: ReasoningPart = {
+      kind: 'reasoning',
+      seg,
+      text: '',
+      streaming: true,
+      ...(atMs !== undefined
+        ? { startedAt: atMs, lastFrameAt: atMs, lastFrameLocalAt: Date.now() }
+        : {})
+    }
     message.parts.push(part)
     return part
   }
   const part: TextPart = { kind: 'text', seg, text: '', streaming: true }
   message.parts.push(part)
   return part
+}
+
+/**
+ * 段封口的**唯一**收尾：置 `streaming=false`，并给思考段补 `endedAt`。
+ *
+ * 批次6A / AR-12：`endedAt` 只认服务端 `atMs`（封口帧自己的时刻），脚本内没有帧时刻时退回
+ * 该段最后一次帧的 `lastFrameAt`（仍是服务端钟）—— 两条都不成立就留空，绝不按本地 now 编一个。
+ */
+function sealStreamPart(part: TextPart | ReasoningPart, atMs?: number): void {
+  if (!part.streaming) {
+    return
+  }
+  part.streaming = false
+  if (part.kind === 'reasoning' && part.endedAt === undefined) {
+    const endedAt = atMs ?? part.lastFrameAt
+    if (endedAt !== undefined) {
+      part.endedAt = endedAt
+    }
+  }
+}
+
+/**
+ * 思考帧的**接收锚**（批次6A 返修）：服务端 `atMs` + 本地收帧时刻成对落段。
+ *
+ * 计时不用 `Date.now() - 服务端 atMs`（两端钟差会整段偏移），而是
+ * `(lastFrameAt - startedAt) + (now - lastFrameLocalAt)` —— 钟差被这一对锚吸收。刷新读回时
+ * 本地锚由镜像 `savedAt` 重播（镜像不持久化本字段），离线/关闭页签的那段也计入真实已用时长。
+ * 旧帧没有 `atMs` 时什么都不写（保持"无起点不显示"）。
+ */
+function noteReasoningFrame(part: ReasoningPart, atMs?: number, receivedAtMs?: number): void {
+  if (atMs === undefined) {
+    return
+  }
+  if (part.startedAt === undefined) {
+    part.startedAt = atMs
+  }
+  // 单调：重连全量回放会从更早的帧重放，不能把已观测到的 lastFrameAt 往回拨（否则秒表倒退）。
+  if (part.lastFrameAt === undefined || atMs >= part.lastFrameAt) {
+    part.lastFrameAt = atMs
+    part.lastFrameLocalAt = receivedAtMs ?? Date.now()
+  }
+}
+
+/** 消息内最后一个思考段（`message_end{kind:'reasoning'}` 落 `endedAt` 的定位口径）。 */
+function lastReasoningPart(message: ChatMessage): ReasoningPart | null {
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index]
+    if (part && part.kind === 'reasoning') {
+      return part
+    }
+  }
+  return null
+}
+
+/**
+ * 思考段已用时长（毫秒；`null` = 无起点 ⇒ 面板不显示计时）。
+ *
+ * 批次6A / AR-12（返修）：实时 / 续跑 / 重连 / **刷新在途**都走本函数。换算只用**帧接收锚**：
+ * 收帧那一刻同时记下服务端 `lastFrameAt` 与本地 `lastFrameLocalAt`，时长 =
+ * `(lastFrameAt - startedAt) + (now - lastFrameLocalAt)` —— 等价于 `now - (startedAt + 钟差)`，
+ * 刷新/离线的那段也计入，且**不做** `Date.now() - 服务端 atMs` 的裸减法（两端钟差被接收锚吸收）。
+ *
+ * - `endedAt` 后静止：两端都是服务端钟，直接相减（不受本地钟影响）；
+ * - 没有接收锚的旧段（本字段落地前的镜像）：只报服务端已确认的 `lastFrameAt - startedAt`，
+ *   不拿本地 now 猜（宁可偏低，不虚报）；
+ * - 历史已完成轮没有这些键 ⇒ 返回 null，**不按当前时刻回算**、不给旧数据补造耗时。
+ */
+export function reasoningElapsedMs(part: ReasoningPart, nowMs: number): number | null {
+  const startedAt = part.startedAt
+  if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) {
+    return null
+  }
+  if (typeof part.endedAt === 'number' && Number.isFinite(part.endedAt)) {
+    return Math.max(0, part.endedAt - startedAt)
+  }
+  const confirmed = typeof part.lastFrameAt === 'number' && Number.isFinite(part.lastFrameAt)
+    ? Math.max(0, part.lastFrameAt - startedAt)
+    : 0
+  if (part.streaming) {
+    if (typeof part.lastFrameLocalAt === 'number' && Number.isFinite(part.lastFrameLocalAt)) {
+      return confirmed + Math.max(0, nowMs - part.lastFrameLocalAt)
+    }
+    return confirmed
+  }
+  if (typeof part.lastFrameAt === 'number' && Number.isFinite(part.lastFrameAt)) {
+    return confirmed
+  }
+  return null
 }
 
 /**
@@ -70,8 +169,72 @@ export function openStreamPart(message: ChatMessage, kind: 'text' | 'reasoning')
 export function sealTrailingStreamPart(message: ChatMessage): void {
   const last = message.parts[message.parts.length - 1]
   if (last && (last.kind === 'text' || last.kind === 'reasoning') && last.streaming) {
-    last.streaming = false
+    sealStreamPart(last)
   }
+}
+
+/**
+ * 批次6A（N8/N9）：工具段**诊断分层**的分类（`null` = 卡面照常展示，不分层）。
+ *
+ * 背景（review-04 N8/N9）：卡面曾经把**给模型/排障看**的原文直接当给人看的话 —— 内部码
+ * （`TOOL_BUDGET_EXHAUSTED` / `RESOURCE_LOCKED` / `KIND_MISMATCH`）、`app.ai.*` 配置键、
+ * 回灌端点路径、陈旧确认卡的 `runId/toolCallId`。批次6B 已让 store 把陈旧卡落只读终态、
+ * 批次6C 已让后端把 `result` 换成用户摘要；本分类是**前端展示层的安全网**（旧镜像 / 旧帧 /
+ * 旧归档没有这些修正）：
+ * - `staleGate`：无决策的 CONFIRM 段已 expired/cancelled，且文本里还残留机器标识（N8）；
+ * - `skipped`：skipped 段的文本仍是模型向/机器向（N9：预算、步数上限、配置键）；
+ * - `internal`：blocked（**未执行**）段里残留内部码/路径（N9 的错入口、资源锁同族）。
+ *
+ * 成功 / 进行中 / 执行失败（`failed`）的段不分类：L1「结果已清除（… toolCallId=…）」的占位符
+ * 是**真执行过**的证据；`failed` 的原文常是已可读的业务解释（如 `SHEET_DISABLED` 的管理员
+ * 说明），按它是否含配置键把人话整段藏起来反而是倒退 —— 码在 6C 已换成用户摘要，这一层只
+ * 兜"未执行"的旧数据。
+ */
+export type PartDiagnostic = 'skipped' | 'staleGate' | 'internal'
+
+/** 机器向文本的判据（只收**码/配置键/端点**这类稳定记号；不按中文措辞猜语义）。 */
+const INTERNAL_MARKER_RE = /(?:^|[^A-Za-z0-9_])(?:TOOL_BUDGET_EXHAUSTED|TOOL_STEP_LIMIT|TOOL_KIND_MISMATCH|RESOURCE_LOCKED|SCOPE_NOT_DISCLOSED|UPSTREAM_FAILED|TOOL_ALREADY_CLAIMED|CREATE_TASK_TURN_LIMIT|UNKNOWN_TOOL_CALL|UNKNOWN_RUN)(?:[^A-Za-z0-9_]|$)|app\.ai\.[a-z]|\/api\/ai\/frontend-tool-result|toolCallId=|runId\/toolCallId/
+
+function internalMarkerPresent(part: ToolPart): boolean {
+  return INTERNAL_MARKER_RE.test(`${part.reason ?? ''}\n${part.result ?? ''}`)
+}
+
+export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
+  if (part.kind !== 'tool' || !internalMarkerPresent(part)) {
+    return null
+  }
+  const staleGate = part.kind2 === 'CONFIRM'
+    && part.decision === undefined
+    && (part.status === 'expired' || part.status === 'cancelled')
+  if (staleGate) {
+    return 'staleGate'
+  }
+  if (part.status === 'skipped') {
+    return 'skipped'
+  }
+  return part.status === 'blocked' ? 'internal' : null
+}
+
+/** 该段的 `result` 自身是否就是机器向文本（`true` ⇒ 卡面「输出」位让位给诊断详情，不同屏双显）。 */
+export function partResultIsInternal(part: MessagePart): boolean {
+  return part.kind === 'tool' && INTERNAL_MARKER_RE.test(part.result ?? '')
+}
+
+/**
+ * 收进「诊断详情」的原文：只收**自身带机器记号**的字段（reason / result 去重后拼接）。
+ * 人话字段不高亮进诊断层（否则同一句人话会在「输出」与「诊断详情」各出现一次）。
+ * 无分层或无可收原文 ⇒ null。
+ */
+export function partDiagnosticText(part: MessagePart): string | null {
+  if (part.kind !== 'tool' || partDiagnosticOf(part) === null) {
+    return null
+  }
+  const values = [part.reason, part.result]
+    .filter((value): value is string => typeof value === 'string'
+      && value.trim() !== ''
+      && INTERNAL_MARKER_RE.test(value))
+  const unique = Array.from(new Set(values))
+  return unique.length > 0 ? unique.join('\n\n') : null
 }
 
 /** 定位工具段（不建段）。 */
@@ -498,25 +661,53 @@ export function writeSubmittedValuesToMessage(
  */
 export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
   switch (frame.type) {
-    case 'message_start':
+    case 'message_start': {
       message.messageId = frame.messageId
       message.streaming = true
       // R-154 #17：实时路时间戳 = 帧的服务端构造时刻（atMs 与 messageId 同帧单点取值）
       if (message.timestamp === undefined && frame.atMs !== undefined) {
         message.timestamp = frame.atMs
       }
+      // 批次6A：思考段边界帧就是**段的起点**（首个思考 delta 之前可能有一段静默，起点不能
+      // 从 delta 才起算）。只认服务端 atMs；旧帧没有本键则不造起点。
+      if (frame.kind === 'reasoning') {
+        const part = openStreamPart(message, 'reasoning', frame.atMs)
+        if (part.kind === 'reasoning') {
+          noteReasoningFrame(part, frame.atMs)
+        }
+      }
       break
-    case 'message_end':
+    }
+    case 'message_end': {
       // 段边界：只封口末尾流式段 + 记身份，不改段结构（R2-2）
       message.messageId = frame.messageId
       sealTrailingStreamPart(message)
+      // 批次6A：思考段封口帧的 atMs 是 `endedAt` 的权威来源（秒表就此停住）。
+      // 上面的 sealStreamPart 已用 lastFrameAt 兜底过一次 —— 本帧带 atMs 时以帧为准覆盖
+      // （帧才是"段到此结束"的服务端钟；否则封口时长会停在上一个 delta 的时刻）。
+      if (frame.kind === 'reasoning') {
+        const part = lastReasoningPart(message)
+        if (part) {
+          noteReasoningFrame(part, frame.atMs)
+          if (frame.atMs !== undefined) {
+            part.endedAt = frame.atMs
+          } else if (part.endedAt === undefined && part.lastFrameAt !== undefined) {
+            part.endedAt = part.lastFrameAt
+          }
+        }
+      }
       break
+    }
     case 'delta': {
       // L-91：`kind==='reasoning'` = 思考段增量（缺省 = 正文，旧帧行为一字不动）。
-      // 段的开合仍由边界帧/上一个段的状态机决定：`openStreamPart` 会在切换类型时封口末尾段。
-      const part = openStreamPart(message, frame.kind === 'reasoning' ? 'reasoning' : 'text')
+      // 段的开合仍由边界帧/上一个段的状态机决定：`openStreamPart` 会在切换类型时封口末尾段
+      //（封口时刻取当前帧 atMs —— 那正是段边界发生时的服务端钟）。
+      const part = openStreamPart(message, frame.kind === 'reasoning' ? 'reasoning' : 'text', frame.atMs)
       part.text += frame.text
       part.streaming = true
+      if (part.kind === 'reasoning') {
+        noteReasoningFrame(part, frame.atMs)
+      }
       // A10 R-15：delta 的 text 也可能被单帧字节预算截断（FrameSizeLimiter fields=text）。
       // 旧帧缺省 ⇒ 不新增键；新帧把码/数字透传到段上，由 AiPanel 给角标提示。
       if (frame.truncated !== undefined) part.truncated = frame.truncated
@@ -531,9 +722,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       break
     }
     case 'reasoning': {
-      const part = openStreamPart(message, 'reasoning')
+      const part = openStreamPart(message, 'reasoning', frame.atMs)
       part.text += frame.text
       part.streaming = true
+      noteReasoningFrame(part, frame.atMs)
       break
     }
     case 'tool_start': {
@@ -602,6 +794,8 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // 治理 P0-1 M2：阻断文案按 `code` 区分 —— 互斥抢占（TOOL_ALREADY_CLAIMED）不是"未披露"。
       // B23L1 批③b 增两支（只增不改）：资源锁冲突（RESOURCE_LOCKED）与目标资源不成立（TARGET_INVALID）——
       // 两者都是"本次未执行"，但原因完全不同（一个等对方收尾、一个参数就是错的）。
+      // 返修（6C 建议，不扩散）：错入口（TOOL_KIND_MISMATCH）不是"越出披露范围"，而是走错通道 ——
+      // 后端桩不执行前端工具，正确出口是当前页面。文案走 locale（与 6C 用户摘要同义）。
       const reason = blocked
         ? (frame.code === 'TOOL_ALREADY_CLAIMED'
             ? '该操作已由另一实例执行，本次未重复执行'
@@ -609,7 +803,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
               ? '该任务已有作业在执行，本次未执行'
               : frame.code === 'TARGET_INVALID'
                 ? '目标资源不存在或不在当前任务内，本次未执行'
-                : '该工具不在当前工作区上下文的披露范围内，未执行')
+                : frame.code === 'TOOL_KIND_MISMATCH'
+                  ? translate('ai.panel.toolKindMismatch')
+                  : '该工具不在当前工作区上下文的披露范围内，未执行')
         : rejected ? (existing?.reason ?? '用户拒绝执行') : null
       upsertToolPart(message, {
         toolCallId: frame.toolCallId,

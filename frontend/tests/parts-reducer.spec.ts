@@ -22,6 +22,7 @@ import {
   deriveProjections,
   markApplied,
   openStreamPart,
+  reasoningElapsedMs,
   sealTrailingStreamPart,
   upsertToolPart
 } from '@/utils/parts'
@@ -1005,5 +1006,32 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     expect(failed).toMatchObject({ status: 'failed', kind2: 'CONFIRM', decision: 'approved', requiresAction: false })
     expect(readOnlyStateOf(failed)).toBe('failed')
     expect(cardStatusOf(failed)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+  })
+})
+
+// 批次6A 返修：思考段计时的接收锚换算（只写不跑，禁止本轮测试）
+describe('批次6A 返修：reasoningElapsedMs 的接收锚换算', () => {
+  const part = (overrides: Partial<ReasoningPart>): ReasoningPart => ({
+    kind: 'reasoning',
+    seg: 0,
+    text: '想',
+    streaming: true,
+    ...overrides
+  })
+
+  it('无起点 ⇒ null；endedAt 后静止 = 服务端两端差值（不受本地钟影响）', () => {
+    expect(reasoningElapsedMs(part({}), 999_999)).toBeNull()
+    expect(reasoningElapsedMs(part({ startedAt: 1_000, lastFrameAt: 4_000, endedAt: 6_000 }), 999_999)).toBe(5_000)
+  })
+
+  it('进行中 = 已确认 + 收帧锚后的本地间隔；刷新/离线那段也计入（钟差被锚吸收）', () => {
+    // 帧 atMs=1000..3000 在本地 8000 收到（本地钟比服务端快 5s）
+    const live = part({ startedAt: 1_000, lastFrameAt: 3_000, lastFrameLocalAt: 8_000 })
+    expect(reasoningElapsedMs(live, 8_500)).toBe(2_500)
+    expect(reasoningElapsedMs(live, 8_000 + 3_600_000)).toBe(2_000 + 3_600_000)
+  })
+
+  it('无接收锚的旧段只报服务端已确认时长（不拿本地 now 猜，宁可偏低）', () => {
+    expect(reasoningElapsedMs(part({ startedAt: 1_000, lastFrameAt: 4_000 }), 999_999)).toBe(3_000)
   })
 })

@@ -611,6 +611,30 @@ describe('治理 P0-1 M2：blocked 卡面 reason 按 code 选择', () => {
     // 只升不降：两支都仍是阻断口径（不是 failed/succeeded），且既有两支在上面那例原样通过
     expect(outcomeStatus('blocked')).toBe('blocked')
   })
+
+  // 批次6A 返修（6C 建议，不扩散）：错入口是"走错通道"，不是"越出披露范围"——
+  // 用户原因改准为一句可行动的人话，不带内部码 / 回灌路径 / 「当前页面 / 披露范围」机器话术。
+  it('TOOL_KIND_MISMATCH ⇒ 人话「这一步没有执行」，不冒充披露范围拦截', () => {
+    const mismatch = makeMessage()
+    applyFrameToParts(mismatch, {
+      type: 'tool_result',
+      toolCallId: 'k6',
+      name: 'probe.tool',
+      kind: 'FRONTEND',
+      ok: false,
+      executed: false,
+      status: 'BLOCKED',
+      outcome: 'blocked',
+      code: 'TOOL_KIND_MISMATCH'
+    })
+    const part = toolPart(mismatch, 'k6')
+    expect(part.status).toBe('blocked')
+    expect(part.reason).toContain('这一步没有执行')
+    expect(part.reason).not.toContain('披露范围')
+    expect(part.reason).not.toContain('当前页面')
+    expect(part.reason).not.toContain('/api/ai/frontend-tool-result')
+    expect(part.reason).not.toContain('TOOL_KIND_MISMATCH')
+  })
 })
 
 describe('契约增量：SHEET_DISABLED 历史终态（治理批）', () => {

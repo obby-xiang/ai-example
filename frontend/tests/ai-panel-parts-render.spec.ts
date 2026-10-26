@@ -15,6 +15,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
+import { applyLocale } from '@/locales'
+import zhCN from '@/locales/zh-CN.json'
+import enUS from '@/locales/en-US.json'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 
 const api = vi.hoisted(() => ({
@@ -6481,5 +6484,168 @@ describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）'
       toolCallId: 'pub3', name: 'start_publish', decision: 'rejected', approved: false, status: 'REJECTED'
     } as never)
     expect(store.gateAckOf('pub3')).toBe(false)
+  })
+})
+
+// ── 批次6A：N8 陈旧卡 / N9 诊断分层 / N12 空态口径 / AR-14 复制页签 / log 无障碍 ──────────
+
+describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，见施工报告）', () => {
+  it('N12：空态同时写清浏览器镜像 / Redis 24h / DB 无 TTL，且不再声称关闭页签即结束', async () => {
+    const store = useAiStore()
+    store.messages = []
+    store.historyLoaded = true
+    api.history.mockResolvedValue({ sessionId: 's-6a', count: 0, messages: [] })
+    const wrapper = await mountPanel([])
+
+    const notice = wrapper.find('[data-testid="storage-notice"]')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('浏览器镜像')
+    expect(notice.text()).toContain('24 小时')
+    expect(notice.text()).toContain('数据库')
+    expect(notice.text()).toContain('没有自动过期')
+    expect(wrapper.text()).not.toContain('关闭页签即结束')
+
+    applyLocale('en-US')
+    await wrapper.vm.$nextTick()
+    const enNotice = wrapper.find('[data-testid="storage-notice"]').text()
+    expect(enNotice).toContain('browser mirror')
+    expect(enNotice).toContain('24 hours')
+    expect(enNotice).toContain('database')
+    expect(enNotice).toContain('no automatic expiry')
+    wrapper.unmount()
+  })
+
+  it('N9：skipped 卡首屏是人话，模型向原文只收在「诊断详情」（不占输出位、全卡仅一次）', async () => {
+    const MARKER = 'app.ai.resilience.max-tool-steps'
+    const RAW = `未执行：本轮工具调用步数已达上限（${MARKER} = 25）。请用已经获得的信息给出结论。`
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'sk9', name: 'start_import', kind2: 'BACKEND', status: 'skipped', args: '{}', result: RAW, outcome: 'skipped', requiresAction: false }
+    ])
+    msg.id = 'a-sk9'
+    const wrapper = await mountPanel([msg])
+    await wrapper.find('[data-testid="block-toggle-a-sk9:sk9"]').trigger('click')
+
+    // 首屏只有人话；机器向原文（配置键 / 模型指令）不直接上卡面
+    expect(wrapper.find('[data-testid="tool-skipped-human"]').text()).toContain('这一步没有执行')
+    expect(wrapper.find('[data-testid="tool-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="tool-output-text"]').exists()).toBe(false)
+    // 原文唯一落点 = 折叠的诊断详情（同文不在别处再出现）
+    const diagnostics = wrapper.find('[data-testid="card-diagnostics-sk9"]')
+    expect(diagnostics.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="card-diagnostics-text-sk9"]').text()).toContain(MARKER)
+    expect(wrapper.text().split(MARKER).length - 1).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('N8：陈旧确认卡是只读「已超时」，卡面人话、runId/toolCallId 只进诊断详情', async () => {
+    const msg = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'stale1', name: 'start_export', kind2: 'CONFIRM',
+        status: 'expired', args: '{}', reason: '未知或已过期的 runId/toolCallId', requiresAction: false
+      }
+    ])
+    msg.id = 'a-stale1'
+    const wrapper = await mountPanel([msg])
+
+    // 只读终态：不再是可以再点的待决卡
+    expect(wrapper.find('[data-testid="pending-card-stale1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="hitl-receipt"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="ro-badge-stale1"]').text()).toContain('已超时')
+    // 卡面人话；内部标识不上首屏
+    const reason = wrapper.find('[data-testid="ro-reason-stale1"]')
+    expect(reason.text()).toContain('这轮对话已失效')
+    expect(reason.text()).not.toContain('runId')
+    // 原文收在诊断详情，且仍可追溯（不是丢掉证据）
+    const diagnostic = wrapper.find('[data-testid="ro-diagnostics-stale1"]')
+    expect(diagnostic.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="ro-diagnostics-text-stale1"]').text()).toContain('runId/toolCallId')
+    wrapper.unmount()
+  })
+
+  it('AR-14：复制页签只有一次性「新会话」告知（中英双语键在），无接回原会话入口', async () => {
+    expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('新会话')
+    expect((enUS as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('new conversation')
+    expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.staleConfirmCard).toContain('已失效')
+    expect((enUS as { ai: { notice: Record<string, string> } }).ai.notice.staleConfirmCard).toContain('no longer available')
+
+    const store = useAiStore()
+    store.messages = []
+    store.historyLoaded = true
+    store.noticeCode = 'ai.notice.copiedNewTab'
+    store.noticeArgs = {}
+    store.notice = '已在新页签开始新会话；原页签的对话不受影响。'
+    store.noticeSeverity = 'info'
+    api.history.mockResolvedValue({ sessionId: 's-6a-copy', count: 0, messages: [] })
+    const wrapper = await mountPanel([])
+
+    const bar = wrapper.find('[data-testid="notice-bar"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('已在新页签开始新会话')
+    expect(bar.text()).toContain('原页签的对话不受影响')
+    // AR-14：只告知，不接回原会话（无重挂 / 返回进行中回答入口）
+    expect(wrapper.find('[data-testid="return-active-run"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('批次6A：log 有可访问名；加载中与流式中 aria-busy=true，静止后 false', async () => {
+    const store = useAiStore()
+    store.messages = [buildMessage([{ kind: 'text', seg: 0, text: '静止内容', streaming: false }])]
+    store.historyLoaded = false
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+
+    const log = (): ReturnType<typeof wrapper.find> => wrapper.find('[role="log"]')
+    expect((log().attributes('aria-label') ?? '').trim()).not.toBe('')
+    expect(log().attributes('aria-busy')).toBe('true')
+
+    store.historyLoaded = true
+    await wrapper.vm.$nextTick()
+    expect(log().attributes('aria-busy')).toBe('false')
+
+    store.messages[0]!.streaming = true
+    await wrapper.vm.$nextTick()
+    expect(log().attributes('aria-busy')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('AR-12：历史 reasoningContent 映射为无计时思考段；通道无字段则不出卡（不伪造）', async () => {
+    const store = useAiStore()
+    const noSuspension = {
+      found: false, runId: null, snapshotStatus: null, pendingEntries: [],
+      unresolvedExternal: [], archiveMaxSeq: 0
+    }
+    api.runsCurrent.mockResolvedValue(noSuspension)
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 1,
+      messages: [
+        { type: 'ASSISTANT', text: '历史答案', reasoningContent: '历史里已有的思考正文' }
+      ]
+    })
+    await store.loadHistory()
+
+    const message = store.messages[0] as ChatMessage
+    const reasoningPart = message.parts.find((part) => part.kind === 'reasoning')
+    expect(reasoningPart).toMatchObject({ kind: 'reasoning', text: '历史里已有的思考正文', streaming: false })
+    // 历史已完成轮：不带任何计时字段（无起点 ⇒ 面板不显示耗时、不回算）
+    expect(reasoningPart?.kind === 'reasoning' ? reasoningPart.startedAt : 'unexpected-kind').toBeUndefined()
+    expect(reasoningPart?.kind === 'reasoning' ? reasoningPart.endedAt : 'unexpected-kind').toBeUndefined()
+    expect(message.reasoning).toBe('历史里已有的思考正文')
+
+    const wrapper = await mountPanel(store.messages)
+    expect(wrapper.findAll('[data-testid^="reasoning-toggle-"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid^="reasoning-timer-"]').exists()).toBe(false)
+    wrapper.unmount()
+
+    // 通道没有该键（当前 /history 尚未透出）⇒ 不出思考卡，也不补造
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 1,
+      messages: [{ type: 'ASSISTANT', text: '只有正文' }]
+    })
+    await store.loadHistory()
+    const plain = await mountPanel(store.messages)
+    expect(plain.findAll('[data-testid^="reasoning-toggle-"]')).toHaveLength(0)
+    plain.unmount()
   })
 })

@@ -461,7 +461,7 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("executed", false)
 				.containsEntry("messageId", "tool-call-j");
 		assertThat(skipped.get("result")).asString()
-				.isEqualTo("未执行：上游 fake_w_tool 失败（TASK_FINALIZED），本调用已跳过");
+				.isEqualTo("上一个步骤没有成功，这一步没有执行；AI 会用已有信息继续回答。");
 		// 跳过项零执行：下游工具一次都没被调用
 		assertThat(tools.skippedInvocations.get()).isZero();
 		assertThat(tools.failedInvocations.get()).isEqualTo(1);

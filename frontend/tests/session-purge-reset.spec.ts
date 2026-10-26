@@ -74,7 +74,9 @@ describe('resetSession 消费 purge clientCleanup', () => {
     expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBeNull()
     expect(sessionStorage.getItem('cm.ai.form.draft.call-2')).toBeNull()
     expect(sessionStorage.getItem(OTHER_MIRROR)).toBe('{"messages":["keep"]}')
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-other')).toBe('{"name":"keep"}')
+    // 批次6B（N10）：换会话按 draft 前缀 + 在场白名单清孤儿键 —— call-other 不在场，一样清掉；
+    // 非 draft 键（业务键、别的会话镜像）照旧不动。
+    expect(sessionStorage.getItem('cm.ai.form.draft.call-other')).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
     expect(sessionStorage.getItem('ai-session-id')).toBe(nextId)
     expect(store.noticeCode).toBeNull()
@@ -115,7 +117,7 @@ describe('resetSession 消费 purge clientCleanup', () => {
     expect(store.noticeCode).toBe('ai.notice.sessionPurgeIncomplete')
   })
 
-  it('响应缺 clientCleanup 时只清该会话镜像（旧后端兼容），不动其它键', async () => {
+  it('响应缺 clientCleanup 时只清该会话镜像（旧后端兼容），草稿按换会话口径清孤儿', async () => {
     const store = oldSessionWithArtifacts()
     api.deleteHistory.mockResolvedValue({ complete: true })
 
@@ -123,7 +125,8 @@ describe('resetSession 消费 purge clientCleanup', () => {
 
     expect(sessionStorage.getItem('ai-mirror:' + OLD_SESSION)).toBeNull()
     expect(sessionStorage.getItem(OTHER_MIRROR)).toBe('{"messages":["keep"]}')
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBe('{"name":"old-1"}')
+    // 批次6B（N10）：草稿不再依赖 clientCleanup 枚举 —— 换会话即按前缀 + 在场白名单清
+    expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
     expect(store.noticeCode).toBeNull()
   })

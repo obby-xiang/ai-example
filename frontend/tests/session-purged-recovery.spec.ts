@@ -112,13 +112,14 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
     expect(api.chat.mock.calls[0]![0]).toMatchObject({ sessionId: OLD_SESSION })
   })
 
-  it('不清别的会话/业务键：草稿、业务键、locale、展开态原样保留', async () => {
+  it('不清别的会话/业务键：草稿按换会话口径清孤儿，业务键/locale/展开态原样保留', async () => {
     const store = seedPurgedTab()
     api.chat.mockRejectedValueOnce(purged())
 
     await store.send('再试一次')
 
-    expect(sessionStorage.getItem(DRAFT_KEY)).toBe('{"region":"HB"}')
+    // 批次6B（N10）：换会话按 draft 前缀 + 在场白名单清孤儿键（DRAFT_KEY 不在场）
+    expect(sessionStorage.getItem(DRAFT_KEY)).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
     expect(sessionStorage.getItem(LOCALE_KEY)).toBe('zh-CN')
     expect(sessionStorage.getItem(EXPANDED_KEY)).toBe('1')

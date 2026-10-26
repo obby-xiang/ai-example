@@ -9,6 +9,7 @@ import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
+import com.example.configmgr.ai.tool.ToolResultUserText;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -1278,7 +1279,10 @@ public class SseChatEmitter {
 		frame.put("retryable", outcome.retryable(code));
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
-		frame.put("result", result);
+		// N9：{@code result} 是卡面「输出」块的人读通道 —— 内部码换成用户摘要；
+		// {@code outcome}/{@code code}/{@code retryable} 不动，模型侧信封与台账原文也不动。
+		// markModelView 仍用<b>原文</b>判定模型视图是否被截断，显示摘要不改变机器可读事实。
+		frame.put("result", ToolResultUserText.forUser(code, result));
 		if (resultView != null) {
 			frame.put("resultView", resultView.toMap());
 		}
@@ -1361,7 +1365,8 @@ public class SseChatEmitter {
 		frame.put("retryable", outcome.retryable(code));
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
-		frame.put("result", result);
+		// 与 tool_result 同口径：内部码换用户摘要（回灌成功/取消的原文不受影响）。
+		frame.put("result", ToolResultUserText.forUser(code, result));
 		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}

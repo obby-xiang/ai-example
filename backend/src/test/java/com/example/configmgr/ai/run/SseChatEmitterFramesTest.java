@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.conformance.FrameWire;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -140,6 +141,48 @@ class SseChatEmitterFramesTest {
         assertThat(archived.get(0)).containsEntry("messageId", "tool-call-7")
                 .containsEntry("status", PendingToolCall.EXECUTED);
         assertThat(archived.get(1)).containsEntry("messageId", "tool-call-8");
+    }
+
+    /**
+     * N9（2026-10-26 批次 6C）：工具卡「输出」块只说人话。
+     *
+     * <p>{@code result} 是卡面的人读通道，不得出现 {@code app.ai.*} 配置键、内部接口路径
+     * 或"请直接…"这类说给模型的指令；{@code outcome}/{@code code} 仍是机器可读真值。
+     */
+    @Test
+    void toolResultFrameShowsUserSummaryForInternalCodes() {
+        PendingToolCall skipped = pending("call-skip");
+        skipped.setStatus(PendingToolCall.SKIPPED);
+        skipped.setOutcome(ToolOutcome.SKIPPED.wire());
+        skipped.setCode(ToolOutcome.CODE_TOOL_STEP_LIMIT);
+
+        PendingToolCall wrongEntry = pending("call-wrong");
+        wrongEntry.setStatus(PendingToolCall.BLOCKED);
+        wrongEntry.setOutcome(ToolOutcome.BLOCKED.wire());
+        wrongEntry.setCode(ToolOutcome.CODE_TOOL_KIND_MISMATCH);
+
+        this.emitter.toolResult(skipped, false, false,
+                "未执行：本轮工具调用步数已达上限（app.ai.resilience.max-tool-steps = 25）。"
+                        + "请用已经获得的信息给出结论。");
+        this.emitter.toolResult(wrongEntry, false, false,
+                "TOOL_KIND_MISMATCH：该调用是前端通道工具（kind=FRONTEND）；"
+                        + "前端结果只能经 /api/ai/frontend-tool-result 回灌。");
+
+        List<Map<String, Object>> frames = archivedFrames();
+        assertThat(frames.get(0)).containsEntry("outcome", ToolOutcome.SKIPPED.wire())
+                .containsEntry("code", ToolOutcome.CODE_TOOL_STEP_LIMIT);
+        assertThat(String.valueOf(frames.get(0).get("result")))
+                .as("用户可见摘要不含配置键与模型指令")
+                .doesNotContain("app.ai.")
+                .doesNotContain("请用已经获得的信息")
+                .contains("这一步没有执行");
+        assertThat(frames.get(1)).containsEntry("outcome", ToolOutcome.BLOCKED.wire())
+                .containsEntry("code", ToolOutcome.CODE_TOOL_KIND_MISMATCH);
+        assertThat(String.valueOf(frames.get(1).get("result")))
+                .as("用户可见摘要不含内部接口路径与 kind")
+                .doesNotContain("/api/ai/")
+                .doesNotContain("kind=FRONTEND")
+                .contains("这一步没有执行");
     }
 
     @Test

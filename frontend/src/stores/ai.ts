@@ -78,9 +78,9 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
-import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
+import { clearFormDraft, loadFormDraft, pruneFormDrafts, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { ValidationIssue } from '@/types/job'
@@ -1127,12 +1127,14 @@ function writeMirror(
       inFlight: extra.inFlight === true,
       runSeq: extra.runSeq ? { ...extra.runSeq } : undefined,
       // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）；
-      // `appliedSeqs` 是内部幂等记账，**不入镜像**（Pick 不含它）
+      // `appliedSeqs` 是内部幂等记账，**不入镜像**（Pick 不含它）；思考段的本地接收锚
+      // `lastFrameLocalAt` 同样是**运行时锚**，写出时剔除（AR-12：不为计时新增持久化字段），
+      // 读回时由镜像的 `savedAt` 重新播种（仍是本地钟，见 `seedReasoningLocalAnchors`）。
       messages: messages.map((message) => ({
         id: message.id,
         role: message.role,
         content: message.content,
-        parts: message.parts,
+        parts: stripReasoningLocalAnchors(message.parts),
         reasoning: message.reasoning,
         toolRuns: message.toolRuns,
         pendingCall: message.pendingCall,
@@ -1171,6 +1173,41 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     toolRuns: message.toolRuns.map((run) => ({ ...run })),
     pendingCall: message.pendingCall ? { ...message.pendingCall } : null,
     appliedSeqs: []
+  }
+}
+
+/**
+ * 批次6A 返修：镜像写出时剔除思考段的**本地接收锚**（AR-12：不为计时新增持久化字段）。
+ * 锚只在运行时有效；刷新读回时由 `seedReasoningLocalAnchors` 用镜像 `savedAt` 重播。
+ */
+function stripReasoningLocalAnchors(parts: MessagePart[]): MessagePart[] {
+  return parts.map((part) => {
+    if (part.kind !== 'reasoning' || part.lastFrameLocalAt === undefined) {
+      return part
+    }
+    const rest = { ...part }
+    delete (rest as { lastFrameLocalAt?: number }).lastFrameLocalAt
+    return rest as MessagePart
+  })
+}
+
+/**
+ * 批次6A 返修：镜像读回时为思考段重播本地接收锚 = 镜像写入时刻（`savedAt`，本地钟）。
+ *
+ * <p>为什么用 `savedAt`：它是"最后一帧已包含在这份镜像里"的本地收帧时刻（镜像写盘由帧事件
+ * 节流触发），与段的 `lastFrameAt`（服务端钟）成对，正好构成接收锚 —— 刷新/离线的那段
+ * 因此计入真实已用时长，且不落任何新持久化字段。已有的运行时锚（同一次页面会话）不覆盖。
+ */
+function seedReasoningLocalAnchors(messages: ChatMessage[], savedAtMs: unknown): void {
+  if (typeof savedAtMs !== 'number' || !Number.isFinite(savedAtMs)) {
+    return
+  }
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.kind === 'reasoning' && part.lastFrameAt !== undefined && part.lastFrameLocalAt === undefined) {
+        part.lastFrameLocalAt = savedAtMs
+      }
+    }
   }
 }
 
@@ -1468,6 +1505,7 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.decisionSubmitting': 'warning',
   'ai.notice.decisionIdempotent': 'warning',
   'ai.notice.ackRequired': 'warning',
+  'ai.notice.staleConfirmCard': 'warning',
   'ai.notice.sheetLargePlan': 'warning',
   'ai.notice.formSubmittedElsewhere': 'warning',
   'ai.notice.formResultTooLarge': 'warning',
@@ -1480,7 +1518,20 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.noPendingDecision': 'warning',
   'ai.notice.toolTerminal': 'warning',
   'ai.notice.toolAlreadySubmitted': 'warning',
-  'ai.notice.noUiUndo': 'warning'
+  'ai.notice.noUiUndo': 'warning',
+  // 复制页签告知是**中性事实**（不是错误/降级）：级别必须自带，不能继承上一轮 error。
+  'ai.notice.copiedNewTab': 'info'
+}
+
+/** 陈旧确认卡：码 → 人话 key。只收"后端已无该条目"的码（见 {@link GateStaleCode}）。 */
+const STALE_GATE_NOTICE: Readonly<Partial<Record<GateStaleCode, string>>> = {
+  UNKNOWN_TOOL_CALL: 'ai.notice.staleConfirmCard',
+  UNKNOWN_RUN: 'ai.notice.staleConfirmCard'
+}
+
+/** 码在陈旧表里 ⇒ 返回人话 key；否则 null（仍按可重试失败处理）。 */
+function staleGateNoticeKey(code: string): string | null {
+  return STALE_GATE_NOTICE[code as GateStaleCode] ?? null
 }
 
 function noticeSeverityOf(code: string): NoticeSeverity {
@@ -1532,12 +1583,13 @@ function clearNotice(sink: NoticeSink): void {
  *
  * <p>只删两处：<b>该会话</b>的镜像键 `ai-mirror:<sid>`（响应值必须与期望键一致，否则回落期望键，
  * 防止服务端字段异常删到别的键）与<b>枚举到的</b> `draftToolCallIds` 对应草稿键（由
- * `clearFormDraft` 固定拼 `cm.ai.form.draft.<id>`）。<b>严禁</b> `sessionStorage.clear()` 或前缀
- * 通配：同一页签可能已换到新会话，业务状态也在同一 sessionStorage 里。整份清空只有复制页签
- * 确认那一条路径（{@link clearDuplicatedTabStorage}），与"删旧会话残留"不是同一件事。
+ * `clearFormDraft` 固定拼 `cm.ai.form.draft.<id>`）。本函数**不做**前缀扫描、更不
+ * `sessionStorage.clear()`：同一页签可能已换到新会话，业务状态也在同一 sessionStorage 里。
+ * 整份清空只有复制页签确认那一条路径（{@link clearDuplicatedTabStorage}）；换会话留下的孤儿
+ * 草稿键由 {@link useAiStore.pruneOrphanFormDrafts} 按前缀 + 在场白名单清（同样不是 clear）。
  *
  * <p>响应缺字段（旧后端/旧版本）时仍清该会话镜像；草稿只在有 id 时清（当前活动表单已由
- * `adoptFreshSession` 的 `dropActiveForm` 清掉）。
+ * `adoptFreshSession` 的 `dropActiveForm` 清掉，孤儿键也已由同处的 prune 收口）。
  */
 function cleanupSessionLocalArtifacts(sessionId: string, payload: SessionPurgeResponse | null): void {
   const expectedMirror = MIRROR_PREFIX + sessionId
@@ -2277,6 +2329,10 @@ export const useAiStore = defineStore('ai', {
           // 读取侧逐段归一。parts 是数组须逐段 map；**不收进** sanitizeMirrorResidues（防职责扩大）。
           parts: message.parts.map((part) => ('streaming' in part && part.streaming ? { ...part, streaming: false } : part))
         }))
+        // 批次6A 返修：思考段计时用**帧接收锚**（服务器 lastFrameAt ↔ 本地收帧时刻）。
+        // 镜像不持久化该本地锚（AR-12），读回时用镜像写入时刻 `savedAt` 重播 —— 仍是本地钟，
+        // 与 lastFrameAt 成对，刷新/离线的那段计入真实已用时长。
+        seedReasoningLocalAnchors(this.messages, mirror.savedAt)
         this.activeRunId = mirror.lastRunId ?? null
         // 批G · G4：帧序号随镜像回来（增量续收的锚点）；刷新后本轮之前没有更新的序号，直接接管
         this.runSeq = { ...mirrorRunSeq }
@@ -2401,14 +2457,24 @@ export const useAiStore = defineStore('ai', {
         const calls = item.toolCalls ?? []
         const blankText = (item.text ?? '').trim() === ''
         const hasTextPart = !blankText || calls.length === 0
+        // 批次6A 返修 / AR-12：历史 assistant 自带的思考正文（记忆 metadata.reasoningContent，
+        // 通道有该键才展示）→ 一条 `streaming=false` 的思考段。**不带任何计时字段**：历史已完成
+        // 轮不显示耗时、不回算；通道缺键则不出思考卡（不伪造、不新写持久化）。
+        const reasoningText = typeof item.reasoningContent === 'string' ? item.reasoningContent : ''
+        const hasReasoningPart = reasoningText.trim() !== ''
+        const textSeg = hasReasoningPart ? 1 : 0
+        const toolSegBase = textSeg + (hasTextPart ? 1 : 0)
         const hasTextFrameTruncation = item.noticeCode !== undefined
           || item.originalChars !== undefined || item.returnedChars !== undefined
           || item.strategy !== undefined || item.truncatedReason !== undefined
         const parts: MessagePart[] = [
+          ...(hasReasoningPart
+            ? [{ kind: 'reasoning', seg: 0, text: reasoningText, streaming: false } as MessagePart]
+            : []),
           ...(hasTextPart
             ? [{
               kind: 'text',
-              seg: 0,
+              seg: textSeg,
               text: item.text ?? '',
               streaming: false,
               // 裸 truncated 是消息级长度截断；有段级元数据时则保留旧帧的段级截断标记。
@@ -2439,7 +2505,7 @@ export const useAiStore = defineStore('ai', {
             }
             const part: ToolPart = {
               kind: 'tool',
-              seg: hasTextPart ? toolIndex + 1 : toolIndex,
+              seg: toolSegBase + toolIndex,
               toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
               name,
               kind2: kind === 'CONFIRM' || kind === 'FRONTEND' || kind === 'BACKEND' ? kind : 'UNKNOWN',
@@ -2589,7 +2655,10 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         const calls = item.toolCalls ?? []
-        if (calls.length === 0 && (item.text ?? '').trim().length === 0) {
+        // 批次6A 返修：只带思考正文的 assistant 不是"空白条目"（历史思考要能展示），不得被丢弃。
+        const blankReasoning = typeof item.reasoningContent !== 'string'
+          || item.reasoningContent.trim().length === 0
+        if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning) {
           flushGroup() // drop 规则：空白 ASSISTANT 丢弃且断窗
           continue
         }
@@ -4526,6 +4595,30 @@ export const useAiStore = defineStore('ai', {
           this.armGateSync(toolCallId)
           return
         }
+        // 批次6B（N8）：后端明确"条目已不存在/已过期" ⇒ 这不是可重试失败。
+        // 旧口径把段改回 pending + 原样打印 message（含 runId/toolCallId，且再点还是同一句）。
+        // 现在落只读终态（expired），通知只给人话 key，不携带任何内部 ID。
+        const staleKey = error instanceof ApiError ? staleGateNoticeKey(error.code) : null
+        if (staleKey !== null) {
+          this.clearGateSubmission(toolCallId)
+          this.clearGateAck(toolCallId)
+          if (host) {
+            this.upsertToolPart(host, {
+              toolCallId,
+              name,
+              kind2: kind,
+              status: 'expired',
+              decision: undefined,
+              decidedAt: undefined,
+              requiresAction: false
+            })
+            deriveProjections(host)
+          }
+          // 这张卡不再等人 ⇒ 没有别的待决卡就把挂起态收口（输入区不被一张死卡锁住）
+          this.clearSuspendedIfNoOtherConfirms(toolCallId)
+          setNotice(this, staleKey, {}, 'warning')
+          return
+        }
         // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现；
         // 决策元数据一并清回缺省（未形成有效决策，防回执卡误显）。撤在途表 ⇒ 允许重试。
         this.clearGateSubmission(toolCallId)
@@ -4860,6 +4953,32 @@ export const useAiStore = defineStore('ai', {
       }
       this.activeForm = null
       this.clearQueuedForms()
+    },
+
+    /**
+     * 批次6B（N10）：清**孤儿**草稿键 —— 前缀扫描 + 在场白名单，绝不整份 clear。
+     *
+     * <p>"在场" = 活动表单 / 排队表单 / 仍 `requiresAction` 的工具段（确认门、前端卡、待填表单）。
+     * 终态卡与上一会话留下的 `cm.ai.form.draft.<toolCallId>` 都不在场 ⇒ 删除。换会话时
+     * `adoptFreshSession` 先收口活动/排队表单，故白名单为空、全部清掉；接手让渡会话后由
+     * `takeOverSession` 在历史载入后调用，保留新会话仍在场的那几张。
+     */
+    pruneOrphanFormDrafts(): void {
+      const present = new Set<string>()
+      if (this.activeForm) {
+        present.add(this.activeForm.toolCallId)
+      }
+      for (const entry of this.queuedForms) {
+        present.add(entry.toolCallId)
+      }
+      for (const message of this.messages) {
+        for (const part of message.parts) {
+          if (part.kind === 'tool' && part.requiresAction) {
+            present.add(part.toolCallId)
+          }
+        }
+      }
+      pruneFormDrafts(present)
     },
 
     /**
@@ -6112,6 +6231,11 @@ export const useAiStore = defineStore('ai', {
       this.recoveryGap = null
       this.busyRun = null
       this.restoringRecovery = false
+      // 批次6B（N7）：工作区 chip / ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
+      // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
+      this.contextSync = null
+      this.lastUiEventResult = null
+      this.lastRoundOutcome = 'ok'
       this.dropActiveForm()
       // B12：预览属于旧会话 —— 计划与预览色一起丢弃（"新建对话"不是换个盒子继续改这张表）
       this.dropSheetPreview('session')
@@ -6136,6 +6260,9 @@ export const useAiStore = defineStore('ai', {
       // 批次3：压缩/准备中阶段是内存态，跨会话不带走
       this.resetCompactionProgress()
       this.clearPreparingRun()
+      // 批次6B（N10）：换会话 = 旧草稿全部失去引用 ⇒ 按 draft 前缀清孤儿键
+      // （活动/排队表单已在上面的 dropActiveForm 收口；禁止整份 sessionStorage.clear()）。
+      this.pruneOrphanFormDrafts()
       this.historyLoaded = true
       return nextId
     },
@@ -6149,7 +6276,8 @@ export const useAiStore = defineStore('ai', {
      *   一个 microtask，既有挂载时序一格不动；
      * - **复制页签**（锁被原页签持有）⇒ 对本页签整份 `sessionStorage` 清**一次**（继承的会话镜像、
      *   未提交表单草稿、业务页签键都不带走；`localStorage` 不动），随后 `adoptFreshSession()` 起
-     *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；让渡监听随之装上
+     *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；给一条一次性
+     *   `ai.notice.copiedNewTab` 告知（AR-14：只告知、不做接回入口）；让渡监听随之装上
      *   （原页签关闭后由 `onOwnershipMessage` 决定是否接手）；
      * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
      *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
@@ -6199,6 +6327,9 @@ export const useAiStore = defineStore('ai', {
           // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
           clearDuplicatedTabStorage()
           this.adoptFreshSession()
+          // 批次6B / AR-14：只做**一次性告知**（这是新会话、原页签不受影响），
+          // 不提供接回原会话的入口，也不在这里读原会话历史。
+          setNotice(this, 'ai.notice.copiedNewTab')
           rotatePageId()
           await this.claimSessionOwnership(this.sessionId)
         }
@@ -6333,7 +6464,13 @@ export const useAiStore = defineStore('ai', {
       this.tabOwnership = 'owner'
       ownedSessionId = sessionId
       postOwnership('claim', sessionId)
+      // 批次6B（N7）：接手的是**另一个会话**，上一身份的 chip / ui_event 回执 / 轮结局不带走。
+      this.contextSync = null
+      this.lastUiEventResult = null
+      this.lastRoundOutcome = 'ok'
       await this.loadHistory()
+      // 批次6B（N10）：历史载入后再清孤儿草稿 —— 此时"在场"（仍待动作的表单卡）才是最终集合。
+      this.pruneOrphanFormDrafts()
     },
 
     /**

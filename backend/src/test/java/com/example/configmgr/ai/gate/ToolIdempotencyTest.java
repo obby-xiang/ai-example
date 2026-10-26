@@ -188,7 +188,8 @@ class ToolIdempotencyTest {
 			.containsEntry("outcome", ToolOutcome.BLOCKED.wire())
 			.containsEntry("code", ToolOutcome.CODE_ALREADY_CLAIMED)
 			.containsEntry("reused", true);
-		assertThat(String.valueOf(frame.get("result"))).contains("该操作已由实例 instance-other 认领执行");
+		assertThat(String.valueOf(frame.get("result")))
+			.isEqualTo("这一步已由其他执行实例接管，本次没有重复执行。");
 
 		PendingToolCall pending = this.store.pending(RUN_ID, CALL_ID);
 		assertThat(pending.getCode()).isEqualTo(ToolOutcome.CODE_ALREADY_CLAIMED);

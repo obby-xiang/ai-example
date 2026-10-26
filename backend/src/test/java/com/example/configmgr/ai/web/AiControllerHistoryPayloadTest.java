@@ -4,6 +4,8 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.history.AiChatHistoryService;
+import com.example.configmgr.ai.history.AiChatMessageRepository;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.resultview.ListTasksResultViewProvider;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -26,10 +28,15 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.PlatformTransactionManager;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -48,7 +55,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <li>ASSISTANT 条目带 {@code toolCallStates}，逐 {@code toolCallId} 各读其态（一轮多工具、状态各异）；</li>
  * <li>{@code kind} 随同通道透出；</li>
  * <li>旧载荷（metadata 无该键）⇒ 后端不产 {@code toolCallStates} 字段；</li>
- * <li>既有五字段（type/text/toolCalls/toolResponses/timestamp）逐字未变。</li>
+ * <li>既有五字段（type/text/toolCalls/toolResponses/timestamp）逐字未变；</li>
+ * <li>AR-12：assistant 已有 {@code metadata.reasoningContent} 以 additive 键透出，且不产计时字段；
+ * synthetic 条目（压缩摘要/收尾）不透出该键与任何内部 metadata。</li>
  * </ol>
  */
 class AiControllerHistoryPayloadTest {
@@ -123,6 +132,78 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
 			.andExpect(jsonPath("$.data.messages[1].synthetic").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[1].text").value("真的问题"));
+	}
+
+	/**
+	 * AR-12（只写不跑）：历史 assistant 已有的 {@code metadata.reasoningContent} 原样透出；
+	 * 只读展示，不透出计时（即使 metadata 里恰好有 {@code startedAt/endedAt} 也不下发）。
+	 */
+	@Test
+	void assistantReasoningContentIsAdditiveWithoutTimingFields() throws Exception {
+		AssistantMessage assistant = AssistantMessage.builder()
+			.content("答复正文")
+			.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "先看任务再决定",
+					"startedAt", 1_000L, "endedAt", 2_000L))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(assistant));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].reasoningContent").value("先看任务再决定"))
+			.andExpect(jsonPath("$.data.messages[0].startedAt").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].endedAt").doesNotExist());
+	}
+
+	/**
+	 * AR-12 synthetic 守卫（只写不跑）：压缩摘要/收尾提示是系统提示，不是助手答复 ——
+	 * 即使其 metadata 带 {@code reasoningContent}，也不得借本字段透出；其他内部 metadata
+	 * （如 {@code compactedFrom}）同样不进入载荷。
+	 */
+	@Test
+	void syntheticEntryDoesNotExposeReasoningOrInternalMetadata() throws Exception {
+		AssistantMessage synthetic = AssistantMessage.builder()
+			.content(SyntheticMessages.SUMMARY_PLACEHOLDER)
+			.properties(Map.of(SyntheticMessages.COMPACTED_FROM, 42,
+					ResilientChatService.REASONING_METADATA_KEY, "压缩过程的内部思考"))
+			.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(synthetic));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].synthetic").value(true))
+			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
+			.andExpect(jsonPath("$.data.messages[0].reasoningContent").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].compactedFrom").doesNotExist());
+	}
+
+	/**
+	 * AR-12 完整历史通道（只写不跑）：{@code ai_chat_message.metadata_json} 里已有的
+	 * {@code reasoningContent} 经既有 {@code AiChatHistoryService#toMessage} 还原后，
+	 * 由 {@code toHistoryItem} 原样透出；仍不产计时字段。**不新增表/列/持久化**。
+	 */
+	@Test
+	void fullHistoryExposesPersistedReasoningContentWithoutTimingFields() throws Exception {
+		AiChatHistoryService real = new AiChatHistoryService(mock(AiChatMessageRepository.class),
+				new ObjectMapper(), mock(PlatformTransactionManager.class));
+		AiChatHistoryService.MessageView view = new AiChatHistoryService.MessageView(1L, "s-1", "r-1", 1L,
+				"m-1", "ASSISTANT", "答复正文", null, null,
+				"{\"reasoningContent\":\"历史思考\",\"startedAt\":1000,\"endedAt\":2000}", false,
+				LocalDateTime.now());
+
+		AiChatHistoryService service = mock(AiChatHistoryService.class);
+		when(service.pageBefore(eq("s-1"), isNull(), anyInt()))
+			.thenReturn(new AiChatHistoryService.ChatPage(List.of(view), false, null));
+		when(service.toMessage(view)).thenReturn(real.toMessage(view));
+
+		AiController local = controller(this.availability);
+		ReflectionTestUtils.setField(local, "aiChatHistoryService", service);
+		MockMvc mvc = MockMvcBuilders.standaloneSetup(local).build();
+
+		mvc.perform(get("/api/ai/history/s-1/messages"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].reasoningContent").value("历史思考"))
+			.andExpect(jsonPath("$.data.messages[0].startedAt").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].endedAt").doesNotExist());
 	}
 
 	/**

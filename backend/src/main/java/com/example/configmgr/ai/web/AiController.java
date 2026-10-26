@@ -36,6 +36,7 @@ import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
+import com.example.configmgr.ai.tool.ToolResultUserText;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.AiStateUnavailableException;
@@ -1695,13 +1696,28 @@ public class AiController {
 	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与写侧同一份</b>，不许各写一套），
 	 * 命中即加 additive 键 {@code synthetic=true}：前端据此按系统消息呈现，
 	 * <b>摘要不冒充用户</b>、不显示内部配置键；正文与角色字段一律原样（不改写、不改模型记忆）。
+	 *
+	 * <p><b>AR-12（只读展示）</b> —— assistant 条目已有的 {@code metadata.reasoningContent}
+	 * 以 additive 可选键 {@code reasoningContent} 原样透出（记忆窗口与完整历史两个通道同源）；
+	 * <b>不新增表/列/持久化</b>，也不透出 {@code startedAt}/{@code endedAt} 等计时。
+	 * synthetic 条目一律跳过本键：那是系统提示，不能借"思考正文"把内部元数据带上用户面。
 	 */
 	private Map<String, Object> toHistoryItem(Message message) {
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("type", message.getMessageType().name());
 		item.put("text", message.getText());
-		if (SyntheticMessages.isSynthetic(message)) {
+		boolean synthetic = SyntheticMessages.isSynthetic(message);
+		if (synthetic) {
 			item.put(SyntheticMessages.DISPLAY_KEY, true);
+		}
+		// AR-12（只读展示）：历史 assistant 已有的思考正文只从 metadata.reasoningContent 原样透出，
+		// 不新增表/列/持久化，也不透出 startedAt/endedAt 等计时（历史已完成轮不显示耗时、不回算）。
+		// synthetic 压缩/收尾条目一律跳过：那是系统提示，不是助手答复，不能借本字段带出内部键。
+		if (!synthetic && message instanceof AssistantMessage reasoningAssistant) {
+			Object reasoning = reasoningAssistant.getMetadata().get(ResilientChatService.REASONING_METADATA_KEY);
+			if (reasoning instanceof String reasoningText && !reasoningText.isBlank()) {
+				item.put(ResilientChatService.REASONING_METADATA_KEY, reasoningText);
+			}
 		}
 		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
 			item.put("toolCalls", assistant.getToolCalls());
@@ -1731,10 +1747,14 @@ public class AiController {
 	}
 
 	/**
-	 * 历史通道的信封解包（P0-1）：模型记忆里 {@code role:tool} 继续带信封 JSON（续跑与首轮同形），
-	 * 但 {@code /history} 是<b>回显给人/前端</b>的通道 —— 前端按 {@code responseData} 渲染工具结果原文，
-	 * 直接透传信封会让卡片里出现一整段 {@code {"ok":...}}。因此这里只暴露 {@code message} 字段原文；
-	 * 旧数据（不是信封）原样透传，前端历史形态不变。
+	 * 历史通道的工具结果（P0-1 信封解包 + N9 用户面摘要）。
+	 *
+	 * <p>模型记忆里 {@code role:tool} 继续带信封 JSON（续跑与首轮同形），但 {@code /history}
+	 * 是<b>回显给人/前端</b>的通道 —— 前端按 {@code responseData} 渲染工具结果原文，
+	 * 直接透传信封会让卡片里出现一整段 {@code {"ok":...}}。因此先剥壳取 {@code message}，
+	 * 再按 {@code code} 换成用户摘要（预算/步数/上游失败/资源锁/错入口/关闸/越 scope/超时/
+	 * 他实例认领）；{@code outcome}/{@code code} 仍由 {@code toolCallStates} 原样回放。
+	 * 旧数据（不是信封）原样透传；模型侧信封原文不受影响（记忆与台账里仍是可排障的文本）。
 	 */
 	private List<Map<String, Object>> historyToolResponses(ToolResponseMessage message) {
 		List<Map<String, Object>> out = new ArrayList<>(message.getResponses().size());
@@ -1742,7 +1762,8 @@ public class AiController {
 			Map<String, Object> item = new LinkedHashMap<>();
 			item.put("id", response.id());
 			item.put("name", response.name());
-			item.put("responseData", historyMessageText(response.responseData()));
+			item.put("responseData", ToolResultUserText.forUser(envelopeCode(response.responseData()),
+					historyMessageText(response.responseData())));
 			// A10 R-15：模型侧视图截断是**持久事实**（信封五字段），历史通道必须原样透出，
 			// 否则刷新后截断角标与 locale hover 消失（帧只活在实时流里）。
 			Map<String, Object> truncation = historyTruncation(response.responseData());
@@ -1756,6 +1777,27 @@ public class AiController {
 			out.add(item);
 		}
 		return out;
+	}
+
+	/** 信封里的机器可读码（旧数据/非信封为 null）；只用于选择用户摘要，不改写原文。 */
+	private String envelopeCode(String responseData) {
+		String json = ToolResultEnvelope.unwrapModelJson(responseData);
+		if (json == null || !json.trim().startsWith("{")) {
+			return null;
+		}
+		try {
+			JsonNode node = this.objectMapper.readTree(json);
+			if (node == null || !node.isObject() || !isToolResultEnvelope(node)) {
+				return null;
+			}
+			JsonNode code = node.get("code");
+			return code == null || code.isNull() ? null : code.asText();
+		}
+		catch (Exception ex) {
+			// 展示增强不得让 /history 500：解析失败按"无码"处理，原文照旧
+			log.debug("历史工具结果信封码解析失败，按无码透传：{}", ex.getMessage());
+			return null;
+		}
 	}
 
 	/**
@@ -2140,20 +2182,30 @@ public class AiController {
 		return body;
 	}
 
+	/**
+	 * N8（2026-10-26 批次 6C）：未知/过期的确认条目。
+	 *
+	 * <p>{@code code} 与 {@code runId}/{@code toolCallId} 仍是结构字段（前端按 {@code code}
+	 * 把卡收敛成失效态，排障按 id 对账）；{@code message} 是用户可见文案，<b>不打印内部 ID</b>，
+	 * 也不复述"runId/toolCallId"这类实现术语。
+	 */
 	private Map<String, Object> unknownToolCall(String runId, String toolCallId) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("code", ErrorCodes.UNKNOWN_TOOL_CALL);
-		body.put("message", "未知或已过期的 runId/toolCallId");
+		body.put("message", localize(ErrorCodes.UNKNOWN_TOOL_CALL,
+				"这轮对话已失效，无法再处理这个操作；请重新提问。"));
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
 		body.put("instanceId", this.runStore.instanceId());
 		return body;
 	}
 
+	/** 重复提交同样是用户可见文案；{@code code}/{@code status}/{@code duplicate} 保持结构不变。 */
 	private Map<String, Object> duplicateToolCall(String runId, String toolCallId, String status) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("code", ErrorCodes.DUPLICATE_TOOL_CALL_ID);
-		body.put("message", "该 toolCallId 已有决策或结果，重复提交被拒绝");
+		body.put("message", localize(ErrorCodes.DUPLICATE_TOOL_CALL_ID,
+				"这个操作已经处理过了，无需重复提交。"));
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
 		body.put("status", status);

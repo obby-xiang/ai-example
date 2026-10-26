@@ -301,6 +301,15 @@ export interface AiHistoryMessage extends MessageTruncationFields {
    * 前端据此把它转成系统级「已压缩」提示（不画成用户气泡，也不展示任何内部配置键）。
    */
   synthetic?: boolean
+  /**
+   * 批次6A 返修 / AR-12：历史 assistant 条目**已有**的思考正文（记忆 metadata 的
+   * `reasoningContent`，由历史通道按需透出）。
+   *
+   * <p>只读展示：前端把它映射成一条 `streaming=false` 的思考段（**不带任何计时字段**），
+   * 既不为补全而新写持久化，也不按当前时刻回算耗时。通道没有本键（当前 `/history` 尚未
+   * 透出）⇒ 不出思考卡，保持"不伪造"。
+   */
+  reasoningContent?: string
 }
 
 /** 会话历史响应（GET /api/ai/history/{sessionId} 的 data）。 */
@@ -492,11 +501,32 @@ export interface TextPart extends MessagePartBase, MessageTruncationFields {
   streaming: boolean
 }
 
-/** 思考段（`delta{kind:'reasoning'}` 的累积分段；L-91 起后端真实产出）。 */
+/**
+ * 思考段（`delta{kind:'reasoning'}` 的累积分段；L-91 起后端真实产出）。
+ *
+ * 批次6A / AR-12：服务端时刻三段（`startedAt` / `endedAt` / `lastFrameAt`）全部取帧的 `atMs`；
+ * 刷新在途时随段入镜像（**只进浏览器镜像，不入历史/后端/记忆**），续收/重连的后续帧继续抬高。
+ * 实时的本地推进用 `lastFrameLocalAt`（收帧那一刻的本地钟）做**接收锚**换算 —— 不拿本地 now
+ * 直接减服务端 atMs（两端钟差会整段偏移）；刷新读回时该本地锚由镜像 `savedAt` 重播，
+ * 离线期间也按这个锚计入。历史载荷没有这些键
+ * ⇒ 面板不显示耗时（`reasoningElapsedMs` 返回 null），不伪造。
+ */
 export interface ReasoningPart extends MessagePartBase, MessageTruncationFields {
   kind: 'reasoning'
   text: string
   streaming: boolean
+  /** 服务端帧时刻：本段第一个思考帧（`message_start{kind:'reasoning'}` 优先）。无 = 无起点。 */
+  startedAt?: number
+  /** 服务端帧时刻：本段封口（`message_end{kind:'reasoning'}` / 换段 / 轮终态）。缺省 = 仍在流式。 */
+  endedAt?: number
+  /** 服务端帧时刻：本段最后一帧。 */
+  lastFrameAt?: number
+  /**
+   * 本地接收锚：收到该帧那一刻的 `Date.now()`（与 `lastFrameAt` 成对，吸收两端钟差）。
+   * **只存在于运行时**：镜像写出时剔除（AR-12 不新增持久化字段），刷新读回时由镜像
+   * `savedAt` 重播；历史通道不产生本键。
+   */
+  lastFrameLocalAt?: number
 }
 
 /**
@@ -774,6 +804,15 @@ export interface PendingToolCall {
    */
   status: 'pending' | 'running' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'succeeded' | 'blocked'
 }
+
+/**
+ * 批次6B（N8）：确认门提交时后端明确表示"条目已不存在/已过期"的码。
+ *
+ * <p>只有这两个码能把卡**落只读终态**：它们证明后端已无该条目（换会话销毁、24h TTL 到期、
+ * bfcache 旧卡等），重试同一张卡永远不会成功。其它 4xx/5xx 仍按"提交失败、可重试"回退，
+ * 不得借本表把临时故障判成死卡。码到这里已由后端定名，前端不得从 `message` 文本反推。
+ */
+export type GateStaleCode = 'UNKNOWN_TOOL_CALL' | 'UNKNOWN_RUN'
 
 /**
  * R-166（口径③）：确认门提交态（同 toolCallId **最多提交一次**）。

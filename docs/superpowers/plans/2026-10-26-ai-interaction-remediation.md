@@ -175,6 +175,8 @@ Expected: 未载入/失败不再产出静默空包，所有新增断言通过。
 - [ ] **Step 3:** 实现错误条 + 重试 + 草稿保留；所有恢复早退统一封口；409 提供手动重挂；通知 severity 不再从上一轮结局推断。镜像 schema 的唯一 owner 是 Task 4，本任务不得改镜像字段。
 - [ ] **Step 4:** 修正复制页签（按 **AR-14**：只补“这是新会话”的一次性告知，**不做**接回原会话入口）、空态保存（按 **AR-01** 必须**同时写清三类载体**——浏览器镜像 / Redis 运行态·记忆 24h 滑动 / 既有完整历史 DB **无 TTL**；**不得**写成“不落库”，并删除与现行实现矛盾的表述）、机器码与草稿孤儿键；chips 与 composer 共用可用性闸；关键错误归错误卡（按 **AR-13**），通知**不新增**全局队列 / 通知中心，只做 severity 自带与归卡。跑定向和 typecheck。
 
+**实现范围与状态（2026-10-26 批次 6；本 Step 仅登记已实现面，其余仍待 Task 3 后续步骤）**：**已实现** = 复制页签一次性告知、空态三载体文案、新会话清场（`contextSync` / `lastUiEventResult` / `lastRoundOutcome` 且 notice 自带 severity）、陈旧卡只读人话、孤儿草稿键按前缀 + 白名单清理（禁 `storage.clear()`）、`N8`/`N9` 用户摘要与诊断 detail 分层（配置键 / 路径 / `runId` / `toolCallId` 默认不上屏）—— 落到工作区、**未入库**。**单点证据（仅下界）** = `frontend/tests/b6b-session-handoff.spec.ts` 陈旧卡 1 方法 + 后端 `SseChatEmitterFramesTest#toolResultFrameShowsUserSummaryForInternalCodes`；**未跑** = 复制页签告知 / 清场 / 孤儿草稿 / `N8` 前端人话映射各面用例、chips 闸、`typecheck` 与前端全量。**文档同步仍归 Task 13 Step 2**。
+
 Expected: 无静默永久“工作中…”，无自动重挂轮询，无新增存储 `clear()`；Task 3 完成后 Task 4 才能改镜像 schema 和错误现场。
 
 ### Task 4: 保存失败现场，提供中性未确认状态与窄恢复入口
@@ -361,6 +363,8 @@ Expected: create_task + navigate_to 的额外汇返被明确测试；不以全�
 - [ ] **Step 3:** 实现段级 timing 和局部秒表；aria-live=off，补 log 可访问名、aria-busy、aria-expanded/controls。
 - [ ] **Step 4（按 AR-12）：** 历史回放**不新增**后端字段 / 不改表 / 不改记忆 schema；历史已完成轮**不显示思考耗时**（不伪造、不按当前时刻回算）；实时 / 续跑 / 重连的计时**纯前端**（`startedAt/endedAt/lastFrameAt` 来自服务端 `atMs`）；历史思考按记忆里既有 `metadata.reasoningContent` 展示（有则展示、无则占位），**不为补全而新写**。
 - [ ] **Step 5:** 跑定向、typecheck 和 i18n 残留检查。
+
+**实现范围与状态（2026-10-26 批次 6）**：本任务 **Step 1 / 3 / 4 已实现**（段级 `startedAt/endedAt/lastFrameAt` + 局部秒表；实时 / 续跑 / 重连有起止；**离线按已收帧还原已用时间**、不伪造；**历史已完成轮不显示时长**（AR-12：不新增后端字段、不按当前时刻回算）；a11y 四项 = `role="log"` 可访问名 / `aria-busy` / `aria-expanded`+`aria-controls` / 计时 `aria-live=off`），落到工作区、**未入库**。**单点证据（仅下界）** = `frontend/tests/ai-reasoning-frame.spec.ts` **实时秒表 1 方法**（**GREEN 前有多次修正**：断言与实现来回调整过若干轮，最终 GREEN 如实登记，不写作"一次通过"）；**未跑** = 离线 / 重连计时、多段各自计时、无起点不显示、历史轮无计时、a11y 四项各面用例，以及 `typecheck`、前端全量 / 构建、i18n 残留检查、主 CI。**文档同步仍归 Task 13 Step 2**。
 
 ### Task 11: 修复确定的渲染生命周期问题并量化性能
 

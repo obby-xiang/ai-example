@@ -237,3 +237,176 @@ describe('L-91 渲染：思考块独立成框、可折叠、不混入正文', ()
     wrapper.unmount()
   })
 })
+
+// ── ④ 批次6A：思考段计时（服务端 atMs）与无障碍 ─────────────────────────────
+
+const T0 = 1_700_000_000_000
+
+describe('批次6A 思考段计时：ReasoningHeader 局部秒表', () => {
+  it('实时秒表从服务端起点走、message_end 的 atMs 落静止；无起点不显示', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(T0)
+      const store = useAiStore()
+      const assistant = store.appendAssistantMessage()
+      store.handleFrame({ type: 'message_start', messageId: 'm-6a', kind: 'reasoning', atMs: T0, seq: 1 })
+      // 每帧的"接收锚"= 该帧到达时的本地钟（与 atMs 同步推进，模拟两端同速的在线流）
+      vi.setSystemTime(T0 + 1_000)
+      store.handleFrame({ type: 'delta', text: '先想', kind: 'reasoning', messageId: 'm-6a', atMs: T0 + 1_000, seq: 2 })
+      vi.setSystemTime(T0 + 2_000)
+      store.handleFrame({ type: 'delta', text: '再想', kind: 'reasoning', messageId: 'm-6a', atMs: T0 + 2_000, seq: 3 })
+
+      const reasoning = assistant.parts.find((part) => part.kind === 'reasoning')
+      expect(reasoning).toMatchObject({ startedAt: T0, lastFrameAt: T0 + 2_000, lastFrameLocalAt: T0 + 2_000 })
+      expect(reasoning?.kind === 'reasoning' ? reasoning.endedAt : 'unexpected-kind').toBeUndefined()
+
+      store.historyLoaded = true
+      vi.setSystemTime(T0 + 2_000)
+      const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+      const wrapper = mount(AiPanel, { global: { stubs } })
+      await wrapper.vm.$nextTick()
+
+      const toggle = wrapper.find('[data-testid^="reasoning-toggle-"]')
+      expect(toggle.exists()).toBe(true)
+      const blockId = toggle.attributes('data-testid')!.replace('reasoning-toggle-', '')
+      const timer = (): ReturnType<typeof wrapper.find> => wrapper.find(`[data-testid="reasoning-timer-${blockId}"]`)
+      expect(timer().exists()).toBe(true)
+      expect(timer().attributes('aria-live')).toBe('off')
+      expect(timer().text()).toContain('思考中')
+      expect(timer().text()).toContain('2 秒')
+      // 折叠控件可访问：aria-expanded + aria-controls 指向正文节点
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      expect(toggle.attributes('aria-controls')).toBe(`reasoning-body-${blockId}`)
+      // blockId 含 `:`（消息命名空间前缀）—— 只能用属性选择器，`#id` 里的冒号会被当伪类
+      expect(wrapper.find(`[id="reasoning-body-${blockId}"]`).exists()).toBe(true)
+
+      // 局部秒表：只在组件内部 1s 一跳推进，面板其余部分不因秒数重渲染
+      vi.advanceTimersByTime(3_000)
+      await wrapper.vm.$nextTick()
+      expect(timer().text()).toContain('思考中')
+      expect(timer().text()).toContain('5 秒')
+
+      // 封口：message_end 的服务端 atMs 成为 endedAt ⇒ 秒表停住（不再跟本地时钟涨）
+      store.handleFrame({ type: 'message_end', messageId: 'm-6a', kind: 'reasoning', atMs: T0 + 5_000, seq: 4 })
+      await wrapper.vm.$nextTick()
+      expect(timer().text()).toContain('已思考')
+      expect(timer().text()).toContain('5 秒')
+      vi.advanceTimersByTime(4_000)
+      await wrapper.vm.$nextTick()
+      expect(timer().text()).toContain('5 秒')
+
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('无起点（历史/旧帧）不显示计时；log 有可访问名、非加载非流式时 aria-busy=false', async () => {
+    const wrapper = await mountPanel([messageWithReasoning('历史已完成思考', '答案')])
+
+    expect(wrapper.find('[data-testid^="reasoning-timer-"]').exists()).toBe(false)
+    const log = wrapper.find('[role="log"]')
+    expect(log.exists()).toBe(true)
+    expect((log.attributes('aria-label') ?? '').trim()).not.toBe('')
+    expect(log.attributes('aria-busy')).toBe('false')
+    wrapper.unmount()
+  })
+
+  it('多段一卡一段：两段思考各有自己的计时（互不合并、互不串味）', async () => {
+    const parts: MessagePart[] = [
+      { kind: 'reasoning', seg: 0, text: '第一段思考', streaming: false, startedAt: 1_000, endedAt: 4_000, lastFrameAt: 4_000 },
+      { kind: 'text', seg: 1, text: '中间回答', streaming: false },
+      { kind: 'reasoning', seg: 2, text: '第二段思考', streaming: false, startedAt: 10_000, endedAt: 12_000, lastFrameAt: 12_000 }
+    ]
+    const message: ChatMessage = {
+      id: 'a-6a-multi',
+      role: 'assistant',
+      content: '中间回答',
+      parts,
+      reasoning: '第一段思考第二段思考',
+      toolRuns: [],
+      pendingCall: null,
+      streaming: false,
+      done: true
+    }
+    const wrapper = await mountPanel([message])
+
+    expect(wrapper.findAll('[data-testid^="reasoning-toggle-"]')).toHaveLength(2)
+    const timers = wrapper.findAll('[data-testid^="reasoning-timer-"]')
+    expect(timers).toHaveLength(2)
+    expect(timers[0]!.text()).toContain('3 秒')
+    expect(timers[1]!.text()).toContain('2 秒')
+    wrapper.unmount()
+  })
+
+  it('刷新在途：按收帧锚换算，离线那一段也计入真实已用时长（不是只算挂载后）', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(T0 + 3_600_000) // 页面关了一小时后才刷新回来
+      const resumed: ChatMessage = {
+        id: 'a-6a-resume',
+        role: 'assistant',
+        content: '',
+        parts: [{
+          kind: 'reasoning',
+          seg: 0,
+          text: '断线前想到一半',
+          streaming: true,
+          startedAt: T0,
+          lastFrameAt: T0 + 2_000,
+          // 收帧锚随镜像回来：最后一帧到达时的本地钟（服务端 2 秒 = 本地 2 秒，钟差已在锚里）
+          lastFrameLocalAt: T0 + 2_000
+        }],
+        reasoning: '断线前想到一半',
+        toolRuns: [],
+        pendingCall: null,
+        streaming: true,
+        done: false
+      }
+      // 刷新回来的同一条助手消息由镜像恢复（这里直挂 store，等价于 mergeMirrorInFlightRound 的产物）
+      const store = useAiStore()
+      store.messages = [resumed]
+      store.historyLoaded = true
+      const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+      const wrapper = mount(AiPanel, { global: { stubs } })
+      await wrapper.vm.$nextTick()
+
+      const timer = () => wrapper.find('[data-testid^="reasoning-timer-"]')
+      // 「等价 now - startedAt」：2 秒确认 + 离线 3598 秒 = 3600 秒（不是只算挂载后的 2 秒）
+      expect(timer().text()).toContain('3600 秒')
+      vi.advanceTimersByTime(3_000)
+      await wrapper.vm.$nextTick()
+      expect(timer().text()).toContain('3603 秒')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('钟差：收帧锚吸收两端偏差 —— 不用 Date.now 直接减服务端 atMs', async () => {
+    vi.useFakeTimers()
+    try {
+      // 本地钟比服务端快 5 秒：帧 atMs=T0 到达时本地已是 T0+5000
+      vi.setSystemTime(T0 + 5_000)
+      const store = useAiStore()
+      store.appendAssistantMessage()
+      store.handleFrame({ type: 'message_start', messageId: 'm-skew', kind: 'reasoning', atMs: T0, seq: 1 })
+      store.handleFrame({ type: 'delta', text: '想', kind: 'reasoning', messageId: 'm-skew', atMs: T0, seq: 2 })
+      store.historyLoaded = true
+      const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+      const wrapper = mount(AiPanel, { global: { stubs } })
+      await wrapper.vm.$nextTick()
+
+      const timer = () => wrapper.find('[data-testid^="reasoning-timer-"]')
+      // 开始时长为 0；若裸减（now - startedAt）会错误显示 5 秒
+      expect(timer().text()).toContain('0 秒')
+      expect(timer().text()).not.toContain('5 秒')
+      vi.advanceTimersByTime(2_000)
+      await wrapper.vm.$nextTick()
+      expect(timer().text()).toContain('2 秒')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

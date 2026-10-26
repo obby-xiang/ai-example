@@ -245,6 +245,27 @@ class AiControllerToolKindEntryTest {
 			.andExpect(jsonPath("$.code").value("UNKNOWN_TOOL_CALL"));
 	}
 
+	/**
+	 * N8（2026-10-26 批次 6C，只写不跑）：未知/过期条目的用户可见文案不打印内部 ID；
+	 * {@code code}/{@code runId}/{@code toolCallId} 仍是结构字段（前端按码把卡收敛成失效态，
+	 * 排障按 id 对账）。
+	 */
+	@Test
+	void unknownToolCallMessageHidesInternalIdsButKeepsStructuredFields() throws Exception {
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(null);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(eq(RUN), eq(CALL), eq(true), any()))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.NOT_FOUND, null, false, null));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(confirmBody(true)))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("UNKNOWN_TOOL_CALL"))
+			.andExpect(jsonPath("$.runId").value(RUN))
+			.andExpect(jsonPath("$.toolCallId").value(CALL))
+			.andExpect(jsonPath("$.message").value("这轮对话已失效，无法再处理这个操作；请重新提问。"));
+	}
+
 	/** 非中文 locale 取 {@code messages_en} 的码级文案（双语补齐的可执行证据）。 */
 	@Test
 	void englishLocaleRendersTheRegisteredMessage() throws Exception {

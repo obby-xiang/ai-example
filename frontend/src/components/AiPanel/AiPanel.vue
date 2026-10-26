@@ -204,6 +204,8 @@
       <div
         ref="msgWrapRef"
         role="log"
+        :aria-label="t('ai.panel.logAria')"
+        :aria-busy="logBusy ? 'true' : 'false'"
         class="flex-1 overflow-y-auto overflow-x-hidden p-3"
         :class="SCROLLBAR_CLASS"
         @scroll.passive="onMsgScroll"
@@ -235,7 +237,14 @@
           {{ t('ai.panel.welcome1') }}<br />
           {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
         </div>
-        <div class="mt-[6px] text-[11.8px] text-[#8b949e]">{{ t('ai.panel.tabOnlyNotice') }}</div>
+        <!-- 批次6A / N12 / AR-01：空态必须如实写清**三类载体**（浏览器镜像 / Redis 运行态与
+             记忆 24h 滑动 / 完整历史 DB 无 TTL），并说明关页签后本轮仍会继续。
+             旧文案「关闭页签即结束」与实现相反，已删除（不得写成“不落库”）。 -->
+        <div class="mt-[6px] text-[11.8px] leading-[1.7] text-[#8b949e]" data-testid="storage-notice">
+          <div>{{ t('ai.panel.storage.mirror') }}</div>
+          <div>{{ t('ai.panel.storage.run') }}</div>
+          <div>{{ t('ai.panel.storage.history') }}</div>
+        </div>
         <!-- 批 E · E2（用户裁决 2026-10-22）：空态快捷 chips 点击**直接发送**（不再回填输入框）。
              写操作靠既有 HITL 确认卡兜底；文案与"每轮建议"共用一份词表（ai.suggestions.*，双语）。 -->
         <div class="mt-[11px] flex flex-wrap gap-[6px]">
@@ -363,26 +372,21 @@
                   v-if="part.kind === 'reasoning' && part.text"
                   class="border border-solid border-[#e3e6ea] rounded-[10px] bg-[#f6f7f9] overflow-hidden mb-3.5"
                 >
-                  <button
-                    type="button"
-                    class="flex items-center gap-[8px] w-full border-0 bg-transparent px-[10px] py-[7px] text-left transition-colors duration-[150ms] hover:bg-white"
-                    :data-testid="'reasoning-toggle-' + block.id"
-                    @click="toggleBlock(block)"
+                  <!-- 批次6A：卡头独立成组件（局部秒表；aria-expanded/controls 与展开体同源）。
+                       多段一卡一段 —— 每个思考段各有自己的卡头与计时，不合并、不互相影响。 -->
+                  <ReasoningHeader
+                    :part="part"
+                    :block-id="block.id"
+                    :expanded="isBlockExpanded(block)"
+                    :truncated-title="truncationTitle(part)"
+                    @toggle="toggleBlock(block)"
+                  />
+                  <div
+                    :id="'reasoning-body-' + block.id"
+                    v-show="isBlockExpanded(block)"
+                    class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]"
+                    :data-testid="'reasoning-body-' + block.id"
                   >
-                    <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#e3e6ea] text-[#8b949e] text-[9px] flex items-center justify-center" aria-hidden="true">⋆</span>
-                    <span class="text-[12.4px] text-[#57606a]">{{ t('ai.panel.thinking') }}</span>
-                    <span class="flex-1 text-[11.5px] text-[#8b949e]">{{ reasoningSummary(part.text, isBlockExpanded(block)) }}</span>
-                    <span
-                      v-if="part.truncated"
-                      class="inline-block h-[7px] w-[7px] rounded-full bg-[#8b949e]"
-                      role="img"
-                      :aria-label="t('ai.panel.truncated')"
-                      :title="truncationTitle(part)"
-                      data-testid="reasoning-truncated-badge"
-                    ></span>
-                    <span :class="[TCHEV_CLASS, isBlockExpanded(block) ? 'is-open' : '']">›</span>
-                  </button>
-                  <div v-show="isBlockExpanded(block)" class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]" :data-testid="'reasoning-body-' + block.id">
                     <!-- S6 批1（demo v7.9 裁决点 21 · 2026-10-16 用户直裁通过）：思考过程展开体改
                          **纯限高内滚**（2A 批裁决 §14.4 字段 / 文本块族：双约束 `min(280px,35vh)`）——
                          CollapsibleText 的「渐隐 + 显示更多」钮退役；卡头折叠机制（.is-open）逐字不动。
@@ -536,12 +540,29 @@
                         </div>
                         <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">{{ t('ai.panel.formUnavailable') }}</div>
                       </template>
-                      <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源） -->
+                      <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源）。
+                           批次6A（N8/N9）：诊断分层命中时本行只放**人话**；机器原文（runId/toolCallId、
+                           内部码、配置键、回灌端点）收进下方「诊断详情」，不再当用户第一眼读到的原因。 -->
                       <div
-                        v-if="!isBlankText(part.reason)"
-                        class="mx-[11px] mt-[9px] rounded-[8px] border border-solid border-[#f0d5d0] bg-[#fdf1ef] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#c0392b] whitespace-pre-wrap break-words"
+                        v-if="readOnlyReasonText(part)"
+                        class="mx-[11px] mt-[9px] rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6] whitespace-pre-wrap break-words"
+                        :class="diagnosticOf(part) === 'staleGate'
+                          ? 'border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]'
+                          : 'border-[#f0d5d0] bg-[#fdf1ef] text-[#c0392b]'"
                         :data-testid="'ro-reason-' + part.toolCallId"
-                      >{{ part.reason }}</div>
+                        :data-diagnostic="diagnosticOf(part) ?? 'none'"
+                      >{{ readOnlyReasonText(part) }}</div>
+                      <details
+                        v-if="diagnosticTextOf(part)"
+                        class="mx-[11px] mt-[6px]"
+                        :data-testid="'ro-diagnostics-' + part.toolCallId"
+                      >
+                        <summary class="cursor-pointer select-none text-[11.2px] text-[#8b949e]">{{ t('ai.card.error.diagnostic.label') }}</summary>
+                        <div
+                          :class="['mt-[3px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-words text-[11.2px] leading-[1.55] text-[#57606a]', SCROLLBAR_CLASS]"
+                          :data-testid="'ro-diagnostics-text-' + part.toolCallId"
+                        >{{ diagnosticTextOf(part) }}</div>
+                      </details>
                     </div>
                     <!-- 卡体分支保留（统一卡头之下）：已决只读态 → ro-body；普通工具 → 折叠展开体。
                          展开体渲染后 0 行 ⇒ 不渲展开体 / 不渲 chevron / 卡头 disabled（v7.10 ajv11）。 -->
@@ -571,7 +592,17 @@
                       <!-- S6 批2 迁移步④（设计稿 §7.1-④）：视图可渲时「输出」区整块让位 —— 同一份真值
                            不在卡面报两次（原文仍是 part.result，模型侧 / 复制路径不受影响）；
                            视图渲不出或段上没有视图 ⇒ 本盒照旧（回退路径不删）。 -->
-                      <div v-if="!isBlankText(part.result) && !outputByView(part)">
+                      <!-- 批次6A（N9）：skipped 的原文在旧帧/旧镜像里仍是模型向（预算、步数上限、配置键）
+                           —— 不占「输出」位，收进下方「诊断详情」；卡面只留一句人话。 -->
+                      <div
+                        v-if="diagnosticOf(part) === 'skipped'"
+                        class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#57606a] bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[9px]"
+                        data-testid="tool-skipped-human"
+                      >
+                        <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.2px] border-[#8b949e] text-[#8b949e] text-[9px]" aria-hidden="true">—</span>
+                        <span class="flex-1 min-w-0 break-words">{{ t('ai.panel.skippedHuman') }}</span>
+                      </div>
+                      <div v-if="!isBlankText(part.result) && !outputByView(part) && !outputSupersededByDiagnostics(part)">
                         <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">{{ t('ai.panel.output') }}</div>
                         <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**，原 CollapsibleText 的渐隐 +
                              「显示更多」钮退役（无展开钮）；截断徽标保留。
@@ -612,10 +643,19 @@
                            S6 批2：明细表的**来源**改为 `part.resultView`（通用渲染器），红底行仍只取首行；
                            无视图的旧段才回退到反解表（回退路径按设计稿 §7.1-⑤ 最后删）。
                            2A 批（裁决 §14.4 回执 / 文本族）：原因行限高改 `min(280px,35vh)`。 -->
-                      <div v-if="!isBlankText(part.reason)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error">
+                      <div v-if="faceReasonText(part)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error" :data-diagnostic="diagnosticOf(part) ?? 'none'">
                         <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
-                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">{{ t('ai.panel.reasonPrefix', { text: reasonText(part) }) }}</span>
+                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">{{ t('ai.panel.reasonPrefix', { text: faceReasonText(part) }) }}</span>
                       </div>
+                      <!-- 批次6A（N8/N9）：机器原文只在「诊断详情」里出现（折叠、限高内滚）；
+                           用户向与诊断分层，卡面首屏不再出现内部码 / 回灌路径 / 轮次标识。 -->
+                      <details v-if="diagnosticTextOf(part)" class="mt-1" :data-testid="'card-diagnostics-' + part.toolCallId">
+                        <summary class="cursor-pointer select-none text-[11.2px] text-[#8b949e]">{{ t('ai.card.error.diagnostic.label') }}</summary>
+                        <div
+                          :class="['mt-[3px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all text-[11.2px] leading-[1.55] text-[#57606a]', SCROLLBAR_CLASS]"
+                          :data-testid="'card-diagnostics-text-' + part.toolCallId"
+                        >{{ diagnosticTextOf(part) }}</div>
+                      </details>
                       <!-- S6 批2（§5.3 / §7.1-③）：视图通道接管明细表 —— 有 `resultView` 时由通用渲染器渲，
                            旧反解表（`conflict-table`）在本分支下**零出现**（不同屏双份报同一份明细 = 违规）。
                            旧表保留为 `v-else-if` 回退：旧镜像 / 旧归档的段没有视图，按 §7.1-⑤ 最后才删。 -->
@@ -1452,7 +1492,7 @@ import {
   resolveBlockExpanded,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, deriveProjections } from '@/utils/parts'
+import { deriveCopyText, deriveProjections, partDiagnosticOf, partDiagnosticText, partResultIsInternal, type PartDiagnostic } from '@/utils/parts'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRenderer.vue'
@@ -1460,6 +1500,7 @@ import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
+import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
 import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
 import type { ToolPreflight } from '@/types/sse'
@@ -1494,6 +1535,17 @@ const stageStartedAtMs = computed(() => (stageMode.value === 'preparing'
 const stageElapsedMs = computed(() => (stageMode.value === 'preparing'
   ? ai.preparingRun?.elapsedMs ?? null
   : ai.compactionElapsedMs))
+
+/**
+ * 批次6A：消息流（`role="log"`）的 `aria-busy` —— 加载与流式两种"还在变"的状态。
+ *
+ * - 历史加载期（骨架屏）：整段内容尚未对账完；
+ * - 任一轮在流式（含刷新在途/续跑）：内容仍在增长。
+ * 读屏据此延后播报，不把半截内容当最终结果念。
+ */
+const logBusy = computed(() => !ai.historyLoaded
+  || ai.loading
+  || ai.messages.some((message) => message.streaming))
 
 /**
  * 批次3 补齐 / AR-10：本轮运行态寿命的**本地时钟**（只推进显示，不参与"何时到期"的定义）。
@@ -3700,6 +3752,57 @@ function reasonText(part: ToolPart): string {
   return conflictRows(part).length > 0 ? reasonHeadline(reason) : reason
 }
 
+// ── 批次6A（N8 / N9）：给人看的话 / 给模型与排障看的话，分层展示 ─────────────
+
+/** 诊断分层的**人话**词条（与 `utils/parts.ts#partDiagnosticOf` 的三分类一一对应）。 */
+const DIAGNOSTIC_HUMAN_KEY: Record<PartDiagnostic, string> = {
+  skipped: 'ai.panel.skippedHuman',
+  staleGate: 'ai.panel.gateExpiredHuman',
+  internal: 'ai.panel.internalHuman'
+}
+
+function diagnosticOf(part: ToolPart): PartDiagnostic | null {
+  return partDiagnosticOf(part)
+}
+
+function diagnosticHumanOf(part: ToolPart): string | null {
+  const kind = diagnosticOf(part)
+  return kind === null ? null : t(DIAGNOSTIC_HUMAN_KEY[kind])
+}
+
+function diagnosticTextOf(part: ToolPart): string | null {
+  return partDiagnosticText(part)
+}
+
+/** 「输出」位让位判据：分层命中的段若 result 自身就是机器向文本，就只留诊断详情（不双显）。 */
+function outputSupersededByDiagnostics(part: ToolPart): boolean {
+  return diagnosticOf(part) !== null && partResultIsInternal(part)
+}
+
+/**
+ * 已决只读卡的原因行文本：分层命中时用**人话**（陈旧卡 = 「这轮对话已失效」；skipped/
+ * internal = 「这一步没有执行 / 没有正常完成」），没有分层时逐字沿用原 reason。
+ */
+function readOnlyReasonText(part: ToolPart): string {
+  const human = diagnosticHumanOf(part)
+  if (human !== null) {
+    return human
+  }
+  return isBlankText(part.reason) ? '' : (part.reason as string)
+}
+
+/** 普通工具卡红色原因行文本：skipped 走独立人话行、staleGate 是只读卡形态，两者都不进本行。 */
+function faceReasonText(part: ToolPart): string {
+  const kind = diagnosticOf(part)
+  if (kind === 'skipped' || kind === 'staleGate') {
+    return ''
+  }
+  if (kind === 'internal') {
+    return t('ai.panel.internalHuman')
+  }
+  return isBlankText(part.reason) ? '' : reasonText(part)
+}
+
 /**
  * 工具展示名（S2 收口）：`tool.<name>.title` 是唯一来源（zh 值与迁移前 `TOOL_LABELS` 逐字一致）。
  * 缺键时回落工具名原文 —— 保证"永远有字"，不渲染 key 片段。
@@ -3779,19 +3882,6 @@ function alertBox(tone: keyof typeof ALERT_TONE): string {
 
 function alertIcon(tone: keyof typeof ALERT_TONE): string {
   return `${ALERT_ICON_BASE} ${ALERT_TONE[tone].ic}`
-}
-
-/**
- * R-165 S2：思考卡摘要（v7 `.rsum` 位）。蓝本写「已用 N 秒 · 点击展开」——本仓 reasoning 段
- * 无时长元数据（帧只带 text），故摘要取**字数 + 折叠动作**，不伪造时长。
- *
- * L-91：思考卡从"永不出现的死位"变成真实渲染面（后端开始产 `delta{kind:'reasoning'}`），
- * 故文案改走词条（`ai.panel.thinkingChars/Expand/Collapse`，zh/en 双份对称）——
- * 不能把一个中文硬编码摘要带进英文界面。
- */
-function reasoningSummary(text: string, expanded: boolean): string {
-  const action = expanded ? t('ai.panel.thinkingCollapse') : t('ai.panel.thinkingExpand')
-  return `${t('ai.panel.thinkingChars', { n: text.length })} · ${action}`
 }
 
 /**

@@ -7,7 +7,8 @@
  * <li><b>永不进模型上下文</b>：草稿只在本地读写，回灌（{@code POST /api/ai/frontend-tool-result}）
  * 只发生在用户点"提交"那一次；</li>
  * <li><b>永不写服务器</b>：没有任何上传/持久化接口；</li>
- * <li>提交 / 取消 / 终态即清（{@link clearFormDraft}），不留残留。</li>
+ * <li>提交 / 取消 / 终态即清（{@link clearFormDraft}），不留残留；换会话再按
+ * {@link pruneFormDrafts} 的前缀 + 在场白名单清孤儿键（绝不整份 clear）。</li>
  * </ul>
  *
  * <p>为什么不用 localStorage：草稿是"这一次填写"的临时态，跨页签/跨天恢复会带来
@@ -84,4 +85,41 @@ export function clearFormDraft(toolCallId: string): void {
   } catch {
     // 同上：清理失败不影响主流程
   }
+}
+
+/**
+ * 批次6B（N10）：按前缀清**孤儿**草稿 —— 只保留 `present` 里的 `toolCallId`。
+ *
+ * <p>为什么需要：`clientCleanup.draftToolCallIds` 只枚举服务端还认识的条目，已决卡 / 换会话后
+ * 不再被引用的草稿键会长期留在 sessionStorage（无人可见，但不该留）。这里以
+ * {@link FORM_DRAFT_PREFIX} 为唯一扫描面，**绝不** `sessionStorage.clear()` ——
+ * 同一页签里还有业务键、镜像键与其它页签状态。
+ *
+ * @param present 在场白名单（活动表单 / 排队表单 / 仍待动作的工具段引用的 toolCallId）
+ * @returns 实际删除的键数（测试与诊断用）
+ */
+export function pruneFormDrafts(present: Iterable<string>): number {
+  const target = storage()
+  if (!target) {
+    return 0
+  }
+  const keep = new Set(present)
+  const doomed: string[] = []
+  try {
+    for (let i = 0; i < target.length; i += 1) {
+      const key = target.key(i)
+      if (!key || !key.startsWith(FORM_DRAFT_PREFIX)) {
+        continue
+      }
+      const toolCallId = key.slice(FORM_DRAFT_PREFIX.length)
+      if (!keep.has(toolCallId)) {
+        doomed.push(key)
+      }
+    }
+    doomed.forEach((key) => target.removeItem(key))
+  } catch {
+    // 隐私模式/配额：清理失败不影响主流程（孤儿键只是卫生问题）
+    return 0
+  }
+  return doomed.length
 }
