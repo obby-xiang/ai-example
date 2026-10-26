@@ -179,7 +179,7 @@ function fileBasename(value: string): string {
   return parts[parts.length - 1] ?? value
 }
 
-/** 解析 args JSON：仅接受对象形态；空对象 / 非 JSON / 历史脏数据 ⇒ 空数组（不渲 raw 文本）。 */
+/** 解析 args JSON：仅接受对象形态；空对象 / 非 JSON / 历史脏数据 ⇒ null（不渲 raw 文本）。 */
 function parseArgObject(args: string | null | undefined): Record<string, unknown> | null {
   if (isBlankText(args)) {
     return null
@@ -196,19 +196,136 @@ function parseArgObject(args: string | null | undefined): Record<string, unknown
   }
 }
 
-/**
- * 工具参数行（普通工具卡折叠区字段表 / 门卡字段表共用）。
- * `maskSensitive` = 门卡口径：键名命中敏感词的值显示定长圆点（v7.10 门卡全键）。
- */
-export function argRows(args: string | null | undefined, maskSensitive = false): FieldRow[] {
-  const parsed = parseArgObject(args)
-  if (parsed === null) {
-    return []
+/* ============================ 批次7B（P0-2）：ToolPart args / 派生值缓存 ============================
+ * 渲染面同一帧会数次向同一个段要「参数行 / 表单定义 / 卡体判据 / 提交摘要 / 一行摘要」。
+ * 旧实现每处都 `JSON.parse(part.args)`（blocks.ts 与 tool-summaries.ts 各一份），长会话里
+ * 同一段在一帧内被重复解析。这里把**解析结果与派生值**按**段对象**存 WeakMap：
+ * - 段被替换/回收 ⇒ 条目随之释放，不引入会话级 Map 的泄漏面；
+ * - 命中前核对 `part.args` 原串（历史存量写点会原地改 args），args 变了即失效；
+ * - `toolArgsOf` 是 blocks.ts / tool-summaries.ts 的唯一解析口，跨模块共用同一份缓存。
+ * 直接传 args 原串的旧调用面（AiPanel 模板）仍走**有界 LRU**，同一帧同样只解析一次。
+ * ================================================================================================ */
+
+/** 段判据：只对真正的工具段走 WeakMap（普通对象参数不会被误当段）。 */
+function isToolPart(value: unknown): value is ToolPart {
+  return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'tool'
+}
+
+interface ParsedArgsEntry {
+  raw: string | null | undefined
+  parsed: Record<string, unknown> | null
+}
+
+/** 段 → 已解析 args（WeakMap；guard = args 原串一致）。 */
+const toolArgsCache = new WeakMap<ToolPart, ParsedArgsEntry>()
+
+/** 原串调用面的有界 LRU：条数与字符预算双上限，避免长会话把大 args 常驻内存。 */
+const RAW_ARGS_CACHE_MAX_ENTRIES = 128
+const RAW_ARGS_CACHE_MAX_CHARS = 256 * 1024
+const rawArgsCache = new Map<string, Record<string, unknown> | null>()
+let rawArgsCacheChars = 0
+
+function rememberRawArgs(raw: string, parsed: Record<string, unknown> | null): void {
+  rawArgsCache.delete(raw)
+  rawArgsCache.set(raw, parsed)
+  rawArgsCacheChars += raw.length
+  while (rawArgsCache.size > RAW_ARGS_CACHE_MAX_ENTRIES || rawArgsCacheChars > RAW_ARGS_CACHE_MAX_CHARS) {
+    const oldest = rawArgsCache.keys().next()
+    if (oldest.done) {
+      break
+    }
+    rawArgsCache.delete(oldest.value)
+    rawArgsCacheChars -= oldest.value.length
   }
+}
+
+function parsedArgsOfRaw(raw: string): Record<string, unknown> | null {
+  if (rawArgsCache.has(raw)) {
+    const cached = rawArgsCache.get(raw) ?? null
+    // LRU：命中移到队尾（Map 保持插入序，队首即最旧）。
+    rawArgsCache.delete(raw)
+    rawArgsCache.set(raw, cached)
+    return cached
+  }
+  const parsed = parseArgObject(raw)
+  rememberRawArgs(raw, parsed)
+  return parsed
+}
+
+/**
+ * 段 → 已解析 args（批次7B 的统一解析口；blocks.ts 的字段表/表单定义/卡体判据与
+ * tool-summaries.ts 的一行摘要共用）。空串 / 非法 JSON / 空对象 / 数组一律 null。
+ *
+ * 复核结论（跨段共享）：同一条 args 原串会命中同一个有界 LRU 条目，因此**不同段可能拿到
+ * 同一个解析对象**。它是只读数据，所有内部消费方（字段表 / 表单定义 / 一行摘要）都只读；
+ * 调用方不得原地修改返回值（否则会污染同 args 的其它段）。
+ */
+export function toolArgsOf(part: ToolPart): Record<string, unknown> | null {
+  const raw = part.args
+  const cached = toolArgsCache.get(part)
+  if (cached !== undefined && cached.raw === raw) {
+    return cached.parsed
+  }
+  const parsed = isBlankText(raw) ? null : parsedArgsOfRaw(raw as string)
+  toolArgsCache.set(part, { raw, parsed })
+  return parsed
+}
+
+/** 统一入口：ToolPart 走 WeakMap；原串走有界 LRU；空值直接 null。 */
+function parsedArgsOf(source: ToolPart | string | null | undefined): Record<string, unknown> | null {
+  if (isToolPart(source)) {
+    return toolArgsOf(source)
+  }
+  if (typeof source !== 'string' || isBlankText(source)) {
+    return null
+  }
+  return parsedArgsOfRaw(source)
+}
+
+interface ArgRowsEntry {
+  raw: string | null | undefined
+  plain: FieldRow[]
+  masked: FieldRow[] | null
+}
+
+const argRowsCache = new WeakMap<ToolPart, ArgRowsEntry>()
+
+function buildArgRows(parsed: Record<string, unknown>, maskSensitive: boolean): FieldRow[] {
   return Object.entries(parsed).map(([key, value]) => ({
     key,
     value: maskSensitive && SENSITIVE_KEY_RE.test(key) ? MASKED_VALUE : readableValue(value)
   }))
+}
+
+/**
+ * 工具参数行（普通工具卡折叠区字段表 / 门卡字段表共用）。
+ * `maskSensitive` = 门卡口径：键名命中敏感词的值显示定长圆点（v7.10 门卡全键）。
+ *
+ * 批次7B：接受 `ToolPart`（推荐，走 WeakMap 缓存）或原来的 args 原串（兼容旧调用面）。
+ */
+export function argRows(source: ToolPart | string | null | undefined, maskSensitive = false): FieldRow[] {
+  if (!isToolPart(source)) {
+    const parsed = parsedArgsOf(source)
+    return parsed === null ? [] : buildArgRows(parsed, maskSensitive)
+  }
+  const raw = source.args
+  const cached = argRowsCache.get(source)
+  if (cached !== undefined && cached.raw === raw) {
+    if (!maskSensitive) {
+      return cached.plain
+    }
+    cached.masked ??= buildArgRows(toolArgsOf(source) ?? {}, true)
+    return cached.masked
+  }
+  const parsed = toolArgsOf(source)
+  const plain = parsed === null ? [] : buildArgRows(parsed, false)
+  const entry: ArgRowsEntry = {
+    raw,
+    plain,
+    masked: maskSensitive ? (parsed === null ? [] : buildArgRows(parsed, true)) : null
+  }
+  argRowsCache.set(source, entry)
+  return maskSensitive ? (entry.masked as FieldRow[]) : plain
 }
 
 /** GF 表单字段（宽松提取：只认 key / label 两个非空字符串 + options 的中文标签）。 */
@@ -219,14 +336,38 @@ export interface FormFieldLite {
   options?: Array<{ value: string; label?: string }>
 }
 
+interface FormFieldsEntry {
+  raw: string | null | undefined
+  value: FormFieldLite[]
+}
+
+const formFieldsCache = new WeakMap<ToolPart, FormFieldsEntry>()
+
 /**
  * GF 字段表（宽松口径，与 RC-1 的 `formFields` 同源）：`args.form.fields[]` 的 `key / label`
  * 保持 schema 序；类型与 options 取到就用（枚举中文标签），取不到不阻断 —— **不重复 schema 强度校验**
  * （那属 FormRenderer / 后端闸门的职责，回执摘要不能因脏字段整列失效）。
+ *
+ * 批次7B：接受 `ToolPart`（推荐）或 args 原串；按段缓存，同一帧不重复解析。
  */
-export function formFieldsOf(args: string | null | undefined): FormFieldLite[] {
-  const parsed = parseArgObject(args)
-  const raw = parsed === null ? undefined : (parsed as { form?: { fields?: unknown } }).form?.fields
+export function formFieldsOf(source: ToolPart | string | null | undefined): FormFieldLite[] {
+  if (!isToolPart(source)) {
+    const parsed = parsedArgsOf(source)
+    return parsed === null ? [] : buildFormFields(parsed)
+  }
+  const raw = source.args
+  const cached = formFieldsCache.get(source)
+  if (cached !== undefined && cached.raw === raw) {
+    return cached.value
+  }
+  const parsed = toolArgsOf(source)
+  const value = parsed === null ? [] : buildFormFields(parsed)
+  formFieldsCache.set(source, { raw, value })
+  return value
+}
+
+function buildFormFields(parsed: Record<string, unknown>): FormFieldLite[] {
+  const raw = (parsed as { form?: { fields?: unknown } }).form?.fields
   if (!Array.isArray(raw)) {
     return []
   }
@@ -262,13 +403,26 @@ export function formFieldsOf(args: string | null | undefined): FormFieldLite[] {
   return fields
 }
 
+interface SubmitRowsEntry {
+  raw: string | null | undefined
+  values: Record<string, unknown>
+  rows: FieldRow[]
+}
+
+/** 段 → 提交摘要（guard = args 原串 + submittedValues 对象身份；值对象由写点整体替换）。 */
+const submitRowsCache = new WeakMap<ToolPart, SubmitRowsEntry>()
+
 /** GF 已提交值的行（label 取 `args.form.fields[].label`，值可读化；枚举走 options 的中文标签）。 */
 export function submitRows(part: ToolPart): FieldRow[] {
   const values = part.submittedValues
   if (!values || Object.keys(values).length === 0) {
     return []
   }
-  const fields = formFieldsOf(part.args)
+  const cached = submitRowsCache.get(part)
+  if (cached !== undefined && cached.raw === part.args && cached.values === values) {
+    return cached.rows
+  }
+  const fields = formFieldsOf(part)
   const byKey = new Map(fields.map((field) => [field.key, field]))
   const rows: FieldRow[] = []
   const seen = new Set<string>()
@@ -283,6 +437,7 @@ export function submitRows(part: ToolPart): FieldRow[] {
       rows.push({ key: byKey.get(key)?.label ?? key, value: readableValue(value) })
     }
   }
+  submitRowsCache.set(part, { raw: part.args, values, rows })
   return rows
 }
 
@@ -586,14 +741,25 @@ export function cardStatusOf(part: ToolPart): CardStatus {
 /**
  * GF 表单定义（`args.form` 的防御性解析）—— 已决只读态要复用**同一张表单**（K1），
  * 七型控件（GF 优化批新增 attachment）与字段序都取自这里；解析失败返回 null
- * （卡面只留兜底文案，不臆造控件）。
+ * （卡面只留兜底文案，不臆造控件）。批次7B：按段缓存（guard = args 原串）。
  */
+interface FormSpecEntry {
+  raw: string | null | undefined
+  value: FormSpec | null
+}
+
+const formSpecCache = new WeakMap<ToolPart, FormSpecEntry>()
+
 export function formSpecOf(part: ToolPart): FormSpec | null {
-  const parsed = parseArgObject(part.args)
-  if (parsed === null) {
-    return null
+  const raw = part.args
+  const cached = formSpecCache.get(part)
+  if (cached !== undefined && cached.raw === raw) {
+    return cached.value
   }
-  return parseFormSchema((parsed as { form?: unknown }).form)
+  const parsed = toolArgsOf(part)
+  const value = parsed === null ? null : parseFormSchema((parsed as { form?: unknown }).form)
+  formSpecCache.set(part, { raw, value })
+  return value
 }
 
 /**
@@ -608,7 +774,7 @@ export function hasToolBody(part: ToolPart): boolean {
   if (part.requiresAction) {
     return true
   }
-  if (argRows(part.args).length > 0) {
+  if (argRows(part).length > 0) {
     return true
   }
   if (!isBlankText(part.result)) {

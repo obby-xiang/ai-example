@@ -240,9 +240,41 @@ let preparingRetryInFlight = false
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
+/** 批次7B：trailing 写盘的 idle 句柄（有 requestIdleCallback 时用它，避免占渲染帧）。 */
+let mirrorIdleHandle: number | null = null
 /** 批G · G4：最后一次真实落盘时刻（throttle 的 leading 判据）与节流窗口。 */
 let mirrorLastWriteAt = 0
 const MIRROR_THROTTLE_MS = 300
+
+/** 取消待写的 trailing（timer + idle 各一），pagehide/可见性 flush 前必须先取消，避免重复写。 */
+function cancelMirrorSchedule(): void {
+  if (mirrorTimer !== null) {
+    clearTimeout(mirrorTimer)
+    mirrorTimer = null
+  }
+  if (mirrorIdleHandle !== null) {
+    const cancel = (window as unknown as { cancelIdleCallback?: (handle: number) => void }).cancelIdleCallback
+    if (typeof cancel === 'function') {
+      cancel(mirrorIdleHandle)
+    }
+    mirrorIdleHandle = null
+  }
+}
+
+/** 批次7B：把一次（已经节流过的）落盘放到浏览器空闲期；没有 idle API 时同步执行。 */
+function writeMirrorWhenIdle(run: () => void): void {
+  const requestIdle = (window as unknown as {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number
+  }).requestIdleCallback
+  if (typeof requestIdle !== 'function') {
+    run()
+    return
+  }
+  mirrorIdleHandle = requestIdle(() => {
+    mirrorIdleHandle = null
+    run()
+  }, { timeout: MIRROR_THROTTLE_MS })
+}
 
 /**
  * 批次2（F6）：**开流前**瞬时失败的有界重试。
@@ -1107,53 +1139,295 @@ function enqueueFrontendTool(messageId: string, run: () => Promise<void>): void 
   })
 }
 
+/* ============================ 批次7B（P1⑤）：镜像增量 / 有界 / idle 落盘 ============================
+ * 旧实现每次节流窗口都把**整个会话**重新 deep `JSON.stringify`（O(会话)），长会话在流式每帧
+ * 稳定做一次全量序列化；配额/隐私模式失败又被 catch 静默吞掉（用户不知道刷新恢复已失效）。
+ *
+ * 本批口径：
+ * - **增量**：按消息对象 WeakMap 缓存已序列化 JSON（guard = 消息字段/段字段浅比较），
+ *   未变化的历史消息不再重复 stringify；只有变化的那条重算；
+ * - **浅比较前提（复核结论）**：`toolRuns` / `pendingCall` / `errorCard` / 段内 `resultView` /
+ *   `preflight` / `submittedValues` 在当前全部写点都是**整体替换**（含 `Object.assign` 只写
+ *   截断标量字段），故按引用比较即可；若将来出现原地改嵌套字段，必须先扩展这里的比较，
+ *   否则会漏更新；
+ * - **有界**：只保最近 {@link MIRROR_MAX_MESSAGES} 条，且消息 JSON 总量不超过
+ *   {@link MIRROR_MAX_CHARS}（从最旧开始丢；更早内容由服务端完整历史补齐）。最后一条助手 /
+ *   最后一条用户 / 最新一条不受字符预算约束（`mirrorBoundedMessages`），保证在途轮
+ *   「提问 + 半截回答」不被拆散；
+ * - **不重复写**：现场（消息 + lastRunId + inFlight + runSeq）与上次落盘一致时**整次 no-op**，
+ *   `savedAt` 不前进（与既有"无改动不回写"的幂等断言同口径）；
+ * - **配额失败一次性可见**：写失败落一次通知（同一故障段不刷屏，成功写盘后再次失败可重新提示）。
+ * 消息字段映射（含 errorCard/code/runId/思考 timing 剔除本地锚）与旧镜像逐字一致，读侧零改动。
+ * 序列化失败（脏段 / 循环引用）与写盘失败分开口径：前者只吞异常不外溢，不冒充配额提示。
+ * ================================================================================================ */
+
+/** 镜像有界：最多保留的最近消息条数（更早的由服务端完整历史补齐）。 */
+export const MIRROR_MAX_MESSAGES = 120
+/** 镜像有界：消息 JSON 总量预算（UTF-16 字符，与 sessionStorage 配额同单位）。 */
+export const MIRROR_MAX_CHARS = 512 * 1024
+/** 写盘失败（配额已满 / 隐私模式）的通知码；同一故障段只提示一次。 */
+const MIRROR_STORAGE_NOTICE = 'ai.notice.mirrorQuotaExceeded'
+
+type MirrorWriteOutcome = 'ok' | 'unchanged' | 'error'
+
+type MirroredMessage = AiSessionMirror['messages'][number]
+
+interface MirrorMessageSnapshot {
+  scalars: unknown[]
+  parts: Array<{ part: MessagePart; fields: Array<[string, unknown]> }>
+}
+
+/** 与 `AiSessionMirror.messages` 的 Pick 键一一对应（顺序只影响快照比较，不影响镜像 JSON）。 */
+const MIRROR_MESSAGE_SCALAR_KEYS = [
+  'id',
+  'role',
+  'content',
+  'reasoning',
+  'toolRuns',
+  'pendingCall',
+  'stopped',
+  'truncated',
+  'errorCard',
+  'code',
+  'unconfirmed',
+  'recoveryGap',
+  'synthetic',
+  'runId'
+] as const
+
+/** 消息 → 上次序列化时的快照与 JSON（WeakMap：消息被替换/回收即释放）。 */
+const mirrorMessageCache = new WeakMap<ChatMessage, { snapshot: MirrorMessageSnapshot; json: string }>()
+
+function mirrorPartFields(part: MessagePart): Array<[string, unknown]> {
+  const fields: Array<[string, unknown]> = []
+  for (const key of Object.keys(part)) {
+    // 运行时锚不入镜像（AR-12），也不参与变更判定 —— 否则每个思考帧都会触发重算。
+    if (key === 'lastFrameLocalAt') {
+      continue
+    }
+    fields.push([key, (part as unknown as Record<string, unknown>)[key]])
+  }
+  return fields
+}
+
+function mirrorSnapshotOf(message: ChatMessage): MirrorMessageSnapshot {
+  return {
+    scalars: MIRROR_MESSAGE_SCALAR_KEYS.map((key) => message[key]),
+    parts: message.parts.map((part) => ({ part, fields: mirrorPartFields(part) }))
+  }
+}
+
+/** 段字段浅比较（值按 `===`；正文/args 都是不可变字符串，同引用时 O(1)）。 */
+function sameMirrorPartFields(previous: Array<[string, unknown]>, part: MessagePart): boolean {
+  const comparable = Object.keys(part).filter((key) => key !== 'lastFrameLocalAt')
+  if (comparable.length !== previous.length) {
+    return false
+  }
+  for (let index = 0; index < comparable.length; index += 1) {
+    const key = comparable[index] as string
+    const prev = previous[index]
+    if (prev === undefined || prev[0] !== key || prev[1] !== (part as unknown as Record<string, unknown>)[key]) {
+      return false
+    }
+  }
+  return true
+}
+
+function sameMirrorSnapshot(snapshot: MirrorMessageSnapshot, message: ChatMessage): boolean {
+  for (let index = 0; index < MIRROR_MESSAGE_SCALAR_KEYS.length; index += 1) {
+    if (snapshot.scalars[index] !== message[MIRROR_MESSAGE_SCALAR_KEYS[index]]) {
+      return false
+    }
+  }
+  if (snapshot.parts.length !== message.parts.length) {
+    return false
+  }
+  for (let index = 0; index < message.parts.length; index += 1) {
+    const previous = snapshot.parts[index]
+    const part = message.parts[index]
+    if (previous === undefined || part === undefined || previous.part !== part) {
+      return false
+    }
+    if (!sameMirrorPartFields(previous.fields, part)) {
+      return false
+    }
+  }
+  return true
+}
+
+/** 单条消息 → 镜像形态（字段与批次2 逐字一致；新增字段时只加这里 + `MIRROR_MESSAGE_SCALAR_KEYS`）。 */
+function mirrorMessageOf(message: ChatMessage): MirroredMessage {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    parts: stripReasoningLocalAnchors(message.parts),
+    reasoning: message.reasoning,
+    toolRuns: message.toolRuns,
+    pendingCall: message.pendingCall,
+    ...(message.stopped ? { stopped: true } : {}),
+    ...(message.truncated ? { truncated: true } : {}),
+    // 批次2（镜像 additive 键）：失败现场与中性态活过刷新 —— 否则"失败"会被归一成一条完整回答。
+    ...(message.errorCard ? { errorCard: message.errorCard } : {}),
+    ...(message.code ? { code: message.code } : {}),
+    ...(message.unconfirmed ? { unconfirmed: true } : {}),
+    ...(message.recoveryGap ? { recoveryGap: true } : {}),
+    // 批次2：系统级合成提示（压缩摘要）也必须活过刷新，不能回退成用户气泡
+    ...(message.synthetic ? { synthetic: true } : {}),
+    // 批次2：run 归属必须活过刷新 —— 「重试本轮」只按它定位后端 run（不得猜 activeRunId）
+    ...(message.runId ? { runId: message.runId } : {})
+  }
+}
+
+function mirrorMessageJsonOf(message: ChatMessage): string {
+  const cached = mirrorMessageCache.get(message)
+  if (cached !== undefined && sameMirrorSnapshot(cached.snapshot, message)) {
+    return cached.json
+  }
+  const json = JSON.stringify(mirrorMessageOf(message))
+  mirrorMessageCache.set(message, { snapshot: mirrorSnapshotOf(message), json })
+  return json
+}
+
+/**
+ * 从最新往回取，直到条数/字符预算用尽。
+ *
+ * 两条**永不按字符预算裁剪**：①最新一条（丢它=丢本轮现场）；②最后一条助手消息与最后一条
+ * 用户消息（在途轮的「提问 + 半截回答」必须成对）—— 否则超大回答会把配对提问挤掉，
+ * 刷新后只剩孤儿回答，`mergeMirrorInFlightRound` / `carryMirrorOutcomeMarkers` 的同句配对
+ * 判据也会失配。条数上限（{@link MIRROR_MAX_MESSAGES}）天然覆盖这三条（一轮至多两三条）。
+ */
+function mirrorBoundedMessages(messages: ChatMessage[]): string[] {
+  let lastUserIndex = -1
+  let lastAssistantIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const role = messages[index]?.role
+    if (lastAssistantIndex < 0 && role === 'assistant') {
+      lastAssistantIndex = index
+    }
+    if (lastUserIndex < 0 && role === 'user') {
+      lastUserIndex = index
+    }
+    if (lastUserIndex >= 0 && lastAssistantIndex >= 0) {
+      break
+    }
+  }
+  const json: string[] = []
+  let chars = 0
+  for (let index = messages.length - 1; index >= 0 && json.length < MIRROR_MAX_MESSAGES; index -= 1) {
+    const message = messages[index]
+    if (message === undefined) {
+      continue
+    }
+    const serialized = mirrorMessageJsonOf(message)
+    // 最新一条 / 最后一条助手 / 最后一条用户：不受字符预算约束（条数上限仍生效）。
+    const preserved = index === messages.length - 1 || index === lastAssistantIndex || index === lastUserIndex
+    if (!preserved && json.length > 0 && chars + serialized.length > MIRROR_MAX_CHARS) {
+      break
+    }
+    json.push(serialized)
+    chars += serialized.length
+  }
+  return json.reverse()
+}
+
+interface MirrorWriteMemo {
+  sessionId: string | null
+  messageCount: number
+  messages: string[]
+  lastRunId: string | null
+  inFlight: boolean
+  runSeq: string
+}
+
+/** 每个 store 实例一份"上次落盘现场"（WeakMap：新 store / 换会话自然失效）。 */
+const mirrorWriteMemos = new WeakMap<object, MirrorWriteMemo>()
+
+function mirrorMemoOf(owner: object): MirrorWriteMemo {
+  let memo = mirrorWriteMemos.get(owner)
+  if (memo === undefined) {
+    memo = { sessionId: null, messageCount: 0, messages: [], lastRunId: null, inFlight: false, runSeq: 'null' }
+    mirrorWriteMemos.set(owner, memo)
+  }
+  return memo
+}
+
+/** 同一故障段是否已提示过（按 store 实例 + 会话记账；成功写盘后清除）。 */
+const mirrorFailureNotified = new WeakMap<object, string>()
+
+function noteMirrorFailure(sink: object & NoticeSink, sessionId: string): void {
+  if (mirrorFailureNotified.get(sink) === sessionId) {
+    return
+  }
+  mirrorFailureNotified.set(sink, sessionId)
+  setNotice(sink, MIRROR_STORAGE_NOTICE, {}, 'warning')
+}
+
+/**
+ * 唯一写口：增量序列化 + 有界裁剪 + 幂等去重 + 失败通知。
+ *
+ * @returns `unchanged` = 现场与上次一致，未写盘（`savedAt` 不前进）；`error` = 写盘/序列化失败。
+ */
 function writeMirror(
+  sink: object & NoticeSink,
   sessionId: string,
   messages: ChatMessage[],
   lastRunId: string | null,
   extra: { inFlight?: boolean; runSeq?: Record<string, number> } = {}
-): void {
+): MirrorWriteOutcome {
+  const inFlight = extra.inFlight === true
+  const memo = mirrorMemoOf(sink)
+  let messageJsons: string[] = []
+  let runSeqJson = 'null'
+  let payload = ''
   try {
-    const mirror: AiSessionMirror = {
-      // 批2 权威翻转后口径：parts 是**唯一真值**，content/reasoning/toolRuns/pendingCall 是同一次
-      // 写入前由 `deriveProjections` 派生的投影。镜像里两份都留 —— 只为回滚（旧版前端读镜像）与
-      // 外部读（调试/对账脚本直接看 JSON）不必自行派生；权威口径与迁移说明见 types/ai.ts。
+    runSeqJson = JSON.stringify(extra.runSeq ?? null)
+    messageJsons = mirrorBoundedMessages(messages)
+    if (
+      memo.sessionId === sessionId
+      && memo.messageCount === messages.length
+      && memo.lastRunId === lastRunId
+      && memo.inFlight === inFlight
+      && memo.runSeq === runSeqJson
+      && memo.messages.length === messageJsons.length
+      && memo.messages.every((json, index) => json === messageJsons[index])
+    ) {
+      return 'unchanged'
+    }
+
+    // 信封照旧（v/savedAt/lastRunId/inFlight/runSeq），messages 直接拼**已序列化**的单条 JSON，
+    // 不再把整棵镜像对象交给一次全量 stringify。
+    const envelope = JSON.stringify({
       v: MIRROR_VERSION,
       savedAt: Date.now(),
       lastRunId,
-      // 批G · G4：在途标记 + 帧序号 —— 刷新后据此决定"静默续收"，以及能否只补差量。
-      // `stopped` 一并入镜像（S3/S4）：停止标记必须活过刷新，否则半截正文刷新后变成"完整答案"。
-      // `truncated`（截断专项）同理：长度截断是持久事实，刷新后仍要提示"这不是完整答案"。
-      inFlight: extra.inFlight === true,
-      runSeq: extra.runSeq ? { ...extra.runSeq } : undefined,
-      // 镜像只留展示所需字段（pendingCall 内嵌其中，刷新后可重建确认卡）；
-      // `appliedSeqs` 是内部幂等记账，**不入镜像**（Pick 不含它）；思考段的本地接收锚
-      // `lastFrameLocalAt` 同样是**运行时锚**，写出时剔除（AR-12：不为计时新增持久化字段），
-      // 读回时由镜像的 `savedAt` 重新播种（仍是本地钟，见 `seedReasoningLocalAnchors`）。
-      messages: messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        parts: stripReasoningLocalAnchors(message.parts),
-        reasoning: message.reasoning,
-        toolRuns: message.toolRuns,
-        pendingCall: message.pendingCall,
-        ...(message.stopped ? { stopped: true } : {}),
-        ...(message.truncated ? { truncated: true } : {}),
-        // 批次2（镜像 additive 键）：失败现场与中性态活过刷新 —— 否则"失败"会被归一成一条完整回答。
-        ...(message.errorCard ? { errorCard: message.errorCard } : {}),
-        ...(message.code ? { code: message.code } : {}),
-        ...(message.unconfirmed ? { unconfirmed: true } : {}),
-        ...(message.recoveryGap ? { recoveryGap: true } : {}),
-        // 批次2：系统级合成提示（压缩摘要）也必须活过刷新，不能回退成用户气泡
-        ...(message.synthetic ? { synthetic: true } : {}),
-        // 批次2：run 归属必须活过刷新 —— 「重试本轮」只按它定位后端 run（不得猜 activeRunId）
-        ...(message.runId ? { runId: message.runId } : {})
-      }))
-    }
-    sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify(mirror))
+      inFlight,
+      ...(extra.runSeq ? { runSeq: { ...extra.runSeq } } : {})
+    })
+    payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
   } catch {
-    // 配额/隐私模式等场景忽略：镜像是刷新体验优化，不是正确性依赖
+    // 序列化异常（脏段 / 循环引用等）：旧实现整体在 try 内、异常不外溢 —— 镜像是刷新体验
+    // 增强，不是正确性依赖，绝不能把异常抛进 `$subscribe`。此类失败不冒充配额提示。
+    return 'error'
+  }
+  try {
+    sessionStorage.setItem(MIRROR_PREFIX + sessionId, payload)
+    memo.sessionId = sessionId
+    memo.messageCount = messages.length
+    memo.messages = messageJsons
+    memo.lastRunId = lastRunId
+    memo.inFlight = inFlight
+    memo.runSeq = runSeqJson
+    mirrorFailureNotified.delete(sink)
+    // 故障恢复后清掉**自己留下的**降级提示（不误清别的通知）。
+    if (sink.noticeCode === MIRROR_STORAGE_NOTICE) {
+      clearNotice(sink)
+    }
+    return 'ok'
+  } catch {
+    // 配额/隐私模式：镜像是刷新体验优化，不是正确性依赖 —— 但失败必须**一次性可见**。
+    noteMirrorFailure(sink, sessionId)
+    return 'error'
   }
 }
 
@@ -1520,7 +1794,9 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.toolAlreadySubmitted': 'warning',
   'ai.notice.noUiUndo': 'warning',
   // 复制页签告知是**中性事实**（不是错误/降级）：级别必须自带，不能继承上一轮 error。
-  'ai.notice.copiedNewTab': 'info'
+  'ai.notice.copiedNewTab': 'info',
+  // 批次7B：镜像写盘失败（配额已满 / 隐私模式）是刷新恢复的降级事实，按 warning 提示一次。
+  [MIRROR_STORAGE_NOTICE]: 'warning'
 }
 
 /** 陈旧确认卡：码 → 人话 key。只收"后端已无该条目"的码（见 {@link GateStaleCode}）。 */
@@ -2089,6 +2365,10 @@ export const useAiStore = defineStore('ai', {
      * 镜像就永远写不下去（实证 A2：刷新前镜像正文为空、DOM 已 154 字）。节流 = leading 立即写
      * + 窗口内合并为一次 trailing；另在 pagehide / visibilitychange(hidden) 立即 flush，
      * 保证"关页/切后台"那一刻的正文不丢。
+     *
+     * <p>
+     * 批次7B（P1⑤）：trailing 落到浏览器 idle 再写（长会话不再占渲染帧）；同一现场重复触发时
+     * 由 {@link writeMirror} 去重（no-op），不产生重复写。增量序列化 / 有界裁剪 / 配额提示见该函数。
      */
     startMirror(): void {
       if (mirrorStarted) {
@@ -2099,29 +2379,24 @@ export const useAiStore = defineStore('ai', {
         const now = Date.now()
         const elapsed = now - mirrorLastWriteAt
         if (elapsed >= MIRROR_THROTTLE_MS) {
-          if (mirrorTimer !== null) {
-            clearTimeout(mirrorTimer)
-            mirrorTimer = null
-          }
+          cancelMirrorSchedule()
           this.writeMirrorNow()
           return
         }
-        if (mirrorTimer !== null) {
+        if (mirrorTimer !== null || mirrorIdleHandle !== null) {
           return // 窗口内已有一次待写：合并（trailing 覆盖最新快照）
         }
+        // 批次7B：窗口用尽后**等到浏览器空闲**再写盘（长会话序列化不再占渲染帧）。
         mirrorTimer = setTimeout(() => {
           mirrorTimer = null
-          this.writeMirrorNow()
+          writeMirrorWhenIdle(() => this.writeMirrorNow())
         }, MIRROR_THROTTLE_MS - elapsed)
       }, { detached: true, deep: true })
       // 页面隐藏/卸载 = 最后一次机会：立即落盘（退订由浏览器负责，页签生命周期内不重复装）
       if (!mirrorFlushInstalled) {
         mirrorFlushInstalled = true
         mirrorFlushHandler = () => {
-          if (mirrorTimer !== null) {
-            clearTimeout(mirrorTimer)
-            mirrorTimer = null
-          }
+          cancelMirrorSchedule()
           this.writeMirrorNow()
         }
         window.addEventListener('pagehide', mirrorFlushHandler)
@@ -2148,8 +2423,7 @@ export const useAiStore = defineStore('ai', {
       if (!this.historyLoaded && this.messages.length === 0) {
         return
       }
-      mirrorLastWriteAt = Date.now()
-      writeMirror(this.sessionId, this.messages, this.activeRunId, {
+      const outcome = writeMirror(this, this.sessionId, this.messages, this.activeRunId, {
         // 批G · R4（真机回归）：**挂起态也是在途** —— B1「挂起即断」把挂起轮写成
         // `loading=false && suspended=true`（收流了，但这一轮还在等人决策）。只看 loading 会把
         // "还在等决策的一轮"标成不在途，刷新后 `mergeMirrorInFlightRound` 首行直接返回，
@@ -2157,6 +2431,10 @@ export const useAiStore = defineStore('ai', {
         inFlight: this.loading || this.suspended,
         runSeq: this.runSeq
       })
+      // 批次7B：去重命中（现场未变）不推进节流锚 —— 下一次真实变化应尽快落盘。
+      if (outcome !== 'unchanged') {
+        mirrorLastWriteAt = Date.now()
+      }
     },
 
     /**
@@ -2356,7 +2634,7 @@ export const useAiStore = defineStore('ai', {
         if (migrated.migrated || sanitized) {
           // 只在"迁移过 / 收口过"时回写：无变化时回写会让每次刷新都写盘
           // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
-          writeMirror(this.sessionId, this.messages, this.activeRunId, {
+          writeMirror(this, this.sessionId, this.messages, this.activeRunId, {
             inFlight: mirrorInFlight,
             runSeq: this.runSeq
           })

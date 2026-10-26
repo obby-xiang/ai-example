@@ -270,6 +270,7 @@
       <div
         v-for="(m, mi) in ai.messages"
         :key="m.id"
+        v-memo="messageMemo(m, mi)"
         class="group flex"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
@@ -328,7 +329,8 @@
                  改为根容器随行工具类 MD_BODY_ROOT_CLASS，层级元素由渲染层逐标签注入。 -->
             <div
               v-if="block.kind === 'text'"
-              :ref="(el) => setUserBodyRef(m.id, el)"
+              :ref="userBodyRefFor(m.id)"
+              v-memo="blockMemo(block, m)"
               :class="[
                 'md-body',
                 MD_BODY_ROOT_CLASS,
@@ -370,6 +372,7 @@
                      展开体 = 左竖线（border-l-2 #e3e6ea）+ pl-10px/pr-11px/pb-10px 的 12.6px#57606a 正文。 -->
                 <div
                   v-if="part.kind === 'reasoning' && part.text"
+                  v-memo="partMemo(part, block)"
                   class="border border-solid border-[#e3e6ea] rounded-[10px] bg-[#f6f7f9] overflow-hidden mb-3.5"
                 >
                   <!-- 批次6A：卡头独立成组件（局部秒表；aria-expanded/controls 与展开体同源）。
@@ -403,6 +406,7 @@
                        GF 同一张表单 readonly、零操作按钮、卡面不渲染 decidedAt）；已决多态回合结束后
                        一律默认折叠，由 turnStillOpen 承担「回合未结束仍展开」。 -->
                   <div
+                    v-memo="partMemo(part, block)"
                     :class="cardShellClass(part)"
                     :data-testid="cardTestId(part)"
                   >
@@ -894,6 +898,18 @@
               </template>
             </template>
           </template>
+
+          <!-- 批次 7C：>10k 字符的本条消息只出**一条**中性降级提示（消息 id 维度，不是段维度；
+               `renderMarkdown` 只在该消息首个降级帧返回文案，后续帧/重渲不重复）。 -->
+          <div
+            v-if="degradeNotices[m.id]"
+            class="mt-[6px] flex items-start gap-[6px] rounded-[9px] border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[9px] py-[6px] text-[11.5px] leading-[1.6] text-[#57606a]"
+            :data-testid="'degrade-notice-' + m.id"
+            role="note"
+          >
+            <span class="flex-[0_0_14px] text-center" aria-hidden="true">—</span>
+            <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ degradeNotices[m.id] }}</span>
+          </div>
 
           <!-- R-165 S4 → S5a 项 6：用户长消息「展开/收起」—— 真溢出（正文高 > 184px = 8 行）才出；
                折叠态 = 限高 + overflow:hidden + 底部渐隐（mask 任意值类），展开态为该消息本地态；
@@ -1502,7 +1518,7 @@ import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
 import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
 import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
-import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type TextPart, type ToolPart } from '@/types/ai'
 import type { ToolPreflight } from '@/types/sse'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
@@ -2084,29 +2100,75 @@ function runErrorCardAction(message: ChatMessage): void {
 
 /** 用户消息 md-body 元素表（按消息 id 记，供单一 measure 读 scrollHeight）。 */
 const userBodyEls = new Map<string, HTMLElement>()
+/** 模板函数 ref 的稳定身份（同一 id 复用同一 setter，避免每次 patch 都被当成新 ref 重登）。 */
+const userBodyRefSetters = new Map<string, (el: Element | { $el?: Element } | null) => void>()
+/** 本轮真正需要重量的用户消息（新挂载 / 文本变化 / 展开切换）——不再逐条扫全表。 */
+const dirtyUserMsgIds = new Set<string>()
+/** 可观测性：每次 measure 实际读了哪些消息（只保留最近若干轮，避免调试面自身泄漏）。 */
+const measurePasses: string[][] = []
 /** 真溢出（正文高 > 184px）的用户消息 id 集 —— 只有它为真才渲染「展开/收起」。 */
 const userMsgOverflowed = ref<Set<string>>(new Set())
 /** 已展开的用户消息 id 集（默认收起 = 不在集内）。 */
 const userMsgExpanded = ref<Set<string>>(new Set())
 
+function markUserMsgDirty(id: string): void {
+  dirtyUserMsgIds.add(id)
+}
+
+/** 稳定 ref setter：同一消息 id 返回同一函数，元素挂载/卸载才触发登记与脏标记。 */
+function userBodyRefFor(id: string): (el: Element | { $el?: Element } | null) => void {
+  let setter = userBodyRefSetters.get(id)
+  if (setter === undefined) {
+    setter = (el: Element | { $el?: Element } | null): void => setUserBodyRef(id, el)
+    userBodyRefSetters.set(id, setter)
+  }
+  return setter
+}
+
 /** 模板函数 ref：用户消息正文元素登记/注销（收起态下 scrollHeight 仍为内容自然高，量取稳定）。 */
 function setUserBodyRef(id: string, el: Element | { $el?: Element } | null): void {
   if (el instanceof HTMLElement) {
     userBodyEls.set(id, el)
+    markUserMsgDirty(id)
     return
   }
   userBodyEls.delete(id)
+  dirtyUserMsgIds.delete(id)
 }
 
-/** 单一 measure：逐条读 scrollHeight 与限高比较，集合真变化才换引用（防无谓重渲）。 */
-function measureUserMsgOverflow(): void {
-  const next = new Set<string>()
-  for (const [id, el] of userBodyEls) {
-    if (el.scrollHeight > USER_MSG_MAX_HEIGHT_PX) {
-      next.add(id)
+/**
+ * 单一 measure：**只量脏消息**（新挂载 / 文本变化 / 展开切换），集合真变化才换引用。
+ * 无参数 = 消费全部脏标记；传 ids = 只量指定消息（如展开/收起该条本身）。
+ */
+function measureUserMsgOverflow(ids?: Iterable<string>): void {
+  const requested = ids ?? dirtyUserMsgIds
+  const measured: string[] = []
+  const next = new Set(userMsgOverflowed.value)
+  let changed = false
+  for (const id of requested) {
+    const el = userBodyEls.get(id)
+    if (el === undefined) {
+      dirtyUserMsgIds.delete(id)
+      continue
     }
+    measured.push(id)
+    const overflow = el.scrollHeight > USER_MSG_MAX_HEIGHT_PX
+    if (overflow !== next.has(id)) {
+      if (overflow) {
+        next.add(id)
+      } else {
+        next.delete(id)
+      }
+      changed = true
+    }
+    // 显式传入的 id 也从全局脏集清掉：这次读数已覆盖它的最新 DOM。
+    dirtyUserMsgIds.delete(id)
   }
-  if (next.size !== userMsgOverflowed.value.size || [...next].some((id) => !userMsgOverflowed.value.has(id))) {
+  measurePasses.push(measured)
+  if (measurePasses.length > 32) {
+    measurePasses.shift()
+  }
+  if (changed) {
     userMsgOverflowed.value = next
   }
 }
@@ -2116,7 +2178,7 @@ function isUserMsgCollapsed(id: string): boolean {
   return userMsgOverflowed.value.has(id) && !userMsgExpanded.value.has(id)
 }
 
-/** 展开/收起切换（同回落单一 measure：展开后字数变化同样以读数为准）。 */
+/** 展开/收起切换（只重量该条：展开后字数变化同样以读数为准）。 */
 function toggleUserMsg(id: string): void {
   const next = new Set(userMsgExpanded.value)
   if (next.has(id)) {
@@ -2125,7 +2187,8 @@ function toggleUserMsg(id: string): void {
     next.add(id)
   }
   userMsgExpanded.value = next
-  void nextTick(measureUserMsgOverflow)
+  markUserMsgDirty(id)
+  void nextTick(() => measureUserMsgOverflow([id]))
 }
 
 /**
@@ -2652,18 +2715,129 @@ watch(
 )
 
 /**
- * R-163 T1：正文 Markdown 渲染（markdown-it → DOMPurify → v-html 唯一链路的组件侧）——
- * 结果 memo（键 = 消息 + 段 + 文本长度 + 流式态）；mermaid 闭合围栏占位 div 在 nextTick
- * 后异步渲染 SVG 回填（失败保留源码块）。R-159 #6 逐字符渐显（chSplit/CH_TAIL）按决策卡
- * §三.1 显式退役：其语义被 Markdown 渲染取代。
+ * R-163 T1：正文 Markdown 渲染（markdown-it → DOMPurify → v-html 唯一链路的组件侧）。
+ *
+ * 批次 7A：缓存拆成**两张互不挤占的表**：
+ * - 流式块：按块稳定 key 只保留「最后一帧」（`text + flush tick` 相同才命中），每帧不会挤掉历史；
+ * - 历史块：组件级 LRU，键含**内容指纹**（长度 + FNV-1a hash），命中时再比对原文，避免
+ *   「同长不同文」误命中；容量同时受块数与字节预算约束，命中即刷新队尾。
+ * mermaid 槽位在 cache 命中时同样重新水合（收起/展开后 DOM 会按 v-html 重建，不能只依赖首次渲染）。
+ * R-159 #6 逐字符渐显（chSplit/CH_TAIL）按决策卡 §三.1 显式退役：其语义被 Markdown 渲染取代。
  */
-const mdCache = new Map<string, { html: string }>()
-const MD_CACHE_MAX = 128
+interface MermaidSlotRef {
+  index: number
+  key: string
+  source: string
+}
+
+interface MdHistoryEntry {
+  text: string
+  html: string
+  mermaid: MermaidSlotRef[]
+  degradeNotice: string | null
+  bytes: number
+}
+
+interface MdStreamEntry {
+  text: string
+  tick: number
+  locale: string
+  html: string
+  mermaid: MermaidSlotRef[]
+  degradeNotice: string | null
+}
+
+/**
+ * 批次 7C：>10k 降级提示的消息级展示态。
+ *
+ * `renderMarkdown` 的 `degradeNotice` 只在该消息首个降级帧返回一次；组件把它记在**消息 id**
+ * 维度（不是段维度），模板只在消息尾部渲染一条中性提示。命中缓存时从缓存条目取回同一条文案，
+ * 所以收起/展开/重渲不会丢，也不会每帧/每段重复。
+ */
+const degradeNotices = ref<Record<string, string>>({})
+const pendingDegradeNotices = new Map<string, string>()
+let degradeNoticeFlushScheduled = false
+
+function rememberDegradeNotice(messageId: string, notice: string | null): void {
+  if (notice === null || degradeNotices.value[messageId] === notice || pendingDegradeNotices.get(messageId) === notice) {
+    return
+  }
+  pendingDegradeNotices.set(messageId, notice)
+  if (degradeNoticeFlushScheduled) {
+    return
+  }
+  degradeNoticeFlushScheduled = true
+  // markdownHtml 在渲染期被调用；这里不直接改 ref，避免同一渲染周期内自触发。
+  void nextTick(() => {
+    degradeNoticeFlushScheduled = false
+    if (pendingDegradeNotices.size === 0) {
+      return
+    }
+    const next = { ...degradeNotices.value }
+    for (const [id, text] of pendingDegradeNotices) {
+      next[id] = text
+    }
+    pendingDegradeNotices.clear()
+    degradeNotices.value = next
+  })
+}
+
+const historyMdCache = new Map<string, MdHistoryEntry>()
+let historyMdCacheBytes = 0
+/** 块预算 + 字节预算（字节按 UTF-16 码元粗略估算；单条超预算时保留该条，不进入每帧重算）。 */
+const MD_HISTORY_MAX_BLOCKS = 256
+const MD_HISTORY_MAX_BYTES = 8 * 1024 * 1024
+const streamMdCache = new Map<string, MdStreamEntry>()
+/** 可观测性（批次 7A）：命中/未命中不直接暴露 UI，供回归测试与后续 profile 打点。 */
+let markdownHtmlCalls = 0
+let historyMdHits = 0
+let historyMdMisses = 0
+
+/** 轻量内容指纹（FNV-1a 32 位）。真正的防误命中仍靠 entry.text 全等比对。 */
+function hashText(text: string): string {
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function estimateMdBytes(text: string, html: string): number {
+  return (text.length + html.length) * 2
+}
+
+function touchHistoryEntry(key: string, entry: MdHistoryEntry): void {
+  historyMdCache.delete(key)
+  historyMdCache.set(key, entry)
+}
+
+function evictHistoryEntries(): void {
+  while (historyMdCache.size > MD_HISTORY_MAX_BLOCKS || historyMdCacheBytes > MD_HISTORY_MAX_BYTES) {
+    // 单条就超字节预算时保留它：删掉会让这一条每帧重算，比超预算更糟。
+    if (historyMdCache.size <= 1) {
+      return
+    }
+    const oldestKey = historyMdCache.keys().next().value
+    if (oldestKey === undefined) {
+      return
+    }
+    const oldest = historyMdCache.get(oldestKey)
+    historyMdCache.delete(oldestKey)
+    historyMdCacheBytes -= oldest?.bytes ?? 0
+  }
+}
+
+function hydrateMermaidIfNeeded(messageId: string, mermaid: MermaidSlotRef[]): void {
+  if (mermaid.length > 0) {
+    void nextTick(() => hydrateMermaid(messageId, mermaid))
+  }
+}
 
 /**
  * 问题1 偏差修正批 aj14d ②：流式块防抖的「落地」信号 —— 75ms 窗口内被合并掉的增量由
  * `setStreamFlushHandler` 回调（静默满窗后触发）bump 本计数，令 markdownHtml 重入一次真渲染。
- * 只有流式块把本计数并进 memo key（非流式块 cache 键仍是 `...:f`，不被本计数搅动）。
+ * 只有流式块把本计数并进「最后一帧」槽的命中判据（历史块不受本计数搅动）。
  */
 const mdStreamTick = ref(0)
 setStreamFlushHandler(() => {
@@ -2671,26 +2845,56 @@ setStreamFlushHandler(() => {
 })
 
 function markdownHtml(message: ChatMessage, block: Block): string {
+  markdownHtmlCalls += 1
   const part = block.parts[0]
   const text = part.kind === 'text' ? part.text : ''
   // aj14d ③：块级稳定 key = 消息 + 段（与文本长度/流式态解耦，作防抖记账与围栏身份的命名空间）
   const blockKey = `${message.id}:${part.seg}`
-  const key = `${blockKey}:${text.length}:${message.streaming ? `s${mdStreamTick.value}` : 'f'}`
-  const hit = mdCache.get(key)
-  if (hit) {
+  // 渲染器注入的复制按钮文案随 UI 语言变化 —— 缓存键必须带 locale，否则切语言会命中旧 HTML。
+  const localeKey = currentLocaleKey()
+
+  if (message.streaming) {
+    const cached = streamMdCache.get(blockKey)
+    if (cached !== undefined && cached.text === text && cached.tick === mdStreamTick.value && cached.locale === localeKey) {
+      rememberDegradeNotice(message.id, cached.degradeNotice)
+      hydrateMermaidIfNeeded(message.id, cached.mermaid)
+      return cached.html
+    }
+    const { html, mermaid, degradeNotice } = renderMarkdown(text, true, blockKey)
+    // 降级提示只在本条首个降级帧由渲染层给出；后续帧沿用首帧文案，避免流式过程把它冲掉。
+    const carriedNotice = degradeNotice ?? cached?.degradeNotice ?? null
+    streamMdCache.set(blockKey, { text, tick: mdStreamTick.value, locale: localeKey, html, mermaid, degradeNotice: carriedNotice })
+    rememberDegradeNotice(message.id, carriedNotice)
+    hydrateMermaidIfNeeded(message.id, mermaid)
+    return html
+  }
+
+  // 完成态：释放该块的流式最后一帧槽，只走历史 LRU（降级提示随槽带到历史条目）。
+  const streamNotice = streamMdCache.get(blockKey)?.degradeNotice ?? null
+  streamMdCache.delete(blockKey)
+  const key = `${blockKey}:${localeKey}:${text.length}:${hashText(text)}`
+  const hit = historyMdCache.get(key)
+  if (hit !== undefined && hit.text === text) {
+    historyMdHits += 1
+    touchHistoryEntry(key, hit)
+    rememberDegradeNotice(message.id, hit.degradeNotice)
+    hydrateMermaidIfNeeded(message.id, hit.mermaid)
     return hit.html
   }
-  const { html, mermaid } = renderMarkdown(text, message.streaming, blockKey)
-  if (mermaid.length > 0) {
-    void nextTick(() => hydrateMermaid(message.id, mermaid))
+  historyMdMisses += 1
+  const { html, mermaid, degradeNotice } = renderMarkdown(text, false, blockKey)
+  const carriedNotice = degradeNotice ?? streamNotice
+  rememberDegradeNotice(message.id, carriedNotice)
+  const entry: MdHistoryEntry = { text, html, mermaid, degradeNotice: carriedNotice, bytes: estimateMdBytes(text, html) }
+  const replaced = historyMdCache.get(key)
+  if (replaced !== undefined) {
+    // 指纹碰撞：同一 key 的旧条目先退字节，再以原文全等的新条目替换。
+    historyMdCacheBytes -= replaced.bytes
   }
-  if (mdCache.size >= MD_CACHE_MAX) {
-    const first = mdCache.keys().next().value
-    if (first !== undefined) {
-      mdCache.delete(first)
-    }
-  }
-  mdCache.set(key, { html })
+  historyMdCache.set(key, entry)
+  historyMdCacheBytes += entry.bytes
+  evictHistoryEntries()
+  hydrateMermaidIfNeeded(message.id, mermaid)
   return html
 }
 
@@ -2716,20 +2920,95 @@ const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
 /** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 右状态标签已同屏承担，摘要位不再重复）。 */
 const STATUS_WORD_SET = computed(() => toolStatusWords())
 
-function toolSummaryOrNull(part: ToolPart): string | null {
-  const summary = toolSummary(part)
-  const stripPrefix = (prefix: string): string | null => {
-    if (prefix === '' || !summary.startsWith(prefix)) {
-      return null
+/**
+ * 批次 7A：ToolPart 派生值按**段对象**做 WeakMap 复用。
+ *
+ * 模板里同一张卡的标题 / 摘要 / 状态 / 参数行 / 卡体行数会在一次渲染中被多处调用；原实现每次都
+ * `JSON.parse(args)` / 归一化 / i18n 拼装。段更新时 store 会换新对象（`upsertToolPart` 用 spread），
+ * WeakMap 因此随段对象自然失效；另记 locale 标记，切语言时重算一次。
+ */
+interface LocaleCacheEntry<T> {
+  locale: string
+  stamp: readonly unknown[]
+  value: T
+}
+
+const parameterRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
+const gateRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
+const conflictRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<ConflictRow[]>>()
+const bodyRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<boolean>>()
+const outputByViewCache = new WeakMap<ToolPart, LocaleCacheEntry<boolean>>()
+const toolSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
+const cardTitleCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
+const cardSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
+const cardStatusCache = new WeakMap<ToolPart, LocaleCacheEntry<ReturnType<typeof cardStatusOf>>>()
+const gateFactsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
+const diagnosticCache = new WeakMap<ToolPart, LocaleCacheEntry<PartDiagnostic | null>>()
+const diagnosticTextCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
+const toolDeriveMisses: Record<string, number> = {
+  paramRows: 0,
+  gateRows: 0,
+  bodyRows: 0,
+  cardSummary: 0,
+  conflictRows: 0,
+  outputByView: 0,
+  cardTitle: 0,
+  cardStatus: 0,
+  gateFacts: 0,
+  summary: 0,
+  diagnosis: 0
+}
+
+function currentLocaleKey(): string {
+  return String(locale.value)
+}
+
+function sameStamp(left: readonly unknown[], right: readonly unknown[]): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+  for (let i = 0; i < left.length; i += 1) {
+    if (!Object.is(left[i], right[i])) {
+      return false
     }
-    return summary.slice(prefix.length).replace(SUMMARY_PREFIX_SEP, '').trim()
   }
-  // 展示名优先；无 summaryFor 映射的向导工具再按原始 name 剥壳（兜底串以前者打头）。
-  const rest = stripPrefix(toolLabel(part.name)) ?? stripPrefix(part.name)
-  if (rest === null) {
-    return summary
+  return true
+}
+
+function cachedForLocale<T>(
+  cache: WeakMap<ToolPart, LocaleCacheEntry<T>>,
+  part: ToolPart,
+  kind: keyof typeof toolDeriveMisses,
+  stamp: readonly unknown[],
+  compute: () => T
+): T {
+  const localeKey = currentLocaleKey()
+  const hit = cache.get(part)
+  if (hit !== undefined && hit.locale === localeKey && sameStamp(hit.stamp, stamp)) {
+    return hit.value
   }
-  return rest === '' || STATUS_WORD_SET.value.has(rest) ? null : rest
+  toolDeriveMisses[kind] = (toolDeriveMisses[kind] ?? 0) + 1
+  const value = compute()
+  cache.set(part, { locale: localeKey, stamp, value })
+  return value
+}
+
+function toolSummaryOrNull(part: ToolPart): string | null {
+  return cachedForLocale(toolSummaryCache, part, 'summary', [part.name, part.status, part.args], () => {
+    const summary = toolSummary(part)
+    const stripPrefix = (prefix: string): string | null => {
+      if (prefix === '' || !summary.startsWith(prefix)) {
+        return null
+      }
+      return summary.slice(prefix.length).replace(SUMMARY_PREFIX_SEP, '').trim()
+    }
+    // 展示名优先；无 summaryFor 映射的向导工具再按原始 name 剥壳（兜底串以前者打头）。
+    const rest = stripPrefix(toolLabel(part.name)) ?? stripPrefix(part.name)
+    if (rest === null) {
+      return summary
+    }
+    return rest === '' || STATUS_WORD_SET.value.has(rest) ? null : rest
+  })
 }
 
 /**
@@ -2856,7 +3135,8 @@ function prepareMermaidSvg(svg: string, extra = ''): string {
 
 /** 卡结构（demo v7.7 裁决区 12 右栏逐条）：卡头 = ◈ + 名称 + 分段 tab + 右端图标钮组；
  *  预览态 = 260px 限高横滚容器（pan/scale 两层 transform）；源码态 = 200px 内滚 mono 盒 + 复制源码钮。
- *  `svg === null`（render error / 3s 超时）⇒ 降级为「源码态卡」：无 tab、无缩放钮（源码直显、复制可用），
+ *  `svg === null`（render error / 3s 等待预算用尽，只停止等待、不中断同步渲染）⇒ 降级为「源码态卡」：
+ *  无 tab、无缩放钮（源码直显、复制可用），
  *  不留任何无 handler 的钮。 */
 function buildMermaidCardHtml(svg: string | null): string {
   const hasSvg = svg !== null
@@ -3268,7 +3548,8 @@ async function renderMermaidSlot(bubble: Element, code: Element, source: string)
   }
   const card = document.createElement('div')
   card.className = MMD_CARD_CLASS
-  // svg === null（render error / 3s 超时 / 超上限）⇒ 源码态卡兜底（§三.7 口径；不留无 handler 的钮）
+  // svg === null（render error / 3s 等待预算用尽——只停止等待、不中断同步渲染 / 超上限）⇒ 源码态卡兜底
+  //（§三.7 口径；不留无 handler 的钮）
   card.innerHTML = buildMermaidCardHtml(svg === null ? null : prepareMermaidSvg(svg))
   const codeBox = card.querySelector('.mmdc-src')
   if (codeBox) {
@@ -3392,16 +3673,181 @@ function toggleBlock(block: Block): void {
 }
 
 /**
+ * 批次 7A：消息 / 块渲染边界。
+ *
+ * `v-memo` 的可见性依赖必须覆盖模板真实读取的值：消息自身字段、逐块展开态、消息级动作条件、
+ * 局部态（复制/反馈/折叠/淡出）、以及卡片会读的 store 切片。输入框 `inputText` 是组件本地态，
+ * 不在这些依赖里 —— 打字只重渲 composer，不重渲消息列表。
+ */
+function partMemo(part: MessagePart, block: Block): unknown[] {
+  const deps: unknown[] = [
+    part.kind,
+    part.seg,
+    locale.value,
+    block.id,
+    block.kind,
+    isBlockExpanded(block),
+    ai.loading,
+    ai.messages[ai.messages.length - 1]?.id ?? '',
+    stageMode.value
+  ]
+  if (part.kind === 'reasoning') {
+    deps.push(
+      part.text,
+      part.streaming,
+      part.startedAt,
+      part.endedAt,
+      part.lastFrameAt,
+      part.lastFrameLocalAt,
+      part.truncated,
+      part.noticeCode,
+      part.originalChars,
+      part.returnedChars,
+      part.truncatedReason
+    )
+    return deps
+  }
+  if (part.kind === 'text') {
+    deps.push(part.text, part.streaming, part.truncated, part.noticeCode, part.originalChars, part.returnedChars, part.truncatedReason)
+    return deps
+  }
+  deps.push(
+    part.toolCallId,
+    part.name,
+    part.kind2,
+    part.status,
+    part.requiresAction,
+    part.args,
+    part.result,
+    part.reason,
+    part.resultView,
+    part.preflight,
+    part.submittedValues,
+    part.decision,
+    part.decidedAt,
+    part.outcome,
+    part.timeoutSeconds,
+    part.irreversible,
+    part.truncated,
+    part.noticeCode,
+    part.originalChars,
+    part.returnedChars,
+    part.truncatedReason,
+    isReadOnlyCard(part),
+    cardTypeOf(part),
+    gateFactsExpanded(part),
+    ai.gateSubmissionOf(part.toolCallId),
+    ai.gateAckOf(part.toolCallId),
+    ai.uiUndoToolCallId,
+    ai.uiUndoEntry,
+    ai.sheetApplied,
+    ai.sessionId
+  )
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    deps.push(liveForm, liveForm?.status, liveForm?.error, liveForm?.fieldErrors, liveForm?.values, formHostMessageId.value, ai.queuedForms, formQueuePosition(part.toolCallId))
+  }
+  if (isUploadHandoffPart(part)) {
+    deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part))
+  }
+  if (isSheetPreviewPart(part)) {
+    deps.push(sheetPreviewFor(part))
+  }
+  if (part.requiresAction) {
+    deps.push(runExpiryView.value, runExpiryNowMs.value)
+  }
+  if (appliedSummaryFor(part) !== null) {
+    deps.push(appliedSummaryFor(part))
+  }
+  return deps
+}
+
+function blockMemo(block: Block, message: ChatMessage): unknown[] {
+  const deps: unknown[] = [
+    message.id,
+    message.role,
+    locale.value,
+    block.id,
+    message.streaming,
+    isUserMsgCollapsed(message.id)
+  ]
+  for (const part of block.parts) {
+    deps.push(...partMemo(part, block))
+  }
+  return deps
+}
+
+function messageMemo(message: ChatMessage, index: number): unknown[] {
+  const lastId = ai.messages[ai.messages.length - 1]?.id ?? ''
+  const deps: unknown[] = [
+    message.id,
+    message.role,
+    message.parts.length,
+    message.parts,
+    message.streaming,
+    message.done,
+    message.stopped,
+    message.truncated,
+    message.synthetic,
+    message.timestamp,
+    message.pendingCall,
+    message.pendingCall?.status,
+    message.errorCard,
+    message.errorCard?.variant,
+    message.errorCard?.title,
+    message.errorCard?.summary,
+    message.errorCard?.guide,
+    message.errorCard?.code,
+    message.errorCard?.detail,
+    message.errorCard?.action,
+    index,
+    msgGapClass(index),
+    locale.value,
+    syntheticOf(message),
+    unconfirmedOf(message),
+    showMetaRow(message),
+    waitingKind(message),
+    isBreathing(message),
+    isFading(message),
+    showContinue(message),
+    showRetryTurn(message),
+    feedbackOf(message.id),
+    isMsgCopied(message.id),
+    copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
+    userMsgOverflowed.value.has(message.id),
+    userMsgExpanded.value.has(message.id),
+    degradeNotices.value[message.id] ?? null,
+    ai.loading,
+    lastId,
+    ai.runPhase,
+    ai.lastRoundOutcome,
+    ai.activeRunId,
+    stageMode.value
+  ]
+  for (const block of blocksOf(message)) {
+    deps.push(block.id, block.kind, isBlockExpanded(block))
+    // 段级依赖必须并进消息级 memo：否则消息行被 v-memo 跳过时，卡内 v-memo 根本没有机会更新。
+    for (const part of block.parts) {
+      deps.push(...partMemo(part, block))
+    }
+  }
+  return deps
+}
+
+/**
  * S6 批1（v7.10 ajv11 / 场景 19-e）→ 卡片三类型统一：
  * - 已决 HITL / GF 卡体恒在（门卡字段表 / GF 同一张表单），卡头恒可折叠；
  * - 普通工具卡：展开体渲染后 ≥ 1 行才可点；0 行 ⇒ disabled、无 chevron、无 hover、点击 no-op；
  * - requiresAction 待决 HITL/GF：强制展开、无 chevron，卡头**仍禁点**（放行/拒绝走门内双钮）。
  */
+function bodyRowsOf(part: ToolPart): boolean {
+  return cachedForLocale(bodyRowsCache, part, 'bodyRows', [part.args, part.result, part.reason, part.resultView, part.requiresAction], () => hasBodyRows(part))
+}
+
 function cardHeadEnabled(part: ToolPart): boolean {
   if (isReadOnlyCard(part)) {
     return true
   }
-  return !part.requiresAction && hasBodyRows(part)
+  return !part.requiresAction && bodyRowsOf(part)
 }
 
 /** 卡头 disabled 判据（与 enabled 互为反面，模板 `:disabled` / cursor / hover 三处同源）。 */
@@ -3411,7 +3857,7 @@ function cardHeadDisabled(part: ToolPart): boolean {
 
 /** 展开体是否渲染：普通工具卡有内容（或待动作卡强制展开）才渲；已决只读态卡体恒在。 */
 function cardBodyShown(part: ToolPart): boolean {
-  return hasBodyRows(part)
+  return bodyRowsOf(part)
 }
 
 /** AI 表格操作专项：待用户确认的写预览段（replace_values / update_rows / normalize commit=true）。 */
@@ -3567,19 +4013,21 @@ function cardHeadClass(part: ToolPart): string {
  * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
  */
 function cardTitle(part: ToolPart): string {
-  if (cardTypeOf(part) === 'form') {
-    return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
-  }
-  const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
-  if (target) {
-    const createBusiness = createTaskBusinessTitle(target)
-    if (createBusiness !== null) {
-      return isReadOnlyCard(part) ? createBusiness : t('ai.panel.confirmTitle', { business: createBusiness })
+  return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
+    if (cardTypeOf(part) === 'form') {
+      return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
     }
-    const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
-    return isReadOnlyCard(part) ? business : t('ai.panel.confirmTitle', { business })
-  }
-  return toolLabel(part.name)
+    const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
+    if (target) {
+      const createBusiness = createTaskBusinessTitle(target)
+      if (createBusiness !== null) {
+        return isReadOnlyCard(part) ? createBusiness : t('ai.panel.confirmTitle', { business: createBusiness })
+      }
+      const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
+      return isReadOnlyCard(part) ? business : t('ai.panel.confirmTitle', { business })
+    }
+    return toolLabel(part.name)
+  })
 }
 
 /**
@@ -3622,16 +4070,18 @@ function formRequiredSummary(part: ToolPart): string {
  * - 其余 tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
  */
 function cardSummary(part: ToolPart): string {
-  if (cardTypeOf(part) === 'form') {
-    if (!isReadOnlyCard(part)) {
-      return formRequiredSummary(part)
+  return cachedForLocale(cardSummaryCache, part, 'cardSummary', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues, part.args, part.preflight], () => {
+    if (cardTypeOf(part) === 'form') {
+      if (!isReadOnlyCard(part)) {
+        return formRequiredSummary(part)
+      }
+      return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
     }
-    return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
-  }
-  if (cardTypeOf(part) === 'hitl' && part.preflight?.target) {
-    return ''
-  }
-  return toolSummaryOrNull(part) ?? ''
+    if (cardTypeOf(part) === 'hitl' && part.preflight?.target) {
+      return ''
+    }
+    return toolSummaryOrNull(part) ?? ''
+  })
 }
 
 /** 右状态标签底座（demo r13/r14：9.5px / leading 1.7 / px-5 / 圆角 5 / 描边）。 */
@@ -3644,12 +4094,16 @@ const CARD_STATUS_TONE: Record<CardTone, string> = {
   neutral: 'text-[#57606a] bg-[#f6f7f9] border-[#e3e6ea]'
 }
 
+function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
+  return cachedForLocale(cardStatusCache, part, 'cardStatus', [part.name, part.kind2, part.status, part.decision, part.requiresAction], () => cardStatusOf(part))
+}
+
 function cardStatusClass(part: ToolPart): string {
-  return `${CARD_STATUS_BASE} ${CARD_STATUS_TONE[cardStatusOf(part).tone]}`
+  return `${CARD_STATUS_BASE} ${CARD_STATUS_TONE[cardStatusView(part).tone]}`
 }
 
 function cardStatusLabel(part: ToolPart): string {
-  return cardStatusOf(part).label
+  return cardStatusView(part).label
 }
 
 /**
@@ -3665,12 +4119,12 @@ function onCardHeadClick(block: Block, part: ToolPart): void {
 
 /** 普通工具卡参数行（字段表）：S6 起 args JSON 盒由 label-value 行替代（值可读化，敏感不掩码）。 */
 function paramRows(part: ToolPart): FieldRow[] {
-  return argRows(part.args)
+  return cachedForLocale(parameterRowsCache, part, 'paramRows', [part.args], () => argRows(part))
 }
 
 /** 发布冲突明细行（N8）：从段 reason 解析出 `defCode#rowKey：message` 明细 → 表格数据。 */
 function conflictRows(part: ToolPart): ConflictRow[] {
-  return parsePublishConflicts(part.reason)
+  return cachedForLocale(conflictRowsCache, part, 'conflictRows', [part.reason], () => parsePublishConflicts(part.reason))
 }
 
 /**
@@ -3681,7 +4135,9 @@ function conflictRows(part: ToolPart): ConflictRow[] {
  * `data.ref` 的求值域是 `part.result` 原文（与渲染器同源），所以两处传同一份文本。
  */
 function outputByView(part: ToolPart): boolean {
-  return part.resultView != null && isRenderableView(part.resultView, part.result ?? null)
+  return cachedForLocale(outputByViewCache, part, 'outputByView', [part.resultView, part.result], () => (
+    part.resultView != null && isRenderableView(part.resultView, part.result ?? null)
+  ))
 }
 
 /** 截断文案的公共字段（ToolPart / TextPart / ReasoningPart 同形）。 */
@@ -3762,7 +4218,7 @@ const DIAGNOSTIC_HUMAN_KEY: Record<PartDiagnostic, string> = {
 }
 
 function diagnosticOf(part: ToolPart): PartDiagnostic | null {
-  return partDiagnosticOf(part)
+  return cachedForLocale(diagnosticCache, part, 'diagnosis', [part.status, part.decision, part.kind2, part.reason, part.result], () => partDiagnosticOf(part))
 }
 
 function diagnosticHumanOf(part: ToolPart): string | null {
@@ -3771,7 +4227,7 @@ function diagnosticHumanOf(part: ToolPart): string | null {
 }
 
 function diagnosticTextOf(part: ToolPart): string | null {
-  return partDiagnosticText(part)
+  return cachedForLocale(diagnosticTextCache, part, 'diagnosis', [part.status, part.decision, part.kind2, part.reason, part.result], () => partDiagnosticText(part))
 }
 
 /** 「输出」位让位判据：分层命中的段若 result 自身就是机器向文本，就只留诊断详情（不双显）。 */
@@ -3894,7 +4350,9 @@ function alertIcon(tone: keyof typeof ALERT_TONE): string {
  * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON。
  */
 function gateRows(part: ToolPart): FieldRow[] {
-  return [{ key: t('ai.panel.actionField'), value: toolLabel(part.name) }, ...argRows(part.args, true)]
+  return cachedForLocale(gateRowsCache, part, 'gateRows', [part.args, part.name], () => (
+    [{ key: t('ai.panel.actionField'), value: toolLabel(part.name) }, ...argRows(part, true)]
+  ))
 }
 
 /**
@@ -3936,12 +4394,14 @@ function probe(): void {
  * 此口；渲染滞后（watch 先于 DOM 补丁触发）导致的「钉到旧底」由 nextTick 后的二次钉底
  * （批 D · D2①）与 RO 内容重钉（D2②）双重兜底。
  */
-function pinBottom(): void {
-  const wrap = msgWrapRef.value
-  if (!wrap) {
+function pinBottomTo(wrap: HTMLElement, target: number): void {
+  // 批次 7A：watch 的二次钉底与 RO 内容重钉可能落在同一帧。已在底部时直接返回，
+  // 不再重复写 scrollTop / 开静默期 —— 否则每帧多出一次「写-读」布局回合。
+  if (bottomDist(wrap) <= 1) {
+    followBottom.value = true
+    updateBackToBottom(0)
     return
   }
-  const target = wrap.scrollHeight
   // D2③：只有"真的把视口往上追了一段"（内容长高了）才会引出浏览器的补偿/回声事件 ——
   // 这类钉底才开静默期。挂载首钉（scrollTop 与 scrollHeight 本就相等）不开，
   // 否则用户刚进页面就上滑会被误判成"布局回声"（既有跟随口径一格不动）。
@@ -3953,6 +4413,14 @@ function pinBottom(): void {
   }
   followBottom.value = true
   updateBackToBottom(bottomDist(wrap))
+}
+
+function pinBottom(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  pinBottomTo(wrap, wrap.scrollHeight)
 }
 
 function scrollBottom(force = false): void {
@@ -4159,6 +4627,7 @@ async function send(): Promise<void> {
       const target = ai.messages[cut] as ChatMessage
       target.parts = [{ kind: 'text', seg: 0, text, streaming: false }]
       deriveProjections(target)
+      markUserMsgDirty(target.id)
       ai.messages.splice(cut + 1)
       pinBottom()
       skipUserRecord = true
@@ -4341,7 +4810,12 @@ function toggleGateFacts(toolCallId: string): void {
 
 /** 只读摘要行（影响面 / 条件摘要 / 权威发布模式；空值由纯函数剔除，前端不补猜）。 */
 function gateFactsOf(part: ToolPart): FieldRow[] {
-  return gateFactsRows(part.preflight)
+  return cachedForLocale(gateFactsCache, part, 'gateFacts', [
+    part.preflight,
+    part.preflight?.impact,
+    part.preflight?.conditionSummary,
+    part.preflight?.publishMode
+  ], () => gateFactsRows(part.preflight))
 }
 
 /**
@@ -4413,23 +4887,73 @@ watch(
   },
   async () => {
     scrollBottom()
-    // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 同一帧后重跑单一 measure
-    // （内容变化不进滚动指纹的折叠判据，故在本 watch 内顺带兜底）。
-    void nextTick(measureUserMsgOverflow)
+    // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 只把**末条用户消息**标脏，
+    // 不再逐 token 扫全部用户正文；助手流式 token 不产生任何 measure。
+    const last = ai.messages[ai.messages.length - 1]
+    if (last?.role === 'user') {
+      markUserMsgDirty(last.id)
+    }
     // 批 D · D2①：watch 回调跑在**组件更新之前**（flush:'pre'），此时读到的 scrollHeight 还是
     // 旧内容的高度 —— 钉底会停在旧底，等 DOM 补丁把内容垫高后视图就离底一截（长段补发尤其明显）。
     // 因此在同一帧的 DOM 补丁之后再钉一次（跟随态下才钉，尊重用户上滑）。
+    // 批次 7A：第二次钉底与 RO 已在 pinBottomTo 里按「是否已在底部」去重。
     await nextTick()
+    if (dirtyUserMsgIds.size > 0) {
+      measureUserMsgOverflow()
+    }
     scrollBottom()
   }
 )
 
-watch(() => ai.expanded, (expanded) => {
-  if (expanded) {
-    // R-161：撤 :1052 setTimeout hack —— RO 不覆盖「容器自身尺寸变」的时序（面板展开/收起
-    // 导致 clientHeight 变、内容相对底部位置漂移），expanded watch 保留但改走统一 pinBottom()。
-    pinBottom()
+/**
+ * 批次 7A：消息视口观察器 / 横滚捕获监听随 `ai.expanded` 迁移。
+ *
+ * 面板用 `v-if/v-else` 切换收起条与完整面板，但组件实例不卸载 —— 旧实现只在 onMounted 绑定、
+ * onBeforeUnmount 解绑，收起后观察器仍持有已脱离的 DOM，展开后 RO / 横滚联动 / mermaid 水合都
+ * 指向旧树。现在收起即解绑并清空 `mermaidPending`，展开后按新 DOM 重新绑定，不等组件卸载。
+ */
+let msgResizeObserver: ResizeObserver | null = null
+let msgScrollBound: HTMLElement | null = null
+let lastMsgScrollHeight = 0
+
+function detachMessageViewObservers(): void {
+  msgResizeObserver?.disconnect()
+  msgResizeObserver = null
+  if (msgScrollBound !== null) {
+    msgScrollBound.removeEventListener('scroll', onTableScrollCapture, { capture: true })
+    msgScrollBound = null
   }
+  mermaidObserver?.disconnect()
+  mermaidObserver = null
+  mermaidPending.clear()
+  lastMsgScrollHeight = 0
+}
+
+function attachMessageViewObservers(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  lastMsgScrollHeight = wrap.scrollHeight
+  if (typeof ResizeObserver !== 'undefined') {
+    msgResizeObserver = new ResizeObserver(onMsgWrapResized)
+    msgResizeObserver.observe(msgContentRef.value ?? wrap)
+  }
+  wrap.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })
+  msgScrollBound = wrap
+}
+
+watch(() => ai.expanded, async (expanded) => {
+  if (!expanded) {
+    detachMessageViewObservers()
+    return
+  }
+  // v-if 分支在本次 patch 后才挂载：等 DOM 落地再绑新树。
+  await nextTick()
+  attachMessageViewObservers()
+  measureUserMsgOverflow()
+  // R-161：容器自身尺寸变化导致的相对底部漂移，统一走 pinBottom()。
+  pinBottom()
 })
 
 /**
@@ -4443,9 +4967,6 @@ watch(() => ai.expanded, (expanded) => {
  * `overflow-y-auto` 里长高只改它的 scrollHeight、**不改它的 box**，RO 观测它等于观测一个
  * 不变的目标 —— 真正的"内容长高"信号只有内容层的尺寸变化才给得出。
  */
-let msgResizeObserver: ResizeObserver | null = null
-let lastMsgScrollHeight = 0
-
 function onMsgWrapResized(): void {
   const wrap = msgWrapRef.value
   if (!wrap) {
@@ -4453,7 +4974,7 @@ function onMsgWrapResized(): void {
   }
   const height = wrap.scrollHeight
   if (height > lastMsgScrollHeight && followBottom.value) {
-    pinBottom()
+    pinBottomTo(wrap, height)
   }
   lastMsgScrollHeight = height
 }
@@ -4486,15 +5007,10 @@ onMounted(async () => {
   if (!ai.messages.length) {
     await ai.loadHistory()
   }
-  const wrap = msgWrapRef.value
-  if (wrap && typeof ResizeObserver !== 'undefined') {
-    lastMsgScrollHeight = wrap.scrollHeight
-    msgResizeObserver = new ResizeObserver(onMsgWrapResized)
-    // D2②：观测内容层（滚动容器自身的 box 不随内容变，观测它对内容增长零触发）
-    msgResizeObserver.observe(msgContentRef.value ?? wrap)
+  // 收起态挂载时没有消息树可观测；展开 watch 会在新 DOM 落地后补绑。
+  if (ai.expanded) {
+    attachMessageViewObservers()
   }
-  // R-165 S5a 项 5：长表格双区横滚联动（scroll 不冒泡 ⇒ 消息容器上捕获监听）
-  wrap?.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })
   // R-165 S4：首渲落地后跑一次用户长消息 measure（历史回读路径；jsdom 零高环境恒不溢出）。
   await nextTick()
   measureUserMsgOverflow()
@@ -4511,10 +5027,8 @@ onBeforeUnmount(() => {
     clearTimeout(timer)
   }
   fadeTimers.clear()
-  // R-161：RO disconnect（照上件纪律）+ 平滑回底类计时器收尾
-  msgResizeObserver?.disconnect()
-  msgResizeObserver = null
-  msgWrapRef.value?.removeEventListener('scroll', onTableScrollCapture, { capture: true })
+  // 批次 7A：统一从绑定点解绑（RO / 横滚捕获 / mermaid IO / pending），与收起路径同一函数。
+  detachMessageViewObservers()
   for (const timer of copyFlashTimers.values()) {
     window.clearTimeout(timer)
   }
@@ -4532,11 +5046,50 @@ onBeforeUnmount(() => {
   }
   // 问题1 偏差修正批 aj14d ②：注销流式防抖 flush 回调（面板卸载后不再重入渲染）
   setStreamFlushHandler(null)
-  // 性能专项（2026-10-24）：mermaid 视口观察器与待渲染登记随面板销毁（避免持有已脱离的源码块）
-  mermaidObserver?.disconnect()
-  mermaidObserver = null
-  mermaidPending.clear()
+  // 批次 7A：组件销毁时释放两张 Markdown 缓存（收起/展开不销毁，缓存保留以复用）。
+  historyMdCache.clear()
+  historyMdCacheBytes = 0
+  streamMdCache.clear()
   ai.stopWorkspaceSync()
+})
+
+/** 批次 7A 可观测面：只读调试视图（回归测试 / 后续 profile 用，不参与 UI 渲染）。 */
+defineExpose({
+  __batch7aDebug: {
+    get mermaidPendingSize() {
+      return mermaidPending.size
+    },
+    get scrollBound() {
+      return msgScrollBound
+    },
+    get historyCacheKeys() {
+      return Array.from(historyMdCache.keys())
+    },
+    get historyCacheSize() {
+      return historyMdCache.size
+    },
+    get historyCacheBytes() {
+      return historyMdCacheBytes
+    },
+    get historyCacheHits() {
+      return historyMdHits
+    },
+    get historyCacheMisses() {
+      return historyMdMisses
+    },
+    get streamCacheSize() {
+      return streamMdCache.size
+    },
+    get markdownHtmlCalls() {
+      return markdownHtmlCalls
+    },
+    get toolDeriveMisses() {
+      return { ...toolDeriveMisses }
+    },
+    get measurePasses() {
+      return measurePasses.map((ids) => [...ids])
+    }
+  }
 })
 </script>
 

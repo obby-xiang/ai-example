@@ -6,6 +6,9 @@
  * `tool.<name>.<variant>`；本文件只保留**选哪个变体**的判定（参数有无决定变体）。
  * zh 值逐字等于迁移前模板（`tool-summary-parity.spec.ts` 快照钉死）。
  *
+ * 批次7B：args 解析不再自带一份 `JSON.parse` —— 与 `utils/blocks.ts` 共用 `toolArgsOf`
+ * 的 WeakMap 缓存（同一段同一帧只解析一次）。
+ *
  * 全集来源（逐个核名，非凭猜）：
  * - 后端 @Tool（AiTools.java）：list_config_defs / get_config_def / list_tasks /
  *   get_workspace_state / check_job_status / get_row_count / create_task /
@@ -20,6 +23,7 @@
 
 import i18n from '@/locales'
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
+import { toolArgsOf } from '@/utils/blocks'
 
 /** 状态词全集（10 态）；兜底摘要与右状态标签共用同一份译文。 */
 export const TOOL_STATUSES: readonly ToolRunStatus[] = [
@@ -72,16 +76,9 @@ function taskTypeLabel(args: ToolArgs): string {
   return type === 'IMPORT' ? '导入' : type === 'EXPORT' ? '导出' : type
 }
 
-function toolArgsOf(part: ToolPart): ToolArgs {
-  if (!part.args) {
-    return {}
-  }
-  try {
-    const parsed: unknown = JSON.parse(part.args)
-    return parsed && typeof parsed === 'object' ? (parsed as ToolArgs) : {}
-  } catch {
-    return {}
-  }
+function summaryArgsOf(part: ToolPart): ToolArgs {
+  // 批次7B：与 blocks.ts 共用同一份 args 缓存（同一帧只解析一次）。
+  return toolArgsOf(part) ?? {}
 }
 
 /**
@@ -256,7 +253,7 @@ function summaryFor(name: string, args: ToolArgs): string | null {
  * 无映射工具与解析失败态兜底「工具名 + 状态词」。
  */
 export function toolSummary(part: ToolPart): string {
-  const args = toolArgsOf(part)
+  const args = summaryArgsOf(part)
   const mapped = summaryFor(part.name, args)
   if (mapped) {
     return mapped

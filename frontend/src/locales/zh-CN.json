@@ -180,6 +180,7 @@
       "sessionPurgeIncomplete": "旧会话的 AI 数据尚未删净（不影响新对话）",
       "staleConfirmCard": "这轮对话已失效，请重新提问。",
       "copiedNewTab": "已在新页签开始新会话；原页签的对话不受影响。",
+      "mirrorQuotaExceeded": "浏览器本地镜像写入失败（可能存储已满或处于隐私模式）：刷新后可能无法完整恢复本轮现场，完整历史仍在服务端。",
       "sessionPurged": "这个会话已在服务端销毁，已为你新建对话。刚才那条消息没有发出，内容已留在输入框，请再点一次发送。",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
       "upstreamRetry": "上游连接中断，正在重试（本轮尚未产出内容）",
@@ -1487,6 +1488,7 @@
     }
   },
   "markdown": {
-    "copyCode": "复制代码"
+    "copyCode": "复制代码",
+    "degradeNotice": "本条消息超过 1 万字符，已关闭代码高亮与图表渲染（正文结构照常显示）。"
   }
 }

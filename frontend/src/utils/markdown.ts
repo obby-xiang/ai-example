@@ -28,12 +28,26 @@
  *      的准入 + 静默满窗后的 flush 回调），把逐 token 重排压到 ≤14 次/秒 —— 块的**首次**渲染恒立即
  *      落地（不延后首帧），窗口外的增量也恒立即落地；窗口内沿用上一帧结果（调用方据 flush 回调重入）；
  *   ③ **块级稳定 key**：每个围栏按「**块序号（本次渲染的出现序）+ 语言**」生成
- *      `data-fence-key="f{n}-{lang}"`（fence 规则内自增，见 `nextFenceKey`），
- *      流式未闭合阶段与闭合之后序号/语言均不变 ⇒ 渲染产物带稳定身份，
- *      mermaid 卡按该 key 绑定槽位（不再靠位置下标），「代码块 → mermaid 卡」的替换不会打到别的块上。
+ *      `data-fence-key="f{n}-{lang}"`（fence 规则内自增，见 `nextFenceKey`；批次 7C 起 key 先进账本，
+ *      净化后按渲染器 token 回填 —— 见下方「批次 7C ①」），流式未闭合阶段与闭合之后序号/语言均不变
+ *      ⇒ 渲染产物带稳定身份，mermaid 卡按该 key 绑定槽位（不再靠位置下标），
+ *      「代码块 → mermaid 卡」的替换不会打到别的块上。
  * - mermaid（§三.7）：securityLevel:'strict' + htmlLabels:false + suppressErrorRendering:true +
  *   maxTextSize / maxEdges 硬上限，渲染产物 SVG 过 DOMPurify SVG profile；
- *   失败（render error / 超时 3s / 超上限）保留源码块；组件侧按可见性惰性水合。
+ *   失败（render error / 3s 等待预算用尽——只停止等待、不中断同步渲染 / 超上限）保留源码块。
+ *
+ * - **批次 7C（2026-10-26）三处收口**：
+ *   ① **围栏槽位身份只由渲染器生成**（FE-42）：`data-fence-key` **不进白名单** —— 模型原生 HTML
+ *      写的 key 一律在净化期被剥；渲染器在 fence 规则里按出现序记 key 账本，并给 pre 打一枚
+ *      随机 `data-fence-token`（净化期唯一放行的内部标记），净化后按 token 认领、回填
+ *      `data-fence-key="f{n}-{lang}"` 并立刻删掉 token。模型既不能携带/覆盖槽位属性，
+ *      也不能挤占序号或把自己登记成 mermaid 槽位（mermaid 登记改在回填后、只认带 key 的 pre）。
+ *   ② **mermaid「可见 + idle」双门控**：组件侧 IntersectionObserver 管「可见」，渲染层
+ *      `renderMermaidSvg` 进 idle（`requestIdleCallback`，1s 超时兜底；无 rIC 退 `setTimeout(0)`）
+ *      才开始 import/渲染。3s `Promise.race` 只是**等待预算、不是中断**（JS 单线程，同步渲染
+ *      无法被抢占）；超时后迟到的 SVG 直接丢弃（不缓存、不回填），源码块保留，下次仍重试。
+ *   ③ **>10000 字符的降级提示按条只出一次**：`renderMarkdown` 产物带 `degraded` 与 `degradeNotice`；
+ *      同一消息（`blockKey` 去掉段号）的首个降级帧给文案，后续帧为 null，下一条消息不粘滞。
  */
 import MarkdownIt from 'markdown-it'
 import type { MarkdownIt as MarkdownItInstance } from 'markdown-it'
@@ -92,8 +106,8 @@ export function highlightLanguages(): string[] {
 
 /** 长文降级阈值（字符数，决策卡 §三.2「>10k」；**按条**短路、不粘滞）。 */
 export const DEGRADE_AT_CHARS = 10_000
-/** mermaid 单次渲染超时（ms），超时按失败兜底（源码块保留）。 */
-const MERMAID_TIMEOUT_MS = 3_000
+/** mermaid 单次渲染的**等待预算**（ms）：到点只释放等待方，不中断同步渲染（见 renderMermaidSvg）。 */
+export const MERMAID_TIMEOUT_MS = 3_000
 /** mermaid 图源硬上限（字符）——超出由 mermaid 抛错，回源码卡（防超长图卡死主线程）。 */
 export const MERMAID_MAX_TEXT_SIZE = 30_000
 /** mermaid 边数硬上限——同上。 */
@@ -118,9 +132,10 @@ const ALLOWED_ATTR = [
   'class', 'href', 'src', 'alt', 'type',
   // svg 图标几何属性（复制图标：rect 的 x/y/width/height/rx、path 的 d、polyline 的 points、svg 的 viewBox）
   'viewBox', 'd', 'points', 'x', 'y', 'width', 'height', 'rx',
-  // 问题1 偏差修正批 aj14d ③：围栏块稳定身份（渲染层注入，`f{序号}-{语言}`）；显式单条放行
-  // —— `ALLOW_DATA_ATTR: false` 不变（任意 data-* 仍被剥），此处只开这一枚惰性标记属性。
-  'data-fence-key'
+  // 批次 7C（FE-42）：`data-fence-key` **不是白名单属性** —— 模型原生 HTML 写了也在净化期被剥，
+  // 围栏身份只能由渲染器在净化后回填。净化期唯一放行的是内部认领标记 `data-fence-token`
+  // （随机 nonce，回填即从产物删除；模型伪造的 token 值不匹配、同样被删）。
+  'data-fence-token'
 ]
 
 /**
@@ -303,6 +318,24 @@ function joinClass(token: { attrJoin: (name: string, value: string) => void }, c
   }
 }
 
+/* ---------- 批次 7C（FE-42）：围栏槽位身份的「渲染器账本 + 净化后回填」 ----------
+ *
+ * 围栏身份（`f{序号}-{语言}`）只能由渲染器的 fence 规则按**出现序**生成：
+ * ① 每次单块渲染前生成一枚随机 nonce，fence 规则把 key 记进账本、并给 `<pre>` 打
+ *    `data-fence-token="{nonce}"`（净化期唯一放行的内部标记，不是槽位身份）；
+ * ② `data-fence-key` 不在 DOMPurify 白名单 ⇒ 模型原生 HTML 写的 key 在净化期被剥；
+ * ③ 净化后按 token 认领 pre、回填 key 并立刻删掉 token（模型伪造的 token 值不匹配 ⇒ 同样删除）。
+ * 因而模型既不能携带/覆盖槽位属性，也不能挤占序号；mermaid 登记同样只认回填后的 key。
+ * ------------------------------------------------------------------------- */
+const fenceLedger: string[] = []
+let activeFenceNonce = ''
+let fenceNonceSeq = 0
+
+function newFenceNonce(): string {
+  fenceNonceSeq += 1
+  return `fk${fenceNonceSeq.toString(36)}${Math.random().toString(36).slice(2, 10)}`
+}
+
 /**
  * R-165 S5c：把「渲染层吐工具类」装到实例上 —— 原 ai-chat.css 的正文排版族全部改由此处注入
  * （v-html 节点不带 scope，工具类挂在元素自身属性上 ⇒ 不再依赖全局样式表）。
@@ -340,13 +373,15 @@ function applyTypographyRules(instance: MarkdownItInstance): void {
   wrap('td_open', MD_TD_CLASS)
   wrap('code_inline', MD_CODE_INLINE_CLASS)
   // fence：默认规则把语言 class 挂在 <code> 上、<pre> 是裸标签 ⇒ 这里给 <pre> 补上排版类，
-  // 并盖稳定身份（aj14d ③：`data-fence-key="f{序号}-{语言}"`，序号本次渲染内自增 = 围栏出现序）。
+  // 并记下稳定身份（批次 7C：key 进账本，pre 只带内部 token；净化后由 backfillFenceKeys 回填）。
   const fence = rules.fence
   rules.fence = (tokens, idx, options, env, self) => {
     const out = fence ? fence(tokens, idx, options, env, self) : ''
-    return out.startsWith('<pre>')
-      ? `<pre class="${escapeHtml(MD_FENCE_PRE_CLASS)}" data-fence-key="${escapeHtml(nextFenceKey(tokens[idx].info))}">${out.slice(5)}`
-      : out
+    if (!out.startsWith('<pre>')) {
+      return out
+    }
+    fenceLedger.push(nextFenceKey(tokens[idx].info))
+    return `<pre class="${escapeHtml(MD_FENCE_PRE_CLASS)}" data-fence-token="${escapeHtml(activeFenceNonce)}">${out.slice(5)}`
   }
 }
 
@@ -485,8 +520,12 @@ export function sanitizeSvg(html: string): string {
 /** 渲染结果：净化后 HTML + 待渲染 mermaid 源码块（闭合围栏才出现）。 */
 export interface MarkdownRender {
   html: string
-  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）；`key` = 稳定身份（aj14d ③）。 */
+  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）；`key` = 稳定身份（批次 7C 回填）。 */
   mermaid: Array<{ index: number; key: string; source: string }>
+  /** 本条是否命中 >10k 按条降级（关高亮与 mermaid，结构照渲）。 */
+  degraded: boolean
+  /** 降级提示文案：**本条消息只在首个降级帧给出**，后续帧 / 非降级帧为 null。 */
+  degradeNotice: string | null
 }
 
 /* ---------- 问题1 偏差修正批 aj14d ②：流式块重绘防抖（75ms 合并一次） ---------- */
@@ -528,9 +567,9 @@ export function resetStreamDebounce(): void {
   streamRenders.clear()
 }
 
-/** R-165 S5c：`<pre>` 现带排版工具类（见 MD_FENCE_PRE_CLASS）⇒ 属性段不再可为空。
- *  aj14d ③：属性段另带 `data-fence-key`（稳定身份），登记 mermaid 时一并取用。 */
-const mermaidIndexRe = /<pre([^>]*)><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
+/** 批次 7C：mermaid 登记改在「净化 + key 回填」之后跑 —— 只认带 `data-fence-key` 的 pre
+ *  （模型原生 HTML 的 `language-mermaid` 预块没有 key，不会进清单、也抢不走槽位）。 */
+const mermaidIndexRe = /<pre\b([^>]*)><code class="language-mermaid">([\s\S]*?)<\/code><\/pre>/g
 
 /* ---------- R-165 S5a：共享配方常量（demo v7.7 `.icbtn` / `.tip` / 6px 滚动条口径逐条照搬） ---------- */
 
@@ -621,8 +660,8 @@ function wrapFenceFigures(html: string): string {
   return html.replace(
     fenceFigureRe,
     (_m, preAttrs: string, lang: string, code: string) =>
-      // aj14d ③：稳定身份随容器改写原样带到 figure 上（同一块的 key 不因「裸 pre → 图容器」而变）
-      `<figure class="${FIGURE_CODE_CLASS}"${fenceKeyAttr(preAttrs)}><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
+      // 批次 7C：key 由净化后回填（只落在 pre 槽位上）；figure 不再携带任何槽位属性
+      `<figure class="${FIGURE_CODE_CLASS}"><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
       `<span class="${FIG_HLIB_CLASS}">highlight.js</span>` +
       `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="${i18n.global.t('markdown.copyCode')}">${COPY_ICON_SVGS}` +
       `<span class="tip ${TIP_CLASS}">${i18n.global.t('markdown.copyCode')}<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
@@ -679,10 +718,68 @@ function nextFenceKey(info: string | undefined): string {
   return `f${fenceRenderSeq}-${lang}`
 }
 
-/** 从属性串里取稳定身份（图容器改写 / mermaid 登记时沿用原始 pre 上的那一枚）。 */
-function fenceKeyAttr(attrs: string): string {
-  const key = /data-fence-key="([^"]*)"/.exec(attrs)?.[1] ?? ''
-  return key === '' ? '' : ` data-fence-key="${escapeHtml(key)}"`
+/**
+ * 批次 7C（FE-42）：净化后回填围栏槽位身份。
+ *
+ * <p>只认「带本帧 nonce 的 `data-fence-token`」的标签 —— 那是 fence 规则给渲染器围栏打的内部标记。
+ * 模型原生 HTML 要么被白名单剥掉 `data-fence-key`，要么 token 值不匹配 ⇒ 既拿不到 key，
+ * 也不消耗账本序号。回填后 token 一律删除（含模型伪造的）。
+ */
+function backfillFenceKeys(html: string, keys: string[], nonce: string): string {
+  let next = 0
+  return html.replace(/<([a-zA-Z][\w:-]*)([^>]*)>/g, (_match, tag: string, attrs: string) => {
+    const claimed = attrs.includes(`data-fence-token="${nonce}"`)
+    const cleaned = attrs
+      .replace(/\sdata-fence-token="[^"]*"/g, '')
+      .replace(/\sdata-fence-key="[^"]*"/g, '')
+    if (!claimed) {
+      return `<${tag}${cleaned}>`
+    }
+    const key = keys[next]
+    next += 1
+    return key === undefined
+      ? `<${tag}${cleaned}>`
+      : `<${tag}${cleaned} data-fence-key="${escapeHtml(key)}">`
+  })
+}
+
+/* ---------- 批次 7C：>10000 字符降级提示「按条只出一次」 ----------
+ *
+ * `renderMarkdown` 的 `degradeNotice` 只在**某条消息的首个降级帧**给文案；后续帧为 null。
+ * 记账键 = `blockKey` 去掉段号（`messageId:seg` → `messageId`），所以同一条消息的多个正文段
+ * 不会各弹一次；换一条消息自然重新计（不粘滞）。FIFO 上限防长会话无限增长。
+ * ------------------------------------------------------------------------- */
+const degradeNotified = new Set<string>()
+const DEGRADE_NOTICE_MAX = 256
+
+/** 清空降级提示记账（测试/会话切换用）。 */
+export function resetDegradeNotices(): void {
+  degradeNotified.clear()
+}
+
+/** 消息键（`blockKey` 形如 `messageId:seg`；无冒号时整串就是消息键）。 */
+function messageKeyOf(blockKey: string): string {
+  const at = blockKey.lastIndexOf(':')
+  return at > 0 ? blockKey.slice(0, at) : blockKey
+}
+
+/** 取本条消息的降级提示：首次返回文案，之后返回 null（无 blockKey ⇒ 无消息身份，不提示）。 */
+function claimDegradeNotice(blockKey?: string): string | null {
+  if (blockKey === undefined) {
+    return null
+  }
+  const key = messageKeyOf(blockKey)
+  if (degradeNotified.has(key)) {
+    return null
+  }
+  if (degradeNotified.size >= DEGRADE_NOTICE_MAX) {
+    const first = degradeNotified.values().next().value
+    if (first !== undefined) {
+      degradeNotified.delete(first)
+    }
+  }
+  degradeNotified.add(key)
+  return i18n.global.t('markdown.degradeNotice')
 }
 
 /**
@@ -875,26 +972,25 @@ function renderChunk(
   parsed?: ParsedSource | null
 ): ChunkResult {
   const startSeq = fenceRenderSeq
-  // 已有整篇 token 时直接走 renderer（等价 instance.render，但省掉一次 parse）
-  let html =
-    parsed === undefined || parsed === null
-      ? instance.render(source)
-      : instance.renderer.render(parsed.tokens, instance.options, parsed.env)
+  const ledgerStart = fenceLedger.length
+  activeFenceNonce = newFenceNonce()
+  const nonce = activeFenceNonce
+  let html: string
+  let keys: string[] = []
+  try {
+    // 已有整篇 token 时直接走 renderer（等价 instance.render，但省掉一次 parse）
+    html =
+      parsed === undefined || parsed === null
+        ? instance.render(source)
+        : instance.renderer.render(parsed.tokens, instance.options, parsed.env)
+    keys = fenceLedger.slice(ledgerStart)
+  } finally {
+    // 账本只服务本次 chunk；即使渲染抛错也不把残缺 key 留给下一块
+    fenceLedger.length = ledgerStart
+  }
   const fences = fenceRenderSeq - startSeq
   html = wrapTables(html)
-  const mermaid: Array<{ index: number; key: string; source: string }> = []
   if (options.collectMermaid) {
-    // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
-    // aj14d ③：key 直接读该围栏 pre 上的稳定身份（渲染期已盖，不另算序号）。
-    let match: RegExpExecArray | null
-    mermaidIndexRe.lastIndex = 0
-    while ((match = mermaidIndexRe.exec(html)) !== null) {
-      mermaid.push({
-        index: options.mermaidBase + mermaid.length,
-        key: /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? '',
-        source: unescapeHtml(match[2])
-      })
-    }
     // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
     html = wrapFenceFigures(html)
   }
@@ -905,7 +1001,27 @@ function renderChunk(
       html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
     }
   }
-  return { html: sanitizeHtml(html), fences, mermaid }
+  // 批次 7C：净化期 key 被白名单剥掉，这里只给「渲染器 token 认领的 pre」按出现序回填
+  const safe = backfillFenceKeys(sanitizeHtml(html), keys, nonce)
+  const mermaid: Array<{ index: number; key: string; source: string }> = []
+  if (options.collectMermaid) {
+    // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
+    // 只认带 key 的 pre ⇒ 模型原生 HTML 的 language-mermaid 预块不进清单。
+    let match: RegExpExecArray | null
+    mermaidIndexRe.lastIndex = 0
+    while ((match = mermaidIndexRe.exec(safe)) !== null) {
+      const key = /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? ''
+      if (key === '') {
+        continue
+      }
+      mermaid.push({
+        index: options.mermaidBase + mermaid.length,
+        key,
+        source: unescapeHtml(match[2])
+      })
+    }
+  }
+  return { html: safe, fences, mermaid }
 }
 
 /**
@@ -924,6 +1040,8 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
     tailSource = nl >= 0 ? tailRaw.slice(nl + 1) : ''
   }
   const useDegraded = text.length > DEGRADE_AT_CHARS
+  // 批次 7C：提示按「条」记账 —— 本条消息的首个降级帧给文案，后续帧为 null；短消息恒 null
+  const degradeNotice = useDegraded ? claimDegradeNotice(blockKey) : null
   const instance = useDegraded ? mdDegraded : md
   const cacheKey = streaming && blockKey !== undefined ? blockKey : null
   try {
@@ -940,7 +1058,7 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
         mermaidBase: 0,
         stripTailLanguage: fenceOpen
       })
-      return { html: chunk.html, mermaid: chunk.mermaid }
+      return { html: chunk.html, mermaid: chunk.mermaid, degraded: useDegraded, degradeNotice }
     }
     const probe = probePrefix(text)
     const boundary = probe.length
@@ -955,7 +1073,7 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
         { collectMermaid: false, mermaidBase: 0, stripTailLanguage: fenceOpen },
         probe.parsed
       )
-      return { html: chunk.html, mermaid: chunk.mermaid }
+      return { html: chunk.html, mermaid: chunk.mermaid, degraded: useDegraded, degradeNotice }
     }
     let prefix: PrefixEntry
     const cached = prefixCache.get(cacheKey)
@@ -1013,7 +1131,7 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
       mermaidBase: 0,
       stripTailLanguage: fenceOpen
     })
-    return { html: prefix.html + rest.html, mermaid: rest.mermaid }
+    return { html: prefix.html + rest.html, mermaid: rest.mermaid, degraded: useDegraded, degradeNotice }
   } finally {
     tailFenceFingerprint = null
   }
@@ -1060,9 +1178,35 @@ function loadMermaid(): Promise<typeof import('mermaid')> {
 /** mermaid 渲染缓存（源码指纹 → 净化后 SVG），失败不缓存。 */
 const mermaidCache = new Map<string, string>()
 
+/** mermaid 水合的 idle 等待上限（ms）：浏览器迟迟不空闲时到点也必须开工，避免图永远不现身。 */
+export const MERMAID_IDLE_TIMEOUT_MS = 1_000
+
+/** 等一次浏览器 idle（无 rIC 环境退 `setTimeout(0)`）——组件「可见」门控之后的第二层门控。 */
+function whenIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    const ric = (globalThis as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+    }).requestIdleCallback
+    if (typeof ric === 'function') {
+      ric(() => resolve(), { timeout: MERMAID_IDLE_TIMEOUT_MS })
+      return
+    }
+    setTimeout(resolve, 0)
+  })
+}
+
 /**
- * 渲染单个 mermaid 图源（围栏闭合后一次性调用；render error/超时 ⇒ 返回 null，
+ * 渲染单个 mermaid 图源（围栏闭合后一次性调用；render error / 等待超时 ⇒ 返回 null，
  * 调用方保留源码块——§三.7 失败兜底）。返回净化后 SVG 字符串。
+ *
+ * <p>批次 7C 两条硬口径：
+ * <ul>
+ *   <li>**进入 idle 才开工**：组件侧 IntersectionObserver 只管「可见」，这里再等一次
+ *       `requestIdleCallback`（1s 超时兜底）⇒ 「可见且 idle」双门控，不在首屏/流式高负载时抢主线程。</li>
+ *   <li>**3s `Promise.race` 是等待预算、不是中断**：JS 单线程，mermaid 一旦进入同步布局/渲染，
+ *       定时器根本无法插进去抢占；超时只让**等待方**拿到 null。迟到的 SVG 会被 Promise.race
+ *       丢弃（不入缓存、不回填槽位），源码块保留，下一次调用仍会重试。</li>
+ * </ul>
  */
 export async function renderMermaidSvg(source: string): Promise<string | null> {
   const key = source
@@ -1071,21 +1215,30 @@ export async function renderMermaidSvg(source: string): Promise<string | null> {
     return hit
   }
   try {
+    await whenIdle()
     const mod = await loadMermaid()
     const id = `mmd-${Math.abs(hashCode(key)).toString(36)}`
-    const timeout = new Promise<never>((_resolve, reject) =>
-      setTimeout(() => reject(new Error('mermaid timeout')), MERMAID_TIMEOUT_MS)
-    )
-    const result = (await Promise.race([mod.default.render(id, source), timeout])) as { svg: string }
-    const svg = sanitizeSvg(result.svg)
-    if (mermaidCache.size >= MERMAID_CACHE_MAX) {
-      const first = mermaidCache.keys().next().value
-      if (first !== undefined) {
-        mermaidCache.delete(first)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('mermaid timeout')), MERMAID_TIMEOUT_MS)
+    })
+    try {
+      const result = (await Promise.race([mod.default.render(id, source), timeout])) as { svg: string }
+      const svg = sanitizeSvg(result.svg)
+      if (mermaidCache.size >= MERMAID_CACHE_MAX) {
+        const first = mermaidCache.keys().next().value
+        if (first !== undefined) {
+          mermaidCache.delete(first)
+        }
+      }
+      mermaidCache.set(key, svg)
+      return svg
+    } finally {
+      // 超时/成功都清掉等待计时器（迟到结果已被 race 丢弃，不会走到这里）
+      if (timer !== null) {
+        clearTimeout(timer)
       }
     }
-    mermaidCache.set(key, svg)
-    return svg
   } catch {
     return null
   }

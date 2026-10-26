@@ -180,6 +180,7 @@
       "sessionPurgeIncomplete": "The old session's AI data has not been fully deleted (the new conversation is unaffected)",
       "staleConfirmCard": "This turn is no longer available. Please ask again.",
       "copiedNewTab": "A new conversation was started in this tab; the conversation in the original tab is unaffected.",
+      "mirrorQuotaExceeded": "The browser mirror could not be written (storage may be full or private mode may be on): this tab's current state may not fully survive a refresh. The full history is still kept on the server.",
       "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Upstream connection interrupted, retrying (no content produced yet this turn)",
@@ -1487,6 +1488,7 @@
     }
   },
   "markdown": {
-    "copyCode": "Copy code"
+    "copyCode": "Copy code",
+    "degradeNotice": "This message exceeds 10,000 characters; syntax highlighting and diagrams are disabled (message structure still renders)."
   }
 }

@@ -389,6 +389,8 @@ Expected: create_task + navigate_to 的额外汇返被明确测试；不以全�
 - [ ] **Step 5:** `docs/03-技术方案文档-v2.1.md` 的高亮语言表逐条对照 `markdown.ts` 已注册清单（javascript/typescript/java/python/sql/json/bash/yaml/xml/css/markdown/diff/go/csharp/kotlin = 15 种）书写，降级口径写成“按条 >1 万字符关高亮与 mermaid、结构照渲 + 一次性提示”，不列未注册语言。
 - [ ] **Step 6:** 跑定向和 typecheck；只有测量超既有阈值才另提虚拟化方案，不预选依赖。
 
+**实现范围与状态（2026-10-26 批次 7）**：本任务 **Step 1 / 2 / 3 / 5 已实现**（观察器迁移 + pending 清理、组件层 `mdCache` **LRU**（与内层 16 LRU 分层）、`v-memo` 显式依赖、ToolPart `WeakMap` 派生缓存、镜像**增量有界**且**保留最新助手 + 配对用户**、配额失败一次性可见、>1 万字符降级**一次性提示**、fence key **只由渲染器生成**且原生 HTML 不得占用槽位属性、mermaid **可见且 idle** 才水合、`03` 文档高亮表按实际注册 **15 种**书写），落到工作区、**未入库**。**单点证据（仅下界）** = `frontend/tests/ai-panel-batch7a.spec.ts` 收起 / 展开 1 方法 + `frontend/tests/tool-part-derived-cache.spec.ts` 1 方法 + `frontend/tests/markdown-batch7c.spec.ts#7C-1` 1 方法。**未做（如实）** = **Step 4 真实浏览器 profile 未做**（消息数 / DOM / P50-P95-max / 长任务 / INP / 内存），故 **Step 6 的虚拟化立项闸不启动**（`AR-15`：不引依赖、不选型、阈值仍"消息 >80 条再议"）；**未跑** = 上述 3 点之外的其余 spec（`markdown-render-perf` / `ai-panel-scroll-follow` / `parts-double-write` 等）、`typecheck`、前端全量与构建、主 CI。**文档同步剩余仍归 Task 13 Step 2**。
+
 ### Task 12: Q-08 与剩余恢复边界
 
 **Files:**
