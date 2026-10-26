@@ -36,6 +36,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * 本地未置位而 Redis 读不出来时是 {@code UNKNOWN}（A5），布尔口 {@link #isCancelled(String)} 拒绝作答
  * 而不是返回 {@code false}。5s 退避期同样返回 {@code UNKNOWN}，不把"没访问 Redis"伪装成"未取消"。
  * 降级事实（WARN / {@code degraded} / 统一降级计数）照旧保留，不静默。
+ * <p>退避只由<b>设施级</b>失败<b>新开</b>：本线程被取消/中断引起的读失败（因果链里有 {@code InterruptedException}）
+ * 只让那一拍是 {@code UNKNOWN}，不会把 {@code degraded} 从 false 翻成 true —— 否则一个被取消的轮次能把整实例的
+ * 取消判定锁进 5s UNKNOWN，让紧接着的另一个轮在工具边界误判为"基础设施不可用"（W-30 · run 40232440965）。
+ * 若此前已有真实故障在退避，这一拍仍按既有节流等待（本批不改节流实现）。
  *
  * <h2>键的清理</h2>
  * 取消标志<b>故意不随轮终态删除</b>：它要在 TTL 内继续可见（取证），并且"取消后立刻重启"
@@ -270,6 +274,19 @@ public class CancellationRegistry {
 			// 的事实，排障时既看不到频率也看不到根因。
 			RedisDegradation.record(RedisDegradation.A5_CANCEL_READ, ex);
 			this.lastReadFailure = ex;
+			// 本线程被取消/中断引起的读失败是<b>局部信号</b>（取消一轮会 dispose 上游，boundedElastic
+			// 上的阻塞 GET 真的会被 interrupt）：这一拍仍是 UNKNOWN，但<b>不把 degraded 从 false 翻成
+			// true</b>，因此不会因它新开一个 5s <b>全实例</b>退避。否则紧接着的另一个轮会在工具边界读到
+			// UNKNOWN（W-30 · run 40232440965：上一轮取消 320ms 后，816aa484… 的第 1 次尝试就撞在
+			// 上一轮失败点亮的退避上）⇒ 可重试失败 ⇒ 重试把轮次跑成 DONE。
+			// 判据与 {@link LeaseService#isLocalThreadInterrupt(Throwable)} 同源（因果链里有 InterruptedException）：
+			// 真正的设施故障（连接失败 / 查询超时 / CROSSSLOT）链上没有它，照旧降级。
+			// <b>已知窄残留（m1，本批只改注释）</b>：若此前已因真实故障处于退避（degraded 已为 true），
+			// 本次读在 try 之前已经刷新了节流锚点，这一拍会顺延既有退避 —— 它不解除已有退避，只是不再新增一次。
+			if (LeaseService.isLocalThreadInterrupt(ex)) {
+				log.debug("取消标志读取被本线程中断打断，只影响这一拍（不新开全实例退避）：{}", ex.getMessage());
+				return RedisRead.unknown(ex);
+			}
 			if (!this.degraded) {
 				this.degraded = true;
 				log.warn("取消标志读取失败，降级为进程内取消（单实例等价，跨实例失效）：{}", ex.getMessage());

@@ -3,12 +3,14 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -100,6 +102,34 @@ class CancellationRegistryFailClosedTest {
 		assertThat(registry.polls()).as("退避期不访问 Redis（也不逐个等超时）").isEqualTo(pollsAfterFirst);
 		assertThat(RedisDegradation.count(RedisDegradation.A5_CANCEL_UNKNOWN))
 			.as("退避期返回 UNKNOWN 也必须计数").isGreaterThan(unknownBefore + 1);
+	}
+
+	/**
+	 * W-30 夜跑（run 40232440965）：一次<b>本线程中断</b>引起的 Redis 读失败，把整实例的取消判定
+	 * 锁进 5s <b>UNKNOWN</b>，随后 320ms 后的另一轮（W-30）工具边界读到 UNKNOWN ⇒ 可重试失败 ⇒
+	 * 重试把轮次跑成 DONE。同一次失败，{@code LeaseService} 当场判为"局部信号，不是设施故障"，
+	 * 注册表却把 {@code degraded} 置了全实例位。这里钉住：线程局部的读失败不得污染别的轮。
+	 */
+	@Test
+	void aThreadInterruptReadFailureDoesNotPoisonOtherRuns() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(values.get(anyString())).thenThrow(new RedisSystemException("Redis command interrupted",
+				new InterruptedException("interrupted")));
+		CancellationRegistry registry = new CancellationRegistry(redis, this.properties);
+		registry.register(RUN_ID);
+
+		assertThat(registry.cancelState(RUN_ID)).as("被打断的这一拍仍是未知（不得折成未取消）")
+			.isEqualTo(CancellationRegistry.CancelState.UNKNOWN);
+
+		long pollsBefore = registry.polls();
+		// 重打桩必须用 doReturn：when(mock.get(...)) 会真的调用到已配置的 thenThrow 上
+		doReturn(null).when(values).get(anyString());
+		assertThat(registry.cancelState("run-cancel-other"))
+			.as("上一轮被中断 ≠ Redis 坏了：别的轮这一拍必须重新问 Redis，而不是吃 5s 全局 UNKNOWN")
+			.isEqualTo(CancellationRegistry.CancelState.NOT_CANCELLED);
+		assertThat(registry.polls()).as("退避不该被线程局部失败触发").isGreaterThan(pollsBefore);
 	}
 
 	@Test

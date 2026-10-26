@@ -317,6 +317,42 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
+	/** DONE 专用：不新增键，只在原快照键上阻止取消态被成功终态覆盖。 */
+	private static final RedisScript<Long> DONE_SET_IF_NOT_CANCELLED_SCRIPT = new DefaultRedisScript<>("""
+			-- DONE_SET_IF_NOT_CANCELLED
+			local current = redis.call('GET', KEYS[1])
+			if current then
+			  local ok, snapshot = pcall(cjson.decode, current)
+			  -- 解不开的旧值不冒充取消态（本进程写出的快照恒为合法 JSON）：按可用性优先照常写
+			  if ok and type(snapshot) == 'table'
+			      and (snapshot.status == 'CANCELLED' or snapshot.cancelled == true) then
+			    return 0
+			  end
+			end
+			redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+			return 1
+			""", Long.class);
+
+	/** DONE 专用：同一原子段内同时校验原 fence 与取消态，其它终态仍走原脚本。 */
+	private static final RedisScript<Long> FENCED_DONE_SET_SCRIPT = new DefaultRedisScript<>("""
+			-- FENCED_DONE_SET
+			local fence = redis.call('GET', KEYS[2])
+			if fence and tonumber(fence) > tonumber(ARGV[2]) then
+			  return 0
+			end
+			local current = redis.call('GET', KEYS[1])
+			if current then
+			  local ok, snapshot = pcall(cjson.decode, current)
+			  if ok and type(snapshot) == 'table'
+			      and (snapshot.status == 'CANCELLED' or snapshot.cancelled == true) then
+			    return 0
+			  end
+			end
+			redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+			redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+			return 1
+			""", Long.class);
+
 	/** C1 / Minor3：值匹配才删认领字段（避免误删他人重新认领的值）。 */
 	private static final RedisScript<Long> CLAIM_ROLLBACK_SCRIPT = new DefaultRedisScript<>("""
 			-- CLAIM_ROLLBACK
@@ -696,6 +732,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 *
 	 * <p>写终态时 best-effort 释放本实例持有的续跑租约（{@link #releaseRunLease}）—— 正常收尾的轮
 	 * 不该让下一个实例等 TTL。
+	 *
+	 * <h2>DONE 的取消态 CAS（W-30 跨实例窄守卫）</h2>
+	 * 只有 {@code status=DONE} 的写多走一次状态 CAS：Lua 在<b>同一个原子步</b>里用 {@code cjson} 解析
+	 * <b>当前</b>快照，若已是 {@code status=CANCELLED} 或 {@code cancelled=true} ⇒ <b>拒写并直接返回</b>
+	 * （不覆盖取消终态，也不执行后面的会话索引 / 租约副作用）。持租分支用
+	 * {@link #FENCED_DONE_SET_SCRIPT}（原来的 fence 比较逐字保留，且在同一脚本内），无租约分支用
+	 * {@link #DONE_SET_IF_NOT_CANCELLED_SCRIPT}。键、TTL、fence 语义都不变，不新增键、不需要迁移；
+	 * 其它状态（RUNNING / SUSPENDED / CANCELLED / FAILED …）的写路径逐字不变，普通 DONE 照常落库。
+	 * <p><b>边界</b>：这是"快照状态不得从取消态进 DONE"的原子守卫，<b>不是</b>分布式事务 ——
+	 * DB 历史 append 不在这一个原子步内（见 {@code ResilientChatService#finishSuccess} 的落库后复读）。
 	 */
 	public void save(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
@@ -719,16 +765,33 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			throw new IllegalStateException("无法序列化轮次快照 " + runId, ex);
 		}
 		if (epoch > 0L) {
-			if (!fencedSet(runId, json, epoch)) {
-				log.warn("STALE_EPOCH 拒写轮次快照 runId={} epoch={}（fence 已推进到更高 epoch："
-						+ "另一实例已接管本轮的续跑权，本实例的写回作废）", runId, epoch);
+			boolean done = RunSnapshot.DONE.equals(snapshot.getStatus());
+			boolean written = done ? fencedDoneSet(runId, json, epoch) : fencedSet(runId, json, epoch);
+			if (!written) {
+				if (done) {
+					log.warn("DONE 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
+							+ "不覆盖 CANCELLED，也不改会话索引/租约）", runId, epoch);
+				}
+				else {
+					log.warn("STALE_EPOCH 拒写轮次快照 runId={} epoch={}（fence 已推进到更高 epoch："
+							+ "另一实例已接管本轮的续跑权，本实例的写回作废）", runId, epoch);
+				}
 				return;
 			}
 		}
 		else {
 			warnIfFenceIsAhead(runId);
 			try {
-				this.redis.opsForValue().set(runKey(runId), json, ttlFor(runId));
+				if (RunSnapshot.DONE.equals(snapshot.getStatus())) {
+					if (!doneSetIfNotCancelled(runId, json)) {
+						log.warn("DONE 拒写轮次快照 runId={}（当前快照已是取消态：不覆盖 CANCELLED，"
+								+ "也不改会话索引/租约）", runId);
+						return;
+					}
+				}
+				else {
+					this.redis.opsForValue().set(runKey(runId), json, ttlFor(runId));
+				}
 			}
 			catch (Exception ex) {
 				throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
@@ -807,6 +870,44 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
 		}
+	}
+
+	/**
+	 * DONE 的持租写：fence 校验与 {@link #fencedSet} 逐字相同，外加"当前快照已是取消态 ⇒ 拒写"
+	 * （同一脚本内 {@code cjson} 解析，见 {@link #FENCED_DONE_SET_SCRIPT}）。
+	 *
+	 * @return false = 陈旧 epoch <b>或</b> 当前快照是取消态（两者都不落库、不改索引）
+	 */
+	private boolean fencedDoneSet(String runId, String json, long epoch) {
+		Duration ttl = ttlFor(runId);
+		try {
+			Long result = this.redis.execute(FENCED_DONE_SET_SCRIPT, List.of(runKey(runId), fenceKey(runId)),
+					json, String.valueOf(epoch), String.valueOf(ttl.toMillis()));
+			return result != null && result > 0L;
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+		}
+	}
+
+	/**
+	 * DONE 的无租约写（E3 plain 分支）：同一键上"当前快照已是取消态 ⇒ 拒写"，否则普通 {@code SET PX}。
+	 * 不持租的路径原先没有任何原状态检查（也是 W-30 现场 wipe 掉 CANCELLED 的那一条），这里用一条
+	 * 单键脚本把"读-判-写"合成一个原子步，不引入新键。
+	 *
+	 * @return false = 当前快照是取消态（不落库、不改索引）
+	 */
+	private boolean doneSetIfNotCancelled(String runId, String json) {
+		Duration ttl = ttlFor(runId);
+		Long result = this.redis.execute(DONE_SET_IF_NOT_CANCELLED_SCRIPT, List.of(runKey(runId)), json,
+				String.valueOf(ttl.toMillis()));
+		if (result == null) {
+			// 生产脚本恒回 0/1；null 只可能来自"脚本没被执行"（替身未建模 / 包装层无返回值）。
+			// 不把"没判"折成"取消"（那会让一次成功轮的终态写凭空消失），按旧口径普通写。
+			this.redis.opsForValue().set(runKey(runId), json, ttl);
+			return true;
+		}
+		return result > 0L;
 	}
 
 	// ── session → current 轮索引（T2b-D#1；体验优化，不是正确性依赖） ─────────

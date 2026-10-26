@@ -18,6 +18,7 @@ import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -219,12 +220,26 @@ public class ConfirmGate {
 	private final Object submitLock = new Object();
 
 	/**
-	 * 派发失败的有界重试计数（park 批，按 runId）。
+	 * 派发失败的<b>有界</b>重试计数（park 批，按 runId，<b>按外部触发周期</b>）。
 	 *
-	 * <p>为什么需要：park 之后"推进这一轮"的责任在派发方。续跑池饱和（{@code POOL_SATURATED}）
-	 * 或会话门被另一轮占着（{@code SESSION_BUSY}）时，如果只记一条日志，用户已经批准的卡会停在
-	 * "已决 + 无人执行"。这里按 {@code app.ai.park.max-dispatch-retries} 有界重派发；
-	 * 成功/其它结局即清零，用尽不再重排（避免死卡永久占用调度线程），并 ERROR 留痕。
+	 * <p>为什么需要：park 之后"推进这一轮"的责任在派发方。续跑池饱和（{@code POOL_SATURATED}）、
+	 * 会话门被另一轮占着（{@code SESSION_BUSY}）或取消状态此刻不可确认（{@code CANCEL_STATE_UNKNOWN}）
+	 * 时，如果只记一条日志，用户已经批准的卡会停在"已决 + 无人执行"（W-21 就是后者：已结算的前端
+	 * 工具没有物化路径）。这里按 {@code app.ai.park.max-dispatch-retries} 有界重派发。
+	 *
+	 * <h2>生命周期（唯一允许清零的地方是外部触发入口）</h2>
+	 * <ul>
+	 * <li><b>清零</b>：只有<b>外部</b>触发才开新周期并清零 —— {@link #triggerResume} 的
+	 *     {@code allowRetry=true} 调用方（决策/放弃/回灌、前端回执到期裁决、重挂自愈对账）。
+	 *     这就是既有"下一次明确交互可重新触发"的语义。<b>启动扫描不是</b>这类调用方：
+	 *     {@code StartupResumeRunner} 直接调 {@code ResumeService.resume}，不经本入口，也不重置预算；</li>
+	 * <li><b>耗尽</b>：{@link #retryDispatch} 到 {@code max+1} 后把计数<b>钉死</b>（不 remove），
+	 *     于是同一个周期内的其它链、以及已排期任务的后续拍都看见同一份"已耗尽"，既不新建预算也不
+	 *     再排期。旧实现耗尽即 remove，晚醒的链会各自拿到一整套新预算（一个周期内 15 × 链数）；</li>
+	 * <li><b>不清零</b>：调度器内部的续派（{@code allowRetry=false}）与任何 {@code runResume} 结局
+	 *     都不清 —— 否则"有界"只成立到"下一条链醒过来"。代价是计数会留到下一次外部触发（每个 runId
+	 *     一个小 AtomicInteger），这是有意的：宁可多留一行状态，也不要在故障期悄悄续命。</li>
+	 * </ul>
 	 */
 	private final Map<String, java.util.concurrent.atomic.AtomicInteger> dispatchRetries =
 			new ConcurrentHashMap<>();
@@ -1931,10 +1946,18 @@ public class ConfirmGate {
 	/**
 	 * 触发判定与派发（{@link #maybeTriggerResume} 与"抢租失败后的延迟重试"共用）。
 	 *
-	 * @param allowRetry 抢租失败时是否排一次延迟重试。派发路径 true；<b>重试任务自身 false</b> ——
-	 * 一次性重试不会自我续命（holder 活着就一直重排会让一个死卡永久占用重试线程）
+	 * @param allowRetry 抢租失败时是否排一次延迟重试。<b>外部触发路径 true</b>（决策/放弃/回灌、
+	 * 前端回执到期裁决、重挂自愈对账 —— 启动扫描不走这里，它直接调 {@code ResumeService}）；
+	 * <b>重试任务自身 false</b> —— 一次性重试不会自我
+	 * 续命（holder 活着就一直重排会让一个死卡永久占用重试线程），也<b>不 rearm</b> 重派发预算
+	 * （{@code allowRetry=true} 是 {@link #dispatchRetries} 唯一的清零点：一个外部触发 = 一个周期）
 	 */
 	private ResumeTrigger triggerResume(String runId, boolean woke, boolean allowRetry) {
+		if (allowRetry) {
+			// 外部触发入口：开一个新的重派发周期。放在最前面（即便下面因 woke/latch/状态被跳过），
+			// 语义仍是"用户/系统的这次明确动作重新拥有完整预算"。调度器内部续派不会走到这里。
+			this.dispatchRetries.remove(runId);
+		}
 		if (woke) {
 			return ResumeTrigger.skipped("WOKE_IN_PROCESS_GATE", null);
 		}
@@ -2019,8 +2042,38 @@ public class ConfirmGate {
 	}
 
 	/**
-	 * 派发失败的一次<b>有界</b>重试（{@code POOL_SATURATED} / {@code SESSION_BUSY}），
-	 * 间隔按<b>指数退避</b>（I3）。
+	 * 该结局是否值得<b>有界重派发</b>：都属于"这一拍没有可确认的驱动者，但既不是终态、
+	 * 也不是有人接管"。
+	 *
+	 * <ul>
+	 * <li>{@code POOL_SATURATED} / {@code SESSION_BUSY}：驱动权暂时拿不到（续跑池满 / 同会话另一轮在跑）；</li>
+	 * <li>{@code CANCEL_STATE_UNKNOWN}：死卡兜底续跑的入口复查读不出取消标志。{@code CancellationRegistry}
+	 *     读失败后进入<b>进程级 5s 退避窗</b>，窗内每一拍都返回 {@code UNKNOWN}（A5：不把"没读 Redis"
+	 *     伪装成"未取消"）⇒ 续跑 fail-closed 拒绝。窗口自愈，所以"等下一拍"是有意义的；一次失败就永久
+	 *     搁置，会让已结算的前端工具（{@code FRONTEND_RESULT}）没有物化路径（W-21）。</li>
+	 * </ul>
+	 *
+	 * <p><b>为什么不需要改延迟</b>：既有节拍 2s→4s→8s…（累计 2s / 6s / 14s…）的第 2 拍（6s）就已越过
+	 * 那个 5s 窗，所以这里只扩结局集合，不动 {@link #dispatchRetryDelay} 与上限。
+	 *
+	 * <p><b>为什么 {@code STATE_UNKNOWN} 不在此列</b>：它看着同义，但产地是 {@code ResumeService}
+	 * 入口那个 {@code catch (RuntimeException)}，同时包住"待决条目读失败（瞬时）"与"条目 JSON 反序列化
+	 * 失败（{@code IllegalStateException}，永久数据损坏）"—— 后者重试必然全废，只会刷一串 ERROR 与
+	 * 无意义续跑。不可确认 ≠ 等一拍就好；W-21 也不需要它。
+	 *
+	 * <p>不在此列：{@code PROVIDER_GONE}（换模型重跑会让历史说谎）、{@code NOT_FOUND} /
+	 * {@code ALREADY_DONE} / {@code ALREADY_CANCELLED}（已收尾）、{@code ALREADY_RUNNING} /
+	 * {@code PENDING_UNRESOLVED} / {@code LEASE_HELD_ELSEWHERE}（已有人管）、{@code ACCEPTED}（成功）、
+	 * {@code STATE_UNKNOWN}（可能是永久性条目损坏）。
+	 */
+	private static boolean isRetriableDispatchOutcome(ResumeService.Outcome outcome) {
+		return outcome == ResumeService.Outcome.POOL_SATURATED || outcome == ResumeService.Outcome.SESSION_BUSY
+				|| outcome == ResumeService.Outcome.CANCEL_STATE_UNKNOWN;
+	}
+
+	/**
+	 * 派发失败的一次<b>有界</b>重试（{@link #isRetriableDispatchOutcome}：池满 / 会话占用 /
+	 * 取消状态不可确认），间隔按<b>指数退避</b>（I3）。
 	 *
 	 * <p>与 {@link #scheduleLeaseRetry} 的区别：那条救的是"holder 死了但没释放租约"（等 TTL），
 	 * 本条救的是"决策已落库、驱动权暂时拿不到"（池满 / 同会话另一轮在跑）—— 两者都用同一个
@@ -2031,8 +2084,15 @@ public class ConfirmGate {
 	 * 等于"批准了但永久不执行"。本方法按 {@code dispatch-retry-delay} 起、每次翻倍、
 	 * {@code dispatch-retry-max-delay} 封顶（缺省 2s→…→30s，15 次 ≈ 360s，覆盖 300s 轮预算）。
 	 *
-	 * <p><b>边界</b>：重试用尽仍失败只 ERROR 留痕，不无限重排（死卡会永久占用调度线程）；
-	 * 计数随即清零，于是<b>下一次触发</b>（决策/重挂/启动扫描）重新计数 —— 不是"只留一条 ERROR"。
+	 * <p><b>边界（按外部触发周期）</b>：{@code max} 次用尽后把计数钉在 {@code max+1} 并<b>只打一次</b>
+	 * ERROR，本周期内不再排期、不再新建预算 —— 包括同一 run 上并发派发出去的其它链，以及已经排在
+	 * 调度器里的后续拍。计数<b>不在这里清零</b>：那是外部触发入口（{@link #triggerResume} 的
+	 * {@code allowRetry=true} 调用方）的职责，所以"下一次明确交互/重挂会重新计数"仍然成立
+	 * （启动扫描直接调 {@code ResumeService}，不经过本入口、不重置预算，但会重新驱动这一轮）。
+	 *
+	 * <p><b>临时读不出来不算结局</b>：{@link AiStateUnavailableException}（Redis 断连/超时）在重试拍里
+	 * 仍然计入同一份预算并继续下一拍（见调度任务里的 catch），否则一次抖动就会把
+	 * {@code CANCEL_STATE_UNKNOWN} 的预算链提前终结。
 	 */
 	private void retryDispatch(String runId) {
 		int max = this.properties.getPark().getMaxDispatchRetries();
@@ -2043,23 +2103,41 @@ public class ConfirmGate {
 				ignored -> new java.util.concurrent.atomic.AtomicInteger());
 		int attempt = counter.incrementAndGet();
 		if (attempt > max) {
-			this.dispatchRetries.remove(runId);
-			log.error("续跑派发在 {} 次有界重试后仍未成功 runId={}（决策已落库；卡保持 SUSPENDED，"
-					+ "下一次交互/启动扫描会再触发）", max, runId);
+			// 钉死（不 remove）：并发链/后续拍看到的是同一份"已耗尽"，不会 computeIfAbsent 出
+			// 一整套新预算。只有外部新触发才会清掉这条记录。
+			counter.set(max + 1);
+			if (attempt == max + 1) {
+				log.error("本次触发周期的续跑派发在 {} 次有界重试后仍未成功 runId={}（决策已落库；卡保持 "
+						+ "SUSPENDED，下一次明确交互/重挂会重新计数；启动扫描直接调 ResumeService，不重置本预算）",
+						max, runId);
+			}
 			return;
 		}
 		Duration delay = dispatchRetryDelay(attempt);
 		try {
 			this.retryScheduler.schedule(() -> {
 				try {
-					triggerResume(runId, false, false);
+					ResumeTrigger trigger = triggerResume(runId, false, false);
+					if (!trigger.triggered()) {
+						// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
+						log.debug("续跑重派发未派发 runId={} reason={} detail={}", runId, trigger.outcome(),
+								trigger.detail());
+					}
+				}
+				catch (AiStateUnavailableException ex) {
+					// 这一拍连"快照是什么状态"都读不出来（Redis 断连/超时）：不是结局，是暂时不可确认。
+					// 必须留在同一个有界周期里继续下一拍，否则一次抖动就把 CANCEL_STATE_UNKNOWN 的
+					// 预算链提前终结，轮次永久停在 SUSPENDED（W-21 的收尾形态）。
+					// 只认这一个类型：值损坏等永久故障仍是 IllegalStateException，落到下面的分支不重试。
+					log.warn("续跑重派发遇到状态读取暂时不可用，继续本周期下一拍 runId={}：{}", runId, ex.getMessage());
+					retryDispatch(runId);
 				}
 				catch (Exception ex) {
 					log.warn("续跑重派发异常 runId={}：{}", runId, ex.getMessage());
 				}
 			}, delay);
-			log.info("续跑派发失败（池满/会话占用），第 {}/{} 次有界重试已排期 runId={} delay={}ms", attempt, max,
-					runId, delay.toMillis());
+			log.info("续跑派发失败（池满/会话占用/状态不可确认），第 {}/{} 次有界重试已排期 runId={} delay={}ms",
+					attempt, max, runId, delay.toMillis());
 		}
 		catch (Exception ex) {
 			log.warn("续跑有界重试未排上 runId={}：{}", runId, ex.getMessage());
@@ -2147,12 +2225,13 @@ public class ConfirmGate {
 			log.info("死卡兜底续跑结局 runId={} outcome={} body={}", runId,
 					result == null ? null : result.outcome(), result == null ? null : result.body());
 			// park 批：池饱和 / 会话被占 = "决策已落库但这一拍没有驱动者" ⇒ 有界重派发。
-			if (result != null && (result.outcome() == ResumeService.Outcome.POOL_SATURATED
-					|| result.outcome() == ResumeService.Outcome.SESSION_BUSY)) {
+			// W-21：取消状态"此刻不可确认"同属这一类（不是终态、也不是有人接管）——
+			// 一次失败就永久搁置会让已结算的前端工具没有物化路径（STATE_UNKNOWN 不在其列：可能是
+			// 永久性条目损坏，见 isRetriableDispatchOutcome）。
+			// 注意：这里<b>不清零</b>计数（成功/终态也不清）—— 清零点只有外部触发入口，
+			// 否则耗尽的链会被"某个结局"悄悄续命（见 dispatchRetries 字段注释）。
+			if (result != null && isRetriableDispatchOutcome(result.outcome())) {
 				retryDispatch(runId);
-			}
-			else {
-				this.dispatchRetries.remove(runId);
 			}
 			if (lease == null) {
 				return;
@@ -2174,6 +2253,13 @@ public class ConfirmGate {
 			else if (result == null) {
 				log.warn("死卡兜底续跑未返回结局 runId={}（按'有人接管'处理：不还租，最多等 TTL）", runId);
 			}
+		}
+		catch (AiStateUnavailableException ex) {
+			// ResumeService 内部同类临时读取失败（审批条目/快照/fence）：同样只是"这一拍不可确认"，
+			// 不是结局。放租后留在同一个有界周期里继续 —— 否则轮次停在 SUSPENDED 且无人再驱动。
+			log.warn("死卡兜底续跑遇到状态读取暂时不可用 runId={}（已排期本周期下一拍）：{}", runId, ex.getMessage());
+			releaseLeaseQuietly(lease, runId, fresh);
+			retryDispatch(runId);
 		}
 		catch (Exception ex) {
 			log.error("死卡兜底续跑异常 runId={}", runId, ex);

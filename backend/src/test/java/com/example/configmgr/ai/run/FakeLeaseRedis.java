@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.run;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.ListOperations;
@@ -67,6 +69,9 @@ import static org.mockito.Mockito.when;
 @SuppressWarnings({ "unchecked", "rawtypes" })
 public final class FakeLeaseRedis {
 
+	/** 解析快照 JSON（复刻 Lua 侧 {@code cjson.decode}；只读 status / cancelled 两个字段）。 */
+	private static final ObjectMapper MAPPER = new ObjectMapper();
+
 	/** 脚本分派标记（必须与 {@link LeaseService} 脚本正文里的注释一致）。 */
 	static final String ACQUIRE_MARK = "LEASE_ACQUIRE";
 
@@ -83,6 +88,11 @@ public final class FakeLeaseRedis {
 	static final String RELEASE_MARK = "LEASE_RELEASE";
 
 	static final String FENCE_MARK = "LEASE_FENCE_SET";
+
+	/** DONE 专用的取消态 CAS（W-30 跨实例）：明文键 + fence 键两路。 */
+	static final String DONE_SET_IF_NOT_CANCELLED_MARK = "DONE_SET_IF_NOT_CANCELLED";
+
+	static final String FENCED_DONE_SET_MARK = "FENCED_DONE_SET";
 
 	/** 台账 + 幂等索引的同一原子步（B23L1 批③a）。 */
 	static final String IDEM_PUSH_MARK = "IDEM_PUSH";
@@ -567,6 +577,14 @@ public final class FakeLeaseRedis {
 		if (body.contains(RELEASE_MARK)) {
 			return release(str(keys.get(0)), str(args.get(0)));
 		}
+		if (body.contains(FENCED_DONE_SET_MARK)) {
+			return fenceDoneSet(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
+					Long.parseLong(str(args.get(1))), Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+		}
+		if (body.contains(DONE_SET_IF_NOT_CANCELLED_MARK)) {
+			return doneSetIfNotCancelled(str(keys.get(0)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+		}
 		if (body.contains(FENCE_MARK)) {
 			return fenceSet(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
 					Long.parseLong(str(args.get(1))), Duration.ofMillis(Long.parseLong(str(args.get(2)))));
@@ -740,6 +758,47 @@ public final class FakeLeaseRedis {
 		touchTtl(fenceKey, ttl);
 		this.sets.incrementAndGet();
 		return 1L;
+	}
+
+	/**
+	 * {@code -- FENCED_DONE_SET}：fence 校验（与 {@link #fenceSet} 逐字相同）+ 当前快照是取消态 ⇒ 拒写。
+	 * 与 Lua 一样，先判 fence 再解当前 JSON。
+	 */
+	private Long fenceDoneSet(String runKey, String fenceKey, String json, long epoch, Duration ttl) {
+		String fence = this.strings.get(fenceKey);
+		if (fence != null && Long.parseLong(fence) > epoch) {
+			return 0L;
+		}
+		if (cancelledSnapshot(this.strings.get(runKey))) {
+			return 0L;
+		}
+		return fenceSet(runKey, fenceKey, json, epoch, ttl);
+	}
+
+	/** {@code -- DONE_SET_IF_NOT_CANCELLED}：当前快照是取消态 ⇒ 拒写，否则普通 SET PX。 */
+	private Long doneSetIfNotCancelled(String runKey, String json, Duration ttl) {
+		if (cancelledSnapshot(this.strings.get(runKey))) {
+			return 0L;
+		}
+		this.strings.put(runKey, json);
+		touchTtl(runKey, ttl);
+		this.sets.incrementAndGet();
+		return 1L;
+	}
+
+	/** Lua 侧 {@code cjson.decode} 的替身：解不开的旧值不冒充取消态（与脚本的 pcall 口径一致）。 */
+	private static boolean cancelledSnapshot(String json) {
+		if (json == null) {
+			return false;
+		}
+		try {
+			JsonNode snapshot = MAPPER.readTree(json);
+			return snapshot != null && ("CANCELLED".equals(snapshot.path("status").asText())
+					|| snapshot.path("cancelled").asBoolean(false));
+		}
+		catch (Exception ex) {
+			return false;
+		}
 	}
 
 	/**

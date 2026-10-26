@@ -98,9 +98,14 @@ jobs:
     if: ${{ needs.changes.outputs.backend == 'true' }}
     # 用例形态：以 @SpringBootTest（真实 Spring 上下文 + H2 内存库 + Flyway 迁移）为主，
     # 少量为纯 JUnit + Mockito 桩（如 SSE 帧序、确认门接线）。
-    # 不依赖 Redis、AI key 与 Windows 专属物，故取 ubuntu-latest：启动更快、排队更短。
+    # 少量真实 Redis 行为用例由 services.redis 提供；不依赖 AI key 与 Windows 专属物。
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7.2.16
+        ports:
+          - 6379:6379
     defaults:
       run:
         working-directory: backend

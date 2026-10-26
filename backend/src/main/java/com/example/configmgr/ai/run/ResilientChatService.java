@@ -755,7 +755,14 @@ public class ResilientChatService {
 			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"本段剩余预算"里出。
 			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗本段预算。
 			if (attempt > 1) {
-				awaitRetryBackoff(runId, attempt - 1, turnStartedAtMs, config, retryAfterMs);
+				if (awaitRetryBackoff(runId, attempt - 1, turnStartedAtMs, config, retryAfterMs)) {
+					// 退避期已收到取消 ⇒ 不得再发一次尝试。W-30（run 40232440965 · runId 816aa484…）：
+					// 第 2 次尝试的请求没有工具结果，桩按"每路由一次"回纯文本，3ms 就正常收尾 ——
+					// 新看门狗一拍都没打（1s 节拍），工具事件边界也不存在，于是取消被吞、finish 写了 DONE。
+					// 这里直接进取消收尾，不赌"下一次尝试会被看门狗收口"。
+					cancelTerminal(runId, sessionId, null, attempt - 1, null, out, turn);
+					return;
+				}
 				retryAfterMs = null;
 			}
 			long attemptStartedAtMs = System.currentTimeMillis();
@@ -824,6 +831,19 @@ public class ResilientChatService {
 						>= config.getTotalBudget().toMillis();
 				boolean hasNext = attempt < maxAttempts;
 				boolean retryable = outcome.retryable() && !emitted && !sideEffect && hasNext && !overBudget;
+				// ===== W-21 Fix A：挂起工具轮不得被当作"可重试的空轮" =====
+				// saveSuspended 在等待<b>之前</b>就写好 SUSPENDED + inFlightToolCalls，请求帧也已公布。
+				// 此时若按"无产出/无副作用"发起普通重试，请求会从 memory 重建（user 被复制、assistant(tool_calls)
+				// 与 TOOL 段都不在），桩按幂等闸不再给工具 ⇒ finish 用 DONE 把挂着的那一轮抹掉
+				// （W-21 · run 40247120358：boot.log 6265/6282、req-206 `[system,user,user]`）。
+				// 与 RunParkedException 同口径：不是失败、不是取消 —— 不发终帧、不写失败态、不动快照/pending/req，
+				// 只把线程交还，由 resume 物化这一轮。判据只看<b>权威快照</b>（不看 pending 的结算时机），
+				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedAny=true）或最后一次尝试
+				// （hasNext=false）同样不能被 fail() 写成 FAILED —— 挂起轮一旦落库就只归 resume 收口。
+				boolean parkedToolRound = isPersistedParkedToolRound(runId);
+				if (parkedToolRound) {
+					retryable = false;
+				}
 				// 429 的 Retry-After 是"重试的最短等待"：剩余预算连它 + 下一次尝试的余量都不够时，
 				// 不做注定超预算的重试（宁可当场如实失败，也不让用户多等一次必然失败的重连）。
 				if (retryable && outcome.retryAfterMillis() != null) {
@@ -839,6 +859,10 @@ public class ResilientChatService {
 						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), violation.getMessage(), accumulator.tailSummary());
 				if (!retryable) {
+					if (parkedToolRound) {
+						handBackParkedToolRound(runId, sessionId, attempt, violation);
+						return;
+					}
 					fail(runId, sessionId, violation, attempt, emitted, sideEffect, accumulator, out, turn);
 					return;
 				}
@@ -882,19 +906,22 @@ public class ResilientChatService {
 	 * <ul>
 	 * <li><b>只从剩余预算里出</b>：剩余 = 段预算 − 本段已用，并留 1s 给下一次
 	 * 尝试本身 —— 退避把预算花完 = 下一次尝试刚发出去就撞 {@code TOTAL_BUDGET}，不如不睡；</li>
-	 * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并把控制权交回尝试循环
-	 * —— 新看门狗第一拍就会把它收口成 {@code CANCELLED} 终态（退避不吞取消）；</li>
+	 * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并<b>返回 {@code true}</b> ——
+	 * 调用方必须立刻走取消收尾，<b>不得再发一次尝试</b>：退避之后的尝试可能在上游一拍内跑完
+	 * （W-30 的桩文本轮 3ms），新看门狗还没来得及打第一拍，工具事件边界也不存在，取消就被吞了；</li>
 	 * <li><b>中断即返回</b>：线程被中断时不吞标志，交给上层路径收尾。</li>
 	 * </ul>
+	 *
+	 * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
 	 */
-	private void awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs, AiProperties.Resilience config,
-			Long retryAfterMillis) {
+	private boolean awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,
+			AiProperties.Resilience config, Long retryAfterMillis) {
 		long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 		long delay = RetryBackoff.delayMsWithRetryAfter(retryNo, remaining, retryAfterMillis);
 		if (delay <= 0) {
 			log.debug("重试退避跳过 runId={} retry={} 剩余预算={}ms Retry-After={}（不再等待）", runId, retryNo,
 					remaining, retryAfterMillis);
-			return;
+			return false;
 		}
 		log.debug("重试退避 runId={} retry={} 等待={}ms 剩余预算={}ms Retry-After={}", runId, retryNo, delay, remaining,
 				retryAfterMillis);
@@ -902,21 +929,21 @@ public class ResilientChatService {
 		while (true) {
 			long slice = Math.min(250L, deadline - System.currentTimeMillis());
 			if (slice <= 0) {
-				return;
+				return false;
 			}
 			// C2：退避期 UNKNOWN 按"未取消 + 计数继续"（这里没有不可逆动作，不能被一次读抖动改判硬失败）。
 			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
 			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
 				log.info("退避期间收到取消 runId={} retry={}（剩余 {}ms 不再等待）", runId, retryNo,
 						Math.max(0L, deadline - System.currentTimeMillis()));
-				return;
+				return true;
 			}
 			try {
 				Thread.sleep(slice);
 			}
 			catch (InterruptedException ex) {
 				Thread.currentThread().interrupt();
-				return;
+				return false;
 			}
 		}
 	}
@@ -1022,6 +1049,10 @@ public class ResilientChatService {
 	/**
 	 * 成功终局：补最终 assistant 消息 → 快照 DONE → 记忆收敛 → {@code done} 终帧。
 	 *
+	 * <p><b>W-30 · 复审 I-1</b>：这条路径与取消收尾共用 per-run 监视器，锁内重读快照与取消事实再写
+	 * 历史/快照/终帧（见 {@link #finishSuccess}）—— 取消落在"判定"与"落库"之间时不会出现
+	 * "DONE 覆盖 CANCELLED + 两条 done"。
+	 *
 	 * <p><b>T3-7 / A12：空文本不再算成功</b> —— 正文去空白后为空即转 {@link #emptyReply}
 	 * （FAILED + {@code EMPTY_REPLY}）。三形态（空串 / 纯空白 / 空文本但本轮用过工具）一律如此：
 	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
@@ -1042,7 +1073,52 @@ public class ResilientChatService {
 		// 截断语义的唯一判据（实时帧与持久面同源）：只有 finish_reason=length 算截断。
 		// cancel/stop/content_filter/empty_reply 都不是"被长度上限截断"，不得打这个键。
 		boolean lengthTruncated = finish == UpstreamErrorClassifier.Finish.LENGTH;
+		// ===== 成功终局临界区（W-30 · 复审 I-1）=====
+		// "重读快照/取消事实 → 写 DB 历史 → 写快照 DONE → 发终帧"必须与取消收尾（cancelTerminal）
+		// 共用同一把 per-run 监视器：否则取消可以落在"判定未取消"与"save(DONE)"之间的 DB/Redis 往返里
+		// —— 取消侧写 CANCELLED + done{cancelled:true}，本线程随后把快照盖成 DONE 并补
+		// done{cancelled:false}（run 40232440965 的同一症状，只是窗口更窄；归档会出现两条 done）。
+		// monitor 与 cancelTerminal 同一把（{@link CancelledRunFinalizer#finalizeMonitor} 按 runId 条带化），
+		// synchronized 可重入 ⇒ 临界区内再进 cancelTerminal 不会死锁。两种先到顺序都只有一条终帧：
+		// 取消先到 ⇒ 这里重读后走取消收尾（归档已有终帧 ⇒ 直接返回，不写 DONE、不再发 done）；
+		// 成功先到 ⇒ 取消侧 cancelTerminalLocked 的终态保护拒绝改写。
+		// 边界：monitor 只覆盖<b>本进程</b>；跨实例由 {@code RunStore#save} 的 DONE 状态 CAS（Lua 里
+		// cjson 检查当前快照）兜住"取消态不得被 DONE 覆盖"，DB 历史 append 仍在该原子步之外（见
+		// finishSuccess 的落库后复读）；不把两者说成分布式事务。
+		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
+		if (monitor == null) {
+			// 轻装配/直接 new 的单测没有交棒器可提供监视器：维持单线程语义（与引入本批之前同形）。
+			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
+			return;
+		}
+		synchronized (monitor) {
+			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
+		}
+	}
+
+	/**
+	 * 成功终局的临界区体：<b>调用方必须已持有</b> {@link CancelledRunFinalizer#finalizeMonitor(String)}
+	 * 返回的 per-run 监视器（或明确的无监视器单线程装配）。
+	 *
+	 * <p>锁内重读快照与取消事实，再写历史/快照/终帧 —— 这样"判定 → 落库 → 出帧"对取消收尾是一个原子段。
+	 */
+	private void finishSuccess(String runId, String sessionId, Accumulator accumulator, int attempts,
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, boolean lengthTruncated) {
+		String text = accumulator.text();
 		RunSnapshot snapshot = this.store.get(runId);
+		// ===== 取消优先（I-1 的反向）：成功终局绝不改写 CANCELLED =====
+		// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路，见 RunStore），
+		// 但本进程内的取消收尾（驱动线程 / 交棒执行体 / 死卡兜底续跑）与本线程共用同一把 monitor，
+		// 必须先在锁内重读并转入取消收尾，才能保证"不写 DONE、不补 done{cancelled:false}"。
+		// W-30（run 40232440965 · runId 816aa484…）的 20s 轮询正是读到被覆盖后的 DONE。
+		// 口径与 cancelTerminalLocked 的"取消收尾绝不改写 DONE/FAILED"对称：终态先到者赢；
+		// 重复收尾交给 cancelTerminal 自己的归档幂等（已有终帧就什么都不做）。
+		if (cancelledBeforeSuccess(runId, snapshot)) {
+			log.info("成功终局前发现取消，交给取消收尾 runId={}（不写 DONE、不补 done{cancelled:false}）", runId);
+			cancelTerminal(runId, sessionId, isCancelledSnapshot(snapshot) ? null : accumulator, attempts, watchdog, out,
+					turn);
+			return;
+		}
 		List<Message> history = new ArrayList<>();
 		if (snapshot != null) {
 			history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
@@ -1072,6 +1148,36 @@ public class ResilientChatService {
 					this.historyRecorder.recordFinalAssistant(sessionId, runId, finalAssistant);
 				}
 				this.store.save(snapshot);
+				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
+				// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路），
+				// 所以这一笔可能根本没落库；也可能刚落库就被另一实例的取消收尾覆盖。出帧/记忆之前
+				// 再读一次权威快照，并<b>只按这次复读的可见状态</b>决定出哪种终帧 —— 不再用本地取消 flag
+				// 兜底"读不出来"（flag 只说明有人请求过取消，既不证明 DONE 没落库，也不证明快照已是
+				// CANCELLED；用它二选一会分别造出"DONE 零终帧"和"done{false} 与 CANCELLED 并存"）：
+				//  ① 复读成功、status=DONE 且 cancelled=false ⇒ 成功终局（继续 done{cancelled:false}）；
+				//     即使本地 flag 已置位也不改判 —— 终态先到者赢，取消侧会按终态保护拒绝改写。
+				//  ② CANCELLED 或 cancelled=true ⇒ 交给幂等的 cancelTerminal（归档已有终帧就什么都不做）。
+				//  ③ 复读失败 / 轮不存在 / 其它非 DONE 状态 ⇒ 终态暂不可确认（见 emitUnconfirmedTerminal）：
+				//     不改写快照（不写 DONE/FAILED），用既有 error 帧如实收尾。
+				// 边界：DB 历史 append 在 save 之前（保持 resume 幂等口径），它不在这个原子步里 ——
+				// 跨实例取消恰好落在 append 与 save 之间时，快照会是 CANCELLED 而 DB 已有完整 assistant
+				// （first-write-wins 无法回退）。这是本批明确保留的边界，不声称是分布式事务。
+				RunSnapshot persisted = readSnapshotQuietly(runId);
+				if (isCancelledSnapshot(persisted)) {
+					// 只传 null：这条路径的 accumulator 是<b>成功正文</b>，若交给 cancelTerminal，
+					// 它会把它当作"停止半截"合成 stopped 消息写进 DB 历史与 chat memory
+					// （DB 有 first-write-wins，chat memory 是整窗覆盖，都没有保护）。
+					// null ⇒ cancelTerminal 取权威快照的 assistantContent（另一实例已写入的半截）。
+					// 正常用户取消（attempt 内取消）仍传真实 accumulator，保留半截正文。
+					log.info("DONE 落库后复读发现取消，交给取消收尾 runId={}（不再发 done{cancelled:false}）",
+							runId);
+					cancelTerminal(runId, sessionId, null, attempts, watchdog, out, turn);
+					return;
+				}
+				if (persisted == null || !RunSnapshot.DONE.equals(persisted.getStatus())) {
+					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn);
+					return;
+				}
 				convergeMemory(runId, sessionId, history);
 			}
 			log.debug("AI 轮次结束 runId={} sessionId={} 历史条数={} 尝试次数={} 终帧=done 末帧序列=[{}]", runId, sessionId,
@@ -1097,10 +1203,90 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 成功终局前问一次"这一轮是不是已经被取消了"（W-30 · run 40232440965）。<b>调用方必须已持有
+	 * per-run 监视器</b>（见 {@link #finishSuccess}）—— 本方法的结论与随后的历史/快照写必须在同一临界区。
+	 *
+	 * <p>两个信号都算：<b>快照终态</b>（取消收尾已经落库，含交棒/死卡兜底那一路）与
+	 * <b>取消事实</b>（{@link CancellationRegistry#cancelState} 的 {@code CANCELLED}，含本进程已置位的
+	 * 加速态）。
+	 *
+	 * <p><b>UNKNOWN 按"未取消"继续是有意的可用性取舍，不是"没有不可逆动作"</b>：DONE 是不可逆
+	 * 终态。同实例的取消有本地 flag（{@code cancelState} 先读 flag）兜底；<b>跨实例</b>的"取消不得被
+	 * DONE 覆盖"由 {@code RunStore#save} 的 DONE 状态 CAS 兜住（Lua 里 {@code cjson} 检查当前快照），
+	 * 本方法只回答"这一拍读到的取消事实"，不单独声称跨实例已闭合。
+	 */
+	private boolean cancelledBeforeSuccess(String runId, RunSnapshot snapshot) {
+		if (isCancelledSnapshot(snapshot)) {
+			return true;
+		}
+		try {
+			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
+		}
+		catch (RuntimeException ex) {
+			log.debug("成功终局前的取消判定不可读 runId={}（按未取消继续）：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 快照本身是不是取消态（终态 CANCELLED 或取消位已置位）。 */
+	private static boolean isCancelledSnapshot(RunSnapshot snapshot) {
+		return snapshot != null && (RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled());
+	}
+
+	/**
+	 * 落库后复读快照：读失败按 {@code null}（不可知）处理，不因一次读抖动把一次成功轮改成异常。
+	 * 调用方按"复读可见状态"决定终帧（见 {@link #finishSuccess}）。
+	 */
+	private RunSnapshot readSnapshotQuietly(String runId) {
+		try {
+			return this.store.get(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("落库后复读快照失败 runId={}（按不可知继续）：{}", runId, ex.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * 成功终局落库后<b>无法确认</b>权威快照（复读失败 / 轮不存在 / 其它非 DONE 状态）时的收尾
+	 * （W-30 复审 I-1）。
+	 *
+	 * <p>三条底线：
+	 * <ul>
+	 * <li><b>不改写快照</b>：绝不把未知状态"终态化"成 DONE 或 FAILED —— 那会盖掉别人先到的终态
+	 *     （CANCELLED 尤其不能被抹掉）；</li>
+	 * <li><b>不发 {@code done{cancelled:false}}</b>：不可知不是成功；</li>
+	 * <li><b>emitter 可写且归档里尚无终帧时</b>用既有 {@code error} 帧如实表达"终态暂不可确认"，
+	 *     避免出现无终帧的轮；这里不绕过 emitter 自己的写门 —— 续跑权已丢（写门拒绝）时这一帧会被
+	 *     丢弃，那是既有的只读语义，不是本路径能收口的边界。</li>
+	 * </ul>
+	 *
+	 * <p><b>为什么不用本地取消 flag 兜底</b>：flag 只说明"有人请求过取消"，既不证明 DONE 没落库，
+	 * 也不证明快照已是 CANCELLED。用它二选一会分别造出"DONE 零终帧"（cancelTerminal 的终态保护
+	 * 直接返回、finish 也返回）与"done{false} 与 CANCELLED 并存"。读不到就如实说读不到。
+	 */
+	private void emitUnconfirmedTerminal(String runId, String sessionId, RunSnapshot persisted,
+			Accumulator accumulator, int attempts, SseChatEmitter out, TurnContext turn) {
+		String code = ErrorCodes.AI_REDIS_UNAVAILABLE;
+		log.warn("成功终局落库后无法确认权威状态：按不可知收尾 runId={} 复读={}（不改写快照、不发 done）", runId,
+				persisted == null ? "(读失败或轮不存在)" : persisted.getStatus());
+		if (Boolean.TRUE.equals(out.terminalFrameArchived())) {
+			log.info("终帧已归档，跳过不可知终态帧 runId={}", runId);
+			emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
+			return;
+		}
+		int partialChars = accumulator == null ? 0 : accumulator.text().length();
+		out.textEnd(partialChars);
+		out.error(code, messageFor(code));
+		emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
+	}
+
+	/**
 	 * 一轮的<b>唯一摘要行</b>（日志链路批）：{@code event=turn_end}。
 	 *
-	 * <p>四个终态出口（done / failed / empty_reply / cancelled）全都经过这里 ——
+	 * <p>终态出口（done / failed / empty_reply / cancelled / unconfirmed）全都经过这里 ——
 	 * "按 runId grep 一定有收尾行"是排查手册的第一条，缺一个出口就等于缺一条线索。
+	 * {@code unconfirmed} = 成功终局落库后无法确认权威快照（不写快照、不发 done，用 error 帧收尾）。
 	 * 只记元数据：耗时、审批等待、工具次数、三维 token 与估算标记；<b>不含任何正文</b>。
 	 */
 	private void emitTurnEnd(String runId, String sessionId, String status, String code, int attempts,
@@ -1394,7 +1580,8 @@ public class ResilientChatService {
 			log.warn("取消终帧归档状态不可读，按未归档继续收尾 runId={}（写门会再拦一次；交棒侧重试）", runId);
 		}
 		// ===== 终态保护（I-1）：取消收尾绝不改写 DONE/FAILED =====
-		// RunStore#save 只查租约写权限、不查原状态；延迟交棒（LEASE_HELD_ELSEWHERE 会按租约 TTL
+		// RunStore#save 的取消态 CAS 只拦"DONE 覆盖取消"（单向）；反方向（取消覆盖 DONE/FAILED）只能
+		// 靠这里判终态。延迟交棒（LEASE_HELD_ELSEWHERE 会按租约 TTL
 		// 反复重排）期间另一实例可以合法接管并把这一轮跑成 DONE 并释放租约 —— 下一次交棒能全新
 		// 抢到租约并通过 verifyHeld，若这里不判终态就会把 DONE 改写成 CANCELLED 并补第二个 done。
 		if (snapshot != null && RunSnapshot.isTerminal(snapshot.getStatus())
@@ -2221,6 +2408,45 @@ public class ResilientChatService {
 		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
 		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
 		return new Compaction(finalMessages, limit, outcome);
+	}
+
+	/**
+	 * <b>W-21 Fix A</b>：本轮是否已经是一个"已持久化的挂起工具轮"——权威快照
+	 * {@code status=SUSPENDED} 且 {@code inFlightToolCalls} 非空。
+	 *
+	 * <p>{@link RunStore#saveSuspended} 在进入等待<b>之前</b>就写好这三样（SUSPENDED / in-flight /
+	 * 请求帧），所以这是"请求已公布、等着 resume 物化"的确定性事实，不是竞态窗口。
+	 *
+	 * <p><b>为什么不用 pending 表判</b>：pending 里可能同时有已结算的条目（预检失败、迟到回灌），
+	 * 拿"有没有 pending"当"要不要再执行"会让判据随结算时机漂移；快照状态才是权威面。
+	 * 这里也<b>不重放</b>任何条目 —— 只把控制权交还 resume。
+	 *
+	 * <p>读失败按"不是挂起轮"处理：不能因为一次读抖动把一次可重试失败改成静默挂起（那会让轮次
+	 * 永远停在 RUNNING）。代价是这种极端情况下仍会走旧的重试路径（已知边界，见报告）。
+	 */
+	private boolean isPersistedParkedToolRound(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot != null && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
+					&& snapshot.getInFlightToolCalls() != null && !snapshot.getInFlightToolCalls().isEmpty();
+		}
+		catch (RuntimeException ex) {
+			log.debug("挂起轮判据读快照失败 runId={}（按非挂起继续）：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * 把"已持久化的挂起工具轮"交还给 resume：不发终帧、不写失败态、不清 in-flight、
+	 * 不动 pending/req —— 与 {@link RunParkedException} 的出口同口径（W-21 Fix A）。
+	 */
+	private void handBackParkedToolRound(String runId, String sessionId, int attempt,
+			StreamViolationException violation) {
+		AiTrace.event("turn_parked", "kind", "PERSISTED_TOOL_ROUND", "attempt", attempt, "code",
+				violation.getCode());
+		log.warn("挂起工具轮已持久化：不重试、不发终帧、不写失败态 runId={} sessionId={} attempt={} code={}"
+				+ "（快照保持 SUSPENDED，in-flight/pending/req 原样保留，等 resume 物化）", runId, sessionId, attempt,
+				violation.getCode());
 	}
 
 	/**

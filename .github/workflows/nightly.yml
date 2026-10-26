@@ -65,6 +65,11 @@ jobs:
     name: 后端全量（默认 locale + en-US）
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.2.16
+        ports:
+          - 6379:6379
     defaults:
       run:
         working-directory: backend
@@ -286,6 +291,11 @@ jobs:
     name: 倒排表重建 + 校验
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      redis:
+        image: redis:7.2.16
+        ports:
+          - 6379:6379
     defaults:
       run:
         working-directory: backend
