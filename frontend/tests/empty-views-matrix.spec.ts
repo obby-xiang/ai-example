@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, type PropType } from 'vue'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
   feedbackList: vi.fn(),
@@ -114,6 +115,42 @@ describe('C5-07 无任务：任务中心零行时给行动提示，表体不崩'
     expect(wrapper.find('.alert-stub').exists()).toBe(false)
     // 空表不是死界面：创建入口仍在
     expect(wrapper.text()).toContain('创建任务')
+    wrapper.unmount()
+  })
+})
+
+describe('批次5A 设置类页面：AI 反馈进页即声明/复位工作区（与 AI 设置同口径）', () => {
+  it('从导出向导（任务 7，已取消）进入反馈页 ⇒ 复位到默认页、任务态全中性', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'QUERY_COND',
+      taskId: 7,
+      taskStatus: 'CANCELLED',
+      selectedDefs: ['CURRENCY'],
+      queryConditions: { CURRENCY: {} },
+      importMode: 'MERGE'
+    })
+    api.feedbackList.mockResolvedValue([])
+
+    const { default: AiFeedbackView } = await import('@/views/AiFeedbackView.vue')
+    const wrapper = mount(AiFeedbackView, { global: { stubs: viewStubs } })
+    await flushPromises()
+
+    // 设置类页面不上报 settings（后端 page 闭集）⇒ 复位到默认页 tasks
+    expect(workspace.pageId).toBe('tasks')
+    expect(workspace.page).toBe('tasks')
+    expect(workspace.taskType).toBeNull()
+    expect(workspace.step).toBeNull()
+    expect(workspace.taskId).toBeNull()
+    expect(workspace.taskStatus).toBeNull()
+    expect(workspace.selectedDefs).toEqual([])
+    expect(workspace.queryConditions).toEqual({})
+    expect(workspace.importMode).toBeNull()
+    // 页面本身照常加载（声明不影响数据面）
+    expect(api.feedbackList).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 })

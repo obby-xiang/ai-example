@@ -35,15 +35,35 @@ export type PageHandlerName =
 /** 页面能力 handler：入参由各页自定，返回说明文本（作为工具结果回灌）。 */
 export type PageHandler = (payload: Record<string, unknown>) => unknown | Promise<unknown>
 
+/**
+ * 页面级上下文（批次5A 的「声明即全集」口径）：这些字段是「当前任务 / 当前页」的事实，
+ * 进入某页时**整体声明** —— 没声明的一律回中性值，跨页残留会让下一轮上下文报错页。
+ *
+ * @see WorkspaceContract.enterPage
+ */
+export type WorkspacePageContext = Pick<
+  WorkspaceSnapshot,
+  'taskType' | 'step' | 'taskId' | 'taskStatus' | 'selectedDefs' | 'queryConditions' | 'importMode'
+>
+
 /** 工作区状态快照（AI 侧可读的摘要，raw 化前）。 */
 export interface WorkspaceSnapshot {
   /**
    * 当前页面标签（ToolScope 的 page:* 口径）：上报给后端的页面维度，
    * **实现上与 `pageId` 同值**（路由页 id 的镜像，见 `stores/workspace.ts#enterPage` 的回退）；
    * 合法值域 = tasks / export / import / definitions / data。
+   *
+   * <p><b>设置类页面（AI 设置 / AI 反馈）不上报 `settings`</b>（批次5A 显式记录）：后端 page 是
+   * **闭集** —— `ContextFieldGate#page` 只放行 `ContextBuilder.PAGE_LABELS` 里的五个 id，未知值会被
+   * 降级成 `unknown`（每轮一条降级日志、提示词渲染成「未知页面」）。故这两页按「不在工作区内」处理：
+   * 复位到默认页 `tasks` + 任务态中性，**不虚增页面 id**（要真加 `settings`，须后端白名单、
+   * `PAGE_LABELS` 与 ToolScope 同批改，并同步本文件与 `stores/workspace.ts` 的映射表）。
    */
   page: string
-  /** 页面 id（路由级）；AI 侧判定"在哪个页面"请用本字段（`page` 只是它的镜像） */
+  /**
+   * 页面 id（路由级）；AI 侧判定"在哪个页面"请用本字段（`page` 只是它的镜像）。
+   * 设置类页面同样复位到默认页 `tasks`（理由见 {@link WorkspaceSnapshot.page}）。
+   */
   pageId: WorkspacePageId
   /** 任务类型 */
   taskType: TaskType | null
@@ -51,7 +71,7 @@ export interface WorkspaceSnapshot {
   step: TaskStep | null
   /** 当前任务 id */
   taskId: number | null
-  /** 当前任务状态 */
+  /** 当前任务状态（**每轮顶层上报**：后端披露面据此做终态收窄） */
   taskStatus: TaskStatus | null
   /** 任务已选配置项编码 */
   selectedDefs: string[]
@@ -59,7 +79,10 @@ export interface WorkspaceSnapshot {
   queryConditions: Record<string, QueryCondition | unknown>
   /** 导入模式 */
   importMode: ImportMode | null
-  /** 数据版本号（工作区状态变化的单调计数，供 AI 判断是否要重新拉取） */
+  /**
+   * 数据版本号（工作区状态变化的单调计数，供 AI 判断是否要重新拉取）。
+   * **时间线字段**：进页复位不重置它（见 {@link WorkspaceContract.enterPage}）。
+   */
   dataVersion: number
 }
 
@@ -69,7 +92,17 @@ export interface WorkspaceContract {
   buildContext(): AiChatContext
   /** 供 get_workspace_state 类工具拉取的完整快照 */
   snapshot(): WorkspaceSnapshot
-  /** 用户/页面进入某页时更新上下文 */
+  /**
+   * 进入某页：**声明本页的页面级上下文（声明即全集）**。
+   *
+   * <p>带页面身份（`pageId` / `page`）时，{@link WorkspacePageContext} 里**没声明**的字段一律回中性值
+   * （`null` / `[]` / `{}`）—— 上一页向导的 `taskType + step`、旧 `taskId`、终态 `taskStatus`、
+   * 选中集与查询条件都不得跨页残留（会让下一轮上下文报错页、让只读守卫误拒其它页的写事件）。
+   * 不带页面身份的调用是**增量更新**（只写显式给出的字段）。
+   *
+   * <p>**不扩大清空**：`dataVersion` / `recentActions`（时间线）与 `contractVersion` 一律保留；
+   * 本页显式声明的值（例：数据浏览页正在浏览的 `selectedDefs`）原样保留。
+   */
   enterPage(init: Partial<WorkspaceSnapshot>): void
   /**
    * 服务端任务状态同步（作业终态后由页面刷新快照写回）：驱动后端披露面的终态收窄。
@@ -80,7 +113,12 @@ export interface WorkspaceContract {
   dispatch(event: UiEvent): Promise<UiEventResult>
 }
 
-/** ui_event 分发结果（AI 侧据此决定回灌文案）。 */
+/**
+ * ui_event 分发结果（AI 侧据此决定回灌文案）。
+ *
+ * <p>面板侧口径（批次5A）：`handled === true` 才算「工作区已同步」（广播 `workspace_changed`）；
+ * `handled === false` 只经 `ui_event_result` 进面板回执位，并作为「被拒」留在工作区时间线里。
+ */
 export interface UiEventResult {
   handled: boolean
   /** 说明文本：'已打开导出向导' / '当前页面不支持该动作' 等 */

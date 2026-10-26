@@ -46,8 +46,19 @@ import { ElMessage } from 'element-plus'
 import { ApiError } from '@/api/http'
 import TaskCenterView from '@/views/TaskCenterView.vue'
 import { useTaskStore } from '@/stores/task'
+import { emitWorkspaceEvent } from '@/stores/workspace'
 import type { Job, JobStatus } from '@/types/job'
 import type { TaskSummary } from '@/types/task'
+
+/** jsdom 的 `document.visibilityState` 只读（原型 getter）⇒ 覆写为自身访问器属性。 */
+function setDocumentVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+  document.dispatchEvent(new Event('visibilitychange'))
+}
+
+function restoreDocumentVisibility(): void {
+  delete (document as unknown as { visibilityState?: string }).visibilityState
+}
 
 /** 桩 EventSource：只登记实例、不发帧（任务中心不得再开任何任务级事件连接）。 */
 class FakeEventSource {
@@ -165,6 +176,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  restoreDocumentVisibility()
 })
 
 describe('views/TaskCenterView.vue · 全静止 + 手动刷新（M1+F2）', () => {
@@ -351,6 +363,77 @@ describe('views/TaskCenterView.vue · 全静止 + 手动刷新（M1+F2）', () =
     expect(bubble.find('[data-testid="irreversible-ack-box"]').exists()).toBe(true)
     expect(bubble.text()).toContain('确认删除任务，执行后无法恢复')
     bubble.unmount()
+    wrapper.unmount()
+  })
+
+  /**
+   * AR-08（批次 5B 聚焦用例）：任务中心刷新的**三条件**。
+   *
+   * ①AI 工具事件后 ②存在**非终态**作业（只认 PENDING/RUNNING，与 AR-16 同族）③页面可见
+   * —— 三者同时成立才刷一次；隐藏期不刷（回可见补刷一次，不补偿后台错过的次数）；
+   * 无在途作业时事件**不触发**刷新（不是轮询、也不空转）。同时锁"数据截至 HH:mm:ss"：
+   * 让「没刷新」与「没有变化」可区分。
+   */
+  it('ar08-event-inflight-visible：事件后 + 在途 + 可见才刷新，并显示数据截至时刻', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING'), makeSummary(2, 'COMPLETED')]))
+    const wrapper = mount(TaskCenterView, { global: { stubs } })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(1)
+
+    // ①+②+③ 同时成立（AI 经 ui_event 起了作业）⇒ 恰好刷一次
+    emitWorkspaceEvent('ui_event_result', { event: 'run_job', handled: true, message: '作业已启动：EXPORT（作业 #10）' })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(2)
+
+    // 数据截至时刻可见（「没刷新」与「没有变化」可区分）
+    expect(wrapper.text()).toMatch(/数据截至\s*\d{2}:\d{2}:\d{2}/)
+
+    // ③ 不成立（页面隐藏）⇒ 不刷
+    setDocumentVisibility('hidden')
+    emitWorkspaceEvent('ui_event_result', { event: 'cancel_job', handled: true, message: '已请求取消作业 #10' })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(2)
+
+    // 回可见：隐藏期收到的那次事件补刷恰好一次（仍不是轮询）
+    setDocumentVisibility('visible')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(3)
+
+    // ② 不成立（列表里已无在途作业）⇒ 事件不触发刷新（不空转）
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(2, 'COMPLETED')]))
+    await wrapper.find('button[title="刷新"]').trigger('click')
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(4)
+    emitWorkspaceEvent('ui_event_result', { event: 'cancel_job', handled: true, message: '已请求取消作业 #10' })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(4)
+
+    wrapper.unmount()
+    restoreDocumentVisibility()
+  })
+
+  /** AR-08 第 4 条：事件驱动刷新失败必须进错误位（不静默），且不清空已有列表。 */
+  it('ar08-event-refresh-failure-visible：事件驱动刷新失败 ⇒ 错误横幅可见、列表不清空', async () => {
+    api.listTasks.mockResolvedValue(pageOf([makeSummary(1, 'RUNNING')]))
+    const wrapper = mount(TaskCenterView, {
+      global: {
+        stubs: {
+          ...stubs,
+          'el-alert': { props: ['title'], template: '<div class="alert-render">{{ title }}</div>' }
+        }
+      }
+    })
+    await flushPromises()
+    expect(api.listTasks).toHaveBeenCalledTimes(1)
+
+    api.listTasks.mockRejectedValueOnce(new Error('网络中断'))
+    emitWorkspaceEvent('ui_event_result', { event: 'run_job', handled: true, message: '作业已启动：EXPORT（作业 #10）' })
+    await flushPromises()
+
+    expect(api.listTasks).toHaveBeenCalledTimes(2)
+    expect(useTaskStore().loadError).toContain('网络中断')
+    expect(wrapper.find('.alert-render').text()).toContain('任务列表加载失败')
+    expect(wrapper.text()).toContain('任务 1') // 失败不改写已有列表
     wrapper.unmount()
   })
 })

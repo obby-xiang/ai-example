@@ -7,8 +7,11 @@ import { useI18n } from 'vue-i18n'
  */
 import { onMounted, ref } from 'vue'
 import { aiApi, type AiFeedbackEntry } from '@/api/ai'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const { t } = useI18n()
+
+const workspace = useWorkspaceStore()
 
 const items = ref<AiFeedbackEntry[]>([])
 const loading = ref(true)
@@ -26,7 +29,39 @@ async function load(): Promise<void> {
   }
 }
 
-onMounted(load)
+/**
+ * 进页即声明工作区上下文（批次5A，与「AI 设置」页同口径）。
+ *
+ * <p>为什么必须声明：本页与设置页一样**不属于五页工作区**，此前完全没有 `enterPage` ⇒
+ * 从导出/导入向导点进来时，工作区仍停在上一页的 `taskType + step`（后端按 `task:*` 披露工具）、
+ * 旧 `taskId` / 终态 `taskStatus`（只读守卫会拿别的任务的终态误拒写事件）。
+ *
+ * <p>为什么声明成默认页 `tasks` 而**不是**虚增一个 `settings` 页 id：后端 page 是**闭集**
+ * （`ContextFieldGate` + `ContextBuilder.PAGE_LABELS` 只有 tasks / export / import / definitions / data，
+ * 两侧须同改），未知 id 会被降级成 `unknown`（每轮一条降级日志、提示词变「未知页面」）。
+ * 故设置类页面（AI 设置 / AI 反馈）统一复位到默认页，避免虚增页面 id。
+ *
+ * <p>边界：只复位页面级事实；`dataVersion` / `recentActions` 时间线与契约版本由 store 保留
+ * （见 `stores/workspace.ts#enterPage`）。
+ */
+function declareWorkspaceContext(): void {
+  workspace.enterPage({
+    pageId: 'tasks',
+    page: 'tasks',
+    taskType: null,
+    step: null,
+    taskId: null,
+    taskStatus: null,
+    selectedDefs: [],
+    queryConditions: {},
+    importMode: null
+  })
+}
+
+onMounted(() => {
+  declareWorkspaceContext()
+  void load()
+})
 
 function retry(): void {
   void load()

@@ -35,9 +35,12 @@ const api = vi.hoisted(() => ({
 
 const confirmMock = vi.hoisted(() => vi.fn())
 const toast = vi.hoisted(() => ({ success: vi.fn(), warning: vi.fn(), error: vi.fn() }))
+/** 批次5A：本页进页即声明工作区上下文 —— 这里只钉「声明了什么」，store 的复位语义另有专测。 */
+const workspaceEnterPage = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api/aiConfig', () => ({ aiConfigApi: api, default: undefined }))
 vi.mock('@/api/ai', () => ({ aiApi: { health: api.health } }))
+vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => ({ enterPage: workspaceEnterPage }) }))
 vi.mock('element-plus', () => ({
   ElMessage: toast,
   ElMessageBox: { confirm: confirmMock }
@@ -100,6 +103,7 @@ beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset())
   confirmMock.mockReset().mockResolvedValue(undefined)
   Object.values(toast).forEach((fn) => fn.mockReset())
+  workspaceEnterPage.mockReset()
   api.listProviders.mockResolvedValue(providersFixture())
   api.getDefaults.mockResolvedValue(defaultsFixture())
   api.health.mockResolvedValue(healthFixture())
@@ -486,5 +490,36 @@ describe('F3 按 code 映射文案（不显示后端中文）', () => {
 
     expect(wrapper.find('[data-testid="ai-settings-error"]').text()).toContain('操作失败，请重试')
     expect(wrapper.text()).not.toContain('内部细节')
+  })
+})
+
+describe('批次5A 页面上下文：设置页进页即声明并复位工作区', () => {
+  it('挂载即声明默认页 + 全部任务态中性值（不继承上一页向导上下文）', async () => {
+    await mountView()
+
+    // 声明即全集：设置页不属于五页工作区（后端 page 白名单只有 tasks/export/import/
+    // definitions/data）⇒ 复位到默认页，且七个页面级字段逐项显式中性。
+    // 未声明的字段由 store 复位（`tests/workspace-page-context-reset.spec.ts` 锁该语义）。
+    expect(workspaceEnterPage).toHaveBeenCalledTimes(1)
+    expect(workspaceEnterPage).toHaveBeenCalledWith({
+      pageId: 'tasks',
+      page: 'tasks',
+      taskType: null,
+      step: null,
+      taskId: null,
+      taskStatus: null,
+      selectedDefs: [],
+      queryConditions: {},
+      importMode: null
+    })
+  })
+
+  it('声明发生在加载数据之前（错误态也照样声明：页面身份与加载成败无关）', async () => {
+    api.listProviders.mockRejectedValue(new ApiError('boom', 500, 'UNREACHABLE', null))
+
+    const wrapper = await mountView()
+
+    expect(wrapper.find('[data-testid="ai-settings-error"]').exists()).toBe(true)
+    expect(workspaceEnterPage).toHaveBeenCalledTimes(1)
   })
 })

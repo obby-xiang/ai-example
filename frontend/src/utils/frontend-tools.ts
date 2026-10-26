@@ -26,6 +26,9 @@
  * - **AI 表格操作专项 · 批B（读侧补齐，2026-10-22）**：`FRONTEND_TOOLS` 17 → 18，后端 `@Tool` 33 → 34
  *   （前端通道 22 → 23）。新增读工具 `find_rows`（全列检索：命中行号 + 单元格地址 + ≤20 行采样），
  *   与其余读工具同 scope、走**路由 1 + 默认执行器**；`aggregate_sheet` 增加分组排序（Top-N）。
+ * - **批次 5B（Task 8）**：`restore_task` 前置特判（{@link runRestoreTask}：按**服务端**任务类型
+ *   恢复向导，导入任务不跳导出）；`navigate_to` 的执行体抽成 {@link runNavigateTo}
+ *   （带 taskId 时同样以服务端类型为准，且**导航后等目标页就绪**再回灌，路由 3 的导航类事件同理）。
  *
  * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
  * 内的分支注释一致，实读该方法确认共 4 条）：
@@ -34,8 +37,9 @@
  *    confirm_step；别名经 `WORKSPACE_ACTION_ALIASES` 归一：select_config_defs /
  *    set_query_conditions / goto_step / advance_step / restore_task / open_page）：
  *    先找页面能力 handler，再落契约层 `dispatchUiEvent`（与用户点击**同一套** action）；
+ *    其中 navigate_to 走 {@link runNavigateTo}，`restore_task` 更早一步被前置特判接走；
  * 3. **ui_event 同名动作**（`select_defs` / `set_conditions` / `goto_step` / `open_page` /
- *    `download` / `run_job` …）：直接经契约层分发；
+ *    `download` / `run_job` …）：直接经契约层分发（导航类事件同样等目标页就绪）；
  * 4. **页面能力 handler**（页面经 `registerPageHandler` 反向暴露，名字即 handler 名；
  *    该页未登记时本分支走不到）。
  *
@@ -79,9 +83,11 @@ import {
   type UiToolOutcome
 } from '@/utils/ai-dom-tools'
 import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { useTaskStore } from '@/stores/task'
 import { currentAiEpoch, listAiRegions } from '@/utils/ai-regions'
 import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
 import type { ConfigField } from '@/types/definition'
+import type { TaskType } from '@/types/task'
 import {
   aggregateSheet,
   findRows,
@@ -681,6 +687,13 @@ async function dispatchFrontendToolInner(call: FrontendToolCall): Promise<Fronte
   if (descriptor) {
     return await runRegisteredTool(descriptor, call)
   }
+  // 批次 5B（Task 8）：`restore_task` = **按服务端任务类型**恢复向导（入参只需 taskId）。
+  // 旧实现经别名落到 `navigate_to`：缺 `page` 直接判"参数不完整"（模型手里的 `restore_task`
+  // 因此根本不可达），而带上 page 又是拿列表缓存猜类型（缺失即 EXPORT 兜底）⇒ 导入任务可能被
+  // 送进导出向导。两条都不再成立：类型先查权威来源，页面就绪再回灌。
+  if (call.name === 'restore_task') {
+    return await runRestoreTask(call.args)
+  }
   // 设计稿 §3.1 / §7-裁 7：`delete_rows` 留批③待裁，未上线时调用必须明确“不可用”，
   // 不能落到“未知前端工具”的模糊文案。
   if (call.name === 'delete_rows') {
@@ -734,17 +747,6 @@ interface WorkspaceAction {
   handlerNames: readonly string[]
   /** 无 handler 时的契约层后备动作（与用户点击同一套 action） */
   toUiEvent?: (args: Record<string, unknown>) => UiEvent | null
-  /**
-   * 本动作会把界面导航到哪个页面（F3：这类动作执行后要等目标页面就绪再回灌结果，
-   * 否则同一轮里紧随其后的动作会打在"页面还没挂载"的窗口上）。
-   */
-  navigatesTo?: (args: Record<string, unknown>) => WorkspacePageId | null
-  /**
-   * 本动作要求绑定哪个任务（issue #1）：非 null 时，完成判据从"页面就绪"升级为
-   * "页面就绪 **且** `workspace.taskId` 已绑定为该值"，否则紧随的 `select_definitions`
-   * 之类的动作会打在"页面在、任务还没绑上"的窗口上。
-   */
-  bindsTask?: (args: Record<string, unknown>) => number | null
 }
 
 /**
@@ -839,6 +841,218 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * 等待"**某个向导页**就绪且任务已绑定"（`restore_task` 未带任务类型时的完成判据）。
+ *
+ * 为什么不能先猜页面：目标页由任务类型决定，而类型没给就必须由服务端说了算。这里只等
+ * "任务绑上了、且落在一个向导页面上"，不替用户/模型选边（选错页正是"导入跳导出"）。
+ */
+async function waitForTaskOpened(
+  expectedTaskId: number,
+  timeoutMs = PAGE_READY_TIMEOUT_MS
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const workspace = useWorkspaceStore()
+    const page = workspace.pageId
+    const wizardReady = (page === 'export' || page === 'import')
+      && PAGE_READY_PROBES[page].some((name) => getPageHandler(name) !== null)
+    if (wizardReady && workspace.taskId === expectedTaskId) {
+      return true
+    }
+    if (Date.now() >= deadline) {
+      return false
+    }
+    await delay(50)
+  }
+}
+
+/** `restore_task` 的目标页（任务类型 → 向导页）：类型由服务端给定，不由调用方猜。 */
+function wizardPageOf(taskType: TaskType): { page: WorkspacePageId; label: string } {
+  return taskType === 'IMPORT'
+    ? { page: 'import', label: '导入' }
+    : { page: 'export', label: '导出' }
+}
+
+/**
+ * **权威任务类型**解析（批次 5B）：查不到就**不导航**。
+ *
+ * 返回 `null` 的三种现场（任务不存在 / 读取失败 / 类型不可识别）都必须给模型一条可行动的回执，
+ * 而不是按旧口径兜底成 EXPORT —— 那会把导入任务送进导出向导，且模型看到的是"成功"。
+ */
+async function resolveAuthoritativeTaskType(taskId: number): Promise<TaskType | null> {
+  return await useTaskStore().ensureTaskType(taskId)
+}
+
+/**
+ * 任务类型未知时的统一回执（fail-closed：不导航、不猜页）。
+ */
+function taskTypeUnknown(taskId: number): FrontendToolExecution {
+  return makeExecution({
+    outcome: 'failed',
+    availability: 'degraded',
+    result: `无法确认任务 #${taskId} 的类型（任务不存在或读取失败），本次未导航。`
+      + '请用 list_tasks 核对任务号后重试，或提示用户在任务中心打开该任务。'
+  })
+}
+
+/**
+ * `restore_task`：按**服务端**任务类型恢复向导，等目标页就绪再回灌（批次 5B）。
+ *
+ * 与 `navigate_to(page, taskId)` 的分工：本动作**不需要** page 入参（类型是事实，不是参数），
+ * 模型只给任务号即可；`navigate_to` 给了 page 也仍以服务端类型为准（见 {@link runNavigateTo}）。
+ */
+async function runRestoreTask(args: Record<string, unknown>): Promise<FrontendToolExecution> {
+  const taskId = toNumber(args.taskId)
+  if (taskId === null) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'unavailable',
+      result: `恢复任务的参数不完整：${missingArgsHint('restore_task', WORKSPACE_ACTION_REQUIRED_ARGS)}`
+    })
+  }
+  const taskType = await resolveAuthoritativeTaskType(taskId)
+  if (taskType === null) {
+    return taskTypeUnknown(taskId)
+  }
+  const { page, label } = wizardPageOf(taskType)
+  const workspace = useWorkspaceStore()
+  const context = workspace.snapshot()
+  if (context.pageId === page && context.taskId === taskId) {
+    return makeExecution({
+      outcome: 'ok',
+      availability: 'available',
+      code: 'UI_ALREADY_ON_PAGE',
+      result: `已在任务 #${taskId} 的${label}向导（任务 #${taskId} 已绑定），这一步不用再做。`
+    })
+  }
+  const outcome = await dispatchUiEvent({ type: 'restore_task', taskId, taskType })
+  if (!outcome.handled) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: `恢复任务 #${taskId} 的向导未完成（${outcome.message}）。请提示用户在任务中心手动打开该任务。`
+    })
+  }
+  const wait = await waitForTaskBound(page, taskId)
+  if (wait.pageReady && wait.taskBound) {
+    return makeExecution({
+      outcome: 'ok',
+      availability: 'available',
+      result: `${outcome.message}（页面已就绪，任务 #${taskId} 已绑定；类型以服务端为准：${label}任务）`
+    })
+  }
+  if (wait.pageReady) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: `${outcome.message}，但任务 #${taskId} 的绑定没有完成（${label}向导已就绪，未绑定该任务）。`
+        + '请核对任务号，或提示用户手动在任务中心打开该任务后重试。'
+    })
+  }
+  return makeExecution({
+    outcome: 'failed',
+    availability: 'degraded',
+    code: 'UI_PAGE_NOT_READY',
+    result: formatUiReceipt({
+      tool: '恢复任务',
+      conclusion: `导航已提交，但${label}向导在等待上界内仍未就绪（任务 #${taskId}）`,
+      reason: '页面加载慢，或该页尚未注册可操作能力',
+      next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+    })
+  })
+}
+
+/**
+ * `navigate_to` 的执行体（批次 5B 抽出）。
+ *
+ * 导航是**唯一**同时需要"先查权威任务类型、后等页面就绪"的动作，故单独成体，避免与
+ * 选配置 / 设条件 / 推进步骤那三条本页动作混在一个分支里。
+ *
+ * 关键口径：带 taskId 且目标是向导页时，**已知的任务类型优先于模型写的 page** ——
+ * 模型写 `page=export` 而该任务已知是导入任务时，实际进入导入向导并在回执里说明修正。
+ * 类型**未知**时不为此多发一次 GET（导航本身会由契约层按列表缓存恢复；真错页会在
+ * "等页面就绪 / 任务绑定"那一步如实失败）；需要"必须知道类型"的 `restore_task` 另走
+ * {@link runRestoreTask}（那里 fetch 权威类型，查不到就不导航）。
+ */
+async function runNavigateTo(args: Record<string, unknown>): Promise<FrontendToolExecution> {
+  const intent = resolveNavigateIntent(args)
+  if (!intent) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'unavailable',
+      result: `页面导航的参数不完整：${missingArgsHint('navigate_to', WORKSPACE_ACTION_REQUIRED_ARGS)}`
+    })
+  }
+  let page = intent.page
+  let taskType: TaskType | null = null
+  let correction = ''
+  if (intent.taskId !== null) {
+    taskType = useTaskStore().knownWizardType(intent.taskId)
+    if (taskType !== null) {
+      const target = wizardPageOf(taskType)
+      if (target.page !== page) {
+        correction = `（任务 #${intent.taskId} 是${target.label}任务，已按服务端类型进入${target.label}向导）`
+        page = target.page
+      }
+    }
+  }
+  const workspace = useWorkspaceStore()
+  const context = workspace.snapshot()
+  // 批 A（A-01/A-02）：同页同参幂等直返（导航重试风暴的根因就是"每次都当真执行"）
+  if (page === context.pageId && (intent.taskId === null || intent.taskId === context.taskId)) {
+    const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
+    return makeExecution({
+      outcome: 'ok',
+      availability: 'available',
+      code: 'UI_ALREADY_ON_PAGE',
+      result: `已在目标页（${page}）${bound}，这一步不用再做。`
+    })
+  }
+  const event: UiEvent = intent.taskId === null
+    ? { type: 'open_page', page }
+    : { type: 'restore_task', taskId: intent.taskId, ...(taskType === null ? {} : { taskType }) }
+  const outcome = await dispatchUiEvent(event)
+  if (!outcome.handled) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: `${outcome.message}。请提示用户在界面上手动完成该动作。`
+    })
+  }
+  // F3：导航类动作等目标页面就绪再回灌（否则同一轮里紧随的动作会打在页面未挂载的窗口上）
+  const wait = intent.taskId === null
+    ? { pageReady: await waitForPageReady(page), taskBound: true }
+    : await waitForTaskBound(page, intent.taskId)
+  if (wait.pageReady && wait.taskBound) {
+    const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
+    return makeExecution({
+      outcome: 'ok',
+      availability: 'available',
+      result: `${outcome.message}（页面已就绪${bound}，可继续执行本页动作）${correction}`
+    })
+  }
+  if (wait.pageReady) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: `${outcome.message}，但任务 #${intent.taskId} 的绑定没有完成（向导页已就绪，未绑定该任务）。`
+        + `请核对任务 #${intent.taskId} 是否存在，或提示用户手动在任务中心打开该任务后重试。`
+    })
+  }
+  return makeExecution({
+    outcome: 'failed',
+    availability: 'degraded',
+    code: 'UI_PAGE_NOT_READY',
+    result: formatUiReceipt({
+      tool: '页面导航',
+      conclusion: `导航已提交，但目标页面在等待上界内仍未就绪（${page}${intent.taskId === null ? '' : `，任务 #${intent.taskId} 待绑定`}）`,
+      reason: '页面加载慢，或该页尚未注册可操作能力',
+      next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+    })
+  })
+}
+
+/**
  * 工作区动作表。
  *
  * 名字来源（**核对过后端口径**）：
@@ -848,6 +1062,10 @@ function delay(ms: number): Promise<void> {
  *   作为**别名**一并登记，避免因命名差异漏路由。
  * 后端已披露 7 个 FRONTEND 工具，上述 4 个均在其中，故这些动作今天经「前端工具帧」或
  * 「契约层」触发；执行器与页面能力已就绪，后续工具接入时前端零改动。
+ *
+ * `navigate_to` 只保留展示名与页面白名单（回灌文案、`toolDisplayName` 用）：
+ * 它的执行体是 {@link runNavigateTo}（批次 5B 抽出 —— 要先查权威任务类型再等页面就绪，
+ * 与"本页动作"不是同一条链）。
  */
 export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
   {
@@ -855,18 +1073,7 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
     displayName: '页面导航',
     allowPages: ['tasks', 'export', 'import', 'definitions', 'data'],
     allowSteps: [],
-    handlerNames: [],
-    toUiEvent: (args) => {
-      const intent = resolveNavigateIntent(args)
-      if (!intent) {
-        return null
-      }
-      return intent.taskId === null
-        ? { type: 'open_page', page: intent.page }
-        : { type: 'restore_task', taskId: intent.taskId }
-    },
-    navigatesTo: (args) => resolveNavigateIntent(args)?.page ?? null,
-    bindsTask: (args) => resolveNavigateIntent(args)?.taskId ?? null
+    handlerNames: []
   },
   {
     name: 'select_definitions',
@@ -911,8 +1118,7 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
 ] as const
 
 /**
- * `navigate_to` 的意图解析（`toUiEvent` / `navigatesTo` / `bindsTask` 三处共用同一份判定，
- * 避免"事件映射"与"完成判据"两份判断漂移）。
+ * `navigate_to` 的意图解析（{@link runNavigateTo} 的唯一判定入口）。
  *
  * 带 taskId 且目标是向导页 ⇒ 恢复该任务的向导（`restore_task`，会绑定任务）；
  * 否则只是切页（`open_page`，不碰任务绑定）。
@@ -984,6 +1190,11 @@ async function runWorkspaceAction(
   action: WorkspaceAction,
   args: Record<string, unknown>
 ): Promise<FrontendToolExecution> {
+  // 导航是唯一需要"先查权威任务类型、后等页面就绪"的动作：单独成体（批次 5B）。
+  // 其余三条（选配置 / 设条件 / 推进步骤）留在本函数里按"本页动作"处理。
+  if (action.name === 'navigate_to') {
+    return await runNavigateTo(args)
+  }
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
   if (!action.allowPages.includes(context.pageId)) {
@@ -1008,22 +1219,6 @@ async function runWorkspaceAction(
     })
   }
 
-  // 批 A（A-01/A-02）：同页同参幂等直返 —— 已在目标页且任务已绑定（或本就不带任务）时，
-  // 不再 router.push（导航重试风暴的根因就是"每次都当真执行"）。
-  if (action.name === 'navigate_to') {
-    const intent = resolveNavigateIntent(args)
-    if (intent !== null && intent.page === context.pageId
-      && (intent.taskId === null || intent.taskId === context.taskId)) {
-      const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
-      return makeExecution({
-        outcome: 'ok',
-        availability: 'available',
-        code: 'UI_ALREADY_ON_PAGE',
-        result: `已在目标页（${intent.page}）${bound}，这一步不用再做。`
-      })
-    }
-  }
-
   for (const handlerName of action.handlerNames) {
     const handler = getPageHandler(handlerName)
     if (handler) {
@@ -1041,47 +1236,6 @@ async function runWorkspaceAction(
   }
   const outcome = await dispatchUiEvent(event)
   if (outcome.handled) {
-    // F3：导航类动作等目标页面就绪再回灌（否则同一轮里紧随的动作会打在页面未挂载的窗口上）
-    const target = action.navigatesTo?.(args) ?? null
-    if (target !== null) {
-      // issue #1：带 taskId 的导航还要等**任务绑定落地**再回灌 —— 只等"页面就绪"会谎报成功
-      // （向导页已挂载时 handler 早在，workspace.taskId 却还是 null）。
-      const expectedTaskId = action.bindsTask?.(args) ?? null
-      const wait = expectedTaskId === null
-        ? { pageReady: await waitForPageReady(target), taskBound: true }
-        : await waitForTaskBound(target, expectedTaskId)
-      if (wait.pageReady && wait.taskBound) {
-        const bound = expectedTaskId === null ? '' : `，任务 #${expectedTaskId} 已绑定`
-        return makeExecution({
-          outcome: 'ok',
-          availability: 'available',
-          result: `${outcome.message}（页面已就绪${bound}，可继续执行本页动作）`
-        })
-      }
-      if (wait.pageReady) {
-        // 页面已就绪却仍没绑定该任务 ⇒ 不是"还在加载"，再等也不会变：明确降级，不谎报成功
-        return makeExecution({
-          outcome: 'failed',
-          availability: 'degraded',
-          result: `${outcome.message}，但任务 #${expectedTaskId} 的绑定没有完成（向导页已就绪，未绑定该任务）。`
-            + `请核对任务 #${expectedTaskId} 是否存在，或提示用户手动在任务中心打开该任务后重试。`
-        })
-      }
-      // 批 A（A-04）：等待上界（PAGE_READY_TIMEOUT_MS）内没等到目标页就绪 ⇒ **可判定失败**
-      // （导航已发生，后置条件未满足）：outcome failed + code UI_PAGE_NOT_READY。
-      // 不再报「结局未知」—— 那会让模型以为是网络抖动而反复导航。
-      return makeExecution({
-        outcome: 'failed',
-        availability: 'degraded',
-        code: 'UI_PAGE_NOT_READY',
-        result: formatUiReceipt({
-          tool: action.displayName,
-          conclusion: `导航已提交，但目标页面在等待上界内仍未就绪（${target}${expectedTaskId === null ? '' : `，任务 #${expectedTaskId} 待绑定`}）`,
-          reason: '页面加载慢，或该页尚未注册可操作能力',
-          next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
-        })
-      })
-    }
     return makeExecution({ outcome: 'ok', availability: 'available', result: outcome.message })
   }
   // 契约层拒绝（缺任务/缺 handler）→ degraded：给出可行动说明，不静默
@@ -1316,6 +1470,37 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
   })
 }
 
+/**
+ * 导航类 ui_event 的目标页与完成判据（批次 5B：导航后等目标页就绪再回灌）。
+ *
+ * 直接经路由 3 驱动的 ui_event（`export_started` / `import_batch` / `import_action` / `open_page`）
+ * 此前一律"push 即回执"：同一轮里紧随的动作会打在"页面还没挂载"的窗口上（与 F3 同一根因，
+ * 只是走的是另一条路由）。`restore_task` 的目标页由任务类型决定 —— 有 `taskType` 就按它对页面，
+ * 没有就等"某个向导页就绪且任务已绑定"（不猜）。
+ *
+ * @returns `null` = 本事件不导航（无需等待）
+ */
+async function waitForUiEventNavigation(event: UiEvent): Promise<boolean | null> {
+  switch (event.type) {
+    case 'open_page':
+      return await waitForPageReady(event.page)
+    case 'export_started':
+      return await waitForPageReady('export')
+    case 'import_batch':
+    case 'import_action':
+      return await waitForPageReady('import')
+    case 'restore_task': {
+      if (event.taskType === 'IMPORT' || event.taskType === 'EXPORT') {
+        const wait = await waitForTaskBound(wizardPageOf(event.taskType).page, event.taskId)
+        return wait.pageReady && wait.taskBound
+      }
+      return await waitForTaskOpened(event.taskId)
+    }
+    default:
+      return null
+  }
+}
+
 /** 路由 3：ui_event 同名动作 → 契约层统一分发（与用户点击同一套 action）。 */
 async function runUiEventAction(name: UiEvent['type'], args: Record<string, unknown>): Promise<FrontendToolExecution> {
   const event = toUiEvent(name, args)
@@ -1330,10 +1515,28 @@ async function runUiEventAction(name: UiEvent['type'], args: Record<string, unkn
     const outcome = await dispatchUiEvent(event)
     // 批3③a D1：handled:true 且副作用已 await ⇒ 'ok'；契约层未受理（fail）⇒ 确定性 'failed'
     // —— 不再让"未受理"戴着 ok:true 出去。
+    if (!outcome.handled) {
+      return makeExecution({ outcome: 'failed', availability: 'available', result: outcome.message })
+    }
+    // 批次 5B：导航类事件等目标页就绪再回灌（等待上界与 navigate_to 同源）
+    const ready = await waitForUiEventNavigation(event)
+    if (ready === false) {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'degraded',
+        code: 'UI_PAGE_NOT_READY',
+        result: formatUiReceipt({
+          tool: name,
+          conclusion: `导航已提交，但目标页面在等待上界内仍未就绪（${event.type}）`,
+          reason: '页面加载慢，或该页尚未注册可操作能力',
+          next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+        })
+      })
+    }
     return makeExecution({
-      outcome: outcome.handled ? 'ok' : 'failed',
+      outcome: 'ok',
       availability: 'available',
-      result: outcome.message
+      result: ready === true ? `${outcome.message}（页面已就绪，可继续执行本页动作）` : outcome.message
     })
   } catch (error) {
     return makeExecution({

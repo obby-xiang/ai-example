@@ -5,7 +5,8 @@
         <h2 class="m-0 text-xl text-[#303133]">{{ t('views.tasks.title') }}</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
           {{ t('views.tasks.subtitle') }}
-          <span class="ml-1">{{ t('views.tasks.refreshHint') }}{{ lastLoadedText }}</span>
+          <span class="ml-1">{{ t('views.tasks.refreshHint') }}</span>
+          <span v-if="asOfText" class="ml-1 as-of">{{ asOfText }}</span>
         </div>
       </div>
       <div>
@@ -151,21 +152,24 @@ import { useI18n } from 'vue-i18n'
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
  *   控件值是**草稿**（改动不请求），`commitFilterDraft()` 在查询/翻页/刷新/写后刷新时
  *   把它提交成 store 的已应用值 —— 三个入口同一份筛选，控件与列表不再错位（P1-5）；
- * - 刷新口径（手动刷新批，M1 + F2）：**无任何周期自刷、零 EventSource 连接** ——
- *   挂载只拉一次列表，此后静止对后端零请求；右上角刷新按钮与写操作成功后的本地 refreshNow()
- *   是唯一更新入口（轮询治理一期步1~步3 的条件自刷与任务级 SSE 订阅池已整体摘除）；
+ * - 刷新口径（手动刷新批 M1 + F2 + AR-08）：**无任何周期自刷、零 EventSource 连接** ——
+ *   挂载只拉一次列表，此后静止对后端零请求；更新入口 = 右上角刷新按钮、写操作成功后的
+ *   `refreshNow()`，以及 AR-08 的**受限事件刷新**：AI 作业事件（`ui_event_result` 里的
+ *   `run_job` / `cancel_job` / `start_*`）到达后，若**存在在途作业**且**页面可见**才刷一次；
+ *   页面隐藏期只记待补、回可见补刷一次（不是轮询，也不补后台错过的次数）；
+ *   「数据截至 HH:mm:ss」让"没刷新"与"没有变化"可区分；
  * - 点任务标题 = 一键恢复向导（`restoreWizard` 按任务类型跳对应向导页，与创建任务后跳转同口径）；
  * - 「取消」取消的是该任务最新作业（后端只有 DELETE /api/jobs/{id}；作业已终态 →
  *   409 JOB_ALREADY_FINAL，按码给中文提示，不当普通错误弹）；取消成功后本地 refreshNow() 一次；
  * - 「删除」级联清理作业/条目/问题/暂存/文件（S4.3b⑦）；
  * - 进度列是**行级**口径：total 未知（-1）时显示"处理中"而不是百分比。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
-import { useTaskStore } from '@/stores/task'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { isTaskCenterRefreshEvent, useTaskStore } from '@/stores/task'
+import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { formatDateTime, progressView, stepLabel } from '@/utils/format'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
@@ -187,12 +191,33 @@ const createForm = reactive<{ type: TaskType; title: string }>({ type: 'EXPORT',
 
 const cancellingId = ref<number | null>(null)
 
-const lastLoadedText = computed(() => {
+/**
+ * AR-08「数据截至时刻」：只显示 `HH:mm:ss`（列表最近一次**成功**加载的时刻）。
+ *
+ * 为什么必须显示：事件驱动刷新是**有条件**的（无在途作业 / 页面隐藏时不刷），没有这一刻，
+ * 用户无法区分"列表没刷新"与"数据确实没变化"。
+ */
+const asOfText = computed(() => {
   if (taskStore.lastLoadedAt === 0) {
     return ''
   }
-  return t('views.tasks.recentLoaded', { time: formatDateTime(new Date(taskStore.lastLoadedAt).toISOString()) })
+  // `toTimeString()` 前三段恒为 HH:mm:ss（与 locale 无关）——只取时间，日期在同一屏另有列
+  return t('views.tasks.asOf', { time: new Date(taskStore.lastLoadedAt).toTimeString().slice(0, 8) })
 })
+
+/**
+ * AR-08：AI 作业事件 → store 的三条件闸（事件后 + 仅在途 + 可见）。
+ *
+ * 订阅面只取工作区事件总线的 `ui_event_result`（`dispatchUiEvent` 对**每个** ui_event 都发，
+ * `run_job` / `cancel_job` 都在其中）；白名单外的动作（导航 / 选配置 / 设条件）不刷新。
+ * 视图只做"转交"，三条件判定全部在 `stores/task.ts`，避免两处判据漂移。
+ */
+let disposeJobEvents: (() => void) | null = null
+
+/** 可见性变化：回到前台时补刷隐藏期收到的那一次（`flushAutoRefreshOnVisible` 自带判据）。 */
+function onVisibilityChange(): void {
+  taskStore.flushAutoRefreshOnVisible()
+}
 
 /**
  * 筛选控件是**草稿**：改动本身不发请求，与 store 里**已应用**的筛选分开存放
@@ -400,5 +425,26 @@ onMounted(() => {
   workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
   // 手动刷新批（M1）：只拉一次列表 —— 不起周期表、不开任务级事件订阅
   void taskStore.load()
+  // AR-08：进入观察窗 + 订阅作业事件（事件后刷新；无定时器，页面静止仍零请求）
+  taskStore.watchCenter()
+  disposeJobEvents = onWorkspaceEvent('ui_event_result', (payload) => {
+    const result = payload as { event?: unknown; handled?: unknown } | null
+    // 被拒 / 失败的动作没有改变列表事实（批次5A：失败不记"已同步"）⇒ 不构成"事件后"
+    if (result?.handled === false) {
+      return
+    }
+    const event: unknown = result?.event
+    if (isTaskCenterRefreshEvent(event)) {
+      taskStore.notifyJobEvent(event)
+    }
+  })
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
+
+onBeforeUnmount(() => {
+  disposeJobEvents?.()
+  disposeJobEvents = null
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  taskStore.unwatchCenter()
 })
 </script>

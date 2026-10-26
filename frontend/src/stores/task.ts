@@ -7,9 +7,14 @@
  *
  * 刷新口径（手动刷新批，M1 + F2）：任务中心**不再有任何周期自刷**（步1/步2 的
  * 4s 条件 + 30s 兜底两张表、步3 的任务级 SSE 订阅池整体摘除 —— 页面静止时对后端零请求）。
- * 唯一的拉取入口是 `refreshNow()` 手动刷新通道：右上角刷新按钮、用户写操作
- * （取消任务等）成功后的本地刷新、ui_event 驱动的即时刷新都走它；
- * 被在途 load（loading 挡住的）合并为恰好 1 次补发（refreshPending 标记 + finally 收口）。
+ * 唯一的拉取入口是 `refreshNow()`：右上角刷新按钮、用户写操作（取消任务等）成功后的本地刷新、
+ * ui_event 驱动的即时刷新都走它；被在途 load（loading 挡住的）合并为恰好 1 次补发
+ * （refreshPending 标记 + finally 收口）。
+ *
+ * 事件后刷新（AR-08，批次 5B）：在"手动刷新"之上只**加**一条受限通道 —— ①AI 工具事件后
+ * ②存在非终态作业（`PENDING`/`RUNNING`）③页面可见，三者同时成立才刷一次（{@link notifyJobEvent}）。
+ * **不引入**常驻轮询 / 后台标签刷新 / 跨页签广播刷新：没有事件就没有请求，且"数据截至时刻"
+ * 让"没刷新"与"没有变化"可区分。
  *
  * 口径提醒：
  * - 列表排序由后端固定 createdAt DESC, id DESC；关键词转义后端已处理（Q16②），前端原样传；
@@ -73,6 +78,53 @@ let refreshPending = false
 export const PUBLISH_WATCH_WALL_CLOCK_MS = 300_000
 
 /**
+ * 列表里是否存在**非终态作业**（AR-08 条件②，也是 AR-16「只探测 PENDING/RUNNING」的同族判据）。
+ *
+ * 只认 `PENDING` / `RUNNING`：终态作业不构成"还有东西要等"的理由 —— 把它也算作在途，
+ * 一次终态落定就会让任务中心对每个后续事件都刷一次（那就是变相轮询）。
+ */
+export function hasInFlightJob(items: readonly TaskSummary[]): boolean {
+  return items.some((item) => {
+    const status = item.latestJob?.status
+    return status === 'PENDING' || status === 'RUNNING'
+  })
+}
+
+/**
+ * 会改变任务中心列表事实的 AI 事件名白名单（`ui_event_result.event` 与 `start_*` 工具名同表）。
+ *
+ * 只认**起作业 / 取消作业**这一类；导航、选配置、设条件不刷新 —— 否则一轮对话能把列表刷十几次。
+ */
+export const TASK_CENTER_REFRESH_EVENTS: ReadonlySet<string> = new Set([
+  'run_job',
+  'cancel_job',
+  'start_export',
+  'start_precheck',
+  'start_import',
+  'start_publish'
+])
+
+/** 事件名是否在白名单内（视图订阅 `ui_event_result` 时的唯一判据）。 */
+export function isTaskCenterRefreshEvent(event: unknown): event is string {
+  return typeof event === 'string' && TASK_CENTER_REFRESH_EVENTS.has(event)
+}
+
+/**
+ * 事件本身是否证明"有作业刚起来"（AR-08 条件②的第二种成立方式）。
+ *
+ * 起作业后该作业必然非终态，而列表快照**还没回来**（甚至还是旧数据、看不出在途）——
+ * 只按列表判据会把"刚起的那一次"整条丢掉（用户停在任务中心等结果时最需要那一次刷新）。
+ */
+export function jobEventStartedJob(event: string): boolean {
+  return event === 'run_job' || event.startsWith('start_')
+}
+
+/** 页面可见判据（AR-08 条件③：`document.visibilityState === 'visible'`）。 */
+function isDocumentVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible'
+}
+
+/**
  * 发布跟踪注册表（F4）：key = `taskId:jobId`。AI dispatch（workspace run_job）与向导页发起
  * 的 publish watcher 同键不得双开 —— 第二次调用直接返回在册 dispose。
  */
@@ -130,10 +182,26 @@ export const useTaskStore = defineStore('task', {
     loadError: null as string | null,
     /** 写操作失败（创建/删除；只走 ElMessage，不污染列表横幅）。 */
     actionError: null as string | null,
-    lastLoadedAt: 0 as number
+    lastLoadedAt: 0 as number,
+    /**
+     * AR-08：任务中心是否**正在被看**（视图挂载/卸载写入）。
+     * 没人在看时的作业事件不刷新 —— 没有渲染位，刷了也只是给后端加一次无用请求。
+     */
+    watchingCenter: false,
+    /** AR-08：隐藏期收到、且已满足①②的刷新请求（回可见补刷**一次**，不按时间补偿）。 */
+    autoRefreshPending: false,
+    /**
+     * 权威任务类型缓存（`GET /tasks/{id}` 的落点，按 store 实例隔离）。
+     * `restore_task` / `navigate_to` 以它为准 —— **不因读取失败回落 EXPORT**（那是"导入跳导出"的根因）。
+     */
+    knownTaskTypes: {} as Record<number, TaskType>
   }),
 
   getters: {
+    /** 列表里是否存在非终态作业（AR-08 条件②；视图与用例读同一处判据）。 */
+    hasInFlightJob(state): boolean {
+      return hasInFlightJob(state.items)
+    },
     /** 任务中心的筛选参数（拉取时用）。 */
     queryParams(state): { type?: TaskType; status?: TaskStatus; keyword?: string; page: number; size: number } {
       const params: { type?: TaskType; status?: TaskStatus; keyword?: string; page: number; size: number } = {
@@ -166,6 +234,8 @@ export const useTaskStore = defineStore('task', {
         this.items = result.content ?? []
         this.total = result.totalElements ?? 0
         this.lastLoadedAt = Date.now()
+        // 列表已是最新：隐藏期攒下的那次补刷不再需要（手动刷新 / 事件刷新都从这里收口）
+        this.autoRefreshPending = false
       } catch (error) {
         this.loadError = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
       } finally {
@@ -202,6 +272,64 @@ export const useTaskStore = defineStore('task', {
       await this.load()
     },
 
+    /**
+     * AR-08：开始"正在看任务中心"的观察窗（视图 `onMounted`）。
+     * 观察窗之外的事件一律不刷新 —— 自动刷新的前提是**有人要看这份数据**。
+     */
+    watchCenter(): void {
+      this.watchingCenter = true
+    },
+
+    /** 结束观察窗（视图 `onBeforeUnmount`）；待补标记一并清掉，不给离开的页面留隐形待办。 */
+    unwatchCenter(): void {
+      this.watchingCenter = false
+      this.autoRefreshPending = false
+    },
+
+    /**
+     * AR-08：**事件后**的唯一自动刷新判据（AI 工具事件 → 本函数）。
+     *
+     * 三条件同时成立才刷一次：
+     * ① 事件后 —— 由调用方保证（`start_*` 工具结果 / 面板转发的 `ui_event_result`）；
+     * ② 存在非终态作业 —— 列表里已有 `PENDING`/`RUNNING`，或**本次事件就是起作业**
+     *    （`jobEventStartedJob`：刚起的作业必然非终态，列表快照还没回来的那一拍靠它兜住）；
+     * ③ 页面可见 —— `visibilityState === 'visible'`。
+     *
+     * ③ 不成立 ⇒ **不刷**，只记 `autoRefreshPending`（回可见补刷恰好 1 次，不补后台错过的次数）。
+     * ② 不成立 ⇒ 直接返回：没有要等的作业，事件不该换来一次请求（本函数就是"不空转"的闸）。
+     *
+     * **这不是轮询**：本函数没有任何定时器，没有事件就没有请求（AR-08 明令禁止常驻轮询 /
+     * 后台标签刷新 / 跨页签广播刷新）。
+     */
+    notifyJobEvent(event: string): void {
+      if (!this.watchingCenter) {
+        return
+      }
+      if (!jobEventStartedJob(event) && !hasInFlightJob(this.items)) {
+        return
+      }
+      if (!isDocumentVisible()) {
+        this.autoRefreshPending = true
+        return
+      }
+      this.autoRefreshPending = false
+      void this.refreshNow()
+    },
+
+    /**
+     * AR-08：回到前台时补刷隐藏期收到的那次事件（**恰好一次**，不按时间补偿）。
+     *
+     * 视图在 `visibilitychange` 且可见时调用；没观察 / 无待补 / 仍隐藏 ⇒ 什么都不做。
+     * 补刷落地（成功或失败）都由 `load()` 收口 —— 失败进 `loadError`，不静默。
+     */
+    flushAutoRefreshOnVisible(): void {
+      if (!this.autoRefreshPending || !this.watchingCenter || !isDocumentVisible()) {
+        return
+      }
+      this.autoRefreshPending = false
+      void this.refreshNow()
+    },
+
     setPage(page: number): void {
       this.page = page
       void this.load()
@@ -231,6 +359,10 @@ export const useTaskStore = defineStore('task', {
       this.actionError = null
       try {
         const task = await tasksApi.createTask(type, title)
+        if (task?.id !== undefined && (task.type === 'EXPORT' || task.type === 'IMPORT')) {
+          // 创建响应就是权威事实：钉进类型缓存，后续 restore_task / 导航不必再拉一次
+          this.knownTaskTypes[task.id] = task.type
+        }
         await this.load()
         return task
       } catch (error) {
@@ -381,16 +513,23 @@ export const useTaskStore = defineStore('task', {
      * （R-94：原 `currentTask?.type` 读点随死字段删除 —— 该值恒 null 恒走兜底，功能等效死码。）
      */
     async restoreWizard(taskId: number, taskType?: TaskType): Promise<RouteLocationRaw> {
-      const type = taskType ?? (await this.fetchTaskType(taskId))
+      const type = taskType ?? (await this.ensureTaskType(taskId)) ?? 'EXPORT'
       if (type === 'IMPORT') {
         return { name: ROUTE_NAMES.importWizard, query: { taskId: String(taskId) } }
       }
       return { name: ROUTE_NAMES.exportWizard, query: { taskId: String(taskId) } }
     },
 
-    /** 同步版的向导目标（供 ui_event 分发使用，命中缓存即回声，不回则按 EXPORT 兜底）。 */
+    /**
+     * 同步版的向导目标（供 ui_event 分发使用）。
+     *
+     * 优先级：显式传入的类型 → **权威缓存**（`ensureTaskType` 拉过的那一份）→ 列表行 → EXPORT 兜底。
+     * 权威缓存排在列表之前，是因为 `restore_task` 会先用 `ensureTaskType` 把类型钉住再分发事件
+     * （导入任务不得因为列表未加载 / 分页不含该行而被送进导出向导）。
+     */
     resolveWizardRoute(taskId: number, taskType?: TaskType): WizardRouteTarget {
       const cached = taskType
+        ?? this.knownTaskTypes[taskId]
         ?? this.items.find((item) => item.task.id === taskId)?.task.type
         ?? 'EXPORT'
       if (cached === 'IMPORT') {
@@ -399,13 +538,45 @@ export const useTaskStore = defineStore('task', {
       return { name: ROUTE_NAMES.exportWizard, query: { taskId: String(taskId) } }
     },
 
-    async fetchTaskType(taskId: number): Promise<TaskType> {
+    /**
+     * **已知**任务类型（只读缓存，**不发请求**）：权威缓存 → 列表行。
+     *
+     * 供导航类动作做"不额外花一次 GET"的类型校正（`navigate_to(page, taskId)` 的页面以它为准）；
+     * 需要"必须知道类型"的动作（`restore_task`）走 {@link ensureTaskType}。
+     */
+    knownWizardType(taskId: number): TaskType | null {
+      return this.knownTaskTypes[taskId]
+        ?? this.items.find((item) => item.task.id === taskId)?.task.type
+        ?? null
+    },
+
+    /**
+     * **权威任务类型**（`restore_task` / 带任务的导航的唯一依据）。
+     *
+     * 命中缓存（本列表行 / 之前拉过）⇒ 直接返回；否则拉一次 `GET /tasks/{id}` 并记入缓存。
+     * **读取失败返回 `null`，不兜底成 EXPORT**：兜底会让导入任务在"列表未加载 / 瞬时失败"
+     * 的那一拍被送进导出向导（"导入跳导出"的根因），调用方应据此给出可行动的回执，而不是替用户选错页。
+     */
+    async ensureTaskType(taskId: number): Promise<TaskType | null> {
+      const known = this.knownWizardType(taskId)
+      if (known) {
+        this.knownTaskTypes[taskId] = known
+        return known
+      }
       try {
         const task = await tasksApi.getTask(taskId)
+        if (!task || (task.type !== 'EXPORT' && task.type !== 'IMPORT')) {
+          return null
+        }
+        this.knownTaskTypes[taskId] = task.type
         return task.type
       } catch {
-        return 'EXPORT'
+        return null
       }
+    },
+
+    async fetchTaskType(taskId: number): Promise<TaskType> {
+      return (await this.ensureTaskType(taskId)) ?? 'EXPORT'
     },
 
     /** 当前任务在向导中的步骤 key 序列（步进条与 AI 上下文共用）。 */

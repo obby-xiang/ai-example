@@ -23,10 +23,13 @@ import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
 import { useAiSettingsCopy, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const { t } = useCopy()
 /** 文案对象：属性是 getter（取值时按当前语言翻译），模板里照旧写 `T.title`。 */
 const T = useAiSettingsCopy()
+
+const workspace = useWorkspaceStore()
 
 const loading = ref(true)
 const loadError = ref<unknown>(null)
@@ -220,7 +223,41 @@ async function load(): Promise<void> {
   }
 }
 
-onMounted(load)
+/**
+ * 进页即声明工作区上下文（批次5A：此前本页**完全没有** enterPage）。
+ *
+ * <p>为什么必须声明：从导出/导入向导点进设置页时，工作区仍停在上一页 ——
+ * `taskType + step` 让后端按 `task:*` 披露工具（模型以为用户还在向导里），旧 `taskId` /
+ * `taskStatus` 还会让只读守卫拿别的任务的终态误拒写事件。设置页不属于五页工作区，
+ * 这里把工作区**复位到默认页（任务中心，同时也是后端 `page` 白名单的默认口径）**并清空全部任务态。
+ *
+ * <p>为什么是「任务中心」而不是一个 `settings` 页 id：后端 page 是**闭集**（`ContextFieldGate` 的
+ * 白名单 = `ContextBuilder.PAGE_LABELS` 的 tasks / export / import / definitions / data，两侧须同改），
+ * 未知 id 会被降级成 `unknown`（每轮一条降级日志、提示词里变成「未知页面」）。故设置类页面
+ * （AI 设置 / AI 反馈）统一复位到默认页 —— **不虚增页面 id**；要真加 `settings`，须后端白名单、
+ * `PAGE_LABELS` 与 ToolScope 同批改，并同步 `types/workspace.ts#WorkspaceSnapshot.page` 的登记。
+ *
+ * <p>边界：只复位页面级事实；`dataVersion` / `recentActions` 时间线与契约版本由 store 保留
+ * （见 `stores/workspace.ts#enterPage`）。
+ */
+function declareWorkspaceContext(): void {
+  workspace.enterPage({
+    pageId: 'tasks',
+    page: 'tasks',
+    taskType: null,
+    step: null,
+    taskId: null,
+    taskStatus: null,
+    selectedDefs: [],
+    queryConditions: {},
+    importMode: null
+  })
+}
+
+onMounted(() => {
+  declareWorkspaceContext()
+  void load()
+})
 
 // ── provider 卡片 ──────────────────────────────────────────────────────────
 

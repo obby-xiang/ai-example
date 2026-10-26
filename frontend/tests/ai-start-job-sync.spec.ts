@@ -18,6 +18,7 @@ import { ElMessage } from 'element-plus'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import { registerPageHandler, unregisterPageHandler } from '@/stores/workspace'
+import { useTaskStore } from '@/stores/task'
 
 const api = vi.hoisted(() => ({
   getTask: vi.fn(),
@@ -101,7 +102,7 @@ function streamingMessage(): ChatMessage {
 /** 走真实帧路径：tool_start（带 args）→ tool_result（带结果文本）。 */
 function feedJobFrames(
   store: ReturnType<typeof useAiStore>,
-  name: 'start_export' | 'start_precheck' | 'start_import',
+  name: 'start_export' | 'start_precheck' | 'start_import' | 'start_publish',
   result: string,
   ok = true,
   args = '{"taskId":7}',
@@ -236,10 +237,76 @@ describe('D3 · 导出向导页：AI 触发 start_export 后 exportJob 绑定并
 
     const reply = await handler?.({ taskId: 99, jobId: 12, toolCallId: 'c-9' })
 
-    expect(String(reply)).toContain('未同步')
+    // 批次 5B：失败分支改为结构化 `{ ok:false, reason }`（store 侧据此出可见回执）
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason)).toContain('未同步')
     expect(api.openTaskEvents).not.toHaveBeenCalled()
     expect(api.getIssues).not.toHaveBeenCalled()
     wrapper.unmount()
     expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 批次 5B（Task 8）新增面：
+ * - `start_publish` 也要进页面作业面板（补进 `START_JOB_SYNC`）；
+ * - 页面 handler 的失败**必须可见**（通知槽），不再静默吞掉；
+ * - 工具结果成功即通知任务中心（AR-08「事件后」的入口，与页面是否挂载无关）。
+ *
+ * 本组只写不跑（批次 5B 只跑 `task-center-view.spec.ts` 的一条聚焦用例）。
+ */
+describe('批次 5B · start_publish 同步 / 失败回执可见 / AR-08 事件通知', { timeout: 20_000 }, () => {
+  it('start_publish ok ⇒ 调 import.syncJob（发布作业也进导入向导的作业面板）', async () => {
+    const handler = vi.fn().mockResolvedValue('已同步发布作业 #41（RUNNING）到导入向导')
+    registerPageHandler('import.syncJob', handler)
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+    // 发布冲突跟踪的同源副作用（watchPublishOutcome 会起 300s 墙钟）与本次断言无关，桩掉
+    vi.spyOn(useTaskStore(), 'watchPublishOutcome').mockReturnValue(() => {})
+
+    feedJobFrames(store, 'start_publish', '发布作业已启动（作业 #41），正在将数据写入正式库…')
+    await flushPromises()
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ taskId: 7, jobId: 41 }))
+  })
+
+  it('handler 返回 { ok:false, reason } ⇒ 面板通知可见（不静默）', async () => {
+    const handler = vi.fn().mockResolvedValue({ ok: false, reason: '未同步：该作业属于任务 #99，当前导入向导绑定的是任务 #7' })
+    registerPageHandler('import.syncJob', handler)
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+    vi.spyOn(useTaskStore(), 'watchPublishOutcome').mockReturnValue(() => {})
+
+    feedJobFrames(store, 'start_publish', '发布作业已启动（作业 #41），正在将数据写入正式库…')
+    await flushPromises()
+
+    expect(store.notice).toContain('作业 #41')
+    expect(store.notice).toContain('未能同步')
+    expect(store.noticeSeverity).toBe('warning')
+  })
+
+  it('handler 抛错 ⇒ 同样落可见通知（不再 .catch(() => undefined)）', async () => {
+    const handler = vi.fn().mockRejectedValue(new Error('页面已卸载'))
+    registerPageHandler('export.syncJob', handler)
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+
+    feedJobFrames(store, 'start_export', '导出作业已启动（作业 #12），请稍后查看进度')
+    await flushPromises()
+
+    expect(store.notice).toContain('页面已卸载')
+    expect(store.noticeSeverity).toBe('warning')
+  })
+
+  it('start_export ok ⇒ 通知任务中心（AR-08 事件后的入口，与页面能力是否注册无关）', async () => {
+    const notify = vi.spyOn(useTaskStore(), 'notifyJobEvent')
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+
+    feedJobFrames(store, 'start_export', '导出作业已启动（作业 #12），请稍后查看进度')
+    await flushPromises()
+
+    expect(notify).toHaveBeenCalledWith('start_export')
   })
 })

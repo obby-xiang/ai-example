@@ -144,7 +144,24 @@ export const useWorkspaceStore = defineStore('workspace', {
   },
 
   actions: {
-    /** 进入某页（路由守卫/页面 onMounted 调用）。 */
+    /**
+     * 进入某页（路由守卫/页面 onMounted 调用）。
+     *
+     * <p><b>声明即全集</b>（批次5A）：带页面身份（`pageId`/`page`）的调用，是把本页的页面级上下文
+     * **整体声明**一遍 —— `taskType` / `step` / `taskId` / `taskStatus` / `selectedDefs` /
+     * `queryConditions` / `importMode` 里**没声明的一律回中性值**。理由：这些字段是「当前任务 /
+     * 当前页」的事实，跨页残留会让下一轮上下文报错页 ——
+     * <ul>
+     * <li>残留 `taskType + step` ⇒ 后端披露面按 `task:*` 给工具，模型以为用户还在向导里；</li>
+     * <li>残留 `taskStatus`（COMPLETED / CANCELLED）⇒ 只读守卫把**其它页**的写事件当
+     * 「任务已结束」误拒（取消作业尤其明显）。</li>
+     * </ul>
+     * 不带页面身份的调用仍是**增量更新**（只写显式给出的字段），供同一页内补声明使用。
+     *
+     * <p><b>复位边界（不扩大清空）</b>：只复位页面级事实。`dataVersion` / `recentActions`
+     * （面板与模型据此判断「刚才发生了什么」）与 `contractVersion` 一律不动；本页显式声明的值
+     * （例：数据浏览页正在浏览的 `selectedDefs`）原样保留。
+     */
     enterPage(init: Partial<WorkspaceSnapshot>): void {
       if (init.pageId !== undefined) {
         this.pageId = init.pageId
@@ -154,26 +171,36 @@ export const useWorkspaceStore = defineStore('workspace', {
       } else if (init.pageId !== undefined) {
         this.page = init.pageId
       }
-      if (init.taskType !== undefined) {
-        this.taskType = init.taskType
-      }
-      if (init.step !== undefined) {
-        this.step = init.step
-      }
-      if (init.taskId !== undefined) {
-        this.taskId = init.taskId
-      }
-      if (init.taskStatus !== undefined) {
-        this.taskStatus = init.taskStatus
-      }
-      if (init.selectedDefs !== undefined) {
-        this.selectedDefs = [...init.selectedDefs]
-      }
-      if (init.queryConditions !== undefined) {
-        this.queryConditions = { ...init.queryConditions }
-      }
-      if (init.importMode !== undefined) {
-        this.importMode = init.importMode
+      if (init.pageId !== undefined || init.page !== undefined) {
+        this.taskType = init.taskType ?? null
+        this.step = init.step ?? null
+        this.taskId = init.taskId ?? null
+        this.taskStatus = init.taskStatus ?? null
+        this.selectedDefs = init.selectedDefs === undefined ? [] : [...init.selectedDefs]
+        this.queryConditions = init.queryConditions === undefined ? {} : { ...init.queryConditions }
+        this.importMode = init.importMode ?? null
+      } else {
+        if (init.taskType !== undefined) {
+          this.taskType = init.taskType
+        }
+        if (init.step !== undefined) {
+          this.step = init.step
+        }
+        if (init.taskId !== undefined) {
+          this.taskId = init.taskId
+        }
+        if (init.taskStatus !== undefined) {
+          this.taskStatus = init.taskStatus
+        }
+        if (init.selectedDefs !== undefined) {
+          this.selectedDefs = [...init.selectedDefs]
+        }
+        if (init.queryConditions !== undefined) {
+          this.queryConditions = { ...init.queryConditions }
+        }
+        if (init.importMode !== undefined) {
+          this.importMode = init.importMode
+        }
       }
       this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, '界面', {
         code: 'ai.workspace.enterPage',
@@ -281,6 +308,24 @@ export const useWorkspaceStore = defineStore('workspace', {
      *   与 `summary` 是同一动作的两份受众面
      */
     touch(summary: string, source: WorkspaceActionSource = '界面', display?: WorkspaceActionRecord['display']): number {
+      const record = this.recordAction(summary, source, display)
+      emitWorkspaceEvent('workspace_changed', record)
+      return record.version
+    },
+
+    /**
+     * 只落时间线、**不**广播 `workspace_changed`（批次5A：失败/被拒回执的落点）。
+     *
+     * <p>为什么仍要记：模型下一轮必须看到「这一手被拒了」（`extra.recentActions`），否则会把
+     * 被拒当成已改动继续推进 —— 只读壳里的写事件尤其如此（既有用例锁住这条）。
+     * 为什么不广播：面板的「工作区已同步」chip 只认**真落地**的动作；失败挂在那里就是谎报同步，
+     * 失败回执另走 `ui_event_result` 到面板回执位（见 {@link dispatchUiEvent}）。
+     */
+    recordAction(
+      summary: string,
+      source: WorkspaceActionSource = 'AI',
+      display?: WorkspaceActionRecord['display']
+    ): WorkspaceActionRecord {
       this.dataVersion += 1
       const record: WorkspaceActionRecord = {
         version: this.dataVersion,
@@ -290,8 +335,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         ...(display === undefined ? {} : { display })
       }
       this.recentActions = [...this.recentActions, record].slice(-WORKSPACE_ACTION_LIMIT)
-      emitWorkspaceEvent('workspace_changed', record)
-      return this.dataVersion
+      return record
     },
 
     /** 清空待同步动作（AI 发消息带上上下文后调用：动作只注入一轮，不重复累积）。 */
@@ -468,13 +512,21 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
  * 每个分支都落到**与用户手点相同**的 API/action 上，因此 AI 驱动与手工操作
  * 的后端副作用完全一致（不新建"AI 专用后门"）。
  *
- * 契约联动：分发结果会同时 (1) 记入工作区动作（source=AI，随下一轮请求回到模型），
- * (2) 经 `ui_event_result` 事件广播给 AI 面板展示。
+ * 契约联动（批次5A 语义收口）：
+ * - **成功**（`handled=true`）：记入工作区动作并广播 `workspace_changed`（面板出「工作区已同步」chip，
+ *   `source=AI` 的动作随下一轮请求回到模型）；
+ * - **失败**（`handled=false`）：**不广播** `workspace_changed` —— 「已同步」不能拿来描述一次没落地的
+ *   动作（审查 §5-4 的「失败仍已同步」）。但时间线仍留一条（模型下一轮要知道这一手被拒），
+ *   失败回执经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。
  */
 export async function dispatchUiEvent(event: UiEvent): Promise<UiEventResult> {
   const result = await runUiEvent(event)
   const workspace = useWorkspaceStore()
-  workspace.touch(result.message, 'AI')
+  if (result.handled) {
+    workspace.touch(result.message, 'AI')
+  } else {
+    workspace.recordAction(result.message, 'AI')
+  }
   emitWorkspaceEvent('ui_event_result', { event: event.type, ...result })
   return result
 }

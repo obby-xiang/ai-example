@@ -181,7 +181,8 @@ import {
   parseConditionJson,
   stringifyCondition,
   type ConditionDraftModel,
-  type ConditionInputIssue
+  type ConditionInputIssue,
+  type FieldQueryCondition
 } from '@/types/condition'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
@@ -509,8 +510,18 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   }
   task.value = loaded
   selectedDefs.value = (loaded.items ?? []).map((item) => item.defCode)
+  // 批次5A：条件必须随进页声明一起回填。`enterPage` 是「声明即全集」—— 未声明的
+  // `queryConditions` 会被复位成 `{}`；只复位不恢复会让 `get_workspace_state` 把**有条件的**
+  // 任务报成"全量"（模型据此以为用户没设过条件）。权威来源 = 任务条目的 `conditionJson`，
+  // 与 `draftModels` 同一份解析（不前移成两份口径）。
+  const restoredConditions: Record<string, FieldQueryCondition> = {}
   for (const item of loaded.items ?? []) {
-    draftModels[item.defCode] = draftModelFromCondition(parseConditionJson(item.conditionJson))
+    const condition = parseConditionJson(item.conditionJson)
+    draftModels[item.defCode] = draftModelFromCondition(condition)
+    // 空条件（null）= 该配置项按全量查询，没有可上报的条件事实（不写 null 占位）
+    if (condition) {
+      restoredConditions[item.defCode] = condition
+    }
   }
   const restoredStep = STEP_KEYS.indexOf(loaded.currentStep as (typeof STEP_KEYS)[number])
   stepIndex.value = restoredStep >= 0 ? restoredStep : 0
@@ -521,7 +532,8 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     step: STEP_KEYS[stepIndex.value],
     taskId: taskId.value,
     taskStatus: loaded.status,
-    selectedDefs: [...selectedDefs.value]
+    selectedDefs: [...selectedDefs.value],
+    queryConditions: restoredConditions
   })
   await resumeJobs()
   if (generation !== taskGeneration) {
@@ -1989,19 +2001,21 @@ function registerHandlers(): void {
   // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页的跟踪面。
   // 与既有 resumeJobs() 同一条恢复链（刷新/回页时也走它）——不重复一套绑定逻辑；
   // taskId 对不上就不动本页（别的任务的作业显示在这里 = 说 A 实际给 B）。
+  // 批次 5B：失败分支返回**结构化** `{ ok:false, reason }` —— store 侧据此把"没同步上"
+  // 落成可见回执（字符串一律按成功解读，静默失败正是本批要收掉的面）。
   registerPageHandler('export.syncJob', async (payload) => {
     const jobId = Number(payload.jobId)
     const jobTaskId = Number(payload.taskId)
     if (!Number.isInteger(jobId) || jobId <= 0) {
-      return '未同步：作业号无效'
+      return { ok: false, reason: '未同步：作业号无效' }
     }
     if (taskId.value === null || taskId.value !== jobTaskId) {
-      return `未同步：该作业属于任务 #${jobTaskId}，当前导出向导绑定的是任务 #${taskId.value ?? '（无）'}`
+      return { ok: false, reason: `未同步：该作业属于任务 #${jobTaskId}，当前导出向导绑定的是任务 #${taskId.value ?? '（无）'}` }
     }
     await resumeJobs()
     const bound = exportJob.value
     if (bound?.id !== jobId) {
-      return `已刷新导出作业列表（未在本任务的作业中找到 #${jobId}）`
+      return { ok: false, reason: `已刷新导出作业列表（未在本任务的作业中找到 #${jobId}）` }
     }
     // 终态作业 resumeJobs 不建 watch（结果已由文件列表铺开）⇒ 这里把结果面刷一次，
     // 否则 AI 触发后页面停在上一次的导出结果上。

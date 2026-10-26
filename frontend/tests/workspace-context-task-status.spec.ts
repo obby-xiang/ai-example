@@ -49,4 +49,24 @@ describe('工作区上下文：taskStatus 顶层上报（与后端 Context 六�
     workspace.setTaskStatus(null)
     expect(workspace.buildContext().taskStatus).toBeNull()
   })
+
+  it('批次5A 兼容：进页复位只置 null，不改键集（taskStatus 仍顶层上报）', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'EXPORT',
+      taskId: 7,
+      taskStatus: 'COMPLETED'
+    })
+    expect(workspace.buildContext().taskStatus).toBe('COMPLETED')
+
+    // 复位到任务中心（未声明 taskStatus / taskId）⇒ 值回 null，但键与位置不变
+    workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
+    const context = workspace.buildContext()
+    expect(Object.keys(context).sort()).toEqual(['extra', 'page', 'step', 'taskId', 'taskStatus', 'taskType'])
+    expect(context.taskStatus).toBeNull()
+    expect((context.extra as Record<string, unknown>).taskStatus).toBeUndefined()
+  })
 })

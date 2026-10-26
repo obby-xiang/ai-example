@@ -12,7 +12,7 @@
  *   下一轮请求上下文（`buildContext().extra.recentActions`）。
  */
 
-import { defineStore } from 'pinia'
+import { defineStore, getActivePinia } from 'pinia'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import { SSE_TIMEOUT_CODES, probeReattach, type SseFrameHandlers, type SseStreamOptions } from '@/api/sse'
@@ -1039,11 +1039,72 @@ const DERIVE_FRAME_TYPES: ReadonlySet<string> = new Set([
  * 这三个工具成功后作业在后端已经跑起来了，但向导页的作业面板没有任何人告诉它"该跟哪个作业"
  * —— 用户切过去看到的是一张空面板。映射到页面自己注册的能力（页面侧 = 既有 `resumeJobs()`），
  * 与 R-155 的发布冲突跟踪同体例：AI 侧只给"任务号 + 作业号"，不 import 任何视图。
+ *
+ * 批次 5B 补 `start_publish`：发布作业同样落在导入向导的作业面板（`import.syncJob` 按 jobType
+ * 分派 check / import / publish 三位），此前只跟冲突明细、不进页面跟踪面 —— 页面看不到"正在发布"。
  */
 const START_JOB_SYNC: Readonly<Record<string, string>> = {
   start_export: 'export.syncJob',
   start_precheck: 'import.syncJob',
-  start_import: 'import.syncJob'
+  start_import: 'import.syncJob',
+  start_publish: 'import.syncJob'
+}
+
+/**
+ * 页面同步 handler 的**失败**结局（批次 5B：失败回执必须可见，不得静默）。
+ *
+ * 页面 handler 的约定形态：成功回说明字符串 / 不返回值；失败回结构化
+ * `{ ok: false, reason }`。这里只认结构化失败 —— 字符串一律视为成功（与
+ * `utils/frontend-tools.ts#interpretHandlerOutcome` 的兼容解读同口径）。
+ *
+ * @returns `{ reason }`（`reason === null` = 页面没给原因）；`null` = 成功
+ */
+function startJobSyncFailure(outcome: unknown): { reason: string | null } | null {
+  if (outcome === null || typeof outcome !== 'object' || !('ok' in outcome)) {
+    return null
+  }
+  const structured = outcome as { ok: unknown; reason?: unknown }
+  if (structured.ok !== false) {
+    return null
+  }
+  return {
+    reason: typeof structured.reason === 'string' && structured.reason !== '' ? structured.reason : null
+  }
+}
+
+/**
+ * 同一助手消息内 `frontend_tool_request` 的**串行队列**（Task 8 / 批次 5B）。
+ *
+ * 键 = 助手消息 id（一轮一条助手消息），值 = 该消息已排队动作的**队尾** promise。
+ */
+const frontendToolChains = new Map<string, Promise<void>>()
+
+/**
+ * 把一次前端工具执行排到该消息队尾（严格串行）。
+ *
+ * <h2>为什么必须串行</h2>
+ * 一帧 `frontend_tool_request` 只有一条工具，但同一轮里模型可以连续下发多条
+ * （`navigate_to` 后紧跟 `select_definitions`）。此前每条都 `void runFrontendTool(...)`
+ * 并发开跑：后一条会在前一条改变界面**之前**读现场（目标页还没挂载 / 任务还没绑定），
+ * 于是模型拿到"页面不支持该动作"这种**假失败**，并据此放弃一条本来可行的工作区操作。
+ *
+ * <h2>边界</h2>
+ * - 串行范围只到"回灌 POST 发出"（`runFrontendTool` 的返回点），不再往后拖整轮收尾；
+ * - 队尾一次失败不阻塞后续（`runFrontendTool` 自带结局收敛；这里再兜一层 catch，
+ *   保证队列不会因为一次异常永久卡死）；
+ * - **不跨消息**：不同助手消息属于不同轮次，串起来只会让两条并行回复互相拖住。
+ * - 等人类工具（生成式表单 / 上传交接 / 表格写预览）**不排队**：它们在帧分支里就建卡返回，
+ *   等的是人而不是执行器，排进队列会把后续动作一起挂住。
+ */
+function enqueueFrontendTool(messageId: string, run: () => Promise<void>): void {
+  const previous = frontendToolChains.get(messageId) ?? Promise.resolve()
+  const settled = previous.then(run).catch(() => undefined)
+  frontendToolChains.set(messageId, settled)
+  void settled.then(() => {
+    if (frontendToolChains.get(messageId) === settled) {
+      frontendToolChains.delete(messageId)
+    }
+  })
 }
 
 function writeMirror(
@@ -6606,7 +6667,9 @@ export const useAiStore = defineStore('ai', {
             break
           }
           // 其余即时执行类前端工具：立即在浏览器执行并回灌结果
-          void this.runFrontendTool(message, frame)
+          // 批次 5B（Task 8）：**同一助手消息内串行** —— 每条排到该消息队尾，前一条的回灌
+          // 发出后才启动下一条（并发会让紧随导航的动作打在"页面还没挂载 / 任务还没绑定"的窗口上）
+          enqueueFrontendTool(message.id, () => this.runFrontendTool(message, frame))
           break
         }
         case 'frontend_tool_result': {
@@ -6956,8 +7019,15 @@ export const useAiStore = defineStore('ai', {
      * 再调页面自己注册的能力（{@link START_JOB_SYNC}：`export.syncJob` / `import.syncJob`）。
      * 页面 handler 负责"绑定 + 进跟踪"（既有 `resumeJobs()`），AI 侧不 import 任何视图。
      *
-     * 任一环取不到（非三件套 / 未执行即 ok=false / 无作业号 / 无 taskId / 当前页没注册该能力）
-     * 一律静默跳过：作业在后端照常跑，用户回到向导页时 `loadTask → resumeJobs` 仍会接上。
+     * 批次 5B 两处变化：
+     * 1. **AR-08 事件驱动刷新**：只要作业号取到了就通知任务中心（`taskStore.notifyJobEvent`）——
+     *    用户在任务中心时向导页并没有挂载（没有页面 handler），但列表同样需要这一次事实更新。
+     *    三条件（在途 / 可见 / 观察窗）由 task store 判，这里只负责"事件发生了"。
+     * 2. **失败回执可见**：handler 返回 `{ ok:false, reason }` 或直接抛错 ⇒ 落一条 warning 通知，
+     *    不再 `.catch(() => undefined)` 静默吞掉（"页面没同步上"必须让用户看得见）。
+     *
+     * 作业号 / 任务号任一取不到即静默跳过：作业在后端照常跑，用户回到向导页时
+     * `loadTask → resumeJobs` 仍会接上。
      */
     armStartJobSync(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
       const handlerName = START_JOB_SYNC[frame.name]
@@ -6975,12 +7045,43 @@ export const useAiStore = defineStore('ai', {
       if (!Number.isInteger(taskId)) {
         return
       }
+      // AR-08：作业真的起来了（事件后）—— 任务中心那边按"在途 + 可见"决定是否拉一次列表。
+      // 与页面能力是否注册无关：这一句是**工具结果驱动**的刷新入口，不是前端空转。
+      // 无活动 pinia（单测直接调 store、未装 pinia）时跳过：那是测试装配，不是运行期现场。
+      if (getActivePinia()) {
+        useTaskStore().notifyJobEvent(frame.name)
+      }
       const handler = getPageHandler(handlerName)
       if (!handler) {
         return
       }
-      // 页面侧失败不影响对话（作业已在后端运行；页面自己的提示走页面）——只防未处理拒绝
-      void Promise.resolve(handler({ taskId, jobId, toolCallId: frame.toolCallId })).catch(() => undefined)
+      void Promise.resolve(handler({ taskId, jobId, toolCallId: frame.toolCallId }))
+        .then((outcome) => {
+          const failure = startJobSyncFailure(outcome)
+          if (failure !== null) {
+            this.noticeStartJobSyncFailure(jobId, failure.reason)
+          }
+        })
+        .catch((error: unknown) => {
+          this.noticeStartJobSyncFailure(
+            jobId,
+            error instanceof Error ? error.message : String(error)
+          )
+        })
+    },
+
+    /**
+     * 批次 5B：作业同步失败的可见回执（`ai.notice.startJobSyncFailed*`）。
+     *
+     * 走通知槽而不是错误卡：作业本身在后端正常运行，失败的是"页面跟踪面没接上"这一步 ——
+     * 这是提示级事实，不是轮次错误（错误卡会让人以为作业没起来）。
+     */
+    noticeStartJobSyncFailure(jobId: number, reason: string | null): void {
+      if (reason === null) {
+        setNotice(this, 'ai.notice.startJobSyncFailed', { jobId }, 'warning')
+        return
+      }
+      setNotice(this, 'ai.notice.startJobSyncFailedReason', { jobId, reason }, 'warning')
     },
 
     /**

@@ -315,6 +315,8 @@ Expected: 不把“披露可见”当授权，不把模型文本当发布模式�
 - [ ] **Step 4（按 AR-08）：** 任务中心刷新 = **事件后 + 仅在途 + 可见时**三条件同时成立才刷（AI 工具事件后、存在非终态作业、`visibilityState==='visible'`），并显示**数据截至时刻**；**不引入**常驻轮询 / 后台标签刷新 / 跨页签广播刷新；刷新失败进入错误位（不静默）。
 - [ ] **Step 5:** 跑定向和 typecheck。
 
+**实现范围与状态（2026-10-26 批次 5）**：本任务 **Step 1 / 3 / 4 已实现**（页面声明与复位含 `queryConditions` 权威恢复、设置 / 反馈页默认 `tasks` 且给原因、失败不报已同步、动作串行、权威任务类型、`start_publish` 绑定、**`AR-08` 受限刷新 + 数据截至时刻**），落到工作区、**未入库**。**单点证据（仅下界）** = `frontend/tests/workspace-page-context-reset.spec.ts` 页面复位 1 方法 + `frontend/tests/task-center-view.spec.ts#ar08-event-inflight-visible` 1 方法（**该 GREEN 后仍有后续复核**，复核期核对过断言与实现，最终 GREEN 如实登记、不写作"一次通过"）；**未跑** = `tasks` 默认原因 / 失败不报已同步 / 动作串行 / 权威任务类型 / `start_publish` 各面用例，`workspace-audience` / `workspace-run-job-publish-confirm` / `ai-start-job-sync` / `session-purge-reset` 等 spec，以及 `typecheck`、前端全量与构建、主 CI。**文档同步仍归 Task 13 Step 2**。
+
 ### Task 9: 按裁决实现 create_task 确认与幂等
 
 **Files:**

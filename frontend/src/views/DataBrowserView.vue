@@ -235,12 +235,19 @@ function applyDefSelection(code: string): void {
   draftModel.value = emptyDraftModel()
   serverCount.value = null
   page.value = 0
+  // 批次5A：页面级上下文「声明即全集」。数据页只拥有「正在浏览哪个定义」（selectedDefs），
+  // 任务态（taskId / taskStatus / step / 查询条件 / 导入模式）显式声明为中性值 ——
+  // 从向导点进数据页时，残留的任务上下文会让后端按 task:* 披露工具、还会让只读守卫误拒写事件。
   workspace.enterPage({
     pageId: 'data',
     page: 'data',
     taskType: null,
     step: null,
-    selectedDefs: code ? [code] : []
+    taskId: null,
+    taskStatus: null,
+    selectedDefs: code ? [code] : [],
+    queryConditions: {},
+    importMode: null
   })
 }
 
@@ -358,7 +365,19 @@ function onSizeChange(next: number): void {
 }
 
 onMounted(async () => {
-  workspace.enterPage({ pageId: 'data', page: 'data', taskType: null, step: null })
+  // 批次5A：进页即复位页面级上下文（未声明的一律回中性值）。定义选中集由 refreshDefinitions →
+  // applyDefSelection 随后声明（数据页拥有「正在浏览哪个定义」这一项），此处不预置。
+  workspace.enterPage({
+    pageId: 'data',
+    page: 'data',
+    taskType: null,
+    step: null,
+    taskId: null,
+    taskStatus: null,
+    selectedDefs: [],
+    queryConditions: {},
+    importMode: null
+  })
   await reload()
   const [regionList, projectList] = await Promise.all([
     masterDataApi.listRegions().catch(() => []),
