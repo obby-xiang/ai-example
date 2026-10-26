@@ -75,7 +75,7 @@ class RunStoreTerminalCancellationTest {
 	void fencedDoneCannotOverwriteCancelled() throws Exception {
 		this.held = this.fencedStore.tryAcquireRunLease(FENCED).orElseThrow();
 		this.fencedStore.save(snapshot(FENCED, RunSnapshot.RUNNING, false));
-		// 证明本用例确实走持租分支（fenced）：authority=HELD 且 epoch>0 ⇒ save 选 FENCED_DONE_SET_SCRIPT
+		// 证明本用例确实走持租分支（fenced）：authority=HELD 且 epoch>0 ⇒ save 选 FENCED_TERMINAL_SET 脚本
 		assertThat(this.fencedStore.runLeaseAuthority(FENCED)).isEqualTo(LeaseService.LeaseAuthority.HELD);
 		assertThat(this.fencedStore.heldRunEpoch(FENCED)).isGreaterThan(0L);
 		this.redis.opsForValue().set(RunStore.runScopedKey(RunStore.RUN_PREFIX, FENCED),
@@ -101,7 +101,7 @@ class RunStoreTerminalCancellationTest {
 
 	/**
 	 * 持租分支的成功路径也要有真实 Redis 证据：RUNNING → DONE 必须真的落库，且 DONE 的
-	 * {@code runEpoch} 与 fence 都是本次租约 epoch（证明走的是 {@code FENCED_DONE_SET_SCRIPT}，
+	 * {@code runEpoch} 与 fence 都是本次租约 epoch（证明走的是 {@code FENCED_TERMINAL_SET} 脚本，
 	 * 不是绕道 plain）。
 	 */
 	@Test

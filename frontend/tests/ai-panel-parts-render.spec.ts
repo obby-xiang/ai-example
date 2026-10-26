@@ -5324,13 +5324,16 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
       expect(card?.guide, code).not.toBe('')
       expect(card?.code, code).toBe(code)
     }
-    // 派生码：展示与基础码同一张卡，但诊断码逐字保留（含后缀）
+    // 批次2：派生码不再削回基础码 —— 完整码/基础码/派生语义都在卡上，标题与摘要按现场区分
     const base = buildErrorCard('UPSTREAM_STREAM_ERROR', '断流')
     const derived = buildErrorCard('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL', '断流')
-    expect(derived?.title).toBe(base?.title)
+    expect(derived?.title).not.toBe(base?.title)
+    expect(derived?.title).toContain('内容不完整')
+    expect(derived?.baseCode).toBe('UPSTREAM_STREAM_ERROR')
+    expect(derived?.derived).toBe('partial')
     expect(derived?.code).toBe('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL')
     expect(buildErrorCard('TOTAL_BUDGET_EXCEEDED_AFTER_TOOL_SIDE_EFFECT', '超时')?.title)
-      .toBe(buildErrorCard('TOTAL_BUDGET_EXCEEDED', '超时')?.title)
+      .toContain('已执行工具')
     // R-12：无 key / key 解不开 → 专门卡 + 引导到设置页
     const missing = buildErrorCard('AI_KEY_MISSING', '后端原文')
     expect(missing?.title).toBe('缺少 API Key')
@@ -5486,7 +5489,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     wrapper.unmount()
   })
 
-  it('动作钮：稍后重试⇒重发本轮；改写后重发⇒焦点回输入框；开新会话⇒既有 newChat 出口', async () => {
+  it('动作钮：普通已完成无 regenerate 假入口；改写后重发⇒焦点回输入框；开新会话⇒既有 newChat 出口', async () => {
     const { buildErrorCard } = await import('@/utils/error-card')
     const store = useAiStore()
     const mk = (id: string, code: string, detail: string) => {
@@ -5495,19 +5498,21 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
       m.errorCard = buildErrorCard(code, detail)
       return m
     }
-    const sendSpy = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
     const resetSpy = vi.spyOn(store, 'resetSession').mockResolvedValue(undefined)
-    const wrapper = await mountPanel([mk('q2', '429', '配额用尽'), mk('f2', 'content_filter', '被拦截'), mk('c2', 'context_length_exceeded', '超限')])
+    const ask = buildMessage([{ kind: 'text', seg: 0, text: '原提问', streaming: false }])
+    ask.id = 'u-q2'
+    ask.role = 'user'
+    const wrapper = await mountPanel([ask, mk('f2', 'content_filter', '被拦截'), mk('c2', 'context_length_exceeded', '超限'), mk('q2', '429', '配额用尽')])
     const composer = wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement
     const focusSpy = vi.spyOn(composer, 'focus')
-    await wrapper.find('[data-testid="error-card-action-q2"]').trigger('click')
-    expect(sendSpy).toHaveBeenCalledWith('继续')
+    // AR-17：有产出的普通已完成轮没有真实 regenerate 入口 ⇒ quota 卡的「稍后重试」直接隐藏，
+    // 不做禁用 / unsupported 假动作，也不本地截断后 send。
+    expect(wrapper.find('[data-testid="error-card-action-q2"]').exists()).toBe(false)
     await wrapper.find('[data-testid="error-card-action-f2"]').trigger('click')
     expect(focusSpy).toHaveBeenCalled()
     await wrapper.find('[data-testid="error-card-action-c2"]').trigger('click')
     expect(resetSpy).toHaveBeenCalled()
     wrapper.unmount()
-    sendSpy.mockRestore()
     resetSpy.mockRestore()
     focusSpy.mockRestore()
   })

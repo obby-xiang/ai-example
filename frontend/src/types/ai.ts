@@ -266,6 +266,11 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   }>
   timestamp?: unknown
   /**
+   * 所属 runId（additive；完整历史 `/history/{sessionId}/messages` 带，40 条记忆窗口通常不带）。
+   * 有则前端把它落到 {@link ChatMessage.runId}，作为「重试本轮」的归属证据。
+   */
+  runId?: string
+  /**
    * 批G · S4：这一条 assistant 是**被用户停止**的半截正文（后端 {@code stopped} 元数据透出）。
    * 前端据此渲染「已停止」，而不是把半句话当完整答案。
    */
@@ -278,6 +283,12 @@ export interface AiHistoryMessage extends MessageTruncationFields {
    * 因此"没说"与"没截断"可区分，前端不得把缺键当 {@code false} 写进段或提示。
    */
   truncated?: boolean
+  /**
+   * 批次2 / AR-01 第 5 条：该条是<b>合成/系统提示</b>（上下文压缩摘要、工具步数/预算收尾），
+   * 不是用户原话、也不是模型答复。后端 `toHistoryItem` 按与写侧同源的判据加本键；
+   * 前端据此把它转成系统级「已压缩」提示（不画成用户气泡，也不展示任何内部配置键）。
+   */
+  synthetic?: boolean
 }
 
 /** 会话历史响应（GET /api/ai/history/{sessionId} 的 data）。 */
@@ -349,6 +360,14 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   /** DC-14 T5：服务端给的消息身份（message_start/end 与 delta 帧的 messageId） */
   messageId?: string
+  /**
+   * 批次2：这条消息所属的 **run**（后端 `start` / `message_start` 帧的 `runId`）。
+   *
+   * <p>用途 = 「重试本轮」的唯一归属证据：`retryModelStep` 只按本字段定位后端 run，
+   * **不再**拿 `activeRunId` 猜（刷新后它可能为空或指向更晚的一轮）。缺键 = 归属不可证明
+   * （旧镜像 / 历史通道），此类消息不出「重试本轮」入口，也不得回退到别的轮。
+   */
+  runId?: string
   content: string
   /**
    * 消息的**段序列**：带顺序信息的判别联合 —— 文本段 / 思考段 / 工具段按真实时序交错，
@@ -386,9 +405,30 @@ export interface ChatMessage {
   /**
    * R-165 S5c：错误卡（demo v7.7 裁决区 08）—— **内联于对话流、按发生位置插入，绝不做顶部固定**。
    * 挂在本消息上（= 错误发生的那一轮），面板在元信息行之后渲染；分类口径见 `utils/error-card.ts`。
-   * 内存态、不入镜像（刷新后由历史重载消失；错误卡记录的是"本轮现场"，不属可回读的业务事实）。
+   *
+   * <p>批2 起**入镜像**（`AiSessionMirror` 的可选键，additive）：刷新后这一轮仍是"失败现场"，
+   * 不得被历史/镜像归一成一条完整回答。历史通道没有该字段 ⇒ 历史覆盖后由镜像侧 outcome
+   * 标记回填（见 store `carryMirrorOutcomeMarkers`）。
    */
   errorCard?: ErrorCard | null
+  /**
+   * 批2（镜像 additive 键）：本轮终帧的机器码（`error` 帧的 `code`，或 `handleChatError` 的 ApiError 码）。
+   * 只作诊断与面板分派，**不直接展示**；入镜像（刷新后仍可区分"哪种失败"）。
+   */
+  code?: string | null
+  /**
+   * 批2 / AR-05：**中性「状态未确认」视图态** —— 本轮已有产出但权威终态无法确认。
+   *
+   * <p>后端收尾 = `error` 终帧携带 additive `unconfirmed=true`（code 仍是既有的
+   * `AI_REDIS_UNAVAILABLE`，**不能**靠该故障码判断"可能成功"）+ `turn_end=unconfirmed`。
+   * 不是失败、也不是完整答案：不挂错误卡、不进错误通知，由面板给"重新载入 / 新开一轮"这类手动入口。
+   */
+  unconfirmed?: boolean
+  /**
+   * 批2 / 归档缺口：这一条来自镜像或差量回放，但**无法确认完整**（恢复失败 / 归档窗口裁掉了
+   * 中间帧）。中性事实（"不可完整恢复"），不是轮失败 —— 不挂错误卡、不改 `lastRoundOutcome`。
+   */
+  recoveryGap?: boolean
   /**
    * 批G · S3：本轮被用户**手工停止**（消息尾出「已停止」标识）。
    *
@@ -407,6 +447,14 @@ export interface ChatMessage {
    * **入镜像**（刷新后仍能提示"这不是完整答案"）；缺键 = 未截断，不写 {@code false}。
    */
   truncated?: boolean
+  /**
+   * 批次2 / AR-01 第 5 条：**系统级合成提示**（历史 `synthetic=true` 的条目转成）。
+   *
+   * <p>面板按系统提示渲染（局部中性条 + 「已压缩」文案），**不**画成用户气泡、**不**把摘要正文
+   * 当用户原话，也不展示任何内部配置键（如 `compactedFrom`）。
+   * 缺键 = 普通消息；入镜像（刷新后提示仍在）。
+   */
+  synthetic?: boolean
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -738,12 +786,21 @@ export interface GateSubmission {
  * 批2（权威翻转）起：`parts` 是唯一真值，`content` / `reasoning` / `toolRuns` / `pendingCall`
  * 是同一次写入前由段派生出的投影 —— 镜像里**仍双存**两份，为的是回滚（旧版前端读镜像）与
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
+ *
+ * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
+ * `recoveryGap` / `synthetic` / `runId` —— 刷新后失败现场、中性态、系统级合成提示与 run 归属
+ * 仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而重试错轮。
+ *
+ * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧的新旧组合都自洽
+ * （旧前端忽略未知键；新前端把缺键读成"无现场"），段结构/migration 语义一格未变。升版本号会让
+ * 存量 v2 镜像在读取侧被重写一次（无变化不写盘的幂等口径随之被打破），收益仅为形式上的版本对齐。
+ * 将来若出现**必填**新键或段结构变化，再升 `v` 并在 `migrateMirror` 里给出真实迁移。
  */
 export interface AiSessionMirror {
-  /** 镜像结构版本（缺省 = v1 旧镜像，需迁移） */
+  /** 镜像结构版本（缺省 = v1 旧镜像，需迁移 parts） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'synthetic' | 'runId'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**
@@ -762,9 +819,12 @@ export interface AiSessionMirror {
 }
 
 /**
- * 当前镜像结构版本：
+ * 当前镜像结构版本（**只描述段结构**，不描述可选的现场键）：
  * - v1（隐式）：只有 `content` / `toolRuns` / `pendingCall`，无 `parts`；
  * - v2（对话时序包 批1，批2 沿用）：新增 `parts` 段序列（批2 起为唯一真值，旧字段为派生投影）。
+ *
+ * 批次2 新增的 message 级 `errorCard` / `code` / `unconfirmed` / `recoveryGap` / `synthetic` /
+ * `runId` 是**可选键**（缺省 = 没有现场），不构成结构变化 —— 故版本号不变，也不需要新的迁移分支。
  */
 export const MIRROR_VERSION = 2
 
@@ -796,6 +856,66 @@ export interface ActiveGenerativeForm {
    */
   fieldErrors: FormValueIssue[]
 }
+
+/**
+ * 视图层加载失败的**机器可读**现场（批次2，Task 3 Step 1-3）。
+ *
+ * <p>store 只落这个结构，不落任何用户可见文案 —— 面板按 `scope` 选重试动作、按 `code` 选 locale
+ * 词条。`status` 是 HTTP 状态（`0` = 请求未到达后端），只作日志/分档，不进用户文案。
+ */
+export type AiLoadErrorScope = 'history' | 'current' | 'context'
+
+export interface AiLoadErrorView {
+  scope: AiLoadErrorScope
+  /** ApiError.code / 前端兜底码（NETWORK_ERROR、UNKNOWN_ERROR） */
+  code: string
+  /** HTTP 状态；0 = 未到达后端 */
+  status: number
+  /** 发生时刻（epoch 毫秒） */
+  at: number
+}
+
+/** 恢复缺口的原因：历史读不到 / 快照读不到 / 归档窗口裁掉了中间帧。 */
+export type AiRecoveryGapReason = 'history-unavailable' | 'snapshot-unavailable' | 'archive-window'
+
+/**
+ * 「不可完整恢复」的显式表示（批次2）。
+ *
+ * <p>它不是轮失败，也不是"答案完整"：只是一个**中性事实**——此刻无法保证屏上内容的完整性。
+ * `fromSeq`/`toSeq` 只在能给出缺口区间时（归档窗口裁剪）有值，其余为 null（不臆造区间）。
+ */
+export interface AiRecoveryGap {
+  reason: AiRecoveryGapReason
+  /** 缺失区间起点（含）；null = 区间不可知 */
+  fromSeq: number | null
+  /** 缺失区间终点（含）；null = 区间不可知 */
+  toSeq: number | null
+  /** 检出时刻（epoch 毫秒） */
+  at: number
+}
+
+/**
+ * 409 `SESSION_BUSY` 回执里可指回的**进行中轮**（批次2）。
+ *
+ * <p>只作"手动回到进行中的回答"的入参：面板给一个动作钮，store 收到点击后做**一次**历史对账 +
+ * 静默续收（不是轮询）。`runId` **不得**进入任何用户可见文本。
+ */
+export interface AiBusyRunRef {
+  runId: string
+  /** 后端给的 `/api/ai/events/{runId}`；与 `runId` 不一致时置 null（不指向编造地址） */
+  reattach: string | null
+}
+
+/**
+ * 批次2 / AR-05：`retryModelStep` 的本地结局（只用于面板/状态分派，不是后端码表）。
+ *
+ * - accepted：202 已受理，随后由既有 events 通道重挂；
+ * - cancelled / partial：取消已先到 / 有半截内容（中性未确认视图，不再自动重跑）；
+ * - in-progress：本端已有轮在跑/挂起（或后端 409 在途），本次不动作；
+ * - denied：前置不满足（非失败轮 / 待决工具 / 历史不配对 / 模型已变）；
+ * - error：网络/服务不可用等可重试失败。
+ */
+export type AiRetryModelStepOutcome = 'accepted' | 'cancelled' | 'partial' | 'in-progress' | 'denied' | 'error'
 
 /** SSE 一轮的收尾判定结果。 */
 export interface StreamCloseInfo {

@@ -396,6 +396,20 @@ class SseChatEmitterFramesTest {
         return frame;
     }
 
+    /**
+     * 批次2 / AR-05（只写不跑）：{@code error} 终帧可带 additive {@code unconfirmed=true} ——
+     * 前端只据此进入中性「状态未确认」视图，而不是拿 {@code AI_REDIS_UNAVAILABLE} 猜。
+     */
+    @Test
+    void errorFrameCarriesAdditiveUnconfirmedFlag() {
+        this.emitter.error("AI_REDIS_UNAVAILABLE", "终态暂不可确认", Map.of("unconfirmed", true));
+
+        Map<String, Object> frame = archivedFrames().get(0);
+        assertThat(frame).containsEntry("type", "error")
+                .containsEntry("code", "AI_REDIS_UNAVAILABLE")
+                .containsEntry("unconfirmed", true);
+    }
+
     /** 静默未用到的桩（避免 IDE 提示）：本测试类不校验最后一个订阅者的摘除行为。 */
     @Test
     void subscriberCountTracksAttachment() {

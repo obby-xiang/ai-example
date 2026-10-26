@@ -1444,10 +1444,27 @@ public class SseChatEmitter {
 	}
 
 	public void error(String code, String message) {
+		error(code, message, null);
+	}
+
+	/**
+	 * 带 additive 现场键的 {@code error} 终帧（批次2 / AR-05）。
+	 *
+	 * <p>用途 = 把"这条 error 不是普通失败"这类事实显式告知前端，而不新增帧型、
+	 * 不改既有键的语义：例如终态暂不可确认时附 {@code unconfirmed=true}。
+	 * 前端只认<b>显式标记</b>（{@code unconfirmed=true} / {@code turnEnd=unconfirmed}），
+	 * 绝不拿 {@code AI_REDIS_UNAVAILABLE} 这类真实故障码去猜 —— 猜错会把普通失败说成"可能成功"。
+	 *
+	 * @param extra additive 键（{@code null}/空 = 与两参重载逐字节相同）
+	 */
+	public void error(String code, String message, Map<String, Object> extra) {
 		Map<String, Object> frame = frame("error");
 		frame.put("runId", this.runId);
 		frame.put("code", code);
 		frame.put("message", message);
+		if (extra != null && !extra.isEmpty()) {
+			frame.putAll(extra);
+		}
 		emit(frame);
 	}
 

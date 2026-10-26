@@ -317,9 +317,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
-	/** DONE 专用：不新增键，只在原快照键上阻止取消态被成功终态覆盖。 */
-	private static final RedisScript<Long> DONE_SET_IF_NOT_CANCELLED_SCRIPT = new DefaultRedisScript<>("""
-			-- DONE_SET_IF_NOT_CANCELLED
+	/**
+	 * <b>取消优先状态守卫</b>（无租约分支）：不新增键，只在原快照键上阻止取消态被任何
+	 * <b>非取消</b>状态覆盖（不只终态：RUNNING / SUSPENDED 的写同样不得从 CANCELLED 转出）。
+	 *
+	 * <p>批次2 / AR-05 起守卫从"仅 DONE"先扩到 <b>DONE + FAILED</b>（三条失败出口
+	 * {@code fail()} / {@code emptyReply()} / {@code AiController} 环外异常共用
+	 * {@link #saveTerminalUnlessCancelled(RunSnapshot)}），再扩到<b>所有非取消状态</b>
+	 * （重跑/续跑的 RUNNING、池饱和回落的 SUSPENDED 同样不得把 {@code CANCELLED} 翻案）。
+	 */
+	private static final RedisScript<Long> TERMINAL_SET_IF_NOT_CANCELLED_SCRIPT = new DefaultRedisScript<>("""
+			-- TERMINAL_SET_IF_NOT_CANCELLED
 			local current = redis.call('GET', KEYS[1])
 			if current then
 			  local ok, snapshot = pcall(cjson.decode, current)
@@ -333,9 +341,9 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
-	/** DONE 专用：同一原子段内同时校验原 fence 与取消态，其它终态仍走原脚本。 */
-	private static final RedisScript<Long> FENCED_DONE_SET_SCRIPT = new DefaultRedisScript<>("""
-			-- FENCED_DONE_SET
+	/** 取消优先状态守卫（持租分支）：同一原子段内同时校验原 fence 与取消态；非取消状态都走本脚本。 */
+	private static final RedisScript<Long> FENCED_TERMINAL_SET_SCRIPT = new DefaultRedisScript<>("""
+			-- FENCED_TERMINAL_SET
 			local fence = redis.call('GET', KEYS[2])
 			if fence and tonumber(fence) > tonumber(ARGV[2]) then
 			  return 0
@@ -733,17 +741,71 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <p>写终态时 best-effort 释放本实例持有的续跑租约（{@link #releaseRunLease}）—— 正常收尾的轮
 	 * 不该让下一个实例等 TTL。
 	 *
-	 * <h2>DONE 的取消态 CAS（W-30 跨实例窄守卫）</h2>
-	 * 只有 {@code status=DONE} 的写多走一次状态 CAS：Lua 在<b>同一个原子步</b>里用 {@code cjson} 解析
-	 * <b>当前</b>快照，若已是 {@code status=CANCELLED} 或 {@code cancelled=true} ⇒ <b>拒写并直接返回</b>
-	 * （不覆盖取消终态，也不执行后面的会话索引 / 租约副作用）。持租分支用
-	 * {@link #FENCED_DONE_SET_SCRIPT}（原来的 fence 比较逐字保留，且在同一脚本内），无租约分支用
-	 * {@link #DONE_SET_IF_NOT_CANCELLED_SCRIPT}。键、TTL、fence 语义都不变，不新增键、不需要迁移；
-	 * 其它状态（RUNNING / SUSPENDED / CANCELLED / FAILED …）的写路径逐字不变，普通 DONE 照常落库。
-	 * <p><b>边界</b>：这是"快照状态不得从取消态进 DONE"的原子守卫，<b>不是</b>分布式事务 ——
+	 * <h2>取消优先状态 CAS（W-30 + 批次2 / AR-05）</h2>
+	 * <b>所有非取消状态</b>（{@code RUNNING} / {@code SUSPENDED} / {@code DONE} / {@code FAILED}）的写
+	 * 都走一次状态 CAS：Lua 在<b>同一个原子步</b>里用 {@code cjson} 解析<b>当前</b>快照，若已是
+	 * {@code status=CANCELLED} 或 {@code cancelled=true} ⇒ <b>拒写并直接返回</b>（不覆盖取消终态，
+	 * 也不执行后面的会话索引 / 租约副作用）。持租分支用 {@link #FENCED_TERMINAL_SET_SCRIPT}
+	 * （原来的 fence 比较逐字保留，且在同一脚本内），无租约分支用
+	 * {@link #TERMINAL_SET_IF_NOT_CANCELLED_SCRIPT}。键、TTL、fence 语义都不变，不新增键、
+	 * 不需要迁移；{@code CANCELLED} 自己的写不受限（幂等重写取消态照常落库）。
+	 *
+	 * <p><b>为什么 RUNNING / SUSPENDED 也在守卫内</b>：续跑与"仅模型步重跑"都是先检查取消、
+	 * 再把快照写成 RUNNING —— 检查与写之间取消可能恰好落库。旧口径只守终态，这条
+	 * CANCELLED → RUNNING 的翻案会把用户已停止的轮重新驱动起来（比 FAILED 翻案更危险：
+	 * 前端会重挂到一条不该再跑的轮上）。<b>不变量：任何状态写入都不得从 CANCELLED 转出。</b>
+	 *
+	 * <p><b>为什么 FAILED 也要同一守卫</b>：失败出口三条（{@code fail()} /
+	 * {@code emptyReply()} / {@code AiController} 的环外异常 catch）都写 FAILED，而 FAILED 与 DONE
+	 * 一样是<b>不可逆终态</b>；"取消先到 ⇒ 失败不得翻案"与"成功不得翻案"是同一条口径。
+	 * 三条出口共用 {@link #saveTerminalUnlessCancelled(RunSnapshot)}，本方法因此也享受同一判据
+	 * （不因为调用方用 {@code save} 还是可判定变体而分叉）。
+	 *
+	 * <p><b>边界</b>：这是"快照状态不得从取消态进其它状态"的原子守卫，<b>不是</b>分布式事务 ——
 	 * DB 历史 append 不在这一个原子步内（见 {@code ResilientChatService#finishSuccess} 的落库后复读）。
 	 */
 	public void save(RunSnapshot snapshot) {
+		persist(snapshot);
+	}
+
+	/**
+	 * 取消优先终态写的<b>可判定变体</b>（失败现场批次2）：与 {@link #save} <b>同一条写路径、同一个
+	 * 原子判据</b>，只是把"这一笔到底有没有落库"如实返回给调用方。
+	 *
+	 * <p>谁需要它：{@code fail()} / {@code emptyReply()} / {@code AiController} 的环外异常出口 ——
+	 * 被守卫拒写（当前快照已是取消态）时，它们<b>不得</b>再发自己的失败终帧（取消侧会发
+	 * {@code done{cancelled:true}}），否则一轮会出现两条终帧。
+	 *
+	 * @return {@code true} = 已落库（或本就无需守卫生效）；{@code false} = 这一笔被拒写
+	 *         （当前快照是取消态，或本实例已无续跑权；也不改会话索引 / 租约）
+	 */
+	public boolean saveTerminalUnlessCancelled(RunSnapshot snapshot) {
+		return saveStatusUnlessCancelled(snapshot);
+	}
+
+	/**
+	 * <b>任意状态写入</b>的取消优先原子守卫（可判定变体）—— 与 {@link #save} 同一条写路径，
+	 * 但把"这一笔到底有没有落库"如实返回。
+	 *
+	 * <p>适用面 = <b>所有非取消状态</b>（RUNNING / SUSPENDED / DONE / FAILED）。它与
+	 * {@link #saveTerminalUnlessCancelled} 是同一个原子判据，区别只在名字与调用意图：
+	 * 终态出口用前者（语义是"终态不得翻案取消"），
+	 * <b>重跑/续跑的状态转换用本方法</b>（语义是"不得从 CANCELLED 转出"）。
+	 *
+	 * <p>为什么重跑不能直接用 {@link #save}：入口的 {@code cancelStateOutcome} 检查与这笔记账之间
+	 * 没有原子性，而 {@code save} 的返回值是 void —— 即使守卫拒写，调用方也无从知道，仍会继续
+	 * 交棒线程池驱动这一轮。本方法把拒写变成可分支的事实：{@code false} ⇒ 取消已先到，
+	 * 调用方必须返回取消语义、<b>不得</b>再驱动。
+	 *
+	 * @return {@code true} = 已落库；{@code false} = 这一笔被拒写（当前快照是取消态，<b>或</b>
+	 *         本实例已无续跑权 / fence 已推进到更高 epoch）。调用方必须复核后再决定取消语义
+	 *         还是续跑权语义，不能一律当成"已取消"。
+	 */
+	public boolean saveStatusUnlessCancelled(RunSnapshot snapshot) {
+		return persist(snapshot);
+	}
+
+	private boolean persist(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		String runId = snapshot.getRunId();
 		// 续租 fencing 收口批：写权限由 authority 判定，不再用 epoch==0 当"可写"。
@@ -751,7 +813,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
 		if (authority.readOnly()) {
 			warnReadOnly(runId, authority, "轮次快照");
-			return;
+			return false;
 		}
 		long epoch = heldRunEpoch(runId);
 		if (epoch > 0L) {
@@ -764,29 +826,31 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		catch (Exception ex) {
 			throw new IllegalStateException("无法序列化轮次快照 " + runId, ex);
 		}
+		// 取消优先状态守卫的适用面：所有非取消状态（RUNNING / SUSPENDED / DONE / FAILED）。
+		// CANCELLED 自己不受限（幂等重写取消态照常落库）；不变量 = 任何状态写入不得从 CANCELLED 转出。
+		boolean guardedStatus = guardedStatus(snapshot.getStatus());
 		if (epoch > 0L) {
-			boolean done = RunSnapshot.DONE.equals(snapshot.getStatus());
-			boolean written = done ? fencedDoneSet(runId, json, epoch) : fencedSet(runId, json, epoch);
+			boolean written = guardedStatus ? fencedTerminalSet(runId, json, epoch) : fencedSet(runId, json, epoch);
 			if (!written) {
-				if (done) {
-					log.warn("DONE 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
-							+ "不覆盖 CANCELLED，也不改会话索引/租约）", runId, epoch);
+				if (guardedStatus) {
+					log.warn("{} 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
+							+ "不覆盖 CANCELLED，也不改会话索引/租约）", snapshot.getStatus(), runId, epoch);
 				}
 				else {
 					log.warn("STALE_EPOCH 拒写轮次快照 runId={} epoch={}（fence 已推进到更高 epoch："
 							+ "另一实例已接管本轮的续跑权，本实例的写回作废）", runId, epoch);
 				}
-				return;
+				return false;
 			}
 		}
 		else {
 			warnIfFenceIsAhead(runId);
 			try {
-				if (RunSnapshot.DONE.equals(snapshot.getStatus())) {
-					if (!doneSetIfNotCancelled(runId, json)) {
-						log.warn("DONE 拒写轮次快照 runId={}（当前快照已是取消态：不覆盖 CANCELLED，"
-								+ "也不改会话索引/租约）", runId);
-						return;
+				if (guardedStatus) {
+					if (!terminalSetIfNotCancelled(runId, json)) {
+						log.warn("{} 拒写轮次快照 runId={}（当前快照已是取消态：不覆盖 CANCELLED，"
+								+ "也不改会话索引/租约）", snapshot.getStatus(), runId);
+						return false;
 					}
 				}
 				else {
@@ -821,6 +885,18 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				log.debug("续期会话→run 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
 			}
 		}
+		return true;
+	}
+
+	/**
+	 * 该状态是否走取消优先守卫：<b>一切非取消状态</b>（RUNNING / SUSPENDED / DONE / FAILED，
+	 * 含 {@code REJECTED} 归一）。
+	 *
+	 * <p>{@code CANCELLED} 自己的写不受守卫限制（幂等重写取消态照常落库）；其它状态在
+	 * "当前快照已是取消态"时一律拒写 —— 这就是"任何状态写入均不得从 CANCELLED 转出"的判据。
+	 */
+	private static boolean guardedStatus(String status) {
+		return !RunSnapshot.CANCELLED.equals(status);
 	}
 
 	/**
@@ -873,15 +949,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	/**
-	 * DONE 的持租写：fence 校验与 {@link #fencedSet} 逐字相同，外加"当前快照已是取消态 ⇒ 拒写"
-	 * （同一脚本内 {@code cjson} 解析，见 {@link #FENCED_DONE_SET_SCRIPT}）。
+	 * 取消优先终态的持租写：fence 校验与 {@link #fencedSet} 逐字相同，外加"当前快照已是取消态 ⇒ 拒写"
+	 * （同一脚本内 {@code cjson} 解析，见 {@link #FENCED_TERMINAL_SET_SCRIPT}）。
 	 *
 	 * @return false = 陈旧 epoch <b>或</b> 当前快照是取消态（两者都不落库、不改索引）
 	 */
-	private boolean fencedDoneSet(String runId, String json, long epoch) {
+	private boolean fencedTerminalSet(String runId, String json, long epoch) {
 		Duration ttl = ttlFor(runId);
 		try {
-			Long result = this.redis.execute(FENCED_DONE_SET_SCRIPT, List.of(runKey(runId), fenceKey(runId)),
+			Long result = this.redis.execute(FENCED_TERMINAL_SET_SCRIPT, List.of(runKey(runId), fenceKey(runId)),
 					json, String.valueOf(epoch), String.valueOf(ttl.toMillis()));
 			return result != null && result > 0L;
 		}
@@ -891,15 +967,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	/**
-	 * DONE 的无租约写（E3 plain 分支）：同一键上"当前快照已是取消态 ⇒ 拒写"，否则普通 {@code SET PX}。
-	 * 不持租的路径原先没有任何原状态检查（也是 W-30 现场 wipe 掉 CANCELLED 的那一条），这里用一条
-	 * 单键脚本把"读-判-写"合成一个原子步，不引入新键。
+	 * 取消优先终态的无租约写（E3 plain 分支）：同一键上"当前快照已是取消态 ⇒ 拒写"，否则普通
+	 * {@code SET PX}。不持租的路径原先没有任何原状态检查（也是 W-30 现场 wipe 掉 CANCELLED 的那一条），
+	 * 这里用一条单键脚本把"读-判-写"合成一个原子步，不引入新键。
+	 *
+	 * <p>批次2 起也服务 FAILED（失败出口三条共用 {@link #saveTerminalUnlessCancelled}）。
 	 *
 	 * @return false = 当前快照是取消态（不落库、不改索引）
 	 */
-	private boolean doneSetIfNotCancelled(String runId, String json) {
+	private boolean terminalSetIfNotCancelled(String runId, String json) {
 		Duration ttl = ttlFor(runId);
-		Long result = this.redis.execute(DONE_SET_IF_NOT_CANCELLED_SCRIPT, List.of(runKey(runId)), json,
+		Long result = this.redis.execute(TERMINAL_SET_IF_NOT_CANCELLED_SCRIPT, List.of(runKey(runId)), json,
 				String.valueOf(ttl.toMillis()));
 		if (result == null) {
 			// 生产脚本恒回 0/1；null 只可能来自"脚本没被执行"（替身未建模 / 包装层无返回值）。
@@ -2668,6 +2746,50 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 心跳活动戳键名（诊断/取证可直读）。 */
 	public String beatKey(String runId) {
 		return BEAT_PREFIX + runId;
+	}
+
+	/**
+	 * <b>轮内预算 armed 的持久化</b>（AR-10 第 3 条；批次2）。
+	 *
+	 * <p>armed 原先只活在 {@code ToolActivityBeacon}（进程内加速态）：park 退出与续跑入口都会清信标，
+	 * 于是"挂起后恢复 = 预算重新开始"，与"本轮预算"（步数类预算一律<b>继续累计</b>、绝不重置）的
+	 * 口径相反。这里把两个事实写进<b>已有的</b>轮次快照（同一键族、同一 TTL、不新增键、不碰 DB）：
+	 * <ul>
+	 * <li>{@code budgetArmedAtMs}：武装时刻（0 = 未武装）；</li>
+	 * <li>{@code budgetSkippedBatches}：武装后被拦下的工具批次数（到顶仍按既有上界收尾）。</li>
+	 * </ul>
+	 *
+	 * <p><b>只升不降</b>：{@code Math.max(现值, 新值)} —— 并发/迟到写入不得把已武装改回未武装，
+	 * 也不得把已拦下的批次数改小（那等于给模型"再来几批"的额度）。
+	 *
+	 * <p><b>失败姿态</b>：写不进去只 WARN，不打断工具循环。代价是恢复后按真值/估算重判一次预算
+	 * （最坏情况是<b>多判一次</b>，不是漏判），与信标类注"不承载可恢复状态"的原口径一致 ——
+	 * 这条持久化只是在能写时把"本轮预算"钉住。
+	 */
+	public void markTurnBudget(String runId, long armedAtMs, int skippedBatches) {
+		if (runId == null) {
+			return;
+		}
+		try {
+			RunSnapshot snapshot = get(runId);
+			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+				return;
+			}
+			int currentSkipped = snapshot.getBudgetSkippedBatches();
+			long currentArmed = snapshot.getBudgetArmedAtMs();
+			long nextArmed = Math.max(currentArmed, armedAtMs);
+			int nextSkipped = Math.max(currentSkipped, skippedBatches);
+			if (nextArmed == currentArmed && nextSkipped == currentSkipped) {
+				return;
+			}
+			snapshot.setBudgetArmedAtMs(nextArmed);
+			snapshot.setBudgetSkippedBatches(nextSkipped);
+			persist(snapshot);
+		}
+		catch (RuntimeException ex) {
+			log.warn("轮内预算 armed 落快照失败 runId={} armedAtMs={} skippedBatches={}（不打断工具循环）：{}", runId,
+					armedAtMs, skippedBatches, ex.getMessage());
+		}
 	}
 
 	/**

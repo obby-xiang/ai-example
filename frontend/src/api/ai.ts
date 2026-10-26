@@ -194,6 +194,17 @@ export function resume(runId: string): Promise<Record<string, unknown>> {
   return post<Record<string, unknown>>(`/ai/runs/${encodeURIComponent(runId)}/resume`)
 }
 
+/**
+ * POST /api/ai/runs/{runId}/retry-model-step（批次2 / AR-05：仅模型步重跑）。
+ *
+ * 202 = 已受理（随后用既有 `GET /api/ai/events/{runId}` 重挂；**不追加用户消息**）；
+ * 200 = 已收尾/已取消（幂等空操作）；409 = 在途或前置失败（`failedCheck`）；
+ * 404 = 轮次不存在；503 = AI/Redis 不可用（可重试）。
+ */
+export function retryModelStep(runId: string): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>(`/ai/runs/${encodeURIComponent(runId)}/retry-model-step`)
+}
+
 /** GET /api/ai/pending/{runId}（挂起项快照，诊断用）。 */
 export function pending(runId: string): Promise<PendingSnapshot[]> {
   return get<PendingSnapshot[]>(`/ai/pending/${encodeURIComponent(runId)}`)
@@ -224,6 +235,7 @@ export const aiApi = {
   runs,
   run,
   resume,
+  retryModelStep,
   pending,
   runsCurrent,
   feedbackSubmit,

@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -70,6 +71,12 @@ public class InMemoryRunStore extends RunStore {
 
 	/** T3-2：{@code ai:seq:<runId>} 的进程内替身（已发放最大业务号）。 */
 	private final Map<String, Long> issuedSeqs = new ConcurrentHashMap<>();
+
+	/**
+	 * 批次2（AR-05）：{@code ai:run:<runId>} 上"写过取消态"的进程内事实 —— 真实实现由取消优先
+	 * CAS 在 Lua 里 {@code cjson} 复读当前快照得出；替身没有 Lua，故用这张表表达同一事实。
+	 */
+	private final Set<String> cancelledMarks = ConcurrentHashMap.newKeySet();
 
 	/** B23L1 批②a：{@code ai:req:<runId>}（field=toolCallId, value=置位时刻）。 */
 	private final Map<String, Map<String, String>> reqMarks = new ConcurrentHashMap<>();
@@ -236,7 +243,16 @@ public class InMemoryRunStore extends RunStore {
 			snapshot.setRunEpoch(epoch);
 			this.fenceEpochs.put(snapshot.getRunId(), epoch);
 		}
+		// 批次2：与真实实现的"任何非取消状态不得从 CANCELLED 转出"同一不变量
+		// （真实实现由 Lua 的 cjson 复读当前快照；替身用写入过取消态的事实表）。
+		boolean incomingCancelled = RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled();
+		if (!incomingCancelled && this.cancelledMarks.contains(snapshot.getRunId())) {
+			return;
+		}
 		this.runs.put(snapshot.getRunId(), snapshot);
+		if (incomingCancelled) {
+			this.cancelledMarks.add(snapshot.getRunId());
+		}
 		// 与真实实现同一联动口径（T2b-D#1）：SUSPENDED 建索引、终态清索引、RUNNING 保留
 		String status = snapshot.getStatus();
 		if (RunSnapshot.SUSPENDED.equals(status)) {
@@ -246,6 +262,44 @@ public class InMemoryRunStore extends RunStore {
 			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
 			releaseRunLease(snapshot.getRunId());
 		}
+	}
+
+	/**
+	 * 取消优先终态守卫（进程内复刻；批次2 / AR-05）：写入过取消态的轮，其后任何 FAILED/DONE 写一律被拒。
+	 *
+	 * <p>与真实 {@link RunStore#saveTerminalUnlessCancelled} 同一可判定契约：被拒 ⇒ {@code false}，
+	 * 调用方（{@code fail()} / {@code emptyReply()} / 环外异常）据此不发自己的失败终帧。
+	 */
+	@Override
+	public boolean saveTerminalUnlessCancelled(RunSnapshot snapshot) {
+		return saveStatusUnlessCancelled(snapshot);
+	}
+
+	/**
+	 * 任意状态写入的取消优先守卫（进程内复刻）：已经写过取消态的轮，其后任何非取消状态写一律被拒。
+	 *
+	 * <p>与真实 {@link RunStore#saveStatusUnlessCancelled} 同一可判定契约：被拒 ⇒ {@code false}。
+	 * 重跑/续跑的状态转换靠它判断"取消已先到 ⇒ 不得驱动"。
+	 */
+	@Override
+	public boolean saveStatusUnlessCancelled(RunSnapshot snapshot) {
+		boolean incomingCancelled = RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled();
+		if (!incomingCancelled && this.cancelledMarks.contains(snapshot.getRunId())) {
+			return false;
+		}
+		save(snapshot);
+		return true;
+	}
+
+	/** 轮内预算 armed 的进程内持久化（AR-10 第 3 条）：直接挂在快照对象上，语义与真实实现一致。 */
+	@Override
+	public void markTurnBudget(String runId, long armedAtMs, int skippedBatches) {
+		RunSnapshot snapshot = this.runs.get(runId);
+		if (snapshot == null) {
+			return;
+		}
+		snapshot.setBudgetArmedAtMs(Math.max(snapshot.getBudgetArmedAtMs(), armedAtMs));
+		snapshot.setBudgetSkippedBatches(Math.max(snapshot.getBudgetSkippedBatches(), skippedBatches));
 	}
 
 	// ── B23L1 批②a：租约 / req 位 / 决策 guard 的进程内替身 ────────────────────

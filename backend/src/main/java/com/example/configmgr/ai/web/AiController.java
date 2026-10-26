@@ -16,6 +16,7 @@ import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.history.AiChatHistoryService;
 import com.example.configmgr.ai.history.AiChatHistoryService.ChatPage;
 import com.example.configmgr.ai.history.AiChatHistoryService.MessageView;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -473,9 +474,17 @@ public class AiController {
 					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
 							"type", ex.getClass().getSimpleName(),
 							"msg", ex.getMessage());
-					// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
-					out.error(ErrorCodes.AI_RUN_FAILED,
-							localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
+					// ===== 批次2 / AR-05：环外异常也走取消优先终态守卫 =====
+					// 环外异常（压缩/记忆写/快照建/取模型）此前只发一帧 error、快照留在 RUNNING ⇒
+					// 刷新后既无终态也无"可重跑"的依据。这里补写 FAILED，但**必须**与 fail()/emptyReply()
+					// 共用 RunStore 的同一个 CAS：取消先到时不得把 CANCELLED 盖成 FAILED，
+					// 也不得再发第二条终帧（取消侧的 done{cancelled:true} 才是这一轮的终帧）。
+					boolean failureWritten = writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED);
+					if (failureWritten) {
+						// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
+						out.error(ErrorCodes.AI_RUN_FAILED,
+								localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
+					}
 				}
 				finally {
 					LocaleContextHolder.resetLocaleContext();
@@ -495,6 +504,49 @@ public class AiController {
 			AiTrace.clear();
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	/**
+	 * <b>环外异常</b>的失败终态写口（批次2 / AR-05）：与 {@code ResilientChatService#fail} /
+	 * {@code emptyReply()} <b>共用</b> {@link RunStore#saveTerminalUnlessCancelled} 的同一个原子 CAS。
+	 *
+	 * <p>三条口径：
+	 * <ol>
+	 * <li><b>取消优先</b>：当前快照已是取消态（{@code status=CANCELLED} 或 {@code cancelled=true}）
+	 *     ⇒ 这一笔不写、返回 {@code false}，调用方不得再发 {@code error} 终帧（取消侧发
+	 *     {@code done{cancelled:true}}）；否则一轮会有两条终帧、且"已取消"会被改写成"失败"；</li>
+	 * <li><b>已是终态不覆盖</b>：DONE/FAILED/CANCELLED 一律不动（终态先到者赢）；</li>
+	 * <li><b>不新增 DB 写入</b>：失败现场只落在 Redis 快照（{@code ai:run:<runId>}，24h 滑动 TTL）
+	 *     与帧归档里 —— AR-01 明确禁止为失败现场新增 DB 写入 / 列 / TTL。</li>
+	 * </ol>
+	 *
+	 * @return {@code true} = 这一笔确实落下（调用方可以发失败终帧）；{@code false} = 不必发
+	 */
+	private boolean writeOutsideTurnFailure(String runId, String code) {
+		try {
+			RunSnapshot snapshot = this.runStore.get(runId);
+			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+				return false;
+			}
+			if (snapshot.isCancelled()) {
+				log.info("环外异常不写失败态 runId={}：快照取消位已置位（取消优先）", runId);
+				return false;
+			}
+			snapshot.setStatus(RunSnapshot.FAILED);
+			snapshot.setInFlightToolCalls(new java.util.ArrayList<>());
+			snapshot.setError(code + "：" + localize(code, "AI 服务暂时不可用，请稍后重试。"));
+			boolean written = this.runStore.saveTerminalUnlessCancelled(snapshot);
+			if (!written) {
+				log.info("环外异常失败态被取消优先守卫拒写 runId={} code={}（不覆盖 CANCELLED、不发 error 终帧）", runId,
+						code);
+			}
+			return written;
+		}
+		catch (RuntimeException writeEx) {
+			log.warn("环外异常失败态写回失败 runId={}（终帧照发；恢复侧按快照/租约兜底）：{}", runId,
+					writeEx.getMessage());
+			return true;
+		}
 	}
 
 	/**
@@ -979,7 +1031,106 @@ public class AiController {
 		if (service == null) {
 			return ApiResponse.ok(Map.of("exists", false));
 		}
-		return ApiResponse.ok(service.describe(runId));
+		Map<String, Object> body = new LinkedHashMap<>(service.describe(runId));
+		putArchiveRecoverability(body, runId);
+		return ApiResponse.ok(body);
+	}
+
+	/**
+	 * <b>归档窗口完整性</b>（批次2 / Task 4 Step 3）—— 只读，<b>绝不</b>因缺口伪造轮失败。
+	 *
+	 * <h2>为什么需要它</h2>
+	 * 帧归档（{@code ai:xevents}）按窗口裁剪（条数 / 字节预算）。窗口一过，早于窗口的帧就没了 ——
+	 * 这属于"<b>不可完整恢复</b>的归档限制"，<b>不是</b>这一轮失败了。旧读侧只有
+	 * {@code RedisDegradation.c1.streamReplayGap} 计数与一行 debug 日志，人看不到；
+	 * 于是"回放少了一段"很容易被误读成"轮次失败/丢失"。
+	 *
+	 * <h2>判据与载荷（additive）</h2>
+	 * <ul>
+	 * <li>{@code archiveFirstSeq}：当前可回放的最小 seq（0 = 一帧都没有）；</li>
+	 * <li>{@code archiveReadable}：这次探测是否可信（读失败 ⇒ {@code false}，按"不可证明完整"处理）；</li>
+	 * <li>{@code archiveGap}：有帧、但<b>首帧不是 {@code start}</b> ⇒ 归档头部已被裁剪；</li>
+	 * <li>{@code recoverable}：{@code "complete"} / {@code "partial"}（前端文案："不可完整恢复"）。</li>
+	 * </ul>
+	 *
+	 * <p><b>本方法不写任何状态</b>（不改快照、不写 FAILED、不发终帧）：缺口只影响"回放是否完整"，
+	 * 与"这一轮成没成"是两件事。
+	 */
+	private void putArchiveRecoverability(Map<String, Object> body, String runId) {
+		boolean readable = true;
+		boolean gap = false;
+		long firstSeq = 0L;
+		if (!Boolean.TRUE.equals(body.get("exists"))) {
+			return;
+		}
+		if (this.frameStore == null) {
+			readable = false;
+		}
+		else {
+			try {
+				FrameStore.ReadResult read = this.frameStore.readFromWithStatus(runId, 0L, 1);
+				readable = !read.degraded();
+				List<Map<String, Object>> frames = read.frames();
+				if (frames != null && !frames.isEmpty()) {
+					Map<String, Object> first = frames.get(0);
+					if (first.get("seq") instanceof Number number) {
+						firstSeq = number.longValue();
+					}
+					gap = !"start".equals(String.valueOf(first.get("type")));
+				}
+			}
+			catch (RuntimeException ex) {
+				readable = false;
+				log.debug("归档完整性探测失败 runId={}（按不可证明完整处理）：{}", runId, ex.getMessage());
+			}
+		}
+		body.put("archiveFirstSeq", firstSeq);
+		body.put("archiveReadable", readable);
+		body.put("archiveGap", gap);
+		body.put("recoverable", readable && !gap ? "complete" : "partial");
+	}
+
+	/**
+	 * <b>仅模型步重跑</b>（AR-05 / 批次2）：{@code POST /api/ai/runs/{runId}/retry-model-step}。
+	 *
+	 * <h2>契约（前端可直接用）</h2>
+	 * <ul>
+	 * <li><b>202</b>：已受理 —— {@code {runId, sessionId, retried:true, modelStepOnly:true,
+	 *     reason:"MODEL_STEP_RETRY_ACCEPTED", reusedToolLedger:true, appendedUserMessages:0,
+	 *     promptMessageCount, promptRoles, retryOfStatus:"FAILED"}}。前端接着走既有
+	 *     {@code GET /api/ai/events/{runId}?lastSeq=} 重挂即可（帧流与续跑同一条）；
+	 *     <b>不要</b>再追加一条用户消息，也<b>不要</b>把它当成"重试本轮 = 重发消息"；</li>
+	 * <li><b>200</b>：已收尾/已取消（幂等空操作，{@code retried:false}）；</li>
+	 * <li><b>409</b>：在途（{@code LEASE_HELD_ELSEWHERE} / {@code RESUME_IN_PROGRESS} /
+	 *     {@code ALREADY_RUNNING}），或前置失败
+	 *     （{@code reason:"RETRY_PRECONDITION_FAILED", code:"ILLEGAL_STATE",
+	 *     failedCheck:"NOT_FAILED|CANCELLED|PENDING_TOOLS|PARTIAL_CONTENT|TOOL_PAIRING_INCOMPLETE|MODEL_CHANGED"}）
+	 *     —— {@code PARTIAL_CONTENT} 表示"状态未确认"，前端应给中性视图 + 新开一轮，而不是重跑；</li>
+	 * <li><b>404</b>：轮次不存在；<b>503</b>：AI/Redis 不可用（可重试）。</li>
+	 * </ul>
+	 *
+	 * <p>语义边界（AR-05）：<b>不</b>做"半截自动替换"，<b>不</b>重执行已结算工具，
+	 * <b>不</b>追加用户消息，<b>不</b>换模型，<b>不</b>改历史切片。
+	 */
+	@PostMapping(value = "/runs/{runId}/retry-model-step", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<?> retryModelStep(@PathVariable String runId) {
+		ResumeService service = this.resumeService.getIfAvailable();
+		if (!this.availability.isAvailable() || service == null) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
+		}
+		if (!this.redisAvailability.isAvailable()) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		ResumeService.ResumeResult result = service.retryModelStep(runId, ErrorBodyFactory.requestLocale());
+		return switch (result.outcome()) {
+			case ACCEPTED -> ResponseEntity.accepted().contentType(MediaType.APPLICATION_JSON).body(result.body());
+			case ALREADY_DONE, ALREADY_CANCELLED ->
+				ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
+			case NOT_FOUND -> json(HttpStatus.NOT_FOUND, result.body());
+			case POOL_SATURATED, CANCEL_STATE_UNKNOWN, STATE_UNKNOWN ->
+				json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
+			default -> json(HttpStatus.CONFLICT, result.body());
+		};
 	}
 
 	/**
@@ -1360,11 +1511,22 @@ public class AiController {
 		return ResponseEntity.ok(ApiResponse.ok(body));
 	}
 
-	/** R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。 */
+	/**
+	 * R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。
+	 *
+	 * <p><b>批次2 / AR-01 第 5 条：synthetic 展示过滤（读侧）</b> —— 合成/系统提示（上下文压缩摘要、
+	 * 步数收尾、轮内预算收尾）在记忆里是真实消息，但对人不是"用户原话"也不是"助手答复"。
+	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与写侧同一份</b>，不许各写一套），
+	 * 命中即加 additive 键 {@code synthetic=true}：前端据此按系统消息呈现，
+	 * <b>摘要不冒充用户</b>、不显示内部配置键；正文与角色字段一律原样（不改写、不改模型记忆）。
+	 */
 	private Map<String, Object> toHistoryItem(Message message) {
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("type", message.getMessageType().name());
 		item.put("text", message.getText());
+		if (SyntheticMessages.isSynthetic(message)) {
+			item.put(SyntheticMessages.DISPLAY_KEY, true);
+		}
 		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
 			item.put("toolCalls", assistant.getToolCalls());
 			Object toolCallStates = assistant.getMetadata().get(ResilientChatService.TOOL_CALL_STATES_KEY);

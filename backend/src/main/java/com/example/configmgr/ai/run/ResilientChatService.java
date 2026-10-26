@@ -585,6 +585,10 @@ public class ResilientChatService {
 		// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
 		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId, snapshot);
 		this.cancellations.register(runId);
+		// AR-10 第 3 条（批次2）：**armed 跨 park 持久化** —— 快照里带着"本轮已进入收尾"的事实，
+		// 恢复时必须重新点亮信标（挂起不清零、继续累计），否则模型可以再要一批工具、再清一次结果、
+		// 再追加一条收尾 user 消息，与"本轮预算"（不是会话预算、不是重置式）的口径相反。
+		restoreTurnBudget(runId, snapshot);
 		// 段级预算（决策看板 :14）：续跑 = 一次恢复点 ⇒ 新段从这里起算
 		this.beacon.markSegmentStart(runId, turnStartedAtMs);
 		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
@@ -634,6 +638,25 @@ public class ResilientChatService {
 	 * <li><b>providerId 为空</b>：旧快照/旧签名 ⇒ 按模型名兼容解析（本批之前的行为）+ WARN。</li>
 	 * </ol>
 	 */
+	/**
+	 * 续跑/重跑入口的 armed 恢复（AR-10 第 3 条）。
+	 *
+	 * <p>快照 {@code budgetArmedAtMs > 0} ⇒ 这一轮此前已经武装过（收尾中）：把信标点亮，并把
+	 * {@code budgetSkippedBatches} 一并带回 —— 到顶仍按既有上界收尾，"本轮预算"因此跨 park 连续。
+	 *
+	 * <p>{@code snapshot == null}（读失败/旧快照）⇒ 什么都不做：按真值/估算重判一次预算，
+	 * 最坏是<b>多判一次</b>，不是漏判（与信标类注同一姿态）。
+	 */
+	private void restoreTurnBudget(String runId, RunSnapshot snapshot) {
+		if (snapshot == null || snapshot.getBudgetArmedAtMs() <= 0L) {
+			return;
+		}
+		this.beacon.restoreBudgetArmed(runId, snapshot.getBudgetArmedAtMs());
+		this.beacon.restoreBudgetSkippedBatches(runId, snapshot.getBudgetSkippedBatches());
+		log.debug("恢复本轮预算 armed runId={} armedAtMs={} skippedBatches={}", runId,
+				snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches());
+	}
+
 	/**
 	 * 续跑压缩用的本轮运行态（与 {@link #driveResumed} 同一派生口径）。
 	 *
@@ -751,6 +774,9 @@ public class ResilientChatService {
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		// 上一次失败带来的 429 Retry-After（只对紧接着的这次重试生效；成功/收尾后自然丢弃）
 		Long retryAfterMs = null;
+		// 空回复重试只给一次（AR-05）：本条记录"本轮已经因 EMPTY_REPLY 再试过一次"，
+		// 第二次仍空 ⇒ 直接落 FAILED（不无限重试、不在有产出的情况下重试）。
+		boolean emptyReplyRetried = false;
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
 			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"本段剩余预算"里出。
 			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗本段预算。
@@ -804,8 +830,15 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
-				finish(runId, sessionId, accumulator, attempt, watchdog, out, turn);
-				return;
+				boolean handled = finish(runId, sessionId, accumulator, attempt, watchdog, out, turn,
+						attemptStartedAtMs, beaconBefore, emptyReplyRetried);
+				if (handled) {
+					return;
+				}
+				// 空回复的<b>仅模型步</b>再试一次（AR-05）：不追加用户消息、不改历史切片、
+				// 不重跑任何工具（本轮零副作用已由 emptyReplyRetryable 证明），只是再问模型一次。
+				emptyReplyRetried = true;
+				continue;
 			}
 			catch (Throwable error) {
 				// 人工等待 park（2026-10-25）：不是失败、不是取消 —— 本次执行到此结束，
@@ -1056,19 +1089,33 @@ public class ResilientChatService {
 	 * <p><b>T3-7 / A12：空文本不再算成功</b> —— 正文去空白后为空即转 {@link #emptyReply}
 	 * （FAILED + {@code EMPTY_REPLY}）。三形态（空串 / 纯空白 / 空文本但本轮用过工具）一律如此：
 	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
+	 *
+	 * <p><b>批次2 / AR-05：空回复的<b>一次</b>重试</b> —— 只有"零产出（正文与思考都没出过帧）+ 零副作用"
+	 * 才允许再试一次（见 {@link #emptyReplyRetryable}）。有思考、有工具副作用、已挂起工具轮、已到
+	 * 尝试上界或预算耗尽时一律<b>不</b>重试，直接落 {@code EMPTY_REPLY} 失败（否则重试会把已出过的
+	 * 思考段再吐一遍，或把"这一轮已做过事"抹成没做过）。
+	 *
+	 * @return {@code true} = 已终态收尾（调用方 return）；{@code false} = 空回复可再试一次
+	 *         （调用方继续尝试循环，本方法已发 {@code retry} 帧）
 	 */
-	private void finish(String runId, String sessionId, Accumulator accumulator, int attempts, StreamWatchdog watchdog,
-			SseChatEmitter out, TurnContext turn) {
+	private boolean finish(String runId, String sessionId, Accumulator accumulator, int attempts,
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, long attemptStartedAtMs,
+			long beaconBefore, boolean emptyReplyRetried) {
 		UpstreamErrorClassifier.Finish finish = accumulator.finish();
 		// content_filter = 明确失败（即使已有半截正文也不当作完成）
 		if (finish == UpstreamErrorClassifier.Finish.CONTENT_FILTER) {
 			contentFiltered(runId, sessionId, accumulator, attempts, out, turn);
-			return;
+			return true;
 		}
 		String text = accumulator.text();
 		if (!StringUtils.hasText(text)) {
+			if (emptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
+					beaconBefore, emptyReplyRetried)) {
+				emitEmptyReplyRetry(runId, sessionId, attempts, out, turn);
+				return false;
+			}
 			emptyReply(runId, sessionId, accumulator, attempts, out, turn);
-			return;
+			return true;
 		}
 		// 截断语义的唯一判据（实时帧与持久面同源）：只有 finish_reason=length 算截断。
 		// cancel/stop/content_filter/empty_reply 都不是"被长度上限截断"，不得打这个键。
@@ -1089,11 +1136,12 @@ public class ResilientChatService {
 		if (monitor == null) {
 			// 轻装配/直接 new 的单测没有交棒器可提供监视器：维持单线程语义（与引入本批之前同形）。
 			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
-			return;
+			return true;
 		}
 		synchronized (monitor) {
 			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
 		}
+		return true;
 	}
 
 	/**
@@ -1277,7 +1325,10 @@ public class ResilientChatService {
 		}
 		int partialChars = accumulator == null ? 0 : accumulator.text().length();
 		out.textEnd(partialChars);
-		out.error(code, messageFor(code));
+		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
+		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
+		// 进入中性视图，不得自行拿故障码猜"可能成功"。
+		out.error(code, messageFor(code), Map.of("unconfirmed", true));
 		emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
 	}
 
@@ -1331,6 +1382,106 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 空回复的<b>一次</b>重试是否可以发起（AR-05 / 批次2；判据逐条列出，便于对账七条件里的
+	 * "零产出 / 零副作用"两条）。
+	 *
+	 * <ol>
+	 * <li>本轮还<b>没有</b>因空回复重试过（一次为限，不无限重试）；</li>
+	 * <li>还有下一次尝试额度（{@code app.ai.resilience.max-attempts} 封顶 = 有界重试）；</li>
+	 * <li><b>零产出</b>：{@code !accumulator.emittedAny()} —— 正文与思考都没出过帧。
+	 *     只有 reasoning、正文为空时 {@code emittedAny()=true} ⇒ <b>不重试</b>（重试会把已发过的
+	 *     思考段再吐一遍，且 {@code retry} 帧会落在思考 delta 之后，破帧序契约）；</li>
+	 * <li><b>零副作用</b>：本次尝试内没有工具开始执行、台账也没有新增执行记录；</li>
+	 * <li>不是"已挂起的工具轮"（那种轮归 resume 收口，不能被当成空轮重试）；</li>
+	 * <li>本段预算还没耗尽（不发起注定撞 {@code TOTAL_BUDGET} 的重试）。</li>
+	 * </ol>
+	 */
+	private boolean emptyReplyRetryable(String runId, Accumulator accumulator, int attempts, long turnStartedAtMs,
+			long attemptStartedAtMs, long beaconBefore, boolean emptyReplyRetried) {
+		if (emptyReplyRetried) {
+			return false;
+		}
+		AiProperties.Resilience config = this.properties.getResilience();
+		if (attempts >= Math.max(1, config.getMaxAttempts())) {
+			return false;
+		}
+		if (accumulator.emittedAny()) {
+			return false;
+		}
+		if (this.beacon.startedCount(runId) > beaconBefore
+				|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0) {
+			return false;
+		}
+		if (isPersistedParkedToolRound(runId)) {
+			return false;
+		}
+		return segmentElapsedMs(runId, turnStartedAtMs) < config.getTotalBudget().toMillis();
+	}
+
+	/**
+	 * 空回复重试的帧与日志（{@code retry} 帧；additive 键 {@code emptyReply=true}）。
+	 *
+	 * <p>为什么不发 {@code message_start/delta}：零产出轮没有打开过正文段，{@code retry} 就是
+	 * 这一轮的第一条非终态帧 —— 帧序契约（{@code FrameContract}）因此不需要新分支。
+	 */
+	private void emitEmptyReplyRetry(String runId, String sessionId, int attempts, SseChatEmitter out,
+			TurnContext turn) {
+		Map<String, Object> retryFrame = new LinkedHashMap<>();
+		retryFrame.put("nextAttempt", attempts + 1);
+		retryFrame.put("code", EMPTY_REPLY_CODE);
+		retryFrame.put("reason", "模型本轮未产出任何内容，仅重跑模型步（不重执行工具、不追加用户消息）");
+		retryFrame.put("emptyReply", true);
+		retryFrame.put("elapsedMs", Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs()));
+		out.retry(retryFrame);
+		AiTrace.event("turn_empty_retry", "attempt", attempts, "nextAttempt", attempts + 1, "code", EMPTY_REPLY_CODE,
+				"elapsedMs", Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs()));
+		log.warn("空回复按仅模型步重试一次 runId={} sessionId={} attempt={}/{}", runId, sessionId, attempts,
+				this.properties.getResilience().getMaxAttempts());
+	}
+
+	/**
+	 * <b>失败出口的取消优先守卫</b>（AR-05 / 批次2；三个 FAILED 写口共用）。
+	 *
+	 * <p>三层判据：
+	 * <ol>
+	 * <li>快照已经是取消态（{@code status=CANCELLED} 或 {@code cancelled=true}）⇒ 这一笔不写；</li>
+	 * <li>写 FAILED 走 {@link RunStore#saveTerminalUnlessCancelled} —— 与 DONE 那一侧<b>同一个</b>
+	 *     原子 CAS（Lua 内 {@code cjson} 复读当前快照），跨实例同样拦得住；</li>
+	 * <li>被拒写 ⇒ 返回 {@code false}，调用方<b>不得</b>再发自己的失败终帧（取消侧会发
+	 *     {@code done{cancelled:true}}），否则一轮会出现两条终帧。</li>
+	 * </ol>
+	 *
+	 * <p><b>不伪写半截</b>：本方法只改快照的状态/错误/次数，不向 DB 写任何正文
+	 * （{@code ai_chat_message} 的写入只在 {@code convergeMemory} / 终态落定那几处，且失败路径不调它）。
+	 *
+	 * @return {@code true} = 失败态已落库（或本就没有快照可写，沿用旧口径继续发失败终帧）；
+	 *         {@code false} = 取消优先，调用方必须直接返回（交给取消收尾）
+	 */
+	private boolean failRunUnlessCancelled(String runId, RunSnapshot snapshot, String code, String message,
+			int attempts, java.util.function.Consumer<RunSnapshot> prepare) {
+		if (snapshot == null) {
+			return true;
+		}
+		// 读侧先行：取消态一票否决（不写 FAILED）。写侧还有同一判据的原子 CAS（见下），
+		// 两者是"同一口径的两道门"，不是两次不同判定。
+		if (isCancelledSnapshot(snapshot)) {
+			log.info("失败终局前发现取消 runId={}（不写 FAILED、不发 error 终帧；取消收尾负责终态与终帧）", runId);
+			return false;
+		}
+		if (prepare != null) {
+			prepare.accept(snapshot);
+		}
+		snapshot.setStatus(RunSnapshot.FAILED);
+		snapshot.setAttempts(attempts);
+		snapshot.setError(code + "：" + message);
+		if (!this.store.saveTerminalUnlessCancelled(snapshot)) {
+			log.info("失败终态被取消优先守卫拒写 runId={} code={}（不覆盖 CANCELLED、不发 error 终帧）", runId, code);
+			return false;
+		}
+		return true;
+	}
+
+	/**
 	 * 空回复终局（T3-7 / A12，<b>口径变更</b>）：正文去空白后为空 ⇒ 轮次 FAILED + 机器可读码
 	 * {@value #EMPTY_REPLY_CODE}，终帧 {@code error}（此前是 {@code done}）。
 	 *
@@ -1338,6 +1489,9 @@ public class ResilientChatService {
 	 * （空消息会污染下一轮记忆）；② 仍以快照现状的历史收敛记忆（本轮已落定的工具配对随之进记忆，
 	 * "这一轮开过的东西"不悬空）。已经打开过的正文段（纯空白分片也发 delta，见 {@code consume}）
 	 * 先收尾再发终帧 —— 与 {@link #fail} 的帧序契约一致（运行关闭前，它打开的一切都要先关闭）。
+	 *
+	 * <p><b>批次2 / AR-05：取消优先</b> —— FAILED 是终态，与 DONE 一样不得覆盖 {@code CANCELLED}；
+	 * 写口走 {@link #writeFailureUnlessCancelled}（与 {@link #fail} 共用同一守卫）。
 	 */
 	private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out,
 			TurnContext turn) {
@@ -1350,15 +1504,19 @@ public class ResilientChatService {
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			snapshot.setMessageJson(this.codec.serializeAll(history));
-			snapshot.setInFlightToolCalls(new ArrayList<>());
-			snapshot.setAssistantContent(null);
-			snapshot.setFinalText(text);
-			snapshot.setStatus(RunSnapshot.FAILED);
-			snapshot.setCancelled(false);
-			snapshot.setAttempts(attempts);
-			snapshot.setError(EMPTY_REPLY_CODE + "：" + message);
-			this.store.save(snapshot);
+			boolean written = failRunUnlessCancelled(runId, snapshot, EMPTY_REPLY_CODE, message, attempts,
+					target -> {
+						target.setMessageJson(this.codec.serializeAll(history));
+						target.setInFlightToolCalls(new ArrayList<>());
+						target.setAssistantContent(null);
+						target.setFinalText(text);
+						target.setCancelled(false);
+					});
+			if (!written) {
+				// 取消优先：终态与终帧归取消收尾（幂等，归档已有终帧则什么都不做）
+				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
+				return;
+			}
 			convergeMemory(runId, sessionId, history);
 		}
 		out.textEnd(text.length());
@@ -1754,6 +1912,17 @@ public class ResilientChatService {
 		}
 	}
 
+	/**
+	 * 失败终局：快照转 FAILED → 收正文段 → {@code error} 终帧 → 摘要行（S5c-5 帧序契约）。
+	 *
+	 * <p><b>批次2 / AR-05：取消优先</b> —— FAILED 是终态，与 DONE 一样不得覆盖 {@code CANCELLED}。
+	 * 写口走 {@link #failRunUnlessCancelled}（与 {@code emptyReply()}、{@code AiController} 的环外异常
+	 * 出口<b>共用</b>同一个 {@link RunStore#saveTerminalUnlessCancelled} 原子 CAS）；被拒写时不发
+	 * {@code error} 终帧，改由取消收尾发 {@code done{cancelled:true}}。
+	 *
+	 * <p><b>不伪写半截</b>：本路径不写 DB 历史（{@code ai_chat_message}）—— 失败现场只落在
+	 * Redis 快照与帧归档里（AR-01：不新增 DB 写入 / 列 / TTL）。
+	 */
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
 			boolean sideEffect, Accumulator accumulator, SseChatEmitter out, TurnContext turn) {
 		int partialChars = accumulator == null ? 0 : accumulator.text().length();
@@ -1764,10 +1933,10 @@ public class ResilientChatService {
 				describeForLog(violation));
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot != null && !RunSnapshot.DONE.equals(snapshot.getStatus())) {
-			snapshot.setStatus(RunSnapshot.FAILED);
-			snapshot.setAttempts(attempts);
-			snapshot.setError(code + "：" + message);
-			this.store.save(snapshot);
+			if (!failRunUnlessCancelled(runId, snapshot, code, message, attempts, null)) {
+				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
+				return;
+			}
 		}
 		// S5c-5：失败也是"把这一轮开过的东西关掉"——与 finish / cancelTerminal 同口径地先收正文段
 		// 再发终帧。否则"已产出半截正文后上游报错"会让运行以一条仍开着的文本消息收尾
@@ -2704,7 +2873,18 @@ public class ResilientChatService {
 		return messageFor(code);
 	}
 
-	/** 按（可带派生后缀的）码取用户文案；派生码在 en 有更精确的一份，zh 回落基础码短句。 */
+	/**
+	 * 按（可带派生后缀的）码取用户文案。
+	 *
+	 * <p><b>批次2 / AR-05 口径修正：中文派生码按完整码文案。</b>派生码（{@code <base>_AFTER_PARTIAL} /
+	 * {@code <base>_AFTER_TOOL_SIDE_EFFECT}）在 {@code messages_zh.properties} 与
+	 * {@code messages_en.properties} 里都有一份<b>更精确</b>的文案（"已显示的内容不完整" /
+	 * "且本轮已有工具执行；请先核对结果"）。旧实现只对 en 查完整码、zh 恒回落基础码短句 ——
+	 * 同一个码在中英两侧说了两件事。现在两侧同源：<b>完整码优先</b>，缺键才回落基础码白名单。
+	 *
+	 * <p>基础码（不带后缀）的中文仍用 {@link #SAFE_FAILURE_MESSAGES} 的白名单短句（逐字不变），
+	 * 只有派生码走完整码查表 —— 这样"精确化"只作用在需要它的地方，不搬运既有文案。
+	 */
 	private String messageFor(String code) {
 		String base = baseCode(code);
 		return messageFor(code, SAFE_FAILURE_MESSAGES.getOrDefault(base,
@@ -2712,11 +2892,18 @@ public class ResilientChatService {
 	}
 
 	private String messageFor(String code, String zhFallback) {
-		if (!ReplyLanguage.current().english() || this.messageSource == null) {
+		if (this.messageSource == null) {
+			return zhFallback;
+		}
+		boolean english = ReplyLanguage.current().english();
+		boolean derived = !baseCode(code).equals(code);
+		if (!english && !derived) {
+			// 中文 + 基础码：白名单短句（既有文案逐字不变）
 			return zhFallback;
 		}
 		try {
-			return this.messageSource.getMessage("error." + code, null, java.util.Locale.ENGLISH);
+			return this.messageSource.getMessage("error." + code, null,
+					english ? java.util.Locale.ENGLISH : java.util.Locale.SIMPLIFIED_CHINESE);
 		}
 		catch (org.springframework.context.NoSuchMessageException ex) {
 			return zhFallback;

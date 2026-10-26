@@ -414,7 +414,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 已有信息作答。计数用于"模型反复请求工具"的硬上界（TurnBudgetPlan#MAX_ARMED_BATCHES）。
 		boolean budgetArmed = this.beacon.budgetArmed(runId);
 		if (budgetArmed) {
-			this.beacon.markBudgetSkippedBatch(runId);
+			int skipped = this.beacon.markBudgetSkippedBatch(runId);
+			// AR-10 第 3 条：武装后拦下的批次计数随快照落库 —— park 恢复后继续累计，
+			// 到顶仍按既有上界收尾（`MAX_ARMED_BATCHES` 的输入不因挂起而清零）。
+			this.store.markTurnBudget(runId, 0L, skipped);
 		}
 
 		// ===== F5：确认门之前先跑只读预检（不通过者根本不进门） =====
@@ -908,6 +911,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 				wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
 				current = wrapped;
 				this.beacon.armBudget(runId);
+				// AR-10 第 3 条（批次2）：武装事实<b>落轮次快照</b> —— 挂起不清零、恢复继续累计，
+				// 保持"本轮预算"语义（不与信标同生共死）。写失败只 WARN，不打断工具循环。
+				this.store.markTurnBudget(runId, System.currentTimeMillis(),
+						this.beacon.budgetSkippedBatches(runId));
 				armedNow = true;
 				nextEst += ContextEstimator.estimate(TURN_BUDGET_WRAP_UP);
 				needRejudge = true;

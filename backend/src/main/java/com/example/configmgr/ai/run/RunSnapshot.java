@@ -25,7 +25,9 @@ import java.util.Map;
  * 推理相关键与厂商私有未知键一并保真，续跑原样挂回）；</li>
  * <li>{@link #paramsVersion} 与 {@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}：
  * <b>L-26 的生效参数冻结</b>（同一 run 续跑不移志；新 run 才读新全局默认）；</li>
- * <li>{@link #status}：RUNNING / SUSPENDED / DONE / FAILED —— 供重启后的发现与幂等判定。</li>
+ * <li>{@link #status}：RUNNING / SUSPENDED / DONE / FAILED / CANCELLED —— 供重启后的发现与幂等判定。
+ *     <b>取消是吸收态</b>：快照写入路径的原子守卫保证任何非取消状态都不得从 CANCELLED 转出
+ *     （见 {@code RunStore#saveStatusUnlessCancelled}）。</li>
  * </ul>
  */
 @Data
@@ -183,6 +185,26 @@ public class RunSnapshot {
 	private long runEpoch;
 
 	/**
+	 * 本轮上下文预算<b>武装时刻</b>（AR-10 第 3 条 / 批次2：armed <b>跨 park 持久化</b>；0 = 未武装）。
+	 *
+	 * <p>为什么必须进快照：armed 原先只活在 {@code ToolActivityBeacon}（进程内加速态），而 park 退出与
+	 * 续跑入口都会清信标 ⇒ 挂起恢复后"收尾中"的事实被清零，模型可以再要一批工具、再清一次结果，
+	 * 甚至再追加一条收尾 user 消息 —— 与"本轮预算"（不是会话预算、不是重置式）的语义相反。
+	 *
+	 * <p>语义口径：挂起<b>不清零</b>、恢复<b>继续累计</b>（{@link #budgetSkippedBatches} 一并带回），
+	 * 恢复后到顶仍按既有 {@code MAX_ARMED_BATCHES} 收尾。它不是新的持久面：键族/TTL 与
+	 * {@code ai:run:<runId>} 完全同寿（{@code app.ai.session-ttl}），不新增列、不碰 DB。
+	 */
+	private long budgetArmedAtMs;
+
+	/**
+	 * armed 之后已被拦下的工具批次数（{@code TurnBudgetPlan#MAX_ARMED_BATCHES} 的输入；AR-10 第 3 条）。
+	 *
+	 * <p>与 {@link #budgetArmedAtMs} 同寿同源：随快照落库 ⇒ 跨 park 不重置，恢复后继续累计。
+	 */
+	private int budgetSkippedBatches;
+
+	/**
 	 * 冻结本轮生效参数（L-26）：<b>只在首轮创建快照时调用</b>，续跑不得再写。
 	 *
 	 * <p>不变量：{@code paramsVersion = 1} 之后，三值与 {@code paramsLocked} 就是这一轮的
@@ -234,6 +256,9 @@ public class RunSnapshot {
 		out.put("topP", this.topP);
 		out.put("maxTokens", this.maxTokens);
 		out.put("paramsLocked", this.paramsLocked);
+		// AR-10 第 3 条（additive）：armed 跨 park 持久化的两个事实；0 = 未武装（旧快照同值）
+		out.put("budgetArmedAtMs", this.budgetArmedAtMs);
+		out.put("budgetSkippedBatches", this.budgetSkippedBatches);
 		return out;
 	}
 

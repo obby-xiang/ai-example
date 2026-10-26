@@ -89,10 +89,16 @@ public final class FakeLeaseRedis {
 
 	static final String FENCE_MARK = "LEASE_FENCE_SET";
 
-	/** DONE 专用的取消态 CAS（W-30 跨实例）：明文键 + fence 键两路。 */
-	static final String DONE_SET_IF_NOT_CANCELLED_MARK = "DONE_SET_IF_NOT_CANCELLED";
+	/**
+	 * 取消优先终态 CAS（W-30 跨实例 + 批次2 / AR-05）：明文键 + fence 键两路。
+	 *
+	 * <p>标记文案与 {@code RunStore} 的 Lua 注释逐字一致；批次2 起守卫覆盖<b>所有非取消状态</b>
+	 * （RUNNING / SUSPENDED / DONE / FAILED 一律不得从 CANCELLED 转出），标记因此从
+	 * {@code DONE_*} 改名为 {@code TERMINAL_*}（脚本名保留，语义已扩面）。
+	 */
+	static final String TERMINAL_SET_IF_NOT_CANCELLED_MARK = "TERMINAL_SET_IF_NOT_CANCELLED";
 
-	static final String FENCED_DONE_SET_MARK = "FENCED_DONE_SET";
+	static final String FENCED_TERMINAL_SET_MARK = "FENCED_TERMINAL_SET";
 
 	/** 台账 + 幂等索引的同一原子步（B23L1 批③a）。 */
 	static final String IDEM_PUSH_MARK = "IDEM_PUSH";
@@ -577,12 +583,12 @@ public final class FakeLeaseRedis {
 		if (body.contains(RELEASE_MARK)) {
 			return release(str(keys.get(0)), str(args.get(0)));
 		}
-		if (body.contains(FENCED_DONE_SET_MARK)) {
-			return fenceDoneSet(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
+		if (body.contains(FENCED_TERMINAL_SET_MARK)) {
+			return fenceTerminalSet(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
 					Long.parseLong(str(args.get(1))), Duration.ofMillis(Long.parseLong(str(args.get(2)))));
 		}
-		if (body.contains(DONE_SET_IF_NOT_CANCELLED_MARK)) {
-			return doneSetIfNotCancelled(str(keys.get(0)), str(args.get(0)),
+		if (body.contains(TERMINAL_SET_IF_NOT_CANCELLED_MARK)) {
+			return terminalSetIfNotCancelled(str(keys.get(0)), str(args.get(0)),
 					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
 		}
 		if (body.contains(FENCE_MARK)) {
@@ -761,10 +767,10 @@ public final class FakeLeaseRedis {
 	}
 
 	/**
-	 * {@code -- FENCED_DONE_SET}：fence 校验（与 {@link #fenceSet} 逐字相同）+ 当前快照是取消态 ⇒ 拒写。
+	 * {@code -- FENCED_TERMINAL_SET}：fence 校验（与 {@link #fenceSet} 逐字相同）+ 当前快照是取消态 ⇒ 拒写。
 	 * 与 Lua 一样，先判 fence 再解当前 JSON。
 	 */
-	private Long fenceDoneSet(String runKey, String fenceKey, String json, long epoch, Duration ttl) {
+	private Long fenceTerminalSet(String runKey, String fenceKey, String json, long epoch, Duration ttl) {
 		String fence = this.strings.get(fenceKey);
 		if (fence != null && Long.parseLong(fence) > epoch) {
 			return 0L;
@@ -775,8 +781,8 @@ public final class FakeLeaseRedis {
 		return fenceSet(runKey, fenceKey, json, epoch, ttl);
 	}
 
-	/** {@code -- DONE_SET_IF_NOT_CANCELLED}：当前快照是取消态 ⇒ 拒写，否则普通 SET PX。 */
-	private Long doneSetIfNotCancelled(String runKey, String json, Duration ttl) {
+	/** {@code -- TERMINAL_SET_IF_NOT_CANCELLED}：当前快照是取消态 ⇒ 拒写，否则普通 SET PX。 */
+	private Long terminalSetIfNotCancelled(String runKey, String json, Duration ttl) {
 		if (cancelledSnapshot(this.strings.get(runKey))) {
 			return 0L;
 		}

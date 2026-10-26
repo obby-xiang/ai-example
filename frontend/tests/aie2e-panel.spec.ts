@@ -28,7 +28,8 @@ const api = vi.hoisted(() => ({
   confirm: vi.fn(),
   cancel: vi.fn(),
   deleteHistory: vi.fn(),
-  uploadFormAttachment: vi.fn()
+  uploadFormAttachment: vi.fn(),
+  retryModelStep: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({
@@ -161,9 +162,9 @@ describe('P-10（P2）：stopping 态可见 —— 按钮 disabled + 文案「�
 describe('P-13（P2）：「继续」入口的语义与互斥', () => {
   /**
    * 判据：轮次号 +1、按**新轮**处理（不续写半截答案）；停止轮与「继续」互斥（批G · S3）。
-   * 落地形态：点「继续」= 把「继续」当作用户消息直接发送（新轮，`send()` 走同一入口）。
+   * 批次2（AR-09）：继续 = append-drive —— 发送「继续」驱动下一轮，但**不追加用户气泡**。
    */
-  it('error 轮：点「继续」⇒ 新发一条用户消息（旧半截正文不被改写）', async () => {
+  it('error 轮：点「继续」⇒ append-drive（旧半截保留、不追加用户气泡）', async () => {
     const store = useAiStore()
     store.messages = [message('u1', 'user', '把定义导出'), message('a1', 'assistant', '出错了', { done: true })]
     store.lastRoundOutcome = 'error'
@@ -175,10 +176,10 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     await flushPromises()
 
     expect(api.chat).toHaveBeenCalledTimes(1)
-    expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ message: '继续' }) // 新轮，不是续写半截
+    expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ message: '继续' }) // append-drive，不是续写半截
     expect(store.messages[0]?.content).toBe('把定义导出')
     expect(store.messages[1]?.content).toBe('出错了') // 旧答案原样保留
-    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(2)
+    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(1) // AR-09：无伪用户气泡
     wrapper.unmount()
   }, 20_000)
 
@@ -211,23 +212,25 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     expect(api.chat).toHaveBeenCalledTimes(1)
     const sent = (api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message
     expect(sent).toBe(label) // 显示 == 发送：按钮上写着什么，模型就收到什么
+    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(1) // AR-09：无伪用户气泡
     // 与请求语言同源：Accept-Language 由同一个 activeLocale 供（sse 通道侧另有 sse-language-header 锁定）
     expect(acceptLanguage()).toBe('en-US')
     wrapper.unmount()
   }, 20_000)
 
   /**
-   * 同一路径的第二入口：错误卡「稍后重试」= `continueRound()`（不是第二份字面量）。
-   * en-US 下它必须与被点的卡片语言一致。
+   * AR-09 / AR-17 后的第二入口：错误卡「稍后重试」只对**归属可证明**的零产出失败轮出现，
+   * 走真实「仅模型步重跑」窄入口；**不发送「继续」伪用户消息**，也不本地截断重发。
    */
-  it('A3-Y8：en-US 下错误卡「稍后重试」走同一路径 ⇒ 发送英文标签', async () => {
+  it('A3-Y8：错误卡重试走仅模型步重跑，不追加伪用户消息（en-US）', async () => {
     const { buildErrorCard } = await import('@/utils/error-card')
     applyLocale('en-US')
     const store = useAiStore()
-    const failed = message('a-q', 'assistant', 'failed', { done: true })
+    const failed = message('a-q', 'assistant', '', { done: true, runId: 'run-q' })
     failed.errorCard = buildErrorCard('429', 'quota exceeded')
     store.messages = [message('u-q', 'user', 'export all'), failed]
     store.lastRoundOutcome = 'error'
+    api.retryModelStep.mockResolvedValue({ retried: true, reason: 'MODEL_STEP_RETRY_ACCEPTED' })
     const wrapper = await mountPanel()
 
     const action = wrapper.find('[data-testid="error-card-action-a-q"]')
@@ -235,9 +238,9 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     await action.trigger('click')
     await flushPromises()
 
-    expect(api.chat).toHaveBeenCalledTimes(1)
-    expect((api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message)
-      .toBe(i18n.global.t('ai.panel.continue'))
+    expect(api.retryModelStep).toHaveBeenCalledWith('run-q')
+    expect(api.chat).not.toHaveBeenCalled()
+    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(1)
     wrapper.unmount()
   }, 20_000)
 
@@ -260,6 +263,7 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     await flushPromises()
 
     expect((api.chat.mock.calls[0]?.[0] as { message?: string } | undefined)?.message).toBe('继续')
+    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(1) // AR-09：无伪用户气泡
     expect(acceptLanguage()).toBe('zh-CN')
     wrapper.unmount()
   }, 20_000)

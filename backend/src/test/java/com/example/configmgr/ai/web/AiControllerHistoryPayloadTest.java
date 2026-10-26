@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.resultview.ListTasksResultViewProvider;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -103,6 +104,25 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
 			.andExpect(jsonPath("$.data.messages[0].text").value(""))
 			.andExpect(jsonPath("$.data.messages[0].toolCalls[0].id").value("tc-1"));
+	}
+
+	/**
+	 * 批次2 / AR-01 第 5 条：<b>synthetic 展示过滤（读侧）</b> —— 压缩摘要按"系统消息"呈现，
+	 * <b>不冒充用户原话</b>。判据复用 {@code SyntheticMessages}（与写侧同一份），载荷只加
+	 * additive 键 {@code synthetic=true}，正文/角色字段一律原样。
+	 */
+	@Test
+	void syntheticSummaryIsFlaggedInsteadOfPretendingToBeAUserMessage() throws Exception {
+		UserMessage summary = new UserMessage(SyntheticMessages.SUMMARY_PLACEHOLDER);
+		UserMessage real = new UserMessage("真的问题");
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(summary, real));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data.messages[0].synthetic").value(true))
+			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
+			.andExpect(jsonPath("$.data.messages[1].synthetic").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[1].text").value("真的问题"));
 	}
 
 	/**

@@ -139,8 +139,11 @@ class EmptyReplyTerminalTest {
 		FrameWire wire = runTurn();
 
 		List<Map<String, Object>> frames = clientView(wire);
-		assertThat(FrameContract.types(frames)).as("空回复不发 done，改发 error 终帧")
-				.containsExactly("start", "error");
+		assertThat(FrameContract.types(frames)).as("空回复先按 AR-05 仅模型步重试一次（retry 帧），仍空才发 error 终帧")
+				.containsExactly("start", "retry", "error");
+		assertThat(FrameContract.oneOfType(frames, "retry")).as("重试是一次为限的模型步重试")
+				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+				.containsEntry("emptyReply", true);
 		assertThat(FrameContract.oneOfType(frames, "error"))
 				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE);
 		FrameContract.assertConformant(frames);
@@ -223,6 +226,50 @@ class EmptyReplyTerminalTest {
 		assertThat(snapshot.getFinalText()).isEqualTo("你好");
 	}
 
+	// ── ⑥ 批次2（AR-05）：EMPTY_REPLY 只在"零产出 + 零副作用"时重试一次 ──
+
+	/**
+	 * 空回复 ⇒ <b>仅模型步</b>再试一次：{@code retry} 帧（additive {@code emptyReply=true}）后
+	 * 第二次拿到正文 ⇒ 正常 {@code done}。不追加用户消息、不重执行工具（本用例零工具）。
+	 */
+	@Test
+	void emptyReplyRetriesTheModelStepExactlyOnce() {
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("stop")),
+				Flux.just(chunk("第二次答出来了"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).as("空回复先发 retry，再走正常成功帧序")
+				.containsExactly("start", "retry", "message_start", "delta", "message_end", "done");
+		assertThat(FrameContract.oneOfType(frames, "retry"))
+				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+				.containsEntry("emptyReply", true);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(snapshot.getFinalText()).isEqualTo("第二次答出来了");
+	}
+
+	/**
+	 * <b>只有思考、正文为空 ⇒ 不重试</b>（L-91 同族）：{@code emittedAny()=true} 时重试会把已发过的
+	 * 思考段再吐一遍，且 {@code retry} 帧会落在思考 delta 之后（帧序契约禁止）。
+	 */
+	@Test
+	void reasoningOnlyEmptyReplyIsNotRetried() {
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(reasoning("先想一下"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).as("已出思考 ⇒ 直接空回复失败，不重试")
+				.doesNotContain("retry")
+				.contains("error");
+		assertThat(FrameContract.oneOfType(frames, "error"))
+				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
 	// ── ⑤ 终态判定函数（参数化，A13/A14） ──
 
 	@ParameterizedTest(name = "isTerminal({0}) == {1}")
@@ -287,5 +334,16 @@ class EmptyReplyTerminalTest {
 	private static ChatResponse terminal(String finishReason) {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build(),
 				ChatGenerationMetadata.builder().finishReason(finishReason).build())));
+	}
+
+	/**
+	 * 思考分片（L-91）：Spring AI 1.1.7 用 {@code AssistantMessage} metadata 键
+	 * {@code reasoningContent} 携带思考文本（与产品侧 {@code REASONING_METADATA_KEY} 同一拼写）。
+	 */
+	private static ChatResponse reasoning(String text) {
+		return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+			.content("")
+			.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, text))
+			.build())));
 	}
 }

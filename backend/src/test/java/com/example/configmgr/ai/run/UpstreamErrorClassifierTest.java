@@ -203,6 +203,52 @@ class UpstreamErrorClassifierTest {
 		assertThat(outcome.retryable()).isTrue();
 	}
 
+	/**
+	 * 批次2（Task 4 Step 7）：<b>已知瞬态逐个分类</b> —— Netty 超时族必须单独成条。
+	 *
+	 * <p>判据理由：{@code io.netty.handler.timeout.TimeoutException}（及其
+	 * {@code ReadTimeoutException}/{@code WriteTimeoutException} 子类）继承的是
+	 * {@code ChannelException → RuntimeException}，<b>不是</b>
+	 * {@link java.util.concurrent.TimeoutException}，也不在 {@code IOException} 族里 ——
+	 * 旧清单把它落到未知桶（不重试），而它正是"读超时/对端关连接"这类最常见的瞬时故障。
+	 *
+	 * <p>用反射取实例（不 import netty 类型）：分类器本身就不依赖 netty（按父类名判定），
+	 * 测试也不该因为 netty 换版本/换坐标就编译不过。
+	 */
+	@Test
+	void nettyReadTimeoutIsAKnownTransient() throws Exception {
+		Class<?> readTimeout;
+		try {
+			readTimeout = Class.forName("io.netty.handler.timeout.ReadTimeoutException");
+		}
+		catch (ClassNotFoundException ex) {
+			org.junit.jupiter.api.Assumptions.assumeTrue(false, "测试 classpath 无 netty-handler ⇒ 本条不适用");
+			return;
+		}
+		java.lang.reflect.Field instance = readTimeout.getDeclaredField("INSTANCE");
+		instance.setAccessible(true);
+		Throwable error = (Throwable) instance.get(null);
+
+		UpstreamErrorClassifier.Outcome outcome = UpstreamErrorClassifier.classify(error, 0);
+
+		assertThat(outcome.code()).isEqualTo(ErrorCodes.UPSTREAM_CONNECTION_BROKEN);
+		assertThat(outcome.retryable()).as("已知瞬态（开流前零副作用可重试）").isTrue();
+		assertThat(UpstreamErrorClassifier.isNettyTimeout(error)).isTrue();
+	}
+
+	/**
+	 * 未知桶不放开：既不是已知瞬态、也没有可识别的断流形态时，一律 {@code UPSTREAM_STREAM_ERROR}
+	 * 且<b>不</b>重试（Task 4 Step 7 的"不开放未知桶"）。
+	 */
+	@Test
+	void unlistedRuntimeFailureStaysInTheClosedBucket() {
+		UpstreamErrorClassifier.Outcome outcome = UpstreamErrorClassifier
+			.classify(new UnsupportedOperationException("某个未登记的运行时错误"), 5);
+
+		assertThat(outcome.code()).isEqualTo(ErrorCodes.UPSTREAM_STREAM_ERROR);
+		assertThat(outcome.retryable()).isFalse();
+	}
+
 	@Test
 	void explicitStreamViolationKeepsItsCodeAndRetryability() {
 		StreamViolationException broken = new StreamViolationException(StreamViolationException.CONNECTION_BROKEN,

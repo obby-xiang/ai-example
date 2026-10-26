@@ -250,6 +250,35 @@ public class ToolActivityBeacon {
 		return armedAt != null && armedAt.get() > 0L;
 	}
 
+	/**
+	 * <b>恢复</b>已武装事实（AR-10 第 3 条 / 批次2：armed 跨 park 持久化）。
+	 *
+	 * <p>调用点只有续跑/重跑入口（{@code ResilientChatService#driveResumed}）：它从轮次快照
+	 * （{@code budgetArmedAtMs}）读到"本轮已进入收尾"，把进程内信标重新点亮 —— 于是挂起恢复后
+	 * <b>不会</b>从"未武装"重新开始（不再清一次结果、不再追加一条收尾 user 消息）。
+	 *
+	 * <p>{@code armedAtMs} 只作观测：判据始终是"是否已武装"，恢复语义是<b>继续累计</b>（不是重置计时）。
+	 */
+	public void restoreBudgetArmed(String runId, long armedAtMs) {
+		if (runId == null || armedAtMs <= 0L) {
+			return;
+		}
+		this.budgetArmedAtMs.computeIfAbsent(runId, key -> new AtomicLong()).set(armedAtMs);
+	}
+
+	/**
+	 * <b>恢复</b>武装后被拦下的批次计数（与 {@link #restoreBudgetArmed} 同源同寿命）。
+	 *
+	 * <p>只升不降：恢复值不得把进程内已累计的更大值改小（同一进程内的真实累计优先）。
+	 */
+	public void restoreBudgetSkippedBatches(String runId, int skipped) {
+		if (runId == null || skipped <= 0) {
+			return;
+		}
+		this.budgetSkippedBatches.computeIfAbsent(runId, key -> new AtomicLong())
+			.updateAndGet(current -> Math.max(current, skipped));
+	}
+
 	/** armed 之后已被拦下的工具批次数（未武装返回 0）。 */
 	public int budgetSkippedBatches(String runId) {
 		AtomicLong count = this.budgetSkippedBatches.get(runId);

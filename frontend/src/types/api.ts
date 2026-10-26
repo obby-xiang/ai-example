@@ -55,6 +55,13 @@ export interface ApiErrorBody {
 export const ErrorCode = {
   BAD_REQUEST: 'BAD_REQUEST',
   ILLEGAL_ARGUMENT: 'ILLEGAL_ARGUMENT',
+  /**
+   * 当前状态不允许该操作（409）。
+   *
+   * <p>批次2：`POST /api/ai/runs/{runId}/retry-model-step` 的前置拒绝也用它（**不新增码表项**），
+   * 具体是哪一条不满足走响应体的 `failedCheck`（NOT_FAILED / CANCELLED / PENDING_TOOLS /
+   * PARTIAL_CONTENT / TOOL_PAIRING_INCOMPLETE / MODEL_CHANGED），前端不得拿本码猜原因。
+   */
   ILLEGAL_STATE: 'ILLEGAL_STATE',
   RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
   SESSION_BUSY: 'SESSION_BUSY',
@@ -234,11 +241,12 @@ export const STRUCTURED_RESULT_MAX_CHARS = 8000
 /**
  * 409 SESSION_BUSY 的响应体形态。
  *
- * 契约（ADR-5）：**持有者可知时**必须携进行中轮的 `runId` 与 `reattach`
- * （前端据此改走 `/api/ai/events/{runId}`）。**持有者不可知**时（会话锁诊断读失败 /
- * 锁已消失、无法给出 runId）后端**不编造**这两个字段：它们缺省、`unknown` 为 true，
- * 其余不变（仍是 409 + `SESSION_BUSY` + `degraded`）。此时**不得**自行拼接重挂路径
- * （如 `/api/ai/events/null`），按既有重试/退避恢复即可（无粘滞）。
+ * 契约（ADR-5）：**持有者可知时**必须携进行中轮的 `runId` 与 `reattach`。
+ * **批次2 口径**：这两个字段只作面板「回到进行中的回答」**手动入口**的入参 —— 用户点击后由
+ * store 做**一次**历史对账 + 静默续收（`reattachBusyRun`），**不自动重挂、不轮询**。
+ * **持有者不可知**时（会话锁诊断读失败 / 锁已消失、无法给出 runId）后端**不编造**这两个字段：
+ * 它们缺省、`unknown` 为 true，其余不变（仍是 409 + `SESSION_BUSY` + `degraded`）。
+ * 此时**不得**自行拼接重挂路径（如 `/api/ai/events/null`），按既有重试/退避恢复即可（无粘滞）。
  */
 export interface SessionBusyConflict {
   code: typeof ErrorCode.SESSION_BUSY
@@ -270,7 +278,14 @@ export interface SuspendPoolSaturated {
   poolSize: number
 }
 
-/** 503 AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE / AI_REDIS_UNAVAILABLE / NO_MODEL_CONFIGURED 的响应体形态。 */
+/**
+ * 503 AI_UNAVAILABLE / AI_KEY_MISSING / AI_KEY_UNREADABLE / AI_REDIS_UNAVAILABLE /
+ * NO_MODEL_CONFIGURED 的响应体形态。
+ *
+ * <p>批次2：`AI_REDIS_UNAVAILABLE` **不是一个"可能成功"的信号**。终态暂不可确认时后端用
+ * `error` 帧的 additive `unconfirmed=true`（+ `turn_end=unconfirmed`）表达，码仍是本值；
+ * store 只认显式 `unconfirmed` 标记，绝不拿本码推断中性视图。
+ */
 export interface AiUnavailableBody {
   code:
     | typeof ErrorCode.AI_UNAVAILABLE

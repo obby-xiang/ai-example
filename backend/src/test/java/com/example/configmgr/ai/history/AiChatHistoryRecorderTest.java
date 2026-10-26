@@ -307,6 +307,24 @@ class AiChatHistoryRecorderTest {
                 .doesNotContain(com.example.configmgr.ai.gate.SpToolCallingManager.TURN_BUDGET_WRAP_UP);
     }
 
+    /**
+     * 批次2 / AR-01 第 5 条：合成判据<b>只有一份</b>（{@link SyntheticMessages}）—— 写侧
+     * （"最后一个真实 user"边界）与读侧（{@code /history} 的 {@code synthetic=true}）必须同源。
+     * 这里直接锁判据本身：摘要占位与两种收尾提示都是合成，普通用户文本不是。
+     */
+    @Test
+    void syntheticPredicateCoversSummaryAndWrapUpButNotRealUserText() {
+        assertThat(SyntheticMessages.isSynthetic(user(SyntheticMessages.SUMMARY_PLACEHOLDER))).isTrue();
+        assertThat(SyntheticMessages.isSynthetic(user(SyntheticMessages.STEP_LIMIT_PREFIX + "（10 步）"))).isTrue();
+        assertThat(SyntheticMessages.isSynthetic(
+                user(com.example.configmgr.ai.gate.SpToolCallingManager.TURN_BUDGET_WRAP_UP))).isTrue();
+        assertThat(SyntheticMessages.isSynthetic(
+                AssistantMessage.builder().content("摘要").properties(Map.of("compactedFrom", 7)).build()))
+            .isTrue();
+        assertThat(SyntheticMessages.isSynthetic(user("真的问题"))).isFalse();
+        assertThat(SyntheticMessages.isSynthetic(finalAssistant("真的回答"))).isFalse();
+    }
+
     private static UserMessage user(String text) {
         return UserMessage.builder().text(text).build();
     }

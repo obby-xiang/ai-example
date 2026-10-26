@@ -82,6 +82,42 @@
       </div>
     </div>
 
+    <!-- 批次2（N3）：历史/快照恢复失败不再静默 —— 错误条 + 重试出口。
+         只读 store 适配器（historyError/currentError，见 recoveryBridge 注释），不在此处自造错误态。 -->
+    <div v-if="recoveryErrorText()" :class="alertBox('error')" data-testid="alert-history-error">
+      <span :class="alertIcon('error')" aria-hidden="true">!</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ recoveryErrorLabel() }}</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
+      </div>
+      <button
+        type="button"
+        data-testid="retry-history"
+        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        @click="retryRecoveryLoad()"
+      >
+        {{ t('ai.panel.retryRecovery') }}
+      </button>
+    </div>
+
+    <!-- 批次2：**不可完整恢复**（recoveryGap）——中性事实，不是轮失败、不是错误卡。
+         只有"本地镜像/差量回放不能保证完整"这一条信息 + 重新载入出口；不显示内部区间/原因码。 -->
+    <div v-if="ai.recoveryGap" :class="alertBox('gray')" data-testid="alert-recovery-gap">
+      <span :class="alertIcon('gray')" aria-hidden="true">i</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.recoveryGap') }}</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.recoveryGapHint') }}</span>
+      </div>
+      <button
+        type="button"
+        data-testid="retry-recovery-gap"
+        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        @click="reloadTurnState()"
+      >
+        {{ t('ai.panel.reloadTurn') }}
+      </button>
+    </div>
+
     <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
          R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。 -->
     <div
@@ -101,6 +137,18 @@
       <!-- S6 批1（长内容审计 #7）：通知文本包一层 span —— 原为匿名 flex 项，不可 min-w-0 缩也不可折行，
            后端 5xx 长文案会顶开通知槽（或被他处 overflow-hidden 硬裁）。 -->
       <span class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ noticeText }}</span>
+      <!-- 批次2（N5）：409 SESSION_BUSY 的恢复入口 —— 通知文案不暴露 runId/重挂术语，
+           动作把用户带回**仍在进行**的那一轮（store 适配器，见 recoveryBridge 注释）。 -->
+      <button
+        v-if="canReturnToActiveRun()"
+        type="button"
+        data-testid="return-active-run"
+        :aria-label="t('ai.panel.returnToActiveRunHint')"
+        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[3px] text-[11.8px] text-[#2563eb] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        @click="returnToActiveRun()"
+      >
+        {{ t('ai.panel.returnToActiveRun') }}
+      </button>
     </div>
 
     <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
@@ -206,9 +254,19 @@
         class="group flex"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
+        <!-- 批次2 / AR-01 第 5 条：历史 `synthetic=true` 的合成/系统提示（压缩摘要、步数收尾）
+             转成**系统级「已压缩」提示** —— 不作为用户气泡、不渲染摘要内部键，也不出任何消息操作。 -->
+        <div
+          v-if="syntheticOf(m)"
+          class="w-full border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[6px] text-[11.6px] leading-[1.6] text-[#57606a]"
+          :data-testid="'synthetic-notice-' + m.id"
+        >
+          <b class="[font-weight:650] text-[#1f2328]">{{ t('ai.panel.compacted') }}</b>
+          <span class="ml-1">{{ t('ai.panel.compactedHint') }}</span>
+        </div>
         <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
         <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
-        <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+        <div v-else class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
              R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。
              R-163B G3：用户气泡对齐 demo —— 中性灰 #f6f7f9 + 1px #eef0f3 边框 +
@@ -713,8 +771,18 @@
           :data-testid="'msg-ops-' + m.id"
         >
           <span class="flex items-center gap-1 min-h-[18px]">
+            <!-- 批次2（N4）：park 等人期间不显示「工作中…」——按待人卡类型显示等待确认 / 填写。
+                 轮次的 streaming 事实不改，只换展示判据。 -->
             <span
-              v-if="isBreathing(m) || isFading(m)"
+              v-if="waitingTextKey(m)"
+              data-testid="park-waiting"
+              class="inline-flex items-center gap-[5px] text-[12.2px] text-[#b45309] tracking-[.3px]"
+            >
+              <span class="w-[7px] h-[7px] rounded-full bg-[#b45309]" aria-hidden="true"></span>
+              <span>{{ t(waitingTextKey(m) ?? 'ai.panel.waitingConfirm') }}</span>
+            </span>
+            <span
+              v-else-if="isBreathing(m) || isFading(m)"
               :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
             >
@@ -754,17 +822,31 @@
               {{ t('ai.round.truncated') }}
               <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
-            <!-- R-163 T4：「继续」入口（error/断流/取消后，最后一条助手消息）——点击直发当前语言的「继续」（A3-Y8） -->
+            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有产出的失败轮，append-drive）/
+                 重试本轮（零产出且归属可证明的失败轮，走仅模型步重跑窄入口）/
+                 普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。
+                 前两者都不追加伪用户气泡；同轮「继续 / 重试本轮」互斥。 -->
             <button
               v-if="showContinue(m)"
               type="button"
               data-testid="continue-round"
               :aria-label="t('ai.panel.resumeChat')"
-              class="group/tip relative inline-flex items-center justify-center w-7 h-7 rounded-[8px] border-0 bg-transparent p-0 text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
-              @click="continueRound"
+              class="group/tip relative inline-flex items-center justify-center h-7 rounded-[8px] border-0 bg-transparent px-[6px] text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
+              @click="continueTurn(m)"
             >
               {{ t('ai.panel.continue') }}
               <span :class="TIP_CLASS">{{ t('ai.panel.resumeChat') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            </button>
+            <button
+              v-if="showRetryTurn(m)"
+              type="button"
+              data-testid="retry-turn"
+              :aria-label="t('ai.panel.retryTurnHint')"
+              class="group/tip relative inline-flex items-center justify-center h-7 rounded-[8px] border-0 bg-transparent px-[6px] text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
+              @click="retryTurn(m)"
+            >
+              {{ t('ai.panel.retryTurn') }}
+              <span :class="TIP_CLASS">{{ t('ai.panel.retryTurnHint') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消；
                  R-165 S1：全 Tailwind 图标按钮（demo v7 `.icon-btn` 配方），SVG 照搬 v7（描边 1.6/15×15）；
@@ -840,19 +922,61 @@
           >{{ ERROR_CARD_TONE[m.errorCard.variant].glyph }}</span>
           <div class="flex-1 min-w-0">
             <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ m.errorCard.title }}</b>
-            <!-- S6 批1（长内容审计清零项：错误卡 detail 无 cap）：detail 加限高内滚。
-                 2A 批（裁决 §14.4 文本块族）：限高改双约束 `min(280px,35vh)` —— 长错误文案不再把会话顶开。 -->
-            <span :class="['block max-h-[min(280px,35vh)] overflow-y-auto text-[11.6px] text-[#57606a] leading-[1.55] whitespace-pre-wrap break-words', SCROLLBAR_CLASS]" :data-testid="'error-card-detail-' + m.id">{{ m.errorCard.detail }}</span>
+            <!-- 批次2：首屏只读**用户向摘要**；后端原文与机器码收进下面的「诊断详情」（折叠）。
+                 用户向与诊断分层，长错误文案不再顶开会话。 -->
+            <span
+              class="block mt-[2px] text-[11.6px] text-[#57606a] leading-[1.55] break-words"
+              :data-testid="'error-card-summary-' + m.id"
+            >{{ m.errorCard.summary || t('ai.card.error.summary.generic') }}</span>
             <span v-if="m.errorCard.guide" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ m.errorCard.guide }}</span>
+            <details class="mt-[4px]" :data-testid="'error-card-diagnostic-' + m.id">
+              <summary class="cursor-pointer text-[11.2px] text-[#8b949e] select-none">{{ t('ai.card.error.diagnostic.label') }}</summary>
+              <div class="mt-[3px] text-[11.2px] text-[#57606a] break-all">
+                <span>{{ t('ai.card.error.diagnostic.code') }}: </span>
+                <code :data-testid="'error-card-code-' + m.id">{{ m.errorCard.code }}</code>
+              </div>
+              <!-- S6 批1（长内容审计清零项：错误卡 detail 无 cap）：detail 加限高内滚。
+                   2A 批（裁决 §14.4 文本块族）：限高改双约束 `min(280px,35vh)` —— 长错误文案不再把会话顶开。 -->
+              <span :class="['mt-[2px] block max-h-[min(280px,35vh)] overflow-y-auto text-[11.2px] text-[#57606a] leading-[1.55] whitespace-pre-wrap break-words', SCROLLBAR_CLASS]" :data-testid="'error-card-detail-' + m.id">{{ m.errorCard.detail }}</span>
+            </details>
           </div>
           <button
-            v-if="m.errorCard.action"
+            v-if="m.errorCard.action && errorCardActionVisible(m)"
             type="button"
             class="flex-none border-0 bg-transparent p-0 text-[11.5px]"
             :class="ERROR_CARD_TONE[m.errorCard.variant].action"
             :data-testid="'error-card-action-' + m.id"
-            @click="runErrorCardAction(m.errorCard)"
+            @click="runErrorCardAction(m)"
           ><span class="border-b border-[#e3e6ea]">{{ m.errorCard.action }}</span></button>
+        </div>
+        <!-- 批次2（AR-05）：中性「状态未确认」视图 —— 只展示、不写乐观 done，也不冒充错误卡。
+             消费 store/消息侧已有的 unconfirmed 状态（字段约定见顶部 recoveryBridge 注释）；
+             出口 = 重新载入（同步服务端状态），不提供自动重跑/半截替换。 -->
+        <div
+          v-if="unconfirmedOf(m)"
+          class="w-full flex items-start gap-[8px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[8px] mb-2.5"
+          :data-testid="'turn-unconfirmed-' + m.id"
+        >
+          <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.3px] border-[#8b949e] text-[#57606a] text-[9px] mt-[2px] flex items-center justify-center" aria-hidden="true">?</span>
+          <div class="flex-1 min-w-0">
+            <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.turnUnconfirmed') }}</b>
+            <span class="block mt-[2px] text-[11.6px] text-[#57606a] leading-[1.55] break-words">{{ t('ai.panel.turnUnconfirmedHint') }}</span>
+          </div>
+          <button
+            type="button"
+            class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#2563eb]"
+            :data-testid="'reload-turn-' + m.id"
+            @click="reloadTurnState()"
+          ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.reloadTurn') }}</span></button>
+        </div>
+        <!-- 批次2：这条消息来自镜像/差量回放但不能确认完整 —— 中性局部标记（全局提示条另有重载出口）。 -->
+        <div
+          v-if="m.recoveryGap === true"
+          class="w-full flex items-start gap-[8px] border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[6px] mb-2.5 text-[11.6px] leading-[1.6] text-[#57606a]"
+          :data-testid="'recovery-gap-msg-' + m.id"
+        >
+          <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#8b949e] text-[9px] mt-[1px] flex items-center justify-center" aria-hidden="true">i</span>
+          <span class="min-w-0 flex-1 break-words">{{ t('ai.panel.recoveryGapHint') }}</span>
         </div>
         </div>
       </div>
@@ -1214,16 +1338,249 @@ import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRender
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
-import { GENERATIVE_FORM_TOOL, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
-import type { ErrorCard, ErrorCardVariant } from '@/utils/error-card'
+import type { ErrorCardVariant } from '@/utils/error-card'
 
 const { t, locale } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
+
+/**
+ * 批次2（store 由并行 agent 维护，本批禁改 stores/ai.ts）·恢复与轮次动作的**唯一适配层**。
+ *
+ * <p>面板只经下面这组函数读状态 / 调动作；store 侧字段或 action 名变化时**只改这里**。
+ * 已对齐并行落地的实际契约（2026-10-26）：`historyError` / `currentError`（`AiLoadErrorView`，
+ * 只有 code/status，不含文案）、`retryLoadHistory()` / `retryRestoreSnapshot()`、
+ * `busyRun`（`AiBusyRunRef`）+ `reattachBusyRun()`、`message.unconfirmed` 与
+ * `lastRoundOutcome='unconfirmed'`。其余候选名只为兼容旧基线，缺省即不渲染，不伪造状态。
+ * <ul>
+ * <li>历史/快照恢复错误：`historyError` / `currentError`（对象或字符串）；重试
+ *     `retryLoadHistory`（history）/ `retryRestoreSnapshot`（current），缺省回落 `loadHistory()`。</li>
+ * <li>409 在途轮：`busyRun.runId`；动作 `reattachBusyRun()`（一次性对账 + 静默续收），
+ *     缺省回落 `reattachActive(runId)`。runId 不进任何用户可见文本。</li>
+ * <li>unconfirmed：`message.unconfirmed=true`（兼容旧字段名）；重新载入优先
+ *     `retryLoadHistory`，缺省 `loadHistory()`。</li>
+ * <li>三动作（AR-09 / AR-05 / AR-17）：继续 = `send(..., { skipUserRecord: true })`（保持既有口径）；
+ *     重试本轮 = 「仅模型步重跑」真实 store action（`retryModelStep` → 后端窄入口 → 既有 events 重挂；
+ *     只认 `message.runId` 归属，无证据不出入口）；
+ *     普通 regenerate = **本批不做、入口整体隐藏**（无禁用 / unsupported 死 UI，也不本地截断重发）。</li>
+ * </ul>
+ */
+type RecoveryStoreView = Record<string, unknown>
+
+function storeView(): RecoveryStoreView {
+  return ai as unknown as RecoveryStoreView
+}
+
+/** 按候选名取第一个非 null/undefined 的 store 字段。 */
+function storeField<T>(...names: string[]): T | undefined {
+  const view = storeView()
+  for (const name of names) {
+    const value = view[name]
+    if (value !== undefined && value !== null) {
+      return value as T
+    }
+  }
+  return undefined
+}
+
+/** 按候选名取第一个函数型 store action（不存在 = null，不抛错）。 */
+function storeAction(...names: string[]): ((...args: unknown[]) => unknown) | null {
+  const view = storeView()
+  for (const name of names) {
+    const value = view[name]
+    if (typeof value === 'function') {
+      return value as (...args: unknown[]) => unknown
+    }
+  }
+  return null
+}
+
+/** 恢复失败的视图（scope 决定标签与重试动作；detail 是本地化人话，code/status 只作分档）。 */
+interface RecoveryLoadError {
+  scope: 'history' | 'current'
+  detail: string
+}
+
+/**
+ * store 只落机器可读现场（`AiLoadErrorView`：scope/code/status/at），**不落用户文案** ——
+ * 这里按 code/status 选一条本地化短句；机器码本身不进用户可见文本。
+ */
+function loadErrorDetail(view: AiLoadErrorView | string): string {
+  if (typeof view === 'string') {
+    return view
+  }
+  if (view.code === 'NETWORK_ERROR' || view.status === 0) {
+    return t('ai.panel.loadErrorNetwork')
+  }
+  if (view.status >= 500) {
+    return t('ai.panel.loadErrorServer')
+  }
+  return t('ai.panel.loadErrorUnknown')
+}
+
+function recoveryLoadError(): RecoveryLoadError | null {
+  const history = storeField<AiLoadErrorView | string>('historyError', 'restoreError', 'historyLoadError')
+  if (history !== undefined) {
+    return { scope: 'history', detail: loadErrorDetail(history) }
+  }
+  const current = storeField<AiLoadErrorView | string>('currentError', 'snapshotError')
+  if (current !== undefined) {
+    return { scope: 'current', detail: loadErrorDetail(current) }
+  }
+  return null
+}
+
+function recoveryErrorLabel(): string {
+  return recoveryLoadError()?.scope === 'current'
+    ? t('ai.panel.recoveryFailed')
+    : t('ai.panel.historyLoadFailed')
+}
+
+function recoveryErrorText(): string | null {
+  return recoveryLoadError()?.detail ?? null
+}
+
+function retryRecoveryLoad(): void {
+  if (recoveryLoadError()?.scope === 'current') {
+    const restore = storeAction('retryRestoreSnapshot', 'retryCurrentSnapshot')
+    if (restore !== null) {
+      void restore.call(ai)
+      return
+    }
+  }
+  const history = storeAction('retryLoadHistory', 'retryHistory', 'reloadHistory')
+  if (history !== null) {
+    void history.call(ai)
+    return
+  }
+  void ai.loadHistory()
+}
+
+/** 409 回执里的进行中轮（`busyRun.runId`）；旧字段名仅作兼容。 */
+function busyRunId(): string | null {
+  const view = storeView()
+  // 并行落地的 store 以 `busyRun` 为权威：为 null = 后端没给可信 runId ⇒ 不出入口（不拿旧 activeRunId 猜）。
+  if ('busyRun' in view) {
+    const busy = view.busyRun
+    if (busy !== null && typeof busy === 'object') {
+      const runId = (busy as Record<string, unknown>).runId
+      if (typeof runId === 'string' && runId.trim() !== '') {
+        return runId
+      }
+    }
+    return null
+  }
+  const explicit = storeField<unknown>('busyRunId', 'sessionBusyRunId', 'conflictRunId', 'blockedByRunId')
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    return explicit
+  }
+  // 旧基线（无 busyRun 字段）的兜底：409 的本地通知码 + 既有在途 runId（不显示 runId 本身）。
+  if (ai.noticeCode === 'ai.notice.sendFailed'
+    && typeof ai.activeRunId === 'string' && ai.activeRunId !== '') {
+    return ai.activeRunId
+  }
+  return null
+}
+
+function canReturnToActiveRun(): boolean {
+  return busyRunId() !== null
+}
+
+function returnToActiveRun(): void {
+  const action = storeAction('reattachBusyRun', 'returnToActiveRun', 'resumeActiveRun')
+  if (action !== null) {
+    void action.call(ai)
+    return
+  }
+  const runId = busyRunId()
+  if (runId !== null) {
+    void ai.reattachActive(runId)
+  }
+}
+
+/**
+ * 批次2 / AR-01 第 5 条：该条历史消息是**合成/系统提示**（后端 `synthetic=true`）。
+ *
+ * <p>面板把它渲染为系统级「已压缩」提示，而不是用户气泡；摘要正文不直接展示
+ * （其中可能含内部配置键/占位符），也不参与「继续/重试/regenerate」等消息级动作。
+ */
+function syntheticOf(message: ChatMessage): boolean {
+  return message.synthetic === true
+}
+
+function unconfirmedOf(message: ChatMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false
+  }
+  const view = message as unknown as RecoveryStoreView
+  if (view.turnUnconfirmed === true || view.unconfirmed === true) {
+    return true
+  }
+  for (const key of ['turnState', 'turnStatus', 'endState', 'turnEnd']) {
+    const value = view[key]
+    if (value === 'unconfirmed' || value === 'UNCONFIRMED') {
+      return true
+    }
+  }
+  const messageId = storeField<string>('unconfirmedMessageId', 'unconfirmedTurnMessageId')
+  if (messageId !== undefined && messageId === message.id) {
+    return true
+  }
+  const last = ai.messages[ai.messages.length - 1]
+  if (ai.lastRoundOutcome === 'unconfirmed' && last === message) {
+    return true
+  }
+  const storeFlag = storeField<unknown>('turnUnconfirmed', 'unconfirmed')
+  if (storeFlag === true && last === message) {
+    return true
+  }
+  const storeState = storeField<unknown>('turnEnd', 'turnState', 'turnStatus')
+  if ((storeState === 'unconfirmed' || storeState === 'UNCONFIRMED') && last === message) {
+    return true
+  }
+  const runId = storeField<string>('unconfirmedRunId')
+  return runId !== undefined && runId === ai.activeRunId && last === message
+}
+
+function reloadTurnState(): void {
+  const action = storeAction('retryLoadHistory', 'reloadUnconfirmedTurn', 'reloadTurnState', 'reloadFromServer')
+  if (action !== null) {
+    void action.call(ai)
+    return
+  }
+  void ai.loadHistory()
+}
+
+/** 一轮的「产出」判据：非空正文 / 非空思考 / 任意工具段（AR-05 的零产出 = 全空）。 */
+function turnHasOutput(message: ChatMessage): boolean {
+  return message.parts.some((part) => {
+    if (part.kind === 'text' || part.kind === 'reasoning') {
+      return part.text.trim() !== ''
+    }
+    return part.kind === 'tool'
+  })
+}
+
+/** 继续（append-drive）：追加驱动，不删历史、**不追加用户气泡**（保持既有 skipUserRecord 口径）。 */
+function continueTurn(_message: ChatMessage): void {
+  void ai.send(t('ai.panel.continue'), { skipUserRecord: true })
+}
+
+/**
+ * 重试本轮（retry-turn）：走 store 的**真实 action**（仅模型步重跑窄入口）。
+ *
+ * <p>批次2 修：旧实现是"store 没有 action 时本地截断 + `send(skipUserRecord)` —— 那是**重发请求**，
+ * 不是仅模型步重跑（会重建上下文、可能重放工具），属于危险假实现。这里不存在任何本地回退：
+ * 后端不允许（非 FAILED / 有半截 / 待决未清）就由 store 按 `failedCheck` 显示对应状态。
+ */
+function retryTurn(message: ChatMessage): void {
+  void ai.retryModelStep(message)
+}
 
 const inputText = ref('')
 /**
@@ -1419,13 +1776,36 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
   generic: { box: 'border-[#f0d5d0] bg-[#fdf1ef]', icon: 'border-[#c0392b] text-[#c0392b] font-bold', glyph: '!', action: 'text-[#c0392b]' }
 }
 
-/** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
- *  「稍后重试」= 重发本轮（`continueRound`，与「继续」同一条路）；「改写后重发」= 把焦点交回输入框
- *  （改写是用户动作，面板只能把落点指过去）；「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。
- *  分派按 **variant**（i18n L-69 后 `action` 文案随 UI 语言变，字符串比对会断；variant → 动作是一对一）。 */
-function runErrorCardAction(card: ErrorCard): void {
+/**
+ * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「稍后重试」只在**归属可证明的零产出失败轮**
+ * 上出现（真实窄入口）。普通已完成 / 有半截内容没有对应的后端入口 —— 该动作**直接隐藏**，
+ * 不做"禁用但仍可点出 unsupported"的死 UI。
+ */
+function errorCardActionVisible(message: ChatMessage): boolean {
+  const card = message.errorCard
+  if (!card?.action) {
+    return false
+  }
   if (card.variant === 'quota') {
-    continueRound()
+    return showRetryTurn(message)
+  }
+  return true
+}
+
+/** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
+ *  「稍后重试」= 零产出且归属可证明 ⇒ **重试本轮**（仅模型步重跑窄入口）；否则该动作隐藏（AR-17）；
+ *  「改写后重发」= 把焦点交回输入框（改写是用户动作，面板只能把落点指过去）；
+ *  「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。
+ *  分派按 **variant**（i18n L-69 后 `action` 文案随 UI 语言变，字符串比对会断；variant → 动作是一对一）。 */
+function runErrorCardAction(message: ChatMessage): void {
+  const card = message.errorCard
+  if (card === null || card === undefined) {
+    return
+  }
+  if (card.variant === 'quota') {
+    if (showRetryTurn(message)) {
+      retryTurn(message)
+    }
     return
   }
   if (card.variant === 'filter') {
@@ -1850,12 +2230,66 @@ const formHostMessageId = computed(() => {
   return null
 })
 
+/** 批次2（N4）：park 等人的气泡态 —— 不是「工作中…」，而是明确等哪一种用户动作。 */
+type WaitingKind = 'confirm' | 'form' | 'frontend'
+
+const WAITING_TEXT_KEY: Record<WaitingKind, string> = {
+  confirm: 'ai.panel.waitingConfirm',
+  form: 'ai.panel.waitingForm',
+  frontend: 'ai.panel.waitingFrontend'
+}
+
+function isLastAssistantMessage(message: ChatMessage): boolean {
+  return message.role === 'assistant' && ai.messages[ai.messages.length - 1] === message
+}
+
+/**
+ * park 等待中的气泡态判据：轮次 `suspended` 为真时，宿主助手消息不再显示「工作中…」。
+ * - 有生成式表单（activeForm / GENERATIVE_FORM_TOOL 待决段）⇒ 等待填写；
+ * - 有 CONFIRM 待决段 ⇒ 等待确认；
+ * - 其余待决前端工具 ⇒ 等待你的操作；
+ * - 无待决段但最后一条助手消息仍在挂起态 ⇒ 等待确认（不谎报"工作中"）。
+ * unconfirmed 是"已结束、状态未确认"，不归 park（另出中性视图），故排除。
+ */
+function waitingKind(message: ChatMessage): WaitingKind | null {
+  if (message.role !== 'assistant' || ai.runPhase !== 'parked' || unconfirmedOf(message)) {
+    return null
+  }
+  const pending = message.parts.filter(
+    (part): part is ToolPart => part.kind === 'tool' && part.requiresAction === true
+  )
+  const activeFormId = ai.activeForm?.toolCallId ?? null
+  if (pending.some((part) => part.name === GENERATIVE_FORM_TOOL)
+    || (activeFormId !== null && (pending.some((part) => part.toolCallId === activeFormId)
+      || (pending.length === 0 && isLastAssistantMessage(message))))) {
+    return 'form'
+  }
+  if (pending.some((part) => part.kind2 === 'CONFIRM')) {
+    return 'confirm'
+  }
+  if (pending.length > 0) {
+    return 'frontend'
+  }
+  return isLastAssistantMessage(message) ? 'confirm' : null
+}
+
+function waitingTextKey(message: ChatMessage): string | null {
+  const kind = waitingKind(message)
+  return kind === null ? null : WAITING_TEXT_KEY[kind]
+}
+
 /**
  * R-159 #2：「工作中…」呼吸全程常驻判据 —— 助手消息 streaming 全期成立（发出即现，
  * 首字符上屏不消失；原 isTyping 的「无正文」判据退役，消费点仅元信息行左位一处）。
+ *
+ * 批次2：park 等待 / unconfirmed 都不再显示「工作中…」（前者换成等待确认/填写，
+ * 后者出中性未确认视图），但仍不改写 `streaming`（轮次事实归 store）。
  */
 function isBreathing(message: ChatMessage): boolean {
-  return message.role === 'assistant' && message.streaming
+  return message.role === 'assistant'
+    && message.streaming
+    && waitingKind(message) === null
+    && !unconfirmedOf(message)
 }
 
 /**
@@ -1867,10 +2301,15 @@ function isBreathing(message: ChatMessage): boolean {
  * 把 chip 一起藏掉（真机 4/4 缺）。停止是消息级事实，与有没有正文无关。
  * 截断专项：「已截断」chip 同理，`truncated` 是消息级事实（长度截断必有正文，但仍按消息级
  * 判据给位置，避免正文被清空/渲染失败时标记消失）。
+ * 批次2：park 等待态 / unconfirmed 中性视图同样自带位置。
  */
 function showMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || isBreathing(message)
+    || waitingKind(message) !== null
+    || unconfirmedOf(message)
+    || showContinue(message)
+    || showRetryTurn(message)
     || message.stopped === true
     || message.truncated === true
 }
@@ -3195,10 +3634,21 @@ function scrollBottom(force = false): void {
  * R-157 #2 → R-163 T4：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
  * 该条之后的消息、以输入框新文本重发。仅用户消息可编辑（模板 v-if role 过滤）。
  * T4：输入框**非空白**（非全空白字符）时先弹确认防覆盖（window.confirm，spec 桩断言）。
+ *
+ * 批次2（AR-09）：编辑是**不可逆删除**，点击编辑时先按实测条数提示「将删除此后 N 条消息」，
+ * 用户确认后才进入编辑态；N = 该消息之后的消息条数（不是固定文案）。N=0 不弹删除确认。
  */
 const editingMessageId = ref<string | null>(null)
 
 function editMessage(m: ChatMessage): void {
+  const index = ai.messages.indexOf(m)
+  const laterCount = index >= 0 ? ai.messages.length - index - 1 : 0
+  if (laterCount > 0) {
+    const confirmed = window.confirm(t('ai.panel.editDeleteConfirm', { count: laterCount }))
+    if (!confirmed) {
+      return
+    }
+  }
   if (inputText.value.trim() !== '') {
     const confirmed = window.confirm(t('ai.panel.overwriteConfirm'))
     if (!confirmed) {
@@ -3209,26 +3659,32 @@ function editMessage(m: ChatMessage): void {
   editingMessageId.value = m.id
 }
 
-/** R-163 T4：「继续」按钮判据 —— error/断流/取消后，最后一条助手消息给出消息级入口。
- *  批G · S3：被用户停止的轮**不出**「继续」（与「已停止」标识互斥）。 */
-function showContinue(message: ChatMessage): boolean {
+/** 本轮是否仍可给出消息级恢复入口（最后一条助手消息 + 失败/断流/取消 + 未被停止）。 */
+function isFailedLastAssistant(message: ChatMessage): boolean {
   const last = ai.messages[ai.messages.length - 1]
   return message.role === 'assistant'
     && last === message
     && message.stopped !== true
+    && !unconfirmedOf(message)
     && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
 }
 
-/** 「继续」= 把**当前语言**的「继续」当作用户消息直接发送（参考 Kimi）。
- *
- *  <p>A3-Y8（4B 语言专项）：发送文本与按钮显示**同源**（同一 i18n 键 `ai.panel.continue`）——
- *  en 界面发 "Continue"、zh 界面仍发「继续」。此前硬编码中文会让 en 界面下用户气泡变中文，
- *  且与请求语言（`Accept-Language` → 系统消息「回答语言（本轮）」段）错配。
- *  固定指令词的语义不变：它仍是"新一轮的用户消息"，不是续写半截答案。
- *  提示词侧（主提示规则 10 的「请回复「继续」」）不必跟改 —— 语言段已声明
- *  「继续/重试」这类固定指令词按本轮声明语言回答。 */
-function continueRound(): void {
-  void ai.send(t('ai.panel.continue'))
+/**
+ * AR-09 / AR-17：动作语义分离后的显示判据。
+ * - 继续（append-drive）：**有产出**的失败轮才出（续写/追加驱动，不删历史、不加用户气泡）；
+ * - 重试本轮（retry-turn）：**零产出 + 归属可证明**的失败轮才出（替换本轮、不加用户气泡）；
+ * - 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
+ * 同一轮「继续 / 重试本轮」互斥，避免把两种语义塞进同一个按钮。
+ */
+function showContinue(message: ChatMessage): boolean {
+  return isFailedLastAssistant(message) && turnHasOutput(message)
+}
+
+function showRetryTurn(message: ChatMessage): boolean {
+  // 归属不可证明（无 message.runId，且不是当前在途宿主）⇒ 不出「重试本轮」入口：
+  // 刷新后 activeRunId 可能为空或指向更晚的一轮，猜它就会重试错轮。
+  return isFailedLastAssistant(message) && !turnHasOutput(message)
+    && ai.retryRunIdFor(message) !== null
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -3281,9 +3737,10 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
 }
 
 /**
- * R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。 */
+ * R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。
+ * 批次2：park 等待 / unconfirmed 时收起光标（轮次事实不改，只是不再假装"正在生成"）。 */
 function showCaret(message: ChatMessage, blockIndex: number): boolean {
-  if (!message.streaming) {
+  if (!message.streaming || waitingKind(message) !== null || unconfirmedOf(message)) {
     return false
   }
   const blocks = blocksOf(message)

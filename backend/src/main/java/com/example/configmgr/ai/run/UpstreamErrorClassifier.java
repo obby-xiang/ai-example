@@ -33,12 +33,20 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * <ul>
  * <li>{@code 400/401/403/404/409/422}（以及其它未列 4xx）⇒ 不重试：同一份请求再发一次只会再被拒；</li>
  * <li>{@code 408/429/5xx} 与网络层（{@link IOException}/{@link ResourceAccessException}/
- * {@code WebClientRequestException}/{@link TimeoutException}）⇒ 可重试，次数由
+ * {@code WebClientRequestException}/{@link TimeoutException}/<b>Netty 超时族</b>
+ * {@code io.netty.handler.timeout.TimeoutException}）⇒ 可重试，次数由
  * {@code app.ai.resilience.max-attempts} 封顶；</li>
  * <li>{@code 429} 额外携带 {@code Retry-After}（秒或 HTTP-date），由退避层取
  * max(指数退避, Retry-After)，并按"未产出 / 无副作用 / 剩余预算"裁剪（见 {@link RetryBackoff}）；</li>
  * <li>类型未知的异常 ⇒ 不重试（未证明是瞬时故障，重试只会拖长用户等待）。</li>
  * </ul>
+ *
+ * <p>另：<b>批次2 / Task 4 Step 6</b> 把"开流前零副作用瞬时失败"的有界重试写成口径（判定仍在
+ * {@code ResilientChatService#runAttempts}，本类只负责<b>分类</b>）：
+ * <b>可重试</b> = 可重试类别 ∧ 本次尝试零产出（正文/思考都没出帧）∧ 零副作用（工具没开始执行、
+ * 台账无新增执行记录）∧ 还有下一次尝试额度 ∧ 本段预算未耗尽。于是"开流前"的瞬时失败最多按
+ * {@code app.ai.resilience.max-attempts} 重试，而<b>已出帧/已有副作用</b>的同一类错误一次都不重试
+ * （它们走派生码 {@code *_AFTER_PARTIAL} / {@code *_AFTER_TOOL_SIDE_EFFECT} 如实失败）。
  *
  * <h2>200 里的错误</h2>
  * 网关/兼容层可能用 HTTP 200 + 错误体返回错误。这类异常带 2xx 状态 ⇒ 归
@@ -251,9 +259,14 @@ public final class UpstreamErrorClassifier {
 	 * 网络层失败 = {@link IOException} 族（含 {@code SocketException}/{@code EOFException}/
 	 * reactor {@code PrematureCloseException}）、Spring 的 {@link ResourceAccessException}、
 	 * 反应式 {@code WebClientRequestException}（本模块不直接依赖 webflux，按类名登记）、
-	 * 以及 {@link TimeoutException}。
+	 * <b>Netty 超时族</b>（{@link #isNettyTimeout}）以及 {@link TimeoutException}。
 	 *
 	 * <p>按<b>类型/因果链</b>判定，不看消息文本。
+	 *
+	 * <p><b>已知瞬态逐个分类（批次2 / Task 4 Step 7）</b>：这张清单是<b>穷举</b>的 ——
+	 * 每一条都有名字、都能单独写用例；不在这张单子上的类型一律落到
+	 * {@code UPSTREAM_STREAM_ERROR}（不重试）。<b>未知桶不放开</b>：把"没证明是瞬时的异常"整桶
+	 * 改成可重试，等于让一次协议错误/程序缺陷被重放两次，用户等待翻倍而成功率不涨。
 	 */
 	static boolean isNetworkFailure(Throwable error) {
 		for (Throwable cause = error; cause != null; cause = next(cause)) {
@@ -264,9 +277,36 @@ public final class UpstreamErrorClassifier {
 			if (isWebClientRequestException(cause)) {
 				return true;
 			}
+			if (isNettyTimeout(cause)) {
+				return true;
+			}
 		}
 		return false;
 	}
+
+	/**
+	 * <b>Netty 超时族</b>（已知瞬态，单独成条）：{@code io.netty.handler.timeout.TimeoutException}
+	 * 及其子类（{@code ReadTimeoutException} / {@code WriteTimeoutException}）。
+	 *
+	 * <p>为什么<b>必须单独判</b>：它们继承的是 {@code io.netty.handler.timeout.TimeoutException}
+	 * → {@code io.netty.channel.ChannelException} → {@code RuntimeException}，
+	 * <b>不是</b> {@link java.util.concurrent.TimeoutException}，也不在 {@link IOException} 族里。
+	 * 走"按类型判"的既有清单会把它落到未知桶（{@code UPSTREAM_STREAM_ERROR}、不重试）——
+	 * 而它恰恰是"读超时/连接被对端关掉"这一最常见的瞬时故障（开流前零副作用，重试一次即可能成功）。
+	 *
+	 * <p>按<b>父类名</b>判定（子类名不可穷举，且本模块不依赖 netty 类型）。
+	 */
+	static boolean isNettyTimeout(Throwable error) {
+		for (Class<?> type = error.getClass(); type != null; type = type.getSuperclass()) {
+			if (NETTY_TIMEOUT_TYPE.equals(type.getName())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** {@code io.netty.handler.timeout.TimeoutException} 的类名（本模块不依赖 netty）。 */
+	private static final String NETTY_TIMEOUT_TYPE = "io.netty.handler.timeout.TimeoutException";
 
 	private static boolean isWebClientRequestException(Throwable error) {
 		for (Class<?> type = error.getClass(); type != null; type = type.getSuperclass()) {

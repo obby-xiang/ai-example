@@ -13,7 +13,7 @@
  */
 
 import { defineStore } from 'pinia'
-import { ApiError } from '@/api/http'
+import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
@@ -78,7 +78,7 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiHealth, type AiHistory, type AiHistoryMessage, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormValueIssue } from '@/types/form-schema'
 import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -221,6 +221,121 @@ let mirrorTimer: ReturnType<typeof setTimeout> | null = null
 /** 批G · G4：最后一次真实落盘时刻（throttle 的 leading 判据）与节流窗口。 */
 let mirrorLastWriteAt = 0
 const MIRROR_THROTTLE_MS = 300
+
+/**
+ * 批次2（F6）：**开流前**瞬时失败的有界重试。
+ *
+ * <p>判据极窄 —— 只有"一个帧都没收到"（`sawAnyFrame === false`）、本轮仍属当前连接、且失败是
+ * 瞬时类型（网络不可达 / 502/503/504 的传输层失败）时才重试；`SESSION_BUSY` / `SESSION_PURGED`
+ * 与配置类 503（无 key / 无模型 / Redis 不可用）都**不**重试。重试复用同一条用户气泡与同一条
+ * 助手消息（零副作用：不追加消息、不重跑工具、不换会话），次数 = 1（共 2 次尝试）。
+ */
+export const PRE_STREAM_RETRY_MAX = 1
+/** 重试前等待（毫秒）：给瞬时抖动一个恢复窗口，但不让用户感知为"卡住"。 */
+export const PRE_STREAM_RETRY_DELAY_MS = 400
+
+/** 这些码即使带 5xx 也是**确定性**失败（重试只会重复同一结果）。 */
+const NON_TRANSIENT_PRE_STREAM_CODES: ReadonlySet<string> = new Set([
+  ErrorCode.SESSION_BUSY,
+  ErrorCode.SESSION_PURGED,
+  ErrorCode.AI_UNAVAILABLE,
+  ErrorCode.AI_KEY_MISSING,
+  ErrorCode.AI_KEY_UNREADABLE,
+  ErrorCode.AI_REDIS_UNAVAILABLE,
+  ErrorCode.NO_MODEL_CONFIGURED
+])
+
+/** 开流前失败是否属于"瞬时、可安全重试"（零副作用）类型。 */
+function isTransientPreStreamError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) {
+    return false
+  }
+  if (NON_TRANSIENT_PRE_STREAM_CODES.has(error.code)) {
+    return false
+  }
+  if (error.code === FRONTEND_ERROR_CODES.NETWORK_ERROR || error.status === 0) {
+    return true
+  }
+  // 502/504 = 网关瞬时失败；503 在配置类码被排除后也只剩传输层/池抖动
+  return error.status === 502 || error.status === 503 || error.status === 504
+}
+
+/** 任意异常 → 视图错误现场（机器码，不含文案）。 */
+function toLoadErrorView(scope: AiLoadErrorScope, error: unknown): AiLoadErrorView {
+  if (error instanceof ApiError) {
+    return { scope, code: error.code, status: error.status, at: Date.now() }
+  }
+  return { scope, code: FRONTEND_ERROR_CODES.UNKNOWN_ERROR, status: 0, at: Date.now() }
+}
+
+/** 409 回执里的 `reattach` 必须与 `runId` 推出的事件路径一致，否则视为不可信（不指向编造地址）。 */
+function trustedReattachPath(runId: string, reattach: unknown): string | null {
+  if (typeof reattach !== 'string' || reattach === '') {
+    return null
+  }
+  return reattach === `/api/ai/events/${encodeURIComponent(runId)}` ? reattach : null
+}
+
+/** 批次2：409 回执 → 可手动指回的进行中轮（runId 不可用/不可信时返回 null）。 */
+function readBusyRunRef(error: ApiError): AiBusyRunRef | null {
+  const body = error.bodyAs<{ runId?: unknown; reattach?: unknown; unknown?: unknown }>()
+  if (!body || body.unknown === true || typeof body.runId !== 'string' || body.runId.trim() === '') {
+    return null
+  }
+  const runId = body.runId
+  return { runId, reattach: trustedReattachPath(runId, body.reattach) }
+}
+
+/**
+ * 批次2（AR-05）：中性「状态未确认」终帧的判据。
+ *
+ * <p>只认**显式标记**（协议增量，均为 additive 键）：`code=TURN_UNCONFIRMED` / `turnEnd=unconfirmed`
+ * / `unconfirmed=true`。**不**拿 `AI_REDIS_UNAVAILABLE` 猜 —— 那是真实故障码，猜错会把普通失败
+ * 说成"可能成功"，比不说更糟。
+ */
+function isUnconfirmedTerminal(frame: unknown): boolean {
+  const raw = frame as { code?: unknown; turnEnd?: unknown; unconfirmed?: unknown }
+  return raw.code === 'TURN_UNCONFIRMED' || raw.turnEnd === 'unconfirmed' || raw.unconfirmed === true
+}
+
+/**
+ * 批次2 / AR-05：仅模型步重跑的 409 前置失败码（后端 `failedCheck`）。
+ *
+ * <p>只从**结构化回执**读取；不拿文案猜。缺省 = 普通可重试失败。
+ */
+function failedCheckOf(error: unknown): string | null {
+  if (!(error instanceof ApiError)) {
+    return null
+  }
+  const body = error.bodyAs<{ failedCheck?: unknown }>()
+  return body && typeof body.failedCheck === 'string' ? body.failedCheck : null
+}
+
+/** 重跑窄入口 409 回执里的 `reason`（在后端未给 `failedCheck` 时用于区分在途/已取消）。 */
+function retryReasonOf(error: unknown): string | null {
+  if (!(error instanceof ApiError)) {
+    return null
+  }
+  const body = error.bodyAs<{ reason?: unknown }>()
+  return body && typeof body.reason === 'string' ? body.reason : null
+}
+
+/** 把 `failedCheck` 映射到用户可读的本地化通知码（未知值走通用句）。 */
+function retryDeniedNoticeKey(failedCheck: string | null): string {
+  switch (failedCheck) {
+    case 'NOT_FAILED':
+      return 'ai.notice.retryDeniedNotFailed'
+    case 'PENDING_TOOLS':
+      return 'ai.notice.retryDeniedPending'
+    case 'TOOL_PAIRING_INCOMPLETE':
+      return 'ai.notice.retryDeniedHistory'
+    case 'MODEL_CHANGED':
+      return 'ai.notice.retryDeniedModel'
+    default:
+      return 'ai.notice.retryDenied'
+  }
+}
+
 /** 页面离开/隐藏时的立即落盘是否已装上（只装一次）。 */
 let mirrorFlushInstalled = false
 let mirrorFlushHandler: (() => void) | null = null
@@ -903,7 +1018,16 @@ function writeMirror(
         toolRuns: message.toolRuns,
         pendingCall: message.pendingCall,
         ...(message.stopped ? { stopped: true } : {}),
-        ...(message.truncated ? { truncated: true } : {})
+        ...(message.truncated ? { truncated: true } : {}),
+        // 批次2（镜像 additive 键）：失败现场与中性态活过刷新 —— 否则"失败"会被归一成一条完整回答。
+        ...(message.errorCard ? { errorCard: message.errorCard } : {}),
+        ...(message.code ? { code: message.code } : {}),
+        ...(message.unconfirmed ? { unconfirmed: true } : {}),
+        ...(message.recoveryGap ? { recoveryGap: true } : {}),
+        // 批次2：系统级合成提示（压缩摘要）也必须活过刷新，不能回退成用户气泡
+        ...(message.synthetic ? { synthetic: true } : {}),
+        // 批次2：run 归属必须活过刷新 —— 「重试本轮」只按它定位后端 run（不得猜 activeRunId）
+        ...(message.runId ? { runId: message.runId } : {})
       }))
     }
     sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify(mirror))
@@ -1384,8 +1508,11 @@ export const useAiStore = defineStore('ai', {
     /**
      * R-163 T4：最近一轮结局（内存态，不进镜像/持久化）——error/断流/取消后最后一条助手消息
      * 出「继续」入口；新轮发送时复位 'ok'。
+     *
+     * <p>批次2：新增 `'unconfirmed'`（中性「状态未确认」，AR-05）——它**不是**普通失败：
+     * 面板据此给"重新载入 / 新开一轮"而不是错误卡/报错通知。
      */
-    lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled',
+    lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled' | 'unconfirmed',
     /**
      * 批 E · E2：上一轮是否以 **done 正常终态** 收尾（"回复下方出建议"的轮次级判据）。
      *
@@ -1482,7 +1609,41 @@ export const useAiStore = defineStore('ai', {
     contextUsage: null as ContextUsage | null,
     contextBreakdown: null as ContextBreakdownItem[] | null,
     /** 端点返回的压缩态（提示条/运维面用；批① 只存不渲染） */
-    contextCompaction: null as ContextCompaction | null
+    contextCompaction: null as ContextCompaction | null,
+    /**
+     * 批次2：历史对账失败现场（`GET /api/ai/history` 的失败）。`null` = 无失败。
+     *
+     * <p>只有机器码/状态/时刻 —— 文案由面板按 `scope` 选词条（store 不落用户可见串）。
+     * 失败时同时做**统一封口**（{@link sealRecovery}）并置 `recoveryGap`（不可完整恢复），
+     * 所以界面不会永久停在"正在加载/正在生成"。
+     */
+    historyError: null as AiLoadErrorView | null,
+    /** 批次2：`GET /api/ai/runs/current`（恢复快照）失败现场。 */
+    currentError: null as AiLoadErrorView | null,
+    /**
+     * 批次2：上下文明细端点失败现场。**不覆盖**已有数据（"读不到"不等于"用了 0"），
+     * popover 据此出"失败 + 重试"，有旧数据时数据与失败提示并存。
+     */
+    contextError: null as AiLoadErrorView | null,
+    /** 批次2：上下文明细的加载态（idle/loading/ready/error）—— popover 三态判据。 */
+    contextStatus: 'idle' as 'idle' | 'loading' | 'ready' | 'error',
+    /**
+     * 批次2：恢复完整性缺口（不可完整恢复）。中性事实：不是轮失败。
+     * 值只在"能说清为什么/缺哪段"时才有；无缺口 = null。
+     */
+    recoveryGap: null as AiRecoveryGap | null,
+    /**
+     * 批次2：恢复/续收进行中（面板据此显示中性的"正在恢复"而不是普通生成中，
+     * 也用于 `runPhase` 四态判定）。只由 loadHistory 与"回到进行中的回答"置位。
+     */
+    restoringRecovery: false,
+    /**
+     * 批次2（ADR-5）：409 `SESSION_BUSY` 回执里可手动指回的进行中轮。
+     *
+     * <p>**只作动作入参**：面板给"回到进行中的回答"入口，`runId` 绝不进用户可见文本；
+     * store 不自动重挂、不轮询。持有者不可知（`unknown=true`）时为 null。
+     */
+    busyRun: null as AiBusyRunRef | null
   }),
 
   getters: {
@@ -1568,6 +1729,29 @@ export const useAiStore = defineStore('ai', {
     /** 输入区是否可用（执行中/挂起等待中一律禁发）。 */
     canSend(state): boolean {
       return !state.loading
+    },
+    /**
+     * 批次2：本轮的**视图阶段**（四态，单一判据）。
+     *
+     * <p>为什么不让面板自己拼 `loading`/`suspended`：B1「挂起即断」之后 park 是
+     * `loading=false && suspended=true`，与"空闲"只差一个布尔 —— 拼错就会把"等人决策"说成
+     * "没有在途轮"。这里把口径钉死：
+     * <ul>
+     * <li>`parked` = 挂起等待（有卡等人/等前端执行；连接可能已按设计收流）；</li>
+     * <li>`recovering` = 正在恢复/续收（`restoringRecovery`，含"回到进行中的回答"）；</li>
+     * <li>`running` = 有连接在收流且无人工等待；</li>
+     * <li>`idle` = 没有在途轮。</li>
+     * </ul>
+     * 优先级：parked > recovering > running > idle（挂起时"有没有连接"不再是用户的关注点）。
+     */
+    runPhase(state): 'idle' | 'running' | 'parked' | 'recovering' {
+      if (state.suspended) {
+        return 'parked'
+      }
+      if (state.restoringRecovery) {
+        return 'recovering'
+      }
+      return state.loading ? 'running' : 'idle'
     },
     /**
      * R-166（口径③）：某挂起条目的提交态（null = 未提交）——面板据此把批准/拒绝双按钮
@@ -1759,6 +1943,8 @@ export const useAiStore = defineStore('ai', {
      */
     async loadContext(): Promise<void> {
       const sid = this.sessionId
+      this.contextStatus = 'loading'
+      this.contextError = null
       try {
         const snapshot = await aiApi.getContext(sid)
         // 会话身份守卫（同 loadHistory 的红队 MAJOR-1 口径）：跨 await 期间换了会话即整体丢弃
@@ -1767,6 +1953,7 @@ export const useAiStore = defineStore('ai', {
         }
         this.contextBreakdown = snapshot.breakdown ?? null
         this.contextCompaction = snapshot.compaction ?? null
+        this.contextStatus = 'ready'
         if (snapshot.source === 'none') {
           this.contextUsage = null
           return
@@ -1779,12 +1966,48 @@ export const useAiStore = defineStore('ai', {
           est: snapshot.estimated,
           circuit: snapshot.compaction?.circuit ?? 'closed'
         }
-      } catch {
-        // 读不到就不动（历史渲染与既有状态不受影响）
+      } catch (error) {
+        // 读不到就不动数据（历史渲染与既有状态不受影响），但要**可见**：失败 + 可重试。
+        if (this.sessionId !== sid) {
+          return
+        }
+        this.contextStatus = 'error'
+        this.contextError = toLoadErrorView('context', error)
       }
     },
 
+    /** 批次2：上下文明细失败后的重试（一次性；popover 的重试钮入口）。 */
+    async retryLoadContext(): Promise<void> {
+      await this.loadContext()
+    },
+
+    /**
+     * 批次2：历史对账入口（`restoringRecovery` 的唯一置位点 + 必达复位）。
+     *
+     * <p>把 `restoringRecovery` 放在**包装层**而不是内层各 return 上：恢复路径有 5+ 个早退
+     * 分支，逐个补复位必然会漏一个（漏掉就是"永久恢复中"）。`loadHistoryInner` 只管取数与落盘。
+     */
     async loadHistory(): Promise<void> {
+      const sid = this.sessionId
+      this.restoringRecovery = true
+      try {
+        await this.loadHistoryInner()
+      } catch (error) {
+        if (this.sessionId !== sid) {
+          return // 会话已换：过期异常不落进新会话
+        }
+        // 兜底：未预期异常同样必须可见 + 封口（按"历史是否已落定"选择归属，不误报历史失败）
+        if (!this.historyLoaded) {
+          this.sealRecovery('history', error)
+        } else if (this.currentError === null) {
+          this.sealRecovery('current', error)
+        }
+      } finally {
+        this.restoringRecovery = false
+      }
+    },
+
+    async loadHistoryInner(): Promise<void> {
       const sid = this.sessionId
       this.startMirror()
       const mirror = readMirror(this.sessionId)
@@ -1841,12 +2064,15 @@ export const useAiStore = defineStore('ai', {
       let history: AiHistory
       try {
         history = await aiApi.history(this.sessionId)
-      } catch {
+      } catch (error) {
         if (this.sessionId !== sid) {
           return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
         }
         this.historyLoaded = true
-        return // 后端不可达：保留镜像展示
+        // 批次2：失败必须**可见 + 可重试**，且当场统一封口（不留在流式假态 / 不永久 loading）。
+        // 镜像内容只是"现场"，不是可确认完整的答案 ⇒ 同步置 recoveryGap（中性，不是轮失败）。
+        this.sealRecovery('history', error)
+        return
       }
 
       // 会话身份对账（红队 MAJOR-1）：不匹配则整体丢弃 —— 下面的 messages 写入与
@@ -1854,6 +2080,9 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId !== sid) {
         return
       }
+      // 批次2：历史拿到了 ⇒ 历史错误与"历史不可用"类缺口一并作废（归档缺口可能在续收时另行检出）
+      this.historyError = null
+      this.recoveryGap = null
 
       // 上下文专项批①：占用条在刷新后必须由服务端重建（本地 store 是内存态，刷新即丢）。
       // 与历史并行拉，不阻塞历史渲染（pill 慢一拍可接受，历史渲染慢一拍不可接受）。
@@ -1872,7 +2101,7 @@ export const useAiStore = defineStore('ai', {
         this.historyLoaded = true
         // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
         // 消除镜像/历史写入与挂起重建之间的写后写竞态）；后端不可达的 catch 分支不重建
-        await this.restoreSuspendedSnapshot()
+        await this.restoreSnapshotGuarded()
         return
       }
 
@@ -1909,7 +2138,11 @@ export const useAiStore = defineStore('ai', {
         if ((item.type || '').toUpperCase() === 'TOOL') {
           return [] // TOOL 条目：响应已并入 ASSISTANT 工具段，本身不再产生消息
         }
-        const role = roleOf(item.type)
+        // 批次2 / AR-01 第 5 条：后端 `synthetic=true` 的条目是合成/系统提示（压缩摘要、步数收尾），
+        // **不得**按 USER 建成用户气泡。这里统一转成 SYSTEM 消息并保留 `synthetic` 标记，
+        // 面板据此渲染系统级「已压缩」提示（不展示内部配置键、不冒充用户原话）。
+        const synthetic = item.synthetic === true
+        const role: ChatMessage['role'] = synthetic ? 'system' : roleOf(item.type)
         // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
         // result 由 TOOL 条目的 toolResponses 回填（id 优先、序位兜底）；历史条目没有待决语义，
         // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns。
@@ -2022,10 +2255,14 @@ export const useAiStore = defineStore('ai', {
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
+          // 批次2：完整历史通道带 runId 时落消息，作为「重试本轮」的归属证据（40 条窗口通常无此键）
+          ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
           // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
           ...(item.stopped === true ? { stopped: true } : {}),
           // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
-          ...(item.truncated === true ? { truncated: true } : {})
+          ...(item.truncated === true ? { truncated: true } : {}),
+          // 批次2：系统级合成提示（压缩摘要/步数收尾）—— 面板不画用户气泡、不显示内部键
+          ...(synthetic ? { synthetic: true } : {})
         }
         deriveProjections(message)
         return [message]
@@ -2123,11 +2360,31 @@ export const useAiStore = defineStore('ai', {
       // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
       // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
       this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
+      // 批次2：历史通道不带失败现场（errorCard/code/unconfirmed）—— 由镜像侧把它补回**同一轮**，
+      // 否则刷新后一次失败会被"历史整体替换"归一成一条完整回答（看起来像成功）。
+      this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
       // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
       this.historyLoaded = true
       // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
       // 消除历史整体替换与挂起重建之间的写后写竞态）
-      await this.restoreSuspendedSnapshot()
+      await this.restoreSnapshotGuarded()
+    },
+
+    /**
+     * 批次2：快照重建的**兜底出口** —— 未预期异常同样落 `currentError` + 统一封口。
+     *
+     * <p>`restoreSuspendedSnapshot` 只把 `runs/current` 的失败当错误处理；重建路径里若还有
+     * 未预期异常（例如载荷形态异常），不接住就会以 rejected promise 结束 —— 既没有可见错误、
+     * 也没有封口。这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
+     */
+    async restoreSnapshotGuarded(): Promise<void> {
+      try {
+        await this.restoreSuspendedSnapshot()
+      } catch (error) {
+        if (this.currentError === null) {
+          this.sealRecovery('current', error)
+        }
+      }
     },
 
     /**
@@ -2175,6 +2432,67 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 批次2：历史整体替换后，把**镜像侧**的结局标记补回同一轮的助手消息上。
+     *
+     * <p>为什么需要：`/history` 只带正文/工具/stopped/truncated，**不带** errorCard/code/
+     * unconfirmed/recoveryGap。一次失败轮在历史里就是一段 assistant 文本 —— 不加这一步，刷新
+     * 后它就变成"一条完整回答"，用户再也看不到"这轮其实失败了/状态未确认"。
+     *
+     * <p>判据（宁可少补、不可错配）：
+     * <ol>
+     * <li>镜像末条是 assistant 且带任一结局标记；</li>
+     * <li>历史末条 assistant 未带同类标记（历史口径优先，已有就不覆盖）；</li>
+     * <li>两侧最后一条用户消息**归一后同句**（同一轮才补；对不上即放弃）。</li>
+     * </ol>
+     * 只补标记，不改正文/段/状态。
+     */
+    carryMirrorOutcomeMarkers(historical: ChatMessage[], mirrorMessages: ChatMessage[]): void {
+      if (mirrorMessages.length === 0) {
+        return
+      }
+      const tail = mirrorMessages[mirrorMessages.length - 1]
+      if (!tail || tail.role !== 'assistant') {
+        return
+      }
+      const hasOutcome = tail.errorCard != null || tail.code != null || tail.unconfirmed === true
+        || tail.recoveryGap === true
+      if (!hasOutcome) {
+        return
+      }
+      const target = [...historical].reverse().find((item) => item.role === 'assistant')
+      if (!target) {
+        return
+      }
+      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
+      const historyUser = [...historical].reverse().find((item) => item.role === 'user') ?? null
+      if (!mirrorUser || !historyUser
+        || normalizeUserText(messageText(mirrorUser)) !== normalizeUserText(messageText(historyUser))) {
+        return
+      }
+      // 批次2：run 归属与结局标记同一轮才搬运；即使目标已有结局标记，也补 runId
+      // （历史通道通常不带 runId，缺了它「重试本轮」就没有可证明的归属）。
+      if (!target.runId && tail.runId) {
+        target.runId = tail.runId
+      }
+      if (target.errorCard != null || target.code != null || target.unconfirmed === true
+        || target.recoveryGap === true) {
+        return
+      }
+      if (tail.errorCard != null) {
+        target.errorCard = tail.errorCard
+      }
+      if (tail.code != null) {
+        target.code = tail.code
+      }
+      if (tail.unconfirmed === true) {
+        target.unconfirmed = true
+      }
+      if (tail.recoveryGap === true) {
+        target.recoveryGap = true
+      }
+    },
+
+    /**
      * T2b-D#3（红队 A1/A3/B3）：刷新后的挂起卡走"快照重建 + 增量续收"，禁止全量回放重建
      * （防双重渲染/孤儿过滤失效/死卡复活）。数据源为后端 runs/current 的 pendingEntries 快照，
      * 由本 action 在 loadHistory 完成后触发；历史/镜像既有的渲染形态一律兜底，不复制历史工具卡。
@@ -2205,8 +2523,13 @@ export const useAiStore = defineStore('ai', {
       let current: AiRunCurrent
       try {
         current = await aiApi.runsCurrent(sid)
-      } catch {
-        // 该路径不可用时刷新体验降级为既有镜像/历史形态（空历史的 expired 降级规则兜底）
+      } catch (error) {
+        if (this.sessionId !== sid) {
+          return // 会话已换：过期失败不落进新会话
+        }
+        // 批次2：快照读不到同样必须**可见 + 可重试**，且当场统一封口（镜像里的在途轮不能永久"在流"）。
+        // 缺口原因 = 快照不可用（中性事实，不是把这一轮判失败）。
+        this.sealRecovery('current', error)
         return
       }
       // 取数窗口内的身份对账（R-130/R-132）：sid 不等 = 会话已换；abort 句柄已换 = 同会话已起
@@ -2216,6 +2539,8 @@ export const useAiStore = defineStore('ai', {
       }
       // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
       this.restoredPendingQueue = []
+      // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
+      this.currentError = null
       if (!current.found || !current.runId) {
         // 空态：没有在途轮 —— 镜像若留下"未收尾"的助手消息，就地封口（否则光标永远在流）。
         // 既有历史渲染与空历史 expired 降级规则兜底。
@@ -2317,6 +2642,8 @@ export const useAiStore = defineStore('ai', {
         // 继续收 —— 绝不回落到已收尾的上一轮（R2 修 2，见 findInFlightHost）
         host = this.appendAssistantMessage('')
       }
+      // 批次2：在途恢复的宿主归属该 run（重试入口只认 message.runId）
+      host.runId = runId
       // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
       host.parts = [{ kind: 'text', seg: 0, text: '', streaming: true }]
       host.content = ''
@@ -2391,6 +2718,262 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 批次2：**统一的恢复失败出口** —— 错误可见 + 统一封口 + 缺口可表示。
+     *
+     * <p>历史/快照读取失败时，"屏上那半截"既不能继续装作在流（永久 loading/光标常驻），
+     * 也不能被当成完整答案。本方法一次做完三件事：
+     * <ol>
+     * <li>按 scope 落机器可读错误现场（`historyError` / `currentError`），供面板出"失败 + 重试"；</li>
+     * <li>封口所有未收尾的助手消息，并把它们标成 `recoveryGap`（**中性**：不是轮失败、不出错误卡）；</li>
+     * <li>落 `recoveryGap` 全局态（原因 = 历史不可用 / 快照不可用），表示"不可完整恢复"。</li>
+     * </ol>
+     */
+    sealRecovery(scope: Exclude<AiLoadErrorScope, 'context'>, error: unknown): void {
+      const pendingIds = this.messages
+        .filter((message) => message.role === 'assistant' && !message.done)
+        .map((message) => message.id)
+      const view = toLoadErrorView(scope, error)
+      if (scope === 'history') {
+        this.historyError = view
+      } else {
+        this.currentError = view
+      }
+      this.sealLeftoverInFlight()
+      for (const id of pendingIds) {
+        const message = this.messages.find((item) => item.id === id)
+        if (message) {
+          message.recoveryGap = true
+        }
+      }
+      // 没有连接在跑才复位 loading（别的轮正在收流时不得把它标成空闲）
+      if (currentAbort === null) {
+        this.loading = false
+      }
+      this.markRecoveryGap(scope === 'history' ? 'history-unavailable' : 'snapshot-unavailable')
+      if (this.messages.length > 0) {
+        this.writeMirrorNow()
+      }
+    },
+
+    /**
+     * 批次2：显式登记"不可完整恢复"（中性事实）。
+     *
+     * <p>`archive-window` 由续收首帧的序号断层检出（见 {@link noteArchiveGap}）；历史/快照不可用
+     * 由 {@link sealRecovery} 登记。缺口**不是**轮失败：不改 `lastRoundOutcome`、不挂错误卡。
+     *
+     * @param span 已知缺口区间（含端点）；省略 = 区间不可知（不臆造）
+     */
+    markRecoveryGap(
+      reason: AiRecoveryGapReason,
+      span: { fromSeq: number | null; toSeq: number | null } = { fromSeq: null, toSeq: null }
+    ): void {
+      this.recoveryGap = { reason, fromSeq: span.fromSeq, toSeq: span.toSeq, at: Date.now() }
+    },
+
+    /**
+     * 批次2：续收连接的**首帧序号断层**判定 —— 归档窗口裁掉中间帧 ⇒ 不可完整恢复。
+     *
+     * <p>口径：业务帧的 `seq` 每轮从 1 起连续递增（心跳不占 seq）。以 `anchor`（本连接请求的
+     * `lastSeq`，全量回放为 0）为期望位置，首帧 `seq > anchor + 1` 即说明 `(anchor, seq)` 之间的
+     * 帧已不在归档里。只在**首帧**判一次（后续跳号可能是并发连接的正常交错，不据此下结论）。
+     * 判定只落缺口标记，不伪造轮失败。
+     *
+     * @returns 是否检出缺口（调用方据此只报一次）
+     */
+    noteArchiveGap(anchor: number | null, seq: number | null): boolean {
+      if (anchor === null || seq === null) {
+        return false
+      }
+      const expected = Math.max(0, anchor) + 1
+      if (seq <= expected) {
+        return false
+      }
+      this.markRecoveryGap('archive-window', { fromSeq: expected, toSeq: seq - 1 })
+      const host = this.messages.find((item) => item.id === activeRoundHostId)
+        ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+      if (host) {
+        host.recoveryGap = true
+        this.writeMirrorNow()
+      }
+      return true
+    },
+
+    /** 批次2：历史失败后的重试（一次性；面板错误条的重试钮入口）。 */
+    async retryLoadHistory(): Promise<void> {
+      this.historyError = null
+      this.recoveryGap = null
+      await this.loadHistory()
+    },
+
+    /** 批次2：恢复快照失败后的重试（只重跑 runs/current 那一步，不重新拉历史）。 */
+    async retryRestoreSnapshot(): Promise<void> {
+      this.currentError = null
+      this.restoringRecovery = true
+      try {
+        await this.restoreSnapshotGuarded()
+      } finally {
+        this.restoringRecovery = false
+      }
+    },
+
+    /**
+     * 批次2（ADR-5）：用户手动"回到进行中的回答"（409 带回 runId 时）。
+     *
+     * <p>**一次性**动作：先做一次历史对账（把那一轮的用户消息与已有正文取回来），
+     * `loadHistory → restoreSuspendedSnapshot` 会按既有 G2 路径**静默续收**在途轮。
+     * 不做定时轮询、不自动重试；`runId` 不进入任何用户可见文本。
+     */
+    async reattachBusyRun(): Promise<void> {
+      const busy = this.busyRun
+      if (!busy) {
+        return
+      }
+      this.busyRun = null
+      this.activeRunId = busy.runId
+      this.restoringRecovery = true
+      try {
+        await this.loadHistoryInner()
+      } finally {
+        this.restoringRecovery = false
+      }
+    },
+
+    /**
+     * 批次2 / AR-05：**重试本轮 = 仅模型步重跑**（真实后端窄入口，不本地截断、不追加用户消息）。
+     *
+     * <p>与旧假实现的区别：旧路径在"store 没有 action"时把本地消息截断后 `send(skipUserRecord)`，
+     * 那是**重发请求**（会重建上下文、可能重放工具），不是"从固定历史重跑模型步"。这里只调
+     * `POST /api/ai/runs/{runId}/retry-model-step`；202 受理后用**既有 events 通道**重挂
+     * （`lastSeq` = 本端已见的最大帧序号），由同一套帧处理续写这条助手消息。
+     *
+     * <p>失败按后端 `failedCheck` 落到对应状态（不伪造成功、不猜）：
+     * 取消 ⇒ `cancelled`；有半截内容 ⇒ 中性 `unconfirmed`；在途 ⇒ `in-progress`；
+     * 其它前置失败 ⇒ 本地化说明；网络/503 ⇒ `error`。
+     */
+    retryRunIdFor(message: ChatMessage): string | null {
+      if (typeof message.runId === 'string' && message.runId.trim() !== '') {
+        return message.runId
+      }
+      // 唯一可证明的 activeRunId 回退：这条消息就是**当前在途轮**的宿主（run 身份在连接期仍活着）。
+      // 其余情况（刷新后 activeRunId 为空 / 指向更晚一轮 / 历史通道无 runId）一律拒绝 ——
+      // 宁可不出入口，也不重试错轮。
+      if (activeRoundHostId !== null && activeRoundHostId === message.id && this.activeRunId) {
+        return this.activeRunId
+      }
+      return null
+    },
+
+    async retryModelStep(message: ChatMessage): Promise<AiRetryModelStepOutcome> {
+      if (this.loading || this.suspended) {
+        return 'in-progress'
+      }
+      const runId = this.retryRunIdFor(message)
+      if (!runId) {
+        // 归属不可证明 ⇒ 不猜、不本地重发、不回退 activeRunId（伪造功能比不动作更糟）
+        setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
+        return 'denied'
+      }
+      // 重挂锚点：既有 runSeq 优先，其次这条消息已应用的帧序号（两者都缺 = 只能全量回放）。
+      const appliedMax = message.appliedSeqs && message.appliedSeqs.length > 0
+        ? Math.max(...message.appliedSeqs)
+        : 0
+      const lastSeq = Math.max(this.runSeq[runId] ?? 0, appliedMax)
+      this.loading = true
+      let body: Record<string, unknown>
+      try {
+        body = await aiApi.retryModelStep(runId)
+      } catch (error) {
+        this.loading = false
+        if (error instanceof ApiError) {
+          const failedCheck = failedCheckOf(error)
+          const reason = retryReasonOf(error)
+          if (failedCheck === 'CANCELLED' || reason === 'ALREADY_CANCELLED') {
+            this.lastRoundOutcome = 'cancelled'
+            // 取消是终态：打上 stopped 让面板收起「重试本轮」入口（不再反复撞 409）
+            message.stopped = true
+            setNotice(this, 'ai.notice.retryCancelled')
+            return 'cancelled'
+          }
+          if (reason === 'RESUME_IN_PROGRESS' || reason === 'LEASE_HELD_ELSEWHERE'
+            || reason === 'ALREADY_RUNNING') {
+            setNotice(this, 'ai.notice.retryInProgress')
+            return 'in-progress'
+          }
+          if (error.code === ErrorCode.UNKNOWN_RUN || error.status === 404) {
+            setNotice(this, 'ai.notice.retryDeniedNotFailed', {}, 'error')
+            return 'denied'
+          }
+          if (failedCheck === 'PARTIAL_CONTENT') {
+            // AR-05：有半截正文/思考 ⇒ 不做"失效替换"，给中性「状态未确认」视图
+            message.unconfirmed = true
+            this.lastRoundOutcome = 'unconfirmed'
+            setNotice(this, 'ai.notice.retryPartial')
+            return 'partial'
+          }
+          if (error.code === ErrorCode.SESSION_BUSY) {
+            setNotice(this, 'ai.notice.retryInProgress')
+            return 'in-progress'
+          }
+          if (error.status === 503 || error.code === ErrorCode.AI_REDIS_UNAVAILABLE
+            || error.code === ErrorCode.AI_UNAVAILABLE) {
+            setNotice(this, 'ai.notice.retryUnavailable', {}, 'error')
+            return 'error'
+          }
+          if (failedCheck !== null) {
+            setNotice(this, retryDeniedNoticeKey(failedCheck), {}, 'error')
+            return 'denied'
+          }
+        }
+        setNotice(this, 'ai.notice.retryUnavailable', {}, 'error')
+        return 'error'
+      }
+      this.loading = false
+      // 200（幂等空操作）也可能带 retried:false —— 只有明确 retried:true 才进入重挂
+      if (body?.retried !== true) {
+        const reason = typeof body?.reason === 'string' ? body.reason : ''
+        if (reason === 'ALREADY_CANCELLED') {
+          this.lastRoundOutcome = 'cancelled'
+          message.stopped = true
+          setNotice(this, 'ai.notice.retryCancelled')
+          return 'cancelled'
+        }
+        if (reason === 'PENDING_UNRESOLVED') {
+          setNotice(this, 'ai.notice.retryDeniedPending', {}, 'error')
+          return 'denied'
+        }
+        setNotice(this, 'ai.notice.retryDeniedNotFailed', {}, 'error')
+        return 'denied'
+      }
+      // 202 已受理：清掉失败现场，把宿主重新置为流式态（内容由 events 回放/续收重建）
+      this.activeRunId = runId
+      this.streamInterrupted = false
+      this.stopped = false
+      this.busyRun = null
+      this.followupReady = false
+      this.lastRoundOutcome = 'ok'
+      message.parts = []
+      message.content = ''
+      message.reasoning = ''
+      message.toolRuns = []
+      message.pendingCall = null
+      message.done = false
+      message.streaming = true
+      delete message.errorCard
+      delete message.code
+      delete message.unconfirmed
+      delete message.recoveryGap
+      delete message.stopped
+      delete message.truncated
+      delete message.synthetic
+      delete message.appliedSeqs
+      deriveProjections(message)
+      // 受理即返回：重挂是长连接（持续到本轮结束），不阻塞调用方；失败由重挂路径自己的
+      // onClose/断流口径处理（与既有刷新恢复同一条通道）。
+      void this.reattachActive(runId, { hostMessageId: message.id, lastSeq })
+      return 'accepted'
+    },
+
+    /**
      * M-2b（2026-10-22）：把一条快照待决条目重建为挂起卡（刷新恢复与「串行补下一张」共用）。
      *
      * 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
@@ -2409,6 +2992,8 @@ export const useAiStore = defineStore('ai', {
         host.streaming = false
         host.done = true
       }
+      // 批次2：快照重建的宿主由该 run 的待决条目决定归属（「重试本轮」的归属证据，不得留空/留旧）
+      host.runId = runId
       // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
       // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
       // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
@@ -2530,6 +3115,8 @@ export const useAiStore = defineStore('ai', {
       activeRoundHostId = hostMessageId ?? null
       /** R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。 */
       const isCurrentRound = (): boolean => currentAbort === controller
+      /** 批次2：归档缺口只按**首帧**判一次（后续跳号可能是并发交错的正常现象）。 */
+      let gapChecked = false
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
       // 其 onClose 的断流提示不会写脏新连接的现场
       previous?.abort()
@@ -2537,7 +3124,17 @@ export const useAiStore = defineStore('ai', {
         await aiApi.reattachRun(
           runId,
           {
-            onFrame: (frame) => this.handleFrame(frame, hostMessageId),
+            onFrame: (frame) => {
+              // 批次2：续收**首帧**序号断层 = 归档窗口缺口（不可完整恢复，中性）。只判一次。
+              if (!gapChecked) {
+                const firstSeq = frameSeq(frame)
+                if (firstSeq !== null) {
+                  gapChecked = true
+                  this.noteArchiveGap(lastSeq ?? null, firstSeq)
+                }
+              }
+              this.handleFrame(frame, hostMessageId)
+            },
             onReconnect: (attempt, delayMs) => {
               if (!isCurrentRound()) {
                 return
@@ -2627,7 +3224,7 @@ export const useAiStore = defineStore('ai', {
      * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
     /**
      * @param resend.skipUserRecord 截断后重发通道（R-157 收口 MAJOR-1）：调用方已把用户消息
-     *   原地保留/更新并截断其后消息（编辑重跑 / 重试 regenerate），send 不得再追加新用户消息 ——
+     *   原地保留/更新并截断其后消息（编辑重跑），send 不得再追加新用户消息 ——
      *   否则旧文本与新文本并存（编辑）或同一提问重复两次（重试）。
      */
     async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
@@ -2659,6 +3256,8 @@ export const useAiStore = defineStore('ai', {
       // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
       this.followupReady = false
       this.poolSaturated = null
+      // 批次2：新一轮即作废上一轮的"回到进行中的回答"入口（它指的那一轮可能已经结束）
+      this.busyRun = null
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
@@ -2667,10 +3266,13 @@ export const useAiStore = defineStore('ai', {
 
       /** error 终帧会让 `aiApi.chat` 正常 resolve（不是 reject）；用本轮局部标记与开流前 catch 区分。 */
       let sawErrorTerminal = false
+      /** 批次2（F6）：本轮是否已收到**任何**帧 —— 有产出后一律不重试（非零副作用）。 */
+      let sawAnyFrame = false
       /** B1：本轮收尾是否为"挂起导致的服务端收流"（正常收尾）—— finally 据此保留 suspended。 */
       let suspendedClose = false
       const handlers: SseFrameHandlers = {
         onFrame: (frame) => {
+          sawAnyFrame = true
           if (isCurrentRound() && frame.type === 'error') {
             sawErrorTerminal = true
           }
@@ -2731,15 +3333,48 @@ export const useAiStore = defineStore('ai', {
       }
       let outcome: AiSendOutcome
       try {
-        await aiApi.chat(
-          { sessionId: this.sessionId, message: content, context },
-          handlers,
-          options
-        )
+        /**
+         * 批次2（F6）：**开流前**瞬时失败的有界重试。
+         *
+         * <p>零副作用的判据是结构性的：一个帧都没收到（`sawAnyFrame === false`）⇒ 后端没有产出
+         * 任何可观察的东西，重发同一条请求不会重复正文/工具副作用；重试**复用**同一条用户气泡与
+         * 同一个 assistant 宿主（不追加消息）。一旦收到任何帧，退化为既有失败路径（绝不重放）。
+         */
+        let preStreamAttempt = 0
+        for (;;) {
+          try {
+            await aiApi.chat(
+              { sessionId: this.sessionId, message: content, context },
+              handlers,
+              options
+            )
+            break
+          } catch (error) {
+            const retryable = preStreamAttempt < PRE_STREAM_RETRY_MAX
+              && !sawAnyFrame
+              && !this.stopped
+              && isCurrentRound()
+              && !controller.signal.aborted
+              && isTransientPreStreamError(error)
+            if (!retryable) {
+              throw error
+            }
+            preStreamAttempt += 1
+            await new Promise((resolve) => setTimeout(resolve, PRE_STREAM_RETRY_DELAY_MS))
+            if (this.stopped || !isCurrentRound() || controller.signal.aborted) {
+              throw error
+            }
+          }
+        }
         outcome = settleOutcome(sawErrorTerminal ? 'error' : 'ok')
       } catch (error) {
         const busyConflict = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
         const sessionPurged = error instanceof ApiError && error.code === ErrorCode.SESSION_PURGED
+        // 批次2（ADR-5）：409 回执里的 runId/reattach 只作**手动**"回到进行中的回答"入口。
+        // 不自动重挂、不轮询；持有者不可知（unknown=true / 无 runId）时不登记，绝不编造地址。
+        if (busyConflict && error instanceof ApiError) {
+          this.busyRun = readBusyRunRef(error)
+        }
         /** 410 是否由本处做了本地恢复（决定收尾口径与乐观气泡的去向）。 */
         let purgedRecovered = false
         if (sessionPurged) {
@@ -2836,6 +3471,10 @@ export const useAiStore = defineStore('ai', {
           ? buildErrorCard(error.code, error.message)
           : buildErrorCard('', error instanceof Error ? error.message : translate('ai.notice.chatRequestFailed'))
         const target = this.messages.find((item) => item.id === assistantId)
+        // 批次2：机器码随消息落镜像（即使该码不出卡，刷新后也还能区分失败类型）
+        if (target) {
+          target.code = error instanceof ApiError ? error.code : null
+        }
         if (target && card !== null) {
           target.errorCard = card
           cardAttached = true
@@ -2959,6 +3598,8 @@ export const useAiStore = defineStore('ai', {
         : [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
           ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
       const assistant = host ?? this.appendAssistantMessage('')
+      // 批次2：重挂的宿主就是这一 run 的消息 —— 归属必须钉住（后续重试按 message.runId 定位）
+      assistant.runId = targetRunId
       this.loading = true
       this.streamInterrupted = false
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
@@ -2970,6 +3611,8 @@ export const useAiStore = defineStore('ai', {
       activeRoundHostId = assistant.id
       /** R1/R6（issue#5）：本次接管是否仍是"当前轮"（以 AbortController 身份为准）。 */
       const isCurrentRound = (): boolean => currentAbort === controller
+      /** 批次2：归档缺口只按**首帧**判一次（续收锚点 = lastSeq）。 */
+      let gapChecked = false
       // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
       previous?.abort()
@@ -2977,7 +3620,16 @@ export const useAiStore = defineStore('ai', {
         await aiApi.reattachRun(
           targetRunId,
           {
-            onFrame: (frame) => this.handleFrame(frame, assistant.id),
+            onFrame: (frame) => {
+              if (!gapChecked) {
+                const firstSeq = frameSeq(frame)
+                if (firstSeq !== null) {
+                  gapChecked = true
+                  this.noteArchiveGap(lastSeq ?? null, firstSeq)
+                }
+              }
+              this.handleFrame(frame, assistant.id)
+            },
             onReconnect: (attempt, delayMs) => {
               if (!isCurrentRound()) {
                 return
@@ -4915,6 +5567,14 @@ export const useAiStore = defineStore('ai', {
       this.stopping = false
       this.poolSaturated = null
       this.suspended = false
+      // 批次2：恢复失败现场 / 上下文加载态 / 缺口 / 409 手动入口都属于旧会话 —— 一律不带走
+      this.historyError = null
+      this.currentError = null
+      this.contextError = null
+      this.contextStatus = 'idle'
+      this.recoveryGap = null
+      this.busyRun = null
+      this.restoringRecovery = false
       this.dropActiveForm()
       // B12：预览属于旧会话 —— 计划与预览色一起丢弃（"新建对话"不是换个盒子继续改这张表）
       this.dropSheetPreview('session')
@@ -5337,6 +5997,10 @@ export const useAiStore = defineStore('ai', {
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
+          // 批次2：把 run 归属钉在宿主消息上 —— 「重试本轮」只认它（刷新后 activeRunId 可能为空/换轮）
+          if (typeof frame.runId === 'string' && frame.runId !== '') {
+            message.runId = frame.runId
+          }
           clearNotice(this)
           break
         case 'message_start':
@@ -5344,6 +6008,9 @@ export const useAiStore = defineStore('ai', {
           // T5 三段式的 start/end：本段边界（正文/思考段共用同一套帧）—— 只写消息身份与段边界
           // （message_end 顺带封口末尾流式段，o-R1），**不改段结构**（R2-2：段收口只发生在工具类帧
           // 与轮终态）。批2：写入统一走 applyFrameToParts。
+          if (typeof frame.runId === 'string' && frame.runId !== '' && !message.runId) {
+            message.runId = frame.runId
+          }
           applyFrameToParts(message, frame)
           break
         case 'delta': {
@@ -5592,6 +6259,18 @@ export const useAiStore = defineStore('ai', {
           // AR-13：关键错误归错误卡（不再进通知条）。卡挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           // 只有专属 Alert 码（buildErrorCard 返回 null）才回落到 error 级通知。
+          // 批次2：机器码入消息（随镜像持久化）—— 刷新后仍能区分"哪种失败"。
+          message.code = frame.code ?? null
+          if (isUnconfirmedTerminal(frame)) {
+            // 批次2 / AR-05：**中性「状态未确认」** —— 不是失败（不挂错误卡、不发错误通知），
+            // 也不是完整答案。只落视图态，由面板给"重新载入 / 新开一轮"这类手动入口。
+            message.unconfirmed = true
+            message.errorCard = null
+            this.lastRoundOutcome = 'unconfirmed'
+            this.followupReady = false
+            this.clearGateSubmissions()
+            break
+          }
           const card = buildErrorCard(frame.code, frame.message)
           message.errorCard = card
           if (card !== null) {

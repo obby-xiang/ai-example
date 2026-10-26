@@ -534,6 +534,12 @@ export interface SseErrorFrame extends SseFrameBase {
   runId: string
   code: string
   message: string
+  /**
+   * 批次2 / AR-05（additive）：`true` = 这条 error 的语义是<b>终态暂不可确认</b>（中性视图），
+   * 不是普通失败。`code` 仍可是 `AI_REDIS_UNAVAILABLE` —— 前端**只能**认本显式键
+   * （或 `turn_end=unconfirmed`），不得拿故障码推断"可能成功"。
+   */
+  unconfirmed?: boolean
 }
 
 /**

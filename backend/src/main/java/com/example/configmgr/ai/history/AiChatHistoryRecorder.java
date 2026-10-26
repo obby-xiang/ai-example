@@ -52,15 +52,6 @@ public class AiChatHistoryRecorder {
 
     private static final Logger log = LoggerFactory.getLogger(AiChatHistoryRecorder.class);
 
-    /** RollingSummarizer 写在摘要消息 metadata 上的键。 */
-    private static final String COMPACTED_FROM = "compactedFrom";
-
-    /** RollingSummarizer 的摘要占位正文。 */
-    private static final String SUMMARY_PLACEHOLDER = "[上下文压缩摘要]";
-
-    /** SpToolCallingManager 的步数收尾 user 正文前缀。 */
-    private static final String STEP_LIMIT_PREFIX = "已达到本轮工具调用步数上限";
-
     private static final int MAX_MESSAGE_ID_LENGTH = 128;
 
     private final AiChatHistoryService history;
@@ -174,14 +165,15 @@ public class AiChatHistoryRecorder {
         }
     }
 
+    /**
+     * 合成/系统提示的判据 —— <b>委托</b> {@link SyntheticMessages}（唯一来源）。
+     *
+     * <p>为什么不再各写一份：写侧（本类，"最后一个真实 user"边界）与读侧
+     * （{@code AiController#toHistoryItem}，{@code synthetic=true} 展示标记）必须同源，
+     * 否则会出现"写侧当合成、读侧当用户原话"的分叉（AR-01 第 5 条：摘要不冒充用户）。
+     */
     private static boolean isSynthetic(Message message) {
-        Map<String, Object> metadata = message.getMetadata();
-        if (metadata != null && metadata.containsKey(COMPACTED_FROM)) {
-            return true;
-        }
-        String text = message.getText();
-        return text != null && (SUMMARY_PLACEHOLDER.equals(text) || text.startsWith(STEP_LIMIT_PREFIX)
-                || text.startsWith(SpToolCallingManager.TURN_BUDGET_WRAP_UP));
+        return SyntheticMessages.isSynthetic(message);
     }
 
     private static int lastRealUserIndex(List<Message> messages) {
