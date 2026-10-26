@@ -720,8 +720,8 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
       '表单条目离开 PENDING')
     expect(['FRONTEND_RESULT', 'FRONTEND_CANCELLED', 'CANCELLED', 'TIMEOUT', 'APPROVED'])
       .toContain(String(settled.status))
-    // 终态只有一种：提交成功就不会同时是取消（status 单值即证据），且轮次已收口
-    const detail = await runDetail(runId)
+    // 终态由续跑线程异步写：等轮次快照真正收口，不能把条目结算当成轮次已收口
+    const detail = await waitTerminal(runId, 30_000)
     expect((detail.pending ?? []).length).toBe(1)
     expect(['DONE', 'CANCELLED']).toContain(String(detail.snapshot?.status))
     // 表单不再可编辑（无论哪种结局都收敛）
