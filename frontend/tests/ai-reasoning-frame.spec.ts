@@ -243,6 +243,40 @@ describe('L-91 渲染：思考块独立成框、可折叠、不混入正文', ()
 const T0 = 1_700_000_000_000
 
 describe('批次6A 思考段计时：ReasoningHeader 局部秒表', () => {
+  it('卡头保留思考中/思考过程与计时，不显示字数或展开收起文字', async () => {
+    const live = messageWithReasoning('正在思考', '')
+    live.streaming = true
+    live.done = false
+    const part = live.parts.find((item) => item.kind === 'reasoning')
+    if (part?.kind !== 'reasoning') throw new Error('reasoning part missing')
+    part.streaming = true
+    const receivedAt = Date.now()
+    part.startedAt = receivedAt - 2_000
+    part.lastFrameAt = receivedAt
+    part.lastFrameLocalAt = receivedAt
+    const wrapper = await mountPanel([live])
+    const toggle = wrapper.find('[data-testid^="reasoning-toggle-"]')
+    const blockId = toggle.attributes('data-testid')!.replace('reasoning-toggle-', '')
+    expect(wrapper.find(`[data-testid="reasoning-title-${blockId}"]`).text()).toBe('思考中')
+    expect(wrapper.find(`[data-testid="reasoning-timer-${blockId}"]`).text()).toBe('2 秒')
+    expect(toggle.text()).not.toContain('字')
+    expect(toggle.text()).not.toContain('点击展开')
+    expect(toggle.text()).not.toContain('点击收起')
+
+    const store = useAiStore()
+    const current = store.messages[0]!
+    const currentPart = current.parts.find((item) => item.kind === 'reasoning')
+    if (currentPart?.kind !== 'reasoning') throw new Error('reasoning part missing')
+    currentPart.streaming = false
+    currentPart.endedAt = receivedAt + 3_000
+    current.streaming = false
+    current.done = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find(`[data-testid="reasoning-title-${blockId}"]`).text()).toBe('思考过程')
+    expect(wrapper.find(`[data-testid="reasoning-timer-${blockId}"]`).text()).toBe('5 秒')
+    wrapper.unmount()
+  })
+
   it('实时秒表从服务端起点走、message_end 的 atMs 落静止；无起点不显示', async () => {
     vi.useFakeTimers()
     try {
@@ -272,7 +306,7 @@ describe('批次6A 思考段计时：ReasoningHeader 局部秒表', () => {
       const timer = (): ReturnType<typeof wrapper.find> => wrapper.find(`[data-testid="reasoning-timer-${blockId}"]`)
       expect(timer().exists()).toBe(true)
       expect(timer().attributes('aria-live')).toBe('off')
-      expect(timer().text()).toContain('思考中')
+      expect(wrapper.find(`[data-testid="reasoning-title-${blockId}"]`).text()).toBe('思考中')
       expect(timer().text()).toContain('2 秒')
       // 折叠控件可访问：aria-expanded + aria-controls 指向正文节点
       expect(toggle.attributes('aria-expanded')).toBe('false')
@@ -283,13 +317,13 @@ describe('批次6A 思考段计时：ReasoningHeader 局部秒表', () => {
       // 局部秒表：只在组件内部 1s 一跳推进，面板其余部分不因秒数重渲染
       vi.advanceTimersByTime(3_000)
       await wrapper.vm.$nextTick()
-      expect(timer().text()).toContain('思考中')
+      expect(wrapper.find(`[data-testid="reasoning-title-${blockId}"]`).text()).toBe('思考中')
       expect(timer().text()).toContain('5 秒')
 
       // 封口：message_end 的服务端 atMs 成为 endedAt ⇒ 秒表停住（不再跟本地时钟涨）
       store.handleFrame({ type: 'message_end', messageId: 'm-6a', kind: 'reasoning', atMs: T0 + 5_000, seq: 4 })
       await wrapper.vm.$nextTick()
-      expect(timer().text()).toContain('已思考')
+      expect(wrapper.find(`[data-testid="reasoning-title-${blockId}"]`).text()).toBe('思考过程')
       expect(timer().text()).toContain('5 秒')
       vi.advanceTimersByTime(4_000)
       await wrapper.vm.$nextTick()

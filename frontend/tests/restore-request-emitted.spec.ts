@@ -8,13 +8,14 @@
  * ③ GF 表单随卡一起提前武装 ⇒ 可提前提交（后端根本还没走到那张卡）。
  *
  * 本 spec 锁四条判据（`restoreSuspendedSnapshot`）：
- * - 建卡 = `entryStatus === 'PENDING'` && `kind ∈ {CONFIRM, FRONTEND}` && `req !== false`；
+ * - 建卡 = `entryStatus === 'PENDING'` && 真实待人的 `CONFIRM/FRONTEND` && `req !== false`；
  * - `req === false`（同批请求帧还没轮到）= 不建卡，等实时帧（活轮行为不变）；
  *   `req` 缺键 **不在此列** —— M-2b 起按「升级前遗留的孤儿轮」建卡（见
  *   `restore-orphan-null-req.spec.ts`；本文件末尾只留一条旧载荷回归锁）；
- * - `suspended` 置位与 req / kind **无关**：只要存在任意 PENDING 条目就置位（输入禁用语义不变）；
+ * - `suspended` 只跟随可重建且真实等待用户动作的 CONFIRM/FRONTEND 条目；自动前端工具、
+ *   BACKEND 与 `req === false` 不制造输入锁或假等待；
  * - 未发卡条目不渲染，也不新增任何占位 UI；**但无卡 ≠ 无后续帧**（I-1，2026-10-21 收口修）：
- *   挂起态下即使一张卡都重建不出来，也照常以 `archiveMaxSeq` 挂差量续收 —— 后续请求帧到达即
+ *   即使一张卡都重建不出来，也照常以 `archiveMaxSeq` 挂差量续收 —— 后续请求帧到达即
  *   按实时路径建卡（旧行为「无卡⇒无连接」会让页面停在"输入禁用 + 上方无卡"的死胡同）。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
@@ -159,7 +160,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     expect(api.reattachRun.mock.calls[0]?.[2]?.awaitingInput ?? false).toBe(false)
   }, 15000)
 
-  it('存在任意 PENDING 条目（全部 req=false）⇒ suspended 仍置位、activeRunId 指向该轮、照常挂流（I-1）', async () => {
+  it('全部 req=false ⇒ 不伪造挂起，activeRunId 指向该轮、照常挂流（I-1）', async () => {
     const store = await freshStore()
     store.sessionId = 'sess-l0-suspend'
     store.historyLoaded = true
@@ -170,7 +171,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
 
     await store.restoreSuspendedSnapshot()
 
-    expect(store.suspended).toBe(true)
+    expect(store.suspended).toBe(false)
     expect(store.activeRunId).toBe('run-l0')
     expect(toolSegments(store.messages)).toHaveLength(0)
     // I-1（收口修）：无卡 ≠ 无后续帧 —— 仍以 archiveMaxSeq 挂差量续收，等请求帧实时到达
@@ -189,9 +190,9 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
 
     await store.restoreSuspendedSnapshot()
 
-    // 刷新瞬间：无卡、输入禁用，但连接已经挂上（旧行为 = 直接返回、无连接 ⇒ 死胡同）
+    // 刷新瞬间：无卡、无假等待锁，但连接已经挂上（旧行为 = 直接返回、无连接 ⇒ 死胡同）
     expect(toolSegments(store.messages)).toHaveLength(0)
-    expect(store.suspended).toBe(true)
+    expect(store.suspended).toBe(false)
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5, awaitingInput: false })
     const handlers = api.reattachRun.mock.calls[0]?.[1] as {
@@ -223,7 +224,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     await notRequested.restoreSuspendedSnapshot()
     expect(notRequested.activeForm).toBeNull()
     expect(toolSegments(notRequested.messages)).toHaveLength(0)
-    expect(notRequested.suspended).toBe(true)
+    expect(notRequested.suspended).toBe(false)
 
     const requested = await freshStore()
     requested.sessionId = 'sess-l0-gf-b'

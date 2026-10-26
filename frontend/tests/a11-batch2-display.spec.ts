@@ -2,7 +2,7 @@
  * 批次2 前端展示层 · 面板交互（只写不跑；聚焦 RED/GREEN 在 a11-batch2-error-card.spec.ts）。
  *
  * 覆盖父令的六件事：
- * 1. park 气泡 = 等待确认 / 等待填写（不再「工作中…」）；
+ * 1. park 气泡 = 真实待操作时统一「等待中…」，其余运行阶段显示「工作中…」；
  * 2. unconfirmed 中性视图（本轮已结束、状态未确认 + 重新载入），不写乐观 done；
  * 3. 历史恢复错误条 + 重试（store 适配器）；
  * 4. 409「回到进行中的回答」按钮（store 适配器）；
@@ -130,7 +130,7 @@ afterEach(() => {
 })
 
 describe('批次2 · park 气泡', () => {
-  it('挂起等待确认时，元信息行显示「等待你的确认」而不是「工作中…」', async () => {
+  it('真实待操作时统一显示「等待中」，沿用呼吸样式且不显示时间戳', async () => {
     const reply = buildMessage(
       [
         { kind: 'text', seg: 0, text: '准备执行', streaming: true },
@@ -147,16 +147,33 @@ describe('批次2 · park 气泡', () => {
       { toolCallId: 'c1', name: 'start_export', kind: 'CONFIRM', args: {}, rawArgs: '{}', status: 'pending' },
       true
     )
+    reply.timestamp = 1_700_000_000_000
     const wrapper = await mountPanel([userMessage('u-1', '请导出'), reply], { suspended: true })
     const wait = wrapper.find('[data-testid="park-waiting"]')
     expect(wait.exists()).toBe(true)
-    expect(wait.text()).toContain('等待你的确认')
+    expect(wait.text()).toBe('等待中…')
+    expect(wait.classes()).toEqual(expect.arrayContaining([
+      'inline-flex', 'items-center', 'gap-[5px]', 'text-[12.2px]', 'text-[#b45309]', 'tracking-[.3px]'
+    ]))
+    expect(wait.classes()).not.toContain('loading-breath')
+    const dot = wait.find('.animate-breathe')
+    expect(dot.exists()).toBe(true)
+    expect(dot.classes()).toContain('bg-[#b45309]')
     expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="msg-timestamp"]').exists()).toBe(false)
+
+    const store = useAiStore()
+    store.messages[1]!.streaming = false
+    store.messages[1]!.done = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="park-waiting"]').exists()).toBe(false)
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="msg-timestamp"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('挂起等待填写表单时，气泡显示「等待你填写表单」', async () => {
+  it('挂起生成式表单时，气泡统一显示「等待中」', async () => {
     const reply = buildMessage(
       [
         {
@@ -173,7 +190,7 @@ describe('批次2 · park 气泡', () => {
       true
     )
     const wrapper = await mountPanel([reply], { suspended: true, activeForm: { toolCallId: 'f1', runId: 'r1', form: {}, status: 'filling', error: null, values: {}, fieldErrors: [] } })
-    expect(wrapper.find('[data-testid="park-waiting"]').text()).toContain('等待你填写表单')
+    expect(wrapper.find('[data-testid="park-waiting"]').text()).toContain('等待中')
     expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(false)
     wrapper.unmount()
   })

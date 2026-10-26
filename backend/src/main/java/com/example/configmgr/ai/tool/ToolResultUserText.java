@@ -15,7 +15,8 @@ import java.util.regex.Pattern;
  * 内部接口路径、实例/轮次标识，也不出现"请直接用已经获得的信息…"这类说给模型的指令。
  *
  * <p>机器可读真值（{@code outcome}/{@code code}/{@code retryable}）不经过本类，仍由
- * {@link ToolResultEnvelope} 原样下发；本类只按 {@code code} 选择用户摘要，
+ * {@link ToolResultEnvelope} 原样下发；本类只按 {@code code} 选择用户摘要，并把命中摘要的原码
+ * 作为 {@code userTextCode} 供前端本地化；中文摘要继续作为旧路径与无本地化时的回退。
  * <b>不认识的码一律回落到原文</b>（成功结果、业务失败原因不做改写）。唯一的动态摘要是
  * 单轮 {@code create_task} 上限里的<b>业务</b>任务号（{@code 本轮已创建任务 #99}）——
  * 用户需要它去打开刚建的任务，它不是内部标识。
@@ -57,6 +58,11 @@ public final class ToolResultUserText {
 					"这一步已由其他执行实例接管，本次没有重复执行。"));
 
 	private ToolResultUserText() {
+	}
+
+	/** 命中用户摘要时复用原机器码作为本地化键；原文透传时没有摘要码。 */
+	public static String userTextCode(String code) {
+		return code != null && SUMMARIES.containsKey(code) ? code : null;
 	}
 
 	/**

@@ -164,17 +164,27 @@ class SystemPromptHitlConfirmTest {
 	}
 
 	@Test
-	void systemPromptPinsCreationConfirmationCompletedDownloadAndStructuredSelection() {
+	void systemPromptPinsExportContinuationFlatSelectionAndDownloadIntent() {
 		String systemText = runTurnAndCaptureSystemText();
 
-		assertThat(systemText).as("AR-03：创建≠执行 + 单轮一次")
-			.contains("创建≠执行").contains("同一轮最多创建一次");
-		assertThat(systemText).as("q4：COMPLETED 引导下载而不是重复导出")
-			.contains("download_export_files");
+		assertThat(systemText).as("无任务时沿既有导出链自动接续")
+			.contains("create_task → navigate_to → select_definitions → confirm_step → start_export")
+			.contains("不要求用户重复导出意图")
+			.contains("不得绕过 DANGER 确认");
+		assertThat(systemText).as("导出配置项表单直接平铺多选")
+			.contains("直接平铺多选配置项")
+			.contains("不得要求用户先选择 GLOBAL/REGION/PROJECT");
+		assertThat(systemText).as("启动导出与下载旧结果严格分离")
+			.contains("start_export 成功后严禁自动调用 download_export_files")
+			.contains("只有用户明确提出下载/获取文件意图")
+			.contains("不得把“启动导出”")
+			.contains("改写成“下载旧结果”");
+		assertThat(systemText).as("仅高危确认卡声明后果说明与复选框权威值")
+			.contains("高危确认卡上的后果说明与复选框勾选状态是**宿主权威值**")
+			.contains("勾选复选框后才可批准")
+			.doesNotContain("确认卡上的影响面、条件摘要、发布模式");
 		assertThat(systemText).as("AR-02/AR-03：两种未执行语义必须分开")
 			.contains("未批准·未执行").contains("已批准·未执行");
-		assertThat(systemText).as("结构化选择优先于开放式文字一问一答")
-			.contains("生成式表单").contains("select_definitions");
 	}
 
 	@Test

@@ -339,26 +339,48 @@ describe('E2 建议条（DOM 面）', () => {
     const store = useAiStore()
     const chip = () => wrapper.find('[data-testid="suggestion-chip"]')
 
-    // 健康可用：chips 可点（原有行为不退化）
+    // 健康可用：chips 可见且可点。
+    expect(chip().exists()).toBe(true)
     expect(chip().attributes('disabled')).toBeUndefined()
 
-    // health 不可用 ⇒ 与 composer 一样关闭发送闸，点击零请求
+    // health 不可用 ⇒ 发送闸关闭时建议直接隐藏，而不是置灰。
     store.health = { ...store.health!, available: false }
     await wrapper.vm.$nextTick()
-    expect(chip().attributes('disabled')).toBeDefined()
-    await chip().trigger('click')
-    await flushPromises()
+    expect(chip().exists()).toBe(false)
     expect(api.chat).not.toHaveBeenCalled()
 
-    // 挂起/待决等待 ⇒ 同样关闭（pendingToolCall 由消息派生；空态下以挂起态覆盖同一闸）
+    // 挂起/待决等待 ⇒ 同样隐藏（pendingToolCall 由消息派生；空态下以挂起态覆盖同一闸）。
     store.health = { ...store.health!, available: true }
     store.suspended = true
     await wrapper.vm.$nextTick()
-    expect(chip().attributes('disabled')).toBeDefined()
-    await chip().trigger('click')
-    await flushPromises()
+    expect(chip().exists()).toBe(false)
     expect(api.chat).not.toHaveBeenCalled()
 
+    wrapper.unmount()
+  })
+
+  it('COMPLETED 按任务类型过滤：IMPORT 保留后续动作，EXPORT 不重复启动导出', async () => {
+    seedCompletedRound()
+    const workspace = useWorkspaceStore()
+    workspace.page = 'import'
+    workspace.pageId = 'import'
+    workspace.taskType = 'IMPORT'
+    workspace.step = 'PUBLISH'
+    workspace.taskId = 7
+    workspace.taskStatus = 'COMPLETED'
+    const wrapper = await mountPanel()
+    const suggestionIds = () => wrapper.findAll('[data-testid="followup-suggestion"]')
+      .map((button) => button.attributes('data-suggestion-id'))
+
+    expect(suggestionIds()).toEqual(expect.arrayContaining(['startImport', 'precheckImport']))
+
+    workspace.page = 'export'
+    workspace.pageId = 'export'
+    workspace.taskType = 'EXPORT'
+    workspace.step = 'EXPORT'
+    await wrapper.vm.$nextTick()
+    expect(suggestionIds()).toEqual(expect.arrayContaining(['taskProgress', 'exportEstimate']))
+    expect(suggestionIds()).not.toContain('startExport')
     wrapper.unmount()
   })
 

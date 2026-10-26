@@ -760,6 +760,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           messageId: frame.messageId,
           // 信封文案（后端 skippedMessage 同文放帧 result）；message 仅作旧帧缺 result 时的回落。
           result: frame.result ?? frame.message ?? null,
+          ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
           truncated: frame.truncated ?? false,
           truncatedReason: frame.truncatedReason ?? null,
           ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
@@ -807,6 +808,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
+        ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
         // R-154 #2 / A10 R-15：消费帧侧截断标记（noticeCode + 结构化数字优先；
         // truncatedReason 仅作旧帧/旧客户端兼容），随段持久化供卡面「已截断」角标渲染。
         truncated: frame.truncated ?? false,
@@ -960,6 +962,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         status,
         messageId: frame.messageId,
         result: frame.result ?? null,
+        ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
         // A10 R-15 I-B：frontend_tool_result 帧同样会挂截断四件套（模型侧预裁 / 帧字节裁），
         // 必须随段透传；缺省帧不产生 undefined 键（旧帧零变化）。
         ...(frame.truncated !== undefined ? { truncated: frame.truncated } : {}),

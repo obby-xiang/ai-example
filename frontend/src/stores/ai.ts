@@ -1678,15 +1678,25 @@ function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRun
 /**
  * M-2b（2026-10-22 用户直裁「无感恢复」）：快照条目是否可重建为挂起卡。
  *
- * - `PENDING` + `kind ∈ {CONFIRM, FRONTEND}`：与 L0 同口径；
+ * - `PENDING` + `kind === 'CONFIRM'`，或确实需要用户操作的 FRONTEND 条目；
  * - `req !== false`：`true` = 请求帧已发；**缺键 = 升级前遗留的孤儿轮**（无法判定）——
  *   按可建处理，否则刷新后整轮从界面消失、输入框永久禁用。显式 `false`（同批请求帧
  *   还没轮到）保持 L0 不建卡，等实时帧到达（活轮行为不变）。
+ * 自动前端工具不走挂起卡恢复：它们的后续请求帧仍由续收路径处理，不伪造等待确认。
  */
 function isRestorablePendingEntry(entry: AiRunCurrentEntry): boolean {
-  return entry.entryStatus === 'PENDING'
-    && (entry.kind === 'CONFIRM' || entry.kind === 'FRONTEND')
-    && entry.req !== false
+  if (entry.entryStatus !== 'PENDING' || entry.req === false) {
+    return false
+  }
+  if (entry.kind === 'CONFIRM') {
+    return true
+  }
+  if (entry.kind !== 'FRONTEND') {
+    return false
+  }
+  return entry.name === GENERATIVE_FORM_TOOL
+    || UI_HANDOFF_TOOLS.has(entry.name)
+    || needsSheetPreview(entry.name, parseToolArgs(entry.arguments))
 }
 
 /**
@@ -2821,6 +2831,7 @@ export const useAiStore = defineStore('ai', {
             if (matched) {
               consumedResponses.add(matched)
               part.result = matched.responseData ?? null
+              part.userTextCode = matched.userTextCode
               // L-78：历史面的视图（后端按工具名重新派生）随段落位 —— 刷新后卡面仍是表格形态，
               // 而不是回落到旧文本。缺键 = 该工具没有视图投影（与帧内 `resultView` 同一契约）。
               if (matched.resultView) {
@@ -2869,6 +2880,7 @@ export const useAiStore = defineStore('ai', {
         const hit = responsePool[hitIndex] as NonNullable<AiHistoryMessage['toolResponses']>[number]
         consumedResponses.add(hit)
         unmatched.part.result = hit.responseData ?? null
+        unmatched.part.userTextCode = hit.userTextCode
         Object.assign(unmatched.part, historyTruncationFields(hit))
       }
       // C1（复核 m-1）：序位兜底在 deriveProjections（flatMap 内）**之后**才写 part.result ——
@@ -3100,15 +3112,15 @@ export const useAiStore = defineStore('ai', {
      * **规则：本函数内任何新增 await 之后、写回之前都必须重新对账**（对账口径见下方守卫）。
      *
      * **M-2b（2026-10-22 用户直裁「无感恢复」）：孤儿轮也重建，且串行呈现。** 判据 ——
-     * `entryStatus === 'PENDING'`、`kind ∈ {CONFIRM, FRONTEND}`（快照给的是**三值原文**，
-     * `BACKEND` 条目后端直接执行、从不弹卡）、`req !== false`。`req === true` = 请求帧已发；
+     * `entryStatus === 'PENDING'`、真实需要用户操作的 CONFIRM/FRONTEND 条目、`req !== false`。
+     * `BACKEND` 与自动前端工具直接续跑、从不弹卡；`req === true` = 请求帧已发；
      * **缺键 = 升级前遗留的孤儿轮**（是否发过帧已不可知）—— 按可建处理，否则整轮从界面消失、
      * 输入框永久禁用。显式 `req === false`（同批里请求帧还没轮到）维持 L0 口径：不建卡，
      * 等实时帧到达（活轮行为不变）。
      *
      * 串行呈现与实时路径一致：本函数**只重建第一张**，同批其余待决条目排进
      * `restoredPendingQueue`；当前卡决完后由 {@link revealNextRestoredPendingCard} 就地补下一张。
-     * 未发卡条目不渲染、不新增占位 UI；`suspended` 仍按"存在任意 PENDING 条目"置位（输入禁用语义不变）。
+     * 未发卡条目不渲染、不新增占位 UI；`suspended` 只按可重建的待人卡置位。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
       const sid = this.sessionId
@@ -3265,20 +3277,20 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
-      // 重建（M-2b）：PENDING + kind ∈ {CONFIRM, FRONTEND} + req !== false（缺键 = 孤儿轮，可建）。
+      // 重建（M-2b）：PENDING + 真实待人卡 + req !== false（缺键 = 孤儿轮，可建）。
       // - PENDING：已决条目不重建挂起卡（勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）；
-      // - kind：快照里是**三值原文**，BACKEND 条目（后端直接执行、从不弹卡）不是挂起卡；
+      // - kind：BACKEND 与自动 FRONTEND 工具不弹卡；表单、表格预览、上传交接与 CONFIRM 才等人；
       // - req：显式 false 的同批条目等实时帧，不进队列（活轮行为不变）。
       // 串行呈现：只建第一张，其余进 `restoredPendingQueue`，决完一张补一张。
       const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
-      const awaitingInput = pendingEntries.every((entry) => entry.kind === 'BACKEND' || entry.req !== false)
-      if (pendingEntries.length > 0) {
-        // 输入禁用语义只认"还有未决条目"，与 req / kind 无关
-        this.suspended = true
-        this.activeRunId = current.runId
-      }
       const restorable = pendingEntries.filter(isRestorablePendingEntry)
       const first = restorable.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
+      const awaitingInput = first !== null
+      if (pendingEntries.length > 0) {
+        this.activeRunId = current.runId
+      }
+      // 只有真实可重建的待人卡才锁输入；自动工具/BACKEND/req=false 不制造假挂起。
+      this.suspended = awaitingInput
       const host = first ? this.rebuildPendingCard(first, current.runId) : null
       this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
 
@@ -3287,15 +3299,15 @@ export const useAiStore = defineStore('ai', {
         void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id, awaitingInput)
         return
       }
-      // I-1（2026-10-21 收口修）：**无卡也要挂流** —— 挂起态下"没有可重建的卡"不等于"没有后续帧"。
+      // I-1（2026-10-21 收口修）：**无卡也要挂流** —— 没有可重建的卡不等于没有后续帧。
       // 真实窗口：卡 1 已决 → 后端先执行卡 1 的工具（时长可达数秒～数分钟，期间快照仍 SUSPENDED、
       // 卡 2 一直 `req=false`）→ 才轮到卡 2 发请求帧。刷新落在这段里时本函数此前直接返回 ⇒
-      // 卡 2 的请求帧无人接收（只入归档），页面停在"输入禁用 + 上方无卡"死胡同（只能停止或再刷新）。
+      // 卡 2 的请求帧无人接收（只入归档），页面停在没有入口的死胡同（只能停止或再刷新）。
       // 现在照常以 `archiveMaxSeq` 挂上差量续收：请求帧到达即按实时路径建卡（`confirm_request`
       // handler），不新增任何占位 UI。宿主消息在**首个帧到达时**由 `handleFrame` 惰性取当前助手消息
       // （有则续写、无则创建），故不传 `hostMessageId` —— 空转期间不留空气泡。
       // req=false 说明还有请求帧可期，不能当成已完成的 park 收流；这类恢复保留断流重连。
-      if (!this.suspended || !current.runId) {
+      if (pendingEntries.length === 0) {
         return
       }
       const lastAssistant = [...this.messages].reverse().find((item) => item.role === 'assistant')
@@ -3418,11 +3430,13 @@ export const useAiStore = defineStore('ai', {
      * 批次2：**统一的恢复失败出口** —— 错误可见 + 统一封口 + 缺口可表示。
      *
      * <p>历史/快照读取失败时，"屏上那半截"既不能继续装作在流（永久 loading/光标常驻），
-     * 也不能被当成完整答案。本方法一次做完三件事：
+     * 也不能被当成完整答案。本方法一次做完四件事：
      * <ol>
      * <li>按 scope 落机器可读错误现场（`historyError` / `currentError`），供面板出"失败 + 重试"；</li>
      * <li>封口所有未收尾的助手消息，并把它们标成 `recoveryGap`（**中性**：不是轮失败、不出错误卡）；</li>
      * <li>落 `recoveryGap` 全局态（原因 = 历史不可用 / 快照不可用），表示"不可完整恢复"。</li>
+     * <li>清掉本地待决段与交互单例，避免恢复失败留下 suspended/pendingToolCall 假等待；
+     *   只做过期降级，不伪造后端取消或成功。</li>
      * </ol>
      */
     sealRecovery(scope: Exclude<AiLoadErrorScope, 'context'>, error: unknown): void {
@@ -3436,6 +3450,14 @@ export const useAiStore = defineStore('ai', {
         this.currentError = view
       }
       this.sealLeftoverInFlight()
+      // pendingToolCall 是段投影：先清段的待决事实，再派生，不能直接给 computed 赋值。
+      for (const message of this.messages) {
+        expireResidueToolParts(message)
+        deriveProjections(message)
+      }
+      // 本地恢复已失败，交互单例与恢复队列一并清场；不发起任何后端取消/回灌。
+      this.cleanupTerminalInteractionState()
+      this.suspended = false
       for (const id of pendingIds) {
         const message = this.messages.find((item) => item.id === id)
         if (message) {
@@ -3570,11 +3592,16 @@ export const useAiStore = defineStore('ai', {
         setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
         return 'denied'
       }
-      // 重挂锚点：既有 runSeq 优先，其次这条消息已应用的帧序号（两者都缺 = 只能全量回放）。
+      // 重挂锚点：取本端已见的最大帧序号。业务帧序号从 1 开始，0 不是可靠的重挂锚点；
+      // 缺锚时禁止用 0 全量回放旧 error，也保留原失败现场，交由用户重新载入或新开一轮。
       const appliedMax = message.appliedSeqs && message.appliedSeqs.length > 0
         ? Math.max(...message.appliedSeqs)
         : 0
       const lastSeq = Math.max(this.runSeq[runId] ?? 0, appliedMax)
+      if (!Number.isFinite(lastSeq) || lastSeq <= 0) {
+        setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
+        return 'denied'
+      }
       this.loading = true
       let body: Record<string, unknown>
       try {
@@ -3686,11 +3713,12 @@ export const useAiStore = defineStore('ai', {
         ?? null
       if (!host) {
         host = this.appendAssistantMessage('')
-        host.streaming = false
-        host.done = true
       }
-      // 批次2：快照重建的宿主由该 run 的待决条目决定归属（「重试本轮」的归属证据，不得留空/留旧）
+      // 批次2：快照重建的宿主由该 run 的待决条目决定归属（「重试本轮」的归属证据，不得留空/留旧）。
+      // 待决条目证明本轮仍有后续续跑；只恢复这个宿主的活动事实，不把历史助手一律标成流式。
       host.runId = runId
+      host.streaming = true
+      host.done = false
       // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
       // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
       // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
@@ -3802,6 +3830,12 @@ export const useAiStore = defineStore('ai', {
       // 无宿主（I-1「无卡挂流」）：置 null —— `handleFrame` 收到 `assistantId === undefined` 时
       // 按"本轮"处理并惰性取用当前助手消息，故 null 与 undefined 在此等价。
       activeRoundHostId = hostMessageId ?? null
+      // 续收证明本轮仍有后续帧：只恢复已属于本轮的宿主活动事实，不触碰无关历史助手。
+      const host = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
+      if (host && (!host.done || host.runId === runId)) {
+        host.streaming = true
+        host.done = false
+      }
       /** R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。 */
       const isCurrentRound = (): boolean => currentAbort === controller
       /** 批次2：归档缺口只按**首帧**判一次（后续跳号可能是并发交错的正常现象）。 */
@@ -4751,9 +4785,10 @@ export const useAiStore = defineStore('ai', {
       )) ?? [...this.messages].reverse().find((item) => item.role === 'assistant') ?? null
       if (!host) {
         host = this.appendAssistantMessage('')
-        host.streaming = false
-        host.done = true
       }
+      // APPROVED 表示本轮仍在执行，宿主不能被恢复路径永久封成完成态。
+      host.streaming = true
+      host.done = false
       this.upsertToolPart(host, {
         toolCallId: entry.toolCallId,
         name: entry.name,
@@ -6554,9 +6589,8 @@ export const useAiStore = defineStore('ai', {
      *   一个 microtask，既有挂载时序一格不动；
      * - **复制页签**（锁被原页签持有）⇒ 对本页签整份 `sessionStorage` 清**一次**（继承的会话镜像、
      *   未提交表单草稿、业务页签键都不带走；`localStorage` 不动），随后 `adoptFreshSession()` 起
-     *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；给一条一次性
-     *   `ai.notice.copiedNewTab` 告知（AR-14：只告知、不做接回入口）；让渡监听随之装上
-     *   （原页签关闭后由 `onOwnershipMessage` 决定是否接手）；
+     *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；复制提示保持静默；
+     *   让渡监听随之装上（原页签关闭后由 `onOwnershipMessage` 决定是否接手）；
      * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
      *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
      *   那条兜底 —— 会话确实不归本页签了，但用户眼前的记录不该被当成复制品抹掉。
@@ -6605,9 +6639,7 @@ export const useAiStore = defineStore('ai', {
           // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
           clearDuplicatedTabStorage()
           this.adoptFreshSession()
-          // 批次6B / AR-14：只做**一次性告知**（这是新会话、原页签不受影响），
-          // 不提供接回原会话的入口，也不在这里读原会话历史。
-          setNotice(this, 'ai.notice.copiedNewTab')
+          // 复制页签只换本地会话并保持静默；不提供接回入口，也不在这里读原会话历史。
           rotatePageId()
           await this.claimSessionOwnership(this.sessionId)
         }
@@ -7253,8 +7285,8 @@ export const useAiStore = defineStore('ai', {
           // FE-25：与 done 同口径 —— 人围栏单例全部收口（轮已经结束，卡不能再推动它）
           this.cleanupTerminalInteractionState()
           // I-2（审查）：与 done 同口径解掉挂起态。`expireResidueToolParts` 已把待决段收口
-          // （`pendingToolCall` 变 null），若 `suspended` 还留在真值，输入区会永久锁在
-          // 「正在等待你的确认…」而屏上没有任何可点的卡 —— 只能刷新。
+          // （`pendingToolCall` 变 null）。只有真实待人卡才允许保持等待；自动工具没有卡，
+          // 若 `suspended` 仍留真值就会伪造“等待确认”并锁住输入。
           this.suspended = false
           // AR-13：关键错误归错误卡（不再进通知条）。卡挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。

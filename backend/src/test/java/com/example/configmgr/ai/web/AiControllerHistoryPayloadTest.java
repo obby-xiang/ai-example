@@ -252,6 +252,56 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	@Test
+	void userTextCodeMatchesAcrossLiveToolResultAndHistory() throws Exception {
+		String code = com.example.configmgr.common.ErrorCodes.TOOL_STEP_LIMIT;
+		com.example.configmgr.ai.conformance.InMemoryRunStore frameStore =
+				new com.example.configmgr.ai.conformance.InMemoryRunStore();
+		com.example.configmgr.ai.run.SseChatEmitter out = new com.example.configmgr.ai.run.RunRegistry(
+				frameStore, new ObjectMapper(), new AiProperties()).of("run-user-text-code");
+		com.example.configmgr.ai.run.PendingToolCall pending = new com.example.configmgr.ai.run.PendingToolCall();
+		pending.setToolCallId("tc-user-text");
+		pending.setName("list_tasks");
+		pending.setKind(com.example.configmgr.ai.run.PendingToolCall.KIND_BACKEND);
+		pending.setStatus(com.example.configmgr.ai.run.PendingToolCall.SKIPPED);
+		pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.SKIPPED.wire());
+		pending.setCode(code);
+
+		out.toolResult(pending, false, false, "内部排障原文");
+
+		Map<String, Object> frame = frameStore.events("run-user-text-code").get(0);
+		org.assertj.core.api.Assertions.assertThat(frame)
+				.containsEntry("type", "tool_result")
+				.containsEntry("code", code)
+				.containsEntry("userTextCode", code);
+		org.assertj.core.api.Assertions.assertThat(String.valueOf(frame.get("result")))
+				.contains("这一步没有执行").doesNotContain("内部排障原文");
+
+		pending.setKind(com.example.configmgr.ai.run.PendingToolCall.KIND_FRONTEND);
+		out.frontendToolResult(pending, false, "内部排障原文");
+		Map<String, Object> frontendFrame = frameStore.events("run-user-text-code").get(1);
+		org.assertj.core.api.Assertions.assertThat(frontendFrame)
+				.containsEntry("type", "frontend_tool_result")
+				.containsEntry("code", code)
+				.containsEntry("userTextCode", code);
+		org.assertj.core.api.Assertions.assertThat(String.valueOf(frontendFrame.get("result")))
+				.contains("这一步没有执行").doesNotContain("内部排障原文");
+
+		String envelopeJson = com.example.configmgr.ai.tool.ToolResultEnvelope
+				.failed(code, "内部排障原文", "{}").toJson();
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+				.responses(List.of(new ToolResponseMessage.ToolResponse("tc-user-text", "list_tasks", envelopeJson)))
+				.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].userTextCode").value(code))
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData")
+						.value(org.hamcrest.Matchers.containsString("这一步没有执行")))
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].locale").doesNotExist());
+	}
+
+	@Test
 	void existingFiveFieldsAreUnchanged() throws Exception {
 		AssistantMessage assistant = AssistantMessage.builder()
 			.content("")

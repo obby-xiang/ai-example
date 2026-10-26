@@ -1754,7 +1754,8 @@ public class AiController {
 	 * 直接透传信封会让卡片里出现一整段 {@code {"ok":...}}。因此先剥壳取 {@code message}，
 	 * 再按 {@code code} 换成用户摘要（预算/步数/上游失败/资源锁/错入口/关闸/越 scope/超时/
 	 * 他实例认领）；{@code outcome}/{@code code} 仍由 {@code toolCallStates} 原样回放。
-	 * 旧数据（不是信封）原样透传；模型侧信封原文不受影响（记忆与台账里仍是可排障的文本）。
+	 * 命中摘要时以同名 {@code userTextCode} 透出原码供前端本地化；旧数据（不是信封）原样透传，
+	 * 模型侧信封原文不受影响（记忆与台账里仍是可排障的文本）。
 	 */
 	private List<Map<String, Object>> historyToolResponses(ToolResponseMessage message) {
 		List<Map<String, Object>> out = new ArrayList<>(message.getResponses().size());
@@ -1762,8 +1763,10 @@ public class AiController {
 			Map<String, Object> item = new LinkedHashMap<>();
 			item.put("id", response.id());
 			item.put("name", response.name());
-			item.put("responseData", ToolResultUserText.forUser(envelopeCode(response.responseData()),
+			String code = envelopeCode(response.responseData());
+			item.put("responseData", ToolResultUserText.forUser(code,
 					historyMessageText(response.responseData())));
+			item.put("userTextCode", ToolResultUserText.userTextCode(code));
 			// A10 R-15：模型侧视图截断是**持久事实**（信封五字段），历史通道必须原样透出，
 			// 否则刷新后截断角标与 locale hover 消失（帧只活在实时流里）。
 			Map<String, Object> truncation = historyTruncation(response.responseData());

@@ -364,18 +364,6 @@
       "irreversible": "I understand that {action} cannot be undone",
       "publishIrreversible": "Confirm starting the publish job: if this run uses replace mode, old data in scope will be deleted and cannot be undone",
       "ackHint": "Tick the box above to continue",
-      "facts": {
-        "title": "Decision facts",
-        "expand": "Expand",
-        "collapse": "Collapse",
-        "impact": "Impact",
-        "condition": "Condition summary",
-        "publishMode": "Publish mode",
-        "mode": {
-          "merge": "Merge (incremental)",
-          "replace": "Replace (in scope)"
-        }
-      },
       "action": {
         "start_publish": "starting the publish job"
       }
@@ -487,11 +475,21 @@
         "history": "The full history is stored in the server database long-term with no automatic expiry; closing the tab does not stop the run on the server."
       },
       "thinking": "Thinking process",
-      "thinkingChars": "{n} characters",
-      "thinkingExpand": "Click to expand",
-      "thinkingCollapse": "Click to collapse",
-      "thinkingSeconds": "Thought for {seconds}s",
-      "thinkingRunning": "Thinking · {seconds}s",
+      "thinkingLive": "Thinking",
+      "thinkingSeconds": "{seconds}s",
+      "toolResult": {
+        "TOOL_STEP_LIMIT": "This turn's tool-call limit was reached, so this step was not executed. The assistant will continue with the available information.",
+        "TOOL_BUDGET_EXHAUSTED": "This conversation's context is full, so this step was not executed. The assistant will continue with the available information.",
+        "UPSTREAM_FAILED": "The previous step did not succeed, so this step was not executed. The assistant will continue with the available information.",
+        "CREATE_TASK_TURN_LIMIT": "Only one task can be created per turn, so no additional task was created. Please request a new task in the next turn.",
+        "CREATE_TASK_TURN_LIMIT_WITH_ID": "Task #{id} was already created in this turn. Only one task can be created per turn, so no additional task was created.",
+        "RESOURCE_LOCKED": "This task already has a job running, so this action was not executed. Wait for the job to finish and try again.",
+        "TOOL_KIND_MISMATCH": "This step was not executed. Complete this action on the current page.",
+        "SHEET_DISABLED": "Spreadsheet features have been disabled by an administrator, so this step was not executed.",
+        "SCOPE_NOT_DISCLOSED": "This action is not available on the current page or step, so it was not executed.",
+        "TOOL_TIMEOUT": "This step did not finish in time, and its result is unconfirmed. It may have made partial changes; verify them before continuing.",
+        "TOOL_ALREADY_CLAIMED": "Another execution instance took over this step, so it was not executed again."
+      },
       "skippedHuman": "This step was not executed; the assistant will continue with what it already has.",
       "internalHuman": "This step did not complete normally.",
       "gateExpiredHuman": "This turn is no longer available. Please ask again.",
@@ -516,9 +514,7 @@
       "retryTurnHint": "Rerun only the model step (no tool re-execution, no extra user message)",
       "regenerateMessage": "Regenerate this answer",
       "editDeleteConfirm": "Editing will delete {count} later message(s), and this cannot be undone. Continue?",
-      "waitingConfirm": "Waiting for your confirmation",
-      "waitingForm": "Waiting for you to fill the form",
-      "waitingFrontend": "Waiting for your action",
+      "waiting": "Waiting…",
       "turnUnconfirmed": "This turn has ended, but its status is unconfirmed",
       "turnUnconfirmedHint": "The content shown may be incomplete. Reload to sync the server state, or start a new turn.",
       "compacted": "Earlier conversation was compacted",
@@ -1273,6 +1269,7 @@
         "downloadInFlight": "{code} download already in progress; not started again",
         "downloaded": "Downloaded {name}",
         "downloadFailed": "Download failed",
+        "downloadSuperseded": "Export results are now batch {batch}; this download was cancelled (the old batch will not be downloaded)",
         "zipDownloaded": "Packaged {count} files for download",
         "zipFailed": "Failed to package the download",
         "pickZipDefs": "Tick the definitions to package first",

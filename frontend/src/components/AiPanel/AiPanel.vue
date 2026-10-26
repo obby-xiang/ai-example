@@ -121,7 +121,7 @@
     <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
          R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。 -->
     <div
-      v-if="ai.notice"
+      v-if="ai.notice && ai.noticeCode !== 'ai.notice.copiedNewTab'"
       class="m-2 flex items-center gap-[8px] border px-[11px] py-[8px] text-[12.6px]"
       :class="noticeIsError
         ? 'border-solid border-[#f0d5d0] bg-[#fdf1ef] text-[#1f2328] rounded-[9px]'
@@ -150,16 +150,6 @@
         {{ t('ai.panel.returnToActiveRun') }}
       </button>
     </div>
-
-    <!-- 批次3：压缩 / 准备中阶段条 —— 真实已用秒数 + 完成提示，不显示百分比。
-         秒数在子组件内部推进（aria-live 只随阶段变化播一次，不逐秒播报）。 -->
-    <CompactionStatus
-      v-if="stageMode"
-      :mode="stageMode"
-      :started-at-ms="stageStartedAtMs"
-      :elapsed-ms="stageElapsedMs"
-      @retry="ai.retryPreparing()"
-    />
 
     <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
@@ -247,14 +237,13 @@
         </div>
         <!-- 批 E · E2（用户裁决 2026-10-22）：空态快捷 chips 点击**直接发送**（不再回填输入框）。
              写操作靠既有 HITL 确认卡兜底；文案与"每轮建议"共用一份词表（ai.suggestions.*，双语）。 -->
-        <div class="mt-[11px] flex flex-wrap gap-[6px]">
+        <div v-if="chipsAvailable && visibleEmptyStateChips.length" class="mt-[11px] flex flex-wrap gap-[6px]">
           <button
-            v-for="chip in EMPTY_STATE_CHIPS"
+            v-for="chip in visibleEmptyStateChips"
             :key="chip"
             type="button"
             :class="SUGGESTION_CHIP"
             data-testid="suggestion-chip"
-            :disabled="chipDisabled"
             :aria-label="t('ai.suggestions.sendAria', { text: t(`ai.suggestions.${chip}`) })"
             @click="sendPreset(t(`ai.suggestions.${chip}`))"
           >
@@ -311,10 +300,8 @@
                R-154 #13+14 起 activity 恒为单段卡（组壳已拆），展开态读 store 三态
                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
-          <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
-            <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路
-                 （chSplit/CH_TAIL 逐字符渐显退役——R-159 该语义被 Markdown 渲染取代，spec 口径同步改写）；
-                 R-159 #3：流式正文末尾打字机光标保留（移出正文 div，随块同帧淡出）。 -->
+          <template v-for="block in blocksOf(m)" :key="block.id">
+            <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路。 -->
             <!-- R-163B G4 → R-165 S5b：v-html 内交互（代码块复制 / mermaid 卡四钮：复制源码 · tab 切换 ·
                  复位 · 全屏）走事件委托（onMdBodyClick），不在注入 HTML 内联任何脚本。 -->
             <!-- R-165 S4：md-body 容器按 role 挂两条修正类（全部走任意变体类）：
@@ -348,11 +335,6 @@
               :title="textTruncationTitle(block)"
               data-testid="text-truncated-badge"
             ></span>
-            <span
-              v-if="block.kind === 'text' && (showCaret(m, bi) || isFading(m))"
-              :class="[CARET_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
-              data-testid="stream-caret"
-            ></span>
 
             <!-- S6 批1（裁决 2026-10-15 第 3 条）：HITL **独立回执块退役** —— 原 `block.kind === 'receipt'`
                  分支（徽标行 + 「查看详情 ⇄ 收起详情」钮 + 单层 mono JSON 盒）整段删除；
@@ -366,7 +348,7 @@
               <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
                 <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢）
                      R-165 S2：思考卡按 demo v7 `.reason` 结构重写 —— 卡容器 bg-#f6f7f9 / 1px #e3e6ea /
-                     圆角 10；卡头 = 圆环⋆ 图标 + 「思考过程」12.4px#57606a + 摘要 11.5px#8b949e + chevron；
+                     圆角 10；卡头只保留思考中/思考过程与计时，折叠仍由 chevron 承担；
                      R-166 口径⑦：图标字形由 demo 的 U+2726（四角星）改 U+22C6 —— demo 实字落在
                      U+2600-27BF（本批 emoji 复扫的判废区间）内，改取同形的数学星号保住视觉且扫描 0 命中。
                      展开体 = 左竖线（border-l-2 #e3e6ea）+ pl-10px/pr-11px/pb-10px 的 12.6px#57606a 正文。 -->
@@ -497,33 +479,6 @@
                             <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
                           </div>
                         </div>
-                        <!-- 批4 / AR-02：已决只读卡同样保留知情摘要（默认收起，与待决门卡同一份纯函数）。 -->
-                        <div v-if="gateFactsOf(part).length" class="mx-[11px] mt-[9px]" data-testid="gate-facts">
-                          <button
-                            type="button"
-                            class="flex w-full items-center gap-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-left text-[12.2px] leading-[1.5] text-[#57606a] transition-colors duration-[150ms] hover:border-[#d8dde3] hover:text-[#1f2328]"
-                            :aria-expanded="gateFactsExpanded(part)"
-                            data-testid="gate-facts-toggle"
-                            @click="toggleGateFacts(part.toolCallId)"
-                          >
-                            <span class="flex-1 min-w-0 break-words">{{ t('ai.hitl.facts.title') }}</span>
-                            <span class="flex-none text-[11.5px]">{{ gateFactsExpanded(part) ? t('ai.hitl.facts.collapse') : t('ai.hitl.facts.expand') }}</span>
-                          </button>
-                          <div
-                            v-if="gateFactsExpanded(part)"
-                            class="mt-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
-                            data-testid="gate-facts-body"
-                          >
-                            <div
-                              v-for="row in gateFactsOf(part)"
-                              :key="row.key"
-                              class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
-                            >
-                              <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
-                              <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
-                            </div>
-                          </div>
-                        </div>
                       </template>
                       <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮）。
                            卡体留白与门卡只读态同构：mx-[11px] mt-[9px] 包裹（demo
@@ -614,7 +569,7 @@
                              S6 批1 长内容审计清零项：补 break-all + overflow-wrap:anywhere（长串不越界）。
                              2A 批（裁决 §14.4 代码 / 详情族）：限高改双约束 `min(280px,35vh)`。 -->
                         <div data-testid="tool-output-text" :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
-                          {{ part.result }}<span
+                          {{ toolResultText(part) }}<span
                             v-if="part.truncated"
                             class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
                             :title="truncationTitle(part)"
@@ -697,9 +652,8 @@
                                继续」+ 内层 chip）整段退役，字段表与按钮行直接落在统一卡头的卡体内；
                                操作/参数行一个不少（操作 + args 全键，敏感掩码口径不变）。
                                倒计时环 / 剩余秒 / 「等待人工确认」静态兜底随去超时裁决一并退役
-                               （历史 TIMEOUT 卡只读展示保留）。旧预检五段式摘要区不恢复；
-                               批4 / AR-02 只以**可折叠、默认收起**的只读三字段（影响面 / 条件摘要 /
-                               权威发布模式）承接知情信息；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
+                               （历史 TIMEOUT 卡只读展示保留）。普通确认不展示额外摘要；
+                               仅不可逆操作保留后果说明与勾选批准门；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
                           <div class="pb-[11px]" data-testid="hitl-gate">
                             <!-- 字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
                                  按钮行在滚动区之外常驻。 -->
@@ -718,34 +672,6 @@
                                      （min-w-0 + 上限 40%）+ truncate + title 看全，与只读卡键列同口径。 -->
                                 <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
-                              </div>
-                            </div>
-                            <!-- 批4 / AR-02：知情摘要 —— 只读三字段（影响面 / 条件摘要 / 权威发布模式），
-                                 默认收起、展开后才进 DOM；不恢复旧预检区五段式、不恢复“查看详情”抽屉。 -->
-                            <div v-if="gateFactsOf(part).length" class="mx-[11px] mt-[9px]" data-testid="gate-facts">
-                              <button
-                                type="button"
-                                class="flex w-full items-center gap-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-left text-[12.2px] leading-[1.5] text-[#57606a] transition-colors duration-[150ms] hover:border-[#d8dde3] hover:text-[#1f2328]"
-                                :aria-expanded="gateFactsExpanded(part)"
-                                data-testid="gate-facts-toggle"
-                                @click="toggleGateFacts(part.toolCallId)"
-                              >
-                                <span class="flex-1 min-w-0 break-words">{{ t('ai.hitl.facts.title') }}</span>
-                                <span class="flex-none text-[11.5px]">{{ gateFactsExpanded(part) ? t('ai.hitl.facts.collapse') : t('ai.hitl.facts.expand') }}</span>
-                              </button>
-                              <div
-                                v-if="gateFactsExpanded(part)"
-                                class="mt-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
-                                data-testid="gate-facts-body"
-                              >
-                                <div
-                                  v-for="row in gateFactsOf(part)"
-                                  :key="row.key"
-                                  class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
-                                >
-                                  <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
-                                  <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
-                                </div>
                               </div>
                             </div>
                             <!-- 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。
@@ -902,13 +828,13 @@
           <!-- 批次 7C：>10k 字符的本条消息只出**一条**中性降级提示（消息 id 维度，不是段维度；
                `renderMarkdown` 只在该消息首个降级帧返回文案，后续帧/重渲不重复）。 -->
           <div
-            v-if="degradeNotices[m.id]"
+            v-if="degradeNotices[degradeNoticeKey(m.id)]"
             class="mt-[6px] flex items-start gap-[6px] rounded-[9px] border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[9px] py-[6px] text-[11.5px] leading-[1.6] text-[#57606a]"
             :data-testid="'degrade-notice-' + m.id"
             role="note"
           >
             <span class="flex-[0_0_14px] text-center" aria-hidden="true">—</span>
-            <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ degradeNotices[m.id] }}</span>
+            <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ degradeNotices[degradeNoticeKey(m.id)] }}</span>
           </div>
 
           <!-- R-165 S4 → S5a 项 6：用户长消息「展开/收起」—— 真溢出（正文高 > 184px = 8 行）才出；
@@ -945,15 +871,13 @@
           :data-testid="'msg-ops-' + m.id"
         >
           <span class="flex items-center gap-1 min-h-[18px]">
-            <!-- 批次2（N4）：park 等人期间不显示「工作中…」——按待人卡类型显示等待确认 / 填写。
-                 轮次的 streaming 事实不改，只换展示判据。 -->
             <span
-              v-if="waitingTextKey(m)"
+              v-if="waitingForAction(m)"
               data-testid="park-waiting"
               class="inline-flex items-center gap-[5px] text-[12.2px] text-[#b45309] tracking-[.3px]"
             >
-              <span class="w-[7px] h-[7px] rounded-full bg-[#b45309]" aria-hidden="true"></span>
-              <span>{{ t(waitingTextKey(m) ?? 'ai.panel.waitingConfirm') }}</span>
+              <span class="w-[7px] h-[7px] rounded-full bg-[#b45309] animate-breathe" aria-hidden="true"></span>
+              <span>{{ t('ai.panel.waiting') }}</span>
             </span>
             <span
               v-else-if="isBreathing(m) || isFading(m)"
@@ -962,7 +886,7 @@
             >
               <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px]">{{ t('ai.panel.breathing') }}</span>
             </span>
-            <span v-else-if="formatProgressiveTs(m.timestamp)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
+            <span v-else-if="showTimestamp(m)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
             class="flex items-center gap-2"
@@ -1172,7 +1096,6 @@
           data-testid="followup-suggestion"
           :data-suggestion-id="item.id"
           :class="SUGGESTION_CHIP"
-          :disabled="chipDisabled"
           :aria-label="t('ai.suggestions.sendAria', { text: suggestionText(item) })"
           @click="sendPreset(suggestionText(item))"
         >
@@ -1204,7 +1127,7 @@
     <!-- 输入区（问题4 composer v2 阶段一，demo docs/demo/chat-ux/composer-decisions.html ①/②）：
          form 形态 = 1 行 40px 起 / [field-sizing:content] 随内容增高 / 4 行 101px 封顶后框内滚动；
          白底 shell + 整盒 focus-within 蓝环；盒内底栏左工具位虚线占位、右 28×28 圆形发送/停止钮。
-         行为：流式生成中 textarea 保持可编辑（硬禁用只看真实不可用/挂起/pendingToolCall）；
+         行为：生成、挂起、表单、自动工具与健康异常时 textarea 始终可编辑，发送闸独立拦截；
          普通 Enter 空闲走 send，流式中 preventDefault 后静默；Shift+Enter 不拦截；
          IME 组合期（isComposing / keyCode 229 / compositionend 约 30ms）不误发；失焦复位组合态。 -->
     <div
@@ -1222,8 +1145,7 @@
           rows="1"
           data-testid="composer-input"
           :maxlength="MESSAGE_MAX_CHARS"
-          class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] [outline:none] [field-sizing:content] placeholder:text-[#8b949e] disabled:cursor-default"
-          :disabled="composerHardDisabled"
+          class="block min-h-[40px] max-h-[101px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] font-[inherit] text-[13px] leading-[1.6] text-[#1f2328] [outline:none] [field-sizing:content] placeholder:text-[#8b949e]"
           :placeholder="inputPlaceholder"
           @keydown="onComposerKeydown"
           @compositionstart="onComposerCompositionStart"
@@ -1264,7 +1186,7 @@
             data-composer-tip="send"
             class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
             :aria-label="t('ai.panel.send')"
-            :disabled="composerHardDisabled || !canSubmit"
+            :disabled="!canSubmit"
             @click="send"
           >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">{{ t('ai.panel.send') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
         </div>
@@ -1493,7 +1415,6 @@ import {
   cardStatusOf,
   cardTypeOf,
   formSpecOf,
-  gateFactsRows,
   hasBodyRows,
   isBlankText,
   isReadOnlyCard,
@@ -1515,7 +1436,6 @@ import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRender
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
-import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
 import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
 import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type TextPart, type ToolPart } from '@/types/ai'
@@ -1529,28 +1449,6 @@ import type { ErrorCardVariant } from '@/utils/error-card'
 const { t, locale } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
-
-/**
- * 批次3：阶段条的唯一判据（准备中 > 压缩中 > 压缩完成）。
- *
- * 直接把 store 的三组字段映射成组件 props；秒数由 `CompactionStatus` 内部时钟推进，
- * 面板本身不因秒数重渲染。`runId` 只留在 store，绝不进模板。
- */
-const stageMode = computed<'compacting' | 'preparing' | 'done' | null>(() => {
-  if (ai.preparingRun) {
-    return 'preparing'
-  }
-  if (ai.compactionPhase === 'compacting') {
-    return 'compacting'
-  }
-  return ai.compactionPhase === 'done' ? 'done' : null
-})
-const stageStartedAtMs = computed(() => (stageMode.value === 'preparing'
-  ? ai.preparingRun?.startedAtMs ?? null
-  : ai.compactionStartedAtMs))
-const stageElapsedMs = computed(() => (stageMode.value === 'preparing'
-  ? ai.preparingRun?.elapsedMs ?? null
-  : ai.compactionElapsedMs))
 
 /**
  * 批次6A：消息流（`role="log"`）的 `aria-busy` —— 加载与流式两种"还在变"的状态。
@@ -1849,6 +1747,7 @@ function turnHasOutput(message: ChatMessage): boolean {
 
 /** 继续（append-drive）：追加驱动，不删历史、**不追加用户气泡**（保持既有 skipUserRecord 口径）。 */
 function continueTurn(_message: ChatMessage): void {
+  clearStreamMdCache()
   void ai.send(t('ai.panel.continue'), { skipUserRecord: true })
 }
 
@@ -1860,6 +1759,7 @@ function continueTurn(_message: ChatMessage): void {
  * 后端不允许（非 FAILED / 有半截 / 待决未清）就由 store 按 `failedCheck` 显示对应状态。
  */
 function retryTurn(message: ChatMessage): void {
+  clearStreamMdCache()
   void ai.retryModelStep(message)
 }
 
@@ -2031,14 +1931,9 @@ const MD_BODY_USER_CLASS = `[&>*:last-child]:!mb-0 [&_p]:text-[13.5px] [&_li]:te
 const MD_BODY_AI_CLASS = `[&>*:last-child]:!mb-0 ${CODE_PRE_LIMIT_CLASS}`
 
 /**
- * R-165 S5c：三段状态动画/装饰元素的模板类串（原 ai-chat.css `.caret` / `.loading-breath` /
- * `.fade-out` / `.tchev` 逐值迁移）。**语义标记类保留**（`caret` / `loading-breath` / `fade-out` /
- * `tchev`）——它们与 `.md-body` / `cpbtn` / `mmdc-*` 同属「结构标记」命名法，既有断言（fade-out
- * 两态、`.tchev` 存在）与外部探针靠它们定位；承载视觉的是随行的 Tailwind 工具类。
- * keyframes 本体见 tailwind.config.js（aiBlink / aiBreathe / aiFadeOut）。
+ * 活动中提示、淡出与 chevron 共用模板工具类；等待中保留原琥珀样式，圆点同样使用呼吸动画。
+ * keyframes 本体见 tailwind.config.js（aiBreathe / aiFadeOut）。
  */
-const CARET_CLASS =
-  'caret inline-block w-[6px] h-[14px] bg-[#57606a] align-[-2px] rounded-[1px] animate-caret motion-reduce:animate-none'
 const BREATH_CLASS = 'loading-breath inline-flex items-center gap-[6px] m-0 pl-[2px] text-[12.2px] text-[#57606a]'
 /** 完成淡出：`fade-out` 为标记类（既有两态断言锚），`animate-fade-out` 承载 0.3s forwards。 */
 const FADE_OUT_CLASS = 'fade-out animate-fade-out'
@@ -2211,38 +2106,34 @@ const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
  * 顺序 = 用户最常用的四件事：看定义 / 看工作区 / 估行数 / 启动作业。
  */
 const EMPTY_STATE_CHIPS = ['listDefs', 'workspaceState', 'exportEstimate', 'startExport'] as const
+const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'precheckImport'])
+const chipsAvailable = computed(() => ai.available && ai.canSend && !ai.suspended && ai.pendingToolCall === null)
+const visibleEmptyStateChips = computed(() => EMPTY_STATE_CHIPS.filter((chip) => suggestionAllowedForTask(chip)))
+
+function suggestionAllowedForTask(id: string): boolean {
+  if (!TERMINAL_TASK_SUGGESTIONS.has(id)) {
+    return true
+  }
+  if (workspace.taskStatus === 'CANCELLED') {
+    return false
+  }
+  return !(workspace.taskStatus === 'COMPLETED' && workspace.taskType === 'EXPORT' && id === 'startExport')
+}
 
 /** 建议/胶囊的当前语言文案（模板 id + 插值参数 → 文案；缺键时 vue-i18n 回落 key 原文）。 */
 function suggestionText(item: FollowupSuggestion): string {
   return t(`ai.suggestions.${item.key}`, item.params ?? {})
 }
 
-/**
- * 点 chip / 点建议 = **直接发送**（批 E · E2：不再回填输入框）。
- *
- * 直接走 `ai.send()`（与用户手打发送同一入口）：写操作该走确认卡的自然会走确认卡，
- * 面板不在这里做任何"要不要先问一句"的判断。在途轮里点了不响应、**不提示**（批G · G6 用户直裁：
- * 输入/快捷操作都不响应，用户要发就自己先停止）。
- */
 function sendPreset(text: string): void {
-  if (chipDisabled.value) {
+  if (!chipsAvailable.value) {
     return
   }
   void ai.send(text)
 }
 
-/**
- * 每轮正常完成后的建议（2–3 条；规则模板 + 现有上下文槽位）。
- *
- * <h2>闸门（缺一不出）</h2>
- * <ul>
- * <li>本轮以**非取消的 done** 收尾（store 的 `followupReady`）、且没有在生成/挂起；</li>
- * <li>没有待确认卡 / 待前端执行的调用 / 表单 / 写预览 / 上传交接（挂着卡时建议会抢注意力）；</li>
- * <li>最后一条是助手消息且已封口（流式中不出，免得建议随 token 抖动）。</li>
- * </ul>
- */
 const followups = computed<FollowupSuggestion[]>(() => {
-  if (!ai.followupReady || ai.loading || ai.suspended || ai.streamInterrupted) {
+  if (!chipsAvailable.value || !ai.followupReady || ai.loading || ai.suspended || ai.streamInterrupted) {
     return []
   }
   if (ai.lastRoundOutcome !== 'ok') {
@@ -2263,7 +2154,7 @@ const followups = computed<FollowupSuggestion[]>(() => {
     taskType: workspace.taskType,
     step: workspace.step,
     taskId: workspace.taskId
-  })
+  }).filter((item) => suggestionAllowedForTask(item.id))
 })
 
 const healthLabel = computed(() => {
@@ -2282,34 +2173,10 @@ const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
 
 const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degradeUnknown'))
 
-/**
- * 问题4 composer v2：输入区硬禁用只看真实不可用 / 挂起 / 待处理工具调用。
- * health 尚未探测（null 且无 healthError）= 未知态，不硬禁用（避免首帧闪禁 / 吞掉输入）；
- * `ai.loading`（流式生成中）**不**硬禁用 —— 生成中仍可继续编辑，发送位换停止钮。
- *
- * 这个判据同时是空态快捷 chips 的可用性闸（U3）：chips 点即发，不能绕过 composer 的
- * health / 挂起 / 待决门；`availabilityGateClosed` 就是两者共用的那一个真值源。
- */
-const availabilityGateClosed = computed(
-  () =>
-    (ai.health !== null && !ai.health.available) ||
-    ai.healthError !== null ||
-    ai.suspended ||
-    ai.pendingToolCall !== null
-)
-
-const composerHardDisabled = computed(() => availabilityGateClosed.value)
-
-/** 发送闸只认 health available + 非空 + 未超限；不依赖 loading（流式中的 Enter 在 keydown 层静默）。 */
+/** 输入始终可编辑；发送闸只拦发送，与建议 chip 共用同一份可执行状态。 */
 const canSubmit = computed(
-  () => ai.available && inputText.value.trim().length > 0 && inputText.value.length <= MESSAGE_MAX_CHARS
+  () => chipsAvailable.value && inputText.value.trim().length > 0 && inputText.value.length <= MESSAGE_MAX_CHARS
 )
-
-/**
- * 空态 chips 的禁用态 = composer 发送闸（health available + 非挂起/待决 + 非在途轮）。
- * 在途轮（`canSend=false`）保留既有「点击不响应、不提示」口径，但按钮明确禁用。
- */
-const chipDisabled = computed(() => !ai.available || availabilityGateClosed.value || !ai.canSend)
 
 /**
  * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
@@ -2495,7 +2362,7 @@ function onComposerTipEscape(event: KeyboardEvent): void {
 /**
  * Enter 唯一入口：空闲普通 Enter 走现有 send；流式中 preventDefault 后静默返回
  * （不发送 / 不停止 / 不提示 / 不换行）；Shift+Enter 不拦截；IME 组合期与 repeat 不发。
- * 发送闸与发送钮同源（composerHardDisabled || !canSubmit），不允许键盘绕过禁用。
+ * 发送闸与发送钮同源（!canSubmit），不允许键盘绕过禁用。
  */
 function onComposerKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Enter' || event.shiftKey) {
@@ -2512,7 +2379,7 @@ function onComposerKeydown(event: KeyboardEvent): void {
     return
   }
   event.preventDefault()
-  if (event.repeat || ai.loading || composerHardDisabled.value || !canSubmit.value) {
+  if (event.repeat || ai.loading || !canSubmit.value) {
     return
   }
   void send()
@@ -2558,69 +2425,34 @@ const formHostMessageId = computed(() => {
   return null
 })
 
-/** 批次2（N4）：park 等人的气泡态 —— 不是「工作中…」，而是明确等哪一种用户动作。 */
-type WaitingKind = 'confirm' | 'form' | 'frontend'
-
-const WAITING_TEXT_KEY: Record<WaitingKind, string> = {
-  confirm: 'ai.panel.waitingConfirm',
-  form: 'ai.panel.waitingForm',
-  frontend: 'ai.panel.waitingFrontend'
-}
-
 function isLastAssistantMessage(message: ChatMessage): boolean {
   return message.role === 'assistant' && ai.messages[ai.messages.length - 1] === message
 }
 
-/**
- * park 等待中的气泡态判据：轮次 `suspended` 为真时，宿主助手消息不再显示「工作中…」。
- * - 有生成式表单（activeForm / GENERATIVE_FORM_TOOL 待决段）⇒ 等待填写；
- * - 有 CONFIRM 待决段 ⇒ 等待确认；
- * - 其余待决前端工具 ⇒ 等待你的操作；
- * - 无待决段但最后一条助手消息仍在挂起态 ⇒ 等待确认（不谎报"工作中"）。
- * unconfirmed 是"已结束、状态未确认"，不归 park（另出中性视图），故排除。
- */
-function waitingKind(message: ChatMessage): WaitingKind | null {
-  if (message.role !== 'assistant' || ai.runPhase !== 'parked' || unconfirmedOf(message)) {
-    return null
+/** 只有当前消息里真实存在可操作卡时才显示等待；自动前端工具与其余运行阶段都算工作。 */
+function waitingForAction(message: ChatMessage): boolean {
+  if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || unconfirmedOf(message)) {
+    return false
   }
-  const pending = message.parts.filter(
-    (part): part is ToolPart => part.kind === 'tool' && part.requiresAction === true
-  )
-  const activeFormId = ai.activeForm?.toolCallId ?? null
-  if (pending.some((part) => part.name === GENERATIVE_FORM_TOOL)
-    || (activeFormId !== null && (pending.some((part) => part.toolCallId === activeFormId)
-      || (pending.length === 0 && isLastAssistantMessage(message))))) {
-    return 'form'
-  }
-  if (pending.some((part) => part.kind2 === 'CONFIRM')) {
-    return 'confirm'
-  }
-  if (pending.length > 0) {
-    return 'frontend'
-  }
-  return isLastAssistantMessage(message) ? 'confirm' : null
+  return message.parts.some((part) => part.kind === 'tool'
+    && part.requiresAction
+    && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL || isSheetPreviewPart(part) || isUploadHandoffPart(part)))
 }
 
-function waitingTextKey(message: ChatMessage): string | null {
-  const kind = waitingKind(message)
-  return kind === null ? null : WAITING_TEXT_KEY[kind]
-}
-
-/**
- * R-159 #2：「工作中…」呼吸全程常驻判据 —— 助手消息 streaming 全期成立（发出即现，
- * 首字符上屏不消失；原 isTyping 的「无正文」判据退役，消费点仅元信息行左位一处）。
- *
- * 批次2：park 等待 / unconfirmed 都不再显示「工作中…」（前者换成等待确认/填写，
- * 后者出中性未确认视图），但仍不改写 `streaming`（轮次事实归 store）。
- */
 function isBreathing(message: ChatMessage): boolean {
+  const active = message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
   return message.role === 'assistant'
-    && message.streaming
-    && waitingKind(message) === null
+    && active
+    && !message.done
+    && !waitingForAction(message)
     && !unconfirmedOf(message)
-    // 批次3：压缩/准备中由阶段条承载（避免同屏两条"正在…"）
-    && stageMode.value !== 'compacting'
-    && stageMode.value !== 'preparing'
+}
+
+function showTimestamp(message: ChatMessage): boolean {
+  if (formatProgressiveTs(message.timestamp) === '') {
+    return false
+  }
+  return message.role !== 'assistant' || (message.done && !message.streaming)
 }
 
 /**
@@ -2637,7 +2469,7 @@ function isBreathing(message: ChatMessage): boolean {
 function showMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || isBreathing(message)
-    || waitingKind(message) !== null
+    || waitingForAction(message)
     || unconfirmedOf(message)
     || showContinue(message)
     || showRetryTurn(message)
@@ -2663,7 +2495,7 @@ function msgGapClass(index: number): string {
     : MSG_GAP_OTHER_SENDER
 }
 
-/** R-159 #4：完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出（caretOut），
+/** 完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出，
  *  新 delta 到达（false→true）立即打断撤出；超时清账后元行换时间戳+复制。 */
 const fadingIds = ref<Set<string>>(new Set())
 const fadeTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -2745,6 +2577,7 @@ interface MdStreamEntry {
   html: string
   mermaid: MermaidSlotRef[]
   degradeNotice: string | null
+  bytes: number
 }
 
 /**
@@ -2758,11 +2591,16 @@ const degradeNotices = ref<Record<string, string>>({})
 const pendingDegradeNotices = new Map<string, string>()
 let degradeNoticeFlushScheduled = false
 
+function degradeNoticeKey(messageId: string): string {
+  return `${ai.sessionId}:${messageId}`
+}
+
 function rememberDegradeNotice(messageId: string, notice: string | null): void {
-  if (notice === null || degradeNotices.value[messageId] === notice || pendingDegradeNotices.get(messageId) === notice) {
+  const key = degradeNoticeKey(messageId)
+  if (notice === null || degradeNotices.value[key] === notice || pendingDegradeNotices.get(key) === notice) {
     return
   }
-  pendingDegradeNotices.set(messageId, notice)
+  pendingDegradeNotices.set(key, notice)
   if (degradeNoticeFlushScheduled) {
     return
   }
@@ -2788,6 +2626,45 @@ let historyMdCacheBytes = 0
 const MD_HISTORY_MAX_BLOCKS = 256
 const MD_HISTORY_MAX_BYTES = 8 * 1024 * 1024
 const streamMdCache = new Map<string, MdStreamEntry>()
+let streamMdCacheBytes = 0
+const MD_STREAM_MAX_BLOCKS = 64
+const MD_STREAM_MAX_BYTES = 2 * 1024 * 1024
+
+function deleteStreamEntry(key: string): void {
+  const old = streamMdCache.get(key)
+  streamMdCache.delete(key)
+  streamMdCacheBytes -= old?.bytes ?? 0
+}
+
+function evictStreamEntries(): void {
+  while (streamMdCache.size > MD_STREAM_MAX_BLOCKS || streamMdCacheBytes > MD_STREAM_MAX_BYTES) {
+    if (streamMdCache.size <= 1) {
+      return
+    }
+    const oldestKey = streamMdCache.keys().next().value
+    if (oldestKey === undefined) {
+      return
+    }
+    deleteStreamEntry(oldestKey)
+  }
+}
+
+function setStreamEntry(key: string, entry: MdStreamEntry): void {
+  deleteStreamEntry(key)
+  streamMdCache.set(key, entry)
+  streamMdCacheBytes += entry.bytes
+  evictStreamEntries()
+}
+
+function clearStreamMdCache(): void {
+  streamMdCache.clear()
+  streamMdCacheBytes = 0
+  degradeNotices.value = {}
+  pendingDegradeNotices.clear()
+}
+
+watch(() => ai.sessionId, clearStreamMdCache)
+
 /** 可观测性（批次 7A）：命中/未命中不直接暴露 UI，供回归测试与后续 profile 打点。 */
 let markdownHtmlCalls = 0
 let historyMdHits = 0
@@ -2856,6 +2733,8 @@ function markdownHtml(message: ChatMessage, block: Block): string {
   if (message.streaming) {
     const cached = streamMdCache.get(blockKey)
     if (cached !== undefined && cached.text === text && cached.tick === mdStreamTick.value && cached.locale === localeKey) {
+      streamMdCache.delete(blockKey)
+      streamMdCache.set(blockKey, cached)
       rememberDegradeNotice(message.id, cached.degradeNotice)
       hydrateMermaidIfNeeded(message.id, cached.mermaid)
       return cached.html
@@ -2863,7 +2742,15 @@ function markdownHtml(message: ChatMessage, block: Block): string {
     const { html, mermaid, degradeNotice } = renderMarkdown(text, true, blockKey)
     // 降级提示只在本条首个降级帧由渲染层给出；后续帧沿用首帧文案，避免流式过程把它冲掉。
     const carriedNotice = degradeNotice ?? cached?.degradeNotice ?? null
-    streamMdCache.set(blockKey, { text, tick: mdStreamTick.value, locale: localeKey, html, mermaid, degradeNotice: carriedNotice })
+    setStreamEntry(blockKey, {
+      text,
+      tick: mdStreamTick.value,
+      locale: localeKey,
+      html,
+      mermaid,
+      degradeNotice: carriedNotice,
+      bytes: estimateMdBytes(text, html)
+    })
     rememberDegradeNotice(message.id, carriedNotice)
     hydrateMermaidIfNeeded(message.id, mermaid)
     return html
@@ -2871,7 +2758,7 @@ function markdownHtml(message: ChatMessage, block: Block): string {
 
   // 完成态：释放该块的流式最后一帧槽，只走历史 LRU（降级提示随槽带到历史条目）。
   const streamNotice = streamMdCache.get(blockKey)?.degradeNotice ?? null
-  streamMdCache.delete(blockKey)
+  deleteStreamEntry(blockKey)
   const key = `${blockKey}:${localeKey}:${text.length}:${hashText(text)}`
   const hit = historyMdCache.get(key)
   if (hit !== undefined && hit.text === text) {
@@ -2942,7 +2829,6 @@ const toolSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>(
 const cardTitleCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
 const cardSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
 const cardStatusCache = new WeakMap<ToolPart, LocaleCacheEntry<ReturnType<typeof cardStatusOf>>>()
-const gateFactsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
 const diagnosticCache = new WeakMap<ToolPart, LocaleCacheEntry<PartDiagnostic | null>>()
 const diagnosticTextCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
 const toolDeriveMisses: Record<string, number> = {
@@ -2954,7 +2840,6 @@ const toolDeriveMisses: Record<string, number> = {
   outputByView: 0,
   cardTitle: 0,
   cardStatus: 0,
-  gateFacts: 0,
   summary: 0,
   diagnosis: 0
 }
@@ -3688,8 +3573,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     block.kind,
     isBlockExpanded(block),
     ai.loading,
-    ai.messages[ai.messages.length - 1]?.id ?? '',
-    stageMode.value
+    ai.messages[ai.messages.length - 1]?.id ?? ''
   ]
   if (part.kind === 'reasoning') {
     deps.push(
@@ -3719,6 +3603,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.requiresAction,
     part.args,
     part.result,
+    part.userTextCode,
     part.reason,
     part.resultView,
     part.preflight,
@@ -3735,7 +3620,6 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.truncatedReason,
     isReadOnlyCard(part),
     cardTypeOf(part),
-    gateFactsExpanded(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
     ai.uiUndoToolCallId,
@@ -3805,7 +3689,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     syntheticOf(message),
     unconfirmedOf(message),
     showMetaRow(message),
-    waitingKind(message),
+    waitingForAction(message),
     isBreathing(message),
     isFading(message),
     showContinue(message),
@@ -3815,13 +3699,12 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
     userMsgOverflowed.value.has(message.id),
     userMsgExpanded.value.has(message.id),
-    degradeNotices.value[message.id] ?? null,
+    degradeNotices.value[degradeNoticeKey(message.id)] ?? null,
     ai.loading,
     lastId,
     ai.runPhase,
     ai.lastRoundOutcome,
-    ai.activeRunId,
-    stageMode.value
+    ai.activeRunId
   ]
   for (const block of blocksOf(message)) {
     deps.push(block.id, block.kind, isBlockExpanded(block))
@@ -4181,6 +4064,21 @@ function truncationTitle(part: TruncationCarrier): string {
     return isEnglishLocale() && containsCjk(legacy) ? t('ai.panel.truncatedFallback') : legacy
   }
   return t('ai.panel.truncatedFallback')
+}
+
+function toolResultText(part: ToolPart): string | null | undefined {
+  const code = part.userTextCode?.trim()
+  if (!code) {
+    return part.result
+  }
+  const createdTaskId = code === 'CREATE_TASK_TURN_LIMIT'
+    ? /本轮已创建任务 #(\d+)/.exec(part.result ?? '')?.[1]
+    : undefined
+  const key = createdTaskId
+    ? 'ai.panel.toolResult.CREATE_TASK_TURN_LIMIT_WITH_ID'
+    : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
+  const translated = t(key, { id: createdTaskId ?? '' })
+  return translated === key ? part.result : translated
 }
 
 function textPartOf(block: Block): TextPart | null {
@@ -4544,17 +4442,6 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
 }
 
 /**
- * R-157 #3：打字机光标显示判据 —— 消息流式中且该正文块是末尾块（与呼吸点接力）。
- * 批次2：park 等待 / unconfirmed 时收起光标（轮次事实不改，只是不再假装"正在生成"）。 */
-function showCaret(message: ChatMessage, blockIndex: number): boolean {
-  if (!message.streaming || waitingKind(message) !== null || unconfirmedOf(message)) {
-    return false
-  }
-  const blocks = blocksOf(message)
-  return blockIndex === blocks.length - 1 && blocks[blockIndex]?.kind === 'text'
-}
-
-/**
  * 生成式表单已提交摘要（RC-1 → 2A）：**只读 `submittedValues`**（用户这次实际提交的值），
  * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串
  * （状态由统一卡头右标签「✓ 已提交」唯一承担，摘要位不重复）。
@@ -4659,6 +4546,7 @@ async function send(): Promise<void> {
 }
 
 function stop(): void {
+  clearStreamMdCache()
   void ai.stop()
 }
 
@@ -4790,32 +4678,6 @@ function onGateAckChange(toolCallId: string, event: Event): void {
     return
   }
   ai.clearGateAck(toolCallId)
-}
-
-// ── 批4 / AR-02：确认卡知情摘要（三字段、只读、默认收起） ─────────────────────
-
-/**
- * 知情摘要展开态（会话内内存态，按 toolCallId 记；缺省 = 收起）。
- * 不写 store：它不是业务状态，刷新后按默认收起重来即可。
- */
-const gateFactsOpen = ref<Record<string, boolean>>({})
-
-function gateFactsExpanded(part: ToolPart): boolean {
-  return gateFactsOpen.value[part.toolCallId] === true
-}
-
-function toggleGateFacts(toolCallId: string): void {
-  gateFactsOpen.value = { ...gateFactsOpen.value, [toolCallId]: !gateFactsOpen.value[toolCallId] }
-}
-
-/** 只读摘要行（影响面 / 条件摘要 / 权威发布模式；空值由纯函数剔除，前端不补猜）。 */
-function gateFactsOf(part: ToolPart): FieldRow[] {
-  return cachedForLocale(gateFactsCache, part, 'gateFacts', [
-    part.preflight,
-    part.preflight?.impact,
-    part.preflight?.conditionSummary,
-    part.preflight?.publishMode
-  ], () => gateFactsRows(part.preflight))
 }
 
 /**
@@ -5049,7 +4911,7 @@ onBeforeUnmount(() => {
   // 批次 7A：组件销毁时释放两张 Markdown 缓存（收起/展开不销毁，缓存保留以复用）。
   historyMdCache.clear()
   historyMdCacheBytes = 0
-  streamMdCache.clear()
+  clearStreamMdCache()
   ai.stopWorkspaceSync()
 })
 
@@ -5080,6 +4942,9 @@ defineExpose({
     get streamCacheSize() {
       return streamMdCache.size
     },
+    get streamCacheBytes() {
+      return streamMdCacheBytes
+    },
     get markdownHtmlCalls() {
       return markdownHtmlCalls
     },
@@ -5093,11 +4958,5 @@ defineExpose({
 })
 </script>
 
-<!-- R-165 S5c：本组件不再持有任何 scoped 样式块（曾承载 .md-body 排版 / 光标 / 呼吸 / chevron /
-     scroll-smooth / reduced-motion 抑制）。全部改工具类：
-     - v-html 正文族 = 渲染层逐标签注入（utils/markdown.ts，故 v-html 节点无 scope 属性也不再是问题）；
-     - 光标 / 呼吸 / chevron = 模板类串（CARET_CLASS / BREATH_CLASS / TCHEV_CLASS）；
-     - 三个 keyframes = tailwind.config.js 的 theme.extend.keyframes/animation；
-     - 平滑回底 = Tailwind 内置 `scroll-smooth` 工具类（JS 只做 classList 切换，类名不变）；
-     - reduced-motion：呼吸**豁免**（= 生成中状态语义，非纯装饰，R-161 用户实测回归口径）
-       改在光标元素上写 `motion-reduce:animate-none`（纯装饰抑制保留），媒体查询不再手写。 -->
+<!-- 本组件不持有 scoped 样式块：正文由渲染层注入工具类，呼吸与 chevron 使用模板类串，
+     动画归 tailwind.config.js，平滑回底使用内置 scroll-smooth。 -->

@@ -591,6 +591,28 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
     expect(toolPart(plain, 'c2').originalChars).toBeUndefined()
   })
 
+  it('tool_result 保留稳定 userTextCode，缺 code 的旧帧保持缺省', () => {
+    const message = makeMessage()
+    applyFrameToParts(message, {
+      type: 'tool_result',
+      toolCallId: 'localized',
+      name: 'list_tasks',
+      kind: 'BACKEND',
+      ok: true,
+      executed: true,
+      result: '中文结果',
+      userTextCode: 'TOOL_STEP_LIMIT'
+    } as never)
+    expect(toolPart(message, 'localized')).toMatchObject({ result: '中文结果', userTextCode: 'TOOL_STEP_LIMIT' })
+
+    const legacy = makeMessage()
+    applyFrameToParts(legacy, {
+      type: 'tool_result', toolCallId: 'legacy', name: 'list_tasks', kind: 'BACKEND',
+      ok: true, executed: true, result: '旧结果'
+    })
+    expect(toolPart(legacy, 'legacy').userTextCode).toBeUndefined()
+  })
+
   it('⑨′ frontend_tool_result 同样透传 noticeCode/数字/strategy（缺省帧不产生 undefined 键）', () => {
     const message = makeMessage()
     upsertToolPart(message, {

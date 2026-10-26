@@ -292,7 +292,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     reportHash: '3a9f'
   }
 
-  it('卡面一致性：门卡带 preflight → 旧预检区不渲染，只出默认收起的知情摘要 + 标题业务化', async () => {
+  it('卡面一致性：门卡带 preflight → 不展示固定摘要，保留业务化标题', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'text', seg: 0, text: '', streaming: false },
@@ -302,21 +302,21 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const gate = wrapper.find('[data-testid="pending-card-pf1"]').find('[data-testid="hitl-gate"]')
     expect(gate.exists()).toBe(true)
 
-    // 旧预检区**整块撤除**：无区名 / 徽标 / 四行；批4 / AR-02 只以收起态知情摘要承接三字段
+    // 旧预检区与固定三字段摘要均不展示。
     expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
     expect(gate.text()).not.toContain('预检摘要')
     expect(gate.text()).not.toContain('预检通过')
     expect(gate.text()).not.toContain('批准绑定')
     expect(gate.text()).not.toContain('影响面')
-    expect(gate.find('[data-testid="gate-facts-toggle"]').attributes('aria-expanded')).toBe('false')
+    expect(gate.find('[data-testid="gate-facts-toggle"]').exists()).toBe(false)
     expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
 
-    // 单层卡体子块序 = 字段表 / 知情摘要（收起态一行）/ 按钮行（无内层卡头、无旧五段式）
+    // 单层卡体子块序 = 字段表 / 按钮行。
     const kids = Array.from(gate.element.children) as HTMLElement[]
     expect(kids[0]!.getAttribute('data-testid')).toBe('gate-rows')
-    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-facts')
-    expect(kids[2]!.getAttribute('data-testid')).toBe('gate-actions')
-    expect(kids[2]!.querySelectorAll('button')).toHaveLength(2)
+    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-actions')
+    expect(kids).toHaveLength(2)
+    expect(kids[1]!.querySelectorAll('button')).toHaveLength(2)
 
     // 标题业务化（demo 场景一）：待你确认：<类型> 任务 #<id>『<title>』
     const card = wrapper.find('[data-testid="pending-card-pf1"]')
@@ -334,7 +334,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(rows[0]!.text()).toContain('启动发布作业')
     expect(rows[1]!.text()).toContain('5')
 
-    // 按钮文案口径（H1 仅两钮；知情摘要的展开钮不在动作行）
+    // 按钮文案口径（普通确认仅拒绝/批准，不增加摘要操作）
     expect(gate.find('[data-testid="gate-actions"]').findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
     wrapper.unmount()
   })
@@ -409,8 +409,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
-  it('B4：知情摘要默认收起且只读后端三字段；未批准·未执行 / 已批准·未执行 / 已批准·执行失败三态可辨', async () => {
-    // ① 待决门卡：三字段均来自后端 preflight，默认收起；展开后才进 DOM（不恢复旧预检区）
+  it('B4：固定摘要不展示；未批准·未执行 / 已批准·未执行 / 已批准·执行失败三态可辨', async () => {
+    // ① 即使后端带 preflight，普通确认卡也不展示固定三字段摘要。
     const facts = {
       ...PREFLIGHT,
       conditionSummary: '仅导出 CURRENCY 且状态=启用',
@@ -425,19 +425,9 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const gate = wrapper.find('[data-testid="pending-card-b4gate"]').find('[data-testid="hitl-gate"]')
     expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
     const toggle = gate.find('[data-testid="gate-facts-toggle"]')
-    expect(toggle.exists()).toBe(true)
-    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.exists()).toBe(false)
     expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
     expect(gate.text()).not.toContain('影响面')
-    await toggle.trigger('click')
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    const body = gate.find('[data-testid="gate-facts-body"]')
-    expect(body.exists()).toBe(true)
-    expect(body.text()).toContain('将发布 3 个配置定义 · 影响 12,480 行数据')
-    expect(body.text()).toContain('仅导出 CURRENCY 且状态=启用')
-    expect(body.text()).toContain('整体替换')
-    await toggle.trigger('click')
-    expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
     wrapper.unmount()
 
     // ② 后端没给 publishMode ⇒ 不出模式行（前端不猜 MERGE/REPLACE）
@@ -448,11 +438,10 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     noModeMsg.id = 'b4-nomode'
     const w2 = await mountPanel([noModeMsg])
     const g2 = w2.find('[data-testid="pending-card-b4nomode"]').find('[data-testid="hitl-gate"]')
-    await g2.find('[data-testid="gate-facts-toggle"]').trigger('click')
-    const body2 = g2.find('[data-testid="gate-facts-body"]')
-    expect(body2.exists()).toBe(true)
-    expect(body2.text()).not.toContain('增量合并')
-    expect(body2.text()).not.toContain('整体替换')
+    expect(g2.find('[data-testid="gate-facts-toggle"]').exists()).toBe(false)
+    expect(g2.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
+    expect(g2.text()).not.toContain('增量合并')
+    expect(g2.text()).not.toContain('整体替换')
     w2.unmount()
 
     // ③ 预检未通过（未进确认门、无决策）⇒ 未批准·未执行，绝不含「已批准」
@@ -699,8 +688,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const breath = wrapper.findAll('[data-testid="loading-breath"]')
     expect(breath).toHaveLength(2)
     expect(breath[1].text()).toContain('工作中…')
-    // 光标与呼吸同存（不再互斥接力）
-    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
+    // 流式光标已清退，活动中呼吸保留
+    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(0)
     expect(wrapper.findAll('.typing')).toHaveLength(0)
     expect(wrapper.text()).toContain('正在说')
     // 终态：两者皆无
@@ -806,7 +795,7 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
     expect(wrapper.find('[data-testid="reasoning-body-a-1:reasoning-0"]').attributes('style')).toContain('display: none')
     const toggle = wrapper.find('[data-testid="reasoning-toggle-a-1:reasoning-0"]')
     // R-165 S2：思考卡对齐 demo v7 `.reason` —— 卡容器 bg-#f6f7f9/1px #e3e6ea/圆角 10；
-    // 卡头 = 圆环✦（15×15 / 1.2px / #e3e6ea）+「思考过程」12.4px#57606a + 摘要 11.5px#8b949e + chevron；
+    // 卡头 = 圆环图标 +「思考过程」12.4px#57606a + chevron；字数与展开/收起文字已清退；
     // 展开体 = 左竖线 border-l-2 #e3e6ea + pl-10px/pr-11px/pb-10px，正文 12.6px/1.7/#57606a。
     expect(toggle.element.tagName).toBe('BUTTON')
     expect(toggle.classes()).toEqual(expect.arrayContaining(['flex', 'items-center', 'gap-[8px]', 'px-[10px]', 'py-[7px]', 'border-0', 'bg-transparent']))
@@ -824,15 +813,16 @@ describe('批4④：折叠块渲染与展开态三态承诺', () => {
     expect(ric.className).toContain('rounded-[50%]')
     expect(ric.className).toContain('w-[15px]')
     expect(toggle.text()).toContain('思考过程')
-    expect(toggle.text()).toContain('共 13 字 · 点击展开') // 摘要位（v7 .rsum 11.5px 灰）
-    const rsum = wrapper.find('[data-testid="reasoning-toggle-a-1:reasoning-0"] span:nth-child(3)')
-    expect(rsum.classes()).toEqual(expect.arrayContaining(['text-[11.5px]', 'text-[#8b949e]']))
+    expect(toggle.text()).not.toContain('共 13 字')
+    expect(toggle.text()).not.toContain('点击展开')
+    const rsum = wrapper.find('[data-testid="reasoning-title-a-1:reasoning-0"]')
+    expect(rsum.classes()).toEqual(expect.arrayContaining(['text-[12.4px]', 'text-[#57606a]']))
     expect(toggle.find('.tchev').exists()).toBe(true) // chevron（R-165 S5c 起旋转由 [&.is-open]:rotate-90 工具类承载）
     await toggle.trigger('click')
     expect(wrapper.find('[data-testid="reasoning-body-a-1:reasoning-0"]').attributes('style') ?? '').not.toContain('display: none')
     const rbody = wrapper.find('[data-testid="reasoning-body-a-1:reasoning-0"]')
     expect(rbody.classes()).toEqual(expect.arrayContaining(['pl-[10px]', 'pr-[11px]', 'pb-[10px]', 'border-l-2', 'border-solid', 'border-[#e3e6ea]']))
-    expect(wrapper.find('[data-testid="reasoning-toggle-a-1:reasoning-0"]').text()).toContain('点击收起')
+    expect(wrapper.find('[data-testid="reasoning-toggle-a-1:reasoning-0"]').text()).not.toContain('点击收起')
     wrapper.unmount()
 
     // DOM 重建：同 store 重挂载 —— 展开态来自 store，不丢
@@ -1185,6 +1175,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     const reasoningBadge = reasoning.find('[data-testid="reasoning-truncated-badge"]')
     expect(reasoningBadge.exists()).toBe(true)
     expect(reasoningBadge.attributes('title')).toContain('2000')
+    expect(reasoning.find('[data-testid^="reasoning-title-"]').text()).toBe('思考过程')
     reasoning.unmount()
   })
 
@@ -1248,16 +1239,16 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#7/#3 语义延续（R-157 改承载）：流式标识正文产出后仍在，撤 el-tag 改呼吸点/光标', async () => {
+  it('#7/#3 语义延续：流式标识正文产出后仍在，撤 el-tag 改呼吸点且无光标', async () => {
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在说', streaming: true }], null, true)
     speaking.id = 'a-speaking'
     const settled = buildMessage([{ kind: 'text', seg: 0, text: '说完了', streaming: false }], null, false)
     settled.id = 'a-settled'
 
     const wrapper = await mountPanel([speaking, settled])
-    // R-154 的 el-tag「生成中」已撤（R-157 #3 直裁方案一）；流式标识 = 打字机光标
+    // el-tag 与打字机光标均已清退；流式标识 = 活动中呼吸点
     expect(wrapper.findAll('[data-testid="streaming-tag"]')).toHaveLength(0)
-    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-testid="stream-caret"]')).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -1475,7 +1466,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
 })
 
 /**
- * R-157 前端面（用户直裁五点）：操作行挪卡片下方 / 编辑收窄+重跑 / 呼吸点+光标接力 / 发送滚底 / 头像去文字。
+ * R-157 前端面：操作行挪卡片下方 / 编辑收窄+重跑 / 呼吸点 / 发送滚底 / 头像去文字。
  */
 describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 新头像', () => {
   const stubsWithInput = {
@@ -2593,23 +2584,22 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
 })
 
 /**
- * R-159（issue #13 流式回复体验）：B1 光标 / 呼吸全程常驻 / 元信息行流式遮蔽 /
- * 完成 300ms 淡出换入 / 工具期光标收起归位（S0-b 时序证据）/ span.ch 渐显包裹。
+ * R-159（issue #13 流式回复体验）：呼吸全程常驻 / 元信息行流式遮蔽 /
+ * 完成 300ms 淡出换入 / span.ch 渐显包裹；打字机光标已清退。
  */
 describe('R-159：流式回复体验六项', () => {
-  it('#1：B1 光标在流式正文末尾（R-163 T1 口径：caret 为 md-body 之后紧邻兄弟）', async () => {
+  it('#1：流式正文保留呼吸，不渲染打字机光标', async () => {
     const speaking = buildMessage([{ kind: 'text', seg: 0, text: '正在输出的一段文字', streaming: true }], null, true)
     speaking.id = 'a-b1'
     const wrapper = await mountPanel([speaking])
     const caret = wrapper.find('[data-testid="stream-caret"]')
-    expect(caret.exists()).toBe(true)
-    expect(caret.classes()).toContain('caret')
-    // R-163 T1：正文走 markdown-it → DOMPurify → v-html（md-body），光标移出正文 div，
-    // 为其后紧邻兄弟（B1 粗块随文尾的视觉语义不变）
+    expect(caret.exists()).toBe(false)
+    expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(true)
+    // 正文仍走 markdown-it → DOMPurify → v-html（md-body），光标不再渲染。
     const bubble = wrapper.find('[data-testid="msg-bubble-a-b1"]')
     const mdBody = bubble.find('.md-body')
     expect(mdBody.exists()).toBe(true)
-    expect(caret.element.previousElementSibling).toBe(mdBody.element)
+    expect(bubble.find('.md-body').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -2629,7 +2619,7 @@ describe('R-159：流式回复体验六项', () => {
     wrapper.unmount()
   })
 
-  it('#4：完成淡出 —— streaming=false 同帧起 fade-out（呼吸+光标），300ms 后换时间戳+复制', async () => {
+  it('#4：完成淡出 —— streaming=false 同帧起呼吸 fade-out，300ms 后换时间戳+复制', async () => {
     const msg = buildMessage([{ kind: 'text', seg: 0, text: '已完成的回复', streaming: true }], null, true)
     msg.id = 'a-fade'
     msg.timestamp = 1_700_000_000_000
@@ -2637,14 +2627,15 @@ describe('R-159：流式回复体验六项', () => {
     // 经 store 代理写入（裸引用写入不触发响应式 —— 实测结论）
     const store = useAiStore()
     store.messages[0]!.streaming = false
+    store.messages[0]!.done = true
     await wrapper.vm.$nextTick()
-    // 同帧淡出：呼吸与光标挂 fade-out（jsdom 无动画计时，class 断言）
+    // 同帧淡出：呼吸挂 fade-out（jsdom 无动画计时，class 断言）
     expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
-    expect(wrapper.find('[data-testid="stream-caret"]').classes()).toContain('fade-out')
+    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
 
     await new Promise((resolve) => setTimeout(resolve, 350))
     await wrapper.vm.$nextTick()
-    // 淡出退役：呼吸/光标消失，元行换时间戳（左）+ 复制（右，visibility 恢复）
+    // 淡出退役：呼吸消失，元行换时间戳（左）+ 复制（右，visibility 恢复）
     expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
     const ops = wrapper.find('[data-testid="msg-ops-a-fade"]')
@@ -2660,10 +2651,12 @@ describe('R-159：流式回复体验六项', () => {
     const store = useAiStore()
 
     store.messages[0]!.streaming = false
+    store.messages[0]!.done = true
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="loading-breath"]').classes()).toContain('fade-out')
     // 新 delta 到达（streaming 复 true）——打断
     store.messages[0]!.streaming = true
+    store.messages[0]!.done = false
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="loading-breath"]').classes()).not.toContain('fade-out')
     await new Promise((resolve) => setTimeout(resolve, 350))
@@ -2672,7 +2665,7 @@ describe('R-159：流式回复体验六项', () => {
     wrapper.unmount()
   })
 
-  it('#5/S0-b：工具卡为末块期间光标收起；工具收口后新 text 段成末块自然归位', async () => {
+  it('#5/S0-b：工具期及后续正文续跑均不渲染光标', async () => {
     const msg = buildMessage(
       [
         { kind: 'text', seg: 0, text: '先读文件', streaming: true },
@@ -2687,11 +2680,11 @@ describe('R-159：流式回复体验六项', () => {
     expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
     // 时序：message_end 未到（streaming 仍 true）、工具仍在 running —— 期间无光标
     expect(msg.streaming).toBe(true)
-    // 归位：工具收口后正文继续（新 text 段成为末块）⇒ 光标即刻归位（不依赖 streaming=false）——经代理 push 触发响应式
+    // 工具收口后正文继续（新 text 段成为末块）仍不恢复光标。
     const store = useAiStore()
     ;(store.messages[0]!.parts as MessagePart[]).push({ kind: 'text', seg: 2, text: '继续输出', streaming: true })
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stream-caret"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -2860,7 +2853,7 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     wrapper.unmount()
   })
 
-  it('reduced-motion 豁免：呼吸**不被抑制**（状态语义非纯装饰）+ 光标抑制走 motion-reduce:animate-none', async () => {
+  it('reduced-motion 豁免：呼吸**不被抑制**，光标代码已清退', async () => {
     const source = (await import('@/components/AiPanel/AiPanel.vue?raw')).default
     // R-165 S5c：媒体查询不再手写 —— 组件整体零 <style> 块（抑制改由 Tailwind motion-reduce 变体承载）
     expect(source).not.toContain('<style')
@@ -2868,8 +2861,9 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     // 呼吸 = 生成中状态语义 ⇒ 元素上不得挂任何 reduced-motion 抑制
     expect(source).toContain('animate-breathe')
     expect(source).not.toMatch(/motion-reduce:animate-none[^']*animate-breathe|animate-breathe[^']*motion-reduce:animate-none/)
-    // 光标 = 纯装饰 ⇒ 抑制保留（motion-reduce 变体 + 律动类同挂一条类串上）
-    expect(source).toContain('animate-caret motion-reduce:animate-none')
+    // 光标及其 motion-reduce 规则已随渲染一并清退。
+    expect(source).not.toContain('animate-caret')
+    expect(source).not.toContain('data-testid="stream-caret"')
     // 豁免后律动照常（律动本体落 tailwind.config.js，keyframes 名 aiBreathe 防全局撞名）
     const { readFileSync } = await import('node:fs')
     expect(readFileSync('tailwind.config.js', 'utf8')).toContain("breathe: 'aiBreathe 1.5s ease-in-out infinite'")
@@ -4072,7 +4066,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     wrapper.unmount()
   })
 
-  it('composer v2 禁用拆分：仅真实不可用 / 挂起 / pendingToolCall 硬禁用；loading 不硬禁用', async () => {
+  it('composer v2 输入与发送解耦：生成、挂起、待决工具和健康异常时输入始终可编辑', async () => {
     const { store, wrapper } = await mountPhase1()
     const box = wrapper.find('[data-testid="composer-input"]')
     const isDisabled = () => box.attributes('disabled') !== undefined
@@ -4084,10 +4078,10 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     store.suspended = true
     await wrapper.vm.$nextTick()
-    expect(isDisabled()).toBe(true)
+    expect(isDisabled()).toBe(false)
     store.loading = false
     await wrapper.vm.$nextTick()
-    expect(isDisabled()).toBe(true)
+    expect(isDisabled()).toBe(false)
 
     store.suspended = false
     await wrapper.vm.$nextTick()
@@ -4095,7 +4089,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     store.health = { ...store.health!, available: false }
     await wrapper.vm.$nextTick()
-    expect(isDisabled()).toBe(true)
+    expect(isDisabled()).toBe(false)
     store.health = { ...store.health!, available: true }
     await wrapper.vm.$nextTick()
     expect(isDisabled()).toBe(false)
@@ -4105,7 +4099,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
       { toolCallId: 'pc-1', name: 'probe.tool', kind: 'FRONTEND', args: {}, status: 'pending' }
     )]
     await wrapper.vm.$nextTick()
-    expect(isDisabled()).toBe(true)
+    expect(isDisabled()).toBe(false)
     wrapper.unmount()
   })
 
@@ -4228,10 +4222,10 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     wrapper.unmount()
   })
 
-  it('composer v2 healthError：textarea 硬禁用（真不可用）', async () => {
+  it('composer v2 healthError：textarea 仍可编辑，发送钮禁用', async () => {
     const { wrapper } = await mountPhase1({ health: 'error' })
     const box = wrapper.find('[data-testid="composer-input"]')
-    expect(box.attributes('disabled')).toBeDefined()
+    expect(box.attributes('disabled')).toBeUndefined()
     expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
@@ -4245,7 +4239,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     const send = wrapper.find('[data-testid="send-btn"]')
     expect(send.attributes('disabled')).toBeDefined()
-    expect(box.attributes('disabled')).toBeDefined()
+    expect(box.attributes('disabled')).toBeUndefined()
     const sendSpy = vi.spyOn(store, 'send')
     // 移出 DOM disabled 后直接派发：证明 keydown 分支自身也会拦（不只靠 disabled 属性）
     box.element.removeAttribute('disabled')
@@ -6562,7 +6556,7 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     wrapper.unmount()
   })
 
-  it('AR-14：复制页签只有一次性「新会话」告知（中英双语键在），无接回原会话入口', async () => {
+  it('AR-14：复制页签通知不在 AiPanel 展示，locale 仅为旧镜像兼容保留', async () => {
     expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('新会话')
     expect((enUS as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('new conversation')
     expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.staleConfirmCard).toContain('已失效')
@@ -6579,10 +6573,9 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     const wrapper = await mountPanel([])
 
     const bar = wrapper.find('[data-testid="notice-bar"]')
-    expect(bar.exists()).toBe(true)
-    expect(bar.text()).toContain('已在新页签开始新会话')
-    expect(bar.text()).toContain('原页签的对话不受影响')
-    // AR-14：只告知，不接回原会话（无重挂 / 返回进行中回答入口）
+    expect(bar.exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('已在新页签开始新会话')
+    // 不展示通知，也不提供接回原会话入口。
     expect(wrapper.find('[data-testid="return-active-run"]').exists()).toBe(false)
     wrapper.unmount()
   })

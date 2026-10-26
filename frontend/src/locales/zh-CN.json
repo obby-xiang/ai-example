@@ -364,18 +364,6 @@
       "irreversible": "确认{action}，执行后无法恢复",
       "publishIrreversible": "确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复",
       "ackHint": "请先勾选上方确认项",
-      "facts": {
-        "title": "知情摘要",
-        "expand": "展开",
-        "collapse": "收起",
-        "impact": "影响面",
-        "condition": "条件摘要",
-        "publishMode": "发布模式",
-        "mode": {
-          "merge": "增量合并",
-          "replace": "整体替换"
-        }
-      },
       "action": {
         "start_publish": "启动发布作业"
       }
@@ -487,11 +475,21 @@
         "history": "完整历史写入服务端数据库，长期保留、没有自动过期；关闭页签后本轮仍会在服务端继续。"
       },
       "thinking": "思考过程",
-      "thinkingChars": "共 {n} 字",
-      "thinkingExpand": "点击展开",
-      "thinkingCollapse": "点击收起",
-      "thinkingSeconds": "已思考 {seconds} 秒",
-      "thinkingRunning": "思考中 {seconds} 秒",
+      "thinkingLive": "思考中",
+      "thinkingSeconds": "{seconds} 秒",
+      "toolResult": {
+        "TOOL_STEP_LIMIT": "本轮工具调用次数已用完，这一步没有执行；AI 会用已有信息继续回答。",
+        "TOOL_BUDGET_EXHAUSTED": "本轮对话上下文已满，这一步没有执行；AI 会用已有信息继续回答。",
+        "UPSTREAM_FAILED": "上一个步骤没有成功，这一步没有执行；AI 会用已有信息继续回答。",
+        "CREATE_TASK_TURN_LIMIT": "同一轮只允许创建一次任务，这一次没有再创建；需要新任务请在下一轮提出。",
+        "CREATE_TASK_TURN_LIMIT_WITH_ID": "本轮已创建任务 #{id}；同一轮只允许创建一次任务，这一次没有再创建。",
+        "RESOURCE_LOCKED": "该任务已有作业在执行，本次未执行；请等待作业结束后再试。",
+        "TOOL_KIND_MISMATCH": "这一步没有执行；该操作需要由当前页面完成。",
+        "SHEET_DISABLED": "表格功能已被管理员关闭，这一步没有执行。",
+        "SCOPE_NOT_DISCLOSED": "当前页面或步骤不支持这个操作，这一步没有执行。",
+        "TOOL_TIMEOUT": "这一步没有在时限内完成，结果尚未确认；该操作可能已产生部分变化，请核对后再继续。",
+        "TOOL_ALREADY_CLAIMED": "这一步已由其他执行实例接管，本次没有重复执行。"
+      },
       "skippedHuman": "这一步没有执行，AI 会用已有信息继续回答。",
       "internalHuman": "这一步没有正常完成。",
       "gateExpiredHuman": "这轮对话已失效，请重新提问。",
@@ -516,9 +514,7 @@
       "retryTurnHint": "只重跑模型步（不重执行工具、不追加用户消息）",
       "regenerateMessage": "重新生成这条回答",
       "editDeleteConfirm": "编辑将删除此后 {count} 条消息，且无法恢复。是否继续？",
-      "waitingConfirm": "等待你的确认",
-      "waitingForm": "等待你填写表单",
-      "waitingFrontend": "等待你的操作",
+      "waiting": "等待中…",
       "turnUnconfirmed": "本轮已结束，状态未确认",
       "turnUnconfirmedHint": "已显示的内容可能不完整。可以重新载入以同步服务端状态，或开始新的一轮。",
       "compacted": "较早的对话已压缩",
@@ -1273,6 +1269,7 @@
         "downloadInFlight": "{code} 的下载已在进行中，本次未重复发起",
         "downloaded": "已下载 {name}",
         "downloadFailed": "下载失败",
+        "downloadSuperseded": "导出结果已更新为第 {batch} 批，本次下载已取消（不会下载旧批次文件）",
         "zipDownloaded": "已打包下载 {count} 个文件",
         "zipFailed": "打包下载失败",
         "pickZipDefs": "请先勾选要打包的配置项",

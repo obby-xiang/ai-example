@@ -21,6 +21,16 @@ import type { ResultView } from './resultview'
 import type { SheetToolMeta } from '@/utils/sheet-tools'
 import type { ErrorCard } from '@/utils/error-card'
 
+declare module './sse' {
+  interface SseToolResultFrame {
+    /** 工具结果的用户文案稳定代码；缺省表示沿用 result 原文。 */
+    userTextCode?: string | null
+  }
+  interface SseFrontendToolResultFrame {
+    userTextCode?: string | null
+  }
+}
+
 /**
  * 工作区上下文（AiChatRequest.Context）。
  *
@@ -248,6 +258,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     id?: string
     name?: string
     responseData?: string
+    /** 与 tool_result 帧一致的用户文案稳定代码。 */
+    userTextCode?: string | null
     /**
      * L-78：历史面的**结果视图**（后端按工具名从注册表重新派生，只对成功结局出）。
      * 缺省 = 该工具没有声明视图投影 / 旧载荷 ⇒ 卡面走旧形态（与帧内 `resultView` 同契约）。
@@ -543,6 +555,8 @@ export interface ToolPart extends MessagePartBase {
   args?: string
   /** 结果文本摘要 */
   result?: string | null
+  /** 用户文案稳定代码；卡体优先按当前语言翻译，缺 code 或缺词条时回退 result。 */
+  userTextCode?: string | null
   /** 拒绝原因 / 失败原因 */
   reason?: string | null
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`） */
@@ -604,11 +618,8 @@ export interface ToolPart extends MessagePartBase {
   atMs?: number
   /**
    * H1 确认门预检摘要（可选契约增量；来自 confirm_request / suspended 帧，随段持久化）。
-   * 缺省 = 旧帧 / 无预检的工具（GF、前端工具、后端工具），门卡不渲染知情摘要。
-   * 预检**不通过**时后端不弹卡，故门卡只在 `preflight` 存在（且通过）时出现该摘要。
-   *
-   * 2026-10-26 批4 / AR-02：門卡/只读卡只展示三字段（impact / conditionSummary /
-   * publishMode），默认收起；旧预检区五段式版式不恢复。
+   * 缺省 = 旧帧 / 无预检的工具。预检只用于既有业务标题等展示，不渲染固定三字段摘要；
+   * 不可逆操作的后果说明与勾选批准门由 `irreversible` 独立控制。
    */
   preflight?: ToolPreflight | null
   /**
@@ -750,6 +761,7 @@ export interface ToolPartPatch {
   status?: ToolRunStatus
   args?: string
   result?: string | null
+  userTextCode?: string | null
   reason?: string | null
   messageId?: string
   /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */

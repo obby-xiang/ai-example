@@ -42,8 +42,7 @@ import java.util.Set;
 public class JobService {
 
     /**
-     * "在途"作业状态（同类互斥与 runner 存活守卫的判定范围）：到终态
-     * （COMPLETED/FAILED/CANCELLED）即不再互斥，也不再逐条查 runner 存活。
+     * "在途"作业状态：用于同类互斥、取消与启动失败收敛；runner 存活守卫独立扫描全部旧作业。
      */
     private static final List<Job.JobStatus> IN_FLIGHT =
             List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
@@ -287,23 +286,16 @@ public class JobService {
     }
 
     /**
-     * P1-3：同任务旧 runner 存活守卫（不区分作业类型）。
+     * P1-3 / S1：同任务旧 runner 存活守卫（不区分作业类型或作业状态）。
      *
-     * <p>只扫描<b>非终态</b>作业（PENDING/RUNNING）：终态写发生在执行器数据面事务提交之后
-     * （{@link JobProgressService} / {@link JobTerminalWriter} 的 REQUIRES_NEW 先于 runner 返回），
-     * 终态作业的 runner 不再写暂存/文件，此后只剩 {@code endRunner} 清理 —— 逐条对历史作业
-     * 打 Redis 既没有正确性收益，又会在 task 行锁内产生 N 次同步命令，延迟随历史作业数增长
-     * （FA3-N7 / BZ-34）。取消场景另有任务级守卫兜底（CANCELLED 任务在
-     * {@link #assertTaskNotFinalized} 已被拒），不会因此放行第二个写者。
+     * <p>看门狗或取消通路可能先把作业写成终态，而旧 runner 尚未退出；只要 runner 仍存活，
+     * 就继续沿用 {@code JOB_ALREADY_RUNNING} 收尾冲突，禁止第二个写者。
      *
      * <p>Redis 读失败仍 fail-closed 409，绝不把“查不到”当“没有 runner”；调用点保持在
      * task 行锁内（{@link #createAndStart}）。
      */
     private void assertNoRunnerInFlight(Long taskId) {
         for (Job existing : jobRepository.findByTaskId(taskId)) {
-            if (!IN_FLIGHT.contains(existing.getStatus())) {
-                continue;
-            }
             boolean alive;
             try {
                 alive = heartbeatRegistry.isRunnerAlive(existing.getId());

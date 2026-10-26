@@ -12,7 +12,6 @@
  * {@link resolveBlockExpanded}，用户触碰记录存 store 的 `expandedBlocks`（D4：会话内内存态）。
  */
 import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
-import type { ToolPreflight } from '@/types/sse'
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
 import { translate } from '@/composables/useCopy'
 
@@ -566,44 +565,6 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
  */
 export function readOnlyDefaultExpanded(_part: ToolPart): boolean {
   return false
-}
-
-/* ============================ 批4 / AR-02：确认卡知情摘要三字段 ============================
- * 只展示后端已经算好的 影响面 / 条件摘要 / 权威发布模式；缺哪个就不渲染哪一行：
- * - 条件摘要**不由前端反解** args / 模型文本（那会把"前端猜测"伪装成后端事实）；
- * - 发布模式**不默认 MERGE**、不从模型回复猜；无值 = 未知，整行不出；
- * - 旧预检区的 checks / reportHash / 五段式版式不恢复（10-20 撤除理由仍成立）。
- * 返回 FieldRow 供门卡与只读卡共用；文案 key 经 translate（切语言即重算）。
- * ========================================================================================== */
-
-/** 权威发布模式 → 人读文案：只认后端枚举 MERGE/REPLACE；其余原样展示（不推测、不改写）。 */
-function publishModeText(mode: string): string {
-  const normalized = mode.trim().toUpperCase()
-  if (normalized === 'MERGE') {
-    return translate('ai.hitl.facts.mode.merge')
-  }
-  if (normalized === 'REPLACE') {
-    return translate('ai.hitl.facts.mode.replace')
-  }
-  return mode.trim()
-}
-
-/** 确认卡知情摘要行（空值不出行；顺序 = 影响面 → 条件摘要 → 发布模式）。 */
-export function gateFactsRows(preflight: ToolPreflight | null | undefined): FieldRow[] {
-  if (preflight === null || preflight === undefined) {
-    return []
-  }
-  const rows: FieldRow[] = []
-  if (!isBlankText(preflight.impact)) {
-    rows.push({ key: translate('ai.hitl.facts.impact'), value: preflight.impact as string })
-  }
-  if (!isBlankText(preflight.conditionSummary)) {
-    rows.push({ key: translate('ai.hitl.facts.condition'), value: preflight.conditionSummary as string })
-  }
-  if (typeof preflight.publishMode === 'string' && !isBlankText(preflight.publishMode)) {
-    rows.push({ key: translate('ai.hitl.facts.publishMode'), value: publishModeText(preflight.publishMode) })
-  }
-  return rows
 }
 
 /* ============================ 卡片三类型统一判据（tool / hitl / form） ============================

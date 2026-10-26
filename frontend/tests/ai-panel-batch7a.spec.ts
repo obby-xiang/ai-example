@@ -163,6 +163,7 @@ interface DebugView {
   historyCacheSize: number
   historyCacheBytes: number
   streamCacheSize: number
+  streamCacheBytes: number
   markdownHtmlCalls: number
   toolDeriveMisses: Record<string, number>
   measurePasses: string[][]
@@ -317,6 +318,24 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     expect(debugOf(wrapper2).streamCacheSize).toBe(1)
     expect(debugOf(wrapper2).historyCacheSize).toBe(0)
     wrapper2.unmount()
+  })
+
+  it('streamMdCache 有块数上限，并在会话切换时清空', async () => {
+    const messages = Array.from({ length: 70 }, (_, index) => {
+      const message = messageWith([{ kind: 'text', seg: 0, text: `流式 ${index}`, streaming: true }], `live-${index}`)
+      message.streaming = true
+      message.done = false
+      return message
+    })
+    const wrapper = await mountPanel(messages)
+    expect(debugOf(wrapper).streamCacheSize).toBeLessThanOrEqual(64)
+    expect(debugOf(wrapper).streamCacheBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
+
+    useAiStore().sessionId = 'another-session'
+    await settle(wrapper)
+    expect(debugOf(wrapper).streamCacheSize).toBe(0)
+    expect(debugOf(wrapper).streamCacheBytes).toBe(0)
+    wrapper.unmount()
   })
 
   it('ToolPart 派生值按段 WeakMap 复用：同一段只解析一次', async () => {

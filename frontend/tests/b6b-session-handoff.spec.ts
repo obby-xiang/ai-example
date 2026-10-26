@@ -1,9 +1,9 @@
 /**
- * 批次6B（AR-13 / AR-14 / N6-N10）：会话切换的"告知、清场、只读"三件事。
+ * 批次6B（AR-13 / AR-14 / N6-N10）：会话切换的"静默、清场、只读"三件事。
  *
  * <p>本套用例只锁四组可判定行为：
  * <ul>
- * <li><b>复制页签</b>：判为 duplicate 时**只**给一条"这是新会话、原页签不受影响"的 notice，
+ * <li><b>复制页签</b>：判为 duplicate 时静默换新会话，notice/noticeCode 均为 null，
  *   不提供任何接回原会话的入口（不读原历史、不把旧会话 id 写回）；</li>
  * <li><b>新会话残留</b>：`adoptFreshSession()` 清掉工作区 chip（`contextSync`）、ui_event 回执
  *   （`lastUiEventResult`）与上一轮结局（`lastRoundOutcome`），notice 级别不继承旧轮；</li>
@@ -12,8 +12,7 @@
  * <li><b>草稿孤儿键</b>：换会话按 `cm.ai.form.draft.` 前缀 + 在场白名单清，禁用整份 clear。</li>
  * </ul>
  *
- * <p>本批的 locale 需求只登记 key（`ai.notice.copiedNewTab` / `ai.notice.staleConfirmCard`），
- * 不在 store 里硬编码中文；用例断言 `noticeCode` 而不是译文，语言包接入前也稳定。
+ * <p>复制页签不再写通知；陈旧确认卡仍断言 `noticeCode` 而不是译文，避免绑定具体语言。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -117,8 +116,8 @@ function partOf(store: ReturnType<typeof useAiStore>, toolCallId: string): ToolP
   throw new Error(`tool part not found: ${toolCallId}`)
 }
 
-describe('复制页签：一次性告知新会话，不接回原会话', () => {
-  it('判为 duplicate ⇒ 新会话 + 一条 info notice；旧轮 error 不把这条通知染红', async () => {
+describe('复制页签：静默换新会话，不接回原会话', () => {
+  it('判为 duplicate ⇒ 新会话且 notice/noticeCode 为空，旧轮状态不跨会话', async () => {
     seedTab('tab-copy-b6b')
     locks.hold(SESSION_LOCK_PREFIX + 'tab-copy-b6b')
 
@@ -131,7 +130,8 @@ describe('复制页签：一次性告知新会话，不接回原会话', () => {
 
     expect(store.tabOwnership).toBe('duplicate')
     expect(store.sessionId).not.toBe('tab-copy-b6b')
-    expect(store.noticeCode).toBe('ai.notice.copiedNewTab')
+    expect(store.notice).toBeNull()
+    expect(store.noticeCode).toBeNull()
     expect(store.noticeSeverity).toBe('info')
     expect(store.lastRoundOutcome).toBe('ok')
     expect(store.contextSync).toBeNull()

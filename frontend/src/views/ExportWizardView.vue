@@ -1506,6 +1506,43 @@ type DownloadOutcome =
   | { ok: false; reason: string }
 
 /**
+ * 一次下载**发起时**的「结果批次绑定」：批次号 + 任务代次 + 任务号。
+ *
+ * 为什么需要：`buildXlsx`（表格载入 / 服务端回落）与 `zipBlobs` 都是 await —— 期间一个导出作业
+ * 完成会把**新一批**结果整批铺开（`resultsBatch` 前进、`exportResults` 整体替换）。没有这道绑定，
+ * 构建晚到的字节照样交给浏览器 ⇒ 用户 / AI 拿到的是"上一批"的导出文件，而页面已显示新批次。
+ */
+interface DownloadBinding {
+  batch: number
+  generation: number
+  task: number | null
+}
+
+function captureDownloadBinding(): DownloadBinding {
+  return { batch: resultsBatch.value, generation: taskGeneration, task: taskId.value }
+}
+
+/** 本次下载的绑定是否已失效（批次被换掉 / 任务被换掉 ⇒ 已构建的字节不属于当前结果面）。 */
+function downloadBindingBroken(binding: DownloadBinding): boolean {
+  return binding.batch !== resultsBatch.value
+    || binding.generation !== taskGeneration
+    || binding.task !== taskId.value
+}
+
+/**
+ * 下载在构建/打包期间被换批**作废**（不是失败）：不触发 `link.click`、不下载旧批次字节。
+ *
+ * 用独立错误类型而不是普通 `Error`：两侧 `catch` 要把"作废"与"真失败"分开 —— 前者只给一句
+ * 简短提示（实际冲突才提示，不新增常驻横幅），也不计入"打包下载失败"。
+ */
+class DownloadSuperseded extends Error {
+  constructor() {
+    super(t('views.export.msg.downloadSuperseded', { batch: resultsBatch.value }))
+    this.name = 'DownloadSuperseded'
+  }
+}
+
+/**
  * 「发起」一次下载（**不吞异常**）：取该配置项的当前内容并交给浏览器下载链路。
  *
  * 与 {@link downloadOne} 的分工：本函数不捕获任何异常（`buildXlsx` 的引擎/网络错误、
@@ -1513,7 +1550,12 @@ type DownloadOutcome =
  * 结局 toast，也能支撑 AI 侧「即发即回」（{@link startDownloadInBackground}）。
  */
 async function startDownload(code: string): Promise<XlsxSource> {
+  // 发起时绑定结果批次：`buildXlsx` 的 await 期间新一批结果可能已经铺开 ⇒ 作废本次下载
+  const binding = captureDownloadBinding()
   const built = await buildXlsx(code)
+  if (downloadBindingBroken(binding)) {
+    throw new DownloadSuperseded()
+  }
   downloadBlob(built.blob, built.fileName)
   return built
 }
@@ -1540,6 +1582,11 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
     ElMessage.success(downloadedText(built))
     return { ok: true, fileName: built.fileName, source: built.source, rowCount: built.rowCount }
   } catch (error) {
+    if (error instanceof DownloadSuperseded) {
+      // 批次在构建期间被换掉：只提示一句，不当成失败（也确实没有文件被下载）
+      ElMessage.info(error.message)
+      return { ok: false, reason: error.message }
+    }
     const reason = error instanceof Error ? error.message : '下载失败'
     ElMessage.error(reason)
     return { ok: false, reason }
@@ -1570,6 +1617,11 @@ function startDownloadInBackground(code: string): void {
       ElMessage.success(downloadedText(built))
     })
     .catch((error: unknown) => {
+      if (error instanceof DownloadSuperseded) {
+        // 换批作废：一句提示即可（不弹错误、也不产出回执）
+        ElMessage.info(error.message)
+        return
+      }
       ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.downloadFailed'))
     })
     .finally(() => {
@@ -1592,6 +1644,9 @@ function startDownloadInBackground(code: string): void {
 function startBatchDownloadInBackground(codes: readonly string[]): void {
   const batch = [...codes]
   const task = taskId.value ?? 0
+  // 同 `startDownload`：逐码取字节与 `zipBlobs` 都是 await，期间换批即作废整包
+  // （否则会把上一批的字节打成 zip 交给浏览器，而页面已显示新一批结果）
+  const binding = captureDownloadBinding()
   for (const code of batch) {
     inFlightDownloads.add(code)
   }
@@ -1600,12 +1655,27 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
     const { blob, fileName } = await buildXlsx(code)
     return { name: fileName, blob }
   }))
-    .then((entries) => zipBlobs(entries))
+    .then((entries) => {
+      // 逐码取字节这一段是 await：换批就到此为止，连 zip 都不必合成
+      if (downloadBindingBroken(binding)) {
+        throw new DownloadSuperseded()
+      }
+      return zipBlobs(entries)
+    })
     .then((zipped) => {
+      // `zipBlobs` 也是异步：交付浏览器前再复检一次，绝不把上一批的 zip 交出去
+      if (downloadBindingBroken(binding)) {
+        throw new DownloadSuperseded()
+      }
       downloadBlob(zipped, `export-${task}.zip`)
       ElMessage.success(t('views.export.msg.zipDownloaded', { count: batch.length }))
     })
     .catch((error: unknown) => {
+      if (error instanceof DownloadSuperseded) {
+        // 换批作废 ≠ 打包失败：一句提示，且确实一个字节都没交给浏览器
+        ElMessage.info(error.message)
+        return
+      }
       // 整批显式失败：不产出残缺 zip、不下载一部分（否则用户以为拿到了全部文件）
       ElMessage.error(t('views.export.msg.zipBatchFailed', {
         count: batch.length,

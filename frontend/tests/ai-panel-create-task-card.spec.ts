@@ -137,8 +137,8 @@ describe('create_task 确认卡：预检 target 无任务号 ⇒ 用「创建」
     expect(title).toBe('待你确认：创建导出配置任务『月报』')
     expect(title).not.toContain('undefined')
     expect(title).not.toContain('#')
-    // 知情摘要三字段仍按后端给值渲染（影响面 / 条件摘要；publishMode=null 不出行）
-    expect(wrapper.find('[data-testid="gate-facts-toggle"]').exists()).toBe(true)
+    // 普通确认卡不展示知情摘要或额外三字段。
+    expect(wrapper.find('[data-testid="gate-facts-toggle"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

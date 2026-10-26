@@ -1298,10 +1298,11 @@ public class SseChatEmitter {
 		frame.put("retryable", outcome.retryable(code));
 		frame.put("target", ToolResultEnvelope.targetOf(pending.getArguments()));
 		frame.put("messageId", toolMessageId(pending));
-		// N9：{@code result} 是卡面「输出」块的人读通道 —— 内部码换成用户摘要；
+		// N9/S9：{@code result} 保留中文用户摘要回退，{@code userTextCode} 供前端按原码本地化；
 		// {@code outcome}/{@code code}/{@code retryable} 不动，模型侧信封与台账原文也不动。
 		// markModelView 仍用<b>原文</b>判定模型视图是否被截断，显示摘要不改变机器可读事实。
 		frame.put("result", ToolResultUserText.forUser(code, result));
+		frame.put("userTextCode", ToolResultUserText.userTextCode(code));
 		if (resultView != null) {
 			frame.put("resultView", resultView.toMap());
 		}
@@ -1386,6 +1387,7 @@ public class SseChatEmitter {
 		frame.put("messageId", toolMessageId(pending));
 		// 与 tool_result 同口径：内部码换用户摘要（回灌成功/取消的原文不受影响）。
 		frame.put("result", ToolResultUserText.forUser(code, result));
+		frame.put("userTextCode", ToolResultUserText.userTextCode(code));
 		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}
