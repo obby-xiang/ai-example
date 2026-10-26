@@ -137,7 +137,7 @@ class ConfirmGateWiringTest {
     }
 
     @Test
-    void readAndCreateToolsExecuteDirectly() {
+    void readToolsExecuteDirectly() {
         when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
         when(this.store.get(RUN_ID)).thenReturn(snapshot());
         when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
@@ -147,14 +147,14 @@ class ConfirmGateWiringTest {
         when(this.store.claimExecution(eq(RUN_ID), anyString(), anyString())).thenReturn(true);
         when(this.store.instanceId()).thenReturn("test-instance");
 
-        for (String tool : List.of("list_tasks", "create_task", "get_workspace_state")) {
+        // AR-03 起 create_task 是 DANGER（确认门），不再属于"直接执行"清单；
+        // 这里只锁纯读工具的直接执行面。
+        for (String tool : List.of("list_tasks", "get_workspace_state")) {
             when(this.toolRegistry.channelOf(tool)).thenReturn(ToolMeta.Channel.BACKEND);
             when(this.toolRegistry.riskOf(tool)).thenReturn(ToolMeta.RiskLevel.READ);
         }
-        when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.WRITE);
 
-        this.manager.executeToolCalls(prompt("create_task", "{\"type\":\"EXPORT\"}"),
-                response("create_task", "{\"type\":\"EXPORT\"}"));
+        this.manager.executeToolCalls(prompt("list_tasks", "{}"), response("list_tasks", "{}"));
 
         assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getKind)
                 .containsExactly(PendingToolCall.KIND_BACKEND);

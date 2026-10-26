@@ -33,8 +33,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
  * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
  * （{@code start_export}/{@code start_precheck} 增加 {@code page:tasks}）；</li>
- * <li><b>S4.4e 三项</b>：{@code create_task} 的披露范围（任务中心 + 两类向导页，其余页面不披露）与
- * 风险（{@code WRITE}，不进确认门）；启动类四个工具一律 {@code DANGER}（确认门，FR-5.3）；
+ * <li><b>S4.4e + AR-03 三项</b>：{@code create_task} 的披露范围（任务中心 + 两类向导页，其余页面不披露）
+ * 与风险（{@code DANGER}，进确认门）；启动类四个工具一律 {@code DANGER}（确认门，FR-5.3）；
+ * 已完成 EXPORT 任务不再披露 {@code start_export}（终态收窄，引导改走下载）；
  * {@code set_condition} 的入参 Schema 里必须出现前端契约的内层结构
  * （{@code conditions.fields[].fieldCode/operator/value} + {@code conditions.scopeKeys}），
  * 且<b>不得</b>再出现扁平参数键（前端只读 {@code defCode/conditions}，扁平键会被静默丢弃）。</li>
@@ -347,9 +348,34 @@ class ToolRegistryDisclosureTest {
         assertThat(namesFor(AiContext.of("definitions", null, null, null, null))).doesNotContain("create_task");
         assertThat(namesFor(AiContext.of("data", null, null, null, null))).doesNotContain("create_task");
         assertThat(namesFor(AiContext.empty())).doesNotContain("create_task");
-        // 风险 WRITE：创建任务可逆（删除机制既有），不进确认门；执行通道是后端（与 REST 同一服务层）
-        assertThat(toolRegistry.riskOf("create_task")).isEqualTo(ToolMeta.RiskLevel.WRITE);
+        // 风险 DANGER（AR-03）：创建占任务号/进列表/可被引用，进确认门；执行通道仍是后端
+        assertThat(toolRegistry.riskOf("create_task")).isEqualTo(ToolMeta.RiskLevel.DANGER);
         assertThat(toolRegistry.channelOf("create_task")).isEqualTo(ToolMeta.Channel.BACKEND);
+    }
+
+    @Test
+    void completedExportTaskHidesStartExportButKeepsDownload() {
+        AiContext completed = AiContext.of("export", "EXPORT", "EXPORT", 1L, "COMPLETED", Map.of());
+        AiContext active = AiContext.of("export", "EXPORT", "EXPORT", 1L, "ACTIVE", Map.of());
+
+        assertThat(namesFor(completed)).as("已完成导出任务不再披露再导出入口").doesNotContain("start_export");
+        assertThat(toolRegistry.matchesContext("start_export", completed))
+            .as("披露面与执行面同判据").isFalse();
+        assertThat(namesFor(completed)).as("下载/查看已有结果的入口必须保留").contains("download_export_files");
+        assertThat(namesFor(active)).as("ACTIVE 任务照旧披露").contains("start_export");
+        assertThat(toolRegistry.matchesContext("start_export", active)).isTrue();
+        // 导入任务的 COMPLETED 可能只是"预检查通过"，不得误杀后续导入/发布
+        AiContext completedImport = AiContext.of("import", "IMPORT", "IMPORT", 2L, "COMPLETED", Map.of());
+        assertThat(namesFor(completedImport)).contains("start_import");
+    }
+
+    @Test
+    void everyRegisteredCallbackHasMetadataAndScope() {
+        for (var callback : toolRegistry.allCallbacks()) {
+            String name = callback.getToolDefinition().name();
+            assertThat(toolRegistry.getMeta(name)).as("%s 必须有元数据", name).isNotNull();
+            assertThat(toolRegistry.getMeta(name).getScopePatterns()).as("%s 必须有 scope", name).isNotEmpty();
+        }
     }
 
     // ── S4.4e 裁决⑥：启动类工具一律经确认门（FR-5.3） ──────────────────────────

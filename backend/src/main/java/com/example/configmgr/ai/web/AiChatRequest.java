@@ -42,7 +42,13 @@ public record AiChatRequest(String sessionId, String message, Context context, S
 	 * 闸门根本轮不到执行。故这里显式放行未知键，由闸门负责丢弃与计数（X-06）。
 	 */
 	@com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
-	public record Context(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
+	public record Context(String page, String taskType, String step, Long taskId, String taskStatus,
+			Map<String, Object> extra) {
+
+		/** 兼容构造器：{@code taskStatus} 之前的调用点（含测试）无需改动。 */
+		public Context(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
+			this(page, taskType, step, taskId, null, extra);
+		}
 	}
 
 	/**

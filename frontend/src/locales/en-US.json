@@ -30,7 +30,9 @@
         "expired": "! Timed out",
         "failed": "! Approved · Execution failed",
         "submitted": "✓ Submitted",
-        "cancelled": "✗ Cancelled"
+        "cancelled": "✗ Cancelled",
+        "notApproved": "! Not approved · Not executed",
+        "notExecuted": "! Approved · Not executed"
       },
       "error": {
         "quota": {
@@ -357,6 +359,18 @@
       "irreversible": "I understand that {action} cannot be undone",
       "publishIrreversible": "Confirm starting the publish job: if this run uses replace mode, old data in scope will be deleted and cannot be undone",
       "ackHint": "Tick the box above to continue",
+      "facts": {
+        "title": "Decision facts",
+        "expand": "Expand",
+        "collapse": "Collapse",
+        "impact": "Impact",
+        "condition": "Condition summary",
+        "publishMode": "Publish mode",
+        "mode": {
+          "merge": "Merge (incremental)",
+          "replace": "Replace (in scope)"
+        }
+      },
       "action": {
         "start_publish": "starting the publish job"
       }
@@ -373,6 +387,9 @@
       "submitting": "Submitting…",
       "notRetryable": "This form can no longer be submitted; cancel and ask the assistant to start over",
       "unsupportedType": "Field \"{label}\" has an unsupported type ({type}) and was not rendered",
+      "cascadeCleared": "Cleared {fields} — no longer applicable after the change",
+      "advancedExpand": "More conditions ({count})",
+      "advancedCollapse": "Hide advanced conditions",
       "hintSeparator": "; ",
       "hint": {
         "required": "required",
@@ -426,6 +443,13 @@
       "confirmTitle": "Awaiting your confirmation: {business}",
       "requiredCount": "{count} required",
       "formCancelledSummary": "Not submitted; entries are not recorded",
+      "gfQueue": {
+        "position": "Queued · {position} of {total}",
+        "hint": "Another form is being filled in. This one appears automatically after the previous form is submitted or cancelled.",
+        "cancel": "Cancel this queued form"
+      },
+      "createTaskBusiness": "Create an {type} task “{title}”",
+      "createTaskBusinessUntitled": "Create an {type} task",
       "actionField": "Action",
       "overwriteConfirm": "The input box already has content. Editing will overwrite it. Continue?",
       "modelFallback": "Streaming chat · tool calling",

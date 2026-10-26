@@ -55,6 +55,12 @@ public class ToolRegistry {
     /** 已应用的快照版本（诊断面 / 日志用；空快照 = "annotations"）。 */
     private String snapshotVersion = "annotations";
 
+    /** 任务终态：披露面据此收窄"已完成导出任务"的再导出入口。 */
+    public static final String TASK_STATUS_COMPLETED = "COMPLETED";
+
+    /** 被终态收窄的工具（只收这一支：COMPLETED 不改变导入/发布链的披露）。 */
+    private static final String TOOL_START_EXPORT = "start_export";
+
     @PostConstruct
     public void init() {
         // 扫描期创建失败的 bean 名 + 原始异常：工具 bean 的失败必须在扫描结束后整批抛出，
@@ -137,7 +143,37 @@ public class ToolRegistry {
                     failures.get(0));
         }
         applyOverrides();
+        assertDisclosureConsistency();
         log.info("ToolRegistry: registered {} tools（定义来源={}）", callbackMap.size(), snapshotVersion);
+    }
+
+    /**
+     * 披露不变量（启动期 fail-fast）：<b>回调表 ⊆ 元数据表</b>，且每个已注册工具都有非空 scope。
+     *
+     * <p>为什么必须启动失败而不是运行期兜底：没有元数据的回调会被
+     * {@link #forContext} 当成"unscoped: always include"、被 {@link #matchesContext} 直接放行 ——
+     * 于是"漏写 {@code @ToolScope}"变成"该工具在所有页面都披露且都能执行"，是静默扩大授权面。
+     * 空 scope 数组同理：披露面按"不匹配任何标签"不披露，执行面旧实现却按 unscoped 放行（分叉）。
+     * 本断言把两种分叉在启动期一次性钉死；运行期仍保留同一判据（见两处方法）。
+     */
+    private void assertDisclosureConsistency() {
+        List<String> missingMeta = callbackMap.keySet().stream()
+                .filter(name -> !metaMap.containsKey(name))
+                .sorted()
+                .toList();
+        if (!missingMeta.isEmpty()) {
+            throw new IllegalStateException("工具回调缺少元数据（回调表必须 ⊆ 元数据表）：" + missingMeta
+                    + " —— 启动中止：缺元数据会让该工具在所有上下文披露并放行执行");
+        }
+        List<String> emptyScope = metaMap.values().stream()
+                .filter(meta -> meta.getScopePatterns() == null || meta.getScopePatterns().length == 0)
+                .map(ToolMeta::getName)
+                .sorted()
+                .toList();
+        if (!emptyScope.isEmpty()) {
+            throw new IllegalStateException("工具 scope 为空（@ToolScope 必须至少声明一个标签）：" + emptyScope
+                    + " —— 启动中止：空 scope 会让披露面与执行面得出相反结论");
+        }
     }
 
     /**
@@ -320,7 +356,8 @@ public class ToolRegistry {
                 .filter(e -> {
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
-                    return matchesAny(meta.getScopePatterns(), tags) && this.sheetSwitches.allows(e.getKey());
+                    return scopeAllows(meta, tags) && stateAllows(e.getKey(), ctx)
+                            && this.sheetSwitches.allows(e.getKey());
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
@@ -369,10 +406,37 @@ public class ToolRegistry {
      * @return true = 该工具在当前上下文内本就被披露（可执行）；false = 越 scope（必须拦截）
      */
     public boolean matchesContext(String name, AiContext ctx) {
+        AiContext effective = ctx == null ? AiContext.empty() : ctx;
         ToolMeta meta = metaMap.get(name);
-        boolean scopeOk = meta == null || meta.getScopePatterns() == null || meta.getScopePatterns().length == 0
-                || matchesAny(meta.getScopePatterns(), buildTags(ctx == null ? AiContext.empty() : ctx));
-        return scopeOk && !sheetDisabled(name);
+        boolean scopeOk = meta == null || scopeAllows(meta, buildTags(effective));
+        return scopeOk && stateAllows(name, effective) && !sheetDisabled(name);
+    }
+
+    /**
+     * scope 披露判据（披露面 {@link #forContext} 与执行面 {@link #matchesContext} 共用）。
+     *
+     * <p>空数组 = <b>谁都不匹配</b>（与 {@code matchesAny([], tags)} 同结论）：两侧同判、
+     * 不存在"披露不出去却在执行时放行"的分叉；启动期另有 {@link #assertDisclosureConsistency}
+     * 把空 scope 直接判成启动失败。
+     */
+    private static boolean scopeAllows(ToolMeta meta, Set<String> tags) {
+        String[] patterns = meta.getScopePatterns();
+        return patterns != null && patterns.length > 0 && matchesAny(patterns, tags);
+    }
+
+    /**
+     * 任务终态收窄（q4 的"COMPLETED 仍披露 start_export"）：已完成任务不再披露/放行再导出，
+     * 引导改走 {@code download_export_files} / {@code open_export_file_editor}。
+     *
+     * <p>只收窄 {@code start_export} 一支：导入任务的 COMPLETED 可能只是"预检查通过"，
+     * 后续导入/发布仍应可用 —— 把整组 {@code start_*} 一起收窄会误杀主流程。
+     * 该判据只是"让模型看不见假入口"，执行面仍有预检与域层终态守卫兜底。
+     */
+    private static boolean stateAllows(String name, AiContext ctx) {
+        if (ctx == null || !TOOL_START_EXPORT.equals(name)) {
+            return true;
+        }
+        return !TASK_STATUS_COMPLETED.equalsIgnoreCase(ctx.getTaskStatus());
     }
 
     /**
@@ -477,7 +541,7 @@ public class ToolRegistry {
         }
     }
 
-    private boolean matchesAny(String[] patterns, Set<String> tags) {
+    private static boolean matchesAny(String[] patterns, Set<String> tags) {
         for (String p : patterns) {
             if (tags.contains(p)) return true;
         }

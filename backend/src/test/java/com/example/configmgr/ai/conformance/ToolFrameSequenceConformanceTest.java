@@ -425,9 +425,9 @@ class ToolFrameSequenceConformanceTest {
 	 */
 	@Test
 	void firstDeterministicFailureSkipsTheRestAndSkippedFrameHasNoToolStart() {
-		when(this.toolRegistry.categoryOf("create_task")).thenReturn(ToolMeta.Category.W);
-		when(this.toolRegistry.channelOf("create_task")).thenReturn(ToolMeta.Channel.BACKEND);
-		when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.WRITE);
+		when(this.toolRegistry.categoryOf("fake_w_tool")).thenReturn(ToolMeta.Category.W);
+		when(this.toolRegistry.channelOf("fake_w_tool")).thenReturn(ToolMeta.Channel.BACKEND);
+		when(this.toolRegistry.riskOf("fake_w_tool")).thenReturn(ToolMeta.RiskLevel.WRITE);
 		when(this.toolRegistry.categoryOf("start_export")).thenReturn(ToolMeta.Category.J);
 		when(this.toolRegistry.channelOf("start_export")).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf("start_export")).thenReturn(ToolMeta.RiskLevel.DANGER);
@@ -437,7 +437,7 @@ class ToolFrameSequenceConformanceTest {
 		out.start(SESSION_ID);
 
 		ToolExecutionResult result = this.manager.executeToolCalls(promptWithTools(tools),
-				response(new AssistantMessage.ToolCall("call-w", "function", "create_task", "{\"type\":\"IMPORT\"}"),
+				response(new AssistantMessage.ToolCall("call-w", "function", "fake_w_tool", "{\"type\":\"IMPORT\"}"),
 						new AssistantMessage.ToolCall("call-j", "function", "start_export", "{\"taskId\":9}")));
 		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
 
@@ -461,7 +461,7 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("executed", false)
 				.containsEntry("messageId", "tool-call-j");
 		assertThat(skipped.get("result")).asString()
-				.isEqualTo("未执行：上游 create_task 失败（TASK_FINALIZED），本调用已跳过");
+				.isEqualTo("未执行：上游 fake_w_tool 失败（TASK_FINALIZED），本调用已跳过");
 		// 跳过项零执行：下游工具一次都没被调用
 		assertThat(tools.skippedInvocations.get()).isZero();
 		assertThat(tools.failedInvocations.get()).isEqualTo(1);
@@ -684,8 +684,8 @@ class ToolFrameSequenceConformanceTest {
 
 		final AtomicInteger skippedInvocations = new AtomicInteger();
 
-		@Tool(name = "create_task", description = "受控替身：建任务必失败（触发首错即停）")
-		public String createTask(@ToolParam(description = "任务类型") String type) {
+		@Tool(name = "fake_w_tool", description = "受控替身：W 类写工具必失败（触发首错即停；不用 create_task，避免与 AR-03 的 DANGER 元数据混淆）")
+		public String fakeWrite(@ToolParam(description = "占位参数") String type) {
 			this.failedInvocations.incrementAndGet();
 			throw new ConflictException("TASK_FINALIZED", "任务已终态，不能创建");
 		}

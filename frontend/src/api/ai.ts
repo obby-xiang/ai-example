@@ -105,8 +105,12 @@ export async function uploadFormAttachment(
 /**
  * GET /api/ai/form/option-sources/{sourceId}（联动原语④的数据源解析口）。
  *
- * `sourceId` 是**后端注册的闭集**（本批只有 `definition_fields`）——模型无法让前端去请求
- * 任意 URL；这里的路径参数只是把已通过的 sourceId 交给后端复核。
+ * `sourceId` 是**后端注册的闭集**（`GenerativeFormRules#OPTION_SOURCE_IDS`，当前两个内置源）：
+ * - `definition_fields`：父值 = 配置定义编码 → 该定义的字段（先选定义，再选它的字段）；
+ * - `definitions`：父值 = 层级（GLOBAL / REGION / PROJECT）→ 该层级的配置定义（「层级→定义」用法）。
+ *
+ * 模型无法让前端去请求任意 URL；这里的路径参数只是把已通过 schema 闸门的 sourceId 交给后端复核
+ * （未知 id 后端按闭集拒绝，前端不做自由请求）。父值缺失/不可解析时返回空列表（不猜测）。
  */
 export async function formOptionSource(
   sourceId: string,

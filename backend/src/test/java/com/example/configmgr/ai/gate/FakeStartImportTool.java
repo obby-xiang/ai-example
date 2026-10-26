@@ -34,4 +34,10 @@ public class FakeStartImportTool {
         return "导入作业已启动（作业 #4242），数据将写入暂存区，发布前可预览";
     }
 
+    /** 纯读替身：确认门用例里用于验证"读工具直接执行"（AR-03 后 create_task 不再属于该面）。 */
+    @Tool(name = "list_tasks", description = "受控替身：列出任务（纯读，直接执行）")
+    public String listTasks() {
+        return "没有进行中的任务";
+    }
+
 }

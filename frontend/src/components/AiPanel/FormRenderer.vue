@@ -21,7 +21,18 @@
 
     <div :class="readonly || flat ? '' : 'p-[11px]'">
       <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? '' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
-      <div v-for="field in visibleFields" :key="field.key" class="mb-[11px]">
+      <div v-for="field in visibleFields" :key="field.key" :class="isFieldOpen(field) ? 'mb-[11px]' : 'mb-0'">
+        <!-- 高级条件渐进披露（AR-07）：长尾可选条件折叠，按钮只出现一次（高级区第一张之前） -->
+        <div v-if="!readonly && isAdvancedGroupStart(field)" class="mb-[11px]">
+          <button
+            type="button"
+            data-testid="gf-advanced-toggle"
+            :aria-expanded="advancedOpen"
+            class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[3px] text-[12px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+            @click="advancedOpen = !advancedOpen"
+          >{{ advancedOpen ? t('ai.gf.advancedCollapse') : t('ai.gf.advancedExpand', { count: advancedCount }) }}</button>
+        </div>
+        <template v-if="isFieldOpen(field)">
         <label
           :for="controlId(field)"
           class="block text-[12.2px] mb-[4px] break-words [overflow-wrap:anywhere]"
@@ -202,11 +213,19 @@
         <span v-if="fieldIssues(field).length > 0" :id="errorId(field)" :class="[FMSG, 'mt-[5px]']">
           {{ fieldIssues(field).map((issue) => issueText(field, issue)).join('；') }}
         </span>
+        </template>
       </div>
       </div>
 
       <!-- 错误 live region（G-G）：新增错误时读屏播报；视觉上由各字段错误条承担 -->
       <span class="sr-only" role="alert" aria-live="polite" data-testid="gf-live-region">{{ liveSummary }}</span>
+
+      <!-- AR-07：级联清值的一次性告知（父值变了 ⇒ 哪些子值被清掉），常驻在字段区下方 -->
+      <span
+        v-if="!readonly && cascadeNotice"
+        class="mt-[11px] block text-[11.8px] leading-[1.5] text-[#57606a] bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[6px] px-[8px] py-[5px]"
+        data-testid="gf-cascade-notice"
+      >{{ cascadeNotice }}</span>
 
       <span v-if="!readonly && cardError" :class="[FMSG, 'mt-[11px]']" data-testid="gf-error">{{ cardError }}</span>
 
@@ -250,6 +269,9 @@
  *   无 scoped 样式块、无行内 style；
  * - GF 优化批（G-A/G-D/G-E/G-F/G-G）：结构化错误按 key 点亮、联动五原语、附件上传、长文本域、
  *   `<label for>`/`aria-invalid`/`aria-describedby`/live region/首错聚焦，chrome 文案全走 locales。
+ * - AR-07（批次4 前端C）：① 常用筛选条件**一屏**（不拆成一屏一问），长尾可选条件走「更多条件」
+ *   渐进披露 —— 必填 / 已填值 / 有错误的字段永不折叠；② 父值变化清掉子值时给**一句**聚合提示
+ *   （`gf-cascade-notice`），不逐字段弹条。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -259,6 +281,7 @@ import {
   applyDefaultFrom,
   buildInitialValues,
   checkFormIssues,
+  clearedCascadeFields,
   isFieldDisabled,
   isFieldRequired,
   isFieldVisible,
@@ -406,6 +429,11 @@ function initialModel(): Record<string, FormModelValue> {
 }
 
 const model = ref<Record<string, FormModelValue>>(initialModel())
+/**
+ * 建卡时的初始模型：判断"用户是不是真的填过这一格"的对照基线（与它相同 = 还是默认态）。
+ * 披露判据用它 —— 枚举初值恒有值（首个合法选项），把它当"已填"会让高级条件永远摊开。
+ */
+const defaultModel = initialModel()
 /** 本卡根元素（首错聚焦只在本子树里找，同页多卡不串）。 */
 const rootRef = ref<HTMLElement | null>(null)
 /** 本次提交前复核的问题（结构化：按 key 归属字段）。 */
@@ -465,6 +493,73 @@ const scenarioLabel = computed(() =>
 
 /** 联动显隐：隐藏字段不渲染、不参与校验、不提交。 */
 const visibleFields = computed(() => props.schema.fields.filter((field) => isFieldVisible(field, model.value)))
+
+/**
+ * 常用条件一屏能放下的字段数（AR-07 / Task 7 Step 3「常用筛选一屏，高级渐进披露」）。
+ * 与 GOV.UK 式「一屏一问」相反：相互影响的筛选条件拆开只会让用户来回翻，
+ * 故**常用条件始终同屏**，只有长尾可选条件折叠。
+ */
+const FILTER_COMMON_FIELD_COUNT = 6
+
+/** 高级条件展开态（纯呈现层；不影响取值、校验与提交）。 */
+const advancedOpen = ref(false)
+
+function hasUserValue(field: FormFieldSpec): boolean {
+  const value = model.value[field.key]
+  const initial = defaultModel[field.key]
+  if (Array.isArray(value) || Array.isArray(initial)) {
+    const left = Array.isArray(value) ? value : []
+    const right = Array.isArray(initial) ? initial : []
+    return left.length !== right.length || left.some((item, index) => item !== right[index])
+  }
+  return value !== initial
+}
+
+/**
+ * 渐进披露（AR-07）：哪些可见字段属"高级条件"（默认折叠）。
+ *
+ * <p>schema 没有"高级"标记（字段白名单不含该属性），故按**顺序 + 必填/已填/报错**推导：
+ * 前 {@link FILTER_COMMON_FIELD_COUNT} 张可见卡是常用条件，其余**可选**字段是长尾高级条件。
+ * 三条不折叠的例外：必填（折叠了表就交不出去）、用户已填（不藏用户自己的数据）、
+ * 有错误（错误必须可见）。只读回放不折叠（整张表按提交原样呈现）；CLARIFY（确认型）
+ * 也不折叠 —— 确认场景要的就是一眼看全。
+ */
+const advancedKeys = computed<Set<string>>(() => {
+  const keys = new Set<string>()
+  if (props.readonly === true || props.schema.scenario !== 'FILTER') {
+    return keys
+  }
+  visibleFields.value.forEach((field, index) => {
+    if (index < FILTER_COMMON_FIELD_COUNT) {
+      return
+    }
+    if (isFieldRequired(field, model.value) || hasUserValue(field) || fieldIssues(field).length > 0) {
+      return
+    }
+    keys.add(field.key)
+  })
+  return keys
+})
+
+/** 折叠区的字段数（按钮文案用）。 */
+const advancedCount = computed(() => visibleFields.value.filter((field) => advancedKeys.value.has(field.key)).length)
+
+/** 该字段此刻是否展开渲染（常用字段恒 true；高级字段看展开态）。 */
+function isFieldOpen(field: FormFieldSpec): boolean {
+  return !advancedKeys.value.has(field.key) || advancedOpen.value
+}
+
+/** 高级区的第一张（折叠按钮就挂在这里，保证整段只出现一个开关）。 */
+function isAdvancedGroupStart(field: FormFieldSpec): boolean {
+  const first = visibleFields.value.find((candidate) => advancedKeys.value.has(candidate.key))
+  return first !== undefined && first.key === field.key
+}
+
+/**
+ * 级联清值的一次性提示（AR-07）：本次父值变化清掉了哪些字段（null = 没清）。
+ * 一次改动最多一句说明，不逐字段弹条 —— 清值是**一个动作的后果**，不是 N 个独立事件。
+ */
+const cascadeNotice = ref<string | null>(null)
 
 /** 控件 DOM id：交互卡保持历史形态；只读回放卡按卡作用域分段（同页多卡不撞车）。 */
 function controlIdOfKey(key: string): string {
@@ -557,8 +652,14 @@ function numberValue(key: string): number | string {
 function setValue(key: string, value: FormModelValue): void {
   // 级联裁剪（I2）：父值一变，依赖它的子值里"按新选项已经不合法"的先清掉 —— 否则多选级联的
   // 复选框整组消失后模型仍带旧值，用户连取消勾选都做不到（提交必被判不在选项内）。
-  const changed = pruneCascadeValues(props.schema, { ...model.value, [key]: value }, key)
+  const before = model.value
+  const changed = pruneCascadeValues(props.schema, { ...before, [key]: value }, key)
   model.value = changed as Record<string, FormModelValue>
+  // AR-07：清值必须**告知**（否则用户以为值还在）—— 一次改动聚成一句，覆盖本次被清掉的每个字段
+  const cleared = clearedCascadeFields(props.schema, before, changed)
+  cascadeNotice.value = cleared.length > 0
+    ? t('ai.gf.cascadeCleared', { fields: cleared.map((field) => field.label).join(t('ai.gf.hintSeparator')) })
+    : null
   touched.add(key)
   const withDefaults = applyDefaultFrom(props.schema, changed, key, { touched })
   model.value = withDefaults as Record<string, FormModelValue>

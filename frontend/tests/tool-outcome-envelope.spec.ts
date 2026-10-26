@@ -512,7 +512,8 @@ describe('契约增量：PRECHECK_FAILED 历史终态（outcome 缺失时不得�
 
     const message = store.messages[0] as ChatMessage
     expect(toolPart(message, 'pf1')).toMatchObject({ status: 'failed', kind2: 'CONFIRM', requiresAction: false })
-    expect(cardStatusOf(toolPart(message, 'pf1')).label).toContain('执行失败')
+    // 批4：PRECHECK_FAILED 从未批准、未进确认门 —— 不得显示「已批准 · 执行失败」。
+    expect(cardStatusOf(toolPart(message, 'pf1')).label).toBe('! 未批准 · 未执行')
   })
 })
 

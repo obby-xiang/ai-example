@@ -22,16 +22,31 @@ public class AiContext {
 
 	private String taskType;
 
+	/**
+	 * 任务状态（{@code ACTIVE}/{@code COMPLETED}/{@code CANCELLED}/{@code FAILED}）。
+	 *
+	 * <p>披露面用它做"终态收窄"（{@code ToolRegistry#forContext}/{@code matchesContext} 同一判据）：
+	 * 已完成任务不再披露 {@code start_export}，避免模型看到"可导出"的假入口；
+	 * 执行面仍由预检与域层终态守卫兜底，本字段不构成授权。
+	 */
+	private String taskStatus;
+
 	private String step;
 
 	private Map<String, Object> extra = new LinkedHashMap<>();
 
 	public static AiContext of(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
+		return of(page, taskType, step, taskId, null, extra);
+	}
+
+	public static AiContext of(String page, String taskType, String step, Long taskId, String taskStatus,
+			Map<String, Object> extra) {
 		AiContext context = new AiContext();
 		context.setPage(page != null ? page : "");
 		context.setTaskType(taskType);
 		context.setStep(step);
 		context.setTaskId(taskId);
+		context.setTaskStatus(taskStatus);
 		if (extra != null) {
 			context.getExtra().putAll(extra);
 		}
@@ -63,6 +78,7 @@ public class AiContext {
 		out.put("page", page);
 		out.put("taskId", taskId);
 		out.put("taskType", taskType);
+		out.put("taskStatus", taskStatus);
 		out.put("step", step);
 		out.put("extra", extra);
 		return out;
@@ -77,6 +93,7 @@ public class AiContext {
 		Object taskId = map.get("taskId");
 		return of((String) map.get("page"), (String) map.get("taskType"), (String) map.get("step"),
 				taskId == null ? null : Long.valueOf(String.valueOf(taskId)),
+				(String) map.get("taskStatus"),
 				map.get("extra") instanceof Map<?, ?> extra ? (Map<String, Object>) extra : null);
 	}
 

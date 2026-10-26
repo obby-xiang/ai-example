@@ -30,9 +30,14 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -121,6 +126,152 @@ public class TaskService {
         task.setCurrentStep(type == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
         task = taskRepository.save(task);
         return task;
+    }
+
+    /**
+     * AR-03 宿主幂等 + 单轮上限 1：AI 创建任务<b>只走这一条</b>。
+     *
+     * <p>幂等键 = 规范化标题（name）+ 本轮 runId（parent/父作用域）+ 稳定参数（type）的 sha256；
+     * <b>不以标题为唯一依据</b>。同一轮同一键 ⇒ 复用已有任务（{@code reused=true}，绝不二次创建）；
+     * 同一轮不同键 ⇒ 明确冲突（{@code CREATE_TASK_CONFLICT}，本轮只允许创建一次）。
+     *
+     * <p>幂等标记落既有的 {@code settings_json}（{@code {"aiCreateKey":…,"aiCreateRun":…}}）：
+     * 不新增表/列，跨进程重启仍可判定；其它设置（如 {@code importMode}）原样保留。
+     * runId 缺失（旧调用/直调测试）时退化为"键级幂等"，行为见 {@link #findByCreateKey}。
+     */
+    @Transactional
+    public CreateOutcome createIdempotent(Task.TaskType type, String title, String runId) {
+        String normalizedTitle = normalizeCreateName(title);
+        String runToken = runId == null || runId.isBlank() ? null : runId.trim();
+        String key = createIdempotencyKey(type, normalizedTitle, runToken);
+        Object lock = createLock(runToken == null ? "key:" + key : "run:" + runToken);
+        synchronized (lock) {
+            if (runToken != null) {
+                Optional<Task> inRun = findByRun(runToken);
+                if (inRun.isPresent()) {
+                    Task existing = inRun.get();
+                    if (key.equals(settingsValue(existing, "aiCreateKey"))) {
+                        log.info("create_task 命中同轮幂等键，复用任务 #{}（未二次创建）runId={}", existing.getId(),
+                                runToken);
+                        return new CreateOutcome(existing, true);
+                    }
+                    throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
+                            "本轮已创建任务 #" + existing.getId() + "，同一轮只允许创建一次；本次未创建。"
+                                    + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
+                }
+            }
+            else {
+                Optional<Task> sameKey = findByCreateKey(key);
+                if (sameKey.isPresent()) {
+                    Task existing = sameKey.get();
+                    log.info("create_task 命中幂等键，复用任务 #{}（未二次创建）", existing.getId());
+                    return new CreateOutcome(existing, true);
+                }
+            }
+
+            Task task = new Task();
+            task.setType(type);
+            task.setTitle(normalizedTitle);
+            task.setCurrentStep(type == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
+            Map<String, Object> settings = new LinkedHashMap<>();
+            settings.put("aiCreateKey", key);
+            if (runToken != null) {
+                settings.put("aiCreateRun", runToken);
+            }
+            try {
+                task.setSettingsJson(objectMapper.writeValueAsString(settings));
+            }
+            catch (Exception ex) {
+                throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                        "任务设置序列化失败: " + ex.getMessage(), ex);
+            }
+            Task saved = taskRepository.save(task);
+            log.info("create_task 落库任务 #{}（key={}，runId={}）", saved.getId(), key, runToken);
+            return new CreateOutcome(saved, false);
+        }
+    }
+
+    /** 幂等创建结果（{@code reused=true} = 命中已有键，未二次创建）。 */
+    public record CreateOutcome(Task task, boolean reused) {
+    }
+
+    /** 分片锁：按 run/key 串行化同进程内的并发创建（跨实例由 run 租约与"单轮 1"共同约束）。 */
+    private static final Object[] CREATE_LOCKS = createLocks();
+
+    private static Object[] createLocks() {
+        Object[] locks = new Object[64];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private static Object createLock(String scope) {
+        return CREATE_LOCKS[Math.floorMod(scope.hashCode(), CREATE_LOCKS.length)];
+    }
+
+    private static String normalizeCreateName(String title) {
+        String normalized = title == null ? "" : title.trim().replaceAll("\\s+", " ");
+        return normalized.isEmpty() ? "未命名任务" : normalized;
+    }
+
+    /** 幂等键：name（规范化标题）+ parent（runId）+ 稳定参数（type）的 sha256。 */
+    static String createIdempotencyKey(Task.TaskType type, String normalizedTitle, String runToken) {
+        String material = "create_task|name=" + normalizedTitle + "|parent=" + (runToken == null ? "-" : runToken)
+                + "|params=" + type.name();
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(material.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(64);
+            for (byte value : digest) {
+                hex.append(String.format(Locale.ROOT, "%02x", value));
+            }
+            return hex.toString();
+        }
+        catch (NoSuchAlgorithmException ex) {
+            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 不可用，无法生成创建幂等键", ex);
+        }
+    }
+
+    private Optional<Task> findByRun(String runToken) {
+        String needle = "\"aiCreateRun\":\"" + runToken + "\"";
+        try {
+            for (Task task : taskRepository.findBySettingsJsonContaining(needle)) {
+                if (runToken.equals(settingsValue(task, "aiCreateRun"))) {
+                    return Optional.of(task);
+                }
+            }
+        }
+        catch (RuntimeException ex) {
+            // fail-closed：查不了幂等面时宁可拒绝二次创建，也不能重复落库。
+            log.warn("读取同轮创建幂等键失败 runId={}：{}", runToken, ex.getMessage());
+            throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
+                    "无法确认本轮是否已创建任务（幂等查询失败），为避免重复创建已拒绝本次创建，请稍后重试");
+        }
+        return Optional.empty();
+    }
+
+    private Optional<Task> findByCreateKey(String key) {
+        String needle = "\"aiCreateKey\":\"" + key + "\"";
+        for (Task task : taskRepository.findBySettingsJsonContaining(needle)) {
+            if (key.equals(settingsValue(task, "aiCreateKey"))) {
+                return Optional.of(task);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** 从 {@code settings_json} 取一个字符串键（缺失/坏 JSON 返回 null）。 */
+    private String settingsValue(Task task, String key) {
+        if (task == null || task.getSettingsJson() == null || task.getSettingsJson().isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(task.getSettingsJson()).path(key).asText(null);
+        }
+        catch (Exception ex) {
+            return null;
+        }
     }
 
     @Transactional

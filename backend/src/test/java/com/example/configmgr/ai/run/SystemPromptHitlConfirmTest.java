@@ -164,6 +164,20 @@ class SystemPromptHitlConfirmTest {
 	}
 
 	@Test
+	void systemPromptPinsCreationConfirmationCompletedDownloadAndStructuredSelection() {
+		String systemText = runTurnAndCaptureSystemText();
+
+		assertThat(systemText).as("AR-03：创建≠执行 + 单轮一次")
+			.contains("创建≠执行").contains("同一轮最多创建一次");
+		assertThat(systemText).as("q4：COMPLETED 引导下载而不是重复导出")
+			.contains("download_export_files");
+		assertThat(systemText).as("AR-02/AR-03：两种未执行语义必须分开")
+			.contains("未批准·未执行").contains("已批准·未执行");
+		assertThat(systemText).as("结构化选择优先于开放式文字一问一答")
+			.contains("生成式表单").contains("select_definitions");
+	}
+
+	@Test
 	void textQuestionsRemainOnlyForOpenEndedInformation() {
 		String systemText = runTurnAndCaptureSystemText();
 

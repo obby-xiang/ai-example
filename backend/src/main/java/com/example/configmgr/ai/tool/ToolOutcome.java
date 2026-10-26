@@ -134,6 +134,18 @@ public enum ToolOutcome {
 	public static final String CODE_TARGET_INVALID = ErrorCodes.TARGET_INVALID;
 
 	/**
+	 * 同一轮第二次 {@code create_task}（AR-03 单轮上限 1）：<b>未创建</b>、结局 {@link #SKIPPED}。
+	 *
+	 * <p>为什么不是 {@code failed}：这不是"创建出错"，而是"本轮已经建过"—— 用 failed 会触发
+	 * 批次首错即停，把同批后续动作（例如导航/继续汇报）一起作废；skipped 的卡面文案是"已跳过"，
+	 * 与"未创建"一致，且原因文本会说明出口。
+	 */
+	public static final String CODE_CREATE_TASK_TURN_LIMIT = ErrorCodes.CREATE_TASK_TURN_LIMIT;
+
+	/** 同一轮创建幂等键冲突（宿主拒绝二次创建）。 */
+	public static final String CODE_CREATE_TASK_CONFLICT = ErrorCodes.CREATE_TASK_CONFLICT;
+
+	/**
 	 * 错入口批准（入口 kind 校验批）：{@code kind=FRONTEND} 的条目被写成 {@code APPROVED}
 	 * （历史假批准 / 旧代码不校验入口时留下的数据）。<b>后端不执行前端工具的桩体、不写执行台账</b>，
 	 * 结局 {@link #BLOCKED}、{@code executed=false}，不可重试（要重来得走前端回灌入口）。

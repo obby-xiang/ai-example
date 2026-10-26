@@ -11,7 +11,7 @@
 #
 # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故将来改描述
 # 必须发新 version 并留痕，禁止"保存即生效"式编辑。
-version: 2026-10-21.1
+version: 2026-10-26.2
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -28,28 +28,70 @@ tools:
     title: 预估数据行数
   - toolKey: create_task
     title: 创建任务
+    description: >-
+      从零创建配置管理任务（EXPORT/IMPORT）。前置：确认卡批准后才会创建；同一轮最多一次；
+      同轮重复调用会复用或明确拒绝。创建不等于执行：不会启动任何作业。
+      批准后用 navigate_to(page=..., taskId=...) 打开向导。
   - toolKey: start_export
     title: 启动导出作业
+    description: >-
+      启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；任务未终态（CANCELLED/已完成导出成功
+      的任务不可再导出）、无同类在途作业。任务已完成时改用 download_export_files，不要重复发起导出。
   - toolKey: start_precheck
     title: 启动预检查作业
+    description: >-
+      启动预检查作业（需要用户确认）。前置：IMPORT 任务已选配置项且已上传数据文件；无在途作业。
   - toolKey: start_import
     title: 启动导入作业
+    description: >-
+      启动导入作业（需要用户确认）。前置：IMPORT 任务有上传文件，且最近一次预检查通过且未过期；无在途作业。
   - toolKey: start_publish
     title: 启动发布作业
+    description: >-
+      启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过；发布模式由任务设置决定
+      （MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。
   - toolKey: open_export_file_editor
     title: 打开导出文件在线编辑器
   - toolKey: download_export_files
     title: 下载导出文件
+    description: >-
+      下载导出文件（前端执行）。前置：EXPORT 任务已有成功导出作业/导出文件。任务已完成时用它
+      （或 open_export_file_editor），不要重复 start_export。
   - toolKey: navigate_to
     title: 跳转页面
+    description: >-
+      跳转页面并绑定任务（前端执行）。前置：目标页面存在；create_task 返回任务 id 后用它打开该任务向导。
+      同一目标页不要重复导航。
   - toolKey: select_definitions
     title: 选择配置项
+    description: >-
+      在工作区勾选配置项（前端执行，勾选即落任务项）。前置：已打开对应导出/导入向导并绑定 taskId。
+      选择项优先用本工具，不要用开放式文字询问。
   - toolKey: set_condition
     title: 设置查询条件
+    description: >-
+      设置导出查询条件（前端执行，立即落库）。前置：EXPORT 任务且当前在 QUERY_COND 步骤；
+      条件必须是结构化对象（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数。
   - toolKey: confirm_step
     title: 确认步骤
+    description: >-
+      确认并推进向导步骤（前端执行）。前置：当前步骤校验通过；推进只对下一轮生效，
+      推进后不要在同一轮调用刚解锁的工具。
   - toolKey: generative_form
     title: 生成式表单
+    # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在
+    # GenerativeFormRules.OPTION_SOURCE_IDS 里注册，模型却无从得知 ⇒ 只能靠 map 写死选项。
+    # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故 version 同步 +1。
+    description: >-
+      在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，或在信息不足时向用户澄清）；
+      字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。
+      选择题的选项有三种来源：options（写死）、optionsFrom.map（父值 → 选项，静态映射）、
+      optionsFrom.sourceId（后端注册数据源，闭集两个：definition_fields = 父值(配置定义编码) → 该定义的字段；
+      definitions = 父值(层级 GLOBAL/REGION/PROJECT) → 该层级的配置定义，即「层级→定义」用法）。
+      optionsFrom / defaultFrom 的 dependsOn 必填（没有父字段就没有级联），URL/脚本等自定义数据源一律被拒。
+      工具结果是统一信封 JSON（outcome/code/retryable/target/message）：用户提交后，字段 key→值的 JSON 原文
+      在 message 字段里（读取它，不要把整个信封当表单数据）；用户关闭表单则 outcome=cancelled、无数据；
+      schema 不合规则 outcome=rejected 且表单未下发。
   - toolKey: read_sheet_summary
     title: 读取表格摘要
   - toolKey: aggregate_sheet

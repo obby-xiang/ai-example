@@ -135,9 +135,14 @@ public final class GenerativeFormRules {
 
 	/**
 	 * 后端注册的选项数据源 id（<b>闭集</b>：模型只能引用这里的 id，URL/脚本一律
-	 * {@code OPTIONS_SOURCE_UNKNOWN}）。本批只注册一个：配置定义字段选项源。
+	 * {@code OPTIONS_SOURCE_UNKNOWN}）。两个内置源：
+	 * <ul>
+	 * <li>{@code definition_fields}：父值 = 配置定义编码 → 该定义的字段；</li>
+	 * <li>{@code definitions}：父值 = 层级（{@code GLOBAL/REGION/PROJECT}）→ 该层级的配置定义
+	 * （供"选一个配置项"用，父值为空/未知时返回空列表，<b>不是</b>列出全部通配）。</li>
+	 * </ul>
 	 */
-	public static final Set<String> OPTION_SOURCE_IDS = Set.of("definition_fields");
+	public static final Set<String> OPTION_SOURCE_IDS = Set.of("definition_fields", "definitions");
 
 	/**
 	 * 字段键黑名单：<b>原型污染键</b>（与前端 {@code FORBIDDEN_FIELD_KEYS} 拦截口径一致，红队问题 3）。
@@ -793,6 +798,15 @@ public final class GenerativeFormRules {
 					issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_SOURCE_CONFLICT,
 							at + ".options 与 optionsFrom 不能同时出现（二选一：静态选项 or 级联选项）"));
 				}
+				if (isStaticallyRequired(field) && OPTION_TYPES.contains(field.path("type").asText(""))
+						&& field.get("options") == null && !usesOptionSource(field)
+						&& optionsFrom.path("map").isObject() && optionValues(field).isEmpty()) {
+					// 空选项 + required = 死路（无分支必填）：用户永远填不了，模型必须重出可填表单。
+					// sourceId 级联的选项在后端数据里，规则层不枚举，故不在此判空。
+					issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_EMPTY,
+							at + ".optionsFrom 解析不出任何可选项（映射各分支为空或缺失），但字段 required=true —— "
+									+ "该必填字段永远无法填写，请至少给 1 个分支选项（不想必填请去掉 required）"));
+				}
 			}
 			JsonNode defaultFrom = field.get("defaultFrom");
 			if (defaultFrom != null) {
@@ -1039,6 +1053,18 @@ public final class GenerativeFormRules {
 		visiting.remove(node);
 		memo.put(node, best);
 		return best;
+	}
+
+	/** 字段是否静态声明了 {@code required:true}（{@code requiredWhen} 在 schema 期无法求值，不算）。 */
+	private static boolean isStaticallyRequired(JsonNode field) {
+		JsonNode required = field.get("required");
+		return required != null && required.isBoolean() && required.asBoolean();
+	}
+
+	/** 是否引用了后端注册的选项数据源（选项在数据里，规则层无法枚举，也就不能在 schema 期判"空"）。 */
+	private static boolean usesOptionSource(JsonNode field) {
+		JsonNode optionsFrom = field.get("optionsFrom");
+		return optionsFrom != null && optionsFrom.isObject() && textOrNull(optionsFrom.get("sourceId")) != null;
 	}
 
 	// ── 回灌值的类型复核 ─────────────────────────────────────────────────────

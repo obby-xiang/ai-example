@@ -19,6 +19,7 @@ import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
@@ -41,8 +42,8 @@ import java.util.stream.Collectors;
  * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
  * <li><b>只读</b>：查询定义/任务/数据行数/作业状态 —— 无副作用，直接执行；</li>
- * <li><b>任务创建</b>：{@code create_task}（{@code @ToolRisk(WRITE)}）—— 创建即落库，返回任务 id
- * （S4.4e 裁决②，见 {@link #createTask}）；</li>
+ * <li><b>任务创建</b>：{@code create_task}（AR-03 起 {@code @ToolRisk(DANGER)}，进确认门；
+ * 宿主幂等 + 单轮上限 1）—— 批准后才落库，返回任务 id（S4.4e 裁决② + AR-03，见 {@link #createTask}）；</li>
  * <li><b>作业发起（确认门）</b>：{@code start_export} / {@code start_precheck} / {@code start_import} /
  * {@code start_publish} 四个工具统一为 {@code @ToolRisk(DANGER)} —— 执行前挂起、渲染确认卡片，
  * 放行才创建作业，拒绝（或历史上的超时记录）以"未执行"语义回填（FR-5.3 明文，S4.4e 裁决⑥，
@@ -278,20 +279,29 @@ public class AiTools {
      * 向导页一并披露，是为了在已有任务时也能按用户要求再建一条（否则模型得先导航回任务中心，
      * 而一轮内的披露集在请求边界冻结，跨页会导致工具子集不一致）。
      *
-     * <p><b>风险等级 {@code WRITE}</b>（不进确认门）：创建任务本身可逆（任务中心/REST 既有删除机制），
-     * 不直接改动业务数据；FR-5.3 的确认清单是"启动导出/检查/导入/发布 + 删除任务"，不含"创建任务"。
+     * <p><b>风险等级 {@code DANGER}</b>（AR-03：进确认门）：创建会占任务号、进列表、可被后续引用，
+     * 属有后果动作；用户拒绝/取消即<b>不创建</b>。确认门复用既有三态语义（批准/拒绝/取消），
+     * 前端零新形态。
      *
-     * <p>返回值刻意带上任务 id 与下一个动作（{@code navigate_to} 的目标页面），
-     * 让模型不必猜"下一步该拿哪个 id 做什么"。
+     * <p><b>宿主幂等 + 单轮上限 1</b>：{@link TaskService#createIdempotent} 以
+     * "规范化标题 + 本轮 runId + 类型"的哈希为幂等键；同轮同键复用、同轮第二个直接拒绝
+     * （{@code CREATE_TASK_CONFLICT} / {@code CREATE_TASK_TURN_LIMIT}），模型重试、并发调用、
+     * 用户重复确认都收敛到"至多一个任务"。
+     *
+     * <p><b>创建≠执行</b>：本工具只建任务，不启动作业；返回值带上任务 id 与下一个动作
+     * （{@code navigate_to} 的目标页面），让模型在新一轮打开向导。
+     *
+     * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT 导出 / IMPORT 导入），创建即落库并返回任务 id；随后用 navigate_to(page=..., taskId=...) 打开它的向导",
+    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT/IMPORT）。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，下一轮用 navigate_to(page=..., taskId=...) 打开向导",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
-    @ToolRisk(ToolMeta.RiskLevel.WRITE)
+    @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.W)
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
-            @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title) {
+            @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
+            ToolContext toolContext) {
         Task.TaskType taskType;
         try {
             taskType = Task.TaskType.valueOf(type == null ? "" : type.trim().toUpperCase());
@@ -302,19 +312,30 @@ public class AiTools {
         }
         boolean export = taskType == Task.TaskType.EXPORT;
         String effectiveTitle = title == null || title.isBlank() ? (export ? "导出任务" : "导入任务") : title.trim();
+        String runId = toolContext == null || toolContext.getContext() == null ? null
+                : stringOf(toolContext.getContext().get("runId"));
         try {
-            Task task = taskService.create(taskType, effectiveTitle);
+            TaskService.CreateOutcome outcome = taskService.createIdempotent(taskType, effectiveTitle, runId);
+            Task task = outcome.task();
+            String prefix = outcome.reused() ? "该任务已在同一轮创建过，本次复用任务" : "已创建" + (export ? "导出" : "导入") + "任务";
             return String.format(
-                    "已创建%s任务 #%d（标题：%s，当前步骤：%s）。下一步：navigate_to(page=\"%s\", taskId=%d) 打开向导，"
-                            + "再用 select_definitions 勾选配置项。",
-                    export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep(),
+                    "%s #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业。下一步："
+                            + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项。",
+                    prefix, task.getId(), task.getTitle(), task.getCurrentStep(),
                     export ? "export" : "import", task.getId());
         }
         // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
         // SpToolCallingManager.executeOnce 捕获置 ok=false 呈给模型（恢复框架既有失败通道）
+        catch (ConflictException e) {
+            throw e;
+        }
         catch (Exception e) {
             throw new CodedIllegalStateException(ErrorCodes.TOOL_EXECUTION_FAILED, "创建任务失败: " + e.getMessage(), e);
         }
+    }
+
+    private static String stringOf(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     // ==================== 作业发起：导出 / 预检查 / 导入 / 发布（确认门） ====================
@@ -630,7 +651,7 @@ public class AiTools {
     @ToolCategory(ToolMeta.Category.H)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String generativeForm(
-            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select|attachment\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填，或改用 optionsFrom),\"placeholder\":\"占位提示(仅 text/number/date,可选)\",\"variant\":\"longText(text 可选的 textarea 变体,上限2000)\",\"minLength/maxLength\":\"text 长度约束(可选,maxLength 硬顶200,longText 2000)\",\"format\":\"email|tel|url|idcard(仅 text,不接受正则)\",\"min/max/step/integer\":\"number 约束;date 只收 min/max(ISO)\",\"minItems/maxItems\":\"multi_select 选项数约束\",\"visibleWhen/requiredWhen/disabledWhen\":{\"key\":\"依赖字段\",\"op\":\"eq|in|notIn|empty|notEmpty|between\",\"value\":\"或 values 数组\"},\"optionsFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":[{\"value\":\"值\"}]}} 或 {\"dependsOn\":\"父字段\",\"sourceId\":\"definition_fields\"},\"defaultFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":默认值}}}]}（字段 ≤20，选项 ≤50；attachment 的值由用户上传产生，不要预填 defaultValue）") FormSpec form) {
+            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select|attachment\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填，或改用 optionsFrom),\"placeholder\":\"占位提示(仅 text/number/date,可选)\",\"variant\":\"longText(text 可选的 textarea 变体,上限2000)\",\"minLength/maxLength\":\"text 长度约束(可选,maxLength 硬顶200,longText 2000)\",\"format\":\"email|tel|url|idcard(仅 text,不接受正则)\",\"min/max/step/integer\":\"number 约束;date 只收 min/max(ISO)\",\"minItems/maxItems\":\"multi_select 选项数约束\",\"visibleWhen/requiredWhen/disabledWhen\":{\"key\":\"依赖字段\",\"op\":\"eq|in|notIn|empty|notEmpty|between\",\"value\":\"或 values 数组\"},\"optionsFrom\":{\"dependsOn\":\"父字段(必填)\",\"map\":{\"父值\":[{\"value\":\"值\"}]}} 或 {\"dependsOn\":\"父字段(必填)\",\"sourceId\":\"definition_fields|definitions\"}（sourceId 是后端闭集：definition_fields=父值(配置定义编码)→该定义的字段；definitions=父值(层级 GLOBAL/REGION/PROJECT)→该层级的配置定义，即「层级→定义」用法）,\"defaultFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":默认值}}}]}（字段 ≤20，选项 ≤50；attachment 的值由用户上传产生，不要预填 defaultValue）") FormSpec form) {
         return FRONTEND_STUB;
     }
 
@@ -728,14 +749,21 @@ public class AiTools {
     /**
      * 选项级联：静态映射 {@code {dependsOn,map}} 或后端注册数据源 {@code {dependsOn,sourceId}}。
      *
-     * @param dependsOn 父字段键
+     * <p><b>{@code dependsOn} 恒必填</b>（两种形态都要父字段）：没有父值就没有"级联"，
+     * 放开必填等于让表单下发一张永远解析不出选项的空壳。
+     *
+     * @param dependsOn 父字段键（必填；必须是本表单已声明的字段）
      * @param map       父值 → 选项数组（静态映射）
-     * @param sourceId  后端注册的数据源 id（本批只有 {@code definition_fields}；URL/脚本一律拒）
+     * @param sourceId  后端注册的数据源 id（闭集，见
+     *                  {@code GenerativeFormRules#OPTION_SOURCE_IDS}：{@code definition_fields}
+     *                  / {@code definitions}；URL/脚本一律拒）
      */
     public record FormOptionsFrom(
             @ToolParam(description = "父字段键（必须是本表单已声明的字段）") String dependsOn,
             @ToolParam(description = "父值 → 选项数组的静态映射", required = false) Map<String, List<FormOption>> map,
-            @ToolParam(description = "后端注册的数据源 id（本批：definition_fields）", required = false) String sourceId) {
+            @ToolParam(description = "后端注册的数据源 id：definition_fields（父值=配置定义编码→该定义的字段）"
+                    + "或 definitions（父值=层级 GLOBAL/REGION/PROJECT→该层级的配置定义，即「层级→定义」用法）",
+                    required = false) String sourceId) {
     }
 
     /**

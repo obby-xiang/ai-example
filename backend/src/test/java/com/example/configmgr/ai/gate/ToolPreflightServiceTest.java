@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
 import com.example.configmgr.job.entity.Job;
@@ -22,7 +23,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * F5 只读预检的判据用例：四项检查各自通过/失败，以及"报告结构 + 指纹 + 影响面"的口径。
+ * F5 只读预检的判据用例：作业四项 + 覆盖面三项（配置项/上传文件/目标一致）各自通过/失败，
+ * 以及"报告结构（影响面 + 条件摘要 + 权威发布模式）+ 指纹"的口径。
  *
  * <p>判据全部走 {@link JobService} 的只读守卫（{@code finalizedConflict}/{@code inFlightConflict}/
  * {@code precheckConflict}），本类只把 {@link JobService} 换桩 —— 预检"照着执行路径的同一份结论"
@@ -42,7 +44,7 @@ class ToolPreflightServiceTest {
 	// ── 通过路径 ────────────────────────────────────────────────────────────
 
 	@Test
-	void publishPassesWithFourChecksImpactAndFingerprint() {
+	void publishPassesWithAllChecksImpactAndFingerprint() {
 		stubTask(task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE));
 		when(this.stagingRowRepository.countByTaskIdAndDefCode(5L, "ORDER")).thenReturn(5_000L);
 		when(this.stagingRowRepository.countByTaskIdAndDefCode(5L, "ORDER_LINE")).thenReturn(7_480L);
@@ -51,13 +53,13 @@ class ToolPreflightServiceTest {
 
 		assertThat(report.pass()).isTrue();
 		assertThat(report.checks()).extracting(ToolPreflightService.PreflightReport.Check::name)
-			.containsExactly("任务存在", "类型匹配", "无在途作业", "预检指纹新鲜");
+			.containsExactly("任务存在", "类型匹配", "无在途作业", "预检指纹新鲜", "配置项齐备", "上传文件齐备", "目标一致");
 		assertThat(report.checks()).allMatch(ToolPreflightService.PreflightReport.Check::pass);
 		assertThat(report.impact()).isEqualTo("将发布 2 个配置定义 · 影响 12,480 行数据");
 		assertThat(report.reportHash()).matches("[0-9a-f]{8}");
 
 		Map<String, Object> map = report.asMap();
-		assertThat(map).containsOnlyKeys("target", "checks", "impact", "reportHash");
+		assertThat(map).containsOnlyKeys("target", "checks", "impact", "conditionSummary", "publishMode", "reportHash");
 		@SuppressWarnings("unchecked")
 		Map<String, Object> target = (Map<String, Object>) map.get("target");
 		assertThat(target).containsEntry("taskId", 5L)
@@ -68,6 +70,37 @@ class ToolPreflightServiceTest {
 		List<Map<String, Object>> checks = (List<Map<String, Object>>) map.get("checks");
 		assertThat(checks.get(0)).containsOnlyKeys("name", "pass", "detail");
 		assertThat(checks.get(3).get("detail")).asString().isNotEmpty();
+	}
+
+	@Test
+	void payloadCarriesImpactConditionSummaryAndAuthoritativePublishMode() {
+		Task task = task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE);
+		TaskItem conditioned = item("ORDER", 0);
+		conditioned.setConditionJson("{\"scopeKeys\":[\"CN\"],\"fields\":["
+				+ "{\"fieldCode\":\"AMOUNT\",\"operator\":\"GT\",\"value\":100}]}");
+		task.setItems(List.of(conditioned));
+		task.setSettingsJson("{\"importMode\":\"REPLACE\"}");
+		stubTask(task);
+		when(this.stagingRowRepository.countByTaskIdAndDefCode(5L, "ORDER")).thenReturn(42L);
+		when(this.taskFileRepository.findByTaskId(5L)).thenReturn(List.of(uploadFile()));
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_publish", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isTrue();
+		Map<String, Object> map = report.asMap();
+		assertThat(map).containsKeys("impact", "conditionSummary", "publishMode", "reportHash");
+		assertThat(map.get("impact")).isEqualTo("将发布 1 个配置定义 · 影响 42 行数据");
+		assertThat(String.valueOf(map.get("conditionSummary"))).contains("AMOUNT").contains("大于");
+		assertThat(map.get("publishMode")).as("发布模式只能取宿主设置，不得由模型文本决定").isEqualTo("REPLACE");
+
+		Task empty = task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE);
+		empty.setItems(List.of());
+		stubTask(empty);
+		ToolPreflightService.PreflightReport failed = this.service.inspect("start_import", "{\"taskId\":5}");
+		assertThat(failed.pass()).isFalse();
+		assertThat(failed.failureMessage()).as("未进确认门 = 未批准，与已批准未执行必须可区分")
+			.startsWith("未批准·未执行")
+			.doesNotContain("已批准");
 	}
 
 	@Test
@@ -86,14 +119,14 @@ class ToolPreflightServiceTest {
 	// ── 失败路径（逐项） ────────────────────────────────────────────────────
 
 	@Test
-	void missingTaskFailsAllFourChecks() {
+	void missingTaskFailsAllChecks() {
 		when(this.jobService.findTask(5L)).thenReturn(Optional.empty());
 		when(this.jobService.latestPrecheck(5L)).thenReturn(Optional.empty());
 
 		ToolPreflightService.PreflightReport report = this.service.inspect("start_import", "{\"taskId\":5}");
 
 		assertThat(report.pass()).isFalse();
-		assertThat(report.failures()).hasSize(4);
+		assertThat(report.failures()).hasSize(7);
 		assertThat(report.checks().get(0).detail()).contains("未找到任务 #5");
 		assertThat(report.failureMessage()).contains("预检未通过").contains("任务存在");
 	}
@@ -153,7 +186,7 @@ class ToolPreflightServiceTest {
 
 		assertThat(report.pass()).isFalse();
 		assertThat(report.checks()).extracting(ToolPreflightService.PreflightReport.Check::name)
-			.containsExactly("任务存在", "类型匹配", "无在途作业", "预检指纹新鲜");
+			.containsExactly("任务存在", "类型匹配", "无在途作业", "预检指纹新鲜", "配置项齐备", "上传文件齐备", "目标一致");
 		assertThat(failure(report, "类型匹配")).isEqualTo("任务 #5 已 COMPLETED，不可再发起 PUBLISH 作业（TASK_FINALIZED）");
 	}
 
@@ -168,6 +201,70 @@ class ToolPreflightServiceTest {
 		assertThat(check(report, "预检指纹新鲜").detail()).contains("不依赖既往预检查");
 	}
 
+	// ── 覆盖面补齐（review-03 第 4 项） ─────────────────────────────────────
+
+	@Test
+	void missingItemsFailsEvenWhenOldFourChecksPass() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setItems(List.of());
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "配置项齐备")).contains("尚未选择任何配置项");
+	}
+
+	@Test
+	void missingUploadFailsForImportLikeJobs() {
+		Task task = task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE);
+		stubTask(task);
+		when(this.taskFileRepository.findByTaskId(5L)).thenReturn(List.of());
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_precheck", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "上传文件齐备")).contains("尚未上传数据文件");
+	}
+
+	@Test
+	void targetMismatchFailsWithWorkspaceTask() {
+		stubTask(task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE));
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_publish", "{\"taskId\":5}",
+				AiContext.of("import", "IMPORT", "PUBLISH", 8L, "ACTIVE", Map.of()));
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "目标一致")).contains("任务 #5").contains("任务 #8");
+	}
+
+	@Test
+	void publishModeNeverComesFromConditionText() {
+		Task task = task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE);
+		task.setSettingsJson("{\"importMode\":\"MERGE\"}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_publish", "{\"taskId\":5}",
+				AiContext.of("import", "IMPORT", "PUBLISH", 5L, "ACTIVE",
+						Map.of("importMode", "REPLACE")));
+
+		assertThat(report.publishMode()).as("任务设置优先于上下文/模型文本").isEqualTo("MERGE");
+	}
+
+	@Test
+	void createTaskPreflightValidatesTypeAndCarriesCreationImpact() {
+		ToolPreflightService.PreflightReport report = this.service.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"title\":\"季度导出\"}", AiContext.empty());
+
+		assertThat(report.pass()).isTrue();
+		assertThat(report.impact()).contains("创建").contains("创建≠执行");
+		assertThat(report.conditionSummary()).contains("创建任务");
+		assertThat(report.asMap().get("publishMode")).isNull();
+
+		ToolPreflightService.PreflightReport bad = this.service.inspect("create_task", "{\"type\":\"NOPE\"}");
+		assertThat(bad.pass()).isFalse();
+	}
+
 	// ── helpers ────────────────────────────────────────────────────────────
 
 	private void stubTask(Task task) {
@@ -176,7 +273,17 @@ class ToolPreflightServiceTest {
 		when(this.jobService.inFlightConflict(eq(task.getId()), any())).thenReturn(null);
 		when(this.jobService.precheckConflict(eq(task.getId()), any())).thenReturn(null);
 		when(this.jobService.latestPrecheck(task.getId())).thenReturn(Optional.of(precheck()));
-		when(this.taskFileRepository.findByTaskId(task.getId())).thenReturn(List.of());
+		when(this.taskFileRepository.findByTaskId(task.getId())).thenReturn(List.of(uploadFile()));
+	}
+
+	private static TaskFile uploadFile() {
+		TaskFile file = new TaskFile();
+		file.setTaskId(5L);
+		file.setDefCode("ORDER");
+		file.setFileType("UPLOAD");
+		file.setStoragePath("./target/preflight/ORDER.xlsx");
+		file.setRowCount(42);
+		return file;
 	}
 
 	private static Job precheck() {

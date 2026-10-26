@@ -8,9 +8,12 @@ import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskService;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -117,7 +120,7 @@ class AiToolsThrowPathTest {
 
     @Test
     void createTaskIllegalArgumentThrowsWithCode() {
-        assertThatThrownBy(() -> aiTools.createTask("NOT_A_TYPE", null))
+        assertThatThrownBy(() -> aiTools.createTask("NOT_A_TYPE", null, new ToolContext(Map.of("runId", "s5a-throw-1"))))
                 .isInstanceOfSatisfying(ConflictException.class, ex -> {
                     assertThat(ex.getCode()).isEqualTo("ILLEGAL_ARGUMENT");
                     assertThat(ex.getMessage()).contains("任务类型不合法");

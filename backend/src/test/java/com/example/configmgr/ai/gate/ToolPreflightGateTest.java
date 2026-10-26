@@ -141,7 +141,7 @@ class ToolPreflightGateTest {
 
 	@Test
 	void preflightFailureNeverEntersConfirmGateAndEmitsNoCard() {
-		when(this.preflight.inspect(eq("start_import"), anyString())).thenReturn(failingReport());
+		when(this.preflight.inspect(eq("start_import"), anyString(), any(AiContext.class))).thenReturn(failingReport());
 		FrameWire wire = attach();
 
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
@@ -185,7 +185,7 @@ class ToolPreflightGateTest {
 
 	@Test
 	void preflightPassCarriesReportAndBindsHashOnApproval() throws Exception {
-		when(this.preflight.inspect(eq("start_import"), anyString())).thenReturn(passingReport());
+		when(this.preflight.inspect(eq("start_import"), anyString(), any(AiContext.class))).thenReturn(passingReport());
 		FrameWire wire = attach();
 		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
 			wire.awaitType("confirm_request", 5000L);
@@ -231,7 +231,7 @@ class ToolPreflightGateTest {
 
 	@Test
 	void preflightFailureDoesNotHaltBatch() {
-		when(this.preflight.inspect(eq("start_import"), anyString())).thenReturn(failingReport());
+		when(this.preflight.inspect(eq("start_import"), anyString(), any(AiContext.class))).thenReturn(failingReport());
 		FrameWire wire = attach();
 
 		ToolExecutionResult result = this.manager.executeToolCalls(promptWithTools(),
@@ -280,7 +280,7 @@ class ToolPreflightGateTest {
 
 	@Test
 	void preflightMarksPassiveActivityBeforeAndAfterWithoutStartingTool() {
-		when(this.preflight.inspect(eq("start_import"), anyString())).thenReturn(failingReport());
+		when(this.preflight.inspect(eq("start_import"), anyString(), any(AiContext.class))).thenReturn(failingReport());
 		attach();
 
 		this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
@@ -289,7 +289,7 @@ class ToolPreflightGateTest {
 
 		InOrder order = inOrder(this.beacon, this.preflight);
 		order.verify(this.beacon).markPassiveActivity(RUN_ID);
-		order.verify(this.preflight).inspect(eq("start_import"), anyString());
+		order.verify(this.preflight).inspect(eq("start_import"), anyString(), any(AiContext.class));
 		order.verify(this.beacon).markPassiveActivity(RUN_ID);
 		// 被动锚点不得冒充"工具已开始"（否则会污染重试副作用判定）
 		verify(this.beacon, never()).enter(anyString(), anyString(), anyString());
@@ -299,7 +299,7 @@ class ToolPreflightGateTest {
 
 	@Test
 	void preflightInfrastructureFailureFailsSafeWithoutEnteringGate() {
-		when(this.preflight.inspect(eq("start_import"), anyString()))
+		when(this.preflight.inspect(eq("start_import"), anyString(), any(AiContext.class)))
 			.thenThrow(new IllegalStateException("预检仓储暂时不可用"));
 		FrameWire wire = attach();
 
@@ -332,7 +332,68 @@ class ToolPreflightGateTest {
 		assertThat(envelope.retryable()).isTrue();
 	}
 
+	// ── ⑦ AR-03：单轮第二次 create_task 直接拒绝（不弹第二张卡、不执行） ──────────
+
+	@Test
+	void secondCreateTaskInSameTurnIsRejectedBeforeCard() {
+		seedExecutedCreateTask("call-created", "已创建导出任务 #99（标题：季度导出）。创建不等于执行：尚未启动任何作业。");
+		when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.DANGER);
+		when(this.toolRegistry.categoryOf("create_task")).thenReturn(ToolMeta.Category.W);
+		when(this.toolRegistry.channelOf("create_task")).thenReturn(ToolMeta.Channel.BACKEND);
+		when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+			.thenReturn(createPassingReport());
+		FrameWire wire = attach();
+		FakeCreateTaskTool createTool = new FakeCreateTaskTool();
+
+		ToolExecutionResult result = this.manager.executeToolCalls(
+				prompt(createTool, "create_task", "{\"type\":\"EXPORT\"}"),
+				response("create_task", "{\"type\":\"EXPORT\"}"));
+		finish();
+
+		List<Map<String, Object>> frames = wire.frames();
+		assertThat(FrameContract.types(frames)).doesNotContain("suspended", "confirm_request");
+		Map<String, Object> frame = FrameContract.oneOfType(frames, "tool_result");
+		assertThat(frame).containsEntry("code", ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT)
+			.containsEntry("status", PendingToolCall.SKIPPED)
+			.containsEntry("executed", false);
+		assertThat(String.valueOf(frame.get("result"))).contains("任务 #99").contains("同一轮只允许创建一次任务");
+		assertThat(createTool.invocations.get()).as("被上限挡下的调用绝不执行").isZero();
+		assertThat(this.gate.pendingGates()).isZero();
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
+
+	private void seedExecutedCreateTask(String toolCallId, String resultText) {
+		PendingToolCall executed = new PendingToolCall();
+		executed.setToolCallId(toolCallId);
+		executed.setName("create_task");
+		executed.setKind(PendingToolCall.KIND_CONFIRM);
+		executed.setStatus(PendingToolCall.EXECUTED);
+		executed.setOutcome(ToolOutcome.OK.wire());
+		executed.setExecuted(true);
+		this.store.appendLedger(RUN_ID, executed, resultText);
+	}
+
+	private static ToolPreflightService.PreflightReport createPassingReport() {
+		Map<String, Object> target = new LinkedHashMap<>();
+		target.put("type", "EXPORT");
+		target.put("title", null);
+		return new ToolPreflightService.PreflightReport(true, target, List.of(
+				new ToolPreflightService.PreflightReport.Check("创建类型合法", true, "")),
+				"将创建 EXPORT 任务（创建≠执行，不启动作业）", "无筛选条件（创建任务）", null, "c0ffee01");
+	}
+
+	private Prompt prompt(Object toolObject, String tool, String args) {
+		List<ToolCallback> callbacks = List.of(MethodToolCallbackProvider.builder()
+			.toolObjects(toolObject)
+			.build()
+			.getToolCallbacks());
+		ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+			.toolCallbacks(callbacks)
+			.toolContext(Map.of("runId", RUN_ID, "sessionId", SESSION_ID))
+			.build();
+		return new Prompt(List.of(new UserMessage("请执行 " + tool)), options);
+	}
 
 	private FrameWire attach() {
 		SseChatEmitter out = this.registry.of(RUN_ID);
@@ -436,6 +497,19 @@ class ToolPreflightGateTest {
 
 	private static ToolResultEnvelope envelope(ToolExecutionResult result) {
 		return ToolResultEnvelope.fromJson(toolResponses(result).get(0).responseData());
+	}
+
+	/** create_task 的真实回调替身（证明"被单轮上限挡下时绝不执行"）。 */
+	static class FakeCreateTaskTool {
+
+		final AtomicInteger invocations = new AtomicInteger();
+
+		@Tool(name = "create_task", description = "受控替身：创建任务")
+		public String createTask(@ToolParam(description = "任务类型") String type) {
+			this.invocations.incrementAndGet();
+			return "已创建任务 #1";
+		}
+
 	}
 
 	/** 同批第二调用的真实回调（证明"预检失败不停批"）。 */

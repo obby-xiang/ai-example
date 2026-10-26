@@ -2,17 +2,21 @@
  * 工作区契约 store（窄接口，AI ⇄ 业务之间唯一的通信层）。
  *
  * 三件事：
- * 1. 状态窄接口：buildContext()（注入每轮 chat/tool-result 的 Agent Context，严格 5 键）
- *    与 snapshot()（get_workspace_state 类工具的完整快照）；
+ * 1. 状态窄接口：buildContext()（注入每轮 chat/tool-result 的 Agent Context，键集与后端
+ *    `AiChatRequest.Context` 一致：page/taskType/step/taskId/taskStatus/extra）与
+ *    snapshot()（get_workspace_state 类工具的完整快照）；
  * 2. 页面能力注册表：registerPageHandler()（页面把能力反向暴露给 AI 工具，AI 侧不 import 视图）；
  * 3. ui_event 分发：把 AI 的动作落到与用户点击**同一套 store action**（deepseek 契约形态 + 版本号）。
  *
  * 裁剪性：本文件不 import AiPanel / ai store。移除 AI 栏后，业务页面照常工作。
  *
  * 后端对齐要点（核对 AiChatRequest.Context + AiContext#getContextKey）：
- * - context 只允许 page/taskType/step/taskId/extra 五个键；
+ * - context 只允许 page/taskType/step/taskId/taskStatus/extra 这六个键（白名单外的键会被
+ *   `ContextFieldGate` 丢弃 ⇒ 静默失效，所以有消费面的字段一律顶层）；
  * - taskType 与 step **必须成对出现**，否则后端退回 page:* 口径，披露的工具子集就错了；
- * - step 取值必须与 @ToolScope 的标签一致（见 types/task.ts 的 TaskSteps）。
+ * - step 取值必须与 @ToolScope 的标签一致（见 types/task.ts 的 TaskSteps）；
+ * - taskStatus 有**披露面消费点**（后端终态收窄：COMPLETED/CANCELLED 任务不再披露
+ *   `start_export`），故它必须随每轮上报 —— 放在 extra 里等于没上报。
  */
 
 import { defineStore } from 'pinia'
@@ -189,6 +193,22 @@ export const useWorkspaceStore = defineStore('workspace', {
       }
     },
 
+    /**
+     * 任务状态写入（**后端快照驱动的唯一状态入口**）。
+     *
+     * <p>为什么要有它：`taskStatus` 是后端披露面的终态收窄依据（`ToolRegistry#stateAllows`：
+     * COMPLETED 任务不再披露 `start_export`，只收这一支），而任务状态的变化几乎都来自**服务端**
+     * （作业终态联动 ⇒ `GET /tasks/{id}` 快照）。向导页在作业终态后刷新快照，必须把新状态写回
+     * 工作区，否则下一轮请求仍带着旧状态 ⇒ 收窄不生效（模型看到"还能导出"的假入口）。
+     *
+     * <p>不记 `recentActions`：这是**服务端事实的同步**，不是用户/AI 的动作（记进去会让
+     * `extra.recentActions` 被状态刷新刷爆，模型误以为有人在操作）。同理不 `touch`、不广播
+     * `workspace_changed` —— 面板 chip 不因一次状态轮询抖动。
+     */
+    setTaskStatus(status: TaskStatus | null): void {
+      this.taskStatus = status
+    },
+
     setTaskId(taskId: number | null, taskType?: TaskType | null, status?: TaskStatus | null): void {
       this.taskId = taskId
       this.taskType = taskType === undefined ? this.taskType : taskType
@@ -279,13 +299,20 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.recentActions = []
     },
 
-    /** 注入到每轮 chat/tool-result 的 Agent Context（严格 5 键，多余信息进 extra）。 */
+    /**
+     * 注入到每轮 chat/tool-result 的 Agent Context。
+     *
+     * 键集 = 后端 `AiChatRequest.Context` 的六个顶层字段（page/taskType/step/taskId/taskStatus/extra），
+     * 多余信息一律进 extra（`ContextFieldGate` 只把白名单键交给消费方）。`taskStatus` **必须顶层**：
+     * 后端 `ToolRegistry#forContext` 用它做终态收窄（COMPLETED 任务不再披露 `start_export`）。
+     */
     buildContext(): AiChatContext {
       return {
         page: this.page,
         taskType: this.taskType,
         step: this.step,
         taskId: this.taskId,
+        taskStatus: this.taskStatus,
         extra: {
           pageId: this.pageId,
           selectedDefs: [...this.selectedDefs],

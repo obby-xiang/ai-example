@@ -158,6 +158,10 @@ public final class ErrorCodes {
     public static final String RESOURCE_LOCKED = "RESOURCE_LOCKED";
     /** 工具参数里的目标资源不成立。 */
     public static final String TARGET_INVALID = "TARGET_INVALID";
+    /** 同一轮第二次 create_task：直接拒绝创建（未执行），下一轮可再创建。 */
+    public static final String CREATE_TASK_TURN_LIMIT = "CREATE_TASK_TURN_LIMIT";
+    /** 同一轮的创建幂等键冲突（本轮已创建过任务）。 */
+    public static final String CREATE_TASK_CONFLICT = "CREATE_TASK_CONFLICT";
     /** 工具不在预检范围内。 */
     public static final String TOOL_NOT_PREFLIGHTABLE = "TOOL_NOT_PREFLIGHTABLE";
     /** 工具结果信封序列化失败。 */

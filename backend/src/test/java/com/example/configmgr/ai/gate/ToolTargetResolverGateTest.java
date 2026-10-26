@@ -57,7 +57,7 @@ import static org.mockito.Mockito.when;
  * <h2>覆盖</h2>
  * F1 目标不成立 → 阻断且不占认领、不记台账、批次照常；F3 与上下文不一致 → 阻断；
  * F7 重放优先：台账命中时即使目标已失效，也回原结果（不再校验、不再执行）；
- * 另加 create_task 无 taskId 不校验的对照。
+ * 另加"非作业发起工具（无 taskId）不校验"的对照（不用 create_task：AR-03 起它是 DANGER 确认门工具）。
  */
 class ToolTargetResolverGateTest {
 
@@ -200,12 +200,12 @@ class ToolTargetResolverGateTest {
 		assertThat(this.store.ledger(RUN_ID)).hasSize(1);
 	}
 
-	// ── 对照：create_task 没有 taskId ⇒ 不校验、照常执行 ────────────────────
+	// ── 对照：非作业发起工具没有 taskId ⇒ 不校验、照常执行 ────────────────────
 
 	@Test
-	void createTaskWithoutTaskIdIsNotValidated() {
+	void nonJobToolWithoutTaskIdIsNotValidated() {
 		FrameWire wire = attach();
-		this.manager.executeToolCalls(prompt(RUN_ID), response("create_task", "{\"type\":\"IMPORT\"}"));
+		this.manager.executeToolCalls(prompt(RUN_ID), response("fake_read_tool", "{}"));
 		finish();
 
 		Map<String, Object> frame = FrameContract.oneOfType(wire.frames(), "tool_result");
@@ -294,9 +294,9 @@ class ToolTargetResolverGateTest {
 			return "导入作业已启动（作业 #4221）";
 		}
 
-		@Tool(name = "create_task", description = "受控替身：创建任务")
-		public String createTask(@ToolParam(description = "任务类型") String type) {
-			return "任务 #8 已创建";
+		@Tool(name = "fake_read_tool", description = "受控替身：非作业发起工具（无 taskId）")
+		public String fakeRead(@ToolParam(description = "占位参数") String value) {
+			return "非作业工具已执行";
 		}
 
 	}

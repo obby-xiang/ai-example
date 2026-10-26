@@ -16,6 +16,7 @@ import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.execution.DefaultToolCallResultConverter;
@@ -114,7 +115,8 @@ class AiToolsToolResultPlainTextTest {
         TaskService taskService = mock(TaskService.class);
         when(taskService.findAll()).thenReturn(List.of(task()));
         when(taskService.findById(1L)).thenReturn(task());
-        when(taskService.create(any(), any())).thenReturn(task());
+        when(taskService.createIdempotent(any(), any(), any()))
+                .thenReturn(new TaskService.CreateOutcome(task(), false));
 
         ConfigDataService dataService = mock(ConfigDataService.class);
         when(dataService.count(any(), any(), any())).thenReturn(4L);
@@ -147,7 +149,8 @@ class AiToolsToolResultPlainTextTest {
                 .containsExactlyInAnyOrderElementsOf(BACKEND_BUSINESS_TOOLS);
 
         for (Map.Entry<String, String> call : calls.entrySet()) {
-            String raw = callback(tools, call.getKey()).call(call.getValue());
+            String raw = callback(tools, call.getKey()).call(call.getValue(),
+                    new ToolContext(Map.of("runId", "plain-text-test")));
 
             assertThat(raw).as("%s 的执行结果必须是正文（不是再编码一次的 JSON 字符串）", call.getKey())
                     .doesNotStartWith("\"");

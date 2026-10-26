@@ -3,7 +3,7 @@
  *
  * 形态来源：kimi-k3 `stores/workspace.js`（buildContext / registerPageHandler）+
  *          deepseek-v4-pro `utils/workspaceBus.js`、`workspaceContract.js`（ui_event + 版本号）。
- * 字段名一律对齐后端 AiChatRequest.Context（page/taskType/step/taskId/extra）。
+ * 字段名一律对齐后端 AiChatRequest.Context（page/taskType/step/taskId/taskStatus/extra）。
  */
 
 import type { AiChatContext } from './ai'
@@ -65,12 +65,17 @@ export interface WorkspaceSnapshot {
 
 /** 契约层入口的窄接口（AI 面板只依赖这些）。 */
 export interface WorkspaceContract {
-  /** 注入到每次 chat / tool-result 请求的 Agent Context（严格 5 键） */
+  /** 注入到每次 chat / tool-result 请求的 Agent Context（六个顶层键，与后端 Context 一致） */
   buildContext(): AiChatContext
   /** 供 get_workspace_state 类工具拉取的完整快照 */
   snapshot(): WorkspaceSnapshot
   /** 用户/页面进入某页时更新上下文 */
   enterPage(init: Partial<WorkspaceSnapshot>): void
+  /**
+   * 服务端任务状态同步（作业终态后由页面刷新快照写回）：驱动后端披露面的终态收窄。
+   * 不记 `recentActions` —— 这是事实同步，不是用户/AI 的动作。
+   */
+  setTaskStatus(status: TaskStatus | null): void
   /** ui_event 统一分发（与用户点击调用同一 store action） */
   dispatch(event: UiEvent): Promise<UiEventResult>
 }

@@ -114,3 +114,32 @@ describe('I2 级联子值在渲染层被裁剪', () => {
     expect(draft.province).toBe('')
   })
 })
+
+/**
+ * AR-07（批次4 前端C）：「父值变化清值**有提示**」。
+ *
+ * 裁决策略：清值是**一个动作的后果**，不是 N 个独立事件 —— 一次父值改动最多出一句聚合提示，
+ * 逐字段弹条会把"我改了一个筛选"变成一串与用户无关的噪音。所以断言点是
+ * ① 没清值时没有提示（不预先嚷嚷）；② 清了两个字段也只有**一个**提示元素；
+ * ③ 那句提示同时点名被清的两个字段（用户能对上号）。
+ */
+describe('AR-07 级联清值的一次性告知', () => {
+  it('父值变化清掉两个级联子值 ⇒ 只有一句聚合提示，并点名两个字段', async () => {
+    const schema = spec(MULTI_CASCADE)
+    const wrapper = mountForm(schema)
+
+    await wrapper.find('#gf-field-defs-CURRENCY').setValue(true)
+    await wrapper.find('#gf-field-province').setValue('SC')
+    // 还没有任何清值 ⇒ 不出现提示
+    expect(wrapper.find('[data-testid="gf-cascade-notice"]').exists()).toBe(false)
+
+    // CN → US：CURRENCY 不在 US 分支、SC 也不在 US 分支 ⇒ 两个子值同时被清
+    await wrapper.find('#gf-field-country').setValue('US')
+
+    const notices = wrapper.findAll('[data-testid="gf-cascade-notice"]')
+    expect(notices).toHaveLength(1)
+    const text = notices[0]?.text() ?? ''
+    expect(text).toContain('配置项')
+    expect(text).toContain('省份')
+  })
+})

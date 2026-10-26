@@ -289,7 +289,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     reportHash: '3a9f'
   }
 
-  it('卡面一致性：门卡带 preflight → 预检摘要区**不渲染**（payload 留段不展示）+ 标题业务化', async () => {
+  it('卡面一致性：门卡带 preflight → 旧预检区不渲染，只出默认收起的知情摘要 + 标题业务化', async () => {
     const wrapper = await mountPanel([
       buildMessage([
         { kind: 'text', seg: 0, text: '', streaming: false },
@@ -299,17 +299,21 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const gate = wrapper.find('[data-testid="pending-card-pf1"]').find('[data-testid="hitl-gate"]')
     expect(gate.exists()).toBe(true)
 
-    // 预检摘要区**整块撤除**：payload 保留在段上，卡面不渲染（不再有区名 / 徽标 / 四行）
+    // 旧预检区**整块撤除**：无区名 / 徽标 / 四行；批4 / AR-02 只以收起态知情摘要承接三字段
     expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
     expect(gate.text()).not.toContain('预检摘要')
     expect(gate.text()).not.toContain('预检通过')
     expect(gate.text()).not.toContain('批准绑定')
     expect(gate.text()).not.toContain('影响面')
+    expect(gate.find('[data-testid="gate-facts-toggle"]').attributes('aria-expanded')).toBe('false')
+    expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
 
-    // 单层卡体子块序 = 字段表 / 按钮行（demo 场景一：无中间区、无内层卡头）
+    // 单层卡体子块序 = 字段表 / 知情摘要（收起态一行）/ 按钮行（无内层卡头、无旧五段式）
     const kids = Array.from(gate.element.children) as HTMLElement[]
     expect(kids[0]!.getAttribute('data-testid')).toBe('gate-rows')
-    expect(kids[1]!.querySelectorAll('button')).toHaveLength(2)
+    expect(kids[1]!.getAttribute('data-testid')).toBe('gate-facts')
+    expect(kids[2]!.getAttribute('data-testid')).toBe('gate-actions')
+    expect(kids[2]!.querySelectorAll('button')).toHaveLength(2)
 
     // 标题业务化（demo 场景一）：待你确认：<类型> 任务 #<id>『<title>』
     const card = wrapper.find('[data-testid="pending-card-pf1"]')
@@ -327,8 +331,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(rows[0]!.text()).toContain('启动发布作业')
     expect(rows[1]!.text()).toContain('5')
 
-    // 按钮文案口径（H1 仅两钮）：拒绝 / 批准
-    expect(gate.findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
+    // 按钮文案口径（H1 仅两钮；知情摘要的展开钮不在动作行）
+    expect(gate.find('[data-testid="gate-actions"]').findAll('button').map((btn) => btn.text())).toEqual(['拒绝', '批准'])
     wrapper.unmount()
   })
 
@@ -400,6 +404,88 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     // 恢复出来的挂起卡仍走业务化标题（preflight.target 驱动），payload 本身不展示
     expect(wrapper.find('[data-testid="card-title-rpf1"]').text()).toBe('待你确认：导入 任务 #5『订单配置导入』')
     wrapper.unmount()
+  })
+
+  it('B4：知情摘要默认收起且只读后端三字段；未批准·未执行 / 已批准·未执行 / 已批准·执行失败三态可辨', async () => {
+    // ① 待决门卡：三字段均来自后端 preflight，默认收起；展开后才进 DOM（不恢复旧预检区）
+    const facts = {
+      ...PREFLIGHT,
+      conditionSummary: '仅导出 CURRENCY 且状态=启用',
+      publishMode: 'REPLACE'
+    }
+    const gateMsg = buildMessage([
+      { kind: 'text', seg: 0, text: '', streaming: false },
+      { kind: 'tool', seg: 1, toolCallId: 'b4gate', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":5}', timeoutSeconds: 120, requiresAction: true, preflight: facts }
+    ])
+    gateMsg.id = 'b4-gate'
+    const wrapper = await mountPanel([gateMsg])
+    const gate = wrapper.find('[data-testid="pending-card-b4gate"]').find('[data-testid="hitl-gate"]')
+    expect(gate.find('[data-testid="preflight-summary"]').exists()).toBe(false)
+    const toggle = gate.find('[data-testid="gate-facts-toggle"]')
+    expect(toggle.exists()).toBe(true)
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
+    expect(gate.text()).not.toContain('影响面')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    const body = gate.find('[data-testid="gate-facts-body"]')
+    expect(body.exists()).toBe(true)
+    expect(body.text()).toContain('将发布 3 个配置定义 · 影响 12,480 行数据')
+    expect(body.text()).toContain('仅导出 CURRENCY 且状态=启用')
+    expect(body.text()).toContain('整体替换')
+    await toggle.trigger('click')
+    expect(gate.find('[data-testid="gate-facts-body"]').exists()).toBe(false)
+    wrapper.unmount()
+
+    // ② 后端没给 publishMode ⇒ 不出模式行（前端不猜 MERGE/REPLACE）
+    const noModeMsg = buildMessage([
+      { kind: 'text', seg: 0, text: '', streaming: false },
+      { kind: 'tool', seg: 1, toolCallId: 'b4nomode', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":5}', timeoutSeconds: 120, requiresAction: true, preflight: { ...PREFLIGHT } }
+    ])
+    noModeMsg.id = 'b4-nomode'
+    const w2 = await mountPanel([noModeMsg])
+    const g2 = w2.find('[data-testid="pending-card-b4nomode"]').find('[data-testid="hitl-gate"]')
+    await g2.find('[data-testid="gate-facts-toggle"]').trigger('click')
+    const body2 = g2.find('[data-testid="gate-facts-body"]')
+    expect(body2.exists()).toBe(true)
+    expect(body2.text()).not.toContain('增量合并')
+    expect(body2.text()).not.toContain('整体替换')
+    w2.unmount()
+
+    // ③ 预检未通过（未进确认门、无决策）⇒ 未批准·未执行，绝不含「已批准」
+    const preFailedMsg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'b4pre', name: 'start_export', kind2: 'CONFIRM', status: 'failed', args: '{"taskId":7}', result: '预检未通过，本次未进入确认门、未执行', requiresAction: false }
+    ])
+    preFailedMsg.id = 'b4-pre'
+    const w3 = await mountPanel([preFailedMsg])
+    const notApproved = w3.find('[data-testid="ro-badge-b4pre"]')
+    expect(notApproved.exists()).toBe(true)
+    expect(notApproved.attributes('data-state')).toBe('notApproved')
+    expect(notApproved.text()).toBe('! 未批准 · 未执行')
+    expect(notApproved.text()).not.toContain('已批准')
+    w3.unmount()
+
+    // ④ 已批准但执行前未执行（blocked）⇒ 已批准·未执行；真执行失败仍是「已批准·执行失败」
+    const approvedNotRunMsg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'b4post', name: 'start_export', kind2: 'CONFIRM', status: 'blocked', decision: 'approved', args: '{"taskId":7}', reason: '目标任务已终态，本次未执行', requiresAction: false }
+    ])
+    approvedNotRunMsg.id = 'b4-post'
+    const w4 = await mountPanel([approvedNotRunMsg])
+    const approvedNotRun = w4.find('[data-testid="ro-badge-b4post"]')
+    expect(approvedNotRun.exists()).toBe(true)
+    expect(approvedNotRun.attributes('data-state')).toBe('notExecuted')
+    expect(approvedNotRun.text()).toBe('! 已批准 · 未执行')
+    w4.unmount()
+
+    const execFailedMsg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'b4fail', name: 'start_publish', kind2: 'CONFIRM', status: 'failed', decision: 'approved', args: '{"taskId":7}', reason: '发布失败：目标库不可写', requiresAction: false }
+    ])
+    execFailedMsg.id = 'b4-fail'
+    const w5 = await mountPanel([execFailedMsg])
+    const execFailed = w5.find('[data-testid="ro-badge-b4fail"]')
+    expect(execFailed.attributes('data-state')).toBe('failed')
+    expect(execFailed.text()).toBe('! 已批准 · 执行失败')
+    w5.unmount()
   })
 
   it('D-C9：同一消息复数 requiresAction 段逐段各出一卡（旧模板单槽只出末段卡）', async () => {

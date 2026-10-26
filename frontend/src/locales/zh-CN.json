@@ -30,7 +30,9 @@
         "expired": "! 已超时",
         "failed": "! 已批准 · 执行失败",
         "submitted": "✓ 已提交",
-        "cancelled": "✗ 已取消"
+        "cancelled": "✗ 已取消",
+        "notApproved": "! 未批准 · 未执行",
+        "notExecuted": "! 已批准 · 未执行"
       },
       "error": {
         "quota": {
@@ -357,6 +359,18 @@
       "irreversible": "确认{action}，执行后无法恢复",
       "publishIrreversible": "确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复",
       "ackHint": "请先勾选上方确认项",
+      "facts": {
+        "title": "知情摘要",
+        "expand": "展开",
+        "collapse": "收起",
+        "impact": "影响面",
+        "condition": "条件摘要",
+        "publishMode": "发布模式",
+        "mode": {
+          "merge": "增量合并",
+          "replace": "整体替换"
+        }
+      },
       "action": {
         "start_publish": "启动发布作业"
       }
@@ -373,6 +387,9 @@
       "submitting": "提交中…",
       "notRetryable": "该表单已无法继续提交，请取消后让 AI 重新发起",
       "unsupportedType": "字段「{label}」类型不支持（{type}），未渲染",
+      "cascadeCleared": "已清空「{fields}」（新条件下不再适用）",
+      "advancedExpand": "更多条件（{count}）",
+      "advancedCollapse": "收起高级条件",
       "hintSeparator": "；",
       "hint": {
         "required": "必填",
@@ -426,6 +443,13 @@
       "confirmTitle": "待你确认：{business}",
       "requiredCount": "{count} 项必填",
       "formCancelledSummary": "未提交，填写内容不作记录",
+      "gfQueue": {
+        "position": "排队中 · 第 {position} / {total} 张",
+        "hint": "正在填写另一张表单；这张会在前一张提交或取消后自动出现。",
+        "cancel": "取消这张排队表单"
+      },
+      "createTaskBusiness": "创建{type}任务『{title}』",
+      "createTaskBusinessUntitled": "创建{type}任务",
       "actionField": "操作",
       "overwriteConfirm": "输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？",
       "modelFallback": "流式对话 · 工具调用",

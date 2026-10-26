@@ -384,11 +384,42 @@ export function parseFormSchema(raw: unknown): FormSpec | null {
       field.linkageInvalid = true
     }
   }
+  // AR-07：必填选择题的可选项必须真的可达 —— 否则用户切到某个父值时这一格没有任何可选项，
+  // 既填不了也交不出去（只能取消重开）。这类"注定填不完"的 schema 判不可渲染（fail-closed）。
+  if (fields.some((field) => requiredOptionsUnreachable(field, fields))) {
+    return null
+  }
   return {
     scenario: raw.scenario,
     ...(typeof raw.title === 'string' && raw.title !== '' ? { title: raw.title } : {}),
     fields
   }
+}
+
+/**
+ * 必填选择题的可选项可达性（AR-07 / Task 7）：静态 `options` 已由 {@link parseOptions} 保证非空；
+ * 选项级联的 `map` 还必须**覆盖父枚举的每个取值** —— 缺一个分支，用户切到那个父值时这一格就没有
+ * 任何可选项，必填永远填不出来（不是校验失败，而是控件里根本没有东西可选）。
+ *
+ * <p>判不了就不猜：父值不是"静态可枚举的 enum"（自身来自数据源 / 多选 / 非选项型）时一律放行，
+ * 数据源分支的空集留给运行期判据（`checkFormIssues` 的必填/选项校验）。
+ */
+function requiredOptionsUnreachable(field: FormFieldSpec, fields: readonly FormFieldSpec[]): boolean {
+  if (field.required !== true || (field.type !== 'enum' && field.type !== 'multi_select')) {
+    return false
+  }
+  const map = field.optionsFrom?.map
+  if (!map) {
+    return false
+  }
+  const parent = fields.find((candidate) => candidate.key === field.optionsFrom?.dependsOn)
+  if (!parent || parent.type !== 'enum' || !parent.options) {
+    return false
+  }
+  return parent.options.some((option) => {
+    const branch = map[option.value]
+    return !branch || branch.length === 0
+  })
 }
 
 /**
@@ -687,6 +718,37 @@ function sameValue(left: unknown, right: unknown): boolean {
     return left === right
   }
   return left.length === right.length && left.every((item, index) => item === right[index])
+}
+
+/**
+ * 级联清值的**一次性告知**（AR-07 / Task 7 Step 1「父值变化清值有提示」）：
+ * 返回本次父值变化后被清空的级联字段（按 schema 顺序）。
+ *
+ * <p>口径：只认"原来有值、现在空了"的选项级联字段 —— 原本就空的字段不算被清（否则提示会
+ * 在每次改父值时刷出一条与用户无关的说明）。渲染层把这份清单聚成**一句**提示，
+ * 不逐字段弹条：一次改动最多一条说明。
+ *
+ * <p>纯函数：只读入参，不写模型。
+ */
+export function clearedCascadeFields(
+  spec: FormSpec,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>
+): FormFieldSpec[] {
+  const cleared: FormFieldSpec[] = []
+  for (const field of spec.fields) {
+    if (field.type !== 'enum' && field.type !== 'multi_select') {
+      continue
+    }
+    if (!field.optionsFrom?.dependsOn) {
+      continue
+    }
+    if (!isFilled(before[field.key]) || isFilled(after[field.key])) {
+      continue
+    }
+    cleared.push(field)
+  }
+  return cleared
 }
 
 // ── 取值校验（与后端同源判据） ─────────────────────────────────────────────

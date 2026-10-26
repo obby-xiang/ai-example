@@ -79,7 +79,7 @@ import {
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
-import type { FormValueIssue } from '@/types/form-schema'
+import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { clearFormDraft, loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
@@ -98,6 +98,20 @@ import { translate } from '@/composables/useCopy'
 /** sessionStorage 键：会话 id 与镜像前缀。 */
 export const SESSION_ID_KEY = 'ai-session-id'
 export const MIRROR_PREFIX = 'ai-mirror:'
+
+/**
+ * AR-07：同批后续表单的排队态 —— 只保存"重建这张卡所需"的三件。
+ *
+ * <p>为什么不在排队时就建 `ActiveGenerativeForm`：活动表单的 `status` 蕴含"用户此刻能填/能交"，
+ * 排队中的那张还没有这个语义；草稿仍按 toolCallId 留在 sessionStorage（{@link loadFormDraft}），
+ * 轮到它时再回填。这样"同一时刻只有一个活动表单"由类型本身约束，不靠调用方自觉。
+ */
+export interface QueuedGenerativeForm {
+  toolCallId: string
+  runId: string
+  /** 已过防御性解析的 schema（解析失败的不会进队） */
+  form: FormSpec
+}
 
 /** `send()` 收尾结果：composer 据此决定是否保稿、是否设编辑锚点。 */
 export type AiSendOutcome = 'ok' | 'error' | 'interrupted' | 'cancelled' | 'not-sent'
@@ -1583,8 +1597,19 @@ export const useAiStore = defineStore('ai', {
     /**
      * GF-B（DC-15）：当前待填写的生成式表单（generative_form 特判挂起，等用户填写）。
      * 不进镜像：刷新后由 pendingCall 的 expired 降级与后端超时收敛。
+     *
+     * <p><b>AR-07：同一时刻只有一个活动表单</b>。同批到达的第二张及以后进 {@link queuedForms}，
+     * 第一张结算（提交 / 取消 / 失败）后按到达序补上 —— 不覆盖、不丢弃、不留死卡。
      */
     activeForm: null as ActiveGenerativeForm | null,
+    /**
+     * AR-07：同批后续表单的排队态（**到达序**；只留在内存，草稿在 sessionStorage 按 toolCallId 存）。
+     *
+     * <p>为什么排队而不是拒绝第二张：实时路径此前是单槽覆盖 ⇒ 第二张连同用户可能看到的信息
+     * 一起消失；而恢复路径（快照串行重建）本来就是对的 —— 排队等于**让实时路径向已正确的
+     * 恢复路径看齐**（两条路径同构）。不提供"批量一次提交"：仍逐张确认（HITL 语义）。
+     */
+    queuedForms: [] as QueuedGenerativeForm[],
     /**
      * AI 表格操作专项：当前待确认的写预览（设计稿 §3.3bis / §3.4）。
      * 只活在浏览器内存（业务行值不外送）；刷新即丢 ⇒ 恢复路径转 {@link stalePreviewToolCallId}。
@@ -2739,6 +2764,8 @@ export const useAiStore = defineStore('ai', {
       this.clearPreparingRun()
       // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
       this.restoredPendingQueue = []
+      // AR-07：同批排队的表单同样以快照为权威口径（不在快照里的表单不该再被补出来）
+      this.clearQueuedForms()
       // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
       this.currentError = null
       // AR-10（批次3 补齐）：寿命锚点只认后端 PTTL 的只读推导 —— 有就落、没有就清（不猜 24h）。
@@ -3303,21 +3330,13 @@ export const useAiStore = defineStore('ai', {
           }
         }
       }
-      if (entry.name === GENERATIVE_FORM_TOOL && this.activeForm?.toolCallId !== entry.toolCallId) {
+      if (entry.name === GENERATIVE_FORM_TOOL) {
+        // AR-07：恢复路径与实时路径走**同一个闸门** —— 空位激活、占位排队（"实时与恢复同构"）。
         // 不武装任何本地时限：表单一直可填，收口只认后端结局帧 / 用户取消。
         // 同一 toolCallId 保留现有填写态；串行补下一张时（旧表已决/已取消）换成本卡的表单。
         const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
         if (spec) {
-          this.activeForm = {
-            toolCallId: entry.toolCallId,
-            runId,
-            form: spec,
-            status: 'filling',
-            error: null,
-            // G-B：刷新/重建路径同样回填本机草稿（只读 sessionStorage）
-            values: loadFormDraft(entry.toolCallId) ?? {},
-            fieldErrors: []
-          }
+          this.presentGenerativeForm(entry.toolCallId, runId, spec)
         }
         // schema 非法：只留挂起卡（用户可取消），不武装表单态
       }
@@ -3512,6 +3531,8 @@ export const useAiStore = defineStore('ai', {
       roundEpoch += 1
       // M-2b：上一轮快照恢复留下的串行队列随换轮作废（不得把旧卡补进新轮）
       this.restoredPendingQueue = []
+      // AR-07：同批排队的表单同理 —— 换轮即整队作废（连同各自草稿）
+      this.clearQueuedForms()
       const userMessage = resend.skipUserRecord ? null : this.recordUserMessage(content)
       const userMessageId = userMessage?.id ?? null
       const assistant = this.appendAssistantMessage()
@@ -3872,6 +3893,8 @@ export const useAiStore = defineStore('ai', {
       roundEpoch += 1
       // M-2b：接管走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
       this.restoredPendingQueue = []
+      // AR-07：接管 = 换轮次身份 —— 同批表单队列一并作废（重建由实时帧/快照重新给出）
+      this.clearQueuedForms()
       const previous = currentAbort
       const lastSeq = options.lastSeq ?? this.runSeq[targetRunId]
       const host = options.hostMessageId
@@ -4178,7 +4201,11 @@ export const useAiStore = defineStore('ai', {
         return true
       }
       // ② 计划已从快照恢复、但还没轮到建段的卡（串行呈现的队列）
-      return this.restoredPendingQueue.some((entry) => !this.hasDecidedPendingResidue(entry.toolCallId))
+      if (this.restoredPendingQueue.some((entry) => !this.hasDecidedPendingResidue(entry.toolCallId))) {
+        return true
+      }
+      // ③ AR-07：同批排队、还没轮到的表单（"人在等"的第三类载体 —— 与段、恢复队列同判据）
+      return this.queuedForms.some((entry) => !this.hasDecidedPendingResidue(entry.toolCallId))
     },
 
     /**
@@ -4614,7 +4641,8 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * GF-B：generative_form 帧到达 → 防御性解析 schema。
-     * 合法：挂到会话态进"等待用户填写"（AiPanel 渲染 FormRenderer）；**不武装任何本地时限**
+     * 合法：交给"单活动表单"闸门（{@link presentGenerativeForm}）—— 空位即激活（AiPanel 渲染
+     * FormRenderer），已有活动表单则**按到达序排队**（AR-07）；**不武装任何本地时限**
      * （去超时裁决：表单一直可填，收口只认后端结局帧 / 用户取消）；
      * 非法 / 缺 runId（渲染器不可用的任何异常路径）：带 cancelled:true 回灌，挂起立刻收敛
      * （GFa §8.3 / 裁决 #3），绝不让通用执行器回灌说明文本。
@@ -4632,7 +4660,10 @@ export const useAiStore = defineStore('ai', {
       const spec = parseFormSchema(args?.form)
       const runId = frame.runId ?? this.activeRunId
       if (!spec || !runId) {
-        const result = '表单 schema 解析失败（或缺少 runId），前端无法渲染，已带 cancelled:true 回灌收敛（GFa §8.3）'
+        // AR-07：原因写清**可执行的下一步** —— 模型据此重出一张可渲染、可填完的表
+        const result = '表单 schema 不可渲染（形状不符白名单，或必填选择题在某个父值下没有任何可选项），'
+          + '已带 cancelled:true 回灌收敛（GFa §8.3）。请重新生成一张可填写的表单：'
+          + '必填的选择题必须给出可选项（选项级联要覆盖父值的每个取值）。'
         this.upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,
@@ -4645,18 +4676,101 @@ export const useAiStore = defineStore('ai', {
         void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
         return
       }
-      // 去超时裁决（2026-10-20）：GF 不再武装本地时限计时器 —— 表单一直可填，收口只认后端结局帧
+      this.presentGenerativeForm(frame.toolCallId, runId, spec)
+    },
+
+    /** AR-07：此刻是否有一张**活**的活动表单（在填 / 在提交）—— "单活动表单"判据的唯一实现。 */
+    hasLiveForm(): boolean {
+      const form = this.activeForm
+      return form !== null && (form.status === 'filling' || form.status === 'submitting')
+    },
+
+    /**
+     * AR-07：把一张已解析的表单交给"单活动表单"闸门 —— **空位激活，占位排队**（到达序）。
+     *
+     * <p>实时帧（{@link openGenerativeForm}）与刷新恢复（{@link rebuildPendingCard}）共用本入口，
+     * 这是"实时与恢复同构"的落点：两条路径对"第二张怎么办"给出同一个答案。
+     * 同一 toolCallId 重复到达是幂等的（不重灌草稿、不覆盖用户正在填的内容）。
+     */
+    presentGenerativeForm(toolCallId: string, runId: string, form: FormSpec): void {
+      if (this.activeForm?.toolCallId === toolCallId
+        || this.queuedForms.some((entry) => entry.toolCallId === toolCallId)) {
+        return
+      }
+      if (this.hasLiveForm()) {
+        this.queuedForms = [...this.queuedForms, { toolCallId, runId, form }]
+        return
+      }
+      // 去超时裁决（2026-10-20）：GF 不武装本地时限计时器 —— 表单一直可填，收口只认后端结局帧
       // / 用户主动取消。
       this.activeForm = {
-        toolCallId: frame.toolCallId,
+        toolCallId,
         runId,
-        form: spec,
+        form,
         status: 'filling',
         error: null,
         // G-B：刷新恢复 —— 同一 toolCallId 的浏览器镜像回填（草稿从不经服务器）
-        values: loadFormDraft(frame.toolCallId) ?? {},
+        values: loadFormDraft(toolCallId) ?? {},
         fieldErrors: []
       }
+    },
+
+    /**
+     * AR-07：活动表单结算后按到达序补下一张（没有活动表单才补；已决条目跳过）。
+     *
+     * <p>为什么"已决就丢"：他端提交 / 后端超时 / 结局帧先到的那些表单已经不需要人填，补出来
+     * 就是一张点不动的死卡 —— 出队清草稿才是正确的收口（取消出口不需要它）。
+     */
+    promoteNextForm(): void {
+      if (this.hasLiveForm()) {
+        return
+      }
+      while (this.queuedForms.length > 0) {
+        const next = this.queuedForms[0] as QueuedGenerativeForm
+        this.queuedForms = this.queuedForms.slice(1)
+        if (this.hasDecidedPendingResidue(next.toolCallId)) {
+          clearFormDraft(next.toolCallId)
+          continue
+        }
+        this.presentGenerativeForm(next.toolCallId, next.runId, next.form)
+        return
+      }
+    },
+
+    /** AR-07：队列里的一张已在他处结算（结局帧 / 他端提交）⇒ 出队清草稿，不留死卡。 */
+    discardQueuedForm(toolCallId: string): void {
+      const hit = this.queuedForms.find((entry) => entry.toolCallId === toolCallId)
+      if (!hit) {
+        return
+      }
+      this.queuedForms = this.queuedForms.filter((entry) => entry !== hit)
+      clearFormDraft(toolCallId)
+    },
+
+    /** AR-07：整队收口（换轮 / 停止 / 换会话 / 快照权威覆盖）—— 队列与各自的草稿一起清。 */
+    clearQueuedForms(): void {
+      for (const entry of this.queuedForms) {
+        clearFormDraft(entry.toolCallId)
+      }
+      this.queuedForms = []
+    },
+
+    /**
+     * AR-07：一张表单被结局帧结算 —— 只收这一张（连同草稿），再把队列里的下一张补上。
+     *
+     * <p>与 {@link dropActiveForm} 的分界：那是"整轮 / 整会话到此为止"（队列一起清），
+     * 这里是"这一张决了，还有人在等"（队列留着接续）。结局帧打给**排队中**的那张时
+     * （他端提交 / 超时先到）走 {@link discardQueuedForm}，不惊动正在填的那张。
+     */
+    settleActiveForm(toolCallId: string): void {
+      const form = this.activeForm
+      if (!form || form.toolCallId !== toolCallId) {
+        this.discardQueuedForm(toolCallId)
+        return
+      }
+      clearFormDraft(toolCallId)
+      this.activeForm = null
+      this.promoteNextForm()
     },
 
     /**
@@ -4674,6 +4788,9 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 收起当前表单：先清草稿镜像再置空（停止本轮 / 结局帧 / done / error / 换会话的统一出口）。
+     *
+     * <p>AR-07：同批排队的那几张也一起收（连同各自草稿）—— 这是"整轮/整会话到此为止"的出口，
+     * 队列不能带着旧卡活到下一轮。只收**一张**的路径见 {@link settleActiveForm}。
      */
     dropActiveForm(): void {
       const form = this.activeForm
@@ -4681,6 +4798,7 @@ export const useAiStore = defineStore('ai', {
         clearFormDraft(form.toolCallId)
       }
       this.activeForm = null
+      this.clearQueuedForms()
     },
 
     /**
@@ -5573,6 +5691,9 @@ export const useAiStore = defineStore('ai', {
         }
         if (this.activeForm?.toolCallId === form.toolCallId) {
           form.status = 'submitted'
+          // AR-07：这一张已结算（提交成功 / 409 已在他处提交）⇒ 同批里还有人等就按到达序补下一张。
+          // 结算记录本身留在 `activeForm` 上（既有口径：结局帧到达才 drop），补卡只是换掉它。
+          this.promoteNextForm()
         }
         return
       }
@@ -5607,8 +5728,18 @@ export const useAiStore = defineStore('ai', {
         : translate('ai.notice.formSubmitFailedPlain')
     },
 
-    /** GF-B：显式取消 —— 带 cancelled:true 回灌，挂起立刻收敛。 */
-    async cancelGenerativeForm(): Promise<void> {
+    /**
+     * GF-B：显式取消 —— 带 cancelled:true 回灌，挂起立刻收敛。
+     *
+     * <p>AR-07：取消出口对**每一张**都成立 —— 不带参数 = 取消当前活动表单（卡面自己的「取消」）；
+     * 带 toolCallId = 取消**队列里**的那一张（它还没轮到呈现，仍要能从外面收口，不留死卡）。
+     * 取消是用户已经做完的决定，故本地结算后立即按到达序补下一张，不干等结局帧。
+     */
+    async cancelGenerativeForm(toolCallId?: string): Promise<void> {
+      if (toolCallId !== undefined && this.activeForm?.toolCallId !== toolCallId) {
+        await this.cancelQueuedForm(toolCallId)
+        return
+      }
       const form = this.activeForm
       if (!form || form.status === 'cancelled' || form.status === 'submitted') {
         return
@@ -5623,46 +5754,75 @@ export const useAiStore = defineStore('ai', {
       // 2A 批（裁决 §3 缺陷①）：取消 / 超时收尾记决策时刻（数据层记录，卡面不渲染）
       this.markFormDecided(form.toolCallId)
       const outcome = await this.submitFrontendToolResult(form.toolCallId, '', 'http-post', true, form.runId)
-      if (this.activeForm?.toolCallId !== form.toolCallId) {
-        // 结局帧/新表单已收敛：错误提示不写进过期表单（红队问题 6）
+      if (this.activeForm?.toolCallId === form.toolCallId) {
+        if (!outcome.ok && !outcome.duplicate) {
+          form.error = translate('ai.notice.formCancelFailed', {
+            message: outcome.message ?? translate('ai.notice.networkError')
+          })
+          this.writeFormPartReason(form.toolCallId, form.error)
+        }
+        // AR-07：结算完成 ⇒ 收掉这一张（同批下一张由此接上）；结局帧后到时与它无关（段已终态）
+        this.activeForm = null
+      }
+      this.promoteNextForm()
+    },
+
+    /**
+     * AR-07：取消**队列里**的一张表单 —— 不动正在填的那张。
+     *
+     * <p>与活动卡同一套收尾口径：出队清草稿 → 乐观终态 → 记决策时刻 → `cancelled:true` 回灌；
+     * 回灌失败的原因落段（卡面可见），不吞。
+     */
+    async cancelQueuedForm(toolCallId: string): Promise<void> {
+      const entry = this.queuedForms.find((item) => item.toolCallId === toolCallId)
+      if (!entry) {
         return
       }
+      this.discardQueuedForm(toolCallId)
+      this.applyPendingTerminal(toolCallId, 'cancelled')
+      this.markFormDecided(toolCallId)
+      const outcome = await this.submitFrontendToolResult(toolCallId, '', 'http-post', true, entry.runId)
       if (!outcome.ok && !outcome.duplicate) {
-        form.error = translate('ai.notice.formCancelFailed', {
+        this.writeFormPartReason(toolCallId, translate('ai.notice.formCancelFailed', {
           message: outcome.message ?? translate('ai.notice.networkError')
-        })
-        // 批4④ A4'（D3/D11）：同一份文案（同源自 form.error，不两处各写字面量）落段 reason ——
-        // 段持久（activeForm 七处清空不影响可见性），卡内 reason 位渲染；不经 applyPendingTerminal
-        // （防污染 confirm 路径 reason 语义）。D-C2 钉死形状：requiresAction 显式 false（必填字段，
-        // 误置 true 会把刚收口的终态段重挂回 requiresAction，破 ③b D8 闸）；
-        // createIfMissing=false：段不存在时静默丢写（不新建段）+ DEV 警告（须含 toolCallId）。
-        const reason = form.error
-        // 收口修 F5（红队 m-3）：reason 单落点 = **末条**持该 toolCallId 的宿主消息 —— 与
-        // formHostMessageId（AiPanel.vue 倒序扫末条，D2 保留面）同口径。误取首条时，双卡/重投
-        // 场景下用户在末条宿主卡上取消，reason 会落到首条消息卡上，与操作位错位。
-        let host: ChatMessage | undefined
-        for (let i = this.messages.length - 1; i >= 0; i--) {
-          const message = this.messages[i]
-          if (message && message.parts.some((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)) {
-            host = message
-            break
-          }
+        }))
+      }
+    },
+
+    /**
+     * 表单取消回灌失败的原因落段（批4④ A4' / D3/D11）。
+     *
+     * <p>段持久（activeForm 的清空不影响可见性），卡内 reason 位渲染；不经 applyPendingTerminal
+     * （防污染 confirm 路径 reason 语义）。D-C2 钉死形状：requiresAction 显式 false（必填字段，
+     * 误置 true 会把刚收口的终态段重挂回 requiresAction，破 ③b D8 闸）；
+     * createIfMissing=false：段不存在时静默丢写（不新建段）+ DEV 警告（须含 toolCallId）。
+     */
+    writeFormPartReason(toolCallId: string, reason: string): void {
+      // 收口修 F5（红队 m-3）：reason 单落点 = **末条**持该 toolCallId 的宿主消息 —— 与
+      // formHostMessageId（AiPanel.vue 倒序扫末条，D2 保留面）同口径。误取首条时，双卡/重投
+      // 场景下用户在末条宿主卡上取消，reason 会落到首条消息卡上，与操作位错位。
+      let host: ChatMessage | undefined
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        const message = this.messages[i]
+        if (message && message.parts.some((part) => part.kind === 'tool' && part.toolCallId === toolCallId)) {
+          host = message
+          break
         }
-        const existing = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === form.toolCallId)
-        if (host && existing && existing.kind === 'tool') {
-          this.upsertToolPart(host, {
-            toolCallId: form.toolCallId,
-            name: existing.name,
-            kind2: existing.kind2,
-            requiresAction: false,
-            reason
-          }, false)
-          // 收口修 F4（红队 m-2）：段 reason 落段后同步派生投影 —— 否则 toolRuns[].reason
-          // （parts.ts:199 投影含 reason）滞留旧值，违背「parts 唯一真值、投影由 deriveProjections 派生」契约。
-          deriveProjections(host)
-        } else if (import.meta.env.DEV) {
-          console.warn(`[批4④ A4'] 取消回灌失败：未找到 toolCallId=${form.toolCallId} 的工具段，reason 未落段（不新建段）`)
-        }
+      }
+      const existing = host?.parts.find((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+      if (host && existing && existing.kind === 'tool') {
+        this.upsertToolPart(host, {
+          toolCallId,
+          name: existing.name,
+          kind2: existing.kind2,
+          requiresAction: false,
+          reason
+        }, false)
+        // 收口修 F4（红队 m-2）：段 reason 落段后同步派生投影 —— 否则 toolRuns[].reason
+        // （parts.ts:199 投影含 reason）滞留旧值，违背「parts 唯一真值、投影由 deriveProjections 派生」契约。
+        deriveProjections(host)
+      } else if (import.meta.env.DEV) {
+        console.warn(`[批4④ A4'] 取消回灌失败：未找到 toolCallId=${toolCallId} 的工具段，reason 未落段（不新建段）`)
       }
     },
 
@@ -6473,8 +6633,10 @@ export const useAiStore = defineStore('ai', {
             if (this.activeForm.status === 'filling') {
               setNotice(this, 'ai.notice.formSubmittedElsewhere')
             }
-            this.dropActiveForm()
           }
+          // AR-07：只结算**这一张**（活动表单一结局帧就收掉并按到达序补下一张；打给排队中的
+          // 那张则出队清草稿）—— 这里不能用 `dropActiveForm`，它会把整队一起清掉。
+          this.settleActiveForm(frame.toolCallId)
           // M2 / FE-22：只清**这张卡**的挂起语义 —— 同轮还有别的待人卡（确认门 / 另一张前端卡）
           // 时保持挂起，否则那一张的提交将失去重连判据（`reconnectSuspendedRun` 认 suspended）。
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)

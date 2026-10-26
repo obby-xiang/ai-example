@@ -12,6 +12,7 @@
  * {@link resolveBlockExpanded}，用户触碰记录存 store 的 `expandedBlocks`（D4：会话内内存态）。
  */
 import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
+import type { ToolPreflight } from '@/types/sse'
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
 import { translate } from '@/composables/useCopy'
 
@@ -25,8 +26,9 @@ export type ActivityPart = ToolPart | ReasoningPart
  *
  * 2A 批（裁决 2026-10-17 §9 K1 + §10 F9 + §15 K12）：只读态 = **原样 UI 只读渲染**（门卡参数区
  * 字段表原样 / GF 同一张表单控件原生 disabled 值回填 / 零操作按钮），卡头 = 左固定类型裸 SVG +
- * 中性标题/摘要 + 右状态文字标签 + chevron（可折叠时）；已决六态（已批准 / 已拒绝 / 已超时 /
- * 已批准·执行失败 / 已提交 / 已取消）回合结束后**一律默认折叠**，卡头单行（标题/摘要/状态标签）
+ * 中性标题/摘要 + 右状态文字标签 + chevron（可折叠时）；已决多态（已批准 / 已拒绝 / 已超时 /
+ * 已批准·执行失败 / 已批准·未执行 / 未批准·未执行 / 已提交 / 已取消）回合结束后**一律默认折叠**，
+ * 卡头单行（标题/摘要/状态标签）
  * 保留可辨识信息。卡面不渲染 decidedAt（§16 M1：后端照记、不上卡面）—— 标题/摘要/状态标签由
  * 卡头恒显行承接 R-160 兼容条件。
  */
@@ -38,7 +40,7 @@ export interface Block {
   kind: 'text' | 'activity'
   /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'} */
   parts: MessagePart[]
-  /** requiresAction 段 true（强制展开）；已决 HITL 六态一律折叠（见 {@link readOnlyDefaultExpanded}）；其余 false */
+  /** requiresAction 段 true（强制展开）；已决 HITL 多态一律折叠（见 {@link readOnlyDefaultExpanded}）；其余 false */
   defaultExpanded: boolean
 }
 
@@ -55,7 +57,7 @@ function isActivityPart(part: MessagePart): part is ActivityPart {
 /**
  * defaultExpanded 判定（R-154 #13+14 → 2A 批裁决 §15 K12 → r15 直裁）：
  * ① requiresAction === true ⇒ true（强制展开，R4-5 + D-C6，手动收起不生效）；
- * ② 已决 HITL 段（{@link readOnlyDefaultExpanded}）⇒ 六态一律折叠；
+ * ② 已决 HITL 段（{@link readOnlyDefaultExpanded}）⇒ 多态一律折叠；
  * ③ 其余（含 reason 非空、pending/running 进行中、纯 reasoning 段）一律 false。
  * 决策瞬间「不折叠」的时序不在这里判 —— 那是回合级时序（见 AiPanel 的 turnStillOpen）。
  */
@@ -309,36 +311,57 @@ function optionLabel(field: FormFieldLite, value: unknown): string {
  *
  * 2A 批（裁决 §9 K2）：`blocked` / `unknown` / `pending` **不是决策态** —— 它们是工具运行侧
  * 的「未形成裁决」（越 scope 拦下 / 结局未知 / 仍在途），继续走普通工具卡（右状态标签承接
- * 「超出当前范围 / 结局未知 / 待确认」），不进审批卡的只读四态，避免把非决策读成超时。
+ * 「超出当前范围 / 结局未知 / 待确认」），不进审批卡的只读状态机，避免把非决策读成超时。
  * 契约增量：`skipped`（上游失败导致未执行）同属非决策态 —— 必须由普通状态标签显示「已跳过」，
  * 不得被只读状态机折成「已超时 / 已批准」。
+ *
+ * 2026-10-26 批4 例外（{@link isApprovedNotExecuted}）：**已有 approved 决策**的 blocked /
+ * skipped 是「已批准但未执行」，不是普通工具结局；它必须进只读卡，且不能显示成执行失败。
+ * 无决策的 blocked / skipped 仍按 2A 口径走普通卡（不把"未批准"冒充成已批准）。
  */
 const NON_DECISION_STATUSES: ReadonlySet<ToolRunStatus> = new Set(['pending', 'blocked', 'unknown', 'skipped'])
+
+/**
+ * 2026-10-26 批4：**已批准但执行前被挡下**（target 校验 / 上游 skipped）不是普通工具结局，
+ * 必须进只读卡显示「已批准 · 未执行」；`blocked` 的无决策段（越 scope 拦下）仍走普通工具卡
+ * 「超出当前范围」，不被本条收编。
+ */
+function isApprovedNotExecuted(part: ToolPart): boolean {
+  return part.kind2 === 'CONFIRM'
+    && part.decision === 'approved'
+    && (part.status === 'blocked' || part.status === 'skipped')
+}
 
 export function isReadOnlyCard(part: ToolPart): boolean {
   return !part.requiresAction
     && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL)
-    && !NON_DECISION_STATUSES.has(part.status)
+    && (!NON_DECISION_STATUSES.has(part.status) || isApprovedNotExecuted(part))
 }
 
 /**
- * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名；批G · S13 起门卡增至五态）：
- * - 门卡（H1）五态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / **已取消**；
+ * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名；批G · S13 起门卡增至五态；
+ * 2026-10-26 批4 增至七态）：
+ * - 门卡（H1）七态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / **已取消** /
+ *   **已批准·未执行** / **未批准·未执行**；
  * - 表单系（GF）两态：已提交 / 已取消。
  *
  * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
  * - decision=timeout ⇒ 已超时（2A 挂账①：超时是**第三种门结局** —— 闸门未开、本次未执行）；
  * - decision=approved：status=failed ⇒ 执行失败（K3：失败是执行结果，不是决策结果）；
+ *   status=blocked / skipped ⇒ **已批准·未执行**（批4：批准后执行前被 target 校验/上游挡下）；
  * - decision=rejected ⇒ 已拒绝；
  * - decision=cancel ⇒ 已取消（批G · S13：**用户停止是一次决策**，不是"没人管"，更不是系统超时；
  *   写口见 `cancelRoundParts`（本地停止）/ confirm_decision 帧 / 历史 toolCallStates）；
- * - 无 decision 的历史段：succeeded/running ⇒ 已批准、failed ⇒ 执行失败、rejected ⇒ 已拒绝、
- *   其余（expired / cancelled）⇒ 已超时。
+ * - 无 decision 的历史段：succeeded/running ⇒ 已批准、rejected ⇒ 已拒绝、
+ *   **failed / blocked / skipped ⇒ 未批准·未执行**（批4：没有批准证据就不得声称「已批准」——
+ *   F5 预检未通过 / 预检不可用就地结算的 `failed` 段即走此支）、其余（expired / cancelled）
+ *   ⇒ 已超时。
  *   无决策元数据的 `cancelled` 归入「已超时」是 K2 旧口径的兜底：旧载荷/旧镜像没有 cancel
  *   决策可读，两者同属**未批准收尾**（闸门未开、本次操作未执行）。
- *   `blocked` / `unknown` / `pending` 不属决策态，已由 {@link isReadOnlyCard} 挡在只读卡之外。
+ *   `blocked` / `unknown` / `pending` 无决策时仍不属只读卡，已由 {@link isReadOnlyCard} 挡住；
+ *   有 approved 决策的 blocked / skipped 例外进只读卡（{@link isApprovedNotExecuted}）。
  */
-export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'submitted' | 'cancelled'
+export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'submitted' | 'cancelled' | 'notApproved' | 'notExecuted'
 
 export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
   if (part.name === GENERATIVE_FORM_TOOL) {
@@ -348,7 +371,13 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
     return 'expired'
   }
   if (part.decision === 'approved') {
-    return part.status === 'failed' ? 'failed' : 'approved'
+    if (part.status === 'failed') {
+      return 'failed'
+    }
+    if (part.status === 'blocked' || part.status === 'skipped') {
+      return 'notExecuted'
+    }
+    return 'approved'
   }
   if (part.decision === 'rejected') {
     return 'rejected'
@@ -361,7 +390,10 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
     case 'running':
       return 'approved'
     case 'failed':
-      return 'failed'
+    case 'blocked':
+    case 'skipped':
+      // 批4：无批准证据的未执行/失败一律「未批准 · 未执行」—— 预检未通过不得显示「已批准」。
+      return 'notApproved'
     case 'rejected':
       return 'rejected'
     default:
@@ -370,7 +402,7 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
 }
 
 /**
- * 已决只读卡的默认展开态（§15 K12 → r15 直裁）：**六态一律折叠** ——
+ * 已决只读卡的默认展开态（§15 K12 → r15 直裁）：**多态一律折叠** ——
  * 回合结束后统一收成卡头单行（类型图标 + 中性标题/摘要 + 右状态标签 + chevron），
  * 由用户手动展开回溯。
  * `pending` / `blocked` / `unknown` 与 requiresAction 待决门卡不属已决只读态（{@link isReadOnlyCard}
@@ -379,6 +411,44 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
  */
 export function readOnlyDefaultExpanded(_part: ToolPart): boolean {
   return false
+}
+
+/* ============================ 批4 / AR-02：确认卡知情摘要三字段 ============================
+ * 只展示后端已经算好的 影响面 / 条件摘要 / 权威发布模式；缺哪个就不渲染哪一行：
+ * - 条件摘要**不由前端反解** args / 模型文本（那会把"前端猜测"伪装成后端事实）；
+ * - 发布模式**不默认 MERGE**、不从模型回复猜；无值 = 未知，整行不出；
+ * - 旧预检区的 checks / reportHash / 五段式版式不恢复（10-20 撤除理由仍成立）。
+ * 返回 FieldRow 供门卡与只读卡共用；文案 key 经 translate（切语言即重算）。
+ * ========================================================================================== */
+
+/** 权威发布模式 → 人读文案：只认后端枚举 MERGE/REPLACE；其余原样展示（不推测、不改写）。 */
+function publishModeText(mode: string): string {
+  const normalized = mode.trim().toUpperCase()
+  if (normalized === 'MERGE') {
+    return translate('ai.hitl.facts.mode.merge')
+  }
+  if (normalized === 'REPLACE') {
+    return translate('ai.hitl.facts.mode.replace')
+  }
+  return mode.trim()
+}
+
+/** 确认卡知情摘要行（空值不出行；顺序 = 影响面 → 条件摘要 → 发布模式）。 */
+export function gateFactsRows(preflight: ToolPreflight | null | undefined): FieldRow[] {
+  if (preflight === null || preflight === undefined) {
+    return []
+  }
+  const rows: FieldRow[] = []
+  if (!isBlankText(preflight.impact)) {
+    rows.push({ key: translate('ai.hitl.facts.impact'), value: preflight.impact as string })
+  }
+  if (!isBlankText(preflight.conditionSummary)) {
+    rows.push({ key: translate('ai.hitl.facts.condition'), value: preflight.conditionSummary as string })
+  }
+  if (typeof preflight.publishMode === 'string' && !isBlankText(preflight.publishMode)) {
+    rows.push({ key: translate('ai.hitl.facts.publishMode'), value: publishModeText(preflight.publishMode) })
+  }
+  return rows
 }
 
 /* ============================ 卡片三类型统一判据（tool / hitl / form） ============================
@@ -434,7 +504,7 @@ const TOOL_STATUS_TONE: Record<ToolRunStatus, CardTone> = {
 }
 
 /**
- * 已决六态文案（2A 批 §9 K2 / §10 F6 原样；批G · S13 起门卡的 `cancelled` 不再被折叠成
+ * 已决只读态文案（2A 批 §9 K2 / §10 F6 原样；批G · S13 起门卡的 `cancelled` 不再被折叠成
  * 「已超时」—— 用户停止是一次决策，文案与 GF 取消同字：`✗ 已取消`）。
  *
  * i18n L-69：这里存 **locale key**，取文案经 {@link translate}（调用点在渲染/computed 内 ⇒ 切语言即重算）。
@@ -445,17 +515,24 @@ const READ_ONLY_LABEL_KEY: Record<ReadOnlyState, string> = {
   expired: 'ai.card.readonly.expired',
   failed: 'ai.card.readonly.failed',
   submitted: 'ai.card.readonly.submitted',
-  cancelled: 'ai.card.readonly.cancelled'
+  cancelled: 'ai.card.readonly.cancelled',
+  notApproved: 'ai.card.readonly.notApproved',
+  notExecuted: 'ai.card.readonly.notExecuted'
 }
 
-/** 已决六态色族（与旧 READONLY_BADGE_TONE 同源：通过琥珀、提交/批准绿、拒绝/失败/取消红）。 */
+/**
+ * 已决多态色族（与旧 READONLY_BADGE_TONE 同源：通过琥珀、提交/批准绿、拒绝/失败/取消红）。
+ * 批4：未批准/已批准未执行都用中性色 —— 它们不是执行失败（不得染红），也不是成功（不得染绿）。
+ */
 const READ_ONLY_TONE: Record<ReadOnlyState, CardTone> = {
   approved: 'success',
   rejected: 'danger',
   expired: 'warning',
   failed: 'danger',
   submitted: 'success',
-  cancelled: 'danger'
+  cancelled: 'danger',
+  notApproved: 'neutral',
+  notExecuted: 'warning'
 }
 
 /**
@@ -474,7 +551,7 @@ export function cardTypeOf(part: ToolPart): CardType {
 
 /**
  * 普通段状态文案（排除 pending —— 已由 {@link cardStatusOf} 按类型分工先判；
- * 只读六态走 {@link readOnlyStateOf}，不在此重复）。
+ * 只读状态机走 {@link readOnlyStateOf}，不在此重复）。
  *
  * i18n L-69：文案走 `ai.card.status.*`；`blocked` 的 en 由「out of scope」改准为
  * 「超出可展示范围」（zh「超出当前范围」= 工具/结果越出本轮可展示面，不是"不归本功能管"）。
@@ -488,7 +565,7 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
  * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / label / tone 全由 {@link readOnlyStateOf} 派生；
  * - 其余 pending ⇒ 文案按 {@link cardTypeOf} 分工；
  * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown / skipped）
- *   ⇒ 既有九态文案 + 色族（blocked / unknown / skipped 不落只读六态；pending 已在前一分支处理）。
+ *   ⇒ 既有九态文案 + 色族（blocked / unknown / skipped 无批准决策时不落只读状态机；pending 已在前一分支处理）。
  */
 export function cardStatusOf(part: ToolPart): CardStatus {
   if (isReadOnlyCard(part)) {

@@ -359,3 +359,81 @@ describe('G-G 文案走 locales', () => {
     expect(en.text()).toContain('Select 省份')
   })
 })
+
+/**
+ * AR-07（批次4 前端C）：「常用筛选一屏，高级渐进披露，不机械一屏一问」。
+ *
+ * 产品口径（合并稿 §5 Q6b / 调研-业界对照）：GOV.UK 式一屏一问只适合**线性、低耦合**的服务问答；
+ * 筛选条件相互影响，NN/g 明确这类拆分有害。故本仓采用「**常用条件一屏 + 长尾可选条件渐进披露**」。
+ *
+ * 断言点：
+ * ① 常用条件同屏（全部控件同时在场，不存在"下一步"分页）；
+ * ② 长尾可选条件默认折叠，一个开关只出现一次，展开后即可填；
+ * ③ 必填 / 已填值 / 有错误的字段**永不折叠**（披露只藏没用到的条件，不藏用户的东西）。
+ */
+describe('AR-07 常用筛选一屏 + 高级条件渐进披露', () => {
+  const manyFields = (): FormSpec => ({
+    scenario: 'FILTER',
+    fields: [
+      { key: 'f0', label: '字段0', type: 'text', required: true },
+      { key: 'f1', label: '字段1', type: 'text' },
+      { key: 'f2', label: '字段2', type: 'text' },
+      { key: 'f3', label: '字段3', type: 'text' },
+      { key: 'f4', label: '字段4', type: 'text' },
+      { key: 'f5', label: '字段5', type: 'text' },
+      { key: 'f6', label: '字段6', type: 'text' },
+      { key: 'f7', label: '字段7', type: 'text' }
+    ]
+  })
+
+  /** 尾部那张改成必填：披露不得把必填字段藏起来。 */
+  const tailRequired = (): FormSpec => ({
+    scenario: 'FILTER',
+    fields: [
+      { key: 'f0', label: '字段0', type: 'text', required: true },
+      { key: 'f1', label: '字段1', type: 'text' },
+      { key: 'f2', label: '字段2', type: 'text' },
+      { key: 'f3', label: '字段3', type: 'text' },
+      { key: 'f4', label: '字段4', type: 'text' },
+      { key: 'f5', label: '字段5', type: 'text' },
+      { key: 'f6', label: '字段6', type: 'text' },
+      { key: 'f7', label: '字段7', type: 'text', required: true }
+    ]
+  })
+
+  it('常用条件同时在场；长尾可选条件折叠，展开后即可填', async () => {
+    const wrapper = mountForm(manyFields())
+    // ① 一屏：前 6 张（常用）全部同时渲染 —— 不是一屏一问
+    for (const key of ['f0', 'f1', 'f2', 'f3', 'f4', 'f5']) {
+      expect(wrapper.find(`#gf-field-${key}`).exists()).toBe(true)
+    }
+    // ② 长尾可选条件默认折叠
+    expect(wrapper.find('#gf-field-f6').exists()).toBe(false)
+    expect(wrapper.find('#gf-field-f7').exists()).toBe(false)
+
+    const toggles = wrapper.findAll('[data-testid="gf-advanced-toggle"]')
+    expect(toggles).toHaveLength(1)
+    expect(toggles[0]?.attributes('aria-expanded')).toBe('false')
+    expect(toggles[0]?.text()).toContain('更多条件')
+
+    await toggles[0]?.trigger('click')
+    expect(wrapper.find('#gf-field-f6').exists()).toBe(true)
+    expect(wrapper.find('#gf-field-f7').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="gf-advanced-toggle"]').attributes('aria-expanded')).toBe('true')
+  })
+
+  it('必填 / 已填值的高级字段不折叠（不藏用户的东西）', () => {
+    const wrapper = mountForm(tailRequired(), { initialValues: { f6: '已经填了' } })
+    // 必填不折叠（折叠了表就交不出去）
+    expect(wrapper.find('#gf-field-f7').exists()).toBe(true)
+    // 有值不折叠（草稿恢复的内容也要看得见）
+    expect(wrapper.find('#gf-field-f6').exists()).toBe(true)
+    expect((wrapper.find('#gf-field-f6').element as HTMLInputElement).value).toBe('已经填了')
+  })
+
+  it('确认型（CLARIFY）不做折叠：确认场景要一眼看全', () => {
+    const wrapper = mountForm({ ...manyFields(), scenario: 'CLARIFY' })
+    expect(wrapper.find('#gf-field-f7').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="gf-advanced-toggle"]').exists()).toBe(false)
+  })
+})

@@ -23,6 +23,8 @@ import java.util.Map;
  * <li>{@code step} 只保留"字母/数字/下划线/连字符/点/斜杠/空格"且截 64 字符；</li>
  * <li>{@code taskType} 只认 {@code EXPORT}/{@code IMPORT}（{@code Task.TaskType} 全集）；</li>
  * <li>{@code taskId} ≤ 0 视为未提供；</li>
+ * <li>{@code taskStatus} 只认 {@code ACTIVE/COMPLETED/CANCELLED/FAILED}（未知值降级为 null =
+ *     不做终态收窄）；</li>
  * <li>{@code extra} 只留 {@link ContextBuilder#ALLOWED_EXTRA_KEYS}（非白名单键丢弃并计数）
  *     <b>加上</b>标签专用旁路 {@link ContextBuilder#TAG_ONLY_EXTRA_KEYS}（只进披露判定、
  *     不进模型载荷 —— 两条消费面在 {@code ContextBuilder} 内分开，见该常量注释）。</li>
@@ -47,6 +49,9 @@ public class ContextFieldGate {
 
 	private static final List<String> TASK_TYPES = List.of("EXPORT", "IMPORT");
 
+	/** 任务状态闭集（与 {@code Task.TaskStatus} 同构）；未知值降级为 null（= 不做终态收窄）。 */
+	private static final List<String> TASK_STATUSES = List.of("ACTIVE", "COMPLETED", "CANCELLED", "FAILED");
+
 	/** 闸后结果：{@code downgraded} > 0 表示有字段被降级（日志/计数用，不含原文）。 */
 	public record Result(AiChatRequest.Context context, int downgraded, List<String> reasons) {
 	}
@@ -65,8 +70,9 @@ public class ContextFieldGate {
 			taskId = null;
 			reasons.add("taskId");
 		}
+		String taskStatus = taskStatus(raw.taskStatus(), reasons);
 		Map<String, Object> extra = extra(raw.extra(), reasons);
-		AiChatRequest.Context context = new AiChatRequest.Context(page, taskType, step, taskId, extra);
+		AiChatRequest.Context context = new AiChatRequest.Context(page, taskType, step, taskId, taskStatus, extra);
 		if (!reasons.isEmpty()) {
 			log.warn("context 字段降级（未回显原值）降级项={} 项数={}", reasons, reasons.size());
 		}
@@ -94,6 +100,18 @@ public class ContextFieldGate {
 			return upper;
 		}
 		reasons.add("taskType");
+		return null;
+	}
+
+	private static String taskStatus(String raw, List<String> reasons) {
+		if (raw == null || raw.isBlank()) {
+			return null;
+		}
+		String upper = raw.trim().toUpperCase(java.util.Locale.ROOT);
+		if (TASK_STATUSES.contains(upper)) {
+			return upper;
+		}
+		reasons.add("taskStatus");
 		return null;
 	}
 

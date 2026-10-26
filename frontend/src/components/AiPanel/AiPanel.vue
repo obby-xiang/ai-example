@@ -396,7 +396,7 @@
                        中 = 标题 + 摘要（中性色，不随状态变色）；右 = 状态文字标签（唯一状态色承载）；
                        末尾 = chevron（可折叠时；待决 HITL/GF 强制展开且无 chevron）。
                        已决 HITL / GF 的卡体仍为原样 UI 只读态（2A 批 K1 / F9 / M1：门卡字段表原样、
-                       GF 同一张表单 readonly、零操作按钮、卡面不渲染 decidedAt）；六态回合结束后
+                       GF 同一张表单 readonly、零操作按钮、卡面不渲染 decidedAt）；已决多态回合结束后
                        一律默认折叠，由 turnStillOpen 承担「回合未结束仍展开」。 -->
                   <div
                     :class="cardShellClass(part)"
@@ -487,6 +487,33 @@
                             <!-- 键列口径同待决门卡（自适应内容宽 + 上限 40% + truncate + title 看全） -->
                             <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                             <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                          </div>
+                        </div>
+                        <!-- 批4 / AR-02：已决只读卡同样保留知情摘要（默认收起，与待决门卡同一份纯函数）。 -->
+                        <div v-if="gateFactsOf(part).length" class="mx-[11px] mt-[9px]" data-testid="gate-facts">
+                          <button
+                            type="button"
+                            class="flex w-full items-center gap-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-left text-[12.2px] leading-[1.5] text-[#57606a] transition-colors duration-[150ms] hover:border-[#d8dde3] hover:text-[#1f2328]"
+                            :aria-expanded="gateFactsExpanded(part)"
+                            data-testid="gate-facts-toggle"
+                            @click="toggleGateFacts(part.toolCallId)"
+                          >
+                            <span class="flex-1 min-w-0 break-words">{{ t('ai.hitl.facts.title') }}</span>
+                            <span class="flex-none text-[11.5px]">{{ gateFactsExpanded(part) ? t('ai.hitl.facts.collapse') : t('ai.hitl.facts.expand') }}</span>
+                          </button>
+                          <div
+                            v-if="gateFactsExpanded(part)"
+                            class="mt-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
+                            data-testid="gate-facts-body"
+                          >
+                            <div
+                              v-for="row in gateFactsOf(part)"
+                              :key="row.key"
+                              class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
+                            >
+                              <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
+                              <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                            </div>
                           </div>
                         </div>
                       </template>
@@ -626,8 +653,9 @@
                                继续」+ 内层 chip）整段退役，字段表与按钮行直接落在统一卡头的卡体内；
                                操作/参数行一个不少（操作 + args 全键，敏感掩码口径不变）。
                                倒计时环 / 剩余秒 / 「等待人工确认」静态兜底随去超时裁决一并退役
-                               （历史 TIMEOUT 卡只读展示保留）。预检摘要区撤除（types 的 preflight
-                               字段保留不渲染）；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
+                               （历史 TIMEOUT 卡只读展示保留）。旧预检五段式摘要区不恢复；
+                               批4 / AR-02 只以**可折叠、默认收起**的只读三字段（影响面 / 条件摘要 /
+                               权威发布模式）承接知情信息；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
                           <div class="pb-[11px]" data-testid="hitl-gate">
                             <!-- 字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
                                  按钮行在滚动区之外常驻。 -->
@@ -646,6 +674,34 @@
                                      （min-w-0 + 上限 40%）+ truncate + title 看全，与只读卡键列同口径。 -->
                                 <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
                                 <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                              </div>
+                            </div>
+                            <!-- 批4 / AR-02：知情摘要 —— 只读三字段（影响面 / 条件摘要 / 权威发布模式），
+                                 默认收起、展开后才进 DOM；不恢复旧预检区五段式、不恢复“查看详情”抽屉。 -->
+                            <div v-if="gateFactsOf(part).length" class="mx-[11px] mt-[9px]" data-testid="gate-facts">
+                              <button
+                                type="button"
+                                class="flex w-full items-center gap-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[6px] text-left text-[12.2px] leading-[1.5] text-[#57606a] transition-colors duration-[150ms] hover:border-[#d8dde3] hover:text-[#1f2328]"
+                                :aria-expanded="gateFactsExpanded(part)"
+                                data-testid="gate-facts-toggle"
+                                @click="toggleGateFacts(part.toolCallId)"
+                              >
+                                <span class="flex-1 min-w-0 break-words">{{ t('ai.hitl.facts.title') }}</span>
+                                <span class="flex-none text-[11.5px]">{{ gateFactsExpanded(part) ? t('ai.hitl.facts.collapse') : t('ai.hitl.facts.expand') }}</span>
+                              </button>
+                              <div
+                                v-if="gateFactsExpanded(part)"
+                                class="mt-[6px] rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
+                                data-testid="gate-facts-body"
+                              >
+                                <div
+                                  v-for="row in gateFactsOf(part)"
+                                  :key="row.key"
+                                  class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
+                                >
+                                  <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12px]" :title="row.key">{{ row.key }}</span>
+                                  <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                                </div>
                               </div>
                             </div>
                             <!-- 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。
@@ -669,7 +725,7 @@
                             </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
                                  下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。 -->
-                            <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]">
+                            <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-testid="gate-actions">
                               <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用 -->
                               <span
                                 v-if="gateNeedsAck(part)"
@@ -722,6 +778,30 @@
                             @cancel="onFormCancel"
                             @draft="onFormDraft"
                           />
+                          <!-- AR-07（批次4 集成返修）：排队中的表单一律有说明 + 取消出口 ——
+                               它还没轮到呈现，不能靠"卡体空白"让用户以为坏了；也不能逼用户先处理
+                               前面那张才能收口这一张（取消出口恒在）。运行态到期时本块与卡头下方的
+                               「本轮运行态已失效」提示并存：到期只说明后端保留期，不改变"这张仍可
+                               本地收口"（取消 = 本地终态 + cancelled 回灌）。 -->
+                          <div
+                            v-else-if="formQueuePosition(part.toolCallId) > 0"
+                            class="rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[8px]"
+                            data-testid="gf-queue-card"
+                            :data-tool-call-id="part.toolCallId"
+                          >
+                            <div class="flex flex-wrap items-center gap-[8px] text-[12.2px] leading-[1.5] text-[#1f2328]">
+                              <span class="flex-none font-semibold" data-testid="gf-queue-position">{{ t('ai.panel.gfQueue.position', { position: formQueuePosition(part.toolCallId), total: ai.queuedForms.length }) }}</span>
+                              <span class="min-w-0 flex-1 break-words text-[#57606a]" data-testid="gf-queue-hint">{{ t('ai.panel.gfQueue.hint') }}</span>
+                            </div>
+                            <div class="mt-[6px] flex justify-end">
+                              <button
+                                type="button"
+                                class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+                                data-testid="gf-queue-cancel"
+                                @click="onQueuedFormCancel(part.toolCallId)"
+                              >{{ t('ai.panel.gfQueue.cancel') }}</button>
+                            </div>
+                          </div>
                         </div>
 
                         <!-- AI 表格操作专项 §3.3bis：写预览卡（计数 / 采样 diff / 全量 diff 三档）。
@@ -1321,10 +1401,12 @@
  *    GF 复用同一张表单（FormRenderer readonly：原生 disabled + 值回填）、操作按钮整块不渲染；
  * ② 卡头 = 三类型统一结构（左固定类型裸 SVG + 中性标题/摘要 + 右状态文字标签 + chevron；
  *    36.4px、chevron ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
- * ③ 已决六态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已提交 / 已取消）回合结束后
- *    一律默认折叠，卡头单行（标题/摘要/右状态标签）保留可辨识信息；决策当下不折叠（turnStillOpen）；
+ * ③ 已决多态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已批准·未执行 / 未批准·未执行 /
+ *    已提交 / 已取消）回合结束后一律默认折叠，卡头单行（标题/摘要/右状态标签）保留可辨识信息；
+ *    决策当下不折叠（turnStillOpen）；
  * ④ 状态全集：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（批G · S13 起增「已取消」：
- *    用户停止是一次决策）；表单系 = 已提交 / 已取消；审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
+ *    用户停止是一次决策；批4 增「已批准·未执行」「未批准·未执行」）；表单系 = 已提交 / 已取消；
+ *    审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
  * ⑤ 未提交不记录：取消 / 超时收尾回初始空态再锁定（F9）；
  * ⑥ **限高新尺度（§14.4）**：字段族 `min(280px,35vh)` / 表单·组合族 `min(320px,45vh)` /
  *    长表格族 `min(480px,60vh)` / 代码·详情族 `min(280px,35vh)` / 用户长消息 184px 不动 /
@@ -1355,6 +1437,7 @@ import {
   cardStatusOf,
   cardTypeOf,
   formSpecOf,
+  gateFactsRows,
   hasBodyRows,
   isBlankText,
   isReadOnlyCard,
@@ -1379,6 +1462,7 @@ import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
 import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type TextPart, type ToolPart } from '@/types/ai'
+import type { ToolPreflight } from '@/types/sse'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
@@ -3223,10 +3307,10 @@ function blocksOf(message: ChatMessage): Block[] {
  * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
  * 未触碰（键缺省）回落 defaultExpanded。
  *
- * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决只读卡（六态全集）的折叠是
+ * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决只读卡（多态全集）的折叠是
  * **回合级时序** —— 决策瞬间不折叠，等本轮结束（新建消息 / 回合文本收尾）后才收成卡头行。
  * 判据 = `turnStillOpen`：本轮 loading 仍在，且该卡属于**末条消息**；不满足才走 defaultExpanded
- * （r15：六态 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
+ * （r15：多态 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
  */
 function isBlockExpanded(block: Block): boolean {
   const manual = ai.expandedBlocks[block.id]
@@ -3245,7 +3329,7 @@ function turnStillOpen(block: Block): boolean {
   return last !== undefined && last.id === block.messageId
 }
 
-/** 已决只读卡（六态全集）—— 唯一受「回合结束才收」时序影响的卡型。 */
+/** 已决只读卡（多态全集）—— 唯一受「回合结束才收」时序影响的卡型。 */
 function readOnlyTerminalCard(block: Block): boolean {
   return block.parts.some((part) => part.kind === 'tool' && isReadOnlyCard(part))
 }
@@ -3425,6 +3509,9 @@ function cardHeadClass(part: ToolPart): string {
  * - form = 表单业务标题（FormRenderer 内头已抑制，标题上提）；
  * - CONFIRM 带 `preflight.target` ⇒ **业务化标题**（demo 场景一/二/三 1:1）：
  *   `待你确认：<类型> 任务 #<id>『<title>』`（待决）/ `<类型> 任务 #<id>『<title>』`（只读）；
+ * - `create_task` 的预检 target **没有任务号**（工具语义如此：任务在批准后才存在，预检只判
+ *   `type/title` 是否可用，见 `ToolPreflightService#inspectCreate`）⇒ 走「创建」句式，
+ *   不得套用 `任务 #<id>` 模板（旧实现在此渲染出 `任务 #undefined`）；
  * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
  */
 function cardTitle(part: ToolPart): string {
@@ -3433,10 +3520,40 @@ function cardTitle(part: ToolPart): string {
   }
   const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
   if (target) {
+    const createBusiness = createTaskBusinessTitle(target)
+    if (createBusiness !== null) {
+      return isReadOnlyCard(part) ? createBusiness : t('ai.panel.confirmTitle', { business: createBusiness })
+    }
     const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
     return isReadOnlyCard(part) ? business : t('ai.panel.confirmTitle', { business })
   }
   return toolLabel(part.name)
+}
+
+/**
+ * `create_task` 的业务化标题片段；非 create_task（target 带任务号）⇒ `null`（走既有模板）。
+ *
+ * 判据 = **target 里没有 taskId**：`ToolPreflightService#inspectCreate` 的 target 只有
+ * `type/title`（创建后才有任务号），四个 `start_*` 的 target 恒带 `taskId`。
+ * 文案随 UI 语言（类型词用建任务对话框同一份 `views.tasks.*Type`）；标题为空时用无标题句式，
+ * 不留下 `『』` 空壳。
+ */
+function createTaskBusinessTitle(target: ToolPreflight['target']): string | null {
+  if (target.taskId !== undefined && target.taskId !== null && `${target.taskId}` !== '') {
+    return null
+  }
+  const typeKey = target.type === 'EXPORT'
+    ? 'views.tasks.exportType'
+    : target.type === 'IMPORT'
+      ? 'views.tasks.importType'
+      : null
+  if (typeKey === null) {
+    return null
+  }
+  const title = (target.title ?? '').trim()
+  return title === ''
+    ? t('ai.panel.createTaskBusinessUntitled', { type: t(typeKey) })
+    : t('ai.panel.createTaskBusiness', { type: t(typeKey), title })
 }
 
 /** 待填写 GF 摘要：必填项计数（无必填 / 无 schema ⇒ 空串）。 */
@@ -4116,6 +4233,27 @@ function onGateAckChange(toolCallId: string, event: Event): void {
   ai.clearGateAck(toolCallId)
 }
 
+// ── 批4 / AR-02：确认卡知情摘要（三字段、只读、默认收起） ─────────────────────
+
+/**
+ * 知情摘要展开态（会话内内存态，按 toolCallId 记；缺省 = 收起）。
+ * 不写 store：它不是业务状态，刷新后按默认收起重来即可。
+ */
+const gateFactsOpen = ref<Record<string, boolean>>({})
+
+function gateFactsExpanded(part: ToolPart): boolean {
+  return gateFactsOpen.value[part.toolCallId] === true
+}
+
+function toggleGateFacts(toolCallId: string): void {
+  gateFactsOpen.value = { ...gateFactsOpen.value, [toolCallId]: !gateFactsOpen.value[toolCallId] }
+}
+
+/** 只读摘要行（影响面 / 条件摘要 / 权威发布模式；空值由纯函数剔除，前端不补猜）。 */
+function gateFactsOf(part: ToolPart): FieldRow[] {
+  return gateFactsRows(part.preflight)
+}
+
 /**
  * 提交一次人工裁决（放行 / 拒绝）。
  *
@@ -4138,6 +4276,27 @@ function onFormSubmit(values: Record<string, unknown>): void {
 /** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
 function onFormCancel(): void {
   void ai.cancelGenerativeForm()
+}
+
+/**
+ * AR-07（批次4 集成返修）：该 toolCallId 在队列里的**位次**（1 起；0 = 不在队列）。
+ *
+ * 卡面只显示"第几张 / 共几张"（到达序），不自己维护第二份顺序 —— 顺序的唯一真值在
+ * store 的 `queuedForms`（实时帧与刷新恢复共用同一队列）。
+ */
+function formQueuePosition(toolCallId: string): number {
+  const index = ai.queuedForms.findIndex((entry) => entry.toolCallId === toolCallId)
+  return index < 0 ? 0 : index + 1
+}
+
+/**
+ * AR-07：取消**排队里**的那一张（不动正在填的那张）。
+ *
+ * 走 store 的唯一出口 `cancelGenerativeForm(toolCallId)`（内部转 `cancelQueuedForm`）：
+ * 出队清草稿 → 乐观终态 → 记决策时刻 → `cancelled:true` 回灌，失败原因落段可见。
+ */
+function onQueuedFormCancel(toolCallId: string): void {
+  void ai.cancelGenerativeForm(toolCallId)
 }
 
 /**

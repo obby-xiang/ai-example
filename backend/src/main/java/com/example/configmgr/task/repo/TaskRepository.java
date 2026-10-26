@@ -29,6 +29,17 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Query("SELECT t FROM Task t WHERE t.id = :id")
     Optional<Task> findByIdForUpdate(@Param("id") Long id);
 
+    /**
+     * AI 创建任务的宿主幂等/单轮上限查询（AR-03）：按 {@code settings_json} 里的
+     * {@code aiCreateRun} 取值找同一轮创建过的任务。
+     *
+     * <p>{@code settings_json} 是既有列（CLOB/TEXT），不新增表/列；AI 创建时写入的键是
+     * {@code {"aiCreateKey":"…","aiCreateRun":"…"}}，其它设置（如 {@code importMode}）原样保留。
+     * LIKE 仅用于低频的创建幂等判定，不在热路径上。
+     */
+    @Query("SELECT t FROM Task t WHERE t.settingsJson LIKE CONCAT('%', :needle, '%') ORDER BY t.id ASC")
+    List<Task> findBySettingsJsonContaining(@Param("needle") String needle);
+
     /** createdAt 相同（同秒批量创建）时按 id 兜底，保证跨页顺序稳定（Q16①）。 */
     @Query("SELECT t FROM Task t ORDER BY t.createdAt DESC, t.id DESC")
     List<Task> findAllOrdered();

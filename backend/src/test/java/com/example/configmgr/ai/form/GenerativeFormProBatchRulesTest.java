@@ -300,6 +300,33 @@ class GenerativeFormProBatchRulesTest {
 	}
 
 	@Test
+	void definitionEnumerationSourceIsTheSecondRegisteredClosure() throws Exception {
+		// 闭集扩容到两个内置源：definition_fields（定义编码 → 字段）与 definitions（层级 → 定义）
+		assertThat(GenerativeFormRules.OPTION_SOURCE_IDS)
+			.containsExactlyInAnyOrder("definition_fields", FormOptionSource.DefinitionOptionSource.ID);
+
+		String ok = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"level","label":"层级","type":"enum",
+				   "options":[{"value":"GLOBAL"},{"value":"REGION"},{"value":"PROJECT"}]},
+				  {"key":"def","label":"配置项","type":"enum","required":true,
+				   "optionsFrom":{"dependsOn":"level","sourceId":"definitions"}}]}""";
+		// required 不误判"空选项"：选项在后端数据里，规则层不枚举、也不做成员校验（既有边界不扩大）
+		assertThat(GenerativeFormRules.schemaIssues(form(ok))).isEmpty();
+		assertThat(GenerativeFormRules.resultIssues(schema(ok), values("{\"level\":\"GLOBAL\",\"def\":\"CURRENCY\"}")))
+			.isEmpty();
+
+		// 闭集没有变成开放面：近似 id / URL 一律拒
+		String nearMiss = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"level","label":"层级","type":"enum","options":[{"value":"GLOBAL"}]},
+				  {"key":"def","label":"配置项","type":"enum",
+				   "optionsFrom":{"dependsOn":"level","sourceId":"definitions_all"}}]}""";
+		assertThat(GenerativeFormRules.schemaIssues(form(nearMiss))).extracting(FormIssue::code)
+			.contains(FormIssueCodes.OPTIONS_SOURCE_UNKNOWN);
+	}
+
+	@Test
 	void conditionalVisibilityDrivesRequirednessOnSubmit() throws Exception {
 		String schema = """
 				{"scenario":"FILTER","fields":[

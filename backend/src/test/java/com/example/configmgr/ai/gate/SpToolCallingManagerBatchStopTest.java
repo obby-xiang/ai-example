@@ -119,7 +119,7 @@ class SpToolCallingManagerBatchStopTest {
 
     @ParameterizedTest(name = "上游 {0}（{1}）确定性失败 ⇒ 后续 {2} 被 SKIPPED")
     @CsvSource({
-            "create_task,W,start_export",
+            "fake_w_tool,W,start_export",
             "start_export,J,start_import",
             "start_publish,P,start_export"})
     void writeJobPublishCategoriesHaltTheBatch(String failingTool, String category, String nextTool) {
@@ -294,7 +294,7 @@ class SpToolCallingManagerBatchStopTest {
     }
 
     private static String argsOf(String tool) {
-        return tool.equals("create_task") ? "{\"type\":\"EXPORT\"}" : "{\"taskId\":9}";
+        return tool.equals("fake_w_tool") ? "{\"type\":\"EXPORT\"}" : "{\"taskId\":9}";
     }
 
     private void backend(String name, ToolMeta.Category category, ToolMeta.RiskLevel risk) {

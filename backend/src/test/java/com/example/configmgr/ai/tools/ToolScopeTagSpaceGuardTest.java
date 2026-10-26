@@ -42,8 +42,13 @@ class ToolScopeTagSpaceGuardTest {
      */
     private static final List<String> RESERVED_PAGE_TAGS = List.of("page:export", "page:import");
 
-    /** 扫描下限：防止"扫描自身坏掉"被当成"没有违规"（当前 26 个 @ToolScope 声明）。 */
-    private static final int MIN_DECLARATIONS = 26;
+    /**
+     * 扫描下限：防止"扫描自身坏掉"被当成"没有违规"（当前 <b>37</b> 个 {@code @ToolScope} 声明）。
+     *
+     * <p>26 → 37 是"披露不变量"整改的一部分：下限贴着真实声明数，才能让"整批工具静默消失"
+     * 或"扫描面被缩窄"暴露成红测（少 11 个工具不会被 26 的下限发现）。
+     */
+    private static final int MIN_DECLARATIONS = 37;
 
     @Test
     void noToolScopeUsesReservedWizardPageTags() {

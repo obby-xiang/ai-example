@@ -215,6 +215,38 @@ class GenerativeFormSchemaRulesTest {
 	}
 
 	@Test
+	void requiredOptionFieldWithNoResolvableOptionsIsRejectedAtSchemaTime() throws Exception {
+		// 级联映射没有任何分支 + required = 死路：用户永远填不了这张表单，必须在 schema 期拒绝并让模型重出
+		String deadEnd = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"kind","label":"类别","type":"enum","options":[{"value":"GLOBAL"}]},
+				  {"key":"def","label":"配置项","type":"enum","required":true,
+				   "optionsFrom":{"dependsOn":"kind","map":{}}}]}""";
+		List<FormIssue> issues = GenerativeFormRules.schemaIssues(form(deadEnd));
+		assertThat(issues).extracting(FormIssue::key).containsExactly("def");
+		assertThat(issues).extracting(FormIssue::code).containsExactly(FormIssueCodes.OPTIONS_EMPTY);
+		assertThat(issues.get(0).message()).contains("required=true").contains("永远无法填写");
+
+		// 非必填可以留空：空分支只是"暂时没有可选项"，不是死路
+		String optional = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"kind","label":"类别","type":"enum","options":[{"value":"GLOBAL"}]},
+				  {"key":"def","label":"配置项","type":"enum",
+				   "optionsFrom":{"dependsOn":"kind","map":{}}}]}""";
+		assertThat(GenerativeFormRules.schemaIssues(form(optional))).isEmpty();
+
+		// 数据源级联的选项由后端数据决定，规则层不枚举 ⇒ 不按"空选项"拒绝（不越界）；
+		// definitions = 配置定义枚举源（父值 = 层级），是闭集内新增的合法来源
+		String sourced = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"level","label":"层级","type":"enum",
+				   "options":[{"value":"GLOBAL"},{"value":"REGION"},{"value":"PROJECT"}]},
+				  {"key":"def","label":"配置项","type":"enum","required":true,
+				   "optionsFrom":{"dependsOn":"level","sourceId":"definitions"}}]}""";
+		assertThat(GenerativeFormRules.schemaIssues(form(sourced))).isEmpty();
+	}
+
+	@Test
 	void rejectsOptionsOnNonOptionType() throws Exception {
 		String form = """
 				{"scenario":"FILTER","fields":[{"key":"k","label":"K","type":"text",

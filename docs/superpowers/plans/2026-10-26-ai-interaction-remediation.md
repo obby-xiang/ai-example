@@ -260,6 +260,8 @@ Expected: 无上游事件时仍有保活；45s 看门狗不误杀正常压缩；
 
 Expected: 不把“披露可见”当授权，不把模型文本当发布模式权威来源；6a 可独立交付，6b 按 **AR-02** 实施（不再等裁决）。
 
+**实现范围与状态（2026-10-26 批次 4）**：本任务 **Step 3 / 4 / 5 / 6 已实现**（预检"未批准 / 已批准·未执行"语义、知情三字段、`taskStatus` 收窄、scope 不变量 26→37、`AR-10` 到期可见化），落到工作区、**未入库**。**单点证据（仅下界）** = `ToolPreflightServiceTest#payloadCarriesImpactConditionSummaryAndAuthoritativePublishMode`（三字段进 payload）+ `frontend/tests/ai-panel-parts-render.spec.ts` 知情摘要 1 方法；**未跑** = 预检语义前端用例、`taskStatus` 收窄用例、scope 不变量启动断言用例、以及其余全部。**文档同步仍归 Task 13 Step 2**，本任务不写文档。
+
 ### Task 7: 表单队列、级联反馈与结构化选择
 
 **Files:**
@@ -286,6 +288,8 @@ Expected: 不把“披露可见”当授权，不把模型文本当发布模式�
 - [ ] **Step 3:** 实现“同一时刻仅一个活动表单、不覆盖、无死卡”与 schema fail-closed；第二张**按 AR-07 排队**（实时与恢复同构、不提供批量一次提交）；常用筛选用一屏，高级条件渐进披露，不强制一屏一问。
 - [ ] **Step 4:** 按 AR-07 的同一口径扩展定义枚举选项源和提示词；清空条件使用显式动作并过风险确认，不与非法空值混用。
 - [ ] **Step 5:** 跑定向测试；真模型自然语言触发表单采样留到获批验收，不能用桩替代服从率证据。
+
+**实现范围与状态（2026-10-26 批次 4）**：本任务 **Step 1 / 3 / 4 已实现**（单活动表单**排队** + 排队位次可见可取消 + `definitions` 数据源扩展 + 空选项必填 schema 期拒绝），落到工作区、**未入库**。**单点证据（仅下界）** = `frontend/tests/gf-form-queue.spec.ts` 同批两张 1 方法 + `frontend/tests/ai-panel-gf-queue-card.spec.ts` 排队位次 1 方法（**其中 RED 含一次期望值修正**，修正后转 GREEN，如实登记、不算一次通过）+ 后端 `GenerativeFormSchemaRulesTest#requiredOptionFieldWithNoResolvableOptionsIsRejectedAtSchemaTime`；**未跑** = 父值清值提示用例、选项源用例、其余全部 spec 与后端定向 / 全量。**文档同步仍归 Task 13 Step 2**。
 
 ### Task 8: 工作区复位、动作串行与作业同步
 
@@ -332,6 +336,8 @@ Expected: 不把“披露可见”当授权，不把模型文本当发布模式�
 - [ ] **Step 4:** 同步提示词、工具描述、测试和文档；跑定向测试。
 
 Expected: create_task + navigate_to 的额外汇返被明确测试；不以全局“所有 WRITE 都确认”扩散改动。
+
+**实现范围与状态（2026-10-26 批次 4）**：本任务 **Step 1 / 3 已实现**（DANGER 确认门 + 宿主幂等 `name`+`parentId`+参数哈希 + 单轮上限 1），落到工作区、**未入库**；**单点证据 = 无**（本任务的幂等 / 单轮 / 拒绝不创建用例**全部未跑**，凭据只到"代码成立"）；**其余未跑** = `AiToolsInvocationTest` / `ToolPreflightGateTest`、后端定向 / 全量、主 CI。**文档与提示词同步仍归 Task 13 Step 2**。
 
 ### Task 10: 思考计时、文案与可访问性
 

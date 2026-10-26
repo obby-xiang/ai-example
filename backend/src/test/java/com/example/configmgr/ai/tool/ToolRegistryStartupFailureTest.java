@@ -70,6 +70,20 @@ class ToolRegistryStartupFailureTest {
         }
     }
 
+    @Test
+    void emptyToolScopeFailsStartupInsteadOfDividingDisclosureAndExecution() {
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext(EmptyScopeToolConfig.class)) {
+            ToolRegistry registry = registryOn(context);
+
+            assertThatThrownBy(registry::init)
+                    .as("空 scope 在披露面=不披露、执行面=放行，是静默扩大授权面 ⇒ 必须启动失败")
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("工具 scope 为空")
+                    .hasMessageContaining("empty_scope_tool");
+        }
+    }
+
     private static ToolRegistry registryOn(AnnotationConfigApplicationContext context) {
         ToolRegistry registry = new ToolRegistry();
         ReflectionTestUtils.setField(registry, "applicationContext", context);
@@ -133,6 +147,24 @@ class ToolRegistryStartupFailureTest {
 
         @Tool(name = "second_failing_tool", description = "受控替身：第二个创建失败的工具 bean")
         public String second(@ToolParam(description = "占位参数") String value) {
+            return value;
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class EmptyScopeToolConfig {
+
+        @Bean
+        EmptyScopeTool emptyScopeTool() {
+            return new EmptyScopeTool();
+        }
+    }
+
+    static class EmptyScopeTool {
+
+        @Tool(name = "empty_scope_tool", description = "受控替身：显式空 scope")
+        @ToolScope({})
+        public String empty(@ToolParam(description = "占位参数") String value) {
             return value;
         }
     }

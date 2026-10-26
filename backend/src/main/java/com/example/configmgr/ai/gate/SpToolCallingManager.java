@@ -426,7 +426,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// retryable=true），既不出现在 suspended 帧里，也不会被 arm 成闸门、不会发 confirm_request。
 		List<PendingToolCall> suspended = new ArrayList<>(pendings.size());
 		Set<String> preflightBlocked = new HashSet<>();
+		Set<String> createTaskBlocked = new HashSet<>();
 		Set<String> frontendRejected = new HashSet<>();
+		// AR-03 单轮上限 1：同一轮只允许创建一次任务。批内重复在挂起前就拒绝（不弹第二张卡），
+		// 跨批重复按台账判定（第一笔执行后 ledger 已有记录）。
+		boolean createTaskSeenInBatch = false;
+		boolean createTaskChecked = false;
+		CreateTaskInRun createTaskPrior = CreateTaskInRun.NONE;
 		// 已发过 tool_start 的 toolCallId（park 前置批次 + 执行循环共用）：每张卡恰一条，不重发。
 		Set<String> toolStarted = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
@@ -440,7 +446,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				this.beacon.markPassiveActivity(runId);
 				ToolPreflightService.PreflightReport report;
 				try {
-					report = this.preflight.inspect(pending.getName(), pending.getArguments());
+					report = this.preflight.inspect(pending.getName(), pending.getArguments(), context);
 				}
 				catch (RuntimeException ex) {
 					// MINOR-4：预检基础设施异常 → 安全侧兜底：不放行、不判"预检未通过"、不进门。
@@ -457,6 +463,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 					continue;
 				}
 				pending.setPreflight(report.asMap());
+			}
+			// AR-03：create_task 的宿主单轮上限（不依赖模型服从）。第一个照常进确认门；
+			// 同批第二个 / 本轮已建过 ⇒ 直接结算成"未创建"并给可读出口，不再弹卡。
+			if (!budgetArmed && TOOL_CREATE_TASK.equals(pending.getName())
+					&& PendingToolCall.KIND_CONFIRM.equals(pending.getKind())) {
+				if (!createTaskChecked) {
+					createTaskChecked = true;
+					createTaskPrior = createTaskAlreadyInRun(runId);
+				}
+				if (createTaskSeenInBatch || createTaskPrior.created()) {
+					// 先落终态再 continue：本批若因第一张卡 park，第二笔也不会以 PENDING 留在快照里
+					// 变成"刷新后多出一张可点的卡"；帧在下方执行循环统一发（不在 suspended 之前）。
+					markCreateTaskLimit(runId, pending, createTaskPrior);
+					createTaskBlocked.add(pending.getToolCallId());
+					continue;
+				}
+				createTaskSeenInBatch = true;
 			}
 			// 前端通道条目的入参复核：与确认门预检<b>同一位置</b> —— 必须在 suspended 公告与请求帧之前。
 			// 复核对入参是确定性的；放到 await 里再判，"不挂起、不下发"的契约会被
@@ -582,6 +605,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text)));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
+					continue;
+				}
+				// AR-03：单轮第二次 create_task 直接拒绝创建（未执行、无副作用），给可读原因与出口。
+				if (createTaskBlocked.contains(pending.getToolCallId())) {
+					emitToolStartOnce(runId, toolStarted, pending);
+					responses.add(skipAsCreateTaskLimit(runId, pending, createTaskPrior));
+					traceToolSkipped(runId, snapshot.getSessionId(), pending,
+							ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
 					continue;
 				}
 				// 步数笼：到顶后的调用不再执行，结算成 skipped/TOOL_STEP_LIMIT（不判整轮失败）
@@ -823,6 +854,117 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.registry.of(runId).toolResult(pending, false, false, message);
 		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 				modelData(pending, message));
+	}
+
+	/**
+	 * AR-03 单轮第二次 {@code create_task}：结算成 {@code skipped/CREATE_TASK_TURN_LIMIT}
+	 * （<b>未创建</b>、不弹第二张卡、不写执行台账），并给模型可读出口。
+	 *
+	 * @param prior 本轮已创建任务的已知程度（有 id / 任务号不可确认 / 同批尚未结算），
+	 *              见 {@link CreateTaskInRun} —— <b>任务号不可确认时绝不编造 {@code #-1}</b>
+	 */
+	public ToolResponseMessage.ToolResponse skipAsCreateTaskLimit(String runId, PendingToolCall pending,
+			CreateTaskInRun prior) {
+		String message = markCreateTaskLimit(runId, pending, prior);
+		this.registry.of(runId).toolResult(pending, false, false, message);
+		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+				modelData(pending, message));
+	}
+
+	/** 只落"单轮上限"终态（不发帧）：供 park 前检测使用，保证第二笔不会以 PENDING 留在快照里。 */
+	private String markCreateTaskLimit(String runId, PendingToolCall pending, CreateTaskInRun prior) {
+		String detail;
+		if (prior.idUnknown()) {
+			detail = "无法确认本轮是否已创建任务；为避免重复创建，本次未创建。"
+					+ "请先用 list_tasks 查看已有任务（如有，用 navigate_to 打开）；需要再建请在新一轮发起。";
+		}
+		else if (prior.taskId() != null) {
+			detail = "本轮已创建任务 #" + prior.taskId() + "，本次未创建。请用 navigate_to(page=..., taskId="
+					+ prior.taskId() + ") 打开该任务；需要再建请在新一轮发起。";
+		}
+		else {
+			detail = "本次调用未创建。请先完成本轮已发起的那一次创建（确认卡）；需要再建请在新一轮发起。";
+		}
+		String message = "未创建（" + ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT + "）：同一轮只允许创建一次任务。" + detail;
+		pending.setStatus(PendingToolCall.SKIPPED);
+		pending.setOutcome(ToolOutcome.SKIPPED.wire());
+		pending.setCode(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+		pending.setReason(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(message);
+		this.store.putPending(runId, pending);
+		log.warn("单轮 create_task 上限命中，拒绝创建 runId={} toolCallId={} priorTaskId={} idUnknown={}", runId,
+				pending.getToolCallId(), prior.taskId(), prior.idUnknown());
+		return message;
+	}
+
+	/**
+	 * 本轮是否已经创建过任务（跨批 / 续跑口径 = 执行台账）。
+	 *
+	 * <p><b>不编造任务号</b>：台账读不到 / 回执里解析不出 {@code #id} 时返回
+	 * {@link CreateTaskInRun#unknown()}，文案只说"无法确认本轮是否已创建任务"，绝不输出
+	 * {@code #-1} 这类伪 ID 让用户去导航，也不断言"一定已创建"。
+	 */
+	private CreateTaskInRun createTaskAlreadyInRun(String runId) {
+		List<Map<String, Object>> ledger;
+		try {
+			ledger = this.store.ledger(runId);
+		}
+		catch (RuntimeException ex) {
+			// fail-closed：查不到台账时宁可拒绝第二次创建，也不能冒"重复建库"的险。
+			log.warn("读取单轮 create_task 台账失败，按已创建处理（任务号不可确认）runId={}：{}", runId,
+					ex.getMessage());
+			return CreateTaskInRun.unknown();
+		}
+		for (Map<String, Object> record : ledger) {
+			if (TOOL_CREATE_TASK.equals(record.get("name"))
+					&& ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
+				Long taskId = taskIdFromText(String.valueOf(record.get("resultText")));
+				return taskId == null ? CreateTaskInRun.unknown() : new CreateTaskInRun(true, taskId, false);
+			}
+		}
+		return CreateTaskInRun.NONE;
+	}
+
+	/** 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。 */
+	private static Long taskIdFromText(String text) {
+		if (text == null) {
+			return null;
+		}
+		int hash = text.indexOf('#');
+		if (hash < 0) {
+			return null;
+		}
+		int index = hash + 1;
+		long value = 0L;
+		boolean any = false;
+		while (index < text.length() && Character.isDigit(text.charAt(index))) {
+			value = value * 10 + (text.charAt(index) - '0');
+			any = true;
+			index++;
+		}
+		return any ? value : null;
+	}
+
+	/**
+	 * "本轮是否已创建任务"的三态结果（AR-03 单轮上限）。
+	 *
+	 * @param created  本轮是否已有成功创建
+	 * @param taskId   已知任务号（未知/同批未结算时为 null）
+	 * @param idUnknown 已有创建但任务号不可确认（台账读失败/回执无 {@code #id}）；
+	 *                  文案必须走通用措辞，不得给伪 ID
+	 */
+	public record CreateTaskInRun(boolean created, Long taskId, boolean idUnknown) {
+
+		/** 未创建（同批第一笔尚未结算也归此态）。 */
+		public static final CreateTaskInRun NONE = new CreateTaskInRun(false, null, false);
+
+		/** 已有创建但任务号不可确认。 */
+		public static CreateTaskInRun unknown() {
+			return new CreateTaskInRun(true, null, true);
+		}
 	}
 
 	/**
@@ -1291,8 +1433,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private void blockPreflightUnavailable(String runId, PendingToolCall pending, RuntimeException error) {
 		long now = System.currentTimeMillis();
-		String text = "预检暂不可用（" + ToolOutcome.CODE_PRECHECK_UNAVAILABLE
-				+ "）：预检过程发生内部错误，本次未进入确认门、未执行 —— 这不代表条件已满足。"
+		String text = ToolPreflightService.NOT_APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_PRECHECK_UNAVAILABLE
+				+ "）：预检暂不可用，预检过程发生内部错误，本次未进入确认门、未执行 —— 这不代表条件已满足。"
 				+ "请稍后重试；若持续出现请联系维护人员。";
 		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
 		pending.setOutcome(ToolOutcome.FAILED.wire());
@@ -1477,9 +1619,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return text;
 	}
 
+	/** 创建任务工具名（AR-03：DANGER 确认门 + 宿主幂等 + 单轮上限 1）。 */
+	public static final String TOOL_CREATE_TASK = "create_task";
+
 	/** 工具被"别人正在做同类动作"挡下时的固定口径（模型/帧/台账三面同文；禁 emoji）。 */
-	public static final String RESOURCE_LOCKED_TEXT = ToolOutcome.CODE_RESOURCE_LOCKED
-			+ "：该任务已有作业在执行，本次未执行。请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
+	public static final String RESOURCE_LOCKED_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+			+ ToolOutcome.CODE_RESOURCE_LOCKED + "）：该任务已有作业在执行，本次未执行。"
+			+ "请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
 
 	/**
 	 * 错入口批准（{@code APPROVED + FRONTEND}）的固定口径：显式 blocked、未执行。
@@ -1501,7 +1647,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
 		String detail = verdict == null || verdict.detail() == null || verdict.detail().isBlank() ? "目标资源不成立"
 				: verdict.detail();
-		return ToolOutcome.CODE_TARGET_INVALID + "：目标资源不存在或不在当前任务内，本次未执行（" + detail
+		return ToolPreflightService.APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_TARGET_INVALID
+				+ "）：目标资源不存在或不在当前任务内，本次未执行（" + detail
 				+ "）。请核对任务 ID 与当前页面/步骤后重新发起。";
 	}
 

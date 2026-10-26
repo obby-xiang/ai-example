@@ -60,18 +60,30 @@ export type PendingStatus =
  * H1 确认门**预检摘要**（可选契约增量，与后端已锁定；缺省 = null/undefined，旧帧零影响）。
  *
  * 依据 `docs/demo/chat-ux/hitl-confirm-preflight.html` 场景一（用户 2026-10-20 批准）：
- * 预检通过 → 确认卡在「参数行」与「按钮行」之间多出一块摘要区；预检不通过 → 后端**不弹卡**
- * （不进确认门，无卡形态），故前端不存在「未通过」的门卡分支。
+ * 预检通过 → 确认卡可展示知情摘要；预检不通过 → 后端**不弹卡**（不进确认门，无卡形态），
+ * 故前端不存在「未通过」的门卡分支。
+ *
+ * 2026-10-26 批4 / AR-02：只恢复**三字段**只读摘要（影响面 / 条件摘要 / 权威发布模式），
+ * 不恢复旧预检区五段式版式；`conditionSummary` 与 `publishMode` 是后端在预检阶段算好的
+ * additive 字段（旧帧缺省 ⇒ 不渲染对应行，前端不得反解模型文本或本地猜模式）。
+ *
+ * <p><b>`ToolPreflightTarget` 的字段形状有两族</b>（后端 `ToolPreflightService` 的两个分支，
+ * 前端不得假设同形）：
+ * <ul>
+ * <li>`start_*`：任务已存在 ⇒ 带 `taskId/status`；</li>
+ * <li>`create_task`：任务**批准后才存在** ⇒ target 只有 `type/title`
+ * （`taskId` 不存在），卡头因此走「创建…任务」句式，不套 `任务 #<id>` 模板。</li>
+ * </ul>
  */
 export interface ToolPreflightTarget {
-  /** 任务 id（demo 卡面渲染为「任务 #5」） */
-  taskId: string | number
-  /** 任务标题（demo：「订单配置导入」） */
+  /** 任务 id（demo 卡面渲染为「任务 #5」）；`create_task` 无此键 */
+  taskId?: string | number
+  /** 任务标题（demo：「订单配置导入」）；`create_task` 为待创建任务的标题 */
   title: string
-  /** 任务类型（demo：「导入」） */
+  /** 任务类型（demo：「导入」；`create_task` 为待创建类型 EXPORT/IMPORT） */
   type: string
-  /** 任务状态（demo：「进行中」） */
-  status: string
+  /** 任务状态（demo：「进行中」）；`create_task` 无此键 */
+  status?: string
 }
 
 /** 单项预检结论（`pass=false` 在门卡形态下不会出现 —— 预检失败后端不弹卡）。 */
@@ -91,6 +103,17 @@ export interface ToolPreflight {
   impact: string
   /** 预检报告指纹（demo：「批准绑定」行的依据；卡面只展示说明行，不直接显示本值） */
   reportHash: string
+  /**
+   * AR-02：结构化条件的**后端可读摘要**（预检阶段算好，additive 可选键）。
+   * 缺省 = 旧帧 / 无此信息 ⇒ 不渲染条件行；前端不得用 args/模型文本自行反解。
+   */
+  conditionSummary?: string | null
+  /**
+   * AR-02：宿主给出的**权威发布模式**（`Task.settingsJson.importMode` 同口径枚举，如
+   * `MERGE` / `REPLACE`；additive 可选键）。缺省 = 未知 ⇒ 不渲染模式行；前端不得默认
+   * 成 MERGE，也不得从模型回复猜模式。
+   */
+  publishMode?: string | null
 }
 
 /** 外置挂起条目（PendingToolCall#asMap 的字段集）。 */

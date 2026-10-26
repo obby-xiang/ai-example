@@ -16,6 +16,7 @@ import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.service.TaskService;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
@@ -42,7 +43,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <li>{@code list_config_items} → {@link AiTools#listConfigDefs}（返回面向模型的文本，非结构化列表）；</li>
  * <li>{@code get_current_state} → {@link AiTools#getWorkspaceState}；glm 的"无活动任务必须抛
  *     BizException(没有进行中的任务)"在本仓库不存在（工具返回提示文本），断言改为提示文本；</li>
- * <li>{@code create_task} 在本仓库是 WRITE 级后端工具，创建即落库并返回任务 id + 下一步动作 → 用例 3；</li>
+ * <li>{@code create_task} 自 AR-03 起是 DANGER 级确认门工具（宿主幂等 + 单轮上限 1）；
+ *     <b>直调</b>本用例绕开确认卡，只验"批准后的创建语义"与幂等 → 用例 3；</li>
  * <li>{@code set_selected_configs} / {@code submit_config_data} 是前端通道的哨兵桩
  *     （选择与上传的副作用在浏览器）→ 用例用 {@code TaskService} 与真实上传件准备前置状态，
  *     但<b>作业发起一律走 AI 工具</b>，从而覆盖"工具 → 作业 → 数据面"这条链路；</li>
@@ -62,6 +64,10 @@ class AiToolsInvocationTest {
 
     /** 作业异步执行 + 数据面写库的等待上限（demo 延迟已置 0，正常 1s 内完成）。 */
     private static final long JOB_WAIT_MS = 30_000;
+
+    private static ToolContext ctx(String runId) {
+        return new ToolContext(Map.of("runId", runId));
+    }
 
     @Autowired
     private AiTools aiTools;
@@ -122,7 +128,7 @@ class AiToolsInvocationTest {
 
     @Test
     void createTaskFromAiPersistsTaskAndReportsNextAction() {
-        String text = aiTools.createTask("EXPORT", null);
+        String text = aiTools.createTask("EXPORT", null, ctx("s5a-create-1"));
 
         assertThat(text).contains("已创建导出任务").contains("SELECT_DEFS").contains("navigate_to");
         long taskId = firstId(text);
@@ -131,22 +137,40 @@ class AiToolsInvocationTest {
         assertThat(task.getTitle()).as("缺省标题按类型生成").isEqualTo("导出任务");
         assertThat(task.getCurrentStep()).isEqualTo("SELECT_DEFS");
 
-        String importText = aiTools.createTask("IMPORT", "S5A-AI-导入任务");
+        String importText = aiTools.createTask("IMPORT", "S5A-AI-导入任务", ctx("s5a-create-2"));
         assertThat(importText).contains("导入任务").contains("UPLOAD");
         assertThat(taskRepository.findById(firstId(importText)).orElseThrow().getCurrentStep())
                 .isEqualTo("UPLOAD");
 
         // 类型非法 → 抛带 ILLEGAL_ARGUMENT 码的业务异常（由统一信封回填，不再伪造成功文本）
-        assertThatThrownBy(() -> aiTools.createTask("NOPE", null))
+        assertThatThrownBy(() -> aiTools.createTask("NOPE", null, ctx("s5a-create-3")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("任务类型不合法");
+    }
+
+    @Test
+    void createTaskHostIdempotencyAndSingleTurnLimit() {
+        String first = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-1"));
+        long firstId = firstId(first);
+
+        String repeated = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-1"));
+        assertThat(firstId(repeated)).as("同轮同键复用，绝不二次创建").isEqualTo(firstId);
+        assertThat(repeated).contains("复用");
+
+        assertThatThrownBy(() -> aiTools.createTask("EXPORT", "同轮另一个标题", ctx("run-idem-1")))
+            .as("同轮不同键 = 明确冲突，不是静默丢弃")
+            .isInstanceOf(ConflictException.class)
+            .hasMessageContaining("同一轮只允许创建一次");
+
+        String nextTurn = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-2"));
+        assertThat(firstId(nextTurn)).as("新一轮可再创建（幂等按轮作用域）").isNotEqualTo(firstId);
     }
 
     // ── 用例 4：导出工具链 → 真起作业 → 真落导出文件 ──
 
     @Test
     void exportToolChainRunsRealJobAndWritesFile() throws Exception {
-        long taskId = firstId(aiTools.createTask("EXPORT", "S5A-AI-导出"));
+        long taskId = firstId(aiTools.createTask("EXPORT", "S5A-AI-导出", ctx("s5a-create-4")));
         taskService.selectDefs(taskId, List.of(SYS_PARAM));
         taskService.setCondition(taskId, SYS_PARAM,
                 "{\"fields\":[{\"fieldCode\":\"paramKey\",\"operator\":\"CONTAINS\",\"value\":\"param.2\"}]}");
@@ -168,7 +192,7 @@ class AiToolsInvocationTest {
 
     @Test
     void importToolChainRunsPrecheckImportAndPublish() throws Exception {
-        long taskId = firstId(aiTools.createTask("IMPORT", "S5A-AI-导入"));
+        long taskId = firstId(aiTools.createTask("IMPORT", "S5A-AI-导入", ctx("s5a-create-5")));
         taskService.selectDefs(taskId, List.of(ROLE_DICT));
         upload(taskId, ROLE_DICT, List.of(
                 row("roleCode", "NEW_R", "roleName", "新角色", "permissionLevel", "3", "builtin", "false")));
@@ -215,7 +239,7 @@ class AiToolsInvocationTest {
 
     @Test
     void startImportReportsGuardWhenPrecheckNotPassed() {
-        long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫"));
+        long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫", ctx("s5a-create-6")));
         taskService.selectDefs(taskId, List.of(ROLE_DICT));
 
         assertThatThrownBy(() -> aiTools.startImport(taskId))

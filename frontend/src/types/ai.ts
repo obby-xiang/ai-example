@@ -16,6 +16,7 @@ import type {
   TruncationNoticeCode
 } from './sse'
 import type { FormSpec, FormValueIssue } from './form-schema'
+import type { TaskStatus } from './task'
 import type { ResultView } from './resultview'
 import type { SheetToolMeta } from '@/utils/sheet-tools'
 import type { ErrorCard } from '@/utils/error-card'
@@ -23,10 +24,15 @@ import type { ErrorCard } from '@/utils/error-card'
 /**
  * 工作区上下文（AiChatRequest.Context）。
  *
- * **只允许这 5 个键**：后端的 ObjectMapper（JacksonConfig）是 `new ObjectMapper()`，
- * 未关闭 FAIL_ON_UNKNOWN_PROPERTIES，多余键有 400 风险；工作区的其余信息一律塞进 `extra`。
+ * **键集 = 后端 `AiChatRequest.Context` 的 6 个顶层字段**：page / taskType / step / taskId /
+ * taskStatus / extra。后端 `Context` 带 `@JsonIgnoreProperties(ignoreUnknown = true)`（由
+ * `ContextFieldGate` 白名单化 + 计数降级），但**多写的键仍会被闸门丢弃**，等于静默失效 ——
+ * 所以 `taskStatus` 这类有后端消费面的字段必须**顶层**上报，不能塞进 `extra`（`extra` 里没有
+ * 任何工具披露/终态收窄的消费点）；工作区其余自由信息才进 `extra`。
  *
- * page/taskType/step 三个标签决定本轮披露给模型的工具子集（见 types/tools.ts 的 ToolScope）。
+ * page/taskType/step 三个标签决定本轮披露给模型的工具子集（见 types/tools.ts 的 ToolScope）；
+ * taskStatus 在披露面做**终态收窄**（例如 COMPLETED 任务不再披露 `start_export`，
+ * 见后端 `ToolRegistry#forContext` / `AiContext#taskStatus`）。
  */
 export interface AiChatContext {
   /** 页面标签：任务中心 / 导出向导 / 导入向导 / 配置定义 / 数据浏览（ToolScope 的 page:* 口径：tasks/definitions/data） */
@@ -36,6 +42,11 @@ export interface AiChatContext {
   /** 当前步骤 key：SELECT_DEFS / QUERY_COND / EXPORT / UPLOAD / PRECHECK / IMPORT / PUBLISH */
   step?: string | null
   taskId?: number | null
+  /**
+   * 当前任务状态（`Task.TaskStatus` 全集）：只认 ACTIVE / COMPLETED / CANCELLED / FAILED；
+   * 未知值后端降级为 null（= 不做终态收窄）。前端只如实上报，不自行推断。
+   */
+  taskStatus?: TaskStatus | null
   /** 额外上下文（工作区摘要、数据版本号等自由信息） */
   extra?: Record<string, unknown>
 }
@@ -563,8 +574,11 @@ export interface ToolPart extends MessagePartBase {
   atMs?: number
   /**
    * H1 确认门预检摘要（可选契约增量；来自 confirm_request / suspended 帧，随段持久化）。
-   * 缺省 = 旧帧 / 无预检的工具（GF、前端工具、后端工具），门卡不渲染预检区。
-   * 预检**不通过**时后端不弹卡，故门卡只在 `preflight` 存在（且通过）时出现该区。
+   * 缺省 = 旧帧 / 无预检的工具（GF、前端工具、后端工具），门卡不渲染知情摘要。
+   * 预检**不通过**时后端不弹卡，故门卡只在 `preflight` 存在（且通过）时出现该摘要。
+   *
+   * 2026-10-26 批4 / AR-02：門卡/只读卡只展示三字段（impact / conditionSummary /
+   * publishMode），默认收起；旧预检区五段式版式不恢复。
    */
   preflight?: ToolPreflight | null
   /**

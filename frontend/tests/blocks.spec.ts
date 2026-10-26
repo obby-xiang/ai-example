@@ -299,9 +299,15 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     for (const status of ['blocked', 'unknown', 'pending'] as const) {
       expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status, requiresAction: false }))).toBe(false)
     }
-    // 无 decision 的历史段回退 status
+    // 无 decision 的历史段回退 status：没有批准证据的失败/未执行 ⇒ 未批准·未执行（批4）
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded' }))).toBe('approved')
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed' }))).toBe('failed')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed' }))).toBe('notApproved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked' }))).toBe('notApproved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped' }))).toBe('notApproved')
+    // 有 approved 决策的 blocked / skipped = 已批准但未执行（进只读卡，不冒充执行失败）
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }))).toBe('notExecuted')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped', decision: 'approved' }))).toBe('notExecuted')
+    expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved', requiresAction: false }))).toBe(true)
     // 表单系两态：succeeded ⇒ 已提交，其余 ⇒ 已取消
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe('submitted')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toBe('cancelled')
@@ -475,6 +481,9 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       [makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }), { key: 'rejected', label: '✗ 已拒绝', tone: 'danger' }],
       [makeTool({ kind2: 'CONFIRM', status: 'expired' }), { key: 'expired', label: '! 已超时', tone: 'warning' }],
       [makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }), { key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' }],
+      // 批4 / AR-02：无批准证据的失败（预检未通过 / 预检不可用）⇒「未批准 · 未执行」，绝不显示已批准
+      [makeTool({ kind2: 'CONFIRM', status: 'failed' }), { key: 'notApproved', label: '! 未批准 · 未执行', tone: 'neutral' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }), { key: 'notExecuted', label: '! 已批准 · 未执行', tone: 'warning' }],
       // 批G · S13：用户停止（decision='cancel'）是第五种门结局 ⇒ 「✗ 已取消」
       [makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }), { key: 'cancelled', label: '✗ 已取消', tone: 'danger' }],
       // 无决策元数据的 cancelled 段（旧载荷）仍归未批准收尾（已超时）
