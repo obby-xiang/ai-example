@@ -934,6 +934,35 @@ public class AiProperties {
 		private int maxOnStartup = 10;
 
 		/**
+		 * <b>运行期低频死轮扫描</b>（批次8B / Task 12 Step 3）的开关。
+		 *
+		 * <p>
+		 * 启动扫描每实例只跑一拍；此后"进程死在模型调用中间"、"决策已落库但派发窗口整段错过"、
+		 * "重挂自愈那一下 Redis 抖了"都会留下无人推进的 {@code RUNNING}/{@code SUSPENDED} 轮到下一次重启。
+		 * 打开后按 {@link #runtimeSweepInterval} 周期把<b>无驾驶方</b>的那些轮次交给与启动扫描同一条
+		 * 续跑路径（判据见 {@code StartupResumeRunner#sweep()}：候选 = {@code listRuns()}，
+		 * 活/死 = {@code RunLiveness.isDead}，窗口 = {@link #zombieAge}）。
+		 *
+		 * <p>
+		 * <b>缺省不一致是刻意的（同 {@link #onStartup} 的纪律）</b>：代码缺省 {@code false}
+		 * （非 Spring 装配/单测不起定时器），出厂 {@code application.yml} 显式 {@code true}；
+		 * 单测 {@code src/test/resources/application.properties} 显式关掉，避免周期线程跨测试类续跑
+		 * 污染倒排录制的归因窗口（{@code SessionPurgeRetryRunner} 同一处置）。关掉只停"按周期自动扫"，
+		 * 同步入口 {@code StartupResumeRunner#sweep()} 仍可直接驱动。
+		 */
+		private boolean runtimeSweepEnabled = false;
+
+		/**
+		 * 运行期死轮扫描的周期（低频，缺省 2 分钟）。
+		 *
+		 * <p>
+		 * <b>它不参与判死</b>：判死窗口永远是 {@link #zombieAge}（180s，由 {@link #verifyZombieAge()}
+		 * 在启动期守着，不因本键缩短）。本键只决定"多久看一眼"，因此把间隔配大只增长"死轮无人接管"的
+		 * 最长时延（≈ 间隔 + 僵尸窗口），不会把活轮判死。非正值不注册定时器（只 ERROR 留痕）。
+		 */
+		private Duration runtimeSweepInterval = Duration.ofMinutes(2);
+
+		/**
 		 * 续跑触发池（T3-6a / A9 的"轻量执行器"）工作线程数。
 		 *
 		 * <p>承载的动作很短：一次 {@code ResumeService.resume} 调用（读快照/台账/待决 + 重建历史 +

@@ -408,6 +408,8 @@ Expected: create_task + navigate_to 的额外汇返被明确测试；不以全�
 - [ ] **Step 5（L-150 / D8，本地证据 ≠ 三实例证据）：** D8 的本地确定性测试（`SpToolCallingManager`、`RunStore` 用例）只作**本地证据**，不得用 cluster 16/16 或本地绿反推三实例；在获批验收环境用 `scripts/ci/cluster3-probe.mjs` 显式执行 L-150 三格确定性三实例用例，实际跑出三格结果才记为闭环，未执行一律保持未闭环。
 - [ ] **Step 6:** 定向验证后，主 CI 在同一 SHA 重跑到三次独立成功；Q-08 与 L-143 不合并归因。
 
+**实现范围与状态（2026-10-26 批次 8）**：本任务 **Step 1-5 已实现**（`Q-08` 按 `AR-04` 改断言 + `Q-05` / `D-08` / `M-07` / `TC-18` 两果 / `D-13` 可控时序 409 / 运行期死轮扫描 / `L-143` 确定性用例 / `L-150` 三格用例），落到工作区、**未入库**。**单点证据（仅下界）** = `StartupResumeRunnerRuntimeSweepTest` **单点 GREEN**、`ZeroItemJobTerminalTest#exportJobWithoutTaskItemsMustNotComplete` **1/1 通过**（`D7` 只记单点，**不把台账改成"已验"**）、`SseChatEmitterParkCloseRaceTest` **单点 RED → GREEN**。**未执行（如实）** = ⓐ**`Q-08` 的 `verify-e2e.ps1` 脚本未运行**（改动只到代码与用例文本）；ⓑ**`L-150` 真实三实例未执行** —— 本机 **Docker / HAProxy 不可用** ⇒ **`L-150` 待验、不闭环**，`cluster-3node` 16/16 不得反推三格；ⓒ**`stub-upstream` 只做静态同步、未跑 self-check**。**Step 6 未做**（主 CI 三次独立成功）。**文档同步仍归 Task 13 Step 2**，本任务不写文档。
+
 ### Task 13: 文档同步与分级验收
 
 **Files:**

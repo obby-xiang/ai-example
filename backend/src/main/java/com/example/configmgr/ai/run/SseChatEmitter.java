@@ -109,7 +109,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * 抢不到说明另一个 drain 可能已取走尾帧、尚未写出，旧 drain 若此刻 {@code completeOne} 会抢在
  * 写出前关闭连接（W-01）。释放后的那一拍还要同时观察<b>终态收尾意图</b>：{@code completeWhenDrained}
  * 的 CAS 失败（本 drain 仍持权）后，责任回到本线程，只看帧面会漏掉它（I-1）；
- * <b>handoff 与 complete 二选一</b>，不靠无限等待兜底；</li>
+ * <b>handoff 与 complete 二选一</b>，不靠无限等待兜底；收尾的"判空即关闭"还要与出帧在飞计数
+ * 串行（8D/L-143）：已有 {@code emit} 宣告、尚未落档/入队时让位给它的 {@code finally}，
+ * 否则刚归档的挂起请求帧会被清队列丢掉（"同毫秒关闭、请求帧未及交付"）；</li>
  * <li><b>池拒绝语义（R3）</b>：池任务提交被拒（池队列满）时摘除触发本次提交的订阅者
  * （显式 {@code emitter.complete()}，前端 onerror/onclose 后带 lastSeq 重挂补帧）；</li>
  * <li><b>溢出摘除 = 主动断连（S2-1）</b>：实时队列满即摘除并 complete，不静默丢帧
@@ -342,6 +344,21 @@ public class SseChatEmitter {
 	 * 任一方说"该收尾了"，drain 的队空分支就完成该订阅者。
 	 */
 	private final AtomicBoolean terminating = new AtomicBoolean(false);
+
+	/**
+	 * <b>8D / L-143：正在 {@link #emit} 里的线程数</b>（含已进入方法、还没拿到 {@link #emitLock}
+	 * 的那一段）。收尾判定只在它归零时才允许"判空即关闭"：
+	 * <ul>
+	 * <li>归零 ⇒ 没有"已宣告出帧、尚未落档/入队"的请求帧。判空是稳定的；</li>
+	 * <li>非零 ⇒ 把关闭让位给最后一个 emit 的 {@code finally}（{@link #closeDeferredSubscriptions}），
+	 * 否则会出现"已落档的请求帧被收尾清队列丢掉"的 W-01 同毫秒形态。</li>
+	 * </ul>
+	 *
+	 * <p>
+	 * 计数必须在<b>取 {@link #emitLock} 之前</b>递增：一个已经进入 emit、正在等锁的线程同样算
+	 * "在飞"——否则收尾持锁判空时看不到它，随后它落档入队，连接已经被关闭。
+	 */
+	private final AtomicInteger emitting = new AtomicInteger();
 
 	/** "续跑权只读 ⇒ 已丢弃业务帧"的告警节流（每轮一条，避免逐帧刷屏）。 */
 	private final AtomicBoolean readOnlyWarned = new AtomicBoolean();
@@ -702,10 +719,12 @@ public class SseChatEmitter {
 			}
 			// 回放已含终帧（或本轮已 complete，不会再有新帧）：排空回放后收尾，不悬挂。
 			sub.terminating = true;
-			if (sub.queue.isEmpty()) {
+			if (sub.queue.isEmpty() && this.emitting.get() == 0) {
 				completeOne(sub);
 			}
 			else {
+				// 8D/L-143：在飞 emit 尚未落档/入队时不能据"空回放"关闭；kickDrain 排空后由
+				// finishDrain / 最后一个 emit 的 finally 收尾。
 				kickDrain(sub);
 			}
 			return plan;
@@ -1519,6 +1538,47 @@ public class SseChatEmitter {
 	}
 
 	/**
+	 * <b>8D / L-143：出帧的在飞登记 + 收尾让位。</b>
+	 *
+	 * <p>
+	 * 收尾（{@link #completeWhenDrained} / {@link #finishDrain}）在"队列为空"这一拍还要看本计数：
+	 * 非零表示已有 emit 宣告、尚未落档/入队。此刻关闭会把随后落档的帧清出队列（请求帧"已归档、
+	 * 未送达"），故收尾让位给最后一个 emit 的 {@code finally}（{@link #closeDeferredSubscriptions}）。
+	 *
+	 * <p>
+	 * 递增早于 {@link #emitLock}：等锁的 emit 也算在飞，收尾持锁判空时必须能看到它。
+	 */
+	private void emit(Map<String, Object> frame) {
+		this.emitting.incrementAndGet();
+		try {
+			emitInternal(frame);
+		}
+		finally {
+			this.emitting.decrementAndGet();
+			closeDeferredSubscriptions();
+		}
+	}
+
+	/**
+	 * 最后一个在飞 emit 退出后，补做被让位的收尾（否则那个订阅者会一直悬挂到前端看门狗）。
+	 *
+	 * <p>只在计数归零时执行：若仍有别的 emit 在飞，由最后退出的那个线程负责。
+	 */
+	private void closeDeferredSubscriptions() {
+		if (this.emitting.get() != 0) {
+			return;
+		}
+		for (Subscription sub : this.subscribers) {
+			if (sub.closed || sub.completed.get()) {
+				continue;
+			}
+			if (sub.terminating || sub.terminal) {
+				completeWhenDrained(sub);
+			}
+		}
+	}
+
+	/**
 	 * B23L1 批①：出帧路径 —— <b>取号（FrameStore）→ 截断 → 落档（FrameStore）→ 唤醒发布 → 本地扇出</b>。
 	 *
 	 * <p>
@@ -1538,7 +1598,7 @@ public class SseChatEmitter {
 	 * 落档必须拿到截断后的帧（否则事件日志里躺着未截断帧，回放与实时流分叉）；
 	 * 发布必须在落档之后（否则别的实例被唤醒后读不到这一帧）。
 	 */
-	private void emit(Map<String, Object> frame) {
+	private void emitInternal(Map<String, Object> frame) {
 		frame.putIfAbsent("runId", this.runId);
 		// 续租 fencing 收口批：丢租（LOST）/ 设施不可确认（UNAVAILABLE）⇒ 只读恢复。
 		// 业务帧一律不取号、不落档、不发布、不扇出 —— 终帧（done/error）也在其中：这一轮已由
@@ -1901,18 +1961,29 @@ public class SseChatEmitter {
 				submitDrain(sub);
 				return;
 			}
-			if (!sub.closed && (sub.terminal || sub.terminating) && sub.queue.isEmpty()) {
-				// S1-1：终态只在队列<b>真正空了</b>才收尾。判空发生在<b>持权期间</b>，没有别的
-				// drain 能在这中间取走帧，因此这个判空是稳定的。
-				completeOne(sub);
+			boolean ready;
+			synchronized (this.emitLock) {
+				// 8D/L-143：判空必须在 emitLock 内，且同时看在飞 emit。否则"判空为真"之后、
+				// completeOne 之前落档入队的请求帧会被随后的清队列丢掉（连接关闭顺序反了）。
+				ready = !sub.closed && (sub.terminal || sub.terminating) && sub.queue.isEmpty()
+						&& this.emitting.get() == 0;
+				if (ready) {
+					// S1-1：终态只在队列<b>真正空了</b>才收尾。判空与 emit 的落档/入队同锁，
+					// 因此"已落档的帧不会被收尾抢跑"。
+					completeOne(sub);
+				}
+			}
+			if (ready) {
 				return;
 			}
 			sub.draining.set(false);
 			// 释放后再观察一拍：帧面（生产者 kick 失败的帧）与终态收尾意图（completeWhenDrained
 			// 的 CAS 失败）都只能由本线程接住；都没有才允许退出。终态意图必须在 canTakeOverDrain
 			// <b>之后</b>读：它可能正好落在本次观察期间（那时 CAS 失败，责任在本线程）。
+			// 8D/L-143：在飞 emit 让位给它自己的 finally（closeDeferredSubscriptions），
+			// 这里不把"等它"变成自旋。
 			boolean takeOver = canTakeOverDrain(sub);
-			boolean terminalIntent = !sub.closed && (sub.terminal || sub.terminating);
+			boolean terminalIntent = !sub.closed && (sub.terminal || sub.terminating) && this.emitting.get() == 0;
 			if (!takeOver && !terminalIntent) {
 				return;
 			}
@@ -2209,6 +2280,12 @@ public class SseChatEmitter {
 	 * {@code draining} 抢得到 ⇒ 此刻既没有在跑的、也没有排队的 drain 任务（帧不会正写在半途）：
 	 * 队列已空就直接收尾，否则自己跑一个 drain 去排空并收尾。抢不到 ⇒ 交给在跑的那一个 ——
 	 * 它会在队空分支看到终态标志并 {@code completeOne}（见 {@link #drain} 的 {@code finally}）。
+	 *
+	 * <p>
+	 * <b>8D / L-143：判空与 emit 串行。</b>判空在 {@link #emitLock} 内做，并且要求
+	 * {@link #emitting} 归零；否则"判空为真"之后落档的请求帧会被 {@code completeOne} 的清队列
+	 * 丢掉（挂起请求帧与订阅者关闭同毫秒的形态）。在飞 emit 时本方法让位，由最后一个 emit 的
+	 * {@code finally}（{@link #closeDeferredSubscriptions}）补做收尾。
 	 */
 	private void completeWhenDrained(Subscription sub) {
 		// 终态标志先落到订阅者上下文上：在跑的 drain 只在"自己的 finally 里看到该标志且队列已空"
@@ -2217,13 +2294,29 @@ public class SseChatEmitter {
 		if (sub.evicted.get()) {
 			return;
 		}
-		if (sub.draining.compareAndSet(false, true)) {
-			if (sub.queue.isEmpty()) {
-				sub.draining.set(false);
-				completeOne(sub);
+		while (true) {
+			if (!sub.draining.compareAndSet(false, true)) {
+				return;
 			}
-			else {
+			boolean ready;
+			synchronized (this.emitLock) {
+				ready = sub.queue.isEmpty() && this.emitting.get() == 0;
+				if (ready) {
+					completeOne(sub);
+				}
+			}
+			if (ready) {
+				return;
+			}
+			if (!sub.queue.isEmpty()) {
 				submitDrain(sub);
+				return;
+			}
+			sub.draining.set(false);
+			// 队列空但仍有 emit 在飞：让位给它的 finally。若它恰好在本线程释放投递权前后退出，
+			// 则由本线程重试（emit 的 finally 可能因 CAS 失败而没有接住这一次收尾）。
+			if (this.emitting.get() != 0) {
+				return;
 			}
 		}
 	}

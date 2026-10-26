@@ -57,8 +57,10 @@
  *        --stats-url 'http://127.0.0.1:23189/stats;csv'
  *        --ports 'a=23181,b=23182,c=23183,h2=23190,redis=23179'
  *        [--ready-timeout 180] [--job-fail-timeout 90] [--kill-takeover-timeout 120]
+ *        [--case preexec-cancel-grid]      # 单点/子集执行（实测 L-150 三格时用；不写 = 全套）
  *
  * 退出码：0 = 全部 PASS；1 = 有 FAIL；2 = 环境/参数错误（基线起不来，后续用例无意义）。
+ * 退出码 0 只代表**本次实际执行的用例**都通过：用了 `--case` 时 summary 会显式标注"子集"。
  *
  * 零第三方依赖：只用 Node 内置模块（--self-check 会静态断言 import 全部是 node: 前缀）。
  */
@@ -119,7 +121,8 @@ const REQUIRED_CASE_IDS = Object.freeze([
   'streaming-kill-a',
   'job-kill-a',
   'readiness-removal',
-  'redis-outage-recovery'
+  'redis-outage-recovery',
+  'preexec-cancel-grid'
 ])
 
 const PLACEHOLDER_KEY = 'cluster3-stub-placeholder'
@@ -212,6 +215,7 @@ const RUN = {
   readyTimeoutMs: 180000,
   jobFailTimeoutMs: 90000,
   killTakeoverTimeoutMs: 120000,
+  onlyCases: [],
   keep: Boolean(ARGS.keep)
 }
 
@@ -232,6 +236,8 @@ function configureRun() {
   RUN.readyTimeoutMs = argNumber('ready-timeout', 180) * 1000
   RUN.jobFailTimeoutMs = argNumber('job-fail-timeout', 130) * 1000
   RUN.killTakeoverTimeoutMs = argNumber('kill-takeover-timeout', 120) * 1000
+  const only = argString('case', '')
+  RUN.onlyCases = only ? only.split(',').map((id) => id.trim()).filter(Boolean) : []
   const ports = argString('ports', '')
   if (ports) {
     for (const pair of ports.split(',')) {
@@ -2200,7 +2206,8 @@ const CASES = [
   { id: 'streaming-kill-a', title: '流式中 kill A → 僵尸扫描接管 → 跨实例补帧到终帧（seq 无洞）', fn: caseStreamingKillA },
   { id: 'job-kill-a', title: '作业中 kill A → 幸存实例看门狗收敛 FAILED → 重启清理后 B 重试成功', fn: caseJobKillA },
   { id: 'readiness-removal', title: 'readiness 摘除：无 key 不摘 A；SIGTERM/draining 摘 A 并由 B/C 接管；重启后重新纳入', fn: caseReadinessRemoval },
-  { id: 'redis-outage-recovery', title: 'Redis 故障恢复：暂停期间 503/业务可用 → 恢复后跨实例健康与对话可用', fn: caseRedisOutageRecovery }
+  { id: 'redis-outage-recovery', title: 'Redis 故障恢复：暂停期间 503/业务可用 → 恢复后跨实例健康与对话可用', fn: caseRedisOutageRecovery },
+  { id: 'preexec-cancel-grid', title: 'L-150 三格：UNKNOWN 不得执行 / 已 CANCELLED 不得误认领 / claim 哈希-only 不得伪未执行（三格独立断言）', fn: casePreexecCancelGrid }
 ]
 
 const CTX = {
@@ -4231,6 +4238,485 @@ async function caseRedisOutageRecovery() {
   }
 }
 
+// ── 用例 15：执行前取消的三格安全反例（L-150 / D8）────────────────────────
+
+/**
+ * L-150 的三条安全反例（`task-8-cancel-guard` / `settleIfCancelledBeforeClaim` 的判据格）。
+ * 三格共用**真实三实例 + 共享 Redis** 的同一条链路，但每格独立断言，互不代偿：
+ *
+ * <ul>
+ * <li><b>R-1 `UNKNOWN` 不得执行</b>：取消状态读不出来 ≠ "未取消"。注入方式 = 把权威键
+ *     `ai:cancel:<runId>` 改成 LIST（产品 `GET` 得 WRONGTYPE ⇒ 三态里的 `UNKNOWN`）。
+ *     此时 `/runs/{runId}/resume` 必须给出 typed 拒绝（`CANCEL_STATE_UNKNOWN`），用户在别的
+ *     实例上"批准"也不得把 `start_export` 跑起来；条目状态与终帧一概不动（未知不是已取消）。</li>
+ * <li><b>R-2 已 `CANCELLED` 不得误认领</b>：取消收敛后，再从另一个实例批准 / 直接续跑都必须
+ *     被取消语义拒绝（`DUPLICATE_TOOL_CALL_ID` / `ALREADY_CANCELLED`）：认领表不得出现该条目、
+ *     台账不得有执行记录、作业数不变。</li>
+ * <li><b>R-3 claim 哈希-only 不得伪未执行</b>：条目是 `APPROVED` 且**零**执行证据，只有认领表
+ *     （`ai:claim:<runId>` 的某个 field）有值。取消收尾的判据格（`hasExecutionEvidence` 含认领表）
+ *     必须**不**把条目改写成 `CANCELLED`/"未执行"，也不得回滚认领证据。
+ *     R-2 是同一取消路径的**对照组**（无认领 ⇒ 收敛为 `CANCELLED`），两格只差"认领表有没有值"。</li>
+ * </ul>
+ *
+ * <p><b>确定性</b>：三格都不靠"卡竞态窗口"——R-1/R-3 用错误类型的键制造 `UNKNOWN`；R-3 的
+ * `APPROVED` 也是在 `UNKNOWN` 下批准得到的（续跑被拒，因此不会执行），认领表由夹具直接写入。
+ * 注入点都是本网独占的 Redis（每次运行一个全新容器），用例结束即删键。
+ *
+ * <p><b>边界（如实）</b>：`settleIfCancelledBeforeClaim` 内部"认领前一刻读到 UNKNOWN"的那一瞬
+ * 仍由单元测试（`task-8-unknown-outcome` 32/32）覆盖 —— 黑盒探针无法确定性地卡在两条指令之间。
+ * 本用例断言的是**对外可观测的不变量**：UNKNOWN 一律不执行、不认领、不伪造结论。
+ */
+
+const CANCEL_KEY_PREFIX = 'ai:cancel:'
+const CLAIM_KEY_PREFIX = 'ai:claim:'
+const CANCELLED_BEFORE_CLAIM_TEXT = '本轮对话已被用户取消，该工具未执行。'
+
+function cancelFlagKey(runId) {
+  return `${CANCEL_KEY_PREFIX}${runId}`
+}
+
+function executionClaimKey(runId) {
+  return `${CLAIM_KEY_PREFIX}${runId}`
+}
+
+function executionClaimPresent(runId, toolCallId) {
+  return redisCli('HEXISTS', executionClaimKey(runId), toolCallId) === '1'
+}
+
+function executionClaimValue(runId, toolCallId) {
+  return executionClaimPresent(runId, toolCallId) ? redisCli('HGET', executionClaimKey(runId), toolCallId) : ''
+}
+
+async function cancelOn(key, runId) {
+  return postJson(key, `/api/ai/cancel/${encodeURIComponent(runId)}`, {})
+}
+
+async function resumeOn(key, runId) {
+  return postJson(key, `/api/ai/runs/${encodeURIComponent(runId)}/resume`, {})
+}
+
+/** 取消标志现状（只读）：`cancelState` 三态与 `redisReadFailed` 是 UNKNOWN 注入的见证面。 */
+async function cancelStateOf(key, runId) {
+  const { record, body } = await getJson(key, `/api/ai/cancel/${encodeURIComponent(runId)}`)
+  checkEq(record.status, 200, `GET /api/ai/cancel/${runId}（${key}）HTTP`)
+  check(body && body.success === true && body.data, `取消状态读取异常：${record.text.slice(0, 400)}`)
+  return body.data
+}
+
+/** 前置门：三实例都必须报 `UNKNOWN`（读失败），否则本格会变成空断言。 */
+async function awaitCancelUnknownAll(runId, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  let last = {}
+  while (Date.now() < deadline) {
+    let allUnknown = true
+    for (const inst of INSTANCES) {
+      const data = await cancelStateOf(inst.key, runId)
+      last[inst.key] = {
+        cancelState: data.cancelState || null,
+        redisReadFailed: data.redisReadFailed,
+        localFlag: data.localFlag
+      }
+      if (data.cancelState !== 'UNKNOWN' || data.redisReadFailed !== true || data.localFlag === true) {
+        allUnknown = false
+      }
+    }
+    if (allUnknown) return last
+    await sleep(300)
+  }
+  throw new Error(`取消状态未能在 ${timeoutMs}ms 内对三实例都呈现 UNKNOWN：${JSON.stringify(last)}`)
+}
+
+/**
+ * 等三实例的取消状态读取恢复（`degraded` 的 5s 退避清掉）。
+ *
+ * <p>为什么必须等：注入的读失败会让每个实例进入"5s 内不再访问 Redis 且返回 UNKNOWN"的退避；
+ * 不等它清掉就接着跑后面的用例，会把上一格的注入噪声带进下一格（假红）。
+ */
+async function awaitCancelReadableAll(runId, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs
+  let last = {}
+  while (Date.now() < deadline) {
+    let allReadable = true
+    for (const inst of INSTANCES) {
+      const data = await cancelStateOf(inst.key, runId)
+      last[inst.key] = { cancelState: data.cancelState || null, redisReadFailed: data.redisReadFailed }
+      if (data.redisReadFailed !== false) allReadable = false
+    }
+    if (allReadable) return last
+    await sleep(500)
+  }
+  throw new Error(`取消状态读取未能在 ${timeoutMs}ms 内恢复（degraded 退避未清）：${JSON.stringify(last)}`)
+}
+
+function pendingEntryIn(detail, toolCallId) {
+  return (detail.pending || []).find((item) => item && item.toolCallId === toolCallId) || null
+}
+
+async function pendingEntryOf(key, runId, toolCallId) {
+  const detail = await runDetail(key, runId)
+  return { detail, entry: pendingEntryIn(detail, toolCallId) }
+}
+
+async function waitPendingStatus(key, runId, toolCallId, expected, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const { detail, entry } = await pendingEntryOf(key, runId, toolCallId)
+    last = { status: entry ? entry.status : null, runStatus: detail.snapshot ? detail.snapshot.status : null }
+    if (entry && entry.status === expected) return { detail, entry }
+    await sleep(250)
+  }
+  throw new Error(`条目 ${toolCallId} 未在 ${timeoutMs}ms 内到 ${expected}（最后：${JSON.stringify(last)}）`)
+}
+
+/** 执行证据面（条目 + 台账 + 认领表）的一次快照；断言之前先落盘。 */
+async function executionStateOf(key, runId, toolCallId) {
+  const detail = await runDetail(key, runId)
+  return {
+    runStatus: detail.snapshot ? detail.snapshot.status : null,
+    entry: pendingEntryIn(detail, toolCallId),
+    ledger: ledgerFor(detail, toolCallId),
+    ledgerCounts: detail.ledgerCounts || {},
+    claimPresent: executionClaimPresent(runId, toolCallId),
+    claimValue: executionClaimValue(runId, toolCallId)
+  }
+}
+
+/** "该工具没有执行"的统一判据：条目零执行证据 + 台账为空 +（默认）认领表无该条目。 */
+function assertNoExecution(state, label, { allowClaim = false } = {}) {
+  check(state.entry, `${label}：条目缺失`)
+  checkEq(state.entry.executed, false, `${label}：条目 executed 必须是 false`)
+  checkEq(state.entry.executedBy, null, `${label}：条目 executedBy 必须为空`)
+  checkEqNumber(state.entry.claimedAtMs, 0, `${label}：条目 claimedAtMs 必须是 0`)
+  checkEqNumber(state.entry.claimedEpoch, 0, `${label}：条目 claimedEpoch 必须是 0`)
+  checkEqNumber(state.entry.executedAtMs, 0, `${label}：条目 executedAtMs 必须是 0`)
+  checkEq(state.ledger.length, 0, `${label}：该 toolCallId 不得有台账条目（没有执行）`)
+  if (!allowClaim) {
+    checkEq(state.claimPresent, false, `${label}：认领表不得出现该 toolCallId`)
+  }
+}
+
+/** `/resume` 的 typed 拒绝：租约被占时重试（取消收尾仍在还租），其余结局一律按实得值判红。 */
+async function resumeRefusal(key, runId, expectedReasons, label, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const result = await resumeOn(key, runId)
+    last = result
+    const reason = result.body ? result.body.reason : null
+    if (reason && expectedReasons.includes(reason)) return result
+    await sleep(500)
+  }
+  throw new Error(`${label}：/resume 未给出 ${JSON.stringify(expectedReasons)}（最后 HTTP ${last ? last.record.status : '?'}`
+    + ` 体=${last ? last.record.text.slice(0, 400) : '无'}）`)
+}
+
+/** R-1：`UNKNOWN` 不得执行（typed 拒绝 + 零执行 + 不伪造取消结论）。 */
+async function gridUnknownMustNotExecute() {
+  const task = await newSuspendedTask('l150-unknown')
+  const run = await createSuspendedRun('a', {
+    prefix: 'l150-unknown',
+    taskId: task.id,
+    messageSuffix: ' l150-unknown',
+    evidenceName: 'R1-parked.jsonl'
+  })
+  const flagKey = cancelFlagKey(run.runId)
+  const jobsBefore = (await jobsOf('c', task.id)).length
+  caseLog(`R-1 挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id}`)
+  let cleanupOk = false
+  try {
+    redisCli('DEL', flagKey)
+    checkEq(redisCli('LPUSH', flagKey, 'l150-unknown-probe'), '1', 'R-1 取消标志键注入（改成 LIST）')
+    const witness = await awaitCancelUnknownAll(run.runId)
+    saveEvidence('R1-cancel-unknown-witness.json', witness)
+
+    const resume = await resumeRefusal('b', run.runId, ['CANCEL_STATE_UNKNOWN'], 'R-1 续跑拒绝')
+    const confirm = await confirmOn('c', {
+      runId: run.runId,
+      toolCallId: run.toolCallId,
+      reason: 'L-150 R-1 cancel state UNKNOWN'
+    })
+    // 异步派发的续跑也要有时间失败；这一段没有可等的事件，只能给有界余量后再读权威状态。
+    await sleep(1500)
+    const replay = await reattachOn('c', run.runId, 0, { timeoutMs: 30000 })
+    let replayHow = null
+    try {
+      replayHow = await replay.waitClosed(PARK_SETTLE_TIMEOUT_MS, 'R-1 回放收流')
+    } finally {
+      saveFrames('R1-replay.jsonl', replay.frames)
+      replay.close()
+    }
+    const state = await executionStateOf('c', run.runId, run.toolCallId)
+    const jobsAfter = (await jobsOf('c', task.id)).length
+    const snapshot = {
+      witness,
+      resume: { status: resume.record.status, body: resume.body },
+      confirm: { status: confirm.record.status, body: confirm.body },
+      replayHow,
+      replayTypes: typesOf(replay.frames),
+      state,
+      jobsBefore,
+      jobsAfter
+    }
+    saveEvidence('R1-unknown.json', snapshot)
+
+    checkEq(resume.record.status, 503, `R-1 取消状态 UNKNOWN 时 /resume HTTP（体=${resume.record.text.slice(0, 400)}）`)
+    checkEq(resume.body && resume.body.resumed, false, 'R-1 /resume 不得续跑')
+    checkEq(resume.body.reason, 'CANCEL_STATE_UNKNOWN', 'R-1 /resume reason')
+    checkEq(resume.body.code, 'AI_REDIS_UNAVAILABLE', 'R-1 /resume code')
+
+    checkEq(confirm.record.status, 200, `R-1 批准回执 HTTP（体=${confirm.record.text.slice(0, 400)}）`)
+    checkEq(confirm.body && confirm.body.executed, false, 'R-1 批准回执不得声称已执行')
+
+    checkEq(replayHow, 'end', 'R-1 回放必须被服务端正常收尾（连接重置不算）')
+    const replayBusiness = businessFrames(replay.frames)
+    checkEq(
+      countOf(replayBusiness, 'done') + countOf(replayBusiness, 'error'),
+      0,
+      `R-1 取消状态不可知不得伪造终帧（已收=${typesOf(replayBusiness).join(',')}）`
+    )
+    check(
+      replayBusiness
+        .filter((frame) => frame.type === 'confirm_decision' && frame.toolCallId === run.toolCallId)
+        .every((frame) => frame.decision !== 'cancel'),
+      'R-1 取消状态不可知不得伪造取消裁决帧（decision=cancel）'
+    )
+
+    checkEq(state.runStatus, 'SUSPENDED', `R-1 取消状态不可知不得改写轮次状态（实得 ${state.runStatus}）`)
+    checkEq(state.entry && state.entry.status, 'APPROVED', 'R-1 决策已落库（批准）')
+    check(
+      state.entry && state.entry.status !== 'CANCELLED',
+      'R-1 基础设施不可知不是"已取消"：不得把条目写成取消终态'
+    )
+    check(
+      !String(state.entry && state.entry.resultText ? state.entry.resultText : '').includes('未执行'),
+      'R-1 不得给出"未执行"的结论（未知不是未执行）'
+    )
+    assertNoExecution(state, 'R-1')
+    checkEq(jobsAfter, jobsBefore, 'R-1 不得起作业（start_export 未执行）')
+
+    caseLog(`R-1 三实例均 UNKNOWN（witness=${JSON.stringify(witness)}）；/resume=${resume.body.reason}，`
+      + `批准 accepted=${confirm.body.accepted} executed=${confirm.body.executed}`
+      + `（resumeOutcome=${confirm.body.resumeOutcome}）；轮次仍 ${state.runStatus}、条目 ${state.entry.status}；`
+      + `认领表无该条目、台账 0 条、作业 ${jobsAfter} 个（未执行）`)
+  } finally {
+    // 收尾必须原子：先把注入键覆盖成**合法**取消标志（单条 SET —— 不存在"键已恢复但标志未写"的空窗，
+    // 那个空窗里被死卡兜底派发的续跑会把这条 APPROVED 的工具真的执行掉），再由产品 /cancel 驱动收敛。
+    try {
+      redisCli('SET', flagKey, 'l150-probe-cleanup')
+      const cleanup = await cancelOn('b', run.runId)
+      await waitRunStatus('c', run.runId, 'CANCELLED', 60000)
+      await awaitCancelReadableAll(run.runId)
+      cleanupOk = true
+      caseLog(`R-1 收尾：/cancel HTTP ${cleanup.record.status}（alreadyCancelled=${cleanup.body ? cleanup.body.alreadyCancelled : '?'}），轮次已 CANCELLED，三实例取消状态读取已恢复`)
+    } catch (e) {
+      caseLog(`R-1 收尾失败（不改写本格判据，但取消标志键保留以免该轮以后被执行）：${e.message}`)
+    }
+    if (cleanupOk) redisCli('DEL', flagKey)
+  }
+}
+
+/** R-2：已 `CANCELLED` 不得误认领（对照组：无认领 ⇒ 取消收尾必须收敛）。 */
+async function gridAlreadyCancelledMustNotBeReclaimed() {
+  const task = await newSuspendedTask('l150-cancelled')
+  const run = await createSuspendedRun('a', {
+    prefix: 'l150-cancelled',
+    taskId: task.id,
+    messageSuffix: ' l150-cancelled',
+    evidenceName: 'R2-parked.jsonl'
+  })
+  const jobsBefore = (await jobsOf('c', task.id)).length
+  caseLog(`R-2 挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id}`)
+
+  const cancel = await cancelOn('b', run.runId)
+  await waitRunStatus('c', run.runId, 'CANCELLED', 60000)
+  const settled = await waitPendingStatus('c', run.runId, run.toolCallId, 'CANCELLED', 20000)
+  const before = await executionStateOf('c', run.runId, run.toolCallId)
+  const frames = await fullReplayToTerminal('c', run.runId, 30000, 'R2-full.jsonl')
+
+  const resume = await resumeRefusal('c', run.runId, ['ALREADY_CANCELLED'], 'R-2 已取消续跑')
+  const confirm = await confirmOn('c', {
+    runId: run.runId,
+    toolCallId: run.toolCallId,
+    reason: 'L-150 R-2 already cancelled'
+  })
+  await sleep(800)
+  const after = await executionStateOf('c', run.runId, run.toolCallId)
+  const jobsAfter = (await jobsOf('c', task.id)).length
+  const business = businessFrames(frames)
+  saveEvidence('R2-already-cancelled.json', {
+    cancel: { status: cancel.record.status, body: cancel.body },
+    settledStatus: settled.entry ? settled.entry.status : null,
+    before,
+    resume: { status: resume.record.status, body: resume.body },
+    confirm: { status: confirm.record.status, body: confirm.body },
+    after,
+    frames: { types: typesOf(business), terminal: findOf(business, 'done') },
+    jobsBefore,
+    jobsAfter
+  })
+
+  checkEq(cancel.record.status, 200, `R-2 取消 HTTP（体=${cancel.record.text.slice(0, 400)}）`)
+  checkEq(cancel.body && cancel.body.cancelled, true, 'R-2 取消回执 cancelled')
+  checkEq(after.runStatus, 'CANCELLED', 'R-2 取消后轮次终态')
+
+  checkEq(countOf(business, 'done'), 1, `R-2 取消归档终帧数（已收=${typesOf(business).join(',')}）`)
+  checkEq(findOf(business, 'done').cancelled, true, 'R-2 终帧必须是 done{cancelled:true}')
+  checkEq(countOf(business, 'tool_result', run.toolCallId), 0, 'R-2 已取消条目不得出现 tool_result（没有执行）')
+  checkEq(countOf(business, 'confirm_decision', run.toolCallId), 1, 'R-2 取消必须补一条裁决帧')
+  checkEq(findOf(business, 'confirm_decision', run.toolCallId).decision, 'cancel', 'R-2 裁决帧 decision')
+
+  checkEq(before.entry && before.entry.status, 'CANCELLED', 'R-2 取消收尾必须把条目收敛为 CANCELLED')
+  assertNoExecution(before, 'R-2（取消收敛时）')
+
+  checkEq(resume.body && resume.body.reason, 'ALREADY_CANCELLED', 'R-2 已取消轮的续跑结局')
+  checkEq(resume.body.resumed, false, 'R-2 已取消轮不得续跑')
+  checkEq(confirm.record.status, 409, `R-2 已取消条目再次批准必须 409（实得 ${confirm.record.status}）`)
+  checkEq(confirm.body && confirm.body.code, 'DUPLICATE_TOOL_CALL_ID', 'R-2 重复决策 code')
+
+  checkEq(after.entry && after.entry.status, 'CANCELLED', 'R-2 条目不得被重新打开')
+  assertNoExecution(after, 'R-2（拒绝重新认领后）')
+  checkEq(jobsAfter, jobsBefore, 'R-2 不得起作业')
+  caseLog(`R-2 取消 → 条目 ${before.entry.status}（零执行证据）；/resume=${resume.body.reason}；`
+    + `再次批准 409 ${confirm.body.code}；认领表始终无该条目、台账 0 条、作业 ${jobsAfter} 个`)
+}
+
+/** R-3：claim 哈希-only 不得伪未执行（与 R-2 同链路，只多一条认领表 field）。 */
+async function gridClaimHashOnlyMustNotFakeNotExecuted() {
+  const task = await newSuspendedTask('l150-claim-only')
+  const run = await createSuspendedRun('a', {
+    prefix: 'l150-claim-only',
+    taskId: task.id,
+    messageSuffix: ' l150-claim-only',
+    evidenceName: 'R3-parked.jsonl'
+  })
+  const flagKey = cancelFlagKey(run.runId)
+  const claimKey = executionClaimKey(run.runId)
+  const planted = '0|l150-claim-only-probe'
+  const jobsBefore = (await jobsOf('c', task.id)).length
+  caseLog(`R-3 挂起在 A：runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id}`)
+  let cancelled = false
+  try {
+    // ① 先得到"APPROVED 且零执行证据"的条目：取消状态不可读 ⇒ 续跑被拒，批准只落决策、不执行。
+    redisCli('DEL', flagKey)
+    checkEq(redisCli('LPUSH', flagKey, 'l150-claim-only-probe'), '1', 'R-3 取消标志键注入（改成 LIST）')
+    await awaitCancelUnknownAll(run.runId)
+    const confirm = await confirmOn('b', {
+      runId: run.runId,
+      toolCallId: run.toolCallId,
+      reason: 'L-150 R-3 approve without execution'
+    })
+    await waitPendingStatus('b', run.runId, run.toolCallId, 'APPROVED', 20000)
+
+    // ② 夹具：只写认领表（哈希 field），条目保持零执行证据 —— 这正是 R-3 的判据格。
+    checkEq(redisCli('HSET', claimKey, run.toolCallId, planted), '1', 'R-3 认领表注入')
+    const preCancel = await executionStateOf('b', run.runId, run.toolCallId)
+
+    // ③ 覆盖成合法取消标志（单条 SET，无空窗），由产品 /cancel 端点驱动取消收尾。
+    redisCli('SET', flagKey, 'l150-claim-only-cancel')
+    const cancel = await cancelOn('c', run.runId)
+    await waitRunStatus('a', run.runId, 'CANCELLED', 60000)
+    cancelled = true
+    // cancelTerminal 的条目收敛先于快照 CANCELLED 落库；这段余量只留给异步结算，不改变条目判据。
+    await sleep(800)
+    const after = await executionStateOf('a', run.runId, run.toolCallId)
+    const frames = await fullReplayToTerminal('a', run.runId, 30000, 'R3-full.jsonl')
+    const jobsAfter = (await jobsOf('c', task.id)).length
+    const business = businessFrames(frames)
+    saveEvidence('R3-claim-hash-only.json', {
+      confirm: { status: confirm.record.status, body: confirm.body },
+      planted,
+      preCancel,
+      cancel: { status: cancel.record.status, body: cancel.body },
+      after,
+      frames: { types: typesOf(business), terminal: findOf(business, 'done') },
+      jobsBefore,
+      jobsAfter
+    })
+
+    checkEq(confirm.record.status, 200, `R-3 批准回执 HTTP（体=${confirm.record.text.slice(0, 400)}）`)
+    checkEq(confirm.body && confirm.body.executed, false, 'R-3 批准回执不得声称已执行')
+    checkEq(preCancel.entry && preCancel.entry.status, 'APPROVED', 'R-3 前置：条目必须是 APPROVED')
+    assertNoExecution(preCancel, 'R-3（认领表注入前）', { allowClaim: true })
+    checkEq(preCancel.claimPresent, true, 'R-3 前置：认领表必须有该 toolCallId')
+    checkEq(preCancel.claimValue, planted, 'R-3 前置：认领表的认领者')
+
+    checkEq(cancel.record.status, 200, `R-3 取消 HTTP（体=${cancel.record.text.slice(0, 400)}）`)
+    checkEq(after.runStatus, 'CANCELLED', 'R-3 取消后轮次终态')
+
+    // 判据格：取消收尾**只认"零证据"**。认领表有值 ⇒ 必须不碰条目，不得把"可能已执行"说成"未执行"。
+    checkEq(
+      after.entry && after.entry.status,
+      'APPROVED',
+      `R-3 claim 哈希-only 不得伪未执行：条目被改写成了 ${after.entry ? after.entry.status : '（缺失）'}`
+    )
+    check(
+      after.entry.reason !== 'RUN_CANCELLED',
+      `R-3 条目不得被写成取消原因（实得 reason=${JSON.stringify(after.entry.reason)}）`
+    )
+    check(
+      after.entry.outcome !== 'cancelled',
+      `R-3 条目 outcome 不得被写成 cancelled（实得 ${JSON.stringify(after.entry.outcome)}）`
+    )
+    check(
+      after.entry.code !== 'RUN_CANCELLED',
+      `R-3 条目 code 不得被写成 RUN_CANCELLED（实得 ${JSON.stringify(after.entry.code)}）`
+    )
+    check(
+      !String(after.entry.resultText ? after.entry.resultText : '').includes('未执行'),
+      `R-3 不得用"${CANCELLED_BEFORE_CLAIM_TEXT}"覆盖条目（认领表已证明它可能执行过）`
+    )
+    checkEq(after.claimPresent, true, 'R-3 认领证据不得被回滚/删除')
+    checkEq(after.claimValue, planted, 'R-3 认领表的值不得被改写')
+
+    checkEq(
+      countOf(business, 'tool_result', run.toolCallId),
+      0,
+      `R-3 不得补"未执行"的 tool_result（已收=${typesOf(business).join(',')}）`
+    )
+    // 批准本身会补一条 confirm_decision(approve) 回执帧；这里禁的是**取消**裁决（伪"未执行"的另一个面）。
+    const cancelDecisions = business.filter((frame) => frame.type === 'confirm_decision'
+      && frame.toolCallId === run.toolCallId && frame.decision === 'cancel')
+    checkEq(
+      cancelDecisions.length,
+      0,
+      `R-3 不得补取消裁决帧（条目没有收敛为 CANCELLED；已收=${typesOf(business).join(',')}）`
+    )
+    checkEq(countOf(business, 'done'), 1, 'R-3 取消归档终帧数')
+    checkEq(findOf(business, 'done').cancelled, true, 'R-3 终帧必须是 done{cancelled:true}')
+    assertNoExecution(after, 'R-3（取消收尾之后）', { allowClaim: true })
+    checkEq(jobsAfter, jobsBefore, 'R-3 不得起作业')
+
+    caseLog(`R-3 条目 APPROVED + 零证据 + 认领表(${planted})；取消后条目仍 ${after.entry.status}`
+      + `（reason=${after.entry.reason} outcome=${after.entry.outcome}），未出现"未执行"改写与 tool_result；`
+      + `认领表值保持、台账 0 条、作业 ${jobsAfter} 个；对照 R-2：同一路径无认领时收敛为 CANCELLED`)
+  } finally {
+    redisCli('DEL', claimKey)
+    let cleanupOk = cancelled
+    if (!cleanupOk) {
+      try {
+        redisCli('SET', flagKey, 'l150-probe-cleanup')
+        await cancelOn('b', run.runId)
+        await waitRunStatus('a', run.runId, 'CANCELLED', 30000)
+        cleanupOk = true
+      } catch (e) {
+        // 不改写本格判据，也绝不 `return`（finally 里的 return 会吞掉原来的断言失败）。
+        caseLog(`R-3 收尾失败（取消标志键保留以免该轮以后被执行）：${e.message}`)
+      }
+    }
+    if (cleanupOk) redisCli('DEL', flagKey)
+  }
+}
+
+async function casePreexecCancelGrid() {
+  await ensureUp()
+  caseLog('L-150 三格：R-1 UNKNOWN 不得执行 → R-2 已 CANCELLED 不得误认领 → R-3 claim 哈希-only 不得伪未执行')
+  await gridUnknownMustNotExecute()
+  await gridAlreadyCancelledMustNotBeReclaimed()
+  await gridClaimHashOnlyMustNotFakeNotExecuted()
+  caseLog('L-150 三格全部按各自判据通过（三格独立断言，不互相代偿）')
+}
+
 // ── 结果与摘要 ─────────────────────────────────────────────────────────────
 
 function initArtifacts() {
@@ -4306,6 +4792,10 @@ function writeSummary(exitCode) {
     '# 三实例集群验证网（A/B/C · 共享 Redis / H2-TCP / 文件 · 统一反向代理）',
     '',
     `- 结论：**${fail === 0 && exitCode === 0 ? 'PASS' : 'FAIL'}**（PASS ${pass} / FAIL ${fail}；exit=${exitCode}）`,
+    ...(RUN.onlyCases.length > 0
+      ? [`- 范围：**子集**（--case ${RUN.onlyCases.join(',')}，实际执行 ${STATE.results.length} 条）—— `
+        + '这个 PASS **不代表**全部用例已跑，不得用它反推整套验收']
+      : []),
     `- 时间（UTC）：${new Date(STATE.startedAt).toISOString()} → ${nowIso()}`,
     `- 端口：proxy=${RUN.ports.proxy} / stats=${RUN.ports.stats} / A=${RUN.ports.a} / B=${RUN.ports.b} / C=${RUN.ports.c} / H2=${RUN.ports.h2} / Redis=${RUN.ports.redis} / stub=${RUN.ports.stub}`,
     `- 共享库：H2 TCP（baseDir=${RUN.dbBase}）；共享文件：${RUN.sharedFiles}`,
@@ -4401,15 +4891,46 @@ async function runOneCase(def) {
   }
 }
 
+/**
+ * `--case a,b` 的单点/子集选择。
+ *
+ * <p>存在的理由：用例网里有一部分判据只能在真实三实例上跑（L-150 三格），而**只允许单点运行**
+ * 时不能顺带跑全套 —— 未知 id 一律按参数错误拒绝，避免"什么都没跑"被读成全绿。
+ */
+function selectCases(ids) {
+  if (ids.length === 0) return CASES
+  const known = CASES.map((def) => def.id)
+  const unknown = ids.filter((id) => !known.includes(id))
+  if (unknown.length > 0) {
+    throw new Error(`未知用例 id：${unknown.join(',')}（可用：${known.join(',')}）`)
+  }
+  return CASES.filter((def) => ids.includes(def.id))
+}
+
 async function mainRun() {
-  configureRun()
+  try {
+    configureRun()
+  } catch (e) {
+    console.error(`参数错误：${e.message}`)
+    return 2
+  }
+  let selected
+  try {
+    selected = selectCases(RUN.onlyCases)
+  } catch (e) {
+    console.error(`参数错误：${e.message}`)
+    return 2
+  }
   initArtifacts()
   saveEnv()
   logLine(`三实例集群验证开始：artifacts=${RUN.artifacts} runDir=${RUN.runDir}`)
+  if (RUN.onlyCases.length > 0) {
+    logLine(`用例选择（--case）：${selected.map((def) => def.id).join(',')}（共 ${selected.length} 条，不是全量）`)
+  }
   let finalExit = 0
   try {
     await preflight()
-    for (const def of CASES) {
+    for (const def of selected) {
       await runOneCase(def)
     }
     finalExit = STATE.results.some((r) => r.status === 'FAIL') ? 1 : 0
@@ -5380,6 +5901,43 @@ function selfTestColdProviderIdentity() {
   return '1 正例 + 5 反例'
 }
 
+/**
+ * L-150 三格契约的自证：**产品键名 + 判据方法 + 探针里的三格断言**都还在。
+ *
+ * <p>为什么值得单独钉：三格靠"往产品键里注入 + 读产品判据"成立。键名或方法改名后，
+ * 用例仍可能"绿"（注入到没人读的键、或断言被顺手删掉）——那正是本用例最怕的 false-pass。
+ */
+function selfTestL150GridContract() {
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/CancellationRegistry.java', [
+    'CANCEL_PREFIX = "ai:cancel:"'
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/RunStore.java', [
+    'CLAIM_PREFIX = "ai:claim:"',
+    'public boolean hasExecutionEvidence(',
+    'public boolean cancellableBeforeExecution('
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java', [
+    'private String settleIfCancelledBeforeClaim(',
+    'CancelState.UNKNOWN'
+  ])
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  // 先剔除本函数自身，避免"检查项里自带这些字符串"造成恒真。
+  const start = source.indexOf('function selfTestL150GridContract')
+  const body = start >= 0 ? source.slice(0, start) : source
+  const needles = [
+    'R-1 取消状态 UNKNOWN 时 /resume HTTP',
+    "checkEq(resume.body.reason, 'CANCEL_STATE_UNKNOWN'",
+    'R-2 已取消条目再次批准必须 409',
+    'R-3 claim 哈希-only 不得伪未执行',
+    "checkEq(redisCli('HSET', claimKey",
+    'assertNoExecution(after,'
+  ]
+  for (const needle of needles) {
+    checkIncludes(body, needle, `L-150 三格断言 ${needle}`)
+  }
+  return `${needles.length} 条断言 + 4 个产品契约`
+}
+
 function selfTestHygiene() {
   const files = [
     'scripts/ci/cluster3-run.sh',
@@ -5402,7 +5960,7 @@ function selfTestHygiene() {
 
 async function selfCheckMain() {
   console.log('cluster3-probe --self-check（不启动 Java/Docker、不连接任何端口）\n')
-  selfCheck('用例注册覆盖用户清单（16 条）', selfTestCaseRegistry)
+  selfCheck(`用例注册覆盖用户清单（${REQUIRED_CASE_IDS.length} 条）`, selfTestCaseRegistry)
   selfCheck('结果状态只有 PASS/FAIL（无 SKIP）', () => RESULT_STATUSES.join(',') === 'PASS,FAIL' ? 'PASS/FAIL' : (() => { throw new Error(RESULT_STATUSES.join(',')) })())
   selfCheck('端口段 231xx 且禁用端口不出现', selfTestPortHygiene)
   selfCheck('静态 import 全部为 node: 内置模块', selfTestStaticImports)
@@ -5426,6 +5984,7 @@ async function selfCheckMain() {
   selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
   selfCheck('复审契约（SIGSTOP/deferred / 分档码 / >40 分页 / providerId 绑定）', selfTestReviewContracts)
   selfCheck('冷启动种子身份（非合成库行 + 三实例一致）', selfTestColdProviderIdentity)
+  selfCheck('L-150 三格契约（取消键/认领表/判据方法 + 探针断言仍在）', selfTestL150GridContract)
   selfCheck('三个交付文件的卫生（LF/无盘符/无密钥/无禁用端口）', selfTestHygiene)
   await selfCheckAsync('SSE 解析器（任意 chunk 边界 / CRLF / 多行 data / [DONE]）', selfTestSseParser)
   await selfCheckAsync('keep-alive 单连接判定（同客户端端口覆盖 3 节点）', selfTestKeepAlive)
@@ -5456,7 +6015,9 @@ async function main() {
        --haproxy-container <name> --haproxy-config <file>
        --stub-url http://127.0.0.1:23199 --proxy-url http://127.0.0.1:23180
        --stats-url 'http://127.0.0.1:23189/stats;csv'
-       --ports 'a=23181,b=23182,c=23183,h2=23190,redis=23179'`)
+       --ports 'a=23181,b=23182,c=23183,h2=23190,redis=23179'
+       [--case preexec-cancel-grid]   # 单点/子集（逗号分隔多个 id）；不写 = 全套
+                                      # L-150 三格请用：--case preexec-cancel-grid`)
     return 0
   }
   if (MODE_SELF_CHECK) return selfCheckMain()

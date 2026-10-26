@@ -122,7 +122,11 @@ const CONDITION_OPS = ['eq', 'in', 'notIn', 'empty', 'notEmpty', 'between']
 const CONDITION_ATTRIBUTES = ['key', 'op', 'value', 'values']
 const VARIANT_TYPES = ['text']
 const TEXT_FORMATS = ['email', 'tel', 'url', 'idcard']
-const OPTION_SOURCE_IDS = ['definition_fields']
+// 选项数据源闭集：**必须与产品 `GenerativeFormRules.OPTION_SOURCE_IDS` 逐值一致**（自检 ③ 对账）。
+// `definitions` = 配置定义枚举（父值 = 层级 GLOBAL/REGION/PROJECT → 该层级的定义），
+// 供"先选配置项"用；样例返回的唯一取数点 = stub-routes.json 的 `optionSources.definitions`。
+const OPTION_SOURCE_IDS = ['definition_fields', 'definitions']
+const DEFINITION_SOURCE_ID = 'definitions'
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/
 
 const MAX_TITLE_CHARS = 100
@@ -1350,6 +1354,26 @@ function checkConstantsAgainstSource(src, bad) {
   }
 }
 
+// ── 选项数据源样例返回（`optionsFrom.sourceId` 的桩内返回面） ─────────────────
+// 与后端 `FormOptionSource` 同语义：未注册 id ⇒ null（调用方按拒绝处理）；
+// `definitions` 只认层级（trim + 大写归一），**空 / 未知父值 ⇒ 空列表**——
+// 绝不回退成"列出全部定义"（空值不是通配符），与产品侧"清空是显式动作"的口径一致。
+// 本函数只供 `--self-check` 断言"层级 → 定义"的返回是可用样例而非空壳；不新增 HTTP 端点。
+function definitionOptionFixture() {
+  const fixture = ROUTES?.optionSources?.[DEFINITION_SOURCE_ID]
+  return fixture && typeof fixture === 'object' && !Array.isArray(fixture) ? fixture : {}
+}
+
+function optionSourceOptions(sourceId, parentValue) {
+  if (!OPTION_SOURCE_IDS.includes(sourceId)) return null
+  // definition_fields 的选项在业务数据里（父值 = 定义编码 → 字段），桩不伪造业务数据
+  if (sourceId !== DEFINITION_SOURCE_ID) return []
+  const fixture = definitionOptionFixture()
+  const level = typeof parentValue === 'string' ? parentValue.trim().toUpperCase() : ''
+  const options = fixture[level]
+  return Array.isArray(options) ? options.map((o) => ({ value: o.value, label: o.label })) : []
+}
+
 function selfCheck() {
   const problems = []
   let mark = 0
@@ -2028,6 +2052,70 @@ function selfCheck() {
   const defField = (optRoute?.arguments?.form?.fields || []).find((f) => f.defaultFrom)
   if (!defField) bad('GF-OPTIONS-FROM 缺 defaultFrom（G-12 无底座）')
   ok(`GF 新能力面自证通过（七型覆盖 / 深联动 ${deepest} 层 > ${MAX_LINKAGE_DEPTH} / optionsFrom+defaultFrom 底座在位）`)
+
+  // ⑨-h `definitions`（配置定义枚举，批次4 后端D）：路由 +「层级 → 定义」样例返回必须同源、可用。
+  //   三条硬边界：①样例不得是空壳（每个层级 ≥1 项，value/label 非空且 value 不重复）；
+  //   ②空 / 未知父值 ⇒ 空列表（unknown parent 不得回退全量；也不许 ALL/* 这类通配层级）；
+  //   ③未注册 id ⇒ null（与后端注册表同语义：闭集扩容不等于开放面）。
+  const defRoute = (ROUTES.routes || []).find((r) => r.id === 'GF-DEFINITION-OPTIONS')
+  const defFixture = definitionOptionFixture()
+  const fixtureLevels = Object.keys(defFixture)
+  if (!defRoute) {
+    bad('缺 GF-DEFINITION-OPTIONS 路由：definitions 数据源在桩内没有可用返回面（空壳）')
+  } else {
+    const defFields = defRoute.arguments?.form?.fields || []
+    const levelField = defFields.find((f) => f.key === 'level')
+    const sourcedField = defFields.find((f) => f.optionsFrom?.sourceId === DEFINITION_SOURCE_ID)
+    if (!sourcedField) bad('GF-DEFINITION-OPTIONS 缺 optionsFrom.sourceId=definitions 的字段（返回面是空壳）')
+    else if (sourcedField.optionsFrom.dependsOn !== 'level') {
+      bad(`GF-DEFINITION-OPTIONS 的 definitions 级联必须以 level 为父字段（实际 ${sourcedField.optionsFrom.dependsOn}）`)
+    }
+    const levelValues = (levelField?.options || []).map((o) => o.value)
+    if (!levelField) bad('GF-DEFINITION-OPTIONS 缺 level 字段（definitions 级联没有父字段可选）')
+    else if (sortedJoin(levelValues) !== sortedJoin(fixtureLevels)) {
+      bad(`GF-DEFINITION-OPTIONS 的 level 选项 [${levelValues.join(',')}] 与样例层级 [${fixtureLevels.join(',')}] 不一致`)
+    }
+  }
+  if (fixtureLevels.length === 0) {
+    bad('stub-routes.json 的 optionSources.definitions 为空（层级 → 定义样例缺失，返回即空壳）')
+  }
+  if (fixtureLevels.some((k) => ['ALL', 'ANY', '*', '__ALL__'].includes(k))) {
+    bad(`optionSources.definitions 含通配层级 [${fixtureLevels.join(',')}]：unknown parent 不得回退全量`)
+  }
+  let fixtureCount = 0
+  for (const level of fixtureLevels) {
+    const options = defFixture[level]
+    if (!Array.isArray(options) || options.length === 0) {
+      bad(`optionSources.definitions["${level}"] 为空（不得返回空壳）`)
+      continue
+    }
+    fixtureCount += options.length
+    const seenValues = new Set()
+    for (const option of options) {
+      const value = option?.value
+      if (typeof value !== 'string' || value.trim() === '') bad(`optionSources.definitions["${level}"] 含空 value`)
+      else if (seenValues.has(value)) bad(`optionSources.definitions["${level}"] 的 value "${value}" 重复`)
+      else seenValues.add(value)
+      if (typeof option?.label !== 'string' || option.label.trim() === '') {
+        bad(`optionSources.definitions["${level}"] 含空 label（选项必须有可读文案）`)
+      }
+    }
+    // 解析器与样例同源：层级大小写/首尾空白归一后仍返回同一批选项
+    const resolved = optionSourceOptions(DEFINITION_SOURCE_ID, ` ${level.toLowerCase()} `)
+    if (resolved.length !== options.length) {
+      bad(`definitions 解析 "${level}" 得到 ${resolved.length} 项，样例 ${options.length} 项（解析器与样例不同源）`)
+    }
+  }
+  for (const parent of [undefined, null, '', '   ', 'ALL', 'NOPE']) {
+    const resolved = optionSourceOptions(DEFINITION_SOURCE_ID, parent)
+    if (!Array.isArray(resolved) || resolved.length !== 0) {
+      bad(`definitions 对父值 ${JSON.stringify(parent)} 必须返回空列表（unknown parent 不得回退全量）`)
+    }
+  }
+  if (optionSourceOptions('definitions_all', 'GLOBAL') !== null) {
+    bad('未注册的选项数据源必须返回 null（与后端注册表同语义，闭集不因扩容变开放面）')
+  }
+  ok(`definitions 数据源自证通过（${fixtureLevels.length} 个层级 / 样例 ${fixtureCount} 项；空或未知父值空列表；未注册 id 拒绝）`)
 
   section()
   // ⑩ 批③b 桩增强：请求级工具路由 / epoch 注入 / 迟到帧。全部纯函数自证，不起服务。

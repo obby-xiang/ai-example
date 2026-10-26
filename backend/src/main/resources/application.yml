@@ -244,6 +244,15 @@ app:
       zombie-age: 180s
       zombie-margin: 60s
       max-on-startup: 10
+      # 批次8B（Task 12 Step 3）：运行期低频死轮扫描。
+      #   启动扫描每实例只跑一拍；此后"进程死在模型调用中间 / 决策已落库却没人执行 / 重挂自愈那一下抖动"
+      #   都会留下无人推进的 RUNNING/SUSPENDED 轮到下次重启。打开后按间隔扫一拍，判据与启动扫描同一份：
+      #   候选 = ResumeService#listRuns()，活/死 = RunLiveness.isDead（租约 + 本进程活订阅 + 业务活动锚点），
+      #   窗口 = 上面 zombie-age（180s，**不因本键缩短**）。终态（DONE/FAILED/CANCELLED）不复活，
+      #   仍 PENDING 的外部项不碰（不绕开人审）。间隔只决定"多久看一眼"，不影响判死。
+      #   关掉 = 只保留启动扫描与重挂自愈；同步入口 sweep() 仍可直接驱动。
+      runtime-sweep-enabled: true
+      runtime-sweep-interval: 120s
       # T3-6a：死卡兜底的"轻量执行器"（确认门 woke=false 且快照 SUSPENDED 时触发续跑）。
       # 容量小 + 队列有界 + 饱和拒绝：resume 内部还会向挂起池提交一次，同池提交即嵌套占用。
       trigger-pool-size: 2

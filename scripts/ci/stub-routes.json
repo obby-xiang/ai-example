@@ -34,6 +34,45 @@
   "convergence": {
     "maxCallsPerTurn": 6
   },
+  "optionSourcesNote": "`optionsFrom.sourceId` 样例返回的唯一取数点（批次4 后端D）。`definitions` = 配置定义枚举：父值 = 层级（GLOBAL/REGION/PROJECT），选项 = 该层级的配置定义（value=定义编码，label=定义名称，取自 DataSeedRunner 的种子定义）。桩的解析器（stub-upstream.mjs 的 optionSourceOptions）只认这里的层级键：空/未知父值返回空列表，**不**回退成全部层级的并集，也不允许 ALL/* 一类通配键（自检 ⑨-h 断言）。`definition_fields`（父值 = 定义编码 → 字段）的选项在业务数据里，桩不伪造。",
+  "optionSources": {
+    "definitions": {
+      "GLOBAL": [
+        {
+          "value": "CURRENCY",
+          "label": "货币字典"
+        },
+        {
+          "value": "DOC_TYPE",
+          "label": "单据类型"
+        },
+        {
+          "value": "APPROVE_ROLE",
+          "label": "审批角色"
+        }
+      ],
+      "REGION": [
+        {
+          "value": "TAX_RATE",
+          "label": "税率配置"
+        }
+      ],
+      "PROJECT": [
+        {
+          "value": "PROJ_PARAM",
+          "label": "项目参数"
+        },
+        {
+          "value": "PROJ_APPROVE",
+          "label": "项目审批流"
+        },
+        {
+          "value": "PROJ_PRICE",
+          "label": "项目价格表"
+        }
+      ]
+    }
+  },
   "usageShapes": {
     "note": "上下文统计与压缩专项 §5.8 的 usage 形状表（E2E-CTX-1..4 的唯一取数点）。`last` = 改造前桩就发的基线（逐字节不变）；`repeat` = 每块重复同一份；`zero-last` = 中间真值 + 末块 0/0/0；`none` = 整轮不发。verify-e2e.ps1 读同一份文件，桩与用例因此不会漂移。",
     "last": {
@@ -764,7 +803,7 @@
     },
     {
       "id": "GF-OPTIONS-FROM",
-      "note": "G-11/G-12 的底座：B 的选项走 optionsFrom 静态映射（dependsOn=region），C 的初值走 defaultFrom。sourceId 只允许注册值 definition_fields。",
+      "note": "G-11/G-12 的底座：B 的选项走 optionsFrom 静态映射（dependsOn=region），C 的初值走 defaultFrom。sourceId 只允许注册值 definition_fields / definitions（闭集与产品 GenerativeFormRules.OPTION_SOURCE_IDS 一致）。",
       "match": {
         "messageAny": [
           "gf-options-from"
@@ -827,6 +866,57 @@
                   "XN": 10,
                   "HD": 20
                 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "GF-DEFINITION-OPTIONS",
+      "note": "批次4 后端D 的底座：optionsFrom.sourceId=definitions（父值 = 层级 → 该层级的配置定义，供先选一个配置项）。样例返回 = optionSources.definitions（唯一取数点）；空 / 未知父值必须是空列表，不得回退全量。",
+      "match": {
+        "messageAny": [
+          "gf-definition-options"
+        ],
+        "requiresTools": [
+          "generative_form"
+        ]
+      },
+      "tool": "generative_form",
+      "arguments": {
+        "form": {
+          "scenario": "FILTER",
+          "title": "选择配置项",
+          "fields": [
+            {
+              "key": "level",
+              "label": "层级",
+              "type": "enum",
+              "required": true,
+              "options": [
+                {
+                  "value": "GLOBAL",
+                  "label": "全局"
+                },
+                {
+                  "value": "REGION",
+                  "label": "区域"
+                },
+                {
+                  "value": "PROJECT",
+                  "label": "项目"
+                }
+              ]
+            },
+            {
+              "key": "definition",
+              "label": "配置项",
+              "type": "enum",
+              "required": true,
+              "optionsFrom": {
+                "dependsOn": "level",
+                "sourceId": "definitions"
               }
             }
           ]
