@@ -273,6 +273,38 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(snapshot.getInFlightToolCalls()).isEmpty();
 	}
 
+	// ── 取消优先：settle 之后的取消不再驱动下一跳 ────────────────────────────
+
+	/**
+	 * 取消落在"本批工具已结算"之后：不得再把可驱动下一跳的历史交回 Spring AI。
+	 *
+	 * <p>取消读口以"本轮是否已 settle"（{@code round} 已推进）为界：执行前/认领前/执行后三处边界
+	 * 读到的都是"未取消"，只有 settle 之后那一次读到取消 —— 因此本用例不依赖读口被调用的次数。
+	 */
+	@Test
+	void cancelAfterToolSettlementStopsBeforeNextModelTurn() {
+		when(this.cancellations.cancelState(RUN_ID)).thenAnswer(invocation -> {
+			RunSnapshot snapshot = this.store.get(RUN_ID);
+			return snapshot != null && snapshot.getRound() > 0
+					? CancellationRegistry.CancelState.CANCELLED
+					: CancellationRegistry.CancelState.NOT_CANCELLED;
+		});
+
+		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(historyWithOldResults()),
+				response(1000, 0, "c-1")))
+			.isInstanceOfSatisfying(StreamViolationException.class,
+					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CANCELLED));
+
+		assertThat(this.executed).as("工具只执行一次（取消不撤回已发生的副作用）").containsExactly("c-1");
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(String.join("\n", snapshot.getMessageJson())).as("历史先 settle：工具结果已写进快照")
+			.contains("c-1");
+		assertThat(snapshot.getInFlightToolCalls()).isEmpty();
+		PendingToolCall entry = this.store.pending(RUN_ID, "c-1");
+		assertThat(entry.getStatus()).isEqualTo(PendingToolCall.EXECUTED);
+		assertThat(entry.effectiveOutcome()).isEqualTo(ToolOutcome.OK);
+	}
+
 	// ── 真值 usage 优先 / 无 usage 估算 ──────────────────────────────────────
 
 	@Test

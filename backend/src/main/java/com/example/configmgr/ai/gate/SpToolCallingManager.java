@@ -778,6 +778,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			}
 			// 已执行记录全部落定后，才允许越窗失败穿出去。
 			settle(runId, history);
+			// 取消优先：settle 之后、把历史交回 Spring AI 之前再查一次权威标志 —— 命中即终止本轮，
+			// 不再返回可驱动下一跳的历史（工具结果与历史已先落定，已发生的副作用不撤回）。
+			checkCancelled(runId);
 			if (budget.overflow()) {
 				throw new StreamViolationException(StreamViolationException.CONTEXT_OVERFLOW,
 						"轮内上下文预算判定：下一跳请求将超出上下文窗口（nextEst=" + budget.decision().nextEst()

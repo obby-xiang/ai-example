@@ -2150,15 +2150,21 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.CANCELLED.wire());
 			pending.setCode(com.example.configmgr.ai.tool.ToolOutcome.CODE_RUN_CANCELLED);
 		}
-		// 结算时刻取 guard 里记的 atMs（有的话）：它是"决策真正发生的时刻"，比读侧此刻更准
-		try {
-			long atMs = Long.parseLong(raw.substring(sep + 1, raw.indexOf('|', sep + 1)));
-			if (atMs > 0L) {
-				pending.setResolvedAtMs(atMs);
+		// 结算时刻取 guard 里记的 atMs（有的话）：它是"决策真正发生的时刻"，比读侧此刻更准。
+		// 段式兼容：status|atMs|instanceId / status|atMs / 裸 status —— 有第二个 | 取中间段，
+		// 否则取余段；空值或非数字只缺时间，不影响已成立的状态。
+		if (sep >= 0) {
+			try {
+				int end = raw.indexOf('|', sep + 1);
+				String atMsText = end < 0 ? raw.substring(sep + 1) : raw.substring(sep + 1, end);
+				long atMs = Long.parseLong(atMsText);
+				if (atMs > 0L) {
+					pending.setResolvedAtMs(atMs);
+				}
 			}
-		}
-		catch (RuntimeException ex) {
-			// 坏值/旧形态：结论成立，时刻缺席
+			catch (RuntimeException ex) {
+				// 坏值/旧形态：结论成立，时刻缺席
+			}
 		}
 	}
 

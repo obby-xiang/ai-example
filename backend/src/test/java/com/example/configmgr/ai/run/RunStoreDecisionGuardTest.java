@@ -72,6 +72,37 @@ class RunStoreDecisionGuardTest {
 				.isEqualTo(first.recorded());
 	}
 
+	/**
+	 * WAL 读侧收敛的时间戳解析：guard 值兼容三段式 {@code status|atMs|instanceId}、两段式
+	 * {@code status|atMs} 与裸 {@code status}。
+	 *
+	 * <p>两段式（旧写者/灰度期形态）必须同时恢复状态与 {@code resolvedAtMs}；裸状态只恢复状态，
+	 * 时间缺省（不得因缺段而抛错或丢状态）。
+	 */
+	@Test
+	void twoPartAndBareDecisionMarkersConvergeWithoutLosingStatus() {
+		long atMs = 1_726_000_123_456L;
+		this.fake.table(DECIDED_KEY).put(CALL_ID, PendingToolCall.REJECTED + "|" + atMs);
+
+		PendingToolCall twoPart = this.store.pending(RUN_ID, CALL_ID);
+
+		assertThat(twoPart.getStatus()).as("两段式：状态收敛").isEqualTo(PendingToolCall.REJECTED);
+		assertThat(twoPart.getResolvedAtMs()).as("两段式：结算时刻不丢").isEqualTo(atMs);
+
+		String bareCallId = "call-bare";
+		PendingToolCall bareEntry = new PendingToolCall();
+		bareEntry.setToolCallId(bareCallId);
+		bareEntry.setName("start_import");
+		bareEntry.setKind(PendingToolCall.KIND_CONFIRM);
+		this.store.putPending(RUN_ID, bareEntry);
+		this.fake.table(DECIDED_KEY).put(bareCallId, PendingToolCall.CANCELLED);
+
+		PendingToolCall bare = this.store.pending(RUN_ID, bareCallId);
+
+		assertThat(bare.getStatus()).as("裸状态：状态收敛").isEqualTo(PendingToolCall.CANCELLED);
+		assertThat(bare.getResolvedAtMs()).as("裸状态：时间缺省").isZero();
+	}
+
 	/** D5：WAL —— guard 已写、条目仍 PENDING 时，读侧可据 guard 收敛出结论。 */
 	@Test
 	void guardCarriesTheConclusionEvenWhenTheEntryIsStillPending() {
