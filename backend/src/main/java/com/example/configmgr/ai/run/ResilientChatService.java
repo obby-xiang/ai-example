@@ -909,7 +909,7 @@ public class ResilientChatService {
 			}
 			long attemptStartedAtMs = System.currentTimeMillis();
 			long beaconBefore = this.beacon.startedCount(runId);
-			Accumulator accumulator = new Accumulator();
+			Accumulator accumulator = new Accumulator(runId);
 			CompletableFuture<Void> settled = new CompletableFuture<>();
 			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, config, this.beacon,
 					this.cancellations, turnStartedAtMs, settled::completeExceptionally);
@@ -2491,7 +2491,8 @@ public class ResilientChatService {
 	 * <li>只有 {@code [DONE]} 没有任何 finishReason ⇒ 同样是不完整流
 	 * （{@link UpstreamErrorClassifier.Finish} 为 null）。</li>
 	 * </ul>
-	 * {@link #tailSummary()} 留最后几次响应的形态（finishReason/文本长度/用量），
+	 * {@link #tailSummary()} 留最后几次响应的形态（分片序号 {@code i}、相对首片 {@code dMs}、
+	 * finishReason/文本长度/是否带工具调用/用量），
 	 * 供"为什么判成断流/为什么判成正常"在日志里一眼可查。
 	 */
 	private static final class Accumulator {
@@ -2529,17 +2530,36 @@ public class ResilientChatService {
 		 */
 		private volatile UpstreamErrorClassifier.Finish lastFinish;
 
+		/** 本轮运行 id（只用于日志定位；由 {@code runAttempts} 在建 Accumulator 时传入）。 */
+		private final String runId;
+
+		/** 本尝试的分片序号（从 1 起；{@link #tailSummary()} 与终态后 WARN 共用同一计数）。 */
+		private int shardCount;
+
+		/** "终态后又收到 finishReason"只 WARN 一次（每次尝试一个 Accumulator ⇒ 天然每 attempt 一行）。 */
+		private final java.util.concurrent.atomic.AtomicBoolean terminalOverwriteWarned = new java.util.concurrent.atomic.AtomicBoolean();
+
+		Accumulator(String runId) {
+			this.runId = runId;
+		}
+
 		/** 累计一个上游分片：思考不入正文（见 {@link #reasoning(String)}），正文原样拼接。 */
 		void accept(ChatResponse response) {
+			long atMs = System.currentTimeMillis();
 			if (this.firstByteAtMs == 0L) {
-				this.firstByteAtMs = System.currentTimeMillis();
+				this.firstByteAtMs = atMs;
 			}
+			long sinceFirstShardMs = Math.max(0L, atMs - this.firstByteAtMs);
+			int shardIndex = ++this.shardCount;
 			this.lastResponse.set(response);
 			this.meter.accept(response);
 			Generation generation = response.getResult();
+			boolean hasToolCalls = generation != null && generation.getOutput() != null
+					&& generation.getOutput().hasToolCalls();
 			if (generation != null) {
 				String finishReason = generation.getMetadata() == null ? null : generation.getMetadata().getFinishReason();
 				if (StringUtils.hasText(finishReason)) {
+					warnFinishAfterTerminal(finishReason, hasToolCalls, shardIndex, sinceFirstShardMs);
 					this.terminalSignal = "finishReason=" + finishReason;
 					this.lastFinish = UpstreamErrorClassifier.finishOf(finishReason);
 				}
@@ -2550,7 +2570,23 @@ public class ResilientChatService {
 					}
 				}
 			}
-			record(response, generation);
+			record(response, generation, shardIndex, sinceFirstShardMs, hasToolCalls);
+		}
+
+		/**
+		 * 终态之后又收到 finishReason 的观测点（<b>只记日志</b>：不改 {@link #lastFinish}、
+		 * {@link #terminalSignal} 或任何判定）。用于确认"STOP 之后上游仍裸发 TOOL_CALLS"这类序列。
+		 *
+		 * <p>每 attempt 至多一条（{@link #terminalOverwriteWarned}）：同一次流里后续分片不再重复刷。
+		 */
+		private void warnFinishAfterTerminal(String finishReason, boolean hasToolCalls, int shardIndex,
+				long sinceFirstShardMs) {
+			if (this.lastFinish == null || !this.lastFinish.terminal()
+					|| !this.terminalOverwriteWarned.compareAndSet(false, true)) {
+				return;
+			}
+			log.warn("终态后又收到 finishReason terminal={} incoming={} hasToolCalls={} i={} dMs={} runId={}",
+					this.lastFinish, finishReason, hasToolCalls, shardIndex, sinceFirstShardMs, this.runId);
 		}
 
 		/**
@@ -2575,13 +2611,17 @@ public class ResilientChatService {
 		}
 
 
-		/** 末帧形态留档（最多 {@value #TAIL_SIZE} 条）。 */
-		private void record(ChatResponse response, Generation generation) {
+		/** 末帧形态留档（最多 {@value #TAIL_SIZE} 条；含分片序号/相对首片毫秒/是否带工具调用）。 */
+		private void record(ChatResponse response, Generation generation, int shardIndex, long sinceFirstShardMs,
+				boolean hasToolCalls) {
 			var usage = response.getMetadata() == null ? null : response.getMetadata().getUsage();
-			String descriptor = "finishReason="
+			String descriptor = "i=" + shardIndex
+					+ "|dMs=" + sinceFirstShardMs
+					+ "|finishReason="
 					+ (generation == null || generation.getMetadata() == null ? "null" : generation.getMetadata().getFinishReason())
 					+ "|textLen=" + (generation == null || generation.getOutput() == null || generation.getOutput().getText() == null
 							? -1 : generation.getOutput().getText().length())
+					+ "|hasToolCalls=" + hasToolCalls
 					+ "|usage=" + (usage == null ? "null"
 							: usage.getPromptTokens() + "/" + usage.getCompletionTokens() + "/" + usage.getTotalTokens());
 			if (this.tail.size() >= TAIL_SIZE) {
