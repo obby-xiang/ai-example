@@ -60,24 +60,36 @@ class LanguagePolicyTest {
 	}
 
 	/**
-	 * M-4（4B 独立评审 → 2026-10-27 裁决更新）：规则 10 不再机械引导用户回复「继续」。
+	 * 多步工作流（2026-10-27 裁决更新）：规则 10 不再要求用户补一句下一步指令 —— 页面级动作在同一
+	 * 运行内按批串行，新披露在下一批直接生效，模型自己接续。旧的"允许用户给出下一步指令"口径
+	 * （以及更早的「请回复『继续』」）都必须消失。
 	 *
-	 * <p>修复前它写「请回复「继续」完成最后一步」，上一轮改成双语举例，随后一度收紧成全局"不得索取继续"。
-	 * 主控验收指出后者过宽：新步骤工具必须下一轮才披露时，没有用户输入就无法继续。最终口径 =
-	 * 确需下一轮披露时可简短说明状态并允许用户给下一步指令，只是禁止机械套用"请回复继续"；
-	 * 禁止再要批准/继续仅限 create_task 已批准/已创建成功这一例外。
+	 * <p>语言中立：提示词骨架只有一份（单语），locale 只影响「回答语言（本轮）」段的目标语言 ——
+	 * zh-CN 与 en-US 下续作口径逐字同义，两份语言段都不得索取"下一步指令/请回复继续"。
 	 */
 	@Test
 	void continueGuidanceInRuleTenIsLanguageNeutral() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
 		assertThat(prompt)
-			.as("确需下一轮披露时允许用户给下一步指令，但不得机械套用「请回复继续」")
-			.contains("允许用户给出下一步指令")
-			.contains("不要机械套用");
-		assertThat(prompt)
-			.as("旧的继续引导不得回归")
+			.as("不再要求用户给下一步指令：旧口径必须消失")
+			.doesNotContain("允许用户给出下一步指令")
 			.doesNotContain("请回复「继续」")
-			.doesNotContain("引导用户回复继续指令");
+			.doesNotContain("引导用户回复继续指令")
+			.contains("不要要求用户给出下一步指令");
+		assertThat(prompt)
+			.as("续作由模型在同一运行内按批接续，不靠用户补指令")
+			.contains("下一批按最新披露")
+			.contains("一批只做一步");
+		assertThat(new ReplyLanguage(ReplyLanguage.ZH_CN).directive())
+			.as("zh-CN 语言段不得索取继续指令")
+			.doesNotContain("下一步指令")
+			.doesNotContain("请回复")
+			.doesNotContain("回复继续");
+		assertThat(new ReplyLanguage(ReplyLanguage.EN_US).directive())
+			.as("en-US 只切换目标语言，续作口径与 zh-CN 同义：同样不得索取下一步指令")
+			.doesNotContain("下一步指令")
+			.doesNotContain("请回复")
+			.doesNotContain("回复继续");
 	}
 }

@@ -188,9 +188,13 @@ class SystemPromptHitlConfirmTest {
 	}
 
 	/**
-	 * 用户 2026-10-27 裁决（「依赖模型 + 调整提示词」→ 主控验收返修）：新建任务后不得把
-	 * "再要一次批准/请回复继续/重建任务"写进正文；拿到真实 taskId 的同一轮立即导航，且不得并批。
-	 * 同时锁规则 10 的收窄口径：确需下一轮披露时可允许用户给下一步指令，禁止机械"请回复继续"。
+	 * 用户 2026-10-27 裁决（多步工作流）：新建任务获批准后，导航<b>不是</b>本轮终点 ——
+	 * 页面级动作可在后续批次按 {@code navigate_to → select_definitions → confirm_step → set_condition}
+	 * 串行接续，进入新页面/步骤后使用最新披露的工具列表；HITL 不变
+	 * （{@code create_task} 与 {@code start_*} 仍走各自确认卡，披露不等于授权）。
+	 *
+	 * <p>本轮同时锁住创建侧不变的两条：拿到真实 taskId 的同一轮立即导航且不与 create_task 并批；
+	 * 已创建成功即"任务已存在"，不得再要批准、不得要求用户回复继续。
 	 */
 	@Test
 	void systemPromptPinsCreateThenNavigateInSameTurnWithoutReapproval() {
@@ -205,13 +209,20 @@ class SystemPromptHitlConfirmTest {
 			.contains("同一轮立即单独调用 navigate_to(page, taskId)")
 			.contains("禁止把 create_task 与 navigate_to 放进同一批并行调用")
 			.contains("page 按任务类型取对应向导")
-			.contains("导航前不要调用 select_definitions / confirm_step")
-			.contains("导航成功后结束本轮");
-		assertThat(systemText).as("规则 10 收窄：下一轮披露可允许用户给下一步指令，不机械索取继续")
-			.contains("允许用户给出下一步指令")
-			.contains("不要机械套用")
-			.contains("不要求用户重复原始意图")
-			.contains("同一目标页不要重复导航");
+			.contains("导航前不要调用 select_definitions / confirm_step");
+		assertThat(systemText).as("旧口径（导航成功即结束本轮）必须删除")
+			.doesNotContain("导航成功后结束本轮")
+			.doesNotContain("导航成功后即结束本轮")
+			.contains("导航成功后不要结束本轮");
+		assertThat(systemText).as("页面级动作按批串行接续，进入新页面/步骤后用最新披露的工具列表")
+			.contains("navigate_to → select_definitions → confirm_step → set_condition")
+			.contains("一批只做一步")
+			.contains("下一批按最新披露")
+			.doesNotContain("推进只对下一轮生效");
+		assertThat(systemText).as("动态披露只是当前可用，不等于用户授权；创建与启动仍由确认卡承接")
+			.contains("披露不等于授权")
+			.contains("create_task 与 start_* 仍必须由各自确认卡承接")
+			.contains("页面级动作失败即停");
 	}
 
 	/**

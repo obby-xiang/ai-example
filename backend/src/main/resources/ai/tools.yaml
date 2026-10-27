@@ -11,7 +11,7 @@
 #
 # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故将来改描述
 # 必须发新 version 并留痕，禁止"保存即生效"式编辑。
-version: 2026-10-27.1
+version: 2026-10-27.2
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -61,6 +61,7 @@ tools:
     title: 跳转页面
     description: >-
       跳转页面并绑定任务（前端执行）。前置：目标页面存在；create_task 返回任务 id 后用它打开该任务向导。
+      导航成功不是本轮终点：下一批按最新披露继续页面动作，不要在同一批里并排调用后续动作。
       同一目标页不要重复导航。
   - toolKey: select_definitions
     title: 选择配置项
@@ -72,12 +73,14 @@ tools:
     description: >-
       设置导出查询条件（前端执行，立即落库）。前置：EXPORT 任务且当前在 QUERY_COND 步骤；
       条件必须是结构化对象（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数。
+      只有用户明确提出筛选/查询条件时才调用；用户没提就不要设置条件（不设条件即全量）。
   - toolKey: confirm_step
     title: 确认步骤
     description: >-
       确认并推进向导步骤（前端执行）。默认不传 step，只前进一步；step 仅在用户点名目标步骤或
-      明确要求跳过筛选时才传，不要擅自跳步。前置：当前步骤校验通过；推进只对下一轮生效，
-      推进后不要在同一轮调用刚解锁的工具。
+      明确要求跳过筛选时才传，不要擅自跳步。前置：当前步骤校验通过。推进成功后不要结束本轮，
+      下一批按最新披露继续（不要在同一批里连续推进）；推进失败即停，如实说明原因与当前步骤，
+      不要重试推进或跳步。
   - toolKey: generative_form
     title: 生成式表单
     # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在

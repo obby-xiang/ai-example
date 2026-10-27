@@ -52,6 +52,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProcessor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -64,6 +65,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -107,6 +109,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  * （本地动作，无模型调用），达收尾线追加收尾指令并<b>武装</b>本轮（此后工具一律不执行），
  * 估算已吃掉整窗时<b>先 settle 已执行记录、再报 {@code CONTEXT_OVERFLOW}</b>，不发注定失败的那一发。
  * 轮首的压缩语义不变（{@code ContextCompactor} 仍是唯一的轮首入口）。</li>
+ * </ul>
+ *
+ * <h2>批间动态披露（多步工作流批）</h2>
+ * 披露面有两个时刻，<b>刻意不同</b>：
+ * <ul>
+ * <li><b>批内冻结</b>：本方法一进来就把 {@code snapshot.context} 读成一份 {@code context}，
+ * 同批所有调用的预检/防线③/目标校验都用它 —— 于是"导航成功后同批立刻选配置"仍被
+ * {@code SCOPE_NOT_DISCLOSED} 拒绝（一批工具不允许自我扩权）；</li>
+ * <li><b>批间刷新</b>：逐条<b>成功结算</b>后由 {@link RunContextRefresher} 把
+ * {@code navigate_to}/{@code create_task}/{@code confirm_step} 的真实结果写回快照上下文
+ * （导航/建任务更新页面与任务，推进步骤只认任务权威 {@code currentStep}；失败只 WARN、保留旧值）；
+ * {@link #resolveToolDefinitions} 每跳按<b>当前快照</b>重算 {@code ToolRegistry#forContext}，
+ * 下一批的 scope 判据与披露面才换成新的。执行侧若遇到"本批请求边界之外的新披露回调"，
+ * 用当前 callbacks 副本补齐（{@link #executionPrompt}）保证官方委托能解析 ——
+ * 这份副本<b>只解决可解析性，不构成授权</b>：能不能执行仍由防线③与各自确认门决定。</li>
  * </ul>
  *
  * <h2>结果的两条通道（DC-14 T2）</h2>
@@ -354,6 +371,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.resultViewProviders = providers == null ? List.of() : List.copyOf(providers);
 	}
 
+	/**
+	 * 工具批后刷新运行上下文的入口（动态披露批）。null = 不刷新（轻装配面 / 单测）。
+	 */
+	private RunContextRefresher contextRefresher;
+
+	/** 可选注入：批间上下文刷新。缺失 = 快照上下文不随工具结果推进（既有单测行为一字不变）。 */
+	@Autowired(required = false)
+	public void setContextRefresher(RunContextRefresher refresher) {
+		this.contextRefresher = refresher;
+	}
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -406,9 +434,168 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.toolTimeoutExecutor = toolTimeoutExecutor(this.toolTimeoutThreads);
 	}
 
+	/**
+	 * 每跳按<b>当前快照</b>重算披露面（动态披露批的唯一接缝）。
+	 *
+	 * <p>官方模型循环（{@code ReasoningAwareOpenAiChatModel#createRequest}）在<b>每一发请求</b>前都调
+	 * 本方法，而它所带的 {@code chatOptions} 是请求边界那一份（callbacks 冻结）。于是"同一轮里
+	 * 导航成功后下一跳能看到向导工具"就取决于这里：读本轮快照的 {@code context}，用
+	 * {@code ToolRegistry#forContext} 重算一次，再与冻结集合按<b>名字</b>合并 ——
+	 * <ul>
+	 * <li>冻结集合的顺序优先（上下文没变时结果与旧口径逐字一致，不击穿 prompt 缓存）；</li>
+	 * <li>已不在当前披露面的冻结工具被裁掉；新增披露的追加在后面；</li>
+	 * <li>执行侧的 callback 解析另由 {@link #executionPrompt} 兜住（否则新增工具会"看得见、点不动"）。</li>
+	 * </ul>
+	 *
+	 * <h2>回落口径（不能让工具凭空变空/变多）</h2>
+	 * 无 options / callbacks 为空 / 无 {@code runId} / 无快照 / 重算结果为空 / 任何异常 ⇒
+	 * <b>原样返回委托结果</b>。尤其是"callbacks 为空"：那可能是"本轮不下发任何工具"（模型不支持
+	 * 工具调用），把它换成 registry 的全集就是<b>静默扩大授权面</b>。
+	 */
 	@Override
 	public List<ToolDefinition> resolveToolDefinitions(ToolCallingChatOptions chatOptions) {
-		return this.delegate.resolveToolDefinitions(chatOptions);
+		List<ToolDefinition> delegated = this.delegate.resolveToolDefinitions(chatOptions);
+		try {
+			if (chatOptions == null) {
+				return delegated;
+			}
+			List<ToolCallback> frozen = chatOptions.getToolCallbacks();
+			if (frozen == null || frozen.isEmpty()) {
+				return delegated;
+			}
+			// toolNames 的解析面在本类之外（委托的 resolver），重算不了 ⇒ 原样委托
+			if (chatOptions.getToolNames() != null && !chatOptions.getToolNames().isEmpty()) {
+				return delegated;
+			}
+			String runId = runIdOf(chatOptions.getToolContext());
+			if (runId == null) {
+				return delegated;
+			}
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				return delegated;
+			}
+			List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
+			if (current == null || current.isEmpty()) {
+				return delegated;
+			}
+			List<ToolCallback> merged = mergeDisclosed(frozen, current);
+			if (merged.isEmpty()) {
+				return delegated;
+			}
+			return merged.stream().map(ToolCallback::getToolDefinition).toList();
+		}
+		catch (RuntimeException ex) {
+			// 披露重算是增强：算不出来就按请求边界那一份继续（执行侧防线③仍按快照上下文复查）
+			log.warn("按当前快照重算工具定义失败，回落原委托：{}", ex.getMessage());
+			return delegated;
+		}
+	}
+
+	/**
+	 * 冻结集合（名字与顺序）∩ 当前披露面 + 新披露的那些（追加在后）。
+	 *
+	 * <p>用<b>名字</b>对齐而不是对象身份：请求边界与本次重算拿到的都是 registry 里同一个回调实例，
+	 * 但"同一性"不该成为披露口径的隐含前提。
+	 */
+	private static List<ToolCallback> mergeDisclosed(List<ToolCallback> frozen, List<ToolCallback> current) {
+		Map<String, ToolCallback> disclosed = new LinkedHashMap<>();
+		for (ToolCallback callback : current) {
+			if (callback != null) {
+				disclosed.putIfAbsent(toolNameOf(callback), callback);
+			}
+		}
+		List<ToolCallback> merged = new ArrayList<>(frozen.size() + disclosed.size());
+		Set<String> kept = new HashSet<>();
+		for (ToolCallback callback : frozen) {
+			if (callback == null) {
+				continue;
+			}
+			String name = toolNameOf(callback);
+			if (disclosed.containsKey(name)) {
+				merged.add(callback);
+				kept.add(name);
+			}
+		}
+		for (Map.Entry<String, ToolCallback> entry : disclosed.entrySet()) {
+			if (kept.add(entry.getKey())) {
+				merged.add(entry.getValue());
+			}
+		}
+		return merged;
+	}
+
+	private static String toolNameOf(ToolCallback callback) {
+		return callback.getToolDefinition().name();
+	}
+
+	/** 回调集合的名字序列（顺序敏感的比较用：披露面没变时不得复制 options、不得改序）。 */
+	private static List<String> names(List<ToolCallback> callbacks) {
+		List<String> names = new ArrayList<>(callbacks.size());
+		for (ToolCallback callback : callbacks) {
+			names.add(callback == null ? null : toolNameOf(callback));
+		}
+		return names;
+	}
+
+	/**
+	 * 执行侧：本次调用的官方委托要能解析到它的 callback。
+	 *
+	 * <p>官方 {@code DefaultToolCallingManager} 执行单个调用时只从 {@code prompt.getOptions()}
+	 * 的 callbacks 里按名字找（找不到才问 resolver，而本类的 delegate 用的是空 resolver）。
+	 * 下一跳重算把 {@code check_job_status} 之类的新工具给了模型，但旧 options 里没有它 ——
+	 * 不补这一份副本就会"模型看得见、执行时 No ToolCallback found"。
+	 *
+	 * <p><b>真实语义</b>：这里为当前这次调用合并出一份"可解析回调"副本（与
+	 * {@link #mergeDisclosed} 同一口径 —— 随当前披露面变化，旧集合里已不在披露面的回调会被裁掉、
+	 * 新披露的会追加），集合本身<b>不是授权</b>：能否执行仍由防线③（{@code matchesContext} 按快照
+	 * 上下文复查）与各工具的确认门/HITL 决定。拿不到上下文/异常一律按原 options 执行。
+	 */
+	private Prompt executionPrompt(Prompt prompt, String toolName) {
+		try {
+			if (prompt == null || !(prompt.getOptions() instanceof ToolCallingChatOptions options)) {
+				return prompt;
+			}
+			List<ToolCallback> frozen = options.getToolCallbacks() == null ? List.of() : options.getToolCallbacks();
+			if (frozen.stream().anyMatch(callback -> callback != null && toolName != null
+					&& toolName.equals(toolNameOf(callback)))) {
+				return prompt;
+			}
+			String runId = runIdOf(prompt);
+			if (runId == null) {
+				return prompt;
+			}
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				return prompt;
+			}
+			List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
+			if (current == null || current.isEmpty()) {
+				return prompt;
+			}
+			List<ToolCallback> merged = mergeDisclosed(frozen, current);
+			// 仍解析不到（该工具现在本来就不该被披露）⇒ 保留原 options，让既有失败口径如实回填，
+			// 不在这里伪造"可解析"；集合没变化 ⇒ 也不必复制 options
+			if (merged.stream().noneMatch(callback -> callback != null && toolName != null
+					&& toolName.equals(toolNameOf(callback)))) {
+				return prompt;
+			}
+			if (names(merged).equals(names(frozen))) {
+				return prompt;
+			}
+			ToolCallingChatOptions copy = options.copy();
+			if (copy == null) {
+				return prompt;
+			}
+			copy.setToolCallbacks(merged);
+			log.info("执行期补齐当前披露的回调（本批请求边界之外的新披露工具）runId={} tool={} callbacks={}", runId,
+					toolName, merged.size());
+			return new Prompt(prompt.getInstructions(), copy);
+		}
+		catch (RuntimeException ex) {
+			log.warn("执行期补齐工具回调失败，按原 options 执行 tool={}：{}", toolName, ex.getMessage());
+			return prompt;
+		}
 	}
 
 	@Override
@@ -741,6 +928,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 				ToolCallEndTrace.emitOnce(this.settlementObservations, runId, snapshot.getSessionId(), source,
 						pending.getToolCallId(), pending.getName(), pending.getKind(), totalToolMs,
 						execMsOf(source, totalToolMs), text, this.sheetAudit);
+				// 动态披露（多步工作流批）：<b>逐条成功结算之后</b>按真实结果推进本轮上下文。
+				// 同批后续调用的 scope 判据仍用上面那份冻结 context（批内不扩权），只有下一批
+				// （又一次 executeToolCalls）才会按新上下文重算披露面（resolveToolDefinitions）。
+				refreshRunContext(runId, source);
 				// T2：回填模型的是裁剪后的文本；上面的 text 本身（进帧、进台账）保持全文
 				// P0-1：模型侧 = 统一信封 JSON（先裁剪 message，再组装，见 ToolResultEnvelope#toModelJson）
 				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText
@@ -969,24 +1160,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return CreateTaskInRun.NONE;
 	}
 
-	/** 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。 */
+	/** 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。实现与刷新器同一份。 */
 	private static Long taskIdFromText(String text) {
-		if (text == null) {
-			return null;
-		}
-		int hash = text.indexOf('#');
-		if (hash < 0) {
-			return null;
-		}
-		int index = hash + 1;
-		long value = 0L;
-		boolean any = false;
-		while (index < text.length() && Character.isDigit(text.charAt(index))) {
-			value = value * 10 + (text.charAt(index) - '0');
-			any = true;
-			index++;
-		}
-		return any ? value : null;
+		return RunContextRefresher.taskIdFromText(text);
 	}
 
 	/**
@@ -2326,7 +2502,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		AssistantMessage.ToolCall call = new AssistantMessage.ToolCall(pending.getToolCallId(),
 				pending.getType() == null ? "function" : pending.getType(), pending.getName(), pending.getArguments());
 		AssistantMessage single = AssistantMessage.builder().toolCalls(List.of(call)).build();
-		ToolExecutionResult result = this.delegate.executeToolCalls(prompt,
+		// 动态披露：本批请求边界之外的"新披露工具"不在旧 options 的 callbacks 里，官方委托按名字
+		// 找不到就会抛 No ToolCallback found —— 用当前披露面的 callbacks 副本保证可解析（集合可随披露面
+		// 变化，但不是授权：能否执行仍由防线③与确认门/HITL 决定）。
+		ToolExecutionResult result = this.delegate.executeToolCalls(executionPrompt(prompt, pending.getName()),
 				new ChatResponse(List.of(new Generation(single))));
 		return result.conversationHistory()
 			.stream()
@@ -2531,12 +2710,64 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.store.save(snapshot);
 	}
 
+	/**
+	 * 工具批后把<b>运行上下文</b>推进到真实结果（多步工作流批）。
+	 *
+	 * <p>三层口径：
+	 * <ol>
+	 * <li><b>只由成功结算触发</b>：判据（工具名 + {@code outcome=OK}）在
+	 * {@link RunContextRefresher#next} 里，本方法只负责"读快照 → 算 → 写回"；</li>
+	 * <li><b>批内冻结</b>：这里只改<b>外置快照</b>，执行循环里那份 {@code context} 变量一字不动 ——
+	 * 同一批里"导航 + 选配置"仍按批首 scope 被拒（{@code SCOPE_NOT_DISCLOSED}），下一批才放行；</li>
+	 * <li><b>失败不打断</b>：任何异常（读快照/任务服务/写快照）只 WARN，保留旧上下文，
+	 * 工具轮照常返回 —— 刷新是"让下一步更准"的增强，不是本批的判定面。</li>
+	 * </ol>
+	 */
+	private void refreshRunContext(String runId, PendingToolCall settled) {
+		RunContextRefresher refresher = this.contextRefresher;
+		if (refresher == null || settled == null || !RunContextRefresher.supports(settled.getName())) {
+			return;
+		}
+		try {
+			RunSnapshot fresh = this.store.get(runId);
+			if (fresh == null) {
+				return;
+			}
+			AiContext before = AiContext.fromMap(fresh.getContext());
+			Optional<AiContext> next = refresher.next(before, settled);
+			if (next == null || next.isEmpty()) {
+				return;
+			}
+			AiContext after = next.get();
+			if (after.equals(before)) {
+				return;
+			}
+			fresh.setContext(after.toMap());
+			this.store.save(fresh);
+			log.info("工具批后已刷新运行上下文 runId={} tool={} page={} taskId={} taskType={} step={} status={}", runId,
+					settled.getName(), after.getPage(), after.getTaskId(), after.getTaskType(), after.getStep(),
+					after.getTaskStatus());
+		}
+		catch (RuntimeException ex) {
+			log.warn("工具批后刷新运行上下文失败，保留旧上下文（不阻断工具轮）runId={} tool={}：{}", runId,
+					settled.getName(), ex.getMessage());
+		}
+	}
+
 	private String runIdOf(Prompt prompt) {
-		if (prompt.getOptions() instanceof ToolCallingChatOptions options && options.getToolContext() != null) {
-			Object runId = options.getToolContext().get("runId");
-			return runId == null ? null : String.valueOf(runId);
+		if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
+			return runIdOf(options.getToolContext());
 		}
 		return null;
+	}
+
+	/** 从 {@code toolContext} 取本轮 runId（无则 null：披露重算/执行补全都按"不可判定"回落）。 */
+	private static String runIdOf(Map<String, Object> toolContext) {
+		if (toolContext == null) {
+			return null;
+		}
+		Object runId = toolContext.get("runId");
+		return runId == null ? null : String.valueOf(runId);
 	}
 
 	private Map<String, Object> toolContextOf(Prompt prompt) {

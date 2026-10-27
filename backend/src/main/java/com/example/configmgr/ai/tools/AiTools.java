@@ -66,9 +66,12 @@ import java.util.stream.Collectors;
  * 下发与执行沿用既有 {@code frontend_tool_request} 通道，前端零改动。
  *
  * <p>披露口径（三重防线之一，见 {@code ToolScope}）：向导动作在<b>任务中心</b>（向导入口页）与
- * <b>对应任务类型</b>下披露，{@code definitions/data} 等非向导页面不披露；一轮内模型发起的多次
- * 调用共享同一份披露集（上下文在请求边界冻结），因此按"任务类型"而非"单一步骤"披露 ——
- * 步骤级/页面级适配由前端动作表的 {@code allowPages}/{@code allowSteps} 兜底校验（防线三）。
+ * <b>对应任务类型</b>下披露，{@code definitions/data} 等非向导页面不披露；<b>同一批</b>模型发起的
+ * 多次调用共享同一份披露集（scope 判据在批首冻结，一批工具不允许自我扩权），因此按"任务类型"
+ * 而非"单一步骤"披露 —— 步骤级/页面级适配由前端动作表的 {@code allowPages}/{@code allowSteps}
+ * 兜底校验（防线三）。批与批之间则按真实结果刷新：{@code navigate_to}/{@code create_task}/
+ * {@code confirm_step} 成功结算后运行上下文（页面/任务/权威步骤）写入本轮快照，下一跳由
+ * {@code ToolRegistry#forContext} 重算披露面。
  *
  * <p><b>S4.4e 裁决③</b>：{@code set_condition} 的 {@code conditions} 入参改为与前端契约
  * （{@code frontend/src/types/condition.ts} 的 {@code FieldQueryCondition}）逐字段一致的
@@ -276,8 +279,9 @@ public class AiTools {
      * → {@code start_export}（确认门）。
      *
      * <p><b>披露范围（{@code page:tasks} + 两类向导页）</b>：任务中心是"没有任务时建任务"的现场；
-     * 向导页一并披露，是为了在已有任务时也能按用户要求再建一条（否则模型得先导航回任务中心，
-     * 而一轮内的披露集在请求边界冻结，跨页会导致工具子集不一致）。
+     * 向导页一并披露，是为了在已有任务时也能按用户要求再建一条（否则模型得先导航回任务中心）。
+     * 同一批内的披露面在批首冻结，跨页的披露切换由<b>批间</b>的运行上下文刷新完成
+     * （{@code create_task} 成功结算后按真实任务号写入快照，下一跳重算披露面）。
      *
      * <p><b>风险等级 {@code DANGER}</b>（AR-03：进确认门）：创建会占任务号、进列表、可被后续引用，
      * 属有后果动作；用户拒绝/取消即<b>不创建</b>。确认门复用既有三态语义（批准/拒绝/取消），
@@ -469,7 +473,8 @@ public class AiTools {
      * 页面导航。披露范围为 {@code *}：它是任意页面进入向导的唯一入口动作，
      * 目标页面的合法性由前端动作表白名单（{@code allowPages}）兜底校验。
      */
-    @Tool(name = "navigate_to", description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导")
+    @Tool(name = "navigate_to", description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导。"
+            + "导航成功不是本轮终点：下一批按最新披露继续页面动作，同一目标页不要重复导航")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.U)
@@ -536,7 +541,8 @@ public class AiTools {
      * 写进拒绝原因。未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
     @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
-            + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项）")
+            + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
+            + "只有用户明确提出筛选/查询条件时才调用）")
     @ToolScope({ "page:tasks", "task:EXPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -584,7 +590,8 @@ public class AiTools {
      * {@code confirm_step} 仍是同一条路径。回执必须如实说明实际写回了哪些配置项。
      */
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
-            + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步")
+            + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
+            + "推进成功后下一批按最新披露继续，推进失败即停")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)

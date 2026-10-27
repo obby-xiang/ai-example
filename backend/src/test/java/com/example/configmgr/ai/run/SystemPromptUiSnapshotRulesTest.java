@@ -11,7 +11,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 三条都是「结构约束的说明书」：快照闸与动态披露在代码里已经强制，提示词负责让模型
  * <b>理解为什么工具消失 / 为什么被拒</b>，避免把能力收窄误读成故障后反复尝试或向用户道歉。
  *
- * <p><b>证红</b>：删掉第 20/21 条 ⇒ 对应用例红；把「导航类调用成功后即结束本轮」删掉 ⇒ 第 10 条用例红；
+ * <p><b>证红</b>：删掉第 20/21 条 ⇒ 对应用例红；把第 10 条的「导航成功后不要结束本轮 / 下一批按最新披露」
+ * 或「同一目标页不要重复导航」删掉 ⇒ 第 10 条用例红；
  * 删掉第 22 条或把其中 `text=true` 改写 ⇒ {@code textSnapshotRuleIsPresent} 红。
  */
 class SystemPromptUiSnapshotRulesTest {
@@ -34,14 +35,18 @@ class SystemPromptUiSnapshotRulesTest {
 		assertThat(prompt).contains("不要反复尝试 ui_*");
 	}
 
+	/**
+	 * 多步工作流（2026-10-27）：第 10 条已从"导航成功即结束本轮"改为"导航成功后不要结束本轮，
+	 * 下一批按最新披露继续页面动作"，本用例随之改为钉新口径；导航去重与"同一目标页不要重复导航"
+	 * 的收紧保持不变。
+	 */
 	@Test
 	void navigationTighteningIsAppendedToRule10() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
-		assertThat(prompt).contains("导航类调用成功后即结束本轮");
+		assertThat(prompt).contains("导航成功后不要结束本轮");
+		assertThat(prompt).contains("下一批按最新披露");
 		assertThat(prompt).contains("同一目标页不要重复导航");
-		// 收紧只加一句，不换掉第 10 条原有语义（"本轮拿不到刚解锁的工具"仍须保留）
-		assertThat(prompt).contains("同一轮里不要接着调用刚解锁的工具");
 	}
 
 	@Test

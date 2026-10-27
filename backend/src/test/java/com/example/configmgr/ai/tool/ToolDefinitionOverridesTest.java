@@ -273,8 +273,9 @@ class ToolDefinitionOverridesTest {
     }
 
     /**
-     * 用户 2026-10-27 裁决：confirm_step 的模型侧描述要说明"默认不传 step 只前进一步"与
-     * "step 仅在用户点名目标/明确跳过时才传"。描述覆盖存在 YAML 里，改它必须同时升 version。
+     * 多步工作流（2026-10-27）：confirm_step 的模型侧描述改为"推进成功后下一批按最新披露继续、
+     * 失败即停"，旧的"推进只对下一轮生效"必须删除；默认不传 step 的口径保留。
+     * 描述覆盖存在 YAML 里，改它必须同时升 version。
      */
     @Test
     void shippedConfirmStepOverridePinsDefaultNextStepAndBumpsVersion() {
@@ -284,6 +285,10 @@ class ToolDefinitionOverridesTest {
         assertTrue(override.hasDescription(), "confirm_step 必须保留描述覆盖（否则回落注解）");
         assertTrue(override.description().contains("默认不传 step，只前进一步"), override.description());
         assertTrue(override.description().contains("step 仅在用户点名目标步骤或"), override.description());
-        assertTrue(!"2026-10-26.2".equals(shipped.version()), "改描述必须发新 version，当前：" + shipped.version());
+        assertTrue(!override.description().contains("推进只对下一轮生效"),
+                "旧口径（推进只对下一轮生效）必须删除：" + override.description());
+        assertTrue(override.description().contains("下一批按最新披露"), override.description());
+        assertTrue(override.description().contains("失败即停"), override.description());
+        assertEquals("2026-10-27.2", shipped.version(), "改描述必须发新 version");
     }
 }
