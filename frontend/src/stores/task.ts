@@ -189,6 +189,23 @@ function formatPublishConflictSummary(jobId: number, issues: ValidationIssue[]):
  */
 let watchingJobId: number | null = null
 
+/**
+ * `ensureTaskType` 的读取失败分类：只有**瞬时**失败值得退避重试。
+ *
+ * - 网络层未到达（`status === 0`）/ 网关或服务端 5xx / 显式限流与超时（408 / 429）⇒ 重试；
+ * - 任务确定不存在（404 等确定性 4xx）⇒ 不重试，立刻 fail-closed（重试同一条不会变）；
+ * - 非 `ApiError` 的意外异常 ⇒ 按读取失败处理（不知道是不是瞬时的，给一次机会）。
+ */
+function isTransientTaskReadFailure(error: unknown): boolean {
+  if (!(error instanceof ApiError)) {
+    return true
+  }
+  if (error.status === 0 || error.status === 408 || error.status === 429) {
+    return true
+  }
+  return error.status >= 500
+}
+
 export const useTaskStore = defineStore('task', {
   state: () => ({
     items: [] as TaskSummary[],
@@ -589,9 +606,14 @@ export const useTaskStore = defineStore('task', {
     /**
      * **权威任务类型**（`restore_task` / 带任务的导航的唯一依据）。
      *
-     * 命中缓存（本列表行 / 之前拉过）⇒ 直接返回；否则拉一次 `GET /tasks/{id}` 并记入缓存。
+     * 命中缓存（本列表行 / 之前拉过）⇒ 直接返回；否则拉 `GET /tasks/{id}` 并记入缓存。
      * **读取失败返回 `null`，不兜底成 EXPORT**：兜底会让导入任务在"列表未加载 / 瞬时失败"
      * 的那一拍被送进导出向导（"导入跳导出"的根因），调用方应据此给出可行动的回执，而不是替用户选错页。
+     *
+     * 有限退避（NAV3 同批）：首发 + 200ms + 400ms 共 **3 次**，只为跨过一次瞬时抖动
+     * （网络 / 网关 / 5xx）—— **不轮询**，也不再延长上界。只重试**瞬时**读取失败：
+     * 任务确定不存在（404 等确定性 4xx）立即收口，重试只会把"没有这条"拖成三次无谓请求。
+     * 每次重试前重查缓存：退避期间别的调用点（列表加载 / 事件分发）可能已经把类型钉住。
      */
     async ensureTaskType(taskId: number): Promise<TaskType | null> {
       const known = this.knownWizardType(taskId)
@@ -599,16 +621,34 @@ export const useTaskStore = defineStore('task', {
         this.knownTaskTypes[taskId] = known
         return known
       }
-      try {
-        const task = await tasksApi.getTask(taskId)
-        if (!task || (task.type !== 'EXPORT' && task.type !== 'IMPORT')) {
-          return null
+      const backoffMs = [200, 400]
+      for (let attempt = 0; attempt <= backoffMs.length; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, backoffMs[attempt - 1])
+          })
+          // 缓存优先：退避窗口里已被别处钉住的类型（权威缓存 / 列表行）直接复用，不再发请求
+          const pinned = this.knownWizardType(taskId)
+          if (pinned) {
+            this.knownTaskTypes[taskId] = pinned
+            return pinned
+          }
         }
-        this.knownTaskTypes[taskId] = task.type
-        return task.type
-      } catch {
-        return null
+        try {
+          const task = await tasksApi.getTask(taskId)
+          if (!task || (task.type !== 'EXPORT' && task.type !== 'IMPORT')) {
+            return null
+          }
+          this.knownTaskTypes[taskId] = task.type
+          return task.type
+        } catch (error) {
+          // 确定性不存在（404 等）：重试同一条也不会变，立即 fail-closed
+          if (!isTransientTaskReadFailure(error)) {
+            return null
+          }
+        }
       }
+      return null
     },
 
     async fetchTaskType(taskId: number): Promise<TaskType> {

@@ -289,11 +289,12 @@ public class AiTools {
      * 用户重复确认都收敛到"至多一个任务"。
      *
      * <p><b>创建≠执行</b>：本工具只建任务，不启动作业；返回值带上任务 id 与下一个动作
-     * （{@code navigate_to} 的目标页面），让模型在新一轮打开向导。
+     * （{@code navigate_to} 的目标页面），让模型在同一轮拿到 taskId 后立即打开向导
+     * （与本次调用<b>分批</b>发起，不并批）。
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT/IMPORT）。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，下一轮用 navigate_to(page=..., taskId=...) 打开向导",
+    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT/IMPORT）。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -582,7 +583,8 @@ public class AiTools {
      * 通道判定优先于风险等级，WRITE 不会触发后端确认卡；用户点页面「下一步」与 AI 调用
      * {@code confirm_step} 仍是同一条路径。回执必须如实说明实际写回了哪些配置项。
      */
-    @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）")
+    @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
+            + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步")
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)

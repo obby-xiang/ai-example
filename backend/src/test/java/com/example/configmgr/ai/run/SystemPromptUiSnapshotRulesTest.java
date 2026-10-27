@@ -40,8 +40,8 @@ class SystemPromptUiSnapshotRulesTest {
 
 		assertThat(prompt).contains("导航类调用成功后即结束本轮");
 		assertThat(prompt).contains("同一目标页不要重复导航");
-		// 收紧只加一句，不换掉第 10 条原有语义
-		assertThat(prompt).contains("推进后不要在同一轮里接着调用刚解锁的工具");
+		// 收紧只加一句，不换掉第 10 条原有语义（"本轮拿不到刚解锁的工具"仍须保留）
+		assertThat(prompt).contains("同一轮里不要接着调用刚解锁的工具");
 	}
 
 	@Test

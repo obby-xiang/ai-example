@@ -700,6 +700,13 @@ function rememberSameCall(slot: DedupeSlot | null, execution: FrontendToolExecut
   if (slot.scope !== dedupeScope) {
     return
   }
+  // 只缓存**可复用**的结局：确认成功（`ok`，含 `UI_ALREADY_ON_PAGE` 这类幂等直返）且能力可用。
+  // 失败 / 超时 / 结局未知 / 降级一律不记 —— 记下去等于把一次失败毒化成"本轮已执行过"，
+  // 同参重试会被这条失败条目挡回（模型据此判定"这条路走不通"，而现场可能早已可执行）。
+  // 幂等与否由 outcome 表达，不按文案猜：`ok` 之外没有任何结局可以被同参复用。
+  if (execution.outcome !== 'ok' || execution.availability !== 'available') {
+    return
+  }
   dedupeCache.set(slot.key, execution)
 }
 
@@ -938,23 +945,28 @@ function delay(ms: number): Promise<void> {
  *
  * 为什么不能先猜页面：目标页由任务类型决定，而类型没给就必须由服务端说了算。这里只等
  * "任务绑上了、且落在一个向导页面上"，不替用户/模型选边（选错页正是"导入跳导出"）。
+ *
+ * 三维**分开返回**（NAV2）：`opened` = 落在某个向导页且任务已绑定；`detailReady` = 详情已应用。
+ * 只有布尔值时，"页已打开、详情还在加载"与"页根本没打开"会挤进同一个 false，回执只能瞎猜一侧
+ * —— 前者被说成"页面未就绪/未跳转"就是谎报。两维都只读现场，不加等待时长。
  */
 async function waitForTaskOpened(
   expectedTaskId: number,
   timeoutMs = PAGE_READY_TIMEOUT_MS
-): Promise<boolean> {
+): Promise<{ opened: boolean; detailReady: boolean }> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const workspace = useWorkspaceStore()
     const page = workspace.pageId
     const wizardReady = (page === 'export' || page === 'import')
       && PAGE_READY_PROBES[page].some((name) => getPageHandler(name) !== null)
-      && isTaskDetailReady(page)
-    if (wizardReady && workspace.taskId === expectedTaskId) {
-      return true
+    const opened = wizardReady && workspace.taskId === expectedTaskId
+    const detailReady = opened && isTaskDetailReady(page)
+    if (opened && detailReady) {
+      return { opened: true, detailReady: true }
     }
     if (Date.now() >= deadline) {
-      return false
+      return { opened, detailReady }
     }
     await delay(50)
   }
@@ -990,21 +1002,27 @@ function taskTypeUnknown(taskId: number): FrontendToolExecution {
 }
 
 /**
- * 页面与任务都在位、但**任务详情未应用**时的统一回执（不谎报成功）。
+ * 页面与任务都在位、但**任务详情未应用**时的统一回执（不谎报成功，也不谎报"没导航"）。
  *
  * 这一拍页面上的选中集/条件仍是空的：放行成 ok，紧随的 `confirm_step` 就会拿空选中集推进
  * 并向服务端落库（"AI 说按勾选导出，实际导出全量"）。故如实报 failed + 可行动下一步。
+ *
+ * NAV2 口径：`router.push` 已经成功、目标页也挂上了，缺的只是**详情**这一维 —— 回执必须说
+ * "页面已打开、详情仍在加载"，不能写成"导航未执行 / 未跳转 / 打开失败"（模型会据此重新导航，
+ * 页面再挂一次，且真正的等待窗口被重新计时）。路由**不改**：不重推、不回退。
+ *
+ * @param label 向导中文名（`导出` / `导入`）；未带任务类型时页名不可知，传 `null` 走通用主语
  */
-function taskDetailNotReady(label: string, taskId: number): FrontendToolExecution {
+function taskDetailNotReady(label: string | null, taskId: number): FrontendToolExecution {
   return makeExecution({
     outcome: 'failed',
     availability: 'degraded',
     code: 'UI_PAGE_NOT_READY',
     result: formatUiReceipt({
-      tool: `${label}向导`,
-      conclusion: `任务 #${taskId} 的详情在等待上界内仍未应用（选中的配置项 / 查询条件 / 步骤尚未恢复）`,
-      reason: '任务详情读取慢或读取失败，此时页面上的勾选集为空',
-      next: '本轮不要再设置条件或推进步骤；请稍后重试，或提示用户手动打开该任务'
+      tool: label === null ? '任务向导' : `${label}向导`,
+      conclusion: `页面已打开、任务 #${taskId} 已绑定，但任务详情在等待上界内仍未应用（选中的配置项 / 查询条件 / 步骤尚未恢复）`,
+      reason: '详情读取慢或读取失败，此时页面上的勾选集为空；路由已经落位，无需重新导航',
+      next: '本轮不要再设置条件或推进步骤；请稍后重试或提示用户手动打开该任务'
     })
   })
 }
@@ -1605,6 +1623,19 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
 }
 
 /**
+ * 导航类 ui_event 的等待结局。
+ *
+ * `opened-detail-pending` 必须与 `not-ready` 分开：`router.push` 已经成功、目标页也挂上了，
+ * 只差任务详情这一维 —— 把它并进 `not-ready` 就会被回执说成"页面未就绪/没导航"，
+ * 与事实相反（模型据此重新导航，页面再挂一次，真正的等待窗口又被重新计时）。
+ */
+type UiEventNavigationWait =
+  | { kind: 'none' }
+  | { kind: 'ready' }
+  | { kind: 'opened-detail-pending'; taskId: number; label: string | null }
+  | { kind: 'not-ready' }
+
+/**
  * 导航类 ui_event 的目标页与完成判据（批次 5B：导航后等目标页就绪再回灌）。
  *
  * 直接经路由 3 驱动的 ui_event（`export_started` / `import_batch` / `import_action` / `open_page`）
@@ -1612,26 +1643,43 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
  * 只是走的是另一条路由）。`restore_task` 的目标页由任务类型决定 —— 有 `taskType` 就按它对页面，
  * 没有就等"某个向导页就绪且任务已绑定"（不猜）。
  *
- * @returns `null` = 本事件不导航（无需等待）
+ * `restore_task` 的成功判据与 `navigate_to` / `runRestoreTask` **同源**：页面 + 绑定 + **详情**
+ * 三维齐了才算就绪（漏掉详情这一维，紧随的 `confirm_step` 会拿空选中集落库）。
+ *
+ * @returns `none` = 本事件不导航（无需等待）
  */
-async function waitForUiEventNavigation(event: UiEvent): Promise<boolean | null> {
+async function waitForUiEventNavigation(event: UiEvent): Promise<UiEventNavigationWait> {
   switch (event.type) {
     case 'open_page':
-      return await waitForPageReady(event.page)
+      return await waitForPageReady(event.page) ? { kind: 'ready' } : { kind: 'not-ready' }
     case 'export_started':
-      return await waitForPageReady('export')
+      return await waitForPageReady('export') ? { kind: 'ready' } : { kind: 'not-ready' }
     case 'import_batch':
     case 'import_action':
-      return await waitForPageReady('import')
+      return await waitForPageReady('import') ? { kind: 'ready' } : { kind: 'not-ready' }
     case 'restore_task': {
       if (event.taskType === 'IMPORT' || event.taskType === 'EXPORT') {
-        const wait = await waitForTaskBound(wizardPageOf(event.taskType).page, event.taskId)
+        const { page, label } = wizardPageOf(event.taskType)
+        const wait = await waitForTaskBound(page, event.taskId)
+        if (wait.pageReady && wait.taskBound && wait.detailReady) {
+          return { kind: 'ready' }
+        }
+        // 页已打开、任务已绑定，只差详情：回执照实说"已打开"，不说"未就绪/未导航"
         return wait.pageReady && wait.taskBound
+          ? { kind: 'opened-detail-pending', taskId: event.taskId, label }
+          : { kind: 'not-ready' }
       }
-      return await waitForTaskOpened(event.taskId)
+      const opened = await waitForTaskOpened(event.taskId)
+      if (opened.detailReady) {
+        return { kind: 'ready' }
+      }
+      // 未带类型：页名不可知（类型归服务端），回执只用通用主语"任务向导"
+      return opened.opened
+        ? { kind: 'opened-detail-pending', taskId: event.taskId, label: null }
+        : { kind: 'not-ready' }
     }
     default:
-      return null
+      return { kind: 'none' }
   }
 }
 
@@ -1657,8 +1705,13 @@ async function runUiEventAction(
       return makeExecution({ outcome: 'failed', availability: 'available', result: outcome.message })
     }
     // 批次 5B：导航类事件等目标页就绪再回灌（等待上界与 navigate_to 同源）
-    const ready = await waitForUiEventNavigation(event)
-    if (ready === false) {
+    const wait = await waitForUiEventNavigation(event)
+    // 页已打开、任务已绑定，只差详情：共用 `taskDetailNotReady`（failed + degraded，不改路由、
+    // 不说"没导航"），与 `navigate_to` / `restore_task` 三条导航路径同一口径。
+    if (wait.kind === 'opened-detail-pending') {
+      return taskDetailNotReady(wait.label, wait.taskId)
+    }
+    if (wait.kind === 'not-ready') {
       return makeExecution({
         outcome: 'failed',
         availability: 'degraded',
@@ -1674,7 +1727,7 @@ async function runUiEventAction(
     return makeExecution({
       outcome: 'ok',
       availability: 'available',
-      result: ready === true ? `${outcome.message}（页面已就绪，可继续执行本页动作）` : outcome.message
+      result: wait.kind === 'ready' ? `${outcome.message}（页面已就绪，可继续执行本页动作）` : outcome.message
     })
   } catch (error) {
     return makeExecution({

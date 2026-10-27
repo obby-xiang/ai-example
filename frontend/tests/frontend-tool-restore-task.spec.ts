@@ -17,6 +17,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { ApiError } from '@/api/http'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { dispatchUiEvent, getPageHandler, registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
@@ -242,6 +243,44 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
       expect(execution.code).toBe('UI_PAGE_NOT_READY')
       expect(execution.result).toContain('详情')
       expect(execution.result).not.toContain('可继续执行本页动作')
+      // NAV2：页已打开、任务已绑定，只差详情 —— 不得倒过来说成"没导航/没打开"
+      expect(execution.availability).toBe('degraded')
+      expect(execution.result).toContain('页面已打开')
+      expect(execution.result).toContain('任务 #51 已绑定')
+      expect(execution.result).toContain('不要再设置条件或推进步骤')
+      expect(execution.result).not.toContain('未导航')
+      expect(execution.result).not.toContain('未跳转')
+      expect(execution.result).not.toContain('导航未执行')
+      expect(execution.result).not.toContain('打开失败')
+    } finally {
+      unregisterPageHandler('export.taskDetailReady')
+    }
+  })
+
+  it('restore_task：push 已成功、页与任务都在位但详情未就绪 ⇒ 照实说"页面已打开"，不改路由', async () => {
+    api.getTask.mockResolvedValue({ id: 54, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
+    registerPageHandler('export.taskDetailReady', () => false)
+    try {
+      const execution = await executeFrontendTool({
+        name: 'restore_task',
+        args: { taskId: 54 },
+        budgetMs: 8_000
+      })
+
+      // 路由确实执行过：一次 push，页与任务都已落位
+      expect(push).toHaveBeenCalledTimes(1)
+      expect(useWorkspaceStore().pageId).toBe('export')
+      expect(useWorkspaceStore().taskId).toBe(54)
+      expect(execution.outcome).toBe('failed')
+      expect(execution.availability).toBe('degraded')
+      expect(execution.code).toBe('UI_PAGE_NOT_READY')
+      expect(execution.result).toContain('页面已打开')
+      expect(execution.result).toContain('任务 #54 已绑定')
+      expect(execution.result).toContain('详情')
+      expect(execution.result).not.toContain('未导航')
+      expect(execution.result).not.toContain('未跳转')
+      expect(execution.result).not.toContain('导航未执行')
+      expect(execution.result).not.toContain('打开失败')
     } finally {
       unregisterPageHandler('export.taskDetailReady')
     }
@@ -281,5 +320,48 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
     } finally {
       unregisterPageHandler('export.taskDetailReady')
     }
+  })
+})
+
+/**
+ * `ensureTaskType` 的有限退避：首发 + 200ms + 400ms 共 3 次，只重试**瞬时**读取失败。
+ * 判据两端都要锁：瞬时失败要能跨过去（否则一次抖动就 fail-closed 不导航）；
+ * 确定不存在不许重试（否则"任务不存在"会变成三次无谓请求）。
+ */
+describe('ensureTaskType：有限退避（200ms / 400ms，共 3 次）', () => {
+  it('瞬时读取失败两次 ⇒ 第 3 次成功，导航照常完成', async () => {
+    api.getTask
+      .mockRejectedValueOnce(new ApiError('网关错误', 502, '502', null))
+      .mockRejectedValueOnce(new ApiError('网络不可达', 0, 'NETWORK_ERROR', null))
+      .mockResolvedValueOnce({ id: 61, type: 'IMPORT', status: 'IN_PROGRESS', items: [], currentStep: 'UPLOAD' })
+
+    const execution = await executeFrontendTool({ name: 'restore_task', args: { taskId: 61 }, budgetMs: 8_000 })
+
+    expect(api.getTask).toHaveBeenCalledTimes(3)
+    expect(push).toHaveBeenCalledWith({ name: 'importWizard', query: { taskId: '61' } })
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toContain('导入')
+    expect(useTaskStore().knownTaskTypes[61]).toBe('IMPORT')
+  })
+
+  it('确定不存在（404）⇒ 只查 1 次、不导航、不兜底 EXPORT', async () => {
+    api.getTask.mockRejectedValue(new ApiError('任务不存在', 404, 'RESOURCE_NOT_FOUND', null))
+
+    const execution = await executeFrontendTool({ name: 'restore_task', args: { taskId: 62 }, budgetMs: 8_000 })
+
+    expect(api.getTask).toHaveBeenCalledTimes(1)
+    expect(push).not.toHaveBeenCalled()
+    expect(execution.outcome).toBe('failed')
+    expect(execution.result).toContain('无法确认任务 #62 的类型')
+    expect(useTaskStore().knownTaskTypes[62]).toBeUndefined()
+  })
+
+  it('缓存命中 ⇒ 一次请求都不发（退避不改变缓存优先）', async () => {
+    useTaskStore().knownTaskTypes[63] = 'EXPORT'
+
+    const type = await useTaskStore().ensureTaskType(63)
+
+    expect(type).toBe('EXPORT')
+    expect(api.getTask).not.toHaveBeenCalled()
   })
 })

@@ -60,22 +60,24 @@ class LanguagePolicyTest {
 	}
 
 	/**
-	 * M-4（4B 独立评审）：规则 10 的"继续"引导必须是语言中立表述。
+	 * M-4（4B 独立评审 → 2026-10-27 裁决更新）：规则 10 不再机械引导用户回复「继续」。
 	 *
-	 * <p>修复前它写「请回复「继续」完成最后一步」—— en 界面用户点 Continue 之后，模型仍被这样引导，
-	 * 很可能把中文「继续」原样吐给英文用户，形成"界面英文 + 引导中文"的缝。固定指令词本身在
-	 * 语言段里已声明按本轮语言回答，这里只需把提示词里那条举例改成双语/中立。
+	 * <p>修复前它写「请回复「继续」完成最后一步」，上一轮改成双语举例，随后一度收紧成全局"不得索取继续"。
+	 * 主控验收指出后者过宽：新步骤工具必须下一轮才披露时，没有用户输入就无法继续。最终口径 =
+	 * 确需下一轮披露时可简短说明状态并允许用户给下一步指令，只是禁止机械套用"请回复继续"；
+	 * 禁止再要批准/继续仅限 create_task 已批准/已创建成功这一例外。
 	 */
 	@Test
 	void continueGuidanceInRuleTenIsLanguageNeutral() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
 		assertThat(prompt)
-			.as("必须同时点名中文与英文两种指令词，不再只给中文举例")
-			.contains("「继续」")
-			.contains("Continue");
+			.as("确需下一轮披露时允许用户给下一步指令，但不得机械套用「请回复继续」")
+			.contains("允许用户给出下一步指令")
+			.contains("不要机械套用");
 		assertThat(prompt)
-			.as("旧的中文独占举例不得回归")
-			.doesNotContain("请回复「继续」完成最后一步");
+			.as("旧的继续引导不得回归")
+			.doesNotContain("请回复「继续」")
+			.doesNotContain("引导用户回复继续指令");
 	}
 }

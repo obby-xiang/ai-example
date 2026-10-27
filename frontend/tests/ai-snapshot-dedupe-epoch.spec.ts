@@ -13,7 +13,12 @@
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { executeFrontendTool } from '@/utils/frontend-tools'
+import {
+  executeFrontendTool,
+  makeExecution,
+  registerFrontendToolExecutor,
+  unregisterFrontendToolExecutor
+} from '@/utils/frontend-tools'
 import { bumpAiEpoch, currentAiEpoch, noteAiPage, unregisterAiRegion } from '@/utils/ai-regions'
 import { enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
@@ -190,5 +195,74 @@ describe('navigate_to：旧行为不破', () => {
     const second = await call()
     expect(second.result).toContain('本轮已执行过同参调用')
     expect(push).toHaveBeenCalledTimes(0)
+  })
+})
+
+/**
+ * NAV3：去重表只收**可复用**的结局（`ok` + 能力可用）。
+ *
+ * 毒化现场：一次 `failed` / `timeout` / 降级成功被记进表，同轮同参重试就命中它、直接回
+ * "本轮已执行过"——模型据此认定这条路走不通，而现场可能早已可执行（详情加载完 / 页面恢复）。
+ */
+describe('NAV3：失败结局不进去重表（同参可重试）', () => {
+  it('failed / timeout 不缓存，第三次 ok 才缓存，之后同参才去重', async () => {
+    enterImportPage()
+    registerRegion(makeRoot(button('import.upload.choose', '上传')))
+    const runId = 'nav3-poison'
+    const script = ['failed', 'timeout', 'ok'] as const
+    let attempt = 0
+    const executor = vi.fn(() => {
+      const outcome = script[Math.min(attempt, script.length - 1)]
+      attempt += 1
+      return makeExecution({
+        outcome,
+        availability: outcome === 'ok' ? 'available' : 'degraded',
+        result: `第 ${attempt} 次执行的结局：${outcome}`
+      })
+    })
+    registerFrontendToolExecutor('ui_snapshot', executor)
+    try {
+      const first = await snapshot(runId)
+      expect(first.outcome).toBe('failed')
+
+      const second = await snapshot(runId)
+      expect(second.outcome).toBe('timeout')
+      expect(second.result).not.toContain('本轮已执行过同参调用')
+
+      const third = await snapshot(runId)
+      expect(third.outcome).toBe('ok')
+      expect(third.result).toContain('第 3 次执行的结局')
+      expect(third.result).not.toContain('本轮已执行过同参调用')
+      expect(executor).toHaveBeenCalledTimes(3)
+
+      // 成功（ok + available）仍然进表：同参第四次被去重挡回，不再执行
+      const fourth = await snapshot(runId)
+      expect(fourth.result).toContain('本轮已执行过同参调用')
+      expect(executor).toHaveBeenCalledTimes(3)
+    } finally {
+      unregisterFrontendToolExecutor('ui_snapshot')
+    }
+  })
+
+  it('降级成功（ok + degraded）不缓存：同参再调必须真执行', async () => {
+    enterImportPage()
+    registerRegion(makeRoot(button('import.upload.choose', '上传')))
+    const runId = 'nav3-degraded'
+    const executor = vi
+      .fn()
+      .mockReturnValueOnce(makeExecution({ outcome: 'ok', availability: 'degraded', result: '降级结果' }))
+      .mockReturnValueOnce(makeExecution({ outcome: 'ok', availability: 'available', result: '恢复后的完整结果' }))
+    registerFrontendToolExecutor('ui_snapshot', executor)
+    try {
+      const first = await snapshot(runId)
+      expect(first.outcome).toBe('ok')
+
+      const second = await snapshot(runId)
+      expect(second.result).toContain('恢复后的完整结果')
+      expect(second.result).not.toContain('本轮已执行过同参调用')
+      expect(executor).toHaveBeenCalledTimes(2)
+    } finally {
+      unregisterFrontendToolExecutor('ui_snapshot')
+    }
   })
 })

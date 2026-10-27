@@ -11,7 +11,7 @@
 #
 # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故将来改描述
 # 必须发新 version 并留痕，禁止"保存即生效"式编辑。
-version: 2026-10-26.2
+version: 2026-10-27.1
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -75,7 +75,8 @@ tools:
   - toolKey: confirm_step
     title: 确认步骤
     description: >-
-      确认并推进向导步骤（前端执行）。前置：当前步骤校验通过；推进只对下一轮生效，
+      确认并推进向导步骤（前端执行）。默认不传 step，只前进一步；step 仅在用户点名目标步骤或
+      明确要求跳过筛选时才传，不要擅自跳步。前置：当前步骤校验通过；推进只对下一轮生效，
       推进后不要在同一轮调用刚解锁的工具。
   - toolKey: generative_form
     title: 生成式表单

@@ -271,4 +271,19 @@ class ToolDefinitionOverridesTest {
             assertEquals("tool." + tool + ".title", shipped.load().find(tool).effectiveTitleKey());
         }
     }
+
+    /**
+     * 用户 2026-10-27 裁决：confirm_step 的模型侧描述要说明"默认不传 step 只前进一步"与
+     * "step 仅在用户点名目标/明确跳过时才传"。描述覆盖存在 YAML 里，改它必须同时升 version。
+     */
+    @Test
+    void shippedConfirmStepOverridePinsDefaultNextStepAndBumpsVersion() {
+        YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
+        ToolDefinitionOverride override = shipped.load().find("confirm_step");
+        assertNotNull(override);
+        assertTrue(override.hasDescription(), "confirm_step 必须保留描述覆盖（否则回落注解）");
+        assertTrue(override.description().contains("默认不传 step，只前进一步"), override.description());
+        assertTrue(override.description().contains("step 仅在用户点名目标步骤或"), override.description());
+        assertTrue(!"2026-10-26.2".equals(shipped.version()), "改描述必须发新 version，当前：" + shipped.version());
+    }
 }

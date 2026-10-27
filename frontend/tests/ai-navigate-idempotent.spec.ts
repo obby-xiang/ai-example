@@ -117,23 +117,50 @@ describe('A-04：导航已提交但页面未就绪 ⇒ failed + UI_PAGE_NOT_READ
   })
 })
 
+/**
+ * NAV3 之后 A-05 的口径只剩一半：**成功**结果仍去重；**失败**结果不得再挡住重试。
+ *
+ * 旧版本拿"导航超时（failed）后被去重"当去重证据 —— 那正是要根治的毒化：
+ * 一次超时被记进表，同参重试直接被挡回"本轮已执行过"，模型据此认定路走不通。
+ */
 describe('A-05：同 run 同参去重（第二次回执「本轮已执行过」）', () => {
-  it('连调两次 navigate_to(export) ⇒ push 仍 1 次', async () => {
+  it('同页幂等成功后再连调 ⇒ 第二次去重，push 仍 0 次', async () => {
+    enter('export')
+    const call = () => executeFrontendTool({
+      name: 'navigate_to',
+      args: { page: 'export' },
+      runId: 'run-a05',
+      budgetMs: 30_000
+    })
+    const first = await call()
+    expect(first.outcome).toBe('ok')
+    expect(first.code).toBe('UI_ALREADY_ON_PAGE')
+
+    const second = await call()
+    expect(second.result).toContain('本轮已执行过')
+    expect(push).toHaveBeenCalledTimes(0)
+  })
+
+  it('首次导航失败（超时）⇒ 不缓存，同参重试会真执行（push 2 次）', async () => {
     vi.useFakeTimers()
     try {
       enter('tasks')
       const call = () => executeFrontendTool({
         name: 'navigate_to',
         args: { page: 'export' },
-        runId: 'run-a05',
+        runId: 'run-a05b',
         budgetMs: 30_000
       })
       const first = call()
       await vi.advanceTimersByTimeAsync(3_500)
-      await first
-      const second = await call()
-      expect(second.result).toContain('本轮已执行过')
-      expect(push).toHaveBeenCalledTimes(1)
+      expect((await first).outcome).toBe('failed')
+
+      const second = call()
+      await vi.advanceTimersByTimeAsync(3_500)
+      const retried = await second
+      expect(retried.outcome).toBe('failed')
+      expect(retried.result).not.toContain('本轮已执行过')
+      expect(push).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()
     }

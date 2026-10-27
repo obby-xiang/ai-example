@@ -187,6 +187,55 @@ class SystemPromptHitlConfirmTest {
 			.contains("未批准·未执行").contains("已批准·未执行");
 	}
 
+	/**
+	 * 用户 2026-10-27 裁决（「依赖模型 + 调整提示词」→ 主控验收返修）：新建任务后不得把
+	 * "再要一次批准/请回复继续/重建任务"写进正文；拿到真实 taskId 的同一轮立即导航，且不得并批。
+	 * 同时锁规则 10 的收窄口径：确需下一轮披露时可允许用户给下一步指令，禁止机械"请回复继续"。
+	 */
+	@Test
+	void systemPromptPinsCreateThenNavigateInSameTurnWithoutReapproval() {
+		String systemText = runTurnAndCaptureSystemText();
+
+		assertThat(systemText).as("只有确认卡待决时才说批准；已创建成功即任务已存在")
+			.contains("只有确认卡确实待决时才提示")
+			.contains("已批准且创建成功即\"任务已存在\"")
+			.contains("不得再次索要批准")
+			.contains("不得要求用户回复继续");
+		assertThat(systemText).as("同一轮拿到真实 taskId 后立即导航，不并批、不提前 select/confirm")
+			.contains("同一轮立即单独调用 navigate_to(page, taskId)")
+			.contains("禁止把 create_task 与 navigate_to 放进同一批并行调用")
+			.contains("page 按任务类型取对应向导")
+			.contains("导航前不要调用 select_definitions / confirm_step")
+			.contains("导航成功后结束本轮");
+		assertThat(systemText).as("规则 10 收窄：下一轮披露可允许用户给下一步指令，不机械索取继续")
+			.contains("允许用户给出下一步指令")
+			.contains("不要机械套用")
+			.contains("不要求用户重复原始意图")
+			.contains("同一目标页不要重复导航");
+	}
+
+	/**
+	 * 用户 2026-10-27 裁决：select_definitions 后默认不传 step 前进下一步，不主动追问筛选，
+	 * 只有用户主动提出才 set_condition；未提条件 = 全量导出，且查询条件始终可选。
+	 */
+	@Test
+	void systemPromptDefaultsToPlainNextStepWithoutProactiveFilterAsk() {
+		String systemText = runTurnAndCaptureSystemText();
+
+		assertThat(systemText).as("默认 confirm_step 不传 step，只前进一步")
+			.contains("不要主动追问\"要筛选还是跳过\"")
+			.contains("默认直接调用 confirm_step")
+			.contains("不传 step，只前进一步");
+		assertThat(systemText).as("筛选只在用户主动提出时设置，未提不展开询问")
+			.contains("只有用户主动提出筛选需求时才用 set_condition 设置条件")
+			.contains("不要展开询问条件");
+		assertThat(systemText).as("不设条件即全量导出并如实说明")
+			.contains("不设条件即全量导出");
+		assertThat(systemText).as("step 仅目标明确/跳过时才传，查询条件不强制")
+			.contains("step 仅在用户点名目标步骤或明确要求跳过筛选时传")
+			.contains("查询条件始终可选，不强制要求填写");
+	}
+
 	@Test
 	void textQuestionsRemainOnlyForOpenEndedInformation() {
 		String systemText = runTurnAndCaptureSystemText();
