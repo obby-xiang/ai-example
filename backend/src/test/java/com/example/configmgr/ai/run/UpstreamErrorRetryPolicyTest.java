@@ -337,21 +337,119 @@ class UpstreamErrorRetryPolicyTest {
 		verify(this.chatModel, times(1)).stream(any(Prompt.class));
 	}
 
+	// ── 2026-10-27 回归：stop 之后的裸 tool_calls 标记不得翻案 ────────────────
+
+	/**
+	 * <b>【终态锁存回归】</b>真实上游的 6 片形态里，{@code stop} 之后还会补一个<b>裸</b>
+	 * {@code finish_reason=tool_calls} 分片（该分片<b>没有</b>任何 toolCalls）。旧口径"最后一个非空
+	 * finishReason 说了算"把它当成工具轮中间态 ⇒ {@code sawTerminal=false} ⇒ 一轮已经完整落地的
+	 * 对话被误判成 {@code UPSTREAM_STREAM_INCOMPLETE}（DONE 变成 error）。
+	 *
+	 * <p>锁存口径下：首个可完成终态（{@code stop}）一次锁存，裸标记不翻案 ⇒ DONE、无 error、
+	 * {@code terminalSignal} 仍是 {@code stop}；但锁存之后若真的来了带 toolCalls 的分片（真实的新
+	 * 工具轮），仍按断流处理 —— 终态不得吞掉真实工具轮。
+	 *
+	 * <p>kill：{@code sawTerminal()} 改回读 {@code lastFinish} ⇒ 第一段变红；去掉真实工具分片守卫 ⇒
+	 * 第二段变红。
+	 */
+	@Test
+	void stopThenBareToolCallsMarkerStaysDoneWhileRealToolCallsStayIncomplete() {
+		this.properties.getResilience().setMaxAttempts(3);
+		// 6 片形态：正文 2 片 + 空片 + stop + 空片 + 裸 tool_calls 标记（无 toolCalls）
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("你"), chunk("好"), emptyChunk(),
+				terminal("stop"), emptyChunk(), terminal("tool_calls")));
+
+		List<Map<String, Object>> frames = runTurn();
+
+		assertThat(FrameContract.types(frames)).containsExactly("start", "message_start", "delta", "delta",
+				"message_end", "done");
+		FrameContract.assertConformant(frames);
+		assertThat(FrameContract.ofType(frames, "error")).as("裸 tool_calls 标记不是断流证据").isEmpty();
+		assertThat(FrameContract.oneOfType(frames, "done")).containsEntry("terminalSignal", "finishReason=stop");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(this.store.get(RUN_ID).getFinalText()).isEqualTo("你好");
+		verify(this.chatModel, times(1)).stream(any(Prompt.class));
+
+		// 锁存之后又来一条<b>真实</b>工具调用分片（无 finishReason）：这是新的工具轮，不是完成
+		String runId = "run-upstream-policy-tool-after-stop";
+		String sessionId = "s-upstream-policy-tool-after-stop";
+		seedRun(runId, sessionId);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("你"), chunk("好"), terminal("stop"), toolCallChunk()));
+
+		List<Map<String, Object>> second = runTurn(runId, sessionId);
+
+		assertThat(FrameContract.ofType(second, "done")).as("真实工具轮不得被终态吞成 DONE").isEmpty();
+		assertThat(FrameContract.oneOfType(second, "error"))
+			.containsEntry("code", ErrorCodes.UPSTREAM_STREAM_INCOMPLETE_AFTER_PARTIAL);
+		assertThat(this.store.get(runId).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	/**
+	 * <b>【安全分类不丢】</b>终态锁存不得把"最后一个 finishReason"的最终安全语义一起冻住：
+	 * {@code stop → length} 仍必须 {@code truncated}、{@code stop → content_filter} 仍是明确失败
+	 * （{@link ResilientChatService#finish} 只读 {@code Accumulator#finish()} = 最后一个 finishReason）。
+	 *
+	 * <p>kill：把 {@code finish()} 改成返回锁存的终态 ⇒ 第一段丢 {@code truncated}；让它只认锁存值
+	 * 的 CONTENT_FILTER ⇒ 第二段从 error 变 DONE。
+	 */
+	@Test
+	void stopFollowedByLengthOrContentFilterKeepsTheFinalSafetyClassification() {
+		this.properties.getResilience().setMaxAttempts(3);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("半"), terminal("stop"), terminal("length")));
+
+		List<Map<String, Object>> truncated = runTurn();
+
+		assertThat(FrameContract.types(truncated)).containsExactly("start", "message_start", "delta", "message_end",
+				"done");
+		assertThat(FrameContract.oneOfType(truncated, "done")).containsEntry("truncated", true)
+			.containsEntry("terminalSignal", "finishReason=stop");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+
+		String runId = "run-upstream-policy-filter-after-stop";
+		String sessionId = "s-upstream-policy-filter-after-stop";
+		seedRun(runId, sessionId);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("半"), terminal("stop"), terminal("content_filter")));
+
+		List<Map<String, Object>> filtered = runTurn(runId, sessionId);
+
+		assertThat(FrameContract.ofType(filtered, "done")).as("content_filter 不是完成").isEmpty();
+		assertThat(FrameContract.oneOfType(filtered, "error")).containsEntry("code", ErrorCodes.CONTENT_FILTERED);
+		assertThat(this.store.get(runId).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private List<Map<String, Object>> runTurn() {
-		this.store.seedArchive(RUN_ID,
-				FrameContract.fixture("start", 1L, "runId", RUN_ID, "sessionId", SESSION_ID));
-		SseChatEmitter out = this.registry.of(RUN_ID);
+		return runTurn(RUN_ID, SESSION_ID);
+	}
+
+	private List<Map<String, Object>> runTurn(String runId, String sessionId) {
+		this.store.seedArchive(runId,
+				FrameContract.fixture("start", 1L, "runId", runId, "sessionId", sessionId));
+		SseChatEmitter out = this.registry.of(runId);
 		FrameWire wire = FrameWire.attachTo(out);
-		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("你好")), out);
-		return clientView(wire);
+		this.service.driveResumed(runId, sessionId, AiContext.empty(), List.of(new UserMessage("你好")), out);
+		return clientView(runId, wire);
+	}
+
+	/** 铺一个"运行中"的轮次快照（与 {@link #setUp()} 同形），供同一用例里的第二条轮使用。 */
+	private void seedRun(String runId, String sessionId) {
+		RunSnapshot snapshot = this.store.seedRun(runId, sessionId);
+		snapshot.setContext(AiContext.empty().toMap());
+		this.store.save(snapshot);
 	}
 
 	/** 客户端最终持有的完整帧流 = 归档帧 ∪ 实时流帧（按 seq 去重，归档优先）。 */
 	private List<Map<String, Object>> clientView(FrameWire wire) {
+		return clientView(RUN_ID, wire);
+	}
+
+	private List<Map<String, Object>> clientView(String runId, FrameWire wire) {
 		Map<Long, Map<String, Object>> bySeq = new LinkedHashMap<>();
-		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(RUN_ID))) {
+		for (Map<String, Object> frame : FrameWire.normalize(this.store.events(runId))) {
 			bySeq.putIfAbsent(((Number) frame.get("seq")).longValue(), frame);
 		}
 		for (Map<String, Object> frame : wire.frames()) {
@@ -392,6 +490,19 @@ class UpstreamErrorRetryPolicyTest {
 	private static ChatResponse terminal(String finishReason) {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build(),
 				ChatGenerationMetadata.builder().finishReason(finishReason).build())));
+	}
+
+	/** 一个空正文分片（只有 role/用量，模拟上游的中间空片）。 */
+	private static ChatResponse emptyChunk() {
+		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build())));
+	}
+
+	/** 一条<b>真实</b>工具调用分片（无 finishReason）：{@code output.hasToolCalls()=true}。 */
+	private static ChatResponse toolCallChunk() {
+		return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+			.content("")
+			.toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "ui_snapshot", "{}")))
+			.build())));
 	}
 
 }

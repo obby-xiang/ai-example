@@ -2475,7 +2475,9 @@ public class ResilientChatService {
 	 * 本次尝试的累计状态。
 	 *
 	 * <p>
-	 * {@link #sawTerminal()} 是完成帧校验的唯一判据：<b>最后一个 finishReason 必须是可完成的值</b>。
+	 * {@link #sawTerminal()} 是完成帧校验的唯一判据：<b>{@link #terminalFinish} 已锁存首个可完成终态，
+	 * 且此后没有再出现真实工具调用分片</b>（裸 finishReason 标记不算）。
+	 * {@link #lastFinish} 不参与完成判定，只用于 {@code length}/{@code content_filter} 的最终安全分类。
 	 * 实测（SM-02 第一轮）证明不能拿"usage 非空"当终帧：
 	 * <ul>
 	 * <li>Spring AI 的流式聚合对每个分片都挂一个 Usage 对象（0/0/0），只看"非空"会把
@@ -2483,14 +2485,20 @@ public class ResilientChatService {
 	 * <li>带工具的一轮里，客户端可见的 usage 可能来自前面的工具轮（聚合器的累计值），
 	 * 于是"第二轮被静默截断"同样会被 usage 信号掩盖（SM-02c 实测踩到）。</li>
 	 * </ul>
-	 * 两个 finishReason 特例（第 10 项）：
+	 * 三个 finishReason 特例（第 10 项 + 终态锁存）：
 	 * <ul>
-	 * <li><b>只看最后一个</b>非空 finishReason —— 工具轮的中间态是 {@code tool_calls}，之后
-	 * 官方循环会续跑并给出最终 {@code stop}；若流断在中间，最后一个仍是 {@code tool_calls}
-	 * ⇒ 按不完整流处理（不能拿更早的终态把它盖过去）；</li>
+	 * <li><b>首个可完成终态只锁存一次</b>（{@link #terminalFinish}）—— 实测上游会在 {@code stop}
+	 * 之后<b>再补一个裸 {@code tool_calls} 标记分片</b>（该分片没有任何 toolCalls）。若仍按
+	 * "最后一个非空 finishReason"判定，这一轮已经完整落地却被翻成工具轮中间态 ⇒ 误判断流；</li>
+	 * <li>但工具轮的中间态确实是 {@code tool_calls}：<b>本轮还没锁存终态</b>时它仍是断流判据
+	 * （不能拿更早的终态把它盖过去）；终态锁存后若又来<b>真实</b>工具调用分片
+	 * （{@code output.hasToolCalls()=true}，无论是否带 finishReason），同样按断流处理 ——
+	 * 真实的新工具轮不能被终态吞掉；裸标记不算；</li>
 	 * <li>只有 {@code [DONE]} 没有任何 finishReason ⇒ 同样是不完整流
 	 * （{@link UpstreamErrorClassifier.Finish} 为 null）。</li>
 	 * </ul>
+	 * {@link #lastFinish} 仍覆盖为最后一个非空 finishReason：{@code length}/{@code content_filter}
+	 * 这类<b>最终安全分类</b>必须按最后收到的那一个判（{@link #finish()} 只读它）。
 	 * {@link #tailSummary()} 留最后几次响应的形态（分片序号 {@code i}、相对首片 {@code dMs}、
 	 * finishReason/文本长度/是否带工具调用/用量），
 	 * 供"为什么判成断流/为什么判成正常"在日志里一眼可查。
@@ -2525,10 +2533,27 @@ public class ResilientChatService {
 		/**
 		 * 最后一个非空 finishReason 的语义分类（null = 本轮一个 finishReason 都没收到）。
 		 *
-		 * <p>刻意<b>覆盖</b>而不是"见过即记"：工具轮中间会出现 {@code tool_calls}，只有最后的
-		 * {@code stop} 才代表整轮真正走完。
+		 * <p>刻意<b>覆盖</b>而不是"见过即记"：{@code length}/{@code content_filter} 这类最终安全
+		 * 分类必须按最后收到的那一个判（见 {@link #finish()}）。完成与否<b>不</b>看这里，见
+		 * {@link #terminalFinish}。
 		 */
 		private volatile UpstreamErrorClassifier.Finish lastFinish;
+
+		/**
+		 * 第一次遇到的<b>可完成终态</b>（{@code terminal()}），只锁存一次、之后不再改写。
+		 *
+		 * <p>实测上游会在 {@code stop} 之后再补一个<b>裸</b> {@code finish_reason=tool_calls}
+		 * 分片（该分片没有任何 toolCalls）。只按 {@link #lastFinish} 判完成会把这一轮完整的流翻成
+		 * "工具轮中间态" ⇒ 误判 {@code UPSTREAM_STREAM_INCOMPLETE}。
+		 */
+		private final java.util.concurrent.atomic.AtomicReference<UpstreamErrorClassifier.Finish> terminalFinish = new java.util.concurrent.atomic.AtomicReference<>();
+
+		/**
+		 * 终态锁存<b>之后</b>又收到真实工具调用分片（{@code hasToolCalls=true}，无论是否带
+		 * finishReason）：真实的新工具轮不能被终态吞掉 ⇒ {@link #sawTerminal()} 必须为 false。
+		 * 裸 {@code tool_calls} 标记（不带 toolCalls）不会置位。
+		 */
+		private final java.util.concurrent.atomic.AtomicBoolean realToolCallAfterTerminal = new java.util.concurrent.atomic.AtomicBoolean();
 
 		/** 本轮运行 id（只用于日志定位；由 {@code runAttempts} 在建 Accumulator 时传入）。 */
 		private final String runId;
@@ -2557,11 +2582,16 @@ public class ResilientChatService {
 			boolean hasToolCalls = generation != null && generation.getOutput() != null
 					&& generation.getOutput().hasToolCalls();
 			if (generation != null) {
+				// "本片之前终态是否已锁存"：真实工具守卫只看<b>后续</b>分片（本片自己锁存的终态不算）
+				boolean terminalLatchedBefore = this.terminalFinish.get() != null;
 				String finishReason = generation.getMetadata() == null ? null : generation.getMetadata().getFinishReason();
 				if (StringUtils.hasText(finishReason)) {
 					warnFinishAfterTerminal(finishReason, hasToolCalls, shardIndex, sinceFirstShardMs);
-					this.terminalSignal = "finishReason=" + finishReason;
 					this.lastFinish = UpstreamErrorClassifier.finishOf(finishReason);
+					latchTerminal(finishReason, this.lastFinish);
+				}
+				if (terminalLatchedBefore && hasToolCalls) {
+					this.realToolCallAfterTerminal.set(true);
 				}
 				if (generation.getOutput() != null) {
 					String chunk = generation.getOutput().getText();
@@ -2571,6 +2601,17 @@ public class ResilientChatService {
 				}
 			}
 			record(response, generation, shardIndex, sinceFirstShardMs, hasToolCalls);
+		}
+
+		/**
+		 * 首个可完成终态只锁存一次；{@link #terminalSignal} 与它同源（此后不再被覆盖 —— 也就不会
+		 * 被后续裸 {@code tool_calls} 标记改写成 {@code finishReason=tool_calls}）。
+		 */
+		private void latchTerminal(String finishReason, UpstreamErrorClassifier.Finish finish) {
+			if (finish == null || !finish.terminal() || !this.terminalFinish.compareAndSet(null, finish)) {
+				return;
+			}
+			this.terminalSignal = "finishReason=" + finishReason;
 		}
 
 		/**
@@ -2645,11 +2686,11 @@ public class ResilientChatService {
 		}
 
 		boolean sawTerminal() {
-			// 最后一个 finishReason 必须能代表"本轮完整结束"；tool_calls 是工具轮中间态，不是终态
-			return this.lastFinish != null && this.lastFinish.terminal();
+			// 首个可完成终态已锁存（后续裸 tool_calls 标记不翻案），且之后没有再出现真实工具调用分片
+			return this.terminalFinish.get() != null && !this.realToolCallAfterTerminal.get();
 		}
 
-		/** 最后一个 finishReason 的语义（null = 一个都没收到）。 */
+		/** 最后一个 finishReason 的语义（null = 一个都没收到；{@code length}/{@code content_filter} 的安全判据）。 */
 		UpstreamErrorClassifier.Finish finish() {
 			return this.lastFinish;
 		}
