@@ -3684,11 +3684,16 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     // 律动本体（keyframes + 1.5s ease-in-out infinite）唯一归属 = tailwind.config.js
     expect(config).toContain("breathe: 'aiBreathe 1.5s ease-in-out infinite'")
     expect(config).toContain('aiBreathe: {')
+    expect(config).toContain('aiBreatheText: {')
+    expect(config).toContain("'0%, 100%': { opacity: '0.45' }")
+    expect(config).toContain("'50%': { opacity: '1' }")
+    expect(config).toContain("'breathe-text': 'aiBreatheText 1.5s ease-in-out infinite'")
     // 呼吸点几何/色（原 `.ai-chat .loading-breath .dot`）：7px 圆点 + 纯色 --blue(#2563eb)
     expect(template).toContain('w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe')
-    // 容器与文字族（原 `.loading-breath` / `.txt`）
+    // 容器与文字族（原 `.loading-breath` / `.txt`）；文字只呼吸透明度，不继承圆点 scale。
     expect(template).toContain('inline-flex items-center gap-[6px]')
-    expect(template).toContain('text-[12.2px] text-[#57606a] tracking-[.5px]')
+    expect(template).toContain('text-[12.2px] text-[#57606a] tracking-[.5px] animate-breathe-text')
+    expect(template).toContain('<span class="animate-breathe-text">{{ t(\'ai.panel.waiting\') }}</span>')
     // 旧口径清零（整仓样式源三份都不得再出现）
     expect(all).not.toContain('1.4s')
     expect(all).not.toContain('breathTxt')

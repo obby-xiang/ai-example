@@ -84,6 +84,30 @@ class ToolRegistryStartupFailureTest {
         }
     }
 
+    @Test
+    void riskChannelInvariantFailsStartup() {
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext(DangerousFrontendToolConfig.class)) {
+            ToolRegistry registry = registryOn(context);
+
+            assertThatThrownBy(registry::init)
+                    .as("DANGER+FRONTEND 会让后端等确认、前端等回灌 ⇒ 死卡，必须启动失败")
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("风险/通道不变量")
+                    .hasMessageContaining("dangerous_frontend_tool");
+        }
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext(BackendWriteToolConfig.class)) {
+            ToolRegistry registry = registryOn(context);
+
+            assertThatThrownBy(registry::init)
+                    .as("WRITE+BACKEND 会被 kindOf 判成直执行 ⇒ 可逆写绕过确认门，必须启动失败")
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("风险/通道不变量")
+                    .hasMessageContaining("backend_write_tool");
+        }
+    }
+
     private static ToolRegistry registryOn(AnnotationConfigApplicationContext context) {
         ToolRegistry registry = new ToolRegistry();
         ReflectionTestUtils.setField(registry, "applicationContext", context);
@@ -165,6 +189,46 @@ class ToolRegistryStartupFailureTest {
         @Tool(name = "empty_scope_tool", description = "受控替身：显式空 scope")
         @ToolScope({})
         public String empty(@ToolParam(description = "占位参数") String value) {
+            return value;
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class DangerousFrontendToolConfig {
+
+        @Bean
+        DangerousFrontendTool dangerousFrontendTool() {
+            return new DangerousFrontendTool();
+        }
+    }
+
+    static class DangerousFrontendTool {
+
+        @Tool(name = "dangerous_frontend_tool", description = "受控替身：DANGER+FRONTEND 的非法组合")
+        @ToolScope({ "*" })
+        @ToolRisk(ToolMeta.RiskLevel.DANGER)
+        @ToolChannel(ToolMeta.Channel.FRONTEND)
+        public String run(@ToolParam(description = "占位参数") String value) {
+            return value;
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class BackendWriteToolConfig {
+
+        @Bean
+        BackendWriteTool backendWriteTool() {
+            return new BackendWriteTool();
+        }
+    }
+
+    static class BackendWriteTool {
+
+        @Tool(name = "backend_write_tool", description = "受控替身：WRITE+BACKEND 的非法组合")
+        @ToolScope({ "*" })
+        @ToolRisk(ToolMeta.RiskLevel.WRITE)
+        @ToolChannel(ToolMeta.Channel.BACKEND)
+        public String run(@ToolParam(description = "占位参数") String value) {
             return value;
         }
     }

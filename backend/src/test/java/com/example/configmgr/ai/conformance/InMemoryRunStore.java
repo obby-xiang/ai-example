@@ -847,6 +847,17 @@ public class InMemoryRunStore extends RunStore {
 		this.issuedSeqs.merge(runId, seq, Math::max);
 	}
 
+	@Override
+	public void ensureIssuedSeqAtLeast(String runId, long floor) {
+		if (runId == null || floor <= 0L) {
+			return;
+		}
+		if (runLeaseAuthority(runId).readOnly()) {
+			return;
+		}
+		this.issuedSeqs.merge(runId, floor, Math::max);
+	}
+
 	// ── 取证辅助（只给用例用，不属于 RunStore 契约） ─────────────────────────
 
 	/** 归档帧的 seq（心跳不占业务号也不入档；只有落档失败才在归档里留洞）。 */

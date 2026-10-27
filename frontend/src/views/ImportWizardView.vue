@@ -328,6 +328,14 @@ const busy = ref<BusyKind>(null)
 
 const stepIndex = ref(0)
 const selectedDefs = ref<string[]>([])
+/**
+ * 任务详情是否已**应用**到本页（选中集 / 导入模式 / 步骤 / 状态已按服务端事实恢复并 `enterPage`）。
+ *
+ * 与导出页同口径（见 `ExportWizardView.vue` 同名 ref）：契约层经 `import.taskDetailReady`
+ * 探针等它变 true 才放行后续动作，避免 `confirm_step` 拿空选中集推进并落库。
+ * 置 true 的时点在 `enterPage` 之后，**不等**作业恢复 / 暂存行 / 表格引擎 / 编辑器。
+ */
+const taskDetailReady = ref(false)
 const activeEditorTab = ref('')
 const uploadedFiles = reactive<Record<string, string>>({})
 const savedDefs = reactive(new Set<string>())
@@ -547,20 +555,31 @@ async function loadDefinitions(): Promise<void> {
  */
 async function loadTask(): Promise<void> {
   if (taskId.value === null) {
+    taskDetailReady.value = false
     return
   }
   const generation = taskGeneration
+  // 详情重新起飞：在 `enterPage` 之前一律不认"已应用"
+  taskDetailReady.value = false
   let loaded: Task
   try {
     loaded = await tasksApi.getTask(taskId.value)
   } catch (error) {
     if (generation === taskGeneration) {
+      taskDetailReady.value = false
       ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.taskLoadFailed'))
     }
     return
   }
   // 旧任务的详情晚到：不得覆盖新任务的标题/步骤/勾选（I5）
   if (generation !== taskGeneration) {
+    return
+  }
+  // 类型相反 ⇒ 本页不是它的向导：**静默**改投导出向导（不弹提示），否则导入页会拿一条
+  // 导出任务恢复上传清单与编辑区（"导出任务显示成导入向导"）。
+  if (loaded.type === 'EXPORT') {
+    taskDetailReady.value = false
+    await router.replace({ name: 'export-wizard', query: { taskId: String(taskId.value) } })
     return
   }
   task.value = loaded
@@ -587,6 +606,9 @@ async function loadTask(): Promise<void> {
     selectedDefs: [...selectedDefs.value],
     importMode: importMode.value
   })
+  // 详情已应用：选中集 / 导入模式 / 步骤 / 状态都已按服务端事实恢复并声明进工作区
+  //（**不等**下面的作业恢复与暂存行 —— 它们不影响后续动作的正确性）
+  taskDetailReady.value = true
   await resumeJobs()
   if (generation !== taskGeneration) {
     return
@@ -672,6 +694,8 @@ async function ensureFileList(): Promise<boolean> {
  */
 function resetTaskScopedState(): void {
   taskGeneration += 1
+  // 换任务 = 详情重新起飞：新任务的 `enterPage` 之前不认"已应用"（导出页同名口径）
+  taskDetailReady.value = false
   filesOk.value = false
   filesInFlight = null
   editorLoadInFlight = null
@@ -1925,7 +1949,9 @@ const HANDLER_NAMES = [
   // AI 可视可操作专项：上传交接把用户手势选到的 File 交回页面既有上传链
   'import.receiveFile',
   // 批 D · D3（问题 6）：AI 触发 start_precheck / start_import 后把作业绑进本页跟踪面
-  'import.syncJob'
+  'import.syncJob',
+  // 任务详情就绪探针（只读）：契约层导航/幂等判据据此等"选中集/模式/步骤已恢复"
+  'import.taskDetailReady'
 ]
 
 /** AI 可视可操作专项：上传区（区域围栏的 root；`data-ai-ref` 挂在其中的三个按钮上）。 */
@@ -1936,6 +1962,8 @@ const aiModeRowRef = ref<HTMLElement | null>(null)
 const aiGridRef = ref<HTMLElement | null>(null)
 
 function registerHandlers(): void {
+  // 任务详情就绪探针（只读，返回布尔）：契约层在导航/幂等早退处等它变 true 才放行后续动作。
+  registerPageHandler('import.taskDetailReady', () => taskDetailReady.value)
   // 批 D · D3（问题 6）：AI 触发 start_precheck / start_import 后把作业绑进本页的跟踪面。
   // 与既有 resumeJobs() 同一条恢复链（刷新/回页也走它）：三种作业各归各位（check/import/publish）；
   // taskId 对不上就不动本页（别的任务的作业显示在这里 = 说 A 实际给 B）。

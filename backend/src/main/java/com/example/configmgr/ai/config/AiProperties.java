@@ -50,6 +50,15 @@ public class AiProperties {
 	private Resume resume = new Resume();
 
 	/**
+	 * 思考（{@code reasoning_content}）的展示与持久化开关。
+	 *
+	 * <p>展示（帧/历史）与持久化（记忆回填）解耦：默认不展示 —— 上游零思考帧、{@code /history}
+	 * 无 {@code reasoningContent}；思考仍按 {@link Reasoning#isPersistContent()} 累计进 assistant
+	 * 消息 metadata，供下一轮回填。打开 {@code display-enabled} 即回到逐片出帧、历史透出的行为。
+	 */
+	private Reasoning reasoning = new Reasoning();
+
+	/**
 	 * 人工等待 <b>park</b>（等人/等前端时不驻留线程；用户裁决 2026-10-25）。
 	 */
 	private Park park = new Park();
@@ -1543,6 +1552,32 @@ public class AiProperties {
 			 */
 			private String authEnv = "KB_HTTP_AUTH";
 		}
+	}
+
+	/**
+	 * 思考（{@code reasoning_content}）的展示与持久化（{@code app.ai.reasoning.*}）。
+	 *
+	 * <p>两键互不替代：展示关掉只影响"发不发 reasoning 帧 / 历史透不透 {@code reasoningContent}"，
+	 * 不影响落进 assistant 消息 metadata 的思考全文（{@code persist-content=true} 时）——
+	 * 下一轮的上下文回填（{@code ReasoningAwareOpenAiChatModel}）读的正是那份 metadata。
+	 */
+	@Data
+	public static class Reasoning {
+
+		/**
+		 * 是否展示思考（默认 <b>false</b>）：{@code false} = {@code consume} 不发
+		 * {@code reasoningDelta}、{@code /history} 不透出 {@code reasoningContent}；
+		 * 思考仍累计供记忆回填。需要思考帧的用例显式打开本键。
+		 */
+		private boolean displayEnabled = false;
+
+		/**
+		 * 是否把思考全文随 assistant 消息写进记忆（默认 <b>true</b>）。
+		 *
+		 * <p>与 {@link #displayEnabled} 解耦：展示关掉时仍要回填（"想过"是模型下一轮的输入事实）。
+		 */
+		private boolean persistContent = true;
+
 	}
 
 }

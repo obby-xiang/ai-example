@@ -29,8 +29,8 @@ import static org.mockito.Mockito.when;
  * <p>顺序也是契约的一部分：{@code NOT_FOUND} → <b>kind</b> → {@code DUPLICATE}。于是
  * "正确 kind 的重复提交"仍是 409 DUPLICATE，而"错入口 + 已决"报 mismath（入口归属比幂等更根本）。
  *
- * <p>旧数据（{@code kind=null}）：放行 + WARN —— 与 {@code ResumeService}/{@code SpToolCallingManager}
- * 的兼容口径一致。
+ * <p>{@code kind=null}：同样拒绝（{@code TOOL_KIND_MISMATCH}）+ WARN —— 缺证据不授权。
+ * 这是本批收紧的口径（原"兼容放行"已废止）：无法证明条目属于哪条通道时，既不批准也不执行。
  */
 class ConfirmGateToolKindTest {
 
@@ -109,19 +109,19 @@ class ConfirmGateToolKindTest {
 		assertThat(this.store.pending(RUN, CALL).getStatus()).isEqualTo(PendingToolCall.PENDING);
 	}
 
-	// ── 兼容：旧数据 kind=null ─────────────────────────────────────────────
+	// ── 收紧：缺 kind 的条目既不批准也不回灌 ─────────────────────────────────
 
 	@Test
-	void legacyEntryWithoutKindIsAcceptedByBothPaths() {
+	void entryWithoutKindIsRejectedByBothPaths() {
 		this.store.putPending(RUN, entry(null, PendingToolCall.PENDING));
 		ConfirmGate.Submission decision = this.gate.submitDecision(RUN, CALL, true, null);
-		assertThat(decision.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		assertThat(this.store.pending(RUN, CALL).getStatus()).isEqualTo(PendingToolCall.APPROVED);
+		assertThat(decision.outcome()).as("kind=null 不得批准").isEqualTo(ConfirmGate.Outcome.TOOL_KIND_MISMATCH);
+		assertThat(this.store.pending(RUN, CALL).getStatus()).isEqualTo(PendingToolCall.PENDING);
 
 		this.store.putPending(RUN, entry(CALL2, null, PendingToolCall.PENDING));
 		ConfirmGate.Submission result = this.gate.submitFrontendResult(RUN, CALL2, "ok", "http-post", false, null);
-		assertThat(result.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		assertThat(this.store.pending(RUN, CALL2).getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);
+		assertThat(result.outcome()).as("kind=null 也不得被回灌改写").isEqualTo(ConfirmGate.Outcome.TOOL_KIND_MISMATCH);
+		assertThat(this.store.pending(RUN, CALL2).getStatus()).isEqualTo(PendingToolCall.PENDING);
 	}
 
 	// ── 正确 kind：幂等/正常路径不回归 ─────────────────────────────────────

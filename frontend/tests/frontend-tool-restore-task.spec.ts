@@ -18,7 +18,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { executeFrontendTool } from '@/utils/frontend-tools'
-import { getPageHandler, registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { dispatchUiEvent, getPageHandler, registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import type { RouteLocationRaw } from 'vue-router'
 
@@ -61,6 +61,8 @@ function mountPageOnPush(): void {
       workspace.enterPage({ pageId: 'import', page: 'import', taskType: 'IMPORT', step: 'UPLOAD', taskId })
     } else if (route.name === 'exportWizard') {
       workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId })
+    } else if (route.name === 'dataBrowser') {
+      workspace.enterPage({ pageId: 'data', page: 'data', taskType: null, step: null, taskId: null })
     }
   })
 }
@@ -126,7 +128,7 @@ describe('navigate_to(page, taskId)：已知任务类型优先于模型写的页
     expect(execution.result).toContain('已按服务端类型进入导入向导')
   })
 
-  it('类型未知时不为此额外发请求（导航本身由契约层按缓存恢复）', async () => {
+  it('无 taskId 的纯切页不发类型查询（GET 0 次）', async () => {
     const execution = await executeFrontendTool({
       name: 'navigate_to',
       args: { page: 'data' },
@@ -183,5 +185,101 @@ describe('导航后等目标页就绪', () => {
 
     expect(execution.outcome).toBe('failed')
     expect(execution.result).toContain('绑定没有完成')
+  })
+})
+
+describe('冷缓存：类型缓存优先、未命中查一次、查不到不导航', () => {
+  it('navigate_to(page=export) 而缓存为空 ⇒ 发一次 GET 并按服务端类型进导入向导', async () => {
+    api.getTask.mockResolvedValue({ id: 41, type: 'IMPORT', status: 'IN_PROGRESS', items: [], currentStep: 'UPLOAD' })
+
+    const execution = await executeFrontendTool({
+      name: 'navigate_to',
+      args: { page: 'export', taskId: 41 },
+      budgetMs: 8_000
+    })
+
+    expect(api.getTask).toHaveBeenCalledTimes(1)
+    expect(push).toHaveBeenCalledWith({ name: 'importWizard', query: { taskId: '41' } })
+    expect(execution.result).toContain('已按服务端类型进入导入向导')
+  })
+
+  it('类型查不到 ⇒ navigate_to 也 fail-closed（push 0 次）', async () => {
+    api.getTask.mockRejectedValue(new Error('任务不存在'))
+
+    const execution = await executeFrontendTool({
+      name: 'navigate_to',
+      args: { page: 'export', taskId: 42 },
+      budgetMs: 8_000
+    })
+
+    expect(push).not.toHaveBeenCalled()
+    expect(execution.outcome).toBe('failed')
+    expect(execution.result).toContain('无法确认任务 #42 的类型')
+  })
+
+  it('契约层 restore_task 未带 taskType ⇒ 当场用 ensureTaskType 定页（不按列表兜底 EXPORT）', async () => {
+    api.getTask.mockResolvedValue({ id: 43, type: 'IMPORT', status: 'IN_PROGRESS', items: [], currentStep: 'UPLOAD' })
+
+    const result = await dispatchUiEvent({ type: 'restore_task', taskId: 43 })
+
+    expect(result.handled).toBe(true)
+    expect(push).toHaveBeenCalledWith({ name: 'importWizard', query: { taskId: '43' } })
+  })
+})
+
+describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）', () => {
+  it('详情未应用 ⇒ failed（不自称成功），回执点名"本轮不要推进步骤"', async () => {
+    api.getTask.mockResolvedValue({ id: 51, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
+    registerPageHandler('export.taskDetailReady', () => false)
+    try {
+      const execution = await executeFrontendTool({
+        name: 'navigate_to',
+        args: { page: 'export', taskId: 51 },
+        budgetMs: 6_000
+      })
+
+      expect(execution.outcome).toBe('failed')
+      expect(execution.code).toBe('UI_PAGE_NOT_READY')
+      expect(execution.result).toContain('详情')
+      expect(execution.result).not.toContain('可继续执行本页动作')
+    } finally {
+      unregisterPageHandler('export.taskDetailReady')
+    }
+  })
+
+  it('详情已应用 ⇒ ok，回执说明已绑定', async () => {
+    api.getTask.mockResolvedValue({ id: 52, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
+    registerPageHandler('export.taskDetailReady', () => true)
+    try {
+      const execution = await executeFrontendTool({
+        name: 'navigate_to',
+        args: { page: 'export', taskId: 52 },
+        budgetMs: 6_000
+      })
+
+      expect(execution.outcome).toBe('ok')
+      expect(execution.result).toContain('任务 #52 已绑定')
+    } finally {
+      unregisterPageHandler('export.taskDetailReady')
+    }
+  })
+
+  it('同页同参幂等早退也等详情：详情未应用 ⇒ 不再回 UI_ALREADY_ON_PAGE', async () => {
+    useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 53 })
+    api.getTask.mockResolvedValue({ id: 53, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
+    registerPageHandler('export.taskDetailReady', () => false)
+    try {
+      const execution = await executeFrontendTool({
+        name: 'navigate_to',
+        args: { page: 'export', taskId: 53 },
+        budgetMs: 6_000
+      })
+
+      expect(execution.outcome).toBe('failed')
+      expect(execution.code).not.toBe('UI_ALREADY_ON_PAGE')
+      expect(push).not.toHaveBeenCalled()
+    } finally {
+      unregisterPageHandler('export.taskDetailReady')
+    }
   })
 })

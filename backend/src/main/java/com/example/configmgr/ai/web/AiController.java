@@ -1712,8 +1712,10 @@ public class AiController {
 		}
 		// AR-12（只读展示）：历史 assistant 已有的思考正文只从 metadata.reasoningContent 原样透出，
 		// 不新增表/列/持久化，也不透出 startedAt/endedAt 等计时（历史已完成轮不显示耗时、不回算）。
+		// 展示开关（app.ai.reasoning.display-enabled，默认 false）关掉时历史不透出该键；metadata 仍照旧落库。
 		// synthetic 压缩/收尾条目一律跳过：那是系统提示，不是助手答复，不能借本字段带出内部键。
-		if (!synthetic && message instanceof AssistantMessage reasoningAssistant) {
+		if (!synthetic && this.properties.getReasoning().isDisplayEnabled()
+				&& message instanceof AssistantMessage reasoningAssistant) {
 			Object reasoning = reasoningAssistant.getMetadata().get(ResilientChatService.REASONING_METADATA_KEY);
 			if (reasoning instanceof String reasoningText && !reasoningText.isBlank()) {
 				item.put(ResilientChatService.REASONING_METADATA_KEY, reasoningText);

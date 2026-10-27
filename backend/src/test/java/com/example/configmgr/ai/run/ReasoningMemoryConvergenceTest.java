@@ -127,8 +127,10 @@ class ReasoningMemoryConvergenceTest {
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(reasoning("先想一步。"), reasoning("再想一步。"),
 				chunk("答案是 2"), terminal("stop")));
 
-		runTurn();
+		FrameWire wire = runTurn();
 
+		assertThat(wire.frames()).as("默认关闭思考展示，但仍保留正文与记忆")
+			.noneMatch(frame -> "reasoning".equals(frame.get("kind")));
 		AssistantMessage assistant = lastMemoryAssistant();
 		assertThat(assistant.getText()).isEqualTo("答案是 2");
 		assertThat(assistant.getMetadata()).as("思考全文（两片拼接，不截断）随 assistant 消息进记忆")

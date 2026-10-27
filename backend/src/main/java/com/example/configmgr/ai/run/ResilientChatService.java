@@ -11,6 +11,7 @@ import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -168,7 +169,7 @@ public class ResilientChatService {
 			- 帮助用户创建和管理快速实施任务（导出/导入配置）
 			- 查询配置定义和字段信息
 			- 设置查询条件、选择配置项
-			- 启动导出、预检查、导入等作业并监控进度
+			- 启动导出、预检查、导入等作业（启动成功后即结束本轮，进度由页面展示）
 			- 解释检查结果、解答业务疑问
 
 			工作原则：
@@ -190,7 +191,9 @@ public class ResilientChatService {
 			   用户要求新建其它任务时也同样使用 create_task。
 			   全链必须保留各写操作的确认卡，尤其不得绕过 DANGER 确认，不得新造一键导出工具
 			9. 启动导出/检查/导入/发布都会在界面渲染确认卡片，等用户点「确认执行」后才真正执行：
-			   发起后如实告诉用户"请在确认卡片上确认"，不要重复发起同一个调用，也不要预先宣称已启动
+			   发起后如实告诉用户"请在确认卡片上确认"，不要重复发起同一个调用，也不要预先宣称已启动。
+			   用户批准、作业真正启动成功后立即结束本轮：进度由页面展示，不要轮询，也不要主动调用
+			   查询工具反复查进度；只有用户明确询问进度时才去查一次并如实回答
 			10. 步骤推进（confirm_step、navigate_to）只对**下一轮**生效：新步骤或新页面才披露的工具
 			    本轮拿不到，硬调会被拒绝执行。因此推进后不要在同一轮里接着调用刚解锁的工具，
 			    而是如实汇报"已推进到 X 步骤"，并用一句话引导用户回复继续指令——指令词随本轮回答
@@ -521,8 +524,9 @@ public class ResilientChatService {
 			// L-26：首轮创建即<b>冻结生效参数</b>（provider/model 走既有身份字段，三值 + paramsLocked 走
 			// FrozenParams）。冻结的是 runtime.options() 里的<b>生效值</b>（全局默认 + 本轮请求覆盖 +
 			// "被策略锁住 ⇒ 没生效"三种情形都已体现），不是请求体原文。
-			this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(), runtime.modelId(),
-					frozenParams(runtime, paramsLocked));
+			// A：请求边界冻结的权威执行信封要用这份刚建好的快照（不是稍后可能被改写的读回值）。
+			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
+					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked));
 
 			// 完整历史：用户消息在 run 创建后、上游调用前落库（上游失败也不该让用户输入消失）。
 			// 幂等键 = (sessionId, runId, user-<runId>)；重复路径由 converge 的 recordRunTail 兜底补写。
@@ -570,8 +574,9 @@ public class ResilientChatService {
 						.user(request.message())
 						// 记忆 advisor 的会话键：官方常量（MessageChatMemoryAdvisor 据此读写 Redis）
 						.advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, sessionId))
-						// 显式 runId 通道：ToolCallingManager 由此拿到外置/挂起所需的轮次 id
-						.toolContext(Map.of("runId", runId, "sessionId", sessionId));
+						// 显式 runId 通道：ToolCallingManager 由此拿到外置/挂起所需的轮次 id；
+						// A：同一份 toolContext 里带本轮权威执行信封（key = executionEnvelope），runId/sessionId 保留。
+						.toolContext(toolContext(runId, sessionId, executionSnapshot, out.lastIssuedSeq()));
 					var withTools = tools.isEmpty() ? spec : spec.toolCallbacks(tools);
 					return withTools.stream().chatResponse();
 				});
@@ -652,7 +657,8 @@ public class ResilientChatService {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
 				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
 						history.size());
-				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history);
+				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
+						out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
 				return runtime.chatModel().stream(prompt);
 			});
 		}
@@ -833,11 +839,12 @@ public class ResilientChatService {
 	 * Prompt：结算挂起项不需要模型名，而这条路在控制器已按 availability 放行之后几乎不可达。
 	 */
 	public Prompt buildResumedPrompt(String runId, String sessionId, AiContext context, List<Message> history) {
-		return buildResumedPrompt(this.providerRegistry.tryCurrent().orElse(null), runId, sessionId, context, history);
+		return buildResumedPrompt(this.providerRegistry.tryCurrent().orElse(null), runId, sessionId, context, history,
+				resumeSnapshot(runId), this.store.lastIssuedSeq(runId));
 	}
 
 	private Prompt buildResumedPrompt(ProviderRuntime runtime, String runId, String sessionId, AiContext context,
-			List<Message> history) {
+			List<Message> history, RunSnapshot snapshot, long seqFloor) {
 		ChatOptions base = runtime == null ? null : runtime.chatModel().getDefaultOptions();
 		OpenAiChatOptions options = base instanceof OpenAiChatOptions openAiOptions
 				? OpenAiChatOptions.fromOptions(openAiOptions) : OpenAiChatOptions.builder().build();
@@ -846,8 +853,28 @@ public class ResilientChatService {
 				|| this.providerRegistry.supportsToolCalling(runtime.providerId(), runtime.modelId());
 		options.setToolCallbacks(toolsAllowed ? this.toolRegistry.forContext(context) : List.of());
 		options.setInternalToolExecutionEnabled(true);
-		options.setToolContext(Map.of("runId", runId, "sessionId", sessionId));
+		// A：续跑与首轮同构 —— runId/sessionId 原样保留，另带本轮权威执行信封。
+		options.setToolContext(toolContext(runId, sessionId, snapshot, seqFloor));
 		return new Prompt(history, options);
+	}
+
+	/**
+	 * 工具执行的 {@code toolContext}（A）：{@code runId}/{@code sessionId} 原样保留，另带本轮
+	 * <b>权威执行信封</b>（{@link ToolExecutionEnvelope#TOOL_CONTEXT_KEY}）—— 执行点据此在快照
+	 * 读不到时原地恢复运行事实，而不是回落"绕过确认门"的官方默认执行。
+	 *
+	 * <p>{@code snapshot == null}（旧轮/读失败）或 envelope 构造不出时只保留原有两项：
+	 * 缺信封与"没带信封的旧版本"同语义，不阻断请求。
+	 */
+	private static Map<String, Object> toolContext(String runId, String sessionId, RunSnapshot snapshot, long seqFloor) {
+		Map<String, Object> context = new LinkedHashMap<>();
+		context.put("runId", runId);
+		context.put("sessionId", sessionId);
+		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromSnapshot(snapshot, seqFloor);
+		if (envelope != null) {
+			context.put(ToolExecutionEnvelope.TOOL_CONTEXT_KEY, envelope);
+		}
+		return context;
 	}
 
 	// ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
@@ -977,9 +1004,14 @@ public class ResilientChatService {
 						retryable = false;
 					}
 				}
-				log.warn("本轮尝试失败 runId={} attempt={}/{} code={} 已产出={} 副作用={} 超预算={} 可重试={} 上游事件={} 原因={} 末帧序列=[{}]",
+				long failedAtMs = System.currentTimeMillis();
+				// B：失败日志补"最后一条上游事件到失败"的静默时长与可得的工具活动间隔（都不含正文）。
+				long silenceMs = Math.max(0L, failedAtMs - watchdog.lastUpstreamAtMs());
+				long toolIdleMs = toolActivityIdleMs(runId, failedAtMs);
+				log.warn("本轮尝试失败 runId={} attempt={}/{} code={} 已产出={} 副作用={} 超预算={} 可重试={} 上游事件={} 静默={}ms 工具空闲={} 原因={} 末帧序列=[{}]",
 						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
-						watchdog.upstreamEvents(), violation.getMessage(), accumulator.tailSummary());
+						watchdog.upstreamEvents(), silenceMs, toolIdleMs, violation.getMessage(),
+						accumulator.tailSummary());
 				if (!retryable) {
 					stopKeepalive(keepalive);
 					if (parkedToolRound) {
@@ -1069,6 +1101,23 @@ public class ResilientChatService {
 				return false;
 			}
 		}
+	}
+
+	/**
+	 * 距最近一次工具活动的时间（{@code -1} = 本段没有可得的工具活动锚点）。
+	 *
+	 * <p>只读 {@link ToolActivityBeacon#lastActivityAtMs(String)}（工具开始/落定/被动活动），
+	 * 用于失败日志区分"上游一直静默"与"工具刚跑完就失败"。
+	 */
+	private long toolActivityIdleMs(String runId, long nowMs) {
+		long lastToolAtMs;
+		try {
+			lastToolAtMs = this.beacon.lastActivityAtMs(runId);
+		}
+		catch (RuntimeException ex) {
+			return -1L;
+		}
+		return lastToolAtMs <= 0L ? -1L : Math.max(0L, nowMs - lastToolAtMs);
 	}
 
 	/**
@@ -1266,7 +1315,7 @@ public class ResilientChatService {
 			// 截断专项：length 同时写进 metadata（持久事实）—— 经历史写入器的 commandFor(metadata)
 			// 保真路径落 ai_chat_message.metadata_json，刷新后 /history 仍能读到；与 done.extra 同判据。
 			AssistantMessage finalAssistant = ReasoningOrigin.stamp(
-					assistantMessage(text, accumulator.reasoningText(), lengthTruncated),
+					assistantMessage(text, storedReasoning(accumulator.reasoningText()), lengthTruncated),
 					snapshot.getProviderId(), snapshot.getModelId());
 			history.add(finalAssistant);
 			snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -1725,6 +1774,15 @@ public class ResilientChatService {
 		return assistantMessage(content, reasoning, false);
 	}
 
+	/**
+	 * 思考全文是否随消息落记忆：{@code app.ai.reasoning.persist-content}（默认 true）。
+	 * 关掉时返回空串（{@link #assistantMessage} / {@link #stoppedMetadata} 据此不写该键），
+	 * 展示开关（{@code display-enabled}）只管帧与历史，不影响这里。
+	 */
+	private String storedReasoning(String reasoning) {
+		return this.properties.getReasoning().isPersistContent() ? reasoning : "";
+	}
+
 	/** 取消半截的元数据：{@code stopped} 标记 + 本段已产生的思考全文（可空）。 */
 	private static Map<String, Object> stoppedMetadata(String reasoning) {
 		Map<String, Object> metadata = new LinkedHashMap<>();
@@ -1849,7 +1907,7 @@ public class ResilientChatService {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			List<Message> stoppedMessages = new ArrayList<>();
 			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
-					accumulator == null ? "" : accumulator.reasoningText())) {
+					storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
 				history.add(stopped);
 				stoppedMessages.add(stopped);
 			}
@@ -2346,7 +2404,10 @@ public class ResilientChatService {
 		// 但**全文**由累加器保留，随落定/取消写进 assistant 消息 metadata（下一轮回填）。
 		String reasoning = chunkReasoning(response);
 		if (reasoning != null && !reasoning.isEmpty()) {
-			out.reasoningDelta(reasoning);
+			// D：展示开关默认关闭 —— 不发思考帧；思考仍原样累计，供落定/取消时写进记忆回填。
+			if (this.properties.getReasoning().isDisplayEnabled()) {
+				out.reasoningDelta(reasoning);
+			}
 			// 已产出思考 = 已产出内容：重试三条件里的"未产出内容"不再成立
 			// （否则 retry 会落在思考段之后，且前端会看到两段重复的思考）。
 			accumulator.reasoning(reasoning);
@@ -2361,9 +2422,25 @@ public class ResilientChatService {
 		// 流式分片边界上很常见）时，message_end.chars 会大于 delta 拼接长度，前端渲染的正文
 		// 与落定正文（finalText）分家。改为"非空即发"：空白也是正文的一部分，三处口径归一。
 		if (text != null && !text.isEmpty()) {
+			// C：替换字符只观测（计数/偏移/长度进日志），不改正文、不缓冲、不新增提示。
+			observeReplacementCharacters(out.runId(), text);
 			out.textStart();
 			out.delta(text);
 		}
+	}
+
+	/** 替换字符（U+FFFD）的观测口径：只记计数与首个偏移，绝不打印正文。 */
+	private static void observeReplacementCharacters(String runId, String text) {
+		int first = text.indexOf('\uFFFD');
+		if (first < 0) {
+			return;
+		}
+		int count = 0;
+		for (int at = first; at >= 0; at = text.indexOf('\uFFFD', at + 1)) {
+			count++;
+		}
+		log.warn("上游正文含替换字符 runId={} replacementCount={} textLength={} firstReplacementOffset={}", runId, count,
+				text.length(), first);
 	}
 
 	/** 上游分片的正文（{@code null} = 该分片没有文本）。 */

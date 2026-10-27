@@ -877,14 +877,14 @@
               class="inline-flex items-center gap-[5px] text-[12.2px] text-[#b45309] tracking-[.3px]"
             >
               <span class="w-[7px] h-[7px] rounded-full bg-[#b45309] animate-breathe" aria-hidden="true"></span>
-              <span>{{ t('ai.panel.waiting') }}</span>
+              <span class="animate-breathe-text">{{ t('ai.panel.waiting') }}</span>
             </span>
             <span
               v-else-if="isBreathing(m) || isFading(m)"
               :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
             >
-              <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px]">{{ t('ai.panel.breathing') }}</span>
+              <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px] animate-breathe-text">{{ t('ai.panel.breathing') }}</span>
             </span>
             <span v-else-if="showTimestamp(m)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
@@ -920,8 +920,8 @@
               {{ t('ai.round.truncated') }}
               <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
-            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有产出的失败轮，append-drive）/
-                 重试本轮（零产出且归属可证明的失败轮，走仅模型步重跑窄入口）/
+            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有正文/思考的失败轮，append-drive）/
+                 重试本轮（零正文零思考且归属可证明的失败轮，含仅工具已结算的轮，走仅模型步重跑窄入口）/
                  普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。
                  前两者都不追加伪用户气泡；同轮「继续 / 重试本轮」互斥。 -->
             <button
@@ -1735,14 +1735,17 @@ function reloadTurnState(): void {
   void ai.loadHistory()
 }
 
-/** 一轮的「产出」判据：非空正文 / 非空思考 / 任意工具段（AR-05 的零产出 = 全空）。 */
-function turnHasOutput(message: ChatMessage): boolean {
-  return message.parts.some((part) => {
-    if (part.kind === 'text' || part.kind === 'reasoning') {
-      return part.text.trim() !== ''
-    }
-    return part.kind === 'tool'
-  })
+/**
+ * 一轮是否已有**文字产出**：非空正文 / 非空思考。
+ *
+ * <p>工具段**不算**文字产出：工具已结算但模型没写出任何正文/思考的失败轮，续写没有可承接的半截答案，
+ * 应走「重试本轮」（仅模型步重跑）；有文字才走「继续」（append-drive）。旧判据把工具段并入「有产出」，
+ * 导致这类轮只出「继续」而不出「重试本轮」。
+ */
+function hasTextOrReasoning(message: ChatMessage): boolean {
+  return message.parts.some(
+    (part) => (part.kind === 'text' || part.kind === 'reasoning') && part.text.trim() !== ''
+  )
 }
 
 /** 继续（append-drive）：追加驱动，不删历史、**不追加用户气泡**（保持既有 skipUserRecord 口径）。 */
@@ -1932,7 +1935,8 @@ const MD_BODY_AI_CLASS = `[&>*:last-child]:!mb-0 ${CODE_PRE_LIMIT_CLASS}`
 
 /**
  * 活动中提示、淡出与 chevron 共用模板工具类；等待中保留原琥珀样式，圆点同样使用呼吸动画。
- * keyframes 本体见 tailwind.config.js（aiBreathe / aiFadeOut）。
+ * 文字只呼吸透明度（animate-breathe-text / aiBreatheText，无 scale）；圆点仍用 animate-breathe。
+ * keyframes 本体见 tailwind.config.js（aiBreathe / aiBreatheText / aiFadeOut）。
  */
 const BREATH_CLASS = 'loading-breath inline-flex items-center gap-[6px] m-0 pl-[2px] text-[12.2px] text-[#57606a]'
 /** 完成淡出：`fade-out` 为标记类（既有两态断言锚），`animate-fade-out` 承载 0.3s forwards。 */
@@ -1953,7 +1957,7 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
 }
 
 /**
- * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「稍后重试」只在**归属可证明的零产出失败轮**
+ * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「稍后重试」只在**归属可证明的零文字产出失败轮**
  * 上出现（真实窄入口）。普通已完成 / 有半截内容没有对应的后端入口 —— 该动作**直接隐藏**，
  * 不做"禁用但仍可点出 unsupported"的死 UI。
  */
@@ -1969,7 +1973,7 @@ function errorCardActionVisible(message: ChatMessage): boolean {
 }
 
 /** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
- *  「稍后重试」= 零产出且归属可证明 ⇒ **重试本轮**（仅模型步重跑窄入口）；否则该动作隐藏（AR-17）；
+ *  「稍后重试」= 零文字产出且归属可证明 ⇒ **重试本轮**（仅模型步重跑窄入口）；否则该动作隐藏（AR-17）；
  *  「改写后重发」= 把焦点交回输入框（改写是用户动作，面板只能把落点指过去）；
  *  「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。
  *  分派按 **variant**（i18n L-69 后 `action` 文案随 UI 语言变，字符串比对会断；variant → 动作是一对一）。 */
@@ -4376,19 +4380,20 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
 
 /**
  * AR-09 / AR-17：动作语义分离后的显示判据。
- * - 继续（append-drive）：**有产出**的失败轮才出（续写/追加驱动，不删历史、不加用户气泡）；
- * - 重试本轮（retry-turn）：**零产出 + 归属可证明**的失败轮才出（替换本轮、不加用户气泡）；
+ * - 继续（append-drive）：**有正文/思考**的失败轮才出（续写/追加驱动，不删历史、不加用户气泡）；
+ * - 重试本轮（retry-turn）：**零正文零思考 + 归属可证明**的失败轮才出（工具已结算但没写出文字的
+ *   轮次也归此类 —— 无半截内容可续，只能仅模型步重跑；替换本轮、不加用户气泡）；
  * - 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
  * 同一轮「继续 / 重试本轮」互斥，避免把两种语义塞进同一个按钮。
  */
 function showContinue(message: ChatMessage): boolean {
-  return isFailedLastAssistant(message) && turnHasOutput(message)
+  return isFailedLastAssistant(message) && hasTextOrReasoning(message)
 }
 
 function showRetryTurn(message: ChatMessage): boolean {
   // 归属不可证明（无 message.runId，且不是当前在途宿主）⇒ 不出「重试本轮」入口：
   // 刷新后 activeRunId 可能为空或指向更晚的一轮，猜它就会重试错轮。
-  return isFailedLastAssistant(message) && !turnHasOutput(message)
+  return isFailedLastAssistant(message) && !hasTextOrReasoning(message)
     && ai.retryRunIdFor(message) !== null
 }
 

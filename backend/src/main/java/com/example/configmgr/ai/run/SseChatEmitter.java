@@ -538,6 +538,14 @@ public class SseChatEmitter {
 		return this.runId;
 	}
 
+	/**
+	 * 本写出器最近一次<b>已处置</b>的业务序号（未出帧 = 0）。诊断/上下文快照用；
+	 * 不参与去重与差量下界（那是各订阅者的游标，见 {@link Subscription#wakeFloor}）。
+	 */
+	public long lastIssuedSeq() {
+		return this.lastFanoutSeq.get();
+	}
+
 	/** 挂一个订阅者（首轮响应 / reattach 重挂共用）。 */
 	public void attach(SseEmitter emitter) {
 		attachSubscription(new Subscription(emitter, false));

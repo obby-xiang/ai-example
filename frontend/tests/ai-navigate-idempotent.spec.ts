@@ -8,6 +8,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useTaskStore } from '@/stores/task'
 import { resetAiTestState } from './ai-fixtures'
 
 const push = vi.hoisted(() => vi.fn(async () => undefined))
@@ -32,6 +33,11 @@ function enter(pageId: 'tasks' | 'export' | 'import', taskId: number | null = nu
     step: pageId === 'tasks' ? null : 'EXPORT',
     taskId
   })
+  // `navigate_to(page, taskId)` 现在**缓存优先、未命中就 GET**（查不到即不导航）；
+  // 这里按页面类型钉住权威缓存，等价于"任务中心列表已加载 / 之前 restore_task 查过"。
+  if (taskId !== null && pageId !== 'tasks') {
+    useTaskStore().knownTaskTypes[taskId] = pageId === 'export' ? 'EXPORT' : 'IMPORT'
+  }
 }
 
 describe('A-01 / A-02：同页同参幂等直返（push 0 次）', () => {
@@ -68,6 +74,8 @@ describe('A-03：同页但任务不同 ⇒ 不直返，正常派发', () => {
     vi.useFakeTimers()
     try {
       enter('export', 579)
+      // 目标任务 #580 的类型已知（列表已加载 / 之前查过）：导航只需 cache 命中，不再发 GET
+      useTaskStore().knownTaskTypes[580] = 'EXPORT'
       const pending = executeFrontendTool({
         name: 'navigate_to',
         args: { page: 'export', taskId: 580 },

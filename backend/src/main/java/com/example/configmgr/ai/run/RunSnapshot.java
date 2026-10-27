@@ -227,6 +227,18 @@ public class RunSnapshot {
 		return this.paramsVersion >= PARAMS_VERSION_FROZEN;
 	}
 
+	/**
+	 * 冻结值的取证视图（只读；{@link #paramsFrozen()} 为 {@code false} 时调用方不应使用）。
+	 *
+	 * <p>存在的理由 = 执行信封（{@code ToolExecutionEnvelope.fromSnapshot}）要把"这一轮当时的生效
+	 * 参数"原样带走，避免再散点抄四个字段；{@code paramsLocked} 的 null 与 false 在快照里本就不分
+	 * （冻结口径把它归一成布尔），这里保持同一口径。
+	 */
+	public FrozenParams frozenParams() {
+		return new FrozenParams(this.temperature, this.topP, this.maxTokens,
+				Boolean.TRUE.equals(this.paramsLocked));
+	}
+
 	/** 取证视图（不含 messageJson 正文）。 */
 	public Map<String, Object> asMap() {
 		Map<String, Object> out = new LinkedHashMap<>();

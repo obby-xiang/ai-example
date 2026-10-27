@@ -312,6 +312,24 @@ class ResilientChatServiceMemoryWriteTest {
 		});
 	}
 
+	@Test
+	void replacementCharactersAreObservedWithoutChangingText(CapturedOutput output) {
+		String original = "前\uFFFD中\uFFFD后";
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk(original), terminal("stop")));
+
+		SseChatEmitter out = runTurn();
+
+		assertThat(this.store.events(RUN_ID)).filteredOn(frame -> "delta".equals(frame.get("type")))
+			.singleElement()
+			.satisfies(frame -> assertThat(frame.get("text")).isEqualTo(original));
+		assertThat(this.repository.findByConversationId(SESSION_ID)).last()
+			.satisfies(message -> assertThat(message.getText()).isEqualTo(original));
+		assertThat(output.getAll()).contains("replacementCount=2", "textLength=" + original.length(),
+				"firstReplacementOffset=" + original.indexOf('\uFFFD'), "runId=" + RUN_ID)
+			.doesNotContain("text=" + original);
+		assertThat(out.lastIssuedSeq()).isPositive();
+	}
+
 	// ───────────────────────── 辅助 ─────────────────────────
 
 	private SseChatEmitter runTurn() {

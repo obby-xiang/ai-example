@@ -624,8 +624,15 @@ class AiControllerHistoryPayloadTest {
 		return new AiController(availability, provider(), provider(), provider(), this.chatMemory,
 				this.chatMemoryRepository, this.sessionGate, mock(ConfirmGate.class), this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), this.redisAvailability,
-				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
+				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), displayProperties(), mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+	}
+
+	/** AR-12 用例锁的是"历史透出思考"：展示开关显式打开（默认关闭）。 */
+	private static AiProperties displayProperties() {
+		AiProperties properties = new AiProperties();
+		properties.getReasoning().setDisplayEnabled(true);
+		return properties;
 	}
 
 	@SuppressWarnings("unchecked")

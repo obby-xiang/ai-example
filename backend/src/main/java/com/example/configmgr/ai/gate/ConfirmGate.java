@@ -1457,8 +1457,9 @@ public class ConfirmGate {
 	 * <ul>
 	 * <li>条目带 kind 且不符 ⇒ {@code true}（调用方回 {@link Outcome#TOOL_KIND_MISMATCH}，
 	 *     条目一个字节都不改）；</li>
-	 * <li>旧数据（{@code kind=null}，字段引入前写入）⇒ {@code false} + <b>WARN</b>：
-	 *     升级瞬间在途的挂起不能因为缺少元数据而被判成"错入口"（否则人永远提交不了）；</li>
+	 * <li><b>{@code kind=null} 也 ⇒ {@code true} + WARN</b>（本批收紧）：kind 是服务端写入的通道事实，
+	 *     缺失时无法证明这个条目该走确认门还是前端回灌。缺证据不授权 —— <b>不得批准、不得执行</b>，
+	 *     显式回 {@code TOOL_KIND_MISMATCH}，条目保持原状（旧兼容口径"放行 + WARN"已废止）；</li>
 	 * <li>相符 ⇒ {@code false}。</li>
 	 * </ul>
 	 *
@@ -1470,10 +1471,10 @@ public class ConfirmGate {
 	 */
 	private boolean kindMismatch(PendingToolCall pending, String expectedKind, String endpoint) {
 		if (!pending.hasKind()) {
-			log.warn("旧数据缺 kind，按兼容口径放行 toolCallId={} name={} endpoint={} expected={}"
-					+ "（kind 字段引入前写入的挂起，不做种类判定）", pending.getToolCallId(), pending.getName(), endpoint,
+			log.warn("条目缺 kind，拒绝批准/回灌（缺证据不授权）toolCallId={} name={} endpoint={} expected={}"
+					+ "（不写状态、不占 guard、不发帧）", pending.getToolCallId(), pending.getName(), endpoint,
 					expectedKind);
-			return false;
+			return true;
 		}
 		if (pending.isKind(expectedKind)) {
 			return false;
@@ -1575,7 +1576,8 @@ public class ConfirmGate {
 	 *
 	 * <p><b>入口 kind 永远第一</b>（入口 kind 校验批）：本入口只改写 {@code kind=FRONTEND} 的条目，
 	 * 确认门条目的 toolCallId 发到这里 ⇒ {@link Outcome#TOOL_KIND_MISMATCH}（连
-	 * {@code cancelled=true} 也拦 —— 它同样会改写状态）。旧数据 {@code kind=null} 放行 + WARN。
+	 * {@code cancelled=true} 也拦 —— 它同样会改写状态）。{@code kind=null} 同样拒绝 + WARN
+	 * （缺证据不授权：无法证明它属于前端通道）。
 	 *
 	 * @param cancelled 前端是否报告"用户主动放弃"（关闭表单/取消对话框）
 	 */

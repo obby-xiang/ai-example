@@ -250,6 +250,17 @@ const creatingTask = ref(false)
 
 const stepIndex = ref(0)
 const selectedDefs = ref<string[]>([])
+/**
+ * 任务详情是否已**应用**到本页（选中集 / 条件草案 / 步骤 / 状态已按服务端事实恢复并 `enterPage`）。
+ *
+ * 为什么单独成一个事实：`restore_task` / 同页绑定只同步写 `workspace.taskId`，`/tasks/{id}`
+ * 还在路上时本页的勾选集仍是空的。契约层据此等（`export.taskDetailReady` 探针，见
+ * `utils/frontend-tools.ts` 的 `TASK_DETAIL_READY_PROBES`），否则紧随的 `confirm_step`
+ * 会拿空选中集推进并向服务端落库（"AI 说按勾选导出，实际导出全量"）。
+ *
+ * 口径：只在 `enterPage` **之后**置 true，且不等定义列表 / 结果文件 / 作业 / 表格引擎 / 编辑器。
+ */
+const taskDetailReady = ref(false)
 const draftModels = reactive<Record<string, ConditionDraftModel>>({})
 const counts = reactive<Record<string, number | null>>({})
 const countLoading = reactive<Record<string, boolean>>({})
@@ -490,15 +501,19 @@ interface TaskLoadOutcome {
 
 async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   if (taskId.value === null) {
+    taskDetailReady.value = false
     return { taskOk: false, filesOk: false }
   }
   const generation = taskGeneration
+  // 详情重新起飞：在 `enterPage` 之前一律不认"已应用"
+  taskDetailReady.value = false
   let loaded = preloaded ?? null
   if (loaded === null) {
     try {
       loaded = await tasksApi.getTask(taskId.value)
     } catch (error) {
       if (generation === taskGeneration) {
+        taskDetailReady.value = false
         ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.taskLoadFailed'))
       }
       return { taskOk: false, filesOk: false }
@@ -506,6 +521,13 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   }
   // 旧任务的详情晚到：不得覆盖新任务的标题/步骤/勾选/条件
   if (generation !== taskGeneration) {
+    return { taskOk: false, filesOk: false }
+  }
+  // 类型相反 ⇒ 本页不是它的向导：**静默**改投对应向导（不弹提示、不回灌"打开失败"），
+  // 否则导出页会拿一条导入任务恢复自己的选中集/步骤（"导入任务显示成导出向导"）。
+  if (loaded.type === 'IMPORT') {
+    taskDetailReady.value = false
+    await router.replace({ name: 'import-wizard', query: { taskId: String(taskId.value) } })
     return { taskOk: false, filesOk: false }
   }
   task.value = loaded
@@ -535,6 +557,9 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     selectedDefs: [...selectedDefs.value],
     queryConditions: restoredConditions
   })
+  // 详情已应用：选中集 / 条件草案 / 步骤 / 状态都已按服务端事实恢复并声明进工作区
+  //（**不等**下面的作业恢复与结果文件列表 —— 它们不影响后续动作的正确性）
+  taskDetailReady.value = true
   await resumeJobs()
   if (generation !== taskGeneration) {
     return { taskOk: false, filesOk: false }
@@ -678,6 +703,8 @@ async function retryLoadLists(): Promise<void> {
  */
 function resetTaskScopedState(): void {
   taskGeneration += 1
+  // 换任务 = 详情重新起飞：在新任务 `enterPage` 之前，本页不得对外的"详情已应用"作任何背书
+  taskDetailReady.value = false
   if (gridDirty) {
     ElMessage.warning(t('views.export.msg.unsavedDiscarded'))
     gridDirty = false
@@ -1877,7 +1904,9 @@ const HANDLER_NAMES = [
   PAGE_HANDLER_OPEN_EXPORT_EDITOR,
   'sheet.current',
   // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页跟踪面
-  'export.syncJob'
+  'export.syncJob',
+  // 任务详情就绪探针（只读）：契约层导航/幂等判据据此等"选中集/条件/步骤已恢复"
+  'export.taskDetailReady'
 ]
 
 /** visop 批 B：两个新增区域的 root（第 1 步配置项选择 / 第 2 步查询条件）。 */
@@ -2068,6 +2097,9 @@ async function preflightWithDeadline(args: Record<string, unknown>): Promise<Gat
 }
 
 function registerHandlers(): void {
+  // 任务详情就绪探针（只读，返回布尔）：契约层在导航/幂等早退处等它变 true 才放行后续动作。
+  // 与 `PAGE_READY_PROBES` 在同一处注册 —— 页面挂载即存在，不会出现"页面就绪但探针缺席"。
+  registerPageHandler('export.taskDetailReady', () => taskDetailReady.value)
   // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页的跟踪面。
   // 与既有 resumeJobs() 同一条恢复链（刷新/回页时也走它）——不重复一套绑定逻辑；
   // taskId 对不上就不动本页（别的任务的作业显示在这里 = 说 A 实际给 B）。

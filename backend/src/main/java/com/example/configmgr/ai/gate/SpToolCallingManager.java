@@ -134,9 +134,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <li>{@link RunSnapshot#getMessageJson()} 写的就是模型实际看到的那串历史，续跑据此重建。</li>
  * </ul>
  *
- * <h2>不落地的路径（诚实回落）</h2>
- * 拿不到 {@code runId}（无 toolContext）或 Redis 里没有本轮快照时，挂起态无法外置，
- * 本类<b>原样委托官方执行</b>并留 WARN —— 宁可无 HITL，也不制造"挂起但不可恢复"的死轮。
+ * <h2>快照缺失时的执行路径（危险工具不得直执行）</h2>
+ * 拿不到 {@code runId}（无 toolContext）或 Redis 里没有本轮快照时，挂起态无法外置。旧实现在这里
+ * <b>原样委托官方执行</b>，于是 DANGER 工具会绕过确认门直接执行。现在的口径分两步：
+ * <ol>
+ * <li><b>先恢复</b>：{@code toolContext} 里的本轮权威执行信封（{@link ToolExecutionEnvelope}）
+ *     若存在且由<b>本实例创建</b>，就用它恢复快照（round/步数/预算原值带回，不写 {@code ai:seq}），
+ *     随后走正常预检 → {@code SUSPENDED}/pending → {@code confirm_request} → 批准续跑；</li>
+ * <li><b>恢复不了才拒绝</b>：危险/前端通道工具一律不执行（{@code blocked}/TOOL_KIND_MISMATCH，
+ *     不弹卡、不认领、不写台账），只有 READ + BACKEND 的调用仍可回落官方执行（无副作用）。
+ *     宁可少做一次只读查询，也不制造"未经确认的高危副作用"。</li>
+ * </ol>
  */
 @Slf4j
 @Component
@@ -386,12 +394,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 		String runId = runIdOf(prompt);
 		RunSnapshot snapshot = runId == null ? null : this.store.get(runId);
 		if (runId == null || snapshot == null) {
-			// 仅防御：生产路径恒有 runId（ToolCallingChatOptions.toolContext 由服务层写入），
-			// 故此分支不可达。注意 delegate 用的是 alwaysThrow=true —— 一旦真的走到这里，工具异常
-			// 会穿出整轮（不落 tool_result 帧、不写台账），因为本类没有可外置的挂起态来做兜底。
-			log.warn("工具执行处拿不到本轮 runId/快照（runId={}），挂起态无法外置，回落官方默认执行：{}",
-					runId, assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::name).toList());
-			return this.delegate.executeToolCalls(prompt, chatResponse);
+			// ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
+			snapshot = recoverSnapshot(ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt)), runId);
+			if (snapshot != null) {
+				runId = snapshot.getRunId();
+			}
+		}
+		if (runId == null || snapshot == null) {
+			// ② 恢复不了：危险/前端工具拒绝直执行，只有 READ+BACKEND 可回落官方执行。
+			return executeWithoutSnapshot(prompt, chatResponse, runId, assistant);
 		}
 
 		SseChatEmitter out = this.registry.of(runId);
@@ -1638,6 +1649,43 @@ public class SpToolCallingManager implements ToolCallingManager {
 			+ "本次未执行（blocked）。前端结果只能经 /api/ai/frontend-tool-result 回灌。";
 
 	/**
+	 * {@code kind=null} 的固定口径：<b>既不批准也不执行</b>。
+	 *
+	 * <p>{@code kind} 是服务端写入的通道事实（CONFIRM / FRONTEND / BACKEND）。它缺失 = 无法证明
+	 * 这个调用该走确认门还是前端回灌；按"缺证据不授权"处理，显式归为
+	 * {@code blocked}/{@code TOOL_KIND_MISMATCH}，条目<b>不进入</b> APPROVED，也不跑后端桩体。
+	 */
+	public static final String KIND_UNKNOWN_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+			+ "：该调用的挂起种类缺失（kind=null），无法确认它该走确认门还是前端通道；"
+			+ "本次既不批准也不执行（blocked），未认领、未写台账。请让用户重新发起该操作。";
+
+	/**
+	 * 批准后执行前复核 {@code reportHash} 不一致的固定口径：<b>不执行、要求重新确认</b>。
+	 *
+	 * <p>确认卡上那份预检报告是批准的依据；执行时状态已变（文件被替换、有在途作业、任务改了步骤……）
+	 * 就必须让用户看新的报告再决定，不能拿旧报告当授权去执行。
+	 */
+	public static final String PRECHECK_STALE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+			+ ErrorCodes.PRECHECK_STALE + "）：确认卡上的预检报告与执行时的状态不一致，本次未执行。"
+			+ "请重新发起该操作并要求用户重新确认（新的确认卡会带上最新预检报告）。";
+
+	/** 执行前复核预检报告时基础设施不可用：同样不执行（失败关闭），要求重新发起并确认。 */
+	public static final String PRECHECK_REVERIFY_UNAVAILABLE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+			+ ToolOutcome.CODE_PRECHECK_UNAVAILABLE + "）：执行前无法复核预检报告（预检基础设施异常），"
+			+ "本次未执行。请稍后重新发起该操作并重新确认。";
+
+	/**
+	 * 快照/runId 缺失且无可信执行信封时的拒绝口径：危险/前端工具<b>不得直执行</b>。
+	 *
+	 * <p>机器码沿用 {@code TOOL_KIND_MISMATCH}（"这个调用不能在后端直执行通道上跑"），
+	 * 措辞说清"没弹卡、没执行"，让模型如实告知用户重新发起，而不是宣称已执行。
+	 */
+	public static final String UNRECOVERABLE_EXECUTION_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+			+ "：本轮执行上下文不可恢复（runId/轮次快照缺失，且没有本实例创建的权威执行信封），"
+			+ "该危险/前端工具未执行（未弹确认卡、未认领、未写台账）。请如实告知用户这一步没有执行，"
+			+ "并请用户重新发起该操作；不要重复调用同一工具。";
+
+	/**
 	 * 认领前复核命中取消时的统一文本（与 {@code cancelPendings} / {@code ConfirmGate#cancel} 逐字同源）：
 	 * 模型与前端都据此知道"没执行"，而不是"失败"或"未知"。
 	 */
@@ -1684,6 +1732,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context,
 			boolean settleObservation) {
+		// ⓪-a kind 缺失硬闸：无法证明该走确认门/前端通道，既不批准也不执行（不认领、不写台账）。
+		if (!pending.hasKind()) {
+			log.warn("拒绝后端执行 kind 缺失的条目 runId={} toolCallId={} name={} status={}（显式 blocked，不写台账）",
+					runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
+			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
+		}
 		// ⓪ 入口 kind 硬闸（入口 kind 校验批）：前端通道工具的桩体永不由后端执行。
 		// 位置在台账重放与认领<b>之前</b>：既不能"重放"一条历史成功台账把假执行说成成功，
 		// 也不能占认领、写新台账。正常路径走不到这里（FRONTEND 走 awaitFrontend），本闸是兜底。
@@ -1697,6 +1751,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
 		if (ledger != null) {
 			return replayLedger(runId, pending, ledger);
+		}
+
+		// ①.5 确认门执行前复核：批准时看到的预检报告必须仍是当前那份（reportHash 一致），
+		// 不一致 ⇒ 不执行并要求重新确认（旧报告不是执行授权）。
+		String staleReport = verifyApprovedReport(runId, pending, context);
+		if (staleReport != null) {
+			return staleReport;
 		}
 
 		// ② F2：目标资源硬校验（参数指向的任务必须存在、类型对得上、且在同一个工作区任务内）
@@ -2245,6 +2306,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
 		String status = pending.getStatus();
+		// kind 缺失硬闸：无法证明该走哪条通道 ⇒ 不执行（也不说成"失败"或"成功"）。
+		// 只拦"本来会执行"的三种态（APPROVED / PENDING / EXECUTED 但 executed=false）；
+		// 已结算的历史条目仍复用 resultText，绝不改写既有结局。
+		boolean wouldExecute = PendingToolCall.APPROVED.equals(status) || PendingToolCall.PENDING.equals(status)
+				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
+		if (!pending.hasKind() && wouldExecute) {
+			log.warn("续跑发现 kind 缺失的待决条目 runId={} toolCallId={} name={} status={}："
+					+ "显式 blocked，不批准、不执行、不写台账", runId, pending.getToolCallId(), pending.getName(), status);
+			ensureToolStartBeforeSettlement(runId, pending);
+			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
+		}
 		// 入口 kind 校验（续跑假批准）：APPROVED + FRONTEND 是"人根本没点过、前端也没执行过"的
 		// 假批准（旧代码/错入口留下的数据）。它<b>绝不能</b>进 executeOnce —— 那会把前端工具的
 		// 后端哨兵桩跑一遍并写成功台账。这里显式结算成 blocked（不认领、不写台账、executed=false）。
@@ -2397,6 +2469,188 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return runId == null ? null : String.valueOf(runId);
 		}
 		return null;
+	}
+
+	private Map<String, Object> toolContextOf(Prompt prompt) {
+		if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
+			return options.getToolContext();
+		}
+		return null;
+	}
+
+	/**
+	 * 凭本轮权威执行信封恢复轮次快照（快照缺失时的第一选择）。
+	 *
+	 * <p>三条硬口径（见 {@link ToolExecutionEnvelope}）：
+	 * <ul>
+	 * <li><b>只认本实例创建者</b>：{@code createdBy} 必须等于本实例 id，runId 也必须对得上 ——
+	 * 别的实例的信封不构成"这一轮归我驱动"的证据；</li>
+	 * <li><b>只恢复运行事实</b>：不写任何审批/认领/台账；恢复出的快照没有已批准条目；</li>
+	 * <li><b>不重置序号/预算/步数/创建时刻</b>：步数、轮次、创建时刻原值入快照；armed/已跳过批次数
+	 * 同时回填进程内信标；{@code ai:seq} 只抬到信封的 {@code seqFloor}（只升不降，绝不回拨并发新号）。
+	 * 抬号是必须的：快照与序号键可能同时丢失，不抬号会让恢复后的 {@code suspended}/{@code confirm_request}
+	 * 从 1 重发，前端带 {@code lastSeq} 重挂时把这些帧当孤儿丢掉（确认卡消失）。</li>
+	 * </ul>
+	 *
+	 * <p>恢复即落库（挂起与续跑都读 {@code ai:run:<runId>}）；落库前再读一次，若并发中已出现快照则直接
+	 * 用那一份，避免用较旧的信封覆盖更新的状态。落库复读成功后、任何后续帧之前抬号并复读校验
+	 * （抬不上去 ⇒ {@code null}，不发出会重号的帧）。任一环节失败 ⇒ {@code null}（调用方失败关闭）。
+	 *
+	 * @return 可用于本轮执行的快照；{@code null} = 信封缺失/不可信/恢复失败
+	 */
+	private RunSnapshot recoverSnapshot(ToolExecutionEnvelope envelope, String runId) {
+		if (envelope == null) {
+			return null;
+		}
+		if (!envelope.restorableBy(runId, this.store.instanceId())) {
+			log.warn("执行信封不可用于恢复（runId={} 信封 runId={} createdBy={} 本实例={}）：不据此恢复，按失败关闭",
+					runId, envelope.runId(), envelope.createdBy(), this.store.instanceId());
+			return null;
+		}
+		RunSnapshot restored = envelope.toSnapshot();
+		try {
+			RunSnapshot concurrent = this.store.get(restored.getRunId());
+			if (concurrent != null) {
+				return concurrent;
+			}
+			this.store.save(restored);
+			// 写权不在本实例（续跑权已转移/丢失）时 save 只 WARN 不抛 —— 必须复读确认真的落库，
+			// 否则后续 saveSuspended 会以"找不到快照"把整轮打穿；这里宁可判成不可恢复（失败关闭）。
+			if (this.store.get(restored.getRunId()) == null) {
+				log.warn("凭执行信封恢复未落库 runId={}（无写权限/丢租）：按失败关闭，危险/前端工具不得直执行",
+						restored.getRunId());
+				return null;
+			}
+		}
+		catch (RuntimeException ex) {
+			log.warn("凭执行信封恢复轮次快照失败 runId={}：{}（按失败关闭：危险/前端工具不得直执行）",
+					restored.getRunId(), ex.getMessage());
+			return null;
+		}
+		// 序号下界：ai:run 与 ai:seq/归档可能同时丢失；抬到信封的 seqFloor（只升不降）后，
+		// 下一帧由 max(归档末帧, ai:seq)+1 / INCR ai:seq 得出，必然 > seqFloor，重挂不会丢卡。
+		// 位置在落库复读之后、任何后续帧之前（本方法只在 emit 之前被调用）。
+		this.store.ensureIssuedSeqAtLeast(restored.getRunId(), envelope.seqFloor());
+		if (envelope.seqFloor() > 0L && this.store.lastIssuedSeq(restored.getRunId()) < envelope.seqFloor()) {
+			log.warn("恢复后业务序号下界未生效 runId={} seqFloor={} current={}（按失败关闭：不发出会重号的帧）",
+					restored.getRunId(), envelope.seqFloor(), this.store.lastIssuedSeq(restored.getRunId()));
+			return null;
+		}
+		// 预算口径跨 park/恢复不重置：进程内信标按信封原值重新点亮（armed 与已跳过批次数）。
+		this.beacon.restoreBudgetArmed(restored.getRunId(), envelope.budgetArmedAtMs());
+		this.beacon.restoreBudgetSkippedBatches(restored.getRunId(), envelope.budgetSkippedBatches());
+		log.warn("轮次快照缺失，已凭本实例权威执行信封恢复 runId={} createdAtMs={} round={} steps={} "
+				+ "budgetArmedAtMs={} skipped={} seqFloor={}（seq 已抬到下界，未伪造审批/台账/认领）",
+				restored.getRunId(), restored.getCreatedAtMs(), envelope.round(), envelope.toolSteps(),
+				envelope.budgetArmedAtMs(), envelope.budgetSkippedBatches(), envelope.seqFloor());
+		return restored;
+	}
+
+	/**
+	 * 快照/runId 缺失且无可信执行信封时的执行路径：<b>READ + BACKEND 放行，危险/前端工具拒绝</b>。
+	 *
+	 * <p>放行部分仍走官方执行器（纯只读、无副作用）；被拒部分在模型侧留下结构化的
+	 * {@code blocked}/{@code TOOL_KIND_MISMATCH} 结果，历史保持"完整 assistant(tool_calls) + 全量
+	 * tool 响应"的形状（官方循环下一跳不会丢消息）。本路径<b>不</b>发帧：没有可外置的挂起态，
+	 * 也不该让前端出现一张"看似可点"的确认卡。
+	 */
+	private ToolExecutionResult executeWithoutSnapshot(Prompt prompt, ChatResponse chatResponse, String runId,
+			AssistantMessage assistant) {
+		List<AssistantMessage.ToolCall> calls = assistant.getToolCalls();
+		List<AssistantMessage.ToolCall> allowed = new ArrayList<>(calls.size());
+		List<AssistantMessage.ToolCall> refused = new ArrayList<>(calls.size());
+		for (AssistantMessage.ToolCall call : calls) {
+			boolean readBackend = this.toolRegistry.channelOf(call.name()) == ToolMeta.Channel.BACKEND
+					&& this.toolRegistry.riskOf(call.name()) == ToolMeta.RiskLevel.READ;
+			(readBackend ? allowed : refused).add(call);
+		}
+		if (refused.isEmpty()) {
+			log.warn("工具执行处拿不到本轮 runId/快照（runId={}），且无可用执行信封；本批均为 READ+BACKEND，"
+					+ "回落官方默认执行：{}", runId, calls.stream().map(AssistantMessage.ToolCall::name).toList());
+			return this.delegate.executeToolCalls(prompt, chatResponse);
+		}
+		log.warn("工具执行处拿不到本轮 runId/快照（runId={}），且无可用执行信封：拒绝危险/前端工具 {}，"
+				+ "READ+BACKEND 放行 {}（不弹卡、不认领、不写台账）", runId,
+				refused.stream().map(AssistantMessage.ToolCall::name).toList(),
+				allowed.stream().map(AssistantMessage.ToolCall::name).toList());
+
+		Map<String, String> allowedData = new LinkedHashMap<>();
+		if (!allowed.isEmpty()) {
+			AssistantMessage subset = AssistantMessage.builder()
+				.content(assistant.getText())
+				.properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata())
+				.toolCalls(allowed)
+				.build();
+			ToolExecutionResult partial = this.delegate.executeToolCalls(prompt,
+					new ChatResponse(List.of(new Generation(subset))));
+			for (Message message : partial.conversationHistory()) {
+				if (message instanceof ToolResponseMessage toolMessage) {
+					for (ToolResponseMessage.ToolResponse response : toolMessage.getResponses()) {
+						allowedData.putIfAbsent(response.id(), response.responseData());
+					}
+				}
+			}
+		}
+
+		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(calls.size());
+		for (AssistantMessage.ToolCall call : calls) {
+			String data = allowedData.get(call.id());
+			if (data != null) {
+				responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(), data));
+				continue;
+			}
+			responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(),
+					ToolResultEnvelope
+						.of(ToolOutcome.BLOCKED, ToolOutcome.CODE_TOOL_KIND_MISMATCH, UNRECOVERABLE_EXECUTION_TEXT,
+								call.arguments())
+						.toModelJson(this.limiter, call.name())));
+		}
+		List<Message> history = new ArrayList<>(prompt.getInstructions());
+		history.add(assistant);
+		history.add(ToolResponseMessage.builder().responses(responses).build());
+		return ToolExecutionResult.builder().conversationHistory(history).build();
+	}
+
+	/**
+	 * 确认门执行前的 {@code reportHash} 复核。
+	 *
+	 * <p>只对"确认门条目 + 预检支持的工具 + 卡上确实带过 reportHash"生效：
+	 * 重跑一次只读预检，指纹一致才允许执行；不一致 ⇒ {@code blocked}/{@code PRECHECK_STALE}，
+	 * 要求用户重新确认（旧报告不是执行授权）。重跑预检自身失败 ⇒ 同样不执行（{@code PRECHECK_UNAVAILABLE}）。
+	 * 旧数据（没有预检报告）没有可比对的指纹，保持既有行为。
+	 *
+	 * @return 阻断文本；{@code null} = 可继续执行
+	 */
+	private String verifyApprovedReport(String runId, PendingToolCall pending, AiContext context) {
+		if (this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+				|| !ToolPreflightService.supports(pending.getName())) {
+			return null;
+		}
+		Map<String, Object> stored = pending.getPreflight();
+		Object storedHash = stored == null ? null : stored.get("reportHash");
+		if (storedHash == null || String.valueOf(storedHash).isBlank()) {
+			return null;
+		}
+		ToolPreflightService.PreflightReport fresh;
+		try {
+			fresh = this.preflight.inspect(pending.getName(), pending.getArguments(), context);
+		}
+		catch (RuntimeException ex) {
+			log.error("执行前复核预检报告失败 runId={} tool={} toolCallId={}：{}（不执行，要求重新确认）", runId,
+					pending.getName(), pending.getToolCallId(), ex.getMessage());
+			return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
+					PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
+		}
+		if (fresh == null) {
+			return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
+					PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
+		}
+		if (String.valueOf(storedHash).equals(fresh.reportHash())) {
+			return null;
+		}
+		log.warn("确认卡预检报告在执行时已变化 runId={} tool={} toolCallId={} 卡上={} 当前={}（不执行，要求重新确认）",
+				runId, pending.getName(), pending.getToolCallId(), storedHash, fresh.reportHash());
+		return settleBlocked(runId, pending, ErrorCodes.PRECHECK_STALE, PRECHECK_STALE_TEXT);
 	}
 
 	/**

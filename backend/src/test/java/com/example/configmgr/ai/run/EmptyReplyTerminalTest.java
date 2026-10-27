@@ -256,6 +256,7 @@ class EmptyReplyTerminalTest {
 	 */
 	@Test
 	void reasoningOnlyEmptyReplyIsNotRetried() {
+		this.properties.getReasoning().setDisplayEnabled(true);
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.just(reasoning("先想一下"), terminal("stop")));
 

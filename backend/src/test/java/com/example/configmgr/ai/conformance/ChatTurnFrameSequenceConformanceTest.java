@@ -290,6 +290,8 @@ class ChatTurnFrameSequenceConformanceTest {
 	 */
 	@Test
 	void reasoningChunksOpenAClosedThinkingSegmentAndNeverLeakIntoTheBody() {
+		// 2026-10-27：思考帧默认关闭；本用例锁的是"开启时"的帧面形态，显式打开。
+		this.properties.getReasoning().setDisplayEnabled(true);
 		when(this.chatModel.stream(any(Prompt.class)))
 				.thenReturn(Flux.just(reasoningChunk("先想"), reasoningChunk("一步"), chunk("答案是 2"),
 						terminal("stop")));
@@ -336,6 +338,8 @@ class ChatTurnFrameSequenceConformanceTest {
 	 */
 	@Test
 	void reasoningOnlyThenUpstreamFailureClosesTheThinkingSegmentAndDoesNotRetry() {
+		// 2026-10-27：思考帧默认关闭；本用例锁的是"开启时"的思考段收口，显式打开。
+		this.properties.getReasoning().setDisplayEnabled(true);
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.concat(Flux.just(reasoningChunk("只想了没答")),
 				Flux.error(new StreamViolationException(StreamViolationException.STREAM_ERROR, "上游流中断"))));
 

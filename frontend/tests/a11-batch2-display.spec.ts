@@ -297,6 +297,33 @@ describe('批次2 · 继续 / 重试本轮（AR-17：普通 regenerate 本批不
     wrapper.unmount()
   })
 
+  it('零正文零思考但工具已结算的失败轮 ⇒ 重试本轮走仅模型步重跑', async () => {
+    const user = userMessage('u-1', '提问')
+    const reply = buildMessage([{
+      kind: 'tool',
+      seg: 0,
+      toolCallId: 'tool-settled',
+      name: 'list_tasks',
+      kind2: 'BACKEND',
+      status: 'succeeded',
+      requiresAction: false,
+      result: '[]'
+    }])
+    reply.id = 'a-1'
+    reply.runId = 'run-a1'
+    const store = useAiStore()
+    const retry = vi.spyOn(store, 'retryModelStep').mockResolvedValue('accepted')
+    const send = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'error' })
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    const button = wrapper.find('[data-testid="retry-turn"]')
+    expect(button.exists()).toBe(true)
+    await button.trigger('click')
+    expect(retry).toHaveBeenCalledWith(reply)
+    expect(send).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('零产出失败但无 runId 归属证据 ⇒ 不出「重试本轮」（不得重试错轮）', async () => {
     const user = userMessage('u-1', '提问')
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: false }])

@@ -542,7 +542,14 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         return ok(`已打开${PAGE_LABELS[event.page]}`)
       }
       case 'restore_task': {
-        const target = taskStore.resolveWizardRoute(event.taskId)
+        // 类型优先用事件里带的**权威值**（导航侧已由 `ensureTaskType` 钉过）；没带就当场补一次
+        // 缓存优先的查询（未命中 GET）。查不到即 fail-closed：按列表兜底成 EXPORT 正是
+        // "冷缓存下导入任务被送进导出向导"的根因。
+        const taskType = event.taskType ?? (await taskStore.ensureTaskType(event.taskId))
+        if (taskType === null) {
+          return fail(`无法确认任务 #${event.taskId} 的类型（任务不存在或读取失败），未导航`)
+        }
+        const target = taskStore.resolveWizardRoute(event.taskId, taskType)
         await router.push(target)
         const isImport = target.name === ROUTE_NAMES.importWizard
         return ok(`已恢复到任务 #${event.taskId} 的向导（${isImport ? '导入' : '导出'}）`)

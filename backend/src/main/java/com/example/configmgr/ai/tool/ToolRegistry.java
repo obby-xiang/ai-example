@@ -174,6 +174,50 @@ public class ToolRegistry {
             throw new IllegalStateException("工具 scope 为空（@ToolScope 必须至少声明一个标签）：" + emptyScope
                     + " —— 启动中止：空 scope 会让披露面与执行面得出相反结论");
         }
+        assertRiskChannelInvariant();
+    }
+
+    /**
+     * <b>风险 / 通道不变量（启动期 fail-fast）</b>：
+     * <ul>
+     * <li>{@code DANGER ⇒ BACKEND}：需要人工确认的高危工具只能是后端可执行通道。
+     *     {@code DANGER + FRONTEND} 会让后端按 {@code kind=CONFIRM} 挂起等确认，前端却按通道把同一次
+     *     调用当 {@code FRONTEND} 等回灌 —— 两条路径互相等，直接死卡；</li>
+     * <li>{@code BACKEND ⇒ READ 或 DANGER}：后端直执行只承载"纯读"与"确认门之后才跑"的工具。
+     *     {@code WRITE + BACKEND} 会被 {@code kindOf} 判成 {@code BACKEND} 直接执行 —— 一次可逆写
+     *     静默绕过人工确认，与"写操作要确认"的口径相反（可逆写一律走前端通道）。</li>
+     * </ul>
+     *
+     * <p>为什么必须启动失败：运行期只能二选一（要么死卡、要么绕过确认），没有安全的默认。
+     * 启动时点名到工具，比上线后在确认卡上发现"点了没反应"或"没点就写了"容易查得多。
+     */
+    private void assertRiskChannelInvariant() {
+        List<String> dangerousFrontend = new ArrayList<>();
+        List<String> backendWrite = new ArrayList<>();
+        for (ToolMeta meta : metaMap.values()) {
+            ToolMeta.RiskLevel risk = meta.getRiskLevel();
+            ToolMeta.Channel channel = meta.getChannel();
+            if (risk == ToolMeta.RiskLevel.DANGER && channel != ToolMeta.Channel.BACKEND) {
+                dangerousFrontend.add(meta.getName());
+            }
+            if (channel == ToolMeta.Channel.BACKEND && risk != ToolMeta.RiskLevel.READ
+                    && risk != ToolMeta.RiskLevel.DANGER) {
+                backendWrite.add(meta.getName());
+            }
+        }
+        if (dangerousFrontend.isEmpty() && backendWrite.isEmpty()) {
+            return;
+        }
+        StringBuilder message = new StringBuilder("工具风险/通道不变量被破坏（DANGER ⇒ BACKEND；BACKEND ⇒ READ/DANGER）");
+        if (!dangerousFrontend.isEmpty()) {
+            message.append("：DANGER+FRONTEND（高危动作会死卡）")
+                .append(dangerousFrontend.stream().sorted().toList());
+        }
+        if (!backendWrite.isEmpty()) {
+            message.append("：后端直执行的写类工具（会绕过确认门）")
+                .append(backendWrite.stream().sorted().toList());
+        }
+        throw new IllegalStateException(message + " —— 启动中止：运行期只能死卡或绕过确认，没有安全默认");
     }
 
     /**

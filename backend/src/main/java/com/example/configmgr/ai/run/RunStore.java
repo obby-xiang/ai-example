@@ -438,6 +438,30 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			""", Long.class);
 
 	/**
+	 * 业务序号<b>下界</b>的单键原子 max + 续期：{@code ai:seq:<runId>}（快照/序号同时丢失后的恢复批）。
+	 *
+	 * <p>为什么必须是 Lua：Java 侧 {@code GET → 比较 → SET} 会把并发发放的新号回拨（与本类活动锚点
+	 * 同一类窗口）。恢复只需保证"下一帧 &gt; 信封里的 seqFloor"，且<b>只升不降</b>：
+	 * 当前号已经更大 ⇒ 只续期、不改值。
+	 *
+	 * @param KEYS[1] {@code ai:seq:<runId>}
+	 * @param ARGV[1] 下界（信封的 {@code seqFloor}）
+	 * @param ARGV[2] TTL（毫秒，{@code app.ai.session-ttl}）
+	 */
+	private static final RedisScript<Long> RAISE_SEQ_SCRIPT = new DefaultRedisScript<>("""
+			-- RAISE_SEQ
+			local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+			if not current then current = 0 end
+			local floor = tonumber(ARGV[1]) or 0
+			if floor > current then
+			  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+			  return floor
+			end
+			redis.call('PEXPIRE', KEYS[1], ARGV[2])
+			return current
+			""", Long.class);
+
+	/**
 	 * 认领结论的三态（B23L1 批③a / 裁决 9）。
 	 *
 	 * <p>为什么要区分后两者：{@code LOST} 的语义是"这个调用已经有主（他实例在执行）"，
@@ -2687,6 +2711,37 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		catch (Exception ex) {
 			log.warn("登记已发放序号失败 runId={} seq={}（继续出帧，跨进程续号可能回退）：{}", runId, seq,
 					ex.getMessage());
+		}
+	}
+
+	/**
+	 * 把 {@code ai:seq:<runId>} 的下界<b>抬到</b> {@code floor}（只升不降；失败只 WARN）。
+	 *
+	 * <h2>为什么需要它</h2>
+	 * 快照与序号键可能同时丢失（键被清 / 同槽整族过期）。此时恢复路径拿到的信封里带着"本实例已处置到的
+	 * 最大 seq"（{@code seqFloor}）。若只恢复快照而不抬 {@code ai:seq}，下一帧会从 1 重新发号，
+	 * 前端带 {@code lastSeq} 重挂时会把新帧当孤儿丢掉（确认卡正好在这批帧里 ⇒ 卡消失）。
+	 *
+	 * <p>单键 Lua 做"比较 + 只升 + 续期"：并发的更大号不会被回拨；已有更大号时只续期。
+	 * 写权限走 {@link #permittedToWrite(String, String)}（丢租/换主后不得再推进号空间）。
+	 * 帧存储的下一号由 {@code max(归档末帧, ai:seq)} 初始化（{@code RunStoreFrameStore}）或直接
+	 * {@code INCR ai:seq}（{@code RedisFrameStore}），因此抬这一个键即可同时覆盖两种实现。
+	 *
+	 * @param floor 下界（{@code <= 0} = 无下界，直接返回）
+	 */
+	public void ensureIssuedSeqAtLeast(String runId, long floor) {
+		if (runId == null || floor <= 0L) {
+			return;
+		}
+		if (!permittedToWrite(runId, "业务序号下界恢复")) {
+			return;
+		}
+		try {
+			this.redis.execute(RAISE_SEQ_SCRIPT, List.of(seqKey(runId)), String.valueOf(floor),
+					String.valueOf(ttlFor(runId).toMillis()));
+		}
+		catch (Exception ex) {
+			log.warn("恢复业务序号下界失败 runId={} floor={}：{}", runId, floor, ex.getMessage());
 		}
 	}
 

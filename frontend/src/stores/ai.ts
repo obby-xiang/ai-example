@@ -433,6 +433,29 @@ let mirrorFlushHandler: (() => void) | null = null
 let workspaceSyncStarted = false
 let workspaceSyncStops: Array<() => void> = []
 
+/**
+ * 成功即**不回执位**的 ui_event（"无噪声成功"）。
+ *
+ * 这六类动作都是"把界面摆到该在的位置"：导航 / 恢复向导 / 切步骤 / 三类刷新。用户能直接看见
+ * 结果（页面已经换过去了），回执位再报一条"已打开导出向导"就是噪声；模型侧要的证明也已经由
+ * 工具结果（回灌文本）给出，不靠这条 Alert。
+ *
+ * **不在此列的一律保留**（失败永远保留）：`run_job` / `cancel_job` / `download` / `select_defs` /
+ * `set_conditions` / `set_import_mode` / `export_started` / `import_batch` / `import_action` ——
+ * 它们的成功意味着后端已落副作用（建作业、取文件、改数据），必须有一条可见回执。
+ *
+ * 底层不动：`workspace.touch` / `recentActions` / `workspace_changed` chip / `dispatchUiEvent` 的广播
+ * 全部照旧 —— 本表只决定 **AI 面板回执位**（`lastUiEventResult`）写不写。
+ */
+const SILENT_SUCCESS_UI_EVENTS: ReadonlySet<string> = new Set([
+  'open_page',
+  'restore_task',
+  'goto_step',
+  'refresh_defs',
+  'refresh_data',
+  'refresh_tasks'
+])
+
 /** 生成页签级会话 id（crypto.randomUUID 在非安全上下文不可用，故留回退）。 */
 export function createSessionId(): string {
   try {
@@ -2454,7 +2477,9 @@ export const useAiStore = defineStore('ai', {
      * - `workspace_changed`：用户在业务页面上的动作（选配置/切步骤/改条件/编辑表格…）
      *   → 面板显示"工作区已同步"chip；动作本身已由 workspace store 记入 recentActions，
      *   随下一轮 `buildContext()` 注入给模型（AI 面板不自己拼上下文，仍走窄接口）；
-     * - `ui_event_result`：AI 驱动工作区动作的回执（AI→业务方向）。
+     * - `ui_event_result`：AI 驱动工作区动作的回执（AI→业务方向）。**成功且属于"无噪声"类**
+     *   （导航 / 恢复向导 / 切步骤 / 三类刷新，见 `SILENT_SUCCESS_UI_EVENTS`）不写回执位；
+     *   失败与有副作用类（建作业 / 下载 / 选配置 / 设条件 / 改模式 …）照旧写。
      */
     startWorkspaceSync(): void {
       if (workspaceSyncStarted) {
@@ -2468,6 +2493,11 @@ export const useAiStore = defineStore('ai', {
         onWorkspaceEvent('ui_event_result', (payload) => {
           const record = payload as { event?: unknown; handled?: unknown; message?: unknown } | null
           if (!record || typeof record.event !== 'string') {
+            return
+          }
+          // 无噪声成功：这类动作的成功不写回执位（见 SILENT_SUCCESS_UI_EVENTS）。
+          // 槽位保持原样 —— 上一手**确实是失败**的那条事实不该被一次成功的导航抹掉。
+          if (record.handled === true && SILENT_SUCCESS_UI_EVENTS.has(record.event)) {
             return
           }
           this.lastUiEventResult = {
@@ -3986,6 +4016,9 @@ export const useAiStore = defineStore('ai', {
       this.resetCompactionProgress()
       this.clearPreparingRun()
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
+      // 回执位是**轮次现场**：上一轮的 ui_event 回执不带到新轮（成功类导航本就不写，
+      // 失败类也属于上一轮的事实 —— 见 SILENT_SUCCESS_UI_EVENTS 的边界）
+      this.lastUiEventResult = null
       // 批 E · E2：新轮触发即收起上一轮的建议条（点 chip / 点建议 / 手打发都是这个入口）
       this.followupReady = false
       this.poolSaturated = null

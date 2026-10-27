@@ -126,6 +126,13 @@ app:
   #    max-iterations/session-ttl-minutes/hitl-timeout-minutes/thinking-disabled 已删除，
   #    其中 thinking-disabled 在新运行时早已失效：官方循环 + reasoning 补丁不设 extraBody.thinking）──
   ai:
+    # ── 思考（reasoning_content）展示与持久化（2026-10-27）────────────────────
+    # 展示与持久化解耦：默认不发思考帧、历史不透 reasoningContent；思考仍落 assistant metadata，
+    # 供下一轮回填（ReasoningAwareOpenAiChatModel 读的就是这份 metadata）。
+    # 需要思考帧/历史思考时把 display-enabled 打开（回到逐片出帧、/history 透出的行为）。
+    reasoning:
+      display-enabled: false
+      persist-content: true
     # ── 模型配置读写开关（模型配置专项批①）─────────────────────────────────
     config:
       # 强制重灌 env 种子（默认 false = strict seed：表非空时 env 完全不参与）。

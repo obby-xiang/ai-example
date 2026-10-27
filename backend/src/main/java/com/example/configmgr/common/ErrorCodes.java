@@ -65,7 +65,7 @@ public final class ErrorCodes {
      * {@code kind=CONFIRM} 的条目，{@code /api/ai/frontend-tool-result} 只应改写 {@code kind=FRONTEND}
      * 的条目。错入口会把人根本没点过的确认卡写成"前端已回灌"，或把前端条目写成"已批准"
      * （续跑时被当成人批准过）。判据取<b>服务端条目</b>上的 {@code kind}，客户端传什么都不信；
-     * 旧数据 {@code kind=null} 兼容放行（见各入口的 WARN）。
+     * {@code kind=null}（旧数据）按"缺证据不授权"同样回本码（见各入口的 WARN）。
      *
      * <p>与 {@link #UNKNOWN_TOOL_CALL}/{@link #DUPLICATE_TOOL_CALL_ID} 分工：那两个是"id 不存在/已决"，
      * 本码是"id 存在但不属于这条入口" —— 状态与条目一个字节都没变。
