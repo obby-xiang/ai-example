@@ -19,6 +19,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { aiApi } from '@/api/ai'
 import {
   registerFrontendToolExecutor,
   unregisterFrontendToolExecutor
@@ -79,7 +80,8 @@ vi.mock('@/api/ai', () => ({
     frontendToolResult: vi.fn(async () => ({})),
     reattachRun: vi.fn(),
     feedbackSubmit: vi.fn(),
-    confirm: vi.fn()
+    confirm: vi.fn(),
+    cancel: vi.fn(async () => ({}))
   }
 }))
 
@@ -177,6 +179,53 @@ describe('同一助手消息内 frontend_tool_request 串行', () => {
     store.handleFrame(requestFrame('c-1', 'open_export_file_editor', { taskId: 7, defCode: 'A' }))
     store.handleFrame(requestFrame('c-2', 'open_export_file_editor', { taskId: 7, defCode: 'B' }))
     await vi.waitFor(() => expect(events).toEqual(['A', 'B']))
+
+    unregisterFrontendToolExecutor('open_export_file_editor')
+  })
+
+  /**
+   * B2：停止必须对**排队中**的动作也立即生效。
+   *
+   * 缺陷：`stop()` 只递增轮次纪元并中止连接，但队列里的下一条排在前一条的 then 上 ——
+   * 前一条返回后它照旧开跑：改界面、写段终态、把旧 run 的结局回灌给已取消的后端。
+   */
+  it('停止后排队中的下一条不再执行（零副作用、不回灌）', async () => {
+    const events: string[] = []
+    let releaseFirst: (() => void) | null = null
+    registerFrontendToolExecutor('open_export_file_editor', async (call) => {
+      const code = String(call.args.defCode)
+      events.push(`start:${code}`)
+      if (code === 'A') {
+        await new Promise<void>((resolve) => {
+          releaseFirst = () => resolve()
+        })
+      }
+      events.push(`end:${code}`)
+      return `已打开 ${code}`
+    })
+    enterExport()
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+
+    store.handleFrame(requestFrame('c-1', 'open_export_file_editor', { taskId: 7, defCode: 'A' }))
+    await Promise.resolve()
+    store.handleFrame(requestFrame('c-2', 'open_export_file_editor', { taskId: 7, defCode: 'B' }))
+    await Promise.resolve()
+    expect(events).toEqual(['start:A'])
+
+    await store.stop()
+    expect(store.stopped).toBe(true)
+
+    const release = releaseFirst as (() => void) | null
+    release?.()
+    await vi.waitFor(() => expect(events).toEqual(['start:A', 'end:A']))
+    // 让队尾项有机会跑（若守卫失效，这里能看到 start:B）
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(events).toEqual(['start:A', 'end:A'])
+    // 停止即收口：A 的晚到结局也不回灌，B 从未开跑
+    expect(vi.mocked(aiApi.frontendToolResult)).not.toHaveBeenCalled()
+    expect(store.stopped).toBe(true)
 
     unregisterFrontendToolExecutor('open_export_file_editor')
   })

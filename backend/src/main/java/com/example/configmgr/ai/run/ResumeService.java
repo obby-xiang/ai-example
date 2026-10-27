@@ -940,10 +940,12 @@ public class ResumeService {
 					}
 					catch (Exception ex) {
 						log.error("仅模型步重跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
-						markDriveFailure(snapshot, ex);
-						if (out != null) {
-							out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
-						}
+						// N2：失败终态与失败终帧由同一个写口在监视器内完成 —— 取消已先到时两者都不发。
+						markDriveFailure(snapshot, ex, () -> {
+							if (out != null) {
+								out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
+							}
+						});
 					}
 					finally {
 						LocaleContextHolder.resetLocaleContext();
@@ -1012,6 +1014,25 @@ public class ResumeService {
 		}
 		body.put("reason", "LEASE_HELD_ELSEWHERE");
 		return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, body);
+	}
+
+	/**
+	 * 续跑的<b>状态写被拒</b>后的 typed 结局（N4）：区分"取消已先到"与"续跑权已丢/不可确认"。
+	 *
+	 * <p>为什么必须再读一次：{@link RunStore#saveStatusUnlessCancelled} 的 {@code false} 同时覆盖取消守卫
+	 * 与只读写门（丢租 / 设施不可用 / fence 已被接管）。取消 ⇒ {@code cancelStateOutcome} 的既有取消
+	 * 收尾（{@code ALREADY_CANCELLED} / {@code CANCEL_STATE_UNKNOWN}）；否则按状态未知收口，
+	 * <b>两者都不驱动</b>。
+	 */
+	private ResumeResult resumeStatusWriteRefused(String runId, Map<String, Object> body) {
+		ResumeResult cancelled = cancelStateOutcome(runId, body);
+		if (cancelled != null) {
+			return cancelled;
+		}
+		body.put("resumed", false);
+		body.put("reason", "STATE_UNKNOWN");
+		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+		return new ResumeResult(Outcome.STATE_UNKNOWN, body);
 	}
 
 	/** 前置失败的 typed 结局（对外 409 + 稳定码 + 具体是哪一条没满足）。 */
@@ -1468,12 +1489,21 @@ public class ResumeService {
 				snapshot.setAssistantContent(null);
 				snapshot.setStatus(RunSnapshot.RUNNING);
 				snapshot.getResumedBy().add(this.store.instanceId());
-				this.store.save(snapshot);
+				// N4：状态转换走取消优先的原子守卫（不是普通 save）。本笔被拒 ⇒ 取消已先到/续跑权已丢，
+				// 复核后给 typed 结局，**不得**继续压缩、认领或交棒驱动这一轮。
+				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
+					log.info("续跑重建后的 RUNNING 状态转换被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）",
+							runId);
+					return resumeStatusWriteRefused(runId, body);
+				}
 			}
 			else {
 				snapshot.getResumedBy().add(this.store.instanceId());
 				snapshot.setStatus(RunSnapshot.RUNNING);
-				this.store.save(snapshot);
+				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
+					log.info("续跑 RUNNING 状态转换被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
+					return resumeStatusWriteRefused(runId, body);
+				}
 			}
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
@@ -1538,7 +1568,12 @@ public class ResumeService {
 				if (compaction.changed()) {
 					history = compaction.messages();
 					snapshot.setMessageJson(this.codec.serializeAll(history));
-					this.store.save(snapshot);
+					// N4：压缩是长窗口（L2 = N 次串行摘要），结束时取消可能已经先到 —— 这一笔同样
+					// 不得把 CANCELLED 翻回 RUNNING；被拒 ⇒ 不写 context 交接位、不交棒驱动。
+					if (!this.store.saveStatusUnlessCancelled(snapshot)) {
+						log.info("续跑压缩后的快照写被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
+						return resumeStatusWriteRefused(runId, body);
+					}
 					body.put("contextCompaction", compaction.levelWire());
 					// 落库顺序（本路径）= 归档 → 快照 → 记忆（轮末 converge 时）。与首轮路径的
 					// "记忆 → 快照"不同，原因是本类拿不到 ChatMemory：轮末 convergeMemory 会以快照为准
@@ -1558,6 +1593,12 @@ public class ResumeService {
 			body.put("resumedBy", this.store.instanceId());
 
 			SseChatEmitter out = this.registry.of(runId);
+			// N4：交棒前最后一次复查取消事实 —— 压缩/窗口收口期间用户按下停止，绝不能再把这一轮
+			// 交出去驱动（取消已成立时由取消收尾负责终态与终帧；UNKNOWN 走既有 typed 结局）。
+			ResumeResult cancelBeforeHandoff = cancelStateOutcome(runId, body);
+			if (cancelBeforeHandoff != null) {
+				return cancelBeforeHandoff;
+			}
 			// ── I-1：续跑侧压缩也要即时可见（与首轮同一份 outcome 载荷）──
 			// 位置：start 已由原轮发出（归档里），本帧在此处取号 ⇒ 必然晚于 start、且早于交棒后的
 			// 首个 delta（交棒在下面 execute 里，本帧在提交之前同步发出）。
@@ -1600,8 +1641,9 @@ public class ResumeService {
 						// R-08：用户面只给白名单短句；原始异常（上游 body / 内部提示）只进日志。
 						log.error("续跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
 						// 交棒后的失败必须落终态，不能只留下错误帧和无人推进的 RUNNING 快照。
-						markDriveFailure(snapshot, ex);
-						out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
+						// N2：失败终态与失败终帧在同一个监视器内完成（取消已先到 ⇒ 两者都不发）。
+						markDriveFailure(snapshot, ex,
+								() -> out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage()));
 					}
 					finally {
 						LocaleContextHolder.resetLocaleContext();
@@ -1629,7 +1671,11 @@ public class ResumeService {
 				// 看到一条"压过 L1 但其实没跑"的幽灵记录）。
 				this.chatService.clearCompaction(runId);
 				snapshot.setStatus(RunSnapshot.SUSPENDED);
-				this.store.save(snapshot);
+				// N4（settle 同型）：池饱和落 SUSPENDED 也不得把并发取消翻案；被拒 ⇒ 复核后给 typed 结局，
+				// 不把"已取消"报成"池满可重试"。
+				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
+					return resumeStatusWriteRefused(runId, body);
+				}
 				return new ResumeResult(Outcome.POOL_SATURATED, body);
 			}
 			return new ResumeResult(Outcome.ACCEPTED, body);
@@ -1652,15 +1698,42 @@ public class ResumeService {
 	/**
 	 * 驱动任务失败时落成 FAILED 终态，并清空未完成的工具调用。
 	 * 已经是终态的快照不覆盖；写终态失败只留 WARN，不把异常抛给已发出的终帧。
+	 *
+	 * <p><b>N2（返修）</b>：整段"读快照 → 判取消 → 写 FAILED → 发 error"在<b>同一把</b> per-run 监视器内，
+	 * 取消已先到（快照取消态 / 守卫拒写）时连失败终帧也不发 —— 否则一轮会同时出现
+	 * {@code error} 与 {@code done{cancelled:true}}。只在写快照时加锁不够：锁外发 error 仍可被
+	 * 取消的 done 插到前面。
+	 *
+	 * @param emitError 失败终帧的发送动作（在监视器内执行；调用方按旧口径决定是否发）
 	 */
-	private void markDriveFailure(RunSnapshot snapshot, Exception ex) {
+	private void markDriveFailure(RunSnapshot snapshot, Exception ex, Runnable emitError) {
 		if (snapshot == null || snapshot.getRunId() == null) {
+			if (emitError != null) {
+				emitError.run();
+			}
 			return;
 		}
+		String runId = snapshot.getRunId();
+		Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
+		if (monitor == null) {
+			markDriveFailureLocked(snapshot, ex, emitError);
+			return;
+		}
+		synchronized (monitor) {
+			markDriveFailureLocked(snapshot, ex, emitError);
+		}
+	}
+
+	private void markDriveFailureLocked(RunSnapshot snapshot, Exception ex, Runnable emitError) {
 		try {
 			RunSnapshot latest = this.store.get(snapshot.getRunId());
 			RunSnapshot target = latest == null ? snapshot : latest;
 			if (RunSnapshot.isTerminal(target.getStatus())) {
+				// 取消是终态里唯一"终帧归别人发"的一种；DONE/FAILED 维持旧口径（写终态失败照发 error）。
+				boolean cancelled = RunSnapshot.CANCELLED.equals(target.getStatus()) || target.isCancelled();
+				if (!cancelled && emitError != null) {
+					emitError.run();
+				}
 				return;
 			}
 			boolean providerGone = ex instanceof ProviderGoneException;
@@ -1669,11 +1742,25 @@ public class ResumeService {
 					: com.example.configmgr.common.ErrorCodes.AI_RESUME_FAILED + "：续跑执行失败")
 					+ "（" + ex.getClass().getSimpleName() + "）");
 			target.setInFlightToolCalls(new ArrayList<>());
-			this.store.save(target);
+			if (!this.store.saveTerminalUnlessCancelled(target)) {
+				log.info("续跑失败终态被取消优先守卫拒写 runId={}（不发 error 终帧；取消收尾负责终态与终帧）",
+						snapshot.getRunId());
+				return;
+			}
+			// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
+			if (this.chatService != null) {
+				this.chatService.clearTerminalRunState(snapshot.getRunId());
+			}
+			if (emitError != null) {
+				emitError.run();
+			}
 		}
 		catch (RuntimeException writeEx) {
-			log.warn("续跑失败落终态写回失败 runId={}（终帧已发出，恢复侧按快照/租约兜底）：{}",
+			log.warn("续跑失败落终态写回失败 runId={}（终帧照发，恢复侧按快照/租约兜底）：{}",
 					snapshot.getRunId(), writeEx.getMessage());
+			if (emitError != null) {
+				emitError.run();
+			}
 		}
 	}
 
@@ -2101,6 +2188,19 @@ public class ResumeService {
 		if (runId == null) {
 			return;
 		}
+		// N2：与取消收尾共用同一把 per-run 监视器 —— "读快照判终态/取消 → 写 FAILED → 出 error 终帧"
+		// 必须是一个原子段，否则取消可以落在判定与写终态之间，一轮出现两条终帧。
+		Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
+		if (monitor == null) {
+			convergeProviderGoneLocked(runId, snapshot);
+			return;
+		}
+		synchronized (monitor) {
+			convergeProviderGoneLocked(runId, snapshot);
+		}
+	}
+
+	private void convergeProviderGoneLocked(String runId, RunSnapshot snapshot) {
 		try {
 			LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
 			if (authority != null && authority.readOnly()) {
@@ -2116,7 +2216,15 @@ public class ResumeService {
 			target.setStatus(RunSnapshot.FAILED);
 			target.setError("PROVIDER_GONE：" + PROVIDER_GONE_MESSAGE);
 			target.setInFlightToolCalls(new ArrayList<>());
-			this.store.save(target);
+			// 取消优先：取消已先到 ⇒ 不写 FAILED、不发 error（取消侧发 done{cancelled:true}）。
+			if (!this.store.saveTerminalUnlessCancelled(target)) {
+				log.info("续跑硬否定让位取消 runId={}（不写 FAILED、不发 error 终帧）", runId);
+				return;
+			}
+			// F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
+			if (this.chatService != null) {
+				this.chatService.clearTerminalRunState(runId);
+			}
 			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
 			if (out == null) {
 				return;

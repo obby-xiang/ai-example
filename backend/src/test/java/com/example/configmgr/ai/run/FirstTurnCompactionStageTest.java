@@ -46,6 +46,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -215,6 +217,32 @@ class FirstTurnCompactionStageTest {
 			.doesNotContain("heartbeat");
 		FrameContract.assertConformant(business);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	/**
+	 * N4（返修）：<b>压缩期间收到取消</b> ⇒ 不建快照、不发起模型调用。
+	 *
+	 * <p>压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。取消只有被"压缩后、建快照前"的复查看见，
+	 * 才谈得上不建快照；若只靠后续的终态保护，快照与用户历史已经落库、上游也已经收到请求。
+	 */
+	@Test
+	void cancelDuringCompactionSkipsSnapshotCreationAndModelCall() {
+		stubFluentChain();
+		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+
+		assertThat(this.store.get(RUN_ID)).as("压缩期间取消 ⇒ 不得建立快照").isNull();
+		verify(this.chatClient, never()).prompt();
+		verify(this.chatModel, never()).stream(any(Prompt.class));
+
+		List<Map<String, Object>> frames = wire.frames();
+		assertThat(FrameContract.types(frames)).as("压缩后取消：只有 start / 压缩阶段帧 / 取消终帧")
+			.doesNotContain("message_start", "delta", "error");
+		assertThat(FrameContract.oneOfType(frames, "done")).as("终态与终帧仍归既有取消收尾")
+			.containsEntry("cancelled", true);
 	}
 
 	/** {@code chat()} 走 ChatClient 的流式链：逐层返回同一个 spec，末端接回 scripted 分片。 */

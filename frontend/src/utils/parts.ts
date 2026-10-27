@@ -1052,12 +1052,26 @@ export function alreadyApplied(message: ChatMessage, seq: number): boolean {
   return Array.isArray(message.appliedSeqs) && message.appliedSeqs.includes(seq)
 }
 
-/** 记账一条已应用的帧序号（幂等）。 */
+/**
+ * 幂等记账保留的最近帧序号个数（B2 有界）。
+ *
+ * <p>为什么定长：`appliedSeqs` 是一条消息的"已应用帧"台账，长轮会累积到成千上万条 ——
+ * 每条一次 `includes` 线性查找，整体 O(n²)，且随镜像/内存一起膨胀。重投窗口远小于 64
+ *（续收/重挂只回放最近一段），超窗丢最旧的风险可忽略。
+ */
+export const APPLIED_SEQ_WINDOW = 64
+
+/** 记账一条已应用的帧序号（幂等；保留最近 {@link APPLIED_SEQ_WINDOW} 条，仍按成员去重）。 */
 export function markApplied(message: ChatMessage, seq: number): void {
   if (!Array.isArray(message.appliedSeqs)) {
     message.appliedSeqs = []
   }
-  if (!message.appliedSeqs.includes(seq)) {
-    message.appliedSeqs.push(seq)
+  const applied = message.appliedSeqs
+  if (applied.includes(seq)) {
+    return
+  }
+  applied.push(seq)
+  if (applied.length > APPLIED_SEQ_WINDOW) {
+    applied.splice(0, applied.length - APPLIED_SEQ_WINDOW)
   }
 }

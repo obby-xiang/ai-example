@@ -2194,13 +2194,23 @@ function registerHandlers(): void {
     // 为什么必须落库：后端 conditionJson 是导出作业与 data 列表的**唯一**条件来源；
     // 只写表单模型的话，AI 说"已设置条件"之后若用户没点下一步就刷新（或直接由 AI 触发起作业），
     // 落库的条件仍是旧的 —— 表现为"AI 说设了但导出全量"。
+    // B：PUT 之后的工作区写回要核对任务代次 —— 在途换任务时，这条条件属于旧任务，
+    // 写到新任务的工作区就是"说 A 实际给 B"（与导入侧模式写回同口径）。
+    const generation = taskGeneration
+    const forTask = taskId.value
     try {
-      await tasksApi.setCondition(taskId.value, defCode, stringifyCondition(condition))
+      await tasksApi.setCondition(forTask, defCode, stringifyCondition(condition))
+      if (generation !== taskGeneration || taskId.value !== forTask) {
+        return `查询条件已提交给任务 #${forTask}，但页面已切换到别的任务：本次未写入当前任务的工作区`
+      }
       // 已落库 ⇒ 草案与服务端一致，后续切步不必重复写（失败则保留登记，切步时重试）
       touchedConditions.delete(defCode)
       workspace.setQueryConditions(defCode, condition)
       return `已设置 ${defCode} 的查询条件并落库：${summary}`
     } catch (error) {
+      if (generation !== taskGeneration || taskId.value !== forTask) {
+        return `查询条件提交给任务 #${forTask} 失败：${error instanceof Error ? error.message : String(error)}（页面已切换到别的任务，本次未改动当前页面）`
+      }
       const reason = error instanceof Error ? error.message : String(error)
       return `已设置 ${defCode} 的查询条件（${summary}），但落库失败：${reason}。`
         + '请提示用户先在「选择配置」步勾选该配置项，或手动在界面上重设条件。'

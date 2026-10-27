@@ -72,7 +72,7 @@ import csharp from 'highlight.js/lib/languages/csharp'
 import kotlin from 'highlight.js/lib/languages/kotlin'
 // hljs 库默认主题（决策卡 §二.2：高亮用库默认主题色，不计入 UI 用色收敛）
 import 'highlight.js/styles/github.css'
-import { i18n } from '@/locales'
+import { translate } from '@/composables/useCopy'
 
 /**
  * 常用语言白名单（15 种）。别名随语言定义自带：xml → html/svg 等、markdown → md、
@@ -663,8 +663,8 @@ function wrapFenceFigures(html: string): string {
       // 批次 7C：key 由净化后回填（只落在 pre 槽位上）；figure 不再携带任何槽位属性
       `<figure class="${FIGURE_CODE_CLASS}"><figcaption class="${FIGCAPTION_CLASS}"><span class="${FIG_LANG_CLASS}">${escapeHtml(lang)}</span>` +
       `<span class="${FIG_HLIB_CLASS}">highlight.js</span>` +
-      `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="${i18n.global.t('markdown.copyCode')}">${COPY_ICON_SVGS}` +
-      `<span class="tip ${TIP_CLASS}">${i18n.global.t('markdown.copyCode')}<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
+      `<button type="button" class="${COPY_ICON_BTN_CLASS}" aria-label="${translate('markdown.copyCode')}">${COPY_ICON_SVGS}` +
+      `<span class="tip ${TIP_CLASS}">${translate('markdown.copyCode')}<span class="tip-arrow ${TIP_ARROW_CLASS}" aria-hidden="true"></span></span>` +
       `</button></figcaption>` +
       `<pre${preAttrs}><code class="language-${lang}">${code}</code></pre></figure>`
   )
@@ -779,7 +779,7 @@ function claimDegradeNotice(blockKey?: string): string | null {
     }
   }
   degradeNotified.add(key)
-  return i18n.global.t('markdown.degradeNotice')
+  return translate('markdown.degradeNotice')
 }
 
 /**

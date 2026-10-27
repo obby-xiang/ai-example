@@ -242,9 +242,9 @@ test.describe('@stub V 可视可操作（12a）', () => {
     await expect(badge.locator('svg')).toHaveCount(1)
     await expect(badge).toContainText('AI 提示：在这里上传文件')
 
-    // 读屏播报：运行时播报串（面板 aria-live 区取同一来源）
+    // 读屏播报：运行时只存动作文本，前缀由面板 `ai.panel.uiOperating` 组句（不出现双前缀）
     const runtime = await vlRuntime(page)
-    expect(runtime.announcement).toContain('AI 正在操作左侧工作区：在这里上传文件')
+    expect(runtime.announcement).toBe('在这里上传文件')
 
     // note 预算 60 字
     const tooLong = await vlCall(page, 'ui_highlight', { ref: 'import.upload.choose', note: 'N'.repeat(61) })
@@ -528,7 +528,7 @@ test.describe('@stub V 可视可操作（12a）', () => {
     await expect(bar).toContainText('准备上传')
     const liveRegion = page.locator('[data-testid="ai-live-region"]')
     await expect(liveRegion).toHaveAttribute('aria-live', 'polite')
-    await expect(liveRegion).not.toHaveText('')
+    await expect(liveRegion).toHaveText('AI 正在操作左侧工作区：准备上传')
 
     // 操作条上的停止 = 与主停止同一个语义（ai.stop()）
     await page.locator('[data-testid="ai-operating-stop"]').click()

@@ -84,7 +84,7 @@ import {
   currentUiDomVersion,
   type UiToolOutcome
 } from '@/utils/ai-dom-tools'
-import { dispatchUiEvent, getPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { dispatchUiEvent, getPageHandler, useWorkspaceStore, type UiEventLifetime } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { currentAiEpoch, listAiRegions } from '@/utils/ai-regions'
 import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
@@ -441,7 +441,9 @@ type BudgetOutcome =
 export async function executeFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
   const budgetMs = normalizeBudgetMs(call.budgetMs)
   const startedAt = Date.now()
-  const outcome = await runWithBudget(dispatchFrontendTool(call), budgetMs, startedAt)
+  // 执行存活标记：预算到点即作废 —— 被抛弃的续体此后不得再写工作区（见 UiEventLifetime）
+  const lifetime: UiEventLifetime = { abandoned: false }
+  const outcome = await runWithBudget(dispatchFrontendTool(call, lifetime), budgetMs, startedAt, lifetime)
   return outcome.kind === 'timeout'
     ? timeoutOutcome(call, budgetMs, outcome.elapsedMs)
     : outcome.execution
@@ -473,17 +475,28 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
  * {@link TIMER_MAX_DELAY_MS}（`2^31 − 1` ms ≈ 24.86 天）—— `setTimeout` 的 delay 按 32 位
  * 有符号整型处理，越界值会被折返成 ~1ms 的 delay，把病态长预算变成**瞬间假超时**。计时器是
  * 本层唯一超时判定源，故收口后的值**就是**有效预算，也随超时结局用于文案。
+ *
+ * **到点后的副作用闸（lifetime）**：`Promise.race` 只决定"先回灌谁"，**不会**打断败者 ——
+ * 被抛弃的续体仍会跑完它已经发起的 await 链。到点即把 `lifetime.abandoned` 置 true：
+ * 续体里的工作区写入口（`dispatchUiEvent` 的 `touch` / `setStep` 等）据此跳过，
+ * 使"已经回灌超时的动作"不会在下一次 await 之后又变成一次成功/一次 chip 同步。
+ * 到点前已经发出的 HTTP 请求无法撤回（本层没有、也不新造 abort 协议），回执文案已如实用
+ * "结局未知 / 请核对实际状态"表述。
  */
 async function runWithBudget(
   task: Promise<FrontendToolExecution>,
   budgetMs: number,
-  startedAt: number
+  startedAt: number,
+  lifetime: UiEventLifetime
 ): Promise<BudgetOutcome> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const expired = new Promise<BudgetOutcome>((resolve) => {
     // budgetMs 已收口在 TIMER_MAX_DELAY_MS 内（见该常量与 normalizeBudgetMs）；越界 delay
     // 会被引擎折返成 ~1ms，等于把"病态长预算"变成瞬间假超时。
-    timer = setTimeout(() => resolve({ kind: 'timeout', elapsedMs: Date.now() - startedAt }), budgetMs)
+    timer = setTimeout(() => {
+      lifetime.abandoned = true
+      resolve({ kind: 'timeout', elapsedMs: Date.now() - startedAt })
+    }, budgetMs)
   })
   try {
     // dispatchFrontendTool 按契约不 reject（每条路由内部都把异常翻成结局文本：见
@@ -581,7 +594,10 @@ function toolDisplayName(name: string): string {
 }
 
 /** 四条路由的统一派发（不含预算；预算包在 {@link executeFrontendTool} 外层）。 */
-async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToolExecution> {
+async function dispatchFrontendTool(
+  call: FrontendToolCall,
+  lifetime: UiEventLifetime
+): Promise<FrontendToolExecution> {
   // 槽位在**执行前**取定：键里的 epoch 就是本次执行观察到的现场（`ui_snapshot` 遍历的正是这份
   // DOM）。执行期间现场若又推进（如 `navigate_to` 触发目标页挂载 → 区域注册推 epoch），
   // 结果仍归旧现场，不会被记到新现场名下（见 rememberSameCall）。
@@ -595,8 +611,12 @@ async function dispatchFrontendTool(call: FrontendToolCall): Promise<FrontendToo
       result: `本轮已执行过同参调用 ${call.name}（未再次执行）。\n${previous.result}`
     })
   }
-  const execution = await dispatchFrontendToolInner(call)
-  rememberSameCall(slot, execution)
+  const execution = await dispatchFrontendToolInner(call, lifetime)
+  // 预算已到点：这条结局属于"已经回灌超时"的那次执行，不得记进去重表
+  //（否则同一轮里同参重试会命中它、把超时后的晚到结局当成现成答案）。
+  if (!lifetime.abandoned) {
+    rememberSameCall(slot, execution)
+  }
   return execution
 }
 
@@ -684,7 +704,10 @@ function rememberSameCall(slot: DedupeSlot | null, execution: FrontendToolExecut
 }
 
 /** 四条路由的派发本体。 */
-async function dispatchFrontendToolInner(call: FrontendToolCall): Promise<FrontendToolExecution> {
+async function dispatchFrontendToolInner(
+  call: FrontendToolCall,
+  lifetime: UiEventLifetime
+): Promise<FrontendToolExecution> {
   const descriptor = findFrontendTool(call.name)
   if (descriptor) {
     return await runRegisteredTool(descriptor, call)
@@ -694,7 +717,7 @@ async function dispatchFrontendToolInner(call: FrontendToolCall): Promise<Fronte
   // 因此根本不可达），而带上 page 又是拿列表缓存猜类型（缺失即 EXPORT 兜底）⇒ 导入任务可能被
   // 送进导出向导。两条都不再成立：类型先查权威来源，页面就绪再回灌。
   if (call.name === 'restore_task') {
-    return await runRestoreTask(call.args)
+    return await runRestoreTask(call.args, lifetime)
   }
   // 设计稿 §3.1 / §7-裁 7：`delete_rows` 留批③待裁，未上线时调用必须明确“不可用”，
   // 不能落到“未知前端工具”的模糊文案。
@@ -708,11 +731,11 @@ async function dispatchFrontendToolInner(call: FrontendToolCall): Promise<Fronte
   // 路由 2：工作区动作表（补丁②：导航 / 选配置 / 填条件 / 推进步骤 + 蓝本别名）
   const action = findWorkspaceAction(call.name)
   if (action) {
-    return await runWorkspaceAction(action, call.args)
+    return await runWorkspaceAction(action, call.args, lifetime)
   }
   // 路由 3：ui_event 同名动作（AI 经契约层驱动工作区：导航/选配置/填条件/触发下载）
   if (isUiEventType(call.name)) {
-    return await runUiEventAction(call.name, call.args)
+    return await runUiEventAction(call.name, call.args, lifetime)
   }
   // 路由 4：页面能力 handler（页面经 registerPageHandler 反向暴露，名字即 handler 名）
   const handler = getPageHandler(call.name)
@@ -992,7 +1015,7 @@ function taskDetailNotReady(label: string, taskId: number): FrontendToolExecutio
  * 与 `navigate_to(page, taskId)` 的分工：本动作**不需要** page 入参（类型是事实，不是参数），
  * 模型只给任务号即可；`navigate_to` 给了 page 也仍以服务端类型为准（见 {@link runNavigateTo}）。
  */
-async function runRestoreTask(args: Record<string, unknown>): Promise<FrontendToolExecution> {
+async function runRestoreTask(args: Record<string, unknown>, lifetime: UiEventLifetime): Promise<FrontendToolExecution> {
   const taskId = toNumber(args.taskId)
   if (taskId === null) {
     return makeExecution({
@@ -1020,7 +1043,7 @@ async function runRestoreTask(args: Record<string, unknown>): Promise<FrontendTo
       result: `已在任务 #${taskId} 的${label}向导（任务 #${taskId} 已绑定），这一步不用再做。`
     })
   }
-  const outcome = await dispatchUiEvent({ type: 'restore_task', taskId, taskType })
+  const outcome = await dispatchUiEvent({ type: 'restore_task', taskId, taskType }, lifetime)
   if (!outcome.handled) {
     return makeExecution({
       outcome: 'failed',
@@ -1072,7 +1095,7 @@ async function runRestoreTask(args: Record<string, unknown>): Promise<FrontendTo
  * 查不到（任务不存在 / 读取失败）就 **fail-closed 不导航** —— 冷缓存下"按列表缓存兜底成 EXPORT"
  * 正是导入任务被送进导出向导的根因。
  */
-async function runNavigateTo(args: Record<string, unknown>): Promise<FrontendToolExecution> {
+async function runNavigateTo(args: Record<string, unknown>, lifetime: UiEventLifetime): Promise<FrontendToolExecution> {
   const intent = resolveNavigateIntent(args)
   if (!intent) {
     return makeExecution({
@@ -1116,7 +1139,7 @@ async function runNavigateTo(args: Record<string, unknown>): Promise<FrontendToo
   const event: UiEvent = intent.taskId === null
     ? { type: 'open_page', page }
     : { type: 'restore_task', taskId: intent.taskId, ...(taskType === null ? {} : { taskType }) }
-  const outcome = await dispatchUiEvent(event)
+  const outcome = await dispatchUiEvent(event, lifetime)
   if (!outcome.handled) {
     return makeExecution({
       outcome: 'failed',
@@ -1298,12 +1321,13 @@ function missingArgsHint(name: string, table: Readonly<Record<string, string>>):
 /** 动作执行：可用性（unavailable）→ 页面 handler（available）→ 契约层（available/degraded）。 */
 async function runWorkspaceAction(
   action: WorkspaceAction,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  lifetime: UiEventLifetime
 ): Promise<FrontendToolExecution> {
   // 导航是唯一需要"先查权威任务类型、后等页面就绪"的动作：单独成体（批次 5B）。
   // 其余三条（选配置 / 设条件 / 推进步骤）留在本函数里按"本页动作"处理。
   if (action.name === 'navigate_to') {
-    return await runNavigateTo(args)
+    return await runNavigateTo(args, lifetime)
   }
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
@@ -1344,7 +1368,7 @@ async function runWorkspaceAction(
       result: `${action.displayName}的参数不完整：${missingArgsHint(action.name, WORKSPACE_ACTION_REQUIRED_ARGS)}`
     })
   }
-  const outcome = await dispatchUiEvent(event)
+  const outcome = await dispatchUiEvent(event, lifetime)
   if (outcome.handled) {
     return makeExecution({ outcome: 'ok', availability: 'available', result: outcome.message })
   }
@@ -1612,7 +1636,11 @@ async function waitForUiEventNavigation(event: UiEvent): Promise<boolean | null>
 }
 
 /** 路由 3：ui_event 同名动作 → 契约层统一分发（与用户点击同一套 action）。 */
-async function runUiEventAction(name: UiEvent['type'], args: Record<string, unknown>): Promise<FrontendToolExecution> {
+async function runUiEventAction(
+  name: UiEvent['type'],
+  args: Record<string, unknown>,
+  lifetime: UiEventLifetime
+): Promise<FrontendToolExecution> {
   const event = toUiEvent(name, args)
   if (!event) {
     return makeExecution({
@@ -1622,7 +1650,7 @@ async function runUiEventAction(name: UiEvent['type'], args: Record<string, unkn
     })
   }
   try {
-    const outcome = await dispatchUiEvent(event)
+    const outcome = await dispatchUiEvent(event, lifetime)
     // 批3③a D1：handled:true 且副作用已 await ⇒ 'ok'；契约层未受理（fail）⇒ 确定性 'failed'
     // —— 不再让"未受理"戴着 ok:true 出去。
     if (!outcome.handled) {

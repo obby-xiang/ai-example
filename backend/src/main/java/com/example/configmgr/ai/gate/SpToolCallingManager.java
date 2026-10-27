@@ -65,6 +65,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -184,18 +185,36 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 工具执行超时监视线程池（超时面治理批② 第 3 项）。
 	 *
 	 * <p>为什么需要一条独立线程：{@code Future#get(timeout)} 要在<b>调用线程</b>上等到点，
-	 * 而桩体必须跑在<b>另一条线程</b>上才能被 {@code cancel(true)} 打断。容量取挂起池缺省值
-	 * （{@code app.ai.suspend.pool-size} = 20）：一轮至多一个工具在跑，容量即并发上限。
-	 * 队列为 {@link SynchronousQueue}（不排队）+ {@code AbortPolicy}：饱和时退化为"同步执行、无超时"
-	 * 并留 WARN —— 宁可少一层兜底，也不让工具调用在队列里无限等。
+	 * 而桩体必须跑在<b>另一条线程</b>上才能被 {@code cancel(true)} 打断。容量取挂起池配置
+	 * {@code app.ai.suspend.pool-size}（缺省 20）：一轮至多一个工具在跑，容量即并发上限。
+	 * 队列为 {@link SynchronousQueue}（不排队）+ {@code AbortPolicy}：容量由
+	 * {@code app.ai.suspend.pool-size} 派生（缺省 {@value #TOOL_TIMEOUT_THREADS_DEFAULT}），
+	 * 饱和时<b>不执行、也不降级成无超时同步执行</b> —— 明确结算成"本次未执行"
+	 * （{@code TOOL_TIMEOUT} 口径，见 {@link #executeWithTimeout}）。宁可让模型知道这一拍没跑，
+	 * 也不能让一次调用脱离超时笼（N3）。
 	 */
-	private static final int TOOL_TIMEOUT_THREADS = 20;
+	private static final int TOOL_TIMEOUT_THREADS_DEFAULT = 20;
 
-	private static final ExecutorService TOOL_TIMEOUT_EXECUTOR = newExecutor();
+	/**
+	 * 按容量共享的执行器：容量派生自配置，<b>同容量复用</b>（避免每个管理器实例各建一条池）。
+	 *
+	 * <p>daemon + 核心线程 0 + 30s keepAlive：空闲即回收，不阻止 JVM 退出。
+	 */
+	private static final Map<Integer, ExecutorService> TOOL_TIMEOUT_EXECUTORS = new ConcurrentHashMap<>();
 
-	private static ExecutorService newExecutor() {
+	/** 配置容量（{@code app.ai.suspend.pool-size}），非法值回落缺省 20。 */
+	private static int toolTimeoutThreads(AiProperties properties) {
+		int configured = properties == null ? 0 : properties.getSuspend().getPoolSize();
+		return configured > 0 ? configured : TOOL_TIMEOUT_THREADS_DEFAULT;
+	}
+
+	private static ExecutorService toolTimeoutExecutor(int threads) {
+		return TOOL_TIMEOUT_EXECUTORS.computeIfAbsent(threads, SpToolCallingManager::newExecutor);
+	}
+
+	private static ExecutorService newExecutor(int threads) {
 		AtomicInteger counter = new AtomicInteger();
-		ThreadPoolExecutor executor = new ThreadPoolExecutor(0, TOOL_TIMEOUT_THREADS, 30L, TimeUnit.SECONDS,
+		ThreadPoolExecutor executor = new ThreadPoolExecutor(0, threads, 30L, TimeUnit.SECONDS,
 				new SynchronousQueue<>(), runnable -> {
 					Thread thread = new Thread(runnable, "ai-tool-timeout-" + counter.incrementAndGet());
 					thread.setDaemon(true);
@@ -203,6 +222,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 				}, new ThreadPoolExecutor.AbortPolicy());
 		return executor;
 	}
+
+	/** 本实例的超时执行器（同容量共享；见 {@link #TOOL_TIMEOUT_EXECUTORS}）。 */
+	private final ExecutorService toolTimeoutExecutor;
+
+	/** 本实例的执行器容量（日志与饱和结算文案用）。 */
+	private final int toolTimeoutThreads;
 
 	private final ToolCallingManager delegate;
 
@@ -377,6 +402,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.targetResolver = targetResolver;
 		this.unknownReconciler = unknownReconciler;
 		this.properties = properties == null ? new AiProperties() : properties;
+		this.toolTimeoutThreads = toolTimeoutThreads(this.properties);
+		this.toolTimeoutExecutor = toolTimeoutExecutor(this.toolTimeoutThreads);
 	}
 
 	@Override
@@ -1921,7 +1948,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		String text;
 		boolean ok = true;
-		boolean timedOut = false;
+		boolean settleAsUnexecuted = false;
 		try {
 			text = executeWithTimeout(prompt, pending);
 			if (text == null) {
@@ -1943,8 +1970,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 			log.warn("工具执行超时 runId={} tool={} toolCallId={} 上限={}", runId, pending.getName(),
 					pending.getToolCallId(), ex.getTimeout());
 			ok = false;
-			timedOut = true;
+			settleAsUnexecuted = true;
 			text = ex.getMessage() + "\n" + RECONCILIATION_NOTE;
+			pending.setOutcome(ToolOutcome.TIMEOUT.wire());
+			pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+		}
+		catch (ToolExecutorSaturatedException ex) {
+			// N3：执行器饱和 ⇒ <b>本次调用没有开始执行</b>（绝不降级成无超时同步执行）。
+			// 结算走既有"未执行"口径：outcome=timeout / code=TOOL_TIMEOUT / executed=false、不写台账；
+			// 文案明确说"未执行"，模型据此如实告知用户稍后重试（不能宣称成功或失败）。
+			log.warn("工具执行器饱和，本次调用未执行 runId={} tool={} toolCallId={} 容量={}", runId,
+					pending.getName(), pending.getToolCallId(), ex.getCapacity());
+			ok = false;
+			settleAsUnexecuted = true;
+			text = ex.getMessage();
 			pending.setOutcome(ToolOutcome.TIMEOUT.wire());
 			pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
 		}
@@ -1958,7 +1997,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setOutcome(ToolOutcome.FAILED.wire());
 			pending.setCode(code);
 		}
-		if (timedOut) {
+		if (settleAsUnexecuted) {
 			return settleToolTimeout(runId, pending, text, settleObservation);
 		}
 		this.store.appendLedger(runId, pending, text);
@@ -2041,8 +2080,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 不可中断的 IO）会继续在池线程上跑完，只是结果被丢弃；这正是"到点必须收口"的代价，
 	 * 也是把超时做成 opt-out（长任务免超时）之前必须先登记的理由。
 	 *
-	 * <p>线程池饱和（{@code AbortPolicy}）时退化为<b>同步执行、无超时</b> + WARN：宁可少一层兜底，
-	 * 也不能让工具调用卡在一个排队等槽位的状态里。
+	 * <p>线程池饱和（{@code AbortPolicy}）时<b>禁止退化成无超时同步执行</b>（N3）：那会让"到点收口"
+	 * 恰好在最忙的时候失效，且工具会脱离超时笼在调用线程上跑完。饱和直接抛
+	 * {@link ToolExecutorSaturatedException}，由调用方按 {@code TOOL_TIMEOUT} 口径结算成
+	 * <b>未执行</b>（{@code executed=false}、不写台账、轮继续）。
 	 */
 	private String executeWithTimeout(Prompt prompt, PendingToolCall pending) {
 		Duration timeout = this.properties.getTool().getExecTimeout();
@@ -2052,12 +2093,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 		Future<String> future;
 		try {
 			// MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
-			future = TOOL_TIMEOUT_EXECUTOR.submit(AiTrace.wrapCallable(() -> delegateSingle(prompt, pending)));
+			future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> delegateSingle(prompt, pending)));
 		}
 		catch (RejectedExecutionException ex) {
-			log.warn("工具超时监视线程池饱和，退化为同步执行（本次无独立超时）tool={} toolCallId={}", pending.getName(),
-					pending.getToolCallId());
-			return delegateSingle(prompt, pending);
+			log.warn("工具超时执行器饱和（容量 {}），本次调用未执行 tool={} toolCallId={}", this.toolTimeoutThreads,
+					pending.getName(), pending.getToolCallId());
+			throw new ToolExecutorSaturatedException(pending.getName(), this.toolTimeoutThreads);
 		}
 		try {
 			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -2081,11 +2122,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 超时结算（{@code executed=false} + 结局帧 + 回填模型）：<b>不写台账</b>、不占重放索引 ——
-	 * 台账记的是"执行过且知道结局"的事实，超时的结局是"不知道有没有副作用"，由
-	 * {@link #RECONCILIATION_NOTE} 提醒人工对账。
+	 * <b>未执行</b>的结算（超时 / 执行器饱和共用；{@code executed=false} + 结局帧 + 回填模型）：
+	 * <b>不写台账</b>、不占重放索引 —— 台账记的是"执行过且知道结局"的事实；超时的结局是
+	 * "不知道有没有副作用"，由 {@link #RECONCILIATION_NOTE} 提醒人工对账；执行器饱和则是确定的
+	 * "没有开始执行"。两者都按既有 {@code timeout/TOOL_TIMEOUT} 口径收敛（不判整轮失败、轮继续）。
 	 *
-	 * <p>超时也是认领胜者的结算（只有认领成功才会执行并超时），故续跑侧同样由这里发
+	 * <p>它也是认领胜者的结算（只有认领成功才会走到这里），故续跑侧同样由这里发
 	 * {@code tool_call_end}（{@code settleObservation=true}）。
 	 */
 	private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation) {
@@ -2115,8 +2157,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
 					this.sheetAudit);
 		}
-		log.warn("工具执行超时已结算（executed=false，轮继续）runId={} tool={} toolCallId={}", runId,
-				pending.getName(), pending.getToolCallId());
+		log.warn("工具未执行结局已结算（executed=false，轮继续）runId={} tool={} toolCallId={} code={}", runId,
+				pending.getName(), pending.getToolCallId(), fresh.getCode());
 		return text;
 	}
 
@@ -2133,6 +2175,29 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		Duration getTimeout() {
 			return this.timeout;
+		}
+
+	}
+
+	/**
+	 * 工具超时执行器饱和的内部信号（N3）：<b>本次调用没有开始执行</b>。
+	 *
+	 * <p>为什么单独一个类型而不是直接返回文本：饱和是"未执行"的确定性事实，必须走与超时同一套
+	 * 结算（{@code executed=false}、不写台账、轮继续），文案里保留 {@code EXECUTOR_SATURATED}
+	 * 这个机器可检索词，便于把"这一拍没跑"与"跑超时了"分开排障。
+	 */
+	private static final class ToolExecutorSaturatedException extends RuntimeException {
+
+		private final int capacity;
+
+		ToolExecutorSaturatedException(String toolName, int capacity) {
+			super("未执行（EXECUTOR_SATURATED / " + ToolOutcome.CODE_TOOL_TIMEOUT + "）：工具执行器已饱和（容量 "
+					+ capacity + "），" + toolName + " 本次调用没有开始执行、没有产生副作用；请稍后重新发起。");
+			this.capacity = capacity;
+		}
+
+		int getCapacity() {
+			return this.capacity;
 		}
 
 	}

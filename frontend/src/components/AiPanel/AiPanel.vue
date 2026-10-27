@@ -172,7 +172,7 @@
         </svg>
       </span>
       <span class="min-w-0 flex-1 text-[12.4px] leading-[1.5] text-[#1f2328] break-words [overflow-wrap:anywhere]">
-        {{ t('ai.panel.uiOperating', { text: ai.uiAnnouncement }) }}
+        {{ uiOperatingText }}
       </span>
       <button
         type="button"
@@ -183,8 +183,8 @@
         {{ t('ai.panel.stop') }}
       </button>
     </div>
-    <!-- 读屏播报（只读动词也播报；视觉零占位） -->
-    <div class="sr-only" aria-live="polite" data-testid="ai-live-region">{{ ai.uiAnnouncement ?? '' }}</div>
+    <!-- 读屏播报（只读动词也播报；视觉零占位）：与操作条同一句，前缀只在 `uiOperating` 出现一次 -->
+    <div class="sr-only" aria-live="polite" data-testid="ai-live-region">{{ uiOperatingText }}</div>
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
@@ -2947,8 +2947,15 @@ function flashCopied(btn: Element, ok: boolean): void {
   if (!(btn instanceof HTMLElement)) {
     return
   }
+  const previous = copyFlashTimers.get(btn)
+  if (previous !== undefined) {
+    window.clearTimeout(previous)
+  }
   btn.classList.toggle('is-copied', ok)
-  const timer = window.setTimeout(() => btn.classList.remove('is-copied'), 2000)
+  const timer = window.setTimeout(() => {
+    copyFlashTimers.delete(btn)
+    btn.classList.remove('is-copied')
+  }, 2000)
   copyFlashTimers.set(btn, timer)
 }
 /** 注入 DOM 的复制钮反馈计时器（节点随 v-html 重建，卸载时统一清理）。 */
@@ -3801,6 +3808,13 @@ function uploadHandoffLabel(part: ToolPart): string {
 
 /** 操作条：本轮仍在跑/挂起且刚播报过界面动作（停止后自动消失）。 */
 const aiOperating = computed(() => ai.uiAnnouncement !== null && (ai.loading || ai.suspended))
+/**
+ * 播报句（F12）：运行时只存动作文本，前缀在这里由 `ai.panel.uiOperating` 组一次；
+ * 可见操作条与 aria-live 共用同一句，避免「AI 正在操作…：AI 正在操作…」双前缀。
+ */
+const uiOperatingText = computed(() => (ai.uiAnnouncement === null
+  ? ''
+  : t('ai.panel.uiOperating', { text: ai.uiAnnouncement })))
 
 function onUiUndo(): void {
   void ai.undoLastUiAction()

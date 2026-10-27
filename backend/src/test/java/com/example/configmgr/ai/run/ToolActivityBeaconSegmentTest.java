@@ -65,4 +65,28 @@ class ToolActivityBeaconSegmentTest {
 			.isEqualTo(fallback);
 	}
 
+	/**
+	 * <b>N5：终态清理活动锚点</b>（只清 {@code lastActivityAtMs}，幂等、不触碰其它进程内状态）。
+	 *
+	 * <p>{@code clear} 刻意保留这个锚点（重试判定要看退出时刻），终态之后它再没有读者 ——
+	 * 因此单独给一个只做这一件事的入口；执行计数/段起点等各有自己的清理语义，不得被顺手清掉。
+	 */
+	@Test
+	void clearRunDropsOnlyTheActivityAnchor() {
+		this.beacon.enter(RUN_ID, "list_tasks", "BACKEND");
+		this.beacon.markSegmentStart(RUN_ID, 5_000L);
+		assertThat(this.beacon.lastActivityAtMs(RUN_ID)).isPositive();
+
+		this.beacon.clearRun(RUN_ID);
+
+		assertThat(this.beacon.lastActivityAtMs(RUN_ID)).as("活动锚点已清").isZero();
+		assertThat(this.beacon.startedCount(RUN_ID)).as("只清锚点：执行计数不动").isEqualTo(1L);
+		assertThat(this.beacon.segmentStartedAtMs(RUN_ID, 0L)).as("只清锚点：段起点不动").isEqualTo(5_000L);
+
+		// 幂等 + null 安全
+		this.beacon.clearRun(RUN_ID);
+		this.beacon.clearRun(null);
+		assertThat(this.beacon.lastActivityAtMs(RUN_ID)).isZero();
+	}
+
 }

@@ -27,11 +27,16 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -87,6 +92,9 @@ class SpToolCallingManagerToolTimeoutTest {
 
 	private final AtomicInteger slowInvocations = new AtomicInteger();
 
+	/** 快工具被真正执行的次数（饱和用例断言"没有退化成同步执行"）。 */
+	private final AtomicInteger fastInvocations = new AtomicInteger();
+
 	/** 执行替身：慢工具睡 5s（可被 interrupt 打断），快工具立即返回。 */
 	private final SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
 			this.toolRegistry, this.codec, this.beacon, this.cancellations, this.limiter, List.of(), null, null, null,
@@ -95,6 +103,7 @@ class SpToolCallingManagerToolTimeoutTest {
 		@Override
 		String delegateSingle(Prompt prompt, PendingToolCall pending) {
 			if (!SLOW_TOOL.equals(pending.getName())) {
+				SpToolCallingManagerToolTimeoutTest.this.fastInvocations.incrementAndGet();
 				return "执行成功：" + pending.getName();
 			}
 			SpToolCallingManagerToolTimeoutTest.this.slowInvocations.incrementAndGet();
@@ -165,6 +174,56 @@ class SpToolCallingManagerToolTimeoutTest {
 	@Test
 	void defaultTimeoutIsTwoMinutes() {
 		assertThat(new AiProperties().getTool().getExecTimeout()).isEqualTo(Duration.ofSeconds(120));
+	}
+
+	/**
+	 * <b>N3：执行器饱和时必须明确结算"未执行"</b>，绝不退化成"无超时同步执行"。
+	 *
+	 * <p>锁两件事：① 工具桩体一次都没跑（没有同步兜底）；② 结局仍是既有 {@code timeout/TOOL_TIMEOUT}
+	 * 口径 —— {@code executed=false}、不写台账、轮继续（不会把一次饱和变成 failed 触发首错即停）。
+	 */
+	@Test
+	void saturatedExecutorSettlesAsUnexecutedWithoutRunningSynchronously() throws Exception {
+		ExecutorService executor = (ExecutorService) ReflectionTestUtils.getField(this.manager,
+				"toolTimeoutExecutor");
+		assertThat(executor).isNotNull();
+		int capacity = this.properties.getSuspend().getPoolSize();
+		CountDownLatch hold = new CountDownLatch(1);
+		CountDownLatch occupied = new CountDownLatch(capacity);
+		List<Future<?>> blockers = new ArrayList<>();
+		for (int i = 0; i < capacity; i++) {
+			blockers.add(executor.submit(() -> {
+				occupied.countDown();
+				hold.await(10, TimeUnit.SECONDS);
+				return null;
+			}));
+		}
+		try {
+			assertThat(occupied.await(5, TimeUnit.SECONDS))
+				.as("占满超时执行器（容量 = app.ai.suspend.pool-size）")
+				.isTrue();
+
+			ToolExecutionResult result = this.manager.executeToolCalls(prompt(),
+					response(call("c-1", FAST_TOOL, "{}")));
+
+			ToolResultEnvelope envelope = envelope(responses(result).get(0));
+			assertThat(envelope.outcome()).as("未执行沿用既有 timeout 口径（不触发首错即停）")
+				.isEqualTo(ToolOutcome.TIMEOUT.wire());
+			assertThat(envelope.code()).isEqualTo(ErrorCodes.TOOL_TIMEOUT);
+			assertThat(envelope.message()).contains("EXECUTOR_SATURATED").contains("未执行");
+			assertThat(this.fastInvocations).as("绝不退化成无超时同步执行").hasValue(0);
+
+			PendingToolCall entry = this.store.pending(RUN_ID, "c-1");
+			assertThat(entry.getStatus()).isEqualTo(PendingToolCall.TIMEOUT);
+			assertThat(entry.isExecuted()).as("饱和 = 确定没有执行").isFalse();
+			assertThat(this.store.idemFor(RUN_ID, "c-1")).as("未执行不写台账").isNull();
+		}
+		finally {
+			hold.countDown();
+			for (Future<?> blocker : blockers) {
+				blocker.get(5, TimeUnit.SECONDS);
+			}
+		}
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

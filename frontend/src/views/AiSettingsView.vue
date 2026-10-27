@@ -17,7 +17,7 @@ import { useCopy } from '@/composables/useCopy'
  * 完全不知道自己在改哪一层。</li>
  * </ul>
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
@@ -449,14 +449,27 @@ async function createProvider(): Promise<void> {
 
 // ── 模型清单 ───────────────────────────────────────────────────────────────
 
+/**
+ * 拉取模型清单（按 **provider 归属**）。
+ *
+ * <p>为什么必须钉住归属：`/models` 是慢请求（外网端点），用户点完「拉取」再切到另一个
+ * provider 是常态。旧实现把响应无条件写进全局 `fetchedModels` —— A 的模型清单会挂在 B 的
+ * 卡片下，用户接着点「添加」就把 A 的模型名加到了 B 上（"provider 切换串模型"）。
+ * 现在请求前记住目标 provider，响应回来时该 provider 仍是当前选中的才落地；busy 也按
+ * provider 分键（A 在飞不挡 B 的按钮，A 回来也不会替 B 解除 loading）。
+ */
 async function pullModels(): Promise<void> {
   const provider = selectedProvider.value
   if (!provider) {
     return
   }
-  await withBusy('pull', async () => {
+  const forProviderId = provider.id
+  await withBusy(pullBusyKey(forProviderId), async () => {
     try {
-      const result = await aiConfigApi.fetchModels(provider.id, true)
+      const result = await aiConfigApi.fetchModels(forProviderId, true)
+      if (selectedProvider.value?.id !== forProviderId) {
+        return // 已切到别的 provider：这份清单属于旧 provider，不得挂到当前卡片下
+      }
       fetchedModels.value = result.models
       fetchedCached.value = result.cached
       if (!result.ok) {
@@ -465,10 +478,32 @@ async function pullModels(): Promise<void> {
         ElMessage.warning(T.pulledEmpty)
       }
     } catch (error) {
+      if (selectedProvider.value?.id !== forProviderId) {
+        return // 旧 provider 的失败不弹在当前卡片上
+      }
       ElMessage.error(describeAiConfigError(error))
     }
   })
 }
+
+/** 「拉取模型」的 busy 键（按 provider 分键，见 {@link pullModels}）。 */
+function pullBusyKey(providerId: number): string {
+  return `pull-${providerId}`
+}
+
+/** 当前选中 provider 是否正在拉取（模板用；选中项为空 = 未在拉取）。 */
+const pulling = computed(() => (selectedProvider.value ? isBusy(pullBusyKey(selectedProvider.value.id)) : false))
+
+/**
+ * 切换 provider ⇒ 清掉上一个 provider 的「可添加模型」清单。
+ *
+ * 那份清单是**另一个端点**的事实（`/models` 逐 provider 返回），留在新卡片下再点「添加」
+ * 就会把旧 provider 的模型名加到新 provider 上 —— 这正是"切换串模型"的另一半。
+ */
+watch(selectedProviderId, () => {
+  fetchedModels.value = []
+  fetchedCached.value = false
+})
 
 async function addFetched(modelId: string): Promise<void> {
   const provider = selectedProvider.value
@@ -752,11 +787,11 @@ async function confirm(message: string): Promise<boolean> {
           </select>
           <button
             class="px-2 py-1 rounded border border-solid border-[#dcdfe6] text-[12px]"
-            :disabled="!selectedProvider || isBusy('pull')"
+            :disabled="!selectedProvider || pulling"
             data-testid="pull-models"
             @click="pullModels"
           >
-            {{ isBusy('pull') ? T.pulling : T.pullModels }}
+            {{ pulling ? T.pulling : T.pullModels }}
           </button>
           <span v-if="fetchedModels.length > 0" class="text-[11px] text-[#909399]">
             {{ t('views.aiSettings.modelCount', { count: fetchedModels.length }) }}{{ fetchedCached ? T.pulledCached : '' }}

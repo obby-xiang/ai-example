@@ -32,9 +32,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -392,6 +394,57 @@ class CancelFinalizeHandoffTest {
 		assertThat(this.finalizer.handOff(RUN_ID, "test")).isTrue();
 		assertThat(this.retries).as("上限 0 ⇒ 提交被拒也不得无界重排").isEmpty();
 		assertThat(this.finalizer.handOff(RUN_ID, "test")).as("用尽后应清理在飞标记，可被下一次触发重新计数").isTrue();
+	}
+
+	/**
+	 * <b>N5：终态清理 {@code forget} 释放交棒位与重试计数</b>（幂等、只动进程内表）。
+	 *
+	 * <p>为什么必须有：{@code inFlight} 是"同一 run 只交棒一次"的去重位，成功收敛后不会自行消失；
+	 * 不清理的话，同一进程里这条 runId 之后的任何交棒都会被静默拒绝。
+	 */
+	@Test
+	void forgetReleasesTheHandoffSlotAndRetryBudget() {
+		setUpService(this.tasks::add);
+		seedSuspendedRunWithPending();
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+
+		assertThat(this.finalizer.handOff(RUN_ID, "test")).isTrue();
+		assertThat(this.finalizer.handOff(RUN_ID, "test")).as("在飞去重").isFalse();
+
+		this.finalizer.forget(RUN_ID);
+		assertThat(attemptCounts()).as("forget 清掉尝试计数").doesNotContainKey(RUN_ID);
+		assertThat(this.finalizer.handOff(RUN_ID, "test")).as("交棒位已释放，可再次交棒").isTrue();
+
+		// 幂等 + null 安全：不报错、不改变其它状态
+		this.finalizer.forget(RUN_ID);
+		this.finalizer.forget(null);
+		assertThat(attemptCounts()).doesNotContainKey(RUN_ID);
+	}
+
+	/**
+	 * <b>N5：Error 路径也必须释放交棒位</b> —— 执行器在派发时就抛 {@link Error}（OOM/实现异常）时，
+	 * 若只清 on {@code RuntimeException}，该 run 会永久 {@code inFlight}，后续交棒全被静默拒绝。
+	 */
+	@Test
+	void anErrorDuringTheHandoffStillReleasesTheInFlightSlot() {
+		AtomicInteger dispatches = new AtomicInteger();
+		setUpService(task -> {
+			if (dispatches.getAndIncrement() == 0) {
+				throw new AssertionError("boom");
+			}
+			task.run();
+		});
+		seedSuspendedRunWithPending();
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+
+		assertThatThrownBy(() -> this.finalizer.handOff(RUN_ID, "test")).isInstanceOf(AssertionError.class);
+		assertThat(this.finalizer.handOff(RUN_ID, "test")).as("Error 路径之后交棒位必须已释放").isTrue();
+	}
+
+	/** {@code attempts} 的进程内视图（只读断言用）。 */
+	@SuppressWarnings("unchecked")
+	private Map<String, AtomicInteger> attemptCounts() {
+		return (Map<String, AtomicInteger>) ReflectionTestUtils.getField(this.finalizer, "attempts");
 	}
 
 	// ── park 分支（<b>不是</b> W-30 的时序；只锁"写权限已丢才交棒"这条条件） ──

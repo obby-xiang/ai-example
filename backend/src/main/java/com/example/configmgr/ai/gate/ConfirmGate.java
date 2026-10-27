@@ -2146,6 +2146,30 @@ public class ConfirmGate {
 		}
 	}
 
+	/**
+	 * 轮终态的进程内清理（N5）：只清本 run 的<b>派发重试计数</b>（{@link #dispatchRetries}）。
+	 *
+	 * <p>为什么需要：计数按"外部触发周期"保留（耗尽后钉死，见该字段注释），终态之后没有任何
+	 * 外部触发会再来清它 —— 不清理就是一个按 runId 常驻的 {@code AtomicInteger}。
+	 *
+	 * <p><b>幂等且边界刻意很窄</b>：
+	 * <ul>
+	 * <li>未清理过 / 已清理 / {@code runId=null} 都不报错、不改变其它状态；</li>
+	 * <li>只动这一个计数 —— <b>不碰</b>租约（{@code LeaseService} 的 ended 墓碑/epoch）、
+	 *     不碰 Redis 帧册、不碰挂起条目与 {@code latches}：终态的权威事实仍是 Redis 那一份，
+	 *     进程内清理不得改写"这一轮是否已结束"的判定；</li>
+	 * <li>清理只意味着"下一次外部触发重新拥有完整重派发预算"，不会派发、不会唤醒、不会发帧。</li>
+	 * </ul>
+	 *
+	 * <p>调用时机由终态收尾方（{@code CancelFinalizer} / 终态写成功之后）决定，本类不做触发。
+	 */
+	public void clearRunState(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return;
+		}
+		this.dispatchRetries.remove(runId);
+	}
+
 	/** 第 {@code attempt} 次重派发的间隔：{@code base × 2^(attempt-1)}，按 {@code max-delay} 封顶。 */
 	private Duration dispatchRetryDelay(int attempt) {
 		Duration base = this.properties.getPark().getDispatchRetryDelay();

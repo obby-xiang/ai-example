@@ -480,6 +480,21 @@ export function reportUiEventResult(event: string, message: string): void {
 }
 
 /**
+ * 一次前端工具执行的**存活标记**（由 `utils/frontend-tools` 的 `runWithBudget` 持有）。
+ *
+ * <p>为什么需要：预算到点后 `executeFrontendTool` 已经回灌"超时"，但被抛弃的异步续体还在跑 ——
+ * 它若继续写工作区（`setStep` / `setSelectedDefs` / `setQueryConditions` / `setImportMode` /
+ * `touch` / `ui_event_result`），面板就会出现"已经超时的动作又报了一次同步"，下一轮请求也会
+ * 带着一条模型并未确认的动作。这里只加一个**布尔**：`runWithBudget` 到点置 `abandoned = true`，
+ * 事件分发在每次 await 之后读它，已作废的续体不再落任何工作区写入口。
+ *
+ * <p>缺省（页面手点 / 单测直调）不传 ⇒ 行为与改动前完全一致；不新增任何跨进程协议。
+ */
+export interface UiEventLifetime {
+  abandoned: boolean
+}
+
+/**
  * 只读态公共判据（收口修 F6，红队 minor-4）：与两向导 `isReadOnly` 同口径的契约层版，
  * 供 ui_event 写事件共用（守卫逻辑只此一份，各分支只传文案）。
  *
@@ -518,9 +533,15 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
  * - **失败**（`handled=false`）：**不广播** `workspace_changed` —— 「已同步」不能拿来描述一次没落地的
  *   动作（审查 §5-4 的「失败仍已同步」）。但时间线仍留一条（模型下一轮要知道这一手被拒），
  *   失败回执经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。
+ *
+ * @param lifetime 前端工具执行的存活标记（见 {@link UiEventLifetime}）。到点作废 ⇒ **不记动作、
+ *   不广播**（时间线与 chip 都不得替一次已经回灌"超时"的动作背书）；缺省不传 = 行为不变。
  */
-export async function dispatchUiEvent(event: UiEvent): Promise<UiEventResult> {
-  const result = await runUiEvent(event)
+export async function dispatchUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<UiEventResult> {
+  const result = await runUiEvent(event, lifetime)
+  if (lifetime?.abandoned === true) {
+    return result
+  }
   const workspace = useWorkspaceStore()
   if (result.handled) {
     workspace.touch(result.message, 'AI')
@@ -531,9 +552,17 @@ export async function dispatchUiEvent(event: UiEvent): Promise<UiEventResult> {
   return result
 }
 
-async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
+async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<UiEventResult> {
   const workspace = useWorkspaceStore()
   const taskStore = useTaskStore()
+  /** 预算是否已作废（到点后不再写工作区；每个 await 之后各查一次）。 */
+  const abandoned = (): boolean => lifetime?.abandoned === true
+  /** 任务身份核对：await 之后工作区绑定的仍是发起时的那个任务，才允许写回。 */
+  const taskStill = (taskId: number): boolean => workspace.taskId === taskId
+  /** 任务已切换的如实回执（不写工作区、不假称已完成）。 */
+  const switched = (taskId: number): UiEventResult => fail(
+    `任务已切换（原任务 #${taskId}，当前任务 #${workspace.taskId ?? '（无）'}）：本次动作已提交给原任务，未写入当前工作区`
+  )
   try {
     switch (event.type) {
       case 'open_page': {
@@ -563,7 +592,18 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，无法跳转步骤')
         }
+        // 守卫期间预算可能已到点：到点后不得再发写请求
+        if (abandoned()) {
+          return fail('前端工具预算已到点：本次未跳转步骤')
+        }
         await tasksApi.goToStep(taskId, event.step)
+        // 写回前必须核对：改的是**发起时那个任务**的工作区状态（换任务后不得写到新任务上）
+        if (abandoned()) {
+          return fail(`前端工具预算已到点：步骤变更已提交给任务 #${taskId}，未写入当前工作区`)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
         workspace.setStep(event.step)
         return ok(`已跳转到步骤 ${event.step}`)
       }
@@ -576,7 +616,16 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未变更所选配置项')
         }
+        if (abandoned()) {
+          return fail('前端工具预算已到点：本次未变更所选配置项')
+        }
         await tasksApi.selectDefs(taskId, event.defCodes)
+        if (abandoned()) {
+          return fail(`前端工具预算已到点：所选配置项已提交给任务 #${taskId}，未写入当前工作区`)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
         workspace.setSelectedDefs(event.defCodes)
         return ok(`已选择配置项：${event.defCodes.join('、') || '（空）'}`)
       }
@@ -589,7 +638,16 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未设置查询条件')
         }
+        if (abandoned()) {
+          return fail('前端工具预算已到点：本次未设置查询条件')
+        }
         await tasksApi.setCondition(taskId, event.defCode, event.conditions)
+        if (abandoned()) {
+          return fail(`前端工具预算已到点：查询条件已提交给任务 #${taskId}，未写入当前工作区`)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
         workspace.setQueryConditions(event.defCode, event.conditions)
         return ok(`已设置 ${event.defCode} 的查询条件`)
       }
@@ -602,7 +660,16 @@ async function runUiEvent(event: UiEvent): Promise<UiEventResult> {
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未变更导入模式')
         }
+        if (abandoned()) {
+          return fail('前端工具预算已到点：本次未变更导入模式')
+        }
         await tasksApi.setImportMode(taskId, event.mode)
+        if (abandoned()) {
+          return fail(`前端工具预算已到点：导入模式已提交给任务 #${taskId}，未写入当前工作区`)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
         workspace.setImportMode(event.mode)
         return ok(`导入模式已设为 ${event.mode === 'MERGE' ? '增量合并' : '整体替换'}`)
       }

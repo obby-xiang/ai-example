@@ -12,6 +12,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { SheetWritePlan } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
+import { applyLocale } from '@/locales'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -90,6 +91,29 @@ describe('① 预览卡组件', () => {
     expect(wrapper.find('[data-testid="sheet-preview-apply"]').attributes('disabled')).toBeUndefined()
     await wrapper.find('[data-testid="sheet-preview-apply"]').trigger('click')
     expect(wrapper.emitted('apply')?.[0]).toEqual([true])
+    wrapper.unmount()
+  })
+
+  it('三档 label 走 ai.sheetCard，英文下括号不用全角', () => {
+    applyLocale('en-US')
+    const wrapper = mount(SheetPreviewCard, {
+      props: {
+        plan: planOf({
+          distribution: {
+            by: 'status',
+            groups: [{ key: 'A', rows: 1, cells: 1 }],
+            otherGroups: 0,
+            truncated: true
+          }
+        })
+      }
+    })
+    expect(wrapper.find('[data-testid="sheet-preview-level-count"]').text()).toBe('Count')
+    expect(wrapper.find('[data-testid="sheet-preview-level-sample-diff"]').text()).toBe('View samples')
+    expect(wrapper.find('[data-testid="sheet-preview-level-full-diff"]').text()).toBe('Full diff')
+    const distribution = wrapper.find('[data-testid="sheet-preview-distribution"]').text()
+    expect(distribution).toContain('(more than 20 groups; the rest are not itemised)')
+    expect(distribution).not.toContain('（')
     wrapper.unmount()
   })
 })

@@ -48,7 +48,7 @@
           v-if="!isReadOnly"
           :auto-upload="false"
           :show-file-list="false"
-          accept=".xlsx,.zip"
+          :accept="UPLOAD_ACCEPT"
           :disabled="!selectedDefs.length || busy === 'upload'"
           :on-change="handleUpload"
         >
@@ -274,6 +274,7 @@ import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { stepLabel } from '@/utils/format'
+import { UPLOAD_ACCEPT, checkUploadFile } from '@/constants/upload'
 import type { PublishConflictAsync } from '@/types/api'
 import { parseRowData, type ConfigStagingRow } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
@@ -876,6 +877,17 @@ async function confirmDirtyBeforeUpload(): Promise<boolean> {
  * 返回一句页面摘要（**不含路径**），作为 `ui_request_upload` 的回灌素材。
  */
 async function uploadOne(file: File): Promise<string> {
+  // F9：扩展名 / 大小前置拦截。三条入口（手点 el-upload、AI 交接 `import.receiveFile`、
+  // 交接高亮区的拖放）都汇到本函数，因此**只这一处**就覆盖全部入口：
+  // - 扩展名：`.xlsx` / `.zip`（常量与选择器 accept 同源，见 constants/upload）；
+  // - 大小：后端 `spring.servlet.multipart.max-file-size: 5MB` 的前置镜像 —— 只是提前给
+  //   可行动提示，后端仍是权威（放行不等于受理，拒绝也绝不替它补收）。
+  const rejection = checkUploadFile(file)
+  if (rejection) {
+    const message = t(rejection.key, { name: rejection.name })
+    ElMessage.warning(message)
+    return `未上传：${message}`
+  }
   if (taskId.value === null || selectedDefs.value.length === 0) {
     ElMessage.warning(t('views.import.msg.pickDefs'))
     return '未上传：请先勾选配置项'
@@ -1919,10 +1931,17 @@ async function onImportModeChange(): Promise<void> {
     return
   }
   const requested = importMode.value
+  // B：PUT 之后的工作区/本地写回必须核对任务代次 —— 请求在途时换了任务，这条模式属于旧任务，
+  // 写到新任务上就是"说 A 实际给 B"（服务端已落库的是旧任务，本地却显示成新任务的模式）。
+  const generation = taskGeneration
+  const forTask = taskId.value
   // C-1：PUT 失败时服务端保持原值；本地 v-model 必须回滚，不能停在“未生效的模式”上。
   const previous = readImportMode(task.value ?? { settingsJson: null }) ?? 'MERGE'
   try {
-    const updated = await tasksApi.setImportMode(taskId.value, requested)
+    const updated = await tasksApi.setImportMode(forTask, requested)
+    if (generation !== taskGeneration || taskId.value !== forTask) {
+      return
+    }
     if (task.value && updated !== null && typeof updated === 'object') {
       task.value = { ...task.value, ...updated }
     }
@@ -1931,6 +1950,9 @@ async function onImportModeChange(): Promise<void> {
       mode: requested === 'REPLACE' ? t('views.import.replaceMode') : t('views.import.mergeMode')
     }))
   } catch (error) {
+    if (generation !== taskGeneration || taskId.value !== forTask) {
+      return // 旧任务失败：不回滚当前任务的选择，也不弹错
+    }
     importMode.value = previous
     ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.importModeFailed'))
   }
@@ -2096,11 +2118,17 @@ function registerHandlers(): void {
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
     syncSelectedDefsToWorkspace('AI')
+    // B：下面的写回（标签页 / 编辑区载入 / 回执）要等 watch 与落定 Promise —— 期间可能换任务，
+    // 换过之后旧任务的选中集不得再驱动新任务的编辑区（代次判据与 uploadOne 同源）。
+    const generation = taskGeneration
     // 批次 1C：取消勾选含脏项时 watch 会先回滚再结算（写回或确认放弃）。这里等它落定再回灌 ——
     // 否则用户刚点了"不丢弃"，回执却已经说"已选择配置项：B"（说 A 实际给 B）。
     await nextTick()
     if (selectionSettle !== null) {
       await selectionSettle
+    }
+    if (generation !== taskGeneration) {
+      return '任务已切换：本次所选配置项属于原任务，未应用到当前页面的编辑区'
     }
     // 当前标签页仍被选中就别跳回第一张表；新增的编辑区由 loadEditors() 补齐，
     // 已载入的**不重载**（整页强制重载会把它们未保存的编辑换成服务端旧文件）

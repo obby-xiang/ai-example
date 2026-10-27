@@ -20,6 +20,7 @@ import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -228,6 +229,21 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * TTL 续期随快照写（{@link #save}）滑动；索引过期/SADD 失败只影响快路径，不影响回退正确性。
 	 */
 	public static final String SESSION_RUNS_PREFIX = "ai:session:runs:";
+
+	/**
+	 * 会话 → <b>活跃</b>轮的有序索引（{@code ZSET}，score = 最近一次活跃写入的毫秒，成员 = runId）。
+	 *
+	 * <p>为什么要它（N1）：终态后 {@link #clearSessionCurrent(String, String)} 要回指"同会话仍活跃的最新
+	 * 一轮"。旧口径先 {@code SMEMBERS ai:session:runs:<sessionId>} 再逐个 {@link #get(String)} 反序列化
+	 * <b>整份快照</b> —— 每轮终态都要付 O(N) 次大 JSON 解析。本索引按更新时间倒序，正常情况下只需对
+	 * 队首做一次快照确认；索引成员是否真的仍活跃<b>仍以快照复读为准</b>（stale 成员摘掉后看下一名）。
+	 *
+	 * <p>生命周期：{@link #markSessionCurrent(String, String)}（RUNNING/SUSPENDED 的每次快照写与确认门
+	 * 心跳）写分数；终态 {@link #clearSessionCurrent(String, String)} / 回收 {@link #deleteRun(String)}
+	 * 摘成员；TTL 与会话同寿。<b>老会话没有本索引</b> ⇒ 一次性回退旧口径（SMEMBERS + 快照），
+	 * 命中后回填本索引。
+	 */
+	public static final String SESSION_ACTIVE_PREFIX = "ai:session:active:";
 
 	/**
 	 * 会话→run 索引的“已回填”内部标记（同一 SET 内的 sentinel）。
@@ -1032,6 +1048,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		try {
 			this.redis.opsForValue().set(sessionCurrentKey(sessionId), runId, sessionCurrentTtl());
+			markActiveRun(sessionId, runId, System.currentTimeMillis());
 		}
 		catch (Exception ex) {
 			log.warn("写入 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
@@ -1041,6 +1058,71 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 索引键名（诊断/取证可直读）。 */
 	public String sessionCurrentKey(String sessionId) {
 		return SESSION_CURRENT_PREFIX + sessionId;
+	}
+
+	/** 会话→活跃轮有序索引键名（{@code ai:session:active:<sessionId>}，ZSET）。 */
+	public String sessionActiveKey(String sessionId) {
+		return SESSION_ACTIVE_PREFIX + sessionId;
+	}
+
+	/**
+	 * 记一次活跃（N1）：{@code ZADD ai:session:active:<sessionId> <nowMs> <runId>}。
+	 *
+	 * <p>索引只是"终态后回指"的候选排序面：写失败/设施不支持时只降级为旧口径（SMEMBERS + 快照），
+	 * 不影响任何正确性。
+	 */
+	private void markActiveRun(String sessionId, String runId, long atMs) {
+		if (sessionId == null || sessionId.isBlank() || runId == null) {
+			return;
+		}
+		try {
+			ZSetOperations<String, String> active = this.redis.opsForZSet();
+			if (active == null) {
+				return;
+			}
+			active.add(sessionActiveKey(sessionId), runId, atMs);
+			this.redis.expire(sessionActiveKey(sessionId), sessionCurrentTtl());
+		}
+		catch (Exception ex) {
+			log.debug("维护会话活跃轮索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+		}
+	}
+
+	/** 从活跃索引摘掉一轮（幂等；终态 / 回收都调，失败只降级）。 */
+	private void forgetActiveRun(String sessionId, String runId) {
+		if (sessionId == null || sessionId.isBlank() || runId == null) {
+			return;
+		}
+		try {
+			ZSetOperations<String, String> active = this.redis.opsForZSet();
+			if (active != null) {
+				active.remove(sessionActiveKey(sessionId), runId);
+			}
+		}
+		catch (Exception ex) {
+			log.debug("清理会话活跃轮索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 活跃索引的倒序候选（纯 runId，不反序列化快照）。
+	 *
+	 * @return {@code null} = 索引不可用或为空（老会话 / 设施不支持 ⇒ 调用方回退旧口径）
+	 */
+	private Set<ZSetOperations.TypedTuple<String>> activeRunOrder(String sessionId) {
+		try {
+			ZSetOperations<String, String> active = this.redis.opsForZSet();
+			if (active == null) {
+				return null;
+			}
+			Set<ZSetOperations.TypedTuple<String>> ordered = active.reverseRangeWithScores(sessionActiveKey(sessionId),
+					0, -1);
+			return ordered == null || ordered.isEmpty() ? null : ordered;
+		}
+		catch (Exception ex) {
+			log.debug("读取会话活跃轮索引失败 sessionId={}（回退旧口径）：{}", sessionId, ex.getMessage());
+			return null;
+		}
 	}
 
 	/** 会话→全部 runId 的轻量索引键名（{@code ai:session:runs:<sessionId>}）。 */
@@ -1140,17 +1222,38 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
-	/** 当前轮终态后回指同会话仍活跃的最新一轮；没有才删除，且只处理仍指向自己的索引。 */
+	/**
+	 * 当前轮终态后回指同会话仍活跃的最新一轮；没有才删除，且只处理仍指向自己的索引。
+	 *
+	 * <p><b>N1</b>：先查活跃有序索引（按最近一次活跃倒序），确认队首那一份快照仍活跃即可回指；
+	 * 索引不可用/为空（老会话）才一次性回退旧的 {@code SMEMBERS + 逐个快照} 口径，并把命中的
+	 * 活跃轮回填进新索引（"旧会话可一次性回退"）。语义不变：仍是"同会话仍活跃的最新 run"
+	 * （{@code updatedAtMs} 最大；同毫秒平手时 SUSPENDED 优先）。
+	 */
 	public void clearSessionCurrent(String sessionId, String runId) {
 		if (sessionId == null || runId == null) {
 			return;
 		}
 		try {
 			String key = sessionCurrentKey(sessionId);
+			// 终态轮先摘出活跃索引（幂等）：即使索引当前指向别人，也不该把已终态的轮留在候选里。
+			forgetActiveRun(sessionId, runId);
 			String value = this.redis.opsForValue().get(key);
 			if (!runId.equals(value)) {
 				return;
 			}
+			Set<ZSetOperations.TypedTuple<String>> ordered = activeRunOrder(sessionId);
+			if (ordered != null) {
+				RunSnapshot fallback = newestActive(sessionId, ordered, runId);
+				if (fallback == null) {
+					this.redis.delete(key);
+				}
+				else {
+					this.redis.opsForValue().set(key, fallback.getRunId(), sessionCurrentTtl());
+				}
+				return;
+			}
+			// ===== 老会话一次性回退：SMEMBERS + 逐个快照（与升级前逐字同形）=====
 			SessionRunIndex index = sessionRunIndex(sessionId);
 			if (!index.readable()) {
 				log.warn("终态后复核 session→current 失败 sessionId={} runId={}（保留原索引，不猜活跃轮）",
@@ -1179,11 +1282,68 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 			else {
 				this.redis.opsForValue().set(key, fallback.getRunId(), sessionCurrentTtl());
+				// 回填：下一次终态就能走单次确认的快路径（不再 SMEMBERS + N 份快照）。
+				markActiveRun(sessionId, fallback.getRunId(), fallback.getUpdatedAtMs());
 			}
 		}
 		catch (Exception ex) {
 			log.debug("清除 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 在活跃索引的倒序候选里找"最新且仍活跃"的一轮（N1）。
+	 *
+	 * <p>按分数分组：同毫秒平手时 SUSPENDED 优先（与旧口径的比较器逐字同形）；只有当前分组确实没有
+	 * 活跃轮时才看下一组 —— 快照反序列化只发生在真正被检查到的候选上。快照读失败向上抛，由
+	 * {@link #clearSessionCurrent} 保留原索引（与旧口径"读不出来不猜"一致）。
+	 */
+	private RunSnapshot newestActive(String sessionId, Set<ZSetOperations.TypedTuple<String>> ordered,
+			String excludeRunId) {
+		List<String> tied = new ArrayList<>();
+		Double tieScore = null;
+		for (ZSetOperations.TypedTuple<String> entry : ordered) {
+			String candidateId = entry == null ? null : entry.getValue();
+			if (candidateId == null) {
+				continue;
+			}
+			double score = entry.getScore() == null ? 0d : entry.getScore();
+			if (tieScore == null || score != tieScore) {
+				RunSnapshot picked = pickActive(sessionId, tied, excludeRunId);
+				if (picked != null) {
+					return picked;
+				}
+				tied.clear();
+				tieScore = score;
+			}
+			if (!excludeRunId.equals(candidateId)) {
+				tied.add(candidateId);
+			}
+		}
+		return pickActive(sessionId, tied, excludeRunId);
+	}
+
+	/** 同一分数分组内挑一个活跃轮：SUSPENDED 优先，否则第一份活跃快照；stale 成员顺手摘掉。 */
+	private RunSnapshot pickActive(String sessionId, List<String> candidateIds, String excludeRunId) {
+		RunSnapshot running = null;
+		for (String candidateId : candidateIds) {
+			if (excludeRunId.equals(candidateId)) {
+				continue;
+			}
+			RunSnapshot candidate = get(candidateId);
+			if (candidate == null || (!RunSnapshot.SUSPENDED.equals(candidate.getStatus())
+					&& !RunSnapshot.RUNNING.equals(candidate.getStatus()))) {
+				forgetActiveRun(sessionId, candidateId);
+				continue;
+			}
+			if (RunSnapshot.SUSPENDED.equals(candidate.getStatus())) {
+				return candidate;
+			}
+			if (running == null) {
+				running = candidate;
+			}
+		}
+		return running;
 	}
 
 	/** 该 session 当前挂起轮的 runId（null = 无索引：从未挂起 / 已终态清除 / TTL 过期）。 */
@@ -1422,6 +1582,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				fenceKey(runId), reqKey(runId), decidedKey(runId), runLeaseEpochKey(runId)));
 		this.redis.opsForSet().remove(RUN_INDEX, runId);
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
+			// N1：活跃有序索引同样摘成员（终态清理失败时它也只会成为下一轮被摘掉的 stale 候选）。
+			forgetActiveRun(snapshot.getSessionId(), runId);
 			try {
 				this.redis.opsForSet().remove(sessionRunsKey(snapshot.getSessionId()), runId);
 			}

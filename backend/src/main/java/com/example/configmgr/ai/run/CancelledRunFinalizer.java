@@ -170,9 +170,47 @@ public class CancelledRunFinalizer {
 			log.warn("取消收尾交棒派发失败 runId={}：{}", runId, ex.getMessage());
 			rescheduleOrGiveUp(runId, cause, false);
 		}
+		catch (Error ex) {
+			// 派发阶段就抛 Error（执行器实现异常/OOM）：交棒位必须释放，否则后续交棒永久被去重拒绝。
+			finish(runId);
+			throw ex;
+		}
+	}
+
+	/**
+	 * 轮终态的进程内清理（N5）：释放本 run 的交棒位与已尝试次数。
+	 *
+	 * <p>为什么要显式接口：交棒去重（{@link #inFlight}）与重试预算（{@link #attempts}）都是
+	 * <b>进程内</b>状态，交棒成功后不会自行消失 —— 终态之后若不清，同一进程里既留着一个
+	 * 永不释放的去重位（下一次同 runId 交棒被静默拒绝），也留着一条无用的计数。
+	 *
+	 * <p><b>幂等且不改变取消语义</b>：未交棒过 / 已清理 / {@code runId=null} 都不报错；
+	 * 只清这两个进程内表，<b>不碰</b>租约（{@code LeaseService} 的 ended/epoch）、帧册、快照与
+	 * {@code ai:cancel:<runId>} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
+	 *
+	 * <p><b>Error 路径也覆盖</b>：{@link #attempt} 在执行体抛 {@link Error} 时会先 {@code finish} 再
+	 * 上抛；本方法则是终态收尾方的兜底入口（终态写成功/失败后都可调用）。
+	 */
+	public void forget(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return;
+		}
+		finish(runId);
 	}
 
 	private void attempt(String runId, String cause) {
+		try {
+			runAttempt(runId, cause);
+		}
+		catch (Error ex) {
+			// Error（OOM/断言失败等）若不释放交棒位，该 run 会永久 inFlight：后续交棒全被静默拒绝，
+			// 重试链也无人重启。先清进程内状态再把 Error 原样上抛（不吞、不改写语义）。
+			finish(runId);
+			throw ex;
+		}
+	}
+
+	private void runAttempt(String runId, String cause) {
 		ResumeService service = this.resumeServiceProvider == null ? null
 				: this.resumeServiceProvider.getIfAvailable();
 		if (service == null) {
@@ -227,6 +265,10 @@ public class CancelledRunFinalizer {
 			this.inFlight.remove(runId);
 			this.attempts.remove(runId);
 			log.warn("取消收尾重试未排上 runId={}：{}", runId, ex.getMessage());
+		}
+		catch (Error ex) {
+			finish(runId);
+			throw ex;
 		}
 	}
 

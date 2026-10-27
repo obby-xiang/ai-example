@@ -256,10 +256,20 @@ function onDefChange(code: string): void {
   void loadData()
 }
 
+/**
+ * 数据列表拉取的序号（last-wins）：翻页/改条件/换定义都可能并发。
+ *
+ * 没有序号时"谁后回来谁写" —— 快速翻页后把旧页的行贴到新页码下，是本页最容易出现的
+ * 错配（行数与 total 对不上，用户以为数据错了）。只让最新一次请求写 rows/total。
+ */
+let loadSeq = 0
+
 async function loadData(): Promise<void> {
   if (!defCode.value) {
     return
   }
+  const seq = ++loadSeq
+  const forDef = defCode.value
   loading.value = true
   try {
     const params: DataQuery = {
@@ -275,40 +285,84 @@ async function loadData(): Promise<void> {
     if (!isConditionEmpty(condition.value)) {
       params.conditions = stringifyCondition(condition.value)
     }
-    const result = await dataApi.listData(defCode.value, params)
+    const result = await dataApi.listData(forDef, params)
+    if (seq !== loadSeq) {
+      return
+    }
     rows.value = result.content ?? []
     total.value = result.totalElements ?? 0
   } catch (error) {
+    if (seq !== loadSeq) {
+      return
+    }
     ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.dataLoadFailed'))
   } finally {
-    loading.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+    }
   }
 }
+
+/**
+ * 行数预估（`/count`）的请求序号（last-wins）—— **与 `loadSeq` 独立**。
+ *
+ * <p>为什么不与列表共享一个代次：计数与列表是两个端点、两种触发（点「预估」vs 翻页/查询）。
+ * 共享序号时，翻页会把还在途的计数判成"旧请求"（用户点完预估再翻页，计数结果被丢掉），
+ * 计数也会把在途列表判旧 —— 正是"相互把对方当旧请求"。两者各管各的先后。
+ *
+ * <p>但"序号新"不等于"条件还是那一份"：改条件/换定义/换范围不一定发起新的计数请求，
+ * 所以在途计数还必须核对**发起时的入参身份**（见 `stale`），否则旧响应/旧错误会覆盖新条件的结论。
+ */
+let countSeq = 0
 
 async function previewCount(): Promise<void> {
   if (!defCode.value) {
     ElMessage.warning(t('views.data.msg.pickDefinition'))
     return
   }
+  const seq = ++countSeq
+  const forDef = defCode.value
+  const forScopeType = scopeType.value
+  const forScopeKey = scopeKey.value
+  const forConditions = isConditionEmpty(condition.value) ? '' : stringifyCondition(condition.value)
+  /**
+   * 响应/错误落地前的一致性判据：序号仍是最新 **且** 当前入参与发起时完全相同。
+   *
+   * 两个条件缺一不可 —— 只看序号漏掉"改条件后旧计数回来"，只看入参漏掉"同参连点两次、
+   * 第一次晚到"（它同样是旧结论）。
+   */
+  const stale = (): boolean => seq !== countSeq
+    || defCode.value !== forDef
+    || scopeType.value !== forScopeType
+    || scopeKey.value !== forScopeKey
+    || (isConditionEmpty(condition.value) ? '' : stringifyCondition(condition.value)) !== forConditions
   counting.value = true
   try {
     const params: { scopeType?: ScopeType; scopeKey?: string; conditions?: string } = {}
-    if (scopeType.value) {
-      params.scopeType = scopeType.value
+    if (forScopeType) {
+      params.scopeType = forScopeType
     }
-    if (scopeKey.value) {
-      params.scopeKey = scopeKey.value
+    if (forScopeKey) {
+      params.scopeKey = forScopeKey
     }
-    if (!isConditionEmpty(condition.value)) {
-      params.conditions = stringifyCondition(condition.value)
+    if (forConditions !== '') {
+      params.conditions = forConditions
     }
-    const result = await dataApi.countData(defCode.value, params)
+    const result = await dataApi.countData(forDef, params)
+    if (stale()) {
+      return // 旧条件/旧请求的计数：不得覆盖当前条件的结论
+    }
     serverCount.value = result.count
     ElMessage.success(t('views.data.msg.serverCount', { count: result.count }))
   } catch (error) {
+    if (stale()) {
+      return // 旧计数失败不得弹在当前条件上
+    }
     ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.estimateFailed'))
   } finally {
-    counting.value = false
+    if (seq === countSeq) {
+      counting.value = false
+    }
   }
 }
 

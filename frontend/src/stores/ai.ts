@@ -188,6 +188,55 @@ let activeRoundHostId: string | null = null
 let roundEpoch = 0
 
 /**
+ * 轮次现场快照（B2 共性代次）：异步动作**入队/发起时**取一份，回到现场再比一次。
+ *
+ * <p>三件一起判：会话身份（换会话后旧现场不得落进新会话）、轮次纪元（停止/换轮即失效）、
+ * 以及必要时的 runId（同一会话里只允许原来那一轮）。判据本身是纯函数、不读 store 状态
+ * —— 排队工具在 `frontendToolChains` 里等执行时也能拿它自查。
+ */
+interface RoundGuard {
+  sessionId: string | null
+  epoch: number
+  runId: string | null
+}
+
+function captureRound(sessionId: string | null, runId: string | null): RoundGuard {
+  return { sessionId, epoch: roundEpoch, runId }
+}
+
+/**
+ * 是否仍是同一轮现场。
+ *
+ * <p>runId 只做**附加**约束：调用方读不到当前 run（轮已收尾 / 首次挂载）时以会话 + 纪元为准，
+ * 否则同会话里换了 run 也算换轮。
+ */
+function stillSameRound(guard: RoundGuard, sessionId: string | null, runId: string | null): boolean {
+  if (roundEpoch !== guard.epoch || sessionId !== guard.sessionId) {
+    return false
+  }
+  return guard.runId === null || runId === null || runId === guard.runId
+}
+
+/**
+ * 记录某轮已见最大帧序号（B2 有界）：唯一写入口 —— 只增不减 + 只留最近 {@link RUN_SEQ_MAX_RUNS} 个 runId。
+ *
+ * <p>为什么有界：`runSeq` 按 runId 累积、随会话长期存活，长会话里每个 run 一条永不回收。
+ * 键序即插入序，超窗时丢最旧的那个；未超窗时返回原对象（不制造无谓的响应式写入）。
+ */
+const RUN_SEQ_MAX_RUNS = 16
+
+function recordRunSeq(runSeqs: Record<string, number>, runId: string, seq: number): Record<string, number> {
+  runSeqs[runId] = Math.max(runSeqs[runId] ?? 0, seq)
+  const ids = Object.keys(runSeqs)
+  if (ids.length <= RUN_SEQ_MAX_RUNS) {
+    return runSeqs
+  }
+  return Object.fromEntries(
+    ids.slice(-RUN_SEQ_MAX_RUNS).map((id) => [id, runSeqs[id] as number] as const)
+  )
+}
+
+/**
  * 轮终态序号（M-d / fix2）：`done` / `error` 各递增一次，且只在**本轮**的终帧上递增
  * （帧归属守卫已在前置 `ownedByActiveRound` 分支返回旧轮帧）。
  *
@@ -1150,16 +1199,37 @@ const frontendToolChains = new Map<string, Promise<void>>()
  * - **不跨消息**：不同助手消息属于不同轮次，串起来只会让两条并行回复互相拖住。
  * - 等人类工具（生成式表单 / 上传交接 / 表格写预览）**不排队**：它们在帧分支里就建卡返回，
  *   等的是人而不是执行器，排进队列会把后续动作一起挂住。
+ * - **入队即捕获轮次现场**（B2）：排队期间被停止 / 换会话 / 换轮后，轮到它时不执行任何动作
+ *   （不写段、不动浏览器、不回灌）—— 停止必须对**排队中**的动作也立即生效，而不是等它们在
+ *   旧纪元里跑完。
  */
-function enqueueFrontendTool(messageId: string, run: () => Promise<void>): void {
+function enqueueFrontendTool(
+  messageId: string,
+  stillCurrent: () => boolean,
+  run: () => Promise<void>
+): void {
   const previous = frontendToolChains.get(messageId) ?? Promise.resolve()
-  const settled = previous.then(run).catch(() => undefined)
+  const settled = previous
+    .then(() => (stillCurrent() ? run() : undefined))
+    .catch(() => undefined)
   frontendToolChains.set(messageId, settled)
   void settled.then(() => {
     if (frontendToolChains.get(messageId) === settled) {
       frontendToolChains.delete(messageId)
     }
   })
+}
+
+/**
+ * 换轮 / 换会话时丢弃排队链表（B2）。
+ *
+ * <p>只清 map 是不够的：已排队的 promise 已经挂在前一条的 then 上，清掉 map 不会让它们停下 ——
+ * 真正的"停"由每条队列项自带的轮次现场判据（`enqueueFrontendTool` 的 `stillCurrent`）执行。
+ * 这里清 map 的作用是**不把新会话的新动作排到旧链尾**（否则新动作要等一条可能永远不返回的
+ * 旧执行器），并让旧链的引用随会话一起被回收。
+ */
+function clearFrontendToolChains(): void {
+  frontendToolChains.clear()
 }
 
 /* ============================ 批次7B（P1⑤）：镜像增量 / 有界 / idle 落盘 ============================
@@ -3624,8 +3694,9 @@ export const useAiStore = defineStore('ai', {
       }
       // 重挂锚点：取本端已见的最大帧序号。业务帧序号从 1 开始，0 不是可靠的重挂锚点；
       // 缺锚时禁止用 0 全量回放旧 error，也保留原失败现场，交由用户重新载入或新开一轮。
+      // B2：`reduce` 取最大值 —— 展开运算符在长轮里既费栈又会在十万级序号记账上退化。
       const appliedMax = message.appliedSeqs && message.appliedSeqs.length > 0
-        ? Math.max(...message.appliedSeqs)
+        ? message.appliedSeqs.reduce((max, seq) => (seq > max ? seq : max), 0)
         : 0
       const lastSeq = Math.max(this.runSeq[runId] ?? 0, appliedMax)
       if (!Number.isFinite(lastSeq) || lastSeq <= 0) {
@@ -3633,6 +3704,8 @@ export const useAiStore = defineStore('ai', {
         return 'denied'
       }
       this.loading = true
+      // B2：点火在途时记住现场 —— 回来若已换会话/换轮，这条旧 run 不得挂进新会话
+      const roundAtRetry = captureRound(this.sessionId, runId)
       let body: Record<string, unknown>
       try {
         body = await aiApi.retryModelStep(runId)
@@ -3680,6 +3753,11 @@ export const useAiStore = defineStore('ai', {
         }
         setNotice(this, 'ai.notice.retryUnavailable', {}, 'error')
         return 'error'
+      }
+      // B2：点火在途时换了会话/轮次 ⇒ 旧 run 不得挂进新会话（不写 activeRunId、不重建消息、
+      // 不重挂）。新会话的 loading 属于它自己的轮次，这里也不得复位。
+      if (!stillSameRound(roundAtRetry, this.sessionId, null)) {
+        return 'denied'
       }
       this.loading = false
       // 200（幂等空操作）也可能带 retried:false —— 只有明确 retried:true 才进入重挂
@@ -3848,7 +3926,7 @@ export const useAiStore = defineStore('ai', {
       // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
       // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
       const previous = currentAbort
-      this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, lastSeq)
+      this.runSeq = recordRunSeq(this.runSeq, runId, lastSeq)
       this.loading = true
       this.streamInterrupted = false
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
@@ -4917,6 +4995,8 @@ export const useAiStore = defineStore('ai', {
       // M-d（fix2）：提交前的现场快照（帧可能先于 POST 响应抵达并清掉 suspended / 收口本轮）
       const parkedAtDecision = this.suspended
       const terminalSeqAtDecision = roundTerminalSeq
+      // B2：提交在途期间的现场 —— 失败回退前要比一次，已取消/已换轮的卡不得被改回待决
+      const roundAtDecision = captureRound(this.sessionId, runId)
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
         // 批4-D：决策送达 ⇒ 勾选态复位（该卡已收尾，不留"已同意"的残影）
@@ -4967,8 +5047,14 @@ export const useAiStore = defineStore('ai', {
         }
         // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现；
         // 决策元数据一并清回缺省（未形成有效决策，防回执卡误显）。撤在途表 ⇒ 允许重试。
+        // B2 例外：这张卡已经**收口为取消**（stop() / 终态帧在提交在途期间落下）或本轮已被
+        // 换掉时不得回退 —— 把取消卡改回待决 = 挂起卡复活、输入区再被一张死卡锁住。
+        const livePart = host ? findToolPart(host, toolCallId) : null
+        const mayRevive = livePart !== null
+          && livePart.status !== 'cancelled'
+          && stillSameRound(roundAtDecision, this.sessionId, this.activeRunId)
         this.clearGateSubmission(toolCallId)
-        if (host) {
+        if (host && mayRevive) {
           this.upsertToolPart(host, {
             toolCallId,
             name,
@@ -5359,6 +5445,8 @@ export const useAiStore = defineStore('ai', {
       const args = parseToolArgs(frame.args)
       const toolCallId = frame.toolCallId
       const runId = frame.runId ?? this.activeRunId ?? undefined
+      // B2：解析表格上下文要 await —— 期间的现场留一份，回来若已换会话/停止则不再建卡
+      const roundAtOpen = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
       const fail = async (reason: string): Promise<void> => {
         this.upsertToolPart(message, {
           toolCallId,
@@ -5381,6 +5469,11 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const resolved = await resolveSheetContext(args.defCode)
+      // B2：换会话 / 停止发生在这段 await 里 ⇒ 预览不得在新会话里复活：既不建卡、不上色，
+      // 也不把失败结局回灌到已经收口的旧 run（后端已按取消收尾，回灌只会被幂等拒绝）。
+      if (!stillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
+        return
+      }
       if (!resolved.ok) {
         await fail(resolved.reason)
         return
@@ -5719,7 +5812,11 @@ export const useAiStore = defineStore('ai', {
       result: string,
       cancelled: boolean
     ): Promise<void> {
-      this.activeUploadHandoff = null
+      // B2：只摘**自己这张卡** —— 迟到的收口（旧卡的 picker 慢一步返回 / 旧卡回灌超时）
+      // 不得把单例里已经换成新卡的那张一起摘掉（新卡还在等人选文件，摘掉就再也点不动）。
+      if (this.activeUploadHandoff?.toolCallId === handoff.toolCallId) {
+        this.activeUploadHandoff = null
+      }
       for (const item of this.messages) {
         if (!findToolPart(item, handoff.toolCallId)) {
           continue
@@ -6383,6 +6480,9 @@ export const useAiStore = defineStore('ai', {
       this.stopping = true
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
+      // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
+      // 轮到它们时零执行；这里只丢掉链表，不把新会话的新动作排到旧链尾。
+      clearFrontendToolChains()
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
@@ -6538,6 +6638,8 @@ export const useAiStore = defineStore('ai', {
       cancelPendingTakeover()
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
       roundEpoch += 1
+      // B2：旧会话排队中的工具随会话作废（判据见 `enqueueFrontendTool`）
+      clearFrontendToolChains()
       // M-2b：旧会话的快照串行队列不得落进新会话
       this.restoredPendingQueue = []
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
@@ -6563,6 +6665,8 @@ export const useAiStore = defineStore('ai', {
       this.sessionId = nextId
       this.messages = []
       this.activeRunId = null
+      // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
+      this.runSeq = {}
       // AR-10：运行态寿命锚点属于旧会话/旧轮 —— 不带走（卡面寿命只对本轮成立）
       this.runExpiry = null
       clearNotice(this)
@@ -6977,7 +7081,7 @@ export const useAiStore = defineStore('ai', {
       if (seq !== null) {
         const runId = frame.runId ?? this.activeRunId
         if (runId) {
-          this.runSeq[runId] = Math.max(this.runSeq[runId] ?? 0, seq)
+          this.runSeq = recordRunSeq(this.runSeq, runId, seq)
         }
       }
 
@@ -7149,7 +7253,13 @@ export const useAiStore = defineStore('ai', {
           // 其余即时执行类前端工具：立即在浏览器执行并回灌结果
           // 批次 5B（Task 8）：**同一助手消息内串行** —— 每条排到该消息队尾，前一条的回灌
           // 发出后才启动下一条（并发会让紧随导航的动作打在"页面还没挂载 / 任务还没绑定"的窗口上）
-          enqueueFrontendTool(message.id, () => this.runFrontendTool(message, frame))
+          // B2：**入队即捕获轮次现场** —— 排队期间被停止/换会话后，这条不执行任何动作
+          const round = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
+          enqueueFrontendTool(
+            message.id,
+            () => stillSameRound(round, this.sessionId, this.activeRunId ?? null),
+            () => this.runFrontendTool(message, frame, round)
+          )
           break
         }
         case 'frontend_tool_result': {
@@ -7626,17 +7736,25 @@ export const useAiStore = defineStore('ai', {
      * 返回才发 POST，因此预算是"回灌一定发出"的保障（issue#6）。
      * `generative_form` 不走本函数（帧 handler 特判 `openGenerativeForm`），其挂起等的是
      * 用户填写，不受本预算影响。
+     *
+     * @param guard 入队时捕获的轮次现场（B2）。省略 = 入口即现场（直接调用方）。
      */
     async runFrontendTool(
       message: ChatMessage,
-      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
+      guard?: RoundGuard
     ): Promise<void> {
-      // 批3③b D10（R-142）/ B1 收口修（C-1）：入口捕获**轮次纪元** —— 丢弃判据 =
-      // "本轮已被真正换掉"（新消息 / 重挂 / 换会话 / 停止），而不是"AbortController 引用变了"。
-      // 挂起收流会在 `send()` 的 finally 里把 `currentAbort` 置 null，决策后的同轮重连还会换新
-      // controller，但那一轮**尚未结束** —— 慢前端工具的结局必须照常写段终态并回灌
-      //（否则段恒 `running`，后端只能等满 120s 前端工具上限出 `FRONTEND_TIMEOUT`）。
-      const epochAtStart = roundEpoch
+      // 批3③b D10（R-142）/ B1 收口修（C-1）：轮次现场在**入队时**捕获下来，回到现场再比一次
+      // —— 丢弃判据 = "本轮已被真正换掉"（新消息 / 重挂 / 换会话 / 停止），而不是
+      // "AbortController 引用变了"。挂起收流会在 `send()` 的 finally 里把 `currentAbort` 置 null，
+      // 决策后的同轮重连还会换新 controller，但那一轮**尚未结束** —— 慢前端工具的结局必须照常
+      // 写段终态并回灌（否则段恒 `running`，后端只能等满 120s 前端工具上限出 `FRONTEND_TIMEOUT`）。
+      const round = guard ?? captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
+      // B2：排队期间已停止 / 换会话 / 换轮 ⇒ 本动作**零副作用**：不推进 UI 轮次 token
+      //（那会把 `abortUiOperations()` 落下的停止位重新放开）、不写段、不动浏览器、不回灌。
+      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+        return
+      }
       // AI 可视可操作专项：单轮配额与"停止后零执行"按轮次 token 归零（同 runId 不重置）
       beginUiTurn(frame.runId ?? this.activeRunId ?? 'local')
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
@@ -7659,14 +7777,14 @@ export const useAiStore = defineStore('ai', {
         args: parseToolArgs(frame.args),
         budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
       })
-      // B1 收口修（C-1）：await 返回后比对**轮次纪元** —— 只有"真正换轮"（`send()` 起新轮 /
+      // B1 收口修（C-1）：await 返回后比对**轮次现场** —— 只有"真正换轮"（`send()` 起新轮 /
       // `reattachActive()` 重挂 / `adoptFreshSession()` 换会话 / `stop()` 取消本轮）才丢弃晚到
       // 结局：段终态写与回灌 POST（`submitFrontendToolResult`）整体不落，防晚到结局覆盖已收尾
       // 现场 / 向已取消轮或新轮回灌。挂起收流（`StreamCloseInfo.suspended`）与决策后的同轮重连
       // **不**递增纪元 ⇒ 工具回灌照常（C-1 的原始缺陷即栽在"controller 引用变了"这条判据上）。
       // 本轮正常结束（done）后晚到的执行器同属本轮：段落真实结局、回灌交给 409 幂等收敛，
       // 不把卡留在 running 假态（后端此时已超时/取消，重复回灌只会被幂等拒绝）。
-      if (roundEpoch !== epochAtStart) {
+      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return
       }
       // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/

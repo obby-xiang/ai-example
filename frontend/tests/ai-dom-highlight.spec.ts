@@ -81,6 +81,26 @@ describe('T-23：三重冗余高亮', () => {
     expect(badge.textContent).toContain('请在这里选择文件')
   })
 
+  it('F1：新高亮替换旧 timer；播报只存动作文本（前缀由面板组句）', () => {
+    vi.useFakeTimers()
+    try {
+      enterImportPage()
+      registerRegion(makeRoot('<button data-ai-ref="import.upload.choose" aria-label="上传入口">上传</button>'))
+      aiSnapshot({})
+      aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
+      expect(peekUiAnnouncement()).toBe('上传入口')
+      vi.advanceTimersByTime(1000)
+      // 第二次高亮：旧 timer 必须被取消，否则它会在 1.5s 后提前清掉新徽标
+      aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
+      vi.advanceTimersByTime(1500)
+      expect(document.querySelector('[data-ai-highlight-badge]')).toBeTruthy()
+      vi.advanceTimersByTime(1000)
+      expect(document.querySelector('[data-ai-highlight-badge]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('高亮不改 dataVersion、不记撤销点', async () => {
     enterImportPage()
     const workspace = useWorkspaceStore()

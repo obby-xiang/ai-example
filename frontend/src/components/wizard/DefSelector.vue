@@ -192,14 +192,26 @@ function dependenciesOf(def: ConfigDefinition): string[] {
   return [...codes]
 }
 
+/**
+ * 表格选中态同步的序号（last-wins）：watch 是异步的（`await nextTick()`），
+ * 选中集/定义表连续变化时旧一轮的回写会晚于新一轮 —— 没有序号时"后跑完的那轮"说了算，
+ * 结果就是勾选状态回退到上一份 modelValue。只让最新一轮落地。
+ */
+let syncSeq = 0
+
 watch(
   () => [props.modelValue, props.defs],
   async () => {
     if (!tableRef.value) {
       return
     }
+    const seq = ++syncSeq
     syncing = true
     await nextTick()
+    if (seq !== syncSeq) {
+      // 更新的同步已接管：本次不得再改表格选中态，也不得替它清 syncing
+      return
+    }
     const selected = new Set(props.modelValue)
     for (const def of props.defs) {
       tableRef.value.toggleRowSelection(def, selected.has(def.code))

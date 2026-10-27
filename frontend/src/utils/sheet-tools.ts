@@ -20,7 +20,7 @@ import type { FieldQueryCondition } from '@/types/condition'
 import { conditionSummary } from '@/types/condition'
 import type { SheetChange, SheetDistribution, SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 import { columnLetter, excelRowNumber, validateCell, validateRows } from '@/utils/excel'
-import i18n from '@/locales'
+import { translate } from '@/composables/useCopy'
 
 // ── 常量（设计稿 §3.3，读侧硬顶 / 写侧分层） ─────────────────────────────────
 
@@ -745,7 +745,7 @@ function validateDefCode(ctx: SheetContext, args: SheetArgs): string | null {
 
 /** 只读壳的写路径拦截文案（单一源，走 locales；读工具不再被它拦）。 */
 export function sheetReadOnlyWriteBlocked(): string {
-  return i18n.global.t('sheet.readOnlyWriteBlocked')
+  return translate('sheet.readOnlyWriteBlocked')
 }
 
 function requireReadable(ctx: SheetContext): string | null {
@@ -2779,12 +2779,12 @@ export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): 
       preview: 'full-diff',
       scope: 'sheet',
       // i18n（本批范围）：撤销卡的两句用户可见文案走 locale，不再新增中文残留。
-      scopeSummary: i18n.global.t('sheet.undoScopeSummary', { planId: entry.planId }),
+      scopeSummary: translate('sheet.undoScopeSummary', { planId: entry.planId }),
       predicateSummary: '',
       targetRows: [...new Set(reverse.map((change) => change.row))],
       changes: reverse,
       skippedCount: 0,
-      rulesText: i18n.global.t('sheet.undoRulesText', {
+      rulesText: translate('sheet.undoRulesText', {
         cells: entry.cellsCount,
         layers: stack.length
       }),

@@ -589,13 +589,13 @@ public final class GenerativeFormRules {
 	private static List<FormIssue> numberBoundIssues(String at, String key, JsonNode min, JsonNode max,
 			JsonNode step, JsonNode integer) {
 		List<FormIssue> issues = new ArrayList<>();
-		Double minValue = finiteOrNull(min);
-		Double maxValue = finiteOrNull(max);
+		BigDecimal minValue = finiteDecimalOrNull(min);
+		BigDecimal maxValue = finiteDecimalOrNull(max);
 		if ((min != null && minValue == null) || (max != null && maxValue == null)) {
 			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
 					at + ".min/max 必须是有限数字（NaN/Infinity/1e999 这类值不接受）"));
 		}
-		else if (minValue != null && maxValue != null && minValue > maxValue) {
+		else if (minValue != null && maxValue != null && minValue.compareTo(maxValue) > 0) {
 			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
 					at + ".min 不得大于 max（" + minValue + " > " + maxValue + "）"));
 		}
@@ -1069,6 +1069,47 @@ public final class GenerativeFormRules {
 
 	// ── 回灌值的类型复核 ─────────────────────────────────────────────────────
 
+	/**
+	 * 数值比较的<b>精确</b>口径（C N10）：两个 JSON 整数按 {@code BigInteger} 精确比较，其余按
+	 * {@link BigDecimal#compareTo} —— 都不过 {@code double} 中转，{@code >2^53} 的整数不再丢位。
+	 * <b>不引入 epsilon</b>：小数相等仍是严格相等（{@code 0.1} 就是 {@code 0.1}）。
+	 */
+	private static int compareNumbers(JsonNode left, JsonNode right) {
+		if (left.isIntegralNumber() && right.isIntegralNumber()) {
+			return left.bigIntegerValue().compareTo(right.bigIntegerValue());
+		}
+		try {
+			return left.decimalValue().compareTo(right.decimalValue());
+		}
+		catch (NumberFormatException ex) {
+			// 非有限数（JSON 的 1e999 解析成 Infinity/NaN）没有 BigDecimal 表示：退回 double 比较
+			// （仍是严格比较，不引入 epsilon）；这类值本身会被 valueIssues 判成类型错误。
+			return Double.compare(left.asDouble(), right.asDouble());
+		}
+	}
+
+	/** JSON 数字 → 精确 {@link BigDecimal}；非数字与 NaN/±Infinity 返回 {@code null}（同 finiteOrNull 口径）。 */
+	private static BigDecimal finiteDecimalOrNull(JsonNode node) {
+		if (node == null || !node.isNumber()) {
+			return null;
+		}
+		try {
+			BigDecimal value = node.decimalValue();
+			return Double.isFinite(value.doubleValue()) ? value : null;
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	/** JSON 数字是否为精确整数（{@code 2.0} 算整数；{@code 2.2} 不算；大整数不丢位）。 */
+	private static boolean isExactInteger(JsonNode node) {
+		if (node.isIntegralNumber()) {
+			return true;
+		}
+		return node.decimalValue().stripTrailingZeros().scale() <= 0;
+	}
+
 	private static List<FormIssue> valueIssues(String key, JsonNode field, JsonNode value, boolean required,
 			JsonNode values) {
 		List<FormIssue> issues = new ArrayList<>();
@@ -1128,21 +1169,24 @@ public final class GenerativeFormRules {
 							"字段 " + key + " 期望有限数字（NaN/Infinity 不接受），实际是 " + value));
 					break;
 				}
-				Double min = finiteOrNull(field.get("min"));
-				Double max = finiteOrNull(field.get("max"));
-				boolean boundsBroken = (field.has("min") && min == null) || (field.has("max") && max == null);
+				BigDecimal exactMin = finiteDecimalOrNull(field.get("min"));
+				BigDecimal exactMax = finiteDecimalOrNull(field.get("max"));
+				BigDecimal exactValue = value.decimalValue();
+				boolean boundsBroken = (field.has("min") && exactMin == null)
+						|| (field.has("max") && exactMax == null);
 				if (boundsBroken) {
 					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
 							"字段 " + key + " 的 schema min/max 不是有限数字，无法复核取值范围（请重新生成表单）"));
 				}
-				else if ((min != null && number < min) || (max != null && number > max)) {
+				else if ((exactMin != null && exactValue.compareTo(exactMin) < 0)
+						|| (exactMax != null && exactValue.compareTo(exactMax) > 0)) {
 					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
-							"字段 " + key + " 超出范围：" + number + "（允许 " + (min == null ? "-∞" : min)
-									+ ".." + (max == null ? "+∞" : max) + "）"));
+							"字段 " + key + " 超出范围：" + exactValue + "（允许 " + (exactMin == null ? "-∞" : exactMin)
+									+ ".." + (exactMax == null ? "+∞" : exactMax) + "）"));
 				}
-				if (field.path("integer").asBoolean(false) && number != Math.rint(number)) {
+				if (field.path("integer").asBoolean(false) && !isExactInteger(value)) {
 					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_NOT_INTEGER,
-							"字段 " + key + " 必须是整数（实际 " + number + "）"));
+							"字段 " + key + " 必须是整数（实际 " + exactValue + "）"));
 				}
 				Double step = finiteOrNull(field.get("step"));
 				if (field.has("step") && step == null) {
@@ -1152,7 +1196,7 @@ public final class GenerativeFormRules {
 									+ "），无法按步长复核（请重新生成表单）"));
 				}
 				else if (step != null && step > 0) {
-					double base = min == null ? 0 : min;
+					double base = exactMin == null ? 0 : exactMin.doubleValue();
 					BigDecimal units = BigDecimal.valueOf(number - base)
 						.divide(BigDecimal.valueOf(step), 8, java.math.RoundingMode.HALF_UP);
 					if (units.subtract(new BigDecimal(units.toBigInteger())).abs().doubleValue() > 1e-6) {
@@ -1305,7 +1349,8 @@ public final class GenerativeFormRules {
 			return actual.asBoolean() == expected.asBoolean();
 		}
 		if (actual.isNumber() && expected.isNumber()) {
-			return actual.asDouble() == expected.asDouble();
+			// C N10：精确比较（整数按 BigInteger、其余按 BigDecimal#compareTo），不过 double、不加 epsilon
+			return compareNumbers(actual, expected) == 0;
 		}
 		return actual.asText().equals(expected.asText());
 	}
@@ -1329,7 +1374,8 @@ public final class GenerativeFormRules {
 		JsonNode low = bounds.get(0);
 		JsonNode high = bounds.get(1);
 		if (actual.isNumber() && low.isNumber() && high.isNumber()) {
-			return actual.asDouble() >= low.asDouble() && actual.asDouble() <= high.asDouble();
+			// C N10：区间也按精确数值比较（>2^53 的边界不再因 double 丢位而误判）
+			return compareNumbers(actual, low) >= 0 && compareNumbers(actual, high) <= 0;
 		}
 		String value = actual.asText();
 		return value.compareTo(low.asText()) >= 0 && value.compareTo(high.asText()) <= 0;

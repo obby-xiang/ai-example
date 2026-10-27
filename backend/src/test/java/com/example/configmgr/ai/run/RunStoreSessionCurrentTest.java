@@ -7,10 +7,12 @@ import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.ZSetOperations;
 
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -178,6 +180,30 @@ class RunStoreSessionCurrentTest {
 		assertEquals("r-parked", this.store.sessionCurrentRunId("s-1"));
 		this.store.save(snapshot("r-parked", "s-1", RunSnapshot.CANCELLED));
 		assertNull(this.store.sessionCurrentRunId("s-1"));
+	}
+
+	/**
+	 * N1：终态后回指走"会话活跃有序索引"—— 只对候选快照做一次确认，不再
+	 * {@code SMEMBERS ai:session:runs} + 逐个反序列化整份快照。
+	 */
+	@Test
+	void terminalRoundPicksNewestActiveViaActiveIndexWithoutScanningEverySnapshot() {
+		ZSetOperations<String, String> active = mock(ZSetOperations.class);
+		when(this.redis.opsForZSet()).thenReturn(active);
+
+		this.store.save(snapshot("r-parked", "s-1", RunSnapshot.SUSPENDED));
+		this.store.save(snapshot("r-next", "s-1", RunSnapshot.RUNNING));
+
+		// 活跃索引按最近一次活跃倒序：当前轮 r-next(20) 在前，r-parked(10) 在后。
+		Set<ZSetOperations.TypedTuple<String>> ordered = new LinkedHashSet<>();
+		ordered.add(ZSetOperations.TypedTuple.of("r-next", 20d));
+		ordered.add(ZSetOperations.TypedTuple.of("r-parked", 10d));
+		when(active.reverseRangeWithScores(this.store.sessionActiveKey("s-1"), 0, -1)).thenReturn(ordered);
+
+		this.store.save(snapshot("r-next", "s-1", RunSnapshot.DONE));
+
+		assertEquals("r-parked", this.store.sessionCurrentRunId("s-1"));
+		verify(this.setOps, never()).members(this.store.sessionRunsKey("s-1"));
 	}
 
 	private static RunSnapshot snapshot(String runId, String sessionId, String status) {

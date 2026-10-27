@@ -198,6 +198,33 @@ class ConfirmGateArmTest {
         assertThat(this.gate.hasActiveLatch(RUN_ID)).as("等待结束即回收闸门").isFalse();
     }
 
+    /**
+     * <b>N5：终态清理只清"派发重试计数"</b>，且幂等、不碰等待中的闸门（语义安全）。
+     *
+     * <p>本方法由终态收尾方调用（另一 agent 接线）：它只允许释放"外部触发周期"的预算记录，
+     * 不得改写"这一轮是否还在等/是否已结束"的任何判定 —— 否则一次清理就会让等待方失联。
+     */
+    @Test
+    void clearRunStateDropsOnlyTheDispatchRetryBudget() throws Exception {
+        Field field = ConfirmGate.class.getDeclaredField("dispatchRetries");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, AtomicInteger> retries = (Map<String, AtomicInteger>) field.get(this.gate);
+        retries.put(RUN_ID, new AtomicInteger(3));
+
+        this.gate.arm(RUN_ID, List.of(TOOL_CALL_ID));
+        this.gate.clearRunState(RUN_ID);
+
+        assertThat(retries).as("终态清理释放派发重试计数").doesNotContainKey(RUN_ID);
+        assertThat(this.gate.hasActiveLatch(RUN_ID)).as("只清计数：等待中的闸门不受影响").isTrue();
+
+        // 幂等 + null 安全
+        this.gate.clearRunState(RUN_ID);
+        this.gate.clearRunState(null);
+        assertThat(retries).doesNotContainKey(RUN_ID);
+        this.gate.disarm(RUN_ID, List.of(TOOL_CALL_ID));
+    }
+
     // ───────────────────────── helpers ─────────────────────────
 
     @SuppressWarnings("unchecked")

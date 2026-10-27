@@ -480,12 +480,15 @@ public class AiController {
 					// 刷新后既无终态也无"可重跑"的依据。这里补写 FAILED，但**必须**与 fail()/emptyReply()
 					// 共用 RunStore 的同一个 CAS：取消先到时不得把 CANCELLED 盖成 FAILED，
 					// 也不得再发第二条终帧（取消侧的 done{cancelled:true} 才是这一轮的终帧）。
-					boolean failureWritten = writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED);
-					if (failureWritten) {
+					// N2（返修）：失败终帧也由写口在**同一把** per-run 监视器内发出 —— 只在写快照时
+					// 加锁不够，取消的 done{cancelled:true} 可以插在"写完 FAILED"与"锁外发 error"之间。
+					writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
+						// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
+						service.clearTerminalRunState(runId);
 						// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
 						out.error(ErrorCodes.AI_RUN_FAILED,
 								localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
-					}
+					});
 				}
 				finally {
 					LocaleContextHolder.resetLocaleContext();
@@ -521,9 +524,32 @@ public class AiController {
 	 *     与帧归档里 —— AR-01 明确禁止为失败现场新增 DB 写入 / 列 / TTL。</li>
 	 * </ol>
 	 *
-	 * @return {@code true} = 这一笔确实落下（调用方可以发失败终帧）；{@code false} = 不必发
+	 * @param emitError 失败终帧的发送动作（在<b>同一把</b> per-run 监视器内执行；{@code null} = 只写状态）
 	 */
-	private boolean writeOutsideTurnFailure(String runId, String code) {
+	private void writeOutsideTurnFailure(String runId, String code, Runnable emitError) {
+		// N2（返修）：与取消收尾共用同一把 per-run 监视器（经
+		// {@link ResilientChatService#finalizeMonitor(String)}），且<b>失败终帧也在锁内发出</b> ——
+		// 否则取消的 done{cancelled:true} 可以插在"写完 FAILED"与"锁外 out.error"之间。
+		// 没有可用实例（轻装配 / 单测桩）时保持旧口径（单线程语义）。
+		ResilientChatService service = this.chatService.getIfAvailable();
+		Object monitor = service == null ? null : service.finalizeMonitor(runId);
+		if (monitor == null) {
+			writeOutsideTurnFailureLocked(runId, code, emitError);
+			return;
+		}
+		synchronized (monitor) {
+			writeOutsideTurnFailureLocked(runId, code, emitError);
+		}
+	}
+
+	private void writeOutsideTurnFailureLocked(String runId, String code, Runnable emitError) {
+		if (writeOutsideTurnFailureState(runId, code) && emitError != null) {
+			emitError.run();
+		}
+	}
+
+	/** 只做状态写（返回"调用方可否发失败终帧"），调用方必须已持有 per-run 监视器。 */
+	private boolean writeOutsideTurnFailureState(String runId, String code) {
 		try {
 			RunSnapshot snapshot = this.runStore.get(runId);
 			if (snapshot == null) {

@@ -8,8 +8,11 @@
  * 刷新口径（手动刷新批，M1 + F2）：任务中心**不再有任何周期自刷**（步1/步2 的
  * 4s 条件 + 30s 兜底两张表、步3 的任务级 SSE 订阅池整体摘除 —— 页面静止时对后端零请求）。
  * 唯一的拉取入口是 `refreshNow()`：右上角刷新按钮、用户写操作（取消任务等）成功后的本地刷新、
- * ui_event 驱动的即时刷新都走它；被在途 load（loading 挡住的）合并为恰好 1 次补发
- * （refreshPending 标记 + finally 收口）。
+ * ui_event 驱动的即时刷新都走它；撞上在途 load 的刷新合并为恰好 1 次补发
+ * （refreshPending 标记 + 在途计数归零时收口）。
+ *
+ * 翻页/筛选的 last-wins（并发形态）：`load()` 不再用 `loading` 早退 —— 参数在发包前快照并领序号，
+ * 旧响应晚到一律丢弃，新请求照常发出（见 `loadSeq` / `inFlightLoads`）。
  *
  * 事件后刷新（AR-08，批次 5B）：在"手动刷新"之上只**加**一条受限通道 —— ①AI 工具事件后
  * ②存在非终态作业（`PENDING`/`RUNNING`）③页面可见，三者同时成立才刷一次（{@link notifyJobEvent}）。
@@ -67,10 +70,29 @@ export function mapTaskStatusToStep(status: TaskStatus | null): StepStateView {
 }
 
 /**
- * refreshNow 的待办标记：被 loading 挡住时置位，由在途那次 load() 复位 loading 后补发**恰好一次**
+ * refreshNow 的待办标记：撞上在途 load 时置位，由**最后一个**收尾的 load() 补发**恰好一次**
  * （多次阻挡合并为 1 次）。模块级与调用方无关，任何页面经 refreshNow 进来的阻挡都合并。
  */
 let refreshPending = false
+
+/**
+ * 列表拉取的**最新序号**（last-wins 的唯一判据）。
+ *
+ * <p>为什么不能再用 `loading` 挡请求：翻页/改筛选本身会把 `page`/`filter*` 立刻写进 state，
+ * 而"在途请求属于旧参数"这件事只有**响应回来时**才看得出来。旧实现用 `loading` 早退，
+ * 第二次翻页连请求都发不出去（页面停在新页码、数据还是旧页）—— 丢的不是旧响应，是**新请求**。
+ * 现在每个请求带序号，只有最新一次允许写回 `items`/`total`；旧响应晚到一律丢弃。
+ */
+let loadSeq = 0
+
+/**
+ * 在途 load 数（>0 = 还有列表请求没回来）。
+ *
+ * 与 {@link loadSeq} 分工：序号决定"谁能写回"，计数决定"什么时候收 loading/补发 refreshNow"。
+ * 快速翻页会真的产生多条在途请求，loading 必须等**全部**收尾才落下（否则中间那次收尾就把遮罩
+ * 撤了，用户看到的是尚未落定的旧数据）。
+ */
+let inFlightLoads = 0
 
 /**
  * 发布跟踪的 300s 墙钟（M4）：独立定时器，**终态到达即清**。非终态到达 ⇒ 提示恰好 1 次 + 收摊。
@@ -222,37 +244,51 @@ export const useTaskStore = defineStore('task', {
   },
 
   actions: {
-    /** 拉取任务列表（分页 + 筛选）。 */
+    /**
+     * 拉取任务列表（分页 + 筛选）。
+     *
+     * <p><b>last-wins</b>：参数在**发包前**快照，并领一个序号；响应回来时只有"仍是最新一次"
+     * 才允许写回。快速翻页 / 连改筛选会产生多条在途请求 —— 旧响应晚到不得覆盖新页，
+     * 也不能再因为 `loading` 把新请求挡在门外（那会让页面停在新页码却显示旧数据）。
+     */
     async load(): Promise<void> {
-      if (this.loading) {
-        return
-      }
+      const seq = ++loadSeq
+      const params = this.queryParams
+      inFlightLoads += 1
       this.loading = true
       this.loadError = null
       try {
-        const result: PageResult<TaskSummary> = await tasksApi.listTasks(this.queryParams)
+        const result: PageResult<TaskSummary> = await tasksApi.listTasks(params)
+        if (seq !== loadSeq) {
+          return // 旧参数的结果：更新的那次请求才是列表的归属，丢弃
+        }
         this.items = result.content ?? []
         this.total = result.totalElements ?? 0
         this.lastLoadedAt = Date.now()
         // 列表已是最新：隐藏期攒下的那次补刷不再需要（手动刷新 / 事件刷新都从这里收口）
         this.autoRefreshPending = false
       } catch (error) {
+        if (seq !== loadSeq) {
+          return // 旧请求的失败不得污染当前列表的错误位
+        }
         this.loadError = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
       } finally {
-        this.loading = false
-        // 被 loading 挡住的 refreshNow 在这里补发（恰好 1 次；正常完成与被挡住两条路径共用此检查点）
-        this.flushPendingRefresh()
+        inFlightLoads -= 1
+        if (inFlightLoads === 0) {
+          this.loading = false
+          // 被在途请求挡住的 refreshNow 在这里补发（恰好 1 次；全部收尾后才补）
+          this.flushPendingRefresh()
+        }
       }
     },
 
     /**
-     * 补发被 loading 挡住的 refreshNow（多次阻挡合并为 1 次）。
+     * 补发被在途 load 挡住的 refreshNow（多次阻挡合并为 1 次）。
      *
-     * 检查点只此一处即可覆盖两条路径：refreshNow 自己走到 load()（正常完成），
-     * 以及 refreshNow 被在途 load 挡住（由**在途那次**的 finally 兜住）。
+     * 检查点只在"在途计数归零"时触发；仍有请求在飞 ⇒ 留给最后收尾的那次兜住。
      */
     flushPendingRefresh(): void {
-      if (!refreshPending) {
+      if (!refreshPending || inFlightLoads > 0) {
         return
       }
       refreshPending = false
@@ -262,10 +298,10 @@ export const useTaskStore = defineStore('task', {
     /**
      * 手动刷新通道（M1 + F2 后**唯一**的列表拉取入口）：立即拉一次列表。
      * 右上角刷新按钮、用户写操作成功后的本地刷新、ui_event 即时刷新都走这里。
-     * 被在途 load 挡住的刷新**不丢弃**——记 refreshPending，由在途那次的 finally 补发恰好 1 次。
+     * 撞上在途请求的刷新**不丢弃**——记 refreshPending，由最后收尾的那次补发恰好 1 次。
      */
     async refreshNow(): Promise<void> {
-      if (this.loading) {
+      if (inFlightLoads > 0) {
         refreshPending = true
         return
       }

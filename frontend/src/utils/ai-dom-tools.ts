@@ -29,6 +29,7 @@
  */
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { FrontendToolOutcome } from '@/types/tools'
+import { translate } from '@/composables/useCopy'
 import { formatUiReceipt } from './ui-receipt'
 import type { AiRisk } from './ai-regions'
 import {
@@ -140,6 +141,8 @@ function markUiMutation(): void {
   snapshotCache = null
 }
 let highlights: Array<{ el: HTMLElement; badge: HTMLElement }> = []
+/** 高亮自动收起的计时器（F1：保存句柄，替换/清空高亮时取消旧计时器）。 */
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
 
 /**
  * 快照闸状态（批 A）：本 epoch 内被**真实快照遍历过**的 ref 集。
@@ -1702,19 +1705,26 @@ function highlightElement(el: HTMLElement, label: string, note?: string): void {
   path.setAttribute('d', 'M8 1l1.6 4.1L14 7l-4.4 1.9L8 13 6.4 8.9 2 7l4.4-1.9z')
   svg.appendChild(path)
   badge.appendChild(svg)
-  const text = note ? `AI 提示：${truncate(note, UI_HIGHLIGHT_NOTE_MAX_CHARS)}` : `AI 提示：${label}`
+  const text = translate('ai.panel.highlightBadge', {
+    text: note ? truncate(note, UI_HIGHLIGHT_NOTE_MAX_CHARS) : label
+  })
   badge.appendChild(document.createTextNode(text))
   const host = el.parentElement ?? el
   host.appendChild(badge)
   highlights.push({ el, badge })
-  announcement = `AI 正在操作左侧工作区：${note ?? label}`
-  setTimeout(() => {
+  // 播报只存动作文本，前缀由面板用 `ai.panel.uiOperating` 统一组句（F12：避免双前缀）
+  announcement = note ?? label
+  highlightTimer = setTimeout(() => {
     clearUiHighlights()
   }, 2500)
 }
 
 /** 撤掉全部高亮（含徽标），供页面卸载与用例复位。 */
 export function clearUiHighlights(): void {
+  if (highlightTimer !== null) {
+    clearTimeout(highlightTimer)
+    highlightTimer = null
+  }
   for (const { el, badge } of highlights) {
     for (const name of [...HIGHLIGHT_CLASSES, 'transition-shadow']) {
       el.classList.remove(name)

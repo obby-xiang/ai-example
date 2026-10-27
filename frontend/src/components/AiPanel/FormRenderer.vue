@@ -448,6 +448,11 @@ const uploadErrors = reactive<Record<string, string>>({})
 const attachmentRejections = reactive<Record<string, AttachmentRejection>>({})
 /** 数据源级联的结果（optionsFrom.sourceId）：按字段 key 缓存，父值一变就重取。 */
 const externalOptions = ref<Record<string, FormFieldOption[]>>({})
+/**
+ * 数据源请求序号（E：last-wins）。父值每变一次（含清空）就推进一格；
+ * 响应回来时序号或父值不再是当前值 ⇒ 丢弃，防止慢请求覆盖新选项。
+ */
+const sourceRequestSeq = new Map<string, number>()
 
 /**
  * 只读态值回填必须跟随 `initialValues` 后到（结局帧先切只读时卡已挂载）。
@@ -710,15 +715,26 @@ async function refreshSourceOptions(field: FormFieldSpec): Promise<void> {
   if (!from?.sourceId) {
     return
   }
+  // 序号先行推进（含空父值分支）：清空父值同样让在途请求失效，慢响应不得回填
+  const seq = (sourceRequestSeq.get(field.key) ?? 0) + 1
+  sourceRequestSeq.set(field.key, seq)
   const parent = model.value[from.dependsOn]
+  const isCurrent = (): boolean => sourceRequestSeq.get(field.key) === seq
+    && model.value[from.dependsOn] === parent
   if (typeof parent !== 'string' || parent === '') {
     externalOptions.value = { ...externalOptions.value, [field.key]: [] }
     return
   }
   try {
     const resolved = await formOptionSource(from.sourceId, parent)
+    if (!isCurrent()) {
+      return
+    }
     externalOptions.value = { ...externalOptions.value, [field.key]: resolved.options }
   } catch {
+    if (!isCurrent()) {
+      return
+    }
     // 数据源不可用：选项留空（字段自身仍可按"值不在选项内"提示），不阻塞其余字段
     externalOptions.value = { ...externalOptions.value, [field.key]: [] }
   }

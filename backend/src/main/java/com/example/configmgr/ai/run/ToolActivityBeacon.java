@@ -291,6 +291,23 @@ public class ToolActivityBeacon {
 		return count > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) count;
 	}
 
+	/**
+	 * 轮终态的<b>活动锚点</b>清理（N5）：只清 {@link #lastActivityAtMs(String)}。
+	 *
+	 * <p>为什么单独一个口而不是扩 {@link #clear(String)}：{@code clear} 刻意保留活动锚点
+	 * （重试判定要看退出时刻，TTL 由轮生命周期兜住）；终态之后那个锚点再没有人会读，留着只是
+	 * 一个按 runId 常驻的 {@link AtomicLong}。本方法只做这一件事：
+	 * <b>不碰</b>执行计数、段起点、挂起等待、armed 计数 —— 那些各有自己的清理时机与语义。
+	 *
+	 * <p>幂等：未活动过 / 已清理 / {@code runId=null} 都不报错、不产生新记录。
+	 */
+	public void clearRun(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return;
+		}
+		this.lastActivityAtMs.remove(runId);
+	}
+
 	/** 轮终态清理（进程内状态随轮结束释放）。 */
 	public void clear(String runId) {
 		this.active.remove(runId);

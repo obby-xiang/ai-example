@@ -21,7 +21,7 @@
  *   refresh_defs / refresh_data / refresh_tasks
  */
 
-import i18n from '@/locales'
+import { translate, type CopyArgs } from '@/composables/useCopy'
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
 import { toolArgsOf } from '@/utils/blocks'
 
@@ -51,12 +51,8 @@ export function toolStatusWords(): Set<string> {
 
 type ToolArgs = Record<string, unknown>
 
-function translate(key: string, params?: Record<string, unknown>): string {
-  return params ? i18n.global.t(key, params) : i18n.global.t(key)
-}
-
 /** 取译文；缺键（vue-i18n 回落为 key 本身）⇒ 返回 null，由调用方决定兜底。 */
-function optional(key: string, params?: Record<string, unknown>): string | null {
+function optional(key: string, params?: CopyArgs): string | null {
   const value = translate(key, params)
   return value === key ? null : value
 }

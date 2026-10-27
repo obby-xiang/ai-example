@@ -325,21 +325,39 @@ function dependenciesOf(def: ConfigDefinition): string[] {
   return [...codes]
 }
 
+/**
+ * 定义列表拉取的序号（last-wins）：连改层级/关键词时旧响应不得覆盖新结果。
+ *
+ * 三条入口（层级单选 / 回车或清空 / 搜索按钮 + 右上刷新）都会并发打到同一处 ——
+ * 没有序号时"谁后回来谁写"，用户最后看到的是哪一次筛选全凭网络时序。
+ */
+let loadSeq = 0
+
 async function loadDefs(): Promise<void> {
+  const seq = ++loadSeq
+  const params: { level?: ConfigLevel; keyword?: string } = {}
+  if (levelFilter.value) {
+    params.level = levelFilter.value
+  }
+  if (keyword.value.trim()) {
+    params.keyword = keyword.value.trim()
+  }
   loading.value = true
   try {
-    const params: { level?: ConfigLevel; keyword?: string } = {}
-    if (levelFilter.value) {
-      params.level = levelFilter.value
+    const list = await definitionsApi.listDefinitions(params)
+    if (seq !== loadSeq) {
+      return // 旧筛选的结果：最新一次请求才是列表的归属
     }
-    if (keyword.value.trim()) {
-      params.keyword = keyword.value.trim()
-    }
-    defs.value = await definitionsApi.listDefinitions(params)
+    defs.value = list
   } catch (error) {
+    if (seq !== loadSeq) {
+      return // 旧请求的失败不得弹在当前筛选上
+    }
     ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.loadFailed'))
   } finally {
-    loading.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+    }
   }
 }
 

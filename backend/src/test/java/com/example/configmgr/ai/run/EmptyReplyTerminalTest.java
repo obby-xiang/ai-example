@@ -36,13 +36,21 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -68,7 +76,26 @@ class EmptyReplyTerminalTest {
 
 	private static final String SESSION_ID = "s-empty-reply";
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	/**
+	 * 记录"失败终态已落库"的瞬间：并发用例用它把取消线程精确放到"写完 FAILED、还没发 error"这个窗口，
+	 * 从而区分"锁只包住写"与"锁包住写 + 终帧"两种实现。
+	 */
+	private static final class FailureSignalingStore extends InMemoryRunStore {
+
+		private final CountDownLatch failedWritten = new CountDownLatch(1);
+
+		@Override
+		public boolean saveTerminalUnlessCancelled(RunSnapshot snapshot) {
+			boolean written = super.saveTerminalUnlessCancelled(snapshot);
+			if (written && RunSnapshot.FAILED.equals(snapshot.getStatus())) {
+				this.failedWritten.countDown();
+			}
+			return written;
+		}
+
+	}
+
+	private final FailureSignalingStore store = new FailureSignalingStore();
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -207,6 +234,109 @@ class EmptyReplyTerminalTest {
 		assertThat(snapshot.getMessageJson()).as("空正文不写成 assistant 消息（不污染下一轮记忆）")
 				.hasSize(before);
 		assertThat(snapshot.getMessageJson().get(before - 1)).contains("list_config_defs");
+	}
+
+	// ── ③b N2：取消事实先到 ⇒ 失败终局让位给取消终帧（不含 error） ──
+
+	/**
+	 * 空回复失败前取消已成立（取消登记表 CANCELLED，快照尚未被收尾改写）：失败出口必须让位给
+	 * 取消收尾 —— 一轮只能有一条终帧（{@code done{cancelled:true}}），不能既有 {@code error} 又
+	 * {@code done{cancelled:true}}。监视器（{@code finalizeMonitor}）与取消收尾同一把，轻装配下为空，
+	 * 本用例因此锁的是"读取消事实 → 不写 FAILED"这一半语义。
+	 */
+	@Test
+	void cancelledBeforeFailureEmitsOnlyCancelTerminal() {
+		// 关掉"空回复仅模型步重试"，让本轮直接走到 emptyReply 的失败出口（否则取消会在重试退避里被看见，
+		// 走的是另一条既有的取消路径，锁不住 N2 的"失败出口让位"）。
+		this.properties.getResilience().setMaxAttempts(1);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).as("取消优先：不得再发 error 终帧").doesNotContain("error");
+		assertThat(FrameContract.oneOfType(frames, "done")).as("取消侧发唯一终帧").containsEntry("cancelled", true);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(snapshot.isCancelled()).isTrue();
+	}
+
+	// ── ③c N2（返修）：失败写与取消并发 ⇒ error 必须在监视器内发出、且只有一条终帧 ──
+
+	/**
+	 * 失败写与取消<b>并发</b>时：本轮只能有一条终帧，且 {@code error} 必须在失败方仍持有 per-run
+	 * 监视器时发出（"写终态 → 发终帧"同一临界区）。
+	 *
+	 * <p>交错由 {@link FailureSignalingStore} 精确控制：取消线程等到"FAILED 已落库"才出手，此刻失败方
+	 * 仍持有监视器。
+	 * <ul>
+	 * <li>只把写快照放进锁（上一版）：取消线程立刻进入收尾，{@code error} 在锁外发出 ⇒
+	 *     {@code errorInMonitor=false}，本用例红；</li>
+	 * <li>整段进锁（本版）：取消被挡到 error 之后，看到终态/终帧已定 ⇒ 不改写、不补帧，终帧恰好一条。</li>
+	 * </ul>
+	 */
+	@Test
+	void concurrentCancelDuringFailureLeavesExactlyOneTerminalFrameUnderTheMonitor() throws Exception {
+		// 关掉空回复重试，让本轮直走 emptyReply 的失败出口
+		this.properties.getResilience().setMaxAttempts(1);
+		CancelledRunFinalizer finalizer = new CancelledRunFinalizer(
+				new org.springframework.beans.factory.ObjectProvider<ResumeService>() {
+					@Override
+					public ResumeService getObject() {
+						return null;
+					}
+
+					@Override
+					public ResumeService getObject(Object... args) {
+						return null;
+					}
+				}, Runnable::run, this.properties, (task, delay) -> () -> {
+				});
+		Object monitor = finalizer.finalizeMonitor(RUN_ID);
+		this.service.setCancelFinalizer(finalizer);
+
+		SseChatEmitter out = mock(SseChatEmitter.class);
+		AtomicInteger terminals = new AtomicInteger();
+		AtomicBoolean errorInMonitor = new AtomicBoolean();
+		AtomicBoolean archived = new AtomicBoolean();
+		when(out.terminalFrameArchived()).thenAnswer(invocation -> archived.get());
+		doAnswer(invocation -> {
+			archived.set(true);
+			terminals.incrementAndGet();
+			return null;
+		}).when(out).done(anyMap(), any(), anyMap(), anyMap());
+		doAnswer(invocation -> {
+			archived.set(true);
+			terminals.incrementAndGet();
+			// 关键断言点：error 帧被调用时，失败方是否仍持有 per-run 监视器
+			errorInMonitor.set(Thread.holdsLock(monitor));
+			return null;
+		}).when(out).error(anyString(), anyString());
+
+		Thread canceller = new Thread(() -> {
+			try {
+				if (!this.store.failedWritten.await(5, TimeUnit.SECONDS)) {
+					return;
+				}
+			}
+			catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+			this.service.cancelParked(RUN_ID);
+		}, "t-cancel-during-failure");
+
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("stop")));
+		canceller.start();
+		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("你好")), out);
+		canceller.join(5000);
+
+		assertThat(terminals.get()).as("error 与 done{cancelled:true} 只能有一条").isEqualTo(1);
+		assertThat(errorInMonitor.get())
+			.as("失败终帧必须在 per-run 监视器内发出（写终态 → 发终帧同一临界区）")
+			.isTrue();
+		verify(out, never()).done(anyMap(), any(), anyMap(), anyMap());
 	}
 
 	// ── ④ 非空回复回归：原 DONE 行为不变 ──

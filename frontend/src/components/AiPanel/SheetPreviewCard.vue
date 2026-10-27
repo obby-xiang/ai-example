@@ -59,7 +59,7 @@
           :title="group.key"
         >{{ index > 0 ? ' · ' : '' }}{{ truncateKey(group.key) }} {{ t('ai.sheetCard.groupItem', { rows: group.rows, cells: group.cells }) }}</span>
         <span v-if="(distribution?.otherGroups ?? 0) > 0"> · {{ t('sheet.preview.distributionOthers', { count: distribution?.otherGroups }) }}</span>
-        <span v-if="distribution?.truncated">（{{ t('sheet.preview.distributionTruncated') }}）</span>
+        <span v-if="distribution?.truncated">{{ t('ai.sheetCard.distributionTruncatedWrapped', { text: t('sheet.preview.distributionTruncated') }) }}</span>
       </div>
       <!-- 三档各自独立（不用 v-else-if 链）：中间夹了分布块，链式判定会被前一个 v-if 抢走配对 -->
       <div v-if="plan.preview === 'sample-diff'" class="mt-[7px]" data-testid="sheet-preview-sample">
@@ -174,11 +174,12 @@ function truncateKey(key: string): string {
   return key.length > 12 ? `${key.slice(0, 12)}…` : key
 }
 
-const LEVELS: Array<{ value: SheetPreviewLevel; label: string }> = [
-  { value: 'count', label: '计数' },
-  { value: 'sample-diff', label: '看样例' },
-  { value: 'full-diff', label: '全量 diff' }
-]
+/** 三档 label 走 locales（F13）：随语言切换重算，中英都不留硬编码中文。 */
+const LEVELS = computed<Array<{ value: SheetPreviewLevel; label: string }>>(() => [
+  { value: 'count', label: t('ai.sheetCard.levelCount') },
+  { value: 'sample-diff', label: t('ai.sheetCard.levelSample') },
+  { value: 'full-diff', label: t('ai.sheetCard.levelFullDiff') }
+])
 
 const PAGE_SIZE = 50
 const page = ref(0)

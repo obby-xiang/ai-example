@@ -160,6 +160,47 @@ class GenerativeFormProBatchRulesTest {
 			.contains(FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX);
 	}
 
+	/**
+	 * <b>C N10：数值比较按精确口径</b>（整数 {@code BigInteger}、其余 {@code BigDecimal#compareTo}），
+	 * <b>不引入 epsilon</b>。
+	 *
+	 * <p>夹具刻意用 {@code 2^53} 以上的相邻整数：两者经 {@code double} 会折成同一个值，
+	 * 旧实现因此把 {@code eq/in/between/min/max} 全部判错（这里逐项锁住）。
+	 */
+	@Test
+	void numericComparisonIsExactBeyondDoublePrecision() throws Exception {
+		String form = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"n","label":"N","type":"number"},
+				  {"key":"eqFlag","label":"EQ","type":"text",
+				     "requiredWhen":{"key":"n","op":"eq","value":9007199254740993}},
+				  {"key":"inFlag","label":"IN","type":"text",
+				     "requiredWhen":{"key":"n","op":"in","values":[9007199254740993]}},
+				  {"key":"btwFlag","label":"BTW","type":"text",
+				     "requiredWhen":{"key":"n","op":"between","values":[9007199254740993,9007199254740993]}}]}""";
+		assertThat(GenerativeFormRules.schemaIssues(form(form))).isEmpty();
+		assertThat(GenerativeFormRules.resultIssues(schema(form), values("{\"n\":9007199254740992}")))
+			.as("9007199254740992 不等于/不在 9007199254740993 的条件内 ⇒ 三个联动都不成立")
+			.isEmpty();
+
+		String bounds = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"v","label":"V","type":"number","min":9007199254740993},
+				  {"key":"w","label":"W","type":"number","integer":true}]}""";
+		assertThat(GenerativeFormRules.resultIssues(schema(bounds),
+				values("{\"v\":9007199254740992,\"w\":9007199254740993}")))
+			.as("值域下限与精确整数都不得因 double 折值而误判")
+			.extracting(FormIssue::code)
+			.containsExactly(FormIssueCodes.VALUE_OUT_OF_RANGE);
+
+		String badBounds = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"b","label":"B","type":"number","min":9007199254740993,"max":9007199254740992}]}""";
+		assertThat(GenerativeFormRules.schemaIssues(form(badBounds))).extracting(FormIssue::code)
+			.as("schema 的 min>max 也要按精确值判定")
+			.contains(FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX);
+	}
+
 	@Test
 	void dateRangeRules() throws Exception {
 		String schema = """

@@ -16,7 +16,8 @@
  *
  * <h3>什么时候**不该**用它（C5 红线）</h3>
  * 送进模型的串（`sheet-tools.ts` / `types/tools.ts` / `ai-dom-tools.ts` / `frontend-tools.ts`
- * 的工具词表、`ui_event` 回灌文本、`recentActions` 摘要）一律保持中文常量，不得经本模块翻译。
+ * 的工具词表、`ui_event` 回灌文本、`recentActions` 摘要）一律保持中文常量，不得经本模块翻译；
+ * 同一文件里的**用户可见**文案（卡面 / 按钮 / 高亮徽标）仍应走本模块。
  * 判据只有一条：**这串给谁看**。
  */
 

@@ -372,6 +372,19 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * N2：本轮终态收尾的 per-run 监视器（<b>统一出口</b>）。
+	 *
+	 * <p>取消收尾（{@code cancelTerminal}）、成功终局（{@code finishSuccess}）、失败出口
+	 * （{@code fail} / {@code emptyReply}）以及环外异常 / 续跑失败的收尾都取这一把，保证
+	 * "读状态 → 写终态 → 发终帧"彼此原子；{@code null} = 轻装配/未注入交棒器（单线程语义）。
+	 * 同包/控制器侧复用（{@code AiController#writeOutsideTurnFailure}、{@code ResumeService}），
+	 * 避免各自另起一套终态互斥。
+	 */
+	public Object finalizeMonitor(String runId) {
+		return this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
+	}
+
+	/**
 	 * 取消终态无法写入时的一次交棒（不阻塞、不重试由交棒方负责）。
 	 *
 	 * @return 本次是否真的派发了（已有一份在飞 / 未装配交棒器 ⇒ false）
@@ -514,6 +527,21 @@ public class ResilientChatService {
 					toolsTokens, 0);
 			memory = compaction.memory();
 
+			// ===== N4（返修）：压缩后、建快照前复查取消 =====
+			// 压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。这期间用户按下停止时，旧实现仍会接着
+			// store.create + 发起模型调用 —— 一条"用户已停止"的轮被真正跑起来。只认确定的 CANCELLED
+			// （UNKNOWN 按未取消继续：此刻还没有不可逆动作，与 C2 的退避口径同源）。
+			// 终态与终帧复用既有取消收尾（快照未建 ⇒ 不写任何快照，只发唯一终帧 done{cancelled:true}）。
+			if (cancellationRequested(runId)) {
+				log.info("首轮压缩期间收到取消 runId={}（不建快照、不发起模型调用）", runId);
+				cancelTerminal(runId, sessionId, null, 0, null, out,
+						new TurnContext(systemTokens, toolsTokens, inputTokens,
+								systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
+								compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs,
+								paramsLocked, runtime.providerCode(), queueMs(System.currentTimeMillis())));
+				return;
+			}
+
 			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
 			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
 			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
@@ -565,6 +593,14 @@ public class ResilientChatService {
 			// 压缩结束、进入模型生成阶段：同一枚定时器切相位（不重排、不抖动），后续节拍由它继续出帧。
 			if (keepalive != null) {
 				keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+			}
+			// N4（返修）：交棒（runAttempts → 上游调用）前再复查一次 —— 覆盖压缩之后、快照建立/
+			// 用户历史落库期间的取消窗口；命中则就地取消收尾（快照已存在，写 CANCELLED + 唯一终帧），
+			// 不发起任何模型调用。
+			if (cancellationRequested(runId)) {
+				log.info("首轮交棒前收到取消 runId={}（不发起模型调用）", runId);
+				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
+				return;
 			}
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
@@ -1387,6 +1423,49 @@ public class ResilientChatService {
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
 		emitTurnEnd(runId, sessionId, "done", null, attempts, accumulator, turn, watchdog);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
+		clearTerminalRunState(runId);
+	}
+
+	/**
+	 * F：<b>统一终态出口</b>的进程内幂等清理（协作面由其他收尾方提供）。
+	 *
+	 * <p>清三样：确认门的重派发计数（{@link ConfirmGate#clearRunState(String)}）、取消交棒的去重位/
+	 * 重试计数（{@link CancelledRunFinalizer#forget(String)}）、工具活动锚点
+	 * （{@link ToolActivityBeacon#clearRun(String)}）。
+	 *
+	 * <p><b>不清</b>：{@code LeaseService} 的 ended 墓碑 / epoch、Redis 帧册与快照 —— 终态的权威事实
+	 * 仍是 Redis 那一份，进程内清理不得改写"这一轮是否已结束"，也不得让"丢租判定/帧回放"失去依据。
+	 *
+	 * <p>幂等且失败只 WARN：清理是收尾的卫生动作，<b>不得</b>改变已发出的终态/终帧。轻装配
+	 * （未注入确认门/交棒器）时对应项直接跳过。
+	 */
+	public void clearTerminalRunState(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return;
+		}
+		try {
+			this.beacon.clearRun(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("终态清理工具活动锚点失败 runId={}：{}", runId, ex.getMessage());
+		}
+		try {
+			if (this.parkSettlement != null) {
+				this.parkSettlement.clearRunState(runId);
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("终态清理确认门重派发计数失败 runId={}：{}", runId, ex.getMessage());
+		}
+		try {
+			if (this.cancelFinalizer != null) {
+				this.cancelFinalizer.forget(runId);
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("终态清理取消交棒去重位失败 runId={}：{}", runId, ex.getMessage());
+		}
 	}
 
 	/**
@@ -1418,6 +1497,22 @@ public class ResilientChatService {
 	/** 快照本身是不是取消态（终态 CANCELLED 或取消位已置位）。 */
 	private static boolean isCancelledSnapshot(RunSnapshot snapshot) {
 		return snapshot != null && (RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled());
+	}
+
+	/**
+	 * N4：首轮压缩后 / 交棒前的取消复查 —— 只认<b>确定</b>的 {@code CANCELLED}。
+	 *
+	 * <p>读不出来（{@code UNKNOWN} / 异常）按未取消继续：这两个位置都还没有不可逆动作
+	 * （没建快照 / 还没发起上游调用），不能被一次读抖动改判成硬失败（与 C2 的退避口径同源）。
+	 */
+	private boolean cancellationRequested(String runId) {
+		try {
+			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
+		}
+		catch (RuntimeException ex) {
+			log.debug("取消复查不可读 runId={}（按未取消继续）：{}", runId, ex.getMessage());
+			return false;
+		}
 	}
 
 	/**
@@ -1590,6 +1685,10 @@ public class ResilientChatService {
 	 *     {@code done{cancelled:true}}），否则一轮会出现两条终帧。</li>
 	 * </ol>
 	 *
+	 * <p><b>N2</b>：整个"读取消事实 → 写 FAILED"段包在 {@link CancelledRunFinalizer#finalizeMonitor(String)}
+	 * 的 per-run 监视器里（与 {@code cancelTerminal} 同一把），"判定 → 落库 → 出帧"因此对取消收尾是原子的。
+	 * 快照为 {@code null} 时也先查取消登记表：没有快照可写，取消登记是唯一还读得到的取消信号。
+	 *
 	 * <p><b>不伪写半截</b>：本方法只改快照的状态/错误/次数，不向 DB 写任何正文
 	 * （{@code ai_chat_message} 的写入只在 {@code convergeMemory} / 终态落定那几处，且失败路径不调它）。
 	 *
@@ -1598,12 +1697,33 @@ public class ResilientChatService {
 	 */
 	private boolean failRunUnlessCancelled(String runId, RunSnapshot snapshot, String code, String message,
 			int attempts, java.util.function.Consumer<RunSnapshot> prepare) {
-		if (snapshot == null) {
-			return true;
+		// N2：与 {@link #cancelTerminal} 共用同一把 per-run 监视器 —— "读取消事实 → 写 FAILED → 出失败终帧"
+		// 必须对取消收尾是一个原子段，否则取消可以落在"判定未取消"与"写 FAILED"之间，两边各发一条终帧
+		// （error + done{cancelled:true}）。轻装配/直接 new 的单测没有交棒器 ⇒ 维持单线程语义。
+		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
+		if (monitor == null) {
+			return failRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
 		}
+		synchronized (monitor) {
+			return failRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
+		}
+	}
+
+	private boolean failRunUnlessCancelledLocked(String runId, RunSnapshot snapshot, String code, String message,
+			int attempts, java.util.function.Consumer<RunSnapshot> prepare) {
 		// 读侧先行：取消态一票否决（不写 FAILED）。写侧还有同一判据的原子 CAS（见下），
 		// 两者是"同一口径的两道门"，不是两次不同判定。
-		if (isCancelledSnapshot(snapshot)) {
+		// 快照为 null（请求前压缩窗口）也查一次取消事实：{@link #cancelledBeforeSuccess} 对 null 快照
+		// 只返回取消登记表那一侧，正是"没有快照可写时唯一还读得到的取消信号"。
+		if (snapshot == null) {
+			if (cancelledBeforeSuccess(runId, null)) {
+				log.info("失败终局前发现取消 runId={}（快照尚未建立：不补 error 终帧，取消收尾负责终态与终帧）",
+						runId);
+				return false;
+			}
+			return true;
+		}
+		if (cancelledBeforeSuccess(runId, snapshot)) {
 			log.info("失败终局前发现取消 runId={}（不写 FAILED、不发 error 终帧；取消收尾负责终态与终帧）", runId);
 			return false;
 		}
@@ -1634,6 +1754,19 @@ public class ResilientChatService {
 	 */
 	private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out,
 			TurnContext turn) {
+		// N2（返修）：与 {@link #fail} 同口径 —— "判取消 → 写终态 → 发 error"整段在 per-run 监视器内。
+		Object monitor = finalizeMonitor(runId);
+		if (monitor == null) {
+			emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn);
+			return;
+		}
+		synchronized (monitor) {
+			emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn);
+		}
+	}
+
+	private void emptyReplyLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
+			SseChatEmitter out, TurnContext turn) {
 		String text = accumulator.text();
 		String detail = "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
 				+ "常见成因：上游静默截断产出 0 字符的\"成功\"响应，或模型返回空回复；请重试或换一种问法。";
@@ -1641,7 +1774,16 @@ public class ResilientChatService {
 		log.error("AI 轮次空回复 runId={} sessionId={} attempts={} rawChars={} 末帧序列=[{}]", runId, sessionId, attempts,
 				text.length(), accumulator.tailSummary());
 		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot != null) {
+		if (snapshot == null) {
+			// 快照尚未建立（请求前压缩窗口）也先查取消：取消已成立 ⇒ 终态与终帧归取消收尾，不发 error。
+			if (cancelledBeforeSuccess(runId, null)) {
+				log.info("空回复终局前发现取消 runId={}（快照尚未建立：不补 error 终帧，取消收尾负责终态与终帧）",
+						runId);
+				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
+				return;
+			}
+		}
+		else {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			boolean written = failRunUnlessCancelled(runId, snapshot, EMPTY_REPLY_CODE, message, attempts,
 					target -> {
@@ -1661,6 +1803,8 @@ public class ResilientChatService {
 		out.textEnd(text.length());
 		out.error(EMPTY_REPLY_CODE, message);
 		emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
+		clearTerminalRunState(runId);
 	}
 
 	/**
@@ -1899,10 +2043,11 @@ public class ResilientChatService {
 		// L-75：**先**把未决条目收敛成 CANCELLED，再写记忆 —— 否则记忆里的段级状态可能是
 		// 「条目仍 PENDING + 轮次已 CANCELLED」的混合态：状态会经快照终态兜底成 cancelled，
 		// 但 `decision` 取自**条目态**（只认 CANCELLED）⇒ 刷新后卡面读成「已超时」而不是「已取消」。
-		// 取消条目与补发裁决帧是两件事：帧仍按"取消前"的清单补（与既有 S5 口径同形）。
 		// C2：取消收尾必须先把条目收敛掉；guard 读失败不能让它停在 PENDING（用户可见"卡在取消中"）。
-		List<PendingToolCall> pendingsBeforeCancel = this.store.pendingsLenient(runId);
+		// N8：整套收尾只在这里收敛一次、再读一次 —— 收敛后的清单同时喂给补帧与 park 结算，
+		// 不再让 emitCancelOutcomes 重复 cancelPendings / 重复整表读。
 		this.store.cancelPendings(runId);
+		List<PendingToolCall> cancelledPendings = this.store.pendingsLenient(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			List<Message> stoppedMessages = new ArrayList<>();
@@ -1942,12 +2087,12 @@ public class ResilientChatService {
 			// 未装配交棒器（轻装配/直接 new 的单测）：保持旧口径继续走 —— 出帧仍会被写门丢弃，
 			// 结算/轮末照发，行为与引入本批之前逐字同形。
 		}
-		emitCancelOutcomes(runId, this.store, out, pendingsBeforeCancel);
+		emitCancelOutcomes(runId, out, cancelledPendings);
 		// park 结算（独立复审 M-2′）：取消是这些卡的终局 —— 批循环早在 park 处穿出，这条
 		// tool_call_end 再没有别的发点。放在补发裁决帧之后、终帧之前，与决策路径同序
 		// （落库 → 帧 → 结算行 → 续跑/终帧）；只 park-on 的 CANCELLED CONFIRM/FRONTEND 会被结算，
 		// 判定与幂等都在闸门侧（见 ConfirmGate#settleCancelledToolCalls），本类只决定时机。
-		settleCancelledFromPark(runId, pendingsBeforeCancel);
+		settleCancelledFromPark(runId, cancelledPendings);
 		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
 				watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
 		Map<String, Object> extra = new LinkedHashMap<>();
@@ -1966,6 +2111,8 @@ public class ResilientChatService {
 				watchdog == null ? 0 : watchdog.upstreamEvents());
 		emitTurnEnd(runId, sessionId, "cancelled", StreamViolationException.CANCELLED, attempts, accumulator, turn,
 				watchdog);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
+		clearTerminalRunState(runId);
 	}
 
 	/**
@@ -1986,28 +2133,24 @@ public class ResilientChatService {
 	 * <p>返回补发的帧数（可观测/测试断言用）。
 	 */
 	static int emitCancelOutcomes(String runId, RunStore store, SseChatEmitter out) {
-		return emitCancelOutcomes(runId, store, out, store.pendingsLenient(runId));
+		store.cancelPendings(runId);
+		return emitCancelOutcomes(runId, out, store.pendingsLenient(runId));
 	}
 
 	/**
-	 * 同 {@link #emitCancelOutcomes(String, RunStore, SseChatEmitter)}，但"取消前清单"由调用方提供。
+	 * 同 {@link #emitCancelOutcomes(String, RunStore, SseChatEmitter)}，但收敛后的条目清单由调用方提供
+	 * （只补帧，不再读/写条目表）。
 	 *
-	 * <p>为什么要这个重载（L-75）：{@code cancelTerminal} 必须**先**收敛条目（否则记忆里的
-	 * 段级 `decision` 读不到 cancel），再补帧；此时条目已被置 CANCELLED，"取消前的清单"只能
-	 * 由调用方在收口前抓取。三参版本保持原语义（自己抓、自己取消），既有用例零改动。
+	 * <p>为什么要这个重载（L-75 / N8）：{@code cancelTerminal} 必须**先**收敛条目（否则记忆里的
+	 * 段级 `decision` 读不到 cancel），再补帧、再结算 park。清单因此在收口处读一次、两处复用；
+	 * 旧实现让本重载又 {@code cancelPendings} 一次、又整表读一次，同一轮取消最多 4 次条目表往返。
+	 * 三参版本保持原语义（自己收敛、自己读），既有用例零改动。
 	 */
-	static int emitCancelOutcomes(String runId, RunStore store, SseChatEmitter out, List<PendingToolCall> before) {
-		store.cancelPendings(runId);
-		Map<String, PendingToolCall> cancelled = new LinkedHashMap<>();
-		for (PendingToolCall pending : store.pendingsLenient(runId)) {
-			if (PendingToolCall.CANCELLED.equals(pending.getStatus())) {
-				cancelled.put(pending.getToolCallId(), pending);
-			}
-		}
+	static int emitCancelOutcomes(String runId, SseChatEmitter out, List<PendingToolCall> cancelledEntries) {
 		int emitted = 0;
-		for (PendingToolCall original : before) {
-			PendingToolCall settled = cancelled.get(original.getToolCallId());
-			if (settled == null) {
+		for (PendingToolCall settled : cancelledEntries) {
+			if (!PendingToolCall.CANCELLED.equals(settled.getStatus())) {
+				// first-wins：已执行/已拒绝的条目不得被改写成"已取消"
 				continue;
 			}
 			if (PendingToolCall.KIND_CONFIRM.equals(settled.getKind())) {
@@ -2073,6 +2216,22 @@ public class ResilientChatService {
 	 */
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
 			boolean sideEffect, Accumulator accumulator, SseChatEmitter out, TurnContext turn) {
+		// N2（返修）：整段"判取消 → 写终态 → 发终帧"必须在<b>同一把</b> per-run 监视器里。
+		// 只在写快照时加锁不够：锁内写 FAILED、锁外发 error，取消侧的 done{cancelled:true} 仍可插到
+		// 两者之间 ⇒ 一轮两条终帧。synchronized 可重入 ⇒ 内部再进 cancelTerminal /
+		// failRunUnlessCancelled 安全；轻装配（无交棒器）维持单线程语义。
+		Object monitor = finalizeMonitor(runId);
+		if (monitor == null) {
+			failLocked(runId, sessionId, violation, attempts, emitted, sideEffect, accumulator, out, turn);
+			return;
+		}
+		synchronized (monitor) {
+			failLocked(runId, sessionId, violation, attempts, emitted, sideEffect, accumulator, out, turn);
+		}
+	}
+
+	private void failLocked(String runId, String sessionId, StreamViolationException violation, int attempts,
+			boolean emitted, boolean sideEffect, Accumulator accumulator, SseChatEmitter out, TurnContext turn) {
 		int partialChars = accumulator == null ? 0 : accumulator.text().length();
 		String code = failureCode(violation.getCode(), sideEffect, emitted);
 		String message = messageFor(code);
@@ -2080,7 +2239,8 @@ public class ResilientChatService {
 		log.error("AI 轮次失败 runId={} sessionId={} attempt={} code={}：{}", runId, sessionId, attempts, code,
 				describeForLog(violation));
 		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot != null && !RunSnapshot.DONE.equals(snapshot.getStatus())) {
+		// N2：快照还没建立（请求前压缩窗口）也要先问一次取消 —— 取消侧才是这一轮的终帧。
+		if (snapshot == null || !RunSnapshot.DONE.equals(snapshot.getStatus())) {
 			if (!failRunUnlessCancelled(runId, snapshot, code, message, attempts, null)) {
 				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
 				return;
@@ -2093,6 +2253,8 @@ public class ResilientChatService {
 		out.textEnd(partialChars);
 		out.error(code, message);
 		emitTurnEnd(runId, sessionId, "failed", code, attempts, accumulator, turn, null);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
+		clearTerminalRunState(runId);
 	}
 
 	/** 历史载荷里段级工具状态映射的键名（R-144）：挂在带 {@code toolCalls} 的 ASSISTANT 消息 metadata 上。 */
@@ -2273,7 +2435,7 @@ public class ResilientChatService {
 			return toolCallState(pending, status);
 		}
 		if (PendingToolCall.APPROVED.equals(status)
-				&& (pending.isExecuted() || this.store.ledgerFor(runId, toolCallId) != null)) {
+				&& (pending.isExecuted() || ledgerEntry(runId, toolCallId) != null)) {
 			// T2 升格判据：KIND_CONFIRM 的 DANGER 工具执行后条目态永久停留 APPROVED（executeOnce 仅对
 			// KIND_BACKEND 置 EXECUTED），但「已批准且已执行」等价于 EXECUTED（executed 标志或台账命中即已执行）。
 			return toolCallState(pending, PendingToolCall.EXECUTED);
@@ -2292,6 +2454,20 @@ public class ResilientChatService {
 			}
 		}
 		return toolCallState(pending, status);
+	}
+
+	/**
+	 * 台账读口（N9）：{@code idemFor}（幂等索引，O(1)）优先，未命中回落 {@code ledgerFor}（全表扫描 / 旧数据）。
+	 *
+	 * <p>与 {@code SpToolCallingManager#ledgerOf} 同一两跳口径：真实 {@code idemFor} 内部已经回落过一次，
+	 * 这里的第二跳只保护只桩了旧读口的轻装配单测；"台账才是判据"因此仍只有一个出口。
+	 */
+	private Map<String, Object> ledgerEntry(String runId, String toolCallId) {
+		Map<String, Object> indexed = this.store.idemFor(runId, toolCallId);
+		if (indexed != null && !indexed.isEmpty()) {
+			return indexed;
+		}
+		return this.store.ledgerFor(runId, toolCallId);
 	}
 
 	/** 条目级终态（非 PENDING / APPROVED 的 10 个状态码）判定。 */

@@ -437,3 +437,56 @@ describe('AR-07 常用筛选一屏 + 高级条件渐进披露', () => {
     expect(wrapper.find('[data-testid="gf-advanced-toggle"]').exists()).toBe(false)
   })
 })
+
+describe('E：数据源级联 last-wins', () => {
+  const SOURCE_SCHEMA: FormSpec = {
+    scenario: 'FILTER',
+    fields: [
+      { key: 'def', label: '定义', type: 'text' },
+      { key: 'field', label: '字段', type: 'multi_select', optionsFrom: { dependsOn: 'def', sourceId: 'definition_fields' } }
+    ]
+  }
+
+  function deferSource() {
+    const pending: Array<{
+      parent: string
+      resolve: (value: { options: Array<{ value: string; label: string }> }) => void
+    }> = []
+    api.formOptionSource.mockImplementation((_sourceId: string, parent: string) =>
+      new Promise((resolve) => {
+        pending.push({ parent, resolve })
+      }))
+    return pending
+  }
+
+  it('乱序返回只认最后一次（慢响应不覆盖新选项）', async () => {
+    const pending = deferSource()
+    const wrapper = mountForm(SOURCE_SCHEMA)
+    await flushPromises()
+    await wrapper.find('#gf-field-def').setValue('CURRENCY')
+    await wrapper.find('#gf-field-def').setValue('DOC_TYPE')
+    expect(pending.map((item) => item.parent)).toEqual(['CURRENCY', 'DOC_TYPE'])
+
+    pending[1].resolve({ options: [{ value: 'doc_field', label: '文档字段' }] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('文档字段')
+
+    pending[0].resolve({ options: [{ value: 'currency_code', label: '币种编码' }] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('文档字段')
+    expect(wrapper.text()).not.toContain('币种编码')
+  })
+
+  it('清空父值让在途请求失效（旧响应不回填）', async () => {
+    const pending = deferSource()
+    const wrapper = mountForm(SOURCE_SCHEMA)
+    await flushPromises()
+    await wrapper.find('#gf-field-def').setValue('CURRENCY')
+    expect(pending).toHaveLength(1)
+    await wrapper.find('#gf-field-def').setValue('')
+
+    pending[0].resolve({ options: [{ value: 'currency_code', label: '币种编码' }] })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('币种编码')
+  })
+})
