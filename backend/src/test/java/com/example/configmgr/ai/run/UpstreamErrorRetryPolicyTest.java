@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
@@ -18,6 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -418,6 +422,71 @@ class UpstreamErrorRetryPolicyTest {
 		assertThat(FrameContract.ofType(filtered, "done")).as("content_filter 不是完成").isEmpty();
 		assertThat(FrameContract.oneOfType(filtered, "error")).containsEntry("code", ErrorCodes.CONTENT_FILTERED);
 		assertThat(this.store.get(runId).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	// ── N2：上游错误正文的日志收敛（敏感隐去 + 单行限长）────────────────────
+
+	/**
+	 * <b>【N2 日志正文收敛】</b>上游错误 body 只经 {@code describeForLog} 一个点进日志：
+	 * 命中凭据（{@code ExcerptGuard.sensitive}）时整段隐去、只留字符数；普通长/多行 body
+	 * 折成单行并限长（约 1024 字符）—— 正文既不能泄露，也不能靠换行伪造日志行。
+	 *
+	 * <p>kill：把 {@code describeForLog} 的 body 分支改回 {@code getResponseBodyAsString()}
+	 * ⇒ 敏感原文出现在日志里、长 body 保留原始换行且不见截断标记，本用例变红。
+	 */
+	@Test
+	void upstreamErrorBodyIsRedactedAndFoldedIntoOneBoundedLogLine() {
+		this.properties.getResilience().setMaxAttempts(1);
+		Logger serviceLogger = (Logger) LoggerFactory.getLogger(ResilientChatService.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		serviceLogger.addAppender(appender);
+		try {
+			// ① 敏感 body：整段隐去（可保留字符数），正文任何片段都不落日志
+			String secret = "sk-xxxxxxxxxxxxxxxxxxxx";
+			String sensitiveBody = "{\"error\":{\"message\":\"Incorrect API key provided: " + secret + "\"}}";
+			when(this.chatModel.stream(any(Prompt.class)))
+				.thenReturn(Flux.error(httpBody(401, sensitiveBody)));
+
+			runTurn("run-upstream-log-sensitive", "s-upstream-log-sensitive");
+
+			String sensitiveLine = logLineFor(appender, "run-upstream-log-sensitive");
+			assertThat(sensitiveLine).as("HTTP 状态保留").contains("HTTP 401");
+			assertThat(sensitiveLine).as("命中凭据 ⇒ 整段隐去，原文不落日志")
+				.doesNotContain(secret)
+				.doesNotContain("Incorrect API key");
+			assertThat(sensitiveLine).as("隐去后保留字符数").contains("已隐去")
+				.contains(String.valueOf(sensitiveBody.length()));
+
+			// ② 普通长/多行 body：折成单行 + 限长，超出部分与尾部内容不进日志
+			StringBuilder longBody = new StringBuilder();
+			for (int i = 0; i < 80; i++) {
+				longBody.append("row-").append(i).append("-0123456789\n");
+			}
+			longBody.append("TAIL-MARKER");
+			when(this.chatModel.stream(any(Prompt.class)))
+				.thenReturn(Flux.error(httpBody(502, longBody.toString())));
+
+			runTurn("run-upstream-log-long", "s-upstream-log-long");
+
+			String longLine = logLineFor(appender, "run-upstream-log-long");
+			assertThat(longLine).as("HTTP 状态保留").contains("HTTP 502").contains("row-0-");
+			assertThat(longLine).as("body 折成单行（换行可伪造日志行）").doesNotContain("\n").doesNotContain("\r");
+			assertThat(longLine).as("超出上限的部分被截断且带标记").contains("截断").doesNotContain("TAIL-MARKER");
+			assertThat(longLine).as("整行有界（1024 正文 + 行首字段 + 截断标记）").hasSizeLessThan(1400);
+		}
+		finally {
+			serviceLogger.detachAppender(appender);
+		}
+	}
+
+	/** 取该轮进入日志的失败行（带 HTTP 诊断的唯一一条）。 */
+	private static String logLineFor(ListAppender<ILoggingEvent> appender, String runId) {
+		return appender.list.stream()
+			.map(ILoggingEvent::getFormattedMessage)
+			.filter(message -> message.contains("runId=" + runId) && message.contains("HTTP "))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("没有找到该轮的失败日志行 runId=" + runId));
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

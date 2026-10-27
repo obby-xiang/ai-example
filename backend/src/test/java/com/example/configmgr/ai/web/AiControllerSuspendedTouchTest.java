@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -19,6 +20,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.env.Environment;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -171,11 +173,14 @@ class AiControllerSuspendedTouchTest {
 	}
 
 	private AiController controller() {
-		return new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
+		AiController built = new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), mock(SessionGate.class), this.confirmGate, this.runStore,
 				this.runRegistry, mock(CancellationRegistry.class), mock(RedisAvailability.class),
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+		// N5：/confirm 的 reason 归一化复用与 /chat 同一个 InputSanitizer（字段注入，standalone 需手填）
+		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
+		return built;
 	}
 
 	@SuppressWarnings("unchecked")

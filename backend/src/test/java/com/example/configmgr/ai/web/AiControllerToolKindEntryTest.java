@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -31,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -291,10 +293,51 @@ class AiControllerToolKindEntryTest {
 		}
 	}
 
+	// ── reason 归一化 + 长度闸（N5） ────────────────────────────────────────
+
+	/**
+	 * N5：{@code reason} 必须先归一化，再按<b>归一后</b>的文本过 1024 长度闸；落进 pending 并回灌
+	 * 模型的也是归一后的那份。
+	 *
+	 * <p>前半段：原文 1028 个字符（1024 个全角 {@code Ａ} —— NFKC 后是等长的半角 {@code A} —— 外加
+	 * 零宽/控制填充）。量原文 ⇒ 400；量归一结果（恰好 1024）⇒ 必须受理，且交给确认门的只有
+	 * {@code A×1024}。后半段：归一后 1025 ⇒ 仍按归一后长度 400，且不再进闸门。
+	 */
+	@Test
+	void confirmReasonIsNormalizedBeforeTheLengthGate() throws Exception {
+		String normalized = "A".repeat(AiController.REASON_MAX_CHARS);
+		String raw = "Ａ".repeat(AiController.REASON_MAX_CHARS) + "\u200B\u200C\uFEFF\u0007";
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM, PendingToolCall.PENDING);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(RUN, CALL, true, normalized)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(confirmBody(true, raw)))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true));
+
+		verify(this.gate).submitDecision(RUN, CALL, true, normalized);
+
+		String tooLongRaw = "Ａ".repeat(AiController.REASON_MAX_CHARS + 1) + "\u200B";
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(confirmBody(true, tooLongRaw)))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.code").value("REASON_TOO_LONG"))
+			.andExpect(jsonPath("$.length").value(AiController.REASON_MAX_CHARS + 1))
+			.andExpect(jsonPath("$.limit").value(AiController.REASON_MAX_CHARS));
+
+		verify(this.gate, times(1)).submitDecision(anyString(), anyString(), anyBoolean(), any());
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private String confirmBody(boolean approved) throws Exception {
-		return this.objectMapper.writeValueAsString(new ConfirmRequest(RUN, CALL, approved, null));
+		return confirmBody(approved, null);
+	}
+
+	private String confirmBody(boolean approved, String reason) throws Exception {
+		return this.objectMapper.writeValueAsString(new ConfirmRequest(RUN, CALL, approved, reason));
 	}
 
 	private String frontendBody(String result, boolean cancelled) throws Exception {
@@ -329,12 +372,15 @@ class AiControllerToolKindEntryTest {
 	}
 
 	private AiController controller() {
-		return new AiController(mock(AiAvailability.class), provider(), provider(), provider(),
+		AiController built = new AiController(mock(AiAvailability.class), provider(), provider(), provider(),
 				mock(ChatMemory.class), mock(ChatMemoryRepository.class), mock(SessionGate.class), this.gate,
 				this.runStore, mock(RunRegistry.class), mock(CancellationRegistry.class),
 				mock(RedisAvailability.class), mock(ThreadPoolTaskExecutor.class), this.objectMapper,
 				new AiProperties(), mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+		// N5：/confirm 的 reason 归一化复用与 /chat 同一个 InputSanitizer（字段注入，standalone 需手填）
+		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
+		return built;
 	}
 
 	@SuppressWarnings("unchecked")

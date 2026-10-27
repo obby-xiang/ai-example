@@ -109,6 +109,14 @@ public final class FakeLeaseRedis {
 	/** 业务活动锚点的单键原子 max + 续期（R1-09 / I-3）。 */
 	static final String ACTIVITY_TOUCH_MARK = "ACTIVITY_TOUCH";
 
+	/** session→current 的单键 compare-and-write（MI1）：值仍匹配才 DEL / SET fallback。 */
+	static final String SESSION_CURRENT_CAS_DELETE_MARK = "SESSION_CURRENT_CAS_DELETE";
+
+	static final String SESSION_CURRENT_CAS_SET_MARK = "SESSION_CURRENT_CAS_SET";
+
+	/** session→current 的单键 compare-and-PEXPIRE（MI2）：值仍匹配才续期。 */
+	static final String SESSION_CURRENT_CAS_PEXPIRE_MARK = "SESSION_CURRENT_CAS_PEXPIRE";
+
 	/** STRING 键面（快照 JSON、租约现值、全局 epoch 计数）。 */
 	final Map<String, String> strings = new ConcurrentHashMap<>();
 
@@ -613,6 +621,17 @@ public final class FakeLeaseRedis {
 			return activityTouch(str(keys.get(0)), str(args.get(0)),
 					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
 		}
+		if (body.contains(SESSION_CURRENT_CAS_DELETE_MARK)) {
+			return sessionCurrentCasDelete(str(keys.get(0)), str(args.get(0)));
+		}
+		if (body.contains(SESSION_CURRENT_CAS_SET_MARK)) {
+			return sessionCurrentCasSet(str(keys.get(0)), str(args.get(0)), str(args.get(1)),
+					Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+		}
+		if (body.contains(SESSION_CURRENT_CAS_PEXPIRE_MARK)) {
+			return sessionCurrentCasPexpire(str(keys.get(0)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+		}
 		throw new UnsupportedOperationException("未建模的脚本：" + body);
 	}
 
@@ -853,6 +872,34 @@ public final class FakeLeaseRedis {
 		if (this.strings.containsKey(key)) {
 			touchTtl(key, ttl);
 		}
+		return 1L;
+	}
+
+	/** {@code -- SESSION_CURRENT_CAS_DELETE}：值 ≠ 期望 runId ⇒ 0；相等才 DEL。 */
+	private Long sessionCurrentCasDelete(String key, String expectedRunId) {
+		if (!expectedRunId.equals(this.strings.get(key))) {
+			return 0L;
+		}
+		this.strings.remove(key);
+		return 1L;
+	}
+
+	/** {@code -- SESSION_CURRENT_CAS_SET}：值 ≠ 期望 runId ⇒ 0；相等才 {@code SET ... PX}。 */
+	private Long sessionCurrentCasSet(String key, String expectedRunId, String value, Duration ttl) {
+		if (!expectedRunId.equals(this.strings.get(key))) {
+			return 0L;
+		}
+		this.strings.put(key, value);
+		touchTtl(key, ttl);
+		return 1L;
+	}
+
+	/** {@code -- SESSION_CURRENT_CAS_PEXPIRE}：值 ≠ 期望 runId ⇒ 0；相等才续期。 */
+	private Long sessionCurrentCasPexpire(String key, String expectedRunId, Duration ttl) {
+		if (!expectedRunId.equals(this.strings.get(key))) {
+			return 0L;
+		}
+		touchTtl(key, ttl);
 		return 1L;
 	}
 

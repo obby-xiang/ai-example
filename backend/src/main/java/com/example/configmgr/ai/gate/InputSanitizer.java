@@ -27,8 +27,9 @@ import java.text.Normalizer;
  * 归一 = 一个不动点：{@code sanitize(sanitize(x)) == sanitize(x)}。实现为此做了收敛循环
  * （剥字符可能让原本被隔开的基字符与组合符相邻，从而产生新的可组合序列，需要再归一一次）。
  *
- * <h2>作用域与 fail-closed 边界（复审 M3 登记，2026-10-21）</h2>
- * 本类<b>只处理 message 这一条自由文本</b>。{@code AiChatRequest.context} 的各字段
+ * <h2>作用域与 fail-closed 边界（复审 M3 登记，2026-10-21；N5 扩展，2026-10-27）</h2>
+ * 本类处理的是<b>自由文本</b>：{@code /chat} 的 {@code message} 与 {@code /confirm} 的 {@code reason}。
+ * {@code AiChatRequest.context} 的各字段
  * （{@code page} / {@code taskType} / {@code step} / {@code taskId} / {@code extra}）<b>不经过</b>本类 ——
  * 它们是结构化字段，正确的处理方式是"白名单 + 长度/字符集约束"（安全防护 §5.1 #5 系统提示字段白名单化，
  * 属批②），而不是文本归一。
@@ -40,8 +41,11 @@ import java.text.Normalizer;
  * 否则本类提供的"编码平整"会被 {@code context} 这条侧路绕过。
  *
  * <p>
- * 同理，{@code /confirm} 的 {@code reason} 与 {@code /frontend-tool-result} 的载荷目前也<b>没有</b>
- * 长度闸与归一化（复审 M4，留防护批②③）—— 本类的存在不代表全入口已受控。
+ * 入口覆盖现状：{@code /confirm} 的 {@code reason} 已在入口复用本类 —— 1024 长度闸本就在，
+ * 缺的只是归一化；N5 起<b>先归一化、再按归一后的文本量长度</b>，落进 pending 与回灌模型的
+ * 也是归一后的那份（空 / 纯不可见文本按 null 交给确认门，沿用其默认文案）。
+ * {@code /frontend-tool-result} 的载荷仍<b>没有</b>归一化（复审 M4，留防护批②③）——
+ * 本类的存在不代表全入口已受控。
  */
 @Component
 public class InputSanitizer {

@@ -631,10 +631,20 @@ public class AiController {
 				|| !StringUtils.hasText(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填"));
 		}
-		// 防护批③ B2-6：{@code reason} 长度闸（与 {@code ai_feedback.reason} 同尺 1024）。
-		// 它是人工路径（误伤面小），但<b>会原样回填模型</b> —— 不闸就等于给了一条无上限的注入通道。
-		if (request.reason() != null && request.reason().length() > REASON_MAX_CHARS) {
-			return json(HttpStatus.BAD_REQUEST, reasonTooLong(request.reason().length()));
+		// 防护批③ B2-6 / N5：{@code reason} 先归一化，再按<b>归一后</b>的文本过 1024 长度闸 ——
+		// 量的是真正落进 pending、并原样回填模型的那份，零宽填充不该把用户挡在门外，
+		// 也不该借归一化把超长正文塞进去。归一后为空（原文仅不可见/空白字符）⇒ 按 null 交给确认门，
+		// 沿用它的默认「用户在确认门中批准/拒绝」文案。
+		InputSanitizer.Result sanitizedReason = this.inputSanitizer.sanitize(request.reason());
+		if (sanitizedReason.changed()) {
+			// 只记长度差与剥离计数：原因原文可能含敏感数据，日志里不得出现
+			log.info("确认原因归一化生效 runId={} 长度 {}→{}（剥离格式字符 {} / 控制字符 {}）", request.runId(),
+					sanitizedReason.originalLength(), sanitizedReason.text().length(),
+					sanitizedReason.removedFormat(), sanitizedReason.removedControl());
+		}
+		String reason = StringUtils.hasText(sanitizedReason.text()) ? sanitizedReason.text() : null;
+		if (reason != null && reason.length() > REASON_MAX_CHARS) {
+			return json(HttpStatus.BAD_REQUEST, reasonTooLong(reason.length()));
 		}
 		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
@@ -657,7 +667,7 @@ public class AiController {
 		AiTrace.bind(request.runId(), null);
 		try {
 			submission = this.confirmGate.submitDecision(request.runId(), request.toolCallId(), approved,
-					request.reason());
+					reason);
 		}
 		finally {
 			AiTrace.clear();

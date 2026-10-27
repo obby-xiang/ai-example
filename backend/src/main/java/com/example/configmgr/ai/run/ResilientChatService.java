@@ -10,6 +10,7 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
+import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.history.AiChatHistoryRecorder;
@@ -3387,9 +3388,16 @@ public class ResilientChatService {
 			Map.entry(ErrorCodes.AI_RESUME_FAILED, "续跑失败，请重试。"),
 			Map.entry(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
 
+	/** 诊断正文（单行化后）的最大长度；超出部分丢弃并带截断标记。 */
+	private static final int LOG_BODY_MAX_CHARS = 1024;
+
 	/**
 	 * 原始诊断（<b>只进日志/台账</b>）：上游错误要留住原始响应体 —— reasoning 回填缺失等协议错误
 	 * 只有这里能看清（400 的 body 才是证据）。
+	 *
+	 * <p><b>N2 日志正文收敛</b>：body 只经 {@link #loggableBody(String)} 一个点落地，HTTP 状态
+	 * 始终保留；命中 {@link ExcerptGuard#sensitive(String)} 时整段隐去（只留字符数），否则折成
+	 * 单行并限长 {@value #LOG_BODY_MAX_CHARS} 字符。失败日志与重试日志共用本方法的产物。
 	 */
 	private String describeForLog(Throwable error) {
 		Throwable cause = error;
@@ -3398,7 +3406,7 @@ public class ResilientChatService {
 		}
 		if (cause instanceof WebClientResponseException upstream) {
 			return "上游返回 HTTP " + upstream.getStatusCode().value() + "："
-					+ upstream.getResponseBodyAsString();
+					+ loggableBody(upstream.getResponseBodyAsString());
 		}
 		if (error instanceof IllegalStateException && error.getMessage() != null
 				&& error.getMessage().startsWith("Timeout on blocking read")) {
@@ -3406,6 +3414,27 @@ public class ResilientChatService {
 					+ " 未完成（段级预算；双超时阈值待压测裁决）";
 		}
 		return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+	}
+
+	/**
+	 * 日志诊断正文的唯一收敛点（见 {@link #describeForLog}）：命中凭据整段隐去，否则单行 + 限长。
+	 *
+	 * <p>敏感判定在<b>折行/截断之前</b>对整段原文做 —— 先截断再判会让落在尾部的凭据漏网；
+	 * 隐去只保留字符数，正文一个片段都不留。
+	 */
+	private static String loggableBody(String body) {
+		if (body == null || body.isEmpty()) {
+			return "";
+		}
+		if (ExcerptGuard.sensitive(body)) {
+			return "[敏感正文已隐去，原长 " + body.length() + " 字符]";
+		}
+		String singleLine = body.replaceAll("\\R", " ");
+		if (singleLine.length() <= LOG_BODY_MAX_CHARS) {
+			return singleLine;
+		}
+		return singleLine.substring(0, LOG_BODY_MAX_CHARS)
+				+ "…(截断，原正文 " + body.length() + " 字符)";
 	}
 
 	/** 供诊断/日志：本类的韧性参数快照。 */

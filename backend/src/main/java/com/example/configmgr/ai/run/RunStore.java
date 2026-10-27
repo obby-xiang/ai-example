@@ -478,6 +478,71 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			""", Long.class);
 
 	/**
+	 * session→current 的<b>单键 compare-and-delete</b>（MI1）：{@code ai:session:current:<sessionId>}。
+	 *
+	 * <p>为什么必须是 Lua：Java 侧 {@code GET → 算回退 → DEL} 之间，同会话的新轮可能已经把
+	 * current 改成自己 —— 过期的 GET 会让终态轮把<b>别人的</b> current 删掉。单键脚本在 Redis 的
+	 * 串行执行语义下"读-比-删"一次完成：只有 current 仍等于本 runId 才删。
+	 *
+	 * <p><b>只碰 current 这一个键</b>：活跃 ZSET 不放进同一脚本（键不带同槽 tag，Cluster 下会
+	 * {@code CROSSSLOT}）；多实例强一致不在本修范围。
+	 *
+	 * @param KEYS[1] {@code ai:session:current:<sessionId>}
+	 * @param ARGV[1] 期望的 runId（本轮的 runId）
+	 * @return 1 = 已删；0 = current 已不是本 runId（不动作）
+	 */
+	private static final RedisScript<Long> SESSION_CURRENT_CAS_DELETE_SCRIPT = new DefaultRedisScript<>("""
+			-- SESSION_CURRENT_CAS_DELETE
+			if redis.call('GET', KEYS[1]) == ARGV[1] then
+			  return redis.call('DEL', KEYS[1])
+			end
+			return 0
+			""", Long.class);
+
+	/**
+	 * session→current 的<b>单键 compare-and-set</b>（MI1）：只有 current 仍等于本 runId 才回填
+	 * fallback，且 TTL 保持 {@code app.ai.session-ttl}（与会话/快照同寿）。
+	 *
+	 * <p>与 {@link #SESSION_CURRENT_CAS_DELETE_SCRIPT} 同因：{@code GET → 算回退 → SET} 的窗口里
+	 * current 可能已被新轮接管，无条件 SET 会把新轮的索引覆盖回旧轮。脚本同时承担 TTL 设置
+	 * （{@code SET ... PX}），不额外发一次 {@code EXPIRE}。
+	 *
+	 * @param KEYS[1] {@code ai:session:current:<sessionId>}
+	 * @param ARGV[1] 期望的 runId（本轮的 runId）
+	 * @param ARGV[2] fallback runId（回填值）
+	 * @param ARGV[3] TTL（毫秒，{@code app.ai.session-ttl}）
+	 * @return 1 = 已写；0 = current 已不是本 runId（不动作）
+	 */
+	private static final RedisScript<Long> SESSION_CURRENT_CAS_SET_SCRIPT = new DefaultRedisScript<>("""
+			-- SESSION_CURRENT_CAS_SET
+			if redis.call('GET', KEYS[1]) == ARGV[1] then
+			  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+			  return 1
+			end
+			return 0
+			""", Long.class);
+
+	/**
+	 * session→current 的<b>单键 compare-and-PEXPIRE</b>（MI2）：值仍匹配才续期，不匹配不动作。
+	 *
+	 * <p>为什么必须是 Lua：确认门等待循环的续期是 {@code GET → 比较 → EXPIRE}，读到旧值之后
+	 * current 可能已被同会话的新轮接管 —— 无条件 {@code EXPIRE} 会把<b>新轮的</b> TTL 续掉
+	 * （索引寿命被旧轮的心跳拖着走）。脚本把比较与续期合成一个原子步。
+	 *
+	 * @param KEYS[1] {@code ai:session:current:<sessionId>}
+	 * @param ARGV[1] 期望的 runId（本轮的 runId）
+	 * @param ARGV[2] TTL（毫秒，{@code app.ai.session-ttl}）
+	 * @return 1 = 已续期；0 = 值不匹配/键不存在（不动作）
+	 */
+	private static final RedisScript<Long> SESSION_CURRENT_CAS_PEXPIRE_SCRIPT = new DefaultRedisScript<>("""
+			-- SESSION_CURRENT_CAS_PEXPIRE
+			if redis.call('GET', KEYS[1]) == ARGV[1] then
+			  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+			end
+			return 0
+			""", Long.class);
+
+	/**
 	 * 认领结论的三态（B23L1 批③a / 裁决 9）。
 	 *
 	 * <p>为什么要区分后两者：{@code LOST} 的语义是"这个调用已经有主（他实例在执行）"，
@@ -1206,16 +1271,26 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
-	/** 续期：仅当值仍是自己这一轮的 runId 才 {@code EXPIRE}（同会话锁 watchdog 语义）。 */
+	/**
+	 * 续期：仅当值仍是自己这一轮的 runId 才续期（同会话锁 watchdog 语义）。
+	 *
+	 * <p><b>MI2</b>：比较与 {@code PEXPIRE} 落在同一条单键 Lua（{@link #SESSION_CURRENT_CAS_PEXPIRE_SCRIPT}）
+	 * —— 先前的 {@code GET → 比较 → EXPIRE} 在两者之间被同会话新轮换掉 current 时，会把<b>新轮</b>的
+	 * TTL 续掉。前面的 {@code GET} 只作快路径（值明显不是自己就不必发脚本），正确性由脚本内的
+	 * 比较兜底；TTL 仍是 {@code app.ai.session-ttl}，异常降级口径不变（debug 后返回）。
+	 */
 	public void renewSessionCurrent(String sessionId, String runId) {
 		if (sessionId == null || runId == null) {
 			return;
 		}
 		try {
-			String value = this.redis.opsForValue().get(sessionCurrentKey(sessionId));
-			if (runId.equals(value)) {
-				this.redis.expire(sessionCurrentKey(sessionId), sessionCurrentTtl());
+			String key = sessionCurrentKey(sessionId);
+			String value = this.redis.opsForValue().get(key);
+			if (!runId.equals(value)) {
+				return;
 			}
+			this.redis.execute(SESSION_CURRENT_CAS_PEXPIRE_SCRIPT, List.of(key), runId,
+					String.valueOf(sessionCurrentTtl().toMillis()));
 		}
 		catch (Exception ex) {
 			log.debug("续期 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
@@ -1229,6 +1304,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 索引不可用/为空（老会话）才一次性回退旧的 {@code SMEMBERS + 逐个快照} 口径，并把命中的
 	 * 活跃轮回填进新索引（"旧会话可一次性回退"）。语义不变：仍是"同会话仍活跃的最新 run"
 	 * （{@code updatedAtMs} 最大；同毫秒平手时 SUSPENDED 优先）。
+	 *
+	 * <p><b>MI1</b>：fast-path 与老会话回退的<b>最终写</b>统一走单键 Lua compare-and-write ——
+	 * 只有 current 仍等于本 runId 才删除（无 fallback）或 SET fallback；若已被同会话新轮换成别的
+	 * runId 则不写（前面那次 {@code GET} 只用于跳过昂贵的回退计算，不作为写入判据）。
+	 * 脚本只碰 current 单键（活跃 ZSET 不进同一 Lua：跨槽），SET 的 TTL 仍是
+	 * {@code app.ai.session-ttl}；CAS 失败时也不回填活跃索引。
 	 */
 	public void clearSessionCurrent(String sessionId, String runId) {
 		if (sessionId == null || runId == null) {
@@ -1246,10 +1327,10 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if (ordered != null) {
 				RunSnapshot fallback = newestActive(sessionId, ordered, runId);
 				if (fallback == null) {
-					this.redis.delete(key);
+					deleteSessionCurrentIfOwned(key, runId);
 				}
 				else {
-					this.redis.opsForValue().set(key, fallback.getRunId(), sessionCurrentTtl());
+					setSessionCurrentIfOwned(key, runId, fallback.getRunId());
 				}
 				return;
 			}
@@ -1278,17 +1359,40 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				}
 			}
 			if (fallback == null) {
-				this.redis.delete(key);
+				deleteSessionCurrentIfOwned(key, runId);
 			}
-			else {
-				this.redis.opsForValue().set(key, fallback.getRunId(), sessionCurrentTtl());
+			else if (setSessionCurrentIfOwned(key, runId, fallback.getRunId())) {
 				// 回填：下一次终态就能走单次确认的快路径（不再 SMEMBERS + N 份快照）。
+				// <b>只在回填真的写成功后才做</b>（MI1）：CAS 失败说明 current 已归新轮，
+				// 这时再把 fallback 塞进活跃索引就等于替一条已经不是 current 的轮记活跃。
 				markActiveRun(sessionId, fallback.getRunId(), fallback.getUpdatedAtMs());
 			}
 		}
 		catch (Exception ex) {
 			log.debug("清除 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 单键 CAS 删除 session→current（MI1）：current 仍等于 {@code expectedRunId} 才删。
+	 *
+	 * @return true = 本次确实删掉了；false = current 已换成他轮（不动作）
+	 */
+	private boolean deleteSessionCurrentIfOwned(String key, String expectedRunId) {
+		Long deleted = this.redis.execute(SESSION_CURRENT_CAS_DELETE_SCRIPT, List.of(key), expectedRunId);
+		return deleted != null && deleted > 0L;
+	}
+
+	/**
+	 * 单键 CAS 回填 session→current（MI1）：current 仍等于 {@code expectedRunId} 才写 fallback，
+	 * TTL 与会话同寿（脚本内 {@code SET ... PX}）。
+	 *
+	 * @return true = 本次确实写入；false = current 已换成他轮（不动作）
+	 */
+	private boolean setSessionCurrentIfOwned(String key, String expectedRunId, String fallbackRunId) {
+		Long written = this.redis.execute(SESSION_CURRENT_CAS_SET_SCRIPT, List.of(key), expectedRunId, fallbackRunId,
+				String.valueOf(sessionCurrentTtl().toMillis()));
+		return written != null && written > 0L;
 	}
 
 	/**

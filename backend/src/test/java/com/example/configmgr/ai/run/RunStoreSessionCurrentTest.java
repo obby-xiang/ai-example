@@ -8,18 +8,23 @@ import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -52,6 +57,17 @@ class RunStoreSessionCurrentTest {
 	/** 与 RunStore 同源注入的属性实例：TTL 期望值从这里实读，不硬编码默认值（红队 S3-7）。 */
 	private final AiProperties properties = new AiProperties();
 
+	/** {@code ai:session:current:<sid>} 的 TTL 续期次数（模板 {@code EXPIRE} 与 Lua {@code PEXPIRE} 同口径）。 */
+	private final Map<String, Integer> ttlTouches = new HashMap<>();
+
+	/**
+	 * 确定性交错注入点：<b>读到键值之后、返回之前</b>执行（参数 = 键）。
+	 *
+	 * <p>用例借此在"fallback 已算出 / 最终写之前"把 current 换成同会话的另一轮 —— 不需要 sleep。
+	 */
+	private Consumer<String> afterValueGet = key -> {
+	};
+
 	private final RunStore store = new RunStore(this.redis, new ObjectMapper(), this.properties);
 
 	RunStoreSessionCurrentTest() {
@@ -60,10 +76,21 @@ class RunStoreSessionCurrentTest {
 			this.strings.put(invocation.getArgument(0), invocation.getArgument(1));
 			return null;
 		}).when(this.valueOps).set(anyString(), anyString(), any(Duration.class));
-		when(this.valueOps.get(anyString())).thenAnswer(invocation -> this.strings.get(invocation.getArgument(0)));
+		when(this.valueOps.get(anyString())).thenAnswer(invocation -> {
+			String key = invocation.getArgument(0);
+			String value = this.strings.get(key);
+			this.afterValueGet.accept(key);
+			return value;
+		});
 		when(this.redis.delete(anyString()))
 			.thenAnswer(invocation -> this.strings.remove(invocation.getArgument(0)) != null);
-		when(this.redis.expire(anyString(), any(Duration.class))).thenReturn(Boolean.TRUE);
+		when(this.redis.expire(anyString(), any(Duration.class))).thenAnswer(invocation -> {
+			this.ttlTouches.merge(invocation.getArgument(0), 1, Integer::sum);
+			return Boolean.TRUE;
+		});
+		when(this.redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+			.thenAnswer(invocation -> handleSessionCurrentScript(invocation.getArgument(0), invocation.getArgument(1),
+					trailingArguments(invocation.getArguments())));
 		when(this.redis.opsForHash()).thenReturn(this.hashOps);
 		when(this.redis.opsForSet()).thenReturn(this.setOps);
 		doAnswer(invocation -> {
@@ -121,17 +148,135 @@ class RunStoreSessionCurrentTest {
 	@Test
 	void renewOnlyExtendsMatchingRunId() {
 		this.store.markSessionCurrent("s-1", "r-1");
+		String key = "ai:session:current:s-1";
+		int before = ttlTouchCount(key);
 
 		this.store.renewSessionCurrent("s-1", "r-2");
-		verify(this.redis, never()).expire(eq("ai:session:current:s-1"), any(Duration.class));
+		assertEquals(before, ttlTouchCount(key), "值不匹配时不得续期");
 
 		this.store.renewSessionCurrent("s-1", "r-1");
-		verify(this.redis).expire(eq("ai:session:current:s-1"), eq(expectedIndexTtl()));
+		assertEquals(before + 1, ttlTouchCount(key), "值匹配时续期一次（模板 EXPIRE 或单键 Lua PEXPIRE）");
+	}
+
+	/**
+	 * MI2（TOCTOU）：{@code GET} 之后 current 被换成同会话的另一轮 —— 旧代码仍按读到的旧值
+	 * {@code EXPIRE}（把别人的 TTL 续了），新代码的单键 Lua compare-and-PEXPIRE 发现值已不匹配即不动作。
+	 *
+	 * <p>竞态由 {@link #afterValueGet} 在"读到值之后、返回之前"确定性地注入，<b>不用 sleep</b>。
+	 */
+	@Test
+	void renewDoesNotExtendWhenCurrentChangesAfterGet() {
+		this.store.markSessionCurrent("s-renew", "r-1");
+		String key = this.store.sessionCurrentKey("s-renew");
+		int before = ttlTouchCount(key);
+		this.afterValueGet = readKey -> {
+			if (key.equals(readKey)) {
+				this.strings.put(key, "r-new");
+			}
+		};
+
+		this.store.renewSessionCurrent("s-renew", "r-1");
+
+		assertEquals(before, ttlTouchCount(key), "current 已被换成他轮：不得按旧值续期");
+		assertEquals("r-new", this.store.sessionCurrentRunId("s-renew"));
+	}
+
+	/**
+	 * MI1（TOCTOU）：current 在"fallback 已算出、最终写之前"被同会话的另一轮替换 ——
+	 * 旧实现按过期的读结果删键/覆盖，新实现的单键 Lua compare-and-write 看到 current 已不是本 runId
+	 * 就不写。一个方法覆盖两种最终写形态：无回退 ⇒ {@code DEL}、有回退 ⇒ {@code SET} fallback。
+	 */
+	@Test
+	void clearDoesNotWriteWhenCurrentChangesAfterFallbackChosen() {
+		// 形态①：无回退（唯一候选已终态）⇒ 旧实现删键
+		this.store.save(snapshot("r-old", "s-del", RunSnapshot.DONE));
+		this.store.markSessionCurrent("s-del", "r-1");
+		ZSetOperations<String, String> active = mock(ZSetOperations.class);
+		Set<ZSetOperations.TypedTuple<String>> delOrdered = new LinkedHashSet<>();
+		delOrdered.add(ZSetOperations.TypedTuple.of("r-old", 10d));
+		when(active.reverseRangeWithScores(this.store.sessionActiveKey("s-del"), 0, -1)).thenReturn(delOrdered);
+		when(this.redis.opsForZSet()).thenReturn(active);
+		String delKey = this.store.sessionCurrentKey("s-del");
+		this.afterValueGet = key -> {
+			if (this.store.runKey("r-old").equals(key)) {
+				this.strings.put(delKey, "r-new");
+			}
+		};
+
+		this.store.clearSessionCurrent("s-del", "r-1");
+
+		assertEquals("r-new", this.store.sessionCurrentRunId("s-del"),
+				"回退为空时只能删仍指向本 runId 的 current，不得删掉已换成他轮的 current");
+
+		// 形态②：有回退（候选仍 SUSPENDED）⇒ 旧实现把 current 覆盖成 fallback
+		this.store.save(snapshot("r-parked", "s-set", RunSnapshot.SUSPENDED));
+		this.store.markSessionCurrent("s-set", "r-1");
+		Set<ZSetOperations.TypedTuple<String>> setOrdered = new LinkedHashSet<>();
+		setOrdered.add(ZSetOperations.TypedTuple.of("r-parked", 10d));
+		when(active.reverseRangeWithScores(this.store.sessionActiveKey("s-set"), 0, -1)).thenReturn(setOrdered);
+		String setKey = this.store.sessionCurrentKey("s-set");
+		this.afterValueGet = key -> {
+			if (this.store.runKey("r-parked").equals(key)) {
+				this.strings.put(setKey, "r-new2");
+			}
+		};
+
+		this.store.clearSessionCurrent("s-set", "r-1");
+
+		assertEquals("r-new2", this.store.sessionCurrentRunId("s-set"),
+				"回退回填只能写仍指向本 runId 的 current，不得覆盖已换成他轮的 current");
 	}
 
 	/** 索引 TTL 的期望值：与实现同源实读（P2-3：app.ai.session-ttl），不用字面量锁死默认值。 */
 	private Duration expectedIndexTtl() {
 		return this.properties.getSessionTtl();
+	}
+
+	private int ttlTouchCount(String key) {
+		return this.ttlTouches.getOrDefault(key, 0);
+	}
+
+	/** 单键 session→current 脚本的语义替身（按脚本正文标记分派；未建模脚本回 null = 既有 fallback）。 */
+	private Object handleSessionCurrentScript(RedisScript<?> script, List<?> keys, List<Object> args) {
+		String body = script.getScriptAsString();
+		String key = String.valueOf(keys.get(0));
+		String expected = String.valueOf(args.get(0));
+		if (body.contains("SESSION_CURRENT_CAS_DELETE")) {
+			if (!expected.equals(this.strings.get(key))) {
+				return 0L;
+			}
+			this.strings.remove(key);
+			return 1L;
+		}
+		if (body.contains("SESSION_CURRENT_CAS_SET")) {
+			if (!expected.equals(this.strings.get(key))) {
+				return 0L;
+			}
+			this.strings.put(key, String.valueOf(args.get(1)));
+			return 1L;
+		}
+		if (body.contains("SESSION_CURRENT_CAS_PEXPIRE")) {
+			if (!expected.equals(this.strings.get(key))) {
+				return 0L;
+			}
+			this.ttlTouches.merge(key, 1, Integer::sum);
+			return 1L;
+		}
+		return null;
+	}
+
+	/** Mockito 的 varargs 可能展开成多个实参、也可能打包成数组；两种形态都摊平。 */
+	private static List<Object> trailingArguments(Object[] raw) {
+		List<Object> out = new ArrayList<>();
+		for (int i = 2; i < raw.length; i++) {
+			if (raw[i] instanceof Object[] packed) {
+				out.addAll(List.of(packed));
+			}
+			else {
+				out.add(raw[i]);
+			}
+		}
+		return out;
 	}
 
 	@Test
