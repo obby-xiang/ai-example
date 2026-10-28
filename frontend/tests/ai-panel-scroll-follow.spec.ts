@@ -105,6 +105,30 @@ function scrollContainer(wrapper: ReturnType<typeof mount>): HTMLElement {
   return wrapper.find('.overflow-y-auto').element as HTMLElement
 }
 
+/**
+ * 物理一致的滚动度量：浏览器把 `scrollTop` 夹在 `[0, scrollHeight − clientHeight]`，jsdom 不夹
+ * （赋什么存什么）。不夹的话，「钉底 = 写 scrollHeight」会造出 `scrollTop + clientHeight >
+ * scrollHeight`（离底距离为负）的非法态 —— 生产侧 `pinBottomTo` 的「已在底部就不重复写」去重
+ * 会据此判定无需滚动，用例就成了对浏览器里不存在的状态的断言。
+ */
+function mockScrollMetrics(
+  wrap: HTMLElement,
+  clientHeight: number,
+  contentHeight: () => number
+): void {
+  let top = 0
+  Object.defineProperty(wrap, 'clientHeight', { configurable: true, get: () => clientHeight })
+  Object.defineProperty(wrap, 'scrollHeight', { configurable: true, get: contentHeight })
+  Object.defineProperty(wrap, 'scrollTop', {
+    configurable: true,
+    get: () => top,
+    set: (value: number) => {
+      // 内容不足一屏 ⇒ 无可滚距离（0）；否则上限 = scrollHeight − clientHeight
+      top = Math.min(Math.max(0, value), Math.max(0, contentHeight() - clientHeight))
+    }
+  })
+}
+
 /** 每次 nextTick 都让出一帧（watch 的 `await nextTick()` 需要两跳才落到 DOM 补丁之后）。 */
 async function settleTicks(wrapper: ReturnType<typeof mount>, times = 3): Promise<void> {
   for (let i = 0; i < times; i += 1) {
@@ -147,24 +171,29 @@ describe('批 D · D2：滚动跟随（二次钉底 / RO 观测内容层 / 跟�
     await wrapper.vm.$nextTick()
     await flushPromises()
     const wrap = scrollContainer(wrapper)
-    Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
     // 高度是"内容的函数"（模拟真实布局）：DOM 补丁之后才变高 —— 这正是旧实现钉不到的地方
-    Object.defineProperty(wrap, 'scrollHeight', {
-      configurable: true,
-      get: () => 400 + (wrap.textContent ?? '').length * 4
-    })
+    mockScrollMetrics(wrap, 200, () => 400 + (wrap.textContent ?? '').length * 4)
+    /** 「贴在底部」= scrollTop 到可滚上限（浏览器口径），不是到 scrollHeight（那一档会被夹掉）。 */
+    const atBottom = (): boolean => wrap.scrollTop === wrap.scrollHeight - wrap.clientHeight
     wrap.scrollTop = wrap.scrollHeight
-    expect(wrap.scrollTop).toBe(wrap.scrollHeight)
+    expect(atBottom()).toBe(true)
     const heightBefore = wrap.scrollHeight
+    const topBefore = wrap.scrollTop
 
-    // 长段补发（指纹变化 = 末段文本长度变了）
+    // 长段补发（指纹变化 = 末段文本长度变了）。增量必须**大于一屏**：增量不足一屏时，
+    // 「钉到旧底（写旧 scrollHeight）」在钳制语义下会被夹到与新底同一个位置，
+    // 旧实现与新实现不可区分，用例就锁不住 D2①（这正是长段补发才炸的原因）。
     const part = store.messages[0]!.parts[0] as { kind: 'text'; text: string }
-    part.text += '\n- 第一步：选择配置项\n- 第二步：设置条件\n- 第三步：启动导出\n'
+    part.text +=
+      '\n- 第一步：选择配置项并确认字段映射\n- 第二步：设置筛选条件与去重口径\n' +
+      '- 第三步：核对导出格式、编码与表头\n- 第四步：启动导出并等待落盘回执\n'
     await settleTicks(wrapper)
 
     expect(wrap.textContent ?? '').toContain('启动导出')
     expect(wrap.scrollHeight).toBeGreaterThan(heightBefore)
-    expect(wrap.scrollTop).toBe(wrap.scrollHeight)
+    // 视图确实跟着长高的内容往下追了一段，且仍贴在底部
+    expect(wrap.scrollTop).toBeGreaterThan(topBefore)
+    expect(atBottom()).toBe(true)
     wrapper.unmount()
   })
 
