@@ -820,6 +820,9 @@ test.describe('@stub R 刷新恢复', () => {
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.locator('[data-testid="gf-fields"]')).toBeVisible({ timeout: 30_000 })
+    // AR-07 高级条件渐进披露（55e6078）：重建后同样是"前 6 张同屏 + 长尾折叠"，附件在折叠区 ⇒ 先展开。
+    const advanced = page.locator('[data-testid="gf-advanced-toggle"]')
+    if ((await advanced.count()) > 0) await advanced.click()
 
     // ① 标题与七型字段完整重建
     await expect(page.locator('[data-testid^="msg-bubble-"]').last()).toContainText('七型渲染基线')
@@ -830,6 +833,7 @@ test.describe('@stub R 刷新恢复', () => {
     await expect(page.locator('[data-testid^="msg-bubble-"]').last()).not.toContainText('剩余')
     // ③ 控件真可交互（真鼠标坐标勾选 boolean）
     const toggle = page.locator('#gf-field-f_boolean')
+    await toggle.scrollIntoViewIfNeeded()
     const box = await toggle.boundingBox()
     expect(box).not.toBeNull()
     await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2)

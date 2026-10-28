@@ -18,7 +18,8 @@ import {
   openPath,
   sendMessage,
   until,
-  waitRoundSettled
+  waitRoundSettled,
+  waitRoundSettledRejectingGates
 } from './support/helpers'
 import {
   API,
@@ -533,7 +534,9 @@ test.describe('@real G 生成式表单（真模型）', () => {
         const rejectBody = response.status() === 200 ? '' : (await response.text()).slice(0, 400)
         expect(response.status(), `#${index} 回灌（FRONTEND_RESULT）非 200：${rejectBody}`).toBe(200)
 
-        await waitRoundSettled(page, 120_000)
+        // 续跑里真模型可能发起需要确认的写操作（创建导出配置任务）⇒ 本轮停在挂起态等裁决；
+        // 本用例的判据只有"回灌 200 + 卡收掉 + 续跑有内容"，故把这些门逐个拒绝（零副作用）再等收敛。
+        await waitRoundSettledRejectingGates(page, 120_000)
         await expect(page.locator('[data-testid="gf-submit"]'), `#${index} 提交后表单仍可填`).toHaveCount(0)
         await expect(page.locator('[data-testid="gf-error"]'), `#${index} 卡级错误`).toHaveCount(0)
         // 续跑真的跑了：提交后助手气泡有内容（桩面「模型收到值 JSON」由 G-02/G-04 的落档断言承载）

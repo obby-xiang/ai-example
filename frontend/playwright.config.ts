@@ -22,6 +22,17 @@ const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_P
 const isCI = !!process.env.CI
 
 /**
+ * 思考帧展示（`app.ai.reasoning.display-enabled`）本棒显式打开。
+ *
+ * 后端自 2026-10-27 起默认 `display-enabled=false`（不发 `delta{kind:'reasoning'}`、`/history`
+ * 不透 `reasoningContent`），而主栈切片里的 S-15（真模型）/ S-15s（桩 reasoning 形态）验的正是
+ * 「显示打开」时的帧→段→块链路 —— 默认关着时 10-srp 会零思考帧必红（run 40675108348 实证）。
+ * 只在主栈这一棒打开（域专用 config 各有自己的后端参数）；外部已指定时尊重外部值。
+ * 注：`E2E_EXTRA_BACKEND_ARGS` 整棒生效，但只有 10-srp 断言 reasoning（其它 spec 不涉思考面）。
+ */
+process.env.E2E_EXTRA_BACKEND_ARGS ??= '--app.ai.reasoning.display-enabled=true'
+
+/**
  * 域专用 spec（各自有独立栈 / 桩 / 后端参数，主栈上必红或必 skip）：
  *   12 系 vl = 自带 189xx 栈（`playwright.vl.config.ts`）；13 系 nfezui = 191xx + 本域桩；
  *   14 系 mdxy = mdxy 桩 + KEK；15-mdo = 双 JVM 同 DB；16-kqc 系 = kqc 桩（b/c 还有专用后端参数）；

@@ -173,6 +173,46 @@ export async function waitRoundSettled(page: Page, timeout = 60_000): Promise<vo
   await expect(page.locator('[data-testid="stop-btn"]')).toHaveCount(0, { timeout })
 }
 
+/**
+ * 等本轮收敛，并顺路拒绝「需要人工裁决」的确认门。
+ *
+ * 真模型会在本轮里发起需要确认的写操作（如创建导出配置任务）：这类轮次**有意**停在挂起态
+ * 等用户裁决 —— 停止钮不会自己消失（run 40675108348 的 G01 / X07 即卡在这里：卡上有
+ * `hitl-gate`「待你确认」，输入框是「挂起等待中」）。本函数按出现顺序逐个点「拒绝」
+ * （不批准 ⇒ 零副作用），直到停止钮消失。
+ *
+ * 只用于"本轮结论不看确认门"的用例；要验门本身的用例仍用 {@link waitRoundSettled}。
+ * 拒绝次数设上限：模型连续重发同一写操作时如实失败，不无限重试。
+ */
+export async function waitRoundSettledRejectingGates(
+  page: Page,
+  timeout = 120_000,
+  maxGates = 5
+): Promise<void> {
+  const stopBtn = page.locator('[data-testid="stop-btn"]')
+  const deadline = Date.now() + timeout
+  let rejected = 0
+  while (Date.now() < deadline) {
+    if ((await stopBtn.count()) === 0) return
+    const reject = page
+      .locator('[data-testid="hitl-gate"]')
+      .last()
+      .getByRole('button', { name: '拒绝', exact: true })
+    if ((await reject.count()) > 0 && (await reject.isEnabled().catch(() => false))) {
+      if (rejected >= maxGates) {
+        throw new Error(`本轮已连续拒绝 ${rejected} 次确认门仍未收敛（疑似模型反复重发同一写操作）`)
+      }
+      await reject.click({ timeout: 10_000 })
+      rejected += 1
+      // 拒绝后这扇门即转只读态（`hitl-gate` 只在 pending 时渲染），等它离开再继续，避免连点同一张卡
+      await expect(reject).toBeHidden({ timeout: 15_000 }).catch(() => undefined)
+      continue
+    }
+    await new Promise((done) => setTimeout(done, 250))
+  }
+  throw new Error(`等本轮收敛超时（${timeout}ms，期间拒绝确认门 ${rejected} 次）`)
+}
+
 export async function sessionId(page: Page): Promise<string> {
   const id = await page.evaluate(() => sessionStorage.getItem('ai-session-id'))
   if (!id) throw new Error('sessionStorage 中没有 ai-session-id')

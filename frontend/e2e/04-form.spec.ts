@@ -10,6 +10,10 @@ async function openSevenTypeForm(page: import('@playwright/test').Page, tag: str
   await openApp(page)
   await sendMessage(page, `gf-seven-types 用例-${tag}`)
   await expect(page.locator('[data-testid="gf-fields"]')).toBeVisible({ timeout: 40_000 })
+  // AR-07 高级条件渐进披露（55e6078）：FILTER 卡前 6 张可选字段同屏，长尾（本表的 attachment）
+  // 默认折叠 ⇒ 先展开高级区，七型才同屏可断言（判据不变：七型仍是七个真实控件、无一型回落成纯文本）。
+  const advanced = page.locator('[data-testid="gf-advanced-toggle"]')
+  if ((await advanced.count()) > 0) await advanced.click()
 }
 
 test.describe('@stub G 生成式表单', () => {
@@ -40,6 +44,8 @@ test.describe('@stub G 生成式表单', () => {
     await openSevenTypeForm(page, 'G18')
 
     const toggle = page.locator('#gf-field-f_boolean')
+    // 展开高级区后表单内层滚动容器可能停在长尾字段处 ⇒ 先滚到 boolean 再取坐标（判据不变：仍是真实鼠标点按）
+    await toggle.scrollIntoViewIfNeeded()
     const box = await toggle.boundingBox()
     expect(box).not.toBeNull()
     // 真实鼠标坐标点击（jsdom 的 element.click() 结构上做不到；G-18 的历史根因就在这里）
