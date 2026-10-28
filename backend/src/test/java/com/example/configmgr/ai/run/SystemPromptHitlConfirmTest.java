@@ -247,6 +247,33 @@ class SystemPromptHitlConfirmTest {
 			.contains("查询条件始终可选，不强制要求填写");
 	}
 
+	/**
+	 * 2026-10-28 步骤披露收口：前端 {@code set_condition} 的 {@code allowSteps} 只有
+	 * {@code QUERY_COND}，而后端披露面同源收窄一样。提示词必须堵住两条"抢跑"：
+	 * <ul>
+	 * <li><b>用户已提出筛选条件也要先推进</b>：只要当前是 SELECT_DEFS，{@code select_definitions}
+	 * 后仍必须先 {@code confirm_step}（不传 step）到 QUERY_COND，<b>下一批</b>才 {@code set_condition}；</li>
+	 * <li><b>生成式表单不推进步骤</b>：表单只收集值，"用户无需手动跳步"不等于 AI 可以跳过
+	 * {@code confirm_step}。</li>
+	 * </ul>
+	 */
+	@Test
+	void systemPromptForbidsSetConditionAtSelectDefsEvenWhenFilterAlreadyKnown() {
+		String systemText = runTurnAndCaptureSystemText();
+
+		assertThat(systemText).as("SELECT_DEFS 下即使已有筛选条件也先 confirm_step，下一批才 set_condition")
+			.contains("即使已经提出筛选条件")
+			.contains("只要当前还在 SELECT_DEFS")
+			.contains("下一批再调用 set_condition")
+			.contains("前端只允许在 QUERY_COND 调");
+		assertThat(systemText).as("generative_form 只收集值、不推进步骤，提交后仍需 confirm_step")
+			.contains("generative_form 只收集值、不推进步骤")
+			.contains("不等于可以跳过 confirm_step");
+		assertThat(systemText).as("旧口径（拿到表单值后直接启动作业/直接设条件）必须删除")
+			.doesNotContain("收到值后可继续走")
+			.doesNotContain("收集后直接启动作业");
+	}
+
 	@Test
 	void textQuestionsRemainOnlyForOpenEndedInformation() {
 		String systemText = runTurnAndCaptureSystemText();

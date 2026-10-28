@@ -349,7 +349,7 @@ class SpToolCallingManagerCreateExportChainTest {
         }
 
         @Tool(name = "select_definitions", description = "勾选配置项")
-        @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+        @ToolScope({ "task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD" })
         @ToolRisk(ToolMeta.RiskLevel.WRITE)
         @ToolCategory(ToolMeta.Category.U)
         @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -359,7 +359,7 @@ class SpToolCallingManagerCreateExportChainTest {
         }
 
         @Tool(name = "confirm_step", description = "确认并推进向导步骤")
-        @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+        @ToolScope({ "task:EXPORT", "task:IMPORT" })
         @ToolRisk(ToolMeta.RiskLevel.WRITE)
         @ToolCategory(ToolMeta.Category.U)
         @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -368,7 +368,7 @@ class SpToolCallingManagerCreateExportChainTest {
         }
 
         @Tool(name = "set_condition", description = "设置查询条件")
-        @ToolScope({ "page:tasks", "task:EXPORT" })
+        @ToolScope({ "task:EXPORT/QUERY_COND" })
         @ToolRisk(ToolMeta.RiskLevel.WRITE)
         @ToolCategory(ToolMeta.Category.U)
         @ToolChannel(ToolMeta.Channel.FRONTEND)

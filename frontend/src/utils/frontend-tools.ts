@@ -1336,6 +1336,26 @@ function missingArgsHint(name: string, table: Readonly<Record<string, string>>):
   return table[name] ?? '缺少必要字段，请核对工具参数后重试'
 }
 
+/**
+ * 步骤不符时的**动作专属**下一步指引（2026-10-28 步骤披露与筛选链路收口）。
+ *
+ * 通用文案只写「请先推进到可用步骤」—— 模型拿到它不知道"推进"用哪个工具、推到哪一步，
+ * 往往重试同一调用或猜 `confirm_step(step=...)`。`set_condition` 的步骤面只有 `QUERY_COND`
+ * （与后端 `@ToolScope("task:EXPORT/QUERY_COND")` 同源），错步多发生在 `SELECT_DEFS` 批里抢跑，
+ * 故只给这一个动作点名工具与目标步骤。**其它动作沿用通用文案，一字不动**（不泛化）。
+ *
+ * 注意：这条指引只解释"该先做什么"，**不是**自动跨步 —— 守卫命中时仍直接拒绝，
+ * `set_condition` 绝不自己调 `confirm_step`，也不自己改工作区步骤。
+ */
+const WORKSPACE_ACTION_STEP_HINT: Readonly<Record<string, string>> = {
+  set_condition: '请先调用 confirm_step 推进到 QUERY_COND（不传 step，只前进一步），下一批再调用 set_condition。'
+}
+
+/** 步骤不符提示：登记过的动作给专属指引，其余保持既有通用文案。 */
+function stepMismatchHint(name: string): string {
+  return WORKSPACE_ACTION_STEP_HINT[name] ?? '请先推进到可用步骤。'
+}
+
 /** 动作执行：可用性（unavailable）→ 页面 handler（available）→ 契约层（available/degraded）。 */
 async function runWorkspaceAction(
   action: WorkspaceAction,
@@ -1360,7 +1380,7 @@ async function runWorkspaceAction(
     return makeExecution({
       outcome: 'failed',
       availability: 'unavailable',
-      result: `当前步骤为${context.step ?? '未进入向导'}，${action.displayName}只支持：${action.allowSteps.join('、')}。请先推进到可用步骤。`
+      result: `当前步骤为${context.step ?? '未进入向导'}，${action.displayName}只支持：${action.allowSteps.join('、')}。${stepMismatchHint(action.name)}`
     })
   }
   if (action.needsTask && context.taskId === null) {

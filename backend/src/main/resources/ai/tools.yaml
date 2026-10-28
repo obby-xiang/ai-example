@@ -11,7 +11,10 @@
 #
 # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故将来改描述
 # 必须发新 version 并留痕，禁止"保存即生效"式编辑。
-version: 2026-10-27.2
+# 2026-10-27.2 → 2026-10-27.3（2026-10-28 步骤披露与筛选链路收口）：向导动作按**能成功的步骤**披露，
+# set_condition 只能在 QUERY_COND 调、SELECT_DEFS 下必须先 confirm_step 推进；描述与注解 @ToolScope
+# 同批改（披露面与前端 allowSteps 同源），改描述必升 version（破 prompt 缓存）。
+version: 2026-10-27.3
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -66,7 +69,8 @@ tools:
   - toolKey: select_definitions
     title: 选择配置项
     description: >-
-      在工作区勾选配置项（前端执行，勾选即落任务项）。前置：已打开对应导出/导入向导并绑定 taskId。
+      在工作区勾选配置项（前端执行，勾选即落任务项）。前置：已打开对应导出/导入向导并绑定 taskId，
+      且当前在「选择配置」步（导出 SELECT_DEFS / 导入 UPLOAD）—— 只在它被披露的步骤调用。
       选择项优先用本工具，不要用开放式文字询问。
   - toolKey: set_condition
     title: 设置查询条件
@@ -74,13 +78,17 @@ tools:
       设置导出查询条件（前端执行，立即落库）。前置：EXPORT 任务且当前在 QUERY_COND 步骤；
       条件必须是结构化对象（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数。
       只有用户明确提出筛选/查询条件时才调用；用户没提就不要设置条件（不设条件即全量）。
+      本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）
+      推进到 QUERY_COND，下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。
   - toolKey: confirm_step
     title: 确认步骤
     description: >-
       确认并推进向导步骤（前端执行）。默认不传 step，只前进一步；step 仅在用户点名目标步骤或
       明确要求跳过筛选时才传，不要擅自跳步。前置：当前步骤校验通过。推进成功后不要结束本轮，
       下一批按最新披露继续（不要在同一批里连续推进）；推进失败即停，如实说明原因与当前步骤，
-      不要重试推进或跳步。
+      不要重试推进或跳步。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；
+      导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。
+      用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。
   - toolKey: generative_form
     title: 生成式表单
     # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在
@@ -93,6 +101,8 @@ tools:
       optionsFrom.sourceId（后端注册数据源，闭集两个：definition_fields = 父值(配置定义编码) → 该定义的字段；
       definitions = 父值(层级 GLOBAL/REGION/PROJECT) → 该层级的配置定义，即「层级→定义」用法）。
       optionsFrom / defaultFrom 的 dependsOn 必填（没有父字段就没有级联），URL/脚本等自定义数据源一律被拒。
+      表单只收集值、不推进步骤：提交后向导仍停在原步骤，"用户无需手动跳步"不等于可以跳过 confirm_step
+      （如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition；不要拿到值后直接启动作业）。
       工具结果是统一信封 JSON（outcome/code/retryable/target/message）：用户提交后，字段 key→值的 JSON 原文
       在 message 字段里（读取它，不要把整个信封当表单数据）；用户关闭表单则 outcome=cancelled、无数据；
       schema 不合规则 outcome=rejected 且表单未下发。

@@ -192,9 +192,10 @@ class ModelLoopHopToolDisclosureTest {
         // 第二跳：官方循环自己发出的上游请求 —— tools 数组必须按刷新后的快照重算
         assertThat(toolNames(requests.get(1)))
             .as("第二跳上游请求的 tools 必须已换成新披露面（不是只调了 resolveToolDefinitions）")
-            .contains("navigate_to", "select_definitions", "confirm_step", "set_condition", "check_job_status")
-            // 步骤仍是 SELECT_DEFS：EXPORT 专属工具不提前出现（正控：按上下文算，不是"总是全带上"）
-            .doesNotContain("start_export");
+            .contains("navigate_to", "select_definitions", "confirm_step", "check_job_status")
+            // 步骤仍是 SELECT_DEFS：QUERY_COND 才用的 set_condition 与 EXPORT 专属的 start_export
+            // 都不提前出现（正控：按上下文算，不是"总是全带上"；2026-10-28 步骤披露收口）
+            .doesNotContain("set_condition", "start_export");
 
         // 第二跳确实带着第一跳的工具结果：证明这是官方循环的工具后续跳，而不是另起一次请求
         assertThat(requests.get(1).messages())

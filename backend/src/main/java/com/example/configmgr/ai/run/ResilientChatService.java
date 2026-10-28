@@ -258,6 +258,12 @@ public class ResilientChatService {
 			    且不传 step，只前进一步。只有用户主动提出筛选需求时才用 set_condition 设置条件；用户没提出
 			    就不要展开询问条件。不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
 			    step 仅在用户点名目标步骤或明确要求跳过筛选时传；查询条件始终可选，不强制要求填写。
+			    步骤顺序不可跳过：即使已经提出筛选条件，只要当前还在 SELECT_DEFS，select_definitions
+			    之后也必须先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用 set_condition；
+			    不要在 SELECT_DEFS 这一批里直接调 set_condition（前端只允许在 QUERY_COND 调，会以步骤不符拒绝）。
+			    generative_form 只收集值、不推进步骤：用户提交表单不改变权威步骤，
+			    "用户无需手动跳步"不等于可以跳过 confirm_step；提交后仍按当前步骤的披露面继续，
+			    下一批再按上面的顺序走（该先推进就先推进），不要在拿到表单值后直接设置条件或启动作业。
 			""";
 
 	/**

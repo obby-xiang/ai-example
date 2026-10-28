@@ -289,6 +289,37 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.2", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.3", shipped.version(), "改描述必须发新 version");
+    }
+
+    /**
+     * 2026-10-28 步骤披露收口：{@code set_condition} 的模型侧描述必须点明它只能在
+     * {@code QUERY_COND} 步骤调用，并且当前在 SELECT_DEFS 时要先 {@code confirm_step}
+     * （不传 step）推进 —— 旧描述只写"前置：EXPORT 任务且当前在 QUERY_COND 步骤"，
+     * 模型在 SELECT_DEFS 被前端拒绝后无从知道下一步该做什么。
+     *
+     * <p>同时锁住 {@code confirm_step} 的步骤枚举：导出 SELECT_DEFS/QUERY_COND/EXPORT；
+     * 导入 UPLOAD/PRECHECK/IMPORT/PUBLISH（**导入没有 SELECT_DEFS 步**）。
+     */
+    @Test
+    void shippedSetConditionOverridePinsQueryCondStepAndConfirmStepGuidance() {
+        YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
+        ToolDefinitionOverride setCondition = shipped.load().find("set_condition");
+        assertNotNull(setCondition);
+        assertTrue(setCondition.hasDescription(), "set_condition 必须保留描述覆盖（否则回落注解）");
+        String description = setCondition.description();
+        assertTrue(description.contains("QUERY_COND"), description);
+        assertTrue(description.contains("先 confirm_step"), description);
+        assertTrue(description.contains("推进到 QUERY_COND"), description);
+        assertTrue(description.contains("下一批"), description);
+        assertTrue(description.contains("SELECT_DEFS"), description);
+
+        ToolDefinitionOverride confirmStep = shipped.load().find("confirm_step");
+        assertNotNull(confirmStep);
+        String stepEnumeration = confirmStep.description();
+        assertTrue(stepEnumeration.contains("SELECT_DEFS/QUERY_COND/EXPORT"), stepEnumeration);
+        assertTrue(stepEnumeration.contains("UPLOAD/PRECHECK/IMPORT/PUBLISH"), stepEnumeration);
+        assertTrue(!stepEnumeration.contains("导入向导 SELECT_DEFS"),
+                "导入向导没有 SELECT_DEFS 步，旧枚举必须删除：" + stepEnumeration);
     }
 }

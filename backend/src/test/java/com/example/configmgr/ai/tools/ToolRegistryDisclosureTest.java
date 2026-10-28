@@ -29,7 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 按事实标 {@code WRITE}，{@code navigate_to} 保持 {@code READ}（只改路由/任务绑定，可逆且无持久写）；
  * <b>不得</b>升级成 DANGER —— FRONTEND 通道优先，且这些动作的后果由下游 {@code start_*} 确认门兜底，
  * 多一道确认卡只会变成无意义弹窗（用户 2026-10-25 裁决）；</li>
- * <li><b>披露边界</b>：向导动作在任务中心与对应任务类型下披露，非向导页面（配置定义/数据浏览）
+ * <li><b>披露边界</b>：向导动作按<b>能成功的步骤</b>披露（2026-10-28 步骤披露收口：任务中心只披露
+ * 入口动作，{@code select_definitions}/{@code set_condition}/{@code confirm_step} 按步骤收窄到
+ * SELECT_DEFS-UPLOAD / QUERY_COND / 整个任务），非向导页面（配置定义/数据浏览）
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
  * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
  * （{@code start_export}/{@code start_precheck} 增加 {@code page:tasks}）；</li>
@@ -46,10 +48,6 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.url=jdbc:h2:mem:s44d-tool-disclosure;DB_CLOSE_DELAY=-1"
 })
 class ToolRegistryDisclosureTest {
-
-    /** 本棒新增的 4 个工作区动作。 */
-    private static final List<String> WIZARD_TOOLS = List.of("navigate_to", "select_definitions", "set_condition",
-            "confirm_step");
 
     /**
      * 受页面/任务类型约束的 3 个向导动作（{@code navigate_to} 是任意页面的导航入口，
@@ -265,10 +263,20 @@ class ToolRegistryDisclosureTest {
         assertThat(aiTools.undoLastSheetEdit("CURRENCY")).isEqualTo(AiTools.FRONTEND_STUB);
     }
 
+    /**
+     * 任务中心（向导入口页）只披露<b>入口动作</b>：{@code navigate_to}（任意页面进向导）与
+     * {@code create_task}（没有任务时建任务）。
+     *
+     * <p>【2026-10-28 步骤披露收口】三个步骤级向导动作在任务中心<b>不再</b>披露：任务中心没有
+     * 「当前步骤」这个事实，按任务类型宽披露正是「模型在 SELECT_DEFS 直接调 {@code set_condition}
+     * 被前端拒绝」的入口（模型看得见就敢调）。改按步骤披露后，模型必须先
+     * {@code navigate_to} 进向导、再按披露面逐步走（见 {@link #wizardToolDisclosureIsStepScoped}）。
+     */
     @Test
-    void wizardToolsAreDisclosedAtTaskCenter() {
+    void taskCenterDisclosesEntryActionsButNotStepScopedWizardActions() {
         List<String> names = namesFor(AiContext.of("tasks", null, null, null, null));
-        assertThat(names).containsAll(WIZARD_TOOLS);
+        assertThat(names).contains("navigate_to", "create_task");
+        assertThat(names).doesNotContain("select_definitions", "set_condition", "confirm_step");
     }
 
     @Test
@@ -292,17 +300,44 @@ class ToolRegistryDisclosureTest {
         }
     }
 
+    /**
+     * 【2026-10-28 步骤披露收口】三个向导写动作按<b>能成功的步骤</b>披露，与前端动作表
+     * {@code allowSteps} 同源（{@code frontend/src/utils/frontend-tools.ts}）：
+     * <ul>
+     * <li>{@code select_definitions}：EXPORT/{@code SELECT_DEFS} 与 IMPORT/{@code UPLOAD}
+     * （前端 {@code allowSteps: ['SELECT_DEFS','UPLOAD']}）；</li>
+     * <li>{@code set_condition}：只 EXPORT/{@code QUERY_COND}（前端 {@code allowSteps: ['QUERY_COND']}）；</li>
+     * <li>{@code confirm_step}：整个任务内（{@code task:EXPORT} / {@code task:IMPORT}），它本身就是推进步骤的手段。</li>
+     * </ul>
+     * 旧口径「按任务类型宽披露」（EXPORT 三步都披露 set_condition）==> 模型在 {@code SELECT_DEFS}
+     * 直接调 {@code set_condition}，前端 {@code allowSteps} 守卫拒绝并回填「步骤不符」。
+     */
     @Test
-    void wizardToolsFollowTaskTypeAcrossSteps() {
-        // 导出任务：整个向导内都在披露集（一轮内可跨步骤驱动）
-        for (String step : List.of("SELECT_DEFS", "QUERY_COND", "EXPORT")) {
-            List<String> names = namesFor(AiContext.of("export", "EXPORT", step, 1L, Map.of()));
-            assertThat(names).as("EXPORT/%s 披露集", step).containsAll(WIZARD_TOOLS);
+    void wizardToolDisclosureIsStepScoped() {
+        List<String> atSelectDefs = namesFor(AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of()));
+        assertThat(atSelectDefs).as("EXPORT/SELECT_DEFS：选配置与推进可见，条件工具不可见")
+                .contains("navigate_to", "select_definitions", "confirm_step")
+                .doesNotContain("set_condition");
+
+        List<String> atQueryCond = namesFor(AiContext.of("export", "EXPORT", "QUERY_COND", 1L, Map.of()));
+        assertThat(atQueryCond).as("EXPORT/QUERY_COND：条件工具正向披露（选配置已过步）")
+                .contains("navigate_to", "set_condition", "confirm_step")
+                .doesNotContain("select_definitions");
+
+        List<String> atExport = namesFor(AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of()));
+        assertThat(atExport).as("EXPORT/EXPORT：只剩推进与作业入口")
+                .contains("navigate_to", "confirm_step", "start_export")
+                .doesNotContain("select_definitions", "set_condition");
+
+        // 导入：第 1 步（UPLOAD）选配置；条件步骤不适用（前端动作表也不允许）
+        List<String> atUpload = namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()));
+        assertThat(atUpload).contains("navigate_to", "select_definitions", "confirm_step")
+                .doesNotContain("set_condition");
+        for (String step : List.of("PRECHECK", "IMPORT", "PUBLISH")) {
+            assertThat(namesFor(AiContext.of("import", "IMPORT", step, 1L, Map.of()))).as("IMPORT/%s", step)
+                    .contains("navigate_to", "confirm_step")
+                    .doesNotContain("select_definitions", "set_condition");
         }
-        // 导入任务：条件步骤不适用（前端动作表也不允许），故不披露 set_condition
-        List<String> importNames = namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()));
-        assertThat(importNames).contains("navigate_to", "select_definitions", "confirm_step");
-        assertThat(importNames).doesNotContain("set_condition");
     }
 
     @Test

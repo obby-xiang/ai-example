@@ -65,13 +65,16 @@ import java.util.stream.Collectors;
  * {@code codes/mode}、{@code defCode/conditions}、{@code step}）—— 后端只负责披露，
  * 下发与执行沿用既有 {@code frontend_tool_request} 通道，前端零改动。
  *
- * <p>披露口径（三重防线之一，见 {@code ToolScope}）：向导动作在<b>任务中心</b>（向导入口页）与
- * <b>对应任务类型</b>下披露，{@code definitions/data} 等非向导页面不披露；<b>同一批</b>模型发起的
- * 多次调用共享同一份披露集（scope 判据在批首冻结，一批工具不允许自我扩权），因此按"任务类型"
- * 而非"单一步骤"披露 —— 步骤级/页面级适配由前端动作表的 {@code allowPages}/{@code allowSteps}
- * 兜底校验（防线三）。批与批之间则按真实结果刷新：{@code navigate_to}/{@code create_task}/
- * {@code confirm_step} 成功结算后运行上下文（页面/任务/权威步骤）写入本轮快照，下一跳由
- * {@code ToolRegistry#forContext} 重算披露面。
+ * <p>披露口径（三重防线之一，见 {@code ToolScope}）：{@code definitions/data} 等非向导页面不披露
+ * 向导动作；<b>同一批</b>模型发起的多次调用共享同一份披露集（scope 判据在批首冻结，
+ * 一批工具不允许自我扩权）。<b>2026-10-28 步骤披露收口</b>：三个步骤级向导动作按<b>它能成功的步骤</b>
+ * 披露（与前端动作表的 {@code allowSteps} 同源）—— {@code select_definitions} 只在
+ * {@code task:EXPORT/SELECT_DEFS} 与 {@code task:IMPORT/UPLOAD}，{@code set_condition} 只在
+ * {@code task:EXPORT/QUERY_COND}，{@code confirm_step} 在 {@code task:EXPORT}/{@code task:IMPORT}
+ * 全任务内（它本身就是推进步骤的手段）。旧口径"按任务类型宽披露"会让模型在 {@code SELECT_DEFS}
+ * 直接调 {@code set_condition}，被前端 {@code allowSteps} 守卫拒绝。批与批之间按真实结果刷新：
+ * {@code navigate_to}/{@code create_task}/{@code confirm_step} 成功结算后运行上下文
+ * （页面/任务/权威步骤）写入本轮快照，下一跳由 {@code ToolRegistry#forContext} 重算披露面。
  *
  * <p><b>S4.4e 裁决③</b>：{@code set_condition} 的 {@code conditions} 入参改为与前端契约
  * （{@code frontend/src/types/condition.ts} 的 {@code FieldQueryCondition}）逐字段一致的
@@ -499,8 +502,8 @@ public class AiTools {
      * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
-    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导）")
-    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）")
+    @ToolScope({ "task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -528,6 +531,13 @@ public class AiTools {
      * 的配置项有效 —— 未选中时表单里没有该卡片（页面 handler 只写表单模型），
      * 而落库（{@code conditionJson}）发生在向导推进步骤时（前端 {@code persistStepData}）。
      *
+     * <p><b>步骤约束（2026-10-28 步骤披露收口）</b>：本工具的披露面只有
+     * {@code task:EXPORT/QUERY_COND}，前端动作表同样只允许 {@code allowSteps: ['QUERY_COND']}。
+     * 因此在 {@code SELECT_DEFS} 步直接调用会被前端<b>拒绝</b>（步骤不符）—— 正确链路是
+     * {@code select_definitions} → {@code confirm_step}（不传 step）到 {@code QUERY_COND} →
+     * <b>下一批</b>再 {@code set_condition}。"一批只做一步"照旧成立；本工具不自动跨步、也不自动
+     * {@code confirm_step}（守卫与披露同源，缺一不可）。
+     *
      * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：导出向导的
      * {@code export.setConditions} handler 会立即 {@code PUT} 落库，{@code conditionJson} 是导出作业的
      * 唯一条件来源 —— 它改变的是"后续动作的工作选择"，不能再用 {@code READ}（"no side effects"）的语义。
@@ -542,8 +552,9 @@ public class AiTools {
      */
     @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
             + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
-            + "只有用户明确提出筛选/查询条件时才调用）")
-    @ToolScope({ "page:tasks", "task:EXPORT" })
+            + "只有用户明确提出筛选/查询条件时才调用）。本工具只能在 QUERY_COND 步骤调用："
+            + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
+    @ToolScope({ "task:EXPORT/QUERY_COND" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -592,12 +603,12 @@ public class AiTools {
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
             + "推进成功后下一批按最新披露继续，推进失败即停")
-    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @ToolScope({ "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String confirmStep(
-            @ToolParam(description = "目标步骤（可选）：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；导入向导 SELECT_DEFS/UPLOAD/PRECHECK/IMPORT/PUBLISH。不传则推进到下一步", required = false) String step) {
+            @ToolParam(description = "目标步骤（可选）：导出向导只能 SELECT_DEFS/QUERY_COND/EXPORT；导入向导只能 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。不传则推进到下一步", required = false) String step) {
         return FRONTEND_STUB;
     }
 
@@ -608,8 +619,11 @@ public class AiTools {
      *
      * <h2>两个场景（DC-15 明文）</h2>
      * <ul>
-     * <li>{@code scenario=FILTER} —— <b>筛选条件填写</b>：用户不必跳到导出向导的「查询条件」步，
-     * 在对话里就能填（AI 收到值后可继续走 {@code set_condition} 或直接启动作业）；</li>
+     * <li>{@code scenario=FILTER} —— <b>筛选条件填写</b>：用户不必为了填值而手动跳到导出向导的
+     * 「查询条件」步，在对话里就能填。<b>表单只收集值、不推进步骤</b>（提交后向导仍在原步骤，
+     * 权威步骤只由前端「下一步」/ {@code confirm_step} 改变）——"用户无需手动跳步"不等于
+     * AI 可以跳过 {@code confirm_step}：拿到值后仍按当前披露面继续，例如当前是 {@code SELECT_DEFS}
+     * 时，下一批要先 {@code confirm_step} 到 {@code QUERY_COND} 才能 {@code set_condition}；</li>
      * <li>{@code scenario=CLARIFY} —— <b>询问澄清</b>：信息不足时给用户一张结构化选择/表单，
      * 避免自由文本往返（对应 DC-15 的"模型向用户提问时给出结构化选择/表单"）。</li>
      * </ul>
@@ -654,7 +668,9 @@ public class AiTools {
             + "或在信息不足时向用户澄清）；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
             + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
-            + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发")
+            + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发。"
+            + "表单只收集值、不推进步骤：提交后向导仍停在原步骤，仍需按当前披露面继续"
+            + "（如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition）")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)
