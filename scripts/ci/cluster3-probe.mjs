@@ -4265,11 +4265,30 @@ async function caseRedisOutageRecovery() {
  * <p><b>边界（如实）</b>：`settleIfCancelledBeforeClaim` 内部"认领前一刻读到 UNKNOWN"的那一瞬
  * 仍由单元测试（`task-8-unknown-outcome` 32/32）覆盖 —— 黑盒探针无法确定性地卡在两条指令之间。
  * 本用例断言的是**对外可观测的不变量**：UNKNOWN 一律不执行、不认领、不伪造结论。
+ *
+ * <p><b>R-1 的重挂口径</b>：决策（`APPROVED`）已落库后的重挂**不是** park 收流 —— 产品对
+ * "条目全部结算"的重挂保留连接等续跑终帧（避免 `done` 缺失的既有契约），此处续跑被
+ * `CANCEL_STATE_UNKNOWN` 拒绝后按有界节拍重试。故 R-1 只做有界观察
+ * （{@link R1_REPLAY_OBSERVE_MS}）：决策帧必须已回放、窗口内不得出现终帧或取消裁决；
+ * "连接是否收流"不是 L-150 的判据面。
  */
 
 const CANCEL_KEY_PREFIX = 'ai:cancel:'
 const CLAIM_KEY_PREFIX = 'ai:claim:'
 const CANCELLED_BEFORE_CLAIM_TEXT = '本轮对话已被用户取消，该工具未执行。'
+
+/**
+ * R-1 决策后重挂的**有界观察窗**（毫秒）。
+ *
+ * <p>为什么不是 park 收流：R-1 在决策已落库（`APPROVED`）之后重挂。产品对"条目全部结算"的
+ * 重挂**有意保留连接** —— 那是避免 `done` 缺失（GF4 / W-01..W-22）的既有契约，且此处续跑被
+ * `CANCEL_STATE_UNKNOWN` 拒绝后按 2s/4s/8s… 有界重试，Redis 恢复后同一连接才收到终帧。
+ * 用 park 收流去判这一格等于要求产品丢掉这条终帧通路（run 40257579571 前的 16 例里也没有这一格）。
+ *
+ * <p>本窗只做"有界观察"：先把窗口内收到的帧落盘，再断言**决策帧已回放且没有伪造终帧/取消裁决**。
+ * 窗口取 10s，覆盖前 3 次重试（2s / 6s / 14s 中的前两次），不改变 L-150 的判据面。
+ */
+const R1_REPLAY_OBSERVE_MS = 10000
 
 function cancelFlagKey(runId) {
   return `${CANCEL_KEY_PREFIX}${runId}`
@@ -4439,9 +4458,12 @@ async function gridUnknownMustNotExecute() {
     // 异步派发的续跑也要有时间失败；这一段没有可等的事件，只能给有界余量后再读权威状态。
     await sleep(1500)
     const replay = await reattachOn('c', run.runId, 0, { timeoutMs: 30000 })
-    let replayHow = null
+    // 决策已落库（APPROVED）后的重挂：产品保留连接等续跑终帧（见 R1_REPLAY_OBSERVE_MS 的说明），
+    // 因此这里只做有界观察并如实记录连接结局，不断言 park 收流。
+    let replayHow = 'open'
     try {
-      replayHow = await replay.waitClosed(PARK_SETTLE_TIMEOUT_MS, 'R-1 回放收流')
+      await sleep(R1_REPLAY_OBSERVE_MS)
+      replayHow = replay.endError ? 'error' : (replay.ended ? 'end' : 'open')
     } finally {
       saveFrames('R1-replay.jsonl', replay.frames)
       replay.close()
@@ -4468,12 +4490,25 @@ async function gridUnknownMustNotExecute() {
     checkEq(confirm.record.status, 200, `R-1 批准回执 HTTP（体=${confirm.record.text.slice(0, 400)}）`)
     checkEq(confirm.body && confirm.body.executed, false, 'R-1 批准回执不得声称已执行')
 
-    checkEq(replayHow, 'end', 'R-1 回放必须被服务端正常收尾（连接重置不算）')
+    check(
+      replayHow !== 'error',
+      `R-1 回放连接不得被重置（实得 ${replayHow}；reset 不能冒充"未执行"的结论）`
+    )
     const replayBusiness = businessFrames(replay.frames)
+    checkEq(
+      countOf(replayBusiness, 'confirm_decision', run.toolCallId),
+      1,
+      `R-1 决策帧必须已回放（已收=${typesOf(replayBusiness).join(',')}）`
+    )
+    checkEq(
+      findOf(replayBusiness, 'confirm_decision', run.toolCallId).decision,
+      'approve',
+      'R-1 回放的决策帧必须是已落库的 approve'
+    )
     checkEq(
       countOf(replayBusiness, 'done') + countOf(replayBusiness, 'error'),
       0,
-      `R-1 取消状态不可知不得伪造终帧（已收=${typesOf(replayBusiness).join(',')}）`
+      `R-1 取消状态不可知不得伪造终帧（已收=${typesOf(replayBusiness).join(',')}；连接结局=${replayHow}）`
     )
     check(
       replayBusiness
@@ -4497,7 +4532,9 @@ async function gridUnknownMustNotExecute() {
 
     caseLog(`R-1 三实例均 UNKNOWN（witness=${JSON.stringify(witness)}）；/resume=${resume.body.reason}，`
       + `批准 accepted=${confirm.body.accepted} executed=${confirm.body.executed}`
-      + `（resumeOutcome=${confirm.body.resumeOutcome}）；轮次仍 ${state.runStatus}、条目 ${state.entry.status}；`
+      + `（resumeOutcome=${confirm.body.resumeOutcome}）；重挂回放 ${typesOf(replayBusiness).join(',')}`
+      + `（有界观察 ${R1_REPLAY_OBSERVE_MS}ms，连接结局=${replayHow}）；`
+      + `轮次仍 ${state.runStatus}、条目 ${state.entry.status}；`
       + `认领表无该条目、台账 0 条、作业 ${jobsAfter} 个（未执行）`)
   } finally {
     // 收尾必须原子：先把注入键覆盖成**合法**取消标志（单条 SET —— 不存在"键已恢复但标志未写"的空窗，
@@ -5930,7 +5967,10 @@ function selfTestL150GridContract() {
     'R-2 已取消条目再次批准必须 409',
     'R-3 claim 哈希-only 不得伪未执行',
     "checkEq(redisCli('HSET', claimKey",
-    'assertNoExecution(after,'
+    'assertNoExecution(after,',
+    // R-1 的重挂判据：决策帧必须回放 + 有界窗口内不得伪造终帧（"连接收流"不在判据面）。
+    'R-1 决策帧必须已回放',
+    'R-1 取消状态不可知不得伪造终帧'
   ]
   for (const needle of needles) {
     checkIncludes(body, needle, `L-150 三格断言 ${needle}`)
