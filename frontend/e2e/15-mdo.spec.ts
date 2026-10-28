@@ -767,10 +767,20 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await page.locator('[data-testid="send-btn"]').click()
     await expect(page.locator('[data-testid="stop-btn"]')).toBeVisible({ timeout: 60_000 })
     const oldSession = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
-    const before = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(oldSession)}`)
-    const beforeBody = (await before.json()) as { data?: { runId?: string } }
-    const oldRunId = String(beforeBody.data?.runId ?? '')
-    expect(oldRunId.length).toBeGreaterThan(0)
+    // 施加「切会话」之前要等两件**产品事实**各自出现（判据不变，只把竞态换成同步等待）：
+    //   ① 本轮登记进 `runs/current`（Redis 注册点，`start` 帧之后仍可能没写）——
+    //      本地单点复跑实测读到的 runId 为空，旧写法直接断言 >0 会红在这一步；
+    //   ② 运行快照真的建立（AR-06 空窗，与 c922548 / verify-e2e W-25 同源：`start` 帧先于
+    //      「请求前压缩 → 建快照」发出，空窗内切会话该轮按设计**不建快照**，
+    //      run 40718751980 实证 `最后快照 status=∅`，后面 waitTerminal 永远读不到 CANCELLED）。
+    let oldRunId = ''
+    await until(async () => {
+      const res = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(oldSession)}`)
+      const body = (await res.json()) as { data?: { runId?: string } }
+      oldRunId = String(body.data?.runId ?? '')
+      return oldRunId.length > 0
+    }, 30_000, '本轮登记到 runs/current')
+    await until(async () => (await runDetail(oldRunId)).snapshot !== undefined, 30_000, '旧轮建立运行快照')
 
     await page.locator('[data-testid="new-chat"]').click()
     await expect(page.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 20_000 })
