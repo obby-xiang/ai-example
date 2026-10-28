@@ -502,7 +502,8 @@ public class AiTools {
      * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
-    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）")
+    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）。"
+            + "用户已明确配置定义时直接调用，不用表单重复询问")
     @ToolScope({ "task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -552,7 +553,7 @@ public class AiTools {
      */
     @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
             + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
-            + "只有用户明确提出筛选/查询条件时才调用）。本工具只能在 QUERY_COND 步骤调用："
+            + "只有用户明确提出筛选/查询条件时才调用；已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链）。本工具只能在 QUERY_COND 步骤调用："
             + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
     @ToolScope({ "task:EXPORT/QUERY_COND" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
@@ -665,7 +666,8 @@ public class AiTools {
      * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
      */
     @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，"
-            + "或在信息不足时向用户澄清）；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
+            + "或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
+            + "不用于已知信息、预填确认或取消后自动重问；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
             + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
             + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发。"
