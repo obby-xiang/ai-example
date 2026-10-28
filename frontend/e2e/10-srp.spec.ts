@@ -150,9 +150,11 @@ test.describe('@stub S 流式稳定', () => {
 
     // ② 两个尝试都超时后：显式错误卡 + 机器码可读（不是无限转圈）
     await expect(errorCard(page)).toBeVisible({ timeout: 75_000 })
-    await expect(page.locator('[data-testid="notice-bar"]')).toContainText('本轮出错')
-    await expect(page.locator('[data-testid="notice-bar"]')).toContainText('AI 响应超时')
-    await expect(page.locator('[data-testid="notice-bar"]')).not.toContainText('UPSTREAM_FIRST_BYTE_TIMEOUT')
+    // AR-13：关键错误归**错误卡**（不再进通知条）⇒ 人话在卡首屏，机器码只收进折叠的「诊断详情」。
+    const card = errorCard(page).last()
+    await expect(card.locator('b').first()).toContainText('AI 响应超时')
+    await expect(card.locator('[data-testid^="error-card-summary-"]')).not.toContainText('UPSTREAM_FIRST_BYTE_TIMEOUT')
+    await expect(card.locator('[data-testid^="error-card-code-"]')).toHaveText('UPSTREAM_FIRST_BYTE_TIMEOUT')
     await expect(stopButton(page)).toHaveCount(0)
 
     // ③ 帧级证据：重试与终态码（首包看门狗真在判定，不是前端兜底猜的）
@@ -829,8 +831,10 @@ test.describe('@stub R 刷新恢复', () => {
     for (const key of ['f_text', 'f_number', 'f_boolean', 'f_date', 'f_enum', 'f_file']) {
       await expect(page.locator(`#gf-field-${key}`)).toBeVisible()
     }
-    // ② 无倒计时：卡面不得出现「剩余 Ns」类文案（去超时裁决的直接可见面）
-    await expect(page.locator('[data-testid^="msg-bubble-"]').last()).not.toContainText('剩余')
+    // ② 无倒计时：**卡面**不得出现「剩余 Ns」类文案（去超时裁决的直接可见面）。
+    //    2026-10-28 起面板元信息行新增「本轮运行态剩余约 N 小时」（ai.panel.runStatus.hours，会话寿命），
+    //    它不在卡面、也不是表单倒计时 ⇒ 判据按注释原义收窄到表单卡（`gf-form-*`），字符串仍为「剩余」。
+    await expect(page.locator('[data-testid^="gf-form-"]').last()).not.toContainText('剩余')
     // ③ 控件真可交互（真鼠标坐标勾选 boolean）
     const toggle = page.locator('#gf-field-f_boolean')
     await toggle.scrollIntoViewIfNeeded()
@@ -1293,19 +1297,22 @@ test.describe('@stub P 手工停止', () => {
     const sid = await sessionId(page)
     const contextBefore = (await (await request.get(`${API_BASE}/api/ai/context/${sid}`)).json()) as { turnNo: number }
     const bubblesBefore = await page.locator('[data-testid^="msg-bubble-"]').count()
+    const userBubblesBefore = await page.locator('[data-testid^="edit-msg-"]').count()
 
     await page.locator('[data-testid="continue-round"]').click()
+    // 当前契约（AiPanel「三动作语义分离」AR-09/AR-05/AR-17）：继续 = append-drive 续跑，
+    // **不追加伪用户气泡** ⇒ 本轮只新增一条助手气泡；轮次仍推进（turnNo +1，见 ①）。
+    // 旧断言（+2 气泡 + 末条 user 气泡文案「继续」）是 skipUserRecord 之前的契约。
     await expect
       .poll(async () => page.locator('[data-testid^="msg-bubble-"]').count(), { timeout: 20_000 })
-      .toBe(bubblesBefore + 2)
+      .toBe(bubblesBefore + 1)
     await waitRoundSettled(page, 60_000)
 
     // ① turnNo 递增（新轮，不是续写）
     const contextAfter = (await (await request.get(`${API_BASE}/api/ai/context/${sid}`)).json()) as { turnNo: number }
     expect(contextAfter.turnNo).toBe(contextBefore.turnNo + 1)
-    // ② 气泡是新轮：末条 user 气泡文本为「继续」
-    const userBubbles = page.locator('[data-testid^="edit-msg-"]')
-    expect(await userBubbles.count()).toBe(bubblesBefore / 2 + 1)
+    // ② 不追加伪用户气泡：用户气泡（= 编辑入口）数量不变
+    expect(await page.locator('[data-testid^="edit-msg-"]').count()).toBe(userBubblesBefore)
   })
 
   /**

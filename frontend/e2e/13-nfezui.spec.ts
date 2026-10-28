@@ -523,16 +523,22 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
     const originalText = (await firstUser.innerText()).trim()
     const editId = ((await firstUser.getAttribute('data-testid')) ?? '').replace('msg-bubble-', '')
 
-    // 输入框非空 ⇒ 先弹 window.confirm（真对话框）
+    // 输入框非空 ⇒ 编辑有两道确认（批次2 / AR-09 起）：
+    //   ① 编辑是**不可逆删除** —— 先按实测条数提示「将删除此后 N 条消息」（本条之后 3 条）；
+    //   ② 输入框非空白时再弹「覆盖现有输入」。
+    // 旧判据只挂 `page.once('dialog')`（只收第一个），且断言其含「覆盖」⇒ 漏掉了前置的删除确认。
     await page.locator('[data-testid="composer-input"]').fill('草稿占位')
-    let dialogText = ''
-    page.once('dialog', async (dialog) => {
-      dialogText = dialog.message()
+    const dialogs: string[] = []
+    const onDialog = async (dialog: { message(): string; accept(): Promise<void> }): Promise<void> => {
+      dialogs.push(dialog.message())
       await dialog.accept()
-    })
+    }
+    page.on('dialog', onDialog)
     await page.locator(`[data-testid="edit-msg-${editId}"]`).click()
-    await expect.poll(async () => dialogText).not.toBe('')
-    expect(dialogText).toContain('覆盖')
+    await expect.poll(async () => dialogs.length).toBe(2)
+    page.off('dialog', onDialog)
+    expect(dialogs[0]).toContain('删除此后 3 条')
+    expect(dialogs[1]).toContain('覆盖')
     await expect(page.locator('[data-testid="composer-input"]')).toHaveValue(originalText)
 
     // 改完从该条重跑：该条之后的消息被截断，不新增用户气泡
@@ -556,9 +562,14 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
     const cont = page.locator('[data-testid="continue-round"]')
     await expect(cont).toBeVisible()
 
-    // 点「继续」= 以新用户消息「继续」重发
+    // 点「继续」= append-drive 续跑（AR-09/AR-05/AR-17）：**不追加伪用户气泡**，只新增一条助手答复
+    const userBefore = await userBubbles(page).count()
+    const assistantBefore = await assistantBubbles(page).count()
     await cont.click()
-    await expect(userBubbles(page).last()).toContainText('继续', { timeout: 20_000 })
+    await expect
+      .poll(async () => assistantBubbles(page).count(), { timeout: 20_000 })
+      .toBe(assistantBefore + 1)
+    expect(await userBubbles(page).count()).toBe(userBefore)
     await waitSettled(page)
 
     // ② 被用户停止的轮**不出**「继续」（与「已停止」标识互斥）

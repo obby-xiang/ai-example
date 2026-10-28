@@ -18,9 +18,11 @@ test.describe('@stub S 流式稳定', () => {
     await openApp(page)
     await sendMessage(page, 'turn-text stall-frames=250')
 
-    // 流中：正文已在增长，打字机光标在位（真 SSE 的中间态，jsdom 结构上不可得）
+    // 流中：正文已在增长；在飞指示器 = 产品的「呼吸点」（`loading-breath`）。
+    // 旧 `stream-caret`（打字机光标，1e61419 引入）已在 9c6e8c4 的面板改写中被呼吸点换回、元素不存在
+    // ⇒ 判据锚到**现行**在飞指示器（仍是"流中可见信号"，不是去掉断言）。
     await expect(assistantBubble(page)).toBeVisible()
-    await expect(page.locator('[data-testid="stream-caret"]')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="loading-breath"]')).toBeVisible({ timeout: 15_000 })
     const partial = await assistantText(page)
     expect(partial.length).toBeGreaterThan(0)
     expect(TURN_TEXT.startsWith(partial) || partial.length < TURN_TEXT.length).toBeTruthy()
@@ -43,10 +45,13 @@ test.describe('@stub S 流式稳定', () => {
       .poll(async () => (await assistantText(page)).length, { timeout: 20_000 })
       .toBeGreaterThan(10)
 
-    // 桩的上游 TCP 被销毁 ⇒ 产品以「本轮出错（人话，不带码）」收敛，并给「继续」入口
-    const notice = page.locator('[data-testid="notice-bar"]')
-    await expect(notice).toContainText('本轮出错', { timeout: 40_000 })
-    await expect(notice).not.toContainText('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL')
+    // 桩的上游 TCP 被销毁 ⇒ 产品以「错误卡」收敛（AR-13：关键错误归错误卡、不再进通知条），并给「继续」入口。
+    // 人话在首屏（标题 + 摘要），机器码只收进折叠的「诊断详情」—— 判据仍是"首屏看不到码、人话可读、码可取证"。
+    const card = page.locator('[data-testid^="error-card-"][data-variant]').last()
+    await expect(card).toBeVisible({ timeout: 40_000 })
+    await expect(card.locator('b').first()).toContainText('AI 服务异常') // UPSTREAM_STREAM_ERROR 的人话标题
+    await expect(card.locator('[data-testid^="error-card-summary-"]')).not.toContainText('UPSTREAM_STREAM_ERROR')
+    await expect(card.locator('[data-testid^="error-card-code-"]')).toHaveText('UPSTREAM_STREAM_ERROR_AFTER_PARTIAL')
     await waitRoundSettled(page, 60_000)
     await expect(page.locator('[data-testid="continue-round"]')).toBeVisible()
 

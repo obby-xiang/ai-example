@@ -89,8 +89,12 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     const quotaCard = page.locator('[data-testid^="error-card-"][data-variant="quota"]').last()
     await expect(quotaCard).toBeVisible({ timeout: 40_000 })
     await expect(quotaCard).toContainText('请求超出配额')
-    await expect(page.locator('[data-testid^="error-card-action-"]').last()).toContainText('稍后重试')
+    // AR-17（AiPanel errorCardActionVisible）：配额卡的「稍后重试」= 重试本轮入口，只在
+    // 「零文字产出 + 归属可证明」时渲染。本场景 429 发生在开流前（无 runId 可归属）⇒ 动作钮按契约不出现；
+    // 判据改为"配额卡不得串上别的变体文案/动作"（filter/context 的文案都不许出现在这里）。
+    await expect(quotaCard.locator('[data-testid^="error-card-action-"]')).toHaveCount(0)
     await expect(quotaCard).not.toContainText('安全策略')
+    await expect(quotaCard).not.toContainText('改写后重发')
     await waitSettled(page, 30_000)
 
     // ② filter（400 + content_filter）
@@ -193,9 +197,10 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     const alert = page.locator('[data-testid="alert-degraded"]')
     await expect(alert).toBeVisible({ timeout: 30_000 })
     await expect(alert).toContainText('AI')
-    // 降级面：发送钮禁用 —— 且输入区整体硬禁用（composerHardDisabled：health.available=false）
+    // 降级面：只锁「发送」，不锁输入框 —— `composerHardDisabled` 已在 9c6e8c4（面板状态收敛）移除，
+    // 现行契约 = 输入可编辑、发送被禁（与 P-05「不锁死输入」一致）。
     await expect(page.locator('[data-testid="send-btn"]')).toBeDisabled()
-    await expect(page.locator('[data-testid="composer-input"]')).toBeDisabled()
+    await expect(page.locator('[data-testid="composer-input"]')).toBeEditable()
   })
 
   test('E2E-E08 池饱和横幅：并发池打满时第 4 轮 503 + alert-pool-saturated 可见', async ({ browser }) => {
@@ -254,13 +259,21 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     for (const [marker, status, code, message] of codes) {
       await failChatWith(page, marker, status, { success: false, code, message })
       await send(page, `${marker} 用例-E09-${unique(code)}`)
-      await expect(page.locator('[data-testid^="error-card-"]').last()).toBeVisible({ timeout: 40_000 })
+      // 卡片根节点的判据要看 `[data-variant]`：裸前缀还会命中 `error-card-detail-*` / `error-card-code-*`
+      // 这类子节点（在折叠的「诊断详情」里 ⇒ hidden），`.last()` 会选到隐藏后代。
+      await expect(page.locator('[data-testid^="error-card-"][data-variant]').last()).toBeVisible({ timeout: 40_000 })
       await waitSettled(page, 30_000)
     }
+    // AR-13（stores/ai.ts 错误终帧分支）：关键错误归**错误卡**、不进通知条（出卡即 clearNotice）
+    // ⇒「单槽位不堆叠」的现行形态：错误不再落顶部通知条，屏上只留**最新一条**错误卡
+    // （前三轮都是开流前失败、服务端无历史可恢复，故 DOM 里只剩本轮的卡与消息）。
     const bars = page.locator('[data-testid="notice-bar"]')
-    await expect(bars).toHaveCount(1)
-    await expect(bars.last()).toContainText('third-generic-notice')
-    await expect(bars.last()).not.toContainText('rate limit exceeded')
+    await expect(bars).toHaveCount(0)
+    const cards = page.locator('[data-testid^="error-card-"][data-variant]')
+    await expect(cards).toHaveCount(1)
+    await expect(cards.last()).toContainText('本轮出错')
+    await expect(cards.last()).not.toContainText('rate limit exceeded')
+    await expect(cards.last()).not.toContainText('content_filter triggered')
   })
 
   test('E2E-E10 ui_event 回执：工作区动作执行后出 alert-ui-event（含事件名与处理结果）', async ({ page }) => {
@@ -316,7 +329,8 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     await openPanel(page)
     await failChatWith(page, MARK.generic, 500, { success: false, code: 'NFEZUI_UNKNOWN', message: 'e13-generic' })
     await send(page, `${MARK.generic} 用例-E13`)
-    await expect(page.locator('[data-testid^="error-card-"]').last()).toBeVisible({ timeout: 40_000 })
+    // 同 E09：卡片根节点必须带 `[data-variant]`（裸前缀会选到折叠区里的隐藏子节点）。
+    await expect(page.locator('[data-testid^="error-card-"][data-variant]').last()).toBeVisible({ timeout: 40_000 })
     await waitSettled(page, 30_000)
     await expect(page.locator('[data-testid="followup-suggestions"]')).toHaveCount(0)
 
