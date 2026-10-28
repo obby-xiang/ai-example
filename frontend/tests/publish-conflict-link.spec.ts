@@ -21,10 +21,11 @@ const api = vi.hoisted(() => ({
   reattachRun: vi.fn()
 }))
 const watchPublishOutcome = vi.hoisted(() => vi.fn(() => (): void => {}))
+const notifyJobEvent = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 vi.mock('@/stores/task', () => ({
-  useTaskStore: () => ({ watchPublishOutcome })
+  useTaskStore: () => ({ watchPublishOutcome, notifyJobEvent })
 }))
 
 import { useAiStore } from '@/stores/ai'

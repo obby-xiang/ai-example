@@ -55,6 +55,22 @@ function textMessage(id: string, role: ChatMessage['role'], text: string): ChatM
   }
 }
 
+/**
+ * 用户可见文本 = 正文 + 文本段。
+ *
+ * <p>**内部 `runId` 不算可见内容**：消息上带着它是有意的合法实现（续跑/重挂归属靠它，
+ * 见 `restoreInFlightRound` 的 `host.runId = runId` 与 `ChatMessage.runId` 的类型注），
+ * 所以断言口径是"看不到"，不是"字段不存在" —— 序列化整条消息这种断言会把合法内部字段一起否掉。
+ */
+function visibleText(messages: ChatMessage[]): string {
+  return messages
+    .map((message) => [
+      message.content,
+      ...message.parts.flatMap((part) => (part.kind === 'text' ? [part.text] : []))
+    ].join('\n'))
+    .join('\n')
+}
+
 function snapshotOf(overrides: Record<string, unknown> = {}) {
   return {
     found: true,
@@ -159,10 +175,22 @@ describe('批G · G2：在途轮刷新 ⇒ 静默全量重放续收', () => {
     expect(assistants[0]?.id).toBe('a-1') // 续写镜像里那条宿主
     expect(assistants[0]?.content).toBe('重放正文') // 清空后重放，不双拼
 
-    // 用户看不到任何"重挂"概念
+    // 内部 runId 留在宿主上是**有意合法**的（续跑/重挂归属只认 message.runId），
+    // 断言它存在，防止后人把"静默"误读成"连内部字段都不许有"。
+    expect(assistants[0]?.runId).toBe('run-g2')
+
+    // 用户看不到任何"重挂"概念：无横幅 / 无占位文案 / 正文里既无 runId 也无恢复类措辞。
+    // 只看可见文本（正文 + 文本段），不对整条消息做序列化比对。
     expect(store.notice).toBeNull()
-    expect(JSON.stringify(store.messages)).not.toContain('run-g2')
-    expect(JSON.stringify(store.messages)).not.toContain('重挂')
+    const visible = visibleText(store.messages)
+    expect(visible).not.toContain('run-g2')
+    expect(visible).not.toContain('runId')
+    for (const wording of ['重挂', '重连', '重新连接', '正在恢复', '恢复中', '正在准备', '请稍候']) {
+      expect(visible).not.toContain(wording)
+    }
+    // 可见层面也不许偷偷插占位段：宿主只有一段重放正文
+    expect(assistants[0]?.parts.filter((part) => part.kind === 'text').map((part) => part.text))
+      .toEqual(['重放正文'])
     expect(store.loading).toBe(true)
     expect(store.suspended).toBe(false)
   })

@@ -118,11 +118,34 @@ const stubs = {
   FormRenderer: true
 }
 
+/**
+ * L-72 隔离口径：本文件的"现场"由**两个实例**构成 —— 一份 pinia、一份组件模块。
+ * 两者都必须由夹具显式持有，用例只在这两个句柄上操作：
+ *
+ * - `testPinia`：用例侧一律 `useAiStore(testPinia)`，不靠"再取一次 activePinia"。
+ *   否则一旦中途 active pinia 被换（另一份模块图里的 `setActivePinia` / 重新 import），
+ *   用例改的是**另一个 store 实例**，组件侧观察不到（典型症状：改 `sessionId` 不触发清理、
+ *   而 `handleFrame` 落在别处的消息上）。
+ * - `panelModule`：AiPanel 模块只解析一次，全文件共用一个模块实例；`vi.resetModules()`
+ *   后再 `import()` 会拿到**另一份模块图**，缓存 / 计数器 / 观察器各自成对，读数就串了。
+ */
+let testPinia = createPinia()
+let panelModule: Promise<typeof import('@/components/AiPanel/AiPanel.vue')> | null = null
+
+/** 面板组件模块的唯一解析口（同一模块实例 ⇒ 同一份缓存与调试面）。 */
+function loadAiPanel(): Promise<typeof import('@/components/AiPanel/AiPanel.vue')> {
+  if (panelModule === null) {
+    panelModule = import('@/components/AiPanel/AiPanel.vue')
+  }
+  return panelModule
+}
+
 beforeEach(() => {
   sessionStorage.clear()
   observers.io.length = 0
   observers.ro.length = 0
-  setActivePinia(createPinia())
+  testPinia = createPinia()
+  setActivePinia(testPinia)
   vi.stubGlobal('IntersectionObserver', IntersectionObserverStub)
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   api.health.mockReset()
@@ -208,12 +231,25 @@ function toolPart(overrides: Partial<ToolPart> = {}): ToolPart {
   }
 }
 
+/** 用户消息夹具：`messageWith` 的助手默认值不适用（长文折叠 / 脏标记都只针对用户侧）。 */
+function userMessageWith(parts: ChatMessage['parts'], id = 'u-1'): ChatMessage {
+  return { ...messageWith(parts, id), role: 'user' }
+}
+
+/** 真在流式中的助手消息：`done:false` 才能被 `currentAssistantMessage()` 认作宿主。 */
+function liveMessageWith(parts: ChatMessage['parts'], id = 'a-live'): ChatMessage {
+  return { ...messageWith(parts, id), streaming: true, done: false }
+}
+
 async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mount>> {
-  const store = useAiStore()
+  // 组件侧取 store 读的是 activePinia；挂载前再钉一次，确保它落的正是本用例持有的实例。
+  setActivePinia(testPinia)
+  const store = useAiStore(testPinia)
   store.messages = messages
   store.historyLoaded = true
   store.expanded = true
-  const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+  const { default: AiPanel } = await loadAiPanel()
+  setActivePinia(testPinia)
   const wrapper = mount(AiPanel, { global: { stubs } })
   await flushPromises()
   await wrapper.vm.$nextTick()
@@ -243,7 +279,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     expect(debugOf(wrapper).mermaidPendingSize).toBeGreaterThan(0)
 
     const removeSpy = vi.spyOn(wrapBefore as HTMLElement, 'removeEventListener')
-    useAiStore().expanded = false
+    useAiStore(testPinia).expanded = false
     await settle(wrapper)
 
     expect(roBefore!.disconnected).toBe(true)
@@ -252,7 +288,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     expect(debugOf(wrapper).mermaidPendingSize).toBe(0)
     expect(debugOf(wrapper).scrollBound).toBeNull()
 
-    useAiStore().expanded = true
+    useAiStore(testPinia).expanded = true
     await settle(wrapper)
 
     const wrapAfter = wrapper.find('.overflow-y-auto').element
@@ -274,7 +310,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     const body = wrapper.find('.md-body')
     expect(body.text()).toContain('AAAA')
 
-    const store = useAiStore()
+    const store = useAiStore(testPinia)
     const part = store.messages[0]!.parts[0]
     if (part.kind !== 'text') throw new Error('unexpected part')
     part.text = 'BBBB'
@@ -295,11 +331,11 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     const before = debugOf(wrapper).historyCacheKeys
     expect(before).toHaveLength(2)
 
-    useAiStore().expanded = false
+    useAiStore(testPinia).expanded = false
     await settle(wrapper)
     // 收起态改段序：展开后按新序访问两个历史块；LRU 命中应把后访问的块移到队尾。
-    useAiStore().messages[0]!.parts.reverse()
-    useAiStore().expanded = true
+    useAiStore(testPinia).messages[0]!.parts.reverse()
+    useAiStore(testPinia).expanded = true
     await settle(wrapper)
 
     const after = debugOf(wrapper).historyCacheKeys
@@ -309,7 +345,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     expect(debugOf(wrapper).historyCacheBytes).toBeLessThanOrEqual(8 * 1024 * 1024)
     wrapper.unmount()
 
-    const streaming = useAiStore()
+    const streaming = useAiStore(testPinia)
     const live = messageWith([{ kind: 'text', seg: 0, text: '流式正文', streaming: true }], 'a-live')
     live.streaming = true
     live.done = false
@@ -331,7 +367,7 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
     expect(debugOf(wrapper).streamCacheSize).toBeLessThanOrEqual(64)
     expect(debugOf(wrapper).streamCacheBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
 
-    useAiStore().sessionId = 'another-session'
+    useAiStore(testPinia).sessionId = 'another-session'
     await settle(wrapper)
     expect(debugOf(wrapper).streamCacheSize).toBe(0)
     expect(debugOf(wrapper).streamCacheBytes).toBe(0)
@@ -355,14 +391,19 @@ describe('批次 7A：渲染生命周期与缓存边界', () => {
 
   it('布局只测新增/变化消息：流式助手 token 不重复量全部用户消息', async () => {
     const wrapper = await mountPanel([
-      messageWith([{ kind: 'text', seg: 0, text: '早先用户长文', streaming: false }], 'u-1'),
-      messageWith([{ kind: 'text', seg: 0, text: '回答', streaming: true }], 'a-2')
+      userMessageWith([{ kind: 'text', seg: 0, text: '早先用户长文', streaming: false }], 'u-1'),
+      liveMessageWith([{ kind: 'text', seg: 0, text: '回答', streaming: true }], 'a-2')
     ])
-    const passes = debugOf(wrapper).measurePasses
-    const baseline = passes.length
-    const store = useAiStore()
+    const store = useAiStore(testPinia)
+    await settle(wrapper)
+    const baseline = debugOf(wrapper).measurePasses.length
     store.handleFrame({ type: 'delta', text: '继续', seq: 2 })
     await settle(wrapper)
+    // 夹具自检：帧必须落在**已在屏上的**宿主消息里。`messageWith()` 默认 `done:true` + 助手角色，
+    // `currentAssistantMessage()` 会判成"无宿主"另开一条空气泡 —— 那是整列重渲，量全部消息是夹具
+    // 造的假象，与"流式 token 是否只量变化消息"无关。
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1]!.content).toContain('继续')
     const after = debugOf(wrapper).measurePasses.slice(baseline)
     expect(after.every((ids) => ids.length === 0)).toBe(true)
     wrapper.unmount()
