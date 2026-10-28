@@ -120,7 +120,7 @@ beforeEach(() => {
 })
 
 describe('C7-01 全局停用：不可用时发不出去，且原因如实上屏', () => {
-  it('health.available=false + AI_UNAVAILABLE ⇒ 降级条给后端原文、输入框禁用、Enter 零请求', async () => {
+  it('health.available=false + AI_UNAVAILABLE ⇒ 降级条给后端原文、输入框仍可编辑、只关发送、Enter 零请求', async () => {
     api.health.mockResolvedValue(healthFixture({
       available: false,
       code: 'AI_UNAVAILABLE',
@@ -138,16 +138,20 @@ describe('C7-01 全局停用：不可用时发不出去，且原因如实上屏'
     expect(degraded.text()).toContain('AI 能力暂不可用')
     expect(degraded.text()).toContain('未配置可用的模型供应商')
 
+    // composer 口径：输入框**始终可编辑**（用户写草稿的权利不被降级剥夺），发送闸独立拦截。
+    // 锁 disabled 会把旧形态（降级即禁输）固化回来，故这里锁"无 disabled"。
     const box = wrapper.find('[data-testid="composer-input"]')
-    expect((box.element as HTMLTextAreaElement).disabled).toBe(true)
+    expect((box.element as HTMLTextAreaElement).disabled).toBe(false)
+    expect(box.attributes('disabled')).toBeUndefined()
     expect(box.attributes('placeholder')).toContain('AI 当前不可用')
     expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeDefined()
 
-    // 键盘路径同样不放行（不是只靠 disabled 视觉）
+    // 键盘路径同样不放行（可编辑 ≠ 可发送；不是只靠按钮置灰的视觉）
     await box.setValue('还能用吗')
     await box.trigger('keydown', { key: 'Enter' })
     await flushPromises()
     expect(api.chat).not.toHaveBeenCalled()
+    expect((box.element as HTMLTextAreaElement).value).toBe('还能用吗') // 草稿留在框里
     wrapper.unmount()
   }, 20_000)
 })

@@ -1551,6 +1551,9 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
     await wrapper.vm.$nextTick()
 
+    // AR-09：编辑点击先弹「将删除此后 N 条」确认；jsdom 的 confirm 未实现（恒 false），
+    // 不桩掉会丢掉编辑锚点，发送退化成新消息（本用例断言不追加用户消息）。
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await wrapper.find('[data-testid="edit-msg-u-1"]').trigger('click')
     const input = wrapper.find('[data-testid="composer-input"]')
     await input.setValue('改写后的提问')
@@ -1562,6 +1565,7 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     expect(store.messages[0]?.content).toBe('改写后的提问')
     expect(api.chat).toHaveBeenCalledTimes(1)
     expect(api.chat.mock.calls[0][0].message).toBe('改写后的提问')
+    confirmSpy.mockRestore()
     wrapper.unmount()
   })
 
@@ -2813,7 +2817,16 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     const wrap = wrapper.find('.overflow-y-auto').element as HTMLElement
     Object.defineProperty(wrap, 'scrollHeight', { value: 1000, configurable: true })
     Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
-    wrap.scrollTop = 1000 // 贴底（跟随态）
+    // jsdom 无布局：scrollTop 按真实浏览器口径夹到 [0, scrollHeight − clientHeight]；
+    // 越界写 1000（合法上界 500）会让 bottomDist 恒为负，钉底被早退挡掉。
+    let legalScrollTop = 500 // 贴底（跟随态）
+    Object.defineProperty(wrap, 'scrollTop', {
+      configurable: true,
+      get: () => legalScrollTop,
+      set: (value: number) => {
+        legalScrollTop = Math.max(0, Math.min(value, wrap.scrollHeight - wrap.clientHeight))
+      }
+    })
     // 确认门帧到达（工具段插入 = 卡体增高前兆；指纹 watch 只盯末段，RO 接管钉底）
     store.handleFrame(
       { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', timeoutSeconds: 120, runId: 'run-1', seq: 2 },
@@ -2824,7 +2837,7 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     Object.defineProperty(wrap, 'scrollHeight', { value: 1300, configurable: true })
     captured.cb?.([] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
     await wrapper.vm.$nextTick()
-    expect(wrap.scrollTop).toBe(1300) // 已重钉到新底部
+    expect(wrap.scrollTop).toBe(800) // 已重钉到新底部（1300 − 500；真实浏览器同样夹到此值）
     wrapper.unmount()
   })
 
@@ -3635,8 +3648,8 @@ describe('R-163B：视觉对齐 demo v6（样式生效 + 横滚止血）', () =>
     const { renderMarkdown } = await import('@/utils/markdown')
     const { html } = renderMarkdown('```js\nconst a = 1\n```\n\n完成', false)
     // R-165 S5c：图容器/图题/语言名三处改渲染层注入的工具类（标记类 `code` / `lg` / `hlib` 保留）
-    // 问题1 偏差修正批 aj14d ③：图容器另带 `data-fence-key="f1-js"`（块序号 + 语言的稳定身份）
-    expect(html).toMatch(/<figure class="code [^"]*" data-fence-key="f1-js">/)
+    // 问题1 偏差修正批 aj14d ③ → 批次 7C ①：槽位身份落在 `<pre>`（净化后由渲染器回填，模型不可伪造）
+    expect(html).toMatch(/<pre class="[^"]*" data-fence-key="f1-js">/)
     expect(html).toMatch(/<figcaption class="flex items-center[^"]*">/)
     expect(html).toMatch(/<span class="lg [^"]*">js<\/span>/)
     // R-165 S5a 项 7：文字钮「复制」→ v7 图标钮（cpbtn + 两枚叠放 svg + tip 气泡），

@@ -316,7 +316,7 @@
                  改为根容器随行工具类 MD_BODY_ROOT_CLASS，层级元素由渲染层逐标签注入。 -->
             <div
               v-if="block.kind === 'text'"
-              :ref="userBodyRefFor(m.id)"
+              :ref="m.role === 'user' ? userBodyRefFor(m.id) : undefined"
               v-memo="blockMemo(block, m)"
               :class="[
                 'md-body',
@@ -2027,6 +2027,10 @@ function userBodyRefFor(id: string): (el: Element | { $el?: Element } | null) =>
 /** 模板函数 ref：用户消息正文元素登记/注销（收起态下 scrollHeight 仍为内容自然高，量取稳定）。 */
 function setUserBodyRef(id: string, el: Element | { $el?: Element } | null): void {
   if (el instanceof HTMLElement) {
+    // 函数 ref 每次 patch 都会回调：同一元素重复登记不必再标脏（只有挂载/换元素需要重量）。
+    if (userBodyEls.get(id) === el) {
+      return
+    }
     userBodyEls.set(id, el)
     markUserMsgDirty(id)
     return
@@ -3604,6 +3608,11 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
   }
   if (part.kind === 'text') {
     deps.push(part.text, part.streaming, part.truncated, part.noticeCode, part.originalChars, part.returnedChars, part.truncatedReason)
+    // 75ms 防抖的落地信号不在文本里（停吐时文本已是最新值）：流式正文块必须并进 tick，
+    // 否则 messageMemo / blockMemo 都会跳过重渲，末帧永远不现身。历史块不带本依赖。
+    if (part.streaming) {
+      deps.push(mdStreamTick.value)
+    }
     return deps
   }
   deps.push(

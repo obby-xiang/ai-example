@@ -387,12 +387,17 @@ const FMSG = 'block text-[11.8px] leading-[1.5] text-[#c0392b] bg-[#fdf1ef] bord
 const GF_CANCEL = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default'
 const GF_SUBMIT = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal'
 
+/** schema 默认值（枚举初值合法默认）：不含任何用户数据，是"用户是否填过"的对照基线。 */
+function schemaDefaults(): Record<string, FormModelValue> {
+  return buildInitialValues(props.schema) as Record<string, FormModelValue>
+}
+
 /**
- * 初始模型：待填态走 `buildInitialValues`（枚举初值已合法默认）；
- * 只读态 / 草稿恢复额外合并 `initialValues` —— 只接受与字段类型形状相符的值。
+ * 初始模型：`schemaDefaults` 之上叠加 `initialValues`（草稿恢复 / 只读回填）——
+ * 只接受与字段类型形状相符的值。
  */
 function initialModel(): Record<string, FormModelValue> {
-  const base = buildInitialValues(props.schema) as Record<string, FormModelValue>
+  const base = schemaDefaults()
   const values = props.initialValues
   if (!values) {
     return base
@@ -430,10 +435,11 @@ function initialModel(): Record<string, FormModelValue> {
 
 const model = ref<Record<string, FormModelValue>>(initialModel())
 /**
- * 建卡时的初始模型：判断"用户是不是真的填过这一格"的对照基线（与它相同 = 还是默认态）。
- * 披露判据用它 —— 枚举初值恒有值（首个合法选项），把它当"已填"会让高级条件永远摊开。
+ * 判断"用户是不是真的填过这一格"的对照基线（与它相同 = 还是默认态）。
+ * **只含 schema 默认值**，不合并 `initialValues`：草稿/回填是用户数据，算"已填"；
+ * 而枚举初值恒有值（首个合法选项），把它当"已填"会让高级条件永远摊开。
  */
-const defaultModel = initialModel()
+const defaultModel = schemaDefaults()
 /** 本卡根元素（首错聚焦只在本子树里找，同页多卡不串）。 */
 const rootRef = ref<HTMLElement | null>(null)
 /** 本次提交前复核的问题（结构化：按 key 归属字段）。 */

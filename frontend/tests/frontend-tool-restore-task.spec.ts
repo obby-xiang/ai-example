@@ -68,6 +68,15 @@ function mountPageOnPush(): void {
   })
 }
 
+/**
+ * 真实等待用例的单例超时。
+ *
+ * `PAGE_READY_TIMEOUT_MS`（frontend-tools.ts）已升到 8s，而"到点仍不满足 ⇒ 降级/失败"这类
+ * 判据必须**等满上界**才能观测到结局，必然超过 Vitest 默认的 5s。只给这些真等满上界的用例
+ * 单独放宽超时，等待上界与断言口径一字不动。
+ */
+const REAL_WAIT_TEST_TIMEOUT_MS = 15_000
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
@@ -172,7 +181,7 @@ describe('导航后等目标页就绪', () => {
 
     expect(execution.outcome).toBe('failed')
     expect(execution.code).toBe('UI_PAGE_NOT_READY')
-  })
+  }, REAL_WAIT_TEST_TIMEOUT_MS)
 
   it('restore_task 后页面就绪但任务未绑定 ⇒ degraded（区分"还在加载"与"绑不上"）', async () => {
     api.getTask.mockResolvedValue({ id: 7, type: 'IMPORT', status: 'IN_PROGRESS', items: [], currentStep: 'UPLOAD' })
@@ -186,7 +195,7 @@ describe('导航后等目标页就绪', () => {
 
     expect(execution.outcome).toBe('failed')
     expect(execution.result).toContain('绑定没有完成')
-  })
+  }, REAL_WAIT_TEST_TIMEOUT_MS)
 })
 
 describe('冷缓存：类型缓存优先、未命中查一次、查不到不导航', () => {
@@ -255,7 +264,7 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
     } finally {
       unregisterPageHandler('export.taskDetailReady')
     }
-  })
+  }, REAL_WAIT_TEST_TIMEOUT_MS)
 
   it('restore_task：push 已成功、页与任务都在位但详情未就绪 ⇒ 照实说"页面已打开"，不改路由', async () => {
     api.getTask.mockResolvedValue({ id: 54, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
@@ -284,7 +293,7 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
     } finally {
       unregisterPageHandler('export.taskDetailReady')
     }
-  })
+  }, REAL_WAIT_TEST_TIMEOUT_MS)
 
   it('详情已应用 ⇒ ok，回执说明已绑定', async () => {
     api.getTask.mockResolvedValue({ id: 52, type: 'EXPORT', status: 'IN_PROGRESS', items: [], currentStep: 'EXPORT' })
@@ -320,7 +329,7 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
     } finally {
       unregisterPageHandler('export.taskDetailReady')
     }
-  })
+  }, REAL_WAIT_TEST_TIMEOUT_MS)
 
   it('详情在 3–8 秒之间完成：旧 3s 上界会降级、8s 上界应成功；超过 8s 仍 UI_PAGE_NOT_READY', async () => {
     vi.useFakeTimers()

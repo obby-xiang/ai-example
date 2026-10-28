@@ -53,6 +53,32 @@ vi.mock('element-plus', async (importOriginal) => {
 
 import DataBrowserView from '@/views/DataBrowserView.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import type { ConfigDataRow } from '@/types/data'
+
+/**
+ * `el-table-column` 的段 stub：**按列作用域插槽的真实形态**投一个 row。
+ *
+ * 缺省 stub（以及未解析组件按原生元素处理）调用默认插槽时不传参，而模板里三处列插槽都是
+ * `#default="{ row }"`（DataBrowserView.vue:76/98/107/116）⇒ 解构 `undefined` 直接崩。
+ * 这里只补插槽入参，不改模板，也不把 Element Plus 整包拉进 jsdom。
+ */
+const ElTableColumnStub = defineComponent({
+  name: 'ElTableColumn',
+  props: { type: String, prop: String, label: String },
+  setup(_props, { slots }) {
+    const row: ConfigDataRow = {
+      id: 1,
+      defCode: 'DEMO',
+      scopeType: 'GLOBAL',
+      scopeKey: null,
+      rowKey: 'DEMO:GLOBAL',
+      dataJson: '{}',
+      version: 1,
+      updatedAt: '2026-01-01T00:00:00'
+    }
+    return () => (slots.default ? slots.default({ row }) : null)
+  }
+})
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -82,7 +108,14 @@ describe('批次5A 数据页：进页即复位任务态，保留本页声明', (
       importMode: 'MERGE'
     })
 
-    const wrapper = shallowMount(DataBrowserView)
+    const wrapper = shallowMount(DataBrowserView, {
+      global: {
+        // 解析 + stub 同一对象：仅注册不 stub 会渲染整个列组件；仅 stub 不注册则标签未解析，
+        // 插槽仍被当原生 children 无参调用（原崩溃形态）。
+        components: { ElTableColumn: ElTableColumnStub },
+        stubs: { ElTableColumn: ElTableColumnStub }
+      }
+    })
     await flushPromises()
 
     expect(workspace.pageId).toBe('data')

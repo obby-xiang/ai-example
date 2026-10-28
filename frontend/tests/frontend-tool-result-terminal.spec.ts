@@ -131,7 +131,17 @@ function suspendedFrontendSnapshot(): AiRunCurrent {
     runId: 'run-old',
     snapshotStatus: 'PENDING',
     pendingEntries: [
-      { toolCallId: 'n1', entryStatus: 'PENDING', kind: 'FRONTEND', name: 'probe.unknown-nongf', arguments: '{}', req: true }
+      // 必须是**可重建**的真实前端工具（UI_HANDOFF_TOOLS 成员）：快照重建只认 GF / 上传交接 /
+      // 表格写工具预览这三类待人卡，虚构工具名（原 `probe.unknown-nongf`）按"未知工具不重建"
+      // 的既有语义不会产出任何段或宿主，夹具因此空转。
+      {
+        toolCallId: 'n1',
+        entryStatus: 'PENDING',
+        kind: 'FRONTEND',
+        name: 'ui_request_upload',
+        arguments: JSON.stringify({ accept: ['xlsx'] }),
+        req: true
+      }
     ],
     unresolvedExternal: [],
     awaitingExternal: true,
@@ -292,6 +302,7 @@ describe('F1 ② store 链路级：handleFrame 收 frontend_tool_result 终帧',
 
     await store.loadHistory()
 
+    // 宿主由 rebuildPendingCard 就地建出（快照里的可重建条目），不复制历史工具卡
     const host = store.messages[0] as ChatMessage
     expect(host).toBeTruthy()
     expect(soleToolPart(host)).toMatchObject({ toolCallId: 'n1', status: 'pending', requiresAction: true })
@@ -301,7 +312,7 @@ describe('F1 ② store 链路级：handleFrame 收 frontend_tool_result 终帧',
     store.handleFrame({
       type: 'frontend_tool_result',
       toolCallId: 'n1',
-      name: 'probe.unknown-nongf',
+      name: 'ui_request_upload',
       ok: false,
       executed: false,
       status: 'TIMEOUT',

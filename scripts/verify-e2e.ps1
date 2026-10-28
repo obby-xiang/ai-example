@@ -295,6 +295,10 @@ function Read-SseCore($path, $bodyObj, [string[]]$stopOn, $sink, $onOpen) {
     if ($onOpen) { & $onOpen }
     $stream = $resp.Content.ReadAsStreamAsync().Result
     $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+    # 202（AR-06 "已 start、快照未建" ⇒ "准备中"，AiController#preparingOrUnknown）：响应体是 JSON
+    # 契约（preparing/retryAfterMs/elapsedMs），不是 SSE 帧。只有这个状态码需要正文，故只在 202 时
+    # 收集非 `data:` 行；其余状态码的 text 仍恒为 ''（既有 60+ 调用点的观测量不变）。
+    $bodyLines = New-Object System.Collections.ArrayList
     try {
         while ($true) {
             $line = $reader.ReadLine()
@@ -311,6 +315,8 @@ function Read-SseCore($path, $bodyObj, [string[]]$stopOn, $sink, $onOpen) {
                         if ($stopOn -contains $frame.type) { break }
                     }
                 }
+            } elseif ($statusOk -eq 202) {
+                $bodyLines.Add($line) | Out-Null
             }
         }
     } catch {
@@ -320,7 +326,8 @@ function Read-SseCore($path, $bodyObj, [string[]]$stopOn, $sink, $onOpen) {
         $resp.Dispose()
         $cts.Dispose()
     }
-    return @{ status = $statusOk; ok = $true; text = '' }
+    $text = if ($bodyLines.Count -gt 0) { ($bodyLines -join "`n") } else { '' }
+    return @{ status = $statusOk; ok = $true; text = $text }
 }
 
 # Read-Sse = Read-SseCore + 既有抛错口径（文案形状不变："SSE <path> => HTTP <status> <body>"；
@@ -2790,6 +2797,51 @@ function Ai-Events($runId, $lastSeq, [string[]]$stopOn) {
     $buf = New-Object System.Collections.ArrayList
     Read-Sse "/api/ai/events/$runId`?lastSeq=$lastSeq" $null $stopOn $buf $null
     return $buf
+}
+# ---------- 刷新恢复类用例的取数时点（AR-06：start 先于快照建立） ----------
+# 首帧 start 前移到"请求前压缩"之前发出（AiController#events 的 AR-06 类注）⇒ 存在一段**合法窗口**：
+# runId 已有、帧面已开、快照还没建。此刻两个持久面都还不完整 ——
+#   · GET /runs/current           → 空态（found=false）；
+#   · GET /events/{runId}         → 202 {preparing:true, retryAfterMs, elapsedMs}（AiController#preparing）。
+# 这两处都不是被测行为本身（刷新恢复的判据是"快照建好后持久面报什么"），而是取数时点太早：
+# "收到 start 就立刻读持久面"跑在空窗里，读到的是准备中，不是这一轮的恢复面。
+# 故取数时点改为按产品自己的信号**有界等待**，上界由调用方传产品键派生值
+# （app.ai.resilience.first-byte-timeout，见 Get-AiResilienceSeconds）——空窗不收敛即 FAIL，
+# 不是放宽断言：断言面（runId / RUNNING / archiveMaxSeq / 帧集）一个字都没动。
+function Ai-WaitCurrentRun($sid, $runId, [int]$sec) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    while ($true) {
+        $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
+        if ($cur.found) { return $cur }
+        if ((Get-Date) -ge $deadline) {
+            throw "${sec}s 内 /runs/current 一直是空态（found=false，runId=$runId）：快照未建立，AR-06 空窗未收敛"
+        }
+        Start-Sleep -Milliseconds 300
+    }
+}
+function Ai-EventsReady($runId, $lastSeq, [string[]]$stopOn, [int]$sec) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    $tries = 0
+    while ($true) {
+        $buf = New-Object System.Collections.ArrayList
+        $r = Read-SseCore "/api/ai/events/$runId`?lastSeq=$lastSeq" $null $stopOn $buf $null
+        if (-not $r.ok) { throw "SSE /api/ai/events/$runId`?lastSeq=$lastSeq => HTTP $($r.status) $($r.text)" }
+        # 202 是"准备中"，不是"回放零帧"：202 是 2xx，旧口径会让空 buf 冒充完整回放，
+        # 用例于是在空窗里断言"重放没有 start"。按服务端给的 retryAfterMs 重挂，直到拿到真回放。
+        if ([int]$r.status -ne 202) { return $buf }
+        $tries++
+        $body = $null
+        if ($r.text) { try { $body = $r.text | ConvertFrom-Json } catch { $body = $null } }
+        if (-not $body -or $null -eq $body.PSObject.Properties['retryAfterMs']) {
+            throw "重挂 202 缺 retryAfterMs（准备中契约被破坏）：$($r.text)"
+        }
+        $waitMs = [int]$body.retryAfterMs
+        if ($waitMs -lt 1) { throw "重挂 202 的 retryAfterMs=$waitMs（无法按契约重试）" }
+        if ((Get-Date).AddMilliseconds($waitMs) -ge $deadline) {
+            throw "${sec}s 内 /events/$runId 一直停在 202 准备中（重挂 $tries 次，最后 retryAfterMs=$waitMs，elapsedMs=$($body.elapsedMs)）"
+        }
+        Start-Sleep -Milliseconds $waitMs
+    }
 }
 function Ai-Cancel($runId) {
     try { return PostJsonRaw "/api/ai/cancel/$runId" $null } catch { return @{ cancelled = $false } }
@@ -5602,8 +5654,11 @@ Add-AiCase 'W-35' 'P1' '刷新恢复①在途轮发现：客户端断开后 runs
     # 只读到 start 就断开（= 用户刷新页面）：连接没了，但这一轮还在服务端跑
     Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text stall-frames=2000 刷新恢复在途轮发现。'; context = @{ page = 'tasks' } } @('start') $head
     $runId = Ai-RunId $head
-    $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
-    if (-not $cur.found) { throw '客户端断开后 runs/current 为空（刷新后无从发现这段在途轮）' }
+    # 取数时点（AR-06）：start 帧前移到"请求前压缩"之前发出，故"收到 start 就立刻读"会命中
+    # "快照还没建"的合法窗口，runs/current 此刻必然 found=false。刷新恢复的判据是**快照建好后的**
+    # 持久面，故先有界等"这一轮被建立"（上界 = 首字节预算，产品键），超时即 FAIL。
+    # 断言面不变：仍要求它指向本轮的 runId、报 RUNNING、archiveMaxSeq≥1。
+    $cur = Ai-WaitCurrentRun $sid $runId (Get-AiResilienceSeconds 'first-byte-timeout')
     if ($cur.runId -ne $runId) { throw "runs/current 指向 $($cur.runId)，期望 $runId" }
     if ($cur.snapshotStatus -ne 'RUNNING') { throw "断开后快照状态 $($cur.snapshotStatus)，期望 RUNNING（在途轮发现的判据）" }
     if ([int]$cur.archiveMaxSeq -lt 1) { throw "archiveMaxSeq=$($cur.archiveMaxSeq)，期望 ≥1（无归档则刷新后无从续收）" }
@@ -5617,8 +5672,11 @@ Add-AiCase 'W-36' 'P1' '刷新恢复②全量重放：断开后 lastSeq=0 重连
     $head = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】turn-text stall-frames=600 刷新恢复全量重放。'; context = @{ page = 'tasks' } } @('start') $head
     $runId = Ai-RunId $head
-    # 刷新恢复的在途路径（restoreInFlightRound）就是 lastSeq=0 全量重放：镜像正文滞后，增量必缺口
-    $replay = Ai-Events $runId 0 @('done', 'error')
+    # 刷新恢复的在途路径（restoreInFlightRound）就是 lastSeq=0 全量重放：镜像正文滞后，增量必缺口。
+    # 取数时点（AR-06）：start 已到但快照可能未建，此刻 /events 回 202 {preparing,retryAfterMs}；
+    # 202 是 2xx，若当"回放零帧"读就变成了"重放没有 start"的假红。按 retryAfterMs 有界重挂，
+    # 直到拿到真回放（上界 = 首字节预算，产品键），断言面不变。
+    $replay = Ai-EventsReady $runId 0 @('done', 'error') (Get-AiResilienceSeconds 'first-byte-timeout')
     $starts = @($replay | Where-Object { $_.type -eq 'start' })
     if ($starts.Count -ne 1) { throw "重放 start 帧 $($starts.Count) 个（期望恰 1）" }
     if ($starts[0].runId -ne $runId) { throw "重放首帧 runId=$($starts[0].runId)，期望 $runId" }

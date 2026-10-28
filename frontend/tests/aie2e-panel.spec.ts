@@ -226,7 +226,9 @@ describe('P-13（P2）：「继续」入口的语义与互斥', () => {
     const { buildErrorCard } = await import('@/utils/error-card')
     applyLocale('en-US')
     const store = useAiStore()
-    const failed = message('a-q', 'assistant', '', { done: true, runId: 'run-q' })
+    // 夹具：`retryModelStep` 以「本端已见最大帧序号」为重挂锚点，0 不是合法锚点（缺锚 ⇒ 拒绝）。
+    // 真实失败轮必然已应用过 `start` 帧，故补一条已应用序号，让 lastSeq > 0。
+    const failed = message('a-q', 'assistant', '', { done: true, runId: 'run-q', appliedSeqs: [1] })
     failed.errorCard = buildErrorCard('429', 'quota exceeded')
     store.messages = [message('u-q', 'user', 'export all'), failed]
     store.lastRoundOutcome = 'error'
@@ -317,6 +319,12 @@ describe('Q-01（P1）：空态快捷 chips 点即发（与手输同一入口）
     store.messages = []
     store.historyLoaded = true
     const wrapper = await mountPanel()
+    // 隔离（本用例曾随前序用例的执行时序偶发变红）：chips 的可见性来自 `chipsAvailable`，
+    // 其中 `ai.available` 由 `/health` 探针异步落地 —— 不等探针就断言，会把"探针未回"
+    // 误读成"chips 不可用"。先确认闸门的这一半真开了，再看 chips 的形态。
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(store.available).toBe(true)
 
     const chip = wrapper.find('[data-testid="suggestion-chip"]')
     expect(chip.exists()).toBe(true)
@@ -334,19 +342,27 @@ describe('Q-01（P1）：空态快捷 chips 点即发（与手输同一入口）
 })
 
 describe('Q-05（P1）：流式中 chips 不得发送（不产生 409）', () => {
-  it('loading 中点击 chip：零请求（canSend 闸门），不产生 SESSION_BUSY', async () => {
+  /**
+   * U3 口径（空态 chips 与 composer 共用可用性闸）：发送闸关闭时 chips **直接隐藏**、不置灰 ——
+   * 故断言 = 隐藏 + 零请求，不再要求 `disabled` 形态（置灰是不可见形态，锁它会锁错实现）。
+   */
+  it('loading 中 chips 隐藏且零请求（chipsAvailable 闸门），不产生 SESSION_BUSY', async () => {
     const store = useAiStore()
     store.messages = []
     store.historyLoaded = true
-    store.loading = true // 流式中（空态仍渲染 chips）
     const wrapper = await mountPanel()
-
-    const chip = wrapper.find('[data-testid="suggestion-chip"]')
-    expect(chip.exists()).toBe(true)
-    await chip.trigger('click')
+    // 先让 /health 探针落地，确认"闸门的另一半是开的"：否则 chips 消失可能只因探针未回，
+    // 断言会假绿。
     await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(store.available).toBe(true)
 
-    expect(api.chat).not.toHaveBeenCalled() // 点击不发送
+    store.loading = true // 流式中
+    await wrapper.vm.$nextTick()
+    expect(store.canSend).toBe(false)
+    expect(wrapper.find('[data-testid="suggestion-chip"]').exists()).toBe(false) // 隐藏，不置灰
+
+    expect(api.chat).not.toHaveBeenCalled() // 零请求
     expect(store.messages).toHaveLength(0) // 无幻影气泡
     wrapper.unmount()
   }, 20_000)

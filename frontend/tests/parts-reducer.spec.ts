@@ -504,7 +504,9 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
     })
 
     expect(store.suspended).toBe(false)
-    expect(store.activeForm?.status).toBe('cancelled')
+    // AR-07：取消即结算 ⇒ 活动表单位被收掉（同批下一张从这里接上）。结局落在**段**上，
+    // 不在 `activeForm` 上 —— 断言 `activeForm.status === 'cancelled'` 会把"已结算"当成"仍在填"。
+    expect(store.activeForm).toBeNull()
     expect(toolPart(assistant, 'g1').status).toBe('cancelled')
     expect(assistant.pendingCall).toBeNull()
   })
