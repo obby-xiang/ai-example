@@ -1174,9 +1174,13 @@ try {
 #   源断言：tool_start list_config_defs + /api/ai/tools?page=export 的披露子集
 #   main 适配：披露子集由只读端点 GET /api/ai/tools 取证（M1 收尾项⑤新增）——
 #   该端点与 ToolRegistry.forContext 同源，故断言不再依赖后端 DEBUG 日志；
-#   提供 -BackendLog 时仍做一次"日志行 vs 端点"的交叉校验。取 page:tasks 与
-#   task:IMPORT/PUBLISH 两个上下文对照（start_export 只在任务中心/导出向导披露；
-#   start_publish 只在导入向导的发布步披露）
+#   提供 -BackendLog 时仍做一次"日志行 vs 端点"的交叉校验。取 page:tasks / task:IMPORT/PUBLISH /
+#   task:EXPORT/{SELECT_DEFS,QUERY_COND} 四个上下文对照（start_export 只在任务中心与导出向导的
+#   导出步披露；start_publish 只在导入向导的发布步披露）。
+#   2026-10-28 步骤披露收口：三个步骤级向导动作按"它能成功的步骤"披露（与前端动作表的 allowSteps
+#   同源，口径见 ToolRegistryDisclosureTest#wizardToolDisclosureIsStepScoped）——
+#   select_definitions 只在 EXPORT/SELECT_DEFS + IMPORT/UPLOAD，set_condition 只在 EXPORT/QUERY_COND，
+#   confirm_step 在整个任务内；任务中心没有任务/步骤事实，三者一律不披露
 # ============================================================
 Say '--- TC15 AI 对话（流式 / 工具 / 渐进披露） ---'
 try {
@@ -1208,12 +1212,31 @@ try {
     if ($toolsPub.context -ne 'task:IMPORT/PUBLISH') { throw "端点上下文 $($toolsPub.context)，期望 task:IMPORT/PUBLISH" }
     $tPub = @($toolsPub.toolNames)
 
-    foreach ($need in @('list_config_defs', 'create_task', 'navigate_to', 'select_definitions', 'start_export')) {
+    foreach ($need in @('list_config_defs', 'create_task', 'navigate_to', 'start_export')) {
         if ($tTasks -notcontains $need) { throw "page:tasks 未披露 $need（$($tTasks -join ',')）" }
     }
     if ($tTasks -contains 'start_publish') { throw 'page:tasks 不应披露 start_publish' }
+    # 2026-10-28 步骤披露收口：任务中心没有「当前任务/步骤」这个事实，三个步骤级向导动作不披露
+    # （旧口径的宽披露会让模型在 SELECT_DEFS 直接调 set_condition，被前端 allowSteps 守卫拒绝）
+    foreach ($stepScoped in @('select_definitions', 'set_condition', 'confirm_step')) {
+        if ($tTasks -contains $stepScoped) { throw "page:tasks 不应披露步骤级动作 $stepScoped（$($tTasks -join ',')）" }
+    }
     if ($tPub -notcontains 'start_publish') { throw "task:IMPORT/PUBLISH 缺少 start_publish（$($tPub -join ',')）" }
     if ($tPub -contains 'start_export') { throw 'task:IMPORT/PUBLISH 不应披露 start_export' }
+
+    # 正向对照：步骤级动作在各自「能成功的步骤」披露（收口不等于全删）
+    $toolsSelDefs = GetJson '/api/ai/tools?page=export&taskType=EXPORT&step=SELECT_DEFS'
+    if ($toolsSelDefs.context -ne 'task:EXPORT/SELECT_DEFS') { throw "端点上下文 $($toolsSelDefs.context)，期望 task:EXPORT/SELECT_DEFS" }
+    $tSelDefs = @($toolsSelDefs.toolNames)
+    if ($tSelDefs -notcontains 'select_definitions') { throw "task:EXPORT/SELECT_DEFS 未披露 select_definitions（$($tSelDefs -join ',')）" }
+    if ($tSelDefs -notcontains 'confirm_step') { throw "task:EXPORT/SELECT_DEFS 未披露 confirm_step（$($tSelDefs -join ',')）" }
+    if ($tSelDefs -contains 'set_condition') { throw 'task:EXPORT/SELECT_DEFS 不应披露 set_condition（QUERY_COND 才可用）' }
+
+    $toolsQueryCond = GetJson '/api/ai/tools?page=export&taskType=EXPORT&step=QUERY_COND'
+    if ($toolsQueryCond.context -ne 'task:EXPORT/QUERY_COND') { throw "端点上下文 $($toolsQueryCond.context)，期望 task:EXPORT/QUERY_COND" }
+    $tQueryCond = @($toolsQueryCond.toolNames)
+    if ($tQueryCond -notcontains 'set_condition') { throw "task:EXPORT/QUERY_COND 未披露 set_condition（$($tQueryCond -join ',')）" }
+    if ($tQueryCond -contains 'select_definitions') { throw 'task:EXPORT/QUERY_COND 不应披露 select_definitions（SELECT_DEFS 才可用）' }
 
     # 备选交叉校验：后端 DEBUG 行的披露清单必须与只读端点一致（未提供 -BackendLog 时跳过）
     if ($BackendLog) {
@@ -1227,7 +1250,7 @@ try {
         if ($logTasks -ne $epTasks) { throw "page:tasks 日志($logTasks) 与端点($epTasks) 披露不一致" }
         if ($logPub -ne $epPub) { throw "task:IMPORT/PUBLISH 日志($logPub) 与端点($epPub) 披露不一致" }
     }
-    Ok ("TC15 流式+工具调用可见+渐进披露（只读端点 /api/ai/tools）：page:tasks {0} 个工具（无 start_publish）；task:IMPORT/PUBLISH 含 start_publish" -f $tTasks.Count)
+    Ok ("TC15 流式+工具调用可见+渐进披露（只读端点 /api/ai/tools）：page:tasks {0} 个工具（无 start_publish、无步骤级向导动作）；task:IMPORT/PUBLISH 含 start_publish；task:EXPORT/SELECT_DEFS 含 select_definitions 且无 set_condition；task:EXPORT/QUERY_COND 含 set_condition" -f $tTasks.Count)
 } catch { No 'TC15' $_.Exception.Message }
 
 # ============================================================
