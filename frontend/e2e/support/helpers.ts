@@ -174,43 +174,59 @@ export async function waitRoundSettled(page: Page, timeout = 60_000): Promise<vo
 }
 
 /**
- * 等本轮收敛，并顺路拒绝「需要人工裁决」的确认门。
+ * 等本轮收敛，并把「必须人工介入」的挂起面收掉（只做**不推进业务**的收尾动作）：
  *
- * 真模型会在本轮里发起需要确认的写操作（如创建导出配置任务）：这类轮次**有意**停在挂起态
- * 等用户裁决 —— 停止钮不会自己消失（run 40675108348 的 G01 / X07 即卡在这里：卡上有
- * `hitl-gate`「待你确认」，输入框是「挂起等待中」）。本函数按出现顺序逐个点「拒绝」
- * （不批准 ⇒ 零副作用），直到停止钮消失。
+ * ① 确认门（`hitl-gate`）→ 点「拒绝」（不批准 ⇒ 零副作用）；
+ * ② 待填写的生成式表单（可交互卡的「取消」）→ 点取消（`cancelled=true` 回灌，本轮继续收尾、不落业务数据）。
  *
- * 只用于"本轮结论不看确认门"的用例；要验门本身的用例仍用 {@link waitRoundSettled}。
- * 拒绝次数设上限：模型连续重发同一写操作时如实失败，不无限重试。
+ * 为什么要收：真模型会按槽位**渐进补问** —— 例：FILTER 表单提交后，它再就"选哪个配置项"补一张
+ * 定义表（`eab80bc`/`3717bc3` 的槽位填充口径），这类追加挂起面**不是**用例的断言对象；
+ * 不收它，停止钮就一直亮着（run 40714209280 的 `@real E2E-G01` 第 6 轮即卡在这里）。
+ * 另：真模型也会发起需要确认的写操作（同 run 40675108348 的 G01/X07，卡上有 `hitl-gate`）。
+ *
+ * 只用于"本轮结论不看挂起面本身"的用例；要验门/表单的用例仍用 {@link waitRoundSettled}。
+ * 处理次数有上限：模型连续重发时如实失败，不无限重试。
  */
-export async function waitRoundSettledRejectingGates(
+export async function waitRoundSettledDismissingPending(
   page: Page,
   timeout = 120_000,
-  maxGates = 5
+  maxDismissals = 5
 ): Promise<void> {
   const stopBtn = page.locator('[data-testid="stop-btn"]')
   const deadline = Date.now() + timeout
-  let rejected = 0
+  let dismissed = 0
   while (Date.now() < deadline) {
     if ((await stopBtn.count()) === 0) return
     const reject = page
       .locator('[data-testid="hitl-gate"]')
       .last()
       .getByRole('button', { name: '拒绝', exact: true })
+    // 只认**可交互**的活表单（带提交钮）；已提交/已取消的只读回放卡没有 `gf-cancel`，不会误点。
+    const cancel = page
+      .locator('[data-testid^="gf-form-"]')
+      .filter({ has: page.locator('[data-testid="gf-submit"]') })
+      .last()
+      .locator('[data-testid="gf-cancel"]')
+    let acted: typeof reject | null = null
     if ((await reject.count()) > 0 && (await reject.isEnabled().catch(() => false))) {
-      if (rejected >= maxGates) {
-        throw new Error(`本轮已连续拒绝 ${rejected} 次确认门仍未收敛（疑似模型反复重发同一写操作）`)
-      }
+      acted = reject
       await reject.click({ timeout: 10_000 })
-      rejected += 1
-      // 拒绝后这扇门即转只读态（`hitl-gate` 只在 pending 时渲染），等它离开再继续，避免连点同一张卡
-      await expect(reject).toBeHidden({ timeout: 15_000 }).catch(() => undefined)
+    } else if ((await cancel.count()) > 0 && (await cancel.isEnabled().catch(() => false))) {
+      acted = cancel
+      await cancel.click({ timeout: 10_000 })
+    }
+    if (acted !== null) {
+      dismissed += 1
+      if (dismissed > maxDismissals) {
+        throw new Error(`本轮已处理 ${dismissed} 个挂起面仍未收敛（疑似模型反复重发同一挂起动作）`)
+      }
+      // 处理后面即转只读态（门只在 pending 时渲染；表单取消后无 gf-submit/gf-cancel），等它离开再继续
+      await expect(acted).toBeHidden({ timeout: 15_000 }).catch(() => undefined)
       continue
     }
     await new Promise((done) => setTimeout(done, 250))
   }
-  throw new Error(`等本轮收敛超时（${timeout}ms，期间拒绝确认门 ${rejected} 次）`)
+  throw new Error(`等本轮收敛超时（${timeout}ms，期间处理挂起面 ${dismissed} 次）`)
 }
 
 export async function sessionId(page: Page): Promise<string> {

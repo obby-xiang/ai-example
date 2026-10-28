@@ -894,7 +894,13 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
           `第 ${turn} 轮：分别用 get_config_def 查询 CURRENCY、DOC_TYPE、APPROVE_ROLE 三个配置定义的字段详情`
             + '（三个编码各调用一次工具，不要合并成一次），再用一句话复述上一轮结论。'
         )
-        expect(round.done, `第 ${turn} 轮未收敛`).toBeTruthy()
+        // 真模型轮可能不给 done（HTTP 409 会话门 / 上游 error 终帧 / 空流）—— 红时把
+        // 状态码与帧序列带进断言消息，避免"第 N 轮未收敛"这种无法归因的失败（run 40714209280 第 6 轮即缺此证据）。
+        expect(
+          round.done,
+          `第 ${turn} 轮未收敛（HTTP ${round.status}，帧：${round.frames.map((frame) => frame.type).join(',') || '<空>'}`
+            + `，错误码：${round.errors.map((frame) => String(frame.code ?? '')).join(',') || '-'}）`
+        ).toBeTruthy()
         expect(round.errors).toHaveLength(0)
         const snapshot = await contextSnapshot(sid)
         // 分母必须来自模型行（写接口写进去的那个值），不是任何 env 回退
