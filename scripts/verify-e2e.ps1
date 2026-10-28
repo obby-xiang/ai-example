@@ -4307,8 +4307,25 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
     }
     $ids = @($afterRows | ForEach-Object { [string]$_.messageId } | Where-Object { $_ })
     if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { throw '历史里出现重复 messageId（同一落定点写了两次）' }
-    $firstHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$t*" })
-    if ($firstHits.Count -ne 1) { throw "挂起轮的用户消息在历史里有 $($firstHits.Count) 条（期望 1）" }
+    # 幻影气泡判据用**稳定身份**，不用短数字通配（run 40684192021 的 Q-08 偶发红即此因）：
+    #   `$t` 是夹具刚建任务的自增主键（短数字，本轮 37），而第二次发送的正文里带
+    #   `q08-second-<8 位 hex>` 随机 token —— 一旦 hex 片段里恰好出现 "37"，旧的
+    #   `-like "*37*"` 会把次轮消息连同首轮消息一起计进来（2 条），而两轮历史总数都是 4、
+    #   messageId 无重复，产品并没有重复落库。短数字在任意 token 里都可能出现 ⇒ 这条判据
+    #   天生不稳（约 7 个相邻位 × 1/256 ≈ 2.7%/轮）。
+    # 现在：① 行身份 = 首轮消息在 before 快照里的 messageId，after 里必须恰 1 条；
+    #       ② 正文按**整条相等**比对（首轮正文带 taskId、次轮正文不同）—— 防"同文不同号"的幻影副本。
+    $firstId = [string]$beforeRows[0].messageId
+    if ([string]::IsNullOrWhiteSpace($firstId)) {
+        throw '挂起轮的用户消息没有 messageId（幻影判据缺稳定身份；不得退回短数字通配）'
+    }
+    $firstHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and [string]$_.messageId -eq $firstId })
+    if ($firstHits.Count -ne 1) { throw "挂起轮的用户消息（messageId=$firstId）在历史里有 $($firstHits.Count) 条（期望 1）" }
+    $firstText = [string]$beforeRows[0].text
+    $firstTextHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and [string]$_.text -eq $firstText })
+    if ($firstTextHits.Count -ne 1) {
+        throw "挂起轮的用户消息正文在历史里有 $($firstTextHits.Count) 条（期望 1：同一次发送落了两条同文用户消息）"
+    }
     $secondHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
     $newRows = @($afterRows | Select-Object -Skip $beforeCount)
     if ($accepted) {
