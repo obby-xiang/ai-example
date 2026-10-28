@@ -112,6 +112,57 @@ class GenerativeFormGuardSlotsTest {
 		assertThat(condition.accepted()).as("配置项已知但条件槽位仍缺：条件表单可用").isTrue();
 	}
 
+	@Test
+	void missingPurposeWithDefinitionsSourceIsStillReleasedAsSelection() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				definitionSelectionForm(null), context(List.of("CURRENCY"), List.of()));
+
+		assertThat(verdict.accepted())
+			.as("旧选择表单没写 purpose：definitions 数据源是明确的配置选择结构，不能绕闸")
+			.isFalse();
+		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+	}
+
+	@Test
+	void missingPurposeWithDefinitionsSourceStillAllowsUnknownDefinitions() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				definitionSelectionForm(null), AiContext.empty());
+
+		assertThat(verdict.accepted()).as("未知配置时老表单照常可用").isTrue();
+	}
+
+	@Test
+	void explicitGeneralClarifyIsNotOverriddenByShape() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				definitionSelectionForm("GENERAL_CLARIFY"), context(List.of("CURRENCY"), List.of()));
+
+		assertThat(verdict.accepted())
+			.as("显式 GENERAL_CLARIFY 不因形状被改判为选择表单")
+			.isTrue();
+	}
+
+	@Test
+	void filterScenarioWithoutPurposeInfersConditionCollection() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				filterForm(), context(List.of("CURRENCY"),
+						List.of(new ConditionSlot("CURRENCY", "code", "CNY"))));
+
+		assertThat(verdict.accepted()).as("缺省 purpose + FILTER 场景 = 条件表单").isFalse();
+		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+	}
+
+	@Test
+	void titleAndLabelAloneDoNotInferPurpose() {
+		String form = "{\"form\":{\"scenario\":\"CLARIFY\",\"title\":\"选择配置项\",\"fields\":["
+				+ "{\"key\":\"defs\",\"label\":\"配置项\",\"type\":\"text\"}]}}";
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				form, context(List.of("CURRENCY"), List.of()));
+
+		assertThat(verdict.accepted())
+			.as("标题/label 不参与用途判断，仍按 GENERAL_CLARIFY 放行")
+			.isTrue();
+	}
+
 	// ── helpers ─────────────────────────────────────────────────────────────
 
 	private static AiContext context(List<String> defCodes, List<ConditionSlot> conditions) {
@@ -132,5 +183,21 @@ class GenerativeFormGuardSlotsTest {
 		String json = "{\"form\":{" + purposeField + "\"scenario\":\"CLARIFY\",\"fields\":["
 				+ "{\"key\":\"" + fieldKey + "\",\"label\":\"值\",\"type\":\"text\"}]}}";
 		return json;
+	}
+
+	/** 旧式"层级 → 配置定义"选择表单：没有 purpose，但 optionsFrom.sourceId=definitions 是选择结构。 */
+	private static String definitionSelectionForm(String purpose) {
+		String purposeField = purpose == null ? "" : "\"purpose\":\"" + purpose + "\",";
+		return "{\"form\":{" + purposeField + "\"scenario\":\"CLARIFY\",\"fields\":["
+				+ "{\"key\":\"level\",\"label\":\"层级\",\"type\":\"enum\",\"required\":true,"
+				+ "\"options\":[{\"value\":\"GLOBAL\",\"label\":\"全局\"},{\"value\":\"PROJECT\",\"label\":\"项目\"}]},"
+				+ "{\"key\":\"defs\",\"label\":\"配置项\",\"type\":\"multi_select\","
+				+ "\"optionsFrom\":{\"dependsOn\":\"level\",\"sourceId\":\"definitions\"}}]}}";
+	}
+
+	/** 旧式条件表单：没有 purpose，只有 scenario=FILTER。 */
+	private static String filterForm() {
+		return "{\"form\":{\"scenario\":\"FILTER\",\"fields\":["
+				+ "{\"key\":\"value\",\"label\":\"值\",\"type\":\"text\"}]}}";
 	}
 }

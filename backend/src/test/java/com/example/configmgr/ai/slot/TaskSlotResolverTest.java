@@ -37,12 +37,36 @@ class TaskSlotResolverTest {
 	}
 
 	@Test
-	void ambiguousDefinitionsAreNotGuessed() {
+	void multipleExplicitDefinitionsAreOneSelection() {
 		TaskSlots slots = resolve("导出 CURRENCY 和 ROLE_DICT");
 
 		assertThat(slots.defCodes())
-			.as("多候选 = 歧义：宁可缺失，也不替用户挑一个")
+			.as("多项明确配置是合法的多选导出，不是歧义")
+			.containsExactly("CURRENCY", "ROLE_DICT");
+
+		TaskSlots byNames = resolve("导出货币和角色字典");
+		assertThat(byNames.defCodes())
+			.as("唯一中文名同样可以作为多选的一项")
+			.containsExactly("CURRENCY", "ROLE_DICT");
+	}
+
+	@Test
+	void sharedDisplayNameIsStillAmbiguous() {
+		TaskSlots slots = resolve("导出重复字典");
+
+		assertThat(slots.defCodes())
+			.as("同一中文名对应多个定义编码，且没有编码消歧：不猜")
 			.isEmpty();
+	}
+
+	@Test
+	void cnyCurrencyDictionaryFillsConditionWithoutFilterKeyword() {
+		TaskSlots slots = resolve("导出CNY货币字典");
+
+		assertThat(slots.defCodes()).containsExactly("CURRENCY");
+		assertThat(slots.conditions())
+			.as("原文已给出唯一主键值：不要求出现“筛选/只要”等词")
+			.containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
 	}
 
 	@Test
@@ -162,6 +186,10 @@ class TaskSlotResolverTest {
 						new SlotDefinition.SlotField("code", "角色代码", true, List.of("ADMIN", "USER")))),
 				new SlotDefinition("SYS_PARAM", "系统参数", List.of(
 						new SlotDefinition.SlotField("paramKey", "参数键", true, List.of()),
-						new SlotDefinition.SlotField("paramValue", "参数值", false, List.of()))));
+						new SlotDefinition.SlotField("paramValue", "参数值", false, List.of()))),
+				new SlotDefinition("DUP_A", "重复字典", List.of(
+						new SlotDefinition.SlotField("code", "代码", true, List.of()))),
+				new SlotDefinition("DUP_B", "重复字典", List.of(
+						new SlotDefinition.SlotField("code", "代码", true, List.of()))));
 	}
 }

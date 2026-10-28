@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
- * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件）/ {@code GENERAL_CLARIFY}（通用澄清，缺省）</td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件）</td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>
@@ -106,7 +106,7 @@ public final class GenerativeFormRules {
 
 	/**
 	 * 表单<b>用途</b>（槽位放行的判据，不是渲染属性）：宿主只按这个字段判断"这张表是来补哪个缺口的"，
-	 * 绝不按标题猜。缺省 = {@link #DEFAULT_PURPOSE}（既有调用一字不改，行为兼容）。
+	 * 绝不按标题猜。缺省时按结构推断（见 {@link #purposeOf}），推断不出才是 {@link #DEFAULT_PURPOSE}。
 	 */
 	public static final String PURPOSE_SELECT_DEFINITIONS = "SELECT_DEFINITIONS";
 
@@ -1406,7 +1406,15 @@ public final class GenerativeFormRules {
 	// ── 小工具 ───────────────────────────────────────────────────────────────
 
 	/**
-	 * 表单用途：缺省 {@link #DEFAULT_PURPOSE}（兼容既有调用）；非法值在 schema 校验里拒绝。
+	 * 表单用途：显式值优先；<b>只有缺省时</b>才按结构推断 ——
+	 * <ol>
+	 * <li>字段 {@code optionsFrom.sourceId=definitions}（层级 → 定义的配置选择结构）⇒
+	 * {@code SELECT_DEFINITIONS}；</li>
+	 * <li>否则 {@code scenario=FILTER} ⇒ {@code SET_CONDITIONS}；</li>
+	 * <li>其它形状（含标题/label）一律 {@code GENERAL_CLARIFY}。</li>
+	 * </ol>
+	 * 显式 {@code GENERAL_CLARIFY} 直接返回，不被形状覆盖（旧表单的绕行口在缺省时堵住，
+	 * 显式澄清不受影响）。非法值由 schema 校验拒绝，不进入本方法。
 	 *
 	 * @param form 表单 schema 节点（可为 null）
 	 */
@@ -1415,8 +1423,27 @@ public final class GenerativeFormRules {
 			return DEFAULT_PURPOSE;
 		}
 		JsonNode purpose = form.get("purpose");
-		return purpose != null && purpose.isTextual() && !purpose.asText().isBlank()
-				? purpose.asText() : DEFAULT_PURPOSE;
+		if (purpose != null && purpose.isTextual() && !purpose.asText().isBlank()) {
+			return purpose.asText();
+		}
+		if (hasDefinitionsSelection(form)) {
+			return PURPOSE_SELECT_DEFINITIONS;
+		}
+		JsonNode scenario = form.get("scenario");
+		if (scenario != null && scenario.isTextual() && "FILTER".equals(scenario.asText())) {
+			return PURPOSE_SET_CONDITIONS;
+		}
+		return DEFAULT_PURPOSE;
+	}
+
+	/** 表单里是否有"配置定义选择"的明确结构：{@code optionsFrom.sourceId=definitions}。 */
+	private static boolean hasDefinitionsSelection(JsonNode form) {
+		for (JsonNode field : form.path("fields")) {
+			if ("definitions".equals(field.path("optionsFrom").path("sourceId").asText())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 结构化清单 → 人读清单（{@code schemaReasons/resultReasons/argumentReasons} 的唯一出口）。 */

@@ -17,9 +17,10 @@ import java.util.regex.Pattern;
  * {@code docs/research/修复-AI多步工作流与动态披露-2026-10-28.md} §8：
  * <ul>
  * <li><b>只在明确的导出/选择意图下</b>把配置定义名/编码当成选择（"查询货币字典"不是选择）；</li>
- * <li><b>唯一匹配才填</b>：多候选、否定、取消一律不猜；</li>
- * <li><b>条件必须保守</b>：明确"字段为/=值"，或唯一配置项 + 唯一主键 + 唯一大写值；
- * 没有筛选意图不造条件。</li>
+ * <li><b>唯一匹配才填</b>：编码或唯一中文名各算一项，<b>多项明确配置是合法多选</b>；
+ * 只有同一中文名对应多个编码（且没有编码消歧）、否定、取消才不猜；</li>
+ * <li><b>条件必须保守</b>：明确"字段为/=值"，或唯一配置项 + 唯一主键 + 唯一合法大写值；
+ * 本轮已明确选定唯一配置时裸值不要求筛选词（"导出CNY货币字典"），多候选仍不造条件。</li>
  * </ul>
  */
 final class TaskSlotParser {
@@ -87,21 +88,24 @@ final class TaskSlotParser {
 		if (text == null || text.isBlank()) {
 			return Intent.absent();
 		}
-		List<SlotDefinition> matched = matchDefinitions(text, definitions);
+		SelectionMatch match = matchSelection(text, definitions);
 		boolean selectIntent = SELECT_INTENT.matcher(text).find();
 		boolean negated = NEGATED_SELECT.matcher(text).find();
 		boolean clearAll = CLEAR_ALL.matcher(text).find();
 
 		SlotState selection;
 		List<String> defCodes = List.of();
-		if (!matched.isEmpty() && selectIntent && !negated) {
-			if (matched.size() == 1) {
+		if (selectIntent && !negated) {
+			if (match.ambiguous()) {
+				// 同一中文名对应多个定义编码（且文本里没有编码消歧）：不猜
+				selection = SlotState.AMBIGUOUS;
+			}
+			else if (!match.definitions().isEmpty()) {
 				selection = SlotState.DETERMINED;
-				defCodes = List.of(matched.get(0).code());
+				defCodes = match.definitions().stream().map(SlotDefinition::code).toList();
 			}
 			else {
-				// 多候选：不猜（"导出 A 和 B"里到底选哪个，文本没有足够信息）
-				selection = SlotState.AMBIGUOUS;
+				selection = SlotState.ABSENT;
 			}
 		}
 		else if (negated || clearAll) {
@@ -129,15 +133,13 @@ final class TaskSlotParser {
 				condition = SlotState.DETERMINED;
 				conditions = explicit;
 			}
-			else if (FILTER_INTENT.matcher(text).find() && def != null) {
-				ConditionSlot shorthand = shorthandCondition(text, def);
-				if (shorthand != null) {
-					condition = SlotState.DETERMINED;
-					conditions = List.of(shorthand);
-				}
-				else {
-					condition = SlotState.AMBIGUOUS;
-				}
+			else if (def != null && (selection == SlotState.DETERMINED
+					|| FILTER_INTENT.matcher(text).find())) {
+				// 裸值缩写：本轮已明确选定唯一配置时不再要求"筛选/只要"等词
+				// （"导出CNY货币字典"）；仍要求唯一主键 + 唯一合法大写候选。
+				ShorthandResult shorthand = shorthandCondition(text, def);
+				condition = shorthand.state();
+				conditions = shorthand.slot() == null ? List.of() : List.of(shorthand.slot());
 			}
 			else {
 				condition = SlotState.ABSENT;
@@ -157,20 +159,45 @@ final class TaskSlotParser {
 	// ── 配置定义识别 ─────────────────────────────────────────────────────────
 
 	/**
-	 * 文本里出现的配置定义（编码按词边界、大小写安全；中文名按 ≥2 字子串）。
-	 * 返回去重后的<b>候选集合</b>；大小由调用方判定"唯一才填"。
+	 * 文本里的配置定义选择：<b>多项明确配置是合法多选</b>（编码/唯一名称各算一项），
+	 * 只有"同一中文名映射到多个编码且文本里没有编码消歧"才算歧义。
 	 */
-	private static List<SlotDefinition> matchDefinitions(String text, List<SlotDefinition> definitions) {
-		List<SlotDefinition> matched = new ArrayList<>();
+	private static SelectionMatch matchSelection(String text, List<SlotDefinition> definitions) {
+		Set<String> codeMatched = new LinkedHashSet<>();
+		Map<String, List<SlotDefinition>> byName = new LinkedHashMap<>();
 		for (SlotDefinition definition : definitions) {
 			if (definition == null || definition.code() == null) {
 				continue;
 			}
-			if (containsCode(text, definition.code()) || containsName(text, definition.name())) {
-				matched.add(definition);
+			if (containsCode(text, definition.code())) {
+				codeMatched.add(definition.code());
+			}
+			if (containsName(text, definition.name())) {
+				byName.computeIfAbsent(definition.name().trim(), key -> new ArrayList<>()).add(definition);
 			}
 		}
-		return matched;
+		for (List<SlotDefinition> group : byName.values()) {
+			if (group.size() > 1
+					&& group.stream().noneMatch(definition -> codeMatched.contains(definition.code()))) {
+				return new SelectionMatch(true, List.of());
+			}
+		}
+		List<SlotDefinition> selected = new ArrayList<>();
+		for (SlotDefinition definition : definitions) {
+			if (definition == null || definition.code() == null) {
+				continue;
+			}
+			List<SlotDefinition> group = definition.name() == null ? null : byName.get(definition.name().trim());
+			boolean byUniqueName = group != null && group.size() == 1
+					&& group.get(0).code().equals(definition.code());
+			if (codeMatched.contains(definition.code()) || byUniqueName) {
+				selected.add(definition);
+			}
+		}
+		return new SelectionMatch(false, selected);
+	}
+
+	private record SelectionMatch(boolean ambiguous, List<SlotDefinition> definitions) {
 	}
 
 	private static boolean containsCode(String text, String code) {
@@ -257,13 +284,14 @@ final class TaskSlotParser {
 	}
 
 	/**
-	 * 唯一主键 + 唯一大写值的确定场景（如"导出 CURRENCY，筛选 CNY"）。
-	 * 以下任一不成立即返回 null：主键不唯一、没有候选/多候选、值不在可选枚举内。
+	 * 唯一主键 + 唯一大写值的确定场景（如"导出 CURRENCY，筛选 CNY"、"导出CNY货币字典"）。
+	 * 以下任一不成立即不造条件：主键不唯一、没有候选、值不在可选枚举内；
+	 * <b>多候选</b>是歧义（{@link SlotState#AMBIGUOUS}），无候选则是"没提"（沿用前值）。
 	 */
-	private static ConditionSlot shorthandCondition(String text, SlotDefinition definition) {
+	private static ShorthandResult shorthandCondition(String text, SlotDefinition definition) {
 		SlotDefinition.SlotField key = definition.keyField().orElse(null);
 		if (key == null) {
-			return null;
+			return new ShorthandResult(SlotState.ABSENT, null);
 		}
 		Set<String> excluded = new LinkedHashSet<>();
 		excluded.add(definition.code().toLowerCase(Locale.ROOT));
@@ -284,15 +312,21 @@ final class TaskSlotParser {
 				candidates.add(token);
 			}
 		}
-		if (candidates.size() != 1) {
-			return null;
+		if (candidates.isEmpty()) {
+			return new ShorthandResult(SlotState.ABSENT, null);
+		}
+		if (candidates.size() > 1) {
+			return new ShorthandResult(SlotState.AMBIGUOUS, null);
 		}
 		String value = candidates.get(0);
 		if (!key.optionValues().isEmpty() && !key.optionValues().contains(value)) {
 			// 有枚举就按枚举校验：不在可选值里不是"筛选"，是另一个词
-			return null;
+			return new ShorthandResult(SlotState.ABSENT, null);
 		}
-		return new ConditionSlot(definition.code(), key.code(), value);
+		return new ShorthandResult(SlotState.DETERMINED, new ConditionSlot(definition.code(), key.code(), value));
+	}
+
+	private record ShorthandResult(SlotState state, ConditionSlot slot) {
 	}
 
 	// ── 任务类型 ─────────────────────────────────────────────────────────────

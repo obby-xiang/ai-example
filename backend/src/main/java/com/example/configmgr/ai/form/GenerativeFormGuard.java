@@ -39,7 +39,9 @@ import java.util.Set;
  * 下发前在<b>原 schema 校验之后</b>再看 {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
  * 槽位已确定的收集表单没有真实缺口 ⇒ 拒绝下发（{@code FORM_SLOTS_ALREADY_KNOWN}，零副作用），
  * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与
- * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。上下文由
+ * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。缺省 purpose 只在结构明确时推断
+ * （{@code optionsFrom.sourceId=definitions} → 选择，{@code scenario=FILTER} → 条件），
+ * 显式 {@code GENERAL_CLARIFY} 不被形状覆盖；标题/label 不参与判断。上下文由
  * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
  * （既有单测/兼容调用）槽位规则整体跳过。
  */
