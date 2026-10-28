@@ -12,7 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { defineComponent } from 'vue'
 import type { ConditionDraftModel } from '@/types/condition'
 
 const api = vi.hoisted(() => ({

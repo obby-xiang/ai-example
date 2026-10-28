@@ -24,8 +24,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 会被旧主人用陈旧视图覆盖（Camunda INVALID_STATE 同型）。fence = {@code ai:fence:run:<runId>}
  * 记"已落库的最大 epoch"，写入要求 {@code fence ≤ 本次 epoch}，并在同一步把 fence 推到本次 epoch。
  *
- * <p><b>红线 E3</b>：<b>不持租</b>（epoch = 0）时保持 plain {@code SET} —— 单实例/降级路径的
- * 既有语义（TTL 24h、无 fence 键）一点不变；"无租约不拒写"是对"租约设施故障即全面停写"的拒绝。
+ * <p><b>红线 E3</b>：<b>不持租</b>（epoch = 0）时不得被 fence 写拒之门外 —— 单实例/降级路径的
+ * 既有语义（同一个快照键、TTL 24h、无 fence 键）一点不变，快照写仍照落；只是非取消状态改为过一次
+ * 单键取消守卫 Lua（{@code TERMINAL_SET_IF_NOT_CANCELLED}），"无租约不拒写"仍是对"租约设施故障
+ * 即全面停写"的拒绝。
  */
 class RunStoreFencedWriteTest {
 
@@ -116,7 +118,10 @@ class RunStoreFencedWriteTest {
 				.anySatisfy(event -> assertThat(event.getFormattedMessage()).contains("STALE_EPOCH"));
 	}
 
-	/** E3（红线）：不持租 ⇒ 保持 plain SET，无 fence 键、TTL 仍 24h。 */
+	/**
+	 * E3（红线）：不持租 ⇒ 不进 fence 写（无 fence 键、TTL 仍 24h）；但非取消状态的写要过一次
+	 * 单键取消守卫 Lua（{@code TERMINAL_SET_IF_NOT_CANCELLED}），不再是不经脚本的 plain SET。
+	 */
 	@Test
 	void withoutALeaseSaveStaysAPlainSet() {
 		assertThat(this.storeA.heldRunEpoch(RUN_ID)).isZero();
@@ -126,7 +131,12 @@ class RunStoreFencedWriteTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		this.storeA.save(snapshot);
 
-		assertThat(this.fake.scriptCalls.get()).as("无租约 ⇒ 一次 Lua 都不进").isZero();
+		assertThat(this.fake.scriptCalls.get()).as("无租约的非取消状态写 ⇒ 恰好一次取消守卫 Lua").isEqualTo(1);
+		assertThat(this.fake.lastScriptBody()).as("走的是取消守卫脚本，不是 fence 写")
+			.contains("TERMINAL_SET_IF_NOT_CANCELLED")
+			.doesNotContain("FENCED_TERMINAL_SET")
+			.doesNotContain("LEASE_FENCE_SET");
+		assertThat(this.fake.lastScriptKeys()).as("守卫只碰快照键（单键，不带 fence 键）").containsExactly(RUN_KEY);
 		assertThat(this.fake.string(FENCE_KEY)).as("无租约 ⇒ 不产生 fence 键").isNull();
 		assertThat(this.fake.string(RUN_KEY)).isNotNull();
 		assertThat(this.fake.expiry(RUN_KEY)).as("TTL 仍是 session-ttl（24h）").isEqualTo(Duration.ofHours(24));

@@ -62,7 +62,8 @@ vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: api.lis
 const TASK_7 = {
   id: 7,
   type: 'EXPORT',
-  status: 'IN_PROGRESS',
+  title: '演示导出任务',
+  status: 'ACTIVE',
   items: [{ defCode: 'DEMO', conditionJson: null }],
   currentStep: 'QUERY_COND'
 }
@@ -127,7 +128,7 @@ describe('import.taskDetailReady：同一口径（导入页）', () => {
     expect(probe).not.toBeNull()
     expect(probe!({})).toBe(false)
 
-    pending.resolve({ ...TASK_7, type: 'IMPORT', items: [] })
+    pending.resolve({ ...TASK_7, type: 'IMPORT', title: '演示导入任务', status: 'ACTIVE', items: [] })
     await flushPromises()
 
     expect(probe!({})).toBe(true)

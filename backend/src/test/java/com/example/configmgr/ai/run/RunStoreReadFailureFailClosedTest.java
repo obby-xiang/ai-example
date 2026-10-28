@@ -7,12 +7,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.HashOperations;
-import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.doThrow;
 
@@ -159,11 +161,12 @@ class RunStoreReadFailureFailClosedTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
 		snapshot.setStatus(RunSnapshot.RUNNING);
-		ValueOperations<String, String> values = this.fake.redis.opsForValue();
+		// 当前无租约的非取消状态写走取消守卫 Lua（TERMINAL_SET_IF_NOT_CANCELLED，redis.execute），
+		// 不再走 values.set —— 故障注入因此落在脚本执行入口，与产品代码当前的写路径一致。
 		doThrow(new IllegalStateException("模拟快照写失败"))
-			.when(values).set(org.mockito.ArgumentMatchers.eq(this.store.runKey(RUN_ID)),
-					org.mockito.ArgumentMatchers.anyString(),
-					org.mockito.ArgumentMatchers.any(java.time.Duration.class));
+			.when(this.fake.redis)
+			.execute(argThat((RedisScript<?> script) -> script.getScriptAsString()
+				.contains("TERMINAL_SET_IF_NOT_CANCELLED")), anyList(), any(Object[].class));
 		assertThatThrownBy(() -> this.store.save(snapshot))
 			.isInstanceOf(AiStateUnavailableException.class);
 	}

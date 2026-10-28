@@ -48,7 +48,8 @@ class ResultViewFrameTest {
 		assertThat(frame).containsEntry("result", "全部 15 个定义");
 		assertThat(frame.keySet()).containsExactlyInAnyOrder("type", "seq", "atMs", "runId", "toolCallId", "name",
 				"kind", "ok", "executed", "executedBy", "reused", "status", "outcome", "code", "retryable",
-				"target", "messageId", "result");
+				"target", "messageId", "result", "userTextCode");
+		assertThat(frame.get("userTextCode")).as("无摘要码时 userTextCode 仍挂键，值为 null").isNull();
 	}
 
 	@Test
