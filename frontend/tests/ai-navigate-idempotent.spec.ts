@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { executeFrontendTool } from '@/utils/frontend-tools'
+import { PAGE_READY_TIMEOUT_MS, executeFrontendTool } from '@/utils/frontend-tools'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { resetAiTestState } from './ai-fixtures'
@@ -82,7 +82,7 @@ describe('A-03：同页但任务不同 ⇒ 不直返，正常派发', () => {
         runId: 'run-a03',
         budgetMs: 30_000
       })
-      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
       const execution = await pending
       expect(push).toHaveBeenCalledTimes(1)
       expect(execution.result).not.toContain('已在目标页')
@@ -93,7 +93,7 @@ describe('A-03：同页但任务不同 ⇒ 不直返，正常派发', () => {
 })
 
 describe('A-04：导航已提交但页面未就绪 ⇒ failed + UI_PAGE_NOT_READY（不再「结局未知」）', () => {
-  it('3s 上界耗尽 ⇒ 可判定失败 + 「本轮不要重复导航」', async () => {
+  it('等待上界耗尽 ⇒ 可判定失败 + 「本轮不要重复导航」', async () => {
     vi.useFakeTimers()
     try {
       enter('tasks')
@@ -103,7 +103,7 @@ describe('A-04：导航已提交但页面未就绪 ⇒ failed + UI_PAGE_NOT_READ
         runId: 'run-a04',
         budgetMs: 30_000
       })
-      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
       const execution = await pending
       expect(execution.outcome).toBe('failed')
       expect(execution.code).toBe('UI_PAGE_NOT_READY')
@@ -152,11 +152,11 @@ describe('A-05：同 run 同参去重（第二次回执「本轮已执行过」�
         budgetMs: 30_000
       })
       const first = call()
-      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
       expect((await first).outcome).toBe('failed')
 
       const second = call()
-      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
       const retried = await second
       expect(retried.outcome).toBe('failed')
       expect(retried.result).not.toContain('本轮已执行过')

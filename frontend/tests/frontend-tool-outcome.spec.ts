@@ -10,6 +10,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import {
+  PAGE_READY_TIMEOUT_MS,
   executeFrontendTool,
   makeExecution,
   registerFrontendToolExecutor,
@@ -150,15 +151,15 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
 })
 
 describe('批3③a T4 → 批 A A-04：动作表等待上界耗尽 ⇒ failed + UI_PAGE_NOT_READY', () => {
-  it('navigate_to(export) 3s 内目标页未就绪 ⇒ 可判定失败（不再「结局未知」）', async () => {
+  it('navigate_to(export) 等待上界内目标页未就绪 ⇒ 可判定失败（不再「结局未知」）', async () => {
     // 现场：open_page 契约动作被受理（router.push 在 jsdom 下自行结算），但 export 页能力
-    // handler 从未注册 ⇒ waitForPageReady 轮询 3s 超时。
+    // handler 从未注册 ⇒ waitForPageReady 轮询到 PAGE_READY_TIMEOUT_MS 超时。
     // 批 A 语义变更：导航已发生、后置条件未满足 ⇒ failed + UI_PAGE_NOT_READY；
     // 文案要求「导航已提交」「本轮不要重复导航」，且不得再出现「结局未知」。
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
     const pending = executeFrontendTool({ name: 'navigate_to', args: { page: 'export' }, budgetMs: 30_000 })
-    await vi.advanceTimersByTimeAsync(3_000)
+    await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
     const execution = await pending
     expect(execution.ok).toBe(false)
     expect(execution.outcome).toBe('failed')

@@ -797,7 +797,7 @@ const PAGE_READY_PROBES: Record<WorkspacePageId, readonly string[]> = {
 }
 
 /** 页面就绪等待上限（毫秒）：超过即如实告知"仍在加载"，不无限等。 */
-export const PAGE_READY_TIMEOUT_MS = 3_000
+export const PAGE_READY_TIMEOUT_MS = 8_000
 
 /**
  * 等待目标页面就绪（F3，参照 kimi-k3 蓝本"导航后等页面可用再动作"的实践）。

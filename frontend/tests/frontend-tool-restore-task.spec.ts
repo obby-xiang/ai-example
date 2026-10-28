@@ -166,8 +166,8 @@ describe('导航后等目标页就绪', () => {
     const execution = await executeFrontendTool({
       name: 'navigate_to',
       args: { page: 'export' },
-      // 预算给足 3s 等待上界 + 余量
-      budgetMs: 6_000
+      // 预算给足 8s 等待上界 + 余量
+      budgetMs: 10_000
     })
 
     expect(execution.outcome).toBe('failed')
@@ -182,7 +182,7 @@ describe('导航后等目标页就绪', () => {
     })
     expect(getPageHandler('import.nextStep')).not.toBeNull()
 
-    const execution = await executeFrontendTool({ name: 'restore_task', args: { taskId: 7 }, budgetMs: 6_000 })
+    const execution = await executeFrontendTool({ name: 'restore_task', args: { taskId: 7 }, budgetMs: 10_000 })
 
     expect(execution.outcome).toBe('failed')
     expect(execution.result).toContain('绑定没有完成')
@@ -236,7 +236,7 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
       const execution = await executeFrontendTool({
         name: 'navigate_to',
         args: { page: 'export', taskId: 51 },
-        budgetMs: 6_000
+        budgetMs: 10_000
       })
 
       expect(execution.outcome).toBe('failed')
@@ -264,7 +264,7 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
       const execution = await executeFrontendTool({
         name: 'restore_task',
         args: { taskId: 54 },
-        budgetMs: 8_000
+        budgetMs: 10_000
       })
 
       // 路由确实执行过：一次 push，页与任务都已落位
@@ -311,13 +311,52 @@ describe('导航成功前等"任务详情已应用"（防 confirm_step 空写）
       const execution = await executeFrontendTool({
         name: 'navigate_to',
         args: { page: 'export', taskId: 53 },
-        budgetMs: 6_000
+        budgetMs: 10_000
       })
 
       expect(execution.outcome).toBe('failed')
       expect(execution.code).not.toBe('UI_ALREADY_ON_PAGE')
       expect(push).not.toHaveBeenCalled()
     } finally {
+      unregisterPageHandler('export.taskDetailReady')
+    }
+  })
+
+  it('详情在 3–8 秒之间完成：旧 3s 上界会降级、8s 上界应成功；超过 8s 仍 UI_PAGE_NOT_READY', async () => {
+    vi.useFakeTimers()
+    let detailReady = false
+    registerPageHandler('export.taskDetailReady', () => detailReady)
+    try {
+      // 边界一：详情在 5s 应用 —— 旧 3s 上界已到点（failed + degraded），8s 上界仍在等
+      api.getTask.mockResolvedValue({ id: 71, type: 'EXPORT', status: 'ACTIVE', items: [], currentStep: 'EXPORT' })
+      const within = executeFrontendTool({
+        name: 'navigate_to',
+        args: { page: 'export', taskId: 71 },
+        budgetMs: 20_000
+      })
+      await vi.advanceTimersByTimeAsync(4_950)
+      expect(detailReady).toBe(false)
+      detailReady = true
+      await vi.advanceTimersByTimeAsync(100)
+      const withinExecution = await within
+      expect(withinExecution.outcome).toBe('ok')
+      expect(withinExecution.result).toContain('可继续执行本页动作')
+
+      // 边界二：详情始终不应用，超过 8s ⇒ 仍是 UI_PAGE_NOT_READY（上界是硬边界，不退化成无限等）
+      detailReady = false
+      api.getTask.mockResolvedValue({ id: 72, type: 'EXPORT', status: 'ACTIVE', items: [], currentStep: 'EXPORT' })
+      const beyond = executeFrontendTool({
+        name: 'navigate_to',
+        args: { page: 'export', taskId: 72 },
+        budgetMs: 20_000
+      })
+      await vi.advanceTimersByTimeAsync(8_100)
+      const beyondExecution = await beyond
+      expect(beyondExecution.outcome).toBe('failed')
+      expect(beyondExecution.availability).toBe('degraded')
+      expect(beyondExecution.code).toBe('UI_PAGE_NOT_READY')
+    } finally {
+      vi.useRealTimers()
       unregisterPageHandler('export.taskDetailReady')
     }
   })
