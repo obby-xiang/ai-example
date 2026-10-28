@@ -4253,7 +4253,7 @@ async function caseRedisOutageRecovery() {
  *     被取消语义拒绝（`DUPLICATE_TOOL_CALL_ID` / `ALREADY_CANCELLED`）：认领表不得出现该条目、
  *     台账不得有执行记录、作业数不变。</li>
  * <li><b>R-3 claim 哈希-only 不得伪未执行</b>：条目是 `APPROVED` 且**零**执行证据，只有认领表
- *     （`ai:claim:<runId>` 的某个 field）有值。取消收尾的判据格（`hasExecutionEvidence` 含认领表）
+ *     （`ai:claim:{run:<runId>}` 的某个 field）有值。取消收尾的判据格（`hasExecutionEvidence` 含认领表）
  *     必须**不**把条目改写成 `CANCELLED`/"未执行"，也不得回滚认领证据。
  *     R-2 是同一取消路径的**对照组**（无认领 ⇒ 收敛为 `CANCELLED`），两格只差"认领表有没有值"。</li>
  * </ul>
@@ -4291,11 +4291,21 @@ const CANCELLED_BEFORE_CLAIM_TEXT = '本轮对话已被用户取消，该工具�
 const R1_REPLAY_OBSERVE_MS = 10000
 
 function cancelFlagKey(runId) {
+  // 取消标志是**裸前缀**键：产品 `CancellationRegistry` 直接用 `ai:cancel:<runId>`
+  // （`POST /api/ai/cancel/{runId}` 的响应体 `cancelKey` 即此形态）。
   return `${CANCEL_KEY_PREFIX}${runId}`
 }
 
+/**
+ * 认领表键：产品用 `RunStore.runScopedKey(CLAIM_PREFIX, runId)` = `ai:claim:{run:<runId>}`。
+ *
+ * <p>为什么钉死：早期夹具写成裸 `${CLAIM_KEY_PREFIX}${runId}`（把取消标志的裸前缀形态套到认领表上），
+ * 注入落在没人读的键上 ⇒ 产品读不到认领证据 ⇒ 取消收尾把已批准条目收敛成 `CANCELLED`，
+ * R-3 假红（run 40681954172：条目 APPROVED+零证据+认领表注入，取消后仍被改写为 CANCELLED）。
+ * `--self-check` 里同时钉产品侧的 `runScopedKey(CLAIM_PREFIX, runId)` 与 `runTag` 形态。
+ */
 function executionClaimKey(runId) {
-  return `${CLAIM_KEY_PREFIX}${runId}`
+  return `${CLAIM_KEY_PREFIX}{run:${runId}}`
 }
 
 function executionClaimPresent(runId, toolCallId) {
@@ -5950,6 +5960,11 @@ function selfTestL150GridContract() {
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/RunStore.java', [
     'CLAIM_PREFIX = "ai:claim:"',
+    // 认领表是 **run 级作用域键**：`claimKey` 必须经 `runScopedKey`，`runTag` 必须是 `{run:<id>}`。
+    // 只钉前缀会让夹具把裸 `ai:claim:<runId>` 当成产品键（run 40681954172 的 R-3 假红）。
+    'public String claimKey(String runId)',
+    'runScopedKey(CLAIM_PREFIX, runId)',
+    'return "{run:" + runId + "}"',
     'public boolean hasExecutionEvidence(',
     'public boolean cancellableBeforeExecution('
   ])
@@ -5957,6 +5972,10 @@ function selfTestL150GridContract() {
     'private String settleIfCancelledBeforeClaim(',
     'CancelState.UNKNOWN'
   ])
+  // 夹具自身的键形态：认领表必须带 run 作用域（`{run:<id>}`），取消标志必须是裸前缀。
+  // 两者各有产品侧实证：`ai:claim:` 由 `runScopedKey` 拼（本源码断言），`ai:cancel:` 见 /cancel 响应体 `cancelKey`。
+  checkEq(executionClaimKey('l150-probe'), 'ai:claim:{run:l150-probe}', 'R-3 夹具的认领表键必须带 run 作用域')
+  checkEq(cancelFlagKey('l150-probe'), 'ai:cancel:l150-probe', 'R-1 夹具的取消标志键必须是裸前缀')
   const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
   // 先剔除本函数自身，避免"检查项里自带这些字符串"造成恒真。
   const start = source.indexOf('function selfTestL150GridContract')
@@ -5975,7 +5994,7 @@ function selfTestL150GridContract() {
   for (const needle of needles) {
     checkIncludes(body, needle, `L-150 三格断言 ${needle}`)
   }
-  return `${needles.length} 条断言 + 4 个产品契约`
+  return `${needles.length} 条断言 + 2 条键形态 + 9 项产品契约`
 }
 
 function selfTestHygiene() {
