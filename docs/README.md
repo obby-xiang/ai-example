@@ -52,6 +52,8 @@
 | 2026-10-19 仓外文档补档批 | 23 件仓外正式报告补档（22 件入 `docs/evidence/` + 1 件入 `docs/demo/`），含排除清单（DC-21 issue-archive 豁免 / 过期 audit / 运行台账）与 **demo 真缺失 0**；入口 = 自包含归档清单 | `docs/evidence/归档清单-仓外文档补档-2026-10-19.md` |
 | 2026-10-20 裁决链 / 审查链补档 | 2026-10-19 补档批的裁决源与审查链 6 件（44 候选最终对账、54 会话索引、独立审查、审查修正、修正后复审 + 裁决源 JSON 附件），按 DC-08 脱敏后入库、源件一律未改；`_cu-handoff27/` 两件执行报告与 `_cu-card-project/progress.md` 按 DC-19 过程台账豁免 | 归档清单 §8：`docs/evidence/归档清单-仓外文档补档-2026-10-19.md` |
 
+| **当前会话与子 agent 脱敏证据（2026-10-28）** | 本会话的**交付总账 + 子 agent 调用台账**：台账 4 笔提交（`4613eee` / `2d12b30` / `79fafa7` / `38fc8c9`，基线 `3f5bd6b`）、主要任务与执行口径、**单点回执分四类**（A 精确单点 / B 类级 / C 只读 diff / D 工程门禁）、**未验边界 9 条**与**禁止主张清单**；子 agent **实算 110 个**（169 次 `Agent` 调用 / 167 次 spawn；完成 106 · 取消 4 · 运行中 0）。日志本体留在仓外、只提取安全元数据；入口 = 本目录 `README.md` 与 `subagents.md`（原名 `agents.md`，已更名以免被当 `AGENTS.md` 加载）；**性质 = 证据台账，不是验收报告** | `docs/evidence/ai-session-2026-10-28/README.md`、`docs/evidence/ai-session-2026-10-28/subagents.md` |
+
 > 附件约定：证据文档的原始材料（`.log` / `.json` / `.txt`）与被引文档同目录、同前缀（如 `V3-附件-e2e-run1-原始输出.txt`）。按 DC-08，入库产物一律用 `<REPO_ROOT>` / `<MAVEN_HOME>` 等占位符；个别为保存原始命令行/日志而保留了本机路径的附件，按 `scripts/githooks/README.md` 第 5.1 节的既定处理（占位符改写，或留痕放行并登记待清理）对待，**不要以它们为写作范例**。
 > 附件约定（探针）：`probes/` 子目录放随证探针 `.java` 源码——**仓库外编译运行、不参与构建与测试计数**；`backend/pom.xml` 未声明任何指向 `docs/` 的 `sourceDirectory`/`testSourceDirectory`/`includes`，该形状由文档门禁 `scripts/ci/check-docs.mjs` 断言。
 
