@@ -939,8 +939,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			boolean written = guardedStatus ? fencedTerminalSet(runId, json, epoch) : fencedSet(runId, json, epoch);
 			if (!written) {
 				if (guardedStatus) {
-					log.warn("{} 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
-							+ "不覆盖 CANCELLED，也不改会话索引/租约）", snapshot.getStatus(), runId, epoch);
+					Long fence = fenceAheadOf(runId, epoch);
+					if (fence != null) {
+						log.warn("STALE_EPOCH 拒写轮次快照 runId={} status={} epoch={} fence={}（fence 已推进到更高 "
+								+ "epoch：另一实例已接管本轮的续跑权，本实例的写回作废）", runId, snapshot.getStatus(),
+								epoch, fence);
+					}
+					else {
+						log.warn("{} 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
+								+ "不覆盖 CANCELLED，也不改会话索引/租约）", snapshot.getStatus(), runId, epoch);
+					}
 				}
 				else {
 					log.warn("STALE_EPOCH 拒写轮次快照 runId={} epoch={}（fence 已推进到更高 epoch："
@@ -1003,6 +1011,31 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	private static boolean guardedStatus(String status) {
 		return !RunSnapshot.CANCELLED.equals(status);
+	}
+
+	/**
+	 * 拒写后的 fence 复核（只服务诊断）：fence 已推进到 {@code epoch} 之上时返回该值。
+	 *
+	 * <p>为什么只能在冷路径上复核：{@link #FENCED_TERMINAL_SET_SCRIPT} 把"fence 陈旧"与"当前快照已是
+	 * 取消态"合成同一个返回码，拒写原因因此不可分辨。这里用一次单键 {@code GET} 事后区分 ——
+	 * fence 大于本次 epoch 时，脚本的第一处判据必然先命中，拒写原因就是陈旧 epoch。
+	 *
+	 * <p><b>读不出来 ⇒ {@code null}</b>（回退原有的合并日志）：复核只是可观测性增强，不得引入新异常、
+	 * 也不得改变"这一笔被拒"的结论。刻意不走 {@link #fenceEpoch}（它在读失败时 fail-closed 抛异常并记
+	 * 认领侧的 WARN，语义与这里的纯诊断用途不同）。
+	 */
+	private Long fenceAheadOf(String runId, long epoch) {
+		try {
+			String raw = this.redis.opsForValue().get(fenceKey(runId));
+			if (raw == null) {
+				return null;
+			}
+			long fence = Long.parseLong(raw);
+			return fence > epoch ? Long.valueOf(fence) : null;
+		}
+		catch (Exception ex) {
+			return null;
+		}
 	}
 
 	/**
