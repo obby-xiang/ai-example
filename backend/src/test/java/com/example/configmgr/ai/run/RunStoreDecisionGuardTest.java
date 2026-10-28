@@ -103,6 +103,35 @@ class RunStoreDecisionGuardTest {
 		assertThat(bare.getResolvedAtMs()).as("裸状态：时间缺省").isZero();
 	}
 
+	/**
+	 * 空/非数字时间戳是"坏值/旧形态"，只缺时间：已成立的状态照常合并，
+	 * {@code resolvedAtMs} 保持缺省，读侧不得因此抛错。
+	 *
+	 * <p>空段（{@code REJECTED|}）与非数字段（{@code CANCELLED|not-a-number|inst-b}）是本方法覆盖的两个值。
+	 */
+	@Test
+	void emptyOrNonNumericTimestampKeepsMergedStatusAndLeavesTimeUnset() {
+		this.fake.table(DECIDED_KEY).put(CALL_ID, PendingToolCall.REJECTED + "|");
+
+		PendingToolCall emptyTime = this.store.pending(RUN_ID, CALL_ID);
+
+		assertThat(emptyTime.getStatus()).as("空时间戳：状态照常合并").isEqualTo(PendingToolCall.REJECTED);
+		assertThat(emptyTime.getResolvedAtMs()).as("空时间戳：时间缺省（且读取未抛错）").isZero();
+
+		String nonNumericCallId = "call-non-numeric";
+		PendingToolCall nonNumericEntry = new PendingToolCall();
+		nonNumericEntry.setToolCallId(nonNumericCallId);
+		nonNumericEntry.setName("start_import");
+		nonNumericEntry.setKind(PendingToolCall.KIND_CONFIRM);
+		this.store.putPending(RUN_ID, nonNumericEntry);
+		this.fake.table(DECIDED_KEY).put(nonNumericCallId, PendingToolCall.CANCELLED + "|not-a-number|inst-b");
+
+		PendingToolCall nonNumeric = this.store.pending(RUN_ID, nonNumericCallId);
+
+		assertThat(nonNumeric.getStatus()).as("非数字时间戳：状态照常合并").isEqualTo(PendingToolCall.CANCELLED);
+		assertThat(nonNumeric.getResolvedAtMs()).as("非数字时间戳：时间缺省（且读取未抛错）").isZero();
+	}
+
 	/** D5：WAL —— guard 已写、条目仍 PENDING 时，读侧可据 guard 收敛出结论。 */
 	@Test
 	void guardCarriesTheConclusionEvenWhenTheEntryIsStillPending() {

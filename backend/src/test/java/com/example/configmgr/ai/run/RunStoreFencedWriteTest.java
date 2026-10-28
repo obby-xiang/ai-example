@@ -10,11 +10,17 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * {@link RunStore#save} 的 fence 写（B23L1 批②a / 设计稿 §2.2 · 方案第 9 条）。
@@ -176,6 +182,66 @@ class RunStoreFencedWriteTest {
 		assertThat(this.fake.string(FENCE_KEY)).isNull();
 		assertThat(this.fake.hashTables.get(this.storeA.reqKey(RUN_ID))).isNull();
 		assertThat(this.fake.hashTables.get(this.storeA.decidedKey(RUN_ID))).isNull();
+	}
+
+	/**
+	 * E7：{@code STALE_EPOCH} 的<b>事后复核自己读不出来</b>时（{@code fenceAheadOf} 的一次单键
+	 * {@code GET} 失败），拒写结论与"不误标陈旧"两条不变量都不得变。
+	 *
+	 * <p>语料 = fence <b>没有</b>推进（仍等于本任 epoch）且当前快照已是取消态 —— 脚本把
+	 * "fence 陈旧"与"已是取消态"合成同一个返回码 0，复核是唯一能区分二者的地方。fence 键读不出来 ⇒
+	 * 只能回退合并日志：
+	 * <ul>
+	 * <li>这一笔<b>仍被拒</b>（{@code saveStatusUnlessCancelled} 返回 false），快照仍是 CANCELLED；</li>
+	 * <li><b>不抛异常</b>：诊断读失败只影响日志精度，不得把一次"取消优先"升级成写失败；</li>
+	 * <li><b>不得误报 {@code STALE_EPOCH}</b>：fence 压根没推进，把它说成"被接管"会误导排障。</li>
+	 * </ul>
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	void unreadableFenceKeepsTheRejectionAndDoesNotReportStaleEpoch() throws Exception {
+		LeaseService.Lease lease = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
+		RunSnapshot running = load();
+		running.setStatus(RunSnapshot.RUNNING);
+		this.storeA.save(running);
+		assertThat(this.fake.string(FENCE_KEY)).as("fence = 本任 epoch，没有推进")
+			.isEqualTo(String.valueOf(lease.epoch()));
+
+		// 取消侧已落库（终态出口不在本实例走过 ⇒ 本实例仍持租，走 fence 写分支）
+		RunSnapshot cancelled = load();
+		cancelled.setStatus(RunSnapshot.CANCELLED);
+		this.fake.strings.put(RUN_KEY, this.mapper.writeValueAsString(cancelled));
+
+		AtomicInteger fenceReads = new AtomicInteger();
+		ValueOperations<String, String> fenceUnreadable = mock(ValueOperations.class);
+		when(fenceUnreadable.get(anyString())).thenAnswer(invocation -> {
+			String key = invocation.getArgument(0);
+			if (FENCE_KEY.equals(key)) {
+				fenceReads.incrementAndGet();
+				throw new IllegalStateException("读取 fence 不可用（模拟 Redis 抖动）");
+			}
+			return this.fake.string(key);
+		});
+		when(this.fake.redis.opsForValue()).thenReturn(fenceUnreadable);
+		this.appender.list.clear();
+
+		RunSnapshot attempt = load();
+		attempt.setStatus(RunSnapshot.SUSPENDED);
+		attempt.setFinalText("must-not-land");
+		boolean written = assertDoesNotThrow(() -> this.storeA.saveStatusUnlessCancelled(attempt));
+
+		assertThat(written).as("fence 读不出来不得把拒写翻成落库").isFalse();
+		assertThat(fenceReads.get()).as("拒写后的 fence 复核确实执行过（失败被吞掉，未改变结论）").isEqualTo(1);
+		RunSnapshot stored = load();
+		assertThat(stored.getStatus()).as("快照仍是取消态").isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(stored.getFinalText()).as("本笔内容不得落库").isNull();
+		assertThat(this.fake.string(FENCE_KEY)).as("被拒的写不得推进 fence")
+			.isEqualTo(String.valueOf(lease.epoch()));
+		assertThat(this.appender.list).as("复核读不出来 ⇒ 回退合并日志（两种拒写原因不可分辨）")
+			.anySatisfy(event -> assertThat(event.getFormattedMessage()).contains("拒写轮次快照")
+				.contains("fence 陈旧或当前快照已是取消态"));
+		assertThat(this.appender.list).as("fence 未推进 + 已是取消态：不得误报 STALE_EPOCH")
+			.noneMatch(event -> event.getFormattedMessage().contains("STALE_EPOCH"));
 	}
 
 	// ── 语料 ────────────────────────────────────────────────────────────────

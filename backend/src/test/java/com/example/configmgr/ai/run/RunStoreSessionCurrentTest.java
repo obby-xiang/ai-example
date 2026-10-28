@@ -227,6 +227,53 @@ class RunStoreSessionCurrentTest {
 				"回退回填只能写仍指向本 runId 的 current，不得覆盖已换成他轮的 current");
 	}
 
+	/**
+	 * MI1（TOCTOU）· <b>老会话回退路径</b>：活跃索引不可用（升级前的会话，或设施不支持）⇒ 走
+	 * {@code SMEMBERS ai:session:runs} + 逐个快照的旧口径算出 fallback。若在这之后 current 被同会话
+	 * 新轮替换，最终写（无回退 ⇒ {@code DEL}、有回退 ⇒ {@code SET} fallback）仍必须是同一条单键 CAS：
+	 * 不得删掉、也不得覆盖新值。
+	 *
+	 * <p>与 {@link #clearDoesNotWriteWhenCurrentChangesAfterFallbackChosen} 互补：那条走
+	 * {@code reverseRangeWithScores} 的活跃索引快路径，本条走 SMEMBERS + 快照回退 —— 两种回退计算
+	 * 读的是不同面，各自的最终写都得过同一道 CAS。
+	 */
+	@Test
+	void legacyFallbackDoesNotWriteWhenCurrentChangesAfterFallbackComputed() {
+		// 形态①：候选只剩终态轮 ⇒ 回退为空 ⇒ 最终写是 DEL
+		this.store.save(snapshot("r-legacy-done", "s-legacy-del", RunSnapshot.DONE));
+		this.store.markSessionCurrent("s-legacy-del", "r-1");
+		when(this.setOps.members(this.store.sessionRunsKey("s-legacy-del")))
+			.thenReturn(Set.of("r-legacy-done"));
+		String delKey = this.store.sessionCurrentKey("s-legacy-del");
+		this.afterValueGet = key -> {
+			if (this.store.runKey("r-legacy-done").equals(key)) {
+				this.strings.put(delKey, "r-new");
+			}
+		};
+
+		this.store.clearSessionCurrent("s-legacy-del", "r-1");
+
+		assertEquals("r-new", this.store.sessionCurrentRunId("s-legacy-del"),
+				"老会话回退为空时也只能删仍指向本 runId 的 current，不得删掉已换成他轮的 current");
+
+		// 形态②：候选仍 SUSPENDED ⇒ 回退非空 ⇒ 最终写是 SET fallback
+		this.store.save(snapshot("r-legacy-parked", "s-legacy-set", RunSnapshot.SUSPENDED));
+		this.store.markSessionCurrent("s-legacy-set", "r-1");
+		when(this.setOps.members(this.store.sessionRunsKey("s-legacy-set")))
+			.thenReturn(Set.of("r-legacy-parked"));
+		String setKey = this.store.sessionCurrentKey("s-legacy-set");
+		this.afterValueGet = key -> {
+			if (this.store.runKey("r-legacy-parked").equals(key)) {
+				this.strings.put(setKey, "r-new2");
+			}
+		};
+
+		this.store.clearSessionCurrent("s-legacy-set", "r-1");
+
+		assertEquals("r-new2", this.store.sessionCurrentRunId("s-legacy-set"),
+				"老会话回退回填只能写仍指向本 runId 的 current，不得覆盖已换成他轮的 current");
+	}
+
 	/** 索引 TTL 的期望值：与实现同源实读（P2-3：app.ai.session-ttl），不用字面量锁死默认值。 */
 	private Duration expectedIndexTtl() {
 		return this.properties.getSessionTtl();
