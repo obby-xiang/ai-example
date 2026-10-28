@@ -302,8 +302,14 @@ public class TaskService {
             }
         }
 
-        task.setCurrentStep("SELECT_DEFS");
-        task = taskRepository.save(task);
+        // 勾选后的权威步骤回落**该类型的首步**：EXPORT=SELECT_DEFS，IMPORT=UPLOAD
+        // （导入的步骤白名单是 UPLOAD/PRECHECK/IMPORT/PUBLISH，见 STEP_WHITELIST，没有 SELECT_DEFS；
+        // 写成 SELECT_DEFS 会让 AI 上下文按 task:IMPORT/SELECT_DEFS 刷新，该步不披露
+        // select_definitions 与表格工具）。
+        task.setCurrentStep(task.getType() == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
+        // 必须先 flush 再 refresh：refresh 会以库里的状态覆盖内存，未 flush 的改动会被丢弃
+        // （旧实现即因此从未真正写回步骤）；flush 后 refresh 仍按原意重读 EAGER 的 items 快照。
+        task = taskRepository.saveAndFlush(task);
         // EAGER 集合在方法入口 findById 时已快照；一级缓存里还是旧对象，
         // 用 refresh 强制从数据库重读，保证返回的 items 包含刚保存的条目。
         entityManager.refresh(task);

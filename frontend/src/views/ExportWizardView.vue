@@ -431,8 +431,8 @@ const jobErrorMessage = computed(() => {
  * 真实变化（手动勾选/减选、AI handler）才写入，并记入 `recentActions` 供模型感知。
  *
  * 比较按**集合**（顺序不敏感，裁决⑤）：同一集合仅顺序不同（表格行序 vs 任务 items 序）不算变化。
- * 本函数**不**调 `tasksApi.selectDefs`：逐个勾选都落库会把后端 `currentStep` 强制回退到
- * 选择步（遗留 L-1，已登记），落库仍只发生在切步/开始导出时的 `persistStepData`。
+ * 本函数**不**调 `tasksApi.selectDefs`：逐个勾选都落库会把后端 `currentStep` 回退到该类型的首步
+ * （导出 SELECT_DEFS / 导入 UPLOAD，遗留 L-1），落库仍只发生在切步/开始导出时的 `persistStepData`。
  */
 function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): void {
   const codes = [...selectedDefs.value]
