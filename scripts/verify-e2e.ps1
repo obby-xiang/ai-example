@@ -2813,6 +2813,22 @@ function Ai-WaitStatus($runId, [string[]]$want, [int]$sec = 15) {
     }
     throw "轮次 $runId 在 ${sec}s 内未进入 $($want -join '/')（现值 $last）"
 }
+# 施加停止的前置：快照已建立（AR-06 的同一段空窗，见上方 Ai-WaitCurrentRun 注）。
+# start 帧先于「请求前压缩 → 建快照」发出；若取消落在这段空窗里，产品走早停分支，分两种：
+#   · "首轮交棒前收到取消（不发起模型调用）" —— 仍会建快照（W-26/W-32 能断言 CANCELLED 即此）；
+#   · "首轮压缩期间收到取消（不建快照、不发起模型调用）" —— 快照与归档都是空的，只发终帧。
+# 后者下停止类判据（快照 CANCELLED / 归档 done{cancelled:true} / 条目终态）没有持久面可断言，
+# 读到的是"(未读到)"。run 40708651817 的 W-25（首次压缩期间取消）即此。故停止一律等快照建立
+# 后再施加：有界等待（上界取产品首包超时），空窗不收敛即 FAIL —— 各用例断言面一个字未动。
+function Ai-WaitSnapshotReady($runId, [int]$sec) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    while ((Get-Date) -lt $deadline) {
+        $r = Invoke-Api 'GET' "/api/ai/runs/$runId" $null
+        if ($r.ok -and $r.json -and $r.json.success -and $r.json.data.snapshot) { return $r.json.data }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "${sec}s 内 /api/ai/runs/$runId 读不到 snapshot（AR-06 空窗未收敛：该轮还没建快照就被停，停止类判据没有持久面）"
+}
 function Ai-ChatRaw($sid, $msg, $ctx) {
     return Invoke-Api 'POST' '/api/ai/chat' @{ sessionId = $sid; message = $msg; context = $ctx }
 }
@@ -5025,6 +5041,9 @@ function Ai-StopMidTurn($sid, $message, $context) {
     $head = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = $message; context = $context } @('start') $head
     $runId = Ai-RunId $head
+    # 停止前先等快照建立（原因见 Ai-WaitSnapshotReady 的注）：本 helper 的调用方断言的都是
+    # "轮次在飞时被停止"的持久面（快照 CANCELLED / 归档 done{cancelled:true} / 条目终态）。
+    $null = Ai-WaitSnapshotReady $runId (Get-AiResilienceSeconds 'first-byte-timeout')
     $cancel = Ai-Cancel $runId
     if (-not $cancel.cancelled) { throw 'POST /api/ai/cancel 未返回 cancelled=true' }
     $final = Ai-WaitStatus $runId @('CANCELLED') 20
