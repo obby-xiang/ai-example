@@ -109,7 +109,10 @@ const VIOLATE_FORM_TYPE = flag('violate-form-type')
 const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype']
 const FIELD_TYPES = ['text', 'number', 'boolean', 'date', 'enum', 'multi_select', 'attachment']
 const SCENARIOS = ['FILTER', 'CLARIFY']
-const FORM_ATTRIBUTES = ['scenario', 'title', 'fields']
+// 2026-10-28（677e06f 验收返修）：产品白名单新增 `purpose`（缺省 GENERAL_CLARIFY，见
+// GenerativeFormRules#FORM_ATTRIBUTES / DEFAULT_PURPOSE）。缺省值由后端补齐，桩只做入参白名单校验，
+// 故此处只需同步名单；不同步时 `--self-check` ③ 会红（e2e job 在起服务前即失败）。
+const FORM_ATTRIBUTES = ['scenario', 'purpose', 'title', 'fields']
 // GF 优化批（attachment + 联动五原语/两条 from + 文本修饰）已进产品白名单，桩副本必须同步；
 // 未同步时 `--self-check` ③ 会红（事实源对账），这正是漂移窗口的告警位。
 const FIELD_ATTRIBUTES = ['key', 'label', 'type', 'required', 'defaultValue', 'options', 'placeholder',
