@@ -9,6 +9,7 @@ import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -93,12 +94,19 @@ class FrontendGuardPreSuspendTest {
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
-		this.manager = new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
-				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
-				new ToolResultLimiter(this.properties), List.of(rejectingGuard()));
+		this.manager = newManager(rejectingGuard());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
+	}
+
+	private SpToolCallingManager newManager(FrontendToolGuard guard) {
+		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
+		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
+				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+		return new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
+				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
+				new ToolResultLimiter(this.properties), List.of(guard));
 	}
 
 	@Test
@@ -129,6 +137,22 @@ class FrontendGuardPreSuspendTest {
 			.contains(REJECT_CODE);
 	}
 
+	@Test
+	void guardReceivesRunContextForSlotRelease() {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setContext(AiContext.of("tasks", null, null, null,
+				Map.of(TaskSlots.EXTRA_KEY, new TaskSlots(null, List.of("CURRENCY"), List.of()).toMap())).toMap());
+		this.store.save(snapshot);
+		this.manager = newManager(slotAwareGuard());
+
+		this.manager.executeToolCalls(prompt(), response());
+
+		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus())
+			.as("槽位放行依赖 run 上下文：manager 必须把 AiContext 传给复核器")
+			.isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
+		assertThat(this.store.pending(RUN_ID, CALL_ID).getCode()).isEqualTo("FORM_SLOTS_ALREADY_KNOWN");
+	}
+
 	private static FrontendToolGuard rejectingGuard() {
 		return new FrontendToolGuard() {
 
@@ -155,6 +179,37 @@ class FrontendGuardPreSuspendTest {
 			private Verdict reject() {
 				return Verdict.reject(REJECT_CODE, "表单 schema 未通过白名单校验",
 						List.of("fields[4].type=html 不在白名单类型内"));
+			}
+		};
+	}
+
+	/**
+	 * 只在<b>三参重载</b>里看上下文的复核器：两参版本放行 ⇒ 若 manager 仍调旧重载，本用例会红。
+	 */
+	private static FrontendToolGuard slotAwareGuard() {
+		return new FrontendToolGuard() {
+
+			@Override
+			public boolean supports(String toolName) {
+				return "generative_form".equals(toolName);
+			}
+
+			@Override
+			public Verdict inspectArguments(String argumentsJson) {
+				return Verdict.accept();
+			}
+
+			@Override
+			public Verdict inspectArguments(String toolName, String argumentsJson, AiContext context) {
+				TaskSlots slots = TaskSlots.fromExtra(context == null ? null : context.getExtra());
+				return slots.hasDefCodes()
+						? Verdict.reject("FORM_SLOTS_ALREADY_KNOWN", "配置项已确定", List.of("已确定配置项"))
+						: Verdict.accept();
+			}
+
+			@Override
+			public Verdict inspectResult(String argumentsJson, String resultJson) {
+				return Verdict.accept();
 			}
 		};
 	}

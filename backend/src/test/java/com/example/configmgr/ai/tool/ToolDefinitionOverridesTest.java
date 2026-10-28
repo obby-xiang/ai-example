@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.4", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.5", shipped.version(), "改描述必须发新 version");
     }
 
     /**

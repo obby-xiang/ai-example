@@ -1,6 +1,10 @@
 package com.example.configmgr.task.service;
 
+import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.repo.TaskRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -9,6 +13,7 @@ import org.springframework.test.context.TestPropertySource;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 2026-10-28 步骤披露收口（同族残余）：{@link TaskService#selectDefs} 写回的权威步骤必须按
@@ -31,6 +36,12 @@ class TaskSelectDefsInitialStepTest {
 
     @Autowired
     private TaskService taskService;
+
+    @Autowired
+    private TaskRepository taskRepository;
+
+    @Autowired
+    private JobRepository jobRepository;
 
     @Test
     void importSelectDefsResetsAuthoritativeStepToUpload() {
@@ -61,5 +72,52 @@ class TaskSelectDefsInitialStepTest {
                 .isEqualTo("SELECT_DEFS");
         assertThat(this.taskService.findByIdRaw(task.getId()).orElseThrow().getCurrentStep())
                 .isEqualTo("SELECT_DEFS");
+    }
+
+    @Test
+    void cancelledTaskRejectsSelectionAndStepReset() {
+        Task task = this.taskService.create(Task.TaskType.EXPORT, "AI导出-CANCELLED-选择变更");
+        task.setStatus(Task.TaskStatus.CANCELLED);
+        this.taskRepository.save(task);
+
+        assertThatThrownBy(() -> this.taskService.selectDefs(task.getId(), List.of("SYS_PARAM")))
+                .isInstanceOfSatisfying(ConflictException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("TASK_FINALIZED");
+                    assertThat(ex.getMessage()).contains("CANCELLED");
+                });
+
+        Task reloaded = this.taskService.findById(task.getId());
+        assertThat(reloaded.getCurrentStep())
+                .as("CANCELLED 任务不得被选择变更带回首步")
+                .isEqualTo("SELECT_DEFS");
+        assertThat(reloaded.getItems())
+                .as("被拒绝的选择变更不留下任何任务条目")
+                .isEmpty();
+    }
+
+    @Test
+    void completedTaskWithSuccessfulExportRejectsSelectionAndStepReset() {
+        Task task = this.taskService.create(Task.TaskType.EXPORT, "AI导出-COMPLETED-选择变更");
+        this.taskService.goToStep(task.getId(), "EXPORT");
+        Task fresh = this.taskRepository.findById(task.getId()).orElseThrow();
+        fresh.setStatus(Task.TaskStatus.COMPLETED);
+        this.taskRepository.save(fresh);
+        Job export = new Job();
+        export.setTaskId(task.getId());
+        export.setJobType(Job.JobType.EXPORT);
+        export.setStatus(Job.JobStatus.COMPLETED);
+        this.jobRepository.save(export);
+
+        assertThatThrownBy(() -> this.taskService.selectDefs(task.getId(), List.of("SYS_PARAM")))
+                .isInstanceOfSatisfying(ConflictException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("TASK_FINALIZED");
+                    assertThat(ex.getMessage()).contains("COMPLETED");
+                });
+
+        Task reloaded = this.taskService.findById(task.getId());
+        assertThat(reloaded.getCurrentStep())
+                .as("COMPLETED（导出成功）任务不得被选择变更回落到 SELECT_DEFS")
+                .isEqualTo("EXPORT");
+        assertThat(reloaded.getItems()).isEmpty();
     }
 }

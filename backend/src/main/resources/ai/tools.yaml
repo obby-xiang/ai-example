@@ -17,7 +17,10 @@
 # 2026-10-27.3 → 2026-10-27.4（2026-10-28 已知信息复用收口）：用户已明确的配置项/筛选条件与值直接用于工具，
 # generative_form 只补真实信息缺口（不用于已知信息、预填确认、取消后自动重问）；描述与注解 @Tool 同批改，
 # 改描述必升 version（破 prompt 缓存）。
-version: 2026-10-27.4
+# 2026-10-27.4 → 2026-10-27.5（2026-10-28 槽位填充 + 条件放行）：表单用途 purpose 显式化
+# （SELECT_DEFINITIONS/SET_CONDITIONS/GENERAL_CLARIFY，缺省 GENERAL_CLARIFY），宿主按 purpose 与
+# 「任务槽位」判断槽位是否已齐；槽位已确定的收集表单被零副作用拒绝（FORM_SLOTS_ALREADY_KNOWN）。
+version: 2026-10-27.5
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -101,6 +104,10 @@ tools:
     description: >-
       在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，或在信息不足时向用户澄清）；
       只用于真实信息缺口（缺失或歧义且需结构化补充），不用于已知信息、预填确认或取消后自动重问。
+      表单用途必须显式给出 purpose=SELECT_DEFINITIONS（收集配置项选择）/ SET_CONDITIONS（收集筛选条件）/
+      GENERAL_CLARIFY（通用澄清，缺省）；宿主只按 purpose 判断用途，禁止靠标题猜。
+      系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
+      请直接调用对应工具；未知配置或歧义时表单仍可用。
       字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。
       选择题的选项有三种来源：options（写死）、optionsFrom.map（父值 → 选项，静态映射）、
       optionsFrom.sourceId（后端注册数据源，闭集两个：definition_fields = 父值(配置定义编码) → 该定义的字段；

@@ -177,6 +177,8 @@ public final class ErrorCodes {
     public static final String FORM_RESULT_REJECTED = "FORM_RESULT_REJECTED";
     /** 400：生成式表单 schema 越白名单。 */
     public static final String FORM_SCHEMA_REJECTED = "FORM_SCHEMA_REJECTED";
+    /** 生成式表单的槽位已由任务/工作区或用户明确值确定：冗余收集表单不下发（零副作用）。 */
+    public static final String FORM_SLOTS_ALREADY_KNOWN = "FORM_SLOTS_ALREADY_KNOWN";
     /** 400：预检查未通过。 */
     public static final String PRECHECK_NOT_PASSED = "PRECHECK_NOT_PASSED";
     /** 400：预检结果已过期。 */

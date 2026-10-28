@@ -26,6 +26,8 @@ public final class FormIssueCodes {
 	public static final String FORM_EXTRA_ATTRIBUTE = "FORM_EXTRA_ATTRIBUTE";
 	public static final String FORM_TOO_LARGE = "FORM_TOO_LARGE";
 	public static final String FORM_SCENARIO_INVALID = "FORM_SCENARIO_INVALID";
+	public static final String FORM_PURPOSE_INVALID = "FORM_PURPOSE_INVALID";
+	public static final String FORM_SLOT_ALREADY_KNOWN = "FORM_SLOT_ALREADY_KNOWN";
 	public static final String FORM_TITLE_INVALID = "FORM_TITLE_INVALID";
 	public static final String FORM_TITLE_TOO_LONG = "FORM_TITLE_TOO_LONG";
 	public static final String FORM_FIELDS_MISSING = "FORM_FIELDS_MISSING";

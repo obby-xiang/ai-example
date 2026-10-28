@@ -61,6 +61,21 @@ public interface FrontendToolGuard {
 	}
 
 	/**
+	 * 下发前的入参复核（带<b>上下文</b>，槽位放行批）。
+	 *
+	 * <p>默认实现忽略上下文、退回带工具名的两参版本 —— 既有复核器（表格写 / UI 原语 / 向导动作）
+	 * 零改动。生成式表单用它判断"这张表要补的槽位是否已经被任务/工作区或用户明确值填满"：
+	 * 填满 ⇒ 不下发（零副作用），把模型引回对应工具。
+	 *
+	 * @param toolName      模型给出的工具名原文
+	 * @param argumentsJson 该次调用的入参原文
+	 * @param context       本轮工作区上下文（可为 null：兼容调用方）
+	 */
+	default Verdict inspectArguments(String toolName, String argumentsJson, AiContext context) {
+		return inspectArguments(toolName, argumentsJson);
+	}
+
+	/**
 	 * 回灌前的结果复核。
 	 *
 	 * @param argumentsJson 该次调用的入参原文（挂起时外置在待决条目里，即"当初下发的那份 schema"）

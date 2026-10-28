@@ -281,6 +281,12 @@ public class TaskService {
         // H2 会判死锁并回滚一方（500）。lockForUpdate 返回的就是锁后读到的任务行。
         Task task = lockForUpdate(taskId);
 
+        // 槽位/选择批：终态守卫（与 goToStep 同口径，2026-10-28）—— CANCELLED 恒拒；
+        // COMPLETED 按类型核最终作业（EXPORT→EXPORT 成功、IMPORT→PUBLISH 成功）。
+        // 选择变更会回落权威步骤，终态任务上做这件事等于把已结束的任务重新拉回向导。
+        // 只拦"选择变更"，不改在途作业语义（FAILED/ACTIVE 照旧）。
+        assertTaskNotFinalized(task);
+
         // Remove items not in new selection
         if (!defCodes.isEmpty()) {
             taskItemRepository.deleteByTaskIdAndDefCodeNotIn(taskId, defCodes);

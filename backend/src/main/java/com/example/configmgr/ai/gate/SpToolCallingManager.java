@@ -711,7 +711,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// publishRequestsForParkedBatch 打破（非法 schema 先拿到 suspended + frontend_tool_request，
 			// 随后才被判 REJECTED_ARGUMENTS —— E2E GF6/G-13/X-10 的实测帧序正是如此）。
 			if (!budgetArmed && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-				FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending);
+				FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
 				if (verdict != null && !verdict.accepted()) {
 					settleFrontendRejected(runId, pending, verdict);
 					frontendRejected.add(pending.getToolCallId());
@@ -874,7 +874,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					}
 					else {
 						text = switch (pending.getKind()) {
-							case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending);
+							case PendingToolCall.KIND_FRONTEND -> awaitFrontend(runId, pending, context);
 							case PendingToolCall.KIND_CONFIRM -> awaitConfirm(runId, prompt, pending, context);
 							default -> executeOnce(runId, prompt, pending, context);
 						};
@@ -1768,8 +1768,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * （机器可读码 + 原因清单）作为该次调用的工具结果回填模型，官方循环照常继续
 	 * ——模型读到"哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
 	 */
-	private String awaitFrontend(String runId, PendingToolCall pending) {
-		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending);
+	private String awaitFrontend(String runId, PendingToolCall pending, AiContext context) {
+		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
 		if (verdict != null && !verdict.accepted()) {
 			return rejectFrontendArguments(runId, pending, verdict);
 		}
@@ -1777,13 +1777,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return resolved.getResultText() == null ? "" : resolved.getResultText();
 	}
 
-	/** 第一个认领该工具名的复核器的入参判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
-	private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending) {
+	/**
+	 * 第一个认领该工具名的复核器的入参判定；没有复核器返回 null（= 该工具不受闸门约束）。
+	 *
+	 * <p>上下文与入参一起传给复核器（槽位放行批）：生成式表单要按 {@code purpose} 与
+	 * {@code AiContext.extra[taskSlots]} 判断"这张表还有没有真实缺口"；其它复核器走
+	 * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 的默认实现，行为不变。
+	 */
+	private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending, AiContext context) {
 		for (FrontendToolGuard guard : this.frontendGuards) {
 			if (guard.supports(pending.getName())) {
 				// 工具安全边界批：按**真名**复核 —— 只传 json 会让复核器靠"入参形状"猜工具名，
 				// 少一个必填键就会落到别的分支被放行（update_rows 漏 set ⇒ 被当成撤销）。
-				return guard.inspectArguments(pending.getName(), pending.getArguments());
+				return guard.inspectArguments(pending.getName(), pending.getArguments(), context);
 			}
 		}
 		return null;

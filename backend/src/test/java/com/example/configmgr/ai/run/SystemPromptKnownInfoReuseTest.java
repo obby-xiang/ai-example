@@ -116,6 +116,30 @@ class SystemPromptKnownInfoReuseTest {
 	}
 
 	@Test
+	void taskSlotsAndFormPurposeAreDeclared() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("系统会解析并展示任务槽位（已知值），模型据此直接调工具")
+			.contains("任务槽位")
+			.contains("已确定");
+		assertThat(prompt).as("表单必须显式给 purpose，宿主不按标题猜")
+			.contains("purpose")
+			.contains("SELECT_DEFINITIONS")
+			.contains("SET_CONDITIONS")
+			.contains("GENERAL_CLARIFY")
+			.contains("禁止靠标题");
+		assertThat(prompt).as("缺省 purpose 兼容为 GENERAL_CLARIFY")
+			.contains("缺省");
+		assertThat(prompt).as("槽位缺失/未知配置时表单仍可用（不得删掉这条说明）")
+			.contains("未知配置")
+			.contains("歧义")
+			.contains("表单仍可用");
+		assertThat(prompt).as("槽位已确定的冗余表单由宿主拒绝，模型按回执纠正一次")
+			.contains("FORM_SLOTS_ALREADY_KNOWN")
+			.contains("零副作用");
+	}
+
+	@Test
 	void newRulesKeepAscendingNumbering() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 

@@ -28,6 +28,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件）/ {@code GENERAL_CLARIFY}（通用澄清，缺省）</td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>
@@ -103,7 +104,21 @@ public final class GenerativeFormRules {
 	/** 表单场景白名单（DC-15 的两个场景）。 */
 	public static final Set<String> SCENARIOS = Set.of("FILTER", "CLARIFY");
 
-	public static final Set<String> FORM_ATTRIBUTES = Set.of("scenario", "title", "fields");
+	/**
+	 * 表单<b>用途</b>（槽位放行的判据，不是渲染属性）：宿主只按这个字段判断"这张表是来补哪个缺口的"，
+	 * 绝不按标题猜。缺省 = {@link #DEFAULT_PURPOSE}（既有调用一字不改，行为兼容）。
+	 */
+	public static final String PURPOSE_SELECT_DEFINITIONS = "SELECT_DEFINITIONS";
+
+	public static final String PURPOSE_SET_CONDITIONS = "SET_CONDITIONS";
+
+	/** 缺省用途：兼容既有 {@code generative_form} 调用（它们没有 purpose 字段）。 */
+	public static final String DEFAULT_PURPOSE = "GENERAL_CLARIFY";
+
+	public static final List<String> FORM_PURPOSES = List.of(PURPOSE_SELECT_DEFINITIONS, PURPOSE_SET_CONDITIONS,
+			DEFAULT_PURPOSE);
+
+	public static final Set<String> FORM_ATTRIBUTES = Set.of("scenario", "purpose", "title", "fields");
 
 	/** 字段属性白名单（与 {@code AiTools.FormField} 的属性名逐项对账）。 */
 	public static final Set<String> FIELD_ATTRIBUTES = Set.of("key", "label", "type", "required", "defaultValue",
@@ -266,6 +281,13 @@ public final class GenerativeFormRules {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_SCENARIO_INVALID,
 					"scenario 必填且必须是 " + String.join("/", sorted(SCENARIOS)) + " 之一（实际："
 							+ (scenario == null ? "缺失" : scenario.asText()) + "）"));
+		}
+		JsonNode purpose = form.get("purpose");
+		if (purpose != null
+				&& (!purpose.isTextual() || !FORM_PURPOSES.contains(purpose.asText()))) {
+			issues.add(FormIssue.form(FormIssueCodes.FORM_PURPOSE_INVALID,
+					"purpose 只能取 " + String.join("/", FORM_PURPOSES) + " 之一（缺省 = "
+							+ DEFAULT_PURPOSE + "）；实际：" + (purpose.isTextual() ? purpose.asText() : purpose)));
 		}
 		JsonNode title = form.get("title");
 		if (title != null) {
@@ -1382,6 +1404,20 @@ public final class GenerativeFormRules {
 	}
 
 	// ── 小工具 ───────────────────────────────────────────────────────────────
+
+	/**
+	 * 表单用途：缺省 {@link #DEFAULT_PURPOSE}（兼容既有调用）；非法值在 schema 校验里拒绝。
+	 *
+	 * @param form 表单 schema 节点（可为 null）
+	 */
+	public static String purposeOf(JsonNode form) {
+		if (form == null || !form.isObject()) {
+			return DEFAULT_PURPOSE;
+		}
+		JsonNode purpose = form.get("purpose");
+		return purpose != null && purpose.isTextual() && !purpose.asText().isBlank()
+				? purpose.asText() : DEFAULT_PURPOSE;
+	}
 
 	/** 结构化清单 → 人读清单（{@code schemaReasons/resultReasons/argumentReasons} 的唯一出口）。 */
 	public static List<String> messages(List<FormIssue> issues) {

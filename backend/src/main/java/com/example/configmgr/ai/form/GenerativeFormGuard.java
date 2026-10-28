@@ -1,7 +1,11 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.slot.TaskSlots;
+import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
+import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.file.FileStorageService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,8 +22,8 @@ import java.util.Set;
  * {@code generative_form} 的复核器（DC-15 安全闸）：把模型给的表单 schema 与前端回灌的填写值，
  * 交给 {@link GenerativeFormRules} 的白名单规则判定，产出可回填的 {@link Verdict}。
  *
- * <p>本类只做四件事：解析 JSON、调用纯规则、<b>附件三重校验</b>（G-E：存在 / 归属 / 一次性）、
- * 组装结论文本 —— 校验口径<b>全部</b>在 {@link GenerativeFormRules} 里
+ * <p>本类只做五件事：解析 JSON、调用纯规则、<b>槽位放行</b>（purpose + 任务槽位）、<b>附件三重校验</b>
+ * （G-E：存在 / 归属 / 一次性）、组装结论文本 —— 校验口径<b>全部</b>在 {@link GenerativeFormRules} 里
  * （那里是可以脱离 Spring 直接断言的正反例对象）。
  *
  * <p>两道闸门的调用方见 {@link FrontendToolGuard}：下发前（{@code SpToolCallingManager}）与
@@ -30,6 +34,14 @@ import java.util.Set;
  * 拒绝时同时给两件东西：人读 {@code reasons}（既有契约，逐条不改）与结构化 {@code issues}
  * （{@code {key, code, message}}）。前端按 {@code key} 点亮字段、按 {@code code} 决定是否可重试；
  * 模型拿到的是同一批 message 的编号清单 —— 两处不各写一份文案。
+ *
+ * <h2>槽位放行（2026-10-28，任务槽位批）</h2>
+ * 下发前在<b>原 schema 校验之后</b>再看 {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
+ * 槽位已确定的收集表单没有真实缺口 ⇒ 拒绝下发（{@code FORM_SLOTS_ALREADY_KNOWN}，零副作用），
+ * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与
+ * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。上下文由
+ * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
+ * （既有单测/兼容调用）槽位规则整体跳过。
  */
 @Slf4j
 @Component
@@ -80,6 +92,23 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	/** 下发前的 schema 白名单校验：不合法 ⇒ 调用方不挂起、前端看不到这张表单。 */
 	@Override
 	public Verdict inspectArguments(String argumentsJson) {
+		return inspectArguments(GenerativeFormRules.TOOL_NAME, argumentsJson, null);
+	}
+
+	/**
+	 * 下发前的复核（带工具名与上下文）。
+	 *
+	 * <p>顺序是硬要求：<b>先</b>跑原有 schema 白名单（非法仍是 {@code FORM_SCHEMA_REJECTED}），
+	 * <b>再</b>看 {@code purpose} 与任务槽位 —— 槽位已确定的收集表单没有缺口，拒绝下发并把模型
+	 * 引回对应工具。{@code context == null}（既有单测/兼容调用）时槽位规则整体跳过。
+	 */
+	@Override
+	public Verdict inspectArguments(String toolName, String argumentsJson) {
+		return inspectArguments(toolName, argumentsJson, null);
+	}
+
+	@Override
+	public Verdict inspectArguments(String toolName, String argumentsJson, AiContext context) {
 		JsonNode arguments = parse(argumentsJson);
 		if (arguments == null) {
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.ARG_NOT_OBJECT,
@@ -88,13 +117,63 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					"表单 schema 不是合法 JSON，工具未执行（未向前端下发表单）", issues);
 		}
 		List<FormIssue> issues = GenerativeFormRules.argumentIssues(arguments);
-		if (issues.isEmpty()) {
-			return Verdict.accept();
+		if (!issues.isEmpty()) {
+			log.warn("generative_form schema 未通过白名单校验（未挂起、未下发前端）：{}",
+					GenerativeFormRules.messages(issues));
+			return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
+					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
-		log.warn("generative_form schema 未通过白名单校验（未挂起、未下发前端）：{}",
-				GenerativeFormRules.messages(issues));
-		return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
-				"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
+		return inspectSlots(GenerativeFormRules.purposeOf(arguments.get("form")),
+				TaskSlots.fromExtra(context == null ? null : context.getExtra()));
+	}
+
+	/**
+	 * 槽位放行：purpose 与已解析槽位的组合决定"这张表还有没有真实缺口"。
+	 *
+	 * <p>拒绝是<b>零副作用</b>的（调用方不挂起、不下发、不认领、不记台账），模型收到可读码与
+	 * 下一步指引后可按规则 29 做一次不同的纠正；槽位缺失/歧义与 {@code GENERAL_CLARIFY} 一律放行。
+	 */
+	private Verdict inspectSlots(String purpose, TaskSlots slots) {
+		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose) && slots.hasDefCodes()) {
+			String known = String.join(", ", slots.defCodes());
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"已确定配置项：" + known + "（来源：任务/工作区或用户明确值）"));
+			List<String> reasons = List.of(
+					"已确定配置项：" + known + "（系统解析，不是猜测）",
+					"下一步：直接调用 select_definitions（codes=[" + quoted(known) + "]），不要再用表单重复收集");
+			log.warn("generative_form 选择表单被槽位放行拒绝（槽位已确定，未挂起、未下发前端）：{}", known);
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"配置项已确定，选择表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && slots.conditionsCoverDefCodes()) {
+			String known = renderConditions(slots);
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"已确定条件：" + known + "（来源：任务/工作区或用户明确值）"));
+			List<String> reasons = List.of(
+					"已确定条件：" + known + "（系统解析，不是猜测）",
+					"下一步：按既有步骤链调用 set_condition；若当前是 SELECT_DEFS，先 confirm_step（不传 step）"
+							+ "推进到 QUERY_COND，下一批再 set_condition");
+			log.warn("generative_form 条件表单被槽位放行拒绝（条件已确定，未挂起、未下发前端）：{}", known);
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"筛选条件已确定，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
+		return Verdict.accept();
+	}
+
+	private static String renderConditions(TaskSlots slots) {
+		List<String> rendered = new ArrayList<>();
+		for (ConditionSlot condition : slots.conditions()) {
+			rendered.add(condition.defCode() + "." + condition.fieldCode() + " = " + condition.value());
+		}
+		return String.join("；", rendered);
+	}
+
+	private static String quoted(String joined) {
+		List<String> out = new ArrayList<>();
+		for (String code : joined.split(", ")) {
+			out.add("\"" + code + "\"");
+		}
+		return String.join(", ", out);
 	}
 
 	/** 回灌前的填写值类型复核（无归属上下文：附件跳过归属校验）。 */

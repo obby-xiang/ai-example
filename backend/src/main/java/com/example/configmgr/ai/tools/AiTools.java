@@ -629,6 +629,10 @@ public class AiTools {
      * 避免自由文本往返（对应 DC-15 的"模型向用户提问时给出结构化选择/表单"）。</li>
      * </ul>
      *
+     * <p>2026-10-28（任务槽位批）：表单还要显式给 {@code purpose}
+     * （{@code SELECT_DEFINITIONS} / {@code SET_CONDITIONS} / {@code GENERAL_CLARIFY}，缺省后者），
+     * 宿主按 purpose + 任务槽位判断"这张表还有没有真实缺口"，不按标题猜用途。
+     *
      * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
      * 两个场景的现场都在"任务驱动"这条链路上：
      * <ul>
@@ -642,11 +646,15 @@ public class AiTools {
      * 与 DC-06⑤ 渐进披露的"最小必要工具集"同向）。若后续实测确有"任意页面都要澄清表单"的需求，
      * 改这一处注解即可（一行，且披露与防线③同源，不会漂移）。
      *
-     * <h2>三道后端闸门（本工具与其它前端工具的区别）</h2>
+     * <h2>四道后端闸门（本工具与其它前端工具的区别）</h2>
      * <ol>
      * <li><b>schema 白名单</b>（{@code form/GenerativeFormRules}，下发前）：
      * 类型仅限 text/number/boolean/date/enum/multi_select，属性仅限白名单那几个，其余一律
      * {@code FORM_SCHEMA_REJECTED} 且<b>不挂起、不下发</b>（前端永远看不到非法表单）；</li>
+     * <li><b>槽位放行</b>（下发前，2026-10-28）：{@code purpose=SELECT_DEFINITIONS} 且配置项已确定、
+     * 或 {@code purpose=SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ {@code FORM_SLOTS_ALREADY_KNOWN}
+     * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_condition；缺槽位、
+     * 歧义与 {@code GENERAL_CLARIFY} 放行；</li>
      * <li><b>回灌类型复核</b>（回灌时）：值必须与 schema 的类型逐字段相符（number 是数、date 是
      * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
      * 不符即 400 {@code FORM_RESULT_REJECTED} 且<b>挂起保持未决</b>（可修正后重试）；</li>
@@ -667,7 +675,11 @@ public class AiTools {
      */
     @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，"
             + "或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
-            + "不用于已知信息、预填确认或取消后自动重问；字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
+            + "不用于已知信息、预填确认或取消后自动重问；表单用途必须显式给出 purpose="
+            + "SELECT_DEFINITIONS（收集配置项选择）/SET_CONDITIONS（收集筛选条件）/GENERAL_CLARIFY（通用澄清，缺省）；"
+            + "宿主只按 purpose 判断用途，禁止靠标题猜。系统工作区状态里的「任务槽位」是已知值："
+            + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
+            + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
             + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
             + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发。"
@@ -691,13 +703,23 @@ public class AiTools {
      * 恰恰要求看得见它们。两者的属性名由用例对账锁定（防止改了 record 却忘了白名单）。
      *
      * @param scenario 场景：{@code FILTER}（收集筛选/查询条件）/ {@code CLARIFY}（信息不足时澄清）
+     * @param purpose  用途：{@code SELECT_DEFINITIONS}/{@code SET_CONDITIONS}/{@code GENERAL_CLARIFY}
+     *                 （可选，缺省 {@code GENERAL_CLARIFY}；宿主按它判断槽位是否已齐）
      * @param title    表单标题（可选）
      * @param fields   字段列表（1..20）
      */
     public record FormSpec(
             @ToolParam(description = "场景：FILTER（收集筛选/查询条件）或 CLARIFY（信息不足时向用户澄清）") String scenario,
+            @ToolParam(description = "用途（选择/条件表单必须显式给）：SELECT_DEFINITIONS（收集配置项选择）/ "
+                    + "SET_CONDITIONS（收集筛选条件）/ GENERAL_CLARIFY（通用澄清，缺省）。宿主按用途判断槽位是否已齐，"
+                    + "禁止靠标题猜用途", required = false) String purpose,
             @ToolParam(description = "表单标题（可选，≤100 字符）", required = false) String title,
             @ToolParam(description = "字段列表（1..20 个）") List<FormField> fields) {
+
+        /** 兼容构造器：既有调用（含测试）不传 purpose —— 缺省 {@code GENERAL_CLARIFY}。 */
+        public FormSpec(String scenario, String title, List<FormField> fields) {
+            this(scenario, null, title, fields);
+        }
     }
 
     /**

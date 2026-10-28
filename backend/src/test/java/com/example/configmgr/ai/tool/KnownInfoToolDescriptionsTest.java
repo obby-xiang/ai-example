@@ -61,6 +61,24 @@ class KnownInfoToolDescriptionsTest {
     }
 
     @Test
+    void generativeFormDeclaresPurposeAndSlotRelease() throws Exception {
+        String annotation = annotationDescription("generativeForm", AiTools.FormSpec.class);
+        assertTrue(annotation.contains("purpose"), annotation);
+        assertTrue(annotation.contains("SELECT_DEFINITIONS"), annotation);
+        assertTrue(annotation.contains("SET_CONDITIONS"), annotation);
+        assertTrue(annotation.contains("GENERAL_CLARIFY"), annotation);
+
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("generative_form");
+        assertNotNull(yaml);
+        assertTrue(yaml.hasDescription(), "generative_form 必须保留 YAML 描述覆盖");
+        assertTrue(yaml.description().contains("purpose"), yaml.description());
+        assertTrue(yaml.description().contains("SELECT_DEFINITIONS"), yaml.description());
+        assertTrue(yaml.description().contains("SET_CONDITIONS"), yaml.description());
+        assertTrue(yaml.description().contains("GENERAL_CLARIFY"), yaml.description());
+        assertTrue(yaml.description().contains("任务槽位"), yaml.description());
+    }
+
+    @Test
     void setConditionDescriptionReusesKnownConditionWithinStepChain() throws Exception {
         String annotation = annotationDescription("setCondition", String.class, AiTools.FieldQueryCondition.class);
         assertTrue(annotation.contains("已知条件直接使用"), annotation);
@@ -77,6 +95,6 @@ class KnownInfoToolDescriptionsTest {
     @Test
     void toolsVersionBumpedForKnownInfoDescriptions() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        assertEquals("2026-10-27.4", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
+        assertEquals("2026-10-27.5", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
     }
 }
