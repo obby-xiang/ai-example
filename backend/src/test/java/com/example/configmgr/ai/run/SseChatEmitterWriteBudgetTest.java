@@ -248,6 +248,11 @@ class SseChatEmitterWriteBudgetTest {
 		ThreadPoolExecutor singleWriter = new ThreadPoolExecutor(0, 1, 60L, TimeUnit.SECONDS,
 				new SynchronousQueue<>(), daemon("saturated-writer"), new ThreadPoolExecutor.AbortPolicy());
 		try {
+			// 预热唯一的写线程：`SseWriteBudget.write` 的预算从**提交**起算，冷池（corePoolSize=0）
+			// 现场建线程的时延也计进 300ms —— 高负载 runner 上会"写还没开始就被判超时"：
+			// 订阅者先被摘、首帧 send 永不进入（CI 实证：5.006s 卡在 awaitFirstSend，本用例偶发红）。
+			// 预热后预算只衡量"写出被卡住"的时长，本用例"饱和（而非超时）摘除"的判据才成立。
+			warmUpWriter(singleWriter);
 			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 					SseWriteBudget.on(singleWriter, 300L));
@@ -593,6 +598,21 @@ class SseChatEmitterWriteBudgetTest {
 			thread.setDaemon(true);
 			return thread;
 		};
+	}
+
+	/**
+	 * 预热写出线程：把"建线程"的时延移出 {@code SseWriteBudget} 的单帧预算。
+	 *
+	 * <p>预算从**提交**起算且包住 {@code future.get(timeout)}：池是 {@code corePoolSize=0} 的
+	 * 弹性池，第一笔提交要现场建线程，高负载 runner 上这段时延可以吃掉整个 300ms 预算 ——
+	 * 于是"写还没开始"就被判超时、订阅者先被摘，用例里等 {@code send} 的断言只能等到超时
+	 * （CI 实证：{@code writerPoolSaturation...} 卡满 5.006s 变红）。
+	 * 预热只提前建一个空线程，不改任何断言与口径。
+	 */
+	private static void warmUpWriter(ExecutorService writer) throws InterruptedException {
+		CountDownLatch warmed = new CountDownLatch(1);
+		writer.execute(warmed::countDown);
+		assertThat(warmed.await(5L, TimeUnit.SECONDS)).as("写出线程预热完成（把建线程时延移出写预算）").isTrue();
 	}
 
 	private static boolean awaitSubscriberCount(SseChatEmitter out, int expected, long seconds)
