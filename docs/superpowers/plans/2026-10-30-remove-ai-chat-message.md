@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 主仓库 `ai-example-main-v2`（本工作树）施工。
+- 主仓库 `<REPO_ROOT>`（本工作树）施工。
 - `ai_feedback` 与所有 AI 配置表、业务表不动。
 - 只能精确单点测试，禁止整类、整文件、批量或循环测试。
 - 不改变 Redis 记忆、RunSnapshot、SSE 和现有 `/api/ai/history/{sessionId}` 窗口接口。
