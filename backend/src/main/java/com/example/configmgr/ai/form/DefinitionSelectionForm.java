@@ -6,6 +6,7 @@ import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
@@ -64,6 +65,18 @@ import java.util.Set;
  * 走既有 {@code POST /api/ai/frontend-tool-result}（{@link ConfirmGate#submitFrontendResult}）与既有续跑，
  * 值经既有回灌闸门（{@link GenerativeFormGuard#inspectResult}）复核后作为工具结果回填模型；
  * 选择本身仍由既有 {@code select_definitions} 完成 —— HITL 确认门、步骤守卫、任务状态机一字不动。
+ *
+ * <h2>两条挂起期的硬约束</h2>
+ * <ol>
+ * <li><b>沿用当前快照的 {@code assistantContent}/{@code assistantMetadata}</b>：{@code saveSuspended}
+ * 会把这两项一起覆盖写，传 {@code ""}/{@code null} 等于抹掉模型刚产出的那一轮（正文可能非空，
+ * 推理元数据还带着 {@code reasoningContent}/{@code encrypted_content} 等厂商私有键）。挂起只换
+ * "谁在等"，故先读快照再原样带上（6 参重载）；</li>
+ * <li><b>快照一旦挂起成功，本拍就不再交回模型</b>：随后的发帧/发布/收流只是观测面，任一失败
+ * 都只 WARN 并<b>返回 true</b>（这一轮在等人，等恢复）。交回模型会形成
+ * "SUSPENDED + 待决条目 + 模型在跑"的双驱动 —— 同一轮的帧与历史会分叉。
+ * {@code saveSuspended} 本身的失败仍按原口径收敛成终态并返回 {@code false}。</li>
+ * </ol>
  *
  * <p><b>只在 park 装配下生效</b>（{@code app.ai.park.enabled}，生产 yml = true）：阻塞式等待
  * （park=false）意味着"等人在同一个工作线程里"，把它用在这条<b>新增</b>的流程上就是新的中断路径，
@@ -383,10 +396,19 @@ public class DefinitionSelectionForm {
 	/**
 	 * 既有挂起面（与模型自己下发的 {@code generative_form} 同一条路）：外置挂起态 → {@code suspended}
 	 * → 请求帧 → 本轮收流。顺序是硬要求（{@code saveSuspended} 先于任何帧）。
+	 *
+	 * <p><b>正文/推理元数据沿用当前快照</b>：{@code saveSuspended} 会把 {@code assistantContent} 与
+	 * {@code assistantMetadata} 一起覆盖写 —— 这里传 {@code ""}/{@code null} 等于抹掉模型刚产出的那一轮
+	 * （正文可能非空，推理元数据还带着 {@code reasoningContent}/{@code encrypted_content} 等厂商私有键）。
+	 * 挂起只该换"谁在等"，因此先读快照再原样带上（6 参重载）；快照缺失仍交给
+	 * {@code saveSuspended} 自己的失败路径（下面同一段收敛）。
 	 */
 	private boolean park(String runId, List<Message> history, PendingToolCall pending) {
 		try {
-			this.store.saveSuspended(runId, "", List.of(pending), history, this.codec);
+			RunSnapshot current = this.store.get(runId);
+			this.store.saveSuspended(runId, current == null ? null : current.getAssistantContent(),
+					List.of(pending), history, this.codec,
+					current == null ? null : current.getAssistantMetadata());
 		}
 		catch (RuntimeException ex) {
 			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，
@@ -396,12 +418,36 @@ public class DefinitionSelectionForm {
 			convergeAfterParkFailure(runId, pending, ex);
 			return false;
 		}
-		SseChatEmitter out = this.registry.of(runId);
-		out.suspended(List.of(pending), this.store.runKey(runId), this.store.pendingKey(runId),
-				this.store.instanceId());
-		this.gate.publishRequestsForParkedBatch(runId, List.of(pending));
-		// "挂起即断"（B1）：请求帧送达后本轮订阅收流，用户提交/取消后再带 lastSeq 重连
-		out.completeSubscriptions();
+		SseChatEmitter out;
+		try {
+			out = this.registry.of(runId);
+			out.suspended(List.of(pending), this.store.runKey(runId), this.store.pendingKey(runId),
+					this.store.instanceId());
+		}
+		catch (RuntimeException ex) {
+			// 快照已成功挂起 ⇒ 这一拍<b>绝不能</b>交回模型（否则 SUSPENDED + 待决条目 + 模型在跑 =
+			// 双驱动：同一轮的帧与历史会分叉）。发帧是观测面，失败只告警，等恢复。
+			log.warn("宿主表单已挂起，但 suspended 帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
+					runId, pending.getToolCallId(), ex.getMessage());
+			return true;
+		}
+		try {
+			this.gate.publishRequestsForParkedBatch(runId, List.of(pending));
+		}
+		catch (RuntimeException ex) {
+			log.warn("宿主表单已挂起，但请求帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
+					runId, pending.getToolCallId(), ex.getMessage());
+			return true;
+		}
+		try {
+			// "挂起即断"（B1）：请求帧送达后本轮订阅收流，用户提交/取消后再带 lastSeq 重连
+			out.completeSubscriptions();
+		}
+		catch (RuntimeException ex) {
+			// 收流失败不回退：条目与快照已就位，重挂/刷新仍能取到这张卡
+			log.warn("宿主表单已挂起，但本轮收流失败（不影响挂起态）runId={} toolCallId={}：{}", runId,
+					pending.getToolCallId(), ex.getMessage());
+		}
 		log.info("宿主已挂起定义选择表单 runId={} toolCallId={}（平铺多选，等用户勾选）", runId,
 				pending.getToolCallId());
 		return true;

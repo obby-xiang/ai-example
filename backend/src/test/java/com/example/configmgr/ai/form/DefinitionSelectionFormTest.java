@@ -135,7 +135,8 @@ class DefinitionSelectionFormTest {
 		assertThat(field.path("options").get(1).path("label").asText()).isEqualTo("汇率");
 
 		// 走既有挂起面：先外置挂起态，再发 suspended + 请求帧（前端据此渲染既有表单卡）
-		verify(this.store).saveSuspended(eq(RUN_ID), eq(""), eq(List.of(pending)), any(), eq(this.codec));
+		verify(this.store).saveSuspended(eq(RUN_ID), org.mockito.ArgumentMatchers.isNull(),
+				eq(List.of(pending)), any(), eq(this.codec), org.mockito.ArgumentMatchers.isNull());
 		verify(this.emitter).suspended(eq(List.of(pending)), anyString(), anyString(), anyString());
 		verify(this.gate).publishRequestsForParkedBatch(RUN_ID, List.of(pending));
 	}
@@ -165,7 +166,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("配置已确定 ⇒ 不弹表单，直接走 select_definitions").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 		verifyNoInteractions(this.gate);
 	}
 
@@ -178,7 +179,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK), ownForm), history());
 
 		assertThat(parked).as("本批已有模型自己的表单 ⇒ 宿主不再重复挂一张").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -210,7 +211,7 @@ class DefinitionSelectionFormTest {
 						ToolOutcome.OK)), history());
 
 		assertThat(parked).isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	// ── ③ 不在新任务链上：普通浏览 / 别的页面 / 别的步骤都不弹 ────────────────
@@ -223,7 +224,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("没有 create_task 的普通浏览 ⇒ 宿主不得弹表单").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -232,7 +233,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(7L, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("导航到的不是本轮新建的那个任务 ⇒ 不弹").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -241,7 +242,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.FAILED)), history());
 
 		assertThat(parked).isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -252,7 +253,7 @@ class DefinitionSelectionFormTest {
 				history());
 
 		assertThat(parked).isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -263,7 +264,7 @@ class DefinitionSelectionFormTest {
 				history());
 
 		assertThat(parked).isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -276,7 +277,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("同一任务已挂过宿主表单 ⇒ 不重复挂起").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -287,7 +288,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("非 park 装配（阻塞式等待）不引入新中断路径").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	// ── ④ 目录空 / 读取失败 / 超上限：不得生成空表单 ─────────────────────────
@@ -300,7 +301,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("目录为空 ⇒ 不生成空表单（走既有失败恢复）").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -314,7 +315,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("目录读取失败 ⇒ 不生成空表单").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -328,7 +329,7 @@ class DefinitionSelectionFormTest {
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
 
 		assertThat(parked).as("超出平铺上限 ⇒ 不生成残缺表单（宁可交回既有路径）").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), anyString(), any(), any(), any());
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
 	// ── ⑤ 挂起写失败：不留"看不见的待决条目"（否则续跑会被 PENDING_UNRESOLVED 卡死） ──
@@ -336,7 +337,7 @@ class DefinitionSelectionFormTest {
 	@Test
 	void parkWriteFailureConvergesTheEntryInsteadOfLeavingItPending() {
 		org.mockito.Mockito.doThrow(new IllegalStateException("redis down")).when(this.store)
-			.saveSuspended(anyString(), anyString(), any(), any(), any());
+			.saveSuspended(anyString(), any(), any(), any(), any(), any());
 
 		boolean parked = this.form.parkIfDue(RUN_ID, selectionStepContext(Map.of()),
 				List.of(navigateTo(TASK_ID, ToolOutcome.OK)), history());
@@ -357,7 +358,8 @@ class DefinitionSelectionFormTest {
 	private PendingToolCall capturedPending() {
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<PendingToolCall>> captor = ArgumentCaptor.forClass(List.class);
-		verify(this.store).saveSuspended(eq(RUN_ID), eq(""), captor.capture(), any(), eq(this.codec));
+		verify(this.store).saveSuspended(eq(RUN_ID), org.mockito.ArgumentMatchers.isNull(), captor.capture(),
+				any(), eq(this.codec), org.mockito.ArgumentMatchers.isNull());
 		assertThat(captor.getValue()).hasSize(1);
 		return captor.getValue().get(0);
 	}

@@ -92,7 +92,27 @@ class DefinitionSelectionFormSettlementTest {
 		seedNewTaskRun();
 	}
 
-	// ── ① 挂起后：刷新恢复能看到这张卡（req 已置位） ─────────────────────────
+	// ── ①′ 挂起不得抹掉模型那一轮的正文/推理元数据 ─────────────────────────
+
+	@Test
+	void parkingKeepsTheModelTurnTextAndReasoningMetadata() {
+		RunSnapshot before = this.store.get(RUN_ID);
+		before.setAssistantContent("正在为你打开导出向导");
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		metadata.put("reasoningContent", "先建任务，再导航到选择步骤");
+		metadata.put("encrypted_content", "sig-abc");
+		before.setAssistantMetadata(metadata);
+		this.store.save(before);
+
+		assertThat(park()).isTrue();
+
+		RunSnapshot after = this.store.get(RUN_ID);
+		// 挂起只换"谁在等"，不换模型刚产出的那一轮：正文与整份推理元数据原样保留
+		assertThat(after.getAssistantContent()).isEqualTo("正在为你打开导出向导");
+		assertThat(after.getAssistantMetadata()).isEqualTo(metadata);
+	}
+
+	// ── ② 挂起后：刷新恢复能看到这张卡（req 已置位） ─────────────────────────
 
 	@Test
 	void parkedFormIsRestorableAfterRefreshWithTheRequestMarkerSet() {

@@ -239,7 +239,29 @@ class DefinitionFormResumeParkTest {
 		assertThat(persisted.get(persisted.size() - 1).getMessageType().name()).isEqualTo("TOOL");
 	}
 
-	// ── ② 已知配置：不弹，交给模型走 select_definitions ─────────────────────
+	// ── ②′ 挂起表单不得抹掉上一轮的推理元数据（下一跳的 provider 回放要用） ─────────
+
+	@Test
+	void parkedFormKeepsTheNavigationTurnReasoningMetadata() {
+		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(navigateEntry(NEW_TASK_ID)), "帮我新建一个导出任务");
+		RunSnapshot seeded = this.store.get(RUN_ID);
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		metadata.put("reasoningContent", "先建任务，再导航到选择步骤");
+		metadata.put("encrypted_content", "sig-abc");
+		seeded.setAssistantMetadata(metadata);
+		this.store.save(seeded);
+
+		this.service.resume(RUN_ID);
+
+		RunSnapshot parked = this.store.get(RUN_ID);
+		assertThat(parked.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		// 挂起只换"谁在等"：推理元数据原样留在快照上（否则下一跳请求少了 provider 要求的推理件）
+		assertThat(parked.getAssistantMetadata()).isEqualTo(metadata);
+	}
+
+	// ── ③ 已知配置：不弹，交给模型走 select_definitions ─────────────────────
 
 	@Test
 	void knownConfigFromTheUserMessageDrivesTheModelWithoutAForm() {
@@ -302,7 +324,35 @@ class DefinitionFormResumeParkTest {
 			.noneMatch(pending -> CALL_FORM.equals(pending.getToolCallId()));
 	}
 
-	// ── ⑤ 表单回灌后的续跑：不再问第二次 ────────────────────────────────────
+	// ── ⑤ 挂起快照成功后的发帧失败：不得交回模型（否则 SUSPENDED + 待决 + 模型在跑 = 双驱动） ──
+
+	@Test
+	void framePublishFailureAfterTheSnapshotIsParkedNeverDrivesTheModel() {
+		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(navigateEntry(NEW_TASK_ID)), "帮我新建一个导出任务");
+		// 请求帧发布失败（SSE 通道抖动）：快照此时已经写成 SUSPENDED
+		org.mockito.Mockito.doThrow(new IllegalStateException("sse down")).when(this.emitter)
+			.frontendToolRequest(any(), any());
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(result.body()).containsEntry("reason", "DEFINITION_FORM_PARKED");
+		// 快照已是"等人在填表" ⇒ 本拍绝不能再让模型跑（双驱动会让同一轮的帧/历史分叉）
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				any());
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		// 待决条目保持可恢复：用户提交/取消仍能结算它（不是被收敛成终态的孤儿）
+		PendingToolCall parked = this.store.pending(RUN_ID, CALL_FORM);
+		assertThat(parked).isNotNull();
+		assertThat(parked.getStatus()).isEqualTo(PendingToolCall.PENDING);
+		assertThat(snapshot.getInFlightToolCalls()).extracting(PendingToolCall::getToolCallId)
+			.containsExactly(CALL_FORM);
+	}
+
+	// ── ⑥ 表单回灌后的续跑：不再问第二次 ────────────────────────────────────
 
 	@Test
 	void resumingAfterTheFormWasSubmittedHandsOffToTheModelWithoutAskingAgain() {
