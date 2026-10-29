@@ -80,9 +80,12 @@ class RunStoreFirstSnapshotWriteTest {
 	@Test
 	void createThrowsWhenTheFirstSnapshotWriteIsRefused() {
 		// 同一 runId 已有一条取消态（幂等重放/迟到创建）：取消优先守卫会拒写 RUNNING 首笔快照
+		// 记录的归属必须与写者身份一致（生产快照恒带身份；0/0 记录严禁写进某个身份命名空间）
 		RunSnapshot cancelled = new RunSnapshot();
 		cancelled.setRunId(RUN_ID);
 		cancelled.setSessionId(SESSION_ID);
+		cancelled.setTenantId(1L);
+		cancelled.setUserId(101L);
 		cancelled.setStatus(RunSnapshot.CANCELLED);
 		cancelled.setCancelled(true);
 		cancelled.setMessageJson(this.codec.serializeAll(List.of()));
@@ -99,9 +102,12 @@ class RunStoreFirstSnapshotWriteTest {
 
 	@Test
 	void createDoesNotRegisterTheRunIndexWhenTheFirstWriteIsRefused() {
+		// 记录的归属必须与写者身份一致（生产快照恒带身份；0/0 记录严禁写进某个身份命名空间）
 		RunSnapshot cancelled = new RunSnapshot();
 		cancelled.setRunId(RUN_ID);
 		cancelled.setSessionId(SESSION_ID);
+		cancelled.setTenantId(1L);
+		cancelled.setUserId(101L);
 		cancelled.setStatus(RunSnapshot.CANCELLED);
 		cancelled.setCancelled(true);
 		cancelled.setMessageJson(this.codec.serializeAll(List.of()));

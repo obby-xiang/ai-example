@@ -197,7 +197,8 @@ public class StartupResumeRunner {
 			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie);
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie,
+						identityField(run, "tenantId"), identityField(run, "userId"));
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
 				item.put("zombieTakeover", zombie);
@@ -323,7 +324,8 @@ public class StartupResumeRunner {
 			boolean takeover = RunSnapshot.RUNNING.equals(status);
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover);
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover,
+						identityField(run, "tenantId"), identityField(run, "userId"));
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
 				item.put("statusBeforeSweep", status);
@@ -425,18 +427,20 @@ public class StartupResumeRunner {
 	}
 
 	/**
-	 * 以<b>该轮快照的身份</b>执行一次续跑（启动扫描与运行期扫描的唯一入口）。
+	 * 以<b>该轮记录身份</b>执行一次续跑（启动扫描与运行期扫描的唯一入口）。
 	 *
-	 * <p>扫描跑在定时线程上，那里没有请求身份；身份也不能从"当前线程"或默认租户补 ——
-	 * 唯一来源是该轮 {@code RunSnapshot} 的 {@code tenantId/userId}。旧快照（0/0）没有身份可恢复：
-	 * {@link RunIdentityScope#open(long, long)} 返回空作用域，续跑入口按既有 fail-closed 口径处理。
+	 * <p>扫描跑在定时线程上，那里没有请求身份；身份也不能从"当前线程"或默认租户补。
+	 * 身份的<b>来源是 {@code ai:runs} 的复合索引成员</b>（{@code tenantId/userId/runId}，
+	 * 由 {@code ResumeService.listRuns()} 随条目交下来）—— 不是"先读快照再猜身份"：
+	 * 快照键本身由身份拼出，在无身份线程上先读只能读到 {@code null}（那条链会静默退化成空作用域）。
+	 *
+	 * <p>旧快照 / 无归属成员（{@code 0/0}）没有身份可恢复：{@link RunIdentityScope#open(long, long)}
+	 * 会<b>清空</b>线程身份（不沿用调用者），续跑入口因此按 legacy 口径或 fail-closed 处理。
 	 *
 	 * <p>作用域只包住这一次续跑调用，扫描循环（下一轮可能是另一个租户）不继承身份。
 	 */
-	private ResumeService.ResumeResult resumeWithRunIdentity(String runId, boolean takeover) {
-		RunSnapshot snapshot = this.store.get(runId);
-		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
-		long userId = snapshot == null ? 0L : snapshot.getUserId();
+	private ResumeService.ResumeResult resumeWithRunIdentity(String runId, boolean takeover, long tenantId,
+			long userId) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
 			return this.resumeService.resume(runId, takeover);
 		}
@@ -467,7 +471,9 @@ public class StartupResumeRunner {
 		boolean leaseHeld;
 		try {
 			LeaseService leases = this.store.leaseService();
-			leaseHeld = leases != null && leases.isHeld(this.store.runLeaseKey(runId));
+			// 租约键由身份拼出：按<b>索引成员里的记录身份</b>取键（扫描线程没有身份，用线程身份取到的是
+			// legacy 租约 ⇒ 恒"无人持有" ⇒ 活跃轮被判死并接管 = 双驱动）。
+			leaseHeld = leases != null && leases.isHeld(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
 			log.debug("运行期扫描读取续跑租约失败 runId={}（按活跃处理，不接管）：{}", runId, ex.getMessage());
@@ -562,6 +568,25 @@ public class StartupResumeRunner {
 
 	private static long asLong(Object value) {
 		return value instanceof Number number ? number.longValue() : 0L;
+	}
+
+	/**
+	 * 发现条目里的<b>记录身份</b>字段（{@code tenantId}/{@code userId}，由 {@code listRuns} 从
+	 * {@code ai:runs} 的复合成员交下来）。缺字段 ⇒ {@code 0}（旧快照/无归属成员：没有身份可恢复，
+	 * 不猜、也不沿用扫描线程身份）。
+	 */
+	private static long identityField(Map<String, Object> run, String key) {
+		return asLong(run.get(key));
+	}
+
+	/** 该轮续跑权租约键（按记录身份；旧/无归属条目退回 legacy 键形）。 */
+	private static String leaseKeyOf(Map<String, Object> run, String runId) {
+		long tenantId = identityField(run, "tenantId");
+		long userId = identityField(run, "userId");
+		if (RunIdentityScope.usable(tenantId, userId)) {
+			return RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, tenantId, userId, runId);
+		}
+		return RunStore.legacyRunKey(RunStore.LEASE_RUN_PREFIX, runId);
 	}
 
 	/**

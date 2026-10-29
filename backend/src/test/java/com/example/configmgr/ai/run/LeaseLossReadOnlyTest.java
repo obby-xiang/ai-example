@@ -4,6 +4,8 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.UserMessage;
 
@@ -38,8 +40,6 @@ class LeaseLossReadOnlyTest {
 
 	private static final String SESSION_ID = "s-lease-lost";
 
-	private static final String LEASE_KEY = RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, RUN_ID);
-
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
 	private final AiProperties properties = new AiProperties();
@@ -60,13 +60,32 @@ class LeaseLossReadOnlyTest {
 
 	private final RunStore noFacility = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/**
+	 * run 级键在租户改造后由<b>身份</b>拼出（{@code ai:run:{1:101:run:<id>}}）：本组用例直调真实
+	 * {@link RunStore}，必须显式进入身份作用域 —— 否则 {@code create} 缺身份 fail-closed，
+	 * 而"legacy 键"的断言也测不到真实键形。
+	 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable tenantScope;
+
+	@BeforeEach
+	void enterIdentity() {
+		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void leaveIdentity() {
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
+	}
+
 	@Test
 	void lostLeaseTurnsTheOldHolderReadOnly() {
 		seedRun();
 		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
 
 		// A 的租约 TTL 到点，B 接管并写出终态 DONE
-		this.fake.dropKey(LEASE_KEY);
+		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
 		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
 		RunSnapshot byB = this.storeB.get(RUN_ID);
 		byB.setStatus(RunSnapshot.DONE);
@@ -194,7 +213,7 @@ class LeaseLossReadOnlyTest {
 	void lostTombstoneSurvivesRunDeletionAndDiesWithTheProcess() {
 		seedRun();
 		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
-		this.fake.dropKey(LEASE_KEY);
+		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
 		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
 		assertThat(this.leaseA.renewState(a, ttl())).isEqualTo(LeaseService.RenewOutcome.LOST);
 
@@ -214,7 +233,7 @@ class LeaseLossReadOnlyTest {
 	void lostLeaseCannotHalfWriteSuspendedState() {
 		seedRun();
 		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
-		this.fake.dropKey(LEASE_KEY);
+		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
 		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
 		assertThat(this.leaseA.renewState(a, ttl())).isEqualTo(LeaseService.RenewOutcome.LOST);
 		PendingToolCall pending = new PendingToolCall();
@@ -235,7 +254,7 @@ class LeaseLossReadOnlyTest {
 	void fenceAheadWithoutRenewalDropsProductionEmitterFrames() {
 		seedRun();
 		LeaseService.Lease a = this.storeA.tryAcquireRunLease(RUN_ID).orElseThrow();
-		this.fake.dropKey(LEASE_KEY);
+		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
 		this.storeB.tryAcquireRunLease(RUN_ID).orElseThrow();
 		RunSnapshot byB = this.storeB.get(RUN_ID);
 		byB.setStatus(RunSnapshot.SUSPENDED);

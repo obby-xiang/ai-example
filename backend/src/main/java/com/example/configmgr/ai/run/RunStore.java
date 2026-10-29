@@ -658,6 +658,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return RunKeyScope.scoped(prefix, tenantId, userId, runId);
 	}
 
+	/**
+	 * legacy 键形（{@code <prefix>{run:<runId>}}）：<b>显式</b>拼，不读线程身份。
+	 *
+	 * <p>用于"判定旧成员死活"这类必须落在旧键上的动作：若改用 {@code runKey(member)}，在有身份的
+	 * 上下文里算出来的是带身份的新键 ⇒ 旧轮次被判死并 {@code SREM}（机会式清理会把迁移前的发现面删光）。
+	 */
+	static String legacyRunKey(String prefix, String runId) {
+		return prefix + "{run:" + runId + "}";
+	}
+
 	public String runKey(String runId) {
 		return runScopedKey(RUN_PREFIX, runId);
 	}
@@ -991,20 +1001,24 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <ul>
 	 * <li>记录有身份 ⇒ 在记录身份下写入；当前上下文是另一个身份 ⇒ <b>直接拒绝</b>
 	 *     （否则一笔记错身份的写会落到别人的同名 runId 上）；</li>
-	 * <li>记录没有身份（旧数据/手工构造）但有当前上下文 ⇒ 用当前身份补齐并写进快照；</li>
-	 * <li>两者都没有 ⇒ legacy 命名空间（{@code RunIdentityScope} 的空作用域，不伪造身份）。</li>
+	 * <li>记录<b>没有</b>身份（旧数据/手工构造）而当前有身份 ⇒ <b>拒绝</b>：写侧不得把 0/0 记录
+	 *     <b>adopt</b> 成当前身份（读侧 {@link #get(String)} 已把 0/0 按"不是我的"处理，写侧补齐会把
+	 *     无归属数据"合法地"复制进某个租户命名空间）；</li>
+	 * <li>两者都没有 ⇒ legacy 命名空间（{@code RunIdentityScope} 的显式无身份作用域，不伪造身份）。</li>
 	 * </ul>
 	 */
 	private RunIdentityScope.Scope openSnapshotWriteScope(RunSnapshot snapshot) {
-		TenantUser owner = RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
-				? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+		TenantUser owner = recordIdentityOf(snapshot);
 		TenantUser current = RequestContextUtils.currentOrNull();
-		if (owner == null && current != null) {
-			snapshot.setTenantId(current.tenantId());
-			snapshot.setUserId(current.userId());
-			owner = current;
+		if (owner == null) {
+			if (current != null) {
+				throw new IllegalStateException("拒绝把无归属（0/0）的轮次快照写进当前身份 runId="
+						+ snapshot.getRunId() + "（当前身份=" + current + "）：记录身份缺失即 fail-closed，"
+						+ "不得以调用者身份 adopt");
+			}
+			return RunIdentityScope.denied();
 		}
-		if (owner != null && current != null && !owner.equals(current)) {
+		if (current != null && !owner.equals(current)) {
 			throw new IllegalStateException("拒绝以他人身份写入轮次快照 runId=" + snapshot.getRunId() + "（记录归属="
 					+ owner + "，当前身份=" + current + "）：轮级键的 hash tag 含身份，错身份写会把别人的轮次覆盖掉");
 		}
@@ -1636,9 +1650,43 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * {@link AiStateUnavailableException} is-a {@code IllegalStateException}，既有 catch 分支不受影响。
 	 */
 	public RunSnapshot get(String runId) {
+		return readSnapshot(runKey(runId), runId, RequestContextUtils.currentOrNull());
+	}
+
+	/**
+	 * <b>显式身份读口</b>（恢复型入口的唯一正确读法）：键由<b>给定身份</b>拼，不读线程上下文。
+	 *
+	 * <p>为什么需要它：{@link #get(String)} 的键名由<b>当前线程身份</b>决定，而恢复型入口（定时链、
+	 * 启动扫描、取消收尾重试）在无身份线程上只会命中 legacy 命名空间 —— 对任何带身份的轮次恒返回
+	 * {@code null}。"先 store.get 再 useContext"因此在那些线程上是死循环的鸡生蛋：读记录要先有身份，
+	 * 身份又要从记录里来。显式身份读口把身份变成<b>入参</b>（来自索引成员 / 交棒时的记录身份 /
+	 * 信封），读与身份不再互相依赖。
+	 *
+	 * <p>归属复核与 {@link #get(String)} 同口径（记录身份必须等于给定身份，否则按不存在处理）；
+	 * 但给定身份<b>不可用</b>时直接拒绝（{@link IllegalArgumentException}）—— 显式读口没有"无身份"
+	 * 这种合法形态，缺身份必须 fail-closed，而不是悄悄退回 legacy 键。
+	 */
+	public RunSnapshot get(String runId, long tenantId, long userId) {
+		if (!RunIdentityScope.usable(tenantId, userId)) {
+			throw new IllegalArgumentException("显式身份读口要求可用的记录身份（tenantId>0 且 userId>0 或系统 -1）："
+					+ tenantId + "/" + userId + " runId=" + runId);
+		}
+		return readSnapshot(runScopedKey(RUN_PREFIX, tenantId, userId, runId), runId,
+				new TenantUser(tenantId, userId));
+	}
+
+	/** 按索引成员读快照（成员自带身份；不是复合成员 ⇒ 无归属，返回 {@code null}）。 */
+	public RunSnapshot get(RunKeyScope.IndexRef ref) {
+		if (ref == null) {
+			return null;
+		}
+		return get(ref.runId(), ref.tenantId(), ref.userId());
+	}
+
+	private RunSnapshot readSnapshot(String key, String runId, TenantUser expected) {
 		String raw;
 		try {
-			raw = this.redis.opsForValue().get(runKey(runId));
+			raw = this.redis.opsForValue().get(key);
 		}
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("无法读取轮次快照 " + runId + "（Redis 不可用）", ex);
@@ -1656,11 +1704,10 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		// 归属复核（纵深防御）：键面已经按身份分开，这里再核一次记录里的身份，
 		// 拒绝"键对了但记录不是我的"与"无归属旧快照进入新身份读路径"。
-		TenantUser current = RequestContextUtils.currentOrNull();
-		if (current != null && !current.equals(recordIdentityOf(snapshot))) {
-			log.warn("轮次快照归属不符 runId={}（记录 tenantId/userId={}，当前身份={}）：按不存在处理，"
+		if (expected != null && !expected.equals(recordIdentityOf(snapshot))) {
+			log.warn("轮次快照归属不符 runId={}（记录 tenantId/userId={}，期望身份={}）：按不存在处理，"
 					+ "无归属/他人快照不得进入新身份读路径", runId, snapshot.getTenantId() + "/" + snapshot.getUserId(),
-					current.tenantId() + "/" + current.userId());
+					expected.tenantId() + "/" + expected.userId());
 			return null;
 		}
 		return snapshot;
@@ -1820,16 +1867,83 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 但不删就会随轮次永久留存）。
 	 */
 	public void deleteRun(String runId) {
+		deleteRun(runId, RequestContextUtils.currentOrNull());
+	}
+
+	/**
+	 * 按<b>记录身份</b>删除这一轮的键族（系统路径：会话销毁、租户注销）。
+	 *
+	 * <p>键名由身份拼出（13 键 + 全局索引成员），因此"传给谁"决定"删到谁"：用错身份时旧实现的
+	 * {@code DEL} 打在不存在的键上、{@code SREM} 摘不存在的成员，<b>既不抛错也不打日志</b> ——
+	 * 销毁报告成功而数据仍在。本重载把身份做成入参（来自记录/索引成员），并对不匹配<b>响亮失败</b>：
+	 * <ul>
+	 * <li>身份不可用（{@code 0/0}）⇒ {@link IllegalArgumentException}（缺身份 fail-closed，不退回 legacy 删）；</li>
+	 * <li>记录存在但归属 ≠ 给定身份 ⇒ {@link IllegalStateException}（不得静默 no-op）；</li>
+	 * <li>记录已不在（重复销毁/已过期）⇒ 按给定身份删自己命名空间的残留键（幂等）。</li>
+	 * </ul>
+	 */
+	public void deleteRun(String runId, long tenantId, long userId) {
+		if (!RunIdentityScope.usable(tenantId, userId)) {
+			throw new IllegalArgumentException("删除轮次要求可用的记录身份（tenantId>0 且 userId>0 或系统 -1）："
+					+ tenantId + "/" + userId + " runId=" + runId);
+		}
+		deleteRun(runId, new TenantUser(tenantId, userId));
+	}
+
+	/** 按索引成员删除这一轮的键族（成员自带身份）。 */
+	public void deleteRun(RunKeyScope.IndexRef ref) {
+		if (ref == null) {
+			throw new IllegalArgumentException("删除轮次要求索引成员自带身份（不得凭 runId 猜身份）");
+		}
+		deleteRun(ref.runId(), ref.tenantId(), ref.userId());
+	}
+
+	private void deleteRun(String runId, TenantUser identity) {
+		RunSnapshot snapshot = readForDelete(runId, identity);
+		if (identity != null && snapshot != null && !identity.equals(recordIdentityOf(snapshot))) {
+			// 记录在（且是从调用线程身份那一侧读到的）却与给定删除身份不符 ⇒ 拒绝。
+			// 静默 no-op 会让销毁报告"成功"而这一轮的数据仍在。
+			throw new IllegalStateException("拒绝以身份 " + identity + " 删除不属于它的轮次 runId=" + runId
+					+ "（记录归属=" + recordIdentityOf(snapshot) + "）：键名由身份拼出，错身份删是静默 no-op/误删");
+		}
+		if (identity != null) {
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+				deleteRunKeys(runId, snapshot, identity);
+			}
+			return;
+		}
+		log.warn("删除轮次时没有身份上下文 runId={}：只清理 legacy 命名空间的键（带身份的轮次不会被删到）", runId);
+		deleteRunKeys(runId, snapshot, null);
+	}
+
+	/**
+	 * 删除前的归属读取：<b>先按调用线程身份</b>（若有）、再按给定身份读 —— 于是"记录存在但不属于给定身份"
+	 * 可被识别并拒绝，而不是落到"删自己命名空间的空键"上。
+	 */
+	private RunSnapshot readForDelete(String runId, TenantUser identity) {
+		RunSnapshot snapshot = null;
+		if (RequestContextUtils.currentOrNull() != null) {
+			try {
+				snapshot = get(runId);
+			}
+			catch (RuntimeException ex) {
+				log.debug("删除轮次前读快照失败 runId={}（会话索引成员留待 TTL/对账清理）：{}", runId, ex.getMessage());
+			}
+		}
+		if (snapshot == null && identity != null) {
+			try {
+				snapshot = get(runId, identity.tenantId(), identity.userId());
+			}
+			catch (RuntimeException ex) {
+				log.debug("删除轮次前按记录身份读快照失败 runId={}（按已不存在处理）：{}", runId, ex.getMessage());
+			}
+		}
+		return snapshot;
+	}
+
+	private void deleteRunKeys(String runId, RunSnapshot snapshot, TenantUser identity) {
 		// 先放掉本进程持有的租约：删键之后脚本再比对就会扑空，进程内视图会成为幽灵所有权
 		releaseRunLease(runId);
-		// 会话→run 轻量索引需要 sessionId；删键前读一次快照（读不到只留 stale 成员，销毁方仍可过滤）。
-		RunSnapshot snapshot = null;
-		try {
-			snapshot = get(runId);
-		}
-		catch (RuntimeException ex) {
-			log.debug("删除轮次前读快照失败 runId={}（会话索引成员留待 TTL/对账清理）：{}", runId, ex.getMessage());
-		}
 		// B23L1 批②a：租约 / fence / req 位 / decided guard 同属"本轮的全部键"——
 		// 留着它们会让下一轮同 id 的运行继承前任的 fence 与决策（且 fence 只增不减 ⇒ 新租约写不进去）。
 		// 批③a：幂等索引随台账一起删（索引是台账的指针，台账没了它只会指向空气）。
@@ -1844,7 +1958,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				fenceKey(runId), reqKey(runId), decidedKey(runId), runLeaseEpochKey(runId)));
 		// 全局索引成员是复合成员（{@code tenantId/userId/runId}）：只摘<b>本身份这一条</b>，
 		// 同 runId 的其它租户/用户成员原样保留。
-		this.redis.opsForSet().remove(RUN_INDEX, RunKeyScope.indexMember(runId));
+		this.redis.opsForSet().remove(RUN_INDEX,
+				identity == null ? RunKeyScope.indexMember(runId) : RunKeyScope.indexMember(identity, runId));
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
 			// N1：活跃有序索引同样摘成员（终态清理失败时它也只会成为下一轮被摘掉的 stale 候选）。
 			forgetActiveRun(snapshot.getSessionId(), runId);
@@ -2069,7 +2184,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if (current != null) {
 				continue;
 			}
-			if (Boolean.TRUE.equals(this.redis.hasKey(runKey(member)))) {
+			if (Boolean.TRUE.equals(this.redis.hasKey(legacyRunKey(RUN_PREFIX, member)))) {
 				live.add(member);
 			}
 			else {
@@ -2158,8 +2273,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				boolean exists = ref != null
 						? Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(),
 								ref.userId(), ref.runId())))
-						// legacy 成员（旧形 runId）：按旧键形判定，不动它
-						: Boolean.TRUE.equals(this.redis.hasKey(runKey(member)));
+						// legacy 成员（旧形 runId）：按<b>旧键形</b>判定（不读线程身份；不动它）
+						: Boolean.TRUE.equals(this.redis.hasKey(legacyRunKey(RUN_PREFIX, member)));
 				if (!exists) {
 					dead.add(member);
 				}

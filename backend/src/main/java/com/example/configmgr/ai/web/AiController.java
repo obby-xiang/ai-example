@@ -1336,6 +1336,14 @@ public class AiController {
 	@PostMapping("/cancel/{runId}")
 	public ResponseEntity<?> cancel(@PathVariable String runId) {
 		RunSnapshot snapshot = ownedRun(runId);
+		if (snapshot == null && !hasOwnArchive(runId)) {
+			// 归属不明 ⇒ 不写任何取消事实（取消会中断那一轮的执行：跨身份写全局旗标 = DoS / 误杀他人轮次）。
+			// 快照未建但归档里有本命名空间的帧（"已 start、快照未建"的准备窗口）仍允许取消：
+			// 归档键同样按身份分开，能读到就证明是本身份的这一轮。
+			log.warn("拒绝取消：runId 无归属或不存在 runId={}（取消旗标未写，无任何副作用）", runId);
+			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId, "cancelled",
+					false));
+		}
 		Map<String, Object> before = this.cancellations.status(runId);
 		CancellationRegistry.CancelResult result = this.cancellations.cancel(runId, this.runStore.instanceId());
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -1363,10 +1371,37 @@ public class AiController {
 		return ResponseEntity.ok(body);
 	}
 
-	/** 取消标志现状（只读，取证用）。 */
+	/** 取消标志现状（只读，取证用；<b>先核归属</b>：跨身份读是状态探测面）。 */
 	@GetMapping("/cancel/{runId}")
-	public ApiResponse<Map<String, Object>> cancelStatus(@PathVariable String runId) {
-		return ApiResponse.ok(this.cancellations.status(runId));
+	public ResponseEntity<?> cancelStatus(@PathVariable String runId) {
+		RunSnapshot snapshot = ownedRun(runId);
+		if (snapshot == null && !hasOwnArchive(runId)) {
+			// 不区分"不存在"与"不是我的"：回显任何一种事实都属于跨身份状态探测。
+			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
+		}
+		return ResponseEntity.ok(ApiResponse.ok(this.cancellations.status(runId)));
+	}
+
+	/**
+	 * 归档里是否有<b>本命名空间</b>的帧（{@code ai:xevents:{<t>:<u>:run:<id>}}）。
+	 *
+	 * <p>只用于"快照还没建立"的准备窗口：那一轮确实属于当前身份（归档键按身份分开），
+	 * 但还没有可核对的记录。归档末号读不出来（Redis 抖动）按<b>无归属</b>处理 ——
+	 * 取消/状态查询这类带副作用或探测性的动作宁可不做，也不猜。
+	 */
+	private boolean hasOwnArchive(String runId) {
+		FrameStore frames = this.frameStore;
+		if (frames == null || runId == null || runId.isBlank()) {
+			return false;
+		}
+		try {
+			java.util.OptionalLong last = frames.lastSeqIfKnown(runId);
+			return last.isPresent() && last.getAsLong() > 0L;
+		}
+		catch (RuntimeException ex) {
+			log.debug("取消归属核对读归档失败 runId={}（按无归属处理，不写取消旗标）：{}", runId, ex.getMessage());
+			return false;
+		}
 	}
 
 	/**

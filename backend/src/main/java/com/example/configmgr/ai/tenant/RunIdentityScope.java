@@ -16,6 +16,15 @@ package com.example.configmgr.ai.tenant;
  * <p>作用域只能在建立它的线程关闭（同 {@link RequestContextUtils.SafeCloseable}）；
  * 跨线程的任务必须在执行线程里用同一份 {@code tenantId/userId} 重新 {@link #open(long, long)}，
  * 不能把句柄传过去关闭。
+ *
+ * <h2>0/0（旧记录）＝ 显式无身份，不是"沿用调用者"</h2>
+ * 记录没有身份时本类<b>清空</b>线程身份并返回可关闭句柄（关闭即还原）：
+ * 池化/定时线程上残留的身份若被沿用，下游所有按身份定键的读写都会以<b>别人</b>的身份执行。
+ * 这正是"不伪造默认租户"的反面要求 —— 不伪造 ≠ 沿用调用者。
+ *
+ * <h2>嵌套还原</h2>
+ * 作用域可嵌套（外层 = 请求/交棒身份，内层 = 记录身份）：关闭内层必须回到外层身份，
+ * 关闭外层才回到进入前的状态（无旧值则清空）。句柄关闭幂等。
  */
 public final class RunIdentityScope {
 
@@ -35,25 +44,41 @@ public final class RunIdentityScope {
 	}
 
 	/**
-	 * 按记录里的身份建立作用域；记录缺失或身份不可用时返回空作用域（{@link #NONE}）。
+	 * 按记录里的身份建立作用域。
+	 *
+	 * <p>身份<b>不可用</b>（{@code 0/0}、负值、缺字段）时不是"什么都不做"：清空线程身份并返回可关闭
+	 * 句柄（关闭即还原进入前的身份）。语义 = <b>这条记录没有身份</b>，于是这一拍也不得以调用者身份执行。
 	 *
 	 * @param tenantId 记录里的租户（{@code <=0} = 无身份/旧记录）
 	 * @param userId   记录里的用户（{@code 0} = 无身份/旧记录；{@code -1} = 系统账号）
 	 */
 	public static Scope open(long tenantId, long userId) {
 		if (!usable(tenantId, userId)) {
-			return NONE;
+			return denied();
 		}
 		RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(tenantId, userId);
 		return scope::close;
 	}
 
-	/** 按已解析的身份建立作用域；{@code null} = 空作用域。 */
+	/** 按已解析的身份建立作用域；{@code null} = 该记录没有身份（清空线程身份）。 */
 	public static Scope open(TenantUser identity) {
 		if (identity == null) {
-			return NONE;
+			return denied();
 		}
 		return open(identity.tenantId(), identity.userId());
+	}
+
+	/**
+	 * <b>显式无身份</b>作用域：清空线程绑定，关闭时还原。
+	 *
+	 * <p>当前线程本来就没有身份时返回无副作用的句柄（常见路径，不额外分配线程状态）。
+	 */
+	public static Scope denied() {
+		if (RequestContextUtils.currentOrNull() == null) {
+			return NONE;
+		}
+		RequestContextUtils.SafeCloseable scope = RequestContextUtils.clearContext();
+		return scope::close;
 	}
 
 	/**

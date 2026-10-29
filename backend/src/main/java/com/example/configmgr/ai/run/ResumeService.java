@@ -16,7 +16,10 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.RunKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
@@ -462,68 +465,125 @@ public class ResumeService {
 
 	}
 
-	/** 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口）。 */
+	/**
+	 * 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口）。
+	 *
+	 * <h2>两条口径（按调用线程有没有身份分）</h2>
+	 * <ul>
+	 * <li><b>系统恢复面</b>（启动扫描 / 运行期扫描，线程无身份）：{@code ai:runs} 的复合成员自带
+	 *     {@code tenantId/userId}，逐条 {@link RunIdentityScope#open(long, long)} 后再读 —— <b>不需要</b>
+	 *     扫描租户列表，也不需要"先读快照再猜身份"（快照键本身由身份决定，先读必然读不到）。
+	 *     条目里带上 {@code tenantId/userId}，续跑侧据此直接进入该轮身份，
+	 *     不再出现"定时线程上 {@code store.get} 恒为 {@code null}"的假死链；</li>
+	 * <li><b>请求面</b>（HTTP 列表，线程有身份）：仍走 {@link RunStore#allRunIds()}（只返回<b>当前身份</b>
+	 *     的轮次），绝不把别人的轮次列进来；</li>
+	 * <li>两者都不丢：pre-deploy 的裸成员（无归属）只在<b>无身份</b>线程上按旧键形发现（过渡期口径）。</li>
+	 * </ul>
+	 */
 	public List<Map<String, Object>> listRuns() {
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (String runId : this.store.allRunIds()) {
-			RunSnapshot snapshot = this.store.get(runId);
-			if (snapshot == null) {
+		java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+		for (RunKeyScope.IndexRef ref : systemRunRecords()) {
+			String key = ref.tenantId() + "/" + ref.userId() + "/" + ref.runId();
+			if (!seen.add(key)) {
 				continue;
 			}
-			// C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
-			List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
-			Map<String, Object> item = new LinkedHashMap<>();
-			item.put("runId", runId);
-			item.put("sessionId", snapshot.getSessionId());
-			item.put("status", snapshot.getStatus());
-			item.put("round", snapshot.getRound());
-			item.put("messageCount", snapshot.getMessageJson().size());
-			item.put("createdBy", snapshot.getCreatedBy());
-			item.put("resumedBy", snapshot.getResumedBy());
-			item.put("updatedAtMs", snapshot.getUpdatedAtMs());
-			item.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
-			item.put("pendingUnresolved", pendings.stream()
-				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-				.map(PendingToolCall::getToolCallId)
-				.toList());
-			item.put("ledgerCounts", this.store.ledgerCounts(runId));
-			// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
-			// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
-			// C2：发现/列表面 UNKNOWN 按"未取消 + 计数继续"（这里只是展示可续跑性，没有副作用）。
-			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
-			boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
-			if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-				log.debug("发现态取消状态未知，按未取消继续展示 runId={}", runId);
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(ref.tenantId(), ref.userId())) {
+				Map<String, Object> item = listRun(ref.runId(), ref.tenantId(), ref.userId());
+				if (item != null) {
+					out.add(item);
+				}
 			}
-			long activeAtMs = activeAtMs(snapshot);
-			boolean zombie = RunSnapshot.RUNNING.equals(snapshot.getStatus())
-					&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge()
-						.toMillis();
-			// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
-			// 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
-			// SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
-			long heartbeatAtMs = this.store.lastBeatAtMs(runId);
-			long livenessAtMs = RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
-					? Math.max(activeAtMs, heartbeatAtMs) : activeAtMs;
-			item.put("activeAtMs", activeAtMs);
-			item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
-			item.put("lastHeartbeatAtMs", heartbeatAtMs);
-			item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
-			List<String> unresolvedExternal = pendings.stream()
-				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-				.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-				.map(PendingToolCall::getToolCallId)
-				.toList();
-			item.put("cancelled", cancelled);
-			item.put("zombieRunning", zombie);
-			// T3-7（A14）：可续跑性组合改用统一终态判定（含 REJECTED 归一），不再散点比对三个字面量
-			item.put("resumeable", !cancelled && unresolvedExternal.isEmpty()
-					&& !RunSnapshot.isTerminal(snapshot.getStatus())
-					&& (zombie || !RunSnapshot.RUNNING.equals(snapshot.getStatus())));
-			item.put("unresolvedExternal", unresolvedExternal);
-			out.add(item);
+		}
+		// 当前身份（请求面）或过渡期的 legacy 裸成员：键由线程身份决定，交给 store 的既有过滤
+		TenantUser current = RequestContextUtils.currentOrNull();
+		for (String runId : this.store.allRunIds()) {
+			String key = (current == null ? "" : current.tenantId() + "/" + current.userId()) + "/" + runId;
+			if (!seen.add(key)) {
+				continue;
+			}
+			Map<String, Object> item = listRun(runId, current == null ? 0L : current.tenantId(),
+					current == null ? 0L : current.userId());
+			if (item != null) {
+				out.add(item);
+			}
 		}
 		return out;
+	}
+
+	/**
+	 * 系统恢复面的候选（复合成员）：<b>无身份线程</b>上返回全部带身份成员；有身份（请求面）时返回空 ——
+	 * 列表端点只走 {@link RunStore#allRunIds()}（只看自己身份），<b>不</b>对别人的成员做活/死判定
+	 * （那会读别人的键，既是隔离问题也是 O(全索引) 的额外往返）。
+	 */
+	private List<RunKeyScope.IndexRef> systemRunRecords() {
+		if (RequestContextUtils.currentOrNull() != null) {
+			return List.of();
+		}
+		return this.store.allRunRecords();
+	}
+
+	/** 单条列表项（在<b>该条记录身份</b>的作用域内构造）。 */
+	private Map<String, Object> listRun(String runId, long tenantId, long userId) {
+		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
+				: this.store.get(runId);
+		if (snapshot == null) {
+			return null;
+		}
+		// C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
+		List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		// 身份随条目交给扫描方：续跑入口据此 useContext（不读快照猜身份、不扫描租户列表）
+		item.put("tenantId", snapshot.getTenantId());
+		item.put("userId", snapshot.getUserId());
+		item.put("sessionId", snapshot.getSessionId());
+		item.put("status", snapshot.getStatus());
+		item.put("round", snapshot.getRound());
+		item.put("messageCount", snapshot.getMessageJson().size());
+		item.put("createdBy", snapshot.getCreatedBy());
+		item.put("resumedBy", snapshot.getResumedBy());
+		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
+		item.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
+		item.put("pendingUnresolved", pendings.stream()
+			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+			.map(PendingToolCall::getToolCallId)
+			.toList());
+		item.put("ledgerCounts", this.store.ledgerCounts(runId));
+		// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
+		// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
+		// C2：发现/列表面 UNKNOWN 按"未取消 + 计数继续"（这里只是展示可续跑性，没有副作用）。
+		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+		boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
+		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+			log.debug("发现态取消状态未知，按未取消继续展示 runId={}", runId);
+		}
+		long activeAtMs = activeAtMs(snapshot);
+		boolean zombie = RunSnapshot.RUNNING.equals(snapshot.getStatus())
+				&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge().toMillis();
+		// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
+		// 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
+		// SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
+		long heartbeatAtMs = this.store.lastBeatAtMs(runId);
+		long livenessAtMs = RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
+				? Math.max(activeAtMs, heartbeatAtMs) : activeAtMs;
+		item.put("activeAtMs", activeAtMs);
+		item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
+		item.put("lastHeartbeatAtMs", heartbeatAtMs);
+		item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
+		List<String> unresolvedExternal = pendings.stream()
+			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+			.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+			.map(PendingToolCall::getToolCallId)
+			.toList();
+		item.put("cancelled", cancelled);
+		item.put("zombieRunning", zombie);
+		// T3-7（A14）：可续跑性组合改用统一终态判定（含 REJECTED 归一），不再散点比对三个字面量
+		item.put("resumeable", !cancelled && unresolvedExternal.isEmpty()
+				&& !RunSnapshot.isTerminal(snapshot.getStatus())
+				&& (zombie || !RunSnapshot.RUNNING.equals(snapshot.getStatus())));
+		item.put("unresolvedExternal", unresolvedExternal);
+		return item;
 	}
 
 	/**
@@ -725,72 +785,82 @@ public class ResumeService {
 
 	private ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason,
 			Locale replyLocale) {
-		// ===== 接管前初检（M-1）=====
-		// 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
-		// 否则"先抢租 → 复核发现驱动还活 → 拒绝并把租约还掉"的净结果是
-		// 「fence 已推进 + 租约被删 + 无人驱动」：原驱动被围栏在外，这一轮再也没人推。
-		if (forceTakeover) {
-			ResumeResult refused = takeoverPreCheck(runId);
-			if (refused != null) {
-				return refused;
+		// ===== 身份作用域：抢租 / 还租 / 续租判据都必须落在<b>记录身份</b>下 =====
+		// 租约键（{@code ai:lease:run:{<t>:<u>:run:<id>}}）由身份拼出：抢租发生在读快照之前，
+		// 若用调用线程身份（定时线程 = 无身份）拼键，抢到的是一把 legacy 租约 —— 真实那一轮既没被围栏，
+		// 又会被另一实例当成"无人持有"再次接管（双驱动）。因此身份必须在<b>进入本方法时</b>就定下来：
+		// 调用方（启动扫描 = 索引成员身份 / 确认门 = 交棒时的记录身份 / HTTP = 请求身份）负责给出。
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			// ===== 接管前初检（M-1）=====
+			// 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
+			// 否则"先抢租 → 复核发现驱动还活 → 拒绝并把租约还掉"的净结果是
+			// 「fence 已推进 + 租约被删 + 无人驱动」：原驱动被围栏在外，这一轮再也没人推。
+			if (forceTakeover) {
+				ResumeResult refused = takeoverPreCheck(runId);
+				if (refused != null) {
+					return refused;
+				}
 			}
-		}
-		LeaseService leases = this.store.leaseService();
-		boolean fresh = false;
-		LeaseService.Lease lease = null;
-		if (leases != null) {
-			LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
-			if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
-						"reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
+			LeaseService leases = this.store.leaseService();
+			boolean fresh = false;
+			LeaseService.Lease lease = null;
+			if (leases != null) {
+				LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+				if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+					return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
+							"reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
+				}
+				// I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
+				// 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
+				// 把启动续跑/运维续跑全部 409 掉。
+				// 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
+				// 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
+				// 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
+				// 把胜方的 fencing 写打回 plain SET（harness lease-scripts 实锤）。
+				lease = acquired.lease();
+				fresh = acquired.created();
 			}
-			// I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
-			// 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
-			// 把启动续跑/运维续跑全部 409 掉。
-			// 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
-			// 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
-			// 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
-			// 把胜方的 fencing 写打回 plain SET（harness lease-scripts 实锤）。
-			lease = acquired.lease();
-			fresh = acquired.created();
-		}
-		ResumeResult result;
-		try {
-			result = resumeInternal(runId, forceTakeover, lease, fresh, resumeReason, replyLocale);
-		}
-		catch (RuntimeException ex) {
+			ResumeResult result;
+			try {
+				result = resumeInternal(runId, forceTakeover, lease, fresh, resumeReason, replyLocale);
+			}
+			catch (RuntimeException ex) {
+				if (fresh) {
+					this.store.releaseRunLease(runId);
+				}
+				throw ex;
+			}
 			if (fresh) {
-				this.store.releaseRunLease(runId);
+				if (result.outcome() == Outcome.ACCEPTED) {
+					// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
+					// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
+					// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
+					// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）。
+					leases.markDriving(lease,
+							() -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId, identity), identity);
+				}
+				else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
+					// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
+					// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
+					// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
+					// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
+					// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
+					leases.stopDriving(lease.key(), lease.owner());
+					leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
+							&& snapshotNotTerminal(runId, identity), identity);
+					log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
+							lease.epoch());
+				}
+				else if (result.outcome().releasesLease()) {
+					// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
+					// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
+					// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
+					this.store.releaseRunLease(runId);
+				}
 			}
-			throw ex;
+			return result;
 		}
-		if (fresh) {
-			if (result.outcome() == Outcome.ACCEPTED) {
-				// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
-				// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
-				// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
-				leases.markDriving(lease, () -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId));
-			}
-			else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
-				// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
-				// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
-				// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
-				// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
-				// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
-				leases.stopDriving(lease.key(), lease.owner());
-				leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
-						&& snapshotNotTerminal(runId));
-				log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
-						lease.epoch());
-			}
-			else if (result.outcome().releasesLease()) {
-				// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
-				// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
-				// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
-				this.store.releaseRunLease(runId);
-			}
-		}
-		return result;
 	}
 
 	/**
@@ -963,7 +1033,9 @@ public class ResumeService {
 		}
 		if (fresh) {
 			if (result.outcome() == Outcome.ACCEPTED) {
-				leases.markDriving(lease, () -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId));
+				TenantUser identity = RequestContextUtils.currentOrNull();
+				leases.markDriving(lease,
+						() -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId, identity), identity);
 			}
 			else if (result.outcome().releasesLease()) {
 				this.store.releaseRunLease(runId);
@@ -2959,10 +3031,15 @@ public class ResumeService {
 	 *
 	 * <p>与 {@code resuming} 表合用 = "本进程还有续跑任务在跑，且这一轮还没收尾"。读快照失败
 	 * （Redis 抖动）按"仍活着"处理：误判为假会提前放掉一个正在跑的轮的续跑权。
+	 *
+	 * <p><b>身份</b>：本判据在<b>续租线程</b>上执行（那里没有请求身份），因此必须按记录身份走
+	 * {@link RunStore#get(String, long, long)}；用线程身份读只会命中 legacy 键 ⇒ 恒 {@code null}
+	 * ⇒ 首拍即"驱动者已不在" ⇒ 主动还租、fence 不再推进（双驱动窗口）。
 	 */
-	private boolean snapshotNotTerminal(String runId) {
+	private boolean snapshotNotTerminal(String runId, TenantUser identity) {
 		try {
-			RunSnapshot snapshot = this.store.get(runId);
+			RunSnapshot snapshot = identity == null ? this.store.get(runId)
+					: this.store.get(runId, identity.tenantId(), identity.userId());
 			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
 		}
 		catch (Exception ex) {

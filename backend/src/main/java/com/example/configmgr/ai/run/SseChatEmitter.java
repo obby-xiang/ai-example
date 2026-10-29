@@ -232,13 +232,20 @@ public class SseChatEmitter {
 	/**
 	 * 本轮的投递身份（投递池线程没有请求身份）。
 	 *
-	 * <p>构造线程通常是请求/重挂线程，已有身份；跨实例唤醒创建的写出器没有 —— 此时按
-	 * {@code ai:run:<runId>} 快照懒解析一次（记录身份是唯一权威来源）。解析不到就保持 {@code null}，
-	 * 投递照常（帧面不依赖身份），不伪造默认租户。
+	 * <p><b>唯一来源 = 本轮记录</b>（{@code ai:run:{<t>:<u>:run:<id>}} 的 {@code tenantId/userId}）：
+	 * 跨实例唤醒创建的写出器从来没有过请求身份，重挂线程的身份也不保证等于记录身份。构造线程的
+	 * 当前身份只作<b>取键提示</b>（记录键由身份拼出，没有它就无从读起），<b>绝不</b>当成权威 ——
+	 * 记录身份与它不同时以记录为准（"请求身份覆盖记录"会让帧写进另一个租户的键）。
+	 *
+	 * <p>解析不到（记录还没建 / 0/0 旧轮 / Redis 抖动）就保持 {@code null}：帧面照常，
+	 * 但身份相关的键走 legacy 口径 —— 不伪造默认租户，也不回落到调用线程的残留身份。
 	 */
 	private volatile TenantUser deliveryIdentity;
 
-	/** 快照身份只探测一次（首轮可能在快照建立前就有帧，那一路由构造线程的身份兜底）。 */
+	/** 构造线程的当前身份（只用于"按身份拼键去读记录"，不作权威身份）。 */
+	private final TenantUser requestIdentityHint;
+
+	/** 快照身份只探测一次（记录一旦有身份就不会再变；首轮在快照建立前出的帧由提示身份兜底）。 */
 	private final AtomicBoolean identityProbed = new AtomicBoolean();
 
 	/**
@@ -520,8 +527,9 @@ public class SseChatEmitter {
 		}
 		this.maxFrameBytes = maxFrameBytes;
 		this.writeBudget = writeBudget != null ? writeBudget : SseWriteBudget.direct();
-		// 构造线程（请求/重挂）通常已有本轮身份；跨实例唤醒线程没有，投递时再按快照解析。
-		this.deliveryIdentity = RequestContextUtils.currentOrNull();
+		// 构造线程（请求/重挂）的身份只作"取键提示"：本轮身份唯一权威来源是记录本身，
+		// 解析见 {@link #deliveryIdentity()}（记录身份优先，请求身份不得覆盖记录）。
+		this.requestIdentityHint = RequestContextUtils.currentOrNull();
 		this.assistantMessageId = "assistant-" + runId;
 	}
 
@@ -2352,22 +2360,38 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * 本轮的投递身份：构造时已抓到就直接用；否则按快照懒解析一次（跨实例唤醒创建的写出器）。
+	 * 本轮的投递身份：<b>只按记录解析</b>（记录身份优先，构造线程身份只用于拼读记录的键）。
 	 *
-	 * <p>解析失败（快照还没建 / Redis 抖动）不改变投递行为：返回 {@code null} 即"没有身份可恢复"，
-	 * 绝不回落到默认租户。
+	 * <p>解析顺序：
+	 * <ol>
+	 * <li>已解析过的记录身份 ⇒ 直接用（结果缓存，后续拍不再读）；</li>
+	 * <li>首次解析：用构造线程身份（提示）走<b>显式身份读口</b> {@link RunStore#get(String, long, long)}
+	 *     读这一轮记录；记录有身份 ⇒ 用记录里的 {@code tenantId/userId}（即使与提示不同）；</li>
+	 * <li>记录<b>不存在</b>（首轮快照还没建）⇒ 用提示身份（那就是即将创建这条记录的身份，不是"覆盖"）；</li>
+	 * <li>记录存在但无归属（0/0）或读不出来 ⇒ {@code null}：不 adopt、不回落线程身份。</li>
+	 * </ol>
+	 * 解析失败不改变投递行为：返回 {@code null} 即"没有身份可恢复"，绝不回落到默认租户。
 	 */
 	private TenantUser deliveryIdentity() {
 		TenantUser known = this.deliveryIdentity;
 		if (known != null) {
 			return known;
 		}
-		if (this.identityProbed.compareAndSet(false, true) && this.store != null) {
+		if (!this.identityProbed.compareAndSet(false, true)) {
+			return this.deliveryIdentity;
+		}
+		TenantUser hint = this.requestIdentityHint;
+		TenantUser resolved = null;
+		if (this.store != null && hint != null) {
 			try {
-				RunSnapshot snapshot = this.store.get(this.runId);
-				if (snapshot != null && RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())) {
-					known = new TenantUser(snapshot.getTenantId(), snapshot.getUserId());
-					this.deliveryIdentity = known;
+				RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
+				if (snapshot != null) {
+					resolved = RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
+							? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+				}
+				else {
+					// 记录还没建：首轮的帧写在"即将创建这一轮"的身份下（提示 = 请求身份，不是覆盖记录）
+					resolved = hint;
 				}
 			}
 			catch (RuntimeException ex) {
@@ -2375,7 +2399,8 @@ public class SseChatEmitter {
 						ex.getMessage());
 			}
 		}
-		return known != null ? known : RequestContextUtils.currentOrNull();
+		this.deliveryIdentity = resolved;
+		return resolved;
 	}
 
 	/**

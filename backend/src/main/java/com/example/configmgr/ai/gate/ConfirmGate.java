@@ -13,10 +13,12 @@ import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
-import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -932,18 +934,25 @@ public class ConfirmGate {
 		if (holder == null || lease == null || runId == null) {
 			return;
 		}
-		holder.markDriving(lease, () -> stillDriving(runId, lease));
+		// 判据在<b>续租线程</b>上执行：身份随租约携带（记录身份），不是"那一拍线程碰巧是谁"。
+		TenantUser identity = recordIdentityNow(runId);
+		holder.markDriving(lease, () -> stillDriving(runId, lease, identity), identity);
 	}
 
 	/**
 	 * 交棒后的存活判据（I7）：快照仍非终态，且本进程仍是该租约的主人。
 	 *
+	 * <p><b>身份</b>：本判据跑在续租线程上，那里没有请求身份；快照键与租约键都由身份拼出。
+	 * 用 {@link RunStore#get(String, long, long)}（显式记录身份）读，否则带身份的轮次第一拍就判
+	 * "驱动者已不在" ⇒ 提前还租 ⇒ 另一实例可接管（双驱动）。
+	 *
 	 * <p>读快照失败（Redis 抖动）按"仍活着"处理：判据误判为假会提前放掉一个正在跑的轮的续跑权，
 	 * 代价远大于多续一拍（续租本身会失败并走 {@code renewTick} 的既有降级）。
 	 */
-	private boolean stillDriving(String runId, LeaseService.Lease lease) {
+	private boolean stillDriving(String runId, LeaseService.Lease lease, TenantUser identity) {
 		try {
-			RunSnapshot snapshot = this.store.get(runId);
+			RunSnapshot snapshot = identity == null ? this.store.get(runId)
+					: this.store.get(runId, identity.tenantId(), identity.userId());
 			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
 				return false;
 			}
@@ -1176,26 +1185,32 @@ public class ConfirmGate {
 		long delayMs = Math.max(0L, deadlineMs - System.currentTimeMillis());
 		String toolCallId = pending.getToolCallId();
 		String toolName = pending.getName();
+		// 身份随任务携带（提交时刻的记录身份）：到期裁决跑在定时线程上，那里<b>没有</b>请求身份，
+		// 而快照/待决条目的键都由身份拼出 —— 在任务体里现读快照只能读到 legacy 键（恒 null ⇒ 永不收敛）。
+		TenantUser identity = recordIdentityNow(runId);
 		try {
 			this.retryScheduler.schedule(() -> {
-				try {
-					// 到期裁决跑在定时线程上：按本轮记录建立身份后再收敛条目/派发续跑。
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					// 到期裁决：身份来自提交时刻的记录，不来自这一拍线程。
 					RunSnapshot snapshot = this.store.get(runId);
-					withRunIdentity(snapshot, () -> {
-						PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
-						if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
-							return;
-						}
-						PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
-						settleParkedToolCall(runId, expired, expired.getResultText());
-						AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
-								toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
-						log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
-								+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
-								runId, toolCallId, toolName, timeoutSeconds);
-						// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
-						triggerResume(runId, false, true);
-					});
+					if (snapshot == null) {
+						log.warn("park 后的前端回执到期裁决读不到本轮快照 runId={} toolCallId={}"
+								+ "（记录身份={}，按无归属/已过期处理，不改任何状态）", runId, toolCallId, identity);
+						return;
+					}
+					PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
+					if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
+						return;
+					}
+					PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
+					settleParkedToolCall(runId, expired, expired.getResultText());
+					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
+							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
+					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
+							+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
+							runId, toolCallId, toolName, timeoutSeconds);
+					// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
+					triggerResume(runId, false, true);
 				}
 				catch (RuntimeException ex) {
 					log.warn("park 后的前端回执到期收敛失败 runId={} toolCallId={}：{}", runId, toolCallId,
@@ -2253,20 +2268,19 @@ public class ConfirmGate {
 			return;
 		}
 		Duration delay = dispatchRetryDelay(attempt);
+		// 身份随任务携带（提交时刻的记录身份）：重试跑在定时线程上，那里没有请求身份。
+		TenantUser identity = recordIdentityNow(runId);
 		try {
 			this.retryScheduler.schedule(() -> {
-				try {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 					// 身份读取与重派发同属这一拍：快照读不出来也必须落在下面的 catch 里
 					// （否则异常会穿到调度线程，有界周期断链）。
-					RunSnapshot snapshot = this.store.get(runId);
-					withRunIdentity(snapshot, () -> {
-						ResumeTrigger trigger = triggerResume(runId, false, false);
-						if (!trigger.triggered()) {
-							// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
-							log.debug("续跑重派发未派发 runId={} reason={} detail={}", runId, trigger.outcome(),
-									trigger.detail());
-						}
-					});
+					ResumeTrigger trigger = triggerResume(runId, false, false);
+					if (!trigger.triggered()) {
+						// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
+						log.debug("续跑重派发未派发 runId={} reason={} detail={}", runId, trigger.outcome(),
+								trigger.detail());
+					}
 				}
 				catch (AiStateUnavailableException ex) {
 					// 这一拍连"快照是什么状态"都读不出来（Redis 断连/超时）：不是结局，是暂时不可确认。
@@ -2395,15 +2409,29 @@ public class ConfirmGate {
 	}
 
 	/**
-	 * 定时重试线程没有请求身份：按本轮记录打开身份作用域后执行一次动作
-	 * （快照 0/0 = 旧轮次，无身份可恢复 ⇒ 空作用域，不伪造默认租户）。
+	 * <b>提交时刻</b>抓取这一轮的身份（随后随定时任务携带）。
+	 *
+	 * <p>定时线程没有请求身份，而快照/待决/租约的键由身份拼出 —— "先读快照再建作用域"在定时线程上
+	 * 读到的是 legacy 键（恒 {@code null}），于是所有定时链对带身份的轮次静默失效。身份必须在
+	 * <b>还有身份的线程</b>（请求线程 / 驱动线程）上取。
+	 *
+	 * <p>取值顺序 = 记录身份优先（{@code store.get} 在当前身份键下读，命中即用记录里的
+	 * {@code tenantId/userId}）；快照<b>尚未建立</b>时退回提交线程的当前身份（那就是即将创建这条记录的
+	 * 身份）；快照存在但<b>无归属（0/0）</b>时返回 {@code null} —— 不沿用调用者身份（0/0 不得 adopt）。
 	 */
-	private static void withRunIdentity(RunSnapshot snapshot, Runnable action) {
-		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
-		long userId = snapshot == null ? 0L : snapshot.getUserId();
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
-			action.run();
+	private TenantUser recordIdentityNow(String runId) {
+		TenantUser current = RequestContextUtils.currentOrNull();
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot != null) {
+				return RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
+						? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+			}
 		}
+		catch (RuntimeException ex) {
+			log.debug("抓取本轮身份时读快照失败 runId={}（退回提交线程身份）：{}", runId, ex.getMessage());
+		}
+		return current;
 	}
 
 	/**
@@ -2414,11 +2442,12 @@ public class ConfirmGate {
 	 * 不再排下一次（否则一张死卡会永久占用重试线程）。
 	 */
 	private void scheduleLeaseRetry(String runId) {
+		// 身份随任务携带：租约重试跑在定时线程上（无身份），而租约/快照键都由身份拼出。
+		TenantUser identity = recordIdentityNow(runId);
 		try {
 			this.retryScheduler.schedule(() -> {
-				try {
-					RunSnapshot snapshot = this.store.get(runId);
-					withRunIdentity(snapshot, () -> triggerResume(runId, false, false));
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					triggerResume(runId, false, false);
 				}
 				catch (Exception ex) {
 					log.warn("续跑租约重试异常 runId={}：{}", runId, ex.getMessage());

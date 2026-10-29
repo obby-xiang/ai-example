@@ -7,6 +7,8 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.UserMessage;
 
@@ -49,6 +51,21 @@ class RunStoreFenceAheadWriteGateTest {
 	private final RunStore storeA = new RunStore(this.fake.redis, this.mapper, this.properties, this.leaseA);
 
 	private final RunStore storeB = new RunStore(this.fake.redis, this.mapper, this.properties, this.leaseB);
+
+	/** run 级键由身份拼出：直调真实 {@link RunStore} 必须显式进入身份作用域（否则 create fail-closed）。 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable tenantScope;
+
+	@BeforeEach
+	void enterIdentity() {
+		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void leaveIdentity() {
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
+	}
 
 	@Test
 	void fenceAheadDriverCannotWriteLedgerFramesOrSeq() {

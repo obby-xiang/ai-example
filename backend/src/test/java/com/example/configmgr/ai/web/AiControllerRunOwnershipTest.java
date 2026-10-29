@@ -113,10 +113,23 @@ class AiControllerRunOwnershipTest {
 	void cancelEndpointDoesNotAdoptAnotherIdentitiesSnapshot() throws Exception {
 		when(this.store.get(RUN_ID)).thenReturn(snapshot(2L, 202L));
 
+		// 归属不明 ⇒ 按不存在回答，且<b>不得留下任何取消副作用</b>（取消会中断别人的执行）。
 		this.mvc.perform(post("/api/ai/cancel/{runId}", RUN_ID))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.runExists").value(false))
-			.andExpect(jsonPath("$.statusBeforeCancel").doesNotExist());
+			.andExpect(status().isNotFound())
+			.andExpect(jsonPath("$.code").value(ErrorCodes.UNKNOWN_RUN))
+			.andExpect(jsonPath("$.cancelled").value(false));
+		verify(this.cancellations, never()).cancel(anyString(), anyString());
+	}
+
+	@Test
+	void cancelStatusEndpointHidesAnotherIdentitiesRun() throws Exception {
+		when(this.store.get(RUN_ID)).thenReturn(snapshot(2L, 202L));
+
+		// GET 只回显键形/旗标，属跨身份状态探测面：无归属一律 404，不回显任何字段。
+		this.mvc.perform(get("/api/ai/cancel/{runId}", RUN_ID))
+			.andExpect(status().isNotFound())
+			.andExpect(jsonPath("$.code").value(ErrorCodes.UNKNOWN_RUN));
+		verify(this.cancellations, never()).status(anyString());
 	}
 
 	@Test

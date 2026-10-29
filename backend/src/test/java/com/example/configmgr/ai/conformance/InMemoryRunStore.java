@@ -428,6 +428,39 @@ public class InMemoryRunStore extends RunStore {
 		return this.runs.get(runId);
 	}
 
+	/**
+	 * 显式身份读口（与真实现同语义）：记录身份必须等于给定身份，否则按不存在处理。
+	 *
+	 * <p>替身没有键，但"归属复核"这一层是产品契约的一部分（真实实现先按身份拼键、再核记录），
+	 * 因此这里也照做 —— 否则用例会以为"读到别人那一轮"是允许的。
+	 */
+	@Override
+	public RunSnapshot get(String runId, long tenantId, long userId) {
+		RunSnapshot snapshot = this.runs.get(runId);
+		if (snapshot == null || snapshot.getTenantId() != tenantId || snapshot.getUserId() != userId) {
+			return null;
+		}
+		return snapshot;
+	}
+
+	/**
+	 * 全局索引的进程内替身：只返回<b>带身份</b>的记录（与真实现"无归属成员不返回"同口径；
+	 * 0/0 旧轮由 {@code listRuns} 的 legacy 分支按旧键形发现）。
+	 */
+	@Override
+	public List<com.example.configmgr.ai.tenant.RunKeyScope.IndexRef> allRunRecords() {
+		List<com.example.configmgr.ai.tenant.RunKeyScope.IndexRef> out = new ArrayList<>();
+		for (RunSnapshot snapshot : this.runs.values()) {
+			if (com.example.configmgr.ai.tenant.RunIdentityScope.usable(snapshot.getTenantId(),
+					snapshot.getUserId())) {
+				out.add(new com.example.configmgr.ai.tenant.RunKeyScope.IndexRef(snapshot.getTenantId(),
+						snapshot.getUserId(), snapshot.getRunId()));
+			}
+		}
+		out.sort((left, right) -> left.runId().compareTo(right.runId()));
+		return out;
+	}
+
 	@Override
 	public void deleteRun(String runId) {
 		this.runs.remove(runId);
@@ -443,6 +476,25 @@ public class InMemoryRunStore extends RunStore {
 		this.decided.remove(runId);
 		this.heldEpochs.remove(runLeaseKey(runId));
 		this.fenceEpochs.remove(runId);
+	}
+
+	/** 显式身份删除（与真实现同语义：身份不符不得静默 no-op）。 */
+	@Override
+	public void deleteRun(String runId, long tenantId, long userId) {
+		RunSnapshot snapshot = this.runs.get(runId);
+		if (snapshot != null && (snapshot.getTenantId() != tenantId || snapshot.getUserId() != userId)) {
+			throw new IllegalStateException("拒绝以身份 " + tenantId + "/" + userId + " 删除不属于它的轮次 runId="
+					+ runId + "（记录归属=" + snapshot.getTenantId() + "/" + snapshot.getUserId() + "）");
+		}
+		deleteRun(runId);
+	}
+
+	@Override
+	public void deleteRun(com.example.configmgr.ai.tenant.RunKeyScope.IndexRef ref) {
+		if (ref == null) {
+			throw new IllegalArgumentException("删除轮次要求索引成员自带身份（不得凭 runId 猜身份）");
+		}
+		deleteRun(ref.runId(), ref.tenantId(), ref.userId());
 	}
 
 	@Override

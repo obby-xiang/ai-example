@@ -1,7 +1,9 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -172,23 +174,51 @@ public class CancelledRunFinalizer {
 			return false;
 		}
 		this.attempts.put(runId, new AtomicInteger());
-		submit(runId, cause);
+		submit(runId, cause, recordIdentityNow(runId));
 		return true;
 	}
 
-	private void submit(String runId, String cause) {
+	/**
+	 * <b>交棒时刻</b>抓取这一轮的身份，随任务携带到执行线程。
+	 *
+	 * <p>为什么不在执行体里现读快照：交棒执行体跑在 {@code aiResumeTrigger} / 重试调度线程上，那里没有
+	 * 请求身份，而快照键由身份拼出 —— "先 {@code store.get} 再 {@code useContext}"在无身份线程上恒读到
+	 * {@code null} ⇒ 空作用域 ⇒ 取消收尾永远看不到这一轮（重试一次都不可用）。
+	 *
+	 * <p>记录身份优先；快照尚未建立时退回提交线程身份；快照存在但无归属（0/0）⇒ {@code null}，
+	 * 不沿用调用者身份。
+	 */
+	private TenantUser recordIdentityNow(String runId) {
+		TenantUser current = RequestContextUtils.currentOrNull();
+		if (this.store == null) {
+			return current;
+		}
 		try {
-			this.executor.execute(() -> attempt(runId, cause));
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot != null) {
+				return RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
+						? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("抓取取消收尾身份时读快照失败 runId={}（退回提交线程身份）：{}", runId, ex.getMessage());
+		}
+		return current;
+	}
+
+	private void submit(String runId, String cause, TenantUser identity) {
+		try {
+			this.executor.execute(() -> attempt(runId, cause, identity));
 		}
 		catch (RejectedExecutionException ex) {
 			// 触发池饱和：交棒动作本身很短，排一次重试即可 —— 但同样受 maxDispatchRetries 约束
 			// （M-3：旧实现这条路径绕过上限，池满时会无界重排）。
 			log.warn("取消收尾交棒未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false);
+			rescheduleOrGiveUp(runId, cause, false, identity);
 		}
 		catch (RuntimeException ex) {
 			log.warn("取消收尾交棒派发失败 runId={}：{}", runId, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false);
+			rescheduleOrGiveUp(runId, cause, false, identity);
 		}
 		catch (Error ex) {
 			// 派发阶段就抛 Error（执行器实现异常/OOM）：交棒位必须释放，否则后续交棒永久被去重拒绝。
@@ -218,9 +248,9 @@ public class CancelledRunFinalizer {
 		finish(runId);
 	}
 
-	private void attempt(String runId, String cause) {
+	private void attempt(String runId, String cause, TenantUser identity) {
 		try {
-			runAttempt(runId, cause);
+			runAttempt(runId, cause, identity);
 		}
 		catch (Error ex) {
 			// Error（OOM/断言失败等）若不释放交棒位，该 run 会永久 inFlight：后续交棒全被静默拒绝，
@@ -230,7 +260,7 @@ public class CancelledRunFinalizer {
 		}
 	}
 
-	private void runAttempt(String runId, String cause) {
+	private void runAttempt(String runId, String cause, TenantUser identity) {
 		ResumeService service = this.resumeServiceProvider == null ? null
 				: this.resumeServiceProvider.getIfAvailable();
 		if (service == null) {
@@ -240,21 +270,18 @@ public class CancelledRunFinalizer {
 		}
 		ResumeService.CancelFinalize outcome;
 		try {
-			// 身份只从本轮记录恢复：交棒执行体（触发池 / 定时重试线程）没有请求身份。
-			RunSnapshot snapshot = this.store == null ? null : this.store.get(runId);
-			long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
-			long userId = snapshot == null ? 0L : snapshot.getUserId();
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			// 身份 = 交棒时刻抓到的<b>记录身份</b>（随任务携带），不在执行线程上现读快照猜身份。
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 				outcome = service.cancelConfirmed(runId);
 			}
 		}
 		catch (RuntimeException ex) {
 			log.warn("取消收尾交棒执行异常 runId={} cause={}：{}", runId, cause, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false);
+			rescheduleOrGiveUp(runId, cause, false, identity);
 			return;
 		}
 		if (outcome == null) {
-			rescheduleOrGiveUp(runId, cause, false);
+			rescheduleOrGiveUp(runId, cause, false, identity);
 			return;
 		}
 		switch (outcome) {
@@ -263,14 +290,14 @@ public class CancelledRunFinalizer {
 				finish(runId);
 			}
 			// 租约在别的实例手里：不抢、不覆盖；按租约 TTL 之后再确认一次（holder 死了也能接管）。
-			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, cause, true);
+			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, cause, true, identity);
 			// 取消事实不可见 / 取消状态不可读 / 设施不可用 / 同进程已有执行体 / 会话门被占 /
 			// 写门仍拒写：一律"这拍没落定"，有界重试；**绝不**宣告完成（M-6），**绝不**驱动。
-			default -> rescheduleOrGiveUp(runId, cause, false);
+			default -> rescheduleOrGiveUp(runId, cause, false, identity);
 		}
 	}
 
-	private void rescheduleOrGiveUp(String runId, String cause, boolean leaseHeldElsewhere) {
+	private void rescheduleOrGiveUp(String runId, String cause, boolean leaseHeldElsewhere, TenantUser identity) {
 		int attempt = nextAttempt(runId);
 		int max = this.properties.getPark().getMaxDispatchRetries();
 		if (max <= 0 || attempt > max) {
@@ -280,12 +307,12 @@ public class CancelledRunFinalizer {
 					+ "下一次取消/续跑/启动扫描会重新触发）", max, runId, cause);
 			return;
 		}
-		reschedule(runId, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt));
+		reschedule(runId, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt), identity);
 	}
 
-	private void reschedule(String runId, String cause, Duration delay) {
+	private void reschedule(String runId, String cause, Duration delay, TenantUser identity) {
 		try {
-			this.scheduler.schedule(() -> attempt(runId, cause), delay);
+			this.scheduler.schedule(() -> attempt(runId, cause, identity), delay);
 		}
 		catch (RuntimeException ex) {
 			this.inFlight.remove(runId);

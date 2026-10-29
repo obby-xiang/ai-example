@@ -77,6 +77,21 @@ public final class RequestContextUtils {
 	}
 
 	/**
+	 * 建立<b>显式无身份</b>作用域：进入即清空线程绑定，关闭时还原进入前的身份。
+	 *
+	 * <p>为什么必须有这个入口：池化/定时线程上可能残留上一位调用者的身份。要处理"记录本身没有身份"
+	 * （旧快照 {@code 0/0}）的轮次时，<b>不覆盖</b>就等于沿用调用者身份 —— 用别人的身份跑我的轮。
+	 * 因此恢复型入口在"无身份可恢复"时必须显式清空，而不是返回一个什么都不做的句柄。
+	 *
+	 * <p>窗口（包内可见）：只供 {@link RunIdentityScope} 表达"记录无身份"的语义，业务代码不直接调用。
+	 */
+	static SafeCloseable clearContext() {
+		TenantUser previous = HOLDER.get();
+		HOLDER.remove();
+		return new SafeCloseable(previous);
+	}
+
+	/**
 	 * 作用域句柄：关闭即恢复进入前的身份（无旧值则清空）。
 	 *
 	 * <p>

@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -963,10 +966,17 @@ public class LeaseService {
 	 * {@code RunStore.save}（终态释放）时，定时器会把租约<b>永远</b>续下去 —— 别的实例既接不了管，
 	 * 运维也看不出"这个租约其实已经没有主人"。判据为假 ⇒ 停续租 + 释放（epoch scoped）。
 	 *
+	 * <p><b>身份随租约携带</b>：续租线程是自建的裸单线程（没有请求身份），而判据里的读（快照是否
+	 * 非终态、本进程是否仍登记驱动）全部按<b>身份定键</b>。若在续租线程上用"线程身份"执行判据，
+	 * 带身份的轮次第一拍就会读到 {@code null} ⇒ 判"驱动者已不在" ⇒ 提前还租、fence 不再推进
+	 * （另一实例可接管 ⇒ 双驱动）。因此登记时把<b>记录身份</b>一并交给续租任务，每拍在它的作用域里
+	 * 执行判据。这里不读线程身份（避免把提交线程的残留身份当成记录身份）。
+	 *
 	 * @param alive 由调用方给出的"仍有驱动者"判据（例如"快照非终态 且 本进程仍有该轮的驱动标记"）；
 	 * {@code null} 等价于恒真（兼容既有调用）
+	 * @param identity 该轮记录身份（{@code null} = 记录没有身份：判据按 legacy 口径执行）
 	 */
-	public void markDriving(Lease lease, BooleanSupplier alive) {
+	public void markDriving(Lease lease, BooleanSupplier alive, TenantUser identity) {
 		if (lease == null) {
 			return;
 		}
@@ -977,7 +987,17 @@ public class LeaseService {
 		// （永远取消不掉，release 之后还在续租）。
 		// 批③a：登记键 = (key, owner) —— 同键不同 owner 各有一个续租任务，互不覆盖。
 		this.driving.computeIfAbsent(viewKey(lease.key(), lease.owner()),
-				key -> this.scheduler.schedule(() -> renewTick(lease, check), interval));
+				key -> this.scheduler.schedule(() -> renewTick(lease, check, identity), interval));
+	}
+
+	/**
+	 * 开始续租（判据身份 = 调用线程当前身份）。
+	 *
+	 * <p>兼容重载：调用方在<b>记录身份作用域内</b>登记（首轮驱动、交棒）时等价于显式传记录身份。
+	 * 恢复型入口应优先用三参重载把身份显式带进来。
+	 */
+	public void markDriving(Lease lease, BooleanSupplier alive) {
+		markDriving(lease, alive, RequestContextUtils.currentOrNull());
 	}
 
 	/**
@@ -1019,7 +1039,14 @@ public class LeaseService {
 		}
 	}
 
-	private void renewTick(Lease lease, BooleanSupplier alive) {
+	private void renewTick(Lease lease, BooleanSupplier alive, TenantUser identity) {
+		// 判据 + 续租整拍都在<b>记录身份</b>里执行：续租线程没有请求身份，而判据读的是身份定键的数据。
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			renewTickInScope(lease, alive);
+		}
+	}
+
+	private void renewTickInScope(Lease lease, BooleanSupplier alive) {
 		try {
 			if (!alive.getAsBoolean()) {
 				log.info("续租判据转假，停续租并归还租约 key={} owner={} epoch={}（驱动者已不在：轮终态/线程收尾）",
