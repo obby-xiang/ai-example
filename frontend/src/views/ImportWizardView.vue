@@ -274,6 +274,7 @@ import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { stepLabel } from '@/utils/format'
+import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { UPLOAD_ACCEPT, checkUploadFile } from '@/constants/upload'
 import type { PublishConflictAsync } from '@/types/api'
 import { parseRowData, type ConfigStagingRow } from '@/types/data'
@@ -484,25 +485,13 @@ function fieldsOf(code: string): readonly ConfigField[] {
 }
 
 /**
- * `select_definitions` 的编码校验（按**当前**定义列表，与导出向导同口径）。
- *
- * 非法编码不得写进选中集 / 工作区，也不得让回执说"已选择"——否则第 1 步会带着一个不存在
- * 的配置项去建编辑区、落库任务项，错误要到预检查才以别的面貌爆出来。
+ * `select_definitions` 的编码校验（与导出向导、契约层兜底同源；判据与文案在
+ * `utils/definition-codes`）。非法编码不得写进选中集 / 工作区，也不得让回执说"已选择"。
  *
  * @returns `null` = 全部编码可用；否则为可直接回灌的失败原因（点名无效码 + 可用码清单）
  */
 function selectDefsProblem(codes: readonly string[]): string | null {
-  const available = defs.value.map((item) => item.code)
-  if (defs.value.length === 0) {
-    return `配置定义列表${defsLoading.value ? '仍在加载' : '不可用'}，无法确认 ${codes.join('、')} 是否为可用编码`
-      + `（可用编码：${available.join('、') || '（无）'}）。本次未改动所选配置项，也未落库。`
-  }
-  const invalid = codes.filter((code) => defOf(code) === null)
-  if (invalid.length === 0) {
-    return null
-  }
-  return `无效配置编码 ${invalid.join('、')}：当前定义列表里没有这些编码。`
-    + `可用编码：${available.join('、') || '（无）'}。本次未改动所选配置项，也未落库。`
+  return definitionCodesProblem(codes, defs.value.map((item) => item.code), { loading: defsLoading.value })
 }
 
 /**
@@ -2184,13 +2173,9 @@ function registerHandlers(): void {
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
     }
-    const codes = Array.isArray(payload.defCodes)
-      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
-      : []
-    if (codes.length === 0) {
-      return { ok: false, reason: '未指定任何配置项（codes 为空）：本次未改动所选配置项，也未落库。' }
-    }
-    // 编码必须存在于**当前**定义列表：非法码不写选中集、不收敛工作区、不落库
+    const codes = normalizeDefinitionCodes(Array.isArray(payload.defCodes) ? payload.defCodes : [])
+    // 编码必须存在于**当前**定义列表（空清单 = 不知道可用编码，同样拒绝）：非法码不写
+    // 选中集、不收敛工作区、不落库
     const problem = selectDefsProblem(codes)
     if (problem !== null) {
       return { ok: false, reason: problem }

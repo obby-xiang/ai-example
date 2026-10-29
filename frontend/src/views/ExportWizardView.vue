@@ -170,6 +170,7 @@ import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-regions'
 import {
+  applyDraftEdit,
   assertConditionBuildable,
   buildConditionOutcome,
   buildQueryCondition,
@@ -206,6 +207,7 @@ import { formatUiReceipt } from '@/utils/ui-receipt'
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
+import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 
@@ -462,25 +464,13 @@ function fieldsOf(code: string): readonly ConfigField[] {
 }
 
 /**
- * `select_definitions` 的编码校验（按**当前**定义列表，唯一判据）。
- *
- * 模型给的编码可能拼错、是幻觉、或指向已删除的定义。旧实现照单全收：回执「已选择配置项：
- * NOT_A_DEF」、工作区 `extra.selectedDefs` 与后续 `persistStepData` 都带着一个不存在的配置项。
+ * `select_definitions` 的编码校验（按**当前**定义列表；判据与文案与契约层兜底同源，
+ * 见 `utils/definition-codes`）。
  *
  * @returns `null` = 全部编码可用；否则为可直接回灌的失败原因（点名无效码 + 可用码清单）
  */
 function selectDefsProblem(codes: readonly string[]): string | null {
-  const available = defs.value.map((item) => item.code)
-  if (defs.value.length === 0) {
-    return `配置定义列表${defsLoading.value ? '仍在加载' : '不可用'}，无法确认 ${codes.join('、')} 是否为可用编码`
-      + `（可用编码：${available.join('、') || '（无）'}）。本次未改动所选配置项，也未落库。`
-  }
-  const invalid = codes.filter((code) => defOf(code) === null)
-  if (invalid.length === 0) {
-    return null
-  }
-  return `无效配置编码 ${invalid.join('、')}：当前定义列表里没有这些编码。`
-    + `可用编码：${available.join('、') || '（无）'}。本次未改动所选配置项，也未落库。`
+  return definitionCodesProblem(codes, defs.value.map((item) => item.code), { loading: defsLoading.value })
 }
 
 /**
@@ -520,15 +510,95 @@ function setGridRef(code: string, el: unknown): void {
 
 // ── 页面加载 ───────────────────────────────────────────────────────────────────
 
-async function loadDefinitions(): Promise<void> {
-  defsLoading.value = true
-  try {
-    defs.value = await definitionsApi.listDefinitions()
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.defsLoadFailed'))
-  } finally {
-    defsLoading.value = false
+/**
+ * 等待定义列表就绪的上限（毫秒）。
+ *
+ * <p>页面挂载时 `loadDefinitions()` 与 `loadTask()` 并行：任务先回来就会触发结果表格载入，
+ * 而此刻定义还在路上。旧实现直接按"0 字段"失败，且定义到达后无人重试（整页一直空白）。
+ * 这里让载入**等一个上界**：等到就用真实字段载入；到点仍未到 ⇒ 保持 fail-closed（不按 0 字段载入）。
+ * 取值与页面就绪等待同量级（10s），只影响"启动瞬间"这一窗，不改变任何判定口径。
+ */
+const DEFINITIONS_READY_TIMEOUT_MS = 10_000
+
+/** 定义列表是否**成功读到过**（空列表也算成功；失败保持 false）。 */
+const defsLoaded = ref(false)
+/** 定义列表的在途请求（单飞：载入等待 / 重试 / 挂载共用同一笔）。 */
+let defsInFlight: Promise<boolean> | null = null
+
+async function loadDefinitions(): Promise<boolean> {
+  if (defsInFlight !== null) {
+    return await defsInFlight
   }
+  defsLoading.value = true
+  const run = (async (): Promise<boolean> => {
+    try {
+      defs.value = await definitionsApi.listDefinitions()
+      defsLoaded.value = true
+      // 定义晚到：此前因"0 字段"没能载入的表格自动恢复（不必等用户手动重开标签/刷新整页）
+      void recoverGridsAfterDefinitions()
+      return true
+    } catch (error) {
+      defsLoaded.value = false
+      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.defsLoadFailed'))
+      return false
+    } finally {
+      defsLoading.value = false
+    }
+  })()
+  defsInFlight = run
+  try {
+    return await run
+  } finally {
+    if (defsInFlight === run) {
+      defsInFlight = null
+    }
+  }
+}
+
+/**
+ * 等定义列表就绪（有界）：在途就等它；没在途就按当前事实判定。
+ *
+ * @returns true = 已成功读到**非空**定义列表（可校验字段）；false = 加载中到点 / 加载失败 / 列表为空
+ */
+async function awaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): Promise<boolean> {
+  if (defsInFlight === null) {
+    return defsLoaded.value && defs.value.length > 0
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+  })
+  try {
+    const ok = await Promise.race([defsInFlight, expired])
+    return ok === true && defs.value.length > 0
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+/**
+ * 定义到达后的自动恢复：把**当前激活标签**的结果表格按真实字段重新载入。
+ *
+ * 只在导出结果步且有结果时动作；已载入的跳过（不重载用户正在编辑的表）。
+ */
+async function recoverGridsAfterDefinitions(): Promise<void> {
+  if (stepIndex.value !== 2 || exportResults.value.length === 0) {
+    return
+  }
+  const code = activeTab.value || exportResults.value[0]?.defCode || ''
+  if (code === '') {
+    return
+  }
+  if (!activeTab.value) {
+    activeTab.value = code
+    await nextTick()
+  }
+  if (loadedGrids.has(code)) {
+    return
+  }
+  await ensureGridLoaded(code)
 }
 
 /** 任务详情与导出结果的加载结局（issue #2：跨任务执行器据此区分失败类型，给出不同文案）。 */
@@ -722,6 +792,9 @@ async function retryLoadLists(): Promise<void> {
   }
   retryingLists.value = true
   try {
+    // 定义列表也要重读：它是"字段是否可用"的唯一来源 —— 只重读文件/作业清单的话，
+    // 首轮定义失败时页面会永远停在 0 字段（空白结果页无出口）。
+    await loadDefinitions()
     await resumeJobs()
     await loadExistingResults()
   } finally {
@@ -1066,18 +1139,26 @@ async function persistStepData(
  * 条件表单改动（用户 / AI 回填都走这里）：写入草案模型并清掉该配置项上一次的服务端错误
  * —— 陈旧告警会误导模型「仍然不合法」（挂账 L-67）。
  *
- * **无损纪律**：带 `verbatim` 的草案是"无法用表单行表达的服务端条件"，而 `ConditionForm`
- * 在回填时会按行重建一份新模型（不带 `verbatim`）。内容没变就只是**显示回写**，不能当成
- * 一次真实改动（否则下一次切步就会用有损草案覆盖服务端）。
+ * **无损纪律（R1 返修）**：带 `verbatim` 的草案是"无法用表单行表达的服务端条件"。
+ * 用户改一个字段时 `ConditionForm` 会重建一份**不带 verbatim** 的模型；直接采用会把它
+ * 字段（同字段多条件、取值含逗号…）按有损草案重写。故统一走 {@link applyDraftEdit}：
+ * - 未编辑字段：原条件逐字保留（verbatim 继续携带，可继续编辑）；
+ * - 编辑/删除字段：只按新草案处理；scopeKeys 变化不影响字段级原条件。
+ * 内容确实没变（只是显示回写）时不记 `touchedConditions`。
  */
 function onConditionChange(code: string, value: ConditionDraftModel): void {
   const previous = draftModels[code]
-  if (previous?.verbatim !== undefined && draftContentEqual(previous, value)) {
-    draftModels[code] = { ...value, verbatim: previous.verbatim }
+  if (previous === undefined) {
+    draftModels[code] = value
+    touchedConditions.add(code)
     delete condErrors[code]
     return
   }
-  draftModels[code] = value
+  draftModels[code] = applyDraftEdit(previous, value)
+  if (draftContentEqual(previous, value)) {
+    delete condErrors[code]
+    return
+  }
   // 改过就登记：即使改成了空条件，也要落库（"故意清空"是用户的显式决定，不能被当成"未改"跳过）
   touchedConditions.add(code)
   delete condErrors[code]
@@ -1429,9 +1510,18 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   if (!grid) {
     return { ok: false, error: `${code} 的结果表格组件未挂载（请重开该标签页重试）` }
   }
+  let fieldsProblem = fieldsUnavailableReason(code)
+  // 启动窗：定义列表在途时等它就绪再判定（否则"定义还没回来"会被当成"0 字段"直接失败，
+  // 且定义到达后没人重试 ⇒ 整页空白）。到点仍未就绪 ⇒ 仍按 fail-closed 失败。
+  if (fieldsProblem !== null && defOf(code) === null && defsInFlight !== null) {
+    await awaitDefinitionsReady()
+    if (generation !== taskGeneration) {
+      return { ok: false, error: '任务已切换，本次结果未载入' }
+    }
+    fieldsProblem = fieldsUnavailableReason(code)
+  }
   // 字段闸（fail-closed）：0 字段时 `loadFromXlsx` 会"成功"载入一张 0 列的表，随后
   // `toXlsxBlob()` 是空工作簿 —— 下载给用户空文件、保存则覆盖服务端真实结果。
-  const fieldsProblem = fieldsUnavailableReason(code)
   if (fieldsProblem !== null) {
     const reason = `${fieldsProblem}：无法把结果文件映射成表格列，本次未按 0 字段载入（否则会产出空文件）`
       + '。请确认定义列表已加载后重试'
@@ -2260,13 +2350,9 @@ function registerHandlers(): void {
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
     }
-    const codes = Array.isArray(payload.defCodes)
-      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
-      : []
-    if (codes.length === 0) {
-      return { ok: false, reason: '未指定任何配置项（codes 为空）：本次未改动所选配置项，也未落库。' }
-    }
-    // 编码必须存在于**当前**定义列表：非法码不写选中集、不收敛工作区、不落库
+    const codes = normalizeDefinitionCodes(Array.isArray(payload.defCodes) ? payload.defCodes : [])
+    // 编码必须存在于**当前**定义列表（空清单 = 不知道可用编码，同样拒绝）：非法码不写
+    // 选中集、不收敛工作区、不落库
     const problem = selectDefsProblem(codes)
     if (problem !== null) {
       return { ok: false, reason: problem }

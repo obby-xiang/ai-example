@@ -24,6 +24,8 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api/tasks', () => ({ tasksApi: api }))
 vi.mock('@/api/jobs', () => ({ jobsApi: api }))
+// 契约层兜底 select_defs 现在按权威定义服务校验编码（R1 返修）——本 spec 只需 A/B/C 可用
+vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: vi.fn(async () => [{ code: 'A' }, { code: 'B' }, { code: 'C' }]) } }))
 
 import { useTaskStore } from '@/stores/task'
 import { dispatchUiEvent, useWorkspaceStore } from '@/stores/workspace'

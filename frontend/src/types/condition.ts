@@ -157,10 +157,13 @@ export interface ConditionDraftModel {
    * 草案无法无损表达时保留的**原始条件**（`draftModelFromCondition` 写入）。
    *
    * 存在即代表：这份模型的重建结果与服务端条件不是一一对应，任何"按草案重建再 PUT"的写入
-   * 都会换义（多值 IN 压成逗号串、同字段多条件只剩第一条）。因此：
-   * - 重建口径（{@link buildConditionOutcome}）直接返回本字段，保证"往返"等价；
+   * 都可能换义（多值 IN 压成逗号串、同字段多条件只剩第一条）。因此：
+   * - 重建口径（{@link buildConditionOutcome}）**按字段合并**：`verbatim` 里仍在的字段
+   *   原样保留，其余字段按草案展开，保证"往返"等价；
    * - 落库方在模型未被真正改动时不得覆盖服务端；
-   * - 用户/AI 改过条件（换了一份新模型）后本字段消失，按新草案落库。
+   * - 用户编辑某个字段后，{@link applyDraftEdit} 只从 `verbatim` 里摘掉**该字段**的原条件
+   *   （其余未编辑字段继续原样保留，可继续编辑）；删除字段则其原条件一并丢弃；
+   * - `scopeKeys` 始终取草案（改范围不影响字段级原条件）。
    */
   verbatim?: FieldQueryCondition
 }
@@ -293,14 +296,11 @@ export function buildFieldConditions(model: ConditionDraftModel): FieldCondition
  * `invalid` 时 `condition` 恒为 null，但**不能**当成"无条件"使用（那正是导出全量的来源）；
  * 调用方必须阻断并成文 `issues`。
  *
- * 模型带 `verbatim`（草案无法无损表达的原始条件）时直接返回它：那才是这份条件的事实，
- * 按有损草案重建出来的东西不是。
+ * **先校验草案，再合并 `verbatim`**：草案行里的空值 / IN 空列表一律判 `invalid`（原条件
+ * 不能拿来给一份非法草案背书）；只有草案可提交时才做"未编辑字段用原条件、其余按草案"
+ * 的字段级合并（见 {@link ConditionDraftModel.verbatim}）。
  */
 export function buildConditionOutcome(model: ConditionDraftModel): ConditionBuildOutcome {
-  const verbatim = model.verbatim
-  if (verbatim && !isConditionEmpty(verbatim)) {
-    return { status: 'ok', condition: verbatim, issues: [] }
-  }
   const { conditions, issues } = expandFields(model)
   if (issues.length > 0) {
     return { status: 'invalid', condition: null, issues }
@@ -310,12 +310,33 @@ export function buildConditionOutcome(model: ConditionDraftModel): ConditionBuil
   if (scopeKeys.length > 0) {
     condition.scopeKeys = scopeKeys
   }
-  if (conditions.length > 0) {
-    condition.fields = conditions
+  const fields = mergeVerbatimFields(model.verbatim, model, conditions)
+  if (fields.length > 0) {
+    condition.fields = fields
   }
   return condition.scopeKeys || condition.fields
     ? { status: 'ok', condition, issues: [] }
     : { status: 'cleared', condition: null, issues: [] }
+}
+
+/**
+ * 字段级合并：`verbatim` 里**仍保有草案行**的字段原条件原样保留；其余字段用草案展开结果。
+ *
+ * 被编辑/删除的字段由 {@link applyDraftEdit} 提前从 `verbatim` 里摘掉，这里的"仍有草案行"
+ * 只是第二道保险（删行必须让原条件消失）。
+ */
+function mergeVerbatimFields(
+  verbatim: FieldQueryCondition | undefined,
+  model: ConditionDraftModel,
+  expanded: FieldCondition[]
+): FieldCondition[] {
+  const original = verbatim?.fields
+  if (!original || original.length === 0) {
+    return expanded
+  }
+  const preserved = original.filter((field) => Object.prototype.hasOwnProperty.call(model.fields, field.fieldCode))
+  const preservedCodes = new Set(preserved.map((field) => field.fieldCode))
+  return [...preserved, ...expanded.filter((field) => !preservedCodes.has(field.fieldCode))]
 }
 
 /**
@@ -606,6 +627,67 @@ export function conditionsEquivalent(
 export function draftContentEqual(a: ConditionDraftModel, b: ConditionDraftModel): boolean {
   return JSON.stringify({ scopeKeys: a.scopeKeys, fields: a.fields })
     === JSON.stringify({ scopeKeys: b.scopeKeys, fields: b.fields })
+}
+
+/** 两份草案里**被改过 / 新增 / 删除**的字段编码（逐条草案比对，忽略 scopeKeys 与 verbatim）。 */
+export function draftFieldsChanged(previous: ConditionDraftModel, next: ConditionDraftModel): string[] {
+  const codes = new Set([...Object.keys(previous.fields), ...Object.keys(next.fields)])
+  const changed: string[] = []
+  for (const code of codes) {
+    const before = previous.fields[code] ?? null
+    const after = next.fields[code] ?? null
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      changed.push(code)
+    }
+  }
+  return changed
+}
+
+/**
+ * 从原始条件里摘掉指定字段的条件（其余字段原样保留；摘空则返回 null）。
+ *
+ * 用途：用户编辑/删除某字段后，该字段只能按新草案处理，但**其它未编辑字段**的原条件必须
+ * 继续保留（否则一次编辑就把整份无法从表单行还原的条件冲掉了）。
+ */
+export function dropVerbatimFields(
+  condition: FieldQueryCondition | null | undefined,
+  fieldCodes: ReadonlySet<string>
+): FieldQueryCondition | null {
+  if (!condition) {
+    return null
+  }
+  const next: FieldQueryCondition = {}
+  const scopeKeys = [...(condition.scopeKeys ?? [])]
+  if (scopeKeys.length > 0) {
+    next.scopeKeys = scopeKeys
+  }
+  const fields = (condition.fields ?? []).filter((field) => !fieldCodes.has(field.fieldCode))
+  if (fields.length > 0) {
+    next.fields = fields
+  }
+  return isConditionEmpty(next) ? null : next
+}
+
+/**
+ * 用户/表单改过草案后的模型合并（`onConditionChange` 唯一入口）。
+ *
+ * - **未编辑字段**：继续携带 `previous.verbatim` 里该字段的原条件（逐字不动）；
+ * - **编辑/删除字段**：其原条件从 `verbatim` 里摘除，只按新草案处理；
+ * - **scopeKeys**：完全取新草案（改范围不丢字段级原条件）。
+ *
+ * 返回值仍带（裁剪后的）`verbatim`，因此可以**继续编辑**（连续多次编辑不会丢未动字段）。
+ */
+export function applyDraftEdit(previous: ConditionDraftModel, next: ConditionDraftModel): ConditionDraftModel {
+  const verbatim = previous.verbatim
+  if (verbatim === undefined) {
+    return next
+  }
+  const changed = new Set(draftFieldsChanged(previous, next))
+  if (changed.size === 0) {
+    return { ...next, verbatim }
+  }
+  const remaining = dropVerbatimFields(verbatim, changed)
+  return remaining === null ? next : { ...next, verbatim: remaining }
 }
 
 /**

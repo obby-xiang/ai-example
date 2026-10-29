@@ -25,8 +25,10 @@ import { saveBlob } from '@/api/http'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
+import { definitionsApi } from '@/api/definitions'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
+import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { findPublishTool } from '@/utils/publish-links'
@@ -619,15 +621,36 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未变更所选配置项')
         }
-        await tasksApi.selectDefs(taskId, event.defCodes)
+        // R1 返修（reviewer Important）：兜底分支此前**不校验编码** —— 页面未挂载时，
+        // 非法码照样落库并写进 `extra.selectedDefs`。这里用**权威定义服务**做与页面同口径的
+        // 校验；定义不可用 / 编码非法一律零写（不落库、不写工作区）。
+        const codes = normalizeDefinitionCodes(event.defCodes)
+        let available: string[] = []
+        try {
+          available = (await definitionsApi.listDefinitions()).map((def) => def.code)
+        } catch {
+          // 定义服务不可用 ⇒ 无法校验 ⇒ 零写（文案由同一判据生成，不与页面口径分叉）
+          return fail(definitionCodesProblem(codes, []) ?? '配置定义列表不可用：本次未变更所选配置项')
+        }
+        if (abandoned()) {
+          return fail('前端工具预算已到点：本次未变更所选配置项')
+        }
+        const problem = definitionCodesProblem(codes, available)
+        if (problem !== null) {
+          return fail(problem)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
+        await tasksApi.selectDefs(taskId, codes)
         if (abandoned()) {
           return fail(`前端工具预算已到点：所选配置项已提交给任务 #${taskId}，未写入当前工作区`)
         }
         if (!taskStill(taskId)) {
           return switched(taskId)
         }
-        workspace.setSelectedDefs(event.defCodes)
-        return ok(`已选择配置项：${event.defCodes.join('、') || '（空）'}`)
+        workspace.setSelectedDefs(codes)
+        return ok(`已选择配置项：${codes.join('、') || '（空）'}`)
       }
       case 'set_conditions': {
         const taskId = workspace.taskId

@@ -206,9 +206,28 @@ describe('导出向导：select_definitions 按当前定义列表校验编码', 
     await flushPromises()
 
     expect(reply).toMatchObject({ ok: false })
-    expect(String((reply as { reason?: string }).reason ?? '')).toContain('定义列表')
+    const reason = String((reply as { reason?: string }).reason ?? '')
+    expect(reason).toContain('定义列表')
+    // R1：拿不到清单时不得同时声称"可用编码：（无）"（那是把未校验写成事实）
+    expect(reason).toContain('拿不到可用编码清单')
+    expect(reason).not.toContain('可用编码：（无）')
     expect(workspace.selectedDefs).toEqual(['CURRENCY'])
     expect(api.selectDefs).not.toHaveBeenCalled()
+  })
+
+  it('codes 为空 ⇒ 结构化失败，零落库、工作区不变（不得把"清空选择"当成功）', async () => {
+    await mountExport()
+    const workspace = useWorkspaceStore()
+
+    const handler = getPageHandler('export.selectDefs')
+    const reply = await handler?.({ defCodes: [], mode: 'REPLACE' })
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason ?? '')).toContain('codes 为空')
+    expect(workspace.selectedDefs).toEqual(['CURRENCY'])
+    expect(api.selectDefs).not.toHaveBeenCalled()
+    expect(api.setCondition).not.toHaveBeenCalled()
   })
 
   it('合法编码 ⇒ 照常选中并同步工作区（相邻正向不回归）', async () => {
@@ -253,5 +272,37 @@ describe('导入向导：select_definitions 同样按定义列表校验编码', 
     await flushPromises()
 
     expect(workspace.selectedDefs).toEqual(['CURRENCY', 'REGION'])
+  })
+
+  it('定义列表不可用（空）⇒ 失败、零调用、文案不声称"可用编码：（无）"', async () => {
+    await mountImport([], ['CURRENCY'])
+    const workspace = useWorkspaceStore()
+
+    const handler = getPageHandler('import.selectDefs')
+    const reply = await handler?.({ defCodes: ['REGION'], mode: 'ADD' })
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    const reason = String((reply as { reason?: string }).reason ?? '')
+    expect(reason).toContain('定义列表')
+    expect(reason).toContain('拿不到可用编码清单')
+    expect(reason).not.toContain('可用编码：（无）')
+    expect(workspace.selectedDefs).toEqual(['CURRENCY'])
+    expect(api.selectDefs).not.toHaveBeenCalled()
+    expect(api.setCondition).not.toHaveBeenCalled()
+  })
+
+  it('codes 为空 ⇒ 结构化失败、零落库、选中集不变', async () => {
+    await mountImport()
+    const workspace = useWorkspaceStore()
+
+    const handler = getPageHandler('import.selectDefs')
+    const reply = await handler?.({ defCodes: [], mode: 'REPLACE' })
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason ?? '')).toContain('codes 为空')
+    expect(workspace.selectedDefs).toEqual(['CURRENCY'])
+    expect(api.selectDefs).not.toHaveBeenCalled()
   })
 })

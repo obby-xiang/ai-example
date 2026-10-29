@@ -118,6 +118,7 @@ import ExportWizardView from '@/views/ExportWizardView.vue'
 import ImportWizardView from '@/views/ImportWizardView.vue'
 import { getPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { executeFrontendTool } from '@/utils/frontend-tools'
+import { ElMessage } from 'element-plus'
 
 const FIELDS = [
   { defCode: 'DEMO', code: 'code', label: '编码', fieldType: 'STRING', required: true, key: true, sortOrder: 1 }
@@ -264,6 +265,39 @@ describe('定义字段为空：不得按 0 字段成功载入', () => {
 
     expect(reply).toMatchObject({ ok: false })
     expect(String((reply as { reason?: string }).reason ?? '')).toContain('字段')
+  })
+
+  it('先有字段载入、后定义丢失 ⇒ 保存编辑零 PUT，并点名字段不可用（R1 item 5）', async () => {
+    await mountExport(demoDef(FIELDS))
+    // 前提：表格确实按真实字段载入过（1 列）
+    const open = getPageHandler('export.openEditor')
+    const opened = await open?.({ defCode: 'DEMO', taskId: 7 })
+    await flushPromises()
+    expect(typeof opened).toBe('string')
+    expect(grids.loadCalls).toContain('DEMO:1')
+
+    // 让「重试读取」出口出现（作业清单读失败），随后把定义列表打成空（模拟定义丢失/不可用）
+    api.listJobs.mockRejectedValueOnce(new Error('GET /api/jobs 503'))
+    const sync = getPageHandler('export.syncJob')
+    await sync?.({ taskId: 7, jobId: 12 })
+    await flushPromises()
+    api.listJobs.mockResolvedValue([])
+    api.listDefinitions.mockResolvedValue([])
+    const retry = mounted[0]?.findAll('el-button').find((button) => button.text().includes('重试读取'))
+    expect(retry).toBeTruthy()
+    await retry?.trigger('click')
+    await flushPromises()
+
+    // 保存编辑：已载入的表格 + 定义已丢失 ⇒ 不得用空工作簿覆盖服务端真实结果
+    await saveButton()?.trigger('click')
+    await flushPromises()
+
+    expect(api.saveFile).not.toHaveBeenCalled()
+    const warning = String(
+      (ElMessage.warning as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[0] ?? ''
+    )
+    expect(warning).toContain('字段')
+    expect(warning).toContain('未写回')
   })
 })
 
