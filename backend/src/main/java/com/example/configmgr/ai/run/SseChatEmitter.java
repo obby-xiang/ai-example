@@ -1490,12 +1490,21 @@ public class SseChatEmitter {
 	 * 既有口径也原样保留。
 	 *
 	 * <h2>谁发、什么时候发</h2>
-	 * 唯一的发送者是 {@link TurnKeepalive}（独立定时器）与其"阶段开始"那一次同步调用 ——
-	 * <b>同步压缩调用自身不发帧</b>。首轮/续跑的请求前压缩由调用线程在进入压缩之前发一条
-	 * {@code elapsedMs=0} 的阶段开始帧，压缩期的后续节拍只来自定时器（"压缩不伪称持续发帧"）。
+	 * 唯一的发送者是 {@link TurnKeepalive}（独立定时器 + 相位切换时的同步公告）——
+	 * <b>同步压缩调用自身不主动发帧</b>。
+	 * <ul>
+	 * <li><b>首轮/续跑一开始</b>：初始相位是 {@code streaming}，调用线程在进入请求前压缩<b>之前</b>
+	 *     发一条 {@code elapsedMs=0} 的阶段帧（普通请求因此只有"工作中"，没有压缩/准备阶段条）；</li>
+	 * <li><b>真实 L2 模型摘要</b>：{@code ContextCompactor} 的 {@code onSummaryStart} 在第一次真正
+	 *     调用摘要模型之前把相位切到 {@code compacting}（只公告一次）；摘要结束立即切回
+	 *     {@code streaming}，不等定时器的下一拍；</li>
+	 * <li><b>普通请求 / L1 / L3 本地操作</b>：没有任何摘要调用，因此<b>不会</b>出现
+	 *     {@code compacting}（L1 清工具结果、L3 硬截断都不公告）；</li>
+	 * <li>各相位期间的后续节拍只来自定时器（"压缩不伪称持续发帧"）。</li>
+	 * </ul>
 	 *
-	 * @param phase {@link TurnKeepalive#PHASE_COMPACTING}（请求前压缩）/
-	 *            {@link TurnKeepalive#PHASE_STREAMING}（模型生成：含首包等待、包间静默、慢工具）
+	 * @param phase {@link TurnKeepalive#PHASE_COMPACTING}（真实 L2 模型摘要进行中）/
+	 *            {@link TurnKeepalive#PHASE_STREAMING}（模型生成/准备：含首包等待、包间静默、慢工具）
 	 * @param elapsedMs <b>本阶段</b>已用毫秒（服务端钟；不伪造进度百分比）
 	 * @param attempt 本尝试序号（0 = 尚未进入尝试循环，例如压缩阶段）
 	 */

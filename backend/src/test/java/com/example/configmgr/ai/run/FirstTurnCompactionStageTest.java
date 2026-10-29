@@ -202,8 +202,10 @@ class FirstTurnCompactionStageTest {
 			.as("阶段帧走心跳通道：没有业务 seq")
 			.doesNotContainKey("seq");
 		assertThat(((Number) stage.get("heartbeatSeq")).longValue()).as("独立号空间从 1 起").isEqualTo(1L);
-		assertThat(FrameContract.types(frames)).as("没有真实 L2 摘要 ⇒ 不出现压缩阶段条")
-			.doesNotContain("compacting");
+		assertThat(FrameContract.ofType(frames, FrameContract.HEARTBEAT).stream()
+			.map(frame -> String.valueOf(frame.get("phase")))
+			.toList()).as("没有真实 L2 摘要 ⇒ 心跳相位里不出现 compacting")
+			.doesNotContain(TurnKeepalive.PHASE_COMPACTING);
 
 		assertThat(this.store.framesObservedAtCreate.get())
 			.as("压缩 + 建快照期间只有 [start, 阶段帧]：同步压缩调用自身一帧不发")

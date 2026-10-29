@@ -108,7 +108,7 @@ public final class TurnKeepalive implements AutoCloseable {
 	 * 工作中"。等定时器的下一拍（最长 {@code intervalMs}=5s）会出现一段假状态 —— 摘要已经结束，
 	 * 界面还停在"正在压缩"。同一相位的重复调用（多分块摘要每块一次）只公告一次。
 	 *
-	 * <p>停表/关闭之后不再公告（终帧之后不得有帧）。{@code elapsedMs} 从切换时刻重新起算，
+	 * <p>close 之后不再公告（终帧之后不得有帧）。{@code elapsedMs} 从切换时刻重新起算，
 	 * 与定时器节拍共用同一个 {@link Stage} 起点。
 	 */
 	public void phase(String phase) {
