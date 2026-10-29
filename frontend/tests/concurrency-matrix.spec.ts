@@ -162,8 +162,8 @@ describe('C8-02 发送与停止同 tick', () => {
   })
 })
 
-describe('C8-03 两条连接同时 reattach：效果幂等', () => {
-  it('同 runId 并发接管 ⇒ 旧连接被中止、只 1 条宿主气泡、重复 seq 帧不重复累加', async () => {
+describe('C8-03 同一 runId 的并发 reattach：单飞并入（M08）', () => {
+  it('同 runId 并发接管 ⇒ 后到者并入（只 1 条连接）、只 1 条宿主气泡、重复 seq 帧不重复累加', async () => {
     hangReattach()
     const store = useAiStore()
     store.activeRunId = 'run-c3'
@@ -176,22 +176,28 @@ describe('C8-03 两条连接同时 reattach：效果幂等', () => {
     const second = store.reattachActive('run-c3')
     await Promise.resolve()
 
-    expect(api.reattachRun).toHaveBeenCalledTimes(2)
-    const firstSignal = (api.reattachRun.mock.calls[0]?.[2] as { signal?: AbortSignal } | undefined)?.signal
-    expect(firstSignal?.aborted).toBe(true) // 新连接先换身份再中止旧连接
+    // M08 单飞：后到的恢复入口并入现连接，不新建第二条 SSE —— 旧口径"两条连接并存"
+    // 正是双倍连接与双倍重连预算的来源；并入也不换轮次身份，故那条连接不该被中止。
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    const onlySignal = (api.reattachRun.mock.calls[0]?.[2] as { signal?: AbortSignal } | undefined)?.signal
+    expect(onlySignal?.aborted).toBe(false)
     expect(store.messages.filter((message) => message.role === 'assistant')).toHaveLength(1)
 
-    // 两连接回放同一批帧（相同 seq）：文本只累加一次（帧幂等）
-    const handlersA = api.reattachRun.mock.calls[0]?.[1] as { onFrame: (frame: SseFrame) => void }
-    const handlersB = api.reattachRun.mock.calls[1]?.[1] as { onFrame: (frame: SseFrame) => void }
-    handlersA.onFrame({ type: 'delta', text: '重放正文', seq: 1, runId: 'run-c3' } as SseFrame)
-    handlersB.onFrame({ type: 'delta', text: '重放正文', seq: 1, runId: 'run-c3' } as SseFrame)
+    // 同一连接回放同一批帧（相同 seq）：文本只累加一次（帧幂等）
+    const handlers = api.reattachRun.mock.calls[0]?.[1] as { onFrame: (frame: SseFrame) => void }
+    handlers.onFrame({ type: 'delta', text: '重放正文', seq: 1, runId: 'run-c3' } as SseFrame)
+    handlers.onFrame({ type: 'delta', text: '重放正文', seq: 1, runId: 'run-c3' } as SseFrame)
 
     expect(assistantTexts(store.messages)).toEqual(['重放正文'])
     expect(store.messages[0]?.parts.filter((part) => part.kind === 'text')).toHaveLength(1)
 
-    const settled = await Promise.race([Promise.all([first, second]).then(() => 'done'), Promise.resolve('pending')])
-    expect(settled).toBe('pending') // 两条连接都还挂着（真正的并发形态）
+    // 并入的调用立刻返回；宿主连接仍挂着（hangReattach 的连接 Promise 永不 settle）
+    await expect(second).resolves.toBeUndefined()
+    let firstSettled = false
+    void first.then(() => { firstSettled = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(firstSettled).toBe(false)
   })
 })
 
