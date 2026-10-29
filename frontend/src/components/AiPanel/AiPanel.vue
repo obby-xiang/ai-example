@@ -2282,11 +2282,11 @@ const healthBlocksSend = computed(() => ai.health !== null && ai.available === f
  */
 const identityBlocked = computed(() => ai.directoryStatus !== 'ready' || !ai.sessionReady)
 /**
- * 身份横幅（返修 I-2）：目录不可用 **或** 目录已就绪但还没拿到会话号（发号失败/进行中）。
- * 两者都必须有可见出口；发号失败不能让面板永久停摆。
+ * 身份横幅（返修 I-2 / round3）：目录不可用 **或** 发号**确实失败**（`sessionIssueFailed`）。
+ * "正在发号"不是失败 —— 只用 `sessionReady=false` 判会导致每次切身份/首启都闪一次红条。
  */
 const identityRetryVisible = computed(
-  () => ai.directoryStatus === 'unavailable' || (ai.directoryStatus === 'ready' && !ai.sessionReady)
+  () => ai.directoryStatus === 'unavailable' || ai.sessionIssueFailed
 )
 const identityRetryTitle = computed(
   () => ai.directoryStatus === 'unavailable' ? t('ai.panel.identityUnavailable') : t('ai.panel.identityNotReady')

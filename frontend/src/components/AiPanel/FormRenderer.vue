@@ -786,14 +786,14 @@ function rejectAttachment(file: File): AttachmentRejection | null {
 }
 
 /**
- * 会话就绪闸（Task 4）：上传前确保后端已发号。无活动 pinia / store 异常时按"未就绪"处理
- * （宁可不传，也不带空号/无身份头发请求）；上传契约本身不变。
+ * 会话就绪闸（Task 4）：上传前确保后端已发号，并返回**最新**会话号（可能刚发出/刚恢复）。
+ * 无活动 pinia / store 异常时按"未就绪"处理（宁可不传，也不带空号/无身份头发请求）。
  */
-async function sessionReadyForUpload(): Promise<boolean> {
+async function ensuredUploadSessionId(): Promise<string> {
   try {
-    return (await useAiStore().ensureSession()) !== ''
+    return await useAiStore().ensureSession()
   } catch {
-    return false
+    return ''
   }
 }
 
@@ -811,16 +811,17 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
     input.value = ''
     return
   }
-  // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸（附件 API 契约不变，仍只传
-  // runId/toolCallId/sessionId；这里只保证会话号确实存在，绝不在空号下发上传）。
-  if (!(await sessionReadyForUpload())) {
+  // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸；并把**最新**会话号随上下文传给
+  // 上传口（附件 API 契约不变，sessionId 仍是可选字段；这里只保证不拿空号/旧号去传）。
+  const sessionId = await ensuredUploadSessionId()
+  if (sessionId === '') {
     uploadErrors[field.key] = t('ai.gf.attachment.failed')
     input.value = ''
     return
   }
   uploading[field.key] = true
   try {
-    const uploaded = await uploadFormAttachment(file, props.uploadContext)
+    const uploaded = await uploadFormAttachment(file, { ...props.uploadContext, sessionId })
     attachments.value = { ...attachments.value, [field.key]: uploaded }
     setValue(field.key, uploaded.fileId)
     localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)

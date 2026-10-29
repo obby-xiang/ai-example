@@ -1,18 +1,22 @@
 /**
- * Task 4 返修 round 2（复评 I-1 / I-2）：
+ * Task 4 返修 round 2/3（复评 I-1 / I-2 / round3 Important+Minor）：
  *
  * <ol>
  * <li><b>连续快速切换身份</b>：指针恢复分支的探活是异步的（最多 3×150ms）。第一次切换的续体
  *   不得在第二次切换之后把"身份 A 的会话号"写到"身份 B"上 —— 令牌/身份/空号三道再校验；
- *   `tabOwnership='owner'` 也必须在会话号确定之后才设置。</li>
- * <li><b>发号失败 → 重试 → 恢复</b>：目录就绪但发号失败时，面板必须是"未就绪"可重试态；
- *   重试先重新加载目录（不能复用刚结束的单飞 promise 变成 no-op）再发号，成功后立即可发送。</li>
+ *   `tabOwnership='owner'` 也必须在会话号确定之后才设置；放弃分支必须归还本次探到的锁。</li>
+ * <li><b>发号失败 → 重试 → 恢复</b>：失败才显示错误态（发号窗口不闪），重试只在目录不可用时
+ *   重载目录，成功后清失败态与失败通知，立即可发送。</li>
+ * <li><b>指针恢复的绑定与目录错误本地化</b>：启动期 unknown 角色恢复会话时补做所有权 channel/
+ *   lifecycle 绑定；非 ApiError 的目录失败不得把技术原文上屏。</li>
  * </ol>
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useAiStore } from '@/stores/ai'
-import { identityHeaders, resetAiIdentityCache, writeAiIdentity } from '@/utils/ai-identity'
+import { OWNERSHIP_CHANNEL_NAME, heldSessionLockName, useAiStore } from '@/stores/ai'
+import { identityHeaders, resetAiIdentityCache, sessionLockName, writeAiIdentity } from '@/utils/ai-identity'
+import { translate } from '@/composables/useCopy'
+import { channels, FakeBroadcastChannel, FakeLockManager } from './tab-ownership-fixtures'
 
 const api = vi.hoisted(() => ({
   tenantUsers: vi.fn(),
@@ -70,6 +74,7 @@ class DelayedLockManager {
 beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
+  channels.clear()
   resetAiIdentityCache()
   setActivePinia(createPinia())
   for (const fn of Object.values(api)) {
@@ -128,6 +133,9 @@ describe('Task 4 返修 round 2：身份切换竞态 / 发号失败重试', () =
     // B 的指针未被 A 的恢复流程改写。
     expect(sessionStorage.getItem('ai-session-id:8:81')).toBe('9002')
     expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
+    // 锁账本不得与当前身份分叉：放弃分支必须归还刚才探到的 B 锁；留下的只能是 A 的锁（或空）。
+    expect(heldSessionLockName()).not.toBe('ai-session-8:81:9002')
+    expect(heldSessionLockName() === null || heldSessionLockName() === sessionLockName('1001')).toBe(true)
 
     // 后续请求必须用 A 的号（配 A 的头）。
     api.chat.mockImplementation((_request: unknown, handlers: any) => {
@@ -157,6 +165,8 @@ describe('Task 4 返修 round 2：身份切换竞态 / 发号失败重试', () =
     expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
     expect(store.sessionId).toBe('')
     expect(store.sessionReady).toBe(false)
+    // 失败态显式置位（横幅只认它；发号窗口不会因 sessionReady=false 闪红）。
+    expect(store.sessionIssueFailed).toBe(true)
 
     const failed = await store.send('你好')
     expect(failed.outcome).toBe('not-sent')
@@ -164,18 +174,53 @@ describe('Task 4 返修 round 2：身份切换竞态 / 发号失败重试', () =
     expect(api.createSession).toHaveBeenCalledTimes(2)
     expect(api.tenantUsers).toHaveBeenCalledTimes(1)
 
-    // 重试：先重载目录（不是复用旧 promise 的 no-op），再发号。
+    // 重试：目录已就绪 ⇒ **不再重载目录**，直接重新发号。
     const recovered = await store.retryIdentitySession()
     expect(recovered).toBe('5001')
     expect(store.sessionReady).toBe(true)
     expect(store.sessionId).toBe('5001')
-    expect(api.tenantUsers).toHaveBeenCalledTimes(2)
+    expect(api.tenantUsers).toHaveBeenCalledTimes(1)
     expect(api.createSession).toHaveBeenCalledTimes(3)
+    // 失败态与失败通知一起清除（横幅消失、红字不残留）。
+    expect(store.sessionIssueFailed).toBe(false)
+    expect(store.noticeCode).not.toBe('ai.notice.sessionIssueFailed')
 
     // 恢复后发送走新号。
     const sent = await store.send('继续')
     expect(sent.outcome).toBe('ok')
     expect(api.chat).toHaveBeenCalledTimes(1)
     expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ sessionId: '5001' })
+  })
+
+  it('启动期 unknown 角色的指针恢复补做所有权绑定：channel 打开、锁账本指向恢复会话', async () => {
+    writeAiIdentity({ tenantId: 7, userId: 71 })
+    sessionStorage.setItem('ai-session-id:7:71', '1001')
+    sessionStorage.setItem('ai-session-id:8:81', '9002')
+    const locks = new FakeLockManager()
+    Object.defineProperty(navigator, 'locks', { value: locks, configurable: true })
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
+
+    const store = useAiStore()
+    expect(store.tabOwnership).toBe('unknown')
+
+    await store.switchIdentity(8, 81)
+
+    expect(store.identity).toEqual({ tenantId: 8, userId: 81 })
+    expect(store.sessionId).toBe('9002')
+    expect(store.tabOwnership).toBe('owner')
+    // 指针恢复分支在 unknown 时补判所有权 ⇒ BroadcastChannel 已打开（channel/lifecycle 绑定）。
+    expect([...channels].some((channel) => channel.name === OWNERSHIP_CHANNEL_NAME)).toBe(true)
+    expect(heldSessionLockName()).toBe(sessionLockName('9002'))
+  })
+
+  it('目录失败详情使用本地化兜底（非 ApiError 的原文不上屏）', async () => {
+    api.tenantUsers.mockRejectedValueOnce(new Error('boom raw stack text'))
+    const store = useAiStore()
+
+    await store.loadTenantDirectory()
+
+    expect(store.directoryStatus).toBe('unavailable')
+    expect(store.directoryError).toBe(translate('ai.notice.directoryFailed'))
+    expect(store.directoryError).not.toContain('boom')
   })
 })

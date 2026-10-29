@@ -854,6 +854,14 @@ export interface OwnershipMessage {
 /** 本页签持有的会话锁与自有会话 id（模块级：文档级资源，不进响应式状态）。 */
 let heldLock: { name: string; release: () => void } | null = null
 let ownedSessionId: string | null = null
+
+/**
+ * 只读探针（诊断/测试）：本页签当前记账的会话锁名（null = 账本为空）。
+ * 用于断言"当前会话身份"与 `heldLock` 不发生分叉（例如竞态放弃分支不得留下别人的锁）。
+ */
+export function heldSessionLockName(): string | null {
+  return heldLock?.name ?? null
+}
 let ownershipChannel: OwnershipChannel | null = null
 let ownershipLifecycleBound = false
 /** 本页签曾在 pagehide 里"离开"过（bfcache 冻结 / 卸载）——`pageshow` 只在此时重认领。 */
@@ -2341,6 +2349,11 @@ export const useAiStore = defineStore('ai', {
     directoryStatus: 'idle' as 'idle' | 'loading' | 'ready' | 'unavailable',
     /** 目录加载失败（面板提示）。 */
     directoryError: null as string | null,
+    /**
+     * 发号失败（返修 round3）：只在**确实失败**时置位，横幅据此显示；发号中只是
+     * `sessionReady=false`，不再闪红条。成功后立即清除。
+     */
+    sessionIssueFailed: false,
     /**
      * 本页签的会话所有权角色（RC-4）：'unknown' = 尚未判定；'owner' = 本页签持有会话锁；
      * 'duplicate' = 由复制产生、已就地换新会话且**尚未**接手原会话（让渡判据）；
@@ -7993,7 +8006,8 @@ export const useAiStore = defineStore('ai', {
         directory = Array.isArray(raw) ? raw.map(normalizeTenantEntry).filter((entry): entry is TenantUsersEntry => entry !== null) : []
       } catch (error) {
         this.directoryStatus = 'unavailable'
-        this.directoryError = error instanceof Error ? error.message : translate('ai.notice.directoryFailed')
+        // 返修 round3：非 ApiError（裸 Error/网络异常原文）不得直接上屏 —— 本地化兜底。
+        this.directoryError = error instanceof ApiError ? error.message : translate('ai.notice.directoryFailed')
         return
       }
       this.tenantDirectory = directory
@@ -8030,11 +8044,13 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 身份不可用/会话未就绪时的**统一重试入口**（面板横幅按钮，返修 I-2）：
-     * 先重试目录，再发号。发号失败不再让面板永久停摆。
+     * 身份不可用/会话未就绪时的**统一重试入口**（面板横幅按钮，返修 I-2/round3）：
+     * 仅目录不可用时才重载目录；目录已就绪（只是发号失败）直接重新发号，避免多打一次 `/ai/tenants`。
      */
     async retryIdentitySession(): Promise<string> {
-      await this.retryLoadTenantDirectory()
+      if (this.directoryStatus !== 'ready') {
+        await this.retryLoadTenantDirectory()
+      }
       if (this.directoryStatus !== 'ready') {
         return ''
       }
@@ -8081,12 +8097,32 @@ export const useAiStore = defineStore('ai', {
         if (entryToken !== sessionGateToken
           || !isSameIdentity(this.identity, identity)
           || this.sessionId !== '') {
+          // 返修 round3：本次探活若真的拿到了锁（verdict !== 'occupied'），必须**还回去** ——
+          // 它已经把账本改成这把锁；带着"放弃"返回会把当前身份的会话锁句柄覆盖掉/泄漏，
+          // 之后本页签再也认领不到自己的会话锁。这里只能用文档级 releaseSessionLock()
+          // （释放的正是本次刚探到的那把）；不能用 releaseOwnLock(pointer)：它按**当前**身份
+          // 重算锁名，身份已切走时名字不匹配 ⇒ 不会释放。
+          if (verdict !== 'occupied') {
+            releaseSessionLock()
+          }
           return
         }
         if (verdict !== 'occupied') {
           this.sessionId = pointer
           this.sessionIdentity = identity
+          this.sessionIssueFailed = false
+          if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
+            clearNotice(this)
+          }
           // 号确定之后才记 owner（发号失败/被抢占时不得留下"owner 但无会话"的假状态）。
+          // 返修 round3：启动期（角色仍 unknown）走这条分支时，先补一次所有权判定，完成
+          // BroadcastChannel / pagehide-pageshow 的绑定，否则本页签不会响应别人的 released。
+          if (this.tabOwnership === 'unknown') {
+            const pending = this.ensureTabOwnership()
+            if (pending !== null) {
+              void pending
+            }
+          }
           this.tabOwnership = 'owner'
           await this.loadHistory()
           void this.claimSessionOwnership(pointer)
@@ -8118,6 +8154,13 @@ export const useAiStore = defineStore('ai', {
      */
     async ensureSession(): Promise<string> {
       if (this.sessionId !== '') {
+        // 已有号即视为恢复：清掉上一次失败态/失败通知（如切回有指针的身份后）。
+        if (this.sessionIssueFailed) {
+          this.sessionIssueFailed = false
+          if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
+            clearNotice(this)
+          }
+        }
         return this.sessionId
       }
       // 返修 I6：目录仍在加载时等它落定（面板不再为目录请求阻塞所有权判定/历史恢复）。
@@ -8151,12 +8194,19 @@ export const useAiStore = defineStore('ai', {
             : normalizeSessionId((response as { sessionId?: unknown } | null)?.sessionId)
         } catch {
           if (token === sessionGateToken) {
+            // 返修 round3：显式失败态（横幅据此显示），与"正在发号"区分，避免正常窗口闪红条。
+            this.sessionIssueFailed = true
             setNotice(this, 'ai.notice.sessionIssueFailed')
           }
           return ''
         }
         if (issued === '' || token !== sessionGateToken || !isSameIdentity(this.identity, identity)) {
           return ''
+        }
+        this.sessionIssueFailed = false
+        // 重试成功后清掉上一次失败留下的单槽通知（否则横幅消失但红字还挂着）。
+        if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
+          clearNotice(this)
         }
         this.sessionId = issued
         this.sessionIdentity = identity
@@ -8245,6 +8295,8 @@ export const useAiStore = defineStore('ai', {
       sessionGateFingerprint = null
       this.sessionId = nextId
       this.sessionIdentity = scopeIdentity
+      // 换会话/换身份 ⇒ 上一次发号失败的结论不带走（新窗口重新判定）。
+      this.sessionIssueFailed = false
       this.messages = []
       this.activeRunId = null
       // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
@@ -8534,6 +8586,10 @@ export const useAiStore = defineStore('ai', {
       }
       this.sessionId = sessionId
       this.sessionIdentity = this.identity
+      this.sessionIssueFailed = false
+      if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
+        clearNotice(this)
+      }
       try {
         // 显式绑定到本页签身份（不依赖默认参数），避免身份事实源分叉时写裸键（返修 M6）。
         sessionStorage.setItem(sessionIdStorageKey(this.identity), sessionId)
