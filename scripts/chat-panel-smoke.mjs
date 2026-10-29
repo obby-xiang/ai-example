@@ -135,6 +135,58 @@ const STAMP = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '
 const RESULT_FILE = `${OUT}/result-${STAMP}.json`
 mkdirSync(OUT, { recursive: true })
 
+// ── AI 对话数据面身份（Task 4/5）────────────────────────────────────────────
+// 后端 `TenantIdentityFilter` 要求 /api/ai 对话数据面每个请求带 `X-Tenant-Id` / `X-User-Id`，
+// 否则 400。页面自身的请求由前端统一带头（本脚本不代发）；但本脚本**直连后端**的取证请求
+// （/api/ai/history、/api/ai/runs/{id}、/api/ai/runs/current）也必须带同一身份，否则取证恒为空。
+// 身份取值优先级：`SMOKE_TENANT_ID`/`SMOKE_USER_ID` 显式覆盖 > 页面当前身份（store/ai-identity）
+// > 目录首项默认（1/101，与前端自动进入的首个身份一致）。
+const TENANT_HEADER = 'X-Tenant-Id'
+const USER_HEADER = 'X-User-Id'
+const SMOKE_TENANT_ID = process.env.SMOKE_TENANT_ID
+const SMOKE_USER_ID = process.env.SMOKE_USER_ID
+/** 页面当前身份（`{tenantId,userId}`）；未取到返回 null。 */
+async function pageAiIdentity() {
+  if (SMOKE_TENANT_ID && SMOKE_USER_ID) {
+    return { tenantId: Number(SMOKE_TENANT_ID), userId: Number(SMOKE_USER_ID) }
+  }
+  try {
+    const fromStore = await evaluate(`(() => {
+      const app = document.getElementById('app')
+      if (!app || !app.__vue_app__) return null
+      const ai = app.__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const id = ai && ai.identity
+      return id && id.tenantId > 0 && id.userId > 0 ? { tenantId: id.tenantId, userId: id.userId } : null
+    })()`, { awaitPromise: false })
+    if (fromStore) return fromStore
+  } catch { /* 页面未就绪：退回 storage/默认 */ }
+  try {
+    const raw = await evaluate(`sessionStorage.getItem('ai-identity')`, { awaitPromise: false })
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Number.isInteger(parsed.tenantId) && Number.isInteger(parsed.userId)
+        && parsed.tenantId > 0 && parsed.userId > 0) return parsed
+    }
+  } catch { /* 忽略 */ }
+  return { tenantId: 1, userId: 101 }
+}
+let aiIdentity = null
+/** 取证请求的公共头（身份 + JSON）。 */
+async function apiHeaders() {
+  if (!aiIdentity) aiIdentity = await pageAiIdentity()
+  return { [TENANT_HEADER]: String(aiIdentity.tenantId), [USER_HEADER]: String(aiIdentity.userId) }
+}
+
+/**
+ * 会话镜像键的**身份无关**匹配：Task 4 起键形是 `ai-mirror:<tenant>:<user>:<sid>`，
+ * 无身份时才退回 `ai-mirror:<sid>`。断言只关心"是不是这个会话的镜像"，
+ * 故按 `: <sid>` 结尾匹配，两种键形都成立（不写死身份段，避免身份切换后恒假）。
+ */
+function isMirrorKeyOf(key, sessionId) {
+  return key.startsWith('ai-mirror:') && (key === `ai-mirror:${sessionId}` || key.endsWith(`:${sessionId}`))
+}
+
+
 const chrome = spawn(CHROME, [
   `--remote-debugging-port=${PORT}`,
   `--user-data-dir=${OUT}/chrome-profile`,
@@ -218,7 +270,7 @@ async function waitAppReady() {
 
 /** 后端该会话的记忆条数（GET /api/ai/history/{sessionId} 的 data.count）。 */
 async function historyCount(sessionId) {
-  const r = await fetch(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`)
+  const r = await fetch(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`, { headers: await apiHeaders() })
   if (!r.ok) throw new Error(`GET /api/ai/history/${sessionId} → HTTP ${r.status}`)
   const body = await r.json()
   return body?.data?.count ?? null
@@ -244,7 +296,7 @@ async function waitCount(sessionId, want, { tries = 24 } = {}) {
  */
 async function historyPayload(sessionId) {
   try {
-    const r = await fetch(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`)
+    const r = await fetch(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`, { headers: await apiHeaders() })
     if (!r.ok) return null
     const body = await r.json()
     return body?.data ?? null
@@ -281,9 +333,16 @@ function snapshotExpr() {
     const btn = document.querySelector('[data-testid="${TESTID_NEW_CHAT}"]')
     const hint = [...document.querySelectorAll('div')].find(e => e.textContent.trim() === ${JSON.stringify(TAB_HINT_TEXT)})
     const oldMirrorKeys = Object.keys(sessionStorage).filter(k => k.startsWith('ai-mirror:'))
+    // Task 4 起会话 id 的存储键带身份指纹（ai-session-id:<tenant>:<user>）；无身份时才退回裸键。
+    const sidKey = Object.keys(sessionStorage).find(k => k === 'ai-session-id' || k.startsWith('ai-session-id:'))
+    // 镜像键同口径（ai-mirror:<tenant>:<user>:<sid>）；断言只关心"是不是本会话的镜像"。
+    const mirrorOf = (sid) => oldMirrorKeys.filter(k => k === 'ai-mirror:' + sid || k.endsWith(':' + sid))
+    const identityRaw = sessionStorage.getItem('ai-identity')
     return {
       sessionId: ai.sessionId,
-      storedSessionId: sessionStorage.getItem('ai-session-id'),
+      storedSessionId: sidKey ? sessionStorage.getItem(sidKey) : null,
+      sessionIdKey: sidKey ?? null,
+      identityRaw,
       messages: ai.messages.length,
       historyLoaded: ai.historyLoaded,
       notice: ai.notice,
@@ -292,7 +351,7 @@ function snapshotExpr() {
       buttonText: btn ? btn.textContent.trim() : null,
       hintVisible: !!(hint && hint.offsetParent !== null),
       mirrorKeys: oldMirrorKeys,
-      hasOldMirror: oldMirrorKeys.includes('ai-mirror:' + ai.sessionId)
+      hasOldMirror: mirrorOf(ai.sessionId).length > 0
     }
   })()`
 }
@@ -510,7 +569,7 @@ async function realReload(why) {
 /** `GET /api/ai/runs/{runId}` 的快照状态（null = 取不到 / 不存在）。 */
 async function runStatus(runId) {
   try {
-    const r = await fetch(`${API}/api/ai/runs/${encodeURIComponent(runId)}`)
+    const r = await fetch(`${API}/api/ai/runs/${encodeURIComponent(runId)}`, { headers: await apiHeaders() })
     if (!r.ok) return null
     const body = await r.json()
     return body?.data?.snapshot?.status ?? null
@@ -522,7 +581,7 @@ async function runStatus(runId) {
 /** `GET /api/ai/runs/current?sessionId=` 的 found 标记（刷新后"有没有幽灵在途轮"的判据）。 */
 async function runCurrentFound(sessionId) {
   try {
-    const r = await fetch(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+    const r = await fetch(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`, { headers: await apiHeaders() })
     if (!r.ok) return null
     const body = await r.json()
     return body?.data?.found === true
@@ -709,7 +768,7 @@ try {
   if (!await waitAppReady()) { console.error('FATAL: 应用/store 未就绪'); process.exit(3) }
   console.log('[app] ready')
   await evaluate(`(() => {
-    for (const k of Object.keys(sessionStorage)) { if (k.startsWith('ai-mirror:') || k === 'ai-session-id') sessionStorage.removeItem(k) }
+    for (const k of Object.keys(sessionStorage)) { if (k.startsWith('ai-mirror:') || k.startsWith('ai-session-id')) sessionStorage.removeItem(k) }
     return true
   })()`, { awaitPromise: false })
   await send('Page.navigate', { url: URL_APP })
@@ -754,15 +813,17 @@ try {
   RESULT.phases.afterNewChat = { ...s3, oldSessionHistoryCount: oldCount }
   console.log('[阶段3 新建对话后]', JSON.stringify(RESULT.phases.afterNewChat))
   // 注：新会话自己会有一个（空的）镜像键 —— 这里只断言**旧**镜像键已被删（施工卡 §1.2 验收②）
+  // 镜像键形带身份段（Task 4），故按"是不是 sid1 的镜像"判，不写死 'ai-mirror:<sid>'。
+  const oldMirrorLeft = s3.mirrorKeys.filter(k => isMirrorKeyOf(k, sid1)).length > 0
   assert('③', s3.messages === 0 && s3.buttonDisabled === true
     && s3.sessionId !== sid1 && s3.storedSessionId === s3.sessionId
-    && s3.mirrorKeys.includes('ai-mirror:' + sid1) === false
+    && oldMirrorLeft === false
     && s3.notice === null      // 删除未失败（失败会写 notice「旧会话记忆删除失败（不影响新对话）」）
     && oldCount === 0,
   {
     messages: s3.messages, buttonDisabled: s3.buttonDisabled, notice: s3.notice,
     sessionIdChanged: s3.sessionId !== sid1, stateMatchesStorage: s3.storedSessionId === s3.sessionId,
-    oldMirrorRemoved: !s3.mirrorKeys.includes('ai-mirror:' + sid1), oldSessionHistoryCount: oldCount
+    oldMirrorRemoved: !oldMirrorLeft, oldSessionHistoryCount: oldCount
   })
 
   // ── 阶段 4：新会话再发一轮 → 记忆记在新 id 上（缺陷修复的行为级证据） ──
@@ -1100,7 +1161,7 @@ try {
   await send('Fetch.enable', { patterns: [{ urlPattern: '*api/ai/history*', requestStage: 'Request' }] })
   pausedHistoryId = null
   await evaluate(`(() => {
-    for (const k of Object.keys(sessionStorage)) { if (k.startsWith('ai-mirror:') || k === 'ai-session-id') sessionStorage.removeItem(k) }
+    for (const k of Object.keys(sessionStorage)) { if (k.startsWith('ai-mirror:') || k.startsWith('ai-session-id')) sessionStorage.removeItem(k) }
     return true
   })()`, { awaitPromise: false })
   await send('Page.navigate', { url: URL_APP })
@@ -1169,7 +1230,9 @@ try {
     console.log(`[阶段14] 在途窗口已关闭（第 ${attempt + 1} 次：loading=${stillInFlight}），换新会话重试`)
   }
   const mirrorBeforeReload = await evaluate(
-    `(() => { const raw = sessionStorage.getItem('ai-mirror:' + ${AI_EXPR}.sessionId)
+    `(() => { const sid = '' + ${AI_EXPR}.sessionId
+      const key = Object.keys(sessionStorage).find(k => k.startsWith('ai-mirror:') && (k === 'ai-mirror:' + sid || k.endsWith(':' + sid)))
+      const raw = key ? sessionStorage.getItem(key) : null
       if (!raw) return null
       const m = JSON.parse(raw)
       const last = (m.messages || []).filter(x => x.role === 'assistant').pop() || null

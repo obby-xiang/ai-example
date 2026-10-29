@@ -38,6 +38,9 @@
 
 .PARAMETER NoStart
   不自起服务：只用已就绪的 8081/8082（脚本仍做健康等待，不达标即整棒 FAIL）。
+  注意：多实例各实例的会话发号实例位必须不同（自起时脚本给 A=0 / B=1）；用已就绪实例时
+  请确认两边启动参数分别带 `--app.instance-slot=0` / `=1`（或环境变量 APP_INSTANCE_SLOT），
+  否则同一毫秒两侧可能发出同一个会话号。
 
 .PARAMETER KeepAlive
   用例跑完不杀进程（默认会收掉本脚本起来的全部子进程）。
@@ -102,6 +105,66 @@ $script:childrenCleaned = $false
 $script:frameSamples = New-Object System.Collections.ArrayList
 $script:http = New-Object System.Net.Http.HttpClient
 $script:http.Timeout = [TimeSpan]::FromMinutes(3)
+
+# ── 身份（租户/用户）：AI 对话数据面每个请求都带 X-Tenant-Id / X-User-Id ──────────
+# 与后端 TenantIdentityFilter 同一分界：/api/ai 下的**对话数据面**缺头即 400；排除面只有
+#   · 精确路径 health / tools / tenants / startup-resume(+scan)（子路径不排除）
+#   · 模型配置子树 providers / models / settings
+# 业务数据（/api/tasks、select-defs…）与模型配置**不做租户隔离**，本脚本也不给它们加身份头。
+$script:AiTenantId = 1
+$script:AiUserId = 101
+$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants',
+    '/api/ai/startup-resume', '/api/ai/startup-resume/scan')
+$script:AiConfigSubtrees = @('/api/ai/providers', '/api/ai/models', '/api/ai/settings')
+
+function Test-AiDataPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $p = $path.Split('?')[0]
+    if ($p.Length -gt 1 -and $p.EndsWith('/')) { $p = $p.Substring(0, $p.Length - 1) }
+    if (-not ($p -eq '/api/ai' -or $p.StartsWith('/api/ai/'))) { return $false }
+    if ($script:AiExcludedExactPaths -contains $p) { return $false }
+    foreach ($sub in $script:AiConfigSubtrees) {
+        if ($p -eq $sub -or $p.StartsWith($sub + '/')) { return $false }
+    }
+    return $true
+}
+
+# run 级键的 hash tag：租户任务 2 起<b>同时含身份与 runId</b>（`{<tenant>:<user>:run:<runId>}`）。
+# harness 的每个 AI 请求都带身份，故直接取证时也必须用带身份的 tag —— 否则读到的是
+# legacy 命名空间里不存在的键（表现为"取号未落"之类的假红），或误判同槽。
+function Get-RunTag($runId) {
+    return '{' + $script:AiTenantId + ':' + $script:AiUserId + ':run:' + $runId + '}'
+}
+
+function Add-AiIdentityHeaders($req) {
+    if (-not (Test-AiDataPath $req.RequestUri.AbsolutePath)) { return $req }
+    $req.Headers.TryAddWithoutValidation('X-Tenant-Id', [string]$script:AiTenantId) | Out-Null
+    $req.Headers.TryAddWithoutValidation('X-User-Id', [string]$script:AiUserId) | Out-Null
+    return $req
+}
+
+# 会话号只由后端发（POST /api/ai/session）；权威值是 data.sessionIdText（十进制字符串）。
+# 不得本地造号：多实例/同毫秒唯一性与会话归属只有后端能保证；也不得读 JSON number
+# （≈1.7e18 > 2^53，double 会静默改值）—— 故从原始响应文本正则取字符串。
+function Get-SessionIdText([string]$json) {
+    if (-not $json) { return $null }
+    $m = [regex]::Match($json, '"sessionIdText"\s*:\s*"([0-9]+)"')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+function New-AiSession($base, $tag) {
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, ($base + '/api/ai/session'))
+    Add-AiIdentityHeaders $req | Out-Null
+    $resp = $script:http.SendAsync($req).Result
+    if ($null -eq $resp) { throw "POST /api/ai/session（$tag）未取得响应（$base 不可达？）" }
+    $text = $resp.Content.ReadAsStringAsync().Result
+    if (-not $resp.IsSuccessStatusCode) { throw "POST /api/ai/session（$tag）=> HTTP $([int]$resp.StatusCode) $text" }
+    $sid = Get-SessionIdText $text
+    if (-not $sid) { throw "POST /api/ai/session（$tag）响应缺权威字段 sessionIdText：$text" }
+    if ($sid.Length -lt 16) { throw "sessionIdText（$tag）只有 $($sid.Length) 位，未超出 2^53 安全整数范围" }
+    return $sid
+}
 
 function Say($msg) { Write-Host $msg }
 function Ok($name) { $script:passed++; Write-Host ("  [PASS] " + $name) -ForegroundColor Green }
@@ -259,6 +322,10 @@ function Start-Instance($pair, $jarPath) {
         "--spring.data.redis.host=$RedisHost",
         "--spring.data.redis.port=$RedisPort",
         $dsArg,
+        # 会话发号的实例位（app.instance-slot，0..999）：两实例**必须不同**，否则同一毫秒
+        # 两侧可能发出同一个 sessionId（唯一性不等于隔离，但撞号会让"谁的会话"无从判断）。
+        # 显式写死 A=0 / B=1，不依赖 Profile 判据（本 harness 不起多实例 profile）。
+        "--app.instance-slot=$($pair.slot)",
         '--app.job.batch-size=10'
     ) -join ' '
     $env = @{
@@ -280,7 +347,9 @@ $script:cancelHandler = [ConsoleCancelEventHandler]{
 [Console]::add_CancelKeyPress($script:cancelHandler)
 
 function GetJson($base, $path) {
-    $resp = $script:http.GetAsync($base + $path).Result
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, ($base + $path))
+    Add-AiIdentityHeaders $req | Out-Null
+    $resp = $script:http.SendAsync($req).Result
     # .NET Framework 在连不上/被取消时 .Result 会回 $null（不抛）——显式报"不可达"，避免空值方法调用。
     if ($null -eq $resp) { throw "GET $path 未取得响应（$base 不可达？）" }
     $text = $resp.Content.ReadAsStringAsync().Result
@@ -291,14 +360,18 @@ function GetJson($base, $path) {
 function PostJson($base, $path, $body) {
     $json = if ($body -is [string]) { $body } else { $body | ConvertTo-Json -Depth 20 -Compress }
     $content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, 'application/json')
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, ($base + $path))
+    $req.Content = $content
+    Add-AiIdentityHeaders $req | Out-Null
     $resp = $null
     try {
-        $resp = $script:http.PostAsync($base + $path, $content).Result
+        $resp = $script:http.SendAsync($req).Result
         if ($null -eq $resp) { throw "POST $path 未取得响应（$base 不可达？）" }
         $text = $resp.Content.ReadAsStringAsync().Result
         return @{ status = [int]$resp.StatusCode; text = $text; ok = $resp.IsSuccessStatusCode }
     } finally {
         if ($resp) { $resp.Dispose() }
+        $req.Dispose()
         $content.Dispose()
     }
 }
@@ -339,6 +412,7 @@ function Read-Sse($base, $path, $bodyObj, [string[]]$stopOn, [int]$timeoutMs = 1
     } else {
         $req.Method = [System.Net.Http.HttpMethod]::Get
     }
+    Add-AiIdentityHeaders $req | Out-Null
     $cts = New-Object System.Threading.CancellationTokenSource
     $cts.CancelAfter($timeoutMs)
     $resp = $script:http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).Result
@@ -447,13 +521,28 @@ function Get-Percentile($values, [double]$p) {
 # 在独立作业里发一次 POST（并发用例用）：作业不可见主进程函数，故块内自包含。
 function Start-PostJob($base, $path, $bodyObj, [int64]$fireAtMs = 0) {
     $json = if ($null -eq $bodyObj) { '{}' } else { $bodyObj | ConvertTo-Json -Depth 10 -Compress }
-    return Start-Job -ArgumentList $base, $path, $json, $fireAtMs -ScriptBlock {
-        param($base, $path, $json, $fireAtMs)
+    # 作业进程看不到主进程的函数，身份头与"哪些路径算 AI 数据面"的判据一起传进去。
+    # 并发用例打的是 /api/ai/confirm（对话数据面）⇒ 缺头即 400，双路并发会退化成"两路都 400"。
+    $tenantId = [string]$script:AiTenantId
+    $userId = [string]$script:AiUserId
+    return Start-Job -ArgumentList $base, $path, $json, $fireAtMs, $tenantId, $userId -ScriptBlock {
+        param($base, $path, $json, $fireAtMs, $tenantId, $userId)
         $ErrorActionPreference = 'Stop'
         Add-Type -AssemblyName System.Net.Http
         $http = New-Object System.Net.Http.HttpClient
         $http.Timeout = [TimeSpan]::FromSeconds(60)
         $content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, 'application/json')
+        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, ($base + $path))
+        $req.Content = $content
+        $p = $path.Split('?')[0]
+        $isAiData = ($p -eq '/api/ai' -or $p.StartsWith('/api/ai/')) -and
+            -not (@('/api/ai/health', '/api/ai/tools', '/api/ai/tenants', '/api/ai/startup-resume',
+                '/api/ai/startup-resume/scan') -contains $p) -and
+            -not ($p.StartsWith('/api/ai/providers') -or $p.StartsWith('/api/ai/models') -or $p.StartsWith('/api/ai/settings'))
+        if ($isAiData) {
+            $req.Headers.TryAddWithoutValidation('X-Tenant-Id', $tenantId) | Out-Null
+            $req.Headers.TryAddWithoutValidation('X-User-Id', $userId) | Out-Null
+        }
         # 并发用例用同一个墙钟时刻做"发令枪"：作业启动耗时不均，不校准就变成先后两枪。
         if ($fireAtMs -gt 0) {
             $waitMs = $fireAtMs - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
@@ -461,13 +550,14 @@ function Start-PostJob($base, $path, $bodyObj, [int64]$fireAtMs = 0) {
         }
         $resp = $null
         try {
-            $resp = $http.PostAsync($base + $path, $content).Result
+            $resp = $http.SendAsync($req).Result
             if ($null -eq $resp) { throw "POST $path 未取得响应（$base 不可达？）" }
             $status = [int]$resp.StatusCode
             $text = $resp.Content.ReadAsStringAsync().Result
             return @{ status = $status; text = $text }
         } finally {
             if ($resp) { $resp.Dispose() }
+            $req.Dispose()
             $content.Dispose()
             $http.Dispose()
         }
@@ -569,7 +659,7 @@ function Get-RedisSlot([string]$key) {
 function New-SuspendedExportRun($prefix, $tag, [int64]$TaskId = 0, $Base = '', [string]$MessageSuffix = '') {
     if ([string]::IsNullOrWhiteSpace($Base)) { $Base = $BaseA }
     $sideLabel = if ($Base -eq $BaseA) { 'A 侧' } else { 'B 侧' }
-    $sessionId = $prefix + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sessionId = New-AiSession $Base ($prefix + 'sid')
     if ($TaskId -gt 0) {
         # SharedDb / 资源锁用例：复用已存在（且两侧可见）的任务，不再建新任务。
         $taskId = $TaskId
@@ -623,7 +713,7 @@ function New-SuspendedExportRun($prefix, $tag, [int64]$TaskId = 0, $Base = '', [
 
 function Case-Reattach-Full-Replay {
     $name = 'reattach-full-replay（批①：连接层无状态，B 侧可全量回放 A 的帧）'
-    $sessionId = 'b23l1-full-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sessionId = New-AiSession $BaseA 'b23l1-full'
     $framesA = Read-Sse $BaseA '/api/ai/chat' @{ sessionId = $sessionId; message = 'scenario=PLAIN 你好' } @('done', 'error') 120000 'full-A'
     $runId = $null
     foreach ($f in $framesA) { if ($f.type -eq 'start') { $runId = $f.runId } }
@@ -642,7 +732,7 @@ function Case-Reattach-Full-Replay {
 
 function Case-Reattach-Diff {
     $name = 'reattach-diff（批①：?lastSeq 差量重挂，不重不漏）'
-    $sessionId = 'b23l1-diff-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sessionId = New-AiSession $BaseA 'b23l1-diff'
     $framesA = Read-Sse $BaseA '/api/ai/chat' @{ sessionId = $sessionId; message = 'scenario=PLAIN 你好' } @('done', 'error') 120000 'diff-A'
     $runId = $null
     foreach ($f in $framesA) { if ($f.type -eq 'start') { $runId = $f.runId } }
@@ -676,15 +766,20 @@ function Case-Suspend-Reattach-Wake {
     # 哨兵名带 runId（跨用例隔离），起作业前先清掉同名的陈旧件。
     $readyFile = Join-Path $ArtifactDir ('wake-B.ready.' + $runId)
     Remove-Item -LiteralPath $readyFile -Force -ErrorAction SilentlyContinue
-    $job = Start-Job -ArgumentList $BaseB, $runId, $lastSeq, $readyFile -ScriptBlock {
-        param($base, $runId, $lastSeq, $readyFile)
+    $job = Start-Job -ArgumentList $BaseB, $runId, $lastSeq, $readyFile, ([string]$script:AiTenantId), ([string]$script:AiUserId) -ScriptBlock {
+        param($base, $runId, $lastSeq, $readyFile, $tenantId, $userId)
         $ErrorActionPreference = 'Stop'
         Add-Type -AssemblyName System.Net.Http
         $http = New-Object System.Net.Http.HttpClient
         $http.Timeout = [TimeSpan]::FromMinutes(2)
         $uri = New-Object System.Uri($base + '/api/ai/events/' + $runId + '?lastSeq=' + $lastSeq)
+        # /api/ai/events 是对话数据面：缺身份头会被 400（响应头立刻回、看起来"就绪"，
+        # 但收到的是 JSON 错误体而不是 SSE 回放）—— 头必须带。
+        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $uri)
+        $req.Headers.TryAddWithoutValidation('X-Tenant-Id', $tenantId) | Out-Null
+        $req.Headers.TryAddWithoutValidation('X-User-Id', $userId) | Out-Null
         # 先把订阅请求发出去（异步、不等响应头），再判就绪。
-        $task = $http.GetAsync($uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+        $task = $http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
         $ready = $false
         try {
             # 有回放帧时服务端立刻回响应头；零回放时 SSE 不 commit（一帧都不写），
@@ -1112,11 +1207,11 @@ function Case-Idempotency {
     $starts = Count-Frames $full2 'tool_start' $run.toolCallId
     if ($starts -ne 1) { throw "二次决策后 tool_start 仍应恰 1，实得 $starts" }
 
-    # 批③ 幂等索引只读取证：ai:idem:{run:<runId>} 的 field = <runId>:<toolCallId>（RunStore#idemField）。
-    # B23L1 批① Cluster 硬阻断后 run 级键族带 {run:<runId>} hash tag（幂等索引与台账必须同槽，
-    # 否则 IDEM_PUSH 在原生 Cluster 上 CROSSSLOT —— 炸点正好在"副作用已执行之后"）。
+    # 批③ 幂等索引只读取证：ai:idem:<tag> 的 field = <runId>:<toolCallId>（RunStore#idemField），
+    # tag 带身份与 runId（租户任务 2）—— 幂等索引与台账必须同槽，否则 IDEM_PUSH 在原生 Cluster
+    # 上 CROSSSLOT（炸点正好在"副作用已执行之后"）。
     $idemField = $run.runId + ':' + $run.toolCallId
-    $idemKey = 'ai:idem:{run:' + $run.runId + '}'
+    $idemKey = 'ai:idem:' + (Get-RunTag $run.runId)
     $idemVal = Invoke-RedisCommand @('HGET', $idemKey, $idemField)
     if ([string]::IsNullOrWhiteSpace([string]$idemVal)) {
         throw "幂等索引缺失：HGET $idemKey $idemField 为空"
@@ -1262,13 +1357,13 @@ function Case-Lease-Scripts {
     Say ("  租约已存在：" + $leaseKey + " = " + $leaseVal)
 
     # 批① Cluster 硬阻断取证（R1-01 + 评审 I-1）：epoch 取号在<b>与租约键同槽的 per-run 计数器</b>上
-    # （`ai:lease:epoch:{run:<runId>}`），`INCR + SET` 在<b>同一条 Lua</b> 里 —— 号与占用必然同序。
+    # （`ai:lease:epoch:<tag>`，tag = `{<tenant>:<user>:run:<runId>}`），`INCR + SET` 在<b>同一条 Lua</b> 里 —— 号与占用必然同序。
     # 判据三条：① 租约值仍是 `<epoch>|<owner>` 且 > 0；② 计数器键存在且 == 该租约 epoch
     # （脚本内的 INCR 是这一任的唯一号源）；③ 旧全局 `ai:lease:epoch` <b>不再</b>参与 run 租约
     # （资源锁仍会用它，所以它可能存在，但不能等于/小于本租约 epoch 的"号源校验"）。
     $leaseEpoch = [int64](([string]$leaseVal).Split('|')[0])
     if ($leaseEpoch -le 0) { throw "租约值形态异常（期望 <epoch>|<owner>，实得 '$leaseVal'）：epoch 未由计数器发放" }
-    $runTag = '{run:' + $runId + '}'
+    $runTag = Get-RunTag $runId
     $runEpochKey = 'ai:lease:epoch:' + $runTag
     $epochRaw = Invoke-RedisCommand @('GET', $runEpochKey)
     if ([string]::IsNullOrWhiteSpace([string]$epochRaw)) {
@@ -1281,7 +1376,8 @@ function Case-Lease-Scripts {
     Say ("  ACQUIRE 证据：epoch=" + $leaseEpoch + "，per-run 计数器 " + $runEpochKey + "=" + $epochRaw + "（脚本内 INCR+SET 同槽原子）")
 
     # ── 批① 收口：一轮 13 键同槽 + 真实写读（R1-05 / R1-02 / R1-03 / 评审 I-1） ──────────────
-    # 判据三条：① slot 算法自检（Redis 官方示例 foo=12182）；② 13 个键全部带 {run:<runId>} tag
+    # 判据三条：① slot 算法自检（Redis 官方示例 foo=12182）；② 13 个键全部带带身份的 run tag
+    # （`{<tenant>:<user>:run:<runId>}`，租户任务 2）
     # 且落同一槽（deleteRun 的那条 13 键 DEL 才可能原子生效）；③ 帧/序号/req 位真的写在 tagged 键上
     # —— 写方（RedisFrameStore / RunStore）与删方键形不一致时，第 ③ 条必红。
     # 说明：deleteRun 目前**没有生产调用点**（池饱和回滚用），所以"13 键一条 DEL 原子生效"的取证
@@ -1289,7 +1385,7 @@ function Case-Lease-Scripts {
     if ((Get-RedisSlot 'foo') -ne 12182 -or (Get-RedisSlot 'bar') -ne 5061) {
         throw ("slot 自检失败：foo/bar 期望 12182/5061，实得 " + (Get-RedisSlot 'foo') + "/" + (Get-RedisSlot 'bar') + "（CRC16 或 hash tag 实现不对，后续同槽判定不可信）")
     }
-    $tag = '{run:' + $runId + '}'
+    $tag = Get-RunTag $runId
     $keyRun = 'ai:run:' + $tag
     $keyPending = 'ai:pending:' + $tag
     $keyClaim = 'ai:claim:' + $tag
@@ -1446,7 +1542,7 @@ function Case-Lease-Scripts {
 #   · 首跳就 429 ⇒ 上一个同名前缀的窗口没退，SKIP（同一分钟内不要连跑两次）。
 function Case-RateLimit-Shared {
     $name = 'rate-limit-shared（防护批③：A11+B10 同一 sessionId → 第 21 次 429）'
-    $sessionId = 'b23l1-ratelimit-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sessionId = New-AiSession $BaseA 'b23l1-ratelimit'
     $probe = '中' * 8193
     $other429 = 0
     $bad = @()
@@ -1534,7 +1630,7 @@ try {
         New-Item -ItemType Directory -Force -Path $stubLogDir | Out-Null
         Start-Child 'stub' 'node' ("scripts/ci/stub-upstream.mjs --port " + $StubPort + " --dir `"" + $stubLogDir + "`"") $RepoRoot $null | Out-Null
 
-        $pairs = @(@{ name = 'instance-a'; port = $PortA }, @{ name = 'instance-b'; port = $PortB })
+        $pairs = @(@{ name = 'instance-a'; port = $PortA; slot = 0 }, @{ name = 'instance-b'; port = $PortB; slot = 1 })
         if ($SharedDb) {
             # 交错启动：A 先起并等健康（H2 AUTO_SERVER 服务端就绪），再起 B 连接同一文件。
             Start-Instance $pairs[0] $jarPath

@@ -68,6 +68,62 @@ const URL_APP = process.env.SMOKE_APP ?? 'http://localhost:5202/'
 // 零模型回归守卫模式（SMOKE_SKIP_MODEL=1）：跳过阶段 3 真实模型挂起轮，断言① 记 skipped
 const SKIP_MODEL = process.env.SMOKE_SKIP_MODEL === '1'
 
+// ── AI 对话数据面身份（租户/用户）─────────────────────────────────────────────
+// 后端 `TenantIdentityFilter` 要求 /api/ai 对话数据面每个请求带 `X-Tenant-Id` / `X-User-Id`，
+// 否则 400。页面自身请求由前端统一带头；本脚本**直连后端**的两处（POST /chat、POST /api/ai/session）
+// 必须带同一身份，且注入 sessionStorage 时键形也要带同一身份指纹，否则刷新恢复读不到。
+// 取值优先级：SMOKE_TENANT_ID/SMOKE_USER_ID 显式覆盖 > 页面当前身份 > 目录首项（1/101）。
+const SMOKE_TENANT_ID = process.env.SMOKE_TENANT_ID
+const SMOKE_USER_ID = process.env.SMOKE_USER_ID
+async function pageAiIdentity() {
+  if (SMOKE_TENANT_ID && SMOKE_USER_ID) {
+    return { tenantId: Number(SMOKE_TENANT_ID), userId: Number(SMOKE_USER_ID) }
+  }
+  try {
+    const fromStore = await evaluate(`(() => {
+      const app = document.getElementById('app')
+      if (!app || !app.__vue_app__) return null
+      const ai = app.__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const id = ai && ai.identity
+      return id && id.tenantId > 0 && id.userId > 0 ? { tenantId: id.tenantId, userId: id.userId } : null
+    })()`, { awaitPromise: false })
+    if (fromStore) return fromStore
+  } catch { /* 页面未就绪：退回 storage/默认 */ }
+  try {
+    const raw = await evaluate(`sessionStorage.getItem('ai-identity')`, { awaitPromise: false })
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Number.isInteger(parsed.tenantId) && Number.isInteger(parsed.userId)
+        && parsed.tenantId > 0 && parsed.userId > 0) return parsed
+    }
+  } catch { /* 忽略 */ }
+  return { tenantId: 1, userId: 101 }
+}
+let aiIdentity = null
+async function aiHeaders() {
+  if (!aiIdentity) aiIdentity = await pageAiIdentity()
+  return { 'X-Tenant-Id': String(aiIdentity.tenantId), 'X-User-Id': String(aiIdentity.userId) }
+}
+/** 身份指纹（与前端 `identityFingerprint` 同形：`<tenantId>:<userId>`）。 */
+async function identityFingerprint() {
+  if (!aiIdentity) aiIdentity = await pageAiIdentity()
+  return `${aiIdentity.tenantId}:${aiIdentity.userId}`
+}
+/**
+ * 会话号只由后端发（`POST /api/ai/session`）；取 **sessionIdText**（十进制字符串，权威值）。
+ * 禁止读 `sessionId` 数字字段：号值 ≈1.7e18 > `Number.MAX_SAFE_INTEGER`，`JSON.parse` 会静默改值；
+ * 也禁止本地造号（会绕过"多实例/同毫秒唯一 + 归属登记"）。
+ */
+async function newAiSession() {
+  const res = await fetch(`${API}/api/ai/session`, { method: 'POST', headers: { Accept: 'application/json', ...await aiHeaders() } })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`POST /api/ai/session → HTTP ${res.status}：${text.slice(0, 300)}`)
+  const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(text)
+  if (!matched) throw new Error(`POST /api/ai/session 响应缺权威字段 sessionIdText：${text.slice(0, 300)}`)
+  if (matched[1].length < 16) throw new Error(`sessionIdText=${matched[1]} 未超出 2^53 安全整数范围`)
+  return matched[1]
+}
+
 // ── R-137（T7/N-6 收编）：合成帧与收敛轮询的集中常量 ──────────────────────────
 // timeoutSeconds 不再裸写 120：脚本侧与 app.ai.hitl.frontend-tool-timeout（现值 120s，
 // 生产侧经 ConfirmGate.frontendToolTimeoutSeconds() 单点取值、无硬编码——本批前置复核结论）
@@ -337,7 +393,7 @@ try {
     }
   }
   else {
-    const S = 'm2t2b-' + crypto.randomUUID()
+    const S = await newAiSession()
     console.log('[阶段3] 真实挂起轮 session =', S, 'api =', API)
 
     // a. 造真实挂起轮：Node 侧直连后端 /chat（真实模型），读到 frontend_tool_request 为止，
@@ -346,7 +402,7 @@ try {
     //    未等到 → 断言① FAIL（detail 记 stopReason + 帧类型序列，可区分"后端给了终帧"与"窗内空读"）
     const chatRes = await fetch(`${API}/api/ai/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...await aiHeaders() },
       body: JSON.stringify({ sessionId: S, message: PROMPT_GF1, context: { page: 'tasks' } })
     })
     if (!chatRes.ok || !chatRes.body) {
@@ -384,9 +440,13 @@ try {
 
     // b. 刷新重建：注入 sessionId + 清该 session 镜像键 → 整页刷新 →
     //    loadHistory → runs/current 命中 → 快照重建（挂起轮在后台保持活着）
+    //    键形带身份指纹（Task 4）：`ai-session-id:<tenant>:<user>` / `ai-mirror:<tenant>:<user>:<sid>`，
+    //    并显式落 `ai-identity`，保证刷新后的页签身份与本次直连请求的身份是同一个。
+    const fingerprint = await identityFingerprint()
     await evaluate(`(() => {
-      sessionStorage.setItem('ai-session-id', '${S}')
-      sessionStorage.removeItem('ai-mirror:${S}')
+      sessionStorage.setItem('ai-identity', JSON.stringify(${JSON.stringify(aiIdentity)}))
+      sessionStorage.setItem('ai-session-id:${fingerprint}', '${S}')
+      sessionStorage.removeItem('ai-mirror:${fingerprint}:${S}')
       return true
     })()`)
     await send('Page.navigate', { url: URL_APP })

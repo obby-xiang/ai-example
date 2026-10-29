@@ -97,10 +97,47 @@ const PORTS = Object.freeze({
 })
 
 const INSTANCES = Object.freeze([
-  { key: 'a', node: 'node-a', port: PORTS.a },
-  { key: 'b', node: 'node-b', port: PORTS.b },
-  { key: 'c', node: 'node-c', port: PORTS.c }
+  // slot = 会话发号实例位（app.instance-slot，0..999）：**三实例必须不同**。
+  // h2tcp 属多实例 profile，后端未显式配置实例位即启动失败（SessionIdGenerator 的 fail-closed）；
+  // 配成同一个值则同一毫秒两侧可能发出同一个 sessionId（撞号）。
+  { key: 'a', node: 'node-a', port: PORTS.a, slot: 0 },
+  { key: 'b', node: 'node-b', port: PORTS.b, slot: 1 },
+  { key: 'c', node: 'node-c', port: PORTS.c, slot: 2 }
 ])
+
+// ── AI 对话数据面身份（X-Tenant-Id / X-User-Id）────────────────────────────
+// 与后端 TenantIdentityFilter 同一分界：/api/ai 下的对话数据面缺头即 400；排除面只有
+// 精确路径（health/tools/tenants/startup-resume(+scan)）与模型配置子树（providers/models/settings）。
+// 业务数据与模型配置**不做租户隔离**，本探针不给它们加身份头。
+const AI_TENANT_ID = '1'
+const AI_USER_ID = '101'
+const AI_PUBLIC_EXACT_PATHS = Object.freeze([
+  '/api/ai/health',
+  '/api/ai/tools',
+  '/api/ai/tenants',
+  '/api/ai/startup-resume',
+  '/api/ai/startup-resume/scan'
+])
+const AI_CONFIG_SUBTREES = Object.freeze(['/api/ai/providers', '/api/ai/models', '/api/ai/settings'])
+
+/** 该路径是否属于"必须带身份头"的对话数据面（与后端 shouldNotFilter 同口径，子路径默认受保护）。 */
+function aiDataPath(pathname) {
+  if (!pathname) return false
+  let p = pathname.split('?')[0]
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
+  if (p !== '/api/ai' && !p.startsWith('/api/ai/')) return false
+  if (AI_PUBLIC_EXACT_PATHS.includes(p)) return false
+  for (const sub of AI_CONFIG_SUBTREES) {
+    if (p === sub || p.startsWith(`${sub}/`)) return false
+  }
+  return true
+}
+
+/** 对话数据面身份头（非数据面返回空对象，便于统一展开）。 */
+function aiIdentityHeaders(pathname) {
+  if (!aiDataPath(pathname)) return {}
+  return { 'X-Tenant-Id': AI_TENANT_ID, 'X-User-Id': AI_USER_ID }
+}
 
 const RESULT_STATUSES = Object.freeze(['PASS', 'FAIL'])
 
@@ -813,6 +850,9 @@ function httpRequest(url, options = {}) {
     const target = new URL(url)
     const started = Date.now()
     const headers = { ...(options.headers || {}) }
+    // 对话数据面统一身份头：漏带会 400，且"回放/重挂/决策"会静默落到别的口径上；
+    // 业务/模型配置不加（它们不做租户隔离）。
+    Object.assign(headers, aiIdentityHeaders(target.pathname))
     const agent = options.agent === undefined ? false : options.agent
     const req = http.request({
       hostname: target.hostname,
@@ -1109,7 +1149,8 @@ function openSse(url, options = {}) {
       timeout: options.timeoutMs || 120000,
       headers: {
         Accept: 'text/event-stream',
-        ...(options.headers || {})
+        ...(options.headers || {}),
+        ...aiIdentityHeaders(target.pathname)
       }
     }, (res) => {
       if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -1394,6 +1435,8 @@ function instanceArgs(key, { apiKey = PLACEHOLDER_KEY, extraArgs = [] } = {}) {
     RUN.jar,
     '--spring.profiles.active=h2tcp',
     `--server.port=${inst.port}`,
+    // 实例位：h2tcp 属多实例 profile，后端要求显式配置且各实例不同（否则启动失败/撞号）。
+    `--app.instance-slot=${inst.slot}`,
     `--spring.datasource.url=${dbUrl}`,
     '--spring.datasource.username=sa',
     '--spring.datasource.password=',
@@ -1850,6 +1893,24 @@ function uniqueId(prefix) {
   return `${prefix}-${crypto.randomBytes(4).toString('hex')}`
 }
 
+/**
+ * 会话号只由后端发（`POST /api/ai/session`）：返回值取 **sessionIdText**（十进制字符串，权威值）。
+ *
+ * <p>为什么不能读数值字段也不能本地造号：号值 ≈1.7×10^18 超出 `Number.MAX_SAFE_INTEGER`，
+ * `JSON.parse` 会把 `sessionId` 静默换成另一个数（double 在该量级间隔 256），后续 chat 打到的
+ * 就是另一条会话；本地 `uniqueId` 则绕过了"多实例/同毫秒唯一 + 归属登记"这两件产品保证。
+ * 故这里从**原始响应文本**用正则取字符串（与 `sessionId` 数字字段并存时以文本为准）。
+ */
+async function newSession(key, tag) {
+  const { record } = await postJson(key, '/api/ai/session', {})
+  checkEq(record.status, 200, `POST /api/ai/session（${key}/${tag}）HTTP：${record.text.slice(0, 300)}`)
+  const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(record.text)
+  check(matched, `POST /api/ai/session（${key}/${tag}）响应缺权威字段 sessionIdText：${record.text.slice(0, 300)}`)
+  const sessionId = matched[1]
+  check(sessionId.length >= 16, `sessionIdText（${key}/${tag}）= ${sessionId} 未超出 2^53 安全整数范围`)
+  return sessionId
+}
+
 async function createTask(key, type, title) {
   const { record, body } = await postJson(key, '/api/tasks', { type, title })
   checkEq(record.status, 201, `POST /api/tasks（${key}）HTTP`)
@@ -2074,7 +2135,7 @@ async function createSuspendedRun(
   key,
   { prefix, taskId, messageSuffix = '', contextPage = 'tasks', waitForPark = true, evidenceName = null }
 ) {
-  const sessionId = uniqueId(prefix)
+  const sessionId = await newSession(key, prefix)
   const context = { page: contextPage, taskType: 'EXPORT', step: 'EXPORT', taskId }
   const message = `start_export 帮我导出 taskId=${taskId}${messageSuffix}`
   const evidence = evidenceName || (waitForPark ? 'A-parked.jsonl' : 'A-park-transition.jsonl')
@@ -2548,7 +2609,7 @@ async function caseSameTcpAcrossAbc() {
 // ── 用例 4：任意实例 reattach + history ────────────────────────────────────
 
 async function runPlainChat(key, prefix, extraMessage = '', { sessionId: fixedSessionId } = {}) {
-  const sessionId = fixedSessionId || uniqueId(prefix)
+  const sessionId = fixedSessionId || (await newSession(key, prefix))
   const message = `scenario=PLAIN ${extraMessage || '三实例连通性'}`.trim()
   const stream = await chatOn(key, { sessionId, message })
   try {
@@ -2631,7 +2692,7 @@ async function caseReattachAnyInstance() {
 
 async function caseSeqCrossInstance() {
   await ensureUp()
-  const sessionId = uniqueId('cluster3-seq')
+  const sessionId = await newSession('a', 'cluster3-seq')
   const message = 'scenario=PLAIN stall-frames=2000 seq-cross-instance'
   const streamA = await chatOn('a', { sessionId, message })
   let cut = 0
@@ -2877,7 +2938,9 @@ async function caseIdempotencyCrossInstance() {
   checkEq(Number(detail1.ledgerCounts.start_export), 1, '重复决策后台账 start_export 仍为 1')
   const jobs1 = await jobsOf('c', task1.id)
   checkEq(jobs1.length, 1, '重复决策后作业数仍为 1')
-  const idemKey = `ai:idem:{run:${run1.runId}}`
+  // 幂等索引键：`RunStore#runScopedKey(IDEM_PREFIX, runId)`，tag = `{<tenant>:<user>:run:<runId>}`
+  // （租户任务 2：身份进 tag，否则同 runId 跨身份会落到同一个哈希上）。
+  const idemKey = `ai:idem:{${AI_TENANT_ID}:${AI_USER_ID}:run:${run1.runId}}`
   const idemField = `${run1.runId}:${run1.toolCallId}`
   const idemValue = redisHget(idemKey, idemField)
   check(idemValue && idemValue.length > 0, `幂等索引缺失：HGET ${idemKey} ${idemField}`)
@@ -2995,7 +3058,7 @@ async function caseSessionPurgeCrossInstance() {
   })
 
   // ② 在途慢流：SIGSTOP 冻结 A 的取消处理，B 删除必须 deferred（不赌 watchdog 时序）。
-  const activeSession = uniqueId('cluster3-purge-active')
+  const activeSession = await newSession('a', 'cluster3-purge-active')
   const slow = await chatOn('a', { sessionId: activeSession, message: 'scenario=PLAIN stall-frames=4000 purge-active' })
   let activeRunId = null
   let aPaused = false
@@ -3039,8 +3102,9 @@ async function caseSessionPurgeCrossInstance() {
 
   // 等跨实例看到终态后，不手动补删：另一实例的自动重试必须清掉 durable pending。
   await waitRunTerminal('c', activeRunId, RUN.killTakeoverTimeoutMs)
+  // durable pending 键带身份段（`ai:purge:pending:<tenant>:<user>:<session>`；租户任务 2）。
+  const pendingKey = `ai:purge:pending:${AI_TENANT_ID}:${AI_USER_ID}:${activeSession}`
   const automaticPurgeRecovery = async () => {
-    const pendingKey = `ai:purge:pending:${activeSession}`
     const deadline = Date.now() + 90000
     while (redisExists(pendingKey)) {
       if (Date.now() >= deadline) {
@@ -3050,7 +3114,7 @@ async function caseSessionPurgeCrossInstance() {
     }
   }
   await automaticPurgeRecovery()
-  check(!redisExists(`ai:purge:pending:${activeSession}`), '自动销毁重试必须移除 durable pending')
+  check(!redisExists(pendingKey), '自动销毁重试必须移除 durable pending')
 
   // 再 DELETE 只验证幂等；它不是上面的自动清理证据。
   const retry = await deleteJson('c', `/api/ai/session/${encodeURIComponent(activeSession)}`)
@@ -3539,7 +3603,7 @@ async function forceZombieResume(runId) {
 
 async function caseStreamingKillA() {
   await ensureUp()
-  const sessionId = uniqueId('cluster3-stream-kill')
+  const sessionId = await newSession('a', 'cluster3-stream-kill')
   const message = 'scenario=PLAIN stall-frames=4000 streaming-kill-a'
   const streamA = await chatOn('a', { sessionId, message })
   let runId = null
@@ -3771,10 +3835,12 @@ async function caseReadinessRemoval() {
   check(stillIncluded.includes('node-b') && stillIncluded.includes('node-c'), `无 key 时流量仍应覆盖 B/C：${JSON.stringify(stillIncluded)}`)
 
   // 无 key 时 /chat 在开流前 503 AI_UNAVAILABLE（能力面，不是实例就绪面）。
+  // 会话号从 B 取（A 此刻无 key；取号只需要身份 + 实例位，不依赖 AI key）。
+  const readinessSession = await newSession('b', 'cluster3-readiness')
   const readinessChat = await httpRequest(directUrl('a', '/api/ai/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
-    body: Buffer.from(JSON.stringify({ sessionId: uniqueId('cluster3-readiness'), message: 'scenario=PLAIN readiness' }), 'utf8'),
+    body: Buffer.from(JSON.stringify({ sessionId: readinessSession, message: 'scenario=PLAIN readiness' }), 'utf8'),
     timeoutMs: 15000,
     routeKind: 'chat-reject',
     directNode: directNode('a')
@@ -3793,7 +3859,7 @@ async function caseReadinessRemoval() {
   check(includedAfterKey.includes('node-a'), `A 恢复 key 后代理未重新纳入：${JSON.stringify(includedAfterKey)}`)
 
   // ── ② 真实在途慢流 + SIGTERM：ready=false/draining → 代理摘 A → B/C 接管 ──
-  const slowSession = uniqueId('cluster3-draining')
+  const slowSession = await newSession('a', 'cluster3-draining')
   const slow = await chatOn('a', { sessionId: slowSession, message: 'scenario=PLAIN stall-frames=4000 readiness-draining' })
   // 预热一条 keep-alive 连接：SIGTERM 后 Tomcat 可能不再接受**新**连接，但既有连接上的
   // 请求仍要走完优雅停机；用同一条连接轮询 readiness，才拿得到 draining=true 的响应。
@@ -3860,7 +3926,9 @@ async function caseReadinessRemoval() {
     inFlightStillOpen = !slow.ended
 
     // B/C 接管新流量：经统一代理再起一轮，必须由 B/C 之一完成。
-    const takeover = await chatOn(null, { sessionId: uniqueId('cluster3-draining-takeover'), message: 'scenario=PLAIN draining-takeover' }, { viaProxy: true })
+    // 会话号直连 B 取（A 正在 draining，取号不该依赖将要下线的实例）。
+    const takeoverSession = await newSession('b', 'cluster3-draining-takeover')
+    const takeover = await chatOn(null, { sessionId: takeoverSession, message: 'scenario=PLAIN draining-takeover' }, { viaProxy: true })
     try {
       takeoverTerminal = await takeover.waitTerminal(90000)
       checkEq(takeoverTerminal.type, 'done', 'draining 后经代理的新对话终帧')
@@ -3989,6 +4057,9 @@ async function caseRedisOutageRecovery() {
     const run = await runPlainChat('a', 'cluster3-redis-baseline')
     CTX.plainRun = { runId: run.runId, sessionId: run.sessionId, message: run.message, seqs: run.seqs.slice() }
   }
+  // 会话号先取（后端已就绪、Redis 尚在）：Redis 暂停后再取号会把"降级窗口"混进取号路径，
+  // 而本例要断言的是 **chat 在 Redis 故障时快速失败**，不是取号延迟。
+  const outageSession = await newSession('c', 'cluster3-redis-outage')
 
   const pausedAt = Date.now()
   await pauseRedis()
@@ -4012,7 +4083,7 @@ async function caseRedisOutageRecovery() {
     const chat = await httpRequest(directUrl('c', '/api/ai/chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
-      body: Buffer.from(JSON.stringify({ sessionId: uniqueId('cluster3-redis-outage'), message: 'scenario=PLAIN redis-outage' }), 'utf8'),
+      body: Buffer.from(JSON.stringify({ sessionId: outageSession, message: 'scenario=PLAIN redis-outage' }), 'utf8'),
       timeoutMs: 15000,
       routeKind: 'chat-reject',
       directNode: directNode('c')
@@ -4068,7 +4139,9 @@ async function caseRedisOutageRecovery() {
     let lastError = null
     for (let attempt = 0; attempt < 3 && !done; attempt += 1) {
       try {
-        const stream = await chatOn(null, { sessionId: uniqueId('cluster3-redis-recovery'), message: 'scenario=PLAIN redis-recovery' }, { viaProxy: true })
+        // 每次重试换一个新号：同一号重试会把"上一轮已收敛的会话"混进本次判定。
+        const recoverySession = await newSession('b', 'cluster3-redis-recovery')
+        const stream = await chatOn(null, { sessionId: recoverySession, message: 'scenario=PLAIN redis-recovery' }, { viaProxy: true })
         try {
           const terminal = await stream.waitTerminal(60000)
           checkEq(terminal.type, 'done', 'Redis 恢复后代理对话终帧')
@@ -4172,7 +4245,9 @@ function cancelFlagKey(runId) {
  * `--self-check` 里同时钉产品侧的 `runScopedKey(CLAIM_PREFIX, runId)` 与 `runTag` 形态。
  */
 function executionClaimKey(runId) {
-  return `${CLAIM_KEY_PREFIX}{run:${runId}}`
+  // 租户任务 2：run 级键 tag 同时含身份与 runId（`{<tenant>:<user>:run:<runId>}`）。
+  // 身份取探针统一身份（AI_TENANT_ID / AI_USER_ID），与请求头一致；否则注入落在别人的键上。
+  return `${CLAIM_KEY_PREFIX}{${AI_TENANT_ID}:${AI_USER_ID}:run:${runId}}`
 }
 
 function executionClaimPresent(runId, toolCallId) {
@@ -5732,14 +5807,23 @@ function selfTestStubContract() {
   return `routes=${routes.routes.length}`
 }
 
-/** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段。 */
+/** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段 / 实例位。 */
 function selfTestInstanceArgs() {
   const args = instanceArgs('a')
   const dbArg = args.find((arg) => arg.startsWith('--spring.datasource.url='))
   checkIncludes(args.join(' '), '--spring.profiles.active=h2tcp', '实例启动参数 profile')
   check(dbArg && dbArg.includes('LOCK_TIMEOUT=60000'), `H2 JDBC URL 必须带 LOCK_TIMEOUT=60000：${dbArg}`)
   checkIncludes(args.join(' '), '--app.web.trusted-proxies=127.0.0.1/32', '可信代理网段')
-  return 'h2tcp + LOCK_TIMEOUT + trusted-proxies'
+  // 实例位：多实例 profile 下后端强制显式配置（0..999），且各实例必须不同（撞号 = 会话静默合并）。
+  const slots = INSTANCES.map((inst) => {
+    const arg = instanceArgs(inst.key).find((item) => item.startsWith('--app.instance-slot='))
+    check(arg, `实例 ${inst.key} 启动参数缺 --app.instance-slot`)
+    const value = Number(arg.split('=')[1])
+    check(Number.isInteger(value) && value >= 0 && value < 1000, `实例 ${inst.key} 实例位越界：${arg}`)
+    return value
+  })
+  checkEq(new Set(slots).size, INSTANCES.length, `三实例实例位必须互不相同（实得 ${JSON.stringify(slots)}）`)
+  return 'h2tcp + LOCK_TIMEOUT + trusted-proxies + instance-slot'
 }
 
 /** 复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、二元绑定删回去）。 */
@@ -5821,21 +5905,29 @@ function selfTestL150GridContract() {
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/RunStore.java', [
     'CLAIM_PREFIX = "ai:claim:"',
-    // 认领表是 **run 级作用域键**：`claimKey` 必须经 `runScopedKey`，`runTag` 必须是 `{run:<id>}`。
-    // 只钉前缀会让夹具把裸 `ai:claim:<runId>` 当成产品键（run 40681954172 的 R-3 假红）。
+    // 认领表是 **run 级作用域键**：`claimKey` 必须经 `runScopedKey`，tag 由 `RunKeyScope` 拼
+    // （租户任务 2 起 tag 同时含身份与 runId：`{<tenant>:<user>:run:<runId>}`）。
+    // 只钉前缀会让夹具把裸 `ai:claim:<runId>` 当成产品键（run 40681954172 的 R-3 假红），
+    // 只钉 `{run:<id>}` 同样会漏：身份进 tag 后旧形态落到另一个键上。
     'public String claimKey(String runId)',
     'runScopedKey(CLAIM_PREFIX, runId)',
-    'return "{run:" + runId + "}"',
+    'return RunKeyScope.tag(runId)',
     'public boolean hasExecutionEvidence(',
     'public boolean cancellableBeforeExecution('
+  ])
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/tenant/RunKeyScope.java', [
+    'public static String tag(String runId)',
+    'private static String tagContent(String identitySegment, String runId)',
+    'RUN_MARK'
   ])
   assertSourceContains('backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java', [
     'private String settleIfCancelledBeforeClaim(',
     'CancelState.UNKNOWN'
   ])
-  // 夹具自身的键形态：认领表必须带 run 作用域（`{run:<id>}`），取消标志必须是裸前缀。
-  // 两者各有产品侧实证：`ai:claim:` 由 `runScopedKey` 拼（本源码断言），`ai:cancel:` 见 /cancel 响应体 `cancelKey`。
-  checkEq(executionClaimKey('l150-probe'), 'ai:claim:{run:l150-probe}', 'R-3 夹具的认领表键必须带 run 作用域')
+  // 夹具自身的键形态：认领表必须带 run 作用域 + 身份段，取消标志必须是裸前缀。
+  // 两者各有产品侧实证：`ai:claim:` 由 `runScopedKey`/`RunKeyScope.tag` 拼（本源码断言），
+  // `ai:cancel:` 见 `CancellationRegistry#keyFor` 与 /cancel 响应体 `cancelKey`（单键，不进 tag）。
+  checkEq(executionClaimKey('l150-probe'), `ai:claim:{${AI_TENANT_ID}:${AI_USER_ID}:run:l150-probe}`, 'R-3 夹具的认领表键必须带身份 + run 作用域')
   checkEq(cancelFlagKey('l150-probe'), 'ai:cancel:l150-probe', 'R-1 夹具的取消标志键必须是裸前缀')
   const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
   // 先剔除本函数自身，避免"检查项里自带这些字符串"造成恒真。

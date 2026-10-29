@@ -52,7 +52,15 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-*/AIE2E-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
+# 租户/用户身份（租户任务 5）：AI 对话数据面（/api/ai 下除 health/tools/tenants/startup-resume
+#   与 providers/models/settings 子树）的**每个**请求都由本脚本统一附加 X-Tenant-Id / X-User-Id
+#   （默认身份 tenant=1 / user=101；业务数据与模型配置不加）。会话号一律由后端发
+#   （POST /api/ai/session，取权威字段 sessionIdText 十进制字符串），脚本不再本地造号：
+#   号值 ≈1.7e18 > 2^53，JSON number 会被静默改值。
+#   末尾 TENANT-AI-1..4 是租户验收（身份边界 / 发号契约 / 会话归属 / 对话隔离），计入主 PASS/FAIL。
+#
 # 结果口径：166 个用例计入 PASS/FAIL —— 既有 35 + 批① 91（AIE2E-*）+ V1 34（AIE2E-W-*）+ V2 4 + V5 2
+#   另有主计数内的 4 条租户验收（TENANT-AI-1..4，租户任务 5 追加；不计入 AIE2E manifest 的 131）。
 #   既有 35：TC1–TC22 共 22 个 + TC23（T3b 收尾：CONFIRM 卡快照重建）+ GF1–GF5 共 5 个
 #   （生成式表单端到端，docs/evidence/GFc-E2E用例设计-GLM-5.3.md）+ GF6（入参闸门，-EnableGf6，
 #   桩模式启用并计入主计数，底座为桩的确定性违规模式 --violate-form-type）+ R-137 红队补测
@@ -130,9 +138,50 @@ $http = New-Object System.Net.Http.HttpClient
 # 单请求上限 = total-budget + 60s（见上方派生段；原为写死的 5min）
 $http.Timeout = [TimeSpan]::FromMilliseconds($script:HttpTimeoutMs)
 
+# ---------- 身份（租户/用户）：AI 对话数据面每个请求都带 X-Tenant-Id / X-User-Id ----------
+# 产品口径（后端 TenantIdentityFilter）：/api/ai 下的**对话数据面**缺头即 400；排除面只有两类
+#   · 精确路径：health / tools / tenants / startup-resume(+scan)（其子路径不排除）
+#   · 模型配置子树：providers / models / settings（AiConfigController）
+# 业务数据（/api/tasks、/api/jobs、/api/definitions…）与模型配置**不做租户隔离**，脚本也不给它们
+# 附加身份头 —— 加了会让人误以为它们也隔离，且会让"漏带头的对话请求 400"这类回归失去判据。
+$script:AiTenantId = 1
+$script:AiUserId = 101
+# 验收用第二/第三身份（目录 = TenantUserDirectory：tenant1: 101/102；tenant2: 201/202）
+$script:AiOtherTenantId = 2
+$script:AiOtherTenantUserId = 201
+$script:AiSameTenantOtherUserId = 102
+
+$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants',
+    '/api/ai/startup-resume', '/api/ai/startup-resume/scan')
+$script:AiConfigSubtrees = @('/api/ai/providers', '/api/ai/models', '/api/ai/settings')
+
+# 与后端 shouldNotFilter 同一判定（子路径默认受保护：新增 /api/ai/* 数据接口不会静默逃出身份边界）
+function Test-AiDataPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $p = $path.Split('?')[0]
+    if ($p.Length -gt 1 -and $p.EndsWith('/')) { $p = $p.Substring(0, $p.Length - 1) }
+    if (-not ($p -eq '/api/ai' -or $p.StartsWith('/api/ai/'))) { return $false }
+    if ($script:AiExcludedExactPaths -contains $p) { return $false }
+    foreach ($sub in $script:AiConfigSubtrees) {
+        if ($p -eq $sub -or $p.StartsWith($sub + '/')) { return $false }
+    }
+    return $true
+}
+
+# 统一身份头；$identity = @{ tenantId = <long>; userId = <long> }（缺省 = 脚本主身份）
+function Add-AiIdentityHeaders($req, $identity = $null) {
+    $path = $req.RequestUri.AbsolutePath
+    if (-not (Test-AiDataPath $path)) { return $req }
+    $tenantId = if ($null -ne $identity -and $null -ne $identity.tenantId) { $identity.tenantId } else { $script:AiTenantId }
+    $userId = if ($null -ne $identity -and $null -ne $identity.userId) { $identity.userId } else { $script:AiUserId }
+    $req.Headers.TryAddWithoutValidation('X-Tenant-Id', [string]$tenantId) | Out-Null
+    $req.Headers.TryAddWithoutValidation('X-User-Id', [string]$userId) | Out-Null
+    return $req
+}
+
 # ---------- HTTP 辅助（main 响应信封：{success, message?, code?, data?}） ----------
 
-function Invoke-Api($method, $path, $body) {
+function Invoke-Api($method, $path, $body, $identity = $null) {
     $req = New-Object System.Net.Http.HttpRequestMessage
     $req.RequestUri = New-Object System.Uri($Base + $path)
     $req.Method = New-Object System.Net.Http.HttpMethod($method)
@@ -140,6 +189,7 @@ function Invoke-Api($method, $path, $body) {
         $json = if ($body -is [string]) { $body } else { $body | ConvertTo-Json -Depth 20 -Compress }
         $req.Content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, 'application/json')
     }
+    Add-AiIdentityHeaders $req $identity | Out-Null
     $resp = $http.SendAsync($req).Result
     $text = $resp.Content.ReadAsStringAsync().Result
     $obj = $null
@@ -149,26 +199,26 @@ function Invoke-Api($method, $path, $body) {
     return @{ status = [int]$resp.StatusCode; ok = $resp.IsSuccessStatusCode; text = $text; json = $obj }
 }
 
-function GetJson($path) {
-    $r = Invoke-Api 'GET' $path $null
+function GetJson($path, $identity = $null) {
+    $r = Invoke-Api 'GET' $path $null $identity
     if (-not $r.ok -or -not $r.json -or -not $r.json.success) { throw "GET $path => HTTP $($r.status) $($r.text)" }
     return $r.json.data
 }
 
-function PostJson($path, $body) {
-    $r = Invoke-Api 'POST' $path $body
+function PostJson($path, $body, $identity = $null) {
+    $r = Invoke-Api 'POST' $path $body $identity
     if (-not $r.ok -or -not $r.json -or -not $r.json.success) { throw "POST $path => HTTP $($r.status) $($r.text)" }
     return $r.json.data
 }
 
-function PutJson($path, $body) {
-    $r = Invoke-Api 'PUT' $path $body
+function PutJson($path, $body, $identity = $null) {
+    $r = Invoke-Api 'PUT' $path $body $identity
     if (-not $r.ok -or -not $r.json -or -not $r.json.success) { throw "PUT $path => HTTP $($r.status) $($r.text)" }
     return $r.json.data
 }
 
-function DeleteJson($path) {
-    $r = Invoke-Api 'DELETE' $path $null
+function DeleteJson($path, $identity = $null) {
+    $r = Invoke-Api 'DELETE' $path $null $identity
     if (-not $r.ok -or -not $r.json -or -not $r.json.success) { throw "DELETE $path => HTTP $($r.status) $($r.text)" }
     return $r.json.data
 }
@@ -182,7 +232,9 @@ function PostJsonRaw($path, $body) {
 }
 
 function GetBytes($path) {
-    $resp = $http.GetAsync($Base + $path).Result
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, ($Base + $path))
+    Add-AiIdentityHeaders $req | Out-Null
+    $resp = $http.SendAsync($req).Result
     if (-not $resp.IsSuccessStatusCode) { throw "GET $path => HTTP $($resp.StatusCode)" }
     return $resp.Content.ReadAsByteArrayAsync().Result
 }
@@ -194,6 +246,29 @@ function Expect-Fail($method, $path, $body, $what) {
         throw "$what —— 预期被拒绝但请求成功（HTTP $($r.status)）"
     }
     return $r
+}
+
+# ---------- 会话号：只由后端发（POST /api/ai/session） ----------
+# 返回 `sessionId`(long，仅兼容) + `sessionIdText`(十进制字符串，**权威值**)。脚本不再本地造号
+# （旧实现 `aie2e-<tag>-<guid>`）：多实例/同毫秒唯一性与会话归属（tenantId/userId）只有后端能保证；
+# 本地号还会让"销毁后按归属恢复 / 复制页签取新号"失去语义。
+# 取号必须用 `sessionIdText`：号值 ≈1.7e18 > 2^53，`ConvertFrom-Json` 的 JSON number 在该量级
+# 间隔 256，会**静默**换成另一个号（不报错）—— 故这里从原始响应文本正则取，绝不读 data.sessionId。
+function Get-SessionIdText([string]$json) {
+    if (-not $json) { return $null }
+    $m = [regex]::Match($json, '"sessionIdText"\s*:\s*"([0-9]+)"')
+    if (-not $m.Success) { return $null }
+    return $m.Groups[1].Value
+}
+
+function Ai-NewSid($tag, $identity = $null) {
+    $r = Invoke-Api 'POST' '/api/ai/session' $null $identity
+    if (-not $r.ok) { throw "POST /api/ai/session（$tag）=> HTTP $($r.status) $($r.text)" }
+    $sid = Get-SessionIdText $r.text
+    if (-not $sid) { throw "POST /api/ai/session（$tag）响应缺权威字段 sessionIdText：$($r.text)" }
+    # 契约强度锁：号必须超出 JS 安全整数范围（否则"必须用字符串"没有可观测意义）
+    if ($sid.Length -lt 16) { throw "sessionIdText（$tag）= $sid 只有 $($sid.Length) 位，未超出 2^53 安全整数范围" }
+    return $sid
 }
 
 # Wait-Job 作业终态等待窗口（总账 S-10；2026-10-11 批 B / R-96 由隐式 96s 显式化为 120s）。
@@ -283,6 +358,7 @@ function Read-SseCore($path, $bodyObj, [string[]]$stopOn, $sink, $onOpen) {
     } else {
         $req.Method = [System.Net.Http.HttpMethod]::Get
     }
+    Add-AiIdentityHeaders $req | Out-Null
     $cts = New-Object System.Threading.CancellationTokenSource
     # SSE 读窗口与 HTTP 同源（total-budget + 60s；原为写死的 180000ms）
     $cts.CancelAfter($script:HttpTimeoutMs)
@@ -1326,7 +1402,7 @@ try {
 # ============================================================
 Say '--- TC15 AI 对话（流式 / 工具 / 渐进披露） ---'
 try {
-    $script:aiSession15 = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $script:aiSession15 = Ai-NewSid 'tc15'
     $turn = $null
     $hitTool = $false
     for ($attempt = 1; $attempt -le 2 -and -not $hitTool; $attempt++) {
@@ -1407,7 +1483,7 @@ Say '--- TC16 AI 工具驱动工作区（确认门 + 前端工具挂起） ---'
 try {
     $script:t16 = New-ExportTask 'S5B-TC16-AI驱动' @('CURRENCY')
     PutJson "/api/tasks/$($script:t16)/step" @{ step = 'EXPORT' } | Out-Null
-    $session16 = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $session16 = Ai-NewSid 'tc16'
     $jobsBefore = @(GetJson "/api/tasks/$($script:t16)/jobs").Count
 
     $handler16 = {
@@ -1435,7 +1511,7 @@ try {
     if ($files16.Count -lt 1) { throw '确认放行后未产出导出文件' }
 
     # 前端工具挂起通道：工作区动作（navigate_to / select_definitions）不得由后端执行，需回灌结果
-    $session16b = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $session16b = Ai-NewSid 'tc16b'
     $handler16b = {
         param($f)
         if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
@@ -1568,6 +1644,7 @@ function Read-Sse-Brief($path, $millis) {
     $req = New-Object System.Net.Http.HttpRequestMessage
     $req.RequestUri = New-Object System.Uri($Base + $path)
     $req.Method = [System.Net.Http.HttpMethod]::Get
+    Add-AiIdentityHeaders $req | Out-Null
     $cts = New-Object System.Threading.CancellationTokenSource
     $cts.CancelAfter($millis)
     $resp = $null
@@ -1616,6 +1693,7 @@ function Read-Sse-Brief-Post($path, $bodyObj, $millis, $stopAfterFrames = 3) {
     $req.Method = [System.Net.Http.HttpMethod]::Post
     $json = if ($bodyObj -is [string]) { $bodyObj } else { $bodyObj | ConvertTo-Json -Depth 20 -Compress }
     $req.Content = New-Object System.Net.Http.StringContent($json, [System.Text.Encoding]::UTF8, 'application/json')
+    Add-AiIdentityHeaders $req | Out-Null
     $cts = New-Object System.Threading.CancellationTokenSource
     $cts.CancelAfter($millis)
     $resp = $null
@@ -1816,7 +1894,7 @@ try {
     $formOk = $false
     while ($attempt -lt 3) {
         $attempt++
-        $sessionGf1 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $sessionGf1 = Ai-NewSid 'gf1'
         $script:gfPosts = @()
         $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
         $script:gfSchemaDrift = $null
@@ -1908,7 +1986,7 @@ try {
     $formOk = $false
     while ($attempt -lt 3) {
         $attempt++
-        $sessionGf2 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $sessionGf2 = Ai-NewSid 'gf2'
         $script:gfPosts = @()
         $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
         $script:gfSchemaDrift = $null
@@ -1988,7 +2066,7 @@ try {
     $formOk = $false
     while ($attempt -lt 3) {
         $attempt++
-        $sessionGf3 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $sessionGf3 = Ai-NewSid 'gf3'
         $script:gfPosts = @()
         $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
         $script:gfSchemaDrift = $null
@@ -2082,7 +2160,7 @@ try {
     $formOk = $false
     while ($attempt -lt 3) {
         $attempt++
-        $sessionGf4 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $sessionGf4 = Ai-NewSid 'gf4'
         $script:gfPosts = @()
         $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
         $script:gfSchemaDrift = $null
@@ -2212,7 +2290,7 @@ if ($EnableGf6) {
     $gf6Frames = $null
     while ($gf6Attempt -lt 3 -and -not $gf6Rejected) {
         $gf6Attempt++
-        $sessionGf6 = 'gfc-' + [Guid]::NewGuid().ToString('N')
+        $sessionGf6 = Ai-NewSid 'gf6'
         $script:gfPosts = @()
         $script:gfHttp = @()
         $handlerGf6 = {
@@ -2390,7 +2468,7 @@ if ($null -eq $ctxShapes) {
     foreach ($c in $ctxCases) {
         Say ("--- {0} {1}（usage-shape={2}） ---" -f $c.id, $c.title, $c.shape)
         try {
-            $sid = 's5b-' + $c.id.ToLower() + '-' + [Guid]::NewGuid().ToString('N')
+            $sid = Ai-NewSid ('ctx-' + $c.id.ToLower())
             $turn = Invoke-AiTurn $sid "【上下文计量用例 $($c.id)】usage-shape=$($c.shape) 请只回复一句确认。" `
                 @{ page = 'tasks' } $script:continueHandler 2
             $resp = Invoke-Api 'GET' "/api/ai/context/$sid" $null
@@ -2464,7 +2542,7 @@ try {
 
     $ctx17 = @{ page = 'import'; taskId = $script:t17; taskType = 'IMPORT'; step = 'PUBLISH' }
     $ask = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $script:t17)
-    $session17 = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $session17 = Ai-NewSid 'tc17'
 
     # ① 拒绝：不发布
     $before17 = @{}
@@ -2512,7 +2590,7 @@ try {
     # ② 确认：真的发布（作业由后端服务层创建）。换新会话（避免上一轮拒绝的对话记忆影响模型），
     #    并对"模型未调用工具"的抖动做最多 3 次尝试
     Start-Sleep -Seconds 2
-    $session17b = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $session17b = Ai-NewSid 'tc17b'
     $script:tc17Approve = $true
     $appr = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -2552,8 +2630,8 @@ try {
 # ============================================================
 Say '--- TC18 会话隔离 / 并发发轮两果（AR-04） / 取消后终态与再发 ---'
 try {
-    $sa = 's5b-' + [Guid]::NewGuid().ToString('N')
-    $sb = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $sa = Ai-NewSid 'tc18a'
+    $sb = Ai-NewSid 'tc18b'
     $tagA = 'ABC' + (Get-Random -Minimum 100000 -Maximum 999999)
     $tagB = 'XYZ' + (Get-Random -Minimum 100000 -Maximum 999999)
     Invoke-AiTurn $sa ("你好，我的会话标识是 $tagA") @{ page = 'tasks' } $script:continueHandler 3 | Out-Null
@@ -2590,7 +2668,7 @@ try {
     #    反复重发直到 200"，那种重试把两果都糊成绿、也把偶发红藏起来 ⇒ 本批去掉：只发一次，不 sleep、
     #    不重试；幻影轮次（帧面）先断，再按分支断状态面（409 确定性覆盖见 AIE2E-D-13），
     #    最后用收敛后的窗口（/history/{sid}）对账用户原文"每次受理恰一条 / 未受理零条"。
-    $sc = 's5b-' + [Guid]::NewGuid().ToString('N')
+    $sc = Ai-NewSid 'tc18c'
     $frames18 = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $sc; message = $ask18; context = $ctx18 } `
         @('confirm_request', 'done', 'error') $frames18 $null
@@ -2763,7 +2841,7 @@ try {
     $frames23 = New-Object System.Collections.ArrayList
     $script:gfHttp = @()   # TC23 的 HTTP 原文按用例重置（Gf-Dump 落 gfc-TC23.http.txt）
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $session23 = 's5b-tc23-' + [Guid]::NewGuid().ToString('N')
+        $session23 = Ai-NewSid 'tc23'
         $batch23 = New-Object System.Collections.ArrayList
         Read-Sse '/api/ai/chat' @{ sessionId = $session23; message = $ask23; context = $ctx23 } `
             @('confirm_request', 'done', 'error') $batch23 $null
@@ -2893,7 +2971,7 @@ $script:aiCases = New-Object System.Collections.ArrayList
 function Add-AiCase($id, $p, $title, $body) {
     $script:aiCases.Add(@{ id = $id; p = $p; title = $title; body = $body }) | Out-Null
 }
-function Ai-NewSid($tag) { return ('aie2e-' + $tag + '-' + [Guid]::NewGuid().ToString('N')) }
+
 # 恒返回数组（逗号运算符）：返回单元素时 PowerShell 会把 `@(...)` 拆包成标量，
 # 而 PSCustomObject 没有 .Count ⇒ `(Ai-F ...).Count` 变 $null，"恰 1 个" 的断言与 Ai-One 会双双失效。
 function Ai-F($frames, [string[]]$types) { return ,@($frames | Where-Object { $types -contains $_.type }) }
@@ -3486,7 +3564,10 @@ function Ai-FormUpload($runId, $toolCallId, $filePath, $fileName) {
     $content.Add($bc, 'file', $fileName)
     $content.Add((New-Object System.Net.Http.StringContent($runId)), 'runId')
     $content.Add((New-Object System.Net.Http.StringContent($toolCallId)), 'toolCallId')
-    $resp = $http.PostAsync($Base + '/api/ai/form/attachments', $content).Result
+    $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, ($Base + '/api/ai/form/attachments'))
+    $req.Content = $content
+    Add-AiIdentityHeaders $req | Out-Null
+    $resp = $http.SendAsync($req).Result
     $text = $resp.Content.ReadAsStringAsync().Result
     $obj = $null
     if ($text -and $text.TrimStart().StartsWith('{')) { try { $obj = $text | ConvertFrom-Json } catch { } }
@@ -4926,6 +5007,7 @@ Say '--- 批① · SAF 合规与脱敏（12 条） ---'
 
 function Ai-Headers($path) {
     $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, ($Base + $path))
+    Add-AiIdentityHeaders $req | Out-Null
     $resp = $http.SendAsync($req).Result
     $out = @{ status = [int]$resp.StatusCode; headers = @{} }
     foreach ($h in $resp.Headers) { $out.headers[$h.Key.ToLowerInvariant()] = ($h.Value -join ',') }
@@ -6211,6 +6293,147 @@ if ($manifestWhy.Count -gt 0) {
 } else {
     Ok ("AIE2E-MANIFEST 计数自校验：131 条 / 12 域（S13 P1 H11 G11 T10 K6 Q4 C8 M3 D12 X12 W40）/ P0 {0} · P1 {1} · P2 {2}，与设计稿 §2 逐行 P 列一致 + L-21 两条表格主用例（T-13/T-14，P1）+ V1 的 W 域 34 条 + V2 的刷新恢复链 4 条 + V5 的不可撤销批准/撤销闭环 2 条 + AR-04 的 D-13（可控时序 409，P0）" -f $script:aiP.P0, $script:aiP.P1, $script:aiP.P2)
 }
+
+# ============================================================
+# 租户/用户验收（TENANT-AI-1..4 · Task 5 脚本面）
+#   产品口径：AI 对话数据面**必须**带 X-Tenant-Id/X-User-Id（缺头/非正数/系统账号/目录外组合
+#   一律 400）；会话号只由后端发（sessionIdText 为权威字符串）；同一 sessionId 在不同身份下
+#   互不可见、互不能销毁；只带 runId 的读面同样按快照归属判定。
+#   判据一律取真实 HTTP 行为（状态码/字段/键形/计数），不用"脚本自己造号/自己补身份"替代。
+#   计入主 PASS/FAIL 与退出码（与 TC/GF 同门禁属性）；不进入 AIE2E 域计数（manifest 不变）。
+# ============================================================
+Say '--- 租户/用户身份验收（TENANT-AI-1..4） ---'
+
+$script:identA = @{ tenantId = $script:AiTenantId; userId = $script:AiUserId }
+$script:identB = @{ tenantId = $script:AiOtherTenantId; userId = $script:AiOtherTenantUserId }
+$script:identA2 = @{ tenantId = $script:AiTenantId; userId = $script:AiSameTenantOtherUserId }
+
+# 裸请求：只带这里显式给的头。用来证明"缺头/伪造身份"确实被产品拒绝，
+# 而不是被脚本的身份帮助函数补成默认身份（那种绿是假的）。
+function Invoke-AiRaw($method, $path, $headers) {
+    $req = New-Object System.Net.Http.HttpRequestMessage
+    $req.RequestUri = New-Object System.Uri($Base + $path)
+    $req.Method = New-Object System.Net.Http.HttpMethod($method)
+    if ($null -ne $headers) {
+        foreach ($k in $headers.Keys) { $req.Headers.TryAddWithoutValidation($k, [string]$headers[$k]) | Out-Null }
+    }
+    $resp = $http.SendAsync($req).Result
+    $text = $resp.Content.ReadAsStringAsync().Result
+    $obj = $null
+    if ($text -and $text.TrimStart().StartsWith('{')) { try { $obj = $text | ConvertFrom-Json } catch { $obj = $null } }
+    return @{ status = [int]$resp.StatusCode; ok = $resp.IsSuccessStatusCode; text = $text; json = $obj }
+}
+
+# ---- TENANT-AI-1：身份边界（前门拒绝，不落默认身份） ----
+try {
+    $noHead = Invoke-AiRaw 'POST' '/api/ai/session' $null
+    if ($noHead.status -ne 400) { throw "缺身份头 POST /api/ai/session => HTTP $($noHead.status)，期望 400" }
+    if ($noHead.json.code -ne 'TENANT_IDENTITY_REQUIRED') { throw "缺头错误码 $($noHead.json.code)，期望 TENANT_IDENTITY_REQUIRED" }
+    $halfHead = Invoke-AiRaw 'POST' '/api/ai/session' @{ 'X-Tenant-Id' = '1' }
+    if ($halfHead.status -ne 400) { throw "只带租户头 => HTTP $($halfHead.status)，期望 400（半个身份不是身份）" }
+    $unknown = Invoke-AiRaw 'POST' '/api/ai/session' @{ 'X-Tenant-Id' = '1'; 'X-User-Id' = '999' }
+    if ($unknown.status -ne 400 -or $unknown.json.code -ne 'TENANT_IDENTITY_UNKNOWN') {
+        throw "目录外组合 1/999 => HTTP $($unknown.status)/code=$($unknown.json.code)，期望 400/TENANT_IDENTITY_UNKNOWN"
+    }
+    $system = Invoke-AiRaw 'POST' '/api/ai/session' @{ 'X-Tenant-Id' = '1'; 'X-User-Id' = '-1' }
+    if ($system.status -ne 400) { throw "系统账号 1/-1 => HTTP $($system.status)，期望 400（-1 仅限系统任务）" }
+    $zeroTenant = Invoke-AiRaw 'POST' '/api/ai/session' @{ 'X-Tenant-Id' = '0'; 'X-User-Id' = '101' }
+    if ($zeroTenant.status -ne 400) { throw "tenant=0 => HTTP $($zeroTenant.status)，期望 400（不做 tenant=0 兜底）" }
+    $legal = Invoke-AiRaw 'POST' '/api/ai/session' @{ 'X-Tenant-Id' = '1'; 'X-User-Id' = '101' }
+    if ($legal.status -ne 200) { throw "合法身份 1/101 => HTTP $($legal.status) $($legal.text)" }
+    $legalSid = Get-SessionIdText $legal.text
+    if ($legalSid) { Invoke-Api 'DELETE' "/api/ai/session/$legalSid" $null $script:identA | Out-Null }
+    # 模型配置面不在身份边界内（不因缺头 400）：证明"业务/配置请求不附加身份头"这条分界是真的
+    $cfg = Invoke-AiRaw 'GET' '/api/ai/providers' $null
+    if ($cfg.status -eq 400 -and $cfg.json -and $cfg.json.code -like 'TENANT_IDENTITY*') {
+        throw '模型配置面被纳入身份边界（/api/ai/providers 因缺头 400）：分界线与后端 filter 不一致'
+    }
+    Ok 'TENANT-AI-1 身份边界：缺头/半头/目录外/系统账号/tenant=0 均 400，合法身份 200，模型配置面不强制身份头'
+} catch { No 'TENANT-AI-1 身份边界' $_.Exception.Message }
+
+# ---- TENANT-AI-2：后端发号契约（sessionIdText 权威，long 仅兼容） ----
+try {
+    $issueA = Invoke-Api 'POST' '/api/ai/session' $null $script:identA
+    $issueB = Invoke-Api 'POST' '/api/ai/session' $null $script:identB
+    if (-not $issueA.ok -or -not $issueB.ok) {
+        throw "POST /api/ai/session => A=$($issueA.status) B=$($issueB.status)（期望均 200）"
+    }
+    $textA = Get-SessionIdText $issueA.text
+    $textB = Get-SessionIdText $issueB.text
+    if (-not $textA -or -not $textB) { throw "发号响应缺 sessionIdText（A=$($issueA.text) B=$($issueB.text)）" }
+    if ($textA -notmatch '^[0-9]+$') { throw "sessionIdText 不是纯十进制：$textA" }
+    if ($textA.Length -lt 16 -or $textB.Length -lt 16) {
+        throw "号未超出 2^53 安全整数范围（A=$textA 位数 $($textA.Length)）：sessionIdText 失去意义"
+    }
+    if ($textA -eq $textB) { throw "两个身份取到同一个号 $textA（发号未区分实例/身份）" }
+    # 兼容字段必须在（旧消费方），且不能被脚本当权威值使用
+    if ($issueA.text -notmatch '"sessionId"\s*:\s*[0-9]+') { throw "发号响应缺兼容字段 sessionId（long）：$($issueA.text)" }
+    $rawNumber = [regex]::Match($issueA.text, '"sessionId"\s*:\s*([0-9]+)').Groups[1].Value
+    if ($rawNumber -ne $textA) { throw "sessionId 与 sessionIdText 不是同一个值（$rawNumber vs $textA）" }
+    Invoke-Api 'DELETE' "/api/ai/session/$textA" $null $script:identA | Out-Null
+    Invoke-Api 'DELETE' "/api/ai/session/$textB" $null $script:identB | Out-Null
+    Ok "TENANT-AI-2 后端发号：sessionIdText 十进制 $($textA.Length) 位（>2^53）、两身份互异、sessionId 兼容字段同值"
+} catch { No 'TENANT-AI-2 后端发号契约' $_.Exception.Message }
+
+# ---- TENANT-AI-3：会话归属（跨租户/同租户他人不得销毁我的会话） ----
+try {
+    $sidOwner = Ai-NewSid 'tenant-owner' $script:identA
+    # 他人（跨租户）销毁：按不存在处理，且响应里的键形必须带**他自己的**身份段
+    $purgeB = Invoke-Api 'DELETE' "/api/ai/session/$sidOwner" $null $script:identB
+    if (-not $purgeB.ok) { throw "DELETE /api/ai/session（跨租户）=> HTTP $($purgeB.status) $($purgeB.text)" }
+    if ([bool]$purgeB.json.found) { throw '跨租户销毁报 found=true（他人会话被当真）' }
+    if ([string]$purgeB.json.memoryKey -notlike 'chat:mem:2:201:*') {
+        throw "跨租户销毁的 memoryKey=$($purgeB.json.memoryKey)，期望落在 chat:mem:2:201:*（身份段缺失即键族未隔离）"
+    }
+    if ([string]$purgeB.json.clientCleanup.mirrorKey -ne "ai-mirror:2:201:$sidOwner") {
+        throw "跨租户 clientCleanup.mirrorKey=$($purgeB.json.clientCleanup.mirrorKey)，期望 ai-mirror:2:201:$sidOwner"
+    }
+    # 同租户他人（101 vs 102）同样不可见
+    $purgeA2 = Invoke-Api 'DELETE' "/api/ai/session/$sidOwner" $null $script:identA2
+    if (-not $purgeA2.ok -or [bool]$purgeA2.json.found) {
+        throw "同租户他人 1/102 销毁看到 found=$($purgeA2.json.found)（期望 false）"
+    }
+    if ([string]$purgeA2.json.memoryKey -notlike 'chat:mem:1:102:*') {
+        throw "同租户他人 memoryKey=$($purgeA2.json.memoryKey)，期望 chat:mem:1:102:*"
+    }
+    # 归属者自己销毁：会话登记（POST /api/ai/session 落 ai:session:1:101:<sid>）必须还在 ⇒ found=true
+    $purgeA = Invoke-Api 'DELETE' "/api/ai/session/$sidOwner" $null $script:identA
+    if (-not $purgeA.ok) { throw "归属者 DELETE /api/ai/session => HTTP $($purgeA.status) $($purgeA.text)" }
+    if (-not [bool]$purgeA.json.found) {
+        throw '归属者销毁报 found=false：他人的幂等删除把本会话删掉了（按 sessionId 而非归属删）'
+    }
+    if ([string]$purgeA.json.memoryKey -notlike 'chat:mem:1:101:*') {
+        throw "归属者 memoryKey=$($purgeA.json.memoryKey)，期望 chat:mem:1:101:*"
+    }
+    if (-not [bool]$purgeA.json.complete) { throw "归属者销毁 complete=$($purgeA.json.complete)，期望 true（无活跃 run 的纯会话）" }
+    Ok 'TENANT-AI-3 会话归属：跨租户/同租户他人销毁报 found=false 且键形带各自身份段，归属者仍能完整销毁'
+} catch { No 'TENANT-AI-3 会话归属' $_.Exception.Message }
+
+# ---- TENANT-AI-4：对话数据按身份隔离（同一 sessionId 的记忆与 run 读面） ----
+try {
+    $sidTalk = Ai-NewSid 'tenant-talk' $script:identA
+    $talkToken = 'tenant-accept-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $turn = Invoke-AiTurn $sidTalk "【TENANT-AI-4】$talkToken 请只回复一句确认。" @{ page = 'tasks' } $script:continueHandler 2
+    $done = @($turn.frames | Where-Object { $_.type -eq 'done' })
+    if ($done.Count -lt 1) { throw '未收到 done 帧（对话未收敛，记忆/run 判据无对象）' }
+    $talkRunId = Ai-RunId $turn.frames
+    if (-not $talkRunId) { throw '未收到 start 帧（runId 缺失）' }
+    $histA = GetJson "/api/ai/history/$sidTalk" $script:identA
+    if ([int]$histA.count -lt 2) { throw "归属者历史只有 $($histA.count) 条（期望 ≥2）" }
+    $joinedA = (@($histA.messages) | ForEach-Object { [string]$_.text }) -join ' '
+    if ($joinedA -notlike "*$talkToken*") { throw '归属者历史缺本轮用户原文（记忆未落在本身份下）' }
+    $histB = GetJson "/api/ai/history/$sidTalk" $script:identB
+    if ([int]$histB.count -ne 0) { throw "跨租户读到 $($histB.count) 条记忆（同一 sessionId 跨身份可见）" }
+    $histA2 = GetJson "/api/ai/history/$sidTalk" $script:identA2
+    if ([int]$histA2.count -ne 0) { throw "同租户他人读到 $($histA2.count) 条记忆（用户维度未隔离）" }
+    # 只带 runId 的读面同样按归属：他人按"不存在"回答，不给存在性探针
+    $runB = GetJson "/api/ai/runs/$talkRunId" $script:identB
+    if ([bool]$runB.exists) { throw '跨租户读 /api/ai/runs/{runId} 报 exists=true（runId 被当成归属证明）' }
+    $runA = GetJson "/api/ai/runs/$talkRunId" $script:identA
+    if (-not [bool]$runA.exists) { throw '归属者读自己的 run 报 exists=false（归属判据反向失效）' }
+    Invoke-Api 'DELETE' "/api/ai/session/$sidTalk" $null $script:identA | Out-Null
+    Ok "TENANT-AI-4 对话隔离：同一 sessionId 记忆仅归属者可见（跨租户/同租户他人 count=0），run 读面按归属 exists=false/true"
+} catch { No 'TENANT-AI-4 对话隔离' $_.Exception.Message }
 
 # ============================================================
 # TC19 清理与演示数据恢复（含 Q8② 运行期日志收尾扫描）
