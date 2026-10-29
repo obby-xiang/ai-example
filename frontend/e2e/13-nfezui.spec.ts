@@ -81,17 +81,16 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
 
   test('E2E-N04 删除会话全链：DELETE 200 → history 空 → context 归零 → 重复删除幂等', async ({ page, request }) => {
     await openPanel(page)
-    await seedRound(page, 'N04')
+    const tag = unique('N04')
+    await seedRound(page, tag)
     const sid = await sessionIdOf(page)
 
     // ① 销毁前：真实存在过的状态（不伪造 —— 都是本用例这一轮真跑出来的）
+    // 数据库完整历史端点（/history/{sid}/messages）与 ai_chat_message 已随 Task 1 移除；
+    // 记忆窗口是本域唯一的历史读面，且必须能看到本轮真写的用户原文（不是只看 count>0）。
     const before = await historyOf(request, sid)
     expect(before.count).toBeGreaterThan(0)
-    const fullBefore = await apiGet<{ count: number }>(
-      request,
-      `/api/ai/history/${encodeURIComponent(sid)}/messages?limit=200`
-    )
-    expect(fullBefore.count).toBeGreaterThan(0)
+    expect((before.messages ?? []).some((m) => String(m.text ?? '').includes(tag))).toBe(true)
     const ctxBefore = await apiGet<{ usedTokens?: number; source?: string }>(
       request,
       `/api/ai/context/${encodeURIComponent(sid)}`
@@ -115,8 +114,9 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     expect(first.status()).toBe(200)
     // DELETE 回的是裸对象（与 /cancel、/context 同姿态，不套 ApiResponse）
     // 契约来源：`AiController` 的 DELETE 已统一委托 `AiSessionPurgeService`（完整会话销毁）——
-    // 删该会话全部 AI 数据（记忆 / run 13 键 / 上下文 / 附件 / 反馈 / 完整历史 / 会话索引），
+    // 删该会话全部 AI 数据（记忆 / run 13 键 / 上下文 / 附件 / 反馈 / 会话索引），
     // 业务数据不碰；旧 `/history` 只是兼容路径，**没有第二套"只清记忆窗口"的语义**。
+    // 数据库面只剩反馈（`database.feedbackRows/feedbackDeleted`）：ai_chat_message 与完整历史端点已移除。
     const removed = (await first.json()) as {
       complete?: boolean
       found?: boolean
@@ -134,8 +134,6 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
       database?: {
         feedbackRows?: number
         feedbackDeleted?: number
-        chatMessageRows?: number
-        chatMessagesDeleted?: number
       }
     }
     // 销毁完整性：不是"删了点东西就算成功"，而是各面都交代清楚且无残留/无延后
@@ -152,20 +150,13 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     expect(removed.context?.deletedKeys ?? 0).toBeGreaterThan(0)
     expect(removed.database?.feedbackRows ?? 0).toBeGreaterThan(0)
     expect(removed.database?.feedbackDeleted).toBe(removed.database?.feedbackRows)
-    expect(removed.database?.chatMessageRows ?? 0).toBeGreaterThan(0)
-    expect(removed.database?.chatMessagesDeleted).toBe(removed.database?.chatMessageRows)
     // 附件面：N-04 的桩场景没有挂起表单 ⇒ 没有附件实例可造（不伪造）。
     // 这里只钉"响应必须如实交代附件面、且没有删除失败"；真正的附件删除由 hgta 域用真表单覆盖。
     expect(removed.attachments?.registrationsDeleted).toBe(removed.attachments?.registered)
     expect(removed.attachments?.failedFileIds ?? []).toEqual([])
 
-    // ② 销毁后：记忆窗口、完整历史、反馈、上下文计量、会话/记忆/上下文键全部归零/不可读
+    // ② 销毁后：记忆窗口、反馈、上下文计量、会话/记忆/上下文键全部归零/不可读
     expect((await historyOf(request, sid)).count).toBe(0)
-    const fullAfter = await apiGet<{ count: number }>(
-      request,
-      `/api/ai/history/${encodeURIComponent(sid)}/messages?limit=200`
-    )
-    expect(fullAfter.count).toBe(0)
     const ctxAfter = await apiGet<{ usedTokens?: number; source?: string }>(
       request,
       `/api/ai/context/${encodeURIComponent(sid)}`

@@ -53,7 +53,8 @@ import static org.mockito.Mockito.when;
  * {@code approval_park}/{@code tool_call_park} —— 取消来自 {@code ConfirmGate#await} 的等待循环，
  * 该轮随后由驱动线程在 {@code cancelTerminal} 收尾。收尾被<b>唯一写门</b>拒绝：
  * {@code 续跑权只读：拒绝取消态 DB 历史/快照/记忆（租约设施不可用（无法确认是否仍持有））}
- * （{@code boot.log:6740}），同一判据把终帧也丢了（{@code :6741}）；驱动线程记完
+ * （{@code boot.log:6740}；**这是现场原文** —— 数据库完整历史写口已于 2026-10-30 整条移除，
+ * 现行阶段名是「取消态快照/记忆」，其余判据不变），同一判据把终帧也丢了（{@code :6741}）；驱动线程记完
  * {@code turn_end}（{@code :6748}）后退出，<b>没有任何执行体再试</b> ⇒ 20s 后快照仍 SUSPENDED。
  *
  * <h2>为什么这一拍是 UNAVAILABLE（不是"Redis 故障"）</h2>

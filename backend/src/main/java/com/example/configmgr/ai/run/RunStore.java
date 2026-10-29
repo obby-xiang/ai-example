@@ -889,7 +889,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * （不因为调用方用 {@code save} 还是可判定变体而分叉）。
 	 *
 	 * <p><b>边界</b>：这是"快照状态不得从取消态进其它状态"的原子守卫，<b>不是</b>分布式事务 ——
-	 * DB 历史 append 不在这一个原子步内（见 {@code ResilientChatService#finishSuccess} 的落库后复读）。
+	 * 记忆窗口的整窗写回不在这一个原子步内（见 {@code ResilientChatService#finishSuccess} 的落库后复读）。
 	 */
 	public void save(RunSnapshot snapshot) {
 		persist(snapshot);
@@ -1852,8 +1852,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 这段"HELD-but-fence-ahead"。
 	 *
 	 * <p><b>唯一写门</b>：本方法同时被 {@link com.example.configmgr.ai.run.ResilientChatService}
-	 * 的"答案面"写口（DB 历史 / 记忆整窗）复用（RT-20）—— 帧、台账、序号、历史、记忆因此共享
-	 * 同一套判据，不会出现"快照拒写、但答案已经落库"的半只读状态。
+	 * 的"答案面"写口（快照终态 / 记忆整窗）复用（RT-20）—— 帧、台账、序号、快照、记忆因此共享
+	 * 同一套判据，不会出现"快照拒写、但答案已经写回"的半只读状态。
 	 */
 	public boolean permittedToWrite(String runId, String action) {
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);

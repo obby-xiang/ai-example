@@ -1867,11 +1867,10 @@ public class AiController {
 
 	/**
 	 * R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。
-
 	 *
 	 * <p><b>批次2 / AR-01 第 5 条：synthetic 展示过滤（读侧）</b> —— 合成/系统提示（上下文压缩摘要、
 	 * 步数收尾、轮内预算收尾）在记忆里是真实消息，但对人不是"用户原话"也不是"助手答复"。
-	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与写侧同一份</b>，不许各写一套），
+	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与槽位解析同一份</b>，不许各写一套），
 	 * 命中即加 additive 键 {@code synthetic=true}：前端据此按系统消息呈现，
 	 * <b>摘要不冒充用户</b>、不显示内部配置键；正文与角色字段一律原样（不改写、不改模型记忆）。
 	 *

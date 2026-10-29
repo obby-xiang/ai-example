@@ -61,7 +61,8 @@
 #   `big` = repeat 同形态但真值更大（11000/200），供 C13 起"窗口 ≥ 22K 才不被前缀主导"的用例）。
 #   批① 91：设计稿 §2 十二域的接口级用例（AIE2E-S01…X13）+ L-21 两条表格主用例（T-13/T-14）
 #   + AR-04 的可控时序 409（D-13，批次8A 追加、不在设计稿 §2 名单内）；同批把 Q-08 / Q-05 / D-08 / M-07
-#   与遗留 TC18 的"挂起后必 409"统一改为**200/409 两果都合法**（历史无幻影先断；409 断 SESSION_BUSY +
+#   与遗留 TC18 的"挂起后必 409"统一改为**200/409 两果都合法**（无幻影先断：帧面未受理零帧 +
+#   收敛后窗口按唯一 token 对账"受理恰一条 / 未受理零条 / 无重复用户原话"；409 断 SESSION_BUSY +
 #   runId + reattach，200 断独立 runId + done 无 error），TC18 的 Start-Sleep 与重试循环一并移除，
 #   桩开关与路由见 scripts/ci/stub-routes.json
 #   的 `faults.switches`（唯一取数点）；桩下**零 SKIP**，末尾 MANIFEST 自校验条数/逐域/优先级。
@@ -2440,11 +2441,15 @@ try {
     }
 
     $ctx18 = @{ page = 'import'; taskId = $t18; taskType = 'IMPORT'; step = 'PUBLISH' }
-    $ask18 = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t18)
+    # 挂起轮的用户原文带唯一 token：数据库完整历史端点已移除 ⇒ 收敛后按 Redis 记忆窗口对账"恰一条"，
+    # token 是稳定身份（不用任务号这类短数字通配，见 Q-08 的历史教训）。
+    $askToken18 = 'tc18-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $ask18 = ("【TC18】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $askToken18, $t18)
     # ② 串行化面（AR-04 两果都合法）：会话 C 挂起在确认门时同会话再发 —— 409（门仍被占）与 200
     #    （park 已释放门）都是现行语义下的合法结果。旧写法是"2 次尝试凑一个挂起 + Start-Sleep 后
     #    反复重发直到 200"，那种重试把两果都糊成绿、也把偶发红藏起来 ⇒ 本批去掉：只发一次，不 sleep、
-    #    不重试；历史无幻影先断，再按分支断状态面（409 确定性覆盖见 AIE2E-D-13）。
+    #    不重试；幻影轮次（帧面）先断，再按分支断状态面（409 确定性覆盖见 AIE2E-D-13），
+    #    最后用收敛后的窗口（/history/{sid}）对账用户原文"每次受理恰一条 / 未受理零条"。
     $sc = 's5b-' + [Guid]::NewGuid().ToString('N')
     $frames18 = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $sc; message = $ask18; context = $ctx18 } `
@@ -2453,34 +2458,23 @@ try {
     if ($cr18.Count -lt 1) { throw '未挂起到确认门（TC18 串行化面的现场不成立；不重试）' }
     $runId18 = $cr18[0].runId
 
-    # 历史快照（幻影判据的基线）必须排在任何状态码断言之前。
-    $h18a = GetJson "/api/ai/history/$sc/messages?afterSeq=0&limit=200"
-    $a18 = [int]$h18a.count
-    if ($a18 -lt 1) { throw 'TC18 挂起轮没有落历史（幻影判据无对象）' }
+    # 轮次身份基线必须排在任何状态码断言之前：挂起轮自己的 start 帧（这一轮真的开了）。
+    # 数据库完整历史（带 seq/messageId 的行）已移除 ⇒ 用户原文的"恰一条"改在收敛后按窗口对账（见本用例末尾）。
+    $st18p = Ai-F $frames18 @('start')
+    if ($st18p.Count -ne 1) { throw "TC18 挂起轮 start 帧 $($st18p.Count) 个（期望恰 1；幻影判据无对象）" }
+    if ([string]$st18p[0].runId -ne [string]$runId18) {
+        throw "TC18 挂起轮 start.runId=$($st18p[0].runId) ≠ confirm_request.runId=$runId18（轮次身份错配）"
+    }
 
     $token18 = 'tc18-second-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $busy = Ai-ChatSse $sc ('【TC18】turn-text ' + $token18 + ' 在吗') @{ page = 'tasks' } @('done', 'error') $null
     $busyStatus = [int]$busy.status
 
-    # 历史无幻影（先断，与状态码无关）：200 ⇒ 恰 1 条该 token 的用户消息 + 新增恰 2 条；
-    # 409 ⇒ 该 token 零条、历史零新增。
-    $h18b = GetJson "/api/ai/history/$sc/messages?afterSeq=0&limit=200"
-    $rows18 = @($h18b.messages)
-    if ([int]$h18b.count -lt $a18) { throw "TC18 历史条数 $a18 → $($h18b.count)（旧段被删/被重写）" }
-    $ids18 = @($rows18 | ForEach-Object { [string]$_.messageId } | Where-Object { $_ })
-    if (@($ids18 | Sort-Object -Unique).Count -ne $ids18.Count) { throw 'TC18 历史里出现重复 messageId' }
-    $hits18 = @($rows18 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token18*" })
-    $new18 = @($rows18 | Select-Object -Skip $a18)
-    if ($busyStatus -eq 200) {
-        if ($hits18.Count -ne 1) { throw "TC18 受理的发送落了 $($hits18.Count) 条用户消息（幻影气泡）" }
-        if ($new18.Count -ne 2) { throw "TC18 受理的发送新增历史 $($new18.Count) 条，期望恰 2 条（user+assistant）" }
+    # 幻影轮次（先断，与状态码无关）：未受理（非 200）的发送一个 SSE 帧都不许产出；
+    # 受理轮 = 真的开了独立一轮（start/终帧/runId 不复用在下面分支断言）。
+    if ($busyStatus -ne 200 -and @($busy.frames).Count -ne 0) {
+        throw "TC18 未受理的发送（HTTP $busyStatus）却产出了 $(@($busy.frames).Count) 个 SSE 帧（幻影轮次）"
     }
-    else {
-        if ($hits18.Count -ne 0) { throw "TC18 未受理的发送却在历史里落了 $($hits18.Count) 条用户消息（幻影气泡）" }
-        if ($new18.Count -ne 0) { throw "TC18 未受理的发送却新增了 $($new18.Count) 条历史（幻影轮次）" }
-    }
-    $expect18 = if ($busyStatus -eq 200) { $a18 + 2 } else { $a18 }
-    if ([int]$h18b.count -ne $expect18) { throw "TC18 历史条数 $($h18b.count)，期望 $expect18（旧段 $a18 + 本轮自身新增）" }
 
     # 状态面（历史面已断完）
     if ($busyStatus -eq 409) {
@@ -2515,14 +2509,10 @@ try {
     $token18c = 'tc18-again-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $again = Ai-ChatSse $sc ('【TC18】turn-text ' + $token18c + ' 取消后同会话再发一次') @{ page = 'tasks' } @('done', 'error') $null
     $againStatus = [int]$again.status
-    # 历史无幻影（先断）：409 ⇒ 该 token 零条；200 ⇒ 恰 1 条（条数增量不在此断：取消收敛自身会补落本轮尾巴）
-    $h18c = GetJson "/api/ai/history/$sc/messages?afterSeq=0&limit=200"
-    $hits18c = @($h18c.messages | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token18c*" })
-    if ($againStatus -eq 200) {
-        if ($hits18c.Count -ne 1) { throw "TC18 取消后再发落了 $($hits18c.Count) 条用户消息（幻影气泡）" }
-    }
-    else {
-        if ($hits18c.Count -ne 0) { throw "TC18 取消后再发未受理，却在历史里落了 $($hits18c.Count) 条用户消息（幻影气泡）" }
+    # 幻影轮次（先断）：未受理（非 200）的发送一个 SSE 帧都不许产出；受理轮的身份在下面分支断言，
+    # 用户原文"每次受理恰一条 / 未受理零条"在本用例末尾按收敛后的窗口对账。
+    if ($againStatus -ne 200 -and @($again.frames).Count -ne 0) {
+        throw "TC18 取消后再发未受理（HTTP $againStatus）却产出了 $(@($again.frames).Count) 个 SSE 帧（幻影轮次）"
     }
     if ($againStatus -eq 200) {
         $st18c = @($again.frames | Where-Object { $_.type -eq 'start' })
@@ -2539,6 +2529,49 @@ try {
     }
     else {
         throw "TC18 取消后再发 HTTP $againStatus（只接受 200 放行 / 409 忙回执两果；$($again.text)）"
+    }
+
+    # ── 收敛后的窗口对账（载体 = Redis 记忆窗口 /history/{sid}；数据库完整历史端点已移除）──
+    # 每次受理的用户原文恰 1 条、未受理 0 条；窗口里不得出现重复用户原话 —— 这是原"完整历史无重复
+    # messageId / 条数只增不减"在窗口侧的可观测等价判据（窗口条目不带 messageId）。
+    # 收敛是终态之后的异步写回且没有读侧同步信号 ⇒ 只对"必须出现"的轮做有界等待（超时如实 FAIL）。
+    $null = Ai-WaitWindowToken $sc $askToken18 20
+    if ($busyStatus -eq 200) { $null = Ai-WaitWindowToken $sc $token18 20 }
+    if ($againStatus -eq 200) { $null = Ai-WaitWindowToken $sc $token18c 20 }
+    $win18 = Ai-Window $sc
+    $askHits18 = @($win18 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$askToken18*" })
+    if ($askHits18.Count -ne 1) { throw "TC18 挂起轮的发送在窗口里有 $($askHits18.Count) 条用户消息（期望 1）" }
+    $busyHits18 = @($win18 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token18*" })
+    if ($busyStatus -eq 200) {
+        if ($busyHits18.Count -ne 1) { throw "TC18 受理的发送在窗口里有 $($busyHits18.Count) 条用户消息（期望 1：幻影气泡）" }
+    }
+    elseif ($busyHits18.Count -ne 0) {
+        throw "TC18 未受理的发送却在窗口里落了 $($busyHits18.Count) 条用户消息（幻影气泡）"
+    }
+    $againHits18 = @($win18 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token18c*" })
+    if ($againStatus -eq 200) {
+        if ($againHits18.Count -ne 1) { throw "TC18 取消后再发在窗口里有 $($againHits18.Count) 条用户消息（期望 1：幻影气泡）" }
+    }
+    elseif ($againHits18.Count -ne 0) {
+        throw "TC18 取消后再发未受理，却在窗口里落了 $($againHits18.Count) 条用户消息（幻影气泡）"
+    }
+    $expectedUser18 = 1 + $(if ($busyStatus -eq 200) { 1 } else { 0 }) + $(if ($againStatus -eq 200) { 1 } else { 0 })
+    $userRows18 = @($win18 | Where-Object { $_.type -eq 'USER' })
+    if ($userRows18.Count -ne $expectedUser18) {
+        throw "TC18 窗口用户消息 $($userRows18.Count) 条，期望 $expectedUser18（挂起轮 1 + 每次受理 1）"
+    }
+    $dup18 = Ai-WindowDuplicateUserTexts $sc
+    if ($dup18.Count -ne 0) { throw "TC18 窗口里出现重复用户原话（幻影气泡）：$($dup18 -join ' | ')" }
+    # 受理轮的 assistant 身份必须唯一：同一条消息不得被拆成多个 messageId（原"历史无重复 messageId"
+    # 在帧侧的可观测形式；窗口条目不带 messageId）。
+    foreach ($round18 in @(@{ name = '并发受理轮'; status = $busyStatus; frames = $busy.frames },
+            @{ name = '取消后再发受理轮'; status = $againStatus; frames = $again.frames })) {
+        if ($round18.status -ne 200) { continue }
+        $ids18r = Ai-AssistantIds $round18.frames
+        if ($ids18r.Count -eq 0) { throw "TC18 $($round18.name) 没有任何 assistant 消息身份（判据无对象，不得当通过）" }
+        if ($ids18r.Count -ne 1) {
+            throw "TC18 $($round18.name) assistant messageId 有 $($ids18r.Count) 个（同一条消息被拆成多身份）：$($ids18r -join ',')"
+        }
     }
     Ok 'TC18 会话记忆隔离 + 并发发轮两果（409 忙回执 runId/reattach 可接管 / 200 独立轮 done 无 error）+ 取消后终态与再发'
 } catch { No 'TC18' $_.Exception.Message }
@@ -2756,6 +2789,44 @@ function Ai-DoneIsLast($frames) {
     }
 }
 function Ai-Text($frames) { return (($frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join '') }
+# ---------- 已收敛的 Redis 记忆窗口（数据库完整历史端点移除后的用户可见回显载体） ----------
+# 为什么需要这三个助手：完整历史（/history/{sid}/messages，带 seq/messageId）已随 ai_chat_message
+# 整条链路移除。原"历史不污染 / 无幻影气泡 / messageId 幂等"的判据改为两个可观测载体：
+#   ① 帧归档（/api/ai/events/{runId} 与实时帧）：一轮恰一条 start、未受理的发送零帧；
+#   ② 已收敛的窗口（GET /api/ai/history/{sid}）：用户原文按唯一 token 恰一条、无重复原话。
+# 窗口在终态之后由 convergeMemory 异步写回，且**没有读侧同步信号** ⇒ 只能有界等待"该轮原文出现"；
+# 超时如实 FAIL，不把"没看到"当通过（那是空断言）。
+function Ai-Window($sid) {
+    $h = GetJson "/api/ai/history/$sid"
+    return ,@($h.messages)
+}
+# 等窗口里出现该 token（返回命中条目）；超时抛错（判据无对象 = 失败，不是跳过）。
+function Ai-WaitWindowToken($sid, $token, [int]$sec = 20) {
+    $deadline = (Get-Date).AddSeconds($sec)
+    while ((Get-Date) -lt $deadline) {
+        $hits = @(Ai-Window $sid | Where-Object { ([string]$_.text) -like "*$token*" })
+        if ($hits.Count -ge 1) { return ,$hits }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "会话 $sid 的窗口在 ${sec}s 内没有出现 $token（收敛未发生：判据无对象，不得当通过）"
+}
+# 窗口里重复的用户原话（同一条发送被落两次）= 幻影气泡/重复落库的最小可观测形式
+# （原判据是"完整历史里没有重复 messageId"；窗口条目不带 messageId，正文 + 唯一 token 是其等价身份）。
+function Ai-WindowDuplicateUserTexts($sid) {
+    $texts = @(Ai-Window $sid | Where-Object { $_.type -eq 'USER' } | ForEach-Object { [string]$_.text } |
+        Where-Object { $_ })
+    if ($texts.Count -eq 0) { throw "会话 $sid 的窗口没有任何用户消息（判据无对象，不得当通过）" }
+    return ,@($texts | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+}
+# 一轮的 assistant 消息身份集合（message_start / delta / message_end 都带 messageId）。
+# 空集合 = 这一轮没有可判定的 assistant 正文 ⇒ 调用方必须显式失败（判据无对象）。
+function Ai-AssistantIds($frames) {
+    $ids = @($frames | Where-Object {
+            @('message_start', 'delta', 'message_end') -contains $_.type -and
+            $null -ne $_.PSObject.Properties['messageId']
+        } | ForEach-Object { [string]$_.messageId } | Where-Object { $_ } | Sort-Object -Unique)
+    return ,$ids
+}
 # 安全面探针取证（X-02 / X-03，L-137）：把**实收 delta 分片**逐条落档到 -ArtifactDir（仓库外），
 # 供"上游确实把探针切开并发出"的事后复核 —— 帧是上游 chunk 经产品 SSE 的中继，切点即上游切点。
 # `$needle` = 探针本体（假密钥 / PEM body），落档里标出哪些分片含它的片段。
@@ -4195,23 +4266,25 @@ Add-AiCase 'Q-04' 'P2' '历史重载后不出现重复 messageId（无半旧半�
     return $null
 }
 
-Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话并发发轮 —— 409 走忙回执 / 200 走独立轮；历史无幻影先断' {
+Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话并发发轮 —— 409 走忙回执 / 200 走独立轮；无幻影（帧 + 窗口）先断' {
     # 原口径"挂起后同会话必 409"在现行语义下不可确定：park 后由驱动线程 finally 释放会话门，挂起帧与
-    # 释放之间有一段无读侧同步信号的窗口（与 Q-08 同一个病）。⇒ 与 Q-08 同口径：**历史面（无幻影）先断**，
+    # 释放之间有一段无读侧同步信号的窗口（与 Q-08 同一个病）。⇒ 与 Q-08 同口径：**无幻影先断**，
     # 再按 409 / 200 分支断；409 的确定性覆盖在 D-13（可控时序窗口），不在这里靠时序赌。
+    # 数据库完整历史端点已移除：幻影判据的载体改为 ① 帧面（未受理的发送零帧）+ ② 收敛后的 Redis
+    # 记忆窗口（/history/{sid}；每次受理的用户原文恰一条、未受理零条、无重复原话）。
     $t = Ai-PublishFixture 'AIE2E-Q-05-并发'
     $sid = Ai-NewSid 'q05'
+    $parkToken = 'q05-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $frames = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("【AIE2E-Q-05】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
         @('confirm_request', 'done', 'error') $frames $null
     $cr = Ai-One $frames 'confirm_request'
     if (-not $cr) { throw '未挂起（并发面现场不成立）' }
     $null = Ai-WaitStatus $cr.runId @('SUSPENDED') 20
 
-    # 历史快照（幻影判据的基线）必须排在任何状态码断言之前。
-    $h1 = GetJson "/api/ai/history/$sid/messages?afterSeq=0&limit=200"
-    $beforeCount = [int]$h1.count
-    if ($beforeCount -lt 1) { throw '挂起轮没有落历史（幻影判据无对象）' }
+    # 轮次身份基线必须排在任何状态码断言之前：挂起轮自己的 start 帧（这一轮真的开了）。
+    $st5 = Ai-F $frames @('start')
+    if ($st5.Count -ne 1) { throw "挂起轮 start 帧 $($st5.Count) 个（期望恰 1；幻影判据无对象）" }
 
     # 同会话并发再发（"点建议"路径）。只发一次：不 sleep、不重试；两果都收。
     $token = 'q05-second-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -4219,27 +4292,13 @@ Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话�
     $second = Ai-ChatSse $sid $secondText @{ page = 'tasks' } @('confirm_request', 'frontend_tool_request', 'done', 'error') $null
     $secondStatus = [int]$second.status
 
-    # ── 历史无幻影（先断，与状态码无关）：200 ⇒ 恰 1 条该 token 的用户消息 + 新增恰 2 条；409 ⇒ 零条零新增 ──
-    $h2 = GetJson "/api/ai/history/$sid/messages?afterSeq=0&limit=200"
-    $afterRows = @($h2.messages)
-    if ([int]$h2.count -lt $beforeCount) { throw "历史条数 $beforeCount → $($h2.count)（旧段被删/被重写）" }
-    $ids = @($afterRows | ForEach-Object { [string]$_.messageId } | Where-Object { $_ })
-    if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { throw '历史里出现重复 messageId（同一落定点写了两次）' }
-    $secondHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
-    $newRows = @($afterRows | Select-Object -Skip $beforeCount)
-    if ($secondStatus -eq 200) {
-        if ($secondHits.Count -ne 1) { throw "受理的发送落了 $($secondHits.Count) 条用户消息（幻影气泡）" }
-        $newUser = @($newRows | Where-Object { $_.type -eq 'USER' }).Count
-        if ($newRows.Count -ne 2 -or $newUser -ne 1) { throw "受理的发送新增历史 $($newRows.Count) 条（用户 $newUser 条），期望恰 2 条且用户恰 1 条" }
+    # ── 幻影轮次（帧面，先断、与状态码无关）：未受理（非 200）的发送一个 SSE 帧都不许产出 ──
+    # 用户原文"恰一条 / 零条"与"无重复原话"在收敛后按窗口对账（见本用例末尾）。
+    if ($secondStatus -ne 200 -and @($second.frames).Count -ne 0) {
+        throw "未受理的发送（HTTP $secondStatus）却产出了 $(@($second.frames).Count) 个 SSE 帧（幻影轮次）"
     }
-    else {
-        if ($secondHits.Count -ne 0) { throw "未受理的发送却在历史里落了 $($secondHits.Count) 条用户消息（幻影气泡）" }
-        if ($newRows.Count -ne 0) { throw "未受理的发送却新增了 $($newRows.Count) 条历史（幻影轮次）" }
-    }
-    $expectCount = if ($secondStatus -eq 200) { $beforeCount + 2 } else { $beforeCount }
-    if ([int]$h2.count -ne $expectCount) { throw "历史条数 $($h2.count)，期望 $expectCount（旧段 $beforeCount + 本轮自身新增）" }
 
-    # ── 状态面（历史面已断完）──
+    # ── 状态面 ──
     if ($secondStatus -eq 200) {
         # 被受理 ⇒ 真的开了独立一轮：恰 1 start / 无 error / 恰 1 done / 非 cancelled / runId 不复用挂起轮
         if ((Ai-F $second.frames @('start')).Count -ne 1) { throw "受理轮 start 帧 $((Ai-F $second.frames @('start')).Count) 个（期望恰 1）" }
@@ -4259,7 +4318,31 @@ Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话�
     else {
         throw "同会话并发发轮 HTTP $secondStatus（只接受 200 受理 / 409 忙回执两果；$($second.text)）"
     }
+
+    # ── 收敛后的窗口对账（载体 = Redis 记忆窗口；数据库完整历史端点已移除）──
+    # 先取消挂起轮（与本用例原顺序一致），再等收敛：挂起轮原文恰 1 条、受理轮恰 1 条 / 未受理 0 条、
+    # 窗口无重复用户原话。messageId 幂等的等价形式：① 窗口无重复原话；② 受理轮 assistant 帧共用一个
+    # messageId（同一条消息不得被拆成多个身份）。
     Ai-Cancel $cr.runId | Out-Null
+    $null = Ai-WaitWindowToken $sid $parkToken 20
+    if ($secondStatus -eq 200) { $null = Ai-WaitWindowToken $sid $token 20 }
+    $win5 = Ai-Window $sid
+    $parkHits5 = @($win5 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$parkToken*" })
+    if ($parkHits5.Count -ne 1) { throw "挂起轮的发送在窗口里有 $($parkHits5.Count) 条用户消息（期望 1）" }
+    $secondHits5 = @($win5 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
+    if ($secondStatus -eq 200) {
+        if ($secondHits5.Count -ne 1) { throw "受理的发送在窗口里有 $($secondHits5.Count) 条用户消息（期望 1：幻影气泡）" }
+    }
+    elseif ($secondHits5.Count -ne 0) {
+        throw "未受理的发送却在窗口里落了 $($secondHits5.Count) 条用户消息（幻影气泡）"
+    }
+    $dup5 = Ai-WindowDuplicateUserTexts $sid
+    if ($dup5.Count -ne 0) { throw "窗口里出现重复用户原话（幻影气泡）：$($dup5 -join ' | ')" }
+    if ($secondStatus -eq 200) {
+        $ids5 = Ai-AssistantIds $second.frames
+        if ($ids5.Count -eq 0) { throw '受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
+        if ($ids5.Count -ne 1) { throw "受理轮 assistant messageId 有 $($ids5.Count) 个（同一条消息被拆成多身份）：$($ids5 -join ',')" }
+    }
     return $null
 }
 
@@ -4281,17 +4364,24 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
     #  2) 那段窗口**没有读侧同步信号**（/ai/runs/{runId} 的 keys 不含 ai:session:lock:<sid>），所以本
     #     用例**接受两果**：200 = 门已释放、新轮被受理；409 = 门仍被占（同一次释放窗口的另一侧）。
     #     两者都是现行语义下的合法结果 —— 不用 sleep / 重试去"凑"其中一种（那正是旧用例的病）。
-    #  3) 顺序（AR-04 §2.4）：**历史三面先断、与状态码无关** ——
-    #     ① 无幻影气泡：一次发送最多只落一条用户消息（200 恰 1 条，409 零条）；
-    #     ② 历史不污染：挂起轮已落的历史逐条原位保留（messageId / 角色 / 正文都不变），无重复 messageId；
+    #  3) 顺序（AR-04 §2.4）：**无幻影 / 不污染先断、与状态码无关** ——
+    #     数据库完整历史端点（/history/{sid}/messages）已随 ai_chat_message 链路移除，载体改为：
+    #     ① 帧面（本地，无 I/O）：未受理（非 200）的发送一个 SSE 帧都不许产出；受理轮的 start/done/runId
+    #        在状态分支断言（= 真的开了独立一轮，不是幻影轮次）；
+    #     ② 收敛后的 Redis 记忆窗口（GET /api/ai/history/{sid}）：
+    #        · 无幻影气泡：一次发送最多只落一条用户原话（200 恰 1 条，409 零条）；
+    #        · 历史不污染：挂起轮的原文逐字原位保留（整条相等恰 1 条）且顺序在第二次发送之前；
+    #        · messageId 幂等：窗口无重复用户原话 + 受理轮 assistant 帧共用一个 messageId。
     #     ③ 之后才按分支断状态面与"无假提示"：
     #        200 ⇒ 完成断言（恰 1 start / 恰 1 done / done 是最后帧 / seq 严格递增 / 无 error / 非 cancelled）；
     #        409 ⇒ 忙回执断言（SESSION_BUSY + runId 指向占门轮 + reattach 指向它的重挂端点 + 零 SSE 帧）。
     #  4) 409 的**确定性**覆盖不放在本节（否则与 D-13 重复）：D-13 用可控时序窗口保证门被持有。
     $t = Ai-PublishFixture 'AIE2E-Q-08-幻影'
     $sid = Ai-NewSid 'q08'
+    $parkToken = 'q08-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $parkText = ("【AIE2E-Q-08】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t)
     $frames = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("请立即调用 start_publish 工具发布导入任务 {0}（系统会自动弹出确认卡片，无需再询问我）" -f $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = $parkText; context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
         @('confirm_request', 'done', 'error') $frames $null
     $cr = Ai-One $frames 'confirm_request'
     if (-not $cr) { throw '未挂起（点即发场景的现场不成立：没有卡就不会走这条入口）' }
@@ -4306,16 +4396,15 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
         throw "runs/current 未指向挂起轮（found=$($cur.found) runId=$($cur.runId) status=$($cur.snapshotStatus)）"
     }
 
-    # 历史快照必须排在任何状态码断言之前（AR-04 §2.4；旧用例正是栽在这里）。
-    # 载体用**完整历史**（/history/{sessionId}/messages，带 messageId/seq，写侧 recordUser 在上游调用前
-    # 落库）——记忆窗口（/history/{sessionId}）在 park 后尚未收敛（本轮那半截不进记忆），拿它做旧段
-    # 对账会变成空断言。
-    $h1 = GetJson "/api/ai/history/$sid/messages?afterSeq=0&limit=200"
-    $beforeRows = @($h1.messages)
-    $beforeCount = [int]$h1.count
-    if ($beforeCount -lt 1) { throw '挂起轮没有落历史（幻影气泡的判据无对象）' }
-    if ($h1.hasMore -eq $true) { throw '完整历史一页装不下（判据被截断，幻影气泡/污染不可判）' }
-    if ($beforeRows[0].type -ne 'USER') { throw "历史首条是 $($beforeRows[0].type)，期望 USER（挂起轮的用户消息）" }
+    # 轮次身份基线必须排在任何状态码断言之前（AR-04 §2.4）：挂起轮自己的 start 帧（这一轮真的开了）。
+    # 数据库完整历史（带 messageId/seq 的行）已移除 ⇒ 用户原文的"恰一条 + 原位保留"改在收敛后按
+    # Redis 记忆窗口对账；窗口在 park 后尚未收敛（本轮那半截不进记忆），故不在这里取窗口做旧段对账
+    # （那会变成空断言），而是等挂起轮取消收敛后再对账（见本用例末尾）。
+    $st8 = Ai-F $frames @('start')
+    if ($st8.Count -ne 1) { throw "挂起轮 start 帧 $($st8.Count) 个（期望恰 1；幻影判据无对象）" }
+    if ([string]$st8[0].runId -ne [string]$cr.runId) {
+        throw "挂起轮 start.runId=$($st8[0].runId) ≠ confirm_request.runId=$($cr.runId)（轮次身份错配）"
+    }
 
     # 第二次发送（"点建议"路径）。只发一次：不 sleep、不重试；两果都收（见文件头 2)。
     $token = 'q08-second-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -4324,60 +4413,13 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
     $secondStatus = [int]$second.status
     $accepted = ($secondStatus -eq 200)
 
-    # ── ② 历史不污染（旧段逐条原位保留 + 无重复 messageId）+ ① 无幻影气泡（两分支都断）──
-    # 这一段与状态码无关：200 ⇒ 只新增这一轮自己的 user+assistant；409（及其他非 2xx）⇒ 零新增。
-    # 全部历史面在这里断完，不会被后面的状态码断言抢在前面抛掉。
-    $h2 = GetJson "/api/ai/history/$sid/messages?afterSeq=0&limit=200"
-    $afterRows = @($h2.messages)
-    if ([int]$h2.count -lt $beforeCount) { throw "历史条数 $beforeCount → $($h2.count)（旧段被删/被重写）" }
-    for ($i = 0; $i -lt $beforeCount; $i++) {
-        if ([string]$afterRows[$i].messageId -ne [string]$beforeRows[$i].messageId -or
-            [string]$afterRows[$i].type -ne [string]$beforeRows[$i].type -or
-            [string]$afterRows[$i].text -ne [string]$beforeRows[$i].text) {
-            throw ("历史第 {0} 条被改写（历史不污染被破坏）：{1}/{2}/{3} → {4}/{5}/{6}" -f ($i + 1),
-                $beforeRows[$i].messageId, $beforeRows[$i].type, $beforeRows[$i].text,
-                $afterRows[$i].messageId, $afterRows[$i].type, $afterRows[$i].text)
-        }
+    # ── 幻影轮次（帧面，先断、与状态码无关）：未受理（非 200）的发送一个 SSE 帧都不许产出 ──
+    # 用户原文"恰一条 / 零条 / 原位保留 / 顺序"在收敛后按窗口对账（见本用例末尾）。
+    if (-not $accepted -and @($second.frames).Count -ne 0) {
+        throw "未受理的发送（HTTP $secondStatus）却产出了 $(@($second.frames).Count) 个 SSE 帧（幻影轮次）"
     }
-    $ids = @($afterRows | ForEach-Object { [string]$_.messageId } | Where-Object { $_ })
-    if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { throw '历史里出现重复 messageId（同一落定点写了两次）' }
-    # 幻影气泡判据用**稳定身份**，不用短数字通配（run 40684192021 的 Q-08 偶发红即此因）：
-    #   `$t` 是夹具刚建任务的自增主键（短数字，本轮 37），而第二次发送的正文里带
-    #   `q08-second-<8 位 hex>` 随机 token —— 一旦 hex 片段里恰好出现 "37"，旧的
-    #   `-like "*37*"` 会把次轮消息连同首轮消息一起计进来（2 条），而两轮历史总数都是 4、
-    #   messageId 无重复，产品并没有重复落库。短数字在任意 token 里都可能出现 ⇒ 这条判据
-    #   天生不稳（约 7 个相邻位 × 1/256 ≈ 2.7%/轮）。
-    # 现在：① 行身份 = 首轮消息在 before 快照里的 messageId，after 里必须恰 1 条；
-    #       ② 正文按**整条相等**比对（首轮正文带 taskId、次轮正文不同）—— 防"同文不同号"的幻影副本。
-    $firstId = [string]$beforeRows[0].messageId
-    if ([string]::IsNullOrWhiteSpace($firstId)) {
-        throw '挂起轮的用户消息没有 messageId（幻影判据缺稳定身份；不得退回短数字通配）'
-    }
-    $firstHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and [string]$_.messageId -eq $firstId })
-    if ($firstHits.Count -ne 1) { throw "挂起轮的用户消息（messageId=$firstId）在历史里有 $($firstHits.Count) 条（期望 1）" }
-    $firstText = [string]$beforeRows[0].text
-    $firstTextHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and [string]$_.text -eq $firstText })
-    if ($firstTextHits.Count -ne 1) {
-        throw "挂起轮的用户消息正文在历史里有 $($firstTextHits.Count) 条（期望 1：同一次发送落了两条同文用户消息）"
-    }
-    $secondHits = @($afterRows | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
-    $newRows = @($afterRows | Select-Object -Skip $beforeCount)
-    if ($accepted) {
-        if ($secondHits.Count -ne 1) { throw "第二次发送落了 $($secondHits.Count) 条用户消息（幻影气泡：同一次发送出现第二条用户气泡）" }
-        $newUser = @($newRows | Where-Object { $_.type -eq 'USER' }).Count
-        if ($newRows.Count -ne 2 -or $newUser -ne 1) {
-            throw "第二次发送新增历史 $($newRows.Count) 条（其中用户 $newUser 条），期望恰 2 条且用户恰 1 条"
-        }
-    }
-    else {
-        if ($secondHits.Count -ne 0) { throw "未受理的发送却在历史里落了 $($secondHits.Count) 条用户消息（幻影气泡）" }
-        if ($newRows.Count -ne 0) { throw "未受理的发送却新增了 $($newRows.Count) 条历史（幻影轮次）" }
-    }
-    # 条数面：200 ⇒ 旧段 + 2（只多这一轮自己的两行）；409/其他非 2xx ⇒ 不变。
-    $expectCount = if ($accepted) { $beforeCount + 2 } else { $beforeCount }
-    if ([int]$h2.count -ne $expectCount) { throw "历史条数 $($h2.count)，期望 $expectCount（旧段 $beforeCount + 本轮自身新增）" }
 
-    # ── ③ 无假提示 + 状态面（历史面已断完，这里才判状态码）──
+    # ── ③ 无假提示 + 状态面 ──
     if ($accepted) {
         # 200：受理轮的完成面（与既有纯文本轮同口径）—— 前端据此出正常答复，不会给"没发出去"的提示。
         if ((Ai-F $second.frames @('start')).Count -ne 1) { throw "受理轮 start 帧 $((Ai-F $second.frames @('start')).Count) 个（期望恰 1）" }
@@ -4406,7 +4448,50 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
         throw "同会话第二次发送 HTTP $secondStatus（只接受 200 受理 / 409 忙回执两果；$($second.text)）"
     }
 
+    # ── 收敛后的窗口面：无幻影气泡 + 历史不污染 + messageId 幂等（数据库完整历史端点已移除）──
+    # 先取消挂起轮（与本用例原顺序一致），再等两轮各自收敛：
+    #   ① 挂起轮原文在窗口里恰 1 条（同一次发送落了两条同文 = 幻影副本）；
+    #   ② 受理的第二次发送恰 1 条、未受理 0 条（无幻影气泡）；
+    #   ③ 原位保留/不重排：挂起轮原文必须排在第二次发送之前；
+    #   ④ messageId 幂等：窗口无重复用户原话 + 受理轮 assistant 帧共用一个 messageId。
+    # 注意：入库正文经过归一化（NFKC，全角括号会变 ASCII），所以"整条相等"必须用窗口里读回的
+    # **存储文本**做基准，不能拿发送原文比对；唯一 token（ASCII）不受归一化影响，用来定位这一条。
     Ai-Cancel $cr.runId | Out-Null
+    $null = Ai-WaitWindowToken $sid $parkToken 20
+    if ($accepted) { $null = Ai-WaitWindowToken $sid $token 20 }
+    $win8 = Ai-Window $sid
+    $parkHits8 = @($win8 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$parkToken*" })
+    if ($parkHits8.Count -ne 1) {
+        throw "挂起轮的用户原文在窗口里有 $($parkHits8.Count) 条（期望 1：幻影气泡或未收敛）"
+    }
+    $parkStoredText8 = [string]$parkHits8[0].text
+    $parkExact8 = @($win8 | Where-Object { $_.type -eq 'USER' -and [string]$_.text -eq $parkStoredText8 })
+    if ($parkExact8.Count -ne 1) {
+        throw "挂起轮的用户原文（整条相等）在窗口里有 $($parkExact8.Count) 条（期望 1：同一次发送落了两条同文用户消息）"
+    }
+    $secondHits8 = @($win8 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
+    if ($accepted) {
+        if ($secondHits8.Count -ne 1) { throw "第二次发送在窗口里有 $($secondHits8.Count) 条用户消息（期望 1：幻影气泡）" }
+        $parkIndex8 = -1
+        $secondIndex8 = -1
+        for ($i = 0; $i -lt $win8.Count; $i++) {
+            if ($parkIndex8 -lt 0 -and [string]$win8[$i].text -eq $parkStoredText8) { $parkIndex8 = $i }
+            if ($secondIndex8 -lt 0 -and ([string]$win8[$i].text) -like "*$token*") { $secondIndex8 = $i }
+        }
+        if (-not ($parkIndex8 -ge 0 -and $secondIndex8 -gt $parkIndex8)) {
+            throw "窗口顺序被重排：挂起轮 #$parkIndex8 未排在第二次发送 #$secondIndex8 之前（历史不污染被破坏）"
+        }
+        $ids8 = Ai-AssistantIds $second.frames
+        if ($ids8.Count -eq 0) { throw '受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
+        if ($ids8.Count -ne 1) {
+            throw "受理轮 assistant messageId 有 $($ids8.Count) 个（同一条消息被拆成多身份）：$($ids8 -join ',')"
+        }
+    }
+    elseif ($secondHits8.Count -ne 0) {
+        throw "未受理的发送却在窗口里落了 $($secondHits8.Count) 条用户消息（幻影气泡）"
+    }
+    $dup8 = Ai-WindowDuplicateUserTexts $sid
+    if ($dup8.Count -ne 0) { throw "窗口里出现重复用户原话（幻影气泡）：$($dup8 -join ' | ')" }
     return $null
 }
 
@@ -4706,10 +4791,13 @@ Add-AiCase 'D-13' 'P0' '会话门持有期 409（AR-04 可控时序）：门确�
     # 窗口长度（只用于保证"门确定被持有"；用例在窗口内就取消，不等满它 —— 所以这个数字不是
     # "等多久"，而是"上游流至少还要这么久才结束"）。8000ms 与 W-23/W-35 同族取值的量级一致。
     $windowMs = 8000
-    # 被拒请求的文本带一个 ASCII 标记：① 归一化（NFKC）不会把它改形，历史面按标记判"有没有落下来"
+    # 被拒请求的文本带一个 ASCII 标记：① 归一化（NFKC）不会把它改形，窗口面按标记判"有没有落下来"
     # 才不会被全角括号折叠骗成假绿；② 它与本用例其它标记一起保证唯一。
     $rejectToken = 'd13-rejected-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $secondText = $rejectToken + ' 门持有时再发一条'
+    # 首轮正文也带唯一 token：零副作用面需要**正控**（首轮原文必须出现在收敛后的窗口里），
+    # 否则"被拒 token 零条"会退化成对空窗口的空断言。
+    $firstToken = 'd13-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $script:d13Second = $null
     $onOpen = {
         $script:d13Second = Ai-ChatRaw $sid $secondText @{ page = 'tasks' }
@@ -4719,18 +4807,16 @@ Add-AiCase 'D-13' 'P0' '会话门持有期 409（AR-04 可控时序）：门确�
             Ai-Cancel ([string]$script:d13Second.json.runId) | Out-Null
         }
     }
-    $first = Ai-ChatSse $sid ("【AIE2E-D-13】turn-text stall-frames=$windowMs 请回复一句。") @{ page = 'tasks' } @('done', 'error') $onOpen
+    $first = Ai-ChatSse $sid ("【AIE2E-D-13】turn-text {0} stall-frames=$windowMs 请回复一句。" -f $firstToken) @{ page = 'tasks' } @('done', 'error') $onOpen
     if (-not $first.ok) { throw "首个请求 HTTP $($first.status) $($first.text)（可控窗口前提不成立）" }
     $second = $script:d13Second
     if ($null -eq $second) { throw '第二个请求没有发出（onOpen 时点未生效）' }
 
     # ③ 零副作用面（**排在状态码断言之前**，与 AR-04 §2.4 同一纪律）：被这一轮拒掉的发送不得在
-    # 完整历史里留下任何用户消息。消息里带状态码 —— 若门其实没被持有（窗口没抓住），这条会以
-    # "HTTP 200" 现形，比"必 409 断言先炸"更容易归因。
-    $hist = GetJson "/api/ai/history/$sid/messages?afterSeq=0&limit=200"
-    $hits = @($hist.messages | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$rejectToken*" })
-    if ($hits.Count -ne 0) {
-        throw "第二次发送（HTTP $($second.status)）在历史里落了 $($hits.Count) 条用户消息（零副作用被破坏 / 幻影气泡）"
+    # 用户可见回显里留下任何用户消息，也不得产出任何 SSE 帧。数据库完整历史端点已移除 ⇒ 载体是
+    # ① 帧面（本地、无 I/O）：被拒请求零帧；② 收敛后的 Redis 记忆窗口（见 ④，带正控，不是空断言）。
+    if (@($second.frames).Count -ne 0) {
+        throw "第二次发送（HTTP $($second.status)）产出了 $(@($second.frames).Count) 个 SSE 帧（零副作用被破坏 / 幻影轮次）"
     }
     # ① 409 + 码
     if ($second.status -ne 409) { throw "门持有期发轮 HTTP $($second.status)，期望 409" }
@@ -4745,6 +4831,26 @@ Add-AiCase 'D-13' 'P0' '会话门持有期 409（AR-04 可控时序）：门确�
     }
     # ④ 收尾：轮 1 已按取消收敛（门随驱动线程 finally 释放，不留僵尸门）
     $null = Ai-WaitStatus $firstRun @('CANCELLED') 20
+    # 收敛后的窗口对账（数据库完整历史端点已移除）：首轮原文恰一条是**正控**（证明判据有对象），
+    # 被拒的发送零条；窗口里不得出现重复用户原话（原"完整历史无重复 messageId"的等价形式）。
+    $null = Ai-WaitWindowToken $sid $firstToken 20
+    $win13 = Ai-Window $sid
+    $firstHits13 = @($win13 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$firstToken*" })
+    if ($firstHits13.Count -ne 1) {
+        throw "首轮发送在窗口里有 $($firstHits13.Count) 条用户消息（期望 1：零副作用判据的正控）"
+    }
+    $rejectHits13 = @($win13 | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$rejectToken*" })
+    if ($rejectHits13.Count -ne 0) {
+        throw "第二次发送（HTTP $($second.status)）在窗口里落了 $($rejectHits13.Count) 条用户消息（零副作用被破坏 / 幻影气泡）"
+    }
+    $dup13 = Ai-WindowDuplicateUserTexts $sid
+    if ($dup13.Count -ne 0) { throw "窗口里出现重复用户原话（幻影气泡）：$($dup13 -join ' | ')" }
+    # messageId 幂等（帧侧）：被取消的首轮若已吐过正文，其 assistant 身份必须唯一（不得被拆成多条）。
+    # 0 个身份 = 取消太早、本轮没有可判定的正文（不作为失败；窗口面的正控已保证判据非空）。
+    $ids13 = Ai-AssistantIds $first.frames
+    if ($ids13.Count -gt 1) {
+        throw "首轮 assistant messageId 有 $($ids13.Count) 个（同一条消息被拆成多身份）：$($ids13 -join ',')"
+    }
     return $null
 }
 

@@ -1616,8 +1616,8 @@ public class ResilientChatService {
 		// cancel/stop/content_filter/empty_reply 都不是"被长度上限截断"，不得打这个键。
 		boolean lengthTruncated = finish == UpstreamErrorClassifier.Finish.LENGTH;
 		// ===== 成功终局临界区（W-30 · 复审 I-1）=====
-		// "重读快照/取消事实 → 写 DB 历史 → 写快照 DONE → 发终帧"必须与取消收尾（cancelTerminal）
-		// 共用同一把 per-run 监视器：否则取消可以落在"判定未取消"与"save(DONE)"之间的 DB/Redis 往返里
+		// "重读快照/取消事实 → 写快照 DONE → 发终帧"必须与取消收尾（cancelTerminal）
+		// 共用同一把 per-run 监视器：否则取消可以落在"判定未取消"与"save(DONE)"之间的 Redis 往返里
 		// —— 取消侧写 CANCELLED + done{cancelled:true}，本线程随后把快照盖成 DONE 并补
 		// done{cancelled:false}（run 40232440965 的同一症状，只是窗口更窄；归档会出现两条 done）。
 		// monitor 与 cancelTerminal 同一把（{@link CancelledRunFinalizer#finalizeMonitor} 按 runId 条带化），
@@ -1625,8 +1625,8 @@ public class ResilientChatService {
 		// 取消先到 ⇒ 这里重读后走取消收尾（归档已有终帧 ⇒ 直接返回，不写 DONE、不再发 done）；
 		// 成功先到 ⇒ 取消侧 cancelTerminalLocked 的终态保护拒绝改写。
 		// 边界：monitor 只覆盖<b>本进程</b>；跨实例由 {@code RunStore#save} 的 DONE 状态 CAS（Lua 里
-		// cjson 检查当前快照）兜住"取消态不得被 DONE 覆盖"，DB 历史 append 仍在该原子步之外（见
-		// finishSuccess 的落库后复读）；不把两者说成分布式事务。
+		// cjson 检查当前快照）兜住"取消态不得被 DONE 覆盖"；不把两者说成分布式事务。
+		// （历史说明：数据库完整历史写入机在 2026-10-30 整条移除，临界区内不再有 DB 往返。）
 		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
 		if (monitor == null) {
 			// 轻装配/直接 new 的单测没有交棒器可提供监视器：维持单线程语义（与引入本批之前同形）。
@@ -1695,14 +1695,14 @@ public class ResilientChatService {
 				//  ② CANCELLED 或 cancelled=true ⇒ 交给幂等的 cancelTerminal（归档已有终帧就什么都不做）。
 				//  ③ 复读失败 / 轮不存在 / 其它非 DONE 状态 ⇒ 终态暂不可确认（见 emitUnconfirmedTerminal）：
 				//     不改写快照（不写 DONE/FAILED），用既有 error 帧如实收尾。
-				// 边界：DB 历史 append 在 save 之前（保持 resume 幂等口径），它不在这个原子步里 ——
-				// 跨实例取消恰好落在 append 与 save 之间时，快照会是 CANCELLED 而 DB 已有完整 assistant
-				// （first-write-wins 无法回退）。这是本批明确保留的边界，不声称是分布式事务。
+				// 边界：这是一个"快照状态不得从取消态翻案"的原子步，不是分布式事务；退出后到出终帧
+				// 之间仍可能有跨实例并发（历史说明：数据库完整历史写入机已于 2026-10-30 整条移除，
+				// 因此不再有"DB 已写、快照未写"的窗口需要保留说明）。
 				RunSnapshot persisted = readSnapshotQuietly(runId);
 				if (isCancelledSnapshot(persisted)) {
 					// 只传 null：这条路径的 accumulator 是<b>成功正文</b>，若交给 cancelTerminal，
-					// 它会把它当作"停止半截"合成 stopped 消息写进 DB 历史与 chat memory
-					// （DB 有 first-write-wins，chat memory 是整窗覆盖，都没有保护）。
+					// 它会把它当作"停止半截"合成 stopped 消息写进 chat memory
+					// （chat memory 是整窗覆盖，没有保护）。
 					// null ⇒ cancelTerminal 取权威快照的 assistantContent（另一实例已写入的半截）。
 					// 正常用户取消（attempt 内取消）仍传真实 accumulator，保留半截正文。
 					log.info("DONE 落库后复读发现取消，交给取消收尾 runId={}（不再发 done{cancelled:false}）",
@@ -2708,12 +2708,12 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * <b>RT-20：持久面（DB 历史 / 记忆）的续跑权闸</b>。
+	 * <b>RT-20：持久面（快照 / 记忆窗口）的续跑权闸</b>。
 	 *
 	 * <p>丢租（LOST）、不可确认（UNAVAILABLE）、以及 {@code HELD-but-fence-ahead}（续跑权已被
-	 * 新主人接管）都<b>不得</b>再写"答案面"数据：这些写没有 fencing 保护（DB 历史是
-	 * first-write-wins、记忆是整窗覆盖），一旦落库就是"旧答案盖新答案"，且刷新后用户看到的是
-	 * 作废的那一份。判定本身读不出来 ⇒ 按不可知处理（不写）。
+	 * 新主人接管）都<b>不得</b>再写"答案面"数据：这些写没有 fencing 保护（记忆是整窗覆盖），
+	 * 一旦写回就是"旧答案盖新答案"，且刷新后用户看到的是作废的那一份。
+	 * 判定本身读不出来 ⇒ 按不可知处理（不写）。
 	 *
 	 * @param runId 本轮 id；{@code null}/{@code blank} = 调用方没有 run 语义（兼容口），放行
 	 */
@@ -2728,7 +2728,7 @@ public class ResilientChatService {
 			return this.store.permittedToWrite(runId, stage);
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑权判定不可读：跳过{} runId={}（不写历史/记忆，避免旧驱动覆盖新答案）：{}", stage, runId,
+			log.warn("续跑权判定不可读：跳过{} runId={}（不写快照/记忆，避免旧驱动覆盖新答案）：{}", stage, runId,
 					ex.getMessage());
 			return false;
 		}

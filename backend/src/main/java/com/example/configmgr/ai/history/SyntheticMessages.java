@@ -17,10 +17,17 @@ import java.util.Map;
  * <li>轮内上下文预算的收尾提示（{@link SpToolCallingManager#TURN_BUDGET_WRAP_UP}）。</li>
  * </ul>
  *
- * <h2>判据只保留一份</h2>
- * 判据集中在读侧使用：{@code AiController#toHistoryItem} 给历史回显条目加 {@code synthetic=true}，
- * 前端据此按"系统消息"呈现（<b>摘要不冒充用户</b>，也不显示内部配置键）。
- * 该过滤是<b>展示层</b>行为，不改变模型记忆里的既有结构（AR-01 明确保留这条边界）。
+ * <h2>判据只保留一份（展示 + 槽位解析必须同源）</h2>
+ * 本判据有两个消费面，二者<b>必须同源</b>，否则会出现"一处当合成、另一处当用户原话"的分叉：
+ * <ol>
+ * <li><b>展示（读侧）</b> {@code AiController#toHistoryItem}：给历史回显条目加 {@code synthetic=true}，
+ *     前端据此按"系统消息"呈现（<b>摘要不冒充用户</b>，也不显示内部配置键）；</li>
+ * <li><b>槽位解析（写侧输入面）</b> {@code TaskIntent#lastRealUserText} 与
+ *     {@code TaskSlotResolver#enrich}：以"最后一个<b>真实</b> user"取用户原话，合成提示不得当成
+ *     用户输入 —— 否则压缩摘要/步数收尾会把"最后一句话变成了系统提示"，让旧选择凭空复活。</li>
+ * </ol>
+ * 展示过滤本身不改变模型记忆里的既有结构（AR-01 明确保留这条边界）：消息照旧在窗口里，
+ * 只是回显时打标、解析时跳过。
  */
 public final class SyntheticMessages {
 

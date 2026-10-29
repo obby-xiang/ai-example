@@ -110,7 +110,6 @@ const REQUIRED_CASE_IDS = Object.freeze([
   'proxy-no-sticky',
   'same-tcp-across-abc',
   'reattach-any-instance',
-  'history-pagination',
   'session-purge-cross-instance',
   'seq-cross-instance',
   'suspend-cross-instance',
@@ -1912,32 +1911,17 @@ async function historyOf(key, sessionId) {
   return { record, body }
 }
 
-/** 完整历史游标页（`/history/{sid}/messages`；afterSeq/beforeSeq 二选一，limit 1..200）。 */
-async function fullHistoryPage(key, sessionId, { afterSeq = null, beforeSeq = null, limit = 50 } = {}) {
-  const params = new URLSearchParams()
-  if (afterSeq !== null && afterSeq !== undefined) params.set('afterSeq', String(afterSeq))
-  if (beforeSeq !== null && beforeSeq !== undefined) params.set('beforeSeq', String(beforeSeq))
-  if (limit !== null && limit !== undefined) params.set('limit', String(limit))
-  const query = params.toString()
-  const { record, body } = await getJson(key, `/api/ai/history/${encodeURIComponent(sessionId)}/messages${query ? `?${query}` : ''}`)
-  return { record, body }
-}
-
-/** 等完整历史落齐（终态后 recorder 异步补齐；轮询到至少 minCount 条）。 */
-/** 等完整历史落齐（终态后 recorder 异步补齐；按 seq 正序轮询到至少 minCount 条）。 */
-async function waitFullHistory(key, sessionId, minCount = 2, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs
-  let last = null
-  while (Date.now() < deadline) {
-    const page = await fullHistoryPage(key, sessionId, { afterSeq: 0, limit: 50 })
-    last = page
-    const data = page.body && page.body.success === true ? page.body.data : null
-    if (page.record.status === 200 && data && Array.isArray(data.messages) && data.messages.length >= minCount) {
-      return data
-    }
-    await sleep(500)
+/**
+ * 等记忆窗口收敛出某条用户原文（数据库完整历史端点 /history/{sid}/messages 已随 ai_chat_message
+ * 整条链路移除；窗口是唯一的历史读面，终态后由 convergeMemory 异步写回且没有读侧同步信号 ⇒ 有界等待）。
+ * 超时如实抛错：判据无对象 = 失败，不得当通过。
+ */
+async function waitHistoryUserMessage(key, sessionId, expectedText, timeoutMs = 30000) {
+  try {
+    return await historyStable(key, sessionId, expectedText, timeoutMs)
+  } catch (e) {
+    throw new Error(`记忆窗口（${key}）在 ${timeoutMs}ms 内没有出现用户原文 ${expectedText}：${e.message}`)
   }
-  throw new Error(`完整历史（${key}）在 ${timeoutMs}ms 内不足 ${minCount} 条；最后响应=${last && last.record ? last.record.text.slice(0, 500) : '无'}`)
 }
 
 /** 等 run 落终态（DONE/FAILED/CANCELLED）。 */
@@ -2195,7 +2179,6 @@ const CASES = [
   { id: 'proxy-no-sticky', title: '无 cookie/IP 粘滞（固定 Cookie + 固定 XFF，30 请求覆盖 A/B/C）', fn: caseProxyNoSticky },
   { id: 'same-tcp-across-abc', title: '同一条 keep-alive TCP 连接连续请求覆盖 A/B/C（代理日志佐证）', fn: caseSameTcpAcrossAbc },
   { id: 'reattach-any-instance', title: '任意实例 reattach（B 全量 / C 差量）与 history', fn: caseReattachAnyInstance },
-  { id: 'history-pagination', title: '完整历史游标分页：B/C 跨实例正序翻页（afterSeq/limit、hasMore/nextCursor、seq 连续）', fn: caseHistoryPagination },
   { id: 'seq-cross-instance', title: '跨实例 seq：实时流 / 增量重挂 / 全量回放同号同序', fn: caseSeqCrossInstance },
   { id: 'suspend-cross-instance', title: '挂起在 A → 决策前 B/C 重挂回放后即收流 → C 决策 → 决策后 B/C 重挂都收到续跑终帧', fn: caseSuspendCrossInstance },
   { id: 'idempotency-cross-instance', title: '跨实例幂等：重复决策 409 + 并发双决策恰一胜 + 副作用恰一次', fn: caseIdempotencyCrossInstance },
@@ -2644,144 +2627,6 @@ async function caseReattachAnyInstance() {
   caseLog(`runId=${run.runId} 帧数=${run.seqs.length}；B 全量同号同序；C 差量 lastSeq=${cut} 不重不漏；三实例 history total=${historyA.total}`)
 }
 
-// ── 用例 4b：完整历史游标分页（跨实例正序）─────────────────────────────────
-
-async function caseHistoryPagination() {
-  await ensureUp()
-  const ROUNDS = 21
-  const sessionId = uniqueId('cluster3-history')
-  const runs = []
-  for (let i = 1; i <= ROUNDS; i += 1) {
-    runs.push(await runPlainChat('a', 'cluster3-history', `history-round-${i}`, { sessionId }))
-  }
-  const expectedTotal = ROUNDS * 2
-  const all = await waitFullHistory('b', sessionId, expectedTotal, 180000)
-  const allOnC = dataOf((await fullHistoryPage('c', sessionId, { afterSeq: 0, limit: 200 })).record,
-    'C 完整历史全量')
-  checkGe(all.messages.length, 41, `同会话必须 >40 条真实消息（实得 ${all.messages.length}）`)
-  checkEq(all.messages.length, expectedTotal, '完整历史条数（21 轮 = 42 条）')
-  checkEq(allOnC.count, all.messages.length, 'C 全量条数与 B 一致')
-
-  const tuple = (message) => `${message.seq}|${message.runId}|${message.messageId}`
-  checkEq(JSON.stringify(allOnC.messages.map(tuple)), JSON.stringify(all.messages.map(tuple)),
-    'B/C 全量 (seq,runId,messageId) 必须逐条同源')
-
-  const first = all.messages[0]
-  checkEq(first.seq, 1, '完整历史首条 seq')
-  checkEq(first.type, 'USER', '完整历史首条类型（正序从 user 开始）')
-  checkIncludes(first.text, 'history-round-1', '完整历史首条文本（首条仍在）')
-  checkEq(first.runId, runs[0].runId, '完整历史首条 runId 与第 1 轮实时流同源')
-
-  const last = all.messages[all.messages.length - 1]
-  checkEq(last.seq, expectedTotal, '完整历史末条 seq')
-  checkEq(last.type, 'ASSISTANT', '完整历史末条类型')
-  checkEq(last.runId, runs[ROUNDS - 1].runId, '完整历史末条 runId 与最后一轮实时流同源')
-
-  for (let i = 0; i < ROUNDS; i += 1) {
-    const user = all.messages[i * 2]
-    const assistant = all.messages[i * 2 + 1]
-    checkEq(user.type, 'USER', `第 ${i + 1} 轮 user 类型`)
-    checkEq(assistant.type, 'ASSISTANT', `第 ${i + 1} 轮 assistant 类型`)
-    checkEq(user.runId, runs[i].runId, `第 ${i + 1} 轮 user runId 同源`)
-    checkEq(assistant.runId, runs[i].runId, `第 ${i + 1} 轮 assistant runId 同源`)
-    checkIncludes(user.text, `history-round-${i + 1}`, `第 ${i + 1} 轮 user 文本`)
-    check(user.messageId && assistant.messageId && user.messageId !== assistant.messageId,
-      `第 ${i + 1} 轮 messageId 必须存在且互异`)
-  }
-  const messageIds = all.messages.map((message) => message.messageId)
-  checkEq(new Set(messageIds).size, messageIds.length, '完整历史 messageId 不得重复')
-  const ascendingSeqs = all.messages.map((message) => message.seq)
-  checkStrictlyIncreasing(ascendingSeqs, '完整历史全量 seq（afterSeq=0 正序）')
-
-  // afterSeq 跨实例翻页（B/C 交替）：>40 条全量可读，游标接续不重不漏。
-  const afterSeqs = []
-  const afterTuples = []
-  let afterCursor = 0
-  let hop = 0
-  while (true) {
-    const key = hop % 2 === 0 ? 'b' : 'c'
-    const page = dataOf((await fullHistoryPage(key, sessionId, { afterSeq: afterCursor, limit: 20 })).record,
-      `${key} afterSeq=${afterCursor} 页`)
-    checkEq(page.direction, 'after', `afterSeq 翻页方向（${key}）`)
-    checkLe(page.messages.length, 20, 'afterSeq 页大小')
-    afterSeqs.push(...page.messages.map((message) => message.seq))
-    afterTuples.push(...page.messages.map(tuple))
-    if (!page.hasMore) {
-      checkEq(page.nextCursor, null, 'afterSeq 末页 nextCursor 必须 null')
-      break
-    }
-    check(page.nextCursor !== null && page.nextCursor !== undefined, 'afterSeq hasMore=true 时 nextCursor 不得为空')
-    check(page.nextCursor > afterCursor, `afterSeq nextCursor 必须前进（${afterCursor} → ${page.nextCursor}）`)
-    afterCursor = page.nextCursor
-    hop += 1
-    check(hop <= 10, 'afterSeq 翻页次数异常（可能游标未前进）')
-  }
-  checkEq(JSON.stringify(afterSeqs), JSON.stringify(ascendingSeqs), 'afterSeq 跨实例翻页覆盖全部 seq（无重不漏）')
-  checkEq(JSON.stringify(afterTuples), JSON.stringify(all.messages.map(tuple)), 'afterSeq 翻页消息元组与全量一致')
-
-  // beforeSeq 从最新向最早翻页（C/B 交替），同样无重不漏。
-  const beforeSeqs = []
-  const beforeTuples = []
-  let beforeCursor = null
-  let backHop = 0
-  while (true) {
-    const key = backHop % 2 === 0 ? 'c' : 'b'
-    const page = dataOf((await fullHistoryPage(key, sessionId, { beforeSeq: beforeCursor, limit: 13 })).record,
-      `${key} beforeSeq=${beforeCursor === null ? '(最新)' : beforeCursor} 页`)
-    checkEq(page.direction, 'before', `beforeSeq 翻页方向（${key}）`)
-    checkLe(page.messages.length, 13, 'beforeSeq 页大小')
-    beforeSeqs.push(...page.messages.map((message) => message.seq))
-    beforeTuples.push(...page.messages.map(tuple))
-    if (!page.hasMore) {
-      checkEq(page.nextCursor, null, 'beforeSeq 末页 nextCursor 必须 null')
-      break
-    }
-    check(page.nextCursor !== null && page.nextCursor !== undefined, 'beforeSeq hasMore=true 时 nextCursor 不得为空')
-    check(beforeCursor === null || page.nextCursor < beforeCursor, `beforeSeq nextCursor 必须向更早推进（${beforeCursor} → ${page.nextCursor}）`)
-    beforeCursor = page.nextCursor
-    backHop += 1
-    check(backHop <= 10, 'beforeSeq 翻页次数异常（可能游标未前进）')
-  }
-  for (let i = 1; i < beforeSeqs.length; i += 1) {
-    if (!(beforeSeqs[i] < beforeSeqs[i - 1])) {
-      throw new Error(`beforeSeq 翻页必须严格递减（${beforeSeqs[i - 1]} → ${beforeSeqs[i]}）`)
-    }
-  }
-  checkEq(new Set(beforeSeqs).size, beforeSeqs.length, 'beforeSeq 翻页 seq 不得重复')
-  checkEq(beforeSeqs.length, expectedTotal, 'beforeSeq 翻页条数')
-  checkEq(beforeSeqs[beforeSeqs.length - 1], 1, 'beforeSeq 必须翻到最早一条')
-  checkEq(JSON.stringify(beforeSeqs.slice().reverse()), JSON.stringify(ascendingSeqs), 'beforeSeq 逆序 = afterSeq 正序（无重不漏）')
-  checkEq(JSON.stringify(beforeTuples.slice().reverse()), JSON.stringify(all.messages.map(tuple)),
-    'beforeSeq 翻页消息元组与 afterSeq 全量一致')
-
-  // beforeSeq 与 afterSeq 同传必须 400（产品契约，不靠客户端兜底）。
-  const both = await fullHistoryPage('c', sessionId, { afterSeq: 10, beforeSeq: 20, limit: 1 })
-  checkEq(both.record.status, 400, `beforeSeq+afterSeq 同传必须 400（实得 ${both.record.status}）`)
-
-  // 旧 /history 仍是 40 条记忆窗口：42 条完整历史下必须只回 40 条，且不含完整历史游标字段。
-  const legacy = await historyOf('c', sessionId)
-  checkEq(legacy.record.status, 200, '旧 /history HTTP')
-  const legacyData = dataOf(legacy.record, '旧 /history')
-  checkEq(legacyData.count, legacyData.total, '旧 /history 默认全量窗口：count=total')
-  checkEq(legacyData.hasMore, false, '旧 /history 默认 hasMore=false')
-  check(!Object.prototype.hasOwnProperty.call(legacyData, 'nextCursor'), '旧 /history 不得混入完整历史的 nextCursor 字段')
-  checkEq(legacyData.total, 40, '旧 /history 必须仍是 40 条记忆窗口（42 条完整历史下）')
-  checkEq(legacyData.messages.length, 40, '旧 /history messages 长度 = 40 窗口')
-
-  saveEvidence('history-pagination.json', {
-    sessionId,
-    rounds: ROUNDS,
-    expectedTotal,
-    fullCount: all.messages.length,
-    first: { seq: first.seq, runId: first.runId, messageId: first.messageId },
-    last: { seq: last.seq, runId: last.runId, messageId: last.messageId },
-    afterSeqs,
-    beforeSeqs,
-    bothStatus: both.record.status,
-    legacy: { count: legacyData.count, total: legacyData.total, hasMore: legacyData.hasMore }
-  })
-  caseLog(`会话 ${sessionId} 共 ${expectedTotal} 条消息；afterSeq 跨 B/C 覆盖 1..${expectedTotal}；beforeSeq 从最新翻回 1；旧 /history 仍 40 窗口；before+after 同传=400`)
-}
 // ── 用例 5：跨实例 seq（实时流 / 增量重挂 / 全量回放）─────────────────────
 
 async function caseSeqCrossInstance() {
@@ -3078,12 +2923,14 @@ async function caseSessionPurgeCrossInstance() {
   await selectDefs('a', task.id, ['CURRENCY'])
   const keep = await runPlainChat('a', 'cluster3-purge-keep')
   const target = await runPlainChat('a', 'cluster3-purge-target')
-  await waitFullHistory('b', target.sessionId, 2)
-  await historyStable('c', target.sessionId, '三实例连通性')
-  const beforeFull = await waitFullHistory('c', target.sessionId, 2)
-  checkEq(beforeFull.messages[0].runId, target.runId, '销毁前完整历史 runId 与目标轮一致')
+  // 数据库完整历史端点（/history/{sid}/messages）已随 ai_chat_message 移除 ⇒ 销毁前后的"存在/无残留"
+  // 都用记忆窗口（/history/{sid}）判定，并用 runs/current 把窗口所属会话绑到目标轮（窗口条目不带 runId）。
+  const beforeWindow = await waitHistoryUserMessage('c', target.sessionId, '三实例连通性')
+  checkGe(beforeWindow.messages.length, 2, '销毁前 C 侧记忆窗口必须能看到目标轮（用户+助手）')
+  const beforeCurrent = await currentRun('c', target.sessionId)
+  checkEq(beforeCurrent.runId, target.runId, '销毁前 runs/current 必须指向目标轮')
 
-  // ① 普通完成会话：B 删 → C 验证旧 history / 完整 history / runs/current 均无残留。
+  // ① 普通完成会话：B 删 → C 验证旧 history / runs/current 均无残留。
   const del = await deleteJson('b', `/api/ai/session/${encodeURIComponent(target.sessionId)}`)
   checkEq(del.record.status, 200, `B 侧 DELETE /session HTTP：${del.record.text.slice(0, 400)}`)
   check(del.body && del.body.complete === true, `非在途会话销毁必须 complete=true：${del.record.text.slice(0, 600)}`)
@@ -3097,19 +2944,14 @@ async function caseSessionPurgeCrossInstance() {
   checkEq(legacyAfterData.messages.length, 0, 'C 侧旧 /history 销毁后 messages 必须为空')
   checkEq(legacyAfterData.total, 0, 'C 侧旧 /history 销毁后 total 必须为 0')
 
-  const fullAfter = await fullHistoryPage('c', target.sessionId, { limit: 50 })
-  const fullAfterData = dataOf(fullAfter.record, 'C 侧完整历史（销毁后）')
-  checkEq(fullAfterData.count, 0, 'C 侧完整历史销毁后 count 必须为 0')
-  checkEq(fullAfterData.messages.length, 0, 'C 侧完整历史销毁后 messages 必须为空')
-
   const currentAfter = await currentRun('c', target.sessionId)
   checkEq(currentAfter.found, false, 'C 侧 runs/current 销毁后必须 found=false')
 
   // 另一个会话不受影响。
   const keepHistory = await historyStable('c', keep.sessionId, '三实例连通性')
   checkGe(keepHistory.total, 2, '销毁目标会话后，另一个会话的 history 仍完整')
-  const keepFull = await waitFullHistory('c', keep.sessionId, 2)
-  checkEq(keepFull.messages[0].runId, keep.runId, '另一个会话的完整历史 runId 不变')
+  const keepCurrent = await currentRun('c', keep.sessionId)
+  checkEq(keepCurrent.runId, keep.runId, '另一个会话的 runs/current 仍指向它自己的轮（不受销毁波及）')
   // 业务 task 不被会话销毁波及。
   const taskAfter = await getTask('c', task.id)
   checkEq(taskAfter.id, task.id, '会话销毁后业务 task 仍可读取')
@@ -3118,9 +2960,9 @@ async function caseSessionPurgeCrossInstance() {
     target: { sessionId: target.sessionId, runId: target.runId },
     purge: del.body,
     legacyAfter: { total: legacyAfterData.total, messages: legacyAfterData.messages.length },
-    fullAfter: { count: fullAfterData.count },
+    before: { messages: beforeWindow.messages.length, runId: beforeCurrent.runId },
     runsCurrent: currentAfter.found,
-    keep: { sessionId: keep.sessionId, total: keepHistory.total },
+    keep: { sessionId: keep.sessionId, total: keepHistory.total, runId: keepCurrent.runId },
     taskId: task.id
   })
 
@@ -3194,9 +3036,6 @@ async function caseSessionPurgeCrossInstance() {
   const revivedLegacy = await historyOf('b', activeSession)
   const revivedLegacyData = dataOf(revivedLegacy.record, '在途会话销毁后的旧 /history')
   checkEq(revivedLegacyData.messages.length, 0, '在途会话销毁后旧 /history 不得复活')
-  const revivedFull = await fullHistoryPage('b', activeSession, { limit: 50 })
-  const revivedFullData = dataOf(revivedFull.record, '在途会话销毁后的完整历史')
-  checkEq(revivedFullData.count, 0, '在途会话销毁后完整历史不得复活')
   const revivedCurrent = await currentRun('b', activeSession)
   checkEq(revivedCurrent.found, false, '在途会话销毁后 runs/current 必须 found=false')
   const taskStillThere = await getTask('b', task.id)
@@ -3211,7 +3050,7 @@ async function caseSessionPurgeCrossInstance() {
     automaticPurgeRecovery: true,
     retry: retry.body,
     purgedChat: purgedChat.body,
-    revived: { legacyMessages: revivedLegacyData.messages.length, fullCount: revivedFullData.count, runsCurrent: revivedCurrent.found },
+    revived: { legacyMessages: revivedLegacyData.messages.length, runsCurrent: revivedCurrent.found },
     taskId: task.id
   })
   caseLog('在途会话由自动重试清理 complete=true；旧/完整 history 均未复活；旧会话 410；业务 task 保留')
@@ -5796,9 +5635,6 @@ function selfTestProductContract() {
     '@GetMapping(value = "/events/{runId}"',
     '@RequestParam(required = false) Long lastSeq',
     '@GetMapping("/history/{sessionId}")',
-    '@GetMapping("/history/{sessionId}/messages")',
-    '@RequestParam(name = "afterSeq", required = false) Long afterSeq',
-    'body.put("nextCursor"',
     'body.put("hasMore"',
     '@GetMapping("/runs/current")',
     'body.put("snapshotStatus"',
@@ -5878,7 +5714,7 @@ function selfTestInstanceArgs() {
   return 'h2tcp + LOCK_TIMEOUT + trusted-proxies'
 }
 
-/** 三条复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、>40 分页、二元绑定删回去）。 */
+/** 复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、二元绑定删回去）。 */
 function selfTestReviewContracts() {
   const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
   // 先剔除本函数自身，避免“检查项里自带这些字符串”造成恒真。
@@ -5891,9 +5727,6 @@ function selfTestReviewContracts() {
     'SIGSTOP',
     'SIGCONT',
     "'AI_KEY_MISSING'",
-    'const ROUNDS = 21',
-    'beforeSeq: beforeCursor',
-    '必须 400',
     'providerId: bindingProviderId',
     '运行时 providerId',
     'NO_TERMINAL_FRAME_WITHIN_DRAIN_WINDOW',
@@ -6041,7 +5874,7 @@ async function selfCheckMain() {
   selfCheck('产品端点/字段静态契约', selfTestProductContract)
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)
   selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
-  selfCheck('复审契约（SIGSTOP/deferred / 分档码 / >40 分页 / providerId 绑定）', selfTestReviewContracts)
+  selfCheck('复审契约（SIGSTOP/deferred / 分档码 / providerId 绑定）', selfTestReviewContracts)
   selfCheck('冷启动种子身份（非合成库行 + 三实例一致）', selfTestColdProviderIdentity)
   selfCheck('L-150 三格契约（取消键/认领表/判据方法 + 探针断言仍在）', selfTestL150GridContract)
   selfCheck('三个交付文件的卫生（LF/无盘符/无密钥/无禁用端口）', selfTestHygiene)

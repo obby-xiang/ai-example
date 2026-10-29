@@ -110,7 +110,7 @@ class AiControllerHistoryPayloadTest {
 
 	/**
 	 * 批次2 / AR-01 第 5 条：<b>synthetic 展示过滤（读侧）</b> —— 压缩摘要按"系统消息"呈现，
-	 * <b>不冒充用户原话</b>。判据复用 {@code SyntheticMessages}（与写侧同一份），载荷只加
+	 * <b>不冒充用户原话</b>。判据复用 {@code SyntheticMessages}（与槽位解析同一份），载荷只加
 	 * additive 键 {@code synthetic=true}，正文/角色字段一律原样。
 	 */
 	@Test
