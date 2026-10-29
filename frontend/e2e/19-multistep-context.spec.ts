@@ -2,9 +2,20 @@
  * 真机 E2E · 多步工作流（页面级动作分批串行）· Task 1「续跑上下文刷新与表单幻影」
  *
  * <h2>被验的场景（本批的原始场景，不是 CI 绿的替代品）</h2>
- * 生产 {@code app.ai.park.enabled=true} 下，一句话走完「导出 CURRENCY（货币字典）」：
+ * 生产 {@code app.ai.park.enabled=true} 下，一句话走完「导出 CURRENCY（货币字典）里的一行」：
  * <b>创建任务 → 导航向导 → 选配置 → 推进步骤 → 设条件</b>，且<b>全程没有一张冗余表单卡</b>
  * （{@code generative_form} 一次都不该发：配置项已由任务/用户明确值确定）。
+ *
+ * <p>筛选条件锚在种子数据的<b>真实列</b>上：{@code CURRENCY} 的字段是
+ * {@code code / name / exchangeRate / decimalPlaces}（**没有 enabled**），种子行含
+ * {@code code=CNY（人民币）}。所以用户话说的是"货币代码 code = CNY"，模型才有可能产生
+ * {@code code=CNY} 这条条件；写"只导出启用的行"等于让它去筛一个不存在的列（本用例的
+ * {@code code=CNY} 断言会必然落空 —— 那是用例自己的错，不是产品缺陷）。
+ *
+ * <p><b>明确停止点 = 筛选条件步（{@code currentStep=QUERY_COND}）</b>：任务书要求的就是
+ * "创建、导航、选配置、推进、设条件"，本用例<b>不</b>覆盖 {@code start_export}（那是另一条
+ * 有自己确认卡的链路）。因此提示词会显式说"到设条件就停下、不要启动导出"，断言也据此收口 ——
+ * 这样"模型多走一步"才是被提示词约束住的偏差，而不是把产品多做的那一步误判成失败。
  *
  * <h2>为什么必须真机 + 真模型</h2>
  * <ul>
@@ -16,11 +27,14 @@
  *
  * <h2>证据面（三方同源）</h2>
  * <ol>
- * <li><b>浏览器</b>：确认卡出现/被批准、{@code gf-fields} 恒为 0（无冗余表单）、无错误卡；</li>
+ * <li><b>浏览器</b>：确认卡出现/被批准（{@code approvals>=1} = 真的走过 park→续跑）、
+ * {@code gf-fields} 恒为 0（无冗余表单）、无错误卡；</li>
  * <li><b>历史载荷</b> {@code GET /api/ai/history/{sid}}：工具调用名序列（{@code create_task} →
  * {@code navigate_to} → {@code select_definitions} → {@code confirm_step} → {@code set_condition}）
  * 与 {@code toolCallStates[].code}；{@code FORM_SLOTS_ALREADY_KNOWN} 一次都不许出现；</li>
- * <li><b>业务面</b>：{@code GET /api/tasks/{id}/jobs} 至少一条 EXPORT 作业（创建真的落了库）。</li>
+ * <li><b>业务面（任务权威状态）</b> {@code GET /api/tasks/{id}}：{@code currentStep=QUERY_COND}
+ * （本用例的明确停止点）且 {@code items[]} 里 {@code CURRENCY} 条目的 {@code conditionJson}
+ * 已持久化并含 {@code code=CNY} —— 不再断言"存在 EXPORT 作业"（本用例根本不启动导出）。</li>
  * </ol>
  *
  * <p><b>运行方式</b>：{@code E2E_MODE=real AI_API_KEY=… AI_BASE_URL=… AI_MODEL=… npx playwright test 19-multistep-context}。
@@ -32,7 +46,7 @@ import { api, openApp, sendMessage, sessionId } from './support/helpers'
 /** 模型可能不按顺序走：给两轮机会（每轮内部自动推进多批），至少一轮走完全链才算通过。 */
 const ATTEMPTS = Math.max(1, Number(process.env.E2E_MULTISTEP_ATTEMPTS ?? '2'))
 
-/** 需要人工批准的卡（create_task / start_export 都是可逆确认卡：无复选框）。 */
+/** 需要人工批准的卡（本场景唯一一张 = create_task 的可逆确认卡：无复选框）。 */
 async function approveGatesUntilSettled(page: Page, deadlineMs: number): Promise<number> {
   const gate = page.locator('[data-testid="hitl-gate"]')
   const stop = page.locator('[data-testid="stop-btn"]')
@@ -157,11 +171,12 @@ test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币�
       }
       await sendMessage(
         page,
-        `请用「货币字典」（CURRENCY）这个配置做一次导出，条件是只导出启用的行。`
+        `请用「货币字典」（CURRENCY）这个配置做一次导出：只导出货币代码 code = CNY（人民币）这一行。`
           + `按顺序自己做完：先 create_task 建导出任务，再 navigate_to 打开导出向导，`
           + `然后 select_definitions 勾上 CURRENCY，confirm_step 推进到筛选条件步，`
-          + `再 set_condition 设置条件，最后如实告诉我现在到了哪一步。`
-          + `配置项已经明确，不需要再发任何收集表单。`
+          + `再 set_condition 把条件设成 CURRENCY 的 code = CNY。`
+          + `到筛选条件这一步就结束（这是本次任务的终点）：不要继续推进步骤，也不要启动导出作业。`
+          + `配置项和条件都已经明确，不需要再发任何收集表单。`
       )
       approvals += await approveGatesUntilSettled(page, 240_000)
       const sid = await sessionId(page)
@@ -189,7 +204,8 @@ test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币�
     await expect(page.locator('[data-testid="gf-fields"]')).toHaveCount(0)
 
     // ③ 业务面：任务真的建成了，并停在「筛选条件步」、条件已按 CURRENCY.code=CNY 持久化
-    //    （本任务范围只到 set_condition：**不虚构 start_export / 不另有作业**）
+    //    停止点由提示词显式声明（"到筛选条件就结束、不要启动导出"）⇒ 这一步的多走一截是
+    //    可判定的偏差；本用例覆盖范围不含 start_export，故不虚构作业、也不放宽下面的状态断言。
     const created = calls.find((call) => call.name === 'create_task' && /#\d+/.test(call.result ?? ''))
     expect(created, 'create_task 的回执里没有真实任务号').toBeTruthy()
     const taskId = Number(/#(\d+)/.exec(created?.result ?? '')?.[1] ?? 0)
