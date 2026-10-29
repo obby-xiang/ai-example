@@ -2820,7 +2820,9 @@ export const useAiStore = defineStore('ai', {
       // I4（R1 返修）：入口时本端已有在途轮（用户在本轮里点"重试/重新载入"就是这条路）⇒ 镜像
       // 是**滞后现场**，不得先拿它把屏上本轮换掉；历史回来也只能"对账不替换"。判据放在这里而不是
       // 只靠 await 后比对：镜像物化发生在 await **之前**，只比对轮次身份拦不住它。
-      const inFlightAtEntry = this.loading || currentAbort !== null
+      // N3（R2）：`stopped` 之后保留的旧传输（C2 为等 start 特意不 abort）不算"在途轮"—— 这一轮
+      // 已被放弃，历史重载必须能照常落盘，否则停止后再也刷不出历史。
+      const inFlightAtEntry = this.loading || (currentAbort !== null && !this.stopped)
       this.startMirror()
       const mirror = readMirror(this.sessionId)
       // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
@@ -6966,8 +6968,11 @@ export const useAiStore = defineStore('ai', {
         return false
       }
       if (intent.hostMessageId !== hostMessageId) {
-        // 另一轮（新轮）的 start 已经到达 ⇒ 旧意向失去意义，就地清理（I5：新轮后不残留）
+        // 另一轮（新轮）的 start 已经到达 ⇒ 旧意向失去意义，就地清理（I5：新轮后不残留）。
+        // N5（R2）：顺带收掉挂在旧意向上的 /chat 传输 —— 它等的那一轮不可能是"被停的那一轮"了，
+        // 留着只是一条空连接（会一直挂到首帧超时）。归属判断不变：这里**不**取消任何 run。
         this.stopIntent = null
+        intent.transport?.abort()
         return false
       }
       this.stopIntent = null
@@ -7676,12 +7681,6 @@ export const useAiStore = defineStore('ai', {
 
       // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
       const seq = frameSeq(frame)
-      if (seq !== null) {
-        const runId = frame.runId ?? this.activeRunId
-        if (runId) {
-          this.runSeq = recordRunSeq(this.runSeq, runId, seq)
-        }
-      }
 
       if (!ownedByActiveRound) {
         /**
@@ -7689,6 +7688,12 @@ export const useAiStore = defineStore('ai', {
          * （`loading`/`activeRunId`/`suspended`/`notice`/`activeForm`）——否则旧轮的 done/error
          * 会把正在跑的新轮标记成空闲，旧轮的 retry/取消提示会覆盖新轮提示（G2/G3/G7）。
          */
+        // N4（R2）：**先证明归属再记 seq**。这里只有"自带 runId"的迟到帧可以记 —— 它记的是
+        // **它自己那个 run** 的锚点（自证归属）；没有 runId 的旧帧一律不记：`frame.runId ?? activeRunId`
+        // 会把它借用成**新轮**的锚点，下一次 reattach 就以错误的 lastSeq 起收（缺帧）。
+        if (seq !== null && frame.runId !== undefined && frame.runId !== '') {
+          this.runSeq = recordRunSeq(this.runSeq, frame.runId, seq)
+        }
         if (isTerminalFrame(frame)) {
           message.streaming = false
           message.done = true
@@ -7702,6 +7707,14 @@ export const useAiStore = defineStore('ai', {
           }
         }
         return
+      }
+
+      // N4（R2）：本轮帧的 seq 记账放在归属判定**之后**（旧帧已在上面 return）。
+      if (seq !== null) {
+        const runId = frame.runId ?? this.activeRunId
+        if (runId) {
+          this.runSeq = recordRunSeq(this.runSeq, runId, seq)
+        }
       }
 
       // R2-1（批2）：seq 幂等 —— 同一帧被重复投递（reattach 全量回放 / 双连接竞态）时整帧跳过：

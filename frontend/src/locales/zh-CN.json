@@ -431,6 +431,7 @@
       "available": "可用",
       "degraded": "已降级",
       "untested": "未检测",
+      "probeFailed": "探测失败",
       "breathing": "工作中…",
       "uploadFallbackLabel": "上传 xlsx / zip",
       "confirmTitle": "待你确认：{business}",

@@ -325,6 +325,38 @@ describe('M-16 编辑重跑的失败还原', { timeout: 20_000 }, () => {
 })
 
 describe('I8 健康提示文案与发送闸同一判据', { timeout: 20_000 }, () => {
+  it('N1 原始：探针失败 ⇒ 胶囊单独一档「探测失败」（不得绿色可用），healthError 有出口', async () => {
+    api.health.mockRejectedValue(new ApiError('probe down: 502', 502, 'NETWORK_ERROR', null))
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+
+    const chip = wrapper.find('[data-testid="health-chip"]')
+    expect(chip.text()).toBe('探测失败')
+    // 不是 success 绿（R-163 C2 的绿族），也不是"可用"
+    expect(chip.classes()).not.toContain('text-[#1a7f45]')
+    expect(chip.classes()).not.toContain('bg-[#edf7f0]')
+    // healthError 有出口：胶囊 title 带探针失败原因
+    expect(chip.attributes('title')).toBe(store.healthError)
+    expect(chip.attributes('title')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('N1 相邻：明确不可用 ⇒ 「已降级」；从未探测 ⇒ 「未检测」（三档不串）', async () => {
+    api.health.mockResolvedValue({ available: false, code: 'AI_UNAVAILABLE', message: '未配置可用模型' })
+    const degraded = await mountPanel()
+    expect(degraded.find('[data-testid="health-chip"]').text()).toBe('已降级')
+    expect(degraded.find('[data-testid="health-chip"]').attributes('title')).toBeUndefined()
+    degraded.unmount()
+
+    api.health.mockImplementation(() => new Promise(() => {}))
+    const store = useAiStore()
+    store.health = null
+    store.healthError = null
+    const untested = await mountPanel()
+    expect(untested.find('[data-testid="health-chip"]').text()).toBe('未检测')
+    untested.unmount()
+  })
+
   it('I8 原始：探针失败 ⇒ 不显示"AI 能力不可用"降级条、占位文案不谎报不可用', async () => {
     api.health.mockRejectedValue(new ApiError('probe down', 502, 'NETWORK_ERROR', null))
     const wrapper = await mountPanel()

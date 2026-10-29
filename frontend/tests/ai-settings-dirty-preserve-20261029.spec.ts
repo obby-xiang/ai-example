@@ -221,6 +221,52 @@ describe('I1 保存/清除成功后密钥不得留在表单或回滚', () => {
     expect(saveBody).not.toHaveProperty('apiKey')
     wrapper.unmount()
   })
+
+  it('N2 原始：保存成功但卡片被并发删除（表单已不在）⇒ 不得误报失败', async () => {
+    const wrapper = await mountView()
+    const vm = wrapper.vm as unknown as {
+      providers: unknown[]
+      cardForms: Record<number, { key: string }>
+    }
+    api.updateProvider.mockImplementation(async () => {
+      // 并发现实：这一拍里他端把 provider 删了（列表与卡片表单一起消失）
+      vm.providers = [providerFixture(8, 'qwen', 'Qwen')]
+      delete vm.cardForms[7]
+      return providerFixture(7, 'deepseek', 'DeepSeek')
+    })
+
+    await wrapper.findAll('[data-testid="key-input"]')[0]!.setValue('sk-concurrent')
+    await wrapper.findAll('[data-testid="save-provider"]')[0]!.trigger('click')
+    await flushPromises()
+
+    expect(api.updateProvider).toHaveBeenCalledTimes(1)
+    expect(toast.success).toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('N2 相邻：清除密钥成功但卡片被并发删除 ⇒ 同样不得误报失败', async () => {
+    const wrapper = await mountView()
+    const vm = wrapper.vm as unknown as {
+      providers: unknown[]
+      cardForms: Record<number, { key: string }>
+    }
+    api.updateProvider.mockImplementation(async () => {
+      vm.providers = [providerFixture(8, 'qwen', 'Qwen')]
+      delete vm.cardForms[7]
+      return providerFixture(7, 'deepseek', 'DeepSeek')
+    })
+
+    await wrapper.findAll('[data-testid="key-input"]')[0]!.setValue('sk-concurrent')
+    await wrapper.findAll('[data-testid="clear-key"]')[0]!.trigger('click')
+    await flushPromises()
+
+    expect(api.updateProvider).toHaveBeenCalledTimes(1)
+    expect((api.updateProvider.mock.calls[0] as [number, Record<string, unknown>])[1]).toEqual({ clearKey: true })
+    expect(toast.success).toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })
 
 describe('I2 默认参数区的脏值同样不被任何 load 清空', () => {

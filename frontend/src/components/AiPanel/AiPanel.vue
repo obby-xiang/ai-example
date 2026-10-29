@@ -40,7 +40,7 @@
            `min-width:auto` 不会缩到内容宽以下，长 `contextSummary` 会整行溢出后被外层 overflow-hidden
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap">
-        <span :class="chipClass(healthTagType)">{{ healthLabel }}</span>
+        <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
         <span>{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
         <span>·</span>
         <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
@@ -2184,14 +2184,23 @@ const followups = computed<FollowupSuggestion[]>(() => {
 })
 
 /**
- * I8（R1）：状态胶囊 / 占位文案 / 降级条**与发送闸同一判据**（`healthBlocksSend`）。
- *
- * <p>探针失败（`health === null`，原因在 `healthError`）只是"没测到"，不是"不可用"：此时发送闸
- * 是放行的，文案就不能说"AI 能力暂不可用 / 已降级"，否则用户看到的是"不可用"却又能发出去。
+ * I8（R1）/ N1（R2）：状态胶囊 / 占位文案 / 降级条**与发送闸同一判据**（`healthBlocksSend`），
+ * 且三档各自独立、互不冒充：
+ * <ul>
+ *   <li>`healthBlocksSend`（探针成功且明确不可用）⇒「已降级」；</li>
+ *   <li>`health === null && healthError`（探针**失败**，可用性未确认）⇒「探测失败」+ 灰族，
+ *       `title` 给出 `healthError` —— 既不谎报"可用"绿，也不冒充"未检测"；</li>
+ *   <li>`health === null` 且无错误（还没测过）⇒「未检测」。</li>
+ * </ul>
  */
+const healthProbeFailed = computed(() => ai.health === null && ai.healthError !== null)
+
 const healthLabel = computed(() => {
   if (healthBlocksSend.value) {
     return t('ai.panel.degraded')
+  }
+  if (healthProbeFailed.value) {
+    return t('ai.panel.probeFailed')
   }
   if (ai.health === null && ai.healthError === null) {
     return t('ai.panel.untested')
@@ -2199,11 +2208,14 @@ const healthLabel = computed(() => {
   return t('ai.panel.available')
 })
 
+/** N1：探针失败的原因只在这里露出（胶囊 title），不新增占位 UI、不进对话主链。 */
+const healthTitle = computed(() => (healthProbeFailed.value ? ai.healthError ?? undefined : undefined))
+
 const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
-  if (ai.health === null && ai.healthError === null) {
-    return 'info'
+  if (healthBlocksSend.value || healthProbeFailed.value) {
+    return 'warning'
   }
-  return healthBlocksSend.value ? 'warning' : 'success'
+  return ai.health === null ? 'info' : 'success'
 })
 
 const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degradeUnknown'))

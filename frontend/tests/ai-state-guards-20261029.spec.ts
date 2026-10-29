@@ -525,4 +525,141 @@ describe('I4 轮内主动重载（入口即在途）', () => {
     transport.close({ terminal: true })
     await sending
   })
+
+  it('N3 原始：停止后（保留的旧传输仍在）历史重载照常落盘，不被"在途"误判丢弃', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n3'
+    store.historyLoaded = true
+
+    const { sending, transport } = await startRound(store, '被停的一轮')
+    await store.stop()
+    // 停止后传输被保留（C2）—— 旧判据只看 currentAbort !== null，会把这次重载当"在途"整份丢弃
+    expect(store.stopped).toBe(true)
+
+    api.history.mockResolvedValue({
+      sessionId: 'sess-n3',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '旧问题' },
+        { type: 'ASSISTANT', text: '旧回答' }
+      ]
+    } as AiHistory)
+    await store.loadHistory()
+
+    expect(store.messages.some((message) => message.content === '旧回答')).toBe(true)
+
+    transport.close({ terminal: true })
+    await sending
+  })
+
+  it('N3 反向：停止后又真的开了新一轮（loading）⇒ 历史仍受在途保护、不整替', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n3-again'
+    store.historyLoaded = true
+
+    const first = await startRound(store, '被停的一轮')
+    await store.stop()
+
+    const second = await startRound(store, '停后新开的一轮')
+    expect(store.loading).toBe(true)
+    api.history.mockResolvedValue({
+      sessionId: 'sess-n3-again',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '旧问题' },
+        { type: 'ASSISTANT', text: '旧回答' }
+      ]
+    } as AiHistory)
+    await store.loadHistory()
+
+    expect(store.messages.some((message) => message.content === '旧回答')).toBe(false)
+    expect(store.messages.some((message) => message.id === second.host.id)).toBe(true)
+
+    first.transport.close({ terminal: true })
+    second.transport.close({ terminal: true })
+    await Promise.all([first.sending, second.sending])
+  })
+})
+
+describe('N4 帧归属先于 seq 记账', () => {  it('N4 原始：旧宿主的迟到帧不得推进新 run 的 lastSeq（无 runId 帧不得借用 activeRunId）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n4'
+    store.historyLoaded = true
+    const hostA = store.appendAssistantMessage('A 的回答')
+    hostA.done = true
+
+    const round = await startRound(store, '新一轮')
+    round.transport.emit({ type: 'start', runId: 'run-B', seq: 1 } as SseFrame)
+    await flushPromises()
+    expect(store.runSeq['run-B']).toBe(1)
+
+    // 旧宿主上的迟到帧（无 runId、seq=7）：归属不是本轮 ⇒ 不得写进新 run 的帧序号锚点
+    // （帧门上游本就会按连接身份丢弃这类帧；这里直接对 handleFrame 断言"归属先于 seq 记账"的顺序）
+    store.handleFrame({ type: 'delta', text: '迟到帧', seq: 7 } as SseFrame, hostA.id)
+    await flushPromises()
+
+    expect(store.runSeq['run-B']).toBe(1)
+
+    round.transport.close({ terminal: true })
+    await round.sending
+  })
+
+  it('N4 相邻：本轮自己的帧照常推进锚点（守卫不误伤）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n4-ok'
+    store.historyLoaded = true
+
+    const round = await startRound(store, '正常一轮')
+    round.transport.emit({ type: 'start', runId: 'run-ok', seq: 1 } as SseFrame)
+    round.transport.emit({ type: 'delta', text: '正文', seq: 2 } as SseFrame)
+    await flushPromises()
+
+    expect(store.runSeq['run-ok']).toBe(2)
+
+    round.transport.close({ terminal: true })
+    await round.sending
+  })
+})
+
+describe('N5 新轮 start 让旧停止意向失效时收掉旧传输', () => {
+  it('N5 原始：新轮 start 使旧意向作废 ⇒ 顺手 abort 旧 /chat 传输（不再空等到首帧超时）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n5'
+    store.historyLoaded = true
+
+    const first = await startRound(store, '被停的一轮')
+    await store.stop()
+    expect(store.stopIntent).toBeTruthy()
+    expect(first.transport.aborted).toBe(false)
+
+    const second = await startRound(store, '新的一轮')
+    second.transport.emit({ type: 'start', runId: 'run-second' } as SseFrame)
+    await flushPromises()
+
+    // 归属判断不变：新轮不被旧意向取消
+    expect(api.cancel).not.toHaveBeenCalled()
+    expect(store.stoppedRunId).toBeNull()
+    expect(store.stopIntent).toBeNull()
+    // 旧传输在这一刻已无意义 ⇒ 收掉（否则它会一直挂到 45s 首帧超时才结束）
+    expect(first.transport.aborted).toBe(true)
+
+    second.transport.close({ terminal: true })
+    await Promise.all([first.sending, second.sending])
+  })
+
+  it('N5 相邻：自身 start 命中（补 cancel）同样收掉该传输，且只收自己的', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n5-own'
+    store.historyLoaded = true
+
+    const round = await startRound(store, '被停的这一轮')
+    await store.stop()
+    round.transport.emit({ type: 'start', runId: 'run-own' } as SseFrame)
+    await flushPromises()
+
+    expect(api.cancel).toHaveBeenCalledWith('run-own')
+    expect(round.transport.aborted).toBe(true)
+
+    await round.sending
+  })
 })

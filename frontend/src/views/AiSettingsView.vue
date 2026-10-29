@@ -401,7 +401,9 @@ async function saveProvider(provider: AiProviderView): Promise<void> {
       // I1（R1 返修）：密钥已随本次保存提交 ⇒ 立刻清空输入框（**在 load() 之前**）：
       // ① 明文不常驻表单；② 否则下一次重载会把这段"已保存的脏值"继续当成脏值保留，
       // 再点保存就会把同一把密钥重复提交，而"清除密钥"之后也会被它悄悄回滚。
-      cardForms[provider.id]!.key = ''
+      // N2（R2）：安全判空 —— PUT 已经成功了，卡片这一刻可能已被并发删除（列表与表单一起重建/消失）；
+      // 用非空断言会在**成功之后**抛 TypeError，被 catch 说成"保存失败"（把成功误报成失败）。
+      clearCardKey(provider.id)
       ElMessage.success(T.saved)
       await load()
     } catch (error) {
@@ -420,13 +422,27 @@ async function clearKey(provider: AiProviderView): Promise<void> {
       await aiConfigApi.updateProvider(provider.id, { clearKey: true })
       // I1（R1 返修）：同 saveProvider —— 清除成功后输入框立刻清空，否则脏值保留会让下一次保存
       // 把这把密钥再写回去（"清除"被静默回滚），明文也一直留在表单里。
-      cardForms[provider.id]!.key = ''
+      // N2（R2）：同 saveProvider —— 卡片已被并发删除时安全跳过，不把成功误报成失败。
+      clearCardKey(provider.id)
       ElMessage.success(T.saved)
       await load()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
   })
+}
+
+/**
+ * N2（R2）：清空某张卡的密钥输入框（卡片已不在 = 无操作）。
+ *
+ * <p>为什么不用 `cardForms[id]!`：服务端已成功之后，这一拍里他端可能刚把 provider 删掉
+ * （`load()` 会同步清 `cardForms`），非空断言会抛错并被外层 catch 当成"保存失败"提示用户。
+ */
+function clearCardKey(providerId: number): void {
+  const form = cardForms[providerId]
+  if (form) {
+    form.key = ''
+  }
 }
 
 async function toggleEnabled(provider: AiProviderView): Promise<void> {

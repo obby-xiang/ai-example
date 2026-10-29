@@ -431,6 +431,7 @@
       "available": "Available",
       "degraded": "Degraded",
       "untested": "Not checked",
+      "probeFailed": "Health check failed",
       "breathing": "Working…",
       "uploadFallbackLabel": "Upload xlsx / zip",
       "confirmTitle": "Awaiting your confirmation: {business}",
