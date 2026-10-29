@@ -4223,28 +4223,30 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     wrapper.unmount()
   })
 
-  it('composer v2 health 未知：textarea 不硬禁用，但发送钮禁用且 Enter 不发送', async () => {
+  it('M-15 composer v2 health 未知：发送钮不因探针失败禁用（Enter 照常发送）', async () => {
+    // 2026-10-29 审计 M-15 改判：探针失败（health=null）不再当"服务不可用"，发送闸只认真实轮次与挂起
     const { store, wrapper } = await mountPhase1({ health: 'unknown' })
     const box = wrapper.find('[data-testid="composer-input"]')
     expect(box.attributes('disabled')).toBeUndefined()
     await box.setValue('未知态草稿')
 
     const send = wrapper.find('[data-testid="send-btn"]')
-    expect(send.attributes('disabled')).toBeDefined()
+    expect(send.attributes('disabled')).toBeUndefined()
     const sendSpy = vi.spyOn(store, 'send')
 
     const event = fireEnter(box.element as HTMLTextAreaElement)
     expect(event.defaultPrevented).toBe(true)
-    expect(sendSpy).not.toHaveBeenCalled()
+    expect(sendSpy).toHaveBeenCalledTimes(1)
     expect(store.notice).toBeNull()
     wrapper.unmount()
   })
 
-  it('composer v2 healthError：textarea 仍可编辑，发送钮禁用', async () => {
+  it('M-15 composer v2 healthError：textarea 仍可编辑，发送钮不被探针失败禁用', async () => {
     const { wrapper } = await mountPhase1({ health: 'error' })
     const box = wrapper.find('[data-testid="composer-input"]')
     expect(box.attributes('disabled')).toBeUndefined()
-    expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeDefined()
+    await box.setValue('探针失败的草稿')
+    expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 

@@ -93,14 +93,50 @@ async function withBusy(key: string, action: () => Promise<void>): Promise<void>
   }
 }
 
+/**
+ * 每张卡上一次**服务端**值（脏判据的基线）。key 不在基线里：服务端从不下发明文。
+ *
+ * <p>M-20（2026-10-29）：没有基线就无法区分"用户改过还没保存"和"服务端刚变" —— 旧实现直接
+ * 无条件重建表单，于是任何一次 `load()`（他卡保存/启停/拉模型/删模型…）都会把别的卡片的
+ * 脏密钥静默清空、把改名打回原样；再点「保存」时请求体没有 `apiKey`（留空 = 不改），页面却
+ * 仍提示"已保存"。
+ */
+const cardBaselines = new Map<number, Omit<CardForm, 'key'>>()
+
 function fillForms(): void {
+  const alive = new Set<number>()
   for (const provider of providers.value) {
-    cardForms[provider.id] = {
+    alive.add(provider.id)
+    const server: Omit<CardForm, 'key'> = {
       displayName: provider.displayName,
       baseUrl: provider.baseUrl,
       completionsPath: provider.completionsPath,
-      modelsPath: provider.modelsPath,
-      key: ''
+      modelsPath: provider.modelsPath
+    }
+    const baseline = cardBaselines.get(provider.id)
+    const form = cardForms[provider.id]
+    if (!form || !baseline) {
+      cardForms[provider.id] = { ...server, key: form?.key ?? '' }
+    } else {
+      const next: CardForm = { ...server, key: form.key }
+      for (const field of ['displayName', 'baseUrl', 'completionsPath', 'modelsPath'] as const) {
+        if (form[field] !== baseline[field]) {
+          next[field] = form[field]
+        }
+      }
+      cardForms[provider.id] = next
+    }
+    cardBaselines.set(provider.id, server)
+  }
+  // 已不存在的 provider：表单与基线一起清（否则会留下点不到、却在保存时被读到的幽灵卡）
+  for (const key of Object.keys(cardForms)) {
+    if (!alive.has(Number(key))) {
+      delete cardForms[Number(key)]
+    }
+  }
+  for (const id of [...cardBaselines.keys()]) {
+    if (!alive.has(id)) {
+      cardBaselines.delete(id)
     }
   }
 }

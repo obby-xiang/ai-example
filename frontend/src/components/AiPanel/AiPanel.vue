@@ -2117,7 +2117,23 @@ const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
  */
 const EMPTY_STATE_CHIPS = ['listDefs', 'workspaceState', 'exportEstimate', 'startExport'] as const
 const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'precheckImport'])
-const chipsAvailable = computed(() => ai.available && ai.canSend && !ai.suspended && ai.pendingToolCall === null)
+/**
+ * M-15（2026-10-29）：**探针失败**不等于"服务不可用"。
+ *
+ * <p>`available` 来自健康探针：一次网络抖动 / 代理 502 / 体形态不符就会把它打成 false，而旧实现
+ * 直接拿它当发送闸 —— 发送钮、Enter 与空态 chips 一起被禁用，用户必须手动点"重新探测"，
+ * 程序化 `ai.send` 又不被拦（UI 与 store 语义分叉）。现在把两者分开：
+ * <ul>
+ * <li>探针**成功且明确说不可用**（`health !== null && available === false`）⇒ 仍按降级限制；</li>
+ * <li>探针**失败 / 尚未探测**（`health === null`，`healthError` 承载失败文案）⇒ 只作提示，
+ *     发送闸只看真实轮次与挂起；真实不可用由后端在 `/chat` 上用具体错误码说话
+ *     （AI_KEY_MISSING / NO_MODEL_CONFIGURED 等）。</li>
+ * </ul>
+ */
+const healthBlocksSend = computed(() => ai.health !== null && ai.available === false)
+const chipsAvailable = computed(
+  () => !healthBlocksSend.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
+)
 const visibleEmptyStateChips = computed(() => EMPTY_STATE_CHIPS.filter((chip) => suggestionAllowedForTask(chip)))
 
 function suggestionAllowedForTask(id: string): boolean {
@@ -4519,6 +4535,32 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
  */
 let sendGeneration = 0
 
+/** M-16：编辑重跑的删除现场（失败时原样回插/还原）。 */
+interface EditRerunUndo {
+  /** 编辑锚点在删除时刻的下标（目标消息已不在数组里时用它定位） */
+  index: number
+  target: ChatMessage
+  /** 被改写前的段（原文唯一真值：正文投影由它派生） */
+  parts: ChatMessage['parts']
+  /** 被 splice 掉的后继消息（保持原序） */
+  removed: ChatMessage[]
+}
+
+/**
+ * M-16（2026-10-29）：把编辑重跑删掉的东西放回去 —— 用户原文 + 其后的消息。
+ *
+ * <p>回插位置 = 编辑锚点（那条用户消息）之后：被删消息本来就是"这条提问的回答与后续"，
+ * 放回提问后面才与删除前的对话形态一致。本次失败轮自己的助手气泡（错误卡宿主）留在末尾。
+ */
+function restoreEditRerun(undo: EditRerunUndo): void {
+  undo.target.parts = undo.parts
+  deriveProjections(undo.target)
+  const at = ai.messages.indexOf(undo.target)
+  const index = at >= 0 ? at : undo.index
+  ai.messages.splice(index + 1, 0, ...undo.removed)
+  pinBottom()
+}
+
 async function send(): Promise<void> {
   const draft = inputText.value
   const text = draft.trim()
@@ -4537,15 +4579,20 @@ async function send(): Promise<void> {
   // 输入框新文本、截断其后消息、从该条重跑（skipUserRecord：不另起新用户消息）。
   const editId = editingMessageId.value
   let skipUserRecord = false
+  /** M-16（2026-10-29）：编辑重跑是"先删后发"——发送前把删除现场留一份，失败时原样还原。 */
+  let editUndo: EditRerunUndo | null = null
   if (editId) {
     editingMessageId.value = null
     const cut = ai.messages.findIndex((item) => item.id === editId)
     if (cut >= 0) {
       const target = ai.messages[cut] as ChatMessage
+      const originalParts = target.parts
+      const removed = ai.messages.slice(cut + 1)
       target.parts = [{ kind: 'text', seg: 0, text, streaming: false }]
       deriveProjections(target)
       markUserMsgDirty(target.id)
       ai.messages.splice(cut + 1)
+      editUndo = { index: cut, target, parts: originalParts, removed }
       pinBottom()
       skipUserRecord = true
     }
@@ -4564,6 +4611,12 @@ async function send(): Promise<void> {
   // 成功 / 主动停止：保持已清空，草稿不回流。
   if (result.outcome === 'ok' || result.outcome === 'cancelled') {
     return
+  }
+  // M-16（2026-10-29）：发送失败 / 断流 / 未发送 ⇒ 先把"先删后发"的现场还原 —— 被删消息原序回插、
+  // 被改写的用户原文还原。不还原的代价：旧回答只能靠刷新从服务端找回（本地已 splice 掉），
+  // 而用户刚改的文本服务端从未收到，刷新后一并丢失。
+  if (editUndo) {
+    restoreEditRerun(editUndo)
   }
   // 用户已在流式中写入新内容：不覆盖，也不把失败消息设成新的编辑锚点。
   if (inputText.value !== '') {

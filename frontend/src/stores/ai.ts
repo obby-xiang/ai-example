@@ -349,6 +349,14 @@ export const PRE_STREAM_RETRY_DELAY_MS = 400
 export const STOP_SETTLE_MAX_WAIT_MS = 2_000
 
 /**
+ * M-19（2026-10-29）：**start 帧之前就停止**时，"停止意向"的有效期（毫秒）。
+ *
+ * <p>这段时间里后端可能刚建好这一轮（runId 只能从 start 帧或下一条消息的 409 响应体里拿到）。
+ * 超时即作废 —— 绝不拿一个很久以前的停止意向去取消后来的新轮。
+ */
+export const STOP_INTENT_TTL_MS = 60_000
+
+/**
  * O02：`stop()` 的落地闸门（模块级，与 `currentAbort` 同为"这一轮"的句柄）。
  * 非 null = 有一次停止还在等 cancel 送达；{@link send} 据此先等它落地。
  */
@@ -2303,6 +2311,17 @@ export const useAiStore = defineStore('ai', {
      */
     stoppedRunId: null as string | null,
     /**
+     * M-19（2026-10-29）：**start 帧之前就停止**的会话停止意向（`stop()` 在 runId 未知时置位）。
+     *
+     * <p>为什么需要：runId 只由 start 帧（或下一条消息的 409 响应体）给出。旧实现在 runId 为空时
+     * 只做本地收敛、**从不发 cancel** —— 后端那一轮继续跑（工具副作用、记忆写入），用户却以为已停；
+     * 下一条消息撞 409 时又因为 `stoppedRunId === null` 被说成"上一轮仍在进行中"（与认知相反）。
+     *
+     * <p>落地口径：意向只保留 {@link STOP_INTENT_TTL_MS}；`hostMessageId` 用来排除"另一轮"的
+     * start 帧（新轮的宿主 id 与停止时不同，不得被旧意向取消）。
+     */
+    stopIntent: null as { hostMessageId: string | null; at: number } | null,
+    /**
      * M08：当前**活动续收连接**所在的 runId（single-flight 登记位，null = 没有活动连接）。
      *
      * <p>与 `currentAbort` 一起判活（{@link hasLiveRunStream}）：同一 runId 只允许一条 SSE，
@@ -2784,6 +2803,11 @@ export const useAiStore = defineStore('ai', {
 
     async loadHistoryInner(): Promise<void> {
       const sid = this.sessionId
+      // M-17（2026-10-29）：取历史期间用户可能已发出新一轮（`send()` 递增 `roundEpoch` 并换
+      // `currentAbort`）。轮次身份必须在入口捕获 —— 否则历史回来时会整体替换 `messages`，
+      // 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
+      const epochAtEntry = roundEpoch
+      const abortAtEntry = currentAbort
       this.startMirror()
       const mirror = readMirror(this.sessionId)
       // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
@@ -2857,6 +2881,13 @@ export const useAiStore = defineStore('ai', {
       // 会话身份对账（红队 MAJOR-1）：不匹配则整体丢弃 —— 下面的 messages 写入与
       // restoreSuspendedSnapshot（读 this.sessionId 拉 runs/current、就地重建挂起卡）都不得落进新会话
       if (this.sessionId !== sid) {
+        return
+      }
+      // M-17：取数窗口内已起新轮 / 换了连接 ⇒ 这份历史属于**过期现场**，只对账不替换。
+      // 保留屏上的在途现场（镜像 + 实时帧），本次历史整体丢弃；`historyLoaded` 仍落定
+      // （对账已结束，镜像写入恢复正常），后续帧继续写原来的宿主。
+      if (roundEpoch !== epochAtEntry || currentAbort !== abortAtEntry) {
+        this.historyLoaded = true
         return
       }
       // 批次2：历史拿到了 ⇒ 历史错误与"历史不可用"类缺口一并作废（归档缺口可能在续收时另行检出）
@@ -4456,6 +4487,11 @@ export const useAiStore = defineStore('ai', {
           if (isCurrentRound() && frame.type === 'error') {
             sawErrorTerminal = true
           }
+          // M-19：start 帧之前就停止过（runId 当时未知）⇒ 首个 start 帧带来 runId，立刻补真实
+          // cancel。必须**在 handleFrame 之前**判：停止闸门会丢弃非终态帧，这一帧可能根本不被处理。
+          if (frame.type === 'start' && isCurrentRound()) {
+            this.cancelRunIfStopIntended(frame.runId, assistant.id)
+          }
           this.handleFrame(frame, assistant.id)
         },
         onReconnect: (attempt, delayMs) => {
@@ -4562,7 +4598,12 @@ export const useAiStore = defineStore('ai', {
         // "上一轮仍在进行中"（那是停止尚未传播的残影 / 已结束的轮），此时只留"没发出去"的提示。
         if (busyConflict && error instanceof ApiError) {
           const busy = readBusyRunRef(error)
-          this.busyRun = this.isAuthoritativeBusyRun(busy) ? busy : null
+          // M-19（2026-10-29）：start 帧之前停止过 ⇒ 这条 409 指的就是**刚被停的那一轮**（runId
+          // 当时未知、cancel 还没发出去）。就地补真实 cancel，并按"已停止"登记 —— 否则界面会把
+          // 它说成"上一轮仍在进行中"，与用户"已经停了"的认知相反。
+          const cancelledIntended = busy?.runId !== undefined
+            && this.cancelRunIfStopIntended(busy.runId)
+          this.busyRun = !cancelledIntended && this.isAuthoritativeBusyRun(busy) ? busy : null
         }
         /** 410 是否由本处做了本地恢复（决定收尾口径与乐观气泡的去向）。 */
         let purgedRecovered = false
@@ -5650,6 +5691,10 @@ export const useAiStore = defineStore('ai', {
           requiresAction: false
         })
         deriveProjections(message)
+        // M-18（2026-10-29）：段已落 failed + requiresAction=false ⇒ 屏上**没有可点的卡**。
+        // 只按"还有没有别的待人卡"收口挂起态（回灌成不成功都不影响这个结论：这条已经不在等人）。
+        // 不收口的代价：输入区/发送闸永久锁死，唯一出口是底部「停止」。
+        this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
         void this.submitFrontendToolResult(frame.toolCallId, '', 'frontend-executor', true, runId ?? undefined)
         return
       }
@@ -5848,6 +5893,9 @@ export const useAiStore = defineStore('ai', {
           requiresAction: false
         }, false)
         deriveProjections(message)
+        // M-18（2026-10-29）：建卡失败 ⇒ 段已是 failed + requiresAction=false（无可点卡）。
+        // 就地按"还有没有别的待人卡"收口挂起态 —— 回灌成不成功都不该让输入区继续锁着。
+        this.clearSuspendedIfNoOtherConfirms(toolCallId)
         await this.submitFrontendToolResult(toolCallId, reason, 'frontend-executor', false, runId, 'failed')
       }
       // 撤销的新卡不得静默挤掉一张仍在等人决策的预览卡（工具安全边界批）：那张卡的 plan 会被覆盖，
@@ -5960,6 +6008,9 @@ export const useAiStore = defineStore('ai', {
           requiresAction: false
         }, false)
         deriveProjections(message)
+        // M-18（2026-10-29）：建卡失败 ⇒ 段已 failed + requiresAction=false（无可点卡），
+        // 就地按"还有没有别的待人卡"收口挂起态（回灌成败不影响这个结论）。
+        this.clearSuspendedIfNoOtherConfirms(toolCallId)
         await this.submitFrontendToolResult(toolCallId, result, 'frontend-executor', false, runId ?? undefined, 'failed')
       }
 
@@ -5982,6 +6033,9 @@ export const useAiStore = defineStore('ai', {
           requiresAction: false
         }, false)
         deriveProjections(message)
+        // M-18（2026-10-29）：同 fail() —— 这条也不建卡（rejected 段 requiresAction=false），
+        // 挂起态按"还有没有别的待人卡"就地收口。
+        this.clearSuspendedIfNoOtherConfirms(toolCallId)
         await this.submitFrontendToolResult(toolCallId, text, 'frontend-executor', false, runId ?? undefined,
           'rejected', undefined, 'UI_REF_NOT_SNAPSHOTTED')
         return
@@ -6841,6 +6895,57 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * M-19（2026-10-29）：记下"本会话停止意向"（`stop()` 时后端还没给出 runId）。
+     *
+     * <p>记录宿主消息 id 是为了**排除另一轮**：新轮的 start 帧不能因为旧意向而被取消。
+     */
+    noteStopIntent(): void {
+      this.stopIntent = { hostMessageId: activeRoundHostId, at: Date.now() }
+    },
+
+    /**
+     * M-19（2026-10-29）：拿到 runId（start 帧 / 409 响应体）后补一次真实 cancel。
+     *
+     * @param runId 刚拿到的 runId
+     * @param hostMessageId 该 runId 所属的助手宿主；省略 = 归属未知（按 TTL 判）
+     * @returns 是否真的发起了 cancel（`false` = 没有意向 / 已过期 / 属于另一轮）
+     */
+    cancelRunIfStopIntended(runId: string, hostMessageId?: string): boolean {
+      const intent = this.stopIntent
+      if (intent === null || runId === '') {
+        return false
+      }
+      if (Date.now() - intent.at > STOP_INTENT_TTL_MS) {
+        // 过期的意向作废：绝不拿它取消一个后来的新轮
+        this.stopIntent = null
+        return false
+      }
+      // 有归属且对不上 = 这条 runId 属于另一轮；意向留着给下一条消息的 409 用，不在这里消耗
+      if (hostMessageId !== undefined && intent.hostMessageId !== null
+        && intent.hostMessageId !== hostMessageId) {
+        return false
+      }
+      this.stopIntent = null
+      this.stoppedRunId = runId
+      if (this.busyRun?.runId === runId) {
+        this.busyRun = null
+      }
+      void this.cancelStoppedRun(runId)
+      return true
+    },
+
+    /**
+     * M-19：补发的 cancel（失败不写技术文案 —— 本地停止早已收敛，与 `stop()` 同口径）。
+     */
+    async cancelStoppedRun(runId: string): Promise<void> {
+      try {
+        await aiApi.cancel(runId)
+      } catch {
+        // 后端不可达不影响本地已落地的停止
+      }
+    },
+
+    /**
      * 停止本轮（批G · S1/S2/S3/S4 收敛口径）。
      *
      * <p>
@@ -6882,6 +6987,11 @@ export const useAiStore = defineStore('ai', {
         if (this.busyRun?.runId === runId) {
           this.busyRun = null
         }
+      } else {
+        // M-19（2026-10-29）：start 帧还没到 ⇒ runId 未知，现在没有 cancel 的对象。记下"本会话
+        // 停止意向"，等 runId 从 start 帧 / 下一条消息的 409 响应体里出现时补一次真实 cancel
+        //（后端没有这条意向会继续跑完这一轮，用户却以为已经停了）。
+        this.noteStopIntent()
       }
       // M08-R2：停止 = 放弃这一轮 ⇒ 释放驱动所有权与预算（停止是终态动作，不是"连接结束"）
       this.forgetRunStreamDrive(runId ?? undefined)
@@ -7097,6 +7207,8 @@ export const useAiStore = defineStore('ai', {
       this.activeStreamRunId = null
       this.activeStreamParked = false
       this.stoppedRunId = null
+      // M-19：停止意向同属旧会话现场（不得跨会话取消任何轮）
+      this.stopIntent = null
       // M08-R2：驱动所有权/预算同样是旧会话现场
       this.forgetRunStreamDrive()
       this.restoringRecovery = false
