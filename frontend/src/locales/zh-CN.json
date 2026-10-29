@@ -132,8 +132,8 @@
       }
     },
     "notice": {
-      "resumeRetry": "续收中断，{seconds} 秒后第 {attempt} 次重试",
-      "reconnect": "连接中断，{seconds} 秒后重挂（第 {attempt} 次）",
+      "resumeRetry": "续收中断，正在第 {attempt} 次重试",
+      "reconnect": "连接中断，正在第 {attempt} 次重连",
       "interruptedSuspended": "连接中断，结果可能不完整（{reason}）。挂起卡保留，可刷新重试。",
       "interruptedKeep": "连接中断，结果可能不完整（{reason}）。已生成的内容保留，可重新发送或刷新页面继续接收。",
       "interruptedKeepShort": "连接中断，结果可能不完整（{reason}）。已生成的内容保留。",

@@ -144,7 +144,11 @@ export interface SseFrameHandlers {
   onTerminal?: (frame: SseDoneFrame | SseErrorFrame) => void
   /** 流关闭（terminal=false 表示断流） */
   onClose?: (info: StreamCloseInfo) => void
-  /** 重连前的公告（前端可展示"连接中断，N 秒后重试"） */
+  /**
+   * 重连公告：**只在确实要开新连接时**发出（C1 —— 排期在断流当刻开始，但探测命中 202/404
+   * 会把它撤销，届时一条公告都不发）。`delayMs` 保留为"本次排期用掉的等待"，文案已改为
+   * 无倒计时表述（"正在第 N 次重连"），不再对用户承诺未来时。
+   */
   onReconnect?: (attempt: number, delayMs: number) => void
   /** 连接层面的错误（HTTP 非 2xx、网络异常） */
   onError?: (error: ApiError) => void

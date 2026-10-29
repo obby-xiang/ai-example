@@ -132,8 +132,8 @@
       }
     },
     "notice": {
-      "resumeRetry": "Resume interrupted, retrying in {seconds}s (attempt {attempt})",
-      "reconnect": "Connection interrupted, reconnecting in {seconds}s (attempt {attempt})",
+      "resumeRetry": "Resume interrupted, retrying now (attempt {attempt})",
+      "reconnect": "Connection interrupted, reconnecting now (attempt {attempt})",
       "interruptedSuspended": "Connection interrupted, the result may be incomplete ({reason}). The suspended card is kept; refresh to retry.",
       "interruptedKeep": "Connection interrupted, the result may be incomplete ({reason}). Generated content is kept; resend or refresh to keep receiving.",
       "interruptedKeepShort": "Connection interrupted, the result may be incomplete ({reason}). Generated content is kept.",
