@@ -4,7 +4,9 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.ContextState;
+import com.example.configmgr.ai.context.ContextTrigger;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
+import com.example.configmgr.ai.context.TestProviderRuntime;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.conformance.FrameContract;
@@ -247,16 +249,16 @@ class ResumeContextCompactionTest {
 	}
 
 	/**
-	 * <b>AR-06（批次3）：续跑压缩的阶段帧</b> —— 与首轮同构：阶段开始帧由<b>本线程</b>在进入同步压缩
-	 * <b>之前</b>发出，且压缩调用自身不发帧。
+	 * <b>续跑压缩的阶段信号（2026-10-29）</b>：L1 只是本地清工具结果 ⇒ <b>不公告</b> compacting。
 	 *
-	 * <p>这里把驱动侧（{@code chatService}）的 {@code startKeepalive} 桩成"真定时器 + 立即发阶段帧"：
-	 * 于是断言的对象仍是<b>真实帧线</b> —— 阶段帧必须早于 {@code context} 帧（后者在压缩<b>之后</b>发），
-	 * 且它是心跳（不带业务 {@code seq}、不进归档）。kill：把阶段帧挪到压缩调用之后（或让压缩体自己发帧）
-	 * ⇒ 顺序断言变红。
+	 * <p>续跑的初始保活相位是 {@code streaming}（不是压缩/准备），第一条阶段帧因此是
+	 * {@code heartbeat{phase=streaming}}；{@code context} 帧之后仍然没有 compacting —— 用户不会在没有
+	 * 模型摘要的轮次里看到"正在压缩"。
+	 *
+	 * <p>证红方式（旧实现）：续跑在同步压缩之前无条件公告 {@code compacting} ⇒ 本用例的阶段相位断言变红。
 	 */
 	@Test
-	void resumeCompactionAnnouncesTheCompactingStageBeforeTheSyncCall() {
+	void resumeL1CompactionAnnouncesOnlyTheStreamingStage() {
 		seedSuspendedRun();
 		armCompactingResume();
 		ScheduledExecutorService stageScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -265,11 +267,7 @@ class ResumeContextCompactionTest {
 			return thread;
 		});
 		try {
-			when(this.chatService.startKeepalive(eq(RUN_ID), any(SseChatEmitter.class),
-					eq(TurnKeepalive.PHASE_COMPACTING), eq(true)))
-				.thenAnswer(invocation -> TurnKeepalive.startWithStageFrame(RUN_ID,
-						invocation.getArgument(1, SseChatEmitter.class), stageScheduler, 5_000L,
-						invocation.getArgument(2, String.class)));
+			stubKeepalive(stageScheduler);
 			doAnswer(invocation -> {
 				// 交棒后的真实轮次会产出终帧（与上面的用例同形，便于整条流收敛）
 				SseChatEmitter out = invocation.getArgument(4);
@@ -288,15 +286,56 @@ class ResumeContextCompactionTest {
 			List<Map<String, Object>> frames = this.wire.frames();
 			FrameContract.assertConformant(frames);
 			// 阶段帧：start 之后、context 之前，且是心跳（无业务 seq）
-			List<String> types = FrameContract.types(frames);
-			assertThat(types).containsSubsequence("start", "heartbeat", "context", "done");
-			List<Map<String, Object>> stages = FrameContract.ofType(frames, FrameContract.HEARTBEAT);
-			assertThat(stages).hasSize(1);
-			assertThat(stages.get(0)).containsEntry("phase", TurnKeepalive.PHASE_COMPACTING)
-				.containsEntry("elapsedMs", 0L)
+			assertThat(FrameContract.types(frames)).containsSubsequence("start", "heartbeat", "context", "done");
+			assertThat(stagePhases()).containsExactly(TurnKeepalive.PHASE_STREAMING);
+			assertThat(FrameContract.oneOfType(frames, FrameContract.HEARTBEAT)).containsEntry("elapsedMs", 0L)
 				.doesNotContainKey("seq");
 			assertThat(this.store.events(RUN_ID)).extracting(frame -> frame.get("type"))
 				.as("阶段帧不入归档").doesNotContain(FrameContract.HEARTBEAT);
+		}
+		finally {
+			stageScheduler.shutdownNow();
+		}
+	}
+
+	/**
+	 * <b>续跑真实 L2 摘要</b>：相位序列 {@code streaming → compacting → streaming}，
+	 * 摘要结束立即恢复 {@code streaming}（前端阶段条随即退场）。
+	 */
+	@Test
+	void resumeRealL2AnnouncesStreamingThenCompactingThenStreaming() {
+		seedLongSuspendedRun();
+		armCompactingResume();
+		long now = System.currentTimeMillis();
+		// 已压过 L1（谱系 L1 ⇒ 本次最多升一级到 L2）；滞回可解锁，且触发比落在 L2 区间
+		this.contextStore.write(SESSION_ID, ContextState.EMPTY
+			.withUsage(72000, 25000, 1, false, now, "test-model", 3000, 4000, 0)
+			.withCompaction(ContextTrigger.Level.L1, 0, 0, "seed", now));
+		java.util.concurrent.atomic.AtomicInteger summaries = new java.util.concurrent.atomic.AtomicInteger();
+		ReflectionTestUtils.setField(this.service, "contextCompactor",
+				new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore,
+						(system, user, runtime) -> {
+							summaries.incrementAndGet();
+							return "摘要正文";
+						}));
+		when(this.chatService.runtimeForCompaction(eq(RUN_ID), any(), any()))
+			.thenReturn(TestProviderRuntime.runtime());
+
+		ScheduledExecutorService stageScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "resume-l2-stage-keepalive");
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			stubKeepalive(stageScheduler);
+
+			ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+			assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+			assertThat(result.body()).containsEntry("contextCompaction", "L2");
+			assertThat(summaries.get()).as("模型摘要真的发生").isPositive();
+			assertThat(stagePhases()).containsExactly(TurnKeepalive.PHASE_STREAMING,
+					TurnKeepalive.PHASE_COMPACTING, TurnKeepalive.PHASE_STREAMING);
 		}
 		finally {
 			stageScheduler.shutdownNow();
@@ -319,6 +358,35 @@ class ResumeContextCompactionTest {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
 		}).when(this.executor).execute(any(Runnable.class));
+	}
+
+	/** 驱动侧保活桩：真实定时器 + 立即公告（相位由生产代码传入，不在用例里写死）。 */
+	private void stubKeepalive(ScheduledExecutorService scheduler) {
+		when(this.chatService.startKeepalive(eq(RUN_ID), any(SseChatEmitter.class), anyString(), eq(true)))
+			.thenAnswer(invocation -> TurnKeepalive.startWithStageFrame(RUN_ID,
+					invocation.getArgument(1, SseChatEmitter.class), scheduler, 5_000L,
+					invocation.getArgument(2, String.class)));
+	}
+
+	private List<String> stagePhases() {
+		return FrameContract.ofType(this.wire.frames(), FrameContract.HEARTBEAT).stream()
+			.map(frame -> String.valueOf(frame.get("phase")))
+			.toList();
+	}
+
+	/** 够 L2 切窗的长历史：7 轮旧正文 + 挂起轮的既有 7 段（共 8 段，keep-recent-turns=6 ⇒ 摘要 2 段）。 */
+	private void seedLongSuspendedRun() {
+		seedSuspendedRun();
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+		List<Message> older = new ArrayList<>();
+		for (int i = 1; i <= 7; i++) {
+			older.add(new UserMessage("旧问题 " + i));
+			older.add(AssistantMessage.builder().content("旧回答 " + i + " " + "答".repeat(20)).build());
+		}
+		older.addAll(history);
+		snapshot.setMessageJson(this.codec.serializeAll(older));
+		this.store.save(snapshot);
 	}
 
 	@Test

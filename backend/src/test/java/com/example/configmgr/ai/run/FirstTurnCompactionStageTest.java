@@ -57,8 +57,9 @@ import static org.mockito.Mockito.when;
  * <h2>被钉住的四件事（一条链，任一处退回去都红）</h2>
  * <ol>
  * <li><b>start 仍是首帧</b> —— 前移改变的是"它相对压缩的位置"，不是它的地位；</li>
- * <li><b>压缩阶段开始帧</b>（{@code heartbeat{phase=compacting}}）是第二帧，由<b>请求线程</b>在进入
- *     同步压缩<b>之前</b>发出；</li>
+ * <li><b>阶段帧</b>（{@code heartbeat{phase=streaming}}）是第二帧，由<b>请求线程</b>在进入
+ *     同步压缩<b>之前</b>发出 —— 普通轮（本例没有 L2 摘要）<b>不</b>出现 compacting；
+ *     "正在压缩"只属于真实 L2 模型摘要（见 {@link CompactionStageSignalTest}）；</li>
  * <li><b>同步压缩调用自身一帧不发</b>：快照建立那一刻的帧面恰好是 [start, 阶段帧]（压缩体若偷发
  *     任何帧，这里就会多出来）；</li>
  * <li><b>"已 start、快照未建"窗口真实存在</b>：建立快照时归档里已经有 start 与阶段帧 —— 这正是
@@ -173,12 +174,15 @@ class FirstTurnCompactionStageTest {
 	}
 
 	/**
-	 * 首轮：{@code start} 是首帧、阶段开始帧紧随其后且在同步压缩之前、压缩自身不发帧。
+	 * 首轮：{@code start} 是首帧、阶段帧紧随其后且在同步压缩之前、压缩自身不发帧。
 	 *
 	 * <p>断言对象是<b>客户端收到的那条帧流</b>与<b>建立快照那一刻的帧面</b>，不是"某个方法被调用过"。
+	 *
+	 * <p>2026-10-29 起阶段帧的相位是 {@code streaming}（普通请求不出现压缩/准备阶段条）；
+	 * 本例没有真实 L2 摘要，因此 {@code compacting} 一条都不该出现。
 	 */
 	@Test
-	void firstTurnEmitsStartThenTheCompactingStageBeforeTheSyncCompaction() {
+	void firstTurnEmitsStartThenTheStreamingStageBeforeTheSyncCompaction() {
 		stubFluentChain();
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
@@ -188,16 +192,18 @@ class FirstTurnCompactionStageTest {
 
 		List<Map<String, Object>> frames = wire.frames();
 		assertThat(FrameContract.types(frames))
-			.as("首帧仍是 start（前移的是位置，不是地位）；压缩阶段开始帧紧随其后")
+			.as("首帧仍是 start（前移的是位置，不是地位）；阶段帧紧随其后")
 			.containsExactly("start", "heartbeat", "message_start", "delta", "message_end", "done");
 
 		Map<String, Object> stage = frames.get(1);
-		assertThat(stage).containsEntry("phase", TurnKeepalive.PHASE_COMPACTING)
+		assertThat(stage).containsEntry("phase", TurnKeepalive.PHASE_STREAMING)
 			.containsEntry("elapsedMs", 0L)
 			.containsEntry("attempt", 0L)
 			.as("阶段帧走心跳通道：没有业务 seq")
 			.doesNotContainKey("seq");
 		assertThat(((Number) stage.get("heartbeatSeq")).longValue()).as("独立号空间从 1 起").isEqualTo(1L);
+		assertThat(FrameContract.types(frames)).as("没有真实 L2 摘要 ⇒ 不出现压缩阶段条")
+			.doesNotContain("compacting");
 
 		assertThat(this.store.framesObservedAtCreate.get())
 			.as("压缩 + 建快照期间只有 [start, 阶段帧]：同步压缩调用自身一帧不发")
@@ -243,7 +249,7 @@ class FirstTurnCompactionStageTest {
 		verify(this.chatModel, never()).stream(any(Prompt.class));
 
 		List<Map<String, Object>> frames = wire.frames();
-		assertThat(FrameContract.types(frames)).as("压缩后取消：只有 start / 压缩阶段帧 / 取消终帧")
+		assertThat(FrameContract.types(frames)).as("压缩后取消：只有 start / 阶段帧 / 取消终帧")
 			.doesNotContain("message_start", "delta", "error");
 		assertThat(FrameContract.oneOfType(frames, "done")).as("终态与终帧仍归既有取消收尾")
 			.containsEntry("cancelled", true);

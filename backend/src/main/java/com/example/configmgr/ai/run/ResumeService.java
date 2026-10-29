@@ -1798,13 +1798,14 @@ public class ResumeService {
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
 			ContextCompactor.Outcome compaction = null;
 			if (this.contextCompactor != null && !history.isEmpty()) {
-				// ===== AR-06 / Task 5 Step 3：续跑压缩同样是零帧窗口 =====
-				// 与首轮同构：阶段开始帧由<b>本线程</b>在进入同步压缩<b>之前</b>发出；压缩调用自身一帧不发；
-				// 压缩期的节拍只由 TurnKeepalive 的独立定时器产生（不依赖上游事件，也不依赖压缩进度回调）。
+				// ===== AR-06 / Task 5 Step 3 + 2026-10-29 压缩阶段信号批 =====
+				// 与首轮同构：初始相位是 streaming（普通续跑不出现任何压缩/准备阶段条）；压缩调用自身
+				// 一帧不发；只有真实 L2 模型摘要开始时才由 onSummaryStart 切到 compacting，摘要结束立刻
+				// 切回 streaming。压缩期的节拍只由 TurnKeepalive 的独立定时器产生（不依赖上游事件）。
 				// 保活句柄在压缩段结束处（finally）交出：交棒之后由驱动侧自己排一枚（driveResumed）。
 				TurnKeepalive keepalive = this.chatService == null || this.registry == null ? null
 						: this.chatService.startKeepalive(runId, this.registry.of(runId),
-								TurnKeepalive.PHASE_COMPACTING, true);
+								TurnKeepalive.PHASE_STREAMING, true);
 				try {
 					ContextState state = this.contextCompactor.readState(sessionId);
 					int systemTokens = 0;
@@ -1817,6 +1818,8 @@ public class ResumeService {
 					ProviderRuntime compactionRuntime = this.chatService == null ? null
 							: this.chatService.runtimeForCompaction(runId, snapshot.getProviderId(),
 									snapshot.getModelId());
+					Runnable onSummaryStart = keepalive == null ? null
+							: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
 					compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
 							runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
@@ -1825,7 +1828,12 @@ public class ResumeService {
 							// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s）。这个回调只刷新<b>业务活动锚点</b>
 							// （避免长压缩被别的实例判成僵尸并接管），它<b>不发帧</b> —— 压缩期的可见性由上面
 							// 那枚独立定时器的 stage 心跳承担（"压缩不伪称持续发帧"）。
-							() -> this.store.touchBusinessActivity(runId, System.currentTimeMillis()));
+							() -> this.store.touchBusinessActivity(runId, System.currentTimeMillis()),
+							onSummaryStart);
+					// 摘要结束（或压根没压）：立即恢复工作中，前端阶段条随即退场。
+					if (keepalive != null) {
+						keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+					}
 				}
 				finally {
 					if (keepalive != null) {

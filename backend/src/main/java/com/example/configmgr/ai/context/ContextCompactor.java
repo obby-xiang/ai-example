@@ -221,16 +221,16 @@ public final class ContextCompactor {
 	 * 写台账。任一 L2/L3 步骤失败 ⇒ 返回<b>原消息列表</b>（连 L1 那一步也不落地），fuse 计数 +1。
 	 */
 	public Outcome compact(Request request) {
-		return compact(request, null);
+		return compact(request, null, null);
 	}
 
 	/**
-	 * 压缩（带"每次摘要完成"进度回调；R1-09 M-1）。
+	 * 压缩（旧两参重载，保持兼容；等价于不带"摘要开始"回调）。
 	 *
 	 * <p>
-	 * <b>压缩自身不发任何帧</b>（Task 5 / AR-06 的口径："不伪称持续发帧"）：压缩期的可见性由调用方
-	 * 在进入本次同步调用前发出的阶段帧（{@code heartbeat{phase=compacting}}）与一枚<b>独立定时器</b>
-	 * （{@code TurnKeepalive}）承担，与压缩内部进度无关。
+	 * <b>压缩自身不主动发任何帧</b>（Task 5 / AR-06 的口径："不伪称持续发帧"）：压缩期的可见性由调用方
+	 * 提供的阶段回调（{@code onSummaryStart} → {@code heartbeat{phase=compacting}}，只属于真实 L2）
+	 * 与一枚<b>独立定时器</b>（{@code TurnKeepalive}）承担，与压缩内部进度无关。
 	 *
 	 * <p>
 	 * 本回调仍只做一件事：刷新<b>业务活动锚点</b>。L2 的 N 次串行摘要每次最长 60s，累计可能超过
@@ -240,6 +240,24 @@ public final class ContextCompactor {
 	 * @param onSummaryProgress 每次摘要尝试结束后的回调（null = 不回调；<b>不得</b>用它发帧）
 	 */
 	public Outcome compact(Request request, Runnable onSummaryProgress) {
+		return compact(request, onSummaryProgress, null);
+	}
+
+	/**
+	 * 压缩（带摘要进度回调 + <b>摘要开始</b>回调；2026-10-29 压缩阶段信号批）。
+	 *
+	 * <p>
+	 * {@code onSummaryStart} 只在<b>真正要调用 L2 摘要模型</b>之前触发一次（多分块摘要也只一次）：
+	 * 调用方据此把保活相位从 {@code streaming} 切到 {@code compacting}。以下情形<b>绝不</b>触发：
+	 * L1 工具结果清除、L3 硬截断（都是本地操作）、未达阈值、空历史、摘要器不可用、没有可摘要的旧轮、
+	 * 前缀主导降级 —— 用户因此不会在"没有模型摘要"的轮次里看到"正在压缩"。
+	 *
+	 * <p>回调抛异常不影响压缩结果（只记 DEBUG）：它是观测面，不是判定面。
+	 *
+	 * @param onSummaryProgress 每次摘要尝试结束后的回调（null = 不回调；<b>不得</b>用它发帧）
+	 * @param onSummaryStart    第一次真正调用摘要模型之前的回调（null = 不回调）
+	 */
+	public Outcome compact(Request request, Runnable onSummaryProgress, Runnable onSummaryStart) {
 		List<Message> original = request.messages() == null ? List.of() : request.messages();
 		ContextState state = readState(request.sessionId());
 		int limit = limitTokens(request.providerId(), request.model());
@@ -312,7 +330,10 @@ public final class ContextCompactor {
 		try {
 			if (target == ContextTrigger.Level.L2) {
 				reason = RollingSummarizer.REASON_SUMMARY;
-				RollingSummarizer.Summarizer summarizer = withProgress(this.summarizer, onSummaryProgress);
+				// 2026-10-29 压缩阶段信号批：摘要是唯一"真在压缩上下文"的动作 —— 只在第一次真正调用
+				// 摘要模型之前公告阶段。L1/L3（本地操作）、摘要器缺席、没有可摘要旧轮都静默。
+				RollingSummarizer.Summarizer summarizer = withStart(
+						withProgress(this.summarizer, onSummaryProgress), onSummaryStart);
 				if (summarizer == null || request.runtime() == null) {
 					// 摘要只使用本轮 provider/model/options：没有本轮 runtime 就不压，绝不回落全局默认
 					return failSummary(request, state, fuse, now, before, limit, decision, REASON_SUMMARY_UNAVAILABLE);
@@ -542,6 +563,31 @@ public final class ContextCompactor {
 		event.put("circuit", state.circuit() == null ? CompactionFuse.CLOSED : state.circuit());
 		event.put("fails", state.fuseFails());
 		return event;
+	}
+
+	/**
+	 * 给摘要器包一层"<b>第一次真正摘要之前</b>"回调（多分块摘要只触发一次）。
+	 *
+	 * <p>包装位置就是判据：只有摘要器真的被调用，回调才可能执行 —— L1/L3、未达阈值、摘要器不可用、
+	 * 没有可摘要旧轮等路径根本走不到 {@code summarize}，因此<b>不会</b>误报"正在压缩"。
+	 * 回调抛异常同样不改写摘要结果（只记 DEBUG）：它只负责阶段信号，不是判定面。
+	 */
+	private static RollingSummarizer.Summarizer withStart(RollingSummarizer.Summarizer delegate, Runnable hook) {
+		if (delegate == null || hook == null) {
+			return delegate;
+		}
+		java.util.concurrent.atomic.AtomicBoolean announced = new java.util.concurrent.atomic.AtomicBoolean();
+		return (systemPrompt, userPrompt, runtime) -> {
+			if (announced.compareAndSet(false, true)) {
+				try {
+					hook.run();
+				}
+				catch (RuntimeException ex) {
+					log.debug("摘要开始回调失败（忽略，不影响压缩）：{}", ex.getMessage());
+				}
+			}
+			return delegate.summarize(systemPrompt, userPrompt, runtime);
+		};
 	}
 
 	/**

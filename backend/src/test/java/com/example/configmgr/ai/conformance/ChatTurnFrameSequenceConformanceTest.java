@@ -11,6 +11,7 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.run.TurnKeepalive;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
@@ -65,15 +66,18 @@ import static org.mockito.Mockito.when;
  *
  * <h2>AR-06（批次3）：<b>首轮帧序已变</b>，本类不再声称"旧帧序不变"</h2>
  * 首帧 {@code start} 前移到请求前压缩之前，且压缩阶段的可见性由一条<b>心跳通道</b>的阶段帧承担
- * （{@code heartbeat{phase=compacting}}）。于是精确序列变了两处、类型集不变（仍是 16）：
+ * （{@code heartbeat{phase}}）。于是精确序列变了两处、类型集不变（仍是 16）：
  * <pre>
  * 旧（首轮）：[压缩…] start → context? → message_start → delta… → message_end → done
- * 新（首轮）：start → heartbeat{phase=compacting} → [压缩…] → context? → 正文三段式 → done
+ * 新（首轮）：start → heartbeat{phase=streaming} → [压缩…] → context? → 正文三段式 → done
  * </pre>
+ * 2026-10-29 压缩阶段信号批：普通轮的阶段相位是 {@code streaming}；只有真实 L2 模型摘要才切
+ * {@code compacting}（随后立即切回 {@code streaming}），L1/L3 本地操作静默 —— 本类的首轮用例没有
+ * L2，因此看不到 {@code compacting}。
  * 续跑（{@code driveResumed}）的形状不变：{@code start} 由原轮发出（归档里），续跑不重发；
- * 续跑压缩的阶段帧由 {@code ResumeService} 在进入同步压缩之前发（见 {@code ResumeContextCompactionTest}）。
- * 阶段帧是心跳：不占业务 {@code seq}、不入归档 ⇒ 回放断言里看不到它（"正在压缩"由重挂的
- * 202"准备中"给出，见 {@code AiControllerEventsPreparingTest}）。
+ * 续跑压缩的阶段相位由 {@code ResumeService} 在同一个保活句柄上切换（见
+ * {@code ResumeContextCompactionTest}）。阶段帧是心跳：不占业务 {@code seq}、不入归档 ⇒ 回放断言里
+ * 看不到它（"正在压缩"由重挂的 202"准备中"给出，见 {@code AiControllerEventsPreparingTest}）。
  */
 class ChatTurnFrameSequenceConformanceTest {
 
@@ -454,20 +458,22 @@ class ChatTurnFrameSequenceConformanceTest {
 	// ── AR-06（批次3）：首轮精确序列（start 前移 + 压缩阶段帧） ────────────────
 
 	/**
-	 * <b>【AR-06】首轮精确序列</b>：{@code start} → {@code heartbeat{phase=compacting}} → 正文三段式 → {@code done}。
+	 * <b>【AR-06 + 2026-10-29 阶段信号】首轮精确序列</b>：{@code start} → {@code heartbeat{phase=streaming}}
+	 * → 正文三段式 → {@code done}。
 	 *
 	 * <p>与旧帧序的差别只有两处，本用例就是这两处的可执行规格：
 	 * <ol>
 	 * <li>{@code start} 由"压缩之后"前移到"压缩<b>之前</b>"（首帧地位不变）；</li>
 	 * <li>{@code start} 与正文之间多了一条<b>心跳通道</b>的阶段帧 —— 不占业务 {@code seq}、不入归档，
-	 *     因此 16 帧类型集不变、回放里也看不到它。</li>
+	 *     因此 16 帧类型集不变、回放里也看不到它。相位是 {@code streaming}：本例没有真实 L2 摘要，
+	 *     {@code compacting} 不属于普通轮（见 {@code CompactionStageSignalTest}）。</li>
 	 * </ol>
 	 *
 	 * <p>kill：把 {@code out.start(...)} 挪回 {@code store.create(...)} 之后 ⇒ 第 2 项（heartbeat）变红；
 	 * 把阶段帧改成业务帧 ⇒ 归档里出现 heartbeat、业务 seq 出现洞，replay 断言变红。
 	 */
 	@Test
-	void firstTurnPutsStartThenTheCompactionStageFrameBeforeTheBody() {
+	void firstTurnPutsStartThenTheStreamingStageFrameBeforeTheBody() {
 		stubFluentChain();
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
@@ -478,7 +484,7 @@ class ChatTurnFrameSequenceConformanceTest {
 		assertThat(FrameContract.types(frames)).containsExactly("start", "heartbeat", "message_start", "delta",
 				"message_end", "done");
 		assertThat(frames.get(1)).as("阶段帧走心跳通道：没有业务 seq")
-			.containsEntry("phase", "compacting")
+			.containsEntry("phase", TurnKeepalive.PHASE_STREAMING)
 			.doesNotContainKey("seq");
 		List<Map<String, Object>> business = frames.stream()
 			.filter(frame -> !FrameContract.HEARTBEAT.equals(FrameContract.type(frame)))

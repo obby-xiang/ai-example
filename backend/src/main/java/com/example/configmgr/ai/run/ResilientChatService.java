@@ -605,20 +605,27 @@ public class ResilientChatService {
 		// 代价是必须同时定义"已 start、快照未建"这段的语义（不能只挪帧）：
 		// · 读侧：同一窗口里的重挂返回"准备中"（可重试 + 已用时间），<b>不</b>返回 404 / "轮不存在"
 		//   （见 AiController#events 的 preparing 分支）；
-		// · 出帧侧：start 仍是首帧；紧随一条 phase=compacting 的<b>心跳阶段帧</b>，由请求线程在进入
-		//   同步压缩<b>之前</b>发出 —— 压缩调用自身一帧不发（不伪称持续发帧）；
+		// · 出帧侧（2026-10-29 压缩阶段信号批）：start 仍是首帧；紧随一条 phase=<b>streaming</b> 的
+		//   心跳阶段帧。普通请求**不**改成任何压缩/准备相位 —— 没有压缩就没有阶段条，只剩"工作中"。
+		//   真实的 L2 模型摘要在 ContextCompactor 里通过 onSummaryStart 把相位切到 compacting
+		//   （见 compactBeforeRequest），L1/L3 本地操作静默；
 		// · 保活侧：压缩期的节拍由 TurnKeepalive 的独立定时器承担（不依赖上游事件）；
 		// · 异常侧：该窗口里抛错仍走控制器的"取消优先"终态守卫（无快照时禁止裸 save / 新建快照）。
 		// 取消登记一并前移：压缩期收到的取消同样必须生效（权威态在 Redis，登记只是同进程加速通道）。
 		this.cancellations.register(runId);
 		out.start(sessionId);
-		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_COMPACTING, true);
+		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, true);
 		// 驱动所有权（快照建好之后取得；压缩期还没有快照，接管方也无从判死这一轮）
 		DriveOwnership ownership = DriveOwnership.none();
 		try {
 			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
-					toolsTokens, 0);
+					toolsTokens, 0, keepalive);
 			memory = compaction.memory();
+			// 摘要结束（或压根没压）：立即回到 streaming，前端阶段条随即退场。
+			// 只在相位真的变过时才公告（L1/L3/未压缩路径的 streaming 是同相位，不重复出帧）。
+			if (keepalive != null) {
+				keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+			}
 
 			// ===== N4（返修）：压缩后、建快照前复查取消 =====
 			// 压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。这期间用户按下停止时，旧实现仍会接着
@@ -709,10 +716,6 @@ public class ResilientChatService {
 					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
 					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked,
 					runtime.providerCode(), queueMs);
-			// 压缩结束、进入模型生成阶段：同一枚定时器切相位（不重排、不抖动），后续节拍由它继续出帧。
-			if (keepalive != null) {
-				keepalive.phase(TurnKeepalive.PHASE_STREAMING);
-			}
 			// N4（返修）：交棒（runAttempts → 上游调用）前再复查一次 —— 覆盖压缩之后、快照建立/
 			// 用户历史落库期间的取消窗口；命中则就地取消收尾（快照已存在，写 CANCELLED + 唯一终帧），
 			// 不发起任何模型调用。
@@ -813,8 +816,8 @@ public class ResilientChatService {
 				this.properties.getResilience().getMaxAttempts(),
 				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
 		// 独立保活（AR-06 / Task 5 Step 3）：续跑的上游静默与慢工具同样需要保活。这里<b>不发</b>阶段开始帧
-		// —— 续跑的快照早已建立、start 也早已在归档里，阶段帧只属于"请求前压缩"那段（首轮/续跑压缩
-		// 各由自己的调用方在进入压缩之前发，见 chat() 与 ResumeService）。
+		// —— 续跑的快照早已建立、start 也早已在归档里；请求前压缩的阶段公告（只有真实 L2 才有）由
+		// 调用方 ResumeService 在同一个保活句柄上切相位完成。
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 		try {
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
@@ -836,9 +839,13 @@ public class ResilientChatService {
 	/**
 	 * 排一个<b>独立、可取消</b>的保活定时器（AR-06 / Task 5 Step 3）。
 	 *
-	 * @param announce {@code true} = 立刻由<b>当前调用线程</b>发阶段开始帧。调用方必须保证本方法
-	 * 返回之后才进入同步压缩调用（"阶段开始帧在同步压缩之前"）；{@code false} = 只排节拍
-	 * （续跑/生成阶段：start 早已在归档里，不需要额外的阶段公告）
+	 * @param phase 初始相位。首轮/续跑从这里开始都是 {@link TurnKeepalive#PHASE_STREAMING}
+	 * （普通请求不改成任何压缩/准备相位）；真实 L2 摘要开始时由
+	 * {@link ContextCompactor} 的 {@code onSummaryStart} 回调切到
+	 * {@link TurnKeepalive#PHASE_COMPACTING}，摘要结束立即切回
+	 * @param announce {@code true} = 立刻由<b>当前调用线程</b>发一条阶段帧（{@code elapsedMs=0}）。
+	 * 首轮/续跑用它把"这一轮已经在跑"先落进帧线（相位仍是 streaming）；{@code false} = 只排节拍
+	 * （{@code driveResumed} 的生成阶段：start 早已在归档里，不需要额外的阶段公告）
 	 * @return 定时器句柄（调用方在终态/异常/取消/park 四条出口停表；{@code null} 只在调度器缺失时）
 	 */
 	public TurnKeepalive startKeepalive(String runId, SseChatEmitter out, String phase, boolean announce) {
@@ -3283,7 +3290,8 @@ public class ResilientChatService {
 	 * 比不裁剪更坏。故"窗口改了"与"压缩改了"合并成<b>一次</b>覆盖写。
 	 */
 	private Compaction compactBeforeRequest(String runId, String sessionId, ProviderRuntime runtime,
-			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure) {
+			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure,
+			TurnKeepalive keepalive) {
 		int limit = this.contextCompactor == null ? 0
 				: this.contextCompactor.limitTokens(runtime.providerId(), runtime.modelId());
 		if (memory == null || memory.isEmpty()) {
@@ -3301,10 +3309,14 @@ public class ResilientChatService {
 		}
 		// ── ② 上下文压缩：按模型上限占比兜底（窗口之后的历史才是它的输入） ──
 		ContextState state = this.contextCompactor.readState(sessionId);
+		// 2026-10-29 压缩阶段信号批：只有真实 L2 模型摘要才切到 compacting（L1/L3 本地操作、摘要器缺席、
+		// 没有可摘要旧轮都不公告）；摘要一结束由调用方立刻切回 streaming。
+		Runnable onSummaryStart = keepalive == null ? null
+				: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
 		ContextCompactor.Outcome outcome = this.contextCompactor.compact(new ContextCompactor.Request(sessionId, runId,
 				runtime.modelId(), runtime.providerId(), windowed, this.codec.serializeAll(windowed), state.usedTokens(),
 				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
-				protectedIds, runtime));
+				protectedIds, runtime), null, onSummaryStart);
 		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
 		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
 		return new Compaction(finalMessages, limit, outcome);

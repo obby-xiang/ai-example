@@ -155,6 +155,60 @@ class TurnKeepaliveTest {
 		}
 	}
 
+	/**
+	 * 相位变化<b>立即公告</b>一次，同相位<b>不重复公告</b>。
+	 *
+	 * <p>会话口径：只有真实 L2 摘要开始时才从 {@code streaming} 切到 {@code compacting}
+	 * （多分块摘要只公告一次）；摘要结束切回 {@code streaming} 时同样立即公告 —— 前端的阶段条
+	 * 因此不必等下一拍（最长 5s 的假状态正是这条用例要挡住的）。
+	 *
+	 * <p>证红方式：{@link TurnKeepalive#phase(String)} 只改状态不公告 ⇒ 切相位后一条心跳都没有（旧实现）。
+	 */
+	@Test
+	void phaseChangeAnnouncesImmediatelyAndOnlyOnce() {
+		// 间隔取生产值：本用例只观察同步公告，不允许定时器插进来
+		TurnKeepalive keepalive = TurnKeepalive.start(RUN_ID, this.out, this.scheduler,
+				ResilientChatService.STREAMING_HEARTBEAT_MILLIS, TurnKeepalive.PHASE_STREAMING);
+		try {
+			assertThat(FrameContract.ofType(this.wire.frames(), FrameContract.HEARTBEAT)).isEmpty();
+
+			keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+			keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+			List<Map<String, Object>> beats = FrameContract.ofType(this.wire.frames(), FrameContract.HEARTBEAT);
+			assertThat(beats).as("切到 compacting 立即公告一次；同相位不重复公告").hasSize(1);
+			assertThat(beats.get(0)).containsEntry("phase", TurnKeepalive.PHASE_COMPACTING)
+				.containsEntry("elapsedMs", 0L);
+
+			keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+			beats = FrameContract.ofType(this.wire.frames(), FrameContract.HEARTBEAT);
+			assertThat(beats).as("摘要结束立即切回 streaming").hasSize(2);
+			assertThat(beats.get(1)).containsEntry("phase", TurnKeepalive.PHASE_STREAMING)
+				.containsEntry("elapsedMs", 0L);
+		}
+		finally {
+			keepalive.close();
+		}
+	}
+
+	/** 真实长摘要期间（compacting 相位）节拍照常：保活只看墙钟，不等摘要进度。 */
+	@Test
+	void longSummaryKeepsBeatingInCompactingPhase() {
+		TurnKeepalive keepalive = TurnKeepalive.start(RUN_ID, this.out, this.scheduler, BEAT_MS,
+				TurnKeepalive.PHASE_STREAMING);
+		try {
+			keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+			sleep(BEAT_MS * 5);
+			List<Map<String, Object>> beats = FrameContract.ofType(this.wire.frames(), FrameContract.HEARTBEAT);
+			assertThat(beats.size()).as("摘要期间至少还有两拍").isGreaterThanOrEqualTo(3);
+			assertThat(beats).allSatisfy(beat -> assertThat(beat)
+				.containsEntry("phase", TurnKeepalive.PHASE_COMPACTING)
+				.containsKeys("elapsedMs", "attempt", "heartbeatSeq"));
+		}
+		finally {
+			keepalive.close();
+		}
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	/** 等到心跳条数 >= target（最多 ~2s）；返回实际条数。 */

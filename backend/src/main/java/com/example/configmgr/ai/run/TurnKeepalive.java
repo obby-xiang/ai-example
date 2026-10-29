@@ -101,11 +101,32 @@ public final class TurnKeepalive implements AutoCloseable {
 		return keepalive;
 	}
 
-	/** 切阶段（{@code elapsedMs} 从此刻重新起算）。 */
+	/**
+	 * 切阶段：相位<b>真的改变</b>时立即公告一条 {@code elapsedMs=0} 的阶段帧，同相位不重复公告。
+	 *
+	 * <p>为什么"立即"而不是等下一拍：切回的时机是"真实 L2 摘要结束"，用户要的是"摘要一结束就回到
+	 * 工作中"。等定时器的下一拍（最长 {@code intervalMs}=5s）会出现一段假状态 —— 摘要已经结束，
+	 * 界面还停在"正在压缩"。同一相位的重复调用（多分块摘要每块一次）只公告一次。
+	 *
+	 * <p>停表/关闭之后不再公告（终帧之后不得有帧）。{@code elapsedMs} 从切换时刻重新起算，
+	 * 与定时器节拍共用同一个 {@link Stage} 起点。
+	 */
 	public void phase(String phase) {
-		Stage current = this.stage.get();
-		if (!phase.equals(current.phase())) {
-			this.stage.set(new Stage(phase, System.currentTimeMillis()));
+		if (phase == null || phase.isBlank()) {
+			return;
+		}
+		while (true) {
+			Stage current = this.stage.get();
+			if (phase.equals(current.phase())) {
+				return;
+			}
+			Stage next = new Stage(phase, System.currentTimeMillis());
+			if (this.stage.compareAndSet(current, next)) {
+				if (!this.closed.get()) {
+					emit(next.phase(), 0L);
+				}
+				return;
+			}
 		}
 	}
 

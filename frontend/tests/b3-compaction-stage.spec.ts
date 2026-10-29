@@ -100,6 +100,22 @@ describe('批次3 · 压缩阶段', () => {
     expect(store.contextUsage).toBeNull()
   })
 
+  it('streaming 心跳同时清掉准备中与压缩两个阶段（摘要结束立即恢复工作中）', () => {
+    const store = freshStore()
+    store.appendAssistantMessage('')
+    store.handleFrame(asFrame({ type: 'start', runId: 'run-s', sessionId: 'sess' }))
+    store.handleFrame(asFrame({ type: 'heartbeat', phase: 'compacting', elapsedMs: 3_000 }))
+    store.notePreparingHeartbeat('run-s', 1_000)
+
+    expect(store.compactionPhase).toBe('compacting')
+    expect(store.preparingRun).not.toBeNull()
+
+    store.handleFrame(asFrame({ type: 'heartbeat', phase: 'streaming', elapsedMs: 0 }))
+
+    expect(store.preparingRun).toBeNull()
+    expect(store.compactionPhase).toBe('done')
+  })
+
   it('终帧收口压缩阶段，不让完成提示跨轮残留', () => {
     const store = freshStore()
     store.appendAssistantMessage('')

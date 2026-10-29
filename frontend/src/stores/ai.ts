@@ -8268,7 +8268,7 @@ export const useAiStore = defineStore('ai', {
             message.runId = frame.runId
           }
           // 批次3：start 仍是首帧（压缩已前移到它之后）—— 新轮的阶段态从零开始；
-          // "已 start、快照未建"随首个 compacting/preparing 心跳重新落位。
+          // 普通轮的 streaming 心跳不改任何阶段条；只有真实 L2 的 compacting 心跳才落"正在压缩"。
           this.resetCompactionProgress()
           this.clearPreparingRun()
           // 批次3 / AR-06：runId 一到就落一次镜像。否则刷新落在节流窗口（300ms）内时，
@@ -8497,7 +8497,9 @@ export const useAiStore = defineStore('ai', {
               this.notePreparingHeartbeat(runId, heartbeatElapsedMs(frame))
             }
           } else if (frame.phase === 'streaming') {
-            // 压缩后恢复上游流：若 compacting 完成帧（context）缺失，以这条心跳作为完成信号。
+            // 压缩后恢复上游流：阶段条**立即**退场 —— 压缩完成帧（context）可能缺失，
+            // 而"准备中"也是同一段窗口的残留。两条阶段态一起清，之后只保留"工作中"。
+            this.clearPreparingRun()
             this.markCompactionDone()
           }
           break
