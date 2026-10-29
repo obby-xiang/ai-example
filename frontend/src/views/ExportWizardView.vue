@@ -2378,6 +2378,16 @@ function registerHandlers(): void {
     if (!defCode) {
       return '缺少 defCode，未设置条件'
     }
+    // R5：`conditions` 必填 —— 漏参（缺键 / undefined / null）必须明确失败，不能走
+    // `validateConditionPayload(undefined)` 的"无法序列化"模糊文案，更不能补 `{}` 当清空。
+    if (!Object.prototype.hasOwnProperty.call(payload, 'conditions')
+      || payload.conditions === undefined
+      || payload.conditions === null) {
+      return {
+        ok: false,
+        reason: '缺少 conditions（查询条件对象；清空条件请显式传空对象）：本次未设置查询条件（未落库、未改动页面条件）'
+      }
+    }
     // 先校验、后写（R4 返修）：统一复用契约层同一个载荷校验 —— `validateConditionPayload`
     // 内含 `parseConditionJson → draftModelFromCondition → buildConditionOutcome`，并**先做**
     // 结构完整性检查。旧实现只靠 `parseConditionJson` 的 null：空串 / 坏 JSON / 非对象 /

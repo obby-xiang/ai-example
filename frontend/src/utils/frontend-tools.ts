@@ -1250,7 +1250,11 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
     handlerNames: ['export.setConditions'],
     toUiEvent: (args) => {
       const defCode = typeof args.defCode === 'string' ? args.defCode : ''
-      return defCode === '' ? null : { type: 'set_conditions', defCode, conditions: args.conditions ?? {} }
+      // R5：`conditions` 必填 —— 漏参**不得**补成 `{}`（那会被契约层当成「显式清空」）。
+      // 缺参在此返回 null，走「参数不完整」失败文案（零写）。
+      return defCode === '' || !hasExplicitConditionPayload(args)
+        ? null
+        : { type: 'set_conditions', defCode, conditions: args.conditions }
     }
   },
   {
@@ -1308,7 +1312,7 @@ const WORKSPACE_ACTION_REQUIRED_ARGS: Readonly<Record<string, string>> = {
   navigate_to: '缺少 page（页面标识：tasks / export / import / definitions / data）',
   restore_task: '缺少 taskId 或它不是数字',
   select_definitions: '缺少 codes（配置项编码列表，不能为空）',
-  set_condition: '缺少 defCode 或 conditions.fields',
+  set_condition: '缺少 defCode 或 conditions（查询条件对象；清空条件请显式传空对象）',
   confirm_step: '缺少 step（目标步骤标识）'
 }
 
@@ -1321,7 +1325,7 @@ const UI_EVENT_REQUIRED_ARGS: Readonly<Record<string, string>> = {
   restore_task: '缺少 taskId 或它不是数字',
   goto_step: '缺少 step 或它是空串',
   select_defs: '缺少 defCodes 或它不是数组',
-  set_conditions: '缺少 defCode 或它是空串',
+  set_conditions: '缺少 defCode / conditions（查询条件对象；清空条件请显式传空对象），或 defCode 是空串',
   set_import_mode: '缺少 mode 或它不是 MERGE / REPLACE',
   run_job: '缺少 taskId 或 jobType（EXPORT / PRECHECK / IMPORT / PUBLISH）',
   cancel_job: '缺少 jobId 或它不是数字',
@@ -1424,7 +1428,8 @@ function normalizeActionArgs(action: WorkspaceAction, args: Record<string, unkno
     case 'select_definitions':
       return { defCodes: toStringList(args.codes ?? args.defCodes), mode: args.mode === 'ADD' ? 'ADD' : 'REPLACE' }
     case 'set_condition':
-      return { defCode: args.defCode ?? '', conditions: args.conditions ?? {} }
+      // R5：原样透传（不补 {}）—— 漏参由页面 handler 显式拒绝，绝不替调用方清空
+      return { defCode: args.defCode ?? '', conditions: args.conditions }
     case 'confirm_step':
       return { step: args.step ?? '' }
     default:
@@ -1435,6 +1440,18 @@ function normalizeActionArgs(action: WorkspaceAction, args: Record<string, unkno
 function toNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+/**
+ * `conditions` 是否**显式提供**（`{}` 算提供；缺键 / `undefined` / `null` 都不算）。
+ *
+ * 为什么必须区分：`conditions` 是设置条件的**必填载荷**，只有显式 `{}` 才表示清空条件。
+ * 用 `args.conditions ?? {}` 兜底会把一次漏参静默变成清空（= 导出全量）。
+ */
+function hasExplicitConditionPayload(args: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(args, 'conditions')
+    && args.conditions !== undefined
+    && args.conditions !== null
 }
 
 function toStringList(value: unknown): string[] {
@@ -1855,8 +1872,9 @@ function toUiEvent(name: UiEvent['type'], args: Record<string, unknown>): UiEven
     }
     case 'set_conditions': {
       const defCode = args.defCode
-      return typeof defCode === 'string' && defCode !== ''
-        ? { type: 'set_conditions', defCode, conditions: args.conditions ?? {} }
+      // R5：`conditions` 必填（缺参 → null → 参数不完整失败，不补 {} 当清空）
+      return typeof defCode === 'string' && defCode !== '' && hasExplicitConditionPayload(args)
+        ? { type: 'set_conditions', defCode, conditions: args.conditions }
         : null
     }
     case 'set_import_mode': {

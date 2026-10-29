@@ -494,11 +494,11 @@ describe('RC-3：前端工具参数错误文案人话化（任何路径不内嵌
     expect(text).not.toContain('\"')
   }
 
-  it('工作区动作 set_condition 缺参 ⇒ 「缺少 defCode 或 conditions.fields」', async () => {
+  it('工作区动作 set_condition 缺参 ⇒ 「缺少 defCode 或 conditions」', async () => {
     useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'QUERY_COND', taskId: 7 })
     const execution = await executeFrontendTool({ name: 'set_condition', args: {} })
     expect(execution.outcome).toBe('failed')
-    expectHumanText(execution.result, '设置查询条件的参数不完整：缺少 defCode 或 conditions.fields')
+    expectHumanText(execution.result, '设置查询条件的参数不完整：缺少 defCode 或 conditions（查询条件对象；清空条件请显式传空对象）')
   })
 
   it('工作区动作 navigate_to 缺参 ⇒ 指名 page（不再回显参数对象）', async () => {
