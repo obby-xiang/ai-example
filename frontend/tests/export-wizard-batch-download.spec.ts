@@ -85,6 +85,25 @@ const FILES = [
 ]
 
 /**
+ * 定义列表：下载/打包要求字段可用（`buildXlsx` 对 0 字段 fail-closed —— 不产出空文件）。
+ * 本夹具只关心数量分流与下载计数，字段内容不参与断言。
+ */
+const DEFS = [
+  {
+    code: 'DEMO',
+    name: '演示配置',
+    level: 'GLOBAL',
+    fields: [{ defCode: 'DEMO', code: 'code', label: '编码', fieldType: 'STRING', required: false, key: true, sortOrder: 1 }]
+  },
+  {
+    code: 'CURR',
+    name: '币种',
+    level: 'GLOBAL',
+    fields: [{ defCode: 'CURR', code: 'code', label: '编码', fieldType: 'STRING', required: false, key: true, sortOrder: 1 }]
+  }
+]
+
+/**
  * 字节源在本夹具里固定走 `tasksApi.downloadFile`：结果表格挂在 `el-tabs` / `el-tab-pane` 插槽内，
  * 而本仓库测试不装 element-plus（未解析组件把插槽内容丢弃）⇒ `gridRefs` 为空，`buildXlsx` 取
  * "文件回落"支。两支路同名同源（都取该配置的当前导出结果），"逐码取字节"的计数断言不受影响。
@@ -111,7 +130,7 @@ beforeEach(() => {
   api.downloadFile.mockResolvedValue(new Blob(['x']))
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
-  api.listDefinitions.mockResolvedValue([])
+  api.listDefinitions.mockResolvedValue(DEFS)
   api.zipBlobs.mockImplementation(async (entries: Array<{ name: string; blob: Blob }>) => {
     return new Blob([`zip:${entries.length}`])
   })

@@ -142,10 +142,27 @@ export interface ConditionDraft {
   value2: string
 }
 
-/** 表单模型：字段编码 → 草案；scopeKeys 为范围（地区/项目编码）多选。 */
+/**
+ * 表单模型：字段编码 → 草案；scopeKeys 为范围（地区/项目编码）多选。
+ *
+ * `fields` 每个字段只放得下**一条**草案，因此并非所有后端条件都表达得出来（同字段多条件、
+ * IN 取值里含分隔符等）。这类条件下的逆映射必须是无损的：模型把原始条件原样带在
+ * {@link ConditionDraftModel.verbatim} 上，`buildConditionOutcome` 直接返回它；落库方据
+ * 「是否带 verbatim」判断能否用草案覆盖服务端（不等价禁止覆盖）。
+ */
 export interface ConditionDraftModel {
   scopeKeys: string[]
   fields: Record<string, ConditionDraft>
+  /**
+   * 草案无法无损表达时保留的**原始条件**（`draftModelFromCondition` 写入）。
+   *
+   * 存在即代表：这份模型的重建结果与服务端条件不是一一对应，任何"按草案重建再 PUT"的写入
+   * 都会换义（多值 IN 压成逗号串、同字段多条件只剩第一条）。因此：
+   * - 重建口径（{@link buildConditionOutcome}）直接返回本字段，保证"往返"等价；
+   * - 落库方在模型未被真正改动时不得覆盖服务端；
+   * - 用户/AI 改过条件（换了一份新模型）后本字段消失，按新草案落库。
+   */
+  verbatim?: FieldQueryCondition
 }
 
 /** 空草案模型。 */
@@ -236,14 +253,21 @@ function expandFields(model: ConditionDraftModel): {
       }
       continue
     }
+    if (operator === 'IN') {
+      // 表单以逗号串承载多选（`ConditionForm` 的 placeholder 同口径），但后端 IN 的口径是
+      // **数组**（`ConditionEvaluator.matchesOp` 的 List 分支）：压成单个字符串会退化成
+      // "整串等于行值"（几乎必不命中）。这里拆回数组，空列表仍判非法（不得静默变全量）。
+      const values = draft.value.split(',').map((item) => item.trim()).filter((item) => item !== '')
+      if (values.length === 0) {
+        issues.push({ fieldCode, operator, code: 'EMPTY_IN', value: '' })
+        continue
+      }
+      conditions.push({ fieldCode, operator, value: values })
+      continue
+    }
     const value = draft.value.trim()
     if (value === '') {
-      issues.push({
-        fieldCode,
-        operator,
-        code: operator === 'IN' ? 'EMPTY_IN' : 'EMPTY_VALUE',
-        value
-      })
+      issues.push({ fieldCode, operator, code: 'EMPTY_VALUE', value })
       continue
     }
     conditions.push({ fieldCode, operator, value })
@@ -268,8 +292,15 @@ export function buildFieldConditions(model: ConditionDraftModel): FieldCondition
  *
  * `invalid` 时 `condition` 恒为 null，但**不能**当成"无条件"使用（那正是导出全量的来源）；
  * 调用方必须阻断并成文 `issues`。
+ *
+ * 模型带 `verbatim`（草案无法无损表达的原始条件）时直接返回它：那才是这份条件的事实，
+ * 按有损草案重建出来的东西不是。
  */
 export function buildConditionOutcome(model: ConditionDraftModel): ConditionBuildOutcome {
+  const verbatim = model.verbatim
+  if (verbatim && !isConditionEmpty(verbatim)) {
+    return { status: 'ok', condition: verbatim, issues: [] }
+  }
   const { conditions, issues } = expandFields(model)
   if (issues.length > 0) {
     return { status: 'invalid', condition: null, issues }
@@ -495,7 +526,13 @@ export function displayFieldValue(field: ConfigField, value: unknown): string {
   return String(value)
 }
 
-/** 单个条件值 → 表单文本（数组按 IN 的逗号约定回写）。 */
+/**
+ * 单个条件值 → 表单文本（数组按 IN 的逗号约定回写）。
+ *
+ * 逗号是**表单承载约定**，不是后端口径：`expandFields` 会把 IN 的逗号串拆回数组。
+ * 值本身含逗号时拆分会变义，这类条件由 {@link draftModelFromCondition} 的等价判定兜住
+ * （往返不等价 ⇒ 保留原始条件）。
+ */
 function draftValue(value: unknown): string {
   if (value === null || value === undefined) {
     return ''
@@ -506,11 +543,81 @@ function draftValue(value: unknown): string {
   return String(value)
 }
 
+/** 条件值的比较串：后端逐条 AND、按字符串比较（`toString`），IN 的列表视为无序集合。 */
+function canonicalValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '\u0000null'
+  }
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map((item) => (item === null || item === undefined ? '\u0000null' : String(item))).sort())
+  }
+  return String(value)
+}
+
+/** 单条字段条件的比较键（字段 + 算子 + 归一化取值）。 */
+function fieldConditionKey(field: FieldCondition): string {
+  return `${field.fieldCode}\u0000${String(field.operator).toUpperCase()}\u0000${canonicalValue(field.value)}`
+}
+
+/**
+ * 两份条件是否**语义等价**（落库前"能不能用这份覆盖那份"的判据）。
+ *
+ * 口径：
+ * - `scopeKeys` 按集合比较；字段条件按**多重集**比较（后端逐条 AND ⇒ 顺序无关）；
+ * - 取值按后端字符串比较口径归一（`100` 与 `"100"` 同值；IN 的数组顺序无关）。
+ *
+ * 它比"逐字节相等"宽松一点（顺序/标量文字形态不算换义），但比"草案重建完事"严格：
+ * 类型变化（`IN` 数组 → 逗号串）、条目丢失、取值被拆散都会判不等价。
+ */
+export function conditionsEquivalent(
+  a: FieldQueryCondition | null | undefined,
+  b: FieldQueryCondition | null | undefined
+): boolean {
+  if (isConditionEmpty(a) || isConditionEmpty(b)) {
+    return isConditionEmpty(a) && isConditionEmpty(b)
+  }
+  const aScope = new Set(a?.scopeKeys ?? [])
+  const bScope = new Set(b?.scopeKeys ?? [])
+  if (aScope.size !== bScope.size || [...aScope].some((key) => !bScope.has(key))) {
+    return false
+  }
+  const countKeys = (condition: FieldQueryCondition | null | undefined): Map<string, number> => {
+    const counts = new Map<string, number>()
+    for (const field of condition?.fields ?? []) {
+      const key = fieldConditionKey(field)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }
+  const aCounts = countKeys(a)
+  const bCounts = countKeys(b)
+  if (aCounts.size !== bCounts.size) {
+    return false
+  }
+  for (const [key, count] of aCounts) {
+    if (bCounts.get(key) !== count) {
+      return false
+    }
+  }
+  return true
+}
+
+/** 两份草案的**内容**是否相同（scopeKeys + 逐字段草案；忽略 `verbatim` 这类元信息）。 */
+export function draftContentEqual(a: ConditionDraftModel, b: ConditionDraftModel): boolean {
+  return JSON.stringify({ scopeKeys: a.scopeKeys, fields: a.fields })
+    === JSON.stringify({ scopeKeys: b.scopeKeys, fields: b.fields })
+}
+
 /**
  * 后端条件 → 表单草案模型（恢复向导 / 详情回显 / AI 回填共用）。
  *
  * 同一个字段上的 GTE+LTE 合并回一个 `BETWEEN` 草案（`buildFieldConditions` 的逆运算），
  * 其余操作符原样保留；空条件返回空模型。
+ *
+ * **无损纪律**：每字段只放得下一条草案，所以逆映射不是天然的一一对应。构建完立即做一次
+ * 往返等价判定；不等价（同字段多条件、IN 取值含逗号、类型/空值等）时把原始条件挂到
+ * {@link ConditionDraftModel.verbatim}，后续任何重建都返回原条件、落库方也不会用它覆盖
+ * 服务端（否则 `confirm_step` 会把 AI 设的条件换义）。
  */
 export function draftModelFromCondition(condition: FieldQueryCondition | null | undefined): ConditionDraftModel {
   const model = emptyDraftModel(condition?.scopeKeys ?? [])
@@ -539,6 +646,13 @@ export function draftModelFromCondition(condition: FieldQueryCondition | null | 
       operator: first.operator,
       value: draftValue(first.value),
       value2: ''
+    }
+  }
+  if (condition && !isConditionEmpty(condition)) {
+    const rebuilt = buildConditionOutcome(model).condition
+    if (!conditionsEquivalent(condition, rebuilt)) {
+      // 冻结一份：调用方（工作区 / 落库）可能继续持有原对象，别名会让两处互相改
+      model.verbatim = JSON.parse(JSON.stringify(condition)) as FieldQueryCondition
     }
   }
   return model

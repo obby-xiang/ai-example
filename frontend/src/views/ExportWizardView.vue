@@ -173,6 +173,7 @@ import {
   assertConditionBuildable,
   buildConditionOutcome,
   buildQueryCondition,
+  draftContentEqual,
   draftModelFromCondition,
   emptyDraftModel,
   InvalidConditionInputError,
@@ -458,6 +459,45 @@ function defName(code: string): string {
 
 function fieldsOf(code: string): readonly ConfigField[] {
   return defOf(code)?.fields ?? []
+}
+
+/**
+ * `select_definitions` 的编码校验（按**当前**定义列表，唯一判据）。
+ *
+ * 模型给的编码可能拼错、是幻觉、或指向已删除的定义。旧实现照单全收：回执「已选择配置项：
+ * NOT_A_DEF」、工作区 `extra.selectedDefs` 与后续 `persistStepData` 都带着一个不存在的配置项。
+ *
+ * @returns `null` = 全部编码可用；否则为可直接回灌的失败原因（点名无效码 + 可用码清单）
+ */
+function selectDefsProblem(codes: readonly string[]): string | null {
+  const available = defs.value.map((item) => item.code)
+  if (defs.value.length === 0) {
+    return `配置定义列表${defsLoading.value ? '仍在加载' : '不可用'}，无法确认 ${codes.join('、')} 是否为可用编码`
+      + `（可用编码：${available.join('、') || '（无）'}）。本次未改动所选配置项，也未落库。`
+  }
+  const invalid = codes.filter((code) => defOf(code) === null)
+  if (invalid.length === 0) {
+    return null
+  }
+  return `无效配置编码 ${invalid.join('、')}：当前定义列表里没有这些编码。`
+    + `可用编码：${available.join('、') || '（无）'}。本次未改动所选配置项，也未落库。`
+}
+
+/**
+ * 字段可用性（载入 / 下载 / 保存的公共前置）。
+ *
+ * 0 字段的含义是「**不知道**列映射」（定义列表未加载/加载失败，或该定义确实没有字段），
+ * 不是"一张空表"：`loadFromXlsx(blob, [])` 会按 0 列载入并回报成功，随后 `toXlsxBlob()`
+ * 产出的是空工作簿 —— 下载给用户空文件，保存则用空文件覆盖服务端真实导出结果。
+ */
+function fieldsUnavailableReason(code: string): string | null {
+  if (defOf(code) === null) {
+    return `配置定义 ${code} 不在当前定义列表里（定义列表可能尚未加载或加载失败）`
+  }
+  if (fieldsOf(code).length === 0) {
+    return `配置定义 ${code} 没有字段`
+  }
+  return null
 }
 
 /**
@@ -974,6 +1014,12 @@ async function persistStepData(
       // `InvalidConditionInputError` 由下方 catch 统一成文（condErrors + 阻断建作业），
       // 绝不把"非法空输入"当"全部数据"落库（否则一次切步就变成全量导出）。
       const condition = assertConditionBuildable(model)
+      // 不等价禁止覆盖（AI 向导数据正确性）：草案带 `verbatim` 说明它无法无损表达服务端条件
+      // （多值 IN、同字段多条件…）。未真正改动过时一律不写 —— 按草案重建再 PUT 就是把
+      // `IN [...]` 压成逗号串、把同字段多条件丢掉。
+      if (!touchedConditions.has(code) && model.verbatim !== undefined) {
+        continue
+      }
       // 草案未改且解析为空 ⇒ **什么都不写**。服务端可能已有 AI 设置的条件（页面草案只是
       // 还没载入/没回填）；这里一度无条件下发 `{}`，等于把"AI 说设了条件"改成"无条件导出全量"。
       // 草案改过的（用户/AI 动过表单，含"故意清空"）与非空条件照原样落库。
@@ -1019,8 +1065,18 @@ async function persistStepData(
 /**
  * 条件表单改动（用户 / AI 回填都走这里）：写入草案模型并清掉该配置项上一次的服务端错误
  * —— 陈旧告警会误导模型「仍然不合法」（挂账 L-67）。
+ *
+ * **无损纪律**：带 `verbatim` 的草案是"无法用表单行表达的服务端条件"，而 `ConditionForm`
+ * 在回填时会按行重建一份新模型（不带 `verbatim`）。内容没变就只是**显示回写**，不能当成
+ * 一次真实改动（否则下一次切步就会用有损草案覆盖服务端）。
  */
 function onConditionChange(code: string, value: ConditionDraftModel): void {
+  const previous = draftModels[code]
+  if (previous?.verbatim !== undefined && draftContentEqual(previous, value)) {
+    draftModels[code] = { ...value, verbatim: previous.verbatim }
+    delete condErrors[code]
+    return
+  }
   draftModels[code] = value
   // 改过就登记：即使改成了空条件，也要落库（"故意清空"是用户的显式决定，不能被当成"未改"跳过）
   touchedConditions.add(code)
@@ -1373,6 +1429,15 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   if (!grid) {
     return { ok: false, error: `${code} 的结果表格组件未挂载（请重开该标签页重试）` }
   }
+  // 字段闸（fail-closed）：0 字段时 `loadFromXlsx` 会"成功"载入一张 0 列的表，随后
+  // `toXlsxBlob()` 是空工作簿 —— 下载给用户空文件、保存则覆盖服务端真实结果。
+  const fieldsProblem = fieldsUnavailableReason(code)
+  if (fieldsProblem !== null) {
+    const reason = `${fieldsProblem}：无法把结果文件映射成表格列，本次未按 0 字段载入（否则会产出空文件）`
+      + '。请确认定义列表已加载后重试'
+    ElMessage.error(reason)
+    return { ok: false, error: reason }
+  }
   try {
     const blob = await tasksApi.downloadFile(forTask, code)
     // 下载在途时换了任务：旧任务的字节不得画进新任务的面板
@@ -1455,6 +1520,14 @@ async function buildXlsx(code: string): Promise<XlsxSource> {
   const item = exportResults.value.find((entry) => entry.defCode === code)
   const fileName = item?.fileName ?? xlsxFileName(code, defName(code))
   const rowCount = item?.rowCount ?? 0
+  // 字段闸（fail-closed）：0 字段时表格里没有任何列，`toXlsxBlob()` 是空工作簿；服务端回落
+  // 也无法确认内容口径 ⇒ 一律失败，绝不产出空文件（否则"下载"给用户一个空 xlsx，
+  // 或让上游把这批空字节当成新结果）。
+  const fieldsProblem = fieldsUnavailableReason(code)
+  if (fieldsProblem !== null) {
+    throw new Error(`${fieldsProblem}：无法构建 ${code} 的导出文件（不产出空文件）。`
+      + '请确认定义列表已加载后重试')
+  }
   // 任务号与代次在**入口**捕获：`ensureGridLoaded` / `toXlsxBlob` / 回落下载都是 await，
   // 期间换任务会把 A 的表格字节（或 A 的结果文件）当成 B 的文件交出去。代次一变即中止。
   const generation = taskGeneration
@@ -1803,6 +1876,8 @@ interface SaveOutcome {
   saved: string[]
   skipped: string[]
   invalid: string[]
+  /** 定义字段不可用（0 字段）而拒绝写回的配置项 —— 与"未载入"分开，原因不同 */
+  unsupported?: string[]
   reason?: string
 }
 
@@ -1823,6 +1898,7 @@ async function saveEdits(): Promise<SaveOutcome> {
   const saved: string[] = []
   const skipped: string[] = []
   const invalid: string[] = []
+  const unsupported: string[] = []
   let aborted = false
   let failed: string | null = null
   try {
@@ -1834,6 +1910,14 @@ async function saveEdits(): Promise<SaveOutcome> {
       const grid = gridRefs[item.defCode]
       if (!grid || !loadedGrids.has(item.defCode)) {
         skipped.push(item.defCode)
+        continue
+      }
+      // 字段闸（fail-closed）：0 字段的表 `toXlsxBlob()` 是空工作簿，PUT 上去就是用空文件
+      // 覆盖服务端真实导出结果。载入闸已挡住这种表格，这里是写回前的最后一道。
+      const fieldsProblem = fieldsUnavailableReason(item.defCode)
+      if (fieldsProblem !== null) {
+        unsupported.push(item.defCode)
+        ElMessage.warning(`${fieldsProblem}：本次未写回 ${item.defCode}（否则会用空文件覆盖服务端导出结果）`)
         continue
       }
       const issues = grid.validateLocal()
@@ -1868,13 +1952,16 @@ async function saveEdits(): Promise<SaveOutcome> {
   }
   if (aborted) {
     ElMessage.warning('任务已切换，本次保存中止（未把上一个任务的内容写到新任务上）')
-    return { ok: false, saved, skipped, invalid, reason: t('views.export.msg.saveAborted') }
+    return { ok: false, saved, skipped, invalid, unsupported, reason: t('views.export.msg.saveAborted') }
   }
-  const incomplete = skipped.length + invalid.length
+  const incomplete = skipped.length + invalid.length + unsupported.length
   if (failed !== null || incomplete > 0) {
     const parts: string[] = []
     if (saved.length > 0) {
       parts.push(t('views.export.msg.savePartSaved', { count: saved.length, codes: saved.join('、') }))
+    }
+    if (unsupported.length > 0) {
+      parts.push(`${unsupported.join('、')} 的配置定义字段不可用（未写回，避免空文件覆盖服务端导出结果）`)
     }
     if (invalid.length > 0) {
       parts.push(t('views.export.msg.savePartInvalid', { count: invalid.length, codes: invalid.join('、') }))
@@ -1887,7 +1974,7 @@ async function saveEdits(): Promise<SaveOutcome> {
     }
     const reason = t('views.export.msg.saveIncomplete', { parts: parts.join('; ') })
     ElMessage.warning(reason)
-    return { ok: false, saved, skipped, invalid, reason }
+    return { ok: false, saved, skipped, invalid, unsupported, reason }
   }
   gridDirty = false
   ElMessage.success(t('views.export.msg.savedToServer'))
@@ -2047,6 +2134,18 @@ async function preflightDownload(
         + `请在任务 #${taskId.value} 上完成上述配置的导出后重试，或核对传入的 taskId 与 defCodes；本次未触发下载`
     }
   }
+  // 字段闸（fail-closed）：定义列表不可用 / 该定义没有字段时无法确认表格列，`buildXlsx` 会
+  // 直接失败（不产出空文件）—— 把它前移到前置校验，AI 拿到的是确定性失败而不是"已发起下载"。
+  const unusable = defCodes
+    .map((code) => [code, fieldsUnavailableReason(code)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== null)
+  if (unusable.length > 0) {
+    return {
+      ok: false,
+      message: `${unusable.map(([code, reason]) => `${code}：${reason}`).join('；')}。`
+        + '没有字段就无法确认导出文件的表格列，无法构建文件（不产出空文件）；本次未触发下载'
+    }
+  }
   // 施工卡 §S3e：切页属"让用户看到下载发生的位置"，只读态（任务已结束）必须走零写的 `viewStep`
   if (stepIndex.value !== 2) {
     if (isReadOnly.value) {
@@ -2161,7 +2260,17 @@ function registerHandlers(): void {
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
     }
-    const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
+    const codes = Array.isArray(payload.defCodes)
+      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
+      : []
+    if (codes.length === 0) {
+      return { ok: false, reason: '未指定任何配置项（codes 为空）：本次未改动所选配置项，也未落库。' }
+    }
+    // 编码必须存在于**当前**定义列表：非法码不写选中集、不收敛工作区、不落库
+    const problem = selectDefsProblem(codes)
+    if (problem !== null) {
+      return { ok: false, reason: problem }
+    }
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     for (const code of codes) {
       draftModels[code] = draftModels[code] ?? emptyDraftModel()
@@ -2253,6 +2362,12 @@ function registerHandlers(): void {
         ok: false,
         reason: `当前激活的表格是 ${activeTab.value || '无'}，不是 ${code}。请先切换到该配置的结果标签页。`
       }
+    }
+    // 字段闸（fail-closed）：0 字段 = 表格没有任何可映射的列，交出适配器等于让工具在"空表"上
+    // 读成 0 行、写进不存在的列。先如实拒绝。
+    const fieldsProblem = fieldsUnavailableReason(code)
+    if (fieldsProblem !== null) {
+      return { ok: false, reason: `${fieldsProblem}：表格列映射不可用，本次不交出表格能力。请确认定义列表已加载后重试。` }
     }
     const grid = gridRefs[code]
     if (!grid || typeof grid.getSheetAdapter !== 'function') {

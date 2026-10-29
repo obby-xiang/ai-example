@@ -84,6 +84,16 @@ const TASK_7 = {
   currentStep: 'SELECT_DEFS'
 }
 
+/** 定义列表必须可用（0 字段 ⇒ 下载/载入 fail-closed 会抢在本用例要验的闸门之前）。 */
+const DEFS = [
+  {
+    code: 'DEMO',
+    name: '演示配置',
+    level: 'GLOBAL',
+    fields: [{ defCode: 'DEMO', code: 'code', label: '编码', fieldType: 'STRING', required: false, key: true, sortOrder: 1 }]
+  }
+]
+
 async function mountWizard(): Promise<void> {
   shallowMount(ExportWizardView, { global: { plugins: [createPinia()] } })
   await flushPromises()
@@ -100,7 +110,7 @@ beforeEach(() => {
   api.downloadFile.mockResolvedValue(new Blob(['x']))
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
-  api.listDefinitions.mockResolvedValue([])
+  api.listDefinitions.mockResolvedValue(DEFS)
 })
 
 afterEach(() => {

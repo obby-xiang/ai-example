@@ -483,6 +483,45 @@ function fieldsOf(code: string): readonly ConfigField[] {
   return defOf(code)?.fields ?? []
 }
 
+/**
+ * `select_definitions` 的编码校验（按**当前**定义列表，与导出向导同口径）。
+ *
+ * 非法编码不得写进选中集 / 工作区，也不得让回执说"已选择"——否则第 1 步会带着一个不存在
+ * 的配置项去建编辑区、落库任务项，错误要到预检查才以别的面貌爆出来。
+ *
+ * @returns `null` = 全部编码可用；否则为可直接回灌的失败原因（点名无效码 + 可用码清单）
+ */
+function selectDefsProblem(codes: readonly string[]): string | null {
+  const available = defs.value.map((item) => item.code)
+  if (defs.value.length === 0) {
+    return `配置定义列表${defsLoading.value ? '仍在加载' : '不可用'}，无法确认 ${codes.join('、')} 是否为可用编码`
+      + `（可用编码：${available.join('、') || '（无）'}）。本次未改动所选配置项，也未落库。`
+  }
+  const invalid = codes.filter((code) => defOf(code) === null)
+  if (invalid.length === 0) {
+    return null
+  }
+  return `无效配置编码 ${invalid.join('、')}：当前定义列表里没有这些编码。`
+    + `可用编码：${available.join('、') || '（无）'}。本次未改动所选配置项，也未落库。`
+}
+
+/**
+ * 字段可用性（编辑区载入 / 写回的公共前置）。
+ *
+ * 0 字段时 `loadFromXlsx` / `loadFromJson` 会"成功"载入一张 0 列的表，`editorState` 被置位，
+ * 随后 `toXlsxBlob()` 产出空工作簿 —— 预检查/导入读到的就是这个空文件（覆盖了用户上传的
+ * 真实文件），页面上却显示"已保存草稿"。
+ */
+function fieldsUnavailableReason(code: string): string | null {
+  if (defOf(code) === null) {
+    return `配置定义 ${code} 不在当前定义列表里（定义列表可能尚未加载或加载失败）`
+  }
+  if (fieldsOf(code).length === 0) {
+    return `配置定义 ${code} 没有字段`
+  }
+  return null
+}
+
 function setGridRef(code: string, el: unknown): void {
   if (!el) {
     delete gridRefs[code]
@@ -1018,6 +1057,15 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
     if (!grid) {
       continue
     }
+    // 字段闸（fail-closed）：0 字段的表格会"载入成功"但没有任何列，随后写回就是空文件。
+    // 直接不载入、不置位（`editorState` 缺失 ⇒ 写回闸也不放行）。
+    const fieldsProblem = fieldsUnavailableReason(def.code)
+    if (fieldsProblem !== null) {
+      if (generation === taskGeneration) {
+        ElMessage.error(`${fieldsProblem}：编辑区本次未载入（按 0 字段载入会产出空文件并覆盖服务端文件）`)
+      }
+      continue
+    }
     try {
       if (uploadedFiles[def.code]) {
         const blob = await tasksApi.downloadFile(forTask, def.code)
@@ -1160,6 +1208,16 @@ async function flushEditors(): Promise<FlushOutcome> {
       if (!grid) {
         continue
       }
+      // 字段闸（fail-closed）：0 字段的表写回去就是空文件（覆盖用户上传的真实文件）；
+      // 这里挡住，并如实说明（不能落进下面"编辑区未载入"的统一话术）。
+      const fieldsProblem = fieldsUnavailableReason(def.code)
+      if (fieldsProblem !== null) {
+        ok = false
+        const fieldsReason = `${def.code}：${fieldsProblem}（本次未写回，避免空文件覆盖服务端文件）`
+        ElMessage.warning(fieldsReason)
+        failureReason = failureReason ? `${failureReason}；${fieldsReason}` : fieldsReason
+        continue
+      }
       // 写回闸③：内容来源必须与"服务端文件清单"一致才可写：
       // - `file`：表格里就是服务端文件字节，写回不会改内容；
       // - `template`：只有清单确认过"没有该文件"时才是合法的新建导入，否则一律不写。
@@ -1254,6 +1312,12 @@ async function flushDirtyDefs(
       const grid = gridRefs[code]
       if (!grid) {
         failed.push(t('views.import.msg.editorUnmounted', { code }))
+        continue
+      }
+      // 字段闸（fail-closed）：0 字段的表写回去就是空文件（覆盖服务端真实文件）
+      const fieldsProblem = fieldsUnavailableReason(code)
+      if (fieldsProblem !== null) {
+        failed.push(`${code}：${fieldsProblem}（未写回，避免空文件覆盖服务端文件）`)
         continue
       }
       const state = editorState.get(code)
@@ -2032,6 +2096,12 @@ function registerHandlers(): void {
     if (!grid || typeof grid.getSheetAdapter !== 'function') {
       return { ok: false, reason: `${code} 的编辑区表格未挂载（请重开该标签页后重试）。` }
     }
+    // 字段闸（fail-closed）：0 字段 = 没有任何可映射的列，交出适配器等于让工具在空表上
+    // 读写（写进不存在的列 / 读成 0 行）。先如实拒绝。
+    const fieldsProblem = fieldsUnavailableReason(code)
+    if (fieldsProblem !== null) {
+      return { ok: false, reason: `${fieldsProblem}：表格列映射不可用，本次不交出表格能力。请确认定义列表已加载后重试。` }
+    }
     try {
       // L-115：编辑区可能还在载入（首次勾选 / 换文件后 `loadEditors` 在飞）—— 等**内容**落定
       // 再交出适配器，否则工具读到空表（T05 的「0 行」/ T13 的「0 组」）。
@@ -2114,7 +2184,17 @@ function registerHandlers(): void {
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
     }
-    const codes = Array.isArray(payload.defCodes) ? payload.defCodes.map((item) => String(item)) : []
+    const codes = Array.isArray(payload.defCodes)
+      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
+      : []
+    if (codes.length === 0) {
+      return { ok: false, reason: '未指定任何配置项（codes 为空）：本次未改动所选配置项，也未落库。' }
+    }
+    // 编码必须存在于**当前**定义列表：非法码不写选中集、不收敛工作区、不落库
+    const problem = selectDefsProblem(codes)
+    if (problem !== null) {
+      return { ok: false, reason: problem }
+    }
     selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
     // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
     syncSelectedDefsToWorkspace('AI')

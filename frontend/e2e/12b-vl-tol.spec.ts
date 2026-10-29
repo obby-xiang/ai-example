@@ -180,10 +180,16 @@ test.describe('@stub L 工具全量面（12b）', () => {
     // 页面选中态真的变了（不是只回一句话）
     await expect(target).toHaveAttribute('aria-checked', 'true', { timeout: 15_000 })
 
-    // 非法编码如实失败（不谎报已选）
+    // 非法编码如实失败（不谎报已选）。旧断言只看回执"含 NOT_A_DEF"——旧实现回的是
+    // 「已选择配置项：APPROVE_ROLE、NOT_A_DEF」（成功语义），这个弱断言照样通过。
+    // 真判据：结局必须是 failed、回执点名无效码与可用码、**页面选中态未变**（没有"部分成功"）。
     const bad = await vlCall(page, 'select_definitions', { codes: ['NOT_A_DEF'], task: 'import' })
+    expect(String(bad.outcome)).toBe('failed')
     const badText = String(bad.result ?? '')
     expect(badText).toContain('NOT_A_DEF')
+    expect(badText).toContain('可用编码')
+    await expect(target).toHaveAttribute('aria-checked', 'true')
+    await expect(page.locator('[data-ai-ref$=".NOT_A_DEF"]')).toHaveCount(0)
   })
 
   test('E2E-L12 set_condition：筛选控件值真实变化且落库', async ({ page, request }) => {
@@ -209,6 +215,34 @@ test.describe('@stub L 工具全量面（12b）', () => {
     const bad = await callUntil(page, 'set_condition', { conditions: { fields: [] } },
       (view) => String(view.result ?? '').includes('缺少 defCode'))
     expect(String(bad.result ?? '')).toContain('缺少 defCode')
+  })
+
+  test('E2E-L12b set_condition（多值 IN）：confirm_step 不得把条件换义（数组仍是数组）', async ({ page, request }) => {
+    const taskId = await createExportTaskAtQueryCond(request)
+    await vlOpenApp(page, `/export?taskId=${taskId}`)
+    await vlSnapshotWithRegion(page, 'export.cond')
+
+    const set = await callUntil(page, 'set_condition', {
+      defCode: 'CURRENCY',
+      conditions: { fields: [{ fieldCode: 'code', operator: 'IN', value: ['CNY', 'USD'] }] }
+    }, (view) => view.outcome === 'ok' && String(view.result ?? '').includes('CURRENCY'))
+    expect(set.outcome).toBe('ok')
+
+    // 真机确认推进（confirm_step 会走 persistStepData）：草案对多值 IN 必须无损
+    const advanced = await callUntil(page, 'confirm_step', { step: 'EXPORT' },
+      (view) => view.outcome === 'ok' && String(view.result ?? '').includes('已推进'))
+    expect(advanced.outcome).toBe('ok')
+
+    const task = await api.get<{ items: Array<{ defCode: string; conditionJson: string | null }> }>(request, `/api/tasks/${taskId}`)
+    const item = task.items.find((entry) => entry.defCode === 'CURRENCY')
+    const parsed = JSON.parse(item?.conditionJson ?? '{}') as {
+      fields?: Array<{ fieldCode: string; operator: string; value: unknown }>
+    }
+    const field = parsed.fields?.find((entry) => entry.fieldCode === 'code')
+    expect(field?.operator).toBe('IN')
+    // 修复前：confirm_step 把 IN 数组压成 "CNY,USD" 字符串（后端按整串比较 ⇒ 命中 0 行）
+    expect(Array.isArray(field?.value)).toBe(true)
+    expect(field?.value).toEqual(['CNY', 'USD'])
   })
 
   test('E2E-L13 confirm_step：步骤真实推进、非法步骤被拒（不越级）', async ({ page, request }) => {
@@ -277,6 +311,27 @@ test.describe('@stub L 工具全量面（12b）', () => {
     expect(name).toMatch(/CURRENCY/)
     expect(name).toMatch(/\.(xlsx|zip)$/)
     expect(String(outcome.result ?? '')).toContain('CURRENCY')
+  })
+
+  test('E2E-L15b 定义列表不可用（0 字段）：download_export_files 必须确定性失败且零下载', async ({ page, request }) => {
+    const taskId = await createExportedTask(request)
+    // 真机把定义列表打成空（后端仍在，但页面拿不到字段）——0 字段不得按成功载入，更不得
+    // 产出空 xlsx 交给浏览器。路由必须在打开页面前挂上（页面挂载即拉定义）。
+    await page.route('**/api/definitions*', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: [] })
+    }))
+    await vlOpenApp(page, `/export?taskId=${taskId}`)
+    await vlSnapshotWithRegion(page, 'export.selectDefs')
+
+    const outcome = await callUntil(page, 'download_export_files', { taskId, defCodes: ['CURRENCY'] },
+      (view) => view.outcome === 'failed' && String(view.result ?? '').includes('字段'))
+    expect(String(outcome.outcome)).toBe('failed')
+    expect(String(outcome.result ?? '')).toContain('字段')
+    expect(String(outcome.result ?? '')).toContain('未触发下载')
+    // 浏览器侧一个下载事件都不该发生（空文件比"没有文件"更糟：用户会当成导出结果）
+    await expect(page.waitForEvent('download', { timeout: 2_000 })).rejects.toThrow()
   })
 
   test('E2E-L16 越 scope 的工具不披露也不执行：READ 同样受 scope 约束', async ({ page, request }) => {

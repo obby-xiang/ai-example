@@ -92,6 +92,22 @@ const FILES = [
   { fileType: 'EXPORT', defCode: 'CURR', fileName: 'CURR.xlsx', rowCount: 2 }
 ]
 
+/** 定义列表必须可用（0 字段 ⇒ `buildXlsx` fail-closed，本 spec 的换批场景就走不到了）。 */
+const DEFS = [
+  {
+    code: 'DEMO',
+    name: '演示配置',
+    level: 'GLOBAL',
+    fields: [{ defCode: 'DEMO', code: 'code', label: '编码', fieldType: 'STRING', required: false, key: true, sortOrder: 1 }]
+  },
+  {
+    code: 'CURR',
+    name: '币种',
+    level: 'GLOBAL',
+    fields: [{ defCode: 'CURR', code: 'code', label: '编码', fieldType: 'STRING', required: false, key: true, sortOrder: 1 }]
+  }
+]
+
 function job(id: number, status: string): Record<string, unknown> {
   return { id, taskId: 7, jobType: 'EXPORT', status, progress: 0, total: 0, errorCount: 0, warningCount: 0, items: [] }
 }
@@ -129,7 +145,7 @@ beforeEach(() => {
   api.selectDefs.mockResolvedValue({})
   api.setCondition.mockResolvedValue({})
   api.goToStep.mockResolvedValue(TASK_7)
-  api.listDefinitions.mockResolvedValue([])
+  api.listDefinitions.mockResolvedValue(DEFS)
   api.getIssues.mockResolvedValue({ content: [] })
   // 轮询快照永不结算：本用例的换批由页面能力驱动，不让 3s 兜底表插一手
   api.getJob.mockReturnValue(new Promise(() => {}))

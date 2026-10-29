@@ -165,6 +165,7 @@ import { computed, ref, watch } from 'vue'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import {
   buildFieldConditions,
+  draftContentEqual,
   emptyDraftModel,
   operatorNeedsValue,
   operatorsForFieldType,
@@ -243,8 +244,10 @@ watch(
       }
       model.fields[row.field] = { operator: row.operator, value: row.value, value2: row.value2 }
     }
-    // 与外部模型等价时不再回写（否则"父级回填 → 子级再 emit"会互相触发成环）
-    if (JSON.stringify(model) === JSON.stringify(props.modelValue)) {
+    // 与外部模型**内容**等价时不再回写（否则"父级回填 → 子级再 emit"会互相触发成环）。
+    // 用内容判据而不是 JSON 全等：父级模型可能带 `verbatim`（原始条件），行重建不出来，
+    // 但那不是一次改动 —— 按 JSON 全等会把它 emit 掉，用户没动条件也会丢原条件。
+    if (draftContentEqual(model, props.modelValue)) {
       return
     }
     emit('update:modelValue', model)
