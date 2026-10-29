@@ -2401,13 +2401,17 @@ export const useAiStore = defineStore('ai', {
     available(state): boolean {
       return state.health?.available ?? false
     },
-    /** 降级原因文案（不可用时）。 */
+    /**
+     * 降级原因文案（不可用时）。
+     *
+     * <p>R4（2026-10-29）：**只读服务端的 `health.message`**（可读的原因），固定兜底由面板的
+     * `degradeReason` 给（`ai.panel.degradeUnknown`）。`healthError` 是**诊断字段**（探针失败的
+     * 异常原文，可能含 `AI_API_KEY` / provider / KEK 等机制词），不进任何用户文案 —— 它的出口只有
+     * DEV 日志与"探测失败"的固定提示。
+     */
     unavailableReason(state): string | null {
       if (state.health?.available) {
         return null
-      }
-      if (state.healthError) {
-        return state.healthError
       }
       return state.health?.message ?? null
     },
@@ -3411,6 +3415,14 @@ export const useAiStore = defineStore('ai', {
      * 未发卡条目不渲染、不新增占位 UI；`suspended` 只按可重建的待人卡置位。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
+      // R4（2026-10-29）：**停止态不接受后端快照的挂起重建**。用户在 start 帧之前/之后停止后，
+      // 后端那一轮可能仍是 SUSPENDED + awaitingExternal（cancel 尚未落地/未传播）；照旧重建就会
+      // 把一张可点卡摆回屏上、`suspended` 置回 true —— 输入区被重新锁住，与用户"已经停了"的认知相反。
+      // 停止是**本地已落地**的决策：保持"已停止"展示，不恢复外部待决/挂起卡、不重连；
+      // 刷新（内存态 `stopped` 复位）后才会按服务端真实状态恢复。
+      if (this.stopped) {
+        return
+      }
       const sid = this.sessionId
       const abortAtEntry = currentAbort
       let current: AiRunCurrent

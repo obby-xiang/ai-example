@@ -415,3 +415,106 @@ describe('I8 健康提示文案与发送闸同一判据', { timeout: 20_000 }, (
     wrapper.unmount()
   })
 })
+
+describe('R4 停止态不恢复挂起卡 + 探针原文零出口', { timeout: 20_000 }, () => {
+  it('R4 原始：停止后 loadHistory 即使后端 awaitingExternal 也不重建挂起卡、不重置 suspended', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-r4-stopped'
+    store.historyLoaded = true
+    api.history.mockResolvedValue({
+      sessionId: 'sess-r4-stopped',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '旧问题' },
+        { type: 'ASSISTANT', text: '旧回答' }
+      ]
+    })
+    // 后端仍把这一轮当"等外部决策"（cancel 尚未落地/未传播）
+    api.runsCurrent.mockResolvedValue({
+      found: true,
+      runId: 'run-stopped',
+      snapshotStatus: 'SUSPENDED',
+      pendingEntries: [
+        { toolCallId: 'confirm-stopped', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{}', req: true }
+      ],
+      unresolvedExternal: [],
+      awaitingExternal: true,
+      archiveMaxSeq: 9
+    })
+    store.loading = true
+    await store.stop()
+    expect(store.stopped).toBe(true)
+
+    const wrapper = await mountPanel()
+    await flushPromises()
+
+    // 本地"已停止"展示保持不变：不挂起、不锁输入、不重建可点卡、不重连
+    expect(store.suspended).toBe(false)
+    expect(store.pendingToolCall).toBeNull()
+    expect(store.pendingConfirms).toHaveLength(0)
+    expect(store.messages.some((message) => message.parts.some(
+      (part) => part.kind === 'tool' && part.toolCallId === 'confirm-stopped'
+    ))).toBe(false)
+    expect(api.reattachRun).not.toHaveBeenCalled()
+    // 输入区解禁（发送入口在，停止钮不在）
+    expect(wrapper.find('[data-testid="send-btn"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stop-btn"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('R4 反向：未停止时同快照照常恢复挂起卡并锁输入（守卫不误伤）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-r4-live'
+    store.historyLoaded = true
+    store.messages = [
+      {
+        id: 'a-live',
+        role: 'assistant',
+        content: '正文',
+        parts: [{ kind: 'text', seg: 0, text: '正文', streaming: false }],
+        reasoning: '',
+        toolRuns: [],
+        pendingCall: null,
+        streaming: false,
+        done: true,
+        runId: 'run-live'
+      }
+    ]
+    expect(store.stopped).toBe(false)
+    api.runsCurrent.mockResolvedValue({
+      found: true,
+      runId: 'run-live',
+      snapshotStatus: 'SUSPENDED',
+      pendingEntries: [
+        { toolCallId: 'confirm-live', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{}', req: true }
+      ],
+      unresolvedExternal: [],
+      awaitingExternal: true,
+      archiveMaxSeq: 9
+    })
+    api.reattachRun.mockImplementation(() => new Promise(() => {}))
+
+    await store.restoreSuspendedSnapshot()
+
+    expect(store.suspended).toBe(true)
+    expect(store.pendingConfirms).toHaveLength(1)
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('R4 相邻：探针原文零出口 —— 降级文案只取 health.message / 固定兜底', async () => {
+    const store = useAiStore()
+    store.health = { available: false, code: 'AI_UNAVAILABLE', message: '未配置可用模型' } as never
+    store.healthError = 'AI_API_KEY is not set for provider=deepseek (KEK unreadable)'
+    expect(store.unavailableReason).toBe('未配置可用模型')
+
+    store.health = null
+    expect(store.unavailableReason).toBeNull()
+
+    const wrapper = await mountPanel()
+    const forbidden = ['AI_API_KEY', 'provider', 'KEK']
+    for (const word of forbidden) {
+      expect(wrapper.text(), word).not.toContain(word)
+    }
+    wrapper.unmount()
+  })
+})

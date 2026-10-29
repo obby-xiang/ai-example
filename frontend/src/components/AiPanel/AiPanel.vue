@@ -2189,7 +2189,7 @@ const followups = computed<FollowupSuggestion[]>(() => {
  * <ul>
  *   <li>`healthBlocksSend`（探针成功且明确不可用）⇒「已降级」；</li>
  *   <li>`health === null && healthError`（探针**失败**，可用性未确认）⇒「探测失败」+ 灰族，
- *       `title` 给出 `healthError` —— 既不谎报"可用"绿，也不冒充"未检测"；</li>
+ *       `title` 给**固定友好文案**（R3：原文不上屏）—— 既不谎报"可用"绿，也不冒充"未检测"；</li>
  *   <li>`health === null` 且无错误（还没测过）⇒「未检测」。</li>
  * </ul>
  */
