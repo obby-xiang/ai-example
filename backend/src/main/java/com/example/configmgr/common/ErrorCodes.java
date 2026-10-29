@@ -365,6 +365,17 @@ public final class ErrorCodes {
     public static final String CONTEXT_OVERFLOW_AFTER_PARTIAL = "CONTEXT_OVERFLOW_AFTER_PARTIAL";
     public static final String CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT =
             "CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT";
+    /**
+     * 终局失败派生码：工具预算耗尽（收尾指令被连续无视）+ <b>本轮已执行过工具</b>。
+     *
+     * <p>为什么需要它（C13）：{@code TOOL_BUDGET_EXHAUSTED} 原先只在"轮内拦下某一步"时出现，
+     * 作为<b>整轮失败码</b>是 C13 新引入的（收尾被无视不再冒充 {@code CONTEXT_OVERFLOW}）。
+     * 派生规则与既有 {@code *_AFTER_TOOL_SIDE_EFFECT} 同源：{@code failureCode(base, sideEffect, emitted)}
+     * 只会返回<b>已登记</b>的组合，未登记就退回基础码 —— 所以这里必须显式登记，否则"本轮已执行工具"
+     * 这条现场信息会被静默丢掉，用户会按"重试一次就好"处理一件已经产生副作用的事。
+     */
+    public static final String TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT =
+            "TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT";
     /** SSE error 帧：轮次未捕获异常。 */
     public static final String AI_RUN_FAILED = "AI_RUN_FAILED";
     /** SSE error 帧：续跑失败。 */

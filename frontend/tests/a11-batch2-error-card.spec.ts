@@ -53,6 +53,40 @@ describe('批次2 · 错误卡派生码与两层文案', () => {
     expect(card?.detail).toBe('缺终帧')
   })
 
+  /**
+   * C13 / I4：工具预算耗尽有了<b>自己的终局文案</b>，且"本轮已执行工具"这条现场信息不被静默丢掉。
+   *
+   * <p>缺陷现场：换码前这条错误卡落通用红卡（"AI 服务暂时不可用"）；换码后若只登记基础码，
+   * 派生后缀会被削掉、摘要还沿用工具卡那套"会继续回答"—— 与"整轮已失败、且可能有副作用"相反。
+   */
+  it('C13: tool-budget exhaustion has its own copy and keeps the tool-side-effect suffix', () => {
+    applyLocale('zh-CN')
+    const base = buildErrorCard('TOOL_BUDGET_EXHAUSTED', 'tool budget exhausted')
+    const derived = buildErrorCard('TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT', 'tool budget exhausted')
+
+    expect(base).not.toBeNull()
+    expect(base?.title).toContain('工具')
+    expect(base?.summary).toContain('工具')
+    expect(base?.summary).not.toContain('继续回答')
+    expect(base?.summary).not.toBe('AI 服务暂时不可用，请稍后重试。')
+
+    expect(derived?.code).toBe('TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT')
+    expect(derived?.baseCode).toBe('TOOL_BUDGET_EXHAUSTED')
+    expect(derived?.derived).toBe('tool-side-effect')
+    expect(derived?.title).toContain('已执行工具')
+    expect(derived?.summary).toContain('工具')
+    expect(derived?.summary).toContain('已执行')
+    expect(derived?.summary).not.toContain('继续回答')
+
+    applyLocale('en-US')
+    const en = buildErrorCard('TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT', 'tool budget exhausted')
+    expect(en?.title).toContain('Tools already ran')
+    expect(en?.summary.toLowerCase()).toContain('already ran')
+    expect(en?.summary.toLowerCase()).toContain('tool')
+    expect(en?.summary.toLowerCase()).not.toContain('continue')
+    applyLocale('zh-CN')
+  })
+
   it('keeps dedicated alert codes out of the inline card, even with a derived suffix', () => {
     expect(buildErrorCard('SESSION_BUSY', 'busy')).toBeNull()
     expect(buildErrorCard('SESSION_BUSY_AFTER_PARTIAL', 'busy')).toBeNull()

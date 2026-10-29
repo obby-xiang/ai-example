@@ -196,20 +196,38 @@ public final class ContextTrigger {
 	}
 
 	/**
-	 * 滞回解锁：压缩完成后 {@code usedNow / limit < hysteresis-percent} 才允许再次触发。
+	 * 滞回解锁：压缩完成后<b>可压缩历史</b>占触发同一分母的比例低于滞回线才允许再次触发。
 	 *
 	 * <p>
 	 * 判据用<b>真值</b>（不是 nextEst）：估算抖动不该产生"压一次不够、立刻再压"的抖动链。
-	 * 从未压缩过 ⇒ 直接解锁。上限未知 ⇒ 解锁（降级态由 L1/L3 的绝对阈值兜底，本批不实现）。
+	 * 从未压缩过 ⇒ 直接解锁。上限未知 ⇒ 解锁（降级态由 L1/L3 的绝对阈值兜底）。
+	 *
+	 * <p><b>C13 两处口径修正</b>（否则大固定前缀会把 L2/L3 永久锁死）：
+	 * <ol>
+	 * <li><b>扣掉不可压缩的前缀</b>：{@code usedNow} 自 C13 起含 system + tools（与上游
+	 * {@code promptTokens} 同口径）；滞回要问的是"<b>历史</b>还大不大"。一份 8000 token 的人设+
+	 * 工具集在 15000 窗口上恒 ≥ 60%，若不扣，L2/L3（只有轮首能做）永远不触发，会话只能靠轮内
+	 * L1/收窄苦撑；</li>
+	 * <li><b>分母与触发一致</b>：用 {@code limit − effectiveReserve}（同 {@link #decide}），
+	 * 否则"触发看一个分母、解锁看另一个"会在小窗口上互相打架。</li>
+	 * </ol>
+	 *
+	 * @param usedNow            压缩后的基线（含 system + tools）
+	 * @param fixedPrefixTokens  本轮 system + tools 的估算（不可压缩，按 {@code > 0} 才扣）
+	 * @param limitTokens        实际窗口（{@code <=0} = 未知 ⇒ 解锁）
+	 * @param everCompacted      本会话是否压缩过
 	 */
-	public boolean hysteresisUnlocked(int usedNow, int limitTokens, boolean everCompacted) {
+	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted) {
 		if (!everCompacted) {
 			return true;
 		}
 		if (limitTokens <= 0) {
 			return true;
 		}
-		return (double) Math.max(0, usedNow) * 100d / limitTokens < this.config.getHysteresisPercent();
+		int compressible = Math.max(0, Math.max(0, usedNow) - Math.max(0, fixedPrefixTokens));
+		long denominator = Math.max(1L,
+				(long) limitTokens - effectiveReserve(limitTokens, this.config.getReserveTokens()));
+		return (double) compressible * 100d / denominator < this.config.getHysteresisPercent();
 	}
 
 }

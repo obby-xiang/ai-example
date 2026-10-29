@@ -117,7 +117,8 @@
           "rejected": "The provider rejected this request.",
           "keyMissing": "No usable provider key is configured.",
           "keyUnreadable": "The provider key cannot be decrypted, so the request was not sent.",
-          "noModel": "The default provider has no usable model."
+          "noModel": "The default provider has no usable model.",
+          "toolBudget": "The tool-call budget for this turn is exhausted. Review the executed results, then start a new conversation."
         },
         "derived": {
           "partialLabel": "Incomplete content",
@@ -128,6 +129,10 @@
         "diagnostic": {
           "label": "Diagnostic details",
           "code": "Error code"
+        },
+        "toolBudget": {
+          "title": "Tool budget used up",
+          "guide": "Review the executed results, then start a new conversation."
         }
       }
     },

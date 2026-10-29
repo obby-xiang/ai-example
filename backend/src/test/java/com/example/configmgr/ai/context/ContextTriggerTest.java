@@ -80,15 +80,39 @@ class ContextTriggerTest {
 		assertThat(ContextTrigger.Level.L2.advanceTo(ContextTrigger.Level.NONE)).isEqualTo(ContextTrigger.Level.L2);
 	}
 
-	/** C-10：滞回 —— 压缩后真值 62% 不得再触发；59% 才允许。kill：删滞回 ⇒ 62% 仍触发。 */
+	/**
+	 * C-10：滞回 —— 压缩后真值 62% 不得再触发；59% 才允许。
+	 *
+	 * <p>C13 起分母与触发一致（{@code limit − effectiveReserve} = 115000）：62% / 59% 都按这个分母
+	 * 取比（62% = 71300、59% = 67850），无固定前缀（{@code fixedPrefixTokens = 0}）。
+	 */
 	@Test
 	void c10HysteresisBlocksReTriggerUntilBelowSixtyPercent() {
 		ContextTrigger trigger = trigger();
 
-		assertThat(trigger.hysteresisUnlocked(79360, 128000, true)).as("62% 未解锁").isFalse();
-		assertThat(trigger.hysteresisUnlocked(75520, 128000, true)).as("59% 已解锁").isTrue();
-		assertThat(trigger.hysteresisUnlocked(79360, 128000, false)).as("从未压缩过 ⇒ 直接解锁").isTrue();
-		assertThat(trigger.hysteresisUnlocked(120000, 0, true)).as("上限未知 ⇒ 解锁").isTrue();
+		assertThat(trigger.hysteresisUnlocked(71300, 0, 128000, true)).as("62% 未解锁").isFalse();
+		assertThat(trigger.hysteresisUnlocked(67850, 0, 128000, true)).as("59% 已解锁").isTrue();
+		assertThat(trigger.hysteresisUnlocked(71300, 0, 128000, false)).as("从未压缩过 ⇒ 直接解锁").isTrue();
+		assertThat(trigger.hysteresisUnlocked(120000, 0, 0, true)).as("上限未知 ⇒ 解锁").isTrue();
+	}
+
+	/**
+	 * C13 / I3：<b>大固定前缀不得把 L2/L3 永久锁死</b>。
+	 *
+	 * <p>缺陷现场：压缩后基线已含 system+tools（C13 第 1 项），而滞回仍拿"整条基线 / limit"比 ——
+	 * 一份 8000 token 的人设+工具集在 15000 窗口上就恒 ≥ 60%，于是 L2/L3（只有轮首能做）永远不触发，
+	 * 会话只能靠轮内 L1/收窄苦撑。滞回要问的是"<b>可压缩的历史</b>还大不大"，不是"整条请求大不大"。
+	 */
+	@Test
+	void c13BigFixedPrefixDoesNotLockHysteresisForever() {
+		ContextTrigger trigger = trigger();
+
+		// 15000 窗口 ⇒ 有效预留 7500 ⇒ 与触发一致的分母 7500；基线 9000 里 8000 是不可压缩前缀
+		assertThat(trigger.hysteresisUnlocked(9000, 8000, 15000, true))
+			.as("可压缩历史 1000 / 7500 = 13% ⇒ 必须解锁（旧口径 9000/15000 = 60% ⇒ 永久锁死）").isTrue();
+		// 反证：可压缩历史真的很大时仍然锁住（滞回本身不能失效）
+		assertThat(trigger.hysteresisUnlocked(14000, 8000, 15000, true))
+			.as("可压缩历史 6000 / 7500 = 80% ⇒ 仍应锁住").isFalse();
 	}
 
 	/** 滞回锁住时，即便占比已越线也不给级别（但 ratio 照实返回，供观测）。 */

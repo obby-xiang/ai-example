@@ -198,17 +198,34 @@ public class ToolResultLimiter {
 			return Truncation.untouched(text);
 		}
 
+		if (maxChars <= 0) {
+			String notice = notice(originalChars, totalRows, kept.length(), maxRows, 0, rowsCut);
+			String visited = kept + marker(notice);
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, visited.length(), notice,
+					visited);
+		}
+		// 标记长度计入预算：正文只拿"上限 − 标记"的额度
 		String notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
-		if (maxChars > 0) {
-			// 标记长度计入预算：正文只拿"上限 − 标记"的额度
-			int budget = maxChars - marker(notice).length();
-			kept = cutChars(kept, Math.max(0, budget));
-			notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
-			int second = maxChars - marker(notice).length();
-			if (kept.length() > second) {
-				kept = cutChars(kept, Math.max(0, second));
-				notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
+		String marker = marker(notice);
+		if (marker.length() > maxChars) {
+			// I7：额度装不下完整说明 ⇒ 退到短说明；仍装不下就<b>只留标记</b>并截到额度。
+			// 绝不"吐一整段标记"（那会让单份结果比额度大一个数量级，预算形同虚设）。
+			notice = compactNotice(originalChars, kept.length());
+			marker = marker(notice);
+			if (marker.length() > maxChars) {
+				String trimmed = cutChars(marker, maxChars);
+				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, trimmed.length(), notice,
+						trimmed);
 			}
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(), notice,
+					marker);
+		}
+		kept = cutChars(kept, maxChars - marker.length());
+		notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
+		int second = maxChars - marker(notice).length();
+		if (kept.length() > second) {
+			kept = cutChars(kept, Math.max(0, second));
+			notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
 		}
 		String visited = kept + marker(notice);
 		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, visited.length(), notice,
@@ -257,14 +274,34 @@ public class ToolResultLimiter {
 		for (int i = 0; i < 4; i++) {
 			marker = TruncationContract.jsonMarker(preview, originalChars, notice);
 			if (marker.length() <= maxChars) {
-				break;
+				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(),
+						notice, marker);
 			}
 			int over = marker.length() - maxChars;
 			preview = cutChars(preview, Math.max(0, preview.length() - over));
 		}
 		marker = TruncationContract.jsonMarker(preview, originalChars, notice);
-		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(), notice,
-				marker);
+		if (marker.length() <= maxChars) {
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(), notice,
+					marker);
+		}
+		// I7：额度连"完整契约标记"都装不下 ⇒ 逐级退让，但<b>每一步仍是合法 JSON</b>
+		// （绝不按字符切 JSON）。顺序：短说明 → 只留 truncated/originalChars → {"truncated":true} → {}。
+		notice = compactNotice(originalChars, 0);
+		for (String candidate : new String[] { TruncationContract.jsonMarker("", originalChars, notice),
+				"{\"truncated\":true,\"originalChars\":" + originalChars + "}", "{\"truncated\":true}", "{}" }) {
+			if (candidate.length() <= maxChars) {
+				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, candidate.length(),
+						notice, candidate);
+			}
+		}
+		// 额度小到连 {} 都放不下：给空串（不给半截 JSON —— 半截 JSON 会被下游整段丢弃）
+		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, 0, notice, "");
+	}
+
+	/** 短说明（完整说明装不下时的退让档；仍以 {@link #NOTICE_PREFIX} 开头，标记可被识别）。 */
+	private static String compactNotice(int originalChars, int returnedChars) {
+		return NOTICE_PREFIX + "原 " + originalChars + " 字符，返回 " + returnedChars + " 字符（完整结果见本轮工具调用记录）";
 	}
 
 	private static String marker(String notice) {

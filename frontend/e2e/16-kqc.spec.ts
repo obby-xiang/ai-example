@@ -902,14 +902,10 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
           `第 ${turn} 轮未收敛（HTTP ${round.status}，帧：${round.frames.map((frame) => frame.type).join(',') || '<空>'}`
             + `，错误码：${round.errors.map((frame) => String(frame.code ?? '')).join(',') || '-'}）`
         ).toBeTruthy()
-        expect(round.errors).toHaveLength(0)
-        // C13：工具已产生副作用之后仍不得以越窗收场 —— 模型侧按剩余窗口收缩、越窗恢复只压缩固定
-        // 历史（不重跑工具）。这里单独点名禁用码：`round.errors` 为空时上面那条已经覆盖，但红时
-        // 只有这条会告诉我们"是 C13 退化了"而不是"上游偶发失败"。
-        const overflowCodes = round.errors
-          .map((frame) => String(frame.code ?? ''))
-          .filter((code) => code.startsWith('CONTEXT_OVERFLOW'))
-        expect(overflowCodes, `第 ${turn} 轮出现越窗（C13：模型侧应按剩余窗口收缩）`).toHaveLength(0)
+        // `round.errors` 必须为空 ⇒ 本轮没有任何 error 终帧（含 CONTEXT_OVERFLOW*）。
+        // C13 的"工具副作用之后不得越窗"就锁在这一条上：非空时 `round.done` 那条的失败消息里
+        // 已经带了全部错误码，不必再加一条"先断言为空、再对空数组做筛选"的恒真断言。
+        expect(round.errors, `第 ${turn} 轮出现 error 终帧（C13：不得以越窗收场）`).toHaveLength(0)
         const snapshot = await contextSnapshot(sid)
         // 分母必须来自模型行（写接口写进去的那个值），不是任何 env 回退
         expect(snapshot.limitTokens, `第 ${turn} 轮分母必须是模型行`).toBe(REAL_LINEAGE_WINDOW)

@@ -7,6 +7,7 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.ContextTrigger;
+import com.example.configmgr.ai.context.HardTrim;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
@@ -38,6 +40,8 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.ToolDefinition;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -340,6 +344,39 @@ class SpToolCallingManagerTurnBudgetTest {
 	// ── C13：越窗后收缩最新未保护结果 / 压缩固定历史（不重跑工具）────────────────
 
 	/**
+	 * C13 / I1：越窗后必须<b>先试零代价的 L1 清除</b>，可清的时候不得先削最新结果。
+	 *
+	 * <p>缺陷现场：初始判定就是 {@code OVERFLOW} 时旧实现直接跳到"收窄最新"，把"清得掉且零代价"的
+	 * 旧工具结果留着、反而去削模型接下来最可能要用的最新结果 —— 省同样的 token，代价更高，
+	 * 而且台账里连一条 L1 都没有（"清过旧结果"这件事无据可查）。
+	 */
+	@Test
+	void overflowClearsOldResultsBeforeShrinkingTheNewest() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		// pin 最近 2 条（本批结果 + old-3）⇒ old-1/old-2 可清、old-3 清不掉（不属于"旧结果"）
+		this.properties.getContext().setKeepToolPairs(2);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		List<Message> pinned = historyWithClearableOldResults();
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(pinned),
+				response(ContextEstimator.estimateMessages(pinned), 0, "c-1"));
+
+		List<Message> history = result.conversationHistory();
+		assertThat(oldResultText(history, "old-1")).as("可清的旧结果必须先被清除")
+			.startsWith(ToolResultClearing.PLACEHOLDER_PREFIX);
+		assertThat(oldResultText(history, "old-2")).startsWith(ToolResultClearing.PLACEHOLDER_PREFIX);
+		assertThat(ToolResultEnvelope.fromJson(oldResultText(history, "old-3")).truncated())
+			.as("清除足够时不得先削最新结果").isFalse();
+		// 台账里必须有这条 L1（清了多少、清了谁），而不是只留一条 trace
+		assertThat(this.contextStore.contextLedger(SESSION_ID)).hasSize(1);
+		Map<String, Object> event = this.contextStore.contextLedger(SESSION_ID).get(0);
+		assertThat(event.get("level")).isEqualTo("L1");
+		assertThat(idsOf(event)).containsExactly("old-1", "old-2");
+		assertPairing(history);
+	}
+
+	/**
 	 * C13 第 3 项：L1 清不掉的<b>最近几对</b>（pin 窗口内）在仍越窗时被<b>收窄</b>，未决 HITL 不动。
 	 *
 	 * <p>语料：pin 最近 5 对 ⇒ 三条大结果全在 pin 窗口内，L1 一个都清不掉；
@@ -370,8 +407,12 @@ class SpToolCallingManagerTurnBudgetTest {
 			.as("未决 HITL 条目一个字都不动").isFalse();
 		assertThat(ToolResultEnvelope.fromJson(oldResultText(history, "old-2")).truncated())
 			.as("最新未保护结果最先收窄").isTrue();
-		assertThat(history).as("不丢轮次：只收窄（+ 可能的收尾指令）")
-			.hasSizeBetween(pinned.size() + 2, pinned.size() + 3);
+		// I2：收窄目标是"窗口 − 1"，随后按既有 95% 规则收尾并武装 —— 这是有意的安全后果，
+		// 因此历史恰好是 "原历史 + 本批 assistant/tool + 一条收尾指令"，不多不少（不用区间放宽）。
+		assertThat(history).as("只收窄 + 一条收尾指令，不丢轮次").hasSize(pinned.size() + 3);
+		assertThat(history.get(history.size() - 1).getText())
+			.as("收尾指令是本轮最后一条（模型据此停止要工具）").contains("上下文已接近模型窗口上限");
+		assertThat(this.beacon.budgetArmed(RUN_ID)).as("收窄到 95% 线之上 ⇒ 武装本轮").isTrue();
 		assertPairing(history);
 	}
 
@@ -400,6 +441,80 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(this.codec.deserializeAll(snapshot.getMessageJson()))
 			.as("落定的是同一份压缩后的历史（模型看到的 = 快照里的）")
 			.hasSameSizeAs(history);
+	}
+
+	// ── C13：越窗恢复的硬截断必须与压缩同账（归档 + 状态 + 台账）──────────────────
+
+	/**
+	 * C13 / I5：轮内硬截断（丢最旧轮）是<b>压缩</b>的一种，必须与轮首 L3 同账：
+	 * 先归档压缩前原文，再写档位/轮数/lostTokens，再写台账（before/after/turns/lostTokens）。
+	 *
+	 * <p>缺陷现场：只发一条 trace 的"丢轮"在模型侧真的改了历史，而 {@code ?ledger=1} 与
+	 * {@code /context} 里一个字都没有 —— 用户/运维看到"从未压缩过"，归档也取不回被丢掉的那几轮。
+	 */
+	@Test
+	void inRoundTrimArchivesAndRecordsTheCompactionLedger() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		List<Message> longHistory = historyWithLongTurns();
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1"));
+
+		List<Message> history = result.conversationHistory();
+		assertThat(history.size()).as("固定历史被压缩").isLessThan(longHistory.size() + 2);
+		// ① 归档：被丢掉的那几轮原文必须可回溯
+		assertThat(this.contextStore.archiveCount()).as("硬截断也必须先归档").isEqualTo(1);
+		List<String> archived = this.contextStore.archived(SESSION_ID, 1);
+		assertThat(archived).isNotNull();
+		assertThat(String.join(" | ", archived)).contains("第 1 个问题").contains("这是第 1 轮的回答");
+		// ② 状态：档位/轮数/lostTokens 与台账同值
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.level()).as("丢整轮 = L3 语义").isEqualTo("L3");
+		// 语料 = 10 轮 + 最后一条"新问题" ⇒ 11 段；keep-recent-turns 默认 6 ⇒ 丢最旧 5 段
+		assertThat(state.compactedTurns()).isEqualTo(5);
+		assertThat(state.lostTokens()).isPositive();
+		// ③ 台账：一条 level=L3 事件，before/after/turns/lostTokens 齐全
+		assertThat(this.contextStore.contextLedger(SESSION_ID)).hasSize(1);
+		Map<String, Object> event = this.contextStore.contextLedger(SESSION_ID).get(0);
+		assertThat(event.get("level")).isEqualTo("L3");
+		assertThat(event.get("reason")).as("原因如实：这是硬截断，不是 L1 清除").isEqualTo(HardTrim.REASON_HARD_TRIM);
+		assertThat(event.get("turns")).isEqualTo(5);
+		assertThat(((Number) event.get("lostTokens")).intValue()).isEqualTo(state.lostTokens());
+		assertThat(((Number) event.get("after")).intValue()).isLessThan(((Number) event.get("before")).intValue());
+		assertThat(this.executed).as("恢复不重跑工具").containsExactly("c-1");
+	}
+
+	/**
+	 * C13 / I5：台账写失败 ⇒ <b>不应用</b>这次硬截断（历史保持原样），并如实按越窗收尾。
+	 *
+	 * <p>三步是三个独立写、无事务（与轮内 L1 同一个已知窗口）：归档与状态可能已落，台账缺一条；
+	 * 但"模型看到的历史"绝不因此少一半。
+	 */
+	@Test
+	void inRoundTrimIsNotAppliedWhenTheLedgerWriteFails() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
+			@Override
+			public void appendLedger(String sessionId, Map<String, Object> event) {
+				throw new IllegalStateException("redis down");
+			}
+		};
+		this.manager.setContextStateStore(broken);
+		List<Message> longHistory = historyWithLongTurns();
+
+		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1")))
+			.isInstanceOfSatisfying(StreamViolationException.class,
+					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CONTEXT_OVERFLOW));
+
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.as("截断没记账 ⇒ 不应用；快照里第 1 轮还在").hasSize(longHistory.size() + 2);
+		assertThat(broken.contextLedger(SESSION_ID)).isEmpty();
+		assertThat(broken.archiveCount()).as("归档先于台账（已知的部分失败窗口）").isEqualTo(1);
 	}
 
 	// ── 100 档：先 settle，再 CONTEXT_OVERFLOW ───────────────────────────────
@@ -676,22 +791,31 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	/**
-	 * C13：轮内清除写下的基线也要<b>含 system + tools</b>（与轮首压缩的新基线同口径）。
+	 * C13 / I3：轮内清除写下的基线必须用<b>本轮请求的 prefix</b>（system + tools），不是旧 state 里的值。
 	 *
-	 * <p>两条写点若各写一套，同一会话的"占用"会随"这轮是靠轮首压的还是轮内清的"而跳变；
-	 * 上游真值本来就含这两项，缺了它们只会让下一轮 nextEst 少算前缀。
+	 * <p>缺陷现场：旧实现拿 {@code state.systemTokens()/toolsTokens()} 相加 —— 那是<b>上一轮</b>的锚点，
+	 * 本轮披露面/人设变了（工具集扩容、工作区快照变长）就会算错基线；而 state 里的锚点本身也没被刷新。
+	 * 这里把 state 故意写成 1/2（陈旧），请求带 3000 字人设 + 一份工具 schema ⇒ 断言基线/锚点都用请求值。
 	 */
 	@Test
-	void inRoundClearBaselineAlsoCountsSystemAndTools() {
+	void inRoundClearBaselineUsesThisRoundsRequestPrefixNotStaleState() {
 		this.contextStore.write(SESSION_ID, ContextState.EMPTY
-			.withUsage(7200, 100, 3, false, 1_000L, "m", 3_000, 4_000, 500));
+			.withUsage(7200, 100, 3, false, 1_000L, "m", 1, 2, 0));
+		String systemText = "系统人设与工作区快照：" + "设".repeat(3_000);
+		List<ToolCallback> tools = List.of(toolCallback());
 
 		List<Message> postClear = this.manager
-			.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"))
+			.executeToolCalls(promptWithPrefix(historyWithOldResults(), systemText, tools), response(7200, 0, "c-1"))
 			.conversationHistory();
 
-		assertThat(this.contextStore.read(SESSION_ID).usedTokens())
-			.isEqualTo(ContextEstimator.estimateMessages(postClear) + 3_000 + 4_000);
+		int systemTokens = ContextEstimator.estimate(systemText);
+		int toolsTokens = ContextEstimator.estimateToolSchemas(tools);
+		assertThat(systemTokens).as("语料必须足够大：与 state 里的 1 明显不同").isGreaterThan(1_500);
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.usedTokens()).as("基线 = 清除后历史 + 本轮 system/tools")
+			.isEqualTo(ContextEstimator.estimateMessages(postClear) + systemTokens + toolsTokens);
+		assertThat(state.systemTokens()).as("锚点也必须刷新成本轮的值").isEqualTo(systemTokens);
+		assertThat(state.toolsTokens()).isEqualTo(toolsTokens);
 	}
 
 	/** 已经到 L2/L3 的谱系不被一次轮内 L1 回退（{@code level} 同时是 advanceTo 的起点）。 */
@@ -727,18 +851,21 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(idsOf(ledger.get(1))).containsExactly("old-1", "old-2");
 	}
 
-	/** 非 L1 分支（未达阈值 / 收尾 / 越窗）不得新增台账与归档。 */
+	/**
+	 * "不压缩"的两条分支（未达阈值 / 达收尾线）不得新增台账与归档。
+	 *
+	 * <p>越窗分支<b>不再</b>属于"不压缩"：C13 / I1 起它会先试零代价的 L1 清除（有可清的就记账），
+	 * 那一支由 {@code overflowClearsOldResultsBeforeShrinkingTheNewest} 锁。
+	 */
 	@Test
-	void nonL1BranchesWriteNoLedgerOrArchive() {
+	void belowThresholdAndWrapUpWriteNoLedgerOrArchive() {
 		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(1000, 0, "c-1"));
 		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(9600, 0, "c-2"));
-		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(historyWithOldResults()), response(LIMIT, 0, "c-3")))
-			.isInstanceOfSatisfying(StreamViolationException.class,
-					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CONTEXT_OVERFLOW));
 
 		assertThat(this.contextStore.ledgerCount()).isZero();
 		assertThat(this.contextStore.archiveCount()).isZero();
 		assertThat(this.contextStore.read(SESSION_ID).level()).isEqualTo("none");
+		assertThat(this.beacon.budgetArmed(RUN_ID)).as("收尾分支确实跑到了（不是空过）").isTrue();
 	}
 
 	/**
@@ -772,6 +899,24 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
+
+	/** C13 语料：两对"大"旧结果（可清）+ 一对"大"最新结果（pin 窗口内）+ 一条本轮输入。 */
+	private static List<Message> historyWithClearableOldResults() {
+		List<Message> out = new ArrayList<>();
+		out.add(new UserMessage("旧问题"));
+		List<AssistantMessage.ToolCall> calls = new ArrayList<>();
+		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+		for (int i = 1; i <= 3; i++) {
+			calls.add(new AssistantMessage.ToolCall("old-" + i, "function", TOOL, "{}"));
+			responses.add(new ToolResponseMessage.ToolResponse("old-" + i, TOOL,
+					ToolResultEnvelope.of(ToolOutcome.OK, null, "旧结果 " + i + "：" + "大".repeat(5_990), "{}")
+						.toModelJson(null, TOOL)));
+		}
+		out.add(AssistantMessage.builder().toolCalls(calls).build());
+		out.add(ToolResponseMessage.builder().responses(responses).build());
+		out.add(new UserMessage("新问题"));
+		return out;
+	}
 
 	/** C13 语料：三对"大"工具结果（全部落在 pin 窗口内，L1 清不掉）+ 一条本轮输入。 */
 	private static List<Message> historyWithPinnedBigResults() {
@@ -817,7 +962,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	/** 旧历史：两对可清除的工具结果 + 一条本轮输入（最后一轮永不被 pin 之外的东西动）。 */
-	private static List<Message> historyWithOldResults() {		List<Message> out = new ArrayList<>();
+	private static List<Message> historyWithOldResults() {
+		List<Message> out = new ArrayList<>();
 		out.add(new UserMessage("旧问题"));
 		out.add(AssistantMessage.builder()
 			.toolCalls(List.of(new AssistantMessage.ToolCall("old-1", "function", TOOL, "{}"),
@@ -829,6 +975,29 @@ class SpToolCallingManagerTurnBudgetTest {
 			.build());
 		out.add(new UserMessage("新问题"));
 		return out;
+	}
+
+	/** 带 system + 工具 schema 的 prompt（口径与生产装配点一致：system 在 instructions 里单列）。 */
+	private static Prompt promptWithPrefix(List<Message> history, String systemText, List<ToolCallback> tools) {
+		List<Message> instructions = new ArrayList<>(history.size() + 1);
+		instructions.add(new SystemMessage(systemText));
+		instructions.addAll(history);
+		ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+			.toolContext(Map.of("runId", RUN_ID))
+			.toolCallbacks(tools)
+			.build();
+		return new Prompt(instructions, options);
+	}
+
+	private static ToolCallback toolCallback() {
+		ToolDefinition definition = ToolDefinition.builder()
+			.name(TOOL)
+			.description("查询任务列表：返回任务号、状态与更新时间")
+			.inputSchema("{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"integer\"}}}")
+			.build();
+		ToolCallback callback = mock(ToolCallback.class);
+		when(callback.getToolDefinition()).thenReturn(definition);
+		return callback;
 	}
 
 	private static Prompt prompt(List<Message> instructions) {

@@ -1430,7 +1430,9 @@ public class AiProperties {
 		private int l3Percent = 95;
 
 		/**
-		 * 滞回线（默认 60）：压缩完成后 {@code used / limit < 60%} 才允许再次触发。
+		 * 滞回线（默认 60）：压缩完成后<b>可压缩历史</b>占 {@code limit − 有效预留} 的比例 &lt; 60%
+		 * 才允许再次触发（C13：先扣掉不可压缩的 system + tools，且分母与触发同一口径 ——
+		 * 否则大固定前缀会把 L2/L3 永久锁死，见 {@code ContextTrigger#hysteresisUnlocked}）。
 		 *
 		 * <p>依据 = 调研 Q4"压缩到 60% 以下才允许再次触发"；防的是"压一次不够、立刻再压"的抖动链
 		 * （每次压缩都要改写前缀 ⇒ 缓存整段重建）。

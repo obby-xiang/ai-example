@@ -116,7 +116,9 @@ class ContextCompactorTest {
 				"deepseek-flash", 1L, turns(6), List.of("{}"), 0, 0, 0, 0, 3000, 4000, Set.of(),
 				TestProviderRuntime.runtime()));
 
-		assertThat(outcome.nextEst()).as("整包估算必须含 system + tools").isGreaterThanOrEqualTo(7000);
+		// 整包 = 历史估算 + system 3000 + tools 4000 + 本轮输入 0（逐项相加，不是"大约大于 7000"）
+		assertThat(outcome.nextEst())
+			.isEqualTo(ContextEstimator.estimateMessages(turns(6)) + 3000 + 4000);
 		assertThat(outcome.reason()).as("只算新输入（0）会误报 under_threshold")
 			.isNotEqualTo(ContextCompactor.REASON_UNDER_THRESHOLD);
 		// 分母 = 15000 − min(13000, 7500) = 7500（未收口时会是 15000 − 13000 = 2000）

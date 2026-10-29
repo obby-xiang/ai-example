@@ -145,6 +145,7 @@ class ToolResultLimiterTest {
         assertThat(truncation.truncated()).isTrue();
         assertThat(truncation.text().trim()).as("预算装不下正文 ⇒ 只给标记（绝不静默丢弃）")
             .startsWith(ToolResultLimiter.TRUNCATION_MARKER.trim());
+        assertThat(truncation.text().length()).as("标记本身也不得超额度（I7）").isLessThanOrEqualTo(50);
         assertThat(truncation.notice()).isNotBlank();
     }
 
@@ -199,6 +200,31 @@ class ToolResultLimiterTest {
         assertThat(ToolResultLimiter.charsForRemainingTokens(-5)).isZero();
         assertThat(ToolResultLimiter.charsForRemainingTokens(100)).as("100 token ⇒ 最多 170 字符（保守）")
             .isEqualTo(170);
+    }
+
+    /**
+     * C13 / I7：<b>极小额度</b>下也绝不超额 —— 普通文本与结构化结果最终长度都必须 ≤ 给定额度，
+     * 且结构化结果仍是<b>合法 JSON</b>。
+     *
+     * <p>缺陷现场：额度比"截断标记"还小时，旧实现直接吐整段标记（`notice` 里带原文字数、
+     * 行数、上限……），单份结果因此比额度大一个数量级 —— 窗口收缩/极小 per-tool 配置下这一条
+     * 就足以把"预算"变成摆设。
+     */
+    @Test
+    void tinyBudgetsNeverExceedTheQuotaAndKeepStructuredResultsValidJson() throws Exception {
+        this.properties.getResultBudget().getModel().getPerTool().put(TOOL, 20);
+        ToolResultLimiter.Truncation plain = this.limiter.forModel(TOOL, "x".repeat(500));
+        assertThat(plain.truncated()).isTrue();
+        assertThat(plain.text().length()).as("普通文本最终长度不得超过额度").isLessThanOrEqualTo(20);
+        assertThat(plain.text().trim()).as("极小额仍以截断标记开头（模型必须知道这不是全文）")
+            .startsWith(ToolResultLimiter.TRUNCATION_MARKER.trim());
+
+        String json = "{\"rows\":[" + "{\"a\":1},".repeat(2_000) + "{\"a\":1}]}";
+        this.properties.getResultBudget().getModel().getPerTool().put(TOOL, 40);
+        ToolResultLimiter.Truncation structured = this.limiter.forModel(TOOL, json);
+        assertThat(structured.truncated()).isTrue();
+        assertThat(structured.text().length()).as("结构化结果同样 ≤ 额度").isLessThanOrEqualTo(40);
+        assertThat(new ObjectMapper().readTree(structured.text())).as("绝不能为了额度产出坏 JSON").isNotNull();
     }
 
     // ── ④ 结构化结果：绝不字符截断 ──────────────────────────────────────

@@ -231,7 +231,9 @@ public final class ContextCompactor {
 			return noop(request, before, ContextTrigger.Level.fromWire(state.level()), 0, 0d, 0,
 					REASON_LIMIT_UNKNOWN, state.circuit());
 		}
-		boolean armed = trigger.hysteresisUnlocked(state.usedTokens(), limit, state.everCompacted());
+		// C13 / I3：滞回判"可压缩历史"，先扣掉本轮不可压缩的 system + tools（否则大前缀永久锁死 L2/L3）
+		int fixedPrefix = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
+		boolean armed = trigger.hysteresisUnlocked(state.usedTokens(), fixedPrefix, limit, state.everCompacted());
 		// C13：无真值时用整包估算判（system + tools + 历史 + 本轮输入）—— 轮首/压缩后基线没有
 		// 上游 truth，只算"新输入"会让 system 与工具 schema 在小窗口模型上完全不计入判据。
 		int wholeRequest = before + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens())

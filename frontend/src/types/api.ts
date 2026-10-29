@@ -96,8 +96,10 @@ export const ErrorCode = {
   TOOL_TIMEOUT: 'TOOL_TIMEOUT',
   /** 工具调用步数到顶（超时面治理批②；skipped 结局，本轮部分完成收尾） */
   TOOL_STEP_LIMIT: 'TOOL_STEP_LIMIT',
-  /** 轮内上下文预算耗尽（armed 后新工具不执行，skipped 结局） */
+  /** 轮内上下文预算耗尽（armed 后新工具不执行，skipped 结局；C13 起也是"收尾被无视"的整轮失败码） */
   TOOL_BUDGET_EXHAUSTED: 'TOOL_BUDGET_EXHAUSTED',
+  /** 工具预算耗尽 + 本轮已执行过工具（C13 派生码；对应后端同一个常量，镜像必须逐字一致） */
+  TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT: 'TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT',
   RUN_CANCELLED: 'RUN_CANCELLED',
   /** 前端工具条目终态：用户取消/渲染器不可用（结局帧 status 口径，展示态登记） */
   FRONTEND_CANCELLED: 'FRONTEND_CANCELLED',

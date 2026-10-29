@@ -117,7 +117,8 @@
           "rejected": "供应商拒绝了这次请求。",
           "keyMissing": "当前没有可用的供应商密钥。",
           "keyUnreadable": "供应商密钥无法解密，请求没有发出。",
-          "noModel": "默认供应商没有可用的模型。"
+          "noModel": "默认供应商没有可用的模型。",
+          "toolBudget": "本轮的工具调用预算已用完；已执行的结果请先核对，再开启新会话。"
         },
         "derived": {
           "partialLabel": "内容不完整",
@@ -128,6 +129,10 @@
         "diagnostic": {
           "label": "诊断详情",
           "code": "错误码"
+        },
+        "toolBudget": {
+          "title": "本轮工具预算已用完",
+          "guide": "请先核对已执行的结果，再开启新会话重试。"
         }
       }
     },

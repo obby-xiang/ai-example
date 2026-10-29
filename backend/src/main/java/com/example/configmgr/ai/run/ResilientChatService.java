@@ -3459,8 +3459,13 @@ public class ResilientChatService {
 		return code;
 	}
 
-	/** 终局失败码 = 基础码 + 现场后缀；组合未登记时退回基础码（绝不发出未登记码）。 */
-	private static String failureCode(String base, boolean sideEffect, boolean emitted) {
+	/**
+	 * 终局失败码 = 基础码 + 现场后缀；组合未登记时退回基础码（绝不发出未登记码）。
+	 *
+	 * <p>包级可见是为了让"派生规则的<b>登记</b>与<b>退回</b>"可单测：C13 换码（
+	 * {@code TOOL_BUDGET_EXHAUSTED}）时，派生码没登记就会被静默削掉"本轮已执行工具"这条现场信息。
+	 */
+	static String failureCode(String base, boolean sideEffect, boolean emitted) {
 		String suffix = sideEffect ? AFTER_TOOL_SIDE_EFFECT : emitted ? AFTER_PARTIAL : "";
 		if (suffix.isEmpty()) {
 			return base;

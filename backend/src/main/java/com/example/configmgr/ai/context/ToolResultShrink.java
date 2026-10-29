@@ -85,19 +85,23 @@ public final class ToolResultShrink {
 	/**
 	 * 规划一次收窄（纯函数）。
 	 *
+	 * <p><b>目标 = {@code limit − 1}（不是 {@code limit − reserve}）</b>：越窗判据是
+	 * {@code nextEst >= limit}，收到"恰好等于窗口"仍算越窗 —— 旧目标在 {@code reserve = 0} 时
+	 * 正好削到 {@code limit}，白削一刀还照样失败。留 1 token 余量之后，这一跳真的落在窗口内；
+	 * 随后按既有 95% 规则 WRAP_UP / arm（收尾指令本身也占 token，这是有意的安全后果）。
+	 *
 	 * @param messages              当前历史（原消息对象不被修改）
 	 * @param currentTokens         当前判据值（{@code nextEst}）
 	 * @param limitTokens           实际窗口
-	 * @param reserveTokens         有效预留（调用方按 {@link ContextTrigger#effectiveReserve} 收口）
 	 * @param protectedToolCallIds  未决 HITL 条目（{@code null} = 读不到保护集 ⇒ 不生效）
 	 * @param limiter               裁剪器（截断判定与模型侧写入口同一份）
 	 */
-	public static Plan plan(List<Message> messages, int currentTokens, int limitTokens, int reserveTokens,
+	public static Plan plan(List<Message> messages, int currentTokens, int limitTokens,
 			Set<String> protectedToolCallIds, ToolResultLimiter limiter) {
 		if (messages == null || messages.isEmpty() || limiter == null || protectedToolCallIds == null) {
 			return new Plan(messages, List.of(), 0);
 		}
-		int target = Math.max(0, limitTokens - Math.max(0, reserveTokens));
+		int target = Math.max(0, limitTokens - 1);
 		int needToSave = currentTokens - target;
 		if (needToSave <= 0) {
 			return new Plan(messages, List.of(), 0);
@@ -117,29 +121,50 @@ public final class ToolResultShrink {
 			Slot slot = candidates.get(index);
 			// 最新优先"按需"收窄：先让最新的一条吐出缺口（到 MIN_KEEP 为止），仍不够才动下一条 ——
 			// 均匀摊薄会把"还能读全的最新结果"也一起削掉，而模型接下来最可能用的就是它。
-			int take = Math.min(remainingNeed, Math.max(0, slot.tokens() - MIN_KEEP_TOKENS));
-			if (take <= 0) {
+			// 同一条最多重试 3 次：字符额度 → token 的换算是保守近似（标记本身也占字符），
+			// 一次削下来可能差几十 token；差多少再补多少，直到真的落在窗口内。
+			int dataTokens = slot.tokens();
+			int before = dataTokens;
+			String data = slot.data();
+			for (int attempt = 0; attempt < 3 && remainingNeed > 0; attempt++) {
+				ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(data);
+				if (envelope == null) {
+					break;
+				}
+				// 额度算在 message 上（信封外壳/字段不参与"还能留多少正文"），否则第二轮会算出
+				// "刚好等于当前长度"的额度而原地打转。
+				int messageTokens = ContextEstimator.estimate(envelope.message());
+				int take = Math.min(remainingNeed, Math.max(0, messageTokens - MIN_KEEP_TOKENS));
+				if (take <= 0) {
+					break;
+				}
+				int capChars = ToolResultLimiter.charsForRemainingTokens(messageTokens - take);
+				if (capChars <= 0 || envelope.message().length() <= capChars) {
+					break;
+				}
+				ToolResultLimiter.Truncation truncation = limiter.forModel(slot.name(), envelope.message(), capChars);
+				if (!truncation.truncated()) {
+					break;
+				}
+				// I6：再收缩不得把<b>首次</b>的 originalChars 改写成"这次看到的长度"。
+				// 已被裁过的结果（如 originalChars=20000 / message≈5100）再收一刀时，forModel 只看得见
+				// 现在这份文本；沿用更大的那个才是"原文有多长"的事实（取两值最大，不新造字段）。
+				truncation = keepLargerOriginalChars(truncation, envelope.originalChars());
+				String rewritten = envelope.withTruncation(truncation).toModelJsonWith(truncation);
+				int after = ContextEstimator.estimate(rewritten);
+				if (after >= dataTokens) {
+					break;
+				}
+				data = rewritten;
+				remainingNeed = Math.max(0, remainingNeed - (dataTokens - after));
+				dataTokens = after;
+			}
+			if (dataTokens >= before) {
 				continue;
 			}
-			int keepTokens = slot.tokens() - take;
-			int capChars = ToolResultLimiter.charsForRemainingTokens(keepTokens);
-			if (capChars <= 0 || slot.envelope().message().length() <= capChars) {
-				continue;
-			}
-			ToolResultLimiter.Truncation truncation = limiter.forModel(slot.name(), slot.envelope().message(), capChars);
-			if (!truncation.truncated()) {
-				continue;
-			}
-			String rewritten = slot.envelope().withTruncation(truncation).toModelJsonWith(truncation);
-			int after = ContextEstimator.estimate(rewritten);
-			if (after >= slot.tokens()) {
-				continue;
-			}
-			replacements.computeIfAbsent(slot.messageIndex(), key -> new HashMap<>()).put(slot.responseIndex(),
-					rewritten);
-			shrunk.add(new Shrunk(slot.toolCallId(), slot.name(), slot.tokens(), after));
-			savedTokens += slot.tokens() - after;
-			remainingNeed = Math.max(0, remainingNeed - (slot.tokens() - after));
+			replacements.computeIfAbsent(slot.messageIndex(), key -> new HashMap<>()).put(slot.responseIndex(), data);
+			shrunk.add(new Shrunk(slot.toolCallId(), slot.name(), before, dataTokens));
+			savedTokens += before - dataTokens;
 		}
 		if (shrunk.isEmpty()) {
 			return new Plan(messages, List.of(), 0);
@@ -150,6 +175,20 @@ public final class ToolResultShrink {
 			out.add(patch == null ? messages.get(i) : rebuild((ToolResponseMessage) messages.get(i), patch));
 		}
 		return new Plan(out, List.copyOf(shrunk), savedTokens);
+	}
+
+	/**
+	 * 保留更大的 {@code originalChars}（I6）：二次/多次收缩时，"早先那份原文有多长"不能被覆盖成
+	 * "这次看到的长度" —— 否则信封字段与台账全文自相矛盾。
+	 */
+	private static ToolResultLimiter.Truncation keepLargerOriginalChars(ToolResultLimiter.Truncation truncation,
+			int previousOriginalChars) {
+		int original = Math.max(truncation.originalChars(), previousOriginalChars);
+		if (original == truncation.originalChars()) {
+			return truncation;
+		}
+		return new ToolResultLimiter.Truncation(truncation.truncated(), truncation.strategy(), original,
+				truncation.returnedChars(), truncation.notice(), truncation.text());
 	}
 
 	/**
@@ -184,7 +223,7 @@ public final class ToolResultShrink {
 				if (envelope == null || envelope.message() == null || envelope.message().isEmpty()) {
 					continue;
 				}
-				candidates.add(new Slot(i, j, response.id(), response.name(), ContextEstimator.estimate(data),
+				candidates.add(new Slot(i, j, response.id(), response.name(), ContextEstimator.estimate(data), data,
 						envelope));
 			}
 		}
@@ -206,7 +245,7 @@ public final class ToolResultShrink {
 	}
 
 	private record Slot(int messageIndex, int responseIndex, String toolCallId, String name, int tokens,
-			ToolResultEnvelope envelope) {
+			String data, ToolResultEnvelope envelope) {
 	}
 
 }

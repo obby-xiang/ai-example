@@ -112,7 +112,12 @@ const CODE_CARD_TEXT: Record<string, { title: string; guide: string }> = {
   UPSTREAM_REJECTED: { title: 'ai.card.error.rejected.title', guide: 'ai.card.error.rejected.guide' },
   AI_KEY_MISSING: { title: 'ai.card.error.keyMissing.title', guide: 'ai.card.error.keyMissing.guide' },
   AI_KEY_UNREADABLE: { title: 'ai.card.error.keyUnreadable.title', guide: 'ai.card.error.keyUnreadable.guide' },
-  NO_MODEL_CONFIGURED: { title: 'ai.card.error.noModel.title', guide: 'ai.card.error.noModel.guide' }
+  NO_MODEL_CONFIGURED: { title: 'ai.card.error.noModel.title', guide: 'ai.card.error.noModel.guide' },
+  // C13：工具预算耗尽（整轮失败）—— 不是"重试一次就好"，也不是工具卡那套"会继续回答"
+  TOOL_BUDGET_EXHAUSTED: {
+    title: 'ai.card.error.toolBudget.title',
+    guide: 'ai.card.error.toolBudget.guide'
+  }
 }
 
 /**
@@ -133,7 +138,8 @@ const CODE_SUMMARY_KEY: Record<string, string> = {
   UPSTREAM_REJECTED: 'ai.card.error.summary.rejected',
   AI_KEY_MISSING: 'ai.card.error.summary.keyMissing',
   AI_KEY_UNREADABLE: 'ai.card.error.summary.keyUnreadable',
-  NO_MODEL_CONFIGURED: 'ai.card.error.summary.noModel'
+  NO_MODEL_CONFIGURED: 'ai.card.error.summary.noModel',
+  TOOL_BUDGET_EXHAUSTED: 'ai.card.error.summary.toolBudget'
 }
 
 /** 有专属色族/动作的码（上下文超限走蓝族"开新会话"，限流走红族，内容过滤走灰族）。 */
