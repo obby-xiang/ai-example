@@ -663,3 +663,65 @@ describe('N5 新轮 start 让旧停止意向失效时收掉旧传输', () => {
     await round.sending
   })
 })
+
+describe('N-1（Minor）停止后历史重载：await 后只比对轮次纪元', () => {
+  it('N-1 原始：停止后重载期间旧连接被收（currentAbort 置 null）⇒ 历史仍要落盘', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n1-history'
+    store.historyLoaded = true
+
+    const { sending, transport } = await startRound(store, '被停的一轮')
+    await store.stop()
+    expect(store.stopped).toBe(true)
+
+    const history = deferred<AiHistory>()
+    api.history.mockImplementation(() => history.promise)
+    const loading = store.loadHistory()
+
+    // await 期间：保留的那条 pre-start 连接收尾/被收 ⇒ currentAbort 置 null（轮次纪元不变）
+    transport.close({ terminal: false, reason: '连接已中止' })
+    await sending
+    expect(store.stopped).toBe(true)
+
+    history.resolve({
+      sessionId: 'sess-n1-history',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '旧问题' },
+        { type: 'ASSISTANT', text: '旧回答' }
+      ]
+    } as AiHistory)
+    await loading
+
+    // 停止后重载：只认轮次纪元 ⇒ 连接被收不该把历史整份丢掉
+    expect(store.messages.some((message) => message.content === '旧回答')).toBe(true)
+  })
+
+  it('N-1 反向：未停止时连接身份变化仍按原双判据丢弃（守卫不误伤）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-n1-history-live'
+    store.historyLoaded = true
+    const host = store.appendAssistantMessage('屏上正文')
+
+    const history = deferred<AiHistory>()
+    api.history.mockImplementation(() => history.promise)
+    const loading = store.loadHistory()
+
+    // 未停止：await 期间起了续收连接（roundEpoch 未变，但 currentAbort 从 null 变为在途）
+    void store.resumeSnapshotStream('run-live', 0, host.id, false)
+    await Promise.resolve()
+
+    history.resolve({
+      sessionId: 'sess-n1-history-live',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '旧问题' },
+        { type: 'ASSISTANT', text: '旧回答' }
+      ]
+    } as AiHistory)
+    await loading
+
+    expect(store.messages.some((message) => message.content === '旧回答')).toBe(false)
+    expect(store.messages.some((message) => message.id === host.id)).toBe(true)
+  })
+})

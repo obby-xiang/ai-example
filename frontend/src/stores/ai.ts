@@ -2714,6 +2714,11 @@ export const useAiStore = defineStore('ai', {
       } catch (error) {
         this.health = null
         this.healthError = error instanceof Error ? error.message : translate('ai.notice.healthProbeFailed')
+        // N-1（R3）：原文**只进日志/诊断**（`healthError` 字段本身也是诊断用途）—— 用户可见的
+        // 胶囊/告警一律用固定友好文案（`ai.panel.probeFailedHint`），机制词不上屏。
+        if (import.meta.env.DEV) {
+          console.warn('[ai] health probe failed:', this.healthError)
+        }
         // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
       }
     },
@@ -2902,7 +2907,13 @@ export const useAiStore = defineStore('ai', {
       // 只对账不替换。保留屏上的在途现场（镜像 + 实时帧），本次历史整体丢弃；`historyLoaded` 仍落定
       // （对账已结束，镜像写入恢复正常），后续帧继续写原来的宿主。历史这一路**成功**了，故历史错误与
       // "历史不可用"缺口一并作废（否则重试成功后错误条还挂着）。
-      if (inFlightAtEntry || roundEpoch !== epochAtEntry || currentAbort !== abortAtEntry) {
+      // N-1（R3）：**停止后只比对轮次纪元**。C2 特意保留的 pre-start 连接会在 await 期间被收
+      //（`currentAbort` 置 null）—— 那是"被放弃的那一轮"的连接收尾，不是换了轮；再拿连接身份判就
+      // 会把这次合法重载整份丢掉（停止后再也刷不出历史）。未停止时维持原双判据（换连接 = 换轮）。
+      const roundChanged = this.stopped
+        ? roundEpoch !== epochAtEntry
+        : (roundEpoch !== epochAtEntry || currentAbort !== abortAtEntry)
+      if (inFlightAtEntry || roundChanged) {
         this.historyLoaded = true
         this.historyError = null
         this.recoveryGap = null

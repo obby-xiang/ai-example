@@ -11,6 +11,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
+import { applyLocale } from '@/locales'
 import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
 import type { ChatMessage } from '@/types/ai'
 import { createFakeChat, type FakeChat } from './ai-fake-transport'
@@ -329,15 +330,52 @@ describe('I8 健康提示文案与发送闸同一判据', { timeout: 20_000 }, (
     api.health.mockRejectedValue(new ApiError('probe down: 502', 502, 'NETWORK_ERROR', null))
     const wrapper = await mountPanel()
     const store = useAiStore()
-
     const chip = wrapper.find('[data-testid="health-chip"]')
     expect(chip.text()).toBe('探测失败')
     // 不是 success 绿（R-163 C2 的绿族），也不是"可用"
     expect(chip.classes()).not.toContain('text-[#1a7f45]')
     expect(chip.classes()).not.toContain('bg-[#edf7f0]')
-    // healthError 有出口：胶囊 title 带探针失败原因
-    expect(chip.attributes('title')).toBe(store.healthError)
+    // healthError 有出口 ⇒ 固定友好文案（R3 起原文不上屏，见 N-1）
+    expect(chip.attributes('title')).toBe('AI 状态检测未成功，可点「重新检测」；不影响页面其它操作')
     expect(chip.attributes('title')).toBeTruthy()
+    expect(chip.attributes('title')).not.toBe(store.healthError)
+    wrapper.unmount()
+  })
+
+  it('N-1 原始：探针失败的胶囊 title 是固定友好文案（后端原文不上屏、不含机制词）', async () => {
+    // 后端/网关原文里带足机制词：一律不得出现在屏上任何位置
+    api.health.mockRejectedValue(new ApiError(
+      'AI_API_KEY is not set for provider=deepseek (KEK unreadable, http 502 from gateway, Redis down)',
+      502,
+      'AI_KEY_MISSING',
+      null
+    ))
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+    expect(store.healthError).toContain('AI_API_KEY')
+
+    const chip = wrapper.find('[data-testid="health-chip"]')
+    expect(chip.attributes('title')).toBe('AI 状态检测未成功，可点「重新检测」；不影响页面其它操作')
+    expect(chip.attributes('title')).not.toBe(store.healthError)
+
+    const forbidden = ['AI_API_KEY', 'DEEPSEEK_API_KEY', 'AI_SECRET_KEK', 'KEK', 'provider', 'http', '502', 'Redis']
+    for (const word of forbidden) {
+      expect(chip.attributes('title'), word).not.toContain(word)
+      expect(wrapper.text(), word).not.toContain(word)
+    }
+    wrapper.unmount()
+  })
+
+  it('N-1 相邻：同一档在英文界面给英文友好文案（不是中文、也不是原文）', async () => {
+    api.health.mockRejectedValue(new ApiError('AI_API_KEY missing (provider=deepseek)', 502, 'AI_KEY_MISSING', null))
+    const wrapper = await mountPanel()
+    applyLocale('en-US')
+    await wrapper.vm.$nextTick()
+
+    const title = wrapper.find('[data-testid="health-chip"]').attributes('title')
+    expect(title).toBe('AI health check did not succeed. Click “Recheck”; other page features are unaffected.')
+    expect(title).not.toContain('AI_API_KEY')
+    applyLocale('zh-CN')
     wrapper.unmount()
   })
 

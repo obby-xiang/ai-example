@@ -432,6 +432,7 @@
       "degraded": "Degraded",
       "untested": "Not checked",
       "probeFailed": "Health check failed",
+      "probeFailedHint": "AI health check did not succeed. Click “Recheck”; other page features are unaffected.",
       "breathing": "Working…",
       "uploadFallbackLabel": "Upload xlsx / zip",
       "confirmTitle": "Awaiting your confirmation: {business}",

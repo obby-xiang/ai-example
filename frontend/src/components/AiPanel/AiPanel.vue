@@ -2208,8 +2208,12 @@ const healthLabel = computed(() => {
   return t('ai.panel.available')
 })
 
-/** N1：探针失败的原因只在这里露出（胶囊 title），不新增占位 UI、不进对话主链。 */
-const healthTitle = computed(() => (healthProbeFailed.value ? ai.healthError ?? undefined : undefined))
+/**
+ * N-1（R3）：探针失败的 `title` 只用**固定友好文案** —— 后端/网关原文（可能含 `AI_API_KEY` /
+ * provider 名 / KEK / 内部 host 等机制词）不上屏，只留在 `healthError`（诊断字段）与 DEV 日志里。
+ * 既有的降级条文案口径同族：用户看到"怎么办"，机制词归诊断。
+ */
+const healthTitle = computed(() => (healthProbeFailed.value ? t('ai.panel.probeFailedHint') : undefined))
 
 const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
   if (healthBlocksSend.value || healthProbeFailed.value) {
