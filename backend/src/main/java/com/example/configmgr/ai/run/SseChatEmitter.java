@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
@@ -958,9 +959,13 @@ public class SseChatEmitter {
 	 * 归档里却没有终帧 —— "快照终态"因此<b>不能</b>证明"终帧已发"（{@code boot.log:6740/6741}
 	 * 正是同一判据同时拒绝了两者）。判据只能是归档本身。
 	 *
+	 * <p><b>口径 = 整个 runId 的归档，不区分驱动代次</b>：取消收尾要回答的是"这一轮有没有任何终帧"
+	 * （有 ⇒ 不再补取消终帧）。失败出口<b>不能</b>用它 —— 同一 runId 会被驱动多次
+	 * （{@code retry-model-step}），见 {@link #terminalFrameArchivedSinceDriveStart()}。
+	 *
 	 * @return {@code TRUE} 已落档 / {@code FALSE} 确认没有 / {@code null} 读不出来（读降级或未装配
-	 *         帧存储）。调用方<b>不得</b>把 {@code null} 折叠成任何一侧：取消收尾按"继续收尾"处理
-	 *         （写门会再拦一次），交棒侧按"未落定"重试。
+	 *         帧存储）。调用方<b>不得</b>把 {@code null} 折叠成任何一侧：取消收尾按"继续收尾"处理，
+	 *         交棒侧按"未落定"重试。
 	 */
 	public Boolean terminalFrameArchived() {
 		if (this.frames == null) {
@@ -978,6 +983,94 @@ public class SseChatEmitter {
 			return null;
 		}
 		for (Map<String, Object> frame : read.frames()) {
+			String type = String.valueOf(frame.get("type"));
+			if ("done".equals(type) || "error".equals(type)) {
+				return Boolean.TRUE;
+			}
+		}
+		return Boolean.FALSE;
+	}
+
+	// ── 终帧判据的"每次驱动"口径（2026-10-29 返修；复审 I-2） ────────────────
+
+	/**
+	 * 本次驱动的归档序号下界：驱动入口（{@code chat} / {@code driveResumed}）记<b>一次</b>；
+	 * {@code -1} = 未设定或读不出来（不可知）。
+	 */
+	private volatile long driveFloorSeq = -1L;
+
+	/**
+	 * 标记"<b>一次驱动</b>从这里开始"：记下此刻归档里<b>已落档</b>的最大序号作为本次驱动的下界。
+	 *
+	 * <h2>为什么归档判据必须按驱动分段</h2>
+	 * 归档是 per-runId 的，而同一 runId 会被驱动<b>多次</b>：{@code retry-model-step} 接受 FAILED 轮、
+	 * 改回 RUNNING 再驱动一次，归档<b>不清理</b>也不追加代次。只问"归档里有没有任何终帧"会把
+	 * <b>上一次</b>驱动的 error 当成"本次已收尾" —— 本次失败的 {@code textEnd}/{@code error} 被整条吞掉
+	 * （用户看不到"重试也失败了"，且已落档的 delta 段没有 {@code message_end}）。
+	 * 于是判据改成"<b>seq &gt; 本驱动下界</b>的 done/error"：上一次驱动的终帧天然落在下界之内，
+	 * 本次驱动自己落的终帧仍会被认出来（同一驱动的重复发射照旧被拦）。
+	 *
+	 * <p><b>下界取"归档末号"而不是"取号计数器"</b>（{@link FrameStore#lastSeqIfKnown}）：末号只覆盖
+	 * 真正落档的帧，取号计数器可能因落档失败而超前，超前会把本次驱动将要发的帧排除在外。
+	 * 下界读不出来（读降级 / 未装配帧存储）记 {@code -1} ⇒ 判据返回 {@code null}（不可知）⇒ 调用方照发，
+	 * 绝不把"读不到"当成"已收尾"。
+	 *
+	 * <p><b>不是分布式协议</b>：本下界只解决"同一驱动/同一实例的顺序重复"与"多次驱动的跨代次误判"；
+	 * 跨实例并发下"终帧恰好一条"仍需要原子终帧位（与 fence 同事务的条件写），本批<b>未做</b>。
+	 */
+	public void beginDrive() {
+		long floor = -1L;
+		if (this.frames != null) {
+			try {
+				OptionalLong last = this.frames.lastSeqIfKnown(this.runId);
+				if (last != null && last.isPresent()) {
+					floor = Math.max(0L, last.getAsLong());
+				}
+			}
+			catch (RuntimeException ex) {
+				log.debug("驱动下界读取失败 runId={}（按不可知处理，失败出口照发）：{}", this.runId, ex.getMessage());
+				floor = -1L;
+			}
+		}
+		this.driveFloorSeq = floor;
+		log.debug("驱动开始 runId={} 归档下界={}", this.runId, floor);
+	}
+
+	/**
+	 * 归档里是否有<b>本次驱动</b>落的终帧（{@code done}/{@code error} 且 {@code seq > 驱动下界}）。
+	 *
+	 * <p>与 {@link #terminalFrameArchived()} 的分工：那个问"整轮有没有终帧"（取消收尾幂等），
+	 * 本方法问"<b>这一次驱动</b>有没有终帧"（失败出口幂等）。
+	 *
+	 * <p><b>无 seq 的老帧不计入</b>：无法证明它属于本次驱动 ⇒ 宁可多发一条，也不吞掉本次失败。
+	 *
+	 * @return {@code TRUE} 本次驱动已有终帧 / {@code FALSE} 确认没有 /
+	 *         {@code null} 下界或回读不可知（未调 {@link #beginDrive()}、读降级、未装配帧存储）
+	 */
+	public Boolean terminalFrameArchivedSinceDriveStart() {
+		if (this.frames == null) {
+			return null;
+		}
+		long floor = this.driveFloorSeq;
+		if (floor < 0L) {
+			return null;
+		}
+		FrameStore.ReadResult read;
+		try {
+			read = this.frames.readFromWithStatus(this.runId, floor, 0);
+		}
+		catch (RuntimeException ex) {
+			log.debug("驱动内终帧探测失败 runId={} floor={}：{}", this.runId, floor, ex.getMessage());
+			return null;
+		}
+		if (read == null || read.degraded()) {
+			return null;
+		}
+		for (Map<String, Object> frame : read.frames()) {
+			Object seq = frame.get("seq");
+			if (!(seq instanceof Number number) || number.longValue() <= floor) {
+				continue;
+			}
 			String type = String.valueOf(frame.get("type"));
 			if ("done".equals(type) || "error".equals(type)) {
 				return Boolean.TRUE;

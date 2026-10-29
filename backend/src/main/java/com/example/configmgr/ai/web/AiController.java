@@ -486,11 +486,13 @@ public class AiController {
 					writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
 						// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
 						service.clearTerminalRunState(runId);
-						// 本批：发 error 之前先问归档有没有终帧 —— 环外异常是最容易与"另一驱动方已收尾"
-						// 撞车的一条出口（交棒/接管刚收好尾，本线程随后才抛），进程内标记挡不住它。
-						// 读不出来（null）= 不可知 ⇒ 照发（写门会再拦一次）。
-						if (Boolean.TRUE.equals(out.terminalFrameArchived())) {
-							log.info("失败终帧已归档，跳过环外异常的 error runId={}（每轮至多一条终帧）", runId);
+						// 本批（返修后按<b>每次驱动</b>判）：环外异常的 error 只跳过"<b>本次驱动</b>已落的终帧"。
+						// 判据的下界由 ResilientChatService#chat 在驱动入口记一次；这里不能用"整轮有没有终帧"
+						// （同一 runId 会被多次驱动，上一次的 error 会吞掉本次的环外失败）。
+						// 判据不可知（null）⇒ 照发：宁可多一条，也不吞掉本次失败。
+						if (Boolean.TRUE.equals(out.terminalFrameArchivedSinceDriveStart())) {
+							log.info("本次驱动的失败终帧已落档，跳过环外异常的 error runId={}（每次驱动至多一条终帧）",
+									runId);
 							return;
 						}
 						// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。

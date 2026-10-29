@@ -663,6 +663,16 @@ public class ResumeService {
 
 	private ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason,
 			Locale replyLocale) {
+		// ===== 接管前初检（M-1）=====
+		// 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
+		// 否则"先抢租 → 复核发现驱动还活 → 拒绝并把租约还掉"的净结果是
+		// 「fence 已推进 + 租约被删 + 无人驱动」：原驱动被围栏在外，这一轮再也没人推。
+		if (forceTakeover) {
+			ResumeResult refused = takeoverPreCheck(runId);
+			if (refused != null) {
+				return refused;
+			}
+		}
 		LeaseService leases = this.store.leaseService();
 		boolean fresh = false;
 		LeaseService.Lease lease = null;
@@ -684,7 +694,7 @@ public class ResumeService {
 		}
 		ResumeResult result;
 		try {
-			result = resumeInternal(runId, forceTakeover, lease, resumeReason, replyLocale);
+			result = resumeInternal(runId, forceTakeover, lease, fresh, resumeReason, replyLocale);
 		}
 		catch (RuntimeException ex) {
 			if (fresh) {
@@ -701,12 +711,90 @@ public class ResumeService {
 			}
 			else if (result.outcome().releasesLease()) {
 				// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
-				// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜方在用的那一任，
+				// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
 				// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
 				this.store.releaseRunLease(runId);
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * <b>接管前初检</b>（M-1）：zombie 接管（{@code forceTakeover=true}）在<b>抢租之前</b>先判一次
+	 * "驱动是否还活着"，活着就<b>什么都不动</b>地拒绝（不抢租 ⇒ fence 不推进、不还租）。
+	 *
+	 * <p>两条证据（与抢租后的复核同源，只是提前）：
+	 * <ol>
+	 * <li><b>本进程的驱动方仍持有效租约</b>（{@code isDriving} && 进程内 epoch &gt; 0）——
+	 *     登记本身只说明"线程还在"，租约还在才说明"它仍是这一轮的主人"；</li>
+	 * <li><b>业务活动锚点仍在僵尸窗口内</b>（快照 RUNNING 且 {@code activeAtMs} 距今 ≤
+	 *     {@code app.ai.resume.zombie-age}）—— 判活方那一拍之后业务又前进了。</li>
+	 * </ol>
+	 *
+	 * <p>返回 {@code null} = 通过初检（继续抢租，按 fresh 决定后续）；不通过 = {@code ALREADY_RUNNING}。
+	 */
+	private ResumeResult takeoverPreCheck(String runId) {
+		if (this.chatService != null && this.chatService.isDriving(runId) && this.store.heldRunEpoch(runId) > 0L) {
+			return refuseTakeover(runId, "DRIVER_ALIVE_IN_PROCESS", null, null);
+		}
+		// 租约此刻已被某方持有（别人 / 或本进程别的驱动方）：不再做活动初检，把结论交给抢租与抢租后的复核 ——
+		// 别人持有 ⇒ LEASE_HELD_ELSEWHERE（比"活动还新"更具体、也是既有对外语义）；
+		// 本进程重入（created=false）⇒ 抢租后按 !fresh 拒绝（不动租约）。
+		LeaseService facility = this.store.leaseService();
+		if (facility != null) {
+			boolean leaseHeld;
+			try {
+				leaseHeld = facility.isHeld(this.store.runLeaseKey(runId));
+			}
+			catch (RuntimeException ex) {
+				// 探针读不出来 ≠ 没人持有：按"有人持有"处理，把结论交给抢租脚本（它会给出权威答案）
+				log.debug("接管前初检读租约失败 runId={}（交给抢租判定）：{}", runId, ex.getMessage());
+				leaseHeld = true;
+			}
+			if (leaseHeld) {
+				return null;
+			}
+		}
+		RunSnapshot snapshot;
+		try {
+			snapshot = this.store.get(runId);
+		}
+		catch (RuntimeException ex) {
+			// 读不出来不是"可以接管"：交给常规入口的 STATE_UNKNOWN 等既有分支处理（这里不改变方向）
+			log.debug("接管前初检读快照失败 runId={}（交给常规入口）：{}", runId, ex.getMessage());
+			return null;
+		}
+		if (snapshot == null || !RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
+			return null;
+		}
+		long activeAtMs = activeAtMs(snapshot);
+		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+		long activeAgeMs = System.currentTimeMillis() - activeAtMs;
+		if (activeAgeMs <= zombieAgeMs) {
+			return refuseTakeover(runId, "ACTIVITY_ADVANCED", activeAtMs, activeAgeMs);
+		}
+		return null;
+	}
+
+	/** 接管否决的统一出口（初检与抢租后复核共用；形态 = {@code ALREADY_RUNNING} + 具名 reason）。 */
+	private ResumeResult refuseTakeover(String runId, String reason, Long activeAtMs, Long activeAgeMs) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("runId", runId);
+		body.put("resumed", false);
+		body.put("reason", reason);
+		if ("DRIVER_ALIVE_IN_PROCESS".equals(reason)) {
+			body.put("driverAlive", true);
+			log.warn("僵尸接管否决 runId={}：本进程的驱动方仍持有这一轮的租约（不抢租、不还租，驱动不受影响）",
+					runId);
+		}
+		else {
+			body.put("activeAtMs", activeAtMs);
+			body.put("activeAgeMs", activeAgeMs);
+			log.warn("僵尸接管否决 runId={}：业务活动仍在僵尸窗口内（{}ms ≤ 阈值 {}ms）—— 不抢租，让给原驱动",
+					runId, activeAgeMs, this.properties.getResume().getZombieAge().toMillis());
+		}
+		body.put("instanceId", this.store.instanceId());
+		return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 	}
 
 	/**
@@ -727,8 +815,11 @@ public class ResumeService {
 	 * 此时只由进程内互斥排他 —— 与批②b 之前的语义一致
 	 */
 	public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
-		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）
-		return resumeInternal(runId, forceTakeover, lease, RESUME_REATTACH, ErrorBodyFactory.requestLocale());
+		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）。
+		// fresh=false：租约由调用方持有（本方法不抢也不还），抢租后的复核因此可以安全否决
+		// （拒绝不动租约 ⇒ 不会出现"fence 已推进 + 无人驱动"，见 {@link #takeoverPreCheck}）。
+		return resumeInternal(runId, forceTakeover, lease, false, RESUME_REATTACH,
+				ErrorBodyFactory.requestLocale());
 	}
 
 	/**
@@ -1225,7 +1316,7 @@ public class ResumeService {
 	}
 
 	private ResumeResult resumeInternal(String runId, boolean forceTakeover, LeaseService.Lease lease,
-			String resumeReason, Locale replyLocale) {
+			boolean freshLease, String resumeReason, Locale replyLocale) {
 		if (lease != null) {
 			// I3：归属校验对着 Redis 真值做（一次往返），不用进程内视图 —— 视图在"TTL 已到、续租还没失败"
 			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
@@ -1313,31 +1404,40 @@ public class ResumeService {
 					body.put("reason", "ALREADY_RUNNING");
 					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 				}
-				// ===== 接管前复核（2026-10-29）：抢到租约 ≠ 原驱动已死 =====
-				// 调用方那一拍判活与这一次接管之间隔着若干 Redis 往返；而<b>同实例</b>的抢租还是可重入的
-				// （首轮/确认门持有的就是同一任，created=false）—— 只凭"我抢到了"就接管，等于让一轮
-				// 出现两个驱动方。两条证据任一为真即<b>不接管</b>（让给原驱动）：
-				// ① 本进程仍登记着这一轮的驱动方（首轮 chat 的 drivingRuns）；
-				// ② 业务活动锚点此刻仍在僵尸窗口内（原驱动又出过业务帧）。
-				if (this.chatService != null && this.chatService.isDriving(runId)) {
-					body.put("resumed", false);
-					body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
-					body.put("driverAlive", true);
-					log.warn("僵尸接管复核拒绝 runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
-							+ "（同实例抢租可重入，抢到不等于原驱动已死）—— 不接管，避免双驱动", runId, sessionId);
-					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
-				}
+				// ===== 抢租后的复核（2026-10-29；返修 M-1 起与 fresh 绑定）=====
+				// 常态下"驱动还活着"已在 {@link #takeoverPreCheck} 里拦下（那时还没抢租）。
+				// 走到这里仍要复核，是关掉"初检之后、抢租之前驱动又活过来"的窗口 —— 但<b>只有同主重入
+				// （{@code created=false}）才允许否决</b>：那时租约属于活着的驱动方，拒绝不动任何状态。
+				// <b>fresh=true 表示这一任是我抢到的</b>（原租约已过期/无人持有，且 fence 已被我推到新 epoch）：
+				// 此时"拒绝 + 还租"的净结果是「fence 已推进 + 租约被删 + 无人驱动」—— 原驱动被围栏在外，
+				// 这一轮再也没人推。故 fresh 一律<b>安全接管</b>：旧驱动的写会被它自己丢租后的只读判据挡住。
 				long activeAtMs = activeAtMs(snapshot);
 				long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
 				long activeAgeMs = System.currentTimeMillis() - activeAtMs;
-				if (activeAgeMs <= zombieAgeMs) {
-					body.put("resumed", false);
-					body.put("reason", "ACTIVITY_ADVANCED");
-					body.put("activeAtMs", activeAtMs);
-					body.put("activeAgeMs", activeAgeMs);
-					log.warn("僵尸接管复核拒绝 runId={} sessionId={}：业务活动在接管判定之后又前进"
-							+ "（{}ms ≤ 阈值 {}ms：原驱动还活着）—— 不接管", runId, sessionId, activeAgeMs, zombieAgeMs);
-					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				boolean driverAlive = this.chatService != null && this.chatService.isDriving(runId);
+				boolean activityAlive = activeAgeMs <= zombieAgeMs;
+				if (driverAlive || activityAlive) {
+					if (!freshLease) {
+						if (driverAlive) {
+							body.put("resumed", false);
+							body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+							body.put("driverAlive", true);
+							log.warn("僵尸接管复核拒绝 runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
+									+ "（同主重入，拒绝不改任何状态）—— 不接管，避免双驱动", runId, sessionId);
+							return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+						}
+						body.put("resumed", false);
+						body.put("reason", "ACTIVITY_ADVANCED");
+						body.put("activeAtMs", activeAtMs);
+						body.put("activeAgeMs", activeAgeMs);
+						log.warn("僵尸接管复核拒绝 runId={} sessionId={}：业务活动在接管判定之后又前进"
+								+ "（{}ms ≤ 阈值 {}ms：原驱动还活着）—— 不接管", runId, sessionId, activeAgeMs,
+								zombieAgeMs);
+						return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+					}
+					log.warn("僵尸接管复核：仍见活驱动迹象（driverAlive={} activeAgeMs={}），但本次是 fresh 抢租"
+							+ "（已推进 fence）—— 拒绝+还租会留下『无人驱动』，故继续接管 runId={} sessionId={}"
+							+ "（旧驱动的写将被其丢租后的只读判据挡住）", driverAlive, activeAgeMs, runId, sessionId);
 				}
 				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
 				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 业务活动已超龄；
@@ -1709,7 +1809,8 @@ public class ResumeService {
 						log.error("续跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
 						// 交棒后的失败必须落终态，不能只留下错误帧和无人推进的 RUNNING 快照。
 						// N2：失败终态与失败终帧在同一个监视器内完成（取消已先到 ⇒ 两者都不发）。
-						// 本批：发 error 之前先问归档有没有终帧（每轮至多一条终帧，跨实例成立）。
+						// 本批（返修后按<b>每次驱动</b>判）：只跳过"本次驱动已落的终帧"，上一次驱动的 error
+						// 不得吞掉本次失败；跨实例并发的"恰好一条"不在本批保证内（见 emitFailureErrorUnlessArchived）。
 						markDriveFailure(snapshot, ex,
 								() -> emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED,
 										resumeFailedMessage()));
@@ -2012,19 +2113,22 @@ public class ResumeService {
 	}
 
 	/**
-	 * 续跑侧失败出口的<b>终帧幂等</b>（2026-10-29）：归档里已有 {@code done}/{@code error} ⇒ 不发 error。
+	 * 续跑侧失败出口的<b>终帧幂等</b>（2026-10-29；返修后按<b>每次驱动</b>判）。
 	 *
-	 * <p>为什么判据是归档而不是进程内标记：同一轮可能有多个收尾方（接管方、交棒执行体、原驱动线程），
-	 * 它们可能在不同线程/实例/重启后的新进程里；只有共享归档
-	 * （{@link SseChatEmitter#terminalFrameArchived()}）能回答"这一轮到底有没有终帧"。
+	 * <p>判据 = {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}（本次驱动入口之后的
+	 * done/error），入口下界由 {@code ResilientChatService#driveResumed} 在驱动开始时记一次。
+	 * 这样"上一次驱动（{@code retry-model-step}）留下的 error"不会把本次的失败终帧吞掉。
 	 *
-	 * <p>读不出来（{@code null}）= 不可知 ⇒ <b>照发</b>（写门会再拦一次）：把读降级折叠成"已归档"
-	 * 会让失败轮彻底没有终帧。
+	 * <p><b>边界</b>：这是"读 → 判 → 发"的顺序判据，只覆盖<b>同一驱动</b>（含同进程重复收尾）与
+	 * <b>同一 runId 的相邻驱动</b>；跨实例并发的"恰好一条终帧"需要原子终帧位（本批未做，不声称根治）。
+	 * 终态写已还租，写门对这一笔终帧不设防，故这里不把"写门会再拦一次"当兜底。
+	 *
+	 * <p>判据不可知（{@code null}）⇒ <b>照发</b>：宁可多一条，也不能吞掉本次驱动唯一的失败终帧。
 	 */
 	private void emitFailureErrorUnlessArchived(SseChatEmitter out, String code, String message) {
-		Boolean archived = out.terminalFrameArchived();
+		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
 		if (Boolean.TRUE.equals(archived)) {
-			log.info("失败终帧已归档，跳过重复 error code={}（每轮至多一条终帧）", code);
+			log.info("本次驱动的失败终帧已落档，跳过重复 error code={}（每次驱动至多一条终帧）", code);
 			return;
 		}
 		out.error(code, message);

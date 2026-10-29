@@ -40,23 +40,24 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * <b>失败终帧的幂等</b>（2026-10-29）：每 run 至多一条终帧。
+ * <b>失败终帧的幂等</b>（2026-10-29；返修后：**每次驱动**至多一条终帧）。
  *
  * <h2>被钉住的缺陷</h2>
- * 取消收尾与"终态不可确认"两条出口已经按<b>归档里有没有终帧</b>判幂等，但三条
- * DONE/FAILED 失败出口没有：{@code fail()}（含内容过滤/各类上游违规）、{@code emptyReply()}、
- * 以及环外异常/续跑失败。缺了这一步，下列现场会落出<b>第二条终帧</b>：
- * <ul>
- * <li>同一轮的另一个驱动方（接管方/交棒执行体）已经落了终态与终帧，本线程还在跑；
- *     它随后失败，再补一条 {@code error} ⇒ 归档里 done + error 并存（重放与前端收敛按第一条，
- *     第二条既误导"失败了"又破坏"终帧是本轮最后一帧"的帧序不变量）；</li>
- * <li>写门/投递丢帧后重试（同一进程的第二次收尾）。</li>
- * </ul>
+ * 三条 DONE/FAILED 失败出口（{@code fail()} 含内容过滤/各类上游违规、{@code emptyReply()}、环外异常/续跑失败）
+ * 原先不做终帧判定：同一驱动里已经落过终帧时，再补一条 {@code error} ⇒ 归档里 done + error 并存
+ * （重放与前端收敛按第一条，第二条既误导"失败了"又破坏"终帧是本轮最后一帧"的帧序不变量）。
  *
- * <h2>为什么不用 AtomicBoolean</h2>
- * 进程内的布尔只能挡住<b>同一个实例</b>的重复发射；这里要挡的是"同一轮在<b>共享归档</b>里
- * 已经有终帧"。判据必须是归档本身（{@link SseChatEmitter#terminalFrameArchived()}）——
- * 跨实例、跨线程、跨进程重启都成立。
+ * <h2>判据（返修 I-2 后按<b>每次驱动</b>）</h2>
+ * 判据是 {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}：驱动入口记一次归档序号下界，
+ * 只认 {@code seq > 下界} 的 done/error。**不能**用整轮归档（{@code terminalFrameArchived()}）——
+ * 同一 runId 会被驱动多次（{@code retry-model-step}），上一次的 error 会把本次失败整条吞掉；
+ * 本类下半部分的两条用例正是那个反向证据。
+ *
+ * <p><b>不用 AtomicBoolean</b>：进程内布尔只挡自己，也不解决"多次驱动"的代次问题；
+ * 判据必须落在共享归档上（下界是本驱动入口的归档末号）。
+ *
+ * <p><b>边界（如实）</b>：这是"读 → 判 → 发"的顺序判据，**不**提供跨实例并发下的"恰好一条终帧"
+ * （那需要原子终帧位，本批未做）。
  */
 class FailureTerminalFrameIdempotencyTest {
 
@@ -126,36 +127,38 @@ class FailureTerminalFrameIdempotencyTest {
 	}
 
 	/**
-	 * 归档里已有<b>别人落的</b> error 终帧 ⇒ 本线程的失败出口不得再补一条。
+	 * <b>返修 I-2 后的口径</b>：上一次驱动留下的 error <b>不属于</b>本次驱动 ⇒ 本次失败出口
+	 * <b>必须</b>照发自己的终帧（这正是 {@code retry-model-step} 二次驱动失败的场景）。
 	 *
-	 * <p>证红方式：去掉 {@code failLocked} 发 error 前的归档终帧判定 ⇒ 归档里出现两条 error。
+	 * <p>旧口径（"归档里有没有任何终帧"）会在这里把本次的 error 与 {@code textEnd} 一起吞掉 ——
+	 * 本用例在返修前是反向断言（{@code noneMatch(error)}），返修后倒转，锁的是同一条判据的另一面。
 	 */
 	@Test
-	void aFailureDoesNotAppendASecondErrorWhenTheTerminalIsAlreadyArchived() {
+	void aFailureStillEmitsItsOwnErrorWhenOnlyAnEarlierDriveArchivedOne() {
 		seedArchivedTerminal("error");
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.error(new IllegalStateException("上游握手失败（模拟）")));
 
 		List<Map<String, Object>> frames = runTurn();
 
-		assertThat(frames).as("已有终帧 ⇒ 本线程一条 error 都不发").noneMatch(frame -> "error".equals(frame.get("type")));
-		assertThat(terminalTypes(this.store.events(RUN_ID))).as("归档里终帧仍然只有别人那一条")
-			.containsExactly("error");
+		assertThat(frames).as("上一次驱动的 error 不得让本次失败静默").anyMatch(frame -> "error".equals(frame.get("type")));
+		assertThat(terminalTypes(this.store.events(RUN_ID)))
+			.as("归档里 = 上一次驱动那条 + 本次驱动这条")
+			.containsExactly("error", "error");
 	}
 
-	/**
-	 * 归档里已有<b>别人落的</b> done 终帧 ⇒ 本线程的空回复失败出口不得把 done 翻成 error。
-	 */
+	/** 相邻对照：上一次驱动落的是 done，本次空回复失败同样要发自己的 error（不得被旧的 done 吞掉）。 */
 	@Test
-	void anEmptyReplyDoesNotAppendASecondErrorWhenTheTerminalIsAlreadyArchived() {
+	void anEmptyReplyStillEmitsItsOwnErrorWhenAnEarlierDriveArchivedADone() {
 		seedArchivedTerminal("done");
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(emptyChunk(), terminal("stop")));
 
 		List<Map<String, Object>> frames = runTurn();
 
-		assertThat(frames).as("已有 done ⇒ 不得补空回复的 error（一轮两条终帧）")
-			.noneMatch(frame -> "error".equals(frame.get("type")) || "done".equals(frame.get("type")));
-		assertThat(terminalTypes(this.store.events(RUN_ID))).as("归档里仍只有那一条 done").containsExactly("done");
+		assertThat(frames).as("上一次驱动的 done 不得吞掉本次空回复的失败终帧")
+			.anyMatch(frame -> "error".equals(frame.get("type")));
+		assertThat(terminalTypes(this.store.events(RUN_ID))).containsExactly("done", "error");
+		assertThat(this.store.get(RUN_ID).getStatus()).as("本次失败终态照旧落库").isEqualTo(RunSnapshot.FAILED);
 	}
 
 	/** 相邻对照：归档里<b>没有</b>终帧时，失败照旧恰好一条 error（幂等不得把正常失败关掉）。 */

@@ -531,6 +531,9 @@ public class ResilientChatService {
 
 	public void chat(String runId, AiChatRequest request, SseChatEmitter out) {
 		String sessionId = request.sessionId();
+		// 驱动入口（本批返修 I-2）：先记一次归档下界 —— 失败出口只认"本次驱动"落的终帧。
+		// 必须在任何出帧之前（含 out.start），否则下界会吃掉本次驱动自己的首帧判定依据。
+		out.beginDrive();
 		// 日志链路：本方法可能跑在挂起池线程上（AiController 提交），入口再绑一次保证锚点成立
 		AiTrace.bind(runId, sessionId);
 		AiContext context = toContext(request.context());
@@ -771,6 +774,11 @@ public class ResilientChatService {
 	 */
 	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
 			Long providerId, String modelId, SseChatEmitter out) {
+		// 驱动入口（本批返修 I-2）：记一次归档下界。同一 runId 会被驱动多次（retry-model-step），
+		// 上一次驱动留下的 error 不属于本次 —— 失败出口只认 seq 大于下界的终帧。
+		if (out != null) {
+			out.beginDrive();
+		}
 		long turnStartedAtMs = System.currentTimeMillis();
 		// 日志链路：续跑落在挂起池线程上（ResumeService 提交），入口重绑锚点
 		AiTrace.bind(runId, sessionId);
@@ -868,9 +876,11 @@ public class ResilientChatService {
 	 * <ul>
 	 * <li>抢到 / 同主重入 ⇒ 记入进程内驱动登记 + 起续租心跳；</li>
 	 * <li>{@link LeaseService.AcquireOutcome#HELD_ELSEWHERE} ⇒ <b>不驱动</b>
-	 *     （终态与终帧归持有方，本连接照常收流）；</li>
-	 * <li>设施缺失 / 不可确认 ⇒ 按"没有租约语义"继续（写口自身的 fail-closed 判据仍是杀招，
-	 *     不能让一次 Redis 抖动把首轮直接打死）。</li>
+	 *     （终态与终帧归持有方）；</li>
+	 * <li>设施缺失 / 不可确认 ⇒ 继续驱动，但<b>写权限的结论由写口自己给</b>：
+	 *     <b>没有租约设施</b>时 {@code runLeaseAuthority} 是 {@code NEVER_HELD} ⇒ 写口<b>放行</b>
+	 *     （没有租约语义，fencing 不参与）；<b>设施不可确认</b>时是 {@code UNAVAILABLE} ⇒ 写口
+	 *     <b>只读</b>（这一轮的快照/帧会被拒）。两者都不是"本方法兜住"的，这里只决定要不要驱动。</li>
 	 * </ul>
 	 */
 	private DriveOwnership takeDriveOwnership(String runId) {
@@ -881,8 +891,8 @@ public class ResilientChatService {
 			acquired = this.store.acquireRunLease(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("首轮取得续跑权失败 runId={}（按无租约语义继续；写口仍会按权威判定拦）: {}", runId,
-					ex.getMessage());
+			log.warn("首轮取得续跑权失败 runId={}（按无租约语义继续；无设施 ⇒ 写口 NEVER_HELD 放行，"
+					+ "设施不可确认 ⇒ 写口 UNAVAILABLE 只读）: {}", runId, ex.getMessage());
 			return DriveOwnership.none();
 		}
 		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
@@ -1785,30 +1795,37 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * <b>失败终帧的唯一出口</b>（2026-10-29）：发 {@code error} 之前先问归档有没有终帧。
+	 * <b>失败终帧的唯一出口</b>（2026-10-29；返修后按<b>每次驱动</b>判）：发 {@code error} 之前先问
+	 * <b>本次驱动</b>有没有终帧。
 	 *
-	 * <h2>为什么（而不只是 {@code synchronized} / {@code AtomicBoolean}）</h2>
-	 * 每轮至多一条终帧是<b>跨线程、跨实例</b>的不变量：接管方、交棒执行体、原驱动线程都可能在同一轮里
-	 * 收尾，进程内的布尔只能挡自己。判据因此只能是共享归档（{@link SseChatEmitter#terminalFrameArchived()}）。
+	 * <h2>判据（返修 I-2）</h2>
+	 * 用 {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}，即"归档里 seq 大于<b>本次驱动
+	 * 入口</b>下界的 done/error"。不能用"整轮归档里有没有终帧"：同一 runId 会被驱动多次
+	 * （{@code retry-model-step}），上一次驱动的 error 会把本次的 {@code textEnd}/{@code error} 整条吞掉。
 	 *
-	 * <p><b>为什么连 {@code textEnd} 一起跳过</b>：终帧之后不得再有业务帧（帧序不变量）。归档里已有终帧时
-	 * 补一条 {@code message_end} 会把"这一轮最后一条帧"从终帧换成一个段收尾。
+	 * <h2>边界（如实，不过度承诺）</h2>
+	 * 这是"读 → 判 → 发"的<b>顺序</b>判据，不是原子协议：它挡的是<b>同一驱动</b>（含同进程的重复收尾）
+	 * 以及<b>同一 runId 的相邻驱动</b>之间的重复/误判；<b>跨实例并发</b>下"恰好一条终帧"仍需要
+	 * 与 fence 同事务的原子终帧位 —— 本批<b>未做</b>，也不声称已根治。既有的写门（租约/fence）在
+	 * "终态写已还租"之后对这一笔终帧<b>不设防</b>，因此这里<b>不</b>把"写门会再拦一次"当作兜底。
 	 *
-	 * <p>读不出来（{@code null}）= 不可知，按"未归档"继续发（写门会再拦一次）—— 不能把读降级折叠成
-	 * "已归档"，那会让失败轮彻底没有终帧。
+	 * <p><b>为什么连 {@code textEnd} 一起跳过</b>：终帧之后不得再有业务帧（帧序不变量）。本次驱动已有
+	 * 终帧时再补一条 {@code message_end} 会把"这一轮最后一条帧"从终帧换成一个段收尾。
+	 *
+	 * <p>判据不可知（{@code null}，例如下界读降级）= 按"未归档"照发：宁可多一条，也不能吞掉本次失败。
 	 *
 	 * @param closeTextLength 终帧前要闭合的正文段字符数（{@code <= 0} 时 {@code textEnd} 自身是幂等空操作）
-	 * @return {@code true} = 真的发了 {@code error}；{@code false} = 归档已有终帧，跳过
+	 * @return {@code true} = 真的发了 {@code error}；{@code false} = 本次驱动已有终帧，跳过
 	 */
 	private boolean emitFailureTerminal(String runId, SseChatEmitter out, String code, String message,
 			Map<String, Object> extra, int closeTextLength) {
-		Boolean archived = out.terminalFrameArchived();
+		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
 		if (Boolean.TRUE.equals(archived)) {
-			log.info("失败终帧已归档，跳过重复 error runId={} code={}（每轮至多一条终帧）", runId, code);
+			log.info("本次驱动的失败终帧已落档，跳过重复 error runId={} code={}（每次驱动至多一条终帧）", runId, code);
 			return false;
 		}
 		if (archived == null) {
-			log.warn("终帧归档状态不可读 runId={}（按未归档继续收尾，写门会再拦一次）", runId);
+			log.warn("本次驱动的终帧归档状态不可读 runId={}（下界不可知 ⇒ 按未归档继续收尾）", runId);
 		}
 		out.textEnd(closeTextLength);
 		// 无 additive 键时走两参重载（与改造前逐字节同形：既有调用方/用例观察的是同一个方法）

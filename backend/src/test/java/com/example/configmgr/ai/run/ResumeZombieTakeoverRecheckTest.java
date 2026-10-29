@@ -39,13 +39,19 @@ import static org.mockito.Mockito.when;
  *     接管照样发生 ⇒ 同一轮被跑第二遍。</li>
  * </ul>
  *
- * <h2>本批口径</h2>
- * 接管前必须<b>再复核一次</b>"驱动已失活"，两条证据任一为真即<b>不接管</b>（让给原驱动）：
- * <ol>
- * <li>本进程仍登记着这一轮的驱动方（{@code ResilientChatService#isDriving}）；</li>
- * <li>业务活动锚点此刻仍在僵尸窗口内（接管判定之后业务又前进了）。</li>
- * </ol>
- * 真僵尸（无驱动登记 + 活动仍超龄）照旧接管 —— 复核不得把接管能力整体关掉。
+ * <h2>本批口径（返修后：复核与"是不是我夺的租"绑定）</h2>
+ * 两条"驱动还活着"的证据：①本进程仍登记着这一轮的驱动方（{@code ResilientChatService#isDriving}）
+ * <b>且该驱动仍持有有效租约</b>；②业务活动锚点此刻仍在僵尸窗口内。
+ *
+ * <p><b>初检放在抢租之前</b>（M-1）：抢租会把 fence 推到新 epoch（旧驱动从此只读），因此"活驱动"的判定
+ * 必须在<b>还没夺权</b>时做 —— 否则"先抢租、再拒绝、再还租"的净结果是
+ * 「fence 已推进 + 租约被删 + 无人驱动」，比不接管更糟。
+ *
+ * <p><b>抢到之后的复核只对"同主重入"（{@code created=false}）拒绝</b>：那时租约属于活着的驱动方，
+ * 拒绝不改任何状态；若本次是<b>我夺来的</b>（{@code created=true}，说明原租约已过期/无人持有），
+ * 拒绝+还租就是上面那条死路，故必须<b>安全接管</b>（旧驱动的写会被它自己丢租后的只读判据挡住）。
+ *
+ * <p>真僵尸（无驱动登记 + 活动仍超龄）照旧接管 —— 复核不得把接管能力整体关掉。
  */
 class ResumeZombieTakeoverRecheckTest {
 
@@ -56,6 +62,14 @@ class ResumeZombieTakeoverRecheckTest {
 	private final AiProperties properties = new AiProperties();
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
+
+	private final FakeLeaseRedis fake = new FakeLeaseRedis();
+
+	private final FakeRenewScheduler renewScheduler = new FakeRenewScheduler();
+
+	/** 真实租约设施（fence/epoch 语义与生产同源；不装它就看不出"抢租是否推进了 fence"）。 */
+	private final LeaseService leases = new LeaseService(this.fake.redis, this.properties, this.renewScheduler,
+			"inst-a");
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -77,6 +91,7 @@ class ResumeZombieTakeoverRecheckTest {
 
 	@BeforeEach
 	void setUp() {
+		this.store.useLeaseFacility(this.leases);
 		when(this.cancellations.isCancelled(any())).thenReturn(false);
 		when(this.cancellations.cancelState(any())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
@@ -90,13 +105,15 @@ class ResumeZombieTakeoverRecheckTest {
 	}
 
 	/**
-	 * 同实例：首轮 {@code chat()} 仍在驱动（进程内有登记）⇒ 即使 {@code forceTakeover=true}、
-	 * 即使抢租成功（可重入），也不得接管。
+	 * 同实例：首轮 {@code chat()} 仍在驱动、<b>且仍持有租约</b> ⇒ 拒绝接管，并<b>一个键都不动</b>：
+	 * 不抢租（fence 不推进）、不还租（原驱动不被围栏在外）。
 	 */
 	@Test
-	void zombieTakeoverIsRefusedWhileAnInProcessDriverIsStillRegistered() {
+	void zombieTakeoverIsRefusedWhileALeaseHoldingDriverIsStillDriving() {
 		seedStaleRunning();
 		when(this.chatService.isDriving(RUN_ID)).thenReturn(true);
+		long driverEpoch = this.leases.tryAcquire(this.store.runLeaseKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow().epoch();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID, true);
 
@@ -108,6 +125,30 @@ class ResumeZombieTakeoverRecheckTest {
 		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any(), any(), any());
 		verify(this.executor, never()).execute(any(Runnable.class));
 		assertThat(this.store.get(RUN_ID).getStatus()).as("不接管 ⇒ 不得改状态").isEqualTo(RunSnapshot.RUNNING);
+		assertThat(this.store.heldRunEpoch(RUN_ID)).as("原驱动的租约必须原样留在他手上").isEqualTo(driverEpoch);
+		assertThat(this.store.fenceEpoch(RUN_ID)).as("拒绝接管不得推进 fence（否则原驱动会被围栏在外）").isZero();
+	}
+
+	/**
+	 * <b>M-1</b>：本进程仍有驱动登记，但<b>租约已经丢了</b>（本次抢租是 fresh：取了新号、推进了 fence）——
+	 * 此时不得再走"复核拒绝 + 还租"：净结果会是「fence 已推进 + 租约被删 + 无人驱动」，
+	 * 原驱动被围栏在外、这一轮再也没人推。正确出口是<b>安全接管</b>（旧驱动的写被它自己丢租后的
+	 * 只读判据挡住），接管方持有新租约。
+	 */
+	@Test
+	void aFreshTakeoverOfAStillRegisteredDriverTakesOverInsteadOfLeavingNobodyDriving() {
+		seedStaleRunning();
+		when(this.chatService.isDriving(RUN_ID)).thenReturn(true);
+		assertThat(this.store.heldRunEpoch(RUN_ID)).as("前提：驱动方已丢租（进程内无租约视图）").isZero();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID, true);
+
+		assertThat(result.outcome()).as("fresh 已夺权：拒绝+还租会留下无人驱动，必须接管")
+			.isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(result.body()).containsEntry("zombieTakeover", true);
+		verify(this.executor).execute(any(Runnable.class));
+		assertThat(this.store.heldRunEpoch(RUN_ID)).as("接管方仍持租 ⇒ 不是『没人驱动』的状态").isPositive();
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("租约键必须在接管方手里").isNotNull();
 	}
 
 	/**
@@ -127,6 +168,8 @@ class ResumeZombieTakeoverRecheckTest {
 		assertThat(result.outcome()).as("业务仍在前进 ⇒ 不是僵尸，拒绝接管").isEqualTo(ResumeService.Outcome.ALREADY_RUNNING);
 		assertThat(result.body()).containsEntry("reason", "ACTIVITY_ADVANCED");
 		verify(this.executor, never()).execute(any(Runnable.class));
+		assertThat(this.store.fenceEpoch(RUN_ID)).as("拒绝必须在抢租之前（不得推进 fence）").isZero();
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("也不得留下自己的租约").isNull();
 	}
 
 	/** 真僵尸（无驱动登记 + 业务活动仍超龄）：复核不得把接管能力整体关掉。 */
