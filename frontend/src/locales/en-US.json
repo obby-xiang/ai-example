@@ -102,6 +102,10 @@
           "title": "The AI provider rejected the request",
           "guide": "Check the model parameters and provider settings, then try again."
         },
+        "tenantIdentity": {
+          "title": "Identity check failed",
+          "guide": "Pick a tenant and user above, then try again."
+        },
         "summary": {
           "generic": "This turn did not finish normally.",
           "quota": "The request was rate-limited or over quota.",
@@ -119,6 +123,7 @@
           "keyMissing": "No usable provider key is configured.",
           "keyUnreadable": "The provider key cannot be decrypted, so the request was not sent.",
           "noModel": "The default provider has no usable model.",
+          "tenantIdentity": "This request did not carry a recognized tenant/user identity.",
           "toolBudget": "The tool-call budget for this turn is exhausted. Review the executed results, then start a new conversation."
         },
         "derived": {

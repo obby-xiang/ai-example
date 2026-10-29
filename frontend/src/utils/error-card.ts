@@ -113,6 +113,15 @@ const CODE_CARD_TEXT: Record<string, { title: string; guide: string }> = {
   AI_KEY_MISSING: { title: 'ai.card.error.keyMissing.title', guide: 'ai.card.error.keyMissing.guide' },
   AI_KEY_UNREADABLE: { title: 'ai.card.error.keyUnreadable.title', guide: 'ai.card.error.keyUnreadable.guide' },
   NO_MODEL_CONFIGURED: { title: 'ai.card.error.noModel.title', guide: 'ai.card.error.noModel.guide' },
+  // 租户/用户身份码（两个码同一件事：本次请求没带上可识别的身份）——共一张卡，不再分叉
+  TENANT_IDENTITY_REQUIRED: {
+    title: 'ai.card.error.tenantIdentity.title',
+    guide: 'ai.card.error.tenantIdentity.guide'
+  },
+  TENANT_IDENTITY_UNKNOWN: {
+    title: 'ai.card.error.tenantIdentity.title',
+    guide: 'ai.card.error.tenantIdentity.guide'
+  },
   // C13：工具预算耗尽（整轮失败）—— 不是"重试一次就好"，也不是工具卡那套"会继续回答"
   TOOL_BUDGET_EXHAUSTED: {
     title: 'ai.card.error.toolBudget.title',
@@ -139,6 +148,8 @@ const CODE_SUMMARY_KEY: Record<string, string> = {
   AI_KEY_MISSING: 'ai.card.error.summary.keyMissing',
   AI_KEY_UNREADABLE: 'ai.card.error.summary.keyUnreadable',
   NO_MODEL_CONFIGURED: 'ai.card.error.summary.noModel',
+  TENANT_IDENTITY_REQUIRED: 'ai.card.error.summary.tenantIdentity',
+  TENANT_IDENTITY_UNKNOWN: 'ai.card.error.summary.tenantIdentity',
   TOOL_BUDGET_EXHAUSTED: 'ai.card.error.summary.toolBudget'
 }
 

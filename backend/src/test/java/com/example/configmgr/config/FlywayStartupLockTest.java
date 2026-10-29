@@ -80,8 +80,8 @@ class FlywayStartupLockTest {
             pool.shutdownNow();
         }
 
-        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
-        assertThat(historyCount(primary)).isEqualTo(9);
+        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+        assertThat(historyCount(primary)).isEqualTo(11);
         assertThat(historyTableCount(primary)).isEqualTo(1);
     }
 
@@ -139,7 +139,7 @@ class FlywayStartupLockTest {
         // 锁必须已释放：短等待（2s）的第二次启动应立即成功并真正迁移，而不是等 60s。
         FlywayStartupLock next = new FlywayStartupLock(primary, pin, Duration.ofSeconds(2));
         next.migrate(flyway(primary));
-        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
+        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
     }
 
 
@@ -250,8 +250,8 @@ class FlywayStartupLockTest {
         FlywayStartupLock lock = new FlywayStartupLock(primary, pin);
         lock.migrate(flyway(primary));
 
-        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
-        assertThat(historyCount(primary)).isEqualTo(9);
+        assertThat(historyVersions(primary)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+        assertThat(historyCount(primary)).isEqualTo(11);
     }
 
     @Test

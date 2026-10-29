@@ -168,4 +168,3 @@ Maven：`<MAVEN_HOME>/bin/mvn.cmd`（本机 `mvn` 不在 PATH，用便携发行�
   存量受影响用例按 `-Dtest='<类>#<方法>'` 单方法复跑（§2.5）；其中 **8 条在 HEAD 上实测为红**（§2.2 表 + HITL 到期那条）。
 - 未执行：前端（本次零前端改动）、E2E/Playwright、起服务实机核验、打包。
 - `git diff --check`：无空白错误（仅 `core.autocrlf` 的 CRLF 提示）。
-
