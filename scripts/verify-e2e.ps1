@@ -57,7 +57,8 @@
 #   （生成式表单端到端，docs/evidence/GFc-E2E用例设计-GLM-5.3.md）+ GF6（入参闸门，-EnableGf6，
 #   桩模式启用并计入主计数，底座为桩的确定性违规模式 --violate-form-type）+ R-137 红队补测
 #   （MAJOR-2/MAJOR-3）2 个 + E2E-CTX-1..4 共 4 个（上下文计量，底座为桩的请求级
-#   `usage-shape=<last|repeat|zero-last|none>`，形状表取 scripts/ci/stub-routes.json）。
+#   `usage-shape=<last|repeat|big|zero-last|none>`，形状表取 scripts/ci/stub-routes.json；
+#   `big` = repeat 同形态但真值更大（11000/200），供 C13 起"窗口 ≥ 22K 才不被前缀主导"的用例）。
 #   批① 91：设计稿 §2 十二域的接口级用例（AIE2E-S01…X13）+ L-21 两条表格主用例（T-13/T-14）
 #   + AR-04 的可控时序 409（D-13，批次8A 追加、不在设计稿 §2 名单内）；同批把 Q-08 / Q-05 / D-08 / M-07
 #   与遗留 TC18 的"挂起后必 409"统一改为**200/409 两果都合法**（历史无幻影先断；409 断 SESSION_BUSY +

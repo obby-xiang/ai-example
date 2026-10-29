@@ -358,6 +358,35 @@ class ContextCompactorTest {
 		assertThat(this.store.archiveCount()).isZero();
 	}
 
+	/**
+	 * C13 / R3 C1：前缀主导<b>不等于</b>可以放过真正越窗的那一轮。
+	 *
+	 * <p>缺陷现场：守卫只看"前缀占比"就把 target 降到 L1 —— 可当 {@code nextEst >= limit}（这一发注定
+	 * 400）时，L3 硬截断是唯一能腾出空间的一刀。挡掉它 = 直接拿上游 400 换一次"没压"。
+	 * 正确边界：<b>只有 {@code nextEst < limit}（还有余量、L2/L3 只是徒劳）时才降级</b>；
+	 * 真越窗必须保留 L3。
+	 */
+	@Test
+	void c13PrefixDominatedOverflowStillHardTrimsInsteadOfSendingAnOverflowingRequest() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// 谱系已到 L2（这一步的目标是 L3）；真值 5000 让滞回解锁，但续跑重建的工具结果 +12000
+		// ⇒ nextEst = 17000 >= 15000：这一发注定 400（真实入口 = ResumeService 的 rebuiltToolTokens）。
+		seed("L2", 5000);
+		ContextCompactor.Request overflow = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				longTurns(), List.of("{}"), 5000, 0, 0, 12000, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(overflow);
+
+		assertThat(outcome.changed()).as("真越窗必须真的压一次，不能 noop 就发出去").isTrue();
+		assertThat(outcome.level()).as("prefix 主导 + 真越窗 ⇒ 仍做 L3 硬截断").isEqualTo(ContextTrigger.Level.L3);
+		assertThat(outcome.turns()).isEqualTo(3);
+		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
+		assertThat(this.store.read(SESSION_ID).level()).isEqualTo("L3");
+	}
+
 	/** C13 / N3 的另一半：前缀主导时 <b>L1 仍照现有口径处理</b>（清得掉就清、照常记账）。 */
 	@Test
 	void c13PrefixDominatedRoundStillAllowsL1Clearing() {

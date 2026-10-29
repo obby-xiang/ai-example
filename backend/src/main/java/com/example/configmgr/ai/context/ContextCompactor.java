@@ -281,7 +281,11 @@ public final class ContextCompactor {
 		int l2 = config.getL2Percent() <= 0 ? 80 : config.getL2Percent();
 		long denominator = Math.max(1L,
 				(long) limit - ContextTrigger.effectiveReserve(limit, config.getReserveTokens()));
-		boolean prefixDominated = prefixTokens > 0 && prefixTokens * 100d / denominator >= l2;
+		// C1：守卫只在<b>还有余量</b>（{@code nextEst < limit}）时成立 —— 那时 L2/L3 确实徒劳
+		// （压不动固定前缀）。但 {@code nextEst >= limit} 是"这一发注定 400"：L3 硬截断是唯一能腾出
+		// 空间的一刀，挡掉它等于拿上游 400 换一次"没压"。故真越窗<b>保留 L3</b>。
+		boolean prefixDominated = prefixTokens > 0 && prefixTokens * 100d / denominator >= l2
+				&& decision.nextEst() < limit;
 		if (prefixDominated && target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
 			target = ContextTrigger.Level.L1;
 		}

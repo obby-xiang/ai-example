@@ -10,13 +10,13 @@
  * <h2>分母怎么变小（L-93 的结论）</h2>
  * 自 L-89 起上限的<b>唯一真源</b>是 `ai_model.max_context`（`ContextLimitResolver`）；
  * `--app.ai.context.limit-tokens` 只在"模型行没声明 max_context"时作启动期回退 ⇒
- * 用 env 压分母**结构性无效**（L-93 实测：默认与 limit-tokens=20000 两次配置下
+ * 用 env 压分母**结构性无效**（L-93 实测：默认与 limit-tokens=30000 两次配置下
  * `compaction.level` 恒 none、压缩台账 0 条，C-13 的"单调不减、每次至多一格"只是平凡成立）。
  * 本文件因此改走**模型配置写接口**（`PUT /api/ai/providers/{id}/models/{modelId}`）：
  * 每个用例自带窗口、跑完恢复，窗口生效以 `/health.contextLimitTokens` 为准
- * （`support/helpers-kqc.ts#withModelWindow`）。运行命令里仍留 `--app.ai.context.limit-tokens=20000`：
+ * （`support/helpers-kqc.ts#withModelWindow`）。运行命令里仍留 `--app.ai.context.limit-tokens=30000`：
  * 它必须大于 `reserve-tokens`（13000，否则启动期自检拦下），同时与任何一个用例窗口都不同 ——
- * 于是"分母 = 模型行"这件事有断言盯着（`limitTokens === 窗口 && !== 20000`）。
+ * 于是"分母 = 模型行"这件事有断言盯着（`limitTokens === 窗口 && !== 30000`）。
  *
  * <h2>取值纪律（P3 实测；C13 起预留收口 + 前缀主导守卫）</h2>
  * 旧口径下 `limit − reserve` 在"预留接近窗口"时会被钳成个位数的分母：任何轮次都判满、
@@ -55,7 +55,7 @@
  *   桩的请求落档序号（`req-NNN`）每棒从 0 重来，而 harness 只清 H2 / Redis、不清 stub 目录；
  *   残留的上一棒文件会让 `maxStubIndex()` 读到旧的大序号 ⇒ `waitStubRequestsAfter` 永远等不到新请求。
  *   E2E_KQC_COMPACT=1 \
- *   E2E_EXTRA_BACKEND_ARGS="--app.ai.context.limit-tokens=20000" \   # 弃用回退键：留 = 启动自检约束 + 分母断言的对照值
+ *   E2E_EXTRA_BACKEND_ARGS="--app.ai.context.limit-tokens=30000" \   # 弃用回退键：留 = 启动自检约束 + 分母断言的对照值
  *   E2E_BACKEND_PORT=22930 E2E_DEGRADED_BACKEND_PORT=22931 E2E_STUB_PORT=22999 \
  *   E2E_APP_PORT=22901 E2E_DEGRADED_APP_PORT=22902 E2E_REDIS_DB=6 E2E_REDIS_DB_DEGRADED=6 \
  *   E2E_RUN_DIR=test-results/.e2e-run-kqc-c \
@@ -133,9 +133,9 @@ function chronological(ledger: Array<Record<string, unknown>>): Array<Record<str
 /**
  * 轮内上下文预算的收尾指令（`SpToolCallingManager.TURN_BUDGET_WRAP_UP`）。
  *
- * 本文件把分母压到 4500-6000（窗口 17500/19000 − reserve 13000），这个尺度下工具批之后的
- * **轮内**判定会先撞上 95% 收尾线：产品在工具结果之后追加一条"请收尾"的 user 消息（同一轮、
- * 同一段历史，不是新一轮对话）⇒ 续轮请求仍然存在，只是末条不再是 `role=tool`。
+ * 本文件的分母 = `窗口 − min(reserve 13000, 窗口/2)`（三档窗口见文件头：15000 / 13000 / 11000），
+ * 这个尺度下工具批之后的**轮内**判定会先撞上 95% 收尾线：产品在工具结果之后追加一条"请收尾"的
+ * user 消息（同一轮、同一段历史，不是新一轮对话）⇒ 续轮请求仍然存在，只是末条不再是 `role=tool`。
  */
 const TURN_WRAP_UP_PREFIX = '本轮上下文已接近模型窗口上限'
 
@@ -199,7 +199,7 @@ test('@stub E2E-C08 L1 工具结果清除：占位符格式 + 幂等 + 不暴露
     expect(placeholdersAt8).toBeGreaterThanOrEqual(placeholdersAt7)
 
     const snapshot = await contextSnapshot(sid)
-    // 分母 = 模型行（19000），既不是弃用键 limit-tokens=20000、也不是种子行的 128000
+    // 分母 = 模型行（L1_WINDOW），既不是弃用键 limit-tokens=30000、也不是种子行的 128000
     expect(snapshot.limitTokens).toBe(L1_WINDOW)
     expect(snapshot.limitTokens).not.toBe(ENV_FALLBACK_LIMIT)
     expect(snapshot.compaction?.level).toBe('L1')
@@ -320,7 +320,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
   }
   const controlSnapshot = await contextSnapshot(controlSid)
   const bigWindow = controlSnapshot.limitTokens ?? 0
-  // 大分母来自**模型行**（128000），不是启动参数里的 limit-tokens=20000
+  // 大分母来自**模型行**（128000），不是启动参数里的 limit-tokens=30000
   expect(bigWindow, '对照组必须跑在大分母上（种子行 128000）').toBeGreaterThan(100_000)
   expect(bigWindow).not.toBe(ENV_FALLBACK_LIMIT)
   expect(levelOf(controlSnapshot.compaction?.level), '大分母下不该压缩').toBe('none')
@@ -342,7 +342,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
       expect(round.done, `第 ${turn} 轮未收敛`).toBeTruthy()
       expect(round.errors).toHaveLength(0)
       const snapshot = await contextSnapshot(sid)
-      // 分母 = 模型行（写接口写进去的那个值）；`--app.ai.context.limit-tokens=20000` 不参与
+      // 分母 = 模型行（写接口写进去的那个值）；`--app.ai.context.limit-tokens=30000` 不参与
       expect(snapshot.limitTokens, `第 ${turn} 轮分母必须是模型行`).toBe(LINEAGE_WINDOW)
       expect(snapshot.limitTokens).not.toBe(ENV_FALLBACK_LIMIT)
       const telemetry = (round.done?.context ?? {}) as { usedTokens?: number; percent?: number }
@@ -428,12 +428,62 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     // 占用真的降下来了：末条的 after 低于首条的 before
     expect(Number(changed[changed.length - 1].after ?? 0)).toBeLessThan(Number(changed[0].before ?? 0))
 
-    // ③ 快照 ≡ 台账末条（端点与记账同一份事实，不允许两套口径）
-    const lastEvent = changed[changed.length - 1]
+    // ④ L2 的**效果**（不能只看 summaryChars>0；也不能靠 L1/L3 的活动凑聚合）：
+    //    摘要之后不得<立刻>又触发一次 L2 —— 那就是"压了等于没压"的抖动链。
+    //    两条独立证据面：轮首事件序列 与 轮级档位快照序列。
+    const roundStartTrail = roundStart.map((event) => levelOf(event.level)).join(' → ')
+    for (let index = 1; index < roundStart.length; index += 1) {
+      if (levelOf(roundStart[index].level) === 'L2') {
+        expect(
+          levelOf(roundStart[index - 1].level),
+          `相邻两次 L2 压缩（摘要没换来进展）：${roundStartTrail}`
+        ).not.toBe('L2')
+      }
+    }
+    const levelTrail = levels.join(' → ')
+    for (let index = 1; index < levels.length; index += 1) {
+      if (levels[index] === 'L2') {
+        expect(levels[index - 1], `相邻两轮都停在 L2（抖动链）：${levelTrail}`).not.toBe('L2')
+      }
+    }
+
+    // ③ 快照 ≡ 最近一次**会写状态**的压缩：轮首事件，或轮内硬截断（N1：档位封顶 L2）。
+    //    不能直接拿"台账末条"比：轮内 L1 清除在谱系 > L1 时只归档/记账、不写状态（末条往往是它）。
     const finalSnapshot = await contextSnapshot(sid)
-    expect(levelOf(finalSnapshot.compaction?.level)).toBe(levelOf(lastEvent.level))
-    expect(Number(finalSnapshot.compaction?.compactedTurns ?? 0)).toBe(Number(lastEvent.turns ?? 0))
-    expect(Number(finalSnapshot.compaction?.lostTokens ?? 0)).toBe(Number(lastEvent.lostTokens ?? 0))
+    const snapshotLevel = levelOf(finalSnapshot.compaction?.level)
+    const snapshotTurns = Number(finalSnapshot.compaction?.compactedTurns ?? 0)
+    const snapshotLost = Number(finalSnapshot.compaction?.lostTokens ?? 0)
+    const lastRoundStart = roundStart[roundStart.length - 1]
+    const lastTurnTrim = changed
+      .filter((event) => String(event.reason ?? '') === 'turn_l3_hard_trim')
+      .pop()
+    const sameNumbers = (event: Record<string, unknown> | undefined): boolean =>
+      Number(event?.turns ?? -1) === snapshotTurns && Number(event?.lostTokens ?? -1) === snapshotLost
+    const reflectsRoundStart = snapshotLevel === levelOf(lastRoundStart.level) && sameNumbers(lastRoundStart)
+    const reflectsTurnTrim =
+      lastTurnTrim !== undefined && sameNumbers(lastTurnTrim) && levelIndex(snapshotLevel) <= levelIndex('L2')
+    expect(
+      reflectsRoundStart || reflectsTurnTrim,
+      `快照 (${snapshotLevel}/${snapshotTurns}/${snapshotLost}) 与"末次状态写入"对不上：`
+        + `末条轮首 (${levelOf(lastRoundStart.level)}/${String(lastRoundStart.turns)}/${String(lastRoundStart.lostTokens)})、`
+        + `末条轮内硬截断 (${String(lastTurnTrim?.level)}/${String(lastTurnTrim?.turns)}/${String(lastTurnTrim?.lostTokens)})`
+    ).toBe(true)
+    // 档位不得回退：轮内事件最多把谱系推到 L2（N1），绝不会低于最近一次轮首压缩
+    expect(levelIndex(snapshotLevel), '快照档位不得低于最近一次轮首压缩').toBeGreaterThanOrEqual(
+      levelIndex(lastRoundStart.level)
+    )
+    // 轮内事件**不改 level**：L1 只清结果（turns/lostTokens 恒 0），L3 只累计 turns/lostTokens
+    // （写进状态时被封顶到 L2，见上一段 reflectsTurnTrim）
+    for (const event of changed.filter((item) => String(item.reason ?? '').startsWith('turn_'))) {
+      if (levelOf(event.level) === 'L1') {
+        expect(Number(event.turns ?? -1), `轮内 L1 不折叠轮：${JSON.stringify(event).slice(0, 160)}`).toBe(0)
+        expect(Number(event.lostTokens ?? -1)).toBe(0)
+      } else {
+        expect(levelOf(event.level)).toBe('L3')
+        expect(Number(event.turns ?? 0), `轮内 L3 必须如实累计轮数：${JSON.stringify(event).slice(0, 160)}`)
+          .toBeGreaterThan(0)
+      }
+    }
 
     // ④ SSE `context` 帧 ≡ 台账（同一组 (level, before, after, turns, lostTokens)；"即时可见"面）
     const framed = rounds.filter((row) => row.frame !== undefined)
@@ -470,7 +520,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     // eslint-disable-next-line no-console
     console.log(
       `[C-13] 台账=${changed.length} 条（${changed.map((event) => `${levelOf(event.level)}:${event.before}→${event.after}`).join(' / ')}）` +
-        ` 末条 turns=${String(lastEvent.turns)} lostTokens=${String(lastEvent.lostTokens)}`
+        ` 末条轮首 turns=${String(lastRoundStart.turns)} lostTokens=${String(lastRoundStart.lostTokens)}`
     )
   })
 })
