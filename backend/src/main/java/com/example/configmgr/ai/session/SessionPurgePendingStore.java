@@ -67,7 +67,7 @@ public class SessionPurgePendingStore {
 	/** durable pending 键前缀（守卫也读它）。 */
 	public static final String PENDING_PREFIX = SessionPurgeGuard.PENDING_PREFIX;
 
-	/** 待重试队列（LIST，成员是 sessionId）。 */
+	/** 待重试队列（LIST，成员是 pending 键：键本身带完整复合身份，不是裸 sessionId）。 */
 	public static final String QUEUE_KEY = "ai:purge:retry:queue";
 
 	/** 失败重试基础退避。 */

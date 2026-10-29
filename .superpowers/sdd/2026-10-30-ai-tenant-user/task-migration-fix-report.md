@@ -1,7 +1,7 @@
 # 租户迁移 / 断言 / 文档整合修复报告
 
 - 日期：2026-10-30
-- 范围：主仓 `ai-example-code/ai-example-main-v2`
+- 范围：主仓 `<REPO>`
 - 未派子 agent；未推送；未修改 `RunStore` / `ResumeService` / `ConfirmGate` 等运行链文件。
 
 ## 1. 改动文件
@@ -139,3 +139,52 @@ Maven：`<MAVEN_HOME>\bin\mvn`（本机 3.9.9 发行版），统一
    “A 身份销毁看到 B 身份同 sessionId 快照时结果含 `跳过非本身份` warning”的断言。
 7. **未推送**。提交只包含本任务 6 个代码/测试文件与本报告；工作区中其它 agent 的
    `RunStore` / `ResumeService` / `ConfirmGate` 等在飞改动未纳入本次提交。
+
+## 5. 小范围收尾（2026-10-30，§4 第 1/2 条已解决）
+
+本轮只改文档/注释，不扩范围；未改业务代码、未推送。
+
+### 5.1 改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/README.md` | 迁移说明改为“带身份 tagged 目标键 + `ai:runs` 成员重写 `tenantId/userId/runId` + rollback 带身份/legacy tagged 双形回退”；用例数 52/52 → **58/58**；`ai:runs` 不再笼统列为“明确不迁” |
+| `backend/src/main/java/com/example/configmgr/ai/session/SessionPurgePendingStore.java` | `QUEUE_KEY` 顶部注释由“成员是 sessionId”改为“成员是 pending 键：键本身带完整复合身份” |
+| 本报告 | 追加本节收尾结果 |
+
+### 5.2 精确文本核对（全部 PASS）
+
+```text
+PASS README 表行：带身份 tagged 键
+PASS README：ai:runs 索引重写小节
+PASS README：索引成员重写命令（SREM 旧形 + SADD 新形，同一 MULTI）
+PASS README：rollback 双形回退小节
+PASS README：回退语义（先试带身份 tag，absent 再回退 legacy tagged）
+PASS README：ai:runs 不再笼统列为不迁
+PASS README：58/58 恰好 2 处
+PASS README：无 52/52
+PASS README：无旧的 ai:runs 排除写法
+PASS 源码：队列成员是 pending 键
+PASS 源码：无“成员是 sessionId”
+```
+
+### 5.3 check-docs
+
+首次运行：`⑤ 命名纪律禁则` 红 1 处 —— 本报告第 4 行仍含旧主仓目录名。
+按门禁口径改为 `<REPO>` 占位符后重跑：
+
+```text
+① 导航/口径文档无盘符绝对路径                 PASS
+② 技术栈版本与 pom.xml / package.json 一致    PASS
+③ 导航/口径文档引用的文件存在                 PASS
+④ 端口表与 application.yml / vite.config.ts   PASS
+⑤ 命名纪律禁则（git ls-files 全量）            PASS
+⑥ docs/evidence/probes 的 .java 探针不参与构建 PASS
+全部通过：6/6 断言绿。
+```
+
+### 5.4 结论
+
+- §4 剩余风险第 1、2 条（README 旧口径、SessionPurgePendingStore 陈旧注释）已修掉。
+- 本轮未跑代码测试（只改文档/注释）；上一轮 `node --test` 58/58 与 Java 定向用例结果仍然有效。
+- 未推送。
