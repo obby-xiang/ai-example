@@ -488,6 +488,104 @@ class ContextCompactorTest {
 		assertThat(this.store.archiveCount()).isEqualTo(1);
 	}
 
+	/**
+	 * C13 / R6 N-D：判据必须计入<b>同一次里 L1 清除的收益</b> —— "裁「单独」不够、清 + 裁才够"时要两件都做。
+	 *
+	 * <p>缺陷现场（可达）：`clear = ToolResultClearing.plan(...)` 先算出零代价的清理（≥0 的 savedTokens），
+	 * 可 L3 的闸只减了 `trim.lostTokens()` ⇒ `nextEst − lost + reserve > limit` ⇒ bail，而且 bail 的
+	 * `noop` 返回**清除前**的 `request.messages()`：清除的收益既不进判据、也不进返回历史 ⇒
+	 * "清掉旧结果就能过"的一轮被误判成"救不了"，直接 400。
+	 */
+	@Test
+	void trimmingToFitCountsThePlannedL1Clear() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		// 只 pin 最近 1 条工具结果 ⇒ 首轮那条"大结果"是零代价可清的
+		smallWindow.getContext().setKeepToolPairs(1);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// nextEst 20000（真值 5000 让滞回解锁，completion 15000 把它顶上去）；有效预留 7500：
+		//   只裁：20000 − 7956 + 7500 = 19544 > 15000 ⇒ 裁不动
+		//   清 + 裁：20000 − 4990 − 7956 + 7500 = 14554 ≤ 15000 ⇒ 刚好救得回来
+		seed("L2", 5000);
+		List<Message> history = roundsWithClearableResult(8_500);
+		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				history, List.of("{}"), 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(request);
+
+		assertThat(outcome.changed()).as("清 + 裁能救 ⇒ 必须真的压").isTrue();
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L3);
+		assertThat(outcome.clearedPairs()).as("旧结果必须被清掉（不是只丢轮）").isEqualTo(1);
+		assertThat(outcome.turns()).as("丢最旧 3 轮").isEqualTo(3);
+		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
+		assertThat(this.store.archiveCount()).isEqualTo(1);
+		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
+		assertThat(event.get("level")).isEqualTo("L3");
+		assertThat(event.get("clearedPairs")).isEqualTo(1);
+	}
+
+	/**
+	 * C13 / R6 N-D（另一半）：<b>清除本身就能放下</b>、硬裁换不来额外空间时 —— 至少保住这次零代价的
+	 * L1 清理，<b>不丢轮次</b>，也不写"硬裁"的归档/台账。
+	 */
+	@Test
+	void clearingThatAlreadyFitsIsKeptAndDropsNoTurns() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		smallWindow.getContext().setKeepToolPairs(1);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// 大结果 ≈13K token ⇒ 清完 20000 − 13000 = 7000，+7500 = 14500 ≤ 15000：清除已经够了
+		seed("L2", 5000);
+		List<Message> history = roundsWithClearableResult(22_100);
+		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				history, List.of("{}"), 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(request);
+
+		assertThat(outcome.level()).as("清除已够 ⇒ 落 L1，不升到 L3").isEqualTo(ContextTrigger.Level.L1);
+		assertThat(outcome.clearedPairs()).as("零代价清理必须落地").isEqualTo(1);
+		assertThat(outcome.turns()).as("不丢轮次").isZero();
+		assertThat(outcome.lostTokens()).isZero();
+		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");
+		assertThat(outcome.messages()).as("历史一条没少").hasSameSizeAs(history);
+		assertThat(this.store.archiveCount()).as("归档的是这次 L1 清除（不是硬裁）").isEqualTo(1);
+		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
+		assertThat(event.get("level")).as("台账记 L1（本次动作），不写硬裁事件").isEqualTo("L1");
+		assertThat(event.get("reason")).isEqualTo("l1_tool_result_clearing");
+		assertThat(((Number) event.get("lostTokens")).intValue()).isZero();
+		// 只做 L1 时"只升不降"：谱系（状态档位）不得被这次 L1 动作回退成 L1
+		assertThat(this.store.read(SESSION_ID).level()).as("谱系停在 L2，不回退").isEqualTo("L2");
+	}
+
+	/** 语料：9 轮（每轮 ≈2.6K token，丢 3 轮 ≈7.9K）+ 首轮一条可清的大工具结果 + 末轮一条小结果（被 pin）。 */
+	private static List<Message> roundsWithClearableResult(int bigResultChars) {
+		List<Message> messages = new ArrayList<>();
+		for (int i = 1; i <= 9; i++) {
+			messages.add(new UserMessage("第 " + i + " 轮问题"));
+			if (i == 1) {
+				messages.add(AssistantMessage.builder()
+					.toolCalls(List.of(new AssistantMessage.ToolCall("old-1", "function", "list_tasks", "{}")))
+					.build());
+				messages.add(ToolResponseMessage.builder()
+					.responses(List.of(new ToolResponseMessage.ToolResponse("old-1", "list_tasks",
+							"大".repeat(bigResultChars))))
+					.build());
+			}
+			messages.add(AssistantMessage.builder().content("第 " + i + " 轮回答 " + "答".repeat(4_500)).build());
+			if (i == 9) {
+				messages.add(AssistantMessage.builder()
+					.toolCalls(List.of(new AssistantMessage.ToolCall("last-1", "function", "list_tasks", "{}")))
+					.build());
+				messages.add(ToolResponseMessage.builder()
+					.responses(List.of(new ToolResponseMessage.ToolResponse("last-1", "list_tasks", "小结果")))
+					.build());
+			}
+		}
+		return messages;
+	}
+
 	/** C13 / N3 的另一半：前缀主导时 <b>L1 仍照现有口径处理</b>（清得掉就清、照常记账）。 */
 	@Test
 	void c13PrefixDominatedRoundStillAllowsL1Clearing() {

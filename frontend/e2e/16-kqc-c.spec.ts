@@ -390,13 +390,30 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     const ledger = await contextLedger(sid)
     const changed = chronological(ledger).filter((event) => levelOf(event.level) !== 'none')
     const roundStart = changed.filter((event) => !String(event.reason ?? '').startsWith('turn_'))
+    /**
+     * "纯 L1 清除"事件（turns=0 且 clearedPairs>0）：它只清旧工具结果。
+     * N-D 之后，当谱系已在 L2/L3 时这类事件**不改写状态档位**（只升不降，与轮内 L1 同口径），
+     * 因此它在台账里出现 `level=L1` 既不代表推进、也不代表回退 —— 谱系推进只数"真写档位"的事件。
+     */
+    const pureClear = (event: Record<string, unknown>): boolean =>
+      levelOf(event.level) === 'L1' &&
+      Number(event.turns ?? -1) === 0 &&
+      Number(event.clearedPairs ?? 0) > 0
+    /** 写过状态档位的轮首事件（纯清除只有在谱系还 ≤ L1 时才写状态）。 */
+    const stateWriters = roundStart.filter((event, index) => {
+      if (!pureClear(event)) return true
+      return !roundStart
+        .slice(0, index)
+        .some((previous) => levelIndex(levelOf(previous.level)) >= levelIndex('L2'))
+    })
     expect(changed.length, '压缩台账必须非空').toBeGreaterThanOrEqual(2)
     // 谱系起步 = 台账里第一条压缩事件（可能是**轮内** L1 清除，也可能是轮首 L1）：两者都写 L1
     expect(levelOf(changed[0].level), '谱系必须从 L1 起步').toBe('L1')
     expect(roundStart.length, '轮首压缩事件必须 ≥ 2 条（否则谱系只靠轮内事件推进）').toBeGreaterThanOrEqual(2)
-    for (let index = 1; index < roundStart.length; index += 1) {
-      const step = levelIndex(roundStart[index].level) - levelIndex(roundStart[index - 1].level)
-      const trail = roundStart.map((event) => levelOf(event.level)).join(' → ')
+    expect(stateWriters.length, '至少两条"真写档位"的轮首事件（L1 起步 + 一次进位）').toBeGreaterThanOrEqual(2)
+    for (let index = 1; index < stateWriters.length; index += 1) {
+      const step = levelIndex(stateWriters[index].level) - levelIndex(stateWriters[index - 1].level)
+      const trail = stateWriters.map((event) => levelOf(event.level)).join(' → ')
       expect(step, `台账档位跳变：${trail}`).toBeLessThanOrEqual(1)
       expect(step, `台账档位回退：${trail}`).toBeGreaterThanOrEqual(0)
     }
@@ -457,7 +474,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     const snapshotLevel = levelOf(finalSnapshot.compaction?.level)
     const snapshotTurns = Number(finalSnapshot.compaction?.compactedTurns ?? 0)
     const snapshotLost = Number(finalSnapshot.compaction?.lostTokens ?? 0)
-    const lastRoundStart = roundStart[roundStart.length - 1]
+    const lastRoundStart = stateWriters[stateWriters.length - 1] ?? roundStart[roundStart.length - 1]
     const lastTurnTrim = changed
       .filter((event) => String(event.reason ?? '') === 'turn_l3_hard_trim')
       .pop()

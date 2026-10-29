@@ -337,16 +337,34 @@ public final class ContextCompactor {
 				reason = HardTrim.REASON_HARD_TRIM;
 				HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(),
 						request.protectedToolCallIds());
-				if (trim.changed()) {
-					// N-C：先按<b>裁后估算</b>判 —— 裁完连"prompt + 输出预留"都放不下时，
-					// 这一刀换不回可用空间，只换来数据丢失（用户历史没了、下一发照样 400）。
-					int afterTrim = decision.nextEst() - trim.lostTokens();
+				// N-D：`clear` 在本节之前就已算好（零代价、未落任何存储），判据必须计入它的收益 ——
+				// 旧实现只减 `trim.lostTokens()`，"清掉旧结果就能过"的一轮被误判成"裁了也没用"。
+				int afterClear = decision.nextEst() - clear.savedTokens();
+				boolean clearAloneFits = clear.changed() && afterClear + completionReserve <= limit;
+				if (clearAloneFits) {
+					// 清除本身已经够了 ⇒ 只做 L1、不丢轮次（硬裁换不回额外空间）
+					action = ContextTrigger.Level.L1;
+					reason = "l1_tool_result_clearing";
+				}
+				else if (trim.changed()) {
+					// N-C：按<b>清 + 裁后</b>估算判 —— 清 + 裁都放不下时，这一刀只丢历史、
+					// 换不回可用请求（下一发照样 400），不做。
+					int afterTrim = afterClear - trim.lostTokens();
 					if (afterTrim + completionReserve > limit) {
-						return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit,
-								decision.ratio(), decision.nextEst(), REASON_TRIM_CANNOT_FIT, state.circuit());
+						if (clear.changed()) {
+							// 至少把这次零代价的 L1 清除落地（不丢轮、不写硬裁归档/台账）
+							action = ContextTrigger.Level.L1;
+							reason = "l1_tool_result_clearing";
+						}
+						else {
+							return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit,
+									decision.ratio(), decision.nextEst(), REASON_TRIM_CANNOT_FIT, state.circuit());
+						}
 					}
-					current = trim.messages();
-					turns = trim.droppedTurns();
+					else {
+						current = trim.messages();
+						turns = trim.droppedTurns();
+					}
 				}
 				else {
 					// 全在 pin 集里：这一刻没有可丢的，别把"只清了结果"报成 L3
@@ -379,9 +397,14 @@ public final class ContextCompactor {
 			// 基线只写历史估算会让下一轮 nextEst 永远少算前缀，小窗口上"看着没满、一发就 400"。
 			// 台账/帧的 before/after 仍是消息口径（与轮首同账），只有基线补齐前缀。
 			int baseline = after + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
-			ContextState compacted = state.withCompaction(action, turns, lost, reason, now)
-				.withUsage(baseline, 0, state.turnNo(), true, now, request.model(), request.systemTokens(),
-						request.toolsTokens(), request.inputTokens());
+			// N-D：本次只做了 L1 的活、而谱系已在 L2/L3 时，"只升不降"必须成立（否则快照档位在这里
+			// 回退成 L1，下一轮会重爬 L1→L2）。与轮内 L1 同处置：归档 + 台账照记这次 L1 事件，
+			// 但不改写状态档位（台账的 level 仍如实是本次动作 L1）。
+			ContextTrigger.Level lineageNow = ContextTrigger.Level.fromWire(state.level());
+			ContextState compacted = action.ordinal() < lineageNow.ordinal() ? state
+					: state.withCompaction(action, turns, lost, reason, now)
+						.withUsage(baseline, 0, state.turnNo(), true, now, request.model(), request.systemTokens(),
+								request.toolsTokens(), request.inputTokens());
 			if (action.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
 				compacted = fuse.onSuccess(compacted, now);
 			}
@@ -403,9 +426,11 @@ public final class ContextCompactor {
 			AiTrace.eventOn(request.runId(), request.sessionId(), "compaction", "level", action.wire(), "reason",
 					reason, "before", before, "after", after, "savedTokens", saved, "lostTokens", lost, "turns",
 					turns, "clearedPairs", clear.cleared().size(), "summaryChars", summaryChars, "limit", limit);
+			// N-D：只做 L1 而谱系更高时不写状态 ⇒ 回读状态里的基线/est 才是"实际落库的那份"，
+			// 直接报 baseline 会让调用方以为写进去了（正常路径两者相等）。
 			return new Outcome(action, current, before, after, saved, clear.cleared().size(), clear.clearedIds(),
-					reason, limit, baseline, true, compacted.circuit(), decision.ratio(), decision.nextEst(), turns, lost,
-					summaryChars);
+					reason, limit, compacted.usedTokens(), compacted.est(), compacted.circuit(), decision.ratio(),
+					decision.nextEst(), turns, lost, summaryChars);
 		}
 		catch (RuntimeException ex) {
 			// 任一步失败 ⇒ 记 ERROR + 保持原状继续本轮请求（不改历史、不改真值）
