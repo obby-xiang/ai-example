@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
@@ -47,7 +51,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	@Override
 	public void publish(String runId, long upperBoundSeq) {
 		try {
-			this.redis.convertAndSend(CHANNEL_PREFIX + runId, Long.toString(upperBoundSeq));
+			this.redis.convertAndSend(channel(runId), Long.toString(upperBoundSeq));
 		}
 		catch (Exception ex) {
 			log.debug("帧唤醒发布失败 runId={} seq={}（唤醒可丢，正确性由 ?lastSeq 重连兜底）：{}", runId,
@@ -57,15 +61,20 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 
 	@Override
 	public boolean subscribe(String runId, LongConsumer onWake) {
-		String channel = CHANNEL_PREFIX + runId;
+		String channel = channel(runId);
+		// 订阅侧的身份在这一刻固定（调用方是出帧/挂起路径，带着请求或恢复身份）；
+		// 监听回调跑在 Redis 监听线程上，那里没有请求身份 ⇒ 回调内按这份身份 useContext。
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		MessageListener listener = (Message message, byte[] pattern) -> {
 			long upper = parseUpperBound(message == null ? null : message.getBody());
-			onWake.accept(upper);
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+				onWake.accept(upper);
+			}
 		};
-		MessageListener previous = this.listeners.put(runId, listener);
+		MessageListener previous = this.listeners.put(channel, listener);
 		RedisMessageListenerContainer target = container();
 		if (target == null) {
-			this.listeners.remove(runId, listener);
+			this.listeners.remove(channel, listener);
 			return false;
 		}
 		try {
@@ -76,7 +85,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			return true;
 		}
 		catch (Exception ex) {
-			this.listeners.remove(runId, listener);
+			this.listeners.remove(channel, listener);
 			log.warn("帧唤醒订阅失败 runId={}（本实例跨实例唤醒缺席，重挂仍可补帧）：{}", runId, ex.getMessage());
 			return false;
 		}
@@ -84,7 +93,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 
 	@Override
 	public void unsubscribe(String runId) {
-		MessageListener listener = this.listeners.remove(runId);
+		MessageListener listener = this.listeners.remove(channel(runId));
 		RedisMessageListenerContainer target = this.container;
 		if (listener == null || target == null) {
 			return;
@@ -95,6 +104,16 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 		catch (Exception ex) {
 			log.debug("帧唤醒退订失败 runId={}：{}", runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 唤醒频道名：{@code ai:wake:<tenantId>:<userId>:<runId>}（无身份上下文 = 旧形 {@code ai:wake:<runId>}）。
+	 *
+	 * <p>频道粒度仍是 run，但<b>身份进了频道名</b>：两个租户同 runId 的轮次不会互相唤醒
+	 * （否则 A 的帧会让 B 的重挂者去读自己那边并不存在的差量）。
+	 */
+	public static String channel(String runId) {
+		return CHANNEL_PREFIX + TenantKeyScope.currentSegment() + runId;
 	}
 
 	/** 当前被订阅的 run 数（诊断/断言用）。 */

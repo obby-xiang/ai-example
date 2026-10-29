@@ -145,8 +145,12 @@ class RunStoreFirstSnapshotWriteTest {
 
 	private ScheduledExecutorService watchdogExecutor;
 
+	/** 直调真实 RunStore 必须显式带身份（create 缺身份 fail-closed）。 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable tenantScope;
+
 	@BeforeEach
 	void setUpChatHarness() {
+		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.chatStore = new FailingCreateStore();
 		this.chatRegistry = new RunRegistry(this.chatStore, this.mapper, null);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -192,6 +196,9 @@ class RunStoreFirstSnapshotWriteTest {
 	void tearDown() {
 		if (this.watchdogExecutor != null) {
 			this.watchdogExecutor.shutdownNow();
+		}
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
 		}
 	}
 

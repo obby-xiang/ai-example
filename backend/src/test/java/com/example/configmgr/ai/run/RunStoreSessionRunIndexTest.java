@@ -2,8 +2,11 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -33,11 +36,27 @@ class RunStoreSessionRunIndexTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/** 直调存储的用例显式建立身份（RunStore.create 缺身份 fail-closed）。 */
+	private RequestContextUtils.SafeCloseable tenantScope;
+
+	@BeforeEach
+	void enterTenantIdentity() {
+		this.tenantScope = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void leaveTenantIdentity() {
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
+	}
+
 	@Test
 	void createAddsSessionIndexWithTtlAndDeleteRunRemovesIt() {
 		this.store.create(RUN, SESSION, AiContext.empty(), List.of(), this.codec);
 
-		String key = RunStore.SESSION_RUNS_PREFIX + SESSION;
+		String key = this.store.sessionRunsKey(SESSION);
+		assertThat(key).as("会话级键带身份段").isEqualTo(RunStore.SESSION_RUNS_PREFIX + "1:101:" + SESSION);
 		assertThat(this.store.sessionRunIds(SESSION)).containsExactly(RUN);
 		assertThat(this.fake.setsByKey.getOrDefault(key, Set.of())).containsExactly(RUN);
 		assertThat(this.fake.expiry(key)).as("轻量索引与会话/快照同寿").isEqualTo(this.properties.getSessionTtl());
@@ -66,13 +85,13 @@ class RunStoreSessionRunIndexTest {
 		assertThat(backfilled.runIds()).as("sentinel 不得暴露成 runId")
 			.doesNotContain(RunStore.SESSION_RUNS_COMPLETE);
 		assertThat(this.store.sessionRunIds(SESSION)).doesNotContain(RunStore.SESSION_RUNS_COMPLETE);
-		assertThat(this.fake.expiry(RunStore.SESSION_RUNS_PREFIX + SESSION))
+		assertThat(this.fake.expiry(this.store.sessionRunsKey(SESSION)))
 			.as("sentinel 与索引同 TTL").isEqualTo(this.properties.getSessionTtl());
 	}
 
 	@Test
 	void optionalSessionIndexWriteFailureDoesNotFailCreate() {
-		String key = RunStore.SESSION_RUNS_PREFIX + SESSION;
+		String key = this.store.sessionRunsKey(SESSION);
 		org.springframework.data.redis.core.SetOperations<String, String> setOps = this.fake.redis.opsForSet();
 		org.mockito.Mockito.doThrow(new IllegalStateException("可选索引不可用"))
 			.when(setOps).add(key, RUN);
@@ -81,7 +100,7 @@ class RunStoreSessionRunIndexTest {
 			() -> this.store.create(RUN, SESSION, AiContext.empty(), List.of(), this.codec))
 			.doesNotThrowAnyException();
 		assertThat(this.store.get(RUN)).isNotNull();
-		assertThat(this.fake.setsByKey.get(RunStore.RUN_INDEX)).contains(RUN);
+		assertThat(this.fake.setsByKey.get(RunStore.RUN_INDEX)).contains("1/101/" + RUN);
 	}
 
 	@Test

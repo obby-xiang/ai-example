@@ -53,9 +53,12 @@ class RunSnapshotTenantIdentityTest {
 					List.of(new UserMessage("你好")), new MessageJsonCodec(mapper));
 		}
 
-		RunSnapshot persisted = realStore.get("run-real-tenant");
-		assertThat(persisted.getTenantId()).as("真实 RunStore 的 JSON 持久化必须带上租户").isEqualTo(2L);
-		assertThat(persisted.getUserId()).isEqualTo(202L);
+		// 读回同样必须带身份：键面按身份分开，无身份读只落到 legacy 命名空间（读不到新键）。
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(2L, 202L)) {
+			RunSnapshot persisted = realStore.get("run-real-tenant");
+			assertThat(persisted.getTenantId()).as("真实 RunStore 的 JSON 持久化必须带上租户").isEqualTo(2L);
+			assertThat(persisted.getUserId()).isEqualTo(202L);
+		}
 	}
 
 }

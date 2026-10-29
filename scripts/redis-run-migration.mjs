@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 /**
- * AI run 键族离线迁移：旧裸键 → `{run:<runId>}` hash-tag 键。
+ * AI run 键族离线迁移：旧裸键 → tagged 键。
+ *
+ * **键形（租户任务2 起）**：`<prefix>{<tenantId>:<userId>:run:<runId>}`。
+ * 旧数据（`ai:run:<runId>` 之类）**没有身份**，而新路径的键必须带身份 —— 因此正向迁移
+ * 必须由操作者**显式声明目标身份**（`--tenant-id/--user-id`）；未声明时工具只产出旧 tagged 形
+ * `{run:<runId>}`，那是 **legacy 命名空间**：带身份的新路径永远不会读到它。
+ * 不声明身份就得不到隔离（同 runId 的两个租户仍会落到同一个键上），这一点写入 dry-run 报告。
  *
  * 迁移 10 族（精确集合）：
  *   STRING  ai:run: / ai:seq:
@@ -168,8 +174,38 @@ export function oldKeyFor(prefix, runId) {
 	return prefix + runId;
 }
 
-export function taggedKeyFor(prefix, runId) {
-	return `${prefix}{run:${runId}}`;
+/**
+ * tagged 键：{@code <prefix>{[<tenantId>:<userId>:]run:<runId>}}。
+ *
+ * @param identity {tenantId, userId} 或 null/undefined（null = legacy tagged 形，无身份）
+ */
+export function taggedKeyFor(prefix, runId, identity = null) {
+	const segment = identity ? `${identity.tenantId}:${identity.userId}:` : '';
+	return `${prefix}{${segment}run:${runId}}`;
+}
+
+/** 从 tagged 键读身份段；legacy tagged 形（`{run:<id>}`）返回 null（无归属）。 */
+export function parseTaggedIdentity(key, prefix) {
+	if (typeof key !== 'string' || !key.startsWith(prefix)) {
+		return null;
+	}
+	const match = /^\{([^}]*?)run:(.+)\}$/.exec(key.slice(prefix.length));
+	if (!match || match[1] === '') {
+		return null;
+	}
+	const parts = match[1].replace(/:$/, '').split(':');
+	if (parts.length !== 2) {
+		return null;
+	}
+	const tenantId = Number(parts[0]);
+	const userId = Number(parts[1]);
+	if (!Number.isInteger(tenantId) || !Number.isInteger(userId) || tenantId <= 0) {
+		return null;
+	}
+	if (userId <= 0 && userId !== -1) {
+		return null;
+	}
+	return { tenantId, userId };
 }
 
 export function parseOldKey(key, prefix) {
@@ -188,7 +224,8 @@ export function parseTaggedKey(key, prefix) {
 		return null;
 	}
 	const tail = key.slice(prefix.length);
-	const match = /^\{run:(.+)\}$/.exec(tail);
+	// 认两种 tagged 形：legacy `{run:<id>}` 与带身份 `{<t>:<u>:run:<id>}`（runId 里允许冒号）
+	const match = /^\{(?:[^}]*?:)?run:(.+)\}$/.exec(tail);
 	if (!match || !isValidRunId(match[1])) {
 		return null;
 	}
@@ -228,6 +265,26 @@ async function scanPattern(client, pattern, onKey) {
  * @param {{rollback?: boolean, runIds?: string[]}} options rollback=true 时从 tagged 键发现
  * @returns {Promise<Map<string, Set<string>>>} runId → 出现过的 family name
  */
+/**
+ * 归一目标身份：{tenantId, userId} 或 null。
+ *
+ * 旧数据没有身份，正向迁移必须由操作者声明目标身份；只给一半直接失败（猜一个用户 = 串身份）。
+ */
+export function normalizeIdentity(identity) {
+	if (!identity) {
+		return null;
+	}
+	const tenantId = Number(identity.tenantId);
+	const userId = Number(identity.userId);
+	if (!Number.isInteger(tenantId) || tenantId <= 0) {
+		throw new MigrationError(`目标 tenantId 必须是正整数：${identity.tenantId}`);
+	}
+	if (!Number.isInteger(userId) || (userId <= 0 && userId !== -1)) {
+		throw new MigrationError(`目标 userId 必须是正整数或 -1（系统账号）：${identity.userId}`);
+	}
+	return { tenantId, userId };
+}
+
 export async function discoverRunIds(client, options = {}) {
 	const rollback = options.rollback === true;
 	const explicit = options.runIds ?? [];
@@ -243,10 +300,18 @@ export async function discoverRunIds(client, options = {}) {
 	}
 
 	const found = new Map();
+	const identity = normalizeIdentity(options.identity);
 	for (const family of MIGRATION_FAMILIES) {
 		await scanPattern(client, `${family.prefix}*`, (key) => {
 			if (key.endsWith(TEMP_SUFFIX)) {
 				return;
+			}
+			if (rollback && identity) {
+				// 声明了身份就只回滚那一个身份的轮次（别的身份的键不归本次操作）
+				const owner = parseTaggedIdentity(key, family.prefix);
+				if (!owner || owner.tenantId !== identity.tenantId || owner.userId !== identity.userId) {
+					return;
+				}
 			}
 			const runId = rollback
 				? parseTaggedKey(key, family.prefix)
@@ -445,13 +510,15 @@ function newRunPlan(runId, rollback) {
  */
 export async function buildPlan(client, options = {}) {
 	const rollback = options.rollback === true;
+	const identity = normalizeIdentity(options.identity);
 	const discovered = await discoverRunIds(client, {
 		rollback,
+		identity,
 		runIds: options.runIds ?? [],
 	});
 	const runs = [];
 	for (const runId of discovered.keys()) {
-		runs.push(await planRun(client, runId, rollback));
+		runs.push(await planRun(client, runId, rollback, identity));
 	}
 	const totals = {
 		runs: runs.length,
@@ -465,14 +532,30 @@ export async function buildPlan(client, options = {}) {
 		plannedCopies: runs.reduce((n, r) => n + r.plannedCopies, 0),
 		sourceKeys: runs.reduce((n, r) => n + r.sourceKeys, 0),
 	};
-	return { direction: rollback ? 'rollback' : 'forward', runs, totals };
+	return {
+		direction: rollback ? 'rollback' : 'forward',
+		identity,
+		warnings: identity
+			? []
+			: ['未声明目标身份（--tenant-id/--user-id）：目标键是 legacy 形 {run:<runId>}，'
+				+ '带身份的新路径读不到它（不构成租户隔离）'],
+		runs,
+		totals,
+	};
 }
 
-async function planRun(client, runId, rollback) {
+async function planRun(client, runId, rollback, identity = null) {
 	const run = newRunPlan(runId, rollback);
 	const keyOf = (family) => (rollback
-		? { source: taggedKeyFor(family.prefix, runId), target: oldKeyFor(family.prefix, runId) }
-		: { source: oldKeyFor(family.prefix, runId), target: taggedKeyFor(family.prefix, runId) });
+		? {
+			// 反向：源可以是带身份的新键形，也可以是 legacy tagged 形（先试带身份的）
+			source: taggedKeyFor(family.prefix, runId, identity),
+			target: oldKeyFor(family.prefix, runId),
+		}
+		: {
+			source: oldKeyFor(family.prefix, runId),
+			target: taggedKeyFor(family.prefix, runId, identity),
+		});
 
 	const states = new Map();
 	for (const family of MIGRATION_FAMILIES) {
@@ -604,7 +687,8 @@ function tempKeyFor(targetKey) {
 
 /** tagged 目标与临时键同槽，才能用 RENAMENX；旧裸键目标（rollback）只能先查后写。 */
 function supportsAtomicClaim(targetKey) {
-	return targetKey.includes('{run:');
+	// legacy `{run:<id>}` 与带身份 `{<t>:<u>:run:<id>}` 都是 single-tag 键（RENAMENX 同槽）
+	return /\{[^}]*run:/.test(targetKey);
 }
 
 async function execAtomicChunk(client, build) {
@@ -1215,6 +1299,8 @@ export function parseArgs(argv) {
 		deleteSource: false,
 		help: false,
 		runIds: [],
+		tenantId: null,
+		userId: null,
 	};
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
@@ -1228,6 +1314,28 @@ export function parseArgs(argv) {
 			options.apply = false;
 		} else if (arg === '--help' || arg === '-h') {
 			options.help = true;
+		} else if (arg === '--tenant-id' || arg === '--user-id') {
+			const value = argv[++i];
+			if (!/^-?\d+$/.test(String(value ?? ''))) {
+				throw new MigrationError(`${arg} 缺少合法整数（旧数据无身份，目标身份必须显式声明）`);
+			}
+			if (arg === '--tenant-id') {
+				options.tenantId = Number(value);
+			} else {
+				options.userId = Number(value);
+			}
+		} else if (arg.startsWith('--tenant-id=') || arg.startsWith('--user-id=')) {
+			const eq = arg.indexOf('=');
+			const name = arg.slice(0, eq);
+			const value = arg.slice(eq + 1);
+			if (!/^-?\d+$/.test(value)) {
+				throw new MigrationError(`${name} 缺少合法整数（旧数据无身份，目标身份必须显式声明）`);
+			}
+			if (name === '--tenant-id') {
+				options.tenantId = Number(value);
+			} else {
+				options.userId = Number(value);
+			}
 		} else if (arg === '--run-id') {
 			const value = argv[++i];
 			const ids = String(value ?? '')
@@ -1254,6 +1362,12 @@ export function parseArgs(argv) {
 	if (!options.runIds.every(isValidRunId)) {
 		throw new MigrationError(`--run-id 非法：${options.runIds.join(',')}`);
 	}
+	if ((options.tenantId === null) !== (options.userId === null)) {
+		throw new MigrationError('--tenant-id 与 --user-id 必须成对给出（只给一半就是猜一个身份）');
+	}
+	options.identity = options.tenantId === null
+		? null
+		: normalizeIdentity({ tenantId: options.tenantId, userId: options.userId });
 	if (!options.help && options.rollback && options.deleteSource && options.runIds.length === 0) {
 		throw new MigrationError(
 			'--rollback --delete-source 必须显式 --run-id（否则会删除新版本原生 tagged run）',
@@ -1265,13 +1379,14 @@ export function parseArgs(argv) {
 function usage() {
 	return [
 		'用法:',
-		'  node scripts/redis-run-migration.mjs [--run-id <id>[,<id>]] [--apply] [--delete-source]',
-		'  node scripts/redis-run-migration.mjs --rollback [--run-id <id>[,<id>]] [--apply] [--delete-source]',
+		'  node scripts/redis-run-migration.mjs [--run-id <id>[,<id>]] [--tenant-id <t> --user-id <u>] [--apply] [--delete-source]',
+		'  node scripts/redis-run-migration.mjs --rollback [--run-id <id>[,<id>]] [--tenant-id <t> --user-id <u>] [--apply] [--delete-source]',
 		'',
 		`节点: ${NODES_ENV}=host:port[,host:port...]（必填，无默认值）`,
 		'默认 dry-run；--apply 才写；--rollback 反向（tagged -> 旧裸键）。',
 		'源默认保留；--delete-source 仅在逐项对账通过后删除源键。',
 		'--rollback --delete-source 必须显式 --run-id。',
+		'旧数据没有身份：目标身份用 --tenant-id/--user-id 显式声明（否则只得到 legacy {run:<id>}）。',
 	].join('\n');
 }
 

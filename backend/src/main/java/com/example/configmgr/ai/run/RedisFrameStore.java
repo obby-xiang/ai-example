@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -33,8 +34,9 @@ import java.util.function.LongSupplier;
  * 单实例与多实例同一份代码。
  *
  * <h2>键族</h2>
- * <p>三族键名都带 {@code {run:<runId>}} hash tag（{@code <prefix>{run:<runId>}}，见
- * {@link RunStore#runScopedKey(String, String)}）：它们与快照/台账等同属 {@code deleteRun} 的
+ * <p>三族键名都带身份化的 {@code {<tenantId>:<userId>:run:<runId>}} hash tag
+ * （{@code <prefix>{[<t>:<u>:]run:<runId>}}，见 {@link RunStore#runScopedKey(String, String)}）：
+ * 它们与快照/台账等同属 {@code deleteRun} 的
  * "一轮 13 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ <窗口> <seq>-0
@@ -900,7 +902,7 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 本轮的读侧窗口（与写侧同源：用同一份"观察到的最大载荷"）；未见过落档 = 只按条数窗口。 */
 	private int effectiveWindow(String runId) {
-		RunState state = this.runStates.get(runId);
+		RunState state = this.runStates.get(bookkeepingId(runId));
 		return windowForPayload(state == null ? 0L : state.observedPayloadBytes.get());
 	}
 
@@ -959,7 +961,18 @@ public class RedisFrameStore implements FrameStore {
 	 */
 	@Override
 	public void forget(String runId) {
-		this.runStates.remove(runId);
+		this.runStates.remove(bookkeepingId(runId));
+	}
+
+	/**
+	 * 进程内簿记的键：<b>身份段 + runId</b>。
+	 *
+	 * <p>簿记（降级号 / 观察到的最大帧载荷 / 告警位）是<b>按轮</b>的进程内加速态，
+	 * 两个租户的同名 runId 必须是两条：否则一方的字节预算、降级号会污染另一方
+	 * （同进程内最坏情况 = 另一租户的帧按本租户的窗口被裁）。
+	 */
+	private static String bookkeepingId(String runId) {
+		return TenantKeyScope.currentSegment() + runId;
 	}
 
 	/** 当前进程内仍持有簿记的轮数（诊断/断言用）。 */
@@ -970,7 +983,7 @@ public class RedisFrameStore implements FrameStore {
 	/** 取（必要时新建）本轮簿记并推进"最后触达"，顺带做一次到期清理（有节流）。 */
 	private RunState state(String runId) {
 		long now = this.clock.getAsLong();
-		RunState state = this.runStates.computeIfAbsent(runId, id -> new RunState(now));
+		RunState state = this.runStates.computeIfAbsent(bookkeepingId(runId), id -> new RunState(now));
 		state.lastTouchMs = now;
 		sweepIfDue(now);
 		return state;

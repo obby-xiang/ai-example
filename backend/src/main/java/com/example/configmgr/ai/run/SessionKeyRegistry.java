@@ -49,7 +49,8 @@ import java.util.function.Function;
  * <h2>hash tag 口径（B23L1 批① Cluster 硬阻断）</h2>
  * 判定标准 = <b>"它是不是 {@code deleteRun} 手里那一轮 13 键中的一员"</b>（这一族全部同 tag ⇒ 同槽）：
  * <ul>
- * <li><b>带 {@code {run:<runId>}} tag</b>（13 键，全在 {@link RunStore} 的键方法里）：
+ * <li><b>带 {@code {<tenantId>:<userId>:run:<runId>}} tag</b>（13 键，全在 {@link RunStore} 的键方法里；
+ * 无身份上下文的过渡期路径退回 legacy 形 {@code {run:<runId>}}）：
  * {@code ai:run:} / {@code ai:pending:} / {@code ai:claim:} / {@code ai:ledger:} / {@code ai:idem:} /
  * {@code ai:events:} / {@code ai:seq:} / {@code ai:xevents:} / {@code ai:lease:run:} /
  * {@code ai:fence:run:} / {@code ai:req:} / {@code ai:decided:} / {@code ai:lease:epoch:}（取号）。

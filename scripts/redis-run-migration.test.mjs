@@ -23,6 +23,8 @@ const {
 	nodesFromEnv,
 	oldKeyFor,
 	parseArgs,
+	parseTaggedIdentity,
+	parseTaggedKey,
 	rollbackHint,
 	runMigration,
 	taggedKeyFor,
@@ -955,6 +957,10 @@ test('参数解析：默认 dry-run，--apply/--rollback/--delete-source/--run-i
 		deleteSource: false,
 		help: false,
 		runIds: [],
+		// 租户任务2：目标身份必须显式声明（旧数据没有身份）
+		tenantId: null,
+		userId: null,
+		identity: null,
 	});
 	const parsed = parseArgs(['--apply', '--rollback', '--delete-source', '--run-id', 'a,b', '--run-id=c']);
 	assert.equal(parsed.apply, true);
@@ -1615,4 +1621,25 @@ test('plan 输出 ttlShort/targetPttl 字段', async () => {
 
 test('排除清单包含裸 ai:lease:epoch', () => {
 	assert.ok(EXCLUDED_KEY_PREFIXES.includes('ai:lease:epoch'));
+});
+
+test('参数解析：--tenant-id/--user-id 必须成对，且产出 {tenantId,userId} 身份', () => {
+	const parsed = parseArgs(['--tenant-id', '2', '--user-id=202']);
+	assert.deepEqual(parsed.identity, { tenantId: 2, userId: 202 });
+	assert.throws(() => parseArgs(['--tenant-id', '2']), /成对/);
+	assert.throws(() => parseArgs(['--tenant-id', '0', '--user-id', '1']), /正整数/);
+});
+
+test('键形：带身份的目标键 tag 同时含身份与 runId，legacy 形仍无身份', () => {
+	assert.equal(taggedKeyFor('ai:run:', 'r1'), 'ai:run:{run:r1}');
+	assert.equal(
+		taggedKeyFor('ai:run:', 'r1', { tenantId: 2, userId: 202 }),
+		'ai:run:{2:202:run:r1}',
+	);
+	assert.equal(parseTaggedKey('ai:run:{2:202:run:r1}', 'ai:run:'), 'r1');
+	assert.deepEqual(parseTaggedIdentity('ai:run:{2:202:run:r1}', 'ai:run:'), {
+		tenantId: 2,
+		userId: 202,
+	});
+	assert.equal(parseTaggedIdentity('ai:run:{run:r1}', 'ai:run:'), null);
 });

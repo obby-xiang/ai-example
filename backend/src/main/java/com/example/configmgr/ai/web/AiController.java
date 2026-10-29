@@ -29,6 +29,9 @@ import com.example.configmgr.ai.run.SecurityEvents;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
@@ -971,7 +974,7 @@ public class AiController {
 	@GetMapping(value = "/events/{runId}", params = "probe!=1", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 	public ResponseEntity<?> events(@PathVariable String runId,
 			@RequestParam(required = false) Long lastSeq) {
-		RunSnapshot snapshot = this.runStore.get(runId);
+		RunSnapshot snapshot = ownedRun(runId);
 		if (snapshot == null) {
 			// ===== AR-06：已 start、快照未建 =====
 			// 首帧（start）已前移到首轮压缩之前 ⇒ 存在这样一段合法窗口：runId 已有、帧面已开、
@@ -1092,7 +1095,7 @@ public class AiController {
 
 	/** 探测的响应体构造（只读；见 {@link #probeEvents} 的口径）。 */
 	private ResponseEntity<?> probe(String runId) {
-		RunSnapshot snapshot = this.runStore.get(runId);
+		RunSnapshot snapshot = ownedRun(runId);
 		if (snapshot == null) {
 			ResponseEntity<?> early = this.preparingOrUnknown(runId);
 			if (early != null) {
@@ -1331,7 +1334,7 @@ public class AiController {
 	 */
 	@PostMapping("/cancel/{runId}")
 	public ResponseEntity<?> cancel(@PathVariable String runId) {
-		RunSnapshot snapshot = this.runStore.get(runId);
+		RunSnapshot snapshot = ownedRun(runId);
 		Map<String, Object> before = this.cancellations.status(runId);
 		CancellationRegistry.CancelResult result = this.cancellations.cancel(runId, this.runStore.instanceId());
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -1363,6 +1366,52 @@ public class AiController {
 	@GetMapping("/cancel/{runId}")
 	public ApiResponse<Map<String, Object>> cancelStatus(@PathVariable String runId) {
 		return ApiResponse.ok(this.cancellations.status(runId));
+	}
+
+	/**
+	 * <b>只带 runId 的接口的归属核对</b>（设计稿「ID 与归属约束」）：runId <b>不是</b>跨租户归属证明，
+	 * 因此任何只凭 runId 驱动的端点（事件/探测/取消/待决/续跑/列表单项）都必须把快照读出来、
+	 * 核对记录里的 {@code tenantId/userId}，<b>不能只看"键里有这条记录"</b>。
+	 *
+	 * <p>键面本身已按身份分开（同 runId 不同身份落在不同键上），这里是<b>第二层</b>：
+	 * 无归属旧快照（{@code tenantId=0/userId=0}）同样不算"我的"—— 它不得进入新身份读路径。
+	 *
+	 * <p>返回 {@code false} 时调用方一律按<b>不存在</b>处理（不回显"这一轮在别人手里"）。
+	 * 没有身份上下文的直达调用（单测 / 非 HTTP 入口）由 {@link RunStore} 的键面兜底，这里不额外拒绝。
+	 */
+	private boolean ownedByCurrentIdentity(RunSnapshot snapshot) {
+		if (snapshot == null) {
+			return false;
+		}
+		TenantUser current = RequestContextUtils.currentOrNull();
+		if (current == null) {
+			return true;
+		}
+		if (!RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())) {
+			return false;
+		}
+		return current.equals(new TenantUser(snapshot.getTenantId(), snapshot.getUserId()));
+	}
+
+	/**
+	 * 只带 runId 的端点（续跑/重跑/列表单项）：快照不存在也算"可继续按原语义处理"，
+	 * 只有<b>存在但不属于当前身份</b>时才拒绝。
+	 */
+	private boolean ownedOrAbsent(String runId) {
+		RunSnapshot snapshot = this.runStore.get(runId);
+		return snapshot == null || ownedByCurrentIdentity(snapshot);
+	}
+
+	/** 只带 runId 的端点：读快照并核归属；他人/无归属/不存在统一返回 {@code null}。 */
+	private RunSnapshot ownedRun(String runId) {
+		RunSnapshot snapshot = this.runStore.get(runId);
+		if (snapshot != null && !ownedByCurrentIdentity(snapshot)) {
+			TenantUser current = RequestContextUtils.currentOrNull();
+			log.warn("拒绝跨身份访问 runId={}（快照归属 {}/{}，当前身份 {}）：按不存在处理", runId,
+					snapshot.getTenantId(), snapshot.getUserId(), current);
+			return null;
+		}
+		return snapshot;
 	}
 
 	// ── 启动自动续跑（N3/N8） ───────────────────────────────────────────────
@@ -1420,7 +1469,7 @@ public class AiController {
 	@GetMapping("/runs/{runId}")
 	public ApiResponse<Map<String, Object>> run(@PathVariable String runId) {
 		ResumeService service = this.resumeService.getIfAvailable();
-		if (service == null) {
+		if (service == null || !ownedOrAbsent(runId)) {
 			return ApiResponse.ok(Map.of("exists", false));
 		}
 		Map<String, Object> body = new LinkedHashMap<>(service.describe(runId));
@@ -1506,6 +1555,9 @@ public class AiController {
 	 */
 	@PostMapping(value = "/runs/{runId}/retry-model-step", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ResponseEntity<?> retryModelStep(@PathVariable String runId) {
+		if (!ownedOrAbsent(runId)) {
+			return json(HttpStatus.NOT_FOUND, errorBody(ErrorCodes.UNKNOWN_RUN, "轮次不存在"));
+		}
 		ResumeService service = this.resumeService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
@@ -1667,6 +1719,9 @@ public class AiController {
 
 	@PostMapping(value = "/runs/{runId}/resume", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ResponseEntity<?> resume(@PathVariable String runId) {
+		if (!ownedOrAbsent(runId)) {
+			return json(HttpStatus.NOT_FOUND, errorBody(ErrorCodes.UNKNOWN_RUN, "轮次不存在"));
+		}
 		ResumeService service = this.resumeService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
@@ -2535,6 +2590,10 @@ public class AiController {
 	/** 挂起项快照（诊断用：确认门/前端工具各自等在哪里）。 */
 	@GetMapping("/pending/{runId}")
 	public ApiResponse<List<Map<String, Object>>> pending(@PathVariable String runId) {
+		if (!ownedOrAbsent(runId)) {
+			// 他人/无归属的轮次按"没有待决条目"回答：不泄漏这一轮在谁手里
+			return ApiResponse.ok(List.of());
+		}
 		List<Map<String, Object>> items = new ArrayList<>();
 		for (PendingToolCall pending : this.runStore.pendingsLenient(runId)) {
 			items.add(pending.asMap());

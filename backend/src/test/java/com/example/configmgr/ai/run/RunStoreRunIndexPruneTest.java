@@ -3,8 +3,12 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -50,6 +54,21 @@ class RunStoreRunIndexPruneTest {
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
+
+	/** 直调存储的用例显式建立身份（RunStore.create 缺身份 fail-closed；索引成员带身份）。 */
+	private RequestContextUtils.SafeCloseable tenantScope;
+
+	@BeforeEach
+	void enterTenantIdentity() {
+		this.tenantScope = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void leaveTenantIdentity() {
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
+	}
 
 	// ── stale index 可收敛 ───────────────────────────────────────────────────
 
@@ -161,16 +180,25 @@ class RunStoreRunIndexPruneTest {
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private void seedIndex(String... runIds) {
-		this.fake.setsByKey.computeIfAbsent(RunStore.RUN_INDEX, key -> ConcurrentHashMap.newKeySet())
-			.addAll(List.of(runIds));
+		Set<String> members = this.fake.setsByKey.computeIfAbsent(RunStore.RUN_INDEX,
+				key -> ConcurrentHashMap.newKeySet());
+		for (String runId : runIds) {
+			members.add(RunKeyScope.indexMember(1L, 101L, runId));
+		}
 	}
 
 	private void seedSnapshot(String runId) {
 		this.fake.strings.put(this.store.runKey(runId), "{}");
 	}
 
+	/** 索引成员（归一成 runId：断言面仍是"哪些轮在索引里"）。 */
 	private Set<String> members() {
-		return this.fake.setsByKey.getOrDefault(RunStore.RUN_INDEX, Set.of());
+		Set<String> out = new java.util.LinkedHashSet<>();
+		for (String member : this.fake.setsByKey.getOrDefault(RunStore.RUN_INDEX, Set.of())) {
+			RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
+			out.add(ref == null ? member : ref.runId());
+		}
+		return out;
 	}
 
 }

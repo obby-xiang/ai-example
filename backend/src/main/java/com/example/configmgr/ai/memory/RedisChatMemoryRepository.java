@@ -15,6 +15,9 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import com.example.configmgr.ai.session.SessionPurgeGuard;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 
 /**
  * 基于 Spring Data Redis 普通数据结构实现的官方 {@link ChatMemoryRepository} SPI 扩展（SP-01c）。
@@ -37,17 +40,22 @@ import com.example.configmgr.ai.session.SessionPurgeGuard;
  *
  * <h2>存储结构（Cluster 安全）</h2>
  * <ul>
- * <li>{@code chat:mem:{<escapedId>}} — Redis LIST，每个元素是一条 JSON 消息
+ * <li>{@code chat:mem:<tenantId>:<userId>:{<escapedId>}} — Redis LIST，每个元素是一条 JSON 消息
+ * （身份段进键：两个租户/用户用同一个 sessionId 是合法且必然的，键面分开后读/写/删都不必先查归属；
+ * 无身份上下文的过渡期路径退回旧形 {@code chat:mem:{<escapedId>}}）
  * （格式见 {@link MessageJsonCodec}）。花括号内是 Redis hash tag；id 中的 {@code %}/{@code {}/
  * {@code }} 先转义（{@code %}→{@code %25}、{@code {}→{@code %7B}、{@code }}→{@code %7D}），
  * 保证任意非空 id 的 tag 非空且无碰撞。</li>
- * <li>{@code chat:mem:staging:{<escapedId>}:<uuid>} — 非空 {@link #saveAll} 的临时 LIST，
+ * <li>{@code chat:mem:staging:<tenantId>:<userId>:{<escapedId>}:<uuid>} — 非空 {@link #saveAll} 的临时 LIST，
  * 与 final 共享同一个 hash tag，因此 RENAME 同槽。</li>
- * <li>{@code chat:mem:<id>} — <b>迁移期 legacy 键</b>（无 tag，旧版本写入）。读侧 tagged 缺失时回落；
+ * <li>{@code chat:mem:<id>} — <b>无归属 legacy 键</b>（旧版本写入）。<b>只在无身份上下文的过渡期路径</b>
+ * 回落/清理；带身份时既不回落读、也不删（删就是替另一个身份做决定），只按 TTL 自然消亡；
  * 保存成功 RENAME 后删除它，完成自然迁移。<b>只在 {@code id} 不落进别的键族命名空间时可用</b>
  * （见 {@code legacyEligible}）：{@code id="{x}"} 的 legacy 键正是会话 {@code x} 的 tagged 键，
  * {@code id="__ids__"} 的 legacy 键正是全局索引 —— 那两类 id 一律不做 legacy 回落/清理/删除。</li>
- * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，<b>刻意不加 hash tag</b>：给全局索引
+ * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，成员是<b>复合成员</b>
+ * {@code tenantId/userId/<conversationId>}（无身份过渡期写旧形 id）：枚举按成员归属过滤，
+ * 不遍历租户列表。<b>刻意不加 hash tag</b>：给全局索引
  * 打 tag 会把所有会话压进同一个 slot（自造热点）。索引与数据键天然分属不同槽，因此不做跨键 Lua，
  * 只用单键命令序列。</li>
  * </ul>
@@ -195,8 +203,61 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		return tagged;
 	}
 
+	/**
+	 * 数据键：{@code chat:mem:<tenantId>:<userId>:{<escapedId>}}（无身份上下文 = 旧键形，legacy 命名空间）。
+	 *
+	 * <p>身份段进键：两个租户/用户用同一个 conversationId（sessionId）是合法且必然的，
+	 * 键面分开之后读、写、删都不需要先查归属。tag 仍是 {@code {<escapedId>}} —— staging 与 final
+	 * 逐字同 tag，{@code RENAME} 在 Cluster 下同槽。
+	 */
 	private String key(String conversationId) {
-		return KEY_PREFIX + "{" + escapedId(conversationId) + "}";
+		return KEY_PREFIX + TenantKeyScope.currentSegment() + "{" + escapedId(conversationId) + "}";
+	}
+
+	/** 当前是否处于"没有身份上下文"的 legacy 命名空间（旧键形只在过渡期路径可见）。 */
+	private static boolean legacyNamespace() {
+		return TenantKeyScope.currentSegment().isEmpty();
+	}
+
+	/**
+	 * 全局会话索引成员：有身份 = {@code tenantId/userId/<conversationId>}；无身份 = 旧形 {@code <conversationId>}。
+	 *
+	 * <p>索引本身是全局键（刻意不打 tag，避免把所有会话压进一个槽），身份因此只能记在成员上 ——
+	 * 枚举侧按成员里的归属过滤，<b>不通过遍历租户列表</b>发现会话。
+	 */
+	static String indexMember(String conversationId) {
+		String segment = TenantKeyScope.currentSegment();
+		if (segment.isEmpty()) {
+			return requireId(conversationId);
+		}
+		// 身份段 "1:101:" → 复合成员 "1/101/<id>"（设计稿的 tenantId/userId/recordId 口径）
+		return segment.replace(':', '/') + requireId(conversationId);
+	}
+
+	/** 索引成员的身份（不是复合成员 / 无归属老成员 ⇒ {@code null}）。 */
+	private static TenantUser memberIdentity(String member) {
+		int first = member.indexOf('/');
+		int second = first < 0 ? -1 : member.indexOf('/', first + 1);
+		if (first <= 0 || second <= first + 1) {
+			return null;
+		}
+		try {
+			long tenantId = Long.parseLong(member.substring(0, first));
+			long userId = Long.parseLong(member.substring(first + 1, second));
+			if (tenantId <= 0L || (userId <= 0L && userId != TenantUser.SYSTEM_USER_ID)) {
+				return null;
+			}
+			return new TenantUser(tenantId, userId);
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	/** 复合索引成员里的 conversationId；不是复合成员返回 {@code null}。 */
+	private static String memberConversationId(String member) {
+		int second = member.indexOf('/', member.indexOf('/') + 1);
+		return second < 0 ? null : member.substring(second + 1);
 	}
 
 	/**
@@ -218,7 +279,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 * sessionId 自带通配符（如 {@code a*b}）时也不会命中别的会话。
 	 */
 	public static String stagingKeyPrefix(String conversationId) {
-		return STAGING_PREFIX + "{" + escapedId(conversationId) + "}:";
+		return STAGING_PREFIX + TenantKeyScope.currentSegment() + "{" + escapedId(conversationId) + "}:";
 	}
 
 	/** 迁移期旧键形（无 hash tag，id 原样，不转义）。 */
@@ -247,6 +308,10 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 * 这类 id 的旧键仍按原 TTL 自然过期。
 	 */
 	private static boolean legacyEligible(String conversationId) {
+		// 无归属 legacy 键不得进入<b>新身份路径</b>：带身份时一律不回落、不清理、不删除。
+		if (!legacyNamespace()) {
+			return false;
+		}
 		String legacy = legacyKey(conversationId);
 		return !legacy.startsWith(KEY_PREFIX + "{") && !legacy.startsWith(STAGING_PREFIX + "{")
 				&& !legacy.equals(CONVERSATION_IDS_KEY);
@@ -269,25 +334,55 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		return requireId(conversationId).replace("%", "%25").replace("{", "%7B").replace("}", "%7D");
 	}
 
+	/**
+	 * 列出<b>当前归属</b>仍存活的会话 id。
+	 *
+	 * <p>索引成员是复合成员 {@code tenantId/userId/<conversationId>}：枚举侧按成员里的身份过滤
+	 * （不是"先枚举租户再逐租户问"）。无身份上下文时只认 legacy 成员（旧形 {@code <conversationId>}），
+	 * 带身份的路径因此<b>永远看不到</b>无归属的老成员。
+	 */
 	@Override
 	public List<String> findConversationIds() {
 		Set<String> stored = this.redis.opsForSet().members(CONVERSATION_IDS_KEY);
 		if (stored == null || stored.isEmpty()) {
 			return List.of();
 		}
+		TenantUser current = RequestContextUtils.currentOrNull();
 		List<String> live = new ArrayList<>(stored.size());
 		List<String> expired = new ArrayList<>();
-		for (String conversationId : stored) {
+		for (String member : stored) {
 			// 旧版本可能写入过空白索引成员（新写入已拒绝空白 id）；不能让一个毒成员阻断整次枚举。
+			if (member == null || member.isBlank()) {
+				expired.add(member);
+				continue;
+			}
+			TenantUser owner = memberIdentity(member);
+			if (owner == null) {
+				// 无归属老成员：只有 legacy 命名空间（无身份上下文）可见
+				if (current != null) {
+					continue;
+				}
+				if (hasLiveMemory(member)) {
+					live.add(member);
+				}
+				else {
+					expired.add(member);
+				}
+				continue;
+			}
+			if (current == null || !current.equals(owner)) {
+				// 别人的成员：既不返回，也不判定死活（判定会读别人的键）
+				continue;
+			}
+			String conversationId = memberConversationId(member);
 			if (conversationId == null || conversationId.isBlank()) {
-				expired.add(conversationId);
 				continue;
 			}
 			if (hasLiveMemory(conversationId)) {
 				live.add(conversationId);
 			}
 			else {
-				expired.add(conversationId);
+				expired.add(member);
 			}
 		}
 		if (!expired.isEmpty()) {
@@ -310,7 +405,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 * 更符合调用方字段 {@code removedFromIndex} 的语义（它要的是"是否仍可列/仍存活"）。
 	 */
 	public boolean isConversationIndexed(String conversationId) {
-		if (!Boolean.TRUE.equals(this.redis.opsForSet().isMember(CONVERSATION_IDS_KEY, conversationId))) {
+		if (!Boolean.TRUE.equals(this.redis.opsForSet().isMember(CONVERSATION_IDS_KEY, indexMember(conversationId)))) {
 			return false;
 		}
 		return hasLiveMemory(conversationId);
@@ -482,7 +577,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	 */
 	private void addToIndex(String conversationId, String finalKey) {
 		try {
-			this.redis.opsForSet().add(CONVERSATION_IDS_KEY, conversationId);
+			this.redis.opsForSet().add(CONVERSATION_IDS_KEY, indexMember(conversationId));
 		}
 		catch (RuntimeException ex) {
 			log.warn("会话记忆已写入但全局索引更新失败（历史按 id 仍可读；findConversationIds 暂不可见，"
@@ -493,7 +588,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	/** SREM 失败不改变"数据已删除"的事实，只留下可由惰性路径/人工对账的 stale 成员。 */
 	private void removeFromIndexQuietly(String conversationId) {
 		try {
-			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, conversationId);
+			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, indexMember(conversationId));
 		}
 		catch (RuntimeException ex) {
 			log.warn("会话历史已删除但索引 SREM 失败（stale 成员待惰性清理/对账）conversationId={} index={}",

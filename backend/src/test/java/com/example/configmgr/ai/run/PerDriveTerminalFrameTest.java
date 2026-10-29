@@ -98,8 +98,12 @@ class PerDriveTerminalFrameTest {
 
 	private ResilientChatService service;
 
+	/** 直调真实 RunStore 必须显式带身份（create 缺身份 fail-closed）。 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable tenantScope;
+
 	@BeforeEach
 	void setUp() {
+		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		ProviderRuntime runtime = new ProviderRuntime(null, "prov", "model", "http://localhost", "/chat/completions",
 				"k", null, null, this.chatModel, mock(ChatClient.class));
 		when(this.providerRegistry.current()).thenReturn(runtime);
@@ -124,6 +128,9 @@ class PerDriveTerminalFrameTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
 	}
 
 	/**

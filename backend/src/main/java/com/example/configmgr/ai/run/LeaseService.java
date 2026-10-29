@@ -99,7 +99,8 @@ public class LeaseService {
 	public static final String EPOCH_KEY = "ai:lease:epoch";
 
 	/**
-	 * <b>per-slot</b> 取号键前缀（评审 I-1 的根治）：{@code ai:lease:epoch:{run:<runId>}}。
+	 * <b>per-slot</b> 取号键前缀（评审 I-1 的根治）：{@code ai:lease:epoch:{<t>:<u>:run:<runId>}}
+	 * （键名由租约键的 hash tag 推导 ⇒ 身份自动进键；legacy 形 {@code {run:<runId>}} 同样适用）。
 	 *
 	 * <p>键名 = 本前缀 + 租约键里的 hash tag ⇒ 与租约键<b>同槽</b>（Cluster 下才能放进同一条
 	 * {@code EVAL}），于是 {@code INCR} 与 {@code SET} 回到<b>同一个原子步</b>：号与占用必然同序，

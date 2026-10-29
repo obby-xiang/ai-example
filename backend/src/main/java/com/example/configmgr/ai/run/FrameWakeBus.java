@@ -16,7 +16,10 @@ import java.util.function.LongConsumer;
  */
 public interface FrameWakeBus {
 
-	/** 唤醒频道前缀：{@code ai:wake:<runId>}。 */
+	/**
+	 * 唤醒频道前缀：{@code ai:wake:<runId>}；生产实现（{@code RedisFrameWakeBus}）在 runId 前加
+	 * <b>身份段</b> {@code ai:wake:<tenantId>:<userId>:<runId>} —— 同 runId 的两个租户不得互相唤醒。
+	 */
 	String CHANNEL_PREFIX = "ai:wake:";
 
 	/** 发布一次唤醒（载荷 = 上界 seq）。失败只记日志 —— 唤醒可丢。 */
