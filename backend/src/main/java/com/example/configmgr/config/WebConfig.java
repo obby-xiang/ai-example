@@ -16,8 +16,17 @@ import java.util.List;
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
 
+    /**
+     * CORS（I5）：必须<b>显式注册且排在身份过滤器之前</b>。
+     *
+     * <p>
+     * 裸 {@code Filter} Bean 的注册顺序是 {@code LOWEST_PRECEDENCE}，排在身份过滤器之后 ——
+     * 身份拒绝的 400 就不带 {@code Access-Control-Allow-Origin}，浏览器只报 network error。
+     * 这里改用 {@link FilterRegistrationBean} 固定顺序（{@code HIGHEST_PRECEDENCE + 5}），
+     * 让 CORS 头在业务链之前写好，拒绝响应也能被前端读到错误码。
+     */
     @Bean
-    public CorsFilter corsFilter() {
+    public FilterRegistrationBean<CorsFilter> corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
@@ -27,7 +36,12 @@ public class WebConfig implements WebMvcConfigurer {
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);
-        return new CorsFilter(source);
+        FilterRegistrationBean<CorsFilter> registration =
+                new FilterRegistrationBean<>(new CorsFilter(source));
+        registration.addUrlPatterns("/api/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 5);
+        registration.setName("corsFilter");
+        return registration;
     }
 
     /**

@@ -1,12 +1,14 @@
 package com.example.configmgr.ai.session;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.env.MockEnvironment;
 
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 后端会话发号（{@link SessionIdGenerator}）的唯一性单点。
@@ -47,6 +49,39 @@ class SessionIdGeneratorTest {
 		assertThat(instanceA.next()).as("两个实例位在同一毫秒的首号必须不同")
 			.isNotEqualTo(instanceB.next());
 		assertThat(instanceA.next()).isNotEqualTo(instanceB.next());
+	}
+
+	@Test
+	void aLargeClockRollbackFailsFastWithAnUnavailableSignal() {
+		AtomicLong clock = new AtomicLong(1_700_000_000_000L);
+		SessionIdGenerator generator = new SessionIdGenerator(clock::get, 7);
+		generator.next();
+
+		clock.addAndGet(-5_000L);
+
+		assertThatThrownBy(generator::next)
+			.as("大步回拨（>1s）不得占锁自旋，必须以可映射 503 的异常失败")
+			.isInstanceOf(SessionIdGenerator.UnavailableException.class)
+			.hasMessageContaining("时钟回拨");
+	}
+
+	@Test
+	void clusterDeploymentRequiresAnExplicitAuditableInstanceSlot() {
+		MockEnvironment cluster = new MockEnvironment();
+		cluster.setActiveProfiles("cluster");
+
+		assertThatThrownBy(() -> new SessionIdGenerator(cluster))
+			.as("集群/多实例未配置实例位必须启动失败，不得用随机 InstanceId 散列兜底")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("APP_INSTANCE_SLOT");
+
+		MockEnvironment singleInstance = new MockEnvironment();
+		assertThat(new SessionIdGenerator(singleInstance).instanceSlot()).as("单实例默认实例位 0").isZero();
+
+		MockEnvironment configured = new MockEnvironment();
+		configured.setActiveProfiles("cluster");
+		configured.setProperty("app.instance-slot", "3");
+		assertThat(new SessionIdGenerator(configured).instanceSlot()).isEqualTo(3L);
 	}
 
 }

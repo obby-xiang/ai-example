@@ -14,18 +14,25 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 
 /**
  * AI 对话请求的<b>身份边界</b>：读取 {@code X-Tenant-Id}/{@code X-User-Id}，校验后建立
  * {@link RequestContextUtils} 上下文，请求结束（{@code finally}）清理。
  *
  * <h2>纳入边界的范围</h2>
- * 只覆盖<b>对话数据面</b>：{@code /api/ai/} 下除下列之外的全部入口（chat/confirm/events/runs/
- * history/session/context/pending/feedback/cancel/startup-resume 等）。
- * 模型配置（{@code providers}/{@code models}/{@code settings}）、健康面（{@code health}）、
- * 静态工具清单（{@code tools}）、身份目录本身（{@code tenants}）与运维触发的
- * {@code startup-resume} <b>不纳入</b>—— 它们不是对话数据请求，
- * 且前端必须在选身份之前就能读到目录。
+ * 只覆盖<b>对话数据面</b>：{@code /api/ai} 与 {@code /api/ai/} 下除下列之外的全部入口
+ * （chat/confirm/events/runs/history/session/context/pending/feedback/cancel/表单附件等）。
+ * <b>默认受保护</b>，排除面只有两类：
+ * <ul>
+ * <li><b>精确路径</b>：{@code health}、{@code tools}、{@code tenants}、{@code startup-resume}
+ * （含 {@code /scan}）。其<b>子路径不排除</b> —— 新增数据接口不会静默逃逸；{@code /api/ai}
+ * 本身仍在边界内（缺头 = 400）；</li>
+ * <li><b>模型配置子树</b>：{@code providers}/{@code models}/{@code settings} 及其子资源
+ * （{@code AiConfigController} 的全部映射）。</li>
+ * </ul>
+ * 健康面/工具清单/身份目录不纳入，是因为它们不是对话数据，且前端必须在选身份之前就能读到目录；
+ * {@code startup-resume} 是系统运维触发，恢复身份来自每条 run 的快照而非请求头。
  *
  * <h2>为什么拒绝而不是补默认身份</h2>
  * "取不到就算 tenant=0"会让一次漏带请求头的调用读写到另一个身份的数据；这类跨身份错误
@@ -43,14 +50,27 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 
 	public static final String HEADER_USER_ID = "X-User-Id";
 
-	private static final String AI_PREFIX = "/api/ai/";
+	private static final String AI_ROOT = "/api/ai";
+
+	private static final String AI_PREFIX = AI_ROOT + "/";
 
 	/**
-	 * 不纳入租户边界的 AI 前缀：模型配置 / 健康 / 工具清单 / 身份目录，以及
-	 * {@code startup-resume}（系统运维触发：恢复身份来自每条 run 的快照，不来自请求头）。
+	 * 不纳入租户边界的<b>精确路径</b>（不做子路径匹配）：健康面、静态工具清单、身份目录，
+	 * 以及运维触发的 {@code startup-resume}（恢复身份来自每条 run 的快照，不来自请求头）。
+	 *
+	 * <p>
+	 * 只认精确路径是有意的：若按前缀放行，任何新增的 {@code /api/ai/tools/...} 之类
+	 * <b>数据</b>接口都会静默逃出身份边界。子路径默认仍受保护，新增路由必须显式分类。
 	 */
-	private static final List<String> EXCLUDED_PREFIXES = List.of("/api/ai/providers", "/api/ai/models",
-			"/api/ai/settings", "/api/ai/health", "/api/ai/tools", "/api/ai/tenants", "/api/ai/startup-resume");
+	private static final Set<String> EXCLUDED_EXACT = Set.of("/api/ai/health", "/api/ai/tools",
+			"/api/ai/tenants", "/api/ai/startup-resume", "/api/ai/startup-resume/scan");
+
+	/**
+	 * 模型配置命名空间（{@code AiConfigController}）：整个子树不做租户隔离
+	 * （provider/model/setting 的读写与其子资源）。
+	 */
+	private static final List<String> CONFIG_SUBTREES = List.of("/api/ai/providers", "/api/ai/models",
+			"/api/ai/settings");
 
 	private final ObjectMapper objectMapper;
 
@@ -73,11 +93,16 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 		if (StringUtils.hasText(contextPath) && path.startsWith(contextPath)) {
 			path = path.substring(contextPath.length());
 		}
-		if (!path.startsWith(AI_PREFIX)) {
+		// /api/ai 本身也明确纳入边界（缺头 = 400），不静默跳过。
+		if (!path.equals(AI_ROOT) && !path.startsWith(AI_PREFIX)) {
 			return true;
 		}
-		for (String excluded : EXCLUDED_PREFIXES) {
-			if (path.equals(excluded) || path.startsWith(excluded + "/")) {
+		String normalized = path.length() > 1 && path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+		if (EXCLUDED_EXACT.contains(normalized)) {
+			return true;
+		}
+		for (String configSubtree : CONFIG_SUBTREES) {
+			if (normalized.equals(configSubtree) || normalized.startsWith(configSubtree + "/")) {
 				return true;
 			}
 		}

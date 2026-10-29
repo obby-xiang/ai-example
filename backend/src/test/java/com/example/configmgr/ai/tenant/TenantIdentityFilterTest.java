@@ -104,6 +104,29 @@ class TenantIdentityFilterTest {
 		assertThat(RequestContextUtils.currentOrNull()).isNull();
 	}
 
+	@Test
+	void onlyConfigSubtreesAndExactNonDataPathsEscapeTheBoundary() throws Exception {
+		MockHttpServletResponse toolsSubpath = new MockHttpServletResponse();
+		AtomicBoolean toolsSubpathChain = new AtomicBoolean(false);
+		new TenantIdentityFilter(this.mapper).doFilter(new MockHttpServletRequest("GET", "/api/ai/tools/secret"),
+				toolsSubpath, (req, res) -> toolsSubpathChain.set(true));
+
+		assertThat(toolsSubpathChain).as("排除项只认精确路径：新增 /api/ai/tools/... 不得静默逃逸").isFalse();
+		assertThat(toolsSubpath.getStatus()).isEqualTo(400);
+
+		MockHttpServletResponse root = new MockHttpServletResponse();
+		new TenantIdentityFilter(this.mapper).doFilter(new MockHttpServletRequest("GET", "/api/ai"), root,
+				failIfCalled());
+
+		assertThat(root.getStatus()).as("/api/ai 本身也明确纳入边界（缺头 = 拒绝，不是静默跳过）").isEqualTo(400);
+
+		AtomicBoolean configSubtreeChain = new AtomicBoolean(false);
+		new TenantIdentityFilter(this.mapper).doFilter(new MockHttpServletRequest("GET", "/api/ai/providers/1/models"),
+				new MockHttpServletResponse(), (req, res) -> configSubtreeChain.set(true));
+
+		assertThat(configSubtreeChain).as("模型配置子树（providers/models/settings）仍不纳入").isTrue();
+	}
+
 	private static MockHttpServletRequest request(String method, String path, String tenantId, String userId) {
 		MockHttpServletRequest request = new MockHttpServletRequest(method, path);
 		request.addHeader(TENANT_HEADER, tenantId);
