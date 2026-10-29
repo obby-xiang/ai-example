@@ -1,5 +1,8 @@
 /**
- * 压缩与准备心跳仍在 store 保留，但面板不显示阶段条；准备期沿用现有工作中提示。
+ * 阶段条的面板口径（2026-10-29 压缩阶段信号批）：
+ * - **普通轮没有阶段条**：首轮/续跑的初始保活相位是 `streaming`，只有"工作中"呼吸；
+ * - `compacting` 阶段条只在真实 L2 摘要期间出现（心跳相位来自 `ContextCompactor#onSummaryStart`）；
+ * - `preparing` 阶段条属于准备中窗口；任一 `streaming` 心跳同时清掉这两条阶段态（立即恢复"工作中"）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
@@ -146,6 +149,45 @@ describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）',
     expect(bar.find('[data-testid="compaction-retry"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
     expect(wrapper.text()).not.toContain('secret-run-id')
+    wrapper.unmount()
+  })
+
+  it('普通轮只有 streaming 心跳 ⇒ 不出任何阶段条，只剩「工作中」呼吸', async () => {
+    const ai = useAiStore()
+    ai.expanded = true
+    ai.historyLoaded = true
+    ai.loading = true
+    ai.messages = [host()]
+    ai.handleFrame(asFrame({ type: 'start', runId: 'run-plain', sessionId: 'sess' }))
+    // 首轮/续跑初始保活相位 = streaming（普通请求不再无条件公告 compacting）
+    ai.handleFrame(asFrame({ type: 'heartbeat', phase: 'streaming', elapsedMs: 0 }))
+
+    const wrapper = await mountPanel()
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('正在压缩上下文')
+    expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
+    expect(ai.compactionPhase).toBe('idle')
+    expect(ai.preparingRun).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('准备中阶段条随 streaming 心跳退场（摘要结束立即恢复工作中）', async () => {
+    const ai = useAiStore()
+    ai.expanded = true
+    ai.historyLoaded = true
+    ai.loading = true
+    ai.messages = [host()]
+    ai.handleFrame(asFrame({ type: 'start', runId: 'run-prep', sessionId: 'sess' }))
+    ai.notePreparingHeartbeat('run-prep', 1_000)
+
+    const wrapper = await mountPanel()
+    expect(wrapper.find('[data-testid="compaction-status"]').attributes('data-stage')).toBe('preparing')
+
+    ai.handleFrame(asFrame({ type: 'heartbeat', phase: 'streaming', elapsedMs: 0 }))
+    await nextTick()
+    expect(ai.preparingRun).toBeNull()
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
     wrapper.unmount()
   })
 })
