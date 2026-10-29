@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.7", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.8", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -359,7 +359,53 @@ class ToolDefinitionOverridesTest {
         assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
         assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
 
-        assertEquals("2026-10-27.7", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.8", shipped.version(), "改描述必须发新 version");
+    }
+
+    /**
+     * 2026-10-29 审核问题 1/2：<b>新建任务就是新建</b>。旧描述只说"从零创建"，
+     * 没挡住模型在已有/已完成任务页面上先追问配置或先 {@code list_config_defs} 摸底，
+     * 也没说旧任务的配置/步骤/完成状态不属于新任务 —— 与系统提示词第 30 条冲突。
+     *
+     * <p>锁两面（YAML 覆盖 + {@code @Tool} 注解回落，YAML 缺描述时模型看到的就是注解那份）。
+     */
+    @Test
+    void shippedCreateTaskDescriptionBansPreCreationQuestionsAndOldTaskInheritance() {
+        String yaml = createTaskDescriptionFromYaml();
+        String annotation = createTaskDescriptionFromAnnotation();
+
+        for (String description : List.of(yaml, annotation)) {
+            assertTrue(description.contains("已完成任务页面"), "建任务不限任务中心：" + description);
+            assertTrue(description.contains("不要先追问配置项、筛选条件或数据文件"), description);
+            assertTrue(description.contains("list_config_defs 代替创建"), description);
+            assertTrue(description.contains("只需要任务类型"), description);
+            assertTrue(description.contains("不属于新任务"),
+                    "旧任务参数不自动带入新任务的结论必须写明：" + description);
+            assertTrue(description.contains("除非用户明确要求沿用"), description);
+            assertTrue(description.contains("navigate_to"), description);
+        }
+
+        assertEquals("2026-10-27.8", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
+    }
+
+    private static String createTaskDescriptionFromYaml() {
+        ToolDefinitionOverride createTask = new YamlToolDefinitionSource().load().find("create_task");
+        assertNotNull(createTask);
+        assertTrue(createTask.hasDescription(), "create_task 必须保留描述覆盖（否则回落注解）");
+        return createTask.description();
+    }
+
+    private static String createTaskDescriptionFromAnnotation() {
+        try {
+            java.lang.reflect.Method method = com.example.configmgr.ai.tools.AiTools.class
+                .getMethod("createTask", String.class, String.class, ToolContext.class);
+            Tool tool = method.getAnnotation(Tool.class);
+            assertNotNull(tool, "AiTools#createTask 必须带 @Tool");
+            return tool.description();
+        }
+        catch (NoSuchMethodException ex) {
+            throw new AssertionError("AiTools#createTask(String,String,ToolContext) 不存在", ex);
+        }
     }
 
     /**

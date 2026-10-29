@@ -301,7 +301,7 @@ public class AiTools {
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = "create_task", description = "从零创建一个配置管理任务（EXPORT/IMPORT）。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = "create_task", description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。创建只需要任务类型 type（EXPORT/IMPORT）与可选 title：标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，不自动带入，除非用户明确要求沿用。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
