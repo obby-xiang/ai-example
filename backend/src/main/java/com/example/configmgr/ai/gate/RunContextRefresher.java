@@ -262,9 +262,10 @@ public class RunContextRefresher {
 	 * 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。
 	 *
 	 * <p>与 {@code SpToolCallingManager} 的"本轮是否已创建任务"同一解析口径（同一份回执、同一个号），
-	 * 因此放在这里作为包内共享的唯一实现。
+	 * 因此放在这里作为共享的唯一实现（{@code DefinitionSelectionForm} 判定"新任务链"时读同一份回执，
+	 * 故为 {@code public}）。
 	 */
-	static Long taskIdFromText(String text) {
+	public static Long taskIdFromText(String text) {
 		if (text == null) {
 			return null;
 		}

@@ -264,6 +264,23 @@ public class ResumeService {
 		this.taskSlotResolver = resolver;
 	}
 
+	/**
+	 * 宿主确定性定义选择表单（新建任务 → 导航到选择步骤 → 配置未知 ⇒ 宿主自己挂起平铺多选）。
+	 *
+	 * <p>为什么挂在续跑侧：{@code navigate_to} 是前端工具，生产 {@code park=true} 时它在首轮的
+	 * 等待处就结束了执行，真正的结算与"下一跳上下文"都在本类 —— 于是"导航成功"之后、
+	 * 模型再次被问之前的<b>唯一</b>确定点就在这里（既不改前端，也不新增中断路径）。
+	 *
+	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）；缺席 = 不挂起，行为与改造前一致。
+	 */
+	private com.example.configmgr.ai.form.DefinitionSelectionForm definitionSelectionForm;
+
+	/** 可选注入（缺席 = 不生成宿主表单，模型侧既有路径不变）。 */
+	@Autowired(required = false)
+	public void setDefinitionSelectionForm(com.example.configmgr.ai.form.DefinitionSelectionForm form) {
+		this.definitionSelectionForm = form;
+	}
+
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
@@ -1637,6 +1654,11 @@ public class ResumeService {
 			//  - nextHopContext = 整批结算后按真实结果刷新的那一份：只用于<b>交棒给模型</b>
 			//    （下一跳的披露面 + 工作区状态）。无在飞工具时两者相同。
 			AiContext nextHopContext = context;
+			// 本批<b>已结算</b>条目（结算后回读的真值）：整批结算完再统一折算上下文，
+			// 不在循环里逐条刷新（逐条刷新会让同批后面的条目拿到"刚刚才解锁"的披露面 = 批内扩权）。
+			// 声明在分支之外：无在飞工具时为空列表，"宿主定义选择表单"的判据（本批是否刚导航成功）
+			// 因此对两个分支是同一份输入。
+			List<PendingToolCall> settledInBatch = new ArrayList<>(snapshot.getInFlightToolCalls().size());
 
 			if (!snapshot.getInFlightToolCalls().isEmpty()) {
 				// ===== 硬规范②：把挂起那一轮的 assistant(tool_calls) 重新拼回完整历史 =====
@@ -1647,9 +1669,6 @@ public class ResumeService {
 				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
 				// P1-10：续跑与首轮同一批策略 —— W/J/P 确定性失败后，剩余未执行项补 SKIPPED。
 				PendingToolCall haltedBy = null;
-				// 本批<b>已结算</b>条目（结算后回读的真值）：整批结算完再统一折算上下文，
-				// 不在循环里逐条刷新（逐条刷新会让同批后面的条目拿到"刚刚才解锁"的披露面 = 批内扩权）。
-				List<PendingToolCall> settledInBatch = new ArrayList<>(snapshot.getInFlightToolCalls().size());
 				for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
 					// 以 Redis 的待决条目为准（快照里的 in-flight 副本停留在"挂起那一刻"）
 					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
@@ -1770,6 +1789,24 @@ public class ResumeService {
 					log.info("续跑 RUNNING 状态转换被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
 					return resumeStatusWriteRefused(runId, body);
 				}
+			}
+
+			// ===== 宿主确定性定义选择表单（新建任务 → 导航到选择步骤 → 配置未知）=====
+			// 位置刻意在"整批结算 + 权威同步 + 工作区段重写"之后、记忆窗口/压缩与交棒之前：
+			//   · 判据读的是**下一跳**那份上下文（批间刷新后的页面/任务/步骤 + 重算后的槽位），
+			//     不是请求边界那份，于是"刚导航到新任务"这件事在判据里成立；
+			//   · 挂起用既有面（saveSuspended → suspended 帧 → 请求帧 → 收流），与模型自己下发的
+			//     generative_form 完全同一条路；用户的提交/取消走既有回灌与既有续跑；
+			//   · 判据只看"本批是否刚成功导航到本轮新建的那个任务"，因此表单回灌后的下一次续跑
+			//     （settledBatch 里没有那次 navigate_to）不会重复问同一件事。
+			if (this.definitionSelectionForm != null
+					&& this.definitionSelectionForm.parkIfDue(runId, nextHopContext, settledInBatch, history)) {
+				body.put("resumed", false);
+				body.put("reason", "DEFINITION_FORM_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				log.info("续跑改为等人填配置项表单（本拍不驱动模型）runId={} taskId={}", runId,
+						nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
