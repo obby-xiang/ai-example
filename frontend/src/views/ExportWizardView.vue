@@ -2518,7 +2518,9 @@ function registerHandlers(): void {
   registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload) => {
     const defCode = String(payload.defCode ?? '')
     if (!defCode) {
-      return '缺少 defCode，无法打开在线编辑器'
+      // R7：参数错误必须结构化失败 —— 字符串会被 `interpretHandlerOutcome` 当成功（假成功）。
+      // 其它刻意信息型回执（如只读态的「任务已结束，仅供查看…」）保持字符串不动。
+      return { ok: false, reason: '缺少 defCode，无法打开在线编辑器（未执行）' }
     }
     // issue #2：payload.taskId 可能不是当前绑定的任务，先把目标任务绑定好再读 exportResults
     const gate = await ensureTaskBoundForTool(payload.taskId)

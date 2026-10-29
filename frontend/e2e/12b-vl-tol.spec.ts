@@ -286,12 +286,19 @@ test.describe('@stub L 工具全量面（12b）', () => {
     // 编辑器容器真的在屏（不是只回一句"已打开"）
     await expect(page.locator('[data-testid="spread-grid"], .spread-host, canvas').first()).toBeVisible({ timeout: 30_000 })
 
-    // 无产物编码：结构化失败，不空白页
+    // 无产物编码：结构化失败，不空白页（R7：断言收紧为 failed，不再只要求"非 ok"）
     const missing = await callUntil(page, 'open_export_file_editor', { taskId, defCode: 'DOC_TYPE' },
-      (view) => view.outcome !== 'ok' && String(view.result ?? '').includes('DOC_TYPE'))
-    expect(String(missing.outcome)).not.toBe('ok')
+      (view) => String(view.outcome) === 'failed' && String(view.result ?? '').includes('DOC_TYPE'))
+    expect(String(missing.outcome)).toBe('failed')
     expect(String(missing.result)).toContain('DOC_TYPE')
     await expect(page.locator('[data-testid="spread-grid"], .spread-host, canvas').first()).toBeVisible({ timeout: 15_000 })
+
+    // 缺 defCode：参数错误必须结构化失败（R7 起 handler 缺参也回 {ok:false}；
+    // 工具层 REQUIRED_PARAMS 先行时同样 failed），编辑器不被切换
+    const noDef = await callUntil(page, 'open_export_file_editor', { taskId },
+      (view) => String(view.outcome) === 'failed' && String(view.result ?? '').includes('defCode'))
+    expect(String(noDef.outcome)).toBe('failed')
+    expect(String(noDef.result)).toContain('defCode')
   })
 
   test('E2E-L15 download_export_files：真下载事件 + 文件名与产物一致', async ({ page, request }) => {
