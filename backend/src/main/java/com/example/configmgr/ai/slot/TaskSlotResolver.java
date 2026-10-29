@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
@@ -137,7 +138,9 @@ public class TaskSlotResolver {
 		List<String> historyTexts = new ArrayList<>();
 		if (history != null) {
 			for (Message message : history) {
-				if (message instanceof UserMessage user && user.getText() != null) {
+				// 压缩摘要/步数收尾等合成 user 消息不是用户原话：把它们当输入会把旧选择"复活"
+				if (message instanceof UserMessage user && !SyntheticMessages.isSynthetic(message)
+						&& user.getText() != null) {
 					historyTexts.add(user.getText());
 				}
 			}
@@ -181,7 +184,10 @@ public class TaskSlotResolver {
 		if (extra == null) {
 			return null;
 		}
-		if (!(extra.get("pageId") instanceof String pageId) || !ContextBuilder.SELECTION_PAGE_IDS.contains(pageId)) {
+		// 类型口径与 ContextBuilder#pageSelectedDefs 统一为 String.valueOf（此前 instanceof String
+		// 会让同一份上下文在两侧得出不同结论）。
+		Object pageId = extra.get("pageId");
+		if (pageId == null || !ContextBuilder.SELECTION_PAGE_IDS.contains(String.valueOf(pageId))) {
 			return null;
 		}
 		if (!(extra.get("selectedDefs") instanceof List<?> selected)) {

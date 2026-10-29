@@ -54,14 +54,14 @@ public class ContextBuilder {
      * 与前端工作区契约（{@code frontend/src/stores/workspace.ts#buildContext}）逐键对应。
      * 新增键必须<b>两侧同改</b>：前端多塞的键在这里会被丢弃（这是刻意行为，不是缺陷）。
      *
-     * <p><b>刻意例外（批 A / A-13）：{@code uiRegionCount} 永远不进本表。</b>
-     * 它是工具披露标签源（{@code ToolRegistry#buildTags} 的 {@code ui:on}），不是模型输入：
-     * 进提示词等于每轮多付 token 换零信息量。因此「前端上报了但这里没有」是<b>设计如此</b>，
-     * 不是漂移 —— 见 {@code ContextBuilderExtraTest#uiRegionCountIsADeliberateWhitelistException}。
-     * 它走的是另一张表 {@link #TAG_ONLY_EXTRA_KEYS}。
+     * <p><b>刻意例外：{@code uiRegionCount} / {@code selectionSynced} 永远不进本表。</b>
+     * 前者是工具披露标签源（{@code ToolRegistry#buildTags} 的 {@code ui:on}），后者是"空勾选是否
+     * 权威"的判定键 —— 两者都<b>只判定、不进模型载荷</b>：进提示词等于每轮多付 token 换零信息量。
+     * 因此「前端上报了但这里没有」是<b>设计如此</b>，不是漂移。它们各走旁路表
+     * {@link #TAG_ONLY_EXTRA_KEYS} 与 {@link #JUDGE_ONLY_EXTRA_KEYS}。
      */
-    public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "selectionSynced",
-            "importMode", "dataVersion", "contractVersion", "recentActions");
+    public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "importMode",
+            "dataVersion", "contractVersion", "recentActions");
 
     /**
      * 「任务详情已应用」标记键（{@code extra.selectionSynced}，前端工作区上报）。
@@ -74,6 +74,16 @@ public class ContextBuilder {
      * <p>可选字段：旧客户端不带 ⇒ 按未同步处理（保守一侧：不抹掉已落库/历史里的勾选）。
      */
     public static final String SELECTION_SYNCED_KEY = "selectionSynced";
+
+    /**
+     * <b>只进判定、永不进模型载荷</b>的 {@code extra} 键（客户端可上报；闸门保留、提示词不渲染）。
+     *
+     * <p>与 {@link #TAG_ONLY_EXTRA_KEYS} 的区别：那张表服务于工具披露标签（值只认有限数值），
+     * 本表服务于槽位判定（值只认 {@link Boolean}）。两条消费面在结构上分开：
+     * {@code buildContextMessage} 只渲染 {@link #ALLOWED_EXTRA_KEYS}，所以这里多一个键不会让
+     * 模型多看到一段。
+     */
+    public static final List<String> JUDGE_ONLY_EXTRA_KEYS = List.of(SELECTION_SYNCED_KEY);
 
     /**
      * <b>只进披露判定、永不进模型载荷</b>的 {@code extra} 键（批 A / A-13 旁路；缺口 0 收口）。

@@ -12,6 +12,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -129,6 +130,158 @@ class AiControllerWorkspaceContextTest {
 		verify(this.runStore, never()).save(any(RunSnapshot.class));
 	}
 
+	// ── I-1：页面切换不得改写服务端任务事实/预检输入 ─────────────────────────
+
+	/**
+	 * I-1（终审）：用户从导出向导切到任务中心时，客户端会带 {@code page=tasks / taskId=null /
+	 * taskType=null / importMode=null}。这些**不是页面事实**：写进快照会翻转预检
+	 * {@code reportHash}（{@code taskId}/{@code importMode} 都是 hash 输入）——
+	 * 状态没变、只是点了下别的页面，已批准的卡就被误判 {@code PRECHECK_STALE}。
+	 *
+	 * <p>本用例锁：快照已有的 {@code taskId/taskType/taskStatus/importMode} 一律保留服务端原值；
+	 * 只同步 {@code page/step} 与页面 extra（selectedDefs/selectionSynced/pageId/recentActions）；
+	 * 服务端 {@code extra.taskSlots} 必须保留（重试模型步不重算槽位，不能被这次写抹掉）。
+	 */
+	@Test
+	void pageSwitchKeepsServerTaskFactsPublishModeAndTaskSlots() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				serverExtra()).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", "tasks");
+		extra.put("selectedDefs", List.of());
+		extra.put("selectionSynced", false);
+		extra.put("importMode", "REPLACE");
+		AiChatRequest.Context switched = new AiChatRequest.Context("tasks", null, null, null, null, extra);
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, switched))))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true));
+
+		AiContext stored = AiContext.fromMap(snapshot.getContext());
+		assertThat(stored.getPage()).as("页面是页面事实，按客户端同步").isEqualTo("tasks");
+		assertThat(stored.getStep()).isNull();
+		assertThat(stored.getTaskId()).as("客户端不得给已绑定任务换 id").isEqualTo(42L);
+		assertThat(stored.getTaskType()).isEqualTo("EXPORT");
+		assertThat(stored.getTaskStatus()).isEqualTo("ACTIVE");
+		assertThat(stored.getExtra().get("importMode")).as("导入模式是预检 hash 输入，保留服务端值")
+			.isEqualTo("MERGE");
+		assertThat(TaskSlots.fromExtra(stored.getExtra()).defCodes()).as("服务端槽位不得被这次写抹掉")
+			.containsExactly("CURRENCY");
+		assertThat(stored.getExtra().get("selectedDefs")).isEqualTo(List.of());
+		assertThat(stored.getExtra().get("selectionSynced")).isEqualTo(false);
+	}
+
+	/** 相邻：快照原本没有任务绑定 ⇒ 允许采纳客户端任务绑定（新建任务后的首个确认）。 */
+	@Test
+	void clientTaskBindingIsAdoptedOnlyWhenSnapshotHasNone() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", null, null,
+				Map.of("pageId", "export")).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", "export");
+		extra.put("selectedDefs", List.of("CURRENCY"));
+		extra.put("selectionSynced", true);
+		AiChatRequest.Context bound = new AiChatRequest.Context("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				extra);
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, bound))))
+			.andExpect(status().isOk());
+
+		AiContext stored = AiContext.fromMap(snapshot.getContext());
+		assertThat(stored.getTaskId()).isEqualTo(42L);
+		assertThat(stored.getTaskType()).isEqualTo("EXPORT");
+		assertThat(stored.getTaskStatus()).isEqualTo("ACTIVE");
+	}
+
+	// ── I-2：只在"决策会被受理"的前置条件下写上下文 ─────────────────────────
+
+	/** 未知 toolCallId ⇒ 409，且<b>一个字节都不写</b>（入口拒绝 = 零副作用）。 */
+	@Test
+	void unknownToolCallDoesNotTouchTheSnapshot() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(null);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(eq(RUN), eq(CALL), eq(true), any()))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.NOT_FOUND, null, false, null));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict());
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+	}
+
+	/** DUPLICATE（条目已被处理过，非 PENDING）⇒ 409，且不写。 */
+	@Test
+	void duplicateDecisionDoesNotTouchTheSnapshot() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall processed = pending(PendingToolCall.KIND_CONFIRM);
+		processed.setStatus(PendingToolCall.APPROVED);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(processed);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(RUN, CALL, true, null))
+			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.DUPLICATE, processed, false, null));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict());
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+	}
+
+	/** 错 kind（入口预读命中另一通道的条目）⇒ 409，且不写。 */
+	@Test
+	void wrongKindEntryDoesNotTouchTheSnapshot() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending(PendingToolCall.KIND_FRONTEND));
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict());
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+	}
+
+	/**
+	 * RUNNING（或在跑轮）⇒ 不写：本功能只服务挂起期，给在跑轮换上下文会与驱动侧抢同一份快照，
+	 * 且可能回退 status/inFlight 等字段（整对象写、后写者赢）。
+	 */
+	@Test
+	void runningRunIsNotRewrittenByWorkspaceContext() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setStatus(RunSnapshot.RUNNING);
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.runStore.instanceId()).thenReturn("inst-a");
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isOk());
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private static AiChatRequest.Context context() {
@@ -139,6 +292,16 @@ class AiControllerWorkspaceContextTest {
 		// 客户端不可能伪造服务端槽位：闸门按白名单丢弃，页面事实不得被它压掉
 		extra.put("taskSlots", Map.of("defCodes", List.of("STALE")));
 		return new AiChatRequest.Context("export", "EXPORT", "QUERY_COND", 42L, "ACTIVE", extra);
+	}
+
+	private static Map<String, Object> serverExtra() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", "export");
+		extra.put("selectedDefs", List.of("CURRENCY"));
+		extra.put("selectionSynced", true);
+		extra.put("importMode", "MERGE");
+		extra.put(TaskSlots.EXTRA_KEY, new TaskSlots("EXPORT", List.of("CURRENCY"), List.of()).toMap());
+		return extra;
 	}
 
 	private static RunSnapshot suspendedSnapshot() {

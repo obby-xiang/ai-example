@@ -1032,12 +1032,23 @@ public class ResumeService {
 						: Outcome.STATE_UNKNOWN, body);
 			}
 			// ===== 只重跑模型步：固定历史原样交给 driveResumed（不压缩、不重算窗口、不重建 system）=====
+			// 交棒前与正常续跑同口径：按任务权威值同步 type/step/status，重算槽位并重写工作区段 ——
+			// 挂起/失败期用户手动改的步骤不产生任何"刷新类工具结算"，这个入口也没有客户端 context 可补。
+			final AiContext handoffContext = syncAuthorityForHandoff(runId,
+					AiContext.fromMap(snapshot.getContext()), fixedHistory);
+			final List<Message> handoffHistory = rewriteWorkspaceState(new ArrayList<>(fixedHistory),
+					handoffContext, runId);
 			// 状态转换必须走取消优先的原子守卫（不能用普通 save）：入口的 cancelStateOutcome 与本笔
 			// 记账之间没有原子性 —— 取消恰在这段窗口落库时，普通 save 会把 CANCELLED 改回 RUNNING，
 			// 随后还会交棒线程池把一条"已被用户停止"的轮重新驱动起来（前端也会重挂到它上面）。
 			// saveStatusUnlessCancelled 把"这一笔有没有落库"变成可分支的事实：false ⇒ 取消已先到，
 			// 返回取消语义并<b>不</b>驱动。
 			snapshot.setStatus(RunSnapshot.RUNNING);
+			snapshot.setContext(handoffContext.toMap());
+			if (!handoffHistory.equals(fixedHistory)) {
+				// 工作区段已按权威值重写：与上下文同一笔落库，避免"模型看到新的、快照还是旧的"
+				snapshot.setMessageJson(this.codec.serializeAll(handoffHistory));
+			}
 			snapshot.setAssistantContent(null);
 			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setFinalText(null);
@@ -1066,7 +1077,6 @@ public class ResumeService {
 					fixedHistory.stream().map(message -> message.getMessageType().name()).toList());
 			body.put("resumedBy", this.store.instanceId());
 
-			AiContext context = AiContext.fromMap(snapshot.getContext());
 			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
 			String sessionForTask = sessionId;
 			try {
@@ -1079,10 +1089,10 @@ public class ResumeService {
 					}
 					try {
 						if (snapshot.getProviderId() == null) {
-							this.chatService.driveResumed(runId, sessionForTask, context, fixedHistory, out);
+							this.chatService.driveResumed(runId, sessionForTask, handoffContext, handoffHistory, out);
 						}
 						else {
-							this.chatService.driveResumed(runId, sessionForTask, context, fixedHistory,
+							this.chatService.driveResumed(runId, sessionForTask, handoffContext, handoffHistory,
 									snapshot.getProviderId(), snapshot.getModelId(), out);
 						}
 					}

@@ -426,6 +426,32 @@ class ResumeContextRefreshTest {
 			.as("重算结果写回快照").isEmpty();
 	}
 
+	/**
+	 * <b>仅模型步重跑同一口径</b>（终审 I-3）：{@code retryModelStep} 也是交棒入口 —— 挂起/失败期
+	 * 用户手动改了步骤后点"重试模型步"，模型仍按旧步骤与旧披露继续（本入口还没有客户端 context 可补）。
+	 * 因此必须在交棒前复用 {@code syncAuthorityForHandoff + rewriteWorkspaceState}。
+	 */
+	@Test
+	void modelStepRetryAlsoSyncsAuthoritativeStepBeforeHandoff() {
+		this.taskState.set(task(42L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE));
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setStatus(RunSnapshot.FAILED);
+		snapshot.setModelId("test-model");
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				Map.of("pageId", "export", "selectedDefs", List.of("CURRENCY"), "selectionSynced", true)).toMap());
+		snapshot.setMessageJson(this.codec.serializeAll(
+				List.of(new SystemMessage(SYSTEM_TEXT), new UserMessage("做一个导出"))));
+		this.store.save(snapshot);
+
+		assertThat(this.service.retryModelStep(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+
+		AiContext drive = contextOfDriveResumed();
+		assertThat(drive.getStep()).as("重跑前按任务权威值同步").isEqualTo("QUERY_COND");
+		assertThat(toolNames(drive)).contains("set_condition").doesNotContain("select_definitions");
+		assertThat(systemTextOfDriveResumed()).contains("当前步骤: QUERY_COND");
+		assertThat(AiContext.fromMap(this.store.get(RUN_ID).getContext()).getStep()).isEqualTo("QUERY_COND");
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n页面：任务中心\n"

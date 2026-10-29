@@ -644,38 +644,83 @@ public class AiController {
 	 * 决策落地前唯一还能拿到"用户此刻看到的页面"的地方。写回发生在
 	 * {@link ConfirmGate#submitDecision} 之前，因此同一请求触发的续跑一定读到新值。
 	 *
-	 * <h2>口径</h2>
+	 * <h2>写入口径（终审 I-1 / I-2）</h2>
 	 * <ul>
+	 * <li><b>只写页面事实</b>：{@code page/step} 与 {@code extra} 里的页面键（{@code pageId /
+	 *     selectedDefs / selectionSynced / recentActions / dataVersion / contractVersion}）。
+	 *     {@code taskId/taskType/taskStatus} 在快照已有绑定时<b>一律保留服务端原值</b> ——
+	 *     它们是预检 {@code reportHash}（targetConsistency）与披露的输入，页面切换不得改写；
+	 *     只有快照原本没有 {@code taskId} 时才采纳客户端绑定。</li>
+	 * <li><b>{@code importMode} 同样保留服务端已有值</b>（{@code reportHash} 的 publishMode 输入）；
+	 *     快照没有时才采纳客户端。</li>
+	 * <li><b>保留服务端 {@code extra.taskSlots}</b>：重算只是增强，不能让这次写把槽位抹掉
+	 *     （{@code retryModelStep} 不重算，抹掉会退化成表单 fail-open）。</li>
 	 * <li><b>可选字段</b>：旧客户端不带 {@code context} ⇒ 不读不写，行为与改造前逐字一致；</li>
-	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），
-	 *     客户端因此无法伪造服务端槽位（{@code taskSlots}）或越过终态收窄；</li>
-	 * <li><b>不覆盖终态</b>：快照不存在/已终态 ⇒ 不写（终态事实不由页面改写）；</li>
+	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），客户端无法
+	 *     伪造服务端槽位或越过终态收窄；</li>
+	 * <li><b>只在"决策会被受理"时写</b>：调用方必须已预读待决条目；本方法要求条目存在、
+	 *     {@code status=PENDING}、kind 匹配（{@code kind=null} 的旧条目按兼容放行）、
+	 *     且快照状态为 {@code SUSPENDED}。未知/错 kind/DUPLICATE/RUNNING/终态一律<b>不写</b>
+	 *     —— 入口拒绝必须保持零副作用，也不能给在跑轮换上下文（整对象写、后写者赢）。</li>
 	 * <li><b>失败只 WARN</b>：页面事实是"让续跑更准"的增强，不是决策/授权面 —— 写失败不得让
-	 *     用户的确认走不通（续跑会退回旧上下文，与改造前同形）；</li>
-	 * <li><b>不新增 HITL、不自动重发</b>：这里只写上下文，不触发任何工具/确认卡。</li>
+	 *     用户的确认走不通（续跑会退回旧上下文，与改造前同形）；不新增 HITL、不自动重发。</li>
 	 * </ul>
 	 */
-	private void applyWorkspaceContext(String runId, AiChatRequest.Context raw) {
+	private void applyWorkspaceContext(String runId, AiChatRequest.Context raw, PendingToolCall entry,
+			String expectedKind) {
+		if (raw == null || entry == null || expectedKind == null
+				|| (entry.getKind() != null && !expectedKind.equals(entry.getKind()))
+				|| !PendingToolCall.PENDING.equals(entry.getStatus())) {
+			return;
+		}
 		AiChatRequest.Context effective = sanitizedWorkspaceContext(raw);
-		if (effective == null
-				|| (!StringUtils.hasText(effective.page()) && effective.taskId() == null)) {
+		if (effective == null || !StringUtils.hasText(effective.page())) {
 			return;
 		}
 		try {
 			RunSnapshot snapshot = this.runStore.get(runId);
-			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+			if (snapshot == null || !RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
 				return;
 			}
-			AiContext incoming = AiContext.of(effective.page(), effective.taskType(), effective.step(),
-					effective.taskId(), effective.taskStatus(), effective.extra());
-			snapshot.setContext(incoming.toMap());
+			AiContext merged = mergeWorkspaceFacts(AiContext.fromMap(snapshot.getContext()), effective);
+			snapshot.setContext(merged.toMap());
 			this.runStore.save(snapshot);
 			log.info("挂起期工作区上下文已写回快照 runId={} page={} taskId={} step={}", runId,
-					incoming.getPage(), incoming.getTaskId(), incoming.getStep());
+					merged.getPage(), merged.getTaskId(), merged.getStep());
 		}
 		catch (RuntimeException ex) {
 			log.warn("挂起期工作区上下文写回失败（已忽略，续跑退回旧上下文）runId={}：{}", runId, ex.getMessage());
 		}
+	}
+
+	/** 客户端可覆盖的页面事实键（其余 extra 取自快照，服务端键如 {@code taskSlots} 永不丢）。 */
+	private static final List<String> PAGE_FACT_EXTRA_KEYS = List.of("pageId", "selectedDefs", "selectionSynced",
+			"recentActions", "dataVersion", "contractVersion");
+
+	/**
+	 * 页面事实合并：页面/步骤取客户端，任务绑定与发布模式保留服务端已有值（预检 hash 稳定），
+	 * 服务端 extra（含 {@code taskSlots}）叠加页面事实后原样保留。
+	 */
+	private static AiContext mergeWorkspaceFacts(AiContext server, AiChatRequest.Context client) {
+		Map<String, Object> clientExtra = client.extra() == null ? Map.of() : client.extra();
+		Map<String, Object> extra = new LinkedHashMap<>(server.getExtra());
+		for (String key : PAGE_FACT_EXTRA_KEYS) {
+			if (clientExtra.containsKey(key)) {
+				extra.put(key, clientExtra.get(key));
+			}
+		}
+		Object serverImportMode = extra.get("importMode");
+		if ((serverImportMode == null || String.valueOf(serverImportMode).isBlank())
+				&& clientExtra.get("importMode") != null) {
+			extra.put("importMode", clientExtra.get("importMode"));
+		}
+		boolean bound = server.getTaskId() != null;
+		return AiContext.of(client.page(),
+				bound ? server.getTaskType() : client.taskType(),
+				client.step(),
+				bound ? server.getTaskId() : client.taskId(),
+				bound ? server.getTaskStatus() : client.taskStatus(),
+				extra);
 	}
 
 	/** {@code context} 形状闸（与 {@code /chat} 同源；未注入闸门 = 不闸，与改造前同形）。 */
@@ -711,9 +756,6 @@ public class AiController {
 		if (reason != null && reason.length() > REASON_MAX_CHARS) {
 			return json(HttpStatus.BAD_REQUEST, reasonTooLong(reason.length()));
 		}
-		// 挂起期工作区事实（可选字段）：先写回快照，再落决策 —— 续跑只读快照，晚写就来不及。
-		// 旧客户端不带 ⇒ 一个字不动（兼容方向 = 可选字段，不改判定/授权）。
-		applyWorkspaceContext(request.runId(), request.context());
 		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
@@ -730,6 +772,10 @@ public class AiController {
 			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
 					PendingToolCall.KIND_CONFIRM));
 		}
+		// 挂起期工作区事实（可选字段）：只在"决策会被受理"的前置满足后写 —— 未知/错 kind/DUPLICATE/
+		// RUNNING 均不写（入口拒绝必须零副作用；在跑轮不得被页面上下文改写）。
+		// 位置仍在 submitDecision 之前：同一请求触发的续跑一定读到新值。
+		applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_CONFIRM);
 		boolean approved = Boolean.TRUE.equals(request.approved());
 		ConfirmGate.Submission submission;
 		// 日志链路批：决策落在 HTTP 线程上 —— 装锚点，使 approval_decided 与"决策触发的续跑任务"
@@ -839,8 +885,9 @@ public class AiController {
 			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
 					request.toolCallId(), originalChars, callbackMaxChars);
 		}
-		// 挂起期工作区事实（可选字段）：与 /confirm 同一口径（续跑只读快照）。
-		applyWorkspaceContext(request.runId(), request.context());
+		// 挂起期工作区事实（可选字段）：与 /confirm 同一口径 —— 条目存在 + PENDING + kind 正确 +
+		// 快照 SUSPENDED 才写；体积拒绝/DUPLICATE/RUNNING 均不写。
+		applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_FRONTEND);
 		ConfirmGate.Submission submission;
 		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
 		AiTrace.bind(request.runId(), null);

@@ -56,14 +56,18 @@ export function frontendToolResult(request: FrontendToolResultRequest): Promise<
 }
 
 /**
- * HITL 写入口附带<b>最新工作区上下文</b>（可选字段，旧后端忽略）。
+ * HITL 写入口附带<b>最新工作区上下文</b>（可选字段）。
  *
  * 为什么在 api 层拼而不是让每个调用方传：挂起期间用户可能已在向导里改了步骤/勾选/任务详情，
  * 而续跑只读快照 —— 后端 `/confirm`、`/frontend-tool-result` 是决策落地前唯一能拿到"用户此刻
- * 看到的页面"的写入口。字段可选：没有活动 store（单测/非应用环境）时不带，行为与改造前一致。
+ * 看到的页面"的写入口。没有活动 store（单测/非应用环境）时不带，行为与改造前一致。
  *
- * 返回值刻意用 {@code object} 拓宽：请求类型不新增字段（旧后端/旧调用方零影响），
- * 只多一个 additive 键 {@code context}。
+ * <b>部署顺序：后端先上。</b>后端 MVC 的 {@code ObjectMapper} 是 `JacksonConfig` 里的裸
+ * `new ObjectMapper()`（`FAIL_ON_UNKNOWN_PROPERTIES=true`），旧后端收到未知的 `context` 会 400；
+ * 反向（新后端 + 旧前端）安全 —— 字段可选，缺省即不写快照。
+ *
+ * 返回值刻意用 {@code object} 拓宽：请求类型不新增字段（旧调用方零影响），只多一个 additive 键
+ * {@code context}。
  */
 function withWorkspaceContext<T extends object>(request: T): T {
   const context = currentWorkspaceContext()

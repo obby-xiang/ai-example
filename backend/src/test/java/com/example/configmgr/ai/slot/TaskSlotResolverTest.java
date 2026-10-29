@@ -1,9 +1,13 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -205,6 +209,42 @@ class TaskSlotResolverTest {
 		TaskSlots slots = this.resolver.resolve(unsynced, "继续", List.of("导出 CURRENCY"));
 
 		assertThat(slots.defCodes()).as("未同步 ⇒ 允许历史回落").containsExactly("CURRENCY");
+	}
+
+	/**
+	 * 返修：压缩摘要/步数收尾等<b>合成 user 消息</b>不是用户原话，槽位解析（首轮与续跑重算同源）
+	 * 不得把它们当作用户的选择判定 —— 否则摘要里"用户要导出 CURRENCY"会把已取消的勾选复活。
+	 */
+	@Test
+	void syntheticSummaryIsNotTreatedAsUserText() {
+		Message summary = UserMessage.builder()
+			.text("用户要求导出 CURRENCY，筛选 code = CNY")
+			.metadata(Map.of(SyntheticMessages.COMPACTED_FROM, "turn-1"))
+			.build();
+
+		AiContext enriched = this.resolver.enrich(AiContext.empty(), "", List.of(summary));
+		TaskSlots slots = TaskSlots.fromExtra(enriched.getExtra());
+
+		assertThat(slots.defCodes()).as("压缩摘要是系统合成消息，不是用户原话").isEmpty();
+		assertThat(slots.conditions()).isEmpty();
+	}
+
+	/**
+	 * 返修：{@code pageId} 的类型口径与 {@code ContextBuilder#pageSelectedDefs} 统一为
+	 * {@code String.valueOf}（此前一侧 {@code instanceof String}、一侧 {@code String.valueOf}，
+	 * 非字符串形态会让同一份上下文一边判"已同步"、一边判"未同步"）。
+	 */
+	@Test
+	void nonStringPageIdUsesTheSameValueOfRuleAsContextBuilder() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", new StringBuilder("export"));
+		extra.put("selectedDefs", List.of());
+		extra.put("selectionSynced", true);
+		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null, extra);
+
+		TaskSlots slots = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY"));
+
+		assertThat(slots.defCodes()).as("与 ContextBuilder 同一 String.valueOf 口径 ⇒ 已同步空选择").isEmpty();
 	}
 
 	@Test

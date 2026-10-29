@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.gate.ContextFieldGate;
+import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -117,10 +119,37 @@ class ContextBuilderExtraTest {
 
     @Test
     void whitelistMirrorsFrontendContract() {
-        // 与 frontend/src/stores/workspace.ts#buildContext 的 extra 键**逐键对应**（多/少都算契约漂移）
+        // 与 frontend/src/stores/workspace.ts#buildContext 的 extra 键**逐键对应**（多/少都算契约漂移）；
+        // selectionSynced 走 JUDGE_ONLY_EXTRA_KEYS（只判定、不进模型载荷），故不在本表。
         assertThat(new ArrayList<>(ContextBuilder.ALLOWED_EXTRA_KEYS))
-                .containsExactly("pageId", "selectedDefs", "selectionSynced", "importMode", "dataVersion",
-                        "contractVersion", "recentActions");
+                .containsExactly("pageId", "selectedDefs", "importMode", "dataVersion", "contractVersion",
+                        "recentActions");
+        assertThat(ContextBuilder.JUDGE_ONLY_EXTRA_KEYS).containsExactly(ContextBuilder.SELECTION_SYNCED_KEY);
+    }
+
+    /**
+     * 返修：{@code selectionSynced} 是<b>判定用</b>页面事实（决定空勾选是否权威），模型不需要看到它，
+     * 也不该每轮为它多付 token —— 与 {@code uiRegionCount} 同侧：闸门保留、载荷不渲染。
+     */
+    @Test
+    void selectionSyncedSurvivesTheGateButStaysOutOfThePrompt() {
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("selectionSynced", true);
+        extra.put("selectedDefs", List.of());
+
+        assertThat(this.builder.renderExtra(extra)).as("判定用键不进模型载荷").doesNotContain("selectionSynced");
+        String message = this.builder.buildContextMessage(
+                AiContext.of("export", "EXPORT", "SELECT_DEFS", null, extra));
+        assertThat(message).doesNotContain("selectionSynced");
+        assertThat(ContextBuilder.ALLOWED_EXTRA_KEYS).doesNotContain("selectionSynced");
+
+        Map<String, Object> raw = new LinkedHashMap<>();
+        raw.put("selectionSynced", true);
+        AiChatRequest.Context gated = new ContextFieldGate()
+            .sanitize(new AiChatRequest.Context("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE", raw))
+            .context();
+        assertThat(gated.extra()).as("闸门必须保留判定键（否则未水合永远退化成回落）")
+            .containsEntry("selectionSynced", true);
     }
 
     @Test

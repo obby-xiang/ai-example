@@ -26,8 +26,8 @@ import java.util.Map;
  * <li>{@code taskStatus} 只认 {@code ACTIVE/COMPLETED/CANCELLED/FAILED}（未知值降级为 null =
  *     不做终态收窄）；</li>
  * <li>{@code extra} 只留 {@link ContextBuilder#ALLOWED_EXTRA_KEYS}（非白名单键丢弃并计数）
- *     <b>加上</b>标签专用旁路 {@link ContextBuilder#TAG_ONLY_EXTRA_KEYS}（只进披露判定、
- *     不进模型载荷 —— 两条消费面在 {@code ContextBuilder} 内分开，见该常量注释）。</li>
+ *     <b>加上</b>两张旁路表：{@link ContextBuilder#TAG_ONLY_EXTRA_KEYS}（只进披露判定、不进模型载荷）
+ *     与 {@link ContextBuilder#JUDGE_ONLY_EXTRA_KEYS}（只进槽位判定、值只认布尔）。</li>
  * </ul>
  *
  * <p>
@@ -147,6 +147,16 @@ public class ContextFieldGate {
 		for (Map.Entry<String, Object> entry : raw.entrySet()) {
 			if (ContextBuilder.ALLOWED_EXTRA_KEYS.contains(entry.getKey())) {
 				kept.put(entry.getKey(), entry.getValue());
+			}
+			else if (ContextBuilder.JUDGE_ONLY_EXTRA_KEYS.contains(entry.getKey())) {
+				// 只判定、不进模型载荷的页面事实（selectionSynced）：只认布尔值，其它形态按"缺失"
+				// 处理（与旧客户端同形）；它不会出现在 renderExtra 里（不在 ALLOWED_EXTRA_KEYS）。
+				if (entry.getValue() instanceof Boolean flag) {
+					kept.put(entry.getKey(), flag);
+				}
+				else {
+					dropped++;
+				}
 			}
 			else if (ContextBuilder.TAG_ONLY_EXTRA_KEYS.contains(entry.getKey())) {
 				// 标签专用旁路（缺口 0）：这些键不进模型载荷（ContextBuilder 的载荷白名单不含它们），

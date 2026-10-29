@@ -48,6 +48,15 @@ class SystemPromptRuleConflictUnificationTest {
 	}
 
 	@Test
+	void navigationFailureAlsoKeepsTheRule29CorrectionException() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("规则 24 的导航失败即停仍然存在").contains("导航失败即停");
+		assertThat(prompt).as("导航同为页面级动作 ⇒ 第 29 条窄例外同样适用")
+			.contains("第 29 条窄例外同样适用");
+	}
+
+	@Test
 	void completedTaskAloneIsNotDownloadOrEditorAuthorization() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
