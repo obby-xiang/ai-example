@@ -268,3 +268,89 @@ npx vitest run tests/ai-tenant-identity-race-recovery.spec.ts -t "连续快速�
 2. **附件闸无单点**：`FormRenderer` 上传路径属组件行为，本轮按要求只新增专用 race/recovery 测试文件；如需回归锁，建议在 Task 5 夹具迁移时补一条 FormRenderer 用例。
 3. **I-3（63 个旧套件依赖本地造号）仍由测试夹具迁移组处理**：本轮未触碰这些文件；工作区已出现并行组的 `ai-identity-fixture.ts` 与 `a11-batch2-display.spec.ts` 改动，未纳入本提交。
 4. 快速切换同时切到"无指针的新身份"时仍各自发号（`ensureSession` 的令牌/身份守卫已覆盖），最终只保留最后一次切换的号；本轮单点覆盖的是"指针恢复分支"这条新竞态路径。
+
+---
+
+# Task 4 返修 round 3（复评 1 Important + Minor 1/2/3/4/5/6）
+
+- 实现提交：`edba399f`（frontend/src 3 files + 专用测试 1 file，+126/−24）
+- 复评依据：`task-4-rereview2.md`
+- 未推送；未触碰后端与测试夹具迁移组的文件（工作区中大量 `frontend/tests/*` 改动与 `ai-identity-fixture.ts` 为并行组产物，未纳入本提交）。
+
+## Important：竞态放弃分支归还锁
+
+`enterIdentity` 指针恢复的三道再校验失败时：
+
+```
+if (verdict !== 'occupied') {
+  releaseSessionLock()   // 释放的正是本次刚探到的那把锁
+}
+return
+```
+
+- 不用 `releaseOwnLock(pointer)`：它按**当前**身份重算锁名，身份已切走时名字不匹配 ⇒ 不释放。
+- 新增只读探针 `heldSessionLockName()`（store 导出）供账本断言。
+
+红证据（临时短路该归还分支）：
+
+```
+npx vitest run tests/ai-tenant-identity-race-recovery.spec.ts -t "连续快速切换"
+# FAIL: expected 'ai-session-8:81:9002' not to be 'ai-session-8:81:9002'
+```
+
+恢复归还后同一命令 `✓`。用例同时断言：最终身份/会话号/会话归属/身份头全是 A；B 的指针未被改写；
+账本不得指向 B 的锁，且只能是 A 的锁或空 —— 覆盖"当前身份与 heldLock 分叉"。
+
+## Minor 1/2：发号失败态，正常窗口不闪横幅
+
+- store 新增 `sessionIssueFailed`：仅 `ensureSession` 的 catch 置位；发号成功、`ensureSession` 命中已有号、
+  指针恢复、接管会话时清除；`adoptFreshSession`（换身份/换会话）也清零。
+- 成功时若单槽通知仍是 `ai.notice.sessionIssueFailed`，一并 `clearNotice`（重试后红字不残留）。
+- 面板横幅判据改为 `directoryStatus==='unavailable' || sessionIssueFailed` —— 不再用
+  `sessionReady=false`（发号中）当失败。
+- 单点「发号失败 → 可见重试 → 恢复」新增断言：失败后 `sessionIssueFailed===true`；重试成功
+  `sessionReady===true`、`sessionIssueFailed===false`、`noticeCode !== sessionIssueFailed`。
+
+## Minor 3：仅未就绪时不再重载目录
+
+`retryIdentitySession()`：只有 `directoryStatus !== 'ready'` 才 `retryLoadTenantDirectory()`；
+目录已就绪直接 `ensureSession()`。单点断言重试后 `api.tenantUsers` 仍为 1 次、`createSession` 第 3 次成功。
+
+## Minor 4：附件上传使用最新会话号
+
+`FormRenderer` 的上传闸改为返回 `ensureSession()` 的**最新号**，并以
+`uploadFormAttachment(file, { ...uploadContext, sessionId })` 传入；`uploadFormAttachment` 的
+入参/返回契约未改（`sessionId` 仍是可选字段）。
+
+## Minor 5：指针恢复补所有权绑定
+
+指针恢复分支在 `tabOwnership === 'unknown'`（启动期）时，先调用 `ensureTabOwnership()`
+（打开 BroadcastChannel、绑定 pagehide/pageshow）再记 owner。新增单点：未知角色下切到有指针的
+身份，断言 channel 已打开、`tabOwnership==='owner'`、`heldSessionLockName()` 指向恢复会话的锁。
+
+## Minor 6：目录错误本地化兜底
+
+`loadTenantDirectoryOnce` 的 catch：`ApiError` 用其已本地化的 `message`，其它异常一律
+`translate('ai.notice.directoryFailed')`。新增单点：裸 `Error('boom raw stack text')` 时
+`directoryError` 等于本地化文案且不含原文。
+
+## 测试摘要（逐条精确 `-t`）
+
+| 用例 | 命令 | 结果 |
+| --- | --- | --- |
+| 连续快速切换 + 锁账本（Important） | `tests/ai-tenant-identity-race-recovery.spec.ts` / `连续快速切换` | 短路归还分支 FAIL（账本指向 B 的锁）→ 修复后 ✓ |
+| 发号失败→重试→恢复（Minor 1/2/3） | 同上 / `发号失败 → 可见重试` | ✓ |
+| 指针恢复补所有权绑定（Minor 5） | 同上 / `启动期 unknown 角色的指针恢复` | ✓ |
+| 目录错误本地化兜底（Minor 6） | 同上 / `目录失败详情使用本地化兜底` | ✓ |
+
+`git diff --check` 退出码 0。`npx vue-tsc --noEmit` 当前被并行夹具迁移组的**未完成**文件阻塞，
+仅两条错误且都不在本组文件：
+`tests/aie2e-refresh-upload-region.spec.ts(17,1) 'installIdentityFixture' is declared but never read`、
+`tests/parts-double-write.spec.ts(13,10) 'MIRROR_PREFIX' is declared but never read`；本组 src/测试无类型错误。
+
+## 顾虑
+
+1. 附件"最新号回填"是组件行为，未做 FormRenderer 单点（避免与夹具迁移组冲突）；store 侧闸语义已由既有用例覆盖。
+2. 横幅三个 computed 仍无 UI 级断言（store 状态已锁）；组件挂载断言留待夹具迁移后统一补。
+3. `vue-tsc` 全量类型检查的红来自并行组在飞的测试文件（上述两条），与本提交无关；合并前需那组收口。
+4. 指针恢复在 `unknown` 角色下补调用 `ensureTabOwnership()` 后立即置 owner；若探活发现 duplicate，仍由其后继分支按其既有逻辑收口（本次未改该语义）。
