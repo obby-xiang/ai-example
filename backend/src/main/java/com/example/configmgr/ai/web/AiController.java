@@ -61,6 +61,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.util.StringUtils;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -852,17 +853,14 @@ public class AiController {
 	 * 差量/孤儿过滤口径不变；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
 	 *
 	 * <p>
-	 * <b>M08 探测</b>：{@code ?probe=1} 走同一条路径的<b>轻量 JSON 探测</b>（见 {@link #probe}）——
-	 * 只读状态，不建订阅、不回放、不续期。前端断流后"先探一眼再说"因此不再产生第二条真实订阅。
+	 * <b>M08 探测</b>：{@code ?probe=1} <b>不</b>走本方法 —— 它由同路径的
+	 * {@link #probeEvents} 承接（本方法的 {@code params = "probe!=1"} 明确排除它）。
+	 * 两个 mapping 刻意分开：正式通道只产 {@code text/event-stream}、探测只产 {@code application/json}，
+	 * 于是"声明 JSON Accept 但没带 probe=1"的请求拿 <b>406</b> 而不是一条真实订阅（订阅 + 回放 + 续期）。
 	 */
-	@GetMapping(value = "/events/{runId}",
-			produces = { MediaType.TEXT_EVENT_STREAM_VALUE, MediaType.APPLICATION_JSON_VALUE })
+	@GetMapping(value = "/events/{runId}", params = "probe!=1", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 	public ResponseEntity<?> events(@PathVariable String runId,
-			@RequestParam(required = false) Long lastSeq,
-			@RequestParam(name = "probe", required = false, defaultValue = "false") boolean probe) {
-		if (probe) {
-			return this.probe(runId);
-		}
+			@RequestParam(required = false) Long lastSeq) {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {
 			// ===== AR-06：已 start、快照未建 =====
@@ -939,6 +937,11 @@ public class AiController {
 	 * 照常建 {@link SseChatEmitter} 订阅、回放整段归档、{@code touchActiveRun} 续期 ——
 	 * 一次只想知道状态的探测，产生了一次真实订阅（真机 trace：5 条 EventSource + 5 条 probe fetch）。
 	 *
+	 * <p><b>独立 mapping</b>（{@code params = "probe=1"}、只产 JSON）：正式通道的
+	 * {@link #events} 用 {@code params = "probe!=1"} 排除探测，于是两条通道在协议层就不可互串 ——
+	 * {@code probe=1 + Accept: text/event-stream} 与 {@code 无 probe + Accept: application/json}
+	 * 都是 <b>406</b>，不会"顺手"进入一条真实订阅。
+	 *
 	 * <p>本方法因此<b>只做三件只读的事</b>：读快照、按 AR-06 复用 {@link #preparingOrUnknown}
 	 * 判"准备中/不存在/降级"、读归档末号。响应形态：
 	 * <ul>
@@ -953,6 +956,29 @@ public class AiController {
 	 * {@code completeSubscriptions}、或 {@code touchActiveRun}：探测不是"有人在看"，不该延长保留期、
 	 * 也不该抢占用正式连接的退避时间线。
 	 */
+	@GetMapping(value = "/events/{runId}", params = "probe=1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<?> probeEvents(@PathVariable String runId) {
+		return this.probe(runId);
+	}
+
+	/**
+	 * 交叉产型的<b>统一 406 出口</b>：{@code /events/{runId}} 只有两种表示（正式 SSE / 探测 JSON）。
+	 *
+	 * <p>两条更具体的 mapping 都带产型条件，因此"只接受 JSON 但没带 {@code probe=1}""带
+	 * {@code probe=1} 却只接受 {@code text/event-stream}"这类请求会把它们都排除掉；Spring 自己的
+	 * no-match 路径实测回 <b>400</b>（参数不满足的判定先于产型协商），而 HTTP 语义要求
+	 * <b>406</b>。本映射不带任何条件，专接这些"两种表示都不接受"的请求：<b>只</b>抛 406，
+	 * 绝不建订阅、不回放、不续期。
+	 *
+	 * <p>正常请求不会落到这里：带 {@code params} 条件的 mapping 在比较时更具体（同一路径下优先）。
+	 */
+	@GetMapping(value = "/events/{runId}")
+	public ResponseEntity<?> eventsNotAcceptable() throws HttpMediaTypeNotAcceptableException {
+		throw new HttpMediaTypeNotAcceptableException(
+				java.util.List.of(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON));
+	}
+
+	/** 探测的响应体构造（只读；见 {@link #probeEvents} 的口径）。 */
 	private ResponseEntity<?> probe(String runId) {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {

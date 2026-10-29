@@ -199,6 +199,30 @@ class AiControllerEventsProbeTest {
 		assertNoSubscriptionSideEffects();
 	}
 
+	@Test
+	void probeOnlyAcceptsJsonSoAnSseAcceptCannotFallIntoTheProbe() throws Exception {
+		// I2：探测 mapping 只产 JSON —— 声明 SSE Accept 的探测请求必须 406，不得被当成"要开流"
+		when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.RUNNING));
+
+		this.mvc.perform(get("/api/ai/events/{runId}", RUN_ID).param("probe", "1")
+			.accept(MediaType.TEXT_EVENT_STREAM))
+			.andExpect(status().isNotAcceptable());
+
+		assertNoSubscriptionSideEffects();
+	}
+
+	@Test
+	void jsonAcceptWithoutTheProbeFlagCannotEnterTheFormalStream() throws Exception {
+		// I2：正式 mapping 只产 SSE —— 不带 probe=1 却声明 JSON Accept 必须 406，
+		// 否则一次 JSON 探测就能进正式订阅（建订阅 + 回放 + touchActiveRun 续期）
+		when(this.store.get(RUN_ID)).thenReturn(snapshot(RunSnapshot.RUNNING));
+
+		this.mvc.perform(get("/api/ai/events/{runId}", RUN_ID).accept(MediaType.APPLICATION_JSON))
+			.andExpect(status().isNotAcceptable());
+
+		assertNoSubscriptionSideEffects();
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	/** 零副作用：不订阅、不回放、不续期（探测只读状态）。 */

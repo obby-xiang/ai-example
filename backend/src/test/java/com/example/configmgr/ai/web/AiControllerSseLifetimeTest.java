@@ -87,7 +87,7 @@ class AiControllerSseLifetimeTest {
 		when(this.runRegistry.of("r-reattach")).thenReturn(this.out);
 		when(this.out.replayAndAttach(any(SseEmitter.class), any(), any(Boolean.class))).thenReturn(0);
 
-		ResponseEntity<?> response = this.controller.events("r-reattach", null, false);
+		ResponseEntity<?> response = this.controller.events("r-reattach", null);
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 		assertThat(((SseEmitter) response.getBody()).getTimeout()).isEqualTo(-1L);

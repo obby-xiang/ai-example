@@ -175,9 +175,11 @@ describe('reattach 挂起快照恢复', () => {
     })
     FakeEventSource.instances[0]?.fireOpen()
     FakeEventSource.instances[0]?.onerror?.()
-    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
+    // C1（M08）：重连通告只随真实重连发出 —— 排期在断流当刻、通告在到点
+    expect(onReconnect).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1_000)
+    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
     expect(FakeEventSource.instances).toHaveLength(2)
     expect(FakeEventSource.instances[1]?.url).toBe('/api/ai/events/run-resumed?lastSeq=4')
     controller.abort()
@@ -217,9 +219,11 @@ describe('reattach 挂起快照恢复', () => {
       type: 'delta', runId: 'run-progress', messageId: 'm1', seg: 0, text: '继续执行', seq: 5
     }) })
     source?.onerror?.()
-    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
+    // C1（M08）：通告在到点（确实要开新连接）时发，不在断流当刻预告
+    expect(onReconnect).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1_000)
+    expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
     expect(FakeEventSource.instances).toHaveLength(2)
     controller.abort()
     const info = await pending

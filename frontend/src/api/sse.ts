@@ -789,6 +789,11 @@ export async function reattach(
     let connectionEstablished = false
     /** 本次 EventSource 连接是否已做过 202 准备中探测（每次 open 重置，避免重复探测）。 */
     let probedThisConnection = false
+    /**
+     * 连接世代（I1）：每次 `open()` 递增。探测结果只对"发起它的那一代连接"有效 ——
+     * 上一代的慢 202 不得替下一代（或退役后的空窗）做决定。
+     */
+    let generation = 0
 
     const clearIdle = (): void => {
       if (idleTimer !== null) {
@@ -906,20 +911,26 @@ export async function reattach(
       }
       attempts += 1
       state.reconnects = attempts
-      const delay = reconnectDelayMs(attempts, random)
-      handlers.onReconnect?.(attempts, delay)
+      const attempt = attempts
+      const delay = reconnectDelayMs(attempt, random)
       clearRetry()
       retryTimer = setTimeout(() => {
         retryTimer = null
-        if (!settled && !options.signal?.aborted) {
-          open()
+        if (settled || options.signal?.aborted) {
+          return
         }
+        // C1：`onReconnect` 是**用户通告**，只随"确实要开新连接"发出 ——
+        // 排期在断流当刻就已开始，但探测命中 202/404 会把排期连同这句通告一起撤销，
+        // 用户因此不会看到一条不会发生的重试（旧行为在 arm 时就通告，notice 会残留）。
+        handlers.onReconnect?.(attempt, delay)
+        open()
       }, delay)
     }
 
     const open = (): void => {
       // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
       const since = state.lastSeq ?? options.lastSeq
+      generation += 1
       probedThisConnection = false
       source = new EventSource(SSE_PATHS.events(runId, since ?? undefined))
       // R-03：看门狗必须在 onopen 之前武装（构造是同步的，首个事件只会在此后的任务里派发，
@@ -956,8 +967,8 @@ export async function reattach(
         //
         // M08：探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
         // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
-        // 都不影响 1/2/4/8s 时间线，③ 探测结果过期（退避已开新连接）时一律丢弃 ——
-        // 否则一条慢探测会关掉刚建立的新连接，或把"准备中"误判到别的连接上。
+        // 都不影响 1/2/4/8s 时间线，③ 结果只在**本世代、本尝试**下才可应用（I1）——
+        // 否则一条慢探测会关掉刚建立的新连接，或把上一代的"准备中"误判到下一代头上。
         if (!connectionEstablished && !probedThisConnection) {
           probedThisConnection = true
           scheduleReconnect('重挂连接中断')
@@ -965,9 +976,11 @@ export async function reattach(
             // 重挂额度已耗尽（或已收尾）：不再发探测 —— 一个已收尾的连接不该留下在途请求与计时器
             return
           }
+          const probeGeneration = generation
+          const probeAttempt = attempts
           void probeReattach(runId).then((probe) => {
-            if (settled || source !== null) {
-              // 已收尾（其他路径 settle）或退避已开新连接：本探测结果过期
+            if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
+              // 已收尾 / 世代已换代 / 尝试已推进：本探测结果过期（不得据它收尾或改判）
               return
             }
             if (probe.preparing) {
