@@ -211,13 +211,15 @@
     <div class="flex-1 relative min-h-0 flex flex-col">
       <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条。
            R-165 S5a 项 8：滚动条细化 —— 6px 圆角半透明（demo 14a 口径），任意变体类写在模板类串上
-           （禁改 tailwind.config.js、禁手写 CSS）。 -->
+           （禁改 tailwind.config.js、禁手写 CSS）。
+           2026-10-29 返修：`[overflow-anchor:none]` 关掉浏览器原生滚动锚定 —— 自定义 stick-to-bottom
+           已经按 measured size 自己补偿，两者同时生效会各补一次（滚动来回抖 / 视觉闪）。 -->
       <div
         ref="msgWrapRef"
         role="log"
         :aria-label="t('ai.panel.logAria')"
         :aria-busy="logBusy ? 'true' : 'false'"
-        class="flex-1 overflow-y-auto overflow-x-hidden p-3"
+        class="flex-1 overflow-y-auto overflow-x-hidden p-3 [overflow-anchor:none]"
         :class="SCROLLBAR_CLASS"
         @scroll.passive="onMsgScroll"
         @wheel.passive="markUserScrollIntent"
@@ -1864,8 +1866,8 @@ const HIDE_BACK_TO_BOTTOM_PX = 32
  *
  * 场景：pinBottom 把 scrollTop 钉到新底部之后，浏览器还会为「内容长高 / 钉底本身」补派
  * scroll 事件 —— 那一刻读到的离底距离可能已经是下一帧内容的（> 32px），跟随闸被误翻成
- * false，于是自动跟随"自己把自己停了"，下一帧起 `scrollBottom()` 又因 followBottom=false
- * 整段跳过（用户看到的断续 / 拖回）。
+ * false，于是自动跟随"自己把自己停了"，后续内容增长又因 followBottom=false 整段跳过
+ * （用户看到的断续 / 拖回）。
  *
  * 口径：**钉底后 150ms 内、且没有用户滚动意图时，scroll 事件只允许"恢复"跟随，不允许"解除"**。
  * 用户真滚动由 wheel / touch / 键盘的意图标记（{@link markUserScrollIntent}）识别 ——
@@ -3662,7 +3664,8 @@ function isBlockExpanded(block: Block): boolean {
 }
 
 /**
- * 本轮是否仍未终态（2026-10-29 ToC 呈现减负批：判据由「只认 `loading`」放宽到「本轮未终态」）。
+ * 本轮是否仍未终态（2026-10-29 ToC 呈现减负批：判据由「只认 `loading`」放宽到「本轮未终态」；
+ * 同日「导出整屏闪」返修：恢复期不再算未终态）。
  *
  * <p>为什么不能只看 `loading`：B1「挂起即断」之后，等人决策的一轮是 `loading=false && suspended=true`
  * （`runPhase='parked'`）；点批准的那一刻段立刻切只读，而此时连接可能还没建起来 ——
@@ -3672,9 +3675,16 @@ function isBlockExpanded(block: Block): boolean {
  * `loadHistory` / `retryRestoreSnapshot` / `returnToActiveRun` 在 `restoringRecovery` 期间
  * 就**同步**把镜像消息落屏 —— 刷新/重新载入时，末条消息里的已决只读卡会先被强制展开、
  * HTTP 回来再折叠，正是本批要消掉的那类闪动。批准瞬间的闪动另有**决策在途 / GF 提交在途**
- * 两条证据覆盖，不依赖 `recovering`。故终态判据 = 仍在收流 ∨ 挂起等人，再加两条在途证据：
+ * 两条证据覆盖，不依赖 `recovering`。
+ *
+ * <p><b>恢复期同样按「不展开」处理</b>：只用 `loading || suspended` 仍有一条漏网 —— 恢复在途时
+ * store 也会把 `loading` 置真（`resumeSnapshotStream` 先置位再拉快照）。那时卡面读到的仍是
+ * 上一份镜像，展开它就是"对过去的现场做实时渲染"，HTTP 回来照样要折一次。故 `loading` 一支
+ * 显式排除 `restoringRecovery`；恢复结束后真的在收流（`loading && !restoringRecovery`）才展开。
+ *
+ * 终态判据 = 仍在收流 ∨ 挂起等人，再加两条在途证据：
  * <ol>
- * <li>`ai.loading || ai.suspended`（收流中 / 挂起等人 —— 不含恢复中）；</li>
+ * <li>`ai.suspended || (ai.loading && !ai.restoringRecovery)`（挂起等人 / 收流中 —— 不含恢复期）；</li>
  * <li>该卡已有**决策在途**（`gateSubmissions` 有值：点过批准/拒绝、结局帧还没到）；</li>
  * <li>该卡是生成式表单且**提交在途**（结局帧未到的只读锁定态，见 `readOnlyLike`）。</li>
  * </ol>
@@ -3685,7 +3695,7 @@ function turnStillOpen(block: Block): boolean {
   if (last === undefined || last.id !== block.messageId) {
     return false
   }
-  if (ai.loading || ai.suspended) {
+  if (ai.suspended || (ai.loading && !ai.restoringRecovery)) {
     return true
   }
   return block.parts.some((part) => part.kind === 'tool'
@@ -3714,11 +3724,17 @@ function toggleBlock(block: Block): void {
 }
 
 /**
- * 批次 7A：消息 / 块渲染边界。
+ * 批次 7A → 2026-10-29 返修（导出过程整屏闪）：消息 / 块渲染边界。
  *
- * `v-memo` 的可见性依赖必须覆盖模板真实读取的值：消息自身字段、逐块展开态、消息级动作条件、
- * 局部态（复制/反馈/折叠/淡出）、以及卡片会读的 store 切片。输入框 `inputText` 是组件本地态，
- * 不在这些依赖里 —— 打字只重渲 composer，不重渲消息列表。
+ * `v-memo` 的依赖必须**只覆盖本消息模板真实读取的值**。旧实现把 `ai.loading` / `ai.runPhase` /
+ * `ai.activeRunId` / 末条消息 id 这些**全局**现场并进了每一条消息行：任何一次收流开始/结束、
+ * 挂起、恢复或换轮都会让**整列**消息行一起失效（长会话 = 全量重渲正文 + 卡片派生重算），
+ * 在「导出CNY货币字典」这类一轮里密集出帧的场景表现为整屏闪一下。
+ *
+ * 现行口径：全局现场只以**本消息的判定结果**入场（`isBreathing` / `waitingForAction` /
+ * `isBlockExpanded` 等）—— 结果没变 ⇒ 本行不失效（历史消息一格不动）；结果变了 ⇒ 本行照常
+ * 更新（末条消息的呼吸点、挂起等待、卡展开态、继续/重试入口都在）。
+ * 输入框 `inputText` 是组件本地态，不在这些依赖里 —— 打字只重渲 composer，不重渲消息列表。
  */
 function partMemo(part: MessagePart, block: Block): unknown[] {
   const deps: unknown[] = [
@@ -3727,9 +3743,9 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     locale.value,
     block.id,
     block.kind,
-    isBlockExpanded(block),
-    ai.loading,
-    ai.messages[ai.messages.length - 1]?.id ?? ''
+    // 展开态是块内**唯一**读全局现场（loading / suspended / 决策在途 / 恢复期）的判定结果：
+    // 结果入 memo，全局现场本身不入 —— 否则历史块跟着每一次收流翻转一起失效。
+    isBlockExpanded(block)
   ]
   if (part.kind === 'reasoning') {
     deps.push(
@@ -3780,8 +3796,6 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.returnedChars,
     part.truncatedReason,
     readOnlyLike(part),
-    // 展开时序判据读 `loading || suspended`：memo 必须跟着读这两个现场（parked→idle 才重渲）
-    ai.suspended,
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
@@ -3824,7 +3838,6 @@ function blockMemo(block: Block, message: ChatMessage): unknown[] {
 }
 
 function messageMemo(message: ChatMessage, index: number): unknown[] {
-  const lastId = ai.messages[ai.messages.length - 1]?.id ?? ''
   const deps: unknown[] = [
     message.id,
     message.role,
@@ -3838,6 +3851,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     message.timestamp,
     message.pendingCall,
     message.pendingCall?.status,
+    message.recoveryGap,
     message.errorCard,
     message.errorCard?.variant,
     message.errorCard?.title,
@@ -3851,7 +3865,10 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     locale.value,
     syntheticOf(message),
     unconfirmedOf(message),
+    // 元信息行 / 恢复入口的**判定结果**（各自已经把 loading / runPhase / 末条身份算进去了）。
+    // 全局现场本身不入 memo：否则历史行跟着每一次收流翻转一起失效（整屏闪根因）。
     showMetaRow(message),
+    showTimestamp(message),
     waitingForAction(message),
     isBreathing(message),
     isFading(message),
@@ -3862,12 +3879,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
     userMsgOverflowed.value.has(message.id),
     userMsgExpanded.value.has(message.id),
-    degradeNotices.value[degradeNoticeKey(message.id)] ?? null,
-    ai.loading,
-    lastId,
-    ai.runPhase,
-    ai.lastRoundOutcome,
-    ai.activeRunId
+    degradeNotices.value[degradeNoticeKey(message.id)] ?? null
   ]
   for (const block of blocksOf(message)) {
     deps.push(block.id, block.kind, isBlockExpanded(block))
@@ -4501,12 +4513,11 @@ function probe(): void {
 
 /**
  * R-161：统一程序化钉底入口 —— 设 scrollTop=scrollHeight + 记落点 pinGuardTop + 置
- * followBottom=true。一切钉底（scrollBottom / 发送 force / 回到底部 / RO 内容重钉）必经
- * 此口；渲染滞后（watch 先于 DOM 补丁触发）导致的「钉到旧底」由 nextTick 后的二次钉底
- * （批 D · D2①）与 RO 内容重钉（D2②）双重兜底。
+ * followBottom=true。一切钉底（挂载首钉 / 发送 force / 回到底部 / 统一调度的尺寸补偿）必经
+ * 此口；调度侧的重复触发（DOM 补丁后复测 + RO）在这一层按「是否已在底部」去重。
  */
 function pinBottomTo(wrap: HTMLElement, target: number): void {
-  // 批次 7A：watch 的二次钉底与 RO 内容重钉可能落在同一帧。已在底部时直接返回，
+  // 批次 7A：同一帧里的多个钉底信号可能都走到这里。已在底部时直接返回，
   // 不再重复写 scrollTop / 开静默期 —— 否则每帧多出一次「写-读」布局回合。
   if (bottomDist(wrap) <= 1) {
     followBottom.value = true
@@ -4534,8 +4545,11 @@ function pinBottom(): void {
   pinBottomTo(wrap, wrap.scrollHeight)
 }
 
+/**
+ * 挂载首钉：尊重跟随开关（用户上滑暂停后，任何自动路径都不把视图拽回底部）。
+ * 流式 / 卡片增长的跟随走 {@link scheduleStickToBottom} 的尺寸判定，不在这里。
+ */
 function scrollBottom(force = false): void {
-  // R-154 #5：自动钉底须尊重跟随开关 —— 用户上滑暂停后，帧增量的滚动指纹不得把视图拽回底部
   if (!force && !followBottom.value) {
     return
   }
@@ -5028,8 +5042,11 @@ function onFormDraft(values: Record<string, unknown>): void {
 // 末段的 kind/文本长度/段状态。内容增量都体现在"末段文本长度"上，工具帧的状态变化体现在"末段 status"。
 // 收口修 F8（红队 O-2，注释级订正）：末项**仍读旧投影** `last.pendingCall.status` —— 挂起段的
 // requiresAction 翻转/收敛只改派生投影、未必改末段自身 status，故保留投影读点兜底触发跟随；
-// 原注释「无需读旧投影（content/toolRuns）即可触发跟随」与实现不符，按实现残留如实对齐（读点属
-// D2 明确保留面，逻辑不动）。
+// 原注释「无需读旧投影（content/toolRuns）即可触发跟随」与实现不符，按实现残留如实对齐。
+//
+// 2026-10-29 返修（导出过程整屏闪）：本指纹**不再直接滚**，只做两件事 —— 标脏用户长消息的 measure，
+// 以及把"内容增量"作为尺寸变化的证据交给统一调度。状态位（tailStatus / pendingCall.status）留在
+// 指纹里只为"再测一次"，量出来尺寸没变就不滚。
 watch(
   () => {
     const last = ai.messages[ai.messages.length - 1]
@@ -5039,7 +5056,16 @@ watch(
     return `${ai.messages.length}|${last ? last.parts.length : 0}|${tail ? tail.kind : ''}|${tailText}|${tailStatus}|${last && last.pendingCall ? last.pendingCall.status : ''}`
   },
   async () => {
-    scrollBottom()
+    // 内容增量证据：消息数 / 末消息段数 / 末段 kind / 末段正文变长 —— 文本变长必然改尺寸，
+    // 只是测量要等 DOM 补丁落地。状态位（tool status / pendingCall.status）不产生这条证据。
+    const shape = readStickShape()
+    if (shape.count !== stickShape.count
+      || shape.parts !== stickShape.parts
+      || shape.kind !== stickShape.kind
+      || shape.text > stickShape.text) {
+      contentChanged = true
+    }
+    stickShape = shape
     // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 只把**末条用户消息**标脏，
     // 不再逐 token 扫全部用户正文；助手流式 token 不产生任何 measure。
     const last = ai.messages[ai.messages.length - 1]
@@ -5047,16 +5073,90 @@ watch(
       markUserMsgDirty(last.id)
     }
     // 批 D · D2①：watch 回调跑在**组件更新之前**（flush:'pre'），此时读到的 scrollHeight 还是
-    // 旧内容的高度 —— 钉底会停在旧底，等 DOM 补丁把内容垫高后视图就离底一截（长段补发尤其明显）。
-    // 因此在同一帧的 DOM 补丁之后再钉一次（跟随态下才钉，尊重用户上滑）。
-    // 批次 7A：第二次钉底与 RO 已在 pinBottomTo 里按「是否已在底部」去重。
+    // 旧内容的高度。统一调度在 DOM 补丁之后再测量、再钉底（跟随态下才钉，尊重用户上滑）。
     await nextTick()
     if (dirtyUserMsgIds.size > 0) {
       measureUserMsgOverflow()
     }
-    scrollBottom()
+    scheduleStickToBottom()
   }
 )
+
+/**
+ * 2026-10-29 返修（导出过程整屏闪）：stick-to-bottom 的唯一入口。
+ *
+ * <h2>业界口径</h2>
+ * 主流实现（`use-stick-to-bottom` 一类库 / Slack·ChatGPT 的做法）= **尺寸驱动的跟随**：
+ * <ol>
+ * <li>"是否贴底"由用户的滚动事件维护（这里 = {@link followBottom}，滞回阈值见
+ *     {@link FOLLOW_THRESHOLD_PX}）；</li>
+ * <li>只有**内容 measured size 变化**（正文增量 / 卡片展开 / 确认门与表单插入）才把视图钉回底部；</li>
+ * <li>用户上翻即释放，绝不在"状态变化"时把视线拽回去；</li>
+ * <li>同一帧的多个信号（DOM 补丁后的复测 + ResizeObserver 回调）合并成一次测量、最多一次写入；</li>
+ * <li>自己接管滚动时关掉浏览器原生锚定（模板上的 `[overflow-anchor:none]`），否则两边各补一次。</li>
+ * </ol>
+ * 旧实现把钉底直接挂在滚动指纹上（含尾部状态），且 watch 与 RO 各钉一次 ⇒ 一次内容变化最多写
+ * 两次 scrollTop，叠加原生锚定就是"整屏闪 / 来回跳"。
+ */
+/** 内容层最近一次测得的 scrollHeight；`null` = 还没测到（jsdom 无布局时恒 0）。 */
+let lastMeasuredScrollHeight: number | null = null
+/** 滚动指纹里的内容形态（消息数 / 末消息段数 / 末段 kind / 末段正文长度）。 */
+let stickShape = readStickShape()
+/** 本帧的内容增量证据（文本变长 ⇒ 尺寸必然变，测量要等 DOM 补丁）。 */
+let contentChanged = false
+/** 本帧的内容层尺寸变化证据（RO 回调）。 */
+let contentResized = false
+let stickCheckScheduled = false
+
+/** 当前内容形态（与滚动指纹同源口径）—— 基线必须等于**当前**现场，否则第一帧就会被误判成"变过"。 */
+function readStickShape(): { count: number; parts: number; kind: string; text: number } {
+  const last = ai.messages[ai.messages.length - 1]
+  const tail = last ? last.parts[last.parts.length - 1] : undefined
+  return {
+    count: ai.messages.length,
+    parts: last ? last.parts.length : 0,
+    kind: tail ? tail.kind : '',
+    text: tail && (tail.kind === 'text' || tail.kind === 'reasoning') ? tail.text.length : 0
+  }
+}
+
+/** 重建基线（挂载 / 展开 / 收起）：不把"未知"当成 0 参与比较。 */
+function resetStickBaseline(): void {
+  const wrap = msgWrapRef.value
+  lastMeasuredScrollHeight = wrap !== null && wrap.scrollHeight > 0 ? wrap.scrollHeight : null
+  stickShape = readStickShape()
+  contentChanged = false
+  contentResized = false
+}
+
+function scheduleStickToBottom(): void {
+  if (stickCheckScheduled) {
+    return
+  }
+  stickCheckScheduled = true
+  void nextTick(() => {
+    stickCheckScheduled = false
+    stickToBottomIfSized()
+  })
+}
+
+function stickToBottomIfSized(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    return
+  }
+  const height = wrap.scrollHeight
+  const grew = lastMeasuredScrollHeight !== null && height > lastMeasuredScrollHeight
+  const sized = contentChanged || contentResized || grew
+  lastMeasuredScrollHeight = height
+  contentChanged = false
+  contentResized = false
+  // 状态变但尺寸没变 ⇒ 不滚；用户上翻（followBottom=false）⇒ 不拉回。
+  if (!sized || !followBottom.value) {
+    return
+  }
+  pinBottomTo(wrap, height)
+}
 
 /**
  * 批次 7A：消息视口观察器 / 横滚捕获监听随 `ai.expanded` 迁移。
@@ -5067,7 +5167,6 @@ watch(
  */
 let msgResizeObserver: ResizeObserver | null = null
 let msgScrollBound: HTMLElement | null = null
-let lastMsgScrollHeight = 0
 
 function detachMessageViewObservers(): void {
   msgResizeObserver?.disconnect()
@@ -5079,7 +5178,9 @@ function detachMessageViewObservers(): void {
   mermaidObserver?.disconnect()
   mermaidObserver = null
   mermaidPending.clear()
-  lastMsgScrollHeight = 0
+  lastMeasuredScrollHeight = null
+  contentChanged = false
+  contentResized = false
 }
 
 function attachMessageViewObservers(): void {
@@ -5087,9 +5188,9 @@ function attachMessageViewObservers(): void {
   if (!wrap) {
     return
   }
-  lastMsgScrollHeight = wrap.scrollHeight
+  resetStickBaseline()
   if (typeof ResizeObserver !== 'undefined') {
-    msgResizeObserver = new ResizeObserver(onMsgWrapResized)
+    msgResizeObserver = new ResizeObserver(onContentResized)
     msgResizeObserver.observe(msgContentRef.value ?? wrap)
   }
   wrap.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })
@@ -5107,29 +5208,23 @@ watch(() => ai.expanded, async (expanded) => {
   measureUserMsgOverflow()
   // R-161：容器自身尺寸变化导致的相对底部漂移，统一走 pinBottom()。
   pinBottom()
+  resetStickBaseline()
 })
 
 /**
- * R-161（RC-1/2 修复）→ 批 D · D2②：RO 内容重钉底。
+ * R-161（RC-1/2 修复）→ 批 D · D2② → 2026-10-29 返修：RO 只**上报**尺寸变化。
  *
  * 「只增高度、不进滚动指纹」的内容插入（确认门 / 生成式表单 / 工具卡 / 折叠展开）由
- * ResizeObserver 兜底：**内容层**（{@link msgContentRef}）长高且处于跟随态 ⇒ pinBottom()；
- * 高度减小的回调不动作。
+ * ResizeObserver 兜底：观测**内容层**（{@link msgContentRef}）—— 滚动容器
+ * （{@link msgWrapRef}）的盒子由 flex 布局定死，内容长高只改它的 scrollHeight、不改它的 box，
+ * 观测它对"内容增长"零触发。
  *
- * 观测目标改内容层的原因：滚动容器（{@link msgWrapRef}）的盒子由 flex 布局定死，内容在
- * `overflow-y-auto` 里长高只改它的 scrollHeight、**不改它的 box**，RO 观测它等于观测一个
- * 不变的目标 —— 真正的"内容长高"信号只有内容层的尺寸变化才给得出。
+ * 回调本身不钉底：只置"本帧尺寸变过"并交给统一调度，与 DOM 补丁后的复测合并成一次写入
+ * （RO 一次批量可能投递多条 entry，逐条钉底就是重复补偿）。
  */
-function onMsgWrapResized(): void {
-  const wrap = msgWrapRef.value
-  if (!wrap) {
-    return
-  }
-  const height = wrap.scrollHeight
-  if (height > lastMsgScrollHeight && followBottom.value) {
-    pinBottomTo(wrap, height)
-  }
-  lastMsgScrollHeight = height
+function onContentResized(): void {
+  contentResized = true
+  scheduleStickToBottom()
 }
 
 
@@ -5168,6 +5263,8 @@ onMounted(async () => {
   await nextTick()
   measureUserMsgOverflow()
   scrollBottom()
+  // 首钉之后重建基线：首次测量不参与"尺寸变过"的判定（否则挂载即多补一次）。
+  resetStickBaseline()
 })
 
 onBeforeUnmount(() => {
