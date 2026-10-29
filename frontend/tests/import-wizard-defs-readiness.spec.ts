@@ -230,6 +230,40 @@ describe('导入编辑区：定义慢加载时等待就绪并自动载入（不�
     expect(grids.loadCalls).toEqual(['CURRENCY:2'])
   })
 
+  it('连续两次工具调用只请求一次定义，第二次在冷却期内快速失败（R3）', async () => {
+    api.listDefinitions.mockRejectedValue(new Error('GET /api/definitions 503'))
+    await mountWizard()
+    // 挂载期唯一一次请求（失败后进入 5s 冷却）
+    expect(api.listDefinitions).toHaveBeenCalledTimes(1)
+
+    const sheet = getPageHandler('sheet.current')
+    expect(sheet).not.toBeNull()
+    const first = await sheet?.({ defCode: 'CURRENCY' })
+    const startedAt = Date.now()
+    const second = await sheet?.({ defCode: 'CURRENCY' })
+    const elapsed = Date.now() - startedAt
+
+    // 修复前（RED）：每次 loadEditors 都重发 GET ⇒ 3 次；第二次调用也不会"快速失败"
+    expect(api.listDefinitions).toHaveBeenCalledTimes(1)
+    expect(first).toMatchObject({ ok: false })
+    expect(second).toMatchObject({ ok: false })
+    expect(elapsed).toBeLessThan(500)
+    expect(grids.loadCalls).toEqual([])
+  })
+
+  it('冷却期内显式换任务可重置 ⇒ 重新尝试定义并自动载入', async () => {
+    api.listDefinitions.mockRejectedValue(new Error('GET /api/definitions 503'))
+    await mountWizard()
+    expect(api.listDefinitions).toHaveBeenCalledTimes(1)
+
+    api.listDefinitions.mockResolvedValue([CURRENCY_DEF])
+    routeHolder.route.query.taskId = '8'
+    await flushPromises()
+
+    expect(api.listDefinitions).toHaveBeenCalledTimes(2)
+    expect(grids.loadCalls).toEqual(['CURRENCY:2'])
+  })
+
   it('首轮定义失败后换任务 ⇒ 编辑区载入时补一次定义并自动载入（不再永久空白）', async () => {
     api.listDefinitions.mockRejectedValue(new Error('GET /api/definitions 503'))
     await mountWizard()

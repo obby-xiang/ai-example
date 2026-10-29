@@ -573,16 +573,30 @@ function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): 
  */
 const DEFINITIONS_READY_TIMEOUT_MS = 10_000
 
+/**
+ * 定义补请求的**冷却时长**（毫秒）：一次失败后，冷却期内的编辑区载入直接快速失败，
+ * 不再为每个 AI 工具调用各发一次 `GET /api/definitions`（挂起/失败时会把 60s 工具预算吃满）。
+ * 显式换任务或用户显式重载会重置冷却（= 新的重试意图）。
+ */
+const DEFINITIONS_RETRY_COOLDOWN_MS = 5_000
+
 /** 定义列表是否成功读到过（空列表也算成功；失败保持 false）。 */
 const defsLoaded = ref(false)
 /** 定义列表的在途请求（单飞：挂载 / 编辑区等待 / 补载共用同一笔）。 */
 let defsInFlight: Promise<boolean> | null = null
+/** 本轮定义补请求的冷却截止（毫秒时间戳）。失败后在冷却期内快速失败，不再每个工具调用重发 GET。 */
+let definitionsRetryBlockedUntil = 0
+/** 本轮定义请求的起始时刻（用于把"等待上界"按**每次请求**计，而不是每次调用各等一轮）。 */
+let defsAttemptStartedAt = 0
 
 async function loadDefinitions(): Promise<boolean> {
   if (defsInFlight !== null) {
     return await defsInFlight
   }
   defsLoading.value = true
+  if (defsAttemptStartedAt === 0) {
+    defsAttemptStartedAt = Date.now()
+  }
   const run = (async (): Promise<boolean> => {
     try {
       defs.value = await definitionsApi.listDefinitions()
@@ -592,10 +606,13 @@ async function loadDefinitions(): Promise<boolean> {
       return true
     } catch (error) {
       defsLoaded.value = false
+      // 失败即进入冷却：AI 工具的连续调用不得各自再发一次 GET（挂起/失败时会把预算吃满）
+      definitionsRetryBlockedUntil = Date.now() + DEFINITIONS_RETRY_COOLDOWN_MS
       ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.defsLoadFailed'))
       return false
     } finally {
       defsLoading.value = false
+      defsAttemptStartedAt = 0
     }
   })()
   defsInFlight = run
@@ -611,15 +628,23 @@ async function loadDefinitions(): Promise<boolean> {
 /**
  * 等定义列表就绪（有界）：在途就等它；没在途就按当前事实判定。
  *
+ * 等待预算是**按本次请求**计的：同一个挂起请求被多次调用等待时，后续调用只等"剩余额度"，
+ * 不会每次调用各等满一轮（否则一个挂起请求会被 AI 的连续工具调用反复消费预算）。
+ *
  * @returns true = 已成功读到**非空**定义列表（可建编辑区）；false = 加载中到点 / 失败 / 列表为空
  */
 async function awaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): Promise<boolean> {
   if (defsInFlight === null) {
     return defsLoaded.value && defs.value.length > 0
   }
+  const elapsed = defsAttemptStartedAt === 0 ? 0 : Date.now() - defsAttemptStartedAt
+  const remaining = Math.max(0, timeoutMs - elapsed)
+  if (remaining === 0) {
+    return false
+  }
   let timer: ReturnType<typeof setTimeout> | null = null
   const expired = new Promise<boolean>((resolve) => {
-    timer = setTimeout(() => resolve(false), timeoutMs)
+    timer = setTimeout(() => resolve(false), remaining)
   })
   try {
     const ok = await Promise.race([defsInFlight, expired])
@@ -632,10 +657,11 @@ async function awaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): 
 }
 
 /**
- * 编辑区载入前的定义闸：已有定义 ⇒ 直接过；在途 ⇒ 有界等待；**首轮没成功** ⇒ 补一次请求。
+ * 编辑区载入前的定义闸：已有定义 ⇒ 直接过；在途 ⇒ 有界等待；首轮失败 ⇒ **冷却期内快速失败**，
+ * 冷却结束（或用户显式换任务 / 重载）后才再补一次请求。
  *
  * 补请求只在 `!defsLoaded` 时发生（成功读到空列表后不再重复）—— 它由"编辑区真的要载入"
- * 这一动作触发，不是轮询。
+ * 这一动作触发，且同一失败后有 5s 冷却（不是轮询、也不是每次工具调用都重发）。
  */
 async function ensureDefinitionsForEditors(): Promise<void> {
   if (defs.value.length > 0) {
@@ -645,9 +671,18 @@ async function ensureDefinitionsForEditors(): Promise<void> {
     await awaitDefinitionsReady()
     return
   }
-  if (!defsLoaded.value) {
-    await loadDefinitions()
+  if (defsLoaded.value) {
+    return
   }
+  if (Date.now() < definitionsRetryBlockedUntil) {
+    return
+  }
+  await loadDefinitions()
+}
+
+/** 重置定义补请求冷却（显式换任务 / 用户显式重载 = 新的重试意图）。 */
+function resetDefinitionsRetryCooldown(): void {
+  definitionsRetryBlockedUntil = 0
 }
 
 /**
@@ -1084,6 +1119,10 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
 let editorLoadInFlight: Promise<void> | null = null
 
 async function loadEditors(force = false, only?: readonly string[]): Promise<void> {
+  // 显式重载（force）= 用户重试意图：允许重新尝试定义列表（冷却期不再挡住重试）
+  if (force) {
+    resetDefinitionsRetryCooldown()
+  }
   if (editorLoadInFlight !== null) {
     await editorLoadInFlight
     if (!force) {
@@ -2606,6 +2645,8 @@ async function bindTask(id: number): Promise<boolean> {
   }
   // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
   aiStore.onSheetPageLeft()
+  // 显式换任务 = 新的重试意图：允许重新尝试定义列表（否则冷却期会把新任务的编辑区也挡掉）
+  resetDefinitionsRetryCooldown()
   // 换任务 = 新一代：旧任务的载入态/文件清单/作业跟踪一律作废（否则 A 的字节会写进 B）
   resetTaskScopedState()
   taskId.value = id

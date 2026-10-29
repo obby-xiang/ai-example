@@ -28,6 +28,7 @@ import { jobsApi } from '@/api/jobs'
 import { definitionsApi } from '@/api/definitions'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
+import { validateConditionPayload } from '@/utils/condition-payload'
 import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { resolvePublishMode } from '@/utils/publish-mode'
@@ -664,14 +665,25 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未设置查询条件')
         }
-        await tasksApi.setCondition(taskId, event.defCode, event.conditions)
+        // R3 返修（reviewer Important）：兜底分支此前把模型载荷**原样** PUT 并写工作区 ——
+        // `IN []` / 空值 / 坏 JSON 都能落库。这里用与页面完全相同的判据链
+        // （parseConditionJson → draftModelFromCondition → buildConditionOutcome）先校验：
+        // 非法 / 不可解析 ⇒ 零写；显式空条件（`{}`）与坏载荷分开，绝不把坏载荷当"全量"。
+        const verdict = validateConditionPayload(event.conditions)
+        if (!verdict.ok) {
+          return fail(verdict.reason)
+        }
+        if (!taskStill(taskId)) {
+          return switched(taskId)
+        }
+        await tasksApi.setCondition(taskId, event.defCode, verdict.serialized)
         if (abandoned()) {
           return fail(`前端工具预算已到点：查询条件已提交给任务 #${taskId}，未写入当前工作区`)
         }
         if (!taskStill(taskId)) {
           return switched(taskId)
         }
-        workspace.setQueryConditions(event.defCode, event.conditions)
+        workspace.setQueryConditions(event.defCode, verdict.condition)
         return ok(`已设置 ${event.defCode} 的查询条件`)
       }
       case 'set_import_mode': {
