@@ -57,3 +57,49 @@ Maven：`<MAVEN_HOME>/bin/mvn.cmd`（IntelliJ 自带 maven3；无 `clean`），�
 6. **其余执行器未接 TTL**：摘要旁路、SSE 投递、看门狗、定时任务、启动恢复、跨实例接管仍未统一装饰/`useContext`（本批按要求不铺开）；Task 3 必须逐项接入，否则这些路径读身份会 fail-closed 失败。
 7. **未做真实 HTTP + Redis + LLM 全链路**：本批以精确单点 + 一个 `@SpringBootTest`（过滤器注册、身份头、503 语义）验证；未启动前端，未验证 `/api/ai/session` 的真实网络往返（控制器单测已覆盖返回值与登记调用）。
 8. **存量测试改写**：`AiConfigUnavailableSpringTest#chatStillReturns503WithoutBuildingAStream` 增加了身份头（契约变化所需），断言保持不变。
+
+---
+
+# Task 1 fix round 1（I1/I2/I3/I5/I6）
+
+- 状态：**完成**（C1/C2/C3 按指令留给其他组，本批未触碰 `RunStore`/`AiSessionService`/`ToolExecutionEnvelope`/`AiExecutorConfig`/前端）
+- 修复提交：`19b753d9`
+- 改动面（仅限指令允许的 4 个源文件 + 对应测试）：
+  `ai/web/AiSessionController.java`、`ai/session/SessionIdGenerator.java`、
+  `ai/tenant/TenantIdentityFilter.java`、`config/WebConfig.java`；
+  测试 `AiSessionControllerTest`、`SessionIdGeneratorTest`、`TenantIdentityFilterTest`、新增 `config/TenantCorsOrderTest`。
+
+## 修复摘要
+
+| 项 | 处理 |
+| --- | --- |
+| I1 | `POST /api/ai/session` 响应同时返回 `sessionIdText`（十进制字符串，**权威值**）与 `sessionId`（long，仅兼容）；类注明确消费方禁止把 JSON number 当权威值。 |
+| I2 | 实例位只来自 `app.instance-slot` / `APP_INSTANCE_SLOT`（0..999）；单实例默认 0；`cluster`/`multi-instance`/`h2tcp`/`postgresql` profile 未配置即**启动失败**；删除 `InstanceId` 散列兜底；启动日志打印 `instanceSlot` 与多实例判据。 |
+| I3 | 取号锁只覆盖状态读写，所有等待移到锁外（`LockSupport.parkNanos`）；大步回拨（>1s）立即抛 `SessionIdGenerator.UnavailableException`；小幅回拨限 1s 窗口等待；序列耗尽约 100ms 后失败；控制器映射 **503** `SESSION_ID_UNAVAILABLE` 且不登记会话。 |
+| I5 | `corsFilter` 改为 `FilterRegistrationBean<CorsFilter>`，order = `HIGHEST_PRECEDENCE + 5`（早于身份过滤器 +20）；单点验证身份拒绝的 400 带 `Access-Control-Allow-Origin` / `-Credentials`。 |
+| I6 | 排除面改为「精确路径（health/tools/tenants/startup-resume(+scan)）+ 模型配置子树（providers/models/settings）」；`/api/ai/tools/...` 等子路径与 `/api/ai` 本身默认受保护，缺头即 400。 |
+
+## 红/绿命令（每项一个精确方法；未跑整类/批量）
+
+> 共享工作区在本轮期间被 Task 2 在制品改动（`AiSessionService`/`RunStore` 等未完成，整体不可编译），
+> 为遵守「不触碰他人文件、不整类测试」，以下单点在实际代码等价的工作树 `<WORKTREE>`（`cc4983ba` + 本批补丁）执行；
+> 随后仅把本批 8 个文件同步回主仓。Maven：`<MAVEN_HOME>/bin/mvn.cmd`，统一 `-Djacoco.skip=true`。
+
+| 方法 | 红（预期失败） | 绿 |
+| --- | --- | --- |
+| `SessionIdGeneratorTest#aLargeClockRollbackFailsFastWithAnUnavailableSignal` | 编译失败：`找不到符号 类 UnavailableException` | 通过 |
+| `SessionIdGeneratorTest#clusterDeploymentRequiresAnExplicitAuditableInstanceSlot` | 编译失败：`SessionIdGenerator(MockEnvironment)` 无合适构造器 | 通过（日志可见 `instanceSlot=0/3`） |
+| `AiSessionControllerTest#createsTheSessionNumberOnTheBackendAndRegistersTheCurrentIdentity` | 编译失败：`ApiResponse` 无法转 `ResponseEntity`；`UnavailableException` 构造器非 public | 通过 |
+| `AiSessionControllerTest#unavailableNumberingIsMappedToServiceUnavailable` | 同上前置（类型/可见性） | 通过（503 + `SESSION_ID_UNAVAILABLE` + 不登记） |
+| `TenantCorsOrderTest#corsFilterRunsBeforeIdentityFilterAndRejectionsCarryCorsHeaders` | 编译失败：`CorsFilter` 无法转 `FilterRegistrationBean` | 通过（400 带 CORS 头） |
+| `TenantIdentityFilterTest#onlyConfigSubtreesAndExactNonDataPathsEscapeTheBoundary` | 断言失败：`/api/ai/tools/secret` 进入了业务链 | 通过 |
+| 回归（逐个单点） | — | `TenantIdentityFilterTest` 其余 5 个方法、`SessionIdGeneratorTest` 同毫秒/多实例 2 个方法：全通过 |
+
+## 顾虑
+
+1. **多实例 profile 现在强制 `APP_INSTANCE_SLOT`**：`cluster`/`multi-instance`/`h2tcp`/`postgresql` 任一激活且未配置实例位，应用启动失败。CI/E2E 脚本与部署清单（不在本批改动面）必须补该环境变量，且**各实例取值不同**；单进程无法校验"不同"，只能靠启动日志审计。
+2. **`sessionIdText` 迁移未完成**：后端已给权威字符串字段，但 Task 4 前端与 Task 5 脚本需切到该字段；`sessionId`(long) 仅为兼容保留。
+3. **序列耗尽无单点**：验证耗尽需在同一毫秒发出 1000 个号（循环），与"禁止循环测试"冲突；现由代码审查保证"锁外等待 + 有限次后 503"，并有控制器 503 映射单点。
+4. **本轮未在主仓跑测试**：主仓被 Task 2 在制品改动占住且不可编译；本批单点在等价工作树通过。主仓集成分支恢复可编译后，建议由主控复跑上述方法。
+5. **C1/C2/C3 不在本批**：按指令由其他组处理（执行信封身份、写路径 fail-closed、入口归属校验）。其中 C3 的 chat `existed` 校验依赖 `AiSessionService`，本批未触碰。
+6. **CORS 顺序单点只覆盖 `http://localhost:5173` 允许源**：生产允许源仍沿用 `http://localhost:*` / `http://127.0.0.1:*`，未扩大。
