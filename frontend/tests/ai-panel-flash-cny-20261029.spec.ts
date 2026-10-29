@@ -270,6 +270,80 @@ describe('确认卡 · 展开稳定', () => {
     wrapper.unmount()
   })
 
+  /**
+   * 2026-10-29 返修（复审 I-1′）：判据看**进入恢复那一刻**这一轮是否还在收流。
+   * 只看 `loading && !restoringRecovery` 会在"流中手动重载"与"自动恢复两次 attempt 之间"
+   * 各把卡折一次再展开（最多两轮），BASE 在这两条路径是保持展开。
+   */
+  it('流中进入恢复期（进入时 loading=true）：已决只读卡保持展开', async () => {
+    const store = useAiStore()
+    const decided = message('a-hist', [gatePart('succeeded', false)], { streaming: true, done: false })
+    store.loading = true
+
+    const wrapper = await mountPanel([decided])
+    expect(expandedOf(wrapper, 'c1')).toBe(true)
+
+    // 用户点「重新载入」/ 自动恢复进入：这一轮本来就在收流
+    store.restoringRecovery = true
+    await settle(wrapper)
+    expect(expandedOf(wrapper, 'c1')).toBe(true)
+    expect(wrapper.find('[data-testid="ro-body-c1"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+  })
+
+  it('连续两次恢复 attempt 之间不折（loading 恒真，标志一真一假来回）', async () => {
+    const store = useAiStore()
+    const decided = message('a-hist', [gatePart('succeeded', false)], { streaming: true, done: false })
+    store.loading = true
+
+    const wrapper = await mountPanel([decided])
+    const states: boolean[] = [expandedOf(wrapper, 'c1')]
+
+    store.restoringRecovery = true // attempt 1
+    await settle(wrapper)
+    states.push(expandedOf(wrapper, 'c1'))
+    store.restoringRecovery = false // attempt 之间的 400ms 间隔
+    await settle(wrapper)
+    states.push(expandedOf(wrapper, 'c1'))
+    store.restoringRecovery = true // attempt 2
+    await settle(wrapper)
+    states.push(expandedOf(wrapper, 'c1'))
+    store.restoringRecovery = false // 预算耗尽 / 恢复结束，仍在收流
+    await settle(wrapper)
+    states.push(expandedOf(wrapper, 'c1'))
+
+    expect(states).toEqual([true, true, true, true, true])
+
+    // 恢复窗口结束且这一轮确实收口 ⇒ 才收成卡头行（不会停在"永续展开"）
+    store.loading = false
+    await settle(wrapper)
+    expect(expandedOf(wrapper, 'c1')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('首次历史恢复（进入时 loading=false）仍不展开：采样看进入时刻，不看恢复期内的 loading 变化', async () => {
+    const store = useAiStore()
+    const decided = message('a-hist', [gatePart('succeeded', false)], { streaming: true, done: false })
+    store.loading = false
+
+    const wrapper = await mountPanel([decided])
+    store.restoringRecovery = true
+    await settle(wrapper)
+    // 进入时没有再收流 ⇒ 恢复期不展开（刷新首屏 / 轮已收口的重新载入）
+    expect(expandedOf(wrapper, 'c1')).toBe(false)
+
+    // 恢复期内 loading 变真也不展开：采样是"进入那一刻"的快照，不是实时读
+    store.loading = true
+    await settle(wrapper)
+    expect(expandedOf(wrapper, 'c1')).toBe(false)
+
+    // 恢复结束、确实在收流 ⇒ 按既有口径展开
+    store.restoringRecovery = false
+    await settle(wrapper)
+    expect(expandedOf(wrapper, 'c1')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('批准 → 重连 → 完成：外壳不卸载、展开不折叠回弹，终态收口后不复弹', async () => {
     const store = useAiStore()
     const part = gatePart('pending', true)
@@ -536,6 +610,48 @@ describe('M-1 · GF 卡 memo 边界', () => {
     expect(after['g-hist'] ?? 0).toBe(before['g-hist'] ?? 0)
     // 卡面本身没坏：历史卡仍是同一张只读卡
     expect(wrapper.find('[data-testid="ro-summary-g-hist"]').text()).toContain('导出范围 华北')
+    wrapper.unmount()
+  })
+
+  /**
+   * 复审 M-1′：`queuedForms` 的总数只以标量入 memo —— 必须证明"取消后面那张"时，
+   * 前面那张**位次不变、总数变小**的卡面也会更新（只靠位次 dep 是锁不住的）。
+   *
+   * 两张排队卡放**不同消息**：否则后一张的位次变化会连带把同一消息行整行 patch，
+   * 前一张靠"行被连带刷新"侥幸变绿，锁不住 `queuedForms.length` 这条标量依赖。
+   */
+  it('GF 队列取消后面那张：剩余卡的 DOM 总数随之更新（位次不变也更新）', async () => {
+    const store = useAiStore()
+    const queuePart = (toolCallId: string, seg: number): MessagePart => ({
+      kind: 'tool',
+      seg,
+      toolCallId,
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'pending',
+      args: GF_ARGS,
+      requiresAction: true
+    })
+    const first = message('a-gf-q2', [queuePart('q2', 0)], { done: false })
+    const second = message('a-gf-q3', [queuePart('q3', 0)], { done: false })
+    store.queuedForms = [
+      { toolCallId: 'q2', runId: 'run-q', form: GF_FORM as never },
+      { toolCallId: 'q3', runId: 'run-q', form: GF_FORM as never }
+    ]
+
+    const wrapper = await mountPanel([first, second])
+    const before = wrapper.findAll('[data-testid="gf-queue-card"]')
+    expect(before).toHaveLength(2)
+    expect(before[0]!.find('[data-testid="gf-queue-position"]').text()).toContain('第 1 / 2 张')
+
+    // 取消**后面**那张（q3）：q2 位次仍是 1，只有总数 2→1
+    store.queuedForms = [{ toolCallId: 'q2', runId: 'run-q', form: GF_FORM as never }]
+    await settle(wrapper)
+
+    const after = wrapper.findAll('[data-testid="gf-queue-card"]')
+    expect(after).toHaveLength(1)
+    expect(after[0]!.attributes('data-tool-call-id')).toBe('q2')
+    expect(after[0]!.find('[data-testid="gf-queue-position"]').text()).toContain('第 1 / 1 张')
     wrapper.unmount()
   })
 })

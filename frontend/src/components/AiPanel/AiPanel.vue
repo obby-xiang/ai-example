@@ -3665,8 +3665,37 @@ function isBlockExpanded(block: Block): boolean {
 }
 
 /**
+ * 恢复期起点的「本轮是否仍在收流」采样（2026-10-29 返修 I-1′）。
+ *
+ * <p>`restoringRecovery` 只说"恢复在途"，不说**恢复从哪里开始**：
+ * <ul>
+ * <li>刷新首屏：镜像正在落屏，进入时 `loading=false` ⇒ 恢复期必须不展开（对过去的现场做实时渲染）；</li>
+ * <li>流中手动重载 / 自动恢复重试：这一轮本来就在收流，进入时 `loading=true` ⇒ 恢复期必须保持展开，
+ *     否则卡会"折一次→展开"，两条自动恢复 attempt 之间（标志复位、`loading` 仍真）再折一次，
+ *     1~1.5s 的失败恢复窗口里翻两轮（BASE 是保持展开）。</li>
+ * </ul>
+ *
+ * <p>口径 = 只在 `restoringRecovery` **由假变真那一刻**采样 `ai.loading`。用 `flush:'sync'` 与
+ * store 的置位同 tick，避免被后续渲染/批处理挪到别的现场；挂载时已处于恢复期 ⇒ 不触发采样，
+ * 采样保持 `false`（沿用"恢复期不展开"）。恢复结束即清采样，下一次恢复重新取现场。
+ */
+const recoveryStartedWhileStreaming = ref(false)
+
+watch(
+  () => ai.restoringRecovery,
+  (active, wasActive) => {
+    if (active && !wasActive) {
+      recoveryStartedWhileStreaming.value = ai.loading
+    } else if (!active) {
+      recoveryStartedWhileStreaming.value = false
+    }
+  },
+  { flush: 'sync' }
+)
+
+/**
  * 本轮是否仍未终态（2026-10-29 ToC 呈现减负批：判据由「只认 `loading`」放宽到「本轮未终态」；
- * 同日「导出整屏闪」返修：恢复期不再算未终态）。
+ * 同日「导出整屏闪」返修：恢复期按**进入时刻**这一轮是否还在收流来判）。
  *
  * <p>为什么不能只看 `loading`：B1「挂起即断」之后，等人决策的一轮是 `loading=false && suspended=true`
  * （`runPhase='parked'`）；点批准的那一刻段立刻切只读，而此时连接可能还没建起来 ——
@@ -3678,14 +3707,13 @@ function isBlockExpanded(block: Block): boolean {
  * HTTP 回来再折叠，正是本批要消掉的那类闪动。批准瞬间的闪动另有**决策在途 / GF 提交在途**
  * 两条证据覆盖，不依赖 `recovering`。
  *
- * <p><b>恢复期同样按「不展开」处理</b>：只用 `loading || suspended` 仍有一条漏网 —— 恢复在途时
- * store 也会把 `loading` 置真（`resumeSnapshotStream` 先置位再拉快照）。那时卡面读到的仍是
- * 上一份镜像，展开它就是"对过去的现场做实时渲染"，HTTP 回来照样要折一次。故 `loading` 一支
- * 显式排除 `restoringRecovery`；恢复结束后真的在收流（`loading && !restoringRecovery`）才展开。
+ * <p><b>恢复期为什么要看采样</b>：只写 `loading && !restoringRecovery` 会在"流中手动重载"和
+ * "自动恢复两次 attempt 之间"把卡折一次再展开（见 {@link recoveryStartedWhileStreaming}）。
+ * 采样为真（进入时确实在收流）⇒ 整个恢复窗口按"仍在收流"处理；采样为假（刷新首屏）⇒ 恢复期不展开。
  *
  * 终态判据 = 仍在收流 ∨ 挂起等人，再加两条在途证据：
  * <ol>
- * <li>`ai.suspended || (ai.loading && !ai.restoringRecovery)`（挂起等人 / 收流中 —— 不含恢复期）；</li>
+ * <li>`ai.suspended || (ai.loading && (!ai.restoringRecovery || 恢复期采样为真))`；</li>
  * <li>该卡已有**决策在途**（`gateSubmissions` 有值：点过批准/拒绝、结局帧还没到）；</li>
  * <li>该卡是生成式表单且**提交在途**（结局帧未到的只读锁定态，见 `readOnlyLike`）。</li>
  * </ol>
@@ -3696,7 +3724,9 @@ function turnStillOpen(block: Block): boolean {
   if (last === undefined || last.id !== block.messageId) {
     return false
   }
-  if (ai.suspended || (ai.loading && !ai.restoringRecovery)) {
+  const streamingNow = ai.loading
+    && (!ai.restoringRecovery || recoveryStartedWhileStreaming.value)
+  if (ai.suspended || streamingNow) {
     return true
   }
   return block.parts.some((part) => part.kind === 'tool'
@@ -5113,7 +5143,9 @@ watch(
  * <li>只有**内容 measured size 变化**（正文增量 / 卡片展开 / 确认门与表单插入）才把视图钉回底部；</li>
  * <li>用户上翻即释放，绝不在"状态变化"时把视线拽回去；</li>
  * <li>同一帧的多个信号（DOM 补丁后的复测 + ResizeObserver 回调）合并成一次测量、最多一次写入；</li>
- * <li>自己接管滚动时关掉浏览器原生锚定（模板上的 `[overflow-anchor:none]`），否则两边各补一次。</li>
+ * <li>**只有跟随态**关掉浏览器原生锚定（模板上 `followBottom ? '[overflow-anchor:none]' : ''`）：
+ *     跟随态我们自己补偿，两边同时生效就是各补一次；上翻后我们不再补偿，
+ *     此时锚定是唯一的"保位置"手段，必须交回浏览器。</li>
  * </ol>
  * 旧实现把钉底直接挂在滚动指纹上（含尾部状态），且 watch 与 RO 各钉一次 ⇒ 一次内容变化最多写
  * 两次 scrollTop，叠加原生锚定就是"整屏闪 / 来回跳"。
