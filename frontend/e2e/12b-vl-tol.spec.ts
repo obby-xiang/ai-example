@@ -211,9 +211,11 @@ test.describe('@stub L 工具全量面（12b）', () => {
     const item = task.items.find((entry) => entry.defCode === 'CURRENCY')
     expect(item?.conditionJson ?? '').toContain('USD')
 
-    // 非法条件（缺 defCode）结构化失败
+    // 非法条件（缺 defCode）结构化失败。R6：除文本外必须断言 outcome=failed ——
+    // 旧页面 handler 缺 defCode 时回**字符串**，`interpretHandlerOutcome` 会把它判成 ok（假成功）。
     const bad = await callUntil(page, 'set_condition', { conditions: { fields: [] } },
-      (view) => String(view.result ?? '').includes('缺少 defCode'))
+      (view) => String(view.outcome) === 'failed' && String(view.result ?? '').includes('缺少 defCode'))
+    expect(String(bad.outcome)).toBe('failed')
     expect(String(bad.result ?? '')).toContain('缺少 defCode')
   })
 

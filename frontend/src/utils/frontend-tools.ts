@@ -1305,8 +1305,11 @@ function findWorkspaceAction(name: string): WorkspaceAction | null {
  * RC-3：工作区动作的**参数要求**（缺参文案单点）。
  *
  * 用户口径（2026-10-16 裁决②/③）：前端工具的**参数错误文案不得内嵌 `JSON.stringify(args)`**
- * ——原文示范「设置查询条件的参数不完整：缺少 defCode 或 conditions.fields」。故本表逐动作把
- * "缺什么"写成自然语言；表外动作回落一句不指名字段但可行动的话（仍不含任何 JSON 特征）。
+ * ——只把"缺什么"写成自然语言；表外动作回落一句不指名字段但可行动的话（仍不含任何 JSON 特征）。
+ *
+ * 页面 handler 同样受这条约束：**参数错误必须返回结构化 `{ ok:false, reason }`** —— 字符串返回
+ * 会被 `interpretHandlerOutcome` 当"成功 + 该文本"（兼容解读），缺参会变成假成功
+ * （R6 的 `export.setConditions` 缺 defCode 曾回字符串，已修为结构化失败）。
  */
 const WORKSPACE_ACTION_REQUIRED_ARGS: Readonly<Record<string, string>> = {
   navigate_to: '缺少 page（页面标识：tasks / export / import / definitions / data）',
@@ -1805,7 +1808,8 @@ async function runPageHandler(
 
 /**
  * 页面 handler 返回值解读（批3③a A3/A5 共用）：
- * - 字符串 = 成功 + 该文本（兼容解读不变）；
+ * - 字符串 = 成功 + 该文本（兼容解读不变）—— 只用于**已执行后的事实陈述**；
+ *   参数错误 / 确定性失败必须返回结构化 `{ ok:false, reason }`，否则缺参会变成假成功；
  * - 结构化 `{ ok:false, reason }` = **确定性失败**（D2：如编辑器引擎加载失败 —— 落 failed，
  *   不得误入 unknown，也不得被包装层折回成功）；
  * - `{ ok:true, result? }` = 成功；其它非字符串值保持旧兜底「<label>已执行」。

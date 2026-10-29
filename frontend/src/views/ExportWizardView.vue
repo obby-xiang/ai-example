@@ -2376,7 +2376,9 @@ function registerHandlers(): void {
     }
     const defCode = String(payload.defCode ?? '')
     if (!defCode) {
-      return '缺少 defCode，未设置条件'
+      // R6：**必须结构化失败**。字符串返回会被 `interpretHandlerOutcome` 当成功（兼容解读），
+      // 缺参就变成"假成功"（AI 以为条件已设置，实际什么都没写）。
+      return { ok: false, reason: '缺少 defCode，未设置条件（未落库、未改动页面条件）' }
     }
     // R5：`conditions` 必填 —— 漏参（缺键 / undefined / null）必须明确失败，不能走
     // `validateConditionPayload(undefined)` 的"无法序列化"模糊文案，更不能补 `{}` 当清空。

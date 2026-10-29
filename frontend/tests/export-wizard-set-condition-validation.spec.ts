@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ExportWizardView from '@/views/ExportWizardView.vue'
+import { executeFrontendTool } from '@/utils/frontend-tools'
 import { getPageHandler, useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
@@ -235,6 +236,37 @@ describe('set_condition 四类坏载荷：失败且零 PUT、零工作区写（R
     expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
     // 修复前（RED）：清空写成 queryConditions.CURRENCY = null（占位 "已设置条件"）
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+})
+
+describe('set_condition 缺 defCode：结构化失败（字符串会被当成功 —— R6）', () => {
+  it('直接调用页面 handler 缺 defCode ⇒ {ok:false}、零 PUT、零工作区写', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const handler = getPageHandler('export.setConditions')
+    const reply = await handler?.({ conditions: { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] } })
+    await flushPromises()
+
+    // 修复前（RED）：返回字符串「缺少 defCode，未设置条件」⇒ interpretHandlerOutcome 判 ok
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason ?? '')).toContain('缺少 defCode')
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('经 executeFrontendTool 路由缺 defCode ⇒ failed（不再被字符串兼容解读成 ok）', async () => {
+    await mountWizard()
+
+    const execution = await executeFrontendTool({
+      name: 'set_condition',
+      args: { conditions: { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] } },
+      budgetMs: 5_000
+    })
+
+    expect(execution.ok).toBe(false)
+    expect(execution.outcome).toBe('failed')
+    expect(String(execution.result)).toContain('缺少 defCode')
   })
 })
 
