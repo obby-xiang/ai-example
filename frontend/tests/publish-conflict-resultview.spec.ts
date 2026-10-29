@@ -12,7 +12,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import type { ResultView } from '@/types/resultview'
 import { clearPublishToolLinks, linkPublishTool } from '@/utils/publish-links'
-import { MIRROR_PREFIX } from '@/stores/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -93,6 +94,7 @@ beforeEach(() => {
   api.reattachRun.mockReset()
   watchPublishOutcome.mockClear()
   clearPublishToolLinks()
+  installIdentityFixture()
 })
 
 describe('S6 批2 · tool_result.resultView 落段', () => {
@@ -150,7 +152,7 @@ describe('S6 批2 · tool_result.resultView 落段', () => {
       columns: [{ key: 'defCode', type: 'string' }, { key: 'rowKey', type: 'string' }, { key: 'message', type: 'string' }],
       fallback: { text: 'i18n:resultview.publishConflict.fallback', format: 'plain' }
     }
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       v: 2,
       savedAt: Date.now(),
       lastRunId: null,

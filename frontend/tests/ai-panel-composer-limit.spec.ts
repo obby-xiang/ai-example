@@ -16,6 +16,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -78,6 +79,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   api.chat.mockResolvedValue(undefined)
+  installIdentityFixture()
 })
 
 /** 空 messages 挂载（本文件只关心 composer，不需要历史/挂起夹具）。 */

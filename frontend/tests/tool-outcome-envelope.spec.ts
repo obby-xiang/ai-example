@@ -19,6 +19,7 @@ import type { AiRunCurrent, ChatMessage, ToolPart } from '@/types/ai'
 import { applyFrameToParts, deriveProjections, historyToolCallStatus, outcomeStatus } from '@/utils/parts'
 import { cardStatusOf } from '@/utils/blocks'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -54,6 +55,7 @@ beforeEach(() => {
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   frontendTools.executeFrontendTool.mockReset()
+  installIdentityFixture()
 })
 
 /**

@@ -10,6 +10,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { ApiError } from '@/api/http'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 import ContextPopover from '@/components/AiPanel/ContextPopover.vue'
 import type { AiRunCurrent, ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
@@ -29,7 +31,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
-const MIRROR_KEY = 'ai-mirror:'
+/* 镜像键按身份键形取（`mirrorStorageKey`）。 */
 
 function noSuspension(): AiRunCurrent {
   return {
@@ -57,7 +59,7 @@ function runningSnapshot(runId = 'run-live', archiveMaxSeq = 3): AiRunCurrent {
 
 /** 镜像里"写盘时仍在途"的助手消息（刷新后应可续收；恢复失败时必须统一封口）。 */
 function seedInFlightMirror(sessionId: string, text = '半截回答'): void {
-  sessionStorage.setItem(MIRROR_KEY + sessionId, JSON.stringify({
+  sessionStorage.setItem(mirrorStorageKey(sessionId), JSON.stringify({
     v: 2,
     savedAt: Date.now(),
     lastRunId: 'run-mirror',
@@ -76,7 +78,7 @@ function seedInFlightMirror(sessionId: string, text = '半截回答'): void {
 }
 
 function readMirrorRaw(sessionId: string): { v?: number; messages: ChatMessage[] } {
-  return JSON.parse(sessionStorage.getItem(MIRROR_KEY + sessionId) ?? '{}')
+  return JSON.parse(sessionStorage.getItem(mirrorStorageKey(sessionId)) ?? '{}')
 }
 
 function freshStore() {
@@ -103,6 +105,7 @@ beforeEach(() => {
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 /**
@@ -258,7 +261,7 @@ describe('批次2 · 镜像失败现场与旧镜像兼容', () => {
   }, 15000)
 
   it('旧 v2 镜像（无 errorCard/code 键、已有 parts）读取时不重建段', async () => {
-    sessionStorage.setItem(MIRROR_KEY + 'sess-old', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('sess-old'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-old',

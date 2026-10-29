@@ -13,6 +13,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture, queueNextSessionId } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { aiSnapshot } from '@/utils/ai-dom-tools'
 import { enterImportPage, resetAiTestState } from './ai-fixtures'
@@ -111,6 +112,7 @@ beforeEach(() => {
   workspace.taskType = null
   workspace.step = null
   workspace.taskId = null
+  installIdentityFixture()
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {
@@ -124,10 +126,12 @@ async function mountPanel(): Promise<ReturnType<typeof mount>> {
 describe('C5-01 无会话：新建对话后回到空态（不留在旧会话的残影里）', () => {
   it('有消息 ⇒ 空态不在；新建对话后消息清空、sessionId 换新、空态与 chips 回来且可继续发送', async () => {
     const store = useAiStore()
+    const oldSession = store.sessionId
+    // 新建对话要拿**新**号：显式声明下一次发号的返回值（同一身份默认重复取号稳定）
+    queueNextSessionId(Number(oldSession) + 1)
     store.messages = [buildMessage([{ kind: 'text', seg: 0, text: '上一会话的答案', streaming: false }])]
     store.historyLoaded = true
     const wrapper = await mountPanel()
-    const oldSession = store.sessionId
     expect(wrapper.find('[data-testid="empty-state"]').exists()).toBe(false)
 
     await store.resetSession()

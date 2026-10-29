@@ -15,6 +15,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
 import zhCN from '@/locales/zh-CN.json'
 import enUS from '@/locales/en-US.json'
@@ -88,6 +89,7 @@ beforeEach(() => {
   api.confirm.mockResolvedValue(undefined)
   api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
+  installIdentityFixture()
 })
 
 /**

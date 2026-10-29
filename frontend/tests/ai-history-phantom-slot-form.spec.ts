@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { isSlotReleasePhantom } from '@/utils/parts'
 import type { ToolPart } from '@/types/ai'
 
@@ -43,6 +44,7 @@ beforeEach(() => {
     archiveMaxSeq: 0
   })
   api.getContext.mockResolvedValue({ source: 'none' })
+  installIdentityFixture()
 })
 
 describe('历史幻影表单卡（FORM_SLOTS_ALREADY_KNOWN）', () => {

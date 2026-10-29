@@ -17,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { MIRROR_MAX_MESSAGES, MIRROR_PREFIX, useAiStore } from '@/stores/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 
 const api = vi.hoisted(() => ({
@@ -63,7 +65,7 @@ function mirrorOf(sessionId: string): {
   inFlight?: boolean
   messages: Array<Record<string, unknown>>
 } | null {
-  const raw = sessionStorage.getItem(MIRROR_PREFIX + sessionId)
+  const raw = sessionStorage.getItem(mirrorStorageKey(sessionId))
   return raw ? JSON.parse(raw) : null
 }
 
@@ -73,6 +75,7 @@ beforeEach(() => {
   for (const fn of Object.values(api)) {
     fn.mockReset()
   }
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -108,7 +111,7 @@ describe('批次7B · 镜像有界与不重复写', () => {
     store.activeRunId = 'run-dedupe'
     store.messages = [textMessage('u-1', 'user', '问'), textMessage('a-1', 'assistant', '答')]
 
-    const key = MIRROR_PREFIX + 'sess-dedupe'
+    const key = mirrorStorageKey('sess-dedupe')
     const setItem = vi.spyOn(Storage.prototype, 'setItem')
     try {
       store.writeMirrorNow()

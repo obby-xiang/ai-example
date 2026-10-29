@@ -20,6 +20,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -88,6 +89,7 @@ beforeEach(() => {
   })
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.cancel.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 describe('B10-01 勾选与取消勾选：双向写回 store（面板 DOM → store）', () => {

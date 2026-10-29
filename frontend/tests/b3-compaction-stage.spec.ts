@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { SseFrame } from '@/types/sse'
 import type { AiRunCurrent } from '@/types/ai'
 
@@ -60,6 +61,7 @@ beforeEach(() => {
   sse.probeReattach.mockReset()
   api.history.mockResolvedValue({ sessionId: 'sess', count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue(noRun())
+  installIdentityFixture()
 })
 
 describe('批次3 · 压缩阶段', () => {

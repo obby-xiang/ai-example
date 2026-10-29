@@ -32,6 +32,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 /** Element Plus 全部退场；FormRenderer 与本文件无关。 */
 const stubs = {
@@ -103,6 +104,7 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   api.getContext.mockResolvedValue(measuredSnapshot(84213, 128000))
   api.chat.mockResolvedValue(undefined)
+  installIdentityFixture()
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {

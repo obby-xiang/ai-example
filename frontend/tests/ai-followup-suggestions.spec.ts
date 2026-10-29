@@ -25,6 +25,7 @@ import enUS from '@/locales/en-US.json'
 import { applyLocale } from '@/locales'
 import { MAX_SUGGESTION_CHARS, buildFollowups } from '@/utils/ai-suggestions'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 
@@ -213,6 +214,7 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   api.chat.mockResolvedValue(undefined)
   api.getContext.mockRejectedValue(new Error('not stubbed'))
+  installIdentityFixture()
 })
 
 /** 一轮正常完成后的现场：done 终态已到、无挂起、无卡片。 */

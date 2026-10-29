@@ -9,6 +9,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
 import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
@@ -90,6 +91,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ sessionId: 'sess', count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false })
   applyLocale('zh-CN')
+  installIdentityFixture()
 })
 
 describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）', () => {

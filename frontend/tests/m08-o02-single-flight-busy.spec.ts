@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 
@@ -107,6 +108,7 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
+  installIdentityFixture()
 })
 
 describe('M08 · 同一 runId 单飞（single-flight）', () => {

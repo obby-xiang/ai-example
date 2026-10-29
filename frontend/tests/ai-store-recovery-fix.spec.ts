@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
-import { useAiStore, PAGE_ID_KEY, SESSION_LOCK_PREFIX } from '@/stores/ai'
+import { useAiStore, PAGE_ID_KEY } from '@/stores/ai'
+import { mirrorStorageKey, sessionLockName } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { buildErrorCard } from '@/utils/error-card'
 import type { AiRunCurrent, AiRunCurrentEntry, ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
@@ -78,6 +80,7 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -88,19 +91,21 @@ afterEach(() => {
 
 describe('AI store 恢复与重试收口', () => {
   it('复制页签换会话但保持静默，仍清理继承现场并保留原锁', async () => {
-    seedTab('copy-silent')
+    seedTab('9001')
     sessionStorage.setItem(PAGE_ID_KEY, 'page-copy-silent')
-    locks.hold(SESSION_LOCK_PREFIX + 'copy-silent')
+    locks.hold(sessionLockName('9001'))
     const store = useAiStore()
 
     await store.ensureTabOwnership()
 
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(store.sessionId).not.toBe('copy-silent')
+    // 复制品先换新会话：后端发号成功 ⇒ 本页签成为自己新会话的 owner（旧会话锁仍归原页签）。
+    expect(store.tabOwnership).toBe('owner')
+    expect(store.sessionId).not.toBe('9001')
     expect(store.notice).toBeNull()
     expect(store.noticeCode).toBeNull()
-    expect(sessionStorage.getItem('ai-mirror:copy-silent')).toBeNull()
-    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'copy-silent')).toBe(true)
+    expect(sessionStorage.getItem(mirrorStorageKey('9001'))).toBeNull()
+    expect(locks.isHeld(sessionLockName('9001'))).toBe(true)
+    expect(locks.isHeld(sessionLockName(store.sessionId))).toBe(true)
     expect(api.deleteHistory).not.toHaveBeenCalled()
   })
 

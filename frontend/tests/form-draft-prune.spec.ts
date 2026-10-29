@@ -3,6 +3,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 import { FORM_DRAFT_PREFIX, formDraftKey, pruneFormDrafts } from '@/utils/form-draft'
+import { AI_IDENTITY_KEY } from '@/utils/ai-identity'
 
 beforeEach(() => {
   sessionStorage.clear()
@@ -26,10 +27,11 @@ describe('pruneFormDrafts', () => {
   it('空白名单 ⇒ 清光本页签草稿，但绝不调用 clear()', () => {
     sessionStorage.setItem(formDraftKey('a'), '{}')
     sessionStorage.setItem(FORM_DRAFT_PREFIX + 'b', '{}')
-    sessionStorage.setItem('ai-session-id', 'sid')
+    // 非草稿键（身份是页签级状态，绝不能被孤儿清理带走）当哨兵
+    sessionStorage.setItem(AI_IDENTITY_KEY, '{"tenantId":7,"userId":71}')
 
     expect(pruneFormDrafts([])).toBe(2)
     expect(sessionStorage.length).toBe(1)
-    expect(sessionStorage.getItem('ai-session-id')).toBe('sid')
+    expect(sessionStorage.getItem(AI_IDENTITY_KEY)).toBe('{"tenantId":7,"userId":71}')
   })
 })

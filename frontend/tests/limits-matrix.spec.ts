@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { FormSpec } from '@/types/form-schema'
 import { useWorkspaceStore } from '@/stores/workspace'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
@@ -92,6 +93,7 @@ beforeEach(() => {
   const workspace = useWorkspaceStore()
   workspace.page = 'tasks'
   workspace.pageId = 'tasks'
+  installIdentityFixture()
 })
 
 function pickFile(input: ReturnType<ReturnType<typeof mount>['find']>, file: File): Promise<void> {

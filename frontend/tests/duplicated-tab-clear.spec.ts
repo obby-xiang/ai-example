@@ -14,14 +14,20 @@ import { createPinia, setActivePinia } from 'pinia'
 import {
   LOCK_PROBE_ATTEMPTS,
   LOCK_PROBE_RETRY_MS,
-  MIRROR_PREFIX,
   OWNERSHIP_CHANNEL_NAME,
   PAGE_ID_KEY,
   RETURN_INTENT_KEY,
-  SESSION_ID_KEY,
-  SESSION_LOCK_PREFIX,
   useAiStore
 } from '@/stores/ai'
+import {
+  AI_IDENTITY_KEY,
+  currentAiIdentity,
+  identityFingerprint,
+  mirrorStorageKey,
+  sessionIdStorageKey,
+  sessionLockName
+} from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { FORM_DRAFT_PREFIX } from '@/utils/form-draft'
 import {
   channels,
@@ -77,6 +83,7 @@ beforeEach(() => {
   api.deleteHistory.mockResolvedValue({})
   api.cancel.mockResolvedValue({})
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -137,22 +144,24 @@ class FreeOnThirdProbeLockManager {
 }
 
 describe('① 判据：复制页签与普通刷新必须被区别对待', () => {
-  it('同一会话的锁被另一文档持有 + 无返回意向 ⇒ duplicate，且只清一次', async () => {
-    seedDuplicatedTab('tab-copy', 'page-copy')
+  it('同一会话的锁被另一文档持有 + 无返回意向 ⇒ 判为复制并清空一次，随后换到自己的新会话', async () => {
+    seedDuplicatedTab('9101', 'page-copy')
     // 原页签仍开着自己的文档：同一把会话锁被它持有
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-copy')
+    locks.hold(sessionLockName('9101'))
 
     const store = useAiStore()
     const clear = vi.spyOn(Storage.prototype, 'clear')
     await store.ensureTabOwnership()
 
-    expect(store.tabOwnership).toBe('duplicate')
+    expect(store.tabOwnership).toBe('owner')
+    // 复制品换到自己的新会话（原会话仍归原页签）
+    expect(store.sessionId).not.toBe('9101')
     // "确认复制"是清空的前提：探活发生在 clear 之前，clear 只此一次
     expect(clear).toHaveBeenCalledTimes(1)
   })
 
   it('普通刷新 / 快重载（锁空闲）⇒ owner，一次都不清，全部继承现场照旧', async () => {
-    seedDuplicatedTab('tab-reload', 'page-reload')
+    seedDuplicatedTab('9102', 'page-reload')
     // 旧文档已销毁：会话锁空闲（刷新后的新文档第一个拿到）
 
     const store = useAiStore()
@@ -161,23 +170,28 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
 
     expect(store.tabOwnership).toBe('owner')
     expect(clear).not.toHaveBeenCalled()
-    expect(store.sessionId).toBe('tab-reload')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe('tab-reload')
+    expect(store.sessionId).toBe('9102')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9102')
     expect(sessionStorage.getItem(PAGE_ID_KEY)).toBe('page-reload')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-reload')).not.toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9102'))).not.toBeNull()
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
     expect(sessionStorage.getItem('import-wizard-draft')).not.toBeNull()
   })
 
   it('慢重载（带一次性返回意向、锁已被副本接手）⇒ 降级但不清：整份现场还在', async () => {
     sessionStorage.setItem(PAGE_ID_KEY, 'page-slow')
-    seedTab('tab-slow')
+    seedTab('9103')
     sessionStorage.setItem(FORM_DRAFT_PREFIX + 'call-1', JSON.stringify({ name: '草稿' }))
     sessionStorage.setItem(
       RETURN_INTENT_KEY,
-      JSON.stringify({ sessionId: 'tab-slow', pageId: 'page-slow', at: Date.now() })
+      JSON.stringify({
+        sessionId: '9103',
+        pageId: 'page-slow',
+        at: Date.now(),
+        fingerprint: identityFingerprint(currentAiIdentity()!)
+      })
     )
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-slow')
+    locks.hold(sessionLockName('9103'))
 
     const store = useAiStore()
     store.recordUserMessage('刷新前正在看的记录')
@@ -186,9 +200,9 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
 
     expect(store.tabOwnership).toBe('duplicate')
     expect(clear).not.toHaveBeenCalled()
-    expect(store.sessionId).toBe('tab-slow')
+    expect(store.sessionId).toBe('9103')
     expect(store.messages).toHaveLength(1)
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-slow')).not.toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9103'))).not.toBeNull()
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
     // 返回意向已一次性消费（下次刷新不再走降级路）
     expect(sessionStorage.getItem(RETURN_INTENT_KEY)).toBeNull()
@@ -196,7 +210,7 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
 
   it('环境无 Web Locks（无法确认复制）⇒ unsupported，不清：宁可残留也不误伤刷新', () => {
     Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
-    seedDuplicatedTab('tab-nolocks', 'page-nolocks')
+    seedDuplicatedTab('9104', 'page-nolocks')
 
     const store = useAiStore()
     const clear = vi.spyOn(Storage.prototype, 'clear')
@@ -204,12 +218,12 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
 
     expect(store.tabOwnership).toBe('unsupported')
     expect(clear).not.toHaveBeenCalled()
-    expect(store.sessionId).toBe('tab-nolocks')
+    expect(store.sessionId).toBe('9104')
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
   })
 
   it('探活 API reject（无法确认）⇒ unsupported，绝不判复制、绝不整份清空', async () => {
-    seedDuplicatedTab('tab-lockerr', 'page-lockerr')
+    seedDuplicatedTab('9105', 'page-lockerr')
     const rejecting = new RejectingLockManager()
     Object.defineProperty(navigator, 'locks', { value: rejecting, configurable: true })
 
@@ -222,16 +236,16 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
     expect(store.tabOwnership).toBe('unsupported')
     expect(store.tabOwnership).not.toBe('duplicate')
     expect(clear).not.toHaveBeenCalled()
-    expect(store.sessionId).toBe('tab-lockerr')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe('tab-lockerr')
+    expect(store.sessionId).toBe('9105')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9105')
     expect(sessionStorage.getItem(PAGE_ID_KEY)).toBe('page-lockerr')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-lockerr')).not.toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9105'))).not.toBeNull()
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
     expect(api.deleteHistory).not.toHaveBeenCalled()
   })
 
   it('锁占 1–2 次后第 3 次空闲（旧文档锁延迟释放）⇒ owner，绝不清空', async () => {
-    seedDuplicatedTab('tab-race', 'page-race')
+    seedDuplicatedTab('9106', 'page-race')
     const delayed = new FreeOnThirdProbeLockManager()
     Object.defineProperty(navigator, 'locks', { value: delayed, configurable: true })
 
@@ -242,43 +256,43 @@ describe('① 判据：复制页签与普通刷新必须被区别对待', () => 
     // 重试存在的意义：刷新时旧文档的锁可能尚未随文档销毁释放，不能早判复制
     expect(store.tabOwnership).toBe('owner')
     expect(clear).not.toHaveBeenCalled()
-    expect(store.sessionId).toBe('tab-race')
+    expect(store.sessionId).toBe('9106')
     expect(sessionStorage.getItem(PAGE_ID_KEY)).toBe('page-race')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-race')).not.toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9106'))).not.toBeNull()
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
-    expect(delayed.isHeld(SESSION_LOCK_PREFIX + 'tab-race')).toBe(true)
+    expect(delayed.isHeld(sessionLockName('9106'))).toBe(true)
   })
 })
 
 describe('② 确认复制之后：清一次 → 新 pageId → 新 AI 会话', () => {
   it('继承来的会话镜像、未提交草稿、业务页签键全部不继承；只留新的两个身份键', async () => {
-    seedDuplicatedTab('tab-copy', 'page-copy')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-copy')
+    seedDuplicatedTab('9101', 'page-copy')
+    locks.hold(sessionLockName('9101'))
 
     const store = useAiStore()
     await store.ensureTabOwnership()
 
-    expect(store.tabOwnership).toBe('duplicate')
+    expect(store.tabOwnership).toBe('owner')
     expect(store.messages).toEqual([])
     // 新会话 + 新页签身份：两者都独立于原值
-    expect(store.sessionId).not.toBe('tab-copy')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(store.sessionId)
+    expect(store.sessionId).not.toBe('9101')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(store.sessionId)
     expect(sessionStorage.getItem(PAGE_ID_KEY)).not.toBe('page-copy')
     expect(sessionStorage.getItem(PAGE_ID_KEY)).not.toBeNull()
     // 整份继承现场都不在了（含未提交草稿 —— 有意不继承）
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-copy')).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9101'))).toBeNull()
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).toBeNull()
     expect(sessionStorage.getItem('import-wizard-draft')).toBeNull()
     expect(sessionStorage.getItem('some-business-tab-state')).toBeNull()
-    // 清空后只留下本页签重建的两个键
+    // 清空后只留下本页签重建的键：身份 + 新 pageId + 新会话指针
     expect([...Array(sessionStorage.length)].map((_, i) => sessionStorage.key(i)).sort()).toEqual(
-      [PAGE_ID_KEY, SESSION_ID_KEY].sort()
+      [PAGE_ID_KEY, AI_IDENTITY_KEY, sessionIdStorageKey()].sort()
     )
   })
 
   it('只清本页签副本：localStorage、原页签的锁与广播、服务端会话都不动', async () => {
-    seedDuplicatedTab('tab-copy', 'page-copy')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-copy')
+    seedDuplicatedTab('9101', 'page-copy')
+    locks.hold(sessionLockName('9101'))
     const seen = watchOwnership()
 
     const store = useAiStore()
@@ -289,21 +303,21 @@ describe('② 确认复制之后：清一次 → 新 pageId → 新 AI 会话', 
     expect(localStorage.getItem('cm.locale')).toBe('zh-CN')
     expect(localStorage.getItem('cm.sidebar-width')).toBe('280')
     // 原页签的会话锁仍在它手里（本页签没有抢）
-    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'tab-copy')).toBe(true)
+    expect(locks.isHeld(sessionLockName('9101'))).toBe(true)
     // 原页签的服务端会话一个字都没删
     expect(api.deleteHistory).not.toHaveBeenCalled()
     // 广播只出现本页签新会话的 claim，没有替原会话认领
     const claims = seen.filter((message) => message.kind === 'claim')
     expect(claims).toHaveLength(1)
     expect(claims[0]).toMatchObject({ sessionId: store.sessionId })
-    expect(claims[0]?.sessionId).not.toBe('tab-copy')
+    expect(claims[0]?.sessionId).not.toBe('9101')
     // 新会话的锁由本页签持有
-    expect(locks.isHeld(SESSION_LOCK_PREFIX + store.sessionId)).toBe(true)
+    expect(locks.isHeld(sessionLockName(store.sessionId))).toBe(true)
   })
 
   it('复制页签随后刷新（已是普通页签）⇒ 不再清第二次', async () => {
-    seedDuplicatedTab('tab-copy', 'page-copy')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-copy')
+    seedDuplicatedTab('9101', 'page-copy')
+    locks.hold(sessionLockName('9101'))
 
     const first = useAiStore()
     await first.ensureTabOwnership()
@@ -311,7 +325,7 @@ describe('② 确认复制之后：清一次 → 新 pageId → 新 AI 会话', 
     const newPage = sessionStorage.getItem(PAGE_ID_KEY)
 
     // 刷新：旧文档销毁（锁释放），新文档从同一份 sessionStorage 起步
-    locks.dropMine(SESSION_LOCK_PREFIX + newSession)
+    locks.dropMine(sessionLockName(newSession))
     channels.clear()
     setActivePinia(createPinia())
     const clear = vi.spyOn(Storage.prototype, 'clear')
@@ -325,7 +339,7 @@ describe('② 确认复制之后：清一次 → 新 pageId → 新 AI 会话', 
   })
 
   it('bfcache 恢复（pagehide.persisted / pageshow）⇒ 不清，现场原样保留', async () => {
-    seedTab('tab-frozen')
+    seedTab('9107')
     sessionStorage.setItem(PAGE_ID_KEY, 'page-frozen')
     sessionStorage.setItem(FORM_DRAFT_PREFIX + 'call-1', JSON.stringify({ name: '冻结前草稿' }))
 
@@ -340,7 +354,7 @@ describe('② 确认复制之后：清一次 → 新 pageId → 新 AI 会话', 
 
     expect(clear).not.toHaveBeenCalled()
     expect(store.tabOwnership).toBe('owner')
-    expect(store.sessionId).toBe('tab-frozen')
+    expect(store.sessionId).toBe('9107')
     expect(sessionStorage.getItem(FORM_DRAFT_PREFIX + 'call-1')).not.toBeNull()
   })
 })

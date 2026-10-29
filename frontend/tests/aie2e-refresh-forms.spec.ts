@@ -33,6 +33,7 @@ import {
   toolPart,
   writeMirrorFixture
 } from './aie2e-helpers'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -270,6 +271,7 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue(emptySnapshot())
   api.getContext.mockResolvedValue(noContext())
   hangReattach()
+  installIdentityFixture()
 })
 
 afterEach(() => {

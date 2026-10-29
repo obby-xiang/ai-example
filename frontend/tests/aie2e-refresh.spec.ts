@@ -19,6 +19,8 @@ import {
   toolPart,
   writeMirrorFixture, nextSession, freshStoreWithHttp
 } from './aie2e-helpers'
+import { sessionIdStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -88,6 +90,7 @@ beforeEach(() => {
     found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [],
     awaitingExternal: false, archiveMaxSeq: 0
   })
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -455,24 +458,28 @@ describe('M-07（P2）：多页签同会话的降级（复制页签不得与原�
   it('复制页签换新会话：旧镜像清掉、新请求带新 sessionId（不与原页签同轮）', async () => {
     const store = await freshStore()
     store.sessionId = 's-original'
-    sessionStorage.setItem('ai-session-id', 's-original')
+    sessionStorage.setItem(sessionIdStorageKey(), 's-original')
     writeMirrorFixture('s-original', { messages: [textMessage('u', 'user', '原页签的问')] })
     store.messages = [textMessage('u', 'user', '原页签的问')]
 
     const next = store.adoptFreshSession()
 
+    // Task 4：本地不再造号 —— 换会话只清场并把指针抹掉，号由后端下一次发（`send` 时）
+    expect(next).toBe('')
     expect(next).not.toBe('s-original')
     expect(store.sessionId).toBe(next)
     expect(store.messages).toHaveLength(0)
     expect(readMirrorFixture('s-original')).toBeNull() // 旧会话镜像不继承
-    expect(sessionStorage.getItem('ai-session-id')).toBe(next)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBeNull()
 
     api.chat.mockImplementation((_request: unknown, handlers: FrameHandlers) => {
       handlers.onFrame(frame({ type: 'done', runId: 'run-m7', seq: 1, cancelled: false }))
       return Promise.resolve({ terminal: true })
     })
     await store.send('新页签自己的问题')
-    expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ sessionId: next })
+    expect(api.chat.mock.calls[0]?.[0]).toMatchObject({ sessionId: store.sessionId })
+    expect(store.sessionId).not.toBe('s-original')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(store.sessionId)
   }, 20_000)
 })
 

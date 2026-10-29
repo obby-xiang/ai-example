@@ -19,6 +19,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -74,6 +75,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   api.chat.mockResolvedValue(undefined)
+  installIdentityFixture()
 })
 
 function streamingMessage(text: string): ChatMessage {

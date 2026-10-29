@@ -15,6 +15,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -88,6 +89,7 @@ beforeEach(() => {
   api.frontendToolResult.mockResolvedValue({ accepted: true, duplicate: false })
   // 重连不 await（store 注释明示）：给一个永不结算的 Promise 即可，断言只关心"有没有发起"
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
+  installIdentityFixture()
 })
 
 /** 一条持三张 generative_form 待决段的消息（同批到达：一张活动 + 两张排队，用来锁顺序）。 */

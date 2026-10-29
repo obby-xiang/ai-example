@@ -1,8 +1,12 @@
 /**
  * 复制页签 / 所有权（RC-4）测试桩：从 `r166b-fixes.spec.ts` 的 FakeLockManager / FakeBroadcastChannel
  * 原样抽出，供本批新增的页签生命周期用例复用（jsdom 无 Web Locks / BroadcastChannel 实现）。
+ *
+ * <p>Task 4 起会话键/镜像键带 `tenantId:userId` 指纹：`seedTab()` 与 store 同一取键口
+ * （`sessionIdStorageKey` / `mirrorStorageKey`），因此"装了身份夹具 ⇒ 身份键、没装 ⇒ 裸键"两种
+ * 现场都对得上，不再由用例手拼裸键。
  */
-import { MIRROR_PREFIX, SESSION_ID_KEY } from '@/stores/ai'
+import { mirrorStorageKey, sessionIdStorageKey } from '@/utils/ai-identity'
 
 /**
  * Web Locks 桩：`held` = **别的页签**已持有的锁名（原页签存活时就该在里面）；
@@ -78,11 +82,16 @@ export class FakeBroadcastChannel {
   }
 }
 
-/** 预置一个"已有存量会话"的页签现场（sessionStorage 被复制页签继承的原样）。 */
+/**
+ * 预置一个"已有存量会话"的页签现场（sessionStorage 被复制页签继承的原样）。
+ *
+ * <p>键形跟随当前身份（装了 `installIdentityFixture()` ⇒ `ai-session-id:<t>:<u>` /
+ * `ai-mirror:<t>:<u>:<sid>`；未装身份 ⇒ 旧裸键），与 store 的读取口完全一致。
+ */
 export function seedTab(sessionId: string, withMirror = true): void {
-  sessionStorage.setItem(SESSION_ID_KEY, sessionId)
+  sessionStorage.setItem(sessionIdStorageKey(), sessionId)
   if (withMirror) {
-    sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
+    sessionStorage.setItem(mirrorStorageKey(sessionId), JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
   }
 }
 

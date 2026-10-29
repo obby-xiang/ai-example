@@ -20,7 +20,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { ErrorCode } from '@/types/api'
 import { applyLocale } from '@/locales'
-import { MIRROR_PREFIX, SESSION_ID_KEY, useAiStore } from '@/stores/ai'
+import { useAiStore } from '@/stores/ai'
+import { formDraftStorageKey, mirrorStorageKey, sessionIdStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -42,8 +44,9 @@ vi.mock('@/router', () => ({
   ROUTE_NAMES: new Proxy({}, { get: (_target, key) => String(key) })
 }))
 
-const OLD_SESSION = 'purged-session'
-const DRAFT_KEY = 'cm.ai.form.draft.call-9'
+/** 旧会话号：会话号契约是十进制长整（`normalizeSessionId` 只收正整数），故用数字串。 */
+const OLD_SESSION = '4101'
+const DRAFT_CALL_ID = 'call-9'
 const BUSINESS_KEY = 'import-wizard-draft'
 const LOCALE_KEY = 'cm.locale'
 const EXPANDED_KEY = 'ai-panel-expanded'
@@ -59,9 +62,9 @@ function purged(): ApiError {
 
 /** 旧会话的页签现场：会话 id + 镜像 + 与 AI 无关的业务键 / 展示偏好。 */
 function seedPurgedTab(): ReturnType<typeof useAiStore> {
-  sessionStorage.setItem(SESSION_ID_KEY, OLD_SESSION)
-  sessionStorage.setItem(MIRROR_PREFIX + OLD_SESSION, JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
-  sessionStorage.setItem(DRAFT_KEY, '{"region":"HB"}')
+  sessionStorage.setItem(sessionIdStorageKey(), OLD_SESSION)
+  sessionStorage.setItem(mirrorStorageKey(OLD_SESSION), JSON.stringify({ v: 2, savedAt: 1, messages: [] }))
+  sessionStorage.setItem(formDraftStorageKey(DRAFT_CALL_ID), '{"region":"HB"}')
   sessionStorage.setItem(BUSINESS_KEY, 'keep-business')
   sessionStorage.setItem(LOCALE_KEY, 'zh-CN')
   sessionStorage.setItem(EXPANDED_KEY, '1')
@@ -77,6 +80,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ sessionId: OLD_SESSION, count: 0, messages: [] })
   api.deleteHistory.mockResolvedValue({})
   api.cancel.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -96,13 +100,13 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
     // 换 id：内存与 sessionStorage 双写一致
     const nextId = store.sessionId
     expect(nextId).not.toBe(OLD_SESSION)
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(nextId)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(nextId)
     // 本次两条乐观消息（用户 + 空气泡）都不残留；清场走 adoptFreshSession
     expect(store.messages).toHaveLength(0)
     expect(store.loading).toBe(false)
     expect(store.activeRunId).toBeNull()
     // 旧会话镜像被移除（下一次刷新不会再把它读回来，也不会拿旧 id 复跑）
-    expect(sessionStorage.getItem(MIRROR_PREFIX + OLD_SESSION)).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey(OLD_SESSION))).toBeNull()
     // 通知：本地模板 + 中文译文（不回显后端中文原文时也不出现"新建对话后重试"这类后端措辞差异）
     expect(store.noticeCode).toBe('ai.notice.sessionPurged')
     expect(store.notice).toContain('已为你新建对话')
@@ -118,8 +122,8 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
 
     await store.send('再试一次')
 
-    // 批次6B（N10）：换会话按 draft 前缀 + 在场白名单清孤儿键（DRAFT_KEY 不在场）
-    expect(sessionStorage.getItem(DRAFT_KEY)).toBeNull()
+    // 批次6B（N10）：换会话按 draft 前缀 + 在场白名单清孤儿键（DRAFT_CALL_ID 不在场）
+    expect(sessionStorage.getItem(formDraftStorageKey(DRAFT_CALL_ID))).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
     expect(sessionStorage.getItem(LOCALE_KEY)).toBe('zh-CN')
     expect(sessionStorage.getItem(EXPANDED_KEY)).toBe('1')

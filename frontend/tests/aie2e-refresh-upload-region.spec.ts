@@ -14,6 +14,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 import { registerAiRegion, resetAiRegions } from '@/utils/ai-regions'
 import { resetUiRuntime } from '@/utils/ai-dom-tools'
 import type { ChatMessage } from '@/types/ai'
@@ -43,8 +45,6 @@ const UPLOAD_ARGS = JSON.stringify({ ref: 'import.upload.choose', accept: ['.xls
 const UPLOAD_ARGS_NO_REF = JSON.stringify({ accept: ['xlsx'] })
 
 let SESSION = ''
-
-const MIRROR_PREFIX = 'ai-mirror:'
 
 function snapshot(overrides: Record<string, unknown> = {}) {
   return {
@@ -139,6 +139,7 @@ beforeEach(() => {
   resetAiRegions()
   resetUiRuntime()
   setActivePinia(createPinia())
+  installIdentityFixture()
   for (const fn of Object.values(api)) {
     fn.mockReset()
   }
@@ -159,7 +160,7 @@ beforeEach(() => {
     usedTokens: 0, percent: null, source: 'none', estimated: false, breakdown: [],
     compaction: { level: 'none', compactedTurns: 0, lostTokens: 0, lastAtMs: null, reason: null, circuit: 'closed', fuseFails: 0 }
   })
-  expect(sessionStorage.getItem(MIRROR_PREFIX + SESSION)).toBeNull()
+  expect(sessionStorage.getItem(mirrorStorageKey(SESSION))).toBeNull()
 })
 
 /**

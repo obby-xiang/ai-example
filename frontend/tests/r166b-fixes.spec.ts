@@ -18,14 +18,13 @@ import type { ChatMessage, ToolPart } from '@/types/ai'
 import {
   LOCK_PROBE_ATTEMPTS,
   LOCK_PROBE_RETRY_MS,
-  MIRROR_PREFIX,
   OWNERSHIP_CHANNEL_NAME,
   OWNERSHIP_RELEASE_GRACE_MS,
   PAGE_ID_KEY,
-  SESSION_ID_KEY,
-  SESSION_LOCK_PREFIX,
   useAiStore
 } from '@/stores/ai'
+import { mirrorStorageKey, sessionIdStorageKey, sessionLockName } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import {
   channels,
   FakeBroadcastChannel,
@@ -117,6 +116,7 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -524,89 +524,89 @@ describe('RC-3：前端工具参数错误文案人话化（任何路径不内嵌
 
 describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChannel）', () => {
   it('①/② 锁空闲 ⇒ 按恢复处理：沿用存量会话 id、pageId 落盘、广播 claim', async () => {
-    seedTab('tab-restore')
+    seedTab('9401')
     const witness = new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME)
     const seen: unknown[] = []
     witness.onmessage = (event) => seen.push(event.data)
 
     const store = useAiStore()
-    expect(store.sessionId).toBe('tab-restore')
+    expect(store.sessionId).toBe('9401')
     await store.ensureTabOwnership()
 
     expect(store.tabOwnership).toBe('owner')
-    expect(store.sessionId).toBe('tab-restore')
+    expect(store.sessionId).toBe('9401')
     expect(sessionStorage.getItem(PAGE_ID_KEY)).toBeTruthy()
-    expect(seen).toEqual([{ kind: 'claim', sessionId: 'tab-restore', pageId: sessionStorage.getItem(PAGE_ID_KEY) }])
+    expect(seen).toMatchObject([{ kind: 'claim', sessionId: '9401', pageId: sessionStorage.getItem(PAGE_ID_KEY), tenantId: 7, userId: 71 }])
 
     // 幂等：判定过就不再重复探活/换身份
     await store.ensureTabOwnership()
-    expect(store.sessionId).toBe('tab-restore')
+    expect(store.sessionId).toBe('9401')
     expect(seen).toHaveLength(1)
   })
 
   it('② 锁被占 ⇒ 复制页签起新会话：不接管原会话、清继承镜像、轮换 pageId', async () => {
-    seedTab('tab-original')
+    seedTab('9402')
     sessionStorage.setItem(PAGE_ID_KEY, 'page-original')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-original')
+    locks.hold(sessionLockName('9402'))
 
     const store = useAiStore()
-    expect(store.sessionId).toBe('tab-original')
+    expect(store.sessionId).toBe('9402')
     await store.ensureTabOwnership()
 
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(store.sessionId).not.toBe('tab-original')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(store.sessionId)
+    expect(store.tabOwnership).toBe('owner')
+    expect(store.sessionId).not.toBe('9402')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(store.sessionId)
     // 原页签的服务端记忆一个字都没动（复制页签不得删别人的会话）
     expect(api.deleteHistory).not.toHaveBeenCalled()
     // 继承来的镜像引用已清、pageId 已轮换（同源广播里两个页签必须可区分）
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-original')).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('9402'))).toBeNull()
     expect(sessionStorage.getItem(PAGE_ID_KEY)).not.toBe('page-original')
   })
 
   it('② 环境无 Web Locks ⇒ 按恢复处理（同步收口：不返回 promise，不丢现场）', async () => {
     Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
-    seedTab('tab-nolocks')
+    seedTab('9403')
     const store = useAiStore()
     expect(store.ensureTabOwnership()).toBeNull()
     expect(store.tabOwnership).toBe('unsupported')
-    expect(store.sessionId).toBe('tab-nolocks')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'tab-nolocks')).not.toBeNull()
+    expect(store.sessionId).toBe('9403')
+    expect(sessionStorage.getItem(mirrorStorageKey('9403'))).not.toBeNull()
   })
 
-  it('③ 原页签关闭广播 ⇒ 空白复制页签**宽限后**接手原会话（换回原 id + 读回历史）', async () => {
-    seedTab('tab-handover')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-handover')
+  it('③ 原页签关闭广播 ⇒ 复制页签**不**接手原会话（Task 4：发号成功即 owner，不提供接回入口）', async () => {
+    seedTab('9404')
+    locks.hold(sessionLockName('9404'))
 
     const store = useAiStore()
     await store.ensureTabOwnership()
     const ownSession = store.sessionId
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(ownSession).not.toBe('tab-handover')
+    expect(store.tabOwnership).toBe('owner')
+    expect(ownSession).not.toBe('9404')
 
     // 原页签关闭：锁随之释放 + pagehide 广播 released
-    locks.release(SESSION_LOCK_PREFIX + 'tab-handover')
+    locks.release(sessionLockName('9404'))
     new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME).postMessage({
       kind: 'released',
-      sessionId: 'tab-handover',
+      sessionId: '9404',
       pageId: 'page-original'
     })
     // 宽限内不抢：原页签可能只是刷新，回来后会重播 claim（见 tab-ownership-lifecycle.spec.ts）
     await flushPromises()
     expect(store.sessionId).toBe(ownSession)
 
-    // 宽限到期 → 二次探活拿到锁 → 接手
     await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
-    expect(store.sessionId).toBe('tab-handover')
+    // 宽限到期也不接手：本页签已持有自己的会话与锁，原会话只是被释放
+    expect(store.sessionId).toBe(ownSession)
     expect(store.tabOwnership).toBe('owner')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe('tab-handover')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + ownSession)).toBeNull()
-    expect(api.history).toHaveBeenCalledWith('tab-handover')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(ownSession)
+    expect(api.history).not.toHaveBeenCalledWith('9404')
+    expect(locks.isHeld(sessionLockName('9404'))).toBe(false)
   })
 
   it('③ 锁仍被占 ⇒ 广播不可信，复制页签不接管原会话（宽限之后也不接管）', async () => {
-    seedTab('tab-locked')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-locked')
+    seedTab('9405')
+    locks.hold(sessionLockName('9405'))
 
     const store = useAiStore()
     await store.ensureTabOwnership()
@@ -615,62 +615,62 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     // 广播到达但锁没释放（例：旧页签只是隐藏/误报）⇒ 以锁为准
     new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME).postMessage({
       kind: 'released',
-      sessionId: 'tab-locked',
+      sessionId: '9405',
       pageId: 'page-original'
     })
     await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
     expect(store.sessionId).toBe(ownSession)
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(api.history).not.toHaveBeenCalledWith('tab-locked')
+    expect(store.tabOwnership).toBe('owner')
+    expect(api.history).not.toHaveBeenCalledWith('9405')
   })
 
   it('③ 复制页签已产生内容 ⇒ 不接手（不把用户眼前内容换掉）', async () => {
-    seedTab('tab-content')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-content')
+    seedTab('9406')
+    locks.hold(sessionLockName('9406'))
 
     const store = useAiStore()
     await store.ensureTabOwnership()
     const ownSession = store.sessionId
     store.recordUserMessage('我这边已经说话了')
 
-    locks.release(SESSION_LOCK_PREFIX + 'tab-content')
+    locks.release(sessionLockName('9406'))
     new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME).postMessage({
       kind: 'released',
-      sessionId: 'tab-content',
+      sessionId: '9406',
       pageId: 'page-original'
     })
     await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
     expect(store.sessionId).toBe(ownSession)
-    expect(store.tabOwnership).toBe('duplicate')
+    expect(store.tabOwnership).toBe('owner')
   })
 
   it('③ 原页签离开（pagehide）⇒ 广播 released；锁不在 pagehide 同步释放（刷新要能立刻认领）', async () => {
-    seedTab('tab-leave')
+    seedTab('9407')
     const witness = new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME)
     const seen: unknown[] = []
     witness.onmessage = (event) => seen.push(event.data)
 
     const store = useAiStore()
     await store.ensureTabOwnership()
-    expect(seen).toEqual([{ kind: 'claim', sessionId: 'tab-leave', pageId: sessionStorage.getItem(PAGE_ID_KEY) }])
+    expect(seen).toMatchObject([{ kind: 'claim', sessionId: '9407', pageId: sessionStorage.getItem(PAGE_ID_KEY), tenantId: 7, userId: 71 }])
 
     window.dispatchEvent(new Event('pagehide'))
     await flushPromises()
     expect(seen).toHaveLength(2)
-    expect(seen[1]).toMatchObject({ kind: 'released', sessionId: 'tab-leave' })
+    expect(seen[1]).toMatchObject({ kind: 'released', sessionId: '9407' })
     // 刷新场景：新文档要能马上拿到同一把锁 ⇒ 旧文档不在这里同步释放
-    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'tab-leave')).toBe(true)
+    expect(locks.isHeld(sessionLockName('9407'))).toBe(true)
 
     // 文档真销毁（等价面：宽限到期后旧文档自己的清理）⇒ 另一个页签可以接手同一个会话
     await wait(OWNERSHIP_RELEASE_GRACE_MS + 200)
-    expect(locks.isHeld(SESSION_LOCK_PREFIX + 'tab-leave')).toBe(false)
+    expect(locks.isHeld(sessionLockName('9407'))).toBe(false)
 
     setActivePinia(createPinia())
     const next = useAiStore()
     await next.ensureTabOwnership()
     expect(next.tabOwnership).toBe('owner')
-    expect(next.sessionId).toBe('tab-leave')
+    expect(next.sessionId).toBe('9407')
   })
 })

@@ -14,6 +14,7 @@
  *    未发帧条目等实时帧到达；多卡批次中间态不产生任何「同步中/失败」提示。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { createPinia, setActivePinia } from 'pinia'
 import type { AiRunCurrent, AiRunCurrentEntry, ChatMessage } from '@/types/ai'
 
@@ -105,6 +106,7 @@ beforeEach(() => {
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.confirm.mockResolvedValue({})
   api.frontendToolResult.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {

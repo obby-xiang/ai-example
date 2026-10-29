@@ -17,6 +17,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { loadFormDraft, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema } from '@/types/form-schema'
 import type { AiRunCurrent, AiRunCurrentEntry, ChatMessage } from '@/types/ai'
@@ -58,6 +59,7 @@ beforeEach(() => {
   api.deleteHistory.mockResolvedValue({})
   api.confirm.mockResolvedValue({ accepted: true, duplicate: false })
   api.frontendToolResult.mockResolvedValue({ accepted: true, duplicate: false })
+  installIdentityFixture()
 })
 
 function message(): ChatMessage {

@@ -22,6 +22,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { resolveSheetContext } from '@/utils/frontend-tools'
 import { applyFrameToParts } from '@/utils/parts'
@@ -247,6 +248,7 @@ beforeEach(async () => {
   })
   api.history.mockResolvedValue({ count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
+  installIdentityFixture()
   grid = await mountGrid()
 })
 

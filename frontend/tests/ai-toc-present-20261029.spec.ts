@@ -10,6 +10,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { applyLocale } from '@/locales'
 import zhCN from '@/locales/zh-CN.json'
@@ -132,6 +133,7 @@ beforeEach(() => {
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.confirm.mockResolvedValue(undefined)
   applyLocale('zh-CN')
+  installIdentityFixture()
 })
 
 describe('1 · 同一事实只留一个提示面', () => {

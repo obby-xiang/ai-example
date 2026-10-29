@@ -15,6 +15,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
@@ -101,6 +102,7 @@ beforeEach(() => {
   const workspace = useWorkspaceStore()
   workspace.page = 'tasks'
   workspace.pageId = 'tasks'
+  installIdentityFixture()
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {

@@ -34,6 +34,8 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 // 该用例自己的 timeout 预算（实测：首条超时、同文件后续用例 10–40ms 通过）。这里放到收集期
 // 付掉（收集不受单用例 timeout 约束），用例内动态 import 只剩重执行（~20ms）；断言与 timeout 不变。
 import '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 
 
 function assistantMessage(id: string, text: string, extra: Partial<ChatMessage> = {}): ChatMessage {
@@ -108,6 +110,7 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({ cancelled: true, alreadyCancelled: false })
   api.feedbackSubmit.mockResolvedValue({ saved: true })
   api.deleteHistory.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 afterEach(async () => {
@@ -173,7 +176,7 @@ describe('截断专项 · 实时流：done.truncated ⇒ 消息级标记', () =>
     store.handleFrame({ type: 'done', runId: 'run-mirror', seq: 9, truncated: true } as never)
     store.writeMirrorNow()
 
-    const raw = sessionStorage.getItem('ai-mirror:s-trunc-mirror')
+    const raw = sessionStorage.getItem(mirrorStorageKey('s-trunc-mirror'))
     expect(raw).toBeTruthy()
     const mirror = JSON.parse(raw as string) as { messages: Array<{ id: string; truncated?: boolean }> }
     expect(mirror.messages.find((message) => message.id === 'a-1')?.truncated).toBe(true)

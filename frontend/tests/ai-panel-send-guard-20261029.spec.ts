@@ -12,7 +12,9 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { applyLocale } from '@/locales'
-import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
+import { useAiStore } from '@/stores/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { ChatMessage } from '@/types/ai'
 import { createFakeChat, type FakeChat } from './ai-fake-transport'
 
@@ -72,6 +74,7 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   fakeChat = createFakeChat()
   api.chat.mockImplementation(fakeChat.impl)
+  installIdentityFixture()
 })
 
 /**
@@ -279,7 +282,7 @@ describe('M-16 编辑重跑的失败还原', { timeout: 20_000 }, () => {
     expect(store.messages[store.messages.length - 1]?.id).not.toBe('a-2')
 
     // 现场写进镜像：刷新后不应再丢
-    const mirror = sessionStorage.getItem(`${MIRROR_PREFIX}${store.sessionId}`)
+    const mirror = sessionStorage.getItem(mirrorStorageKey(store.sessionId))
     expect(mirror).toBeTruthy()
     expect(mirror).toContain('旧回答一')
     expect(mirror).toContain('旧回答二')

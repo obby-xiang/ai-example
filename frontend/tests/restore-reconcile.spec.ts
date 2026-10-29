@@ -31,6 +31,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 // 该用例自己的 timeout 预算（实测：首条超时、同文件后续用例 10–40ms 通过）。这里放到收集期
 // 付掉（收集不受单用例 timeout 约束），用例内动态 import 只剩重执行（~20ms）；断言与 timeout 不变。
 import '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 
 /** 手控 deferred：把 store 停在 runs/current 的 await 上，测试独占该窗口。 */
@@ -90,6 +91,7 @@ beforeEach(() => {
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 describe('restoreSuspendedSnapshot 的 await 后二次对账', () => {

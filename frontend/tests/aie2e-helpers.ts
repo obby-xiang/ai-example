@@ -8,12 +8,13 @@
 import { vi } from 'vitest'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 
 /** store 实例类型（避免在夹具里静态 import store，见 freshStore 的模块图说明）。 */
 type AiStore = ReturnType<(typeof import('@/stores/ai'))['useAiStore']>
 
-/** 与 store 同源的镜像键前缀（`MIRROR_PREFIX`；生产读点只有 store 自己）。 */
-export const MIRROR_PREFIX = 'ai-mirror:'
+/** 与 store 同源的镜像键（`mirrorStorageKey`；装了身份夹具即带 `tenant:user` 指纹）。 */
+export { AI_MIRROR_PREFIX as MIRROR_PREFIX } from '@/utils/ai-identity'
 
 /**
  * 每例唯一的会话 id。
@@ -128,7 +129,7 @@ export function writeMirrorFixture(
     runSeq?: Record<string, number>
   }
 ): void {
-  sessionStorage.setItem(MIRROR_PREFIX + sessionId, JSON.stringify({
+  sessionStorage.setItem(mirrorStorageKey(sessionId), JSON.stringify({
     v: 2,
     savedAt: 1,
     lastRunId: shape.lastRunId ?? null,
@@ -154,7 +155,7 @@ export function readMirrorFixture(sessionId: string): {
   runSeq?: Record<string, number>
   messages?: ChatMessage[]
 } | null {
-  const raw = sessionStorage.getItem(MIRROR_PREFIX + sessionId)
+  const raw = sessionStorage.getItem(mirrorStorageKey(sessionId))
   return raw ? JSON.parse(raw) : null
 }
 

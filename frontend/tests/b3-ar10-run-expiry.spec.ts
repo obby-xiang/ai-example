@@ -13,6 +13,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
 
 const api = vi.hoisted(() => ({
@@ -76,6 +77,7 @@ beforeEach(() => {
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   applyLocale('zh-CN')
+  installIdentityFixture()
 })
 
 describe('AR-10 · 运行态 24h 只可见化', () => {

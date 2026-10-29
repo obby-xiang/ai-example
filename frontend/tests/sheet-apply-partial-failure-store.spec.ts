@@ -9,6 +9,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { applyFrameToParts } from '@/utils/parts'
 import { SHEET_WRITE_CHUNK_ROWS } from '@/utils/sheet-tools'
@@ -91,6 +92,7 @@ beforeEach(() => {
     fields: sheet.ctx.fields,
     adapter: sheet.ctx.adapter
   }))
+  installIdentityFixture()
 })
 
 describe('R1 应用中途异常的回执', () => {

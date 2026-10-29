@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { applyLocale } from '@/locales'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -44,6 +45,7 @@ beforeEach(() => {
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.chat.mockImplementation(() => new Promise(() => {}))
   applyLocale('zh-CN')
+  installIdentityFixture()
 })
 
 describe('AR-10 · 到期后不静默', () => {

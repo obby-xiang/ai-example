@@ -16,6 +16,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import type { ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -74,6 +75,7 @@ beforeEach(() => {
   api.chat.mockResolvedValue(undefined)
   api.confirm.mockResolvedValue(undefined)
   api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
+  installIdentityFixture()
 })
 
 // ── 夹具 ─────────────────────────────────────────────────────────────────────

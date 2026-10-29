@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { emitWorkspaceEvent } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
@@ -30,6 +31,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  installIdentityFixture()
   useAiStore().startWorkspaceSync()
 })
 

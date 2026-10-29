@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { applyLocale } from '@/locales'
 import { translate } from '@/composables/useCopy'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { ToolPart } from '@/types/ai'
 
 const api = vi.hoisted(() => ({
@@ -34,6 +35,7 @@ beforeEach(() => {
     archiveMaxSeq: 0
   })
   api.getContext.mockResolvedValue({ source: 'none' })
+  installIdentityFixture()
 })
 
 describe('历史工具结果用户文案代码', () => {

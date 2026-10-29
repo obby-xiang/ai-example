@@ -14,6 +14,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import type { ToolPreflight } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -82,6 +83,7 @@ beforeEach(() => {
     checkedAt: '2026-01-01T00:00:00Z'
   })
   api.history.mockResolvedValue({ sessionId: 'sess', count: 0, messages: [] })
+  installIdentityFixture()
 })
 
 function hitlMessage(part: ToolPart): ChatMessage {

@@ -17,6 +17,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { ErrorCode } from '@/types/api'
 import { GATE_SYNC_GRACE_MS, useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { AiRunCurrent, AiRunCurrentEntry, ChatMessage } from '@/types/ai'
 
 const api = vi.hoisted(() => ({
@@ -47,6 +48,7 @@ beforeEach(() => {
   api.confirm.mockResolvedValue({ accepted: true, duplicate: false })
   api.frontendToolResult.mockResolvedValue({ accepted: true, duplicate: false })
   api.runsCurrent.mockResolvedValue(noSuspension())
+  installIdentityFixture()
 })
 
 afterEach(() => {

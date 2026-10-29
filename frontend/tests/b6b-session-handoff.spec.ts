@@ -17,12 +17,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
+import { useAiStore } from '@/stores/ai'
 import {
-  MIRROR_PREFIX,
-  SESSION_ID_KEY,
-  SESSION_LOCK_PREFIX,
-  useAiStore
-} from '@/stores/ai'
+  AI_IDENTITY_KEY,
+  mirrorStorageKey,
+  sessionIdStorageKey,
+  sessionLockName
+} from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { formDraftKey } from '@/utils/form-draft'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import {
@@ -73,6 +75,7 @@ beforeEach(() => {
   api.deleteHistory.mockResolvedValue({})
   api.cancel.mockResolvedValue({})
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -117,9 +120,9 @@ function partOf(store: ReturnType<typeof useAiStore>, toolCallId: string): ToolP
 }
 
 describe('复制页签：静默换新会话，不接回原会话', () => {
-  it('判为 duplicate ⇒ 新会话且 notice/noticeCode 为空，旧轮状态不跨会话', async () => {
-    seedTab('tab-copy-b6b')
-    locks.hold(SESSION_LOCK_PREFIX + 'tab-copy-b6b')
+  it('判为复制 ⇒ 换到自己的新会话且 notice/noticeCode 为空，旧轮状态不跨会话', async () => {
+    seedTab('9301')
+    locks.hold(sessionLockName('9301'))
 
     const store = useAiStore()
     store.lastRoundOutcome = 'error'
@@ -128,8 +131,8 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
 
     await store.ensureTabOwnership()
 
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(store.sessionId).not.toBe('tab-copy-b6b')
+    expect(store.tabOwnership).toBe('owner')
+    expect(store.sessionId).not.toBe('9301')
     expect(store.notice).toBeNull()
     expect(store.noticeCode).toBeNull()
     expect(store.noticeSeverity).toBe('info')
@@ -137,14 +140,14 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
     expect(store.contextSync).toBeNull()
     expect(store.lastUiEventResult).toBeNull()
     // 不接回原会话：不读原历史、不把旧 id 写回本页签
-    expect(api.history).not.toHaveBeenCalledWith('tab-copy-b6b')
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(store.sessionId)
+    expect(api.history).not.toHaveBeenCalledWith('9301')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(store.sessionId)
   })
 })
 
 describe('新会话清场：工作区 chip / ui_event 回执 / 轮次结局不跨会话', () => {
   it('adoptFreshSession ⇒ contextSync、lastUiEventResult、lastRoundOutcome 复位，notice 级别自成', () => {
-    seedTab('tab-fresh-b6b')
+    seedTab('9302')
     const store = useAiStore()
     store.lastRoundOutcome = 'error'
     store.contextSync = { kind: 'workspace_changed', at: 1 } as never
@@ -195,22 +198,22 @@ describe('陈旧确认卡：按码给人话、落只读、不回可点', () => {
 
 describe('换会话清草稿孤儿键：前缀 + 在场白名单，禁止 clear', () => {
   it('adoptFreshSession ⇒ 清光本页签草稿，业务键与别的会话镜像不动', () => {
-    seedTab('tab-draft-b6b')
+    seedTab('9303')
     const store = useAiStore()
     sessionStorage.setItem(formDraftKey('stale-1'), '{"a":1}')
     sessionStorage.setItem(formDraftKey('stale-2'), '{"b":2}')
     sessionStorage.setItem('import-wizard-draft', '{"step":2}')
-    sessionStorage.setItem(MIRROR_PREFIX + 'other-session', '{"messages":[]}')
+    sessionStorage.setItem(mirrorStorageKey('other-session'), '{"messages":[]}')
 
     store.adoptFreshSession()
 
     expect(sessionStorage.getItem(formDraftKey('stale-1'))).toBeNull()
     expect(sessionStorage.getItem(formDraftKey('stale-2'))).toBeNull()
     expect(sessionStorage.getItem('import-wizard-draft')).toBe('{"step":2}')
-    expect(sessionStorage.getItem(MIRROR_PREFIX + 'other-session')).toBe('{"messages":[]}')
+    expect(sessionStorage.getItem(mirrorStorageKey('other-session'))).toBe('{"messages":[]}')
     // 只由前缀键决定删除范围：不是 sessionStorage.clear()
     expect([...Array(sessionStorage.length)].map((_, i) => sessionStorage.key(i)).sort()).toEqual(
-      ['ai-session-id', 'import-wizard-draft', MIRROR_PREFIX + 'other-session'].sort()
+      [AI_IDENTITY_KEY, 'import-wizard-draft', mirrorStorageKey('other-session')].sort()
     )
   })
 
@@ -247,7 +250,7 @@ describe('换会话清草稿孤儿键：前缀 + 在场白名单，禁止 clear'
 
 describe('批次2/4/5 既有语义不回退（本批只写不跑）', () => {
   it('换会话仍清活动表单与排队表单（批次4），且恢复错误态不残留（批次2）', () => {
-    seedTab('tab-compat-b6b')
+    seedTab('9304')
     const store = useAiStore()
     store.activeForm = { toolCallId: 'gf-1' } as never
     store.queuedForms = [{ toolCallId: 'gf-2' } as never]

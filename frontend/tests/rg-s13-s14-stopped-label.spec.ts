@@ -38,6 +38,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 // 该用例自己的 timeout 预算（实测：首条超时、同文件后续用例 10–40ms 通过）。这里放到收集期
 // 付掉（收集不受单用例 timeout 约束），用例内动态 import 只剩重执行（~20ms）；断言与 timeout 不变。
 import '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import '@/components/AiPanel/AiPanel.vue'
 
 
@@ -140,6 +141,7 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({ cancelled: true, alreadyCancelled: false })
   api.feedbackSubmit.mockResolvedValue({ saved: true })
   api.deleteHistory.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 afterEach(() => {

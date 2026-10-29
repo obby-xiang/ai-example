@@ -23,6 +23,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { AiRunCurrent, ChatMessage, ToolPart, ToolRunStatus } from '@/types/ai'
 import { applyFrameToParts, deriveProjections, frontendResultStatus, upsertToolPart } from '@/utils/parts'
 import { frameStatusToPendingStatus, useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -62,6 +63,7 @@ beforeEach(() => {
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.frontendToolResult.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 /** 消息上的工具段序列。 */

@@ -21,6 +21,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, getActivePinia, setActivePinia } from 'pinia'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
@@ -88,6 +89,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   api.chat.mockResolvedValue(undefined)
+  installIdentityFixture()
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {

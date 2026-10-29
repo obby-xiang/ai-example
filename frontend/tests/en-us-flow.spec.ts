@@ -20,6 +20,7 @@ import type { ChatMessage, MessagePart } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import i18n, { applyLocale } from '@/locales'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 const api = vi.hoisted(() => ({
@@ -104,6 +105,7 @@ beforeEach(() => {
   const workspace = useWorkspaceStore(pinia)
   workspace.page = 'tasks'
   workspace.pageId = 'tasks'
+  installIdentityFixture()
 })
 
 afterEach(() => {

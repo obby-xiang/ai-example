@@ -22,7 +22,9 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
-import { SESSION_ID_KEY, useAiStore } from '@/stores/ai'
+import { useAiStore } from '@/stores/ai'
+import { sessionIdStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { nextTick } from 'vue'
 
 const api = vi.hoisted(() => ({
@@ -70,6 +72,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ sessionId: 'x', count: 0, messages: [] })
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [], awaitingExternal: false, archiveMaxSeq: 0 })
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -238,14 +241,18 @@ describe('R-166 口径③：409 之后的瞬态与结局帧收敛', () => {
 
 describe('RC-4 口径⑤（R-166B 替换后）：本文件的页签判据锁已迁出', () => {
   it('存量会话 id 一律先按恢复取用（复制品判定交给 Web Locks 三层握手）', () => {
-    sessionStorage.setItem(SESSION_ID_KEY, 'tab-kept')
-    expect(useAiStore().sessionId).toBe('tab-kept')
+    sessionStorage.setItem(sessionIdStorageKey(), '9001')
+    expect(useAiStore().sessionId).toBe('9001')
   })
 
-  it('无存量 id ⇒ 建新 id 并写盘', () => {
-    const created = useAiStore().sessionId
+  it('无存量 id ⇒ 由后端发号并写到身份键下（不再本地造号）', async () => {
+    installIdentityFixture({ sessionId: '' })
+    const store = useAiStore()
+    expect(store.sessionId).toBe('')
+    const created = await store.ensureSession()
     expect(created.length).toBeGreaterThan(0)
-    expect(sessionStorage.getItem(SESSION_ID_KEY)).toBe(created)
+    expect(store.sessionId).toBe(created)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(created)
   })
 })
 

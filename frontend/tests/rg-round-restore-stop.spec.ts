@@ -28,8 +28,9 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
-/** 与 store 同源的镜像键前缀（`MIRROR_PREFIX` 导出只为测试可读，生产读点只有 store 自己）。 */
-const MIRROR_PREFIX = 'ai-mirror:'
+/** 与 store 同源的镜像键（`mirrorStorageKey`；身份模式下带 `tenant:user` 指纹）。 */
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 function mirrorOf(sessionId: string): {
   messages: Array<{ id: string; role: string; content: string; parts: unknown[]; stopped?: boolean }>
@@ -37,7 +38,7 @@ function mirrorOf(sessionId: string): {
   runSeq?: Record<string, number>
   lastRunId?: string | null
 } | null {
-  const raw = sessionStorage.getItem(MIRROR_PREFIX + sessionId)
+  const raw = sessionStorage.getItem(mirrorStorageKey(sessionId))
   return raw ? JSON.parse(raw) : null
 }
 
@@ -129,6 +130,7 @@ beforeEach(() => {
     found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [],
     awaitingExternal: false, archiveMaxSeq: 0
   })
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -140,7 +142,7 @@ describe('批G · G2：在途轮刷新 ⇒ 静默全量重放续收', () => {
   it('RUNNING 快照 + 镜像在途：复用宿主消息、清空其段、lastSeq=0 重放，全程无提示', async () => {
     const store = await freshStore()
     store.sessionId = 's-g2'
-    sessionStorage.setItem(MIRROR_PREFIX + 's-g2', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('s-g2'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-g2',
@@ -221,7 +223,7 @@ describe('批G · G3：历史 + 未被历史覆盖的镜像在途轮合并', () 
   it('历史只有 USER（开轮即写入记忆）时，镜像里在途的助手正文与卡不被整替抹掉', async () => {
     const store = await freshStore()
     store.sessionId = 's-g3'
-    sessionStorage.setItem(MIRROR_PREFIX + 's-g3', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('s-g3'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-g3',
@@ -264,7 +266,7 @@ describe('批G · G3：历史 + 未被历史覆盖的镜像在途轮合并', () 
   it('历史已收下这一轮回答 ⇒ 不补镜像（防双份）', async () => {
     const store = await freshStore()
     store.sessionId = 's-g3b'
-    sessionStorage.setItem(MIRROR_PREFIX + 's-g3b', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('s-g3b'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-g3b',

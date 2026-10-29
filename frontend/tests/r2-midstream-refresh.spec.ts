@@ -23,6 +23,8 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import type { ChatMessage } from '@/types/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -39,8 +41,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
-/** 与 store 同源的镜像键前缀（`MIRROR_PREFIX`，生产读点只有 store 自己）。 */
-const MIRROR_PREFIX = 'ai-mirror:'
+/** 与 store 同源的镜像键（`mirrorStorageKey`；身份模式下带 `tenant:user` 指纹）。 */
 const SESSION = 's-r2'
 
 interface MirrorFixture {
@@ -51,7 +52,7 @@ interface MirrorFixture {
 }
 
 function mirrorOf(sessionId = SESSION): MirrorFixture | null {
-  const raw = sessionStorage.getItem(MIRROR_PREFIX + sessionId)
+  const raw = sessionStorage.getItem(mirrorStorageKey(sessionId))
   return raw ? (JSON.parse(raw) as MirrorFixture) : null
 }
 
@@ -158,6 +159,7 @@ beforeEach(() => {
     awaitingExternal: false,
     archiveMaxSeq: 0
   })
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -170,7 +172,7 @@ describe('R2 修 1：启动期不得用空态覆盖持久化镜像', () => {
     const store = await freshStore()
     store.sessionId = SESSION
     sessionStorage.setItem(
-      MIRROR_PREFIX + SESSION,
+      mirrorStorageKey(SESSION),
       JSON.stringify({
         v: 2,
         savedAt: 1,
@@ -203,7 +205,7 @@ describe('R2 修 1：启动期不得用空态覆盖持久化镜像', () => {
     const store = await freshStore()
     store.sessionId = SESSION
     sessionStorage.setItem(
-      MIRROR_PREFIX + SESSION,
+      mirrorStorageKey(SESSION),
       JSON.stringify({
         v: 2,
         savedAt: 1,
@@ -268,7 +270,7 @@ describe('R2 修 2：在途轮的宿主只认本轮，绝不回落上一轮', ()
     store.sessionId = SESSION
     // 真机形态：send() 一落用户气泡就写镜像（leading 立即写），此刻还没有助手消息
     sessionStorage.setItem(
-      MIRROR_PREFIX + SESSION,
+      mirrorStorageKey(SESSION),
       JSON.stringify({
         v: 2,
         savedAt: 1,
@@ -304,7 +306,7 @@ describe('R2 修 2：在途轮的宿主只认本轮，绝不回落上一轮', ()
     const store = await freshStore()
     store.sessionId = SESSION
     sessionStorage.setItem(
-      MIRROR_PREFIX + SESSION,
+      mirrorStorageKey(SESSION),
       JSON.stringify({
         v: 2,
         savedAt: 1,

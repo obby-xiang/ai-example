@@ -29,6 +29,7 @@ vi.mock('@/stores/task', () => ({
 }))
 
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const SUMMARY = '发布作业 #42 校验冲突明细：\n1. DEF_A#R1：版本冲突\n（共 1 处）'
 
@@ -68,6 +69,7 @@ beforeEach(() => {
   api.reattachRun.mockReset()
   watchPublishOutcome.mockClear()
   clearPublishToolLinks()
+  installIdentityFixture()
 })
 
 describe('R-155：注册表 + 冲突明细落工具段 reason', () => {

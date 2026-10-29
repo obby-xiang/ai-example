@@ -20,6 +20,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { toSseFrame } from '@/types/sse'
 
 const api = vi.hoisted(() => ({
@@ -54,6 +55,7 @@ beforeEach(() => {
   api.health.mockResolvedValue({ available: false, code: 'AI_UNAVAILABLE', checkedAt: '2026-01-01T00:00:00Z' })
   api.history.mockResolvedValue({ sessionId: 's-1', messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false })
+  installIdentityFixture()
 })
 
 // ── ① 帧解析 ───────────────────────────────────────────────────────────────

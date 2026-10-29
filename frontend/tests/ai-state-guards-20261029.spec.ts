@@ -17,6 +17,7 @@ import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { AiHistory, AiRunCurrent, ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import type { SseFrameHandlers } from '@/api/sse'
@@ -98,6 +99,7 @@ beforeEach(() => {
   api.deleteHistory.mockResolvedValue({})
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
   api.frontendToolResult.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 afterEach(() => {

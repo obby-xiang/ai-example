@@ -10,7 +10,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart, ToolPart } from '@/types/ai'
-import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
+import { useAiStore } from '@/stores/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 // 镜像迁移用例要走 loadHistory：把后端两个取数端点桩掉（其余用例不碰 API）
 // B1（2026-10-20）：决策后重连收流会调 reattachRun —— 桩件保持"在跑"（永不结算）
@@ -24,6 +26,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  installIdentityFixture()
 })
 
 /** 把 parts 里的工具段抽成可与 toolRuns 对账的投影（字段口径两侧同名）。 */
@@ -240,7 +243,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     const store = useAiStore()
     const sid = store.sessionId
     // v1 镜像（无 v、无 parts）：正文 + 一条工具卡 + 一条与之同 toolCallId 的待决条目
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       savedAt: 1,
       lastRunId: 'run-k',
       messages: [
@@ -288,7 +291,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     })
 
     // 立即回写：镜像已是 v2 且带 parts（不回写则下次刷新又迁一遍）
-    const written = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
+    const written = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
     expect(written.v).toBe(2)
     expect(written.messages[1].parts).toHaveLength(2)
     // 批2：appliedSeqs（seq 幂等记账）是内部字段，writeMirror 的 Pick 不含它 —— 不入镜像
@@ -300,7 +303,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     store.messages = []
     await store.loadHistory()
     expect(store.messages[1]?.parts).toHaveLength(2)
-    const again = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
+    const again = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
     expect(again.savedAt).toBe(savedAt)
   })
 })

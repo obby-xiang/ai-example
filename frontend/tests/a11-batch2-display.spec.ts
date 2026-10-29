@@ -17,6 +17,7 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart, PendingToolCall } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
 import { buildErrorCard } from '@/utils/error-card'
 
@@ -123,6 +124,7 @@ beforeEach(() => {
   api.history.mockResolvedValue({ messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false })
   applyLocale('zh-CN')
+  installIdentityFixture()
 })
 
 afterEach(() => {

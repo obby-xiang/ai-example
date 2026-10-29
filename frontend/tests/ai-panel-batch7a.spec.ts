@@ -9,6 +9,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -173,6 +174,7 @@ beforeEach(() => {
   })
   api.feedbackSubmit.mockResolvedValue({ saved: true, cancelled: false })
   api.confirm.mockResolvedValue(undefined)
+  installIdentityFixture()
 })
 
 afterEach(() => {

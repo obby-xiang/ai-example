@@ -18,6 +18,7 @@ import type { ChatMessage, MessagePart } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import type { UiEvent } from '@/types/tools'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore, dispatchUiEvent } from '@/stores/workspace'
 import { applyFrameToParts } from '@/utils/parts'
 import { DEFAULT_SHEET_POLICY, effectiveSheetPolicy } from '@/utils/sheet-tools'
@@ -117,6 +118,7 @@ beforeEach(() => {
   workspace.taskType = null
   workspace.step = null
   workspace.taskId = null
+  installIdentityFixture()
 })
 
 describe('C7-01 全局停用：不可用时发不出去，且原因如实上屏', () => {

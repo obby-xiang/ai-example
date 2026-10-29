@@ -10,6 +10,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { readMirrorFixture } from './aie2e-helpers'
 
@@ -91,6 +92,7 @@ beforeEach(() => {
   workspace.taskType = null
   workspace.step = null
   workspace.taskId = null
+  installIdentityFixture()
 })
 
 afterEach(() => {

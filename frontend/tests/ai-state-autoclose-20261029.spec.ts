@@ -24,10 +24,10 @@ import {
   AUTO_RECOVERY_DELAY_MS,
   AUTO_RECOVERY_MAX_ATTEMPTS,
   RUN_STREAM_DRIVE_BUDGET,
-  SESSION_ID_KEY,
   readActionRecord,
   useAiStore
 } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { SseFrameHandlers, SseStreamOptions } from '@/api/sse'
 import type { AiRunCurrent } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
@@ -43,7 +43,9 @@ const api = vi.hoisted(() => ({
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
   getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  retryModelStep: vi.fn(),
+  // Task 4：会话号只由后端发号（410 换会话等路径要真发一次号）
+  createSession: vi.fn()
 }))
 
 const sse = vi.hoisted(() => ({ probeReattach: vi.fn() }))
@@ -172,6 +174,7 @@ beforeEach(() => {
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
   chat = createChatStub()
   api.chat.mockImplementation(chat.impl as never)
+  installIdentityFixture()
 })
 
 describe('1 · 准备中自动有界恢复（不靠不存在的按钮）', () => {
@@ -535,20 +538,23 @@ describe('8 · 共用有界自动恢复（零副作用面）', () => {
   it('410 已换会话：本地换 id 后自动对账新会话，绝不复发用户消息', async () => {
     vi.useFakeTimers()
     try {
-      sessionStorage.setItem(SESSION_ID_KEY, 'old-sess')
+      // 旧会话号：身份键下的存量指针（会话号契约是十进制长整）
+      installIdentityFixture({ sessionId: 4401 })
       const store = freshStore()
-      expect(store.sessionId).toBe('old-sess')
+      expect(store.sessionId).toBe('4401')
+      // 换会话必须拿到**新**号（后端发号）
+      api.createSession.mockResolvedValueOnce({ sessionId: 4402 })
       api.chat.mockRejectedValueOnce(new ApiError('purged', 410, 'SESSION_PURGED', {
         code: 'SESSION_PURGED',
         message: 'purged',
-        sessionId: 'old-sess',
+        sessionId: '4401',
         action: 'NEW_SESSION'
       }))
 
       const result = await store.send('帮我导一张表')
       expect(result.outcome).toBe('error')
       const nextId = store.sessionId
-      expect(nextId).not.toBe('old-sess')
+      expect(nextId).not.toBe('4401')
 
       await vi.advanceTimersByTimeAsync(AUTO_RECOVERY_DELAY_MS)
       await flushPromises()

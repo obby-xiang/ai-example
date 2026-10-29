@@ -15,6 +15,8 @@
  * 而**真的不同**的提问仍照补（宁可少补、不可双份，但也不能把新提问吞掉）。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { installIdentityFixture } from './ai-identity-fixture'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart } from '@/types/ai'
 
@@ -33,7 +35,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
-const MIRROR_PREFIX = 'ai-mirror:'
+/* 镜像键按身份键形取（`mirrorStorageKey`），不再手拼裸前缀。 */
 
 interface MirrorShape {
   inFlight?: boolean
@@ -41,7 +43,7 @@ interface MirrorShape {
 }
 
 function mirrorOf(sessionId: string): MirrorShape | null {
-  const raw = sessionStorage.getItem(MIRROR_PREFIX + sessionId)
+  const raw = sessionStorage.getItem(mirrorStorageKey(sessionId))
   return raw ? (JSON.parse(raw) as MirrorShape) : null
 }
 
@@ -142,6 +144,7 @@ beforeEach(() => {
     found: false, runId: null, snapshotStatus: null, pendingEntries: [], unresolvedExternal: [],
     awaitingExternal: false, archiveMaxSeq: 0
   })
+  installIdentityFixture()
 })
 
 afterEach(() => {
@@ -239,7 +242,7 @@ describe('批G · R5/R2：判重按"同口径归一化"（后端 InputSanitizer 
   it('同一句提问（全角/半角标点之差）刷新后只有一条用户气泡', async () => {
     const store = await freshStore()
     store.sessionId = 's-r5'
-    sessionStorage.setItem(MIRROR_PREFIX + 's-r5', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('s-r5'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-r5',
@@ -267,7 +270,7 @@ describe('批G · R5/R2：判重按"同口径归一化"（后端 InputSanitizer 
   it('真的不同的提问照补（归一化不得把新提问吞掉）', async () => {
     const store = await freshStore()
     store.sessionId = 's-r5b'
-    sessionStorage.setItem(MIRROR_PREFIX + 's-r5b', JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey('s-r5b'), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-r5b',

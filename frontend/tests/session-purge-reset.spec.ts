@@ -8,6 +8,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
+import { formDraftPrefix, formDraftStorageKey, mirrorStorageKey, sessionIdStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -25,7 +27,6 @@ const api = vi.hoisted(() => ({
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 const OLD_SESSION = 'old-session'
-const OTHER_MIRROR = 'ai-mirror:other-session'
 const BUSINESS_KEY = 'import-wizard-draft'
 
 beforeEach(() => {
@@ -37,17 +38,18 @@ beforeEach(() => {
   api.health.mockResolvedValue({ available: true })
   api.cancel.mockResolvedValue({ cancelled: true })
   api.deleteHistory.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 function oldSessionWithArtifacts(): ReturnType<typeof useAiStore> {
   const store = useAiStore()
   store.sessionId = OLD_SESSION
   store.activeRunId = 'run-old'
-  sessionStorage.setItem('ai-mirror:' + OLD_SESSION, '{"messages":[]}')
-  sessionStorage.setItem(OTHER_MIRROR, '{"messages":["keep"]}')
-  sessionStorage.setItem('cm.ai.form.draft.call-1', '{"name":"old-1"}')
-  sessionStorage.setItem('cm.ai.form.draft.call-2', '{"name":"old-2"}')
-  sessionStorage.setItem('cm.ai.form.draft.call-other', '{"name":"keep"}')
+  sessionStorage.setItem(mirrorStorageKey(OLD_SESSION), '{"messages":[]}')
+  sessionStorage.setItem(mirrorStorageKey('other-session'), '{"messages":["keep"]}')
+  sessionStorage.setItem(formDraftStorageKey('call-1'), '{"name":"old-1"}')
+  sessionStorage.setItem(formDraftStorageKey('call-2'), '{"name":"old-2"}')
+  sessionStorage.setItem(formDraftStorageKey('call-other'), '{"name":"keep"}')
   sessionStorage.setItem(BUSINESS_KEY, 'keep-business')
   return store
 }
@@ -58,8 +60,8 @@ describe('resetSession 消费 purge clientCleanup', () => {
     api.deleteHistory.mockResolvedValue({
       complete: true,
       clientCleanup: {
-        mirrorKey: 'ai-mirror:' + OLD_SESSION,
-        draftPrefix: 'cm.ai.form.draft.',
+        mirrorKey: mirrorStorageKey(OLD_SESSION),
+        draftPrefix: formDraftPrefix(),
         draftToolCallIds: ['call-1', 'call-2']
       }
     })
@@ -70,15 +72,15 @@ describe('resetSession 消费 purge clientCleanup', () => {
     })()
 
     expect(nextId).not.toBe(OLD_SESSION)
-    expect(sessionStorage.getItem('ai-mirror:' + OLD_SESSION)).toBeNull()
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBeNull()
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-2')).toBeNull()
-    expect(sessionStorage.getItem(OTHER_MIRROR)).toBe('{"messages":["keep"]}')
+    expect(sessionStorage.getItem(mirrorStorageKey(OLD_SESSION))).toBeNull()
+    expect(sessionStorage.getItem(formDraftStorageKey('call-1'))).toBeNull()
+    expect(sessionStorage.getItem(formDraftStorageKey('call-2'))).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('other-session'))).toBe('{"messages":["keep"]}')
     // 批次6B（N10）：换会话按 draft 前缀 + 在场白名单清孤儿键 —— call-other 不在场，一样清掉；
     // 非 draft 键（业务键、别的会话镜像）照旧不动。
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-other')).toBeNull()
+    expect(sessionStorage.getItem(formDraftStorageKey('call-other'))).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
-    expect(sessionStorage.getItem('ai-session-id')).toBe(nextId)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(nextId)
     expect(store.noticeCode).toBeNull()
   })
 
@@ -88,8 +90,8 @@ describe('resetSession 消费 purge clientCleanup', () => {
       complete: false,
       deferred: [{ runId: 'run-old', status: 'RUNNING', reason: 'RUN_ACTIVE' }],
       clientCleanup: {
-        mirrorKey: 'ai-mirror:' + OLD_SESSION,
-        draftPrefix: 'cm.ai.form.draft.',
+        mirrorKey: mirrorStorageKey(OLD_SESSION),
+        draftPrefix: formDraftPrefix(),
         draftToolCallIds: ['call-1']
       }
     })
@@ -100,8 +102,8 @@ describe('resetSession 消费 purge clientCleanup', () => {
     expect(store.messages).toHaveLength(0)
     expect(store.noticeCode).toBe('ai.notice.sessionPurgeIncomplete')
     // 部分完成不等于不清本地残留：该删的精确键仍要删
-    expect(sessionStorage.getItem('ai-mirror:' + OLD_SESSION)).toBeNull()
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey(OLD_SESSION))).toBeNull()
+    expect(sessionStorage.getItem(formDraftStorageKey('call-1'))).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
   })
 
@@ -123,10 +125,10 @@ describe('resetSession 消费 purge clientCleanup', () => {
 
     await store.resetSession()
 
-    expect(sessionStorage.getItem('ai-mirror:' + OLD_SESSION)).toBeNull()
-    expect(sessionStorage.getItem(OTHER_MIRROR)).toBe('{"messages":["keep"]}')
+    expect(sessionStorage.getItem(mirrorStorageKey(OLD_SESSION))).toBeNull()
+    expect(sessionStorage.getItem(mirrorStorageKey('other-session'))).toBe('{"messages":["keep"]}')
     // 批次6B（N10）：草稿不再依赖 clientCleanup 枚举 —— 换会话即按前缀 + 在场白名单清
-    expect(sessionStorage.getItem('cm.ai.form.draft.call-1')).toBeNull()
+    expect(sessionStorage.getItem(formDraftStorageKey('call-1'))).toBeNull()
     expect(sessionStorage.getItem(BUSINESS_KEY)).toBe('keep-business')
     expect(store.noticeCode).toBeNull()
   })

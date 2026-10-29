@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { registerAiRegion, resetAiRegions, unregisterAiRegion } from '@/utils/ai-regions'
 import { ApiError } from '@/api/http'
@@ -106,6 +107,7 @@ beforeEach(() => {
   api.feedbackSubmit.mockResolvedValue({ saved: true })
   api.cancel.mockResolvedValue({ cancelled: true, alreadyCancelled: false })
   api.chat.mockImplementation(() => Promise.resolve({ terminal: true }))
+  installIdentityFixture()
 })
 
 afterEach(() => {

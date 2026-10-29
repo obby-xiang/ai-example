@@ -14,7 +14,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
-import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
+import { useAiStore } from '@/stores/ai'
+import { mirrorStorageKey } from '@/utils/ai-identity'
+import { installIdentityFixture } from './ai-identity-fixture'
 import { ApiError } from '@/api/http'
 import { ErrorCode } from '@/types/api'
 import { registerPageHandler, unregisterPageHandler } from '@/stores/workspace'
@@ -39,6 +41,7 @@ beforeEach(() => {
   api.frontendToolResult.mockReset()
   api.confirm.mockReset()
   api.frontendToolResult.mockResolvedValue({})
+  installIdentityFixture()
 })
 
 /**
@@ -360,7 +363,7 @@ describe('施工项2：镜像读取侧 requiresAction 残留收口（GLM o1）',
   it('v2 intact 镜像：done 消息里残留的 pending 工具段 → expired + requiresAction=false，并回写镜像；二次读取幂等', async () => {
     const store = useAiStore()
     const sid = store.sessionId
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: 'run-k',
@@ -388,7 +391,7 @@ describe('施工项2：镜像读取侧 requiresAction 残留收口（GLM o1）',
     expect(part).toMatchObject({ toolCallId: 'k1', status: 'expired', requiresAction: false })
 
     // 收口发生在 writeMirror 回写之前：镜像里不再复活挂起语义
-    const written = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
+    const written = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
     expect(written.v).toBe(2)
     expect(written.messages[0].parts[1]).toMatchObject({ status: 'expired', requiresAction: false })
     const savedAt = written.savedAt
@@ -398,14 +401,14 @@ describe('施工项2：镜像读取侧 requiresAction 残留收口（GLM o1）',
     store.messages = []
     await store.loadHistory()
     expect(soleToolPart(store.messages[0] as ChatMessage)).toMatchObject({ status: 'expired', requiresAction: false })
-    const again = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
+    const again = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
     expect(again.savedAt).toBe(savedAt)
   })
 
   it('v2 intact 镜像：requiresAction 残留但段已非 pending（succeeded）→ 只收 requiresAction，status 保持', async () => {
     const store = useAiStore()
     const sid = store.sessionId
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: null,
@@ -437,7 +440,7 @@ describe('施工项2：镜像读取侧 requiresAction 残留收口（GLM o1）',
     const store = useAiStore()
     const sid = store.sessionId
     // v1 镜像：无 v、无 parts；toolRun 已终态 + pendingCall 仍 pending（迁移并入 requiresAction=true）
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       savedAt: 1,
       lastRunId: 'run-k',
       messages: [
@@ -459,7 +462,7 @@ describe('施工项2：镜像读取侧 requiresAction 残留收口（GLM o1）',
     // 迁移并入的 requiresAction 残留被读取侧收口（status 以 run.status 为权威 = succeeded，不降级）
     expect(soleToolPart(store.messages[0] as ChatMessage))
       .toMatchObject({ toolCallId: 'k3', status: 'succeeded', requiresAction: false })
-    const written = JSON.parse(sessionStorage.getItem(MIRROR_PREFIX + sid) ?? '{}')
+    const written = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
     expect(written.v).toBe(2)
     expect(written.messages[0].parts[1]).toMatchObject({ status: 'succeeded', requiresAction: false })
   })
@@ -1022,7 +1025,7 @@ describe('R-149：loadHistory 双条目合并（TOOL 响应并入 ASSISTANT 工�
 
     // 模拟"刷新前镜像已写盘"（v2 形态 = 合并后的 ChatMessage），再走一遍 loadHistory：
     // 镜像分支先水合、后端分支再整替 —— 两遍产物必须逐段一致
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: null,
@@ -1315,7 +1318,7 @@ describe('R-150：loadHistory 连续 ASSISTANT 合并（同一用户轮内，遇
     const viaBackend = JSON.parse(JSON.stringify(store.messages.map((message) => message.parts)))
     expect(store.messages).toHaveLength(2) // 合并已发生
 
-    sessionStorage.setItem(MIRROR_PREFIX + sid, JSON.stringify({
+    sessionStorage.setItem(mirrorStorageKey(sid), JSON.stringify({
       v: 2,
       savedAt: 1,
       lastRunId: null,
