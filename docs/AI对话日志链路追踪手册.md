@@ -483,7 +483,7 @@ event=turn_end runId=.. sessionId=.. status=done code=none attempts=1 attempt=1 
 |---|---|---|
 | 日志（本手册对象） | 由部署侧日志轮转决定，**不属本仓 TTL** | 有日志就能回溯；**没有日志就无法用本手册还原** |
 | Redis 运行态 / 记忆 / 事件日志 | **24h 滑动 TTL**（活跃即续、无绝对上限） | `/api/ai/events/{runId}` 的逐帧回放**只在 24h 内**可用；超期后帧面归零 |
-| 对话正文（业务数据库） | **不落库**：`ai_chat_message` 与完整历史端点已于 2026-10-30 整条移除，表由后续迁移删除 | **没有 DB 兜底**：`GET /api/ai/history/{sessionId}` 只读 Redis 记忆窗口，键到期即空；`ai_feedback` 仍保留（只有反馈记录，没有正文） |
+| 对话正文（业务数据库） | **不落库**：`ai_chat_message` 与完整历史端点已于 2026-10-30 整条移除，表已由 `V10__drop_ai_chat_message.sql` 删除 | **没有 DB 兜底**：`GET /api/ai/history/{sessionId}` 只读 Redis 记忆窗口，键到期即空；`ai_feedback` 仍保留（只有反馈记录，没有正文） |
 
 > **因此**：§6「需要正文时走 `/api/ai/events/{runId}`（24h 内）或记忆窗口」仍然成立，但**要补一句**：24h 之后**既看不到逐帧现场，也看不到对话正文**（业务数据库不再有对话历史，Redis 键已到期）；能留下的只有反馈行（`ai_feedback`）与部署侧日志。不得把"日志里还有"读成"历史还在"。
 
