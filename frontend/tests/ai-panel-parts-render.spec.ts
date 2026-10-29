@@ -10,7 +10,7 @@
  * `onMounted` 的 health/loadHistory 取数用 `@/api/ai` 桩屏蔽。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
@@ -98,6 +98,14 @@ beforeEach(() => {
 afterEach(() => {
   useAiStore().adoptFreshSession()
 })
+
+/**
+ * 自动卸载：用例若在 `wrapper.unmount()` 之前就红（如产品侧已知的"平滑回底"回归），
+ * 那个 wrapper 会一直挂在文档里，其 `onMounted` 的取数与 watching 会把**下一条用例**的
+ * store 拽回上一条的 pinia（实测：下一条用例 `useAiStore()` 拿到的仍是上一条实例 ⇒ 渲染空态、
+ * 断言找不到 `pending-card-*`）。VTU 的 `enableAutoUnmount` 正是为此：用例结束即卸载。
+ */
+enableAutoUnmount(afterEach)
 
 /** 手搭一条消息（含派生投影：两侧自洽 = deriveProjections 的结果）。 */
 function buildMessage(parts: MessagePart[], pendingCall: PendingToolCall | null = null, streaming = false): ChatMessage {

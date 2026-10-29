@@ -8,7 +8,7 @@
  *   被改写的原文、编辑锚点都必须回来，否则用户只剩刷新一条路（而刚改的文本服务端从未收到）。
  */
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
 import { applyLocale } from '@/locales'
@@ -82,6 +82,14 @@ beforeEach(() => {
 afterEach(() => {
   useAiStore().adoptFreshSession()
 })
+
+/**
+ * 自动卸载：用例若在 `wrapper.unmount()` 之前就红（或本就漏写 unmount），那个 wrapper 会一直挂着，
+ * 其 `onMounted` 的取数/看护会把**下一条用例**的 store 拽回上一条的 pinia（实测：下一条用例
+ * `useAiStore()` 拿到上一条实例 ⇒ 渲染空态、`pending-card-*` / `edit-msg-*` 找不到）。
+ * VTU 的 `enableAutoUnmount` 正是为此：用例结束即卸载。
+ */
+enableAutoUnmount(afterEach)
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {
   const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
