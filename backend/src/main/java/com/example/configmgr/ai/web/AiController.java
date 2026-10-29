@@ -651,6 +651,8 @@ public class AiController {
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
 		this.runStore.touchActiveRun(request.runId());
+		// 同拍续期复核器持有的一次性资源（表单附件登记）：park 期没有心跳，读侧是唯一续期来源
+		this.confirmGate.touchSuspendedResources(request.runId());
 		// 只接受服务端 kind=CONFIRM；错入口在进闸门前拒绝，不改变任何条目。
 		PendingToolCall entry = this.runStore.pendingLenient(request.runId(), request.toolCallId());
 		PendingToolCall wrongKind = wrongKindEntry(entry, PendingToolCall.KIND_CONFIRM);
@@ -710,6 +712,8 @@ public class AiController {
 		}
 		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
+		// 同拍续期一次性资源（附件登记）：与 touchActiveRun 同一位置
+		this.confirmGate.touchSuspendedResources(request.runId());
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
 		// 只接受服务端 kind=FRONTEND；同一条目供 kind 与结构化判定共用，避免重复读取。
 		// kind 先于体积判断；cancelled=true 也先校验，因为取消同样改变状态。
@@ -876,6 +880,8 @@ public class AiController {
 		else {
 			// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
 			this.runStore.touchActiveRun(snapshot);
+			// 同拍续期一次性资源（附件登记）：重挂 = 用户刷新回来，park 期没有心跳
+			this.confirmGate.touchSuspendedResources(runId);
 		}
 		// I-1：回放前先确认事件日志末号可读。末号未知时不得进入"按 0 全量回放"（会拿到最旧窗口、
 		// 拿不到 done）；明确回 503 + degraded，让前端下一拍重试。
@@ -1459,6 +1465,8 @@ public class AiController {
 		body.put("snapshotStatus", snapshot.getStatus());
 		// B23L1 批②b：读侧续期（快照重载，省掉 touch 内部的一次读；终态快照由 RunStore 判掉）
 		this.runStore.touchActiveRun(snapshot);
+		// 同拍续期一次性资源（附件登记）：刷新恢复是 park 期最强的"有人还在看"信号
+		this.confirmGate.touchSuspendedResources(runId);
 		// AR-10（批次3 补齐）：24h 只可见化 —— 快照键的**权威**剩余寿命，用 PTTL 只读推导。
 		// 不改 TTL、不续期、不延长不缩短、不新增持久化；量在 touch 之后取，反映本次响应后的真实寿命。
 		// null = 未知（键刚过期 / 读失败 / 无 TTL）：前端按"不显示时间"处理，不得折算成 0。

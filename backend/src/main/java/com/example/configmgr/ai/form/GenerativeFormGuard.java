@@ -247,6 +247,14 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		JsonNode form = arguments != null && arguments.isObject() ? arguments.get("form") : null;
 		JsonNode values = parse(resultJson);
 		List<AttachmentRef> refs = attachmentRefs(form, values);
+		if (refs.isEmpty()) {
+			// NEW-2（返修二轮）：refs 为空既可能是"确实没传附件"，也可能是"入参/回灌解析失败"。
+			// 收口回收若照删，后者会把用户已上传的附件当"未提交"删光 —— 这里 fail-safe：不消费、不回收。
+			// 代价只是这些件留到登记 TTL（或会话销毁），安全方向是多留不漏删。
+			log.info("回灌里没有可解析的附件引用，跳过附件消费与收口回收 runId={} toolCallId={}", runId,
+					toolCallId);
+			return;
+		}
 		// keep = 本次回灌里被提交的全部附件（无论它们最终是否消费成功）：收口回收只清理
 		// "没被提交"的件。把消费失败的件也交给回收，等于把"保留到 TTL"偷偷改成"立刻删"。
 		Set<String> keep = new LinkedHashSet<>();

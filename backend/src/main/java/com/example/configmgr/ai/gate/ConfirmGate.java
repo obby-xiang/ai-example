@@ -1814,10 +1814,17 @@ public class ConfirmGate {
 	/**
 	 * 挂起期续期：对该轮仍 {@code PENDING} 的条目，逐个调复核器的 {@link FrontendToolGuard#touchSuspension}。
 	 *
+	 * <p><b>公开</b>是因为它是"挂起续期链"的<b>可复用入口</b>：除本类的心跳（park 关闭时的等待线程）之外，
+	 * 读侧（{@code AiController} 的 {@code /confirm}、{@code /frontend-tool-result}、
+	 * {@code GET /events/{runId}}、{@code /runs/current}）在与 {@code RunStore#touchActiveRun}
+	 * <b>同一位置</b>调用它。park 开启时没有心跳线程，待决条目靠读侧续命 —— 复核器持有的一次性资源
+	 * （表单附件登记）必须跟着同一条链续，否则"卡还活着、附件先过期"。
+	 *
 	 * <p>只续 {@code PENDING}：决策/放弃之后一次性资源已被消费或回收，再续只会把已删的键重新养出来
-	 * （Redis {@code EXPIRE} 对缺键虽是无操作，但语义上"已收口就不该再续"）。失败只 DEBUG/WARN。
+	 * （Redis {@code EXPIRE} 对缺键虽是无操作，但语义上"已收口就不该再续"）。
+	 * <b>不抛</b>：续期是养活性维护，读侧/心跳都不得因它失败而中断，失败只 DEBUG/WARN。
 	 */
-	private void touchSuspendedResources(String runId) {
+	public void touchSuspendedResources(String runId) {
 		List<PendingToolCall> entries;
 		try {
 			entries = this.store.pendingsLenient(runId);

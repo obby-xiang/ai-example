@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -184,7 +185,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return true;
 		}
 		try {
-			Attachment attachment = attachmentOfQuietly(redis, fileId);
+			Attachment attachment = readRegistrationOrNull(redis, fileId);
 			if (attachment == null) {
 				// 不存在/已过期：没有可消费的登记，也不该留墓碑（否则"从没上传过"会被报成"已消费"）
 				return false;
@@ -288,7 +289,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		for (String fileId : ids) {
 			try {
 				redis.expire(KEY_PREFIX + fileId, this.ttl);
-				Attachment attachment = attachmentOfQuietly(redis, fileId);
+				Attachment attachment = readRegistrationOrNull(redis, fileId);
 				if (attachment != null) {
 					redis.expire(sessionIndexKey(attachment.sessionId()), this.ttl);
 				}
@@ -429,19 +430,35 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 	}
 
-	/** 消费路径的归属读取（只用于清索引，读不出来不影响消费本身）。 */
-	private Attachment attachmentOfQuietly(StringRedisTemplate redis, String fileId) {
+	/**
+	 * 消费/touch 路径的登记读取（不存在/坏数据返回 null，基础设施故障抛出）。
+	 *
+	 * <p><b>只有"坏数据"才折成 null</b>（JSON 解析不了 ⇒ 按无登记处理，等同过期）；
+	 * {@code Redis} 读失败<b>必须抛出</b>（{@link AiStateUnavailableException}）—— 把它吞成
+	 * "登记不存在"会让消费返回 false，日志与上层把它报成"已被消费/已过期"，真正的原因（基础设施故障）
+	 * 反而消失，用户看到的是"附件过期，请重新上传"。
+	 */
+	private Attachment readRegistrationOrNull(StringRedisTemplate redis, String fileId) {
+		ValueOperations<String, String> values = redis.opsForValue();
+		if (values == null) {
+			return null;
+		}
+		String json;
 		try {
-			if (redis.opsForValue() == null) {
-				return null;
-			}
-			String json = redis.opsForValue().get(KEY_PREFIX + fileId);
-			if (json == null) {
-				return null;
-			}
+			json = values.get(KEY_PREFIX + fileId);
+		}
+		catch (RuntimeException ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			throw new AiStateUnavailableException("附件读取失败（Redis 不可用；不得按无登记处理）", ex);
+		}
+		if (json == null) {
+			return null;
+		}
+		try {
 			return this.objectMapper.readValue(json, Attachment.class);
 		}
-		catch (Exception ex) {
+		catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+			log.warn("附件登记数据无法解析（按无登记处理）fileId={}：{}", fileId, ex.getMessage());
 			return null;
 		}
 	}

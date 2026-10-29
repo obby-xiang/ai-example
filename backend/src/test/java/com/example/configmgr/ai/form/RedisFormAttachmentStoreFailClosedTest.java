@@ -153,6 +153,32 @@ class RedisFormAttachmentStoreFailClosedTest {
 		verify(redis, never()).delete("ai:form:att:" + fileId);
 	}
 
+	/** 消费前的归属读取若遇到 Redis 故障，必须 fail-closed 抛出，不能伪装成"登记不存在/已过期"。 */
+	@Test
+	void consumeReadFailureIsFailClosedInsteadOfLookingLikeAnExpiredRegistration() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(values.get("ai:form:att:att_read0001")).thenThrow(new IllegalStateException("模拟 Redis 读失败"));
+		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
+
+		assertThatThrownBy(() -> store.consume("att_read0001"))
+			.isInstanceOf(AiStateUnavailableException.class)
+			.hasMessageContaining("附件消费");
+	}
+
+	/** 反向：坏数据（JSON 解析不了）按"无登记"处理，不当成基础设施故障。 */
+	@Test
+	void consumeTreatsUnparsableRegistrationAsMissingInsteadOfInfrastructureFailure() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(values.get("ai:form:att:att_bad00001")).thenReturn("not-json");
+		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
+
+		assertThat(store.consume("att_bad00001")).isFalse();
+	}
+
 	private static ObjectProvider<StringRedisTemplate> providerOf(StringRedisTemplate template) {
 		ObjectProvider<StringRedisTemplate> provider = mock(ObjectProvider.class);
 		when(provider.getIfAvailable()).thenReturn(template);

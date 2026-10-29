@@ -228,6 +228,62 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		assertThat(verdict.issues()).extracting(FormIssue::code).containsExactly(FormIssueCodes.ATTACHMENT_NOT_FOUND);
 	}
 
+	@Test
+	void parkedFormStaysSubmittableAfterAReadSideRenewal() throws Exception {
+		ExpiringStore expiring = new ExpiringStore();
+		GenerativeFormGuard expiringGuard = new GenerativeFormGuard(new ObjectMapper(), expiring);
+		AiProperties parked = new AiProperties();
+		parked.getPark().setEnabled(true);
+		com.example.configmgr.ai.conformance.InMemoryRunStore runStore =
+				new com.example.configmgr.ai.conformance.InMemoryRunStore();
+		runStore.seedRun("run-park", "sess-park");
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-park");
+		pending.setName(GenerativeFormRules.TOOL_NAME);
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setStatus(PendingToolCall.PENDING);
+		pending.setArguments(ONE_ATTACHMENT);
+		runStore.putPending("run-park", pending);
+		com.example.configmgr.ai.run.RunRegistry registry = new com.example.configmgr.ai.run.RunRegistry(runStore,
+				new ObjectMapper(), null);
+		com.example.configmgr.ai.run.CancellationRegistry cancellations = org.mockito.Mockito
+			.mock(com.example.configmgr.ai.run.CancellationRegistry.class);
+		org.mockito.Mockito.when(cancellations.isCancelled("run-park")).thenReturn(false);
+		org.mockito.Mockito.when(cancellations.onCancel(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> (AutoCloseable) () -> {
+				});
+		ConfirmGate gate = new ConfirmGate(runStore, registry, parked, cancellations,
+				new com.example.configmgr.ai.run.ToolActivityBeacon(), List.of(expiringGuard));
+		FormAttachmentStore.Attachment attachment = expiring.register("run-park", "call-park", "sess-park",
+				"parked.pdf", 9L, "application/pdf", null);
+
+		// park=true：没有等待线程就没有心跳。刷新（/runs/current、重挂 /events、决策/回灌端点）的读侧续期
+		// 必须顺带把附件登记续上，否则卡还活着、附件先过期。
+		expiring.advance(java.time.Duration.ofHours(23));
+		gate.touchSuspendedResources("run-park");
+		expiring.advance(java.time.Duration.ofHours(2));
+
+		ConfirmGate.Submission submission = gate.submitFrontendResult("run-park", "call-park",
+				"{\"evidence\":\"" + attachment.fileId() + "\"}", "http-post");
+
+		assertThat(submission.outcome()).as("park= 真下读侧续期后 25 小时仍可提交")
+			.isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		assertThat(expiring.find(attachment.fileId())).isNull();
+	}
+
+	@Test
+	void settleWithNoParsableAttachmentRefsNeverReclaimsUploads() throws IOException {
+		Path file = Files.writeString(STORAGE_ROOT.resolve("defensive-keep.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment attachment = register("defensive-keep.pdf", file);
+
+		// 回灌原文解析不出任何附件引用（JSON 坏了 / 形状异常）：这时"无 refs"既可能是"没传附件"，
+		// 也可能是"解析失败"。收口回收若照删，会把用户已上传的附件当"未提交"删光 —— fail-safe 是不回收。
+		this.guard.settleAcceptedResult("run-1", "call-1", ONE_ATTACHMENT, "{not-json");
+
+		assertThat(this.store.find(attachment.fileId())).as("解析不出引用时不得回收").isNotNull();
+		assertThat(file).exists();
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private FormAttachmentStore.Attachment register(String fileName, Path file) {
