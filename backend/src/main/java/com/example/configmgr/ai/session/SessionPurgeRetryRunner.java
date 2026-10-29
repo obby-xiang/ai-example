@@ -2,6 +2,8 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.LeaseService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -207,56 +209,60 @@ public class SessionPurgeRetryRunner {
 					skipped++;
 					continue;
 				}
-				if (pending.verifyAtMs() != null) {
-					// fix4：这条台账的删除主体已完成，只剩一次"记忆面"复核（崩溃残留补偿）。
-					// 到点只做 delete+staging+删后复核 —— 不重跑整轮 retry（那会再删 DB/附件）。
+				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
+				// 不恢复就会把"某个身份的销毁"当成 legacy 去删 —— 跨身份或删不干净。
+				try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
+					if (pending.verifyAtMs() != null) {
+						// fix4：这条台账的删除主体已完成，只剩一次"记忆面"复核（崩溃残留补偿）。
+						// 到点只做 delete+staging+删后复核 —— 不重跑整轮 retry（那会再删 DB/附件）。
+						attempted++;
+						AiSessionPurgeService.MemoryVerify verify;
+						try {
+							verify = this.purgeService.verifyMemoryOnly(pending.sessionId(), pending.purgeId());
+						}
+						catch (RuntimeException ex) {
+							failed++;
+							recordVerifyFailure(pending, "verify exception: " + ex.getMessage());
+							continue;
+						}
+						if (verify == null) {
+							skipped++;
+						}
+						else if (verify.verified()) {
+							completed++;
+						}
+						else {
+							failed++;
+							// 失败沿用有限退避/MAX_ATTEMPTS（verifyAtMs 保留 ⇒ 下一次仍是记忆面复核）。
+							recordVerifyFailure(pending, "memory verify: " + String.join("; ", verify.errors()));
+						}
+						continue;
+					}
 					attempted++;
-					AiSessionPurgeService.MemoryVerify verify;
 					try {
-						verify = this.purgeService.verifyMemoryOnly(pending.sessionId(), pending.purgeId());
+						AiSessionPurgeService.PurgeResult result = this.purgeService.retry(pending.sessionId(),
+								pending.purgeId(), "purge-retry");
+						if (result == null) {
+							skipped++;
+						}
+						else if (result.complete()) {
+							completed++;
+						}
+						else {
+							failed++;
+						}
 					}
 					catch (RuntimeException ex) {
 						failed++;
-						recordVerifyFailure(pending, "verify exception: " + ex.getMessage());
-						continue;
-					}
-					if (verify == null) {
-						skipped++;
-					}
-					else if (verify.verified()) {
-						completed++;
-					}
-					else {
-						failed++;
-						// 失败沿用有限退避/MAX_ATTEMPTS（verifyAtMs 保留 ⇒ 下一次仍是记忆面复核）。
-						recordVerifyFailure(pending, "memory verify: " + String.join("; ", verify.errors()));
-					}
-					continue;
-				}
-				attempted++;
-				try {
-					AiSessionPurgeService.PurgeResult result = this.purgeService.retry(pending.sessionId(),
-							pending.purgeId(), "purge-retry");
-					if (result == null) {
-						skipped++;
-					}
-					else if (result.complete()) {
-						completed++;
-					}
-					else {
-						failed++;
-					}
-				}
-				catch (RuntimeException ex) {
-					failed++;
-					// 失败不 blind disarm；能记则记一次退避，记不了就保持 pending 原状。
-					try {
-						this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(),
-								"retry exception: " + ex.getMessage());
-					}
-					catch (RuntimeException recordEx) {
-						log.warn("记录会话销毁重试失败失败 sessionId={}（pending/guard 保持）：{}",
-								pending.sessionId(), recordEx.getMessage());
+						// 失败不 blind disarm；能记则记一次退避，记不了就保持 pending 原状。
+						try {
+							this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(),
+									"retry exception: " + ex.getMessage());
+						}
+						catch (RuntimeException recordEx) {
+							log.warn("记录会话销毁重试失败失败 sessionId={}（pending/guard 保持）：{}",
+									pending.sessionId(), recordEx.getMessage());
+						}
 					}
 				}
 			}
@@ -285,6 +291,17 @@ public class SessionPurgeRetryRunner {
 		}
 	}
 
+	/**
+	 * 台账身份的作用域（{@code null} = legacy 台账，不改变当前上下文）。
+	 *
+	 * <p>重试线程是定时线程，没有请求身份。每次处理一条台账都按<b>记录</b>恢复 {@code tenantId/userId}
+	 * —— 即使当前不读这些字段，也统一口径（将来加读字段不会因为缺上下文 fail-closed 失败）。
+	 */
+	private static RequestContextUtils.SafeCloseable scopeOf(SessionPurgePendingStore.Pending pending) {
+		TenantUser identity = pending.identityOrNull();
+		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
+	}
+
 	private static boolean hasExhausted(List<SessionPurgePendingStore.Pending> due) {
 		return due.stream().anyMatch(pending -> pending.attempts() >= MAX_ATTEMPTS);
 	}
@@ -297,7 +314,8 @@ public class SessionPurgeRetryRunner {
 			if (pending.attempts() < MAX_ATTEMPTS) {
 				continue;
 			}
-			try {
+			// 重排写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份，否则会去改 legacy 键。
+			try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
 				if (this.pendingStore.defer(pending.sessionId(), pending.purgeId(), nextAt)) {
 					deferred++;
 				}

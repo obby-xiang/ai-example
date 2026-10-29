@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,12 +29,27 @@ import java.util.Set;
  * 因此销毁请求在删除任何数据之前登记本台账（无 TTL，直到 complete=true 才移除），
  * 守卫同时看 pending key —— <b>未完成期间守卫不会因 TTL 到期而失效</b>。
  *
- * <h2>键</h2>
+ * <h2>键（全部带身份）</h2>
  * <ul>
- * <li>{@code ai:purge:pending:<sessionId>} STRING（JSON，无 TTL）—— 每个会话一条 pending；</li>
- * <li>{@code ai:purge:retry:queue} LIST（sessionId）—— 有界扫描的发现面；</li>
- * <li>启动/{@code SCAN} 兜底会把漏登记队列的 pending 补进队列，避免“只靠一个易丢失的索引”。</li>
+ * <li>{@code ai:purge:pending:<tenantId>:<userId>:<sessionId>} STRING（JSON，无 TTL）—— 每个身份的
+ * 每个会话一条 pending；跨租户/跨用户即使 sessionId 相同也不共用台账；</li>
+ * <li>{@code ai:purge:retry:queue} LIST（成员 = <b>pending 键</b>）—— 有界扫描的发现面。
+ * 成员带完整复合身份（键形里就是 {@code <t>:<u>:<sid>}），所以恢复时<b>不需要</b>先知道是谁，
+ * 更不需要遍历租户列表；</li>
+ * <li>启动/{@code SCAN} 兜底把漏登记的 pending 补进队列（同样按记录读出的身份回填）。</li>
  * </ul>
+ *
+ * <h2>身份来源：按<b>记录</b>恢复，绝不从键名反解</h2>
+ * {@code sessionId} 允许含冒号，键名无法可靠反解出身份段。因此：
+ * <ul>
+ * <li>写：身份取当前 {@link RequestContextUtils} 上下文（HTTP 边界/编排入口已建立），落进 JSON
+ * 的 {@code tenantId/userId} 字段；</li>
+ * <li>读：{@code listDue}/{@code recoverOrphans} 先按<b>成员键</b>取值，身份从 JSON <b>记录</b>读出
+ * （{@link Pending#hasIdentity()}），调用方据此 {@code useContext} 恢复上下文再继续 ——
+ * 这就是"按复合身份恢复，不扫描租户列表"。</li>
+ * </ul>
+ * 无身份上下文时落到 legacy 键（{@code ai:purge:pending:<sessionId>}，独立过渡命名空间），
+ * 其记录没有身份字段；带身份的路径永远不会读写它。
  *
  * <h2>owner / purgeId</h2>
  * pending 内保存发起时的 {@code purgeId}。所有更新（失败重排、完成删除）都带 purgeId 条件：
@@ -125,12 +143,33 @@ public class SessionPurgePendingStore {
 	 */
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	public record Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
-			long createdAtMs, String lastError, Long verifyAtMs) {
+			long createdAtMs, String lastError, Long verifyAtMs, Long tenantId, Long userId) {
 
 		/** 兼容构造（老 JSON/既有调用点）：{@code verifyAtMs = null} = 普通待重试台账。 */
 		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
 				long createdAtMs, String lastError) {
-			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, null);
+			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, null, null, null);
+		}
+
+		/** 兼容构造：无身份（legacy 台账）。 */
+		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
+				long createdAtMs, String lastError, Long verifyAtMs) {
+			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, verifyAtMs, null, null);
+		}
+
+		/** 记录里是否带可用身份（两个都非空且合法）。 */
+		public boolean hasIdentity() {
+			return TenantKeyScope.hasIdentity(this.tenantId, this.userId);
+		}
+
+		/** 记录里的身份（缺失返回 {@code null} = legacy，不冒充任何新身份）。 */
+		public TenantUser identityOrNull() {
+			return hasIdentity() ? new TenantUser(this.tenantId, this.userId) : null;
+		}
+
+		/** 这条台账的键（身份来自<b>记录</b>，不读线程上下文）。 */
+		public String key() {
+			return pendingKey(this.sessionId, this.tenantId, this.userId);
 		}
 
 	}
@@ -144,9 +183,16 @@ public class SessionPurgePendingStore {
 	public record Registration(Pending pending, boolean created) {
 	}
 
-	/** pending 键名。 */
+	/** pending 键名（<b>带当前身份</b>；无上下文时是 legacy 键形）。 */
 	public String pendingKey(String sessionId) {
-		return PENDING_PREFIX + sessionId;
+		return TenantKeyScope.scoped(PENDING_PREFIX, sessionId);
+	}
+
+	/** pending 键名（显式身份；身份来自记录/调用方）。 */
+	public static String pendingKey(String sessionId, Long tenantId, Long userId) {
+		return TenantKeyScope.hasIdentity(tenantId, userId)
+				? TenantKeyScope.scoped(PENDING_PREFIX, tenantId, userId, sessionId)
+				: PENDING_PREFIX + sessionId;
 	}
 
 	/**
@@ -155,13 +201,24 @@ public class SessionPurgePendingStore {
 	 * @return 最终生效的 pending 与"是否本次新建"
 	 */
 	public Registration register(String sessionId, String purgeId, String requestedBy, long nowMs) {
-		Pending candidate = new Pending(sessionId, purgeId, requestedBy, 0, nowMs, nowMs, null);
+		return register(RequestContextUtils.currentOrNull(), sessionId, purgeId, requestedBy, nowMs);
+	}
+
+	/** 显式身份的登记（身份来自调用方/记录，不读线程上下文）。 */
+	public Registration register(TenantUser identity, String sessionId, String purgeId, String requestedBy,
+			long nowMs) {
+		Long tenantId = identity == null ? null : identity.tenantId();
+		Long userId = identity == null ? null : identity.userId();
+		Pending candidate = new Pending(sessionId, purgeId, requestedBy, 0, nowMs, nowMs, null, null, tenantId,
+				userId);
+		String key = candidate.key();
 		try {
-			String raw = this.redis.execute(REGISTER_IF_ABSENT, List.of(pendingKey(sessionId)), json(candidate));
+			String raw = this.redis.execute(REGISTER_IF_ABSENT, List.of(key), json(candidate));
 			Pending effective = raw == null ? candidate : parse(sessionId, raw);
 			// 队列可能因崩溃窗口缺这一条（pending 已落、push 未执行）：补登记，不改台账内容。
-			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			// 成员 = pending 键（含完整复合身份），恢复时无需知道"是谁"。
+			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
+			this.redis.opsForList().rightPush(QUEUE_KEY, key);
 			return new Registration(effective, purgeId.equals(effective.purgeId()));
 		}
 		catch (RuntimeException ex) {
@@ -171,19 +228,24 @@ public class SessionPurgePendingStore {
 		}
 	}
 
-	/** 当前 pending（不存在返回 null；JSON 损坏抛错，不静默当成无 pending）。 */
+	/** 当前 pending（<b>按当前身份</b>；不存在返回 null；JSON 损坏抛错，不静默当成无 pending）。 */
 	public Pending current(String sessionId) {
+		return readAt(pendingKey(sessionId), sessionId);
+	}
+
+	/** 按<b>键</b>读台账（listDue/SCAN 恢复用：身份从记录读，不从键名猜）。 */
+	private Pending readAt(String key, String sessionIdForLog) {
 		String raw;
 		try {
-			raw = this.redis.opsForValue().get(pendingKey(sessionId));
+			raw = this.redis.opsForValue().get(key);
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("读取会话销毁 pending 失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("读取会话销毁 pending 失败 sessionId=" + sessionIdForLog, ex);
 		}
 		if (raw == null) {
 			return null;
 		}
-		return parse(sessionId, raw);
+		return parse(sessionIdForLog, raw);
 	}
 
 	private Pending parse(String sessionId, String raw) {
@@ -208,7 +270,7 @@ public class SessionPurgePendingStore {
 		}
 	}
 
-	/** 到期待重试（候选数有界；队列重复成员去重）。 */
+	/** 到期待重试（候选数有界；队列重复成员去重）。成员是 pending 键，身份从记录读。 */
 	public List<Pending> listDue(long nowMs, int limit) {
 		int bounded = Math.max(1, limit);
 		List<String> raw;
@@ -223,13 +285,18 @@ public class SessionPurgePendingStore {
 		}
 		Set<String> seen = new LinkedHashSet<>();
 		List<Pending> out = new ArrayList<>();
-		for (String sessionId : raw) {
-			if (sessionId == null || sessionId.isBlank() || !seen.add(sessionId)) {
+		for (String member : raw) {
+			if (member == null || member.isBlank() || !seen.add(member)) {
 				continue;
 			}
-			Pending pending = current(sessionId);
+			if (!member.startsWith(PENDING_PREFIX)) {
+				// 旧队列形态（裸 sessionId）或污染成员：无法定位带身份的台账，摘掉不猜。
+				removeFromQueueMember(member);
+				continue;
+			}
+			Pending pending = readAt(member, member);
 			if (pending == null) {
-				removeFromQueue(sessionId);
+				removeFromQueueMember(member);
 				continue;
 			}
 			if (pending.nextAtMs() <= nowMs) {
@@ -257,6 +324,10 @@ public class SessionPurgePendingStore {
 	/**
 	 * 启动/队列为空时的 SCAN 兜底：按前缀发现 pending，把漏登记的会话补回队列。
 	 *
+	 * <p><b>按记录恢复</b>：扫到键后读台账 JSON，身份取自记录（{@code tenantId/userId}），
+	 * 并 {@code useContext} 恢复该身份后再回填队列 —— 不从键名反解身份、不遍历租户列表。
+	 * 队列成员是键本身，因此回填不会把台账"搬到"别的身份下。
+	 *
 	 * @param maxKeys SCAN 回填上限（有界）
 	 */
 	public int recoverOrphans(int maxKeys) {
@@ -265,25 +336,30 @@ public class SessionPurgePendingStore {
 		List<String> keys = RedisClusterScanSupport.scan(this.redis,
 				ScanOptions.scanOptions().match(PENDING_PREFIX + "*").count(256).build(), maxKeys);
 		for (String key : keys) {
-			if (key == null || !key.startsWith(PENDING_PREFIX)) {
+			if (key == null || !key.startsWith(PENDING_PREFIX) || key.length() <= PENDING_PREFIX.length()) {
 				continue;
 			}
-			String sessionId = key.substring(PENDING_PREFIX.length());
-			if (sessionId.isBlank()) {
-				continue;
-			}
-			Pending pending = current(sessionId);
+			Pending pending = readAt(key, key);
 			if (pending == null) {
 				continue;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			// 即使这里只写队列、不读身份字段，也按记录恢复作用域（统一口径，将来加读字段不会 fail-closed）。
+			try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
+				this.redis.opsForList().remove(QUEUE_KEY, 0, key);
+				this.redis.opsForList().rightPush(QUEUE_KEY, key);
+			}
 			recovered++;
 		}
 		if (recovered > 0) {
 			log.info("会话销毁 pending SCAN 兜底：扫描 {} 键，补回 {} 条待重试", keys.size(), recovered);
 		}
 		return recovered;
+	}
+
+	/** 记录身份的作用域（无身份返回 {@code null} = 不改变当前上下文）。 */
+	private static RequestContextUtils.SafeCloseable scopeOf(Pending pending) {
+		TenantUser identity = pending.identityOrNull();
+		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
 	}
 
 	/**
@@ -311,15 +387,16 @@ public class SessionPurgePendingStore {
 			return false;
 		}
 		// fix5：复核是新阶段 —— 预算从 0 起；沿用主体阶段的旧计数会被 MAX_ATTEMPTS 短路在复核分支之前。
+		String key = pending.key();
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), 0, verifyAtMs,
-				pending.createdAtMs(), pending.lastError(), verifyAtMs);
+				pending.createdAtMs(), pending.lastError(), verifyAtMs, pending.tenantId(), pending.userId());
 		try {
-			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)), token(purgeId), json(next));
+			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
+			this.redis.opsForList().rightPush(QUEUE_KEY, key);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -342,16 +419,16 @@ public class SessionPurgePendingStore {
 		}
 		int attempts = pending.attempts() + 1;
 		long nextAt = System.currentTimeMillis() + backoffMs(attempts);
+		String key = pending.key();
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), attempts, nextAt,
-				pending.createdAtMs(), error, pending.verifyAtMs());
+				pending.createdAtMs(), error, pending.verifyAtMs(), pending.tenantId(), pending.userId());
 		try {
-			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)),
-					token(purgeId), json(next));
+			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
+			this.redis.opsForList().rightPush(QUEUE_KEY, key);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -374,15 +451,17 @@ public class SessionPurgePendingStore {
 		if (pending == null || !purgeId.equals(pending.purgeId())) {
 			return false;
 		}
+		String key = pending.key();
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), pending.attempts(), nextAtMs,
-				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs());
+				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
+				pending.userId());
 		try {
-			Long updated = this.redis.execute(CAS_SET, List.of(pendingKey(sessionId)), token(purgeId), json(next));
+			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, sessionId);
-			this.redis.opsForList().rightPush(QUEUE_KEY, sessionId);
+			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
+			this.redis.opsForList().rightPush(QUEUE_KEY, key);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -404,13 +483,14 @@ public class SessionPurgePendingStore {
 		if (!purgeId.equals(pending.purgeId())) {
 			return false;
 		}
+		String key = pending.key();
 		try {
-			Long deleted = this.redis.execute(CAS_DEL, List.of(pendingKey(sessionId)), token(purgeId));
+			Long deleted = this.redis.execute(CAS_DEL, List.of(key), token(purgeId));
 			if (deleted == null || deleted <= 0L) {
 				return false;
 			}
 			// 只移除一条：同一 session 可能因重复登记/重排有多条队列成员，不能把新一轮的也删掉。
-			this.redis.opsForList().remove(QUEUE_KEY, 1, sessionId);
+			this.redis.opsForList().remove(QUEUE_KEY, 1, key);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -418,14 +498,17 @@ public class SessionPurgePendingStore {
 		}
 	}
 
-	/** 移除一条队列项（stale pending 清理）。 */
+	/** 移除一条队列项（stale pending 清理；成员 = 当前身份的 pending 键）。 */
 	public void removeFromQueue(String sessionId) {
+		removeFromQueueMember(pendingKey(sessionId));
+	}
+
+	private void removeFromQueueMember(String member) {
 		try {
-			this.redis.opsForList().remove(QUEUE_KEY, 1, sessionId);
+			this.redis.opsForList().remove(QUEUE_KEY, 1, member);
 		}
 		catch (RuntimeException ex) {
-			log.warn("清理会话销毁重试队列失败 sessionId={}（stale 项会被下次扫描过滤）：{}", sessionId,
-					ex.getMessage());
+			log.warn("清理会话销毁重试队列失败 member={}（stale 项会被下次扫描过滤）：{}", member, ex.getMessage());
 		}
 	}
 

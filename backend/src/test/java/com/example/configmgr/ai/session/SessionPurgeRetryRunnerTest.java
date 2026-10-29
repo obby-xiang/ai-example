@@ -54,7 +54,7 @@ class SessionPurgeRetryRunnerTest {
 		// 第 11 条是正常待重试；耗尽项排在它前面（模拟"僵尸占满队头窗口"）。
 		this.store.register(SESSION, "purge-real", "tester", now);
 		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).hasSize(11)
-			.startsWith(zombie(0), zombie(1));
+			.startsWith(this.store.pendingKey(zombie(0)), this.store.pendingKey(zombie(1)));
 
 		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
 		when(purgeService.retry(anyString(), anyString(), anyString())).thenReturn(completedPurge());
@@ -75,7 +75,8 @@ class SessionPurgeRetryRunnerTest {
 			assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isGreaterThan(later);
 		}
 		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).as("耗尽项必须移到队尾")
-			.endsWith(zombie(7), zombie(8), zombie(9));
+			.endsWith(this.store.pendingKey(zombie(7)), this.store.pendingKey(zombie(8)),
+					this.store.pendingKey(zombie(9)));
 
 		// 真实删除主体成功后会移除 pending（这里用台账 API 等价模拟已完成）。
 		assertThat(this.store.complete(SESSION, "purge-real")).isTrue();
@@ -87,6 +88,35 @@ class SessionPurgeRetryRunnerTest {
 
 	private static String zombie(int index) {
 		return "sess-zombie-" + index;
+	}
+
+	/**
+	 * 重试线程没有请求身份：处理每条台账前必须按<b>记录</b>里的 {@code tenantId/userId}
+	 * {@code useContext}，否则会去删 legacy 键（或干脆删不干净）。
+	 */
+	@Test
+	void runOnceRestoresTheRecordedIdentityBeforeRetrying() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable scope =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+			this.store.register(SESSION, "purge-tenant", "tester", 1_000L);
+		}
+		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
+		java.util.concurrent.atomic.AtomicReference<com.example.configmgr.ai.tenant.TenantUser> seen =
+				new java.util.concurrent.atomic.AtomicReference<>();
+		when(purgeService.retry(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
+			seen.set(com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull());
+			return completedPurge();
+		});
+		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.store, purgeService, grantedLease());
+
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(System.currentTimeMillis() + 3_600_000L);
+
+		assertThat(report.completed()).isEqualTo(1);
+		assertThat(seen.get()).as("删除主体必须在记录身份的作用域里执行")
+			.isEqualTo(new com.example.configmgr.ai.tenant.TenantUser(1L, 101L));
+		assertThat(com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull())
+			.as("作用域关闭后不得把身份留在调度线程上")
+			.isNull();
 	}
 
 	// ── 周期注册开关（app.ai.session.purge-retry.periodic-enabled）────────────────

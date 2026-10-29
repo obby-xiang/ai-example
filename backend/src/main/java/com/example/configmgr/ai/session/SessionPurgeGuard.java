@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.session;
 
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -28,6 +29,12 @@ import java.util.List;
  * 但会话销毁失败/延后时，{@link SessionPurgePendingStore} 的 durable pending 会保留 ——
  * {@link #isArmed(String)} 同时看 pending：<b>未完成期间即使 guard key 的 TTL 到了，也不会放行</b>。
  * 只有删除全部完成、pending 移除后才由 {@link #retainOrArmIfOwner} 进入有限保留期。
+ *
+ * <h2>身份隔离（2026-10-30）</h2>
+ * 守卫键 = {@code ai:purge:guard:<tenantId>:<userId>:<sessionId>}，pending 键同口径
+ * （{@link TenantKeyScope}）。跨租户/跨用户即使 sessionId 相同，也<b>不是同一个墓碑</b>：
+ * 一个身份的销毁不会让另一个身份的写回被拒，也不会被另一个身份的 pending 误判成"已销毁"。
+ * 无身份上下文时落到 legacy 键（独立过渡命名空间；带身份的写路径永不读写它）。
  *
  * <h2>失败口径：销毁场景 fail-closed</h2>
  * {@link #isArmed(String)} 读失败<b>不再</b>返回 {@code false}，而是抛出
@@ -85,9 +92,19 @@ public class SessionPurgeGuard {
 		this.redis = redis;
 	}
 
-	/** 守卫键名。 */
+	/** 守卫键名（<b>带当前身份</b>；无上下文时是 legacy 键形）。 */
 	public String keyFor(String sessionId) {
-		return KEY_PREFIX + sessionId;
+		return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
+	}
+
+	/** 守卫键名（显式身份；销毁编排/用例用，不读线程上下文）。 */
+	public static String keyFor(String sessionId, long tenantId, long userId) {
+		return TenantKeyScope.scoped(KEY_PREFIX, tenantId, userId, sessionId);
+	}
+
+	/** durable pending 键名（与 {@code SessionPurgePendingStore} 同一键形）。 */
+	static String pendingKey(String sessionId) {
+		return TenantKeyScope.scoped(PENDING_PREFIX, sessionId);
 	}
 
 	/** 装守卫（销毁流程在删除任何数据之前调用）。值 = {@code purgeId|requestedBy}，便于取证。 */
@@ -111,7 +128,7 @@ public class SessionPurgeGuard {
 				return true;
 			}
 			// 未完成 pending = 守卫有效，即使 guard key 的 TTL 已经到了也不能放行。
-			return Boolean.TRUE.equals(this.redis.hasKey(PENDING_PREFIX + sessionId));
+			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId)));
 		}
 		catch (RuntimeException ex) {
 			log.warn("读取会话销毁守卫失败 sessionId={}（fail-closed：拒绝任何可能复活的写回）：{}", sessionId,

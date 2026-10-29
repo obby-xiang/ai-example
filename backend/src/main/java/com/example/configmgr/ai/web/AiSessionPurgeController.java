@@ -40,8 +40,13 @@ import java.util.Map;
  * </ul>
  *
  * <p><b>本地镜像/草稿</b>：浏览器 {@code sessionStorage} 不归服务端管，响应里的
- * {@code clientCleanup} 给出精确键（{@code ai-mirror:<sid>}、{@code cm.ai.form.draft.<toolCallId>}），
- * 由前端在收到 200 后删除；服务端不伪造“已删”。
+ * {@code clientCleanup} 给出精确键（带身份：{@code ai-mirror:<tenantId>:<userId>:<sessionId>}、
+ * {@code cm.ai.form.draft.<tenantId>:<userId>.<toolCallId>}；无身份上下文时是旧键形
+ * {@code ai-mirror:<sid>}、{@code cm.ai.form.draft.<toolCallId>}），由前端在收到 200 后删除；
+ * 服务端不伪造"已删"。
+ *
+ * <p><b>身份</b>：本端点自己不解析身份头 —— 身份由 {@code TenantIdentityFilter} 建立的上下文提供，
+ * {@link AiSessionPurgeService} 在入口固定它并贯穿全部键族（跨租户同 sessionId 互不可见）。
  */
 @RestController
 @RequestMapping("/api/ai")

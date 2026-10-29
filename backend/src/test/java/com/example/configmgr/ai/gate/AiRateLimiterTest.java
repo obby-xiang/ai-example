@@ -139,6 +139,25 @@ class AiRateLimiterTest {
 	}
 
 	@Test
+	void sessionBudgetIsPerIdentity() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable scope =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+			for (int i = 1; i <= 20; i++) {
+				assertThat(this.limiter.check("s-dup", IP).allowed()).as("A 第 %d 次在额度内", i).isTrue();
+			}
+			assertThat(this.limiter.check("s-dup", IP).allowed()).as("A 的 21 次被拒").isFalse();
+		}
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable scope =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(2L, 201L)) {
+			assertThat(this.limiter.check("s-dup", IP).allowed())
+				.as("B 的会话额度与 A 互不相干（同 sessionId 不同身份）")
+				.isTrue();
+			assertThat(this.redis.zsets).containsKeys("ai:rate:session:1:101:s-dup",
+					"ai:rate:session:2:201:s-dup");
+		}
+	}
+
+	@Test
 	void limitsAreConfigurable() {
 		this.properties.getLimit().setSessionPerMinute(2);
 		this.properties.getLimit().setIpPerMinute(5);

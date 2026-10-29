@@ -10,6 +10,9 @@ import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.file.FileStorageService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,6 +56,14 @@ class AiSessionPurgeServiceTest {
 	private static final String SESSION_A = "sess-a";
 
 	private static final String SESSION_B = "sess-b";
+
+	private static final long TENANT_A = 1L;
+
+	private static final long USER_A = 101L;
+
+	private static final long TENANT_B = 2L;
+
+	private static final long USER_B = 201L;
 
 	@TempDir
 	Path tempDir;
@@ -696,6 +707,115 @@ class AiSessionPurgeServiceTest {
 		return new AiSessionPurgeService(this.fixture.fake.redis, this.fixture.store, this.fixture.gate,
 				this.fixture.cancellations, this.fixture.memory, this.fixture.attachments, this.fixture.files,
 				database, this.fixture.guard, this.fixture.pendingStore, this.fixture.properties, Duration.ZERO);
+	}
+
+	// ── 身份隔离（租户任务 2）：跨租户同 sessionId ──────────────────────────
+
+	/**
+	 * <b>跨租户相同 sessionId 的销毁隔离</b>：A 的删除只能碰 A 身份下的键/文件/台账。
+	 *
+	 * <p>覆盖面：会话记录、销毁台账/守卫、附件登记与落盘文件、run 快照与 13 键、浏览器清理指令键形。
+	 */
+	@Test
+	void purgeInOneIdentityDoesNotTouchAnotherIdentityWithTheSameSessionId() throws Exception {
+		Path fileA;
+		Path fileB;
+		FormAttachmentStore.Attachment attachmentA;
+		FormAttachmentStore.Attachment attachmentB;
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			seedIdentitySession("run-a", "call-a");
+			this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
+					"msg-a", SESSION_A, 1);
+			fileA = writeFile("att-a.pdf", "attachment-a");
+			attachmentA = this.fixture.attachments.register("run-a", "call-a", SESSION_A, "att-a.pdf", 10L,
+					"application/pdf", fileA.toString());
+		}
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
+			seedIdentitySession("run-b", "call-b");
+			fileB = writeFile("att-b.pdf", "attachment-b");
+			attachmentB = this.fixture.attachments.register("run-b", "call-b", SESSION_A, "att-b.pdf", 10L,
+					"application/pdf", fileB.toString());
+		}
+
+		AiSessionPurgeService.PurgeResult result;
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			result = this.fixture.service.purge(SESSION_A, "test");
+		}
+
+		assertThat(result.complete()).as("A 自己的数据应当删净").isTrue();
+		assertThat(result.found()).isTrue();
+		assertThat(result.clientCleanup().mirrorKey())
+			.as("镜像键形与前端一致：ai-mirror:<t>:<u>:<sid>")
+			.isEqualTo("ai-mirror:" + TENANT_A + ":" + USER_A + ":" + SESSION_A);
+		assertThat(result.clientCleanup().draftPrefix())
+			.as("草稿前缀与前端一致：cm.ai.form.draft.<t>:<u>.")
+			.isEqualTo("cm.ai.form.draft." + TENANT_A + ":" + USER_A + ".");
+		assertThat(result.clientCleanup().draftToolCallIds()).containsExactly("call-a");
+
+		// A 面确实删了（会话记录 / 台账 / 守卫 / run / 附件登记 / 文件）
+		assertThat(this.fixture.fake.strings)
+			.doesNotContainKey(AiSessionService.keyFor(SESSION_A, TENANT_A, USER_A));
+		// fix4：complete 之后台账仍留一条"记忆面待复核"，且它带 A 的身份（不是 B 的）。
+		assertThat(this.fixture.fake.strings)
+			.containsKey(SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_A, USER_A));
+		assertThat(this.fixture.fake.strings.get(SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_A, USER_A)))
+			.contains("\"tenantId\":1", "\"userId\":101", "\"verifyAtMs\"");
+		assertThat(this.fixture.fake.strings)
+			.containsKey(SessionPurgeGuard.keyFor(SESSION_A, TENANT_A, USER_A));
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
+		assertThat(Files.exists(fileA)).as("A 的文件必须删").isFalse();
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.attachmentsRegistrationKey(TENANT_A, USER_A,
+				attachmentA.fileId()));
+
+		// B 面一条都没动（同 sessionId、不同身份）
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
+			assertThat(this.fixture.fake.strings)
+				.as("B 的会话记录必须保留")
+				.containsKey(AiSessionService.keyFor(SESSION_A, TENANT_B, USER_B));
+			assertThat(this.fixture.fake.strings)
+				.as("B 的 run 快照必须保留")
+				.containsKey(this.fixture.store.runKey("run-b"));
+			assertThat(this.fixture.fake.strings)
+				.as("B 的销毁台账必须保留")
+				.containsKey(SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_B, USER_B));
+			assertThat(this.fixture.guard.isArmed(SESSION_A)).as("B 的守卫必须仍然 armed").isTrue();
+			assertThat(this.fixture.attachments.find(attachmentB.fileId()))
+				.as("B 的附件登记必须仍然可用")
+				.isNotNull();
+		}
+		assertThat(Files.exists(fileB)).as("B 的文件不得被 A 的销毁删除").isTrue();
+	}
+
+	/** 一个身份下的一整套最小可删面（会话记录 + run + 台账 + 记忆 + 守卫）。 */
+	private void seedIdentitySession(String runId, String toolCallId) throws Exception {
+		TenantUser identity = RequestContextUtils.require();
+		this.fixture.fake.sets
+			.computeIfAbsent(RunStore.RUN_INDEX, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+			.add(RunKeyScope.indexMember(identity.tenantId(), identity.userId(), runId));
+		for (String key : thirteenKeys(runId)) {
+			this.fixture.fake.strings.put(key, "seed");
+		}
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setRunId(runId);
+		snapshot.setSessionId(SESSION_A);
+		snapshot.setStatus(RunSnapshot.DONE);
+		snapshot.setTenantId(identity.tenantId());
+		snapshot.setUserId(identity.userId());
+		this.fixture.fake.strings.put(this.fixture.store.runKey(runId),
+				this.fixture.mapper.writeValueAsString(snapshot));
+		this.fixture.fake.strings.put(this.fixture.store.beatKey(runId), "1");
+		this.fixture.fake.strings.put(this.fixture.store.activityKey(runId), "1");
+		seedPending(runId, toolCallId);
+		this.fixture.fake.strings.put(AiSessionService.keyFor(SESSION_A), "{}");
+		this.fixture.fake.strings.put(this.fixture.store.sessionCurrentKey(SESSION_A), runId);
+		// 记忆面直接落"已是最终形态"的键（saveAll 走 staging 脚本，替身只建模销毁侧脚本）。
+		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A), new ArrayList<>(List.of("{}")));
+		this.fixture.pendingStore.register(SESSION_A, "purge-" + runId, "tester", System.currentTimeMillis());
+		this.fixture.guard.arm(SESSION_A, "purge-" + runId, Duration.ofHours(1));
+	}
+
+	private String attachmentsRegistrationKey(long tenantId, long userId, String fileId) {
+		return "ai:form:att:" + tenantId + ":" + userId + ":" + fileId;
 	}
 
 	private LeaseService grantedLease() {

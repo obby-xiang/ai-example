@@ -2,6 +2,9 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -31,6 +34,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p><b>与 ui_request_upload 的关系</b>：那条通道是"用浏览器手势把句柄交给网页"的既有交接卡，
  * 与本登记簿并存不冲突 —— 一个走 {@code frontend_tool_request} 挂起，一个走表单字段值；
  * 两者都不把文件内容送进模型上下文。
+ *
+ * <h2>身份隔离（2026-10-30）</h2>
+ * 四族键全部带身份段（{@link TenantKeyScope}）：
+ * <ul>
+ * <li>{@code ai:form:att:<t>:<u>:<fileId>}（登记）与 {@code ai:form:att:used:<t>:<u>:<fileId>}（墓碑）；</li>
+ * <li>{@code ai:form:att:sess:<t>:<u>:<sessionId>}（会话索引，销毁枚举面）；</li>
+ * <li>{@code ai:form:att:form:<t>:<u>:<runId>:<toolCallId>}（表单索引，限额/收口回收面）。</li>
+ * </ul>
+ * 同一个 fileId 在别的身份下<b>根本不存在</b>：查不到 ⇒ 不能消费/不能删登记/不能删文件
+ * （"附件归属与文件删除不能跨身份"由键形本身保证，而不是靠调用方自觉）。
+ * 无身份上下文时落到 legacy 键（{@code ai:form:att:<fileId>} 等旧键形，独立过渡命名空间）；
+ * 带身份的读路径<b>不</b>回落 legacy —— 旧数据不会被新身份看见。
  */
 @Slf4j
 @Component
@@ -107,13 +122,15 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		String fileId = "att_" + UUID.randomUUID().toString().replace("-", "");
 		Attachment attachment = new Attachment(fileId, runId, toolCallId, sessionId, fileName, size, contentType,
 				storagePath);
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			this.memory.put(fileId, attachment);
+			this.memory.put(registration, attachment);
 			return attachment;
 		}
 		try {
-			redis.opsForValue().set(KEY_PREFIX + fileId, this.objectMapper.writeValueAsString(attachment), this.ttl);
+			redis.opsForValue().set(registration, this.objectMapper.writeValueAsString(attachment), this.ttl);
 		}
 		catch (Exception ex) {
 			// B3：多实例下登记失败必须 fail-closed —— 回落进程内 Map 会让"上传在 A、回灌在 B"时
@@ -127,8 +144,8 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		// 任一索引失败都必须回滚登记（否则销毁/收口时看不见这条登记，文件成孤儿）：先删数据键再抛出，
 		// 调用方（上传端点）据此删除已落盘文件。
 		try {
-			addToIndex(redis, sessionIndexKey(sessionId), fileId);
-			addToIndex(redis, formIndexKey(runId, toolCallId), fileId);
+			addToIndex(redis, sessionIndexKey(identity, sessionId), fileId);
+			addToIndex(redis, formIndexKey(identity, runId, toolCallId), fileId);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
@@ -136,9 +153,9 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 					+ "（回滚登记，避免销毁/收口时漏删文件）：{}", fileId, sessionId, runId, toolCallId,
 					ex.getMessage());
 			try {
-				redis.delete(KEY_PREFIX + fileId);
-				removeFromIndexQuietly(redis, sessionIndexKey(sessionId), fileId);
-				removeFromIndexQuietly(redis, formIndexKey(runId, toolCallId), fileId);
+				redis.delete(registration);
+				removeFromIndexQuietly(redis, sessionIndexKey(identity, sessionId), fileId);
+				removeFromIndexQuietly(redis, formIndexKey(identity, runId, toolCallId), fileId);
 			}
 			catch (Exception cleanup) {
 				log.warn("回滚附件登记失败 fileId={}（登记会在 TTL 后自清）：{}", fileId, cleanup.getMessage());
@@ -153,12 +170,14 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return null;
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			return this.memory.get(fileId);
+			return this.memory.get(registration);
 		}
 		try {
-			String json = redis.opsForValue().get(KEY_PREFIX + fileId);
+			String json = redis.opsForValue().get(registration);
 			return json == null ? null : this.objectMapper.readValue(json, Attachment.class);
 		}
 		catch (Exception ex) {
@@ -174,18 +193,21 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return false;
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String registration = registrationKey(identity, fileId);
+		String tombstone = consumedKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			if (this.memory.get(fileId) == null) {
+			if (this.memory.get(registration) == null) {
 				return false;
 			}
 			// 进程内路径同为"墓碑先于删除"：先置已消费，再摘登记
-			this.consumed.add(fileId);
-			this.memory.remove(fileId);
+			this.consumed.add(tombstone);
+			this.memory.remove(registration);
 			return true;
 		}
 		try {
-			Attachment attachment = readRegistrationOrNull(redis, fileId);
+			Attachment attachment = readRegistrationOrNull(redis, identity, fileId);
 			if (attachment == null) {
 				// 不存在/已过期：没有可消费的登记，也不该留墓碑（否则"从没上传过"会被报成"已消费"）
 				return false;
@@ -193,13 +215,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			// I5：墓碑（WAL）<b>先写</b>，数据键<b>后删</b>。
 			// 反过来（先删数据键）时，墓碑写失败会留下最坏组合：登记已删 + 无墓碑 + 落盘文件成孤儿
 			// （谁也枚举不到它）。现在墓碑写不进去就直接抛，数据键原样保留 —— 用户还能重试。
-			redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", this.ttl);
-			Boolean deleted = redis.delete(KEY_PREFIX + fileId);
+			redis.opsForValue().set(tombstone, "1", this.ttl);
+			Boolean deleted = redis.delete(registration);
 			if (Boolean.TRUE.equals(deleted)) {
-				this.memory.remove(fileId);
-				removeFromIndexQuietly(redis, sessionIndexKey(attachment.sessionId()), fileId);
-				removeFromIndexQuietly(redis,
-						formIndexKey(attachment.runId(), attachment.toolCallId()), fileId);
+				this.memory.remove(registration);
+				removeFromIndexQuietly(redis, sessionIndexKey(identity, attachment.sessionId()), fileId);
+				removeFromIndexQuietly(redis, formIndexKey(identity, attachment.runId(), attachment.toolCallId()),
+						fileId);
 				return true;
 			}
 			// 墓碑已写但数据键已被并发消费/过期：不是本次消费成功（返回 false 由调用方告警）
@@ -224,9 +246,15 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (sessionId == null || sessionId.isBlank()) {
 			return List.of();
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			return this.memory.values().stream().filter(item -> sessionId.equals(item.sessionId())).toList();
+			// 进程内兜底同样按身份分桶：map 的键是带身份段的登记键，不能只看 sessionId。
+			return this.memory.values()
+				.stream()
+				.filter(item -> sessionId.equals(item.sessionId())
+						&& this.memory.containsKey(registrationKey(identity, item.fileId())))
+				.toList();
 		}
 		SetOperations<String, String> setOps = redis.opsForSet();
 		if (setOps == null) {
@@ -234,7 +262,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		Set<String> ids;
 		try {
-			ids = setOps.members(sessionIndexKey(sessionId));
+			ids = setOps.members(sessionIndexKey(identity, sessionId));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
@@ -261,7 +289,8 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	@Override
 	public void touch(String runId, String toolCallId) {
-		String indexKey = formIndexKey(runId, toolCallId);
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String indexKey = formIndexKey(identity, runId, toolCallId);
 		if (indexKey == null) {
 			return;
 		}
@@ -288,10 +317,10 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		for (String fileId : ids) {
 			try {
-				redis.expire(KEY_PREFIX + fileId, this.ttl);
-				Attachment attachment = readRegistrationOrNull(redis, fileId);
+				redis.expire(registrationKey(identity, fileId), this.ttl);
+				Attachment attachment = readRegistrationOrNull(redis, identity, fileId);
 				if (attachment != null) {
-					redis.expire(sessionIndexKey(attachment.sessionId()), this.ttl);
+					redis.expire(sessionIndexKey(identity, attachment.sessionId()), this.ttl);
 				}
 			}
 			catch (Exception ex) {
@@ -320,11 +349,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
 			return List.of();
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
 			return this.memory.values()
 				.stream()
-				.filter(item -> runId.equals(item.runId()) && toolCallId.equals(item.toolCallId()))
+				.filter(item -> runId.equals(item.runId()) && toolCallId.equals(item.toolCallId())
+						&& this.memory.containsKey(registrationKey(identity, item.fileId())))
 				.toList();
 		}
 		SetOperations<String, String> setOps = redis.opsForSet();
@@ -333,7 +364,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		Set<String> ids;
 		try {
-			ids = setOps.members(formIndexKey(runId, toolCallId));
+			ids = setOps.members(formIndexKey(identity, runId, toolCallId));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
@@ -365,26 +396,29 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return null;
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			return this.memory.remove(fileId);
+			return this.memory.remove(registration);
 		}
 		Attachment attachment = find(fileId);
 		try {
-			redis.delete(KEY_PREFIX + fileId);
+			redis.delete(registration);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_CONSUME, ex);
 			throw new AiStateUnavailableException("附件登记删除失败（Redis 不可用；可重试）", ex);
 		}
 		try {
-			redis.delete(CONSUMED_PREFIX + fileId);
+			redis.delete(consumedKey(identity, fileId));
 		}
 		catch (Exception ex) {
 			log.warn("清理附件消费墓碑失败 fileId={}（墓碑会在 TTL 后自清）：{}", fileId, ex.getMessage());
 		}
-		removeFromIndexQuietly(redis, sessionIndexKey(attachment == null ? null : attachment.sessionId()), fileId);
-		removeFromIndexQuietly(redis, formIndexKey(attachment == null ? null : attachment.runId(),
+		removeFromIndexQuietly(redis, sessionIndexKey(identity,
+				attachment == null ? null : attachment.sessionId()), fileId);
+		removeFromIndexQuietly(redis, formIndexKey(identity, attachment == null ? null : attachment.runId(),
 				attachment == null ? null : attachment.toolCallId()), fileId);
 		return attachment;
 	}
@@ -402,15 +436,26 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		redis.expire(indexKey, this.ttl);
 	}
 
-	private static String sessionIndexKey(String sessionId) {
-		return sessionId == null || sessionId.isBlank() ? null : SESSION_INDEX_PREFIX + sessionId;
+	private static String sessionIndexKey(TenantUser identity, String sessionId) {
+		return sessionId == null || sessionId.isBlank() ? null
+				: SESSION_INDEX_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
 	}
 
-	private static String formIndexKey(String runId, String toolCallId) {
+	private static String formIndexKey(TenantUser identity, String runId, String toolCallId) {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
 			return null;
 		}
-		return FORM_INDEX_PREFIX + runId + ":" + toolCallId;
+		return FORM_INDEX_PREFIX + TenantKeyScope.segmentOf(identity) + runId + ":" + toolCallId;
+	}
+
+	/** 登记键（带身份段；无身份 = legacy 键形）。 */
+	private static String registrationKey(TenantUser identity, String fileId) {
+		return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + fileId;
+	}
+
+	/** 已消费墓碑键（带身份段；无身份 = legacy 键形）。 */
+	private static String consumedKey(TenantUser identity, String fileId) {
+		return CONSUMED_PREFIX + TenantKeyScope.segmentOf(identity) + fileId;
 	}
 
 	/** 索引清理（best-effort：登记已删时 stale 成员不再指向任何文件）。 */
@@ -438,14 +483,14 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 * "登记不存在"会让消费返回 false，日志与上层把它报成"已被消费/已过期"，真正的原因（基础设施故障）
 	 * 反而消失，用户看到的是"附件过期，请重新上传"。
 	 */
-	private Attachment readRegistrationOrNull(StringRedisTemplate redis, String fileId) {
+	private Attachment readRegistrationOrNull(StringRedisTemplate redis, TenantUser identity, String fileId) {
 		ValueOperations<String, String> values = redis.opsForValue();
 		if (values == null) {
 			return null;
 		}
 		String json;
 		try {
-			json = values.get(KEY_PREFIX + fileId);
+			json = values.get(registrationKey(identity, fileId));
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
@@ -468,12 +513,14 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return false;
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		String tombstone = consumedKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			return this.consumed.contains(fileId);
+			return this.consumed.contains(tombstone);
 		}
 		try {
-			return Boolean.TRUE.equals(redis.hasKey(CONSUMED_PREFIX + fileId));
+			return Boolean.TRUE.equals(redis.hasKey(tombstone));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_TOMBSTONE, ex);

@@ -2,6 +2,7 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -29,8 +30,11 @@ import java.util.Map;
  *
  * <h2>身份归属（2026-10-30）</h2>
  * 每条会话记录额外登记 {@code tenantId/userId}：值由服务端从请求身份上下文取得，
- * 不读请求体。"会话属于谁"的判定本身（key 隔离、只带 runId 的入口核对快照）由后续任务接入；
- * 本类只负责<b>登记</b>，键族仍为 {@code ai:session:<sessionId>}。
+ * 不读请求体。"会话属于谁"的判定由<b>键形隔离</b>保证：
+ * 记录键为 {@code ai:session:<tenantId>:<userId>:<sessionId>}（见 {@link TenantKeyScope}），
+ * 跨租户/跨用户即使 sessionId 相同也落在不同键上，互不可见。
+ * 没有身份上下文时落到<b>不含身份段的 legacy 键</b>（{@code ai:session:<sessionId>}）——
+ * 那是独立的过渡命名空间，带身份的读写永远不会碰它。
  *
  * <h2>为什么"校验"其实是"创建或续期"</h2>
  * 发号已改为后端接口（{@code POST /api/ai/session}，时间戳+实例位+序列），但历史页签仍可能携带
@@ -56,7 +60,29 @@ public class AiSessionService {
 	}
 
 	/**
-	 * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文（缺失则不登记归属）。
+	 * 会话记录键（<b>带当前身份</b>）：{@code ai:session:<t>:<u>:<sessionId>}。
+	 *
+	 * <p>无身份上下文时返回 legacy 键形（{@code ai:session:<sessionId>}，独立的过渡命名空间）。
+	 */
+	public static String keyFor(String sessionId) {
+		return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
+	}
+
+	/** 会话记录键（<b>显式身份</b>；身份来自记录/调用方，不读线程上下文）。 */
+	public static String keyFor(String sessionId, long tenantId, long userId) {
+		return TenantKeyScope.scoped(KEY_PREFIX, tenantId, userId, sessionId);
+	}
+
+	/** 会话记录键（可空身份：{@code null} = legacy 键形）。 */
+	public static String keyFor(String sessionId, TenantUser identity) {
+		return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
+	}
+
+	/**
+	 * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文。
+	 *
+	 * <p>有上下文 ⇒ 记录落在该身份的键上；<b>没有上下文</b> ⇒ 落在 legacy 键
+	 * （{@code ai:session:<sessionId>}，独立过渡命名空间，带身份的读路径永不触及）。
 	 *
 	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
 	 */
@@ -77,7 +103,7 @@ public class AiSessionService {
 	}
 
 	private boolean ensureInternal(String sessionId, TenantUser identity) {
-		String key = KEY_PREFIX + sessionId;
+		String key = keyFor(sessionId, identity);
 		Duration ttl = this.properties.getSessionTtl();
 		try {
 			boolean existed = Boolean.TRUE.equals(this.redis.hasKey(key));
@@ -86,7 +112,7 @@ public class AiSessionService {
 			value.put("lastActivity", Instant.now().toString());
 			value.put("rounds", roundOf(key) + 1);
 			if (identity != null) {
-				// 归属随会话记录落 Redis（本批不改键族；键形隔离由后续任务统一处理）
+				// 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
 				value.put("tenantId", identity.tenantId());
 				value.put("userId", identity.userId());
 			}
@@ -102,15 +128,11 @@ public class AiSessionService {
 
 	public boolean exists(String sessionId) {
 		try {
-			return Boolean.TRUE.equals(this.redis.hasKey(KEY_PREFIX + sessionId));
+			return Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId)));
 		}
 		catch (Exception ex) {
 			return false;
 		}
-	}
-
-	public String keyFor(String sessionId) {
-		return KEY_PREFIX + sessionId;
 	}
 
 	private int roundOf(String key) {

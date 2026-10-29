@@ -2,6 +2,7 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.form.RedisFormAttachmentStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
@@ -50,6 +51,34 @@ class RedisFormAttachmentStoreSessionIndexTest {
 
 		assertThat(store.findBySessionId("")).isEmpty();
 		assertThat(store.find(attachment.fileId())).isNotNull();
+	}
+
+	/**
+	 * <b>跨租户相同 sessionId 的附件隔离</b>：登记、枚举、查询、删登记都不跨身份。
+	 *
+	 * <p>fileId 由服务端签发（全局唯一），但"删文件"的依据是登记里的 {@code storagePath} ——
+	 * 只要别的身份<b>查不到这条登记</b>，就删不到那个文件。
+	 */
+	@Test
+	void sameSessionIdInTwoIdentitiesDoesNotShareRegistrations() {
+		RedisFormAttachmentStore store = store();
+		FormAttachmentStore.Attachment a;
+		FormAttachmentStore.Attachment b;
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(1L, 101L)) {
+			a = store.register("run-a", "call-a", "sess-dup", "a.pdf", 10L, "application/pdf", "/tmp/a.pdf");
+			assertThat(store.findBySessionId("sess-dup")).containsExactly(a);
+		}
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(2L, 201L)) {
+			b = store.register("run-b", "call-b", "sess-dup", "b.pdf", 20L, "application/pdf", "/tmp/b.pdf");
+			assertThat(store.findBySessionId("sess-dup")).as("B 只看到自己的附件").containsExactly(b);
+			assertThat(store.find(a.fileId())).as("A 的 fileId 在 B 身份下不可见").isNull();
+			assertThat(store.consume(a.fileId())).as("不得跨身份消费 A 的附件").isFalse();
+			assertThat(store.deleteRegistration(a.fileId())).as("不得跨身份删 A 的登记").isNull();
+		}
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(1L, 101L)) {
+			assertThat(store.find(a.fileId())).as("A 的登记原样保留").isEqualTo(a);
+			assertThat(store.findBySessionId("sess-dup")).containsExactly(a);
+		}
 	}
 
 	@SuppressWarnings("unchecked")

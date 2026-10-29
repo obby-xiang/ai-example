@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -28,10 +29,14 @@ import java.util.UUID;
  *
  * <h2>两个维度</h2>
  * <ul>
- * <li>{@code ai:rate:session:<sessionId>}：{@code app.ai.limit.session-per-minute}（20/分）。本仓
- * sessionId 由客户端自生，故它只拦"同一个页签被脚本连发"；</li>
+ * <li>{@code ai:rate:session:<tenantId>:<userId>:<sessionId>}：{@code app.ai.limit.session-per-minute}
+ * （20/分）。<b>身份隔离（2026-10-30）</b>：会话维度按复合身份分桶 —— 跨租户/跨用户即使 sessionId
+ * 相同也各有各的额度（不会互相消耗，也不会被别人的连发误伤）。无身份上下文时用 legacy 键
+ * {@code ai:rate:session:<sessionId>}（独立过渡命名空间）。本仓 sessionId 由客户端自生，
+ * 故它只拦"同一个页签被脚本连发"；</li>
  * <li>{@code ai:rate:ip:<RemoteAddr>}：{@code app.ai.limit.ip-per-minute}（60/分）。兜住"换
- * sessionId 绕开会话额度"。用 {@code RemoteAddr} 而<b>不</b>读 {@code X-Forwarded-For}
+ * sessionId 绕开会话额度"。<b>刻意不</b>按身份分桶：它防的是同一来源的滥用，按身份分桶等于
+ * 让"切身份"变成免费的额度翻倍。用 {@code RemoteAddr} 而<b>不</b>读 {@code X-Forwarded-For}
  * —— 后者可伪造，而本仓没有前置代理，读它等于把额度交给客户端自己声明。</li>
  * </ul>
  * 顺序：先会话后 IP。会话被拒时<b>不</b>消耗 IP 额度（两个独立单键脚本，天然如此）；
@@ -120,7 +125,9 @@ public class AiRateLimiter {
 	public Decision check(String sessionId, String clientIp) {
 		AiProperties.Limit limit = this.properties.getLimit();
 		long windowMs = limit.getWindow().toMillis();
-		Decision session = hit(SESSION_KEY_PREFIX + sessionId, limit.getSessionPerMinute(), windowMs, SCOPE_SESSION);
+		// 会话维度按身份分桶（{@code ai:rate:session:<t>:<u>:<sid>}）；无上下文 = legacy 键形。
+		Decision session = hit(TenantKeyScope.scoped(SESSION_KEY_PREFIX, sessionId),
+				limit.getSessionPerMinute(), windowMs, SCOPE_SESSION);
 		if (!session.allowed()) {
 			return session;
 		}

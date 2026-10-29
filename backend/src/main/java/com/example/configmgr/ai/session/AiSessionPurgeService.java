@@ -6,6 +6,10 @@ import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunKeyScope;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.file.FileStorageService;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +34,21 @@ import java.util.regex.Pattern;
 
 /**
  * 会话销毁（{@code DELETE /api/ai/session/{sessionId}} 的本体）。
+ *
+ * <h2>身份隔离（2026-10-30，租户任务 2）</h2>
+ * 销毁是<b>身份内</b>的操作：所有键族都带 {@code tenantId/userId}（{@link TenantKeyScope}），
+ * 跨租户/跨用户即使 sessionId 相同也互不可见、互不删除。
+ * <ul>
+ * <li><b>入口身份</b>：{@link #purge(String, String)} 取当前 {@link RequestContextUtils} 上下文
+ * （HTTP 边界已校验）；显式重载供调用方/用例直接给身份；无上下文 = legacy 命名空间（独立过渡面）；</li>
+ * <li><b>记录身份</b>：pending 台账登记时固化 {@code tenantId/userId}；
+ * {@link SessionPurgeRetryRunner} 重试时按<b>记录</b> {@code useContext} 恢复后再调
+ * {@link #retry}/{@link #verifyMemoryOnly} —— 不扫描租户列表；</li>
+ * <li><b>run 归属</b>：只带 sessionId 的索引/快照不足以归属 —— 删除前用快照的
+ * {@code tenantId/userId} 再核对一次；不一致或<b>无归属 legacy</b> 的 run 一律不删（只记 warning）；</li>
+ * <li><b>浏览器清理</b>：{@code clientCleanup} 给出与前端一致的带身份键形
+ * （{@code ai-mirror:<t>:<u>:<sid>}、{@code cm.ai.form.draft.<t>:<u>.}），旧键形只给 legacy 身份。</li>
+ * </ul>
  *
  * <h2>删除面（只删 AI 数据）</h2>
  * <ol>
@@ -274,16 +293,39 @@ public class AiSessionPurgeService {
 	// ── 主流程 ──────────────────────────────────────────────────────────────
 
 	/**
-	 * 销毁一个会话的全部 AI 数据。
+	 * 销毁一个会话的全部 AI 数据（身份取当前上下文；无上下文 = legacy 命名空间）。
 	 *
 	 * @param sessionId 会话 id（前端页签级；允许特殊字符，键名/扫描均做了精确化处理）
 	 * @param requestedBy 发起方（写进取消标志与守卫，便于取证；null = unknown）
 	 * @return 幂等结果；{@code complete=false} 表示有延后/部分失败，可重试
 	 */
 	public PurgeResult purge(String sessionId, String requestedBy) {
+		return purge(sessionId, requestedBy, RequestContextUtils.currentOrNull());
+	}
+
+	/**
+	 * 销毁一个会话的全部 AI 数据，<b>显式指定身份</b>（HTTP 边界/用例用；不读线程上下文）。
+	 *
+	 * <p>身份在入口固定：pending 台账写入 {@code tenantId/userId}，删除主体全程在该身份的
+	 * {@link RequestContextUtils#useContext} 作用域内执行 —— 于是 RunStore/记忆/附件等下游
+	 * 按上下文算出的键必然是本身份的键。
+	 *
+	 * @return 幂等结果；{@code complete=false} 表示有延后/部分失败，可重试
+	 */
+	public PurgeResult purge(String sessionId, String requestedBy, long tenantId, long userId) {
+		return purge(sessionId, requestedBy, new TenantUser(tenantId, userId));
+	}
+
+	private PurgeResult purge(String sessionId, String requestedBy, TenantUser identity) {
 		if (sessionId == null || sessionId.isBlank()) {
 			throw new IllegalArgumentException("sessionId 不得为空白");
 		}
+		try (RequestContextUtils.SafeCloseable ignored = scopeOf(identity)) {
+			return purgeInternal(sessionId, requestedBy, identity);
+		}
+	}
+
+	private PurgeResult purgeInternal(String sessionId, String requestedBy, TenantUser identity) {
 		String requestedPurgeId = UUID.randomUUID().toString();
 		String actor = requestedBy == null || requestedBy.isBlank() ? "unknown" : requestedBy;
 
@@ -293,12 +335,12 @@ public class AiSessionPurgeService {
 		// 否则"本次前置失败 → 回滚删除 pending/disarm 守卫"会把上一轮的 deferred 义务一起抹掉。
 		SessionPurgePendingStore.Registration registration;
 		try {
-			registration = this.pendingStore.register(sessionId, requestedPurgeId, actor,
+			registration = this.pendingStore.register(identity, sessionId, requestedPurgeId, actor,
 					System.currentTimeMillis());
 		}
 		catch (RuntimeException ex) {
 			log.warn("会话销毁 pending 登记失败，未删除任何数据 sessionId={}：{}", sessionId, rootMessage(ex));
-			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId), ex);
+			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId, identity), ex);
 		}
 		String purgeId = registration.pending().purgeId();
 		// owner 口径与守卫值（purgeId|actor）一致：复用时沿用原 owner，避免无意义的改写。
@@ -318,7 +360,7 @@ public class AiSessionPurgeService {
 			}
 			log.warn("会话销毁枚举失败，未删除任何数据 sessionId={} purgeId={}（复用既有 pending 时保留台账）"
 					+ "：{}", sessionId, purgeId, rootMessage(ex));
-			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId), ex);
+			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex);
 		}
 
 		// ③ 装写回守卫（在删除任何数据之前；失败则整体中止并撤销本次新建的 pending）。
@@ -355,6 +397,10 @@ public class AiSessionPurgeService {
 	/**
 	 * 自动/手动重试入口：复用已有 pending 的 purgeId，绝不重新登记 pending 或改写新守卫。
 	 *
+	 * <p><b>身份必须已按记录恢复</b>：本方法按"当前身份"定位台账与全部键。调用方
+	 * （{@link SessionPurgeRetryRunner}）先读台账、再用台账里的 {@code tenantId/userId}
+	 * {@code useContext}，然后才调这里 —— 不猜身份、不扫租户列表。
+	 *
 	 * @return null = pending 不存在或已换主（旧重试应停止）；否则与 {@link #purge} 同形结果
 	 */
 	public PurgeResult retry(String sessionId, String purgeId, String requestedBy) {
@@ -373,7 +419,8 @@ public class AiSessionPurgeService {
 		}
 		catch (RuntimeException ex) {
 			recordFailureQuietly(sessionId, purgeId, "enumerate: " + rootMessage(ex));
-			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId), ex);
+			return aborted(sessionId, purgeId, "enumerate",
+					enumerationForFailure(sessionId, pending.identityOrNull()), ex);
 		}
 
 		SessionPurgeDatabase.Deleted dbDeleted;
@@ -513,7 +560,12 @@ public class AiSessionPurgeService {
 			// 空索引 / 未回填 / 读失败：回退全局索引。“非空”不等于“完整”。
 			Set<String> indexMembers = this.redis.opsForSet().members(RunStore.RUN_INDEX);
 			if (indexMembers != null) {
-				candidates.addAll(indexMembers);
+				for (String member : indexMembers) {
+					String runId = indexRunId(member);
+					if (runId != null) {
+						candidates.add(runId);
+					}
+				}
 			}
 		}
 		if (gateRunId != null) {
@@ -562,6 +614,13 @@ public class AiSessionPurgeService {
 				if (!sessionId.equals(snapshot.getSessionId())) {
 					continue;
 				}
+				if (!belongsToCurrentIdentity(snapshot)) {
+					// 快照带的是别的身份 / 无归属 legacy：sessionId 相同但不是"我的这一轮"，
+					// 绝不删它的 13 键（也不把它写进本会话的 run 索引）。
+					log.warn("会话销毁跳过非本身份的 run runId={} sessionId={} snapshotIdentity={}:{}（不删、不计入索引）",
+							runId, sessionId, snapshot.getTenantId(), snapshot.getUserId());
+					continue;
+				}
 				foundSessionRunIds.add(runId);
 				boolean active = !isTerminal(snapshot.getStatus()) || runId.equals(gateRunId);
 				runs.add(new RunTarget(runId, snapshot.getStatus(), active));
@@ -588,22 +647,22 @@ public class AiSessionPurgeService {
 			memoryExisted = Boolean.TRUE.equals(this.redis.hasKey(memoryKey)) || memoryStaged;
 		}
 		else {
-			memoryKey = RedisChatMemoryRepository.KEY_PREFIX + sessionId;
+			memoryKey = TenantKeyScope.scoped(RedisChatMemoryRepository.KEY_PREFIX, sessionId);
 			List<?> memory = this.chatMemoryRepository.findByConversationId(sessionId);
 			memoryMessages = memory == null ? 0 : memory.size();
 			memoryExisted = memoryMessages > 0 || memoryStaged;
 		}
 
 		ContextTargets context = new ContextTargets(
-				Boolean.TRUE.equals(this.redis.hasKey(RunStore.CONTEXT_PREFIX + sessionId)),
-				Boolean.TRUE.equals(this.redis.hasKey(RunStore.CONTEXT_LEDGER_PREFIX + sessionId)),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
 				archiveKeys(sessionId),
-				Boolean.TRUE.equals(this.redis.hasKey(RunStore.SAFETY_PREFIX + sessionId)));
+				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))));
 
 		boolean sessionCurrentExisted = Boolean.TRUE.equals(
-				this.redis.hasKey(RunStore.SESSION_CURRENT_PREFIX + sessionId));
+				this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
 		boolean sessionRecordExisted = Boolean.TRUE.equals(
-				this.redis.hasKey(AiSessionService.KEY_PREFIX + sessionId));
+				this.redis.hasKey(AiSessionService.keyFor(sessionId)));
 
 		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
 		SessionPurgeDatabase.Snapshot db = this.database.snapshot(sessionId);
@@ -611,10 +670,48 @@ public class AiSessionPurgeService {
 		boolean found = memoryExisted || !runs.isEmpty() || context.any() || !attachmentList.isEmpty()
 				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted;
 
-		ClientCleanup cleanup = new ClientCleanup(CLIENT_MIRROR_PREFIX + sessionId, CLIENT_DRAFT_PREFIX,
-				List.copyOf(new LinkedHashSet<>(toolCallIds)));
+		ClientCleanup cleanup = clientCleanup(sessionId, toolCallIds, RequestContextUtils.currentOrNull());
 		return new Enumeration(runs, attachmentList, context, memoryExisted, memoryMessages, memoryKey, db,
 				sessionCurrentExisted, sessionRecordExisted, found, cleanup);
+	}
+
+	/**
+	 * 浏览器本地清理指令（<b>键形与前端一致</b>）。
+	 *
+	 * <ul>
+	 * <li>镜像：{@code ai-mirror:<tenantId>:<userId>:<sessionId>}（前端 {@code mirrorStorageKey}）；</li>
+	 * <li>草稿前缀：{@code cm.ai.form.draft.<tenantId>:<userId>.}（前端 {@code formDraftPrefix}，
+	 * toolCallId 拼在其后）；</li>
+	 * <li>legacy 身份（无上下文）给出旧键形 {@code ai-mirror:<sid>} / {@code cm.ai.form.draft.}。</li>
+	 * </ul>
+	 */
+	static ClientCleanup clientCleanup(String sessionId, List<String> toolCallIds, TenantUser identity) {
+		String mirrorKey = TenantKeyScope.segmentOf(identity).isEmpty() ? CLIENT_MIRROR_PREFIX + sessionId
+				: CLIENT_MIRROR_PREFIX + identity.tenantId() + ":" + identity.userId() + ":" + sessionId;
+		String draftPrefix = TenantKeyScope.segmentOf(identity).isEmpty() ? CLIENT_DRAFT_PREFIX
+				: CLIENT_DRAFT_PREFIX + identity.tenantId() + ":" + identity.userId() + ".";
+		return new ClientCleanup(mirrorKey, draftPrefix, List.copyOf(new LinkedHashSet<>(toolCallIds)));
+	}
+
+	/**
+	 * 当前身份的作用域（{@code null} = legacy，不改变上下文）。
+	 */
+	private static RequestContextUtils.SafeCloseable scopeOf(TenantUser identity) {
+		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
+	}
+
+	/**
+	 * run 快照是否属于<b>当前销毁身份</b>（只带 sessionId 的归属不够：sessionId 可跨身份重复）。
+	 *
+	 * <p>无身份（legacy 销毁）时保持旧口径（不额外限制）；带身份时要求快照身份完全一致，
+	 * 快照无身份（{@code 0/0}，本功能上线前的旧数据）视为<b>不可证明属于我</b> ⇒ 不删。
+	 */
+	private static boolean belongsToCurrentIdentity(RunSnapshot snapshot) {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null || snapshot == null) {
+			return true;
+		}
+		return snapshot.getTenantId() == identity.tenantId() && snapshot.getUserId() == identity.userId();
 	}
 
 	/**
@@ -634,7 +731,7 @@ public class AiSessionPurgeService {
 	/** 由 {@code ai:ctx:<sid>} 的 {@code turnNo} 推导归档键（读不到/类型不符时返回空）。 */
 	private List<String> archivesFromTurnNo(String sessionId) {
 		try {
-			Object raw = this.redis.opsForHash().get(RunStore.CONTEXT_PREFIX + sessionId, "turnNo");
+			Object raw = this.redis.opsForHash().get(this.runStore.contextKey(sessionId), "turnNo");
 			if (raw == null) {
 				return List.of();
 			}
@@ -644,7 +741,7 @@ public class AiSessionPurgeService {
 			}
 			List<String> keys = new ArrayList<>(turnNo + 1);
 			for (int turn = 0; turn <= turnNo; turn++) {
-				keys.add(RunStore.CONTEXT_ARCHIVE_PREFIX + sessionId + ":" + turn);
+				keys.add(this.runStore.contextArchiveKey(sessionId, turn));
 			}
 			return keys;
 		}
@@ -659,14 +756,15 @@ public class AiSessionPurgeService {
 	 * 归档键 <b>只按需扫描</b>，并做两道防误删：
 	 * <ol>
 	 * <li>sessionId 里的 Redis glob 元字符全部转义；</li>
-	 * <li>键必须逐字以 {@code ai:ctx:archive:<sessionId>:} 开头，且后缀是<b>纯数字</b> turnNo。
-	 * 于是 {@code a} 的扫描不会把 {@code a:1:2}（属于会话 {@code a:1}）当成自己的
-	 * {@code turnNo=1:2}；{@code abc} 也不会命中 {@code abcd}。</li>
+	 * <li>键必须逐字以 {@code ai:ctx:archive:<tenantId>:<userId>:<sessionId>:} 开头，且后缀是
+	 * <b>纯数字</b> turnNo。于是 {@code a} 的扫描不会把 {@code a:1:2}（属于会话 {@code a:1}）当成自己的
+	 * {@code turnNo=1:2}；{@code abc} 也不会命中 {@code abcd}；身份段不同则前缀本身就不同。</li>
 	 * </ol>
 	 */
 	private List<String> scanArchives(String sessionId) {
-		String prefix = RunStore.CONTEXT_ARCHIVE_PREFIX + sessionId + ":";
-		String pattern = RunStore.CONTEXT_ARCHIVE_PREFIX + escapeGlob(sessionId) + ":*";
+		String scopedPrefix = TenantKeyScope.scoped(RunStore.CONTEXT_ARCHIVE_PREFIX, sessionId);
+		String prefix = scopedPrefix + ":";
+		String pattern = escapeGlob(scopedPrefix) + ":*";
 		List<String> archives = new ArrayList<>();
 		// 逐 master 扫描（standalone 走单连接）；任一节点失败上抛，枚举阶段整体中止。
 		List<String> scanned = RedisClusterScanSupport.scan(this.redis,
@@ -1023,7 +1121,8 @@ public class AiSessionPurgeService {
 		if (members == null || members.isEmpty()) {
 			return residual;
 		}
-		for (String runId : members) {
+		for (String member : members) {
+			String runId = indexRunId(member);
 			if (runId == null || runId.isBlank() || known.contains(runId)) {
 				continue;
 			}
@@ -1064,6 +1163,12 @@ public class AiSessionPurgeService {
 			return;
 		}
 		String status = latest == null ? null : latest.getStatus();
+		if (latest != null && !belongsToCurrentIdentity(latest)) {
+			// 归属复核（快照带身份才可信）：别的身份/无归属 legacy 的 run 一律不动。
+			log.warn("会话销毁跳过非本身份的 run（复核）runId={} snapshotIdentity={}:{}", target.runId(),
+					latest.getTenantId(), latest.getUserId());
+			return;
+		}
 		boolean active = latest != null && !isTerminal(status);
 		if (active) {
 			deferred.add(new DeferredView(target.runId(), status, "RUN_ACTIVE"));
@@ -1109,13 +1214,14 @@ public class AiSessionPurgeService {
 	private ContextView deleteContext(String sessionId, ContextTargets targets, List<String> errors,
 			List<String> warnings) {
 		int deleted = 0;
-		deleted += deleteKeyIfType(RunStore.CONTEXT_PREFIX + sessionId, DataType.HASH, errors, warnings, "ctx");
-		deleted += deleteKeyIfType(RunStore.CONTEXT_LEDGER_PREFIX + sessionId, DataType.LIST, errors, warnings,
+		deleted += deleteKeyIfType(this.runStore.contextKey(sessionId), DataType.HASH, errors, warnings, "ctx");
+		deleted += deleteKeyIfType(this.runStore.contextLedgerKey(sessionId), DataType.LIST, errors, warnings,
 				"ctxLedger");
 		for (String archive : targets.archives()) {
 			deleted += deleteKeyIfType(archive, DataType.STRING, errors, warnings, "ctxArchive");
 		}
-		deleted += deleteKeyIfType(RunStore.SAFETY_PREFIX + sessionId, DataType.LIST, errors, warnings, "safety");
+		deleted += deleteKeyIfType(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), DataType.LIST, errors,
+				warnings, "safety");
 		return new ContextView(targets.context(), targets.ledger(), targets.archives().size(), targets.safety(),
 				deleted);
 	}
@@ -1187,7 +1293,7 @@ public class AiSessionPurgeService {
 			errors.add("sessionCurrent: " + rootMessage(ex));
 		}
 		// 只删会话记录键；ai:session:lock:<sid> 是协调键（在跑轮次可能还持有），不在这里动。
-		String recordKey = AiSessionService.KEY_PREFIX + sessionId;
+		String recordKey = AiSessionService.keyFor(sessionId);
 		try {
 			String value = this.redis.opsForValue().get(recordKey);
 			if (value == null) {
@@ -1206,6 +1312,9 @@ public class AiSessionPurgeService {
 		// ai:session:runs:<sid> 与 id="runs:<sid>" 的会话记录是同一个键（"ai:session:"+id）。
 		// 只删 SET（本会话的 run 索引）；其它类型判定为前缀碰撞的他会话键，跳过并留 warning。
 		deleteKeyIfType(this.runStore.sessionRunsKey(sessionId), DataType.SET, errors, warnings, "sessionRuns");
+		// 会话→活跃轮有序索引（ZSET，带 TTL）：销毁后成员指向已删的轮，留着只会让"活跃轮"的
+		// 加速面指向空快照；按类型删除，别的身份的键前缀里带自己的身份段，不会命中。
+		deleteKeyIfType(this.runStore.sessionActiveKey(sessionId), DataType.ZSET, errors, warnings, "sessionActive");
 		return new SessionView(currentDeleted, recordDeleted);
 	}
 
@@ -1287,12 +1396,32 @@ public class AiSessionPurgeService {
 		return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
 	}
 
+	/**
+	 * 全局索引成员 → 本销毁身份的 runId（不匹配返回 {@code null}）。
+	 *
+	 * <p>索引成员是<b>复合身份</b> {@code <tenantId>/<userId>/<runId>}
+	 * （{@link com.example.configmgr.ai.tenant.RunKeyScope}）。只带 sessionId 无法归属，
+	 * 所以这里先按成员身份过滤：别的身份 / 无归属 legacy 成员一律不参与本次销毁。
+	 * 无身份（legacy 销毁）只认旧的裸 runId 成员 —— legacy 不做"跨身份清扫"。
+	 */
+	private static String indexRunId(String member) {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
+		if (identity == null) {
+			return ref == null ? member : null;
+		}
+		if (ref == null) {
+			return null;
+		}
+		return ref.tenantId() == identity.tenantId() && ref.userId() == identity.userId() ? ref.runId() : null;
+	}
+
 	/** 枚举失败时的占位结果（不读取任何依赖，保证"失败不半删"可判定）。 */
-	private static Enumeration enumerationForFailure(String sessionId) {
+	private static Enumeration enumerationForFailure(String sessionId, TenantUser identity) {
 		return new Enumeration(List.of(), List.of(), new ContextTargets(false, false, List.of(), false), false, 0,
-				RedisChatMemoryRepository.KEY_PREFIX + sessionId,
+				RedisChatMemoryRepository.KEY_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId,
 				new SessionPurgeDatabase.Snapshot(0), false, false, false,
-				new ClientCleanup(CLIENT_MIRROR_PREFIX + sessionId, CLIENT_DRAFT_PREFIX, List.of()));
+				clientCleanup(sessionId, List.of(), identity));
 	}
 
 	private static PurgeResult aborted(String sessionId, String purgeId, String phase, Enumeration enumeration,

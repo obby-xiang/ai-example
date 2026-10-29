@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +35,31 @@ class SessionPurgePendingStoreTest {
 	}
 
 	@Test
+	void scanRecoveryRestoresTheCompositeIdentityFromTheRecord() {
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(1L, 101L)) {
+			this.store.register("s-1", "purge-a", "tester", 1_000L);
+		}
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(2L, 201L)) {
+			this.store.register("s-1", "purge-b", "tester", 1_000L);
+		}
+		// 队列成员是 pending 键（含复合身份）：同 sessionId 的两条台账各占一项。
+		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).containsExactly(
+				SessionPurgePendingStore.pendingKey("s-1", 1L, 101L),
+				SessionPurgePendingStore.pendingKey("s-1", 2L, 201L));
+
+		// 队列丢失后只做 SCAN：身份只能来自记录（不扫租户列表、不从键名猜）。
+		this.fake.lists.remove(SessionPurgePendingStore.QUEUE_KEY);
+		int recovered = this.store.recoverOrphans(20);
+		assertThat(recovered).isEqualTo(2);
+
+		List<SessionPurgePendingStore.Pending> due = this.store.listDue(1_000L, 10);
+		assertThat(due).extracting(SessionPurgePendingStore.Pending::sessionId).containsOnly("s-1");
+		assertThat(due).extracting(pending -> pending.tenantId() + ":" + pending.userId())
+			.as("恢复出的每条台账都带着自己的复合身份")
+			.containsExactlyInAnyOrder("1:101", "2:201");
+	}
+
+	@Test
 	void oldPurgeIdCannotUpdateOrCompleteNewPending() {
 		this.store.register("s-1", "purge-new", "tester", 1_000L);
 
@@ -43,8 +69,9 @@ class SessionPurgePendingStoreTest {
 
 		assertThat(this.store.complete("s-1", "purge-new")).isTrue();
 		assertThat(this.store.current("s-1")).isNull();
+		// 队列成员 = pending 键（含身份段），完成时按同一成员摘除。
 		assertThat(this.fake.lists.getOrDefault(SessionPurgePendingStore.QUEUE_KEY, List.of()))
-			.doesNotContain("s-1");
+			.doesNotContain(this.store.pendingKey("s-1"));
 	}
 
 	@Test
