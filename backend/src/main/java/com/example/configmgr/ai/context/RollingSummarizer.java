@@ -36,8 +36,13 @@ import java.util.regex.Pattern;
  *
  * <h2>递归</h2>
  * 旧前缀按 {@code chunk-tokens} 分块（每块一次请求，保证摘要请求自身不越窗），分块摘要再按同一
- * 预算递归合并，直到只剩一段。<b>不截断摘要正文</b>：超预算时继续合并，合并到单块仍超就接受
- * （摘要已比原文小一个量级，再截就成了静默截断）。
+ * 预算递归合并，直到只剩一段。<b>不截断摘要正文</b>：超预算时继续合并；合并到<b>每段自身就超预算</b>
+ * （再合并既不会更小、请求体也必然越窗）时停下，并<b>保留全部段</b>按原顺序拼成摘要 ——
+ * 绝不只取第一段。多段拼接后仍超目标预算时如实记账（{@link #META_SEGMENTS} /
+ * {@link #META_OVER_BUDGET}），不静默丢任何一段历史。
+ * <p>
+ * 同理，任一分块/合并产物为空也算失败（{@code summary_failed}）：那一段旧轮没有任何产物覆盖，
+ * 跳过它就等于静默丢历史。
  *
  * <h2>失败即原样</h2>
  * 摘要请求异常/超时/产物空白 ⇒ {@code changed=false} + {@code reason=summary_failed}，历史
@@ -117,6 +122,16 @@ public final class RollingSummarizer {
 	/** 摘要消息 metadata 键：压缩时刻（服务端钟）。 */
 	public static final String META_AT = "atMs";
 
+	/** 摘要消息 metadata 键：摘要正文由多少段（分块/合并产物）保留拼接而成（1 = 一次摘要完成）。 */
+	public static final String META_SEGMENTS = "summarySegments";
+
+	/**
+	 * 摘要消息 metadata 键：摘要正文超出 {@code chunk-tokens} 的估算量。
+	 *
+	 * <p>非 0 是<b>如实记账</b>而不是失败：无法继续合并时正文只能保留全部段，绝不为压进预算截断/丢段。
+	 */
+	public static final String META_OVER_BUDGET = "summaryOverBudgetTokens";
+
 	@FunctionalInterface
 	public interface Summarizer {
 
@@ -129,7 +144,13 @@ public final class RollingSummarizer {
 
 	}
 
-	/** 摘要方案（{@code changed=false} ⇒ 消息同引用）。 */
+	/**
+	 * 摘要方案（{@code changed=false} ⇒ 消息同引用）。
+	 *
+	 * <p>{@code summary} 即落库的摘要正文：通常是一段；无法继续合并时是<b>全部保留段的按序拼接</b>
+	 * （段数见摘要消息 metadata 的 {@link #META_SEGMENTS}）。{@code summaryChars}/{@code summarizedTurns}
+	 * 与实际产物一致，台账不虚报覆盖范围。
+	 */
 	public record Plan(List<Message> messages, int summarizedTurns, int lostTokens, int summaryChars, int requests,
 			String summary, String reason) {
 
@@ -178,6 +199,7 @@ public final class RollingSummarizer {
 		int chunk = Math.max(1, chunkTokens);
 		int bodyBudget = Math.max(1, chunk - PROMPT_RESERVE_TOKENS);
 		int requests = 0;
+		int keptSegments = 0;
 		String summary;
 		try {
 			List<String> blocks = new ArrayList<>(prefix.size());
@@ -189,24 +211,40 @@ public final class RollingSummarizer {
 			}
 			List<String> partials = new ArrayList<>();
 			for (List<String> group : group(blocks, bodyBudget)) {
-				partials.add(summarizer.summarize(chunkSystemPrompt(chunk), chunkUserPrompt(group), runtime));
+				String partial = summarizer.summarize(chunkSystemPrompt(chunk), chunkUserPrompt(group), runtime);
 				requests++;
+				if (partial == null || partial.isBlank()) {
+					// 这一段旧轮没有任何产物覆盖：拼进摘要或跳过它都等于静默丢历史 ⇒ 整次摘要按失败收口
+					return unchanged(messages, requests, REASON_SUMMARY_FAILED);
+				}
+				partials.add(partial);
 			}
 			while (partials.size() > 1) {
 				List<List<String>> mergeGroups = group(partials, bodyBudget);
-				List<String> merged = new ArrayList<>(mergeGroups.size());
-				for (List<String> group : mergeGroups) {
-					merged.add(summarizer.summarize(mergeSystemPrompt(chunk), mergeUserPrompt(group), runtime));
-					requests++;
-				}
-				boolean shrank = merged.size() < partials.size();
-				partials = merged;
-				if (!shrank) {
-					// 每段摘要自身就超过 chunk 预算：再合并也不会变小，停在这里（不截断）
+				if (mergeGroups.size() >= partials.size()) {
+					// 每段摘要自身就超过合并正文预算：再合并既不会更小、请求体也必然越窗。
+					// 停在这里并保留全部段（绝不只取第一段）。
 					break;
 				}
+				List<String> merged = new ArrayList<>(mergeGroups.size());
+				for (List<String> mergeGroup : mergeGroups) {
+					if (mergeGroup.size() == 1) {
+						// 单段组原样带过：为它单发"合并"请求既缩不小，还会重写一遍已有摘要
+						merged.add(mergeGroup.get(0));
+						continue;
+					}
+					String combined = summarizer.summarize(mergeSystemPrompt(chunk), mergeUserPrompt(mergeGroup),
+							runtime);
+					requests++;
+					if (combined == null || combined.isBlank()) {
+						return unchanged(messages, requests, REASON_SUMMARY_FAILED);
+					}
+					merged.add(combined);
+				}
+				partials = merged;
 			}
-			summary = partials.isEmpty() ? "" : partials.get(0);
+			keptSegments = partials.size();
+			summary = partials.isEmpty() ? "" : joinPartials(partials);
 		}
 		catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
@@ -229,6 +267,8 @@ public final class RollingSummarizer {
 		metadata.put(META_TURNS, cut);
 		metadata.put(META_LOST, lost);
 		metadata.put(META_AT, nowMs);
+		metadata.put(META_SEGMENTS, keptSegments);
+		metadata.put(META_OVER_BUDGET, Math.max(0, ContextEstimator.estimate(summary) - chunk));
 		UserMessage digest = UserMessage.builder().text(digestText).metadata(metadata).build();
 		List<Message> out = new ArrayList<>(system.size() + 1 + body.size() - cutIndex);
 		out.addAll(system);
@@ -260,6 +300,27 @@ public final class RollingSummarizer {
 			groups.add(current);
 		}
 		return groups;
+	}
+
+	/**
+	 * 拼接保留下来的<b>全部</b>段（按原顺序，空行分隔）。
+	 *
+	 * <p>多段只在<b>无法继续合并</b>时出现：每段自身就超过合并请求预算，再发请求既缩不小、请求体
+	 * 也必然越窗。这时宁可让摘要正文超出目标预算（在消息 metadata 里如实记账），也不丢任何一段 ——
+	 * 被丢的段没有任何别的产物覆盖，那就是静默丢历史。
+	 */
+	private static String joinPartials(List<String> partials) {
+		if (partials.size() == 1) {
+			return partials.get(0);
+		}
+		StringBuilder summary = new StringBuilder();
+		for (String partial : partials) {
+			if (summary.length() > 0) {
+				summary.append("\n\n");
+			}
+			summary.append(partial.trim());
+		}
+		return summary.toString();
 	}
 
 	private static String chunkSystemPrompt(int chunkTokens) {

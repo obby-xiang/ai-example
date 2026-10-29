@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.context;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -7,8 +8,11 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,6 +67,66 @@ class RollingSummarizerTest {
 			return this.answer;
 		}
 
+	}
+
+	/** 用例用小预算：chunk=200（合并正文预算 = 200 − 生产预留 96 = 104）。 */
+	private static final int TINY_CHUNK = 200;
+
+	/** 单段摘要正文 = 8 个 ASCII + 300 个 CJK ≈ 179 tokens：超过合并正文预算，且两段拼起来超过目标预算。 */
+	private static String oversized(String marker, String cjk) {
+		return marker + " " + cjk.repeat(300);
+	}
+
+	/** 可摘要前缀 = 一轮 alpha/beta（各 600 字符 ASCII，必然各自成块）+ 一轮逐字保留的最近轮。 */
+	private static List<Message> alphaBetaPrefix() {
+		List<Message> messages = new ArrayList<>();
+		messages.add(new UserMessage("alpha " + "a".repeat(600)));
+		messages.add(AssistantMessage.builder().content("beta " + "b".repeat(600)).build());
+		messages.add(new UserMessage("最近一轮问题"));
+		messages.add(new AssistantMessage("最近一轮回答"));
+		return messages;
+	}
+
+	/** 每个标记一条 600 字符的旧消息（必然各自成块）+ 一条逐字保留的最近轮。 */
+	private static List<Message> markedPrefix(String... markers) {
+		List<Message> messages = new ArrayList<>();
+		for (String marker : markers) {
+			messages.add(new UserMessage(marker + " " + "a".repeat(600)));
+		}
+		messages.add(new UserMessage("最近一轮问题"));
+		return messages;
+	}
+
+	/**
+	 * 按"请求里出现哪个标记就回哪段摘要"作答；合并请求含多个标记时按序拼接（模拟模型保留全部要点）。
+	 * 匹配不分大小写：分块输入里是 {@code alpha}，产物里是 {@code SEG-ALPHA}，两者都要命中。
+	 */
+	private static RollingSummarizer.Summarizer segmented(Map<String, String> answers) {
+		return (system, user, runtime) -> {
+			String haystack = user.toLowerCase();
+			StringBuilder merged = new StringBuilder();
+			answers.forEach((needle, answer) -> {
+				if (haystack.contains(needle.toLowerCase())) {
+					merged.append(answer);
+				}
+			});
+			return merged.toString();
+		};
+	}
+
+	private static RollingSummarizer.Summarizer recording(List<String> users, RollingSummarizer.Summarizer delegate) {
+		return (system, user, runtime) -> {
+			users.add(user);
+			return delegate.summarize(system, user, runtime);
+		};
+	}
+
+	private static Map<String, String> answersOf(String... pairs) {
+		Map<String, String> answers = new LinkedHashMap<>();
+		for (int i = 0; i < pairs.length; i += 2) {
+			answers.put(pairs[i], pairs[i + 1]);
+		}
+		return answers;
 	}
 
 	private static int occurrences(String text, String needle) {
@@ -277,6 +341,154 @@ class RollingSummarizerTest {
 		assertThat(plan.changed()).isFalse();
 		assertThat(plan.reason()).isEqualTo(RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE);
 		assertThat(summarizer.systems).isEmpty();
+	}
+
+	/**
+	 * 两个分块摘要各自超预算（再合并既不会更小、合并请求体也必然越窗）⇒ 两段都必须留在摘要正文里，
+	 * 不得只取第一段把第二段静默丢掉。
+	 */
+	@Test
+	void twoOversizedSegmentsAreBothKeptInsteadOfDroppingTheSecond() {
+		List<String> users = new ArrayList<>();
+		RollingSummarizer.Summarizer summarizer = recording(users,
+				segmented(answersOf("alpha", oversized("SEG-ALPHA", "甲"), "beta", oversized("SEG-BETA", "乙"))));
+
+		RollingSummarizer.Plan plan = plan(alphaBetaPrefix(), 1, TINY_CHUNK, Set.of(), summarizer);
+
+		assertThat(plan.changed()).isTrue();
+		assertThat(plan.requests()).as("两个分块各一次请求；超预算段不再重发合并请求").isEqualTo(2);
+		assertThat(users).as("无法缩小段数时不得发合并请求")
+			.noneMatch(user -> user.contains(RollingSummarizer.MERGE_MARKER));
+		assertThat(plan.summary()).as("两段摘要都在（不能只留第一段）").contains("SEG-ALPHA").contains("SEG-BETA");
+		assertThat(plan.summary().indexOf("SEG-ALPHA")).isLessThan(plan.summary().indexOf("SEG-BETA"));
+		assertThat(plan.messages().get(0).getText()).contains("SEG-ALPHA").contains("SEG-BETA");
+	}
+
+	/** 多段（>2）且每段都超预算：全部按原文顺序保留，一段不丢。 */
+	@Test
+	void manyOversizedSegmentsKeepOriginalOrderAndEverySegment() {
+		RollingSummarizer.Summarizer summarizer = segmented(answersOf("alpha", oversized("SEG-ALPHA", "甲"), "beta",
+				oversized("SEG-BETA", "乙"), "gamma", oversized("SEG-GAMMA", "丙")));
+
+		RollingSummarizer.Plan plan = plan(markedPrefix("alpha", "beta", "gamma"), 1, TINY_CHUNK, Set.of(),
+				summarizer);
+
+		assertThat(plan.changed()).isTrue();
+		assertThat(plan.summarizedTurns()).isEqualTo(3);
+		assertThat(plan.summary()).contains("SEG-ALPHA").contains("SEG-BETA").contains("SEG-GAMMA");
+		assertThat(plan.summary().indexOf("SEG-ALPHA")).isLessThan(plan.summary().indexOf("SEG-BETA"));
+		assertThat(plan.summary().indexOf("SEG-BETA")).isLessThan(plan.summary().indexOf("SEG-GAMMA"));
+	}
+
+	/**
+	 * 内容完整性与台账一致：摘要正文 = 全部保留段按序拼接（无截断、无省略），
+	 * {@code summaryChars}/摘要 metadata 与实际产物逐项对齐；拼接后仍超预算时如实记账，
+	 * 而不是装作在预算内。
+	 */
+	@Test
+	void multiSegmentDigestKeepsExactContentAndLedgerFieldsMatch() {
+		RollingSummarizer.Summarizer summarizer = segmented(answersOf("alpha", oversized("SEG-ALPHA", "甲"), "beta",
+				oversized("SEG-BETA", "乙"), "gamma", oversized("SEG-GAMMA", "丙")));
+
+		RollingSummarizer.Plan plan = plan(markedPrefix("alpha", "beta", "gamma"), 1, TINY_CHUNK, Set.of(),
+				summarizer);
+
+		String summary = plan.summary();
+		Message digest = plan.messages().get(0);
+		assertThat(digest.getText()).as("摘要正文 = 前缀 + 定界 + 全部保留段，一字不多一字不少")
+			.isEqualTo(RollingSummarizer.SUMMARY_PREFIX + "\n" + RollingSummarizer.SUMMARY_OPEN + "\n" + summary
+					+ "\n" + RollingSummarizer.SUMMARY_CLOSE);
+		assertThat(plan.summaryChars()).as("台账记的字符数就是落库正文的字符数").isEqualTo(summary.length());
+		assertThat(ContextEstimator.estimate(summary)).as("三整段拼接必然超过 200 token 目标预算")
+			.isGreaterThan(TINY_CHUNK);
+		assertThat(digest.getMetadata())
+			.as("台账与实际一致：轮数/lost/段数/超预算量都来自这次真实产物")
+			.containsEntry(RollingSummarizer.META_TURNS, 3)
+			.containsEntry(RollingSummarizer.META_LOST, plan.lostTokens())
+			.containsEntry(RollingSummarizer.META_SEGMENTS, 3)
+			.containsEntry(RollingSummarizer.META_OVER_BUDGET, ContextEstimator.estimate(summary) - TINY_CHUNK);
+		assertThat(plan.lostTokens()).as("摘要比原前缀还大时不谎报负数").isGreaterThanOrEqualTo(0);
+	}
+
+	/** 不能继续合并：分组数与现有段数相同 ⇒ 不再发合并请求（不重发、不截断、不丢段）。 */
+	@Test
+	void mergeStopsWhenTheNextRoundCannotShrinkTheSegmentCount() {
+		List<String> users = new ArrayList<>();
+		RollingSummarizer.Summarizer summarizer = recording(users,
+				segmented(answersOf("alpha", oversized("SEG-ALPHA", "甲"), "beta", oversized("SEG-BETA", "乙"))));
+
+		RollingSummarizer.Plan plan = plan(alphaBetaPrefix(), 1, TINY_CHUNK, Set.of(), summarizer);
+
+		assertThat(users).hasSize(2);
+		assertThat(users).allSatisfy(user -> assertThat(user).contains(RollingSummarizer.BODY_MARKER)
+			.doesNotContain(RollingSummarizer.MERGE_MARKER));
+		assertThat(plan.requests()).isEqualTo(users.size());
+	}
+
+	/**
+	 * 部分可合并：单段超预算的段原样带过（不为它单发合并请求），小段继续合并；
+	 * 超预算段的内容在最终摘要里逐字保留。
+	 */
+	@Test
+	void partialMergeKeepsOversizedSegmentAndMergesOnlySmallOnes() {
+		List<String> users = new ArrayList<>();
+		RollingSummarizer.Summarizer summarizer = recording(users, segmented(answersOf("alpha",
+				oversized("SEG-ALPHA", "甲"), "beta", "SEG-BETA", "gamma", "SEG-GAMMA")));
+
+		RollingSummarizer.Plan plan = plan(markedPrefix("alpha", "beta", "gamma"), 1, TINY_CHUNK, Set.of(),
+				summarizer);
+
+		assertThat(plan.changed()).isTrue();
+		assertThat(users).as("3 次分块 + 1 次合并（单段超预算的 alpha 不重发）").hasSize(4);
+		String mergeRequest = users.stream().filter(user -> user.contains(RollingSummarizer.MERGE_MARKER))
+			.findFirst()
+			.orElseThrow();
+		assertThat(mergeRequest).contains("SEG-BETA").contains("SEG-GAMMA").doesNotContain("SEG-ALPHA");
+		assertThat(plan.summary()).contains("SEG-ALPHA").contains("SEG-BETA").contains("SEG-GAMMA");
+		assertThat(plan.summary().indexOf("SEG-ALPHA")).isLessThan(plan.summary().indexOf("SEG-BETA"));
+	}
+
+	/** 某一段摘要为空 ⇒ 该段旧轮没有任何产物覆盖：整次摘要按失败收口，历史逐字不变（不静默丢段）。 */
+	@Test
+	void blankSegmentIsAFailureInsteadOfSilentLoss() {
+		List<Message> messages = alphaBetaPrefix();
+		RollingSummarizer.Summarizer partiallyBlank = (system, user, runtime) -> user.toLowerCase().contains("alpha")
+				? oversized("SEG-ALPHA", "甲") : "   ";
+
+		RollingSummarizer.Plan plan = plan(messages, 1, TINY_CHUNK, Set.of(), partiallyBlank);
+
+		assertThat(plan.changed()).isFalse();
+		assertThat(plan.reason()).isEqualTo(RollingSummarizer.REASON_SUMMARY_FAILED);
+		assertThat(plan.messages()).isSameAs(messages);
+	}
+
+	/**
+	 * 生产装配闭合（真机替代）：走真实 {@link ContextSummaryClient}（定界校验 + 有界线程池 + 超时），
+	 * 两个超大分块摘要必须都进最终摘要。真机模型环境本轮缺失，见
+	 * docs/research/修复-AI-L2摘要丢段-2026-10-29.md。
+	 */
+	@Test
+	void productionSummaryClientKeepsEveryOversizedSegment() {
+		AiProperties properties = new AiProperties();
+		properties.getContext().setSummaryTimeout(Duration.ofSeconds(10));
+		ContextSummaryClient client = new ContextSummaryClient(properties, (system, user, runtime) -> {
+			if (user.contains(RollingSummarizer.MERGE_MARKER)) {
+				throw new IllegalStateException("超预算段不应再走合并请求");
+			}
+			String inner = user.contains("alpha") ? oversized("SEG-ALPHA", "甲") : oversized("SEG-BETA", "乙");
+			return RollingSummarizer.SUMMARY_OPEN + inner + RollingSummarizer.SUMMARY_CLOSE;
+		});
+		try {
+			RollingSummarizer.Plan plan = RollingSummarizer.plan(alphaBetaPrefix(), 1, TINY_CHUNK, Set.of(),
+					TestProviderRuntime.runtime(), client, 1_700_000_000_000L);
+
+			assertThat(plan.changed()).isTrue();
+			assertThat(plan.summary()).contains("SEG-ALPHA").contains("SEG-BETA");
+			assertThat(plan.messages().get(0).getText()).contains("SEG-ALPHA").contains("SEG-BETA");
+		}
+		finally {
+			client.close();
+		}
 	}
 
 }
