@@ -228,13 +228,15 @@ describe('AR-07 单活动表单 + 同批排队', () => {
     expect(queuedIds(store)).toEqual([])
   })
 
-  it('换轮 / 停止收口时队列与草稿一起清空（不把旧卡补进新轮）', async () => {
+  it('换轮 / 终止收口（dropActiveForm）时队列与草稿一起清空（不把旧卡补进新轮）', async () => {
     const store = useAiStore()
     const host = message()
     store.openGenerativeForm(host, frame(FORM_A, 'call-1'))
     store.openGenerativeForm(host, frame(FORM_B, 'call-2'))
     saveFormDraft('call-2', { code: '半张' })
 
+    // 2026-10-29 收口：**停止生成**走 `suspendActiveFormDrafts`（保留未提交草稿），
+    // 本用例锁的是"明确收口"那条出口 —— 换轮 / 轮终态 / 换会话仍由 dropActiveForm 清草稿。
     store.dropActiveForm()
 
     expect(store.activeForm).toBeNull()

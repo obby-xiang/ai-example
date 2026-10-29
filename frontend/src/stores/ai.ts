@@ -339,6 +339,80 @@ export const PRE_STREAM_RETRY_MAX = 1
 export const PRE_STREAM_RETRY_DELAY_MS = 400
 
 /**
+ * 共用**有界自动恢复**的预算（2026-10-29 ToC 收口批）：每类事件最多自动尝试次数、两次尝试的间隔。
+ *
+ * <p>四类事件（准备中 / 首帧超时 / 历史读取失败 / 410 已换会话）共用同一套预算与调度：
+ * 只对**可证明零副作用**的恢复动作发起（读快照、读历史、把既有轮接回来），绝不重发用户消息、
+ * 不重放工具；耗尽后一律回到既有的手动出口（错误条重试 / 回稿）。
+ */
+export const AUTO_RECOVERY_MAX_ATTEMPTS = 2
+export const AUTO_RECOVERY_DELAY_MS = 400
+
+/** 自动恢复的四类触发面（预算与调度按类共享；同类同时只有一条恢复链）。 */
+export type AutoRecoveryKind = 'preparing' | 'first-frame' | 'history' | 'purged'
+
+/** 已排上的自动恢复计时器（按类唯一）。 */
+const autoRecoveryTimers = new Map<AutoRecoveryKind, ReturnType<typeof setTimeout>>()
+/** 正在等下一次尝试的解析函数（作废时立刻放行，避免悬空 await）。 */
+const autoRecoveryWaiters = new Map<AutoRecoveryKind, () => void>()
+/** 正在执行恢复尝试的类别（防重入）。 */
+const autoRecoveryInFlight = new Set<AutoRecoveryKind>()
+/** 每类一个版本号：换会话 / 停止 / 新轮 / 用户手动重试都推进它，链路每步之后对版。 */
+const autoRecoveryEpochs = new Map<AutoRecoveryKind, number>()
+
+function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
+  return autoRecoveryEpochs.get(kind) ?? 0
+}
+
+/**
+ * 作废自动恢复：清计时器、放行等待中的链路、推进版本号。缺省 = 全部作废
+ * （换会话 / 停止 / 新发送这类"现场整体作废"的出口）。
+ */
+function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
+  const kinds = kind === undefined
+    ? [...new Set<AutoRecoveryKind>([
+      ...autoRecoveryEpochs.keys(),
+      ...autoRecoveryTimers.keys(),
+      ...autoRecoveryWaiters.keys(),
+      ...autoRecoveryInFlight
+    ])]
+    : [kind]
+  for (const item of kinds) {
+    autoRecoveryEpochs.set(item, autoRecoveryEpoch(item) + 1)
+    const timer = autoRecoveryTimers.get(item)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      autoRecoveryTimers.delete(item)
+    }
+    const waiter = autoRecoveryWaiters.get(item)
+    if (waiter !== undefined) {
+      autoRecoveryWaiters.delete(item)
+      waiter()
+    }
+  }
+}
+
+/** 重连 / 续收的"正在第 N 次重试"进度通知码 —— 它们只描述过程，过程一结束就该消失。 */
+const RECONNECT_PROGRESS_NOTICES: ReadonlySet<string> = new Set([
+  'ai.notice.reconnect',
+  'ai.notice.resumeRetry'
+])
+
+/**
+ * 清掉重连 / 续收进度通知（只清这一族，不误清别的提示）。
+ *
+ * <p>为什么必须清：`onReconnect` 写的是"连接中断，正在第 N 次重连"这类**过程**事实。
+ * 连接一旦打开（onOpen）/ 首业务帧到达 / 终帧到达，过程就结束了 —— 留着它等于在一条
+ * 正常工作的连接上一直说"正在重连"。
+ */
+function clearReconnectProgressNotice(sink: NoticeSink): void {
+  const code = sink.noticeCode
+  if (code !== null && RECONNECT_PROGRESS_NOTICES.has(code)) {
+    clearNotice(sink)
+  }
+}
+
+/**
  * O02：同 tick「停止 + 发送」时，发送在**停止落地**（cancel 送达）前最多等这么久。
  *
  * <p>停止是一个决策：`stop()` 的本地收敛是同步的，cancel 请求则要一点时间才到后端。
@@ -1733,8 +1807,15 @@ function historyTruncationFields(
   return fields
 }
 
-/** 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。 */
-function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
+/**
+ * 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。导出仅为单测锁形状。
+ *
+ * <p>2026-10-29 收口：`display`（结构化展示面：locale code + 命名插值）必须**随记录保留** ——
+ * 面板 chip 用它按当前语言重译，丢了它就只能回落到 `summary` 那份送模型的中文串（切 en 不变）。
+ * `source` 仍是两值闭集（`AI` / `界面`）原样保留：只认已知值，超出闭集/缺失才回落到「界面」默认，
+ * 不臆造第三个值、也不丢已知值。
+ */
+export function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
   if (!payload || typeof payload !== 'object') {
     return null
   }
@@ -1742,12 +1823,38 @@ function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
   if (typeof record.summary !== 'string' || typeof record.version !== 'number') {
     return null
   }
+  const display = readActionDisplay(record.display)
   return {
     version: record.version,
     summary: record.summary,
     at: typeof record.at === 'number' ? record.at : Date.now(),
-    source: record.source === 'AI' ? 'AI' : '界面'
+    source: record.source === 'AI' || record.source === '界面' ? record.source : '界面',
+    ...(display === null ? {} : { display })
   }
+}
+
+/**
+ * 展示面形状闸：`code` 必须是非空字符串（面板直接 `t(code)`），`args` 只收标量值
+ * （字符串 / 数字）—— 对象/数组塞进插值只会渲染成 `[object Object]`，宁可不给。
+ * 形状不符 ⇒ null（记录仍可用，只是 chip 回落到 `summary`）。
+ */
+function readActionDisplay(raw: unknown): WorkspaceActionRecord['display'] | null {
+  if (!raw || typeof raw !== 'object') {
+    return null
+  }
+  const value = raw as { code?: unknown; args?: unknown }
+  if (typeof value.code !== 'string' || value.code === '') {
+    return null
+  }
+  const args: Record<string, string | number> = {}
+  if (value.args && typeof value.args === 'object' && !Array.isArray(value.args)) {
+    for (const [key, item] of Object.entries(value.args as Record<string, unknown>)) {
+      if (typeof item === 'string' || typeof item === 'number') {
+        args[key] = item
+      }
+    }
+  }
+  return Object.keys(args).length > 0 ? { code: value.code, args } : { code: value.code }
 }
 
 /**
@@ -2353,7 +2460,14 @@ export const useAiStore = defineStore('ai', {
      * 重连都属于同一次驱动）。记录只在终态 / 停止 / 换会话 / 显式动作时删除 —— 见
      * {@link acquireRunStreamDrive} / {@link settleRunStreamDrive} / {@link restartRunStreamDrive}。
      */
-    streamDrives: {} as Record<string, RunStreamDrive>
+    streamDrives: {} as Record<string, RunStreamDrive>,
+    /**
+     * 2026-10-29 ToC 收口批：共用**有界自动恢复**的已用次数（按类别）。
+     *
+     * <p>不落镜像、不进持久面：它只描述"这一次现场里自动恢复试了几次"。换会话 / 停止 /
+     * 新发送 / 用户手动重试都清零或作废（见 {@link resetAutoRecovery}）。
+     */
+    autoRecoveryUsed: {} as Partial<Record<AutoRecoveryKind, number>>
   }),
 
   getters: {
@@ -2568,6 +2682,8 @@ export const useAiStore = defineStore('ai', {
       if (!this.preparingRun || preparingRetryInFlight) {
         return
       }
+      // 手动出口接管：本类自动恢复的排期与预算一并作废（用户已经自己动手，自动链让位）
+      this.resetAutoRecovery('preparing')
       preparingRetryInFlight = true
       this.currentError = null
       this.restoringRecovery = true
@@ -2577,6 +2693,153 @@ export const useAiStore = defineStore('ai', {
         this.restoringRecovery = false
         preparingRetryInFlight = false
       }
+    },
+
+    /**
+     * 2026-10-29 ToC 收口批：进入"准备中"现场（三处入口共用）—— **同时排一次有界自动恢复**。
+     *
+     * <p>为什么不能只留手动重试：面板里没有"立即重试"的调用点（`CompactionStatus.vue` 连同
+     * `retryPreparing` 都没有 UI 入口），只靠它就是一条**不可达**的出口 —— 快照一直没建好时
+     * 界面会永远停在"准备中"。自动恢复只做零副作用的探活：`runs/current → 恢复` 既有路径。
+     */
+    notePreparingState(runId: string, elapsedMs: number | null): void {
+      this.restoredPendingQueue = []
+      this.notePreparingHeartbeat(runId, elapsedMs)
+      this.activeRunId = runId
+      this.currentError = null
+      this.loading = true
+      this.suspended = false
+      this.streamInterrupted = false
+      this.startAutoRecovery(
+        'preparing',
+        async () => {
+          if (this.preparingRun === null) {
+            return true
+          }
+          await this.restoreSnapshotGuarded()
+          return this.preparingRun === null
+        },
+        () => this.notePreparingExhausted()
+      )
+    },
+
+    /**
+     * 准备中的自动恢复**耗尽**：停止自动探活，回到既有手动出口 ——
+     * 面板的恢复错误条（`currentError` + 「重试恢复」→ {@link retryRestoreSnapshot}）。
+     * 不封口、不报"轮不存在"：准备中仍是可恢复阶段。
+     */
+    notePreparingExhausted(): void {
+      if (this.preparingRun === null || this.currentError !== null) {
+        return
+      }
+      this.currentError = toLoadErrorView(
+        'current',
+        // 诊断串（不进用户可见面：`toLoadErrorView` 只留 code/status；文案由面板按 scope 选词条）
+        new ApiError('preparing: auto recovery exhausted', 202, 'PREPARING_TIMEOUT', null)
+      )
+    },
+
+    /** 手动出口接管：清掉该类自动恢复的排期与预算（用户/其它入口已经自己动手了）。 */
+    resetAutoRecovery(kind: AutoRecoveryKind): void {
+      cancelAutoRecovery(kind)
+      if (this.autoRecoveryUsed[kind] === undefined) {
+        return
+      }
+      const next = { ...this.autoRecoveryUsed }
+      delete next[kind]
+      this.autoRecoveryUsed = next
+    },
+
+    /**
+     * 共用**有界自动恢复**（2026-10-29 ToC 收口批）。
+     *
+     * <p>调用方必须保证 `attempt` 是**零副作用**的：读快照 / 读历史 / 把既有轮接回来 /
+     * 给新会话做一次对账 —— 绝不重发用户消息、不重放工具、不重复任何写。
+     * 预算按类别计（{@link AUTO_RECOVERY_MAX_ATTEMPTS}），两次尝试之间隔
+     * {@link AUTO_RECOVERY_DELAY_MS}；任何一步之后现场被作废（换会话 / 停止 / 新轮 / 手动重试）
+     * 即放弃，不再写回。
+     *
+     * @param onExhausted 预算用尽（或本次调用时已用尽）的回调 —— 调用方在这里把现场交回
+     *   **既有**手动出口（错误条 + 重试钮 / 回稿），不新增 UI
+     * @returns 是否恢复成功
+     */
+    async autoRecoverBounded(
+      kind: AutoRecoveryKind,
+      attempt: () => Promise<boolean>,
+      onExhausted?: () => void
+    ): Promise<boolean> {
+      if (autoRecoveryInFlight.has(kind)) {
+        return false
+      }
+      let used = this.autoRecoveryUsed[kind] ?? 0
+      if (used >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+        onExhausted?.()
+        return false
+      }
+      autoRecoveryInFlight.add(kind)
+      const epoch = autoRecoveryEpoch(kind)
+      try {
+        while (used < AUTO_RECOVERY_MAX_ATTEMPTS) {
+          used += 1
+          this.autoRecoveryUsed = { ...this.autoRecoveryUsed, [kind]: used }
+          if (await attempt()) {
+            this.autoRecoveryUsed = { ...this.autoRecoveryUsed, [kind]: 0 }
+            return true
+          }
+          if (autoRecoveryEpoch(kind) !== epoch) {
+            return false
+          }
+          if (used >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+            break
+          }
+          const keepGoing = await new Promise<boolean>((resolve) => {
+            autoRecoveryWaiters.set(kind, () => resolve(false))
+            const timer = setTimeout(() => {
+              autoRecoveryTimers.delete(kind)
+              autoRecoveryWaiters.delete(kind)
+              resolve(true)
+            }, AUTO_RECOVERY_DELAY_MS)
+            autoRecoveryTimers.set(kind, timer)
+          })
+          if (!keepGoing || autoRecoveryEpoch(kind) !== epoch) {
+            return false
+          }
+        }
+        onExhausted?.()
+        return false
+      } finally {
+        autoRecoveryInFlight.delete(kind)
+      }
+    },
+
+    /**
+     * 排一次自动恢复（**延时启动**：先给人 / 其它入口让路，自动动作不抢先）。
+     *
+     * @returns 是否排上（false = 同类已在跑 / 已排 / 预算用尽 —— 调用方据此保留既有手动出口；
+     *   注意 false 不区分"在跑"与"用尽"，只有用尽时才回调 `onExhausted`）
+     */
+    startAutoRecovery(
+      kind: AutoRecoveryKind,
+      attempt: () => Promise<boolean>,
+      onExhausted?: () => void
+    ): boolean {
+      if (autoRecoveryInFlight.has(kind) || autoRecoveryTimers.has(kind)) {
+        return false
+      }
+      if ((this.autoRecoveryUsed[kind] ?? 0) >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+        onExhausted?.()
+        return false
+      }
+      const epoch = autoRecoveryEpoch(kind)
+      const timer = setTimeout(() => {
+        autoRecoveryTimers.delete(kind)
+        if (autoRecoveryEpoch(kind) !== epoch) {
+          return
+        }
+        void this.autoRecoverBounded(kind, attempt, onExhausted)
+      }, AUTO_RECOVERY_DELAY_MS)
+      autoRecoveryTimers.set(kind, timer)
+      return true
     },
 
     toggleExpand(): void {
@@ -2902,6 +3165,12 @@ export const useAiStore = defineStore('ai', {
         // 批次2：失败必须**可见 + 可重试**，且当场统一封口（不留在流式假态 / 不永久 loading）。
         // 镜像内容只是"现场"，不是可确认完整的答案 ⇒ 同步置 recoveryGap（中性，不是轮失败）。
         this.sealRecovery('history', error)
+        // 2026-10-29 收口（共用有界自动恢复）：历史是**纯 GET**（零副作用）⇒ 自动重读有界；
+        // 耗尽后回到既有手动出口（错误条 + 「重新载入历史」钮 + 恢复缺口入口）。
+        this.startAutoRecovery('history', async () => {
+          await this.loadHistory()
+          return this.historyError === null
+        })
         return
       }
 
@@ -3472,16 +3741,11 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 批次3 / AR-06：已 start、快照未建 = "准备中"（可恢复），不是空态、不是轮不存在。
-      // 不封口在途消息、不落 currentError；面板显示"准备中 · 已用 N 秒" + 手动重试。
+      // 不封口在途消息、不落 currentError；面板显示"准备中 · 已用 N 秒"。
+      // 2026-10-29 收口：同一条落点排**有界自动恢复**（面板没有"立即重试"的调用点）。
       const preparing = preparingRunOf(current)
       if (preparing) {
-        this.restoredPendingQueue = []
-        this.currentError = null
-        this.preparingRun = preparing
-        this.activeRunId = preparing.runId
-        this.loading = true
-        this.suspended = false
-        this.streamInterrupted = false
+        this.notePreparingState(preparing.runId, preparing.elapsedMs)
         return
       }
       this.clearPreparingRun()
@@ -3491,6 +3755,8 @@ export const useAiStore = defineStore('ai', {
       this.clearQueuedForms()
       // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
       this.currentError = null
+      // 2026-10-29 收口：权威快照读到 ⇒ 之前的恢复缺口（全局 + 逐消息）一并作废
+      this.clearRecoveryGap()
       // AR-10（批次3 补齐）：寿命锚点只认后端 PTTL 的只读推导 —— 有就落、没有就清（不猜 24h）。
       // 若"上一次已知的锚点已经到期"且这次已拿不到运行态，说明它按保留期消失了：
       // ① 落一条**可见**通知（不是卡悄悄没了）；② 保留这个"已到期"锚点，让仍在屏上的挂起卡
@@ -3523,21 +3789,12 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (probe.preparing) {
-            this.restoredPendingQueue = []
-            this.notePreparingHeartbeat(probe.preparing.runId, probe.preparing.elapsedMs)
-            this.activeRunId = probe.preparing.runId
-            this.currentError = null
-            this.loading = true
-            this.suspended = false
-            this.streamInterrupted = false
+            this.notePreparingState(probe.preparing.runId, probe.preparing.elapsedMs)
             return
           }
           if (probe.status === 202) {
             // 202 但缺 preparing 键（旧后端/异常体）：仍按准备中，不把正常压缩判成失败
-            this.restoredPendingQueue = []
-            this.notePreparingHeartbeat(recoveryRunId, 0)
-            this.loading = true
-            this.suspended = false
+            this.notePreparingState(recoveryRunId, 0)
             return
           }
           if (probe.status === 200) {
@@ -3737,6 +3994,54 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 2026-10-29 ToC 收口批：重挂 / 续收连接**耗尽**后就地封口本轮宿主。
+     *
+     * <p>为什么必须封口：`onClose({terminal:false})` 只把 `loading` 复位、不改消息 ——
+     * `done=false + streaming=true` 会一直留在屏上（光标永远在闪、"这一轮还在跑"），
+     * 而连接早就没了。断流是事实，但**不是**"仍在生成"：封口 + 既有断流提示才是完整口径。
+     *
+     * <p>只封**消息**（streaming/done/段），不置 `recoveryGap`、不出错误卡、不碰待决段：
+     * 卡片仍归用户动作或既有终帧收口。
+     */
+    sealInterruptedHost(hostMessageId?: string | null): void {
+      const host = (hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : undefined)
+        ?? (activeRoundHostId !== null
+          ? this.messages.find((item) => item.id === activeRoundHostId)
+          : undefined)
+        ?? [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
+      if (!host || host.role !== 'assistant' || host.done) {
+        return
+      }
+      host.streaming = false
+      host.done = true
+      sealTrailingStreamPart(host)
+      deriveProjections(host)
+      this.writeMirrorNow()
+    },
+
+    /**
+     * 2026-10-29 ToC 收口批：**权威快照读成功** ⇒ 之前的恢复缺口作废（全局 + 逐消息）。
+     *
+     * <p>缺口（`recoveryGap`）说的是"本地无法确认完整"。`/runs/current` 一旦读到权威现场，
+     * 后续正文由续收/回放重建，"不可确认完整"就不再成立 —— 留着它等于在一条已经对齐的会话上
+     * 永久挂着"部分内容可能不完整"。续收首帧若再检出归档断层，{@link noteArchiveGap} 会重新落值。
+     */
+    clearRecoveryGap(): void {
+      const hadGap = this.recoveryGap !== null
+      this.recoveryGap = null
+      let changed = false
+      for (const message of this.messages) {
+        if (message.recoveryGap === true) {
+          delete message.recoveryGap
+          changed = true
+        }
+      }
+      if (hadGap || changed) {
+        this.writeMirrorNow()
+      }
+    },
+
+    /**
      * 批次2：**统一的恢复失败出口** —— 错误可见 + 统一封口 + 缺口可表示。
      *
      * <p>历史/快照读取失败时，"屏上那半截"既不能继续装作在流（永久 loading/光标常驻），
@@ -3833,6 +4138,8 @@ export const useAiStore = defineStore('ai', {
       this.recoveryGap = null
       // M08-R2：用户显式重试 ⇒ 重新给驱动一份预算（否则"自动重连已用尽"会把重试钮锁死）
       this.forgetRunStreamDrive()
+      // 2026-10-29 收口：手动出口接管 ⇒ 本类自动恢复的排期与预算作废（重复劳动没有意义）
+      this.resetAutoRecovery('history')
       await this.loadHistory()
     },
 
@@ -3842,6 +4149,8 @@ export const useAiStore = defineStore('ai', {
       this.restoringRecovery = true
       // M08-R2：同上 —— 显式重试重置驱动预算
       this.forgetRunStreamDrive()
+      // 2026-10-29 收口：手动出口接管 ⇒ 准备中的自动恢复让位（用户已经自己重试了）
+      this.resetAutoRecovery('preparing')
       try {
         await this.restoreSnapshotGuarded()
       } finally {
@@ -4359,6 +4668,13 @@ export const useAiStore = defineStore('ai', {
               }
               setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
             },
+            onOpen: () => {
+              if (!isCurrentRound()) {
+                return
+              }
+              // 续收连接开了 ⇒ "正在第 N 次重试"的过程结束
+              clearReconnectProgressNotice(this)
+            },
             onClose: (info) => {
               if (!isCurrentRound()) {
                 return
@@ -4370,8 +4686,7 @@ export const useAiStore = defineStore('ai', {
               if (info.suspended) {
                 return
               }
-              // 批次3："准备中"不是断流 —— 连接收流/重挂耗尽都不该报"结果可能不完整"，
-              // 面板的阶段条已给出可重试出口。
+              // 批次3："准备中"不是断流 —— 准备中的自动恢复由 notePreparingState 排。
               if (this.preparingRun) {
                 return
               }
@@ -4381,6 +4696,8 @@ export const useAiStore = defineStore('ai', {
                 setNotice(this, 'ai.notice.interruptedSuspended', {
                   reason: info.reason ?? translate('ai.notice.reasonInterrupted')
                 })
+                // 2026-10-29 收口：续收耗尽同样要封口（断流 ≠ 仍在生成）
+                this.sealInterruptedHost(hostMessageId)
               }
             }
           },
@@ -4511,6 +4828,13 @@ export const useAiStore = defineStore('ai', {
       this.busyRun = null
       // M08-R2：新轮 = 上一轮已放弃 ⇒ 释放它的驱动所有权（预算记录不再有消费者）
       this.forgetRunStreamDrive()
+      // 2026-10-29 收口：新发送 = 新的轮次现场 —— 上一轮排着的自动恢复一律作废
+      // （否则刷新后的首帧超时恢复可能把旧轮接回来盖到新轮上）。
+      cancelAutoRecovery()
+      this.autoRecoveryUsed = {}
+      // 界面播报（aria-live 的一次性文案）按轮收口：上一轮的"已选择…"不带到新轮
+      this.uiAnnouncement = null
+      clearUiAnnouncement()
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
@@ -4525,6 +4849,37 @@ export const useAiStore = defineStore('ai', {
       let sawAnyFrame = false
       /** B1：本轮收尾是否为"挂起导致的服务端收流"（正常收尾）—— finally 据此保留 suspended。 */
       let suspendedClose = false
+      /**
+       * 2026-10-29 收口：首帧超时（**一帧都没有**）已排上自动恢复 ⇒ finally 让位。
+       *
+       * <p>为什么让位：恢复会把本轮宿主接回续收（同一条助手消息继续写）。若这里照旧复位
+       * `loading` 并封口宿主，刚接上的续收就被判成"已结束"，帧只能写进新气泡。
+       */
+      let firstFrameRecovery = false
+      /** 首帧超时（零帧 = 零副作用）的自动恢复：只按快照把**既有轮**接回来，绝不重发。 */
+      const startFirstFrameRecovery = (): boolean => this.startAutoRecovery(
+        'first-frame',
+        async () => {
+          if (this.stopped || !isCurrentRound()) {
+            return true
+          }
+          await this.restoreSnapshotGuarded()
+          if (this.loading || this.preparingRun !== null) {
+            if (this.noticeCode === 'ai.notice.firstFrameTimeout') {
+              clearNotice(this)
+            }
+            return true
+          }
+          // 没有可接回的轮：本轮连接登记到此作废（finally 已让位，这里负责收干净）
+          if (currentAbort === controller) {
+            currentAbort = null
+            activeRoundHostId = null
+            this.activeStreamRunId = null
+            this.activeStreamParked = false
+          }
+          return false
+        }
+      )
       const handlers: SseFrameHandlers = {
         onFrame: (frame) => {
           sawAnyFrame = true
@@ -4545,6 +4900,13 @@ export const useAiStore = defineStore('ai', {
             return // R6：旧轮的迟到重连公告不写进新轮
           }
           setNotice(this, 'ai.notice.reconnect', { seconds: Math.round(delayMs / 1000), attempt })
+        },
+        onOpen: () => {
+          if (!isCurrentRound()) {
+            return
+          }
+          // 连接真的开了 ⇒ "正在第 N 次重连"的过程结束
+          clearReconnectProgressNotice(this)
         },
         onClose: (info) => {
           // M-19（I5）：这条传输收尾仍没等到 start ⇒ 挂在它上面的停止意向再无落地机会（先于
@@ -4571,6 +4933,11 @@ export const useAiStore = defineStore('ai', {
             // 后者要提示"已生成内容保留"。45s 帧间口径本身不变。
             if (info.timeoutStage === 'first-frame') {
               setNotice(this, 'ai.notice.firstFrameTimeout')
+              // 2026-10-29 收口（共用有界自动恢复）：**一个业务帧都没收到**是本轮唯一
+              // 可证明"零副作用"的失败面 —— 但**不重发**同一条请求（后端可能已建轮，
+              // 重发就是第二次真实副作用）；恢复只做"按 /runs/current 把既有轮接回来"。
+              // 耗尽后回到既有手动出口（首帧超时提示 + 面板回稿）。
+              firstFrameRecovery = !sawAnyFrame && startFirstFrameRecovery()
             } else {
               setNotice(this, 'ai.notice.interruptedKeep', {
                 reason: info.reason ?? translate('ai.notice.reasonNoDone')
@@ -4666,6 +5033,13 @@ export const useAiStore = defineStore('ai', {
             void this.claimSessionOwnership(this.sessionId)
             setNotice(this, 'ai.notice.sessionPurged')
             purgedRecovered = true
+            // 2026-10-29 收口（共用有界自动恢复）：410 是**开新轮前**的销毁守卫拦下的，
+            // 那一次请求零副作用 ⇒ 可以自动恢复。但恢复面**只到**"给新会话做一次对账"：
+            // 绝不把用户那句话再发一遍（那是第二次真实副作用，且与面板的失败回稿叠成重复文本）。
+            this.startAutoRecovery('purged', async () => {
+              await this.loadHistory()
+              return this.historyError === null
+            })
           }
         } else if (isCurrentRound()) {
           this.handleChatError(error, assistant.id) // R6：旧轮的异常提示不写进新轮
@@ -4687,7 +5061,7 @@ export const useAiStore = defineStore('ai', {
         // 面板据此回稿且不把已清空的旧消息设成编辑锚点。其余情形仍按"是否还是本轮"判定。
         outcome = purgedRecovered ? 'error' : settleOutcome('error')
       } finally {
-        if (isCurrentRound()) {
+        if (isCurrentRound() && !firstFrameRecovery) {
           // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
           // （界面谎报空闲 + 新轮丢失本地取消句柄）
           this.loading = false
@@ -4704,7 +5078,9 @@ export const useAiStore = defineStore('ai', {
         const target = this.messages.find((message) => message.id === assistant.id)
         // B1：挂起收流时本轮尚未结束（决策后还要续跑），不封口消息 —— 与流派 A 的观感一致：
         // 气泡仍是流式态，终帧（done/error）一到由 handleFrame 的既有路径封口。
-        if (target && !target.done && !suspendedClose) {
+        // 2026-10-29 收口：首帧超时且已排上自动恢复时不封口 —— 恢复会把这条宿主接回续收，
+        // 这里先封就等于把刚接上的那一轮判成结束（后续帧只能落到新气泡）。
+        if (target && !target.done && !suspendedClose && !firstFrameRecovery) {
           target.streaming = false
           target.done = true
         }
@@ -4948,12 +5324,10 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              // 批次3：202 准备中 —— 可重试，不是断流；不暴露 runId。
-              this.notePreparingHeartbeat(probe.runId, probe.elapsedMs)
-              this.currentError = null
-              this.streamInterrupted = false
-              this.loading = true
-              this.suspended = false
+              // 批次3：202 准备中 —— 可恢复，不是断流；不暴露 runId。
+              // 2026-10-29 收口：同一条落点排有界自动恢复 —— 这条连接若在准备中收掉，
+              // 没有恢复链的话宿主会永远停在"在流"，而面板并没有可点的重试按钮。
+              this.notePreparingState(probe.runId, probe.elapsedMs)
             },
             onUnavailable: () => {
               if (!isCurrentRound()) {
@@ -4982,6 +5356,13 @@ export const useAiStore = defineStore('ai', {
               }
               setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
             },
+            onOpen: () => {
+              if (!isCurrentRound()) {
+                return
+              }
+              // 连接真的开了 ⇒ "正在第 N 次重试"的过程结束（否则一条正常工作的连接上一直说重连）
+              clearReconnectProgressNotice(this)
+            },
             onClose: (info) => {
               if (!isCurrentRound()) {
                 return
@@ -4992,7 +5373,7 @@ export const useAiStore = defineStore('ai', {
               if (info.suspended) {
                 return
               }
-              // 批次3：准备中是可恢复阶段，不按断流提示（面板阶段条自带重试）。
+              // 批次3：准备中是可恢复阶段，不按断流提示（准备中的自动恢复由 notePreparingState 排）
               if (this.preparingRun) {
                 return
               }
@@ -5006,8 +5387,10 @@ export const useAiStore = defineStore('ai', {
                 setNotice(this, 'ai.notice.interruptedKeepShort', {
                   reason: info.reason ?? translate('ai.notice.reasonInterrupted')
                 })
-                // 接管耗尽同样不是结局：表单/确认卡仍待用户动作，activeForm 与待决段保留
-                //（刷新由 restoreSuspendedSnapshot 续上）。
+                // 2026-10-29 收口：断流 ≠ 仍在生成 —— 旧实现只提示不封口，宿主会一直
+                // `done=false + streaming=true`（光标永远在闪、界面说"还在跑"）。
+                // 表单/确认卡与待决段照旧保留（那仍是用户的动作面）。
+                this.sealInterruptedHost(assistant.id)
               }
             }
           },
@@ -5863,7 +6246,10 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 收起当前表单：先清草稿镜像再置空（停止本轮 / 结局帧 / done / error / 换会话的统一出口）。
+     * 收起当前表单：先清草稿镜像再置空（结局帧 / done / error / 换会话的统一出口）。
+     *
+     * <p>2026-10-29 收口：**停止生成不再走这里** —— 停止是"这一轮到此为止"，不是"用户放弃了
+     * 这张表"，未提交草稿要留给同一 toolCallId 的恢复重建（见 {@link suspendActiveFormDrafts}）。
      *
      * <p>AR-07：同批排队的那几张也一起收（连同各自草稿）—— 这是"整轮/整会话到此为止"的出口，
      * 队列不能带着旧卡活到下一轮。只收**一张**的路径见 {@link settleActiveForm}。
@@ -5875,6 +6261,23 @@ export const useAiStore = defineStore('ai', {
       }
       this.activeForm = null
       this.clearQueuedForms()
+    },
+
+    /**
+     * 2026-10-29 收口：**停止生成**时只收起表单卡，**保留未提交草稿**。
+     *
+     * <p>为什么与 {@link dropActiveForm} 分开：停止是"这一轮到此为止"，不是"用户放弃了这张表"。
+     * 用户已经填进去的值仍在这台机器上（`cm.ai.form.draft.<toolCallId>`，既有 sessionStorage 键，
+     * 不新增存储规格）—— 停止后若同一张表单被快照恢复重建成同一 toolCallId，`presentGenerativeForm`
+     * 会把草稿回填进控件；清掉就等于让一次停止把用户手填的内容一起删了。
+     *
+     * <p>只有**明确放弃**才清草稿：取消表单（{@link cancelGenerativeForm} / {@link cancelQueuedForm}）、
+     * 提交成功（{@link settleActiveForm}）、轮终态（{@link cleanupTerminalInteractionState} → dropActiveForm）、
+     * 换会话（孤儿键由 {@link pruneOrphanFormDrafts} 清）。
+     */
+    suspendActiveFormDrafts(): void {
+      this.activeForm = null
+      this.queuedForms = []
     },
 
     /**
@@ -5907,10 +6310,11 @@ export const useAiStore = defineStore('ai', {
      * 轮终态的"人围栏单例"收口（FE-25）：`done` / `error` 帧到达时调用一次。
      *
      * <p>收什么：活动表单（连同草稿镜像）、上传交接单例、表格预览计划 + 失效标记、快照恢复的
-     * 串行队列。为什么要一起收：这些单例一旦残留，就等于"已结束的一轮仍能被界面推动"——
-     * 上传交接会把 `frontend_tool_result` 打到收口的 run 上、预览还能再"应用"一次写入、
-     * 队列会在换轮前把旧卡补进新现场。段侧的 `requiresAction` 由 `expireResidueToolParts`
-     * 同口径收掉，故这里只清单例、不碰段。
+     * 串行队列、界面播报（`uiAnnouncement`）。为什么要一起收：这些单例一旦残留，就等于
+     * "已结束的一轮仍能被界面推动"——上传交接会把 `frontend_tool_result` 打到收口的 run 上、
+     * 预览还能再"应用"一次写入、队列会在换轮前把旧卡补进新现场；播报是**一次性的**
+     * aria-live 文案，轮已结束还留着，读屏会把它当成这一轮的新事实念出来。
+     * 段侧的 `requiresAction` 由 `expireResidueToolParts` 同口径收掉，故这里只清单例、不碰段。
      */
     cleanupTerminalInteractionState(): void {
       this.dropActiveForm()
@@ -5919,6 +6323,10 @@ export const useAiStore = defineStore('ai', {
       // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
       this.dropSheetPreview('stop')
       this.restoredPendingQueue = []
+      // 2026-10-29 收口：界面播报按轮收口（模块侧与 state 侧同清，否则下一轮 `syncUiRuntimeState`
+      // 又能把上一轮的播报读回来）
+      clearUiAnnouncement()
+      this.uiAnnouncement = null
     },
 
     /**
@@ -7047,7 +7455,9 @@ export const useAiStore = defineStore('ai', {
      * 新口径 = **本地就地收敛**（不依赖后端帧，后端不可达也成立）：
      * <ol>
      * <li>所有 pending/running 工具段 → {@code cancelled}、{@code requiresAction=false}，
-     *     清 activeForm / activePreview / 挂起队列 / suspended ⟹ 输入框立刻解禁、卡变只读；</li>
+     *     清 activeForm / activePreview / 挂起队列 / suspended ⟹ 输入框立刻解禁、卡变只读；
+     *     **未提交表单草稿保留**（2026-10-29：停止不是"放弃这张表"，见
+     *     {@link suspendActiveFormDrafts}）；</li>
      * <li>本轮助手消息打 {@code stopped} 标记（S3「已停止」，与「继续」入口互斥）；</li>
      * <li>立即写镜像（S4：半截正文 + done，刷新后仍可见）；</li>
      * <li>幂等（S2）：{@code stopping} 在途时重复点击直接返回；{@code alreadyCancelled} 照读。</li>
@@ -7085,6 +7495,10 @@ export const useAiStore = defineStore('ai', {
       }
       // M08-R2：停止 = 放弃这一轮 ⇒ 释放驱动所有权与预算（停止是终态动作，不是"连接结束"）
       this.forgetRunStreamDrive(runId ?? undefined)
+      // 2026-10-29 收口：停止 = 现场作废 ⇒ 所有自动恢复排期与预算一并作废
+      // （否则首帧超时/准备中的恢复链会在停止之后把这一轮接回来）
+      cancelAutoRecovery()
+      this.autoRecoveryUsed = {}
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
       // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
@@ -7126,7 +7540,9 @@ export const useAiStore = defineStore('ai', {
       // 批次3：停止后压缩/准备中阶段一并收口（否则阶段条会挂在一个已放弃的轮上）
       this.resetCompactionProgress()
       this.clearPreparingRun()
-      this.dropActiveForm()
+      // 2026-10-29 收口：停止只收起表单卡，**保留未提交草稿**（只有明确放弃才清 —— 见
+      // `suspendActiveFormDrafts`）。停掉一轮不该顺手删用户手填的内容。
+      this.suspendActiveFormDrafts()
       // 停止 = 本轮被放弃：预览与高亮一起撤（B12 收口矩阵的「停止本轮」格）。
       // 用建卡时留的上下文引用同步清色 —— 表格可能在别的页签，异步解析不保证拿得到。
       this.dropSheetPreview('stop')
@@ -7312,6 +7728,9 @@ export const useAiStore = defineStore('ai', {
       this.stopIntent = null
       // M08-R2：驱动所有权/预算同样是旧会话现场
       this.forgetRunStreamDrive()
+      // 2026-10-29 收口：自动恢复的排期与预算同属旧会话现场（不得把旧会话的轮接进新会话）
+      cancelAutoRecovery()
+      this.autoRecoveryUsed = {}
       this.restoringRecovery = false
       // 批次6B（N7）：工作区 chip / ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
       // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
@@ -7681,6 +8100,14 @@ export const useAiStore = defineStore('ai', {
         return
       }
       /**
+       * 2026-10-29 收口：重连 / 续收的"正在第 N 次重试"进度通知只描述**过程**。
+       * 任何业务帧（心跳除外）到达即说明过程结束 —— 不清它就会在一条已经正常出帧的连接上
+       * 一直说"连接中断，正在重连"。`done` / `error` 同样落在这里（终态也是业务帧）。
+       */
+      if (frame.type !== 'heartbeat') {
+        clearReconnectProgressNotice(this)
+      }
+      /**
        * R2/R6（issue#5）帧归属判定：只有"本轮"（宿主消息仍是当前轮的宿主）的帧才允许改写
        * **轮次级**状态（activeRunId / loading / suspended / notice / activeForm）——旧轮迟到帧
        * （resetSession 之后、或新轮已起）只收敛它自己那条消息，不能把新轮标记成空闲。
@@ -8017,6 +8444,14 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'retry':
+          // 2026-10-29 收口：空回复轮的重试（后端 additive 键 `emptyReply=true`）**不是**断流 ——
+          // 后端明确说明这是"零产出轮只重跑模型步"。旧实现一律写"上游连接中断，正在重试
+          // （本轮尚未产出内容）"，把一次正常重试说成了连接故障。这里按既有词条给事实
+          //（"模型没有返回任何内容"），不新增 locale 键、不改文案规格。
+          if (frame.emptyReply === true) {
+            setNotice(this, 'ai.card.error.summary.emptyReply')
+            break
+          }
           setNotice(this, 'ai.notice.upstreamRetry')
           break
         case 'done': {
