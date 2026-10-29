@@ -28,6 +28,7 @@ import {
 } from '@/utils/parts'
 import { cardStatusOf, readOnlyStateOf } from '@/utils/blocks'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -460,6 +461,8 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
 
   it('R2-5：resetSession 后旧轮迟到帧不写新会话 parts（宿主已不在 ⇒ 整帧丢弃）', async () => {
     api.chat.mockImplementation(() => new Promise(() => {}))
+    // Task 4：send() 走引导门 —— 没有后端发号的会话就不发请求，本用例的"旧轮帧"现场因此建不起来
+    installIdentityFixture()
     const store = useAiStore()
     const round = store.send('旧轮消息') // send 同步落 activeRoundHostId（宿主 = 新助手消息）
     await vi.waitFor(() => expect(api.chat).toHaveBeenCalled())
@@ -996,6 +999,8 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
   })
 
   it('④ 历史恢复（NIT-4 + MINOR-2）：outcome=failed + decision=approved ⇒「已批准 · 执行失败」；decision=timeout 回读 ⇒「已超时」', async () => {
+    // Task 4：/history 是对话域请求，带后端发号的会话；无号则整段跳过 ⇒ 历史回读现场不成立
+    installIdentityFixture()
     const store = useAiStore()
     const sid = store.sessionId
     api.history.mockResolvedValue({

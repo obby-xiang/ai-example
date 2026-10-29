@@ -2662,7 +2662,7 @@ try {
     # 挂起轮的用户原文带唯一 token：数据库完整历史端点已移除 ⇒ 收敛后按 Redis 记忆窗口对账"恰一条"，
     # token 是稳定身份（不用任务号这类短数字通配，见 Q-08 的历史教训）。
     $askToken18 = 'tc18-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $ask18 = ("【TC18】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $askToken18, $t18)
+    $ask18 = ("【TC18】ask {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $askToken18, $t18)
     # ② 串行化面（AR-04 两果都合法）：会话 C 挂起在确认门时同会话再发 —— 409（门仍被占）与 200
     #    （park 已释放门）都是现行语义下的合法结果。旧写法是"2 次尝试凑一个挂起 + Start-Sleep 后
     #    反复重发直到 200"，那种重试把两果都糊成绿、也把偶发红藏起来 ⇒ 本批去掉：只发一次，不 sleep、
@@ -4445,7 +4445,7 @@ Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话�
     $sid = Ai-NewSid 'q05'
     $parkToken = 'q05-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $frames = New-Object System.Collections.ArrayList
-    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("【AIE2E-Q-05】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
+    Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = ("【AIE2E-Q-05】ask {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t); context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
         @('confirm_request', 'done', 'error') $frames $null
     $cr = Ai-One $frames 'confirm_request'
     if (-not $cr) { throw '未挂起（并发面现场不成立）' }
@@ -4550,7 +4550,7 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
     $t = Ai-PublishFixture 'AIE2E-Q-08-幻影'
     $sid = Ai-NewSid 'q08'
     $parkToken = 'q08-first-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $parkText = ("【AIE2E-Q-08】turn-text {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t)
+    $parkText = ("【AIE2E-Q-08】ask {0} 请立即调用 start_publish 工具发布导入任务 {1}（系统会自动弹出确认卡片，无需再询问我）" -f $parkToken, $t)
     $frames = New-Object System.Collections.ArrayList
     Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = $parkText; context = @{ page = 'import'; taskId = $t; taskType = 'IMPORT'; step = 'PUBLISH' } } `
         @('confirm_request', 'done', 'error') $frames $null

@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
-import { SseChunkParser, parseSseFrame, streamChat } from '@/api/sse'
+import { SseChunkParser, parseSseFrame, reconnectDelayMs, streamChat } from '@/api/sse'
 import type { SseStreamOptions } from '@/api/sse'
 import { frameSeq, type SseFrame } from '@/types/sse'
 import { frame, freshStore, textMessage } from './aie2e-helpers'
@@ -95,8 +95,6 @@ class FakeEventSource {
   }
   close(): void {}
 }
-
-const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 // ── C1：解析器分支全覆盖 ─────────────────────────────────────────────────────
 
@@ -247,23 +245,54 @@ describe('C2 帧序异常（跳号 / 回退 / 重复 / 双 runId 交错）', () 
   })
 
   it('C2-02 seq 回退：lastSeq 取最大值（重挂只补最大号之后，不因回退重放）', async () => {
-    FakeEventSource.urls = []
-    ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
-    const controller = new AbortController()
-    const pending = runSse(
-      [
-        sseLine({ type: 'start', runId: 'run-r', seq: 5 })
-        + sseLine({ type: 'delta', runId: 'run-r', seq: 3, text: '回退' })
-      ],
-      { signal: controller.signal }
-    )
-    await tick()
-    expect(FakeEventSource.urls).toHaveLength(1)
-    expect(FakeEventSource.urls[0]).toBe('/api/ai/events/run-r?lastSeq=5')
-    controller.abort()
-    await tick()
-    const { seen } = await pending
-    expect(seen.map((item) => item.type)).toEqual(['start', 'delta'])
+    /**
+     * Task 4：reattach 从原生 `EventSource` 改为带身份头的 `fetch + ReadableStream`（原生
+     * EventSource 设不了身份头）⇒ 观测面随之从"EventSource 构造参数"换成"事件流请求的 URL"。
+     * 重连等待用 fake timers 压缩（口径同 `sse-watchdog.spec.ts`），不引入真实 sleep。
+     */
+    vi.useFakeTimers()
+    try {
+      const urls: string[] = []
+      vi.stubGlobal('fetch', vi.fn((input: string | URL) => {
+        const url = String(input)
+        urls.push(url)
+        if (url.startsWith('/api/ai/events/')) {
+          // 重挂连接：保持打开（本用例只断"补发锚点"，不断帧内容）
+          const response = {
+            ok: true,
+            status: 200,
+            headers: {
+              get: (name: string): string | null =>
+                name.toLowerCase() === 'content-type' ? 'text/event-stream' : null
+            },
+            body: new ReadableStream<Uint8Array>({ start() { /* 永不收流 */ } }),
+            json: async () => ({})
+          }
+          return Promise.resolve(response as unknown as Response)
+        }
+        return Promise.resolve({ ok: true, body: byteStream([
+          sseLine({ type: 'start', runId: 'run-r', seq: 5 })
+          + sseLine({ type: 'delta', runId: 'run-r', seq: 3, text: '回退' })
+        ]) })
+      }))
+      const controller = new AbortController()
+      const seen: SseFrame[] = []
+      const pending = streamChat(
+        { sessionId: 's-v3', message: 'q' } as never,
+        { onFrame: (incoming: SseFrame) => seen.push(incoming) },
+        { signal: controller.signal, random: () => 0 }
+      )
+      await vi.advanceTimersByTimeAsync(0) // 首连读完 2 帧、无终帧 ⇒ 排期退避
+      await vi.advanceTimersByTimeAsync(reconnectDelayMs(1, () => 0))
+      const events = urls.filter((url) => url.startsWith('/api/ai/events/'))
+      expect(events).toEqual(['/api/ai/events/run-r?lastSeq=5'])
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(0)
+      await pending
+      expect(seen.map((item) => item.type)).toEqual(['start', 'delta'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('C2-03 重复 seq：store 层幂等（文本不重复累加、序号不回退）', () => {

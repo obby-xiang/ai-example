@@ -25,6 +25,7 @@ import { useAiStore } from '@/stores/ai'
 import { registerPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { applyFrameToParts } from '@/utils/parts'
 import { planReplace, type SheetContext } from '@/utils/sheet-tools'
+import { sessionIdStorageKey } from '@/utils/ai-identity'
 import { field, makeFakeSheet, type FakeSheet } from './sheet-fixtures'
 
 const api = vi.hoisted(() => ({
@@ -151,7 +152,10 @@ describe('B12-01 换会话：预览随会话一起丢弃', () => {
     expect(clears).toContain('preview')
     expect(store.activePreview).toBeNull()
     expect(store.stalePreviewToolCallId).toBeNull()
-    expect(nextId).not.toBe('')
+    // Task 4：换会话不本地造号（号由后端下一次发）—— 可观测面是"旧会话指针已抹掉"，
+    // 而不是"同步拿到一个新 id"
+    expect(nextId).toBe('')
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBeNull()
   })
 })
 

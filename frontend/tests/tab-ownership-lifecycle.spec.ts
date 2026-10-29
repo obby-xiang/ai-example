@@ -233,8 +233,8 @@ describe('③ adoptFreshSession 换 id：只释放本页签文档持有的旧锁
     // 别人的锁（不归本页签文档持有）
     locks.hold(sessionLockName('9207'))
 
-    const nextId = store.adoptFreshSession()
-    expect(nextId).not.toBe('9206')
+    // Task 4：本地不再造号 —— 换会话只清场并抹掉指针，新号由后端 `ensureSession()` 发
+    expect(store.adoptFreshSession()).toBe('')
     // release 是异步的（真实 Web Locks 也一样）⇒ 等一拍再看锁的归属
     await flushPromises()
     // 旧锁已释放：别的页签现在可以接手旧会话（这正是"不泄漏"的可观测面）
@@ -242,18 +242,24 @@ describe('③ adoptFreshSession 换 id：只释放本页签文档持有的旧锁
     // 别人的锁一个都没碰
     expect(locks.isHeld(sessionLockName('9207'))).toBe(true)
 
+    const nextId = await store.ensureSession()
+    expect(nextId).not.toBe('')
+    expect(nextId).not.toBe('9206')
     await store.claimSessionOwnership(nextId)
     await flushPromises()
     expect(locks.isHeld(sessionLockName(nextId))).toBe(true)
   })
 
-  it('unsupported（无 Web Locks）⇒ 换 id 照旧可用，不抛错', () => {
+  it('unsupported（无 Web Locks）⇒ 换 id 照旧可用，不抛错', async () => {
     Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
     const store = useAiStore()
     const before = store.sessionId
 
-    const nextId = store.adoptFreshSession()
+    // 换会话本身不产号（也不抛错）；号仍由后端发，指针按新号落盘
+    expect(store.adoptFreshSession()).toBe('')
+    const nextId = await store.ensureSession()
 
+    expect(nextId).not.toBe('')
     expect(nextId).not.toBe(before)
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(nextId)
   })

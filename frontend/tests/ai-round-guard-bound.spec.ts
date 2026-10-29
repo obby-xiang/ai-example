@@ -20,6 +20,7 @@ import { registerPageHandler } from '@/stores/workspace'
 import { APPLIED_SEQ_WINDOW, alreadyApplied, markApplied } from '@/utils/parts'
 import { field, makeFakeSheet } from './sheet-fixtures'
 import { resetAiTestState } from './ai-fixtures'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -109,6 +110,8 @@ describe('B2-01 retryModelStep：await 期间换会话 ⇒ 旧 run 不挂进新�
   })
 
   it('同会话正常受理仍是 accepted（守卫不误伤）', async () => {
+    // Task 4：受理后要重挂 SSE，而重挂带身份头与会话号 ⇒ 现场必须先有"身份 + 已发号"的会话
+    installIdentityFixture()
     const store = useAiStore()
     const message = store.appendAssistantMessage()
     message.runId = 'run-1'

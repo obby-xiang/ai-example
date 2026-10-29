@@ -10,6 +10,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import { applyLocale } from '@/locales'
 import type { FormSpec } from '@/types/form-schema'
+import { createPinia, setActivePinia } from 'pinia'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   uploadFormAttachment: vi.fn(),
@@ -250,6 +252,13 @@ describe('G-B 草稿镜像事件', () => {
 })
 
 describe('G-E attachment 控件', () => {
+  // Task 4：附件上传口要先拿到后端发号的会话（组件经 store 的 `ensureSession()` 取号）
+  beforeEach(() => {
+    sessionStorage.clear()
+    setActivePinia(createPinia())
+    installIdentityFixture()
+  })
+
   it('选择文件即上传，成功后显示文件名/大小，提交值是 fileId；可删除重传', async () => {
     api.uploadFormAttachment.mockResolvedValue({
       fileId: 'att_12345678',

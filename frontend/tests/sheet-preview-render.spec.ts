@@ -13,6 +13,7 @@ import type { SheetWritePlan } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import { applyLocale } from '@/locales'
+import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -120,6 +121,8 @@ describe('① 预览卡组件', () => {
 
 describe('②/③ 刷新恢复：无本地 plan ⇒ stale + 放弃回灌 cancelled', () => {
   it('restoreSuspendedSnapshot 标 stale；abandonStalePreview 提交 cancelled=true', async () => {
+    // Task 4：runs/current 属对话域请求（引导门先判会话），无号则整段恢复跳过 ⇒ 现场不成立
+    installIdentityFixture()
     const store = useAiStore()
     api.runsCurrent.mockResolvedValue({
       found: true,

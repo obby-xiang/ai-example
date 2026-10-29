@@ -27,6 +27,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { useAiStore } from '@/stores/ai'
+import { installIdentityFixture } from './ai-identity-fixture'
 import type { ContextUsage } from '@/types/ai'
 import {
   CONTEXT_TIER_DANGER,
@@ -177,6 +178,8 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
   })
 
   it('渲染文本 + 档位标记 + 点击展开七项（按服务端顺序）', async () => {
+    // Task 4：`/context` 属于对话域请求，带后端发号的会话 —— 无号不发请求
+    installIdentityFixture()
     const store = useAiStore()
     store.contextUsage = measured(84213, 128000)
     const wrapper = mount(ContextPill)

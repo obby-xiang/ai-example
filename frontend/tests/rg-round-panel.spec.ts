@@ -9,7 +9,7 @@
  * 「`ai.loading`（流式生成中）**不**硬禁用 —— 生成中仍可继续编辑」。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
@@ -163,6 +163,9 @@ describe('批G · G8：刷新后在途轮恢复停止入口', () => {
     })
 
     const { wrapper, store } = await mountPanel()
+    // 恢复链在 onMounted 里逐段 await（目录门 → 所有权 → 历史 → runs/current 快照）：
+    // 只等一拍 nextTick 会读到"恢复还没落地"的中间态，故按微任务全部落定的口径等待
+    await flushPromises()
     await wrapper.vm.$nextTick()
 
     expect(store.loading).toBe(true) // 在途语义恢复 ⇒ 停止入口的前提
