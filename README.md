@@ -189,6 +189,8 @@ yarn dev
 cd backend
 & "<MAVEN_HOME>/mvn.cmd" -B test -s maven-settings.xml
 # 2026-10-08 实测：Tests run: 249, Failures: 0, Errors: 0, Skipped: 0（计数随测试演进，以 mvn test 输出为准）
+# 覆盖率（JaCoCo，随 mvn test 自动生成，只观测不设阈值）：
+#   target/site/jacoco/index.html（人读）/ jacoco.xml（机器读）/ target/jacoco.exec（原始数据）
 
 # 前端单测 + 类型检查 + 生产构建
 cd frontend
@@ -207,7 +209,7 @@ E2E 脚本的参数、退出码口径、桩模式（`E2E_STUB_MODE=1` 零容忍�
 
 | job | 内容 | 依赖 |
 | --- | --- | --- |
-| `backend` | JDK 21 + `mvn -B test`（全量单测） | — |
+| `backend` | JDK 21 + `mvn -B test`（全量单测）；JaCoCo 覆盖率报告作为 artifact `backend-jacoco-coverage` 上传（**只观测，无阈值**） | — |
 | `frontend` | Node 22 + `yarn install --frozen-lockfile` + `yarn typecheck` + `yarn test` + `yarn build` | — |
 | `e2e` | Redis service 容器 + 桩上游（`scripts/ci/stub-upstream.mjs --violate-form-type`）+ `scripts/verify-e2e.ps1` 29 用例（`-EnableGf6`） | `backend` |
 | `docs` | 文档一致性门禁（`node scripts/ci/check-docs.mjs`，6 条断言）｜**阻断** | — |

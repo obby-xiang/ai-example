@@ -121,8 +121,37 @@ jobs:
           cache-dependency-path: backend/pom.xml
 
       # 用例数随棒次增长（计数随测试演进，以 mvn test 输出为准），故步骤名不再写死数字。
+      # JaCoCo（backend/pom.xml）：prepare-agent 在 initialize 注入，report 绑 test 阶段 ⇒
+      #   本步骤结束时 target/site/jacoco/{jacoco.xml,index.html} 已产出（只观测，无阈值，不改红绿）。
       - name: 编译并运行单测（mvn test，全量用例）
         run: mvn -B test
+
+      # 覆盖率兜底：surefire 一红构建即中止，report 执行不会跑；但 exec 里已有失败前跑过的数据，
+      #   故在此（always）用 `jacoco:report@report` 单独落报告。
+      #   必须带 @report —— 执行级配置（XML+HTML、target/site/jacoco）只在指定 execution 时生效，
+      #   裸 `mvn jacoco:report` 走插件默认值，与本地/绿色路径的产物不一致。
+      #   无 exec（编译期就失败/单测未起来）时只打印 notice，不把 job 弄红；不设覆盖率阈值。
+      - name: 生成覆盖率报告（失败也生成，不设阈值）
+        if: always()
+        run: |
+          if [ -f target/jacoco.exec ]; then
+            mvn -B jacoco:report@report
+          else
+            echo "::notice::无 target/jacoco.exec（单测未执行），跳过覆盖率报告"
+          fi
+
+      # 归档路径相对 workspace —— 本 job 的 defaults.run.working-directory 只作用于 run 步骤，
+      #   upload-artifact 的 path 不受其影响。
+      - name: 归档覆盖率报告（JaCoCo XML/HTML，失败也归档，保留 7 天）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: backend-jacoco-coverage
+          path: |
+            backend/target/jacoco.exec
+            backend/target/site/jacoco/
+          retention-days: 7
+          if-no-files-found: warn
 
   # ============================================================
   # Redis Cluster / 5.0 安全守卫（Cluster 迁移专项 §十 批次 4）
@@ -277,8 +306,11 @@ jobs:
         with:
           node-version: '22'
 
+      # 本 job 不产覆盖率：-Djacoco.skip=true 关掉覆盖率插件的 prepare/report
+      #   （否则 report 会打印 "Skipping JaCoCo execution due to missing execution data file"，
+      #    把"本轮没跑单测"和"覆盖率没配好"混在日志里）。
       - name: 打包后端（跳过单测：单测已由 backend job 全量跑过）
-        run: mvn -B -DskipTests package
+        run: mvn -B -DskipTests -Djacoco.skip=true package
 
       # 桩自身先自证：路由表契约、与 GenerativeFormRules 的白名单对账、收敛性、SSE 帧形态。
       # 桩坏与产品坏的区分靠这一步 + 运行期的 req-*.decision.json（设计草案 §9 R1）。

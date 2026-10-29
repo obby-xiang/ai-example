@@ -24,6 +24,11 @@
         <!-- 业务知识问答 v1：Lucene 9.12.2 = 公司库版本（禁升版；Apache-2.0）。
              三个 jar 已按"仅此一次在线"拉入本地 m2，之后构建保持 mvn -o。 -->
         <lucene.version>9.12.2</lucene.version>
+        <!-- 覆盖率工具版本（全局属性：base 构建与 -Ptestmap 共用一个数）。
+             0.8.15（2026-06-04）是当前最新正式版、支持到 Java 26，本仓 Java 21 在支持面内；
+             0.8.16 目前只有 snapshot（2026-10-19）故不取。Spring Boot 父 POM 不管理 JaCoCo，
+             版本必须在这里自行钉死（详见 docs/research/设计-选择性测试落地方案-2026-10-23.md §5）。 -->
+        <jacoco.version>0.8.15</jacoco.version>
     </properties>
 
     <dependencyManagement>
@@ -189,6 +194,51 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- 覆盖率观测（**只观测，不门禁**）：不绑 jacoco:check、不设任何覆盖率阈值 ——
+                 覆盖率随测试演进波动，设阈值会让既有 CI 在没有代码问题时变红（设计稿 §5.1：
+                 覆盖率只做依赖观测）。产物（CI 归档同一路径）：
+                   target/jacoco.exec            —— 原始执行数据
+                   target/site/jacoco/jacoco.xml —— XML（机器读，供趋势/外部工具）
+                   target/site/jacoco/index.html —— HTML（人读）
+                 report 绑 test 而非 verify：CI 既有步骤就是 mvn test，本地也只需 mvn test 就能看报告。
+                 注意：本仓未自定义 surefire argLine；将来若要加 -Xmx 等，必须写成 @{argLine} 引用，
+                 否则会把 prepare-agent 注入的 -javaagent 整串覆盖掉（agent 静默失效、exec 为空）。 -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                        <configuration>
+                            <!-- append=false：每次运行从空数据开始，避免历次 mvn test 累加进同一 exec
+                                 （会话数/部分计数虚高）。surefire 默认单 fork（forkCount=1、reuseForks=true），
+                                 故"覆盖写"安全；若将来开 forkCount>1，必须改回 append=true。 -->
+                            <destFile>${project.build.directory}/jacoco.exec</destFile>
+                            <append>false</append>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                        <configuration>
+                            <dataFile>${project.build.directory}/jacoco.exec</dataFile>
+                            <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
+                            <formats>
+                                <format>XML</format>
+                                <format>HTML</format>
+                            </formats>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
@@ -206,13 +256,15 @@
 
     <!-- 选择性测试 B 期：倒排录制（设计稿 §3.1/§7.2）。
          只在 -Ptestmap 时生效；不加 profile 时依赖树、插件列表、argLine 逐项不变。
-         JaCoCo 钉 0.8.15（开放点 O5：0.8.16 仅 snapshot）；三个构件为一次性联网拉入本地 m2，
-         之后仍按 mvn -o 构建。 -->
+         JaCoCo 版本统一取 properties 里的 jacoco.version（0.8.15；开放点 O5：0.8.16 仅 snapshot）；
+         三个构件为一次性联网拉入本地 m2，之后仍按 mvn -o 构建。
+         与 base 构建的覆盖率插件的唯一区别 = 录制用的 agent 数据落 target/testmap/jacoco.exec；
+         同阶段内本 profile 的执行声明在后、argLine 由它最后写入，故 base 的 report 在本 profile 下
+         找不到 target/jacoco.exec 会打印 "Skipping JaCoCo execution"（刻意如此：录制不产覆盖率报告）。 -->
     <profiles>
         <profile>
             <id>testmap</id>
             <properties>
-                <jacoco.version>0.8.15</jacoco.version>
                 <!-- 录制开关由 surefire 以系统属性下发给 fork；未加 profile 时两者都为空。 -->
                 <testmap.mode>full</testmap.mode>
             </properties>
