@@ -2411,6 +2411,11 @@ public class SseChatEmitter {
 				yield false;
 			}
 			case TIMED_OUT -> {
+				// I5（复审）：超时后 {@code future.cancel(true)} 只对"还没开始"的任务有效 ——
+				// 若这次写还排在池队列里从未执行（工作线程被别人占着），cancel 会让它永不运行，
+				// λ 的 finally 也就不会复位写在飞标志 ⇒ 同样"永不 complete"。
+				// 已在飞的写出（{@code started == true}）不走这里：由写线程返回后自行复位并补做收尾。
+				releaseWriteSlotIfNeverStarted(sub, started);
 				evictOnWriteTimeout(sub);
 				yield false;
 			}
@@ -2451,6 +2456,10 @@ public class SseChatEmitter {
 	 * <p>判据是"任务是否真的跑过"（λ 入口置位的 {@code started}）：跑过 ⇒ 写线程的 {@code finally}
 	 * 会复位标志并补做收尾，本线程<b>不得</b>插手（否则会与正在飞的那次写搅在一起）；
 	 * 没跑过 ⇒ 只能由本线程复位。调用方紧接着走摘除/收尾，因此复位后立即 {@code completeOne} 生效。
+	 *
+	 * <p><b>三条调用点（同一缺陷族）</b>：{@code SATURATED}（提交被拒，λ 必然未跑）、
+	 * {@code INTERRUPTED}（未启动的 future 被取消）、{@code TIMED_OUT}（超时后 cancel 掉"已接单但
+	 * 从未执行"的那次写，评审 I5）。三处的共同后果都是"收尾交接给一个不存在的写线程"。
 	 */
 	private static void releaseWriteSlotIfNeverStarted(Subscription sub, AtomicBoolean started) {
 		if (!started.get()) {

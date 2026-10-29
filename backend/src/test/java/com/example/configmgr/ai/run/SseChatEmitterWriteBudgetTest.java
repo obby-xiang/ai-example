@@ -338,6 +338,60 @@ class SseChatEmitterWriteBudgetTest {
 		}
 	}
 
+	// ── I5：超时取消"已接单但从未执行"的那次写，同样必须 complete ────────────────
+
+	/**
+	 * <b>I5（复审）：{@code TIMED_OUT} 的"任务从未启动"分支也必须复位写在飞标志。</b>
+	 *
+	 * <p>缺陷形态：{@code SseWriteBudget#write} 在超时后 {@code future.cancel(true)}。若这次写还<b>排在池队列里
+	 * 从未执行</b>（工作线程被别人占着），cancel 会让它永不运行 ⇒ λ 的 {@code finally} 不会复位
+	 * {@code Subscription#writeInFlight} ⇒ {@link SseChatEmitter#completeOne} 把收尾"交接给一个不存在的
+	 * 写线程"（只置 {@code completePending}）⇒ <b>永不 complete</b> ⇒ 前端收不到 onerror/onclose，不会重挂。
+	 *
+	 * <p>C1 只修了"提交被拒"（SATURATED）；本用例钉的是同族的另一条：<b>接单成功、但从未执行</b>。
+	 * 装置把这一点做成确定性事实：写出池只有 1 条工作线程且<b>先被一个无关任务占住</b>，
+	 * 因此预算内这帧的写出只会排在队列里（{@code started} 恒为 false），超时后 cancel 也无法让它跑起来。
+	 *
+	 * <p>判据 = <b>外部可观测</b>：emitter 恰好 complete 一次（前端据此重挂），且该帧从未写出。
+	 */
+	@Test
+	void timedOutWriteThatNeverStartedStillCompletesTheEmitter() throws Exception {
+		InMemoryRunStore store = new InMemoryRunStore();
+		// 单工作线程 + 有界队列：先占住线程 ⇒ 这帧的写出只会被"接单排队"，不会执行。
+		ThreadPoolExecutor queuedWriter = new ThreadPoolExecutor(1, 1, 60L, TimeUnit.SECONDS,
+				new LinkedBlockingQueue<>(), daemon("queued-writer"), new ThreadPoolExecutor.AbortPolicy());
+		CountDownLatch blockerStarted = new CountDownLatch(1);
+		CountDownLatch releaseBlocker = new CountDownLatch(1);
+		try {
+			queuedWriter.execute(() -> {
+				blockerStarted.countDown();
+				try {
+					releaseBlocker.await(10, TimeUnit.SECONDS);
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+			});
+			assertThat(blockerStarted.await(5, TimeUnit.SECONDS)).as("唯一的工作线程已被占住").isTrue();
+
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(queuedWriter, 300L));
+			MonitorFaithfulEmitter sub = new MonitorFaithfulEmitter(false, false);
+			out.attach(sub.emitter());
+
+			out.delta("这一帧只会被接单排队、永不执行");
+			assertThat(sub.awaitCompletes(1, 5L))
+				.as("超时取消「从未启动」的写出后必须 complete（否则前端永不重挂）").isTrue();
+			assertThat(sub.completes()).as("恰好 complete 一次（不重复 onCompletion）").isEqualTo(1);
+			assertThat(sub.payloads()).as("该帧确实从未写出（它仍在归档里，重挂差量可补）").isEmpty();
+		}
+		finally {
+			releaseBlocker.countDown();
+			queuedWriter.shutdownNow();
+		}
+	}
+
 	// ── 兼容性：预算模式下的帧口径与 T4-3 逐条不变 ──────────────────────────
 
 	@Test
