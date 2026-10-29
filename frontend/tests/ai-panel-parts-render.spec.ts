@@ -6555,7 +6555,7 @@ describe('批4-D：不可撤销确认卡的复选框（可逆卡一字不动）'
 // ── 批次6A：N8 陈旧卡 / N9 诊断分层 / N12 空态口径 / AR-14 复制页签 / log 无障碍 ──────────
 
 describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，见施工报告）', () => {
-  it('N12：空态同时写清浏览器镜像 / Redis 24h / DB 无 TTL，且不再声称关闭页签即结束', async () => {
+  it('N12：空态写清浏览器镜像用于刷新恢复 + 服务端 24h 滑动记忆窗口，不再声称数据库完整历史', async () => {
     const store = useAiStore()
     store.messages = []
     store.historyLoaded = true
@@ -6566,17 +6566,21 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     expect(notice.exists()).toBe(true)
     expect(notice.text()).toContain('浏览器镜像')
     expect(notice.text()).toContain('24 小时')
-    expect(notice.text()).toContain('数据库')
-    expect(notice.text()).toContain('没有自动过期')
+    expect(notice.text()).toContain('滑动')
+    expect(notice.text()).toContain('没有长期归档')
+    expect(notice.text()).not.toContain('数据库')
+    expect(notice.text()).not.toContain('没有自动过期')
     expect(wrapper.text()).not.toContain('关闭页签即结束')
 
     applyLocale('en-US')
     await wrapper.vm.$nextTick()
     const enNotice = wrapper.find('[data-testid="storage-notice"]').text()
     expect(enNotice).toContain('browser mirror')
-    expect(enNotice).toContain('24 hours')
-    expect(enNotice).toContain('database')
-    expect(enNotice).toContain('no automatic expiry')
+    expect(enNotice).toContain('24-hour')
+    expect(enNotice).toContain('sliding')
+    expect(enNotice).toContain('no long-term archive')
+    expect(enNotice).not.toContain('database')
+    expect(enNotice).not.toContain('no automatic expiry')
     wrapper.unmount()
   })
 

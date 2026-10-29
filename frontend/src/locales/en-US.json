@@ -186,7 +186,7 @@
       "sessionPurgeIncomplete": "The old session's AI data has not been fully deleted (the new conversation is unaffected)",
       "staleConfirmCard": "This turn is no longer available. Please ask again.",
       "copiedNewTab": "A new conversation was started in this tab; the conversation in the original tab is unaffected.",
-      "mirrorQuotaExceeded": "The browser mirror could not be written (storage may be full or private mode may be on): this tab's current state may not fully survive a refresh. The full history is still kept on the server.",
+      "mirrorQuotaExceeded": "The browser mirror could not be written (storage may be full or private mode may be on): this tab's state may not survive a refresh; the server only keeps a 24-hour sliding memory window.",
       "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Upstream connection interrupted, retrying (no content produced yet this turn)",
@@ -482,7 +482,7 @@
       "storage": {
         "mirror": "The conversation is kept in this tab's browser mirror and survives a refresh.",
         "run": "The server keeps this run and its conversation memory for 24 hours (sliding with activity).",
-        "history": "The full history is stored in the server database long-term with no automatic expiry; closing the tab does not stop the run on the server."
+        "history": "The conversation is only kept in this tab's browser mirror and the server's 24-hour sliding memory window — there is no long-term archive; closing the tab does not stop the run on the server."
       },
       "thinking": "Thinking process",
       "thinkingLive": "Thinking",
