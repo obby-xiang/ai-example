@@ -290,7 +290,7 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   }>
   timestamp?: unknown
   /**
-   * 所属 runId（additive；完整历史 `/history/{sessionId}/messages` 带，40 条记忆窗口通常不带）。
+   * 所属 runId（additive；服务端条目带则透传，40 条记忆窗口通常不带）。
    * 有则前端把它落到 {@link ChatMessage.runId}，作为「重试本轮」的归属证据。
    */
   runId?: string

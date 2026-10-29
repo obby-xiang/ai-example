@@ -23,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li><b>H2 迁移 V1~V6 的字节指纹不变</b>：这些迁移已经发布过，Flyway 的 checksum 存在既有库的
  * {@code flyway_schema_history} 里；改一个空格都会让存量库在启动时报
  * "Migration checksum mismatch"（且不允许自动修复）。指纹钉死后，任何"顺手改一下 V1"都会在单测里先红。</li>
- * <li><b>两目录版本号对齐且无同号冲突</b>：{@code db/migration}（H2：V1~V5 SQL + V6 Java + V7~V9 SQL）
- * 与 {@code db/postgresql}（V1~V9 全 SQL）合起来必须**恰好覆盖 1~9、每个版本号只出现一次**。
+ * <li><b>两目录版本号对齐且无同号冲突</b>：{@code db/migration}（H2：V1~V5 SQL + V6 Java + V7~V10 SQL）
+ * 与 {@code db/postgresql}（V1~V10 全 SQL）合起来必须**恰好覆盖 1~10、每个版本号只出现一次**。
  * 跨分支合并（历史工作树的 V7/V8 并入本树的 V7 app_lock 之后）最容易在这里撞号，
  * 撞号会让 Flyway 在启动期直接失败。</li>
  * <li><b>方言差异只允许出现在 V1/V8</b>（CLOB→TEXT），其余文件两侧逐字节相同；
@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * application-postgresql.yml 的 {@code locations} 单值保证，本用例兜住目录内容本身的完整性。</li>
  * </ol>
  *
- * <p>PG 的真实执行（连接真实库、跑完 V1~V9、Hibernate validate）不在本机跑，留 CI ——
+ * <p>PG 的真实执行（连接真实库、跑完 V1~V10、Hibernate validate）不在本机跑，留 CI ——
  * 本用例只做"能在本机确定的部分"：迁移集完整性、版本号唯一性、方言差异的边界、H2 侧不可变。
  */
 class MigrationSetGuardTest {
@@ -57,7 +57,8 @@ class MigrationSetGuardTest {
 			"V4__ai_provider_config.sql",
 			"V5__ai_model_reasoning_backfill.sql",
 			"V7__app_lock.sql",
-			"V9__ai_chat_message_idempotency.sql");
+			"V9__ai_chat_message_idempotency.sql",
+			"V10__drop_ai_chat_message.sql");
 
 	/** 允许"必要方言兼容"（CLOB→TEXT）的文件：其余结构必须与 H2 一致。 */
 	private static final List<String> DIALECT_ADAPTED_FILES = List.of(
@@ -87,28 +88,28 @@ class MigrationSetGuardTest {
 	@Test
 	void postgresSetHasEveryH2VersionAsSql() {
 		assertThat(versionsIn(PG_DIR))
-				.as("PG 迁移集 = V1~V9（与 H2 侧版本号逐一对齐；PG 侧没有 Java 迁移）")
-				.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
+				.as("PG 迁移集 = V1~V10（与 H2 侧版本号逐一对齐；PG 侧没有 Java 迁移）")
+				.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
 		List<String> pgFiles = sqlFiles(PG_DIR);
 		assertThat(pgFiles).as("PG 目录只放 SQL 迁移（Java 迁移在 PG profile 下被显式关闭）")
 				.allMatch(name -> name.endsWith(".sql"));
 	}
 
 	@Test
-	void h2SqlAndJavaMigrationsCoverV1ToV9ExactlyOnce() {
+	void h2SqlAndJavaMigrationsCoverV1ToV10ExactlyOnce() {
 		List<String> sqlVersions = versionsIn(H2_DIR);
 		List<String> javaVersions = javaMigrationVersions();
 
 		assertThat(sqlVersions)
 				.as("H2 的 SQL 迁移版本（V6 是 Java 迁移，故 SQL 侧没有 6）")
-				.containsExactly("1", "2", "3", "4", "5", "7", "8", "9");
+				.containsExactly("1", "2", "3", "4", "5", "7", "8", "9", "10");
 		assertThat(javaVersions).as("H2 的 Java 迁移版本").containsExactly("6");
 
 		List<String> all = new java.util.ArrayList<>(sqlVersions);
 		all.addAll(javaVersions);
-		assertThat(all).as("H2 侧（SQL + Java）合起来必须恰好覆盖 1~9，且同号只出现一次")
+		assertThat(all).as("H2 侧（SQL + Java）合起来必须恰好覆盖 1~10，且同号只出现一次")
 				.doesNotHaveDuplicates()
-				.containsExactlyInAnyOrder("1", "2", "3", "4", "5", "6", "7", "8", "9");
+				.containsExactlyInAnyOrder("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
 
 		assertThat(versionsIn(PG_DIR))
 				.as("两目录版本号对齐：PG 侧不得缺号/多号")
@@ -159,25 +160,43 @@ class MigrationSetGuardTest {
 	}
 
 	@Test
-	void historyTablesAndIdempotencyIndexAreDeclared() throws Exception {
-		String h2Table = stripComments(Files.readString(H2_DIR.resolve("V8__ai_chat_message.sql"),
+	void v10DropsOnlyTargetTableAndKeepsFeedbackAndConfigTables() throws Exception {
+		String h2Drop = stripComments(Files.readString(H2_DIR.resolve("V10__drop_ai_chat_message.sql"),
 				StandardCharsets.UTF_8));
-		String h2Index = stripComments(Files.readString(H2_DIR.resolve("V9__ai_chat_message_idempotency.sql"),
+		String pgDrop = stripComments(Files.readString(PG_DIR.resolve("V10__drop_ai_chat_message.sql"),
 				StandardCharsets.UTF_8));
 
-		assertThat(h2Table).as("完整历史表（net-new，不改旧表）")
-				.contains("CREATE TABLE IF NOT EXISTS ai_chat_message")
-				.contains("session_id")
-				.contains("run_id")
-				.contains("message_id")
-				.contains("UNIQUE (session_id, seq)");
-		assertThat(h2Index).as("写入幂等键：唯一索引 (session_id, run_id, message_id)")
-				.contains("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_chat_message_session_run_message")
-				.contains("(session_id, run_id, message_id)");
-		assertThat(stripComments(Files.readString(PG_DIR.resolve("V9__ai_chat_message_idempotency.sql"),
-				StandardCharsets.UTF_8)))
-				.as("V9 无方言差异 ⇒ PG 侧同字节同语义")
-				.isEqualTo(h2Index);
+		assertThat(normalizedSql(h2Drop))
+				.as("V10 只做一件事：删目标表（多一句 DROP/ALTER/TRUNCATE 都会在这里现形）")
+				.isEqualTo("DROP TABLE IF EXISTS ai_chat_message;");
+		assertThat(normalizedSql(pgDrop)).as("删表无方言差异 ⇒ 两侧同语义")
+				.isEqualTo(normalizedSql(h2Drop));
+
+		assertThat(stripComments(Files.readString(H2_DIR.resolve("V3__ai_feedback.sql"), StandardCharsets.UTF_8)))
+				.as("反馈表保留：V10 不得动它")
+				.contains("CREATE TABLE ai_feedback");
+		String v4 = stripComments(Files.readString(H2_DIR.resolve("V4__ai_provider_config.sql"),
+				StandardCharsets.UTF_8));
+		for (String table : List.of("ai_provider", "ai_model", "ai_setting", "ai_config_audit")) {
+			assertThat(v4).as("AI 配置表保留：V10 不得动它（%s）", table).contains("CREATE TABLE " + table);
+		}
+
+		for (Path dir : List.of(H2_DIR, PG_DIR)) {
+			for (String name : sqlFiles(dir)) {
+				if (name.startsWith("V10__")) {
+					continue;
+				}
+				String upper = stripComments(Files.readString(dir.resolve(name), StandardCharsets.UTF_8))
+						.toUpperCase();
+				assertThat(upper).as("既有迁移不得删除目标/反馈/配置表：%s/%s", dir, name)
+						.doesNotContain("DROP TABLE IF EXISTS AI_CHAT_MESSAGE")
+						.doesNotContain("DROP TABLE IF EXISTS AI_FEEDBACK")
+						.doesNotContain("DROP TABLE IF EXISTS AI_PROVIDER")
+						.doesNotContain("DROP TABLE IF EXISTS AI_MODEL")
+						.doesNotContain("DROP TABLE IF EXISTS AI_SETTING")
+						.doesNotContain("DROP TABLE IF EXISTS AI_CONFIG_AUDIT");
+			}
+		}
 	}
 
 	@Test

@@ -1383,7 +1383,7 @@ function clearFrontendToolChains(): void {
  *   截断标量字段），故按引用比较即可；若将来出现原地改嵌套字段，必须先扩展这里的比较，
  *   否则会漏更新；
  * - **有界**：只保最近 {@link MIRROR_MAX_MESSAGES} 条，且消息 JSON 总量不超过
- *   {@link MIRROR_MAX_CHARS}（从最旧开始丢；更早内容由服务端完整历史补齐）。最后一条助手 /
+ *   {@link MIRROR_MAX_CHARS}（从最旧开始丢；更早内容只剩服务端 Redis 记忆窗口，不再落库补齐）。最后一条助手 /
  *   最后一条用户 / 最新一条不受字符预算约束（`mirrorBoundedMessages`），保证在途轮
  *   「提问 + 半截回答」不被拆散；
  * - **不重复写**：现场（消息 + lastRunId + inFlight + runSeq）与上次落盘一致时**整次 no-op**，
@@ -1393,7 +1393,7 @@ function clearFrontendToolChains(): void {
  * 序列化失败（脏段 / 循环引用）与写盘失败分开口径：前者只吞异常不外溢，不冒充配额提示。
  * ================================================================================================ */
 
-/** 镜像有界：最多保留的最近消息条数（更早的由服务端完整历史补齐）。 */
+/** 镜像有界：最多保留的最近消息条数（更早的只剩服务端 Redis 记忆窗口，不再落库补齐）。 */
 export const MIRROR_MAX_MESSAGES = 120
 /** 镜像有界：消息 JSON 总量预算（UTF-16 字符，与 sessionStorage 配额同单位）。 */
 export const MIRROR_MAX_CHARS = 512 * 1024
@@ -3423,7 +3423,7 @@ export const useAiStore = defineStore('ai', {
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
-          // 批次2：完整历史通道带 runId 时落消息，作为「重试本轮」的归属证据（40 条窗口通常无此键）
+          // 批次2：服务端条目带 runId 时落消息，作为「重试本轮」的归属证据（40 条记忆窗口通常无此键）
           ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
           // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
           ...(item.stopped === true ? { stopped: true } : {}),
@@ -8042,7 +8042,7 @@ export const useAiStore = defineStore('ai', {
      *    同时用响应 `clientCleanup` 精确清浏览器镜像/草稿。
      *
      * <p>口径更新：旧实现的"只删记忆窗口 + 在飞轮终局可能写回"已被服务端 purge guard 关闭
-     * （记忆 `saveAll` 与完整历史 append 在守卫命中/不可知时都拒绝写回）。前端只在
+     * （记忆 `saveAll` 在守卫命中/不可知时拒绝写回）。前端只在
      * `complete=false`（deferred/errors/aborted）时用 `sessionPurgeIncomplete` 提示"整会话未删净"，
      * 仍不阻断新对话；`complete` 字段缺失时按完成兼容。
      */

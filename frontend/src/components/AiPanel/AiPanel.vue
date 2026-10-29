@@ -264,9 +264,11 @@
           {{ t('ai.panel.welcome1') }}<br />
           {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
         </div>
-        <!-- 批次6A / N12 / AR-01：空态必须如实写清**三类载体**（浏览器镜像 / Redis 运行态与
-             记忆 24h 滑动 / 完整历史 DB 无 TTL），并说明关页签后本轮仍会继续。
-             旧文案「关闭页签即结束」与实现相反，已删除（不得写成“不落库”）。 -->
+        <!-- 批次6A / N12 / AR-01：空态必须如实写清存储载体（浏览器镜像 / Redis 运行态与
+             记忆 24h 滑动），并说明关页签后本轮仍会继续。
+             旧文案「关闭页签即结束」与实现相反，已删除（不得写成“不落库”）。
+             注意：`ai.panel.storage.history` 一句仍写"完整历史写入服务端数据库"——数据库完整
+             历史已随 ai_chat_message 移除而失效，该句待文案评审后下线，勿据其新增断言。 -->
         <div class="mt-[6px] text-[11.8px] leading-[1.7] text-[#8b949e]" data-testid="storage-notice">
           <div>{{ t('ai.panel.storage.mirror') }}</div>
           <div>{{ t('ai.panel.storage.run') }}</div>
