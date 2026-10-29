@@ -3,19 +3,18 @@ package com.example.configmgr.ai.form;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.RunContextRefresher;
-import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -267,23 +266,11 @@ abstract class HostForm {
 	}
 
 	/**
-	 * 交棒历史里最后一条<b>真实用户</b>原文（续跑没有新用户消息，用的就是这一条）。
-	 *
-	 * <p>跳过合成消息（压缩摘要 / 步数或预算收尾提示，判据见 {@code SyntheticMessages}）：它们是系统
-	 * 提示，不是用户原话。把它们当"最后一句"会让"继续任务"的意图凭空消失（表单不再挂起），
-	 * 这与 {@code TaskSlotResolver} 读历史时的过滤是同一条口径。
+	 * 交棒历史里最后一条<b>真实用户</b>原文 —— 委托 {@link TaskIntent#lastRealUserText} 的<b>唯一实现</b>
+	 * （跳过合成消息、与续跑侧交棒前的槽位重算同一口径；三处各写一遍必然漂移）。
 	 */
 	protected static String lastUserText(List<Message> history) {
-		if (history == null) {
-			return null;
-		}
-		for (int i = history.size() - 1; i >= 0; i--) {
-			Message message = history.get(i);
-			if (message instanceof UserMessage user && !SyntheticMessages.isSynthetic(message)) {
-				return user.getText();
-			}
-		}
-		return null;
+		return TaskIntent.lastRealUserText(history);
 	}
 
 	protected static JsonNode parseJson(String json) {

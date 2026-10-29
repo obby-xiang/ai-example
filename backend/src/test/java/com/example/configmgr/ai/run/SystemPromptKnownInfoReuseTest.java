@@ -13,7 +13,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <b>证红</b>：把总纲段删掉 ⇒ {@code knownParametersAreReusedInsteadOfRegathered} 红；把规则 26
  * 新增的「已知值不二次确认 / 取消后不自动重问」删掉 ⇒ {@code generativeFormRuleBansKnownValueConfirmationAndAutoReask}
  * 红；把规则 18 的旧枚举「补充说明、选择配置项、筛选条件等」恢复 ⇒
- * {@code textQuestionsAreLimitedToGenuinelyMissingUnstructuredInfo} 红。
+ * {@code textQuestionsAreLimitedToGenuinelyMissingUnstructuredInfo} 红；把总纲/规则 30 的
+ * 「中文名称/别名、已确认映射也算已知」删掉 ⇒ {@code aliasesAndToolConfirmedMappingsCountAsKnownDefinitions} 红。
  */
 class SystemPromptKnownInfoReuseTest {
 
@@ -80,6 +81,22 @@ class SystemPromptKnownInfoReuseTest {
 			.contains("用户已明确给出的信息不再询问");
 		assertThat(prompt).as("旧口径把「选择配置项/筛选条件」列成开放式信息，是本轮要删的误导")
 			.doesNotContain("补充说明、选择配置项、筛选条件等");
+	}
+
+	@Test
+	void aliasesAndToolConfirmedMappingsCountAsKnownDefinitions() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("总纲：中文名称/别名与编码同等算已知配置定义")
+			.contains("中文名称/别名")
+			.contains("与编码同等算");
+		assertThat(prompt).as("总纲：AI 用工具确认过的编码映射也算已知，确认后直接 select_definitions")
+			.contains("list_config_defs")
+			.contains("get_config_def")
+			.contains("确认过的编码映射")
+			.contains("确认后直接 select_definitions，不弹表单");
+		assertThat(prompt).as("规则 30 与总纲同口径（含名称/别名/已确认映射）")
+			.contains("配置已明确（含用户同一句话里给出的配置定义编码、中文名称/别名");
 	}
 
 	@Test

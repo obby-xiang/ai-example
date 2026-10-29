@@ -503,7 +503,7 @@ public class AiTools {
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
     @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）。"
-            + "用户已明确配置定义时直接调用，不用表单重复询问")
+            + "用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs/get_config_def 确认的映射都算已明确）")
     @ToolScope({ "task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -701,7 +701,9 @@ public class AiTools {
             + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
             + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发。"
             + "表单只收集值、不推进步骤：提交后向导仍停在原步骤，仍需按当前披露面继续"
-            + "（如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition）")
+            + "（如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition）；"
+            + "配置项已明确（编码、中文名称/别名，或已用 list_config_defs/get_config_def 确认的映射）时"
+            + "直接调用 select_definitions，不下发选择表单")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)

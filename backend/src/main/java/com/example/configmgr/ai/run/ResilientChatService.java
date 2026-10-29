@@ -180,6 +180,8 @@ public class ResilientChatService {
 			跨轮延续的「原始意图」包含这些已给参数，除非用户明确修改。只有真正缺失或存在歧义、
 			且需要结构化补充的信息，才按第 26 条收集。
 			- 已知配置定义编码（如 CURRENCY）时，直接调用 select_definitions 勾选，不再询问是否选择；
+			  中文名称/别名（如"货币字典"）与编码同等算已知配置定义；你已用 list_config_defs / get_config_def
+			  确认过的编码映射也算已知：确认后直接 select_definitions，不弹表单；
 			- 已知筛选字段与值（如 CURRENCY 的 code = CNY）时，直接按既有步骤链执行 set_condition
 			  （仍在 QUERY_COND 调用，仍先 confirm_step），不再询问条件。
 
@@ -335,7 +337,8 @@ public class ResilientChatService {
 			    旧任务参数不自动带入新任务：当前任务的配置项、筛选条件、权威步骤与完成状态都属于那条旧任务，
 			    不得当作新任务的已知信息（不等于总纲里的"已给参数"），不得据此先去 select_definitions、
 			    填条件或跳过创建；只有用户明确说"沿用/照当前任务的配置"时才可复用。
-			    创建并按第 24 条导航成功后：配置已明确（含用户同一句话里给出的配置定义编码）⇒
+			    创建并按第 24 条导航成功后：配置已明确（含用户同一句话里给出的配置定义编码、中文名称/别名，
+			    或你已用 list_config_defs / get_config_def 确认过的编码映射）⇒
 			    直接 select_definitions，不弹表单；配置未知且必须由用户选择 ⇒
 			    generative_form(purpose=SELECT_DEFINITIONS)，选项平铺多选配置项；
 			    禁止"请告诉我导出哪个/要导出哪些配置"这类开放式文字反问，也禁止只把定义列表列在正文里让用户自己挑。

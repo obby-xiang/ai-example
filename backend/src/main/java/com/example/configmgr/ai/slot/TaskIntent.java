@@ -1,5 +1,10 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.ai.history.SyntheticMessages;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -64,6 +69,30 @@ public final class TaskIntent {
 	 */
 	public static String explicitTaskType(String text) {
 		return TaskSlotParser.explicitTaskType(text);
+	}
+
+	/**
+	 * 历史里最近一条<b>真实用户</b>原文（跳过合成消息：压缩摘要 / 步数或预算收尾提示）。
+	 *
+	 * <h2>为什么由本类持有</h2>
+	 * 有三处要读"用户这一轮到底说了什么"：宿主表单判据（{@code HostForm}）、交棒前的槽位重算
+	 * （{@code ResumeService}）与继续意图判定。三处各写一遍必然漂移 —— 某处忘了跳合成消息，症状是
+	 * "最后一句话变成了系统提示"（意图凭空消失/旧选择复活）。因此判据只留这一份，{@code HostForm}
+	 * 也委托到这里。
+	 *
+	 * <p>与 {@link SyntheticMessages#isSynthetic} 同一口径（同一判据，两个消费方同源）。
+	 */
+	public static String lastRealUserText(List<Message> history) {
+		if (history == null) {
+			return null;
+		}
+		for (int i = history.size() - 1; i >= 0; i--) {
+			Message message = history.get(i);
+			if (message instanceof UserMessage user && !SyntheticMessages.isSynthetic(message)) {
+				return user.getText();
+			}
+		}
+		return null;
 	}
 
 	/**

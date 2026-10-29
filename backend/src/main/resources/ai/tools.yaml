@@ -36,7 +36,10 @@
 # 「有明确步骤时只有 QUERY_COND 允许 SET_CONDITIONS」（SELECT_DEFS/EXPORT/DONE/导入链一律零副作用拒绝）；
 # 规则 30 / confirm_step / set_condition 的描述统一为「进入 QUERY_COND 给一次非必填自由文本框，留空直接推进，
 # 不得重复收集或文字追问」，删除与规则 26 冲突的「不要为条件弹表单」旧口径。
-version: 2026-10-27.10
+# 2026-10-27.10 → 2026-10-27.11（2026-10-29 已知信息口径补强）：配置已明确不只看编码 ——
+# 中文名称/别名、以及模型已用 list_config_defs / get_config_def 确认过的编码映射同样算已知，
+# 确认后直接 select_definitions，不下发选择表单（系统提示词总纲与规则 30 同批改）。
+version: 2026-10-27.11
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -106,7 +109,7 @@ tools:
     description: >-
       在工作区勾选配置项（前端执行，勾选即落任务项）。前置：已打开对应导出/导入向导并绑定 taskId，
       且当前在「选择配置」步（导出 SELECT_DEFS / 导入 UPLOAD）—— 只在它被披露的步骤调用。
-      选择项优先用本工具，不要用开放式文字询问。用户已明确配置定义时直接调用，不用表单重复询问。
+      选择项优先用本工具，不要用开放式文字询问。用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs / get_config_def 确认的映射都算已明确）。
   - toolKey: set_condition
     title: 设置查询条件
     description: >-
@@ -147,7 +150,8 @@ tools:
       直接 confirm_step 全量推进；条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝（SELECT_DEFS 先
       confirm_step 推进，EXPORT 及之后一律拒绝），不再重复收集。
       系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
-      请直接调用对应工具；未知配置或歧义时表单仍可用。
+      请直接调用对应工具；未知配置或歧义时表单仍可用。配置项已明确（编码、中文名称/别名，或已用
+      list_config_defs / get_config_def 确认的映射）时直接调用 select_definitions，不下发选择表单。
       字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。
       选择题的选项有三种来源：options（写死）、optionsFrom.map（父值 → 选项，静态映射）、
       optionsFrom.sourceId（后端注册数据源，闭集两个：definition_fields = 父值(配置定义编码) → 该定义的字段；

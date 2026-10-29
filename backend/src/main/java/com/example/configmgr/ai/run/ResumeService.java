@@ -2153,8 +2153,9 @@ public class ResumeService {
 	 * <ol>
 	 * <li>按 {@code taskId} 读 {@code TaskService} 的权威 {@code type / currentStep / status} ——
 	 * 挂起期内用户可以在向导里手动改步骤，而这类改动不产生任何"刷新类工具结算"；</li>
-	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 页面显式空（且已同步）仍是权威空，
-	 * 旧槽位与历史选择都不得复活。</li>
+	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 当前文本取历史里<b>最近一条真实用户原文</b>
+	 * （跳过合成消息），因此"本轮原话明确给出的值"照常替换；页面显式空（且已同步）仍是权威空，
+	 * 旧槽位与<b>历史</b>选择都不得复活（用户清空后最后一句只是"继续"时保持为空）。</li>
 	 * </ol>
 	 *
 	 * <p>任一步失败只 WARN 并保留旧值：这是"让下一跳更准"的增强，不是这一轮的判定面
@@ -2178,13 +2179,26 @@ public class ResumeService {
 		}
 	}
 
-	/** 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。 */
+	/**
+	 * 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。
+	 *
+	 * <p><b>当前文本 = 历史里最近一条真实用户原文</b>（跳过合成消息，见
+	 * {@link com.example.configmgr.ai.slot.TaskIntent#lastRealUserText}）。为什么不能传空串：
+	 * 解析器把"当前文本明确给出的值"当作对前值的<b>替换</b>，而空串 = "本轮什么都没提" ⇒ 回落到权威值；
+	 * 新任务的向导页首次导航后会同步"空勾选"（{@code selectedDefs=[]} + {@code selectionSynced=true}，
+	 * 这是权威空），于是用户刚说过的"导出CNY货币字典"会被这份空勾选抹掉，宿主误判配置未知而弹表单。
+	 *
+	 * <p>为什么只取<b>最近一条</b>而不是拼整段历史：用户手动清空后最后一句只是"继续"时，权威空必须
+	 * 保持空（拼历史会把早已撤回的旧选择复活）。
+	 */
 	private AiContext recomputeSlotsBeforeHandoff(String runId, AiContext context, List<Message> history) {
 		if (this.taskSlotResolver == null) {
 			return context;
 		}
 		try {
-			AiContext enriched = this.taskSlotResolver.enrich(context, "", history);
+			String currentText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(history);
+			AiContext enriched = this.taskSlotResolver.enrich(context, currentText == null ? "" : currentText,
+					history);
 			return enriched == null ? context : enriched;
 		}
 		catch (RuntimeException ex) {

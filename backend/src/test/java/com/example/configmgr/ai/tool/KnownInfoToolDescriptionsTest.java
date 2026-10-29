@@ -93,8 +93,26 @@ class KnownInfoToolDescriptionsTest {
     }
 
     @Test
+    void knownDefinitionsIncludeAliasesAndToolConfirmedMappings() throws Exception {
+        String annotation = annotationDescription("selectDefinitions", String[].class, String.class);
+        assertTrue(annotation.contains("中文名称/别名"), annotation);
+        assertTrue(annotation.contains("get_config_def"), annotation);
+
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("select_definitions");
+        assertNotNull(yaml);
+        assertTrue(yaml.description().contains("中文名称/别名"), yaml.description());
+        assertTrue(yaml.description().contains("list_config_defs"), yaml.description());
+
+        String formAnnotation = annotationDescription("generativeForm", AiTools.FormSpec.class);
+        assertTrue(formAnnotation.contains("中文名称/别名"), formAnnotation);
+        ToolDefinitionOverride form = new YamlToolDefinitionSource().load().find("generative_form");
+        assertNotNull(form);
+        assertTrue(form.description().contains("中文名称/别名"), form.description());
+    }
+
+    @Test
     void toolsVersionBumpedForKnownInfoDescriptions() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        assertEquals("2026-10-27.10", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
+        assertEquals("2026-10-27.11", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
     }
 }
