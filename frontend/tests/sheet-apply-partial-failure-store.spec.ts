@@ -97,12 +97,16 @@ describe('R1 应用中途异常的回执', () => {
   it('store 应用路径：提交的 result 是"写入中途失败 + 已写入 N 格"，不是全量成功', async () => {
     let calls = 0
     const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    // 第二块内部只落前 2 格再失败（复审 I-1：块内部分写入也必须精确计入）
+    const partial = 2
     sheet.ctx.adapter.writeCells = (updates) => {
       calls += 1
-      if (calls === 2) {
-        throw new Error('引擎写入失败')
+      if (calls === 1) {
+        return { applied: [...updates] }
       }
-      original(updates)
+      const head = updates.slice(0, partial)
+      original(head)
+      return { applied: [...head], error: new Error('引擎写入失败') }
     }
 
     const store = useAiStore()
@@ -125,7 +129,7 @@ describe('R1 应用中途异常的回执', () => {
     const call = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result?: string } | undefined
     const result = call?.result ?? ''
     expect(result).toContain('写入中途失败')
-    expect(result).toContain(`已写入 ${SHEET_WRITE_CHUNK_ROWS} 格`)
+    expect(result).toContain(`已写入 ${SHEET_WRITE_CHUNK_ROWS + partial} 格`)
     expect(result).toContain('可撤销')
     expect(result).not.toContain('已应用（用户已确认）')
     // 只回灌一次（不是"失败+成功"两条）

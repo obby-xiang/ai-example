@@ -21,6 +21,11 @@ vi.mock('@/utils/spreadjs', () => ({
 
 const bindings = new Map<string, (payload?: unknown) => void>()
 let sheetRows: unknown[][] = []
+/** 故障注入：第 N 次 setArray 抛错（1 基）；null = 不注入。 */
+let failSetArrayOnCall: number | null = null
+let setArrayCalls = 0
+/** 故障注入：下一次 resumePaint 抛错（只抛一次）。 */
+let resumePaintFailure: Error | null = null
 
 function setValueAt(row: number, col: number, value: unknown): void {
   const line = sheetRows[row] ?? []
@@ -36,7 +41,13 @@ function fakeSheet(): Record<string, unknown> {
       bindings.set(event, handler)
     },
     suspendPaint: () => {},
-    resumePaint: () => {},
+    resumePaint: () => {
+      if (resumePaintFailure !== null) {
+        const error = resumePaintFailure
+        resumePaintFailure = null
+        throw error
+      }
+    },
     setRowCount: () => {},
     setColumnCount: () => {},
     setColumnWidth: () => {},
@@ -60,6 +71,10 @@ function fakeSheet(): Record<string, unknown> {
       return grid
     },
     setArray: (row: number, col: number, values: unknown[][]) => {
+      setArrayCalls += 1
+      if (failSetArrayOnCall !== null && setArrayCalls === failSetArrayOnCall) {
+        throw new Error('setArray 失败')
+      }
       values.forEach((line, r) => line.forEach((value, c) => setValueAt(row + r, col + c, value)))
     },
     getSelections: () => []
@@ -110,9 +125,14 @@ async function mountGrid(): Promise<ReturnType<typeof mount>> {
   return wrapper
 }
 
+interface WriteResult {
+  applied: Array<{ row: number; col: number; value: unknown }>
+  error?: unknown
+}
+
 type GridApi = {
   getSheetAdapter: () => {
-    writeCells: (updates: Array<{ row: number; col: number; value: unknown }>) => void
+    writeCells: (updates: Array<{ row: number; col: number; value: unknown }>) => WriteResult
     contentVersion?: () => number
   }
 }
@@ -121,6 +141,9 @@ beforeEach(() => {
   setActivePinia(createPinia())
   useWorkspaceStore().enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 7 })
   bindings.clear()
+  failSetArrayOnCall = null
+  setArrayCalls = 0
+  resumePaintFailure = null
   sheetRows = [
     ['code', 'name', 'status'],
     ['CNY', '人民币', '启用'],
@@ -167,6 +190,41 @@ describe('R2 表内内容版本 contentVersion', () => {
 
     bindings.get('CellChanged')?.({})
     expect(adapter.contentVersion?.() ?? 0).toBe(start + 2)
+    wrapper.unmount()
+  })
+})
+
+describe('R3 writeCells 的落笔回报（复审 I-1 / Minor-7）', () => {
+  it('逐列落笔：第二列的 setArray 抛错 ⇒ 返回第一列已落部分 + error（不 throw）', async () => {
+    const wrapper = await mountGrid()
+    const grid = wrapper.vm as unknown as GridApi
+    failSetArrayOnCall = 2
+
+    const result = grid.getSheetAdapter().writeCells([
+      { row: 1, col: 2, value: '禁用' },
+      { row: 1, col: 1, value: '人民币-改' }
+    ])
+
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.applied).toEqual([{ row: 1, col: 2, value: '禁用' }])
+    // 已落的那一列真的进了表格（视口第 0 行是表头 ⇒ 数据行 1 = sheetRows[2]）
+    expect(sheetRows[2]?.[2]).toBe('禁用')
+    expect(sheetRows[2]?.[1]).toBe('美元')
+    wrapper.unmount()
+  })
+
+  it('resumePaint 抛错不残留 restoring：随后用户手改仍发 data-changed', async () => {
+    const wrapper = await mountGrid()
+    const grid = wrapper.vm as unknown as GridApi
+    resumePaintFailure = new Error('resumePaint 失败')
+
+    const result = grid.getSheetAdapter().writeCells([{ row: 1, col: 2, value: '禁用' }])
+    // 绘制失败不是写入失败：值已落，error 不设（或至少 applied 如实）
+    expect(result.applied).toHaveLength(1)
+
+    bindings.get('CellChanged')?.({})
+    const events = wrapper.emitted('data-changed')
+    expect(events?.at(-1)).toEqual(['user'])
     wrapper.unmount()
   })
 })

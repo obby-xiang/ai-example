@@ -81,12 +81,16 @@ export function makeFakeSheet(input: {
     },
     writeCells: (updates) => {
       writes.push(updates.map((update) => ({ ...update })))
+      const applied: SheetCellUpdate[] = []
       for (const update of updates) {
         const code = input.fields[update.col]?.code
         if (code && rows[update.row]) {
           rows[update.row][code] = update.value
+          applied.push({ ...update })
         }
       }
+      // 新契约（复审 I-1）：回报实际落笔（行不存在 / 列无字段的不算）
+      return { applied }
     },
     selection: () => selection,
     instanceId: () => sheetInstanceId,

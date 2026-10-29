@@ -655,14 +655,30 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
     getCell: (row, col) => live().getValue(row + 1, col),
     getArray: (row, col, rows, cols) => live().getArray(row + 1, col, rows, cols) as unknown[][],
     writeCells: (updates) => {
-      const sheet = live()
-      const list = updates.filter((update) => update.row >= 0 && update.row < rowCount() && update.col >= 0 && update.col < colCount())
-      if (list.length === 0) {
-        return
-      }
-      restoring = true
-      sheet.suspendPaint()
+      const applied: SheetCellUpdate[] = []
+      // live() 也可能抛（表已重建/关闭）—— 契约是"不 throw"，如实回报 error
+      let sheet: SpreadWorksheet
       try {
+        sheet = live()
+      } catch (error) {
+        return { applied, error }
+      }
+      const list = updates.filter((update) => {
+        // 边界用已解析的 sheet 现算（不再经 live()，避免在此处二次抛错逃出契约）
+        const rows = Math.max(0, sheet.getRowCount() - 1)
+        const cols = fields.length > 0 ? fields.length : sheet.getColumnCount()
+        return update.row >= 0 && update.row < rows && update.col >= 0 && update.col < cols
+      })
+      if (list.length === 0) {
+        return { applied }
+      }
+      let failed = false
+      let failure: unknown
+      restoring = true
+      let suspended = false
+      try {
+        sheet.suspendPaint()
+        suspended = true
         const byColumn = new Map<number, SheetCellUpdate[]>()
         for (const update of list) {
           const bucket = byColumn.get(update.col) ?? []
@@ -681,18 +697,44 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
             const run = bucket.slice(runStart, index)
             const first = run[0]
             if (first) {
-              sheet.setArray(first.row + 1, col, run.map((item) => [item.value]))
+              try {
+                sheet.setArray(first.row + 1, col, run.map((item) => [item.value]))
+                applied.push(...run)
+              } catch (error) {
+                // 这一 run 没落成 ⇒ 后面的 run/列都不再写（与"引擎失活"同向），如实回报已落部分
+                failed = true
+                failure = error
+                break
+              }
             }
             runStart = index
           }
+          if (failed) {
+            break
+          }
         }
+      } catch (error) {
+        // suspendPaint 等前置动作失败：没有任何一格落笔
+        failed = true
+        failure = error
       } finally {
-        sheet.resumePaint()
+        // Minor-7：restoring 必须先复位 —— resumePaint 抛错也不能让"程序化写入中"永久为真
+        //（否则之后用户手改不再发 data-changed / 不置脏，导出侧判脏闸静默失效）。
         restoring = false
+        if (suspended) {
+          try {
+            sheet.resumePaint()
+          } catch {
+            // 绘制失败只是屏幕态问题，不影响"已落笔"的事实与回执
+          }
+        }
       }
-      // AI 落笔：表内内容版本 +1，事件来源 = ai（页面据此把工作区动作记给 AI）
-      sheetContentVersion += 1
-      emit('data-changed', 'ai')
+      if (applied.length > 0) {
+        // AI 落笔：表内内容版本 +1，事件来源 = ai（页面据此把工作区动作记给 AI）
+        sheetContentVersion += 1
+        emit('data-changed', 'ai')
+      }
+      return failed ? { applied, error: failure } : { applied }
     },
     selection: (): SheetSelection | null => selectionOf(live().getSelections()),
     // 预览身份（交互专项）：实例身份跟随 live()；代数读组件级计数。

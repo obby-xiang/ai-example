@@ -714,13 +714,16 @@ export interface SheetWritePlan {
   rulesText: string
   /**
    * `pending` = 可应用；`applied` = 全量落笔并登记撤销；
-   * `failed` = **部分**落笔后中途异常（已写部分已登记撤销，同一计划不得重放）；
+   * `failed` = **部分**落笔后中途异常（已写部分尽力登记撤销，`undoable` 如实回报登记结果；
+   * 同一计划不得重放）；
    * `cancelled` / `stale` = 用户放弃 / 上下文失效。
    */
   status: 'pending' | 'applied' | 'failed' | 'cancelled' | 'stale'
   /**
    * 明细粒度（AI 表格工具治理方案 §6.2 的 P0 快路径）：
-   * `none` = 计数档，**没有物化 changes**（`changes` 恒空、`targetRows`/`fingerprint` 恒空）；
+   * `none` = 计数档，**没有物化逐格 changes**（`changes` 不承载全量明细）；
+   * 但 `targetRows` / `fingerprint` **仍然有值**（三个写工具的计数档都会记命中行并现算指纹，
+   * 这是预览硬闸的第二道）—— 别把"没有明细"误读成"没有闸"。
    * `full` = 已物化逐格明细（sample-diff / full-diff）。
    *
    * <p>

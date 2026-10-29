@@ -73,7 +73,7 @@ describe('T-10 三级兜底：页面能力未注册 ⇒ degraded 可行动文案
         getArray: (row: number, col: number, rowCount: number, colCount: number) =>
           Array.from({ length: rowCount }, (_row, r) =>
             Array.from({ length: colCount }, (_cell, c) => (row + r === 0 && col + c === 0 ? 'CNY' : '人民币'))),
-        writeCells: () => undefined,
+        writeCells: () => ({ applied: [] }),
         selection: () => null
       }
     }))
@@ -121,7 +121,7 @@ function installSheetHandler(input: { readOnly: boolean; rowCount: number }): vo
       getArray: (row: number, col: number, rowCount: number, colCount: number) =>
         Array.from({ length: rowCount }, (_row, r) =>
           Array.from({ length: colCount }, (_cell, c) => (col + c === 0 ? `C${row + r + 1}` : `名称${row + r + 1}`))),
-      writeCells: () => undefined,
+      writeCells: () => ({ applied: [] }),
       selection: () => null
     }
   }))

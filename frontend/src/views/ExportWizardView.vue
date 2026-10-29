@@ -1309,6 +1309,11 @@ async function startExport(
   const forTask = taskId.value
   const persisted = await persistStepData(generation, forTask, options.guard)
   if (!persisted.ok) {
+    if (options.guard?.() === true) {
+      // 已作废（预算到点 / 停止）而落库其实可能已完成：直说 persisted 的真实原因，
+      // 不得再包成"未能落库（会按旧条件导出）"—— 那是与事实相反的归因（复审 I-3）。
+      return { ok: false, reason: persisted.reason ?? '前端工具预算已到点或本轮已停止：本次未启动导出作业' }
+    }
     const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
       + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
     return { ok: false, reason }
@@ -2396,6 +2401,11 @@ function registerHandlers(): void {
     // guard：落库 await 之后若已作废（超时/停止），goStep 停在原步、不写工作区。
     const advanced = await goStep(index, uiAbandonGuard(lifetime))
     if (!advanced.ok) {
+      // 复审 Minor-4：作废（预算到点/停止）不是"数据/网络问题" —— 不得追加重试/改数据的指引；
+      // 但也不得丢掉 goStep/persist 已经给出的真实原因（"已提交、未写工作区"）。
+      if (uiAbandoned(lifetime)) {
+        return { ok: false, reason: advanced.reason ?? '前端工具预算已到点或本轮已停止：步骤未推进' }
+      }
       // 结构化失败原样上报（A3 解读支）——不得返回字符串：字符串走「兼容⇒ok」会让卡面 tag
       // 显示「已成功」而卡内文写「步骤未推进」，卡面与回灌自相矛盾（复核 I1）。
       return {
@@ -2614,6 +2624,11 @@ function registerHandlers(): void {
     const gate = await ensureTaskBoundForTool(payload.taskId)
     if (!gate.ok) {
       throw new Error(`${gate.message}。${defCode} 的在线编辑器未打开`)
+    }
+    // 复审 Minor-2：绑定可能是 await 的（在途绑定 / 换任务）—— 恢复后先复查作废，
+    // 不得在"已回灌超时/已停止"之后再去切标签页（activeTab 是页面态写）。
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('打开在线编辑器')
     }
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
       throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)

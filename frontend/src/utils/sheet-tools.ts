@@ -58,6 +58,21 @@ export interface SheetCellUpdate {
   value: unknown
 }
 
+/**
+ * 一次 `writeCells` 的落笔回报（**不 throw**，复审 I-1）。
+ *
+ * <p>为什么必须回报而不是"要么全成要么抛"：适配器内部是**逐列 / 逐 run 的 `setArray`**，
+ * 一个 chunk 中途失败时可能已经落了一部分。调用方（`applySheetPlan`）若按"整块已写/整块未写"
+ * 猜，就会**少报已写格、漏登记撤销**，甚至把"首块已落 3 格"说成"没有任何一格写入"。
+ *
+ * <p>`applied` 是**真的进了表格**的更新（顺序 = 调用顺序；被适配器过滤/越界的不在其中）。
+ * `error` 存在 = 中途失败，`applied` 仍是失败前已落的部分（可为空）。
+ */
+export interface SheetWriteBatchResult {
+  applied: SheetCellUpdate[]
+  error?: unknown
+}
+
 /** 选区（行 = 数据行下标；与 `SheetAdapter#selection` 同口径）。 */
 export interface SheetSelection {
   row: number
@@ -86,7 +101,14 @@ export interface SheetAdapter {
   header(col: number): string
   getCell(row: number, col: number): unknown
   getArray(row: number, col: number, rows: number, cols: number): unknown[][]
-  writeCells(updates: readonly SheetCellUpdate[]): void
+  /**
+   * 批量写单元格。
+   *
+   * <p><b>契约（2026-10-29 复审 I-1）</b>：**不 throw**。返回真实落笔的 `applied` 集合与
+   * 可选 `error`；中途失败时 `applied` = 失败前已落的部分（可为空）。"越界 / 不可写"的更新
+   * 直接不出现在 `applied` 里 —— 调用方据此算真实格数、撤销补丁与上色，不再按 chunk 猜。
+   */
+  writeCells(updates: readonly SheetCellUpdate[]): SheetWriteBatchResult
   selection(): SheetSelection | null
   /**
    * 屏幕态标记（AI 表格工具治理批 §5.4；可选能力）：给这些格加临时底色。
@@ -773,11 +795,28 @@ function changesToUpdates(changes: readonly SheetChange[]): SheetCellUpdate[] {
   return changes.map((change) => ({ row: change.row, col: change.col, value: change.newValue }))
 }
 
-function chunkUpdates(updates: SheetCellUpdate[], size = SHEET_WRITE_CHUNK_ROWS): SheetCellUpdate[][] {
+/**
+ * 把更新按**行**切块（`SHEET_WRITE_CHUNK_ROWS` 名字即行数；复审 I-1 顺手闭合）。
+ *
+ * <p>旧实现按"更新条数"切：多列更新时一块可能切在某一行的中间 ⇒ 半批失败会留"半行已改"，
+ * 且与常量名/注释（"500 行"）不符。按行切保证一块内是完整的若干行。
+ */
+function chunkUpdates(updates: SheetCellUpdate[], rowsPerChunk = SHEET_WRITE_CHUNK_ROWS): SheetCellUpdate[][] {
   if (updates.length === 0) return []
   const chunks: SheetCellUpdate[][] = []
-  for (let index = 0; index < updates.length; index += size) {
-    chunks.push(updates.slice(index, index + size))
+  let current: SheetCellUpdate[] = []
+  const rows = new Set<number>()
+  for (const update of updates) {
+    if (!rows.has(update.row) && rows.size >= rowsPerChunk) {
+      chunks.push(current)
+      current = []
+      rows.clear()
+    }
+    current.push(update)
+    rows.add(update.row)
+  }
+  if (current.length > 0) {
+    chunks.push(current)
   }
   return chunks
 }
@@ -1713,10 +1752,21 @@ export function planPreviewText(plan: SheetWritePlan | null): string {
  *
  * <p>R3-02：不得再声称“仅在浏览器内存” —— 导入向导离开第 1 步会整表写回服务端文件，
  * 回执须把这条写回路径和“此刻尚未保存到服务端”同时说清。
+ *
+ * @param override 实际落笔数（复审 I-1）：适配器可能过滤掉越界/不可写更新 ⇒ 回执不得用
+ *   `plan.cellsCount` 冒充"真的改了这么多"。缺省 = 计划全量（历史调用点不变）。
  */
-export function planAppliedText(plan: SheetWritePlan, ctx?: SheetContext): string {
+export function planAppliedText(
+  plan: SheetWritePlan,
+  ctx?: SheetContext,
+  override?: { cells: number }
+): string {
+  const cells = override?.cells ?? plan.cellsCount
   const lines: string[] = []
-  lines.push(`已应用（用户已确认）：${plan.tool} 改动 ${plan.cellsCount} 格 / ${plan.rowsCount} 行`)
+  lines.push(`已应用（用户已确认）：${plan.tool} 改动 ${cells} 格 / ${plan.rowsCount} 行`)
+  if (override !== undefined && cells < plan.cellsCount) {
+    lines.push(`未落笔：${plan.cellsCount - cells} 格被适配器忽略（越界 / 不可写），未计入本次改动`)
+  }
   lines.push(scopeLine(plan))
   lines.push(`规则：${plan.rulesText}`)
   if (plan.samples.length > 0 && ctx) {
@@ -1726,7 +1776,7 @@ export function planAppliedText(plan: SheetWritePlan, ctx?: SheetContext): strin
     lines.push(`跳过：${plan.skippedCount} 格（校验器拒绝）`)
   }
   lines.push('未保存到服务端：改动只在当前页面表格内（不在服务端）；导入向导离开第 1 步（「下一步」/ confirm_step）会整表写回服务端文件，导出向导需点「保存编辑到服务端」；可撤销（undo_last_sheet_edit）')
-  lines.push(`共 ${plan.cellsCount} 格`)
+  lines.push(`共 ${cells} 格`)
   return lines.join('\n')
 }
 
@@ -2691,59 +2741,85 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
       }
     }
   }
-  // 分块写入：逐块记下"真的落下去的那部分"（changes 与 updates 一一对应、顺序不变）
+  // 分块写入：适配器**如实回报**实际落笔（`applied` / `error`，复审 I-1）；不再按块猜
   const chunks = chunkUpdates(changesToUpdates(plan.changes))
-  const written: SheetChange[] = []
-  let cursor = 0
+  const appliedUpdates: SheetCellUpdate[] = []
+  let failure: { error: unknown } | null = null
   for (const chunk of chunks) {
-    try {
-      ctx.adapter.writeCells(chunk)
-    } catch (error) {
-      const appliedCells = written.length
-      if (appliedCells > 0) {
-        registerUndoEntry(ctx, plan, written)
-        markAppliedCells(ctx, written)
-      }
-      // 消费计划：半批已落笔，同一份计划不得再被"应用"一次（那会把已写部分写第二遍）
-      plan.status = 'failed'
-      const reason = error instanceof Error ? error.message : String(error)
-      const total = plan.changes.length
-      const remaining = total - appliedCells
-      const undoNote = appliedCells > 0
-        ? `已写入的 ${appliedCells} 格已登记为可撤销（可用 undo_last_sheet_edit 回滚这部分）`
-        : '没有任何一格写入（表格保持原样）'
-      return {
-        ok: false,
-        reason: `写入中途失败：已写入 ${appliedCells} 格 / 共 ${total} 格，未写入的 ${remaining} 格保持原样（原因：${reason}）。`
-          + `${undoNote}。请核对表格实际内容后再决定是否重新发起。`,
-        appliedCells,
-        undoable: appliedCells > 0
-      }
+    // 兼容旧适配器（返回 void = 按旧契约"要么全成要么抛"）：无回报时视为整块已落
+    const result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
+    appliedUpdates.push(...result.applied)
+    if (result.error !== undefined) {
+      failure = { error: result.error }
+      break
     }
-    written.push(...plan.changes.slice(cursor, cursor + chunk.length))
-    cursor += chunk.length
   }
-  if (plan.changes.length > 0) {
-    registerUndoEntry(ctx, plan, plan.changes)
-    markAppliedCells(ctx, plan.changes)
+  const written = selectAppliedChanges(plan.changes, appliedUpdates)
+  const appliedCells = written.length
+  // I-2：计划状态**先**落定，再做强收尾（撤销登记 / 上色是 best-effort，失败不得让回执消失）
+  plan.status = failure === null ? 'applied' : 'failed'
+  const undoable = registerUndoEntrySafe(ctx, plan, written)
+  markAppliedCellsSafe(ctx, written)
+  if (failure !== null) {
+    const reason = failure.error instanceof Error ? failure.error.message : String(failure.error)
+    const total = plan.changes.length
+    const remaining = total - appliedCells
+    const undoNote = appliedCells > 0
+      ? (undoable
+        ? `已写入的 ${appliedCells} 格已登记为可撤销（可用 undo_last_sheet_edit 回滚这部分）`
+        : `已写入的 ${appliedCells} 格未能登记撤销（撤销栈不可用），请先核对表格再手工修正`)
+      : '没有任何一格写入（表格保持原样）'
+    return {
+      ok: false,
+      reason: `写入中途失败：已写入 ${appliedCells} 格 / 共 ${total} 格，未写入的 ${remaining} 格保持原样（原因：${reason}）。`
+        + `${undoNote}。请核对表格实际内容后再决定是否重新发起。`,
+      appliedCells,
+      undoable
+    }
   }
   // 消费计划（恰好一次）：第二次直接 apply 同一份计划 ⇒ 身份闸/状态闸拒执，不再写一格。
-  plan.status = 'applied'
-  return { ok: true, text: planAppliedText(plan, ctx), cells: plan.changes.length }
+  // 成功回执也按**实际落笔**报数（被适配器忽略的更新不冒充"已改"）。
+  return { ok: true, text: planAppliedText(plan, ctx, { cells: appliedCells }), cells: appliedCells }
+}
+
+/**
+ * 按 `applied` 更新反查计划里的 change（`row:col` 一一对应，保留计划顺序）。
+ *
+ * <p>这样"被适配器过滤 / 越界 / 半批已落"的差异全部由**真实落笔**决定，不靠 chunk 长度猜。
+ */
+function selectAppliedChanges(changes: readonly SheetChange[], applied: readonly SheetCellUpdate[]): SheetChange[] {
+  if (changes.length === 0 || applied.length === 0) {
+    return []
+  }
+  const byKey = new Map<string, SheetChange>()
+  for (const change of changes) {
+    byKey.set(`${change.row}:${change.col}`, change)
+  }
+  const seen = new Set<SheetChange>()
+  const result: SheetChange[] = []
+  for (const update of applied) {
+    const change = byKey.get(`${update.row}:${update.col}`)
+    if (change && !seen.has(change)) {
+      seen.add(change)
+      result.push(change)
+    }
+  }
+  return result
 }
 
 /**
  * 登记一层反向补丁（`changes` = **实际写入**的那部分；全量成功时就是计划全量）。
  *
  * <p>同一 `planId` 不重复入栈（防双击应用 / 半批重放把同一批改动记两次）。
+ * @returns 真实登记结果（`undoable` 必须与它一致，不得按"想登记"报 true）
  */
-function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): void {
+function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
   if (changes.length === 0) {
-    return
+    return false
   }
   const stack = undoStack.get(ctx.adapter) ?? []
   if (stack.some((entry) => entry.planId === plan.planId)) {
-    return
+    return true
   }
   stack.push({
     planId: plan.planId,
@@ -2761,11 +2837,28 @@ function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: rea
     stack.shift()
   }
   undoStack.set(ctx.adapter, stack)
+  return undoStack.get(ctx.adapter)?.some((entry) => entry.planId === plan.planId) === true
 }
 
-/** 已应用色的绘制（只画底色，不写 cell style / conditionalFormats）。 */
-function markAppliedCells(ctx: SheetContext, changes: readonly SheetChange[]): void {
-  ctx.adapter.markCells?.(changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
+/** 撤销登记 best-effort（I-2）：登记本身失败不得把"已落笔"的事实变成无回执异常。 */
+function registerUndoEntrySafe(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
+  try {
+    return registerUndoEntry(ctx, plan, changes)
+  } catch {
+    return false
+  }
+}
+
+/** 已应用色的绘制（只画底色，不写 cell style / conditionalFormats；best-effort，失败不影响回执）。 */
+function markAppliedCellsSafe(ctx: SheetContext, changes: readonly SheetChange[]): void {
+  if (changes.length === 0) {
+    return
+  }
+  try {
+    ctx.adapter.markCells?.(changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
+  } catch {
+    // 上色的典型失败面正是"表已重建/关闭"（与半批失败的同一场景）：只影响屏幕态
+  }
 }
 
 /**
@@ -2868,8 +2961,22 @@ function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: Sheet
     col: change.col,
     value: change.oldValue
   }))
+  let written = 0
   for (const chunk of chunkUpdates(reverse)) {
-    ctx.adapter.writeCells(chunk)
+    // 新契约（复审 I-1）：写入如实回报，不 throw
+    const result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
+    written += result.applied.length
+    if (result.error !== undefined) {
+      // 已回写部分无法再撤回；撤销层**保留**（不弹栈），如实报"部分撤销"，不谎称已撤销
+      const reason = result.error instanceof Error ? result.error.message : String(result.error)
+      return {
+        ok: false,
+        reason: `撤销中途失败：已回写 ${written} 格 / 共 ${entry.cellsCount} 格（原因：${reason}）。`
+          + `撤销记录仍保留（plan #${entry.planId}），请核对表格后重试。`,
+        appliedCells: written,
+        undoable: true
+      }
+    }
   }
   stack.pop()
   if (stack.length === 0) {
@@ -2877,7 +2984,11 @@ function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: Sheet
   }
   // 被回滚的格清标记；其余层保留（§5.4 第 3 条）。**只清已应用色**：撤销与"另一张尚未应用
   // 的预览"无关，无参全清会把那张卡刚上的预览琥珀也一并抹掉（卡还在、高亮没了）。
-  ctx.adapter.clearMarks?.('applied')
+  try {
+    ctx.adapter.clearMarks?.('applied')
+  } catch {
+    // best-effort：屏幕态清理失败不影响"已撤销"的事实与回执（复审 I-2 同口径）
+  }
   return {
     ok: true,
     text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`,
@@ -3002,7 +3113,9 @@ export function planSheetWithLevel(
  * 切档重算（§6.2 的明细按需计算）：用计划的入参快照重跑同一确定性函数，`planId` 不变。
  *
  * <p>
- * 重跑前必须比对 `sheetVer`：版本变了说明表格已被改动 ⇒ 交给调用方走"预览已失效"，不静默套用旧结果。
+ * 重跑前硬闸 = `previewIdentityMismatch`（身份：toolCallId + instanceId + loadGeneration + scope）
+ * 与 `sameTargetFingerprint`（目标行主键指纹）；**不比对 `sheetVer`**（表内版本只作元数据，
+ * 拿全局 `dataVersion` 当版本会让无关 touch 误伤预览）。任一不符 ⇒ "预览已失效"，不静默套用旧结果。
  * 物化后仍超 `HARD_MAX` ⇒ 回 `null` 的 detail 说明（调用方保持计数档并提示"明细不可用"）。
  */
 export function replanSheet(

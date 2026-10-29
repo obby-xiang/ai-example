@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   getIssues: vi.fn(),
   listDefinitions: vi.fn(),
   countData: vi.fn(),
+  createJob: vi.fn(),
   cancel: vi.fn(),
   health: vi.fn(),
   history: vi.fn(),
@@ -64,7 +65,7 @@ vi.mock('@/components/TaskWizard.vue', async () => {
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 vi.mock('@/api/tasks', () => ({ tasksApi: api }))
-vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api.getIssues, createJob: vi.fn() } }))
+vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api.getIssues, createJob: api.createJob } }))
 vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: api.listDefinitions } }))
 vi.mock('@/api/data', () => ({ dataApi: { countData: api.countData } }))
 vi.mock('@/router', () => ({
@@ -114,6 +115,7 @@ beforeEach(() => {
   api.goToStep.mockResolvedValue(exportTask())
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
+  api.createJob.mockResolvedValue({ id: 99 })
   api.listDefinitions.mockResolvedValue([CURRENCY_DEF])
   api.countData.mockResolvedValue({ count: 0 })
   api.cancel.mockResolvedValue({})
@@ -195,5 +197,86 @@ describe('R2 在途作废：confirm_step 落库 await 期间停止 ⇒ 不切步
 
     expect(workspace.step).toBe(before)
     expect(api.goToStep).not.toHaveBeenCalled()
+  })
+})
+
+describe('R3 export.start 在 persist await 期间被作废（复审 I-3）', () => {
+  it('stop() 落在落库 await 窗口 ⇒ 零 createJob，回执直说"已提交、未写工作区"，不套"未能落库/旧条件"', async () => {
+    await mountWizard()
+    await getPageHandler('export.selectDefs')?.({ defCodes: ['CURRENCY'] })
+
+    let releaseSelect: (value: unknown) => void = () => {}
+    api.selectDefs.mockImplementation(() => new Promise((resolve) => {
+      releaseSelect = resolve
+    }))
+
+    const store = useAiStore()
+    store.$patch({ loading: true, activeRunId: 'run-1' })
+    const pending = executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
+    await vi.waitFor(() => {
+      expect(api.selectDefs).toHaveBeenCalled()
+    })
+
+    await store.stop()
+    releaseSelect({})
+
+    const execution = await pending
+
+    expect(api.createJob).not.toHaveBeenCalled()
+    expect(execution.result).toContain('已提交给任务 #7')
+    expect(execution.result).not.toContain('未能落库')
+    expect(execution.result).not.toContain('旧条件')
+  })
+})
+
+describe('R4 作废后的收尾复查与文案（复审 Minor-2/4）', () => {
+  it('export.openEditor：ensureTaskBoundForTool await 后复用 guard ⇒ 不切标签页，回执是作废而非结果缺失', async () => {
+    await mountWizard()
+    const handler = getPageHandler('export.openEditor')
+    expect(handler).not.toBeNull()
+
+    let releaseTask: (value: unknown) => void = () => {}
+    api.getTask.mockImplementation((id: number) => (id === 8
+      ? new Promise((resolve) => {
+        releaseTask = resolve
+      })
+      : Promise.resolve(exportTask())))
+
+    const lifetime = { abandoned: false }
+    const pending = handler?.({ taskId: 8, defCode: 'CURRENCY' }, lifetime)
+    await vi.waitFor(() => {
+      expect(api.getTask).toHaveBeenCalledWith(8)
+    })
+
+    lifetime.abandoned = true
+    releaseTask({ ...exportTask(), id: 8 })
+    const reply = await pending
+
+    expect(reply).toMatchObject({ ok: false })
+    expect((reply as { reason: string }).reason).toContain('本次未打开在线编辑器')
+  })
+
+  it('export.nextStep：goStep 期间作废 ⇒ 回执不作"数据/网络"归因', async () => {
+    await mountWizard()
+    let releaseSelect: (value: unknown) => void = () => {}
+    api.selectDefs.mockImplementation(() => new Promise((resolve) => {
+      releaseSelect = resolve
+    }))
+
+    const lifetime = { abandoned: false }
+    const pending = getPageHandler('export.nextStep')?.({ step: 'EXPORT' }, lifetime)
+    await vi.waitFor(() => {
+      expect(api.selectDefs).toHaveBeenCalled()
+    })
+
+    lifetime.abandoned = true
+    releaseSelect({})
+    const reply = await pending
+
+    expect(reply).toMatchObject({ ok: false })
+    const reason = (reply as { reason: string }).reason
+    expect(reason).toContain('预算已到点或本轮已停止')
+    expect(reason).not.toContain('核对网络')
+    expect(reason).not.toContain('手动在界面上操作')
   })
 })

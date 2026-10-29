@@ -1,29 +1,30 @@
 /**
- * 应用计划中途异常的如实回报（2026-10-29）。
+ * 应用计划中途异常的如实回报（2026-10-29 复审返修 I-1 口径）。
  *
- * 旧实现按 500 行分块 `writeCells`，任一块抛错就**直接冒泡**：预览卡停在"应用"上、没有任何回执，
- * 而前面几块**已经写进表格**且没有登记撤销 —— 用户既不知道改了多少，也撤不回来；重试还可能
- * 把同一批改动写第二遍。
+ * 复审事实：`writeCells` 内部是**逐列 / 逐 run 的 `setArray`**，一个 chunk 中途抛错时该 chunk
+ * 可能已落了一部分。旧实现（以及上一轮"整 chunk 记已写"的修法）都把整块当成"全失"：
+ * - 块内已写格既不进 `appliedCells`，也不进撤销与上色 ⇒ 永久不可撤销；
+ * - 首块就出部分写入时回执说"没有任何一格写入" —— 假话。
  *
- * 新口径：分块写入中途异常 ⇒ ① 如实 `failed`（不是成功、也不是未知）；② 已写部分**登记为可撤销**
- * （撤销深度 +1、可回滚到修改前值）；③ 回执报**实际写入格数**；④ 计划被消费（重放不再写）。
+ * 本文件按**新契约**锁：`SheetAdapter.writeCells` 返回 `{ applied, error? }`（不再 throw），
+ * `applySheetPlan` 用 `applied` 反查 changes，成功/失败都按**真实落笔**算回执、撤销、上色。
  */
 import { describe, expect, it } from 'vitest'
-import { applySheetPlan, planReplace, planUndo, applyUndoPlan, sheetUndoDepth, SHEET_WRITE_CHUNK_ROWS } from '@/utils/sheet-tools'
+import {
+  applySheetPlan,
+  applyUndoPlan,
+  planReplace,
+  planUndo,
+  sheetUndoDepth,
+  SHEET_WRITE_CHUNK_ROWS,
+  type SheetCellUpdate
+} from '@/utils/sheet-tools'
 import { field, makeFakeSheet } from './sheet-fixtures'
 
 const fields = [
   field('code', '编码', { required: true, key: true }),
   field('status', '状态')
 ]
-
-function bigSheet(rowCount: number) {
-  const sheet = makeFakeSheet({
-    fields,
-    rows: Array.from({ length: rowCount }, (_, index) => ({ code: `C${index}`, status: '停用' }))
-  })
-  return sheet
-}
 
 const args = {
   defCode: 'DEMO',
@@ -34,81 +35,94 @@ const args = {
   preview: 'sample-diff' as const
 }
 
-describe('R1 中途异常：failed + 实际写入数 + 可撤销', () => {
-  it('第 2 块写入抛错 ⇒ 回执 failed、报已写入格数，且只登记已写部分的撤销', () => {
-    const rowCount = SHEET_WRITE_CHUNK_ROWS + 100
-    const sheet = bigSheet(rowCount)
-    const plan = planReplace(sheet.ctx, args, 't-partial')
-    if (!plan.ok) throw new Error(plan.reason)
-    expect(plan.plan.changes).toHaveLength(rowCount)
+function bigSheet(rowCount: number) {
+  return makeFakeSheet({
+    fields,
+    rows: Array.from({ length: rowCount }, (_, index) => ({ code: `C${index}`, status: '停用' }))
+  })
+}
 
-    let calls = 0
+/** 把适配器换成"按计划落前 N 条，然后回报 error"的桩（模拟块内部分写入）。 */
+function writeThenFail(applyFirst: (updates: readonly SheetCellUpdate[]) => void, limit: number) {
+  return (updates: readonly SheetCellUpdate[]) => {
+    const head = updates.slice(0, limit)
+    applyFirst(head)
+    return { applied: [...head], error: new Error('引擎写入失败') }
+  }
+}
+
+describe('R1 块内部分写入：按真实落笔计数、登记撤销、上色', () => {
+  it('首块先落 3 格再报错（计划仅一块）⇒ 报已写入 3 格，不得说"没有任何一格写入"', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-first-chunk')
+    if (!plan.ok) throw new Error(plan.reason)
     const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    const marks: number[] = []
+    sheet.ctx.adapter.markCells = (cells) => {
+      marks.push(cells.length)
+    }
+    sheet.ctx.adapter.writeCells = (updates) => writeThenFail(
+      (head) => {
+        original(head)
+      },
+      3
+    )(updates)
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toContain('已写入 3 格')
+    expect(outcome.reason).not.toContain('没有任何一格写入')
+    expect(outcome.appliedCells).toBe(3)
+    expect(outcome.undoable).toBe(true)
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
+    expect(marks).toEqual([3])
+  })
+
+  it('第二块内部只落 2 格再报错 ⇒ 已写入 = 500 + 2（不是整块 500/1000）', () => {
+    const rowCount = SHEET_WRITE_CHUNK_ROWS + 4
+    const sheet = bigSheet(rowCount)
+    const plan = planReplace(sheet.ctx, args, 't-mid-chunk')
+    if (!plan.ok) throw new Error(plan.reason)
+
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    let calls = 0
     sheet.ctx.adapter.writeCells = (updates) => {
       calls += 1
-      if (calls === 2) {
-        throw new Error('引擎写入失败')
+      if (calls === 1) {
+        original(updates)
+        return { applied: [...updates] }
       }
-      original(updates)
+      // 第二块：只落前 2 条
+      const head = updates.slice(0, 2)
+      original(head)
+      return { applied: [...head], error: new Error('引擎写入失败') }
     }
 
     const outcome = applySheetPlan(sheet.ctx, plan.plan)
 
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
-    // 实际写入 = 第 1 块（500 格），不是计划的 600 格
-    expect(outcome.appliedCells).toBe(SHEET_WRITE_CHUNK_ROWS)
-    expect(outcome.reason).toContain(`已写入 ${SHEET_WRITE_CHUNK_ROWS} 格`)
-    expect(outcome.reason).toContain('可撤销')
-    expect(outcome.undoable).toBe(true)
-    // 前 500 行已改、其余保持原样
+    expect(outcome.appliedCells).toBe(SHEET_WRITE_CHUNK_ROWS + 2)
+    expect(outcome.reason).toContain(`已写入 ${SHEET_WRITE_CHUNK_ROWS + 2} 格`)
+    // 前 500 行 + 第二块前 2 行已改，其余保持原样
     expect(sheet.rows[0]!.status).toBe('禁用')
-    expect(sheet.rows[SHEET_WRITE_CHUNK_ROWS]!.status).toBe('停用')
-    // 已写部分进了撤销栈（深度 1）
+    expect(sheet.rows[SHEET_WRITE_CHUNK_ROWS + 1]!.status).toBe('禁用')
+    expect(sheet.rows[SHEET_WRITE_CHUNK_ROWS + 2]!.status).toBe('停用')
     expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
   })
 
-  it('撤销已登记的部分改动 ⇒ 回到修改前值（不会少撤、也不会多撤）', () => {
-    const rowCount = SHEET_WRITE_CHUNK_ROWS + 100
-    const sheet = bigSheet(rowCount)
-    const plan = planReplace(sheet.ctx, args, 't-partial-undo')
-    if (!plan.ok) throw new Error(plan.reason)
-
-    let calls = 0
-    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
-    sheet.ctx.adapter.writeCells = (updates) => {
-      calls += 1
-      if (calls === 2) {
-        throw new Error('引擎写入失败')
-      }
-      original(updates)
-    }
-    applySheetPlan(sheet.ctx, plan.plan)
-
-    const undoPlan = planUndo(sheet.ctx, {}, 't-undo')
-    if (!undoPlan.ok) throw new Error(undoPlan.reason)
-    const undone = applyUndoPlan(sheet.ctx, undoPlan.plan)
-
-    expect(undone.ok).toBe(true)
-    expect(sheet.rows[0]!.status).toBe('停用')
-    expect(sheet.rows[rowCount - 1]!.status).toBe('停用')
-    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
-  })
-
   it('反向：中途失败后同一份计划重放 ⇒ 被状态闸拒绝，不再写一格', () => {
-    const rowCount = SHEET_WRITE_CHUNK_ROWS + 100
-    const sheet = bigSheet(rowCount)
+    const sheet = bigSheet(3)
     const plan = planReplace(sheet.ctx, args, 't-replay')
     if (!plan.ok) throw new Error(plan.reason)
 
-    let calls = 0
     const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    let calls = 0
     sheet.ctx.adapter.writeCells = (updates) => {
       calls += 1
-      if (calls === 2) {
-        throw new Error('引擎写入失败')
-      }
-      original(updates)
+      return writeThenFail((head) => original(head), 1)(updates)
     }
     const first = applySheetPlan(sheet.ctx, plan.plan)
     expect(first.ok).toBe(false)
@@ -120,5 +134,117 @@ describe('R1 中途异常：failed + 实际写入数 + 可撤销', () => {
     if (second.ok) return
     expect(second.reason).toContain('该预览已失效或已处理')
     expect(calls).toBe(writesBefore)
+  })
+})
+
+describe('R2 撤销只覆盖真实落笔的那部分', () => {
+  it('部分写入后撤销 ⇒ 只回滚已写格，未写格保持原样', () => {
+    const sheet = bigSheet(4)
+    const plan = planReplace(sheet.ctx, args, 't-undo-partial')
+    if (!plan.ok) throw new Error(plan.reason)
+
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    sheet.ctx.adapter.writeCells = (updates) => writeThenFail((head) => original(head), 2)(updates)
+    const applied = applySheetPlan(sheet.ctx, plan.plan)
+    expect(applied.ok).toBe(false)
+    expect(sheet.rows[1]!.status).toBe('禁用')
+    expect(sheet.rows[2]!.status).toBe('停用')
+
+    // 撤销走正常适配器（故障注入只针对那一次应用）
+    sheet.ctx.adapter.writeCells = original
+    const undoPlan = planUndo(sheet.ctx, {}, 't-undo')
+    if (!undoPlan.ok) throw new Error(undoPlan.reason)
+    const undone = applyUndoPlan(sheet.ctx, undoPlan.plan)
+
+    expect(undone.ok).toBe(true)
+    expect(sheet.rows[0]!.status).toBe('停用')
+    expect(sheet.rows[1]!.status).toBe('停用')
+    expect(sheet.rows[3]!.status).toBe('停用')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
+  })
+})
+
+describe('R4 收尾 best-effort：上色/登记失败不得吞掉回执与状态（复审 I-2）', () => {
+  it('中途失败 + 上色抛错 ⇒ 仍回 failed、plan.status=failed、已登记撤销', () => {
+    const sheet = bigSheet(4)
+    const plan = planReplace(sheet.ctx, args, 't-mark-throw')
+    if (!plan.ok) throw new Error(plan.reason)
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    sheet.ctx.adapter.writeCells = (updates) => writeThenFail((head) => original(head), 2)(updates)
+    sheet.ctx.adapter.markCells = () => {
+      throw new Error('表格已重建或已关闭，请重新打开表格后重试')
+    }
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toContain('已写入 2 格')
+    expect(plan.plan.status).toBe('failed')
+    const depth = sheetUndoDepth(sheet.ctx.adapter)
+    expect(depth).toBe(1)
+    // undoable 必须与真实登记结果一致
+    expect(outcome.undoable).toBe(depth === 1)
+  })
+
+  it('成功路径 + 上色抛错 ⇒ 仍算成功、plan.status=applied、撤销已登记', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-mark-throw-ok')
+    if (!plan.ok) throw new Error(plan.reason)
+    sheet.ctx.adapter.markCells = () => {
+      throw new Error('表格已重建或已关闭，请重新打开表格后重试')
+    }
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.cells).toBe(3)
+    expect(plan.plan.status).toBe('applied')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
+  })
+
+  it('零落笔的中途失败 ⇒ undoable=false，且回执不声称"已登记可撤销"', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-zero')
+    if (!plan.ok) throw new Error(plan.reason)
+    sheet.ctx.adapter.writeCells = () => ({ applied: [], error: new Error('引擎写入失败') })
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.appliedCells).toBe(0)
+    expect(outcome.undoable).toBe(false)
+    expect(outcome.reason).toContain('没有任何一格写入')
+    expect(outcome.reason).not.toContain('已登记为可撤销')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
+  })
+})
+
+describe('R3 成功路径：被适配器忽略（越界/不可写）的更新不计入回执与撤销', () => {
+  it('适配器回报少一格 ⇒ 回执只报实际落笔格数，撤销也只登记这 N-1 格', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-drop')
+    if (!plan.ok) throw new Error(plan.reason)
+    expect(plan.plan.changes).toHaveLength(3)
+
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    sheet.ctx.adapter.writeCells = (updates) => {
+      // 模拟"第 3 行越界被过滤"：只落前两条，且**没有** error（成功但少写）
+      const head = updates.filter((update) => update.row !== 2)
+      original(head)
+      return { applied: [...head] }
+    }
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.cells).toBe(2)
+    expect(outcome.text).toContain('改动 2 格')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
+    // 已应用色只画实际落笔的两格（不把"没写进去的"标成已改）
+    expect(plan.plan.changes.filter((change) => change.row === 2)).toHaveLength(1)
   })
 })

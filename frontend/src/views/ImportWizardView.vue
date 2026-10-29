@@ -2334,6 +2334,11 @@ function registerHandlers(): void {
     // guard：写回服务端文件是 await；期间预算到点/停止 ⇒ goStep 停在原步、不写工作区
     const advanced = await goStep(index, uiAbandonGuard(lifetime))
     if (!advanced.ok) {
+      // 复审 Minor-4：作废不是"数据问题" —— 不追加"修正数据/保存草稿"这类错误指引；
+      // 如实带出 goStep 的原因（含"步骤未推进、工作区未改动"），不额外归因。
+      if (uiAbandoned(lifetime)) {
+        return { ok: false, reason: advanced.reason ?? '前端工具预算已到点或本轮已停止：步骤未推进' }
+      }
       const partial = advanced.savedDefs ?? []
       const partialNote = partial.length > 0
         ? `其中 ${partial.length} 个配置项（${partial.join('、')}）的编辑内容已写回服务端文件；`
