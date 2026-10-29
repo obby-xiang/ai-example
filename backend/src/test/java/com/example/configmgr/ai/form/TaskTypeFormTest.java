@@ -47,13 +47,17 @@ import static org.mockito.Mockito.when;
  * <h2>本用例锁的口径</h2>
  * <ol>
  * <li>类型未知 + 新建意图 ⇒ 挂起单 enum 单选（选项正好 EXPORT/IMPORT），走既有挂起面；</li>
- * <li>类型已知（槽位里有）⇒ 不弹；问规则（"怎么创建任务"）与普通浏览 ⇒ 不弹；</li>
+ * <li><b>类型是否已知只看本轮用户原话</b>（明确"导出/导入"）：旧任务页面的 {@code taskType} 与槽位
+ * 都属于那条旧任务，<b>不得</b>当作新任务的类型 —— 旧 EXPORT 页说"创建任务"仍要弹，说"创建导入任务"
+ * 则不弹；问规则（"怎么创建任务"）与普通浏览也不弹；</li>
  * <li>同一轮只问一次：提交/取消之后都不再来第二张；</li>
  * <li>宿主表单与模型自发表单过<b>同一份</b>白名单闸门 —— 它没有"绕过放行判据"的特权。</li>
  * </ol>
  *
- * <p><b>证红</b>：宿主不再挂起 ⇒ 第 1/4/5 条红；判据漏掉槽位（类型已知仍弹）⇒ 第 2 条红；
- * 去重漏掉（同一轮问两次）⇒ 第 3 条红。
+ * <p><b>证红</b>：宿主不再挂起 ⇒ 第 1/4/5 条红；判据改回读旧任务/上下文的类型 ⇒
+ * {@code oldTaskPageWithoutAnExplicitTypeStillAsks} 红；判据丢掉"本句明说类型" ⇒
+ * {@code oldTaskPageWithAnExplicitImportTypeDoesNotAsk} 与
+ * {@code doesNotParkWhenTheCurrentMessageNamesTheType} 红；去重漏掉 ⇒ 第 3 条红。
  */
 class TaskTypeFormTest {
 
@@ -132,15 +136,33 @@ class TaskTypeFormTest {
 		verify(this.emitter).suspended(eq(List.of(pending)), anyString(), anyString(), anyString());
 	}
 
-	// ── ② 类型已知：不弹，交给 create_task ─────────────────────────────────
+	// ── ② 类型已知只看本轮原话（旧任务/上下文的类型不得带入新任务）────────────
 
 	@Test
-	void doesNotParkWhenTypeIsAlreadyKnown() {
-		boolean parked = this.form.parkIfDue(RUN_ID, context(knownType("EXPORT")), "帮我创建一个任务", history("帮我创建一个任务"));
+	void doesNotParkWhenTheCurrentMessageNamesTheType() {
+		boolean parked = this.form.parkIfDue(RUN_ID, context(Map.of()), "帮我创建一个导出任务",
+				history("帮我创建一个导出任务"));
 
-		assertThat(parked).as("类型已给出/已确定 ⇒ 绝不弹类型表单（直接走 create_task）").isFalse();
+		assertThat(parked).as("本句已明说导出 ⇒ 不弹类型表单（直接走 create_task）").isFalse();
 		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
+	}
+
+	@Test
+	void oldTaskPageWithoutAnExplicitTypeStillAsks() {
+		// 现场：还停在旧 EXPORT 任务 #7 的向导上（上下文 taskType=EXPORT、槽位也带着 EXPORT）
+		boolean parked = this.form.parkIfDue(RUN_ID, oldTaskContext(), "创建一个任务", history("创建一个任务"));
+
+		assertThat(parked).as("旧任务的 EXPORT 属于那条旧任务，不得压掉新任务的类型缺口（规格：这里必须弹）").isTrue();
+		assertThat(onlyPending().getToolCallId()).isEqualTo(TaskTypeForm.toolCallId(RUN_ID));
+	}
+
+	@Test
+	void oldTaskPageWithAnExplicitImportTypeDoesNotAsk() {
+		boolean parked = this.form.parkIfDue(RUN_ID, oldTaskContext(), "创建导入任务", history("创建导入任务"));
+
+		assertThat(parked).as("本句已明说导入 ⇒ 直接 create_task(IMPORT)，旧页面的 EXPORT 不得改写它").isFalse();
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 	}
 
 	// ── ③ 普通浏览与问规则：不打扰 ─────────────────────────────────────────
@@ -211,6 +233,11 @@ class TaskTypeFormTest {
 
 	private static AiContext context(Map<String, Object> extra) {
 		return AiContext.of("tasks", null, null, null, null, extra);
+	}
+
+	/** 旧 EXPORT 任务页：上下文与槽位都带着那条旧任务的类型（新任务的类型不能从它推出）。 */
+	private static AiContext oldTaskContext() {
+		return AiContext.of("export", "EXPORT", "SELECT_DEFS", 7L, "ACTIVE", knownType("EXPORT"));
 	}
 
 	private static Map<String, Object> knownType(String taskType) {

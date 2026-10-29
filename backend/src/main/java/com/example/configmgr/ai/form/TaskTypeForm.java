@@ -7,7 +7,6 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.slot.TaskIntent;
-import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -31,12 +30,19 @@ import java.util.Optional;
  * <h2>触发判据（全部成立才挂起）</h2>
  * <ol>
  * <li><b>主动新建意图</b>：用户原话命中 {@link TaskIntent#isNewTaskIntent}（问规则/否定一律不算）；</li>
- * <li><b>类型未知</b>：槽位里没有 {@code taskType}（与 {@link GenerativeFormGuard} 的放行判据
- * <b>同一份</b> {@link TaskSlots}）—— 类型已知时不弹，让模型直接 {@code create_task}；</li>
+ * <li><b>本轮原话没说类型</b>：{@link TaskIntent#explicitTaskType} 为 {@code null}（导出/导入要<b>明说</b>）
+ * —— 明说时直接 {@code create_task}，不弹表。<b>只看本轮用户原话</b>：
+ * {@code context.getTaskType()}（旧任务页面的类型）与 {@code extra[taskSlots].taskType} 都属于<b>当前
+ * 打开的那条旧任务</b>，不得当作新任务的类型 —— 也就是说，在旧 EXPORT 任务的向导页里说"创建任务"
+ * 仍必须弹表；说"创建导入任务"才不弹（导入是新任务自己的类型，不是旧页面的）。</li>
  * <li><b>本轮还没建成任务</b>：台账里没有成功的 {@code create_task}（建过就不缺类型了）；</li>
  * <li><b>同一轮只问一次</b>：{@code toolCallId} 由 {@code runId} 决定，待决条目里已有同号即视为已挂过
  * （刷新恢复、重挂都不会再来一张）。</li>
  * </ol>
+ *
+ * <p><b>与放行闸门的分工</b>：{@link GenerativeFormGuard} 仍按槽位拒绝<b>模型自发</b>的类型表单
+ * （槽位已定 = 模型不该再问）；宿主只负责"这一次由谁来问"，所以它的判据是"本轮原话"而不是旧任务
+ * 的权威值。两边判断对象不同，不存在两套互相矛盾的口径。
  *
  * <h2>接入点与"不新增交互形态"</h2>
  * 挂在首轮 {@code store.create} 之后、驱动模型之前：类型未知时这一轮本来就<b>没有</b>可执行的动作
@@ -103,13 +109,21 @@ public class TaskTypeForm extends HostForm {
 		}
 	}
 
-	/** 判据 + 表单正文（不含任何外置写）。 */
+	/**
+	 * 判据 + 表单正文（不含任何外置写）。
+	 *
+	 * <p>{@code context} 刻意<b>不</b>参与类型判定：它带着的是"当前打开的那条旧任务"的权威值
+	 * （{@code taskType} 与 {@code extra[taskSlots]}），拿它判<b>新任务</b>的类型就是让旧任务参数
+	 * 决定新任务。保留这个参数只为与另外两张宿主表单同形（调用点一处、判据一处）。
+	 */
 	Optional<String> argumentsIfDue(String runId, AiContext context, String userMessage) {
 		if (!TaskIntent.isNewTaskIntent(userMessage)) {
 			return Optional.empty();
 		}
-		if (TaskSlots.fromExtra(context.getExtra()).taskType() != null) {
-			// 类型已知 ⇒ 直接 create_task（与槽位放行同一判据）
+		if (TaskIntent.explicitTaskType(userMessage) != null) {
+			// 本句已明说导出/导入 ⇒ 直接 create_task：类型不是缺口。
+			// 只看**本轮用户原文**：旧任务页面的 taskType 与槽位都属于那条旧任务，不得带入新任务
+			// （在旧 EXPORT 页说"创建任务"仍必须弹表，否则新任务会被旧任务的类型决定）。
 			return Optional.empty();
 		}
 		if (createdTaskInRun(runId) != null) {

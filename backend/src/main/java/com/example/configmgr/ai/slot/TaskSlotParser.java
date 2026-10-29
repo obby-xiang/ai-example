@@ -331,6 +331,19 @@ final class TaskSlotParser {
 
 	// ── 任务类型 ─────────────────────────────────────────────────────────────
 
+	/**
+	 * 这一句<b>明确</b>给出的任务类型（{@code EXPORT}/{@code IMPORT}，说不清就是 {@code null}）。
+	 *
+	 * <p>与 {@link #parse} 里的类型解析<b>同一份实现</b>（导出/导入互斥才算明确；否定视为没提）：
+	 * 宿主判定"新任务的类型是否已知"只看用户原话，复用这里的口径，避免两处各写一套正则。
+	 */
+	static String explicitTaskType(String text) {
+		if (text == null || text.isBlank()) {
+			return null;
+		}
+		return taskType(text, NEGATED_SELECT.matcher(text).find());
+	}
+
 	private static String taskType(String text, boolean negated) {
 		if (negated) {
 			return null;

@@ -57,6 +57,16 @@ public final class TaskIntent {
 	}
 
 	/**
+	 * 这一句<b>明确</b>给出的任务类型（{@code EXPORT}/{@code IMPORT}，说不清 = {@code null}）。
+	 *
+	 * <p>与槽位解析同一个实现（{@link TaskSlotParser} 的导出/导入判定）：两处各写一套正则必然漂移
+	 * ——"槽位认了导出、宿主还以为类型未知"就会多弹一张表。否定（"不要导出…"）按没提处理。
+	 */
+	public static String explicitTaskType(String text) {
+		return TaskSlotParser.explicitTaskType(text);
+	}
+
+	/**
 	 * 这一句是否"继续既有任务"（宿主据此在该任务上补一次条件框；普通浏览不算）。
 	 *
 	 * <p>问句同样排除：{"这个任务},{"条件是什么"} 是在问，不是在推进。
