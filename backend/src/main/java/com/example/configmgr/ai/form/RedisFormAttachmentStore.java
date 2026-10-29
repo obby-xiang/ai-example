@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,7 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 附件登记簿的 Redis 实现（{@code ai:form:att:<fileId>}，TTL 见 {@link #TTL}）。
+ * 附件登记簿的 Redis 实现（{@code ai:form:att:<fileId>}，TTL 见 {@link #ttl()}）。
  *
  * <p><b>B3 fail-closed</b>：只要 {@code StringRedisTemplate} 已装配，Redis 就是<b>唯一事实源</b> ——
  * 登记写失败直接告知上传失败，<b>不再</b>静默回落进程内 Map。原因：多实例下上传在 A、回灌在 B，
@@ -34,8 +35,16 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class RedisFormAttachmentStore implements FormAttachmentStore {
 
-	/** 登记有效期：足够用户填完一张表，又不至于让未消费的临时件长期滞留。 */
-	static final Duration TTL = Duration.ofHours(2);
+	/**
+	 * 登记有效期的兜底值：与 {@link AiProperties#getSessionTtl()} 的默认值（24h）一致。
+	 *
+	 * <p>为什么必须与会话/待决条目<b>同一把尺</b>：{@code generative_form} 无等待上限，待决条目的 TTL
+	 * 是 {@code app.ai.session-ttl}（挂起期随心跳续期）。旧实现把登记写死 2h —— 等超过 2h 的表单
+	 * 必然拿到 {@code ATTACHMENT_NOT_FOUND}，且失效文件没人回收（孤儿）。
+	 * 现在登记/墓碑/两个索引同取一个旋钮；残留边界见类注释与
+	 * {@code docs/research/修复-AI表单附件与决策竞态-2026-10-29.md}。
+	 */
+	static final Duration DEFAULT_TTL = Duration.ofHours(24);
 
 	private static final String KEY_PREFIX = "ai:form:att:";
 
@@ -51,9 +60,21 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	static final String SESSION_INDEX_PREFIX = "ai:form:att:sess:";
 
+	/**
+	 * 表单 → 附件登记 id 索引（{@code ai:form:att:form:<runId>:<toolCallId>}，SET，TTL 与登记同量级）。
+	 *
+	 * <p>两个用途：<b>①上传限额</b>（在册件数 ≤ 表单的 attachment 字段数，每个字段只装一个 fileId）；
+	 * <b>②表单收口回收</b>（决策接受 / 用户放弃后，把"传了但没提交"的登记与落盘文件一并删掉 ——
+	 * 否则它们只能等 TTL，文件成孤儿）。
+	 */
+	static final String FORM_INDEX_PREFIX = "ai:form:att:form:";
+
 	private final ObjectProvider<StringRedisTemplate> redisProvider;
 
 	private final ObjectMapper objectMapper;
+
+	/** 登记/墓碑/索引的有效期（与 {@code app.ai.session-ttl} 同源）。 */
+	private final Duration ttl;
 
 	/** 降级/测试路径的进程内登记簿（Redis 不可用时唯一事实源）。 */
 	private final Map<String, Attachment> memory = new ConcurrentHashMap<>();
@@ -62,8 +83,21 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	private final java.util.Set<String> consumed = ConcurrentHashMap.newKeySet();
 
 	public RedisFormAttachmentStore(ObjectProvider<StringRedisTemplate> redisProvider, ObjectMapper objectMapper) {
+		this(redisProvider, objectMapper, new AiProperties());
+	}
+
+	@org.springframework.beans.factory.annotation.Autowired
+	public RedisFormAttachmentStore(ObjectProvider<StringRedisTemplate> redisProvider, ObjectMapper objectMapper,
+			AiProperties properties) {
 		this.redisProvider = redisProvider;
 		this.objectMapper = objectMapper;
+		Duration configured = properties == null ? null : properties.getSessionTtl();
+		this.ttl = configured == null || configured.isZero() || configured.isNegative() ? DEFAULT_TTL : configured;
+	}
+
+	/** 登记寿命（排障/用例断言用：必须与 {@code app.ai.session-ttl} 同源）。 */
+	Duration ttl() {
+		return this.ttl;
 	}
 
 	@Override
@@ -78,7 +112,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return attachment;
 		}
 		try {
-			redis.opsForValue().set(KEY_PREFIX + fileId, this.objectMapper.writeValueAsString(attachment), TTL);
+			redis.opsForValue().set(KEY_PREFIX + fileId, this.objectMapper.writeValueAsString(attachment), this.ttl);
 		}
 		catch (Exception ex) {
 			// B3：多实例下登记失败必须 fail-closed —— 回落进程内 Map 会让"上传在 A、回灌在 B"时
@@ -88,23 +122,27 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 					ex.getMessage());
 			throw new AiStateUnavailableException("附件登记失败（Redis 不可用；不得回退进程内）", ex);
 		}
-		// 会话销毁的枚举面：登记成功后把它挂进该会话的索引。
-		// 索引失败必须回滚登记（否则销毁时看不到这条登记，文件会成孤儿）：先删数据键再抛出，
+		// 两个索引都是"删文件"的枚举面：会话索引给会话销毁用，表单索引给表单收口回收与上传限额用。
+		// 任一索引失败都必须回滚登记（否则销毁/收口时看不见这条登记，文件成孤儿）：先删数据键再抛出，
 		// 调用方（上传端点）据此删除已落盘文件。
 		try {
-			addToSessionIndex(redis, sessionId, fileId);
+			addToIndex(redis, sessionIndexKey(sessionId), fileId);
+			addToIndex(redis, formIndexKey(runId, toolCallId), fileId);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
-			log.error("附件登记已写入但会话索引失败 fileId={} sessionId={}（回滚登记，避免销毁时漏删文件）：{}",
-					fileId, sessionId, ex.getMessage());
+			log.error("附件登记已写入但索引失败 fileId={} sessionId={} runId={} toolCallId={}"
+					+ "（回滚登记，避免销毁/收口时漏删文件）：{}", fileId, sessionId, runId, toolCallId,
+					ex.getMessage());
 			try {
 				redis.delete(KEY_PREFIX + fileId);
+				removeFromIndexQuietly(redis, sessionIndexKey(sessionId), fileId);
+				removeFromIndexQuietly(redis, formIndexKey(runId, toolCallId), fileId);
 			}
 			catch (Exception cleanup) {
 				log.warn("回滚附件登记失败 fileId={}（登记会在 TTL 后自清）：{}", fileId, cleanup.getMessage());
 			}
-			throw new AiStateUnavailableException("附件登记失败（会话索引不可写；不得留下不可枚举的登记）", ex);
+			throw new AiStateUnavailableException("附件登记失败（索引不可写；不得留下不可枚举的登记）", ex);
 		}
 		return attachment;
 	}
@@ -144,12 +182,17 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return false;
 		}
 		try {
-			String sessionId = sessionIdOfQuietly(redis, fileId);
+			Attachment attachment = attachmentOfQuietly(redis, fileId);
 			Boolean deleted = redis.delete(KEY_PREFIX + fileId);
 			if (Boolean.TRUE.equals(deleted)) {
-				redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", TTL);
+				redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", this.ttl);
 				this.memory.remove(fileId);
-				removeFromSessionIndexQuietly(redis, sessionId, fileId);
+				removeFromIndexQuietly(redis, sessionIndexKey(attachment == null ? null : attachment.sessionId()),
+						fileId);
+				removeFromIndexQuietly(redis,
+						formIndexKey(attachment == null ? null : attachment.runId(),
+								attachment == null ? null : attachment.toolCallId()),
+						fileId);
 				return true;
 			}
 			return false;
@@ -183,7 +226,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		Set<String> ids;
 		try {
-			ids = setOps.members(SESSION_INDEX_PREFIX + sessionId);
+			ids = setOps.members(sessionIndexKey(sessionId));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
@@ -203,7 +246,52 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	}
 
 	/**
-	 * 删除一条登记（销毁用）：数据键 + 墓碑键 + 会话索引成员。
+	 * 该表单仍在册的附件（上传限额面 + 表单收口回收面）。
+	 *
+	 * <p>索引成员可能是 stale（登记已过期/已被并发消费）：逐个 {@link #find(String)} 过滤，并按登记
+	 * 自身的 {@code runId/toolCallId} 再判一次，避免索引污染导致回收别人的件。
+	 * 读失败<b>抛出</b>（上传限额不得按空表处理成"一件都没有"）。
+	 */
+	@Override
+	public List<Attachment> findByForm(String runId, String toolCallId) {
+		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+			return List.of();
+		}
+		StringRedisTemplate redis = redis();
+		if (redis == null) {
+			return this.memory.values()
+				.stream()
+				.filter(item -> runId.equals(item.runId()) && toolCallId.equals(item.toolCallId()))
+				.toList();
+		}
+		SetOperations<String, String> setOps = redis.opsForSet();
+		if (setOps == null) {
+			return List.of();
+		}
+		Set<String> ids;
+		try {
+			ids = setOps.members(formIndexKey(runId, toolCallId));
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			throw new AiStateUnavailableException("附件表单索引读取失败（上传限额/收口回收不得按空表处理）", ex);
+		}
+		if (ids == null || ids.isEmpty()) {
+			return List.of();
+		}
+		List<Attachment> out = new ArrayList<>();
+		for (String fileId : ids) {
+			Attachment attachment = find(fileId);
+			if (attachment != null && runId.equals(attachment.runId())
+					&& toolCallId.equals(attachment.toolCallId())) {
+				out.add(attachment);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 删除一条登记（会话销毁 / 表单收口回收用）：数据键 + 墓碑键 + 两个索引成员。
 	 *
 	 * <p>返回被删登记（含 {@code storagePath}），调用方据此删文件；不存在返回 null（幂等）。
 	 * 数据键删除失败抛出（由销毁流程记为部分失败，可重试）；索引清理失败只 WARN
@@ -232,42 +320,55 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		catch (Exception ex) {
 			log.warn("清理附件消费墓碑失败 fileId={}（墓碑会在 TTL 后自清）：{}", fileId, ex.getMessage());
 		}
-		removeFromSessionIndexQuietly(redis, attachment == null ? null : attachment.sessionId(), fileId);
+		removeFromIndexQuietly(redis, sessionIndexKey(attachment == null ? null : attachment.sessionId()), fileId);
+		removeFromIndexQuietly(redis, formIndexKey(attachment == null ? null : attachment.runId(),
+				attachment == null ? null : attachment.toolCallId()), fileId);
 		return attachment;
 	}
 
-	/** 会话索引登记（失败抛出；调用方回滚登记）。sessionId 为空 = 无法归属，跳过（不阻断上传）。 */
-	private static void addToSessionIndex(StringRedisTemplate redis, String sessionId, String fileId) {
-		if (sessionId == null || sessionId.isBlank()) {
+	/** 索引登记（失败抛出；调用方回滚登记）。key 为空 = 无法归属，跳过（不阻断上传）。 */
+	private void addToIndex(StringRedisTemplate redis, String indexKey, String fileId) {
+		if (indexKey == null) {
 			return;
 		}
 		SetOperations<String, String> setOps = redis.opsForSet();
 		if (setOps == null) {
 			return;
 		}
-		setOps.add(SESSION_INDEX_PREFIX + sessionId, fileId);
-		redis.expire(SESSION_INDEX_PREFIX + sessionId, TTL);
+		setOps.add(indexKey, fileId);
+		redis.expire(indexKey, this.ttl);
 	}
 
-	/** 会话索引清理（best-effort：登记已删时 stale 成员不再指向任何文件）。 */
-	private static void removeFromSessionIndexQuietly(StringRedisTemplate redis, String sessionId, String fileId) {
-		if (sessionId == null || sessionId.isBlank()) {
+	private static String sessionIndexKey(String sessionId) {
+		return sessionId == null || sessionId.isBlank() ? null : SESSION_INDEX_PREFIX + sessionId;
+	}
+
+	private static String formIndexKey(String runId, String toolCallId) {
+		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+			return null;
+		}
+		return FORM_INDEX_PREFIX + runId + ":" + toolCallId;
+	}
+
+	/** 索引清理（best-effort：登记已删时 stale 成员不再指向任何文件）。 */
+	private static void removeFromIndexQuietly(StringRedisTemplate redis, String indexKey, String fileId) {
+		if (indexKey == null) {
 			return;
 		}
 		try {
 			SetOperations<String, String> setOps = redis.opsForSet();
 			if (setOps != null) {
-				setOps.remove(SESSION_INDEX_PREFIX + sessionId, fileId);
+				setOps.remove(indexKey, fileId);
 			}
 		}
 		catch (Exception ex) {
-			log.warn("附件会话索引清理失败 sessionId={} fileId={}（stale 成员会被枚举过滤）：{}", sessionId,
-					fileId, ex.getMessage());
+			log.warn("附件索引清理失败 key={} fileId={}（stale 成员会被枚举过滤）：{}", indexKey, fileId,
+					ex.getMessage());
 		}
 	}
 
-	/** 消费路径的会话归属读取：只用于清索引，读不出来不影响消费本身。 */
-	private String sessionIdOfQuietly(StringRedisTemplate redis, String fileId) {
+	/** 消费路径的归属读取（只用于清索引，读不出来不影响消费本身）。 */
+	private Attachment attachmentOfQuietly(StringRedisTemplate redis, String fileId) {
 		try {
 			if (redis.opsForValue() == null) {
 				return null;
@@ -276,8 +377,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			if (json == null) {
 				return null;
 			}
-			Attachment attachment = this.objectMapper.readValue(json, Attachment.class);
-			return attachment.sessionId();
+			return this.objectMapper.readValue(json, Attachment.class);
 		}
 		catch (Exception ex) {
 			return null;

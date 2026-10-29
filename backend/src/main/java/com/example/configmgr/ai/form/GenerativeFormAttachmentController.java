@@ -1,12 +1,15 @@
 package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.file.StoredFile;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.InputStream;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,8 +40,12 @@ import java.util.Set;
  * <h2>为什么上传要带 runId + toolCallId</h2>
  * 归属校验比"同一会话"更严：登记时绑定<b>本次挂起的这张表单</b>，回灌时
  * {@link GenerativeFormGuard} 按同一对 id 复核（{@code ATTACHMENT_FORBIDDEN}），
- * 且回灌成功即一次性消费（{@code ATTACHMENT_CONSUMED}）。上传前再核一次"该调用确实在等用户"，
- * 避免任意请求往登记簿里塞文件。
+ * 且回灌<b>决策落库之后</b>才一次性消费（{@code ATTACHMENT_CONSUMED}）。上传前再核一次
+ * "该调用确实在等用户"，避免任意请求往登记簿里塞文件。
+ *
+ * <h2>上传预算（2026-10-29 修复批）</h2>
+ * 件数上限 = 表单 schema 里的 attachment 字段数（每个字段只装一个 fileId），总量上限 =
+ * {@link #MAX_TOTAL_ATTACHMENT_BYTES}；归属的 sessionId 只认轮次快照（不采信请求参数）。
  */
 @Slf4j
 @RestController
@@ -46,6 +54,14 @@ public class GenerativeFormAttachmentController {
 
 	/** 单件上限（5MB）：够放截图/PDF 证据，又不至于把上传变成文件搬运通道。 */
 	public static final long MAX_ATTACHMENT_BYTES = 5L * 1024 * 1024;
+
+	/**
+	 * 单张表单的附件<b>总字节</b>上限（20MB）。
+	 *
+	 * <p>为什么单件上限不够：件数此前没有上限，5MB × 无限件 = 磁盘配额由调用方决定。件数上限
+	 * （= 表单的 attachment 字段数）与总量上限一起，才把"一张表单能占多少盘"变成有界量。
+	 */
+	public static final long MAX_TOTAL_ATTACHMENT_BYTES = 20L * 1024 * 1024;
 
 	/** 允许的类型（扩展名 → MIME 白名单；只按扩展名判定，内容不做嗅探 —— 文件永不进模型）。 */
 	private static final Map<String, Set<String>> ALLOWED = Map.of(
@@ -66,20 +82,42 @@ public class GenerativeFormAttachmentController {
 
 	private final FormOptionSourceRegistry optionSources;
 
+	private final ObjectMapper objectMapper;
+
 	public GenerativeFormAttachmentController(FileStorageService fileStorage, FormAttachmentStore attachments,
 			RunStore runStore, FormOptionSourceRegistry optionSources) {
+		this(fileStorage, attachments, runStore, optionSources, new ObjectMapper());
+	}
+
+	@org.springframework.beans.factory.annotation.Autowired
+	public GenerativeFormAttachmentController(FileStorageService fileStorage, FormAttachmentStore attachments,
+			RunStore runStore, FormOptionSourceRegistry optionSources,
+			ObjectMapper objectMapper) {
 		this.fileStorage = fileStorage;
 		this.attachments = attachments;
 		this.runStore = runStore;
 		this.optionSources = optionSources;
+		this.objectMapper = objectMapper;
 	}
 
-	/** 上传一件附件（返回 fileId / fileName / size / contentType；不含存储路径）。 */
+	/**
+	 * 上传一件附件（返回 fileId / fileName / size / contentType；不含存储路径）。
+	 *
+	 * <p><b>{@code sessionId} 请求参数不再采信</b>（2026-10-29 修复批）：它进的是"会话 → 附件"索引，
+	 * 信客户端就等于允许任何调用方把文件挂到<b>别的会话</b>名下（那个会话销毁时会被连带删除）。
+	 * 归属的权威值只有一个：本轮次快照的 {@code sessionId}（待决条目就挂在这一轮上）。
+	 * 参数保留只为兼容旧前端（值被忽略）。
+	 *
+	 * <p><b>{@code fieldKey}</b>（可选）：本次上传要填的 attachment 字段。带了就必须是<b>这张表单</b>
+	 * schema 里的 attachment 字段 —— 否则前端拿到的 fileId 永远填不进任何字段（也不会被提交消费，
+	 * 只是占着盘）。不带时按"表单总附件位"限额。
+	 */
 	@PostMapping("/attachments")
 	public ApiResponse<Map<String, Object>> upload(@RequestParam("file") MultipartFile file,
 			@RequestParam("runId") String runId,
 			@RequestParam("toolCallId") String toolCallId,
-			@RequestParam(value = "sessionId", required = false) String sessionId) throws Exception {
+			@RequestParam(value = "sessionId", required = false) String clientSessionId,
+			@RequestParam(value = "fieldKey", required = false) String fieldKey) throws Exception {
 		if (file == null || file.isEmpty()) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "附件为空，请重新选择文件");
 		}
@@ -100,11 +138,59 @@ public class GenerativeFormAttachmentController {
 			throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
 					"附件 MIME 与扩展名不符：" + contentType + "（." + ext + " 允许 " + String.join("/", mimes) + "）");
 		}
-		assertFormIsWaiting(runId, toolCallId);
-		StoredFile storedFile = this.fileStorage.store(file.getInputStream(), originalName);
+		PendingToolCall pending = assertFormIsWaiting(runId, toolCallId);
+		Set<String> attachmentFields = attachmentFieldKeys(pending);
+		if (attachmentFields.isEmpty()) {
+			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
+					"该表单没有附件字段（无法上传附件），请重新发起表单");
+		}
+		// 目标字段先判：非法请求必须在任何"顶掉旧件/落盘"之前被挡下（否则一次错请求会删掉用户的文件）
+		if (fieldKey != null && !fieldKey.isBlank() && !attachmentFields.contains(fieldKey)) {
+			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
+					"字段 " + fieldKey + " 不是本表单的附件字段（attachment），无法接收上传");
+		}
+		List<FormAttachmentStore.Attachment> existing = this.attachments.findByForm(runId, toolCallId);
+		if (existing.size() >= attachmentFields.size()) {
+			// 单附件字段的表单：前端"重新选择文件"就是再传一次（没有删除接口），旧件的 fieldId 已被
+			// 新值覆盖 —— 顶掉旧登记是唯一能让用户改主意的做法，在册件数仍然 ≤ 1。
+			// 多附件字段时不猜"这次替换的是哪个字段"（猜错会删掉另一个字段正在用的件）：拒绝并提示
+			// 调用方带上 fieldKey / 重新发起表单。
+			if (attachmentFields.size() == 1) {
+				for (FormAttachmentStore.Attachment superseded : existing) {
+					FormAttachmentStore.Attachment removed = this.attachments
+						.deleteRegistration(superseded.fileId());
+					if (removed != null) {
+						this.fileStorage.delete(removed.storagePath());
+						log.info("单附件表单重传，已顶掉旧件 runId={} toolCallId={} fileId={}", runId, toolCallId,
+								removed.fileId());
+					}
+				}
+				existing = List.of();
+			}
+			else {
+				throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
+						"该表单的附件位已满：" + existing.size() + " 件在册（表单共 " + attachmentFields.size()
+								+ " 个附件字段，每个字段只装一个文件Id）；请带 fieldKey 重传或重新发起表单");
+			}
+		}
+		long usedBytes = 0L;
+		for (FormAttachmentStore.Attachment attachment : existing) {
+			usedBytes += Math.max(0L, attachment.size());
+		}
+		if (usedBytes + file.getSize() > MAX_TOTAL_ATTACHMENT_BYTES) {
+			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
+					"附件总量超限：在册 " + usedBytes + " 字节 + 本次 " + file.getSize() + " 字节 > 单表上限 "
+							+ MAX_TOTAL_ATTACHMENT_BYTES + " 字节");
+		}
+		String authoritativeSessionId = authoritativeSessionId(runId);
+		StoredFile storedFile;
+		// MultipartFile 的输入流由容器分配：不关会把连接/临时文件留到 GC（上传口是高频入口）
+		try (InputStream in = file.getInputStream()) {
+			storedFile = this.fileStorage.store(in, originalName);
+		}
 		FormAttachmentStore.Attachment stored;
 		try {
-			stored = this.attachments.register(runId, toolCallId, sessionId,
+			stored = this.attachments.register(runId, toolCallId, authoritativeSessionId,
 					originalName, file.getSize(), contentType, storedFile.key());
 		}
 		catch (RuntimeException ex) {
@@ -124,6 +210,12 @@ public class GenerativeFormAttachmentController {
 		return ApiResponse.ok(data);
 	}
 
+	/** 兼容重载：旧调用方不带目标字段（限额仍按表单总附件位）。 */
+	public ApiResponse<Map<String, Object>> upload(MultipartFile file, String runId, String toolCallId,
+			String clientSessionId) throws Exception {
+		return upload(file, runId, toolCallId, clientSessionId, null);
+	}
+
 	/** 解析选项数据源（只认注册表里的 id）。 */
 	@GetMapping("/option-sources/{sourceId}")
 	public ApiResponse<Map<String, Object>> options(@PathVariable String sourceId,
@@ -139,8 +231,60 @@ public class GenerativeFormAttachmentController {
 		return ApiResponse.ok(data);
 	}
 
+	/**
+	 * 归属的权威会话：本轮次快照的 {@code sessionId}（待决条目属于这一轮）。
+	 *
+	 * <p>读不到快照时返回 null（登记仍成功，只是不进会话索引）—— 上传不该因为"审计面取不到"
+	 * 而失败；而<b>绝不</b>回落到请求参数：那等于把归属交给调用方。
+	 */
+	private String authoritativeSessionId(String runId) {
+		try {
+			RunSnapshot snapshot = this.runStore.get(runId);
+			return snapshot == null ? null : snapshot.getSessionId();
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取轮快照 sessionId 失败 runId={}（附件登记不落会话索引，不采信请求参数）：{}", runId,
+					ex.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * 表单 schema 里的 attachment 字段 key 全集（上传预算的判据来源）。
+	 *
+	 * <p>schema 已在下发前过了白名单（{@code GenerativeFormRules}），这里只做形状读取：
+	 * 解析失败/没有 form/没有 fields 一律返回空集 —— 调用方按"没有附件字段"拒绝上传。
+	 */
+	private Set<String> attachmentFieldKeys(PendingToolCall pending) {
+		Set<String> keys = new java.util.LinkedHashSet<>();
+		String arguments = pending == null ? null : pending.getArguments();
+		if (arguments == null || arguments.isBlank()) {
+			return keys;
+		}
+		try {
+			JsonNode root = this.objectMapper.readTree(arguments);
+			JsonNode form = root == null ? null : root.get("form");
+			if (form == null || !form.isObject()) {
+				return keys;
+			}
+			for (JsonNode field : form.path("fields")) {
+				if ("attachment".equals(field.path("type").asText())) {
+					String key = field.path("key").asText("");
+					if (!key.isEmpty()) {
+						keys.add(key);
+					}
+				}
+			}
+		}
+		catch (Exception ex) {
+			log.warn("表单入参无法解析，按【没有附件字段】拒绝上传 runId={} toolCallId={}：{}", arguments,
+					pending.getToolCallId(), ex.getMessage());
+		}
+		return keys;
+	}
+
 	/** 上传前确认"这张表单确实在等用户"（跨轮次/跨表单的调用直接拒绝）。 */
-	private void assertFormIsWaiting(String runId, String toolCallId) {
+	private PendingToolCall assertFormIsWaiting(String runId, String toolCallId) {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填");
 		}
@@ -150,6 +294,7 @@ public class GenerativeFormAttachmentController {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
 					"该表单调用不在等待填写状态（无法上传附件），请重新发起表单");
 		}
+		return pending;
 	}
 
 	private static String extensionOf(String fileName) {

@@ -100,6 +100,36 @@ public interface FrontendToolGuard {
 	}
 
 	/**
+	 * 决策<b>已落库</b>之后的副作用口（校验与消费分离批）。
+	 *
+	 * <p>为什么必须有这个口：{@link #inspectResult} 发生在"抢决策 guard / 落库"<b>之前</b>，
+	 * 那时拒绝是"可修正后重试"，所以它<b>不能有副作用</b> —— 一旦在那里消费掉一次性资源，
+	 * 后续任何一步失败（并发写者、Redis 抖动、进程死）都会把"可重试"变成假话：
+	 * 用户手里剩下的引用已经全被作废。
+	 *
+	 * <p>调用时机由框架保证（{@code ConfirmGate}）：条目已写成 {@code FRONTEND_RESULT} 之后、
+	 * 唤醒/续跑之前调用一次。实现方的失败<b>不得</b>抛出，也不得改变已定的结论 —— 至多告警。
+	 * 默认空实现 = 该工具没有一次性资源要收。
+	 *
+	 * @param runId         该次挂起所属轮次
+	 * @param toolCallId    该次挂起的前端调用 id
+	 * @param argumentsJson 该次调用的入参原文（挂起时外置的那份 schema）
+	 * @param resultJson    被接受的回灌原文
+	 */
+	default void settleAcceptedResult(String runId, String toolCallId, String argumentsJson, String resultJson) {
+	}
+
+	/**
+	 * 用户<b>放弃</b>该前端调用之后的副作用口（同 {@link #settleAcceptedResult} 的时机口径：
+	 * 结论已落库之后调用）。
+	 *
+	 * <p>生成式表单用它回收"用户传了但没提交"的附件（重传后放弃的旧件就是孤儿文件）。
+	 * 失败只告警，不得改变已落库的取消结论。
+	 */
+	default void settleDiscardedResult(String runId, String toolCallId) {
+	}
+
+	/**
 	 * 回灌结果是否按<b>结构化</b>整体处置（结构化回灌超限拒绝批）。
 	 *
 	 * <p>用途只有一个：回灌端点（{@code AiController#frontendToolResult}）在超限时决定

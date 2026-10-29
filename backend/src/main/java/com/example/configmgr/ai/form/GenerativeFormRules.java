@@ -532,6 +532,12 @@ public final class GenerativeFormRules {
 						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
 								at + ".minLength 不得为负（实际 " + min + "）"));
 					}
+					if (max != null && max < 0) {
+						// 负数上界无法满足：值校验阶段 text.length() > -1 恒真，用户填什么都过不了闸。
+						// schema 阶段拒绝（零副作用），模型改一次即可用。
+						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
+								at + ".maxLength 不得为负（实际 " + max + "）"));
+					}
 					if (max != null && max > hardMax) {
 						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MAX_LENGTH_TOO_LARGE,
 								at + ".maxLength 超过硬顶：" + max + "（上限 " + hardMax + "）"));
@@ -595,13 +601,20 @@ public final class GenerativeFormRules {
 					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
 							at + ".minItems/maxItems 必须是整数"));
 				}
-				else if (minCount != null && minCount < 0) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
-							at + ".minItems 不得为负（实际 " + minCount + "）"));
-				}
-				else if (minCount != null && maxCount != null && minCount > maxCount) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
-							at + ".minItems 不得大于 maxItems（" + minCount + " > " + maxCount + "）"));
+				else {
+					if (minCount != null && minCount < 0) {
+						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
+								at + ".minItems 不得为负（实际 " + minCount + "）"));
+					}
+					if (maxCount != null && maxCount < 0) {
+						// 负数上界在值校验阶段是"任何选集都超限"：schema 阶段拒绝，不把死约束发给用户。
+						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
+								at + ".maxItems 不得为负（实际 " + maxCount + "）"));
+					}
+					if (minCount != null && maxCount != null && minCount > maxCount) {
+						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
+								at + ".minItems 不得大于 maxItems（" + minCount + " > " + maxCount + "）"));
+					}
 				}
 			}
 		}

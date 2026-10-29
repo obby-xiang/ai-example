@@ -63,7 +63,12 @@ class GenerativeFormAttachmentConsumeCleanupTest {
 
         FrontendToolGuard.Verdict accepted = inspect("run-1", "call-1", attachment.fileId());
         assertThat(accepted.accepted()).isTrue();
-        assertThat(accepted.resultSuffix()).as("元数据在消费前取出，回灌结论不受删盘影响").contains("evidence.pdf");
+        assertThat(accepted.resultSuffix()).as("元数据在校验阶段取出，回灌结论不受删盘影响").contains("evidence.pdf");
+        assertThat(Files.exists(file)).as("校验是只读的：决策落库前不删盘").isTrue();
+
+        // 决策落库之后的消费：删登记、删物理文件
+        settle("run-1", "call-1", attachment.fileId());
+        assertThat(this.store.find(attachment.fileId())).isNull();
         assertThat(Files.exists(file)).as("consume 成功后删除物理文件").isFalse();
 
         // 一次性语义不变：同一 fileId 二次提交一律 ATTACHMENT_CONSUMED（且不因文件已删而报错）
@@ -84,8 +89,9 @@ class GenerativeFormAttachmentConsumeCleanupTest {
         assertThat(Files.exists(file)).as("被拒的回灌不删盘（文件仍属当前登记）").isTrue();
         assertThat(this.store.find(attachment.fileId())).isNotNull();
 
-        // 修正归属后可正常提交，此时才删盘
+        // 修正归属后可正常提交，决策落库之后才删盘
         assertThat(inspect("run-1", "call-1", attachment.fileId()).accepted()).isTrue();
+        settle("run-1", "call-1", attachment.fileId());
         assertThat(Files.exists(file)).isFalse();
     }
 
@@ -102,6 +108,7 @@ class GenerativeFormAttachmentConsumeCleanupTest {
                 "evidence.pdf", 9, "application/pdf", stored.key());
 
         assertThat(inspect("run-1", "call-1", attachment.fileId()).accepted()).isTrue();
+        settle("run-1", "call-1", attachment.fileId());
         assertThat(stored.path()).as("消费后按存储键解析并删除落盘文件").doesNotExist();
     }
 
@@ -112,12 +119,18 @@ class GenerativeFormAttachmentConsumeCleanupTest {
                 "gone.pdf", 3, "application/pdf", STORAGE_ROOT.resolve("gone-never-written.pdf").toString());
 
         assertThat(inspect("run-1", "call-1", attachment.fileId()).accepted()).isTrue();
+        settle("run-1", "call-1", attachment.fileId());
         assertThat(this.store.find(attachment.fileId())).isNull();
     }
 
     private FrontendToolGuard.Verdict inspect(String runId, String toolCallId, String fileId) {
         String values = "{\"evidence\":\"" + fileId + "\"}";
         return this.guard.inspectResult(runId, toolCallId, ARGS, values);
+    }
+
+    /** 决策落库之后的消费口（消费不再发生在校验里）。 */
+    private void settle(String runId, String toolCallId, String fileId) {
+        this.guard.settleAcceptedResult(runId, toolCallId, ARGS, "{\"evidence\":\"" + fileId + "\"}");
     }
 
     private FileStorageService storageService() {

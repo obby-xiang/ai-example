@@ -25,20 +25,23 @@ class GenerativeFormAttachmentGateTest {
 			this.store);
 
 	@Test
-	void acceptsAndConsumesAnAttachmentOwnedByThisForm() {
+	void acceptsAnOwnedAttachmentAndConsumesItOnlyAfterTheDecision() {
 		FormAttachmentStore.Attachment attachment = this.store.register("run-1", "call-1", "sess-1",
 				"evidence.pdf", 1024, "application/pdf", "/tmp/evidence.pdf");
+		String submitted = "{\"evidence\":\"" + attachment.fileId() + "\"}";
 
-		FrontendToolGuardVerdict verdict = inspect("run-1", "call-1",
-				"{\"evidence\":\"" + attachment.fileId() + "\"}");
+		FrontendToolGuardVerdict verdict = inspect("run-1", "call-1", submitted);
 		assertThat(verdict.accepted()).isTrue();
 		// 模型只看到元数据（文件名/大小/fileId），文件内容永不进上下文
 		assertThat(verdict.suffix()).contains("evidence.pdf").contains("1024 字节")
 				.contains(attachment.fileId());
+		// 校验是只读的：决策还没落库，登记必须还在（否则"可修正后重试"就是假话）
+		assertThat(this.store.find(attachment.fileId())).isNotNull();
 
-		// 一次性：同一个 fileId 二次提交即 ATTACHMENT_CONSUMED（挂起保持未决，用户可重传）
-		FrontendToolGuardVerdict again = inspect("run-1", "call-1",
-				"{\"evidence\":\"" + attachment.fileId() + "\"}");
+		// 决策落库之后才消费；此后同一 fileId 二次提交即 ATTACHMENT_CONSUMED
+		this.guard.settleAcceptedResult("run-1", "call-1", ARGS, submitted);
+		assertThat(this.store.find(attachment.fileId())).isNull();
+		FrontendToolGuardVerdict again = inspect("run-1", "call-1", submitted);
 		assertThat(again.accepted()).isFalse();
 		assertThat(again.issues()).extracting(FormIssue::code).containsExactly(FormIssueCodes.ATTACHMENT_CONSUMED);
 	}
@@ -100,20 +103,22 @@ class GenerativeFormAttachmentGateTest {
 	}
 
 	@Test
-	void consumeUnavailableAlsoBecomesTypedRetryableIssue() {
+	void consumeOutageAfterTheDecisionIsLoggedInsteadOfReopeningTheSubmission() {
 		InMemoryStore unavailable = new InMemoryStore();
 		unavailable.failConsume = true;
 		GenerativeFormGuard failingGuard = new GenerativeFormGuard(
 				new com.fasterxml.jackson.databind.ObjectMapper(), unavailable);
 		FormAttachmentStore.Attachment attachment = unavailable.register("run-1", "call-1", "sess-1",
 				"evidence.pdf", 1024, "application/pdf", "/tmp/evidence.pdf");
+		String submitted = "{\"evidence\":\"" + attachment.fileId() + "\"}";
 
-		var verdict = failingGuard.inspectResult("run-1", "call-1", ARGS,
-				"{\"evidence\":\"" + attachment.fileId() + "\"}");
+		// 校验阶段不碰消费：登记簿读可用时，回灌照常放行
+		assertThat(failingGuard.inspectResult("run-1", "call-1", ARGS, submitted).accepted()).isTrue();
 
-		assertThat(verdict.accepted()).isFalse();
-		assertThat(verdict.issues()).extracting(FormIssue::code)
-			.containsExactly(FormIssueCodes.ATTACHMENT_UNAVAILABLE);
+		// 决策落库之后的消费故障：不抛、不判"可重试"，登记留在原处（保守：多留不漏删）
+		failingGuard.settleAcceptedResult("run-1", "call-1", ARGS, submitted);
+		assertThat(unavailable.find(attachment.fileId())).isNotNull();
+		assertThat(unavailable.wasConsumed(attachment.fileId())).isFalse();
 	}
 
 	@Test

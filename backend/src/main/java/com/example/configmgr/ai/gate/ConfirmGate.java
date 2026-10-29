@@ -1570,8 +1570,12 @@ public class ConfirmGate {
 	 * 结果文本用机器可读前缀标记"未获得数据"；</li>
 	 * <li><b>结果复核不过</b>（{@link FrontendToolGuard#inspectResult}）→ {@link Outcome#REJECTED}：
 	 * <b>状态不变、不发帧、不唤醒</b>，理由随 HTTP 400 返回给前端（可修正后重试）；</li>
-	 * <li><b>通过</b> → 既有口径：{@link PendingToolCall#FRONTEND_RESULT} + 回灌帧 + 唤醒。</li>
+	 * <li><b>通过</b> → 既有口径：{@link PendingToolCall#FRONTEND_RESULT} + 回灌帧 + 唤醒；
+	 * 之后才调 {@link FrontendToolGuard#settleAcceptedResult}（一次性资源的消费口）。</li>
 	 * </ol>
+	 *
+	 * <p><b>消费只发生在结论落库之后</b>（校验与消费分离批）：复核阶段拒绝时"可修正后重试"必须为真，
+	 * 所以复核器在那里<b>不许</b>动一次性资源；消费/回收走决策后的 settle 钩子，失败只告警。
 	 *
 	 * <p>次序刻意是"取消 &gt; 复核"：放弃是用户的兜底出口，不该因为"值不合规"而被挡住
 	 * （否则用户关掉一张填错一半的表单也被拒，挂起只能等到超时）。
@@ -1665,7 +1669,7 @@ public class ConfirmGate {
 		// 而重复提交在上一行就已返回，故不会覆盖已落的值。
 		applySheetMeta(pending, sheetMeta);
 		if (cancelled) {
-			return dismiss(runId, pending, source);
+			return dismiss(runId, pending, source, sheetMeta);
 		}
 		FrontendToolGuard.Verdict verdict = inspectResult(runId, pending, result);
 		if (verdict != null && !verdict.accepted()) {
@@ -1741,6 +1745,11 @@ public class ConfirmGate {
 		if (publishesRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, resultText);
 		}
+		// ===== 校验与消费分离（2026-10-29 修复批）=====
+		// 一次性资源（表单附件）的消费挪到这里：结论已落库（上面 putPending 成功）、结局帧已发、
+		// 唤醒已完成。放在锁外是因为消费是 Redis + 删盘往返，不得占用实例级的 submitLock。
+		// 钩子内部只告警不抛：走到这一步"可修正后重试"已经不可能，任何失败都不能改写结论。
+		settleAccepted(runId, pending, result);
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 
@@ -1757,6 +1766,50 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 决策落库之后的"接受"钩子（一次性资源消费/回收）：每个工具至多一个复核器认领。
+	 *
+	 * <p>只在这里（{@code doSubmitFrontendResult} 的末尾，落库/发帧/唤醒都已完成之后）或
+	 * {@link #dismiss} 末尾调用；失败只 WARN —— 判定已经定了。
+	 */
+	private void settleAccepted(String runId, PendingToolCall pending, String result) {
+		FrontendToolGuard guard = guardFor(pending.getName());
+		if (guard == null) {
+			return;
+		}
+		try {
+			guard.settleAcceptedResult(runId, pending.getToolCallId(), pending.getArguments(), result);
+		}
+		catch (RuntimeException ex) {
+			log.warn("决策后的资源收口失败（不影响已落库的结论）toolCallId={} name={}：{}", pending.getToolCallId(),
+					pending.getName(), ex.getMessage());
+		}
+	}
+
+	/** 决策落库之后的"放弃"钩子（同 {@link #settleAccepted} 的口径：只在结论落库后调用）。 */
+	private void settleDiscarded(String runId, PendingToolCall pending) {
+		FrontendToolGuard guard = guardFor(pending.getName());
+		if (guard == null) {
+			return;
+		}
+		try {
+			guard.settleDiscardedResult(runId, pending.getToolCallId());
+		}
+		catch (RuntimeException ex) {
+			log.warn("放弃后的资源回收失败（不影响已落库的结论）toolCallId={} name={}：{}", pending.getToolCallId(),
+					pending.getName(), ex.getMessage());
+		}
+	}
+
+	private FrontendToolGuard guardFor(String toolName) {
+		for (FrontendToolGuard guard : this.frontendGuards) {
+			if (guard.supports(toolName)) {
+				return guard;
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * 用户主动放弃（关闭/取消表单）：与决策写入同一套次序（落库 → 发结局帧 → 唤醒）。
 	 *
 	 * <p>为什么要有这个终态：前端工具此前只有"回灌结果"与"超时/整轮取消"出口 ——
@@ -1765,12 +1818,27 @@ public class ConfirmGate {
 	 * 取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
 	 * （且与"没人响应"的超时语义分开，排障时看得清）。
 	 */
-	private Submission dismiss(String runId, PendingToolCall pending, String source) {
+	private Submission dismiss(String runId, PendingToolCall pending, String source, Map<String, Object> sheetMeta) {
 		// R4：放弃同样是"这张卡的结论"，与决策/回灌争同一把 guard（两个页签同时关表单只落一次）
 		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, pending.getToolCallId(),
 				PendingToolCall.FRONTEND_CANCELLED);
-		if (claim != null && !claim.won()) {
-			return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
+		if (claim != null) {
+			if (!claim.won()) {
+				return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
+			}
+			// 抢到 guard 后<b>复读</b>条目：入参那份是抢 guard 之前读到的副本，中间可能已有"不带 guard
+			// 的写者"落了库（前端超时收敛、整轮取消）。旧实现随后无条件把副本改成 FRONTEND_CANCELLED
+			// 并发帧 ⇒ 覆盖别人写下的结局 + 同一张卡两帧。非 PENDING 一律按幂等收口：不覆盖、不发帧。
+			pending = pendingForWrite(runId, pending.getToolCallId());
+			if (pending == null) {
+				return new Submission(Outcome.NOT_FOUND, null, false, null);
+			}
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
+				return new Submission(Outcome.DUPLICATE, pending, false, null);
+			}
+			// 复读出来的是新副本（真实 Redis = 反序列化）：入口已过白名单的表格元数据要在新副本上
+			// 再落一次，否则审计计数（writePlans/writeCancelled）会随旧对象一起丢掉。
+			applySheetMeta(pending, sheetMeta);
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
 		pending.setOutcome(ToolOutcome.CANCELLED.wire());
@@ -1791,6 +1859,9 @@ public class ConfirmGate {
 		if (publishesRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, text);
 		}
+		// 放弃也是"这张卡的结论"：校验与消费分离批的回收钩子（该表单名下没提交的附件）。
+		// 必须在结论落库之后调用 —— 失败只告警，不回滚取消结论。
+		settleDiscarded(runId, pending);
 		log.info("前端工具被用户取消 runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}

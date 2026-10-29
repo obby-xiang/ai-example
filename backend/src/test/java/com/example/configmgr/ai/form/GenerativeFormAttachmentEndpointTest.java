@@ -193,6 +193,9 @@ class GenerativeFormAttachmentEndpointTest {
 		pending.setToolCallId(toolCallId);
 		pending.setName(GenerativeFormRules.TOOL_NAME);
 		pending.setStatus(PendingToolCall.PENDING);
+		// 生产里的待决表单一定带着 schema（它就是工具入参）：上传的附件位/字段校验从这份 schema 来
+		pending.setArguments("{\"form\":{\"scenario\":\"CLARIFY\",\"fields\":["
+				+ "{\"key\":\"evidence\",\"label\":\"证据\",\"type\":\"attachment\"}]}}");
 		when(this.runStore.pending(runId, toolCallId)).thenReturn(pending);
 	}
 

@@ -5,6 +5,7 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -14,8 +15,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -96,6 +100,25 @@ class RedisFormAttachmentStoreFailClosedTest {
 			.isInstanceOf(AiStateUnavailableException.class);
 		assertThat(RedisDegradation.count(RedisDegradation.B3_ATTACHMENT_CONSUME)).isGreaterThan(consumeBefore);
 		assertThat(RedisDegradation.count(RedisDegradation.B3_ATTACHMENT_TOMBSTONE)).isGreaterThan(tombstoneBefore);
+	}
+
+	/** 索引写失败（SADD）同样 fail-closed：数据键必须回滚，否则留下一条谁也枚举不到的登记。 */
+	@Test
+	void indexWriteFailureRollsBackTheRegistrationInsteadOfLeavingAnUnlistableEntry() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		SetOperations<String, String> sets = mock(SetOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(redis.opsForSet()).thenReturn(sets);
+		when(sets.add(anyString(), any(String[].class))).thenThrow(new IllegalStateException("模拟 SADD 失败"));
+		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
+
+		assertThatThrownBy(() -> store.register(RUN_ID, CALL_ID, "sess", "a.pdf", 10L, "application/pdf",
+				"/data/a.pdf"))
+			.isInstanceOf(AiStateUnavailableException.class)
+			.hasMessageContaining("索引");
+
+		verify(redis, atLeastOnce()).delete(startsWith("ai:form:att:"));
 	}
 
 	private static ObjectProvider<StringRedisTemplate> providerOf(StringRedisTemplate template) {

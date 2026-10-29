@@ -10,14 +10,19 @@ import java.util.List;
  * 文件本体落在既有 {@link com.example.configmgr.file.FileStorageService} 的存储目录里，
  * 表单回灌只带 id —— <b>文件内容永不进模型上下文</b>，模型只看得到 fileName/fileId/size。
  *
- * <h2>三重校验（{@link GenerativeFormGuard} 在回灌时执行）</h2>
+ * <h2>三段校验 + 一次消费（{@link GenerativeFormGuard}）</h2>
  * <ol>
- * <li><b>存在</b>：{@link #find(String)} 非 null；</li>
+ * <li><b>存在</b>：{@link #find(String)} 非 null（回灌<b>校验</b>阶段执行，只读）；</li>
  * <li><b>归属</b>：登记时绑定的 {@code runId + toolCallId} 必须是本次挂起的表单
  * （比"同一会话"更严：文件只能被请求它的那张表单消费一次）；</li>
  * <li><b>一次性</b>：{@link #consume(String)} 原子地把状态从"可用"翻成"已消费"，
  * 二次回灌同一 id 一律 {@code ATTACHMENT_CONSUMED}。</li>
  * </ol>
+ *
+ * <p><b>校验与消费分离（2026-10-29 修复批）</b>：前两段在回灌校验里只读执行；{@link #consume} 只在
+ * <b>决策已落库之后</b>调用（{@code FrontendToolGuard#settleAcceptedResult}）—— 校验阶段的拒绝是
+ * "可修正后重试"，在那里消费会让"重试"失去意义。
+ * </p>
  */
 public interface FormAttachmentStore {
 
@@ -50,7 +55,23 @@ public interface FormAttachmentStore {
 	}
 
 	/**
-	 * 删除一条登记（会话销毁用；返回被删的登记，包含删除文件所必需的 {@code storagePath}）。
+	 * 该表单（{@code runId + toolCallId}）名下仍在册的附件（表单收口回收面）。
+	 *
+	 * <p>用途有两处：<b>①</b>上传端点的"按表单限件数"（每个 attachment 字段只装一个 fileId，
+	 * 在册数已达字段数就没有空位）；<b>②</b>表单收口（决策接受 / 用户放弃）后回收"传了但没提交"
+	 * 的登记与落盘文件 —— 没有这个面，那些件只能等 TTL 过期，文件成孤儿。
+	 *
+	 * <p>默认空表是给"只实现最小语义"的测试替身/轻量实现用的；生产实现
+	 * {@code RedisFormAttachmentStore} 维护 {@code ai:form:att:form:<runId>:<toolCallId>} 索引并覆盖。
+	 * <b>读失败必须抛出</b>（调用方据此拒绝上传，不得按空表处理成"没有在册件"）。
+	 */
+	default List<Attachment> findByForm(String runId, String toolCallId) {
+		return List.of();
+	}
+
+	/**
+	 * 删除一条登记（会话销毁 / 表单收口回收用；返回被删的登记，包含删除文件所必需的
+	 * {@code storagePath}）。
 	 *
 	 * <p>与 {@link #consume(String)} 的区别：不置"已消费"墓碑（销毁不是消费），
 	 * 幂等（不存在返回 null）。默认实现没有撤销登记的能力，返回 null；生产实现覆盖。

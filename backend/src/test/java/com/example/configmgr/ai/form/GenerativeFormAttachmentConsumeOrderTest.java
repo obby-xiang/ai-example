@@ -1,0 +1,266 @@
+package com.example.configmgr.ai.form;
+
+import com.example.configmgr.ai.tool.FrontendToolGuard;
+import com.example.configmgr.common.AiStateUnavailableException;
+import com.example.configmgr.config.AppProperties;
+import com.example.configmgr.file.FileStorageService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * G-E 附件的<b>校验与消费分离</b>（2026-10-29 修复批）。
+ *
+ * <p>旧实现的 {@code inspectResult} 在"值校验通过"时就消费附件并删盘 —— 那一步发生在决策
+ * 抢 guard / 落库<b>之前</b>。于是同一份回灌里只要有一件附件消费失败（并发、登记过期、Redis
+ * 抖动），前几件已经被删掉，回灌却被判成"可修正后重试"：用户手里剩下的 fileId 全是死的，
+ * 重试注定 {@code ATTACHMENT_CONSUMED}。更糟的是"决策没写成"与"附件已消费"同时发生，
+ * 卡还 PENDING 但数据已经不可用。
+ *
+ * <p>现在的口径：
+ * <ol>
+ * <li>{@code inspectResult} 只做<b>只读</b>三段校验（存在 / 归属 / 形状），一件都不消费；</li>
+ * <li>消费发生在决策落库之后的 {@code settleAcceptedResult}（{@link FrontendToolGuard} 的
+ * 决策后钩子）—— 此时结论已经定了，部分失败只记日志，绝不再对外宣称"可重试"；</li>
+ * <li>多附件先<b>全部</b>校验并全部取到元数据，再逐件消费；</li>
+ * <li>表单收口（决策接受 / 用户放弃）后回收该表单名下<b>没被提交</b>的登记与落盘文件
+ * （用户重传后放弃的旧件就是孤儿）。</li>
+ * </ol>
+ */
+class GenerativeFormAttachmentConsumeOrderTest {
+
+	private static final String ONE_ATTACHMENT = "{\"form\":{\"scenario\":\"CLARIFY\",\"fields\":["
+			+ "{\"key\":\"evidence\",\"label\":\"附件\",\"type\":\"attachment\",\"required\":true}]}}";
+
+	private static final String TWO_ATTACHMENTS = "{\"form\":{\"scenario\":\"CLARIFY\",\"fields\":["
+			+ "{\"key\":\"evidence\",\"label\":\"证据\",\"type\":\"attachment\"},"
+			+ "{\"key\":\"contract\",\"label\":\"合同\",\"type\":\"attachment\"}]}}";
+
+	private static final Path STORAGE_ROOT = createStorageRoot();
+
+	private final InMemoryStore store = new InMemoryStore();
+
+	private final GenerativeFormGuard guard = new GenerativeFormGuard(new ObjectMapper(), this.store,
+			storageService());
+
+	@AfterAll
+	static void removeStorageRoot() throws IOException {
+		if (!Files.exists(STORAGE_ROOT)) {
+			return;
+		}
+		try (Stream<Path> walk = Files.walk(STORAGE_ROOT)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		}
+	}
+
+	@Test
+	void inspectionValidationDoesNotConsumeAnyAttachment() throws IOException {
+		Path file = Files.writeString(STORAGE_ROOT.resolve("inspect-only.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment attachment = register("evidence.pdf", file);
+
+		FrontendToolGuard.Verdict verdict = this.guard.inspectResult("run-1", "call-1", ONE_ATTACHMENT,
+				values("evidence", attachment.fileId()));
+
+		assertThat(verdict.accepted()).isTrue();
+		assertThat(this.store.find(attachment.fileId())).as("校验是只读的：登记必须还在").isNotNull();
+		assertThat(file).as("校验是只读的：落盘文件不得被删").exists();
+	}
+
+	@Test
+	void acceptedDecisionConsumesAllAttachmentsAndDeletesTheirFiles() throws IOException {
+		Path evidence = Files.writeString(STORAGE_ROOT.resolve("decided-evidence.pdf"), "pdf-bytes");
+		Path contract = Files.writeString(STORAGE_ROOT.resolve("decided-contract.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment first = register("evidence.pdf", evidence);
+		FormAttachmentStore.Attachment second = register("contract.pdf", contract);
+		String submitted = "{\"evidence\":\"" + first.fileId() + "\",\"contract\":\"" + second.fileId() + "\"}";
+
+		// 决策落库之后的钩子：一次提交里的每一件都要消费（多附件不得只消费第一件）
+		this.guard.settleAcceptedResult("run-1", "call-1", TWO_ATTACHMENTS, submitted);
+
+		assertThat(this.store.find(first.fileId())).isNull();
+		assertThat(this.store.find(second.fileId())).isNull();
+		assertThat(this.store.wasConsumed(first.fileId())).isTrue();
+		assertThat(this.store.wasConsumed(second.fileId())).isTrue();
+		assertThat(evidence).doesNotExist();
+		assertThat(contract).doesNotExist();
+	}
+
+	@Test
+	void partialConsumeFailureIsNotReportedAsRetryableRejection() throws IOException {
+		Path evidence = Files.writeString(STORAGE_ROOT.resolve("partial-evidence.pdf"), "pdf-bytes");
+		Path contract = Files.writeString(STORAGE_ROOT.resolve("partial-contract.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment first = register("evidence.pdf", evidence);
+		FormAttachmentStore.Attachment second = register("contract.pdf", contract);
+		this.store.failConsume.add(second.fileId());
+		// 同一个 Redis 故障通常也让索引读不可用：回收面因此也读不出在册件（下面断言"保留"）
+		this.store.failFormIndex = true;
+		String submitted = "{\"evidence\":\"" + first.fileId() + "\",\"contract\":\"" + second.fileId() + "\"}";
+
+		// 决策已经落库：消费阶段的基础设施故障不得再走"回灌被拒、可修正后重试"那条路 ——
+		// 那会把用户手里剩下的 fileId 说成还能用（其实第一件已经删了）。只告警，结论不动。
+		this.guard.settleAcceptedResult("run-1", "call-1", TWO_ATTACHMENTS, submitted);
+
+		assertThat(this.store.find(first.fileId())).as("已消费的件照常删除").isNull();
+		assertThat(evidence).doesNotExist();
+		assertThat(this.store.find(second.fileId())).as("消费失败的件保留登记（安全方向：多留不漏删）").isNotNull();
+		assertThat(contract).exists();
+	}
+
+	@Test
+	void leftoverUploadsOfTheFormAreReclaimedWhenTheDecisionIsAccepted() throws IOException {
+		Path evidence = Files.writeString(STORAGE_ROOT.resolve("kept-evidence.pdf"), "pdf-bytes");
+		Path superseded = Files.writeString(STORAGE_ROOT.resolve("superseded.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment submitted = register("evidence.pdf", evidence);
+		FormAttachmentStore.Attachment abandoned = register("superseded.pdf", superseded);
+
+		// 只提交第一件：同表单的其余上传件（用户重传后放弃的旧件）在收口时一起回收
+		this.guard.settleAcceptedResult("run-1", "call-1", TWO_ATTACHMENTS, values("evidence", submitted.fileId()));
+
+		assertThat(this.store.find(submitted.fileId())).isNull();
+		assertThat(this.store.find(abandoned.fileId())).as("没被提交的上传件不得留成孤儿").isNull();
+		assertThat(superseded).doesNotExist();
+	}
+
+	@Test
+	void discardedFormReclaimsEveryRegisteredUpload() throws IOException {
+		Path evidence = Files.writeString(STORAGE_ROOT.resolve("dismissed-evidence.pdf"), "pdf-bytes");
+		Path contract = Files.writeString(STORAGE_ROOT.resolve("dismissed-contract.pdf"), "pdf-bytes");
+		FormAttachmentStore.Attachment first = register("evidence.pdf", evidence);
+		FormAttachmentStore.Attachment second = register("contract.pdf", contract);
+
+		// 用户关掉表单（cancelled=true）：一件都没提交，两件都不得留到 TTL
+		this.guard.settleDiscardedResult("run-1", "call-1");
+
+		assertThat(this.store.find(first.fileId())).isNull();
+		assertThat(this.store.find(second.fileId())).isNull();
+		assertThat(evidence).doesNotExist();
+		assertThat(contract).doesNotExist();
+		// 放弃不是消费：不置"已消费"墓碑（两者对用户是不同的提示）
+		assertThat(this.store.wasConsumed(first.fileId())).isFalse();
+	}
+
+	// ── 夹具 ────────────────────────────────────────────────────────────────
+
+	private FormAttachmentStore.Attachment register(String fileName, Path file) {
+		return this.store.register("run-1", "call-1", "sess-1", fileName, sizeOf(file), "application/pdf",
+				file == null ? null : file.toString());
+	}
+
+	private static long sizeOf(Path file) {
+		try {
+			return file == null ? 0L : Files.size(file);
+		}
+		catch (IOException ex) {
+			throw new UncheckedIOException(ex);
+		}
+	}
+
+	private static String values(String key, String fileId) {
+		return "{\"" + key + "\":\"" + fileId + "\"}";
+	}
+
+	private FileStorageService storageService() {
+		AppProperties properties = new AppProperties();
+		properties.getFile().setStoragePath(STORAGE_ROOT.toString());
+		return new FileStorageService(properties);
+	}
+
+	private static Path createStorageRoot() {
+		try {
+			return Files.createTempDirectory("flc-attachment-order-");
+		}
+		catch (IOException ex) {
+			throw new UncheckedIOException(ex);
+		}
+	}
+
+	/** 进程内登记簿（含表单索引；语义与 {@code RedisFormAttachmentStore} 的索引一致）。 */
+	private static final class InMemoryStore implements FormAttachmentStore {
+
+		private final Map<String, Attachment> items = new LinkedHashMap<>();
+
+		private final Set<String> consumed = ConcurrentHashMap.newKeySet();
+
+		private final Set<String> failConsume = ConcurrentHashMap.newKeySet();
+
+		private final AtomicInteger seq = new AtomicInteger();
+
+		private boolean failReads;
+
+		private boolean failFormIndex;
+
+		@Override
+		public synchronized Attachment register(String runId, String toolCallId, String sessionId, String fileName,
+				long size, String contentType, String storagePath) {
+			Attachment attachment = new Attachment("att_" + String.format("ord%05d", this.seq.incrementAndGet()),
+					runId, toolCallId, sessionId, fileName, size, contentType, storagePath);
+			this.items.put(attachment.fileId(), attachment);
+			return attachment;
+		}
+
+		@Override
+		public synchronized Attachment find(String fileId) {
+			if (this.failReads) {
+				throw new AiStateUnavailableException("模拟 Redis 读失败（内部细节）");
+			}
+			return this.items.get(fileId);
+		}
+
+		@Override
+		public synchronized boolean consume(String fileId) {
+			if (this.failConsume.contains(fileId)) {
+				throw new AiStateUnavailableException("模拟 Redis 消费失败（内部细节）");
+			}
+			if (this.items.remove(fileId) != null) {
+				this.consumed.add(fileId);
+				return true;
+			}
+			return false;
+		}
+
+		@Override
+		public boolean wasConsumed(String fileId) {
+			return this.consumed.contains(fileId);
+		}
+
+		@Override
+		public synchronized List<Attachment> findByForm(String runId, String toolCallId) {
+			if (this.failFormIndex) {
+				throw new AiStateUnavailableException("模拟 Redis 索引读失败（内部细节）");
+			}
+			List<Attachment> out = new ArrayList<>();
+			for (Attachment attachment : this.items.values()) {
+				if (java.util.Objects.equals(runId, attachment.runId())
+						&& java.util.Objects.equals(toolCallId, attachment.toolCallId())) {
+					out.add(attachment);
+				}
+			}
+			return out;
+		}
+
+		@Override
+		public synchronized Attachment deleteRegistration(String fileId) {
+			return this.items.remove(fileId);
+		}
+
+	}
+
+}

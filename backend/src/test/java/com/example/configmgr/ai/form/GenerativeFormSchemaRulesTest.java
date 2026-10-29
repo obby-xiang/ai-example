@@ -309,6 +309,37 @@ class GenerativeFormSchemaRulesTest {
 	}
 
 	@Test
+	void rejectsNegativeMaxLengthAtSchemaStage() throws Exception {
+		// 负数上界不是"更严的约束"，而是无法满足的约束：值校验阶段 text.length() > -1 恒真，
+		// 用户填什么都过不了闸，挂起只能等到放弃。schema 阶段就拒，模型改一次即可用。
+		String negative = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"keyword","label":"关键字","type":"text","maxLength":-1}]}""";
+		assertThat(joined(GenerativeFormRules.schemaReasons(form(negative)))).contains("maxLength 不得为负");
+		// 0 是合法边界（只接受空串），不得被"负数"判据误伤
+		String zero = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"keyword","label":"关键字","type":"text","maxLength":0}]}""";
+		assertThat(GenerativeFormRules.schemaReasons(form(zero))).isEmpty();
+	}
+
+	@Test
+	void rejectsNegativeMaxItemsAtSchemaStage() throws Exception {
+		// 同 maxLength：负数上界在值校验阶段是"任何选集都超限"，schema 阶段就拒。
+		String negative = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"defs","label":"配置项","type":"multi_select","maxItems":-1,
+				   "options":[{"value":"CURRENCY"}]}]}""";
+		assertThat(joined(GenerativeFormRules.schemaReasons(form(negative)))).contains("maxItems 不得为负");
+		// 0 是合法边界（只接受空选），不得被"负数"判据误伤
+		String zero = """
+				{"scenario":"FILTER","fields":[
+				  {"key":"defs","label":"配置项","type":"multi_select","maxItems":0,
+				   "options":[{"value":"CURRENCY"}]}]}""";
+		assertThat(GenerativeFormRules.schemaReasons(form(zero))).isEmpty();
+	}
+
+	@Test
 	void reportsEveryProblemInOnePass() throws Exception {
 		String messy = """
 				{"scenario":"FILTER","title":123,"fields":[

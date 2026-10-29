@@ -14,17 +14,24 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * {@code generative_form} 的复核器（DC-15 安全闸）：把模型给的表单 schema 与前端回灌的填写值，
  * 交给 {@link GenerativeFormRules} 的白名单规则判定，产出可回填的 {@link Verdict}。
  *
- * <p>本类只做五件事：解析 JSON、调用纯规则、<b>槽位放行</b>（purpose + 任务槽位）、<b>附件三重校验</b>
- * （G-E：存在 / 归属 / 一次性）、组装结论文本 —— 校验口径<b>全部</b>在 {@link GenerativeFormRules} 里
- * （那里是可以脱离 Spring 直接断言的正反例对象）。
+ * <p>本类只做五件事：解析 JSON、调用纯规则、<b>槽位放行</b>（purpose + 任务槽位）、<b>附件只读校验</b>
+ * （G-E：存在 / 归属 / 形状）与决策落库后的<b>附件消费/回收</b>、组装结论文本 —— 校验口径<b>全部</b>在
+ * {@link GenerativeFormRules} 里（那里是可以脱离 Spring 直接断言的正反例对象）。
+ *
+ * <p><b>校验与消费分离（2026-10-29 修复批）</b>：{@link #inspectResult} 跑在"抢决策 guard / 落库"
+ * <b>之前</b>，那个时点拒绝的语义是"可修正后重试"——在那里消费一次性件会把"可重试"变成假话。
+ * 消费改由 {@link #settleAcceptedResult}（决策落库后）/ {@link #settleDiscardedResult}（用户放弃后）
+ * 承担，失败只告警、不改结论。
  *
  * <p>两道闸门的调用方见 {@link FrontendToolGuard}：下发前（{@code SpToolCallingManager}）与
  * 回灌前（{@code ConfirmGate}）。本类<b>不</b>在 {@code AiTools#generativeForm} 里做事 ——
@@ -58,8 +65,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	private final FormAttachmentStore attachments;
 
 	/**
-	 * 物理文件存储（可为 null：只做 schema/值校验的单元路径）。非 null 时，附件
-	 * {@code consume} 成功后删除落盘文件（一次性件不会再有第二次读取机会）。
+	 * 物理文件存储（可为 null：只做 schema/值校验的单元路径）。非 null 时，决策落库后的
+	 * {@code consume}/{@code deleteRegistration} 成功即删除落盘文件（一次性件不会再有第二次读取机会）。
 	 */
 	private final FileStorageService fileStorage;
 
@@ -187,8 +194,14 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	/**
 	 * 回灌前的填写值复核（带 {@code runId/toolCallId}：附件必须属于<b>本次挂起的这张表单</b>）。
 	 *
-	 * <p>复核通过后<b>才</b>消费附件（一次性）：不通过时不消费，用户修正后仍可重试；
-	 * 消费失败（并发已消费）同样判 {@code ATTACHMENT_CONSUMED}，挂起保持未决。
+	 * <h2>只读（2026-10-29 校验与消费分离批）</h2>
+	 * 本方法<b>不消费</b>附件、<b>不删</b>盘：它跑在"抢决策 guard / 落库"之前，而这个时点的拒绝
+	 * 语义是"可修正后重试"——在那里消费一次性件，任何后续失败都会让"可重试"变成假话
+	 * （用户剩下的 fileId 已作废，重试必然 {@code ATTACHMENT_CONSUMED}）。
+	 * 消费挪到决策落库之后的 {@link #settleAcceptedResult}。
+	 *
+	 * <p>多附件在这里<b>全部</b>过一遍三段校验（存在 / 归属 / 形状），一件不合格即整单拒绝，
+	 * 不做"先消费前几件"的部分动作。
 	 */
 	@Override
 	public Verdict inspectResult(String runId, String toolCallId, String argumentsJson, String resultJson) {
@@ -211,25 +224,100 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
 					"回灌的表单结果未通过类型复核，本次回灌被拒（挂起仍在等待，可修正后重试）", issues);
 		}
-		try {
-			// 元数据必须在消费前取（消费会把登记条目删掉）
-			String metadata = attachmentMetadata(form, values);
-			if (!consumeAttachments(form, values)) {
-				List<FormIssue> consumed = List.of(FormIssue.form(FormIssueCodes.ATTACHMENT_CONSUMED,
-						"附件已被其它提交消费（同一 fileId 只能使用一次），请重新上传后再提交"));
-				return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
-						"回灌的附件已被消费，本次回灌被拒（挂起仍在等待，请重新上传）", consumed);
-			}
-			return metadata == null ? Verdict.accept() : Verdict.accept().withResultSuffix(metadata);
+		String metadata = attachmentMetadata(form, values);
+		return metadata == null ? Verdict.accept() : Verdict.accept().withResultSuffix(metadata);
+	}
+
+	/**
+	 * 决策落库之后消费本次提交的附件（一次性），并回收本表单名下没被提交的登记。
+	 *
+	 * <p><b>为什么在这里消费</b>：结论已写成 {@code FRONTEND_RESULT}，此时消费失败不再是
+	 * "用户改一下再交"能解决的事 —— 于是失败只告警、绝不改变结论，也不对外宣称可重试。
+	 * 部分失败最多让未消费的登记活到 TTL（安全方向：多留，不漏删）。
+	 *
+	 * <p><b>先读后删</b>：物理路径必须在 {@code consume} 之前取（消费会删掉登记条目）；
+	 * 读不到的条目直接跳过（登记已过期/已被并发消费），不影响其它件。
+	 */
+	@Override
+	public void settleAcceptedResult(String runId, String toolCallId, String argumentsJson, String resultJson) {
+		if (this.attachments == null) {
+			return;
 		}
-		catch (AiStateUnavailableException ex) {
-			// I-2：基础设施故障给 typed FormIssue（可重试），不把 Redis 异常原文暴露给用户。
-			log.warn("generative_form 附件登记簿暂不可用 runId={} toolCallId={}：{}", runId, toolCallId,
-					ex.getMessage());
-			List<FormIssue> unavailable = List.of(FormIssue.form(FormIssueCodes.ATTACHMENT_UNAVAILABLE,
-					"附件校验暂不可用，请稍后重试"));
-			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
-					"附件校验暂不可用，本次回灌未执行（挂起仍在等待，请稍后重试）", unavailable);
+		JsonNode arguments = parse(argumentsJson);
+		JsonNode form = arguments != null && arguments.isObject() ? arguments.get("form") : null;
+		JsonNode values = parse(resultJson);
+		List<AttachmentRef> refs = attachmentRefs(form, values);
+		Map<String, FormAttachmentStore.Attachment> resolved = new LinkedHashMap<>();
+		for (AttachmentRef ref : refs) {
+			try {
+				FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
+				if (stored != null) {
+					resolved.put(ref.fileId(), stored);
+				}
+				else {
+					log.info("附件消费时登记已不在（过期或已消费）fileId={} runId={} toolCallId={}", ref.fileId(),
+							runId, toolCallId);
+				}
+			}
+			catch (AiStateUnavailableException ex) {
+				log.warn("附件消费前读取登记失败（该件保留到 TTL）fileId={} runId={} toolCallId={}：{}", ref.fileId(),
+						runId, toolCallId, ex.getMessage());
+			}
+		}
+		Set<String> consumedIds = new LinkedHashSet<>();
+		for (Map.Entry<String, FormAttachmentStore.Attachment> entry : resolved.entrySet()) {
+			try {
+				if (this.attachments.consume(entry.getKey())) {
+					consumedIds.add(entry.getKey());
+					deleteConsumedFile(entry.getValue());
+				}
+				else {
+					// 决策已定：不判失败、不改结论；该件至多留到 TTL（安全方向是多留不漏删）
+					log.warn("附件消费未成功（已被消费或登记过期；决策已落库，不回滚）fileId={} runId={} toolCallId={}",
+							entry.getKey(), runId, toolCallId);
+				}
+			}
+			catch (AiStateUnavailableException ex) {
+				log.warn("附件消费失败（决策已落库，不回滚）fileId={} runId={} toolCallId={}：{}", entry.getKey(),
+						runId, toolCallId, ex.getMessage());
+			}
+		}
+		reclaimFormLeftovers(runId, toolCallId, consumedIds);
+	}
+
+	/** 用户放弃该表单：回收它名下所有仍未消费的登记与落盘文件。 */
+	@Override
+	public void settleDiscardedResult(String runId, String toolCallId) {
+		reclaimFormLeftovers(runId, toolCallId, Set.of());
+	}
+
+	/**
+	 * 表单收口回收：删掉本表单名下<b>没被本次提交消费</b>的登记，并删对应落盘文件。
+	 *
+	 * <p>什么时候会有这种件：用户传了文件又重传（旧件没人再引用）、传了多个字段只提交一部分、
+	 * 直接关掉表单。它们此后再也不可能被提交（该调用已不是 {@code PENDING}，上传口也会拒绝），
+	 * 留着只能等 TTL —— 文件就成了孤儿。
+	 *
+	 * <p>失败只告警：回收是清理面，不得影响已落库的结论。
+	 */
+	private void reclaimFormLeftovers(String runId, String toolCallId, Set<String> keep) {
+		if (this.attachments == null) {
+			return;
+		}
+		try {
+			for (FormAttachmentStore.Attachment leftover : this.attachments.findByForm(runId, toolCallId)) {
+				if (leftover == null || leftover.fileId() == null || keep.contains(leftover.fileId())) {
+					continue;
+				}
+				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(leftover.fileId());
+				if (removed != null) {
+					deleteConsumedFile(removed);
+				}
+			}
+		}
+		catch (RuntimeException ex) {
+			// 回收失败不影响结论；残留件仍受登记 TTL 覆盖（与登记同寿）
+			log.warn("表单收口回收未提交附件失败 runId={} toolCallId={}：{}", runId, toolCallId, ex.getMessage());
 		}
 	}
 
@@ -302,21 +390,6 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			}
 		}
 		return issues;
-	}
-
-	private boolean consumeAttachments(JsonNode form, JsonNode values) {
-		if (this.attachments == null) {
-			return true;
-		}
-		for (AttachmentRef ref : attachmentRefs(form, values)) {
-			// 物理路径必须在消费前取（消费会删掉登记条目）；取不到不影响一次性判定。
-			FormAttachmentStore.Attachment stored = this.attachments.find(ref.fileId());
-			if (!this.attachments.consume(ref.fileId())) {
-				return false;
-			}
-			deleteConsumedFile(stored);
-		}
-		return true;
 	}
 
 	/**
