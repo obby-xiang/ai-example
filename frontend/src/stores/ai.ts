@@ -337,6 +337,37 @@ export const PRE_STREAM_RETRY_MAX = 1
 /** 重试前等待（毫秒）：给瞬时抖动一个恢复窗口，但不让用户感知为"卡住"。 */
 export const PRE_STREAM_RETRY_DELAY_MS = 400
 
+/**
+ * O02：同 tick「停止 + 发送」时，发送在**停止落地**（cancel 送达）前最多等这么久。
+ *
+ * <p>停止是一个决策：`stop()` 的本地收敛是同步的，cancel 请求则要一点时间才到后端。
+ * 发送等它落地，才不会撞上"停止尚未传播"的残留 409（那会让界面谎报"上一轮仍在进行中"）。
+ * 等待有界：后端不可达时不能让用户的新消息卡在输入框里 —— 超时后照常发送，残影 409
+ * 仍由 {@link isAuthoritativeBusyRun} 拦下。
+ */
+export const STOP_SETTLE_MAX_WAIT_MS = 2_000
+
+/**
+ * O02：`stop()` 的落地闸门（模块级，与 `currentAbort` 同为"这一轮"的句柄）。
+ * 非 null = 有一次停止还在等 cancel 送达；{@link send} 据此先等它落地。
+ */
+let stopSettleGate: Promise<void> | null = null
+
+/** 等停止落地（有界：见 {@link STOP_SETTLE_MAX_WAIT_MS}）。无停止在途 = 立即返回。 */
+function waitForStopSettlement(): Promise<void> {
+  const gate = stopSettleGate
+  if (gate === null) {
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, STOP_SETTLE_MAX_WAIT_MS)
+    void gate.then(() => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
 /** 这些码即使带 5xx 也是**确定性**失败（重试只会重复同一结果）。 */
 const NON_TRANSIENT_PRE_STREAM_CODES: ReadonlySet<string> = new Set([
   ErrorCode.SESSION_BUSY,
@@ -2236,7 +2267,30 @@ export const useAiStore = defineStore('ai', {
      * <p>**只作动作入参**：面板给"回到进行中的回答"入口，`runId` 绝不进用户可见文本；
      * store 不自动重挂、不轮询。持有者不可知（`unknown=true`）时为 null。
      */
-    busyRun: null as AiBusyRunRef | null
+    busyRun: null as AiBusyRunRef | null,
+    /**
+     * O02：本端已经**发出停止**的那一轮（`stop()` 同步置位）。
+     *
+     * <p>停止与它的传播之间存在窗口：窗口里后端仍可能回 409 指回这一轮。那是对"停止尚未
+     * 传播"的残影，不是"上一轮仍在进行中" —— 见 {@link isAuthoritativeBusyRun}。
+     * runId 每轮唯一，故置位后无需回收（换会话时随现场清空）。
+     */
+    stoppedRunId: null as string | null,
+    /**
+     * M08：当前**活动续收连接**所在的 runId（single-flight 登记位，null = 没有活动连接）。
+     *
+     * <p>与 `currentAbort` 一起判活（{@link hasLiveRunStream}）：同一 runId 只允许一条 SSE，
+     * 后到的恢复入口并入现连接，不新建 —— 否则 `reattachActive` 与 `resumeSnapshotStream`
+     * 各起一条（全量回放 + 增量续收并存），连接与重连预算都翻倍。
+     */
+    activeStreamRunId: null as string | null,
+    /**
+     * M08：上面那条活动连接是否**按"挂起等待"语义**建立的（服务端送达请求帧后会主动收流）。
+     *
+     * <p>这类连接不会带来决策之后的续跑帧 —— 决策送达时必须**重连**（既有 B1 口径），
+     * 所以它不参与 single-flight 的"并入"（否则续流会被静默吞掉）。判据见 {@link resumeSnapshotStream}。
+     */
+    activeStreamParked: false
   }),
 
   getters: {
@@ -3445,6 +3499,11 @@ export const useAiStore = defineStore('ai', {
       this.streamInterrupted = false
       this.suspended = false
       this.loading = true
+      // M08（single-flight）：这一轮已经有活动续收连接在写（另一恢复入口先到）——
+      // 不重复建连接，也不清段重放：清掉之后新连接不会补发已收过的帧，正文会停在空白。
+      if (this.canJoinRunStream(runId)) {
+        return
+      }
       let host = this.findInFlightHost()
       if (!host) {
         // 本轮在消息里没有宿主（如第 2 轮刚开、历史只到本轮的提问、镜像未落盘）：**新建**空宿主
@@ -3633,6 +3692,63 @@ export const useAiStore = defineStore('ai', {
       } finally {
         this.restoringRecovery = false
       }
+    },
+
+    /**
+     * M08：该 runId 是否已有一条**活动**续收连接（single-flight 判据）。
+     *
+     * <p>判活三件一起：登记位一致、句柄仍是 `currentAbort`、且未被中止（`stop()` /
+     * `adoptFreshSession()` 之后立刻失效，不会把新连接误判成"已有连接"）。
+     */
+    hasLiveRunStream(runId: string): boolean {
+      return this.activeStreamRunId === runId && currentAbort !== null && !currentAbort.signal.aborted
+    },
+
+    /**
+     * M08：该 runId 的现连接能否**并入**（不再新建一条 SSE）。
+     *
+     * <p>= 有活动连接且它**不是**按挂起语义建的：挂起连接送达请求帧后就被服务端收流，
+     * 决策之后的续跑帧只能靠一条新连接接回（既有 B1 口径），并入它等于吞掉续流。
+     */
+    canJoinRunStream(runId: string): boolean {
+      return this.hasLiveRunStream(runId) && !this.activeStreamParked
+    },
+
+    /**
+     * O02：409 回执里的"进行中轮"是否仍是**权威活动运行**（决定要不要给忙提示）。
+     *
+     * <p>两条本地证据都足以推翻它：① 本端已对这条 run 发出停止（{@link stoppedRunId}）——
+     * 那时的"忙"只是停止还没传播到后端的残影；② 本端已收到这一轮的终态（消息 `done`）——
+     * 那一轮已经结束。其余情形（另一页签 / 另一条真实在跑的轮）照常返回 true：
+     * 真正的 `SESSION_BUSY` 不被吞，入口照旧给出。
+     */
+    isAuthoritativeBusyRun(busy: AiBusyRunRef | null): boolean {
+      if (busy === null) {
+        return false
+      }
+      if (this.stoppedRunId === busy.runId) {
+        return false
+      }
+      return !this.messages.some((message) => message.role === 'assistant'
+        && message.runId === busy.runId
+        && message.done)
+    },
+
+    /**
+     * O02：终态帧（DONE / CANCELLED / error）到达 ⇒ 忙提示立即作废。
+     *
+     * <p>"回到进行中的回答"只对**仍在进行**的轮成立：那一轮一旦收尾，入口指过去的只会是一条
+     * 已结束的回答。只清与终帧同轮（或本端当前轮）的登记，别的活动轮的忙态不受影响。
+     */
+    clearBusyRunOnTerminal(runId: string | undefined): void {
+      const busy = this.busyRun
+      if (busy === null) {
+        return
+      }
+      if (runId !== undefined && runId !== busy.runId && this.activeRunId !== busy.runId) {
+        return
+      }
+      this.busyRun = null
     },
 
     /**
@@ -3923,6 +4039,21 @@ export const useAiStore = defineStore('ai', {
      * @param awaitingInput 快照或剩余待决卡证明本轮仍 park；一旦执行继续必须恢复 false
      */
     async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string, awaitingInput = false): Promise<void> {
+      // M08（single-flight）：同一 runId 只允许一条活动 SSE。已有连接正在写这一轮时**并入**它 ——
+      // 不新建连接、不换轮次身份（换身份会让在跑连接的登记与回调一起失效），锚点统一为
+      // 「已收最大序号」。两个恢复入口并发（reattachActive + resumeSnapshotStream）因此
+      // 不会再出现"全量回放 + 增量续收"两条并存、重连预算翻倍。
+      if (this.canJoinRunStream(runId)) {
+        this.runSeq = recordRunSeq(this.runSeq, runId, Math.max(lastSeq, this.runSeq[runId] ?? 0))
+        this.loading = true
+        this.streamInterrupted = false
+        const joined = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
+        if (joined && (!joined.done || joined.runId === runId)) {
+          joined.streaming = true
+          joined.done = false
+        }
+        return
+      }
       // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
       // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
       const previous = currentAbort
@@ -3935,6 +4066,9 @@ export const useAiStore = defineStore('ai', {
       this.stopped = false
       const controller = new AbortController()
       currentAbort = controller
+      this.activeStreamRunId = runId
+      // M08：记下这条连接是否按"挂起等待"语义建立 —— 这类连接不参与并入（见 canJoinRunStream）。
+      this.activeStreamParked = awaitingInput
       // 无宿主（I-1「无卡挂流」）：置 null —— `handleFrame` 收到 `assistantId === undefined` 时
       // 按"本轮"处理并惰性取用当前助手消息，故 null 与 undefined 在此等价。
       activeRoundHostId = hostMessageId ?? null
@@ -3944,8 +4078,13 @@ export const useAiStore = defineStore('ai', {
         host.streaming = true
         host.done = false
       }
-      /** R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。 */
-      const isCurrentRound = (): boolean => currentAbort === controller
+      /**
+       * R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。
+       * M08：连接身份 = 句柄引用 **+ 建连时的轮次纪元** —— 停止/换轮（`roundEpoch` 递增）
+       * 之后，被中止的旧连接即使还在派发回调，也一律失效（不写段、不写提示、不写轮次状态）。
+       */
+      const streamEpoch = roundEpoch
+      const isCurrentRound = (): boolean => currentAbort === controller && roundEpoch === streamEpoch
       /** 批次2：归档缺口只按**首帧**判一次（后续跳号可能是并发交错的正常现象）。 */
       let gapChecked = false
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
@@ -3956,6 +4095,9 @@ export const useAiStore = defineStore('ai', {
           runId,
           {
             onFrame: (frame) => {
+              if (!isCurrentRound()) {
+                return
+              }
               // 批次2：续收**首帧**序号断层 = 归档窗口缺口（不可完整恢复，中性）。只判一次。
               if (!gapChecked) {
                 const firstSeq = frameSeq(frame)
@@ -4004,6 +4146,8 @@ export const useAiStore = defineStore('ai', {
           this.loading = false
           currentAbort = null
           activeRoundHostId = null
+          this.activeStreamRunId = null
+          this.activeStreamParked = false
         }
       }
     },
@@ -4069,6 +4213,12 @@ export const useAiStore = defineStore('ai', {
         // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
         return { outcome: 'not-sent', userMessageId: null }
       }
+      // O02：同 tick 的「停止 + 发送」—— 停止是一个决策，必须**先落地**（本地收敛同步生效，
+      // 这里等 cancel 送达）再判断能不能发、是不是忙态：否则 /chat 会撞上停止尚未传播的
+      // 残留 409，界面随即谎报"上一轮仍在进行中"。等待有界（见 waitForStopSettlement）。
+      if (this.stopping) {
+        await waitForStopSettlement()
+      }
       if (this.loading) {
         // 批G · G6（用户直裁 2026-10-22）：在途轮里输入框可输入，但回车/发送**不响应且零提示**
         // —— 不弹 notice、不写占位气泡、不清草稿。用户要发就自己点停止、再点发送。
@@ -4105,6 +4255,8 @@ export const useAiStore = defineStore('ai', {
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
+      this.activeStreamRunId = null // runId 由 start 帧给出（见 handleFrame 的 start 分支）
+      this.activeStreamParked = false
       /** R1/R6（issue#5）：本轮是否仍是"当前轮" —— 以 AbortController 身份为准。 */
       const isCurrentRound = (): boolean => currentAbort === controller
 
@@ -4222,8 +4374,11 @@ export const useAiStore = defineStore('ai', {
         const sessionPurged = error instanceof ApiError && error.code === ErrorCode.SESSION_PURGED
         // 批次2（ADR-5）：409 回执里的 runId/reattach 只作**手动**"回到进行中的回答"入口。
         // 不自动重挂、不轮询；持有者不可知（unknown=true / 无 runId）时不登记，绝不编造地址。
+        // O02：还必须是**权威活动运行** —— 本端刚停止的那一轮、已收到终态的轮都不是
+        // "上一轮仍在进行中"（那是停止尚未传播的残影 / 已结束的轮），此时只留"没发出去"的提示。
         if (busyConflict && error instanceof ApiError) {
-          this.busyRun = readBusyRunRef(error)
+          const busy = readBusyRunRef(error)
+          this.busyRun = this.isAuthoritativeBusyRun(busy) ? busy : null
         }
         /** 410 是否由本处做了本地恢复（决定收尾口径与乐观气泡的去向）。 */
         let purgedRecovered = false
@@ -4270,6 +4425,8 @@ export const useAiStore = defineStore('ai', {
           }
           currentAbort = null
           activeRoundHostId = null
+          this.activeStreamRunId = null
+          this.activeStreamParked = false
         }
         const target = this.messages.find((message) => message.id === assistant.id)
         // B1：挂起收流时本轮尚未结束（决策后还要续跑），不封口消息 —— 与流派 A 的观感一致：
@@ -4442,6 +4599,24 @@ export const useAiStore = defineStore('ai', {
       if (!targetRunId) {
         return // 没有可接管的轮：静默（不写任何技术提示）
       }
+      // M08（single-flight）：同一 runId 已有活动 SSE 时**并入**，不建第二条连接 ——
+      // 也不递增 `roundEpoch`、不作废快照/表单队列：那会让在跑连接的登记与回调一起失效
+      // （"接管"只是指回同一个轮，不是换轮次身份）。锚点统一为「已收最大序号」。
+      if (this.canJoinRunStream(targetRunId)) {
+        const joinedSeq = options.lastSeq ?? this.runSeq[targetRunId] ?? 0
+        this.runSeq = recordRunSeq(this.runSeq, targetRunId, Math.max(joinedSeq, this.runSeq[targetRunId] ?? 0))
+        this.loading = true
+        this.streamInterrupted = false
+        const joinedHost = options.hostMessageId
+          ? this.messages.find((item) => item.id === options.hostMessageId)
+          : null
+        if (joinedHost) {
+          joinedHost.runId = targetRunId
+          joinedHost.streaming = true
+          joinedHost.done = false
+        }
+        return
+      }
       // B1 收口修（C-1）：接管 = 换轮次身份 —— 在途的旧轮前端工具结局丢弃
       roundEpoch += 1
       // M-2b：接管走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
@@ -4465,9 +4640,17 @@ export const useAiStore = defineStore('ai', {
       clearNotice(this)
       const controller = new AbortController()
       currentAbort = controller
+      this.activeStreamRunId = targetRunId
+      // M08：接管连接不是挂起等待语义（续跑帧会经它送达）
+      this.activeStreamParked = false
       activeRoundHostId = assistant.id
-      /** R1/R6（issue#5）：本次接管是否仍是"当前轮"（以 AbortController 身份为准）。 */
-      const isCurrentRound = (): boolean => currentAbort === controller
+      /**
+       * R1/R6（issue#5）：本次接管是否仍是"当前轮"（以 AbortController 身份为准）。
+       * M08：再加**建连时的轮次纪元** —— 停止/换轮之后，被中止的旧连接即使还在派发回调
+       * （帧可能已经读到内存里），也一律失效，不得写段、写提示或写轮次状态。
+       */
+      const streamEpoch = roundEpoch
+      const isCurrentRound = (): boolean => currentAbort === controller && roundEpoch === streamEpoch
       /** 批次2：归档缺口只按**首帧**判一次（续收锚点 = lastSeq）。 */
       let gapChecked = false
       /** 批次3：探测确认 runId 不存在 ⇒ 已封口，onClose 不得再报"断流"。 */
@@ -4499,6 +4682,9 @@ export const useAiStore = defineStore('ai', {
               this.sealLeftoverInFlight()
             },
             onFrame: (frame) => {
+              if (!isCurrentRound()) {
+                return
+              }
               if (!gapChecked) {
                 const firstSeq = frameSeq(frame)
                 if (firstSeq !== null) {
@@ -4554,6 +4740,8 @@ export const useAiStore = defineStore('ai', {
           this.suspended = false
           currentAbort = null
           activeRoundHostId = null
+          this.activeStreamRunId = null
+          this.activeStreamParked = false
         }
       }
     },
@@ -6478,6 +6666,20 @@ export const useAiStore = defineStore('ai', {
         return // 幂等：没有可停的轮（不写任何提示）
       }
       this.stopping = true
+      // O02：停止的落地闸门 —— 同 tick 的发送/忙态判断先等它（见 waitForStopSettlement）。
+      // 本地收敛在本函数里**同步**完成，闸门只等 cancel 送达后端。
+      let releaseStopGate: () => void = () => {}
+      stopSettleGate = new Promise<void>((resolve) => {
+        releaseStopGate = resolve
+      })
+      // O02：本端已对这条 run 作出停止决定 —— 此后指回它的 409 只是"停止尚未传播"的残影，
+      // 不是"上一轮仍在进行中"（判据见 isAuthoritativeBusyRun）；同时撤掉指向它的忙提示。
+      if (runId !== null) {
+        this.stoppedRunId = runId
+        if (this.busyRun?.runId === runId) {
+          this.busyRun = null
+        }
+      }
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
       // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
@@ -6500,6 +6702,9 @@ export const useAiStore = defineStore('ai', {
       // 停止是"本轮到此为止"：`stopped` 置位让本轮收尾判定为 cancelled；连接仍交给它自己的
       // finally 收口（abort 后立即返回），**不在这里清 currentAbort** —— 清了会让本轮 settle
       // 成 interrupted（身份失效），与"用户主动停止"的语义不符。
+      // M08：登记位随之中止（句柄已 abort ⇒ 判活已失效，这里只是不留残值）。
+      this.activeStreamRunId = null
+      this.activeStreamParked = false
       this.loading = false
       this.suspended = false
       // 批次3：停止后压缩/准备中阶段一并收口（否则阶段条会挂在一个已放弃的轮上）
@@ -6537,6 +6742,9 @@ export const useAiStore = defineStore('ai', {
         // 后端不可达不影响本地停止（上面已收敛）；不写技术文案，用户看到的仍是「已停止」
       } finally {
         this.stopping = false
+        // O02：停止落地 —— 等在闸门上的发送可以开始判断"能不能发 / 是不是忙态"了
+        releaseStopGate()
+        stopSettleGate = null
       }
     },
 
@@ -6680,6 +6888,10 @@ export const useAiStore = defineStore('ai', {
       this.contextStatus = 'idle'
       this.recoveryGap = null
       this.busyRun = null
+      // M08 / O02：连接登记位与"已停止的那一轮"同属旧会话现场，不带走
+      this.activeStreamRunId = null
+      this.activeStreamParked = false
+      this.stoppedRunId = null
       this.restoringRecovery = false
       // 批次6B（N7）：工作区 chip / ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
       // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
@@ -7094,6 +7306,9 @@ export const useAiStore = defineStore('ai', {
         if (isTerminalFrame(frame)) {
           message.streaming = false
           message.done = true
+          // O02：即便这帧属于旧轮的宿主，只要它就是忙提示所指的那一轮，入口也必须作废
+          //（"回到进行中的回答"只对仍在进行的轮成立）——轮次级状态之外，busyRun 是纯指针。
+          this.clearBusyRunOnTerminal(frame.runId)
         }
         return
       }
@@ -7126,6 +7341,9 @@ export const useAiStore = defineStore('ai', {
       switch (frame.type) {
         case 'start':
           this.activeRunId = frame.runId
+          // M08：本轮 runId 一到就登记活动连接（single-flight 判据的一部分：send 开的流同样
+          // 占有这个 runId，恢复入口据此并入而不是另开一条）。
+          this.activeStreamRunId = frame.runId
           // 批次2：把 run 归属钉在宿主消息上 —— 「重试本轮」只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
@@ -7477,6 +7695,9 @@ export const useAiStore = defineStore('ai', {
 
       if (isTerminalFrame(frame)) {
         this.loading = false
+        // O02：DONE / CANCELLED / FAILED / error 一到，忙提示立即作废 —— "回到进行中的回答"
+        // 指的那一轮已经结束，入口指过去只会落到一条收尾的回答上。
+        this.clearBusyRunOnTerminal(frame.runId)
       }
     },
 
