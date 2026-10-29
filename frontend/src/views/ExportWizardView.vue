@@ -1087,9 +1087,10 @@ async function persistStepData(
       // `InvalidConditionInputError` 由下方 catch 统一成文（condErrors + 阻断建作业），
       // 绝不把"非法空输入"当"全部数据"落库（否则一次切步就变成全量导出）。
       const condition = assertConditionBuildable(model)
-      // 不等价禁止覆盖（AI 向导数据正确性）：草案带 `verbatim` 说明它无法无损表达服务端条件
-      // （多值 IN、同字段多条件…）。未真正改动过时一律不写 —— 按草案重建再 PUT 就是把
-      // `IN [...]` 压成逗号串、把同字段多条件丢掉。
+      // 未改动且带 `verbatim` ⇒ **不写**：服务端保存的就是这份原条件（AI `set_condition` 已按
+      // 原样落库，或从任务 `conditionJson` 恢复），按字段合并出来的结果与之等价；再 PUT 一次
+      // 只是重复网络写，且在"服务端已被别处（另一次 AI / 用户操作）更新"时会把旧值写回去。
+      // 真正改动过（`touchedConditions`）才按合并结果落库 —— 那才是"界面上的新条件"。
       if (!touchedConditions.has(code) && model.verbatim !== undefined) {
         continue
       }
@@ -2377,7 +2378,21 @@ function registerHandlers(): void {
       return '缺少 defCode，未设置条件'
     }
     const condition = parseConditionJson(typeof payload.conditions === 'string' ? payload.conditions : JSON.stringify(payload.conditions ?? {}))
-    draftModels[defCode] = draftModelFromCondition(condition)
+    const model = draftModelFromCondition(condition)
+    // 先校验、后写（R2 返修）：与 `persistStepData` 同一个 `buildConditionOutcome` 判据。
+    // 旧实现在这里**先**写草案/touched/counts 再直接 PUT 原样条件，于是 `IN []` / 值算子空串
+    // 会先回「已设置…并落库」，真到 confirm_step 才被拦 —— 服务端已被写入一份非法条件。
+    const verdict = buildConditionOutcome(model)
+    if (verdict.status === 'invalid') {
+      return {
+        ok: false,
+        reason: `${describeConditionInputIssues(verdict.issues)} 本次未设置 ${defCode} 的查询条件`
+          + '（未落库、未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
+          + '要表达"空值判断"请用 EMPTY / NOT_EMPTY。'
+      }
+    }
+    // 校验通过：此时才写页面状态（草案 / 已改登记 / 行数预览失效）
+    draftModels[defCode] = model
     // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此落库（含故意清空为无条件）
     touchedConditions.add(defCode)
     counts[defCode] = null

@@ -629,8 +629,8 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         try {
           available = (await definitionsApi.listDefinitions()).map((def) => def.code)
         } catch {
-          // 定义服务不可用 ⇒ 无法校验 ⇒ 零写（文案由同一判据生成，不与页面口径分叉）
-          return fail(definitionCodesProblem(codes, []) ?? '配置定义列表不可用：本次未变更所选配置项')
+          // 定义服务不可用 ⇒ 无法校验 ⇒ 零写；文案由同一判据生成（空清单必返回原因，无需兜底）
+          return fail(definitionCodesProblem(codes, []))
         }
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未变更所选配置项')

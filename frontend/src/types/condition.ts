@@ -147,8 +147,8 @@ export interface ConditionDraft {
  *
  * `fields` 每个字段只放得下**一条**草案，因此并非所有后端条件都表达得出来（同字段多条件、
  * IN 取值里含分隔符等）。这类条件下的逆映射必须是无损的：模型把原始条件原样带在
- * {@link ConditionDraftModel.verbatim} 上，`buildConditionOutcome` 直接返回它；落库方据
- * 「是否带 verbatim」判断能否用草案覆盖服务端（不等价禁止覆盖）。
+ * {@link ConditionDraftModel.verbatim} 上，`buildConditionOutcome` **按字段合并**（未编辑
+ * 字段用原条件、其余按草案）；落库方据「是否改动过」决定要不要写回（未改动不写）。
  */
 export interface ConditionDraftModel {
   scopeKeys: string[]
@@ -648,6 +648,9 @@ export function draftFieldsChanged(previous: ConditionDraftModel, next: Conditio
  *
  * 用途：用户编辑/删除某字段后，该字段只能按新草案处理，但**其它未编辑字段**的原条件必须
  * 继续保留（否则一次编辑就把整份无法从表单行还原的条件冲掉了）。
+ *
+ * 只保留**字段条件**：`scopeKeys` 在合并时恒取草案（{@link buildConditionOutcome}），
+ * 留在这里只会让人误以为改范围会被旧值覆盖。
  */
 export function dropVerbatimFields(
   condition: FieldQueryCondition | null | undefined,
@@ -657,10 +660,6 @@ export function dropVerbatimFields(
     return null
   }
   const next: FieldQueryCondition = {}
-  const scopeKeys = [...(condition.scopeKeys ?? [])]
-  if (scopeKeys.length > 0) {
-    next.scopeKeys = scopeKeys
-  }
   const fields = (condition.fields ?? []).filter((field) => !fieldCodes.has(field.fieldCode))
   if (fields.length > 0) {
     next.fields = fields
@@ -698,8 +697,9 @@ export function applyDraftEdit(previous: ConditionDraftModel, next: ConditionDra
  *
  * **无损纪律**：每字段只放得下一条草案，所以逆映射不是天然的一一对应。构建完立即做一次
  * 往返等价判定；不等价（同字段多条件、IN 取值含逗号、类型/空值等）时把原始条件挂到
- * {@link ConditionDraftModel.verbatim}，后续任何重建都返回原条件、落库方也不会用它覆盖
- * 服务端（否则 `confirm_step` 会把 AI 设的条件换义）。
+ * {@link ConditionDraftModel.verbatim}：`buildConditionOutcome` 按字段合并（未编辑字段用
+ * 原条件、编辑/删除字段按草案），`applyDraftEdit` 保证编辑一个字段时其余字段原条件继续保留
+ * （否则 `confirm_step` 会把 AI 设的条件换义）。
  */
 export function draftModelFromCondition(condition: FieldQueryCondition | null | undefined): ConditionDraftModel {
   const model = emptyDraftModel(condition?.scopeKeys ?? [])

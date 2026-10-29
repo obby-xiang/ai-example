@@ -563,15 +563,101 @@ function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): 
 
 // ── 加载 ──────────────────────────────────────────────────────────────────────
 
-async function loadDefinitions(): Promise<void> {
-  defsLoading.value = true
-  try {
-    defs.value = await definitionsApi.listDefinitions()
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.defsLoadFailed'))
-  } finally {
-    defsLoading.value = false
+/**
+ * 等待定义列表就绪的上限（毫秒；与导出向导同口径）。
+ *
+ * <p>挂载时 `loadDefinitions()` 与 `loadTask()` 并行，`selectedDefs` 的 watch 会在定义到达前
+ * 触发 `loadEditors()` —— 此刻 `editorDefs` 为空，一次什么都没载入就结束。首轮定义**失败**后
+ * 换任务（`bindTask → loadTask → watch`）也没有任何重试 ⇒ 编辑区永久空白。这里补上与导出
+ * 侧同族的"等待 / 补一次 / 到达后恢复"，失败仍 fail-closed（不按 0 字段载入）。
+ */
+const DEFINITIONS_READY_TIMEOUT_MS = 10_000
+
+/** 定义列表是否成功读到过（空列表也算成功；失败保持 false）。 */
+const defsLoaded = ref(false)
+/** 定义列表的在途请求（单飞：挂载 / 编辑区等待 / 补载共用同一笔）。 */
+let defsInFlight: Promise<boolean> | null = null
+
+async function loadDefinitions(): Promise<boolean> {
+  if (defsInFlight !== null) {
+    return await defsInFlight
   }
+  defsLoading.value = true
+  const run = (async (): Promise<boolean> => {
+    try {
+      defs.value = await definitionsApi.listDefinitions()
+      defsLoaded.value = true
+      // 定义晚到：此前因"没定义"没能载入的编辑区自动补载（不必等用户重开标签 / 刷新整页）
+      void recoverEditorsAfterDefinitions()
+      return true
+    } catch (error) {
+      defsLoaded.value = false
+      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.defsLoadFailed'))
+      return false
+    } finally {
+      defsLoading.value = false
+    }
+  })()
+  defsInFlight = run
+  try {
+    return await run
+  } finally {
+    if (defsInFlight === run) {
+      defsInFlight = null
+    }
+  }
+}
+
+/**
+ * 等定义列表就绪（有界）：在途就等它；没在途就按当前事实判定。
+ *
+ * @returns true = 已成功读到**非空**定义列表（可建编辑区）；false = 加载中到点 / 失败 / 列表为空
+ */
+async function awaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): Promise<boolean> {
+  if (defsInFlight === null) {
+    return defsLoaded.value && defs.value.length > 0
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+  })
+  try {
+    const ok = await Promise.race([defsInFlight, expired])
+    return ok === true && defs.value.length > 0
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+/**
+ * 编辑区载入前的定义闸：已有定义 ⇒ 直接过；在途 ⇒ 有界等待；**首轮没成功** ⇒ 补一次请求。
+ *
+ * 补请求只在 `!defsLoaded` 时发生（成功读到空列表后不再重复）—— 它由"编辑区真的要载入"
+ * 这一动作触发，不是轮询。
+ */
+async function ensureDefinitionsForEditors(): Promise<void> {
+  if (defs.value.length > 0) {
+    return
+  }
+  if (defsInFlight !== null) {
+    await awaitDefinitionsReady()
+    return
+  }
+  if (!defsLoaded.value) {
+    await loadDefinitions()
+  }
+}
+
+/**
+ * 定义到达后的自动恢复：第 1 步有选中项时补载尚未载入的编辑区（`loadEditors` 只补未载入的）。
+ */
+async function recoverEditorsAfterDefinitions(): Promise<void> {
+  if (stepIndex.value !== 0 || taskId.value === null || selectedDefs.value.length === 0) {
+    return
+  }
+  await loadEditors()
 }
 
 /**
@@ -1031,6 +1117,17 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
     return
   }
   await nextTick()
+  // 定义闸：选中项里有人"定义还没到"时，先等（在途）/ 补一次（首轮失败）再算 targets。
+  // 否则 `editorDefs` 为空 ⇒ 一次什么都没载入就结束（首轮失败后换任务时还永不重试）。
+  if (selectedDefs.value.some((code) => defOf(code) === null) && defs.value.length === 0) {
+    await ensureDefinitionsForEditors()
+    if (generation !== taskGeneration) {
+      return
+    }
+    if (selectedDefs.value.length === 0) {
+      return
+    }
+  }
   const targets = only === undefined
     ? editorDefs.value
     : editorDefs.value.filter((def) => only.includes(def.code))

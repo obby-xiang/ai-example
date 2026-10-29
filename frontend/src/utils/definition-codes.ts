@@ -18,10 +18,28 @@ export interface DefinitionCodesContext {
 }
 
 /**
+ * 编码校验：拿到的可用清单为空（不知道有哪些编码）时也**必**返回原因，
+ * 因此空清单调用方无需再写死兜底文案（返回类型收窄为 `string`）。
+ *
  * @param codes 本次要选择的编码（调用方已归一：字符串、去空；重复项不影响判据）
  * @param available 当前**可信**的可用编码清单（空数组 = 拿不到清单）
+ * @returns 失败原因（必非空）
+ */
+export function definitionCodesProblem(
+  codes: readonly string[],
+  available: readonly never[],
+  context?: DefinitionCodesContext
+): string
+/**
+ * @param codes 本次要选择的编码（调用方已归一：字符串、去空；重复项不影响判据）
+ * @param available 当前**可信**的可用编码清单
  * @returns `null` = 全部可用；否则为可直接回灌的失败原因
  */
+export function definitionCodesProblem(
+  codes: readonly string[],
+  available: readonly string[],
+  context?: DefinitionCodesContext
+): string | null
 export function definitionCodesProblem(
   codes: readonly string[],
   available: readonly string[],
