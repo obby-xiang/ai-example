@@ -22,9 +22,18 @@ import java.util.Map;
  * @param code 前端自报的机器码（批 A additive；{@code UI_*} 闭集，可空 = 旧客户端）。
  * 入口只认 {@code ^UI_[A-Z_]{2,40}$}，<b>非法值丢弃不报 400</b>；码随条目持久化，
  * 供 {@code tool_result} 帧 / 台账 / 卡面同源取码，且<b>永不写进用户可见文案</b>。
+ * @param context 挂起期的最新工作区上下文（<b>可选</b>；旧客户端不带 = 不更新快照）：
+ * 与 {@code /confirm} 同一口径（同一套 {@code ContextFieldGate} 消毒），续跑前据它更新快照并重算槽位。
  */
 public record FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
-		Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
+		Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code,
+		AiChatRequest.Context context) {
+
+	/** 兼容构造器：不带工作区上下文的旧调用点（含既有单测）无需改动。 */
+	public FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
+			Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
+		this(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, code, null);
+	}
 
 	/** 机器码白名单形态（批 A / A-14）：{@code UI_*} 闭集形态，长度 2..40。 */
 	private static final java.util.regex.Pattern UI_CODE = java.util.regex.Pattern.compile("^UI_[A-Z_]{2,40}$");

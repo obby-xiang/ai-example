@@ -14,7 +14,12 @@ import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
+import com.example.configmgr.ai.slot.DefinitionCatalog;
+import com.example.configmgr.ai.slot.SlotDefinition;
+import com.example.configmgr.ai.slot.TaskSlotResolver;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -315,6 +320,112 @@ class ResumeContextRefreshTest {
 		assertBatchBoundaryContext(AiContext.fromMap(this.store.get(RUN_ID).getContext()));
 	}
 
+	// ── E：挂起期手动改步骤（非刷新工具批）也要按任务权威值同步 ─────────────────
+
+	/**
+	 * <b>挂起期用户在向导里手动改了步骤</b>（返修 Important 1）：挂起批里没有任何
+	 * {@code navigate_to / create_task / confirm_step} 结算（这里只有 {@code select_definitions}），
+	 * 旧实现的唯一刷新点因此什么都不做，下一跳仍带挂起前的 {@code SELECT_DEFS} ——
+	 * 提示词让模型"以权威步骤为准"，而权威步骤恰好是旧的。
+	 *
+	 * <p>本用例锁五条：
+	 * <ol>
+	 * <li>交棒前按 {@code taskId} 读 {@code TaskService} 的权威 {@code type/currentStep/status}；</li>
+	 * <li>披露面按新步骤重算（QUERY_COND 才给 {@code set_condition}）；</li>
+	 * <li>交棒历史的工作区段换成新步骤（模型看到 QUERY_COND）；</li>
+	 * <li>结果写回快照（下一次续跑/读侧同一份事实）；</li>
+	 * <li>批内结算仍用<b>批首</b>上下文（不扩权）。</li>
+	 * </ol>
+	 */
+	@Test
+	void nonRefreshToolBatchStillSyncsAuthoritativeStepBeforeHandoff() {
+		this.taskState.set(task(42L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE));
+		seedSuspendedRun(List.of(entry("call-select", "select_definitions", "{\"codes\":[\"CURRENCY\"]}",
+				PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(),
+				"前端已执行：select_definitions")));
+		seedSuspendedContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				Map.of("pageId", "export", "selectedDefs", List.of("CURRENCY"), "selectionSynced", true)));
+		settleApprovedEntries();
+
+		assertThat(this.service.resume(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+
+		// ① 下一跳步骤/类型/状态来自任务权威值
+		AiContext drive = contextOfDriveResumed();
+		assertThat(drive.getStep()).isEqualTo("QUERY_COND");
+		assertThat(drive.getTaskType()).isEqualTo("EXPORT");
+		assertThat(drive.getTaskStatus()).isEqualTo("ACTIVE");
+		// ② 披露面按新步骤重算
+		assertThat(toolNames(drive)).contains("set_condition").doesNotContain("select_definitions");
+		// ③ 工作区状态跟着换（交棒历史里的 SYSTEM 段）
+		assertThat(systemTextOfDriveResumed()).contains("当前步骤: QUERY_COND");
+		// ④ 写回快照
+		assertThat(AiContext.fromMap(this.store.get(RUN_ID).getContext()).getStep()).isEqualTo("QUERY_COND");
+
+		// ⑤ 批内不扩权：结算 Prompt 仍是批首（SELECT_DEFS）那一份
+		ArgumentCaptor<Prompt> settlementPrompt = ArgumentCaptor.forClass(Prompt.class);
+		verify(this.toolCallingManager).resolvePending(eq(RUN_ID), settlementPrompt.capture(),
+				any(PendingToolCall.class));
+		assertThat(callbacksOf(settlementPrompt.getValue()))
+			.contains("select_definitions").doesNotContain("set_condition");
+	}
+
+	/**
+	 * 任务权威读失败只 WARN 并保留旧值（不阻断续跑、不扩披露面）——与本类其余刷新面的 fail-safe 同口径。
+	 */
+	@Test
+	void taskReadFailureOnlyWarnsAndKeepsTheSnapshotStep() {
+		this.taskState.set(task(42L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE));
+		when(this.taskService.findByIdRaw(42L)).thenThrow(new IllegalStateException("读取任务失败（用例）"));
+		seedSuspendedRun(List.of(entry("call-select-fail", "select_definitions", "{\"codes\":[\"CURRENCY\"]}",
+				PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(),
+				"前端已执行：select_definitions")));
+		seedSuspendedContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				Map.of("pageId", "export", "selectedDefs", List.of("CURRENCY"), "selectionSynced", true)));
+		settleApprovedEntries();
+
+		assertThat(this.service.resume(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+
+		AiContext drive = contextOfDriveResumed();
+		assertThat(drive.getStep()).as("读失败保留旧步骤").isEqualTo("SELECT_DEFS");
+		assertThat(toolNames(drive)).contains("select_definitions").doesNotContain("set_condition");
+	}
+
+	/**
+	 * <b>续跑槽位重算</b>（返修：旧 taskSlots 不得覆盖挂起期间的页面事实）：用户在挂起期把勾选全部
+	 * 取消（页面显式空 + 已同步），快照里却还留着旧槽位 CURRENCY —— 续跑必须重算，显式空仍是权威空。
+	 */
+	@Test
+	void resumedSlotsFollowLatestPageFactsAndDropStaleTaskSlots() {
+		this.service.setTaskSlotResolver(new TaskSlotResolver(new DefinitionCatalog() {
+			@Override
+			public List<SlotDefinition> list() {
+				return List.of(new SlotDefinition("CURRENCY", "货币", List.of(
+						new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY")))));
+			}
+		}, this.taskService, this.mapper));
+		Task task = task(42L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE,
+				"CURRENCY");
+		this.taskState.set(task);
+		when(this.taskService.findById(42L)).thenReturn(task);
+		seedSuspendedRun(List.of(entry("call-select-empty", "select_definitions", "{\"codes\":[]}",
+				PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(),
+				"前端已执行：select_definitions")));
+		seedSuspendedContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", true,
+						TaskSlots.EXTRA_KEY,
+						new TaskSlots("EXPORT", List.of("CURRENCY"), List.of()).toMap())));
+		settleApprovedEntries();
+
+		assertThat(this.service.resume(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+
+		AiContext drive = contextOfDriveResumed();
+		assertThat(TaskSlots.fromExtra(drive.getExtra()).defCodes())
+			.as("页面显式空 + 已同步 ⇒ 权威空，旧槽位/任务条目都不得复活").isEmpty();
+		assertThat(TaskSlots.fromExtra(drive.getExtra()).conditions()).isEmpty();
+		assertThat(TaskSlots.fromExtra(AiContext.fromMap(this.store.get(RUN_ID).getContext()).getExtra()).defCodes())
+			.as("重算结果写回快照").isEmpty();
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n页面：任务中心\n"
@@ -341,6 +452,24 @@ class ResumeContextRefreshTest {
 		verify(this.chatService, org.mockito.Mockito.atLeastOnce())
 			.driveResumed(eq(RUN_ID), eq(SESSION_ID), nextHop.capture(), any(), eq(this.emitter));
 		return nextHop.getValue();
+	}
+
+	/** 交棒历史里那条 SYSTEM 的文本（工作区段的唯一重写口）。 */
+	private String systemTextOfDriveResumed() {
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<Message>> history = ArgumentCaptor.forClass(List.class);
+		verify(this.chatService, org.mockito.Mockito.atLeastOnce())
+			.driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), history.capture(), eq(this.emitter));
+		return history.getValue().get(0).getText();
+	}
+
+	/** 把挂起快照的上下文/历史换成用例现场（步骤/勾选与任务详情一致）。 */
+	private void seedSuspendedContext(AiContext context) {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setContext(context.toMap());
+		snapshot.setMessageJson(this.codec.serializeAll(
+				List.of(new SystemMessage(SYSTEM_TEXT), new UserMessage("做一个导出"))));
+		this.store.save(snapshot);
 	}
 
 	/** 把快照重新置成"又 park 了一次"（快照历史已由上一轮续跑落定）。 */
@@ -460,6 +589,21 @@ class ResumeContextRefreshTest {
 		task.setCurrentStep(step);
 		task.setStatus(status);
 		task.setTitle("任务 " + id);
+		return task;
+	}
+
+	/** 带任务条目的任务（槽位重算用例：任务里已落库的勾选正是"旧选择"的来源）。 */
+	private static Task task(Long id, Task.TaskType type, String step, Task.TaskStatus status, String... defCodes) {
+		Task task = task(id, type, step, status);
+		List<TaskItem> items = new ArrayList<>();
+		for (int i = 0; i < defCodes.length; i++) {
+			TaskItem item = new TaskItem();
+			item.setTaskId(id);
+			item.setDefCode(defCodes[i]);
+			item.setSortOrder(i);
+			items.add(item);
+		}
+		task.setItems(items);
 		return task;
 	}
 

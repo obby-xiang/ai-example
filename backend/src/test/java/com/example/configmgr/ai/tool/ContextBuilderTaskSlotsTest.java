@@ -78,6 +78,34 @@ class ContextBuilderTaskSlotsTest {
 		assertThat(text).doesNotContain("未设筛选");
 	}
 
+	/**
+	 * 返修（Important 4）：{@code 未设筛选 = 全量导出} 只对 <b>EXPORT</b> 成立 —— 导入向导没有
+	 * QUERY_COND 步，渲染"即导出全部"是错误事实（会把模型引向不存在的导出语义）。
+	 */
+	@Test
+	void importTaskNeverClaimsAnUnsetFilterMeansFullExport() {
+		TaskSlots slots = new TaskSlots("IMPORT", List.of("CURRENCY"), List.of());
+		AiContext context = AiContext.of("import", "IMPORT", "PRECHECK", null,
+				Map.of(TaskSlots.EXTRA_KEY, slots.toMap()));
+
+		String text = this.builder.buildContextMessage(context);
+
+		assertThat(text).contains("已确定配置项: CURRENCY");
+		assertThat(text).doesNotContain("未设筛选");
+		assertThat(text).doesNotContain("导出全部");
+		assertThat(text).as("导入也不得把它列为缺失槽位").doesNotContain("不要猜测）: 条件");
+	}
+
+	/** 反向：EXPORT 仍渲染"未设筛选 = 全量"（既有口径不回退）。 */
+	@Test
+	void exportTaskKeepsTheUnsetFilterFullExportLine() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"), List.of());
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", null,
+				Map.of(TaskSlots.EXTRA_KEY, slots.toMap()));
+
+		assertThat(this.builder.buildContextMessage(context)).contains("未设筛选: 全量");
+	}
+
 	/** 相邻：配置项仍未知时只报配置项缺失（没有配置项就无从谈筛选，更不能把条件当缺口）。 */
 	@Test
 	void missingDefinitionsRemainTheOnlyMissingSlot() {

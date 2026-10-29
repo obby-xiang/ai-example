@@ -250,6 +250,20 @@ public class ResumeService {
 		this.contextRefresher = refresher;
 	}
 
+	/**
+	 * 任务槽位解析器（可选）：续跑交棒前按<b>最新</b>上下文重算 {@code extra[taskSlots]} ——
+	 * 挂起期用户在向导里改了步骤/勾选后，旧槽位不得继续把模型引回旧选择（显式空仍是权威空）。
+	 *
+	 * <p>字段注入保持 10 参构造器与既有直接 new 的用例零改动；未注入时只跳过重算（旧槽位原样保留）。
+	 */
+	private com.example.configmgr.ai.slot.TaskSlotResolver taskSlotResolver;
+
+	/** 可选注入（槽位重算；缺席 = 不重算）。 */
+	@Autowired(required = false)
+	public void setTaskSlotResolver(com.example.configmgr.ai.slot.TaskSlotResolver resolver) {
+		this.taskSlotResolver = resolver;
+	}
+
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
@@ -1698,6 +1712,10 @@ public class ResumeService {
 				// 工具在挂起处就结束了这一轮。续跑在<b>整批结算之后</b>补上同一次折算，然后<b>重读快照</b>
 				// 拿下一跳上下文 —— 逐条刷新会让同批后面的条目提前看到刚解锁的工具（批内扩权）。
 				nextHopContext = refreshRunContextAfterBatch(runId, snapshot, settledInBatch);
+				// 挂起期用户可能已在向导里手动改了步骤（本批没有刷新类工具结算，上面的刷新点什么都不做）：
+				// 交棒前按任务权威值同步 type/step/status，并按最新页面事实重算槽位。
+				// 批内结算已全部完成 —— 这里只影响下一跳（批内 context 仍冻结，不扩权）。
+				nextHopContext = syncAuthorityForHandoff(runId, nextHopContext, history);
 				// 刷新后的权威工作区状态跟着交棒：历史里那条 SYSTEM 的工作区段是"模型以为的现场"，
 				// 留着旧页面/旧步骤等于让模型按过期地图继续走（只换段内文本，不动消息序列）。
 				history = rewriteWorkspaceState(history, nextHopContext, runId);
@@ -1713,6 +1731,7 @@ public class ResumeService {
 					this.historyRecorder.recordToolRound(sessionId, runId, assistant, toolMessage);
 				}
 				snapshot.setMessageJson(this.codec.serializeAll(history));
+				snapshot.setContext(nextHopContext.toMap());
 				snapshot.setInFlightToolCalls(new ArrayList<>());
 				snapshot.setAssistantContent(null);
 				snapshot.setStatus(RunSnapshot.RUNNING);
@@ -1726,6 +1745,15 @@ public class ResumeService {
 				}
 			}
 			else {
+				// 无在飞工具（重跑/手动续跑）：同样在交棒前对齐任务权威步骤与槽位 ——
+				// 挂起期的手动改步骤不会产生任何"刷新类工具结算"，这里没有其它刷新点。
+				nextHopContext = syncAuthorityForHandoff(runId, nextHopContext, history);
+				List<Message> beforeRewrite = history;
+				history = rewriteWorkspaceState(history, nextHopContext, runId);
+				snapshot.setContext(nextHopContext.toMap());
+				if (history != beforeRewrite) {
+					snapshot.setMessageJson(this.codec.serializeAll(history));
+				}
 				snapshot.getResumedBy().add(this.store.instanceId());
 				snapshot.setStatus(RunSnapshot.RUNNING);
 				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
@@ -2031,6 +2059,51 @@ public class ResumeService {
 		log.info("续跑批结算后已刷新运行上下文 runId={} page={} taskId={} taskType={} step={} status={}", runId,
 				reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
 		return reread;
+	}
+
+	/**
+	 * 续跑交棒前的<b>权威同步</b>（只作用于下一跳；批内结算用的 {@code context} 保持冻结）：
+	 * <ol>
+	 * <li>按 {@code taskId} 读 {@code TaskService} 的权威 {@code type / currentStep / status} ——
+	 * 挂起期内用户可以在向导里手动改步骤，而这类改动不产生任何"刷新类工具结算"；</li>
+	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 页面显式空（且已同步）仍是权威空，
+	 * 旧槽位与历史选择都不得复活。</li>
+	 * </ol>
+	 *
+	 * <p>任一步失败只 WARN 并保留旧值：这是"让下一跳更准"的增强，不是这一轮的判定面
+	 * （与 {@link #refreshRunContextAfterBatch} 同一 fail-safe 口径）。
+	 */
+	private AiContext syncAuthorityForHandoff(String runId, AiContext context, List<Message> history) {
+		return recomputeSlotsBeforeHandoff(runId, syncTaskBeforeHandoff(runId, context), history);
+	}
+
+	/** 任务权威值的交棒前同步（读失败 = 保留旧值 + WARN，不阻断续跑）。 */
+	private AiContext syncTaskBeforeHandoff(String runId, AiContext context) {
+		if (this.contextRefresher == null) {
+			return context;
+		}
+		try {
+			return this.contextRefresher.syncTask(context).orElse(context);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑交棒前任务权威同步失败，保留旧上下文（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			return context;
+		}
+	}
+
+	/** 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。 */
+	private AiContext recomputeSlotsBeforeHandoff(String runId, AiContext context, List<Message> history) {
+		if (this.taskSlotResolver == null) {
+			return context;
+		}
+		try {
+			AiContext enriched = this.taskSlotResolver.enrich(context, "", history);
+			return enriched == null ? context : enriched;
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑交棒前任务槽位重算失败，保留旧槽位（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			return context;
+		}
 	}
 
 	/**

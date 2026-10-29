@@ -603,7 +603,9 @@ public class AiTools {
      */
     @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
-            + "推进成功后下一批按最新披露继续，推进失败即停")
+            + "推进成功后下一批按最新披露继续，推进失败即停"
+            + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
+            + "同参数/同目标仍在禁止之列）")
     @ToolScope({ "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)

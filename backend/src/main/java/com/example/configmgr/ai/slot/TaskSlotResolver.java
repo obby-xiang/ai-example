@@ -172,8 +172,9 @@ public class TaskSlotResolver {
 	/**
 	 * 页面实时勾选（三态，与 {@code ContextBuilder#pageSelectedDefs} 同一口径）。
 	 *
-	 * @return {@code null} = 页面从未同步（不带 {@code selectedDefs} 键，或不在拥有选中集的向导页上）；
-	 *         空列表 = 页面同步了空集合（用户取消了全部勾选，这是权威空值）
+	 * @return {@code null} = 页面从未同步（不带 {@code selectedDefs} 键、不在拥有选中集的向导页上，
+	 *         或列表为空但任务详情还没应用 —— 未水合的 {@code []} 只表示"不知道"）；
+	 *         空列表 = 页面同步了空集合且详情已应用（用户取消了全部勾选，这是权威空值）
 	 */
 	private List<String> pageSelectedDefCodes(AiContext context) {
 		Map<String, Object> extra = context.getExtra();
@@ -191,6 +192,10 @@ public class TaskSlotResolver {
 			if (element != null && !String.valueOf(element).isBlank()) {
 				codes.add(String.valueOf(element));
 			}
+		}
+		if (codes.isEmpty() && !Boolean.TRUE.equals(extra.get(ContextBuilder.SELECTION_SYNCED_KEY))) {
+			// 未水合 / 旧客户端：[] 不代表"用户清空"，按未同步处理（允许回落任务条目/历史）
+			return null;
 		}
 		return codes;
 	}

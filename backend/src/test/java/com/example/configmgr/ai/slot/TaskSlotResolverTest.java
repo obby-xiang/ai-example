@@ -160,19 +160,38 @@ class TaskSlotResolverTest {
 	}
 
 	/**
-	 * <b>页面显式空列表 = 权威空值</b>（本批收口，与 {@code ContextBuilder#pageSelectedDefs} 的两态一致）：
-	 * 用户在向导里把勾选全部取消时，客户端上报 {@code selectedDefs=[]} —— 这是"现在什么都没选"的事实，
-	 * 不得回落到历史原文把旧选择重新勾回来（那会让模型按用户已取消的选择继续推进）。
+	 * <b>页面显式空列表 = 权威空值</b>（与 {@code ContextBuilder#pageSelectedDefs} 同一口径）：
+	 * 用户在向导里把勾选全部取消、且任务详情已应用（{@code selectionSynced=true}）时，
+	 * 客户端上报的 {@code selectedDefs=[]} 是"现在什么都没选"的事实 —— 不得回落到历史原文把旧选择
+	 * 重新勾回来（那会让模型按用户已取消的选择继续推进）。
 	 */
 	@Test
 	void explicitEmptyPageSelectionIsAuthoritativeAndDoesNotResurrectHistory() {
 		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
-				Map.of("pageId", "export", "selectedDefs", List.of()));
+				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", true));
 
 		TaskSlots slots = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY，筛选 CNY"));
 
 		assertThat(slots.defCodes()).as("页面同步了空集合 ⇒ 权威空，不回落历史").isEmpty();
 		assertThat(slots.conditions()).as("没有配置项就没有可承载的条件").isEmpty();
+	}
+
+	/**
+	 * <b>未水合 ≠ 用户清空</b>（返修）：任务详情还没应用（{@code selectionSynced=false}）或旧客户端
+	 * 不带该标记时，{@code selectedDefs=[]} 只是"还不知道"，必须按未同步回落历史/任务条目 ——
+	 * 否则页面挂载到详情返回的窗口里会把用户已有的勾选误抹成空。
+	 */
+	@Test
+	void emptyPageSelectionWithoutSyncedDetailIsTreatedAsUnsynced() {
+		AiContext notHydrated = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
+				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", false));
+		assertThat(this.resolver.resolve(notHydrated, "继续", List.of("导出 CURRENCY")).defCodes())
+			.as("未水合 ⇒ 按未同步回落历史").containsExactly("CURRENCY");
+
+		AiContext legacyClient = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
+				Map.of("pageId", "export", "selectedDefs", List.of()));
+		assertThat(this.resolver.resolve(legacyClient, "继续", List.of("导出 CURRENCY")).defCodes())
+			.as("无标记（旧客户端）⇒ 同样按未同步处理，不误抹历史").containsExactly("CURRENCY");
 	}
 
 	/**

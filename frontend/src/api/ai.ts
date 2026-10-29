@@ -8,8 +8,11 @@
 import { ApiError, del, get, post } from './http'
 import { reattach, streamChat } from './sse'
 import type { SseFrameHandlers, SseStreamOptions } from './sse'
+import { getActivePinia } from 'pinia'
+import { useWorkspaceStore } from '@/stores/workspace'
 import type {
   AiCancelResult,
+  AiChatContext,
   AiChatRequest,
   AiHealth,
   ContextSnapshot,
@@ -44,12 +47,42 @@ export function reattachRun(
 
 /** POST /api/ai/confirm（HITL 放行/拒绝；重复 toolCallId → 409 DUPLICATE_TOOL_CALL_ID）。 */
 export function confirm(request: ConfirmRequest): Promise<ConfirmResult> {
-  return post<ConfirmResult>('/ai/confirm', request)
+  return post<ConfirmResult>('/ai/confirm', withWorkspaceContext(request))
 }
 
 /** POST /api/ai/frontend-tool-result（前端工具回灌；重复 → 409，未知 → 409）。 */
 export function frontendToolResult(request: FrontendToolResultRequest): Promise<FrontendToolResultAck> {
-  return post<FrontendToolResultAck>('/ai/frontend-tool-result', request)
+  return post<FrontendToolResultAck>('/ai/frontend-tool-result', withWorkspaceContext(request))
+}
+
+/**
+ * HITL 写入口附带<b>最新工作区上下文</b>（可选字段，旧后端忽略）。
+ *
+ * 为什么在 api 层拼而不是让每个调用方传：挂起期间用户可能已在向导里改了步骤/勾选/任务详情，
+ * 而续跑只读快照 —— 后端 `/confirm`、`/frontend-tool-result` 是决策落地前唯一能拿到"用户此刻
+ * 看到的页面"的写入口。字段可选：没有活动 store（单测/非应用环境）时不带，行为与改造前一致。
+ *
+ * 返回值刻意用 {@code object} 拓宽：请求类型不新增字段（旧后端/旧调用方零影响），
+ * 只多一个 additive 键 {@code context}。
+ */
+function withWorkspaceContext<T extends object>(request: T): T {
+  const context = currentWorkspaceContext()
+  if (!context) {
+    return request
+  }
+  return { ...request, context } as T
+}
+
+/** 当前工作区上下文（无活动 pinia / store 异常 ⇒ undefined，绝不阻断请求）。 */
+function currentWorkspaceContext(): AiChatContext | undefined {
+  try {
+    if (!getActivePinia()) {
+      return undefined
+    }
+    return useWorkspaceStore().buildContext()
+  } catch {
+    return undefined
+  }
 }
 
 /** POST /api/ai/cancel/{runId}（取消一轮；幂等，重复返回 alreadyCancelled=true）。 */

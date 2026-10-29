@@ -389,6 +389,9 @@ export const useWorkspaceStore = defineStore('workspace', {
         extra: {
           pageId: this.pageId,
           selectedDefs: [...this.selectedDefs],
+          // 返修：空勾选只有在「任务详情已应用」时才是权威空（用户清空）；未水合窗口按未同步处理，
+          // 后端据此决定 [] 是否回落任务条目/历史（见 TaskSlotResolver/ContextBuilder 同一常量）。
+          selectionSynced: isTaskDetailApplied(this.pageId, this.taskId),
           importMode: this.importMode,
           dataVersion: this.dataVersion,
           contractVersion: this.contractVersion,
@@ -422,6 +425,43 @@ export const useWorkspaceStore = defineStore('workspace', {
 // ── 页面能力注册表（非响应式，页面挂载/卸载时登记） ────────────────────────────
 
 const pageHandlers = new Map<string, PageHandler>()
+
+/**
+ * 任务详情就绪探针名（与 `utils/frontend-tools.ts#TASK_DETAIL_READY_PROBES` 同源）：
+ * 页面在 `GET /tasks/{id}` 应用完（选中集/条件/步骤/状态已 `enterPage`）后才置 true。
+ *
+ * 只在这里列两个向导页：其余页没有任务详情可等。本文件不 import utils/frontend-tools
+ * （那边 import 本 store，反向依赖会成环），因此直接读注册表。
+ */
+const TASK_DETAIL_PROBES: Partial<Record<WorkspacePageId, string>> = {
+  export: 'export.taskDetailReady',
+  import: 'import.taskDetailReady'
+}
+
+/**
+ * 任务详情是否已应用（= 当前的 `selectedDefs` 是页面真值而不是"还没水合"）。
+ *
+ * 无任务（新建流程）/非向导页/探针未注册或未就绪 ⇒ false = 未同步：此时空的 `selectedDefs`
+ * 只是"还不知道"，后端不得把它当用户清空（否则会误抹任务里已落库的勾选）。
+ */
+function isTaskDetailApplied(pageId: WorkspacePageId, taskId: number | null): boolean {
+  if (taskId === null) {
+    return false
+  }
+  const probe = TASK_DETAIL_PROBES[pageId]
+  if (!probe) {
+    return false
+  }
+  const handler = pageHandlers.get(probe)
+  if (!handler) {
+    return false
+  }
+  try {
+    return handler({}) === true
+  } catch {
+    return false
+  }
+}
 
 /** 页面把能力反向暴露给 AI（AI 侧不 import 任何视图）。 */
 export function registerPageHandler(name: PageHandlerName | string, handler: PageHandler): void {

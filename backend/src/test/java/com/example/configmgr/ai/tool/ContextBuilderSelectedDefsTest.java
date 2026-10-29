@@ -59,9 +59,16 @@ class ContextBuilderSelectedDefsTest {
     }
 
     private static Map<String, Object> extra(String pageId, List<String> selectedDefs) {
+        return extra(pageId, selectedDefs, null);
+    }
+
+    private static Map<String, Object> extra(String pageId, List<String> selectedDefs, Boolean selectionSynced) {
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("pageId", pageId);
         extra.put("selectedDefs", selectedDefs);
+        if (selectionSynced != null) {
+            extra.put("selectionSynced", selectionSynced);
+        }
         return extra;
     }
 
@@ -78,15 +85,35 @@ class ContextBuilderSelectedDefsTest {
 
     @Test
     void emptyPageSelectionIsAuthoritativeOverNonEmptyTaskItems() {
-        // 减选到空：页面已同步空集合，这是有效信息，不能被"任务条目里还有两个"盖掉
+        // 减选到空：页面已同步空集合并确认"详情已应用"（selectionSynced=true），这是有效信息，
+        // 不能被"任务条目里还有两个"盖掉
         givenTaskItems("CURRENCY", "DOC_TYPE");
 
         String message = this.builder.buildContextMessage(
-                AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra("export", List.of())));
+                AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra("export", List.of(), true)));
 
         assertThat(message).contains("已选配置项: （空）（来源：页面实时勾选）");
         assertThat(message).doesNotContain("来源：任务条目");
         assertThat(message).doesNotContain("CURRENCY");
+    }
+
+    /**
+     * 返修：<b>未水合 ≠ 用户清空</b>。任务详情还在路上（{@code selectionSynced=false}）时，
+     * 页面上的空勾选只是"还不知道"，必须退回任务条目 —— 否则挂起/进页窗口会把已落库的勾选误抹成空。
+     * 旧客户端不带该标记（{@code absent}）同理，保守按未同步处理。
+     */
+    @Test
+    void emptyPageSelectionWithoutSyncedDetailFallsBackToTaskItems() {
+        givenTaskItems("CURRENCY", "DOC_TYPE");
+
+        String notHydrated = this.builder.buildContextMessage(AiContext.of("export", "EXPORT", "SELECT_DEFS",
+                TASK_ID, extra("export", List.of(), false)));
+        assertThat(notHydrated).as("未水合 ⇒ 退回任务条目").contains("已选配置项: CURRENCY, DOC_TYPE（来源：任务条目）");
+        assertThat(notHydrated).doesNotContain("（空）（来源：页面实时勾选）");
+
+        String legacy = this.builder.buildContextMessage(
+                AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra("export", List.of())));
+        assertThat(legacy).as("无标记（旧客户端）⇒ 同样退回任务条目").contains("已选配置项: CURRENCY, DOC_TYPE（来源：任务条目）");
     }
 
     @Test
@@ -140,7 +167,7 @@ class ContextBuilderSelectedDefsTest {
         givenTaskItems();
 
         String message = this.builder.buildContextMessage(
-                AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra("export", List.of())));
+                AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra("export", List.of(), true)));
 
         assertThat(message).contains("已选配置项: （空）（来源：页面实时勾选）");
     }

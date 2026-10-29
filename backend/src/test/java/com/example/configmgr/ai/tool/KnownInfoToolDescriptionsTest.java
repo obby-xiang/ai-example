@@ -95,6 +95,6 @@ class KnownInfoToolDescriptionsTest {
     @Test
     void toolsVersionBumpedForKnownInfoDescriptions() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        assertEquals("2026-10-27.6", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
+        assertEquals("2026-10-27.7", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
     }
 }

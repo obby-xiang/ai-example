@@ -119,8 +119,8 @@ class ContextBuilderExtraTest {
     void whitelistMirrorsFrontendContract() {
         // 与 frontend/src/stores/workspace.ts#buildContext 的 extra 键**逐键对应**（多/少都算契约漂移）
         assertThat(new ArrayList<>(ContextBuilder.ALLOWED_EXTRA_KEYS))
-                .containsExactly("pageId", "selectedDefs", "importMode", "dataVersion", "contractVersion",
-                        "recentActions");
+                .containsExactly("pageId", "selectedDefs", "selectionSynced", "importMode", "dataVersion",
+                        "contractVersion", "recentActions");
     }
 
     @Test

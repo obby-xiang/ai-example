@@ -32,6 +32,7 @@ import com.example.configmgr.ai.run.SecurityEvents;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
@@ -635,6 +636,60 @@ public class AiController {
 
 	// ── 外部输入：确认门 / 前端工具 ────────────────────────────────────────
 
+	/**
+	 * 挂起期工作区上下文的回写口（{@code /confirm} 与 {@code /frontend-tool-result} 共用）。
+	 *
+	 * <h2>为什么把页面事实放在这两条写入口</h2>
+	 * 挂起期间用户可以在向导里手动改步骤/勾选，而续跑只读<b>快照</b>里的上下文 —— 这两条入口是
+	 * 决策落地前唯一还能拿到"用户此刻看到的页面"的地方。写回发生在
+	 * {@link ConfirmGate#submitDecision} 之前，因此同一请求触发的续跑一定读到新值。
+	 *
+	 * <h2>口径</h2>
+	 * <ul>
+	 * <li><b>可选字段</b>：旧客户端不带 {@code context} ⇒ 不读不写，行为与改造前逐字一致；</li>
+	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），
+	 *     客户端因此无法伪造服务端槽位（{@code taskSlots}）或越过终态收窄；</li>
+	 * <li><b>不覆盖终态</b>：快照不存在/已终态 ⇒ 不写（终态事实不由页面改写）；</li>
+	 * <li><b>失败只 WARN</b>：页面事实是"让续跑更准"的增强，不是决策/授权面 —— 写失败不得让
+	 *     用户的确认走不通（续跑会退回旧上下文，与改造前同形）；</li>
+	 * <li><b>不新增 HITL、不自动重发</b>：这里只写上下文，不触发任何工具/确认卡。</li>
+	 * </ul>
+	 */
+	private void applyWorkspaceContext(String runId, AiChatRequest.Context raw) {
+		AiChatRequest.Context effective = sanitizedWorkspaceContext(raw);
+		if (effective == null
+				|| (!StringUtils.hasText(effective.page()) && effective.taskId() == null)) {
+			return;
+		}
+		try {
+			RunSnapshot snapshot = this.runStore.get(runId);
+			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+				return;
+			}
+			AiContext incoming = AiContext.of(effective.page(), effective.taskType(), effective.step(),
+					effective.taskId(), effective.taskStatus(), effective.extra());
+			snapshot.setContext(incoming.toMap());
+			this.runStore.save(snapshot);
+			log.info("挂起期工作区上下文已写回快照 runId={} page={} taskId={} step={}", runId,
+					incoming.getPage(), incoming.getTaskId(), incoming.getStep());
+		}
+		catch (RuntimeException ex) {
+			log.warn("挂起期工作区上下文写回失败（已忽略，续跑退回旧上下文）runId={}：{}", runId, ex.getMessage());
+		}
+	}
+
+	/** {@code context} 形状闸（与 {@code /chat} 同源；未注入闸门 = 不闸，与改造前同形）。 */
+	private AiChatRequest.Context sanitizedWorkspaceContext(AiChatRequest.Context raw) {
+		if (raw == null) {
+			return null;
+		}
+		ContextFieldGate.Result gated = this.contextFieldGate == null ? null : this.contextFieldGate.sanitize(raw);
+		if (gated != null && gated.downgraded() > 0 && this.securityEvents != null) {
+			this.securityEvents.contextDowngraded(gated.downgraded());
+		}
+		return gated == null ? raw : gated.context();
+	}
+
 	@PostMapping("/confirm")
 	public ResponseEntity<?> confirm(@RequestBody(required = false) ConfirmRequest request) {
 		if (request == null || !StringUtils.hasText(request.runId())
@@ -656,6 +711,9 @@ public class AiController {
 		if (reason != null && reason.length() > REASON_MAX_CHARS) {
 			return json(HttpStatus.BAD_REQUEST, reasonTooLong(reason.length()));
 		}
+		// 挂起期工作区事实（可选字段）：先写回快照，再落决策 —— 续跑只读快照，晚写就来不及。
+		// 旧客户端不带 ⇒ 一个字不动（兼容方向 = 可选字段，不改判定/授权）。
+		applyWorkspaceContext(request.runId(), request.context());
 		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
 		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
 		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
@@ -781,6 +839,8 @@ public class AiController {
 			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
 					request.toolCallId(), originalChars, callbackMaxChars);
 		}
+		// 挂起期工作区事实（可选字段）：与 /confirm 同一口径（续跑只读快照）。
+		applyWorkspaceContext(request.runId(), request.context());
 		ConfirmGate.Submission submission;
 		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
 		AiTrace.bind(request.runId(), null);

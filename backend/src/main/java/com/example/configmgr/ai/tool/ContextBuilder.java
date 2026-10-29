@@ -60,8 +60,20 @@ public class ContextBuilder {
      * 不是漂移 —— 见 {@code ContextBuilderExtraTest#uiRegionCountIsADeliberateWhitelistException}。
      * 它走的是另一张表 {@link #TAG_ONLY_EXTRA_KEYS}。
      */
-    public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "importMode",
-            "dataVersion", "contractVersion", "recentActions");
+    public static final List<String> ALLOWED_EXTRA_KEYS = List.of("pageId", "selectedDefs", "selectionSynced",
+            "importMode", "dataVersion", "contractVersion", "recentActions");
+
+    /**
+     * 「任务详情已应用」标记键（{@code extra.selectionSynced}，前端工作区上报）。
+     *
+     * <p>为什么需要它：前端 {@code buildContext()} 恒发 {@code selectedDefs}（默认 {@code []}），
+     * 而进页到 {@code GET /tasks/{id}} 应用完之间存在"任务详情未水合"的窗口 —— 那里的 {@code []}
+     * 只表示"还不知道"，不是"用户清空了勾选"。只有本键为 {@code true}（详情已应用）时，
+     * 空列表才被当成权威空值；否则按未同步处理（回落任务条目/历史），避免误抹已有选择。
+     *
+     * <p>可选字段：旧客户端不带 ⇒ 按未同步处理（保守一侧：不抹掉已落库/历史里的勾选）。
+     */
+    public static final String SELECTION_SYNCED_KEY = "selectionSynced";
 
     /**
      * <b>只进披露判定、永不进模型载荷</b>的 {@code extra} 键（批 A / A-13 旁路；缺口 0 收口）。
@@ -258,8 +270,8 @@ public class ContextBuilder {
             }
             sb.append("- 已确定条件: ").append(String.join("；", rendered)).append("\n");
         }
-        else if (slots.hasDefCodes()) {
-            // 未设筛选是正常状态（全量），不是长期缺失：明确说清，别再去收集条件
+        else if (slots.hasDefCodes() && "EXPORT".equals(slots.taskType())) {
+            // 未设筛选是导出语义（QUERY_COND 无条件的正常状态）；导入没有筛选步，不得渲染"导出全部"
             sb.append("- 未设筛选: 全量（未设置查询条件即导出全部，不要再收集条件或询问是否筛选）\n");
         }
         List<String> missing = new ArrayList<>();
@@ -336,12 +348,13 @@ public class ContextBuilder {
      * 从 {@code extra.selectedDefs} 取"页面实时选中集"。
      *
      * <p>
-     * 两态必须分开（issue #3 裁决③）：
+     * 两态必须分开（issue #3 裁决③ + 2026-10-29 返修）：
      * <ul>
-     * <li><b>返回 {@code null} = 页面从未同步</b>：客户端没带这个键，或当前不在拥有选中集的向导页上
-     * （任务中心 / 定义页 / 数据浏览上报的 {@code pageId} 都不在 {@link #SELECTION_PAGE_IDS} 里）。
+     * <li><b>返回 {@code null} = 页面从未同步</b>：客户端没带这个键，当前不在拥有选中集的向导页上
+     * （任务中心 / 定义页 / 数据浏览上报的 {@code pageId} 都不在 {@link #SELECTION_PAGE_IDS} 里），
+     * <b>或</b>带了空列表但任务详情还没应用（{@link #SELECTION_SYNCED_KEY} 不为 {@code true}）。
      * 此时的空值只表示"不知道"，调用方应退回任务已存条目；</li>
-     * <li><b>返回空列表 = 页面同步了空集合</b>：用户把勾选全部取消。这是有效信息，
+     * <li><b>返回空列表 = 页面同步了空集合</b>：任务详情已应用且用户把勾选全部取消。这是有效信息，
      * 必须以页面真值呈现，否则模型会把陈旧的"任务条目"当成用户现在选的。</li>
      * </ul>
      */
@@ -358,7 +371,12 @@ public class ContextBuilder {
         if (!(raw instanceof List<?> list)) {
             return null;
         }
-        return list.stream().map(String::valueOf).toList();
+        List<String> codes = list.stream().map(String::valueOf).toList();
+        if (codes.isEmpty() && !Boolean.TRUE.equals(extra.get(SELECTION_SYNCED_KEY))) {
+            // 未水合 / 旧客户端：[] 只表示"还不知道"，不是"用户清空"
+            return null;
+        }
+        return codes;
     }
 
     /**

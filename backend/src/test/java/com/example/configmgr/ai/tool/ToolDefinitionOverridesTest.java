@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.6", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.7", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -359,6 +359,41 @@ class ToolDefinitionOverridesTest {
         assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
         assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
 
-        assertEquals("2026-10-27.6", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.7", shipped.version(), "改描述必须发新 version");
+    }
+
+    /**
+     * 规则冲突统一（2026-10-29 返修）：{@code confirm_step} 的"失败即停"必须保留系统提示词
+     * 第 29 条的<b>零副作用一次纠正</b>例外 —— 否则工具描述与提示词给出相反约束（工具描述本身
+     * 也进模型上下文）。同参数/同目标仍禁止；YAML 覆盖与 {@code AiTools} 注解回落两面同批。
+     */
+    @Test
+    void shippedConfirmStepKeepsTheRule29ZeroSideEffectCorrectionException() {
+        ToolDefinitionOverride confirmStep = new YamlToolDefinitionSource().load().find("confirm_step");
+        assertNotNull(confirmStep);
+        String description = confirmStep.description();
+        assertTrue(description.contains("第 29 条"), description);
+        assertTrue(description.contains("零副作用"), description);
+        assertTrue(description.contains("一次不同的纠正动作"), description);
+        assertTrue(description.contains("同参数"), description);
+        assertTrue(description.contains("失败即停"), description);
+
+        String annotation = confirmStepDescriptionFromAnnotation();
+        assertTrue(annotation.contains("第 29 条"), annotation);
+        assertTrue(annotation.contains("零副作用"), annotation);
+    }
+
+    /** {@code @Tool(description=...)} 的回落面（YAML 缺描述时模型看到的那一份）。 */
+    private static String confirmStepDescriptionFromAnnotation() {
+        try {
+            java.lang.reflect.Method method = com.example.configmgr.ai.tools.AiTools.class
+                .getMethod("confirmStep", String.class);
+            Tool tool = method.getAnnotation(Tool.class);
+            assertNotNull(tool, "AiTools#confirmStep 必须带 @Tool");
+            return tool.description();
+        }
+        catch (NoSuchMethodException ex) {
+            throw new AssertionError("AiTools#confirmStep(String) 不存在", ex);
+        }
     }
 }

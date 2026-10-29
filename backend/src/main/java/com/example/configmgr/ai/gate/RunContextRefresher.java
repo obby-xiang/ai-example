@@ -106,6 +106,28 @@ public class RunContextRefresher {
 		return base.equals(before) ? Optional.empty() : Optional.of(base);
 	}
 
+	/**
+	 * 续跑交棒前的<b>任务权威同步</b>：只按 {@code current.taskId} 读任务，覆盖
+	 * {@code taskType / step / taskStatus}（页面与 extra 不动）。
+	 *
+	 * <p><b>为什么必须有</b>：挂起期内用户可以在向导里手动改步骤/状态；而续跑批里可能没有任何
+	 * {@code navigate_to / create_task / confirm_step} 结算（{@link #supports} 全不命中）
+	 * ⇒ 批间刷新什么都不做，下一跳永远带挂起那一刻的旧步骤。调用方（{@code ResumeService}）
+	 * 只在<b>交棒前</b>用它，批内判定用的上下文仍冻结在批首。
+	 *
+	 * @param current 当前上下文（无 taskId = 无事可同步）
+	 * @return 新上下文；无 taskId 或值未变化 ⇒ {@code empty}
+	 * @throws IllegalStateException 任务读不到/读取失败（调用方必须 WARN 并保留旧值）
+	 */
+	public Optional<AiContext> syncTask(AiContext current) {
+		if (current == null || current.getTaskId() == null || current.getTaskId() <= 0L) {
+			return Optional.empty();
+		}
+		AiContext base = copyOf(current);
+		applyTask(base, requireTask(current.getTaskId()));
+		return base.equals(current) ? Optional.empty() : Optional.of(base);
+	}
+
 	/** 导航：page/taskId 来自入参；有 taskId 时 type/step/status 来自任务权威值。 */
 	private void applyNavigate(AiContext base, PendingToolCall settled) {
 		JsonNode args = parse(settled.getArguments());
