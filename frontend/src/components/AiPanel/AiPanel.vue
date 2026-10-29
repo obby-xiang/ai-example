@@ -65,7 +65,7 @@
       <span :class="alertIcon('primary')" aria-hidden="true">▦</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.suspendPoolFull') }}</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.poolSaturatedDetail', { size: ai.poolSaturated.poolSize }) }}</span>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.poolSaturatedDetail') }}</span>
       </div>
     </div>
 
@@ -722,9 +722,11 @@
                                  一并禁用 —— 决策送不到后端，允许点击只会得到一次失败；出口保留在上方
                                  「已失效」行（刷新状态 / 新建会话）。 -->
                             <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-testid="gate-actions">
-                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用 -->
+                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。
+                                   2026-10-29 复审 M-1：失效门卡的勾选框已禁用 ⇒ 提示行一并退场
+                                   （不留"照着做也做不了"的死指令）。 -->
                               <span
-                                v-if="gateNeedsAck(part)"
+                                v-if="gateNeedsAck(part) && !runExpired"
                                 class="text-[12.2px] text-[#b45309]"
                                 data-testid="gate-ack-hint"
                               >{{ t('ai.hitl.ackHint') }}</span>
@@ -2536,13 +2538,20 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
   return message.role === 'assistant' && ai.messages[ai.messages.length - 1] === message
 }
 
-/** 只有当前消息里真实存在可操作卡时才显示等待；自动前端工具与其余运行阶段都算工作。 */
+/**
+ * 只有当前消息里真实存在**等人**的可操作卡时才显示「等待你操作」；自动前端工具与其余运行阶段都算工作。
+ *
+ * <p>2026-10-29 复审 M-4：生成式表单「已提交、结局未到」这一段，人这一侧已经没有待办
+ * （卡头是「✓ 已提交」、卡体是只读表单、连 chevron 都没有），再报「等待你操作」就是指着用户去做
+ * 一件做不了的事 —— 该窗口归**既有的工作中语义**（呼吸点），不新增任何新状态。
+ */
 function waitingForAction(message: ChatMessage): boolean {
   if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || unconfirmedOf(message)) {
     return false
   }
   return message.parts.some((part) => part.kind === 'tool'
     && part.requiresAction
+    && !isFormAwaitingOutcome(part)
     && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL || isSheetPreviewPart(part) || isUploadHandoffPart(part)))
 }
 
@@ -3657,9 +3666,15 @@ function isBlockExpanded(block: Block): boolean {
  *
  * <p>为什么不能只看 `loading`：B1「挂起即断」之后，等人决策的一轮是 `loading=false && suspended=true`
  * （`runPhase='parked'`）；点批准的那一刻段立刻切只读，而此时连接可能还没建起来 ——
- * 只看 `loading` 就会「批准瞬间折叠 → 重连后展开」闪一下。三条证据任一成立都算未终态：
+ * 只看 `loading` 就会「批准瞬间折叠 → 重连后展开」闪一下。
+ *
+ * <p><b>为什么不直接写 `runPhase ≠ 'idle'`</b>：那个条件把 `recovering` 也算进来，而
+ * `loadHistory` / `retryRestoreSnapshot` / `returnToActiveRun` 在 `restoringRecovery` 期间
+ * 就**同步**把镜像消息落屏 —— 刷新/重新载入时，末条消息里的已决只读卡会先被强制展开、
+ * HTTP 回来再折叠，正是本批要消掉的那类闪动。批准瞬间的闪动另有**决策在途 / GF 提交在途**
+ * 两条证据覆盖，不依赖 `recovering`。故终态判据 = 仍在收流 ∨ 挂起等人，再加两条在途证据：
  * <ol>
- * <li>`runPhase ≠ 'idle'`（running / parked / recovering —— 收流、挂起、恢复中）；</li>
+ * <li>`ai.loading || ai.suspended`（收流中 / 挂起等人 —— 不含恢复中）；</li>
  * <li>该卡已有**决策在途**（`gateSubmissions` 有值：点过批准/拒绝、结局帧还没到）；</li>
  * <li>该卡是生成式表单且**提交在途**（结局帧未到的只读锁定态，见 `readOnlyLike`）。</li>
  * </ol>
@@ -3670,7 +3685,7 @@ function turnStillOpen(block: Block): boolean {
   if (last === undefined || last.id !== block.messageId) {
     return false
   }
-  if (ai.runPhase !== 'idle') {
+  if (ai.loading || ai.suspended) {
     return true
   }
   return block.parts.some((part) => part.kind === 'tool'
@@ -3765,8 +3780,8 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.returnedChars,
     part.truncatedReason,
     readOnlyLike(part),
-    // 展开时序判据换成「本轮未终态」后，memo 必须跟着读 runPhase（否则 parked→idle 不触发重渲）
-    ai.runPhase,
+    // 展开时序判据读 `loading || suspended`：memo 必须跟着读这两个现场（parked→idle 才重渲）
+    ai.suspended,
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
@@ -4372,8 +4387,9 @@ const noticeIsError = computed(() => ai.notice !== null && ai.noticeSeverity ===
 /**
  * 2026-10-29 ToC 呈现减负批（同一事实只留一个提示面）：**专属 Alert 已经在报的那条事实**，
  * 通知槽不再叠一遍。映射刻意只收两组"同义重复"：
- * - 挂起池饱和 ⇒ `alert-pool-saturated`（含容量）已在同屏；
- * - 断流 ⇒ `alert-interrupted`（"结果可能不完整 + 已生成内容保留"）已在同屏。
+ * - 池饱和 ⇒ `alert-pool-saturated` 已在同屏（含 503 无 body 的回落通知）；
+ * - 断流 ⇒ `alert-interrupted`（"结果可能不完整 + 已生成内容保留"）已在同屏
+ *   —— 收流路径写 `interruptedKeep`、**接管耗尽路径写 `interruptedKeepShort`**，两条同义，都要收。
  * 其余通知（取消 / 重试 / 幂等 / 反馈失败 …）没有专属 Alert，照旧走通知槽。
  */
 const noticeCoveredByAlert = computed(() => {
@@ -4384,7 +4400,8 @@ const noticeCoveredByAlert = computed(() => {
   if (ai.poolSaturated !== null && (code === 'ai.notice.poolSaturated' || code === 'ai.notice.poolSaturatedWithSize')) {
     return true
   }
-  return ai.streamInterrupted && code === 'ai.notice.interruptedKeep'
+  return ai.streamInterrupted
+    && (code === 'ai.notice.interruptedKeep' || code === 'ai.notice.interruptedKeepShort')
 })
 
 /** 通知槽是否渲染（原有两条排除 + 专属 Alert 覆盖）。 */
@@ -4393,10 +4410,20 @@ const noticeBarVisible = computed(() => ai.notice !== null
   && !noticeCoveredByAlert.value)
 
 /**
- * 工作区动作回执位是否渲染：上方「工作区已同步」（`contextSync`）已经在报同一件事时让位 —
- * 同一动作不在两条提示面各报一次（失败回执仍会在同步反馈退场后显示，信息不丢）。
+ * 工作区动作回执位是否渲染。
+ *
+ * <p><b>只有「成功回执」才可能与「工作区已同步」报同一件事</b>：`ui_event_result` 的失败
+ * （`handled=false`）从不广播 `workspace_changed`，此时 `contextSync` 若是别的动作（用户手改 /
+ * 上一手 AI 成功），压掉失败回执就是把**另一件事**吞了。故让位条件 = 成功 **且** 有同步反馈；
+ * 失败回执始终显示（信息不丢）。
  */
-const uiEventReceiptVisible = computed(() => ai.lastUiEventResult !== null && ai.contextSync === null)
+const uiEventReceiptVisible = computed(() => {
+  const receipt = ai.lastUiEventResult
+  if (receipt === null) {
+    return false
+  }
+  return !(receipt.handled && ai.contextSync !== null)
+})
 
 /**
  * 通知槽文本（i18n L-69）：store 里 `notice` 是**设定时**的语言快照，`noticeCode/noticeArgs` 才是
@@ -4658,17 +4685,24 @@ function cardFormSpec(part: ToolPart): FormSpec | null {
 }
 
 /**
- * 已决 GF 的回填值（K1 + F9）：**只有提交收尾**才回填 `submittedValues`；
- * 取消 / 超时（未提交）一律 null ⇒ FormRenderer 回落初始空态（不保留半成品值）。
+ * GF 只读态的回填值（K1 + F9）：有 `submittedValues` 且不是**取消** ⇒ 一律回填。
  *
- * <p>2026-10-29：提交**在途**（结局帧未到，`readOnlyStateOf` 还读不到终态）同样回填 ——
- * 用户刚提交的那份值就是卡面该显示的"同一张表单"，不能短暂回落成空表单。
+ * <p>为什么对全部非取消结局都回填：结局帧可能是 `succeeded`，也可能是 `failed` / `expired` /
+ * `rejected` / `notExecuted`（结果回灌丢失时 `expireResidueToolParts` 会把仍 pending 的段收成
+ * `expired`）。只要用户**真的提交过**，卡体就该显示那份值 —— 否则结局到达那一刻卡体会回落成
+ * schema 默认空表单，而卡头摘要（`generativeFormSummary` 读同一份 `submittedValues`）还写着
+ * 「导出范围 华北」：同一张卡自相矛盾，也违背「结局帧到达后形态不变」。
+ *
+ * <p>`cancelled` 是唯一例外（F9）：取消 = 从未提交，不得把半成品值当"提交过的值"回填。
  */
 function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
-  if (isFormAwaitingOutcome(part)) {
-    return part.submittedValues ?? null
+  if (part.submittedValues === undefined || part.submittedValues === null) {
+    return null
   }
-  return readOnlyStateOf(part) === 'submitted' ? (part.submittedValues ?? null) : null
+  if (readOnlyStateOf(part) === 'cancelled') {
+    return null
+  }
+  return part.submittedValues
 }
 
 /**
@@ -4778,6 +4812,12 @@ async function send(): Promise<void> {
   }
   // 用户已在流式中写入新内容：不覆盖，也不把失败消息设成新的编辑锚点。
   if (inputText.value !== '') {
+    return
+  }
+  // 首帧超时的自动恢复**已接管本轮**（`ai.loading` 仍为真：连接/续收在跑）⇒ 不回稿：
+  // 这一轮的提示面是恢复气泡/断流出口，再往输入框塞一遍原稿就是同一句话两处，且用户会误以为
+  // 消息没发出去。真失败到达时 `loading` 已为假，回稿路径一字不变。
+  if (ai.loading) {
     return
   }
   // 失败 / 断流 / 未发送：原稿回流并聚焦；新消息锚到本轮用户消息，编辑重跑沿用发送前 editId。

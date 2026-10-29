@@ -6,7 +6,7 @@
  * 不动 `stores/ai.ts`（并行批）：所有现场都用 store 公开字段直接摆好，断言只看 DOM 与 locale 词条。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useAiStore } from '@/stores/ai'
@@ -162,19 +162,39 @@ describe('1 · 同一事实只留一个提示面', () => {
     wrapper.unmount()
   })
 
-  it('工作区已有同步反馈时不叠 ui_event 回执；没有同步反馈时回执照常显示', async () => {
+  it('工作区同步反馈只让成功回执让位；失败回执始终显示', async () => {
     const store = useAiStore()
     store.contextSync = { version: 3, summary: '选择了 2 个配置定义', at: 1, source: '界面' } as never
+    // ① 失败回执（handled=false）是**另一件事**：不得被无关的「工作区已同步」压掉
     store.lastUiEventResult = { event: 'select_defs', handled: false, message: '当前没有进行中的任务' }
-
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])])
     expect(wrapper.find('[data-testid="panel-context-bar"]').text()).toContain('选择了 2 个配置定义')
+    expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(true)
+
+    // ② 成功回执（handled=true）：同步反馈已在报同一件事 ⇒ 回执位让位
+    store.lastUiEventResult = { event: 'set_conditions', handled: true, message: '已设置筛选条件' }
+    await nextTick()
     expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(false)
 
-    // 对照：同步反馈退场后，回执位仍是唯一提示面
+    // ③ 同步反馈退场后，回执位仍是唯一提示面
     store.contextSync = null
     await nextTick()
     expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('接续耗尽路径的短断流通知同样由断流 Alert 承接', async () => {
+    const store = useAiStore()
+    store.streamInterrupted = true
+    store.lastRoundOutcome = 'interrupted'
+    store.noticeCode = 'ai.notice.interruptedKeepShort'
+    store.noticeArgs = { reason: '断流' }
+    store.noticeSeverity = 'warning'
+    store.notice = '连接中断，结果可能不完整（断流）。已生成的内容保留。'
+
+    const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])])
+    expect(wrapper.find('[data-testid="alert-interrupted"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="notice-bar"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
@@ -249,14 +269,105 @@ describe('3 · 生成式表单提交后保留 submitting 只读态直到结局',
     expect(wrapper.text()).not.toContain('scenario')
 
     // 结局帧到达（success）⇒ 卡头状态与卡体形态与「已提交」期一致（无二次换形）
-    part.status = 'succeeded'
-    part.requiresAction = false
+    //（经 store 的响应式代理改段，确保真的重渲；改原始对象不会触发更新）
+    const live = store.messages[0]!.parts[0] as ToolPart
+    live.status = 'succeeded'
+    live.requiresAction = false
     await nextTick()
     expect(wrapper.find('[data-testid="hitl-receipt"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="ro-badge-g1"]').text()).toContain('已提交')
     expect(wrapper.find('[data-testid="ro-summary-g1"]').text()).toContain('导出范围 华北')
     expect(wrapper.find('[data-testid="ro-form-g1"]').exists()).toBe(true)
     wrapper.unmount()
+  })
+
+  it('提交在途的只读表单在非成功结局仍回填提交值（真实 FormRenderer）', async () => {
+    const store = useAiStore()
+    const part: ToolPart = {
+      kind: 'tool',
+      seg: 0,
+      toolCallId: 'g2',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'running',
+      args: FORM_ARGS,
+      requiresAction: true,
+      submittedValues: { region: 'HB', note: '已提交的备注' }
+    }
+    const msg = buildMessage([part], { toolCallId: 'g2', name: 'generative_form', kind: 'FRONTEND', args: { form: FORM_SPEC }, rawArgs: FORM_ARGS, status: 'running' })
+    msg.id = 'a-gf2'
+    store.activeRunId = 'run-1'
+    store.activeForm = activeForm('g2', 'submitted')
+
+    const wrapper = await mountPanel([msg], { realForm: true })
+    // 提交在途（结局未到）：卡体就是提交值
+    expect((wrapper.find('[data-testid="ro-form-g2"] select').element as HTMLSelectElement).value).toBe('HB')
+    expect((wrapper.find('[data-testid="ro-form-g2"] input[type="text"]').element as HTMLInputElement).value).toBe('已提交的备注')
+
+    // 结局 = 执行失败：值不得被清空（摘要与卡体同源，不能卡头有值、卡体空表）
+    //（经 store 的响应式代理改段，确保真的重渲）
+    const live = store.messages[0]!.parts[0] as ToolPart
+    live.status = 'failed'
+    live.requiresAction = false
+    await nextTick()
+    expect(wrapper.find('[data-testid="ro-summary-g2"]').text()).toContain('导出范围 华北')
+    expect((wrapper.find('[data-testid="ro-form-g2"] select').element as HTMLSelectElement).value).toBe('HB')
+    expect((wrapper.find('[data-testid="ro-form-g2"] input[type="text"]').element as HTMLInputElement).value).toBe('已提交的备注')
+
+    // 结局 = 超时（结果回灌丢失，段被收成 expired）：同样保留提交值
+    live.status = 'expired'
+    await nextTick()
+    expect((wrapper.find('[data-testid="ro-form-g2"] select').element as HTMLSelectElement).value).toBe('HB')
+    expect((wrapper.find('[data-testid="ro-form-g2"] input[type="text"]').element as HTMLInputElement).value).toBe('已提交的备注')
+    wrapper.unmount()
+  })
+
+  it('提交在途不再显示「等待你操作」，走既有工作中语义', async () => {
+    const store = useAiStore()
+    const part: ToolPart = {
+      kind: 'tool',
+      seg: 0,
+      toolCallId: 'g3',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'running',
+      args: FORM_ARGS,
+      requiresAction: true,
+      submittedValues: { region: 'HB' }
+    }
+    const msg = buildMessage([part], { toolCallId: 'g3', name: 'generative_form', kind: 'FRONTEND', args: { form: FORM_SPEC }, rawArgs: FORM_ARGS, status: 'running' }, true)
+    msg.id = 'a-gf3'
+    store.activeRunId = 'run-1'
+    store.activeForm = activeForm('g3', 'submitted')
+    // 挂起语义仍在（runPhase=parked），但人这一侧已经没有待办
+    store.suspended = true
+    store.loading = true
+
+    const wrapper = await mountPanel([msg])
+    expect(wrapper.find('[data-testid="park-waiting"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
+    wrapper.unmount()
+
+    // 对照：仍在填写（无提交值）的挂起表单照旧报「等待你操作」
+    const store2 = useAiStore()
+    const pendingPart: ToolPart = {
+      kind: 'tool',
+      seg: 0,
+      toolCallId: 'g4',
+      name: 'generative_form',
+      kind2: 'FRONTEND',
+      status: 'pending',
+      args: FORM_ARGS,
+      requiresAction: true
+    }
+    const pendingMsg = buildMessage([pendingPart], { toolCallId: 'g4', name: 'generative_form', kind: 'FRONTEND', args: { form: FORM_SPEC }, rawArgs: FORM_ARGS, status: 'pending' }, true)
+    pendingMsg.id = 'a-gf4'
+    store2.activeForm = activeForm('g4', 'filling')
+    store2.suspended = true
+    store2.loading = false
+    const wrapper2 = await mountPanel([pendingMsg])
+    expect(wrapper2.find('[data-testid="park-waiting"]').exists()).toBe(true)
+    wrapper2.unmount()
   })
 })
 
@@ -291,6 +402,32 @@ describe('4 · 失效确认卡禁用批准与拒绝', () => {
     for (const button of live) {
       expect(button.attributes('disabled')).toBeUndefined()
     }
+    wrapper2.unmount()
+  })
+
+  it('失效门卡不留下照做不了的「请先勾选确认项」死指令', async () => {
+    const store = useAiStore()
+    store.activeRunId = 'run-irr'
+    store.runExpiry = { runId: 'run-irr', remainingMs: 1_000, expiresAt: null, receivedAtMs: Date.now() - 5_000 }
+    const msg = buildMessage(
+      [{ kind: 'tool', seg: 0, toolCallId: 'c9', name: 'start_publish', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":3}', requiresAction: true, irreversible: true }],
+      { toolCallId: 'c9', name: 'start_publish', kind: 'CONFIRM', args: { taskId: 3 }, rawArgs: '{"taskId":3}', status: 'pending' }
+    )
+    const wrapper = await mountPanel([msg])
+    // 勾选框已禁用 ⇒ 提示行必须一起退场（否则是指着禁用控件的死指令）
+    expect(wrapper.find('[data-testid="gate-ack-box"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="gate-ack-hint"]').exists()).toBe(false)
+    // 必要出口仍在：失效说明 + 刷新状态 / 新建会话
+    expect(wrapper.find('[data-testid="run-expiry-expired"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="run-expiry-reload"]').exists()).toBe(true)
+    wrapper.unmount()
+
+    // 负例：未失效的不可撤销卡照旧给提示行
+    const store2 = useAiStore()
+    store2.activeRunId = 'run-irr2'
+    store2.runExpiry = { runId: 'run-irr2', remainingMs: 600_000, expiresAt: null, receivedAtMs: Date.now() }
+    const wrapper2 = await mountPanel([msg])
+    expect(wrapper2.find('[data-testid="gate-ack-hint"]').exists()).toBe(true)
     wrapper2.unmount()
   })
 })
@@ -329,6 +466,29 @@ describe('5 · 确认卡展开按本轮未终态', () => {
     store.clearGateSubmission('c1')
     await nextTick()
     expect(wrapper.find('[data-testid="ro-body-c1"]').attributes('style') ?? '').toContain('display: none')
+    wrapper.unmount()
+  })
+
+  it('历史恢复期（restoringRecovery）不得把已决只读卡异常展开再折叠', async () => {
+    const store = useAiStore()
+    // 镜像落屏：末条消息里的已决只读卡（刷新/重新载入后的常态）
+    const msg = buildMessage([
+      { kind: 'tool', seg: 0, toolCallId: 'p9', name: 'start_publish', kind2: 'CONFIRM', status: 'succeeded', args: '{"taskId":3}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }
+    ])
+    msg.id = 'a-hist'
+    // 恢复在途：restoringRecovery=true，但既没有收流也没有挂起
+    store.loading = false
+    store.suspended = false
+    store.restoringRecovery = true
+
+    const wrapper = await mountPanel([msg])
+    // 恢复期不是"本轮未终态"：卡保持既有的折叠形态（不先展开、HTTP 回来再折叠）
+    expect(wrapper.find('[data-testid="ro-body-p9"]').attributes('style') ?? '').toContain('display: none')
+
+    // 恢复结束：形态不变（无二次换形）
+    store.restoringRecovery = false
+    await nextTick()
+    expect(wrapper.find('[data-testid="ro-body-p9"]').attributes('style') ?? '').toContain('display: none')
     wrapper.unmount()
   })
 })
@@ -426,6 +586,26 @@ describe('7 · 技术词只进诊断', () => {
     }
     walk((enUS as Record<string, unknown>).ai, 'ai')
   })
+
+  it('池饱和两条通知也不带池/容量术语（双语，503 无 body 时的回落路径）', () => {
+    const read = (tree: unknown, key: string): string => {
+      let cur: unknown = tree
+      for (const part of key.split('.')) {
+        cur = (cur as Record<string, unknown>)[part]
+      }
+      return cur as string
+    }
+    for (const key of ['ai.notice.poolSaturated', 'ai.notice.poolSaturatedWithSize']) {
+      const zh = read(zhCN, key)
+      for (const word of ['挂起池', '线程池', '容量', '{size}']) {
+        expect(zh, `${key} 的 zh 文案`).not.toContain(word)
+      }
+      const en = read(enUS, key)
+      for (const word of ['suspended-run', 'pool', 'capacity', '{size}']) {
+        expect(en.toLowerCase(), `${key} 的 en 文案`).not.toContain(word)
+      }
+    }
+  })
 })
 
 describe('8 · 硬编码走 locale', () => {
@@ -452,6 +632,49 @@ describe('8 · 硬编码走 locale', () => {
     await nextTick()
     const text = wrapper.find('[data-testid="context-popover"]').text()
     expect(text).not.toMatch(/[\u4e00-\u9fa5]/)
+    wrapper.unmount()
+  })
+})
+
+describe('9 · 首帧超时自动恢复在途时面板不回稿', () => {
+  it('恢复在途（ai.loading）时不回稿，避免与恢复提示重复', async () => {
+    const store = useAiStore()
+    const wrapper = await mountPanel([])
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('原始草稿')
+
+    let resolveSend!: (value: { outcome: 'interrupted'; userMessageId: string }) => void
+    const pending = new Promise<{ outcome: 'interrupted'; userMessageId: string }>((resolve) => {
+      resolveSend = resolve
+    })
+    vi.spyOn(store, 'send').mockReturnValue(pending)
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await nextTick()
+    expect((box.element as HTMLTextAreaElement).value).toBe('')
+
+    // 首帧超时的自动恢复已经接管本轮（连接仍在跑）⇒ 不再把草稿塞回输入框
+    store.loading = true
+    resolveSend({ outcome: 'interrupted', userMessageId: 'u-1' })
+    await flushPromises()
+
+    expect((box.element as HTMLTextAreaElement).value).toBe('')
+    expect(store.loading).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('真失败（loading=false）照旧回稿并聚焦', async () => {
+    const store = useAiStore()
+    const wrapper = await mountPanel([])
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('原始草稿')
+    const focusSpy = vi.spyOn(box.element as HTMLTextAreaElement, 'focus')
+
+    vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'error', userMessageId: 'u-2' })
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    expect((box.element as HTMLTextAreaElement).value).toBe('原始草稿')
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true })
     wrapper.unmount()
   })
 })
