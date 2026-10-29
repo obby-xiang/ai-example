@@ -19,13 +19,13 @@ import {
   AI_MIRROR_PREFIX,
   AI_SESSION_ID_KEY,
   AI_SESSION_LOCK_PREFIX,
+  currentAiIdentity,
   identityFingerprint,
   isPositiveId,
   isSameIdentity,
   mirrorStorageKey,
   normalizeIdentity,
   normalizeSessionId,
-  readAiIdentity,
   sessionIdStorageKey,
   sessionLockName,
   writeAiIdentity,
@@ -156,6 +156,10 @@ let currentAbort: AbortController | null = null
 let sessionGate: Promise<string> | null = null
 let sessionGateFingerprint: string | null = null
 let sessionGateToken = 0
+/** 所有权探活的单飞句柄（面板挂载 + 发号成功补判可能同时触发）。 */
+let ownershipProbe: Promise<void> | null = null
+/** 目录加载单飞句柄（`ensureSession` 在需要身份时等待它，而不是让面板阻塞启动）。 */
+let directoryGate: Promise<void> | null = null
 /**
  * 当前预览计划对应的表格上下文（模块级：不进响应式状态）。
  *
@@ -715,10 +719,10 @@ const SILENT_SUCCESS_UI_EVENTS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * 页签级随机 id（**只**用于 pageId 轮换与"未接身份目录"的单用户兼容会话；Task 4 起
- * 会话 id 一律由后端 `POST /api/ai/session` 发号，不得用本函数造"正式"会话 id）。
+ * 页签随机 id（**只**用于 pageId 轮换）。会话 id 一律由后端 `POST /api/ai/session` 发号，
+ * 本函数与"会话"无关 —— 名字保持中性，防止再被误用为本地会话号。
  */
-export function createSessionId(): string {
+export function createPageIdToken(): string {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       return crypto.randomUUID()
@@ -883,7 +887,7 @@ function ensurePageId(): string {
 }
 
 function rotatePageId(): string {
-  const created = createSessionId()
+  const created = createPageIdToken()
   try {
     sessionStorage.setItem(PAGE_ID_KEY, created)
   } catch {
@@ -950,7 +954,7 @@ function ownershipIdentityMatches(message: OwnershipMessage, identity: AiIdentit
 
 function postOwnership(kind: OwnershipMessage['kind'], sessionId: string): void {
   // 身份指纹随消息发出（接管方据此拒绝跨租户/跨用户接手）；无身份时省略字段，保持旧单用户口径。
-  const identity = readAiIdentity()
+  const identity = currentAiIdentity()
   const message: OwnershipMessage = {
     kind,
     sessionId,
@@ -1064,7 +1068,7 @@ function cancelPendingTakeover(): void {
 
 /** 记下"本页签刚从 pagehide 离开"的意向（刷新/慢重载回来后据此认出自己不是复制品）。 */
 function rememberReturnIntent(sessionId: string): void {
-  const identity = readAiIdentity()
+  const identity = currentAiIdentity()
   try {
     sessionStorage.setItem(
       RETURN_INTENT_KEY,
@@ -1099,7 +1103,7 @@ function takeReturnIntent(sessionId: string): boolean {
   }
   try {
     const value = JSON.parse(raw) as { sessionId?: unknown; pageId?: unknown; at?: unknown; fingerprint?: unknown }
-    const identity = readAiIdentity()
+    const identity = currentAiIdentity()
     const fingerprintMatches = identity
       ? value.fingerprint === identityFingerprint(identity)
       : value.fingerprint === undefined
@@ -1206,11 +1210,17 @@ function clearMirrorRefs(): void {
  * 广播与服务端会话都不受影响。`clear()` 不可用（隐私模式/被禁用）时退回镜像前缀清理 ——
  * 宁可残留，也不抛错打断"本页签用新 id"。
  */
-function clearDuplicatedTabStorage(): void {
+function clearDuplicatedTabStorage(identity: AiIdentity | null): void {
   try {
     sessionStorage.clear()
   } catch {
     clearMirrorRefs()
+  }
+  // Task 4 返修 C1：清空的是"从原页签继承来的现场"，**不包括**本页签当前选择的身份。
+  // 身份的内存缓存是权威，这里必须立即回写 storage —— 否则该页签此后所有 AI 请求漏身份头、
+  // 镜像/草稿/锁键形退化为无身份口径（且跨页签认领消息发出时也不带指纹）。
+  if (identity !== null) {
+    writeAiIdentity(identity)
   }
 }
 
@@ -1226,21 +1236,20 @@ function clearDuplicatedTabStorage(): void {
  * Web Locks 判定，判为复制品再就地换新 id（见 store 的 `ensureTabOwnership`）。
  */
 function initSessionId(): string {
-  const identity = readAiIdentity()
-  const key = sessionIdStorageKey(identity)
+  const identity = currentAiIdentity()
+  if (!identity) {
+    // 未选身份就没有"本页签会话"可恢复；等目录落定后由 `ensureSession()` 向后端发号。
+    return ''
+  }
+  return storedSessionPointer(identity)
+}
+
+/** 该身份当前保存的会话指针（切换身份时保留；空 = 没有可恢复会话）。 */
+function storedSessionPointer(identity: AiIdentity): string {
   try {
-    const stored = sessionStorage.getItem(key)
-    if (stored) {
-      return stored
-    }
-    if (identity) {
-      return ''
-    }
-    const created = createSessionId()
-    sessionStorage.setItem(key, created)
-    return created
+    return normalizeSessionId(sessionStorage.getItem(sessionIdStorageKey(identity)) ?? '')
   } catch {
-    return identity ? '' : createSessionId()
+    return ''
   }
 }
 
@@ -2267,14 +2276,12 @@ function clearNotice(sink: NoticeSink): void {
 function cleanupSessionLocalArtifacts(
   sessionId: string,
   payload: SessionPurgeResponse | null,
-  identity: AiIdentity | null = readAiIdentity()
+  identity: AiIdentity | null = currentAiIdentity()
 ): void {
   const expectedMirror = mirrorStorageKey(sessionId, identity)
   const cleanup = payload?.clientCleanup
   const ownMirrorKey = (key: string | undefined): key is string =>
-    key === expectedMirror
-    || key === `${MIRROR_PREFIX}${sessionId}`
-    || (identity !== null && key === `${MIRROR_PREFIX}${identityFingerprint(identity)}:${sessionId}`)
+    key === expectedMirror || key === `${MIRROR_PREFIX}${sessionId}`
   const mirrorKey = ownMirrorKey(cleanup?.mirrorKey) ? cleanup.mirrorKey : expectedMirror
   try {
     // 两个口径都清：本前端的身份键 + 后端 clientCleanup 给出的键（旧后端仍是 `ai-mirror:<sid>`，
@@ -2287,7 +2294,7 @@ function cleanupSessionLocalArtifacts(
     // 隐私模式/存储被禁用：清不掉不影响主流程（新会话已换 id）
   }
   // 草稿键按**当前身份**拼；身份在销毁回包前已切换 ⇒ 一个都不清（那是新身份的草稿）。
-  if (!isSameIdentity(identity, readAiIdentity())) {
+  if (!isSameIdentity(identity, currentAiIdentity())) {
     return
   }
   const draftIds = Array.isArray(cleanup?.draftToolCallIds) ? cleanup.draftToolCallIds : []
@@ -2326,12 +2333,14 @@ export const useAiStore = defineStore('ai', {
     /** 页签级会话 id（记忆窗口 CONVERSATION_ID；Task 4 起由后端发号，'' = 尚未发号） */
     sessionId: initSessionId(),
     /** 当前页签选中的租户/用户（null = 尚未接入目录，退回旧单用户口径）。 */
-    identity: readAiIdentity() as AiIdentity | null,
+    identity: currentAiIdentity() as AiIdentity | null,
     /** 当前会话归属的身份（换身份/换会话时更新；镜像写入据此拒绝跨身份落盘）。 */
-    sessionIdentity: readAiIdentity() as AiIdentity | null,
-    /** `GET /api/ai/tenant-users` 的目录（少量预置租户，不做循环处理）。 */
+    sessionIdentity: currentAiIdentity() as AiIdentity | null,
+    /** `GET /api/ai/tenants` 的目录（少量预置租户，不做循环处理）。 */
     tenantDirectory: [] as TenantUsersEntry[],
-    /** 目录加载失败（面板提示；不阻断无身份模式的旧单用户使用）。 */
+    /** 目录加载态：`unavailable` = 身份功能不可用（面板横幅 + 发送禁用 + 可重试），不得静默降级。 */
+    directoryStatus: 'idle' as 'idle' | 'loading' | 'ready' | 'unavailable',
+    /** 目录加载失败（面板提示）。 */
     directoryError: null as string | null,
     /**
      * 本页签的会话所有权角色（RC-4）：'unknown' = 尚未判定；'owner' = 本页签持有会话锁；
@@ -5798,7 +5807,13 @@ export const useAiStore = defineStore('ai', {
      * 但也不无限等待：走 {@link retryOrGiveUpGateSync} 有界重试，用尽即解锁（FE-17）。
      */
     async syncGateFromAuthority(toolCallId: string): Promise<void> {
-      const sid = this.sessionId
+      // Task 4 返修 I1：409 校正计时器可能落在身份切换/发号失败窗口 —— 空号一律早退，
+      // 绝不给 `/runs/current?sessionId=` 发空 id 请求。
+      const sid = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
+      if (sid === '') {
+        this.retryOrGiveUpGateSync(toolCallId)
+        return
+      }
       let current: AiRunCurrent
       try {
         current = await aiApi.runsCurrent(sid)
@@ -7933,36 +7948,62 @@ export const useAiStore = defineStore('ai', {
     // ── Task 4：身份目录 / 会话发号引导门 / 身份切换 ──────────────────────────
 
     /**
-     * 拉取预置租户/用户目录（`GET /api/ai/tenant-users`），并按"目录第一项"落默认身份。
+     * 拉取预置租户/用户目录（`GET /api/ai/tenants`，与后端 `TenantDirectoryController` 同一路径），
+     * 并按"目录第一项"落默认身份。
      *
-     * <p>口径：
+     * <p>口径（Task 4 返修 C2）：
      * <ul>
      * <li>已存身份仍在目录里 ⇒ 沿用（刷新/重开页签的恢复路径），随后 `ensureSession()` 取该身份的
      *   会话（有存量就用存量，没有才向后端发号）；</li>
      * <li>没有身份 / 身份已不在目录 ⇒ 落到**目录第一项**，进入身份模式并发号；旧身份会话与镜像
-     *   原样留在旧身份键下（`keepMirror`），不删除、不混用；</li>
-     * <li>旧后端没有该端点 / 请求失败 ⇒ 保持无身份模式（旧单用户口径），只记录错误供面板提示，
-     *   **不**伪造身份、**不**删除任何现场。</li>
+     *   原样留在旧身份键下（`keepMirror` / `keepSessionPointer`），不删除、不混用；</li>
+     * <li>目录不可用（端点缺失 / 请求失败 / 空目录）⇒ `directoryStatus = 'unavailable'`：面板给
+     *   明确横幅 + 重试，**发送禁用**。绝不静默切到"本地造号 + 无身份头"的旧分支。</li>
      * </ul>
      */
-    async loadTenantDirectory(): Promise<void> {
+    /**
+     * 目录加载的**单飞包装**（返修 I6）：面板不再 await 它来阻塞所有权判定/历史恢复 ——
+     * 首次进入没有会话号时所有权判定会先跳过（I2：发号成功后补判），历史/发送由
+     * `ensureSession()` 在需要时等待这份目录结果。
+     */
+    loadTenantDirectory(): Promise<void> {
+      if (directoryGate !== null) {
+        return directoryGate
+      }
+      const task = this.loadTenantDirectoryOnce().finally(() => {
+        if (directoryGate === task) {
+          directoryGate = null
+        }
+      })
+      directoryGate = task
+      return task
+    },
+
+    async loadTenantDirectoryOnce(): Promise<void> {
       const load = aiApi.tenantUsers
       if (typeof load !== 'function') {
+        this.directoryStatus = 'unavailable'
+        this.directoryError = translate('ai.notice.directoryFailed')
         return
       }
+      this.directoryStatus = 'loading'
       this.directoryError = null
       let directory: TenantUsersEntry[] = []
       try {
         const raw = await load()
         directory = Array.isArray(raw) ? raw.map(normalizeTenantEntry).filter((entry): entry is TenantUsersEntry => entry !== null) : []
       } catch (error) {
+        this.directoryStatus = 'unavailable'
         this.directoryError = error instanceof Error ? error.message : translate('ai.notice.directoryFailed')
         return
       }
       this.tenantDirectory = directory
       if (directory.length === 0) {
+        this.directoryStatus = 'unavailable'
+        this.directoryError = translate('ai.notice.directoryEmpty')
         return
       }
+      this.directoryStatus = 'ready'
       const stored = this.identity
       if (stored !== null && directoryHas(directory, stored)) {
         await this.ensureSession()
@@ -7971,6 +8012,12 @@ export const useAiStore = defineStore('ai', {
       const firstTenant = directory[0]
       const firstUser = firstTenant.users[0]
       await this.enterIdentity({ tenantId: firstTenant.tenantId, userId: firstUser.userId })
+    },
+
+    /** 目录失败后的显式重试（面板横幅按钮）；成功则恢复身份与发号。 */
+    async retryLoadTenantDirectory(): Promise<void> {
+      this.directoryError = null
+      await this.loadTenantDirectory()
     },
 
     /**
@@ -7989,15 +8036,17 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 进入（或切换到）某个身份：先清场（旧镜像按旧身份保留），再落身份，最后由后端发号。
+     * 进入（或切换到）某个身份：先清场（旧镜像/旧会话指针按旧身份保留），再落身份，再恢复或发号。
      *
      * <p>顺序不可反：
-     * ① 清场时 `adoptFreshSession` 持有的是**旧身份**，镜像键/锁名按旧身份算；
-     * ② 落身份之后才发号 —— 会话号必须属于新身份，否则「拿到号再换身份」会把新号写进旧身份键；
-     * ③ 发号成功才认领新会话锁（复制页签/410 恢复走同一路径：先判所有权，再取号）。
+     * ① 清场时持有的是**旧身份**，镜像键/锁名按旧身份算；
+     * ② 落身份之后才取号 —— 会话号必须属于新身份；
+     * ③ 新身份**已有会话指针**（切回原身份）⇒ 先按所有权判定，拿得到就恢复原会话（镜像/历史）；
+     *   指针不存在（首次进入）或该会话已被另一页签持有 ⇒ 由后端发新号（返修 I8/C1）。
      */
     async enterIdentity(identity: AiIdentity): Promise<void> {
-      this.adoptFreshSession({ keepMirror: true, pendingSession: true })
+      const pointer = storedSessionPointer(identity)
+      this.adoptFreshSession({ keepMirror: true, keepSessionPointer: true })
       writeAiIdentity(identity)
       this.identity = identity
       this.sessionIdentity = identity
@@ -8005,6 +8054,16 @@ export const useAiStore = defineStore('ai', {
       // 运行期显式切换身份则直接记 owner（本页签刚换的新会话，不存在待接手的复制品关系）。
       if (this.tabOwnership !== 'unknown') {
         this.tabOwnership = 'owner'
+      }
+      if (pointer !== '') {
+        const verdict = await probeSessionLock(pointer)
+        if (verdict !== 'occupied') {
+          this.sessionId = pointer
+          this.sessionIdentity = identity
+          await this.loadHistory()
+          void this.claimSessionOwnership(pointer)
+          return
+        }
       }
       const issued = await this.ensureSession()
       if (issued === '') {
@@ -8027,6 +8086,15 @@ export const useAiStore = defineStore('ai', {
     async ensureSession(): Promise<string> {
       if (this.sessionId !== '') {
         return this.sessionId
+      }
+      // 返修 I6：目录仍在加载时等它落定（面板不再为目录请求阻塞所有权判定/历史恢复）。
+      // 只在"无身份"时等；`enterIdentity` 内部调用本方法时身份已落定，不会自等。
+      if (this.identity === null && this.directoryStatus === 'loading' && directoryGate !== null) {
+        await directoryGate
+        // 等待期间目录落定可能已经完成发号（`enterIdentity` 的发号在目录门内）—— 直接复用。
+        if (this.sessionId !== '') {
+          return this.sessionId
+        }
       }
       const identity = this.identity
       if (identity === null) {
@@ -8064,6 +8132,13 @@ export const useAiStore = defineStore('ai', {
         } catch {
           // 隐私模式/配额：本页签内存态照常使用（刷新后重新发号）
         }
+        // 返修 I2：启动期若因"暂无会话号"跳过了所有权判定，发号成功后补判一次（含复制页签识别）。
+        if (this.tabOwnership === 'unknown') {
+          const pending = this.ensureTabOwnership()
+          if (pending !== null) {
+            void pending
+          }
+        }
         return issued
       })()
       sessionGate = task
@@ -8085,7 +8160,7 @@ export const useAiStore = defineStore('ai', {
      * 走**同一段**本地重置，差别只在后端收尾 —— 复制页签**不得**删旧会话的后端记忆
      * （那是原页签的会话），故本段独立出来只管本页签。
      */
-    adoptFreshSession(options: { keepMirror?: boolean; pendingSession?: boolean } = {}): string {
+    adoptFreshSession(options: { keepMirror?: boolean; keepSessionPointer?: boolean } = {}): string {
       const oldSessionId = this.sessionId
       const oldIdentity = this.sessionIdentity
       // 收口（③）：换 id 前只释放**本页签文档持有、且属于旧会话**的锁 —— 否则新会话的锁随后
@@ -8111,26 +8186,22 @@ export const useAiStore = defineStore('ai', {
       activeRoundHostId = null
       this.loading = false
       /**
-       * 换 id 的口径（Task 4）：
-       * - 已接入身份（`this.identity !== null`）⇒ **不生成**：置 ''，等 `ensureSession()` 向后端发号；
-       *   `pendingSession` 用于"切换身份/复制页签"这类"先清场、再取号"的路径（取号必须发生在
-       *   所有权判定/身份落定之后）。
-       * - 尚无身份（未接租户目录的旧部署/单测）⇒ 保持旧的页签随机 id。
+       * 换 id 的口径（Task 4 返修 C2）：**不生成**，置 ''，等 `ensureSession()` 向后端发号。
+       * 前端没有任何"本地造会话号"的分支 —— 身份模式与无身份模式都一视同仁。
        * 修复（苞 A 必修）：此前只写 sessionStorage、从不写 this.sessionId ⇒ `send` 仍带旧 id 请求、
        * "新建对话"实际继承旧会话的服务端记忆（实测缺陷，见施工报告「必修前置缺陷」）。
        */
-      const nextId = options.pendingSession || this.identity !== null ? '' : createSessionId()
+      const nextId = ''
       const scopeIdentity = this.identity
       try {
         // 旧镜像按**旧身份**键删（保留开关见 keepMirror：身份切换/接管要留下旧身份现场）。
         if (!options.keepMirror && oldSessionId !== '') {
           sessionStorage.removeItem(mirrorStorageKey(oldSessionId, oldIdentity))
         }
-        const key = sessionIdStorageKey(scopeIdentity)
-        if (nextId !== '') {
-          sessionStorage.setItem(key, nextId)
-        } else {
-          sessionStorage.removeItem(key)
+        // 会话指针：普通换会话（新建对话/410/复制页签）要抹掉，避免刷新把已销毁的会话复活；
+        // 身份切换（keepSessionPointer）保留旧身份的指针，切回时可恢复原会话（返修 I8）。
+        if (!options.keepSessionPointer) {
+          sessionStorage.removeItem(sessionIdStorageKey(scopeIdentity))
         }
       } catch {
         // 隐私模式/配额：持久化失败不阻断本次重置（本页签内照常换 id）
@@ -8232,7 +8303,12 @@ export const useAiStore = defineStore('ai', {
       if (this.tabOwnership !== 'unknown') {
         return null
       }
+      // 同一页签可能被多处触发（面板挂载 + 发号成功后的补判）：只跑一次探活。
+      if (ownershipProbe !== null) {
+        return ownershipProbe
+      }
       // Task 4：没有后端发号的会话时没有可判/可认领的锁（空 id 不参与所有权判定）。
+      // 发号成功后 `ensureSession()` 会再调一次本方法补判（返修 I2）。
       if (this.sessionId === '') {
         return null
       }
@@ -8250,7 +8326,7 @@ export const useAiStore = defineStore('ai', {
       const sid = this.sessionId
       // 返回意向一次性消费：无论这次判成 owner 还是 duplicate，都不能留到下一次刷新
       const returning = takeReturnIntent(sid)
-      return (async (): Promise<void> => {
+      const task = (async (): Promise<void> => {
         const role = await resolveTabOwnership(sid)
         if (this.sessionId !== sid) {
           // 探活在途期间会话已被换掉（新建对话 / 让渡）：不为旧会话落任何角色
@@ -8270,7 +8346,7 @@ export const useAiStore = defineStore('ai', {
           // 复制页签：确认复制之后，先对本页签整份 sessionStorage 清一次（继承来的镜像、未提交
           // 草稿、业务页签键一律不带走），再起新会话、轮换 pageId（同源广播里两个页签的 pageId
           // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
-          clearDuplicatedTabStorage()
+          clearDuplicatedTabStorage(this.identity)
           this.adoptFreshSession()
           // 复制页签只换本地会话并保持静默；不提供接回入口，也不在这里读原会话历史。
           rotatePageId()
@@ -8283,6 +8359,13 @@ export const useAiStore = defineStore('ai', {
           }
         }
       })()
+      const tracked = task.finally(() => {
+        if (ownershipProbe === tracked) {
+          ownershipProbe = null
+        }
+      })
+      ownershipProbe = tracked
+      return tracked
     },
 
     /**
@@ -8419,8 +8502,9 @@ export const useAiStore = defineStore('ai', {
       this.sessionId = sessionId
       this.sessionIdentity = this.identity
       try {
-        sessionStorage.setItem(sessionIdStorageKey(), sessionId)
-        sessionStorage.removeItem(mirrorStorageKey(previous))
+        // 显式绑定到本页签身份（不依赖默认参数），避免身份事实源分叉时写裸键（返修 M6）。
+        sessionStorage.setItem(sessionIdStorageKey(this.identity), sessionId)
+        sessionStorage.removeItem(mirrorStorageKey(previous, this.identity))
       } catch {
         // 持久化失败：本页签内存里仍按接手后的会话走
       }

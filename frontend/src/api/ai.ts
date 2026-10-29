@@ -122,27 +122,29 @@ export async function createSession(): Promise<string> {
 /** 从原始响应文本（或已解析对象）里取十进制会话号；非法一律 ''。 */
 function extractSessionId(body: unknown): string {
   if (typeof body === 'string') {
-    const match = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(body)
+    // 只认 `data` 对象里的那个字段（响应若回显请求体，裸扫全串可能命中第二处 `sessionId`）。
+    // 没有 `data` 包装时退回整串（裸对象契约）。从 `"data"` 起点往后找，避免被 data 内的嵌套对象截断。
+    const dataIndex = body.search(/"data"\s*:\s*\{/)
+    const scope = dataIndex >= 0 ? body.slice(dataIndex) : body
+    const match = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(scope)
     return match ? match[1] : ''
   }
-  return normalizeSessionId((body as { sessionId?: unknown } | null)?.sessionId)
+  if (body && typeof body === 'object') {
+    const envelope = body as { sessionId?: unknown; data?: { sessionId?: unknown } }
+    return normalizeSessionId(envelope.sessionId ?? envelope.data?.sessionId)
+  }
+  return ''
 }
 
 /**
- * GET /api/ai/tenant-users（预置租户与用户目录；不参与租户隔离，故不带身份头）。
+ * GET /api/ai/tenants（预置租户与用户目录；与后端 `TenantDirectoryController` 同一路径）。
  *
- * <p>兼容：后端并发实现里的路由也可能是 `/api/ai/tenants`（同一份目录、同一个 DTO）。
- * 契约路径 404 时回落该别名，避免前后端并行期因路径拼写差异整块身份功能不可用。
+ * <p>不参与租户隔离（用户还没选身份，必须先能读到选项），故不在 `TenantIdentityFilter` 的
+ * 边界内、前端也不带身份头。返回 `{tenantId, tenantName?, users:[{userId, displayName|userName}]}`
+ * —— 字段兼容由 store 的 `normalizeTenantEntry` 收口。
  */
-export async function tenantUsers(): Promise<TenantUsersEntry[]> {
-  try {
-    return await get<TenantUsersEntry[]>('/ai/tenant-users')
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return await get<TenantUsersEntry[]>('/ai/tenants')
-    }
-    throw error
-  }
+export function tenantUsers(): Promise<TenantUsersEntry[]> {
+  return get<TenantUsersEntry[]>('/ai/tenants')
 }
 
 /** POST /api/ai/cancel/{runId}（取消一轮；幂等，重复返回 alreadyCancelled=true）。 */

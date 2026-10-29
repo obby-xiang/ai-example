@@ -335,6 +335,13 @@ export interface AiHistory {
  * 会话销毁响应的**客户端清理指令**（DELETE /api/ai/session/{sessionId} 或旧 /history）。
  *
  * <p>服务端删不了浏览器 sessionStorage：只回报精确键，前端按此清理。缺字段兼容旧后端。
+ *
+ * <p><b>Task 4 键形契约（前端已按此实现，后端 `AiSessionPurgeService` 尚未同步）：</b>
+ * <ul>
+ * <li>`mirrorKey`：`ai-mirror:&lt;tenantId&gt;:&lt;userId&gt;:&lt;sessionId&gt;`（旧形 `ai-mirror:&lt;sid&gt;` 前端双删兼容）；</li>
+ * <li>`draftPrefix`：`cm.ai.form.draft.&lt;tenantId&gt;:&lt;userId&gt;.`；</li>
+ * <li>`draftToolCallIds`：与上面前缀拼成完整键。</li>
+ * </ul>
  */
 export interface SessionPurgeClientCleanup {
   mirrorKey?: string

@@ -43,12 +43,12 @@
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
-        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。切换即由后端发新会话并清屏；
-             旧会话与镜像保留在旧身份下，不删除、不混用。 -->
+        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。切到新身份即时清屏并由后端发号；
+             切回有会话指针的身份则恢复原会话。旧会话与镜像保留在旧身份下，不删除、不混用。 -->
         <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
           <select
             data-testid="tenant-select"
-            :aria-label="t('ai.panel.identity')"
+            :aria-label="t('ai.panel.tenantAria')"
             :value="ai.identity?.tenantId ?? ''"
             class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
             @change="onTenantChange"
@@ -59,7 +59,7 @@
           </select>
           <select
             data-testid="user-select"
-            :aria-label="t('ai.panel.identity')"
+            :aria-label="t('ai.panel.userAria')"
             :value="ai.identity?.userId ?? ''"
             class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
             @change="onUserChange"
@@ -107,6 +107,22 @@
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.unavailableDegraded') }}</b>
         <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ degradeReason }}</span>
       </div>
+    </div>
+
+    <div v-if="ai.directoryStatus === 'unavailable'" :class="alertBox('error')" data-testid="alert-identity-unavailable">
+      <span :class="alertIcon('error')" aria-hidden="true">!</span>
+      <div class="flex-1 min-w-0">
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.identityUnavailable') }}</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.notice.directoryFailed') }}</span>
+      </div>
+      <button
+        type="button"
+        data-testid="retry-identity"
+        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        @click="retryIdentity"
+      >
+        {{ t('ai.panel.identityRetry') }}
+      </button>
     </div>
 
     <div v-if="ai.streamInterrupted" :class="alertBox('error')" data-testid="alert-interrupted">
@@ -2259,8 +2275,14 @@ const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'preche
  * </ul>
  */
 const healthBlocksSend = computed(() => ai.health !== null && ai.available === false)
+/**
+ * Task 4 返修 C2/M1：身份未就绪时**发送禁用**（不是静默失败）。
+ * - 目录不可用（端点缺失/失败/空目录）⇒ 明确不可用态，面板给横幅 + 重试；
+ * - 发号未完成（`sessionReady === false`）⇒ 同样关发送闸，避免"点了没反应"。
+ */
+const identityBlocked = computed(() => ai.directoryStatus !== 'ready' || !ai.sessionReady)
 const chipsAvailable = computed(
-  () => !healthBlocksSend.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
+  () => !healthBlocksSend.value && !identityBlocked.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
 )
 const visibleEmptyStateChips = computed(() => EMPTY_STATE_CHIPS.filter((chip) => suggestionAllowedForTask(chip)))
 
@@ -4897,6 +4919,10 @@ async function send(): Promise<void> {
     // 不弹 notice。同源规格见下方 onComposerKeydown 的「流式中 preventDefault 后静默返回」。
     return
   }
+  // Task 4 返修 C2：身份目录不可用 / 尚未发号 ⇒ 发送闸关闭（按钮已 disabled，这里兜住回车路径）。
+  if (identityBlocked.value) {
+    return
+  }
   // R-157 #4 → R-161：发送即统一 pinBottom 强制钉底（上滑暂停不挡住主动发送）。
   pinBottom()
   // R-157 #2（收口 MAJOR-1 语义版）：编辑锚点在 ⇒ 「改完从该条重跑」——该条文本原地更新为
@@ -5383,6 +5409,11 @@ function onUserChange(event: Event): void {
   }
 }
 
+/** 身份目录不可用时的显式重试（横幅按钮）。 */
+function retryIdentity(): void {
+  void ai.retryLoadTenantDirectory()
+}
+
 onMounted(async () => {
   // 批G · R2：订阅必须在读历史**之前**装（刷新后首帧要落盘），但启动期 `messages=[]` 不是
   // "确实为空"而是"还没读" —— 下面 `ensureTabOwnership()` 的 state 变更会触发一次即时写盘，
@@ -5392,9 +5423,10 @@ onMounted(async () => {
   ai.startMirror()
   ai.startWorkspaceSync()
   void ai.probeHealth()
-  // Task 4：身份目录先于所有权判定/历史恢复 —— 会话号属于身份，复制页签的"换新会话"也要在
-  // 已定身份之后发号。旧后端没有该端点时不改变任何行为（保持无身份的单用户口径）。
-  await ai.loadTenantDirectory()
+  // Task 4（返修 I6）：身份目录**不阻塞**所有权判定与历史恢复 —— 目录在后台加载；
+  // 首次没有会话号时所有权判定先跳过（发号成功后 `ensureSession()` 会补判），
+  // `loadHistory()`/发送经引导门按需等待目录结果。
+  void ai.loadTenantDirectory()
   // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，
   // 不能把原页签的历史/挂起卡读进复制页签里。
   // 返回 null = 环境无 Web Locks（判定按恢复同步收口）⇒ **不额外 await**，onMounted 既有

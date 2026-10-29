@@ -14,6 +14,7 @@ import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
+import { resetAiIdentityCache } from '@/utils/ai-identity'
 
 const api = vi.hoisted(() => ({
   tenantUsers: vi.fn(),
@@ -60,6 +61,7 @@ function messageOf(text: string): ChatMessage {
 beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
+  resetAiIdentityCache()
   setActivePinia(createPinia())
   for (const fn of Object.values(api)) {
     fn.mockReset()
@@ -152,5 +154,30 @@ describe('Task 4：身份切换的会话发号与存储隔离', () => {
 
     // ⑦ 任何一次 AI 请求都没带空会话号。
     expect(sentSessionIds.every((id) => typeof id === 'string' && id !== '')).toBe(true)
+  })
+
+  it('切回旧身份恢复原会话指针与镜像（不重新发号、不删除旧指针）', async () => {
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+    expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
+    expect(store.sessionId).toBe('1001')
+
+    store.historyLoaded = true
+    store.messages = [messageOf('甲的旧会话')]
+    store.writeMirrorNow()
+
+    await store.switchIdentity(8, 81)
+    expect(store.sessionId).toBe('1002')
+    // 离开身份 7 时保留它的会话指针（返修 I8）。
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
+    expect(sessionStorage.getItem('ai-session-id:8:81')).toBe('1002')
+
+    const callsBefore = api.createSession.mock.calls.length
+    await store.switchIdentity(7, 71)
+    // 切回：恢复原会话号（不再发号），镜像里的旧会话重新可见。
+    expect(store.sessionId).toBe('1001')
+    expect(api.createSession.mock.calls.length).toBe(callsBefore)
+    expect(store.messages.some((message) => message.content.includes('甲的旧会话'))).toBe(true)
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
   })
 })

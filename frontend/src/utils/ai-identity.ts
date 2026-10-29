@@ -34,7 +34,7 @@ export const AI_FORM_DRAFT_PREFIX = 'cm.ai.form.draft.'
 export const TENANT_HEADER = 'X-Tenant-Id'
 export const USER_HEADER = 'X-User-Id'
 
-/** 目录里的一行（`GET /api/ai/tenant-users`；`tenantName` / `userName` 为兼容后端的别名）。 */
+/** 目录里的一行（`GET /api/ai/tenants`；`tenantName` / `userName` 为后端字段，前端统一收窄成 displayName）。 */
 export interface TenantUsersEntry {
   tenantId: number
   tenantName?: string
@@ -87,17 +87,48 @@ export function readAiIdentity(): AiIdentity | null {
   }
 }
 
-/** 落页签身份（隐私模式/配额失败只影响刷新后的恢复，不影响本次切换）。 */
-export function writeAiIdentity(identity: AiIdentity): void {
+/**
+ * 运行时身份**单一事实源**（Task 4 返修 C1/I7）。
+ *
+ * <p>为什么不能每次都从 sessionStorage 现读：复制页签判定会对本页签 `sessionStorage.clear()`
+ * （继承现场一律不带），若身份只存在存储里，清空后整个页签会静默退化成"无身份"——请求漏头、
+ * 镜像/草稿/锁键形退化。身份是**本页签当前选择**，不是继承了谁的数据：内存缓存是权威，
+ * storage 只是刷新恢复的副本。`undefined` = 尚未从存储加载（首次访问时惰性读一次）。
+ */
+let identityCache: AiIdentity | null | undefined
+
+/** 当前身份（内存权威；首次访问从 storage 惰性加载）。所有键形/请求头都从这里取值。 */
+export function currentAiIdentity(): AiIdentity | null {
+  if (identityCache === undefined) {
+    identityCache = readAiIdentity()
+  }
+  return identityCache
+}
+
+/**
+ * 落身份（内存 + storage 同步更新）。storage 写失败只影响刷新恢复，不影响本页签身份。
+ * `null` = 清除（回到"未选身份"；正常流程不会在会话中途发生）。
+ */
+export function writeAiIdentity(identity: AiIdentity | null): void {
+  identityCache = identity
   try {
-    sessionStorage.setItem(AI_IDENTITY_KEY, JSON.stringify(identity))
+    if (identity) {
+      sessionStorage.setItem(AI_IDENTITY_KEY, JSON.stringify(identity))
+    } else {
+      sessionStorage.removeItem(AI_IDENTITY_KEY)
+    }
   } catch {
     // 忽略：本页签内存态照常生效
   }
 }
 
+/** 测试用：丢弃内存缓存，下次访问重新从 storage 读（避免用例间串身份）。 */
+export function resetAiIdentityCache(): void {
+  identityCache = undefined
+}
+
 /** 统一身份请求头；无身份时返回空对象（调用方据此不发"空身份"请求）。 */
-export function identityHeaders(identity: AiIdentity | null = readAiIdentity()): Record<string, string> {
+export function identityHeaders(identity: AiIdentity | null = currentAiIdentity()): Record<string, string> {
   if (!identity) {
     return {}
   }
@@ -108,14 +139,14 @@ export function identityHeaders(identity: AiIdentity | null = readAiIdentity()):
 }
 
 /** 会话 id 存储键：带身份即在基础键后追加指纹。 */
-export function sessionIdStorageKey(identity: AiIdentity | null = readAiIdentity()): string {
+export function sessionIdStorageKey(identity: AiIdentity | null = currentAiIdentity()): string {
   return identity ? `${AI_SESSION_ID_KEY}:${identityFingerprint(identity)}` : AI_SESSION_ID_KEY
 }
 
 /** 会话镜像键：带身份即带指纹（不同身份不得复用镜像）。 */
 export function mirrorStorageKey(
   sessionId: string,
-  identity: AiIdentity | null = readAiIdentity()
+  identity: AiIdentity | null = currentAiIdentity()
 ): string {
   return identity
     ? `${AI_MIRROR_PREFIX}${identityFingerprint(identity)}:${sessionId}`
@@ -123,7 +154,7 @@ export function mirrorStorageKey(
 }
 
 /** 表单草稿前缀：带身份即带指纹（不同身份不得复用草稿）。 */
-export function formDraftPrefix(identity: AiIdentity | null = readAiIdentity()): string {
+export function formDraftPrefix(identity: AiIdentity | null = currentAiIdentity()): string {
   return identity
     ? `${AI_FORM_DRAFT_PREFIX}${identityFingerprint(identity)}.`
     : AI_FORM_DRAFT_PREFIX
@@ -132,7 +163,7 @@ export function formDraftPrefix(identity: AiIdentity | null = readAiIdentity()):
 /** 表单草稿键（toolCallId 在身份段之后，孤儿清理按前缀扫描即可）。 */
 export function formDraftStorageKey(
   toolCallId: string,
-  identity: AiIdentity | null = readAiIdentity()
+  identity: AiIdentity | null = currentAiIdentity()
 ): string {
   return `${formDraftPrefix(identity)}${toolCallId}`
 }
@@ -140,7 +171,7 @@ export function formDraftStorageKey(
 /** 页签会话锁名：带身份即带指纹（不同身份不得互相探活/接管）。 */
 export function sessionLockName(
   sessionId: string,
-  identity: AiIdentity | null = readAiIdentity()
+  identity: AiIdentity | null = currentAiIdentity()
 ): string {
   return identity
     ? `${AI_SESSION_LOCK_PREFIX}${identityFingerprint(identity)}:${sessionId}`
@@ -180,7 +211,7 @@ export function isAiConversationPath(url: string): boolean {
     '/ai/health',
     '/ai/tools',
     '/ai/tenants',
-    '/ai/tenant-users'
+    '/ai/startup-resume'
   ]
   return !excluded.some((prefix) => path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}?`))
 }

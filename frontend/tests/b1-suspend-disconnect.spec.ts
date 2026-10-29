@@ -314,27 +314,17 @@ describe('B1 裁决 10：挂起中停止按钮可见 + 停止收口', () => {
 })
 
 describe('B1：sse.ts 不再为挂起收流自动重连', () => {
-  it('POST /chat 流在 confirm_request 之后结束 ⇒ onClose.suspended=true 且不起 EventSource', async () => {
+  it('POST /chat 流在 confirm_request 之后结束 ⇒ onClose.suspended=true 且不发起重挂连接', async () => {
     const { streamChat } = await import('@/api/sse')
-    const instances: string[] = []
-    class FakeEventSource {
-      onopen: (() => void) | null = null
-      onmessage: ((event: { data: string }) => void) | null = null
-      onerror: (() => void) | null = null
-      constructor(url: string) {
-        instances.push(url)
-      }
-      close(): void {}
-    }
-    const originalEventSource = (globalThis as unknown as { EventSource?: unknown }).EventSource
-    ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
+    const requestedUrls: string[] = []
     const originalFetch = globalThis.fetch
     const sseText = [
       'data: {"type":"start","runId":"run-1","sessionId":"s-1","seq":1,"atMs":1}\n\n',
       'data: {"type":"confirm_request","runId":"run-1","toolCallId":"c1","name":"start_export",'
         + '"args":"{}","seq":2,"atMs":2}\n\n'
     ].join('')
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (url: string) => {
+      requestedUrls.push(String(url))
       const encoder = new TextEncoder()
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -342,7 +332,12 @@ describe('B1：sse.ts 不再为挂起收流自动重连', () => {
           controller.close()
         }
       })
-      return { ok: true, body } as unknown as Response
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body
+      } as unknown as Response
     }) as typeof fetch
 
     try {
@@ -362,30 +357,21 @@ describe('B1：sse.ts 不再为挂起收流自动重连', () => {
       expect(info.suspended).toBe(true)
       expect(closeInfo).toMatchObject({ terminal: false, suspended: true })
       expect(info.reason).toContain('挂起等待')
-      expect(instances).toHaveLength(0) // 挂起期不占连接：没有自动重挂
+      // 挂起期不占连接：除 POST /chat 外没有发起任何重挂 GET。
+      expect(requestedUrls).toHaveLength(1)
+      expect(requestedUrls.filter((url) => url.includes('/api/ai/events/'))).toHaveLength(0)
     }
     finally {
       globalThis.fetch = originalFetch
-      ;(globalThis as unknown as { EventSource: unknown }).EventSource = originalEventSource
     }
   })
 
   it('普通断流（无卡面请求帧）仍走自动重挂（负控制）', async () => {
     const { streamChat } = await import('@/api/sse')
-    const instances: string[] = []
-    class FakeEventSource {
-      onopen: (() => void) | null = null
-      onmessage: ((event: { data: string }) => void) | null = null
-      onerror: (() => void) | null = null
-      constructor(url: string) {
-        instances.push(url)
-      }
-      close(): void {}
-    }
-    const originalEventSource = (globalThis as unknown as { EventSource?: unknown }).EventSource
-    ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
+    const requestedUrls: string[] = []
     const originalFetch = globalThis.fetch
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (url: string) => {
+      requestedUrls.push(String(url))
       const encoder = new TextEncoder()
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -393,19 +379,30 @@ describe('B1：sse.ts 不再为挂起收流自动重连', () => {
           controller.close()
         }
       })
-      return { ok: true, body } as unknown as Response
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body
+      } as unknown as Response
     }) as typeof fetch
 
+    const controller = new AbortController()
     try {
-      const pending = streamChat({ sessionId: 's-1', message: 'hi', context: null } as never, {})
+      const pending = streamChat(
+        { sessionId: 's-1', message: 'hi', context: null } as never,
+        {},
+        { signal: controller.signal }
+      )
       await flushPromises()
-      expect(instances).toHaveLength(1) // 断流 ⇒ 自动重挂（既有行为不变）
-      expect(instances[0]).toContain('/api/ai/events/run-1?lastSeq=1')
+      const reattachUrls = requestedUrls.filter((url) => url.includes('/api/ai/events/'))
+      expect(reattachUrls).toHaveLength(1) // 断流 ⇒ 自动重挂（既有行为不变）
+      expect(reattachUrls[0]).toContain('/api/ai/events/run-1?lastSeq=1')
+      controller.abort()
       void pending
     }
     finally {
       globalThis.fetch = originalFetch
-      ;(globalThis as unknown as { EventSource: unknown }).EventSource = originalEventSource
     }
   })
 })

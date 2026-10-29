@@ -676,12 +676,32 @@ function openLiveStream(
         return
       }
       if (!response.ok) {
-        handlers.onFailure(`重挂连接失败（HTTP ${response.status}）`)
+        // 用户可见原因保持既有口径（技术细节/HTTP 码不上屏）。
+        handlers.onFailure('重挂连接中断')
+        return
+      }
+      /**
+       * 返修 C3：**不能对 202 / 非事件流响应伪造 `onOpen`**。
+       *
+       * <p>后端在"已 start、快照未建"窗口对 `GET /api/ai/events/{runId}` 回
+       * **202 + application/json `{preparing:true,...}`**；旧 EventSource 会把它当 `onerror`，
+       * 于是 `connectionEstablished === false` ⇒ 走 `?probe=1` 探测 ⇒ `onPreparing`。
+       * fetch 版必须保持同一条判定链：这里只报"连接失败"，不置 onOpen/不等同已连接；
+       * 探测与"准备中"的对外回调仍由 `reattach` 的 `?probe=1` 路径负责（契约不变）。
+       */
+      const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
+      if (response.status === 202 || !contentType.includes('text/event-stream')) {
+        try {
+          await response.body?.cancel()
+        } catch {
+          // 已关闭/不可取消：忽略
+        }
+        handlers.onFailure('重挂连接中断')
         return
       }
       handlers.onOpen()
       if (!response.body) {
-        handlers.onFailure('响应无流式主体（浏览器不支持 ReadableStream）')
+        handlers.onFailure('重挂连接中断')
         return
       }
       const reader = response.body.getReader()
@@ -711,7 +731,7 @@ function openLiveStream(
           handlers.onData(payload)
         }
         if (!closed) {
-          handlers.onFailure('重挂连接已结束')
+          handlers.onFailure('重挂连接中断')
         }
       } finally {
         try {
@@ -724,7 +744,7 @@ function openLiveStream(
       if (closed) {
         return
       }
-      handlers.onFailure(error instanceof Error ? error.message : '重挂连接中断')
+      handlers.onFailure('重挂连接中断')
     }
   })()
   return { close }

@@ -5,6 +5,10 @@
  * 超时面治理批②（决策看板 `:16`）后追加两组断言：
  * - 帧间静默 90s → **45s**（< 代理 60s 死区；后端 90s 不动，错层）；
  * - 重挂 2 次（1s/2s）→ **4 次（1/2/4/8s + jitter ±25%）**，耗尽仍 `settle(false)`。
+ *
+ * Task 4 返修：reattach 从 `EventSource` 改为带身份头的 `fetch + ReadableStream`，本套件改为
+ * 驱动**真实**的 fetch 流（`tests/sse-live-fetch.ts`）—— 连接计数 = 事件流请求数，
+ * 断流 = 连接 `fail()` / `end()`，仍是生产路径。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
@@ -15,35 +19,32 @@ import {
   reattach,
   reconnectDelayMs
 } from '@/api/sse'
+import { installLiveFetch, type LiveConnection } from './sse-live-fetch'
 
-class FakeEventSource {
-  static instances: FakeEventSource[] = []
-  onopen: (() => void) | null = null
-  onmessage: ((event: { data: string }) => void) | null = null
-  onerror: (() => void) | null = null
-  closed = false
-  readonly url: string
-  constructor(url: string) {
-    this.url = url
-    FakeEventSource.instances.push(this)
-  }
-  close(): void {
-    this.closed = true
-  }
-  fireOpen(): void {
-    this.onopen?.()
-  }
+let connections: LiveConnection[] = []
+
+/** 探测永远失败（状态 0）：断流后的退避/探测判定保持"纯连接失败"口径。 */
+function installHarness(): void {
+  connections = installLiveFetch(() => Promise.reject(new TypeError('probe unavailable'))).connections
+}
+
+/** 让 open/fail 引出的微任务（onFailure → scheduleReconnect / onOpen → startIdle）落地。 */
+async function flush(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0)
+}
+
+function last(): LiveConnection | undefined {
+  return connections.at(-1)
 }
 
 beforeEach(() => {
-  FakeEventSource.instances = []
-  ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   vi.useFakeTimers()
+  installHarness()
 })
 
 afterEach(() => {
   vi.useRealTimers()
-  delete (globalThis as unknown as { EventSource?: unknown }).EventSource
+  vi.unstubAllGlobals()
 })
 
 describe('reattach 双看门狗', () => {
@@ -92,7 +93,7 @@ describe('reattach 双看门狗', () => {
     expect(info.reason).toContain('建立超时')
     expect(info.reconnects).toBe(4)
     // 首连 + 4 次重挂 = 5 条连接（旧口径是 3 条）
-    expect(FakeEventSource.instances).toHaveLength(5)
+    expect(connections).toHaveLength(5)
     expect(vi.getTimerCount()).toBe(0) // settle 后无残留看门狗
   })
 
@@ -104,15 +105,17 @@ describe('reattach 双看门狗', () => {
       { onReconnect: () => { reconnects += 1 } },
       { signal: controller.signal, random: () => 0.5 }
     )
-    FakeEventSource.instances[0]?.fireOpen()
+    last()?.open()
+    await flush()
 
     await vi.advanceTimersByTimeAsync(44_000)
-    expect(FakeEventSource.instances).toHaveLength(1) // 45s 之前不该判死
+    expect(connections).toHaveLength(1) // 45s 之前不该判死
+    expect(last()?.closed).toBe(false)
 
     await vi.advanceTimersByTimeAsync(2_500) // 45s 到点 + 1s 退避（random=0.5 ⇒ 因子 1.0）
     expect(reconnects).toBe(1)
-    expect(FakeEventSource.instances).toHaveLength(2)
-    expect(FakeEventSource.instances[0]?.closed).toBe(true)
+    expect(connections).toHaveLength(2)
+    expect(connections[0]?.closed).toBe(true)
 
     controller.abort()
     await pending
@@ -124,11 +127,12 @@ describe('reattach 双看门狗', () => {
     void reattach('run-2', {}).then((info) => {
       settled = info
     })
-    FakeEventSource.instances[0]?.fireOpen()
+    last()?.open()
+    await flush()
 
     await vi.advanceTimersByTimeAsync(20_000)
     expect(settled).toBeNull()
-    expect(FakeEventSource.instances[0]?.closed).toBe(false)
+    expect(last()?.closed).toBe(false)
     expect(vi.getTimerCount()).toBe(1) // 只剩帧间看门狗
   })
 
@@ -151,17 +155,19 @@ describe('reattach 挂起快照恢复', () => {
       awaitingInput: true,
       random: () => 0.5
     })
-    const source = FakeEventSource.instances[0]
+    const source = last()
     expect(source?.url).toBe('/api/ai/events/run-parked?lastSeq=4')
-    source?.fireOpen()
-    source?.onerror?.()
+    source?.open()
+    await flush()
+    source?.end()
+    await flush()
 
     const info = await pending
     expect(info.terminal).toBe(false)
     expect(info.suspended).toBe(true)
     expect(info.reconnects).toBe(0)
     expect(onReconnect).not.toHaveBeenCalled()
-    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(connections).toHaveLength(1)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -173,15 +179,17 @@ describe('reattach 挂起快照恢复', () => {
       lastSeq: 4,
       random: () => 0.5
     })
-    FakeEventSource.instances[0]?.fireOpen()
-    FakeEventSource.instances[0]?.onerror?.()
-    // C1（M08）：重连通告只随真实重连发出 —— 排期在断流当刻、通告在到点
+    last()?.open()
+    await flush()
+    last()?.end()
+    await flush()
+    // C1（M08）：通告只随真实重连发出 —— 排期在断流当刻、通告在到点
     expect(onReconnect).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
-    expect(FakeEventSource.instances).toHaveLength(2)
-    expect(FakeEventSource.instances[1]?.url).toBe('/api/ai/events/run-resumed?lastSeq=4')
+    expect(connections).toHaveLength(2)
+    expect(connections[1]?.url).toBe('/api/ai/events/run-resumed?lastSeq=4')
     controller.abort()
     await pending
     expect(vi.getTimerCount()).toBe(0)
@@ -190,18 +198,21 @@ describe('reattach 挂起快照恢复', () => {
   it('决策帧本身不证明已离开挂起：回放后正常收流仍不重连', async () => {
     const onReconnect = vi.fn()
     const pending = reattach('run-decision', { onReconnect }, { awaitingInput: true, lastSeq: 4 })
-    const source = FakeEventSource.instances[0]
-    source?.fireOpen()
-    source?.onmessage?.({ data: JSON.stringify({
+    const source = last()
+    source?.open()
+    await flush()
+    source?.push({
       type: 'confirm_decision', runId: 'run-decision', toolCallId: 'c1', name: 'start_export',
       decision: 'REJECTED', status: 'REJECTED', approved: false, seq: 5
-    }) })
-    source?.onerror?.()
+    })
+    await flush()
+    source?.end()
+    await flush()
 
     const info = await pending
     expect(info.suspended).toBe(true)
     expect(onReconnect).not.toHaveBeenCalled()
-    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(connections).toHaveLength(1)
   })
 
   it('他端决策后的真实执行帧会清除挂起初态，后续断流仍重连', async () => {
@@ -213,18 +224,19 @@ describe('reattach 挂起快照恢复', () => {
       lastSeq: 4,
       random: () => 0.5
     })
-    const source = FakeEventSource.instances[0]
-    source?.fireOpen()
-    source?.onmessage?.({ data: JSON.stringify({
-      type: 'delta', runId: 'run-progress', messageId: 'm1', seg: 0, text: '继续执行', seq: 5
-    }) })
-    source?.onerror?.()
+    const source = last()
+    source?.open()
+    await flush()
+    source?.push({ type: 'delta', runId: 'run-progress', messageId: 'm1', seg: 0, text: '继续执行', seq: 5 })
+    await flush()
+    source?.end()
+    await flush()
     // C1（M08）：通告在到点（确实要开新连接）时发，不在断流当刻预告
     expect(onReconnect).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(onReconnect).toHaveBeenCalledWith(1, 1_000)
-    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(connections).toHaveLength(2)
     controller.abort()
     const info = await pending
     expect(info.suspended).toBeFalsy()
@@ -239,8 +251,11 @@ describe('reattach 挂起快照恢复', () => {
       random: () => 0.5
     })
     for (const delay of [0, 1_000, 2_000, 4_000, 8_000]) {
-      await vi.advanceTimersByTimeAsync(delay)
-      FakeEventSource.instances.at(-1)?.onerror?.()
+      if (delay > 0) {
+        await vi.advanceTimersByTimeAsync(delay)
+      }
+      last()?.fail()
+      await flush()
     }
 
     const info = await pending
@@ -249,22 +264,25 @@ describe('reattach 挂起快照恢复', () => {
     expect(info.reason).toContain('重挂连接中断')
     expect(info.reconnects).toBe(4)
     expect(onReconnect).toHaveBeenCalledTimes(4)
-    expect(FakeEventSource.instances).toHaveLength(5)
+    expect(connections).toHaveLength(5)
     expect(vi.getTimerCount()).toBe(0)
   })
 
   it('已有挂起快照也不覆盖终帧：done 仍按终态收尾', async () => {
     const pending = reattach('run-terminal', {}, { awaitingInput: true, lastSeq: 4 })
-    const source = FakeEventSource.instances[0]
-    source?.fireOpen()
-    source?.onmessage?.({ data: JSON.stringify({ type: 'done', runId: 'run-terminal', status: 'DONE', seq: 5 }) })
-    source?.onerror?.()
+    const source = last()
+    source?.open()
+    await flush()
+    source?.push({ type: 'done', runId: 'run-terminal', status: 'DONE', seq: 5 })
+    await flush()
+    source?.end()
+    await flush()
 
     const info = await pending
     expect(info.terminal).toBe(true)
     expect(info.suspended).toBeFalsy()
     expect(info.reconnects).toBe(0)
-    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(connections).toHaveLength(1)
     expect(vi.getTimerCount()).toBe(0)
   })
 })
