@@ -305,6 +305,7 @@ import {
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
 import { nextReadonlyFormScope } from '@/utils/form-scope'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
+import { useAiStore } from '@/stores/ai'
 
 /** 七型取值并集（number 的"未填"用 undefined 表示；attachment 的值是 fileId 字符串）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
@@ -784,6 +785,18 @@ function rejectAttachment(file: File): AttachmentRejection | null {
   return (ATTACHMENT_EXTENSIONS as readonly string[]).includes(ext) ? null : 'ATTACHMENT_TYPE_UNSUPPORTED'
 }
 
+/**
+ * 会话就绪闸（Task 4）：上传前确保后端已发号。无活动 pinia / store 异常时按"未就绪"处理
+ * （宁可不传，也不带空号/无身份头发请求）；上传契约本身不变。
+ */
+async function sessionReadyForUpload(): Promise<boolean> {
+  try {
+    return (await useAiStore().ensureSession()) !== ''
+  } catch {
+    return false
+  }
+}
+
 async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -795,6 +808,13 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
   const rejection = rejectAttachment(file)
   if (rejection !== null) {
     attachmentRejections[field.key] = rejection
+    input.value = ''
+    return
+  }
+  // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸（附件 API 契约不变，仍只传
+  // runId/toolCallId/sessionId；这里只保证会话号确实存在，绝不在空号下发上传）。
+  if (!(await sessionReadyForUpload())) {
+    uploadErrors[field.key] = t('ai.gf.attachment.failed')
     input.value = ''
     return
   }

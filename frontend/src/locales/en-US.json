@@ -442,6 +442,7 @@
       "tenantAria": "Select tenant",
       "userAria": "Select user",
       "identityUnavailable": "Identity unavailable: the tenant/user directory could not be loaded, sending is paused",
+      "identityNotReady": "Session not ready: no session has been issued yet, sending is paused",
       "identityRetry": "Retry",
       "collapse": "Collapse",
       "recheck": "Check again",

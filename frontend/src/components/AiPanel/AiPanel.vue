@@ -109,11 +109,11 @@
       </div>
     </div>
 
-    <div v-if="ai.directoryStatus === 'unavailable'" :class="alertBox('error')" data-testid="alert-identity-unavailable">
+    <div v-if="identityRetryVisible" :class="alertBox('error')" data-testid="alert-identity-unavailable">
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.identityUnavailable') }}</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.notice.directoryFailed') }}</span>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ identityRetryTitle }}</b>
+        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ identityRetryDetail }}</span>
       </div>
       <button
         type="button"
@@ -2281,6 +2281,21 @@ const healthBlocksSend = computed(() => ai.health !== null && ai.available === f
  * - 发号未完成（`sessionReady === false`）⇒ 同样关发送闸，避免"点了没反应"。
  */
 const identityBlocked = computed(() => ai.directoryStatus !== 'ready' || !ai.sessionReady)
+/**
+ * 身份横幅（返修 I-2）：目录不可用 **或** 目录已就绪但还没拿到会话号（发号失败/进行中）。
+ * 两者都必须有可见出口；发号失败不能让面板永久停摆。
+ */
+const identityRetryVisible = computed(
+  () => ai.directoryStatus === 'unavailable' || (ai.directoryStatus === 'ready' && !ai.sessionReady)
+)
+const identityRetryTitle = computed(
+  () => ai.directoryStatus === 'unavailable' ? t('ai.panel.identityUnavailable') : t('ai.panel.identityNotReady')
+)
+const identityRetryDetail = computed(
+  () => ai.directoryStatus === 'unavailable'
+    ? (ai.directoryError ?? t('ai.notice.directoryFailed'))
+    : t('ai.notice.sessionIssueFailed')
+)
 const chipsAvailable = computed(
   () => !healthBlocksSend.value && !identityBlocked.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
 )
@@ -5409,9 +5424,9 @@ function onUserChange(event: Event): void {
   }
 }
 
-/** 身份目录不可用时的显式重试（横幅按钮）。 */
+/** 身份不可用/会话未就绪时的统一重试（横幅按钮）：先重试目录，再发号（返修 I-2）。 */
 function retryIdentity(): void {
-  void ai.retryLoadTenantDirectory()
+  void ai.retryIdentitySession()
 }
 
 onMounted(async () => {

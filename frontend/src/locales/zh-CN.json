@@ -442,6 +442,7 @@
       "tenantAria": "选择租户",
       "userAria": "选择用户",
       "identityUnavailable": "身份不可用：无法加载租户/用户目录，发送已暂停",
+      "identityNotReady": "会话未就绪：暂未取得会话号，发送已暂停",
       "identityRetry": "重试",
       "collapse": "收起",
       "recheck": "重新检测",

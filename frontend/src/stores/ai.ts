@@ -1225,11 +1225,10 @@ function clearDuplicatedTabStorage(identity: AiIdentity | null): void {
 }
 
 /**
- * 取/建页签会话 id。
+ * 取页签会话 id（只读，不生成）。
  *
  * <p>Task 4：**选定身份后**只读该身份的会话键，缺失即返回 ''（等 `ensureSession()` 向后端发号）。
- * 不得在身份模式下本地生成 —— 「空 id 不发请求」是引导门的第一条。尚无身份（未接租户目录）时
- * 退回旧的单用户键形与本地页签 id，保证旧后端/旧部署仍可用；目录一到位就走身份模式。
+ * 前端不存在任何"本地造会话号"的分支 —— 无身份时也返回 ''；「空 id 不发请求」是引导门的第一条。
  *
  * RC-4：**不再**用导航类型判"新页签 / 复制页签"（真机复制页签 = `back_forward`，判据作废）——
  * 存量 id 一律先按**恢复**取用，是否复制品由 {@link resolveTabOwnership} 在面板挂载后用
@@ -8016,8 +8015,30 @@ export const useAiStore = defineStore('ai', {
 
     /** 目录失败后的显式重试（面板横幅按钮）；成功则恢复身份与发号。 */
     async retryLoadTenantDirectory(): Promise<void> {
+      // 返修：单飞句柄尚未清空时直接 `loadTenantDirectory()` 会复用刚结束的 promise（表现为
+      // "点重试没反应"）。先等掉在途的那次，再**重新发起**一次目录加载（不是 no-op）。
+      const inFlight = directoryGate
+      if (inFlight !== null) {
+        try {
+          await inFlight
+        } catch {
+          // 目录加载自身的失败已在状态里；这里只等它落定
+        }
+      }
       this.directoryError = null
       await this.loadTenantDirectory()
+    },
+
+    /**
+     * 身份不可用/会话未就绪时的**统一重试入口**（面板横幅按钮，返修 I-2）：
+     * 先重试目录，再发号。发号失败不再让面板永久停摆。
+     */
+    async retryIdentitySession(): Promise<string> {
+      await this.retryLoadTenantDirectory()
+      if (this.directoryStatus !== 'ready') {
+        return ''
+      }
+      return await this.ensureSession()
     },
 
     /**
@@ -8047,27 +8068,39 @@ export const useAiStore = defineStore('ai', {
     async enterIdentity(identity: AiIdentity): Promise<void> {
       const pointer = storedSessionPointer(identity)
       this.adoptFreshSession({ keepMirror: true, keepSessionPointer: true })
+      // 发号令牌在**清场之后**取：清场会递增令牌，之后的任何切换都会让本入口的续体作废。
+      const entryToken = sessionGateToken
       writeAiIdentity(identity)
       this.identity = identity
       this.sessionIdentity = identity
-      // 启动期（角色仍 'unknown'）保持待判：随后 `ensureTabOwnership` 还要判复制页签/接管；
-      // 运行期显式切换身份则直接记 owner（本页签刚换的新会话，不存在待接手的复制品关系）。
-      if (this.tabOwnership !== 'unknown') {
-        this.tabOwnership = 'owner'
-      }
       if (pointer !== '') {
         const verdict = await probeSessionLock(pointer)
+        // 返修 I-1：探活是异步的（最多 3×150ms），期间用户可能已经又切了身份/换了会话。
+        // 三道再校验缺一不可：令牌（清场/发号已换代）、身份（仍是本次目标）、会话号仍空
+        // （别把 A 的号写到 B 已发号的会话上）。任一不符即**整体放弃**本次恢复。
+        if (entryToken !== sessionGateToken
+          || !isSameIdentity(this.identity, identity)
+          || this.sessionId !== '') {
+          return
+        }
         if (verdict !== 'occupied') {
           this.sessionId = pointer
           this.sessionIdentity = identity
+          // 号确定之后才记 owner（发号失败/被抢占时不得留下"owner 但无会话"的假状态）。
+          this.tabOwnership = 'owner'
           await this.loadHistory()
           void this.claimSessionOwnership(pointer)
           return
         }
+        // 指针被另一页签持有：落到发号（原指针会被新号覆盖，属可接受的降级——旧会话在那里活着）。
       }
       const issued = await this.ensureSession()
       if (issued === '') {
         return
+      }
+      // 运行期显式切换：号已确定，记 owner；启动期（仍 unknown）交给 I2 的所有权补判。
+      if (this.tabOwnership !== 'unknown') {
+        this.tabOwnership = 'owner'
       }
       void this.claimSessionOwnership(issued)
     },
