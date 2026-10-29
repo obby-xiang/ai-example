@@ -212,15 +212,16 @@
       <!-- R-161：role="log" 补滚动容器（无障碍，无视觉影响）；R-163B G2：overflow-x-hidden 止血横滚条。
            R-165 S5a 项 8：滚动条细化 —— 6px 圆角半透明（demo 14a 口径），任意变体类写在模板类串上
            （禁改 tailwind.config.js、禁手写 CSS）。
-           2026-10-29 返修：`[overflow-anchor:none]` 关掉浏览器原生滚动锚定 —— 自定义 stick-to-bottom
-           已经按 measured size 自己补偿，两者同时生效会各补一次（滚动来回抖 / 视觉闪）。 -->
+           2026-10-29 返修：`[overflow-anchor:none]` **只在跟随态**挂 —— 跟随态我们自己按 measured size
+           补偿，原生锚定再补一次就是双份；用户上翻后我们不做任何补偿，位置只能交给浏览器锚定
+           （否则 mermaid / 图片 / 字体在视口上方落地时，阅读位置会跳）。 -->
       <div
         ref="msgWrapRef"
         role="log"
         :aria-label="t('ai.panel.logAria')"
         :aria-busy="logBusy ? 'true' : 'false'"
-        class="flex-1 overflow-y-auto overflow-x-hidden p-3 [overflow-anchor:none]"
-        :class="SCROLLBAR_CLASS"
+        class="flex-1 overflow-y-auto overflow-x-hidden p-3"
+        :class="[SCROLLBAR_CLASS, followBottom ? '[overflow-anchor:none]' : '']"
         @scroll.passive="onMsgScroll"
         @wheel.passive="markUserScrollIntent"
         @touchstart.passive="markUserScrollIntent"
@@ -3805,7 +3806,17 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.sessionId
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
-    deps.push(liveForm.value, liveForm.value?.status, liveForm.value?.error, liveForm.value?.fieldErrors, liveForm.value?.values, formHostMessageId.value, ai.queuedForms, formQueuePosition(part.toolCallId))
+    // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
+    // 会让任意一次入队/出队把全部历史 GF 行一起失效。
+    deps.push(formQueuePosition(part.toolCallId), ai.queuedForms.length)
+    // 表单现场（`liveForm` 对象与 `values` 身份）只属于**当前宿主**那一张卡：
+    // 历史 GF 卡的渲染不读它，无条件入 dep 等于"用户每敲一个字，整列 GF 卡全部重渲"。
+    const hostId = formHostMessageId.value
+    const liveToolCallId = liveForm.value?.toolCallId ?? null
+    deps.push(hostId, liveToolCallId)
+    if (liveToolCallId !== null && liveToolCallId === part.toolCallId && hostId === block.messageId) {
+      deps.push(liveForm.value, liveForm.value?.status, liveForm.value?.error, liveForm.value?.fieldErrors, liveForm.value?.values)
+    }
   }
   if (isUploadHandoffPart(part)) {
     deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part))
@@ -4068,6 +4079,12 @@ function cardHeadClass(part: ToolPart): string {
 }
 
 /**
+ * 可观测性（2026-10-29 返修 M-1）：GF 卡的**渲染次数**（按 toolCallId）—— 回归测试用，零 UI 影响。
+ * `cardTitle()` 每张卡每次渲染恰好调用一次，是"这张卡这一帧有没有重渲"的最小探针。
+ */
+const gfCardRenders = new Map<string, number>()
+
+/**
  * 卡头标题。
  * - form = 表单业务标题（FormRenderer 内头已抑制，标题上提）；
  * - CONFIRM 带 `preflight.target` ⇒ **业务化标题**（demo 场景一/二/三 1:1）：
@@ -4078,6 +4095,9 @@ function cardHeadClass(part: ToolPart): string {
  * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
  */
 function cardTitle(part: ToolPart): string {
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    gfCardRenders.set(part.toolCallId, (gfCardRenders.get(part.toolCallId) ?? 0) + 1)
+  }
   return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
     if (cardTypeOf(part) === 'form') {
       return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
@@ -5341,6 +5361,9 @@ defineExpose({
     },
     get measurePasses() {
       return measurePasses.map((ids) => [...ids])
+    },
+    get gfCardRenders() {
+      return Object.fromEntries(gfCardRenders)
     }
   }
 })

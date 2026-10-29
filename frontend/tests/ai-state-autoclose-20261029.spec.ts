@@ -696,3 +696,80 @@ describe('R1 · M-4 封口兜底只封本轮宿主', () => {
     expect(unrelated.streaming).toBe(true)
   })
 })
+
+/**
+ * 2026-10-29 返修（复审 I-1）：`restoringRecovery` 是"恢复在途"的**唯一**呈现层判据
+ * （`turnStillOpen` 用它把"恢复期"从"本轮未终态"里排除）。而它原先只在 4 个**手动**包装层
+ * 置位；两条**自动恢复**路径直接调 `restoreSnapshotGuarded()`，标志全程为假 ⇒ 恢复期仍把
+ * 末条已决只读卡先展开、快照回来再折。本组用例只锁"自动恢复 attempt 也置位 / finally 复位"。
+ */
+describe('9 · 恢复期标志覆盖自动恢复入口（2026-10-29 返修 I-1）', () => {
+  /** 可挂起的 `runs/current`：让 `restoreSnapshotGuarded` 停在"恢复在途"（返回 release）。 */
+  function pendingRunsCurrent(): (value: AiRunCurrent) => void {
+    let release: (value: AiRunCurrent) => void = () => {}
+    api.runsCurrent.mockImplementation(() => new Promise<AiRunCurrent>((resolve) => {
+      release = resolve
+    }))
+    return (value) => release(value)
+  }
+
+  it('准备中自动恢复在途：restoringRecovery 置位，恢复结束 finally 复位', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = freshStore()
+      store.sessionId = 'sess-i1-prep'
+      const host = store.appendAssistantMessage('半截')
+      host.streaming = true
+      host.done = false
+      host.runId = 'run-i1-prep'
+      store.activeRunId = 'run-i1-prep'
+      const release = pendingRunsCurrent()
+
+      store.notePreparingState('run-i1-prep', 1_000)
+      expect(store.restoringRecovery).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(AUTO_RECOVERY_DELAY_MS)
+      await flushPromises()
+
+      expect(api.runsCurrent).toHaveBeenCalled()
+      expect(store.restoringRecovery).toBe(true)
+
+      release(noRun())
+      await flushPromises()
+      expect(store.restoringRecovery).toBe(false)
+      store.resetAutoRecovery('preparing')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('首帧超时自动恢复在途：restoringRecovery 置位，恢复结束 finally 复位', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = freshStore()
+      store.sessionId = 'sess-i1-first-frame'
+      store.historyLoaded = true
+      void store.send('跑一个长任务')
+      await Promise.resolve()
+      const transport = chat.last()
+      const release = pendingRunsCurrent()
+
+      transport.close({ terminal: false, timeoutStage: 'first-frame', reason: '首帧超时' })
+      await flushPromises()
+      expect(store.restoringRecovery).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(AUTO_RECOVERY_DELAY_MS)
+      await flushPromises()
+
+      expect(api.runsCurrent).toHaveBeenCalled()
+      expect(store.restoringRecovery).toBe(true)
+
+      release(noRun())
+      await flushPromises()
+      expect(store.restoringRecovery).toBe(false)
+      store.resetAutoRecovery('first-frame')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

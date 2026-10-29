@@ -2716,8 +2716,16 @@ export const useAiStore = defineStore('ai', {
           if (this.preparingRun === null) {
             return true
           }
-          await this.restoreSnapshotGuarded()
-          return this.preparingRun === null
+          // 2026-10-29 返修（复审 I-1）：自动恢复的 attempt 与手动包装层同款 —— 恢复在途期间
+          // `restoringRecovery` 必须为真，否则呈现层（`turnStillOpen`）会把"恢复期"当成
+          // "本轮未终态"，末条已决只读卡照旧先展开、快照回来再折。
+          this.restoringRecovery = true
+          try {
+            await this.restoreSnapshotGuarded()
+            return this.preparingRun === null
+          } finally {
+            this.restoringRecovery = false
+          }
         },
         () => this.notePreparingExhausted()
       )
@@ -4889,7 +4897,14 @@ export const useAiStore = defineStore('ai', {
           if (this.stopped || !isCurrentRound()) {
             return true
           }
-          await this.restoreSnapshotGuarded()
+          // 2026-10-29 返修（复审 I-1）：同 `notePreparingState` —— 恢复在途期间置位恢复期标志，
+          // 否则这条自动恢复路径的呈现层判据（`turnStillOpen`）仍会把恢复当成"本轮未终态"。
+          this.restoringRecovery = true
+          try {
+            await this.restoreSnapshotGuarded()
+          } finally {
+            this.restoringRecovery = false
+          }
           // 复审返修（M-2）：判据是**真的接回了一条连接**，不是笼统的 `loading` ——
           // `restoreInFlightRound` 会先置 `loading=true` 再因驱动预算不足直接返回；
           // 准备中的旧后端兼容分支也会对陈旧 activeRunId 置 `preparingRun + loading`。

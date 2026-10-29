@@ -46,6 +46,8 @@ const stubs = {
 }
 
 beforeEach(() => {
+  // RO 桩（`vi.stubGlobal`）逐例复位：jsdom 无真实 ResizeObserver，残留会让用例顺序敏感。
+  vi.unstubAllGlobals()
   sessionStorage.clear()
   setActivePinia(createPinia())
   for (const fn of Object.values(api)) {
@@ -134,8 +136,13 @@ async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mo
   return wrapper
 }
 
-function debugOf(wrapper: ReturnType<typeof mount>): { markdownHtmlCalls: number } {
-  return (wrapper.vm as unknown as { __batch7aDebug: { markdownHtmlCalls: number } }).__batch7aDebug
+interface PanelDebug {
+  markdownHtmlCalls: number
+  gfCardRenders: Record<string, number>
+}
+
+function debugOf(wrapper: ReturnType<typeof mount>): PanelDebug {
+  return (wrapper.vm as unknown as { __batch7aDebug: PanelDebug }).__batch7aDebug
 }
 
 async function settle(wrapper: ReturnType<typeof mount>, times = 3): Promise<void> {
@@ -221,7 +228,9 @@ describe('memo · loading 变化不整列重渲', () => {
     await settle(wrapper)
     expect(wrapper.find('[data-testid="msg-ops-a-2"] [data-testid="park-waiting"]').exists()).toBe(true)
 
-    // 两次全局翻转都不许重渲历史正文（v-memo 不再挂全局现场）：markdown 渲染 0 次
+    // 两次全局翻转都不许重渲历史正文（v-memo 不再挂全局现场）。
+    // 真锁 = markdown 生成次数：缓存命中时该计数器同样自增，所以"历史块重渲过"一定被记到。
+    // 上面的 DOM 节点同一性只是弱断言（Vue patch 会复用元素，旧实现同样同一），不单独作证。
     expect(wrapper.find('[data-testid="msg-bubble-h-1"] .md-body').element).toBe(historyBody)
     expect(debugOf(wrapper).markdownHtmlCalls - callsBefore).toBe(0)
     wrapper.unmount()
@@ -242,6 +251,25 @@ describe('确认卡 · 展开稳定', () => {
     wrapper.unmount()
   })
 
+  it('恢复结束且本轮仍在收流 ⇒ 已决只读卡按"回合未结束"重新展开（正半支）', async () => {
+    const store = useAiStore()
+    const decided = message('a-hist', [gatePart('succeeded', false)], { streaming: true, done: false })
+    store.loading = true
+    store.restoringRecovery = true
+
+    const wrapper = await mountPanel([decided])
+    // 恢复期：不展开（对过去的镜像不做实时渲染）
+    expect(wrapper.find('[data-testid="ro-body-c1"]').attributes('style') ?? '').toContain('display: none')
+
+    // 恢复结束，而这一轮确实还在收流 ⇒ 回到"回合未结束仍展开"的既有口径
+    store.restoringRecovery = false
+    await settle(wrapper)
+    expect(store.loading).toBe(true)
+    expect(wrapper.find('[data-testid="ro-toggle-c1"]').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('[data-testid="ro-body-c1"]').attributes('style') ?? '').not.toContain('display: none')
+    wrapper.unmount()
+  })
+
   it('批准 → 重连 → 完成：外壳不卸载、展开不折叠回弹，终态收口后不复弹', async () => {
     const store = useAiStore()
     const part = gatePart('pending', true)
@@ -258,6 +286,9 @@ describe('确认卡 · 展开稳定', () => {
     const actions = wrapper.find('[data-testid="gate-actions"]').findAll('button')
     await actions[1]!.trigger('click')
     await settle(wrapper)
+    // 批准后挂起已被清掉（`confirm` 立即 resolve + 无其它待决卡）：这一步的展开只能靠
+    // "决策在途"（`gateSubmissions`），不是靠 `suspended` 侥幸绿 —— 时序一变这里先红。
+    expect(store.suspended).toBe(false)
     states.push(expandedOf(wrapper, 'c1'))
 
     // 重连：连接建立（loading）⇒ 仍展开
@@ -364,6 +395,147 @@ describe('滚动 · stick-to-bottom', () => {
 
     expect(probe.top).toBe(before)
     expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('grew 第三信号正半支：只有高度变高（无 RO、无内容增量）也钉底', async () => {
+    useCapturedRO()
+    const tool: ToolPart = {
+      kind: 'tool',
+      seg: 1,
+      toolCallId: 't-grew',
+      name: 'list_tasks',
+      kind2: 'BACKEND',
+      status: 'running',
+      args: '{}',
+      result: '任务清单',
+      requiresAction: false
+    }
+    const msg = message('a-1', [textPart('正文'), tool], { done: false })
+    const wrapper = await mountPanel([msg])
+    const wrap = scrollContainer(wrapper)
+    let height = 600
+    const probe = installScrollMetrics(wrap, 300, () => height)
+    probe.top = 300
+
+    const store = useAiStore()
+    // 第一次状态翻转：只建立基线（高度此前未测到 ⇒ 不许滚）
+    store.messages[0]!.parts[1] = { ...tool, status: 'succeeded' }
+    await settle(wrapper)
+    expect(probe.writes).toBe(0)
+
+    // 视口上方长高（字体 / 图片 / mermaid 落地）：本条内容形态没变、RO 也没被触发，
+    // 只剩"测到的高度比基线高"这一条证据
+    height = 900
+    store.messages[0]!.parts[1] = { ...tool, status: 'failed' }
+    await settle(wrapper)
+
+    expect(probe.writes).toBe(1)
+    expect(probe.top).toBe(900 - 300)
+    wrapper.unmount()
+  })
+
+  it('原生锚定只在跟随态关闭：上翻阅读时恢复浏览器锚定', async () => {
+    const wrapper = await mountPanel([message('a-1', [textPart('第一段')], { done: true })])
+    const wrap = scrollContainer(wrapper)
+    const anchorOff = (): boolean => wrap.classList.contains('[overflow-anchor:none]')
+    // 贴底跟随：自己补偿 ⇒ 关掉原生锚定（否则浏览器也补一次）
+    expect(anchorOff()).toBe(true)
+
+    // 用户上翻：我们不再补偿，位置只能交给浏览器锚定
+    Object.defineProperty(wrap, 'clientHeight', { value: 300, configurable: true })
+    Object.defineProperty(wrap, 'scrollHeight', { value: 600, configurable: true })
+    wrap.scrollTop = 0
+    wrap.dispatchEvent(new WheelEvent('wheel', { deltaY: -240 }))
+    wrap.dispatchEvent(new Event('scroll'))
+    await settle(wrapper)
+    expect(anchorOff()).toBe(false)
+
+    // 回到底部附近（离底 < 32）⇒ 跟随恢复 ⇒ 重新关掉原生锚定
+    wrap.scrollTop = 300
+    wrap.dispatchEvent(new Event('scroll'))
+    await settle(wrapper)
+    expect(anchorOff()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+// ── M-1 · GF 卡 memo 边界（2026-10-29 返修）─────────────────────────────────
+
+const GF_FORM = {
+  scenario: 'FILTER',
+  title: '导出参数',
+  fields: [
+    { key: 'region', label: '导出范围', type: 'enum', required: true, options: [{ value: 'HB', label: '华北' }, { value: 'HD', label: '华东' }] }
+  ]
+}
+
+const GF_ARGS = JSON.stringify({ form: GF_FORM })
+
+describe('M-1 · GF 卡 memo 边界', () => {
+  it('只有当前表单的宿主卡随 liveForm 值更新，历史 GF 卡不整列失效', async () => {
+    const store = useAiStore()
+    const history = message('a-gf-hist', [
+      {
+        kind: 'tool',
+        seg: 0,
+        toolCallId: 'g-hist',
+        name: 'generative_form',
+        kind2: 'FRONTEND',
+        status: 'succeeded',
+        args: GF_ARGS,
+        requiresAction: false,
+        submittedValues: { region: 'HB' }
+      }
+    ])
+    const live = message('a-gf-live', [
+      {
+        kind: 'tool',
+        seg: 0,
+        toolCallId: 'g-live',
+        name: 'generative_form',
+        kind2: 'FRONTEND',
+        status: 'pending',
+        args: GF_ARGS,
+        requiresAction: true
+      }
+    ], {
+      done: false,
+      pendingCall: {
+        toolCallId: 'g-live',
+        name: 'generative_form',
+        kind: 'FRONTEND',
+        args: { form: GF_FORM },
+        rawArgs: GF_ARGS,
+        status: 'pending'
+      }
+    })
+    store.activeForm = {
+      toolCallId: 'g-live',
+      runId: 'run-1',
+      form: GF_FORM as never,
+      status: 'filling',
+      error: null,
+      values: { region: 'HB' },
+      fieldErrors: []
+    }
+
+    const wrapper = await mountPanel([history, live])
+    const before = debugOf(wrapper).gfCardRenders
+    expect(before['g-hist'] ?? 0).toBeGreaterThan(0)
+    expect(before['g-live'] ?? 0).toBeGreaterThan(0)
+
+    // 用户在当前表单里改值：`liveForm.value` 与 `values` 身份都被替换
+    store.activeForm = { ...store.activeForm!, values: { region: 'HD' } }
+    await settle(wrapper)
+    const after = debugOf(wrapper).gfCardRenders
+
+    // 宿主卡照常更新（表单值这一帧就在它身上）
+    expect(after['g-live'] ?? 0).toBeGreaterThan(before['g-live'] ?? 0)
+    // 历史 GF 卡不该被全局 liveForm 拖下水（每敲一个字就整列重渲）
+    expect(after['g-hist'] ?? 0).toBe(before['g-hist'] ?? 0)
+    // 卡面本身没坏：历史卡仍是同一张只读卡
+    expect(wrapper.find('[data-testid="ro-summary-g-hist"]').text()).toContain('导出范围 华北')
     wrapper.unmount()
   })
 })
