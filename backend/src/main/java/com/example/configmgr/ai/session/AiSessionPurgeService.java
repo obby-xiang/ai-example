@@ -57,7 +57,8 @@ import java.util.regex.Pattern;
  * {@code complete=false}（索引成员已被 SREM，不能拿"不在索引"当"已删净"）；</li>
  * <li>该会话每一轮的<b>13 个 run 级键</b>（委托 {@link RunStore#deleteRun(String)}，按 run 逐个删，
  * 不使用 KEYS/通配删除）；外加 {@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
- * {@code ai:observed:} 四个观测/取消键（<b>不靠 TTL 自清</b>，逐 run 单键 DEL）；</li>
+ * {@code ai:observed:} 四个观测/取消键（<b>不靠 TTL 自清</b>，逐 run 单键 DEL；四族都带身份段
+ * {@code <t>:<u>:}，与写入方同一个键形）；</li>
  * <li><b>会话→run 索引复核（RT-28）</b>：{@code ai:session:runs:<sid>} 的 {@code complete} 只是加速标记
  * （新 run 入索引是 best-effort），删除尾部按全局 {@code ai:runs} 补发现"哨兵在但成员缺"的本会话 run：
  * 终态即删、活跃即 {@code deferred} ⇒ {@code complete=false} 可重试；复核本身失败也记可重试错误。
@@ -67,7 +68,8 @@ import java.util.regex.Pattern;
  * <li>{@code ai:ctx:<sid>} / {@code ai:ctx:ledger:<sid>} / {@code ai:ctx:archive:<sid>:<turnNo>} /
  * {@code ai:safety:<sid>}；</li>
  * <li>表单附件：该会话的登记、登记索引成员、<b>且只按登记里的 storagePath 删文件</b>（不扫目录）；</li>
- * <li>{@code ai_feedback} 表的该会话行（H2 先行）；</li>
+ * <li>{@code ai_feedback} 表<b>该身份 + 该会话</b>的行（H2 先行；按 {@code sessionId + tenantId + userId}
+ * 三元组定位，跨租户同 sessionId 不误删；无身份上下文 = legacy {@code (0,0)} 命名空间）；</li>
  * <li>{@code ai:session:current:<sid>} 与 {@code ai:session:<sid>}；</li>
  * <li>浏览器本地镜像/草稿：服务端无法访问 sessionStorage，结果里给出精确的
  * {@code clientCleanup}（镜像键 + 草稿键前缀 + 本轮 toolCallId 清单），由前端执行删除。</li>
@@ -115,11 +117,12 @@ public class AiSessionPurgeService {
 	static final String CLIENT_DRAFT_PREFIX = "cm.ai.form.draft.";
 
 	/**
-	 * Task 2 的结算观测位键前缀（{@code ai:observed:<runId>}，HASH，首写即置 session-ttl）。
+	 * 结算观测位键前缀（{@code ai:observed:<tenantId>:<userId>:<runId>}，HASH，首写即置 session-ttl）。
 	 *
-	 * <p>键形来自 Task 2 的契约（`task-2-report.md` §5）：<b>Task 2 拥有 store 与迁移排除清单，
-	 * 本类只负责"销毁时按 runId 删掉它"</b>。此处<b>不</b>引用其 {@code SettlementObservationStore}
-	 * 类：Task 2 未并入时那会编译失败；而单键 DEL 一个不存在的键是 no-op，前向兼容。
+	 * <p>键形与 {@code SettlementObservationStore#observedKey} 同一拼接口（{@link TenantKeyScope}，
+	 * 与 {@code ai:beat:}/{@code ai:activity:} 同族）：<b>store 拥有写入与迁移排除清单，本类只负责
+	 * "销毁时按当前身份的 runId 删掉同一把键"</b>。此处只引用前缀常量而不引用 store 类 —— 单键 DEL
+	 * 一个不存在的键是 no-op，前向兼容；但身份段必须从同一处算，否则会删错（跨租户同 runId）。
 	 */
 	static final String OBSERVED_PREFIX = "ai:observed:";
 
@@ -379,7 +382,7 @@ public class AiSessionPurgeService {
 		// ④ H2 先删（反馈行在独立本地事务里；失败不进入 Redis 删除，并撤销本次新建的 pending/守卫）。
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
-			dbDeleted = this.database.delete(sessionId);
+			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
 			if (ownedByThisCall) {
@@ -425,7 +428,7 @@ public class AiSessionPurgeService {
 
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
-			dbDeleted = this.database.delete(sessionId);
+			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
 			recordFailureQuietly(sessionId, purgeId, "database: " + rootMessage(ex));
@@ -665,7 +668,7 @@ public class AiSessionPurgeService {
 				this.redis.hasKey(AiSessionService.keyFor(sessionId)));
 
 		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
-		SessionPurgeDatabase.Snapshot db = this.database.snapshot(sessionId);
+		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
 
 		boolean found = memoryExisted || !runs.isEmpty() || context.any() || !attachmentList.isEmpty()
 				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted;
@@ -1189,26 +1192,51 @@ public class AiSessionPurgeService {
 	/**
 	 * 13 键之外的四个"每人可见"的 run 级键（不进 {@code deleteRun}，本来按 TTL 自清；销毁要一并清掉）。
 	 *
-	 * <p>{@code ai:observed:<runId>} 是 Task 2 的<b>结算观测位</b>（HASH，首写即置 session-ttl，
-	 * 自清即可）。用户裁定"所有 AI 数据在会话销毁时删除，不只靠 TTL"，而 {@code ai:observed:} 与
-	 * {@code ai:beat:}/{@code ai:activity:} 同列 TTL 型 run 锚点 ⇒ 这里按 runId 单键 DEL 一次，
-	 * 立即收敛（键形由 Task 2 契约固定，不依赖其 store 类；Task 2 未并入时是 no-op）。
-	 * 单键、无 tag ⇒ Cluster 安全。
+	 * <p>{@code ai:observed:<tenantId>:<userId>:<runId>} 是 Task 2 的<b>结算观测位</b>（HASH，首写即置
+	 * session-ttl，自清即可）。用户裁定"所有 AI 数据在会话销毁时删除，不只靠 TTL"，而
+	 * {@code ai:observed:} 与 {@code ai:beat:}/{@code ai:activity:} 同列 TTL 型 run 锚点 ⇒ 这里按
+	 * runId 单键 DEL 一次，立即收敛。<b>钥匙必须与写入方同一个键</b>：身份段取自当前上下文
+	 * （{@link TenantKeyScope}）—— 销毁主体全程在入口身份的作用域内执行，且 run 归属已按快照复核，
+	 * 因此这里算出的就是"本轮在本身份下"的那把键；跨租户同 runId 的观测位不会被误删。
+	 *
+	 * <p><b>四把键逐把单键 DEL</b>（不做多键 {@code DEL} 合并）：这四族都<b>没有 hash tag</b>，
+	 * 真集群下彼此不同槽 —— 合并成一条多键删除会在 Redis 侧 {@code CROSSSLOT}，反而整批删不掉。
+	 * 单键命令天然安全，失败仍逐把进 {@code errors}（可重试语义不变）。
 	 */
 	private void deleteObservabilityKeys(String runId, List<String> errors) {
+		deleteSingleRunAnchor(runId, this.runStore.beatKey(runId), "观测/取消", errors);
+		deleteSingleRunAnchor(runId, this.runStore.activityKey(runId), "观测/取消", errors);
+		deleteSingleRunAnchor(runId, this.cancellations.keyFor(runId), "观测/取消", errors);
+		deleteSingleRunAnchor(runId, TenantKeyScope.scoped(OBSERVED_PREFIX, runId), "结算观测位", errors);
+	}
+
+	/** 单键 DEL 一把 run 锚点；失败只记可重试错误，不影响其余三把。 */
+	private void deleteSingleRunAnchor(String runId, String key, String label, List<String> errors) {
 		try {
-			this.redis.delete(List.of(this.runStore.beatKey(runId), this.runStore.activityKey(runId),
-					this.cancellations.keyFor(runId)));
+			this.redis.delete(key);
 		}
 		catch (RuntimeException ex) {
-			errors.add("run[" + runId + "]: 观测/取消键删除失败（可重试）：" + rootMessage(ex));
+			errors.add("run[" + runId + "]: " + label + "键删除失败（可重试，key=" + key + "）："
+					+ rootMessage(ex));
 		}
-		try {
-			this.redis.delete(OBSERVED_PREFIX + runId);
-		}
-		catch (RuntimeException ex) {
-			errors.add("run[" + runId + "]: 结算观测位删除失败（可重试）：" + rootMessage(ex));
-		}
+	}
+
+	/**
+	 * 枚举 H2 面的反馈行：<b>当前身份</b>（销毁主体在入口身份的上下文里），无身份 = legacy {@code (0,0)}。
+	 *
+	 * <p>与键面同一口径：没有身份上下文时不猜默认身份，只落 legacy 命名空间。
+	 */
+	private SessionPurgeDatabase.Snapshot snapshotFeedback(String sessionId) {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		return identity == null ? this.database.snapshot(sessionId)
+				: this.database.snapshot(sessionId, identity.tenantId(), identity.userId());
+	}
+
+	/** 删除 H2 面的反馈行：按 sessionId + 身份三元组（见 {@link SessionPurgeDatabase}）。 */
+	private SessionPurgeDatabase.Deleted deleteFeedback(String sessionId) {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		return identity == null ? this.database.delete(sessionId)
+				: this.database.delete(sessionId, identity.tenantId(), identity.userId());
 	}
 
 	private ContextView deleteContext(String sessionId, ContextTargets targets, List<String> errors,

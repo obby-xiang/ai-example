@@ -23,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li><b>H2 迁移 V1~V6 的字节指纹不变</b>：这些迁移已经发布过，Flyway 的 checksum 存在既有库的
  * {@code flyway_schema_history} 里；改一个空格都会让存量库在启动时报
  * "Migration checksum mismatch"（且不允许自动修复）。指纹钉死后，任何"顺手改一下 V1"都会在单测里先红。</li>
- * <li><b>两目录版本号对齐且无同号冲突</b>：{@code db/migration}（H2：V1~V5 SQL + V6 Java + V7~V10 SQL）
- * 与 {@code db/postgresql}（V1~V10 全 SQL）合起来必须**恰好覆盖 1~10、每个版本号只出现一次**。
+ * <li><b>两目录版本号对齐且无同号冲突</b>：{@code db/migration}（H2：V1~V5 SQL + V6 Java + V7~V11 SQL）
+ * 与 {@code db/postgresql}（V1~V11 全 SQL）合起来必须**恰好覆盖 1~11、每个版本号只出现一次**。
  * 跨分支合并（历史工作树的 V7/V8 并入本树的 V7 app_lock 之后）最容易在这里撞号，
  * 撞号会让 Flyway 在启动期直接失败。</li>
  * <li><b>方言差异只允许出现在 V1/V8</b>（CLOB→TEXT），其余文件两侧逐字节相同；
@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * application-postgresql.yml 的 {@code locations} 单值保证，本用例兜住目录内容本身的完整性。</li>
  * </ol>
  *
- * <p>PG 的真实执行（连接真实库、跑完 V1~V10、Hibernate validate）不在本机跑，留 CI ——
+ * <p>PG 的真实执行（连接真实库、跑完 V1~V11、Hibernate validate）不在本机跑，留 CI ——
  * 本用例只做"能在本机确定的部分"：迁移集完整性、版本号唯一性、方言差异的边界、H2 侧不可变。
  */
 class MigrationSetGuardTest {
@@ -58,7 +58,8 @@ class MigrationSetGuardTest {
 			"V5__ai_model_reasoning_backfill.sql",
 			"V7__app_lock.sql",
 			"V9__ai_chat_message_idempotency.sql",
-			"V10__drop_ai_chat_message.sql");
+			"V10__drop_ai_chat_message.sql",
+			"V11__ai_feedback_tenant_scope.sql");
 
 	/** 允许"必要方言兼容"（CLOB→TEXT）的文件：其余结构必须与 H2 一致。 */
 	private static final List<String> DIALECT_ADAPTED_FILES = List.of(
@@ -88,28 +89,28 @@ class MigrationSetGuardTest {
 	@Test
 	void postgresSetHasEveryH2VersionAsSql() {
 		assertThat(versionsIn(PG_DIR))
-				.as("PG 迁移集 = V1~V10（与 H2 侧版本号逐一对齐；PG 侧没有 Java 迁移）")
-				.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+				.as("PG 迁移集 = V1~V11（与 H2 侧版本号逐一对齐；PG 侧没有 Java 迁移）")
+				.containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
 		List<String> pgFiles = sqlFiles(PG_DIR);
 		assertThat(pgFiles).as("PG 目录只放 SQL 迁移（Java 迁移在 PG profile 下被显式关闭）")
 				.allMatch(name -> name.endsWith(".sql"));
 	}
 
 	@Test
-	void h2SqlAndJavaMigrationsCoverV1ToV10ExactlyOnce() {
+	void h2SqlAndJavaMigrationsCoverV1ToV11ExactlyOnce() {
 		List<String> sqlVersions = versionsIn(H2_DIR);
 		List<String> javaVersions = javaMigrationVersions();
 
 		assertThat(sqlVersions)
 				.as("H2 的 SQL 迁移版本（V6 是 Java 迁移，故 SQL 侧没有 6）")
-				.containsExactly("1", "2", "3", "4", "5", "7", "8", "9", "10");
+				.containsExactly("1", "2", "3", "4", "5", "7", "8", "9", "10", "11");
 		assertThat(javaVersions).as("H2 的 Java 迁移版本").containsExactly("6");
 
 		List<String> all = new java.util.ArrayList<>(sqlVersions);
 		all.addAll(javaVersions);
-		assertThat(all).as("H2 侧（SQL + Java）合起来必须恰好覆盖 1~10，且同号只出现一次")
+		assertThat(all).as("H2 侧（SQL + Java）合起来必须恰好覆盖 1~11，且同号只出现一次")
 				.doesNotHaveDuplicates()
-				.containsExactlyInAnyOrder("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+				.containsExactlyInAnyOrder("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
 
 		assertThat(versionsIn(PG_DIR))
 				.as("两目录版本号对齐：PG 侧不得缺号/多号")

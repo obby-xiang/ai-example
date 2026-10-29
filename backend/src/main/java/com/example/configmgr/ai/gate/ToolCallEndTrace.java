@@ -24,7 +24,7 @@ import java.util.Map;
  * 当判据时同时踩了两头：跨实例回灌会与源实例的批循环各发一条（两条 end、{@code readCalls=2}）；
  * 多卡乱序回灌会因"预登记闸门被唤醒但随后被 park 摘掉"而一条都不发（0 条 end）。
  *
- * <p>故发点统一走 {@link #emitOnce}：抢 {@code ai:observed:<runId>} 的位（{@code HSETNX}，
+ * <p>故发点统一走 {@link #emitOnce}：抢 {@code ai:observed:<tenantId>:<userId>:<runId>} 的位（{@code HSETNX}，
  * 见 {@link SettlementObservationStore}）——<b>首写者发、其后一律不发</b>，与"发点在哪个实例"无关；
  * {@link SheetAudit} 的计数与日志行在同一次抢占之内，两面必然同增同不增。
  *

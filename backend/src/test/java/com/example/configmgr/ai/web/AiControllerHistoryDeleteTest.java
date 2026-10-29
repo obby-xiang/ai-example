@@ -12,6 +12,7 @@ import com.example.configmgr.ai.session.AiSessionPurgeService.PurgeResult;
 import com.example.configmgr.ai.session.AiSessionPurgeService.RunView;
 import com.example.configmgr.ai.session.AiSessionPurgeService.SessionView;
 import com.example.configmgr.ai.session.SessionPurgeDatabase;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -57,7 +58,7 @@ class AiControllerHistoryDeleteTest {
 		when(this.runStore.instanceId()).thenReturn("inst-1");
 		when(this.service.purge("s-1", "inst-1")).thenReturn(result(true, true, List.of()));
 
-		this.mockMvc.perform(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.sessionId").value("s-1"))
 			.andExpect(jsonPath("$.deleted").value(true))
@@ -76,7 +77,7 @@ class AiControllerHistoryDeleteTest {
 		when(this.runStore.instanceId()).thenReturn("inst-1");
 		when(this.service.purge("s-1", "inst-1")).thenReturn(result(true, false, List.of()));
 
-		this.mockMvc.perform(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.deleted").value(true))
 			.andExpect(jsonPath("$.existed").value(false));
@@ -89,7 +90,7 @@ class AiControllerHistoryDeleteTest {
 		when(this.service.purge("s-1", "inst-1")).thenReturn(result(false, true,
 				List.of(new DeferredView("r-1", "RUNNING", "RUN_ACTIVE"))));
 
-		this.mockMvc.perform(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.complete").value(false))
 			.andExpect(jsonPath("$.deleted").value(false))
@@ -118,6 +119,14 @@ class AiControllerHistoryDeleteTest {
 		assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
 		assertEquals("BAD_REQUEST", response.getBody().get("code"));
 		verify(this.service, never()).purge(any(), any());
+	}
+
+	/** 带身份执行请求（MockMvc 在 {@code perform} 内即执行；无身份时销毁端点 fail-closed 400）。 */
+	private org.springframework.test.web.servlet.ResultActions purgeWithIdentity(
+			org.springframework.test.web.servlet.RequestBuilder request) throws Exception {
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			return this.mockMvc.perform(request);
+		}
 	}
 
 	private static PurgeResult result(boolean complete, boolean existed, List<DeferredView> deferred) {

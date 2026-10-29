@@ -90,7 +90,7 @@ public final class RedisDegradation {
 	public static final String W1_MEMORY_WRITE = "w1.memoryWrite";
 
 	/**
-	 * O1：结算观测位（{@code ai:observed:<runId>}）抢位失败 ⇒ fail-open（本条结算不仲裁、照发）。
+	 * O1：结算观测位（{@code ai:observed:<tenantId>:<userId>:<runId>}）抢位失败 ⇒ fail-open（本条结算不仲裁、照发）。
 	 *
 	 * <p>为什么必须可观测：fail-open 是"宁可极小概率双记"的取舍，静默发生时跨实例"恰好一条
 	 * {@code tool_call_end}"整体失效而日志/健康面全无信号（独立复审 task-2-rereview1 R-C-1/R-I-4

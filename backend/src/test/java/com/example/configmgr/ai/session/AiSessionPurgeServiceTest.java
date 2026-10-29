@@ -5,6 +5,7 @@ import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.form.RedisFormAttachmentStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -724,14 +725,16 @@ class AiSessionPurgeServiceTest {
 		FormAttachmentStore.Attachment attachmentB;
 		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_A, USER_A)) {
 			seedIdentitySession("run-a", "call-a");
-			this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
-					"msg-a", SESSION_A, 1);
+			this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating, tenant_id, user_id) "
+					+ "VALUES (?, ?, ?, ?, ?)", "msg-a", SESSION_A, 1, TENANT_A, USER_A);
 			fileA = writeFile("att-a.pdf", "attachment-a");
 			attachmentA = this.fixture.attachments.register("run-a", "call-a", SESSION_A, "att-a.pdf", 10L,
 					"application/pdf", fileA.toString());
 		}
 		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
 			seedIdentitySession("run-b", "call-b");
+			this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating, tenant_id, user_id) "
+					+ "VALUES (?, ?, ?, ?, ?)", "msg-b", SESSION_A, -1, TENANT_B, USER_B);
 			fileB = writeFile("att-b.pdf", "attachment-b");
 			attachmentB = this.fixture.attachments.register("run-b", "call-b", SESSION_A, "att-b.pdf", 10L,
 					"application/pdf", fileB.toString());
@@ -784,6 +787,58 @@ class AiSessionPurgeServiceTest {
 				.isNotNull();
 		}
 		assertThat(Files.exists(fileB)).as("B 的文件不得被 A 的销毁删除").isTrue();
+
+		// H2 面的同一口径（V11）：反馈按 sessionId + tenantId + userId 删，跨租户同 sessionId 不误删
+		assertThat(countFeedbackFor(SESSION_A, TENANT_A, USER_A)).as("A 的反馈行必须删").isZero();
+		assertThat(countFeedbackFor(SESSION_A, TENANT_B, USER_B)).as("B 的反馈行不得被 A 的销毁误删").isEqualTo(1);
+	}
+
+	private int countFeedbackFor(String sessionId, long tenantId, long userId) {
+		Integer rows = this.fixture.jdbc.queryForObject(
+				"SELECT COUNT(*) FROM ai_feedback WHERE session_id = ? AND tenant_id = ? AND user_id = ?",
+				Integer.class, sessionId, tenantId, userId);
+		return rows == null ? 0 : rows;
+	}
+
+	/**
+	 * <b>销毁面的观测/取消键（租户任务 2 收尾组）</b>：{@code ai:cancel:} / {@code ai:observed:} 带
+	 * {@code <tenantId>:<userId>:} 身份段，删除必须与写入方是<b>同一把键</b> —— 跨租户同 runId 不误删。
+	 *
+	 * <p>证红：把 {@code deleteObservabilityKeys} 里的 cancel/observed 键改回裸 runId 形 ⇒
+	 * A 的两把键删不掉、B 的两把键被误删，本用例立刻红。
+	 */
+	@Test
+	void observabilityKeysAreDeletedOnlyForTheCurrentIdentity() throws Exception {
+		SettlementObservationStore observations = new SettlementObservationStore();
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			seedIdentitySession("run-a", "call-a");
+			this.fixture.fake.strings.put(CancellationRegistry.cancelKey("run-a"), "inst-a");
+			this.fixture.fake.hashes.put(observations.observedKey("run-a"), new LinkedHashMap<>(Map.of("call-a",
+					"1|inst-a")));
+		}
+		String cancelB;
+		String observedB;
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
+			cancelB = CancellationRegistry.cancelKey("run-a");
+			observedB = observations.observedKey("run-a");
+			this.fixture.fake.strings.put(cancelB, "inst-b");
+			this.fixture.fake.hashes.put(observedB, new LinkedHashMap<>(Map.of("call-a", "2|inst-b")));
+		}
+		String cancelA = CancellationRegistry.CANCEL_PREFIX + TENANT_A + ":" + USER_A + ":run-a";
+		String observedA = SettlementObservationStore.KEY_PREFIX + TENANT_A + ":" + USER_A + ":run-a";
+		assertThat(cancelB).as("同 runId 不同身份必须落在不同键上").isNotEqualTo(cancelA);
+		assertThat(observedB).isNotEqualTo(observedA);
+
+		AiSessionPurgeService.PurgeResult result;
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			result = this.fixture.service.purge(SESSION_A, "test");
+		}
+
+		assertThat(result.complete()).isTrue();
+		assertThat(this.fixture.fake.strings).as("A 的取消旗标必须随销毁删除").doesNotContainKey(cancelA);
+		assertThat(this.fixture.fake.hashes).as("A 的结算观测位必须随销毁删除").doesNotContainKey(observedA);
+		assertThat(this.fixture.fake.strings).as("B 的取消旗标不得被 A 的销毁误删").containsKey(cancelB);
+		assertThat(this.fixture.fake.hashes).as("B 的结算观测位不得被 A 的销毁误删").containsKey(observedB);
 	}
 
 	/** 一个身份下的一整套最小可删面（会话记录 + run + 台账 + 记忆 + 守卫）。 */
@@ -1193,7 +1248,8 @@ class AiSessionPurgeServiceTest {
 			this.source = source;
 			this.jdbc = new JdbcTemplate(source);
 			this.jdbc.execute("CREATE TABLE ai_feedback (id BIGINT AUTO_INCREMENT PRIMARY KEY, "
-					+ "message_id VARCHAR(64) NOT NULL, session_id VARCHAR(64) NOT NULL, rating INT NOT NULL)");
+					+ "message_id VARCHAR(64) NOT NULL, session_id VARCHAR(64) NOT NULL, rating INT NOT NULL, "
+					+ "tenant_id BIGINT NOT NULL DEFAULT 0, user_id BIGINT NOT NULL DEFAULT 0)");
 
 			AppProperties app = new AppProperties();
 			app.getFile().setStoragePath(tempDir.resolve("files").toString());

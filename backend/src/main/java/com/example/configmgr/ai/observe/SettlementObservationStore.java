@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.InstanceId;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 
 import java.time.Duration;
 import java.util.List;
@@ -31,9 +32,12 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <h2>键生命周期（复审 C-1 后的口径）</h2>
  * <ul>
- * <li><b>键形</b>：{@code ai:observed:<runId>}（HASH；field = {@code toolCallId}，
- * value = {@code <atMs>|<instanceId>}）。<b>裸前缀、不带 {@code {run:<runId>}} tag</b> ——
- * 只进单键命令/单键脚本（{@code EVAL} 只有一把 KEYS，Cluster 下天然同槽）；</li>
+ * <li><b>键形</b>：{@code ai:observed:<tenantId>:<userId>:<runId>}（HASH；field = {@code toolCallId}，
+ * value = {@code <atMs>|<instanceId>}）。身份段来自 {@code TenantKeyScope#scoped}（与
+ * {@code ai:cancel:} / {@code ai:beat:} / {@code ai:activity:} 同族）；<b>裸前缀、不带
+ * {@code {run:<runId>}} tag</b> —— 只进单键命令/单键脚本（{@code EVAL} 只有一把 KEYS，
+ * Cluster 下天然同槽）。无身份上下文时退回<b>旧键形</b> {@code ai:observed:<runId>}（独立
+ * legacy 命名空间）；<b>跨租户同 runId 不共享观测位</b>（身份段进键，进程内退化表也按整键分槽）；</li>
  * <li><b>TTL</b>：{@code app.ai.session-ttl}。<b>抢位与置 TTL 在同一把单键脚本里</b>
  * （见 {@link #OBSERVE_SCRIPT}）：不存在"键写进去了但没有 TTL"的中间态；脚本之外每拍还做一次
  * 自愈 {@code EXPIRE}，把旧版本/半途失败留下的无 TTL 墓碑补回来（{@link #claim}）；</li>
@@ -100,7 +104,8 @@ public class SettlementObservationStore {
 
 	/** 键名（销毁面/诊断/取证按它取键；与 {@link #claim} 写入的是同一个键）。 */
 	public String observedKey(String runId) {
-		return KEY_PREFIX + runId;
+		// 身份段来自当前上下文：跨租户同 runId 落在不同键上（无上下文 = legacy 旧键形）。
+		return TenantKeyScope.scoped(KEY_PREFIX, runId);
 	}
 
 	/**

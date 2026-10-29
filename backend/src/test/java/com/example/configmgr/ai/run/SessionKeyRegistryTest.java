@@ -69,7 +69,7 @@ class SessionKeyRegistryTest {
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.READ))
 			.extracting(builder -> builder.apply("r1"))
 			.containsExactly(store.reqKey("r1"), store.decidedKey("r1"), store.fenceKey("r1"),
-					store.runLeaseEpochKey("r1"), CancellationRegistry.CANCEL_PREFIX + "r1");
+					store.runLeaseEpochKey("r1"), CancellationRegistry.cancelKey("r1"));
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT))
 			.extracting(builder -> builder.apply("r1"))
 			.containsExactly(store.runKey("r1"), store.pendingKey("r1"), store.eventsKey("r1"), store.seqKey("r1"),

@@ -53,7 +53,7 @@ import java.util.concurrent.TimeUnit;
  * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
  * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
  * 官方循环照常继续（模型如实解释）；</li>
- * <li><b>取消</b>：整轮被取消（{@code ai:cancel:<runId>}）→ {@code status=CANCELLED}，不执行。</li>
+ * <li><b>取消</b>：整轮被取消（{@code ai:cancel:<tenantId>:<userId>:<runId>}）→ {@code status=CANCELLED}，不执行。</li>
  * </ul>
  *
  * <h2>等待没有时限（用户裁决 2026-10-20 第 1/2 条）</h2>
@@ -620,7 +620,8 @@ public class ConfirmGate {
 		// F8：复用 arm 的预登记（同一 key 只允许一把）—— 这里无条件 new 会盖掉预登记闸门，
 		// 使"帧已发出后、进入等待前"到达的唤醒（已 countDown 在旧闸门上）丢失。
 		Latch latch = this.latches.computeIfAbsent(key, ignored -> new Latch());
-		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在 ai:cancel:<runId>。
+		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在
+		// ai:cancel:<tenantId>:<userId>:<runId>。
 		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
@@ -1085,7 +1086,8 @@ public class ConfirmGate {
 					+ " CANCELLED + 终帧；本线程不再重复出帧）", runId, handed);
 		}
 		catch (RuntimeException ex) {
-			log.warn("park 取消时交棒失败 runId={}：{}（取消事实仍在 ai:cancel:<runId>）", runId, ex.getMessage());
+			log.warn("park 取消时交棒失败 runId={}：{}（取消事实仍在 ai:cancel:<tenantId>:<userId>:<runId>）", runId,
+					ex.getMessage());
 		}
 	}
 
@@ -1927,7 +1929,7 @@ public class ConfirmGate {
 	 * {@link com.example.configmgr.ai.observe.SettlementObservationStore} 的首写者仲裁选出：
 	 * 本类（决策 / 放弃 / 整轮取消 / 前端回执到期收敛的胜者）、{@code SpToolCallingManager}
 	 * 的内联批循环与 abort 结算、续跑认领胜者共抢
-	 * {@code ai:observed:<runId>} 的同一 field，抢到者发一行并记一次审计。
+	 * {@code ai:observed:<tenantId>:<userId>:<runId>} 的同一 field，抢到者发一行并记一次审计。
 	 *
 	 * <p><b>覆盖边界（如实登记）</b>：发点现已覆盖 <b>已决 / 放弃 / 整轮取消 / 前端回执到期（park 后
 	 * 的 {@code expireFrontend} 收敛，见 {@link #scheduleParkedFrontendExpiry}）/ 执行认领</b> 五类 ——
@@ -1946,7 +1948,7 @@ public class ConfirmGate {
 	 * 的闸门一并摘掉 ⇒ 该卡永久 0 条 end。</li>
 	 * </ul>
 	 * 两条都说明"发不发"必须由<b>持久、跨实例</b>的首写者裁决 —— 即
-	 * {@code ai:observed:<runId>}（见 {@link SettlementObservationStore}）。
+	 * {@code ai:observed:<tenantId>:<userId>:<runId>}（见 {@link SettlementObservationStore}）。
 	 * 于是本侧与批循环、续跑认领胜者谁先到谁发，其余自动让位；续跑的"复用结果"分支仍不参与。
 	 *
 	 * <h2>为什么仍要 {@code park 开启}</h2>

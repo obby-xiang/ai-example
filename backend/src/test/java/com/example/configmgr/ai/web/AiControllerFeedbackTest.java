@@ -10,6 +10,7 @@ import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -28,6 +29,8 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -39,10 +42,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * R-163 T5：赞踩端点 {@code POST/GET /api/ai/feedback}（幂等 upsert / 取消=删行 / 校验 400 / 查看列表）。
+ * R-163 T5：赞踩端点 {@code POST/GET /api/ai/feedback}（身份内幂等 upsert / 取消=删行 / 校验 400 /
+ * 查看列表 / <b>无身份 fail-closed</b>）。
+ *
+ * <p>租户任务 2 收尾组（V11）：反馈是会话数据 ⇒ 仓储查找/列表都带 {@code tenantId/userId}，
+ * 写入固化 {@code tenant_id/user_id/created_by}。用例在 {@link RequestContextUtils} 上下文里驱动
+ * （生产入口由 {@code TenantIdentityFilter} 提供同一份身份）。
  * 仓储为字段注入（本批后端红线仅限赞踩），standaloneSetup 用 ReflectionTestUtils 灌入。
  */
 class AiControllerFeedbackTest {
+
+	private static final long TENANT_A = 1L;
+
+	private static final long USER_A = 101L;
 
 	private final AiFeedbackRepository feedbackRepository = mock(AiFeedbackRepository.class);
 
@@ -50,26 +62,34 @@ class AiControllerFeedbackTest {
 
 	@Test
 	void firstUpsertCreatesAndSecondUpsertUpdatesSameMessage() throws Exception {
-		when(this.feedbackRepository.findByMessageId("m-1")).thenReturn(null);
+		when(this.feedbackRepository.findByMessageIdAndTenantIdAndUserId("m-1", TENANT_A, USER_A)).thenReturn(null);
 
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":1}"))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.saved").value(true))
-			.andExpect(jsonPath("$.data.cancelled").value(false));
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":1}"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.saved").value(true))
+				.andExpect(jsonPath("$.data.cancelled").value(false));
+		});
 
 		ArgumentCaptor<AiFeedback> captor = ArgumentCaptor.forClass(AiFeedback.class);
 		verify(this.feedbackRepository).save(captor.capture());
 		assertThat(captor.getValue().getMessageId()).isEqualTo("m-1");
 		assertThat(captor.getValue().getRating()).isEqualTo(1);
+		assertThat(captor.getValue().getTenantId()).as("写入固化当前租户").isEqualTo(TENANT_A);
+		assertThat(captor.getValue().getUserId()).as("写入固化当前用户").isEqualTo(USER_A);
+		assertThat(captor.getValue().getCreatedBy()).as("createdBy 记录当前 userId").isEqualTo(String.valueOf(USER_A));
 
 		// 幂等 upsert：同 messageId 二次上报 = 更新同一条（saved=false）；携正文快照 excerpt（收口修 F2）
 		AiFeedback existing = captor.getValue();
-		when(this.feedbackRepository.findByMessageId("m-1")).thenReturn(existing);
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":-1,\"reason\":\"答非所问\",\"excerpt\":\"被评价消息正文快照\"}"))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.saved").value(false));
+		when(this.feedbackRepository.findByMessageIdAndTenantIdAndUserId("m-1", TENANT_A, USER_A))
+			.thenReturn(existing);
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":-1,\"reason\":\"答非所问\",\"excerpt\":\"被评价消息正文快照\"}"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.saved").value(false));
+		});
 		verify(this.feedbackRepository, times(2)).save(existing);
 		assertThat(existing.getRating()).isEqualTo(-1);
 		assertThat(existing.getReason()).isEqualTo("答非所问");
@@ -82,13 +102,15 @@ class AiControllerFeedbackTest {
 	 */
 	@Test
 	void excerptContainingASecretIsStoredAsRedactedPlaceholder() throws Exception {
-		when(this.feedbackRepository.findByMessageId("m-9")).thenReturn(null);
+		when(this.feedbackRepository.findByMessageIdAndTenantIdAndUserId("m-9", TENANT_A, USER_A)).thenReturn(null);
 		String key = "s" + "k-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
 
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-9\",\"sessionId\":\"s-1\",\"rating\":1,\"excerpt\":\"回复里带出 " + key
-						+ " 这一段\"}"))
-			.andExpect(status().isOk());
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-9\",\"sessionId\":\"s-1\",\"rating\":1,\"excerpt\":\"回复里带出 " + key
+							+ " 这一段\"}"))
+				.andExpect(status().isOk());
+		});
 
 		ArgumentCaptor<AiFeedback> captor = ArgumentCaptor.forClass(AiFeedback.class);
 		verify(this.feedbackRepository).save(captor.capture());
@@ -99,35 +121,42 @@ class AiControllerFeedbackTest {
 	void ratingZeroCancelsByDeletingRow() throws Exception {
 		AiFeedback existing = new AiFeedback();
 		existing.setMessageId("m-2");
-		when(this.feedbackRepository.findByMessageId("m-2")).thenReturn(existing);
+		when(this.feedbackRepository.findByMessageIdAndTenantIdAndUserId("m-2", TENANT_A, USER_A))
+			.thenReturn(existing);
 
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-2\",\"sessionId\":\"s-1\",\"rating\":0}"))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.saved").value(false))
-			.andExpect(jsonPath("$.data.cancelled").value(true));
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-2\",\"sessionId\":\"s-1\",\"rating\":0}"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.saved").value(false))
+				.andExpect(jsonPath("$.data.cancelled").value(true));
+		});
 		verify(this.feedbackRepository).delete(existing);
 
 		// 取消幂等：无该行时取消 = 空操作（不报错、不删）——先清调用记录再断负例
 		org.mockito.Mockito.clearInvocations(this.feedbackRepository);
-		when(this.feedbackRepository.findByMessageId("m-3")).thenReturn(null);
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-3\",\"sessionId\":\"s-1\",\"rating\":0}"))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.cancelled").value(false));
+		when(this.feedbackRepository.findByMessageIdAndTenantIdAndUserId("m-3", TENANT_A, USER_A)).thenReturn(null);
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-3\",\"sessionId\":\"s-1\",\"rating\":0}"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.cancelled").value(false));
+		});
 		verify(this.feedbackRepository, never()).delete(any());
 	}
 
 	@Test
 	void invalidPayloadRejectedWith400() throws Exception {
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":5}"))
-			.andExpect(status().isBadRequest())
-			.andExpect(jsonPath("$.code").value("BAD_REQUEST"));
+		asUserA(() -> {
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":5}"))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code").value("BAD_REQUEST"));
 
-		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
-				.content("{\"sessionId\":\"s-1\",\"rating\":1}"))
-			.andExpect(status().isBadRequest());
+			this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sessionId\":\"s-1\",\"rating\":1}"))
+				.andExpect(status().isBadRequest());
+		});
 	}
 
 	@Test
@@ -140,15 +169,52 @@ class AiControllerFeedbackTest {
 		entry.setMessageExcerpt("被评价消息正文快照");
 		entry.setCreatedAt(LocalDateTime.of(2026, 10, 14, 10, 30));
 		entry.setUpdatedAt(LocalDateTime.of(2026, 10, 14, 10, 30));
-		when(this.feedbackRepository.findTop100ByOrderByUpdatedAtDesc()).thenReturn(List.of(entry));
+		when(this.feedbackRepository.findTop100ByTenantIdAndUserIdOrderByUpdatedAtDesc(TENANT_A, USER_A))
+			.thenReturn(List.of(entry));
 
+		asUserA(() -> {
+			this.mockMvc.perform(get("/api/ai/feedback"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data[0].messageId").value("msg-abc-12345"))
+				.andExpect(jsonPath("$.data[0].sessionId").value("session-xyz-678"))
+				.andExpect(jsonPath("$.data[0].rating").value(-1))
+				.andExpect(jsonPath("$.data[0].reason").value("结果有误"))
+				.andExpect(jsonPath("$.data[0].excerpt").value("被评价消息正文快照"));
+		});
+	}
+
+	/**
+	 * <b>无身份 fail-closed</b>（租户任务 2 收尾组）：没有身份上下文时既不写也不读，
+	 * 不回落"全表/默认租户"，更不调用仓储。
+	 */
+	@Test
+	void feedbackWithoutIdentityFailsClosed() throws Exception {
+		this.mockMvc.perform(post("/api/ai/feedback").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"messageId\":\"m-1\",\"sessionId\":\"s-1\",\"rating\":1}"))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.code").value("TENANT_IDENTITY_REQUIRED"));
 		this.mockMvc.perform(get("/api/ai/feedback"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data[0].messageId").value("msg-abc-12345"))
-			.andExpect(jsonPath("$.data[0].sessionId").value("session-xyz-678"))
-			.andExpect(jsonPath("$.data[0].rating").value(-1))
-			.andExpect(jsonPath("$.data[0].reason").value("结果有误"))
-			.andExpect(jsonPath("$.data[0].excerpt").value("被评价消息正文快照"));
+			.andExpect(jsonPath("$.success").value(false))
+			.andExpect(jsonPath("$.code").value("TENANT_IDENTITY_REQUIRED"));
+
+		verify(this.feedbackRepository, never()).save(any());
+		verify(this.feedbackRepository, never()).findByMessageIdAndTenantIdAndUserId(anyString(), anyLong(), anyLong());
+		verify(this.feedbackRepository, never()).findTop100ByTenantIdAndUserIdOrderByUpdatedAtDesc(anyLong(),
+				anyLong());
+	}
+
+	private void asUserA(ThrowingRunnable body) throws Exception {
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			body.run();
+		}
+	}
+
+	@FunctionalInterface
+	private interface ThrowingRunnable {
+
+		void run() throws Exception;
+
 	}
 
 	private AiController controller() {

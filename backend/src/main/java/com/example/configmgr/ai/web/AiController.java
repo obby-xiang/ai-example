@@ -1323,7 +1323,8 @@ public class AiController {
 	 * 取消一轮对话：{@code POST /api/ai/cancel/{runId}}。
 	 *
 	 * <p>
-	 * 权威态写进 Redis（{@code ai:cancel:<runId>}），因此跨实例/跨进程同样生效；
+	 * 权威态写进 Redis（{@code ai:cancel:<tenantId>:<userId>:<runId>}，键形见
+	 * {@link CancellationRegistry#cancelKey(String)}），因此跨实例/跨进程同样生效；
 	 * 同进程时还会当场唤醒挂起闸门与流式看门狗（加速，不改变语义）。
 	 * 该轮随即以 {@code done{cancelled:true}} 收尾，快照转 {@code CANCELLED}，
 	 * 未决的挂起条目转 {@code CANCELLED}（重启续跑不会把它执行掉）。
@@ -2601,15 +2602,25 @@ public class AiController {
 		return ApiResponse.ok(items);
 	}
 
-	// ── R-163 T5：赞踩反馈（本批唯一后端面；ai_feedback net-new 表，parts[] 持久化不动） ──
+	// ── R-163 T5：赞踩反馈（ai_feedback net-new 表，parts[] 持久化不动） ──
 
 	/**
-	 * POST /api/ai/feedback —— 赞踩上报（幂等 upsert：message_id 唯一；rating=0 = 取消=删行）。
-	 * 请求体 {@code {messageId, sessionId, rating∈1/-1/0, reason?}}；校验失败 400 携可读 message。
-	 * 单用户本地应用（无登录体系），created_by 预留隔离位。
+	 * POST /api/ai/feedback —— 赞踩上报（<b>身份内</b>幂等 upsert：(tenant_id,user_id,message_id) 唯一；
+	 * rating=0 = 取消=删行）。请求体 {@code {messageId, sessionId, rating∈1/-1/0, reason?}}；
+	 * 校验失败 400 携可读 message。
+	 *
+	 * <p><b>身份（租户任务 2 收尾组 / V11）</b>：反馈是会话数据 ⇒ 写入固化当前
+	 * {@code tenant_id/user_id}、{@code created_by = userId}，查找/删除都限定在本身份内
+	 * （跨租户同 messageId 各自一行，不互相覆盖）。<b>无身份 fail-closed</b>：不写、不改、不删，
+	 * 400 {@link ErrorCodes#TENANT_IDENTITY_REQUIRED}（生产入口由 {@code TenantIdentityFilter} 保证有身份）。
 	 */
 	@PostMapping("/feedback")
 	public ResponseEntity<?> feedback(@RequestBody Map<String, Object> body) {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null) {
+			return json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.TENANT_IDENTITY_REQUIRED, "缺少租户/用户身份上下文，反馈不可跨身份读写"));
+		}
 		String messageId = stringOf(body.get("messageId"));
 		String sessionId = stringOf(body.get("sessionId"));
 		Object ratingRaw = body.get("rating");
@@ -2622,14 +2633,17 @@ public class AiController {
 			return json(HttpStatus.BAD_REQUEST,
 					errorBody(ErrorCodes.BAD_REQUEST, "messageId/sessionId 必填，rating ∈ 1/-1/0"));
 		}
+		long tenantId = identity.tenantId();
+		long userId = identity.userId();
 		if (rating == 0) {
-			AiFeedback existing = this.aiFeedbackRepository.findByMessageId(messageId);
+			AiFeedback existing = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(messageId, tenantId,
+					userId);
 			if (existing != null) {
 				this.aiFeedbackRepository.delete(existing);
 			}
 			return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", false, "cancelled", existing != null)));
 		}
-		AiFeedback entry = this.aiFeedbackRepository.findByMessageId(messageId);
+		AiFeedback entry = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(messageId, tenantId, userId);
 		boolean saved;
 		if (entry == null) {
 			entry = new AiFeedback();
@@ -2639,6 +2653,9 @@ public class AiController {
 		else {
 			saved = false;
 		}
+		entry.setTenantId(tenantId);
+		entry.setUserId(userId);
+		entry.setCreatedBy(String.valueOf(userId));
 		entry.setSessionId(sessionId);
 		entry.setRating(rating);
 		if (reason != null) {
@@ -2657,12 +2674,19 @@ public class AiController {
 
 	/**
 	 * GET /api/ai/feedback —— 设置页「AI 反馈」查看列表（时间/消息摘要/rating/reason，
-	 * 仅当前用户=单用户应用全表；上限 100 条，按更新时间倒序）。
+	 * <b>仅当前租户/用户</b>；上限 100 条，按更新时间倒序）。
+	 *
+	 * <p>无身份 fail-closed：返回错误信封（{@code TENANT_IDENTITY_REQUIRED}），<b>不</b>回落到"全表"。
 	 */
 	@GetMapping("/feedback")
 	public ApiResponse<List<Map<String, Object>>> feedbackList() {
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null) {
+			return ApiResponse.error(ErrorCodes.TENANT_IDENTITY_REQUIRED, "缺少租户/用户身份上下文，反馈不可跨身份读取");
+		}
 		List<Map<String, Object>> items = new ArrayList<>();
-		for (AiFeedback entry : this.aiFeedbackRepository.findTop100ByOrderByUpdatedAtDesc()) {
+		for (AiFeedback entry : this.aiFeedbackRepository
+			.findTop100ByTenantIdAndUserIdOrderByUpdatedAtDesc(identity.tenantId(), identity.userId())) {
 			Map<String, Object> item = new LinkedHashMap<>();
 			item.put("messageId", entry.getMessageId());
 			item.put("sessionId", entry.getSessionId());

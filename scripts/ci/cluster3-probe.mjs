@@ -4231,9 +4231,11 @@ const CANCELLED_BEFORE_CLAIM_TEXT = '本轮对话已被用户取消，该工具�
 const R1_REPLAY_OBSERVE_MS = 10000
 
 function cancelFlagKey(runId) {
-  // 取消标志是**裸前缀**键：产品 `CancellationRegistry` 直接用 `ai:cancel:<runId>`
-  // （`POST /api/ai/cancel/{runId}` 的响应体 `cancelKey` 即此形态）。
-  return `${CANCEL_KEY_PREFIX}${runId}`
+  // 取消标志是**裸前缀 + 身份段**键（租户任务 2 收尾组）：产品 `CancellationRegistry#cancelKey`
+  // = `TenantKeyScope.scoped(CANCEL_PREFIX, runId)` = `ai:cancel:<tenantId>:<userId>:<runId>`
+  // （`POST /api/ai/cancel/{runId}` 的响应体 `cancelKey` 即此形态；身份取探针统一请求头）。
+  // 仍不进 hash tag：它是单键命令/单键脚本用的 run 锚点键，与 `ai:beat:` / `ai:activity:` 同族。
+  return `${CANCEL_KEY_PREFIX}${AI_TENANT_ID}:${AI_USER_ID}:${runId}`
 }
 
 /**
@@ -5924,11 +5926,16 @@ function selfTestL150GridContract() {
     'private String settleIfCancelledBeforeClaim(',
     'CancelState.UNKNOWN'
   ])
-  // 夹具自身的键形态：认领表必须带 run 作用域 + 身份段，取消标志必须是裸前缀。
+  // 夹具自身的键形态：认领表必须带 run 作用域 + 身份段，取消标志必须带身份段且**不进 tag**。
   // 两者各有产品侧实证：`ai:claim:` 由 `runScopedKey`/`RunKeyScope.tag` 拼（本源码断言），
-  // `ai:cancel:` 见 `CancellationRegistry#keyFor` 与 /cancel 响应体 `cancelKey`（单键，不进 tag）。
+  // `ai:cancel:` 见 `CancellationRegistry#cancelKey`（`TenantKeyScope.scoped`，单键命令，不进 tag）。
   checkEq(executionClaimKey('l150-probe'), `ai:claim:{${AI_TENANT_ID}:${AI_USER_ID}:run:l150-probe}`, 'R-3 夹具的认领表键必须带身份 + run 作用域')
-  checkEq(cancelFlagKey('l150-probe'), 'ai:cancel:l150-probe', 'R-1 夹具的取消标志键必须是裸前缀')
+  checkEq(cancelFlagKey('l150-probe'), `ai:cancel:${AI_TENANT_ID}:${AI_USER_ID}:l150-probe`,
+    'R-1 夹具的取消标志键必须是"裸前缀 + 身份段"（与产品 TenantKeyScope 同一拼接口）')
+  // 产品侧键形实证：取消标志经 TenantKeyScope 拼身份段（无身份上下文才退回旧裸形）。
+  assertSourceContains('backend/src/main/java/com/example/configmgr/ai/run/CancellationRegistry.java', [
+    'TenantKeyScope.scoped(CANCEL_PREFIX, runId)'
+  ])
   const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
   // 先剔除本函数自身，避免"检查项里自带这些字符串"造成恒真。
   const start = source.indexOf('function selfTestL150GridContract')

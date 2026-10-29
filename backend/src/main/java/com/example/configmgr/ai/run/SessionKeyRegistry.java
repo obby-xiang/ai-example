@@ -58,9 +58,10 @@ import java.util.function.Function;
  * {@code ACQUIRE}（租约+计数器 —— 号与占用必须同序，评审 I-1）；{@code deleteRun} 的 13 键
  * {@code DEL} 也靠它回到"一条命令、原子生效"。
  * 取键一律走 {@link RunStore#runScopedKey(String, String)}（{@code RedisFrameStore} 的三族键同理）；</li>
- * <li><b>裸前缀</b>（{@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:}）：只进单键命令、
- * 不在 13 键里，无需同槽 —— 给它们加 tag 只牺牲分布，没有收益（{@code ai:activity} 的写是单键
- * Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。</li>
+ * <li><b>裸前缀 + 身份段</b>（{@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
+ * {@code ai:observed:}）：只进单键命令、不在 13 键里，无需同槽 —— 给它们加 tag 只牺牲分布，
+ * 没有收益（{@code ai:activity} 的写是单键 Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。
+ * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag。</li>
  * </ul>
  * <p><b>禁止项</b>：单键脚本（RENEW/VERIFY/RELEASE/滑动窗口/COMPARE_DELETE）与
  * {@code ai:rate:*} / {@code kb:cache:*} / {@code ai:cfg:ver} / {@code ai:session:*} <b>一律不加 tag</b>
@@ -155,8 +156,8 @@ public final class SessionKeyRegistry {
 		keys.add(new RunKey(LeaseService.EPOCH_PREFIX,
 				runId -> RunStore.runScopedKey(LeaseService.EPOCH_PREFIX, runId), List.of(Renewal.READ),
 				"取号计数器（per-run、与租约键同槽；与 fence 同面同寿）"));
-		keys.add(new RunKey(CancellationRegistry.CANCEL_PREFIX, runId -> CancellationRegistry.CANCEL_PREFIX + runId,
-				List.of(Renewal.READ), "取消标志（随会话共亡）"));
+		keys.add(new RunKey(CancellationRegistry.CANCEL_PREFIX, CancellationRegistry::cancelKey, List.of(Renewal.READ),
+				"取消标志（带身份段；随会话共亡）"));
 		// 3) 随写续期（只登记）
 		keys.add(new RunKey(RunStore.BEAT_PREFIX, runId -> RunStore.BEAT_PREFIX + runId, List.of(Renewal.WRITE), "心跳活动戳"));
 		keys.add(new RunKey(RunStore.ACTIVITY_PREFIX, runId -> RunStore.ACTIVITY_PREFIX + runId,

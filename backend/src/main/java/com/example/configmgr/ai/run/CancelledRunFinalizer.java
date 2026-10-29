@@ -206,7 +206,7 @@ public class CancelledRunFinalizer {
 	 *
 	 * <p><b>幂等且不改变取消语义</b>：未交棒过 / 已清理 / {@code runId=null} 都不报错；
 	 * 只清这两个进程内表，<b>不碰</b>租约（{@code LeaseService} 的 ended/epoch）、帧册、快照与
-	 * {@code ai:cancel:<runId>} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
+	 * {@code ai:cancel:<tenantId>:<userId>:<runId>} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
 	 *
 	 * <p><b>Error 路径也覆盖</b>：{@link #attempt} 在执行体抛 {@link Error} 时会先 {@code finish} 再
 	 * 上抛；本方法则是终态收尾方的兜底入口（终态写成功/失败后都可调用）。
@@ -276,7 +276,7 @@ public class CancelledRunFinalizer {
 		if (max <= 0 || attempt > max) {
 			this.inFlight.remove(runId);
 			this.attempts.remove(runId);
-			log.error("取消收尾在 {} 次交棒后仍未落定 runId={} cause={}（取消事实仍在 ai:cancel:<runId>；"
+			log.error("取消收尾在 {} 次交棒后仍未落定 runId={} cause={}（取消事实仍在 ai:cancel:<tenantId>:<userId>:<runId>；"
 					+ "下一次取消/续跑/启动扫描会重新触发）", max, runId, cause);
 			return;
 		}

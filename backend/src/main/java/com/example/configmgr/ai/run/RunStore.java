@@ -1805,7 +1805,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 池饱和回滚：删掉本轮<b>需要同生同死</b>的 13 个业务状态键（评审 Minor 1）。
 	 *
 	 * <p><b>不是"这一轮的全部键"</b>：{@code ai:beat:<runId>}（心跳戳）、
-	 * {@code ai:activity:<runId>}（业务活动锚点）与 {@code ai:cancel:<runId>}（取消标志）刻意不在其中
+	 * {@code ai:activity:<runId>}（业务活动锚点）与 {@code ai:cancel:<tenantId>:<userId>:<runId>}（取消标志）刻意不在其中
 	 * —— 前两者是观测/判据面（裸前缀、单键命令）、后者要活到驱动线程看见它，各自按 TTL 走；
 	 * {@code ai:lock:* }（taskId 维度）更不在，资源锁的寿命与 run 的生死无关。
 	 *
