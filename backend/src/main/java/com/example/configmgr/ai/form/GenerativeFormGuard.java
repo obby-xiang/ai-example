@@ -157,8 +157,9 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * <p>本批（2026-10-29 闭环批）新增两条：
 	 * <ul>
 	 * <li>{@code TASK_TYPE} 且任务类型已确定 ⇒ 拒绝并指回 {@code create_task}（类型不是缺口）；</li>
-	 * <li>{@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}（或之后）⇒ 拒绝：条件步已关闭，
-	 * 条件要么已设、要么按"未设筛选 = 全量"推进，再收一遍只会拖住流程。</li>
+	 * <li><b>{@code SET_CONDITIONS}</b>：<b>只有 {@code QUERY_COND} 允许</b>条件表单 ——
+	 * {@code SELECT_DEFS} 等前置步拒绝并指引先 {@code confirm_step} 推进；其它步骤（含 {@code EXPORT} 及之后）
+	 * 拒绝并指引按既有步骤链继续；步骤未知时按槽位规则兼容放行（未知 ≠ 关闭）。</li>
 	 * </ul>
 	 */
 	private Verdict inspectSlots(String purpose, TaskSlots slots, String step) {

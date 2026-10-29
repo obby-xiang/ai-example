@@ -30,7 +30,8 @@
 # 2026-10-27.8 → 2026-10-27.9（2026-10-29 闭环批：任务类型与筛选条件收集口径）：类型未知必须用
 # generative_form(purpose=TASK_TYPE) 的单个 enum 单选（EXPORT/IMPORT），不文字反问；类型已确定时零副作用
 # 拒绝并指回 create_task。条件只在 QUERY_COND 用一个非必填自由文本框（longText 可选）收集，留空即全量推进；
-# 条件已明确或已到 EXPORT 及之后不再收条件表单。描述与注解 @Tool 同批改，version 同步升。
+# 条件已明确或已到 EXPORT 及之后不再收条件表单（该口径已在 .10 收紧为只在 QUERY_COND，见下条）。
+# 描述与注解 @Tool 同批改，version 同步升。
 # 2026-10-27.9 → 2026-10-27.10（2026-10-29 返修：条件框只在 QUERY_COND 出现一次）：守卫收成
 # 「有明确步骤时只有 QUERY_COND 允许 SET_CONDITIONS」（SELECT_DEFS/EXPORT/DONE/导入链一律零副作用拒绝）；
 # 规则 30 / confirm_step / set_condition 的描述统一为「进入 QUERY_COND 给一次非必填自由文本框，留空直接推进，

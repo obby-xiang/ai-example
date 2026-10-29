@@ -16,13 +16,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>锁三面：
  * <ol>
  * <li>系统提示词：类型未知必须用表单（{@code purpose=TASK_TYPE}，单个 enum 单选）而不是文字反问；
- * 条件只在 {@code QUERY_COND} 用一个非必填自由文本框收集，留空即全量推进；{@code EXPORT} 及之后禁止条件表单。</li>
+ * 条件表单只有 {@code QUERY_COND} 允许（一个非必填自由文本框，进入该步给一次，留空即全量推进），
+ * {@code SELECT_DEFS} 先 {@code confirm_step}，其它步骤由宿主零副作用拒绝。</li>
  * <li>工具描述：注解与 YAML 同批改（YAML 是可选覆盖，写反了模型看到两套口径）。</li>
  * <li>版本：改描述必须发新 version（破 prompt 缓存）。</li>
  * </ol>
  *
- * <p><b>证红</b>：提示词删掉 TASK_TYPE 段 ⇒ 第 1 条红；删掉条件单框/留空/EXPORT 后禁止 ⇒ 第 2 条红；
- * 注解或 YAML 漏改 ⇒ 第 3 条红；version 不升 ⇒ 第 4 条红。
+ * <p><b>证红</b>：提示词删掉 TASK_TYPE 段 ⇒ 第 1 条红；删掉条件单框/留空/「只在 QUERY_COND」的步骤门 ⇒
+ * 条件契约两条红；注解或 YAML 漏改 ⇒ 第 3 条红；version 不升 ⇒ 第 4 条红。
  */
 class FlowTypeConditionPromptContractTest {
 
