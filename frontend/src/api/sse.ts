@@ -4,7 +4,9 @@
  * 两个通道形态不同，必须分开实现：
  * 1. `POST /api/ai/chat`：**POST + text/event-stream**，EventSource 只支持 GET，
  *    因此这里用 fetch + ReadableStream 自解 SSE 帧；
- * 2. `GET /api/ai/events/{runId}`：**GET**，是 ADR-5 的 reattach 通道，用 EventSource。
+ * 2. `GET /api/ai/events/{runId}`：**GET**，是 ADR-5 的 reattach 通道。两条通道都必须带
+ *    租户/用户身份头（Task 4），因此都走裸 `fetch` + `ReadableStream` 自解 SSE 帧 ——
+ *    原生 `EventSource` 不能设请求头，无法满足身份契约。
  *
  * 完成帧校验（规格 §3）：流正常收尾前必须出现过 `done` 或 `error` 终帧；
  * 缺终帧一律判**断流**，先尝试 reattach（有 runId 时），仍失败则按 ADR-6 提示。
@@ -15,6 +17,7 @@
 
 import { ApiError, FRONTEND_ERROR_CODES } from './http'
 import { acceptLanguage } from '@/locales'
+import { identityHeaders } from '@/utils/ai-identity'
 import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
 import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
@@ -576,7 +579,7 @@ export async function probeReattach(runId: string): Promise<ReattachProbe> {
   try {
     const response = await fetch(SSE_PATHS.eventsProbe(runId), {
       method: 'GET',
-      headers: { Accept: 'application/json', 'Accept-Language': acceptLanguage() },
+      headers: { Accept: 'application/json', 'Accept-Language': acceptLanguage(), ...identityHeaders() },
       cache: 'no-store',
       signal: controller.signal
     })
@@ -616,6 +619,115 @@ export async function probeReattach(runId: string): Promise<ReattachProbe> {
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 带身份头的 GET 流（Task 4）：reattach 通道不能用原生 `EventSource` —— 它**不能设请求头**，
+ * 新后端按 `X-Tenant-Id` / `X-User-Id` 建身份上下文（缺失即拒绝），故这里改用 `fetch` +
+ * `ReadableStream` 自解 SSE 帧，语义与既有 EventSource 口径一一对应：
+ * `onopen` = 响应 2xx 且拿到流；`onmessage` = 一个 data 载荷；`onerror` = 连接失败/干净 EOF。
+ *
+ * <p>`close()` 是"本端主动收流"（看门狗/退避/终帧）：置 closed 后 abort，且**不再**回调
+ * `onFailure` —— 否则主动收流会被误报成断流，退避路径会重复排期。
+ */
+interface LiveStream {
+  close(): void
+}
+
+function openLiveStream(
+  path: string,
+  handlers: {
+    onOpen: () => void
+    onData: (payload: string) => void
+    onFailure: (reason: string) => void
+  }
+): LiveStream {
+  const controller = new AbortController()
+  let closed = false
+  const close = (): void => {
+    if (closed) {
+      return
+    }
+    closed = true
+    try {
+      controller.abort()
+    } catch {
+      // 已中止/不可中止：忽略
+    }
+  }
+  void (async (): Promise<void> => {
+    try {
+      const response = await fetch(path, {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          'Accept-Language': acceptLanguage(),
+          ...identityHeaders()
+        },
+        cache: 'no-store',
+        signal: controller.signal
+      })
+      if (closed) {
+        try {
+          await response.body?.cancel()
+        } catch {
+          // 已关闭：忽略
+        }
+        return
+      }
+      if (!response.ok) {
+        handlers.onFailure(`重挂连接失败（HTTP ${response.status}）`)
+        return
+      }
+      handlers.onOpen()
+      if (!response.body) {
+        handlers.onFailure('响应无流式主体（浏览器不支持 ReadableStream）')
+        return
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      const parser = new SseChunkParser()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (closed) {
+            return
+          }
+          if (done) {
+            break
+          }
+          const text = decoder.decode(value, { stream: true })
+          for (const payload of parser.push(text)) {
+            handlers.onData(payload)
+          }
+        }
+        const tail = decoder.decode()
+        if (tail) {
+          for (const payload of parser.push(tail)) {
+            handlers.onData(payload)
+          }
+        }
+        for (const payload of parser.flush()) {
+          handlers.onData(payload)
+        }
+        if (!closed) {
+          handlers.onFailure('重挂连接已结束')
+        }
+      } finally {
+        try {
+          reader.releaseLock()
+        } catch {
+          // 已在关闭的流上释放：忽略
+        }
+      }
+    } catch (error) {
+      if (closed) {
+        return
+      }
+      handlers.onFailure(error instanceof Error ? error.message : '重挂连接中断')
+    }
+  })()
+  return { close }
 }
 
 /**
@@ -661,7 +773,8 @@ export async function streamChat(
         headers: {
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
-          'Accept-Language': acceptLanguage()
+          'Accept-Language': acceptLanguage(),
+          ...identityHeaders()
         },
         body: JSON.stringify(request),
         signal: controller.signal
@@ -783,7 +896,7 @@ export async function reattach(
   const idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
 
   return await new Promise<StreamCloseInfo>((resolve) => {
-    let source: EventSource | null = null
+    let source: LiveStream | null = null
     let idleTimer: ReturnType<typeof setTimeout> | null = null
     let connectTimer: ReturnType<typeof setTimeout> | null = null
     /** 退避计时器（M08：由 `scheduleReconnect` 记录，`settle` 必须清掉，否则探测命中 202/404 后仍留残留定时器）。 */
@@ -936,73 +1049,87 @@ export async function reattach(
       const since = state.lastSeq ?? options.lastSeq
       generation += 1
       probedThisConnection = false
-      source = new EventSource(SSE_PATHS.events(runId, since ?? undefined))
       // R-03：看门狗必须在 onopen 之前武装（构造是同步的，首个事件只会在此后的任务里派发，
       // 故此处与构造之间没有可丢失事件的窗口）
       startConnect()
-      source.onopen = () => {
-        handlers.onOpen?.()
-        startIdle()
-      }
-      source.onmessage = (event: MessageEvent<string>) => {
-        startIdle()
-        const frame = parseSseFrame(event.data)
-        if (!frame) {
-          return
-        }
-        consumeFrame(frame, state, handlers)
-        if (state.terminal) {
-          settle(true)
-        }
-      }
-      source.onerror = () => {
-        if (settled) {
-          return
-        }
-        if (state.terminal) {
-          // 已终态轮次：后端回放完即 complete()，浏览器把正常关流也报成 error
-          settle(true)
-          return
-        }
-        source?.close()
-        source = null
-        // 批次3：EventSource 读不到非 200 的响应体 —— 用一次裸 fetch 探测 202"准备中"。
-        // 命中 202 ⇒ 不当作断流、也不自动轮询：交给调用方显示可重试的准备中阶段。
-        //
-        // M08：探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
-        // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
-        // 都不影响 1/2/4/8s 时间线，③ 结果只在**本世代、本尝试**下才可应用（I1）——
-        // 否则一条慢探测会关掉刚建立的新连接，或把上一代的"准备中"误判到下一代头上。
-        if (!connectionEstablished && !probedThisConnection) {
-          probedThisConnection = true
-          scheduleReconnect('重挂连接中断')
+      source = openLiveStream(SSE_PATHS.events(runId, since ?? undefined), {
+        onOpen: () => {
           if (settled) {
-            // 重挂额度已耗尽（或已收尾）：不再发探测 —— 一个已收尾的连接不该留下在途请求与计时器
             return
           }
-          const probeGeneration = generation
-          const probeAttempt = attempts
-          void probeReattach(runId).then((probe) => {
-            if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
-              // 已收尾 / 世代已换代 / 尝试已推进：本探测结果过期（不得据它收尾或改判）
-              return
-            }
-            if (probe.preparing) {
-              handlers.onPreparing?.(probe.preparing)
-              settle(false, '准备中（快照未建，可重试）')
-              return
-            }
-            if (probe.status === 404) {
-              // 真不存在：交给调用方封口镜像里的在途轮（不显示"轮不存在"技术文案）
-              handlers.onUnavailable?.()
-              settle(false)
-            }
-            // 其余（200 就绪 / 5xx / 网络失败）：退避已排期，按时重连即可
-          })
+          handlers.onOpen?.()
+          startIdle()
+        },
+        onData: (payload) => {
+          if (settled) {
+            return
+          }
+          startIdle()
+          const frame = parseSseFrame(payload)
+          if (!frame) {
+            return
+          }
+          consumeFrame(frame, state, handlers)
+          if (state.terminal) {
+            settle(true)
+          }
+        },
+        onFailure: onConnectionLost
+      })
+    }
+
+    /**
+     * 连接失败/干净收尾（原 `EventSource.onerror` 的等价物）。
+     *
+     * <p>Task 4 起 reattach 走 `fetch` + `ReadableStream`（原生 `EventSource` 不能设身份头），
+     * 失败事件不再带 `event`/`readyState`，其余判定原样保留：终态轮次直接收尾；否则先收流，
+     * 未确认连接时并行做一次 `?probe=1` 探测（命中 202/404 就按"准备中/不存在"收口），
+     * 退避照旧先行。
+     */
+    function onConnectionLost(reason: string): void {
+      if (settled) {
+        return
+      }
+      if (state.terminal) {
+        // 已终态轮次：后端回放完即关流，干净 EOF 也是正常收尾
+        settle(true)
+        return
+      }
+      source?.close()
+      source = null
+      // 探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
+      // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
+      // 都不影响 1/2/4/8s 时间线，③ 结果只在**本世代、本尝试**下才可应用（I1）——
+      // 否则一条慢探测会关掉刚建立的新连接，或把上一代的"准备中"误判到下一代头上。
+      if (!connectionEstablished && !probedThisConnection) {
+        probedThisConnection = true
+        scheduleReconnect(reason)
+        if (settled) {
+          // 重挂额度已耗尽（或已收尾）：不再发探测 —— 一个已收尾的连接不该留下在途请求与计时器
           return
         }
-        scheduleReconnect('重挂连接中断')
+        const probeGeneration = generation
+        const probeAttempt = attempts
+        void probeReattach(runId).then((probe) => {
+          if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
+            // 已收尾 / 世代已换代 / 尝试已推进：本探测结果过期（不得据它收尾或改判）
+            return
+          }
+          if (probe.preparing) {
+            handlers.onPreparing?.(probe.preparing)
+            settle(false, '准备中（快照未建，可重试）')
+            return
+          }
+          if (probe.status === 404) {
+            // 真不存在：交给调用方封口镜像里的在途轮（不显示"轮不存在"技术文案）
+            handlers.onUnavailable?.()
+            settle(false)
+          }
+          // 其余（200 就绪 / 5xx / 网络失败）：退避已排期，按时重连即可
+        })
+        return
       }
+      scheduleReconnect(reason)
     }
 
     if (options.signal?.aborted) {

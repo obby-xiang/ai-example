@@ -5,11 +5,13 @@
  * http.ts 的 post/get，由拦截器原样放行。
  */
 
-import { ApiError, del, get, post } from './http'
+import { ApiError, del, get, http, post } from './http'
 import { reattach, streamChat } from './sse'
 import type { SseFrameHandlers, SseStreamOptions } from './sse'
 import { getActivePinia } from 'pinia'
 import { useWorkspaceStore } from '@/stores/workspace'
+import type { TenantUsersEntry } from '@/utils/ai-identity'
+import { normalizeSessionId } from '@/utils/ai-identity'
 import type {
   AiCancelResult,
   AiChatContext,
@@ -86,6 +88,60 @@ function currentWorkspaceContext(): AiChatContext | undefined {
     return useWorkspaceStore().buildContext()
   } catch {
     return undefined
+  }
+}
+
+/** POST /api/ai/session 的响应（契约：`{sessionId:number(long)}`）。 */
+export interface AiSessionIssue {
+  sessionId: number
+}
+
+/**
+ * POST /api/ai/session（**唯一**的会话发号入口）。
+ *
+ * <p>前端不再自己造 sessionId：切换身份、复制页签、410 恢复、刷新后无会话时统一走这里。
+ *
+ * <p><b>为什么按文本取数字</b>：后端按 `时间戳(ms) × 10^6 + …` 发号，量级约 1.7×10^18，
+ * **超出 JS `Number.MAX_SAFE_INTEGER`（9×10^15）** —— 先 `JSON.parse` 成 number 会静默丢低位，
+ * 前端就会拿一个"看起来对、实际错"的号去请求。这里让 axios 保留原始文本，用正则取出十进制
+ * 数字串（JSON 文本里的数字本身不丢精度），全程按字符串存储/发送；后端 Jackson 把十进制字符串
+ * 反序列化为 long 是标准行为。
+ */
+export async function createSession(): Promise<string> {
+  const response = await http.post('/ai/session', undefined, {
+    responseType: 'text',
+    transformResponse: [(data: unknown) => data]
+  })
+  const sessionId = extractSessionId(response.data)
+  if (!sessionId) {
+    throw new Error('会话发号失败：响应缺少合法的 sessionId')
+  }
+  return sessionId
+}
+
+/** 从原始响应文本（或已解析对象）里取十进制会话号；非法一律 ''。 */
+function extractSessionId(body: unknown): string {
+  if (typeof body === 'string') {
+    const match = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(body)
+    return match ? match[1] : ''
+  }
+  return normalizeSessionId((body as { sessionId?: unknown } | null)?.sessionId)
+}
+
+/**
+ * GET /api/ai/tenant-users（预置租户与用户目录；不参与租户隔离，故不带身份头）。
+ *
+ * <p>兼容：后端并发实现里的路由也可能是 `/api/ai/tenants`（同一份目录、同一个 DTO）。
+ * 契约路径 404 时回落该别名，避免前后端并行期因路径拼写差异整块身份功能不可用。
+ */
+export async function tenantUsers(): Promise<TenantUsersEntry[]> {
+  try {
+    return await get<TenantUsersEntry[]>('/ai/tenant-users')
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return await get<TenantUsersEntry[]>('/ai/tenants')
+    }
+    throw error
   }
 }
 
@@ -263,6 +319,8 @@ export function runsCurrent(sessionId: string): Promise<AiRunCurrent> {
 }
 
 export const aiApi = {
+  createSession,
+  tenantUsers,
   chat,
   reattachRun,
   confirm,

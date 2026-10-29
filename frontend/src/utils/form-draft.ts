@@ -15,11 +15,18 @@
  * "打开表单看到上次的脏值"的困惑，也扩大了敏感输入在本机的驻留面。
  */
 
-export const FORM_DRAFT_PREFIX = 'cm.ai.form.draft.'
+import { AI_FORM_DRAFT_PREFIX, formDraftPrefix, formDraftStorageKey } from '@/utils/ai-identity'
 
-/** 草稿镜像键（按 toolCallId 隔离；同会话多张表单互不覆盖）。 */
+export const FORM_DRAFT_PREFIX = AI_FORM_DRAFT_PREFIX
+
+/**
+ * 草稿镜像键（按 toolCallId 隔离；同会话多张表单互不覆盖）。
+ *
+ * <p>Task 4：键随**当前身份**加 `tenantId:userId` 指纹（`cm.ai.form.draft.<t>:<u>.<toolCallId>`），
+ * 不同身份既看不到也清不掉彼此的草稿；尚无身份时保持旧键形（未接租户目录的部署/单测）。
+ */
 export function formDraftKey(toolCallId: string): string {
-  return `${FORM_DRAFT_PREFIX}${toolCallId}`
+  return formDraftStorageKey(toolCallId)
 }
 
 function storage(): Storage | null {
@@ -92,8 +99,8 @@ export function clearFormDraft(toolCallId: string): void {
  *
  * <p>为什么需要：`clientCleanup.draftToolCallIds` 只枚举服务端还认识的条目，已决卡 / 换会话后
  * 不再被引用的草稿键会长期留在 sessionStorage（无人可见，但不该留）。这里以
- * {@link FORM_DRAFT_PREFIX} 为唯一扫描面，**绝不** `sessionStorage.clear()` ——
- * 同一页签里还有业务键、镜像键与其它页签状态。
+ * {@link FORM_DRAFT_PREFIX} **+ 当前身份前缀**为唯一扫描面（不同身份的草稿不互相清理），
+ * **绝不** `sessionStorage.clear()` —— 同一页签里还有业务键、镜像键与其它页签状态。
  *
  * @param present 在场白名单（活动表单 / 排队表单 / 仍待动作的工具段引用的 toolCallId）
  * @returns 实际删除的键数（测试与诊断用）
@@ -103,15 +110,16 @@ export function pruneFormDrafts(present: Iterable<string>): number {
   if (!target) {
     return 0
   }
+  const prefix = formDraftPrefix()
   const keep = new Set(present)
   const doomed: string[] = []
   try {
     for (let i = 0; i < target.length; i += 1) {
       const key = target.key(i)
-      if (!key || !key.startsWith(FORM_DRAFT_PREFIX)) {
+      if (!key || !key.startsWith(prefix)) {
         continue
       }
-      const toolCallId = key.slice(FORM_DRAFT_PREFIX.length)
+      const toolCallId = key.slice(prefix.length)
       if (!keep.has(toolCallId)) {
         doomed.push(key)
       }

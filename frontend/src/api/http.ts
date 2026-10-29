@@ -12,6 +12,7 @@ import type { ApiErrorBody, ApiResponse } from '@/types/api'
 import { acceptLanguage } from '@/locales'
 import { translate } from '@/composables/useCopy'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
+import { identityHeaders, isAiConversationPath } from '@/utils/ai-identity'
 
 /** 前端侧补充的错误码（后端未定义，仅用于网络层异常）。 */
 export const FRONTEND_ERROR_CODES = {
@@ -140,9 +141,19 @@ export const http: AxiosInstance = axios.create({
  *
  * 后端 `AcceptHeaderLocaleResolver` 默认 locale = zh-CN，**不带该头的调用方零变化**
  * （E2E / curl / 桩的既有行为不变）；带 `en-US` 时才取英文 messages。
+ *
+ * <p>Task 4：AI **对话域**请求统一带 `X-Tenant-Id` / `X-User-Id`（来源 = 页签身份）。
+ * 判定与排除口径见 {@link isAiConversationPath}：模型配置 / provider / KB / 审计 / 健康探针 /
+ * 租户目录本身不纳入；无身份（尚未选身份）时不加头，由后端按缺少身份拒绝（fail-closed）。
  */
 http.interceptors.request.use((config) => {
   config.headers.set('Accept-Language', acceptLanguage())
+  const url = typeof config.url === 'string' ? config.url : ''
+  if (url && isAiConversationPath(url)) {
+    for (const [name, value] of Object.entries(identityHeaders())) {
+      config.headers.set(name, value)
+    }
+  }
   return config
 })
 

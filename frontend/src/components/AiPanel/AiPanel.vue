@@ -43,6 +43,32 @@
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
+        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。切换即由后端发新会话并清屏；
+             旧会话与镜像保留在旧身份下，不删除、不混用。 -->
+        <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
+          <select
+            data-testid="tenant-select"
+            :aria-label="t('ai.panel.identity')"
+            :value="ai.identity?.tenantId ?? ''"
+            class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
+            @change="onTenantChange"
+          >
+            <option v-for="entry in ai.tenantDirectory" :key="entry.tenantId" :value="entry.tenantId">
+              {{ entry.tenantName ?? t('ai.panel.tenant', { id: entry.tenantId }) }}
+            </option>
+          </select>
+          <select
+            data-testid="user-select"
+            :aria-label="t('ai.panel.identity')"
+            :value="ai.identity?.userId ?? ''"
+            class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
+            @change="onUserChange"
+          >
+            <option v-for="user in currentTenantUsers" :key="user.userId" :value="user.userId">
+              {{ user.displayName }}
+            </option>
+          </select>
+        </span>
         <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
         <el-button link size="small" @click="probe">{{ t('ai.panel.recheck') }}</el-button>
       </div>
@@ -52,6 +78,9 @@
           <span data-testid="diagnostics-session">{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
           <span> · </span>
           <span data-testid="diagnostics-data-version">{{ t('ai.panel.dataVersion', { version: workspace.dataVersion }) }}</span>
+        </div>
+        <div v-if="ai.directoryError" class="text-[11px] text-[#8b949e]" data-testid="directory-error">
+          {{ t('ai.notice.directoryFailed') }}
         </div>
       </details>
       <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate" data-testid="context-synced">
@@ -5326,6 +5355,34 @@ function onContentResized(): void {
  */
 const currentModelLabel = computed(() => ai.health?.model || t('ai.panel.modelFallback'))
 
+/** Task 4：当前租户的用户列表（少量预置；切租户后用户下拉随之换组）。 */
+const currentTenantUsers = computed(() => {
+  const tenantId = ai.identity?.tenantId
+  if (tenantId === undefined) {
+    return []
+  }
+  return ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)?.users ?? []
+})
+
+/** 切租户：落到该租户第一项用户（目录第一项口径不跨租户沿用旧用户）。 */
+function onTenantChange(event: Event): void {
+  const tenantId = Number((event.target as HTMLSelectElement).value)
+  const tenant = ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)
+  const user = tenant?.users[0]
+  if (tenant && user) {
+    void ai.switchIdentity(tenant.tenantId, user.userId)
+  }
+}
+
+/** 切用户：同租户内换人；跨身份一律换新会话（store 侧负责清屏与后端取号）。 */
+function onUserChange(event: Event): void {
+  const tenantId = ai.identity?.tenantId
+  const userId = Number((event.target as HTMLSelectElement).value)
+  if (tenantId !== undefined && Number.isInteger(userId)) {
+    void ai.switchIdentity(tenantId, userId)
+  }
+}
+
 onMounted(async () => {
   // 批G · R2：订阅必须在读历史**之前**装（刷新后首帧要落盘），但启动期 `messages=[]` 不是
   // "确实为空"而是"还没读" —— 下面 `ensureTabOwnership()` 的 state 变更会触发一次即时写盘，
@@ -5335,6 +5392,9 @@ onMounted(async () => {
   ai.startMirror()
   ai.startWorkspaceSync()
   void ai.probeHealth()
+  // Task 4：身份目录先于所有权判定/历史恢复 —— 会话号属于身份，复制页签的"换新会话"也要在
+  // 已定身份之后发号。旧后端没有该端点时不改变任何行为（保持无身份的单用户口径）。
+  await ai.loadTenantDirectory()
   // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，
   // 不能把原页签的历史/挂起卡读进复制页签里。
   // 返回 null = 环境无 Web Locks（判定按恢复同步收口）⇒ **不额外 await**，onMounted 既有
