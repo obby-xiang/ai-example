@@ -2408,12 +2408,15 @@ export const useAiStore = defineStore('ai', {
      * `degradeReason` 给（`ai.panel.degradeUnknown`）。`healthError` 是**诊断字段**（探针失败的
      * 异常原文，可能含 `AI_API_KEY` / provider / KEK 等机制词），不进任何用户文案 —— 它的出口只有
      * DEV 日志与"探测失败"的固定提示。
+     *
+     * <p>R5：用 `||` 而不是 `??` —— 后端 `message: ''`（空串）时 `??` 会把它当有效值返回，降级条
+     * 就成了一条空白栏；空串/undefined 都回落到面板的固定兜底。
      */
     unavailableReason(state): string | null {
       if (state.health?.available) {
         return null
       }
-      return state.health?.message ?? null
+      return state.health?.message || null
     },
     /** 通知槽的渲染文本（i18n L-69）：有 code 就按**当前语言**重译，否则回落裸串。
      *  `notice === null` 一律视为空槽（外部直接置 null / 既有清空写法不得被旧 code 复活）。 */

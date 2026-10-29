@@ -518,3 +518,20 @@ describe('R4 停止态不恢复挂起卡 + 探针原文零出口', { timeout: 20
     wrapper.unmount()
   })
 })
+
+describe('R5 降级原因为空串时回落固定兜底', { timeout: 20_000 }, () => {
+  it('R5 原始：health.message 为空串 ⇒ 降级条显示 ai.panel.degradeUnknown（不是空白）', async () => {
+    api.health.mockResolvedValue({ available: false, code: 'AI_UNAVAILABLE', message: '' })
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+
+    expect(store.health?.message).toBe('')
+    expect(store.unavailableReason).toBeNull()
+
+    const banner = wrapper.find('[data-testid="alert-degraded"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('未检测到 AI 可用性，请点击「重新检测」。')
+    expect(banner.text().trim().length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+})
