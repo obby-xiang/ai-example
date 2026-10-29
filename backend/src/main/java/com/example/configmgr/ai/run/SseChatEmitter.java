@@ -7,6 +7,9 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultUserText;
@@ -225,6 +228,18 @@ public class SseChatEmitter {
 
 	/** T3-1：本写出器的投递执行器。生产 = 共享有界投递池；三参构造（测试/非 Spring）= 同步直执。 */
 	private final Executor deliveryExecutor;
+
+	/**
+	 * 本轮的投递身份（投递池线程没有请求身份）。
+	 *
+	 * <p>构造线程通常是请求/重挂线程，已有身份；跨实例唤醒创建的写出器没有 —— 此时按
+	 * {@code ai:run:<runId>} 快照懒解析一次（记录身份是唯一权威来源）。解析不到就保持 {@code null}，
+	 * 投递照常（帧面不依赖身份），不伪造默认租户。
+	 */
+	private volatile TenantUser deliveryIdentity;
+
+	/** 快照身份只探测一次（首轮可能在快照建立前就有帧，那一路由构造线程的身份兜底）。 */
+	private final AtomicBoolean identityProbed = new AtomicBoolean();
 
 	/**
 	 * 包②：单帧写出的<b>超时预算</b>（{@link SseWriteBudget}）。
@@ -505,6 +520,8 @@ public class SseChatEmitter {
 		}
 		this.maxFrameBytes = maxFrameBytes;
 		this.writeBudget = writeBudget != null ? writeBudget : SseWriteBudget.direct();
+		// 构造线程（请求/重挂）通常已有本轮身份；跨实例唤醒线程没有，投递时再按快照解析。
+		this.deliveryIdentity = RequestContextUtils.currentOrNull();
 		this.assistantMessageId = "assistant-" + runId;
 	}
 
@@ -2203,6 +2220,14 @@ public class SseChatEmitter {
 		if (!this.runId.equals(runId)) {
 			return;
 		}
+		// 唤醒回调跑在 Redis 订阅线程上，没有请求身份：按本写出器的本轮身份建立作用域
+		// （补帧读归档/入队与出帧同一身份口径）。
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+			onWakeScoped(upperBoundSeq);
+		}
+	}
+
+	private void onWakeScoped(long upperBoundSeq) {
 		try {
 			synchronized (this.emitLock) {
 				if (this.subscribers.isEmpty() || this.terminating.get()) {
@@ -2327,6 +2352,33 @@ public class SseChatEmitter {
 	}
 
 	/**
+	 * 本轮的投递身份：构造时已抓到就直接用；否则按快照懒解析一次（跨实例唤醒创建的写出器）。
+	 *
+	 * <p>解析失败（快照还没建 / Redis 抖动）不改变投递行为：返回 {@code null} 即"没有身份可恢复"，
+	 * 绝不回落到默认租户。
+	 */
+	private TenantUser deliveryIdentity() {
+		TenantUser known = this.deliveryIdentity;
+		if (known != null) {
+			return known;
+		}
+		if (this.identityProbed.compareAndSet(false, true) && this.store != null) {
+			try {
+				RunSnapshot snapshot = this.store.get(this.runId);
+				if (snapshot != null && RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())) {
+					known = new TenantUser(snapshot.getTenantId(), snapshot.getUserId());
+					this.deliveryIdentity = known;
+				}
+			}
+			catch (RuntimeException ex) {
+				log.debug("SSE 投递身份读取失败（按无身份投递，不伪造默认租户）runId={}：{}", this.runId,
+						ex.getMessage());
+			}
+		}
+		return known != null ? known : RequestContextUtils.currentOrNull();
+	}
+
+	/**
 	 * 提交 drain 任务（R3：池拒绝 = 摘除触发本次提交的订阅者）。
 	 */
 	private void submitDrain(Subscription sub) {
@@ -2335,7 +2387,10 @@ public class SseChatEmitter {
 			// 并兜底绑本轮的 runId（跨实例唤醒线程上没有锚点）
 			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
 				AiTrace.bind(this.runId, null);
-				drain(sub);
+				// 身份链路：投递池线程同样没有请求身份 —— 按本写出器已解析的本轮身份建立作用域。
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+					drain(sub);
+				}
 			}));
 		}
 		catch (RejectedExecutionException ex) {
@@ -2494,7 +2549,10 @@ public class SseChatEmitter {
 		SseWriteBudget.Result result = this.writeBudget.write(() -> {
 			started.set(true);
 			try {
-				sub.emitter.send(payload);
+				// 写出跑了弹性写出池线程（不是投递线程）：同一份本轮身份再建立一次作用域。
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+					sub.emitter.send(payload);
+				}
 			}
 			finally {
 				sub.writeInFlight.set(false);

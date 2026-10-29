@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.exec;
 
+import com.alibaba.ttl.threadpool.TtlExecutors;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiMdcTaskDecorator;
 import com.example.configmgr.ai.run.StreamWatchdog;
@@ -66,15 +67,22 @@ public class AiExecutorConfig {
 	 * 单条<b>平台</b>守护线程（DC-12 禁虚拟线程）：节拍体只做常数次原子读与一次 Redis GET
 	 * （仅在未命中加速态时），不阻塞、不发起上游请求，因此不会与挂起池争线程。
 	 * 轮与轮之间共用同一个调度器（任务按 runId 命名，便于日志定位）。
+	 *
+	 * <p>
+	 * <b>身份传播</b>：与两个 {@code ThreadPoolTaskExecutor} 同一纪律 —— 提交时刻抓 TTL 快照
+	 * （含租户/用户身份），每次节拍执行时回放。看门狗与保活自身还会按<b>建立时的本轮身份</b>
+	 * 再开一次作用域（{@code RunIdentityScope}），两层都成立时才落到同一个身份上。
 	 */
 	@Bean(name = "aiStreamWatchdog", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiStreamWatchdog() {
 		AtomicInteger counter = new AtomicInteger();
-		return Executors.newScheduledThreadPool(2, runnable -> {
+		ScheduledExecutorService raw = Executors.newScheduledThreadPool(2, runnable -> {
 			Thread thread = new Thread(runnable, "ai-stream-watchdog-" + counter.incrementAndGet());
 			thread.setDaemon(true);
 			return thread;
 		});
+		// TtlExecutors 包装：调度器本身不做 MDC/身份传播，统一装饰补齐
+		return TtlExecutors.getTtlScheduledExecutorService(raw);
 	}
 
 	/**

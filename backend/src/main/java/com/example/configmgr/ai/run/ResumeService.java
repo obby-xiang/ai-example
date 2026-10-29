@@ -16,6 +16,7 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
@@ -986,6 +987,7 @@ public class ResumeService {
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
 		}
 		boolean handedOff = false;
+		RunIdentityScope.Scope identityScope = null;
 		java.util.concurrent.atomic.AtomicBoolean gateHeld = new java.util.concurrent.atomic.AtomicBoolean();
 		String gateSessionId = null;
 		String gateToken = UUID.randomUUID().toString();
@@ -995,6 +997,8 @@ public class ResumeService {
 				return new ResumeResult(Outcome.NOT_FOUND, Map.of("runId", runId, "resumed", false, "retried", false,
 						"reason", "UNKNOWN_RUN", "instanceId", this.store.instanceId()));
 			}
+			// 仅模型步重跑同样是恢复型入口：身份只从本轮记录恢复。
+			identityScope = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId());
 			String sessionId = snapshot.getSessionId();
 			AiTrace.bind(runId, sessionId);
 			AiTrace.markResumeReason(RESUME_MANUAL);
@@ -1117,7 +1121,7 @@ public class ResumeService {
 			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
 			String sessionForTask = sessionId;
 			try {
-				this.suspendExecutor.execute(() -> {
+				this.suspendExecutor.execute(() -> withRunIdentity(snapshot, () -> {
 					if (replyLocale == null) {
 						LocaleContextHolder.resetLocaleContext();
 					}
@@ -1154,7 +1158,7 @@ public class ResumeService {
 							gateHeld.set(false);
 						}
 					}
-				});
+				}));
 				handedOff = true;
 			}
 			catch (RejectedExecutionException ex) {
@@ -1179,6 +1183,9 @@ public class ResumeService {
 				this.sessionGate.release(gateSessionId, runId, gateToken);
 			}
 			AiTrace.clear();
+			if (identityScope != null) {
+				identityScope.close();
+			}
 		}
 	}
 
@@ -1450,6 +1457,9 @@ public class ResumeService {
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
 		}
 		boolean handedOff = false;
+		// 恢复型入口的身份作用域：快照读出来之后建立、本方法返回前关闭（同一线程）。
+		// 启动/运行期扫描线程没有请求身份，续跑内部的一切数据操作都必须落在<b>这一轮的身份</b>下。
+		RunIdentityScope.Scope identityScope = null;
 		// 会话门（park 批）：恢复执行必须重新拿回同 sessionId 的单值门（park 时首轮任务已释放）。
 		// 用 AtomicBoolean 记录"本次是否持有"，外层 finally 统一释放（task 内也释放一次，幂等）。
 		java.util.concurrent.atomic.AtomicBoolean gateHeld = new java.util.concurrent.atomic.AtomicBoolean();
@@ -1464,6 +1474,8 @@ public class ResumeService {
 						Map.of("runId", runId, "resumed", false, "reason", "UNKNOWN_RUN", "instanceId",
 								this.store.instanceId()));
 			}
+			// 身份只从<b>这一轮的记录</b>恢复（不读当前线程、不扫描租户列表、不回落到默认租户）。
+			identityScope = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId());
 			String sessionId = snapshot.getSessionId();
 			// 日志链路批：续跑可能落在 ResumeService 自己的调用线程上（启动扫描 / 死卡兜底触发池），
 			// 入口先装锚点；真正的驱动线程由 driveResumed 再绑一次。
@@ -1959,7 +1971,7 @@ public class ResumeService {
 			// 交棒上下文 = 刷新后的那一份（上面的 lambda 捕获的是本 final 副本）
 			final AiContext handoffContext = nextHopContext;
 			try {
-				this.suspendExecutor.execute(() -> {
+				this.suspendExecutor.execute(() -> withRunIdentity(snapshot, () -> {
 					// I-5 / 4B：locale 不能靠线程池继承（工作线程没有请求上下文）。
 					// HTTP 入口在提交前把 locale 传进来；这里 set，finally 一律 reset（池线程复用）。
 					if (replyLocale == null) {
@@ -2006,7 +2018,7 @@ public class ResumeService {
 							gateHeld.set(false);
 						}
 					}
-				});
+				}));
 				handedOff = true;
 			}
 			catch (RejectedExecutionException ex) {
@@ -2038,6 +2050,11 @@ public class ResumeService {
 			}
 			// 驱动线程（挂起池）在 driveResumed 入口自己绑锚点 —— 本线程到此结束，一律摘掉
 			AiTrace.clear();
+			// 身份作用域最后关闭：上面的租约/会话门清理也要在"这一轮的身份"下完成；
+			// 无旧值时清空，池化线程不会把身份带给下一位调用者。
+			if (identityScope != null) {
+				identityScope.close();
+			}
 		}
 	}
 
@@ -2538,6 +2555,7 @@ public class ResumeService {
 			return CancelFinalize.IN_PROGRESS;
 		}
 		boolean gateHeld = false;
+		RunIdentityScope.Scope identityScope = null;
 		String gateSessionId = null;
 		// 一次性 token：与续跑同纪律（首轮那条迟到 finally 的 token=runId 不会误删本持有者）。
 		String gateToken = UUID.randomUUID().toString();
@@ -2549,6 +2567,8 @@ public class ResumeService {
 			if (snapshot == null) {
 				return CancelFinalize.NO_RUN;
 			}
+			// 取消收尾由独立执行体（触发池/定时重试线程）接管：身份只从本轮记录恢复。
+			identityScope = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId());
 			if (RunSnapshot.isTerminal(snapshot.getStatus())
 					&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
 				// I-1：延迟交棒绝不能把 DONE/FAILED 改写成 CANCELLED
@@ -2630,6 +2650,22 @@ public class ResumeService {
 				releaseQuietly(leases, lease);
 			}
 			this.resuming.remove(runId);
+			if (identityScope != null) {
+				identityScope.close();
+			}
+		}
+	}
+
+	/**
+	 * 在<b>交棒线程</b>上按本轮记录身份建立作用域（快照 0/0 = 空作用域，不伪造默认租户）。
+	 *
+	 * <p>执行器的 TTL 装饰只是第一层；恢复型任务的身份第一来源永远是记录本身。
+	 */
+	private static void withRunIdentity(RunSnapshot snapshot, Runnable action) {
+		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
+		long userId = snapshot == null ? 0L : snapshot.getUserId();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			action.run();
 		}
 	}
 

@@ -39,6 +39,12 @@ public final class ToolExecutionEnvelope {
 
 	private final String sessionId;
 
+	/** 本轮归属的租户（{@code 0} = 本字段引入前的旧信封：没有身份可恢复，不伪造默认租户）。 */
+	private final long tenantId;
+
+	/** 本轮归属的用户（{@code -1} = 系统账号；{@code 0} = 旧信封）。 */
+	private final long userId;
+
 	private final Long providerId;
 
 	private final String modelId;
@@ -65,11 +71,13 @@ public final class ToolExecutionEnvelope {
 	/** 信封生成时本写出器已处置到的最大业务 seq（只读下界；0 = 未知）。 */
 	private final long seqFloor;
 
-	private ToolExecutionEnvelope(String runId, String sessionId, Long providerId, String modelId,
-			Map<String, Object> context, RunSnapshot.FrozenParams frozen, int round, int toolSteps,
+	private ToolExecutionEnvelope(String runId, String sessionId, long tenantId, long userId, Long providerId,
+			String modelId, Map<String, Object> context, RunSnapshot.FrozenParams frozen, int round, int toolSteps,
 			long budgetArmedAtMs, int budgetSkippedBatches, long createdAtMs, String createdBy, long seqFloor) {
 		this.runId = runId;
 		this.sessionId = sessionId;
+		this.tenantId = tenantId;
+		this.userId = userId;
 		this.providerId = providerId;
 		this.modelId = modelId;
 		this.context = context;
@@ -93,8 +101,9 @@ public final class ToolExecutionEnvelope {
 		if (snapshot == null || isBlank(snapshot.getRunId())) {
 			return null;
 		}
-		return new ToolExecutionEnvelope(snapshot.getRunId(), snapshot.getSessionId(), snapshot.getProviderId(),
-				snapshot.getModelId(), copyOf(snapshot.getContext()),
+		return new ToolExecutionEnvelope(snapshot.getRunId(), snapshot.getSessionId(), snapshot.getTenantId(),
+				snapshot.getUserId(), snapshot.getProviderId(), snapshot.getModelId(),
+				copyOf(snapshot.getContext()),
 				snapshot.paramsFrozen() ? snapshot.frozenParams() : null, snapshot.getRound(),
 				snapshot.getToolSteps(), snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches(),
 				snapshot.getCreatedAtMs(), snapshot.getCreatedBy(), seqFloor == null ? 0L : Math.max(0L, seqFloor));
@@ -128,6 +137,8 @@ public final class ToolExecutionEnvelope {
 			return null;
 		}
 		String sessionId = text(map.get("sessionId"));
+		long tenantId = longOrZero(map.get("tenantId"));
+		long userId = longOrZero(map.get("userId"));
 		Long providerId = longOrNull(map.get("providerId"));
 		String modelId = text(map.get("modelId"));
 		Map<String, Object> context = copyOf(asMap(map.get("context")));
@@ -138,8 +149,9 @@ public final class ToolExecutionEnvelope {
 		int budgetSkippedBatches = intOrZero(map.get("budgetSkippedBatches"));
 		long createdAtMs = longOrZero(map.get("createdAtMs"));
 		long seqFloor = longOrZero(map.get("seqFloor"));
-		return new ToolExecutionEnvelope(runId, sessionId, providerId, modelId, context, frozen, round, toolSteps,
-				budgetArmedAtMs, budgetSkippedBatches, createdAtMs, createdBy, Math.max(0L, seqFloor));
+		return new ToolExecutionEnvelope(runId, sessionId, tenantId, userId, providerId, modelId, context, frozen,
+				round, toolSteps, budgetArmedAtMs, budgetSkippedBatches, createdAtMs, createdBy,
+				Math.max(0L, seqFloor));
 	}
 
 	/**
@@ -156,6 +168,8 @@ public final class ToolExecutionEnvelope {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(this.runId);
 		snapshot.setSessionId(this.sessionId);
+		snapshot.setTenantId(this.tenantId);
+		snapshot.setUserId(this.userId);
 		snapshot.setProviderId(this.providerId);
 		snapshot.setModelId(this.modelId);
 		snapshot.setContext(copyOf(this.context));
@@ -181,6 +195,16 @@ public final class ToolExecutionEnvelope {
 
 	public String sessionId() {
 		return this.sessionId;
+	}
+
+	/** 本轮归属的租户（{@code 0} = 旧信封：没有身份可恢复，调用方不得伪造默认租户）。 */
+	public long tenantId() {
+		return this.tenantId;
+	}
+
+	/** 本轮归属的用户（{@code -1} = 系统账号；{@code 0} = 旧信封）。 */
+	public long userId() {
+		return this.userId;
 	}
 
 	public Long providerId() {

@@ -31,6 +31,9 @@ import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.resultview.ToolResultViewProvider;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
@@ -602,13 +605,29 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 		String runId = runIdOf(prompt);
 		RunSnapshot snapshot = runId == null ? null : this.store.get(runId);
+		// 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
+		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt));
 		if (runId == null || snapshot == null) {
 			// ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
-			snapshot = recoverSnapshot(ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt)), runId);
+			snapshot = recoverSnapshot(envelope, runId);
 			if (snapshot != null) {
 				runId = snapshot.getRunId();
 			}
 		}
+		// 官方工具线程（Reactor 上游线程）没有请求身份：按记录（快照 → 信封）恢复。
+		// 两者都没有身份（旧快照/旧信封）⇒ 空作用域，不伪造默认租户；下游按 fail-closed 处理。
+		long tenantId = snapshot != null ? snapshot.getTenantId() : envelope == null ? 0L : envelope.tenantId();
+		long userId = snapshot != null ? snapshot.getUserId() : envelope == null ? 0L : envelope.userId();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			return executeToolCallsResolved(prompt, chatResponse, runId, snapshot, assistant);
+		}
+	}
+
+	/**
+	 * 工具执行主体（已在<b>本轮身份作用域</b>内；身份只来自快照/执行信封）。
+	 */
+	private ToolExecutionResult executeToolCallsResolved(Prompt prompt, ChatResponse chatResponse, String runId,
+			RunSnapshot snapshot, AssistantMessage assistant) {
 		if (runId == null || snapshot == null) {
 			// ② 恢复不了：危险/前端工具拒绝直执行，只有 READ+BACKEND 可回落官方执行。
 			return executeWithoutSnapshot(prompt, chatResponse, runId, assistant);
@@ -2456,9 +2475,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return delegateSingle(prompt, pending);
 		}
 		Future<String> future;
+		// 身份不随线程池继承：在提交线程抓本轮身份，执行线程重新建立作用域（不把句柄跨线程关闭）
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		try {
 			// MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
-			future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> delegateSingle(prompt, pending)));
+			future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					return delegateSingle(prompt, pending);
+				}
+			}));
 		}
 		catch (RejectedExecutionException ex) {
 			log.warn("工具超时执行器饱和（容量 {}），本次调用未执行 tool={} toolCallId={}", this.toolTimeoutThreads,

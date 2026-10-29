@@ -20,6 +20,9 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -866,6 +869,17 @@ public class ResilientChatService {
 		// L-26：续跑读取快照的<b>冻结生效参数</b>（只读；旧快照 paramsVersion=0 ⇒ 走旧行为 + WARN）。
 		// 读失败按"没有冻结信息"处理（旧行为），不能因为多一次旁路读让续跑直接失败。
 		RunSnapshot snapshot = resumeSnapshot(runId);
+		// 恢复型入口：身份只从本轮记录恢复（交棒线程即使带着上一位调用者的 TTL 身份也以快照为准）。
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(
+				snapshot == null ? 0L : snapshot.getTenantId(), snapshot == null ? 0L : snapshot.getUserId())) {
+			driveResumedScoped(runId, sessionId, context, history, providerId, modelId, out, snapshot,
+					turnStartedAtMs);
+		}
+	}
+
+	/** 续跑主体（已在<b>本轮身份作用域</b>内；身份来自 {@code ai:run:<runId>} 快照）。 */
+	private void driveResumedScoped(String runId, String sessionId, AiContext context, List<Message> history,
+			Long providerId, String modelId, SseChatEmitter out, RunSnapshot snapshot, long turnStartedAtMs) {
 		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
 		// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
 		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId, snapshot);
@@ -1236,6 +1250,9 @@ public class ResilientChatService {
 	private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
 			TurnContext turn, TurnKeepalive keepalive, IntFunction<Flux<ChatResponse>> attemptStream) {
 		AiProperties.Resilience config = this.properties.getResilience();
+		// Reactor 事件回调跑在上游线程（Netty event loop）上，那里没有请求身份 ——
+		// 在驱动线程抓一次本轮身份，每个上游事件回放一次（消费帧/写归档的路径因此不丢身份）。
+		TenantUser upstreamIdentity = RequestContextUtils.currentOrNull();
 		int maxAttempts = Math.max(1, config.getMaxAttempts());
 		// 上一次失败带来的 429 Retry-After（只对紧接着的这次重试生效；成功/收尾后自然丢弃）
 		Long retryAfterMs = null;
@@ -1271,13 +1288,15 @@ public class ResilientChatService {
 			try {
 				subscription = attemptStream.apply(attempt)
 					.subscribe(response -> {
-						watchdog.onUpstreamEvent();
-						// ===== Task 5 Step 3：这里不再补心跳 =====
-						// 旧口径在"每条上游事件"上按 {@value #STREAMING_HEARTBEAT_MILLIS}ms 打一帧心跳 ——
-						// 于是上游不出事件（首包等待、包间静默、慢工具）就没有保活。心跳已交给
-						// {@link TurnKeepalive} 的<b>独立定时器</b>：它只看墙钟，不依赖上游事件，
-						// 因此三类静默与本回调是否被调用无关（心跳仍不占业务 seq、不入归档，见 emitter）。
-						consume(response, out, accumulator);
+						try (RunIdentityScope.Scope ignored = RunIdentityScope.open(upstreamIdentity)) {
+							watchdog.onUpstreamEvent();
+							// ===== Task 5 Step 3：这里不再补心跳 =====
+							// 旧口径在"每条上游事件"上按 {@value #STREAMING_HEARTBEAT_MILLIS}ms 打一帧心跳 ——
+							// 于是上游不出事件（首包等待、包间静默、慢工具）就没有保活。心跳已交给
+							// {@link TurnKeepalive} 的<b>独立定时器</b>：它只看墙钟，不依赖上游事件，
+							// 因此三类静默与本回调是否被调用无关（心跳仍不占业务 seq、不入归档，见 emitter）。
+							consume(response, out, accumulator);
+						}
 					}, settled::completeExceptionally, () -> settled.complete(null));
 				watchdog.bind(subscription);
 

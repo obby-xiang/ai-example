@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -105,6 +106,12 @@ public class CancelledRunFinalizer {
 
 	private final AiProperties properties;
 
+	/**
+	 * 轮次快照读取面（身份来源）：交棒跑在触发池/定时重试线程上，那里没有请求身份。
+	 * {@code null} = 轻装配/旧用例构造（无身份可恢复，作用域为空）。
+	 */
+	private final RunStore store;
+
 	/** 在飞的交棒（同一 run 只允许一次；重试任务通过同一集合自我续命）。 */
 	private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
@@ -113,16 +120,29 @@ public class CancelledRunFinalizer {
 
 	@Autowired
 	public CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider,
-			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties) {
-		this(resumeServiceProvider, executor, properties, DEFAULT_SCHEDULER);
+			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties, RunStore store) {
+		this(resumeServiceProvider, executor, properties, store, DEFAULT_SCHEDULER);
+	}
+
+	/** 兼容构造（无快照读取面：身份作用域为空，用于纯交棒行为用例）。 */
+	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
+			AiProperties properties) {
+		this(resumeServiceProvider, executor, properties, null, DEFAULT_SCHEDULER);
 	}
 
 	/** 包内构造（用例注入可手动推进的调度器；不改生产装配形状）。 */
 	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
 			AiProperties properties, Scheduler scheduler) {
+		this(resumeServiceProvider, executor, properties, null, scheduler);
+	}
+
+	/** 包内构造（身份 + 可手动推进的调度器）。 */
+	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
+			AiProperties properties, RunStore store, Scheduler scheduler) {
 		this.resumeServiceProvider = resumeServiceProvider;
 		this.executor = executor;
 		this.properties = properties;
+		this.store = store;
 		this.scheduler = scheduler == null ? DEFAULT_SCHEDULER : scheduler;
 		for (int i = 0; i < MONITOR_STRIPES; i++) {
 			this.finalizeMonitors[i] = new Object();
@@ -220,7 +240,13 @@ public class CancelledRunFinalizer {
 		}
 		ResumeService.CancelFinalize outcome;
 		try {
-			outcome = service.cancelConfirmed(runId);
+			// 身份只从本轮记录恢复：交棒执行体（触发池 / 定时重试线程）没有请求身份。
+			RunSnapshot snapshot = this.store == null ? null : this.store.get(runId);
+			long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
+			long userId = snapshot == null ? 0L : snapshot.getUserId();
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+				outcome = service.cancelConfirmed(runId);
+			}
 		}
 		catch (RuntimeException ex) {
 			log.warn("取消收尾交棒执行异常 runId={} cause={}：{}", runId, cause, ex.getMessage());

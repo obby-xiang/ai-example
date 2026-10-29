@@ -6,6 +6,9 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -142,9 +145,14 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	public String summarize(String systemPrompt, String userPrompt, ProviderRuntime runtime) throws Exception {
 		Duration timeout = this.properties.getContext().getSummaryTimeout();
 		Future<String> future;
+		// 摘要是本轮对话的旁路请求：提交线程（驱动/续跑线程）已有本轮身份，池线程必须重新建立作用域
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		try {
-			future = this.executor.submit(AiTrace.wrapCallable(
-					() -> requireClosedSummary(this.call.call(systemPrompt, userPrompt, runtime))));
+			future = this.executor.submit(AiTrace.wrapCallable(() -> {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					return requireClosedSummary(this.call.call(systemPrompt, userPrompt, runtime));
+				}
+			}));
 		}
 		catch (RejectedExecutionException ex) {
 			// 池饱和/已关闭：不排队等（一个挂住的摘要请求会把队列堵满），按"摘要不可用"收口

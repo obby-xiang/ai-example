@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -196,7 +197,7 @@ public class StartupResumeRunner {
 			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = this.resumeService.resume(runId, zombie);
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie);
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
 				item.put("zombieTakeover", zombie);
@@ -322,7 +323,7 @@ public class StartupResumeRunner {
 			boolean takeover = RunSnapshot.RUNNING.equals(status);
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = this.resumeService.resume(runId, takeover);
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover);
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
 				item.put("statusBeforeSweep", status);
@@ -421,6 +422,24 @@ public class StartupResumeRunner {
 	public boolean isRuntimeSweepRunning() {
 		ScheduledFuture<?> future = this.sweepFuture;
 		return future != null && !future.isDone() && !future.isCancelled();
+	}
+
+	/**
+	 * 以<b>该轮快照的身份</b>执行一次续跑（启动扫描与运行期扫描的唯一入口）。
+	 *
+	 * <p>扫描跑在定时线程上，那里没有请求身份；身份也不能从"当前线程"或默认租户补 ——
+	 * 唯一来源是该轮 {@code RunSnapshot} 的 {@code tenantId/userId}。旧快照（0/0）没有身份可恢复：
+	 * {@link RunIdentityScope#open(long, long)} 返回空作用域，续跑入口按既有 fail-closed 口径处理。
+	 *
+	 * <p>作用域只包住这一次续跑调用，扫描循环（下一轮可能是另一个租户）不继承身份。
+	 */
+	private ResumeService.ResumeResult resumeWithRunIdentity(String runId, boolean takeover) {
+		RunSnapshot snapshot = this.store.get(runId);
+		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
+		long userId = snapshot == null ? 0L : snapshot.getUserId();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			return this.resumeService.resume(runId, takeover);
+		}
 	}
 
 	/** 调度线程绝不能被单轮异常杀死：异常只留痕，下一拍照常。 */

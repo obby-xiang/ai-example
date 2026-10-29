@@ -13,6 +13,7 @@ import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
@@ -1176,19 +1177,23 @@ public class ConfirmGate {
 		try {
 			this.retryScheduler.schedule(() -> {
 				try {
-					PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
-					if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
-						return;
-					}
-					PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
-					settleParkedToolCall(runId, expired, expired.getResultText());
-					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
-							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
-					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
-							+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
-							runId, toolCallId, toolName, timeoutSeconds);
-					// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
-					triggerResume(runId, false, true);
+					// 到期裁决跑在定时线程上：按本轮记录建立身份后再收敛条目/派发续跑。
+					RunSnapshot snapshot = this.store.get(runId);
+					withRunIdentity(snapshot, () -> {
+						PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
+						if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
+							return;
+						}
+						PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
+						settleParkedToolCall(runId, expired, expired.getResultText());
+						AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
+								toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
+						log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
+								+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
+								runId, toolCallId, toolName, timeoutSeconds);
+						// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
+						triggerResume(runId, false, true);
+					});
 				}
 				catch (RuntimeException ex) {
 					log.warn("park 后的前端回执到期收敛失败 runId={} toolCallId={}：{}", runId, toolCallId,
@@ -2105,7 +2110,7 @@ public class ConfirmGate {
 		if (leases == null) {
 			// 无租约设施（6/8 参兼容构造、单测、无 Redis 降级装配）：原逻辑派发，不带租约。
 			// 单实例仍然正确（进程内互斥）；跨实例由批②a 的 fence 写与 claimExecution 兜底。
-			return dispatchResume(runId, null, false);
+			return dispatchResume(runId, snapshot, null, false);
 		}
 		String leaseKey = this.store.runLeaseKey(runId);
 		// 可重入：本进程可能在等待期（或上一次派发/上一次续跑）已持租 —— 此时"释放/交调度器"的职责
@@ -2118,7 +2123,7 @@ public class ConfirmGate {
 			// I4：设施不可用 ⇒ 无租约降级（与"没有租约设施"同口径）：派发不带租约，
 			// 由 ResumeService 的进程内互斥兜底。把"不知道"当成"别人持有"会让 Redis 抖一下就停止续跑。
 			log.warn("续跑权租约不可用，按无租约降级派发 runId={}", runId);
-			return dispatchResume(runId, null, false);
+			return dispatchResume(runId, snapshot, null, false);
 		}
 		LeaseService.Lease lease = acquired.lease();
 		if (lease == null) {
@@ -2129,22 +2134,28 @@ public class ConfirmGate {
 			}
 			return ResumeTrigger.skipped("LEASE_HELD_ELSEWHERE", "另一实例持有续跑租约");
 		}
-		return dispatchResume(runId, lease, acquired.created());
+		return dispatchResume(runId, snapshot, lease, acquired.created());
 	}
 
 	/** 把续跑动作交给轻量执行器；池饱和时<b>先还租约</b>再如实回报（A9 口径不变）。 */
-	private ResumeTrigger dispatchResume(String runId, LeaseService.Lease lease, boolean fresh) {
+	private ResumeTrigger dispatchResume(String runId, RunSnapshot snapshot, LeaseService.Lease lease,
+			boolean fresh) {
 		// I-5 / 4B：在提交线程（决策回灌的 HTTP 线程；租约重试则是调度线程）取好 locale。
 		// 工作线程不继承请求上下文 —— 不显式搬运，en 用户的确认门续跑仍会落到 zh 白名单。
 		Locale replyLocale = ErrorBodyFactory.requestLocale();
 		try {
 			this.resumeTriggerExecutor.execute(() -> {
-				LocaleContextHolder.setLocale(replyLocale);
-				try {
-					runResume(runId, lease, fresh);
-				}
-				finally {
-					LocaleContextHolder.resetLocaleContext();
+				// 触发池线程没有请求身份（决策来自 HTTP/定时重试两条入口）：按本轮记录身份建立作用域。
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(
+						snapshot == null ? 0L : snapshot.getTenantId(),
+						snapshot == null ? 0L : snapshot.getUserId())) {
+					LocaleContextHolder.setLocale(replyLocale);
+					try {
+						runResume(runId, lease, fresh);
+					}
+					finally {
+						LocaleContextHolder.resetLocaleContext();
+					}
 				}
 			});
 		}
@@ -2243,12 +2254,17 @@ public class ConfirmGate {
 		try {
 			this.retryScheduler.schedule(() -> {
 				try {
-					ResumeTrigger trigger = triggerResume(runId, false, false);
-					if (!trigger.triggered()) {
-						// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
-						log.debug("续跑重派发未派发 runId={} reason={} detail={}", runId, trigger.outcome(),
-								trigger.detail());
-					}
+					// 身份读取与重派发同属这一拍：快照读不出来也必须落在下面的 catch 里
+					// （否则异常会穿到调度线程，有界周期断链）。
+					RunSnapshot snapshot = this.store.get(runId);
+					withRunIdentity(snapshot, () -> {
+						ResumeTrigger trigger = triggerResume(runId, false, false);
+						if (!trigger.triggered()) {
+							// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
+							log.debug("续跑重派发未派发 runId={} reason={} detail={}", runId, trigger.outcome(),
+									trigger.detail());
+						}
+					});
 				}
 				catch (AiStateUnavailableException ex) {
 					// 这一拍连"快照是什么状态"都读不出来（Redis 断连/超时）：不是结局，是暂时不可确认。
@@ -2377,6 +2393,18 @@ public class ConfirmGate {
 	}
 
 	/**
+	 * 定时重试线程没有请求身份：按本轮记录打开身份作用域后执行一次动作
+	 * （快照 0/0 = 旧轮次，无身份可恢复 ⇒ 空作用域，不伪造默认租户）。
+	 */
+	private static void withRunIdentity(RunSnapshot snapshot, Runnable action) {
+		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
+		long userId = snapshot == null ? 0L : snapshot.getUserId();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			action.run();
+		}
+	}
+
+	/**
 	 * 抢租失败后的一次性延迟重试（{@code app.ai.lease.retry-delay}，默认 35s = TTL + 5s 余量）。
 	 *
 	 * <p>救的是"holder 已经死了但它没来得及释放"的场景：TTL 到期后本实例就能接管。
@@ -2387,7 +2415,8 @@ public class ConfirmGate {
 		try {
 			this.retryScheduler.schedule(() -> {
 				try {
-					triggerResume(runId, false, false);
+					RunSnapshot snapshot = this.store.get(runId);
+					withRunIdentity(snapshot, () -> triggerResume(runId, false, false));
 				}
 				catch (Exception ex) {
 					log.warn("续跑租约重试异常 runId={}：{}", runId, ex.getMessage());

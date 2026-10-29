@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.RejectedExecutionException;
@@ -61,6 +64,9 @@ public final class TurnKeepalive implements AutoCloseable {
 
 	/** 本尝试序号（0 = 还没进尝试循环，例如压缩阶段）。 */
 	private volatile int attempt;
+
+	/** 建立时的本轮身份（节拍跑在调度线程上，建立它的驱动线程才有身份）。 */
+	private final TenantUser identity = RequestContextUtils.currentOrNull();
 
 	/** 一次"阶段"：名字 + 起点（{@code elapsedMs} 的零点）。 */
 	private record Stage(String phase, long startedAtMs) {
@@ -184,8 +190,10 @@ public final class TurnKeepalive implements AutoCloseable {
 		if (this.closed.get()) {
 			return;
 		}
-		Stage current = this.stage.get();
-		emit(current.phase(), Math.max(0L, System.currentTimeMillis() - current.startedAtMs()));
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
+			Stage current = this.stage.get();
+			emit(current.phase(), Math.max(0L, System.currentTimeMillis() - current.startedAtMs()));
+		}
 	}
 
 	private void emit(String phase, long elapsedMs) {

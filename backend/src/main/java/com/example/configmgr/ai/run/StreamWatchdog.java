@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.Disposable;
 
@@ -90,6 +93,14 @@ public class StreamWatchdog implements AutoCloseable {
 
 	private final ScheduledFuture<?> future;
 
+	/**
+	 * 建立时的本轮身份（看门狗节拍跑在 {@code aiStreamWatchdog} 调度线程上，那里没有请求身份）。
+	 *
+	 * <p>{@code null} = 建立时就没有身份（旧轮次/轻装配面）—— 节拍照常工作，只是不建立作用域；
+	 * 任何需要身份的下游读取仍按 fail-closed 处理。
+	 */
+	private final TenantUser identity;
+
 	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, AiProperties.Resilience config,
 			ToolActivityBeacon beacon, CancellationRegistry cancellations, long segmentStartedAtMs,
 			Consumer<StreamViolationException> onViolation) {
@@ -99,6 +110,8 @@ public class StreamWatchdog implements AutoCloseable {
 		this.cancellations = cancellations;
 		this.segmentSeedAtMs = segmentStartedAtMs;
 		this.onViolation = onViolation;
+		// 身份在建立看门狗时（驱动线程）抓取，节拍线程回放 —— 调度器本身不做传播
+		this.identity = RequestContextUtils.currentOrNull();
 		this.lastUpstreamAtMs.set(segmentStartedAtMs);
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
 		this.cancelListener = cancellations.onCancel(runId, () -> fire(StreamViolationException.CANCELLED,
@@ -136,6 +149,16 @@ public class StreamWatchdog implements AutoCloseable {
 	}
 
 	private void tick() {
+		// 调度线程没有请求身份：每拍按建立时的本轮身份重建作用域（不依赖调度器传播）
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
+			tickOnce();
+		}
+		catch (Exception ex) {
+			log.debug("看门狗节拍异常 runId={}：{}", this.runId, ex.getMessage());
+		}
+	}
+
+	private void tickOnce() {
 		try {
 			long now = System.currentTimeMillis();
 			this.ticks.incrementAndGet();
