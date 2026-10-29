@@ -962,9 +962,10 @@ public class ResumeService {
 					catch (Exception ex) {
 						log.error("仅模型步重跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
 						// N2：失败终态与失败终帧由同一个写口在监视器内完成 —— 取消已先到时两者都不发。
+						// 本批：发 error 之前先问归档有没有终帧（另一驱动方/取消收尾已落终帧时不得再补一条）。
 						markDriveFailure(snapshot, ex, () -> {
 							if (out != null) {
-								out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
+								emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
 							}
 						});
 					}
@@ -1312,11 +1313,36 @@ public class ResumeService {
 					body.put("reason", "ALREADY_RUNNING");
 					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 				}
+				// ===== 接管前复核（2026-10-29）：抢到租约 ≠ 原驱动已死 =====
+				// 调用方那一拍判活与这一次接管之间隔着若干 Redis 往返；而<b>同实例</b>的抢租还是可重入的
+				// （首轮/确认门持有的就是同一任，created=false）—— 只凭"我抢到了"就接管，等于让一轮
+				// 出现两个驱动方。两条证据任一为真即<b>不接管</b>（让给原驱动）：
+				// ① 本进程仍登记着这一轮的驱动方（首轮 chat 的 drivingRuns）；
+				// ② 业务活动锚点此刻仍在僵尸窗口内（原驱动又出过业务帧）。
+				if (this.chatService != null && this.chatService.isDriving(runId)) {
+					body.put("resumed", false);
+					body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+					body.put("driverAlive", true);
+					log.warn("僵尸接管复核拒绝 runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
+							+ "（同实例抢租可重入，抢到不等于原驱动已死）—— 不接管，避免双驱动", runId, sessionId);
+					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				}
+				long activeAtMs = activeAtMs(snapshot);
+				long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+				long activeAgeMs = System.currentTimeMillis() - activeAtMs;
+				if (activeAgeMs <= zombieAgeMs) {
+					body.put("resumed", false);
+					body.put("reason", "ACTIVITY_ADVANCED");
+					body.put("activeAtMs", activeAtMs);
+					body.put("activeAgeMs", activeAgeMs);
+					log.warn("僵尸接管复核拒绝 runId={} sessionId={}：业务活动在接管判定之后又前进"
+							+ "（{}ms ≤ 阈值 {}ms：原驱动还活着）—— 不接管", runId, sessionId, activeAgeMs, zombieAgeMs);
+					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				}
 				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
 				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 业务活动已超龄；
 				// 活跃时刻 = max(快照 updatedAtMs, 最后一条非心跳业务帧 atMs)，因此"还在跑长工具/
 				// 流式吐字"的活轮不会被接管，心跳也不会把卡死的轮养年轻（R1-09）。
-				long activeAtMs = activeAtMs(snapshot);
 				log.warn("僵尸轮接管 runId={} sessionId={} 活跃时刻距今 {}ms（快照 {}ms / 末条业务帧 {}ms，阈值 {}）",
 						runId, sessionId, System.currentTimeMillis() - activeAtMs,
 						System.currentTimeMillis() - snapshot.getUpdatedAtMs(),
@@ -1324,7 +1350,7 @@ public class ResumeService {
 						this.properties.getResume().getZombieAge());
 				body.put("zombieTakeover", true);
 				body.put("activeAtMs", activeAtMs);
-				body.put("activeAgeMs", System.currentTimeMillis() - activeAtMs);
+				body.put("activeAgeMs", activeAgeMs);
 			}
 			// 批③ PROVIDER_GONE：快照的模型身份此刻必须仍可用。判据 = 能解析出<b>同一个</b> provider
 			// 与该模型（enabled + key 可解 + 模型在 allowlist）。缺一 ⇒ 409，不静默换模型续跑。
@@ -1683,8 +1709,10 @@ public class ResumeService {
 						log.error("续跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
 						// 交棒后的失败必须落终态，不能只留下错误帧和无人推进的 RUNNING 快照。
 						// N2：失败终态与失败终帧在同一个监视器内完成（取消已先到 ⇒ 两者都不发）。
+						// 本批：发 error 之前先问归档有没有终帧（每轮至多一条终帧，跨实例成立）。
 						markDriveFailure(snapshot, ex,
-								() -> out.error(ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage()));
+								() -> emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED,
+										resumeFailedMessage()));
 					}
 					finally {
 						LocaleContextHolder.resetLocaleContext();
@@ -1981,6 +2009,25 @@ public class ResumeService {
 				emitError.run();
 			}
 		}
+	}
+
+	/**
+	 * 续跑侧失败出口的<b>终帧幂等</b>（2026-10-29）：归档里已有 {@code done}/{@code error} ⇒ 不发 error。
+	 *
+	 * <p>为什么判据是归档而不是进程内标记：同一轮可能有多个收尾方（接管方、交棒执行体、原驱动线程），
+	 * 它们可能在不同线程/实例/重启后的新进程里；只有共享归档
+	 * （{@link SseChatEmitter#terminalFrameArchived()}）能回答"这一轮到底有没有终帧"。
+	 *
+	 * <p>读不出来（{@code null}）= 不可知 ⇒ <b>照发</b>（写门会再拦一次）：把读降级折叠成"已归档"
+	 * 会让失败轮彻底没有终帧。
+	 */
+	private void emitFailureErrorUnlessArchived(SseChatEmitter out, String code, String message) {
+		Boolean archived = out.terminalFrameArchived();
+		if (Boolean.TRUE.equals(archived)) {
+			log.info("失败终帧已归档，跳过重复 error code={}（每轮至多一条终帧）", code);
+			return;
+		}
+		out.error(code, message);
 	}
 
 	/**
@@ -2448,7 +2495,8 @@ public class ResumeService {
 			if (out == null) {
 				return;
 			}
-			out.error(ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
+			// 本批：终帧幂等（与 fail/emptyReply/环外异常同一判据）—— 归档里已有终帧时不再补一条。
+			emitFailureErrorUnlessArchived(out, ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
 			this.registry.close(runId);
 			log.info("续跑硬否定已收敛 runId={} status=FAILED code={}（重挂会回放该终帧后收流）", runId,
 					ErrorCodes.AI_PROVIDER_GONE);

@@ -795,7 +795,20 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 该旧行为供既有用例与"批③ 之前的调用方"使用；生产路径（{@code ResilientChatService#chat}）
 	 * 永远传非 null（<b>全 null 的 FrozenParams 也是一次冻结</b>：null 本身就是当时的生效值）。
 	 *
+	 * <h2>失败语义（2026-10-29）</h2>
+	 * 首笔快照是这一轮<b>唯一的持久面</b>：写不进去就没有重挂、没有续跑、没有取消终态可落。
+	 * 因此本方法<b>显式判定</b>那一笔写，失败即失败：
+	 * <ul>
+	 * <li>被写口拒写（当前快照已是取消态 / 本实例对该轮无续跑权）⇒ 抛
+	 *     {@link AiStateUnavailableException}；</li>
+	 * <li>Redis 写异常（序列化/连接/脚本失败）⇒ 同一异常类型上抛（由 {@link #persist} 抛出）；</li>
+	 * <li>两种情况都<b>不</b>登记 {@code ai:runs} 索引 —— 索引只指向真实存在的轮。</li>
+	 * </ul>
+	 * 调用方（{@code ResilientChatService#chat}）不得把失败当成"建好了但读不到"继续驱动：
+	 * 没有持久面的成功终帧比失败更有害。
+	 *
 	 * @param frozen 生效参数（可为全部 null）
+	 * @throws AiStateUnavailableException 首笔快照未落库
 	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
@@ -810,7 +823,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		snapshot.freezeParams(frozen);
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
-		save(snapshot);
+		// ===== 首笔快照写入必须<b>显式判定</b>（2026-10-29）=====
+		// save 是"可判定"的：取消优先守卫会拒写（当前快照已是取消态）、续跑权判据会拒写
+		// （丢租 / 设施不可确认 / fence 已被接管），两条都静默返回 false。旧实现忽略它 ⇒ 调用方以为
+		// "这一轮建好了"，继续跑模型并发 done —— Redis 里却根本没有这一轮（刷新/重挂/续跑/取消
+		// 全都没有持久面，用户却收到一条成功）。这里把"没落库"变成失败事实。
+		if (!persist(snapshot)) {
+			throw new AiStateUnavailableException("无法写入轮次快照 " + runId
+					+ "（首笔快照被拒写：当前快照已是取消态，或本实例对该轮无续跑权）");
+		}
 		this.redis.opsForSet().add(RUN_INDEX, runId);
 		if (sessionId != null && !sessionId.isBlank()) {
 			String sessionRunsKey = sessionRunsKey(sessionId);

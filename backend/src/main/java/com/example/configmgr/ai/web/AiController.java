@@ -486,6 +486,13 @@ public class AiController {
 					writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
 						// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
 						service.clearTerminalRunState(runId);
+						// 本批：发 error 之前先问归档有没有终帧 —— 环外异常是最容易与"另一驱动方已收尾"
+						// 撞车的一条出口（交棒/接管刚收好尾，本线程随后才抛），进程内标记挡不住它。
+						// 读不出来（null）= 不可知 ⇒ 照发（写门会再拦一次）。
+						if (Boolean.TRUE.equals(out.terminalFrameArchived())) {
+							log.info("失败终帧已归档，跳过环外异常的 error runId={}（每轮至多一条终帧）", runId);
+							return;
+						}
 						// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
 						out.error(ErrorCodes.AI_RUN_FAILED,
 								localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));

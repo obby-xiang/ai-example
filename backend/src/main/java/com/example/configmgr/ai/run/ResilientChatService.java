@@ -601,6 +601,8 @@ public class ResilientChatService {
 		this.cancellations.register(runId);
 		out.start(sessionId);
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_COMPACTING, true);
+		// 驱动所有权（快照建好之后取得；压缩期还没有快照，接管方也无从判死这一轮）
+		DriveOwnership ownership = DriveOwnership.none();
 		try {
 			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
 					toolsTokens, 0);
@@ -647,6 +649,19 @@ public class ResilientChatService {
 			// A：请求边界冻结的权威执行信封要用这份刚建好的快照（不是稍后可能被改写的读回值）。
 			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
 					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked));
+
+			// ===== 驱动所有权（2026-10-29）：快照建好之后、模型/预检之前先取得续跑权 =====
+			// 旧实现首轮从不持租：跨实例僵尸扫描看到的证据是"RUNNING + 无租约 + 业务活动超龄" ⇒ 判死接管，
+			// 而本线程还在预检/首包等待里 ⇒ 一轮两个驱动方（重复帧、settle 分叉、历史分叉）。
+			// 取得后按 lease.renew-interval 续租（与续跑同一条心跳），于是"长预检"期间租约始终有效。
+			ownership = takeDriveOwnership(runId);
+			if (!ownership.owned()) {
+				// 另一实例已持有这一轮的续跑权：本线程不得驱动（否则就是双驱动）。终态与终帧由持有方负责，
+				// 本连接留在同一个写出器上照常收流（归档是共享的）。
+				log.warn("首轮拒绝驱动 runId={}：这一轮的续跑权已在别的实例手里（避免双驱动；终态与终帧归持有方）",
+						runId);
+				return;
+			}
 
 			// 完整历史：用户消息在 run 创建后、上游调用前落库（上游失败也不该让用户输入消失）。
 			// 幂等键 = (sessionId, runId, user-<runId>)；重复路径由 converge 的 recordRunTail 兜底补写。
@@ -714,6 +729,9 @@ public class ResilientChatService {
 			// 终态/异常/取消/park 四条出口统一在这里兜底停表（runAttempts 在发终帧之前已先停一次，
 			// 这里负责"异常穿透"的那条：无论如何不得让定时器活到轮次之外）。
 			closeKeepalive(keepalive);
+			// 驱动所有权同样在这四条出口收尾：停续租心跳，并按"谁创建谁释放"还租
+			// （终态写/park 交棒已经还过时，这里只是幂等的停表）。
+			releaseDriveOwnership(runId, ownership);
 			this.cancellations.unregister(runId);
 			this.beacon.clear(runId);
 			AiTrace.clear();
@@ -819,6 +837,119 @@ public class ResilientChatService {
 	private static void closeKeepalive(TurnKeepalive keepalive) {
 		if (keepalive != null) {
 			keepalive.close();
+		}
+	}
+
+	// ── 驱动所有权（首轮；2026-10-29） ──────────────────────────────────────
+
+	/**
+	 * 首轮驱动所有权的判定结果。
+	 *
+	 * @param lease 本实例持有的租约（{@code null} = 无租约设施 / 设施不可确认 / 未取得）
+	 * @param owned {@code false} = 这一轮的续跑权已在<b>别的实例</b>手里 ⇒ 本线程不得驱动
+	 * @param created 本次是否是<b>我</b>建出的这一任（"谁创建谁释放"：重入命中不还租）
+	 */
+	private record DriveOwnership(LeaseService.Lease lease, boolean owned, boolean created) {
+
+		static DriveOwnership none() {
+			return new DriveOwnership(null, true, false);
+		}
+
+		static DriveOwnership foreign() {
+			return new DriveOwnership(null, false, false);
+		}
+
+	}
+
+	/**
+	 * 首轮取得本轮的<b>驱动所有权</b>（续跑权租约）并按 {@code lease.renew-interval} 续租。
+	 *
+	 * <p>语义与续跑完全同源（{@code ResumeService.resumeWithReason} 的自抢 + {@code markDriving}）：
+	 * <ul>
+	 * <li>抢到 / 同主重入 ⇒ 记入进程内驱动登记 + 起续租心跳；</li>
+	 * <li>{@link LeaseService.AcquireOutcome#HELD_ELSEWHERE} ⇒ <b>不驱动</b>
+	 *     （终态与终帧归持有方，本连接照常收流）；</li>
+	 * <li>设施缺失 / 不可确认 ⇒ 按"没有租约语义"继续（写口自身的 fail-closed 判据仍是杀招，
+	 *     不能让一次 Redis 抖动把首轮直接打死）。</li>
+	 * </ul>
+	 */
+	private DriveOwnership takeDriveOwnership(String runId) {
+		// 先登记：续租的存活判据立刻为真（顺序反了会让第一拍就当"驱动已死"而自行还租）
+		this.drivingRuns.add(runId);
+		LeaseService.AcquireResult acquired;
+		try {
+			acquired = this.store.acquireRunLease(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("首轮取得续跑权失败 runId={}（按无租约语义继续；写口仍会按权威判定拦）: {}", runId,
+					ex.getMessage());
+			return DriveOwnership.none();
+		}
+		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+			this.drivingRuns.remove(runId);
+			return DriveOwnership.foreign();
+		}
+		LeaseService.Lease lease = acquired.lease();
+		LeaseService leases = this.store.leaseService();
+		if (lease != null && leases != null) {
+			leases.markDriving(lease, () -> this.drivingRuns.contains(runId) && snapshotNotTerminal(runId));
+		}
+		return new DriveOwnership(lease, true, acquired.created());
+	}
+
+	/**
+	 * 首轮收尾：摘驱动登记、停续租心跳，并按"<b>谁创建谁释放</b>"还租。
+	 *
+	 * <p>为什么不是无条件 {@code releaseRunLease}：终态写（{@code RunStore#persist}）与 park 交棒
+	 * 都已经还过租，那之后租约可能已被<b>下一任</b>持有 —— 无条件还就会删掉别人的续跑权。
+	 * 同主重入（{@code created=false}）同样不还：那一任属于别的驱动方。
+	 */
+	private void releaseDriveOwnership(String runId, DriveOwnership ownership) {
+		this.drivingRuns.remove(runId);
+		if (ownership == null || ownership.lease() == null || !ownership.created()) {
+			return;
+		}
+		LeaseService.Lease lease = ownership.lease();
+		LeaseService leases = this.store.leaseService();
+		if (leases == null) {
+			return;
+		}
+		try {
+			// 先停心跳：还租成功时它已自行停（release 会停续租任务），这里兜住"已被别人还掉"的窗口
+			leases.stopDriving(lease.key(), lease.owner());
+			if (this.store.heldRunEpoch(runId) == lease.epoch()) {
+				this.store.releaseRunLease(runId);
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("首轮归还续跑权失败 runId={} epoch={}（等 TTL 自清；不影响终态）: {}", runId, lease.epoch(),
+					ex.getMessage());
+		}
+	}
+
+	/**
+	 * 本进程此刻是否仍登记着这一轮的驱动方（首轮 {@code chat}）。
+	 *
+	 * <p>暴露给 {@code ResumeService} 的僵尸接管做"<b>接管前复核</b>"：租约可重入，
+	 * 同实例里"抢到租约"并不能证明原驱动已死（见 {@link #drivingRuns}）。
+	 */
+	public boolean isDriving(String runId) {
+		return runId != null && this.drivingRuns.contains(runId);
+	}
+
+	/**
+	 * 续租的存活判据：快照仍非终态（与 {@code ResumeService} 的同名判据同口径）。
+	 *
+	 * <p>读失败按"还要活着"（异常分支返回 {@code true}）：一次 Redis 抖动不得让续租自己放弃租约；
+	 * 快照<b>不存在</b>（轮次已被销毁）则按终态处理，别再为空轮续租。
+	 */
+	private boolean snapshotNotTerminal(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
+		}
+		catch (RuntimeException ex) {
+			return true;
 		}
 	}
 
@@ -1644,18 +1775,50 @@ public class ResilientChatService {
 		String code = ErrorCodes.AI_REDIS_UNAVAILABLE;
 		log.warn("成功终局落库后无法确认权威状态：按不可知收尾 runId={} 复读={}（不改写快照、不发 done）", runId,
 				persisted == null ? "(读失败或轮不存在)" : persisted.getStatus());
-		if (Boolean.TRUE.equals(out.terminalFrameArchived())) {
-			log.info("终帧已归档，跳过不可知终态帧 runId={}", runId);
-			emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
-			return;
-		}
 		int partialChars = accumulator == null ? 0 : accumulator.text().length();
-		out.textEnd(partialChars);
 		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
 		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
 		// 进入中性视图，不得自行拿故障码猜"可能成功"。
-		out.error(code, messageFor(code), Map.of("unconfirmed", true));
+		// 本批：出口统一走 emitFailureTerminal（发帧前判归档终帧），"恰好一条终帧"由归档而不是本地标记保证。
+		emitFailureTerminal(runId, out, code, messageFor(code), Map.of("unconfirmed", true), partialChars);
 		emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
+	}
+
+	/**
+	 * <b>失败终帧的唯一出口</b>（2026-10-29）：发 {@code error} 之前先问归档有没有终帧。
+	 *
+	 * <h2>为什么（而不只是 {@code synchronized} / {@code AtomicBoolean}）</h2>
+	 * 每轮至多一条终帧是<b>跨线程、跨实例</b>的不变量：接管方、交棒执行体、原驱动线程都可能在同一轮里
+	 * 收尾，进程内的布尔只能挡自己。判据因此只能是共享归档（{@link SseChatEmitter#terminalFrameArchived()}）。
+	 *
+	 * <p><b>为什么连 {@code textEnd} 一起跳过</b>：终帧之后不得再有业务帧（帧序不变量）。归档里已有终帧时
+	 * 补一条 {@code message_end} 会把"这一轮最后一条帧"从终帧换成一个段收尾。
+	 *
+	 * <p>读不出来（{@code null}）= 不可知，按"未归档"继续发（写门会再拦一次）—— 不能把读降级折叠成
+	 * "已归档"，那会让失败轮彻底没有终帧。
+	 *
+	 * @param closeTextLength 终帧前要闭合的正文段字符数（{@code <= 0} 时 {@code textEnd} 自身是幂等空操作）
+	 * @return {@code true} = 真的发了 {@code error}；{@code false} = 归档已有终帧，跳过
+	 */
+	private boolean emitFailureTerminal(String runId, SseChatEmitter out, String code, String message,
+			Map<String, Object> extra, int closeTextLength) {
+		Boolean archived = out.terminalFrameArchived();
+		if (Boolean.TRUE.equals(archived)) {
+			log.info("失败终帧已归档，跳过重复 error runId={} code={}（每轮至多一条终帧）", runId, code);
+			return false;
+		}
+		if (archived == null) {
+			log.warn("终帧归档状态不可读 runId={}（按未归档继续收尾，写门会再拦一次）", runId);
+		}
+		out.textEnd(closeTextLength);
+		// 无 additive 键时走两参重载（与改造前逐字节同形：既有调用方/用例观察的是同一个方法）
+		if (extra == null || extra.isEmpty()) {
+			out.error(code, message);
+		}
+		else {
+			out.error(code, message, extra);
+		}
+		return true;
 	}
 
 	/**
@@ -1892,8 +2055,9 @@ public class ResilientChatService {
 			}
 			convergeMemory(runId, sessionId, history);
 		}
-		out.textEnd(text.length());
-		out.error(EMPTY_REPLY_CODE, message);
+		// 本批：失败出口统一走 emitFailureTerminal（发帧前判归档终帧）——
+		// 另一驱动方已落 done/error 时，这里不得把一轮翻成两条终帧。
+		emitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, null, text.length());
 		emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
 		clearTerminalRunState(runId);
@@ -2342,8 +2506,8 @@ public class ResilientChatService {
 		// 再发终帧。否则"已产出半截正文后上游报错"会让运行以一条仍开着的文本消息收尾
 		// （ag-ui 的 open-message-at-run-finished 判据：运行关闭前，它打开的一切都必须先关闭）。
 		// 未开过段（纯工具轮 / 未产出正文）时 textEnd 是幂等空操作。
-		out.textEnd(partialChars);
-		out.error(code, message);
+		// 本批：出口走 emitFailureTerminal —— 归档里已有终帧（另一驱动方已收尾）时连 textEnd 都不发。
+		emitFailureTerminal(runId, out, code, message, null, partialChars);
 		emitTurnEnd(runId, sessionId, "failed", code, attempts, accumulator, turn, null);
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
 		clearTerminalRunState(runId);
@@ -3272,6 +3436,21 @@ public class ResilientChatService {
 	 * <p>容量：一轮一个键、读完即删；即便某轮在交棒前失败，条目也只留到该轮结束（runId 不复用）。
 	 */
 	private final Map<String, String> compactionLevels = new ConcurrentHashMap<>();
+
+	/**
+	 * 本进程此刻<b>登记在册的驱动方</b>（{@code runId}）：首轮 {@code chat()} 在取得续跑权那一笔记入、
+	 * 在轮次收尾的 {@code finally} 抹掉。
+	 *
+	 * <h2>为什么需要这张表（2026-10-29）</h2>
+	 * 续跑权租约能拦<b>跨实例</b>的接管，但<b>同实例</b>是拦不住的：{@code LeaseService} 的抢租对同一
+	 * owner 是可重入的（同一进程里的启动扫描/运行期扫描拿到的就是原主人的那一任，{@code created=false}），
+	 * 于是 {@code forceTakeover} 的僵尸接管在同实例里"抢租成功 ⇒ 一路接管"—— 而首轮线程其实还在跑。
+	 * 续跑驱动方有 {@code ResumeService.resuming} 兜着，首轮没有；这张表就是首轮的那一份"驱动还活着"。
+	 *
+	 * <p>它同时是续租的<b>存活判据</b>（与续跑的 {@code resuming} 同口径）：驱动方收尾后下一拍即停续租并还租，
+	 * 于是"驱动线程悄悄死掉、快照停在 RUNNING"不会留下一个永远续租的僵尸租约。
+	 */
+	private final Set<String> drivingRuns = ConcurrentHashMap.newKeySet();
 
 	/**
 	 * 记录续跑轮的压缩级别（由 {@code ResumeService} 在压缩成功后、交棒前调用）。
