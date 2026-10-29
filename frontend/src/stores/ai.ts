@@ -19,7 +19,7 @@ import { SSE_TIMEOUT_CODES, probeReattach, type SseFrameHandlers, type SseStream
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
-import { deriveFrontendToolBudgetMs, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
+import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
 import { UI_HANDOFF_TOOLS } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
@@ -7095,6 +7095,9 @@ export const useAiStore = defineStore('ai', {
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
       // 交接卡随本轮收起（后端取消会让挂起走取消收尾）。
       abortUiOperations()
+      // 停止 = 本轮放弃：**在途前端工具**一并作废 —— 页面 handler / 登记执行器在 await 之后
+      // 读到 `abandoned` 即不再写工作区/步骤/选中集（预算到点是同一条判据的另一触发面）。
+      abandonInFlightFrontendTools()
       this.activeUploadHandoff = null
       this.stopped = true
       this.lastRoundOutcome = 'cancelled'

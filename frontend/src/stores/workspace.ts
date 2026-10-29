@@ -46,7 +46,13 @@ import {
 } from '@/types/tools'
 import type { AiChatContext } from '@/types/ai'
 import type { ImportMode, QueryCondition, TaskStatus, TaskType } from '@/types/task'
-import type { PageHandler, PageHandlerName, UiEventResult, WorkspaceSnapshot } from '@/types/workspace'
+import type {
+  PageHandler,
+  PageHandlerName,
+  UiEventLifetime,
+  UiEventResult,
+  WorkspaceSnapshot
+} from '@/types/workspace'
 
 /** 页面 id → 路由名。 */
 const PAGE_ROUTES: Record<WorkspacePageId, string> = {
@@ -503,19 +509,13 @@ export function reportUiEventResult(event: string, message: string): void {
 }
 
 /**
- * 一次前端工具执行的**存活标记**（由 `utils/frontend-tools` 的 `runWithBudget` 持有）。
+ * 一次前端工具执行的**存活标记**（定义与完整说明见 `types/workspace.ts#UiEventLifetime`）。
  *
- * <p>为什么需要：预算到点后 `executeFrontendTool` 已经回灌"超时"，但被抛弃的异步续体还在跑 ——
- * 它若继续写工作区（`setStep` / `setSelectedDefs` / `setQueryConditions` / `setImportMode` /
- * `touch` / `ui_event_result`），面板就会出现"已经超时的动作又报了一次同步"，下一轮请求也会
- * 带着一条模型并未确认的动作。这里只加一个**布尔**：`runWithBudget` 到点置 `abandoned = true`，
- * 事件分发在每次 await 之后读它，已作废的续体不再落任何工作区写入口。
- *
- * <p>缺省（页面手点 / 单测直调）不传 ⇒ 行为与改动前完全一致；不新增任何跨进程协议。
+ * <p>本文件是既有 import 面（`@/stores/workspace` 的 `UiEventLifetime`）的再导出点；
+ * 契约层（`dispatchUiEvent` / `runUiEvent`）在每次 await 之后读它，已作废的续体不再落
+ * 任何工作区写入口。
  */
-export interface UiEventLifetime {
-  abandoned: boolean
-}
+export type { UiEventLifetime } from '@/types/workspace'
 
 /**
  * 只读态公共判据（收口修 F6，红队 minor-4）：与两向导 `isReadOnly` 同口径的契约层版，

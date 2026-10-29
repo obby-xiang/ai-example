@@ -86,7 +86,7 @@
                 :read-only="isReadOnly"
                 :def-code="def.code"
                 :sheet-name="def.name"
-                @data-changed="onGridChanged(def.code)"
+                @data-changed="onGridChanged(def.code, $event)"
                 @selection-changed="onGridSelectionChanged(def.code)"
               />
             </el-tab-pane>
@@ -272,6 +272,7 @@ import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIss
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
+import { uiAbandonGuard, uiAbandoned, uiAbandonedReply } from '@/utils/ui-lifetime'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { stepLabel } from '@/utils/format'
 import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
@@ -1283,13 +1284,19 @@ async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: s
   }
 }
 
-function onGridChanged(defCode: string | undefined): void {
+function onGridChanged(defCode: string | undefined, origin: 'user' | 'ai' = 'user'): void {
   // 批次 1C：编辑区与「服务端文件」是两回事 —— 记下脏区，重载/换任务/离页前才知道要结算
   if (defCode) {
     dirtyDefs.add(defCode)
   }
   // 契约联动：导入编辑区的内容改动同步进 AI 上下文（表格类改动只递增版本，避免刷爆动作记录）
-  workspace.touch('导入编辑区内容已修改（尚未写回服务端文件）')
+  // 来源按实际写入者记（`origin='ai'` = AI 预览应用后的落笔）：AI 的写入不得冒充用户动作。
+  workspace.touch(
+    origin === 'ai'
+      ? 'AI 已把改动写入导入编辑区（尚未写回服务端文件）'
+      : '导入编辑区内容已修改（尚未写回服务端文件）',
+    origin === 'ai' ? 'AI' : '界面'
+  )
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeEditorCode())
 }
@@ -1628,7 +1635,13 @@ interface StepAdvanceOutcome {
   savedDefs?: string[]
 }
 
-async function goStep(next: number): Promise<StepAdvanceOutcome> {
+/**
+ * 推进到目标步骤（界面「下一步」与 AI `confirm_step` 共用）。
+ *
+ * @param guard 存活判据（AI 通道的预算到点 / 停止）：写回服务端文件是 await，之后若已作废
+ *   ⇒ 不切步骤、不写工作区（"超时/已停止"不得被迟到的步骤推进推翻）。
+ */
+async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
     return { ok: false, reason: `目标步骤 ${next} 不在导入向导范围内` }
   }
@@ -1649,6 +1662,13 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
       }
     }
     writtenDefs = flushed.savedDefs
+  }
+  if (guard?.() === true) {
+    return {
+      ok: false,
+      reason: '前端工具预算已到点或本轮已停止：步骤未推进（工作区与页面步骤均未改动）',
+      savedDefs: writtenDefs
+    }
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
@@ -2275,7 +2295,8 @@ function registerHandlers(): void {
         defCode: code,
         sheetName: defName(code),
         readOnly: isReadOnly.value,
-        version: workspace.dataVersion,
+        // 表内版本由 `resolveSheetContext` 从适配器取；不得回报全局 `workspace.dataVersion`
+        //（那是工作区计数，与"这张表是否被改过"无关，会把无关 touch 误判成表被改）。
         fields: defOf(code)?.fields ?? [],
         adapter: grid.getSheetAdapter()
       }
@@ -2285,10 +2306,14 @@ function registerHandlers(): void {
   })
 
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
-  registerPageHandler('import.nextStep', async (payload) => {
+  registerPageHandler('import.nextStep', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，不能推进步骤'
+    }
+    // 预算到点 / 本轮已停止 ⇒ 零写（交回执为确定性失败，不返回字符串）
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('推进步骤')
     }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
     const fromIndex = stepIndex.value
@@ -2306,7 +2331,8 @@ function registerHandlers(): void {
     }
     // F2（DC-14）：回灌文本必须与真实结局一致 —— 未推进就如实说"未推进 + 为什么"，
     // 否则模型会基于假的成功语义继续往下走（例如直接 start_import，而用户还停在第一步）。
-    const advanced = await goStep(index)
+    // guard：写回服务端文件是 await；期间预算到点/停止 ⇒ goStep 停在原步、不写工作区
+    const advanced = await goStep(index, uiAbandonGuard(lifetime))
     if (!advanced.ok) {
       const partial = advanced.savedDefs ?? []
       const partialNote = partial.length > 0
@@ -2339,10 +2365,14 @@ function registerHandlers(): void {
     return `已推进到导入向导步骤「${stepLabel(STEP_KEYS[index])}」${syncNote}${writeNote}。`
   })
 
-  registerPageHandler('import.selectDefs', async (payload) => {
+  registerPageHandler('import.selectDefs', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态不改变所选配置项（含收敛工作区与重载编辑区一并短路）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
+    }
+    // 预算到点 / 停止 ⇒ 选中集、工作区、编辑区一律不动
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('变更所选配置项')
     }
     const codes = normalizeDefinitionCodes(Array.isArray(payload.defCodes) ? payload.defCodes : [])
     // 编码必须存在于**当前**定义列表（空清单 = 不知道可用编码，同样拒绝）：非法码不写
@@ -2365,6 +2395,14 @@ function registerHandlers(): void {
     }
     if (generation !== taskGeneration) {
       return '任务已切换：本次所选配置项属于原任务，未应用到当前页面的编辑区'
+    }
+    if (uiAbandoned(lifetime)) {
+      // 已作废：选中集与工作区已在作废前同步（那一步发生在超时/停止之前），
+      // 但**编辑区切换与载入**是作废之后才要写的页面态 —— 一律不做。
+      return {
+        ok: false,
+        reason: '前端工具预算已到点或本轮已停止：本次未切换/载入编辑区（工作区与选中集以作废前状态为准）'
+      }
     }
     // 当前标签页仍被选中就别跳回第一张表；新增的编辑区由 loadEditors() 补齐，
     // 已载入的**不重载**（整页强制重载会把它们未保存的编辑换成服务端旧文件）

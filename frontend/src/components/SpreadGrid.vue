@@ -76,8 +76,13 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 用户改动了单元格（AI 侧据此判断工作区状态变化） */
-  (event: 'data-changed'): void
+  /**
+   * 表格内容发生变化。
+   *
+   * @param origin 来源：`ai` = AI 工具经适配器 `writeCells` 落笔；`user` = 用户在表格里手改。
+   *   页面据此把工作区动作记给正确的来源（AI 的写入不得记成"用户未保存编辑"）。
+   */
+  (event: 'data-changed', origin: 'user' | 'ai'): void
   /** 引擎就绪（含从 xlsx/JSON 载入后的就绪） */
   (event: 'ready'): void
   /**
@@ -271,7 +276,9 @@ async function initEngine(): Promise<void> {
     const events = gs.Spread.Sheets.Events
     const onChanged = (): void => {
       if (!restoring) {
-        emit('data-changed')
+        // 用户手改：表内内容版本 +1，事件来源 = user（页面按「界面」记工作区动作）
+        sheetContentVersion += 1
+        emit('data-changed', 'user')
       }
     }
     sheet.bind(events.CellChanged, onChanged)
@@ -375,6 +382,7 @@ function applyLoad(fieldDefs: readonly ConfigField[], rows: readonly Record<stri
   fields = fieldDefs
   // 程序化落数据（模板/换任务重载/加载占位）同样算一次内容代际
   sheetLoadGeneration += 1
+  sheetContentVersion += 1
   restoring = true
   sheet.suspendPaint()
   try {
@@ -436,6 +444,7 @@ async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Pr
     }
     // 程序化载入 ⇒ 新一代（旧预览/旧适配器持有者据此判定内容已换）
     sheetLoadGeneration += 1
+    sheetContentVersion += 1
     restoring = true
     try {
       instance.fromJSON(json)
@@ -546,6 +555,13 @@ const sheetAdapters = new WeakMap<SpreadWorksheet, SheetAdapter>()
  * "同表换内容"。页面能力把该值交给 AI 侧，`previewId` 与当前代数对不上即拒绝应用。
  */
 let sheetLoadGeneration = 0
+/**
+ * 表内内容版本（适配器 `contentVersion()` 的唯一来源）：载入 / AI 写入 / 用户手改各 +1。
+ *
+ * <p>与工作区全局 `dataVersion` 无关 —— 后者任何动作都会自增，拿它当"表格版本"会把无关 touch
+ * 误判成表被修改（预览硬闸已改为只认身份 + 行指纹，这里的版本只作元数据/摘要过期提示）。
+ */
+let sheetContentVersion = 0
 
 /** 工作表实例身份（重建换实例 ⇒ 换 id；同一实例稳定）。 */
 let sheetInstanceSequence = 0
@@ -674,12 +690,15 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
         sheet.resumePaint()
         restoring = false
       }
-      emit('data-changed')
+      // AI 落笔：表内内容版本 +1，事件来源 = ai（页面据此把工作区动作记给 AI）
+      sheetContentVersion += 1
+      emit('data-changed', 'ai')
     },
     selection: (): SheetSelection | null => selectionOf(live().getSelections()),
     // 预览身份（交互专项）：实例身份跟随 live()；代数读组件级计数。
     instanceId: (): string => sheetInstanceIdOf(live()),
     loadGeneration: (): number => sheetLoadGeneration,
+    contentVersion: (): number => sheetContentVersion,
     // 屏幕态标记（AI 表格工具治理 §5.4）：只设底色，不碰 cell style 的持久结构、
     // 不调 conditionalFormats —— 后者会进 toWorkbookJson()，而导出链只读值（collectRows）。
     markCells: (cells, tone) => {

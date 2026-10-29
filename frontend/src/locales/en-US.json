@@ -1300,6 +1300,7 @@
         "dirtyCanceled": "Re-export cancelled: the unsaved edits are still in the table",
         "exportBlockedByLists": "Failed to read the export results / job list ({reason}); the existing results and running jobs cannot be confirmed, so no export job was started. Click \"Retry loading\" first, then retry",
         "exportBlockedByDirty": "The result table has edits that are not saved to the server: once the re-export finishes, the server export file is replaced by the new job result and these edits are lost. Click \"Save edits to server\" first, or confirm discarding them in the UI",
+        "exportBlockedByAiDirty": "The result table has changes applied by the AI that are not saved to the server (you did not edit them manually): they would be lost once the re-export replaces the server file. Click \"Save edits to server\" to write them back first, or let the user confirm discarding them in the UI",
         "gridNotLoaded": "The result table is not loaded",
         "taskSwitchedNoDownload": "The task was switched; nothing was downloaded (the previous task's bytes are never used as the new task's export file)",
         "downloadNotLoadedNoTask": "The result table for {code} is not loaded ({reason}) and no task is bound, so the server bytes cannot be used as a fallback; nothing was downloaded",

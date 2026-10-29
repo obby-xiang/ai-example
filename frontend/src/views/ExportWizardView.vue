@@ -211,6 +211,7 @@ import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/defini
 import { validateConditionPayload } from '@/utils/condition-payload'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
+import { uiAbandonGuard, uiAbandoned, uiAbandonedReply } from '@/utils/ui-lifetime'
 
 const { t } = useI18n()
 
@@ -349,6 +350,13 @@ const inFlightDownloads = new Set<string>()
 const AI_BATCH_DOWNLOADING = 'ai-batch'
 let stopWatchJob: (() => void) | null = null
 let gridDirty = false
+/**
+ * 这些未保存改动是谁弄脏的：`user` = 用户手改（任一用户改动即归 user）；`ai` = 只有 AI 应用写过。
+ *
+ * <p>用途：判脏闸回执不得把 AI 的写入说成"用户未保存"（模型会据此把 start_export 当成
+ * 用户未决事项）；两者都仍拦下（授权矩阵不变，避免静默丢改动）。
+ */
+let gridDirtyBy: 'user' | 'ai' = 'user'
 
 const jobRunning = computed(() => exportJob.value !== null && ['PENDING', 'RUNNING'].includes(exportJob.value.status))
 
@@ -822,6 +830,7 @@ function resetTaskScopedState(): void {
   if (gridDirty) {
     ElMessage.warning(t('views.export.msg.unsavedDiscarded'))
     gridDirty = false
+    gridDirtyBy = 'user'
   }
   jobBatch.value = 1
   resultsBatch.value = 1
@@ -933,7 +942,13 @@ interface StepAdvanceOutcome {
   syncWarning?: string
 }
 
-async function goStep(next: number): Promise<StepAdvanceOutcome> {
+/**
+ * 推进到目标步骤（界面「下一步」与 AI `confirm_step` 共用）。
+ *
+ * @param guard 存活判据（AI 通道的预算到点 / 停止）：落库 await 之后、写步骤之前再问一次 ——
+ *   已作废 ⇒ 不切步骤、不写工作区（"超时/已停止"不得被迟到的步骤推进推翻）。
+ */
+async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceOutcome> {
   if (next < 0 || next >= STEP_KEYS.length) {
     return { ok: false, reason: `目标步骤 ${next} 不在导出向导范围内` }
   }
@@ -941,12 +956,15 @@ async function goStep(next: number): Promise<StepAdvanceOutcome> {
   const generation = taskGeneration
   const forTask = taskId.value
   // D7：先落库当前步数据再切步 —— persist 失败时界面必须停在原步（阻断推进）。
-  const persisted = await persistStepData(generation, forTask)
+  const persisted = await persistStepData(generation, forTask, guard)
   if (generation !== taskGeneration) {
     return { ok: false, reason: '任务已切换，本次未推进步骤' }
   }
   if (!persisted.ok) {
     return { ok: false, reason: persisted.reason ?? '保存选择与条件失败' }
+  }
+  if (guard?.() === true) {
+    return { ok: false, reason: '前端工具预算已到点或本轮已停止：步骤未推进（工作区与页面步骤均未改动）' }
   }
   stepIndex.value = next
   workspace.setStep(STEP_KEYS[next] ?? null)
@@ -1065,10 +1083,14 @@ function describeConditionInputError(error: InvalidConditionInputError): string 
  *
  * 任务号与代次都在**入口捕获**：落库跨多个 await，实时读 `taskId.value` 会在"落库途中换任务"时
  * 把 A 的选中集/条件写到 B（I2）。代次变了即中止并如实回报，调用方不得据此建作业。
+ *
+ * @param guard 存活判据（AI 通道的预算到点 / 停止）：最后一个 await 之后、写工作区之前再问一次
+ *   —— 落库（已发出的 HTTP）无法撤回，但"作废的续体不得再写工作区"必须守住。
  */
 async function persistStepData(
   generation: number = taskGeneration,
-  forTask: number | null = taskId.value
+  forTask: number | null = taskId.value,
+  guard?: () => boolean
 ): Promise<{ ok: boolean; reason?: string }> {
   if (forTask === null) {
     return { ok: true }
@@ -1112,6 +1134,14 @@ async function persistStepData(
       return { ok: false, reason: '任务已切换，本次未完成落库' }
     }
     task.value = refreshed
+    if (guard?.() === true) {
+      // 已作废（预算到点 / 停止）：落库确实发生了，但不得再写工作区（那会替一次已回灌
+      // "超时/已停止"的动作背书）。如实回"已提交、未写工作区"。
+      return {
+        ok: false,
+        reason: `前端工具预算已到点或本轮已停止：选择与条件已提交给任务 #${forTask}，未写入当前工作区`
+      }
+    }
     // issue #3：与 watch / AI handler 共用同一收敛点（此处落库后工作区通常已相等 ⇒ 短路，不重复记动作）
     syncSelectedDefsToWorkspace()
     return { ok: true }
@@ -1244,7 +1274,9 @@ interface StartExportOutcome {
  * **真实性**：`createJob` 一旦成功，后续失败（挂接抛错、建作业期间换任务）都不得退化成"未启动"——
  * 作业已在后端跑，回执必须是"已建在任务 #N、本页未跟踪、请勿重复发起"（`detached`/`attachError`）。
  */
-async function startExport(options: { discardUnsaved?: boolean } = {}): Promise<StartExportOutcome> {
+async function startExport(
+  options: { discardUnsaved?: boolean; guard?: () => boolean } = {}
+): Promise<StartExportOutcome> {
   if (taskId.value === null) {
     const reason = t('views.export.msg.noTaskBound')
     ElMessage.warning(reason)
@@ -1264,14 +1296,18 @@ async function startExport(options: { discardUnsaved?: boolean } = {}): Promise<
   if (gridDirty && exportResults.value.length > 0 && options.discardUnsaved !== true) {
     return {
       ok: false,
-      reason: t('views.export.msg.exportBlockedByDirty')
+      // 来源分流：AI 应用后的改动仍是"未保存"（拦下，避免静默丢弃），但回执不得说成
+      // "用户未保存" —— 那会让模型把 start_export 当成用户未决事项（2026-10-29 修复）。
+      reason: gridDirtyBy === 'ai'
+        ? t('views.export.msg.exportBlockedByAiDirty')
+        : t('views.export.msg.exportBlockedByDirty')
     }
   }
   // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
   // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
   const generation = taskGeneration
   const forTask = taskId.value
-  const persisted = await persistStepData(generation, forTask)
+  const persisted = await persistStepData(generation, forTask, options.guard)
   if (!persisted.ok) {
     const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
       + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
@@ -1420,6 +1456,7 @@ async function refreshResults(): Promise<void> {
   // 之前"未保存"的在线编辑事实上已不存在。脏标记必须同时归零：否则新加的判脏闸会
   // 把每次重导出都拦成"有未保存编辑"，而用户根本没有可保存的内容。
   gridDirty = false
+  gridDirtyBy = 'user'
   await loadExistingResults()
   if (generation !== taskGeneration) {
     return
@@ -1570,13 +1607,33 @@ function onGridSelectionChanged(defCode: string): void {
   useAiStore().onSheetSelectionChanged(defCode)
 }
 
-function onGridChanged(): void {
-  const firstChange = !gridDirty
+/**
+ * 表格内容变化（来源见 `SpreadGrid` 的 `data-changed` 载荷）。
+ *
+ * `origin === 'ai'` = AI 在预览卡上应用后的落笔：工作区动作记给 `AI`，判脏闸回执点名
+ * "AI 的改动尚未保存"，不再把模型自己的写入说成"用户未保存编辑"。
+ */
+function onGridChanged(origin: 'user' | 'ai' = 'user'): void {
+  const wasDirty = gridDirty
+  const wasAiOnly = wasDirty && gridDirtyBy === 'ai'
   gridDirty = true
+  if (origin === 'user') {
+    gridDirtyBy = 'user'
+  } else if (!wasDirty) {
+    gridDirtyBy = 'ai'
+  }
   workspace.bumpVersion()
-  if (firstChange) {
-    // 契约联动：把"用户改了导出结果表格"同步给 AI 上下文（同一批编辑只记一次）
-    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）')
+  if (!wasDirty) {
+    // 契约联动：同一批编辑只记一次；来源按实际写入者记（AI 的写入不得冒充用户动作）
+    workspace.touch(
+      origin === 'ai'
+        ? 'AI 已把改动写入导出结果表格（尚未保存到服务端文件）'
+        : '导出结果表格内容已修改（尚未保存到服务端文件）',
+      origin === 'ai' ? 'AI' : '界面'
+    )
+  } else if (origin === 'user' && wasAiOnly) {
+    // 之前只有 AI 写过，现在用户也改了：补一条「界面」来源，别让用户改动挂在 AI 名下
+    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）', '界面')
   }
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeTab.value)
@@ -2069,6 +2126,7 @@ async function saveEdits(): Promise<SaveOutcome> {
     return { ok: false, saved, skipped, invalid, unsupported, reason }
   }
   gridDirty = false
+  gridDirtyBy = 'user'
   ElMessage.success(t('views.export.msg.savedToServer'))
   return { ok: true, saved, skipped: [], invalid: [] }
 }
@@ -2319,10 +2377,14 @@ function registerHandlers(): void {
   })
 
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）
-  registerPageHandler('export.nextStep', async (payload) => {
+  registerPageHandler('export.nextStep', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，不能推进步骤'
+    }
+    // 预算到点 / 本轮已停止 ⇒ 本 handler 一律零写（步骤、工作区都不动）
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('推进步骤')
     }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
     const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
@@ -2331,7 +2393,8 @@ function registerHandlers(): void {
     }
     // W-06 撒谎点本体收口（批3③a D7）：取 goStep 真实结局再回灌 —— persist 失败阻断推进
     // 时必须如实说"未推进"，否则模型会带着假的成功语义继续往下走。
-    const advanced = await goStep(index)
+    // guard：落库 await 之后若已作废（超时/停止），goStep 停在原步、不写工作区。
+    const advanced = await goStep(index, uiAbandonGuard(lifetime))
     if (!advanced.ok) {
       // 结构化失败原样上报（A3 解读支）——不得返回字符串：字符串走「兼容⇒ok」会让卡面 tag
       // 显示「已成功」而卡内文写「步骤未推进」，卡面与回灌自相矛盾（复核 I1）。
@@ -2346,11 +2409,15 @@ function registerHandlers(): void {
     }
     return `已推进到导出向导步骤「${stepLabel(STEP_KEYS[index])}」`
   })
-  registerPageHandler('export.selectDefs', (payload) => {
+  registerPageHandler('export.selectDefs', (payload, lifetime) => {
     // 施工卡 §S3e（收口修 F4，复核 minor-2）：只读态不改变所选配置项 —— 与导入侧
     // import.selectDefs 守卫对称（本批 10 处守卫的最后一块拼图）
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未变更所选配置项'
+    }
+    // 预算到点 / 本轮已停止 ⇒ 选中集与工作区都不得再写（本 handler 全同步，入口判一次即可）
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('变更所选配置项')
     }
     const codes = normalizeDefinitionCodes(Array.isArray(payload.defCodes) ? payload.defCodes : [])
     // 编码必须存在于**当前**定义列表（空清单 = 不知道可用编码，同样拒绝）：非法码不写
@@ -2369,10 +2436,14 @@ function registerHandlers(): void {
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
-  registerPageHandler('export.setConditions', async (payload) => {
+  registerPageHandler('export.setConditions', async (payload, lifetime) => {
     // 施工卡 §S3e（§2.4 零写清单：setCondition 页面 + AI handler 两处）：只读态拦在落库之前
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未设置查询条件'
+    }
+    // 预算到点 / 本轮已停止 ⇒ 零写：页面草案、touched 登记与工作区都不动，先给确定性失败
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('设置查询条件')
     }
     const defCode = String(payload.defCode ?? '')
     if (!defCode) {
@@ -2426,6 +2497,14 @@ function registerHandlers(): void {
       if (generation !== taskGeneration || taskId.value !== forTask) {
         return `查询条件已提交给任务 #${forTask}，但页面已切换到别的任务：本次未写入当前任务的工作区`
       }
+      if (uiAbandoned(lifetime)) {
+        // 已作废（预算到点 / 停止）：PUT 已发出无法撤回，但工作区不得再写 —— 否则一次
+        // 已回灌"超时/已停止"的动作又会在上下文里变成"条件已同步"。
+        return {
+          ok: false,
+          reason: `前端工具预算已到点或本轮已停止：查询条件已提交给任务 #${forTask}，未写入当前工作区`
+        }
+      }
       // 已落库 ⇒ 草案与服务端一致，后续切步不必重复写（失败则保留登记，切步时重试）
       touchedConditions.delete(defCode)
       if (condition === null) {
@@ -2445,12 +2524,16 @@ function registerHandlers(): void {
     }
   })
 
-  registerPageHandler('export.start', async () => {
+  registerPageHandler('export.start', async (_payload, lifetime) => {
     // 施工卡 §S3e（§2.4 零写清单：createJob 在列）：只读态不得借 AI 通道新建导出作业
     if (isReadOnly.value) {
       return { ok: false, reason: '任务已结束，仅供查看，未启动导出作业' }
     }
-    const outcome = await startExport()
+    // 预算到点 / 停止 ⇒ 零写零建作业；在途作废由 startExport 透传给 persistStepData 复查
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('启动导出作业')
+    }
+    const outcome = await startExport({ guard: uiAbandonGuard(lifetime) })
     if (!outcome.ok) {
       // 条件没落库 / 清单读不到 / 有未保存编辑 ⇒ 未建作业：结构化失败。
       // 各闸门的 `reason` 自带可行动指引（先重试读取 / 先保存或确认丢弃），这里不再追加
@@ -2506,7 +2589,8 @@ function registerHandlers(): void {
         defCode: code,
         sheetName: defName(code),
         readOnly: isReadOnly.value,
-        version: workspace.dataVersion,
+        // 表内版本由 `resolveSheetContext` 从适配器取（`contentVersion` / loadGeneration 派生）；
+        // 这里**不得**回报 `workspace.dataVersion` —— 全局工作区计数会把无关 touch 误判成表被改。
         fields: fieldsOf(code),
         adapter: grid.getSheetAdapter()
       }
@@ -2515,8 +2599,12 @@ function registerHandlers(): void {
     }
   })
 
-  registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload) => {
+  registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload, lifetime) => {
     const defCode = String(payload.defCode ?? '')
+    // 预算到点 / 停止 ⇒ 不切步骤、不切标签页（本次执行已回灌为超时/已停止）
+    if (uiAbandoned(lifetime)) {
+      return uiAbandonedReply('打开在线编辑器')
+    }
     if (!defCode) {
       // R7：参数错误必须结构化失败 —— 字符串会被 `interpretHandlerOutcome` 当成功（假成功）。
       // 其它刻意信息型回执（如只读态的「任务已结束，仅供查看…」）保持字符串不动。
@@ -2537,7 +2625,7 @@ function registerHandlers(): void {
       } else {
         // 批3③a D7：W-06 残余入口收口 —— persist 失败阻断推进时结构化如实上报（A3 解读支），
         // 不得谎报"已打开在线编辑器"。
-        const advanced = await goStep(2)
+        const advanced = await goStep(2, uiAbandonGuard(lifetime))
         if (!advanced.ok) {
           return {
             ok: false,

@@ -32,8 +32,29 @@ export type PageHandlerName =
   | 'export.syncJob'
   | 'import.syncJob'
 
+/**
+ * 一次前端工具执行的**存活标记**（由 `utils/frontend-tools` 的 `runWithBudget` 持有，
+ * 停止时由 `abandonInFlightFrontendTools()` 一并作废）。
+ *
+ * <p>为什么需要：预算到点后 `executeFrontendTool` 已经回灌"超时"，但被抛弃的异步续体还在跑 ——
+ * 它若继续写工作区（`setStep` / `setSelectedDefs` / `setQueryConditions` / `setImportMode` /
+ * `touch` / `ui_event_result`）或推进页面步骤，面板就会出现"已经超时的动作又报了一次同步"，
+ * 下一轮请求也会带着一条模型并未确认的动作。用户点「停止」是同一类事实（本轮已放弃），
+ * 故 `stop()` 也把在途工具的标记置为作废。
+ *
+ * <p>传播面：契约层 `dispatchUiEvent` / `runUiEvent`、页面能力 handler（`PageHandler` 第二参数）
+ * 与登记执行器（`FrontendToolExecutor` 第二参数）都读它。缺省（页面手点 / 单测直调）不传 ⇒
+ * 行为与改动前完全一致；不新增任何跨进程协议。
+ */
+export interface UiEventLifetime {
+  abandoned: boolean
+}
+
 /** 页面能力 handler：入参由各页自定，返回说明文本（作为工具结果回灌）。 */
-export type PageHandler = (payload: Record<string, unknown>) => unknown | Promise<unknown>
+export type PageHandler = (
+  payload: Record<string, unknown>,
+  lifetime?: UiEventLifetime
+) => unknown | Promise<unknown>
 
 /**
  * 页面级上下文（批次5A 的「声明即全集」口径）：这些字段是「当前任务 / 当前页」的事实，

@@ -121,6 +121,15 @@ export interface SheetAdapter {
    * 只靠 `instanceId` 抓不到这种"同表换内容"。
    */
   loadGeneration?(): number
+  /**
+   * 表内内容版本（可选）：**这张表自己的**内容每变一次 +1（载入 / AI 写入 / 用户手改）。
+   *
+   * <p>为什么单列：`SheetContext.version` / `sheetMeta.sheetVer` 曾直接取
+   * `workspace.dataVersion`，那是**工作区全局**计数 —— 记一条无关动作也会自增，
+   * 读工具回报的"版本"与"表格是否被改过"因此对不上（2026-10-29 修复）。
+   * 适配器不实现时由 {@link sheetContentVersionOf} 按 `loadGeneration` 派生表内计数。
+   */
+  contentVersion?(): number
 }
 
 /** 表格上下文（页面能力 `sheet.current` 的返回值）。 */
@@ -130,7 +139,12 @@ export interface SheetContext {
   readOnly: boolean
   adapter: SheetAdapter
   fields: readonly ConfigField[]
-  /** 工作区数据版本号（模型见版本变化即知摘要过期） */
+  /**
+   * 表内内容版本号（`sheetMeta.sheetVer` 同源；模型见版本变化即知摘要过期）。
+   *
+   * <p>**不是** `workspace.dataVersion`：那是工作区全局计数，任何无关动作都会自增，
+   * 拿它判"表格是否被改过"会误伤预览（见 {@link sheetContentVersionOf}）。
+   */
   version: number
   /**
    * 表格实例身份（可选；缺省时由适配器方法/前端兜底派生）。
@@ -169,7 +183,7 @@ export interface SheetToolMeta {
   projCols?: number
   /** 表/范围总行数（采样占比：20 / 30 万 vs 20 / 30 是两件事） */
   totalRows?: number
-  /** 工作区版本号（与 ctx.version 同源） */
+  /** 表格内容版本号（与 ctx.version 同源；表内计数，不是 workspace.dataVersion） */
   sheetVer?: number
   /** 写工具的 planId（把日志与预览卡、撤销补丁串起来） */
   planId?: string
@@ -1476,6 +1490,57 @@ export function sheetLoadGenerationOf(ctx: SheetContext): number {
   return 0
 }
 
+/** `sheetContentVersionOf` 的派生计数（适配器无 `contentVersion` 时的表内回退）。 */
+const derivedContentVersions = new WeakMap<SheetAdapter, { loadGeneration: number; version: number }>()
+
+/**
+ * 表内内容版本（`SheetContext.version` / `sheetMeta.sheetVer` 的唯一来源）。
+ *
+ * <p>两条取值：
+ * <ol>
+ * <li>适配器给了 `contentVersion()` ⇒ 以它为准（真表格：载入 / AI 写入 / 用户手改都 +1）；</li>
+ * <li>没给（纯数据面适配器 / 单测桩）⇒ 按**该适配器**的 `loadGeneration` 派生：同表重载 +1，
+ * 其余一概不动。**不读 `workspace.dataVersion`** —— 全局工作区计数与"这张表是否被改过"
+ * 无关，拿它当 `sheetVer` 会把无关 touch 误判成表被修改（2026-10-29 修复）。</li>
+ * </ol>
+ *
+ * <p>本函数只回答"表内版本是多少"，**不是**预览硬闸：硬闸见 `previewIdentityMismatch`
+ * 与 `applySheetPlan` / `replanSheet` 的行指纹比对。
+ */
+export function sheetContentVersionOf(adapter: SheetAdapter): number {
+  if (typeof adapter.contentVersion === 'function') {
+    try {
+      const value = adapter.contentVersion()
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value
+      }
+    } catch {
+      // 适配器已不可用：回落到派生计数（不把异常抛给读工具）
+    }
+  }
+  let generation = 0
+  if (typeof adapter.loadGeneration === 'function') {
+    try {
+      const value = adapter.loadGeneration()
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        generation = value
+      }
+    } catch {
+      // 同上：按 0 处理
+    }
+  }
+  const entry = derivedContentVersions.get(adapter)
+  if (!entry) {
+    derivedContentVersions.set(adapter, { loadGeneration: generation, version: 1 })
+    return 1
+  }
+  if (entry.loadGeneration !== generation) {
+    entry.loadGeneration = generation
+    entry.version += 1
+  }
+  return entry.version
+}
+
 /** 预览身份（toolCallId + sheetInstanceId + loadGeneration + scope）。 */
 export function previewIdentityOf(
   toolCallId: string,
@@ -1495,6 +1560,25 @@ function previewIdentityMismatch(plan: SheetWritePlan, ctx: SheetContext): boole
     return false
   }
   return plan.previewId !== previewIdentityOf(plan.toolCallId, ctx, plan.scope)
+}
+
+/**
+ * 目标行指纹是否与预览时一致（预览硬闸的第二道，与 `applySheetPlan` 同口径）。
+ *
+ * <p>只比"这张卡要改的那几行"的主键值：同一文件内的其它手改不使预览失效
+ * （用户 2026-10-25「同文件后写可覆盖」口径），无主键则比首列。
+ */
+function sameTargetFingerprint(plan: SheetWritePlan, ctx: SheetContext): boolean {
+  if (plan.targetRows.length === 0) {
+    return true
+  }
+  const current = fingerprintRows(ctx, plan.targetRows, keyColumns(ctx))
+  for (let index = 0; index < plan.targetRows.length; index += 1) {
+    if (current[index] !== plan.fingerprint[index]) {
+      return false
+    }
+  }
+  return true
 }
 
 const PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未应用任何改动。请重新发起。'
@@ -2560,7 +2644,11 @@ export function sheetAppliedSummary(ctx: SheetContext): SheetAppliedSummary | nu
 
 export type ApplySheetPlanOutcome =
   | { ok: true; text: string; cells: number }
-  | { ok: false; reason: string }
+  /**
+   * 失败。`appliedCells` / `undoable` 只在中途异常（已写入一部分）时出现：
+   * 实际写入格数 + 这部分是否已登记为可撤销（用户可回滚，不必猜"到底改了多少"）。
+   */
+  | { ok: false; reason: string; appliedCells?: number; undoable?: boolean }
 
 /**
  * 应用计划：先逐行复核指纹（任一不符 ⇒ 整批拒绝），再分块 `writeCells`，最后登记反向补丁。
@@ -2569,6 +2657,11 @@ export type ApplySheetPlanOutcome =
  * 计数档（`detail === 'none'`）**不可直接应用**：它没有物化明细，也就没有逐格的新值可写。
  * 这条不是限制而是诚实 —— 让它"应用 0 格"才是真正的谎（用户会以为改了）。
  * 卡面在计数档下会先请求重算（`replanSheet`）再允许应用。
+ *
+ * <p><b>中途异常（2026-10-29）</b>：分块写入可能只落了前面几块就抛错（引擎错 / 表被重建）。
+ * 旧实现让异常直接冒泡 ⇒ 卡面无回执、已写部分没有撤销登记。现在：已写部分**登记撤销**、
+ * 回执如实 `failed` 并报**实际写入格数**，计划置 `failed`（重放不再写一格）。
+ * 这是"部分成功"的诚实形态，不是整批成功。
  */
 export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
   const readOnly = requireReadable(ctx)
@@ -2598,37 +2691,81 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
       }
     }
   }
-  for (const chunk of chunkUpdates(changesToUpdates(plan.changes))) {
-    ctx.adapter.writeCells(chunk)
+  // 分块写入：逐块记下"真的落下去的那部分"（changes 与 updates 一一对应、顺序不变）
+  const chunks = chunkUpdates(changesToUpdates(plan.changes))
+  const written: SheetChange[] = []
+  let cursor = 0
+  for (const chunk of chunks) {
+    try {
+      ctx.adapter.writeCells(chunk)
+    } catch (error) {
+      const appliedCells = written.length
+      if (appliedCells > 0) {
+        registerUndoEntry(ctx, plan, written)
+        markAppliedCells(ctx, written)
+      }
+      // 消费计划：半批已落笔，同一份计划不得再被"应用"一次（那会把已写部分写第二遍）
+      plan.status = 'failed'
+      const reason = error instanceof Error ? error.message : String(error)
+      const total = plan.changes.length
+      const remaining = total - appliedCells
+      const undoNote = appliedCells > 0
+        ? `已写入的 ${appliedCells} 格已登记为可撤销（可用 undo_last_sheet_edit 回滚这部分）`
+        : '没有任何一格写入（表格保持原样）'
+      return {
+        ok: false,
+        reason: `写入中途失败：已写入 ${appliedCells} 格 / 共 ${total} 格，未写入的 ${remaining} 格保持原样（原因：${reason}）。`
+          + `${undoNote}。请核对表格实际内容后再决定是否重新发起。`,
+        appliedCells,
+        undoable: appliedCells > 0
+      }
+    }
+    written.push(...plan.changes.slice(cursor, cursor + chunk.length))
+    cursor += chunk.length
   }
   if (plan.changes.length > 0) {
-    const stack = undoStack.get(ctx.adapter) ?? []
-    // 同一 planId 不重复入栈（防双击应用把同一批改动记两次）
-    if (!stack.some((entry) => entry.planId === plan.planId)) {
-      stack.push({
-        planId: plan.planId,
-        toolCallId: plan.toolCallId,
-        tool: plan.tool,
-        defCode: plan.defCode,
-        atMs: Date.now(),
-        changes: plan.changes,
-        rowsCount: plan.rowsCount,
-        cellsCount: plan.cellsCount,
-        appliedValues: plan.changes.map((change) => change.newValue)
-      })
-      // 超出深度即 FIFO 丢掉栈底（静默 —— 但撤销回执会如实报"剩余可撤销 N 层"）
-      while (stack.length > SHEET_UNDO_DEPTH) {
-        stack.shift()
-      }
-      undoStack.set(ctx.adapter, stack)
-    }
-    // 屏幕态标记（L-23 的复用点）：只画底色，不写 cell style / conditionalFormats
-    // —— 后者会污染 toWorkbookJson() 产物（导出走 collectRows()，只读值，故底色进不了文件）。
-    ctx.adapter.markCells?.(plan.changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
+    registerUndoEntry(ctx, plan, plan.changes)
+    markAppliedCells(ctx, plan.changes)
   }
   // 消费计划（恰好一次）：第二次直接 apply 同一份计划 ⇒ 身份闸/状态闸拒执，不再写一格。
   plan.status = 'applied'
   return { ok: true, text: planAppliedText(plan, ctx), cells: plan.changes.length }
+}
+
+/**
+ * 登记一层反向补丁（`changes` = **实际写入**的那部分；全量成功时就是计划全量）。
+ *
+ * <p>同一 `planId` 不重复入栈（防双击应用 / 半批重放把同一批改动记两次）。
+ */
+function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): void {
+  if (changes.length === 0) {
+    return
+  }
+  const stack = undoStack.get(ctx.adapter) ?? []
+  if (stack.some((entry) => entry.planId === plan.planId)) {
+    return
+  }
+  stack.push({
+    planId: plan.planId,
+    toolCallId: plan.toolCallId,
+    tool: plan.tool,
+    defCode: plan.defCode,
+    atMs: Date.now(),
+    changes: [...changes],
+    rowsCount: new Set(changes.map((change) => change.row)).size,
+    cellsCount: changes.length,
+    appliedValues: changes.map((change) => change.newValue)
+  })
+  // 超出深度即 FIFO 丢掉栈底（静默 —— 但撤销回执会如实报"剩余可撤销 N 层"）
+  while (stack.length > SHEET_UNDO_DEPTH) {
+    stack.shift()
+  }
+  undoStack.set(ctx.adapter, stack)
+}
+
+/** 已应用色的绘制（只画底色，不写 cell style / conditionalFormats）。 */
+function markAppliedCells(ctx: SheetContext, changes: readonly SheetChange[]): void {
+  ctx.adapter.markCells?.(changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
 }
 
 /**
@@ -2880,11 +3017,15 @@ export function replanSheet(
   if (!plan.args) {
     return { ok: false, reason: '预览缺少入参快照，无法重算明细。请让 AI 重新发起。' }
   }
-  if (plan.sheetVer !== undefined && plan.sheetVer !== ctx.version) {
+  // 硬闸只有两道：表格身份（previewId：toolCallId + instanceId + loadGeneration + scope）
+  // 与**目标行指纹**（表真的变了才算失效）。
+  // 这里刻意**不比对** `plan.sheetVer !== ctx.version`：`sheetVer` 是表内内容版本/元数据，
+  // 旧实现拿工作区全局 `dataVersion` 当它，任何无关 touch 都会把预览误判成失效。
+  if (previewIdentityMismatch(plan, ctx)) {
+    // 程序化重载（loadGeneration 变）不一定改行值 ⇒ 必须单独比对身份
     return { ok: false, reason: STALE_PREVIEW_REASON }
   }
-  if (previewIdentityMismatch(plan, ctx)) {
-    // 程序化重载（loadGeneration 变）不一定会 bump workspace.dataVersion ⇒ 必须单独比对身份
+  if (!sameTargetFingerprint(plan, ctx)) {
     return { ok: false, reason: STALE_PREVIEW_REASON }
   }
   const args: SheetArgs = { ...plan.args, preview: level }

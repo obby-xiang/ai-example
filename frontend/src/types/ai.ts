@@ -712,7 +712,12 @@ export interface SheetWritePlan {
   fingerprint: string[]
   warnings: string[]
   rulesText: string
-  status: 'pending' | 'applied' | 'cancelled' | 'stale'
+  /**
+   * `pending` = 可应用；`applied` = 全量落笔并登记撤销；
+   * `failed` = **部分**落笔后中途异常（已写部分已登记撤销，同一计划不得重放）；
+   * `cancelled` / `stale` = 用户放弃 / 上下文失效。
+   */
+  status: 'pending' | 'applied' | 'failed' | 'cancelled' | 'stale'
   /**
    * 明细粒度（AI 表格工具治理方案 §6.2 的 P0 快路径）：
    * `none` = 计数档，**没有物化 changes**（`changes` 恒空、`targetRows`/`fingerprint` 恒空）；
@@ -737,7 +742,7 @@ export interface SheetWritePlan {
    * <p><b>只在浏览器内存</b>：可能含 predicate 的取值，绝不进回灌、不进日志。
    */
   args?: Record<string, unknown>
-  /** 计划生成时的工作区版本号（切档重算前比对，变了即"预览失效"，不静默套用旧结果）。 */
+  /** 计划生成时的**表内内容版本**（元数据/诊断；预览硬闸只看 previewId 与行指纹，不比对它）。 */
   sheetVer?: number
   /** 所属轮次（store 回灌用；纯函数计划不带） */
   runId?: string

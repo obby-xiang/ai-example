@@ -98,6 +98,7 @@ import {
   readSheetSummary,
   reviewCells,
   sheetReadOnlyWriteBlocked,
+  sheetContentVersionOf,
   type SheetAdapter,
   type SheetContext,
   type SheetToolOutcome
@@ -125,8 +126,14 @@ export interface FrontendToolCall {
  * 执行器签名：返回回灌给模型的结果文本，或结构化的 {@link FrontendToolExecution}
  * （批3③a A4：执行器想如实报失败不必再 throw —— 可直接返回结构化结局，由
  * runRegisteredTool 按结构化解读；字符串返回值保持"成功 + 该文本"的兼容解读）。
+ *
+ * <p>第二参数是本次执行的存活标记（见 {@link UiEventLifetime}）：预算到点 / 用户停止后
+ * 已作废 ⇒ 执行器在 await 之后不得再写工作区。旧执行器忽略它即可（行为不变）。
  */
-export type FrontendToolExecutor = (call: FrontendToolCall) => Promise<string | FrontendToolExecution> | string | FrontendToolExecution
+export type FrontendToolExecutor = (
+  call: FrontendToolCall,
+  lifetime?: UiEventLifetime
+) => Promise<string | FrontendToolExecution> | string | FrontendToolExecution
 
 /** 页面 handler 名：打开导出文件在线编辑器（由导出向导页面注册）。 */
 export const PAGE_HANDLER_OPEN_EXPORT_EDITOR = 'export.openEditor'
@@ -443,10 +450,39 @@ export async function executeFrontendTool(call: FrontendToolCall): Promise<Front
   const startedAt = Date.now()
   // 执行存活标记：预算到点即作废 —— 被抛弃的续体此后不得再写工作区（见 UiEventLifetime）
   const lifetime: UiEventLifetime = { abandoned: false }
-  const outcome = await runWithBudget(dispatchFrontendTool(call, lifetime), budgetMs, startedAt, lifetime)
-  return outcome.kind === 'timeout'
-    ? timeoutOutcome(call, budgetMs, outcome.elapsedMs)
-    : outcome.execution
+  liveLifetimes.add(lifetime)
+  try {
+    const outcome = await runWithBudget(dispatchFrontendTool(call, lifetime), budgetMs, startedAt, lifetime)
+    return outcome.kind === 'timeout'
+      ? timeoutOutcome(call, budgetMs, outcome.elapsedMs)
+      : outcome.execution
+  } finally {
+    liveLifetimes.delete(lifetime)
+  }
+}
+
+/**
+ * 在途的前端工具存活标记（`executeFrontendTool` 进入时登记、结算时注销）。
+ *
+ * <p>为什么要一张表：预算到点由 `runWithBudget` 自己置位，但**用户点「停止」**是另一条
+ * 触发面 —— 停止发生在 `executeFrontendTool` 之外（`stores/ai.ts#stop`），没有这张表就没有
+ * 任何途径把"本轮已放弃"告诉正在 await 的执行器/页面 handler。
+ */
+const liveLifetimes = new Set<UiEventLifetime>()
+
+/**
+ * 作废**所有在途**前端工具（用户停止本轮时调用）。
+ *
+ * <p>语义 = "本轮已被放弃，此后不得再写工作区/步骤/选中集"：标记一置，被抛弃的续体在
+ * 下一次 await 之后读到的就是 `abandoned === true`（页面 handler / 登记执行器 / 契约层
+ * `dispatchUiEvent` 三处同源判据）。已发出的 HTTP 请求无法撤回；回执文案仍由各 handler
+ * 如实表述"已提交但未写入当前工作区"。
+ */
+export function abandonInFlightFrontendTools(): void {
+  for (const lifetime of liveLifetimes) {
+    lifetime.abandoned = true
+  }
+  liveLifetimes.clear()
 }
 
 /**
@@ -717,7 +753,7 @@ async function dispatchFrontendToolInner(
 ): Promise<FrontendToolExecution> {
   const descriptor = findFrontendTool(call.name)
   if (descriptor) {
-    return await runRegisteredTool(descriptor, call)
+    return await runRegisteredTool(descriptor, call, lifetime)
   }
   // 批次 5B（Task 8）：`restore_task` = **按服务端任务类型**恢复向导（入参只需 taskId）。
   // 旧实现经别名落到 `navigate_to`：缺 `page` 直接判"参数不完整"（模型手里的 `restore_task`
@@ -747,7 +783,7 @@ async function dispatchFrontendToolInner(
   // 路由 4：页面能力 handler（页面经 registerPageHandler 反向暴露，名字即 handler 名）
   const handler = getPageHandler(call.name)
   if (handler) {
-    return await runPageHandler(call.name, handler, call.args)
+    return await runPageHandler(call.name, handler, call.args, undefined, lifetime)
   }
   return makeExecution({
     outcome: 'failed',
@@ -1401,7 +1437,7 @@ async function runWorkspaceAction(
   for (const handlerName of action.handlerNames) {
     const handler = getPageHandler(handlerName)
     if (handler) {
-      return await runPageHandler(handlerName, handler, normalizeActionArgs(action, args), action.displayName)
+      return await runPageHandler(handlerName, handler, normalizeActionArgs(action, args), action.displayName, lifetime)
     }
   }
 
@@ -1493,7 +1529,6 @@ export async function resolveSheetContext(
     defCode?: unknown
     sheetName?: unknown
     readOnly?: unknown
-    version?: unknown
     adapter?: unknown
     fields?: unknown
   }
@@ -1511,7 +1546,9 @@ export async function resolveSheetContext(
       readOnly: value.readOnly === true,
       adapter: value.adapter as SheetAdapter,
       fields: value.fields as ConfigField[],
-      version: typeof value.version === 'number' ? value.version : 0
+      // 表内内容版本（不是页面回报的全局 `workspace.dataVersion`）：无关 touch 不改它，
+      // 也不参与预览硬闸（硬闸 = previewId + 行指纹，见 sheet-tools 的 replanSheet / applySheetPlan）。
+      version: sheetContentVersionOf(value.adapter as SheetAdapter)
     }
   }
 }
@@ -1590,7 +1627,8 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
 /** 路由 1：登记在册的前端工具（参数校验 + scope 校验 + 执行器）。 */
 async function runRegisteredTool(
   descriptor: FrontendToolDescriptor,
-  call: FrontendToolCall
+  call: FrontendToolCall,
+  lifetime: UiEventLifetime
 ): Promise<FrontendToolExecution> {
   const validated = validateArgs(descriptor, call.args)
   if (!validated.ok) {
@@ -1626,7 +1664,7 @@ async function runRegisteredTool(
   }
 
   try {
-    const value = await executor({ ...call, args: validated.coerced })
+    const value = await executor({ ...call, args: validated.coerced }, lifetime)
     // 批3③a A4：执行器可返回结构化结局（如实报失败不必 throw）；字符串保持成功兼容解读。
     return normalizeExecutorReturn(value)
   } catch (error) {
@@ -1781,13 +1819,16 @@ async function runUiEventAction(
 /** 路由 4：页面 handler（页面未注册时该分支不会被走到）。 */
 async function runPageHandler(
   name: string,
-  handler: (payload: Record<string, unknown>) => unknown | Promise<unknown>,
+  handler: (payload: Record<string, unknown>, lifetime?: UiEventLifetime) => unknown | Promise<unknown>,
   args: Record<string, unknown>,
-  displayName?: string
+  displayName?: string,
+  lifetime?: UiEventLifetime
 ): Promise<FrontendToolExecution> {
   const label = displayName ?? name
   try {
-    const outcome = await handler(args)
+    // lifetime = 本次执行的存活标记：页面 handler 在 await 之后读它，已作废就不写工作区/
+    // 步骤/选中集（停止或预算到点后，"超时回执"不得被页面迟到的写入推翻）。
+    const outcome = await handler(args, lifetime)
     // 批3③a A3：handler 可返回结构化 `{ ok:false, reason }` 如实报失败（D2：确定性失败，
     // 不得再包成 ok:true）；字符串保持成功兼容解读（D3(iii) 登记面不动）。
     const interpreted = interpretHandlerOutcome(outcome, label)
@@ -1987,12 +2028,13 @@ function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
     return (call) => runSheetTool(name, call.args)
   }
   if (name === 'open_export_file_editor') {
-    return async (call) => {
+    return async (call, lifetime) => {
       const handler = getPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR)
       if (!handler) {
         throw new Error('导出向导未注册在线编辑器能力')
       }
-      const outcome = await handler({ taskId: call.args.taskId, defCode: call.args.defCode })
+      // 页面 handler 同样拿得到存活标记（打开编辑器前的 await 链可能跨过预算/停止）
+      const outcome = await handler({ taskId: call.args.taskId, defCode: call.args.defCode }, lifetime)
       // 批3③a A5：不再自吞 handler 结局 —— 结构化失败原样透传（由 runRegisteredTool 的
       // normalizeExecutorReturn 落 failed）；字符串保持成功兼容解读。
       const interpreted = interpretHandlerOutcome(outcome, `已请求打开 ${String(call.args.defCode)} 的在线编辑器`)

@@ -119,12 +119,24 @@ describe('P-03 切档重算：planId 不变、明细变成 full', () => {
   })
 })
 
-describe('P-04 版本变化 ⇒ 不套用旧结果', () => {
-  it('切档前表格版本变了 ⇒ replan 失败并说明"预览已失效"', () => {
+describe('P-04 硬闸只认行指纹：无关版本变化不套用旧结果的前提已移除', () => {
+  it('切档前版本号变化（表没动，无关 touch）⇒ 照常重算，planId 不变', () => {
     const countPlan = replacePlan('count')
     const changed: SheetContext = { ...ctx, version: (ctx.version ?? 0) + 1 }
 
     const replanned = replanSheet(changed, countPlan, 'sample-diff')
+
+    expect(replanned.ok).toBe(true)
+    if (!replanned.ok) return
+    expect(replanned.plan.planId).toBe(countPlan.planId)
+  })
+
+  it('目标行主键被改（表真的变了）⇒ replan 失败并说明"预览已失效"', () => {
+    const countPlan = replacePlan('count')
+    // 版本号不变：旧实现靠 sheetVer 判失效，这条改动它看不到；行指纹必须抓到
+    sheet.rows[0]!.code = 'C1-EDITED'
+
+    const replanned = replanSheet(ctx, countPlan, 'sample-diff')
 
     expect(replanned.ok).toBe(false)
     if (replanned.ok) return
