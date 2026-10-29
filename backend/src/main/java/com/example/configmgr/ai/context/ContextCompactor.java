@@ -279,13 +279,16 @@ public final class ContextCompactor {
 		// 而触发线看整条请求 ⇒ 会每轮判 L3、每轮空截一次。此时只留 L1。
 		int prefixTokens = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
 		int l2 = config.getL2Percent() <= 0 ? 80 : config.getL2Percent();
-		long denominator = Math.max(1L,
-				(long) limit - ContextTrigger.effectiveReserve(limit, config.getReserveTokens()));
-		// C1：守卫只在<b>还有余量</b>（{@code nextEst < limit}）时成立 —— 那时 L2/L3 确实徒劳
-		// （压不动固定前缀）。但 {@code nextEst >= limit} 是"这一发注定 400"：L3 硬截断是唯一能腾出
-		// 空间的一刀，挡掉它等于拿上游 400 换一次"没压"。故真越窗<b>保留 L3</b>。
+		int completionReserve = ContextTrigger.effectiveReserve(limit, config.getReserveTokens());
+		long denominator = Math.max(1L, (long) limit - completionReserve);
+		// C1 + R4/N-A：守卫只在"这一发**连同输出预留**都放得下"时成立 —— 那时 L2/L3 确实徒劳
+		// （压不动固定前缀）。判据必须带上输出预留：`limit − reserve ≤ nextEst < limit` 这段
+		// prompt 看似没满，但加上 max_tokens 就放不下，上游照样 400（R3 只判 nextEst < limit，
+		// 在这条区间里每轮降级 = 每轮发一次注定 400 的请求）。故：
+		//   放得下 ⇒ 降级（L1）；放不下（含 nextEst >= limit 的真越窗）⇒ 保留 L3。
+		boolean fitsWithCompletion = decision.nextEst() + completionReserve <= limit;
 		boolean prefixDominated = prefixTokens > 0 && prefixTokens * 100d / denominator >= l2
-				&& decision.nextEst() < limit;
+				&& decision.nextEst() < limit && fitsWithCompletion;
 		if (prefixDominated && target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
 			target = ContextTrigger.Level.L1;
 		}

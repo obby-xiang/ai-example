@@ -340,10 +340,12 @@ class ContextCompactorTest {
 		smallWindow.getContext().setLimitTokens(15000);
 		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
 				this.store);
-		// 15000 窗口、预留 13000 ⇒ 有效预留 7500；本轮 prefix 7000（requestWith 固定）⇒ 93% ≥ L2 线
-		seed("L2", 9000);
+		// 15000 窗口、预留 13000 ⇒ 有效预留 7500；本轮 prefix 7000（requestWith 固定）⇒ 93% ≥ L2 线。
+		// 真值 7000 ⇒ 7000 + 7500 = 14500 ≤ 15000：**连输出预留都放得下**（N-A 之后守卫的前置条件），
+		// 这个局面才是"压了也没用、但不压也不会 400"的那一档。
+		seed("L2", 7000);
 
-		ContextCompactor.Outcome first = service.compact(requestWith(longTurns(), 9000, 0, Set.of()));
+		ContextCompactor.Outcome first = service.compact(requestWith(longTurns(), 7000, 0, Set.of()));
 
 		assertThat(first.level()).as("前缀主导 ⇒ 不得做 L2/L3").isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(first.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
@@ -351,7 +353,7 @@ class ContextCompactorTest {
 		assertThat(this.store.archiveCount()).as("不做压缩就不归档").isZero();
 		assertThat(this.store.read(SESSION_ID).level()).as("谱系不得被空操作推进").isEqualTo("L2");
 
-		ContextCompactor.Outcome second = service.compact(requestWith(longTurns(), 9000, 0, Set.of()));
+		ContextCompactor.Outcome second = service.compact(requestWith(longTurns(), 7000, 0, Set.of()));
 
 		assertThat(second.level()).as("第二轮同样不做（不是'每轮再截一次'）").isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(second.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
@@ -385,6 +387,55 @@ class ContextCompactorTest {
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
 		assertThat(this.store.read(SESSION_ID).level()).isEqualTo("L3");
+		assertThat(this.store.archiveCount()).as("硬截断先归档（原文可回溯）").isEqualTo(1);
+	}
+
+	/**
+	 * C13 / R4 N-A（边界一）：{@code nextEst + 有效预留 == limit}——prompt <b>加上输出预留</b>恰好放得下，
+	 * 这一发不会 400 ⇒ L2/L3 在这种窗口里确实徒劳（压不动固定前缀），守卫可以降级。
+	 */
+	@Test
+	void c13PrefixDominatedAtTheCompletionReserveBoundaryStillDowngrades() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// 有效预留 = min(13000, 15000/2) = 7500；nextEst 7500 ⇒ 7500 + 7500 == 15000（刚好）
+		seed("L2", 7500);
+		ContextCompactor.Request boundary = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				longTurns(), List.of("{}"), 7500, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(boundary);
+
+		assertThat(outcome.level()).as("放得下输出预留 ⇒ 不必截断").isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
+		assertThat(outcome.turns()).isZero();
+		assertThat(this.store.archiveCount()).isZero();
+	}
+
+	/**
+	 * C13 / R4 N-A（边界二）：{@code nextEst < limit} 但 {@code nextEst + 有效预留 > limit} ——
+	 * prompt 加输出预留放不下，上游仍会 400（max_tokens 被顶掉）⇒ 必须保留 L3 硬截断。
+	 *
+	 * <p>缺陷现场：R3 只判 {@code nextEst < limit}，于是在 "limit − reserve ≤ nextEst < limit" 这条
+	 * 区间里降级成 L1 ⇒ 每轮都发一次注定 400 的请求。
+	 */
+	@Test
+	void c13PrefixDominatedAboveTheCompletionReserveKeepsL3() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// nextEst 8000 < limit 15000，但 8000 + 7500 = 15500 > 15000 ⇒ 输出预留放不下
+		seed("L2", 8000);
+		ContextCompactor.Request tight = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				longTurns(), List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(tight);
+
+		assertThat(outcome.level()).as("prompt + 输出预留放不下 ⇒ 保留 L3").isEqualTo(ContextTrigger.Level.L3);
+		assertThat(outcome.turns()).isEqualTo(3);
+		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
 	}
 
 	/** C13 / N3 的另一半：前缀主导时 <b>L1 仍照现有口径处理</b>（清得掉就清、照常记账）。 */
@@ -394,9 +445,9 @@ class ContextCompactorTest {
 		smallWindow.getContext().setLimitTokens(15000);
 		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
 				this.store);
-		seed("L2", 9000);
+		seed("L2", 7000);
 
-		ContextCompactor.Outcome outcome = service.compact(requestWith(turns(8), 9000, 0, Set.of()));
+		ContextCompactor.Outcome outcome = service.compact(requestWith(turns(8), 7000, 0, Set.of()));
 
 		assertThat(outcome.level()).as("L1 不受 prefix 守卫影响").isEqualTo(ContextTrigger.Level.L1);
 		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");

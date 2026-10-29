@@ -27,7 +27,8 @@
  * <p>本应用的**真实前缀约 6.7K token**（system 8.5K 字符 + 工具 schema 8.5K 字符，E2E 实测）。
  * 分母 = `窗口 − min(reserve 13000, 窗口/2)`，于是"能触发且不被守卫挡"必须同时满足：
  * <ol>
- * <li>不主导：前缀 / 分母 &lt; 80%（窗口 ≥ 22K 时即是）；</li>
+ * <li>不主导：前缀 / 分母 &lt; 80%（窗口 &gt; 约 16.6K 即成立 —— 窗口 ≤ 26K 时分母 = 窗口/2，
+ *     本文件三档 22K/26K/28K 都满足）；</li>
  * <li>够触发：`nextEst / 分母` 落在 70%（L1）/ 80%（L2）/ 95%（L3）档 ⇒ usage 真值必须够大
  *     —— 故本文件统一带 {@code usage-shape=big}（prompt=11000 / completion=200，取数点
  *     {@code scripts/ci/stub-routes.json}）；`repeat`(4321) 在这个窗口段里连 70% 都够不到。</li>
@@ -42,7 +43,7 @@
  *
  * <h2>usage 形状</h2>
  * 压缩判据读「上一轮 usage 真值 + 本轮输入估算」，桩的 `last`（prompt=1200）在小分母下
- * 够不到 70% ⇒ 本文件统一带 `usage-shape=repeat`（prompt=4321 / completion=77）。
+ * 够不到 70% ⇒ 本文件统一带 `usage-shape=big`（prompt=11000 / completion=200，见 {@link USAGE}）。
  *
  * <h2>工具面</h2>
  * 本文件用 `get_config_def`（恒常披露的只读业务工具）：压缩是上下文机制，与工具语义无关；
@@ -101,7 +102,8 @@ const TOOL_CALL = 'tool=get_config_def&args={"code":"CURRENCY"}'
  * 压缩判据读上一轮 usage 真值 ⇒ 桩要给一份"够大但不越窗"的真值。
  *
  * 取 `big`（11000/200）而不是 `repeat`（4321/77）：前缀主导守卫要求前缀 &lt; 分母的 80%
- * （本应用真实前缀 ≈ 6.7K token ⇒ 窗口 ≥ 22K），在那个窗口段里 4321 连 L1 的 70% 都够不到。
+ * （本应用真实前缀 ≈ 6.7K token ⇒ 窗口 &gt; 约 16.6K 才不主导）；在那个窗口段里 4321 连 L1 的
+ * 70% 都够不到。
  */
 const USAGE = 'usage-shape=big'
 /** 档位顺序（`none < L1 < L2 < L3`）。 */
@@ -428,7 +430,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     // 占用真的降下来了：末条的 after 低于首条的 before
     expect(Number(changed[changed.length - 1].after ?? 0)).toBeLessThan(Number(changed[0].before ?? 0))
 
-    // ④ L2 的**效果**（不能只看 summaryChars>0；也不能靠 L1/L3 的活动凑聚合）：
+    // ③ L2 的**效果**（不能只看 summaryChars>0；也不能靠 L1/L3 的活动凑聚合）：
     //    摘要之后不得<立刻>又触发一次 L2 —— 那就是"压了等于没压"的抖动链。
     //    两条独立证据面：轮首事件序列 与 轮级档位快照序列。
     const roundStartTrail = roundStart.map((event) => levelOf(event.level)).join(' → ')
@@ -447,7 +449,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
       }
     }
 
-    // ③ 快照 ≡ 最近一次**会写状态**的压缩：轮首事件，或轮内硬截断（N1：档位封顶 L2）。
+    // ④ 快照 ≡ 最近一次**会写状态**的压缩：轮首事件，或轮内硬截断（档位 L2 或原级 L3）。
     //    不能直接拿"台账末条"比：轮内 L1 清除在谱系 > L1 时只归档/记账、不写状态（末条往往是它）。
     const finalSnapshot = await contextSnapshot(sid)
     const snapshotLevel = levelOf(finalSnapshot.compaction?.level)
@@ -460,8 +462,13 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     const sameNumbers = (event: Record<string, unknown> | undefined): boolean =>
       Number(event?.turns ?? -1) === snapshotTurns && Number(event?.lostTokens ?? -1) === snapshotLost
     const reflectsRoundStart = snapshotLevel === levelOf(lastRoundStart.level) && sameNumbers(lastRoundStart)
+    // 轮内硬截断写进状态的档位与生产写入口一致（N1）：`lineage <= L1 ⇒ L2，否则保持原级`
+    // ⇒ 合法值只能是 **L2 或 L3**（不是"只接受 L2"：谱系已到 L3 的会话再做一次轮内截断时仍是 L3，
+    // 只认 L2 会把这条合法路径判成假红）。`sameNumbers` 保证 turns/lostTokens 确实来自这次截断。
     const reflectsTurnTrim =
-      lastTurnTrim !== undefined && sameNumbers(lastTurnTrim) && levelIndex(snapshotLevel) <= levelIndex('L2')
+      lastTurnTrim !== undefined &&
+      sameNumbers(lastTurnTrim) &&
+      (levelIndex(snapshotLevel) === levelIndex('L2') || levelIndex(snapshotLevel) === levelIndex('L3'))
     expect(
       reflectsRoundStart || reflectsTurnTrim,
       `快照 (${snapshotLevel}/${snapshotTurns}/${snapshotLost}) 与"末次状态写入"对不上：`
@@ -485,7 +492,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
       }
     }
 
-    // ④ SSE `context` 帧 ≡ 台账（同一组 (level, before, after, turns, lostTokens)；"即时可见"面）
+    // ⑤ SSE `context` 帧 ≡ 台账（同一组 (level, before, after, turns, lostTokens)；"即时可见"面）
     const framed = rounds.filter((row) => row.frame !== undefined)
     expect(framed.length, '压缩轮必须带 context 帧').toBeGreaterThanOrEqual(2)
     for (const row of framed) {

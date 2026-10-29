@@ -568,6 +568,32 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	/**
+	 * C13 / R4 N-B：谱系<b>已在 L3</b> 时，轮内硬截断保持原级（不降到 L2）。
+	 *
+	 * <p>生产写入口的规则是 `lineage &lt;= L1 ⇒ L2，否则保持原级`：L3 会话再做一次轮内截断时，
+	 * 状态仍是 L3（动作本身也是 L3），E2E 的"快照 ≡ 末次状态写入"必须接受 L2 **与** L3 两种档位 ——
+	 * 只接受 L2 会把这条合法路径判成假红。
+	 */
+	@Test
+	void inRoundTrimKeepsAnAlreadyL3LineageInsteadOfDowngradingToL2() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.contextStore.write(SESSION_ID, ContextState.EMPTY
+			.withCompaction(ContextTrigger.Level.L3, 2, 900, "hard_trim", 1_000L)
+			.withUsage(5_000, 0, 3, false, 1_000L, "m", 0, 0, 0));
+		List<Message> longHistory = historyWithLongTurns();
+
+		this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1"));
+
+		ContextState state = this.contextStore.read(SESSION_ID);
+		assertThat(state.level()).as("已在 L3 ⇒ 保持 L3，不回退成 L2").isEqualTo("L3");
+		assertThat(state.compactedTurns()).as("计数换成这次截断的").isEqualTo(5);
+		assertThat(this.contextStore.contextLedger(SESSION_ID).get(0).get("level")).isEqualTo("L3");
+	}
+
+	/**
 	 * C13 / I5：台账写失败 ⇒ <b>不应用</b>这次硬截断（历史保持原样），并如实按越窗收尾。
 	 *
 	 * <p>三步是三个独立写、无事务（与轮内 L1 同一个已知窗口）：归档与状态可能已落，台账缺一条；
