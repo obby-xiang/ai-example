@@ -34,22 +34,28 @@
       </el-button>
     </div>
 
-    <!-- 会话 / 工作区上下文条（本仓差异：会话恢复与契约联动状态可视化，蓝本无此行） -->
-    <div class="px-3 py-1.5 text-xs text-[#909399] border-0 border-b border-solid border-[#ebeef5] bg-aiPanel">
+    <!-- 会话 / 工作区上下文条（本仓差异：会话恢复与契约联动状态可视化，蓝本无此行）。
+         2026-10-29 ToC 呈现减负批：**首屏只留人话** —— 会话 id / 数据版本是排障用的机读标识，
+         不进这一行，收进下方折叠的「诊断信息」（`panel-diagnostics`），需要时仍可取。 -->
+    <div class="px-3 py-1.5 text-xs text-[#909399] border-0 border-b border-solid border-[#ebeef5] bg-aiPanel" data-testid="panel-context-bar">
       <!-- S6 批1（长内容审计 #13）：`truncate`（nowrap + ellipsis）在 flex 子项上不生效 —— 子项默认
            `min-width:auto` 不会缩到内容宽以下，长 `contextSummary` 会整行溢出后被外层 overflow-hidden
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
-      <div class="flex items-center gap-1.5 flex-wrap">
+      <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
-        <span>{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
-        <span>·</span>
         <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
-        <span>·</span>
-        <span>{{ t('ai.panel.dataVersion', { version: workspace.dataVersion }) }}</span>
         <el-button link size="small" @click="probe">{{ t('ai.panel.recheck') }}</el-button>
       </div>
-      <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate">
-        {{ t('ai.panel.contextSynced', { summary: contextSyncText, version: ai.contextSync.version, source: ai.contextSync.source }) }}
+      <details class="min-w-0" data-testid="panel-diagnostics">
+        <summary class="cursor-pointer select-none text-[11px] text-[#8b949e]">{{ t('ai.panel.diagnostics') }}</summary>
+        <div class="mt-0.5 break-words [overflow-wrap:anywhere] text-[11px] leading-[1.6] text-[#8b949e]">
+          <span data-testid="diagnostics-session">{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
+          <span> · </span>
+          <span data-testid="diagnostics-data-version">{{ t('ai.panel.dataVersion', { version: workspace.dataVersion }) }}</span>
+        </div>
+      </details>
+      <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate" data-testid="context-synced">
+        {{ t('ai.panel.contextSynced', { summary: contextSyncText }) }}
       </div>
     </div>
 
@@ -119,9 +125,11 @@
     </div>
 
     <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
-         R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。 -->
+         R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。
+         2026-10-29 ToC 呈现减负批（同一事实只留一个提示面）：`noticeBarVisible` —— 上方已有**专属 Alert**
+         承担同一件事（挂起池饱和 / 断流）时，本槽不再叠一遍同义文案。 -->
     <div
-      v-if="ai.notice && ai.noticeCode !== 'ai.notice.copiedNewTab'"
+      v-if="noticeBarVisible"
       class="m-2 flex items-center gap-[8px] border px-[11px] py-[8px] text-[12.6px]"
       :class="noticeIsError
         ? 'border-solid border-[#f0d5d0] bg-[#fdf1ef] text-[#1f2328] rounded-[9px]'
@@ -151,12 +159,25 @@
       </button>
     </div>
 
-    <div v-if="ai.lastUiEventResult" :class="alertBox('gray')" data-testid="alert-ui-event">
+    <!-- 工作区动作回执（AI→业务方向）。2026-10-29 ToC 呈现减负批：上方「工作区已同步」已经在报
+         同一件事时（`ai.contextSync` 有值），本回执位不再叠一条同义提示 —— 同一事实只留一个提示面。 -->
+    <div v-if="uiEventReceiptVisible" :class="alertBox('gray')" data-testid="alert-ui-event">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
       <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.uiEvent', { message: ai.lastUiEventResult.message }) }}</b>
+        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.uiEvent', { message: ai.lastUiEventResult?.message ?? '' }) }}</b>
       </div>
     </div>
+
+    <!-- 批次3 阶段条（2026-10-29 ToC 呈现减负批恢复）：压缩 / 准备中**必须有一个说明位** ——
+         挂载准备期（preparingRun）与压缩心跳都落在这里；组件内部自带秒表（只有这一小块每秒重渲），
+         文案走 locale，runId 一律不上屏。压缩完成不另起提示（减法：`loading-breath` 已表示还在产出）。 -->
+    <CompactionStatus
+      v-if="stageBar !== null"
+      :mode="stageBar.mode"
+      :started-at-ms="stageBar.startedAtMs"
+      :elapsed-ms="stageBar.elapsedMs"
+      @retry="ai.retryPreparing()"
+    />
 
     <!-- AI 可视可操作专项（设计稿 §3.10）：操作条落在**消息流之上、panel header 之下** ——
          不进 composer 底栏（那是模型配置批③ 的 model-picker 落点）。停止复用既有停止语义
@@ -459,7 +480,9 @@
                         ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.runExpiry.newChat') }}</span></button>
                       </template>
                     </div>
-                    <div v-if="isReadOnlyCard(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
+                    <!-- 只读体判据 = 已决只读态 ∪ GF「已提交、结局未到」（readOnlyLike）：
+                         后者让提交后的这段时间**同一张表单原样锁定**，不闪普通工具卡 / 不闪 schema。 -->
+                    <div v-if="readOnlyLike(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
                       <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
                            字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。
                            2026-10-20 卡面一致性裁决：**删重复标题行**（标题已在统一卡头业务化），
@@ -687,14 +710,17 @@
                                   class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
                                   data-testid="gate-ack-box"
                                   :checked="gateAcked(part.toolCallId)"
-                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId) || runExpired"
                                   @change="onGateAckChange(part.toolCallId, $event)"
                                 />
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
                               </label>
                             </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
-                                 下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。 -->
+                                 下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。
+                                 2026-10-29 ToC 呈现减负批：本轮运行态已失效（`runExpired`）⇒ 批准与拒绝
+                                 一并禁用 —— 决策送不到后端，允许点击只会得到一次失败；出口保留在上方
+                                 「已失效」行（刷新状态 / 新建会话）。 -->
                             <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-testid="gate-actions">
                               <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用 -->
                               <span
@@ -712,13 +738,13 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  :disabled="gateSubmitting(part.toolCallId) || runExpired"
                                   @click="decide(false, part.toolCallId)"
                                 >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part)"
+                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part) || runExpired"
                                   @click="decide(true, part.toolCallId)"
                                 >{{ t('ai.panel.approve') }}</button>
                               </span>
@@ -738,6 +764,7 @@
                             :key="liveForm.toolCallId"
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
+                            :locked="runExpired"
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
@@ -748,7 +775,11 @@
                             @cancel="onFormCancel"
                             @draft="onFormDraft"
                           />
-                          <!-- AR-07（批次4 集成返修）：排队中的表单一律有说明 + 取消出口 ——
+                          <!-- 已提交、结局未到（`isFormAwaitingOutcome`）：同一张表单**原样锁定**在同一张卡里
+                               —— 此时活动表单已置 submitted（`liveForm` 不再提供表单），卡由上方
+                               `readOnlyLike` 的只读体分支承接（`ro-form-*` + 段上的 `submittedValues`），
+                               这里不再重复渲一份：不闪普通工具卡 / 不闪 schema，结局帧到达后形态不变。
+                               AR-07（批次4 集成返修）：排队中的表单一律有说明 + 取消出口 ——
                                它还没轮到呈现，不能靠"卡体空白"让用户以为坏了；也不能逼用户先处理
                                前面那张才能收口这一张（取消出口恒在）。运行态到期时本块与卡头下方的
                                「本轮运行态已失效」提示并存：到期只说明后端保留期，不改变"这张仍可
@@ -1419,6 +1450,7 @@ import {
   formSpecOf,
   hasBodyRows,
   isBlankText,
+  isFormAwaitingOutcome,
   isReadOnlyCard,
   parsePublishConflicts,
   readOnlyStateOf,
@@ -1434,6 +1466,7 @@ import {
 import { deriveCopyText, deriveProjections, partDiagnosticOf, partDiagnosticText, partResultIsInternal, type PartDiagnostic } from '@/utils/parts'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
+import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
 import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRenderer.vue'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
@@ -1528,6 +1561,28 @@ function refreshExpiredRunState(): void {
 function startNewChatAfterExpiry(): void {
   newChat()
 }
+
+/** 本轮运行态是否已失效（AR-10 到期态）：失效后批准/拒绝与表单提交都不可达，界面须先锁死入口。 */
+const runExpired = computed(() => runExpiryView.value?.expired === true)
+
+/**
+ * 阶段条现场（批次3 CompactionStatus）：只有**进行中**的两态才显示 ——
+ * 压缩完成不另起一条提示（减法：「工作中」呼吸已表示本轮仍在产出）。
+ */
+const stageBar = computed<{ mode: 'compacting' | 'preparing'; startedAtMs: number | null; elapsedMs: number | null } | null>(() => {
+  if (ai.compactionPhase === 'compacting') {
+    return {
+      mode: 'compacting',
+      startedAtMs: ai.compactionStartedAtMs,
+      elapsedMs: ai.compactionElapsedMs
+    }
+  }
+  const preparing = ai.preparingRun
+  if (preparing !== null) {
+    return { mode: 'preparing', startedAtMs: preparing.startedAtMs, elapsedMs: preparing.elapsedMs }
+  }
+  return null
+})
 
 /**
  * 批次2 的恢复与轮次动作**唯一适配层**（批次3 起 store 由本批维护；适配层保留，
@@ -3586,7 +3641,7 @@ function blocksOf(message: ChatMessage): Block[] {
  *
  * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决只读卡（多态全集）的折叠是
  * **回合级时序** —— 决策瞬间不折叠，等本轮结束（新建消息 / 回合文本收尾）后才收成卡头行。
- * 判据 = `turnStillOpen`：本轮 loading 仍在，且该卡属于**末条消息**；不满足才走 defaultExpanded
+ * 判据 = `turnStillOpen`（**本轮未终态**，见下）；不满足才走 defaultExpanded
  * （r15：多态 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
  */
 function isBlockExpanded(block: Block): boolean {
@@ -3597,18 +3652,45 @@ function isBlockExpanded(block: Block): boolean {
   return resolveBlockExpanded(block, manual)
 }
 
-/** 回合是否仍在进行中（末条消息 + 本轮 loading）：已决只读卡据此保持展开到回合结束。 */
+/**
+ * 本轮是否仍未终态（2026-10-29 ToC 呈现减负批：判据由「只认 `loading`」放宽到「本轮未终态」）。
+ *
+ * <p>为什么不能只看 `loading`：B1「挂起即断」之后，等人决策的一轮是 `loading=false && suspended=true`
+ * （`runPhase='parked'`）；点批准的那一刻段立刻切只读，而此时连接可能还没建起来 ——
+ * 只看 `loading` 就会「批准瞬间折叠 → 重连后展开」闪一下。三条证据任一成立都算未终态：
+ * <ol>
+ * <li>`runPhase ≠ 'idle'`（running / parked / recovering —— 收流、挂起、恢复中）；</li>
+ * <li>该卡已有**决策在途**（`gateSubmissions` 有值：点过批准/拒绝、结局帧还没到）；</li>
+ * <li>该卡是生成式表单且**提交在途**（结局帧未到的只读锁定态，见 `readOnlyLike`）。</li>
+ * </ol>
+ * 仍要求该卡属于**末条消息**：历史卡不因"新轮还在跑"被展开。
+ */
 function turnStillOpen(block: Block): boolean {
-  if (!ai.loading) {
+  const last = ai.messages[ai.messages.length - 1]
+  if (last === undefined || last.id !== block.messageId) {
     return false
   }
-  const last = ai.messages[ai.messages.length - 1]
-  return last !== undefined && last.id === block.messageId
+  if (ai.runPhase !== 'idle') {
+    return true
+  }
+  return block.parts.some((part) => part.kind === 'tool'
+    && (ai.gateSubmissionOf(part.toolCallId) !== null || isFormAwaitingOutcome(part)))
+}
+
+/**
+ * 呈现层的「只读卡」判据 = 已决只读态 ∪ GF 提交后在途。
+ *
+ * <p>为什么单起一层、不改 `isReadOnlyCard`：后者同时被 store 侧派生与纯函数状态机复用，
+ * 而「已提交、结局未到」只是**呈现层**要固定的形态（同一张表单锁定 + 卡头「✓ 已提交」），
+ * 不是新的数据终态。本判据只在本组件内使用，范围最小。
+ */
+function readOnlyLike(part: ToolPart): boolean {
+  return isReadOnlyCard(part) || isFormAwaitingOutcome(part)
 }
 
 /** 已决只读卡（多态全集）—— 唯一受「回合结束才收」时序影响的卡型。 */
 function readOnlyTerminalCard(block: Block): boolean {
-  return block.parts.some((part) => part.kind === 'tool' && isReadOnlyCard(part))
+  return block.parts.some((part) => part.kind === 'tool' && readOnlyLike(part))
 }
 
 /** 组头/思考链头点击：写 store 显式态（三态记录；requiresAction 组的强制展开由 resolveBlockExpanded 兜底）。 */
@@ -3682,7 +3764,9 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.originalChars,
     part.returnedChars,
     part.truncatedReason,
-    isReadOnlyCard(part),
+    readOnlyLike(part),
+    // 展开时序判据换成「本轮未终态」后，memo 必须跟着读 runPhase（否则 parked→idle 不触发重渲）
+    ai.runPhase,
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
@@ -3791,7 +3875,7 @@ function bodyRowsOf(part: ToolPart): boolean {
 }
 
 function cardHeadEnabled(part: ToolPart): boolean {
-  if (isReadOnlyCard(part)) {
+  if (readOnlyLike(part)) {
     return true
   }
   return !part.requiresAction && bodyRowsOf(part)
@@ -3909,24 +3993,24 @@ function onSheetPreviewAbandon(toolCallId: string): void {
   void ai.abandonStalePreview(toolCallId)
 }
 
-/** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；已决只读卡恒有；普通工具卡有卡体才有。 */
+/** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；只读卡（含 GF 提交在途）恒有；普通工具卡有卡体才有。 */
 function cardChevronShown(part: ToolPart): boolean {
   if (part.requiresAction) {
     return false
   }
-  return isReadOnlyCard(part) || cardBodyShown(part)
+  return readOnlyLike(part) || cardBodyShown(part)
 }
 
 /** 卡片外壳：只读卡保留 rocard 容器锚，普通卡保留原间距。 */
 function cardShellClass(part: ToolPart): string {
-  return isReadOnlyCard(part)
+  return readOnlyLike(part)
     ? 'rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5'
     : 'mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2'
 }
 
 /** 卡容器 testid（既有锚：hitl-receipt / pending-card-* / tool-card-*）。 */
 function cardTestId(part: ToolPart): string {
-  if (isReadOnlyCard(part)) {
+  if (readOnlyLike(part)) {
     return 'hitl-receipt'
   }
   return part.requiresAction ? `pending-card-${part.toolCallId}` : `tool-card-${part.toolCallId}`
@@ -3934,24 +4018,24 @@ function cardTestId(part: ToolPart): string {
 
 /** 卡头 testid（既有锚：ro-toggle-* / block-toggle-*）。 */
 function cardToggleTestId(part: ToolPart, block: Block): string {
-  return isReadOnlyCard(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
+  return readOnlyLike(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
 }
 
 /** 右状态标签 testid（只读卡保留 ro-badge-*；其余 card-status-*）。 */
 function cardStatusTestId(part: ToolPart): string {
-  return isReadOnlyCard(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
+  return readOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
 }
 
 /** 摘要 testid（只读卡保留 ro-summary-*；普通卡保留 tool-summary-*）。 */
 function cardSummaryTestId(part: ToolPart): string {
-  return isReadOnlyCard(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
+  return readOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
 }
 
 /** 统一卡头 class：三类型同结构（36.4px = py 8+8 + 12px×1.7 标题行）。 */
 function cardHeadClass(part: ToolPart): string {
   return [
     'flex w-full items-center gap-[6px] px-[10px] py-[8px] border-0 bg-transparent text-left font-[inherit] whitespace-nowrap transition-colors duration-[150ms]',
-    isReadOnlyCard(part) ? 'ro-hd' : '',
+    readOnlyLike(part) ? 'ro-hd' : '',
     cardHeadDisabled(part) ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'
   ].filter(Boolean).join(' ')
 }
@@ -4018,7 +4102,7 @@ function formRequiredSummary(part: ToolPart): string {
 
 /**
  * 卡头摘要（中性色，不承载状态）：
- * - form：待填写 = 必填计数；已提交 = submittedValues；已取消 = 未提交说明（F9 不回读残留值）；
+ * - form：待填写 = 必填计数；已提交（含提交在途）= submittedValues；已取消 = 未提交说明（F9 不回读残留值）；
  * - hitl 且已业务化标题（有 preflight.target）⇒ **空**（demo 卡头只有业务标题，标题已说清，
  *   摘要再报「工具名（任务 #N）」= 同屏重复）；
  * - 其余 tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
@@ -4026,7 +4110,7 @@ function formRequiredSummary(part: ToolPart): string {
 function cardSummary(part: ToolPart): string {
   return cachedForLocale(cardSummaryCache, part, 'cardSummary', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues, part.args, part.preflight], () => {
     if (cardTypeOf(part) === 'form') {
-      if (!isReadOnlyCard(part)) {
+      if (!readOnlyLike(part)) {
         return formRequiredSummary(part)
       }
       return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
@@ -4049,7 +4133,9 @@ const CARD_STATUS_TONE: Record<CardTone, string> = {
 }
 
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
-  return cachedForLocale(cardStatusCache, part, 'cardStatus', [part.name, part.kind2, part.status, part.decision, part.requiresAction], () => cardStatusOf(part))
+  // `submittedValues` 进 guard：GF「提交在途」的状态由它判定（写入即从「待填写」转「✓ 已提交」），
+  // 漏掉这一项会让同一段上的旧缓存把卡头状态钉死。
+  return cachedForLocale(cardStatusCache, part, 'cardStatus', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues], () => cardStatusOf(part))
 }
 
 function cardStatusClass(part: ToolPart): string {
@@ -4282,6 +4368,35 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
  * 不能让上一轮的错误把新会话/新轮的一条无害提示染红。
  */
 const noticeIsError = computed(() => ai.notice !== null && ai.noticeSeverity === 'error')
+
+/**
+ * 2026-10-29 ToC 呈现减负批（同一事实只留一个提示面）：**专属 Alert 已经在报的那条事实**，
+ * 通知槽不再叠一遍。映射刻意只收两组"同义重复"：
+ * - 挂起池饱和 ⇒ `alert-pool-saturated`（含容量）已在同屏；
+ * - 断流 ⇒ `alert-interrupted`（"结果可能不完整 + 已生成内容保留"）已在同屏。
+ * 其余通知（取消 / 重试 / 幂等 / 反馈失败 …）没有专属 Alert，照旧走通知槽。
+ */
+const noticeCoveredByAlert = computed(() => {
+  const code = ai.noticeCode
+  if (code === null) {
+    return false
+  }
+  if (ai.poolSaturated !== null && (code === 'ai.notice.poolSaturated' || code === 'ai.notice.poolSaturatedWithSize')) {
+    return true
+  }
+  return ai.streamInterrupted && code === 'ai.notice.interruptedKeep'
+})
+
+/** 通知槽是否渲染（原有两条排除 + 专属 Alert 覆盖）。 */
+const noticeBarVisible = computed(() => ai.notice !== null
+  && ai.noticeCode !== 'ai.notice.copiedNewTab'
+  && !noticeCoveredByAlert.value)
+
+/**
+ * 工作区动作回执位是否渲染：上方「工作区已同步」（`contextSync`）已经在报同一件事时让位 —
+ * 同一动作不在两条提示面各报一次（失败回执仍会在同步反馈退场后显示，信息不丢）。
+ */
+const uiEventReceiptVisible = computed(() => ai.lastUiEventResult !== null && ai.contextSync === null)
 
 /**
  * 通知槽文本（i18n L-69）：store 里 `notice` 是**设定时**的语言快照，`noticeCode/noticeArgs` 才是
@@ -4545,8 +4660,14 @@ function cardFormSpec(part: ToolPart): FormSpec | null {
 /**
  * 已决 GF 的回填值（K1 + F9）：**只有提交收尾**才回填 `submittedValues`；
  * 取消 / 超时（未提交）一律 null ⇒ FormRenderer 回落初始空态（不保留半成品值）。
+ *
+ * <p>2026-10-29：提交**在途**（结局帧未到，`readOnlyStateOf` 还读不到终态）同样回填 ——
+ * 用户刚提交的那份值就是卡面该显示的"同一张表单"，不能短暂回落成空表单。
  */
 function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
+  if (isFormAwaitingOutcome(part)) {
+    return part.submittedValues ?? null
+  }
   return readOnlyStateOf(part) === 'submitted' ? (part.submittedValues ?? null) : null
 }
 

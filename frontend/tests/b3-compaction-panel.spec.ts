@@ -89,8 +89,8 @@ beforeEach(() => {
   applyLocale('zh-CN')
 })
 
-describe('批次3 · 阶段条退场', () => {
-  it('压缩心跳保留但阶段条不显示，准备期由工作中提示承担', async () => {
+describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）', () => {
+  it('压缩心跳 ⇒ 出 compacting 阶段条（替代旧「阶段条退场」口径）', async () => {
     const ai = useAiStore()
     ai.expanded = true
     ai.historyLoaded = true
@@ -104,10 +104,16 @@ describe('批次3 · 阶段条退场', () => {
     }))
 
     const wrapper = await mountPanel()
-    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    const bar = wrapper.find('[data-testid="compaction-status"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.attributes('data-stage')).toBe('compacting')
+    // 已用时间按"服务端 elapsed 折算的锚点 + 本地流逝"推进（挂载后可能多走 1 秒）
+    expect(bar.text()).toMatch(/正在压缩上下文 · 已用 1[23] 秒/)
+    // 压缩提示与「工作中」呼吸并存：阶段条说的是"在做什么"，呼吸说的是"还在产出"
     expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
     expect(ai.compactionPhase).toBe('compacting')
 
+    // 压缩完成（context 帧）⇒ 阶段条退场（不再多一条「压缩完成」提示面）
     ai.handleFrame(asFrame({
       type: 'context',
       level: 'L2',
@@ -119,12 +125,13 @@ describe('批次3 · 阶段条退场', () => {
       est: false
     }))
     await nextTick()
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="compaction-done"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="loading-breath"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('准备中不显示阶段条或替代重试入口', async () => {
+  it('准备中出阶段条（带重试出口），runId 不上屏', async () => {
     const ai = useAiStore()
     ai.expanded = true
     ai.historyLoaded = true
@@ -133,8 +140,10 @@ describe('批次3 · 阶段条退场', () => {
     ai.preparingRun = { runId: 'secret-run-id', startedAtMs: Date.now() - 5_000, elapsedMs: null }
 
     const wrapper = await mountPanel()
-    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="compaction-retry"]').exists()).toBe(false)
+    const bar = wrapper.find('[data-testid="compaction-status"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.attributes('data-stage')).toBe('preparing')
+    expect(bar.find('[data-testid="compaction-retry"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
     expect(wrapper.text()).not.toContain('secret-run-id')
     wrapper.unmount()

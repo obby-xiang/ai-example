@@ -36,8 +36,9 @@ const empty = computed(() => ai.contextStatus === 'ready' && !hasData.value)
 const percentText = computed(() => (usage.value?.percent === null || usage.value?.percent === undefined
   ? '—'
   : `${formatPercent(usage.value.percent)}%`))
+// 上限未知：文案走 locale（2026-10-29 ToC 呈现减负批：英文界面不再夹中文）
 const limitText = computed(() => (usage.value?.limitTokens === null || usage.value?.limitTokens === undefined
-  ? '上限未知'
+  ? t('ai.context.limitUnknown')
   : ''))
 
 function retry(): void {

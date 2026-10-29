@@ -502,6 +502,28 @@ export function isReadOnlyCard(part: ToolPart): boolean {
 }
 
 /**
+ * GF **提交后在途**（2026-10-29 ToC 呈现减负批）：用户已点提交、结果已送达后端，结局帧还没到。
+ *
+ * <p>为什么单列一条判据：提交成功那一刻 store 会写回 `submittedValues`（`writeSubmittedValues`），
+ * 而段状态在结局帧之前仍是 `pending` / `running` —— 旧实现让这张卡掉出只读态（`liveForm` 也不再
+ * 提供表单），卡体瞬间空白或换成普通工具卡，等结局帧到达再变回只读表单，用户看到"闪一下 schema"。
+ * 本判据把「已提交、未结局」这一段固定成**同一张只读表单**（{@link AiPanel} 的 readOnlyLike 分支），
+ * 卡头状态也统一按「✓ 已提交」显示，直到结局帧把段推入终态。
+ *
+ * <p>边界：只在 `pending` / `running` 两态成立（终态一律由 {@link isReadOnlyCard} 接管）；
+ * 没有本地提交值（他端提交 / 409 幂等）时无从回填，仍走原路径 —— 不伪造"同值"。
+ */
+export function isFormAwaitingOutcome(part: ToolPart): boolean {
+  if (part.name !== GENERATIVE_FORM_TOOL || part.kind2 !== 'FRONTEND') {
+    return false
+  }
+  if (part.status !== 'pending' && part.status !== 'running') {
+    return false
+  }
+  return part.submittedValues !== undefined && part.submittedValues !== null
+}
+
+/**
  * 已决只读态（2A 批裁决 §9 K2 + §10 F6 + §15 K12 定名；批G · S13 起门卡增至五态；
  * 2026-10-26 批4 增至七态）：
  * - 门卡（H1）七态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / **已取消** /
@@ -710,6 +732,8 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
 /**
  * 卡片状态（key / label / tone）：
  * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / label / tone 全由 {@link readOnlyStateOf} 派生；
+ * - GF 提交后在途（{@link isFormAwaitingOutcome}）⇒ **恒定「✓ 已提交」**（与结局成功后的只读态同字，
+ *   卡头状态从提交那一刻起不再跳字）；
  * - 其余 pending ⇒ 文案按 {@link cardTypeOf} 分工；
  * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown / skipped）
  *   ⇒ 既有九态文案 + 色族（blocked / unknown / skipped 无批准决策时不落只读状态机；pending 已在前一分支处理）。
@@ -718,6 +742,9 @@ export function cardStatusOf(part: ToolPart): CardStatus {
   if (isReadOnlyCard(part)) {
     const state = readOnlyStateOf(part)
     return { key: state, label: translate(READ_ONLY_LABEL_KEY[state]), tone: READ_ONLY_TONE[state] }
+  }
+  if (isFormAwaitingOutcome(part)) {
+    return { key: 'submitted', label: translate(READ_ONLY_LABEL_KEY.submitted), tone: READ_ONLY_TONE.submitted }
   }
   if (part.status === 'pending') {
     const type = cardTypeOf(part)

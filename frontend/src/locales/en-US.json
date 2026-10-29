@@ -154,7 +154,7 @@
       "keyMissing": "AI has no usable API key. Add a provider key in Settings → AI and retry.",
       "keyUnreadable": "The API key cannot be decrypted. Re-enter it in Settings → AI, or ask the administrator to restore the encryption configuration.",
       "noModelConfigured": "The default AI model is unavailable. Add a model in Settings → AI and select it as the default.",
-      "redisUnavailable": "The AI service is temporarily unavailable (Redis). Please try again later.",
+      "redisUnavailable": "The AI service is temporarily unavailable. Please try again later.",
       "retryDenied": "This turn cannot be retried right now.",
       "retryDeniedNotFailed": "Only failed turns can be retried.",
       "retryDeniedPending": "This turn still has pending tools. Handle them before retrying.",
@@ -173,7 +173,7 @@
       "ackRequired": "This action cannot be undone: tick the confirmation box first",
       "decisionIdempotent": "This decision was already submitted (idempotent rejection); syncing the real outcome with the backend…",
       "decisionFailed": "Failed to submit the decision",
-      "missingRunId": "Missing runId; the frontend tool result cannot be sent back",
+      "missingRunId": "This turn is no longer running, so the result could not be sent back. Send the turn again.",
       "toolTerminal": "This tool call is already in a terminal state (idempotent rejection)",
       "toolAlreadySubmitted": "This tool result was already sent back (idempotent rejection)",
       "toolSubmitFailed": "Failed to send back the frontend tool result",
@@ -363,6 +363,7 @@
       "estimateNote": "This value is an estimate (the upstream returned no usage); it is shown with ≈.",
       "splitNote": "Items are estimated while the total is billed: items are normalized to the used amount, and the top six add up to the used total.",
       "close": "Close",
+      "limitUnknown": "limit unknown",
       "limitOnly": "{limit}: only the used amount is shown; no percentage."
     },
     "hitl": {
@@ -384,6 +385,7 @@
       "submit": "Submit",
       "submitting": "Submitting…",
       "notRetryable": "This form can no longer be submitted; cancel and ask the assistant to start over",
+      "lockedHint": "This turn is no longer available, so the form cannot be submitted right now. Cancel it, or reload the state / start a new conversation above.",
       "unsupportedType": "Field \"{label}\" has an unsupported type ({type}) and was not rendered",
       "cascadeCleared": "Cleared {fields} — no longer applicable after the change",
       "advancedExpand": "More conditions ({count})",
@@ -470,7 +472,7 @@
         "placeholderSuspended": "Suspended: handle the confirmation above first, or click \"Stop\" to end this turn",
         "placeholder": "Type a message. Enter to send, Shift+Enter for a new line"
       },
-      "suspendPoolFull": "Suspended pool is saturated",
+      "suspendPoolFull": "Too many conversations are waiting at once",
       "unavailableDegraded": "AI features are temporarily unavailable (degraded; business features are unaffected)",
       "interrupted": "Connection interrupted; the result may be incomplete",
       "noDoneFrame": "No completion frame (done/error) was received for this turn. Generated content is kept above; resend or refresh the page to keep receiving.",
@@ -495,7 +497,7 @@
         "SHEET_DISABLED": "Spreadsheet features have been disabled by an administrator, so this step was not executed.",
         "SCOPE_NOT_DISCLOSED": "This action is not available on the current page or step, so it was not executed.",
         "TOOL_TIMEOUT": "This step did not finish in time, and its result is unconfirmed. It may have made partial changes; verify them before continuing.",
-        "TOOL_ALREADY_CLAIMED": "Another execution instance took over this step, so it was not executed again."
+        "TOOL_ALREADY_CLAIMED": "This step was already continued elsewhere, so it was not executed again."
       },
       "skippedHuman": "This step was not executed; the assistant will continue with what it already has.",
       "internalHuman": "This step did not complete normally.",
@@ -581,8 +583,9 @@
       "session": "Session {id}",
       "workspace": "Workspace {summary}",
       "dataVersion": "Data version {version}",
-      "contextSynced": "Workspace synced: {summary} (v{version} · {source})",
-      "poolSaturatedDetail": "The suspended-run thread pool is full ({size}); wait for the current suspended turn to be confirmed or to time out.",
+      "diagnostics": "Diagnostics",
+      "contextSynced": "Workspace synced: {summary}",
+      "poolSaturatedDetail": "Handle the conversations that are waiting first (confirm, fill in, or cancel), then try again.",
       "uiEvent": "AI is driving the workspace: {message}",
       "uiOperating": "AI is operating the left workspace: {text}",
       "highlightBadge": "AI hint: {text}",
@@ -625,7 +628,11 @@
       "acceptHint": "Only {accept} is accepted; the file name must contain the definition code (e.g. COUNTRY.xlsx). You pick the file in the browser; the AI never reads it or handles any path.",
       "orClick": "You can also click the highlighted \"{label}\" button on the left, or drop the file onto the highlighted area.",
       "choose": "Choose file",
-      "discard": "Discard"
+      "discard": "Discard",
+      "fallbackEntry": "upload entry",
+      "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the left.",
+      "hintMissing": "Open step 1 of the import wizard first (the upload entry is no longer on this page).",
+      "hintUnavailable": "This task has ended, so it is view-only; the upload entry is unavailable."
     }
   },
   "common": {

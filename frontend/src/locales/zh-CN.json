@@ -154,7 +154,7 @@
       "keyMissing": "AI 缺少可用的 API Key：请到「设置 → AI」为供应商录入密钥后重试。",
       "keyUnreadable": "API Key 无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。",
       "noModelConfigured": "AI 默认模型不可用：请到「设置 → AI」为供应商添加模型并选择默认模型。",
-      "redisUnavailable": "AI 服务暂不可用（Redis），请稍后重试。",
+      "redisUnavailable": "AI 服务暂不可用，请稍后重试。",
       "retryDenied": "这一轮当前不能重跑。",
       "retryDeniedNotFailed": "只有失败的轮次才能重试本轮。",
       "retryDeniedPending": "本轮还有待处理的工具，请先处理后再重试。",
@@ -173,7 +173,7 @@
       "ackRequired": "不可撤销操作：请先勾选确认项",
       "decisionIdempotent": "该确认已提交过（幂等拒绝），正在与后端同步真实裁决…",
       "decisionFailed": "确认提交失败",
-      "missingRunId": "缺少 runId，无法回灌前端工具结果",
+      "missingRunId": "这一轮已经不在进行中，结果没能送回；请重新发送这一轮",
       "toolTerminal": "该工具调用已是终态（幂等拒绝）",
       "toolAlreadySubmitted": "该工具结果已回灌过（幂等拒绝）",
       "toolSubmitFailed": "前端工具结果回灌失败",
@@ -363,6 +363,7 @@
       "estimateNote": "本数值为估算（上游未返回用量），显示时带 ≈。",
       "splitNote": "分项为估算、总量为账单：分项按已用量等比归一，前六项之和等于已用。",
       "close": "关闭",
+      "limitUnknown": "上限未知",
       "limitOnly": "{limit}：只显示已用，不折算百分比。"
     },
     "hitl": {
@@ -384,6 +385,7 @@
       "submit": "提交",
       "submitting": "提交中…",
       "notRetryable": "该表单已无法继续提交，请取消后让 AI 重新发起",
+      "lockedHint": "本轮运行态已失效，暂时无法提交；可先取消，或在上方刷新状态 / 新建会话。",
       "unsupportedType": "字段「{label}」类型不支持（{type}），未渲染",
       "cascadeCleared": "已清空「{fields}」（新条件下不再适用）",
       "advancedExpand": "更多条件（{count}）",
@@ -470,7 +472,7 @@
         "placeholderSuspended": "挂起等待中：请先在上方处理确认/执行，或点「停止」结束本轮",
         "placeholder": "输入消息，Enter 发送，Shift+Enter 换行"
       },
-      "suspendPoolFull": "挂起池已饱和",
+      "suspendPoolFull": "同时等待的对话已达上限",
       "unavailableDegraded": "AI 能力暂不可用（已降级，业务功能不受影响）",
       "interrupted": "连接中断，结果可能不完整",
       "noDoneFrame": "本轮没有收到完成帧（done/error）。已生成的内容保留在上方，可重新发送或刷新页面继续接收。",
@@ -495,7 +497,7 @@
         "SHEET_DISABLED": "表格功能已被管理员关闭，这一步没有执行。",
         "SCOPE_NOT_DISCLOSED": "当前页面或步骤不支持这个操作，这一步没有执行。",
         "TOOL_TIMEOUT": "这一步没有在时限内完成，结果尚未确认；该操作可能已产生部分变化，请核对后再继续。",
-        "TOOL_ALREADY_CLAIMED": "这一步已由其他执行实例接管，本次没有重复执行。"
+        "TOOL_ALREADY_CLAIMED": "这一步已在别处继续处理，本次没有重复执行。"
       },
       "skippedHuman": "这一步没有执行，AI 会用已有信息继续回答。",
       "internalHuman": "这一步没有正常完成。",
@@ -581,8 +583,9 @@
       "session": "会话 {id}",
       "workspace": "工作区 {summary}",
       "dataVersion": "数据版本 {version}",
-      "contextSynced": "工作区已同步：{summary}（v{version} · {source}）",
-      "poolSaturatedDetail": "挂起专用线程池容量 {size} 已用满，请等当前挂起轮次确认/超时后再试。",
+      "diagnostics": "诊断信息",
+      "contextSynced": "工作区已同步：{summary}",
+      "poolSaturatedDetail": "请先处理正在等待确认 / 填写的对话（确认、填写或取消），稍后再试。",
       "uiEvent": "AI 驱动工作区：{message}",
       "uiOperating": "AI 正在操作左侧工作区：{text}",
       "highlightBadge": "AI 提示：{text}",
@@ -625,7 +628,11 @@
       "acceptHint": "只接受 {accept}；文件名需包含配置项编码（如 COUNTRY.xlsx）。文件由你在浏览器里选择，AI 不会读取文件内容，也不会经手任何路径。",
       "orClick": "也可以点左侧高亮按钮「{label}」，或把文件拖到高亮区域。",
       "choose": "选择文件",
-      "discard": "放弃"
+      "discard": "放弃",
+      "fallbackEntry": "上传入口",
+      "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请用左侧的上传入口。",
+      "hintMissing": "请先打开导入向导第 1 步（上传入口已不在当前页面）。",
+      "hintUnavailable": "任务已结束，仅供查看；上传入口不可用。"
     }
   },
   "common": {

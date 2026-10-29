@@ -160,7 +160,7 @@
               multiChecked(field, option.value)
                 ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
                 : 'border-[#e3e6ea] bg-white text-[#57606a]',
-              readonly ? 'cursor-default' : 'cursor-pointer'
+              readonly || locked ? 'cursor-default' : 'cursor-pointer'
             ]"
           >
             <input
@@ -228,6 +228,14 @@
       >{{ cascadeNotice }}</span>
 
       <span v-if="!readonly && cardError" :class="[FMSG, 'mt-[11px]']" data-testid="gf-error">{{ cardError }}</span>
+
+      <!-- 2026-10-29 ToC 呈现减负批：**不可提交**（本轮运行态已失效）时字段只读、提交禁用，
+           但取消仍是本地收口出口。说明只给一句人话，不报内部原因。 -->
+      <span
+        v-if="locked"
+        class="mt-[11px] block text-[11.8px] leading-[1.5] text-[#57606a] bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[6px] px-[8px] py-[5px]"
+        data-testid="gf-locked-hint"
+      >{{ t('ai.gf.lockedHint') }}</span>
 
       <div v-if="!readonly" class="flex flex-wrap items-center justify-end gap-2 mt-[10px] pt-[10px] border-0 border-t border-solid border-[#eef0f3]">
         <span v-if="!canRetry" class="mr-auto text-[11.8px] text-[#57606a]">{{ t('ai.gf.notRetryable') }}</span>
@@ -335,6 +343,12 @@ const props = withDefaults(defineProps<{
    * 操作按钮行整块不渲染、卡级错误条不渲染。
    */
   readonly?: boolean
+  /**
+   * 不可提交锁定（2026-10-29 ToC 呈现减负批）—— 本轮运行态已失效等"提交必然失败"的现场：
+   * 字段只读（按只读配色，不按禁用灰）、「提交」禁用并给一句人话说明，**「取消」仍可用**（本地收口）。
+   * 与 `readonly` 的区别：readonly 是**已决**回放（零操作行），locked 是**待决但此刻交不出去**。
+   */
+  locked?: boolean
   /** 只读态回填值 / 待填态草稿值（形状不符的键回落初始态，不把脏数据塞进受控控件）。 */
   initialValues?: Record<string, unknown> | null
   /** 卡头开关（默认 true）。 */
@@ -348,7 +362,7 @@ const props = withDefaults(defineProps<{
   fieldErrors?: FormValueIssue[] | null
   /** 附件上传归属（G-E）：runId + toolCallId 绑定"本次挂起的这张表单"；缺省时上传控件禁用。 */
   uploadContext?: UploadContext | null
-}>(), { showHeader: true, initialValues: null, fieldErrors: null, uploadContext: null })
+}>(), { showHeader: true, initialValues: null, fieldErrors: null, uploadContext: null, locked: false })
 
 const emit = defineEmits<{
   (event: 'submit', values: Record<string, unknown>): void
@@ -495,8 +509,8 @@ watch(
   { immediate: true }
 )
 
-/** 禁用判据：提交中 / 已决只读（联动禁用按字段另判）。 */
-const disabled = computed(() => props.readonly === true || props.submitting)
+/** 禁用判据：提交中 / 已决只读 / 不可提交锁定（联动禁用按字段另判）。 */
+const disabled = computed(() => props.readonly === true || props.submitting || props.locked === true)
 
 const scenarioLabel = computed(() =>
   props.schema.scenario === 'FILTER' ? t('ai.gf.scenario.filter') : t('ai.gf.scenario.clarify')
@@ -888,7 +902,8 @@ const cardError = computed(() => {  const parts = localIssues.value
 })
 
 function fieldClass(field: FormFieldSpec): string {
-  const disabledTone = props.readonly === true ? FI_READONLY : FI_DISABLED
+  // locked（不可提交）按**只读配色**：字段仍可读、不落"禁用灰"，但原生不可编辑
+  const disabledTone = props.readonly === true || props.locked === true ? FI_READONLY : FI_DISABLED
   return `${FI_BASE} ${disabledTone} ${fieldIssues(field).length > 0 ? FI_BAD : FI_IDLE}`
 }
 

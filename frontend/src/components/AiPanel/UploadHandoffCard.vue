@@ -30,7 +30,7 @@ const emit = defineEmits<{
   (event: 'cancel'): void
 }>()
 
-const entryLabel = computed(() => props.label ?? '上传 xlsx / zip')
+const entryLabel = computed(() => props.label ?? t('ai.uploadHandoff.fallbackEntry'))
 
 const chooseDisabled = computed(() => props.status !== 'waiting')
 
@@ -53,15 +53,19 @@ function onChoose(): void {
   emit('choose')
 }
 
+/**
+ * 三态说明（2026-10-29 ToC 呈现减负批：硬编码中文全部走 locale —— 英文界面不再夹中文）。
+ * `reason` 是后端给的具体原因（数据不是文案），有就用它，没有才回落本地人话。
+ */
 const hint = computed(() => {
   if (props.status === 'degraded') {
-    return props.reason ?? '当前浏览器不支持在对话内直接选择文件'
+    return props.reason ?? t('ai.uploadHandoff.hintDegraded')
   }
   if (props.status === 'missing') {
-    return '请先打开导入向导第 1 步（上传入口已不在当前页面）'
+    return t('ai.uploadHandoff.hintMissing')
   }
   if (props.status === 'unavailable') {
-    return props.reason ?? '任务已结束，仅供查看；上传入口不可用'
+    return props.reason ?? t('ai.uploadHandoff.hintUnavailable')
   }
   return null
 })
