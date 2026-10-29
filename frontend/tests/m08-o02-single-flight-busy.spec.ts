@@ -75,6 +75,15 @@ function handlersOf(callIndex: number): CapturedHandlers {
   return api.reattachRun.mock.calls[callIndex]?.[1] as CapturedHandlers
 }
 
+/** 受控的一次 SSE 生命周期结算（模拟"内部退避重连耗尽后 settle"）。 */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {}
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
@@ -234,5 +243,85 @@ describe('O02 · 停止 + 发送（同 tick）与忙提示', () => {
     store.handleFrame({ type: 'error', runId: 'run-1', seq: 12, code: 'UPSTREAM_ERROR', message: 'boom' } as SseFrame)
 
     expect(store.busyRun).toBeNull()
+  })
+})
+
+describe('M08-R2 · 驱动所有权与重试预算按 runId 固化（跨连接存活期）', () => {
+  it('R2：一次中断生命周期后另一入口不再另起驱动，总连接不超原预算', async () => {
+    const store = fresh()
+    store.messages = [assistantHost()]
+    store.activeRunId = 'run-1'
+    let handlers: CapturedHandlers | null = null
+    const lifecycle = deferred()
+    api.reattachRun.mockImplementation((_runId: string, captured: CapturedHandlers) => {
+      handlers = captured
+      return lifecycle.promise
+    })
+
+    const driving = store.reattachActive('run-1', { hostMessageId: 'a-1', lastSeq: 0 })
+    // 真机形态：内部退避重连若干次（仍属同一次 reattachRun 的预算）后依旧断流
+    handlers!.onReconnect(1, 400)
+    handlers!.onReconnect(4, 3200)
+    handlers!.onClose({ terminal: false })
+    lifecycle.resolve()
+    await driving
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+
+    // 同一 run 的另一个恢复入口（下一拍）不得另起一条驱动：总连接仍是一次生命周期
+    void store.resumeSnapshotStream('run-1', 0, 'a-1', false)
+    void store.reattachActive('run-1', { hostMessageId: 'a-1', lastSeq: 0 })
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('R2：正常挂起收尾不消耗预算，后续恢复入口仍可续收（接管语义不破）', async () => {
+    const store = fresh()
+    store.messages = [assistantHost()]
+    store.activeRunId = 'run-1'
+    let handlers: CapturedHandlers | null = null
+    const lifecycle = deferred()
+    api.reattachRun.mockImplementation((_runId: string, captured: CapturedHandlers) => {
+      handlers = captured
+      return lifecycle.promise
+    })
+
+    const driving = store.resumeSnapshotStream('run-1', 4, 'a-1', true)
+    // 挂起即断：服务端送达请求帧后主动收流 —— 正常收尾，不是断流
+    handlers!.onClose({ terminal: false, suspended: true })
+    lifecycle.resolve()
+    await driving
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+
+    // 刷新恢复再来一次（卡还在等人）：必须能续收，不被"预算"锁死
+    void store.resumeSnapshotStream('run-1', 4, 'a-1', true)
+    expect(api.reattachRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('R2：显式重启后可重新驱动，且锚点为已收最大序号（lastSeq 一致）', async () => {
+    const store = fresh()
+    store.messages = [assistantHost()]
+    store.activeRunId = 'run-1'
+    let handlers: CapturedHandlers | null = null
+    const lifecycle = deferred()
+    api.reattachRun.mockImplementation((_runId: string, captured: CapturedHandlers) => {
+      handlers = captured
+      return lifecycle.promise
+    })
+
+    const driving = store.reattachActive('run-1', { hostMessageId: 'a-1', lastSeq: 0 })
+    handlers!.onFrame({ type: 'delta', runId: 'run-1', seq: 9, text: '（已收）' } as SseFrame)
+    handlers!.onClose({ terminal: false })
+    lifecycle.resolve()
+    await driving
+    expect(store.runSeq['run-1']).toBe(9)
+
+    // 自动入口到此为止：同一 run 不再自动重开（预算不翻倍）
+    void store.resumeSnapshotStream('run-1', 0, 'a-1', false)
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+
+    // 显式动作（决策送达 / 用户重试 / 回到进行中的回答）重新接管：锚点取已收最大序号
+    store.restartRunStreamDrive('run-1')
+    void store.reattachActive('run-1', { hostMessageId: 'a-1' })
+    expect(api.reattachRun).toHaveBeenCalledTimes(2)
+    expect((api.reattachRun.mock.calls[1]?.[2] as { lastSeq?: number } | undefined)?.lastSeq).toBe(9)
   })
 })

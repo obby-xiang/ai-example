@@ -368,6 +368,31 @@ function waitForStopSettlement(): Promise<void> {
   })
 }
 
+/**
+ * M08-R2（真机 40793937300）：同一 runId 的**续流驱动**预算 —— 一次 SSE 生命周期
+ * （一次 `aiApi.reattachRun` 调用，其内部已自带 4 次退避重连，即原预算）。
+ *
+ * <p>为什么按"生命周期"而不是按"连接"计：连接一断就清登记（上一版的做法）会让另一个恢复
+ * 入口下一拍再建一条，两条驱动各烧一份内部重试预算 —— 真机上同一 runId 出现 `?lastSeq=0`
+ * 与无 query 各 5 次交替（5 = 1 次建连 + 4 次重连，两份预算 = 10）。现在所有权与预算都按
+ * runId 固化到"驱动"上：连接存活、退避、重连都是同一个驱动；只有终态 / 停止 / 换会话 /
+ * 显式动作（决策、用户重试）才释放或重置，连接结束本身不算放弃这一轮。
+ */
+export const RUN_STREAM_DRIVE_BUDGET = 1
+
+/** M08-R2：某 run 的续流驱动现场（所有权 + 预算）。 */
+interface RunStreamDrive {
+  /** 驱动令牌（每次真正接管时递增；旧驱动的收尾据它判定"已被接管"） */
+  token: number
+  /** 已消耗的生命周期预算（只有**中断**收尾才消耗：终态/挂起/准备中/用户停止都不算） */
+  used: number
+  /** 是否有在途驱动（连接存活 / 退避 / 重连中） */
+  active: boolean
+}
+
+/** M08-R2：驱动令牌发号器（模块级：与 `currentAbort` 同为连接/驱动身份判据）。 */
+let runStreamDriveSeq = 0
+
 /** 这些码即使带 5xx 也是**确定性**失败（重试只会重复同一结果）。 */
 const NON_TRANSIENT_PRE_STREAM_CODES: ReadonlySet<string> = new Set([
   ErrorCode.SESSION_BUSY,
@@ -2290,7 +2315,16 @@ export const useAiStore = defineStore('ai', {
      * <p>这类连接不会带来决策之后的续跑帧 —— 决策送达时必须**重连**（既有 B1 口径），
      * 所以它不参与 single-flight 的"并入"（否则续流会被静默吞掉）。判据见 {@link resumeSnapshotStream}。
      */
-    activeStreamParked: false
+    activeStreamParked: false,
+    /**
+     * M08-R2：按 runId 固化的**续流驱动**（所有权 + 已消耗预算）。
+     *
+     * <p>与 {@link activeStreamRunId} 的分工：后者只描述"此刻有一条连接活着"，连接一断就清；
+     * 本记录描述"这个 run 由谁驱动、还剩几份预算"，**跨连接存活期**有效（连接存活 / 退避 /
+     * 重连都属于同一次驱动）。记录只在终态 / 停止 / 换会话 / 显式动作时删除 —— 见
+     * {@link acquireRunStreamDrive} / {@link settleRunStreamDrive} / {@link restartRunStreamDrive}。
+     */
+    streamDrives: {} as Record<string, RunStreamDrive>
   }),
 
   getters: {
@@ -3501,7 +3535,9 @@ export const useAiStore = defineStore('ai', {
       this.loading = true
       // M08（single-flight）：这一轮已经有活动续收连接在写（另一恢复入口先到）——
       // 不重复建连接，也不清段重放：清掉之后新连接不会补发已收过的帧，正文会停在空白。
-      if (this.canJoinRunStream(runId)) {
+      // M08-R2：驱动权在别处或预算已用尽时同样不动（本函数下面会先清段再全量重放，
+      // 清完却被挡下等于把正文留在空白）。
+      if (this.canJoinRunStream(runId) || !this.canDriveRunStream(runId)) {
         return
       }
       let host = this.findInFlightHost()
@@ -3680,6 +3716,8 @@ export const useAiStore = defineStore('ai', {
     async retryLoadHistory(): Promise<void> {
       this.historyError = null
       this.recoveryGap = null
+      // M08-R2：用户显式重试 ⇒ 重新给驱动一份预算（否则"自动重连已用尽"会把重试钮锁死）
+      this.forgetRunStreamDrive()
       await this.loadHistory()
     },
 
@@ -3687,6 +3725,8 @@ export const useAiStore = defineStore('ai', {
     async retryRestoreSnapshot(): Promise<void> {
       this.currentError = null
       this.restoringRecovery = true
+      // M08-R2：同上 —— 显式重试重置驱动预算
+      this.forgetRunStreamDrive()
       try {
         await this.restoreSnapshotGuarded()
       } finally {
@@ -3752,6 +3792,84 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * M08-R2：该 run 现在能否新起一次驱动（当前没有在途驱动，且还有预算）。
+     *
+     * <p>调用方据此在**破坏性准备之前**判断（如 `restoreInFlightRound` 会先清段再重放：
+     * 清完却被预算挡下会让正文停在空白）。
+     */
+    canDriveRunStream(runId: string): boolean {
+      const drive = this.streamDrives[runId]
+      if (drive === undefined) {
+        return true
+      }
+      return !drive.active && drive.used < RUN_STREAM_DRIVE_BUDGET
+    },
+
+    /**
+     * M08-R2：占用该 run 的续流驱动权（返回驱动令牌；null = 已有驱动在跑或预算已用尽）。
+     *
+     * <p>预算**跨连接**累计并共用：两个恢复入口不再各烧一份（真机交替重开就是两份预算）。
+     * 被拒绝的入口什么都不做 —— 现场由持有者负责，旁观者不得改写 `loading` / `suspended`。
+     */
+    acquireRunStreamDrive(runId: string): number | null {
+      if (!this.canDriveRunStream(runId)) {
+        return null
+      }
+      const drive = this.streamDrives[runId]
+      runStreamDriveSeq += 1
+      this.streamDrives = {
+        ...this.streamDrives,
+        [runId]: { token: runStreamDriveSeq, used: drive?.used ?? 0, active: true }
+      }
+      return runStreamDriveSeq
+    },
+
+    /**
+     * M08-R2：一次驱动收尾。**连接结束 ≠ 放弃该 run** —— 所有权与预算都按 run 留着，
+     * 只标记"当前没有在途驱动"；只有**中断**（非终态、非挂起、非准备中、非用户停止、
+     * 非探测判死）才消耗一份预算。
+     */
+    settleRunStreamDrive(runId: string, token: number, interrupted: boolean): void {
+      const drive = this.streamDrives[runId]
+      if (drive === undefined || drive.token !== token) {
+        return // 已被终态 / 停止 / 新驱动接管：不动别人的现场
+      }
+      this.streamDrives = {
+        ...this.streamDrives,
+        [runId]: { ...drive, active: false, used: drive.used + (interrupted ? 1 : 0) }
+      }
+    },
+
+    /** M08-R2：释放该 run 的驱动所有权（终态 / 停止 / 换会话）。缺省 runId = 全部释放。 */
+    forgetRunStreamDrive(runId?: string): void {
+      if (runId === undefined) {
+        if (Object.keys(this.streamDrives).length > 0) {
+          this.streamDrives = {}
+        }
+        return
+      }
+      if (this.streamDrives[runId] === undefined) {
+        return
+      }
+      const next = { ...this.streamDrives }
+      delete next[runId]
+      this.streamDrives = next
+    },
+
+    /**
+     * M08-R2：**显式动作**（决策送达 / 用户重试 / 回到进行中的回答）重新接管该 run 的驱动：
+     * 重置所有权与预算。挂起语义连接不再代表"这一轮的后续帧"（决策后的续跑只能靠新连接接回，
+     * 既有 B1 口径）—— 这里只清登记位、不 abort：入口会先换身份再中止旧连接。
+     */
+    restartRunStreamDrive(runId: string): void {
+      this.forgetRunStreamDrive(runId)
+      if (this.activeStreamRunId === runId && this.activeStreamParked) {
+        this.activeStreamRunId = null
+        this.activeStreamParked = false
+      }
+    },
+
+    /**
      * 批次2（ADR-5）：用户手动"回到进行中的回答"（409 带回 runId 时）。
      *
      * <p>**一次性**动作：先做一次历史对账（把那一轮的用户消息与已有正文取回来），
@@ -3765,6 +3883,8 @@ export const useAiStore = defineStore('ai', {
       }
       this.busyRun = null
       this.activeRunId = busy.runId
+      // M08-R2：用户显式"回到进行中的回答" ⇒ 重置该 run 的驱动所有权与预算
+      this.restartRunStreamDrive(busy.runId)
       this.restoringRecovery = true
       try {
         await this.loadHistoryInner()
@@ -3915,6 +4035,8 @@ export const useAiStore = defineStore('ai', {
       delete message.synthetic
       delete message.appliedSeqs
       deriveProjections(message)
+      // M08-R2：用户显式"重试本轮" ⇒ 重新接管该 run 的驱动（预算重置；挂起连接作废）
+      this.restartRunStreamDrive(runId)
       // 受理即返回：重挂是长连接（持续到本轮结束），不阻塞调用方；失败由重挂路径自己的
       // onClose/断流口径处理（与既有刷新恢复同一条通道）。
       void this.reattachActive(runId, { hostMessageId: message.id, lastSeq })
@@ -4056,6 +4178,12 @@ export const useAiStore = defineStore('ai', {
       }
       // B1 收口修（C-1）：本入口是**同一轮**的续收连接（挂起收流 → 决策后重连 / 刷新恢复），
       // 慢前端工具的结局仍属于本轮 ⇒ 不递增 `roundEpoch`（否则工具回灌会在重连后被误丢）。
+      const driveToken = this.acquireRunStreamDrive(runId)
+      if (driveToken === null) {
+        // M08-R2：这一轮的驱动权已在别处（连接存活 / 退避 / 重连中），或预算已用尽 ⇒
+        // 不再另起一条驱动。旁观入口不改写现场（loading / suspended 归持有者）。
+        return
+      }
       const previous = currentAbort
       this.runSeq = recordRunSeq(this.runSeq, runId, lastSeq)
       this.loading = true
@@ -4087,6 +4215,8 @@ export const useAiStore = defineStore('ai', {
       const isCurrentRound = (): boolean => currentAbort === controller && roundEpoch === streamEpoch
       /** 批次2：归档缺口只按**首帧**判一次（后续跳号可能是并发交错的正常现象）。 */
       let gapChecked = false
+      /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
+      const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
       // 其 onClose 的断流提示不会写脏新连接的现场
       previous?.abort()
@@ -4118,6 +4248,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
+              closeTrace.info = info
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；重挂/续收路径同样适用）
               // B1（裁决 8）：挂起导致的服务端收流同样是正常收尾（多卡批次里第 2 张卡
               // 送达后就会再断一次；此时不提示"结果可能不完整"）。
@@ -4149,6 +4280,14 @@ export const useAiStore = defineStore('ai', {
           this.activeStreamRunId = null
           this.activeStreamParked = false
         }
+        // M08-R2：驱动收尾 —— 连接结束不等于放弃这一轮。只有"中断"（真断流）才消耗预算；
+        // 终态 / 挂起收尾 / 准备中 / 用户停止 / 被新驱动接管都不消耗。
+        const closeInfo = closeTrace.info
+        this.settleRunStreamDrive(runId, driveToken, closeInfo !== null
+          && !closeInfo.terminal
+          && !closeInfo.suspended
+          && !this.stopped
+          && this.preparingRun === null)
       }
     },
 
@@ -4197,6 +4336,9 @@ export const useAiStore = defineStore('ai', {
         }
       }
       const awaitingInput = this.hasOtherPendingCards(toolCallId)
+      // M08-R2：决策送达是**显式动作** —— 重新接管该 run 的驱动（重置预算；挂起语义连接
+      // 不再代表后续帧）。决不能让"单飞/预算"把决策后的合法续跑吞掉。
+      this.restartRunStreamDrive(runId)
       void this.resumeSnapshotStream(runId, this.runSeq[runId] ?? 0, host.id, awaitingInput)
     },
 
@@ -4252,6 +4394,8 @@ export const useAiStore = defineStore('ai', {
       this.poolSaturated = null
       // 批次2：新一轮即作废上一轮的"回到进行中的回答"入口（它指的那一轮可能已经结束）
       this.busyRun = null
+      // M08-R2：新轮 = 上一轮已放弃 ⇒ 释放它的驱动所有权（预算记录不再有消费者）
+      this.forgetRunStreamDrive()
       const controller = new AbortController()
       currentAbort = controller
       activeRoundHostId = assistant.id
@@ -4617,6 +4761,13 @@ export const useAiStore = defineStore('ai', {
         }
         return
       }
+      // M08-R2：驱动权按 runId 独占（连接存活 / 退避 / 重连都算同一个驱动），预算跨连接累计。
+      // 拿不到 ⇒ 这一轮已在别处驱动或预算已用尽：**在动任何现场之前**退出（不换轮次身份、
+      // 不作废队列、不新建气泡），否则被拒绝的入口会把在跑驱动的现场改坏。
+      const driveToken = this.acquireRunStreamDrive(targetRunId)
+      if (driveToken === null) {
+        return
+      }
       // B1 收口修（C-1）：接管 = 换轮次身份 —— 在途的旧轮前端工具结局丢弃
       roundEpoch += 1
       // M-2b：接管走实时帧重建，快照串行队列作废（防旧队列在重连后复读旧卡）
@@ -4655,6 +4806,8 @@ export const useAiStore = defineStore('ai', {
       let gapChecked = false
       /** 批次3：探测确认 runId 不存在 ⇒ 已封口，onClose 不得再报"断流"。 */
       let unavailableNotified = false
+      /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
+      const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
       // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
       previous?.abort()
@@ -4704,6 +4857,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
+              closeTrace.info = info
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；接管/续收路径同样适用）
               // B1（裁决 8）：挂起即断导致的收流是正常收尾 —— 不报断流（决策后另有显式重连）。
               if (info.suspended) {
@@ -4743,6 +4897,15 @@ export const useAiStore = defineStore('ai', {
           this.activeStreamRunId = null
           this.activeStreamParked = false
         }
+        // M08-R2：驱动收尾 —— 连接结束不等于放弃这一轮（所有权与预算按 run 保留）。
+        // 只有真断流才消耗预算：终态 / 挂起收尾 / 准备中 / 判死 / 用户停止都不消耗。
+        const closeInfo = closeTrace.info
+        this.settleRunStreamDrive(targetRunId, driveToken, closeInfo !== null
+          && !closeInfo.terminal
+          && !closeInfo.suspended
+          && !this.stopped
+          && !unavailableNotified
+          && this.preparingRun === null)
       }
     },
 
@@ -6680,6 +6843,8 @@ export const useAiStore = defineStore('ai', {
           this.busyRun = null
         }
       }
+      // M08-R2：停止 = 放弃这一轮 ⇒ 释放驱动所有权与预算（停止是终态动作，不是"连接结束"）
+      this.forgetRunStreamDrive(runId ?? undefined)
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
       // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
@@ -6892,6 +7057,8 @@ export const useAiStore = defineStore('ai', {
       this.activeStreamRunId = null
       this.activeStreamParked = false
       this.stoppedRunId = null
+      // M08-R2：驱动所有权/预算同样是旧会话现场
+      this.forgetRunStreamDrive()
       this.restoringRecovery = false
       // 批次6B（N7）：工作区 chip / ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
       // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
@@ -7309,6 +7476,11 @@ export const useAiStore = defineStore('ai', {
           // O02：即便这帧属于旧轮的宿主，只要它就是忙提示所指的那一轮，入口也必须作废
           //（"回到进行中的回答"只对仍在进行的轮成立）——轮次级状态之外，busyRun 是纯指针。
           this.clearBusyRunOnTerminal(frame.runId)
+          // M08-R2：终态 = 该 run 的驱动使命结束，所有权与预算一并释放
+          //（runId 缺失时**不得**当作"释放全部"——那会误伤其它在途轮）
+          if (frame.runId !== undefined) {
+            this.forgetRunStreamDrive(frame.runId)
+          }
         }
         return
       }
@@ -7698,6 +7870,12 @@ export const useAiStore = defineStore('ai', {
         // O02：DONE / CANCELLED / FAILED / error 一到，忙提示立即作废 —— "回到进行中的回答"
         // 指的那一轮已经结束，入口指过去只会落到一条收尾的回答上。
         this.clearBusyRunOnTerminal(frame.runId)
+        // M08-R2：终态 = 该 run 的驱动使命结束（所有权与预算一并释放）；
+        // runId 与 activeRunId 都缺时保持不动（`forgetRunStreamDrive(undefined)` = 释放全部）
+        const terminalRunId = frame.runId ?? this.activeRunId
+        if (terminalRunId !== null) {
+          this.forgetRunStreamDrive(terminalRunId)
+        }
       }
     },
 
