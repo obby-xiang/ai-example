@@ -1,7 +1,7 @@
 # 最终 7 红项小范围修复报告
 
 - 日期：2026-10-30
-- 范围：主仓 `E:/temp/ai-example-code/ai-example-main-v2`
+- 范围：主仓 `<REPO>`
 - 未派子 agent；未推送；未改任何迁移文件（`db/migration`、`db/postgresql` 零改动）；只跑下文 4 条精确单点命令，未跑任何批量/全量。
 
 ## 1. 红项清单（施工前实测，7 项）

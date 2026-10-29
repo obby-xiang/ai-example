@@ -256,3 +256,11 @@ check-docs 应恢复 6/6。
 - rollback 仍按原样复制 tagged 值（不剥离/补写身份）；I-1 只要求正向带身份写入。
 - check-docs 的红来自上述外部报告，提交前无法在不越界的前提下转绿。
 - 未推送；未修改 `RunStore` / `ResumeService` / `ConfirmGate` 等运行链文件。
+
+## 7. 文档门禁收尾（2026-10-30）
+
+只处理 `check-docs` 的第 ⑤ 项：
+
+- `task-final-small-fix-report.md:4` 的本机绝对路径改为 `<REPO>` 占位符；其他内容未动。
+- `node scripts/ci/check-docs.mjs`：修前 5/6（⑤ 命中该行），修后 **6/6 全部通过**。
+- 本任务未改其他文件；未推送。
