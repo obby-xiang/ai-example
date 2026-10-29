@@ -690,6 +690,18 @@ const READ_ONLY_LABEL_KEY: Record<ReadOnlyState, string> = {
 }
 
 /**
+ * 只读态文案 key：表单系（generative_form）**没有批准步骤** ⇒ `failed` 只说「执行失败」，
+ * 不得借门卡的「已批准 · 执行失败」（那句里的"已批准"对表单系是凭空的决策）。
+ * 类型仍走 {@link cardTypeOf} 单一判据；key / tone 全集不变。
+ */
+function readOnlyLabelKeyOf(part: ToolPart, state: ReadOnlyState): string {
+  if (state === 'failed' && cardTypeOf(part) === 'form') {
+    return 'ai.card.readonly.formFailed'
+  }
+  return READ_ONLY_LABEL_KEY[state]
+}
+
+/**
  * 已决多态色族（与旧 READONLY_BADGE_TONE 同源：通过琥珀、提交/批准绿、拒绝/失败/取消红）。
  * 批4：未批准/已批准未执行都用中性色 —— 它们不是执行失败（不得染红），也不是成功（不得染绿）。
  */
@@ -731,7 +743,8 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
 
 /**
  * 卡片状态（key / label / tone）：
- * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / label / tone 全由 {@link readOnlyStateOf} 派生；
+ * - 已决 HITL / GF（{@link isReadOnlyCard}）⇒ key / tone 全由 {@link readOnlyStateOf} 派生，
+ *   label 再按类型分工（表单系无批准步骤，`failed` 只说「执行失败」，见 {@link readOnlyLabelKeyOf}）；
  * - GF 提交后在途（{@link isFormAwaitingOutcome}）⇒ **恒定「✓ 已提交」**（与结局成功后的只读态同字，
  *   卡头状态从提交那一刻起不再跳字）；
  * - 其余 pending ⇒ 文案按 {@link cardTypeOf} 分工；
@@ -741,7 +754,7 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
 export function cardStatusOf(part: ToolPart): CardStatus {
   if (isReadOnlyCard(part)) {
     const state = readOnlyStateOf(part)
-    return { key: state, label: translate(READ_ONLY_LABEL_KEY[state]), tone: READ_ONLY_TONE[state] }
+    return { key: state, label: translate(readOnlyLabelKeyOf(part, state)), tone: READ_ONLY_TONE[state] }
   }
   if (isFormAwaitingOutcome(part)) {
     return { key: 'submitted', label: translate(READ_ONLY_LABEL_KEY.submitted), tone: READ_ONLY_TONE.submitted }

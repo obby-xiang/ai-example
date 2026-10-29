@@ -232,6 +232,49 @@ describe('批次2 · 历史恢复错误出口', () => {
     expect(retry).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
+
+  it('同一恢复失败只出一条全局提示与一个重试动作（错误条合并不完整事实，消息级不重复）', async () => {
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '镜像里的这一段', streaming: false }])
+    reply.id = 'a-gap'
+    reply.recoveryGap = true
+    const store = useAiStore()
+    // sealRecovery 的一次失败：historyError 与 recoveryGap 同帧写入
+    const wrapper = await mountPanel([reply], {
+      historyError: { scope: 'history', code: 'NETWORK_ERROR', status: 0, at: Date.now() },
+      recoveryGap: { reason: 'history-unavailable', fromSeq: null, toSeq: null, at: Date.now() }
+    })
+    expect(wrapper.findAll('[data-testid="alert-history-error"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="alert-recovery-gap"]').exists()).toBe(false)
+    const bar = wrapper.find('[data-testid="alert-history-error"]')
+    expect(bar.text()).toContain('历史恢复失败')
+    expect(bar.text()).toContain('部分内容可能不完整')
+    // 一个动作：不再并列第二个「重新载入」
+    expect(bar.findAll('button')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="retry-recovery-gap"]').exists()).toBe(false)
+    // 消息级第三条不出现
+    expect(wrapper.find('[data-testid="recovery-gap-msg-a-gap"]').exists()).toBe(false)
+    // 无镜像时同样出条 —— 不得无条件声称「当前显示的是本地缓存」
+    expect(wrapper.text()).not.toContain('本地缓存')
+    const retry = vi.spyOn(store, 'retryLoadHistory').mockResolvedValue(undefined)
+    await bar.find('[data-testid="retry-history"]').trigger('click')
+    expect(retry).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('archive-window 真实缺帧（未伴随恢复错误）仍单独出中性缺口条', async () => {
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '缺帧后的内容', streaming: false }])
+    reply.id = 'a-gap2'
+    reply.recoveryGap = true
+    const wrapper = await mountPanel([reply], {
+      recoveryGap: { reason: 'archive-window', fromSeq: 4, toSeq: 6, at: Date.now() }
+    })
+    expect(wrapper.find('[data-testid="alert-history-error"]').exists()).toBe(false)
+    const bar = wrapper.find('[data-testid="alert-recovery-gap"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('部分内容可能不完整')
+    expect(bar.findAll('button')).toHaveLength(1)
+    wrapper.unmount()
+  })
 })
 
 describe('批次2 · 409 回到进行中的回答', () => {
@@ -398,7 +441,8 @@ describe('批次2 · synthetic 与 recoveryGap 的中性呈现', () => {
     const bar = wrapper.find('[data-testid="alert-recovery-gap"]')
     expect(bar.exists()).toBe(true)
     expect(bar.text()).toContain('不完整')
-    expect(wrapper.find('[data-testid="recovery-gap-msg-a-gap"]').exists()).toBe(true)
+    // 同一事实只留一个提示面：全局条已在说这件事，消息级不再重复
+    expect(wrapper.find('[data-testid="recovery-gap-msg-a-gap"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="error-card-a-gap"]').exists()).toBe(false)
     wrapper.unmount()
   })

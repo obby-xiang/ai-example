@@ -32,7 +32,8 @@
         "submitted": "✓ Submitted",
         "cancelled": "✗ Cancelled",
         "notApproved": "! Not approved · Not executed",
-        "notExecuted": "! Approved · Not executed"
+        "notExecuted": "! Approved · Not executed",
+        "formFailed": "Execution failed"
       },
       "error": {
         "quota": {
@@ -549,8 +550,8 @@
       "recoveryGap": "Some content may be incomplete",
       "recoveryGapHint": "This part came from the local cache or incremental replay, so completeness cannot be confirmed. Reload to sync the server state.",
       "reloadTurn": "Reload",
-      "historyLoadFailed": "History restore failed; showing the local cache.",
-      "recoveryFailed": "Session restore failed; showing the local cache.",
+      "historyLoadFailed": "History restore failed",
+      "recoveryFailed": "Session restore failed",
       "retryHistory": "Reload history",
       "retryRecovery": "Retry restore",
       "loadErrorNetwork": "The network is unreachable, so this session could not be read from the server.",

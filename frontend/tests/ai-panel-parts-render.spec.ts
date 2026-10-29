@@ -2800,7 +2800,34 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
       expect(wrap.classList.contains('scroll-smooth')).toBe(true) // CSS 类已挂（禁 scrollTo smooth）
       expect(wrapper.find('[data-testid="back-to-bottom"]').exists()).toBe(false) // 显式收钮
       vi.advanceTimersByTime(600)
+      await wrapper.vm.$nextTick() // 类走 :class ⇒ 计时到点后由本轮 patch 摘掉
       expect(wrap.classList.contains('scroll-smooth')).toBe(false) // ~600ms 后移除类
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('平滑回底：scroll-smooth 并入 :class，点击后的重渲不清掉，600ms 仍按原时机移除', async () => {
+    vi.useFakeTimers()
+    try {
+      const { wrapper, wrap } = await mountScrolled()
+      scrollToDist(wrap, 200, wrapper)
+      await wrapper.vm.$nextTick()
+      await wrapper.find('[data-testid="back-to-bottom"]').trigger('click')
+      await wrapper.vm.$nextTick()
+      expect(wrap.classList.contains('scroll-smooth')).toBe(true)
+      // 流式正文增长 ⇒ 滚动容器的动态 :class 重算 —— 旧实现由 classList 挂的类在这一步被整串覆写
+      const store = useAiStore()
+      ;(store.messages[0]!.parts[0] as { kind: 'text'; text: string }).text = '长文（重渲）'
+      await wrapper.vm.$nextTick()
+      expect(wrap.classList.contains('scroll-smooth')).toBe(true)
+      vi.advanceTimersByTime(599)
+      await wrapper.vm.$nextTick()
+      expect(wrap.classList.contains('scroll-smooth')).toBe(true)
+      vi.advanceTimersByTime(1)
+      await wrapper.vm.$nextTick()
+      expect(wrap.classList.contains('scroll-smooth')).toBe(false)
       wrapper.unmount()
     } finally {
       vi.useRealTimers()

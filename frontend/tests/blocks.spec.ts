@@ -319,7 +319,7 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toBe('failed')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'skipped' }))).toBe('notExecuted')
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toMatchObject({
-      key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger'
+      key: 'failed', label: '执行失败', tone: 'danger'
     })
     // 默认展开：r15 裁决 —— 六态一律折叠（回合结束后只留卡头摘要行）
     expect(readOnlyDefaultExpanded(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe(false)
@@ -539,6 +539,15 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     // 2026-10-29 批（utils/blocks readOnlyStateOf）：只有真取消画「已取消」；
     // 执行失败如实落 failed（旧口径把它也说成"用户自己取消了"，与事实相反）
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toEqual({
+      key: 'failed', label: '执行失败', tone: 'danger'
+    })
+  })
+
+  it('GF 无批准步骤：failed 只说「执行失败」；门卡 CONFIRM 的 failed 仍是「已批准 · 执行失败」', () => {
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toEqual({
+      key: 'failed', label: '执行失败', tone: 'danger'
+    })
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toEqual({
       key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger'
     })
   })

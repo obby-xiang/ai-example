@@ -32,7 +32,8 @@
         "submitted": "✓ 已提交",
         "cancelled": "✗ 已取消",
         "notApproved": "! 未批准 · 未执行",
-        "notExecuted": "! 已批准 · 未执行"
+        "notExecuted": "! 已批准 · 未执行",
+        "formFailed": "执行失败"
       },
       "error": {
         "quota": {
@@ -549,8 +550,8 @@
       "recoveryGap": "部分内容可能不完整",
       "recoveryGapHint": "这一段来自本地缓存或增量回放，无法确认完整。可重新载入以同步服务端状态。",
       "reloadTurn": "重新载入",
-      "historyLoadFailed": "历史恢复失败，当前显示的是本地缓存。",
-      "recoveryFailed": "会话恢复失败，当前显示的是本地缓存。",
+      "historyLoadFailed": "历史恢复失败",
+      "recoveryFailed": "会话恢复失败",
       "retryHistory": "重新载入历史",
       "retryRecovery": "重试恢复",
       "loadErrorNetwork": "网络不可达，没能从服务端读取本会话状态。",

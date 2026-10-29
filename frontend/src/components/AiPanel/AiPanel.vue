@@ -89,12 +89,17 @@
     </div>
 
     <!-- 批次2（N3）：历史/快照恢复失败不再静默 —— 错误条 + 重试出口。
-         只读 store 适配器（historyError/currentError，见 recoveryBridge 注释），不在此处自造错误态。 -->
-    <div v-if="recoveryErrorText()" :class="alertBox('error')" data-testid="alert-history-error">
+         只读 store 适配器（historyError/currentError，见 recoveryBridge 注释），不在此处自造错误态。
+         2026-10-29 返修（同一事实只留一个提示面）：一次失败在 store 里同时写 `historyError` 与
+         `recoveryGap`（见 sealRecovery），旧版并排出两条横幅、两个按钮最终都落 `retryLoadHistory`。
+         现在错误条就地合并「内容可能不完整」这条中性事实，缺口专属条只在**没有**恢复错误时出现。 -->
+    <div v-if="recoveryErrorVisible" :class="alertBox('error')" data-testid="alert-history-error">
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ recoveryErrorLabel() }}</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
+        <span class="block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
+        <!-- 中性事实（不是第二条错误）：恢复失败 ⇒ 当前内容可能不完整 -->
+        <span class="mt-[2px] block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.recoveryGap') }}</span>
       </div>
       <button
         type="button"
@@ -107,8 +112,9 @@
     </div>
 
     <!-- 批次2：**不可完整恢复**（recoveryGap）——中性事实，不是轮失败、不是错误卡。
-         只有"本地镜像/差量回放不能保证完整"这一条信息 + 重新载入出口；不显示内部区间/原因码。 -->
-    <div v-if="ai.recoveryGap" :class="alertBox('gray')" data-testid="alert-recovery-gap">
+         只有"本地镜像/差量回放不能保证完整"这一条信息 + 重新载入出口；不显示内部区间/原因码。
+         真正的缺帧（archive-window）没有恢复错误可归并 ⇒ 本条照常单独出现。 -->
+    <div v-if="recoveryGapBarVisible" :class="alertBox('gray')" data-testid="alert-recovery-gap">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.recoveryGap') }}</b>
@@ -214,14 +220,16 @@
            （禁改 tailwind.config.js、禁手写 CSS）。
            2026-10-29 返修：`[overflow-anchor:none]` **只在跟随态**挂 —— 跟随态我们自己按 measured size
            补偿，原生锚定再补一次就是双份；用户上翻后我们不做任何补偿，位置只能交给浏览器锚定
-           （否则 mermaid / 图片 / 字体在视口上方落地时，阅读位置会跳）。 -->
+           （否则 mermaid / 图片 / 字体在视口上方落地时，阅读位置会跳）。
+           平滑回底（`scroll-smooth`）也挂在这条 `:class` 上（见 backToBottom 注释）—— 本绑定每次重渲
+           都会整串覆写 className，命令式 `classList.add` 会在这里被静默抹掉。 -->
       <div
         ref="msgWrapRef"
         role="log"
         :aria-label="t('ai.panel.logAria')"
         :aria-busy="logBusy ? 'true' : 'false'"
         class="flex-1 overflow-y-auto overflow-x-hidden p-3"
-        :class="[SCROLLBAR_CLASS, followBottom ? '[overflow-anchor:none]' : '']"
+        :class="[SCROLLBAR_CLASS, followBottom ? '[overflow-anchor:none]' : '', smoothBackActive ? 'scroll-smooth' : '']"
         @scroll.passive="onMsgScroll"
         @wheel.passive="markUserScrollIntent"
         @touchstart.passive="markUserScrollIntent"
@@ -1103,9 +1111,10 @@
             @click="reloadTurnState()"
           ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.reloadTurn') }}</span></button>
         </div>
-        <!-- 批次2：这条消息来自镜像/差量回放但不能确认完整 —— 中性局部标记（全局提示条另有重载出口）。 -->
+        <!-- 批次2：这条消息来自镜像/差量回放但不能确认完整 —— 中性局部标记（全局提示条另有重载出口）。
+             2026-10-29 返修：全局条已在说同一件事时消息级不再叠一遍（同一事实只留一个提示面）。 -->
         <div
-          v-if="m.recoveryGap === true"
+          v-if="m.recoveryGap === true && !recoveryNoticeVisible"
           class="w-full flex items-start gap-[8px] border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[6px] mb-2.5 text-[11.6px] leading-[1.6] text-[#57606a]"
           :data-testid="'recovery-gap-msg-' + m.id"
         >
@@ -1702,6 +1711,17 @@ function retryRecoveryLoad(): void {
   void ai.loadHistory()
 }
 
+/**
+ * 恢复提示面的**唯一去重口径**（2026-10-29 返修）：store 一次恢复失败（`sealRecovery`）
+ * 同时写 `historyError` 与 `recoveryGap`，两者是同一个事实 ——
+ * - 有恢复错误 ⇒ 只出错误条（条内合并「内容可能不完整」的事实）；
+ * - 无恢复错误但有缺口（archive-window 真缺帧）⇒ 只出中性缺口条；
+ * - 任一全局条在显示 ⇒ 消息级 `recoveryGap` 局部标记不再重复。
+ */
+const recoveryErrorVisible = computed(() => recoveryErrorText() !== null)
+const recoveryGapBarVisible = computed(() => !recoveryErrorVisible.value && ai.recoveryGap !== null)
+const recoveryNoticeVisible = computed(() => recoveryErrorVisible.value || ai.recoveryGap !== null)
+
 /** 409 回执里的进行中轮（`busyRun.runId`）；旧字段名仅作兼容。 */
 function busyRunId(): string | null {
   const view = storeView()
@@ -1942,27 +1962,35 @@ const showBackToBottom = ref(false)
 /** R-161 平滑回底时长（demo 口径）：CSS scroll-behavior:smooth 类挂 ~600ms 后移除。 */
 const SMOOTH_BACK_MS = 600
 let smoothBackTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * 平滑回底开关 —— **必须走模板 :class**，不能再 `wrap.classList.add`：滚动容器挂着动态
+ * `:class`（跟随态 `[overflow-anchor:none]` 等），每次重渲都会整串覆写 className，
+ * 命令式挂上的 `scroll-smooth` 会被静默抹掉（用户点「回到底部」不再有平滑）。
+ */
+const smoothBackActive = ref(false)
 
 /**
- * 「回到底部」浮钮：加 CSS scroll-behavior:smooth 类 + pinBottom（会审 M2：禁
+ * 「回到底部」浮钮：挂 CSS scroll-behavior:smooth 类 + pinBottom（会审 M2：禁
  * scrollTo({behavior:'smooth'})，jsdom 不同步更新 scrollTop，保既有同步断言）；
  * 显式收钮（会审 M3：滞回态非纯计算，否则「点击后钮消失」不成立）；约 600ms 后移除类，
  * 期间用户滚动可打断（浏览器语义）；流式期 pinBottom 恒瞬跳，不走 smooth。
+ *
+ * 类走响应式字段 ⇒ 本轮 patch 落地后容器才真正带 smooth，钉底因此排到 nextTick：
+ * 先写 scrollTop 的话浏览器按 auto 瞬跳，smooth 就等于没挂。
  */
 function backToBottom(): void {
-  const wrap = msgWrapRef.value
-  if (!wrap) {
+  if (!msgWrapRef.value) {
     return
   }
-  wrap.classList.add('scroll-smooth')
+  smoothBackActive.value = true
   if (smoothBackTimer !== null) {
     clearTimeout(smoothBackTimer)
   }
   smoothBackTimer = setTimeout(() => {
-    wrap.classList.remove('scroll-smooth')
+    smoothBackActive.value = false
     smoothBackTimer = null
   }, SMOOTH_BACK_MS)
-  pinBottom()
+  void nextTick(pinBottom)
   showBackToBottom.value = false
 }
 
