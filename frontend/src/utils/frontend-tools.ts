@@ -566,15 +566,6 @@ async function runWithBudget(
 const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_files', 'download']
 
 /**
- * **副作用可能已发生**（建作业）的前端入口名 —— 超时文案必须与下载类同源（"结局未知 / 勿重复"）。
- *
- * <p>为什么：`export.start` 会在服务端建导出作业；预算到点或停止时作业可能已经创建。按普通
- * timeout 回"执行超时，请重试"会诱导模型重复建作业（与下载类同族风险，2026-10-29 复审 Minor-1）。
- * 名字取页面能力名 `export.start`；不扩展到 import 的建作业入口（复审明确不扩）。
- */
-const JOB_START_TOOL_NAMES: readonly string[] = ['export.start']
-
-/**
  * 下载类前端工具的**显式前置等待上限**（毫秒）。
  *
  * <p>L-82（真机 E2E 批② VL 域）：`download_export_files` 在**编辑器未预热**时"前置校验"里的
@@ -611,21 +602,14 @@ function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: num
   const waitedSeconds = Math.round(elapsedMs / 1000)
   const budgetSeconds = Math.round(budgetMs / 1000)
   if (DOWNLOAD_TOOL_NAMES.includes(call.name)) {
-    // 下载类（副作用可能已发生、只是回执没回来）：`unknown` 白名单之一。
+    // 下载类（副作用可能已发生、只是回执没回来）：`unknown` 白名单的唯一保留者。
     const result = `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到浏览器的完成回执（执行器预算 ${budgetSeconds} 秒）。`
       + '该操作可能仍在后台继续，文件也许已经下载到浏览器的下载目录。'
       + '请让用户先到下载目录确认文件是否已落盘，再决定是否需要重试；请勿重复触发下载。'
       + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
     return makeExecution({ outcome: 'unknown', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
   }
-  if (JOB_START_TOOL_NAMES.includes(call.name)) {
-    // 建作业类（副作用可能已发生）：不得诱导重试 —— 重复发起会重复建导出作业。
-    const result = `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到页面的完成回执（执行器预算 ${budgetSeconds} 秒）。`
-      + '导出作业可能已经创建、也可能没有创建，本次调用结局未知 —— 既未确认成功，也未确认失败。'
-      + '请让用户先到任务中心核对该任务是否已有新的导出作业，再决定是否重新发起；请勿重复发起导出。'
-    return makeExecution({ outcome: 'unknown', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
-  }
-  // 非副作用类：预算到期 = 确定性收口（timeout），不再糊成「结局未知」。
+  // 非下载类：预算到期 = 确定性收口（timeout），不再糊成「结局未知」。
   const result = formatUiReceipt({
     tool: `${label}（${call.name}）`,
     conclusion: `执行超时，本次未完成（等待 ${waitedSeconds} 秒，执行器预算 ${budgetSeconds} 秒）`,

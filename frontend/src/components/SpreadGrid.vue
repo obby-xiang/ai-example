@@ -663,12 +663,17 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
       } catch (error) {
         return { applied, error }
       }
-      const list = updates.filter((update) => {
-        // 边界用已解析的 sheet 现算（不再经 live()，避免在此处二次抛错逃出契约）
-        const rows = Math.max(0, sheet.getRowCount() - 1)
-        const cols = fields.length > 0 ? fields.length : sheet.getColumnCount()
-        return update.row >= 0 && update.row < rows && update.col >= 0 && update.col < cols
-      })
+      // 边界只算一次（复审 I-B/M2）：getRowCount/getColumnCount 与 live() 一样可能在
+      // "在册但失活"的引擎上抛错 —— 一并纳入 try，绝不违反"writeCells 不 throw"的契约。
+      let rows: number
+      let cols: number
+      try {
+        rows = Math.max(0, sheet.getRowCount() - 1)
+        cols = fields.length > 0 ? fields.length : sheet.getColumnCount()
+      } catch (error) {
+        return { applied, error }
+      }
+      const list = updates.filter((update) => update.row >= 0 && update.row < rows && update.col >= 0 && update.col < cols)
       if (list.length === 0) {
         return { applied }
       }

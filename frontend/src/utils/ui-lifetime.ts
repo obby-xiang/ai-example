@@ -27,6 +27,26 @@ export function uiAbandonedReply(action: string): { ok: false; reason: string } 
   }
 }
 
+/**
+ * "步骤未推进"的作废回执（复审 M7）：导入侧 `flushEditors` 可能已经把若干配置写回服务端文件，
+ * 这部分**事实**必须随回执带出（模型据此知道"文件已更新、只是步骤没动"）。
+ *
+ * @param savedDefs 作废前已写回服务端文件的配置编码（导入向导离开第 1 步时的 flush 结果）
+ */
+export function uiStepAbandonedReply(
+  reason: string | undefined,
+  savedDefs: readonly string[] = []
+): { ok: false; reason: string } {
+  const base = reason ?? '前端工具预算已到点或本轮已停止：步骤未推进'
+  if (savedDefs.length === 0) {
+    return { ok: false, reason: base }
+  }
+  return {
+    ok: false,
+    reason: `${base}；其中 ${savedDefs.length} 个配置项（${savedDefs.join('、')}）的编辑内容已写回服务端文件`
+  }
+}
+
 /** 作废判据的页面侧传参形态：`() => boolean`，供 goStep / persistStepData 这类页内函数复用。 */
 export function uiAbandonGuard(lifetime?: UiEventLifetime): () => boolean {
   return () => uiAbandoned(lifetime)

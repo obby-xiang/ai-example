@@ -223,7 +223,7 @@ describe('R4 收尾 best-effort：上色/登记失败不得吞掉回执与状态
 })
 
 describe('R3 成功路径：被适配器忽略（越界/不可写）的更新不计入回执与撤销', () => {
-  it('适配器回报少一格 ⇒ 回执只报实际落笔格数，撤销也只登记这 N-1 格', () => {
+  it('适配器回报少一格 ⇒ 回执只报实际落笔格数，撤销/上色也只覆盖这 N-1 格', () => {
     const sheet = bigSheet(3)
     const plan = planReplace(sheet.ctx, args, 't-drop')
     if (!plan.ok) throw new Error(plan.reason)
@@ -236,6 +236,10 @@ describe('R3 成功路径：被适配器忽略（越界/不可写）的更新不
       original(head)
       return { applied: [...head] }
     }
+    const marks: Array<Array<{ row: number; col: number }>> = []
+    sheet.ctx.adapter.markCells = (cells) => {
+      marks.push(cells.map((cell) => ({ ...cell })))
+    }
 
     const outcome = applySheetPlan(sheet.ctx, plan.plan)
 
@@ -244,7 +248,132 @@ describe('R3 成功路径：被适配器忽略（越界/不可写）的更新不
     expect(outcome.cells).toBe(2)
     expect(outcome.text).toContain('改动 2 格')
     expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
-    // 已应用色只画实际落笔的两格（不把"没写进去的"标成已改）
-    expect(plan.plan.changes.filter((change) => change.row === 2)).toHaveLength(1)
+    // 已应用色**真的**只画实际落笔的两格（不是同义反复的"计划里有几行"）
+    expect(marks).toEqual([[
+      { row: 0, col: 1 },
+      { row: 1, col: 1 }
+    ]])
+  })
+})
+
+describe('R5 零落笔与部分落笔的行数口径（复审 I-A / M3）', () => {
+  it('changes 非空但适配器一格都不落（无 error）⇒ failed，不得 ok:true / status=applied', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-zero-success')
+    if (!plan.ok) throw new Error(plan.reason)
+    expect(plan.plan.changes.length).toBeGreaterThan(0)
+    sheet.ctx.adapter.writeCells = () => ({ applied: [] })
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.appliedCells).toBe(0)
+    expect(outcome.undoable).toBe(false)
+    expect(outcome.reason).toContain('没有任何一格写入')
+    expect(plan.plan.status).toBe('failed')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
+  })
+
+  it('部分落笔的成功回执按**实际行数**（不出现"2 格 / 3 行"）', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-partial-rows')
+    if (!plan.ok) throw new Error(plan.reason)
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    sheet.ctx.adapter.writeCells = (updates) => {
+      const head = updates.filter((update) => update.row !== 2)
+      original(head)
+      return { applied: [...head] }
+    }
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.text).toContain('改动 2 格 / 2 行')
+    expect(outcome.text).not.toContain('2 格 / 3 行')
+  })
+})
+
+describe('R6 适配器自身 throw：调用侧兜底（复审 I-B）', () => {
+  it('applySheetPlan：适配器 throw ⇒ 如实 failed（有回执、status=failed），不向上冒泡', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-throw-apply')
+    if (!plan.ok) throw new Error(plan.reason)
+    sheet.ctx.adapter.writeCells = () => {
+      throw new Error('引擎写入失败（throw 形态）')
+    }
+
+    const outcome = applySheetPlan(sheet.ctx, plan.plan)
+
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.appliedCells).toBe(0)
+    expect(outcome.reason).toContain('写入中途失败')
+    expect(plan.plan.status).toBe('failed')
+  })
+
+  it('applyUndoPlan：撤销写入 throw ⇒ 如实 failed 回执，撤销层保留（不消失）', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-throw-undo')
+    if (!plan.ok) throw new Error(plan.reason)
+    const applied = applySheetPlan(sheet.ctx, plan.plan)
+    expect(applied.ok).toBe(true)
+
+    sheet.ctx.adapter.writeCells = () => {
+      throw new Error('撤销写入失败（throw 形态）')
+    }
+    const undoPlan = planUndo(sheet.ctx, {}, 't-undo-throw')
+    if (!undoPlan.ok) throw new Error(undoPlan.reason)
+    const undone = applyUndoPlan(sheet.ctx, undoPlan.plan)
+
+    expect(undone.ok).toBe(false)
+    if (undone.ok) return
+    expect(undone.reason).toContain('撤销未完成')
+    expect(undone.reason).toContain('剩余 3 格')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
+  })
+})
+
+describe('R7 撤销静默少写：保留未回写格、重试只针对剩余（复审 I-C）', () => {
+  it('适配器只回写 2/3 格（无 error）⇒ 不弹栈、如实报剩余；重试可把剩余格撤完', () => {
+    const sheet = bigSheet(3)
+    const plan = planReplace(sheet.ctx, args, 't-undo-partial-silent')
+    if (!plan.ok) throw new Error(plan.reason)
+    const applied = applySheetPlan(sheet.ctx, plan.plan)
+    expect(applied.ok).toBe(true)
+
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    // 第一次撤销：静默只回写前 2 格（无 error）
+    sheet.ctx.adapter.writeCells = (updates) => {
+      const head = updates.slice(0, 2)
+      original(head)
+      return { applied: [...head] }
+    }
+    const undoPlan = planUndo(sheet.ctx, {}, 't-undo-silent')
+    if (!undoPlan.ok) throw new Error(undoPlan.reason)
+    const first = applyUndoPlan(sheet.ctx, undoPlan.plan)
+
+    expect(first.ok).toBe(false)
+    if (first.ok) return
+    expect(first.reason).toContain('已回写 2 格 / 共 3 格')
+    expect(first.reason).toContain('剩余 1 格')
+    expect(sheet.rows[0]!.status).toBe('停用')
+    expect(sheet.rows[1]!.status).toBe('停用')
+    expect(sheet.rows[2]!.status).toBe('禁用')
+    // 撤销层保留（未弹栈）
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
+
+    // 重试：只针对未回写的 1 格（不被"手动改过"的冲突闸误拦）
+    sheet.ctx.adapter.writeCells = original
+    const retryPlan = planUndo(sheet.ctx, {}, 't-undo-retry')
+    if (!retryPlan.ok) throw new Error(retryPlan.reason)
+    const second = applyUndoPlan(sheet.ctx, retryPlan.plan)
+
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(second.cells).toBe(1)
+    expect(sheet.rows[2]!.status).toBe('停用')
+    expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
   })
 })

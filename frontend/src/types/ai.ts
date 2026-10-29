@@ -713,7 +713,8 @@ export interface SheetWritePlan {
   warnings: string[]
   rulesText: string
   /**
-   * `pending` = 可应用；`applied` = 全量落笔并登记撤销；
+   * `pending` = 可应用；`applied` = 已落笔（**全量或部分**，回执按实际落笔报格/行数与撤销范围；
+   * 部分落笔时被忽略的格已披露；零落笔不判 `applied`）；
    * `failed` = **部分**落笔后中途异常（已写部分尽力登记撤销，`undoable` 如实回报登记结果；
    * 同一计划不得重放）；
    * `cancelled` / `stale` = 用户放弃 / 上下文失效。

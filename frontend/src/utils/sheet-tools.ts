@@ -1759,11 +1759,12 @@ export function planPreviewText(plan: SheetWritePlan | null): string {
 export function planAppliedText(
   plan: SheetWritePlan,
   ctx?: SheetContext,
-  override?: { cells: number }
+  override?: { cells: number; rows?: number }
 ): string {
   const cells = override?.cells ?? plan.cellsCount
+  const rows = override?.rows ?? plan.rowsCount
   const lines: string[] = []
-  lines.push(`已应用（用户已确认）：${plan.tool} 改动 ${cells} 格 / ${plan.rowsCount} 行`)
+  lines.push(`已应用（用户已确认）：${plan.tool} 改动 ${cells} 格 / ${rows} 行`)
   if (override !== undefined && cells < plan.cellsCount) {
     lines.push(`未落笔：${plan.cellsCount - cells} 格被适配器忽略（越界 / 不可写），未计入本次改动`)
   }
@@ -2746,8 +2747,15 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   const appliedUpdates: SheetCellUpdate[] = []
   let failure: { error: unknown } | null = null
   for (const chunk of chunks) {
-    // 兼容旧适配器（返回 void = 按旧契约"要么全成要么抛"）：无回报时视为整块已落
-    const result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
+    // 兼容旧适配器（返回 void = 按旧契约"要么全成要么抛"）：无回报时视为整块已落。
+    // 调用侧兜底（复审 I-B）：即便适配器违约 throw，也只转成真实失败，绝不冒泡成"无回执"。
+    let result: SheetWriteBatchResult
+    try {
+      result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
+    } catch (error) {
+      failure = { error }
+      break
+    }
     appliedUpdates.push(...result.applied)
     if (result.error !== undefined) {
       failure = { error: result.error }
@@ -2756,10 +2764,23 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   }
   const written = selectAppliedChanges(plan.changes, appliedUpdates)
   const appliedCells = written.length
+  const writtenRows = new Set(written.map((change) => change.row)).size
+  // 复审 I-A：计划有格但**一格都没落**（适配器静默过滤）≠ 成功 —— 与计数档同口径，
+  // 否则卡面 tag 成功、正文写"改动 0 格"，且计划被消费（同一张卡无法重试）。
+  const nothingApplied = failure === null && plan.changes.length > 0 && appliedCells === 0
   // I-2：计划状态**先**落定，再做强收尾（撤销登记 / 上色是 best-effort，失败不得让回执消失）
-  plan.status = failure === null ? 'applied' : 'failed'
+  plan.status = (failure !== null || nothingApplied) ? 'failed' : 'applied'
   const undoable = registerUndoEntrySafe(ctx, plan, written)
   markAppliedCellsSafe(ctx, written)
+  if (nothingApplied) {
+    return {
+      ok: false,
+      reason: `本次没有任何一格写入表格：${plan.changes.length} 格全部被适配器判为越界/不可写（表格未产生改动）。`
+        + '请核对表格列映射与行范围后重新发起。',
+      appliedCells: 0,
+      undoable: false
+    }
+  }
   if (failure !== null) {
     const reason = failure.error instanceof Error ? failure.error.message : String(failure.error)
     const total = plan.changes.length
@@ -2779,7 +2800,11 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   }
   // 消费计划（恰好一次）：第二次直接 apply 同一份计划 ⇒ 身份闸/状态闸拒执，不再写一格。
   // 成功回执也按**实际落笔**报数（被适配器忽略的更新不冒充"已改"）。
-  return { ok: true, text: planAppliedText(plan, ctx, { cells: appliedCells }), cells: appliedCells }
+  return {
+    ok: true,
+    text: planAppliedText(plan, ctx, { cells: appliedCells, rows: writtenRows }),
+    cells: appliedCells
+  }
 }
 
 /**
@@ -2927,8 +2952,10 @@ function undoReverseChanges(entry: SheetUndoEntry): SheetChange[] {
  * <p>
  * 三条硬口径：
  * <ol>
- * <li><b>整批全或无</b>：任一格被人改过 ⇒ 整批拒撤、栈不弹出（不做逐格跳过 —— 那会产出
+ * <li><b>冲突整批拒撤</b>：任一格被人改过 ⇒ 整批拒撤、栈不弹出（不做逐格跳过 —— 那会产出
  * "半撤销"，与"半批执行毒化历史"同族）；</li>
+ * <li><b>部分回写可续</b>：适配器静默少写 / 中途失败 ⇒ 栈顶收缩为"尚未回写"的格，
+ * 重试只针对剩余格（见 {@link applyUndoEntry}）；只有全量回写才弹栈。</li>
  * <li><b>回执必报层数</b>：成功说"剩余可撤销 N 层"，无补丁说"只在本次页面有效"，
  * 让用户不必猜；</li>
  * <li><b>不承诺 Ctrl+Z</b>：本栈与用户撤销栈完全独立（共用就回答不了"哪一笔记的是 AI"）。</li>
@@ -2954,28 +2981,62 @@ export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
   return applyUndoEntry(ctx, top.stack, top.entry)
 }
 
-/** 反向补丁落笔 + 弹栈 + 清已应用色（撤销的唯一写入点；调用方须已判定无冲突）。 */
+/**
+ * 反向补丁落笔 + 弹栈 + 清已应用色（撤销的唯一写入点；调用方须已判定无冲突）。
+ *
+ * <p><b>部分回写（复审 I-C）</b>：适配器可能静默少写（越界/列映射收缩）或中途失败。
+ * 这时**不得**弹栈、也不得声称"回到修改前值"：把**尚未回写**的格保留在栈顶
+ * （`changes` / `appliedValues` / `cellsCount` / `rowsCount` 一并收缩到剩余格），
+ * 使重试只针对剩余格、且不被冲突闸误拦（剩余格的现值仍等于其 `appliedValues`）。
+ * 只有**全量回写**才 pop。
+ */
 function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: SheetUndoEntry): ApplySheetPlanOutcome {
   const reverse: SheetCellUpdate[] = entry.changes.map((change) => ({
     row: change.row,
     col: change.col,
     value: change.oldValue
   }))
-  let written = 0
+  const totalCells = entry.cellsCount
+  const appliedUpdates: SheetCellUpdate[] = []
+  let failure: unknown = null
   for (const chunk of chunkUpdates(reverse)) {
-    // 新契约（复审 I-1）：写入如实回报，不 throw
-    const result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
-    written += result.applied.length
+    // 新契约（复审 I-1）：写入如实回报；调用侧兜底（复审 I-B）任何 throw 只转真实失败
+    let result: SheetWriteBatchResult
+    try {
+      result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
+    } catch (error) {
+      failure = error
+      break
+    }
+    appliedUpdates.push(...result.applied)
     if (result.error !== undefined) {
-      // 已回写部分无法再撤回；撤销层**保留**（不弹栈），如实报"部分撤销"，不谎称已撤销
-      const reason = result.error instanceof Error ? result.error.message : String(result.error)
-      return {
-        ok: false,
-        reason: `撤销中途失败：已回写 ${written} 格 / 共 ${entry.cellsCount} 格（原因：${reason}）。`
-          + `撤销记录仍保留（plan #${entry.planId}），请核对表格后重试。`,
-        appliedCells: written,
-        undoable: true
-      }
+      failure = result.error
+      break
+    }
+  }
+  const keyOf = (change: { row: number; col: number }): string => `${change.row}:${change.col}`
+  const appliedKeys = new Set(appliedUpdates.map(keyOf))
+  const remaining = entry.changes.filter((change) => !appliedKeys.has(keyOf(change)))
+  const revertedCells = totalCells - remaining.length
+  if (remaining.length > 0) {
+    // 收缩栈顶到"尚未回写"的格：重试只针对它们，冲突闸只比它们（现值仍等于各自 appliedValues）
+    const expectedByKey = new Map<string, unknown>()
+    entry.changes.forEach((change, index) => {
+      expectedByKey.set(keyOf(change), entry.appliedValues[index])
+    })
+    entry.changes = remaining
+    entry.appliedValues = remaining.map((change) => expectedByKey.get(keyOf(change)))
+    entry.cellsCount = remaining.length
+    entry.rowsCount = new Set(remaining.map((change) => change.row)).size
+    const reasonNote = failure !== null
+      ? `（原因：${failure instanceof Error ? failure.message : String(failure)}）`
+      : '（适配器未写入全部格）'
+    return {
+      ok: false,
+      reason: `撤销未完成：已回写 ${revertedCells} 格 / 共 ${totalCells} 格，剩余 ${remaining.length} 格仍在撤销记录里`
+        + `（plan #${entry.planId}，可再次撤销这 ${remaining.length} 格）${reasonNote}。`,
+      appliedCells: revertedCells,
+      undoable: true
     }
   }
   stack.pop()

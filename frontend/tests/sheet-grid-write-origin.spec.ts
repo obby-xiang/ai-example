@@ -26,6 +26,8 @@ let failSetArrayOnCall: number | null = null
 let setArrayCalls = 0
 /** 故障注入：下一次 resumePaint 抛错（只抛一次）。 */
 let resumePaintFailure: Error | null = null
+/** 故障注入：getRowCount 抛错（引擎"在册但方法失活"的形态）。 */
+let getRowCountFailure: Error | null = null
 
 function setValueAt(row: number, col: number, value: unknown): void {
   const line = sheetRows[row] ?? []
@@ -51,7 +53,12 @@ function fakeSheet(): Record<string, unknown> {
     setRowCount: () => {},
     setColumnCount: () => {},
     setColumnWidth: () => {},
-    getRowCount: () => sheetRows.length,
+    getRowCount: () => {
+      if (getRowCountFailure !== null) {
+        throw getRowCountFailure
+      }
+      return sheetRows.length
+    },
     getColumnCount: () => (sheetRows[0] ?? []).length,
     getCell: (_row: number, _col: number) => ({
       formatter: () => {},
@@ -144,6 +151,7 @@ beforeEach(() => {
   failSetArrayOnCall = null
   setArrayCalls = 0
   resumePaintFailure = null
+  getRowCountFailure = null
   sheetRows = [
     ['code', 'name', 'status'],
     ['CNY', '人民币', '启用'],
@@ -225,6 +233,20 @@ describe('R3 writeCells 的落笔回报（复审 I-1 / Minor-7）', () => {
     bindings.get('CellChanged')?.({})
     const events = wrapper.emitted('data-changed')
     expect(events?.at(-1)).toEqual(['user'])
+    wrapper.unmount()
+  })
+})
+
+describe('R4 边界方法抛错也按 error 回报（复审 I-B）', () => {
+  it('getRowCount 抛错 ⇒ writeCells 返回 { applied: [], error }，不 throw', async () => {
+    const wrapper = await mountGrid()
+    const grid = wrapper.vm as unknown as GridApi
+    getRowCountFailure = new Error('引擎失活：getRowCount 不可用')
+
+    const result = grid.getSheetAdapter().writeCells([{ row: 1, col: 2, value: '禁用' }])
+
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.applied).toEqual([])
     wrapper.unmount()
   })
 })

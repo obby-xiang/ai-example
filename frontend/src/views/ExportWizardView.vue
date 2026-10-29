@@ -211,7 +211,7 @@ import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/defini
 import { validateConditionPayload } from '@/utils/condition-payload'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
-import { uiAbandonGuard, uiAbandoned, uiAbandonedReply } from '@/utils/ui-lifetime'
+import { uiAbandonGuard, uiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 
 const { t } = useI18n()
 
@@ -2404,7 +2404,7 @@ function registerHandlers(): void {
       // 复审 Minor-4：作废（预算到点/停止）不是"数据/网络问题" —— 不得追加重试/改数据的指引；
       // 但也不得丢掉 goStep/persist 已经给出的真实原因（"已提交、未写工作区"）。
       if (uiAbandoned(lifetime)) {
-        return { ok: false, reason: advanced.reason ?? '前端工具预算已到点或本轮已停止：步骤未推进' }
+        return uiStepAbandonedReply(advanced.reason)
       }
       // 结构化失败原样上报（A3 解读支）——不得返回字符串：字符串走「兼容⇒ok」会让卡面 tag
       // 显示「已成功」而卡内文写「步骤未推进」，卡面与回灌自相矛盾（复核 I1）。
