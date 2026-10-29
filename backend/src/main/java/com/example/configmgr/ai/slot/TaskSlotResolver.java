@@ -175,11 +175,15 @@ public class TaskSlotResolver {
 	/**
 	 * 页面实时勾选（三态，与 {@code ContextBuilder#pageSelectedDefs} 同一口径）。
 	 *
+	 * <p><b>为什么对外可见</b>：续跑交棒前的槽位重算（{@code ResumeService}）要用"页面有没有给出
+	 * 权威勾选"来决定能不能用用户原话补初始槽位 —— 这个三态判据只能有一份，否则"页面读法"两处各写
+	 * 一遍必然漂移（一边当成权威空、另一边当成未同步）。
+	 *
 	 * @return {@code null} = 页面从未同步（不带 {@code selectedDefs} 键、不在拥有选中集的向导页上，
 	 *         或列表为空但任务详情还没应用 —— 未水合的 {@code []} 只表示"不知道"）；
 	 *         空列表 = 页面同步了空集合且详情已应用（用户取消了全部勾选，这是权威空值）
 	 */
-	private List<String> pageSelectedDefCodes(AiContext context) {
+	public List<String> pageSelectedDefCodes(AiContext context) {
 		Map<String, Object> extra = context.getExtra();
 		if (extra == null) {
 			return null;

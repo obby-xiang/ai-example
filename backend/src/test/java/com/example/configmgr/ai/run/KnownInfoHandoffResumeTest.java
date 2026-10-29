@@ -124,7 +124,9 @@ class KnownInfoHandoffResumeTest {
 
 	/** 目录里"货币字典" = CURRENCY，主键 code 的取值集合含 CNY（"导出CNY货币字典"才可解析成条件）。 */
 	private final DefinitionCatalog catalog = () -> new ArrayList<>(List.of(new SlotDefinition("CURRENCY",
-			"货币字典", List.of(new SlotDefinition.SlotField("code", "代码", true, List.of("CNY", "USD"))))));
+			"货币字典", List.of(new SlotDefinition.SlotField("code", "代码", true, List.of("CNY", "USD")))),
+			new SlotDefinition("FX_RATE", "汇率", List.of(new SlotDefinition.SlotField("code", "代码", true,
+					List.of("SPOT"))))));
 
 	private AnnotationConfigApplicationContext registryContext;
 
@@ -206,7 +208,45 @@ class KnownInfoHandoffResumeTest {
 			.containsExactly(org.assertj.core.groups.Tuple.tuple("CURRENCY", "code", "CNY"));
 	}
 
-	// ── ② 手动清空后最后一句只是"继续"：权威空不复活历史选择 ────────────────
+	// ── ② 后续改选/清空：页面权威值赢过原始原话 ─────────────────────────────
+
+	@Test
+	void laterPageReselectionWinsOverTheOriginalUserWords() {
+		this.taskState.set(task(TASK_ID, "SELECT_DEFS"));
+		seedCreatedTask();
+		// 用户先说了"导出CNY货币字典"，随后在页面上改选成 FX_RATE（页面权威非空）
+		seedSuspendedRun(List.of(navigateEntry()), List.of("导出CNY货币字典"),
+				wizardContext(pageSelection(List.of("FX_RATE"),
+						List.of("进入导出向导（来源：界面）", "绑定任务 #42（来源：界面）",
+								"已选择配置项：FX_RATE（来源：界面）"))));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.body()).as("页面已给出非空勾选 ⇒ 配置已知，不弹表单")
+			.doesNotContainEntry("reason", "DEFINITION_FORM_PARKED");
+		TaskSlots slots = TaskSlots.fromExtra(contextOfDriveResumed().getExtra());
+		assertThat(slots.defCodes()).as("页面勾选赢过原始原话，不得被 CURRENCY 覆盖")
+			.containsExactly("FX_RATE");
+	}
+
+	@Test
+	void laterClearActionKeepsTheAuthoritativeEmpty() {
+		this.taskState.set(task(TASK_ID, "SELECT_DEFS"));
+		seedCreatedTask();
+		// 用户先说了"导出CNY货币字典"，随后把勾选清空（页面权威空 + 最近动作里有清空记录）
+		seedSuspendedRun(List.of(navigateEntry()), List.of("导出CNY货币字典"),
+				wizardContext(pageSelection(List.of(), List.of("进入导出向导（来源：界面）",
+						"已选择配置项：CURRENCY（来源：界面）", "已选择配置项：（空）（来源：界面）"))));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.body()).as("用户清空过 ⇒ 配置确实是空的，宿主照常给选择表单")
+			.containsEntry("reason", "DEFINITION_FORM_PARKED");
+		PendingToolCall parked = this.store.pending(RUN_ID, DEF_FORM);
+		assertThat(parked).as("不得把用户清空前的 CURRENCY 复活成已知配置").isNotNull();
+	}
+
+	// ── ③ 手动清空后最后一句只是"继续"：权威空不复活历史选择 ────────────────
 
 	@Test
 	void manualClearStaysClearedWhenTheLastMessageIsJustContinue() {
@@ -283,13 +323,26 @@ class KnownInfoHandoffResumeTest {
 		return pending;
 	}
 
-	/** 向导页已同步的"空勾选"（= 权威空；这正是把空文本当当前文本时会误判的现场）。 */
-	private static Map<String, Object> emptySyncedSelection() {
+	/**
+	 * 向导页已同步的勾选 + 本轮的"最近动作"时间线。
+	 *
+	 * <p>{@code recentActions} 的真实形态（前端 {@code workspace.buildContext()}）：{@code List<String>}，
+	 * 每条 = {@code "${record.summary}（来源：${record.source}）"}；每发一次消息由
+	 * {@code clearRecentActions()} 清空，因此它只包含"这条用户消息之后"发生的动作。
+	 * 选择动作的唯一摘要前缀是 {@code 已选择配置项：}（{@code setSelectedDefs} 同时覆盖选中与清空）。
+	 */
+	private static Map<String, Object> pageSelection(List<String> codes, List<String> recentActions) {
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("pageId", "export");
-		extra.put("selectedDefs", List.of());
+		extra.put("selectedDefs", codes);
 		extra.put("selectionSynced", true);
+		extra.put("recentActions", recentActions);
 		return extra;
+	}
+
+	/** 新任务首次导航后的现场：页面同步了空勾选，时间线里只有"进入/绑定任务"，没有任何选择动作。 */
+	private static Map<String, Object> emptySyncedSelection() {
+		return pageSelection(List.of(), List.of("进入导出向导（来源：界面）", "绑定任务 #42（来源：界面）"));
 	}
 
 	private static AiContext wizardContext(Map<String, Object> extra) {

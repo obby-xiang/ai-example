@@ -158,6 +158,16 @@ public class ResumeService {
 			+ "(it must be failed, with no execution in flight, all tool calls settled and paired, no partial content "
 			+ "or reasoning, the same model and the same fixed history). Please start a new turn.";
 
+	/**
+	 * 前端"选择动作"摘要的前缀（{@code extra.recentActions} 条目形如
+	 * {@code "已选择配置项：CURRENCY（来源：界面）"}）。
+	 *
+	 * <p><b>跨端字面量</b>：来源是 {@code frontend/src/stores/workspace.ts#setSelectedDefs}
+	 * （选中与清空共用这一个写入口，清空时摘要为「已选择配置项：（空）」）。只用于
+	 * {@link #selectionActionRecorded} 的"有没有后续改选/清空"判定；前端改文案时这里必须同改。
+	 */
+	static final String SELECTION_ACTION_SUMMARY_PREFIX = "已选择配置项";
+
 	private final RunStore store;
 
 	private final RunRegistry registry;
@@ -2153,9 +2163,9 @@ public class ResumeService {
 	 * <ol>
 	 * <li>按 {@code taskId} 读 {@code TaskService} 的权威 {@code type / currentStep / status} ——
 	 * 挂起期内用户可以在向导里手动改步骤，而这类改动不产生任何"刷新类工具结算"；</li>
-	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 当前文本取历史里<b>最近一条真实用户原文</b>
-	 * （跳过合成消息），因此"本轮原话明确给出的值"照常替换；页面显式空（且已同步）仍是权威空，
-	 * 旧槽位与<b>历史</b>选择都不得复活（用户清空后最后一句只是"继续"时保持为空）。</li>
+	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 当前文本按权威保护决定：页面已有非空勾选、
+	 * 或这条消息之后已有改选/清空动作时传空（权威值说话）；只有"页面还是初始默认空、且没有任何后续
+	 * 选择动作"时才用历史里<b>最近一条真实用户原文</b>（跳过合成消息）补齐初始槽位。</li>
 	 * </ol>
 	 *
 	 * <p>任一步失败只 WARN 并保留旧值：这是"让下一跳更准"的增强，不是这一轮的判定面
@@ -2182,29 +2192,85 @@ public class ResumeService {
 	/**
 	 * 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。
 	 *
-	 * <p><b>当前文本 = 历史里最近一条真实用户原文</b>（跳过合成消息，见
-	 * {@link com.example.configmgr.ai.slot.TaskIntent#lastRealUserText}）。为什么不能传空串：
-	 * 解析器把"当前文本明确给出的值"当作对前值的<b>替换</b>，而空串 = "本轮什么都没提" ⇒ 回落到权威值；
-	 * 新任务的向导页首次导航后会同步"空勾选"（{@code selectedDefs=[]} + {@code selectionSynced=true}，
-	 * 这是权威空），于是用户刚说过的"导出CNY货币字典"会被这份空勾选抹掉，宿主误判配置未知而弹表单。
-	 *
-	 * <p>为什么只取<b>最近一条</b>而不是拼整段历史：用户手动清空后最后一句只是"继续"时，权威空必须
-	 * 保持空（拼历史会把早已撤回的旧选择复活）。
+	 * <p>当前文本按<b>权威保护</b>决定（见 {@link #currentTextForSlotRecompute}）：只有"页面还是初始
+	 * 默认空、且这条消息之后没有任何选择动作"时，才用用户原话补齐初始槽位；页面给出了非空勾选、或
+	 * 已有选择/清空动作时，当前文本传空 —— 原话不得覆盖用户随后的改选与清空。
 	 */
 	private AiContext recomputeSlotsBeforeHandoff(String runId, AiContext context, List<Message> history) {
 		if (this.taskSlotResolver == null) {
 			return context;
 		}
 		try {
-			String currentText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(history);
-			AiContext enriched = this.taskSlotResolver.enrich(context, currentText == null ? "" : currentText,
-					history);
+			String currentText = currentTextForSlotRecompute(context, history);
+			AiContext enriched = this.taskSlotResolver.enrich(context, currentText, history);
 			return enriched == null ? context : enriched;
 		}
 		catch (RuntimeException ex) {
 			log.warn("续跑交棒前任务槽位重算失败，保留旧槽位（不阻断续跑）runId={}：{}", runId, ex.getMessage());
 			return context;
 		}
+	}
+
+	/**
+	 * 槽位重算用的"当前文本"——<b>权威保护</b>下的最小判据。
+	 *
+	 * <h2>为什么不能永远用用户原话（返修）</h2>
+	 * 解析器把"当前文本明确给出的值"当作对前值的<b>替换</b>。若交棒时无条件把最近一条用户原文交进去，
+	 * 用户随后在页面上<b>改选</b>或<b>清空</b>的结果会被那句旧话覆盖（"导出CNY货币字典"重新战胜
+	 * 用户刚点的 FX_RATE 或刚清空的勾选）。所以先问"页面/动作时间线里有没有更新的事实"。
+	 *
+	 * <h2>{@code recentActions} 的实际形态</h2>
+	 * 前端 {@code workspace.buildContext()} 注入的 {@code extra.recentActions} 是
+	 * {@code List<String>}，每条 = {@code "${record.summary}（来源：${record.source}）"}；每发一次消息由
+	 * {@code clearRecentActions()} 清空 ⇒ 列表里只有<b>这条用户消息之后</b>发生的动作。选择动作的唯一
+	 * 写入口 {@code workspace.setSelectedDefs} 的摘要固定以「已选择配置项：」开头（选中与清空都走它，
+	 * 清空时是「已选择配置项：（空）」）。因此"有没有后续选择动作"的最小可靠判据就是：时间线里存在
+	 * 以该前缀开头的条目 —— 不需要解析更多语义，也不会把"进入/绑定任务/切步骤"误判成改选。
+	 *
+	 * <h2>判据（按顺序，第一条命中即生效）</h2>
+	 * <ol>
+	 * <li>时间线里已有选择动作（改选或清空）⇒ 传空：让权威值（页面勾选/任务条目）说话，原话不得覆盖；</li>
+	 * <li>页面给出了<b>非空</b>勾选 ⇒ 传空：页面为准（改选到别的配置后，原话里的旧配置不得回来）；</li>
+	 * <li>其余（页面是初始默认空、页面尚未同步）⇒ 用历史里最近一条真实用户原文（跳过合成消息）
+	 * 补齐初始槽位 —— 这正是"导出CNY货币字典"在新建任务导航后仍被认作已知的场景。</li>
+	 * </ol>
+	 *
+	 * <p>条件不受影响：{@code code=CNY} 在 case 3 由当前文本解析得到；在 case 1/2 由历史条件解析
+	 * （{@code TaskSlotResolver} 的 {@code ABSENT} 分支回落到历史条件）保留，并仍被已选配置项过滤。
+	 */
+	private String currentTextForSlotRecompute(AiContext context, List<Message> history) {
+		if (selectionActionRecorded(context)) {
+			return "";
+		}
+		List<String> pageCodes = this.taskSlotResolver == null ? null
+				: this.taskSlotResolver.pageSelectedDefCodes(context);
+		if (pageCodes != null && !pageCodes.isEmpty()) {
+			return "";
+		}
+		String userText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(history);
+		return userText == null ? "" : userText;
+	}
+
+	/**
+	 * 本轮用户消息之后是否发生过<b>选择动作</b>（改选或清空）。
+	 *
+	 * <p>判据与形态说明见 {@link #currentTextForSlotRecompute}：{@code recentActions} 是
+	 * {@code List<String>}，选择动作的摘要前缀固定。读不出来（缺失/形状不符）= 没有记录（fail-open：
+	 * 按"初始默认空"处理，与本判据引入之前的行为一致）。
+	 */
+	private static boolean selectionActionRecorded(AiContext context) {
+		if (context == null || context.getExtra() == null) {
+			return false;
+		}
+		if (!(context.getExtra().get("recentActions") instanceof List<?> actions)) {
+			return false;
+		}
+		for (Object action : actions) {
+			if (action != null && String.valueOf(action).startsWith(SELECTION_ACTION_SUMMARY_PREFIX)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
