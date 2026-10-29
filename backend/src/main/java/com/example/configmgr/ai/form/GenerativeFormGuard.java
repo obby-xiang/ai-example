@@ -247,6 +247,12 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		JsonNode form = arguments != null && arguments.isObject() ? arguments.get("form") : null;
 		JsonNode values = parse(resultJson);
 		List<AttachmentRef> refs = attachmentRefs(form, values);
+		// keep = 本次回灌里被提交的全部附件（无论它们最终是否消费成功）：收口回收只清理
+		// "没被提交"的件。把消费失败的件也交给回收，等于把"保留到 TTL"偷偷改成"立刻删"。
+		Set<String> keep = new LinkedHashSet<>();
+		for (AttachmentRef ref : refs) {
+			keep.add(ref.fileId());
+		}
 		Map<String, FormAttachmentStore.Attachment> resolved = new LinkedHashMap<>();
 		for (AttachmentRef ref : refs) {
 			try {
@@ -264,11 +270,9 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 						runId, toolCallId, ex.getMessage());
 			}
 		}
-		Set<String> consumedIds = new LinkedHashSet<>();
 		for (Map.Entry<String, FormAttachmentStore.Attachment> entry : resolved.entrySet()) {
 			try {
 				if (this.attachments.consume(entry.getKey())) {
-					consumedIds.add(entry.getKey());
 					deleteConsumedFile(entry.getValue());
 				}
 				else {
@@ -282,7 +286,20 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 						runId, toolCallId, ex.getMessage());
 			}
 		}
-		reclaimFormLeftovers(runId, toolCallId, consumedIds);
+		reclaimFormLeftovers(runId, toolCallId, keep);
+	}
+
+	/**
+	 * 挂起期续期：把本表单名下的附件登记/索引寿命拉回满额（与待决条目同一条续期链）。
+	 *
+	 * <p>不续期的后果：表单等得比 {@code app.ai.session-ttl} 久 ⇒ 卡还在、登记先过期
+	 * （{@code ATTACHMENT_NOT_FOUND}），且失效文件没有回收入口。
+	 */
+	@Override
+	public void touchSuspension(String runId, String toolCallId) {
+		if (this.attachments != null) {
+			this.attachments.touch(runId, toolCallId);
+		}
 	}
 
 	/** 用户放弃该表单：回收它名下所有仍未消费的登记与落盘文件。 */

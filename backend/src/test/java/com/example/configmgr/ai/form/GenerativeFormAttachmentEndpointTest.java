@@ -197,6 +197,11 @@ class GenerativeFormAttachmentEndpointTest {
 		pending.setArguments("{\"form\":{\"scenario\":\"CLARIFY\",\"fields\":["
 				+ "{\"key\":\"evidence\",\"label\":\"证据\",\"type\":\"attachment\"}]}}");
 		when(this.runStore.pending(runId, toolCallId)).thenReturn(pending);
+		// 归属的权威值来自轮次快照（fail-closed：快照缺失/无 sessionId 时上传会被拒）
+		com.example.configmgr.ai.run.RunSnapshot snapshot = new com.example.configmgr.ai.run.RunSnapshot();
+		snapshot.setRunId(runId);
+		snapshot.setSessionId("sess-ep");
+		when(this.runStore.get(runId)).thenReturn(snapshot);
 	}
 
 	/** 进程内登记簿（生产实现见 {@code RedisFormAttachmentStore}）。 */

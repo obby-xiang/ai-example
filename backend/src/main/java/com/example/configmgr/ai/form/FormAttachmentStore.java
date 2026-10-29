@@ -55,6 +55,23 @@ public interface FormAttachmentStore {
 	}
 
 	/**
+	 * 续期一个表单名下所有附件登记（挂起续期链的一环）。
+	 *
+	 * <p>为什么必须有：登记 TTL 取 {@code app.ai.session-ttl}，而生成式表单<b>无等待上限</b> ——
+	 * 只写一次的 TTL 必然在"等得久"的表单上先过期（卡还在、附件已 {@code ATTACHMENT_NOT_FOUND}，
+	 * 失效文件还没人删）。待决条目在挂起期由心跳/读侧续期，附件登记必须跟着同一条链续，
+	 * 否则两处寿命仍然对不齐。
+	 *
+	 * <p>调用时机：{@code ConfirmGate} 在挂起期续期（心跳）时，对该轮仍 {@code PENDING} 的条目逐个调用；
+	 * 决策/放弃之后登记已被消费或回收，再 touch 不会把已删的键重新养出来（Redis {@code EXPIRE}
+	 * 对不存在的键是无操作）。默认空实现 = 该实现没有 TTL 可续（进程内替身/轻量实现）。
+	 *
+	 * <p>实现应<b>逐件隔离失败</b>并只告警：续期是养活性维护，不该让确认门心跳因一个键失败而中断。
+	 */
+	default void touch(String runId, String toolCallId) {
+	}
+
+	/**
 	 * 该表单（{@code runId + toolCallId}）名下仍在册的附件（表单收口回收面）。
 	 *
 	 * <p>用途有两处：<b>①</b>上传端点的"按表单限件数"（每个 attachment 字段只装一个 fileId，

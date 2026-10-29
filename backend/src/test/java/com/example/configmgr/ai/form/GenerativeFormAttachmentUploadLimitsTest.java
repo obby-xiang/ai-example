@@ -5,7 +5,11 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.file.StoredFile;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.mock.web.MockMultipartFile;
 
 import java.io.ByteArrayInputStream;
@@ -103,11 +107,16 @@ class GenerativeFormAttachmentUploadLimitsTest {
 		this.attachments.register(RUN_ID, CALL_ID, "sess-authoritative", "a.pdf", 9, "application/pdf", "k-a");
 		this.attachments.register(RUN_ID, CALL_ID, "sess-authoritative", "b.pdf", 9, "application/pdf", "k-b");
 
-		// 两个 attachment 字段 = 两个附件位；第三件永远提交不进任何字段，只会在 TTL 前占着盘
+		// 两个 attachment 字段 = 两个附件位；第三件永远提交不进任何字段，只会在 TTL 前占着盘。
+		// 拒绝文案必须是"真能照做"的：没有字段归属映射时不存在"按 fieldKey 精确替换"，
+		// 不能把 fieldKey 说成替换开关（那是死路指引）。
 		assertThatThrownBy(() -> this.controller.upload(pdf("c.pdf"), RUN_ID, CALL_ID, null))
 			.isInstanceOf(IllegalArgumentException.class)
 			.hasMessageContaining("附件位已满")
-			.hasMessageContaining("2");
+			.hasMessageContaining("2")
+			.hasMessageContaining("提交当前表单")
+			.hasMessageContaining("取消表单")
+			.hasMessageNotContaining("fieldKey");
 	}
 
 	@Test
@@ -208,6 +217,114 @@ class GenerativeFormAttachmentUploadLimitsTest {
 		org.mockito.Mockito.verify(this.storage, org.mockito.Mockito.never()).delete("stored-keep.pdf");
 	}
 
+	@Test
+	void reuploadKeepsTheOldFileWhenStoringTheNewOneFails() throws Exception {
+		waitingForm(ONE_ATTACHMENT_FIELD);
+		when(this.storage.store(any(InputStream.class), anyString()))
+			.thenReturn(new StoredFile("stored-old.pdf", Path.of("/data/old.pdf")));
+		String oldId = (String) this.controller.upload(pdf("old.pdf"), RUN_ID, CALL_ID, null).getData().get("fileId");
+
+		// 磁盘写失败（最后一版证据不能因为"想换一张"就没了）
+		when(this.storage.store(any(InputStream.class), anyString()))
+			.thenThrow(new java.io.IOException("模拟磁盘写失败"));
+
+		assertThatThrownBy(() -> this.controller.upload(pdf("new.pdf"), RUN_ID, CALL_ID, null))
+			.isInstanceOf(java.io.IOException.class);
+		assertThat(this.attachments.find(oldId)).as("新件没写成，旧件必须原样在册").isNotNull();
+		org.mockito.Mockito.verify(this.storage, org.mockito.Mockito.never()).delete("stored-old.pdf");
+	}
+
+	@Test
+	void reuploadKeepsTheOldFileWhenRegisteringTheNewOneFails() throws Exception {
+		waitingForm(ONE_ATTACHMENT_FIELD);
+		when(this.storage.store(any(InputStream.class), anyString()))
+			.thenReturn(new StoredFile("stored-old.pdf", Path.of("/data/old.pdf")))
+			.thenReturn(new StoredFile("stored-new.pdf", Path.of("/data/new.pdf")));
+		String oldId = (String) this.controller.upload(pdf("old.pdf"), RUN_ID, CALL_ID, null).getData().get("fileId");
+
+		// 登记失败（Redis 抖动）：新件删掉即可，旧件必须还在（否则用户换一张就丢了原证据）
+		this.attachments.failRegister = true;
+		assertThatThrownBy(() -> this.controller.upload(pdf("new.pdf"), RUN_ID, CALL_ID, null))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+
+		assertThat(this.attachments.find(oldId)).as("登记失败不得动旧件").isNotNull();
+		org.mockito.Mockito.verify(this.storage).delete("stored-new.pdf");
+		org.mockito.Mockito.verify(this.storage, org.mockito.Mockito.never()).delete("stored-old.pdf");
+	}
+
+	@Test
+	void reuploadRemovesTheOldRegistrationOnlyAfterTheNewOneIsRegistered() throws Exception {
+		waitingForm(ONE_ATTACHMENT_FIELD);
+		when(this.storage.store(any(InputStream.class), anyString()))
+			.thenReturn(new StoredFile("stored-a.pdf", Path.of("/data/a.pdf")))
+			.thenReturn(new StoredFile("stored-b.pdf", Path.of("/data/b.pdf")));
+		this.controller.upload(pdf("a.pdf"), RUN_ID, CALL_ID, null);
+
+		this.controller.upload(pdf("b.pdf"), RUN_ID, CALL_ID, null);
+
+		int register = this.attachments.events.lastIndexOf("register");
+		int removeOld = this.attachments.events.indexOf("deleteRegistration");
+		assertThat(register).as("必须先登记新件").isGreaterThanOrEqualTo(0);
+		assertThat(removeOld).as("新件登记成功之后才回收旧件").isGreaterThan(register);
+	}
+
+	@Test
+	void uploadFailsClosedWhenTheAuthoritativeSessionIsUnavailable() throws Exception {
+		waitingForm(TWO_ATTACHMENT_FIELDS);
+		// 快照缺失：没有 sessionId 的登记不进会话索引 ⇒ 会话销毁看不见它 ⇒ 文件成孤儿
+		when(this.runStore.get(RUN_ID)).thenReturn(null);
+		assertThatThrownBy(() -> this.controller.upload(pdf("a.pdf"), RUN_ID, CALL_ID, null))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class)
+			.hasMessageContaining("会话归属");
+
+		// 读取失败同样 fail-closed（不采信请求参数、不静默无索引成功）
+		when(this.runStore.get(RUN_ID)).thenThrow(
+				new com.example.configmgr.common.AiStateUnavailableException("Redis 不可用"));
+		assertThatThrownBy(() -> this.controller.upload(pdf("a.pdf"), RUN_ID, CALL_ID, "sess-of-someone-else"))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+
+		// fail-closed 发生在落盘之前：不得留下无主的物理文件
+		org.mockito.Mockito.verify(this.storage, org.mockito.Mockito.never())
+			.store(org.mockito.ArgumentMatchers.any(InputStream.class), org.mockito.ArgumentMatchers.anyString());
+	}
+
+	@Test
+	void unparsableSchemaIsLoggedWithoutTheRawArguments() throws Exception {
+		String marker = "SENSITIVE-DEFAULT-MARKER-9f3a";
+		waitingForm("{\"form\": {\"scenario\": \"CLARIFY\", \"fields\": [{\"label\": \"" + marker + "\"}");
+		Logger logger = (Logger) LoggerFactory.getLogger(GenerativeFormAttachmentController.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			assertThatThrownBy(() -> this.controller.upload(pdf("a.pdf"), RUN_ID, CALL_ID, null))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessageContaining("没有附件字段");
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+
+		assertThat(appender.list).as("必须留下一条诊断日志").isNotEmpty();
+		assertThat(appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+			.as("入参原文可能带用户默认值/长文本，不得进日志")
+			.noneMatch(message -> message.contains(marker));
+	}
+
+	@Test
+	void reuploadSkipsABlankStoragePathOnTheOldRegistration() throws Exception {
+		waitingForm(ONE_ATTACHMENT_FIELD);
+		// 历史登记可能没有 storagePath（迁移前的行）：删盘必须安全跳过，不能因此让重传失败
+		this.attachments.register(RUN_ID, CALL_ID, "sess-authoritative", "legacy.pdf", 3, "application/pdf", "");
+		when(this.storage.store(any(InputStream.class), anyString()))
+			.thenReturn(new StoredFile("stored-new.pdf", Path.of("/data/new.pdf")));
+
+		this.controller.upload(pdf("new.pdf"), RUN_ID, CALL_ID, null);
+
+		assertThat(this.attachments.findByForm(RUN_ID, CALL_ID)).hasSize(1);
+		org.mockito.Mockito.verify(this.storage, org.mockito.Mockito.never()).delete("");
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private static String sixAttachmentFields() {
@@ -246,12 +363,20 @@ class GenerativeFormAttachmentUploadLimitsTest {
 
 		private final AtomicInteger seq = new AtomicInteger();
 
+		private boolean failRegister;
+
+		private final List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+
 		@Override
 		public synchronized Attachment register(String runId, String toolCallId, String sessionId, String fileName,
 				long size, String contentType, String storagePath) {
+			if (this.failRegister) {
+				throw new com.example.configmgr.common.AiStateUnavailableException("模拟登记失败（Redis 抖动）");
+			}
 			Attachment attachment = new Attachment("att_" + String.format("upl%05d", this.seq.incrementAndGet()),
 					runId, toolCallId, sessionId, fileName, size, contentType, storagePath);
 			this.items.put(attachment.fileId(), attachment);
+			this.events.add("register");
 			return attachment;
 		}
 
@@ -287,6 +412,7 @@ class GenerativeFormAttachmentUploadLimitsTest {
 
 		@Override
 		public synchronized Attachment deleteRegistration(String fileId) {
+			this.events.add("deleteRegistration");
 			return this.items.remove(fileId);
 		}
 

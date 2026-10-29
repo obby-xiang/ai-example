@@ -4,12 +4,17 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
 
+import java.util.Set;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -61,6 +66,29 @@ class RedisFormAttachmentStoreLifetimeTest {
 		assertThat(new RedisFormAttachmentStore(providerOf(null), this.mapper, properties).ttl())
 			.as("旋钮改了，登记寿命跟着改（两处不再各写一份常量）")
 			.isEqualTo(Duration.ofHours(6));
+	}
+
+	@Test
+	void touchRenewsTheDataKeyTheFormIndexAndTheSessionIndex() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		SetOperations<String, String> sets = mock(SetOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(redis.opsForSet()).thenReturn(sets);
+		when(values.get("ai:form:att:att_touch0001")).thenReturn(
+				"{\"fileId\":\"att_touch0001\",\"runId\":\"run-touch\",\"toolCallId\":\"call-touch\","
+						+ "\"sessionId\":\"sess-touch\",\"fileName\":\"a.pdf\",\"size\":9,"
+						+ "\"contentType\":\"application/pdf\",\"storagePath\":\"k-a\"}");
+		when(sets.members("ai:form:att:form:run-touch:call-touch")).thenReturn(Set.of("att_touch0001"));
+		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
+
+		store.touch("run-touch", "call-touch");
+
+		// 挂起续期链的一次 touch 必须把三处寿命一起拉回满额（否则卡还在、登记先过期）
+		verify(redis).expire("ai:form:att:att_touch0001", store.ttl());
+		verify(redis).expire("ai:form:att:form:run-touch:call-touch", store.ttl());
+		verify(redis).expire("ai:form:att:sess:sess-touch", store.ttl());
+
 	}
 
 	private static ObjectProvider<StringRedisTemplate> providerOf(StringRedisTemplate template) {

@@ -3,6 +3,7 @@ package com.example.configmgr.ai.form;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ApiResponse;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
@@ -139,7 +140,7 @@ public class GenerativeFormAttachmentController {
 					"附件 MIME 与扩展名不符：" + contentType + "（." + ext + " 允许 " + String.join("/", mimes) + "）");
 		}
 		PendingToolCall pending = assertFormIsWaiting(runId, toolCallId);
-		Set<String> attachmentFields = attachmentFieldKeys(pending);
+		Set<String> attachmentFields = attachmentFieldKeys(runId, pending);
 		if (attachmentFields.isEmpty()) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
 					"该表单没有附件字段（无法上传附件），请重新发起表单");
@@ -150,27 +151,21 @@ public class GenerativeFormAttachmentController {
 					"字段 " + fieldKey + " 不是本表单的附件字段（attachment），无法接收上传");
 		}
 		List<FormAttachmentStore.Attachment> existing = this.attachments.findByForm(runId, toolCallId);
+		List<FormAttachmentStore.Attachment> superseded = List.of();
 		if (existing.size() >= attachmentFields.size()) {
-			// 单附件字段的表单：前端"重新选择文件"就是再传一次（没有删除接口），旧件的 fieldId 已被
+			// 单附件字段的表单：前端"重新选择文件"就是再传一次（没有删除接口），旧件的 fileId 已被
 			// 新值覆盖 —— 顶掉旧登记是唯一能让用户改主意的做法，在册件数仍然 ≤ 1。
-			// 多附件字段时不猜"这次替换的是哪个字段"（猜错会删掉另一个字段正在用的件）：拒绝并提示
-			// 调用方带上 fieldKey / 重新发起表单。
+			// 多附件字段时无法判断"这次替换的是哪个字段"（猜错会删掉另一个字段正在用的件）：
+			// 明确告诉用户可行动的做法（提交或取消当前表单后重新发起），不拿 fieldKey 当替换开关。
 			if (attachmentFields.size() == 1) {
-				for (FormAttachmentStore.Attachment superseded : existing) {
-					FormAttachmentStore.Attachment removed = this.attachments
-						.deleteRegistration(superseded.fileId());
-					if (removed != null) {
-						this.fileStorage.delete(removed.storagePath());
-						log.info("单附件表单重传，已顶掉旧件 runId={} toolCallId={} fileId={}", runId, toolCallId,
-								removed.fileId());
-					}
-				}
+				superseded = List.copyOf(existing);
 				existing = List.of();
 			}
 			else {
 				throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
 						"该表单的附件位已满：" + existing.size() + " 件在册（表单共 " + attachmentFields.size()
-								+ " 个附件字段，每个字段只装一个文件Id）；请带 fieldKey 重传或重新发起表单");
+								+ " 个附件字段，每个字段只装一个文件Id）。当前无法替换已上传的附件：请直接提交当前表单，"
+								+ "或取消表单后重新发起再上传");
 			}
 		}
 		long usedBytes = 0L;
@@ -195,10 +190,26 @@ public class GenerativeFormAttachmentController {
 		}
 		catch (RuntimeException ex) {
 			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
-			this.fileStorage.delete(storedFile.key());
+			deleteQuietly(storedFile.key());
 			log.warn("附件登记失败，已清理落盘文件 runId={} toolCallId={} key={}：{}", runId, toolCallId,
 					storedFile.key(), ex.getMessage());
 			throw ex;
+		}
+		// 新件登记成功之后才回收被顶掉的旧件：先删旧的再存新的会把"换一张"变成"两张都没了"
+		// （存档/磁盘失败时旧证据已不可恢复）。这里失败只告警：旧件仍可用，由表单收口或 TTL 兜底。
+		for (FormAttachmentStore.Attachment old : superseded) {
+			try {
+				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(old.fileId());
+				if (removed != null) {
+					deleteQuietly(removed.storagePath());
+					log.info("单附件表单重传，已顶掉旧件 runId={} toolCallId={} fileId={}", runId, toolCallId,
+							removed.fileId());
+				}
+			}
+			catch (RuntimeException ex) {
+				log.warn("顶掉旧附件失败（新件已登记，旧件保留到 TTL）runId={} toolCallId={} fileId={}：{}", runId,
+						toolCallId, old.fileId(), ex.getMessage());
+			}
 		}
 		Map<String, Object> data = new LinkedHashMap<>();
 		data.put("fileId", stored.fileId());
@@ -234,18 +245,36 @@ public class GenerativeFormAttachmentController {
 	/**
 	 * 归属的权威会话：本轮次快照的 {@code sessionId}（待决条目属于这一轮）。
 	 *
-	 * <p>读不到快照时返回 null（登记仍成功，只是不进会话索引）—— 上传不该因为"审计面取不到"
-	 * 而失败；而<b>绝不</b>回落到请求参数：那等于把归属交给调用方。
+	 * <p>读不到（快照缺失/读取失败）就<b>拒绝上传</b>（fail-closed）：没有 sessionId 的登记不进会话索引，
+	 * 会话销毁时看不见它 ⇒ 文件成孤儿。同理绝不回落到请求参数 —— 那等于把"文件归属谁"交给调用方。
 	 */
 	private String authoritativeSessionId(String runId) {
+		RunSnapshot snapshot;
 		try {
-			RunSnapshot snapshot = this.runStore.get(runId);
-			return snapshot == null ? null : snapshot.getSessionId();
+			snapshot = this.runStore.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取轮快照 sessionId 失败 runId={}（附件登记不落会话索引，不采信请求参数）：{}", runId,
-					ex.getMessage());
-			return null;
+			log.warn("读取轮快照 sessionId 失败 runId={}（fail-closed，不采信请求参数）：{}", runId, ex.getMessage());
+			throw new AiStateUnavailableException("附件上传暂不可用：读不到本轮会话归属，请稍后重试", ex);
+		}
+		String sessionId = snapshot == null ? null : snapshot.getSessionId();
+		if (sessionId == null || sessionId.isBlank()) {
+			log.warn("轮快照缺少 sessionId runId={}（fail-closed：无归属的登记无法在会话销毁时回收）", runId);
+			throw new AiStateUnavailableException("附件上传暂不可用：本轮缺少会话归属，请稍后重试");
+		}
+		return sessionId;
+	}
+
+	/** 删盘（空路径/<b>历史登记</b>的空 storagePath 安全跳过；失败只告警）。 */
+	private void deleteQuietly(String storageKey) {
+		if (storageKey == null || storageKey.isBlank()) {
+			return;
+		}
+		try {
+			this.fileStorage.delete(storageKey);
+		}
+		catch (RuntimeException ex) {
+			log.warn("删除落盘文件失败 key={}（由登记 TTL / 会话销毁兜底）：{}", storageKey, ex.getMessage());
 		}
 	}
 
@@ -255,7 +284,7 @@ public class GenerativeFormAttachmentController {
 	 * <p>schema 已在下发前过了白名单（{@code GenerativeFormRules}），这里只做形状读取：
 	 * 解析失败/没有 form/没有 fields 一律返回空集 —— 调用方按"没有附件字段"拒绝上传。
 	 */
-	private Set<String> attachmentFieldKeys(PendingToolCall pending) {
+	private Set<String> attachmentFieldKeys(String runId, PendingToolCall pending) {
 		Set<String> keys = new java.util.LinkedHashSet<>();
 		String arguments = pending == null ? null : pending.getArguments();
 		if (arguments == null || arguments.isBlank()) {
@@ -277,8 +306,9 @@ public class GenerativeFormAttachmentController {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("表单入参无法解析，按【没有附件字段】拒绝上传 runId={} toolCallId={}：{}", arguments,
-					pending.getToolCallId(), ex.getMessage());
+			// 不打印入参原文（schema 可能带用户填的默认值/长文本）：只记形状与异常摘要
+			log.warn("表单入参无法解析，按【没有附件字段】拒绝上传 runId={} toolCallId={} chars={}：{}",
+					runId, pending.getToolCallId(), arguments.length(), ex.getMessage());
 		}
 		return keys;
 	}

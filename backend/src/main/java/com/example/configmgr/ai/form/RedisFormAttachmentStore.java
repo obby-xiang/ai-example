@@ -175,26 +175,33 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
-			if (this.memory.remove(fileId) != null) {
-				this.consumed.add(fileId);
-				return true;
+			if (this.memory.get(fileId) == null) {
+				return false;
 			}
-			return false;
+			// 进程内路径同为"墓碑先于删除"：先置已消费，再摘登记
+			this.consumed.add(fileId);
+			this.memory.remove(fileId);
+			return true;
 		}
 		try {
 			Attachment attachment = attachmentOfQuietly(redis, fileId);
+			if (attachment == null) {
+				// 不存在/已过期：没有可消费的登记，也不该留墓碑（否则"从没上传过"会被报成"已消费"）
+				return false;
+			}
+			// I5：墓碑（WAL）<b>先写</b>，数据键<b>后删</b>。
+			// 反过来（先删数据键）时，墓碑写失败会留下最坏组合：登记已删 + 无墓碑 + 落盘文件成孤儿
+			// （谁也枚举不到它）。现在墓碑写不进去就直接抛，数据键原样保留 —— 用户还能重试。
+			redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", this.ttl);
 			Boolean deleted = redis.delete(KEY_PREFIX + fileId);
 			if (Boolean.TRUE.equals(deleted)) {
-				redis.opsForValue().set(CONSUMED_PREFIX + fileId, "1", this.ttl);
 				this.memory.remove(fileId);
-				removeFromIndexQuietly(redis, sessionIndexKey(attachment == null ? null : attachment.sessionId()),
-						fileId);
+				removeFromIndexQuietly(redis, sessionIndexKey(attachment.sessionId()), fileId);
 				removeFromIndexQuietly(redis,
-						formIndexKey(attachment == null ? null : attachment.runId(),
-								attachment == null ? null : attachment.toolCallId()),
-						fileId);
+						formIndexKey(attachment.runId(), attachment.toolCallId()), fileId);
 				return true;
 			}
+			// 墓碑已写但数据键已被并发消费/过期：不是本次消费成功（返回 false 由调用方告警）
 			return false;
 		}
 		catch (Exception ex) {
@@ -243,6 +250,61 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 		}
 		return out;
+	}
+
+	/**
+	 * 续期该表单名下的登记、表单索引与会话索引（挂起续期链的一次 touch）。
+	 *
+	 * <p>逐件隔离：单个键失败只告警（{@link RedisDegradation#B3_ATTACHMENT_READ} 计数），
+	 * 不让确认门心跳因一个键失败而中断。索引读不出来同样只告警 —— 下一次心跳还会再试。
+	 */
+	@Override
+	public void touch(String runId, String toolCallId) {
+		String indexKey = formIndexKey(runId, toolCallId);
+		if (indexKey == null) {
+			return;
+		}
+		StringRedisTemplate redis = redis();
+		if (redis == null) {
+			return;
+		}
+		Set<String> ids;
+		try {
+			SetOperations<String, String> setOps = redis.opsForSet();
+			if (setOps == null) {
+				return;
+			}
+			ids = setOps.members(indexKey);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			log.warn("附件续期读表单索引失败 runId={} toolCallId={}（下一拍重试）：{}", runId, toolCallId,
+					ex.getMessage());
+			return;
+		}
+		if (ids == null || ids.isEmpty()) {
+			return;
+		}
+		for (String fileId : ids) {
+			try {
+				redis.expire(KEY_PREFIX + fileId, this.ttl);
+				Attachment attachment = attachmentOfQuietly(redis, fileId);
+				if (attachment != null) {
+					redis.expire(sessionIndexKey(attachment.sessionId()), this.ttl);
+				}
+			}
+			catch (Exception ex) {
+				log.warn("附件续期失败 fileId={} runId={} toolCallId={}（下一拍重试）：{}", fileId, runId,
+						toolCallId, ex.getMessage());
+			}
+		}
+		try {
+			redis.expire(indexKey, this.ttl);
+		}
+		catch (Exception ex) {
+			log.warn("附件续期写表单索引失败 runId={} toolCallId={}（下一拍重试）：{}", runId, toolCallId,
+					ex.getMessage());
+		}
 	}
 
 	/**

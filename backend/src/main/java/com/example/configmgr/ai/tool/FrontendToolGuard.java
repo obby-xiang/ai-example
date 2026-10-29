@@ -107,8 +107,10 @@ public interface FrontendToolGuard {
 	 * 后续任何一步失败（并发写者、Redis 抖动、进程死）都会把"可重试"变成假话：
 	 * 用户手里剩下的引用已经全被作废。
 	 *
-	 * <p>调用时机由框架保证（{@code ConfirmGate}）：条目已写成 {@code FRONTEND_RESULT} 之后、
-	 * 唤醒/续跑之前调用一次。实现方的失败<b>不得</b>抛出，也不得改变已定的结论 —— 至多告警。
+	 * <p>调用时机由框架保证（{@code ConfirmGate}），与实现的实际次序一致：
+	 * <b>落库（{@code putPending}）→ 结局帧 → 唤醒</b>之后，park 结算行（若开启）之后、
+	 * <b>续跑派发（{@code maybeTriggerResume}）之前</b>调用一次，且在 {@code submitLock} 之外。
+	 * 实现方的失败<b>不得</b>抛出，也不得改变已定的结论 —— 至多告警。
 	 * 默认空实现 = 该工具没有一次性资源要收。
 	 *
 	 * @param runId         该次挂起所属轮次
@@ -127,6 +129,20 @@ public interface FrontendToolGuard {
 	 * 失败只告警，不得改变已落库的取消结论。
 	 */
 	default void settleDiscardedResult(String runId, String toolCallId) {
+	}
+
+	/**
+	 * 挂起期<b>续期</b>钩子：确认门每次续期待决条目（心跳/续期链）时对仍 {@code PENDING} 的条目调用一次。
+	 *
+	 * <p>为什么需要它：复核器可能持有"与表单同寿"的一次性资源（生成式表单的附件登记）。那些登记的
+	 * TTL 取 {@code app.ai.session-ttl}，如果没有续期，等得久（&gt; TTL）的表单必然拿到
+	 * {@code ATTACHMENT_NOT_FOUND}，而失效文件还没人删 —— 卡的寿命与附件的寿命必须同一条链。
+	 *
+	 * <p>调用时机：{@code ConfirmGate} 的挂起续期点（与 {@code renewSuspensionTtl} 同拍），且只对
+	 * {@code PENDING} 条目调用 —— 决策/放弃之后不再续（已被消费或回收，没有可续的键）。
+	 * 失败只告警：续期是养活性维护，不得让确认门心跳中断。
+	 */
+	default void touchSuspension(String runId, String toolCallId) {
 	}
 
 	/**

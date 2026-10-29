@@ -792,6 +792,8 @@ public class ConfirmGate {
 					// 裁决第 4 条：心跳同时续期卡的后台数据（快照/待决/归档/序号），
 					// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
 					this.store.renewSuspensionTtl(runId);
+					// 同拍续期复核器持有的一次性资源（表单附件登记）：卡活着，附件也得活着
+					touchSuspendedResources(runId);
 					// B23L1 批②b：续跑权租约按 lease.renew-interval 续期（默认 10s = 5 跳；
 					// 与 TTL 30s 的关系是 3:1，容忍两次连续续租失败）。等多久都不会"把租约等丢"。
 					if (lease != null && heartbeatTicks % renewEveryTicks == 0L) {
@@ -1807,6 +1809,43 @@ public class ConfirmGate {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * 挂起期续期：对该轮仍 {@code PENDING} 的条目，逐个调复核器的 {@link FrontendToolGuard#touchSuspension}。
+	 *
+	 * <p>只续 {@code PENDING}：决策/放弃之后一次性资源已被消费或回收，再续只会把已删的键重新养出来
+	 * （Redis {@code EXPIRE} 对缺键虽是无操作，但语义上"已收口就不该再续"）。失败只 DEBUG/WARN。
+	 */
+	private void touchSuspendedResources(String runId) {
+		List<PendingToolCall> entries;
+		try {
+			entries = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("挂起期续期读待决条目失败 runId={}：{}", runId, ex.getMessage());
+			return;
+		}
+		if (entries == null || entries.isEmpty()) {
+			return;
+		}
+		for (PendingToolCall entry : entries) {
+			if (entry == null || entry.getToolCallId() == null
+					|| !PendingToolCall.PENDING.equals(entry.getStatus())) {
+				continue;
+			}
+			FrontendToolGuard guard = guardFor(entry.getName());
+			if (guard == null) {
+				continue;
+			}
+			try {
+				guard.touchSuspension(runId, entry.getToolCallId());
+			}
+			catch (RuntimeException ex) {
+				log.warn("挂起期续期一次性资源失败（不影响等待）runId={} toolCallId={}：{}", runId,
+						entry.getToolCallId(), ex.getMessage());
+			}
+		}
 	}
 
 	/**

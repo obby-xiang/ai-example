@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -88,6 +89,13 @@ class RedisFormAttachmentStoreFailClosedTest {
 	@Test
 	void consumeAndTombstoneFailuresAreCountedAndFailClosed() {
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		// 消费现在先确认登记存在（墓碑先写、数据键后删）：读成功后再让 delete 失败，才走到故障分支
+		when(values.get("ai:form:att:att_x")).thenReturn(
+				"{\"fileId\":\"att_x\",\"runId\":\"run-att\",\"toolCallId\":\"call-att\","
+						+ "\"sessionId\":\"sess\",\"fileName\":\"a.pdf\",\"size\":9,"
+						+ "\"contentType\":\"application/pdf\",\"storagePath\":\"k-a\"}");
 		when(redis.delete(anyString())).thenThrow(new IllegalStateException("模拟 delete 失败"));
 		when(redis.hasKey(anyString())).thenThrow(new IllegalStateException("模拟 hasKey 失败"));
 		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
@@ -119,6 +127,30 @@ class RedisFormAttachmentStoreFailClosedTest {
 			.hasMessageContaining("索引");
 
 		verify(redis, atLeastOnce()).delete(startsWith("ai:form:att:"));
+	}
+
+	/** 消费顺序：墓碑先写、数据键后删。墓碑写失败 ⇒ 数据键必须原样在（否则"登记已删+无墓碑"= 文件孤儿）。 */
+	@Test
+	void tombstoneWriteFailureLeavesTheRegistrationIntactInsteadOfOrphaningTheFile() {
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> values = mock(ValueOperations.class);
+		SetOperations<String, String> sets = mock(SetOperations.class);
+		when(redis.opsForValue()).thenReturn(values);
+		when(redis.opsForSet()).thenReturn(sets);
+		String fileId = "att_consume0001";
+		when(values.get("ai:form:att:" + fileId)).thenReturn(
+				"{\"fileId\":\"att_consume0001\",\"runId\":\"run-att\",\"toolCallId\":\"call-att\","
+						+ "\"sessionId\":\"sess\",\"fileName\":\"a.pdf\",\"size\":9,"
+						+ "\"contentType\":\"application/pdf\",\"storagePath\":\"k-a\"}");
+		doThrow(new IllegalStateException("模拟墓碑写失败")).when(values)
+			.set(startsWith("ai:form:att:used:"), anyString(), any(Duration.class));
+		RedisFormAttachmentStore store = new RedisFormAttachmentStore(providerOf(redis), this.mapper);
+
+		assertThatThrownBy(() -> store.consume(fileId))
+			.isInstanceOf(AiStateUnavailableException.class)
+			.hasMessageContaining("附件消费");
+
+		verify(redis, never()).delete("ai:form:att:" + fileId);
 	}
 
 	private static ObjectProvider<StringRedisTemplate> providerOf(StringRedisTemplate template) {

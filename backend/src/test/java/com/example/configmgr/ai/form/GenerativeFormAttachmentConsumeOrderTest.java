@@ -1,9 +1,13 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.file.FileStorageService;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -104,24 +108,33 @@ class GenerativeFormAttachmentConsumeOrderTest {
 	}
 
 	@Test
-	void partialConsumeFailureIsNotReportedAsRetryableRejection() throws IOException {
+	void failedConsumptionKeepsTheRegistrationEvenWhenTheFormCloses() throws IOException {
 		Path evidence = Files.writeString(STORAGE_ROOT.resolve("partial-evidence.pdf"), "pdf-bytes");
 		Path contract = Files.writeString(STORAGE_ROOT.resolve("partial-contract.pdf"), "pdf-bytes");
-		FormAttachmentStore.Attachment first = register("evidence.pdf", evidence);
-		FormAttachmentStore.Attachment second = register("contract.pdf", contract);
-		this.store.failConsume.add(second.fileId());
-		// 同一个 Redis 故障通常也让索引读不可用：回收面因此也读不出在册件（下面断言"保留"）
-		this.store.failFormIndex = true;
+		// 生产实现（Redis 登记簿的进程内路径）+ 只对 consume 注入故障：findByForm 是真实语义，
+		// 不是"默认空表"的替身，避免收口回收被空表悄悄跳过而假绿。
+		FailingConsumeStore production = new FailingConsumeStore();
+		GenerativeFormGuard productionGuard = new GenerativeFormGuard(new ObjectMapper(), production,
+				storageService());
+		FormAttachmentStore.Attachment first = production.register("run-1", "call-1", "sess-1", "evidence.pdf",
+				sizeOf(evidence), "application/pdf", evidence.toString());
+		FormAttachmentStore.Attachment second = production.register("run-1", "call-1", "sess-1", "contract.pdf",
+				sizeOf(contract), "application/pdf", contract.toString());
+		production.failConsumeFor = second.fileId();
 		String submitted = "{\"evidence\":\"" + first.fileId() + "\",\"contract\":\"" + second.fileId() + "\"}";
 
-		// 决策已经落库：消费阶段的基础设施故障不得再走"回灌被拒、可修正后重试"那条路 ——
-		// 那会把用户手里剩下的 fileId 说成还能用（其实第一件已经删了）。只告警，结论不动。
-		this.guard.settleAcceptedResult("run-1", "call-1", TWO_ATTACHMENTS, submitted);
+		// 决策已经落库：消费失败只告警，不得回头改结论；失败件必须保留到 TTL，
+		// 不能被"表单收口回收"顺手删掉（那等于把"保留到 TTL"变成"立刻删"）。
+		productionGuard.settleAcceptedResult("run-1", "call-1", TWO_ATTACHMENTS, submitted);
 
-		assertThat(this.store.find(first.fileId())).as("已消费的件照常删除").isNull();
+		assertThat(production.find(first.fileId())).as("已消费的件照常删除").isNull();
 		assertThat(evidence).doesNotExist();
-		assertThat(this.store.find(second.fileId())).as("消费失败的件保留登记（安全方向：多留不漏删）").isNotNull();
+		assertThat(production.find(second.fileId())).as("消费失败的件保留登记").isNotNull();
 		assertThat(contract).exists();
+		assertThat(production.findByForm("run-1", "call-1"))
+			.as("生产 findByForm 只应剩失败件（失败件不得被收口回收）")
+			.extracting(FormAttachmentStore.Attachment::fileId)
+			.containsExactly(second.fileId());
 	}
 
 	@Test
@@ -157,6 +170,64 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		assertThat(this.store.wasConsumed(first.fileId())).isFalse();
 	}
 
+	@Test
+	void formWaitingPastItsRegistrationTtlIsStillSubmittableBecauseRenewalTouchesIt() throws Exception {
+		ExpiringStore expiring = new ExpiringStore();
+		GenerativeFormGuard expiringGuard = new GenerativeFormGuard(new ObjectMapper(), expiring);
+		com.example.configmgr.ai.conformance.InMemoryRunStore runStore =
+				new com.example.configmgr.ai.conformance.InMemoryRunStore();
+		runStore.seedRun("run-touch", "sess-touch");
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-touch");
+		pending.setName(GenerativeFormRules.TOOL_NAME);
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setStatus(PendingToolCall.PENDING);
+		pending.setArguments(ONE_ATTACHMENT);
+		runStore.putPending("run-touch", pending);
+		com.example.configmgr.ai.run.RunRegistry registry = new com.example.configmgr.ai.run.RunRegistry(runStore,
+				new ObjectMapper(), null);
+		com.example.configmgr.ai.run.CancellationRegistry cancellations = org.mockito.Mockito
+			.mock(com.example.configmgr.ai.run.CancellationRegistry.class);
+		org.mockito.Mockito.when(cancellations.isCancelled("run-touch")).thenReturn(false);
+		org.mockito.Mockito.when(cancellations.onCancel(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> (AutoCloseable) () -> {
+				});
+		ConfirmGate gate = new ConfirmGate(runStore, registry, new AiProperties(), cancellations,
+				new com.example.configmgr.ai.run.ToolActivityBeacon(), List.of(expiringGuard));
+		FormAttachmentStore.Attachment attachment = expiring.register("run-touch", "call-touch", "sess-touch",
+				"late.pdf", 9L, "application/pdf", null);
+
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+		try {
+			// 表单已经等了 23 小时；心跳的一拍会顺带 touch 附件登记
+			expiring.advance(java.time.Duration.ofHours(23));
+			java.util.concurrent.Future<PendingToolCall> waiting = pool.submit(() -> gate.awaitFrontendResult(
+					"run-touch", pending));
+			Thread.sleep(2_600);
+			// 再过 2 小时 = 距登记 25 小时（原 TTL 24h 已过），但续期已把它拉回满额 ⇒ 仍可提交
+			expiring.advance(java.time.Duration.ofHours(2));
+			ConfirmGate.Submission submission = gate.submitFrontendResult("run-touch", "call-touch",
+					"{\"evidence\":\"" + attachment.fileId() + "\"}", "http-post");
+			assertThat(submission.outcome()).as("续期后 25 小时仍可提交").isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+			waiting.get(5, java.util.concurrent.TimeUnit.SECONDS);
+			assertThat(expiring.find(attachment.fileId())).isNull();
+		}
+		finally {
+			pool.shutdownNow();
+		}
+
+		// 对照：同样 25 小时但没有续期 ⇒ 登记已过期，提交被拒（ATTACHMENT_NOT_FOUND）
+		ExpiringStore idle = new ExpiringStore();
+		GenerativeFormGuard idleGuard = new GenerativeFormGuard(new ObjectMapper(), idle);
+		FormAttachmentStore.Attachment stale = idle.register("run-idle", "call-idle", "sess-idle", "idle.pdf", 9L,
+				"application/pdf", null);
+		idle.advance(java.time.Duration.ofHours(25));
+		var verdict = idleGuard.inspectResult("run-idle", "call-idle", ONE_ATTACHMENT,
+				"{\"evidence\":\"" + stale.fileId() + "\"}");
+		assertThat(verdict.accepted()).isFalse();
+		assertThat(verdict.issues()).extracting(FormIssue::code).containsExactly(FormIssueCodes.ATTACHMENT_NOT_FOUND);
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private FormAttachmentStore.Attachment register(String fileName, Path file) {
@@ -178,9 +249,13 @@ class GenerativeFormAttachmentConsumeOrderTest {
 	}
 
 	private FileStorageService storageService() {
+		return new FileStorageService(properties());
+	}
+
+	private static AppProperties properties() {
 		AppProperties properties = new AppProperties();
 		properties.getFile().setStoragePath(STORAGE_ROOT.toString());
-		return new FileStorageService(properties);
+		return properties;
 	}
 
 	private static Path createStorageRoot() {
@@ -190,6 +265,150 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		catch (IOException ex) {
 			throw new UncheckedIOException(ex);
 		}
+	}
+
+
+
+	/** 带 TTL 语义的登记簿（虚拟时钟）：语义对齐 Redis 的 EXPIRE —— touch 把每件拉回满额。 */
+	private static final class ExpiringStore implements FormAttachmentStore {
+
+		private static final long TTL_MS = java.time.Duration.ofHours(24).toMillis();
+
+		private final Map<String, long[]> expiry = new LinkedHashMap<>();
+
+		private final Map<String, Attachment> items = new LinkedHashMap<>();
+
+		private final Set<String> consumed = new java.util.HashSet<>();
+
+		private final AtomicInteger seq = new AtomicInteger();
+
+		private long nowMs;
+
+		void advance(java.time.Duration duration) {
+			this.nowMs += duration.toMillis();
+		}
+
+		@Override
+		public synchronized Attachment register(String runId, String toolCallId, String sessionId, String fileName,
+				long size, String contentType, String storagePath) {
+			Attachment attachment = new Attachment("att_exp" + String.format("%05d", this.seq.incrementAndGet()),
+					runId, toolCallId, sessionId, fileName, size, contentType, storagePath);
+			this.items.put(attachment.fileId(), attachment);
+			this.expiry.put(attachment.fileId(), new long[] { this.nowMs + TTL_MS });
+			return attachment;
+		}
+
+		@Override
+		public synchronized Attachment find(String fileId) {
+			Attachment attachment = this.items.get(fileId);
+			if (attachment == null) {
+				return null;
+			}
+			long[] deadline = this.expiry.get(fileId);
+			return deadline != null && this.nowMs < deadline[0] ? attachment : null;
+		}
+
+		@Override
+		public synchronized boolean consume(String fileId) {
+			if (find(fileId) == null) {
+				return false;
+			}
+			this.items.remove(fileId);
+			this.expiry.remove(fileId);
+			this.consumed.add(fileId);
+			return true;
+		}
+
+		@Override
+		public synchronized boolean wasConsumed(String fileId) {
+			return this.consumed.contains(fileId);
+		}
+
+		@Override
+		public synchronized java.util.List<Attachment> findByForm(String runId, String toolCallId) {
+			java.util.List<Attachment> out = new java.util.ArrayList<>();
+			for (String fileId : this.items.keySet()) {
+				Attachment attachment = find(fileId);
+				if (attachment != null && java.util.Objects.equals(runId, attachment.runId())
+						&& java.util.Objects.equals(toolCallId, attachment.toolCallId())) {
+					out.add(attachment);
+				}
+			}
+			return out;
+		}
+
+		@Override
+		public synchronized Attachment deleteRegistration(String fileId) {
+			this.expiry.remove(fileId);
+			return this.items.remove(fileId);
+		}
+
+		@Override
+		public synchronized void touch(String runId, String toolCallId) {
+			for (String fileId : this.items.keySet()) {
+				Attachment attachment = find(fileId);
+				if (attachment != null && java.util.Objects.equals(runId, attachment.runId())
+						&& java.util.Objects.equals(toolCallId, attachment.toolCallId())) {
+					this.expiry.put(fileId, new long[] { this.nowMs + TTL_MS });
+				}
+			}
+		}
+	}
+
+	@Test
+	void consumptionSkipsABlankStoragePath() {
+		RecordingStorage recording = new RecordingStorage();
+		GenerativeFormGuard recordingGuard = new GenerativeFormGuard(new ObjectMapper(), this.store, recording);
+		FormAttachmentStore.Attachment legacy = this.store.register("run-1", "call-1", "sess-1", "legacy.pdf", 3L,
+				"application/pdf", "");
+		String submitted = values("evidence", legacy.fileId());
+
+		assertThat(recordingGuard.inspectResult("run-1", "call-1", ONE_ATTACHMENT, submitted).accepted()).isTrue();
+		recordingGuard.settleAcceptedResult("run-1", "call-1", ONE_ATTACHMENT, submitted);
+
+		assertThat(this.store.find(legacy.fileId())).isNull();
+		assertThat(recording.deleted).as("空 storagePath 必须安全跳过（历史登记没有路径）").isEmpty();
+	}
+
+	/** 记录删盘调用的存储（真实 {@link FileStorageService} 的相对键校验仍在）。 */
+	private static final class RecordingStorage extends FileStorageService {
+
+		private final java.util.List<String> deleted = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+		RecordingStorage() {
+			super(properties());
+		}
+
+		@Override
+		public void delete(String keyOrPath) {
+			this.deleted.add(String.valueOf(keyOrPath));
+		}
+	}
+
+	/** 生产登记簿（进程内路径）+ consume 故障注入。 */
+	private static final class FailingConsumeStore extends RedisFormAttachmentStore {
+
+		private volatile String failConsumeFor;
+
+		FailingConsumeStore() {
+			super(providerOfNull(), new ObjectMapper());
+		}
+
+		@Override
+		public boolean consume(String fileId) {
+			if (fileId != null && fileId.equals(this.failConsumeFor)) {
+				throw new AiStateUnavailableException("模拟消费失败（Redis 抖动）");
+			}
+			return super.consume(fileId);
+		}
+	}
+
+	private static org.springframework.beans.factory.ObjectProvider<StringRedisTemplate> providerOfNull() {
+		@SuppressWarnings("unchecked")
+		org.springframework.beans.factory.ObjectProvider<StringRedisTemplate> provider = org.mockito.Mockito
+			.mock(org.springframework.beans.factory.ObjectProvider.class);
+		org.mockito.Mockito.when(provider.getIfAvailable()).thenReturn(null);
+		return provider;
 	}
 
 	/** 进程内登记簿（含表单索引；语义与 {@code RedisFormAttachmentStore} 的索引一致）。 */
