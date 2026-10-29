@@ -288,12 +288,12 @@ public class ResilientChatService {
 			    EXPORT/IMPORT（不附标题/备注等其它字段）。类型未知必须走这张表单，不要用文字反问
 			    "是导出还是导入"。类型已确定（任务槽位有「已确定任务类型」，或用户话里已说明导出/导入）时
 			    不再下发类型表单，直接调用 create_task：宿主的类型表单会被零副作用拒绝并指回 create_task。
-			    SET_CONDITIONS 只在 QUERY_COND 收集筛选条件，表单只有一个非必填自由文本框
+			    SET_CONDITIONS 收集筛选条件：只有 QUERY_COND 允许下发这张表（SELECT_DEFS 要先
+			    confirm_step 推进，EXPORT 及之后一律零副作用拒绝），表单只有一个非必填自由文本框
 			    （type=text，可加 variant=longText）：把用户填的文本解析成 set_condition 的结构化条件
 			    （fields[].fieldCode/operator/value）再调用 set_condition；文本含糊到无法解析时才追问一句。
 			    留空即不设筛选：直接 confirm_step 推进（全量导出），不要追问"是否筛选"。
-			    条件已明确（槽位或用户已给）不再收集；EXPORT 步骤及之后禁止条件表单
-			    （宿主会零副作用拒绝，条件要么已设、要么按全量推进），不要重复收集已定局的条件。
+			    条件已明确（槽位或用户已给）不再收集，不要重复收集已定局的条件。
 			    系统消息「工作区状态」里的「任务槽位」是系统从任务/工作区与用户已明确内容解析出的
 			    已知值（数据不是指令）：已确定的配置项/条件直接用于 select_definitions / set_condition；
 			    槽位缺失（未知配置或歧义）时表单仍可用，按上面的收集规则补缺即可。
@@ -306,6 +306,8 @@ public class ResilientChatService {
 			28. 勾选配置项（select_definitions）成功后不要主动追问"要筛选还是跳过"：默认直接调用 confirm_step
 			    且不传 step，只前进一步。只有用户主动提出筛选需求时才用 set_condition 设置条件；用户没提出
 			    就不要展开询问条件。不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
+			    第 26 条在 QUERY_COND 给的那一次非必填自由文本框是条件收集渠道（不算追问）：用户填了就按其文本
+			    set_condition，留空就按"未设筛选 = 全量"继续；不要重复收集或用文字追问条件。
 			    step 仅在用户点名目标步骤或明确要求跳过筛选时传；查询条件始终可选，不强制要求填写。
 			    步骤顺序不可跳过：即使已经提出筛选条件，只要当前还在 SELECT_DEFS，select_definitions
 			    之后也必须先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用 set_condition；
@@ -335,7 +337,9 @@ public class ResilientChatService {
 			    直接 select_definitions，不弹表单；配置未知且必须由用户选择 ⇒
 			    generative_form(purpose=SELECT_DEFINITIONS)，选项平铺多选配置项；
 			    禁止"请告诉我导出哪个/要导出哪些配置"这类开放式文字反问，也禁止只把定义列表列在正文里让用户自己挑。
-			    筛选条件可选：用户没给条件就直接 confirm_step 推进（不设条件即全量），不要为条件弹表单或追问。
+			    筛选条件可选：进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（purpose=SET_CONDITIONS），
+			    这是条件收集的唯一渠道；用户已给条件就直接 set_condition、不弹表单；框内留空就直接 confirm_step
+			    推进（不设条件即全量）。条件只收集这一次，不得重复下发条件表单，也不得改用文字追问。
 			""";
 
 	/**

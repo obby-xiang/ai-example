@@ -553,7 +553,8 @@ public class AiTools {
      */
     @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
             + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
-            + "只有用户明确提出筛选/查询条件时才调用；已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链）。本工具只能在 QUERY_COND 步骤调用："
+            + "用户给出条件（含条件表单回填文本解析出的条件）时才调用，没给条件就不设筛选（不设条件即全量）；"
+            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链）。本工具只能在 QUERY_COND 步骤调用："
             + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
     @ToolScope({ "task:EXPORT/QUERY_COND" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
@@ -605,7 +606,8 @@ public class AiTools {
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
             + "推进成功后下一批按最新披露继续，推进失败即停"
             + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
-            + "同参数/同目标仍在禁止之列）")
+            + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 时先按 generative_form(purpose=SET_CONDITIONS) 给一次"
+            + "非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选")
     @ToolScope({ "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -638,7 +640,8 @@ public class AiTools {
      *
      * <p>2026-10-29（闭环批）：{@code TASK_TYPE} 固定为单个 enum 单选 {@code EXPORT/IMPORT}（类型未知才用，
      * 已确定时零副作用拒绝并指回 {@code create_task}）；{@code SET_CONDITIONS} 固定为单个非必填自由文本框
-     * （{@code QUERY_COND} 收集，留空=不设筛选，{@code EXPORT} 及之后拒绝）。
+     * （有明确步骤时只有 {@code QUERY_COND} 允许下发，留空=不设筛选；{@code SELECT_DEFS}/{@code EXPORT} 及之后
+     * 等其它步骤零副作用拒绝）。
      *
      * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
      * 两个场景的现场都在"任务驱动"这条链路上：
@@ -688,9 +691,10 @@ public class AiTools {
             + "/GENERAL_CLARIFY（通用澄清，缺省）；"
             + "宿主只按 purpose 判断用途，禁止靠标题猜。TASK_TYPE 只在任务类型未知时用，形状固定为单个 enum 单选"
             + "（选项正好 EXPORT/IMPORT，不附其它字段）；类型已确定时会被零副作用拒绝并指回 create_task。"
-            + "SET_CONDITIONS 只在 QUERY_COND 收集，形状固定为一个非必填自由文本框（type=text，可加 variant=longText）："
+            + "SET_CONDITIONS 只在 QUERY_COND 收集（其它步骤零副作用拒绝），形状固定为一个非必填自由文本框"
+            + "（type=text，可加 variant=longText）："
             + "把用户文本解析成 set_condition 的结构化条件；留空即不设筛选（直接 confirm_step 全量推进）；"
-            + "条件已明确或已到 EXPORT 及之后会被零副作用拒绝，不再重复收集。系统工作区状态里的「任务槽位」是已知值："
+            + "条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝，不再重复收集。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："

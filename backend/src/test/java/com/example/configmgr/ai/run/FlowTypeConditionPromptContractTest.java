@@ -54,8 +54,10 @@ class FlowTypeConditionPromptContractTest {
 		assertThat(prompt).as("留空 = 不设筛选，直接推进（全量导出）")
 			.contains("留空即不设筛选")
 			.contains("confirm_step");
-		assertThat(prompt).as("EXPORT 及之后禁止条件表单")
-			.contains("EXPORT 步骤及之后禁止条件表单");
+		assertThat(prompt).as("只有 QUERY_COND 允许条件表单（SELECT_DEFS/EXPORT 及之后由宿主零副作用拒绝）")
+			.contains("只有 QUERY_COND 允许下发这张表")
+			.contains("SELECT_DEFS 要先")
+			.contains("EXPORT 及之后一律零副作用拒绝");
 	}
 
 	@Test
@@ -79,11 +81,58 @@ class FlowTypeConditionPromptContractTest {
 	}
 
 	@Test
+	void promptDeclaresOneShotConditionBoxAfterEnteringQueryCond() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("进入 QUERY_COND 给一次非必填自由文本框（规则 30 与规则 26 同口径）")
+			.contains("进入 QUERY_COND 后按第 26 条给一次非必填自由文本框");
+		assertThat(prompt).as("已有条件直接 set_condition，不弹表单")
+			.contains("用户已给条件就直接 set_condition");
+		assertThat(prompt).as("框内留空就直接 confirm_step 全量推进")
+			.contains("框内留空就直接 confirm_step");
+		assertThat(prompt).as("条件只收集一次，不重复收集")
+			.contains("不得重复下发条件表单");
+		assertThat(prompt).as("旧口径「不要为条件弹表单或追问」与规则 26 冲突，必须删除")
+			.doesNotContain("不要为条件弹表单或追问");
+	}
+
+	@Test
+	void toolDescriptionsAgreeOnTheOneShotConditionBox() throws Exception {
+		ToolDefinitionOverride confirmStep = new YamlToolDefinitionSource().load().find("confirm_step");
+		assertThat(confirmStep).isNotNull();
+		assertThat(confirmStep.description())
+			.as("YAML confirm_step 必须给出 QUERY_COND 的一次非必填空框（与提示词同口径）")
+			.contains("进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次")
+			.contains("留空即照常推进")
+			.doesNotContain("不要因此收集条件");
+
+		ToolDefinitionOverride setCondition = new YamlToolDefinitionSource().load().find("set_condition");
+		assertThat(setCondition).isNotNull();
+		assertThat(setCondition.description())
+			.as("YAML set_condition 必须认可条件表单回填解析出的条件")
+			.contains("自由文本框回填后解析出的条件")
+			.doesNotContain("用户没提就不要设置条件");
+
+		Method confirmStepMethod = AiTools.class.getMethod("confirmStep", String.class);
+		String confirmStepAnnotation = confirmStepMethod.getAnnotation(Tool.class).description();
+		assertThat(confirmStepAnnotation).as("注解回落也要有这次条件框")
+			.contains("QUERY_COND")
+			.contains("非必填");
+
+		Method setConditionMethod = AiTools.class.getMethod("setCondition", String.class,
+				AiTools.FieldQueryCondition.class);
+		String setConditionAnnotation = setConditionMethod.getAnnotation(Tool.class).description();
+		assertThat(setConditionAnnotation).as("注解回落不得再把「只有用户明确提出」写成唯一入口")
+			.contains("条件表单回填")
+			.doesNotContain("只有用户明确提出筛选/查询条件时才调用");
+	}
+
+	@Test
 	void toolsVersionIsBumpedForTheNewDescriptions() {
 		YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
 
 		assertThat(shipped.version())
 			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.9");
+			.isEqualTo("2026-10-27.10");
 	}
 }

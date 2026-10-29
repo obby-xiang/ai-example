@@ -23,12 +23,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 类型已确定（槽位有值）⇒ 零副作用拒绝并指回 {@code create_task}；类型未知 ⇒ 放行。</li>
  * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：一个非必填自由文本框（{@code variant=longText} 可选），
  * 由模型把文本解析成 {@code set_condition} 结构；留空 = 不设筛选（直接推进）。
- * 条件已明确不重复收集；{@code EXPORT} 步骤及之后禁止条件表单。</li>
+ * 条件已明确不重复收集；<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，其余步骤
+ * （{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链）一律零副作用拒绝并给继续指引。</li>
  * </ul>
  *
  * <p><b>证红</b>：{@code TASK_TYPE} 未进 purpose 白名单 ⇒ 类型未知放行、类型表单形状两条红；
- * 去掉槽位判据 ⇒ 类型重复拒绝红；去掉步骤判据 ⇒ {@code EXPORT} 后拒绝红；
- * 去掉 SET_CONDITIONS 单框契约 ⇒ 条件表单形状红。
+ * 去掉槽位判据 ⇒ 类型重复拒绝红；把步骤门收成"只拒 EXPORT/DONE" ⇒ {@code SELECT_DEFS} 拒绝红
+ * （前置步与后置步的指引不同，断言两侧互斥）；去掉 SET_CONDITIONS 单框契约 ⇒ 条件表单形状红。
  */
 class GenerativeFormTaskTypeAndConditionTest {
 
@@ -94,13 +95,19 @@ class GenerativeFormTaskTypeAndConditionTest {
 	void conditionFormIsAcceptedOnlyAtQueryCondStep() {
 		FrontendToolGuard.Verdict atQueryCond = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				conditionForm(), context("QUERY_COND", "EXPORT"));
-		assertThat(atQueryCond.accepted()).as("QUERY_COND 是条件收集的现场").isTrue();
+		assertThat(atQueryCond.accepted()).as("QUERY_COND 是条件收集的唯一现场").isTrue();
 
 		FrontendToolGuard.Verdict atSelectDefs = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				conditionForm(), context("SELECT_DEFS", "EXPORT"));
-		assertThat(atSelectDefs.accepted())
-			.as("表单只收集值、不推进步骤：SELECT_DEFS 下先收文本，提交后再 confirm_step 到 QUERY_COND")
-			.isTrue();
+		assertThat(atSelectDefs.accepted()).as("SELECT_DEFS 不下发条件表单：先推进到 QUERY_COND").isFalse();
+		assertThat(atSelectDefs.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+		assertThat(atSelectDefs.render())
+			.as("前置步的指引是「先 confirm_step 推进到 QUERY_COND」，与后置步的「已关闭」可区分")
+			.contains("SELECT_DEFS")
+			.contains("先 confirm_step")
+			.contains("推进到 QUERY_COND")
+			.contains("未向前端下发表单")
+			.doesNotContain("已关闭");
 
 		FrontendToolGuard.Verdict atExport = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				conditionForm(), context("EXPORT", "EXPORT"));
@@ -109,12 +116,29 @@ class GenerativeFormTaskTypeAndConditionTest {
 		assertThat(atExport.render())
 			.contains("EXPORT")
 			.contains("QUERY_COND")
-			.contains("未向前端下发表单");
+			.contains("未向前端下发表单")
+			.as("后置步不再给「先推进到 QUERY_COND」的指引")
+			.doesNotContain("先 confirm_step");
 
 		FrontendToolGuard.Verdict atDone = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				conditionForm(), context("DONE", "EXPORT"));
 		assertThat(atDone.accepted()).as("DONE 在 EXPORT 之后，同样拒绝").isFalse();
 		assertThat(atDone.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+
+		FrontendToolGuard.Verdict atPrecheck = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				conditionForm(), context("PRECHECK", "IMPORT"));
+		assertThat(atPrecheck.accepted()).as("其它步骤（导入链）同样不收集条件").isFalse();
+		assertThat(atPrecheck.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+	}
+
+	@Test
+	void conditionFormStaysAllowedWhenStepIsUnknown() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				conditionForm(), context(null, "EXPORT"));
+
+		assertThat(verdict.accepted())
+			.as("步骤未知 ≠ 关闭：无上下文的既有调用仍按槽位规则放行（兼容）")
+			.isTrue();
 	}
 
 	@Test

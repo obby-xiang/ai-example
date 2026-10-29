@@ -79,9 +79,10 @@ class SystemPromptNewTaskCreationTest {
 			.contains("请告诉我导出哪个")
 			.contains("开放式文字反问")
 			.contains("禁止只把定义列表列在正文里让用户自己挑");
-		assertThat(rule).as("筛选条件可选：没给条件就推进，不为条件弹表单")
+		assertThat(rule).as("筛选条件可选：QUERY_COND 给一次非必填空框，留空直接推进，不重复收集")
 			.contains("筛选条件可选")
-			.contains("不要为条件弹表单或追问");
+			.contains("进入 QUERY_COND 后按第 26 条给一次非必填自由文本框")
+			.contains("不得重复下发条件表单");
 	}
 
 	@Test
@@ -93,6 +94,6 @@ class SystemPromptNewTaskCreationTest {
 		assertThat(rule29).isGreaterThan(0);
 		assertThat(rule30).isGreaterThan(rule29);
 		assertThat(prompt.substring(rule30)).as("30 是最后一条，正文到提示词结尾为止")
-			.contains("不要为条件弹表单或追问");
+			.contains("不得重复下发条件表单");
 	}
 }

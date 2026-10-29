@@ -57,9 +57,10 @@ import java.util.Set;
  * <ul>
  * <li><b>任务类型</b>（{@code purpose=TASK_TYPE}）：槽位里已有任务类型 ⇒ 零副作用拒绝并指回
  * {@code create_task(type=…)}；类型未知 ⇒ 放行（此时表单是唯一合法的收集方式，不能退回文字反问）。</li>
- * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：当前步骤已在 {@code EXPORT}（或 {@code DONE}）⇒
- * 零副作用拒绝（条件步已关闭，未设筛选即全量）；条件已明确同样拒绝（既有判据）。
- * 步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
+ * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：<b>有明确步骤时只有 {@code QUERY_COND} 允许</b>，
+ * 其余步骤（{@code SELECT_DEFS}、{@code EXPORT}、{@code DONE}、导入链等）零副作用拒绝：
+ * 前置步给"先 confirm_step 推进到 QUERY_COND"，后置步给"按既有步骤链继续，不重复收集"；
+ * 条件已明确同样拒绝（既有判据）。步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
  * </ul>
  */
 @Slf4j
@@ -195,33 +196,45 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"任务类型已确定，类型表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
-		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && conditionsStepClosed(step)) {
-			String current = step == null ? "" : step.trim();
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && !conditionsStepAllowed(step)) {
+			String current = step.trim();
+			boolean before = beforeConditionStep(current);
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
-					"查询条件步已关闭：当前步骤 " + current + "（条件只在 QUERY_COND 收集）"));
-			List<String> reasons = List.of(
-					"当前步骤 " + current + " 已在 EXPORT 及之后：条件只在 QUERY_COND 收集，此时要么已设置、"
-							+ "要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
-					"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
-			log.warn("generative_form 条件表单被步骤放行拒绝（条件步已关闭，未挂起、未下发前端）：step={}", current);
+					(before ? "条件表单只能在 QUERY_COND 下发：当前步骤 " : "查询条件步已关闭：当前步骤 ") + current
+							+ "（条件只在 QUERY_COND 收集）"));
+			List<String> reasons = before
+					? List.of(
+							"当前步骤 " + current + " 还不收集条件：条件只在 QUERY_COND 收集（系统状态，不是猜测）",
+							"下一步：先 confirm_step（不传 step）推进到 QUERY_COND，下一批再收集一次条件，"
+									+ "不要在这一批下发条件表单")
+					: List.of(
+							"当前步骤 " + current + " 已过 QUERY_COND 或不属于条件收集步：条件只在 QUERY_COND 收集，"
+									+ "此时要么已设置、要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
+							"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
+			log.warn("generative_form 条件表单被步骤放行拒绝（当前步骤 {}，不是 QUERY_COND；未挂起、未下发前端）：{}",
+					current, before ? "前置步，指引先 confirm_step 推进" : "后置步/非条件步，指引按既有步骤链继续");
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
-					"查询条件步已关闭，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+					(before ? "条件表单只能在 QUERY_COND 下发" : "查询条件步已关闭")
+							+ "，条件表单未下发（工具未执行、未向前端下发表单）",
+					reasons, issues, null);
 		}
 		return Verdict.accept();
 	}
 
 	/**
-	 * 条件收集步是否已关闭：{@code EXPORT}（导出作业步）与 {@code DONE}（终态）都在 {@code QUERY_COND} 之后。
+	 * 条件收集的步骤门：<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，
+	 * 其余步骤（{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链等）一律拒绝。
 	 *
 	 * <p>步骤未知（{@code null}/空，含无上下文的既有单测调用）时<b>不</b>判关闭 —— 未知不等于关闭，
-	 * 那时仍以槽位规则为准。
+	 * 那时仍以槽位规则为准（兼容）。
 	 */
-	private static boolean conditionsStepClosed(String step) {
-		if (step == null || step.isBlank()) {
-			return false;
-		}
-		String normalized = step.trim();
-		return "EXPORT".equalsIgnoreCase(normalized) || "DONE".equalsIgnoreCase(normalized);
+	private static boolean conditionsStepAllowed(String step) {
+		return step == null || step.isBlank() || "QUERY_COND".equalsIgnoreCase(step.trim());
+	}
+
+	/** 是否还在 {@code QUERY_COND} 之前的前置步：指引是"先 confirm_step 推进"，而不是"步已关闭"。 */
+	private static boolean beforeConditionStep(String step) {
+		return "SELECT_DEFS".equalsIgnoreCase(step) || "UPLOAD".equalsIgnoreCase(step);
 	}
 
 	private static String renderConditions(TaskSlots slots) {

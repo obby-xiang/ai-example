@@ -31,7 +31,11 @@
 # generative_form(purpose=TASK_TYPE) 的单个 enum 单选（EXPORT/IMPORT），不文字反问；类型已确定时零副作用
 # 拒绝并指回 create_task。条件只在 QUERY_COND 用一个非必填自由文本框（longText 可选）收集，留空即全量推进；
 # 条件已明确或已到 EXPORT 及之后不再收条件表单。描述与注解 @Tool 同批改，version 同步升。
-version: 2026-10-27.9
+# 2026-10-27.9 → 2026-10-27.10（2026-10-29 返修：条件框只在 QUERY_COND 出现一次）：守卫收成
+# 「有明确步骤时只有 QUERY_COND 允许 SET_CONDITIONS」（SELECT_DEFS/EXPORT/DONE/导入链一律零副作用拒绝）；
+# 规则 30 / confirm_step / set_condition 的描述统一为「进入 QUERY_COND 给一次非必填自由文本框，留空直接推进，
+# 不得重复收集或文字追问」，删除与规则 26 冲突的「不要为条件弹表单」旧口径。
+version: 2026-10-27.10
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -107,7 +111,8 @@ tools:
     description: >-
       设置导出查询条件（前端执行，立即落库）。前置：EXPORT 任务且当前在 QUERY_COND 步骤；
       条件必须是结构化对象（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数。
-      只有用户明确提出筛选/查询条件时才调用；用户没提就不要设置条件（不设条件即全量）。
+      用户给出条件（含 generative_form(purpose=SET_CONDITIONS) 自由文本框回填后解析出的条件）时才调用；
+      用户没给条件就不设筛选（不设条件即全量），不要为凑条件而调用。
       已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链。
       本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）
       推进到 QUERY_COND，下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。
@@ -121,7 +126,8 @@ tools:
       允许一次不同的纠正动作；同参数/同目标仍在禁止之列）。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；
       导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。
       用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。
-      未设筛选是正常状态（= 全量导出）：不要因此收集条件、停在原地或追问是否筛选，照常推进即可。
+      未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次
+      非必填自由文本框（只此一次，留空即照常推进）；不要停在原地、重复收集或用文字追问是否筛选。
   - toolKey: generative_form
     title: 生成式表单
     # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在
@@ -137,7 +143,8 @@ tools:
       类型已确定（任务槽位有「已确定任务类型」或用户已说明导出/导入）时会被零副作用拒绝并指回 create_task。
       SET_CONDITIONS 只在 QUERY_COND 收集：表单只有一个非必填自由文本框（type=text，可加 variant=longText），
       把用户文本解析成 set_condition 的结构化条件（fields[].fieldCode/operator/value）；留空即不设筛选，
-      直接 confirm_step 全量推进；条件已明确或当前步骤已在 EXPORT 及之后会被零副作用拒绝，不再重复收集。
+      直接 confirm_step 全量推进；条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝（SELECT_DEFS 先
+      confirm_step 推进，EXPORT 及之后一律拒绝），不再重复收集。
       系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
       请直接调用对应工具；未知配置或歧义时表单仍可用。
       字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。
