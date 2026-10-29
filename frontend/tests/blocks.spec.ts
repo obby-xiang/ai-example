@@ -334,6 +334,29 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     }
   })
 
+  /**
+   * GF 段在 `tool_start` 之后、回执之前是 `running` + `requiresAction=false`（还没有待填动作）。
+   *
+   * <p>旧口径把这种段也判进只读已决卡，而 `readOnlyStateOf` 的 GF 分支只认五个已决态，`running`
+   * 落到 default ⇒ 「! 已超时」—— 一张**还在跑**的表单被说成"会话已失效"，用户会以为要重发。
+   * 判据修正：`running`（以及任何未决态）不进只读已决卡，走普通状态标签「调用中…」；
+   * 不新增文案态、不改已决态的映射。
+   */
+  it('GF 段 running（tool_start 后、回执前）不得进只读已决卡：显示「调用中…」而不是「已超时」', () => {
+    const runningForm = makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'running' })
+    expect(isReadOnlyCard(runningForm)).toBe(false)
+    expect(cardStatusOf(runningForm)).toMatchObject({ key: 'running', label: '调用中…', tone: 'primary' })
+    // 未决待填（requiresAction=true）仍是"待填写"卡，不受本条影响
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true })))
+      .toMatchObject({ key: 'pending', label: '待填写' })
+    // 已决态回归锚：状态机与文案不变
+    expect(isReadOnlyCard(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe(true)
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })))
+      .toMatchObject({ key: 'cancelled', label: '✗ 已取消' })
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'rejected' })))
+      .toMatchObject({ key: 'rejected', label: '✗ 已拒绝' })
+  })
+
   it('r15：六态矩阵 —— 每态只读卡 groupParts 默认折叠，手动展开 / 收起优先', () => {
     const matrix: Array<[string, ToolPart]> = [
       ['approved', makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' })],

@@ -97,6 +97,48 @@ function indexOfFirst(calls: HistoryCall[], name: string): number {
   return calls.findIndex((call) => call.name === name)
 }
 
+/**
+ * 从落库的条件 JSON 里抽出 `{field, value}` 对（形状不锁死：`fields[]` / `conditions[]` /
+ * 直接的 `{key,value}` 都可能，后端 `TaskItem.conditionJson` 只保证是 JSON 文本）。
+ *
+ * <p>为什么按"对"抽而不是断言某个具体键：条件是**模型生成后经前端契约落库**的，键名由前端
+ * `api/tasks.ts#setCondition` 决定、不是本用例的验收面；本用例要证的是"用户说的 code=CNY 真的进了库"。
+ * 解析失败返回空表（由调用方断言"至少一对"），不吞异常也不伪造。
+ */
+function collectConditionPairs(raw: string): Array<{ field: string; value: string }> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  const pairs: Array<{ field: string; value: string }> = []
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit)
+      return
+    }
+    if (node === null || typeof node !== 'object') {
+      return
+    }
+    const record = node as Record<string, unknown>
+    const fieldKey = ['field', 'fieldCode', 'code', 'key', 'column', 'name'].find(
+      (key) => typeof record[key] === 'string'
+    )
+    const valueKey = ['value', 'values', 'operand', 'keyValue'].find((key) => record[key] !== undefined)
+    if (fieldKey && valueKey) {
+      pairs.push({ field: String(record[fieldKey]), value: JSON.stringify(record[valueKey]) ?? '' })
+    }
+    Object.values(record).forEach((value) => {
+      if (value !== null && typeof value === 'object') {
+        visit(value)
+      }
+    })
+  }
+  visit(parsed)
+  return pairs
+}
+
 test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币字典）', () => {
   test('E2E-MC01 park 下创建→导航→选配置→推进→设条件全链走通，且全程无冗余表单', async ({ page, request }) => {
     test.setTimeout(600_000)
@@ -146,15 +188,30 @@ test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币�
     // 浏览器面同口径：整轮没有任何表单卡（提交/取消都算"多余的表单"）
     await expect(page.locator('[data-testid="gf-fields"]')).toHaveCount(0)
 
-    // ③ 业务面：任务真的建成了，且至少一条 EXPORT 作业存在
+    // ③ 业务面：任务真的建成了，并停在「筛选条件步」、条件已按 CURRENCY.code=CNY 持久化
+    //    （本任务范围只到 set_condition：**不虚构 start_export / 不另有作业**）
     const created = calls.find((call) => call.name === 'create_task' && /#\d+/.test(call.result ?? ''))
     expect(created, 'create_task 的回执里没有真实任务号').toBeTruthy()
     const taskId = Number(/#(\d+)/.exec(created?.result ?? '')?.[1] ?? 0)
     expect(taskId).toBeGreaterThan(0)
-    const jobs = await api.get<Array<{ jobType?: string }>>(request, `/api/tasks/${taskId}/jobs`)
-    expect(jobs.filter((job) => (job.jobType ?? '').toUpperCase() === 'EXPORT').length).toBeGreaterThan(0)
+    const task = await api.get<{
+      currentStep?: string
+      items?: Array<{ defCode?: string; conditionJson?: string | null }>
+    }>(request, `/api/tasks/${taskId}`)
+    expect(task.currentStep, `任务未停在筛选条件步（实际 ${task.currentStep}）`).toBe('QUERY_COND')
+    const currency = (task.items ?? []).find((item) => (item.defCode ?? '').toUpperCase() === 'CURRENCY')
+    expect(currency, '任务条目里没有 CURRENCY').toBeTruthy()
+    const conditionPairs = collectConditionPairs(currency?.conditionJson ?? '')
+    expect(conditionPairs.length, `条件未持久化：${currency?.conditionJson ?? '(null)'}`).toBeGreaterThan(0)
+    expect(
+      conditionPairs.some((pair) => /code/i.test(pair.field) && pair.value.includes('CNY')),
+      `条件里没有 code=CNY：${currency?.conditionJson ?? '(null)'}`
+    ).toBe(true)
 
-    // ④ 用户面没有失败/中断提示（全程只有确认卡这一种人工介入）
+    // ④ 确实走了确认 / park 续跑（一次确认卡被批准 = 一条 HITL 路径被真机走过）
+    expect(approvals, '全程没有任何确认卡被批准 ⇒ 没走到 park→续跑链路').toBeGreaterThanOrEqual(1)
+
+    // ⑤ 用户面没有失败/中断提示（全程只有确认卡这一种人工介入）
     await expect(page.locator('[data-testid^="error-card-"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="alert-interrupted"]')).toHaveCount(0)
   })

@@ -2931,6 +2931,11 @@ export const useAiStore = defineStore('ai', {
       }
       const consumedResponses = new Set<object>()
       const unmatchedCalls: Array<{ name: string; part: ToolPart }> = []
+      // 整条不产出消息的历史下标（当前唯一来源 = 只带槽位放行幻影卡的 assistant）。
+      // 必须记下来交给 R-150 合并 pass：那里用"非 TOOL 条目 ↔ 已建消息"的**按位游标**配对，
+      // 掉了一条而不告诉它，后续每条都会拿到上一条的消息、末尾读到 undefined（合并时直接抛错，
+      // 异常被 loadHistory 吞成 historyError，界面表现为历史加载失败 + 内容错位）。
+      const suppressedHistoryIndexes = new Set<number>()
       this.messages = history.messages.flatMap((item, index) => {
         if ((item.type || '').toUpperCase() === 'TOOL') {
           return [] // TOOL 条目：响应已并入 ASSISTANT 工具段，本身不再产生消息
@@ -3056,7 +3061,9 @@ export const useAiStore = defineStore('ai', {
           })
         ]
         if (parts.length === 0) {
-          // 本条的段全被隐藏（例如整条只带一张槽位放行的幻影表单卡）⇒ 不产空消息
+          // 本条的段全被隐藏（例如整条只带一张槽位放行的幻影表单卡）⇒ 不产空消息；
+          // 下标登记给 R-150 合并 pass，保证"按位游标"与 `history.messages` 不错位。
+          suppressedHistoryIndexes.add(index)
           return []
         }
         const message: ChatMessage = {
@@ -3148,10 +3155,15 @@ export const useAiStore = defineStore('ai', {
         }
         group = []
       }
-      for (const item of history.messages) {
+      for (const [historyIndex, item] of history.messages.entries()) {
         const type = (item.type || '').toUpperCase()
         if (type === 'TOOL') {
           continue // 无消息产出（R-149 已跳过），不断窗
+        }
+        if (suppressedHistoryIndexes.has(historyIndex)) {
+          // 该条目整条未产出消息（只带槽位放行幻影卡）：不推进游标、也不断窗 ——
+          // 它没有可见内容，等价于"这一条什么都没说"，前后同一用户轮的 assistant 仍按既有口径合并。
+          continue
         }
         const message = builtMessages[builtCursor] as ChatMessage
         builtCursor += 1

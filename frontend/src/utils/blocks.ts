@@ -487,8 +487,17 @@ function isApprovedNotExecuted(part: ToolPart): boolean {
 }
 
 export function isReadOnlyCard(part: ToolPart): boolean {
-  return !part.requiresAction
-    && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL)
+  if (part.requiresAction) {
+    return false
+  }
+  // 表单系的"还没结论"比门卡多一档：`tool_start` 之后、回执之前是 `running` +
+  // `requiresAction=false`（还没有待填动作）。它不是已决卡 —— 落进只读状态机会被 default 折成
+  // 「! 已超时」，把"还在跑"说成"会话已失效"。门卡的 `running`（已批准、执行中）语义不同，
+  // 仍按既有口径读成「已批准」，本处不动它。
+  if (part.name === GENERATIVE_FORM_TOOL && part.status === 'running') {
+    return false
+  }
+  return (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL)
     && (!NON_DECISION_STATUSES.has(part.status) || isApprovedNotExecuted(part))
 }
 
