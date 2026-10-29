@@ -688,7 +688,10 @@ class ContextCompactorTest {
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L1);
 	}
 
-	/** L2 的归档 / 台账 / 真值：三条观测面同一组 (level, before, after, turns, lostTokens)。 */
+	/**
+	 * L2 的归档 / 台账 / 真值：归档与台账同一组 (level, before, after, turns, lostTokens)；
+	 * 状态基线按 C13 补齐前缀（{@code after + system + tools}）—— 归账口径与基线口径不同面。
+	 */
 	@Test
 	void l2ArchivesAndRecordsLedgerWithTurns() {
 		seed("L1", 70000);
@@ -710,7 +713,9 @@ class ContextCompactorTest {
 			.containsEntry("est", false);
 		ContextState state = this.store.read(SESSION_ID);
 		assertThat(state.level()).isEqualTo("L2");
-		assertThat(state.usedTokens()).isEqualTo(outcome.after());
+		// C13：落库基线 = 压缩后历史估算 + system(3000) + tools(4000) —— 上游真值本就含这两项，
+		// 只写历史估算会让下一轮 nextEst 永远少算前缀（同 c13CompactionBaselineIncludesSystemAndTools）。
+		assertThat(state.usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
 		assertThat(state.est()).isTrue();
 	}
 

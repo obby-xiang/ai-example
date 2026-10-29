@@ -6000,10 +6000,17 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
 
   it('主动 stop：映射 cancelled', async () => {
     const store = useAiStore()
-    api.chat.mockImplementation((_request: unknown, _handlers?: unknown, options?: { signal?: AbortSignal }) =>
-      new Promise<never>((_resolve, reject) => {
-        options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
-      })
+    // M-19/C2：pre-start 窗口里 stop 只记意向并保留传输，等 start 帧到达再补 cancel。
+    api.chat.mockImplementation(
+      (
+        _request: unknown,
+        handlers?: { onFrame?: (frame: unknown) => void },
+        options?: { signal?: AbortSignal }
+      ) =>
+        new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+          handlers?.onFrame?.({ type: 'start', runId: 'run-s', sessionId: store.sessionId, seq: 1 })
+        })
     )
     const pending = store.send('停止我')
     await Promise.resolve()

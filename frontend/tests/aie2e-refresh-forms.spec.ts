@@ -131,6 +131,12 @@ function hangReattach(): void {
  */
 async function freshStoreClean(): Promise<Store> {
   const store = await freshStore()
+  // 模块级"在途轮"（`currentAbort`）不随 pinia 复位：上一条用例的挂起重连（`reattachRun` 桩永不
+  // 结算）会把它带进本例 —— `loadHistory()` 见 `currentAbort` 非空就判"本端已有在途轮"而**跳过
+  // 镜像**（夜间全量连跑必现、单跑不现）。会话级复位把在途轮一并清掉（等价于重载后的内存态），
+  // 随后把 `freshStore()` 的"未读历史"口径还原（复位把它置成了已读）。
+  store.adoptFreshSession()
+  store.historyLoaded = false
   store.activeForm = null
   store.activePreview = null
   store.stalePreviewToolCallId = null
