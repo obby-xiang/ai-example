@@ -130,25 +130,51 @@ class ResumeZombieTakeoverRecheckTest {
 	}
 
 	/**
-	 * <b>M-1</b>：本进程仍有驱动登记，但<b>租约已经丢了</b>（本次抢租是 fresh：取了新号、推进了 fence）——
-	 * 此时不得再走"复核拒绝 + 还租"：净结果会是「fence 已推进 + 租约被删 + 无人驱动」，
-	 * 原驱动被围栏在外、这一轮再也没人推。正确出口是<b>安全接管</b>（旧驱动的写被它自己丢租后的
-	 * 只读判据挡住），接管方持有新租约。
+	 * <b>同实例收口（返修 R2）</b>：本进程仍登记着驱动方（{@code isDriving=true}）、但<b>租约已丢</b>
+	 * （本次抢租是 fresh：取了新号、推进了 fence）。
+	 *
+	 * <h2>为什么不能"安全接管"</h2>
+	 * 同一进程里两个驱动方共享同一个 {@code LeaseService} 的租约视图（按 {@code key+owner} 记账）——
+	 * 新起的接管驱动一抢租，视图就指向新 epoch ⇒ <b>旧驱动后续的写也会被放行</b>，
+	 * 于是"接管"等于双驱动。也不能"拒绝 + 还租"：净结果是「fence 已推进 + 租约被删 + 无人驱动」。
+	 *
+	 * <h2>本批口径</h2>
+	 * 不新起驱动：把这一任租约<b>重挂给仍在跑的旧驱动</b>（停旧续租任务 → 按新 epoch 起续租，存活判据 =
+	 * 本进程仍有该轮驱动登记 && 快照非终态），返回 {@code ALREADY_RUNNING + leaseRearmed=true}，
+	 * 且<b>不得还租</b>。旧驱动因此既不被围栏在外、也不会出现第二份驱动。
 	 */
 	@Test
-	void aFreshTakeoverOfAStillRegisteredDriverTakesOverInsteadOfLeavingNobodyDriving() {
+	void aFreshTakeoverOfAStillRegisteredDriverRearmsTheExistingDriverInsteadOfStartingASecondOne() {
 		seedStaleRunning();
 		when(this.chatService.isDriving(RUN_ID)).thenReturn(true);
 		assertThat(this.store.heldRunEpoch(RUN_ID)).as("前提：驱动方已丢租（进程内无租约视图）").isZero();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID, true);
 
-		assertThat(result.outcome()).as("fresh 已夺权：拒绝+还租会留下无人驱动，必须接管")
-			.isEqualTo(ResumeService.Outcome.ACCEPTED);
-		assertThat(result.body()).containsEntry("zombieTakeover", true);
-		verify(this.executor).execute(any(Runnable.class));
-		assertThat(this.store.heldRunEpoch(RUN_ID)).as("接管方仍持租 ⇒ 不是『没人驱动』的状态").isPositive();
-		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("租约键必须在接管方手里").isNotNull();
+		assertThat(result.outcome()).as("同实例：不得新起驱动，返回 ALREADY_RUNNING")
+			.isEqualTo(ResumeService.Outcome.ALREADY_RUNNING);
+		assertThat(result.body()).containsEntry("resumed", false)
+			.containsEntry("reason", "DRIVER_ALIVE_IN_PROCESS")
+			.containsEntry("leaseRearmed", true);
+		verify(this.executor, never()).execute(any(Runnable.class));
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any(), any(), any());
+
+		long epoch = this.store.heldRunEpoch(RUN_ID);
+		assertThat(epoch).as("租约必须重挂到本进程（不得还租，否则既围栏旧驱动又无人驱动）").isPositive();
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("租约键仍在（新 epoch）").isNotNull();
+		assertThat(this.renewScheduler.activeCount()).as("必须给旧驱动挂上续租任务").isEqualTo(1);
+		// fence 维度：本替身的抢租走<b>两键</b>脚本（不带 fence），fence 键因此保持 0 —— 断言它
+		// <b>没有</b>被回拨/推到别的 epoch；真实 RunStore 的 fence 推进（三键 ACQUIRE 脚本）由
+		// LeaseLossReadOnlyTest / LeaseEpochPerRunTest 覆盖（本替身不具备该面）。
+		assertThat(this.store.fenceEpoch(RUN_ID)).as("fence 不得被回拨（替身的两键抢租不写 fence）").isZero();
+		// 旧驱动没有被围栏在外：它此刻的写仍然生效（这正是"重挂"而非"接管"的实际效果）
+		RunSnapshot driverWrite = this.store.get(RUN_ID);
+		driverWrite.setAssistantContent("旧驱动仍在写");
+		this.store.save(driverWrite);
+		assertThat(this.store.get(RUN_ID).getAssistantContent()).as("重挂后旧驱动不得被 fence 围栏在外")
+			.isEqualTo("旧驱动仍在写");
+		assertThat(this.store.heldRunEpoch(RUN_ID)).as("旧驱动写回后仍持着同一任租约").isEqualTo(epoch);
 	}
 
 	/**
@@ -172,7 +198,12 @@ class ResumeZombieTakeoverRecheckTest {
 		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("也不得留下自己的租约").isNull();
 	}
 
-	/** 真僵尸（无驱动登记 + 业务活动仍超龄）：复核不得把接管能力整体关掉。 */
+	/**
+	 * 真僵尸（无驱动登记 + 业务活动仍超龄）：复核不得把接管能力整体关掉。
+	 *
+	 * <p>它同时是<b>跨实例</b>的对照面（{@code isDriving=false} ⇒ 本进程没有同实例驱动视图，
+	 * fence 能真正隔开两个进程）：fresh 抢租后照旧<b>接管</b>，不进入"重挂租约"分支。
+	 */
 	@Test
 	void aTrulyStaleRoundWithNoLiveDriverIsStillTakenOver() {
 		seedStaleRunning();

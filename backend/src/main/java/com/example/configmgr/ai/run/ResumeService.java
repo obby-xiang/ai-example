@@ -133,6 +133,16 @@ public class ResumeService {
 			+ "so it cannot be resumed with the same model. Please send a new message.";
 
 	/**
+	 * 接管改判"<b>重挂租约</b>"的 body 键（返修 R2，{@code true} = 本次没有新起驱动）。
+	 *
+	 * <p>含义：本进程仍登记着这一轮的驱动方（{@code isDriving=true}）且本次已抢到租约 —— 同实例两个驱动方
+	 * 共享同一份进程内租约视图，新起驱动会让旧驱动的写照样放行（双驱动），"拒绝+还租"又会把它围栏在外
+	 * 且无人驱动。故本次把租约<b>重挂给旧驱动续租</b>，调用方（{@link #resumeWithReason}）据此
+	 * <b>不得</b> {@code releaseRunLease}，改为 {@code markDriving(lease, 旧驱动存活判据)}。
+	 */
+	public static final String LEASE_REARMED_KEY = "leaseRearmed";
+
+	/**
 	 * 仅模型步重跑被前置条件拒绝的用户面短句（409 响应体的 {@code message}）。
 	 *
 	 * <p>与 {@link #PROVIDER_GONE_MESSAGE} 同一形态：<b>一句话说清"为什么不能这么做 + 该怎么做"</b>，
@@ -708,6 +718,18 @@ public class ResumeService {
 				// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
 				// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
 				leases.markDriving(lease, () -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId));
+			}
+			else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
+				// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
+				// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
+				// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
+				// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
+				// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
+				leases.stopDriving(lease.key(), lease.owner());
+				leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
+						&& snapshotNotTerminal(runId));
+				log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
+						lease.epoch());
 			}
 			else if (result.outcome().releasesLease()) {
 				// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
@@ -1404,18 +1426,32 @@ public class ResumeService {
 					body.put("reason", "ALREADY_RUNNING");
 					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 				}
-				// ===== 抢租后的复核（2026-10-29；返修 M-1 起与 fresh 绑定）=====
+				// ===== 抢租后的复核（2026-10-29；返修 R1 起与 fresh 绑定，R2 起同实例收口）=====
 				// 常态下"驱动还活着"已在 {@link #takeoverPreCheck} 里拦下（那时还没抢租）。
-				// 走到这里仍要复核，是关掉"初检之后、抢租之前驱动又活过来"的窗口 —— 但<b>只有同主重入
-				// （{@code created=false}）才允许否决</b>：那时租约属于活着的驱动方，拒绝不动任何状态。
-				// <b>fresh=true 表示这一任是我抢到的</b>（原租约已过期/无人持有，且 fence 已被我推到新 epoch）：
-				// 此时"拒绝 + 还租"的净结果是「fence 已推进 + 租约被删 + 无人驱动」—— 原驱动被围栏在外，
-				// 这一轮再也没人推。故 fresh 一律<b>安全接管</b>：旧驱动的写会被它自己丢租后的只读判据挡住。
+				// 走到这里仍要复核，是关掉"初检之后、抢租之前驱动又活过来"的窗口。
 				long activeAtMs = activeAtMs(snapshot);
 				long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
 				long activeAgeMs = System.currentTimeMillis() - activeAtMs;
 				boolean driverAlive = this.chatService != null && this.chatService.isDriving(runId);
 				boolean activityAlive = activeAgeMs <= zombieAgeMs;
+				if (driverAlive && lease != null) {
+					// ===== 同实例收口（返修 R2）=====
+					// 本进程里两个驱动方共享同一个 {@code LeaseService} 的租约视图（按 key+owner 记账）：
+					// 新起的接管驱动一抢租，视图就指向新 epoch ⇒ <b>旧驱动后续的写照样放行</b>，
+					// "接管"于是等于双驱动。也不能"拒绝 + 还租"（那是 R1 前的死路：fence 已推进 +
+					// 租约被删 + 无人驱动）。故这里<b>不新起驱动</b>：把这一任租约重挂给仍在跑的旧驱动
+					// （后处理 stop + markDriving，存活判据 = 本进程仍有该轮驱动登记 && 快照非终态），
+					// 返回 ALREADY_RUNNING + leaseRearmed=true，且<b>不得还租</b>。
+					// 跨实例（isDriving=false）不受影响：仍按"fresh 安全接管"（fence 能真正隔开两个进程）。
+					body.put("resumed", false);
+					body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+					body.put("driverAlive", true);
+					body.put(LEASE_REARMED_KEY, true);
+					log.warn("僵尸接管改判『重挂租约』runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
+							+ "（同实例共享租约视图 ⇒ 新起驱动会双驱动）—— 不新起驱动，把租约重挂给旧驱动"
+							+ "（fresh={}）", runId, sessionId, freshLease);
+					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+				}
 				if (driverAlive || activityAlive) {
 					if (!freshLease) {
 						if (driverAlive) {
@@ -1423,7 +1459,7 @@ public class ResumeService {
 							body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
 							body.put("driverAlive", true);
 							log.warn("僵尸接管复核拒绝 runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
-									+ "（同主重入，拒绝不改任何状态）—— 不接管，避免双驱动", runId, sessionId);
+									+ "（无租约可重挂：lease=null；拒绝不改任何状态）—— 不接管", runId, sessionId);
 							return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 						}
 						body.put("resumed", false);
@@ -1436,8 +1472,8 @@ public class ResumeService {
 						return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 					}
 					log.warn("僵尸接管复核：仍见活驱动迹象（driverAlive={} activeAgeMs={}），但本次是 fresh 抢租"
-							+ "（已推进 fence）—— 拒绝+还租会留下『无人驱动』，故继续接管 runId={} sessionId={}"
-							+ "（旧驱动的写将被其丢租后的只读判据挡住）", driverAlive, activeAgeMs, runId, sessionId);
+							+ "（已推进 fence）且本进程没有该轮驱动登记（跨实例）—— 继续接管 runId={} sessionId={}"
+							+ "（旧驱动的写将被 fence 挡住）", driverAlive, activeAgeMs, runId, sessionId);
 				}
 				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
 				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 业务活动已超龄；
