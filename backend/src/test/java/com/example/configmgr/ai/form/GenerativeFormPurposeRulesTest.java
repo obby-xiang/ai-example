@@ -20,8 +20,12 @@ class GenerativeFormPurposeRulesTest {
 
 	private JsonNode args(String purpose) {
 		String purposeField = purpose == null ? "" : "\"purpose\":\"" + purpose + "\",";
-		String json = "{\"form\":{" + purposeField
-				+ "\"scenario\":\"CLARIFY\",\"fields\":[{\"key\":\"choice\",\"label\":\"选择\",\"type\":\"text\"}]}}";
+		// 2026-10-29：TASK_TYPE 的形状固定为单个 enum 单选（EXPORT/IMPORT），其余用途用单个文本字段
+		String fields = GenerativeFormRules.PURPOSE_TASK_TYPE.equals(purpose)
+				? "[{\"key\":\"taskType\",\"label\":\"任务类型\",\"type\":\"enum\",\"options\":["
+						+ "{\"value\":\"EXPORT\",\"label\":\"导出\"},{\"value\":\"IMPORT\",\"label\":\"导入\"}]}]"
+				: "[{\"key\":\"choice\",\"label\":\"选择\",\"type\":\"text\"}]";
+		String json = "{\"form\":{" + purposeField + "\"scenario\":\"CLARIFY\",\"fields\":" + fields + "}}";
 		try {
 			return this.mapper.readTree(json);
 		}

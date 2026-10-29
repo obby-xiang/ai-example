@@ -46,11 +46,21 @@ import java.util.Set;
  * 下发前在<b>原 schema 校验之后</b>再看 {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
  * 槽位已确定的收集表单没有真实缺口 ⇒ 拒绝下发（{@code FORM_SLOTS_ALREADY_KNOWN}，零副作用），
  * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与
- * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。缺省 purpose 只在结构明确时推断
- * （{@code optionsFrom.sourceId=definitions} → 选择，{@code scenario=FILTER} → 条件），
- * 显式 {@code GENERAL_CLARIFY} 不被形状覆盖；标题/label 不参与判断。上下文由
+ * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。
+ * <p><b>缺省 purpose 只在结构明确时推断</b>（{@code optionsFrom.sourceId=definitions} → 选择，
+ * {@code scenario=FILTER} → 条件），显式 {@code GENERAL_CLARIFY} 不被形状覆盖；标题/label 不参与判断。
+ * 上下文由
  * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
- * （既有单测/兼容调用）槽位规则整体跳过。
+ * （既有单测/兼容调用）槽位与步骤规则整体跳过。
+ *
+ * <h2>两条补充判据（2026-10-29 闭环批）</h2>
+ * <ul>
+ * <li><b>任务类型</b>（{@code purpose=TASK_TYPE}）：槽位里已有任务类型 ⇒ 零副作用拒绝并指回
+ * {@code create_task(type=…)}；类型未知 ⇒ 放行（此时表单是唯一合法的收集方式，不能退回文字反问）。</li>
+ * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：当前步骤已在 {@code EXPORT}（或 {@code DONE}）⇒
+ * 零副作用拒绝（条件步已关闭，未设筛选即全量）；条件已明确同样拒绝（既有判据）。
+ * 步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -133,16 +143,24 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
 		return inspectSlots(GenerativeFormRules.purposeOf(arguments.get("form")),
-				TaskSlots.fromExtra(context == null ? null : context.getExtra()));
+				TaskSlots.fromExtra(context == null ? null : context.getExtra()),
+				context == null ? null : context.getStep());
 	}
 
 	/**
-	 * 槽位放行：purpose 与已解析槽位的组合决定"这张表还有没有真实缺口"。
+	 * 槽位放行：purpose 与已解析槽位（以及当前步骤）的组合决定"这张表还有没有真实缺口"。
 	 *
 	 * <p>拒绝是<b>零副作用</b>的（调用方不挂起、不下发、不认领、不记台账），模型收到可读码与
 	 * 下一步指引后可按规则 29 做一次不同的纠正；槽位缺失/歧义与 {@code GENERAL_CLARIFY} 一律放行。
+	 *
+	 * <p>本批（2026-10-29 闭环批）新增两条：
+	 * <ul>
+	 * <li>{@code TASK_TYPE} 且任务类型已确定 ⇒ 拒绝并指回 {@code create_task}（类型不是缺口）；</li>
+	 * <li>{@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}（或之后）⇒ 拒绝：条件步已关闭，
+	 * 条件要么已设、要么按"未设筛选 = 全量"推进，再收一遍只会拖住流程。</li>
+	 * </ul>
 	 */
-	private Verdict inspectSlots(String purpose, TaskSlots slots) {
+	private Verdict inspectSlots(String purpose, TaskSlots slots, String step) {
 		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose) && slots.hasDefCodes()) {
 			String known = String.join(", ", slots.defCodes());
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
@@ -166,7 +184,44 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已确定，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
+		if (GenerativeFormRules.PURPOSE_TASK_TYPE.equals(purpose) && slots.taskType() != null) {
+			String known = slots.taskType();
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"已确定任务类型：" + known + "（来源：任务/工作区或用户明确值）"));
+			List<String> reasons = List.of(
+					"已确定任务类型：" + known + "（系统解析，不是猜测）",
+					"下一步：直接调用 create_task（type=" + known + "，title 可选），不要再用表单重复收集类型");
+			log.warn("generative_form 类型表单被槽位放行拒绝（任务类型已确定，未挂起、未下发前端）：{}", known);
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"任务类型已确定，类型表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && conditionsStepClosed(step)) {
+			String current = step == null ? "" : step.trim();
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"查询条件步已关闭：当前步骤 " + current + "（条件只在 QUERY_COND 收集）"));
+			List<String> reasons = List.of(
+					"当前步骤 " + current + " 已在 EXPORT 及之后：条件只在 QUERY_COND 收集，此时要么已设置、"
+							+ "要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
+					"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
+			log.warn("generative_form 条件表单被步骤放行拒绝（条件步已关闭，未挂起、未下发前端）：step={}", current);
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"查询条件步已关闭，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
 		return Verdict.accept();
+	}
+
+	/**
+	 * 条件收集步是否已关闭：{@code EXPORT}（导出作业步）与 {@code DONE}（终态）都在 {@code QUERY_COND} 之后。
+	 *
+	 * <p>步骤未知（{@code null}/空，含无上下文的既有单测调用）时<b>不</b>判关闭 —— 未知不等于关闭，
+	 * 那时仍以槽位规则为准。
+	 */
+	private static boolean conditionsStepClosed(String step) {
+		if (step == null || step.isBlank()) {
+			return false;
+		}
+		String normalized = step.trim();
+		return "EXPORT".equalsIgnoreCase(normalized) || "DONE".equalsIgnoreCase(normalized);
 	}
 
 	private static String renderConditions(TaskSlots slots) {

@@ -27,7 +27,11 @@
 # 2026-10-27.7 → 2026-10-27.8（2026-10-29 审核问题 1/2，新建任务口径）：无论任务中心还是已有/已完成任务页面，
 # 用户明确要新建导出/导入任务就直接调 create_task（只 type + 可选 title，不先追问配置/文件、不先用
 # list_config_defs 摸底）；旧任务的配置/步骤/完成状态不属于新任务（除非用户明确要求沿用）。
-version: 2026-10-27.8
+# 2026-10-27.8 → 2026-10-27.9（2026-10-29 闭环批：任务类型与筛选条件收集口径）：类型未知必须用
+# generative_form(purpose=TASK_TYPE) 的单个 enum 单选（EXPORT/IMPORT），不文字反问；类型已确定时零副作用
+# 拒绝并指回 create_task。条件只在 QUERY_COND 用一个非必填自由文本框（longText 可选）收集，留空即全量推进；
+# 条件已明确或已到 EXPORT 及之后不再收条件表单。描述与注解 @Tool 同批改，version 同步升。
+version: 2026-10-27.9
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -50,7 +54,8 @@ tools:
       用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：
       不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。
       创建只需要任务类型 type（EXPORT/IMPORT）与可选 title：标题不追问，缺省按类型生成；
-      类型无法判断时才用表单选类型。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，
+      类型无法判断时才用 generative_form(purpose=TASK_TYPE) 的单个 enum 单选选类型（选项正好 EXPORT/IMPORT），
+      不要用文字反问；类型已确定时绝不弹类型表单。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，
       不自动带入，除非用户明确要求沿用。前置：确认卡批准后才会创建；同一轮最多一次；
       同轮重复调用会复用或明确拒绝。创建不等于执行：不会启动任何作业。
       批准后用 navigate_to(page=..., taskId=...) 打开向导。
@@ -123,10 +128,16 @@ tools:
     # GenerativeFormRules.OPTION_SOURCE_IDS 里注册，模型却无从得知 ⇒ 只能靠 map 写死选项。
     # 改 description 会击穿 prompt 缓存（tools → system → messages 前缀），故 version 同步 +1。
     description: >-
-      在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，或在信息不足时向用户澄清）；
+      在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件、任务类型，或在信息不足时向用户澄清）；
       只用于真实信息缺口（缺失或歧义且需结构化补充），不用于已知信息、预填确认或取消后自动重问。
       表单用途必须显式给出 purpose=SELECT_DEFINITIONS（收集配置项选择）/ SET_CONDITIONS（收集筛选条件）/
-      GENERAL_CLARIFY（通用澄清，缺省）；宿主只按 purpose 判断用途，禁止靠标题猜。
+      TASK_TYPE（收集任务类型 EXPORT/IMPORT）/ GENERAL_CLARIFY（通用澄清，缺省）；宿主只按 purpose 判断用途，
+      禁止靠标题猜。
+      TASK_TYPE 只在任务类型未知时用：表单只有一个 enum 字段做单选项，选项正好 EXPORT/IMPORT，不附其它字段；
+      类型已确定（任务槽位有「已确定任务类型」或用户已说明导出/导入）时会被零副作用拒绝并指回 create_task。
+      SET_CONDITIONS 只在 QUERY_COND 收集：表单只有一个非必填自由文本框（type=text，可加 variant=longText），
+      把用户文本解析成 set_condition 的结构化条件（fields[].fieldCode/operator/value）；留空即不设筛选，
+      直接 confirm_step 全量推进；条件已明确或当前步骤已在 EXPORT 及之后会被零副作用拒绝，不再重复收集。
       系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
       请直接调用对应工具；未知配置或歧义时表单仍可用。
       字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。

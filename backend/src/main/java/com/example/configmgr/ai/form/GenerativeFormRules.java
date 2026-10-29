@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
- * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件）</td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，显式给出时固定为<b>单个非必填 text 框</b>，可带 {@code variant=longText}）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件），<b>形状约束只对显式 purpose 生效</b></td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>
@@ -112,11 +112,21 @@ public final class GenerativeFormRules {
 
 	public static final String PURPOSE_SET_CONDITIONS = "SET_CONDITIONS";
 
+	/**
+	 * 收集<b>任务类型</b>的用途（2026-10-29 闭环批）：只在类型未知时下发，
+	 * 形状固定为"单个 enum 单选 {@code EXPORT/IMPORT}"（见 {@link #taskTypeShapeIssues}）——
+	 * 用自由文本问类型等于把结构化缺口退回文字反问。
+	 */
+	public static final String PURPOSE_TASK_TYPE = "TASK_TYPE";
+
 	/** 缺省用途：兼容既有 {@code generative_form} 调用（它们没有 purpose 字段）。 */
 	public static final String DEFAULT_PURPOSE = "GENERAL_CLARIFY";
 
 	public static final List<String> FORM_PURPOSES = List.of(PURPOSE_SELECT_DEFINITIONS, PURPOSE_SET_CONDITIONS,
-			DEFAULT_PURPOSE);
+			PURPOSE_TASK_TYPE, DEFAULT_PURPOSE);
+
+	/** 任务类型表单的选项闭集（与 {@code Task.TaskType} 同名）。 */
+	public static final List<String> TASK_TYPES = List.of("EXPORT", "IMPORT");
 
 	public static final Set<String> FORM_ATTRIBUTES = Set.of("scenario", "purpose", "title", "fields");
 
@@ -289,6 +299,7 @@ public final class GenerativeFormRules {
 					"purpose 只能取 " + String.join("/", FORM_PURPOSES) + " 之一（缺省 = "
 							+ DEFAULT_PURPOSE + "）；实际：" + (purpose.isTextual() ? purpose.asText() : purpose)));
 		}
+		issues.addAll(purposeShapeIssues(form));
 		JsonNode title = form.get("title");
 		if (title != null) {
 			if (!title.isTextual()) {
@@ -380,6 +391,89 @@ public final class GenerativeFormRules {
 			issues.addAll(valueIssues(key, field, value, required, values));
 		}
 		return issues;
+	}
+
+	// ── purpose 专属的表单形状（2026-10-29 闭环批） ─────────────────────────
+
+	/**
+	 * 显式 {@code purpose} 决定的表单形状：<b>只对显式给出的 purpose</b>生效
+	 * （缺省 purpose 仍按结构推断，既有 {@code scenario=FILTER} 老表单不受新形状约束）。
+	 *
+	 * <ul>
+	 * <li>{@code TASK_TYPE}：恰好 1 个 {@code enum} 字段，选项正好 {@code EXPORT/IMPORT}；</li>
+	 * <li>{@code SET_CONDITIONS}：恰好 1 个非必填 {@code text} 字段（可带 {@code variant=longText}）。</li>
+	 * </ul>
+	 *
+	 * <p>形状不合规 = <b>schema 级拒绝</b>（零副作用：表单不下发、不挂起），模型改一版即可用。
+	 */
+	private static List<FormIssue> purposeShapeIssues(JsonNode form) {
+		String purpose = textOrNull(form.get("purpose"));
+		JsonNode fields = form.get("fields");
+		if (purpose == null || fields == null || !fields.isArray() || fields.isEmpty()) {
+			// 缺 fields / 空 fields 由既有规则报，这里不重复
+			return List.of();
+		}
+		if (PURPOSE_TASK_TYPE.equals(purpose)) {
+			return taskTypeShapeIssues(fields);
+		}
+		if (PURPOSE_SET_CONDITIONS.equals(purpose)) {
+			return conditionShapeIssues(fields);
+		}
+		return List.of();
+	}
+
+	private static List<FormIssue> taskTypeShapeIssues(JsonNode fields) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (fields.size() != 1) {
+			issues.add(FormIssue.form(FormIssueCodes.FORM_FIELDS_TOO_MANY,
+					"purpose=TASK_TYPE 的表单只允许 1 个字段（任务类型的单个单选），实际 " + fields.size() + " 个"));
+			return issues;
+		}
+		JsonNode field = fields.get(0);
+		String at = fieldKeyOrIndex(field, 0);
+		String type = textOrNull(field.get("type"));
+		if (!"enum".equals(type)) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_TYPE_UNSUPPORTED,
+					"purpose=TASK_TYPE 的字段类型必须是 enum（单个单选；自由文本等于文字反问，多选会得到多个类型），实际 type="
+							+ type));
+			return issues;
+		}
+		List<String> options = optionValues(field);
+		if (options.size() != TASK_TYPES.size() || !options.containsAll(TASK_TYPES)) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_ATTRIBUTE_INVALID,
+					"purpose=TASK_TYPE 的选项必须正好是 " + String.join("/", TASK_TYPES) + "（实际："
+							+ (options.isEmpty() ? "无" : String.join("/", options)) + "）"));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> conditionShapeIssues(JsonNode fields) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (fields.size() != 1) {
+			issues.add(FormIssue.form(FormIssueCodes.FORM_FIELDS_TOO_MANY,
+					"purpose=SET_CONDITIONS 的表单只允许 1 个自由文本框（条件由模型从这段文本解析），实际 " + fields.size()
+							+ " 个"));
+			return issues;
+		}
+		JsonNode field = fields.get(0);
+		String at = fieldKeyOrIndex(field, 0);
+		String type = textOrNull(field.get("type"));
+		if (!"text".equals(type)) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_TYPE_UNSUPPORTED,
+					"purpose=SET_CONDITIONS 的字段类型必须是 text（自由文本，可带 variant=longText），实际 type=" + type));
+		}
+		JsonNode required = field.get("required");
+		if (required != null && required.isBoolean() && required.asBoolean()) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_REQUIRED_INVALID,
+					"条件收集框必须非必填：留空 = 不设筛选（直接 confirm_step 全量推进），写成 required=true 会把留空卡死"));
+		}
+		return issues;
+	}
+
+	/** 问题归属：有 key 用 key，否则用 {@code fields[i]}（与字段级校验同一口径）。 */
+	private static String fieldKeyOrIndex(JsonNode field, int index) {
+		String key = textOrNull(field.get("key"));
+		return key == null || key.isBlank() ? "fields[" + index + "]" : key;
 	}
 
 	// ── 字段级校验 ────────────────────────────────────────────────────────────

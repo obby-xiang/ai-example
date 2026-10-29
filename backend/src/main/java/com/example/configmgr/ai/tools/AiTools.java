@@ -632,8 +632,13 @@ public class AiTools {
      * </ul>
      *
      * <p>2026-10-28（任务槽位批）：表单还要显式给 {@code purpose}
-     * （{@code SELECT_DEFINITIONS} / {@code SET_CONDITIONS} / {@code GENERAL_CLARIFY}，缺省后者），
+     * （{@code SELECT_DEFINITIONS} / {@code SET_CONDITIONS} / {@code TASK_TYPE} /
+     * {@code GENERAL_CLARIFY}，缺省后者），
      * 宿主按 purpose + 任务槽位判断"这张表还有没有真实缺口"，不按标题猜用途。
+     *
+     * <p>2026-10-29（闭环批）：{@code TASK_TYPE} 固定为单个 enum 单选 {@code EXPORT/IMPORT}（类型未知才用，
+     * 已确定时零副作用拒绝并指回 {@code create_task}）；{@code SET_CONDITIONS} 固定为单个非必填自由文本框
+     * （{@code QUERY_COND} 收集，留空=不设筛选，{@code EXPORT} 及之后拒绝）。
      *
      * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
      * 两个场景的现场都在"任务驱动"这条链路上：
@@ -656,7 +661,8 @@ public class AiTools {
      * <li><b>槽位放行</b>（下发前，2026-10-28）：{@code purpose=SELECT_DEFINITIONS} 且配置项已确定、
      * 或 {@code purpose=SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ {@code FORM_SLOTS_ALREADY_KNOWN}
      * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_condition；缺槽位、
-     * 歧义与 {@code GENERAL_CLARIFY} 放行；</li>
+     * 歧义与 {@code GENERAL_CLARIFY} 放行（2026-10-29 追加：{@code TASK_TYPE} 且任务类型已确定、
+     * {@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}/之后，同样零副作用拒绝）；</li>
      * <li><b>回灌类型复核</b>（回灌时）：值必须与 schema 的类型逐字段相符（number 是数、date 是
      * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
      * 不符即 400 {@code FORM_RESULT_REJECTED} 且<b>挂起保持未决</b>（可修正后重试）；</li>
@@ -675,11 +681,16 @@ public class AiTools {
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/
      * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
      */
-    @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件，"
-            + "或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
+    @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件、"
+            + "任务类型，或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
             + "不用于已知信息、预填确认或取消后自动重问；表单用途必须显式给出 purpose="
-            + "SELECT_DEFINITIONS（收集配置项选择）/SET_CONDITIONS（收集筛选条件）/GENERAL_CLARIFY（通用澄清，缺省）；"
-            + "宿主只按 purpose 判断用途，禁止靠标题猜。系统工作区状态里的「任务槽位」是已知值："
+            + "SELECT_DEFINITIONS（收集配置项选择）/SET_CONDITIONS（收集筛选条件）/TASK_TYPE（收集任务类型 EXPORT/IMPORT）"
+            + "/GENERAL_CLARIFY（通用澄清，缺省）；"
+            + "宿主只按 purpose 判断用途，禁止靠标题猜。TASK_TYPE 只在任务类型未知时用，形状固定为单个 enum 单选"
+            + "（选项正好 EXPORT/IMPORT，不附其它字段）；类型已确定时会被零副作用拒绝并指回 create_task。"
+            + "SET_CONDITIONS 只在 QUERY_COND 收集，形状固定为一个非必填自由文本框（type=text，可加 variant=longText）："
+            + "把用户文本解析成 set_condition 的结构化条件；留空即不设筛选（直接 confirm_step 全量推进）；"
+            + "条件已明确或已到 EXPORT 及之后会被零副作用拒绝，不再重复收集。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
@@ -705,15 +716,17 @@ public class AiTools {
      * 恰恰要求看得见它们。两者的属性名由用例对账锁定（防止改了 record 却忘了白名单）。
      *
      * @param scenario 场景：{@code FILTER}（收集筛选/查询条件）/ {@code CLARIFY}（信息不足时澄清）
-     * @param purpose  用途：{@code SELECT_DEFINITIONS}/{@code SET_CONDITIONS}/{@code GENERAL_CLARIFY}
+     * @param purpose  用途：{@code SELECT_DEFINITIONS}/{@code SET_CONDITIONS}/{@code TASK_TYPE}/{@code GENERAL_CLARIFY}
      *                 （可选，缺省 {@code GENERAL_CLARIFY}；宿主按它判断槽位是否已齐）
      * @param title    表单标题（可选）
      * @param fields   字段列表（1..20）
      */
     public record FormSpec(
             @ToolParam(description = "场景：FILTER（收集筛选/查询条件）或 CLARIFY（信息不足时向用户澄清）") String scenario,
-            @ToolParam(description = "用途（选择/条件表单必须显式给）：SELECT_DEFINITIONS（收集配置项选择）/ "
-                    + "SET_CONDITIONS（收集筛选条件）/ GENERAL_CLARIFY（通用澄清，缺省）。宿主按用途判断槽位是否已齐，"
+            @ToolParam(description = "用途（选择/条件/类型表单必须显式给）：SELECT_DEFINITIONS（收集配置项选择）/ "
+                    + "SET_CONDITIONS（收集筛选条件：只在 QUERY_COND，单个非必填自由文本框，留空=不设筛选）/ "
+                    + "TASK_TYPE（收集任务类型：只在类型未知时，单个 enum 单选 EXPORT/IMPORT）/ "
+                    + "GENERAL_CLARIFY（通用澄清，缺省）。宿主按用途判断槽位是否已齐，"
                     + "禁止靠标题猜用途", required = false) String purpose,
             @ToolParam(description = "表单标题（可选，≤100 字符）", required = false) String title,
             @ToolParam(description = "字段列表（1..20 个）") List<FormField> fields) {
