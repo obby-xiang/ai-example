@@ -1759,6 +1759,11 @@ public class ResumeService {
 	 * <p>写回之后<b>重新读快照</b>：下一跳用的必须是外置真值（与 {@code RunSnapshot#getContext()} 同一份），
 	 * 而不是本方法内存里那份推算结果 —— 写门拒写时两者会分叉，此处如实反映"存下去的"。
 	 *
+	 * <p><b>写回/重读失败的 fail-safe</b>：两步都单独捕获 {@code RuntimeException}（并且重读为空也算失败）：
+	 * 只 WARN、把 {@code snapshot} 的内存上下文<b>显式回滚到 before</b>、返回 {@code before}。理由是
+	 * 未经核实的写不得扩披露面（宁可下一跳不刷新），而 {@code setContext} 已经动过内存，不回滚就会
+	 * 出现"内存是新值、Redis 是旧值"的分叉（后续状态写还会顺手把新值写进去）。
+	 *
 	 * @param settled 本批已结算条目（含已终态复用、被跳过、被拒绝的；非刷新工具由判据自动忽略）
 	 * @return 下一跳应使用的上下文；无变化时返回旧值（同一份事实、不写库）
 	 */
@@ -1796,10 +1801,40 @@ public class ResumeService {
 		if (current.equals(before)) {
 			return before;
 		}
-		snapshot.setContext(current.toMap());
-		this.store.save(snapshot);
-		RunSnapshot fresh = this.store.get(runId);
-		AiContext reread = fresh == null ? current : AiContext.fromMap(fresh.getContext());
+		// ===== 写回 + 重读：任一步失败都只 WARN，并用<b>批首</b>上下文交棒 =====
+		// fail-safe：<b>未经核实的写不得扩披露面</b>。刷新只是"让下一跳更准"的增强，若它能让续跑
+		// 崩掉（Redis 抖一下整轮就死），或用一份没落成的上下文去披露新工具，都比"这一步没刷新"更糟。
+		// snapshot 与落库是<b>同一份内存对象</b>：setContext 会先改内存，写失败后若不显式回滚，
+		// 内存与持久态就各说一套（后续状态写还会把这份没落成的上下文顺手写进去）。
+		Map<String, Object> beforeMap = before.toMap();
+		try {
+			snapshot.setContext(current.toMap());
+			this.store.save(snapshot);
+		}
+		catch (RuntimeException ex) {
+			snapshot.setContext(beforeMap);
+			log.warn("续跑批刷新运行上下文写回失败，保留旧上下文（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			return before;
+		}
+		RunSnapshot fresh;
+		try {
+			fresh = this.store.get(runId);
+		}
+		catch (RuntimeException ex) {
+			// 写可能成了、也可能没有（例如写门静默拒写）：读不到真值就不认这笔刷新
+			snapshot.setContext(beforeMap);
+			log.warn("续跑批刷新运行上下文重读失败，按批首上下文交棒（不阻断续跑）runId={}：{}", runId,
+					ex.getMessage());
+			return before;
+		}
+		if (fresh == null) {
+			snapshot.setContext(beforeMap);
+			log.warn("续跑批刷新运行上下文重读为空，按批首上下文交棒（不阻断续跑）runId={}", runId);
+			return before;
+		}
+		AiContext reread = AiContext.fromMap(fresh.getContext());
+		// 以重读真值为准回写内存：写门静默拒写时它等于 before（不扩披露面），内存也随之与持久态一致。
+		snapshot.setContext(reread.toMap());
 		log.info("续跑批结算后已刷新运行上下文 runId={} page={} taskId={} taskType={} step={} status={}", runId,
 				reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
 		return reread;

@@ -83,7 +83,7 @@ class ResumeContextRefreshTest {
 
 	private static final String CALL_STEP = "call-step";
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private InMemoryRunStore store = new InMemoryRunStore();
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -154,6 +154,14 @@ class ResumeContextRefreshTest {
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 		// 可选注入：与生产装配同一个刷新器（轻装配面不注入 = 不刷新，既有用例语义不变）
+		this.service.setContextRefresher(new RunContextRefresher(this.taskService));
+	}
+
+	/** 换一份存储替身（故障注入用例用同一套装配重建 ResumeService）。 */
+	private void useStore(InMemoryRunStore replacement) {
+		this.store = replacement;
+		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
+				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 		this.service.setContextRefresher(new RunContextRefresher(this.taskService));
 	}
 
@@ -272,6 +280,41 @@ class ResumeContextRefreshTest {
 		assertThat(systemText).as("旧页面的工作区段不得残留").doesNotContain("页面：任务中心");
 	}
 
+	// ── D：刷新写回/重读故障只 WARN，不打断续跑（fail-safe 保持批首上下文）────
+
+	/**
+	 * 刷新把新上下文写回快照（`setContext → save → get`）时，Redis 抛错<b>不得</b>穿出续跑：
+	 * 刷新是"让下一跳更准"的增强，不是这一轮的判定面。两条口径同时钉住：
+	 * <ol>
+	 * <li><b>不打断</b>：`resume()` 仍返回 ACCEPTED，后续交棒照常发生（工具轮不因观测面失败而丢）；</li>
+	 * <li><b>不扩披露面、不分叉</b>：未经核实的写一律按<b>批首</b>上下文交棒，且内存快照被显式恢复 ——
+	 * 否则 `setContext` 已经把内存改了、写库又失败，落库真值与内存/下一跳会各说一套。</li>
+	 * </ol>
+	 * 两段分别覆盖"写抛错"与"写成功但重读抛错"（后者同样未获核实）。
+	 */
+	@Test
+	void refreshWriteOrRereadFailureOnlyWarnsAndKeepsTheBatchBoundaryContext() {
+		FlakyRunStore flaky = new FlakyRunStore();
+		useStore(flaky);
+		this.taskState.set(task(42L, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedSuspendedRun(List.of(navigateEntry()));
+		settleApprovedEntries();
+
+		// ① 写回抛错：续跑必须照常收口，交棒与内存快照都停在批首上下文
+		flaky.failSaveOnRefreshedContext = true;
+		assertThat(this.service.resume(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertBatchBoundaryContext(contextOfDriveResumed());
+		assertBatchBoundaryContext(AiContext.fromMap(this.store.get(RUN_ID).getContext()));
+
+		// ② 写回成功但重读抛错：同样只 WARN（写结果未核实 ⇒ 不据此扩披露面）
+		repark(AiContext.of("tasks", null, null, null, null).toMap(), navigateEntry());
+		flaky.failSaveOnRefreshedContext = false;
+		flaky.failRereadAfterRefresh = true;
+		assertThat(this.service.resume(RUN_ID).outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertBatchBoundaryContext(contextOfDriveResumed());
+		assertBatchBoundaryContext(AiContext.fromMap(this.store.get(RUN_ID).getContext()));
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n页面：任务中心\n"
@@ -302,14 +345,18 @@ class ResumeContextRefreshTest {
 
 	/** 把快照重新置成"又 park 了一次"（快照历史已由上一轮续跑落定）。 */
 	private void repark(Map<String, Object> context) {
+		repark(context, entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
+				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(), "前端已执行：confirm_step"));
+	}
+
+	/** 同上，但由调用方指定"这一次挂起的是哪张卡"（故障注入用例要一张真能推进上下文的卡）。 */
+	private void repark(Map<String, Object> context, PendingToolCall pending) {
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(context);
 		List<PendingToolCall> inFlight = new ArrayList<>();
-		PendingToolCall step = entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
-				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(), "前端已执行：confirm_step");
-		this.store.putPending(RUN_ID, step);
-		inFlight.add(step);
+		this.store.putPending(RUN_ID, pending);
+		inFlight.add(pending);
 		snapshot.setInFlightToolCalls(inFlight);
 		this.store.save(snapshot);
 	}
@@ -323,6 +370,55 @@ class ResumeContextRefreshTest {
 		this.store.save(snapshot);
 		for (PendingToolCall pending : inFlight) {
 			this.store.putPending(RUN_ID, pending);
+		}
+	}
+
+	private static PendingToolCall navigateEntry() {
+		return entry(CALL_NAVIGATE, "navigate_to", "{\"page\":\"export\",\"taskId\":42}",
+				PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire(),
+				"前端已执行：navigate_to");
+	}
+
+	/** 批首（任务中心、无任务）上下文的断言：刷新未经核实 ⇒ 任务/步骤一律不得"提前生效"。 */
+	private static void assertBatchBoundaryContext(AiContext context) {
+		assertThat(context.getPage()).isEqualTo("tasks");
+		assertThat(context.getTaskId()).as("未核实的刷新不得扩披露面（taskId 保持批首值）").isNull();
+		assertThat(context.getStep()).isNull();
+	}
+
+	/**
+	 * 故障注入存储：<b>只</b>让"刷新后的那次写/读"抛错 —— 其它读写（状态机、挂起、认领）照常，
+	 * 否则用例会把"整条续跑崩了"误当成"刷新失败"，断言就失去意义。
+	 */
+	static class FlakyRunStore extends InMemoryRunStore {
+
+		/** 当待写快照的上下文已经带 taskId（= 刷新结果）时抛错。 */
+		volatile boolean failSaveOnRefreshedContext;
+
+		/** 刷新写回成功之后的<b>第一笔</b> get（= 刷新后的重读）抛错。 */
+		volatile boolean failRereadAfterRefresh;
+
+		private volatile boolean refreshedWritten;
+
+		@Override
+		public void save(RunSnapshot snapshot) {
+			boolean refreshed = snapshot.getContext() != null && snapshot.getContext().get("taskId") != null;
+			if (this.failSaveOnRefreshedContext && refreshed) {
+				throw new IllegalStateException("redis down (snapshot write)");
+			}
+			super.save(snapshot);
+			if (refreshed) {
+				this.refreshedWritten = true;
+			}
+		}
+
+		@Override
+		public RunSnapshot get(String runId) {
+			if (this.failRereadAfterRefresh && this.refreshedWritten) {
+				this.refreshedWritten = false;
+				throw new IllegalStateException("redis down (snapshot read)");
+			}
+			return super.get(runId);
 		}
 	}
 
