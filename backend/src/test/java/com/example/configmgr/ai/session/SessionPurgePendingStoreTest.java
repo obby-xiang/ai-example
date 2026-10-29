@@ -78,7 +78,7 @@ class SessionPurgePendingStoreTest {
 	void queueWriteFailureKeepsPendingAndGuardArmed() {
 		org.springframework.data.redis.core.ListOperations<String, String> listOps = this.fake.redis.opsForList();
 		org.mockito.Mockito.doThrow(new IllegalStateException("队列不可用"))
-			.when(listOps).remove(SessionPurgePendingStore.QUEUE_KEY, 0, "s-1");
+			.when(listOps).remove(SessionPurgePendingStore.QUEUE_KEY, 0, this.store.pendingKey("s-1"));
 
 		org.assertj.core.api.Assertions.assertThatThrownBy(
 			() -> this.store.register("s-1", "purge-1", "tester", 1_000L))
@@ -93,7 +93,8 @@ class SessionPurgePendingStoreTest {
 		this.store.register("s-2", "purge-2", "tester", 1_000L);
 		assertThat(this.store.recordFailure("s-1", "purge-1", "boom")).isTrue();
 		this.store.register("s-3", "purge-3", "tester", 1_000L);
-		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).containsExactly("s-2", "s-1", "s-3");
+		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).containsExactly(
+				this.store.pendingKey("s-2"), this.store.pendingKey("s-1"), this.store.pendingKey("s-3"));
 
 		assertThat(this.store.defer("s-1", "purge-1", 900_000L)).isTrue();
 
@@ -102,7 +103,8 @@ class SessionPurgePendingStoreTest {
 		assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isEqualTo(900_000L);
 		assertThat(pending.lastError()).isEqualTo("boom");
 		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).as("耗尽项必须移到队尾，不占队头窗口")
-			.containsExactly("s-2", "s-3", "s-1");
+			.containsExactly(this.store.pendingKey("s-2"), this.store.pendingKey("s-3"),
+					this.store.pendingKey("s-1"));
 
 		assertThat(this.store.defer("s-1", "purge-old", 1L)).as("旧 purgeId 不得改新台账").isFalse();
 		assertThat(this.store.current("s-1").nextAtMs()).isEqualTo(900_000L);

@@ -8,6 +8,13 @@
  * `{run:<runId>}`，那是 **legacy 命名空间**：带身份的新路径永远不会读到它。
  * 不声明身份就得不到隔离（同 runId 的两个租户仍会落到同一个键上），这一点写入 dry-run 报告。
  *
+ * **ai:runs 索引（正向带身份必做）**：`ai:runs` SET 的成员是复合成员
+ * `tenantId/userId/runId`（与 `RunKeyScope.indexMember` 同一口径）。旧成员的裸 `runId`
+ * 没有归属，`allRunRecords()` 不会返回它（启动恢复因此发现不了迁移后的轮次）。所以正向带身份
+ * 迁移在数据键落位后，把本次 run 的成员重写为 `t/u/runId`（SREM 旧形 + SADD 新形，同一 MULTI）；
+ * 只动本次 run 的成员，不扫描租户列表、不碰其他身份的成员。rollback 声明身份时反向恢复为裸
+ * `runId`。未声明身份时（legacy 命名空间）索引成员保持裸 `runId`，不做重写。
+ *
  * 迁移 10 族（精确集合）：
  *   STRING  ai:run: / ai:seq:
  *   HASH    ai:pending: / ai:claim: / ai:idem: / ai:req: / ai:decided:
@@ -18,11 +25,12 @@
  * − beat/cancel + claim/lease:run。本工具再减去 fence/lease:run/per-run epoch，剩
  * 9 个 Registry 键 + claim = 10 族。`claim` 不在 Registry 13 键里，不能混写。
  *
- * 明确不搬：ai:fence:run: / ai:lease:run: / ai:lease:epoch:（含旧全局
- * ai:lease:epoch）、ai:runs、ai:session:current:、ai:session:runs:、ai:purge:guard:、
+ * 明确不搬（数据键）：ai:fence:run: / ai:lease:run: / ai:lease:epoch:（含旧全局
+ * ai:lease:epoch）、ai:runs 的 10 族数据、ai:session:current:、ai:session:runs:、ai:purge:guard:、
  * ai:purge:pending:、ai:purge:retry:queue、ai:purge:retry:lock、ai:beat:、ai:cancel:、ai:lock:、
  * ai:activity:、ai:resume:lock:（历史键）、ai:ctx:、ai:safety:、ai:cfg:ver、ai:rate:；
  * chat:mem legacy 由新仓储回退读 + saveAll 自然迁移，本工具不碰。
+ * `ai:runs` 键本身不参与 SCAN 发现/值复制；只有上面的成员重写。
  *
  * 安全口径：
  * - 默认 dry-run；--apply 才写，--rollback 反向（tagged → 旧裸键）。
@@ -61,6 +69,10 @@ export const NODES_ENV = 'AI_REDIS_CLUSTER_NODES';
 /** 迁移工具自己的串行锁（不属于产品键族）。 */
 export const MIGRATION_LOCK_KEY = 'ai:migrate:lock';
 
+/** 全局轮次索引（SET；成员 = `tenantId/userId/runId`，无身份过渡期是裸 `runId`）。 */
+export const RUN_INDEX_KEY = 'ai:runs';
+
+/** 迁移工具自己的串行锁 TTL。 */
 export const MIGRATION_LOCK_TTL_MS = 60_000;
 const MIGRATION_LOCK_RENEW_MS = 20_000;
 
@@ -84,6 +96,8 @@ export const EXCLUDED_KEY_PREFIXES = Object.freeze([
 	'ai:lease:run:',
 	'ai:lease:epoch:',
 	'ai:lease:epoch',
+	// 全局轮次索引：不是 10 族数据键（不按族 SCAN/复制）；带身份迁移时单独重写成员
+	// （SREM 裸 runId + SADD tenantId/userId/runId），见 planRunIndex/applyRunIndex。
 	'ai:runs',
 	'ai:session:current:',
 	'ai:session:runs:',
@@ -182,6 +196,14 @@ export function oldKeyFor(prefix, runId) {
 export function taggedKeyFor(prefix, runId, identity = null) {
 	const segment = identity ? `${identity.tenantId}:${identity.userId}:` : '';
 	return `${prefix}{${segment}run:${runId}}`;
+}
+
+/**
+ * `ai:runs` 复合成员：带身份 = `<tenantId>/<userId>/<runId>`，无身份 = 旧形裸 `runId`。
+ * 与 `RunKeyScope.indexMember` / `parseIndexMember` 同一口径（allRunRecords 的唯一发现面）。
+ */
+export function indexMemberFor(runId, identity = null) {
+	return identity ? `${identity.tenantId}/${identity.userId}/${runId}` : runId;
 }
 
 /** 从 tagged 键读身份段；legacy tagged 形（`{run:<id>}`）返回 null（无归属）。 */
@@ -307,9 +329,10 @@ export async function discoverRunIds(client, options = {}) {
 				return;
 			}
 			if (rollback && identity) {
-				// 声明了身份就只回滚那一个身份的轮次（别的身份的键不归本次操作）
+				// 声明了身份：只回滚"该身份"的键；但 legacy tagged 形没有身份，是明确的双形回退目标
+				// （先试带身份、缺失再回退 legacy），所以 owner=null 的成员仍然放行。
 				const owner = parseTaggedIdentity(key, family.prefix);
-				if (!owner || owner.tenantId !== identity.tenantId || owner.userId !== identity.userId) {
+				if (owner && (owner.tenantId !== identity.tenantId || owner.userId !== identity.userId)) {
 					return;
 				}
 			}
@@ -544,22 +567,79 @@ export async function buildPlan(client, options = {}) {
 	};
 }
 
+/**
+ * rollback 的源键：先试带身份 tag，缺失再回退 legacy tag（双形回退）。
+ * 两个都不存在时返回首选键（带身份优先），让计划显示 source-missing。
+ */
+async function rollbackSourceKeyFor(client, prefix, runId, identity) {
+	if (identity) {
+		const identityKey = taggedKeyFor(prefix, runId, identity);
+		if ((await client.type(identityKey)) !== 'none') {
+			return identityKey;
+		}
+	}
+	const legacyKey = taggedKeyFor(prefix, runId, null);
+	if ((await client.type(legacyKey)) !== 'none') {
+		return legacyKey;
+	}
+	return taggedKeyFor(prefix, runId, identity);
+}
+
+/**
+ * ai:runs 成员计划（不是 10 族数据键）。
+ *
+ * - forward + identity：本次 run 的成员由裸 `runId` 重写为 `tenantId/userId/runId`；索引里没有时补一条。
+ * - rollback + identity：反向恢复为裸 `runId`；没有成员时不凭空造 legacy 索引。
+ * - 无身份：返回 null —— legacy 命名空间保持原样，不猜身份、不扫租户列表。
+ */
+async function planRunIndex(client, runId, rollback, identity) {
+	if (!identity) {
+		return null;
+	}
+	const sourceMember = rollback ? indexMemberFor(runId, identity) : runId;
+	const targetMember = rollback ? runId : indexMemberFor(runId, identity);
+	const indexType = await client.type(RUN_INDEX_KEY);
+	if (indexType === 'none') {
+		return rollback
+			? { action: 'absent', reason: 'index-missing', sourceMember, targetMember }
+			: { action: 'add', reason: 'index-key-missing', sourceMember: null, targetMember };
+	}
+	if (indexType !== 'set') {
+		return {
+			action: 'conflict',
+			reason: `ai:runs type is ${indexType}, expected set`,
+			sourceMember,
+			targetMember,
+		};
+	}
+	const members = new Set((await client.smembers(RUN_INDEX_KEY)) ?? []);
+	const sourceExists = members.has(sourceMember);
+	const targetExists = members.has(targetMember);
+	if (sourceExists && targetExists) {
+		return { action: 'dedupe', reason: 'both members present; drop source form', sourceMember, targetMember };
+	}
+	if (sourceExists) {
+		return { action: 'rewrite', reason: null, sourceMember, targetMember };
+	}
+	if (targetExists) {
+		return { action: 'identical', reason: 'index member already in target form', sourceMember, targetMember };
+	}
+	return rollback
+		? { action: 'absent', reason: 'index-member-missing', sourceMember, targetMember }
+		: { action: 'add', reason: 'index-member-missing', sourceMember: null, targetMember };
+}
+
 async function planRun(client, runId, rollback, identity = null) {
 	const run = newRunPlan(runId, rollback);
-	const keyOf = (family) => (rollback
-		? {
-			// 反向：源可以是带身份的新键形，也可以是 legacy tagged 形（先试带身份的）
-			source: taggedKeyFor(family.prefix, runId, identity),
-			target: oldKeyFor(family.prefix, runId),
-		}
-		: {
-			source: oldKeyFor(family.prefix, runId),
-			target: taggedKeyFor(family.prefix, runId, identity),
-		});
-
 	const states = new Map();
 	for (const family of MIGRATION_FAMILIES) {
-		const { source, target } = keyOf(family);
+		// 反向：源逐族先试带身份的新键形，缺失再回退 legacy tagged 形（双形回退）。
+		const source = rollback
+			? await rollbackSourceKeyFor(client, family.prefix, runId, identity)
+			: oldKeyFor(family.prefix, runId);
+		const target = rollback
+			? oldKeyFor(family.prefix, runId)
+			: taggedKeyFor(family.prefix, runId, identity);
 		const state = await inspectKey(client, source, family.type);
 		states.set(family.name, state);
 		const item = {
@@ -586,9 +666,20 @@ async function planRun(client, runId, rollback, identity = null) {
 		run.items.push(item);
 	}
 
+	if (run.status === 'conflict') {
+		return run;
+	}
+
+	const targetRunKey = rollback
+		? oldKeyFor('ai:run:', runId)
+		: taggedKeyFor('ai:run:', runId, identity);
+	const targetRunExists = (await client.type(targetRunKey)) !== 'none';
+	const sourceRun = states.get('run');
+	const runWillExist = targetRunExists || (sourceRun.exists && run.status === 'ready');
+
 	const seq = states.get('seq');
 	const xevents = states.get('xevents');
-	if (!seq.exists || !xevents.exists) {
+	if (run.sourceKeys > 0 && (!seq.exists || !xevents.exists)) {
 		const missing = [];
 		if (!seq.exists) {
 			missing.push('seq');
@@ -604,12 +695,6 @@ async function planRun(client, runId, rollback, identity = null) {
 				item.reason = run.reason;
 			}
 		}
-		return run;
-	}
-
-	if (run.sourceKeys === 0) {
-		run.status = 'skipped';
-		run.reason = '没有源键（已迁移或已过期）';
 		return run;
 	}
 
@@ -645,6 +730,38 @@ async function planRun(client, runId, rollback, identity = null) {
 			item.reason = `target exists but differs: ${check.reason}`;
 			run.status = 'conflict';
 			run.reason = run.reason ?? item.reason;
+		}
+	}
+	if (run.status === 'conflict') {
+		return run;
+	}
+
+	if (run.sourceKeys === 0 && !runWillExist) {
+		run.status = 'skipped';
+		run.reason = '没有源键（已迁移或已过期）';
+		return run;
+	}
+
+	const index = runWillExist ? await planRunIndex(client, runId, rollback, identity) : null;
+	if (index) {
+		run.runIndex = index;
+		if (index.action === 'conflict') {
+			run.status = 'conflict';
+			run.reason = run.reason ?? index.reason;
+			return run;
+		}
+	}
+
+	if (run.sourceKeys === 0) {
+		const indexOnly = index
+			&& (index.action === 'rewrite' || index.action === 'dedupe' || index.action === 'add');
+		if (indexOnly) {
+			// 数据键已迁完，只剩索引成员要修：仍算 ready，applyRun 不写数据、只重写 ai:runs。
+			run.status = 'ready';
+			run.reason = 'index-only';
+		} else {
+			run.status = 'skipped';
+			run.reason = '没有源键（已迁移或已过期）';
 		}
 	}
 	return run;
@@ -925,6 +1042,36 @@ async function copyItem(client, item, lock) {
 }
 
 /**
+ * 应用 ai:runs 成员重写。SREM 旧成员 + SADD 新成员放在同一 MULTI：
+ * `ai:runs` 是单键，跨成员更新不会 CROSSSLOT；中途失败整批回滚，不会留下两种形态并存。
+ */
+async function applyRunIndex(client, run, lock) {
+	const index = run.runIndex;
+	if (!index) {
+		return { writes: 0, action: null };
+	}
+	if (index.action === 'identical' || index.action === 'absent') {
+		return { writes: 0, action: index.action };
+	}
+	assertLock(lock);
+	const tx = client.multi();
+	if (index.sourceMember) {
+		tx.srem(RUN_INDEX_KEY, index.sourceMember);
+	}
+	tx.sadd(RUN_INDEX_KEY, index.targetMember);
+	const replies = await tx.exec();
+	if (!replies) {
+		throw new MigrationError('MULTI/EXEC 被中止（ai:runs 成员未重写）');
+	}
+	for (const entry of replies) {
+		if (entry && entry[0]) {
+			throw entry[0];
+		}
+	}
+	return { writes: 1, action: index.action };
+}
+
+/**
  * 应用单个 run。锁只在 item 边界检查：当前 item 允许完成，下一个 item 不再开始。
  * 单 run 内的 chunk 级检查在 copy* / writeViaTemp 中完成。
  */
@@ -938,6 +1085,9 @@ export async function applyRun(client, run, lock = null) {
 		deleted: [],
 		// 数据键写入数（不含迁移锁与临时键；临时键只用于同槽原子认领）
 		writes: 0,
+		// ai:runs 成员重写另计：它不是 10 族数据键，但也是真实写
+		indexWrites: 0,
+		index: run.runIndex ?? null,
 	};
 	if (run.status !== 'ready') {
 		result.items = run.items.map((item) => ({ ...item, writes: 0, verified: false }));
@@ -965,6 +1115,11 @@ export async function applyRun(client, run, lock = null) {
 		}
 		result.items.push(entry);
 	}
+
+	// 数据键全部落位后再改索引：失败/中途停止时不会出现“索引指向不存在的目标”。
+	const indexOutcome = await applyRunIndex(client, run, lock);
+	result.indexWrites = indexOutcome.writes;
+	result.index = indexOutcome.action ? { ...run.runIndex, applied: indexOutcome.action } : run.runIndex ?? null;
 	return result;
 }
 
@@ -1140,7 +1295,7 @@ async function runMigrationInner(client, options, lock) {
 	}
 
 	assertLock(lock);
-	const plan = await buildPlan(client, { rollback, runIds });
+	const plan = await buildPlan(client, { rollback, runIds, identity: options.identity });
 	assertLock(lock);
 	const base = {
 		ok: true,
@@ -1156,6 +1311,7 @@ async function runMigrationInner(client, options, lock) {
 			conflicts: plan.totals.conflicts,
 			plannedCopies: plan.totals.plannedCopies,
 			writes: 0,
+			indexWrites: 0,
 			deleted: 0,
 		},
 	};
@@ -1187,6 +1343,7 @@ async function runMigrationInner(client, options, lock) {
 	}
 	base.results = results;
 	base.totals.writes = results.reduce((n, r) => n + r.writes, 0);
+	base.totals.indexWrites = results.reduce((n, r) => n + (r.indexWrites ?? 0), 0);
 	base.totals.deleted = results.reduce((n, r) => n + r.deleted.length, 0);
 	return base;
 }
@@ -1237,6 +1394,17 @@ function itemLine(item) {
 		+ `${writes}${verify}${reason}`;
 }
 
+function indexLine(index) {
+	if (!index) {
+		return null;
+	}
+	const action = index.applied ? `${index.action}->${index.applied}` : index.action;
+	const source = index.sourceMember ?? '-';
+	const target = index.targetMember ?? '-';
+	const reason = index.reason ? ` reason=${index.reason}` : '';
+	return `  index     SET    ${RUN_INDEX_KEY} ${source} -> ${target} action=${action}${reason}`;
+}
+
 export function formatPlan(result) {
 	const lines = [
 		`mode=${result.mode} direction=${result.direction} nodes_from=${NODES_ENV}`,
@@ -1248,6 +1416,10 @@ export function formatPlan(result) {
 		);
 		for (const item of run.items) {
 			lines.push(itemLine(item));
+		}
+		const index = indexLine(run.runIndex);
+		if (index) {
+			lines.push(index);
 		}
 	}
 	const t = result.plan.totals;
@@ -1262,11 +1434,15 @@ export function formatApply(result) {
 	const lines = [];
 	for (const run of result.results) {
 		lines.push(
-			`run ${run.runId} status=${run.status} writes=${run.writes} deleted=${run.deleted.length}`
-			+ (run.reason ? ` reason=${run.reason}` : ''),
+			`run ${run.runId} status=${run.status} writes=${run.writes} index_writes=${run.indexWrites ?? 0}`
+			+ ` deleted=${run.deleted.length}` + (run.reason ? ` reason=${run.reason}` : ''),
 		);
 		for (const item of run.items) {
 			lines.push(itemLine(item));
+		}
+		const index = indexLine(run.index);
+		if (index) {
+			lines.push(index);
 		}
 		for (const key of run.deleted) {
 			lines.push(`  deleted-source ${key}`);
@@ -1275,7 +1451,7 @@ export function formatApply(result) {
 	const t = result.totals;
 	lines.push(
 		`apply totals runs=${t.runs} ready=${t.ready} skipped=${t.skipped} conflicts=${t.conflicts}`
-		+ ` writes=${t.writes} deleted=${t.deleted}`,
+		+ ` writes=${t.writes} index_writes=${t.indexWrites ?? 0} deleted=${t.deleted}`,
 	);
 	return lines.join('\n');
 }
@@ -1473,6 +1649,7 @@ export async function main(argv = process.argv.slice(2)) {
 					skipped: 0,
 					conflicts: 0,
 					writes: error.partialResults.reduce((n, r) => n + r.writes, 0),
+					indexWrites: error.partialResults.reduce((n, r) => n + (r.indexWrites ?? 0), 0),
 					deleted: error.partialResults.reduce((n, r) => n + r.deleted.length, 0),
 				},
 			}));

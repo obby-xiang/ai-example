@@ -54,7 +54,8 @@ class RedisClusterScanSupportTest {
 
 		assertThat(recovered).isEqualTo(2);
 		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY))
-			.contains("s-1", "s-2");
+			.contains(SessionPurgePendingStore.pendingKey("s-1", null, null),
+					SessionPurgePendingStore.pendingKey("s-2", null, null));
 		assertThat(this.fake.closedNodeCursors).as("每个 master 的 cursor 都要关闭").containsExactlyInAnyOrder(m1, m2);
 		assertThat(this.fake.clusterConnectionCloses).as("cluster 连接关闭一次").hasValue(1);
 		assertThat(this.fake.standaloneConnectionCloses).hasValue(0);
@@ -70,7 +71,9 @@ class RedisClusterScanSupportTest {
 		int recovered = this.pending.recoverOrphans(200);
 
 		assertThat(recovered).isEqualTo(2);
-		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).contains("s-1", "s-2");
+		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY))
+			.contains(SessionPurgePendingStore.pendingKey("s-1", null, null),
+					SessionPurgePendingStore.pendingKey("s-2", null, null));
 		assertThat(this.fake.standaloneConnectionCloses).as("standalone 连接关闭一次").hasValue(1);
 		assertThat(this.fake.standaloneCursorCloses).as("standalone cursor 关闭一次").isEqualTo(1);
 		assertThat(this.fake.clusterConnectionCloses).hasValue(0);

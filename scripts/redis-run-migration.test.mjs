@@ -101,6 +101,9 @@ function cloneEntry(entry) {
 			expiresAt: entry.expiresAt,
 		};
 	}
+	if (entry.type === 'set') {
+		return { type: 'set', value: new Set(entry.value), expiresAt: entry.expiresAt };
+	}
 	throw new Error(`unknown fake type ${entry.type}`);
 }
 
@@ -126,6 +129,14 @@ class FakeMulti {
 
 	xadd(...args) {
 		return this._queue('xadd', args);
+	}
+
+	sadd(...args) {
+		return this._queue('sadd', args);
+	}
+
+	srem(...args) {
+		return this._queue('srem', args);
 	}
 
 	pexpire(...args) {
@@ -399,6 +410,53 @@ class FakeRedis {
 	async xlen(key) {
 		const entry = this._entry(key);
 		return entry?.type === 'stream' ? entry.value.length : 0;
+	}
+
+	async sadd(key, ...members) {
+		let entry = this._entry(key);
+		if (!entry) {
+			entry = { type: 'set', value: new Set(), expiresAt: null };
+			this.store.set(key, entry);
+		}
+		if (entry.type !== 'set') {
+			throw new Error('WRONGTYPE');
+		}
+		let added = 0;
+		for (const member of members.map(String)) {
+			if (!entry.value.has(member)) {
+				entry.value.add(member);
+				added += 1;
+			}
+		}
+		return added;
+	}
+
+	async srem(key, ...members) {
+		const entry = this._entry(key);
+		if (!entry) {
+			return 0;
+		}
+		if (entry.type !== 'set') {
+			throw new Error('WRONGTYPE');
+		}
+		let removed = 0;
+		for (const member of members.map(String)) {
+			if (entry.value.delete(member)) {
+				removed += 1;
+			}
+		}
+		return removed;
+	}
+
+	async smembers(key) {
+		const entry = this._entry(key);
+		if (!entry) {
+			return [];
+		}
+		if (entry.type !== 'set') {
+			throw new Error('WRONGTYPE');
+		}
+		return [...entry.value].sort();
 	}
 
 	async del(key) {
@@ -1642,4 +1700,89 @@ test('键形：带身份的目标键 tag 同时含身份与 runId，legacy 形�
 		userId: 202,
 	});
 	assert.equal(parseTaggedIdentity('ai:run:{run:r1}', 'ai:run:'), null);
+});
+
+// ── ai:runs 索引：正向成员重写 / rollback 双形回退 ─────────────────────────
+
+const IDENTITY = Object.freeze({ tenantId: 2, userId: 202 });
+
+test('正向带身份迁移把 ai:runs 成员重写为 t/u/runId（allRunRecords 可发现）', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	await cluster.sadd('ai:runs', 'run-1', '9/909/run-other');
+
+	const result = await runMigration(cluster, { apply: true, identity: IDENTITY });
+
+	assert.equal(result.ok, true);
+	assert.deepEqual(
+		await cluster.smembers('ai:runs'),
+		['2/202/run-1', '9/909/run-other'],
+		'只重写本次迁移的成员，其他身份的成员原样保留',
+	);
+	assert.equal(
+		await cluster.get(taggedKeyFor('ai:run:', 'run-1', IDENTITY)),
+		await cluster.get(oldKeyFor('ai:run:', 'run-1')),
+	);
+	// allRunRecords 的发现口径：RunKeyScope.parseIndexMember 只认 <tenantId>/<userId>/<runId>；
+	// legacy 裸 runId 对启动恢复不可见。这里逐段校验成员可被该口径解析。
+	const [tenantId, userId, runId] = '2/202/run-1'.split('/');
+	assert.deepEqual([Number(tenantId), Number(userId), runId], [2, 202, 'run-1']);
+
+	const second = await runMigration(cluster, { apply: true, identity: IDENTITY });
+	assert.equal(second.ok, true);
+	assert.equal(second.totals.writes, 0);
+	assert.equal(second.plan.runs[0].runIndex.action, 'identical');
+});
+
+test('已迁移但索引陈旧：--run-id 带身份重跑只修 ai:runs，不重写数据键', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	await cluster.sadd('ai:runs', 'run-1');
+	await runMigration(cluster, { apply: true, deleteSource: true, identity: IDENTITY });
+
+	// 模拟“数据已迁完、索引仍是旧成员”（旧版本工具/手工回填留下的现场）。
+	await cluster.srem('ai:runs', '2/202/run-1');
+	await cluster.sadd('ai:runs', 'run-1');
+
+	const result = await runMigration(cluster, {
+		apply: true,
+		runIds: ['run-1'],
+		identity: IDENTITY,
+	});
+
+	assert.equal(result.ok, true);
+	assert.equal(result.plan.runs[0].status, 'ready', '仅有索引待修时也必须可 apply');
+	assert.equal(result.plan.runs[0].runIndex.action, 'rewrite');
+	assert.equal(result.totals.writes, 0, '数据键已迁移，不得重写');
+	assert.deepEqual(await cluster.smembers('ai:runs'), ['2/202/run-1']);
+});
+
+test('rollback 声明身份时回退到 legacy tagged 源（带身份/legacy 双形回退）', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	// 先做 legacy 形迁移并删源：现场只有 {run:run-1}，没有带身份的源键。
+	const forward = await runMigration(cluster, { apply: true, deleteSource: true });
+	assert.equal(forward.ok, true);
+
+	const rollback = await runMigration(cluster, { rollback: true, apply: true, identity: IDENTITY });
+
+	assert.equal(rollback.ok, true);
+	assert.equal(rollback.direction, 'rollback');
+	assert.ok(rollback.totals.writes > 0);
+	await assertRunCopied(cluster, 'run-1');
+	assert.notEqual(await cluster.type(oldKeyFor('ai:run:', 'run-1')), 'none');
+});
+
+test('rollback 带身份把 ai:runs 成员恢复为裸 runId', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	await cluster.sadd('ai:runs', 'run-1');
+	await runMigration(cluster, { apply: true, deleteSource: true, identity: IDENTITY });
+	assert.deepEqual(await cluster.smembers('ai:runs'), ['2/202/run-1']);
+
+	const rollback = await runMigration(cluster, { rollback: true, apply: true, identity: IDENTITY });
+
+	assert.equal(rollback.ok, true);
+	assert.equal(await cluster.type(oldKeyFor('ai:run:', 'run-1')), 'string');
+	assert.deepEqual(await cluster.smembers('ai:runs'), ['run-1']);
 });

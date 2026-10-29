@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.TenantKeyScope;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -61,7 +63,9 @@ import java.util.function.Function;
  * <li><b>裸前缀 + 身份段</b>（{@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
  * {@code ai:observed:}）：只进单键命令、不在 13 键里，无需同槽 —— 给它们加 tag 只牺牲分布，
  * 没有收益（{@code ai:activity} 的写是单键 Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。
- * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag。</li>
+ * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag；
+ * 本表登记同样用 {@code TenantKeyScope.scoped(prefix, runId)} 装配，与
+ * {@code RunStore#beatKey}/{@code activityKey} 逐字同键（无上下文 = legacy 旧键形）。</li>
  * </ul>
  * <p><b>禁止项</b>：单键脚本（RENEW/VERIFY/RELEASE/滑动窗口/COMPARE_DELETE）与
  * {@code ai:rate:*} / {@code kb:cache:*} / {@code ai:cfg:ver} / {@code ai:session:*} <b>一律不加 tag</b>
@@ -159,9 +163,12 @@ public final class SessionKeyRegistry {
 		keys.add(new RunKey(CancellationRegistry.CANCEL_PREFIX, CancellationRegistry::cancelKey, List.of(Renewal.READ),
 				"取消标志（带身份段；随会话共亡）"));
 		// 3) 随写续期（只登记）
-		keys.add(new RunKey(RunStore.BEAT_PREFIX, runId -> RunStore.BEAT_PREFIX + runId, List.of(Renewal.WRITE), "心跳活动戳"));
-		keys.add(new RunKey(RunStore.ACTIVITY_PREFIX, runId -> RunStore.ACTIVITY_PREFIX + runId,
-				List.of(Renewal.WRITE), "业务活动锚点（非心跳；僵尸判据）"));
+		keys.add(new RunKey(RunStore.BEAT_PREFIX,
+				runId -> TenantKeyScope.scoped(RunStore.BEAT_PREFIX, runId), List.of(Renewal.WRITE),
+				"心跳活动戳（裸前缀 + 身份段，与 RunStore#beatKey 同键）"));
+		keys.add(new RunKey(RunStore.ACTIVITY_PREFIX,
+				runId -> TenantKeyScope.scoped(RunStore.ACTIVITY_PREFIX, runId), List.of(Renewal.WRITE),
+				"业务活动锚点（非心跳；裸前缀 + 身份段，与 RunStore#activityKey 同键）"));
 		keys.add(new RunKey(RunStore.LEDGER_PREFIX, runId -> RunStore.runScopedKey(RunStore.LEDGER_PREFIX, runId),
 				List.of(Renewal.WRITE), "工具执行台账（与幂等索引同槽）"));
 		keys.add(new RunKey(RunStore.IDEM_PREFIX, runId -> RunStore.runScopedKey(RunStore.IDEM_PREFIX, runId),
