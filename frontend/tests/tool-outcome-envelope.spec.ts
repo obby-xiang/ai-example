@@ -13,7 +13,7 @@
  * 风格照抄 parts-reducer.spec.ts / frontend-tool-result-terminal.spec.ts：
  * 只驱动真实 store / 纯函数，不挂载面板。
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { AiRunCurrent, ChatMessage, ToolPart } from '@/types/ai'
 import { applyFrameToParts, deriveProjections, historyToolCallStatus, outcomeStatus } from '@/utils/parts'
@@ -54,6 +54,15 @@ beforeEach(() => {
   api.chat.mockImplementation(() => new Promise(() => {}))
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
   frontendTools.executeFrontendTool.mockReset()
+})
+
+/**
+ * 跨用例收尾：本文件的 `chat`/`reattachRun` 桩永不结算 ⇒ 模块级在途连接（`currentAbort`）
+ * 不会自行清空，`setActivePinia` 只换 store 不碰它。不清则下一个用例的 `loadHistory()` 会按
+ * "本端已有在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 function noSuspension(): AiRunCurrent {

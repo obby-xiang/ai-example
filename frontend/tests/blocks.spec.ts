@@ -529,16 +529,17 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     }
   })
 
-  it('cardStatusOf：GF 两态（已提交 / 已取消）走同一只读状态机；待填写走 pending', () => {
+  it('cardStatusOf：GF 已决态各读真态（提交 / 取消 / 执行失败）；待填写走 pending', () => {
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toEqual({
       key: 'submitted', label: '✓ 已提交', tone: 'success'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toEqual({
       key: 'cancelled', label: '✗ 已取消', tone: 'danger'
     })
-    // failed 收尾同样归「未提交」（readOnlyStateOf 单一判据）
+    // 2026-10-29 批（utils/blocks readOnlyStateOf）：只有真取消画「已取消」；
+    // 执行失败如实落 failed（旧口径把它也说成"用户自己取消了"，与事实相反）
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toEqual({
-      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+      key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger'
     })
   })
 

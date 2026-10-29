@@ -155,6 +155,31 @@ const DEMO_DEF = {
   ]
 }
 
+/**
+ * 第二个导出码的定义（同任务下 OTHER 也有导出文件）。
+ *
+ * <p>必须出现在定义列表里：0 字段 fail-closed 闸按 `defOf(code)` 判"定义不在列表 ⇒ 无法确认列 ⇒
+ * 整批拒绝"，缺它的话"标签载入失败 ⇒ 回落服务端字节"这条路径根本走不到。
+ */
+const OTHER_DEF = {
+  id: 2,
+  code: 'OTHER',
+  name: '其他配置',
+  fields: [
+    {
+      id: 2,
+      defCode: 'OTHER',
+      code: 'status',
+      label: '状态',
+      fieldType: 'TEXT' as const,
+      required: false,
+      key: false,
+      sortOrder: 1,
+      optionsJson: null
+    }
+  ]
+}
+
 /** 服务端已落库的过滤条件（用户在界面上看到的同一条）。 */
 const CONDITION_JSON = JSON.stringify({
   scopeKeys: [],
@@ -209,7 +234,7 @@ beforeEach(() => {
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
   api.createJob.mockResolvedValue({ id: 31, jobType: 'EXPORT', status: 'PENDING', progress: 0, total: 0 })
-  api.listDefinitions.mockResolvedValue([DEMO_DEF])
+  api.listDefinitions.mockResolvedValue([DEMO_DEF, OTHER_DEF])
   api.countData.mockResolvedValue({ count: 0 })
   // 建作业后页面会挂作业跟踪（SSE 主通道 + 轮询兜底）：给一个不发声的假 EventSource，
   // 本 spec 只断言"是否建作业"，不需要通道行为。

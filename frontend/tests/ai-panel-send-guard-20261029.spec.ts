@@ -7,7 +7,7 @@
  * - M-16：「编辑后重跑」是先删后发（不可逆删除 + 原文本改写）。发送失败时，被删的消息、
  *   被改写的原文、编辑锚点都必须回来，否则用户只剩刷新一条路（而刚改的文本服务端从未收到）。
  */
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
@@ -72,6 +72,15 @@ beforeEach(() => {
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
   fakeChat = createFakeChat()
   api.chat.mockImplementation(fakeChat.impl)
+})
+
+/**
+ * 跨用例收尾：本文件的 `reattachRun` 桩永不结算 ⇒ 模块级在途连接（`currentAbort`）不会自行
+ * 清空，`setActivePinia` 只换 store 不碰它。不清则下一个用例的 `loadHistory()` 会按"本端已有
+ * 在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {

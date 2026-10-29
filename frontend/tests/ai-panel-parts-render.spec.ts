@@ -90,6 +90,15 @@ beforeEach(() => {
   api.health.mockResolvedValue({ available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h', frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0, sessionLockRenewals: 0, resumeOnStartup: false, instanceId: 'i', checkedAt: '2026-01-01T00:00:00Z' })
 })
 
+/**
+ * 跨用例收尾：本文件有用例把 `reattachRun` 桩成永不结算 ⇒ 模块级在途连接（`currentAbort`）
+ * 不会自行清空，`setActivePinia` 只换 store 不碰它。不清则后续用例的 `loadHistory()` 会按
+ * "本端已有在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
+})
+
 /** 手搭一条消息（含派生投影：两侧自洽 = deriveProjections 的结果）。 */
 function buildMessage(parts: MessagePart[], pendingCall: PendingToolCall | null = null, streaming = false): ChatMessage {
   const text = parts.map((part) => (part.kind === 'text' ? part.text : '')).join('')

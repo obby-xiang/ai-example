@@ -5,7 +5,7 @@
  * <p>本文件只驱动真实 store（mock 掉 HTTP + 帧源），不挂载面板 —— 面板文案归另一批。
  * store 侧只落**机器可读**状态（码 / 时间 / 序号区间），不落任何用户可见文案。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { ApiError } from '@/api/http'
@@ -103,6 +103,15 @@ beforeEach(() => {
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
+})
+
+/**
+ * 跨用例收尾：本文件的 `chat`/`reattachRun` 桩永不结算 ⇒ 模块级在途连接（`currentAbort`）
+ * 不会自行清空，`setActivePinia` 只换 store 不碰它。不清则下一个用例的 `loadHistory()` 会按
+ * "本端已有在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 describe('批次2 · 恢复失败出口（history/current）', () => {

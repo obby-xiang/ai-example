@@ -244,8 +244,10 @@ describe('T-15/T-24/T-25/T-26/T-29/T-31/T-32 参数与守卫', () => {
     sheet.rows[1]!.code = 'USD-CHANGED'
     await store.confirmWritePreview()
     expect(sheet.writes).toHaveLength(0)
-    expect(lastSubmittedResult()).toContain('表格在预览期间已变动')
-    expect(lastSubmittedResult()).toContain('未应用任何改动')
+    // 2026-10-29 批（utils/sheet-tools 硬闸）：确认前先按入参快照重算，身份/目标行指纹不符即整批拒绝，
+    // 回执走统一的"预览已失效"文案（`STALE_PREVIEW_REASON`），不静默套用旧明细
+    expect(lastSubmittedResult()).toContain('预览已失效')
+    expect(lastSubmittedResult()).toContain('未产出新的明细')
   })
 
   it('T-26：非法正则 ⇒ 人话拒绝、不建卡', async () => {

@@ -11,7 +11,7 @@
  *
  * 风格照抄 parts-double-write.spec.ts：只驱动真实 store、断言纯逻辑层，不挂载面板。
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, ToolPart } from '@/types/ai'
 import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
@@ -39,6 +39,17 @@ beforeEach(() => {
   api.frontendToolResult.mockReset()
   api.confirm.mockReset()
   api.frontendToolResult.mockResolvedValue({})
+})
+
+/**
+ * 跨用例收尾：本文件的 `reattachRun` 桩**永不结算**，"在途连接"（`currentAbort`，模块级变量）
+ * 因此不会被流的 finally 清掉；`setActivePinia` 只换 store，不碰模块级现场。
+ * 不清的后果：下一个用例调 `loadHistory()` 时 `inFlightAtEntry` 判真 ⇒ 镜像分支与历史分支
+ * 双双按"过期现场"跳过 —— messages 为空，断言却在别处（每文件只有一条用例时看不出来）。
+ * 丢弃本页签轮次 = 每个用例等价于一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 /** 消息上的工具段序列。 */

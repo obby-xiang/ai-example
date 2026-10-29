@@ -11,7 +11,7 @@
  * 用「新 pinia + `resetAiRegions()`」表达"刷新后的内存态"。刷新语义仍然成立：store 的轮次状态
  * 全部来自 `/history` + `/runs/current` 快照 + 镜像，pinia 一换就全丢。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
 import { registerAiRegion, resetAiRegions } from '@/utils/ai-regions'
@@ -160,6 +160,15 @@ beforeEach(() => {
     compaction: { level: 'none', compactedTurns: 0, lostTokens: 0, lastAtMs: null, reason: null, circuit: 'closed', fuseFails: 0 }
   })
   expect(sessionStorage.getItem(MIRROR_PREFIX + SESSION)).toBeNull()
+})
+
+/**
+ * 跨用例收尾：本文件的 `reattachRun` 桩永不结算 ⇒ 模块级在途连接（`currentAbort`）不会自行
+ * 清空，`setActivePinia` 只换 store 不碰它。不清则下一个用例的 `loadHistory()` 会按"本端已有
+ * 在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 describe('A7-①（R-17 · P2）：上传中刷新且区域仍注册 ⇒ 交接可继续', () => {

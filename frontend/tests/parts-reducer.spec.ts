@@ -11,7 +11,7 @@
  * 翻转后口径：`parts` 是唯一真值，`content` / `reasoning` / `toolRuns` / `pendingCall`
  * 一律由 `deriveProjections` 派生（delta/reasoning 高频路径按 §6.1 性能注增量维护 content/reasoning）。
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage, MessagePart, ReasoningPart, TextPart, ToolPart } from '@/types/ai'
 import { GENERATIVE_FORM_TOOL } from '@/types/ai'
@@ -56,6 +56,15 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.frontendToolResult.mockResolvedValue({ ok: true })
+})
+
+/**
+ * 跨用例收尾：本文件的 `reattachRun` 桩永不结算 ⇒ 模块级在途连接（`currentAbort`）不会自行
+ * 清空，`setActivePinia` 只换 store 不碰它。不清则下一个用例的 `loadHistory()` 会按"本端已有
+ * 在途轮"跳过镜像与历史两条分支。丢弃本页签轮次 = 每个用例一张新页面。
+ */
+afterEach(() => {
+  useAiStore().adoptFreshSession()
 })
 
 /** 生产同形的助手消息：以"流式空文本段"起头（同 appendAssistantMessage）。 */
