@@ -237,6 +237,32 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertPairing(second.conversationHistory());
 	}
 
+	/**
+	 * C13 第 5 项：{@code WRAP_UP_IGNORED}（收尾指令被连续无视）必须用<b>自己的</b>错误码收尾。
+	 *
+	 * <p>旧实现与本条共用 {@code CONTEXT_OVERFLOW}：用户看到"对话内容过长，请开启新会话"，
+	 * 运维看 {@code CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT} 去查窗口 —— 而真实原因是"模型在被要求收尾后
+	 * 仍在要工具"。同一个码说两件事，排障就被带偏。本用例锁死：码 = {@code TOOL_BUDGET_EXHAUSTED}，
+	 * 原因 = {@code turn_wrap_up_ignored}，且真越窗仍报 {@code CONTEXT_OVERFLOW}（见下面那条用例）。
+	 */
+	@Test
+	void ignoredWrapUpReportsItsOwnBudgetCodeAndReason() {
+		List<Message> armedHistory = this.manager
+			.executeToolCalls(prompt(historyWithOldResults()), response(9600, 0, "c-1"))
+			.conversationHistory();
+		List<Message> skippedHistory = this.manager.executeToolCalls(prompt(armedHistory), response(9600, 0, "c-2"))
+			.conversationHistory();
+
+		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(skippedHistory), response(9600, 0, "c-3")))
+			.isInstanceOfSatisfying(StreamViolationException.class, ex -> {
+				assertThat(ex.getCode()).isEqualTo(com.example.configmgr.common.ErrorCodes.TOOL_BUDGET_EXHAUSTED);
+				assertThat(ex.getCode()).isNotEqualTo(StreamViolationException.CONTEXT_OVERFLOW);
+				assertThat(ex.getMessage()).contains(TurnBudgetPlan.REASON_WRAP_UP_IGNORED);
+			});
+
+		assertThat(this.executed).as("硬停之前一个工具都没有再执行").containsExactly("c-1");
+	}
+
 	@Test
 	void repeatedArmedBatchesStopWithOverflowAfterSettle() {
 		List<Message> armedHistory = this.manager
@@ -245,9 +271,10 @@ class SpToolCallingManagerTurnBudgetTest {
 		List<Message> skippedHistory = this.manager.executeToolCalls(prompt(armedHistory), response(9600, 0, "c-2"))
 			.conversationHistory();
 
+		// C13 第 5 项：收尾被无视有自己的码（不再是 CONTEXT_OVERFLOW）——"先落定再失败"的语义不变
 		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(skippedHistory), response(9600, 0, "c-3")))
 			.isInstanceOfSatisfying(StreamViolationException.class,
-					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CONTEXT_OVERFLOW));
+					ex -> assertThat(ex.getCode()).isEqualTo(com.example.configmgr.common.ErrorCodes.TOOL_BUDGET_EXHAUSTED));
 
 		assertThat(this.executed).as("硬停之前一个工具都没有再执行").containsExactly("c-1");
 		RunSnapshot snapshot = this.store.get(RUN_ID);
@@ -255,8 +282,127 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(snapshot.getInFlightToolCalls()).isEmpty();
 	}
 
-	// ── 100 档：先 settle，再 CONTEXT_OVERFLOW ───────────────────────────────
+	// ── C13：模型侧按剩余窗口收缩（小窗口 + 多份大结果）─────────────────────────
 
+	/**
+	 * C13：15000 窗口下，一批四份各 20000 字符的工具结果必须按<b>剩余窗口</b>收缩。
+	 *
+	 * <p>缺陷现场：模型侧只按配置档（20000 字符/份）裁 —— 四份就是 8 万字符，而 {@code keep-tool-pairs}
+	 * 把最近 5 对钉住，轮内 L1 清不掉，下一跳必然越窗（真机表现为
+	 * {@code CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT}，而模型连"结果被截过"都不知道）。
+	 *
+	 * <p>本用例同时锁死三条契约：① 每份按 {@code 剩余窗口 / 本批调用数} 收缩；
+	 * ② 截断元数据（{@code truncated/originalChars/returnedChars/notice}）如实写进信封；
+	 * ③ 帧/台账仍是<b>全文</b>（双通道对齐不变，模型侧收缩不改变"前端看全文"）。
+	 */
+	@Test
+	void smallWindowShrinksEachToolResultToTheRemainingWindow() {
+		this.properties.getContext().setLimitTokens(15000);
+		this.properties.getContext().setReserveTokens(3000);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		SpToolCallingManager big = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry,
+				this.codec, this.beacon, this.cancellations, this.limiter, List.of(), null, null, null, null,
+				this.properties) {
+
+			@Override
+			String delegateSingle(Prompt prompt, PendingToolCall pending) {
+				SpToolCallingManagerTurnBudgetTest.this.executed.add(pending.getToolCallId());
+				return "大结果 " + pending.getToolCallId() + "：" + "大".repeat(19_990);
+			}
+		};
+		big.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		big.setContextStateStore(this.contextStore);
+
+		ToolExecutionResult result = big.executeToolCalls(prompt(historyWithOldResults()),
+				response(1000, 0, "big-1", "big-2", "big-3", "big-4"));
+
+		int perResultChars = ToolResultLimiter.charsForRemainingTokens((15_000 - 3_000) / 4);
+		for (String id : List.of("big-1", "big-2", "big-3", "big-4")) {
+			ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(responseById(result.conversationHistory(), id).responseData());
+			assertThat(envelope.truncated()).as("%s 必须被窗口收缩", id).isTrue();
+			assertThat(envelope.originalChars()).isEqualTo(20_000);
+			assertThat(envelope.message().length()).as("%s 按剩余窗口收缩（不是配置档 20000）", id)
+				.isLessThanOrEqualTo(perResultChars);
+			assertThat(envelope.notice()).contains("完整结果见本轮工具调用记录");
+		}
+		assertThat(ContextEstimator.estimateMessages(result.conversationHistory())).as("收缩后整批仍在窗口内")
+			.isLessThan(15_000);
+
+		// ③ 帧仍是全文：模型侧收缩不得让"前端看到的"跟着变短
+		org.mockito.ArgumentCaptor<String> frameText = org.mockito.ArgumentCaptor.forClass(String.class);
+		org.mockito.Mockito.verify(this.emitter, org.mockito.Mockito.atLeast(1))
+			.toolResult(any(PendingToolCall.class), org.mockito.ArgumentMatchers.anyBoolean(),
+					org.mockito.ArgumentMatchers.anyBoolean(), frameText.capture());
+		assertThat(frameText.getAllValues()).as("至少一份帧是 20000 字全文").anyMatch(text -> text.length() == 20_000);
+		assertPairing(result.conversationHistory());
+	}
+
+	// ── C13：越窗后收缩最新未保护结果 / 压缩固定历史（不重跑工具）────────────────
+
+	/**
+	 * C13 第 3 项：L1 清不掉的<b>最近几对</b>（pin 窗口内）在仍越窗时被<b>收窄</b>，未决 HITL 不动。
+	 *
+	 * <p>语料：pin 最近 5 对 ⇒ 三条大结果全在 pin 窗口内，L1 一个都清不掉；
+	 * 若没有这一刀，这一轮只能以 {@code CONTEXT_OVERFLOW} 收场（真机表现 = 工具已产生副作用却整轮失败）。
+	 */
+	@Test
+	void pinnedResultsAreShrunkInRoundWhileHitlEntriesStayIntact() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(1_000);
+		this.properties.getContext().setKeepToolPairs(5);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		PendingToolCall hitl = new PendingToolCall();
+		hitl.setToolCallId("old-3");
+		hitl.setName(TOOL);
+		hitl.setKind(PendingToolCall.KIND_BACKEND);
+		hitl.setStatus(PendingToolCall.PENDING);
+		this.store.putPending(RUN_ID, hitl);
+
+		List<Message> pinned = historyWithPinnedBigResults();
+		// 真值 = 这份历史本身的估算（上一跳已经把窗口吃满）—— 这正是 C13 的现场：
+		// 工具已产生副作用、下一跳发不出去，而 keep-tool-pairs 让 L1 一条都清不掉。
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(pinned),
+				response(ContextEstimator.estimateMessages(pinned), 0, "c-1"));
+
+		List<Message> history = result.conversationHistory();
+		assertThat(this.executed).as("工具只执行一次（收缩不重跑）").containsExactly("c-1");
+		assertThat(ToolResultEnvelope.fromJson(oldResultText(history, "old-3")).truncated())
+			.as("未决 HITL 条目一个字都不动").isFalse();
+		assertThat(ToolResultEnvelope.fromJson(oldResultText(history, "old-2")).truncated())
+			.as("最新未保护结果最先收窄").isTrue();
+		assertThat(history).as("不丢轮次：只收窄（+ 可能的收尾指令）")
+			.hasSizeBetween(pinned.size() + 2, pinned.size() + 3);
+		assertPairing(history);
+	}
+
+	/**
+	 * C13 第 4 项：没有可收缩的工具结果时，越窗恢复<b>只压缩固定历史</b>（丢最旧轮）并继续这一跳 ——
+	 * 已执行的工具一次都不重跑，也不会以 {@code CONTEXT_OVERFLOW_AFTER_TOOL_SIDE_EFFECT} 收场。
+	 */
+	@Test
+	void overflowRecoveryTrimsFixedHistoryAndContinuesWithoutReRunningTools() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.properties.getContext().setKeepToolPairs(5);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		List<Message> longHistory = historyWithLongTurns();
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1"));
+
+		List<Message> history = result.conversationHistory();
+		assertThat(this.executed).as("已执行工具绝不重跑").containsExactly("c-1");
+		assertThat(history.size()).as("固定历史被压缩（丢最旧轮），这一跳继续").isLessThan(longHistory.size() + 2)
+			.isGreaterThan(2);
+		assertThat(oldResultText(history, "c-1")).as("本批结果在").isNotNull();
+		assertPairing(history);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(this.codec.deserializeAll(snapshot.getMessageJson()))
+			.as("落定的是同一份压缩后的历史（模型看到的 = 快照里的）")
+			.hasSameSizeAs(history);
+	}
+
+	// ── 100 档：先 settle，再 CONTEXT_OVERFLOW ───────────────────────────────
 	@Test
 	void overflowSettlesExecutedRecordsBeforeFailing() {
 		List<Message> history = historyWithOldResults();
@@ -529,6 +675,25 @@ class SpToolCallingManagerTurnBudgetTest {
 			.isNotEqualTo(ContextCompactor.REASON_HYSTERESIS_LOCKED);
 	}
 
+	/**
+	 * C13：轮内清除写下的基线也要<b>含 system + tools</b>（与轮首压缩的新基线同口径）。
+	 *
+	 * <p>两条写点若各写一套，同一会话的"占用"会随"这轮是靠轮首压的还是轮内清的"而跳变；
+	 * 上游真值本来就含这两项，缺了它们只会让下一轮 nextEst 少算前缀。
+	 */
+	@Test
+	void inRoundClearBaselineAlsoCountsSystemAndTools() {
+		this.contextStore.write(SESSION_ID, ContextState.EMPTY
+			.withUsage(7200, 100, 3, false, 1_000L, "m", 3_000, 4_000, 500));
+
+		List<Message> postClear = this.manager
+			.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"))
+			.conversationHistory();
+
+		assertThat(this.contextStore.read(SESSION_ID).usedTokens())
+			.isEqualTo(ContextEstimator.estimateMessages(postClear) + 3_000 + 4_000);
+	}
+
 	/** 已经到 L2/L3 的谱系不被一次轮内 L1 回退（{@code level} 同时是 advanceTo 的起点）。 */
 	@Test
 	void inRoundClearNeverDowngradesAHigherLineageLevel() {
@@ -608,6 +773,35 @@ class SpToolCallingManagerTurnBudgetTest {
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
+	/** C13 语料：三对"大"工具结果（全部落在 pin 窗口内，L1 清不掉）+ 一条本轮输入。 */
+	private static List<Message> historyWithPinnedBigResults() {
+		List<Message> out = new ArrayList<>();
+		out.add(new UserMessage("旧问题"));
+		List<AssistantMessage.ToolCall> calls = new ArrayList<>();
+		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+		for (int i = 1; i <= 3; i++) {
+			calls.add(new AssistantMessage.ToolCall("old-" + i, "function", TOOL, "{}"));
+			responses.add(new ToolResponseMessage.ToolResponse("old-" + i, TOOL,
+					ToolResultEnvelope.of(ToolOutcome.OK, null, "旧结果 " + i + "：" + "大".repeat(5_990), "{}")
+						.toModelJson(null, TOOL)));
+		}
+		out.add(AssistantMessage.builder().toolCalls(calls).build());
+		out.add(ToolResponseMessage.builder().responses(responses).build());
+		out.add(new UserMessage("新问题"));
+		return out;
+	}
+
+	/** C13 语料：十轮纯文本历史（每轮 ≈1400 token）—— 没有工具结果可收窄，只能靠压缩固定历史救场。 */
+	private static List<Message> historyWithLongTurns() {
+		List<Message> out = new ArrayList<>();
+		for (int i = 1; i <= 10; i++) {
+			out.add(new UserMessage("第 " + i + " 个问题"));
+			out.add(AssistantMessage.builder().content("这是第 " + i + " 轮的回答：" + "答".repeat(2_400)).build());
+		}
+		out.add(new UserMessage("新问题"));
+		return out;
+	}
+
 	/** 旧历史：一条"很大"的工具结果 + 一条本轮输入（用于真值不重复计入的用例）。 */
 	private static List<Message> historyWithLargeOldResult(String oldResult) {
 		List<Message> out = new ArrayList<>();
@@ -623,8 +817,7 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	/** 旧历史：两对可清除的工具结果 + 一条本轮输入（最后一轮永不被 pin 之外的东西动）。 */
-	private static List<Message> historyWithOldResults() {
-		List<Message> out = new ArrayList<>();
+	private static List<Message> historyWithOldResults() {		List<Message> out = new ArrayList<>();
 		out.add(new UserMessage("旧问题"));
 		out.add(AssistantMessage.builder()
 			.toolCalls(List.of(new AssistantMessage.ToolCall("old-1", "function", TOOL, "{}"),

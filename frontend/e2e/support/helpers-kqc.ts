@@ -213,9 +213,11 @@ export async function waitContextLimitTokens(expected: number, timeoutMs = 20_00
 /**
  * 用「小 max_context 的模型行」跑一段，结束后无论如何恢复原值。
  *
- * 取值纪律（P3 实测结论）：`max_context` 必须显著大于 `reserve-tokens`（默认 13000），
- * 否则 `limit − reserve` 被钳到 1，任何轮次都判满、每轮直冲 L3。本域用 17500 / 19000 两档
- * （见 spec 常量），两档都留 ≥ 4500 的分母余量。
+ * 取值纪律（P3 实测结论；C13 起预留按实际窗口收口）：有效预留 = `min(reserve-tokens, 窗口 / 2)`
+ * ⇒ 小窗口（< 2 × reserve）下分母恒为 `窗口 / 2`。要得到某个分母 D，窗口取 `2D`
+ * （本域 12000 / 9000 两档 ⇒ 分母 6000 / 4500，见 spec 常量）。
+ * 窗口同时是硬上限（`nextEst >= limit` ⇒ 轮内判越窗）；C13 之后越窗先收窄最新未保护结果、
+ * 再压缩固定历史（只调模型、不重跑工具），不再直接以失败收场。
  */
 export async function withModelWindow<T>(maxContext: number, body: (window: ModelWindow) => Promise<T>): Promise<T> {
   const before = await currentModelWindow()

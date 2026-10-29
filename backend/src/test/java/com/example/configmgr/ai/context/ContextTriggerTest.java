@@ -101,6 +101,40 @@ class ContextTriggerTest {
 		assertThat(decision.ratio()).isGreaterThan(0.8d);
 	}
 
+	/**
+	 * C13：轮首 / 压缩后<b>没有真值</b>时，判据值取<b>整包估算</b>（system + tools + 历史 + 本轮输入）。
+	 *
+	 * <p>缺陷现场：旧口径只把"新输入"算进 nextEst，system 人设/工作区快照与工具 schema 一个字都不算 ——
+	 * 小窗口模型（如 15000）上"system 3000 + tools 4000 + 历史 4000"的请求在轮首被判成未达线，
+	 * 随后撞上游 400；压缩后的估算基线同样漏掉这两项，下一轮继续漏。
+	 */
+	@Test
+	void c13WithoutTruthTheWholeRequestEstimateDrivesTheDecision() {
+		// 无真值（used=0）：整包 12400（system 3000 + tools 4000 + 历史 4900 + 输入 500）
+		ContextTrigger.Decision decision = trigger().decide(128000, 0, 0, 500, 0, 12400, true);
+
+		assertThat(decision.nextEst()).as("漏算 system+tools 的旧口径只得到 500").isEqualTo(12400);
+		assertThat(decision.level()).as("12400/115000 ≈ 10.8% ⇒ 未达线（如实）")
+			.isEqualTo(ContextTrigger.Level.NONE);
+	}
+
+	/**
+	 * C13：预留额度按<b>实际窗口</b>收口 —— 小窗口下 13000 的绝对预留会把分母压成 2000，
+	 * 任何请求都被判成"三倍越线"（退化分母）。
+	 *
+	 * <p>收口规则 = 预留最多占窗口一半；15000 窗口下有效预留 7500，分母 7500。
+	 */
+	@Test
+	void c13OversizedReserveIsClampedToTheRealWindow() {
+		ContextTrigger.Decision decision = trigger().decide(15000, 6000, 0, 0, 0, true);
+
+		assertThat(decision.reserveTokens()).as("预留不得吃掉整个窗口").isEqualTo(7500);
+		assertThat(decision.ratio()).as("6000/7500 = 80%（未收口则会算成 6000/2000 = 300%）")
+			.isCloseTo(0.8d, org.assertj.core.data.Offset.offset(1e-9));
+		assertThat(decision.level()).as("80% ⇒ L2；退化分母会误判成 L3")
+			.isEqualTo(ContextTrigger.Level.L2);
+	}
+
 	/** 上限未知（降级态）：不发比例判定，ratio 恒 0。 */
 	@Test
 	void degradedWhenLimitUnknown() {

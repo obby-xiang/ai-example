@@ -10,7 +10,9 @@ import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.ContextStateStore;
 import com.example.configmgr.ai.context.ContextTrigger;
+import com.example.configmgr.ai.context.HardTrim;
 import com.example.configmgr.ai.context.ToolResultClearing;
+import com.example.configmgr.ai.context.ToolResultShrink;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
 import com.example.configmgr.ai.form.GenerativeFormRules;
@@ -633,6 +635,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 防线③（T1）的判据来源：本轮<b>冻结</b>的工作区上下文（与请求侧披露用的同一份，
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
+		// ===== C13：本批模型侧写入的剩余窗口 =====
+		// 配置档（20000 字符/份）是静态上限，不知道这一轮还剩多少窗口：小窗口上四份结果就能吃掉整窗，
+		// 而 keep-tool-pairs 把最近几对钉住（轮内 L1 清不掉）⇒ 下一跳必然越窗。故这里先算一份"剩余窗口"，
+		// 由 modelData 在<b>唯一</b>模型侧写入口按它收缩（截断元数据/台账全文口径不变）。
+		ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
 
 		// ===== 轮内上下文预算（工具轮内上下文预算批）：本批已进入收尾（armed） =====
 		// armed 的语义只有一条：此后<b>不再产生新副作用</b>。因此预检（只读但重）、确认卡外置、
@@ -822,7 +829,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 						out.frontendToolResult(pending, false, text);
 					}
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-							modelData(pending, text)));
+							modelData(pending, text, modelBudget)));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
 					continue;
 				}
@@ -834,7 +841,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					emitToolStartOnce(runId, toolStarted, pending);
 					out.toolResult(pending, false, false, text);
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-							modelData(pending, text)));
+							modelData(pending, text, modelBudget)));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
 					continue;
 				}
@@ -943,7 +950,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// P1-10：执行中抛出异常的失败，executeOnce 已把对账措辞追加进 resultText
 				// （帧/台账/模型三面同一份文本；"结果缺失"这类未执行副作用不追加）。
 				responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-						modelData(source, text)));
+						modelData(source, text, modelBudget)));
 				// 停走判定放在结算之后：这里看到的 outcome/code 才是执行/确认门写下的真值。
 				if (haltsBatch(source)) {
 					haltedBy = source;
@@ -979,7 +986,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// 不再返回可驱动下一跳的历史（工具结果与历史已先落定，已发生的副作用不撤回）。
 			checkCancelled(runId);
 			if (budget.overflow()) {
-				throw new StreamViolationException(StreamViolationException.CONTEXT_OVERFLOW,
+				// C13 第 5 项：码按原因分（收尾被无视 = 工具预算耗尽，不是真越窗）。
+				// 换码不改语义：调用方已 settle，失败照样是确定性的、可解释的。
+				throw new StreamViolationException(budget.decision().failureCode(),
 						"轮内上下文预算判定：下一跳请求将超出上下文窗口（nextEst=" + budget.decision().nextEst()
 								+ " >= limit=" + budget.decision().limitTokens() + "，reason="
 								+ budget.decision().reason() + "），已落定已执行记录后终止本轮");
@@ -1251,7 +1260,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 判据值（真值优先；无真值时就是整包估算）。之后的每次本地变更都原地递推它。
 		int nextEst = decision.nextEst();
 		boolean needRejudge = false;
-		for (int pass = 0; pass < 2; pass++) {
+		// C13：越窗之后还有两刀（都属于"只压缩固定历史、只调模型"—— 不重跑任何已执行的工具）：
+		//   ③ 收窄最新未保护的工具结果（pin 窗口内也允许；HITL 不动、配对不动）；
+		//   ④ 丢最旧的固定历史轮次（HardTrim 同一套纯函数：不拆配对，pin 与 HITL 所在轮一刀不剪）。
+		// 两刀各只做一次；做不动就按原判据收尾（真发不出去的上游 400 不该被假装成成功）。
+		int shrunkResults = 0;
+		int trimmedTurns = 0;
+		for (int pass = 0; pass < 4; pass++) {
 			if (pass > 0) {
 				decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, config.getReserveTokens(),
 						config.getL1Percent(), config.getL3Percent(), false, 0, 0, nextEst, 0, armedNow,
@@ -1268,6 +1283,33 @@ public class SpToolCallingManager implements ToolCallingManager {
 					nextEst = Math.max(0, nextEst - plan.savedTokens());
 					needRejudge = true;
 					continue;
+				}
+				break;
+			}
+			if (decision.action() == TurnBudgetPlan.Action.OVERFLOW
+					&& TurnBudgetPlan.REASON_OVERFLOW.equals(decision.reason())) {
+				// ③ 仍超窗：先收窄"最新、未保护"的工具结果（L1 清不掉的 pin 窗口内条目）
+				if (shrunkResults == 0 && protectedIds != null) {
+					ToolResultShrink.Plan shrink = ToolResultShrink.plan(current, nextEst, limit,
+							ContextTrigger.effectiveReserve(limit, config.getReserveTokens()), protectedIds, this.limiter);
+					if (shrink.changed()) {
+						current = shrink.messages();
+						shrunkResults = shrink.shrunk().size();
+						nextEst = Math.max(0, nextEst - shrink.savedTokens());
+						needRejudge = true;
+						continue;
+					}
+				}
+				// ④ 仍超窗：压缩固定历史（丢最旧轮），随后这一跳<b>只调模型</b>（工具一个都不重跑）
+				if (trimmedTurns == 0) {
+					HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(), protectedIds);
+					if (trim.changed()) {
+						current = trim.messages();
+						trimmedTurns = trim.droppedTurns();
+						nextEst = Math.max(0, nextEst - trim.lostTokens());
+						needRejudge = true;
+						continue;
+					}
 				}
 				break;
 			}
@@ -1296,16 +1338,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		int after = estimateRequestTokens(prompt, current);
 		if ((decision.triggered() && !(decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS && cleared == 0))
-				|| cleared > 0) {
+				|| cleared > 0 || shrunkResults > 0 || trimmedTurns > 0) {
 			AiTrace.eventOn(runId, snapshot.getSessionId(), "turn_budget", "action", decision.action().name(),
 					"reason", decision.reason(), "ratio", String.format(Locale.ROOT, "%.3f", decision.ratio()),
 					"nextEst", decision.nextEst(), "limit", decision.limitTokens(), "reserve",
-					decision.reserveTokens(), "before", before, "after", after, "clearedPairs", cleared, "armed",
-					armedNow, "usage", meter.measured());
+					decision.reserveTokens(), "before", before, "after", after, "clearedPairs", cleared,
+					"shrunkResults", shrunkResults, "trimmedTurns", trimmedTurns, "armed", armedNow, "usage",
+					meter.measured());
 			log.info("轮内上下文预算 runId={} action={} reason={} ratio={} nextEst={} limit={} clearedPairs={} "
-					+ "armed={}", runId, decision.action(), decision.reason(),
+					+ "shrunkResults={} trimmedTurns={} armed={}", runId, decision.action(), decision.reason(),
 					String.format(Locale.ROOT, "%.3f", decision.ratio()), decision.nextEst(), limit, cleared,
-					armedNow);
+					shrunkResults, trimmedTurns, armedNow);
 		}
 		return new TurnBudgetOutcome(current, decision.action() == TurnBudgetPlan.Action.OVERFLOW, decision);
 	}
@@ -1384,8 +1427,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 与轮首 ContextCompactor 的成功路径同一口径：level + "清除后规模估算"基线一起写。
 				// est=true 明确这是估算；轮末 recordTurn 会用真值覆盖。缺了这一步，下一次轮首压缩会因为
 				// 沿用的旧 used 撞上滞回线（hysteresis_locked）而整轮不做（含 L2/L3）。
+				// C13：与轮首压缩的新基线同口径 —— 含 system + tools（上游真值本就含这两项）。
+				// 两个写点各写一套会让"占用"随"靠轮首压还是轮内清"跳变，并让下一轮 nextEst 少算前缀。
+				int baseline = after + Math.max(0, state.systemTokens()) + Math.max(0, state.toolsTokens());
 				clearedState = state.withCompaction(ContextTrigger.Level.L1, 0, 0, TurnBudgetPlan.REASON_L1, now)
-					.withUsage(after, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
+					.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
 							state.systemTokens(), state.toolsTokens(), state.inputTokens());
 				store.write(sessionId, clearedState);
 			}
@@ -2531,9 +2577,96 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 模型侧的统一信封 JSON（P0-1）：先对 message 跑 {@link ToolResultLimiter#forModel}，
-	 * 再组装/序列化（顺序不可交换 —— 先组装后截断会把 JSON 本身截坏）。
+	 * 模型侧的统一信封 JSON（C13 窗口版）：在配置档之外再按<b>剩余窗口</b>收缩。
+	 *
+	 * <p>截断判定仍是同一个 {@link ToolResultLimiter}（窗口额度作为第二个上限传入
+	 * {@link ToolResultLimiter#forModel(String, String, int)}）：于是 {@code truncated/strategy/
+	 * originalChars/returnedChars/notice} 五个字段照旧写进信封，模型仍能看见"这份结果不是全部"；
+	 * SSE 帧与执行台账里的 {@code resultText} 仍是全文（双通道口径不动）。
+	 *
+	 * @param budget 本批剩余窗口（{@code unlimited()} = 不按窗口收缩，与改造前逐字一致）
 	 */
+	private String modelData(PendingToolCall pending, String text, ModelWriteBudget budget) {
+		String modelJson = ToolResultEnvelope
+			.of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments())
+			.toModelJson(this.limiter, pending.getName(), budget.nextCapChars());
+		budget.consume(modelJson);
+		return modelJson;
+	}
+
+	/**
+	 * 本批模型侧写入的剩余窗口（C13）。
+	 *
+	 * <p>算式：{@code 实际窗口 − 有效预留 − system/tools − 已固定的历史 − 本批 assistant(tool_calls)}。
+	 * 上限未知（轻装配面/未注入 resolver）⇒ {@link ModelWriteBudget#unlimited()}（行为一字不变）。
+	 */
+	private ModelWriteBudget modelWriteBudget(RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
+			int calls) {
+		int limit = turnBudgetLimit(snapshot);
+		if (limit <= 0 || calls <= 0) {
+			return ModelWriteBudget.unlimited();
+		}
+		int reserve = ContextTrigger.effectiveReserve(limit, this.properties.getContext().getReserveTokens());
+		int fixedPrefix = estimateRequestTokens(prompt, prompt.getInstructions())
+				+ ContextEstimator.estimateMessage(assistant);
+		int remaining = limit - reserve - fixedPrefix;
+		if (remaining <= 0) {
+			// 窗口已经被固定历史吃满：收缩单份结果救不回来（交给轮内收缩/恢复路径），此处不裁
+			return ModelWriteBudget.unlimited();
+		}
+		return ModelWriteBudget.of(remaining, calls);
+	}
+
+	/**
+	 * 一批工具结果写进模型侧时的剩余窗口（C13）。
+	 *
+	 * <p>每份结果按 {@code 剩余 / 本批剩余调用数} 均分：一份结果独占整窗就等于"下一跳必然越窗"，
+	 * 而 {@code keep-tool-pairs} 又让轮内 L1 清不掉最近的几对。写入后按实际写出的文本扣减，
+	 * 于是同一批里靠后的结果自动拿到更小的额度（顺序确定 ⇒ 可重放）。
+	 */
+	private static final class ModelWriteBudget {
+
+		private static final ModelWriteBudget UNLIMITED = new ModelWriteBudget(0, 0);
+
+		private int remainingTokens;
+
+		private int callsLeft;
+
+		private ModelWriteBudget(int remainingTokens, int callsLeft) {
+			this.remainingTokens = remainingTokens;
+			this.callsLeft = callsLeft;
+		}
+
+		/** 无窗口信息（不收缩）。 */
+		static ModelWriteBudget unlimited() {
+			return UNLIMITED;
+		}
+
+		static ModelWriteBudget of(int remainingTokens, int calls) {
+			return remainingTokens <= 0 || calls <= 0 ? UNLIMITED
+					: new ModelWriteBudget(remainingTokens, calls);
+		}
+
+		/** 本次写入的字符额度（{@code 0} = 不按窗口收缩）。 */
+		int nextCapChars() {
+			if (this.callsLeft <= 0) {
+				return 0;
+			}
+			int share = Math.max(1, this.remainingTokens / this.callsLeft);
+			return ToolResultLimiter.charsForRemainingTokens(share);
+		}
+
+		/** 扣减已写出的模型侧文本（token 估算，与判据同一把尺子）。 */
+		void consume(String modelJson) {
+			if (this.callsLeft <= 0) {
+				return;
+			}
+			this.remainingTokens = Math.max(0, this.remainingTokens - ContextEstimator.estimate(modelJson));
+			this.callsLeft--;
+		}
+
+	}
+
 	private String modelData(PendingToolCall pending, String text) {
 		return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
 				pending.getArguments()).toModelJson(this.limiter, pending.getName());

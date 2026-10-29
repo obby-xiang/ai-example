@@ -166,8 +166,42 @@ class ToolResultLimiterTest {
         assertThat(this.limiter.forModel(TOOL, big).text()).isEqualTo(big);
     }
 
-    // ── ④ 结构化结果：绝不字符截断 ──────────────────────────────────────
+    /**
+     * C13：模型侧写入按<b>剩余窗口</b>收缩 —— 窗口额度比配置档更小时取窗口（更小者赢），
+     * 窗口额度更大/未知（{@code <=0}）时保持配置档不变。
+     *
+     * <p>缺陷现场：小窗口模型（15000）下配置档仍是 20000 字符，一份大工具结果自己就能吃掉整窗，
+     * 上游下一跳必然 400；而"最近 5 对不可清"让轮内 L1 也救不回来。
+     */
+    @Test
+    void windowRemainingBudgetShrinksBelowTheConfiguredDefault() {
+        String big = "x".repeat(30_000);
 
+        ToolResultLimiter.Truncation windowed = this.limiter.forModel(TOOL, big, 2_000);
+
+        assertThat(windowed.truncated()).isTrue();
+        assertThat(windowed.text()).as("窗口额度 2000 < 配置档 20000 ⇒ 按窗口收缩").hasSizeLessThanOrEqualTo(2_000);
+        assertThat(windowed.originalChars()).isEqualTo(30_000);
+        assertThat(windowed.returnedChars()).isEqualTo(windowed.text().length());
+        assertThat(windowed.notice()).contains("2000 字符");
+
+        assertThat(this.limiter.forModel(TOOL, big, 0).text()).as("0 = 无窗口信息 ⇒ 走配置档")
+            .hasSizeLessThanOrEqualTo(20_000);
+        assertThat(this.limiter.forModel(TOOL, big, 500_000).text()).as("窗口比配置档大 ⇒ 配置档兜底")
+            .hasSizeLessThanOrEqualTo(20_000);
+        assertThat(this.limiter.forModel(TOOL, "15 个定义", 2_000).truncated()).as("本来就装得下 ⇒ 不裁").isFalse();
+    }
+
+    /** 窗口额度由 token 折算成字符时按 CJK 口径保守取值（1 token 最多 1.7 字符）。 */
+    @Test
+    void remainingCharsAreDerivedConservativelyFromTokens() {
+        assertThat(ToolResultLimiter.charsForRemainingTokens(0)).isZero();
+        assertThat(ToolResultLimiter.charsForRemainingTokens(-5)).isZero();
+        assertThat(ToolResultLimiter.charsForRemainingTokens(100)).as("100 token ⇒ 最多 170 字符（保守）")
+            .isEqualTo(170);
+    }
+
+    // ── ④ 结构化结果：绝不字符截断 ──────────────────────────────────────
     @Test
     void structuredResultIsMarkedAsAWholeInsteadOfCharCut() throws Exception {
         String json = "{\"rows\":[" + IntStream.rangeClosed(1, 4_000)

@@ -769,9 +769,10 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
   const REAL_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
   const REAL_THRESHOLD = Math.ceil(REAL_SAMPLING * 0.7)
   /**
-   * C-13 的压缩分母（`ai_model.max_context`）：必须显著大于 `reserve-tokens`（默认 13000），
-   * 否则 `limit − reserve` 被钳到 1、逐轮直冲 L3。取 15000 ⇒ 预算 2000，
-   * 真模型 6 轮对话 + 工具结果的体量足够把 L1（清工具结果）走完再进 L2（折叠旧轮）。
+   * C-13 的压缩分母（`ai_model.max_context`）：C13 起有效预留按实际窗口收口
+   * （`min(reserve-tokens 13000, 窗口 / 2)`）⇒ 取 15000 时预算 = 7500（不再是 2000 的退化分母）。
+   * 真模型 6 轮对话 + 每轮 3 条工具结果的体量足够越过 L1 线（70% × 7500 ≈ 5250）。
+   * 越窗不再直接失败：先收窄最新未保护的工具结果、再压缩固定历史（只调模型、不重跑工具）。
    * 与 `verify-e2e.ps1` 的启动回退值 20000 不同 ⇒ "分母取的是模型行"这件事有断言盯着。
    */
   const REAL_LINEAGE_WINDOW = 15000
@@ -902,6 +903,13 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
             + `，错误码：${round.errors.map((frame) => String(frame.code ?? '')).join(',') || '-'}）`
         ).toBeTruthy()
         expect(round.errors).toHaveLength(0)
+        // C13：工具已产生副作用之后仍不得以越窗收场 —— 模型侧按剩余窗口收缩、越窗恢复只压缩固定
+        // 历史（不重跑工具）。这里单独点名禁用码：`round.errors` 为空时上面那条已经覆盖，但红时
+        // 只有这条会告诉我们"是 C13 退化了"而不是"上游偶发失败"。
+        const overflowCodes = round.errors
+          .map((frame) => String(frame.code ?? ''))
+          .filter((code) => code.startsWith('CONTEXT_OVERFLOW'))
+        expect(overflowCodes, `第 ${turn} 轮出现越窗（C13：模型侧应按剩余窗口收缩）`).toHaveLength(0)
         const snapshot = await contextSnapshot(sid)
         // 分母必须来自模型行（写接口写进去的那个值），不是任何 env 回退
         expect(snapshot.limitTokens, `第 ${turn} 轮分母必须是模型行`).toBe(REAL_LINEAGE_WINDOW)

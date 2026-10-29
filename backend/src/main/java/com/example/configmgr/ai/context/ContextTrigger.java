@@ -15,9 +15,13 @@ import com.example.configmgr.ai.config.AiProperties;
  * 两者的偏差被"<b>触发看估算、展示看真值</b>"隔离；滞回只看真值，故不会因估算抖动反复触发。
  *
  * <h2>阈值</h2>
- * 对 {@code limit − reserve} 取比（先扣 13K 预留缓冲再取比）：L1 ≥70% / L2 ≥80% / L3 ≥95%。
+ * 对 {@code limit − reserve} 取比（先扣预留缓冲再取比）：L1 ≥70% / L2 ≥80% / L3 ≥95%。
  * 自洽性检查（写进 NUMSPEC 依据列）：128K 下 {@code limit − reserve = 115K}，L3@95% 剩
  * {@code 0.05 × 115K = 5.75K > max-tokens 4096} ⇒ 触发线不会把输出空间吃掉。
+ *
+ * <p><b>预留按实际窗口收口（C13）</b>：上面的自洽性只在"预留远小于窗口"时成立。小窗口模型
+ * （如 15000）上 13000 的绝对预留会把分母压成 2000 —— 任何请求都判成三倍越线，比例阈值失效。
+ * 故分母一律用 {@link #effectiveReserve}：预留最多占窗口一半。
  *
  * <h2>分母由调用方注入（L-89）</h2>
  * 本类<b>不读</b> {@code app.ai.context.limit-tokens}：分母以参数传入，调用方
@@ -101,6 +105,28 @@ public final class ContextTrigger {
 	}
 
 	/**
+	 * 预留额度按<b>实际模型窗口</b>收口（C13）。
+	 *
+	 * <p>「预留」的语义是"给输出与一轮工具回环留的绝对额度"（默认 13000，依据见
+	 * {@code AiProperties.Context#reserveTokens}）。但绝对额度在<b>小窗口模型</b>上会把分母压成
+	 * {@code limit − reserve ≈ 2000}（15000 窗口）：任何一条稍长的请求都被判成"三倍越线"，
+	 * 压缩/收尾在轮首都触发，比例阈值彻底失去意义（退化分母）。
+	 *
+	 * <p>收口规则：预留最多占窗口的一半，剩下的才是比例判定的分母。
+	 * 128K 窗口下 {@code min(13000, 64000) = 13000} —— 与既有口径逐字相同（大窗口零变化）。
+	 *
+	 * @param limitTokens  实际窗口（{@code <=0} = 未知：原样返回，调用方不做比例判定）
+	 * @param reserveTokens 配置的预留（{@code <=0} = 无预留）
+	 */
+	public static int effectiveReserve(int limitTokens, int reserveTokens) {
+		int reserve = Math.max(0, reserveTokens);
+		if (limitTokens <= 0) {
+			return reserve;
+		}
+		return Math.min(reserve, Math.max(1, limitTokens / 2));
+	}
+
+	/**
 	 * 触发判定。
 	 *
 	 * @param limitTokens             分母上限（来自 {@link ContextLimitResolver}；{@code <=0} = 未知 ⇒ 降级态）
@@ -113,9 +139,41 @@ public final class ContextTrigger {
 	 */
 	public Decision decide(int limitTokens, int usedPrompt, int lastCompletion, int newInputTokens,
 			int toolResultsSinceMeasure, boolean thresholdsArmed) {
-		long nextEst = Math.max(0, usedPrompt) + Math.max(0, lastCompletion) + Math.max(0, newInputTokens)
-				+ Math.max(0, toolResultsSinceMeasure);
-		int reserve = this.config.getReserveTokens();
+		return decide(limitTokens, usedPrompt, lastCompletion, newInputTokens, toolResultsSinceMeasure, 0,
+				thresholdsArmed);
+	}
+
+	/**
+	 * 触发判定（带<b>整包估算</b>；C13）。
+	 *
+	 * <h2>为什么需要整包估算</h2>
+	 * 真值口径 {@code used + completion + input + toolResults} 只在"有过一次成功的上游请求"时成立 ——
+	 * 那时 {@code used} 已经把 system 人设/工作区快照与工具 schema 都算进去了。轮首（新会话、新进程、
+	 * {@code ai:ctx:} 过期）与压缩后的第一条请求都<b>没有真值</b>：旧口径这时只算"本轮新输入"，
+	 * 于是一份 3000 token 的 system + 4000 token 的工具集在小窗口模型上<b>一个字都没进判据</b>，
+	 * 一直到上游 400 才发现。
+	 *
+	 * <p>因此无真值时改用调用方给的整包估算（system + tools + 历史 + 本轮输入）。
+	 * 有真值时仍走真值口径 —— 真值是账单，估算只负责兜底（"真值优先"不变）。
+	 *
+	 * @param wholeRequestEstimate 整包估算（{@code <=0} = 调用方没有这份估算 ⇒ 退回旧口径）
+	 */
+	public Decision decide(int limitTokens, int usedPrompt, int lastCompletion, int newInputTokens,
+			int toolResultsSinceMeasure, int wholeRequestEstimate, boolean thresholdsArmed) {
+		long nextEst;
+		if (usedPrompt > 0) {
+			nextEst = Math.max(0, usedPrompt) + Math.max(0, lastCompletion) + Math.max(0, newInputTokens)
+					+ Math.max(0, toolResultsSinceMeasure);
+		}
+		else if (wholeRequestEstimate > 0) {
+			// 无真值：整包估算；completion 单独取 max 兜住"上一跳输出还没进历史"的形态（不重复计）
+			nextEst = Math.max(wholeRequestEstimate,
+					Math.max(0, lastCompletion) + Math.max(0, newInputTokens) + Math.max(0, toolResultsSinceMeasure));
+		}
+		else {
+			nextEst = Math.max(0, lastCompletion) + Math.max(0, newInputTokens) + Math.max(0, toolResultsSinceMeasure);
+		}
+		int reserve = effectiveReserve(limitTokens, this.config.getReserveTokens());
 		if (limitTokens <= 0) {
 			return new Decision(Level.NONE, 0d, (int) nextEst, 0, reserve);
 		}

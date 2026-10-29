@@ -113,7 +113,8 @@ public final class ContextCompactor {
 	 * @param clearedToolCallIds 被清除的调用 id（台账/日志可追溯）
 	 * @param reason           跳过/执行原因
 	 * @param limitTokens      分母（0 = 未知）
-	 * @param usedTokens       压缩后基线（{@code est=true} 时为估算）
+	 * @param usedTokens       压缩后基线（{@code est=true} 时为估算；<b>含 system + tools</b>，与上游
+	 *                         {@code usage.promptTokens} 同口径 —— 见 {@code compact} 里的 baseline 注释）
 	 * @param est              基线是否估算
 	 * @param circuit          熔断态（由 {@code CompactionFuse} 维护）
 	 * @param ratio            触发占比
@@ -231,8 +232,12 @@ public final class ContextCompactor {
 					REASON_LIMIT_UNKNOWN, state.circuit());
 		}
 		boolean armed = trigger.hysteresisUnlocked(state.usedTokens(), limit, state.everCompacted());
+		// C13：无真值时用整包估算判（system + tools + 历史 + 本轮输入）—— 轮首/压缩后基线没有
+		// 上游 truth，只算"新输入"会让 system 与工具 schema 在小窗口模型上完全不计入判据。
+		int wholeRequest = before + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens())
+				+ Math.max(0, request.inputTokens()) + Math.max(0, request.toolResultsSinceMeasure());
 		ContextTrigger.Decision decision = trigger.decide(limit, request.usedTokens(), request.completionTokens(),
-				request.inputTokens(), request.toolResultsSinceMeasure(), armed);
+				request.inputTokens(), request.toolResultsSinceMeasure(), wholeRequest, armed);
 		if (!decision.triggered()) {
 			return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit, decision.ratio(),
 					decision.nextEst(), armed ? REASON_UNDER_THRESHOLD : REASON_HYSTERESIS_LOCKED, state.circuit());
@@ -323,9 +328,13 @@ public final class ContextCompactor {
 			if (request.messageJsonBefore() != null && !request.messageJsonBefore().isEmpty()) {
 				this.store.archive(request.sessionId(), state.turnNo(), request.messageJsonBefore());
 			}
-			// ② 再写真值：压缩成功后基线置为"压缩后规模估算"，等下一次真值回填
+			// ② 再写真值：压缩成功后基线置为"压缩后规模估算"，等下一次真值回填。
+			// C13：这条基线必须<b>含 system + tools</b> —— 上游真值（promptTokens）本就包含这两项，
+			// 基线只写历史估算会让下一轮 nextEst 永远少算前缀，小窗口上"看着没满、一发就 400"。
+			// 台账/帧的 before/after 仍是消息口径（与轮首同账），只有基线补齐前缀。
+			int baseline = after + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
 			ContextState compacted = state.withCompaction(action, turns, lost, reason, now)
-				.withUsage(after, 0, state.turnNo(), true, now, request.model(), request.systemTokens(),
+				.withUsage(baseline, 0, state.turnNo(), true, now, request.model(), request.systemTokens(),
 						request.toolsTokens(), request.inputTokens());
 			if (action.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
 				compacted = fuse.onSuccess(compacted, now);
@@ -349,7 +358,7 @@ public final class ContextCompactor {
 					reason, "before", before, "after", after, "savedTokens", saved, "lostTokens", lost, "turns",
 					turns, "clearedPairs", clear.cleared().size(), "summaryChars", summaryChars, "limit", limit);
 			return new Outcome(action, current, before, after, saved, clear.cleared().size(), clear.clearedIds(),
-					reason, limit, after, true, compacted.circuit(), decision.ratio(), decision.nextEst(), turns, lost,
+					reason, limit, baseline, true, compacted.circuit(), decision.ratio(), decision.nextEst(), turns, lost,
 					summaryChars);
 		}
 		catch (RuntimeException ex) {

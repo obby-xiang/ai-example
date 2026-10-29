@@ -1412,6 +1412,11 @@ public class AiProperties {
 		 * <p>依据 = 调研 §① Claude Code 的 13K 预留缓冲；覆盖 {@code max-tokens 4096} 输出空间
 		 * + 一轮工具回环余量。比例阈值对 {@code limit − reserve} 取比 ⇒ 触发线不会把输出空间吃掉
 		 * （128K 下 L3@95% 仍剩 5.75K &gt; 4096）。
+		 *
+		 * <p><b>C13：实际生效值是"按窗口收口后"的值</b> —— 判定侧一律经
+		 * {@code ContextTrigger#effectiveReserve(limit, reserve)} 取 {@code min(本值, 窗口/2)}。
+		 * 理由：本值是<b>绝对额度</b>，在窗口只比它大一点的小模型上（如 15000）会把分母压成 2000，
+		 * 任何请求都判成越线（退化分母）。128K 下收口前后逐字相同（{@code min(13000, 64000)}）。
 		 */
 		private int reserveTokens = 13000;
 

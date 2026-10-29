@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.context.ContextEstimator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -129,18 +130,56 @@ public class ToolResultLimiter {
 	}
 
 	/**
+	 * 剩余窗口（token）折算成<b>字符</b>额度（C13；保守口径）。
+	 *
+	 * <p>估算器是"字符 → token"（CJK 1.7 字符/token，其余 4 字符/token）。反算必须取两者中
+	 * <b>更保守</b>的一侧：{@code tokens × 1.7}。对拉丁文本这会算得比真实容量小（宁可多裁一点，
+	 * 也不让一个字符计被低估成"装得下"而在下一跳越窗）。
+	 *
+	 * @param tokens 剩余窗口（token；{@code <=0} ⇒ 0）
+	 */
+	public static int charsForRemainingTokens(int tokens) {
+		if (tokens <= 0) {
+			return 0;
+		}
+		return (int) Math.floor(tokens * ContextEstimator.CJK_CHARS_PER_TOKEN);
+	}
+
+	/**
 	 * 按配置裁剪一份<b>给模型看</b>的工具结果文本。
 	 *
 	 * @param toolName 工具名（决定分档；null/空白/未注册 ⇒ 兜底档 8000）
 	 * @param text     原始结果文本
 	 */
 	public Truncation forModel(String toolName, String text) {
+		return forModel(toolName, text, 0);
+	}
+
+	/**
+	 * 按配置<b>且</b>按剩余窗口裁剪一份给模型看的工具结果文本（C13）。
+	 *
+	 * <h2>为什么要有窗口这一档</h2>
+	 * 配置档是"单份结果的静态上限"（默认 20000 字符）。它不知道这一轮还剩多少窗口：15000 的模型上
+	 * 一份 20000 字符的结果自己就把整窗吃掉，而 {@code keep-tool-pairs} 又把最近几对钉住（轮内 L1
+	 * 清不掉它们）⇒ 下一跳必然撞上游 400。于是模型侧写入口按<b>剩余窗口</b>再收一刀：
+	 * 取 {@code min(配置档, 剩余窗口)}，两者都保留（配置档仍然是上限，窗口更紧时以窗口为准）。
+	 *
+	 * <p>截断字段契约（{@code truncated/strategy/originalChars/returnedChars/notice}）与配置档路径
+	 * <b>完全同一套</b>：模型因此仍能看见"这份结果不是全部"；帧/台账里的全文不受影响。
+	 *
+	 * @param remainingChars 剩余窗口折算的字符额度（{@code <=0} = 没有窗口信息 ⇒ 只按配置档）
+	 */
+	public Truncation forModel(String toolName, String text, int remainingChars) {
 		if (text == null || text.isEmpty()) {
 			return Truncation.untouched(text);
 		}
 		AiProperties.ResultBudget.Model model = this.properties.getResultBudget().getModel();
 		int maxRows = model.getMaxRows();
 		int maxChars = maxCharsFor(toolName, model);
+		if (remainingChars > 0) {
+			// 0 = "该档不限" 的既有语义，遇到窗口额度时以窗口为准（否则窗口形同虚设）
+			maxChars = maxChars <= 0 ? remainingChars : Math.min(maxChars, remainingChars);
+		}
 		int originalChars = text.length();
 
 		if (TruncationContract.looksStructured(text)) {

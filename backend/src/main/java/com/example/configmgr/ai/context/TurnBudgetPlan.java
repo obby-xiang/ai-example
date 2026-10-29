@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.context;
 
+import com.example.configmgr.common.ErrorCodes;
+
 /**
  * 轮内（工具回环）上下文预算判定（工具轮内上下文预算批）。
  *
@@ -21,8 +23,9 @@ package com.example.configmgr.ai.context;
  * 追加一条收尾指令让模型用已有信息作答，并<b>武装</b>（armed）本轮：此后模型再请求工具时
  * <b>一律不执行</b>（副作用到此为止），直到本轮结束；</li>
  * <li>{@link Action#OVERFLOW}：估算已达<b>硬上限</b>（{@code nextEst >= limitTokens}）——
- * 这一发请求的上游 400 是可预见的，不发；调用方先落定已执行的台账/快照，再报
- * {@code CONTEXT_OVERFLOW}。</li>
+ * 这一发请求的上游 400 是可预见的，不发；调用方先落定已执行的台账/快照，再按
+ * {@link Decision#failureCode()} 报错（真越窗 {@code CONTEXT_OVERFLOW}；收尾被连续无视
+ * {@code TOOL_BUDGET_EXHAUSTED}，两者原因不同、处置也不同）。</li>
  * </ul>
  *
  * <h2>真值优先（与 {@link ContextTrigger} 同一口径）</h2>
@@ -129,7 +132,8 @@ public final class TurnBudgetPlan {
 	 * @param ratio       {@code nextEst / (limit − reserve)}（{@code limit <= 0} 时恒 0）
 	 * @param nextEst     下一跳请求的估算（判据值）
 	 * @param limitTokens 分母（{@code <=0} = 未知）
-	 * @param reserveTokens 预留缓冲
+	 * @param reserveTokens 预留缓冲（<b>已按实际窗口收口</b>，见
+	 *                    {@link ContextTrigger#effectiveReserve}）
 	 * @param degraded    上限未知（调用方据此不做比例判定、不发百分比）
 	 * @param reason      原因（见本类常量）
 	 */
@@ -138,6 +142,19 @@ public final class TurnBudgetPlan {
 
 		public boolean triggered() {
 			return this.action != Action.PROCEED;
+		}
+
+		/**
+		 * 该判定若以失败收尾，应使用的错误码（C13 第 5 项）。
+		 *
+		 * <p><b>收尾被无视 ≠ 真越窗</b>：{@link #REASON_WRAP_UP_IGNORED} 是"模型在被要求收尾后仍反复
+		 * 要工具"（硬上界命中），与"prompt 真的吃掉了整窗"是两件事。旧实现两者共用
+		 * {@code CONTEXT_OVERFLOW}，用户被告知"开新会话"、运维去查窗口 —— 都指错了方向。故前者用
+		 * 已登记的 {@code TOOL_BUDGET_EXHAUSTED}（与轮内被拦下的工具调用同一个原因码）。
+		 */
+		public String failureCode() {
+			return REASON_WRAP_UP_IGNORED.equals(this.reason) ? ErrorCodes.TOOL_BUDGET_EXHAUSTED
+					: ErrorCodes.CONTEXT_OVERFLOW;
 		}
 
 	}
@@ -151,7 +168,8 @@ public final class TurnBudgetPlan {
 			return new Decision(Action.PROCEED, 0d, 0, 0, 0, true, REASON_LIMIT_UNKNOWN);
 		}
 		int limit = Math.max(0, request.limitTokens());
-		int reserve = Math.max(0, request.reserveTokens());
+		// C13：预留按实际窗口收口（小窗口下绝对预留会把分母压成个位数 ⇒ 退化分母）
+		int reserve = ContextTrigger.effectiveReserve(limit, request.reserveTokens());
 		int nextEst = request.nextEstimate();
 		if (limit <= 0) {
 			return new Decision(Action.PROCEED, 0d, nextEst, 0, reserve, true, REASON_LIMIT_UNKNOWN);

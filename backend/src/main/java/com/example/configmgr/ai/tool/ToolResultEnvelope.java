@@ -174,8 +174,33 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	 * @param toolName 工具名（null/空白 ⇒ 兜底档 8000）
 	 */
 	public String toModelJson(ToolResultLimiter limiter, String toolName) {
-		ToolResultLimiter.Truncation truncation = limiter == null ? ToolResultLimiter.Truncation.untouched(this.message)
-				: limiter.forModel(toolName, this.message);
+		return toModelJson(limiter, toolName, 0);
+	}
+
+	/**
+	 * 模型侧形态（分档 + <b>剩余窗口</b>；C13）：窗口额度比配置档更紧时按窗口收缩。
+	 *
+	 * <p>窗口来自本轮的上下文预算（{@code SpToolCallingManager#modelWriteBudget}）：配置档只知道
+	 * "单份结果最大能有多少"，不知道"这一轮还剩多少"。小窗口上两者必须取更小者，否则一份结果就能
+	 * 吃掉整窗（{@code keep-tool-pairs} 让轮内 L1 清不掉最近的几对，下一跳必然越窗）。
+	 *
+	 * @param remainingChars 剩余窗口折算的字符额度（{@code <=0} = 没有窗口信息 ⇒ 只按配置档）
+	 */
+	public String toModelJson(ToolResultLimiter limiter, String toolName, int remainingChars) {
+		ToolResultLimiter.Truncation truncation = limiter == null
+				? ToolResultLimiter.Truncation.untouched(this.message)
+				: limiter.forModel(toolName, this.message, remainingChars);
+		return toModelJsonWith(truncation);
+	}
+
+	/**
+	 * 模型侧形态（<b>已判定的截断</b>）：把一次截断判定原样写进信封的五个统一字段。
+	 *
+	 * <p>抽出来是为了让"按剩余窗口收缩"（C13）、"分档裁剪"（G5）与"对已落定结果的再收缩"
+	 * 共用<b>同一段</b>组装/中和/序列化代码 —— 三处若各写一遍，{@code truncated} 字段迟早有一处
+	 * 说错（模型就会把半份结果当成全文）。
+	 */
+	public String toModelJsonWith(ToolResultLimiter.Truncation truncation) {
 		// 先裁剪、再在字符串值上中和闭合标签，最后才序列化：JSON 文本不被二次转义/替换。
 		ToolResultEnvelope modelSide = new ToolResultEnvelope(this.ok, neutralize(this.code), neutralize(this.outcome),
 				this.retryable, neutralizeTarget(this.target), neutralizeValue(this.evidence),
@@ -183,6 +208,13 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 				truncation.originalChars(), truncation.returnedChars(), neutralize(truncation.notice()));
 		String json = modelSide.toJson();
 		return TOOL_RESULT_NOTICE + "\n" + TOOL_RESULT_OPEN + "\n" + json + "\n" + TOOL_RESULT_CLOSE;
+	}
+
+	/** 这份信封的 message 被再收缩后的形态（模型侧重建用；原文与字段口径不变）。 */
+	public ToolResultEnvelope withTruncation(ToolResultLimiter.Truncation truncation) {
+		return new ToolResultEnvelope(this.ok, this.code, this.outcome, this.retryable, this.target, this.evidence,
+				truncation.text(), truncation.truncated(), truncation.strategy(), truncation.originalChars(),
+				truncation.returnedChars(), truncation.notice());
 	}
 
 	/** 模型侧字符串值的闭标签中和（等长；只处理本信封拥有的 {@code </tool_result>}）。 */

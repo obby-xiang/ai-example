@@ -18,12 +18,15 @@
  * 它必须大于 `reserve-tokens`（13000，否则启动期自检拦下），同时与任何一个用例窗口都不同 ——
  * 于是"分母 = 模型行"这件事有断言盯着（`limitTokens === 窗口 && !== 20000`）。
  *
- * <h2>取值纪律（P3 实测）</h2>
- * `max_context` 必须显著大于 `reserve-tokens`（默认 13000），否则 `limit − reserve` 被钳到 1、
- * 任何轮次都判满、逐轮直冲 L3。本文件两档：
- *   - {@link L1_WINDOW} = 19000（分母 6000，`nextEst/分母 ≈ 0.74` ⇒ 目标 L1）；
- *   - {@link LINEAGE_WINDOW} = 17500（分母 4500，`nextEst/分母 ≈ 0.98` ⇒ 目标 L3，
+ * <h2>取值纪律（P3 实测；C13 起预留按窗口收口）</h2>
+ * 旧口径下 `limit − reserve` 在"预留接近窗口"时会被钳成个位数的分母：任何轮次都判满、
+ * 逐轮直冲 L3（退化分母）。C13 起 `ContextTrigger#effectiveReserve` 把有效预留收口到
+ * **窗口的一半** ⇒ 小窗口下分母恒为 `窗口 / 2`。于是本文件的两档按"先定分母再定窗口"取：
+ *   - {@link L1_WINDOW} = 12000（分母 6000，`nextEst/分母 ≈ 0.74` ⇒ 目标 L1）；
+ *   - {@link LINEAGE_WINDOW} = 9000（分母 4500，`nextEst/分母 ≈ 0.98` ⇒ 目标 L3，
  *     但"每次至多升一格"⇒ 逐轮 L1 → L2 → L3）。
+ * 窗口同时是**硬上限**（`nextEst >= limit` ⇒ 轮内判越窗）；C13 之后越窗不再直接失败，
+ * 而是先收窄最新未保护的工具结果、再压缩固定历史（只调模型、不重跑工具）。
  *
  * <h2>usage 形状</h2>
  * 压缩判据读「上一轮 usage 真值 + 本轮输入估算」，桩的 `last`（prompt=1200）在小分母下
@@ -70,9 +73,9 @@ test.skip(
   'C-08 / C-10 / C-13 / C-14 需要用「小 max_context 模型行」压分母（模型配置写接口），见文件头运行说明'
 )
 
-/** 分母两档（`ai_model.max_context`；均 > reserve-tokens 13000，见文件头取值纪律）。 */
-const L1_WINDOW = 19000
-const LINEAGE_WINDOW = 17500
+/** 分母两档（`ai_model.max_context`；有效预留 = 窗口的一半 ⇒ 分母 = 窗口 / 2，见文件头取值纪律）。 */
+const L1_WINDOW = 12000
+const LINEAGE_WINDOW = 9000
 /**
  * 启动参数里的弃用回退键 `app.ai.context.limit-tokens`（必须 > reserve-tokens 13000）。
  * 与上面两档都不同 ⇒ "分母取的是模型行"这件事有断言盯着，而不是靠"两个值恰好相等"。

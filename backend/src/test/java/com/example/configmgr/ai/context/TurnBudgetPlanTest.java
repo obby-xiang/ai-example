@@ -130,6 +130,19 @@ class TurnBudgetPlanTest {
 		assertThat(second).isEqualTo(first);
 	}
 
+	/**
+	 * C13：轮内也按<b>实际窗口</b>收口预留 —— 15000 窗口 + 13000 预留时，未收口的分母只剩 2000，
+	 * 6000 的请求会被判成 300%（收尾/硬停），收口后是 80%（只清旧结果）。
+	 */
+	@Test
+	void c13OversizedReserveIsClampedToTheRealWindowInRound() {
+		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request(6000, 13000, false, 0, 15000));
+
+		assertThat(decision.reserveTokens()).isEqualTo(7500);
+		assertThat(decision.ratio()).isCloseTo(0.8d, org.assertj.core.data.Offset.offset(1e-9));
+		assertThat(decision.action()).isEqualTo(TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS);
+	}
+
 	@Test
 	void unknownLimitDegradesInsteadOfJudging() {
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request(999999, 0, false, 0, 0));

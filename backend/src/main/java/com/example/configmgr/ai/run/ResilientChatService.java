@@ -3415,9 +3415,19 @@ public class ResilientChatService {
 	 * 只有派生码走完整码查表 —— 这样"精确化"只作用在需要它的地方，不搬运既有文案。
 	 */
 	private String messageFor(String code) {
+		return messageFor(code, safeFailureMessage(code));
+	}
+
+	/**
+	 * 基础码的中文白名单短句（派生后缀先剥掉再查；缺键回落通用失败句）。
+	 *
+	 * <p>抽成包级静态是为了让"码 → 用户面短句"这件事<b>可单测</b>：C13 把
+	 * {@code WRAP_UP_IGNORED} 换成 {@link ErrorCodes#TOOL_BUDGET_EXHAUSTED} 之后，
+	 * 若这里仍回落到通用句，用户会被带向"稍后重试"（实际应开新会话）—— 换码的理由就白费了。
+	 */
+	static String safeFailureMessage(String code) {
 		String base = baseCode(code);
-		return messageFor(code, SAFE_FAILURE_MESSAGES.getOrDefault(base,
-				SAFE_FAILURE_MESSAGES.get(ErrorCodes.AI_RUN_FAILED)));
+		return SAFE_FAILURE_MESSAGES.getOrDefault(base, SAFE_FAILURE_MESSAGES.get(ErrorCodes.AI_RUN_FAILED));
 	}
 
 	private String messageFor(String code, String zhFallback) {
@@ -3468,6 +3478,8 @@ public class ResilientChatService {
 			Map.entry(ErrorCodes.UPSTREAM_CONNECTION_BROKEN, "连接中断，请重试。"),
 			Map.entry(ErrorCodes.UPSTREAM_STREAM_ERROR, "AI 服务返回异常，请稍后重试。"),
 			Map.entry(ErrorCodes.CONTEXT_OVERFLOW, "对话内容过长，请开启新会话后重试。"),
+			// C13：收尾指令被连续无视（工具预算耗尽）—— 与"对话过长"分开说，处置也不同
+			Map.entry(ErrorCodes.TOOL_BUDGET_EXHAUSTED, "本轮的工具调用预算已用完，请开启新会话后重试。"),
 			Map.entry(ErrorCodes.UPSTREAM_REJECTED, "上游拒绝了本次请求，请检查模型参数或配置后重试。"),
 			Map.entry(ErrorCodes.UPSTREAM_AUTH_FAILED, "上游鉴权失败：请到「设置 → AI」检查 API Key。"),
 			Map.entry(ErrorCodes.UPSTREAM_RATE_LIMITED, "AI 服务繁忙（限流），请稍后重试。"),

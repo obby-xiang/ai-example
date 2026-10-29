@@ -81,7 +81,47 @@ class ContextCompactorTest {
 		ContextState state = this.store.read(SESSION_ID);
 		assertThat(state.level()).isEqualTo("L1");
 		assertThat(state.est()).as("压缩后基线是估算值，等下一次真值回填").isTrue();
-		assertThat(state.usedTokens()).isEqualTo(outcome.after());
+		// C13：基线 = 压缩后历史估算 + system(3000) + tools(4000) —— 上游真值本就含这两项，
+		// 只写历史估算会让下一轮 nextEst 永远少算前缀（见 c13CompactionBaselineIncludesSystemAndTools）
+		assertThat(state.usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
+	}
+
+	/**
+	 * C13：压缩后的估算基线必须<b>含 system + tools</b>（{@code request(...)} 固定 3000 / 4000）。
+	 *
+	 * <p>缺陷现场：旧实现把基线写成"压缩后历史估算"，于是下一轮 {@code nextEst = 基线 + 完成 + 输入}
+	 * 永远少算 system 人设/工作区快照与工具 schema —— 小窗口模型上就是"看着没满、一发就 400"。
+	 * 归档/台账/frame 的 {@code before/after} 仍是<b>消息口径</b>（与轮首同账），只有基线补齐前缀。
+	 */
+	@Test
+	void c13CompactionBaselineIncludesSystemAndTools() {
+		ContextCompactor.Outcome outcome = this.compactor.compact(request(turns(6), 81000, List.of("{\"m\":1}")));
+
+		assertThat(outcome.changed()).isTrue();
+		assertThat(outcome.usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
+		assertThat(this.store.read(SESSION_ID).usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
+	}
+
+	/**
+	 * C13：轮首没有真值时按<b>整包估算</b>判（历史 + system + tools + 本轮输入），
+	 * 且预留按实际窗口收口 —— 小窗口不再因为"只算新输入"而零预警越窗。
+	 */
+	@Test
+	void c13TurnStartWithoutTruthCountsSystemToolsAndHistory() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow), this.store);
+
+		ContextCompactor.Outcome outcome = service.compact(new ContextCompactor.Request(SESSION_ID, RUN_ID,
+				"deepseek-flash", 1L, turns(6), List.of("{}"), 0, 0, 0, 0, 3000, 4000, Set.of(),
+				TestProviderRuntime.runtime()));
+
+		assertThat(outcome.nextEst()).as("整包估算必须含 system + tools").isGreaterThanOrEqualTo(7000);
+		assertThat(outcome.reason()).as("只算新输入（0）会误报 under_threshold")
+			.isNotEqualTo(ContextCompactor.REASON_UNDER_THRESHOLD);
+		// 分母 = 15000 − min(13000, 7500) = 7500（未收口时会是 15000 − 13000 = 2000）
+		assertThat(outcome.ratio()).isCloseTo(outcome.nextEst() / 7500d,
+				org.assertj.core.data.Offset.offset(1e-9));
 	}
 
 	/** 未达线 ⇒ 什么都不做（不开归档、不写台账、不动消息）。 */
