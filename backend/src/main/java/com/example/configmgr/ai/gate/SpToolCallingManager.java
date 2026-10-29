@@ -1327,6 +1327,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 				// 记账失败就<b>不应用</b>这次截断（模型看到的历史绝不因一次 Redis 抖动少一半）。
 				if (trimmedTurns == 0) {
 					HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(), protectedIds);
+					// N-C（与轮首 L3 同口径）：先按<b>裁后估算</b>判 ——
+					// after = nextEst − lostTokens；只有 after + 有效预留 <= limit 才允许裁。
+					// 裁完仍放不下时，这一刀只丢用户历史、换不回可用请求（下一发照样 400）⇒ 不裁，
+					// 原样交给调用方按越窗如实收尾（历史留着还能换窗口/换模型重试）。
+					if (trim.changed() && nextEst - trim.lostTokens()
+							+ ContextTrigger.effectiveReserve(limit, config.getReserveTokens()) > limit) {
+						break;
+					}
 					if (trim.changed() && recordTurnTrim(runId, snapshot, current, trim, systemTokens, toolsTokens)) {
 						current = trim.messages();
 						trimmedTurns = trim.droppedTurns();

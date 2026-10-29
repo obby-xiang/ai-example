@@ -568,6 +568,34 @@ class SpToolCallingManagerTurnBudgetTest {
 	}
 
 	/**
+	 * C13 / R5 N-C（轮内同型）：<b>裁完也装不下</b>时不做轮内硬截断 —— 不归档、不丢轮、原样返回历史，
+	 * 由调用方按越窗如实收尾。
+	 *
+	 * <p>缺陷现场（与轮首 L3 同族）：越窗恢复"先丢最旧轮、再发一次注定 400 的请求"，净新增数据丢失。
+	 * 判据同轮首：{@code nextEst − lostTokens + effectiveReserve <= limit} 才允许裁。
+	 */
+	@Test
+	void inRoundTrimThatStillDoesNotFitIsNotApplied() {
+		this.properties.getContext().setLimitTokens(10_000);
+		// 预留 6000（< 窗口/2=5000? 不：min(6000, 5000) = 5000）⇒ 有效预留 5000
+		this.properties.getContext().setReserveTokens(6_000);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		List<Message> longHistory = historyWithLongTurns();
+
+		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1")))
+			.isInstanceOfSatisfying(StreamViolationException.class,
+					ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CONTEXT_OVERFLOW));
+
+		// 裁后 = 14313 − 5680 = 8633，8633 + 5000 = 13633 > 10000 ⇒ 裁了也没用 ⇒ 不裁
+		assertThat(this.contextStore.archiveCount()).as("不裁剪就不归档").isZero();
+		assertThat(this.contextStore.contextLedger(SESSION_ID)).isEmpty();
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.as("历史一轮都没丢（模型看到的 = 快照里的）").hasSize(longHistory.size() + 2);
+		assertThat(this.executed).as("工具只执行一次").containsExactly("c-1");
+	}
+
+	/**
 	 * C13 / R4 N-B：谱系<b>已在 L3</b> 时，轮内硬截断保持原级（不降到 L2）。
 	 *
 	 * <p>生产写入口的规则是 `lineage &lt;= L1 ⇒ L2，否则保持原级`：L3 会话再做一次轮内截断时，

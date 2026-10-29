@@ -78,6 +78,16 @@ public final class ContextCompactor {
 	public static final String REASON_CIRCUIT_OPEN = "circuit_open";
 
 	/**
+	 * 跳过原因：硬截断<b>裁完也装不下</b>（{@code hard_trim_cannot_fit}）。
+	 *
+	 * <p>前缀主导 + 历史已在 {@code keep-recent-turns} 下限时，丢掉的几轮换不回可用空间
+	 * （{@code nextEst − lostTokens + effectiveReserve} 仍 &gt; {@code limit}）。这时裁剪只会
+	 * <b>先丢掉用户的历史、再发一次注定 400 的请求</b> —— 净新增数据丢失。故宁可不裁、原样返回：
+	 * 上游如实报错，历史留着还能换窗口/换模型重试。
+	 */
+	public static final String REASON_TRIM_CANNOT_FIT = "hard_trim_cannot_fit";
+
+	/**
 	 * 跳过原因：本轮 system + tools 已占到 L2 触发线以上（{@code prefix_dominated}）。
 	 *
 	 * <p>L2/L3 只能压缩<b>历史</b>，压不动不可压缩的固定前缀：此时再压只会把还能用的旧轮丢掉
@@ -328,6 +338,13 @@ public final class ContextCompactor {
 				HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(),
 						request.protectedToolCallIds());
 				if (trim.changed()) {
+					// N-C：先按<b>裁后估算</b>判 —— 裁完连"prompt + 输出预留"都放不下时，
+					// 这一刀换不回可用空间，只换来数据丢失（用户历史没了、下一发照样 400）。
+					int afterTrim = decision.nextEst() - trim.lostTokens();
+					if (afterTrim + completionReserve > limit) {
+						return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit,
+								decision.ratio(), decision.nextEst(), REASON_TRIM_CANNOT_FIT, state.circuit());
+					}
 					current = trim.messages();
 					turns = trim.droppedTurns();
 				}

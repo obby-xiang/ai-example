@@ -315,6 +315,16 @@ class ContextCompactorTest {
 				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds, TestProviderRuntime.runtime());
 	}
 
+	/** N-C 语料：9 轮、每轮 ≈4K token —— 丢最旧 3 轮能换出 ≈12K，够覆盖"输出预留放不下"的缺口。 */
+	private static List<Message> hugeTurns() {
+		List<Message> messages = new ArrayList<>();
+		for (int i = 1; i <= 9; i++) {
+			messages.add(new UserMessage("第 " + i + " 轮问题"));
+			messages.add(AssistantMessage.builder().content("第 " + i + " 轮回答 " + "答".repeat(6_800)).build());
+		}
+		return messages;
+	}
+
 	private ContextCompactor compactorWith(RollingSummarizer.Summarizer summarizer) {
 		return new ContextCompactor(this.properties, this.resolver, this.store, summarizer);
 	}
@@ -376,9 +386,11 @@ class ContextCompactorTest {
 				this.store);
 		// 谱系已到 L2（这一步的目标是 L3）；真值 5000 让滞回解锁，但续跑重建的工具结果 +12000
 		// ⇒ nextEst = 17000 >= 15000：这一发注定 400（真实入口 = ResumeService 的 rebuiltToolTokens）。
+		// 语料用"可丢的 3 轮足够大"（每轮 ≈4K token）：N-C 只允许在"裁后能放下"时裁 ——
+		// 17000 − 12000 + 7500 = 12500 ≤ 15000，这一刀真的换得出空间。
 		seed("L2", 5000);
 		ContextCompactor.Request overflow = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				longTurns(), List.of("{}"), 5000, 0, 0, 12000, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				hugeTurns(), List.of("{}"), 5000, 0, 0, 12000, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
 
 		ContextCompactor.Outcome outcome = service.compact(overflow);
 
@@ -414,11 +426,47 @@ class ContextCompactorTest {
 	}
 
 	/**
-	 * C13 / R4 N-A（边界二）：{@code nextEst < limit} 但 {@code nextEst + 有效预留 > limit} ——
-	 * prompt 加输出预留放不下，上游仍会 400（max_tokens 被顶掉）⇒ 必须保留 L3 硬截断。
+	 * C13 / R5 N-C：<b>裁完也装不下</b>时不得丢历史（前缀主导 + pin 下限的精确边界）。
 	 *
-	 * <p>缺陷现场：R3 只判 {@code nextEst < limit}，于是在 "limit − reserve ≤ nextEst < limit" 这条
-	 * 区间里降级成 L1 ⇒ 每轮都发一次注定 400 的请求。
+	 * <p>缺陷现场：R4 只要"prompt + 输出预留放不下"就保留 L3，于是 L3 照做 —— 可这条历史已经压到
+	 * `keep-recent-turns` 的下限，丢掉的几轮换不回任何可用空间（after 仍然 > limit − reserve）。
+	 * 结果是<b>先丢用户的历史、再发一次注定 400 的请求</b>：净新增的数据丢失。
+	 *
+	 * <p>正确口径：应用 HardTrim 之前先按"裁后估算"判 ——
+	 * {@code after = nextEst − lostTokens}，只有 {@code after + effectiveReserve <= limit} 才允许
+	 * 裁剪并记账；否则 noop（保留原历史、不归档、不丢轮），原因如实报 {@code hard_trim_cannot_fit}。
+	 */
+	@Test
+	void c13PrefixDominatedTrimThatStillDoesNotFitIsNotApplied() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// nextEst 8000（> limit − reserve 7500 ⇒ 输出预留放不下），可丢的 3 轮只有 ~165 token ⇒
+		// 裁后 7835 + 7500 = 15335 > 15000：裁完仍放不下
+		seed("L2", 8000);
+		List<Message> history = longTurns();
+		ContextCompactor.Request impossible = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				history, List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+
+		ContextCompactor.Outcome outcome = service.compact(impossible);
+
+		assertThat(outcome.changed()).as("裁完仍装不下 ⇒ 不许丢历史").isFalse();
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_TRIM_CANNOT_FIT);
+		assertThat(outcome.turns()).isZero();
+		assertThat(outcome.lostTokens()).isZero();
+		assertThat(outcome.messages()).as("历史原样返回（同一份列表）").isSameAs(history);
+		assertThat(this.store.archiveCount()).as("不裁剪就不归档").isZero();
+		assertThat(this.store.contextLedger(SESSION_ID)).isEmpty();
+		assertThat(this.store.read(SESSION_ID).level()).as("谱系不动").isEqualTo("L2");
+	}
+
+	/**
+	 * C13 / R4 N-A（边界二）的另一半：输出预留放不下、但<b>裁后能放下</b> ⇒ 仍正常做 L3。
+	 *
+	 * <p>语料换成"可丢的几轮足够大"（每轮 ≈4K token，丢 3 轮 ≈12K）—— 这正是 N-C 之后
+	 * "保留 L3"唯一成立的局面：裁剪真的能换出空间。
 	 */
 	@Test
 	void c13PrefixDominatedAboveTheCompletionReserveKeepsL3() {
@@ -426,16 +474,18 @@ class ContextCompactorTest {
 		smallWindow.getContext().setLimitTokens(15000);
 		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
 				this.store);
-		// nextEst 8000 < limit 15000，但 8000 + 7500 = 15500 > 15000 ⇒ 输出预留放不下
+		// nextEst 8000 < limit 15000，8000 + 7500 = 15500 > 15000（输出预留放不下）；
+		// 但可丢的 3 轮 ≈12K ⇒ after ≈ -4000 ⇒ 裁后放得下 ⇒ L3 必须照做
 		seed("L2", 8000);
 		ContextCompactor.Request tight = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				longTurns(), List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				hugeTurns(), List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
 
 		ContextCompactor.Outcome outcome = service.compact(tight);
 
-		assertThat(outcome.level()).as("prompt + 输出预留放不下 ⇒ 保留 L3").isEqualTo(ContextTrigger.Level.L3);
+		assertThat(outcome.level()).as("裁后能放下 ⇒ 保留 L3").isEqualTo(ContextTrigger.Level.L3);
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
+		assertThat(this.store.archiveCount()).isEqualTo(1);
 	}
 
 	/** C13 / N3 的另一半：前缀主导时 <b>L1 仍照现有口径处理</b>（清得掉就清、照常记账）。 */

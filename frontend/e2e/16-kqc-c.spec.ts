@@ -33,11 +33,13 @@
  *     —— 故本文件统一带 {@code usage-shape=big}（prompt=11000 / completion=200，取数点
  *     {@code scripts/ci/stub-routes.json}）；`repeat`(4321) 在这个窗口段里连 70% 都够不到。</li>
  * </ol>
- * 三档窗口（先定分母再定窗口；前缀占比 44% / 51% / 60%，都 &lt; 80%）：
+ * 三档窗口（先定分母再定窗口；前缀占比 44% / 51% / 58%，都 &lt; 80%）：
  *   - {@link L1_WINDOW} = 28000（分母 15000，`nextEst/分母 ≈ 0.75` ⇒ 目标 L1）；
  *   - {@link C10_WINDOW} = 26000（分母 13000，`nextEst/分母 ≈ 0.86` ⇒ 目标 L2 ⇒ 先升 L1 再 L2 摘要）；
- *   - {@link LINEAGE_WINDOW} = 22000（分母 11000，`nextEst/分母 ≈ 1.02` ⇒ 目标 L3，
- *     但"每次至多升一格"⇒ 逐轮 L1 → L2 → L3）。
+ *   - {@link LINEAGE_WINDOW} = 23000（分母 11500，`nextEst/分母 ≈ 0.98` ⇒ 目标 L3，
+ *     但"每次至多升一格"⇒ 逐轮 L1 → L2 → L3）。取 23000 而不是 22000：R5/N-C 起 L3 只在
+ *     "裁后 + 输出预留放得下"时才落地 —— 22000 下 `nextEst(≈11222) + 有效预留(11000) > 22000`，
+ *     裁完仍放不下 ⇒ 产品会正确地**不裁**（历史不丢），本用例就再也走不到 L3。
  * 窗口同时是**硬上限**（`nextEst >= limit` ⇒ 轮内判越窗）；C13 之后越窗不再直接失败，
  * 而是先清旧结果、再收窄最新未保护的工具结果、最后压缩固定历史（只调模型、不重跑工具）。
  *
@@ -89,7 +91,7 @@ test.skip(
 /** 分母两档（`ai_model.max_context`；有效预留 = 窗口的一半 ⇒ 分母 = 窗口 / 2，见文件头取值纪律）。 */
 const L1_WINDOW = 28000
 const C10_WINDOW = 26000
-const LINEAGE_WINDOW = 22000
+const LINEAGE_WINDOW = 23000
 /**
  * 启动参数里的弃用回退键 `app.ai.context.limit-tokens`（必须 > reserve-tokens 13000）。
  * 与上面两档都不同 ⇒ "分母取的是模型行"这件事有断言盯着，而不是靠"两个值恰好相等"。
@@ -462,7 +464,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     const sameNumbers = (event: Record<string, unknown> | undefined): boolean =>
       Number(event?.turns ?? -1) === snapshotTurns && Number(event?.lostTokens ?? -1) === snapshotLost
     const reflectsRoundStart = snapshotLevel === levelOf(lastRoundStart.level) && sameNumbers(lastRoundStart)
-    // 轮内硬截断写进状态的档位与生产写入口一致（N1）：`lineage <= L1 ⇒ L2，否则保持原级`
+    // 轮内硬截断写进状态的档位与生产写入口一致（N1）：**最多推到 L2；已在 L2/L3 则保持原级**
     // ⇒ 合法值只能是 **L2 或 L3**（不是"只接受 L2"：谱系已到 L3 的会话再做一次轮内截断时仍是 L3，
     // 只认 L2 会把这条合法路径判成假红）。`sameNumbers` 保证 turns/lostTokens 确实来自这次截断。
     const reflectsTurnTrim =
@@ -480,7 +482,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
       levelIndex(lastRoundStart.level)
     )
     // 轮内事件**不改 level**：L1 只清结果（turns/lostTokens 恒 0），L3 只累计 turns/lostTokens
-    // （写进状态时被封顶到 L2，见上一段 reflectsTurnTrim）
+    // （写进状态时"最多推到 L2、已在 L2/L3 保持原级"，见上一段 reflectsTurnTrim）
     for (const event of changed.filter((item) => String(item.reason ?? '').startsWith('turn_'))) {
       if (levelOf(event.level) === 'L1') {
         expect(Number(event.turns ?? -1), `轮内 L1 不折叠轮：${JSON.stringify(event).slice(0, 160)}`).toBe(0)
