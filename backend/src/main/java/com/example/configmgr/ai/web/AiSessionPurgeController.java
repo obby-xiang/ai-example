@@ -102,7 +102,7 @@ public class AiSessionPurgeController {
 		body.put("runActive", activeRunId != null);
 		body.put("activeRunId", activeRunId);
 		body.put("storedBy", this.runStore.instanceId());
-		body.put("note", "完整会话销毁：只删本会话 AI 数据（记忆/run/上下文/附件/反馈/完整历史/会话索引），"
+		body.put("note", "完整会话销毁：只删本会话 AI 数据（记忆/run/上下文/附件/反馈/会话索引），"
 				+ "业务作业、任务文件、staging、配置/provider/model/settings/KB/审计/资源锁/业务文件一概不动。"
 				+ "complete=false 表示有 deferred/errors/aborted，按明细重试（删除幂等）；此时 deleted=false。"
 				+ "浏览器 sessionStorage 的镜像与草稿由 clientCleanup 交给前端精确清理。");

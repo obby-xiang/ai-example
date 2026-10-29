@@ -7,7 +7,6 @@ import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -30,7 +29,6 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
@@ -50,7 +48,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -199,7 +196,7 @@ class FirstTurnDriveOwnershipTest {
 
 	/**
 	 * <b>长预检不得被僵尸接管造成双驱动</b>：首轮建好快照、取得续跑权之后有一段长预检/首包等待
-	 * （这里用完整历史落库那一笔把时间钉住）。预检期间：
+	 * （这里用上游 {@code chatResponse()} 首包那一笔把时间钉住）。预检期间：
 	 * <ol>
 	 * <li>另一实例抢不到这一轮的续跑权（跨实例的唯一接管入口被堵住）；</li>
 	 * <li>同实例的 {@code forceTakeover} 僵尸接管被"驱动还活着"复核驳回（租约可重入，
@@ -211,13 +208,11 @@ class FirstTurnDriveOwnershipTest {
 	void aLongPreflightKeepsOwnershipSoNoTakeoverCanDoubleDrive() throws Exception {
 		CountDownLatch preflightEntered = new CountDownLatch(1);
 		CountDownLatch preflightRelease = new CountDownLatch(1);
-		AiChatHistoryRecorder recorder = mock(AiChatHistoryRecorder.class);
-		doAnswer(invocation -> {
+		when(this.streamSpec.chatResponse()).thenAnswer(invocation -> {
 			preflightEntered.countDown();
 			preflightRelease.await(10, TimeUnit.SECONDS);
-			return null;
-		}).when(recorder).recordUser(anyString(), anyString(), any());
-		ReflectionTestUtils.setField(this.service, "historyRecorder", recorder);
+			return Flux.just(chunk("好了"), terminal());
+		});
 
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);

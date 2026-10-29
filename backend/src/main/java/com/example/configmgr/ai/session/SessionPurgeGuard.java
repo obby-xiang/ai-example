@@ -19,9 +19,8 @@ import java.util.List;
  *
  * <p>
  * 因此本守卫被<b>所有"会把会话数据写回来"的写口</b>消费：{@code RedisChatMemoryRepository#saveAll}
- * 与完整历史的 {@code AiChatHistoryService#append} 在写之前问一次 {@link #isArmed(String)}，
- * 命中即拒绝写回（WARN 留痕）。它<b>不</b>拦读、不拦删除：销毁流程本身仍要能删键，
- * 重复销毁也必须能继续。
+ * 在写之前问一次 {@link #isArmed(String)}，命中即拒绝写回（WARN 留痕）。它<b>不</b>拦读、不拦删除：
+ * 销毁流程本身仍要能删键，重复销毁也必须能继续。
  *
  * <h2>为什么是带 TTL 的墓碑而不是永久标记</h2>
  * TTL 取 {@code app.ai.session-ttl}（默认 24h），与会话同寿：覆盖"在飞轮次最迟一个会话 TTL 内

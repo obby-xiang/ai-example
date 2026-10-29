@@ -13,7 +13,6 @@ import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
@@ -143,8 +142,7 @@ public class ResilientChatService {
 	 *
 	 * <p>
 	 * 两个消费面：① {@code done.extra.truncated}（实时流，见 {@link #finish}）；
-	 * ② 最终 assistant 消息 metadata（持久面，经 {@code AiChatHistoryService#commandFor} 的
-	 * metadata 保真路径落进 {@code ai_chat_message.metadata_json}，刷新后仍可读）。
+	 * ② 最终 assistant 消息 metadata（记忆窗口：{@code /history} 以 additive 键透出）。
 	 */
 	public static final String TRUNCATED_KEY = "truncated";
 
@@ -413,13 +411,6 @@ public class ResilientChatService {
 	 */
 	@Autowired(required = false)
 	private KbPromptSection kbPromptSection;
-
-	/**
-	 * 完整对话历史写入适配器（第二阶段）。字段注入以保持既有构造器/单测零改动；
-	 * 缺席（局部上下文/直接 new）时只跳过完整历史写入，聊天与记忆窗口行为不变。
-	 */
-	@Autowired(required = false)
-	private AiChatHistoryRecorder historyRecorder;
 
 	/**
 	 * 用户面错误文案的 en 来源（R-08 / 4B）。生产由 Spring Boot 的 {@code MessageSource} 注入；
@@ -749,12 +740,6 @@ public class ResilientChatService {
 				log.warn("首轮拒绝驱动 runId={}：这一轮的续跑权已在别的实例手里（避免双驱动；终态与终帧归持有方）",
 						runId);
 				return;
-			}
-
-			// 完整历史：用户消息在 run 创建后、上游调用前落库（上游失败也不该让用户输入消失）。
-			// 幂等键 = (sessionId, runId, user-<runId>)；重复路径由 converge 的 recordRunTail 兜底补写。
-			if (this.historyRecorder != null) {
-				this.historyRecorder.recordUser(sessionId, runId, instructions.get(1));
 			}
 
 			// 压缩即时可见：请求前压的，故必在本轮第一个 delta/tool_start 之前（帧类型 15 → 16 的唯一新增）。
@@ -1683,8 +1668,7 @@ public class ResilientChatService {
 			// L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
 			// 跨供应方隔离：给模型生成的消息打中性来源标记（快照的冻结身份）—— 请求层据此决定是否回放
 			// reasoningContent。存储面不删任何字（标记是 additive 的，隔离只作用于模型输入）。
-			// 截断专项：length 同时写进 metadata（持久事实）—— 经历史写入器的 commandFor(metadata)
-			// 保真路径落 ai_chat_message.metadata_json，刷新后 /history 仍能读到；与 done.extra 同判据。
+			// 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
 			AssistantMessage finalAssistant = ReasoningOrigin.stamp(
 					assistantMessage(text, storedReasoning(accumulator.reasoningText()), lengthTruncated),
 					snapshot.getProviderId(), snapshot.getModelId());
@@ -1696,15 +1680,9 @@ public class ResilientChatService {
 			snapshot.setStatus(RunSnapshot.DONE);
 			snapshot.setCancelled(false);
 			snapshot.setAttempts(attempts);
-			// 完整历史：最终 assistant 与实时流使用同一份正文（text），先落历史再存快照；
-			// 崩溃在两者之间时，重启 resume 会按同一 messageId 幂等命中。
-			// RT-20：DB 历史是 first-write-wins 且没有 fencing —— 旧驱动先落库就会把答案钉死成
-			// 作废的那一份。因此（与快照写共享同一个续跑权判定，且在<b>写之前</b>问一次）：
-			// 丢租/不可确认/fence 已被接管时，历史与记忆一律不写。
-			if (persistAllowed(runId, "终态 DB 历史/快照/记忆")) {
-				if (this.historyRecorder != null) {
-					this.historyRecorder.recordFinalAssistant(sessionId, runId, finalAssistant);
-				}
+			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
+			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
+			if (persistAllowed(runId, "终态快照/记忆")) {
 				this.store.save(snapshot);
 				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
 				// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路），
@@ -2064,8 +2042,8 @@ public class ResilientChatService {
 	 * 的 per-run 监视器里（与 {@code cancelTerminal} 同一把），"判定 → 落库 → 出帧"因此对取消收尾是原子的。
 	 * 快照为 {@code null} 时也先查取消登记表：没有快照可写，取消登记是唯一还读得到的取消信号。
 	 *
-	 * <p><b>不伪写半截</b>：本方法只改快照的状态/错误/次数，不向 DB 写任何正文
-	 * （{@code ai_chat_message} 的写入只在 {@code convergeMemory} / 终态落定那几处，且失败路径不调它）。
+	 * <p><b>不伪写半截</b>：本方法只改快照的状态/错误/次数，不向记忆窗口写任何正文
+	 * （{@code chat:mem:*} 的整窗覆盖只在 {@code convergeMemory} / 终态落定那几处，失败路径不调它）。
 	 *
 	 * @return {@code true} = 失败态已落库（或本就没有快照可写，沿用旧口径继续发失败终帧）；
 	 *         {@code false} = 取消优先，调用方必须直接返回（交给取消收尾）
@@ -2426,11 +2404,9 @@ public class ResilientChatService {
 		List<PendingToolCall> cancelledPendings = this.store.pendingsLenient(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			List<Message> stoppedMessages = new ArrayList<>();
 			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
 					storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
 				history.add(stopped);
-				stoppedMessages.add(stopped);
 			}
 			snapshot.setMessageJson(this.codec.serializeAll(history));
 			snapshot.setInFlightToolCalls(new ArrayList<>());
@@ -2439,13 +2415,9 @@ public class ResilientChatService {
 			snapshot.setCancelled(true);
 			snapshot.setAttempts(attempts);
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
-			// 完整历史：取消半截 + 配对 tool 响应按原落定点写入；stopped 由消息 metadata 决定。
-			// RT-20：同样是 first-write-wins 的答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
-			boolean persisted = persistAllowed(runId, "取消态 DB 历史/快照/记忆");
+			// RT-20：取消态快照/记忆同样是答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
+			boolean persisted = persistAllowed(runId, "取消态快照/记忆");
 			if (persisted) {
-				if (this.historyRecorder != null) {
-					this.historyRecorder.recordStopped(sessionId, runId, stoppedMessages);
-				}
 				this.store.save(snapshot);
 				convergeMemory(runId, sessionId, history);
 			}
@@ -2587,7 +2559,7 @@ public class ResilientChatService {
 	 * 出口<b>共用</b>同一个 {@link RunStore#saveTerminalUnlessCancelled} 原子 CAS）；被拒写时不发
 	 * {@code error} 终帧，改由取消收尾发 {@code done{cancelled:true}}。
 	 *
-	 * <p><b>不伪写半截</b>：本路径不写 DB 历史（{@code ai_chat_message}）—— 失败现场只落在
+	 * <p><b>不伪写半截</b>：本路径不写记忆窗口 —— 失败现场只落在
 	 * Redis 快照与帧归档里（AR-01：不新增 DB 写入 / 列 / TTL）。
 	 */
 	private void fail(String runId, String sessionId, StreamViolationException violation, int attempts, boolean emitted,
@@ -2646,16 +2618,11 @@ public class ResilientChatService {
 	 * 不凭 pendings 凭空造（禁悬空段）。
 	 */
 	private void convergeMemory(String runId, String sessionId, List<Message> history) {
-		// RT-20：旧驱动（丢租/不可确认/续跑权已被接管）不得写回记忆，也不得把答案补进 DB 历史。
+		// RT-20：旧驱动（丢租/不可确认/续跑权已被接管）不得写回记忆。
 		// 这一条与出帧/台账/认领的拦截同源 —— 否则"新主人答完、旧驱动收尾"会把旧答案写进
-		// ai_chat_message 与 chat:mem（刷新后看到作废回答），而快照写早已被 fence 拒绝。
-		if (!persistAllowed(runId, "记忆/历史收敛")) {
+		// chat:mem（刷新后看到作废回答），而快照写早已被 fence 拒绝。
+		if (!persistAllowed(runId, "记忆收敛")) {
 			return;
-		}
-		// 完整历史：以"最后一个真实 user"为界补齐当前 run 的 assistant/tool 消息。
-		// 幂等键 (runId, messageId) ⇒ finish/cancel/empty 重复收敛、resume 重放都不会重复插入。
-		if (this.historyRecorder != null) {
-			this.historyRecorder.recordRunTail(sessionId, runId, history);
 		}
 		List<Message> memoryPortion = history.stream()
 			.filter(message -> message.getMessageType() != MessageType.SYSTEM)

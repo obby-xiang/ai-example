@@ -13,7 +13,6 @@ import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.context.SystemMessages;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
@@ -234,13 +233,6 @@ public class ResumeService {
 	 */
 	@Autowired(required = false)
 	private MessageSource messageSource;
-
-	/**
-	 * 完整对话历史写入适配器（第二阶段）。字段注入保持 10 参构造器与既有直接 new 的用例零改动；
-	 * 缺席时只跳过历史补充，续跑语义不变。
-	 */
-	@Autowired(required = false)
-	private AiChatHistoryRecorder historyRecorder;
 
 	/**
 	 * 批间运行上下文刷新器（多步工作流批的续跑侧入口）。
@@ -1782,11 +1774,6 @@ public class ResumeService {
 				rebuiltToolTokens = responses.stream()
 					.mapToInt(response -> ContextEstimator.estimate(response.responseData()))
 					.sum();
-				// 完整历史：续跑重建的工具轮按同一 messageId 幂等补写；首轮已写则命中返回，不重复。
-				// 先写历史再清 in-flight/存快照：崩溃在两者之间时下次 resume 仍会重建并幂等命中。
-				if (this.historyRecorder != null) {
-					this.historyRecorder.recordToolRound(sessionId, runId, assistant, toolMessage);
-				}
 				snapshot.setMessageJson(this.codec.serializeAll(history));
 				snapshot.setContext(nextHopContext.toMap());
 				snapshot.setInFlightToolCalls(new ArrayList<>());

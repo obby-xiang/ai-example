@@ -4,8 +4,6 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.history.AiChatHistoryService;
-import com.example.configmgr.ai.history.AiChatMessageRepository;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.resultview.ListTasksResultViewProvider;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -28,15 +26,10 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-import org.springframework.transaction.PlatformTransactionManager;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -177,33 +170,13 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	/**
-	 * AR-12 完整历史通道（只写不跑）：{@code ai_chat_message.metadata_json} 里已有的
-	 * {@code reasoningContent} 经既有 {@code AiChatHistoryService#toMessage} 还原后，
-	 * 由 {@code toHistoryItem} 原样透出；仍不产计时字段。**不新增表/列/持久化**。
+	 * 移除数据库完整历史（Task 1）：{@code GET /api/ai/history/{sessionId}/messages} 不再有处理器
+	 * （404）。记忆窗口端点 {@code GET /api/ai/history/{sessionId}} 保持原契约，由本类其余用例覆盖。
 	 */
 	@Test
-	void fullHistoryExposesPersistedReasoningContentWithoutTimingFields() throws Exception {
-		AiChatHistoryService real = new AiChatHistoryService(mock(AiChatMessageRepository.class),
-				new ObjectMapper(), mock(PlatformTransactionManager.class));
-		AiChatHistoryService.MessageView view = new AiChatHistoryService.MessageView(1L, "s-1", "r-1", 1L,
-				"m-1", "ASSISTANT", "答复正文", null, null,
-				"{\"reasoningContent\":\"历史思考\",\"startedAt\":1000,\"endedAt\":2000}", false,
-				LocalDateTime.now());
-
-		AiChatHistoryService service = mock(AiChatHistoryService.class);
-		when(service.pageBefore(eq("s-1"), isNull(), anyInt()))
-			.thenReturn(new AiChatHistoryService.ChatPage(List.of(view), false, null));
-		when(service.toMessage(view)).thenReturn(real.toMessage(view));
-
-		AiController local = controller(this.availability);
-		ReflectionTestUtils.setField(local, "aiChatHistoryService", service);
-		MockMvc mvc = MockMvcBuilders.standaloneSetup(local).build();
-
-		mvc.perform(get("/api/ai/history/s-1/messages"))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.messages[0].reasoningContent").value("历史思考"))
-			.andExpect(jsonPath("$.data.messages[0].startedAt").doesNotExist())
-			.andExpect(jsonPath("$.data.messages[0].endedAt").doesNotExist());
+	void databaseFullHistoryEndpointIsRemoved() throws Exception {
+		this.mockMvc.perform(get("/api/ai/history/s-1/messages"))
+			.andExpect(status().isNotFound());
 	}
 
 	/**

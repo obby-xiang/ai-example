@@ -6,7 +6,6 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -30,7 +29,6 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
@@ -70,7 +68,7 @@ import static org.mockito.Mockito.when;
  * </ol>
  *
  * <p>五条用例：①退避期收到取消不得再发尝试（根因 ②）；②取消终态先落定不得被成功终局覆盖
- * （根因 ③）；③<b>复审 I-1 的窗口</b>——取消落在 finish 的历史写/落库之间（latch 定序，断言 done 恰一条
+ * （根因 ③）；③<b>复审 I-1 的窗口</b>——取消落在 finish 写 DONE 之前（latch 定序，断言 done 恰一条
  * 且快照/历史一致）；④反序（取消先持锁 ⇒ CANCELLED 赢）；⑤<b>跨实例</b>——另一实例在 DONE 落库那一刻已取消
  * （生产 RunStore 的 DONE 状态 CAS 拒写），落库后复读必须转入取消收尾、不再发 {@code done{cancelled:false}}。
  * 根因 ①（注册表被线程局部中断点亮全实例退避）在 {@code CancellationRegistryFailClosedTest} 里钉；
@@ -208,11 +206,11 @@ class CancelDuringRetryBackoffTest {
 	// ── 复审 I-1：成功终局的临界区（latch 定序，真实并发；旧代码必红） ──
 
 	/**
-	 * <b>取消落在"取消检查之后、写 DONE 之前"的窗口里</b>（复审 I-1）：finish 在历史写入处被 latch 卡住，
+	 * <b>取消落在"取消检查之后、写 DONE 之前"的窗口里</b>（复审 I-1）：finish 在写 DONE 处被 latch 卡住，
 	 * 主线程置取消并由另一线程跑 {@code cancelParked}（它走同一把 per-run 监视器）。
 	 *
-	 * <p>旧代码（finish 不持监视器）：取消侧写 CANCELLED + {@code done{cancelled:true}} + stopped 历史，
-	 * finish 放行后把快照盖成 DONE 并补第二条 {@code done{cancelled:false}} ⇒ 归档 2 条 done、历史与终态不一致。
+	 * <p>旧代码（finish 不持监视器）：取消侧写 CANCELLED + {@code done{cancelled:true}}，
+	 * finish 放行后把快照盖成 DONE 并补第二条 {@code done{cancelled:false}} ⇒ 归档 2 条 done、终态与记忆不一致。
 	 * 修复后两条先到顺序都只有一条 done：本用例的时序里 finish 先持锁 ⇒ DONE 赢，取消侧的终态保护拒绝改写；
 	 * {@link #cancelFinalisedBeforeTheTurnStillWinsUnderTheSharedMonitor} 覆盖反序（取消先持锁 ⇒ CANCELLED 赢）。
 	 */
@@ -221,8 +219,9 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(true);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
+		CountDownLatch inDoneSave = new CountDownLatch(1);
+		CountDownLatch releaseDoneSave = new CountDownLatch(1);
+		((CopyStore) this.store).blockNextDoneSave(inDoneSave, releaseDoneSave);
 		svc.setCancelFinalizer(newFinalizer());
 
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("完整回答"), terminal("stop")));
@@ -232,8 +231,8 @@ class CancelDuringRetryBackoffTest {
 		Thread driver = new Thread(() -> svc.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(),
 				List.of(new UserMessage("按原语执行一次。")), out), "w30-finish-window");
 		driver.start();
-		assertThat(recorder.inRecorder.await(5, TimeUnit.SECONDS))
-			.as("finish 已进入成功终局的临界区（卡在 DB 历史写入）")
+		assertThat(inDoneSave.await(5, TimeUnit.SECONDS))
+			.as("finish 已进入成功终局的临界区（卡在写 DONE 之前）")
 			.isTrue();
 
 		// 取消在窗口内落地：先置取消事实（POST /cancel 的本地标志），再让取消收尾去抢同一把监视器
@@ -242,7 +241,7 @@ class CancelDuringRetryBackoffTest {
 		canceller.start();
 		awaitAtMonitorOrFinished(canceller);
 
-		recorder.release.countDown();
+		releaseDoneSave.countDown();
 		driver.join(5000);
 		canceller.join(5000);
 		assertThat(driver.isAlive() || canceller.isAlive()).as("驱动/取消两个线程都必须收尾").isFalse();
@@ -250,14 +249,14 @@ class CancelDuringRetryBackoffTest {
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		List<Map<String, Object>> archived = doneFrames(frames.readFrom(RUN_ID, 0, 0));
 		// 本时序是确定的：finish 先拿到 monitor（取消线程在 monitorenter 上阻塞），所以终态先到者必为 DONE；
-		// 取消侧随后读到 DONE，按终态保护拒绝改写（不写 stopped、不发 done）。反序由
+		// 取消侧随后读到 DONE，按终态保护拒绝改写（不算取消收尾、不发 done）。反序由
 		// cancelFinalisedBeforeTheTurnStillWinsUnderTheSharedMonitor 覆盖。
 		assertThat(snapshot.getStatus()).as("finish 先持锁 ⇒ 终态先到者赢（DONE）").isEqualTo(RunSnapshot.DONE);
 		assertThat(archived).as("归档里 done 恰一条（旧代码：取消一条 + finish 一条）").hasSize(1);
 		assertThat(archived.get(0)).containsEntry("cancelled", false);
 		assertThat(doneFrames(wire)).as("实时通道同样只能有一条 done").hasSize(1);
-		assertThat(recorder.finalWrites.get()).as("DONE ⇒ 历史是完整最终 assistant").isEqualTo(1);
-		assertThat(recorder.stoppedWrites.get()).as("DONE ⇒ 取消侧终态保护，不写 stopped 历史").isZero();
+		assertThat(((CopyStore) this.store).doneSaves()).as("DONE ⇒ 终态落库恰一次").isEqualTo(1);
+		assertThat(((CopyStore) this.store).cancelledSaves()).as("DONE ⇒ 取消侧终态保护，不再写 CANCELLED").isZero();
 	}
 
 	/**
@@ -269,8 +268,6 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(false);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
 		svc.setCancelFinalizer(newFinalizer());
 
 		this.cancelled.set(true);
@@ -289,8 +286,8 @@ class CancelDuringRetryBackoffTest {
 			.hasSize(1)
 			.allSatisfy(frame -> assertThat(frame).containsEntry("cancelled", true));
 		assertThat(doneFrames(wire)).hasSize(0);
-		assertThat(recorder.finalWrites.get()).as("取消先落定 ⇒ 不得写完整 assistant").isZero();
-		assertThat(recorder.stoppedWrites.get()).as("取消收尾写 stopped 历史恰一次").isEqualTo(1);
+		assertThat(((CopyStore) this.store).doneSaves()).as("取消先落定 ⇒ DONE 一次都不落").isZero();
+		assertThat(((CopyStore) this.store).cancelledSaves()).as("取消收尾落 CANCELLED 恰一次").isEqualTo(1);
 	}
 
 	/**
@@ -298,19 +295,12 @@ class CancelDuringRetryBackoffTest {
 	 * {@code RunStore#save} 的 DONE 状态 CAS 于是拒写。本用例用 {@link CopyStore#cancelJustBeforeDoneSave}
 	 * 复刻这一时序（替身不落 DONE、快照保持 CANCELLED），断言 finish 在落库后复读、转入取消收尾，
 	 * <b>不会再发 {@code done{cancelled:false}}</b>、归档 done 恰一条且与快照一致。
-	 *
-	 * <p>边界（用例里也断言）：{@code recordFinalAssistant} 先于 save（保持 resume 幂等口径），
-	 * 所以 DB 历史那一笔已经发生 —— 跨实例取消恰好落在 append 与 save 之间时，快照 CANCELLED / DB
-	 * 已有完整 assistant 的组合仍可能短暂存在（first-write-wins 不可回退）。这不是"已闭合"，
-	 * 是报告里保留的边界。
 	 */
 	@Test
 	void anotherInstanceCancelBeforeTheDoneWriteIsHonouredAfterSave() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(false);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
 		svc.setCancelFinalizer(newFinalizer());
 		((CopyStore) this.store).cancelJustBeforeDoneSave = true;
 
@@ -327,9 +317,8 @@ class CancelDuringRetryBackoffTest {
 			.allSatisfy(frame -> assertThat(frame).containsEntry("cancelled", true));
 		assertThat(doneFrames(wire)).as("不得再发 done{cancelled:false}").hasSize(1)
 			.allSatisfy(frame -> assertThat(frame).containsEntry("cancelled", true));
-		assertThat(recorder.finalWrites.get()).as("既有顺序：recordFinalAssistant 先于 save（本批保留的边界）")
-			.isEqualTo(1);
-		assertThat(recorder.stoppedWrites.get()).as("复读发现取消 ⇒ 取消收尾写 stopped 历史").isEqualTo(1);
+		assertThat(((CopyStore) this.store).doneSaves()).as("DONE 被状态 CAS 拒写：这一笔不得落库").isZero();
+		assertThat(((CopyStore) this.store).cancelledSaves()).as("复读发现取消 ⇒ 取消收尾落 CANCELLED").isEqualTo(1);
 	}
 
 	/**
@@ -342,8 +331,9 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(true);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
+		CountDownLatch inDoneSave = new CountDownLatch(1);
+		CountDownLatch releaseDoneSave = new CountDownLatch(1);
+		((CopyStore) this.store).blockNextDoneSave(inDoneSave, releaseDoneSave);
 		svc.setCancelFinalizer(newFinalizer());
 		((CopyStore) this.store).failNextGetAfterDoneSave = true;
 
@@ -353,11 +343,11 @@ class CancelDuringRetryBackoffTest {
 		Thread driver = new Thread(() -> svc.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(),
 				List.of(new UserMessage("按原语执行一次。")), out), "w30-reread-window");
 		driver.start();
-		assertThat(recorder.inRecorder.await(5, TimeUnit.SECONDS)).as("finish 已进入成功终局临界区").isTrue();
+		assertThat(inDoneSave.await(5, TimeUnit.SECONDS)).as("finish 已进入成功终局临界区").isTrue();
 
 		// HTTP 取消线程不需要 monitor：窗口内置位本地 flag，随后才放行 finish（DONE 落库 + 复读失败）
 		this.cancelled.set(true);
-		recorder.release.countDown();
+		releaseDoneSave.countDown();
 		driver.join(5000);
 		assertThat(driver.isAlive()).isFalse();
 
@@ -383,8 +373,6 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(false);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
 		svc.setCancelFinalizer(newFinalizer());
 		CopyStore raceStore = (CopyStore) this.store;
 		raceStore.cancelJustBeforeDoneSave = true;
@@ -404,8 +392,8 @@ class CancelDuringRetryBackoffTest {
 
 	/**
 	 * 复审 193 · 第 2 条：落库后复读发现"另一实例已取消"时，finish <b>不能把成功 accumulator 的正文</b>
-	 * 当作停止半截交给 cancelTerminal —— 那会合成 stopped 消息写进 DB 历史与 chat memory
-	 * （DB 有 first-write-wins，chat memory 是整窗覆盖，没有保护）。
+	 * 当作停止半截交给 cancelTerminal —— 那会合成 stopped 消息写进 chat memory
+	 * （chat memory 是整窗覆盖，没有保护）。
 	 * 只在这条"复读已见取消"的路径传 {@code null}，让 cancelTerminal 取权威快照的 assistantContent。
 	 */
 	@Test
@@ -413,8 +401,6 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(false);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
 		svc.setCancelFinalizer(newFinalizer());
 		List<List<Message>> memoryWrites = new CopyOnWriteArrayList<>();
 		doAnswer(invocation -> {
@@ -439,10 +425,6 @@ class CancelDuringRetryBackoffTest {
 		List<String> snapshotJson = after.getMessageJson();
 		assertThat(snapshotJson).as("成功正文不得被合成进停止历史").noneMatch(json -> json.contains("完整回答"));
 		assertThat(snapshotJson).as("停止历史取权威半截正文").anyMatch(json -> json.contains("半截正文"));
-		assertThat(recorder.stoppedTexts()).as("DB 停止历史同样不得带成功正文")
-			.noneMatch(text -> text.contains("完整回答"));
-		assertThat(recorder.stoppedTexts()).as("DB 停止历史取权威半截正文")
-			.anyMatch(text -> text.contains("半截正文"));
 		List<String> memoryTexts = memoryWrites.stream().flatMap(List::stream).map(Message::getText)
 			.filter(Objects::nonNull).toList();
 		assertThat(memoryTexts).as("chat memory 是整窗覆盖：不得把成功正文写进去")
@@ -458,8 +440,6 @@ class CancelDuringRetryBackoffTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
-		CountingRecorder recorder = new CountingRecorder(false);
-		ReflectionTestUtils.setField(svc, "historyRecorder", recorder.recorder);
 		svc.setCancelFinalizer(newFinalizer());
 		List<List<Message>> memoryWrites = new CopyOnWriteArrayList<>();
 		doAnswer(invocation -> {
@@ -485,8 +465,6 @@ class CancelDuringRetryBackoffTest {
 		assertThat(after.getStatus()).isEqualTo(RunSnapshot.CANCELLED);
 		assertThat(after.getMessageJson()).noneMatch(json -> json.contains("迟到成功正文"));
 		assertThat(after.getMessageJson()).anyMatch(json -> json.contains("权威半截"));
-		assertThat(recorder.stoppedTexts()).noneMatch(text -> text.contains("迟到成功正文"));
-		assertThat(recorder.stoppedTexts()).anyMatch(text -> text.contains("权威半截"));
 		assertThat(memoryWrites).as("记忆收敛必须实际发生，不能空断言").isNotEmpty();
 		List<String> memoryTexts = memoryWrites.stream().flatMap(List::stream).map(Message::getText)
 			.filter(Objects::nonNull).toList();
@@ -539,6 +517,16 @@ class CancelDuringRetryBackoffTest {
 		/** 一次性：下一次 {@code get} 抛 {@link AiStateUnavailableException}。 */
 		private final AtomicBoolean failNextGet = new AtomicBoolean();
 
+		/** 一次性：下一次 DONE 的 {@code save} 进入时 countDown 并等待放行（latch 定序）。 */
+		private volatile CountDownLatch doneSaveEntered;
+
+		private volatile CountDownLatch doneSaveRelease;
+
+		/** DONE / CANCELLED 终态实际落库次数（终态归谁所有）。 */
+		private final AtomicInteger doneSaves = new AtomicInteger();
+
+		private final AtomicInteger cancelledSaves = new AtomicInteger();
+
 		private CopyStore(ObjectMapper mapper) {
 			this.mapper = mapper;
 		}
@@ -562,6 +550,22 @@ class CancelDuringRetryBackoffTest {
 
 		@Override
 		public void save(RunSnapshot snapshot) {
+			if (RunSnapshot.DONE.equals(snapshot.getStatus()) && this.doneSaveRelease != null) {
+				// latch 定序：finish 卡在"写 DONE 之前"的成功终局临界区（只有 I-1 窗口用例需要阻塞）。
+				CountDownLatch entered = this.doneSaveEntered;
+				CountDownLatch release = this.doneSaveRelease;
+				this.doneSaveRelease = null;
+				entered.countDown();
+				try {
+					if (!release.await(5, TimeUnit.SECONDS)) {
+						throw new IllegalStateException("latch 超时：finish 未被放行");
+					}
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+					throw new IllegalStateException("latch 等待被中断", ex);
+				}
+			}
 			if (this.cancelJustBeforeDoneSave && RunSnapshot.DONE.equals(snapshot.getStatus())) {
 				// 交叉实例时序的替身：另一实例的取消收尾在"本实例写 DONE"这一刻已经落库，
 				// 生产 RunStore#save 的 DONE CAS 因此拒写（这里同样不落这一笔 DONE）。
@@ -576,59 +580,32 @@ class CancelDuringRetryBackoffTest {
 			}
 			super.save(snapshot);
 			if (RunSnapshot.DONE.equals(snapshot.getStatus())) {
+				this.doneSaves.incrementAndGet();
 				armRereadFailure();
 			}
+			else if (RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+				this.cancelledSaves.incrementAndGet();
+			}
+		}
+
+		/** 一次性：下一次 DONE 的 {@code save} 先 countDown 再等待放行（模拟"卡在写 DONE 之前"）。 */
+		private void blockNextDoneSave(CountDownLatch entered, CountDownLatch release) {
+			this.doneSaveEntered = entered;
+			this.doneSaveRelease = release;
+		}
+
+		private int doneSaves() {
+			return this.doneSaves.get();
+		}
+
+		private int cancelledSaves() {
+			return this.cancelledSaves.get();
 		}
 
 		private void armRereadFailure() {
 			if (this.failNextGetAfterDoneSave) {
 				this.failNextGet.set(true);
 			}
-		}
-
-	}
-
-	/**
-	 * 记录型历史写入器：{@code recordFinalAssistant} 可选地卡在 latch 上（只有 I-1 窗口用例需要阻塞），
-	 * 并计数"完整 assistant / stopped 半截"两侧各被写了几次。
-	 */
-	private static final class CountingRecorder {
-
-		private final CountDownLatch inRecorder = new CountDownLatch(1);
-
-		private final CountDownLatch release = new CountDownLatch(1);
-
-		private final AtomicInteger finalWrites = new AtomicInteger();
-
-		private final AtomicInteger stoppedWrites = new AtomicInteger();
-
-		/** 每次 {@code recordStopped} 收到的消息（按调用顺序；复用断言"成功正文没被合成进停止历史"）。 */
-		private final List<List<Message>> stoppedPayloads = new CopyOnWriteArrayList<>();
-
-		private final AiChatHistoryRecorder recorder = mock(AiChatHistoryRecorder.class);
-
-		private CountingRecorder(boolean blockFinalAssistant) {
-			doAnswer(invocation -> {
-				this.finalWrites.incrementAndGet();
-				this.inRecorder.countDown();
-				if (blockFinalAssistant && !this.release.await(5, TimeUnit.SECONDS)) {
-					throw new IllegalStateException("latch 超时：finish 未被放行");
-				}
-				return null;
-			}).when(this.recorder).recordFinalAssistant(anyString(), anyString(), any());
-			doAnswer(invocation -> {
-				this.stoppedWrites.incrementAndGet();
-				this.stoppedPayloads.add(List.copyOf((List<Message>) invocation.getArgument(2)));
-				return null;
-			}).when(this.recorder).recordStopped(anyString(), anyString(), anyList());
-		}
-
-		private List<String> stoppedTexts() {
-			return this.stoppedPayloads.stream()
-				.flatMap(List::stream)
-				.map(Message::getText)
-				.filter(text -> text != null)
-				.toList();
 		}
 
 	}

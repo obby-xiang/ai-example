@@ -83,8 +83,8 @@ class AiSessionPurgeRunIndexResidueTest {
 		when(this.gate.currentRunId(anyString())).thenReturn(null);
 		when(this.cancellations.keyFor(anyString())).thenAnswer(invocation -> "ai:cancel:" + invocation.getArgument(0));
 		when(this.attachments.findBySessionId(anyString())).thenReturn(List.of());
-		when(this.database.snapshot(anyString())).thenReturn(new SessionPurgeDatabase.Snapshot(false, 0, 0));
-		when(this.database.delete(anyString(), any())).thenReturn(new SessionPurgeDatabase.Deleted(0, 0));
+		when(this.database.snapshot(anyString())).thenReturn(new SessionPurgeDatabase.Snapshot(0));
+		when(this.database.delete(anyString())).thenReturn(new SessionPurgeDatabase.Deleted(0));
 	}
 
 	@Test

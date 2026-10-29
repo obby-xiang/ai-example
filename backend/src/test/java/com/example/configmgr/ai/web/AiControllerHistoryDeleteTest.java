@@ -122,7 +122,7 @@ class AiControllerHistoryDeleteTest {
 
 	private static PurgeResult result(boolean complete, boolean existed, List<DeferredView> deferred) {
 		return new PurgeResult("s-1", "purge-1", complete, true, null,
-				new SessionPurgeDatabase.Snapshot(true, 1, 1), new SessionPurgeDatabase.Deleted(1, 1),
+				new SessionPurgeDatabase.Snapshot(1), new SessionPurgeDatabase.Deleted(1),
 				new MemoryView(existed, existed ? 1 : 0, true), "chat:mem:{s-1}",
 				List.of(new RunView("r-0", "DONE", false, true, false)), deferred,
 				new ContextView(true, true, 1, true, 3), new AttachmentView(0, 0, 0, List.of()),

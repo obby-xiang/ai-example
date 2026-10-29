@@ -17,14 +17,9 @@ import java.util.Map;
  * <li>轮内上下文预算的收尾提示（{@link SpToolCallingManager#TURN_BUDGET_WRAP_UP}）。</li>
  * </ul>
  *
- * <h2>为什么必须只有一份判据</h2>
- * 两个消费方必须同源，否则会出现"写侧当合成、读侧当用户原话"的分叉：
- * <ol>
- * <li><b>写侧</b> {@link AiChatHistoryRecorder}：{@code recordRunTail} 以"最后一个<b>真实</b> user"
- *     为界，合成提示不得当成用户消息落库；</li>
- * <li><b>读侧</b> {@code AiController#toHistoryItem}：历史回显通道给条目加 {@code synthetic=true}，
- *     前端据此按"系统消息"呈现（<b>摘要不冒充用户</b>，也不显示内部配置键）。</li>
- * </ol>
+ * <h2>判据只保留一份</h2>
+ * 判据集中在读侧使用：{@code AiController#toHistoryItem} 给历史回显条目加 {@code synthetic=true}，
+ * 前端据此按"系统消息"呈现（<b>摘要不冒充用户</b>，也不显示内部配置键）。
  * 该过滤是<b>展示层</b>行为，不改变模型记忆里的既有结构（AR-01 明确保留这条边界）。
  */
 public final class SyntheticMessages {

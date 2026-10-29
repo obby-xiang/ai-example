@@ -13,9 +13,6 @@ import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
-import com.example.configmgr.ai.history.AiChatHistoryService;
-import com.example.configmgr.ai.history.AiChatHistoryService.ChatPage;
-import com.example.configmgr.ai.history.AiChatHistoryService.MessageView;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
@@ -104,7 +101,7 @@ import java.util.concurrent.RejectedExecutionException;
  * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
  * <tr><td>{@code DELETE /api/ai/history/{sessionId}} / {@code DELETE /api/ai/session/{sessionId}}</td>
  * <td><b>完整会话销毁</b>（旧路径保留兼容，统一委托 purge）：删除该会话全部 AI 数据（记忆/run 13 键/
- * 上下文/附件/反馈/完整历史/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
+ * 上下文/附件/反馈/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
  * 有活跃 run 时先取消、其 13 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
  * <tr><td>{@code GET /api/ai/health}</td><td>AI 可用性/模型名/记忆后端（供前端降级提示）</td></tr>
  * </table>
@@ -243,13 +240,6 @@ public class AiController {
 
 	@Autowired(required = false)
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
-
-	/**
-	 * 完整对话历史存储（第二阶段）。字段注入保持构造器与既有 {@code new AiController(...)} 用例零改动；
-	 * 未注入（局部上下文）时新端点如实 503，既有 40 条记忆窗口端点不受影响。
-	 */
-	@Autowired(required = false)
-	private AiChatHistoryService aiChatHistoryService;
 
 	/**
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
@@ -1876,65 +1866,8 @@ public class AiController {
 	}
 
 	/**
-	 * 完整对话历史（第二阶段新增；<b>不改变</b>上面 40 条记忆窗口端点的语义）。
-	 *
-	 * <p>游标分页：
-	 * <ul>
-	 * <li>{@code beforeSeq}：向更早翻，返回 seq 倒序（新→旧）；不传 = 从最新开始；</li>
-	 * <li>{@code afterSeq}：向更新翻，返回 seq 正序（旧→新）；不传/0 = 从第一条开始；</li>
-	 * <li>两者只能二选一；{@code limit} 1..200，默认 50。</li>
-	 * </ul>
-	 * <p>条目复用现有 {@code /history} 的 {@code toHistoryItem}（同一份文本/工具信封/视图口径），
-	 * 额外带 {@code seq/runId/messageId/createdAt} 便于前端做稳定 key 与增量合并。
-	 */
-	@GetMapping("/history/{sessionId}/messages")
-	public ResponseEntity<?> fullHistory(@PathVariable String sessionId,
-			@RequestParam(name = "beforeSeq", required = false) Long beforeSeq,
-			@RequestParam(name = "afterSeq", required = false) Long afterSeq,
-			@RequestParam(name = "limit", required = false) Integer limit) {
-		if (this.aiChatHistoryService == null) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE,
-					errorBody(ErrorCodes.AI_CONTEXT_UNAVAILABLE, "完整历史存储未装配"));
-		}
-		if (beforeSeq != null && afterSeq != null) {
-			throw new IllegalArgumentException("beforeSeq 与 afterSeq 只能二选一");
-		}
-		int size = limit == null ? AiChatHistoryService.DEFAULT_LIMIT : limit;
-		ChatPage page = afterSeq != null
-				? this.aiChatHistoryService.pageAfter(sessionId, afterSeq, size)
-				: this.aiChatHistoryService.pageBefore(sessionId, beforeSeq, size);
-		List<Map<String, Object>> messages = new ArrayList<>(page.items().size());
-		for (MessageView view : page.items()) {
-			Message message = this.aiChatHistoryService.toMessage(view);
-			Map<String, Object> item = toHistoryItem(message);
-			item.put("seq", view.seq());
-			item.put("runId", view.runId());
-			item.put("messageId", view.messageId());
-			if (!item.containsKey("stopped") && view.stopped()) {
-				item.put("stopped", true);
-			}
-			if (!item.containsKey("timestamp") && view.createdAt() != null) {
-				item.put("timestamp", view.createdAt().toString());
-			}
-			if (view.createdAt() != null) {
-				item.put("createdAt", view.createdAt().toString());
-			}
-			messages.add(item);
-		}
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("sessionId", sessionId);
-		body.put("count", messages.size());
-		body.put("messages", messages);
-		body.put("hasMore", page.hasMore());
-		body.put("nextCursor", page.nextCursor());
-		body.put("direction", afterSeq != null ? "after" : "before");
-		body.put("beforeSeq", beforeSeq);
-		body.put("afterSeq", afterSeq);
-		return ResponseEntity.ok(ApiResponse.ok(body));
-	}
-
-	/**
 	 * R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。
+
 	 *
 	 * <p><b>批次2 / AR-01 第 5 条：synthetic 展示过滤（读侧）</b> —— 合成/系统提示（上下文压缩摘要、
 	 * 步数收尾、轮内预算收尾）在记忆里是真实消息，但对人不是"用户原话"也不是"助手答复"。
@@ -1943,7 +1876,7 @@ public class AiController {
 	 * <b>摘要不冒充用户</b>、不显示内部配置键；正文与角色字段一律原样（不改写、不改模型记忆）。
 	 *
 	 * <p><b>AR-12（只读展示）</b> —— assistant 条目已有的 {@code metadata.reasoningContent}
-	 * 以 additive 可选键 {@code reasoningContent} 原样透出（记忆窗口与完整历史两个通道同源）；
+	 * 以 additive 可选键 {@code reasoningContent} 原样透出（记忆窗口通道）；
 	 * <b>不新增表/列/持久化</b>，也不透出 {@code startedAt}/{@code endedAt} 等计时。
 	 * synthetic 条目一律跳过本键：那是系统提示，不能借"思考正文"把内部元数据带上用户面。
 	 */

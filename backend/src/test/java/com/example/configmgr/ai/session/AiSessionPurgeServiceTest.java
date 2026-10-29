@@ -83,7 +83,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(result.errors()).isEmpty();
 		assertThat(result.deferred()).isEmpty();
 		assertThat(result.databaseDeleted().feedbackRows()).isEqualTo(1);
-		assertThat(result.databaseDeleted().chatMessageRows()).isEqualTo(1);
 		assertThat(result.attachments().registrationsDeleted()).isEqualTo(1);
 		assertThat(result.attachments().filesDeleted()).isEqualTo(1);
 		assertThat(result.clientCleanup().mirrorKey()).isEqualTo("ai-mirror:" + SESSION_A);
@@ -112,7 +111,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.store.get("run-a")).isNull();
 		assertThat(this.fixture.store.sessionCurrentRunId(SESSION_A)).isNull();
 		assertThat(countFeedback(SESSION_A)).isZero();
-		assertThat(countChat(SESSION_A)).isZero();
 		assertThat(this.fixture.attachments.find(this.fixture.attachmentA.fileId())).isNull();
 		assertThat(Files.exists(this.fixture.fileA)).isFalse();
 
@@ -126,7 +124,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.fake.strings).containsKey(AiSessionService.KEY_PREFIX + SESSION_B);
 		assertThat(this.fixture.fake.sets.getOrDefault(RunStore.RUN_INDEX, Set.of())).contains("run-b");
 		assertThat(countFeedback(SESSION_B)).isEqualTo(1);
-		assertThat(countChat(SESSION_B)).isEqualTo(1);
 		assertThat(this.fixture.attachments.find(this.fixture.attachmentB.fileId())).isNotNull();
 		assertThat(Files.exists(this.fixture.fileB)).isTrue();
 
@@ -241,7 +238,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
 		assertThat(this.fixture.fake.hashes).containsKey(RunStore.CONTEXT_PREFIX + SESSION_A);
 		assertThat(countFeedback(SESSION_A)).isEqualTo(1);
-		assertThat(countChat(SESSION_A)).isEqualTo(1);
 		assertThat(Files.exists(this.fixture.fileA)).isTrue();
 		assertThat(this.fixture.fake.strings).doesNotContainKey(SessionPurgeGuard.KEY_PREFIX + SESSION_A);
 	}
@@ -338,7 +334,7 @@ class AiSessionPurgeServiceTest {
 		SessionPurgeDatabase failing = new SessionPurgeDatabase(this.fixture.jdbc,
 				new DataSourceTransactionManager(this.fixture.source)) {
 			@Override
-			public Deleted delete(String sessionId, Snapshot snapshot) {
+			public Deleted delete(String sessionId) {
 				throw new IllegalStateException("模拟 H2 删除失败");
 			}
 		};
@@ -623,7 +619,7 @@ class AiSessionPurgeServiceTest {
 		AiSessionPurgeService failing = serviceWithDatabase(new SessionPurgeDatabase(this.fixture.jdbc,
 				new DataSourceTransactionManager(this.fixture.source)) {
 			@Override
-			public Deleted delete(String sessionId, Snapshot snapshot) {
+			public Deleted delete(String sessionId) {
 				throw new IllegalStateException("模拟 H2 删除失败");
 			}
 		});
@@ -721,8 +717,6 @@ class AiSessionPurgeServiceTest {
 		this.fixture.fake.strings.put(RunStore.SESSION_CURRENT_PREFIX + sessionId, runId);
 		this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
 				"msg-" + sessionId, sessionId, 1);
-		this.fixture.jdbc.update("INSERT INTO ai_chat_message (session_id, run_id, seq) VALUES (?, ?, ?)",
-				sessionId, runId, 1L);
 		String fileId = sessionId.equals(SESSION_A) ? "att-a" : "att-b";
 		Path file = writeFile(fileId + ".pdf", "attachment-" + fileId);
 		FormAttachmentStore.Attachment stored = this.fixture.attachments.register(runId, toolCallId, sessionId,
@@ -823,11 +817,6 @@ class AiSessionPurgeServiceTest {
 				Integer.class, sessionId);
 	}
 
-	private int countChat(String sessionId) {
-		return this.fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ai_chat_message WHERE session_id = ?",
-				Integer.class, sessionId);
-	}
-
 	// ── fix4：complete 之后的一次有界"记忆面"复核（crash 残留补偿） ────────────
 
 	/**
@@ -875,7 +864,6 @@ class AiSessionPurgeServiceTest {
 		this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
 				"msg-after-" + SESSION_A, SESSION_A, 1);
 		int feedbackBefore = countFeedback(SESSION_A);
-		int chatBefore = countChat(SESSION_A);
 
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
 				this.fixture.service, grantedLease());
@@ -892,7 +880,6 @@ class AiSessionPurgeServiceTest {
 			.doesNotContainKey(this.fixture.memory.keyFor(SESSION_A));
 		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核成功后台账才移除").isNull();
 		assertThat(countFeedback(SESSION_A)).as("复核不得再删 DB（行数不变）").isEqualTo(feedbackBefore);
-		assertThat(countChat(SESSION_A)).as("复核不得再增删 DB").isEqualTo(chatBefore);
 		assertThat(Files.exists(businessFile)).as("复核不得碰业务文件").isTrue();
 		assertThat(this.fixture.fake.strings).as("复核不得碰业务键").containsKey("jobs");
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("复核后守卫仍按保留期 armed").isTrue();
@@ -977,7 +964,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(scheduled).as("complete 后仍留一条待复核台账").isNotNull();
 		assertThat(scheduled.verifyAtMs()).isNotNull();
 		int feedbackAfterPurge = countFeedback(SESSION_A);
-		int chatAfterPurge = countChat(SESSION_A);
 
 		// 崩溃残留：RENAME 已生效、写者在复检完成前死掉 ⇒ 最终键上留着历史。
 		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A),
@@ -995,7 +981,6 @@ class AiSessionPurgeServiceTest {
 				this.fixture.memory.keyFor(SESSION_A));
 		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核成功后台账才移除（不永久驻留）").isNull();
 		assertThat(countFeedback(SESSION_A)).as("复核不得再删 DB").isEqualTo(feedbackAfterPurge);
-		assertThat(countChat(SESSION_A)).as("复核不得再删 DB").isEqualTo(chatAfterPurge);
 	}
 
 	/**
@@ -1029,7 +1014,6 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.fake.lists).as("不得执行 retry：记忆仍在")
 			.containsKey(this.fixture.memory.keyFor(SESSION_A));
 		assertThat(countFeedback(SESSION_A)).as("不得执行 retry：DB 行仍在").isEqualTo(1);
-		assertThat(countChat(SESSION_A)).as("不得执行 retry：DB 行仍在").isEqualTo(1);
 		assertThat(this.fixture.fake.strings).as("没有成功销毁就不得装墓碑（守卫只因 pending 仍 armed）")
 			.doesNotContainKey(this.fixture.guard.keyFor(SESSION_A));
 
@@ -1090,8 +1074,6 @@ class AiSessionPurgeServiceTest {
 			this.jdbc = new JdbcTemplate(source);
 			this.jdbc.execute("CREATE TABLE ai_feedback (id BIGINT AUTO_INCREMENT PRIMARY KEY, "
 					+ "message_id VARCHAR(64) NOT NULL, session_id VARCHAR(64) NOT NULL, rating INT NOT NULL)");
-			this.jdbc.execute("CREATE TABLE ai_chat_message (id BIGINT AUTO_INCREMENT PRIMARY KEY, "
-					+ "session_id VARCHAR(128) NOT NULL, run_id VARCHAR(64) NOT NULL, seq BIGINT NOT NULL)");
 
 			AppProperties app = new AppProperties();
 			app.getFile().setStoragePath(tempDir.resolve("files").toString());

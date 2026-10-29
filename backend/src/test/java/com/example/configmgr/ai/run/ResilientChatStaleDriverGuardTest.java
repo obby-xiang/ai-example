@@ -11,7 +11,6 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -32,7 +31,6 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
@@ -40,11 +38,8 @@ import java.util.LinkedHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -52,14 +47,9 @@ import static org.mockito.Mockito.when;
  *
  * <h2>缺陷形态</h2>
  * {@code authority} 只拦了快照写（{@code RunStore#save} 的 fence）与出帧（{@code SseChatEmitter}），
- * 但终局的两条"答案面"写口完全没看它：
- * <ol>
- * <li>{@code recordFinalAssistant(...)} → {@code ai_chat_message}（<b>first-write-wins</b>）：旧驱动先落库，
- *     新主人的正确回答就再也写不进去，刷新后用户看到的是作废的那一份；</li>
- * <li>{@code convergeMemory(...)} → {@code saveAll} 整窗覆写 {@code chat:mem:*}：旧驱动把整窗历史
- *     盖回去，下一轮读到的还是旧答案。</li>
- * </ol>
- * 本批口径：这两条写口在<b>写之前</b>问一次续跑权（与快照/出帧/认领/台账同源）；
+ * 但终局的"答案面"写口 {@code convergeMemory(...)} → {@code saveAll} 整窗覆写 {@code chat:mem:*}
+ * 完全没看它：旧驱动把整窗历史盖回去，下一轮读到的还是作废答案。
+ * 本批口径：该写口在<b>写之前</b>问一次续跑权（与快照/出帧/认领/台账同源）；
  * 只读（LOST/UNAVAILABLE/fence 已过本实例 epoch）⇒ 一律不写，只留 WARN。
  * 出帧侧不需要改服务：{@code SseChatEmitter} 的闸门读的是同一个 {@code runLeaseAuthority}，
  * 因此"旧驱动发第二份终帧"也一并被拦（本用例直接断言 frames 里没有终帧）。
@@ -92,8 +82,6 @@ class ResilientChatStaleDriverGuardTest {
 
 	private final RecordingRepository repository = new RecordingRepository();
 
-	private final AiChatHistoryRecorder historyRecorder = mock(AiChatHistoryRecorder.class);
-
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
 
 	private final ContextBuilder contextBuilder = mock(ContextBuilder.class);
@@ -120,8 +108,6 @@ class ResilientChatStaleDriverGuardTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.repository, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		// 完整历史写入器是字段注入（生产由 Spring 注入）：这里用反射塞一个替身，观察"是否被调用"。
-		ReflectionTestUtils.setField(this.service, "historyRecorder", this.historyRecorder);
 		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
@@ -139,7 +125,7 @@ class ResilientChatStaleDriverGuardTest {
 	}
 
 	@Test
-	void lostLeaseDriverWritesNeitherMemoryNorDbHistoryNorATerminalFrame() {
+	void lostLeaseDriverWritesNeitherMemoryNorATerminalFrame() {
 		this.store.authority = LeaseService.LeaseAuthority.LOST;
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("旧驱动的作废回答"), terminal("stop")));
 
@@ -147,8 +133,6 @@ class ResilientChatStaleDriverGuardTest {
 
 		assertThat(this.repository.saves).as("RT-20：丢租的旧驱动不得整窗覆写记忆").isZero();
 		assertThat(this.repository.ops).as("记忆面一次写/删都不许发生").isEmpty();
-		verify(this.historyRecorder, never()).recordFinalAssistant(anyString(), anyString(), any());
-		verify(this.historyRecorder, never()).recordRunTail(anyString(), anyString(), anyList());
 		assertThat(terminalFrameTypes(frames)).as("旧驱动不得再发一份终帧（前端会提前收敛到作废回答）").isEmpty();
 	}
 
@@ -160,14 +144,13 @@ class ResilientChatStaleDriverGuardTest {
 		List<Map<String, Object>> frames = runTurn();
 
 		assertThat(this.repository.saves).as("无法确认续跑权 ⇒ 不写记忆（宁可不写也不能写错）").isZero();
-		verify(this.historyRecorder, never()).recordFinalAssistant(anyString(), anyString(), any());
 		assertThat(terminalFrameTypes(frames)).isEmpty();
 	}
 
 	@Test
-	void fenceAheadDriverCannotWriteMemoryOrDbHistory() {
+	void fenceAheadDriverCannotWriteMemory() {
 		// HELD-but-fence-ahead：租约视图还在（authority=HELD），但 fence 已被新主人推进到更高 epoch。
-		// 快照写会被 fence 拒、台账/帧/序号被 RunStore 的写门拒；这里锁住"答案面"（记忆 + DB 历史）。
+		// 快照写会被 fence 拒、台账/帧/序号被 RunStore 的写门拒；这里锁住"答案面"（记忆窗口）。
 		this.store.authority = LeaseService.LeaseAuthority.HELD;
 		this.store.epoch = 1L;
 		this.store.fence = 2L;
@@ -176,12 +159,10 @@ class ResilientChatStaleDriverGuardTest {
 		runTurn();
 
 		assertThat(this.repository.saves).as("fence 已过本实例 epoch ⇒ 不得写记忆").isZero();
-		verify(this.historyRecorder, never()).recordFinalAssistant(anyString(), anyString(), any());
-		verify(this.historyRecorder, never()).recordRunTail(anyString(), anyString(), anyList());
 	}
 
 	@Test
-	void healthyDriverStillWritesMemoryHistoryAndTerminalFrame() {
+	void healthyDriverStillWritesMemoryAndTerminalFrame() {
 		// 回归护栏：修复不得把正常路径一起关掉（无租约语义 = NEVER_HELD 保持原样）。
 		this.store.authority = LeaseService.LeaseAuthority.NEVER_HELD;
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("正常回答"), terminal("stop")));
@@ -190,7 +171,6 @@ class ResilientChatStaleDriverGuardTest {
 
 		assertThat(this.repository.saves).as("正常收尾照旧整窗写一次").isEqualTo(1);
 		assertThat(this.repository.findByConversationId(SESSION_ID)).hasSize(2);
-		verify(this.historyRecorder).recordFinalAssistant(anyString(), anyString(), any());
 		assertThat(terminalFrameTypes(frames)).as("正常收尾必须有终帧").contains("done");
 	}
 

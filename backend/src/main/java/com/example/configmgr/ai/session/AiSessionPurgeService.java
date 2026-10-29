@@ -48,7 +48,7 @@ import java.util.regex.Pattern;
  * <li>{@code ai:ctx:<sid>} / {@code ai:ctx:ledger:<sid>} / {@code ai:ctx:archive:<sid>:<turnNo>} /
  * {@code ai:safety:<sid>}；</li>
  * <li>表单附件：该会话的登记、登记索引成员、<b>且只按登记里的 storagePath 删文件</b>（不扫目录）；</li>
- * <li>{@code ai_feedback} / {@code ai_chat_message} 两张表的该会话行（H2 先行）；</li>
+ * <li>{@code ai_feedback} 表的该会话行（H2 先行）；</li>
  * <li>{@code ai:session:current:<sid>} 与 {@code ai:session:<sid>}；</li>
  * <li>浏览器本地镜像/草稿：服务端无法访问 sessionStorage，结果里给出精确的
  * {@code clientCleanup}（镜像键 + 草稿键前缀 + 本轮 toolCallId 清单），由前端执行删除。</li>
@@ -67,7 +67,7 @@ import java.util.regex.Pattern;
  * <h2>顺序（用户裁决）</h2>
  * <b>先枚举 → 登记 durable pending → 装守卫 → H2 删 → 取消活跃 run → Redis 按 run 删 →
  * 附件文件 → 会话键 → 守卫保留期 + 移除 pending</b>。
- * 枚举失败<b>一个键都不删</b>；H2 删失败也不进入 Redis 删除（两张表在同一本地事务里）。
+ * 枚举失败<b>一个键都不删</b>；H2 删失败也不进入 Redis 删除（反馈表 DELETE 在自己的本地事务里）。
  * 重复 DELETE <b>复用已有 pending</b>（同一 purgeId/owner，不重置 attempts）；中止回滚只撤销
  * "本次新建"的台账，不会抹掉上一轮留下的 deferred 义务。
  * Redis/H2 的后续失败或活跃 run 延后 → {@code complete=false}、pending 保留，
@@ -227,11 +227,8 @@ public class AiSessionPurgeService {
 			body.put("aborted", this.phase != null);
 			body.put("phase", this.phase);
 			Map<String, Object> db = new LinkedHashMap<>();
-			db.put("chatMessageTable", this.databaseSnapshot != null && this.databaseSnapshot.chatTablePresent());
 			db.put("feedbackRows", this.databaseSnapshot == null ? 0 : this.databaseSnapshot.feedbackRows());
-			db.put("chatMessageRows", this.databaseSnapshot == null ? 0 : this.databaseSnapshot.chatMessageRows());
 			db.put("feedbackDeleted", this.databaseDeleted == null ? 0 : this.databaseDeleted.feedbackRows());
-			db.put("chatMessagesDeleted", this.databaseDeleted == null ? 0 : this.databaseDeleted.chatMessageRows());
 			body.put("database", db);
 			body.put("memory", Map.of("existed", this.memory.existed(), "messages", this.memory.messages(),
 					"deleted", this.memory.deleted()));
@@ -337,10 +334,10 @@ public class AiSessionPurgeService {
 			return aborted(sessionId, purgeId, "guard", enumeration, ex);
 		}
 
-		// ④ H2 先删（两张表同一本地事务；失败不进入 Redis 删除，并撤销本次新建的 pending/守卫）。
+		// ④ H2 先删（反馈行在独立本地事务里；失败不进入 Redis 删除，并撤销本次新建的 pending/守卫）。
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
-			dbDeleted = this.database.delete(sessionId, enumeration.database());
+			dbDeleted = this.database.delete(sessionId);
 		}
 		catch (RuntimeException ex) {
 			if (ownedByThisCall) {
@@ -381,7 +378,7 @@ public class AiSessionPurgeService {
 
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
-			dbDeleted = this.database.delete(sessionId, enumeration.database());
+			dbDeleted = this.database.delete(sessionId);
 		}
 		catch (RuntimeException ex) {
 			recordFailureQuietly(sessionId, purgeId, "database: " + rootMessage(ex));
@@ -462,9 +459,9 @@ public class AiSessionPurgeService {
 				current.database(), dbDeleted, memory, current.memoryKey(), runViews, deferred, context,
 				attachmentView, session, removedFromIndex, current.clientCleanup(), errors, warnings);
 		log.info("会话销毁完成 sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
-				+ "memoryExisted={} feedbackDeleted={} chatDeleted={} attachments={}/{}",
+				+ "memoryExisted={} feedbackDeleted={} attachments={}/{}",
 				sessionId, purgeId, complete, runViews.size(), deferred.size(), errors.size(),
-				memory.existed(), dbDeleted.feedbackRows(), dbDeleted.chatMessageRows(),
+				memory.existed(), dbDeleted.feedbackRows(),
 				attachmentView.registrationsDeleted(), attachmentView.registered());
 		return result;
 	}
@@ -612,8 +609,7 @@ public class AiSessionPurgeService {
 		SessionPurgeDatabase.Snapshot db = this.database.snapshot(sessionId);
 
 		boolean found = memoryExisted || !runs.isEmpty() || context.any() || !attachmentList.isEmpty()
-				|| db.feedbackRows() > 0 || db.chatMessageRows() > 0 || sessionCurrentExisted
-				|| sessionRecordExisted;
+				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted;
 
 		ClientCleanup cleanup = new ClientCleanup(CLIENT_MIRROR_PREFIX + sessionId, CLIENT_DRAFT_PREFIX,
 				List.copyOf(new LinkedHashSet<>(toolCallIds)));
@@ -1295,7 +1291,7 @@ public class AiSessionPurgeService {
 	private static Enumeration enumerationForFailure(String sessionId) {
 		return new Enumeration(List.of(), List.of(), new ContextTargets(false, false, List.of(), false), false, 0,
 				RedisChatMemoryRepository.KEY_PREFIX + sessionId,
-				new SessionPurgeDatabase.Snapshot(false, 0, 0), false, false, false,
+				new SessionPurgeDatabase.Snapshot(0), false, false, false,
 				new ClientCleanup(CLIENT_MIRROR_PREFIX + sessionId, CLIENT_DRAFT_PREFIX, List.of()));
 	}
 

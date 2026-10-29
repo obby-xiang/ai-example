@@ -16,7 +16,6 @@ import com.example.configmgr.ai.context.ToolResultShrink;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
 import com.example.configmgr.ai.form.GenerativeFormRules;
-import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.observe.AiTrace;
@@ -342,13 +341,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * （帧上连 {@code resultView} 键都不出现，旧卡面零变化）。
 	 */
 	private List<ToolResultViewProvider> resultViewProviders = List.of();
-
-	/**
-	 * 完整对话历史写入适配器（第二阶段）。可选注入：缺席（单测直接 new）时只跳过历史写入，
-	 * 工具执行/挂起/落定语义不变。
-	 */
-	@Autowired(required = false)
-	private AiChatHistoryRecorder historyRecorder;
 
 	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
 	@Autowired(required = false)
@@ -976,10 +968,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 					budgetArmed, stepWrapped);
 			history = budget.history();
 			persistToolSteps(runId, stepsUsed);
-			// 先写完整历史再写快照：崩溃在两者之间时快照仍有 in-flight，重启 resume 按同一 messageId 幂等命中。
-			if (this.historyRecorder != null) {
-				this.historyRecorder.recordToolRound(snapshot.getSessionId(), runId, assistant, toolMessage);
-			}
 			// 已执行记录全部落定后，才允许越窗失败穿出去。
 			settle(runId, history);
 			// 取消优先：settle 之后、把历史交回 Spring AI 之前再查一次权威标志 —— 命中即终止本轮，

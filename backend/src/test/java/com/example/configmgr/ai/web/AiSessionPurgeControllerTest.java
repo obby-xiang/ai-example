@@ -146,7 +146,7 @@ class AiSessionPurgeControllerTest {
 
 	private static PurgeResult result(boolean complete, List<DeferredView> deferred) {
 		return new PurgeResult("s-1", "purge-1", complete, true, null,
-				new SessionPurgeDatabase.Snapshot(true, 1, 1), new SessionPurgeDatabase.Deleted(1, 1),
+				new SessionPurgeDatabase.Snapshot(1), new SessionPurgeDatabase.Deleted(1),
 				new MemoryView(true, 2, true), "chat:mem:{s-1}",
 				List.of(new RunView("r-1", "DONE", false, true, false)), deferred,
 				new ContextView(true, true, 2, true, 5), new AttachmentView(1, 1, 1, List.of()),
