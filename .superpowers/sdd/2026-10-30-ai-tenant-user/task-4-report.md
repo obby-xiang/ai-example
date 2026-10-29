@@ -201,3 +201,70 @@ npx vitest run tests/ai-tenant-duplicate-tab-identity.spec.ts -t "复制页签�
 3. **I4 依赖并行后端落地**：当前工作区后端已产出新 `clientCleanup` 键形（未由本提交引入）；若后端回退旧形，前端仍能靠旧键双删工作，但"后端认识新前端"不成立。
 4. **M4 未做**：升级后旧键形（裸 `ai-session-id`、`ai-mirror:<uuid>`、`cm.ai.form.draft.<id>`）成为永不读取的孤儿；不做清理不会串身份（新路径不读它们）。
 5. 未跑全量测试（按指令）；`sse-watchdog` 的 3 条纯常量断言未单独 `-t` 运行（本轮未改动其代码），其余改写用例均逐条运行通过。
+
+---
+
+# Task 4 返修 round 2（复评 I-1 / I-2 + Minor）
+
+- 实现提交：`86d636da`（frontend/src 5 files + 新增专用测试 1 file，+264/−13）
+- 复评依据：`task-4-rereview.md`
+- 未推送；未触碰后端与测试夹具迁移组的文件（工作区里的 `tests/a11-batch2-display.spec.ts`、`tests/ai-identity-fixture.ts` 为并行组改动，未纳入本提交）。
+
+## I-1 身份切换竞态（唯一残留跨身份路径）
+
+修法（`stores/ai.ts` `enterIdentity` 指针恢复分支）：
+
+1. `adoptFreshSession()` 清场后取 `entryToken = sessionGateToken`（清场即递增令牌）；
+2. `await probeSessionLock(pointer)` 之后三道再校验：`entryToken === sessionGateToken`、`isSameIdentity(this.identity, identity)`、`this.sessionId === ''`；
+   任一不符**整体放弃**本次恢复（不写号、不写 sessionIdentity、不读历史、不认领锁）；
+3. `tabOwnership = 'owner'` 仅在会话号确定之后设置（恢复分支在赋号后；发号分支在 `ensureSession()` 成功后）。
+
+红证据（临时把再校验条件短路成 `if (false && …)` 重跑，随即恢复）：
+
+```
+npx vitest run tests/ai-tenant-identity-race-recovery.spec.ts -t "连续快速切换"
+# FAIL: expected '9002' to be '1001' —— 正是复评描述的"A 会话配 B 身份"
+```
+
+恢复再校验后同一命令：`✓ 1 passed`。
+
+新单点覆盖：身份 A（指针 1001）→ 快速切到 B（指针 9002，探活 300ms）→ 立刻切回 A（探活 50ms）；
+断言最终 `identity/sessionId/sessionIdentity` 全是 A、B 的指针未被改写、后续 `send()` 的
+`sessionId` 为 1001 且身份头仍为 A。
+
+## I-2 发号失败可见重试
+
+- `retryIdentitySession()`（新 store action）：先 `retryLoadTenantDirectory()`，目录就绪后再 `ensureSession()`。
+- `retryLoadTenantDirectory()` 不再是 no-op：先 `await` 掉在途单飞句柄，再**重新发起**目录加载（修 Minor 3）。
+- 面板横幅判据改为 `directoryStatus === 'unavailable' || (directoryStatus === 'ready' && !sessionReady)`：
+  目录失败与发号失败都有可见入口；标题/说明按两类原因区分（新增 `ai.panel.identityNotReady`）。
+- 重试按钮统一走 `retryIdentitySession()`；成功后 `sessionReady=true`，横幅消失、发送闸恢复。
+
+新单点（`ai-tenant-identity-race-recovery.spec.ts`「发号失败 → 可见重试 → 恢复可发送」）：
+目录成功 + 发号连续两次失败 ⇒ `sessionReady=false`、`send()` 为 `not-sent`、`chat` 未调用；
+`retryIdentitySession()` 触发**第二次目录请求**并发出第三次发号请求 → 得到 `5001`、`sessionReady=true`；
+随后 `send()` 成功且请求体 `sessionId=5001`。
+
+## Minor
+
+1. `initSessionId` 注释清理：改为"取页签会话 id（只读，不生成）"，删除"无身份退回旧单用户键形/本地 id"的过期描述。
+2. 指针被占用时落到发号、原指针会被新号覆盖：已在 `enterIdentity` 注释中写明这是"旧会话由另一页签持有"的可接受降级。
+3. 目录重试 no-op：见 I-2，先等掉在飞再重发。
+4. 附件上传过会话就绪闸（`FormRenderer.onAttachmentChange` → `sessionReadyForUpload()` → `useAiStore().ensureSession()`）：
+   未就绪时不发上传请求并给字段级错误；`uploadFormAttachment` 的入参/返回契约未改。
+
+## 测试摘要（逐个精确 `-t`）
+
+| 用例 | 命令 | 结果 |
+| --- | --- | --- |
+| 连续快速切换（I-1） | `tests/ai-tenant-identity-race-recovery.spec.ts` / `连续快速切换` | 短路修复前 FAIL（9002 vs 1001）→ 修复后 ✓ |
+| 发号失败→重试→恢复（I-2） | 同上 / `发号失败 → 可见重试` | ✓ |
+
+`npx vue-tsc --noEmit` 通过；`git diff --check` 退出码 0。本轮未运行其他测试（禁止批量）。
+
+## 顾虑
+
+1. **I-2 的横幅/禁用是组件级**：单点覆盖 store 的重试与恢复语义；面板横幅本身未做挂载断言（避免与夹具迁移组冲突，也未批量跑 panel 套件）。
+2. **附件闸无单点**：`FormRenderer` 上传路径属组件行为，本轮按要求只新增专用 race/recovery 测试文件；如需回归锁，建议在 Task 5 夹具迁移时补一条 FormRenderer 用例。
+3. **I-3（63 个旧套件依赖本地造号）仍由测试夹具迁移组处理**：本轮未触碰这些文件；工作区已出现并行组的 `ai-identity-fixture.ts` 与 `a11-batch2-display.spec.ts` 改动，未纳入本提交。
+4. 快速切换同时切到"无指针的新身份"时仍各自发号（`ensureSession` 的令牌/身份守卫已覆盖），最终只保留最后一次切换的号；本轮单点覆盖的是"指针恢复分支"这条新竞态路径。
