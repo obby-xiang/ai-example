@@ -229,8 +229,9 @@ public class ContextBuilder {
      *
      * <p>文本形态刻意保持"数据行"（{@code - 已确定配置项: CURRENCY}），值逐个过
      * {@link #safeDelimitedField}（不可信的用户值 / 定义编码不能提前闭合定界）。
-     * "缺失"行告诉模型哪些槽位还没有值 —— 不要猜，需要时按规则 26 用表单收集；
-     * 已确定的槽位对应表单会在下发前被宿主拒绝（{@code GenerativeFormGuard}）。
+     * 只有"配置项"是真正的缺失槽位（按规则 26 收集）；<b>筛选条件未设不是缺失</b>——
+     * 它的语义是"未设筛选 = 全量导出"（规则 28）。写成事实陈述，模型才不会每轮把条件当缺口
+     * 反复下发条件表单。已确定的槽位对应表单会在下发前被宿主拒绝（{@code GenerativeFormGuard}）。
      */
     String renderTaskSlots(TaskSlots slots) {
         if (slots == null || slots.isEmpty()) {
@@ -257,12 +258,13 @@ public class ContextBuilder {
             }
             sb.append("- 已确定条件: ").append(String.join("；", rendered)).append("\n");
         }
+        else if (slots.hasDefCodes()) {
+            // 未设筛选是正常状态（全量），不是长期缺失：明确说清，别再去收集条件
+            sb.append("- 未设筛选: 全量（未设置查询条件即导出全部，不要再收集条件或询问是否筛选）\n");
+        }
         List<String> missing = new ArrayList<>();
         if (!slots.hasDefCodes()) {
             missing.add("配置项");
-        }
-        if (slots.conditions().isEmpty()) {
-            missing.add("条件");
         }
         if (!missing.isEmpty()) {
             sb.append("- 缺失（需要时按第 26 条收集，不要猜测）: ").append(String.join("、", missing)).append("\n");

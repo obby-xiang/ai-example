@@ -26,6 +26,10 @@ import java.util.Map;
  * 明确取消/否定则清空；无法确定（同名多义、多值歧义）保持缺失，严禁猜测。
  * 多项明确配置是合法的多选（`defCodes` 全部填入），不按"多候选 = 歧义"处理。
  *
+ * <p><b>与 {@code ContextBuilder} 同一套两态</b>：页面上报的 {@code selectedDefs} 是<b>显式空列表</b>
+ * （用户把勾选全部取消）时它是权威空值，不得回落历史重新勾选；只有页面<b>从未同步</b>
+ * （无该键 / 不在拥有选中集的向导页上）才允许按历史回落。
+ *
  * <p>解析结果写入 {@code AiContext.extra[taskSlots]}（{@link TaskSlots#EXTRA_KEY}），
  * 随 run 快照传递，并由 {@link ContextBuilder} 展示给模型。
  */
@@ -62,7 +66,13 @@ public class TaskSlotResolver {
 		List<SlotDefinition> definitions = definitions();
 		AiContext ctx = context == null ? AiContext.empty() : context;
 
-		List<String> authoritativeDefCodes = authoritativeDefCodes(ctx);
+		// 页面实时勾选的三态（与 ContextBuilder#pageSelectedDefs 同源）：null = 页面从未同步，
+		// 空列表 = 页面同步了"什么都没选"（权威空值）。
+		List<String> pageDefCodes = pageSelectedDefCodes(ctx);
+		List<String> taskDefCodes = taskDefCodes(ctx);
+		List<String> authoritativeDefCodes = pageDefCodes != null ? pageDefCodes : taskDefCodes;
+		// 权威空值不得回落历史：显式空勾选是"用户此刻什么都没选"，按历史重新勾选等于替用户改选择。
+		boolean selectionIsAuthoritative = pageDefCodes != null || !taskDefCodes.isEmpty();
 		List<ConditionSlot> authoritativeConditions = authoritativeConditions(ctx);
 		String authoritativeTaskType = ctx.getTaskType() == null || ctx.getTaskType().isBlank() ? null
 				: ctx.getTaskType();
@@ -79,7 +89,7 @@ public class TaskSlotResolver {
 			}
 		}
 
-		List<String> fallbackDefCodes = authoritativeDefCodes.isEmpty() ? historyDefCodes : authoritativeDefCodes;
+		List<String> fallbackDefCodes = selectionIsAuthoritative ? authoritativeDefCodes : historyDefCodes;
 		TaskSlotParser.Intent current = TaskSlotParser.parse(currentMessage, definitions, fallbackDefCodes);
 
 		String taskType = authoritativeTaskType != null ? authoritativeTaskType
@@ -159,20 +169,34 @@ public class TaskSlotResolver {
 		}
 	}
 
-	/** 工作区实时勾选优先于任务已存条目（与 ContextBuilder 同一口径）。 */
-	private List<String> authoritativeDefCodes(AiContext context) {
+	/**
+	 * 页面实时勾选（三态，与 {@code ContextBuilder#pageSelectedDefs} 同一口径）。
+	 *
+	 * @return {@code null} = 页面从未同步（不带 {@code selectedDefs} 键，或不在拥有选中集的向导页上）；
+	 *         空列表 = 页面同步了空集合（用户取消了全部勾选，这是权威空值）
+	 */
+	private List<String> pageSelectedDefCodes(AiContext context) {
 		Map<String, Object> extra = context.getExtra();
-		if (extra != null && extra.get("pageId") instanceof String pageId
-				&& ContextBuilder.SELECTION_PAGE_IDS.contains(pageId)
-				&& extra.get("selectedDefs") instanceof List<?> selected) {
-			List<String> codes = new ArrayList<>();
-			for (Object element : selected) {
-				if (element != null && !String.valueOf(element).isBlank()) {
-					codes.add(String.valueOf(element));
-				}
-			}
-			return codes;
+		if (extra == null) {
+			return null;
 		}
+		if (!(extra.get("pageId") instanceof String pageId) || !ContextBuilder.SELECTION_PAGE_IDS.contains(pageId)) {
+			return null;
+		}
+		if (!(extra.get("selectedDefs") instanceof List<?> selected)) {
+			return null;
+		}
+		List<String> codes = new ArrayList<>();
+		for (Object element : selected) {
+			if (element != null && !String.valueOf(element).isBlank()) {
+				codes.add(String.valueOf(element));
+			}
+		}
+		return codes;
+	}
+
+	/** 任务已存条目（页面未同步时的权威来源；没有任务 = 空）。 */
+	private List<String> taskDefCodes(AiContext context) {
 		Task task = task(context);
 		if (task == null || task.getItems() == null) {
 			return List.of();

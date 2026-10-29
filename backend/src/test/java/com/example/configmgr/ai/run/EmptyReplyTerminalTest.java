@@ -401,6 +401,32 @@ class EmptyReplyTerminalTest {
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
 	}
 
+	/**
+	 * <b>隐藏思考不算用户可见产出</b>（本批收口）：展示开关默认关闭时，思考只进累加器、
+	 * 不发 {@code reasoning} 帧 —— 用户屏幕上什么都没出现。正文为空 ⇒ 仍属"零可见产出"，
+	 * 按仅模型步重试一次；此时 {@code retry} 帧之前没有任何 delta，帧序契约不被破坏。
+	 */
+	@Test
+	void hiddenReasoningOnlyEmptyReplyStillRetriesTheModelStepOnce() {
+		assertThat(this.properties.getReasoning().isDisplayEnabled()).as("思考默认隐藏").isFalse();
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(reasoning("先在心里过一遍"), terminal("stop")),
+					Flux.just(chunk("第二次答出来了"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).as("隐藏思考不占帧：retry 是这一轮的第一条非终态帧")
+			.containsExactly("start", "retry", "message_start", "delta", "message_end", "done");
+		assertThat(FrameContract.oneOfType(frames, "retry")).containsEntry("emptyReply", true)
+			.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE);
+		assertThat(frames).as("展示关闭 ⇒ 一个 reasoning delta 都不发")
+			.noneMatch(frame -> "delta".equals(frame.get("type")) && "reasoning".equals(frame.get("kind")));
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(snapshot.getFinalText()).isEqualTo("第二次答出来了");
+	}
+
 	// ── ⑤ 终态判定函数（参数化，A13/A14） ──
 
 	@ParameterizedTest(name = "isTerminal({0}) == {1}")

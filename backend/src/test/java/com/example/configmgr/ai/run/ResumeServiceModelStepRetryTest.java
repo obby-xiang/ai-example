@@ -155,6 +155,28 @@ class ResumeServiceModelStepRetryTest {
 		assertThat(check.failedCheck()).isEqualTo("PARTIAL_CONTENT");
 	}
 
+	/**
+	 * <b>隐藏思考不阻断仅模型步重跑</b>（本批收口）：思考展示关闭时，快照里的
+	 * {@code reasoningContent} 从未上屏，不构成"用户可见的半截产出"；展示开启时仍按旧口径拒绝
+	 * （用户已经看到半截思考，重跑会叠出第二段）。
+	 */
+	@Test
+	void hiddenReasoningDoesNotBlockModelStepRetryWhileDisplayedReasoningStillDoes() {
+		RunSnapshot hidden = snapshot(RunSnapshot.FAILED);
+		hidden.setAssistantMetadata(Map.of(ResilientChatService.REASONING_METADATA_KEY, "想到一半（未上屏）"));
+		List<Message> history = List.of(new UserMessage("你好"));
+
+		ResumeService.ModelStepRetryCheck allowed = ResumeService.checkModelStepRetry(hidden, List.of(), history,
+				false);
+		assertThat(allowed.allowed()).as("隐藏思考不阻断重跑").isTrue();
+		assertThat(allowed.failedCheck()).isNull();
+
+		ResumeService.ModelStepRetryCheck denied = ResumeService.checkModelStepRetry(hidden, List.of(), history,
+				true);
+		assertThat(denied.allowed()).as("已展示的思考仍是半截产出").isFalse();
+		assertThat(denied.failedCheck()).isEqualTo("PARTIAL_CONTENT");
+	}
+
 	private static RunSnapshot snapshot(String status) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);

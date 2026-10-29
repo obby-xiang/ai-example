@@ -159,6 +159,35 @@ class TaskSlotResolverTest {
 		assertThat(replaced.defCodes()).containsExactly("CURRENCY");
 	}
 
+	/**
+	 * <b>页面显式空列表 = 权威空值</b>（本批收口，与 {@code ContextBuilder#pageSelectedDefs} 的两态一致）：
+	 * 用户在向导里把勾选全部取消时，客户端上报 {@code selectedDefs=[]} —— 这是"现在什么都没选"的事实，
+	 * 不得回落到历史原文把旧选择重新勾回来（那会让模型按用户已取消的选择继续推进）。
+	 */
+	@Test
+	void explicitEmptyPageSelectionIsAuthoritativeAndDoesNotResurrectHistory() {
+		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
+				Map.of("pageId", "export", "selectedDefs", List.of()));
+
+		TaskSlots slots = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY，筛选 CNY"));
+
+		assertThat(slots.defCodes()).as("页面同步了空集合 ⇒ 权威空，不回落历史").isEmpty();
+		assertThat(slots.conditions()).as("没有配置项就没有可承载的条件").isEmpty();
+	}
+
+	/**
+	 * 反向/相邻：页面<b>从未同步</b> {@code selectedDefs}（键缺失或不在拥有选中集的页上）时，
+	 * 空值只表示"不知道"，仍允许按历史回落 —— 与 {@code ContextBuilder} 的 {@code null} 态同源。
+	 */
+	@Test
+	void unsyncedPageSelectionStillFallsBackToHistory() {
+		AiContext unsynced = AiContext.of("export", "EXPORT", "SELECT_DEFS", null, Map.of("pageId", "export"));
+
+		TaskSlots slots = this.resolver.resolve(unsynced, "继续", List.of("导出 CURRENCY"));
+
+		assertThat(slots.defCodes()).as("未同步 ⇒ 允许历史回落").containsExactly("CURRENCY");
+	}
+
 	@Test
 	void enrichWritesWhitelistedExtraAndSurvivesSnapshotRoundTrip() {
 		AiContext enriched = this.resolver.enrich(AiContext.empty(), "导出 CURRENCY，筛选 CNY", List.of());

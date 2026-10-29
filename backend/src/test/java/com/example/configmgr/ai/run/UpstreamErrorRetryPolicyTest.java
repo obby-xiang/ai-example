@@ -246,6 +246,61 @@ class UpstreamErrorRetryPolicyTest {
 		verify(this.chatModel, times(1)).stream(any(Prompt.class));
 	}
 
+	/**
+	 * <b>隐藏思考不阻断安全自动重试，也不谎称 {@code _AFTER_PARTIAL}</b>（本批收口）。
+	 *
+	 * <p>展示开关默认关闭 ⇒ 思考从未发帧，用户端零可见产出：本次尝试仍满足重试三条件里的
+	 * "未产出内容"，按 {@code max-attempts} 自动重试；若最终仍失败，派生码必须用基础码
+	 * （{@code UPSTREAM_STREAM_INCOMPLETE}），不能带 {@code _AFTER_PARTIAL} 冒充"用户已看到半截"。
+	 */
+	@Test
+	void hiddenReasoningDoesNotBlockRetryAndNeverClaimsAfterPartial() {
+		assertThat(this.properties.getReasoning().isDisplayEnabled()).as("思考默认隐藏").isFalse();
+		this.properties.getResilience().setMaxAttempts(2);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.concat(Flux.just(reasoning("只在心里想")), Flux.error(http(500))),
+					Flux.just(chunk("答出来了"), terminal("stop")));
+
+		List<Map<String, Object>> frames = runTurn();
+
+		assertThat(FrameContract.types(frames)).as("隐藏思考后仍重试一次，第二次成功")
+			.containsExactly("start", "retry", "message_start", "delta", "message_end", "done");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+
+		// 反向：重试额度用尽且始终无可见产出 ⇒ 基础码，不派生 _AFTER_PARTIAL
+		String runId = "run-upstream-policy-hidden-reasoning-incomplete";
+		String sessionId = "s-upstream-policy-hidden-reasoning-incomplete";
+		seedRun(runId, sessionId);
+		this.properties.getResilience().setMaxAttempts(1);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(reasoning("想了但没答")));
+
+		List<Map<String, Object>> second = runTurn(runId, sessionId);
+
+		assertThat(FrameContract.oneOfType(second, "error"))
+			.as("零可见产出 ⇒ 不得用 _AFTER_PARTIAL 冒充半截产出")
+			.containsEntry("code", ErrorCodes.UPSTREAM_STREAM_INCOMPLETE);
+		assertThat(this.store.get(runId).getError()).contains(ErrorCodes.UPSTREAM_STREAM_INCOMPLETE)
+			.doesNotContain(ResilientChatService.AFTER_PARTIAL);
+	}
+
+	/**
+	 * 反向锁：展示<b>开启</b>时思考帧已经发给用户，重试会叠出第二段思考且 retry 帧落在
+	 * reasoning delta 之后（帧序契约禁止）⇒ 不重试，派生码 {@code _AFTER_PARTIAL} 名副其实。
+	 */
+	@Test
+	void displayedReasoningStillBlocksRetryAndKeepsTheAfterPartialCode() {
+		this.properties.getReasoning().setDisplayEnabled(true);
+		this.properties.getResilience().setMaxAttempts(3);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(reasoning("用户已经看到的思考")));
+
+		List<Map<String, Object>> frames = runTurn();
+
+		assertThat(FrameContract.ofType(frames, "retry")).as("已出思考帧 ⇒ 不自动重试").isEmpty();
+		assertThat(FrameContract.oneOfType(frames, "error"))
+			.containsEntry("code", ErrorCodes.UPSTREAM_STREAM_INCOMPLETE_AFTER_PARTIAL);
+		verify(this.chatModel, times(1)).stream(any(Prompt.class));
+	}
+
 	// ── finishReason：length / content_filter / tool_calls / 未知 ────────────
 
 	@Test
@@ -564,6 +619,17 @@ class UpstreamErrorRetryPolicyTest {
 	/** 一个空正文分片（只有 role/用量，模拟上游的中间空片）。 */
 	private static ChatResponse emptyChunk() {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build())));
+	}
+
+	/**
+	 * 思考分片（L-91）：Spring AI 1.1.7 用 {@code AssistantMessage} metadata 键
+	 * {@code reasoningContent} 携带思考文本（与产品侧 {@code REASONING_METADATA_KEY} 同拼写）。
+	 */
+	private static ChatResponse reasoning(String text) {
+		return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+			.content("")
+			.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, text))
+			.build())));
 	}
 
 	/** 一条<b>真实</b>工具调用分片（无 finishReason）：{@code output.hasToolCalls()=true}。 */

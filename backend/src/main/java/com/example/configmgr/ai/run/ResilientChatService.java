@@ -215,7 +215,12 @@ public class ResilientChatService {
 			    navigate_to → select_definitions → confirm_step → set_condition，一批只做一步；进入新页面
 			    或新步骤后一律以当批实际披露的工具列表为准，没披露的工具不要硬调，如实说明当前状态即可。
 			    不要要求用户给出下一步指令，下一轮按原始意图自动接续，不要求用户重复原始意图。
-			    页面级动作失败即停：如实说明失败原因与当前状态，不要重试推进、跳步或反复导航；
+			    挂起期间用户在向导里手动改了步骤时，后续跑一律按任务的权威步骤同步继续
+			    （以工作区状态里的步骤与最新披露为准，不以历史对话里的旧步骤为准），
+			    不为此新增确认卡、不追问用户：步骤同步是事实收敛，不是新的授权。
+			    页面级动作失败即停：如实说明失败原因与当前状态，不要重试推进、跳步或反复导航
+			    （第 29 条的零副作用一次纠正例外除外：回执给出明确纠正指引且本次失败零副作用时，
+			    允许一次不同的纠正动作；同参数重试推进仍在禁止之列）；
 			    同一目标页不要重复导航。披露不等于授权：工具被披露只是当前可用，
 			    create_task 与 start_* 仍必须由各自确认卡承接（见第 9、17、24 条）。
 			    例外：create_task 已获批准或已创建成功时任务已经存在，不得再次索要批准、
@@ -260,6 +265,8 @@ public class ResilientChatService {
 			25. start_export 成功后严禁自动调用 download_export_files；只有用户明确提出下载/获取文件意图时
 			    才可调用它。任务状态为 COMPLETED 且导出已成功时不要再调用 start_export，也不得把“启动导出”
 			    改写成“下载旧结果”；没有明确下载意图时只如实说明导出状态，查看编辑器也需用户有查看意图。
+			    「任务已完成（COMPLETED）本身不构成下载或打开编辑器的授权」：状态是事实，不是用户意图，
+			    不得仅凭状态自动下载、自动打开编辑器或把入口当成下一步建议。
 			26. 选择配置项、设置筛选条件、澄清结构化信息时，优先用工具或生成式表单（select_definitions /
 			    set_condition / generative_form），不要用开放式文字一问一答。导出配置项选择表单必须
 			    直接平铺多选配置项，不得要求用户先选择 GLOBAL/REGION/PROJECT 层级；此约束只用于该场景，
@@ -1241,7 +1248,8 @@ public class ResilientChatService {
 					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn);
 					return;
 				}
-				boolean emitted = accumulator.emittedAny();
+				// 用户可见产出（正文或已上屏的思考）：隐藏思考不算，重试不会造成重复内容
+				boolean emitted = accumulator.emittedVisible();
 				// 副作用 = 本次尝试内工具开始执行过，或台账在本次尝试开始后新增了执行记录
 				boolean sideEffect = this.beacon.startedCount(runId) > beaconBefore
 						|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0;
@@ -1256,7 +1264,7 @@ public class ResilientChatService {
 				// （W-21 · run 40247120358：boot.log 6265/6282、req-206 `[system,user,user]`）。
 				// 与 RunParkedException 同口径：不是失败、不是取消 —— 不发终帧、不写失败态、不动快照/pending/req，
 				// 只把线程交还，由 resume 物化这一轮。判据只看<b>权威快照</b>（不看 pending 的结算时机），
-				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedAny=true）或最后一次尝试
+				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedVisible=true）或最后一次尝试
 				// （hasNext=false）同样不能被 fail() 写成 FAILED —— 挂起轮一旦落库就只归 resume 收口。
 				boolean parkedToolRound = isPersistedParkedToolRound(runId);
 				if (parkedToolRound) {
@@ -1498,10 +1506,11 @@ public class ResilientChatService {
 	 * （FAILED + {@code EMPTY_REPLY}）。三形态（空串 / 纯空白 / 空文本但本轮用过工具）一律如此：
 	 * "用过工具"只说明这一轮做过事，不改变"模型没给出任何正文"这一事实。
 	 *
-	 * <p><b>批次2 / AR-05：空回复的<b>一次</b>重试</b> —— 只有"零产出（正文与思考都没出过帧）+ 零副作用"
-	 * 才允许再试一次（见 {@link #emptyReplyRetryable}）。有思考、有工具副作用、已挂起工具轮、已到
-	 * 尝试上界或预算耗尽时一律<b>不</b>重试，直接落 {@code EMPTY_REPLY} 失败（否则重试会把已出过的
-	 * 思考段再吐一遍，或把"这一轮已做过事"抹成没做过）。
+	 * <p><b>批次2 / AR-05：空回复的<b>一次</b>重试</b> —— 只有"零<b>可见</b>产出（正文为空且思考没有上屏）
+	 * + 零副作用"才允许再试一次（见 {@link #emptyReplyRetryable}）。已上屏的思考、工具副作用、
+	 * 已挂起工具轮、已到尝试上界或预算耗尽时一律<b>不</b>重试，直接落 {@code EMPTY_REPLY} 失败
+	 * （否则重试会把已出过的思考段再吐一遍，或把"这一轮已做过事"抹成没做过）。隐藏思考（展示关闭）
+	 * 没上屏，不阻断这条重试。
 	 *
 	 * @return {@code true} = 已终态收尾（调用方 return）；{@code false} = 空回复可再试一次
 	 *         （调用方继续尝试循环，本方法已发 {@code retry} 帧）
@@ -1894,9 +1903,10 @@ public class ResilientChatService {
 	 * <ol>
 	 * <li>本轮还<b>没有</b>因空回复重试过（一次为限，不无限重试）；</li>
 	 * <li>还有下一次尝试额度（{@code app.ai.resilience.max-attempts} 封顶 = 有界重试）；</li>
-	 * <li><b>零产出</b>：{@code !accumulator.emittedAny()} —— 正文与思考都没出过帧。
-	 *     只有 reasoning、正文为空时 {@code emittedAny()=true} ⇒ <b>不重试</b>（重试会把已发过的
-	 *     思考段再吐一遍，且 {@code retry} 帧会落在思考 delta 之后，破帧序契约）；</li>
+	 * <li><b>零可见产出</b>：{@code !accumulator.emittedVisible()} —— 正文为空，且思考没有上屏。
+	 *     展示开启时只有 reasoning、正文为空 ⇒ {@code emittedVisible()=true}，<b>不重试</b>
+	 *     （重试会把已发过的思考段再吐一遍，且 {@code retry} 帧会落在思考 delta 之后，破帧序契约）；
+	 *     展示关闭时隐藏思考不计入可见产出 ⇒ 仍按"零产出"重试一次（用户端没有可重复的内容）；</li>
 	 * <li><b>零副作用</b>：本次尝试内没有工具开始执行、台账也没有新增执行记录；</li>
 	 * <li>不是"已挂起的工具轮"（那种轮归 resume 收口，不能被当成空轮重试）；</li>
 	 * <li>本段预算还没耗尽（不发起注定撞 {@code TOTAL_BUDGET} 的重试）。</li>
@@ -1911,7 +1921,7 @@ public class ResilientChatService {
 		if (attempts >= Math.max(1, config.getMaxAttempts())) {
 			return false;
 		}
-		if (accumulator.emittedAny()) {
+		if (accumulator.emittedVisible()) {
 			return false;
 		}
 		if (this.beacon.startedCount(runId) > beaconBefore
@@ -2096,7 +2106,7 @@ public class ResilientChatService {
 		String text = accumulator.text();
 		StreamViolationException violation = new StreamViolationException(ErrorCodes.CONTENT_FILTERED,
 				"上游以 finishReason=content_filter 结束（已产出 " + text.length() + " 字符），按失败收尾");
-		boolean emitted = accumulator.emittedAny();
+		boolean emitted = accumulator.emittedVisible();
 		boolean sideEffect = this.beacon.startedCount(runId) > 0;
 		log.error("AI 轮次被内容过滤 runId={} sessionId={} attempts={} rawChars={} 末帧序列=[{}]", runId, sessionId,
 				attempts, text.length(), accumulator.tailSummary());
@@ -2854,12 +2864,13 @@ public class ResilientChatService {
 		String reasoning = chunkReasoning(response);
 		if (reasoning != null && !reasoning.isEmpty()) {
 			// D：展示开关默认关闭 —— 不发思考帧；思考仍原样累计，供落定/取消时写进记忆回填。
-			if (this.properties.getReasoning().isDisplayEnabled()) {
+			boolean shown = this.properties.getReasoning().isDisplayEnabled();
+			if (shown) {
 				out.reasoningDelta(reasoning);
 			}
-			// 已产出思考 = 已产出内容：重试三条件里的"未产出内容"不再成立
-			// （否则 retry 会落在思考段之后，且前端会看到两段重复的思考）。
-			accumulator.reasoning(reasoning);
+			// 只有"发过 reasoning 帧"才计入用户可见产出：隐藏思考没上屏，重试不会造成重复思考，
+			// 也不会让 retry 帧落在思考 delta 之后（展示关闭时根本没有思考 delta）。
+			accumulator.reasoning(reasoning, shown);
 		}
 		String text = chunkText(response);
 		accumulator.accept(response);
@@ -2960,6 +2971,14 @@ public class ResilientChatService {
 
 		/** <b>L-91/L-98</b>：本尝试累计的思考全文（不进 {@link #text} —— 思考不是正文；原样进记忆元数据）。 */
 		private final StringBuilder reasoning = new StringBuilder();
+
+		/**
+		 * 本尝试是否有思考<b>上过屏</b>（{@code display-enabled=true} 时发过 {@code reasoning} 帧）。
+		 *
+		 * <p>与 {@link #reasoning} 的长度解耦：默认隐藏思考时全文照常累计（供记忆回填），但用户
+		 * 屏幕上零可见产出 —— 重试判据与派生错误码都必须按"用户看到了什么"判，而不是按"模型想了多少"。
+		 */
+		private boolean reasoningShown;
 
 		private final AtomicReference<ChatResponse> lastResponse = new AtomicReference<>();
 
@@ -3083,15 +3102,22 @@ public class ResilientChatService {
 		 * <b>L-91/L-98</b>：记下本片思考的全文（<b>不进</b> {@link #text} —— 思考不是正文）。
 		 *
 		 * <p>
-		 * 两个用途：① {@link #emittedAny()} —— 思考一旦发过帧，它就是"用户已经看到的内容"，
+		 * 两个用途：① {@link #emittedVisible()} —— 只有<b>发过帧</b>的思考才是"用户已经看到的内容"，
 		 * 断流重试会把它再吐一遍（前端出现两段重复思考），且 {@code retry} 帧会落在思考 delta
 		 * 之后（{@link com.example.configmgr.ai.conformance.FrameContract#orderingContract} 明令禁止）；
+		 * 展示关闭的隐藏思考不上屏，因此不阻断重试、也不该让失败码冒充 {@code _AFTER_PARTIAL}；
 		 * ② 落定/取消时随 assistant 消息写进记忆（键 {@code reasoningContent}），供下一轮回填
 		 * （{@code ReasoningAwareOpenAiChatModel}）。体积口径：不截断，随会话记忆 TTL 走。
+		 *
+		 * @param chunk   本片思考原文
+		 * @param shown   本片是否已作为 {@code reasoning} 帧发给客户端（展示开关打开）
 		 */
-		void reasoning(String chunk) {
+		void reasoning(String chunk, boolean shown) {
 			if (chunk != null && !chunk.isEmpty()) {
 				this.reasoning.append(chunk);
+				if (shown) {
+					this.reasoningShown = true;
+				}
 			}
 		}
 
@@ -3148,10 +3174,16 @@ public class ResilientChatService {
 			return this.terminalSignal;
 		}
 
-		boolean emittedAny() {
-			// L-91：思考也算"已产出内容"（前端已看到）——否则纯思考轮的断流会被判成"什么都没发"
-			// 而去重试，重试的思考段会叠在前一段上，且 retry 帧落在 delta 之后。
-			return this.text.length() > 0 || this.reasoning.length() > 0;
+		/**
+		 * 本尝试是否已有<b>用户可见</b>的产出（正文任一字符，或已上屏的思考）。
+		 *
+		 * <p>这是重试三条件里的"未产出内容"与失败派生码 {@code _AFTER_PARTIAL} 的<b>唯一判据</b>：
+		 * 默认隐藏思考时思考只进记忆、不上屏，用户端仍是零产出 —— 因此允许安全重试，且失败码不得
+		 * 冒充 {@code _AFTER_PARTIAL}。展示开启时思考帧已发出，仍按旧口径阻断重试（避免重复思考段，
+		 * 也避免 {@code retry} 帧排在思考 delta 之后）。
+		 */
+		boolean emittedVisible() {
+			return this.text.length() > 0 || this.reasoningShown;
 		}
 
 		String text() {

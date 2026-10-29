@@ -520,7 +520,7 @@ public class ResumeService {
 		// 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写；前端据此在
 		// "仅模型步重跑 / 中性未确认视图 + 新开一轮"之间选，不需要自己反解历史。
 		out.put("failureScene", failureScene(snapshot, pendings, history));
-		ModelStepRetryCheck retryCheck = checkModelStepRetry(snapshot, pendings, history);
+		ModelStepRetryCheck retryCheck = checkModelStepRetry(snapshot, pendings, history, reasoningVisible());
 		out.put("canRetryModelStep", retryCheck.allowed());
 		out.put("retryModelStepDeniedBy", retryCheck.failedCheck());
 		out.put("keys", describeKeys(runId, snapshot));
@@ -972,7 +972,7 @@ public class ResumeService {
 			}
 			List<Message> fixedHistory = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			// ①②③④⑤⑦：状态/待决/配对/半截/历史形状（②的跨实例面已由租约+verifyHeld 证明）
-			ModelStepRetryCheck check = checkModelStepRetry(snapshot, pendings, fixedHistory);
+			ModelStepRetryCheck check = checkModelStepRetry(snapshot, pendings, fixedHistory, reasoningVisible());
 			if (!check.allowed()) {
 				if ("PENDING_TOOLS".equals(check.failedCheck())) {
 					body.put("reason", "PENDING_UNRESOLVED");
@@ -1194,12 +1194,26 @@ public class ResumeService {
 	 * 仅模型步重跑的<b>纯判定</b>（七条件里可在无副作用前提下静态判定的五条）—— 供入口与
 	 * {@link #describe(String)}（{@code canRetryModelStep}）共用，也便于单测直接覆盖。
 	 *
+	 * <p>三参重载 = 兼容旧调用口径：思考按"用户可见"（最保守）处理。
+	 *
 	 * @param snapshot 当前快照（非 null）
 	 * @param pendings 待决条目（强一致读口的结果）
 	 * @param history  快照历史（原样）
 	 */
 	public static ModelStepRetryCheck checkModelStepRetry(RunSnapshot snapshot, List<PendingToolCall> pendings,
 			List<Message> history) {
+		return checkModelStepRetry(snapshot, pendings, history, true);
+	}
+
+	/**
+	 * 仅模型步重跑的纯判定（<b>思考展示口径显式化</b>）。
+	 *
+	 * @param reasoningVisible {@code true} = 这一轮的思考已经以 {@code reasoning} 帧给用户看过
+	 *                         （半截思考因此不可被静默替换）；{@code false} = 隐藏思考从未上屏，
+	 *                         它不构成"用户可见的半截产出"，不阻断重跑
+	 */
+	public static ModelStepRetryCheck checkModelStepRetry(RunSnapshot snapshot, List<PendingToolCall> pendings,
+			List<Message> history, boolean reasoningVisible) {
 		if (snapshot == null) {
 			return new ModelStepRetryCheck(false, "NOT_FAILED", "轮次不存在");
 		}
@@ -1221,15 +1235,16 @@ public class ResumeService {
 					"仍有未结算的待决工具 " + unsettled.size() + " 条");
 		}
 		List<Message> messages = history == null ? List.of() : history;
-		// ⑤ 无半截正文 / 半截思考
+		// ⑤ 无半截正文 / 半截可见思考
 		if (StringUtils.hasText(snapshot.getAssistantContent())) {
 			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有半截正文（不可自动替换）");
 		}
 		if (StringUtils.hasText(snapshot.getFinalText())) {
 			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有最终正文（已被写成完整答案）");
 		}
+		// 思考只在"上过屏"时才算半截产出：展示关闭的隐藏思考用户从未看到，重跑不会出现两段思考。
 		Map<String, Object> assistantMetadata = snapshot.getAssistantMetadata();
-		if (assistantMetadata != null && StringUtils.hasText(
+		if (reasoningVisible && assistantMetadata != null && StringUtils.hasText(
 				assistantMetadata.get(ResilientChatService.REASONING_METADATA_KEY) == null ? null
 						: String.valueOf(assistantMetadata.get(ResilientChatService.REASONING_METADATA_KEY)))) {
 			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有半截思考");
@@ -1246,6 +1261,19 @@ public class ResumeService {
 					"工具调用与工具响应不配对（悬空 tool_calls 会被上游拒绝）");
 		}
 		return new ModelStepRetryCheck(true, null, null);
+	}
+
+	/**
+	 * 这一轮（以及此刻的配置）思考是否曾以 {@code reasoning} 帧上屏：
+	 * {@code app.ai.reasoning.display-enabled} 是全局开关，关闭（默认）时思考只进记忆、不上屏，
+	 * 因此快照里的 {@code reasoningContent} 不构成"用户可见的半截产出"。
+	 *
+	 * <p>口径边界：判定用<b>当前</b>配置。开关在一轮生成与重跑之间被翻转不是支持场景
+	 * （翻转后重跑会按新口径重问模型）；本判据只回答"用户端现在有没有看到过这段思考"。
+	 */
+	private boolean reasoningVisible() {
+		return this.properties != null && this.properties.getReasoning() != null
+				&& this.properties.getReasoning().isDisplayEnabled();
 	}
 
 	/** 历史里的 {@code tool_calls} 与 {@code tool} 响应 id 集合必须相等（配对完整）。 */

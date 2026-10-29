@@ -20,7 +20,10 @@
 # 2026-10-27.4 → 2026-10-27.5（2026-10-28 槽位填充 + 条件放行）：表单用途 purpose 显式化
 # （SELECT_DEFINITIONS/SET_CONDITIONS/GENERAL_CLARIFY，缺省 GENERAL_CLARIFY），宿主按 purpose 与
 # 「任务槽位」判断槽位是否已齐；槽位已确定的收集表单被零副作用拒绝（FORM_SLOTS_ALREADY_KNOWN）。
-version: 2026-10-27.5
+# 2026-10-27.5 → 2026-10-27.6（2026-10-29 规则冲突统一）：任务已完成（COMPLETED）不再是下载/打开编辑器的
+# 理由（只在用户明确意图时调用，状态不是授权）；未设筛选按「全量」呈现（不设条件即全量，不再反复收集条件）。
+# 改描述必升 version（破 prompt 缓存）。
+version: 2026-10-27.6
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -45,7 +48,8 @@ tools:
     title: 启动导出作业
     description: >-
       启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；任务未终态（CANCELLED/已完成导出成功
-      的任务不可再导出）、无同类在途作业。任务已完成时改用 download_export_files，不要重复发起导出。
+      的任务不可再导出）、无同类在途作业。任务已完成时不要重复发起导出；下载或打开编辑器只在用户明确
+      要求时进行（已完成状态本身不是授权）。
   - toolKey: start_precheck
     title: 启动预检查作业
     description: >-
@@ -61,11 +65,16 @@ tools:
       （MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。
   - toolKey: open_export_file_editor
     title: 打开导出文件在线编辑器
+    description: >-
+      打开导出文件的在线编辑器（前端执行）。前置：EXPORT 任务已有成功导出作业/导出文件。
+      只在用户明确提出查看/编辑导出文件意图时调用；任务已完成（COMPLETED）本身不是授权，
+      不要把它当作已完成任务的下一步建议。
   - toolKey: download_export_files
     title: 下载导出文件
     description: >-
-      下载导出文件（前端执行）。前置：EXPORT 任务已有成功导出作业/导出文件。任务已完成时用它
-      （或 open_export_file_editor），不要重复 start_export。
+      下载导出文件（前端执行）。前置：EXPORT 任务已有成功导出作业/导出文件。
+      只在用户明确提出下载/获取文件意图时调用；任务已完成（COMPLETED）本身不是授权，
+      不要用它替代 start_export，也不要仅凭状态自动下载。
   - toolKey: navigate_to
     title: 跳转页面
     description: >-
@@ -96,6 +105,7 @@ tools:
       不要重试推进或跳步。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；
       导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。
       用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。
+      未设筛选是正常状态（= 全量导出）：不要因此收集条件、停在原地或追问是否筛选，照常推进即可。
   - toolKey: generative_form
     title: 生成式表单
     # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在

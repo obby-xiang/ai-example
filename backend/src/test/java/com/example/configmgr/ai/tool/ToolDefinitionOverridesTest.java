@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.5", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.6", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -321,5 +321,44 @@ class ToolDefinitionOverridesTest {
         assertTrue(stepEnumeration.contains("UPLOAD/PRECHECK/IMPORT/PUBLISH"), stepEnumeration);
         assertTrue(!stepEnumeration.contains("导入向导 SELECT_DEFS"),
                 "导入向导没有 SELECT_DEFS 步，旧枚举必须删除：" + stepEnumeration);
+    }
+
+    /**
+     * 2026-10-29 规则冲突统一：<b>任务已完成不等于下载/打开编辑器授权</b>。
+     *
+     * <p>旧描述把"任务已完成"直接写成改用 {@code download_export_files}（或
+     * {@code open_export_file_editor}）的理由 —— 与系统提示词第 25 条"只有用户明确提出下载/获取
+     * 文件意图时才可调用"正面冲突，模型据工具描述即可自动下载（副作用）。本用例锁住：三处描述
+     * 都必须点名"用户明确意图"，且删除"已完成就改用下载"的旧口径；改描述必须按头部约定升 version。
+     */
+    @Test
+    void shippedDownloadAndEditorRequireExplicitUserIntentAndBumpVersion() {
+        YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
+
+        ToolDefinitionOverride startExport = shipped.load().find("start_export");
+        assertNotNull(startExport);
+        String startExportDescription = startExport.description();
+        assertTrue(!startExportDescription.contains("任务已完成时改用 download_export_files"),
+                "旧口径（已完成就改用下载）必须删除：" + startExportDescription);
+        assertTrue(startExportDescription.contains("用户明确"), startExportDescription);
+
+        ToolDefinitionOverride download = shipped.load().find("download_export_files");
+        assertNotNull(download);
+        String downloadDescription = download.description();
+        assertTrue(!downloadDescription.contains("任务已完成时用它"),
+                "旧口径（已完成为由推荐下载）必须删除：" + downloadDescription);
+        assertTrue(downloadDescription.contains("用户明确"), downloadDescription);
+
+        ToolDefinitionOverride editor = shipped.load().find("open_export_file_editor");
+        assertNotNull(editor);
+        assertTrue(editor.hasDescription(), "open_export_file_editor 必须有描述覆盖（点名用户明确意图）");
+        assertTrue(editor.description().contains("用户明确"), editor.description());
+
+        ToolDefinitionOverride confirmStep = shipped.load().find("confirm_step");
+        assertNotNull(confirmStep);
+        assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
+        assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
+
+        assertEquals("2026-10-27.6", shipped.version(), "改描述必须发新 version");
     }
 }
