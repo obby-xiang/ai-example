@@ -81,4 +81,15 @@ final class RunStoreFrameStore implements FrameStore {
 		return this.store.lastEventSeq(runId);
 	}
 
+	/**
+	 * 终态释放本轮的进程内号锚（与生产实现 {@link RedisFrameStore#forget} 同口径）。
+	 *
+	 * <p>下一次取号会按 {@code max(归档末帧, 已发放序号)} 重锚（{@link #nextSeq} 的惰性初始化），
+	 * 因此回收不会让号回退。
+	 */
+	@Override
+	public void forget(String runId) {
+		this.seqs.remove(runId);
+	}
+
 }

@@ -96,4 +96,15 @@ public interface FrameStore {
 	/** 事件日志里<b>已落档</b>的最大序号（无帧 = 0；读失败的生产实现返回 -1，见 {@link #lastSeqIfKnown}）。 */
 	long lastSeq(String runId);
 
+	/**
+	 * <b>终态释放</b>本轮的进程内簿记（帧序号/资源修复批；默认 no-op）。
+	 *
+	 * <p>只清"本进程为这一轮记的东西"（降级号、观察到的最大载荷、每轮一次的告警位），
+	 * <b>不动事件日志与序号键</b>：它们按 session TTL 自然到期，回收之后的重挂/续跑仍按归档回放。
+	 * 由终态出口（{@code RunRegistry#close}）调用 —— 谁结束谁释放，长跑实例上才不会被
+	 * "每轮一条、只增不减"的进程内 Map 拖住。
+	 */
+	default void forget(String runId) {
+	}
+
 }

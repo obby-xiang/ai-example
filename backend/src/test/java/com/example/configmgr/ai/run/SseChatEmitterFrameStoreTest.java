@@ -38,7 +38,7 @@ class SseChatEmitterFrameStoreTest {
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	@Test
-	void emitAppendsThenPublishesThenFansOut() {
+	void emitAppendsThenFansOutThenPublishes() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		SseChatEmitter out = emitter(store);
 		FrameWire wire = new FrameWire(payload -> this.journal.add("send"));
@@ -48,8 +48,10 @@ class SseChatEmitterFrameStoreTest {
 		out.delta("正文");
 
 		assertThat(this.journal)
-				.as("顺序固定：取号 → 落档 → 发布唤醒 → 本地扇出（落档必须早于发布，否则被唤醒者读不到该帧）")
-				.containsExactly("next:" + RUN_ID, "append:" + RUN_ID, "publish:" + RUN_ID, "send");
+				.as("顺序固定：取号 → 落档 → 本地扇出 → 发布唤醒。"
+						+ "资源修复批：发布挪到 emitLock 之外（锁内只累计上界），因此它排在本地扇出之后 —— "
+						+ "落档仍早于发布（否则被唤醒者读不到该帧），而 PUBLISH 的网络往返不再占着出帧锁")
+				.containsExactly("next:" + RUN_ID, "append:" + RUN_ID, "send", "publish:" + RUN_ID);
 		assertThat(this.bus.published).as("唤醒载荷只带上界 seq，不传帧体").containsExactly(RUN_ID + "@1");
 		assertThat(seqs(wire.frames())).containsExactly(1L);
 		assertThat(this.frames.readFrom(RUN_ID, 0L, 0)).as("帧已落进事件日志").hasSize(1);

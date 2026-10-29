@@ -64,12 +64,18 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  *
  * <h2>线程占用口径（慢订阅者隔离的第二层）</h2>
- * 每次写出占用的是<b>本类的写出池</b>（{@link #sharedElasticWriterPool()}，弹性、守护、进程级）
+ * 每次写出占用的是<b>本类的写出池</b>（{@link #sharedElasticWriterPool()}，有界弹性、守护、进程级）
  * 而不是调用线程所在的有界池：调用线程（投递池 / 作业线程 / HTTP 线程）最多被占用
  * {@code timeoutMillis}，池饱和度因此<b>不再由"慢连接数"决定</b>（修复前：{@code M ≥ 池容量}
- * 即全进程停投）。代价是"被卡住的那一次写"仍占 1 个写出池线程，上界 = 每条订阅者 1 个
- * （订阅者的 drain 是串行的），最终由客户端断开、容器写超时（{@code connection-timeout}=120s）、
+ * 即全进程停投）。代价是"被卡住的那一次写"仍占 1 个写出池线程（上界 = 每条订阅者 1 个，
+ * 订阅者的 drain 是串行的），最终由客户端断开、容器写超时（{@code connection-timeout}=120s）、
  * emitter 生命周期超时（任务通道 5m，通常最晚；AI 通道无此层）三者先到者释放。
+ *
+ * <p><b>资源修复批</b>：上述"上界"的推导依赖"并发订阅者数"，而它有<b>没有硬界</b>的外部来源
+ * （多实例 + 多连接 + 客户端不读也不断开）。因此本类的写出池再补一条<b>硬上限</b>
+ * {@link #DEFAULT_MAX_WRITER_THREADS}：线程峰值 = {@code min(并发慢订阅者数, 硬上限)}；
+ * 达上限后提交被拒 ⇒ {@link Outcome#SATURATED} ⇒ 调用方摘除<b>触发本次写出的</b>订阅者
+ * （牺牲"新写"，不牺牲整机内存）。
  */
 @Slf4j
 public final class SseWriteBudget {
@@ -89,16 +95,40 @@ public final class SseWriteBudget {
     /** 累计写超时次数（进程级，供 {@code GET /api/ai/health} 的 sseDelivery 段）。 */
     private static final AtomicLong WRITE_TIMEOUTS = new AtomicLong();
 
+    /** 累计写池饱和次数（进程级：饱和 = 慢订阅者把写线程占满，触发本次写出的订阅者被摘除）。 */
+    private static final AtomicLong WRITE_SATURATIONS = new AtomicLong();
+
+    /**
+     * 写出线程的<b>硬上限</b>（资源修复批）。
+     *
+     * <p>旧池的最大线程数是 {@link Integer#MAX_VALUE}：一条"不读也不断开"的连接会让写出线程卡到
+     * 客户端断开 / 容器 120s 写超时 / 15s 预算先到，而并发订阅者数没有硬界 ⇒ 线程数可被外部拉高
+     * （每个线程默认 1MB 栈，几百条慢连接就是几百 MB 常驻）。本值把"弹性"收成"有界弹性"：
+     *
+     * <ul>
+     * <li>取值 256 = 投递池缺省（{@code app.ai.sse.delivery-pool-size} = 8）的 32 倍：
+     * 正常负载下"同时在写的订阅者"远小于它（写是毫秒级，15s 预算只用来筛停读客户端）；</li>
+     * <li>饱和时<b>不扩容</b>：本次写出直接判 {@link Outcome#SATURATED}，由调用方摘除
+     * <b>触发本次写出的</b>订阅者（慢订阅者摘除，前端 onerror/onclose 带 lastSeq 重挂差量补发）——
+     * 牺牲"新写"而不是"整机内存"，且被摘的正是挤不进来的那一条。</li>
+     * </ul>
+     */
+    public static final int DEFAULT_MAX_WRITER_THREADS = 256;
+
     /** 写出线程编号（{@code sse-write-N}）。 */
     private static final AtomicLong WRITER_NO = new AtomicLong();
 
     /**
-     * 进程级<b>弹性</b>写出池（幂等装配；一次 {@link #sharedElasticWriterPool()} 后复用）。
+     * 进程级<b>有界弹性</b>写出池（幂等装配；一次 {@link #sharedElasticWriterPool()} 后复用）。
      *
-     * <p>
-     * 弹性（{@code corePoolSize=0} + {@code SynchronousQueue}）是刻意的：有界池会把"慢连接数"
-     * 重新变成"停投阈值"，正是本包要消除的那条因果。上界由结构保证 —— 每个订阅者同时至多
-     * 一次在飞写出（drain 独占），故线程峰值 ≈ 并发订阅者数；线程 60s 空闲即回收。
+     * <p>形状：{@code corePoolSize = 0}（空闲即回收，线程 60s 超时）+ {@code maximumPoolSize =
+     * } 硬上限（{@link #DEFAULT_MAX_WRITER_THREADS}）+ {@code SynchronousQueue}（不排队：排队的写
+     * 等于"卡住的写排队继续占调用线程"，与本类的目的相反）+ {@code AbortPolicy}
+     * （饱和立刻拒绝 ⇒ {@link Outcome#SATURATED}）。
+     *
+     * <p>为什么"弹性"仍是刻意的：有界<b>常驻</b>池会把"慢连接数"重新变成"停投阈值"。
+     * 现在的上界结构是：每个订阅者同时至多一次在飞写出（drain 独占），
+     * 因此线程峰值 = min(并发慢订阅者数, 硬上限)。
      */
     private static volatile ThreadPoolExecutor sharedWriterPool;
 
@@ -130,17 +160,43 @@ public final class SseWriteBudget {
 
     /** 进程级弹性写出池（幂等；装配一次后全进程复用）。 */
     public static synchronized ExecutorService sharedElasticWriterPool() {
+        return sharedWriterPool(DEFAULT_MAX_WRITER_THREADS);
+    }
+
+    /**
+     * 进程级有界弹性写出池（幂等；首次调用者决定上限，之后复用同一个池）。
+     *
+     * @param maxThreads 硬上限（{@code <= 0} ⇒ {@link #DEFAULT_MAX_WRITER_THREADS}）
+     */
+    public static synchronized ExecutorService sharedWriterPool(int maxThreads) {
+        int cap = maxThreads > 0 ? maxThreads : DEFAULT_MAX_WRITER_THREADS;
         if (sharedWriterPool == null) {
-            ThreadPoolExecutor pool = new ThreadPoolExecutor(0, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
+            ThreadPoolExecutor pool = new ThreadPoolExecutor(0, cap, 60L, TimeUnit.SECONDS,
                     new SynchronousQueue<>(), runnable -> {
                         Thread thread = new Thread(runnable, "sse-write-" + WRITER_NO.incrementAndGet());
                         thread.setDaemon(true);
                         return thread;
-                    });
+                    }, new ThreadPoolExecutor.AbortPolicy());
             pool.allowCoreThreadTimeOut(true);
             sharedWriterPool = pool;
         }
         return sharedWriterPool;
+    }
+
+    /** 共享写出池的线程硬上限（未装配 ⇒ 缺省值；供 {@code /api/ai/health} 与断言）。 */
+    public static int sharedWriterPoolMaxThreads() {
+        ThreadPoolExecutor pool = sharedWriterPool;
+        return pool == null ? DEFAULT_MAX_WRITER_THREADS : pool.getMaximumPoolSize();
+    }
+
+    /** 累计写超时次数（进程级）。 */
+    public static long writeTimeouts() {
+        return WRITE_TIMEOUTS.get();
+    }
+
+    /** 累计写池饱和次数（进程级）。 */
+    public static long saturations() {
+        return WRITE_SATURATIONS.get();
     }
 
     /** 本预算是否真的约束写出（false = 直执）。 */
@@ -151,11 +207,6 @@ public final class SseWriteBudget {
     /** 单帧写出的预算（毫秒）。 */
     public long timeoutMillis() {
         return this.timeoutMillis;
-    }
-
-    /** 累计写超时次数（进程级）。 */
-    public static long writeTimeouts() {
-        return WRITE_TIMEOUTS.get();
     }
 
     /**
@@ -169,6 +220,8 @@ public final class SseWriteBudget {
      * <li>{@link Outcome#FAILED}：写出抛异常（客户端断开 / 已完成的 emitter），异常交回调用方判处置；</li>
      * <li>{@link Outcome#TIMED_OUT}：超出预算 —— <b>本类不碰 emitter</b>（写线程仍持有其监视器），
      * 计数 + WARN，由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
+     * <li>{@link Outcome#SATURATED}：写出池已达硬上限（{@link #DEFAULT_MAX_WRITER_THREADS}）且无处排队 ——
+     * 本次写出<b>没有发生、也不会发生</b>，调用方据此摘除触发本次写出的订阅者（慢订阅者摘除）；</li>
      * <li>{@link Outcome#INTERRUPTED}：调用线程被中断（已复位中断位并 {@code cancel(true)}）。</li>
      * </ul>
      */
@@ -194,8 +247,13 @@ public final class SseWriteBudget {
             });
         }
         catch (RejectedExecutionException ex) {
-            // 弹性池不设界，理论上到不了这里；留一条明确路径而不是让异常冒泡打断出帧流程。
-            return Result.failed(ex);
+            // 硬上限 + SynchronousQueue + AbortPolicy ⇒ 池满即拒。这**不是**"客户端断开"
+            // （旧实现把它折成 FAILED，语义与日志都会指向错误方向），而是"这条写挤不进来"：
+            // 计数 + WARN，交回调用方摘除触发本次写出的那个订阅者。
+            WRITE_SATURATIONS.incrementAndGet();
+            log.warn("SSE 写出池饱和（线程已达上限 {}，无法再接纳一条写出）：由调用方摘除本次订阅者",
+                    sharedWriterPoolMaxThreads());
+            return Result.saturated();
         }
         try {
             future.get(this.timeoutMillis, TimeUnit.MILLISECONDS);
@@ -223,9 +281,9 @@ public final class SseWriteBudget {
         }
     }
 
-    /** 写出结果：成功 / 失败（带原因）/ 超时 / 调用线程被中断。 */
+    /** 写出结果：成功 / 失败（带原因）/ 超时 / 池饱和 / 调用线程被中断。 */
     public enum Outcome {
-        SENT, FAILED, TIMED_OUT, INTERRUPTED
+        SENT, FAILED, TIMED_OUT, SATURATED, INTERRUPTED
     }
 
     /**
@@ -252,6 +310,10 @@ public final class SseWriteBudget {
 
         static Result interrupted() {
             return new Result(Outcome.INTERRUPTED, null);
+        }
+
+        static Result saturated() {
+            return new Result(Outcome.SATURATED, null);
         }
     }
 

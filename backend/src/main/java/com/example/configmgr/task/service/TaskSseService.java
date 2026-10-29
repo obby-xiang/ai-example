@@ -457,6 +457,13 @@ public class TaskSseService {
                         this.writeBudget.timeoutMillis(), context);
                 yield false;
             }
+            // 写池饱和（硬上限，资源修复批）：本次写没发生，该连接这一帧挤不进来 ⇒ 同"不可用"处置
+            // （摘除；前端 EventSource 重连 + 快照轮询自愈）。与超时分开记日志，便于区分
+            // "慢连接卡住写出"与"写线程被更多慢连接占满"。
+            case SATURATED -> {
+                log.warn("任务 SSE 写出池饱和，摘除该订阅者（{}；并发写出已达硬上限）", context);
+                yield false;
+            }
             case INTERRUPTED -> true;
         };
     }

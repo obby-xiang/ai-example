@@ -396,9 +396,17 @@ final class FakeFrameRedis {
 
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
-	/** 单键脚本的语义替身（synchronized = 复刻 Redis 脚本串行执行）。 */
+	/**
+	 * 脚本语义替身（{@code synchronized} = 复刻 Redis 脚本<b>串行执行</b>）。
+	 *
+	 * <p>串行化是这些脚本的全部意义所在：取号脚本的"读归档末号 + 抬号 + 自增"若在替身里不串行，
+	 * 并发用例就会替产品说谎（假绿）。
+	 */
 	private synchronized Object handleScript(RedisScript<?> script, List<?> keys, List<Object> args) {
 		String body = script.getScriptAsString();
+		if (body.contains(RedisFrameStore.SEQ_NEXT_MARK)) {
+			return seqNext(keys, args);
+		}
 		if (!body.contains(ACTIVITY_TOUCH_MARK)) {
 			throw new UnsupportedOperationException("未建模的脚本：" + body);
 		}
@@ -414,6 +422,60 @@ final class FakeFrameRedis {
 		}
 		return 1L;
 	}
+
+	/** 取号脚本（见 {@code RedisFrameStore} 的 {@code AI_SEQ_NEXT}）：返回 {@code [seq, degraded]}。 */
+	private List<Long> seqNext(List<?> keys, List<Object> args) {
+		if (this.failIncrement) {
+			throw new IllegalStateException("取号脚本失败（模拟 Redis 抖动）");
+		}
+		String seqKey = String.valueOf(keys.get(0));
+		String streamKey = String.valueOf(keys.get(1));
+		String legacyKey = String.valueOf(keys.get(2));
+		long ttlSeconds = Long.parseLong(String.valueOf(args.get(0)));
+		long fallbackLast = Long.parseLong(String.valueOf(args.get(1)));
+		int probe = Integer.parseInt(String.valueOf(args.get(2)));
+
+		long cur = this.counters.merge(seqKey, 1L, Long::sum);
+		long degraded = 0L;
+		if (cur == 1L || cur <= fallbackLast) {
+			long anchor = fallbackLast;
+			if (this.failTailRead) {
+				degraded = 1L;
+			}
+			else {
+				List<Entry> entries = entries(streamKey);
+				for (int i = entries.size() - 1; i >= 0 && i >= entries.size() - probe; i--) {
+					for (Map.Entry<byte[], byte[]> field : entries.get(i).fields.entrySet()) {
+						if (RedisFrameStore.FIELD_SEQ.equals(str(field.getKey()))) {
+							anchor = Math.max(anchor, Long.parseLong(str(field.getValue())));
+						}
+					}
+				}
+			}
+			if (this.failListTailProbe) {
+				degraded = 1L;
+			}
+			else {
+				List<String> legacy = this.lists.getOrDefault(legacyKey, List.of());
+				if (!legacy.isEmpty()) {
+					java.util.regex.Matcher matcher = SEQ_FIELD.matcher(legacy.get(legacy.size() - 1));
+					if (matcher.find()) {
+						anchor = Math.max(anchor, Long.parseLong(matcher.group(1)));
+					}
+				}
+			}
+			if (anchor >= cur) {
+				cur = cur + (anchor + 1L - cur);
+				this.counters.put(seqKey, cur);
+			}
+		}
+		this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
+		return List.of(cur, degraded);
+	}
+
+	/** 兼容期 LIST 末帧里的 {@code "seq":<n>}（只读一个 {@code seq} 字段，不反序列化整帧）。 */
+	private static final java.util.regex.Pattern SEQ_FIELD =
+			java.util.regex.Pattern.compile("\"seq\"\\s*:\\s*(\\d+)");
 
 	private static List<Object> trailingArguments(Object[] raw) {
 		List<Object> out = new ArrayList<>();

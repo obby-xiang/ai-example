@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -33,6 +34,7 @@ import java.util.concurrent.Executor;
  * T3-1：持有 AiProperties 的构造（Spring 装配路径）会用 {@code app.ai.sse.*} 配置并启用
  * 进程级共享有界投递池；显式传 {@code null} properties 的非 Spring/单测路径保持同步直执，帧序用例的确定性不受影响。
  */
+@Slf4j
 @Component
 public class RunRegistry {
 
@@ -140,16 +142,19 @@ public class RunRegistry {
 				: AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY;
 		int maxFrameBytes = this.properties != null ? this.properties.getResultBudget().getUi().getMaxFrameBytes()
 				: AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES;
-		if (this.frames == null) {
-			return this.emitters.computeIfAbsent(runId,
-					id -> new SseChatEmitter(id, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
-							this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
-							this.resultLimiter));
-		}
-		return this.emitters.computeIfAbsent(runId,
-				id -> new SseChatEmitter(id, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
-						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
-						this.resultLimiter));
+		SseChatEmitter emitter = this.frames == null
+				? this.emitters.computeIfAbsent(runId,
+						id -> new SseChatEmitter(id, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
+								this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
+								this.resultLimiter))
+				: this.emitters.computeIfAbsent(runId,
+						id -> new SseChatEmitter(id, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
+								queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
+								this.resultLimiter));
+		// 资源修复批：终态回收钩子 —— 轮终态且订阅者排空后，写出器把自己从表里摘掉（幂等；
+		// 每次 of() 都设一遍，覆盖"上一次 of 拿到的实例被并发替换"的窄窗）。
+		emitter.setRecycleHook(() -> this.emitters.remove(runId, emitter));
+		return emitter;
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */
@@ -185,11 +190,27 @@ public class RunRegistry {
 		return this.emitters.remove(runId, emitter);
 	}
 
-	/** 轮终态：完成全部订阅者并把写出器移出注册表。 */
+	/**
+	 * 轮终态：完成全部订阅者、释放事件日志侧的进程内簿记，并把写出器移出注册表。
+	 *
+	 * <p>终态是"这一轮在本进程的最后一拍"：写出器条目、订阅表、唤醒订阅都在
+	 * {@link SseChatEmitter#complete()} 里收敛；这里补的是 {@link FrameStore#forget} ——
+	 * 事件日志实现按 runId 记的进程内簿记（降级号 / 观察到的最大载荷 / 每轮一次告警位）
+	 * 随终态释放，长跑实例上不再"每轮一条、只增不减"。
+	 */
 	public void close(String runId) {
 		SseChatEmitter emitter = this.emitters.remove(runId);
 		if (emitter != null) {
 			emitter.complete();
+		}
+		if (this.frames != null) {
+			try {
+				this.frames.forget(runId);
+			}
+			catch (RuntimeException ex) {
+				// 释放是"更好"，不是"更正确"的前提：簿记清不掉不能让终态出口失败。
+				log.warn("释放轮次事件日志簿记失败 runId={}（不影响终态；到期清理会兜底）：{}", runId, ex.getMessage());
+			}
 		}
 	}
 

@@ -175,6 +175,79 @@ class SseWriteBudgetTest {
         assertThat(second).as("进程级写出池幂等装配").isSameAs(first);
     }
 
+    // ── 硬上限与饱和（资源修复批） ──────────────────────────────────────────
+
+    /**
+     * <b>写出池必须有硬上限</b>（资源修复批）：旧池是 {@code maximumPoolSize = Integer.MAX_VALUE}
+     * + {@code SynchronousQueue} 的"弹性"形，字节码头注释把上界推导成"线程峰值 ≈ 并发订阅者数"。
+     * 但"订阅者数"本身没有硬界（多实例 + 多连接 + 客户端不读也不断开），而每条卡住的写要占一个
+     * 线程直到客户端断开 / 容器 120s 写超时 / 15s 预算三者先到 —— 于是"弹性"= 线程数可被外部拉高。
+     * 这里把上界钉成常量：{@code DEFAULT_MAX_WRITER_THREADS}。
+     */
+    @Test
+    void sharedWriterPoolHasAHardThreadCap() {
+        ExecutorService pool = SseWriteBudget.sharedElasticWriterPool();
+
+        assertThat(SseWriteBudget.sharedWriterPoolMaxThreads())
+                .as("写线程硬上限 = 单一事实源")
+                .isEqualTo(SseWriteBudget.DEFAULT_MAX_WRITER_THREADS)
+                .isPositive()
+                .isLessThan(Integer.MAX_VALUE);
+        assertThat(((java.util.concurrent.ThreadPoolExecutor) pool).getMaximumPoolSize())
+                .as("共享写出池的最大线程数必须是硬界，而不是 Integer.MAX_VALUE")
+                .isEqualTo(SseWriteBudget.DEFAULT_MAX_WRITER_THREADS);
+    }
+
+    /**
+     * <b>饱和 = 摘除**触发本次写出的订阅者**，不是继续开线程</b>。
+     *
+     * <p>池满（硬上限个线程都在写、{@code SynchronousQueue} 无处排队）时提交被拒：
+     * 旧实现把它折成 {@code FAILED}（语义是"客户端断开"），且弹性池实际上永远拒不了 ——
+     * 只会再开一条线程。现在返回独立的 {@link SseWriteBudget.Outcome#SATURATED}：
+     * 调用方（写出器）据此摘除慢订阅者（前端重挂差量补发），线程数保持在上限内。
+     */
+    @Test
+    void saturatedWriterPoolReportsSaturationInsteadOfSpawningMoreThreads() throws Exception {
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        java.util.concurrent.ThreadPoolExecutor bounded = new java.util.concurrent.ThreadPoolExecutor(0, 2, 60L,
+                TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>(), runnable -> {
+                    Thread thread = new Thread(runnable, "bounded-writer");
+                    thread.setDaemon(true);
+                    return thread;
+                }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        try {
+            // 占满两条写出线程（SynchronousQueue 无法排队 ⇒ 池已饱和）
+            for (int i = 0; i < 2; i++) {
+                bounded.execute(() -> {
+                    started.countDown();
+                    try {
+                        release.await(10, TimeUnit.SECONDS);
+                    }
+                    catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+            }
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+
+            long saturationsBefore = SseWriteBudget.saturations();
+            SseWriteBudget.Result result = SseWriteBudget.on(bounded, 5_000L).write(() -> {
+            });
+
+            assertThat(result.outcome()).as("池饱和 ⇒ 独立的 SATURATED 结果（不是 FAILED/超时）")
+                    .isEqualTo(SseWriteBudget.Outcome.SATURATED);
+            assertThat(bounded.getMaximumPoolSize()).as("上限不变（不会因饱和再开线程）").isEqualTo(2);
+            assertThat(bounded.getPoolSize()).as("池内线程数仍在上限内").isLessThanOrEqualTo(2);
+            assertThat(SseWriteBudget.saturations()).as("饱和计数 +1（可观测面）")
+                    .isEqualTo(saturationsBefore + 1);
+        }
+        finally {
+            release.countDown();
+            bounded.shutdownNow();
+        }
+    }
+
     // ── 配置守卫：emitter 生命周期超时必须为正（2026-10-10 复核 S4-⑨ 收口） ──────
 
     /**

@@ -10,6 +10,7 @@ import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -21,10 +22,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
  * 事件日志的 Redis Stream 实现（B23L1 批① / 设计稿 §2.1）——<b>生产唯一实现</b>，
@@ -111,6 +113,76 @@ public class RedisFrameStore implements FrameStore {
 
 	static final String FIELD_FRAME = "frame";
 
+	/**
+	 * 取号脚本的标记（脚本正文第一行的注释；单测替身按它分派语义，正文改动必须同步改替身）。
+	 */
+	static final String SEQ_NEXT_MARK = "AI_SEQ_NEXT";
+
+	/**
+	 * 取号脚本正文（{@code EVAL}，{@code KEYS} 三键同槽）。
+	 *
+	 * <p>三键：{@code [ai:seq, ai:xevents, ai:events]}（全部带 {@code {run:<runId>}} hash tag ⇒ 同一槽，
+	 * Cluster 下多键脚本因此合法）。{@code ARGV}：{@code [session-ttl 秒, 本进程降级号, 末号探测条数]}。
+	 * 返回 {@code {seq, degraded}}：{@code degraded=1} = 键刚重建/号落后但归档末号读不出
+	 * （脚本不抬号，调用方 WARN 一次）。
+	 *
+	 * <p>为什么"读末号"必须放进脚本：见 {@link #nextSeq(String)} —— 读与写分开时，
+	 * 并发窗口里交出去的低号会被后来的无条件写覆盖，等于<b>复用已发 seq</b>。
+	 */
+	private static final String SEQ_NEXT_BODY = """
+			-- AI_SEQ_NEXT v1: INCR -> (键重建/号落后时按归档末号抬号) -> EXPIRE，一次脚本一次往返
+			local ttl = tonumber(ARGV[1]) or 1
+			local fallbackLast = tonumber(ARGV[2]) or 0
+			local probe = tonumber(ARGV[3]) or 16
+			local cur = redis.call('INCR', KEYS[1])
+			local degraded = 0
+			if cur == 1 or cur <= fallbackLast then
+			  local anchor = fallbackLast
+			  local okStream, entries = pcall(redis.call, 'XREVRANGE', KEYS[2], '+', '-', 'COUNT', probe)
+			  if okStream and type(entries) == 'table' then
+			    for i = 1, #entries do
+			      local fields = entries[i][2]
+			      if type(fields) == 'table' then
+			        for j = 1, #fields, 2 do
+			          if fields[j] == 'seq' then
+			            local v = tonumber(fields[j + 1])
+			            if v and v > anchor then anchor = v end
+			          end
+			        end
+			      end
+			    end
+			  else
+			    degraded = 1
+			  end
+			  local okLegacy, legacy = pcall(redis.call, 'LRANGE', KEYS[3], -1, -1)
+			  if okLegacy and type(legacy) == 'table' and legacy[1] then
+			    local okJson, decoded = pcall(cjson.decode, legacy[1])
+			    if okJson and type(decoded) == 'table' then
+			      local v = tonumber(decoded['seq'])
+			      if v and v > anchor then anchor = v end
+			    end
+			  elseif not okLegacy then
+			    degraded = 1
+			  end
+			  if anchor >= cur then
+			    cur = redis.call('INCRBY', KEYS[1], anchor + 1 - cur)
+			  end
+			end
+			redis.call('EXPIRE', KEYS[1], ttl)
+			return {cur, degraded}
+			""";
+
+	/** 取号脚本（结果 = 两元素数组，故结果类型是 {@code List}）。 */
+	private static final RedisScript<List> SEQ_NEXT_SCRIPT = seqNextScript();
+
+	private static RedisScript<List> seqNextScript() {
+		org.springframework.data.redis.core.script.DefaultRedisScript<List> script =
+				new org.springframework.data.redis.core.script.DefaultRedisScript<>();
+		script.setScriptText(SEQ_NEXT_BODY);
+		script.setResultType(List.class);
+		return script;
+	}
+
 	private final StringRedisTemplate redis;
 
 	private final ObjectMapper mapper;
@@ -120,32 +192,78 @@ public class RedisFrameStore implements FrameStore {
 	/** 窗口（生产 = {@link #STREAM_WINDOW}；包内构造器给单测一个小窗口，避免 6000 帧语料）。 */
 	private final int streamWindow;
 
-	/** 取号降级计数器（Redis 取号失败期间的进程内单调兜底）。 */
-	private final Map<String, AtomicLong> fallbackSeqs = new ConcurrentHashMap<>();
+	/**
+	 * 进程内每轮簿记的<b>硬上限</b>（帧序号/资源修复批）。
+	 *
+	 * <p>取值依据：单实例同时"活着"的 run 数由挂起/并发连接数决定，正常远小于本值
+	 * （会话门 + 连接数上界）；本值只是<b>兜底界</b> —— 让"终态回收漏了一轮"不会变成无界增长。
+	 */
+	static final int MAX_TRACKED_RUNS = 4096;
 
-	/** 已就"显式 ID 落档被拒"告警过的轮（同一轮只吼一次，避免乱序期刷日志）。 */
-	private final Set<String> outOfOrderWarned = ConcurrentHashMap.newKeySet();
+	/** 空闲簿记的清理检查间隔（毫秒）：每帧都做一次 CAS 太贵，一拍一次足够。 */
+	static final long SWEEP_INTERVAL_MS = 60_000L;
+
+	/** 进程内时钟（单测可注入，让"归档到期"可确定性地推进）。 */
+	private final LongSupplier clock;
 
 	/**
-	 * 每轮<b>观察到的最大帧载荷字节数</b>（Redis 容量专项 A 的"每条上界"输入）。
+	 * 每轮的<b>进程内簿记</b>（帧序号/资源修复批：合并成一条，生命周期只有一处）。
 	 *
-	 * <p>为什么是"观察到的"而不是配置的 64KB 上界：静态按 64KB 折算会把所有轮次的窗口从 6000
-	 * 压到 ~1000（正常小帧轮次的白白损失）；按实际见过的最大帧折算，小帧轮次保持既有回放深度，
-	 * 只有真出现大帧的轮次才收窄。上界仍是<b>可证</b>的：此后每条记录都 ≤ 本值 + 固定开销。
+	 * <p>此前是四张按 runId 无界的 Map/Set（降级号、观察到的最大载荷、三类告警位）：
+	 * 每轮各一条，只有进程重启才释放。现在一条 {@link RunState} 承载全部，
+	 * 生命周期由两条口径兜住：终态 {@link #forget(String)}（谁结束谁释放）+ 到期/超上限清理
+	 * （{@link #sweepIdle(long)}：归档 TTL 之后这些簿记已无意义，且总量恒 ≤ {@link #MAX_TRACKED_RUNS}）。
 	 *
-	 * <p>进程内口径、与 {@link #fallbackSeqs} 同姿态（不跨实例共享）。界因此是
-	 * <b>单实例可证</b>的：同一实例的后续落档都按它收窄；<b>多实例</b>交叉写大帧时，另一个实例
-	 * （没观察过那个大帧）仍按自己的窗口写，全局字节上界退化为"各实例各自观察之和"。
-	 * 要严格全局界就得把观察值落共享键（每帧多一次读写 + 新键族），本批按"最小实现"不做 ——
-	 * 共享观察值的收益（多实例同时写同一 run 的概率极低）不抵它的成本。
+	 * <p>清掉簿记不会影响正确性：取号锚点与末号都在 Redis（归档 + {@code ai:seq}），
+	 * 进程内簿记只是降级兜底与"每轮一次"的日志节流；重建时按归档末号重锚（见 {@link #nextFallbackSeq}）。
 	 */
-	private final Map<String, AtomicLong> observedPayloadBytes = new ConcurrentHashMap<>();
+	private final Map<String, RunState> runStates = new ConcurrentHashMap<>();
 
-	/** 已就"字节预算成为约束"告警过的轮。 */
-	private final Set<String> byteCapWarned = ConcurrentHashMap.newKeySet();
+	/** 最近一次到期清理的时刻（毫秒），只让一拍真正做清理。 */
+	private final AtomicLong lastSweepMs = new AtomicLong();
 
-	/** 已就"预算不足以下限窗口"告警过的轮。 */
-	private final Set<String> byteFloorWarned = ConcurrentHashMap.newKeySet();
+	/** 每轮簿记：降级号 + 观察到的最大载荷 + 三个"每轮一次"告警位 + 最后触达时刻。 */
+	static final class RunState {
+
+		/** 降级号的"尚未初始化"哨兵（首次降级时按归档末号锚定）。 */
+		static final long UNINITIALIZED = -1L;
+
+		/** 降级号（Redis 取号失败期间的进程内单调兜底；{@link #UNINITIALIZED} = 未初始化）。 */
+		final AtomicLong fallbackSeq = new AtomicLong(UNINITIALIZED);
+
+		/**
+		 * 本轮<b>观察到的最大帧载荷字节数</b>（Redis 容量专项 A 的"每条上界"输入）。
+		 *
+		 * <p>为什么是"观察到的"而不是配置的 64KB 上界：静态按 64KB 折算会把所有轮次的窗口从 6000
+		 * 压到 ~1000（正常小帧轮次的白白损失）；按实际见过的最大帧折算，小帧轮次保持既有回放深度，
+		 * 只有真出现大帧的轮次才收窄。上界仍是<b>可证</b>的：此后每条记录都 ≤ 本值 + 固定开销。
+		 *
+		 * <p>进程内口径（不跨实例共享）。界因此是<b>单实例可证</b>的：同一实例的后续落档都按它收窄；
+		 * <b>多实例</b>交叉写大帧时，另一个实例（没观察过那个大帧）仍按自己的窗口写，
+		 * 全局字节上界退化为"各实例各自观察之和"。
+		 */
+		final AtomicLong observedPayloadBytes = new AtomicLong();
+
+		/** 已就"显式 ID 落档被拒"告警过（同一轮只吼一次，避免乱序期刷日志）。 */
+		final AtomicBoolean outOfOrderWarned = new AtomicBoolean();
+
+		/** 已就"字节预算成为约束"告警过。 */
+		final AtomicBoolean byteCapWarned = new AtomicBoolean();
+
+		/** 已就"预算不足以下限窗口"告警过。 */
+		final AtomicBoolean byteFloorWarned = new AtomicBoolean();
+
+		/** 已就"号回退修复降级（归档末号读不出）"告警过。 */
+		final AtomicBoolean repairDegradedWarned = new AtomicBoolean();
+
+		/** 最后触达时刻（毫秒）：到期清理与超上限淘汰都按它排序。 */
+		volatile long lastTouchMs;
+
+		RunState(long nowMs) {
+			this.lastTouchMs = nowMs;
+		}
+
+	}
 
 	@Autowired
 	public RedisFrameStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties) {
@@ -153,10 +271,18 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	RedisFrameStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties, int streamWindow) {
+		this(redis, mapper, properties, streamWindow, System::currentTimeMillis);
+	}
+
+	/** 包内构造器（单测）：额外注入时钟，让"归档到期"可确定性推进。 */
+	RedisFrameStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties, int streamWindow,
+			LongSupplier clock) {
 		this.redis = redis;
 		this.mapper = mapper;
 		this.properties = properties;
 		this.streamWindow = streamWindow > 0 ? streamWindow : STREAM_WINDOW;
+		this.clock = clock != null ? clock : System::currentTimeMillis;
+		this.lastSweepMs.set(this.clock.getAsLong());
 	}
 
 	// ── 键名 ────────────────────────────────────────────────────────────────
@@ -179,60 +305,57 @@ public class RedisFrameStore implements FrameStore {
 
 	// ── FrameStore ──────────────────────────────────────────────────────────
 
+	/**
+	 * 取号（<b>一次原子脚本</b>）：{@code INCR} → 必要时按归档末号抬号 → {@code EXPIRE}。
+	 *
+	 * <h2>为什么必须是脚本而不是"INCR + 修复"两条命令（资源/帧序号修复批）</h2>
+	 * {@code ai:seq} 键可能因 24h 无写而过期、被 {@code deleteRun} 删掉，或 Redis 抖动期改走了
+	 * 进程内降级号 —— 三种情形都会让 {@code INCR} 从 1 重来，于是新帧与历史帧同号：
+	 * {@code mergeBySeq} 同号合并丢一帧、前端 {@code lastSeq} 倒退（M-1）。
+	 *
+	 * <p>
+	 * 旧修复是"读归档末号 → {@code SET ai:seq = anchor} → {@code INCR}"：读与写<b>不是原子的</b>，
+	 * 而且 {@code SET} 是<b>无条件写</b> —— 并发下只有"拿到 1 号"的线程会去修复，
+	 * 同一瞬间拿到 2..N 的线程已经把 2..N 交给出帧方并返回：如果归档里正好有 2..N，
+	 * 那一轮就复用了已发（已落档）的号。先改成 {@code INCRBY} 只解决了"把计数器压回去"，
+	 * 没有解决"并发窗口里已经交出去的低号"。本类现在把三件事收进<b>同一段脚本</b>：
+	 * Redis 串行执行脚本 ⇒ 后到者看到的必然是已抬高的计数器，
+	 * <b>任何并发（含跨实例）都不会复用已发号</b>。
+	 *
+	 * <p>
+	 * 脚本只在"键刚重建（{@code INCR} 返回 1）"或"号落后于本进程降级号"时才读归档末号
+	 * （{@code XREVRANGE} 取末尾 {@value #TAIL_PROBE} 条的最大 {@code seq}，再并上兼容期 LIST 末帧），
+	 * 常规路径就只是一次 {@code INCR} + {@code EXPIRE} —— 比"INCR、EXPIRE 两次往返"还少一次。
+	 *
+	 * <p>
+	 * <b>降级</b>：脚本不可用（Redis 抖动 / 脚本被禁用）时退回进程内单调计数（每帧 WARN，与既有降级口径一致），
+	 * 并保留既有口径"该降级不是续号锚点"；末号读不出（{@code WRONGTYPE}/读失败）时脚本不抬号、
+	 * 返回降级位，由本方法 WARN 一次（与 A4"末号未知不得按 0 锚定"同口径）。
+	 */
 	@Override
 	public long nextSeq(String runId) {
-		String key = seqKey(runId);
+		RunState state = state(runId);
 		try {
-			long issued = increment(key);
-			long repaired = repairRollback(runId, key, issued);
-			this.redis.expire(key, ttl());
-			return repaired;
+			long fallbackLast = Math.max(0L, state.fallbackSeq.get());
+			long ttlSeconds = Math.max(1L, ttl().toSeconds());
+			List<?> result = this.redis.execute(SEQ_NEXT_SCRIPT,
+					List.of(seqKey(runId), streamKey(runId), legacyListKey(runId)),
+					String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE));
+			if (result == null || result.isEmpty() || !(result.get(0) instanceof Number issued)) {
+				throw new IllegalStateException("取号脚本返回空");
+			}
+			if (result.size() > 1 && result.get(1) instanceof Number degraded && degraded.longValue() != 0L
+					&& state.repairDegradedWarned.compareAndSet(false, true)) {
+				log.warn("号回退修复降级 runId={}（归档末号读不出，本次按自增号返回；下一次取号会再试）", runId);
+			}
+			return issued.longValue();
 		}
 		catch (Exception ex) {
-			long fallback = fallbackSeq(runId).incrementAndGet();
-			log.warn("序号发放降级为进程内计数 runId={} seq={}（Redis INCR 失败，跨实例不重承诺暂不可用）：{}",
+			long fallback = nextFallbackSeq(runId);
+			log.warn("序号发放降级为进程内计数 runId={} seq={}（Redis 取号失败，跨实例不重承诺暂不可用）：{}",
 					runId, fallback, ex.getMessage());
 			return fallback;
 		}
-	}
-
-	private long increment(String key) {
-		Long issued = this.redis.opsForValue().increment(key);
-		if (issued == null) {
-			throw new IllegalStateException("INCR 返回空");
-		}
-		return issued;
-	}
-
-	/**
-	 * 号回退自修复（M-1）：{@code ai:seq} 键可能因 24h 无写而过期、被 {@code deleteRun} 删掉、
-	 * 或 Redis 抖动期改走了进程内降级计数 —— 三种情形都会让 {@code INCR} 从 1 重来。
-	 *
-	 * <p>判据只用<b>廉价的信号</b>（不引入每帧额外往返）：{@code INCR} 返回 1（键原本不存在）
-	 * 或返回值不大于本进程已降级发出的号。命中才去读一次事件日志末号，把 {@code ai:seq}
-	 * 抬到 {@code max(Stream 末号, LIST 末号, 降级末号)} 再 {@code INCR} 一次。
-	 *
-	 * <p>不修的话：新帧与历史帧同号 ⇒ {@code mergeBySeq} 同号合并会丢一帧、前端 {@code lastSeq} 倒退。
-	 */
-	private long repairRollback(String runId, String key, long issued) {
-		long fallbackLast = this.fallbackSeqs.containsKey(runId) ? this.fallbackSeqs.get(runId).get() : 0L;
-		if (issued > 1L && issued > fallbackLast) {
-			return issued;
-		}
-		StreamTail streamTail = streamTailSeq(runId);
-		if (!streamTail.ok()) {
-			// A4：末号未知时不得拿 0 当锚点修复（会把号抬不到位）；本次不修复，等下一拍/下一帧再试。
-			log.debug("号回退修复跳过 runId={} issued={}（Stream 末号未知，不能按 0 锚定）", runId, issued);
-			return issued;
-		}
-		long anchor = Math.max(Math.max(legacyTailSeq(runId), streamTail.seq()), fallbackLast);
-		if (anchor < issued) {
-			return issued;
-		}
-		log.warn("检测到 ai:seq 号回退 runId={} issued={} anchor={}（键过期/被删/降级后恢复），按已落档末号抬回",
-				runId, issued, anchor);
-		this.redis.opsForValue().set(key, String.valueOf(anchor), ttl());
-		return increment(key);
 	}
 
 	@Override
@@ -260,15 +383,16 @@ public class RedisFrameStore implements FrameStore {
 		long ttlSeconds = Math.max(1L, ttl().toSeconds());
 		// 容量治理（Redis 容量专项 A）：先落"本轮见过的最大载荷"，再据它算本条落档用的窗口 ——
 		// 于是本条自身也落在裁剪后的窗口内，不会留下"先写大帧、下一帧才收窄"的超预算窗口。
-		int window = windowForPayload(recordPayloadBytes(runId, payload.length));
-		noteByteGovernance(runId, window);
+		RunState state = state(runId);
+		int window = windowForPayload(state.observedPayloadBytes.accumulateAndGet(payload.length, Math::max));
+		noteByteGovernance(runId, state, window);
 		try {
 			xadd(key, seq + "-0", seq, payload, ttlSeconds, window);
 		}
 		catch (Exception ex) {
 			// 显式 ID 被拒 = 物理序已经越过这个号（跨实例并发出帧 / 降级号回退）。帧不能丢：
 			// 改用自动 ID 追加（物理位次靠后，但 seq 字段仍在，读侧按 <afterSeq+1>-0 起读 + 按 seq 过滤仍可读到）。
-			if (this.outOfOrderWarned.add(runId)) {
+			if (state.outOfOrderWarned.compareAndSet(false, true)) {
 				log.warn("事件日志显式 ID 落档被拒 runId={} seq={}（改用自动 ID 兜底；物理序与 seq 序将不再一致）：{}",
 						runId, seq, ex.getMessage());
 			}
@@ -680,14 +804,8 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 本轮的读侧窗口（与写侧同源：用同一份"观察到的最大载荷"）；未见过落档 = 只按条数窗口。 */
 	private int effectiveWindow(String runId) {
-		AtomicLong observed = this.observedPayloadBytes.get(runId);
-		return windowForPayload(observed == null ? 0L : observed.get());
-	}
-
-	/** 记下本轮见过的最大载荷并返回它（XADD 的 seq 单调递增，故载荷长度随号缓慢变化）。 */
-	private long recordPayloadBytes(String runId, long payloadBytes) {
-		return this.observedPayloadBytes.computeIfAbsent(runId, id -> new AtomicLong())
-			.accumulateAndGet(payloadBytes, Math::max);
+		RunState state = this.runStates.get(runId);
+		return windowForPayload(state == null ? 0L : state.observedPayloadBytes.get());
 	}
 
 	/**
@@ -702,24 +820,23 @@ public class RedisFrameStore implements FrameStore {
 	 * </ul>
 	 * 计数按"被约束的落档次数"累加（量级可读），日志按轮去重（避免一个长轮刷几千行）。
 	 */
-	private void noteByteGovernance(String runId, int window) {
+	private void noteByteGovernance(String runId, RunState state, int window) {
 		if (window >= this.streamWindow) {
 			return;
 		}
-		AtomicLong observed = this.observedPayloadBytes.get(runId);
-		long observedMax = observed == null ? 0L : observed.get();
+		long observedMax = state.observedPayloadBytes.get();
 		long byBudget = byteBudget() / Math.max(1L, observedMax + ENTRY_OVERHEAD_BYTES);
 		if (byBudget < minWindow()) {
 			RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_FLOOR);
-			if (this.byteFloorWarned.add(runId)) {
+			if (state.byteFloorWarned.compareAndSet(false, true)) {
 				log.warn("事件日志容量预算不足以下限窗口 runId={} 预算={}B 本轮最大帧={}B 下限窗口={}（仍保留 {} 条，"
-						+ "单轮字节会超出预算；请调大 app.ai.stream.byte-budget 或核查单帧上限）", runId,
-						byteBudget(), observedMax, minWindow(), window);
+						+ "单轮字节会超出预算；请调大 app.ai.stream.byte-budget 或核查单帧上限）", runId, byteBudget(),
+						observedMax, minWindow(), window);
 			}
 			return;
 		}
 		RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_CAP);
-		if (this.byteCapWarned.add(runId)) {
+		if (state.byteCapWarned.compareAndSet(false, true)) {
 			log.warn("事件日志按字节预算裁剪 runId={} 预算={}MiB 本轮最大帧={}B 有效窗口={}（条数窗口 {}）："
 					+ "更早的帧不再可回放（增量读取不受影响）", runId, byteBudget() / (1024 * 1024), observedMax, window,
 					this.streamWindow);
@@ -736,10 +853,115 @@ public class RedisFrameStore implements FrameStore {
 		return Math.min(MIN_WINDOW, this.streamWindow);
 	}
 
+	// ── 进程内簿记的生命周期（终态回收 / 到期与超上限清理） ──────────────────
+
+	/**
+	 * 终态释放（{@link FrameStore#forget(String)}）：丢掉该轮的进程内簿记。
+	 *
+	 * <p>只清进程内状态，<b>不动 Redis</b>：归档与 {@code ai:seq} 仍在原有 TTL 下自然到期，
+	 * 之后的重挂/续跑按归档回放；簿记重建时按归档末号重锚，因此不会因回收而回退号。
+	 */
+	@Override
+	public void forget(String runId) {
+		this.runStates.remove(runId);
+	}
+
+	/** 当前进程内仍持有簿记的轮数（诊断/断言用）。 */
+	int trackedRuns() {
+		return this.runStates.size();
+	}
+
+	/** 取（必要时新建）本轮簿记并推进"最后触达"，顺带做一次到期清理（有节流）。 */
+	private RunState state(String runId) {
+		long now = this.clock.getAsLong();
+		RunState state = this.runStates.computeIfAbsent(runId, id -> new RunState(now));
+		state.lastTouchMs = now;
+		sweepIfDue(now);
+		return state;
+	}
+
+	/**
+	 * 到期/超上限清理（有节流）：距上次清理不足 {@link #SWEEP_INTERVAL_MS} 且未超上限 ⇒ 直接返回。
+	 *
+	 * <p>清理动作只允许一拍执行（{@code lastSweepMs} 的 CAS），其余线程照常出帧 ——
+	 * 清理不是出帧的前置条件，绝不让它把写路径串行化。
+	 */
+	private void sweepIfDue(long now) {
+		long last = this.lastSweepMs.get();
+		boolean overCap = this.runStates.size() > MAX_TRACKED_RUNS;
+		if (!overCap && now - last < SWEEP_INTERVAL_MS) {
+			return;
+		}
+		if (!this.lastSweepMs.compareAndSet(last, now)) {
+			return;
+		}
+		sweepIdle(now);
+	}
+
+	/**
+	 * 清掉"归档已到期"的簿记，并把总量压回 {@link #MAX_TRACKED_RUNS}。
+	 *
+	 * <p>两条界：
+	 * <ol>
+	 * <li><b>到期</b>：最后触达早于 session TTL（= 归档键的 TTL）⇒ 该轮的帧/序号键已过期，
+	 * 进程内簿记（降级号、观察到的最大载荷、告警位）不再有任何读者；</li>
+	 * <li><b>硬上限</b>：仍超过 {@link #MAX_TRACKED_RUNS} 时按最后触达时刻从旧到新淘汰 ——
+	 * 取号正确性不依赖这些簿记（锚点在 Redis），被淘汰的轮下一帧会按归档末号重锚。</li>
+	 * </ol>
+	 */
+	void sweepIdle(long nowMs) {
+		long retentionMs = retentionMs();
+		if (retentionMs > 0L) {
+			this.runStates.entrySet().removeIf(entry -> nowMs - entry.getValue().lastTouchMs > retentionMs);
+		}
+		int overflow = this.runStates.size() - MAX_TRACKED_RUNS;
+		if (overflow <= 0) {
+			return;
+		}
+		List<Map.Entry<String, RunState>> byAge = new ArrayList<>(this.runStates.entrySet());
+		byAge.sort((left, right) -> Long.compare(left.getValue().lastTouchMs, right.getValue().lastTouchMs));
+		for (int i = 0; i < overflow && i < byAge.size(); i++) {
+			Map.Entry<String, RunState> eldest = byAge.get(i);
+			this.runStates.remove(eldest.getKey(), eldest.getValue());
+		}
+	}
+
+	/** 簿记的保留时长 = 归档键的 TTL（归档没了，簿记也就没有读者）。 */
+	private long retentionMs() {
+		Duration ttl = this.properties == null ? null : this.properties.getSessionTtl();
+		return ttl == null ? 0L : ttl.toMillis();
+	}
+
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
-	private AtomicLong fallbackSeq(String runId) {
-		return this.fallbackSeqs.computeIfAbsent(runId, id -> new AtomicLong(Math.max(0L, lastSeq(id))));
+	/**
+	 * 降级号（Redis 取号失败期间的进程内单调兜底）：首次使用时按
+	 * {@code max(归档末号, ai:seq)} 锚定，之后只增。
+	 *
+	 * <p>锚定用 CAS({@link RunState#UNINITIALIZED} → 锚点)，并发首次降级不会重复读归档。
+	 * <b>{@code ai:seq} 必须计入</b>：它记着"已经发出、还没落档"的号（出帧与落档之间本就不是原子的），
+	 * 只按归档末号锚定会把降级期的第一个号发成"已发出但未落档"的那个号 —— 复用已发 seq。
+	 * 读 {@code ai:seq} 失败（降级期常见）时退回归档末号，与旧口径一致。
+	 * 该锚点也参与 {@link #repairRollback} 的抬号（恢复后的 Redis 号必须跳过降级期发出的号）。
+	 */
+	private long nextFallbackSeq(String runId) {
+		RunState state = state(runId);
+		if (state.fallbackSeq.get() == RunState.UNINITIALIZED) {
+			long anchor = Math.max(Math.max(0L, lastSeq(runId)), issuedSeqOf(runId));
+			state.fallbackSeq.compareAndSet(RunState.UNINITIALIZED, anchor);
+		}
+		return state.fallbackSeq.incrementAndGet();
+	}
+
+	/** {@code ai:seq} 的当前值（已发放的最大号；读不到 = 0，降级期按归档末号锚定）。 */
+	private long issuedSeqOf(String runId) {
+		try {
+			String raw = this.redis.opsForValue().get(seqKey(runId));
+			return raw == null ? 0L : Math.max(0L, Long.parseLong(raw));
+		}
+		catch (Exception ex) {
+			return 0L;
+		}
 	}
 
 	private Duration ttl() {

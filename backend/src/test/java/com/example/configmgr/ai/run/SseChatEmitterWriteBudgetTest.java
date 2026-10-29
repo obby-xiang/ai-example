@@ -222,6 +222,57 @@ class SseChatEmitterWriteBudgetTest {
 		assertThat(slow.awaitCompletes(1, 5L)).as("写出返回后补做收尾").isTrue();
 	}
 
+	// ── 写池硬上限：饱和摘除"挤不进来"的那一条订阅者 ─────────────────────────
+
+	/**
+	 * <b>写池饱和 ⇒ 摘除触发本次写出的订阅者</b>（资源修复批）。
+	 *
+	 * <p>池的线程数是硬上限（{@code SseWriteBudget.DEFAULT_MAX_WRITER_THREADS}）。上限之下的
+	 * 慢连接只会让"自己在飞的那一次写"卡住，不会让全进程停投；上限之上必须<b>不再开线程</b>，
+	 * 而是把"挤不进来"的那条订阅者摘掉（前端 onerror/onclose 带 lastSeq 重挂差量补发）。
+	 *
+	 * <p>本用例把上限压到 1（生产 = 256，形状相同）：
+	 * <ol>
+	 * <li>慢订阅者的首帧写出卡住唯一的写线程（直到释放）；</li>
+	 * <li>健康订阅者的写出提交被拒 ⇒ {@code SATURATED} ⇒ 它被摘除，且<b>调用线程不等超时</b>；</li>
+	 * <li>写线程数始终 ≤ 1（旧池在这里会再开一条线程、把帧发出去 —— 也就是"无界线程"）。</li>
+	 * </ol>
+	 */
+	@Test
+	void writerPoolSaturationEvictsTheSubscriberThatCouldNotBeWritten() throws Exception {
+		InMemoryRunStore store = new InMemoryRunStore();
+		ThreadPoolExecutor singleWriter = new ThreadPoolExecutor(0, 1, 60L, TimeUnit.SECONDS,
+				new SynchronousQueue<>(), daemon("saturated-writer"), new ThreadPoolExecutor.AbortPolicy());
+		try {
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+					SseWriteBudget.on(singleWriter, 300L));
+			MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
+			FrameWire healthy = FrameWire.attachTo(out);
+			out.attach(slow.emitter());
+
+			long saturationsBefore = SseWriteBudget.saturations();
+			out.delta("占住唯一的写线程");
+			assertThat(slow.awaitFirstSend(5L)).as("慢订阅者的写出卡在唯一的写线程上").isTrue();
+
+			out.delta("健康订阅者的帧");
+			assertThat(awaitSubscriberCount(out, 0, 5L)).as("两条订阅者最终都离开订阅表（超时 + 饱和各摘一条）")
+				.isTrue();
+			assertThat(SseWriteBudget.saturations()).as("饱和计数 +1（与写超时分开可观测）")
+				.isGreaterThan(saturationsBefore);
+			assertThat(FrameWire.normalize(healthy.frames())).as("饱和的那一帧没有写出（改由前端带 lastSeq 重挂补回）")
+				.extracting(frame -> frame.get("type"))
+				.containsExactly("delta");
+			assertThat(healthy.size()).as("健康订阅者只收到饱和之前的那一帧").isEqualTo(1);
+			assertThat(singleWriter.getPoolSize()).as("写线程数不超过硬上限（不再无界扩线程）").isLessThanOrEqualTo(1);
+
+			slow.release();
+		}
+		finally {
+			singleWriter.shutdownNow();
+		}
+	}
+
 	// ── 兼容性：预算模式下的帧口径与 T4-3 逐条不变 ──────────────────────────
 
 	@Test
