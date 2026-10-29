@@ -90,16 +90,21 @@
 
     <!-- 批次2（N3）：历史/快照恢复失败不再静默 —— 错误条 + 重试出口。
          只读 store 适配器（historyError/currentError，见 recoveryBridge 注释），不在此处自造错误态。
-         2026-10-29 返修（同一事实只留一个提示面）：一次失败在 store 里同时写 `historyError` 与
-         `recoveryGap`（见 sealRecovery），旧版并排出两条横幅、两个按钮最终都落 `retryLoadHistory`。
-         现在错误条就地合并「内容可能不完整」这条中性事实，缺口专属条只在**没有**恢复错误时出现。 -->
+         2026-10-29 返修（同一事实只留一个提示面）：`sealRecovery` 那一类失败在 store 里同时写
+         `historyError` 与 `recoveryGap`，旧版并排出两条横幅、两个按钮最终都落 `retryLoadHistory`。
+         现在错误条就地合并「内容可能不完整」这条中性事实，缺口专属条只在**没有**恢复错误时出现。
+         但**不是所有恢复错误都伴随缺口**（`restoreSuspendedSnapshot` 的 preparingRun 分支只写
+         `currentError`）⇒ 那行事实只在 `ai.recoveryGap !== null` 时渲染，否则就是凭空的不完整声明。 -->
     <div v-if="recoveryErrorVisible" :class="alertBox('error')" data-testid="alert-history-error">
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ recoveryErrorLabel() }}</b>
         <span class="block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
-        <!-- 中性事实（不是第二条错误）：恢复失败 ⇒ 当前内容可能不完整 -->
-        <span class="mt-[2px] block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.recoveryGap') }}</span>
+        <!-- 中性事实（不是第二条错误）：真登记过缺口才说"可能不完整"，见上方注释 -->
+        <span
+          v-if="ai.recoveryGap !== null"
+          class="mt-[2px] block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]"
+        >{{ t('ai.panel.recoveryGap') }}</span>
       </div>
       <button
         type="button"
@@ -1712,9 +1717,11 @@ function retryRecoveryLoad(): void {
 }
 
 /**
- * 恢复提示面的**唯一去重口径**（2026-10-29 返修）：store 一次恢复失败（`sealRecovery`）
- * 同时写 `historyError` 与 `recoveryGap`，两者是同一个事实 ——
- * - 有恢复错误 ⇒ 只出错误条（条内合并「内容可能不完整」的事实）；
+ * 恢复提示面的**唯一去重口径**（2026-10-29 返修）：`sealRecovery` 那一路失败在 store 里
+ * 同时写 `historyError` 与 `recoveryGap`，两者是同一个事实 —— 但 `restoreSuspendedSnapshot`
+ * 的 preparingRun 分支只写 `currentError`（不登记缺口），故「错误」与「缺口」不能互相假定：
+ * - 有恢复错误 ⇒ 只出错误条；条内「内容可能不完整」那行**另看 `ai.recoveryGap !== null`**
+ *   （有缺口才说，没有就只说错误本身）；
  * - 无恢复错误但有缺口（archive-window 真缺帧）⇒ 只出中性缺口条；
  * - 任一全局条在显示 ⇒ 消息级 `recoveryGap` 局部标记不再重复。
  */

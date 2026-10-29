@@ -233,6 +233,25 @@ describe('批次2 · 历史恢复错误出口', () => {
     wrapper.unmount()
   })
 
+  it('仅快照恢复失败（无 recoveryGap）时只有错误条与一个动作，不出现完整性文案', async () => {
+    // restoreSuspendedSnapshot 的 preparingRun 分支只写 currentError、不登记缺口
+    // （ai.ts:3717-3719）—— 此时「内容可能不完整」是凭空的事实，不得上屏。
+    const store = useAiStore()
+    const restore = vi.spyOn(store, 'retryRestoreSnapshot').mockResolvedValue(undefined)
+    const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '完整内容', streaming: false }])], {
+      currentError: { scope: 'current', code: 'NETWORK_ERROR', status: 0, at: Date.now() }
+    })
+    const bar = wrapper.find('[data-testid="alert-history-error"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('会话恢复失败')
+    expect(bar.findAll('button')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="alert-recovery-gap"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('不完整')
+    await bar.find('[data-testid="retry-history"]').trigger('click')
+    expect(restore).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
   it('同一恢复失败只出一条全局提示与一个重试动作（错误条合并不完整事实，消息级不重复）', async () => {
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '镜像里的这一段', streaming: false }])
     reply.id = 'a-gap'
