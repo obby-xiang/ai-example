@@ -156,6 +156,31 @@ class ToolResultClearingTest {
 		assertThat(plan.savedTokens()).isLessThan(ContextEstimator.estimate("任务列表内容".repeat(50) + 1));
 	}
 
+	/**
+	 * C13 / R2：小结果的占位符反而更长 ⇒ {@code savedTokens} 必须为 <b>0</b>，不得为负。
+	 *
+	 * <p>判据值按它递推（{@code nextEst -= savedTokens}）：负数会把"没省"算成"变多了"，
+	 * 于是清完一轮反而更容易再触发下一轮清/截。上限是"不许粉饰省了"，下限是"不许倒扣"。
+	 */
+	@Test
+	void savedTokensNeverGoesNegativeWhenThePlaceholderIsLonger() {
+		List<ToolResponseMessage.ToolResponse> tiny = List.of(
+				new ToolResponseMessage.ToolResponse("c-1", "list_tasks", "短"),
+				new ToolResponseMessage.ToolResponse("c-2", "list_tasks", "也短"));
+		List<Message> messages = List.of(
+				AssistantMessage.builder()
+					.toolCalls(List.of(new AssistantMessage.ToolCall("c-1", "function", "list_tasks", "{}"),
+							new AssistantMessage.ToolCall("c-2", "function", "list_tasks", "{}")))
+					.build(),
+				ToolResponseMessage.builder().responses(tiny).build(),
+				new UserMessage("新问题"));
+
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 1, Set.of());
+
+		assertThat(plan.changed()).isTrue();
+		assertThat(plan.savedTokens()).as("占位符更长 ⇒ 0，不得为负").isZero();
+	}
+
 	/** 空历史/无工具结果 ⇒ 不动（不得返回 null 列表）。 */
 	@Test
 	void noOpOnEmptyOrToolFreeHistory() {

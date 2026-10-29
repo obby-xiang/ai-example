@@ -227,6 +227,30 @@ class ToolResultLimiterTest {
         assertThat(new ObjectMapper().readTree(structured.text())).as("绝不能为了额度产出坏 JSON").isNotNull();
     }
 
+    /**
+     * C13 / N2：只返回截断标记时，{@code notice} 里写的"返回 N 字符"必须与
+     * {@code returnedChars}（= 实际返回文本长度）一致 —— 不能一边说"返回 500 字符"
+     * 一边只给 20 字符的标记。
+     */
+    @Test
+    void markerOnlyKeepsNoticeAndReturnedCharsConsistent() {
+        this.properties.getResultBudget().getModel().getPerTool().put(TOOL, 50);
+        ToolResultLimiter.Truncation markerOnly = this.limiter.forModel(TOOL, "x".repeat(500));
+
+        assertThat(markerOnly.truncated()).isTrue();
+        assertThat(markerOnly.returnedChars()).isEqualTo(markerOnly.text().length());
+        assertThat(markerOnly.notice())
+            .as("notice 里报的返回长度必须等于 returnedChars")
+            .contains("返回 " + markerOnly.returnedChars() + " 字符");
+
+        String json = "{\"rows\":[" + "{\"a\":1},".repeat(2_000) + "{\"a\":1}]}";
+        this.properties.getResultBudget().getModel().getPerTool().put(TOOL, 40);
+        ToolResultLimiter.Truncation structured = this.limiter.forModel(TOOL, json);
+        assertThat(structured.returnedChars()).isEqualTo(structured.text().length());
+        // 结构化退让档不写"返回 N 字符"（returnedChars 是唯一口径）—— 不许出现互相矛盾的数字
+        assertThat(structured.notice()).contains("原 " + json.length() + " 字符").doesNotContain("返回 ");
+    }
+
     // ── ④ 结构化结果：绝不字符截断 ──────────────────────────────────────
     @Test
     void structuredResultIsMarkedAsAWholeInsteadOfCharCut() throws Exception {

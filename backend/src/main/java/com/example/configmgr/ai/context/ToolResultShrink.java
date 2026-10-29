@@ -127,7 +127,15 @@ public final class ToolResultShrink {
 			int before = dataTokens;
 			String data = slot.data();
 			for (int attempt = 0; attempt < 3 && remainingNeed > 0; attempt++) {
-				ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(data);
+				// 防御：这一条是我们自己拼出来的（必然合法），但收窄是"最后一道救场"，
+				// 解析异常也不能把整轮恢复弄崩 —— 跳过它、让后面的条目/硬截断接手。
+				ToolResultEnvelope envelope;
+				try {
+					envelope = ToolResultEnvelope.fromJson(data);
+				}
+				catch (RuntimeException ex) {
+					break;
+				}
 				if (envelope == null) {
 					break;
 				}
@@ -223,8 +231,7 @@ public final class ToolResultShrink {
 				if (envelope == null || envelope.message() == null || envelope.message().isEmpty()) {
 					continue;
 				}
-				candidates.add(new Slot(i, j, response.id(), response.name(), ContextEstimator.estimate(data), data,
-						envelope));
+				candidates.add(new Slot(i, j, response.id(), response.name(), ContextEstimator.estimate(data), data));
 			}
 		}
 		return candidates;
@@ -245,7 +252,7 @@ public final class ToolResultShrink {
 	}
 
 	private record Slot(int messageIndex, int responseIndex, String toolCallId, String name, int tokens,
-			String data, ToolResultEnvelope envelope) {
+			String data) {
 	}
 
 }

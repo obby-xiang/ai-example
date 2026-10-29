@@ -203,16 +203,19 @@ function applyRequestViolation(decision, body) {
 // ── usage 形状（上下文统计与压缩专项 §5.8：E2E-CTX-1..4 的确定性底座）──────────
 // 与 `--violate-form-type` 同族的**请求级**开关：由提示词里的 `usage-shape=<mode>` 标记选择，
 // 不猜调用方身份、不影响未带标记的请求（既有 29 用例的帧逐字节不变）。
-// 四种形状（`stub-routes.json` 的 `usageShapes` 是唯一取数点，E2E 脚本读同一份）：
+// 五种形状（`stub-routes.json` 的 `usageShapes` 是唯一取数点，E2E 脚本读同一份）：
 //   last      —— 末块 usage（基线：改造前桩就发这一份）
 //   repeat    —— **每块都挂同一份 usage**（治"累加放大"，对标业界 1.7M tokens 事故）
+//   big       —— 与 repeat 同形态、真值更大（11000/200）：C13 起前缀主导守卫要求窗口 ≥ 22K，
+//                在那个窗口段里 repeat(4321) 连 L1 的 70% 都够不到
 //   zero-last —— 中间块真值 + **末块 0/0/0**（治"直读末帧"把真值读成 0）
 //   none      —— **完全不发 usage**（产品必须回退估算：`est=true` / `source=estimate`）
-const USAGE_SHAPE_MARKER = /usage-shape=(last|repeat|zero-last|none)\b/
-const USAGE_SHAPE_NAMES = ['last', 'repeat', 'zero-last', 'none']
+const USAGE_SHAPE_MARKER = /usage-shape=(last|repeat|big|zero-last|none)\b/
+const USAGE_SHAPE_NAMES = ['last', 'repeat', 'big', 'zero-last', 'none']
 const USAGE_SHAPE_DEFAULTS = {
   last: { promptTokens: 1200, completionTokens: 40, totalTokens: 1240, cachedTokens: 640, reasoningTokens: 16 },
   repeat: { promptTokens: 4321, completionTokens: 77, totalTokens: 4398, cachedTokens: 2048, reasoningTokens: 12 },
+  big: { promptTokens: 11000, completionTokens: 200, totalTokens: 11200 },
   'zero-last': { promptTokens: 3100, completionTokens: 50, totalTokens: 3150 },
   none: {}
 }
@@ -827,7 +830,7 @@ function textRound(text, model, shapeName = 'last') {
   const out = [chunk({ role: 'assistant', content: '' }, null, model)]
   const pieces = String(text).match(/[\s\S]{1,24}/g) || [String(text)]
   pieces.forEach((piece, index) => {
-    const attach = usage && (name === 'repeat' || (name === 'zero-last' && index === 0))
+    const attach = usage && (name === 'repeat' || name === 'big' || (name === 'zero-last' && index === 0))
     out.push(attach ? chunk({ content: piece }, null, model, usage) : chunk({ content: piece }, null, model))
   })
   out.push(chunk({}, 'stop', model))
@@ -1685,11 +1688,11 @@ function selfCheck() {
   ok('工具结果反解通过（对象/双层字符串/前缀混合三形态）')
 
   section()
-  // ⑧ usage 形状（上下文专项 §5.8 的 E2E-CTX-1..4 底座）：四种形状的帧形态 + 标记解析。
+  // ⑧ usage 形状（上下文专项 §5.8 的 E2E-CTX-1..4 底座）：五种形状的帧形态 + 标记解析。
   //    这里的断言与 `scripts/verify-e2e.ps1` 的 E2E-CTX-1..4 是**同一组期望**（数值取
   //    `stub-routes.json` 的 usageShapes，E2E 脚本读同一份）；任何一侧漂移，自检或 E2E 即红。
   const shapes = usageShapes()
-  // ⑧-0 形状表结构：四个形状齐备、数值自洽（缺项回落默认值，但路由表显式声明时必须是合法值）
+  // ⑧-0 形状表结构：五个形状齐备、数值自洽（缺项回落默认值，但路由表显式声明时必须是合法值）
   const declaredShapes = ROUTES.usageShapes || {}
   for (const name of Object.keys(declaredShapes).filter((k) => k !== 'note')) {
     if (!USAGE_SHAPE_NAMES.includes(name)) bad(`usageShapes 含未知形状 ${name}（白名单：${USAGE_SHAPE_NAMES.join(' / ')}）`)

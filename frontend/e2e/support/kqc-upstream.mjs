@@ -141,7 +141,7 @@ function requestToolOf(body) {
   return { name, args: parsed }
 }
 
-const USAGE_SHAPE_MARKER = /\busage-shape=(last|repeat|zero-last|none)\b/
+const USAGE_SHAPE_MARKER = /\busage-shape=(last|repeat|big|zero-last|none)\b/
 
 /**
  * usage 形状是**用例级**开关，跟着用例消息走 —— 不是"最后一条 user"。
@@ -260,12 +260,12 @@ function completion(res, text, model) {
  */
 function textFrames(text, model, shapeName) {
   const shapes = usageShapes()
-  const name = ['last', 'repeat', 'zero-last', 'none'].includes(shapeName) ? shapeName : 'last'
+  const name = ['last', 'repeat', 'big', 'zero-last', 'none'].includes(shapeName) ? shapeName : 'last'
   const usage = name === 'none' ? null : usageOf(shapes[name])
   const out = [chunk({ role: 'assistant', content: '' }, null, model)]
   const pieces = String(text).match(/[\s\S]{1,24}/g) || [String(text)]
   pieces.forEach((piece, index) => {
-    const attach = usage && (name === 'repeat' || (name === 'zero-last' && index === 0))
+    const attach = usage && (name === 'repeat' || name === 'big' || (name === 'zero-last' && index === 0))
     out.push(attach ? chunk({ content: piece }, null, model, usage) : chunk({ content: piece }, null, model))
   })
   out.push(chunk({}, 'stop', model))

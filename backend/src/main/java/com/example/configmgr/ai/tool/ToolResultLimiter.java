@@ -210,15 +210,16 @@ public class ToolResultLimiter {
 		if (marker.length() > maxChars) {
 			// I7：额度装不下完整说明 ⇒ 退到短说明；仍装不下就<b>只留标记</b>并截到额度。
 			// 绝不"吐一整段标记"（那会让单份结果比额度大一个数量级，预算形同虚设）。
-			notice = compactNotice(originalChars, kept.length());
-			marker = marker(notice);
-			if (marker.length() > maxChars) {
-				String trimmed = cutChars(marker, maxChars);
-				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, trimmed.length(), notice,
-						trimmed);
+			// N2：只返回标记时，说明里的"返回 N 字符"必须等于 returnedChars（= 返回文本的实际长度），
+			// 不能还把被丢掉的正文长度（kept.length()）写成返回量 —— 那会自相矛盾。
+			String markerOnly = markerOnly(originalChars);
+			if (markerOnly.length() > maxChars) {
+				String trimmed = cutChars(markerOnly, maxChars);
+				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, trimmed.length(),
+						compactNotice(originalChars, trimmed.length()), trimmed);
 			}
-			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, marker.length(), notice,
-					marker);
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, markerOnly.length(),
+					compactNotice(originalChars, markerOnly.length()), markerOnly);
 		}
 		kept = cutChars(kept, maxChars - marker.length());
 		notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
@@ -287,9 +288,16 @@ public class ToolResultLimiter {
 		}
 		// I7：额度连"完整契约标记"都装不下 ⇒ 逐级退让，但<b>每一步仍是合法 JSON</b>
 		// （绝不按字符切 JSON）。顺序：短说明 → 只留 truncated/originalChars → {"truncated":true} → {}。
-		notice = compactNotice(originalChars, 0);
-		for (String candidate : new String[] { TruncationContract.jsonMarker("", originalChars, notice),
-				"{\"truncated\":true,\"originalChars\":" + originalChars + "}", "{\"truncated\":true}", "{}" }) {
+		// N2：这一档的说明<b>不写"返回 N 字符"</b>（jsonMarker 里的 returnedChars 才是唯一口径），
+		// 否则说明与 returnedChars 会互相矛盾（标记长度随说明长度变化，凑不出稳定值）。
+		notice = lengthFreeNotice(originalChars);
+		String compactMarker = TruncationContract.jsonMarker("", originalChars, notice);
+		if (compactMarker.length() <= maxChars) {
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, compactMarker.length(),
+					notice, compactMarker);
+		}
+		for (String candidate : new String[] { "{\"truncated\":true,\"originalChars\":" + originalChars + "}",
+				"{\"truncated\":true}", "{}" }) {
 			if (candidate.length() <= maxChars) {
 				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, candidate.length(),
 						notice, candidate);
@@ -297,6 +305,28 @@ public class ToolResultLimiter {
 		}
 		// 额度小到连 {} 都放不下：给空串（不给半截 JSON —— 半截 JSON 会被下游整段丢弃）
 		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, 0, notice, "");
+	}
+
+	/**
+	 * "只留标记"形态（N2）：说明里的返回量 = 标记自身长度，用<b>不动点</b>迭代到一致
+	 * （长度数字的位数会改变标记长度，所以一次算不准）。
+	 */
+	private static String markerOnly(int originalChars) {
+		String candidate = marker(compactNotice(originalChars, 0));
+		for (int i = 0; i < 5; i++) {
+			int length = candidate.length();
+			String next = marker(compactNotice(originalChars, length));
+			candidate = next;
+			if (next.length() == length) {
+				break;
+			}
+		}
+		return candidate;
+	}
+
+	/** 不带"返回 N 字符"的短说明（N2：结构化退让档用；避免与 returnedChars 打架）。 */
+	private static String lengthFreeNotice(int originalChars) {
+		return NOTICE_PREFIX + "原 " + originalChars + " 字符（完整结果见本轮工具调用记录）";
 	}
 
 	/** 短说明（完整说明装不下时的退让档；仍以 {@link #NOTICE_PREFIX} 开头，标记可被识别）。 */

@@ -326,6 +326,55 @@ class ContextCompactorTest {
 			.withCompaction(ContextTrigger.Level.fromWire(level), 0, 0, "seed", now));
 	}
 
+	/**
+	 * C13 / N3：本轮 <b>system + tools 本身就占到 L2 线以上</b>时，L2/L3 帮不上忙
+	 * （它们只能压缩历史，压不动不可压缩的前缀）⇒ 不做，如实报 {@code prefix_dominated}。
+	 *
+	 * <p>缺陷现场：滞回只看"可压缩历史"（C13/I3 之后）⇒ 前缀主导时它几乎恒解锁；而触发线看的是
+	 * "整条请求 / 分母" ⇒ 每轮都判 L3 ⇒ <b>每轮硬截断</b>，可历史早已被丢到 pin 下限（什么也丢不掉），
+	 * 结果是"每轮都归档/记账一次空操作"，模型侧一遍遍丢上下文。
+	 */
+	@Test
+	void c13PrefixDominatedRoundDoesNotRepeatedlyHardTrim() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		// 15000 窗口、预留 13000 ⇒ 有效预留 7500；本轮 prefix 7000（requestWith 固定）⇒ 93% ≥ L2 线
+		seed("L2", 9000);
+
+		ContextCompactor.Outcome first = service.compact(requestWith(longTurns(), 9000, 0, Set.of()));
+
+		assertThat(first.level()).as("前缀主导 ⇒ 不得做 L2/L3").isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(first.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
+		assertThat(first.turns()).isZero();
+		assertThat(this.store.archiveCount()).as("不做压缩就不归档").isZero();
+		assertThat(this.store.read(SESSION_ID).level()).as("谱系不得被空操作推进").isEqualTo("L2");
+
+		ContextCompactor.Outcome second = service.compact(requestWith(longTurns(), 9000, 0, Set.of()));
+
+		assertThat(second.level()).as("第二轮同样不做（不是'每轮再截一次'）").isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(second.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
+		assertThat(this.store.archiveCount()).isZero();
+	}
+
+	/** C13 / N3 的另一半：前缀主导时 <b>L1 仍照现有口径处理</b>（清得掉就清、照常记账）。 */
+	@Test
+	void c13PrefixDominatedRoundStillAllowsL1Clearing() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store);
+		seed("L2", 9000);
+
+		ContextCompactor.Outcome outcome = service.compact(requestWith(turns(8), 9000, 0, Set.of()));
+
+		assertThat(outcome.level()).as("L1 不受 prefix 守卫影响").isEqualTo(ContextTrigger.Level.L1);
+		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");
+		assertThat(outcome.clearedPairs()).isEqualTo(3);
+		assertThat(outcome.turns()).isZero();
+	}
+
 	/** T-15：每次最多升一级（none → L1 → L2 → L3），且 L2 真的产摘要、L3 真的按 Turn 截。 */
 	@Test
 	void advancesOneLevelPerCompaction() {

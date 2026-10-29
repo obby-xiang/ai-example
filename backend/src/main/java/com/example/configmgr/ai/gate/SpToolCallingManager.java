@@ -1269,6 +1269,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		//      第二轮只为吸收"随后按 95% 规则追加的收尾指令"那几十 token）；
 		//   ④ 丢最旧的固定历史轮次（HardTrim 同一套纯函数 + 与轮首 L3 同账：归档/档位/台账）。
 		// 做不动就按原判据收尾（真发不出去的上游 400 不该被假装成成功）。
+		// L1 记账每批只试一次：失败后 plan 仍会 changed（清除没落地），后续 pass 再试只会重复写
+		// 归档/状态，结果注定一样 —— 认一次失败，把机会让给后面的收窄/截断。
+		boolean clearAttempted = false;
 		int shrunkResults = 0;
 		int shrinkRounds = 0;
 		int trimmedTurns = 0;
@@ -1285,10 +1288,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// 清得掉、且模型最不需要的旧结果不动，反而去削模型接下来最可能要用的最新结果 ——
 			// 同样的 token，代价更高，台账里还少一条"清过旧结果"。
 			if ((decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS || overflowNow) && cleared == 0
-					&& protectedIds != null) {
+					&& !clearAttempted && protectedIds != null) {
 				List<Message> beforeClear = current;
 				ToolResultClearing.Plan plan = ToolResultClearing.plan(current, config.getKeepToolPairs(),
 						protectedIds);
+				if (plan.changed()) {
+					clearAttempted = true;
+				}
 				if (plan.changed() && recordTurnClear(runId, snapshot, beforeClear, plan, systemTokens, toolsTokens)) {
 					current = plan.messages();
 					cleared += plan.cleared().size();
@@ -1496,21 +1502,30 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		String sessionId = snapshot.getSessionId();
 		long now = System.currentTimeMillis();
+		// 原状态留一份引用：失败时 best-effort 回写（N1：失败不得留档位）
+		ContextState previous = null;
 		try {
 			ContextState state = store.read(sessionId);
 			if (state == null) {
 				state = ContextState.EMPTY;
 			}
+			previous = state;
 			int before = ContextEstimator.estimateMessages(beforeTrim);
 			int after = ContextEstimator.estimateMessages(plan.messages());
 			int turnNo = state.turnNo() + 1;
 			// ① 归档压缩前原文（与轮首/轮内 L1 同一个键族与 TTL）
 			store.archive(sessionId, turnNo, this.codec.serializeAll(beforeTrim));
-			// ② 真值/档位：L3 = 丢整轮；基线同轮首（含本轮 system + tools）
+			// ② 真值/档位：基线同轮首（含本轮 system + tools）。
+			// N1：<b>至多升一级</b> —— 当前 NONE/L1 ⇒ 最多写 L2，已到 L2/L3 保持原级。
+			// 为什么不是无条件 L3：`level` 同时是谱系当前位置（advanceTo 从这里往上推一格、只升不降），
+			// 写死 L3 之后 ① 之后每轮目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于永久关掉）；
+			// ② 一次"临时救场"的轮内截断被永久记成"这个会话已经硬截断过"。台账仍如实记本次 L3。
 			int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
+			ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
+			ContextTrigger.Level written = lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()
+					? ContextTrigger.Level.L2 : lineage;
 			ContextState trimmed = state
-				.withCompaction(ContextTrigger.Level.L3, plan.droppedTurns(), plan.lostTokens(),
-						HardTrim.REASON_HARD_TRIM, now)
+				.withCompaction(written, plan.droppedTurns(), plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, now)
 				.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
 						Math.max(0, systemTokens), Math.max(0, toolsTokens), state.inputTokens());
 			store.write(sessionId, trimmed);
@@ -1522,9 +1537,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			// 本批不截断（history 原样）；归档/状态可能已写、台账缺一条：与轮内 L1 同一个已知窗口
-			log.warn("轮内 L3 硬截断未能记账 runId={}：{}（本次不截断；归档/状态可能已写、台账缺一条：三步无事务）",
-					runId, ex.getMessage());
+			// N1：失败不得把"压过"留在状态里 —— 否则这个会话被永久记成"已截断/已到 L2-L3"（且基线被改小），
+			// 而历史其实没动。这里 best-effort 把状态写回原值；写回也失败才退化成已知的部分失败窗口。
+			try {
+				if (previous != null) {
+					store.write(sessionId, previous);
+				}
+			}
+			catch (RuntimeException rollback) {
+				log.warn("轮内 L3 硬截断失败后状态回写也失败 runId={}：{}（档位可能残留，等下一次轮首压缩收敛）",
+						runId, rollback.getMessage());
+			}
+			log.warn("轮内 L3 硬截断未能记账 runId={}：{}（本次不截断；已尝试回写状态，归档可能已写）", runId,
+					ex.getMessage());
 			return false;
 		}
 	}
@@ -1542,7 +1567,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		event.put("model", snapshot.getModelId());
 		event.put("est", false);
 		event.put("atMs", now);
-		event.put("reason", HardTrim.REASON_HARD_TRIM);
+		event.put("reason", TurnBudgetPlan.REASON_TRIM);
 		event.put("clearedPairs", 0);
 		event.put("clearedToolCallIds", List.of());
 		event.put("circuit", circuit == null ? CompactionFuse.CLOSED : circuit);

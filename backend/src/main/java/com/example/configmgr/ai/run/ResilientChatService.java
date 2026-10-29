@@ -3484,7 +3484,8 @@ public class ResilientChatService {
 			Map.entry(ErrorCodes.UPSTREAM_STREAM_ERROR, "AI 服务返回异常，请稍后重试。"),
 			Map.entry(ErrorCodes.CONTEXT_OVERFLOW, "对话内容过长，请开启新会话后重试。"),
 			// C13：收尾指令被连续无视（工具预算耗尽）—— 与"对话过长"分开说，处置也不同
-			Map.entry(ErrorCodes.TOOL_BUDGET_EXHAUSTED, "本轮的工具调用预算已用完，请开启新会话后重试。"),
+			// 与 messages_zh.properties 的 error.TOOL_BUDGET_EXHAUSTED 逐字一致（用户换个入口不该换一套处置）
+			Map.entry(ErrorCodes.TOOL_BUDGET_EXHAUSTED, "本轮的工具调用预算已用完；请先核对已执行的结果，再开启新会话重试"),
 			Map.entry(ErrorCodes.UPSTREAM_REJECTED, "上游拒绝了本次请求，请检查模型参数或配置后重试。"),
 			Map.entry(ErrorCodes.UPSTREAM_AUTH_FAILED, "上游鉴权失败：请到「设置 → AI」检查 API Key。"),
 			Map.entry(ErrorCodes.UPSTREAM_RATE_LIMITED, "AI 服务繁忙（限流），请稍后重试。"),

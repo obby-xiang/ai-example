@@ -132,7 +132,9 @@ public final class ToolResultClearing {
 			}
 			out.add(rebuild((ToolResponseMessage) messages.get(i), patch));
 		}
-		return new Plan(out, List.copyOf(cleared), savedTokens);
+		// 逐条已按 max(0) 累计（占位符可能比原结果还长）；这里再显式钳一次总量，
+		// 保证 Plan 的契约"省下的量 ∈ [0, 原文量]"在改实现时不会破（判据值按它递推，负数会倒扣）。
+		return new Plan(out, List.copyOf(cleared), Math.max(0, savedTokens));
 	}
 
 	/** 是否已是占位符（幂等判据）。 */

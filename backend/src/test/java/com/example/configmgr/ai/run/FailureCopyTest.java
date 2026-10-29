@@ -62,6 +62,19 @@ class FailureCopyTest {
 		return properties;
 	}
 
+	/**
+	 * C13 / R2：Java 白名单（zh 基础码）必须与 {@code messages_zh.properties} 同口径 ——
+	 * 一份说"请开启新会话"，另一份说"请先核对已执行的结果"，用户换个入口就换一套处置。
+	 */
+	@Test
+	void zhBaseCopyStaysInSyncBetweenTheWhitelistAndTheProperties() throws IOException {
+		String whitelist = ResilientChatService.safeFailureMessage(ErrorCodes.TOOL_BUDGET_EXHAUSTED);
+		String property = messages("messages_zh.properties").getProperty("error." + ErrorCodes.TOOL_BUDGET_EXHAUSTED);
+
+		assertThat(whitelist).as("基础码两处文案必须逐字一致").isEqualTo(property);
+		assertThat(whitelist).contains("核对").as("都要说清'先核对已执行结果'");
+	}
+
 	@Test
 	void toolBudgetExhaustedHasItsOwnCopyInsteadOfTheGenericFallback() {
 		String budget = ResilientChatService.safeFailureMessage(ErrorCodes.TOOL_BUDGET_EXHAUSTED);

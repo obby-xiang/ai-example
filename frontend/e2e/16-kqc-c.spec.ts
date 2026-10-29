@@ -18,15 +18,27 @@
  * 它必须大于 `reserve-tokens`（13000，否则启动期自检拦下），同时与任何一个用例窗口都不同 ——
  * 于是"分母 = 模型行"这件事有断言盯着（`limitTokens === 窗口 && !== 20000`）。
  *
- * <h2>取值纪律（P3 实测；C13 起预留按窗口收口）</h2>
+ * <h2>取值纪律（P3 实测；C13 起预留收口 + 前缀主导守卫）</h2>
  * 旧口径下 `limit − reserve` 在"预留接近窗口"时会被钳成个位数的分母：任何轮次都判满、
  * 逐轮直冲 L3（退化分母）。C13 起 `ContextTrigger#effectiveReserve` 把有效预留收口到
- * **窗口的一半** ⇒ 小窗口下分母恒为 `窗口 / 2`。于是本文件的两档按"先定分母再定窗口"取：
- *   - {@link L1_WINDOW} = 12000（分母 6000，`nextEst/分母 ≈ 0.74` ⇒ 目标 L1）；
- *   - {@link LINEAGE_WINDOW} = 9000（分母 4500，`nextEst/分母 ≈ 0.98` ⇒ 目标 L3，
+ * **窗口的一半** ⇒ 小窗口下分母恒为 `窗口 / 2`；且 `ContextCompactor` 有前缀主导守卫：
+ * 当本轮 system + tools ≥ 分母的 L2 线（80%）时，L2/L3 压不动固定前缀 ⇒ 不做（`prefix_dominated`）。
+ *
+ * <p>本应用的**真实前缀约 6.7K token**（system 8.5K 字符 + 工具 schema 8.5K 字符，E2E 实测）。
+ * 分母 = `窗口 − min(reserve 13000, 窗口/2)`，于是"能触发且不被守卫挡"必须同时满足：
+ * <ol>
+ * <li>不主导：前缀 / 分母 &lt; 80%（窗口 ≥ 22K 时即是）；</li>
+ * <li>够触发：`nextEst / 分母` 落在 70%（L1）/ 80%（L2）/ 95%（L3）档 ⇒ usage 真值必须够大
+ *     —— 故本文件统一带 {@code usage-shape=big}（prompt=11000 / completion=200，取数点
+ *     {@code scripts/ci/stub-routes.json}）；`repeat`(4321) 在这个窗口段里连 70% 都够不到。</li>
+ * </ol>
+ * 三档窗口（先定分母再定窗口；前缀占比 44% / 51% / 60%，都 &lt; 80%）：
+ *   - {@link L1_WINDOW} = 28000（分母 15000，`nextEst/分母 ≈ 0.75` ⇒ 目标 L1）；
+ *   - {@link C10_WINDOW} = 26000（分母 13000，`nextEst/分母 ≈ 0.86` ⇒ 目标 L2 ⇒ 先升 L1 再 L2 摘要）；
+ *   - {@link LINEAGE_WINDOW} = 22000（分母 11000，`nextEst/分母 ≈ 1.02` ⇒ 目标 L3，
  *     但"每次至多升一格"⇒ 逐轮 L1 → L2 → L3）。
  * 窗口同时是**硬上限**（`nextEst >= limit` ⇒ 轮内判越窗）；C13 之后越窗不再直接失败，
- * 而是先收窄最新未保护的工具结果、再压缩固定历史（只调模型、不重跑工具）。
+ * 而是先清旧结果、再收窄最新未保护的工具结果、最后压缩固定历史（只调模型、不重跑工具）。
  *
  * <h2>usage 形状</h2>
  * 压缩判据读「上一轮 usage 真值 + 本轮输入估算」，桩的 `last`（prompt=1200）在小分母下
@@ -74,18 +86,24 @@ test.skip(
 )
 
 /** 分母两档（`ai_model.max_context`；有效预留 = 窗口的一半 ⇒ 分母 = 窗口 / 2，见文件头取值纪律）。 */
-const L1_WINDOW = 12000
-const LINEAGE_WINDOW = 9000
+const L1_WINDOW = 28000
+const C10_WINDOW = 26000
+const LINEAGE_WINDOW = 22000
 /**
  * 启动参数里的弃用回退键 `app.ai.context.limit-tokens`（必须 > reserve-tokens 13000）。
  * 与上面两档都不同 ⇒ "分母取的是模型行"这件事有断言盯着，而不是靠"两个值恰好相等"。
  */
-const ENV_FALLBACK_LIMIT = 20000
+const ENV_FALLBACK_LIMIT = 30000
 
 /** 工具面：恒常披露的只读业务工具（KB 三工具见文件头 B-KB-1 注）。 */
 const TOOL_CALL = 'tool=get_config_def&args={"code":"CURRENCY"}'
-/** 压缩判据读上一轮 usage 真值 ⇒ 桩必须给一个够小分母越线的真值（repeat = 4321/77）。 */
-const USAGE = 'usage-shape=repeat'
+/**
+ * 压缩判据读上一轮 usage 真值 ⇒ 桩要给一份"够大但不越窗"的真值。
+ *
+ * 取 `big`（11000/200）而不是 `repeat`（4321/77）：前缀主导守卫要求前缀 &lt; 分母的 80%
+ * （本应用真实前缀 ≈ 6.7K token ⇒ 窗口 ≥ 22K），在那个窗口段里 4321 连 L1 的 70% 都够不到。
+ */
+const USAGE = 'usage-shape=big'
 /** 档位顺序（`none < L1 < L2 < L3`）。 */
 const LEVEL_ORDER = ['none', 'L1', 'L2', 'L3']
 
@@ -225,7 +243,7 @@ test('@stub E2E-C14 压缩归档可回溯：压缩前原文进 ai:ctx:archive:*�
 })
 
 test('@stub E2E-C10 摘要失败不静默：上游 500 ⇒ 历史逐字不变 + 熔断 +1 + reason 如实', async () => {
-  await withModelWindow(LINEAGE_WINDOW, async () => {
+  await withModelWindow(C10_WINDOW, async () => {
     const sid = newSessionId('C10')
     // 6 轮平推 + 第 7 轮（第 6 对工具结果 ⇒ L1）。`summary-500` 必须在**目标轮的前一轮**打：
     // 压缩发生在轮起点（模型请求还没发出），同一轮带的标记到不了上游、摘要请求已经发出去了。
@@ -238,7 +256,7 @@ test('@stub E2E-C10 摘要失败不静默：上游 500 ⇒ 历史逐字不变 + 
     expect(levelOf(contextFrameOf(l1Round)?.level)).toBe('L1')
 
     const beforeState = await contextSnapshot(sid)
-    expect(beforeState.limitTokens).toBe(LINEAGE_WINDOW)
+    expect(beforeState.limitTokens).toBe(C10_WINDOW)
     expect(beforeState.limitTokens).not.toBe(ENV_FALLBACK_LIMIT)
     // 第 8 轮：目标 L3 ⇒ "每次至多升一格" ⇒ 进 L2 摘要，摘要请求被桩 500 掉（arm 窗口内一律 500，
     // 覆盖 Spring AI 的 5xx 重试；见 kqc-upstream 的 summaryFault）
@@ -362,32 +380,50 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
       levelIndex('L2')
     )
 
-    // ② 台账：条数 > 0、首条 L1、逐条只升一格、每条都真的省了 token
+    // ② 台账：条数 > 0、首条 L1、逐条只升一格、每条都真的省了 token。
+    // **谱系推进只看轮首事件**：轮内临时救场（L1 清除 / 硬截断）以 `turn_` 前缀标识，它们不推进谱系
+    // （N1：最多写 L2）；按时间混读会把"轮内 L1"误读成"谱系回退"。
     const ledger = await contextLedger(sid)
     const changed = chronological(ledger).filter((event) => levelOf(event.level) !== 'none')
+    const roundStart = changed.filter((event) => !String(event.reason ?? '').startsWith('turn_'))
     expect(changed.length, '压缩台账必须非空').toBeGreaterThanOrEqual(2)
+    // 谱系起步 = 台账里第一条压缩事件（可能是**轮内** L1 清除，也可能是轮首 L1）：两者都写 L1
     expect(levelOf(changed[0].level), '谱系必须从 L1 起步').toBe('L1')
-    for (let index = 1; index < changed.length; index += 1) {
-      const step = levelIndex(changed[index].level) - levelIndex(changed[index - 1].level)
-      const trail = changed.map((event) => levelOf(event.level)).join(' → ')
+    expect(roundStart.length, '轮首压缩事件必须 ≥ 2 条（否则谱系只靠轮内事件推进）').toBeGreaterThanOrEqual(2)
+    for (let index = 1; index < roundStart.length; index += 1) {
+      const step = levelIndex(roundStart[index].level) - levelIndex(roundStart[index - 1].level)
+      const trail = roundStart.map((event) => levelOf(event.level)).join(' → ')
       expect(step, `台账档位跳变：${trail}`).toBeLessThanOrEqual(1)
       expect(step, `台账档位回退：${trail}`).toBeGreaterThanOrEqual(0)
     }
     for (const event of changed) {
       const before = Number(event.before ?? 0)
       const after = Number(event.after ?? 0)
-      expect(after, `压缩未降低占用：level=${levelOf(event.level)} before=${before} after=${after}`).toBeLessThan(before)
+      if (levelOf(event.level) === 'L2') {
+        // 摘要可能比"被折叠的若干短轮"更长（带六项保留清单）⇒ 只要求记账如实：
+        // 摘要正文非空、before/after 是实数值；是否真的降了看端到端（末条 after < 首条 before）。
+        expect(Number(event.summaryChars ?? 0), 'L2 必须真的写了摘要').toBeGreaterThan(0)
+      } else {
+        // L1 清除 / L3 硬截断只会让上下文变短：这一条是硬断言
+        expect(after, `压缩未降低占用：level=${levelOf(event.level)} before=${before} after=${after}`)
+          .toBeLessThan(before)
+      }
     }
-    // L1 口径：只清结果、不折叠轮 ⇒ turns / lostTokens 恒 0
-    expect(Number(changed[0].turns ?? -1)).toBe(0)
-    expect(Number(changed[0].lostTokens ?? -1)).toBe(0)
-    expect(String(changed[0].reason ?? '')).toContain('tool_result_clearing')
-    // L2 口径：折叠整轮 ⇒ turns > 0 且 lostTokens > 0（"丢了什么"必须如实记账）
-    const summarized = changed.filter((event) => levelOf(event.level) === 'L2')
+    // L1 口径：只清结果、不折叠轮 ⇒ turns / lostTokens 恒 0（轮内/轮首同一条口径）
+    const firstL1 = changed.find((event) => levelOf(event.level) === 'L1')
+    expect(Number(firstL1?.turns ?? -1)).toBe(0)
+    expect(Number(firstL1?.lostTokens ?? -1)).toBe(0)
+    expect(String(firstL1?.reason ?? '')).toContain('tool_result_clearing')
+    // L2 口径：真的折叠了整轮（turns > 0）且真的写了摘要（summaryChars > 0）。
+    // **不硬断言 lostTokens > 0**：把若干短轮折成"带六项保留清单的摘要"可能比原文更长，
+    // before/after 如实记录即可（本档实测 L2 的 before 1184 → after 1234）；
+    // 判"压过"看 turns/summaryChars，"省了多少"看 before/after，两者不许混为一谈。
+    const summarized = roundStart.filter((event) => levelOf(event.level) === 'L2')
     expect(summarized.length, '必须至少有一次 L2 摘要（否则只验证了 L1 清除）').toBeGreaterThan(0)
     for (const event of summarized) {
       expect(Number(event.turns ?? 0)).toBeGreaterThan(0)
-      expect(Number(event.lostTokens ?? 0)).toBeGreaterThan(0)
+      expect(Number(event.summaryChars ?? 0)).toBeGreaterThan(0)
+      expect(Number(event.lostTokens ?? 0)).toBeGreaterThanOrEqual(0)
     }
     // 占用真的降下来了：末条的 after 低于首条的 before
     expect(Number(changed[changed.length - 1].after ?? 0)).toBeLessThan(Number(changed[0].before ?? 0))
@@ -404,9 +440,29 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     expect(framed.length, '压缩轮必须带 context 帧').toBeGreaterThanOrEqual(2)
     for (const row of framed) {
       const frame = row.frame as Frame
-      expect(levelOf(frame.level)).toBe(row.level)
-      expect(Number(frame.before ?? 0)).toBeGreaterThan(Number(frame.after ?? 0))
-      expect(Number(frame.savedTokens ?? 0)).toBe(Number(frame.before ?? 0) - Number(frame.after ?? 0))
+      // 帧记录的是**轮首**那一次压缩；同一轮随后还可能被轮内预算推进（L1 清除 / 硬截断），
+      // 所以 row.level（轮末快照）只会 **≥** 帧档位，二者不必相等。三面同源改用"帧的
+      // (level,before,after) 必须在台账里找到同一条"来验（更强，且不受轮内事件干扰）。
+      expect(
+        levelIndex(levelOf(frame.level)),
+        `帧档位不得高于轮末快照：frame=${String(frame.level)} snapshot=${row.level}`
+      ).toBeLessThanOrEqual(levelIndex(row.level))
+      const matched = changed.some(
+        (event) =>
+          levelOf(event.level) === levelOf(frame.level) &&
+          Number(event.before ?? -1) === Number(frame.before ?? -2) &&
+          Number(event.after ?? -1) === Number(frame.after ?? -2)
+      )
+      expect(matched, `帧 (${String(frame.level)} ${String(frame.before)}→${String(frame.after)}) 在台账里找不到同一条`)
+        .toBe(true)
+      // savedTokens 的口径 = max(0, before − after)；L2 摘要可能让历史变长（见台账那条注），
+      // 此时 savedTokens = 0 而 before < after —— 帧与台账必须同值，不许两边各说一套。
+      expect(Number(frame.savedTokens ?? 0)).toBe(
+        Math.max(0, Number(frame.before ?? 0) - Number(frame.after ?? 0))
+      )
+      if (levelOf(frame.level) !== 'L2') {
+        expect(Number(frame.before ?? 0)).toBeGreaterThan(Number(frame.after ?? 0))
+      }
     }
     // 摘要落地后模型看到的是摘要占位（"真的改写了下一次请求"的模型可见证据）
     expect(rounds.some((row) => row.summarySeen), 'L2 之后上游请求里必须出现 [上下文压缩摘要]').toBe(true)

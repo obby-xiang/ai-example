@@ -94,7 +94,13 @@
       "completionTokens": 50,
       "totalTokens": 3150
     },
-    "none": {}
+    "none": {},
+    "big": {
+      "promptTokens": 11000,
+      "completionTokens": 200,
+      "totalTokens": 11200,
+      "note": "C13 R2：真实 system+tools 前缀约 6.7K token ⇒ 小窗口下要跨过 70/80/95 三档，usage 真值必须够大，且不能让前缀占满分母（prefix_dominated 守卫会把 L2/L3 挡掉）"
+    }
   },
   "faults": {
     "note": "E2E 批① §4.6 桩开关清单的唯一取数点（数值默认值 + 承载层）。桩（stub-upstream.mjs）与用例（verify-e2e.ps1）读同一份 ⇒ 开关名与默认值不会两边各写一套。layer=stub 的开关由桩按提示词标记注入；layer=script 的开关由用例自己构造（桩无法替代）；layer=product 的开关由产品既有语义产生（桩只负责触发）。",

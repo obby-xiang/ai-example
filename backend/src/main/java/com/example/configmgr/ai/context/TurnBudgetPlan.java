@@ -77,6 +77,15 @@ public final class TurnBudgetPlan {
 	public static final String REASON_WRAP_UP_IGNORED = "turn_wrap_up_ignored";
 
 	/**
+	 * 轮内<b>硬截断</b>（越窗恢复丢最旧轮）的记账原因。
+	 *
+	 * <p>与轮首 L3 的 {@code l3_hard_trim} <b>刻意不同串</b>：轮内事件不推进谱系（N1：最多写 L2），
+	 * 台账消费者要能一眼分出"轮首压缩的谱系推进"与"轮内临时救场"—— 否则按时间读台账会把
+	 * 轮内 L1/L3 事件误读成"谱系回退"。轮内事件统一以 {@code turn_} 前缀标识。
+	 */
+	public static final String REASON_TRIM = "turn_l3_hard_trim";
+
+	/**
 	 * 武装之后模型仍连续请求工具、被拦下的批次数上限。
 	 *
 	 * <p>收尾指令是"请模型配合"的软约束：模型可以不理。若只靠它，一个不配合的模型可以在

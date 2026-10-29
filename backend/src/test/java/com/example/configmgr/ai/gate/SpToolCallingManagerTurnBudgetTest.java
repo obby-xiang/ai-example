@@ -7,6 +7,8 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.ContextTrigger;
+import com.example.configmgr.ai.context.RollingSummarizer;
+import com.example.configmgr.ai.context.TestProviderRuntime;
 import com.example.configmgr.ai.context.HardTrim;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.context.ToolResultClearing;
@@ -471,7 +473,8 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(String.join(" | ", archived)).contains("第 1 个问题").contains("这是第 1 轮的回答");
 		// ② 状态：档位/轮数/lostTokens 与台账同值
 		ContextState state = this.contextStore.read(SESSION_ID);
-		assertThat(state.level()).as("丢整轮 = L3 语义").isEqualTo("L3");
+		// N1：写进谱系的至多是 L2（NONE/L1 ⇒ L2；L2/L3 保持原级）；本次动作仍是硬截断（台账记 L3）
+		assertThat(state.level()).as("谱系至多升一级，不得写死 L3").isEqualTo("L2");
 		// 语料 = 10 轮 + 最后一条"新问题" ⇒ 11 段；keep-recent-turns 默认 6 ⇒ 丢最旧 5 段
 		assertThat(state.compactedTurns()).isEqualTo(5);
 		assertThat(state.lostTokens()).isPositive();
@@ -479,11 +482,89 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(this.contextStore.contextLedger(SESSION_ID)).hasSize(1);
 		Map<String, Object> event = this.contextStore.contextLedger(SESSION_ID).get(0);
 		assertThat(event.get("level")).isEqualTo("L3");
-		assertThat(event.get("reason")).as("原因如实：这是硬截断，不是 L1 清除").isEqualTo(HardTrim.REASON_HARD_TRIM);
+		assertThat(event.get("reason")).as("原因如实：轮内硬截断（turn_ 前缀标识轮内事件）")
+			.isEqualTo(TurnBudgetPlan.REASON_TRIM);
 		assertThat(event.get("turns")).isEqualTo(5);
 		assertThat(((Number) event.get("lostTokens")).intValue()).isEqualTo(state.lostTokens());
 		assertThat(((Number) event.get("after")).intValue()).isLessThan(((Number) event.get("before")).intValue());
 		assertThat(this.executed).as("恢复不重跑工具").containsExactly("c-1");
+	}
+
+	/**
+	 * C13 / N1：轮内硬截断写谱系时<b>至多升一级</b>（当前 NONE/L1 ⇒ 写 L2），不得直接写 L3。
+	 *
+	 * <p>缺陷现场：旧实现无条件写 {@code level=L3}。而 {@code level} 同时是谱系当前位置
+	 * （{@code ContextTrigger#advanceTo} 从这里往上推一格，且只升不降）⇒ 写了 L3 之后：
+	 * ① 之后每一轮的目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于被永久关掉）；
+	 * ② 一次"临时救场"的轮内截断被永久记成"这个会话已经硬截断过"。
+	 *
+	 * <p>本用例两段：先断言轮内截断后谱系 = L2（台账仍如实记本次 L3），再把"下一轮"跑起来 ——
+	 * 目标 L2 时必须走<b>摘要</b>，而不是又一次硬截断。
+	 */
+	@Test
+	void inRoundTrimCapsTheLineageAtL2SoTheNextRoundCanStillSummarize() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		List<Message> longHistory = historyWithLongTurns();
+
+		this.manager.executeToolCalls(prompt(longHistory),
+				response(ContextEstimator.estimateMessages(longHistory), 0, "c-1"));
+
+		ContextState afterTrim = this.contextStore.read(SESSION_ID);
+		assertThat(afterTrim.level()).as("轮内硬截断最多把谱系推到 L2（写 L3 会让之后永远 L3）")
+			.isEqualTo("L2");
+		assertThat(afterTrim.compactedTurns()).isEqualTo(5);
+		assertThat(this.contextStore.contextLedger(SESSION_ID).get(0).get("level"))
+			.as("台账仍如实记本次硬截断").isEqualTo("L3");
+
+		// 下一轮：真实 usage 会远小于"截断前那份估算"，把基线降到滞回线以下；目标 L2
+		this.contextStore.write(SESSION_ID, afterTrim.withUsage(5_000, 0, afterTrim.turnNo(), false,
+				System.currentTimeMillis(), "deepseek-flash", 0, 0, 0));
+		ContextCompactor compactor = new ContextCompactor(this.properties, new ContextLimitResolver(this.properties),
+				this.contextStore, (system, user, runtime) -> "摘要正文");
+		List<Message> nextRound = historyWithLongTurns();
+		ContextCompactor.Outcome next = compactor.compact(new ContextCompactor.Request(SESSION_ID, RUN_ID,
+				"deepseek-flash", 1L, nextRound, this.codec.serializeAll(nextRound), 8_000, 0, 0, 0, 0, 0, Set.of(),
+				TestProviderRuntime.runtime()));
+
+		assertThat(next.level()).as("从 L2 出发、目标 L2 ⇒ 走摘要（旧行为写死 L3，这里会变成再次硬截断）")
+			.isEqualTo(ContextTrigger.Level.L2);
+		assertThat(next.reason()).isEqualTo(RollingSummarizer.REASON_SUMMARY);
+		assertThat(next.turns()).isPositive();
+	}
+
+	/**
+	 * C13 / R2：L1 记账失败后<b>每批只尝试一次</b> —— 不许在同一批的后续 pass 里反复写归档/状态。
+	 *
+	 * <p>缺陷现场：记账失败后 {@code plan.changed()} 仍为 true（清除没落地），循环再判到 L1 时又会
+	 * 走一遍 {@code recordTurnClear}：每多一个 pass 就多一次 Redis 归档写（本批实测 2 次），
+	 * 而结果注定一样。失败要认一次，把机会让给后面的收窄/截断。
+	 */
+	@Test
+	void failedL1AccountingIsAttemptedOnlyOncePerBatch() {
+		this.properties.getContext().setLimitTokens(10_000);
+		this.properties.getContext().setReserveTokens(0);
+		this.properties.getContext().setKeepToolPairs(2);
+		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
+			@Override
+			public void appendLedger(String sessionId, Map<String, Object> event) {
+				throw new IllegalStateException("redis down");
+			}
+		};
+		this.manager.setContextStateStore(broken);
+		List<Message> history = historyWithClearableOldResults();
+
+		ToolExecutionResult result = this.manager.executeToolCalls(prompt(history),
+				response(ContextEstimator.estimateMessages(history), 0, "c-1"));
+
+		assertThat(broken.archiveCount()).as("一批里只尝试一次 L1 记账").isEqualTo(1);
+		assertThat(broken.contextLedger(SESSION_ID)).isEmpty();
+		assertThat(oldResultText(result.conversationHistory(), "old-1")).as("记账失败 ⇒ 清除未落地")
+			.isNotEqualTo(ToolResultClearing.placeholder("list_tasks", 1, "old-1"))
+			.doesNotStartWith(ToolResultClearing.PLACEHOLDER_PREFIX);
+		assertThat(this.executed).as("工具只执行一次").containsExactly("c-1");
 	}
 
 	/**
@@ -515,6 +596,10 @@ class SpToolCallingManagerTurnBudgetTest {
 			.as("截断没记账 ⇒ 不应用；快照里第 1 轮还在").hasSize(longHistory.size() + 2);
 		assertThat(broken.contextLedger(SESSION_ID)).isEmpty();
 		assertThat(broken.archiveCount()).as("归档先于台账（已知的部分失败窗口）").isEqualTo(1);
+		// N1：记账失败不得把"压过"留在状态里 —— 否则这个会话被永久记成"已 L2/L3 截断过"
+		assertThat(broken.read(SESSION_ID).level()).as("失败路径不得留档位").isEqualTo("none");
+		assertThat(broken.read(SESSION_ID).compactedTurns()).isZero();
+		assertThat(broken.read(SESSION_ID).lostTokens()).isZero();
 	}
 
 	// ── 100 档：先 settle，再 CONTEXT_OVERFLOW ───────────────────────────────

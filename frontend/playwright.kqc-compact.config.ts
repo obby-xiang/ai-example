@@ -5,7 +5,8 @@ import { defineConfig, devices } from '@playwright/test'
  *
  * 压缩触发判的是「下一次请求预估」占「分母 − reserve-tokens」的比例；默认分母（128000）下
  * 桩的几百 token 工具结果要几十轮才够 70%。本档只把**分母**压小（不改判定语义）：
- *   - `--app.ai.context.limit-tokens=20000` 必须大于 reserve-tokens（13000）以过启动自检；
+ *   - `--app.ai.context.limit-tokens=30000` 必须大于 reserve-tokens（13000）以过启动自检；
+ *     且必须与用例的三档窗口（28000 / 26000 / 22000）都不同（"分母取的是模型行"有断言盯着）；
  *   - 真正的分母由各用例经模型配置写接口临时设置（`helpers-kqc.ts#withModelWindow`），
  *     并断言 `limitTokens === 窗口 && !== 20000`（证明分母来自模型行，不是过渡键）。
  *
@@ -24,7 +25,7 @@ process.env.E2E_REDIS_DB_DEGRADED ??= '15'
 process.env.E2E_STUB_SCRIPT ??= 'e2e/support/kqc-upstream.mjs'
 // 文件级闸门（16-kqc-c 抬头）：不带此 env 时用例整体 skip
 process.env.E2E_KQC_COMPACT ??= '1'
-process.env.E2E_EXTRA_BACKEND_ARGS ??= '--app.ai.context.limit-tokens=20000'
+process.env.E2E_EXTRA_BACKEND_ARGS ??= '--app.ai.context.limit-tokens=30000'
 
 const appBase = process.env.E2E_APP ?? `http://127.0.0.1:${process.env.E2E_APP_PORT}`
 const isCI = !!process.env.CI

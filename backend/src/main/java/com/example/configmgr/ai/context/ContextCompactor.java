@@ -78,6 +78,15 @@ public final class ContextCompactor {
 	public static final String REASON_CIRCUIT_OPEN = "circuit_open";
 
 	/**
+	 * 跳过原因：本轮 system + tools 已占到 L2 触发线以上（{@code prefix_dominated}）。
+	 *
+	 * <p>L2/L3 只能压缩<b>历史</b>，压不动不可压缩的固定前缀：此时再压只会把还能用的旧轮丢掉
+	 * （甚至每轮丢一次空操作），换不来任何降幅。故不做，并如实报这个原因（便于运维区分
+	 * "没到线" / "该压的都压了" / "是前缀太大"——最后一种只能换更大窗口的模型或精简工具集）。
+	 */
+	public static final String REASON_PREFIX_DOMINATED = "prefix_dominated";
+
+	/**
 	 * 一次压缩请求。
 	 *
 	 * @param sessionId               会话 id（真值/台账/归档键的一维）
@@ -266,6 +275,16 @@ public final class ContextCompactor {
 				state = fuse.halfOpen(state, now);
 			}
 		}
+		// N3：前缀主导守卫 —— system + tools 本身就过 L2 线时，L2/L3 压不动它（只能丢历史），
+		// 而触发线看整条请求 ⇒ 会每轮判 L3、每轮空截一次。此时只留 L1。
+		int prefixTokens = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
+		int l2 = config.getL2Percent() <= 0 ? 80 : config.getL2Percent();
+		long denominator = Math.max(1L,
+				(long) limit - ContextTrigger.effectiveReserve(limit, config.getReserveTokens()));
+		boolean prefixDominated = prefixTokens > 0 && prefixTokens * 100d / denominator >= l2;
+		if (prefixDominated && target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
+			target = ContextTrigger.Level.L1;
+		}
 		ToolResultClearing.Plan clear = ToolResultClearing.plan(original, config.getKeepToolPairs(),
 				request.protectedToolCallIds());
 		List<Message> current = clear.messages();
@@ -317,7 +336,8 @@ public final class ContextCompactor {
 		}
 		if (!clear.changed() && turns == 0) {
 			return noop(request, before, ContextTrigger.Level.fromWire(state.level()), limit, decision.ratio(),
-					decision.nextEst(), REASON_NOTHING_TO_CLEAR, state.circuit());
+					decision.nextEst(), prefixDominated ? REASON_PREFIX_DOMINATED : REASON_NOTHING_TO_CLEAR,
+					state.circuit());
 		}
 		int after = ContextEstimator.estimateMessages(current);
 		int saved = Math.max(0, before - after);

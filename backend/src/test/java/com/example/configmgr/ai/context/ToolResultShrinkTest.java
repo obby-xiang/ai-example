@@ -121,6 +121,30 @@ class ToolResultShrinkTest {
 		assertThat(after.message().length()).as("确实又收窄了一刀").isLessThan(5_200);
 	}
 
+	/**
+	 * C13 / R2：历史里混着<b>非信封</b>的工具结果（早期实现/裸文本）时，收窄只跳过它，绝不抛错。
+	 *
+	 * <p>收窄是"最后一道救场"：因为一条读不懂的历史把整轮恢复弄崩，比不收缩更糟。
+	 */
+	@Test
+	void nonEnvelopeResultsAreSkippedInsteadOfFailing() {
+		List<Message> history = new ArrayList<>();
+		history.add(new UserMessage("旧问题"));
+		history.add(AssistantMessage.builder()
+			.toolCalls(List.of(new AssistantMessage.ToolCall("raw-1", "function", "list_tasks", "{}")))
+			.build());
+		history.add(ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse("raw-1", "list_tasks", "裸文本结果，不是信封")))
+			.build());
+		history.addAll(historyWithResults(6_000, "最新结果：").subList(1, 3));
+
+		ToolResultShrink.Plan plan = ToolResultShrink.plan(history, 12_000, 10_000, Set.of(), this.limiter);
+
+		assertThat(plan.changed()).as("只收窄信封形态的那一条").isTrue();
+		assertThat(plan.shrunkIds()).containsExactly("c-1");
+		assertThat(plan.messages()).hasSameSizeAs(history);
+	}
+
 	@Test
 	void nothingHappensWhenTheEstimateAlreadyFits() {
 		List<Message> history = historyWithResults(20_000, "旧结果：", "中结果：", "最新结果：");
