@@ -66,7 +66,7 @@
     <!-- 批 E · E1：能力位降级黄条随模型选择一起退场 —— 没有选择就没有"选了不支持工具的模型"
          这一状态；默认模型的工具能力由后端 `/health` 与真实调用结果说话。 -->
 
-    <div v-if="!ai.available" :class="alertBox('primary')" data-testid="alert-degraded">
+    <div v-if="healthBlocksSend" :class="alertBox('primary')" data-testid="alert-degraded">
       <span :class="alertIcon('primary')" aria-hidden="true">↓</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.unavailableDegraded') }}</b>
@@ -2183,18 +2183,27 @@ const followups = computed<FollowupSuggestion[]>(() => {
   }).filter((item) => suggestionAllowedForTask(item.id))
 })
 
+/**
+ * I8（R1）：状态胶囊 / 占位文案 / 降级条**与发送闸同一判据**（`healthBlocksSend`）。
+ *
+ * <p>探针失败（`health === null`，原因在 `healthError`）只是"没测到"，不是"不可用"：此时发送闸
+ * 是放行的，文案就不能说"AI 能力暂不可用 / 已降级"，否则用户看到的是"不可用"却又能发出去。
+ */
 const healthLabel = computed(() => {
+  if (healthBlocksSend.value) {
+    return t('ai.panel.degraded')
+  }
   if (ai.health === null && ai.healthError === null) {
     return t('ai.panel.untested')
   }
-  return ai.available ? t('ai.panel.available') : t('ai.panel.degraded')
+  return t('ai.panel.available')
 })
 
 const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
   if (ai.health === null && ai.healthError === null) {
     return 'info'
   }
-  return ai.available ? 'success' : 'warning'
+  return healthBlocksSend.value ? 'warning' : 'success'
 })
 
 const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degradeUnknown'))
@@ -2412,7 +2421,8 @@ function onComposerKeydown(event: KeyboardEvent): void {
 }
 
 const inputPlaceholder = computed(() => {
-  if (!ai.available) {
+  // I8：与发送闸同一判据 —— 探针失败不再谎报"不可用"
+  if (healthBlocksSend.value) {
     return t('ai.panel.composer.placeholderUnavailable')
   }
   if (ai.suspended || ai.pendingToolCall) {
@@ -4535,8 +4545,10 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
  */
 let sendGeneration = 0
 
-/** M-16：编辑重跑的删除现场（失败时原样回插/还原）。 */
+/** M-16 / I3：编辑重跑的删除现场（失败时原样回插/还原）。 */
 interface EditRerunUndo {
+  /** 发起这一轮编辑时的会话（跨会话不得把旧消息回插进新会话） */
+  sessionId: string
   /** 编辑锚点在删除时刻的下标（目标消息已不在数组里时用它定位） */
   index: number
   target: ChatMessage
@@ -4547,17 +4559,26 @@ interface EditRerunUndo {
 }
 
 /**
- * M-16（2026-10-29）：把编辑重跑删掉的东西放回去 —— 用户原文 + 其后的消息。
+ * M-16（2026-10-29）/ I8（R1）：把编辑重跑删掉的东西放回去 —— 用户原文 + 其后的消息。
  *
  * <p>回插位置 = 编辑锚点（那条用户消息）之后：被删消息本来就是"这条提问的回答与后续"，
  * 放回提问后面才与删除前的对话形态一致。本次失败轮自己的助手气泡（错误卡宿主）留在末尾。
+ *
+ * <p>I3：会话已换（410 SESSION_PURGED / 他端接管）时**不得回插** —— 那是旧会话的消息，
+ * 复活进新会话等于把两条时间线拼在一起；此时只靠调用方回填草稿（用户刚改的文本没被服务端收过）。
+ *
+ * <p>I8：还原后立即落镜像 —— 否则刷新一次又把刚救回来的旧回答丢掉（镜像里还是删除后的现场）。
  */
 function restoreEditRerun(undo: EditRerunUndo): void {
+  if (ai.sessionId !== undo.sessionId) {
+    return
+  }
   undo.target.parts = undo.parts
   deriveProjections(undo.target)
   const at = ai.messages.indexOf(undo.target)
   const index = at >= 0 ? at : undo.index
   ai.messages.splice(index + 1, 0, ...undo.removed)
+  ai.writeMirrorNow()
   pinBottom()
 }
 
@@ -4592,7 +4613,7 @@ async function send(): Promise<void> {
       deriveProjections(target)
       markUserMsgDirty(target.id)
       ai.messages.splice(cut + 1)
-      editUndo = { index: cut, target, parts: originalParts, removed }
+      editUndo = { sessionId: ai.sessionId, index: cut, target, parts: originalParts, removed }
       pinBottom()
       skipUserRecord = true
     }
@@ -4608,15 +4629,15 @@ async function send(): Promise<void> {
   if (generation !== sendGeneration) {
     return
   }
-  // 成功 / 主动停止：保持已清空，草稿不回流。
+  // M-16（2026-10-29）/ I8（R1）：失败 / 断流 / 未发送 / **用户主动停止** ⇒ 先把"先删后发"的现场
+  // 还原 —— 被删消息原序回插、被改写的用户原文还原。停止同样是"这一轮没跑成"：不还原等于
+  // 让一次停止把旧回答永久删掉。I3：会话已换时 restoreEditRerun 内部直接跳过（只回填草稿）。
+  if (result.outcome !== 'ok' && editUndo) {
+    restoreEditRerun(editUndo)
+  }
+  // 成功 / 主动停止：草稿保持已清空（既有口径：停止不是失败，不把刚发出去的文本塞回输入框）。
   if (result.outcome === 'ok' || result.outcome === 'cancelled') {
     return
-  }
-  // M-16（2026-10-29）：发送失败 / 断流 / 未发送 ⇒ 先把"先删后发"的现场还原 —— 被删消息原序回插、
-  // 被改写的用户原文还原。不还原的代价：旧回答只能靠刷新从服务端找回（本地已 splice 掉），
-  // 而用户刚改的文本服务端从未收到，刷新后一并丢失。
-  if (editUndo) {
-    restoreEditRerun(editUndo)
   }
   // 用户已在流式中写入新内容：不覆盖，也不把失败消息设成新的编辑锚点。
   if (inputText.value !== '') {

@@ -155,7 +155,7 @@ describe('M-20 重新加载保留其它卡片的脏值', () => {
     wrapper.unmount()
   })
 
-  it('M-20 反向：provider 被他端删除 ⇒ 重载后表单不残留幽灵卡', async () => {
+  it('I7 反向：provider 被他端删除 ⇒ 重载后表单不残留幽灵卡（直接断言 cardForms 已删）', async () => {
     const wrapper = await mountView()
     expect(wrapper.findAll('[data-testid="provider-card"]')).toHaveLength(2)
     api.listProviders.mockResolvedValue([providerFixture(8, 'qwen', 'Qwen')])
@@ -165,12 +165,90 @@ describe('M-20 重新加载保留其它卡片的脏值', () => {
     await flushPromises()
 
     expect(wrapper.findAll('[data-testid="provider-card"]')).toHaveLength(1)
+    // 直接看组件状态：被删 provider 的卡片表单必须一起消失（否则保存路径还会读到它）
+    const forms = (wrapper.vm as unknown as { cardForms: Record<number, unknown> }).cardForms
+    expect(forms[7]).toBeUndefined()
+    expect(forms[8]).toBeDefined()
+
     api.updateProvider.mockClear()
     await wrapper.find('[data-testid="save-provider"]').trigger('click')
     await flushPromises()
     const [id, body] = api.updateProvider.mock.calls[0] as [number, Record<string, unknown>]
     expect(id).toBe(8)
     expect(body).not.toHaveProperty('apiKey')
+    wrapper.unmount()
+  })
+})
+
+describe('I1 保存/清除成功后密钥不得留在表单或回滚', () => {
+  it('I1 原始：保存成功后密钥输入框清空，再保存不带 apiKey（明文不常驻）', async () => {
+    const wrapper = await mountView()
+    api.updateProvider.mockResolvedValue(providerFixture(7, 'deepseek', 'DeepSeek'))
+
+    await wrapper.findAll('[data-testid="key-input"]')[0]!.setValue('sk-saved-once')
+    await wrapper.findAll('[data-testid="save-provider"]')[0]!.trigger('click')
+    await flushPromises()
+
+    const [, firstBody] = api.updateProvider.mock.calls[0] as [number, Record<string, unknown>]
+    expect(firstBody.apiKey).toBe('sk-saved-once')
+    expect((wrapper.findAll('[data-testid="key-input"]')[0]!.element as HTMLInputElement).value).toBe('')
+
+    api.updateProvider.mockClear()
+    await wrapper.findAll('[data-testid="save-provider"]')[0]!.trigger('click')
+    await flushPromises()
+
+    const [, secondBody] = api.updateProvider.mock.calls[0] as [number, Record<string, unknown>]
+    expect(secondBody).not.toHaveProperty('apiKey')
+    wrapper.unmount()
+  })
+
+  it('I1 相邻：清除密钥后重载不得把明文留在输入框，再保存不得回滚这次清除', async () => {
+    const wrapper = await mountView()
+    api.updateProvider.mockResolvedValue(providerFixture(7, 'deepseek', 'DeepSeek'))
+
+    await wrapper.findAll('[data-testid="key-input"]')[0]!.setValue('sk-to-clear')
+    await wrapper.findAll('[data-testid="clear-key"]')[0]!.trigger('click')
+    await flushPromises()
+
+    const [, clearBody] = api.updateProvider.mock.calls[0] as [number, Record<string, unknown>]
+    expect(clearBody).toEqual({ clearKey: true })
+    expect((wrapper.findAll('[data-testid="key-input"]')[0]!.element as HTMLInputElement).value).toBe('')
+
+    api.updateProvider.mockClear()
+    await wrapper.findAll('[data-testid="save-provider"]')[0]!.trigger('click')
+    await flushPromises()
+    const [, saveBody] = api.updateProvider.mock.calls[0] as [number, Record<string, unknown>]
+    expect(saveBody).not.toHaveProperty('apiKey')
+    wrapper.unmount()
+  })
+})
+
+describe('I2 默认参数区的脏值同样不被任何 load 清空', () => {
+  it('I2 原始：改了温度后其它卡片触发重载 ⇒ 温度输入框保持用户值', async () => {
+    const wrapper = await mountView()
+    api.updateProvider.mockResolvedValue(providerFixture(8, 'qwen', 'Qwen'))
+    const temperature = wrapper.find('[data-testid="default-temperature"]')
+    await temperature.setValue('0.95')
+
+    // B 卡保存 = 一次 load()（会重建卡片表单与默认参数区）
+    await wrapper.findAll('[data-testid="save-provider"]')[1]!.trigger('click')
+    await flushPromises()
+
+    expect((wrapper.find('[data-testid="default-temperature"]').element as HTMLInputElement).value)
+      .toBe('0.95')
+    wrapper.unmount()
+  })
+
+  it('I2 相邻：没改过的默认参数仍跟随服务端（他端改了温度要能回显）', async () => {
+    const wrapper = await mountView()
+    api.updateProvider.mockResolvedValue(providerFixture(8, 'qwen', 'Qwen'))
+    api.getDefaults.mockResolvedValue({ ...defaultsFixture(), temperature: 0.7 })
+
+    await wrapper.findAll('[data-testid="save-provider"]')[1]!.trigger('click')
+    await flushPromises()
+
+    expect((wrapper.find('[data-testid="default-temperature"]').element as HTMLInputElement).value)
+      .toBe('0.7')
     wrapper.unmount()
   })
 })

@@ -1,14 +1,16 @@
 /**
- * 2026-10-29 审计批（M-17 / M-18 / M-19）：AI 对话状态的三条守卫。
+ * 2026-10-29 审计批（M-17 / M-18 / M-19）—— 返修 R1：**全部走真实 SSE 传输与帧门**。
  *
- * <h2>本文件为什么单列</h2>
- * 三条都是"跨 await 的轮次身份"缺口，证红方式各自独立（见各用例注释）。放在一个文件里只为
- * 共用同一套 store 装配（`@/api/ai` 桩 + 独立 pinia + 页签锁夹具），不影响逐条 `-t` 运行。
- *
- * <h2>口径</h2>
- * - M-17：历史重载在途时**不得整体替换** `messages`（在途轮的宿主一旦被换掉，后续帧会新建第二条气泡）；
- * - M-18：建卡失败 + 回灌失败时**该卡**的 `suspended` 必须收口，同轮其它待人卡照旧保持挂起；
- * - M-19：start 帧之前就停止 ⇒ 记会话停止意向，拿到 runId（start 帧 / 409 响应体）后补真实 cancel。
+ * <h2>R1 变更（reviewer C1 / C2 / I5 / I6）</h2>
+ * - 不再用"永不 resolve 的 chat 桩 + 手动 pushFrame"：那种桩把"连接是否被 abort"整条事实抹掉，
+ *   而 C2 修的正是"停止 abort 掉 /chat ⇒ start 帧到不了 ⇒ 补 cancel 不可达"；
+ * - 现在用 `tests/ai-fake-transport.ts`：忠于 `api/sse.ts` 的三条语义 —— abort 后调
+ *   `onClose({terminal:false})` 并 resolve、abort 后不再投帧、帧走 store 真实的 `onFrame`；
+ * - C1：M-18 的"建卡失败 + 回灌"必须**先提交**（`parkedAtDecision` 才能为 true），成功走既有
+ *   `reconnectSuspendedRun`（断言 `aiApi.reattachRun` 真被调用并能在其上收尾），失败才收口挂起；
+ * - C2：`stop()` 在 runId 未知时**不得 abort** 这条 /chat 传输，start 到达后补真实 cancel；
+ * - I5：409 不再"猜着取消"（无法证明归属 ⇒ 会误取消另一页签的新轮）；停止意向只在
+ *   自身 start 到达（补 cancel）/ 自身传输收尾无 start / 新轮 start / 过期 / 换会话时清理。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
@@ -17,7 +19,9 @@ import { ApiError } from '@/api/http'
 import { useAiStore } from '@/stores/ai'
 import type { AiHistory, AiRunCurrent, ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
+import type { SseFrameHandlers } from '@/api/sse'
 import { channels, FakeBroadcastChannel, FakeLockManager } from './tab-ownership-fixtures'
+import { createFakeChat, type FakeChat, type FakeTransport } from './ai-fake-transport'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -35,6 +39,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 let locks: FakeLockManager
+let fakeChat: FakeChat
 
 function inboxSnapshot(): AiRunCurrent {
   return {
@@ -48,7 +53,6 @@ function inboxSnapshot(): AiRunCurrent {
   }
 }
 
-/** 可外部结算的 Promise（"请求在途"的唯一表达方式）。 */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -59,17 +63,19 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject }
 }
 
-/** SSE 回调槽（`aiApi.chat` 的第二个入参）。 */
-interface FrameSink {
-  onFrame: (frame: SseFrame) => void
-}
-
-/** 往捕获到的 SSE 回调槽推一帧（未捕获 = 用例装配错误，直接失败）。 */
-function pushFrame(sink: FrameSink | null, frame: SseFrame): void {
-  if (sink === null) {
-    throw new Error('未捕获到 SSE 回调槽：send() 没有走到 aiApi.chat')
+/** 起一轮（拿真实传输句柄与宿主），帧一律经 `transport.emit` 投递。 */
+async function startRound(
+  store: ReturnType<typeof useAiStore>,
+  text = '开始'
+): Promise<{ sending: Promise<unknown>; transport: FakeTransport; host: ChatMessage }> {
+  const sending = store.send(text)
+  await Promise.resolve()
+  const transport = fakeChat.last()
+  const host = store.messages.find((message) => message.role === 'assistant')
+  if (!host) {
+    throw new Error('send() 没有建出助手宿主')
   }
-  sink.onFrame(frame)
+  return { sending, transport, host }
 }
 
 beforeEach(() => {
@@ -83,10 +89,11 @@ beforeEach(() => {
   for (const fn of Object.values(api)) {
     fn.mockReset()
   }
+  fakeChat = createFakeChat()
   api.history.mockResolvedValue({ sessionId: 'sess', count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue(inboxSnapshot())
   api.reattachRun.mockImplementation(() => new Promise(() => {}))
-  api.chat.mockImplementation(() => new Promise(() => {}))
+  api.chat.mockImplementation(fakeChat.impl)
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
@@ -107,16 +114,9 @@ describe('M-17 历史重载的轮次守卫', () => {
 
     const history = deferred<AiHistory>()
     api.history.mockImplementation(() => history.promise)
-    const chat = deferred<void>()
-    api.chat.mockImplementation(() => chat.promise)
 
     const loading = store.loadHistory()
-    // 历史还没回来，用户已经发出新一轮（start 帧之前也算：开轮即换轮次纪元与连接句柄）
-    const sending = store.send('新问题')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant')
-    expect(host).toBeDefined()
-    const hostId = (host as ChatMessage).id
+    const { sending, transport, host } = await startRound(store, '新问题')
 
     history.resolve({
       sessionId: 'sess-m17',
@@ -128,12 +128,11 @@ describe('M-17 历史重载的轮次守卫', () => {
     } as AiHistory)
     await loading
 
-    // 在途轮的宿主仍在（整轮没被历史顶掉），历史正文没有落进屏上
-    expect(store.messages.some((message) => message.id === hostId)).toBe(true)
+    expect(store.messages.some((message) => message.id === host.id)).toBe(true)
     expect(store.messages.some((message) => message.content === '旧回答')).toBe(false)
     expect(store.loading).toBe(true)
 
-    chat.resolve()
+    transport.close({ terminal: true })
     await sending
   })
 
@@ -172,85 +171,132 @@ describe('M-17 历史重载的轮次守卫', () => {
 
     const history = deferred<AiHistory>()
     api.history.mockImplementation(() => history.promise)
-    const chat = deferred<void>()
-    api.chat.mockImplementation(() => chat.promise)
 
     const loading = store.loadHistory()
-    const sending = store.send('新问题')
-    await Promise.resolve()
+    const { sending, transport } = await startRound(store, '新问题')
 
     history.resolve({ sessionId: 'sess-m17-empty', count: 0, messages: [] } as AiHistory)
     await loading
 
-    // 在途轮的待决段仍是待决（历史为空不得就地"过期降级"一个还在跑的卡）
     expect(host.parts.find((part) => part.kind === 'tool')).toMatchObject({
       status: 'pending',
       requiresAction: true
     })
 
-    chat.resolve()
+    transport.close({ terminal: true })
     await sending
   })
 })
 
-describe('M-18 建卡失败 + 回灌失败时的挂起收口', () => {
-  it('M-18 原始：表单卡建卡失败且回灌失败 ⇒ 该卡挂起态收口（不锁输入区）', async () => {
+describe('M-18 建卡失败 + 回灌（C1：先提交，成功续流）', () => {
+  it('C1 原始：回灌成功 ⇒ 走既有 reconnectSuspendedRun（reattach 真被调用）并能续流收尾', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-m18'
     store.historyLoaded = true
-    api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
-
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
+    let reattach: SseFrameHandlers | null = null
+    api.reattachRun.mockImplementation((_runId: string, handlers: SseFrameHandlers) => {
+      reattach = handlers
+      return new Promise(() => {})
     })
-    const sending = store.send('给我一张表单')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant')
-    expect(host).toBeDefined()
 
-    pushFrame(frames, {
+    const { sending, transport, host } = await startRound(store, '给我一张表单')
+    transport.emit({
       type: 'frontend_tool_request',
       runId: 'run-m18',
       toolCallId: 'gf-broken',
       name: 'generative_form',
       args: '{}'
     } as SseFrame)
+    // 挂起即断：服务端在请求帧之后主动收流（真实时序）
+    transport.close({ suspended: true })
+    await sending
     await flushPromises()
 
-    const part = (host as ChatMessage).parts.find(
-      (item) => item.kind === 'tool' && item.toolCallId === 'gf-broken'
-    )
+    const part = host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'gf-broken')
     expect(part).toMatchObject({ status: 'failed', requiresAction: false })
     expect(api.frontendToolResult).toHaveBeenCalledTimes(1)
-    // 无可点卡 ⇒ 不得继续以"挂起等待"锁住输入区
+    // ★ C1：回灌成功必须续流（不再因"先清 suspended"而 parkedAtDecision=false 早退）
+    expect(api.reattachRun).toHaveBeenCalledTimes(1)
+    expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-m18')
+    expect(reattach).not.toBeNull()
+
+    // 续流到终帧：本轮正常收口（挂起态不会被永久锁住）
+    const sink = reattach as unknown as SseFrameHandlers
+    sink.onFrame?.({ type: 'done', runId: 'run-m18', seq: 9 } as SseFrame)
+    await flushPromises()
+    expect(store.suspended).toBe(false)
+  })
+
+  it('C1 反向：回灌失败 ⇒ 收口这张卡的挂起态，且不去续流一个已无卡等人的轮', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-m18-fail'
+    store.historyLoaded = true
+    api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
+
+    const { sending, transport, host } = await startRound(store, '给我一张表单')
+    transport.emit({
+      type: 'frontend_tool_request',
+      runId: 'run-m18-fail',
+      toolCallId: 'gf-broken',
+      name: 'generative_form',
+      args: '{}'
+    } as SseFrame)
+    transport.close({ suspended: true })
+    await sending
+    await flushPromises()
+
+    expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'gf-broken'))
+      .toMatchObject({ status: 'failed', requiresAction: false })
     expect(store.suspended).toBe(false)
     expect(store.pendingToolCall).toBeNull()
+    expect(api.reattachRun).not.toHaveBeenCalled()
+  })
 
-    chat.resolve()
+  it('C1 反向：同轮另有确认门在等 ⇒ 失败的那张收口、其它卡与挂起态保留', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-m18-others'
+    store.historyLoaded = true
+    api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
+
+    const { sending, transport, host } = await startRound(store, '导出并给我一张表单')
+    transport.emit({
+      type: 'confirm_request',
+      runId: 'run-m18-others',
+      toolCallId: 'confirm-other',
+      name: 'start_export',
+      args: '{}'
+    } as SseFrame)
+    await flushPromises()
+    expect(store.suspended).toBe(true)
+
+    transport.emit({
+      type: 'frontend_tool_request',
+      runId: 'run-m18-others',
+      toolCallId: 'gf-broken-2',
+      name: 'generative_form',
+      args: '{}'
+    } as SseFrame)
+    await flushPromises()
+
+    expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'gf-broken-2'))
+      .toMatchObject({ status: 'failed', requiresAction: false })
+    expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'confirm-other'))
+      .toMatchObject({ status: 'pending', requiresAction: true })
+    expect(store.suspended).toBe(true)
+
+    transport.close({ suspended: true })
     await sending
   })
 
-  it('M-18 相邻：写预览建卡失败 + 回灌失败 ⇒ 同样收口挂起（不锁输入区）', async () => {
+  it('C1 相邻：写预览建卡失败 + 回灌失败 ⇒ 同样收口挂起（不锁输入区）', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-m18-preview'
     store.historyLoaded = true
     store.activePreview = { toolCallId: 'prev-preview', tool: 'write_sheet_cells' } as never
     api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
 
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
-    })
-    const sending = store.send('撤销上一次表格编辑')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant') as ChatMessage
-
-    pushFrame(frames, {
+    const { sending, transport, host } = await startRound(store, '撤销上一次表格编辑')
+    transport.emit({
       type: 'frontend_tool_request',
       runId: 'run-m18-preview',
       toolCallId: 'undo-blocked',
@@ -264,27 +310,18 @@ describe('M-18 建卡失败 + 回灌失败时的挂起收口', () => {
     expect(api.frontendToolResult).toHaveBeenCalledTimes(1)
     expect(store.suspended).toBe(false)
 
-    chat.resolve()
+    transport.close({ suspended: true })
     await sending
   })
 
-  it('M-18 反向：上传交接建卡失败 + 回灌失败 ⇒ 收口挂起', async () => {
+  it('C1 相邻：上传交接建卡失败 + 回灌失败 ⇒ 收口挂起', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-m18-upload'
     store.historyLoaded = true
     api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
 
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
-    })
-    const sending = store.send('让我上传文件')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant') as ChatMessage
-
-    pushFrame(frames, {
+    const { sending, transport, host } = await startRound(store, '让我上传文件')
+    transport.emit({
       type: 'frontend_tool_request',
       runId: 'run-m18-upload',
       toolCallId: 'upload-broken',
@@ -295,30 +332,20 @@ describe('M-18 建卡失败 + 回灌失败时的挂起收口', () => {
 
     expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'upload-broken'))
       .toMatchObject({ status: 'failed', requiresAction: false })
-    expect(api.frontendToolResult).toHaveBeenCalledTimes(1)
     expect(store.suspended).toBe(false)
 
-    chat.resolve()
+    transport.close({ suspended: true })
     await sending
   })
 
-  it('M-18 相邻：上传 ref 不在本轮快照 ⇒ 不建卡也不留挂起（回灌失败同样收口）', async () => {
+  it('C1 相邻：上传 ref 不在本轮快照 ⇒ 不建卡也不留挂起（回灌失败同样收口）', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-m18-upload-ref'
     store.historyLoaded = true
     api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
 
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
-    })
-    const sending = store.send('让我上传文件')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant') as ChatMessage
-
-    pushFrame(frames, {
+    const { sending, transport, host } = await startRound(store, '让我上传文件')
+    transport.emit({
       type: 'frontend_tool_request',
       runId: 'run-m18-upload-ref',
       toolCallId: 'upload-ref',
@@ -331,183 +358,171 @@ describe('M-18 建卡失败 + 回灌失败时的挂起收口', () => {
       .toMatchObject({ status: 'rejected', requiresAction: false })
     expect(store.suspended).toBe(false)
 
-    chat.resolve()
-    await sending
-  })
-
-  it('M-18 反向：同轮另有确认门在等 ⇒ 失败的那张收口、其它卡与挂起态保留', async () => {
-    const store = useAiStore()
-    store.sessionId = 'sess-m18-others'
-    store.historyLoaded = true
-    api.frontendToolResult.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
-
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
-    })
-    const sending = store.send('导出并给我一张表单')
-    await Promise.resolve()
-    const host = store.messages.find((message) => message.role === 'assistant') as ChatMessage
-    const push = (frame: SseFrame): void => pushFrame(frames, frame)
-
-    push({
-      type: 'confirm_request',
-      runId: 'run-m18-others',
-      toolCallId: 'confirm-other',
-      name: 'start_export',
-      args: '{}'
-    } as SseFrame)
-    await flushPromises()
-    expect(store.suspended).toBe(true)
-
-    push({
-      type: 'frontend_tool_request',
-      runId: 'run-m18-others',
-      toolCallId: 'gf-broken-2',
-      name: 'generative_form',
-      args: '{}'
-    } as SseFrame)
-    await flushPromises()
-
-    // 失败的那张已收口，但另一张还在等人 ⇒ 挂起态与那张卡都保留
-    expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'gf-broken-2'))
-      .toMatchObject({ status: 'failed', requiresAction: false })
-    expect(host.parts.find((item) => item.kind === 'tool' && item.toolCallId === 'confirm-other'))
-      .toMatchObject({ status: 'pending', requiresAction: true })
-    expect(store.suspended).toBe(true)
-
-    chat.resolve()
+    transport.close({ suspended: true })
     await sending
   })
 })
 
-describe('M-19 start 帧之前停止的意愿落地', () => {
-  it('M-19 原始：start 帧之前停止 ⇒ 拿到 runId 后补一次真实 cancel', async () => {
+describe('M-19 start 帧之前停止（C2：传输保留 + 真实补 cancel）', () => {
+  it('C2 原始：runId 未知时停止不 abort /chat；start 到达后补真实 cancel 并收尾连接', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-m19'
     store.historyLoaded = true
 
-    const chat = deferred<void>()
-    let frames: FrameSink | null = null
-    api.chat.mockImplementation((_body: unknown, handlers: FrameSink) => {
-      frames = handlers
-      return chat.promise
-    })
-    const sending = store.send('跑一个长任务')
-    await Promise.resolve()
+    const { sending, transport } = await startRound(store, '跑一个长任务')
+    expect(transport.aborted).toBe(false)
 
-    // 后端还没发 start（runId 未知）：本地必须立刻收敛，但 cancel 暂时没有对象
     await store.stop()
+    // ★ C2：不得 abort 初始 /chat 传输 —— 否则 start 帧永远到不了，补 cancel 不可达
+    expect(transport.aborted).toBe(false)
     expect(api.cancel).not.toHaveBeenCalled()
-    expect(store.stopIntent).toBeTruthy()
+    // 本地已按"已停止"展示（发送入口立刻回来）
+    expect(store.loading).toBe(false)
+    expect(store.stopped).toBe(true)
 
-    pushFrame(frames, {
-      type: 'start',
-      runId: 'run-late'
-    } as SseFrame)
+    transport.emit({ type: 'start', runId: 'run-late' } as SseFrame)
     await flushPromises()
 
     expect(api.cancel).toHaveBeenCalledTimes(1)
     expect(api.cancel).toHaveBeenCalledWith('run-late')
     expect(store.stoppedRunId).toBe('run-late')
-    expect(store.stopIntent).toBeNull()
+    expect(transport.aborted).toBe(true)
 
-    chat.resolve()
     await sending
+    expect(store.stopIntent).toBeNull()
   })
 
-  it('M-19 相邻：停止意向 + 下一条消息撞 409 ⇒ 按响应体 runId 补 cancel，不当成"仍在进行"', async () => {
+  it('C2 反向：旧意向不得取消新轮的 start（新轮宿主不同 ⇒ 不补 cancel，意向随之清理）', async () => {
     const store = useAiStore()
-    store.sessionId = 'sess-m19-409'
+    store.sessionId = 'sess-m19-new-round'
     store.historyLoaded = true
 
-    // 停止发生在 start 帧之前（runId 未知）
-    store.loading = true
+    const first = await startRound(store, '第一轮')
     await store.stop()
     expect(store.stopIntent).toBeTruthy()
 
-    api.chat.mockRejectedValue(new ApiError('busy', 409, 'SESSION_BUSY', { runId: 'run-busy' }))
-    const result = await store.send('再发一条')
-    await flushPromises()
-
-    expect(result.outcome).toBe('error')
-    expect(api.cancel).toHaveBeenCalledTimes(1)
-    expect(api.cancel).toHaveBeenCalledWith('run-busy')
-    expect(store.stoppedRunId).toBe('run-busy')
-    // 不是"上一轮仍在进行中"：忙态入口不登记
-    expect(store.busyRun).toBeNull()
-    expect(store.stopIntent).toBeNull()
-  })
-
-  it('M-19 反向：没有停止意向 ⇒ 409 照旧登记权威忙态且不发 cancel', async () => {
-    const store = useAiStore()
-    store.sessionId = 'sess-m19-no-intent'
-    store.historyLoaded = true
-    api.chat.mockRejectedValue(new ApiError('busy', 409, 'SESSION_BUSY', { runId: 'run-other' }))
-
-    const result = await store.send('新消息')
-    await flushPromises()
-
-    expect(result.outcome).toBe('error')
-    expect(api.cancel).not.toHaveBeenCalled()
-    expect(store.busyRun).toMatchObject({ runId: 'run-other' })
-    expect(store.stoppedRunId).toBeNull()
-  })
-
-  it('M-19 反向：停止意向过期（超过 TTL）⇒ 不再取消任何后来的轮', async () => {
-    const store = useAiStore()
-    store.sessionId = 'sess-m19-stale'
-    store.historyLoaded = true
-    store.loading = true
-    await store.stop()
-    store.stopIntent = { hostMessageId: null, at: Date.now() - 10 * 60_000 }
-
-    api.chat.mockRejectedValue(new ApiError('busy', 409, 'SESSION_BUSY', { runId: 'run-new' }))
-    await store.send('很久之后的新消息')
-    await flushPromises()
-
-    expect(api.cancel).not.toHaveBeenCalled()
-    expect(store.busyRun).toMatchObject({ runId: 'run-new' })
-    expect(store.stopIntent).toBeNull()
-  })
-
-  it('M-19 反向：意向属于上一轮 ⇒ 新轮的 start 帧不被它取消（只留给 409）', async () => {
-    const store = useAiStore()
-    store.sessionId = 'sess-m19-other-round'
-    store.historyLoaded = true
-
-    const firstChat = deferred<void>()
-    api.chat.mockImplementationOnce((_body: unknown, _handlers: FrameSink) => firstChat.promise)
-    const first = store.send('第一轮')
-    await Promise.resolve()
-    const firstHost = store.messages.find((message) => message.role === 'assistant') as ChatMessage
-    await store.stop()
-    expect(store.stopIntent?.hostMessageId).toBe(firstHost.id)
-    firstChat.resolve()
-    await first
-
-    const secondChat = deferred<void>()
-    let secondFrames: FrameSink | null = null
-    api.chat.mockImplementationOnce((_body: unknown, handlers: FrameSink) => {
-      secondFrames = handlers
-      return secondChat.promise
-    })
-    const second = store.send('第二轮')
-    await Promise.resolve()
-    pushFrame(secondFrames, {
-      type: 'start',
-      runId: 'run-second'
-    } as SseFrame)
+    const second = await startRound(store, '第二轮')
+    second.transport.emit({ type: 'start', runId: 'run-second' } as SseFrame)
     await flushPromises()
 
     expect(api.cancel).not.toHaveBeenCalled()
     expect(store.stoppedRunId).toBeNull()
-    // 意向没有被这一帧消耗掉（留给下一条消息的 409 判据）
+    expect(store.stopIntent).toBeNull()
+
+    first.transport.close({ terminal: true })
+    second.transport.close({ terminal: true })
+    await Promise.all([first.sending, second.sending])
+  })
+
+  it('I5 跨页签：停止意向不得取消另一页签的新轮（409 只登记，不猜归属）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-i5-cross-tab'
+    store.historyLoaded = true
+
+    const first = await startRound(store, '被停的这一轮')
+    await store.stop()
     expect(store.stopIntent).toBeTruthy()
 
-    secondChat.resolve()
-    await second
+    // 另一页签刚起了新轮：本端下一条消息撞 409，响应体里是**别人的** runId
+    api.chat.mockRejectedValueOnce(
+      new ApiError('busy', 409, 'SESSION_BUSY', { runId: 'run-other-tab' })
+    )
+    await store.send('再来一条')
+    await flushPromises()
+
+    expect(api.cancel).not.toHaveBeenCalled()
+    expect(store.stoppedRunId).toBeNull()
+    // 别人的轮照旧可作为"回到进行中的回答"入口（不谎报已停）
+    expect(store.busyRun).toMatchObject({ runId: 'run-other-tab' })
+
+    first.transport.close({ terminal: true })
+    await first.sending
+  })
+
+  it('I5 生命周期：被停那一轮的传输收尾仍无 start ⇒ 意向作废（不留到 TTL 影响后续判断）', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-i5-lifecycle'
+    store.historyLoaded = true
+
+    const { sending, transport } = await startRound(store, '没有 start 的一轮')
+    await store.stop()
+    expect(store.stopIntent).toBeTruthy()
+
+    transport.close({ terminal: false, reason: '首帧超时' })
+    await sending
+    await flushPromises()
+
+    expect(store.stopIntent).toBeNull()
+    expect(api.cancel).not.toHaveBeenCalled()
+  })
+})
+
+describe('I4 轮内主动重载（入口即在途）', () => {
+  it('I4 原始：入口在途 ⇒ 不先替换镜像、也不整体替换历史；丢弃过期历史时清错误与缺口', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-i4'
+    store.historyLoaded = true
+    // 镜像是"上一刻的现场"（滞后于屏上本轮）：先写进镜像，再清屏开新一轮
+    store.messages = [
+      {
+        id: 'mirror-user',
+        role: 'user',
+        content: '镜像里的旧提问',
+        parts: [{ kind: 'text', seg: 0, text: '镜像里的旧提问', streaming: false }],
+        reasoning: '',
+        toolRuns: [],
+        pendingCall: null,
+        streaming: false,
+        done: true
+      },
+      {
+        id: 'mirror-assistant',
+        role: 'assistant',
+        content: '镜像里的旧回答',
+        parts: [{ kind: 'text', seg: 0, text: '镜像里的旧回答', streaming: false }],
+        reasoning: '',
+        toolRuns: [],
+        pendingCall: null,
+        streaming: false,
+        done: true
+      }
+    ] as ChatMessage[]
+    store.writeMirrorNow()
+    store.messages = []
+
+    const { sending, transport, host } = await startRound(store, '本轮提问')
+    transport.emit({ type: 'delta', text: '本轮的半截正文' } as SseFrame)
+    await flushPromises()
+
+    // 用户在本轮进行中点"重试/重新载入"（历史失败后的重试钮就是这条路）
+    store.historyError = { scope: 'history', code: 'NETWORK_ERROR', status: 502, at: Date.now() }
+    store.recoveryGap = { reason: 'history-unavailable', fromSeq: null, toSeq: null, at: Date.now() }
+    const history = deferred<AiHistory>()
+    api.history.mockImplementation(() => history.promise)
+
+    const loading = store.loadHistory()
+    // ★ 入口不得先拿镜像（滞后内容）把屏上本轮换掉
+    expect(store.messages.some((message) => message.id === host.id)).toBe(true)
+    expect(store.messages.some((message) => message.content === '镜像里的旧回答')).toBe(false)
+
+    history.resolve({
+      sessionId: 'sess-i4',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '服务端旧提问' },
+        { type: 'ASSISTANT', text: '服务端旧回答' }
+      ]
+    } as AiHistory)
+    await loading
+
+    // 历史回来同样不整替；在途正文还在
+    expect(store.messages.some((message) => message.content === '服务端旧回答')).toBe(false)
+    expect(store.messages.find((message) => message.id === host.id)?.content).toContain('本轮的半截正文')
+    // 成功但丢弃过期历史 ⇒ 历史错误与缺口作废（否则错误条会一直挂着）
+    expect(store.historyError).toBeNull()
+    expect(store.recoveryGap).toBeNull()
+
+    transport.close({ terminal: true })
+    await sending
   })
 })

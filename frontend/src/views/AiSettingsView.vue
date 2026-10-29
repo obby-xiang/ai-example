@@ -226,13 +226,50 @@ function splitDefaultTarget(target: string): { providerId: number | null; modelI
   }
 }
 
+/** 默认参数区上一次的**服务端**值（脏判据基线，口径同 `cardBaselines`）。 */
+type DefaultsSnapshot = {
+  target: string
+  temperature: string
+  topP: string
+  maxTokens: string
+  allowUserParams: boolean
+}
+let defaultsBaseline: DefaultsSnapshot | null = null
+
+/**
+ * I2（R1 返修）：默认参数区同样"脏值优先"。
+ *
+ * <p>旧实现每次 `load()` 都把五个输入无条件重置成服务端值 —— 用户在默认参数区改到一半、
+ * 去别的卡片点了个操作，改过的温度/上限就被静默打回，随后保存出去的是**服务端旧值**
+ * （与 M-20 的卡片表单同一个缺陷面，只是这里没有密钥那么刺眼）。
+ */
 function fillDefaults(): void {
   const current = defaults.value
-  defaultsForm.target = defaultTargetKeyOf(current?.providerId, current?.modelId)
-  defaultsForm.temperature = current?.temperature == null ? '' : String(current.temperature)
-  defaultsForm.topP = current?.topP == null ? '' : String(current.topP)
-  defaultsForm.maxTokens = current?.maxTokens == null ? '' : String(current.maxTokens)
-  defaultsForm.allowUserParams = current?.allowUserParams !== false
+  const server: DefaultsSnapshot = {
+    target: defaultTargetKeyOf(current?.providerId, current?.modelId),
+    temperature: current?.temperature == null ? '' : String(current.temperature),
+    topP: current?.topP == null ? '' : String(current.topP),
+    maxTokens: current?.maxTokens == null ? '' : String(current.maxTokens),
+    allowUserParams: current?.allowUserParams !== false
+  }
+  const baseline = defaultsBaseline
+  // 基线缺失 = 首次加载（全是"干净"值）；有基线时逐字段判脏（脏值保留、干净值跟随服务端）
+  if (baseline === null || defaultsForm.target === baseline.target) {
+    defaultsForm.target = server.target
+  }
+  if (baseline === null || defaultsForm.temperature === baseline.temperature) {
+    defaultsForm.temperature = server.temperature
+  }
+  if (baseline === null || defaultsForm.topP === baseline.topP) {
+    defaultsForm.topP = server.topP
+  }
+  if (baseline === null || defaultsForm.maxTokens === baseline.maxTokens) {
+    defaultsForm.maxTokens = server.maxTokens
+  }
+  if (baseline === null || defaultsForm.allowUserParams === baseline.allowUserParams) {
+    defaultsForm.allowUserParams = server.allowUserParams
+  }
+  defaultsBaseline = server
 }
 
 async function load(): Promise<void> {
@@ -361,6 +398,10 @@ async function saveProvider(provider: AiProviderView): Promise<void> {
   await withBusy(`save-${provider.id}`, async () => {
     try {
       await aiConfigApi.updateProvider(provider.id, providerBody(provider))
+      // I1（R1 返修）：密钥已随本次保存提交 ⇒ 立刻清空输入框（**在 load() 之前**）：
+      // ① 明文不常驻表单；② 否则下一次重载会把这段"已保存的脏值"继续当成脏值保留，
+      // 再点保存就会把同一把密钥重复提交，而"清除密钥"之后也会被它悄悄回滚。
+      cardForms[provider.id]!.key = ''
       ElMessage.success(T.saved)
       await load()
     } catch (error) {
@@ -377,6 +418,9 @@ async function clearKey(provider: AiProviderView): Promise<void> {
   await withBusy(`clear-${provider.id}`, async () => {
     try {
       await aiConfigApi.updateProvider(provider.id, { clearKey: true })
+      // I1（R1 返修）：同 saveProvider —— 清除成功后输入框立刻清空，否则脏值保留会让下一次保存
+      // 把这把密钥再写回去（"清除"被静默回滚），明文也一直留在表单里。
+      cardForms[provider.id]!.key = ''
       ElMessage.success(T.saved)
       await load()
     } catch (error) {

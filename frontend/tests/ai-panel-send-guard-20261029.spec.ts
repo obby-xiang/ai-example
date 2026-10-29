@@ -11,8 +11,9 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ApiError } from '@/api/http'
-import { useAiStore } from '@/stores/ai'
+import { MIRROR_PREFIX, useAiStore } from '@/stores/ai'
 import type { ChatMessage } from '@/types/ai'
+import { createFakeChat, type FakeChat } from './ai-fake-transport'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -37,6 +38,8 @@ const stubs = {
   'el-tag': { template: '<span class="tag"><slot /></span>' },
   FormRenderer: true
 }
+
+let fakeChat: FakeChat
 
 beforeAll(async () => {
   await import('@/components/AiPanel/AiPanel.vue')
@@ -66,7 +69,8 @@ beforeEach(() => {
   })
   api.history.mockResolvedValue({ count: 0, messages: [] })
   api.runsCurrent.mockResolvedValue({ found: false, runId: null, awaitingExternal: false, pendingEntries: [] })
-  api.chat.mockResolvedValue(undefined)
+  fakeChat = createFakeChat()
+  api.chat.mockImplementation(fakeChat.impl)
 })
 
 async function mountPanel(): Promise<ReturnType<typeof mount>> {
@@ -229,6 +233,115 @@ describe('M-16 编辑重跑的失败还原', { timeout: 20_000 }, () => {
     expect(store.messages.some((message) => message.id === 'a-1')).toBe(true)
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value)
       .toBe('新写的草稿')
+    wrapper.unmount()
+  })
+
+  it('I8 顺序：回插在编辑锚点之后、失败气泡在末尾，并且现场写进镜像', async () => {
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+    store.messages = [
+      chatMessage('u-edit', 'user', '原始问题'),
+      chatMessage('a-1', 'assistant', '旧回答一'),
+      chatMessage('a-2', 'assistant', '旧回答二')
+    ]
+    store.historyLoaded = true
+    await wrapper.vm.$nextTick()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    await wrapper.find('[data-testid="composer-input"]').setValue('改写后的问题')
+
+    api.chat.mockRejectedValueOnce(new ApiError('boom', 500, 'EMPTY_REPLY', null))
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    const ids = store.messages.map((message) => message.id)
+    expect(ids.slice(0, 3)).toEqual(['u-edit', 'a-1', 'a-2'])
+    // 本次失败轮自己的气泡（错误卡宿主）留在末尾
+    expect(store.messages[store.messages.length - 1]?.role).toBe('assistant')
+    expect(store.messages[store.messages.length - 1]?.id).not.toBe('a-2')
+
+    // 现场写进镜像：刷新后不应再丢
+    const mirror = sessionStorage.getItem(`${MIRROR_PREFIX}${store.sessionId}`)
+    expect(mirror).toBeTruthy()
+    expect(mirror).toContain('旧回答一')
+    expect(mirror).toContain('旧回答二')
+    expect(mirror).toContain('原始问题')
+    wrapper.unmount()
+  })
+
+  it('I8 相邻：编辑重跑被用户停止（cancelled）同样还原删除现场', async () => {
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+    store.messages = [
+      chatMessage('u-edit', 'user', '原始问题'),
+      chatMessage('a-1', 'assistant', '旧回答一')
+    ]
+    store.historyLoaded = true
+    await wrapper.vm.$nextTick()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    await wrapper.find('[data-testid="composer-input"]').setValue('改写后的问题')
+
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+    const transport = fakeChat.last()
+    // 用户点了停止：本轮被放弃 ⇒ 被删的旧回答必须回来（不是"停止即永久删除"）
+    await store.stop()
+    transport.close({ terminal: false, reason: '连接已中止' })
+    await flushPromises()
+
+    expect(store.messages.some((message) => message.id === 'a-1')).toBe(true)
+    expect(store.messages.find((message) => message.id === 'u-edit')?.content).toBe('原始问题')
+    wrapper.unmount()
+  })
+
+  it('I3 会话守卫：编辑重跑遇到 410 换会话 ⇒ 不回插旧会话消息，只回填草稿', async () => {
+    const wrapper = await mountPanel()
+    const store = useAiStore()
+    store.sessionId = 'sess-before-purge'
+    store.messages = [
+      chatMessage('u-edit', 'user', '原始问题'),
+      chatMessage('a-1', 'assistant', '旧回答一')
+    ]
+    store.historyLoaded = true
+    await wrapper.vm.$nextTick()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    await wrapper.find('[data-testid="composer-input"]').setValue('改写后的问题')
+
+    api.chat.mockRejectedValueOnce(new ApiError('purged', 410, 'SESSION_PURGED', null))
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    // 410 ⇒ 本地换会话（adoptFreshSession）：旧会话的消息不得被"编辑还原"复活进新会话
+    expect(store.sessionId).not.toBe('sess-before-purge')
+    expect(store.messages.some((message) => message.id === 'a-1')).toBe(false)
+    expect(store.messages.some((message) => message.id === 'u-edit')).toBe(false)
+    // 用户刚改的文本仍留在输入框（服务端从未收到过，不能一起丢）
+    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value)
+      .toBe('改写后的问题')
+    wrapper.unmount()
+  })
+})
+
+describe('I8 健康提示文案与发送闸同一判据', { timeout: 20_000 }, () => {
+  it('I8 原始：探针失败 ⇒ 不显示"AI 能力不可用"降级条、占位文案不谎报不可用', async () => {
+    api.health.mockRejectedValue(new ApiError('probe down', 502, 'NETWORK_ERROR', null))
+    const wrapper = await mountPanel()
+
+    expect(wrapper.find('[data-testid="alert-degraded"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-input"]').attributes('placeholder'))
+      .toBe('输入消息，Enter 发送，Shift+Enter 换行')
+    wrapper.unmount()
+  })
+
+  it('I8 反向：探针成功且明确不可用 ⇒ 降级条与不可用占位文案一致出现', async () => {
+    api.health.mockResolvedValue({ available: false, code: 'AI_UNAVAILABLE', message: '未配置可用模型' })
+    const wrapper = await mountPanel()
+
+    expect(wrapper.find('[data-testid="alert-degraded"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-input"]').attributes('placeholder'))
+      .toBe('AI 当前不可用（已降级，可继续使用页面手动操作）')
     wrapper.unmount()
   })
 })
