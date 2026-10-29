@@ -237,6 +237,7 @@ class FakeRedis {
 			value: String(value),
 			expiresAt: px === null ? null : Date.now() + px,
 		});
+		await this._hook('afterSet', { key, value: String(value), store: this.store });
 		return 'OK';
 	}
 
@@ -1706,10 +1707,33 @@ test('键形：带身份的目标键 tag 同时含身份与 runId，legacy 形�
 
 const IDENTITY = Object.freeze({ tenantId: 2, userId: 202 });
 
-test('正向带身份迁移把 ai:runs 成员重写为 t/u/runId（allRunRecords 可发现）', async () => {
+/** 对比“除记录身份外的全部字段”，避免把 JSON 序列化差异当成迁移改动。 */
+function snapshotBody(raw) {
+	const snapshot = JSON.parse(raw);
+	const { tenantId, userId, ...body } = snapshot;
+	return body;
+}
+
+/**
+ * 与 `RunStore.readSnapshot` 相同口径：先按显式身份取键，再复核记录里的
+ * `tenantId/userId`；两步都通过才返回快照（0/0 记录在显式身份读口下按不存在处理）。
+ */
+async function readSnapshotAsRunStoreWould(cluster, runId, identity) {
+	const raw = await cluster.get(taggedKeyFor('ai:run:', runId, identity));
+	if (raw === null) {
+		return null;
+	}
+	const snapshot = JSON.parse(raw);
+	const tenantId = Number(snapshot.tenantId ?? 0);
+	const userId = Number(snapshot.userId ?? 0);
+	return tenantId === identity.tenantId && userId === identity.userId ? snapshot : null;
+}
+
+test('正向带身份迁移把 ai:runs 成员重写为 t/u/runId，且快照身份被写入并可被 RunStore 显式读口命中', async () => {
 	const cluster = makeFakeCluster();
 	await seedFullRun(cluster, 'run-1');
 	await cluster.sadd('ai:runs', 'run-1', '9/909/run-other');
+	const sourceRaw = await cluster.get(oldKeyFor('ai:run:', 'run-1'));
 
 	const result = await runMigration(cluster, { apply: true, identity: IDENTITY });
 
@@ -1719,19 +1743,101 @@ test('正向带身份迁移把 ai:runs 成员重写为 t/u/runId（allRunRecords
 		['2/202/run-1', '9/909/run-other'],
 		'只重写本次迁移的成员，其他身份的成员原样保留',
 	);
-	assert.equal(
-		await cluster.get(taggedKeyFor('ai:run:', 'run-1', IDENTITY)),
-		await cluster.get(oldKeyFor('ai:run:', 'run-1')),
+
+	const targetRaw = await cluster.get(taggedKeyFor('ai:run:', 'run-1', IDENTITY));
+	assert.notEqual(targetRaw, null, '目标快照必须存在');
+	const targetSnapshot = JSON.parse(targetRaw);
+	assert.equal(targetSnapshot.tenantId, IDENTITY.tenantId, '快照 tenantId 必须写成命令行声明值');
+	assert.equal(targetSnapshot.userId, IDENTITY.userId, '快照 userId 必须写成命令行声明值');
+	assert.deepEqual(
+		snapshotBody(targetRaw),
+		snapshotBody(sourceRaw),
+		'除 tenantId/userId 外，其他字段必须逐值不变',
 	);
-	// allRunRecords 的发现口径：RunKeyScope.parseIndexMember 只认 <tenantId>/<userId>/<runId>；
-	// legacy 裸 runId 对启动恢复不可见。这里逐段校验成员可被该口径解析。
-	const [tenantId, userId, runId] = '2/202/run-1'.split('/');
-	assert.deepEqual([Number(tenantId), Number(userId), runId], [2, 202, 'run-1']);
+	assert.notEqual(targetRaw, sourceRaw, '带身份迁移不得逐字节复制 0/0 快照');
+
+	// RunStore 式显式身份读取：键在 + 记录身份复核通过 ⇒ 可命中（不是只把索引成员 split 一遍）。
+	const readable = await readSnapshotAsRunStoreWould(cluster, 'run-1', IDENTITY);
+	assert.notEqual(readable, null, '显式身份读口必须命中迁移后的快照');
+	assert.equal(readable.runId, 'run-1');
+	assert.equal(readable.state, 'SUSPENDED');
+	assert.equal(readable.text, '你好');
+	// 源键保持原样（0/0），证明身份是写进目标的，不是改了源。
+	const sourceSnapshot = JSON.parse(sourceRaw);
+	assert.equal(sourceSnapshot.tenantId, undefined);
+	assert.equal(sourceSnapshot.userId, undefined);
 
 	const second = await runMigration(cluster, { apply: true, identity: IDENTITY });
 	assert.equal(second.ok, true);
 	assert.equal(second.totals.writes, 0);
 	assert.equal(second.plan.runs[0].runIndex.action, 'identical');
+	assert.equal(second.results[0].items[0].action, 'identical', '第二遍必须按身份语义对账为 identical');
+});
+
+test('未声明身份的 legacy 迁移不改写快照身份，并明确仅归档、不属于新身份', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	const sourceRaw = await cluster.get(oldKeyFor('ai:run:', 'run-1'));
+
+	const result = await runMigration(cluster, { apply: true });
+
+	assert.equal(result.ok, true);
+	assert.ok(
+		result.warnings.some((warning) => /仅具归档价值/.test(warning)
+			&& /不属于任何新身份/.test(warning)),
+		`必须明确 legacy 结果仅归档、不属于新身份：${JSON.stringify(result.warnings)}`,
+	);
+	const legacyRaw = await cluster.get(taggedKeyFor('ai:run:', 'run-1'));
+	assert.equal(legacyRaw, sourceRaw, '未声明身份时必须逐字节保留，不得伪造 tenantId/userId');
+	const legacySnapshot = JSON.parse(legacyRaw);
+	assert.equal(legacySnapshot.tenantId, undefined);
+	assert.equal(legacySnapshot.userId, undefined);
+});
+
+test('delete-source 前复核目标快照身份：目标回退成 0/0 时拒绝删除源', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	const sourceRaw = await cluster.get(oldKeyFor('ai:run:', 'run-1'));
+	const first = await runMigration(cluster, { apply: true, identity: IDENTITY });
+	assert.equal(first.ok, true);
+	const targetKey = taggedKeyFor('ai:run:', 'run-1', IDENTITY);
+	// 把目标写回旧 0/0 快照：键在，但记录身份不可证明 ⇒ 显式身份读口读不到，delete-source 必须拒绝。
+	await cluster.set(targetKey, sourceRaw, 'PX', TTL_LONG);
+
+	await assert.rejects(
+		() => migration.deleteVerifiedSources(cluster, first.results),
+		/身份|对账|不一致/,
+	);
+	assert.notEqual(
+		await cluster.type(oldKeyFor('ai:run:', 'run-1')),
+		'none',
+		'身份复核失败时不得删除源快照',
+	);
+});
+
+test('写后回读校验：目标快照身份被并发改成别的身份时 apply 失败且不删源', async () => {
+	const cluster = makeFakeCluster();
+	await seedFullRun(cluster, 'run-1');
+	const targetKey = taggedKeyFor('ai:run:', 'run-1', IDENTITY);
+	let fired = false;
+	cluster.hooks.afterSet = async ({ key, store }) => {
+		if (!fired && key === targetKey) {
+			fired = true;
+			const entry = store.get(key);
+			const snapshot = JSON.parse(entry.value);
+			entry.value = JSON.stringify({ ...snapshot, tenantId: 9 });
+		}
+	};
+
+	await assert.rejects(
+		() => runMigration(cluster, { apply: true, deleteSource: true, identity: IDENTITY }),
+		/身份/,
+	);
+	assert.notEqual(
+		await cluster.type(oldKeyFor('ai:run:', 'run-1')),
+		'none',
+		'写后身份校验失败时不得删除源快照',
+	);
 });
 
 test('已迁移但索引陈旧：--run-id 带身份重跑只修 ai:runs，不重写数据键', async () => {
@@ -1755,6 +1861,16 @@ test('已迁移但索引陈旧：--run-id 带身份重跑只修 ai:runs，不重
 	assert.equal(result.plan.runs[0].runIndex.action, 'rewrite');
 	assert.equal(result.totals.writes, 0, '数据键已迁移，不得重写');
 	assert.deepEqual(await cluster.smembers('ai:runs'), ['2/202/run-1']);
+	assert.equal(
+		JSON.parse(await cluster.get(taggedKeyFor('ai:run:', 'run-1', IDENTITY))).tenantId,
+		IDENTITY.tenantId,
+		'首次 apply --delete-source 必须写入快照身份并据此通过删除校验',
+	);
+	assert.equal(
+		await cluster.type(oldKeyFor('ai:run:', 'run-1')),
+		'none',
+		'身份回读通过后 --delete-source 必须真正删除源',
+	);
 });
 
 test('rollback 声明身份时回退到 legacy tagged 源（带身份/legacy 双形回退）', async () => {

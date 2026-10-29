@@ -188,3 +188,71 @@ PASS 源码：无“成员是 sessionId”
 - §4 剩余风险第 1、2 条（README 旧口径、SessionPurgePendingStore 陈旧注释）已修掉。
 - 本轮未跑代码测试（只改文档/注释）；上一轮 `node --test` 58/58 与 Java 定向用例结果仍然有效。
 - 未推送。
+
+## 6. 最终审查阻断项 I-1 修复（2026-10-30）
+
+### 6.1 问题与修复
+
+最终审查 I-1：正向带身份迁移只逐字节搬 `ai:run` 键，旧快照的 `tenantId/userId` 仍是 0/0；
+`RunStore.readSnapshot` 在显式身份读口下按记录身份复核，0/0 记录读不到，迁移后的轮次不可续跑。
+
+修复（未改 `RunStore` 的 fail-closed 规则）：
+
+- 正向声明身份时，`ai:run` 不再是字节复制：写目标前 `JSON.parse` 快照，把
+  `tenantId/userId` 置为命令行声明值（源已是其他身份则拒绝；0/0 或同身份可改写）。
+- 写后回读目标并校验：记录身份必须等于声明值，且除 `tenantId/userId` 外其他字段逐值不变；
+  不通过即失败，不进入 `--delete-source`。
+- `--delete-source` 的校验与 DEL 前复验同样按“快照身份 + 其余字段”对账；目标键在但记录是 0/0
+  时拒绝删源。
+- 未声明身份：快照逐字节保留（含 0/0），dry-run/apply 明确告警“仅具归档价值、不属于任何新身份”。
+- `ai:runs` 成员重写保留；配合快照身份写入，显式身份读口（键 + 记录身份复核）可命中。
+- README/脚本头注同步说明“快照身份同步写入 + 写后回读校验”。
+
+### 6.2 红 / 绿（逐条单点执行）
+
+| 用例 | 红（旧实现） | 绿（修复后） |
+| --- | --- | --- |
+| 正向带身份：快照身份写入 + RunStore 式显式读口命中 + 其他字段不变 | `tenantId undefined !== 2` | pass |
+| 未声明身份：不改写身份、仅归档告警 | `warnings=[]` | pass |
+| 索引陈旧重跑：首次 `apply --delete-source` 写身份并通过删除校验 | `tenantId undefined !== 2` | pass（源已删除、索引为 `2/202/run-1`） |
+| delete-source：目标回退成 0/0 时拒绝删源 | `Missing expected rejection`（旧实现会删源） | pass |
+| 写后回读：目标身份被并发改成别的身份时 apply 失败 | 旧消息 `写后对账失败...value mismatch`（无身份校验） | pass（`写后身份校验失败`） |
+
+命令示例（每次只跑一个 pattern）：
+
+```bash
+node --test --test-name-pattern="正向带身份迁移把 ai:runs 成员重写为 t/u/runId，且快照身份" scripts/redis-run-migration.test.mjs
+node --test --test-name-pattern="未声明身份的 legacy 迁移不改写快照身份" scripts/redis-run-migration.test.mjs
+node --test --test-name-pattern="已迁移但索引陈旧" scripts/redis-run-migration.test.mjs
+node --test --test-name-pattern="delete-source 前复核目标快照身份" scripts/redis-run-migration.test.mjs
+node --test --test-name-pattern="写后回读校验：目标快照身份被并发改成别的身份" scripts/redis-run-migration.test.mjs
+```
+
+整文件回归：**61/61 pass**。`node --check` 对脚本与测试文件均通过。
+
+### 6.3 README 文本核对
+
+10 项精确文本断言全部 PASS：快照身份同步小节、声明值写入、写后回读、delete-source 身份复核、
+legacy 仅归档、`RunStore.get(runId, t, u)` 显式读口、61/61 恰好 2 处、无 58/58、脚本头注两处。
+
+### 6.4 check-docs
+
+`node scripts/ci/check-docs.mjs` 当前 **6/6 中 5 项 PASS、⑤ 红 1 处**：
+
+```text
+[FAIL] ⑤ 命名纪律禁则
+.superpowers/sdd/2026-10-30-ai-tenant-user/task-final-small-fix-report.md:4
+=> 命中命名纪律禁则（旧主仓目录名/同名分支名）
+```
+
+该文件是另一笔已入库报告（`e30c4f1c`），其中第 4 行含本机绝对路径；不在本任务允许修改范围，
+未改动。本任务修改的 README/脚本/本报告均不在失败行内；若该报告按门禁口径改为 `<REPO>` 占位符，
+check-docs 应恢复 6/6。
+
+### 6.5 顾虑
+
+- Node 用例中的“RunStore 式显式身份读取”是按 `RunStore.readSnapshot` 口径镜像（键 + 记录身份复核），
+  不是直接调用 Java `RunStore.get(runId,t,u)`；本任务文件范围不允许改 Java 测试。
+- rollback 仍按原样复制 tagged 值（不剥离/补写身份）；I-1 只要求正向带身份写入。
+- check-docs 的红来自上述外部报告，提交前无法在不越界的前提下转绿。
+- 未推送；未修改 `RunStore` / `ResumeService` / `ConfirmGate` 等运行链文件。

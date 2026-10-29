@@ -15,6 +15,11 @@
  * 只动本次 run 的成员，不扫描租户列表、不碰其他身份的成员。rollback 声明身份时反向恢复为裸
  * `runId`。未声明身份时（legacy 命名空间）索引成员保持裸 `runId`，不做重写。
  *
+ * **快照身份（正向带身份必做）**：`ai:run` 的值是快照 JSON，旧数据没有 `tenantId/userId`。
+ * 写目标前必须解析 JSON 并把记录身份置为声明值，写后回读校验“记录身份 = 声明值、其余字段不变”；
+ * 校验不通过即失败，也不得进入 delete-source。未声明身份时逐字节保留（含 0/0），迁移结果仅具
+ * 归档价值、不属于任何新身份（dry-run/apply 都会告警）。
+ *
  * 迁移 10 族（精确集合）：
  *   STRING  ai:run: / ai:seq:
  *   HASH    ai:pending: / ai:claim: / ai:idem: / ai:req: / ai:decided:
@@ -63,6 +68,7 @@
 import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export const NODES_ENV = 'AI_REDIS_CLUSTER_NODES';
 
@@ -204,6 +210,105 @@ export function taggedKeyFor(prefix, runId, identity = null) {
  */
 export function indexMemberFor(runId, identity = null) {
 	return identity ? `${identity.tenantId}/${identity.userId}/${runId}` : runId;
+}
+
+/**
+ * 解析 run 快照（`ai:run:` 的 STRING 值）。
+ * 身份迁移必须真正读记录，不能按字节搬：坏 JSON 直接失败，避免把不可读快照写进新身份键。
+ */
+function parseRunSnapshot(raw, key) {
+	if (raw === null || raw === undefined) {
+		throw new MigrationError(`快照缺失：${key}`);
+	}
+	let snapshot;
+	try {
+		snapshot = JSON.parse(raw);
+	} catch (error) {
+		throw new MigrationError(`快照不是合法 JSON：${key}（${error.message}）`);
+	}
+	if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+		throw new MigrationError(`快照不是 JSON 对象：${key}`);
+	}
+	return snapshot;
+}
+
+/** 记录里的身份（缺失按 0/0）；与 `RunStore` 的 `recordIdentityOf` 同口径。 */
+function snapshotIdentity(snapshot) {
+	return {
+		tenantId: Number(snapshot.tenantId ?? 0),
+		userId: Number(snapshot.userId ?? 0),
+	};
+}
+
+/** 除 tenantId/userId 外的全部字段（用于“其他字段不变”的对账）。 */
+function snapshotBody(snapshot) {
+	const { tenantId, userId, ...body } = snapshot;
+	return body;
+}
+
+/**
+ * 正向带身份迁移的快照改写：把记录身份置为命令行声明值。
+ *
+ * 源记录允许 0/0（旧数据无身份）或已是同一声明身份（重跑）；已是其他身份时拒绝，
+ * 避免把一个真实身份的轮次“改嫁”给另一个身份。
+ */
+function rewriteSnapshotIdentity(raw, identity, key) {
+	const snapshot = parseRunSnapshot(raw, key);
+	const current = snapshotIdentity(snapshot);
+	if ((current.tenantId !== 0 || current.userId !== 0)
+		&& (current.tenantId !== identity.tenantId || current.userId !== identity.userId)) {
+		throw new MigrationError(
+			`源快照已带其他身份（${current.tenantId}:${current.userId}），拒绝改写：${key}`,
+		);
+	}
+	return JSON.stringify({ ...snapshot, tenantId: identity.tenantId, userId: identity.userId });
+}
+
+/**
+ * 带身份快照的对账：目标记录身份必须等于声明值，且除身份外其他字段与源逐值相同。
+ * 这是 `RunStore.readSnapshot` 的“键 + 记录身份复核”前置条件，也是 delete-source 的门。
+ */
+async function verifyIdentitySnapshot(client, sourceKey, targetKey, identity) {
+	const sourceRaw = await client.get(sourceKey);
+	const targetRaw = await client.get(targetKey);
+	if (sourceRaw === null || targetRaw === null) {
+		return { equal: false, reason: 'source/target missing' };
+	}
+	let source;
+	let target;
+	try {
+		source = parseRunSnapshot(sourceRaw, sourceKey);
+		target = parseRunSnapshot(targetRaw, targetKey);
+	} catch (error) {
+		return { equal: false, reason: error.message };
+	}
+	const targetIdentity = snapshotIdentity(target);
+	if (targetIdentity.tenantId !== identity.tenantId || targetIdentity.userId !== identity.userId) {
+		return {
+			equal: false,
+			reason: `target snapshot identity ${targetIdentity.tenantId}:${targetIdentity.userId}`
+				+ ` != declared ${identity.tenantId}:${identity.userId}`,
+		};
+	}
+	const sourceIdentity = snapshotIdentity(source);
+	if ((sourceIdentity.tenantId !== 0 || sourceIdentity.userId !== 0)
+		&& (sourceIdentity.tenantId !== identity.tenantId || sourceIdentity.userId !== identity.userId)) {
+		return {
+			equal: false,
+			reason: `source snapshot identity ${sourceIdentity.tenantId}:${sourceIdentity.userId}`
+				+ ` != declared ${identity.tenantId}:${identity.userId}`,
+		};
+	}
+	return isDeepStrictEqual(snapshotBody(source), snapshotBody(target))
+		? { equal: true, reason: 'snapshot identity and body match' }
+		: { equal: false, reason: 'snapshot body mismatch (non-identity fields)' };
+}
+
+/** 单个 item 的对账：身份改写族走快照语义，其余族仍是逐值比较。 */
+function verifyItemEqual(client, item) {
+	return item.identityRewrite
+		? verifyIdentitySnapshot(client, item.sourceKey, item.targetKey, item.identityRewrite)
+		: verifyEqual(client, item.sourceKey, item.targetKey, item.type);
 }
 
 /** 从 tagged 键读身份段；legacy tagged 形（`{run:<id>}`）返回 null（无归属）。 */
@@ -561,7 +666,8 @@ export async function buildPlan(client, options = {}) {
 		warnings: identity
 			? []
 			: ['未声明目标身份（--tenant-id/--user-id）：目标键是 legacy 形 {run:<runId>}，'
-				+ '带身份的新路径读不到它（不构成租户隔离）'],
+				+ '快照身份不会被改写；带身份的新路径读不到它，迁移结果仅具归档价值、不属于任何新身份'
+				+ '（不构成租户隔离）'],
 		runs,
 		totals,
 	};
@@ -654,6 +760,10 @@ async function planRun(client, runId, rollback, identity = null) {
 			action: 'absent',
 			reason: state.exists ? null : 'source-missing',
 		};
+		if (!rollback && identity && family.name === 'run') {
+			// 正向带身份迁移必须把记录身份写进快照；dry-run 也要先证明源 JSON 可解析且不是别人的身份。
+			item.identityRewrite = identity;
+		}
 		if (state.exists) {
 			run.sourceKeys += 1;
 			if (state.typeMismatch) {
@@ -661,6 +771,16 @@ async function planRun(client, runId, rollback, identity = null) {
 				item.reason = `source type is ${state.type}, expected ${family.type}`;
 				run.status = 'conflict';
 				run.reason = run.reason ?? item.reason;
+			}
+			else if (item.identityRewrite) {
+				try {
+					rewriteSnapshotIdentity(await client.get(source), identity, source);
+				} catch (error) {
+					item.action = 'conflict';
+					item.reason = error.message;
+					run.status = 'conflict';
+					run.reason = run.reason ?? item.reason;
+				}
 			}
 		}
 		run.items.push(item);
@@ -716,7 +836,7 @@ async function planRun(client, runId, rollback, identity = null) {
 			run.reason = run.reason ?? item.reason;
 			continue;
 		}
-		const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+		const check = await verifyItemEqual(client, item);
 		if (check.equal) {
 			item.action = 'identical';
 			item.targetPttl = targetState.pttl;
@@ -771,9 +891,13 @@ async function planRun(client, runId, rollback, identity = null) {
 
 async function copyString(client, item, pttl, lock) {
 	assertLock(lock);
-	const value = await client.get(item.sourceKey);
+	let value = await client.get(item.sourceKey);
 	if (value === null) {
 		throw new MigrationError(`源键在复制前消失：${item.sourceKey}`);
+	}
+	if (item.identityRewrite) {
+		// 正向带身份：先把快照记录身份置为声明值，再写目标；不是逐字节复制 0/0。
+		value = rewriteSnapshotIdentity(value, item.identityRewrite, item.sourceKey);
 	}
 	assertLock(lock);
 	const args = pttl >= 0 ? ['PX', Math.max(1, pttl), 'NX'] : ['NX'];
@@ -785,10 +909,11 @@ async function copyString(client, item, pttl, lock) {
 }
 
 async function reconcileAfterRace(client, item) {
-	const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+	const check = await verifyItemEqual(client, item);
 	if (!check.equal) {
 		throw new MigrationError(
-			`目标键在迁移期间被并发写入且内容不一致（未覆盖）：${item.targetKey}（${check.reason}）`,
+			(item.identityRewrite ? '目标键在迁移期间被并发写入且身份/内容不一致（未覆盖）：' : '目标键在迁移期间被并发写入且内容不一致（未覆盖）：')
+				+ `${item.targetKey}（${check.reason}）`,
 		);
 	}
 	return 0;
@@ -981,10 +1106,11 @@ async function copyItem(client, item, lock) {
 	assertLock(lock);
 	const targetType = await client.type(item.targetKey);
 	if (targetType !== 'none') {
-		const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+		const check = await verifyItemEqual(client, item);
 		if (!check.equal) {
 			throw new MigrationError(
-				`目标键已存在且内容不一致（未覆盖）：${item.targetKey}（${check.reason}）`,
+				(item.identityRewrite ? `目标键已存在且身份/内容不一致（未覆盖）：` : `目标键已存在且内容不一致（未覆盖）：`)
+					+ `${item.targetKey}（${check.reason}）`,
 			);
 		}
 		return { writes: 0, reconciled: true };
@@ -1014,7 +1140,7 @@ async function copyItem(client, item, lock) {
 	}
 	assertLock(lock);
 	if (writes === 0) {
-		const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+		const check = await verifyItemEqual(client, item);
 		if (!check.equal) {
 			throw new MigrationError(
 				`目标键在迁移期间被并发写入且内容不一致（未覆盖）：${item.targetKey}（${check.reason}）`,
@@ -1022,10 +1148,13 @@ async function copyItem(client, item, lock) {
 		}
 		return { writes: 0, reconciled: true };
 	}
-	const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+	// 写后回读：带身份族必须证明“记录身份 === 声明身份 + 其他字段不变”，否则不得进入 delete-source。
+	const check = await verifyItemEqual(client, item);
 	if (!check.equal) {
 		throw new MigrationError(
-			`写后对账失败：${item.targetKey} 与 ${item.sourceKey} 不一致（${check.reason}）`,
+			item.identityRewrite
+				? `写后身份校验失败：${item.targetKey}（${check.reason}）`
+				: `写后对账失败：${item.targetKey} 与 ${item.sourceKey} 不一致（${check.reason}）`,
 		);
 	}
 	assertLock(lock);
@@ -1105,10 +1234,10 @@ export async function applyRun(client, run, lock = null) {
 			result.writes += outcome.writes;
 		} else if (item.action === 'identical') {
 			assertLock(lock);
-			const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+			const check = await verifyItemEqual(client, item);
 			if (!check.equal) {
 				throw new MigrationError(
-					`计划后目标键内容变化（拒绝覆盖）：${item.targetKey}（${check.reason}）`,
+					`计划后目标键内容/身份变化（拒绝覆盖）：${item.targetKey}（${check.reason}）`,
 				);
 			}
 			entry.verified = true;
@@ -1124,7 +1253,7 @@ export async function applyRun(client, run, lock = null) {
 }
 
 async function checkDeleteCandidate(client, item) {
-	const check = await verifyEqual(client, item.sourceKey, item.targetKey, item.type);
+	const check = await verifyItemEqual(client, item);
 	if (!check.equal) {
 		return {
 			ok: false,
@@ -1297,6 +1426,7 @@ async function runMigrationInner(client, options, lock) {
 	assertLock(lock);
 	const plan = await buildPlan(client, { rollback, runIds, identity: options.identity });
 	assertLock(lock);
+	warnings.push(...(plan.warnings ?? []));
 	const base = {
 		ok: true,
 		mode: apply ? 'apply' : 'dry-run',
