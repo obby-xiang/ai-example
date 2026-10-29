@@ -610,9 +610,28 @@ public class ResilientChatService {
 			// 压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。这期间用户按下停止时，旧实现仍会接着
 			// store.create + 发起模型调用 —— 一条"用户已停止"的轮被真正跑起来。只认确定的 CANCELLED
 			// （UNKNOWN 按未取消继续：此刻还没有不可逆动作，与 C2 的退避口径同源）。
-			// 终态与终帧复用既有取消收尾（快照未建 ⇒ 不写任何快照，只发唯一终帧 done{cancelled:true}）。
+			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
+			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
+			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
+			full.add(instructions.get(0));
+			full.addAll(memory);
+			full.add(instructions.get(1));
+
+			// 终态与终帧复用既有取消收尾；快照走既有创建路径，内容只到"请求历史 + 上下文/模型身份"：
+			// 模型一次都没被调用，故不写助手正文、不写工具调用/工具结果（不得伪造轮内产出）。
+			// 为什么必须建这份最小快照：没有它，runId 的取消终态只活在帧归档里，重挂/刷新没有持久面。
 			if (cancellationRequested(runId)) {
-				log.info("首轮压缩期间收到取消 runId={}（不建快照、不发起模型调用）", runId);
+				log.info("首轮压缩期间收到取消 runId={}（保存最小 CANCELLED 快照、不发起模型调用）", runId);
+				try {
+					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
+							runtime.modelId(), frozenParams(runtime, paramsLocked));
+				}
+				catch (RuntimeException ex) {
+					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
+					// 取消收尾对"无快照"仍按既有口径发唯一 done{cancelled:true}。
+					log.warn("压缩期取消的最小快照创建失败 runId={}（沿用无快照取消收尾，终帧不变）：{}", runId,
+							ex.getMessage());
+				}
 				cancelTerminal(runId, sessionId, null, 0, null, out,
 						new TurnContext(systemTokens, toolsTokens, inputTokens,
 								systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
@@ -621,12 +640,6 @@ public class ResilientChatService {
 				return;
 			}
 
-			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
-			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
-			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
-			full.add(instructions.get(0));
-			full.addAll(memory);
-			full.add(instructions.get(1));
 			// 压缩若已发生：快照写的就是压缩后的那一份（快照 === 模型看到的；分叉即 SM-01 同族）
 			// L-26：首轮创建即<b>冻结生效参数</b>（provider/model 走既有身份字段，三值 + paramsLocked 走
 			// FrozenParams）。冻结的是 runtime.options() 里的<b>生效值</b>（全局默认 + 本轮请求覆盖 +

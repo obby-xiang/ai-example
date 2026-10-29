@@ -220,13 +220,15 @@ class FirstTurnCompactionStageTest {
 	}
 
 	/**
-	 * N4（返修）：<b>压缩期间收到取消</b> ⇒ 不建快照、不发起模型调用。
+	 * N4（返修）：<b>压缩期间收到取消</b> ⇒ 不发起模型调用；终态另有持久面（最小 CANCELLED 快照）。
 	 *
-	 * <p>压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。取消只有被"压缩后、建快照前"的复查看见，
-	 * 才谈得上不建快照；若只靠后续的终态保护，快照与用户历史已经落库、上游也已经收到请求。
+	 * <p>压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。取消只有被"压缩后、调用模型前"的复查看见，
+	 * 才谈得上零模型调用；若只靠后续的终态保护，上游已经收到请求。快照仍要落一份
+	 * （{@link EarlyCancelDuringCompactionSnapshotTest} 钉住其最小内容），否则这一轮的取消终态
+	 * 只剩帧归档、没有权威状态面。
 	 */
 	@Test
-	void cancelDuringCompactionSkipsSnapshotCreationAndModelCall() {
+	void cancelDuringCompactionSkipsModelCallAndPersistsCancelledSnapshot() {
 		stubFluentChain();
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.CANCELLED);
 		SseChatEmitter out = this.registry.of(RUN_ID);
@@ -234,7 +236,9 @@ class FirstTurnCompactionStageTest {
 
 		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
 
-		assertThat(this.store.get(RUN_ID)).as("压缩期间取消 ⇒ 不得建立快照").isNull();
+		assertThat(this.store.get(RUN_ID).getStatus()).as("压缩期间取消 ⇒ 最小 CANCELLED 快照")
+			.isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(this.store.get(RUN_ID).getAssistantContent()).as("模型未调用：无助手正文").isNull();
 		verify(this.chatClient, never()).prompt();
 		verify(this.chatModel, never()).stream(any(Prompt.class));
 
