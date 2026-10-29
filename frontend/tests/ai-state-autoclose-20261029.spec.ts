@@ -23,6 +23,7 @@ import { ApiError } from '@/api/http'
 import {
   AUTO_RECOVERY_DELAY_MS,
   AUTO_RECOVERY_MAX_ATTEMPTS,
+  RUN_STREAM_DRIVE_BUDGET,
   SESSION_ID_KEY,
   readActionRecord,
   useAiStore
@@ -560,5 +561,138 @@ describe('8 · 共用有界自动恢复（零副作用面）', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 复审返修 R1（I-1 / M-1 / M-2 / M-4）：只收窄误清与误封，不扩散。
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+describe('R1 · I-1 缺口只清"读快照能解决"的那一类', () => {
+  it('archive-window / history-unavailable 不得被一次成功快照抹掉', async () => {
+    for (const reason of ['archive-window', 'history-unavailable'] as const) {
+      const store = freshStore()
+      store.sessionId = `sess-gap-${reason}`
+      store.historyLoaded = true
+      const host = store.appendAssistantMessage('缺了中间帧的半截')
+      host.streaming = true
+      host.done = false
+      host.runId = 'run-arch'
+      host.recoveryGap = true
+      store.activeRunId = 'run-arch'
+      store.recoveryGap = { reason, fromSeq: 3, toSeq: 5, at: 1 }
+      api.runsCurrent.mockResolvedValue(runningRun('run-arch', 6))
+      vi.spyOn(store, 'reattachActive').mockResolvedValue(undefined)
+
+      await store.restoreSnapshotGuarded()
+
+      // 读 /runs/current 补不回被归档窗口裁掉的帧 ⇒ 缺口与逐消息标记都必须保留
+      expect(store.recoveryGap).toMatchObject({ reason })
+      expect(host.recoveryGap).toBe(true)
+    }
+  })
+
+  it('found=false（轮已消失）不得把半截回答洗成完整：缺口与标记保留', async () => {
+    const store = freshStore()
+    store.sessionId = 'sess-gap-gone'
+    store.historyLoaded = true
+    const host = store.appendAssistantMessage('半截回答')
+    host.streaming = true
+    host.done = false
+    host.runId = 'run-gone'
+    host.recoveryGap = true
+    store.activeRunId = 'run-gone'
+    store.recoveryGap = { reason: 'snapshot-unavailable', fromSeq: null, toSeq: null, at: 1 }
+    api.runsCurrent.mockResolvedValue(noRun())
+    sse.probeReattach.mockResolvedValue({ status: 404, preparing: null })
+
+    await store.restoreSnapshotGuarded()
+
+    // 封口 ≠ 完整：半截回答封口后仍必须带着"不可确认完整"的标记
+    expect(host.done).toBe(true)
+    expect(host.recoveryGap).toBe(true)
+    expect(store.recoveryGap).toMatchObject({ reason: 'snapshot-unavailable' })
+  })
+})
+
+describe('R1 · M-1 进度通知清理排在轮次归属判定之后', () => {
+  it('旧轮迟到帧不得清新轮的"正在第 N 次重连"通知', () => {
+    const store = freshStore()
+    store.sessionId = 'sess-notice-owned'
+    store.historyLoaded = true
+    store.appendAssistantMessage('本轮')
+    const late = store.appendAssistantMessage('旧轮')
+    late.runId = 'run-old'
+    late.done = false
+
+    store.noticeCode = 'ai.notice.reconnect'
+    store.notice = '连接中断，正在第 2 次重连'
+
+    // 旧轮（非本轮宿主）迟到的 start 帧：不得改写轮次级通知
+    store.handleFrame(asFrame({ type: 'start', runId: 'run-old', seq: 1 }), late.id)
+    expect(store.noticeCode).toBe('ai.notice.reconnect')
+
+    // 对照：本轮的帧照样清（清理本身不能被修死）
+    store.handleFrame(asFrame({ type: 'start', runId: 'run-new', seq: 1 }))
+    expect(store.noticeCode).toBeNull()
+  })
+})
+
+describe('R1 · M-2 首帧超时恢复以"真接回"为判据', () => {
+  it('预算不足接不回：耗尽后封口宿主并解禁（不留"工作中无连接"）', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = freshStore()
+      store.sessionId = 'sess-ff-noconn'
+      store.historyLoaded = true
+      void store.send('跑一个长任务')
+      await Promise.resolve()
+      const transport = chat.last()
+      const host = store.messages.find((message) => message.role === 'assistant')
+      expect(host).toBeTruthy()
+      api.runsCurrent.mockResolvedValue(runningRun('run-ff-x', 3))
+      // 驱动预算已用尽 ⇒ restoreInFlightRound 只置 loading、不建连接（loading 不能当"接回"）
+      store.streamDrives = {
+        'run-ff-x': { token: 1, used: RUN_STREAM_DRIVE_BUDGET, active: false }
+      }
+
+      transport.close({ terminal: false, timeoutStage: 'first-frame', reason: '首帧超时' })
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(AUTO_RECOVERY_DELAY_MS * (AUTO_RECOVERY_MAX_ATTEMPTS + 1))
+      await flushPromises()
+
+      expect(api.reattachRun).not.toHaveBeenCalled()
+      expect(api.chat).toHaveBeenCalledTimes(1) // 绝不重发
+      expect(store.loading).toBe(false)
+      expect(host?.done).toBe(true)
+      expect(host?.streaming).toBe(false)
+      // 手动出口保留：首帧超时提示仍在
+      expect(store.noticeCode).toBe('ai.notice.firstFrameTimeout')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('R1 · M-4 封口兜底只封本轮宿主', () => {
+  it('无宿主 id 的续收断流：不误封与本轮无关的未收尾助手消息', () => {
+    const store = freshStore()
+    store.sessionId = 'sess-seal-run'
+    store.historyLoaded = true
+    const target = store.appendAssistantMessage('本轮半截')
+    target.runId = 'run-this'
+    target.streaming = true
+    target.done = false
+    const unrelated = store.appendAssistantMessage('别的轮半截')
+    unrelated.runId = 'run-other'
+    unrelated.streaming = true
+    unrelated.done = false
+
+    store.sealInterruptedHost(null, 'run-this')
+
+    expect(target.done).toBe(true)
+    expect(target.streaming).toBe(false)
+    expect(unrelated.done).toBe(false)
+    expect(unrelated.streaming).toBe(true)
   })
 })

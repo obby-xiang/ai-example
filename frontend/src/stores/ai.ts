@@ -3755,8 +3755,13 @@ export const useAiStore = defineStore('ai', {
       this.clearQueuedForms()
       // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
       this.currentError = null
-      // 2026-10-29 收口：权威快照读到 ⇒ 之前的恢复缺口（全局 + 逐消息）一并作废
-      this.clearRecoveryGap()
+      // 2026-10-29 收口：权威快照读到**在途轮** ⇒ 上一轮的"快照不可用"缺口作废。
+      // 复审返修（I-1）：`found=false`（轮已消失/保留期到期）**不是**"已解决"——
+      // 那一刻紧接着的 `sealLeftoverInFlight()` 只会封口，不会补缺口；在这里清掉就把
+      // 一条从未被确认完整的半截回答洗成了完整回答。可解决的类别判据见 `clearRecoveryGap`。
+      if (current.found && current.runId) {
+        this.clearRecoveryGap()
+      }
       // AR-10（批次3 补齐）：寿命锚点只认后端 PTTL 的只读推导 —— 有就落、没有就清（不猜 24h）。
       // 若"上一次已知的锚点已经到期"且这次已拿不到运行态，说明它按保留期消失了：
       // ① 落一条**可见**通知（不是卡悄悄没了）；② 保留这个"已到期"锚点，让仍在屏上的挂起卡
@@ -4002,13 +4007,22 @@ export const useAiStore = defineStore('ai', {
      *
      * <p>只封**消息**（streaming/done/段），不置 `recoveryGap`、不出错误卡、不碰待决段：
      * 卡片仍归用户动作或既有终帧收口。
+     *
+     * <p>2026-10-29 复审返修（M-4）：兜底查找**只认同一个 run 的宿主**（`runId` 与
+     * {@link activeStreamRunId} / {@link activeRunId} / 显式传入的 `runId` 相等）。旧实现回落到
+     * "最后一条未收尾助手消息"，在没有宿主 id 的续收（`resumeSnapshotStream` 的无卡挂流）里
+     * 会封到**与本轮无关**的另一条半截回答上。
      */
-    sealInterruptedHost(hostMessageId?: string | null): void {
+    sealInterruptedHost(hostMessageId?: string | null, runId?: string | null): void {
+      const run = runId ?? this.activeStreamRunId ?? this.activeRunId
+      const sameRun = (item: ChatMessage): boolean => run !== null && item.runId === run
       const host = (hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : undefined)
         ?? (activeRoundHostId !== null
           ? this.messages.find((item) => item.id === activeRoundHostId)
           : undefined)
-        ?? [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
+        ?? [...this.messages].reverse().find(
+          (item) => item.role === 'assistant' && !item.done && sameRun(item)
+        )
       if (!host || host.role !== 'assistant' || host.done) {
         return
       }
@@ -4020,14 +4034,24 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 2026-10-29 ToC 收口批：**权威快照读成功** ⇒ 之前的恢复缺口作废（全局 + 逐消息）。
+     * 2026-10-29 ToC 收口批：**权威快照读到在途轮** ⇒ 上一轮的"快照不可用"缺口作废。
      *
-     * <p>缺口（`recoveryGap`）说的是"本地无法确认完整"。`/runs/current` 一旦读到权威现场，
-     * 后续正文由续收/回放重建，"不可确认完整"就不再成立 —— 留着它等于在一条已经对齐的会话上
-     * 永久挂着"部分内容可能不完整"。续收首帧若再检出归档断层，{@link noteArchiveGap} 会重新落值。
+     * <p>2026-10-29 复审返修（I-1，收窄）：只清**读快照能证明已解决**的那一类
+     * （`snapshot-unavailable`），且**只在该类缺口存在时**才动逐消息标记：
+     * <ul>
+     * <li>`archive-window`：被归档窗口裁掉的中间帧读 `/runs/current` **补不回来** ——
+     *   续收锚点已是 `runSeq` 最大值，重连也不会再检出；清掉等于把缺帧的正文洗成完整回答；</li>
+     * <li>`history-unavailable`：历史不可用只能由**历史读成功**作废（`loadHistoryInner` 成功路径）；</li>
+     * <li>全局缺口为 null 时**不碰**消息级标记 —— 那些标记可能正来自 `archive-window`
+     *   （全局先被历史成功路径清空、消息标记仍在的时间窗）。</li>
+     * </ul>
+     * 调用方还必须保证"快照确实读到在途轮"（`current.found && current.runId`）：`found=false`
+     * 只意味着这一轮消失了，不意味着屏上那条半截回答变完整了。
      */
     clearRecoveryGap(): void {
-      const hadGap = this.recoveryGap !== null
+      if (this.recoveryGap === null || this.recoveryGap.reason !== 'snapshot-unavailable') {
+        return
+      }
       this.recoveryGap = null
       let changed = false
       for (const message of this.messages) {
@@ -4036,7 +4060,7 @@ export const useAiStore = defineStore('ai', {
           changed = true
         }
       }
-      if (hadGap || changed) {
+      if (changed) {
         this.writeMirrorNow()
       }
     },
@@ -4696,8 +4720,10 @@ export const useAiStore = defineStore('ai', {
                 setNotice(this, 'ai.notice.interruptedSuspended', {
                   reason: info.reason ?? translate('ai.notice.reasonInterrupted')
                 })
-                // 2026-10-29 收口：续收耗尽同样要封口（断流 ≠ 仍在生成）
-                this.sealInterruptedHost(hostMessageId)
+                // 2026-10-29 收口：续收耗尽同样要封口（断流 ≠ 仍在生成）。
+                // 复审返修（M-4）：把本连接的 runId 一并给出 —— 无宿主 id 的"无卡挂流"
+                // 只能封本 run 的宿主，不得回落到别的未收尾助手消息。
+                this.sealInterruptedHost(hostMessageId, runId)
               }
             }
           },
@@ -4864,20 +4890,38 @@ export const useAiStore = defineStore('ai', {
             return true
           }
           await this.restoreSnapshotGuarded()
-          if (this.loading || this.preparingRun !== null) {
+          // 复审返修（M-2）：判据是**真的接回了一条连接**，不是笼统的 `loading` ——
+          // `restoreInFlightRound` 会先置 `loading=true` 再因驱动预算不足直接返回；
+          // 准备中的旧后端兼容分支也会对陈旧 activeRunId 置 `preparingRun + loading`。
+          // 那两种都在"工作中却没有连接"，认成功会把首帧超时提示清掉、宿主继续挂在流式态。
+          const attached = this.activeStreamRunId !== null
+            || this.activeStreamParked
+            || this.preparingRun !== null
+          if (attached) {
             if (this.noticeCode === 'ai.notice.firstFrameTimeout') {
               clearNotice(this)
             }
             return true
           }
-          // 没有可接回的轮：本轮连接登记到此作废（finally 已让位，这里负责收干净）
+          // 没有可接回的轮：**不在这里**动连接登记 —— 那会把 `isCurrentRound()` 提前判假，
+          // 让下一次尝试误读成"本轮已被替换"而报成功。收尾统一交给 `onExhausted`（结构保证）。
+          return false
+        },
+        () => {
+          // 复审返修（M-2）：耗尽必须有**结构保证**的收尾 —— 不依赖 `restoreSnapshotGuarded`
+          // 内部恰好走了 `sealLeftoverInFlight`/`sealRecovery`：解禁输入（loading=false）+
+          // 封口本轮宿主（不留"工作中无连接"），首帧超时提示保留为手动出口。
+          if (!isCurrentRound()) {
+            return
+          }
+          this.loading = false
           if (currentAbort === controller) {
             currentAbort = null
             activeRoundHostId = null
             this.activeStreamRunId = null
             this.activeStreamParked = false
           }
-          return false
+          this.sealInterruptedHost(assistant.id)
         }
       )
       const handlers: SseFrameHandlers = {
@@ -8100,19 +8144,19 @@ export const useAiStore = defineStore('ai', {
         return
       }
       /**
-       * 2026-10-29 收口：重连 / 续收的"正在第 N 次重试"进度通知只描述**过程**。
-       * 任何业务帧（心跳除外）到达即说明过程结束 —— 不清它就会在一条已经正常出帧的连接上
-       * 一直说"连接中断，正在重连"。`done` / `error` 同样落在这里（终态也是业务帧）。
-       */
-      if (frame.type !== 'heartbeat') {
-        clearReconnectProgressNotice(this)
-      }
-      /**
        * R2/R6（issue#5）帧归属判定：只有"本轮"（宿主消息仍是当前轮的宿主）的帧才允许改写
        * **轮次级**状态（activeRunId / loading / suspended / notice / activeForm）——旧轮迟到帧
        * （resetSession 之后、或新轮已起）只收敛它自己那条消息，不能把新轮标记成空闲。
        */
       const ownedByActiveRound = assistantId === undefined || assistantId === activeRoundHostId
+      /**
+       * 复审返修（M-1）：进度通知清理**排在归属判定之后** —— `notice` 是轮次级状态，旧轮迟到帧
+       * 一律不得改写（否则 `stop()` 保留的 pre-start 传输在下一轮建立后迟到的终态帧，会把新轮的
+       * "正在重连"清掉）。清理本身仍覆盖 onOpen / 首业务帧 / done（终态也是业务帧）。
+       */
+      if (ownedByActiveRound && frame.type !== 'heartbeat') {
+        clearReconnectProgressNotice(this)
+      }
       /**
        * P-11 宿主解析（停止轮）：放行的终态帧同样**不得新建空气泡** —— `stop()` 已把本轮宿主
        * 封口（`done=true`），若仍走 `currentAssistantMessage()` 的"找不到 `!done` 就 append"
