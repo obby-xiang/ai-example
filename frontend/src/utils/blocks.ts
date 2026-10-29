@@ -497,7 +497,8 @@ export function isReadOnlyCard(part: ToolPart): boolean {
  * 2026-10-26 批4 增至七态）：
  * - 门卡（H1）七态：已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / **已取消** /
  *   **已批准·未执行** / **未批准·未执行**；
- * - 表单系（GF）两态：已提交 / 已取消。
+ * - 表单系（GF）：已提交 / 已取消 / 已拒绝 / 已超时 / 已批准·执行失败 / 未批准·未执行 ——
+ *   按段的**真实结局**分列（2026-10-29 批：只有真实用户取消才是「已取消」，见下方 GF 分支）。
  *
  * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
  * - decision=timeout ⇒ 已超时（2A 挂账①：超时是**第三种门结局** —— 闸门未开、本次未执行）；
@@ -519,7 +520,28 @@ export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'su
 
 export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
   if (part.name === GENERATIVE_FORM_TOOL) {
-    return part.status === 'succeeded' ? 'submitted' : 'cancelled'
+    // 表单系的已决态 = 这一段**真实发生了什么**，不是"非成功即取消"（见下）：
+    // 2026-10-29 批：旧口径只留「已提交 / 已取消」两态，`status !== 'succeeded'` 一律画成
+    // 「✗ 已取消」—— 于是被安全闸拒绝（rejected）、等表单超时（expired）、执行失败（failed）、
+    // 越界/上游跳过（blocked/skipped）全被说成"用户自己取消了"。事实相反：只有真取消是取消。
+    switch (part.status) {
+      case 'succeeded':
+        return 'submitted'
+      case 'cancelled':
+        return 'cancelled'
+      case 'rejected':
+        return 'rejected'
+      case 'expired':
+        return 'expired'
+      case 'failed':
+        return 'failed'
+      case 'blocked':
+      case 'skipped':
+        return 'notExecuted'
+      default:
+        // pending/running 已被 isReadOnlyCard 挡住；unknown 等"还没结论"的残留沿用旧兜底
+        return 'expired'
+    }
   }
   if (part.decision === 'timeout') {
     return 'expired'

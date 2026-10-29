@@ -3240,6 +3240,18 @@ public class ResilientChatService {
 	}
 
 	/**
+	 * 工作区状态段的<b>唯一渲染口</b>（= {@link #systemPromptText(AiContext)} 的最后一段）。
+	 *
+	 * <p>暴露给 {@code ResumeService}：续跑在整批工具结算后刷新了运行上下文，必须把<b>刷新后的</b>
+	 * 工作区状态交给模型（历史里那条 SYSTEM 的段是"模型以为的现场"，留着旧页面/旧步骤等于让模型
+	 * 按过期地图继续走）。续跑侧要把这一段换进历史 SYSTEM 里，用的必须与首轮<b>同一份</b>渲染，
+	 * 否则首轮与续跑的工作区描述会静默分叉。
+	 */
+	public String workspaceStateText(AiContext context) {
+		return this.contextBuilder.buildContextMessage(context == null ? AiContext.empty() : context);
+	}
+
+	/**
 	 * 本轮披露 schema 的估算（上下文专项批①）。
 	 *
 	 * <p>暴露给 {@code ResumeService}：续跑侧没有 {@code ToolRegistry}，但它必须与首轮用<b>同一个</b>

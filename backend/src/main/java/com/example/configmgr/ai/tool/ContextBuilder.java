@@ -116,6 +116,9 @@ public class ContextBuilder {
     /** 整段 extra 的上限（字符）；超出即按白名单顺序截停并标注省略项数。 */
     public static final int EXTRA_TOTAL_MAX_CHARS = 800;
 
+    /** 工作区段（{@link #buildContextMessage} 的第一行）：段头是"整段替换从哪儿开始"的唯一锚点。 */
+    public static final String WORKSPACE_SECTION_HEADING = "## 当前工作区状态\n";
+
     /** 工作区段的不可信定界符（防护批② B2-2；配套声明在 {@link #UNTRUSTED_NOTICE}）。 */
     public static final String WORKSPACE_STATE_OPEN = "<workspace_state>";
 
@@ -177,7 +180,7 @@ public class ContextBuilder {
      */
     public String buildContextMessage(AiContext ctx) {
         StringBuilder sb = new StringBuilder();
-        sb.append("## 当前工作区状态\n");
+        sb.append(WORKSPACE_SECTION_HEADING);
         sb.append(UNTRUSTED_NOTICE).append("\n");
         sb.append(WORKSPACE_STATE_OPEN).append("\n");
         sb.append("页面：").append(pageLabel(ctx.getPage())).append("\n");

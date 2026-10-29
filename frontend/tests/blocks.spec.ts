@@ -308,10 +308,19 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }))).toBe('notExecuted')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped', decision: 'approved' }))).toBe('notExecuted')
     expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved', requiresAction: false }))).toBe(true)
-    // 表单系两态：succeeded ⇒ 已提交，其余 ⇒ 已取消
+    // 表单系的已决态按<b>真实结局</b>分列（批：只有真实用户取消才是「已取消」）：
+    // 提交成功 = 已提交；用户放弃 = 已取消；被拒 = 已拒绝；超时 = 已超时；执行失败 = 执行失败；
+    // 未执行（越界/上游跳过）= 未批准·未执行。旧口径把除 succeeded 外的一律画成「✗ 已取消」，
+    // 于是"表单被安全闸拒绝""等表单超时"都被说成用户主动取消 —— 事实相反。
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe('submitted')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toBe('cancelled')
-    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toBe('cancelled')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'rejected' }))).toBe('rejected')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'expired' }))).toBe('expired')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toBe('failed')
+    expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'skipped' }))).toBe('notExecuted')
+    expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toMatchObject({
+      key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger'
+    })
     // 默认展开：r15 裁决 —— 六态一律折叠（回合结束后只留卡头摘要行）
     expect(readOnlyDefaultExpanded(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe(false)
     expect(readOnlyDefaultExpanded(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe(false)

@@ -13,6 +13,7 @@ import com.example.configmgr.ai.context.ContextTrigger;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
+import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
@@ -811,10 +812,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 				}
 				// 挂起前被入参闸门拒掉的条目：没有卡、没有请求帧，只有一张「未执行」的结局帧
 				// （与预检未通过同形的两条帧：tool_start → frontend_tool_result）。
+				// 例外：槽位放行（FORM_SLOTS_ALREADY_KNOWN）是"没有缺口"而不是"出了错" —— 条目、
+				// 日志与模型回执照旧，但<b>一条会产生用户卡片的帧都不发</b>：用户不该为一张"系统已经
+				// 知道答案"的表单看见失败卡，也让模型只剩"改调 select_definitions"这一个出口。
 				if (frontendRejected.contains(pending.getToolCallId())) {
 					String text = frameText(pending.getResultText());
-					emitToolStartOnce(runId, toolStarted, pending);
-					out.frontendToolResult(pending, false, text);
+					if (!silentlyReleased(pending)) {
+						emitToolStartOnce(runId, toolStarted, pending);
+						out.frontendToolResult(pending, false, text);
+					}
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text)));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
@@ -2717,6 +2723,27 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
+	 * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（只此一码）。
+	 *
+	 * <p>{@code FORM_SLOTS_ALREADY_KNOWN} = 生成式表单想收集的槽位已由任务/工作区或用户明确值确定：
+	 * 它是"没有缺口"，不是"输入有错"，拒绝本身零副作用且有明确纠正出口（直接调
+	 * {@code select_definitions} / {@code set_condition}）。因此三面照旧、帧面静默：
+	 * <ul>
+	 * <li>条目：仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障）；</li>
+	 * <li>日志：{@code settleFrontendRejected} 的 WARN 照旧；</li>
+	 * <li>模型：统一信封回执照旧（含码与"下一步"指引）；</li>
+	 * <li>用户：{@code tool_start} 与 {@code frontend_tool_result} <b>都不发</b> —— 前端不建段，就不会有卡。</li>
+	 * </ul>
+	 *
+	 * <p>只认这一个码：其它入参拒绝（schema 白名单等）必须让用户看到"这张表为什么没成"。
+	 * 工具名同时校验，是为了不让别的工具"借用"这个码绕过可见性。
+	 */
+	private static boolean silentlyReleased(PendingToolCall pending) {
+		return GenerativeFormRules.TOOL_NAME.equals(pending.getName())
+				&& ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(pending.effectiveCode());
+	}
+
+	/**
 	 * 工具批后把<b>运行上下文</b>推进到真实结果（多步工作流批）。
 	 *
 	 * <p>三层口径：
@@ -2731,7 +2758,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private void refreshRunContext(String runId, PendingToolCall settled) {
 		RunContextRefresher refresher = this.contextRefresher;
-		if (refresher == null || settled == null || !RunContextRefresher.supports(settled.getName())) {
+		if (settled == null || !RunContextRefresher.supports(settled.getName())) {
+			return;
+		}
+		if (refresher == null) {
+			// 可观测性：本批确有"能推进上下文"的结果，但装配里没有刷新器 —— 下一跳会沿用请求边界的
+			// 旧上下文（步骤工具不披露）。这不是"已证根因"，但必须是可检索的一条痕。
+			log.warn("工具批后无法刷新运行上下文：未注入 RunContextRefresher runId={} tool={}"
+					+ "（下一跳沿用旧上下文，步骤工具可能不披露）", runId, settled.getName());
 			return;
 		}
 		try {

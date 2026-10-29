@@ -439,6 +439,27 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
+ * 槽位放行的拒绝码（与后端 {@code ErrorCodes.FORM_SLOTS_ALREADY_KNOWN} 同值）。
+ *
+ * <p>它是"表单想收集的东西已经知道"而不是"出错了"：零副作用、有明确纠正出口。
+ */
+export const FORM_SLOTS_ALREADY_KNOWN = 'FORM_SLOTS_ALREADY_KNOWN'
+
+/**
+ * 该 toolCall 是否是<b>槽位放行的幻影表单卡</b>（历史面唯一判据）。
+ *
+ * <p>为什么需要：后端对这一个码静默了用户可见的工具帧（{@code tool_start} /
+ * {@code frontend_tool_result} 都不发），但条目、日志与模型回执照旧保留 —— 于是历史载荷里仍有
+ * 这条调用。前端若照常建段，就会出现"实时流里没有、刷新后多出一张"的幻影卡。
+ *
+ * <p>判据 = 工具名 + 错误码，两者缺一不可：其它拒绝（如 {@code FORM_SCHEMA_REJECTED}）必须
+ * 让用户看到"这张表为什么没成"；别的工具即便带同名码也不隐藏（不借码绕过可见性）。
+ */
+export function isSlotReleasePhantom(name: unknown, code?: string | null): boolean {
+  return name === GENERATIVE_FORM_TOOL && code === FORM_SLOTS_ALREADY_KNOWN
+}
+
+/**
  * R-144（history 载荷状态码 → 段状态，单表单一事实源）：唯一消费方 = `loadHistory` 历史整替。
  * 载荷码 = 后端 `PendingToolCall` 10 码（T2 升格判据落地后 APPROVED∧已执行 已归 EXECUTED）+
  * 快照态兜底（CANCELLED/DONE；FAILED 不参与段态推导 ⇒ null，与 A-1-4 判据序同源）。

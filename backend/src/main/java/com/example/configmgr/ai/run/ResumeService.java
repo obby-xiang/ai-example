@@ -11,12 +11,14 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.context.SystemMessages;
+import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.history.AiChatHistoryRecorder;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import lombok.extern.slf4j.Slf4j;
@@ -43,6 +45,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -218,6 +221,24 @@ public class ResumeService {
 	 */
 	@Autowired(required = false)
 	private AiChatHistoryRecorder historyRecorder;
+
+	/**
+	 * 批间运行上下文刷新器（多步工作流批的续跑侧入口）。
+	 *
+	 * <p>为什么续跑侧必须有它：生产 {@code app.ai.park.enabled=true} 时 {@code create_task} /
+	 * {@code navigate_to} / {@code confirm_step} 都在 {@code SpToolCallingManager} 执行循环的
+	 * <b>唯一刷新点之前</b>挂起，刷新一次都跑不到 —— 续跑随后拿"请求边界"的旧 {@link AiContext}
+	 * 构造下一跳，步骤工具永远不披露。字段注入保持 10 参构造器与既有直接 new 的用例零改动；
+	 * 缺席时行为与改造前一致（不刷新），但会留一条 WARN。
+	 */
+	@Autowired(required = false)
+	private RunContextRefresher contextRefresher;
+
+	/** 可选注入（生产装配同一个刷新器；轻装配面不注入 = 不刷新）。 */
+	@Autowired(required = false)
+	public void setContextRefresher(RunContextRefresher refresher) {
+		this.contextRefresher = refresher;
+	}
 
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
@@ -1397,6 +1418,11 @@ public class ResumeService {
 			}
 			List<String> rebuilt = new ArrayList<>();
 			int rebuiltToolTokens = 0;
+			// 本轮的运行上下文有两份，用途不同、不得混用：
+			//  - context = 请求边界冻结的那一份：本批<b>结算判据</b>（scope 复查/预检都按它，批内不扩权）；
+			//  - nextHopContext = 整批结算后按真实结果刷新的那一份：只用于<b>交棒给模型</b>
+			//    （下一跳的披露面 + 工作区状态）。无在飞工具时两者相同。
+			AiContext nextHopContext = context;
 
 			if (!snapshot.getInFlightToolCalls().isEmpty()) {
 				// ===== 硬规范②：把挂起那一轮的 assistant(tool_calls) 重新拼回完整历史 =====
@@ -1407,6 +1433,9 @@ public class ResumeService {
 				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
 				// P1-10：续跑与首轮同一批策略 —— W/J/P 确定性失败后，剩余未执行项补 SKIPPED。
 				PendingToolCall haltedBy = null;
+				// 本批<b>已结算</b>条目（结算后回读的真值）：整批结算完再统一折算上下文，
+				// 不在循环里逐条刷新（逐条刷新会让同批后面的条目拿到"刚刚才解锁"的披露面 = 批内扩权）。
+				List<PendingToolCall> settledInBatch = new ArrayList<>(snapshot.getInFlightToolCalls().size());
 				for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
 					// 以 Redis 的待决条目为准（快照里的 in-flight 副本停留在"挂起那一刻"）
 					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
@@ -1467,12 +1496,21 @@ public class ResumeService {
 							ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
 									effective.getArguments()).toModelJson(this.limiter, effective.getName())));
 					rebuilt.add(settlementLabel(source));
+					settledInBatch.add(source);
 					if (this.toolCallingManager.haltsBatch(source)) {
 						haltedBy = source;
 						log.warn("续跑批策略首错即停 runId={} 上游工具={} outcome={} code={}，剩余条目将置 SKIPPED",
 								runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode());
 					}
 				}
+				// ===== 批间上下文刷新（续跑侧的唯一刷新点）=====
+				// 生产 park=true 时首轮的刷新点（SpToolCallingManager 执行循环尾部）根本走不到：
+				// 工具在挂起处就结束了这一轮。续跑在<b>整批结算之后</b>补上同一次折算，然后<b>重读快照</b>
+				// 拿下一跳上下文 —— 逐条刷新会让同批后面的条目提前看到刚解锁的工具（批内扩权）。
+				nextHopContext = refreshRunContextAfterBatch(runId, snapshot, settledInBatch);
+				// 刷新后的权威工作区状态跟着交棒：历史里那条 SYSTEM 的工作区段是"模型以为的现场"，
+				// 留着旧页面/旧步骤等于让模型按过期地图继续走（只换段内文本，不动消息序列）。
+				history = rewriteWorkspaceState(history, nextHopContext, runId);
 				ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
 				history.add(toolMessage);
 				// 上下文专项批①：本次重建出来的工具响应是"上次真值之后"的真增量（续跑侧的 nextEst 一项）
@@ -1554,7 +1592,8 @@ public class ResumeService {
 					compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
 							runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
-							this.chatService.disclosedToolTokens(context), protectedIds, compactionRuntime),
+							// 披露面的额度必须按<b>交棒那一份</b>上下文算：刷新后工具集变了，用旧的会算错
+							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime),
 							// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s）。这个回调只刷新<b>业务活动锚点</b>
 							// （避免长压缩被别的实例判成僵尸并接管），它<b>不发帧</b> —— 压缩期的可见性由上面
 							// 那枚独立定时器的 stage 心跳承担（"压缩不伪称持续发帧"）。
@@ -1615,6 +1654,8 @@ public class ResumeService {
 				this.chatService.noteCompaction(runId, compaction.levelWire());
 			}
 			List<Message> resumeHistory = history;
+			// 交棒上下文 = 刷新后的那一份（上面的 lambda 捕获的是本 final 副本）
+			final AiContext handoffContext = nextHopContext;
 			try {
 				this.suspendExecutor.execute(() -> {
 					// I-5 / 4B：locale 不能靠线程池继承（工作线程没有请求上下文）。
@@ -1630,10 +1671,10 @@ public class ResumeService {
 						// 旧快照（无 providerId）仍走五参旧签名 —— 语义等价（按默认目标续跑 + WARN），
 						// 也让既有用例的 verify(driveResumed(...5 参)) 不必跟改（回归零改动）。
 						if (snapshot.getProviderId() == null) {
-							this.chatService.driveResumed(runId, sessionId, context, resumeHistory, out);
+							this.chatService.driveResumed(runId, sessionId, handoffContext, resumeHistory, out);
 						}
 						else {
-							this.chatService.driveResumed(runId, sessionId, context, resumeHistory,
+							this.chatService.driveResumed(runId, sessionId, handoffContext, resumeHistory,
 									snapshot.getProviderId(), snapshot.getModelId(), out);
 						}
 					}
@@ -1693,6 +1734,149 @@ public class ResumeService {
 			// 驱动线程（挂起池）在 driveResumed 入口自己绑锚点 —— 本线程到此结束，一律摘掉
 			AiTrace.clear();
 		}
+	}
+
+	/**
+	 * <b>续跑侧的批间上下文刷新</b>（本类唯一的刷新点）。
+	 *
+	 * <h2>为什么必须在续跑侧补这一刀</h2>
+	 * 首轮的刷新点在 {@code SpToolCallingManager} 执行循环的尾部。生产 {@code app.ai.park.enabled=true}
+	 * 时 {@code create_task} / {@code navigate_to} / {@code confirm_step} 都在<b>那个点之前</b>就挂起
+	 * （{@code RunParkedException} 直接结束这一轮），刷新一次都跑不到 —— 续跑随后拿请求边界的旧
+	 * {@link AiContext} 构造下一跳，于是步骤工具（{@code select_definitions} / {@code set_condition} /
+	 * {@code start_export}）永远不披露。
+	 *
+	 * <h2>三条口径</h2>
+	 * <ol>
+	 * <li><b>整批结算之后才刷新</b>：入参是本批<b>已结算</b>的条目（结算后回读的真值）。逐条刷新会让
+	 * 同批后面的条目提前看到"刚刚才解锁"的披露面 = 批内扩权；</li>
+	 * <li><b>只认真实成功</b>：判据（工具名 + {@code outcome=OK}）全在
+	 * {@link RunContextRefresher#next}，本方法只负责"读快照 → 折 → 写回 → 重读"；</li>
+	 * <li><b>失败不打断</b>：任何异常只 WARN 并保留旧上下文 —— 刷新是"让下一跳更准"的增强，
+	 * 不是这一轮的判定面，绝不能因为一次读库失败让续跑失败。</li>
+	 * </ol>
+	 *
+	 * <p>写回之后<b>重新读快照</b>：下一跳用的必须是外置真值（与 {@code RunSnapshot#getContext()} 同一份），
+	 * 而不是本方法内存里那份推算结果 —— 写门拒写时两者会分叉，此处如实反映"存下去的"。
+	 *
+	 * @param settled 本批已结算条目（含已终态复用、被跳过、被拒绝的；非刷新工具由判据自动忽略）
+	 * @return 下一跳应使用的上下文；无变化时返回旧值（同一份事实、不写库）
+	 */
+	private AiContext refreshRunContextAfterBatch(String runId, RunSnapshot snapshot, List<PendingToolCall> settled) {
+		AiContext before = AiContext.fromMap(snapshot.getContext());
+		if (settled == null || settled.isEmpty()) {
+			return before;
+		}
+		RunContextRefresher refresher = this.contextRefresher;
+		if (refresher == null) {
+			// 可观测性（不回退、不猜根因）：本批确有"能推进上下文"的结果，但装配里没有刷新器
+			if (settled.stream().anyMatch(entry -> RunContextRefresher.supports(entry.getName()))) {
+				log.warn("续跑批无法刷新运行上下文：未注入 RunContextRefresher runId={}"
+						+ "（下一跳沿用请求边界的旧上下文，步骤工具可能不披露）", runId);
+			}
+			return before;
+		}
+		AiContext current = before;
+		for (PendingToolCall entry : settled) {
+			if (!RunContextRefresher.supports(entry.getName())) {
+				continue;
+			}
+			try {
+				Optional<AiContext> next = refresher.next(current, entry);
+				if (next != null && next.isPresent()) {
+					current = next.get();
+				}
+			}
+			catch (RuntimeException ex) {
+				// 保留旧上下文继续折下一条：一条读库失败不代表整批结果不可用
+				log.warn("续跑批后刷新运行上下文失败，保留旧上下文（不阻断续跑）runId={} tool={}：{}", runId,
+						entry.getName(), ex.getMessage());
+			}
+		}
+		if (current.equals(before)) {
+			return before;
+		}
+		snapshot.setContext(current.toMap());
+		this.store.save(snapshot);
+		RunSnapshot fresh = this.store.get(runId);
+		AiContext reread = fresh == null ? current : AiContext.fromMap(fresh.getContext());
+		log.info("续跑批结算后已刷新运行上下文 runId={} page={} taskId={} taskType={} step={} status={}", runId,
+				reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
+		return reread;
+	}
+
+	/**
+	 * 把<b>刷新后的权威工作区状态</b>换进交棒历史的系统段（工作区段的唯一重写口）。
+	 *
+	 * <h2>为什么换段，而不是新增一条消息</h2>
+	 * <ul>
+	 * <li><b>不新增消息</b>：多一条 SYSTEM 会被 {@link SystemMessages#reattach} 在下次续跑时移到最前，
+	 * 与首轮那条人设并列成"两条系统消息"，其中旧的一条还会被当成现役状态；多一条 USER 则会被
+	 * 记忆/历史当成用户又发了一句。两者都会污染后续轮次；</li>
+	 * <li><b>只换段内文本</b>：人设 / 知识库 / 回答语言这些<b>历史内容</b>一字不动（不拿当前配置覆盖
+	 * 历史），{@code tool_use}/{@code tool_result} 的配对与顺序也不动 —— 换的只是"模型以为的现场"。</li>
+	 * </ul>
+	 *
+	 * <p>渲染走 {@link ResilientChatService#workspaceStateText}（与首轮同一个 {@code ContextBuilder}），
+	 * 段头/闭标签的锚点也用同一份常量：两侧各写一份就会在"首轮怎么描述工作区"上静默分叉。
+	 *
+	 * <p>旧快照里没有工作区段（更早的格式）⇒ 追加到系统消息末尾（模型至少拿到一次权威状态）；
+	 * 渲染失败 ⇒ 只 WARN 并返回原历史 —— 交棒不能因为"状态说明"而失败。
+	 */
+	private List<Message> rewriteWorkspaceState(List<Message> history, AiContext context, String runId) {
+		int leading = SystemMessages.leadingCount(history);
+		if (leading == 0 || this.chatService == null || context == null) {
+			return history;
+		}
+		String fresh;
+		try {
+			fresh = this.chatService.workspaceStateText(context);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑刷新工作区状态文本失败（沿用历史里的那份）runId={}：{}", runId, ex.getMessage());
+			return history;
+		}
+		if (!StringUtils.hasText(fresh)) {
+			return history;
+		}
+		List<Message> out = new ArrayList<>(history);
+		boolean changed = false;
+		for (int index = 0; index < leading; index++) {
+			String text = history.get(index).getText();
+			String rewritten = replaceWorkspaceSection(text, fresh);
+			if (rewritten != null && !rewritten.equals(text)) {
+				out.set(index, new SystemMessage(rewritten));
+				changed = true;
+			}
+		}
+		if (changed) {
+			log.info("续跑交棒前已把工作区状态换成刷新后的权威值 runId={} page={} taskId={} step={}", runId,
+					context.getPage(), context.getTaskId(), context.getStep());
+		}
+		return changed ? out : history;
+	}
+
+	/**
+	 * 段级替换：从 {@link ContextBuilder#WORKSPACE_SECTION_HEADING} 到 {@code </workspace_state>}
+	 * （含其后一个换行）整段换成新渲染的工作区段；没有段头时追加到末尾。
+	 *
+	 * <p>包内可见以便单点验证"只换这一段、别的文本一字不动"。
+	 */
+	static String replaceWorkspaceSection(String systemText, String freshSection) {
+		if (systemText == null || freshSection == null || freshSection.isBlank()) {
+			return systemText;
+		}
+		String section = freshSection.endsWith("\n") ? freshSection : freshSection + "\n";
+		int start = systemText.indexOf(ContextBuilder.WORKSPACE_SECTION_HEADING);
+		if (start < 0) {
+			return systemText.endsWith("\n") ? systemText + section : systemText + "\n" + section;
+		}
+		int close = systemText.indexOf(ContextBuilder.WORKSPACE_STATE_CLOSE, start);
+		int end = close < 0 ? systemText.length() : close + ContextBuilder.WORKSPACE_STATE_CLOSE.length();
+		if (end < systemText.length() && systemText.charAt(end) == '\n') {
+			end++;
+		}
+		return systemText.substring(0, start) + section + systemText.substring(end);
 	}
 
 	/**

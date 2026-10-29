@@ -69,6 +69,7 @@ import {
   deriveProjections,
   findToolPart,
   historyToolCallStatus,
+  isSlotReleasePhantom,
   markApplied,
   openStreamPart,
   outcomeStatus,
@@ -2897,11 +2898,29 @@ export const useAiStore = defineStore('ai', {
       // ③ 混排先 id 后序位；④ 仍不中 result=null（卡片保留不丢）。
       const responsePool: NonNullable<AiHistoryMessage['toolResponses']>[number][] = []
       const responseIndex = new Map<string, NonNullable<AiHistoryMessage['toolResponses']>[number]>()
+      // 槽位放行的幻影卡（2026-10-29）：后端对 FORM_SLOTS_ALREADY_KNOWN 已不发用户可见的工具帧，
+      // 但条目/历史照旧（审计与模型回执要留）。历史面按同一口径隐藏该 toolCallId 的段与响应，
+      // 否则"实时看不到、刷新后又冒出来一张"——同一件事两个答案。
+      // 响应也要一并摘掉：留着会让"序位兜底"把它错配给另一张未配对卡（错配比缺失更糟）。
+      const silentSlotFormIds = new Set<string>()
+      for (const item of history.messages) {
+        for (const call of item.toolCalls ?? []) {
+          const state = call.id !== null && call.id !== undefined && call.id !== ''
+            ? item.toolCallStates?.[call.id]
+            : undefined
+          if (call.id && isSlotReleasePhantom(call.name, state?.code)) {
+            silentSlotFormIds.add(call.id)
+          }
+        }
+      }
       for (const item of history.messages) {
         if ((item.type || '').toUpperCase() !== 'TOOL') {
           continue
         }
         for (const response of item.toolResponses ?? []) {
+          if (response.id && silentSlotFormIds.has(response.id)) {
+            continue
+          }
           responsePool.push(response)
           // 防御性 tie-break（C2，红队 O-1）：后端 Spring AI 的 toolCallId 唯一、实际不产重复 id；
           // 万一载荷出现重复 id，后出现覆盖先出现仅作**确定性兜底**，不宣称符合后端实际产出序
@@ -2930,9 +2949,14 @@ export const useAiStore = defineStore('ai', {
         // R-144（C-6）保序：text 空白且 toolCalls ≥ 1 ⇒ **不产空前导 text 段**（载荷无段序字段，
         // 同条目 text↔toolCalls 相对序不可知，消「空 text 段打头」渲染面）；工具段 seg = 构造后
         // 数组下标（有 text 段时 = toolIndex+1，无 = toolIndex；R-150 合并 pass 仍全局重排）。
-        const calls = item.toolCalls ?? []
+        // 槽位放行的幻影卡（FORM_SLOTS_ALREADY_KNOWN）不进段：后端已不为它发用户可见的工具帧，
+        // 历史面必须同口径（否则刷新后又冒出一张卡）。它的响应也已从 responsePool 摘除，
+        // 因此这里过滤掉之后不会把"无主响应"错配给它后面的卡。
+        const calls = (item.toolCalls ?? []).filter((call) => !(call.id && silentSlotFormIds.has(call.id)))
         const blankText = (item.text ?? '').trim() === ''
-        const hasTextPart = !blankText || calls.length === 0
+        // 全部调用都被隐藏（本条只剩幻影卡）⇒ 不补空 text 段：那会留下一个空气泡。
+        const allCallsSilenced = (item.toolCalls ?? []).length > 0 && calls.length === 0
+        const hasTextPart = !blankText || (calls.length === 0 && !allCallsSilenced)
         // 批次6A 返修 / AR-12：历史 assistant 自带的思考正文（记忆 metadata.reasoningContent，
         // 通道有该键才展示）→ 一条 `streaming=false` 的思考段。**不带任何计时字段**：历史已完成
         // 轮不显示耗时、不回算；通道缺键则不出思考卡（不伪造、不新写持久化）。
@@ -3031,6 +3055,10 @@ export const useAiStore = defineStore('ai', {
             return part
           })
         ]
+        if (parts.length === 0) {
+          // 本条的段全被隐藏（例如整条只带一张槽位放行的幻影表单卡）⇒ 不产空消息
+          return []
+        }
         const message: ChatMessage = {
           // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）
           id: `history-${index}`,
