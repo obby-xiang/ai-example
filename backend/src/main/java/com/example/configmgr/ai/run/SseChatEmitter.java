@@ -1529,6 +1529,71 @@ public class SseChatEmitter {
 		emit(frame);
 	}
 
+	/**
+	 * <b>续跑派发预算耗尽的中性降级结局</b>：<b>只</b>投递给当下挂着的订阅，不入事件日志。
+	 *
+	 * <p>场景：决策/回灌已落库，但续跑的每一拍都被 {@code CANCEL_STATE_UNKNOWN}（取消状态此刻不可
+	 * 确认）拒绝，{@code app.ai.park.max-dispatch-retries} 走完仍无驱动方。快照仍是
+	 * {@code SUSPENDED}、条目已结算 ⇒ 没有人会再发帧；连接若不收尾，客户端只能等自己的超时
+	 * （服务端 emitter 没有传输超时）。
+	 *
+	 * <p><b>为什么是 {@code error} + {@code unconfirmed=true} 而不是新帧型</b>：帧类型集冻结在 16
+	 * （{@code FrameTypeSetFrozenTest}），而这条结局的语义正是既有的中性"未确认"（AR-05）：
+	 * 不是成功、不是失败、不是取消，工具是否执行<b>仍然未知</b>。中性文案与
+	 * {@code recoverable/retryable/degraded} 等 additive 键由调用方给出。
+	 *
+	 * <p><b>为什么不走 {@link #emit}（即不落档）</b>：归档里出现终帧会把这一轮的帧流"判死" ——
+	 * {@code replayAndAttach} 会据此在回放完即收尾，{@code terminalFrameArchived()} 也会让取消收尾
+	 * 跳过 {@code done{cancelled:true}}；而这一轮其实仍可被显式恢复。故本帧只投递给当下的订阅
+	 * （与 N-2 的降级回放同一手法），随后由 {@link #completeWhenDrained} 排空并收尾。
+	 *
+	 * <p><b>不置 {@link #terminating}</b>：轮次没有结束 —— 显式恢复之后的实时帧照常扇出，
+	 * 之后的重挂也照常回放/挂订阅。
+	 *
+	 * @param code 复用既有机器码（本路径 = {@code AI_REDIS_UNAVAILABLE}）
+	 * @param message 中性用户文案（不声称成功/失败/取消）
+	 * @param extra additive 键（{@code null}/空 = 只有 code/message）
+	 * @return 收到本帧的订阅者数（{@code 0} = 此刻没有连接，也没有需要解开的等待）
+	 */
+	public int unresolvedEnding(String code, String message, Map<String, Object> extra) {
+		List<Subscription> targets = new ArrayList<>();
+		final String payload;
+		synchronized (this.emitLock) {
+			if (this.terminating.get() || this.subscribers.isEmpty()) {
+				return 0;
+			}
+			Map<String, Object> frame = frame("error");
+			frame.put("runId", this.runId);
+			frame.put("code", code);
+			frame.put("message", message);
+			if (extra != null && !extra.isEmpty()) {
+				frame.putAll(extra);
+			}
+			try {
+				payload = this.objectMapper.writeValueAsString(frame);
+			}
+			catch (Exception ex) {
+				log.error("续跑降级结局帧序列化失败 runId={}（本帧跳过）：{}", this.runId, ex.getMessage());
+				return 0;
+			}
+			for (Subscription sub : this.subscribers) {
+				if (sub.closed || sub.evicted.get()) {
+					continue;
+				}
+				// 回放批标记：结局帧不受实时队列容量限制（与 finishDegradedReplay 同口径）
+				sub.queue.add(new QueuedFrame(payload, false));
+				targets.add(sub);
+			}
+		}
+		// 收尾动作在锁外做（与 completeSubscriptions 同一理由：emitter.complete() 与 send 同为
+		// synchronized，持锁调用会把出帧线程一起拖住）。
+		for (Subscription sub : targets) {
+			completeWhenDrained(sub);
+		}
+		log.info("续跑降级结局已投递 runId={} subscribers={} code={}", this.runId, targets.size(), code);
+		return targets.size();
+	}
+
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
 	/**

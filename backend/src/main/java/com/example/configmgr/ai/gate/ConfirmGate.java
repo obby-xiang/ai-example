@@ -8,6 +8,7 @@ import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CancelledRunFinalizer;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -20,6 +21,7 @@ import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
+import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -2092,6 +2094,10 @@ public class ConfirmGate {
 	 * {@code allowRetry=true} 调用方）的职责，所以"下一次明确交互/重挂会重新计数"仍然成立
 	 * （启动扫描直接调 {@code ResumeService}，不经过本入口、不重置预算，但会重新驱动这一轮）。
 	 *
+	 * <p><b>耗尽即给中性降级结局</b>：这一刻同时调 {@link #endUnresolvedStream} —— 给仍挂着的连接
+	 * 发一帧可区分的"结局未确认"（{@code unconfirmed=true} / {@code recoverable=true}）并收流。
+	 * 在此之前，重挂的 SSE 会一直挂着等一个永远不会到来的终帧（服务端 emitter 无传输超时）。
+	 *
 	 * <p><b>临时读不出来不算结局</b>：{@link AiStateUnavailableException}（Redis 断连/超时）在重试拍里
 	 * 仍然计入同一份预算并继续下一拍（见调度任务里的 catch），否则一次抖动就会把
 	 * {@code CANCEL_STATE_UNKNOWN} 的预算链提前终结。
@@ -2112,6 +2118,7 @@ public class ConfirmGate {
 				log.error("本次触发周期的续跑派发在 {} 次有界重试后仍未成功 runId={}（决策已落库；卡保持 "
 						+ "SUSPENDED，下一次明确交互/重挂会重新计数；启动扫描直接调 ResumeService，不重置本预算）",
 						max, runId);
+				endUnresolvedStream(runId, max);
 			}
 			return;
 		}
@@ -2144,6 +2151,70 @@ public class ConfirmGate {
 		catch (Exception ex) {
 			log.warn("续跑有界重试未排上 runId={}：{}", runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 预算耗尽的<b>中性降级结局</b>：给仍挂在本轮上的连接发<b>一次</b>可区分的"结局未确认"帧，然后收流。
+	 *
+	 * <h2>为什么要发（而不是只收流）</h2>
+	 * 走到这里的事实是：决策/回灌<b>已落库</b>，但这一轮没有任何可确认的驱动方（取消状态读不出来
+	 * ⇒ 续跑 fail-closed），有界重派发已经用尽。连接若只是静静挂着，客户端既拿不到终帧，也拿不到
+	 * "这一轮为什么停在这里"的任何信号 —— 只能等自己的超时（服务端 emitter 无传输超时）。
+	 *
+	 * <h2>为什么不是 done / 不是新的错误体系</h2>
+	 * <ul>
+	 * <li><b>不是终态</b>：不发 {@code done}（含 {@code cancelled:true}）、不写快照、不改条目 ——
+	 *     工具是否执行仍然<b>未知</b>（条目原样：{@code APPROVED} / {@code executed=false} /
+	 *     {@code outcome=null}）；</li>
+	 * <li><b>不入归档</b>：只投递给当下挂着的连接（{@link SseChatEmitter#unresolvedEnding}）。
+	 *     归档里写终帧会把这一轮的帧流判死（回放即收尾、取消收尾跳过 {@code done{cancelled:true}}），
+	 *     而这一轮其实仍可被显式恢复；</li>
+	 * <li><b>复用既有词汇</b>：帧语义 = 中性的"未确认"（{@code unconfirmed=true}），机器码复用
+	 *     {@code AI_REDIS_UNAVAILABLE} + {@code reason=CANCEL_STATE_UNKNOWN}（与
+	 *     {@code ResumeService} 的取消状态不可确认结局同一口径）。</li>
+	 * </ul>
+	 *
+	 * <p><b>一次</b>由调用方的 {@code attempt == max+1} 保证：同一周期的其它链、以及已排期任务的
+	 * 后续拍都只看到"已耗尽"，不会再发第二帧。
+	 *
+	 * <p>没有连接时什么都不做（没有要解开的等待，也不留归档痕迹）；下一次重挂/显式恢复会重新拥有
+	 * 完整预算并重新派发。
+	 */
+	private void endUnresolvedStream(String runId, int attempts) {
+		SseChatEmitter out = this.registry.find(runId);
+		if (out == null || out.subscriberCount() == 0) {
+			return;
+		}
+		try {
+			if (Boolean.TRUE.equals(out.terminalFrameArchived())) {
+				// 归档里已有终帧（另一条路径已收尾）：交给它，不补第二帧
+				out.completeSubscriptions();
+				return;
+			}
+			Map<String, Object> extra = new LinkedHashMap<>();
+			extra.put("reason", "CANCEL_STATE_UNKNOWN");
+			extra.put("unconfirmed", true);
+			extra.put("retryable", true);
+			extra.put("degraded", true);
+			extra.put("recoverable", true);
+			extra.put("status", RunSnapshot.SUSPENDED);
+			extra.put("attempts", attempts);
+			int delivered = out.unresolvedEnding(ErrorCodes.AI_REDIS_UNAVAILABLE, resumeUnresolvedMessage(), extra);
+			log.info("续跑派发预算耗尽：已向 {} 条连接发出中性降级结局并收流 runId={}（快照保持 {}，可显式恢复）",
+					delivered, runId, RunSnapshot.SUSPENDED);
+		}
+		catch (RuntimeException ex) {
+			log.warn("续跑派发预算耗尽的降级结局投递失败 runId={}（仍收流，不悬挂连接）：{}", runId, ex.getMessage());
+			out.completeSubscriptions();
+		}
+	}
+
+	/** 预算耗尽时用户面的中性短句（双语各一份；不声称成功/失败/取消，也不新增错误码）。 */
+	private static String resumeUnresolvedMessage() {
+		return ReplyLanguage.current().english()
+				? "Your decision was recorded, but this turn could not be resumed just now. The outcome is not "
+						+ "confirmed yet and the turn can still be recovered."
+				: "决定已记录，但这一轮此刻未能继续执行；结果尚未确认，本轮仍可恢复。";
 	}
 
 	/**
