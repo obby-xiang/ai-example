@@ -208,6 +208,7 @@ import type { SheetAdapter } from '@/utils/sheet-tools'
 import { useAiStore } from '@/stores/ai'
 import { stepLabel } from '@/utils/format'
 import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
+import { validateConditionPayload } from '@/utils/condition-payload'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 
@@ -2377,22 +2378,22 @@ function registerHandlers(): void {
     if (!defCode) {
       return '缺少 defCode，未设置条件'
     }
-    const condition = parseConditionJson(typeof payload.conditions === 'string' ? payload.conditions : JSON.stringify(payload.conditions ?? {}))
-    const model = draftModelFromCondition(condition)
-    // 先校验、后写（R2 返修）：与 `persistStepData` 同一个 `buildConditionOutcome` 判据。
-    // 旧实现在这里**先**写草案/touched/counts 再直接 PUT 原样条件，于是 `IN []` / 值算子空串
-    // 会先回「已设置…并落库」，真到 confirm_step 才被拦 —— 服务端已被写入一份非法条件。
-    const verdict = buildConditionOutcome(model)
-    if (verdict.status === 'invalid') {
-      return {
-        ok: false,
-        reason: `${describeConditionInputIssues(verdict.issues)} 本次未设置 ${defCode} 的查询条件`
+    // 先校验、后写（R4 返修）：统一复用契约层同一个载荷校验 —— `validateConditionPayload`
+    // 内含 `parseConditionJson → draftModelFromCondition → buildConditionOutcome`，并**先做**
+    // 结构完整性检查。旧实现只靠 `parseConditionJson` 的 null：空串 / 坏 JSON / 非对象 /
+    // 结构坏全被当成 "cleared"，于是 PUT "{}" 清空并回成功（把坏载荷静默变成全量导出）。
+    const verdict = validateConditionPayload(payload.conditions)
+    if (!verdict.ok) {
+      const reason = verdict.issues !== undefined && verdict.issues.length > 0
+        ? `${describeConditionInputIssues(verdict.issues)} 本次未设置 ${defCode} 的查询条件`
           + '（未落库、未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
           + '要表达"空值判断"请用 EMPTY / NOT_EMPTY。'
-      }
+        : verdict.reason
+      return { ok: false, reason }
     }
+    const condition = verdict.condition
     // 校验通过：此时才写页面状态（草案 / 已改登记 / 行数预览失效）
-    draftModels[defCode] = model
+    draftModels[defCode] = draftModelFromCondition(condition)
     // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此落库（含故意清空为无条件）
     touchedConditions.add(defCode)
     counts[defCode] = null
@@ -2409,13 +2410,18 @@ function registerHandlers(): void {
     const generation = taskGeneration
     const forTask = taskId.value
     try {
-      await tasksApi.setCondition(forTask, defCode, stringifyCondition(condition))
+      await tasksApi.setCondition(forTask, defCode, verdict.serialized)
       if (generation !== taskGeneration || taskId.value !== forTask) {
         return `查询条件已提交给任务 #${forTask}，但页面已切换到别的任务：本次未写入当前任务的工作区`
       }
       // 已落库 ⇒ 草案与服务端一致，后续切步不必重复写（失败则保留登记，切步时重试）
       touchedConditions.delete(defCode)
-      workspace.setQueryConditions(defCode, condition)
+      if (condition === null) {
+        // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与契约层同形）
+        workspace.clearQueryConditions(defCode)
+      } else {
+        workspace.setQueryConditions(defCode, condition)
+      }
       return `已设置 ${defCode} 的查询条件并落库：${summary}`
     } catch (error) {
       if (generation !== taskGeneration || taskId.value !== forTask) {

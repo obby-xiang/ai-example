@@ -155,6 +155,89 @@ describe('set_condition 非法条件：零 PUT、零工作区写、可行动失�
   })
 })
 
+describe('set_condition 四类坏载荷：失败且零 PUT、零工作区写（R4）', () => {
+  it('空串载荷 ⇒ 结构化失败，零 setCondition、工作区无该配置项占位', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const reply = await setCondition('')
+    await flushPromises()
+
+    // 修复前（RED）：parseConditionJson('') → null → 当"显式清空"，PUT "{}" 并回成功
+    expect(reply).toMatchObject({ ok: false })
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('坏 JSON 字符串 ⇒ 结构化失败，零 PUT、零工作区写（不得当清空）', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const reply = await setCondition('{"fields":[{"fieldCode":"code",')
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason ?? '')).toContain('无法解析')
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('非对象载荷（数组 / 标量）⇒ 结构化失败，零 PUT、零工作区写', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const arrayReply = await setCondition('[1,2]')
+    const scalarReply = await setCondition(42)
+    await flushPromises()
+
+    expect(arrayReply).toMatchObject({ ok: false })
+    expect(scalarReply).toMatchObject({ ok: false })
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('结构坏载荷（fields 非数组 / 条目缺 fieldCode）⇒ 结构化失败，零 PUT', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const badShape = await setCondition({ fields: 'oops' })
+    const badEntry = await setCondition('{"fields":[{"operator":"EQ"}]}')
+    await flushPromises()
+
+    expect(badShape).toMatchObject({ ok: false })
+    expect(badEntry).toMatchObject({ ok: false })
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('结构合法但无内容（{"fields":[]}）⇒ 失败，零 PUT（只有显式 {} 才清空）', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const reply = await setCondition({ fields: [] })
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('显式 {} 才清空：PUT "{}"，且工作区**不留**该配置项占位（R4）', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+
+    const reply = await setCondition({})
+    await flushPromises()
+
+    expect(typeof reply).toBe('string')
+    expect(String(reply)).toContain('已设置')
+    expect(api.setCondition).toHaveBeenCalledTimes(1)
+    expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
+    // 修复前（RED）：清空写成 queryConditions.CURRENCY = null（占位 "已设置条件"）
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+})
+
 describe('set_condition 合法条件：仍按原样落库（相邻正向）', () => {
   it('复杂合法条件（同字段多条件 + 含逗号 IN）⇒ 原字节落库且写回工作区', async () => {
     await mountWizard()

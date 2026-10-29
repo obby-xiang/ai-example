@@ -686,6 +686,27 @@ function resetDefinitionsRetryCooldown(): void {
 }
 
 /**
+ * 定义不可用时的**可行动成因**（给用户与模型的失败文案用）。
+ *
+ * 为什么需要：冷却期内编辑区载入会快速失败，但旧文案只有"编辑区表格未能载入（请重试…）"
+ * —— 模型读不出"是定义列表读不到 / 正在冷却"，只会原地重试同一调用（并继续撞冷却）。
+ */
+function definitionsUnavailableHint(): string | null {
+  if (defs.value.length > 0) {
+    return null
+  }
+  const remainingMs = definitionsRetryBlockedUntil - Date.now()
+  if (remainingMs > 0) {
+    const seconds = Math.max(1, Math.ceil(remainingMs / 1000))
+    return `配置定义列表最近一次读取失败，${seconds} 秒内不再自动重试（冷却中）`
+  }
+  if (defsLoaded.value) {
+    return '配置定义列表为空（服务端没有任何配置定义）'
+  }
+  return '配置定义列表尚未就绪（加载中或读取失败）'
+}
+
+/**
  * 定义到达后的自动恢复：第 1 步有选中项时补载尚未载入的编辑区（`loadEditors` 只补未载入的）。
  */
 async function recoverEditorsAfterDefinitions(): Promise<void> {
@@ -1255,7 +1276,11 @@ async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: s
   if (editorReady(code)) {
     return { ok: true, error: '' }
   }
-  return { ok: false, error: '编辑区表格未能载入（请重试，或重新打开该配置的编辑标签页）' }
+  const hint = definitionsUnavailableHint()
+  return {
+    ok: false,
+    error: `编辑区表格未能载入${hint === null ? '' : `（${hint}）`}（请重试，或重新打开该配置的编辑标签页）`
+  }
 }
 
 function onGridChanged(defCode: string | undefined): void {
@@ -2215,6 +2240,16 @@ function registerHandlers(): void {
       return {
         ok: false,
         reason: `当前激活的表格是 ${activeEditorTab.value || '无'}，不是 ${code}。请先切换到该配置的编辑标签页。`
+      }
+    }
+    // 定义不可用（含补请求冷却）⇒ 先给**成因**：此时编辑区根本没被建立，
+    // 若只说"表格未挂载"，模型只会重复同一调用并继续撞冷却。
+    const definitionProblem = definitionsUnavailableHint()
+    if (definitionProblem !== null) {
+      return {
+        ok: false,
+        reason: `${definitionProblem}：${code} 的编辑区无法建立（未按 0 字段载入）。`
+          + '请稍后重试；若持续失败，请让用户刷新页面重新加载配置定义。'
       }
     }
     const grid = gridRefs[code]

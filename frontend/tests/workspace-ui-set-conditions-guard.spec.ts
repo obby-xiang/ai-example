@@ -121,7 +121,7 @@ describe('契约层兜底 set_conditions：非法/坏载荷零 PUT、零工作�
 })
 
 describe('契约层兜底 set_conditions：显式清空与合法复杂条件（相邻正向）', () => {
-  it('显式 {} ⇒ 按"清空条件"落库（PUT "{}"），工作区记为无条件', async () => {
+  it('显式 {} ⇒ 按"清空条件"落库（PUT "{}"），工作区不留该配置项占位（R4）', async () => {
     const workspace = bindTask()
 
     const result = await dispatchUiEvent({ type: 'set_conditions', defCode: 'CURRENCY', conditions: {} })
@@ -130,8 +130,8 @@ describe('契约层兜底 set_conditions：显式清空与合法复杂条件（�
     expect(api.setCondition).toHaveBeenCalledTimes(1)
     expect(api.setCondition.mock.calls[0]?.[1]).toBe('CURRENCY')
     expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
-    expect(workspace.queryConditions).toHaveProperty('CURRENCY')
-    expect(workspace.queryConditions.CURRENCY).toBeNull()
+    // 修复前（RED）：写成 queryConditions.CURRENCY = null（把"清空"记成一条已设置条件）
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 
   it('合法复杂条件（同字段多条件 + 含逗号 IN）⇒ 按内容原样落库并写回工作区', async () => {

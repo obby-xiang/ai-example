@@ -281,6 +281,26 @@ export const useWorkspaceStore = defineStore('workspace', {
       })
     },
 
+    /**
+     * 清空某配置项的查询条件（显式清空 = 回到"导出全部"）。
+     *
+     * 为什么不是 `setQueryConditions(defCode, null)`：留着 `{ [defCode]: null }` 会被
+     * `get_workspace_state` / 上下文当成"已设置过条件"的占位（模型据此以为有筛选）；
+     * 契约层与页面统一走本方法**删键**，工作区里"没有这个键"才等于"无条件"。
+     */
+    clearQueryConditions(defCode: string): void {
+      if (!Object.prototype.hasOwnProperty.call(this.queryConditions, defCode)) {
+        return
+      }
+      const next = { ...this.queryConditions }
+      delete next[defCode]
+      this.queryConditions = next
+      this.touch(`清空 ${defCode} 的查询条件`, '界面', {
+        code: 'ai.workspace.queryConditions',
+        args: { code: defCode }
+      })
+    },
+
     setImportMode(mode: ImportMode | null): void {
       this.importMode = mode
       const label = mode === null
@@ -683,7 +703,12 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (!taskStill(taskId)) {
           return switched(taskId)
         }
-        workspace.setQueryConditions(event.defCode, verdict.condition)
+        if (verdict.condition === null) {
+          // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与页面同形）
+          workspace.clearQueryConditions(event.defCode)
+        } else {
+          workspace.setQueryConditions(event.defCode, verdict.condition)
+        }
         return ok(`已设置 ${event.defCode} 的查询条件`)
       }
       case 'set_import_mode': {

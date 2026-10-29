@@ -9,7 +9,7 @@
  * 收口口径：`parseConditionJson` → `draftModelFromCondition` → `buildConditionOutcome`
  * （与 `export.setConditions` / `persistStepData` 完全同一判据）：
  * - 不可解析 / 结构坏 / 非法空值 ⇒ 失败（调用方零 PUT、零工作区写）；
- * - **显式空条件**（`{}` / 无任何字段与范围）⇒ 清空（与页面一致：PUT `{}`）；
+ * - **显式 `{}`**（空对象）⇒ 清空（与页面一致：PUT `{}`）；有结构但没内容的载荷按坏载荷拒绝；
  * - 合法复杂条件 ⇒ 按内容原样落库（同字段多条件、含逗号 IN 都不改写）。
  */
 
@@ -18,6 +18,7 @@ import {
   draftModelFromCondition,
   parseConditionJson,
   stringifyCondition,
+  type ConditionInputIssue,
   type FieldQueryCondition
 } from '@/types/condition'
 
@@ -29,12 +30,19 @@ export type ConditionPayloadVerdict =
       /** 落库用的规范化 JSON（清空恒为 `{}`） */
       serialized: string
     }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      reason: string
+      /** `invalid` 时的结构化问题（页面侧据此本地化成文；契约层直接用 reason） */
+      issues?: ConditionInputIssue[]
+    }
 
 const REJECT_SUFFIX = '本次未设置查询条件（未落库、未写入工作区）'
 
-function reject(reason: string): ConditionPayloadVerdict {
-  return { ok: false, reason: `${reason}：${REJECT_SUFFIX}` }
+function reject(reason: string, issues?: ConditionInputIssue[]): ConditionPayloadVerdict {
+  return issues === undefined
+    ? { ok: false, reason: `${reason}：${REJECT_SUFFIX}` }
+    : { ok: false, reason: `${reason}：${REJECT_SUFFIX}`, issues }
 }
 
 /** 结构检查：坏载荷不能靠 `parseConditionJson` 静默丢条目后变成"无条件"。 */
@@ -103,9 +111,19 @@ export function validateConditionPayload(payload: unknown): ConditionPayloadVerd
   const outcome = buildConditionOutcome(draftModelFromCondition(condition))
   if (outcome.status === 'invalid') {
     const issues = outcome.issues.map((issue) => `${issue.fieldCode}:${issue.code}`).join('、')
-    return reject(`查询条件不合法（${issues}）；值算子必须填值、IN 至少一个值（空值判断请用 EMPTY / NOT_EMPTY）`)
+    return reject(
+      `查询条件不合法（${issues}）；值算子必须填值、IN 至少一个值（空值判断请用 EMPTY / NOT_EMPTY）`,
+      outcome.issues
+    )
   }
-  // `cleared`（响应里没有任何条件）在这里等价于**显式清空**：与页面 handler 的
-  // `buildConditionOutcome === 'cleared'` 分支一致；坏载荷已在结构检查处被拒，不会走到这里。
+  if (outcome.status === 'cleared') {
+    // 只有**显式 `{}`** 才是"清空"：`{"fields":[]}` / `{"scopeKeys":[]}` 这类"有结构但没内容"
+    // 的载荷语义含糊（后端 set_condition 也会拒），按坏载荷处理，避免把一次含糊调用
+    // 静默解释成"无条件 = 全量"。
+    if (Object.keys(parsed as Record<string, unknown>).length > 0) {
+      return reject('查询条件里没有任何可提交的字段或范围（如需清空条件请显式传 {}）')
+    }
+    return { ok: true, condition: null, serialized: '{}' }
+  }
   return { ok: true, condition: outcome.condition, serialized: stringifyCondition(outcome.condition) }
 }

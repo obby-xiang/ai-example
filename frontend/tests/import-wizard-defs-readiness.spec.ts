@@ -251,6 +251,23 @@ describe('导入编辑区：定义慢加载时等待就绪并自动载入（不�
     expect(grids.loadCalls).toEqual([])
   })
 
+  it('冷却期内 sheet.current 的失败文案给出可行动成因（定义不可用 / 冷却）', async () => {
+    api.listDefinitions.mockRejectedValue(new Error('GET /api/definitions 503'))
+    await mountWizard()
+
+    const sheet = getPageHandler('sheet.current')
+    expect(sheet).not.toBeNull()
+    const reply = await sheet?.({ defCode: 'CURRENCY' })
+    await flushPromises()
+
+    // 修复前（RED）：只有"编辑区表格未能载入（请重试…）"，模型读不出"定义不可用 / 正在冷却"
+    expect(reply).toMatchObject({ ok: false })
+    const reason = String((reply as { reason?: string }).reason ?? '')
+    expect(reason).toContain('配置定义')
+    expect(reason).toContain('冷却')
+    expect(grids.loadCalls).toEqual([])
+  })
+
   it('冷却期内显式换任务可重置 ⇒ 重新尝试定义并自动载入', async () => {
     api.listDefinitions.mockRejectedValue(new Error('GET /api/definitions 503'))
     await mountWizard()
