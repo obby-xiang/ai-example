@@ -2924,13 +2924,23 @@ async function caseSessionPurgeCrossInstance() {
   const keep = await runPlainChat('a', 'cluster3-purge-keep')
   const target = await runPlainChat('a', 'cluster3-purge-target')
   // 数据库完整历史端点（/history/{sid}/messages）已随 ai_chat_message 移除 ⇒ 销毁前后的"存在/无残留"
-  // 都用记忆窗口（/history/{sid}）判定，并用 runs/current 把窗口所属会话绑到目标轮（窗口条目不带 runId）。
+  // 都用记忆窗口（/history/{sid}）判定。窗口条目不带 runId，归属改由 run 维度
+  // （GET /api/ai/runs/{runId} 的 exists / snapshot.sessionId / snapshot.status）绑定：
+  // target/keep 都是 runPlainChat 跑到 done 的完成轮，终态时 RunStore#persist 会
+  // clearSessionCurrent（该会话没有其它活跃轮则键直接删除），故 runs/current 对完成轮
+  // 必然查不到自己 —— 它不是完成轮的归属载体，用它会变成"结构性必红"的错误判据。
   const beforeWindow = await waitHistoryUserMessage('c', target.sessionId, '三实例连通性')
   checkGe(beforeWindow.messages.length, 2, '销毁前 C 侧记忆窗口必须能看到目标轮（用户+助手）')
-  const beforeCurrent = await currentRun('c', target.sessionId)
-  checkEq(beforeCurrent.runId, target.runId, '销毁前 runs/current 必须指向目标轮')
+  const targetDetail = await runDetail('c', target.runId)
+  checkEq(targetDetail.exists, true, '销毁前 run 详情（C 侧）必须 exists=true')
+  checkEq(
+    targetDetail.snapshot ? targetDetail.snapshot.sessionId : null,
+    target.sessionId,
+    '销毁前 run 快照 sessionId 必须等于目标会话'
+  )
+  checkEq(targetDetail.snapshot ? targetDetail.snapshot.status : null, 'DONE', '销毁前目标轮快照状态必须 DONE')
 
-  // ① 普通完成会话：B 删 → C 验证旧 history / runs/current 均无残留。
+  // ① 普通完成会话：B 删 → C 验证记忆窗口与 run 维度均无残留。
   const del = await deleteJson('b', `/api/ai/session/${encodeURIComponent(target.sessionId)}`)
   checkEq(del.record.status, 200, `B 侧 DELETE /session HTTP：${del.record.text.slice(0, 400)}`)
   check(del.body && del.body.complete === true, `非在途会话销毁必须 complete=true：${del.record.text.slice(0, 600)}`)
@@ -2944,14 +2954,21 @@ async function caseSessionPurgeCrossInstance() {
   checkEq(legacyAfterData.messages.length, 0, 'C 侧旧 /history 销毁后 messages 必须为空')
   checkEq(legacyAfterData.total, 0, 'C 侧旧 /history 销毁后 total 必须为 0')
 
-  const currentAfter = await currentRun('c', target.sessionId)
-  checkEq(currentAfter.found, false, 'C 侧 runs/current 销毁后必须 found=false')
+  // 销毁后 run 维度必须无残留：purge 按 run 删 13 个 run 级键（终态轮直接删、活跃轮 deferred），
+  // 所以完整销毁（complete=true）后该 runId 的详情必须 exists=false。
+  const targetAfter = await runDetail('c', target.runId)
+  checkEq(targetAfter.exists, false, 'C 侧目标轮 run 详情销毁后必须 exists=false（run 维度无残留）')
 
   // 另一个会话不受影响。
   const keepHistory = await historyStable('c', keep.sessionId, '三实例连通性')
   checkGe(keepHistory.total, 2, '销毁目标会话后，另一个会话的 history 仍完整')
-  const keepCurrent = await currentRun('c', keep.sessionId)
-  checkEq(keepCurrent.runId, keep.runId, '另一个会话的 runs/current 仍指向它自己的轮（不受销毁波及）')
+  const keepDetail = await runDetail('c', keep.runId)
+  checkEq(keepDetail.exists, true, '另一个会话的 run 详情仍必须 exists=true（不受销毁波及）')
+  checkEq(
+    keepDetail.snapshot ? keepDetail.snapshot.sessionId : null,
+    keep.sessionId,
+    '另一个会话的 run 快照 sessionId 未被改写'
+  )
   // 业务 task 不被会话销毁波及。
   const taskAfter = await getTask('c', task.id)
   checkEq(taskAfter.id, task.id, '会话销毁后业务 task 仍可读取')
@@ -2960,9 +2977,20 @@ async function caseSessionPurgeCrossInstance() {
     target: { sessionId: target.sessionId, runId: target.runId },
     purge: del.body,
     legacyAfter: { total: legacyAfterData.total, messages: legacyAfterData.messages.length },
-    before: { messages: beforeWindow.messages.length, runId: beforeCurrent.runId },
-    runsCurrent: currentAfter.found,
-    keep: { sessionId: keep.sessionId, total: keepHistory.total, runId: keepCurrent.runId },
+    before: {
+      messages: beforeWindow.messages.length,
+      runExists: targetDetail.exists,
+      runStatus: targetDetail.snapshot ? targetDetail.snapshot.status : null,
+      runSessionId: targetDetail.snapshot ? targetDetail.snapshot.sessionId : null
+    },
+    runAfter: { exists: targetAfter.exists },
+    keep: {
+      sessionId: keep.sessionId,
+      total: keepHistory.total,
+      runId: keep.runId,
+      runExists: keepDetail.exists,
+      runSessionId: keepDetail.snapshot ? keepDetail.snapshot.sessionId : null
+    },
     taskId: task.id
   })
 

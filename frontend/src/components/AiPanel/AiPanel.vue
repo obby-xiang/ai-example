@@ -264,11 +264,13 @@
           {{ t('ai.panel.welcome1') }}<br />
           {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
         </div>
-        <!-- 批次6A / N12 / AR-01：空态必须如实写清存储载体（浏览器镜像 / Redis 运行态与
-             记忆 24h 滑动），并说明关页签后本轮仍会继续。
-             旧文案「关闭页签即结束」与实现相反，已删除（不得写成“不落库”）。
-             注意：`ai.panel.storage.history` 一句仍写"完整历史写入服务端数据库"——数据库完整
-             历史已随 ai_chat_message 移除而失效，该句待文案评审后下线，勿据其新增断言。 -->
+        <!-- 批次6A / N12 / AR-01（2026-10-30 删表批口径）：空态如实写清存储载体 —— 本页签浏览器
+             镜像（刷新可恢复）+ 服务端 24h 滑动记忆窗口；对话正文不落库（`ai_chat_message` 已由
+             迁移 V10 删除、完整历史端点 /history/{sid}/messages 已移除）⇒ 没有长期归档。
+             旧文案「关闭页签即结束」与实现相反，已删除。
+             三句 locale（`ai.panel.storage.mirror` / `.run` / `.history`）均已按本口径改好，
+             `frontend/tests/ai-panel-parts-render.spec.ts` 的 N12 用例按新文案做正/反断言
+             （须含「没有长期归档」、不得出现「数据库」）—— 勿再按旧文案新增断言。 -->
         <div class="mt-[6px] text-[11.8px] leading-[1.7] text-[#8b949e]" data-testid="storage-notice">
           <div>{{ t('ai.panel.storage.mirror') }}</div>
           <div>{{ t('ai.panel.storage.run') }}</div>
