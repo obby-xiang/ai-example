@@ -93,7 +93,7 @@ class AiControllerEventsParkCloseTest {
 		SseEmitter attached = new SseEmitter(-1L);
 		this.registry.of(RUN_ID).attach(attached);
 
-		this.controller.events(RUN_ID, null);
+		this.controller.events(RUN_ID, null, false);
 
 		assertThat(this.registry.of(RUN_ID).subscriberCount())
 			.as("条目已结算 ⇒ 续跑在即：调用方连接 + 控制器新建连接都必须保留（否则续跑的 done 丢失）")
@@ -107,7 +107,7 @@ class AiControllerEventsParkCloseTest {
 		SseEmitter attached = new SseEmitter(-1L);
 		this.registry.of(RUN_ID).attach(attached);
 
-		this.controller.events(RUN_ID, null);
+		this.controller.events(RUN_ID, null, false);
 
 		assertThat(this.registry.of(RUN_ID).subscriberCount())
 			.as("仍在等人 ⇒ 回放后收流，不悬挂连接（park 的本意）")
@@ -125,7 +125,7 @@ class AiControllerEventsParkCloseTest {
 		when(this.confirmGate.triggerResumeForParked(RUN_ID))
 			.thenThrow(new AiStateUnavailableException("Redis 不可用：快照读失败"));
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value())
 			.as("对账异常时订阅已挂上（replayAndAttach 在前）：抛出即成 500，emitter 不交给容器、清理回调永不触发")

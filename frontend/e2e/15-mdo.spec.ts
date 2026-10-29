@@ -332,8 +332,16 @@ test.describe('@stub M 多实例与跨实例重连', () => {
 
   test('E2E-M08 重连 4 次退避 + jitter：≤5 条连接、1/2/4/8s(±25%)、耗尽后显式提示', async ({ page }) => {
     const attempts: number[] = []
-    // 网络层真故障注入：EventSource 的每一次重连都被 abort（真 EventSource + 真退避计时器）
+    const probes: string[] = []
+    // 网络层真故障注入：**只** abort 真实的 EventSource 连接（真 EventSource + 真退避计时器）。
+    // M08 口径：探测请求（`?probe=1`，resourceType=fetch/xhr）不计入连接预算 ——
+    // 修复前探测打正式端点、与 EventSource 混在同一个计数里，5 次预算被探测抢走一半。
     await page.route('**/api/ai/events/**', (route) => {
+      const request = route.request()
+      if (request.resourceType() !== 'eventsource') {
+        probes.push(request.url())
+        return route.continue()
+      }
       attempts.push(Date.now())
       return route.abort('connectionreset')
     })
@@ -342,15 +350,18 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     await sendAndReloadDuringRun(page, 'turn-text stall-frames=1500 m08')
 
     await expect(page.locator('[data-testid="alert-interrupted"]')).toBeVisible({ timeout: 90_000 })
-    // 5 条连接 = 1 次初始 + 4 次重试
+    // 5 条连接 = 1 次初始 + 4 次重试（阈值不放宽；探测不占额度）
     await waitFor(() => attempts.length >= 5, 30_000, '第 5 条连接')
     expect(attempts.length).toBeLessThanOrEqual(5)
+    // 探测确实发生了，而且是轻量 JSON 探测（不是第二条 SSE）—— 只作证据，不进预算断言
+    expect(probes.length).toBeGreaterThan(0)
+    expect(probes.every((url) => url.includes('probe=1'))).toBe(true)
 
     const gaps = attempts.slice(1).map((value, index) => value - attempts[index])
     const bases = [1000, 2000, 4000, 8000]
     bases.forEach((base, index) => {
       const gap = gaps[index]
-      // ±25% 抖动 + 传输/调度余量 800ms
+      // ±25% 抖动 + 传输/调度余量 800ms（退避不被探测推迟：余量不放宽）
       expect(gap).toBeGreaterThanOrEqual(base * 0.75 - 100)
       expect(gap).toBeLessThanOrEqual(base * 1.25 + 800)
     })

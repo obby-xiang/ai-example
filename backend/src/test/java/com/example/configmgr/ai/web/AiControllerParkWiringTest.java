@@ -110,7 +110,7 @@ class AiControllerParkWiringTest {
 		when(this.out.replayAndAttach(any(), any(), anyBoolean())).thenReturn(3);
 		when(this.out.completeSubscriptions()).thenReturn(1);
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).isEqualTo(200);
 		verify(this.out, never()).replayTo(any(), any());

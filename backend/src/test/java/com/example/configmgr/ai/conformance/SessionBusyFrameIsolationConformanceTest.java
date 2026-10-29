@@ -207,12 +207,12 @@ class SessionBusyFrameIsolationConformanceTest {
 				FrameContract.fixture("suspended", 2L));
 		this.store.get("run-reattach-endpoint").setStatus(RunSnapshot.SUSPENDED);
 
-		ResponseEntity<?> reattached = this.controller.events("run-reattach-endpoint", 1L);
+		ResponseEntity<?> reattached = this.controller.events("run-reattach-endpoint", 1L, false);
 		assertThat(reattached.getStatusCode()).isEqualTo(HttpStatus.OK);
 		assertThat(reattached.getBody()).as("重挂成功时回体是 SSE 流（回放帧写在 controller 自建的 emitter 上）")
 				.isInstanceOf(SseEmitter.class);
 
-		ResponseEntity<?> unknown = this.controller.events("run-does-not-exist", null);
+		ResponseEntity<?> unknown = this.controller.events("run-does-not-exist", null, false);
 		assertThat(unknown.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 		assertThat(bodyOf(unknown)).containsEntry("code", "UNKNOWN_RUN");
 	}

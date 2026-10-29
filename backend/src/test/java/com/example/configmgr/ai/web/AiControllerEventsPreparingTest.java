@@ -93,7 +93,7 @@ class AiControllerEventsPreparingTest {
 		long startedAtMs = System.currentTimeMillis() - 12_000L;
 		armArchive(List.of(startFrame(startedAtMs)), 1L);
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).as("准备中不是错误：202，不是 404").isEqualTo(202);
 		assertThat(response.getBody()).isInstanceOf(Map.class).isNotInstanceOf(SseEmitter.class);
@@ -123,7 +123,7 @@ class AiControllerEventsPreparingTest {
 				startFrame(System.currentTimeMillis() - 60_000L),
 				FrameContract.fixture("done", 3L, "cancelled", false)));
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).as("回放路径仍是 200 SSE").isEqualTo(200);
 		assertThat(response.getBody()).isInstanceOf(SseEmitter.class);
@@ -133,7 +133,7 @@ class AiControllerEventsPreparingTest {
 	void unknownRunWithAnEmptyArchiveIsStill404() {
 		armArchive(List.of(), 0L);
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).isEqualTo(404);
 		@SuppressWarnings("unchecked")
@@ -145,7 +145,7 @@ class AiControllerEventsPreparingTest {
 	void unreadableArchiveTailIs503Not404() {
 		when(this.frameStore.lastSeqIfKnown(RUN_ID)).thenReturn(OptionalLong.empty());
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).as("读失败 ≠ 没有这一轮").isEqualTo(503);
 		@SuppressWarnings("unchecked")
@@ -159,7 +159,7 @@ class AiControllerEventsPreparingTest {
 		armArchive(List.of(startFrame(startedAtMs)), 1L);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
 
-		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
+		ResponseEntity<?> response = this.controller.events(RUN_ID, null, false);
 
 		assertThat(response.getStatusCode().value()).isEqualTo(202);
 		@SuppressWarnings("unchecked")

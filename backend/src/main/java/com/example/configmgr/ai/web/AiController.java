@@ -850,10 +850,19 @@ public class AiController {
 	 * <b>B23L1 批①</b>：回放源改走 {@link FrameStore}（生产 = Redis Stream {@code ai:xevents:}；
 	 * 兼容期内部把旧的 {@code ai:events:} LIST 串在前面并按 {@code seq} 去重），
 	 * 差量/孤儿过滤口径不变；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
+	 *
+	 * <p>
+	 * <b>M08 探测</b>：{@code ?probe=1} 走同一条路径的<b>轻量 JSON 探测</b>（见 {@link #probe}）——
+	 * 只读状态，不建订阅、不回放、不续期。前端断流后"先探一眼再说"因此不再产生第二条真实订阅。
 	 */
-	@GetMapping(value = "/events/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+	@GetMapping(value = "/events/{runId}",
+			produces = { MediaType.TEXT_EVENT_STREAM_VALUE, MediaType.APPLICATION_JSON_VALUE })
 	public ResponseEntity<?> events(@PathVariable String runId,
-			@RequestParam(required = false) Long lastSeq) {
+			@RequestParam(required = false) Long lastSeq,
+			@RequestParam(name = "probe", required = false, defaultValue = "false") boolean probe) {
+		if (probe) {
+			return this.probe(runId);
+		}
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot == null) {
 			// ===== AR-06：已 start、快照未建 =====
@@ -920,6 +929,56 @@ public class AiController {
 			}
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	/**
+	 * <b>M08：轻量探测（{@code GET /api/ai/events/{runId}?probe=1}）</b> —— 只读状态，零连接。
+	 *
+	 * <p>为什么需要它：前端断流后要"先探一眼再决定重连还是判死"，而 EventSource 读不到非 200 的
+	 * 响应体。此前探测直接打<b>正式</b>端点并声明 {@code Accept: text/event-stream}，于是服务端
+	 * 照常建 {@link SseChatEmitter} 订阅、回放整段归档、{@code touchActiveRun} 续期 ——
+	 * 一次只想知道状态的探测，产生了一次真实订阅（真机 trace：5 条 EventSource + 5 条 probe fetch）。
+	 *
+	 * <p>本方法因此<b>只做三件只读的事</b>：读快照、按 AR-06 复用 {@link #preparingOrUnknown}
+	 * 判"准备中/不存在/降级"、读归档末号。响应形态：
+	 * <ul>
+	 * <li>202 {@code preparing=true}（已 start、快照未建；带 {@code elapsedMs}/{@code retryAfterMs}）；</li>
+	 * <li>404 {@code UNKNOWN_RUN}（归档一帧都没有）；</li>
+	 * <li>503 {@code AI_REDIS_UNAVAILABLE} + {@code degraded=true}（归档末号读不出来；快照读失败由
+	 *     全局出口同样映射 503）；</li>
+	 * <li>200 {@code ready=true}（快照已建，或归档已有终帧 —— 正式通道能立即 serve，前端可重挂）。</li>
+	 * </ul>
+	 *
+	 * <p><b>不得</b>在此创建 {@link SseEmitter}、调 {@link SseChatEmitter#replayAndAttach} /
+	 * {@code completeSubscriptions}、或 {@code touchActiveRun}：探测不是"有人在看"，不该延长保留期、
+	 * 也不该抢占用正式连接的退避时间线。
+	 */
+	private ResponseEntity<?> probe(String runId) {
+		RunSnapshot snapshot = this.runStore.get(runId);
+		if (snapshot == null) {
+			ResponseEntity<?> early = this.preparingOrUnknown(runId);
+			if (early != null) {
+				return early;
+			}
+			// early == null ⇒ 归档里已有终帧（快照被 TTL 先回收）：正式通道会回放终态 ⇒ 探测报就绪
+		}
+		// 与正式通道的 503 同口径：末号读不出来时不冒充"就绪"（下一拍再探）
+		FrameStore frames = this.frameStore;
+		if (frames != null && frames.lastSeqIfKnown(runId).isEmpty()) {
+			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
+					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
+			body.put("degraded", true);
+			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("ready", true);
+		body.put("preparing", false);
+		body.put("runId", runId);
+		if (snapshot != null) {
+			body.put("status", snapshot.getStatus());
+		}
+		body.put("degraded", false);
+		return json(HttpStatus.OK, body);
 	}
 
 	/** "准备中"重挂的响应体字段：建议的重试间隔（毫秒）。 */

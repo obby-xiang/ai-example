@@ -106,7 +106,15 @@ export const SSE_PATHS = {
   events: (runId: string, lastSeq?: number): string =>
     lastSeq === undefined
       ? `/api/ai/events/${encodeURIComponent(runId)}`
-      : `/api/ai/events/${encodeURIComponent(runId)}?lastSeq=${Math.max(0, Math.floor(lastSeq))}`
+      : `/api/ai/events/${encodeURIComponent(runId)}?lastSeq=${Math.max(0, Math.floor(lastSeq))}`,
+  /**
+   * M08：同路径的**轻量探测**（`?probe=1` + JSON）—— 服务端只读状态，
+   * 不建 SseEmitter、不回放、不 `touchActiveRun`。
+   *
+   * 为什么不能复用 `events`：正式端点被探测一次就产生一次真实订阅（订阅 + 回放 + 续期），
+   * 真机 trace 里因此是"5 条 EventSource + 5 条 probe fetch"。
+   */
+  eventsProbe: (runId: string): string => `/api/ai/events/${encodeURIComponent(runId)}?probe=1`
 } as const
 
 /** 批次3：重挂探测得到的"准备中"事实（后端 202 + `preparing=true`）。 */
@@ -544,21 +552,27 @@ async function readStream(
  *
  * <p>为什么不能直接用 EventSource：`GET /api/ai/events/{runId}` 在"已 start、快照未建"窗口
  * 返回 **202 + JSON**（`{preparing:true, elapsedMs, retryAfterMs, ...}`），而 EventSource 只能
- * 把非 200 当 `onerror`，读不到响应体。因此这里用裸 `fetch` 探一次状态：
+ * 把非 200 当 `onerror`，读不到响应体。因此这里用裸 `fetch` 探一次状态。
+ *
+ * <p><b>M08：探测走 `?probe=1` 并声明 `Accept: application/json`</b>（{@link SSE_PATHS#eventsProbe}）。
+ * 修复前这里打的是正式端点、声明 `text/event-stream`，服务端于是照常建订阅、回放归档、
+ * `touchActiveRun` 续期 —— "只想看看状态"的探测产生了一次真实订阅（真机 trace 的 10 个请求里
+ * 一半是它）。探测端点只读状态，因此这条路径不再占用任何真实连接。
+ *
  * <ul>
  * <li>202 + `preparing=true` ⇒ 返回准备中事实（调用方显示"准备中 · 已用 N 秒"）；</li>
- * <li>200 ⇒ 快照已建/有归档，立即 cancel 这条流（调用方会走正式的 EventSource 重挂）；</li>
- * <li>404 / 其它状态原样返回，由调用方决定封口或重试。</li>
+ * <li>200 + `ready=true` ⇒ 快照已建/归档有终帧，立即 cancel 这条请求（调用方会走正式的 EventSource 重挂）；</li>
+ * <li>404 / 503（`degraded`）等原样返回，由调用方决定封口或按时重试。</li>
  * </ul>
- * 本函数**不**消费 200 的流，也不重试。
+ * 本函数**不**消费流，也不重试；调用方**不得**在退避之前 await 它（探测慢不能推迟重连）。
  */
 export async function probeReattach(runId: string): Promise<ReattachProbe> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), DEFAULT_CONNECT_TIMEOUT_MS)
   try {
-    const response = await fetch(SSE_PATHS.events(runId), {
+    const response = await fetch(SSE_PATHS.eventsProbe(runId), {
       method: 'GET',
-      headers: { Accept: 'text/event-stream', 'Accept-Language': acceptLanguage() },
+      headers: { Accept: 'application/json', 'Accept-Language': acceptLanguage() },
       cache: 'no-store',
       signal: controller.signal
     })
@@ -586,7 +600,7 @@ export async function probeReattach(runId: string): Promise<ReattachProbe> {
       }
       return { status: response.status, preparing: null }
     }
-    // 200 = 正式流/归档回放：探测不要留下第二条长期连接
+    // 200 = 就绪（`ready=true` 的轻量 JSON）：不留任何挂起的响应体
     try {
       await response.body?.cancel()
     } catch {
@@ -768,6 +782,8 @@ export async function reattach(
     let source: EventSource | null = null
     let idleTimer: ReturnType<typeof setTimeout> | null = null
     let connectTimer: ReturnType<typeof setTimeout> | null = null
+    /** 退避计时器（M08：由 `scheduleReconnect` 记录，`settle` 必须清掉，否则探测命中 202/404 后仍留残留定时器）。 */
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
     let settled = false
     let connectionEstablished = false
@@ -795,6 +811,14 @@ export async function reattach(
       connectTimer = null
     }
 
+    /** 清退避计时器（`settle` / 重新排期时都要清，保证收尾后不留计时器）。 */
+    const clearRetry = (): void => {
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer)
+      }
+      retryTimer = null
+    }
+
     const settle = (terminal: boolean, reason?: string): void => {
       if (settled) {
         return
@@ -802,6 +826,7 @@ export async function reattach(
       settled = true
       clearIdle()
       clearConnect()
+      clearRetry()
       source?.close()
       source = null
       options.signal?.removeEventListener('abort', onAbort)
@@ -883,7 +908,9 @@ export async function reattach(
       state.reconnects = attempts
       const delay = reconnectDelayMs(attempts, random)
       handlers.onReconnect?.(attempts, delay)
-      setTimeout(() => {
+      clearRetry()
+      retryTimer = setTimeout(() => {
+        retryTimer = null
         if (!settled && !options.signal?.aborted) {
           open()
         }
@@ -926,10 +953,21 @@ export async function reattach(
         source = null
         // 批次3：EventSource 读不到非 200 的响应体 —— 用一次裸 fetch 探测 202"准备中"。
         // 命中 202 ⇒ 不当作断流、也不自动轮询：交给调用方显示可重试的准备中阶段。
+        //
+        // M08：探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
+        // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
+        // 都不影响 1/2/4/8s 时间线，③ 探测结果过期（退避已开新连接）时一律丢弃 ——
+        // 否则一条慢探测会关掉刚建立的新连接，或把"准备中"误判到别的连接上。
         if (!connectionEstablished && !probedThisConnection) {
           probedThisConnection = true
+          scheduleReconnect('重挂连接中断')
+          if (settled) {
+            // 重挂额度已耗尽（或已收尾）：不再发探测 —— 一个已收尾的连接不该留下在途请求与计时器
+            return
+          }
           void probeReattach(runId).then((probe) => {
-            if (settled) {
+            if (settled || source !== null) {
+              // 已收尾（其他路径 settle）或退避已开新连接：本探测结果过期
               return
             }
             if (probe.preparing) {
@@ -941,9 +979,8 @@ export async function reattach(
               // 真不存在：交给调用方封口镜像里的在途轮（不显示"轮不存在"技术文案）
               handlers.onUnavailable?.()
               settle(false)
-              return
             }
-            scheduleReconnect('重挂连接中断')
+            // 其余（200 就绪 / 5xx / 网络失败）：退避已排期，按时重连即可
           })
           return
         }
