@@ -3,6 +3,7 @@ package com.example.configmgr.ai.form;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.RunContextRefresher;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -265,14 +266,20 @@ abstract class HostForm {
 		return false;
 	}
 
-	/** 交棒历史里最后一条<b>用户</b>原文（续跑没有新用户消息，用的就是这一条）。 */
+	/**
+	 * 交棒历史里最后一条<b>真实用户</b>原文（续跑没有新用户消息，用的就是这一条）。
+	 *
+	 * <p>跳过合成消息（压缩摘要 / 步数或预算收尾提示，判据见 {@code SyntheticMessages}）：它们是系统
+	 * 提示，不是用户原话。把它们当"最后一句"会让"继续任务"的意图凭空消失（表单不再挂起），
+	 * 这与 {@code TaskSlotResolver} 读历史时的过滤是同一条口径。
+	 */
 	protected static String lastUserText(List<Message> history) {
 		if (history == null) {
 			return null;
 		}
 		for (int i = history.size() - 1; i >= 0; i--) {
 			Message message = history.get(i);
-			if (message instanceof UserMessage user) {
+			if (message instanceof UserMessage user && !SyntheticMessages.isSynthetic(message)) {
 				return user.getText();
 			}
 		}

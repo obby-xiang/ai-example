@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.RunContextRefresher;
+import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -127,7 +128,59 @@ class ConditionsFormTest {
 		verify(this.emitter).suspended(eq(List.of(pending)), anyString(), anyString(), anyString());
 	}
 
-	// ── ② 步骤门：SELECT_DEFS 与 EXPORT（及之后）一律不弹 ──────────────────
+	// ── ② 用户明确要求别的表单/工具时让位（GF2 回归）──────────────────────────
+
+	@Test
+	void messageAskingForAnotherFormNeverPreemptsTheConditionBox() {
+		seedNewTaskRun();
+		// GF2 的现场：用户既说"继续这个导出任务"，又明确要求模型用 CLARIFY 表单澄清配置项
+		String gf2 = "我想继续这个导出任务，但你缺两个信息。请调用 generative_form 工具（scenario=CLARIFY）"
+				+ "向我澄清 exportScope/includeInactive 分别要什么，不要调用其他工具";
+
+		boolean parked = parkAt("QUERY_COND", gf2, List.of());
+
+		assertThat(parked)
+			.as("用户明确要求 CLARIFY 表单 ⇒ 宿主不得抢成条件框（模型必须被驱动、自行发 CLARIFY）")
+			.isFalse();
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
+		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
+	}
+
+	@Test
+	void messageAskingForAnotherToolNeverPreemptsTheConditionBox() {
+		seedNewTaskRun();
+		String text = "继续这个导出任务，请先调用 list_config_defs 看看有哪些配置项，别发别的工具";
+
+		assertThat(parkAt("QUERY_COND", text, List.of()))
+			.as("用户点名了别的工具 ⇒ 宿主不抢条件框")
+			.isFalse();
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
+	}
+
+	@Test
+	void explicitConditionFormRequestStillParks() {
+		seedNewTaskRun();
+		// 负控制：同样是"说话里带表单"，但指向的正是本节点的缺口 —— 不得被让位规则误排除
+		String text = "继续这个导出任务，请调用 generative_form（scenario=FILTER）收集筛选条件";
+
+		assertThat(parkAt("QUERY_COND", text, List.of()))
+			.as("显式条件请求（FILTER/筛选条件）仍必须由宿主给框")
+			.isTrue();
+		assertThat(onlyPending().getToolCallId()).isEqualTo(ConditionsForm.toolCallId(TASK_ID));
+	}
+
+	@Test
+	void explicitSetConditionsPurposeStillParks() {
+		seedNewTaskRun();
+		String text = "继续任务，用 generative_form 按 purpose=SET_CONDITIONS 发条件框";
+
+		assertThat(parkAt("QUERY_COND", text, List.of()))
+			.as("显式 SET_CONDITIONS 请求不得被误排除")
+			.isTrue();
+		assertThat(onlyPending().getToolCallId()).isEqualTo(ConditionsForm.toolCallId(TASK_ID));
+	}
+
+	// ── ③ 步骤门：SELECT_DEFS 与 EXPORT（及之后）一律不弹 ──────────────────
 
 	@Test
 	void doesNotParkBeforeQueryCondOrAfterExport() {
@@ -143,7 +196,7 @@ class ConditionsFormTest {
 		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
 	}
 
-	// ── ③ 条件已知：不弹（直接 set_condition） ───────────────────────────────
+	// ── ④ 条件已知：不弹（直接 set_condition） ───────────────────────────────
 
 	@Test
 	void doesNotParkWhenConditionsAreAlreadyKnown() {
@@ -156,7 +209,7 @@ class ConditionsFormTest {
 		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 	}
 
-	// ── ④ 普通浏览不打扰；"继续任务"才触发 ─────────────────────────────────
+	// ── ⑤ 普通浏览不打扰；"继续任务"才触发 ─────────────────────────────────
 
 	@Test
 	void plainBrowsingDoesNotParkButContinueIntentDoes() {
@@ -173,7 +226,7 @@ class ConditionsFormTest {
 		assertThat(onlyPending().getToolCallId()).isEqualTo(ConditionsForm.toolCallId(TASK_ID));
 	}
 
-	// ── ⑤ 只问一次：提交/取消后都不再来；留空回灌被既有闸门接受 ────────────
+	// ── ⑥ 只问一次：提交/取消后都不再来；留空回灌被既有闸门接受 ────────────
 
 	@Test
 	void answeringWithBlankKeepsTheFormAnsweredAndDoesNotAskAgain() {
@@ -242,6 +295,21 @@ class ConditionsFormTest {
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(TaskSlots.EXTRA_KEY, slots);
 		return extra;
+	}
+
+	// ── ⑦ 合成收尾提示不得盖住用户原话 ─────────────────────────────────────
+
+	@Test
+	void syntheticWrapUpMessageDoesNotHideTheUsersContinueIntent() {
+		// 既有任务（无 create_task 台账）：任务链只能靠"用户原话在继续"成立
+		seedExistingTaskRun();
+		List<org.springframework.ai.chat.messages.Message> history = List.of(new SystemMessage("PERSONA"),
+				new UserMessage("继续导出这个任务"),
+				new UserMessage(SpToolCallingManager.TURN_BUDGET_WRAP_UP));
+
+		assertThat(this.form.parkIfDue(RUN_ID, context("QUERY_COND", Map.of()), List.of(), history))
+			.as("轮内预算的收尾提示是系统合成消息，不是用户原话：继续意图仍要看最后一条**真实**用户消息")
+			.isTrue();
 	}
 
 	private static List<org.springframework.ai.chat.messages.Message> history(String userMessage) {

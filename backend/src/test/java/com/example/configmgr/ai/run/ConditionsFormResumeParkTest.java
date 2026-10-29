@@ -278,7 +278,43 @@ class ConditionsFormResumeParkTest {
 		assertThat(contextOfDriveResumed().getStep()).isEqualTo("EXPORT");
 	}
 
-	// ── ④ 全链路：每个节点只问该问的，已完成节点不重复 ──────────────────────
+	// ── ④ 用户明确要求别的表单/工具时不抢占（GF2 回归）───────────────────────
+
+	@Test
+	void anExplicitClarifyRequestDrivesTheModelInsteadOfParkingTheConditionBox() {
+		this.taskState.set(task(TASK_ID, "QUERY_COND"));
+		seedCreatedTask();
+		// GF2 原话：既要"继续这个导出任务"，又明确要求模型发 CLARIFY 表单
+		String gf2 = "我想继续这个导出任务，但你缺两个信息。请调用 generative_form 工具（scenario=CLARIFY）"
+				+ "向我澄清 exportScope/includeInactive 分别要什么，不要调用其他工具";
+		seedSuspendedRun(List.of(stepEntry()), gf2,
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", Map.of()));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.body()).as("不得挂起条件框（否则 CLARIFY 永远发不出来）")
+			.doesNotContainEntry("reason", "CONDITIONS_FORM_PARKED");
+		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
+				eq(this.emitter));
+		assertThat(this.store.pendingsLenient(RUN_ID)).as("宿主一张表都不该挂")
+			.noneMatch(pending -> COND_FORM.equals(pending.getToolCallId()));
+	}
+
+	@Test
+	void anExplicitConditionRequestStillParksOnTheResumePath() {
+		this.taskState.set(task(TASK_ID, "QUERY_COND"));
+		seedCreatedTask();
+		seedSuspendedRun(List.of(stepEntry()),
+				"继续这个导出任务，请调用 generative_form（scenario=FILTER）收集筛选条件",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", Map.of()));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.body()).containsEntry("reason", "CONDITIONS_FORM_PARKED");
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				any());
+	}
+	// ── ⑤ 全链路：每个节点只问该问的，已完成节点不重复 ──────────────────────
 
 	@Test
 	void fullChainFromCreationToExportStepAsksEachGapExactlyOnce() {

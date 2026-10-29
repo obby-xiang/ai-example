@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * <b>宿主确定性的筛选条件文本框</b>：进入 {@code QUERY_COND} 且条件未给时，由宿主挂起一张
@@ -34,6 +35,12 @@ import java.util.Optional;
  * <li><b>停在条件步</b>：权威步骤是 {@code QUERY_COND}（与 {@link GenerativeFormGuard} 的步骤门
  * {@link GenerativeFormRules#conditionsStepAllowed} 同一份判据）—— {@code SELECT_DEFS} 之前、
  * {@code EXPORT} 及之后都不会弹（"EXPORT 后不得再弹"由这一条保证）；</li>
+ * <li><b>本句没有要求别的表单/工具/动作</b>：用户明确点名 {@code scenario=CLARIFY} /
+ * {@code GENERAL_CLARIFY} / {@code purpose=TASK_TYPE} / {@code SELECT_DEFINITIONS}，或点名别的工具
+ * （{@code create_task}/{@code select_definitions}/{@code start_export}/{@code list_config_defs}/
+ * {@code navigate_to} 等，见 {@link #asksForOtherFormOrTool}）时<b>一律让位</b> —— 宿主抢着挂条件框
+ * 会把用户点名的那张表挤掉（GF2 的回归正是这样：CLARIFY 永远发不出来）。显式条件请求
+ * （{@code SET_CONDITIONS}/{@code scenario=FILTER}/"筛选条件"…）优先级更高，照常给框；</li>
  * <li><b>主动任务链</b>：本轮台账里有成功的 {@code create_task} 且就是当前任务，<b>或</b>用户原话是
  * 继续既有任务（{@link TaskIntent#isContinueTaskIntent}）。普通浏览既有任务一律不打扰；</li>
  * <li><b>条件未知</b>：槽位里没有覆盖全部已选配置项的条件（与放行闸门同一份 {@link TaskSlots}）；</li>
@@ -62,6 +69,23 @@ public class ConditionsForm extends HostForm {
 
 	/** 宿主条件表单的 {@code toolCallId} 前缀（后接任务号：同一任务只会问一次）。 */
 	public static final String TOOL_CALL_ID_PREFIX = "host-cond-form-";
+
+	/**
+	 * "别的表单 / 别的工具 / 别的动作"的记号（出现即让位，见 {@link #asksForOtherFormOrTool}）。
+	 *
+	 * <p>大写词忽略大小写匹配（用户/模型都可能写成小写）；工具名走词边界，避免 {@code set_condition}
+	 * 被 {@code set_conditions} 之外的普通词误命中。
+	 */
+	private static final Pattern OTHER_FORM_OR_TOOL = Pattern.compile("(?i)(scenario\\s*[=:：]\\s*clarify)"
+			+ "|\\bclarify\\b|general_clarify|\\btask_type\\b|select_definitions|\\bgenerative_form\\b"
+			+ "|\\bcreate_task\\b|\\bstart_export\\b|\\bstart_import\\b|\\blist_config_defs\\b"
+			+ "|\\bnavigate_to\\b|\\blist_tasks\\b|\\bget_task\\b|\\bconfirm_step\\b|澄清");
+
+	/**
+	 * 显式"条件"请求：与本节点的缺口同一件事，优先级高于让位记号（不得被误排除）。
+	 */
+	private static final Pattern CONDITIONS_REQUEST = Pattern.compile("(?i)set_conditions"
+			+ "|scenario\\s*[=:：]\\s*filter|筛选条件|查询条件|过滤条件|条件表单|\\bset_condition\\b");
 
 	@Autowired
 	public ConditionsForm(RunStore store, RunRegistry registry, ConfirmGate gate, MessageJsonCodec codec,
@@ -118,7 +142,13 @@ public class ConditionsForm extends HostForm {
 			// 只有 QUERY_COND：前置步（SELECT_DEFS/UPLOAD）与后置步（EXPORT 及之后）一律不弹
 			return Optional.empty();
 		}
-		if (!activeTaskChain(runId, taskId, history)) {
+		String userText = lastUserText(history);
+		if (asksForOtherFormOrTool(userText)) {
+			// 用户这一句已经明确要求"别的表单/别的工具/别的动作"（GF2：请调用 generative_form
+			// （scenario=CLARIFY）向我澄清…）⇒ 宿主不得抢成条件框，让模型按用户说的去发那张表。
+			return Optional.empty();
+		}
+		if (!activeTaskChain(runId, taskId, userText)) {
 			// 普通浏览不自动打扰：只有主动任务链 / 明确的继续意图
 			return Optional.empty();
 		}
@@ -137,16 +167,48 @@ public class ConditionsForm extends HostForm {
 	}
 
 	/**
+	 * 这一句是否<b>明确要求别的表单/工具/动作</b>（出现即让位：宿主不抢条件框）。
+	 *
+	 * <p>为什么需要它：宿主条件框的触发条件是"继续任务 + 条件步 + 条件未知"，而用户完全可能在同一句里
+	 * 指挥模型做<b>另一件事</b>（GF2 的真实原话就是"请调用 generative_form（scenario=CLARIFY）向我澄清
+	 * exportScope/includeInactive…"）。此时宿主抢先挂条件框，等于把用户点名的那张表挤掉 —— 模型这一拍
+	 * 根本没机会被驱动。
+	 *
+	 * <p><b>让位记号</b>（任一命中即让位）：
+	 * <ul>
+	 * <li>别的表单：{@code scenario=CLARIFY} / {@code CLARIFY} / {@code GENERAL_CLARIFY} /
+	 * {@code purpose=TASK_TYPE} / {@code SELECT_DEFINITIONS} / "澄清"；</li>
+	 * <li>别的工具：{@code generative_form}（未同时指明条件时）/ {@code create_task} /
+	 * {@code select_definitions} / {@code start_export} / {@code start_import} /
+	 * {@code list_config_defs} / {@code navigate_to} / {@code list_tasks} / {@code get_task} /
+	 * {@code confirm_step}。</li>
+	 * </ul>
+	 *
+	 * <p><b>优先级</b>：显式条件请求（{@code SET_CONDITIONS} / {@code scenario=FILTER} / "筛选条件" /
+	 * "查询条件" / "条件表单" / {@code set_condition}）说明用户要的<b>正是</b>本节点的东西，优先级高于
+	 * 上面的让位记号 —— 一句里两者都出现时照常给框，不误排除。
+	 */
+	private static boolean asksForOtherFormOrTool(String userText) {
+		if (userText == null || userText.isBlank()) {
+			return false;
+		}
+		if (CONDITIONS_REQUEST.matcher(userText).find()) {
+			return false;
+		}
+		return OTHER_FORM_OR_TOOL.matcher(userText).find();
+	}
+
+	/**
 	 * 主动任务链：本轮新建的<b>就是这个</b>任务，或用户原话在继续既有任务。
 	 *
 	 * <p>旧任务的创建回执不算：{@code context.getTaskId()} 必须与台账里的任务号相等。
 	 */
-	private boolean activeTaskChain(String runId, Long taskId, List<Message> history) {
+	private boolean activeTaskChain(String runId, Long taskId, String userText) {
 		Long createdTaskId = createdTaskInRun(runId);
 		if (createdTaskId != null && createdTaskId.equals(taskId)) {
 			return true;
 		}
-		return TaskIntent.isContinueTaskIntent(lastUserText(history));
+		return TaskIntent.isContinueTaskIntent(userText);
 	}
 
 	/** 单个非必填 text 框（形状与 {@link GenerativeFormRules#PURPOSE_SET_CONDITIONS} 一致）。 */
