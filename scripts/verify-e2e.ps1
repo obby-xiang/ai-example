@@ -420,23 +420,19 @@ function Ai-AssertRunUnchanged($before, $label) {
         throw "$label：run $($before.runId) 角色序列被改写（$($before.roles -join ',') → $($after.roles -join ',')）"
     }
 }
-# 会话当前轮（真实可执行载体：被拒/受理的发送是否产生新轮，不依赖窗口整窗覆盖）。
+# 会话当前轮（真实可执行载体：只用于被拒分支——被拒的发送是否留下活跃新轮，不依赖窗口整窗覆盖）。
 function Ai-CurrentRun($sid) {
     $cur = GetJson "/api/ai/runs/current?sessionId=$sid"
     return @{ found = [bool]$cur.found; runId = [string]$cur.runId }
 }
 # 未受理的发送不得产生新轮：会话当前轮必须与发送前一致。
+# 边界：只证明被拒分支没有留下**仍在活跃**（SUSPENDED/RUNNING）的新轮。终态轮会被
+# clearSessionCurrent 摘掉并把 current 回指挂起轮或直接删键，故完成轮不能用 runs/current
+# 证"受理开轮"；受理开轮由 start 帧恰 1 + runId 不复用 + /runs/{runId} 存在 + 尾部/身份判据覆盖。
 function Ai-AssertNoNewRun($before, $sid, $label) {
     $after = Ai-CurrentRun $sid
     if ($after.found -ne $before.found -or $after.runId -ne $before.runId) {
         throw "$label：会话当前轮 ($($before.found)/$($before.runId)) → ($($after.found)/$($after.runId))（未受理的发送产生了新轮 / 落了记录）"
-    }
-}
-# 受理的发送必须真的开了新轮：会话当前轮应指向它。
-function Ai-AssertSessionOnRun($sid, $runId, $label) {
-    $cur = Ai-CurrentRun $sid
-    if (-not $cur.found -or $cur.runId -ne [string]$runId) {
-        throw "$label：会话当前轮 found=$($cur.found) runId=$($cur.runId)，期望指向 $runId（未受理或没开起来）"
     }
 }
 # 未受理的发送不得开流：Read-SseCore 对非 2xx 从不填收集器（frames 恒空，不能当证明），
@@ -2646,8 +2642,7 @@ try {
         if ((@($busy.frames | Where-Object { $_.type -eq 'done' })).Count -ne 1) { throw 'TC18 受理轮 done 帧不恰 1 个' }
         if ((@($busy.frames | Where-Object { $_.type -eq 'error' })).Count -ne 0) { throw 'TC18 受理轮出现 error 帧' }
         if ([string]$st18[0].runId -eq [string]$runId18) { throw 'TC18 受理轮复用了挂起轮的 runId（两路共写一条流）' }
-        # 受理恰当开了新轮（会话当前轮指向它）+ 本轮快照尾部恰 USER + ASSISTANT。
-        Ai-AssertSessionOnRun $sc ([string]$st18[0].runId) 'TC18 并发受理轮'
+        # 本轮快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $busyInfo18 = Ai-RunRoleInfo ([string]$st18[0].runId)
         Ai-AssertSingleTurnTail $busyInfo18 'TC18 并发受理轮'
         $ids18b = Ai-AssistantIds $busy.frames
@@ -2696,7 +2691,6 @@ try {
         if ((@($again.frames | Where-Object { $_.type -eq 'done' })).Count -ne 1) { throw 'TC18 取消后再发缺 done 帧' }
         if ((@($again.frames | Where-Object { $_.type -eq 'error' })).Count -ne 0) { throw 'TC18 取消后再发出现 error 帧' }
         if ([string]$st18c[0].runId -eq [string]$runId18) { throw 'TC18 取消后再发复用了已取消轮的 runId' }
-        Ai-AssertSessionOnRun $sc ([string]$st18c[0].runId) 'TC18 取消后再发受理轮'
         $againInfo18 = Ai-RunRoleInfo ([string]$st18c[0].runId)
         Ai-AssertSingleTurnTail $againInfo18 'TC18 取消后再发受理轮'
         $ids18c = Ai-AssistantIds $again.frames
@@ -4410,8 +4404,7 @@ Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话�
         if ($done5.cancelled -eq $true) { throw '受理轮以 cancelled 收尾' }
         $secondRun5 = [string](Ai-RunId $second.frames)
         if ($secondRun5 -eq [string]$cr.runId) { throw '受理轮复用了挂起轮的 runId（新轮没有真正开起来）' }
-        # 受理恰当开了新轮（会话当前轮指向它）+ 本轮快照尾部恰 USER + ASSISTANT。
-        Ai-AssertSessionOnRun $sid $secondRun5 'Q-05 受理轮'
+        # 本轮快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $secondInfo5 = Ai-RunRoleInfo $secondRun5
         Ai-AssertSingleTurnTail $secondInfo5 'Q-05 受理轮'
         $ids5 = Ai-AssistantIds $second.frames
@@ -4533,8 +4526,7 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
         if ($done2.cancelled -eq $true) { throw '受理的轮次以 cancelled 收尾（被当成取消 = 假提示）' }
         $run2 = [string](Ai-RunId $second.frames)
         if ($run2 -eq [string]$cr.runId) { throw '受理轮复用了挂起轮的 runId（新轮没有真正开起来）' }
-        # 受理恰当开了新轮（会话当前轮指向它）+ 本轮（已完成）快照尾部恰 USER + ASSISTANT。
-        Ai-AssertSessionOnRun $sid $run2 'Q-08 受理轮'
+        # 本轮（已完成）快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $secondInfo8 = Ai-RunRoleInfo $run2
         Ai-AssertSingleTurnTail $secondInfo8 'Q-08 受理轮'
         $ids8 = Ai-AssistantIds $second.frames
