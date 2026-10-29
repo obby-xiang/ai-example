@@ -3767,6 +3767,11 @@ Add-AiCase 'G-15' 'P1' '附件三重校验：一次性消费（同 fileId 二次
     # 设计稿 G-15 的三重校验（① 同号二次提交 ② 跨 runId 引用=归属 ③ 伪造 id），外加消费面：
     # 每个子面都要一张**挂起中的**表单，而桩的"每路由一次"台账按会话首条 user 文本分桶 ⇒
     # 同一会话第二轮拿不到第二次卡，故三个子面各用独立会话 + 独立标记。
+    #
+    # 附件件数口径（13db3a92 起）：本表单只有 **1 个**附件字段（fields[*].type=attachment 的
+    # 单附件位），产品的上传口对"在册件数 ≥ 附件字段数"的处置是**顶掉旧件**（前端"重新选择文件"
+    # 就是再传一次，没有删除接口）—— 同一 runId+toolCallId 传第二件会让第一件的 fileId 失效。
+    # 故 ② 的"未消费件"必须由**另一张表单**持有：它未消费、但归属另一轮 runId。
     $sid = Ai-NewSid 'g15'
     $s1 = Ai-FormSuspend $sid 'gf-attachment（G-15 一次性消费）'
     $fileA = Join-Path $tmp 'aie2e-attach2a.txt'
@@ -3774,21 +3779,24 @@ Add-AiCase 'G-15' 'P1' '附件三重校验：一次性消费（同 fileId 二次
     $upA = Ai-FormUpload $s1.runId $s1.toolCallId $fileA 'aie2e-attach2a.txt'
     if (-not $upA.ok) { throw "附件上传 A => HTTP $($upA.status) $($upA.text)" }
     $fileIdA = [string]$upA.json.data.fileId
-    # 第二件附件（不消费）：用于 ② 的"归属"面（同一 fileId 未消费、但换了 runId）
+    # 第二件附件（不消费）：挂在**另一张**表单上，用于 ② 的"归属"面（未消费、但换了 runId）
+    $s1b = Ai-FormSuspend (Ai-NewSid 'g15b') 'gf-attachment（G-15 未消费件归属）'
     $fileB = Join-Path $tmp 'aie2e-attach2b.txt'
     [IO.File]::WriteAllText($fileB, 'AIE2E 附件内容：跨轮归属断言（B）。')
-    $upB = Ai-FormUpload $s1.runId $s1.toolCallId $fileB 'aie2e-attach2b.txt'
+    $upB = Ai-FormUpload $s1b.runId $s1b.toolCallId $fileB 'aie2e-attach2b.txt'
     if (-not $upB.ok) { throw "附件上传 B => HTTP $($upB.status) $($upB.text)" }
     $fileIdB = [string]$upB.json.data.fileId
     $r1 = Ai-FormPost $s1.runId $s1.toolCallId ('{"sheet":"' + $fileIdA + '"}')
-    if ($r1.status -ne 200) { throw "首次提交 HTTP $($r1.status)" }
+    if ($r1.status -ne 200) {
+        throw "首次提交 HTTP $($r1.status) issues=$((@($r1.json.issues | ForEach-Object { [string]$_.code })) -join ',') text=$($r1.text)"
+    }
     # ① 同号二次提交：同一 runId+toolCallId 已有结果 ⇒ 重复提交被拒
     $dup = Ai-FormPost $s1.runId $s1.toolCallId ('{"sheet":"' + $fileIdA + '"}')
     if ($dup.status -ne 409 -or [string]$dup.json.code -ne 'DUPLICATE_TOOL_CALL_ID') {
         throw "同号二次提交 HTTP $($dup.status)/code=$($dup.json.code)，期望 409/DUPLICATE_TOOL_CALL_ID"
     }
-    # ② 跨 runId 引用：B 未被消费（干净），但属于上一张表单 ⇒ 归属被拒
-    $s2 = Ai-FormSuspend (Ai-NewSid 'g15b') 'gf-attachment（G-15 跨轮归属）'
+    # ② 跨 runId 引用：B 未被消费（干净），但归属另一张未决表单 ⇒ 归属被拒
+    $s2 = Ai-FormSuspend (Ai-NewSid 'g15c') 'gf-attachment（G-15 跨轮归属）'
     $cross = Ai-FormPost $s2.runId $s2.toolCallId ('{"sheet":"' + $fileIdB + '"}')
     if ($cross.status -ne 400) { throw "跨轮引用未消费附件 HTTP $($cross.status)，期望 400" }
     $crossCodes = @($cross.json.issues | ForEach-Object { [string]$_.code })
@@ -3799,13 +3807,14 @@ Add-AiCase 'G-15' 'P1' '附件三重校验：一次性消费（同 fileId 二次
     $reuseCodes = @($reuse.json.issues | ForEach-Object { [string]$_.code })
     if ($reuseCodes -notcontains 'ATTACHMENT_CONSUMED') { throw "已消费附件被引用但 issues 码=$($reuseCodes -join ',')（期望 ATTACHMENT_CONSUMED）" }
     # ③ 伪造 id：存在性校验
-    $s3 = Ai-FormSuspend (Ai-NewSid 'g15c') 'gf-attachment（G-15 伪造 id）'
+    $s3 = Ai-FormSuspend (Ai-NewSid 'g15d') 'gf-attachment（G-15 伪造 id）'
     $r2 = Ai-FormPost $s3.runId $s3.toolCallId '{"sheet":"att_FAKEFAKEFAKE"}'
     if ($r2.status -ne 400) { throw "伪造 fileId HTTP $($r2.status)，期望 400" }
     $codes = @($r2.json.issues | ForEach-Object { [string]$_.code })
     if ($codes.Count -lt 1) { throw '伪造 fileId 被拒但 issues 为空' }
     Ai-Cancel $s3.runId | Out-Null
     Ai-Cancel $s2.runId | Out-Null
+    Ai-Cancel $s1b.runId | Out-Null
     return $null
 }
 
