@@ -663,10 +663,17 @@ public class SseChatEmitter {
 	/**
 	 * 装配终态回收钩子（注册表在新建写出器之后调用一次）。
 	 *
+	 * <p><b>挂钩时补一次回收判定（窄窗收口）</b>：{@code RunRegistry#of} 是"先 {@code computeIfAbsent}
+	 * 建实例、再 {@code setRecycleHook}"两步。若这段时间里另一线程（或异常路径）已经把该实例
+	 * {@code complete()} 掉，只赋值的实现会让它<b>永远留在表里</b>（终态、无订阅、钩子从未被调用）。
+	 * 这里赋值后立即 {@link #fireRecycleIfTerminal()}：条件已成立就当场回收（{@link #recycled} 的 CAS
+	 * 保证只跑一次，重复挂钩不会误摘新条目）。
+	 *
 	 * @param hook 终态且订阅者排空时执行一次；{@code null} = 不回收
 	 */
 	public void setRecycleHook(Runnable hook) {
 		this.recycleHook = hook;
+		fireRecycleIfTerminal();
 	}
 
 	/**
@@ -846,6 +853,7 @@ public class SseChatEmitter {
 		// 顺序：登记（锁外）→ 挂订阅 + 回放读（锁内）。回读与登记之间落档的帧仍能被唤醒补到，
 		// 而"一次订阅建立"的时长不再落在 emitLock 上（同轮其它出帧不必等它）。
 		ensureWakeSubscribed();
+		ReplayResult plan;
 		try {
 			synchronized (this.emitLock) {
 				// I-1：**先挂订阅（含唤醒订阅）再读回放**。旧顺序（读档 → 挂订阅）之间落档的帧
@@ -853,7 +861,6 @@ public class SseChatEmitter {
 				// ⇒ B 侧连接永远等不到那一帧。两段同在 emitLock 内，先挂不会改变"回放帧先于实时帧入队"
 				// 的 FIFO 语义（实时入队同样要求这把锁）。
 				attachSubscription(sub);
-				ReplayResult plan;
 				try {
 					plan = stageReplay(sub, lastSeq);
 				}
@@ -869,34 +876,49 @@ public class SseChatEmitter {
 					log.warn("回放降级 runId={} terminal={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）",
 							this.runId, terminal, lastSeq, plan.staged());
 					finishDegradedReplay(sub, plan);
-					return plan;
-				}
-				boolean archivedTerminal = plan.terminalFrame()
-						|| (plan.staged() == 0 && tailFrameIsTerminal(lastSeq));
-				// 归档没有终帧且本轮还没收尾 ⇒ 后面还有（或即将有）实时帧，订阅必须留着。
-				boolean waitForLiveTerminalFrame = !archivedTerminal && !this.terminating.get();
-				if (waitForLiveTerminalFrame) {
-					if (plan.staged() > 0) {
-						kickDrain(sub);
-					}
-					return plan;
-				}
-				// 回放已含终帧（或本轮已 complete，不会再有新帧）：排空回放后收尾，不悬挂。
-				sub.terminating = true;
-				if (sub.queue.isEmpty() && this.emitting.get() == 0) {
-					completeOne(sub);
 				}
 				else {
-					// 8D/L-143：在飞 emit 尚未落档/入队时不能据"空回放"关闭；kickDrain 排空后由
-					// finishDrain / 最后一个 emit 的 finally 收尾。
-					kickDrain(sub);
+					boolean archivedTerminal = plan.terminalFrame()
+							|| (plan.staged() == 0 && tailFrameIsTerminal(lastSeq));
+					// 归档没有终帧且本轮还没收尾 ⇒ 后面还有（或即将有）实时帧，订阅必须留着。
+					boolean waitForLiveTerminalFrame = !archivedTerminal && !this.terminating.get();
+					if (waitForLiveTerminalFrame) {
+						if (plan.staged() > 0) {
+							kickDrain(sub);
+						}
+					}
+					else {
+						// 回放已含终帧（或本轮已 complete，不会再有新帧）：排空回放后收尾，不悬挂。
+						sub.terminating = true;
+						if (sub.queue.isEmpty() && this.emitting.get() == 0) {
+							completeOne(sub);
+						}
+						else {
+							// 8D/L-143：在飞 emit 尚未落档/入队时不能据"空回放"关闭；kickDrain 排空后由
+							// finishDrain / 最后一个 emit 的 finally 收尾。
+							kickDrain(sub);
+						}
+					}
 				}
-				return plan;
 			}
 		}
 		finally {
 			flushWakeSyncIfUnlocked();
 		}
+		// I-2（评审）：退订/重挂交错 —— 旧连接的退订可能把这期间建立的唤醒订阅撤掉，
+		// 于是"回放读之后、唤醒重新登记之前"落档的那一帧没有接收者。顺序很关键：
+		// ①先按<b>当前</b>订阅表把唤醒订阅收敛回来（applyWakeSync，锁外，幂等）；
+		// ②订阅仍活着时再从归档做一次<b>差量追赶</b>（读取下界 = 各订阅者游标最小值，
+		//   逐订阅者按 wakeFloor 去重）。于是追赶读到的是"已重新登记"之后的归档：
+		//   追赶之后落档的帧走唤醒、追赶之前落档的帧被读到 ——
+		//   退订/重挂交错下回放后不丢帧，也不重复（先去重后入队，游标只增）。
+		// 终态回放（已读到 done/error）与降级回放（已排入 typed error）不再追赶：
+		// 它们已在收尾，终帧之后按协议不会再有业务帧。
+		applyWakeSync();
+		if (!sub.closed && !sub.terminating) {
+			onWake(this.runId, Long.MAX_VALUE);
+		}
+		return plan;
 	}
 
 	/**
@@ -1849,7 +1871,14 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * B23L1 批①：出帧路径 —— <b>取号（FrameStore）→ 截断 → 落档（FrameStore）→ 唤醒发布 → 本地扇出</b>。
+	 * B23L1 批①：出帧路径 —— <b>取号（FrameStore）→ 截断 → 落档（FrameStore）→ 本地扇出 → 唤醒发布</b>。
+	 *
+	 * <p>
+	 * <b>资源修复批（I-3 口径更正）</b>：唤醒发布（{@code PUBLISH}）已移到 {@code emitLock} <b>之外</b>，
+	 * 因此它排在<b>本地扇出之后</b>（旧顺序是"锁内先发布、再扇出"）。真正不可调换的只有
+	 * <b>落档早于发布</b>（否则被唤醒者读不到该帧）；"发布早于本地扇出"不再是契约。
+	 * 自唤醒的去重由此改由两条既有判据承担：扇出成功入队后推进本订阅者游标
+	 * （{@link Subscription#wakeFloor}），以及 {@link #onWake} 的"上界不高于最小游标 ⇒ 无差量"短路。
 	 *
 	 * <p>
 	 * 与 B1 收官形态的三点差异（口径全部来自设计稿 §2.1）：
@@ -2357,7 +2386,11 @@ public class SseChatEmitter {
 		// 而是把收尾交接给本 lambda 的 finally（那时 send 已返回/抛出，监视器已释放）。
 		sub.completePending = false;
 		sub.writeInFlight.set(true);
+		// 评审 C1：记下"这次写到底有没有真的跑"。池饱和（提交被拒）与"未启动的 future 被取消"
+		// 两种情形下 λ 从不执行 ⇒ 写在飞标志没有写线程来复位 ⇒ 永远不 complete（前端也不会重挂）。
+		AtomicBoolean started = new AtomicBoolean();
 		SseWriteBudget.Result result = this.writeBudget.write(() -> {
+			started.set(true);
 			try {
 				sub.emitter.send(payload);
 			}
@@ -2382,10 +2415,14 @@ public class SseChatEmitter {
 				yield false;
 			}
 			// 写池饱和（硬上限，资源修复批）：这条写<b>没有发生、也不会发生</b>（池满即拒），
-			// 本订阅者就是"挤不进来"的那一条 ⇒ 摘除它（前端 onerror/onclose 带 lastSeq 重挂差量补发）。
-			// 与 TIMED_OUT 的分工：超时是"这条连接自己卡住"，饱和是"更多慢连接把写线程占满" ——
+			// 本订阅者就是"最后没拿到写线程"的那一条 ⇒ 摘除它（前端 onerror/onclose 带 lastSeq 重挂差量补发）。
+			// <b>被摘者可能是健康订阅者</b>（也可能来自任务通道）：饱和时谈不上"只摘慢连接" ——
+			// 代价是一次重挂，而不是丢帧（帧都在归档里）。
+			// 与 TIMED_OUT 的分工：超时是"这条连接自己卡住"，饱和是"写线程已被更多连接占满" ——
 			// 两者都摘除，但日志/计数分开，排障时才分得清是"一条慢连接"还是"一批慢连接"。
+			// C1：λ 从未执行 ⇒ 先复位写在飞标志，否则 completeOne 会把收尾交接给一个不存在的写线程。
 			case SATURATED -> {
+				releaseWriteSlotIfNeverStarted(sub, started);
 				evict(sub, "写出池饱和（并发写出已达硬上限 " + SseWriteBudget.sharedWriterPoolMaxThreads() + "）");
 				yield false;
 			}
@@ -2393,11 +2430,32 @@ public class SseChatEmitter {
 			// 只"让出 drain"就是静默丢帧 —— 违背 S2-1"不静默丢帧"政策（2026-10-10 复核 S3-② 收口）。
 			// 故与 TIMED_OUT 同出口：摘除订阅者（主动断连），前端 onerror/onclose 带 lastSeq 重挂对账
 			// （差量补发，seq 无洞）。中断位由 SseWriteBudget.write 复位（interrupt()），语义不变。
+			// C1：中断可能落在任务<b>还没开始</b>时（{@code cancel(true)} 直接取消未启动的 future）——
+			// 那时写线程的 finally 不会跑，同样必须由本线程复位写在飞标志。
 			case INTERRUPTED -> {
+				releaseWriteSlotIfNeverStarted(sub, started);
 				evict(sub, "写出被中断（调用线程中断）");
 				yield false;
 			}
 		};
+	}
+
+	/**
+	 * 写出<b>从未真正开始</b>时复位"写在飞"标志（评审 C1）。
+	 *
+	 * <p>为什么必须：{@link #completeOne} 在 {@code writeInFlight} 为真时把收尾"交接给写线程"
+	 * （只置 {@code completePending} 就返回）。若这次写<b>根本没跑</b>（池饱和 ⇒ 提交被拒，
+	 * 或未启动的 future 被取消），那个写线程不存在，标志就永远为真 ⇒ <b>永不 complete</b> ⇒
+	 * 前端收不到 onerror/onclose，也就不会重挂（帧还在归档里，连接却挂死）。
+	 *
+	 * <p>判据是"任务是否真的跑过"（λ 入口置位的 {@code started}）：跑过 ⇒ 写线程的 {@code finally}
+	 * 会复位标志并补做收尾，本线程<b>不得</b>插手（否则会与正在飞的那次写搅在一起）；
+	 * 没跑过 ⇒ 只能由本线程复位。调用方紧接着走摘除/收尾，因此复位后立即 {@code completeOne} 生效。
+	 */
+	private static void releaseWriteSlotIfNeverStarted(Subscription sub, AtomicBoolean started) {
+		if (!started.get()) {
+			sub.writeInFlight.set(false);
+		}
 	}
 
 	/** 写出失败的统一日志口径（修复前与修复后同文本；Q8②：它是"这一个订阅者没了"，不是本轮失败）。 */

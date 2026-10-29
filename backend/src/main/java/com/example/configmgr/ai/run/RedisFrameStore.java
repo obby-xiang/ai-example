@@ -130,13 +130,14 @@ public class RedisFrameStore implements FrameStore {
 	 * 并发窗口里交出去的低号会被后来的无条件写覆盖，等于<b>复用已发 seq</b>。
 	 */
 	private static final String SEQ_NEXT_BODY = """
-			-- AI_SEQ_NEXT v1: INCR -> (键重建/号落后时按归档末号抬号) -> EXPIRE，一次脚本一次往返
+			-- AI_SEQ_NEXT v2: INCR -> (键重建/号落后/强制修复时按归档末号抬号) -> EXPIRE，一次脚本一次往返
 			local ttl = tonumber(ARGV[1]) or 1
 			local fallbackLast = tonumber(ARGV[2]) or 0
 			local probe = tonumber(ARGV[3]) or 16
+			local forceRepair = tonumber(ARGV[4]) or 0
 			local cur = redis.call('INCR', KEYS[1])
 			local degraded = 0
-			if cur == 1 or cur <= fallbackLast then
+			if cur == 1 or cur <= fallbackLast or forceRepair == 1 then
 			  local anchor = fallbackLast
 			  local okStream, entries = pcall(redis.call, 'XREVRANGE', KEYS[2], '+', '-', 'COUNT', probe)
 			  if okStream and type(entries) == 'table' then
@@ -169,6 +170,11 @@ public class RedisFrameStore implements FrameStore {
 			  end
 			end
 			redis.call('EXPIRE', KEYS[1], ttl)
+			if degraded == 1 and cur == 1 then
+			  -- 刚重建的计数器 + 归档末号读不出：这个 1 无法证明未被用过（归档里可能已有 1..N）。
+			  -- 不交出去：返回 0，调用方带 forceRepair 重试或走进程内降级计数（绝不发一个"可能是重复"的号）。
+			  return {0, 1}
+			end
 			return {cur, degraded}
 			""";
 
@@ -202,6 +208,13 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 空闲簿记的清理检查间隔（毫秒）：每帧都做一次 CAS 太贵，一拍一次足够。 */
 	static final long SWEEP_INTERVAL_MS = 60_000L;
+
+	/**
+	 * 取号脚本的<b>最多尝试次数</b>（评审 I4）：只在"刚重建的计数器 + 归档末号读不出"（脚本拒绝交出
+	 * 低号，返回 0）时重试 —— 瞬时抖动第二拍通常就恢复，因此界取 2；不收敛就交给进程内降级计数
+	 * （WARN，跨实例不重号承诺暂停），绝不把"可能是重复"的低号发出去。
+	 */
+	static final int SEQ_ALLOCATE_ATTEMPTS = 2;
 
 	/** 进程内时钟（单测可注入，让"归档到期"可确定性地推进）。 */
 	private final LongSupplier clock;
@@ -255,6 +268,16 @@ public class RedisFrameStore implements FrameStore {
 
 		/** 已就"号回退修复降级（归档末号读不出）"告警过。 */
 		final AtomicBoolean repairDegradedWarned = new AtomicBoolean();
+
+		/**
+		 * <b>上一次取号是降级结果</b>（评审 I4）：脚本回包带 {@code degraded=1} 时置位，
+		 * 下一次取号据此带 {@code forceRepair} 重读归档末号并原子抬号（成功即清位）。
+		 *
+		 * <p>为什么必须有这个位：判据 {@code cur == 1 || cur <= 降级号} 只覆盖"计数器刚重建/还没追上"，
+		 * 一旦计数器越过 1 就<b>永不重试</b> —— 旧文案承诺的"下一次取号会再试"是空头支票，
+		 * 归档恢复可读后号仍停在重建后的低位、持续与归档重叠。
+		 */
+		final AtomicBoolean repairDegraded = new AtomicBoolean();
 
 		/** 最后触达时刻（毫秒）：到期清理与超上限淘汰都按它排序。 */
 		volatile long lastTouchMs;
@@ -317,38 +340,59 @@ public class RedisFrameStore implements FrameStore {
 	 * 旧修复是"读归档末号 → {@code SET ai:seq = anchor} → {@code INCR}"：读与写<b>不是原子的</b>，
 	 * 而且 {@code SET} 是<b>无条件写</b> —— 并发下只有"拿到 1 号"的线程会去修复，
 	 * 同一瞬间拿到 2..N 的线程已经把 2..N 交给出帧方并返回：如果归档里正好有 2..N，
-	 * 那一轮就复用了已发（已落档）的号。先改成 {@code INCRBY} 只解决了"把计数器压回去"，
-	 * 没有解决"并发窗口里已经交出去的低号"。本类现在把三件事收进<b>同一段脚本</b>：
+	 * 那一轮就复用了已发（已落档）的号。本类把三件事收进<b>同一段脚本</b>：
 	 * Redis 串行执行脚本 ⇒ 后到者看到的必然是已抬高的计数器，
 	 * <b>任何并发（含跨实例）都不会复用已发号</b>。
 	 *
 	 * <p>
-	 * 脚本只在"键刚重建（{@code INCR} 返回 1）"或"号落后于本进程降级号"时才读归档末号
-	 * （{@code XREVRANGE} 取末尾 {@value #TAIL_PROBE} 条的最大 {@code seq}，再并上兼容期 LIST 末帧），
-	 * 常规路径就只是一次 {@code INCR} + {@code EXPIRE} —— 比"INCR、EXPIRE 两次往返"还少一次。
+	 * 脚本只在"键刚重建（{@code INCR} 返回 1）"、"号落后于本进程降级号"或"上一次取号是降级结果
+	 * （{@code forceRepair}）"时才读归档末号（{@code XREVRANGE} 取末尾 {@value #TAIL_PROBE} 条的最大
+	 * {@code seq}，再并上兼容期 LIST 末帧），常规路径就只是一次 {@code INCR} + {@code EXPIRE} ——
+	 * 比"INCR、EXPIRE 两次往返"还少一次。
+	 *
+	 * <h2>锚点读不出时的三条退让（评审 I4）</h2>
+	 * <ol>
+	 * <li><b>刚重建 + 锚点读不出 ⇒ 不交出这个 1</b>：归档里可能已有 1..N，交出去等于复用已发号。
+	 * 脚本返回 {@code {0, degraded}}，本方法带 {@code forceRepair} <b>立刻重试</b>一次
+	 * （瞬时抖动通常第二拍即恢复 ⇒ 号直接跳到归档末号之后）。第二拍仍不可读时，发出的是
+	 * 计数器上的下一个号（{@code 2}、{@code 3}…）—— 它与归档**可能**重叠（末号不可读时没有可证明
+	 * 唯一的号），但<b>不会</b>再是发放口刚重建的那个低号；同时置降级位 + WARN 留痕，
+	 * 归档一旦恢复可读，下一次取号即跳到末号之后。</li>
+	 * <li><b>号落后于降级号 + 锚点读不出 ⇒ 至少跳到降级号 + 1</b>：抬号锚点以本进程降级号为底，
+	 * 因此绝不与"已经发出去的降级号"重叠。</li>
+	 * <li><b>降级结果要能自我修复</b>：回包带 {@code degraded} ⇒ 记 {@link RunState#repairDegraded}，
+	 * <b>下一次取号</b>带 {@code forceRepair} 重读末号并原子抬号，成功即清位 ——
+	 * 而不是只在文案里承诺"下次再试"。</li>
+	 * </ol>
 	 *
 	 * <p>
-	 * <b>降级</b>：脚本不可用（Redis 抖动 / 脚本被禁用）时退回进程内单调计数（每帧 WARN，与既有降级口径一致），
-	 * 并保留既有口径"该降级不是续号锚点"；末号读不出（{@code WRONGTYPE}/读失败）时脚本不抬号、
-	 * 返回降级位，由本方法 WARN 一次（与 A4"末号未知不得按 0 锚定"同口径）。
+	 * <b>可观测</b>：降级/拒绝都计入 {@code /api/ai/health} 的降级面（WARN 每轮一次 + 取号回退到
+	 * 进程内计数时另有一条 WARN）；脚本回包的编解码兼容 {@code Number}/{@code String}/{@code byte[]}
+	 * （不同客户端与序列化器的整数回复类型不同，只认 {@code Number} 会把正常取号误判成失败）。
 	 */
 	@Override
 	public long nextSeq(String runId) {
 		RunState state = state(runId);
 		try {
-			long fallbackLast = Math.max(0L, state.fallbackSeq.get());
-			long ttlSeconds = Math.max(1L, ttl().toSeconds());
-			List<?> result = this.redis.execute(SEQ_NEXT_SCRIPT,
-					List.of(seqKey(runId), streamKey(runId), legacyListKey(runId)),
-					String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE));
-			if (result == null || result.isEmpty() || !(result.get(0) instanceof Number issued)) {
-				throw new IllegalStateException("取号脚本返回空");
+			for (int attempt = 0; attempt < SEQ_ALLOCATE_ATTEMPTS; attempt++) {
+				SeqAllocation allocation = allocate(runId, state);
+				if (allocation.degraded()) {
+					// 记下降级位：下一次取号据此强制重读末号（自我修复），而不是"只承诺不重试"。
+					state.repairDegraded.set(true);
+					if (state.repairDegradedWarned.compareAndSet(false, true)) {
+						log.warn("号回退修复降级 runId={}（归档末号读不出，本次按自增号返回；后续取号会持续重试抬号）",
+								runId);
+					}
+				}
+				else {
+					state.repairDegraded.set(false);
+				}
+				if (allocation.seq() > 0L) {
+					return allocation.seq();
+				}
+				// seq == 0 = 脚本拒绝交出"刚重建且无法证明未被用过"的低号 ⇒ 带 forceRepair 再试一次。
 			}
-			if (result.size() > 1 && result.get(1) instanceof Number degraded && degraded.longValue() != 0L
-					&& state.repairDegradedWarned.compareAndSet(false, true)) {
-				log.warn("号回退修复降级 runId={}（归档末号读不出，本次按自增号返回；下一次取号会再试）", runId);
-			}
-			return issued.longValue();
+			throw new IllegalStateException("取号脚本无法确认唯一性（归档末号连续读失败）");
 		}
 		catch (Exception ex) {
 			long fallback = nextFallbackSeq(runId);
@@ -356,6 +400,58 @@ public class RedisFrameStore implements FrameStore {
 					runId, fallback, ex.getMessage());
 			return fallback;
 		}
+	}
+
+	/**
+	 * 执行一次取号脚本（{@code forceRepair} 由上一条结论决定），并把回包解码成
+	 * {@code {seq, degraded}}（{@code seq == 0} = 脚本拒绝交出低号）。
+	 */
+	private SeqAllocation allocate(String runId, RunState state) {
+		long fallbackLast = Math.max(0L, state.fallbackSeq.get());
+		long ttlSeconds = Math.max(1L, ttl().toSeconds());
+		List<?> result = this.redis.execute(SEQ_NEXT_SCRIPT,
+				List.of(seqKey(runId), streamKey(runId), legacyListKey(runId)),
+				String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE),
+				state.repairDegraded.get() ? "1" : "0");
+		if (result == null || result.isEmpty()) {
+			throw new IllegalStateException("取号脚本返回空");
+		}
+		long seq = scriptSeq(result.get(0));
+		boolean degraded = result.size() > 1 && scriptSeq(result.get(1)) != 0L;
+		return new SeqAllocation(seq, degraded);
+	}
+
+	/**
+	 * 脚本回包元素的解码（评审 I4）：兼容 {@code Number} / {@code String} / {@code byte[]}。
+	 *
+	 * <p>同一段脚本在不同客户端/序列化器下回来的是不同类型（Lettuce 整数回复 / 字符串编解码 /
+	 * 原始字节编解码）。只认 {@code Number} 会把后两种误判成"取号失败"⇒ 静默掉进进程内降级号
+	 * （跨实例不重号承诺失效）。解不出来的值一律按 0 处理（调用方会走"拒绝/重试/降级"的既定路径）。
+	 */
+	private static long scriptSeq(Object value) {
+		if (value == null) {
+			return 0L;
+		}
+		if (value instanceof Number number) {
+			return number.longValue();
+		}
+		if (value instanceof byte[] bytes) {
+			return parseSeq(new String(bytes, StandardCharsets.UTF_8));
+		}
+		return parseSeq(String.valueOf(value));
+	}
+
+	private static long parseSeq(String text) {
+		try {
+			return Long.parseLong(text.trim());
+		}
+		catch (RuntimeException ex) {
+			return 0L;
+		}
+	}
+
+	/** 一次脚本取号的结果：{@code seq <= 0} = 脚本拒绝交出低号（需重试/降级）。 */
+	private record SeqAllocation(long seq, boolean degraded) {
 	}
 
 	@Override

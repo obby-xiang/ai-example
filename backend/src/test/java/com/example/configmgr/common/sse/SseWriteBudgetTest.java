@@ -199,12 +199,16 @@ class SseWriteBudgetTest {
     }
 
     /**
-     * <b>饱和 = 摘除**触发本次写出的订阅者**，不是继续开线程</b>。
+     * <b>饱和 = 摘除"触发本次写出的订阅者"，不是继续开线程</b>。
      *
      * <p>池满（硬上限个线程都在写、{@code SynchronousQueue} 无处排队）时提交被拒：
      * 旧实现把它折成 {@code FAILED}（语义是"客户端断开"），且弹性池实际上永远拒不了 ——
      * 只会再开一条线程。现在返回独立的 {@link SseWriteBudget.Outcome#SATURATED}：
-     * 调用方（写出器）据此摘除慢订阅者（前端重挂差量补发），线程数保持在上限内。
+     * 调用方（写出器）据此摘除触发本次写出的订阅者（前端重挂差量补发），线程数保持在上限内。
+     *
+     * <p><b>语义边界</b>：被摘者是"最后拿不到写线程"的那一条，<b>不保证是慢连接</b>
+     * （池满时无人能判断谁慢），也可能是另一条通道的订阅者（池两通道共用）。本用例只钉
+     * "拒绝而非扩容 + 可观测"，误伤面的如实口径见 {@link SseWriteBudget} 类注"跨通道"段。
      */
     @Test
     void saturatedWriterPoolReportsSaturationInsteadOfSpawningMoreThreads() throws Exception {

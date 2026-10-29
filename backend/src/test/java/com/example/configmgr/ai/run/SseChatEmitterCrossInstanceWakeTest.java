@@ -111,12 +111,15 @@ class SseChatEmitterCrossInstanceWakeTest {
 	 * 那一帧<b>只能投一次</b>（本地快路径已投）。
 	 *
 	 * <p>
-	 * 形态说明：生产总线是异步容器线程，这里的替身是同步回调，属于"更严的时序"——
-	 * 唤醒回调在 emit 内部就重入 {@code onWake}，从归档补到的正是刚落的这一帧，并且先于本地扇出
-	 * 把它入队、把<b>本订阅者</b>的游标推到该号；随后本地扇出看到"游标已越过该号"即跳过。
+	 * 形态说明（<b>资源修复批 I-3 口径更正</b>）：唤醒发布已移到 {@code emitLock} 之外，因此
+	 * 本用例的时序是「落档 → <b>本地扇出</b>（入队 + 推进本订阅者游标）→ 发布 → 唤醒回到本实例」。
+	 * 自唤醒的去重<b>不再</b>靠"唤醒先于扇出把游标顶上去"，而是靠两条既有判据：
+	 * ①扇出成功入队后推进 {@code Subscription#wakeFloor}；②{@code onWake} 的
+	 * "上界不高于最小游标 ⇒ 无差量"短路。生产总线是异步容器线程、替身是同步回调，
+	 * 二者都落在同一套游标判据上，本用例因此对两者都成立（同步回调是更严的那一档）。
 	 *
-	 * <p>kill：去掉本地扇出的 {@code liveSeq &lt;= sub.wakeFloor} 跳过（或者让游标在成功入队之前推进）
-	 * ⇒ 本用例收到两帧，变红。
+	 * <p>kill：去掉本地扇出里的 {@code sub.wakeFloor} 推进（或把它挪到入队<b>之前</b>）⇒
+	 * 随后的唤醒从归档把这一帧再推一遍，本用例收到两帧（实测 [1,1]），变红。
 	 */
 	@Test
 	void selfWakeOnTheSameInstanceDoesNotDuplicateTheFrame() {
@@ -149,7 +152,8 @@ class SseChatEmitterCrossInstanceWakeTest {
 	 * 回放快照已读完、订阅还没建立，而挂起/终局帧之后不会再有下一次唤醒。
 	 *
 	 * <p>两段断言：①回读发生的那一刻订阅已建立（由 {@link InMemoryFrameStore#onNextRead} 钩子观测）；
-	 * ②"回读之后、返回之前"落档的那一帧，随后的唤醒能把它作为差量补齐且只补一次。
+	 * ②"回读之后、返回之前"落档的那一帧<b>不丢</b>—— I-2 起由回放后的差量追赶当场补齐
+	 * （旧口径是"等下一次唤醒"，那正是 I-2 里"唤醒被撤掉就丢帧"的根因）；随后的重复唤醒按游标去重。
 	 *
 	 * <p>kill：把 {@code syncWakeSubscription()}（在 {@code attachSubscription} 内）挪回
 	 * {@code stageReplay} 之后 ⇒ ①的观测变 false，本用例变红。
@@ -171,13 +175,49 @@ class SseChatEmitterCrossInstanceWakeTest {
 		instanceB.replayAndAttach(wireB.emitter(), 0L, false);
 
 		assertThat(subscribedDuringRead).as("回读时唤醒订阅已建立（I-1）").isTrue();
-		assertThat(seqs(FrameWire.normalize(wireB.frames()))).as("回放快照只含 1").containsExactly(1L);
+		assertThat(seqs(FrameWire.normalize(wireB.frames())))
+				.as("回放 + 回放后的差量追赶：窗口内落档的那一帧当场补齐（I-2）").containsExactly(1L, 2L);
 
-		// 窗口内那一帧的唤醒随后到达：作为差量补上，且只补一次
+		// 唤醒随后到达（且重复到达）：按每订阅者游标去重，不重发
 		this.bus.inject(RUN_ID, 2L);
 		this.bus.inject(RUN_ID, 2L);
-		assertThat(seqs(FrameWire.normalize(wireB.frames()))).as("窗口内落档的帧经唤醒补齐且不重复")
+		assertThat(seqs(FrameWire.normalize(wireB.frames()))).as("窗口内落档的帧只投一次（唤醒不重复）")
 				.containsExactly(1L, 2L);
+	}
+
+	/**
+	 * <b>I-2：回放窗口内"唤醒被撤掉"落档的那一帧，必须由回放后的差量追赶补齐。</b>
+	 *
+	 * <p>竞态形态（评审 I-2）：重挂先 {@code ensureWakeSubscribed()} 再回放读。若旧连接的退订
+	 * 恰好落在这段窗口里（例如它在本实例的订阅表短暂为空的瞬间结算），本实例的唤醒订阅会被撤掉；
+	 * 回放读之后、唤醒重新登记之前落档的那一帧（N+1）因此<b>没有任何接收者</b>——
+	 * 旧实现就把它丢了（SEQ 无洞的承诺失效，客户端停在 N）。
+	 *
+	 * <p>修复口径：回放结束、唤醒订阅按当前状态重新收敛之后，再用<b>同样的差量读</b>做一次追赶
+	 * （{@code onWake(runId, Long.MAX_VALUE)} 的语义），去重仍由每订阅者游标 {@code wakeFloor} 负责 ——
+	 * 因此"退订/重挂交错"下的帧不丢，且不会重复投递。
+	 *
+	 * <p>本用例用 {@code InMemoryFrameStore#onNextRead} 钩子把窗口确定化：钩子跑在回放读
+	 * "已收集完、尚未返回"的那一刻，撤掉唤醒订阅并落一帧（它的唤醒没有接收者）。
+	 * kill：去掉回放后的追赶 ⇒ 本用例只收到 1，变红。
+	 */
+	@Test
+	void frameArchivedAfterTheReplayReadIsCaughtUpWhenTheWakeWasRevoked() {
+		SseChatEmitter instanceA = emitter("a");
+		instanceA.start("s-1");
+
+		SseChatEmitter instanceB = emitter("b");
+		FrameWire wireB = new FrameWire();
+		this.frames.onNextRead(() -> {
+			// 旧连接的退订把唤醒订阅撤掉（频道层面如实反映），随后落一帧 —— 唤醒没有接收者。
+			this.bus.unsubscribe(RUN_ID);
+			this.frames.seed(RUN_ID, frameMap("delta", 2L));
+		});
+
+		instanceB.replayAndAttach(wireB.emitter(), 0L, false);
+
+		assertThat(seqs(FrameWire.normalize(wireB.frames())))
+				.as("回放后的差量追赶补齐退订窗口内的 N+1 帧（且只补一次）").containsExactly(1L, 2L);
 	}
 
 	/**

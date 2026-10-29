@@ -103,6 +103,21 @@ final class FakeFrameRedis {
 	volatile boolean failTailRead;
 
 	/**
+	 * 只让<b>接下来 N 次</b>末号探测失败（{@code <= 0} = 不额外失败）。
+	 *
+	 * <p>用来区分"瞬时抖动"（下一拍就恢复 ⇒ 取号必须靠重试自我修复）与"持续不可读"
+	 * （降级 + 记录 + 下一次取号重试）。命中一次即递减，{@link #failTailRead} 仍可叠加使用。
+	 */
+	volatile int failTailReadTimes;
+
+	/**
+	 * 取号脚本回包的<b>编解码</b>：{@code "long"}（默认，整数回复）/ {@code "string"}（字符串编解码）/
+	 * {@code "bytes"}（原始编解码）。真实部署里同一段脚本会因客户端与序列化器不同而回不同类型，
+	 * 产品侧必须都认得（评审 I4）。
+	 */
+	volatile String seqResultCodec = "long";
+
+	/**
 	 * 置 true = <b>只让整段 LIST 读</b>（{@code LRANGE -<窗口> -1}）失败；末帧探测（{@code LRANGE -1 -1}）照常成功。
 	 * 与 {@link #failListTailProbe} 分开，是因为产品在 {@code readFrom} 里先探末帧、再决定是否整段读：
 	 * 一个"全挂"的开关只会命中末帧探测，永远走不到整段读那条 WARN（I1 假绿的成因）。
@@ -423,8 +438,14 @@ final class FakeFrameRedis {
 		return 1L;
 	}
 
-	/** 取号脚本（见 {@code RedisFrameStore} 的 {@code AI_SEQ_NEXT}）：返回 {@code [seq, degraded]}。 */
-	private List<Long> seqNext(List<?> keys, List<Object> args) {
+	/**
+	 * 取号脚本（见 {@code RedisFrameStore} 的 {@code AI_SEQ_NEXT}）：返回 {@code [seq, degraded]}。
+	 *
+	 * <p>逐条镜像脚本语义（{@code synchronized} 由 {@link #handleScript} 提供 = Redis 串行执行）：
+	 * {@code INCR} → （键刚重建 / 号落后于降级号 / 调用方要求强制修复）读锚点 → 原子抬号 → {@code EXPIRE}
+	 * → 「刚重建且锚点读不出」时<b>拒绝交出</b>该低号（返回 {@code {0, degraded}}）。
+	 */
+	private List<Object> seqNext(List<?> keys, List<Object> args) {
 		if (this.failIncrement) {
 			throw new IllegalStateException("取号脚本失败（模拟 Redis 抖动）");
 		}
@@ -434,12 +455,16 @@ final class FakeFrameRedis {
 		long ttlSeconds = Long.parseLong(String.valueOf(args.get(0)));
 		long fallbackLast = Long.parseLong(String.valueOf(args.get(1)));
 		int probe = Integer.parseInt(String.valueOf(args.get(2)));
+		boolean forceRepair = args.size() > 3 && "1".equals(String.valueOf(args.get(3)));
 
 		long cur = this.counters.merge(seqKey, 1L, Long::sum);
 		long degraded = 0L;
-		if (cur == 1L || cur <= fallbackLast) {
+		if (cur == 1L || cur <= fallbackLast || forceRepair) {
 			long anchor = fallbackLast;
-			if (this.failTailRead) {
+			if (this.failTailRead || this.failTailReadTimes > 0) {
+				if (this.failTailReadTimes > 0) {
+					this.failTailReadTimes--;
+				}
 				degraded = 1L;
 			}
 			else {
@@ -470,7 +495,23 @@ final class FakeFrameRedis {
 			}
 		}
 		this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
-		return List.of(cur, degraded);
+		if (degraded != 0L && cur == 1L) {
+			// 刚重建的计数器 + 锚点读不出 ⇒ 这个 1 无法证明未被用过：拒绝交出（调用方重试/降级）。
+			return encodeSeqResult(0L, 1L);
+		}
+		return encodeSeqResult(cur, degraded);
+	}
+
+	/** 按 {@link #seqResultCodec} 把脚本回包编码成真实客户端可能给出的三种类型。 */
+	private List<Object> encodeSeqResult(long seq, long degraded) {
+		if ("string".equals(this.seqResultCodec)) {
+			return List.of(String.valueOf(seq), String.valueOf(degraded));
+		}
+		if ("bytes".equals(this.seqResultCodec)) {
+			return List.of(String.valueOf(seq).getBytes(StandardCharsets.UTF_8),
+					String.valueOf(degraded).getBytes(StandardCharsets.UTF_8));
+		}
+		return List.of(seq, degraded);
 	}
 
 	/** 兼容期 LIST 末帧里的 {@code "seq":<n>}（只读一个 {@code seq} 字段，不反序列化整帧）。 */

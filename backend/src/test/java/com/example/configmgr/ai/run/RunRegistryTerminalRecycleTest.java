@@ -110,4 +110,37 @@ class RunRegistryTerminalRecycleTest {
 		assertThat(registry.find(RUN_ID)).isNull();
 	}
 
+	/**
+	 * <b>回收钩子的窄窗收口</b>：{@code of()} 是"先建实例、后挂钩子"两步，
+	 * 若实例在走上钩子之前就已经被 {@code complete()}（另一线程/异常路径抢先收尾），
+	 * 只赋值钩子的实现会让它<b>永远留在表里</b>（终态、无订阅、钩子从未被调用）。
+	 *
+	 * <p>本用例把窄窗的<b>可观测量</b>钉住：给一个"已终态且已排空"的写出器挂钩子，
+	 * 钩子必须<b>立刻</b>执行（且只一次）；已有钩子时不重复执行。
+	 *
+	 * <p>kill：{@code setRecycleHook} 只赋值、不补一次 {@code fireRecycleIfTerminal()} ⇒ 本用例变红。
+	 */
+	@Test
+	void hookInstalledAfterTerminalCompletionRecyclesImmediately() {
+		InMemoryFrameStore frames = new InMemoryFrameStore();
+		SseChatEmitter late = new SseChatEmitter(RUN_ID, this.store, frames, MAPPER, Runnable::run,
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), this.bus, this.listener);
+		FrameWire wire = FrameWire.attachTo(late);
+		late.start("s-1");
+		late.complete();
+		assertThat(wire.size()).isEqualTo(1);
+		assertThat(late.subscriberCount()).isZero();
+
+		java.util.concurrent.atomic.AtomicInteger recycled = new java.util.concurrent.atomic.AtomicInteger();
+		late.setRecycleHook(recycled::incrementAndGet);
+
+		assertThat(recycled.get()).as("挂上钩子时已终态排空 ⇒ 立刻回收（窄窗不会留下永久空壳）").isEqualTo(1);
+
+		// 幂等：再挂一次不得重复回收（避免同一轮被摘两次、把新条目误摘）
+		late.setRecycleHook(recycled::incrementAndGet);
+		assertThat(recycled.get()).isEqualTo(1);
+	}
+
 }

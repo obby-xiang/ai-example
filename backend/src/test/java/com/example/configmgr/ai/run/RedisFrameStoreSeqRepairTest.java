@@ -202,6 +202,128 @@ class RedisFrameStoreSeqRepairTest {
 			.isLessThanOrEqualTo(RedisFrameStore.MAX_TRACKED_RUNS);
 	}
 
+	// ── I4：脚本结果编解码 / 锚点不可读时的退让语义 / 降级后的自我修复 ──────────
+
+	/**
+	 * <b>I4-a：脚本返回值必须兼容 Number / String / byte[]</b>（评审 I4）。
+	 *
+	 * <p>同一段 {@code EVAL} 在不同客户端/序列化器下回来的元素类型不同：数值（Lettuce 默认整数回复）、
+	 * {@code String}（{@code StringRedisTemplate} 的字符串编解码）、{@code byte[]}（原始编解码）。
+	 * 只认 {@code Number} 会把后两种误判成"取号失败"→ 掉进进程内降级号（跨实例不重号承诺静默失效）。
+	 * 本用例让替身依次以三种编解码回包，号必须照常发放且单调。
+	 */
+	@Test
+	void seqScriptResultIsAcceptedAsNumberStringOrBytes() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+
+		redis.seqResultCodec = "long";
+		assertThat(nextAndAppend(store, "start")).as("数值回复").isEqualTo(1L);
+
+		redis.seqResultCodec = "string";
+		assertThat(nextAndAppend(store, "delta")).as("字符串回复（StringRedisTemplate 口径）").isEqualTo(2L);
+
+		redis.seqResultCodec = "bytes";
+		assertThat(nextAndAppend(store, "delta")).as("字节回复（原始编解码）").isEqualTo(3L);
+	}
+
+	/**
+	 * <b>I4-b：归档末号<b>瞬时</b>读不出时，不得把刚重建的 1 直接发出去</b>（评审 I4）。
+	 *
+	 * <p>键丢失（{@code INCR} 返回 1）说明计数器刚重建，此时归档里可能已有 1..N。若这一拍末号读失败
+	 * 就把 1 返回，等于<b>复用已落档的号</b>（同号合并丢帧）。修复口径：
+	 * ①脚本在"刚重建 + 锚点读不出"时<b>拒绝交出这个 1</b>（返回 {@code {0, degraded}}）；
+	 * ②调用方带 {@code forceRepair} 立刻重试一次 —— 瞬时抖动通常第二拍即恢复，于是号直接跳到归档末号之后。
+	 */
+	@Test
+	void transientAnchorReadFailureRetriesInsteadOfHandingOutTheRecreatedSeq() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		for (int i = 0; i < 5; i++) {
+			nextAndAppend(store, "delta");
+		}
+		assertThat(store.lastSeq(RUN_ID)).isEqualTo(5L);
+
+		redis.dropCounter(store.seqKey(RUN_ID));
+		// 只让"紧接的这一拍"末号读失败（瞬时抖动）
+		redis.failTailReadTimes = 1;
+
+		long issued = store.nextSeq(RUN_ID);
+
+		assertThat(issued).as("重试后必须跳过归档里已用过的 1..5").isGreaterThan(5L);
+	}
+
+	/**
+	 * <b>I4-c：末号<b>持续</b>读不出时，至少不交出发放口刚重建的那个低号，且降级可见</b>（评审 I4）。
+	 *
+	 * <p>持久不可读（{@code WRONGTYPE}/连接故障）下没有"可证明唯一"的号可发 —— 但仍有两件事必须成立：
+	 * ①<b>不</b>把刚重建的 {@code 1} 当成正常号发出去（它几乎必然与归档同号）；
+	 * ②降级状态可观测（WARN + 下一次取号仍会重试抬号）。
+	 */
+	@Test
+	void persistentAnchorReadFailureNeverHandsOutTheRecreatedFirstSeq() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		for (int i = 0; i < 3; i++) {
+			nextAndAppend(store, "delta");
+		}
+		redis.dropCounter(store.seqKey(RUN_ID));
+		redis.failTailRead = true;
+
+		long issued = store.nextSeq(RUN_ID);
+
+		assertThat(issued).as("不得把刚重建的 1 直接发出去（它可能与归档同号）").isGreaterThan(1L);
+		assertThat(store.trackedRuns()).as("该轮簿记仍在（降级状态需要保留，供下一次取号重试）").isEqualTo(1);
+	}
+
+	/**
+	 * <b>I4-d：降级之后的<b>下一次</b>取号必须真的重试抬号（失败→成功恢复）</b>（评审 I4）。
+	 *
+	 * <p>旧文案承诺"下一次取号会再试"，但判据只在 {@code cur == 1} 或 {@code cur <= 降级号} 时成立 ——
+	 * 计数器一旦越过 1，就<b>永不重试</b>：归档末号恢复可读之后，号仍停在"重建后的低位"，
+	 * 与归档 1..N 持续重叠。修复口径：脚本回包带 {@code degraded} 位 ⇒ 记 {@code repairDegraded}，
+	 * 下一次取号以 {@code forceRepair} 重读末号并原子抬号，成功即清位。
+	 */
+	@Test
+	void degradedSequenceRepairsItselfOnTheNextAllocationAfterTheArchiveIsReadable() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		for (int i = 0; i < 5; i++) {
+			nextAndAppend(store, "delta");
+		}
+		redis.dropCounter(store.seqKey(RUN_ID));
+		redis.failTailRead = true;
+
+		long degraded = store.nextSeq(RUN_ID);
+		assertThat(degraded).as("降级期发的号救不回来（末号不可读），但必须可见且不再交出发放口的 1")
+			.isGreaterThan(1L);
+
+		// 归档末号恢复可读：下一次取号必须重试抬号，直接越过归档的 1..5
+		redis.failTailRead = false;
+		assertThat(store.nextSeq(RUN_ID)).as("降级后的下一次取号必须自我修复（越过归档末号）")
+			.isGreaterThan(5L);
+	}
+
+	/**
+	 * 相邻路径（I4 的同一条判据）：归档末号读不出、但本进程降级号已经把号推到 3 时，
+	 * 下一次取号<b>至少</b>要跳到降级号 + 1 —— 抬号锚点必须包含降级号。
+	 */
+	@Test
+	void degradedAllocationJumpsAboveFallbackNumbersWhenTheAnchorIsUnreadable() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		nextAndAppend(store, "start");
+		redis.dropCounter(store.seqKey(RUN_ID));
+
+		redis.failIncrement = true;
+		assertThat(store.nextSeq(RUN_ID)).as("降级号 2").isEqualTo(2L);
+		assertThat(store.nextSeq(RUN_ID)).isEqualTo(3L);
+		redis.failIncrement = false;
+		redis.failTailRead = true;
+
+		assertThat(store.nextSeq(RUN_ID)).as("末号读不出也必须越过已发的降级号（3 + 1）").isEqualTo(4L);
+	}
+
 	private RedisFrameStore store(FakeFrameRedis redis) {
 		return new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 	}

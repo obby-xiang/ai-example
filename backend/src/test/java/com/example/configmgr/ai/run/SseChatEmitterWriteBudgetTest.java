@@ -222,7 +222,7 @@ class SseChatEmitterWriteBudgetTest {
 		assertThat(slow.awaitCompletes(1, 5L)).as("写出返回后补做收尾").isTrue();
 	}
 
-	// ── 写池硬上限：饱和摘除"挤不进来"的那一条订阅者 ─────────────────────────
+	// ── 写池硬上限：饱和摘除"最后拿不到写线程"的那一条订阅者 ───────────────────
 
 	/**
 	 * <b>写池饱和 ⇒ 摘除触发本次写出的订阅者</b>（资源修复批）。
@@ -230,6 +230,10 @@ class SseChatEmitterWriteBudgetTest {
 	 * <p>池的线程数是硬上限（{@code SseWriteBudget.DEFAULT_MAX_WRITER_THREADS}）。上限之下的
 	 * 慢连接只会让"自己在飞的那一次写"卡住，不会让全进程停投；上限之上必须<b>不再开线程</b>，
 	 * 而是把"挤不进来"的那条订阅者摘掉（前端 onerror/onclose 带 lastSeq 重挂差量补发）。
+	 *
+	 * <p><b>被摘者可能是健康订阅者</b>（本用例里就是：它一帧都没卡住，只是没抢到写线程），
+	 * 也可能来自另一条通道（写池由 AI 通道与任务通道共用）。本用例的断言口径因此是
+	 * 「<b>最后无法获得写线程者</b>」，不是「只摘慢订阅者」—— 代价是一次重挂，不是丢帧（帧都在归档里）。
 	 *
 	 * <p>本用例把上限压到 1（生产 = 256，形状相同）：
 	 * <ol>
@@ -267,6 +271,67 @@ class SseChatEmitterWriteBudgetTest {
 			assertThat(singleWriter.getPoolSize()).as("写线程数不超过硬上限（不再无界扩线程）").isLessThanOrEqualTo(1);
 
 			slow.release();
+		}
+		finally {
+			singleWriter.shutdownNow();
+		}
+	}
+
+	// ── C1：饱和摘除必须真的 complete（否则前端永不重挂） ─────────────────────
+
+	/**
+	 * <b>饱和摘除必须走到 {@code emitter.complete()}</b> —— 订阅者离开表只是内部状态，
+	 * 前端能不能重挂取决于<b>它是否收到 onerror/onclose</b>。
+	 *
+	 * <p>缺陷形态（评审 C1）：预算模式的写出先把 {@code Subscription#writeInFlight} 置真再提交；
+	 * 池饱和时<b>提交被拒、任务 lambda 从未执行</b> ⇒ 置真的标志永远不会被写线程的 {@code finally}
+	 * 复位 ⇒ {@link SseChatEmitter#completeOne} 把收尾"交接给一个不存在的写线程"（只置
+	 * {@code completePending} 就返回）⇒ <b>永不 complete</b>。旧用例只查 {@code subscriberCount()}
+	 * （被 {@code closeSubscription} 摘表后就归零），所以是假绿。
+	 *
+	 * <p>本用例的判据是<b>外部可观测行为</b>：①受影响的 emitter 恰好 complete 一次；
+	 * ②前端重挂（这里用 {@code replayTo} 模拟带 {@code lastSeq} 的差量重挂）能拿回饱和时没写出的帧。
+	 */
+	@Test
+	void saturatedWriteStillCompletesTheEmitterSoTheFrontendCanReattach() throws Exception {
+		InMemoryRunStore store = new InMemoryRunStore();
+		ThreadPoolExecutor singleWriter = new ThreadPoolExecutor(0, 1, 60L, TimeUnit.SECONDS,
+				new SynchronousQueue<>(), daemon("saturated-writer"), new ThreadPoolExecutor.AbortPolicy());
+		try {
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(singleWriter, 300L));
+			MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
+			MonitorFaithfulEmitter healthy = new MonitorFaithfulEmitter(false, false);
+			out.attach(slow.emitter());
+			out.attach(healthy.emitter());
+
+			out.delta("占住唯一的写线程");
+			assertThat(slow.awaitFirstSend(5L)).as("慢订阅者的写出卡在唯一的写线程上").isTrue();
+			assertThat(awaitSubscriberCount(out, 0, 5L)).as("两条订阅者都离开订阅表（超时 + 饱和各摘一条）")
+				.isTrue();
+
+			// C1 判据：饱和摘除必须真的 complete —— 否则前端收不到 onerror/onclose，不会重挂
+			assertThat(healthy.awaitCompletes(1, 5L)).as("饱和摘除必须 complete 该 emitter（前端据此重挂）")
+				.isTrue();
+			assertThat(healthy.completes()).as("恰好 complete 一次（不重复 onCompletion）").isEqualTo(1);
+
+			// 让出唯一的写线程（模拟"卡住的那次写最终返回"），慢订阅者的收尾仍由写出线程补做。
+			// 注意：收尾发生在写线程的 finally 里、任务尚未返回 —— 必须等池真的空下来再重挂，
+			// 否则重挂的写出仍会撞上"池忙"（那是另一条断言的事，不是本用例的被测点）。
+			slow.release();
+			assertThat(slow.awaitCompletes(1, 5L)).as("慢订阅者的收尾仍由写出线程在 send 返回后补做").isTrue();
+			assertThat(slow.completes()).isEqualTo(1);
+			assertThat(awaitWriterIdle(singleWriter, 5L)).as("写出线程已归还").isTrue();
+
+			// 前端可重挂：饱和时没写出的帧仍在归档里，重挂的差量回放能补齐（seq 无洞）
+			out.delta("饱和之后的新帧");
+			FrameWire reattached = new FrameWire();
+			SseChatEmitter.ReplayResult replay = out.replayToWithStatus(reattached.emitter(), 0L);
+			assertThat(replay.staged()).as("重挂回放暂存帧数（归档里应有 2 帧）").isEqualTo(2);
+			awaitSize(reattached, 2, 3_000L);
+			assertThat(FrameWire.normalize(reattached.frames())).extracting(frame -> frame.get("seq"))
+				.as("重挂回放拿到全部归档帧（饱和只断连，不丢帧）").containsExactly(1L, 2L);
 		}
 		finally {
 			singleWriter.shutdownNow();
@@ -483,6 +548,15 @@ class SseChatEmitterWriteBudgetTest {
 			TimeUnit.MILLISECONDS.sleep(5L);
 		}
 		return out.subscriberCount() == expected;
+	}
+
+	/** 等写出池真的空下来（收尾发生在写线程的 finally 里，任务返回前池仍算忙）。 */
+	private static boolean awaitWriterIdle(ThreadPoolExecutor pool, long seconds) throws InterruptedException {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+		while (pool.getActiveCount() > 0 && System.nanoTime() < deadline) {
+			TimeUnit.MILLISECONDS.sleep(5L);
+		}
+		return pool.getActiveCount() == 0;
 	}
 
 	private static void awaitSize(FrameWire wire, int size, long timeoutMillis) throws InterruptedException {
