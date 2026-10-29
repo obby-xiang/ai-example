@@ -226,11 +226,11 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * 条件收集的步骤门：<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，
 	 * 其余步骤（{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链等）一律拒绝。
 	 *
-	 * <p>步骤未知（{@code null}/空，含无上下文的既有单测调用）时<b>不</b>判关闭 —— 未知不等于关闭，
-	 * 那时仍以槽位规则为准（兼容）。
+	 * <p>判据本体在 {@link GenerativeFormRules#conditionsStepAllowed} —— 宿主条件表单与这道闸门
+	 * <b>共用同一份实现</b>（两处各写一遍必然漂移："模型发的被拒、宿主发的照弹"）。
 	 */
 	private static boolean conditionsStepAllowed(String step) {
-		return step == null || step.isBlank() || "QUERY_COND".equalsIgnoreCase(step.trim());
+		return GenerativeFormRules.conditionsStepAllowed(step);
 	}
 
 	/** 是否还在 {@code QUERY_COND} 之前的前置步：指引是"先 confirm_step 推进"，而不是"步已关闭"。 */

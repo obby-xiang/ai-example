@@ -129,6 +129,21 @@ class FlowTypeConditionPromptContractTest {
 	}
 
 	@Test
+	void promptDeclaresHostIssuedFormsAreAnsweredNotRepeated() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("类型表单由宿主先行下发：收到回灌就直接 create_task")
+			.contains("宿主会先行下发那张类型表单")
+			.contains("收到它的回灌")
+			.contains("就直接按该值 create_task");
+		assertThat(prompt).as("条件文本框同理：回灌文本按规则 26 解析，留空直接推进")
+			.contains("宿主会先行下发那一次条件文本框")
+			.contains("留空就直接 confirm_step");
+		assertThat(prompt).as("宿主已经发过的那一张不得再发第二张（否则同一缺口弹两次）")
+			.contains("不得再下发第二张");
+	}
+
+	@Test
 	void toolsVersionIsBumpedForTheNewDescriptions() {
 		YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
 

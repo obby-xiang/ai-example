@@ -6,9 +6,7 @@ import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
-import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
-import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.TaskSlots;
@@ -16,7 +14,6 @@ import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -94,7 +91,7 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-public class DefinitionSelectionForm {
+public class DefinitionSelectionForm extends HostForm {
 
 	/** 表单唯一字段的 key（回灌值形如 {@code {"defCodes":["CURRENCY",...]}}）。 */
 	public static final String FIELD_KEY = "defCodes";
@@ -114,28 +111,12 @@ public class DefinitionSelectionForm {
 	/** 导出向导页（{@link ContextBuilder#SELECTION_PAGE_IDS} 的成员）。 */
 	static final String EXPORT_PAGE = "export";
 
-	private static final ObjectMapper JSON = new ObjectMapper();
-
-	private final RunStore store;
-
-	private final RunRegistry registry;
-
-	private final ConfirmGate gate;
-
-	private final MessageJsonCodec codec;
-
-	private final AiProperties properties;
-
 	private final DefinitionCatalog catalog;
 
 	@Autowired
 	public DefinitionSelectionForm(RunStore store, RunRegistry registry, ConfirmGate gate, MessageJsonCodec codec,
 			AiProperties properties, DefinitionCatalog catalog) {
-		this.store = store;
-		this.registry = registry;
-		this.gate = gate;
-		this.codec = codec;
-		this.properties = properties;
+		super(store, registry, gate, codec, properties);
 		this.catalog = catalog;
 	}
 
@@ -158,7 +139,7 @@ public class DefinitionSelectionForm {
 		if (runId == null || context == null || history == null) {
 			return false;
 		}
-		if (this.properties == null || !this.properties.getPark().isEnabled()) {
+		if (!parkEnabled()) {
 			// 阻塞式等待不承接这条新增流程（见类注：不新增中断路径）
 			return false;
 		}
@@ -167,7 +148,7 @@ public class DefinitionSelectionForm {
 			if (arguments.isEmpty()) {
 				return false;
 			}
-			return park(runId, history, pending(context.getTaskId(), arguments.get()));
+			return park(runId, history, frontendForm(toolCallId(context.getTaskId()), arguments.get()));
 		}
 		catch (RuntimeException ex) {
 			// fail-safe：这是"让交互确定"的增强，不是这一轮的判定面 —— 任何读库/写库/发帧异常
@@ -192,7 +173,7 @@ public class DefinitionSelectionForm {
 			// 还在旧任务上（或根本没到向导）：旧任务的配置不能被当成新任务的已知信息
 			return Optional.empty();
 		}
-		if (handledInBatch(settledBatch)) {
+		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, "select_definitions")) {
 			return Optional.empty();
 		}
 		if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
@@ -205,38 +186,10 @@ public class DefinitionSelectionForm {
 			// 配置已知 ⇒ 直接走 select_definitions，不弹表单（与槽位放行同一判据）
 			return Optional.empty();
 		}
-		if (alreadyIssued(runId, createdTaskId)) {
+		if (alreadyIssued(runId, toolCallId(createdTaskId))) {
 			return Optional.empty();
 		}
-		return formArguments(createdTaskId);
-	}
-
-	/** 本轮是否已创建任务（AR-03 的同一份台账口径）；回执里没有任务号 = 不算"新任务链"。 */
-	private Long createdTaskInRun(String runId) {
-		List<Map<String, Object>> ledger;
-		try {
-			ledger = this.store.ledger(runId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("读取本轮台账失败，宿主不生成定义选择表单 runId={}：{}", runId, ex.getMessage());
-			return null;
-		}
-		if (ledger == null || ledger.isEmpty()) {
-			return null;
-		}
-		for (Map<String, Object> record : ledger) {
-			if (record == null || !RunContextRefresher.TOOL_CREATE_TASK.equals(record.get("name"))) {
-				continue;
-			}
-			if (!ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
-				continue;
-			}
-			Long taskId = RunContextRefresher.taskIdFromText(String.valueOf(record.get("resultText")));
-			if (taskId != null) {
-				return taskId;
-			}
-		}
-		return null;
+		return buildArguments(createdTaskId);
 	}
 
 	/** 本批是否有一次<b>成功</b>的导航，且目标正是本轮新建的那个任务。 */
@@ -251,46 +204,9 @@ public class DefinitionSelectionForm {
 			if (!settled.resolved() || settled.effectiveOutcome() != ToolOutcome.OK) {
 				continue;
 			}
-			JsonNode args = parse(settled.getArguments());
+			JsonNode args = parseJson(settled.getArguments());
 			Long target = longOf(args == null ? null : args.get("taskId"));
 			if (createdTaskId.equals(target)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** 本批已经有模型自己的选择表单/勾选调用：宿主不再重复（同一缺口只问一次）。 */
-	private static boolean handledInBatch(List<PendingToolCall> settledBatch) {
-		if (settledBatch == null) {
-			return false;
-		}
-		for (PendingToolCall settled : settledBatch) {
-			if (settled == null) {
-				continue;
-			}
-			if (GenerativeFormRules.TOOL_NAME.equals(settled.getName())
-					|| "select_definitions".equals(settled.getName())) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** 同一任务只挂一次：{@code toolCallId} 是确定性的，待决条目里已有同号即视为已挂过。 */
-	private boolean alreadyIssued(String runId, Long createdTaskId) {
-		List<PendingToolCall> pendings;
-		try {
-			pendings = this.store.pendingsLenient(runId);
-		}
-		catch (RuntimeException ex) {
-			// 读不出来就不冒"重复弹表"的险：宁可不发，交回既有路径
-			log.warn("读取待决条目失败，宿主不生成定义选择表单 runId={}：{}", runId, ex.getMessage());
-			return true;
-		}
-		String toolCallId = toolCallId(createdTaskId);
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
-			if (pending != null && toolCallId.equals(pending.getToolCallId())) {
 				return true;
 			}
 		}
@@ -305,7 +221,7 @@ public class DefinitionSelectionForm {
 	 *
 	 * @return {@code empty} = 目录为空 / 不可枚举 / 超出平铺上限（<b>不得</b>下发空表或残表）
 	 */
-	private Optional<String> formArguments(Long createdTaskId) {
+	private Optional<String> buildArguments(Long createdTaskId) {
 		List<SlotDefinition> definitions;
 		try {
 			definitions = this.catalog == null ? List.of() : this.catalog.list();
@@ -351,23 +267,7 @@ public class DefinitionSelectionForm {
 		form.put("purpose", GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS);
 		form.put("title", TITLE);
 		form.put("fields", List.of(field));
-
-		Map<String, Object> arguments = new LinkedHashMap<>();
-		arguments.put("form", form);
-		String json;
-		try {
-			json = JSON.writeValueAsString(arguments);
-		}
-		catch (Exception ex) {
-			log.warn("定义选择表单序列化失败，宿主不生成表单 taskId={}：{}", createdTaskId, ex.getMessage());
-			return Optional.empty();
-		}
-		if (json.length() > GenerativeFormRules.MAX_FORM_CHARS) {
-			log.warn("定义选择表单长度 {} 超出上限 {}，宿主不生成残缺表单 taskId={}", json.length(),
-					GenerativeFormRules.MAX_FORM_CHARS, createdTaskId);
-			return Optional.empty();
-		}
-		return Optional.of(json);
+		return formArguments(form);
 	}
 
 	/** 选项文案：定义名称（只作展示，回灌值是编码）；超长按选项文本上限截断。 */
@@ -379,109 +279,6 @@ public class DefinitionSelectionForm {
 		String trimmed = name.trim();
 		return trimmed.length() > GenerativeFormRules.MAX_OPTION_TEXT_CHARS
 				? trimmed.substring(0, GenerativeFormRules.MAX_OPTION_TEXT_CHARS) : trimmed;
-	}
-
-	private PendingToolCall pending(Long taskId, String arguments) {
-		PendingToolCall pending = new PendingToolCall();
-		pending.setToolCallId(toolCallId(taskId));
-		pending.setName(GenerativeFormRules.TOOL_NAME);
-		pending.setType("function");
-		pending.setArguments(arguments);
-		pending.setKind(PendingToolCall.KIND_FRONTEND);
-		// 表单是"收集值"，不是不可逆写：不要不确定性的复选框语义
-		pending.setIrreversible(false);
-		return pending;
-	}
-
-	/**
-	 * 既有挂起面（与模型自己下发的 {@code generative_form} 同一条路）：外置挂起态 → {@code suspended}
-	 * → 请求帧 → 本轮收流。顺序是硬要求（{@code saveSuspended} 先于任何帧）。
-	 *
-	 * <p><b>正文/推理元数据沿用当前快照</b>：{@code saveSuspended} 会把 {@code assistantContent} 与
-	 * {@code assistantMetadata} 一起覆盖写 —— 这里传 {@code ""}/{@code null} 等于抹掉模型刚产出的那一轮
-	 * （正文可能非空，推理元数据还带着 {@code reasoningContent}/{@code encrypted_content} 等厂商私有键）。
-	 * 挂起只该换"谁在等"，因此先读快照再原样带上（6 参重载）；快照缺失仍交给
-	 * {@code saveSuspended} 自己的失败路径（下面同一段收敛）。
-	 */
-	private boolean park(String runId, List<Message> history, PendingToolCall pending) {
-		try {
-			RunSnapshot current = this.store.get(runId);
-			this.store.saveSuspended(runId, current == null ? null : current.getAssistantContent(),
-					List.of(pending), history, this.codec,
-					current == null ? null : current.getAssistantMetadata());
-		}
-		catch (RuntimeException ex) {
-			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，
-			// 快照那一步失败时条目会留在 Redis 里；前端没有请求帧、用户看不到卡，而后续续跑会被
-			// 既有 PENDING_UNRESOLVED 前置挡住 —— 一轮就此卡死）。这里尽力把它收敛成终态
-			// （不执行、不再等待），失败只告警：最坏情形与"没收敛"相同。
-			convergeAfterParkFailure(runId, pending, ex);
-			return false;
-		}
-		SseChatEmitter out;
-		try {
-			out = this.registry.of(runId);
-			out.suspended(List.of(pending), this.store.runKey(runId), this.store.pendingKey(runId),
-					this.store.instanceId());
-		}
-		catch (RuntimeException ex) {
-			// 快照已成功挂起 ⇒ 这一拍<b>绝不能</b>交回模型（否则 SUSPENDED + 待决条目 + 模型在跑 =
-			// 双驱动：同一轮的帧与历史会分叉）。发帧是观测面，失败只告警，等恢复。
-			log.warn("宿主表单已挂起，但 suspended 帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
-					runId, pending.getToolCallId(), ex.getMessage());
-			return true;
-		}
-		try {
-			this.gate.publishRequestsForParkedBatch(runId, List.of(pending));
-		}
-		catch (RuntimeException ex) {
-			log.warn("宿主表单已挂起，但请求帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
-					runId, pending.getToolCallId(), ex.getMessage());
-			return true;
-		}
-		try {
-			// "挂起即断"（B1）：请求帧送达后本轮订阅收流，用户提交/取消后再带 lastSeq 重连
-			out.completeSubscriptions();
-		}
-		catch (RuntimeException ex) {
-			// 收流失败不回退：条目与快照已就位，重挂/刷新仍能取到这张卡
-			log.warn("宿主表单已挂起，但本轮收流失败（不影响挂起态）runId={} toolCallId={}：{}", runId,
-					pending.getToolCallId(), ex.getMessage());
-		}
-		log.info("宿主已挂起定义选择表单 runId={} toolCallId={}（平铺多选，等用户勾选）", runId,
-				pending.getToolCallId());
-		return true;
-	}
-
-	/** 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。 */
-	private void convergeAfterParkFailure(String runId, PendingToolCall pending, RuntimeException cause) {
-		log.warn("宿主表单挂起写失败（本拍不挂起，按既有路径继续）runId={} toolCallId={}：{}", runId,
-				pending.getToolCallId(), cause.getMessage());
-		try {
-			pending.setStatus(PendingToolCall.BLOCKED);
-			pending.setOutcome(ToolOutcome.FAILED.wire());
-			pending.setCode(ToolOutcome.CODE_TOOL_EXECUTION_FAILED);
-			pending.setReason("宿主表单挂起失败，未下发前端");
-			pending.setExecuted(false);
-			pending.setResolvedAtMs(System.currentTimeMillis());
-			this.store.putPending(runId, pending);
-		}
-		catch (RuntimeException nested) {
-			log.warn("宿主表单挂起失败后的条目收敛也失败（该条目留在 PENDING）runId={} toolCallId={}：{}", runId,
-					pending.getToolCallId(), nested.getMessage());
-		}
-	}
-
-	private static JsonNode parse(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
-			return null;
-		}
-		try {
-			return JSON.readTree(argumentsJson);
-		}
-		catch (Exception ex) {
-			return null;
-		}
 	}
 
 	private static Long longOf(JsonNode node) {

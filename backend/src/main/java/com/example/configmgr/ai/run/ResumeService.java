@@ -281,6 +281,24 @@ public class ResumeService {
 		this.definitionSelectionForm = form;
 	}
 
+	/**
+	 * 宿主确定性筛选条件文本框（进入 {@code QUERY_COND} + 条件未给 + 主动任务链 ⇒ 宿主自己挂起）。
+	 *
+	 * <p>为什么也挂在续跑侧：{@code confirm_step} 是前端工具 —— 把它推进到 {@code QUERY_COND} 的那一批
+	 * 在 park 下同样以续跑收尾，于是"刚进入条件步、模型还没被问"的确定点也在这里。判据里的步骤与
+	 * 槽位读的是<b>交棒那一份</b>（批间刷新 + 权威同步之后），因此已过条件步（{@code EXPORT} 及之后）
+	 * 不会再弹。
+	 *
+	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）；缺席 = 不挂起。
+	 */
+	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+	/** 可选注入（缺席 = 不弹条件框，模型侧既有路径不变）。 */
+	@Autowired(required = false)
+	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
+		this.conditionsForm = form;
+	}
+
 	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
@@ -1805,6 +1823,20 @@ public class ResumeService {
 				body.put("reason", "DEFINITION_FORM_PARKED");
 				body.put("taskId", nextHopContext.getTaskId());
 				log.info("续跑改为等人填配置项表单（本拍不驱动模型）runId={} taskId={}", runId,
+						nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
+
+			// ===== 宿主确定性筛选条件文本框（进入 QUERY_COND + 条件未给 + 主动任务链）=====
+			// 与上面同一处交棒点、同一份下一跳上下文：判据是权威步骤（只有 QUERY_COND 允许）与
+			// 重算后的槽位（条件已给 ⇒ 不弹，模型直接 set_condition）。EXPORT 及之后由步骤门挡住，
+			// 因此"EXPORT 后不得再弹"不是靠调用顺序，而是判据本身。
+			if (this.conditionsForm != null
+					&& this.conditionsForm.parkIfDue(runId, nextHopContext, settledInBatch, history)) {
+				body.put("resumed", false);
+				body.put("reason", "CONDITIONS_FORM_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				log.info("续跑改为等人填筛选条件（本拍不驱动模型）runId={} taskId={}", runId,
 						nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}

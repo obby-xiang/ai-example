@@ -330,6 +330,8 @@ public class ResilientChatService {
 			    标题不追问，缺省即按类型生成；只有类型确实无法判断时才用 generative_form 选 EXPORT/IMPORT
 			    （purpose=TASK_TYPE，单个 enum 单选；类型已确定时绝不弹类型表单，宿主会零副作用拒绝并指回
 			    create_task），标题仍留空，不要用文字反问类型。
+			    类型未知时宿主会先行下发那张类型表单：收到它的回灌（{"type":"EXPORT"}/{"type":"IMPORT"}）
+			    就直接按该值 create_task，不得再下发第二张，也不得再用文字确认类型。
 			    旧任务参数不自动带入新任务：当前任务的配置项、筛选条件、权威步骤与完成状态都属于那条旧任务，
 			    不得当作新任务的已知信息（不等于总纲里的"已给参数"），不得据此先去 select_definitions、
 			    填条件或跳过创建；只有用户明确说"沿用/照当前任务的配置"时才可复用。
@@ -340,6 +342,8 @@ public class ResilientChatService {
 			    筛选条件可选：进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（purpose=SET_CONDITIONS），
 			    这是条件收集的唯一渠道；用户已给条件就直接 set_condition、不弹表单；框内留空就直接 confirm_step
 			    推进（不设条件即全量）。条件只收集这一次，不得重复下发条件表单，也不得改用文字追问。
+			    进入 QUERY_COND 时宿主会先行下发那一次条件文本框：收到它的回灌就把文本按第 26 条解析成
+			    set_condition、留空就直接 confirm_step，不得再下发第二张，也不得改用文字追问。
 			""";
 
 	/**
@@ -477,6 +481,36 @@ public class ResilientChatService {
 	@Autowired(required = false)
 	public void setTaskSlotResolver(TaskSlotResolver resolver) {
 		this.taskSlotResolver = resolver;
+	}
+
+	/**
+	 * 宿主确定性任务类型表单（类型未知 + 主动新建意图 ⇒ 宿主先挂起 {@code EXPORT/IMPORT} 单选）。
+	 *
+	 * <p><b>为什么挂在首轮、驱动模型之前</b>：类型未知时这一轮本来没有可执行动作
+	 * （{@code create_task} 缺必填的 type），先问一句是这一轮最短的路径；而"让模型自己问"是不可控的
+	 * ——它可能写成文字反问。判据只看用户原话与槽位，与模型这一拍的输出无关。
+	 *
+	 * <p><b>为什么字段注入</b>：与 {@link #taskSlotResolver} 同因（本类构造器被多份用例直接 new）；
+	 * 缺席 = 不挂起，首轮行为与引入之前逐字同形。
+	 */
+	private com.example.configmgr.ai.form.TaskTypeForm taskTypeForm;
+
+	/** 可选注入（缺席 = 不弹类型表单，模型侧既有路径不变）。 */
+	@Autowired(required = false)
+	public void setTaskTypeForm(com.example.configmgr.ai.form.TaskTypeForm form) {
+		this.taskTypeForm = form;
+	}
+
+	/**
+	 * 宿主确定性筛选条件文本框（首轮就停在 {@code QUERY_COND} + 条件未给 + 主动任务链 ⇒ 宿主先挂起
+	 * 那个非必填 text 框）。续跑侧的同一判据在 {@code ResumeService} 的交棒点（两处共用一个组件）。
+	 */
+	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+	/** 可选注入（缺席 = 不弹条件框，模型侧既有路径不变）。 */
+	@Autowired(required = false)
+	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
+		this.conditionsForm = form;
 	}
 
 	/** 可选注入（取消收尾的接管通路；缺失时退化为"拒写即退出"的旧口径）。 */
@@ -754,6 +788,21 @@ public class ResilientChatService {
 			if (cancellationRequested(runId)) {
 				log.info("首轮交棒前收到取消 runId={}（不发起模型调用）", runId);
 				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
+				return;
+			}
+			// ===== 宿主确定性收集表单（类型未知 / 停在条件步且条件未给）=====
+			// 位置在取消复查之后、驱动模型之前：判据只看用户原话与槽位（不看模型这一拍的输出），
+			// 于是"问什么"不再由模型的自由裁量决定；挂起面与续跑侧同一个组件（HostForm），
+			// 用户的提交/取消走既有回灌与既有续跑，确认卡与 HITL 一字不动。
+			// 模型不支持工具调用时不下发（它连 create_task 都发不出来，问了也走不下去）。
+			if (toolsAllowed && this.taskTypeForm != null
+					&& this.taskTypeForm.parkIfDue(runId, context, request.message(), full)) {
+				log.info("首轮改为等人填任务类型（本拍不驱动模型）runId={}", runId);
+				return;
+			}
+			if (toolsAllowed && this.conditionsForm != null
+					&& this.conditionsForm.parkIfDue(runId, context, List.of(), full)) {
+				log.info("首轮改为等人填筛选条件（本拍不驱动模型）runId={} taskId={}", runId, context.getTaskId());
 				return;
 			}
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {

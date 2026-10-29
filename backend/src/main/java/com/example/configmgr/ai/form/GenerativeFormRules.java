@@ -192,6 +192,18 @@ public final class GenerativeFormRules {
 
 	public static final int MAX_OPTION_TEXT_CHARS = 100;
 
+	/** 条件收集步（导出向导）：条件表单<b>只有</b>这一步允许下发。 */
+	public static final String STEP_QUERY_COND = "QUERY_COND";
+
+	/**
+	 * 条件收集的<b>步骤门</b>（宿主表单与 {@code GenerativeFormGuard} 共用这一份判据）。
+	 *
+	 * <p>未知步骤（{@code null}/空）不算关闭 —— 未知不等于"已过条件步"，既有兼容口径不变。
+	 */
+	public static boolean conditionsStepAllowed(String step) {
+		return step == null || step.isBlank() || STEP_QUERY_COND.equalsIgnoreCase(step.trim());
+	}
+
 	/** 普通 text 的硬顶（保留；前端同源）。 */
 	public static final int MAX_TEXT_VALUE_CHARS = 200;
 
