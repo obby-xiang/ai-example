@@ -3630,7 +3630,10 @@ Say '--- 批① · GF 生成式表单（11 条：新能力面 + 结构化 issues
 
 Add-AiCase 'G-04' 'P1' '复核拒绝 → 改值重发：400 带结构化 issues/retryable，状态仍 PENDING' {
     $sid = Ai-NewSid 'g04'
-    $s = Ai-FormSuspend $sid 'scenario=FILTER'
+    # 首条 user 文本 = 桩的轮次台账键（fingerprint = 首条 user 文本）：同文本的多条用例会共用
+    # "每路由一次"台账，只有消息数严格回退才清零 —— 各用例的标记带括号区分，避免跨用例串账
+    # （同 `gf-linkage（G-10 …）` / `gf-options-from（G-12 …）` 的既有做法；`scenario=FILTER` 子串保留）。
+    $s = Ai-FormSuspend $sid 'scenario=FILTER（G-04 复核拒绝改值）'
     $bad = '{"keyword":"' + ('X' * 400) + '"}'
     $r1 = Ai-FormPost $s.runId $s.toolCallId $bad
     if ($r1.status -ne 400) { throw "非法值回灌 HTTP $($r1.status)，期望 400" }
@@ -3820,7 +3823,10 @@ Add-AiCase 'G-15' 'P1' '附件三重校验：一次性消费（同 fileId 二次
 
 Add-AiCase 'G-16' 'P1' '草稿不进服务端：表单挂起期服务端无草稿残留，提交后无遗留' {
     $sid = Ai-NewSid 'g16'
-    $s = Ai-FormSuspend $sid 'scenario=FILTER'
+    # 标记带括号区分（同 G-04/G-17）：首条 user 文本是桩的轮次台账键，三条用例共用
+    # `scenario=FILTER` 纯文本会共用台账（G-16 提交后的续轮请求若晚于 G-17 到达，G-17 会拿到
+    # "已用过该路由"的文本收尾，从而拿不到表单）。
+    $s = Ai-FormSuspend $sid 'scenario=FILTER（G-16 草稿不进服务端）'
     $pend = Gf-PendingEntry $s.runId $s.toolCallId
     foreach ($k in @('draft', 'model', 'values')) {
         if ($null -ne $pend.PSObject.Properties[$k]) { throw "pending 条目带 $k（表单草稿被写到服务端）" }
@@ -3836,7 +3842,9 @@ Add-AiCase 'G-16' 'P1' '草稿不进服务端：表单挂起期服务端无草�
 
 Add-AiCase 'G-17' 'P1' '结构化 issues 是点亮字段的数据源（key + code 齐备、可重试区分）' {
     $sid = Ai-NewSid 'g17'
-    $s = Ai-FormSuspend $sid 'scenario=FILTER'
+    # 标记带括号区分（同 G-04/G-16）：与 G-16 共用纯 `scenario=FILTER` 时，台账复位依赖
+    # "G-16 的续轮请求先到达"这一时序（本轮 nightly 实测：续轮迟到 ⇒ 本用例拿到文本收尾、零表单）。
+    $s = Ai-FormSuspend $sid 'scenario=FILTER（G-17 结构化 issues）'
     $r = Ai-FormPost $s.runId $s.toolCallId '{"keyword":"E2EGFC","scope":"NOT_A_SCOPE"}'
     if ($r.status -ne 400) { throw "非法枚举值 HTTP $($r.status)，期望 400" }
     $issues = @($r.json.issues)
