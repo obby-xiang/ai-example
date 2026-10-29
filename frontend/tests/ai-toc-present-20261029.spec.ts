@@ -636,8 +636,8 @@ describe('8 · 硬编码走 locale', () => {
   })
 })
 
-describe('9 · 首帧超时自动恢复在途时面板不回稿', () => {
-  it('恢复在途（ai.loading）时不回稿，避免与恢复提示重复', async () => {
+describe('9 · 自动恢复接管本条时面板不回稿', () => {
+  it('本条确实被自动恢复接管（结局 interrupted 且消息仍在、loading）⇒ 不回稿', async () => {
     const store = useAiStore()
     const wrapper = await mountPanel([])
     const box = wrapper.find('[data-testid="composer-input"]')
@@ -652,13 +652,67 @@ describe('9 · 首帧超时自动恢复在途时面板不回稿', () => {
     await nextTick()
     expect((box.element as HTMLTextAreaElement).value).toBe('')
 
-    // 首帧超时的自动恢复已经接管本轮（连接仍在跑）⇒ 不再把草稿塞回输入框
+    // 自动恢复接管**本条**：连接仍在跑（loading），本条用户气泡仍在消息流里
     store.loading = true
+    store.messages.push({
+      id: 'u-1',
+      role: 'user',
+      content: '原始草稿',
+      parts: [{ kind: 'text', seg: 0, text: '原始草稿', streaming: false }],
+      reasoning: '',
+      toolRuns: [],
+      pendingCall: null,
+      streaming: false,
+      done: true
+    })
     resolveSend({ outcome: 'interrupted', userMessageId: 'u-1' })
     await flushPromises()
 
     expect((box.element as HTMLTextAreaElement).value).toBe('')
     expect(store.loading).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('409 接管回滚（气泡已被删、loading 为真）⇒ 草稿照旧回稿', async () => {
+    const store = useAiStore()
+    const wrapper = await mountPanel([])
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('接管中的草稿')
+
+    let resolveSend!: (value: { outcome: 'interrupted'; userMessageId: string }) => void
+    const pending = new Promise<{ outcome: 'interrupted'; userMessageId: string }>((resolve) => {
+      resolveSend = resolve
+    })
+    vi.spyOn(store, 'send').mockReturnValue(pending)
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await nextTick()
+
+    // R-04 回滚现场：接管方让 loading 为真，但**本次乐观气泡与助手气泡都已被删**
+    //（提示是「这条消息没有发出去」）⇒ 草稿必须留在输入框，否则「只留一处」变成"零处"
+    store.loading = true
+    resolveSend({ outcome: 'interrupted', userMessageId: 'u-gone' })
+    await flushPromises()
+
+    expect(store.messages.some((message) => message.id === 'u-gone')).toBe(false)
+    expect((box.element as HTMLTextAreaElement).value).toBe('接管中的草稿')
+    wrapper.unmount()
+  })
+
+  it('未发送（userMessageId=null，loading 为真）⇒ 草稿照旧回稿', async () => {
+    const store = useAiStore()
+    const wrapper = await mountPanel([])
+    const box = wrapper.find('[data-testid="composer-input"]')
+    await box.setValue('没发出去的草稿')
+
+    vi.spyOn(store, 'send').mockImplementation(async () => {
+      // `stopping` 等待期间被一次续收插进来：本轮根本没发出去，也没有任何提示面
+      store.loading = true
+      return { outcome: 'not-sent', userMessageId: null }
+    })
+    await wrapper.find('[data-testid="send-btn"]').trigger('click')
+    await flushPromises()
+
+    expect((box.element as HTMLTextAreaElement).value).toBe('没发出去的草稿')
     wrapper.unmount()
   })
 

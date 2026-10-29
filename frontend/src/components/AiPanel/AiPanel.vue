@@ -4814,10 +4814,20 @@ async function send(): Promise<void> {
   if (inputText.value !== '') {
     return
   }
-  // 首帧超时的自动恢复**已接管本轮**（`ai.loading` 仍为真：连接/续收在跑）⇒ 不回稿：
-  // 这一轮的提示面是恢复气泡/断流出口，再往输入框塞一遍原稿就是同一句话两处，且用户会误以为
-  // 消息没发出去。真失败到达时 `loading` 已为假，回稿路径一字不变。
-  if (ai.loading) {
+  // 只有「**本条**确实被自动恢复接管」才不回稿 —— 判据必须同时满足三件：
+  // ① 仍有连接在跑（`ai.loading`）；② 结局是 interrupted（断流/接管，不是真失败）；
+  // ③ 本次乐观用户消息**仍在消息流里**（`userMessageId` 非空且找得到）。
+  // 为什么不能只写 `if (ai.loading) return`：`loading` 只表示"**有任何一轮**在跑"——
+  //   · 409 SESSION_BUSY 接管回滚（R-04）会把本次乐观用户+助手气泡一起删掉，随后结局被
+  //     `settleOutcome` 判成 interrupted 而接管方同时置 `loading=true` ⇒ 只按 loading 跳过回稿，
+  //     "草稿只留在输入框一处"就变成"零处"（提示还说"这条消息没有发出去"）；
+  //   · `not-sent`（`stopping` 等待期间被续收插队）连用户气泡都没有，同样会被吞。
+  // 这两类都要求消息已不在 / 没有消息 ⇒ 回落既有回稿路径。真失败（error）`loading` 本就为假，一字不变。
+  const takenOverByRecovery = ai.loading
+    && result.outcome === 'interrupted'
+    && result.userMessageId != null
+    && ai.messages.some((message) => message.id === result.userMessageId)
+  if (takenOverByRecovery) {
     return
   }
   // 失败 / 断流 / 未发送：原稿回流并聚焦；新消息锚到本轮用户消息，编辑重跑沿用发送前 editId。
