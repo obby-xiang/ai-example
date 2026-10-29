@@ -16,6 +16,7 @@ import {
   redisExec as redisExecOn,
   redisKeys as redisKeysOn
 } from './harness'
+import { aiFetch, newAiSession } from './ai-identity'
 
 export const KQC_RUN_DIR = RUN_DIR
 export const STUB_DIR = join(RUN_DIR, 'stub')
@@ -31,7 +32,7 @@ export interface RawResponse {
 }
 
 export async function httpRaw(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<RawResponse> {
-  const res = await fetch(`${API}${path}`, {
+  const res = await aiFetch(`${API}${path}`, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -272,9 +273,9 @@ export interface RoundResult {
   text: string
 }
 
-/** 直打一轮 `POST /api/ai/chat`，等流收完再解析（含 done / error 帧）。 */
+/** 直打一轮 `POST /api/ai/chat`（带身份头），等流收完再解析（含 done / error 帧）。 */
 export async function chatRound(sessionId: string, message: string, timeoutMs = 120_000): Promise<RoundResult> {
-  const res = await fetch(`${API}/api/ai/chat`, {
+  const res = await aiFetch(`${API}/api/ai/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
     body: JSON.stringify({ sessionId, message }),
@@ -561,9 +562,15 @@ export function fingerprint(caseId: string): string {
   return `${caseId.toLowerCase()}-${Date.now().toString(36)}`
 }
 
-/** 新会话 id（每个用例独立会话，避免跨用例记忆污染）。 */
-export function newSessionId(caseId: string): string {
-  return `kqc-${caseId.toLowerCase()}-${Date.now().toString(36)}`
+/**
+ * 新会话号：**后端发号**（`POST /api/ai/session` + `sessionIdText`）。
+ *
+ * <p>Task 4 起前端/脚本/E2E 都不再造号：本地串既证明不了归属，也会在聊天入口被记为"未登记会话"。
+ * `caseId` 只保留在调用点做可读性（号值与用例无关）。
+ */
+export async function newSessionId(caseId: string): Promise<string> {
+  if (caseId.length === 0) throw new Error('newSessionId 缺少 caseId（仅用于调用点可读性）')
+  return newAiSession(API)
 }
 
 // ── Redis（本域 DB；统一走 harness 的 ioredis 客户端，不再自带 RESP 解析）──────────────

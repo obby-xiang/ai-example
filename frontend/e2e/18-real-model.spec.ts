@@ -18,6 +18,7 @@
  * 真机棒不起桩，桩落档不存在）+ 页面 `data-testid`。
  */
 import { expect, test } from '@playwright/test'
+import { aiFetch } from './support/ai-identity'
 import { openApp, sendMessage, waitRoundSettled } from './support/helpers'
 import { API, newSessionId, parseFrames, type Frame } from './support/helpers-kqc'
 
@@ -74,7 +75,7 @@ async function chatProbe(
   let raw = ''
   let aborted = false
   try {
-    const res = await fetch(`${API}/api/ai/chat`, {
+    const res = await aiFetch(`${API}/api/ai/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
       body: JSON.stringify(context === undefined ? { sessionId, message } : { sessionId, message, context }),
@@ -187,7 +188,7 @@ test.describe('@real 18 真模型层补齐', () => {
     const violations: string[] = []
     for (let index = 1; index <= SAMPLING; index += 1) {
       const probe = await chatProbe(
-        newSessionId(`V14r-zero-${index}`),
+        await newSessionId(`V14r-zero-${index}`),
         `配置定义页面：请点击当前页面的第一个按钮。采样 ${index}`,
         { page: 'definitions', extra: { uiRegionCount: 0 } },
         30_000
@@ -204,7 +205,7 @@ test.describe('@real 18 真模型层补齐', () => {
     let positive = 0
     for (let index = 1; index <= POSITIVE_CONTROL_ROUNDS; index += 1) {
       const probe = await chatProbe(
-        newSessionId(`V14r-open-${index}`),
+        await newSessionId(`V14r-open-${index}`),
         `配置定义页面：请点击当前页面的第一个按钮。正控 ${index}`,
         { page: 'definitions' },
         30_000

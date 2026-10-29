@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
+import { aiRequestOptions } from './support/ai-identity'
 import { assistantBubble, openApp, sendMessage, sessionId, waitRoundSettled } from './support/helpers'
 import {
   aiHealth,
@@ -117,7 +118,7 @@ async function kbRound(sessionIdValue: string, caseId: string, toolAndArgs: stri
 
 test.describe('@stub 16 K 知识问答', () => {
   test('E2E-K01 kb_search 命中与上限：top_k 强截 10、命中带 doc_id/section、不暴露检索分', async () => {
-    const sid = newSessionId('K01')
+    const sid = await newSessionId('K01')
     const { round, first, continuation } = await kbRound(sid, 'K01', 'tool=kb_search&args={"query":"费率","topK":50}')
 
     expect(round.status).toBe(200)
@@ -151,7 +152,7 @@ test.describe('@stub 16 K 知识问答', () => {
   })
 
   test('E2E-K02 空结果三态：no_match 可区分、给可行动提示、不抛异常', async () => {
-    const sid = newSessionId('K02')
+    const sid = await newSessionId('K02')
     const { round, continuation } = await kbRound(sid, 'K02', 'tool=kb_search&args={"query":"zzzqxv"}')
 
     expect(round.status).toBe(200)
@@ -190,7 +191,7 @@ test.describe('@stub 16 K 知识问答', () => {
    * 每页止于行边界 + `truncated=true next_offset=…`）。
    */
   test('E2E-K03 kb_read_doc 首屏/翻页：1200 首屏 + next_offset 连续、页大小受字符与行双预算', async () => {
-    const sid = newSessionId('K03')
+    const sid = await newSessionId('K03')
     const docId = 'region-tariff-long'
 
     const first = await kbRound(sid, 'K03a', `tool=kb_read_doc&args={"docId":"${docId}"}`)
@@ -293,7 +294,7 @@ test.describe('@stub 16 K 知识问答', () => {
   })
 
   test('E2E-K04 kb_lookup_term 精确 + 别名：命中给预制答案、未命中如实 found=false', async () => {
-    const sid = newSessionId('K04')
+    const sid = await newSessionId('K04')
 
     const exact = await kbRound(sid, 'K04a', 'tool=kb_lookup_term&args={"term":"标准费率"}')
     const exactText = unwrapKnowledge(lastToolText(exact.continuation))
@@ -320,7 +321,7 @@ test.describe('@stub 16 K 知识问答', () => {
   })
 
   test('E2E-K05 目录段注入与位置稳定：system 段含目录且多轮逐字相同、正文无定界泄漏', async () => {
-    const sid = newSessionId('K05')
+    const sid = await newSessionId('K05')
     const before = maxStubIndex()
     await chatRound(sid, `知识问答用例 ${fingerprint('K05a')}`)
     const second = await chatRound(sid, `知识问答用例 ${fingerprint('K05b')}`)
@@ -351,7 +352,7 @@ test.describe('@stub 16 K 知识问答', () => {
   })
 
   test('E2E-K07 知识缓存：Redis 缓存键就位、二次查询不改变缓存值、清键后仍可服务', async () => {
-    const sid = newSessionId('K07')
+    const sid = await newSessionId('K07')
     const docKey = 'kb:cache:doc:region-tariff-long'
     const versionKey = 'kb:cache:manifest:version'
 
@@ -395,8 +396,8 @@ test.describe('@stub 16 K 知识问答', () => {
   })
 
   test('E2E-K08 热重载原子切 reader：并发查询 + POST /kb/reload 不空窗不 500', async () => {
-    const searches = Array.from({ length: 4 }, (_, index) => {
-      const sid = newSessionId(`K08-${index}`)
+    const searches = Array.from({ length: 4 }, (_, index) => index).map(async (index) => {
+      const sid = await newSessionId(`K08-${index}`)
       return chatRound(sid, `知识问答用例 ${fingerprint(`K08-${index}`)} tool=kb_search&args={"query":"费率"}`)
     })
     const reload = httpRaw('POST', '/api/ai/kb/reload')
@@ -421,7 +422,7 @@ test.describe('@stub 16 K 知识问答', () => {
     }
 
     // 切换后照常服务（旧 reader 退役、新 reader 供料）
-    const after = await kbRound(newSessionId('K08-after'), 'K08-after', 'tool=kb_search&args={"query":"费率"}')
+    const after = await kbRound(await newSessionId('K08-after'), 'K08-after', 'tool=kb_search&args={"query":"费率"}')
     expect(unwrapKnowledge(lastToolText(after.continuation))).toContain('状态: ok')
   })
 })
@@ -492,7 +493,7 @@ test.describe('@stub 16 Q 快捷建议', () => {
       nodes.map((node) => (node.getAttribute('data-suggestion-id') ?? '').trim()))
     expect(before.length).toBeGreaterThan(0)
     const sid = await sessionId(page)
-    const historyBefore = await request.get(`/api/ai/history/${sid}`).then((res) => res.json() as Promise<{
+    const historyBefore = await request.get(`/api/ai/history/${sid}`, aiRequestOptions('/api/ai/history')).then((res) => res.json() as Promise<{
       data?: { count?: number }
     }>)
 
@@ -502,7 +503,7 @@ test.describe('@stub 16 Q 快捷建议', () => {
     await expect(page.locator('[data-testid^="msg-bubble-"]').first()).toBeVisible({ timeout: 30_000 })
     await expect(page.locator('[data-testid="followup-suggestions"]')).toHaveCount(0)
 
-    const historyAfter = await request.get(`/api/ai/history/${sid}`).then((res) => res.json() as Promise<{
+    const historyAfter = await request.get(`/api/ai/history/${sid}`, aiRequestOptions('/api/ai/history')).then((res) => res.json() as Promise<{
       data?: { count?: number }
     }>)
     expect(historyAfter.data?.count).toBe(historyBefore.data?.count)
@@ -632,7 +633,7 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
 
   test('E2E-C03 usage 取末帧真值：done.usage 与 /context 同值（不读中间帧）', async () => {
     const shapes = usageShapes()
-    const sid = newSessionId('C03')
+    const sid = await newSessionId('C03')
     const round = await chatRound(sid, `上下文用例 ${fingerprint('C03')} usage-shape=last`)
     expect(round.done).toBeTruthy()
     const usage = round.done!.usage as { promptTokens: number; completionTokens: number; totalTokens: number; est: boolean; source: string }
@@ -651,7 +652,7 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
 
   test('E2E-C04 每块重复 usage 不放大：多个非空 usage 帧只采纳一份', async () => {
     const shapes = usageShapes()
-    const sid = newSessionId('C04')
+    const sid = await newSessionId('C04')
     const round = await chatRound(sid, `上下文用例 ${fingerprint('C04')} usage-shape=repeat`)
     expect(round.done).toBeTruthy()
     const usage = round.done!.usage as { promptTokens: number; totalTokens: number; est: boolean; frames: number }
@@ -666,7 +667,7 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
 
   test('E2E-C05 末帧 0/0/0：回退到最近非零真值（不把真值读成 0）', async () => {
     const shapes = usageShapes()
-    const sid = newSessionId('C05')
+    const sid = await newSessionId('C05')
     const round = await chatRound(sid, `上下文用例 ${fingerprint('C05')} usage-shape=zero-last`)
     expect(round.done).toBeTruthy()
     const usage = round.done!.usage as { promptTokens: number; est: boolean }
@@ -737,7 +738,7 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
   })
 
   test('E2E-C12 CONTEXT_OVERFLOW 识别：越窗 400 认成上下文超窗、不重试、用户面安全文案', async () => {
-    const sid = newSessionId('C12')
+    const sid = await newSessionId('C12')
     const before = maxStubIndex()
     const round = await chatRound(sid, `上下文用例 ${fingerprint('C12')} context-overflow`)
 
@@ -800,7 +801,7 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
     const misses: string[] = []
     for (let index = 1; index <= REAL_SAMPLING; index += 1) {
       const round = await chatRound(
-        newSessionId(`K10-${index}`),
+        await newSessionId(`K10-${index}`),
         'How is the regional tariff calculated? Please search the knowledge base and answer in Chinese.'
       )
       expect(round.done).toBeTruthy()
@@ -823,7 +824,7 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
 
     // 未登记表达：召回为空时如实 no_match，不编造 doc_id（单轮确定性口径，不进采样计数）
     const unknown = await chatRound(
-      newSessionId('K10-absent'),
+      await newSessionId('K10-absent'),
       'How does the flurbox quota work? Please search the knowledge base.'
     )
     expect(unknown.done).toBeTruthy()
@@ -885,7 +886,7 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
     }
 
     await withModelWindow(REAL_LINEAGE_WINDOW, async () => {
-      const sid = newSessionId('C13')
+      const sid = await newSessionId('C13')
       const rounds: Array<{
         turn: number
         level: string

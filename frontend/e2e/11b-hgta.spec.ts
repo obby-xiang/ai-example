@@ -36,6 +36,7 @@ import {
   type CurrentRun,
   type FormFieldSpec
 } from './support/hgta'
+import { aiRequestOptions, newAiSession } from './support/ai-identity'
 
 const DEF = 'CURRENCY'
 
@@ -184,7 +185,7 @@ test.describe('@stub G 生成式表单', () => {
   })
 
   test('E2E-G05 回灌幂等：重复回灌冲突 409、不二次推进', async ({ request }) => {
-    const sid = `e2e-g05-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, { sessionId: sid, message: `scenario=FILTER 用例G05-${uniq()}`, context: { page: 'tasks' } })
     expect(chat.frames.map((frame) => String(frame.type))).toContain('frontend_tool_request')
     const { runId, toolCallId } = await formRefs(request, sid)
@@ -204,7 +205,7 @@ test.describe('@stub G 生成式表单', () => {
   })
 
   test('E2E-G06 入参闸门：非法联动 schema 被拒、不挂起、不下发坏表单（表达式不求值）', async ({ request }) => {
-    const sid = `e2e-g06-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, { sessionId: sid, message: `gf-expr-linkage 用例G06-${uniq()}`, context: { page: 'tasks' } })
     expect(chat.status).toBe(200)
     const types = chat.frames.map((frame) => String(frame.type))
@@ -296,9 +297,15 @@ test.describe('@stub G 生成式表单', () => {
     expect((await optionTexts()).some((text) => text.includes('XA'))).toBe(false)
 
     // 服务端数据源口子只认注册表 id（URL/脚本一律 400）
-    const res = await request.get(`${API}/api/ai/form/option-sources/definition_fields?value=HD`)
+    const res = await request.get(
+      `${API}/api/ai/form/option-sources/definition_fields?value=HD`,
+      aiRequestOptions('/api/ai/form/option-sources')
+    )
     expect(res.ok()).toBe(true)
-    const forged = await request.get(`${API}/api/ai/form/option-sources/https%3A%2F%2Fevil.example?value=HD`)
+    const forged = await request.get(
+      `${API}/api/ai/form/option-sources/https%3A%2F%2Fevil.example?value=HD`,
+      aiRequestOptions('/api/ai/form/option-sources')
+    )
     expect(forged.status()).toBe(400)
   })
 
@@ -313,7 +320,7 @@ test.describe('@stub G 生成式表单', () => {
   })
 
   test('E2E-G13 依赖深度上限 2：四层联动被拒（fail-closed，不猜）', async ({ request }) => {
-    const sid = `e2e-g13-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, { sessionId: sid, message: `gf-deep-linkage 用例G13-${uniq()}`, context: { page: 'tasks' } })
     expect(chat.status).toBe(200)
     const types = chat.frames.map((frame) => String(frame.type))

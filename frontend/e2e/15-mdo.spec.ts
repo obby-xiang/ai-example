@@ -14,7 +14,8 @@
  *   cd frontend && E2E_MDO_GROUP=degraded npx playwright test --config playwright.mdo.config.ts
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-import { createPublishableImportTask, openApp, until, waitRoundSettled, type JobView } from './support/helpers'
+import { createPublishableImportTask, openApp, until, waitRoundSettled, sessionId as pageSessionId, type JobView } from './support/helpers'
+import { aiRequestOptions, newAiSession, pageMirrorKeyOf, pageSessionKeyOf } from './support/ai-identity'
 import {
   API,
   API_B,
@@ -81,7 +82,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     expect(b.body.instanceId).toBeTruthy()
     expect(a.body.instanceId).not.toBe(b.body.instanceId)
 
-    const sessionId = `mdo-m01-${tag('s')}`
+    const sessionId = await newAiSession(API)
     // stall-frames 把这一轮拉长到数秒：B 的订阅与 A 的产出真实重叠（不是跑完再回放）
     const producer = openSse(`${API}/api/ai/chat`, {
       method: 'POST',
@@ -119,7 +120,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
 
   test('E2E-M02 挂起决策打在另一实例：决策落 B、A 侧在轮询窗口内收敛', async ({ request }) => {
     const taskId = await createPublishableImportTask(request)
-    const sessionId = `mdo-m02-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const { runId, toolCallId } = await suspendOnPublish(taskId, sessionId)
 
     // 挂起态在 B 上同样可见（跨实例读同一个挂起条目）
@@ -189,7 +190,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
 
   test('E2E-M05 业务幂等键：同一 toolCallId 二次决策 409，台账只 1 条', async ({ request }) => {
     const taskId = await createPublishableImportTask(request)
-    const sessionId = `mdo-m05-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const { runId, toolCallId } = await suspendOnPublish(taskId, sessionId)
 
     const first = await confirmOn(API, runId, toolCallId, true)
@@ -221,7 +222,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     const contextTaskId = await createPublishableImportTask(request)
     const targetTaskId = await createPublishableImportTask(request)
     expect(targetTaskId).not.toBe(contextTaskId)
-    const sessionId = `mdo-m06-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const result = await postChat(sessionId, `请立即调用 start_publish 发布任务 ${targetTaskId}`, {
       context: PUBLISH_CONTEXT(contextTaskId)
     })
@@ -254,7 +255,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
   })
 
   test('E2E-M09 lastSeq 差量 + 孤儿过滤：只补 seq>K、心跳零回放、DOM 无重复卡', async ({ request }) => {
-    const sessionId = `mdo-m09-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const result = await postChat(sessionId, 'turn-text m09')
     const start = result.frames.find((frame) => frame.type === 'start')
     expect(start).toBeTruthy()
@@ -288,7 +289,7 @@ test.describe('@stub M 多实例与跨实例重连', () => {
 
   test('E2E-M07 多页签同步降级：复制页签换新会话、不抢锁、不并发两轮', async ({ page, context, request }) => {
     await openApp(page)
-    const sid1 = await page.evaluate(() => sessionStorage.getItem('ai-session-id'))
+    const sid1 = await pageSessionId(page)
     expect(sid1).toBeTruthy()
 
     // 真复制页签（window.open 继承 sessionStorage ⇒ 与"复制标签页"同构）
@@ -301,9 +302,15 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     await tab2.waitForLoadState('domcontentloaded')
     await expect(tab2.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
     // Web Locks 判为复制品 ⇒ 就地换新会话（不接管原会话、不删原会话后端记忆）
-    await waitFor(async () => (await tab2.evaluate(() => sessionStorage.getItem('ai-session-id'))) !== sid1,
-      20_000, '复制页签换到新会话')
-    const sid2 = await tab2.evaluate(() => sessionStorage.getItem('ai-session-id'))
+    await waitFor(async () => {
+      try {
+        return (await pageSessionId(tab2)) !== sid1
+      } catch {
+        // 新页签尚未落身份/发号：还没换出来，继续等
+        return false
+      }
+    }, 20_000, '复制页签换到新会话')
+    const sid2 = await pageSessionId(tab2)
     expect(sid2).not.toBe(sid1)
 
     // 原页签发一轮：复制页签不跟着跑（不指望实时同步）
@@ -313,18 +320,18 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     await expect(userBubbles(tab2)).toHaveCount(0)
 
     // 后端只存在一条该轮的 run：原会话的 current 轮次已终态，复制页签的新会话从未起轮
-    const current = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(String(sid1))}`)
+    const current = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(String(sid1))}`, aiRequestOptions('/api/ai/runs/current'))
     const body = (await current.json()) as { data?: { found?: boolean; snapshotStatus?: string } }
     if (body.data?.found) {
       expect(['DONE', 'FAILED', 'CANCELLED']).toContain(String(body.data.snapshotStatus))
     }
-    const other = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(String(sid2))}`)
+    const other = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(String(sid2))}`, aiRequestOptions('/api/ai/runs/current'))
     const otherBody = (await other.json()) as { data?: { found?: boolean } }
     expect(otherBody.data?.found).toBe(false)
 
     // 让渡：原页签关闭后，仍未说话过的复制页签接手原会话（"靠操作/关闭同步"的口径）
     await page.close()
-    await waitFor(async () => (await tab2.evaluate(() => sessionStorage.getItem('ai-session-id'))) === sid1,
+    await waitFor(async () => (await pageSessionId(tab2)) === sid1,
       30_000, '复制页签接手让渡的会话')
     await expect(userBubbles(tab2)).toHaveCount(1)
     await tab2.close()
@@ -385,7 +392,7 @@ async function sendAndReloadDuringRun(page: Page, message: string): Promise<void
 
 test.describe('@stub D 降级与错误码', () => {
   test('E2E-D05 限流 429：稳定码 + Retry-After + 作用域限于该会话', async ({ request }) => {
-    const sessionId = `mdo-d05-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const oversize = 'A'.repeat(9000)
     let limited: { status: number; body: Record<string, unknown>; retryAfter: string | null } | null = null
     for (let index = 0; index < 260; index += 1) {
@@ -404,7 +411,7 @@ test.describe('@stub D 降级与错误码', () => {
     expect(limited!.retryAfter).toBeTruthy()
 
     // 作用域隔离：被限流的是这个会话，别的会话照常（不误伤整台实例）
-    const other = await chatError(request, `mdo-d05-other-${tag('s')}`, 'turn-text d05-other')
+    const other = await chatError(request, await newAiSession(API), 'turn-text d05-other')
     expect(other.status).toBe(200)
   })
 
@@ -422,7 +429,7 @@ test.describe('@stub D 降级与错误码', () => {
     await expect(page.locator('[data-testid="send-btn"]')).toBeEnabled()
 
     // 绕过前端直打 API：400 MESSAGE_TOO_LONG，limit=8192，且响应体不回显原文
-    const sessionId = `mdo-d06-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const marker = '超长哨兵串-D06-'
     const result = await chatError(request, sessionId, `${marker}${'汉'.repeat(8193)}`)
     expect(result.status).toBe(400)
@@ -432,20 +439,20 @@ test.describe('@stub D 降级与错误码', () => {
   })
 
   test('E2E-D07 归一化后为空：纯不可见字符按必填同口径 400，不上上游', async ({ request }) => {
-    const sessionId = `mdo-d07-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const zeroWidth = '\u200b\u200c\u200d\ufeff\u2060\u200b'
     const result = await chatError(request, sessionId, zeroWidth)
     expect(result.status).toBe(400)
     // 归一口径：纯不可见字符 ⇒ 与"message 必填"同一机器码
     expect(['BAD_REQUEST', 'MESSAGE_REQUIRED']).toContain(String(result.body.code))
     // 零副作用：会话没有留下任何轮次
-    const current = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+    const current = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`, aiRequestOptions('/api/ai/runs/current'))
     const body = (await current.json()) as { data?: { found?: boolean } }
     expect(body.data?.found).toBeFalsy()
   })
 
   test('E2E-D08 会话忙 409 + 可接管线索：runId 指回在途轮、前端零幻影', async ({ page, request }) => {
-    const sessionId = `mdo-d08-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const producer = openSse(`${API}/api/ai/chat`, {
       method: 'POST',
       body: { sessionId, message: 'turn-text stall-frames=1500 d08' }
@@ -462,7 +469,8 @@ test.describe('@stub D 降级与错误码', () => {
 
     // 前端零幻影：这条 409 不是页面发的，页面必须仍只有一条轮、且能自己收尾
     await openApp(page)
-    await page.evaluate((sid) => sessionStorage.setItem('ai-session-id', sid), sessionId)
+    const sessionKey = await pageSessionKeyOf(page)
+    await page.evaluate(({ key, sid }) => sessionStorage.setItem(key, sid), { key: sessionKey, sid: sessionId })
     await page.reload({ waitUntil: 'domcontentloaded' })
     await waitRoundSettled(page, 90_000)
     const detail = await waitTerminal(inFlight, 60_000)
@@ -473,7 +481,7 @@ test.describe('@stub D 降级与错误码', () => {
   test('E2E-D09 上游断流重试边界：attempts 打满 maxAttempts 后终态失败，不无限重试', async ({ request }) => {
     const maxAttempts = Number((await health(API)).body.resilience?.maxAttempts ?? 0)
     expect(maxAttempts).toBeGreaterThanOrEqual(2)
-    const sessionId = `mdo-d09-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const startedAt = Date.now()
     // kill-stream 必须早于首帧：桩的写出是同步的，只有配上 slow-first-byte 才让 kill 计时器真的先跑
     // （否则整段响应在同一个 tick 里写完，socket 销毁时 [DONE] 已到手 = 本轮成功）。
@@ -502,7 +510,7 @@ test.describe('@stub D 降级与错误码', () => {
   test('E2E-D11 前端工具超时结局：卡收敛为超时终态、轮仍跑完、executed=false', async ({ request }) => {
     const budget = Number((await health(API)).body.frontendToolTimeoutSeconds ?? 0)
     expect(budget).toBeGreaterThan(0)
-    const sessionId = `mdo-d11-${tag('s')}`
+    const sessionId = await newAiSession(API)
     // 前端工具（navigate_to 走 FRONTEND 通道）：用例扮演"不回灌的浏览器"
     const result = await postChat(sessionId, `导出向导 ${tag('d11')}`, {
       context: { page: 'export' },
@@ -525,7 +533,7 @@ test.describe('@stub D 降级与错误码', () => {
   })
 
   test('E2E-D12 重复回灌幂等：同 toolCallId 二次回灌 409，不二次推进', async ({ request }) => {
-    const sessionId = `mdo-d12-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const result = await postChat(sessionId, `导出向导 ${tag('d12')}`, { context: { page: 'export' } })
     const start = result.frames.find((frame) => frame.type === 'start')
     const requestFrame = result.frames.find((frame) => frame.type === 'frontend_tool_request')
@@ -557,8 +565,8 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await waitRoundSettled(page, 90_000)
 
     await expect(userBubbles(page)).toHaveCount(1)
-    const sessionId = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
-    const history = await request.get(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`)
+    const sessionId = await pageSessionId(page)
+    const history = await request.get(`${API}/api/ai/history/${encodeURIComponent(sessionId)}`, aiRequestOptions('/api/ai/history'))
     const body = (await history.json()) as { data?: { messages?: unknown[] } }
     // 用户消息只 1 条（后端侧也只有一个 user 回合）
     expect((body.data?.messages ?? []).length).toBe(2)
@@ -571,7 +579,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await composer.fill('turn-text stall-frames=1500 o02')
     await page.locator('[data-testid="send-btn"]').click()
     await expect(page.locator('[data-testid="stop-btn"]')).toBeVisible({ timeout: 60_000 })
-    const sessionId = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
+    const sessionId = await pageSessionId(page)
 
     // 同 tick：点停止 + 回车（草稿是"停止后想发的新消息"）；先真键盘写入并确认草稿已落进输入框
     await composer.click()
@@ -596,7 +604,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
       expect(await userBubbles(page).last().innerText()).toContain('下一条消息 o02')
     }
     // 「不出现两轮同时跑」的后端判据：该会话的所有轮次都已终态，没有 RUNNING/SUSPENDED 孤儿
-    const runs = await (await request.get(`${API}/api/ai/runs`)).json() as {
+    const runs = await (await request.get(`${API}/api/ai/runs`, aiRequestOptions('/api/ai/runs'))).json() as {
       data?: Array<{ runId?: string; sessionId?: string; status?: string }>
     }
     const mine = (runs.data ?? []).filter((run) => run.sessionId === sessionId)
@@ -660,7 +668,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
   })
 
   test('E2E-O03 双连接同时 reattach：两路都收到帧、seq 一致、只收一份 done', async () => {
-    const sessionId = `mdo-o03-${tag('s')}`
+    const sessionId = await newAiSession(API)
     const producer = openSse(`${API}/api/ai/chat`, {
       method: 'POST',
       body: { sessionId, message: 'turn-text stall-frames=1200 o03' }
@@ -693,7 +701,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await page.locator('[data-testid="composer-input"]').fill('turn-text stall-frames=1500 o04')
     await page.locator('[data-testid="send-btn"]').click()
     await expect(page.locator('[data-testid="stop-btn"]')).toBeVisible({ timeout: 60_000 })
-    const sessionId = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
+    const sessionId = await pageSessionId(page)
 
     // 第二个客户端（另一个 context/进程口径）用同一会话发送
     const busy = await chatError(request, sessionId, '并发第二轮 o04')
@@ -714,9 +722,9 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await page.locator('[data-testid="send-btn"]').click()
     await expect(page.locator('[data-testid="gf-fields"]')).toBeVisible({ timeout: 40_000 })
     await page.locator('#gf-field-memo').fill('同 tick 竞态样例')
-    const sessionId = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
+    const sessionId = await pageSessionId(page)
     // 竞态之前先钉住这一轮的 runId（收尾后会话索引会被清，事后再查就可能取不到）
-    const before = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+    const before = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`, aiRequestOptions('/api/ai/runs/current'))
     const beforeBody = (await before.json()) as { data?: { runId?: string } }
     const runId = String(beforeBody.data?.runId ?? '')
     expect(runId.length).toBeGreaterThan(0)
@@ -777,7 +785,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await page.locator('[data-testid="composer-input"]').fill('turn-text stall-frames=1500 o07')
     await page.locator('[data-testid="send-btn"]').click()
     await expect(page.locator('[data-testid="stop-btn"]')).toBeVisible({ timeout: 60_000 })
-    const oldSession = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
+    const oldSession = await pageSessionId(page)
     // 施加「切会话」之前要等两件**产品事实**各自出现（判据不变，只把竞态换成同步等待）：
     //   ① 本轮登记进 `runs/current`（Redis 注册点，`start` 帧之后仍可能没写）——
     //      本地单点复跑实测读到的 runId 为空，旧写法直接断言 >0 会红在这一步；
@@ -786,7 +794,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     //      run 40718751980 实证 `最后快照 status=∅`，后面 waitTerminal 永远读不到 CANCELLED）。
     let oldRunId = ''
     await until(async () => {
-      const res = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(oldSession)}`)
+      const res = await request.get(`${API}/api/ai/runs/current?sessionId=${encodeURIComponent(oldSession)}`, aiRequestOptions('/api/ai/runs/current'))
       const body = (await res.json()) as { data?: { runId?: string } }
       oldRunId = String(body.data?.runId ?? '')
       return oldRunId.length > 0
@@ -795,7 +803,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
 
     await page.locator('[data-testid="new-chat"]').click()
     await expect(page.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 20_000 })
-    const newSession = String(await page.evaluate(() => sessionStorage.getItem('ai-session-id')))
+    const newSession = await pageSessionId(page)
     expect(newSession).not.toBe(oldSession)
 
     // 旧轮收敛（取消是后端真事实，不是只断本地连接）
@@ -807,7 +815,8 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     await expect(page.locator('[data-testid^="msg-bubble-"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="hitl-gate"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="stop-btn"]')).toHaveCount(0)
-    const mirror = await page.evaluate((sid) => sessionStorage.getItem(`ai-mirror:${sid}`), newSession)
+    const newMirrorKey = await pageMirrorKeyOf(page, newSession)
+    const mirror = await page.evaluate((key) => sessionStorage.getItem(key), newMirrorKey)
     if (mirror) {
       const payload = JSON.parse(mirror) as { messages?: unknown[] }
       expect(payload.messages?.length ?? 0).toBe(0)

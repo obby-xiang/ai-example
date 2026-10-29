@@ -15,7 +15,7 @@
  * 断言仍是「形状 + 终态」（不落在模型语义上）。
  */
 import { expect, test, type APIRequestContext } from '@playwright/test'
-import { createPublishableImportTask, openPath, waitRoundSettled } from './support/helpers'
+import { createPublishableImportTask, openPath, sessionId as pageSessionId, waitRoundSettled } from './support/helpers'
 import {
   chatStream,
   createImportTaskAtStep,
@@ -85,7 +85,7 @@ test.describe('@stub S 超时面（缩小阈值的独立档）', () => {
     await expect(page.locator('[data-testid="hitl-gate"]')).toHaveCount(0, { timeout: 60_000 })
     await waitRoundSettled(page, 120_000)
 
-    const sessionId = await page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+    const sessionId = await pageSessionId(page)
     const run = await runOf(request, sessionId)
     expect(String(run.error ?? '')).not.toContain('TOTAL_BUDGET')
     // 轮有终端正文（收尾文本而不是错误卡）
@@ -112,7 +112,7 @@ test.describe('@stub A 上传交接的无超时面', () => {
     const panelText = await page.locator('[data-testid^="msg-bubble-"].w-full').last().innerText()
     expect(panelText).not.toMatch(/超时|timeout/i)
 
-    const sessionId = await page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+    const sessionId = await pageSessionId(page)
     const current = await request.get(
       `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '19930'}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`
     )

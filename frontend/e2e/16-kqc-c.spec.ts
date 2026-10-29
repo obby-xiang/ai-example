@@ -169,7 +169,7 @@ const PLACEHOLDER = /\[工具结果已清除：[A-Za-z_]+ · ≈\d+ tokens · to
 
 test('@stub E2E-C08 L1 工具结果清除：占位符格式 + 幂等 + 不暴露台账键', async () => {
   await withModelWindow(L1_WINDOW, async () => {
-    const sid = newSessionId('C08')
+    const sid = await newSessionId('C08')
     let placeholdersAt7 = 0
     let placeholdersAt8 = 0
     let ledgerAt7 = 0
@@ -215,7 +215,7 @@ test('@stub E2E-C08 L1 工具结果清除：占位符格式 + 幂等 + 不暴露
 
 test('@stub E2E-C14 压缩归档可回溯：压缩前原文进 ai:ctx:archive:*，TTL 随会话（≤ 24h）', async () => {
   await withModelWindow(L1_WINDOW, async () => {
-    const sid = newSessionId('C14')
+    const sid = await newSessionId('C14')
     for (let turn = 1; turn <= 7; turn += 1) {
       const { round } = await toolRound(sid, `C14-${turn}`)
       expect(round.done).toBeTruthy()
@@ -248,7 +248,7 @@ test('@stub E2E-C14 压缩归档可回溯：压缩前原文进 ai:ctx:archive:*�
 
 test('@stub E2E-C10 摘要失败不静默：上游 500 ⇒ 历史逐字不变 + 熔断 +1 + reason 如实', async () => {
   await withModelWindow(C10_WINDOW, async () => {
-    const sid = newSessionId('C10')
+    const sid = await newSessionId('C10')
     // 6 轮平推 + 第 7 轮（第 6 对工具结果 ⇒ L1）。`summary-500` 必须在**目标轮的前一轮**打：
     // 压缩发生在轮起点（模型请求还没发出），同一轮带的标记到不了上游、摘要请求已经发出去了。
     for (let turn = 1; turn <= 6; turn += 1) {
@@ -317,7 +317,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
   test.setTimeout(300_000)
 
   // ── 对照组：默认窗口（种子行 max_context=128000）下 3 轮工具往返不压缩 ─────────────
-  const controlSid = newSessionId('C13-ctl')
+  const controlSid = await newSessionId('C13-ctl')
   for (let turn = 1; turn <= 3; turn += 1) {
     const { round } = await toolRound(controlSid, `C13-ctl-${turn}`)
     expect(round.done).toBeTruthy()
@@ -332,7 +332,7 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
 
   // ── 处置组：小窗口（> reserve 13000）⇒ 逐轮 L1 → L2 → L3 ───────────────────────────
   await withModelWindow(LINEAGE_WINDOW, async () => {
-    const sid = newSessionId('C13')
+    const sid = await newSessionId('C13')
     const rounds: Array<{
       turn: number
       level: string

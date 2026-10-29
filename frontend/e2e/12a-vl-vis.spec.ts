@@ -15,6 +15,7 @@
  */
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import { api, createImportTaskAtUpload, sendMessage, waitRoundSettled, waitJob, type JobView } from './support/helpers'
+import { aiIdentityHeaders, newAiSession } from './support/ai-identity'
 import {
   ensureVlStack,
   latestStubRequest,
@@ -415,11 +416,11 @@ test.describe('@stub V 可视可操作（12a）', () => {
     const zeroMark = mark('V14-zero')
     const zero = await request.post(`${VL_API}/api/ai/chat`, {
       data: {
-        sessionId: `vl-v14-${Date.now()}-0`,
+        sessionId: await newAiSession(VL_API),
         message: `配置定义 ${zeroMark}`,
         context: { page: 'definitions', extra: { uiRegionCount: 0 } }
       },
-      headers: { Accept: 'text/event-stream' },
+      headers: { Accept: 'text/event-stream', ...aiIdentityHeaders() },
       timeout: 60_000
     })
     expect(zero.ok()).toBe(true)
@@ -434,11 +435,11 @@ test.describe('@stub V 可视可操作（12a）', () => {
     const absentMark = mark('V14-absent')
     const absent = await request.post(`${VL_API}/api/ai/chat`, {
       data: {
-        sessionId: `vl-v14-${Date.now()}-1`,
+        sessionId: await newAiSession(VL_API),
         message: `配置定义 ${absentMark}`,
         context: { page: 'definitions' }
       },
-      headers: { Accept: 'text/event-stream' },
+      headers: { Accept: 'text/event-stream', ...aiIdentityHeaders() },
       timeout: 60_000
     })
     expect(absent.ok()).toBe(true)

@@ -13,6 +13,7 @@ import { expect, type APIRequestContext, type Page, type Request } from '@playwr
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { RUN_DIR, startServices, stopServices, URLS } from './harness'
+import { aiRequestOptions, pageSessionId } from './ai-identity'
 
 export { RUN_DIR, URLS }
 
@@ -158,7 +159,8 @@ export async function untilStubRequests(firstUserText: string, n: number, timeou
 export const API = URLS.api
 
 export async function apiGet<T>(request: APIRequestContext, path: string): Promise<T> {
-  const res = await request.get(`${API}${path}`)
+  const url = `${API}${path}`
+  const res = await request.get(url, aiRequestOptions(url))
   if (!res.ok()) throw new Error(`GET ${path} => HTTP ${res.status()} ${await res.text()}`)
   const json = (await res.json()) as { success?: boolean; data?: T }
   if (json.success === false) throw new Error(`GET ${path} => success=false`)
@@ -166,7 +168,8 @@ export async function apiGet<T>(request: APIRequestContext, path: string): Promi
 }
 
 export async function apiPost<T>(request: APIRequestContext, path: string, body: unknown): Promise<T> {
-  const res = await request.post(`${API}${path}`, { data: body })
+  const url = `${API}${path}`
+  const res = await request.post(url, aiRequestOptions(url, { data: body }))
   if (!res.ok()) throw new Error(`POST ${path} => HTTP ${res.status()} ${await res.text()}`)
   const json = (await res.json()) as { success?: boolean; data?: T }
   if (json.success === false) throw new Error(`POST ${path} => success=false`)
@@ -179,7 +182,8 @@ export async function apiPostRaw(
   path: string,
   body: unknown
 ): Promise<{ status: number; json: Record<string, unknown>; text: string }> {
-  const res = await request.post(`${API}${path}`, { data: body })
+  const url = `${API}${path}`
+  const res = await request.post(url, aiRequestOptions(url, { data: body }))
   const text = await res.text()
   let json: Record<string, unknown> = {}
   try {
@@ -204,8 +208,9 @@ export async function currentRun(request: APIRequestContext, sid: string): Promi
   return apiGet<CurrentRun>(request, `/api/ai/runs/current?sessionId=${encodeURIComponent(sid)}`)
 }
 
+/** 页面会话号（身份键 `ai-session-id:<t>:<u>`；页面未发号时抛错，不退回裸键）。 */
 export function sidOf(page: Page): Promise<string> {
-  return page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+  return pageSessionId(page)
 }
 
 // ── 生成式表单：从挂起条目取本轮 schema（真模型的字段面不可假设） ──────────────
@@ -274,10 +279,11 @@ export async function chatFrames(
   request: APIRequestContext,
   payload: { sessionId: string; message: string; context?: Record<string, unknown> }
 ): Promise<{ status: number; text: string; frames: Array<Record<string, unknown>> }> {
-  const res = await request.post(`${API}/api/ai/chat`, {
+  const chatUrl = `${API}/api/ai/chat`
+  const res = await request.post(chatUrl, aiRequestOptions(chatUrl, {
     data: { sessionId: payload.sessionId, message: payload.message, context: payload.context ?? { page: 'tasks' } },
     headers: { accept: 'text/event-stream' }
-  })
+  }))
   const text = await res.text()
   const frames: Array<Record<string, unknown>> = []
   for (const line of text.split(/\r?\n/)) {

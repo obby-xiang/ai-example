@@ -40,6 +40,7 @@ import {
   API_BASE
 } from './support/helpers-srp'
 import { RUN_DIR } from './support/harness'
+import { aiFetch, aiRequestOptions, newAiSession, seedSessionStorage } from './support/ai-identity'
 
 /**
  * 桩的会话指纹 = 首条 user 消息：同一提示词重复使用会让桩把"该路由已用过"的轮次退化成文本轮。
@@ -220,9 +221,9 @@ test.describe('@stub S 流式稳定', () => {
    * 客户端在收到第 2 个 delta 后主动断开 POST 流，再用 `/events/{runId}?lastSeq=K` 续收。
    */
   test('E2E-S05 断点续收：重连 URL 带 lastSeq=K，拼接正文等于全量且 done 只 1 次', async () => {
-    const sid = `srp-s05-${Date.now()}`
+    const sid = await newAiSession(API_BASE)
     const controller = new AbortController()
-    const response = await fetch(`${eventsChatUrl()}/api/ai/chat`, {
+    const response = await aiFetch(`${eventsChatUrl()}/api/ai/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId: sid, message: P('turn-text stall-frames=600 S05') }),
@@ -280,7 +281,7 @@ test.describe('@stub S 流式稳定', () => {
     expect(url).toContain(`lastSeq=${lastSeq}`)
 
     // ② 续收至终帧：只补 seq > K，且拼起来逐字等于全量正文
-    const replay = parseSse(await (await fetch(url)).text())
+    const replay = parseSse(await (await aiFetch(url)).text())
     expect(replay.length).toBeGreaterThan(0)
     for (const frame of replay) {
       if (typeof frame.seq === 'number') expect(frame.seq).toBeGreaterThan(lastSeq)
@@ -308,7 +309,7 @@ test.describe('@stub S 流式稳定', () => {
   test('E2E-S07 上游 503：同一轮重试一次（≤ max-attempts=2），成功路径只有 1 个 done', async () => {
     for (let round = 1; round <= S07_ROUNDS; round += 1) {
       const tag = `第 ${round}/${S07_ROUNDS} 轮`
-      const sid = `srp-s07-${Date.now()}-${round}`
+      const sid = await newAiSession(API_BASE)
       const message = P('turn-text fail-503-once S07')
       const frames = await chatFrames(sid, message)
       const start = frames.find((frame) => frame.type === 'start')
@@ -382,7 +383,7 @@ test.describe('@stub S 流式稳定', () => {
 
     const sid = await sessionId(page)
     // `/api/ai/context/{sid}` 是**裸载荷**（不走 {success,data} 信封，与 /history 不同）
-    const contextResponse = await request.get(`${API_BASE}/api/ai/context/${sid}`)
+    const contextResponse = await request.get(`${API_BASE}/api/ai/context/${sid}`, aiRequestOptions(`/api/ai/context/${sid}`))
     expect(contextResponse.ok()).toBe(true)
     const context = (await contextResponse.json()) as {
       usedTokens: number
@@ -446,7 +447,10 @@ test.describe('@stub S 流式稳定', () => {
     expect(runId).not.toBe('')
 
     // ① 归档原文（Node 侧 UTF-8）：每帧整帧 JSON 的字节数 ≤ 单帧上限（判定含全部字段/转义）。
-    const archivedRaw = (await (await request.get(`${API_BASE}/api/ai/events/${runId}`)).body()).toString('utf8')
+    const archivedRaw = (await (await request.get(
+      `${API_BASE}/api/ai/events/${runId}`,
+      aiRequestOptions(`/api/ai/events/${runId}`)
+    )).body()).toString('utf8')
     const archivedPayloads = archivedRaw
       .split(/\r?\n/)
       .filter((line) => line.startsWith('data:'))
@@ -914,9 +918,7 @@ test.describe('@stub R 刷新恢复', () => {
     // （同会话第二页签并存时会因页签所有权切到新会话，那是 M 域口径，不属 R-11）
     await page.close()
     const reopened = await context.newPage()
-    await reopened.addInitScript((session: string) => {
-      window.sessionStorage.setItem('ai-session-id', session)
-    }, sid)
+    await seedSessionStorage(reopened, sid)
     await reopened.goto('/', { waitUntil: 'domcontentloaded' })
     await expect(reopened.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
 
@@ -1005,7 +1007,7 @@ test.describe('@stub R 刷新恢复', () => {
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.locator('[data-testid="context-pill"]')).toBeVisible({ timeout: 30_000 })
 
-    const contextResponse = await request.get(`${API_BASE}/api/ai/context/${sid}`)
+    const contextResponse = await request.get(`${API_BASE}/api/ai/context/${sid}`, aiRequestOptions(`/api/ai/context/${sid}`))
     const context = (await contextResponse.json()) as {
       usedTokens: number
       limitTokens: number | null
@@ -1295,7 +1297,10 @@ test.describe('@stub P 手工停止', () => {
     await waitRoundSettled(page, 40_000)
 
     const sid = await sessionId(page)
-    const contextBefore = (await (await request.get(`${API_BASE}/api/ai/context/${sid}`)).json()) as { turnNo: number }
+    const contextBefore = (await (await request.get(
+      `${API_BASE}/api/ai/context/${sid}`,
+      aiRequestOptions(`/api/ai/context/${sid}`)
+    )).json()) as { turnNo: number }
     const bubblesBefore = await page.locator('[data-testid^="msg-bubble-"]').count()
     const userBubblesBefore = await page.locator('[data-testid^="edit-msg-"]').count()
 
@@ -1309,7 +1314,10 @@ test.describe('@stub P 手工停止', () => {
     await waitRoundSettled(page, 60_000)
 
     // ① turnNo 递增（新轮，不是续写）
-    const contextAfter = (await (await request.get(`${API_BASE}/api/ai/context/${sid}`)).json()) as { turnNo: number }
+    const contextAfter = (await (await request.get(
+      `${API_BASE}/api/ai/context/${sid}`,
+      aiRequestOptions(`/api/ai/context/${sid}`)
+    )).json()) as { turnNo: number }
     expect(contextAfter.turnNo).toBe(contextBefore.turnNo + 1)
     // ② 不追加伪用户气泡：用户气泡（= 编辑入口）数量不变
     expect(await page.locator('[data-testid^="edit-msg-"]').count()).toBe(userBubblesBefore)

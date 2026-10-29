@@ -6,6 +6,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { TURN_TEXT, api, openApp, sendMessage, sessionId, waitRoundSettled } from './support/helpers'
+import { pageMirrorKeyOf } from './support/ai-identity'
 
 test.describe('@stub N 会话 / F 消息操作 / Q 快捷操作', () => {
   test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
@@ -17,7 +18,7 @@ test.describe('@stub N 会话 / F 消息操作 / Q 快捷操作', () => {
     await expect(page.locator('[data-testid="new-chat"]')).toBeEnabled()
 
     const before = await sessionId(page)
-    const mirrorBefore = await page.evaluate((sid) => sessionStorage.getItem(`ai-mirror:${sid}`) !== null, before)
+    const mirrorBefore = await page.evaluate((key) => sessionStorage.getItem(key) !== null, await pageMirrorKeyOf(page, before))
     expect(mirrorBefore).toBe(true)
 
     // 销毁是**异步**的（`resetSession` 点击即清屏/换 id，`DELETE /api/ai/session/{old}` 在其后发出并等待）；
@@ -35,10 +36,12 @@ test.describe('@stub N 会话 / F 消息操作 / Q 快捷操作', () => {
 
     const after = await sessionId(page)
     expect(after).not.toBe(before)
-    const state = await page.evaluate(({ oldSid, newSid }) => ({
-      oldMirror: sessionStorage.getItem(`ai-mirror:${oldSid}`),
-      newMirror: sessionStorage.getItem(`ai-mirror:${newSid}`)
-    }), { oldSid: before, newSid: after })
+    const oldMirrorKey = await pageMirrorKeyOf(page, before)
+    const newMirrorKey = await pageMirrorKeyOf(page, after)
+    const state = await page.evaluate(({ oldKey, newKey }) => ({
+      oldMirror: sessionStorage.getItem(oldKey),
+      newMirror: sessionStorage.getItem(newKey)
+    }), { oldKey: oldMirrorKey, newKey: newMirrorKey })
     expect(state.oldMirror).toBeNull()
     // 后端旧会话记忆已清空（新建对话是"离开旧会话"，不是仅清屏）：等产品自己那条销毁响应，
     // 再读后端 —— 时序由响应确定（不是等一个固定延迟），并顺带钉住"产品确实发了销毁且报 complete"。

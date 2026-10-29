@@ -30,6 +30,7 @@ import {
   waitRoundSettledDismissingPending
 } from './support/helpers'
 import { API, chatFrames, sidOf } from './support/hgta'
+import { newAiSession } from './support/ai-identity'
 import {
   RUN_DIR,
   allStubRequestText,
@@ -71,7 +72,7 @@ test.describe('@stub X 安全面', () => {
   })
 
   test('E2E-X02 输出流式不脱敏 + done 无 safety 段（API 层）', async ({ request }) => {
-    const sid = `x02-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, { sessionId: sid, message: `safety=mask 用例X02-${uniq()}` })
     expect(chat.status).toBe(200)
 
@@ -128,7 +129,7 @@ test.describe('@stub X 安全面', () => {
   test('E2E-X06 context 形状闸：未知 page 不回显、白名单外键被剔并计数、不 500', async ({ request }) => {
     const before = await securityCounters(request)
     const previous = latestStubRequest()?.tag ?? null
-    const sid = `x06-${uniq()}`
+    const sid = await newAiSession(API)
 
     const chat = await chatFrames(request, {
       sessionId: sid,
@@ -157,7 +158,7 @@ test.describe('@stub X 安全面', () => {
 
   test('E2E-X08 安全计数面：DLP 三项计数不再增长（掩码/阻断机制已删除）', async ({ page, request }) => {
     const before = await securityCounters(request)
-    const sid = `x08-${uniq()}`
+    const sid = await newAiSession(API)
 
     // ① 输出侧样本（旧口径会 mask 并计 outputRedacted）
     const masked = await chatFrames(request, { sessionId: sid, message: `safety=mask 用例X08a-${uniq()}` })

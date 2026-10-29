@@ -52,7 +52,7 @@ test('@stub E2E-K06 索引未就绪文案分流：status 如实 available=false�
   expect(status.doc_count).toBe(0)
 
   // ② 工具面：检索类请求不抛异常、不 5xx，回执里带"为什么"与两条可行动修复路径
-  const sid = newSessionId('K06')
+  const sid = await newSessionId('K06')
   const before = maxStubIndex()
   const round = await chatRound(sid, `知识问答用例 ${fingerprint('K06')} tool=kb_search&args={"query":"费率"}`)
   expect(round.status).toBe(200)

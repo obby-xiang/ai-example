@@ -9,6 +9,7 @@
  * 本域因此用 `E2E_REDIS_DB == E2E_REDIS_DB_DEGRADED` 跑（见 15-mdo 的启动命令）。
  */
 import { expect, type APIRequestContext } from '@playwright/test'
+import { aiFetch, aiRequestOptions, pageIdentity, pageSessionId } from './ai-identity'
 
 function baseOf(rawBase: string | undefined, portVar: string, fallback: string): string {
   if (rawBase !== undefined && rawBase !== '') return rawBase
@@ -53,7 +54,8 @@ export async function postChat(
 ): Promise<ChatResult> {
   const body: Record<string, unknown> = { sessionId, message }
   if (options.context !== undefined) body.context = options.context
-  const res = await fetch(`${options.base ?? API}/api/ai/chat`, {
+  const chatUrl = `${options.base ?? API}/api/ai/chat`
+  const res = await aiFetch(chatUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -70,7 +72,7 @@ export async function postChat(
 /** 归档/回放通道整轮读取（终态轮次读完即收尾）。 */
 export async function eventsRaw(runId: string, lastSeq?: number, base = API): Promise<string> {
   const suffix = lastSeq === undefined ? '' : `?lastSeq=${Math.max(0, Math.floor(lastSeq))}`
-  const res = await fetch(`${base}/api/ai/events/${encodeURIComponent(runId)}${suffix}`, {
+  const res = await aiFetch(`${base}/api/ai/events/${encodeURIComponent(runId)}${suffix}`, {
     signal: AbortSignal.timeout(60_000)
   })
   return res.text()
@@ -117,7 +119,7 @@ export function openSse(
 
   void (async () => {
     try {
-      const res = await fetch(url, {
+      const res = await aiFetch(url, {
         method: options.method ?? 'GET',
         headers: options.method === 'POST' ? { 'content-type': 'application/json' } : undefined,
         body: options.method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined,
@@ -246,7 +248,7 @@ export interface RunDetail {
 }
 
 export async function runDetail(runId: string, base = API): Promise<RunDetail> {
-  const res = await fetch(`${base}/api/ai/runs/${encodeURIComponent(runId)}`)
+  const res = await aiFetch(`${base}/api/ai/runs/${encodeURIComponent(runId)}`)
   const json = (await res.json()) as { data?: RunDetail }
   return json.data ?? {}
 }
@@ -332,11 +334,10 @@ export function userBubbles(page: import('@playwright/test').Page) {
 
 /** 断言页面只有一条 in-flight 轮的证据：activeRunId 与气泡数一致。 */
 export async function activeRunId(page: import('@playwright/test').Page): Promise<string | null> {
-  const id = await page.evaluate(() => {
-    const raw = window.sessionStorage.getItem('ai-session-id') ?? ''
-    return { sid: raw }
-  })
-  expect(id.sid).toBeTruthy()
+  const identity = await pageIdentity(page)
+  expect(identity, '页面尚未落 AI 身份').not.toBeNull()
+  const sid = await pageSessionId(page)
+  expect(sid).toBeTruthy()
   return null
 }
 
@@ -348,7 +349,7 @@ export async function confirmOn(
   approved: boolean,
   reason?: string
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const res = await fetch(`${base}/api/ai/confirm`, {
+  const res = await aiFetch(`${base}/api/ai/confirm`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ runId, toolCallId, approved, reason: reason ?? null })
@@ -364,7 +365,7 @@ export async function frontendResultOn(
   result: string,
   extra: Record<string, unknown> = {}
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const res = await fetch(`${base}/api/ai/frontend-tool-result`, {
+  const res = await aiFetch(`${base}/api/ai/frontend-tool-result`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ runId, toolCallId, result, ...extra })
@@ -374,7 +375,7 @@ export async function frontendResultOn(
 }
 
 export async function cancelOn(base: string, runId: string): Promise<{ status: number; body: Record<string, unknown> }> {
-  const res = await fetch(`${base}/api/ai/cancel/${encodeURIComponent(runId)}`, { method: 'POST' })
+  const res = await aiFetch(`${base}/api/ai/cancel/${encodeURIComponent(runId)}`, { method: 'POST' })
   return { status: res.status, body: safeJson(await res.text()) }
 }
 
@@ -393,7 +394,8 @@ export async function chatError(
   sessionId: string,
   message: string
 ): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | null }> {
-  const res = await request.post(`${API}/api/ai/chat`, { data: { sessionId, message } })
+  const chatUrl = `${API}/api/ai/chat`
+  const res = await request.post(chatUrl, aiRequestOptions(chatUrl, { data: { sessionId, message } }))
   return {
     status: res.status(),
     body: safeJson(await res.text()),

@@ -10,6 +10,7 @@ import {
   createPublishableImportTask,
   openPath,
   sendMessage,
+  sessionId,
   until,
   waitRoundSettled,
   type JobView
@@ -68,7 +69,7 @@ test.describe('@stub H HITL 确认门', () => {
     await expect(approve).toBeDisabled()
 
     // 三通道同源之一：后端快照里的 irreversible 必须为 true
-    const sid = await page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+    const sid = await sessionId(page)
     const current = await api.get<{ found: boolean; pendingEntries?: Array<{ irreversible?: boolean }> }>(
       request,
       `/api/ai/runs/current?sessionId=${encodeURIComponent(sid)}`

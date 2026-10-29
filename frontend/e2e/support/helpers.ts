@@ -3,6 +3,7 @@
  * 断言面一律 data-testid / 终态文本（设计稿 §0.2 A 级纪律）。
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test'
+import { aiHeaders, pageSessionId } from './ai-identity'
 
 export const API = process.env.E2E_API_BASE ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '18330'}`
 export const DEGRADED_API = process.env.E2E_DEGRADED_API_BASE
@@ -18,8 +19,14 @@ export function apiUrl(path: string, base = API): string {
   return `${base}${path}`
 }
 
+/**
+ * 统一 HTTP 取值口：AI 对话数据面（`/api/ai` 下除 health/tools/tenants/startup-resume 与
+ * providers/models/settings 子树）**自动带身份头**；业务数据与模型配置原样不加。
+ */
 async function data<T>(request: APIRequestContext, method: 'get' | 'post' | 'put', path: string, body?: unknown): Promise<T> {
-  const res = await request[method](apiUrl(path), body === undefined ? undefined : { data: body })
+  const headers = aiHeaders(path)
+  const options = { ...(body === undefined ? {} : { data: body }), ...(Object.keys(headers).length > 0 ? { headers } : {}) }
+  const res = await request[method](apiUrl(path), Object.keys(options).length === 0 ? undefined : options)
   if (!res.ok()) throw new Error(`${method.toUpperCase()} ${path} => HTTP ${res.status()} ${await res.text()}`)
   const json = (await res.json()) as { success?: boolean; data?: T }
   if (json.success === false) throw new Error(`${method.toUpperCase()} ${path} => success=false`)
@@ -229,10 +236,11 @@ export async function waitRoundSettledDismissingPending(
   throw new Error(`等本轮收敛超时（${timeout}ms，期间处理挂起面 ${dismissed} 次）`)
 }
 
+/**
+ * 本页签当前会话号（身份键 `ai-session-id:<t>:<u>`；与页面同身份，不读裸键）。
+ */
 export async function sessionId(page: Page): Promise<string> {
-  const id = await page.evaluate(() => sessionStorage.getItem('ai-session-id'))
-  if (!id) throw new Error('sessionStorage 中没有 ai-session-id')
-  return id
+  return pageSessionId(page)
 }
 
 export interface RunCurrent {

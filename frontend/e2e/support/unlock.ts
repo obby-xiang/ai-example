@@ -11,6 +11,7 @@
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test'
 import { api, apiUrl, openPath, waitJob, type JobView } from './helpers'
+import { aiFetch } from './ai-identity'
 
 export const API_BASE = process.env.E2E_API_BASE
   ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '18330'}`
@@ -76,7 +77,7 @@ export async function chatStream(
   context?: ChatContext,
   timeoutMs = 180_000
 ): Promise<{ frames: SseFrame[]; raw: string; status: number }> {
-  const res = await fetch(`${API_BASE}/api/ai/chat`, {
+  const res = await aiFetch(`${API_BASE}/api/ai/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(context === undefined ? { sessionId, message } : { sessionId, message, context }),

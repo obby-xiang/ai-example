@@ -32,6 +32,7 @@ import {
   userBubbles,
   waitSettled
 } from './support/helpers-nfezui'
+import { newAiSession, seedSessionStorage } from './support/ai-identity'
 
 const TURN = 'turn-text 用例'
 const unique = (tag: string): string => `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -235,19 +236,13 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
 
     // 「复制标签页」的真机形态：新页签继承同一 sessionStorage 会话 id
     const dup = await context.newPage()
-    await dup.addInitScript((sessionId) => {
-      try {
-        sessionStorage.setItem('ai-session-id', sessionId)
-      } catch {
-        /* 隐私模式：忽略 */
-      }
-    }, sid)
+    await seedSessionStorage(dup, sid)
     await dup.goto('/', { waitUntil: 'domcontentloaded' })
     await expect(dup.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
 
     // duplicate 就地换新会话（不抢锁、不删原会话记忆）
     await expect
-      .poll(async () => dup.evaluate(() => sessionStorage.getItem('ai-session-id')), { timeout: 20_000 })
+      .poll(async () => sessionIdOf(dup), { timeout: 20_000 })
       .not.toBe(sid)
     const dupSid = await sessionIdOf(dup)
     expect(dupSid).not.toBe(sid)
@@ -270,13 +265,7 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     )
 
     const dup = await context.newPage()
-    await dup.addInitScript((sessionId) => {
-      try {
-        sessionStorage.setItem('ai-session-id', sessionId)
-      } catch {
-        /* 忽略 */
-      }
-    }, sid)
+    await seedSessionStorage(dup, sid)
     await dup.goto('/', { waitUntil: 'domcontentloaded' })
     await expect(dup.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
     await expect(dup.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
@@ -299,20 +288,14 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     const sid = await sessionIdOf(page)
 
     const dup = await context.newPage()
-    await dup.addInitScript((sessionId) => {
-      try {
-        sessionStorage.setItem('ai-session-id', sessionId)
-      } catch {
-        /* 忽略 */
-      }
-    }, sid)
+    await seedSessionStorage(dup, sid)
     await dup.goto('/', { waitUntil: 'domcontentloaded' })
     await expect(dup.locator('[data-testid="composer-input"]')).toBeVisible({ timeout: 30_000 })
     await expect(dup.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
 
     // 原页签离开（pagehide ⇒ 广播 released + 释放锁），duplicate 接手
     await page.close()
-    await expect.poll(async () => dup.evaluate(() => sessionStorage.getItem('ai-session-id')), { timeout: 30_000 })
+    await expect.poll(async () => sessionIdOf(dup), { timeout: 30_000 })
       .toBe(sid)
     // 接手后把该会话历史读回来（真历史，不是空白）
     await expect(assistantBubbles(dup)).toHaveCount(1, { timeout: 30_000 })
@@ -462,12 +445,13 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
   })
 
   test('E2E-F04 反馈页列表渲染：时间/摘要/rating/原因四列齐；无数据显空态', async ({ page, request }) => {
-    // 夹具：三条反馈（API 直造，避免依赖面板操作顺序）
+    // 夹具：三条反馈（API 直造，避免依赖面板操作顺序）；会话号走**后端发号**（不造本地号）
+    const feedbackSession = await newAiSession(NFEZUI_API)
     for (const rating of [1, -1, 1]) {
       const messageId = `nfezui-f04-${rating}-${unique('m')}`
       const res = await apiRaw(request, 'post', '/api/ai/feedback', {
         messageId,
-        sessionId: 'nfezui-f04-session',
+        sessionId: feedbackSession,
         rating,
         excerpt: `反馈页夹具 ${messageId}`
       })

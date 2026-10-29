@@ -8,6 +8,7 @@
  * 提供的 `E2E_*` env 自起自收，RUN_DIR 独立、不与别路共用
  * RUN_DIR/pid 台账）；桩的会话指纹 = 首条 user 消息，故每条提示词都带唯一字母后缀。
  */
+import { aiRequestOptions, newAiSession } from './support/ai-identity'
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import {
   createImportTaskAtUpload,
@@ -229,7 +230,10 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     // 以及 `HumanWaitParkTest#multiCardBatchPublishesEveryRequestBeforeParking`
     // （两张卡 req 均为 true、两条 confirm_request 都在 park 前归档）。
     expect(confirms.filter((entry) => entry.req === true)).toHaveLength(3)
-    const archivedConfirms = (await (await request.get(`${API}/api/ai/events/${runId}`)).text())
+    const archivedConfirms = (await (await request.get(
+      `${API}/api/ai/events/${runId}`,
+      aiRequestOptions('/api/ai/events')
+    )).text())
       .split(/\r?\n/)
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.slice(5).trim())
@@ -293,7 +297,7 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
 
   test('E2E-H05 预检摘要三通道同源：confirm_request 帧 = runs/current = pending', async ({ request }) => {
     const taskId = await createExportStepTask(request)
-    const sid = `e2e-h05-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, {
       sessionId: sid,
       message: `start_export 任务 ${taskId} 预检同源-${uniq()}`,
@@ -359,7 +363,7 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
   test('E2E-H06 预检失败不进闸门：PRECHECK_FAILED 结构化失败 + 零闸门副作用 + retryable', async ({ request }) => {
     // 导入类任务不能发起 EXPORT 作业 ⇒ 预检「类型匹配」项必失败
     const importTask = await createImportAtUpload(request)
-    const sid = `e2e-h06-${uniq()}`
+    const sid = await newAiSession(API)
     const chat = await chatFrames(request, {
       sessionId: sid,
       message: `start_export 任务 ${importTask} 预检失败-${uniq()}`,
@@ -395,7 +399,7 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     const taskId = await createExportStepTask(request)
 
     // ── 半段① 上下文 = definitions（不披露 start_export） ──
-    const sid = `e2e-h07-${uniq()}`
+    const sid = await newAiSession(API)
     const message = `start_export 任务 ${taskId} 越scope-${uniq()}`
     const chat = await chatFrames(request, { sessionId: sid, message, context: { page: 'definitions' } })
     expect(chat.status).toBe(200)
@@ -418,7 +422,7 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     expect(await jobsOf(request, taskId, 'EXPORT')).toHaveLength(0)
 
     // ── 半段② 同一句话，上下文换成 page:tasks ⇒ 披露恢复、闸门出现（对照，证明①不是空转） ──
-    const sid2 = `e2e-h07b-${uniq()}`
+    const sid2 = await newAiSession(API)
     const message2 = `start_export 任务 ${taskId} 对照-${uniq()}`
     const chat2 = await chatFrames(request, { sessionId: sid2, message: message2, context: { page: 'tasks' } })
     expect(chat2.status).toBe(200)
@@ -801,7 +805,7 @@ test.describe('@stub A 附件上传全链', () => {
 
   test('E2E-A02 附件三重校验：伪造 id / 换 runId 归属不符 / 消费即失效，均零副作用', async ({ request }) => {
     // 两张并行挂起的表单：各自 (runId, toolCallId)
-    const sid1 = `e2e-a02a-${uniq()}`
+    const sid1 = await newAiSession(API)
     const chat1 = await chatFrames(request, { sessionId: sid1, message: `gf-attachment 用例A02a-${uniq()}`, context: { page: 'tasks' } })
     expect(chat1.frames.map((frame) => String(frame.type))).toContain('frontend_tool_request')
     const run1 = await currentRun(request, sid1)
@@ -809,7 +813,7 @@ test.describe('@stub A 附件上传全链', () => {
     expect(run1.runId).toBeTruthy()
     expect(t1).not.toBe('')
 
-    const sid2 = `e2e-a02b-${uniq()}`
+    const sid2 = await newAiSession(API)
     await chatFrames(request, { sessionId: sid2, message: `gf-attachment 用例A02b-${uniq()}`, context: { page: 'tasks' } })
     const run2 = await currentRun(request, sid2)
     const t2 = String((run2.pendingEntries ?? [])[0]?.toolCallId ?? '')
@@ -817,13 +821,13 @@ test.describe('@stub A 附件上传全链', () => {
     expect(t2).not.toBe('')
 
     const upload = async (runId: string, toolCallId: string, name: string): Promise<string> => {
-      const res = await request.post(`${API}/api/ai/form/attachments`, {
+      const res = await request.post(`${API}/api/ai/form/attachments`, aiRequestOptions('/api/ai/form/attachments', {
         multipart: {
           file: { name, mimeType: 'text/plain', buffer: Buffer.from('a02 payload') },
           runId,
           toolCallId
         }
-      })
+      }))
       if (!res.ok()) throw new Error(`上传失败 HTTP ${res.status()} ${await res.text()}`)
       const json = (await res.json()) as { data?: { fileId?: string } }
       return json.data?.fileId ?? ''
@@ -861,13 +865,13 @@ test.describe('@stub A 附件上传全链', () => {
       result: JSON.stringify({ sheet: fileIdA, memo: 'ok' })
     })
     expect(ok.status).toBe(200)
-    const afterConsume = await request.post(`${API}/api/ai/form/attachments`, {
+    const afterConsume = await request.post(`${API}/api/ai/form/attachments`, aiRequestOptions('/api/ai/form/attachments', {
       multipart: {
         file: { name: 'late.txt', mimeType: 'text/plain', buffer: Buffer.from('late') },
         runId: String(run1.runId),
         toolCallId: t1
       }
-    })
+    }))
     expect(afterConsume.ok()).toBe(false)
     // 已消费的 fileId 不可再用（换一张表单也不行）
     const reuse = await apiPostRaw(request, '/api/ai/frontend-tool-result', {

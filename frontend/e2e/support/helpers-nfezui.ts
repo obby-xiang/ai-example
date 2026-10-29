@@ -6,6 +6,7 @@
  * **不改 support/helpers.ts**（同族并行写别的 spec，共享文件只读）。
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test'
+import { aiRequestOptions, pageSessionId } from './ai-identity'
 
 export const NFEZUI_API = process.env.E2E_API_BASE ?? `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '19130'}`
 export const NFEZUI_DEGRADED_API = process.env.E2E_DEGRADED_API_BASE
@@ -33,14 +34,16 @@ export interface ApiEnvelope<T> {
 }
 
 export async function apiGet<T>(request: APIRequestContext, path: string, base = NFEZUI_API): Promise<T> {
-  const res = await request.get(`${base}${path}`)
+  const url = `${base}${path}`
+  const res = await request.get(url, aiRequestOptions(url))
   if (!res.ok()) throw new Error(`GET ${path} => HTTP ${res.status()} ${await res.text()}`)
   const json = (await res.json()) as ApiEnvelope<T>
   return (json.data ?? json) as T
 }
 
 export async function apiRaw(request: APIRequestContext, method: 'get' | 'post' | 'put' | 'delete', path: string, body?: unknown) {
-  return request[method](`${NFEZUI_API}${path}`, body === undefined ? undefined : { data: body })
+  const url = `${NFEZUI_API}${path}`
+  return request[method](url, aiRequestOptions(url, body === undefined ? {} : { data: body }))
 }
 
 export async function openPanel(page: Page, path = '/'): Promise<void> {
@@ -72,9 +75,7 @@ export function userBubbles(page: Page) {
 }
 
 export async function sessionIdOf(page: Page): Promise<string> {
-  const id = await page.evaluate(() => sessionStorage.getItem('ai-session-id'))
-  if (!id) throw new Error('sessionStorage 中没有 ai-session-id')
-  return id
+  return pageSessionId(page)
 }
 
 export interface MirrorState {
@@ -83,7 +84,7 @@ export interface MirrorState {
   mirror: string | null
 }
 
-/** 镜像与页签会话键的现场（`mirrorOf` 的 sessionId 用当前页签会话 id）。 */
+/** 镜像与页签会话键的现场（会话键/镜像键都按页面身份的键形取，不读裸键）。 */
 export async function storageState(page: Page): Promise<MirrorState> {
   return page.evaluate(() => {
     const keys: string[] = []
@@ -91,11 +92,14 @@ export async function storageState(page: Page): Promise<MirrorState> {
       const key = sessionStorage.key(i)
       if (key) keys.push(key)
     }
-    const sessionId = sessionStorage.getItem('ai-session-id')
+    const raw = sessionStorage.getItem('ai-identity')
+    const identity = raw ? JSON.parse(raw) as { tenantId: number; userId: number } : null
+    const fingerprint = identity ? `${identity.tenantId}:${identity.userId}` : null
+    const sessionId = fingerprint ? sessionStorage.getItem(`ai-session-id:${fingerprint}`) : null
     return {
       keys,
       sessionId,
-      mirror: sessionId ? sessionStorage.getItem(`ai-mirror:${sessionId}`) : null
+      mirror: identity && sessionId ? sessionStorage.getItem(`ai-mirror:${fingerprint}:${sessionId}`) : null
     }
   })
 }

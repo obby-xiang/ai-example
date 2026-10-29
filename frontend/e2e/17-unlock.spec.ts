@@ -31,10 +31,12 @@ import {
   apiUrl,
   createExportedTask,
   openPath,
+  sessionId as pageSessionId,
   waitJob,
   waitRoundSettled,
   type JobView
 } from './support/helpers'
+import { aiRequestOptions } from './support/ai-identity'
 import {
   API_BASE,
   chatStream,
@@ -95,7 +97,7 @@ test.describe('@stub A 上传交接卡', () => {
     // 轮继续到终态（挂起收口，不悬挂）
     await waitRoundSettled(page, 90_000)
 
-    const sessionId = await page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+    const sessionId = await pageSessionId(page)
     const current = await api.get<{ found: boolean; awaitingExternal?: boolean }>(
       request,
       `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`
@@ -629,7 +631,7 @@ test.describe('@stub R 刷新恢复剩余条', () => {
     await page.locator('[data-testid="send-btn"]').click()
     const bubble = page.locator('[data-testid^="msg-bubble-"].w-full').last()
     await expect.poll(async () => (await bubble.innerText()).trim().length, { timeout: 30_000 }).toBeGreaterThan(10)
-    const sessionId = await page.evaluate(() => sessionStorage.getItem('ai-session-id') ?? '')
+    const sessionId = await pageSessionId(page)
     const current = await api.get<{ found: boolean; runId?: string }>(
       request,
       `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`
@@ -657,7 +659,10 @@ test.describe('@stub R 刷新恢复剩余条', () => {
     await waitRoundSettled(page, 90_000)
 
     // 归档侧同源：该 run 的归档帧里有且只有一个 done，末帧文本与屏上一致
-    const archive = await request.get(`${API_BASE}/api/ai/events/${encodeURIComponent(runId)}?lastSeq=0`)
+    const archive = await request.get(
+      `${API_BASE}/api/ai/events/${encodeURIComponent(runId)}?lastSeq=0`,
+      aiRequestOptions('/api/ai/events')
+    )
     const frames = (await archive.text())
       .split(/\r?\n/)
       .filter((line) => line.startsWith('data:'))

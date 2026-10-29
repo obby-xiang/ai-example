@@ -7,6 +7,7 @@ import { expect, type APIRequestContext, type Page } from '@playwright/test'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { api } from './helpers'
+import { aiFetch, pageMirrorKeyOf } from './ai-identity'
 import { RUN_DIR } from './harness'
 
 export const API_BASE = process.env.E2E_API_BASE
@@ -30,13 +31,13 @@ export function parseSse(text: string): SseFrame[] {
   return frames
 }
 
-/** 直打 POST /api/ai/chat（API 层），返回整轮帧序列。 */
+/** 直打 POST /api/ai/chat（API 层，带身份头），返回整轮帧序列。 */
 export async function chatFrames(
   sessionId: string,
   message: string,
   timeoutMs = 120_000
 ): Promise<SseFrame[]> {
-  const res = await fetch(`${API_BASE}/api/ai/chat`, {
+  const res = await aiFetch(`${API_BASE}/api/ai/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sessionId, message }),
@@ -84,10 +85,10 @@ export function stubRequestsContaining(marker: string): StubRequest[] {
   return found.sort((a, b) => a.index - b.index)
 }
 
-/** 打开 GET /api/ai/events/{runId}?lastSeq= 直读文本（回放/续收通道）。 */
+/** 打开 GET /api/ai/events/{runId}?lastSeq= 直读文本（回放/续收通道；带身份头）。 */
 export async function eventsRaw(runId: string, lastSeq?: number): Promise<string> {
   const suffix = lastSeq === undefined ? '' : `?lastSeq=${Math.max(0, Math.floor(lastSeq))}`
-  const res = await fetch(`${API_BASE}/api/ai/events/${encodeURIComponent(runId)}${suffix}`)
+  const res = await aiFetch(`${API_BASE}/api/ai/events/${encodeURIComponent(runId)}${suffix}`)
   return res.text()
 }
 
@@ -181,7 +182,7 @@ export async function archivedFrames(runId: string, lastSeq = 0): Promise<SseFra
   return parseSse(await eventsRaw(runId, lastSeq)).filter((f) => f.type !== 'heartbeat')
 }
 
-/** 会话镜像（sessionStorage `ai-mirror:<sid>`，节流落盘）。 */
+/** 会话镜像（sessionStorage 身份键 `ai-mirror:<t>:<u>:<sid>`，节流落盘）。 */
 export interface MirrorPayload {
   v?: number
   inFlight?: boolean
@@ -191,9 +192,10 @@ export interface MirrorPayload {
 }
 
 export async function readMirror(page: Page, sid: string): Promise<MirrorPayload | null> {
+  const key = await pageMirrorKeyOf(page, sid)
   const raw = await page.evaluate(
-    (key) => window.sessionStorage.getItem(key),
-    `ai-mirror:${sid}`
+    (storageKey) => window.sessionStorage.getItem(storageKey),
+    key
   )
   if (!raw) return null
   return JSON.parse(raw) as MirrorPayload
