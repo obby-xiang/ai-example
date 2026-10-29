@@ -29,6 +29,9 @@
              0.8.16 目前只有 snapshot（2026-10-19）故不取。Spring Boot 父 POM 不管理 JaCoCo，
              版本必须在这里自行钉死（详见 docs/research/设计-选择性测试落地方案-2026-10-23.md §5）。 -->
         <jacoco.version>0.8.15</jacoco.version>
+        <!-- 租户/用户身份上下文（2026-10-30）：RequestContextUtils 以 TTL 承载身份，
+             线程池装饰器可直接捕获/回放，避免平台线程丢身份。 -->
+        <ttl.version>2.14.5</ttl.version>
     </properties>
 
     <dependencyManagement>
@@ -124,6 +127,13 @@
             <groupId>org.apache.lucene</groupId>
             <artifactId>lucene-analysis-smartcn</artifactId>
             <version>${lucene.version}</version>
+        </dependency>
+        <!-- 租户/用户身份上下文：TransmittableThreadLocal 作为统一传播基座。
+             本批只要求 RequestContextUtils 与同步/嵌套成立；执行器改造由后续任务分批接入。 -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>transmittable-thread-local</artifactId>
+            <version>${ttl.version}</version>
         </dependency>
         <!-- Lombok -->
         <dependency>

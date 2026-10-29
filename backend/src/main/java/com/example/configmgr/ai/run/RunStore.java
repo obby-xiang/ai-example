@@ -3,6 +3,8 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.core.JsonParser;
@@ -815,6 +817,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
+		// 租户/用户身份：首轮创建时固定。上下文缺失（无 HTTP 身份头的直接调用/旧测试）时保持 0，
+		// 不伪造默认身份；生产入口由 TenantIdentityFilter 保证上下文存在。
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity != null) {
+			snapshot.setTenantId(identity.tenantId());
+			snapshot.setUserId(identity.userId());
+		}
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
 		snapshot.setMessageJson(codec.serializeAll(history));

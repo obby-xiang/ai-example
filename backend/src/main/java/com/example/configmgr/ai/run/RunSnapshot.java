@@ -72,6 +72,21 @@ public class RunSnapshot {
 
 	private String sessionId;
 
+	/**
+	 * 本轮归属的租户（首轮创建时从 {@code RequestContextUtils} 固定；{@code 0} = 本字段引入前的旧快照）。
+	 *
+	 * <p><b>只读不重算</b>：续跑/恢复/跨实例接管都发生在原请求结束之后，身份只能从这条记录读回，
+	 * 不得按当前线程上下文"重新判定归属"（那会让接管方以自己的身份改写别人的轮次）。
+	 */
+	private long tenantId;
+
+	/**
+	 * 本轮归属的用户（{@code -1} = 系统账号；{@code 0} = 旧快照）。
+	 *
+	 * <p>与 {@link #tenantId} 同源同寿：创建时一起固定，续跑只读。
+	 */
+	private long userId;
+
 	/** 轮次状态，取值见本类常量。 */
 	private String status = RUNNING;
 
@@ -244,6 +259,9 @@ public class RunSnapshot {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("runId", this.runId);
 		out.put("sessionId", this.sessionId);
+		// 身份归属（additive）：0 = 本字段引入前的旧快照（不冒充任何真实租户）
+		out.put("tenantId", this.tenantId);
+		out.put("userId", this.userId);
 		out.put("status", this.status);
 		out.put("round", this.round);
 		out.put("attempts", this.attempts);

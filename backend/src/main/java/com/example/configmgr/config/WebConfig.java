@@ -1,5 +1,7 @@
 package com.example.configmgr.config;
 
+import com.example.configmgr.ai.tenant.TenantIdentityFilter;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -40,6 +42,21 @@ public class WebConfig implements WebMvcConfigurer {
         registration.addUrlPatterns("/api/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
         registration.setName("securityHeadersFilter");
+        return registration;
+    }
+
+    /**
+     * 租户/用户身份边界（2026-10-30）：{@code /api/ai/*} 下的对话数据面读取
+     * {@code X-Tenant-Id}/{@code X-User-Id} 并建立上下文；模型配置/健康/工具/身份目录除外
+     * （见 {@code TenantIdentityFilter#shouldNotFilter}）。排在安全响应头之后。
+     */
+    @Bean
+    public FilterRegistrationBean<TenantIdentityFilter> tenantIdentityFilter(ObjectMapper objectMapper) {
+        FilterRegistrationBean<TenantIdentityFilter> registration =
+                new FilterRegistrationBean<>(new TenantIdentityFilter(objectMapper));
+        registration.addUrlPatterns("/api/*");
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 20);
+        registration.setName("tenantIdentityFilter");
         return registration;
     }
 }

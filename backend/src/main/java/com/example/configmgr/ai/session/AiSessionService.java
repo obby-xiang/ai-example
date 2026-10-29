@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -25,9 +27,14 @@ import java.util.Map;
  * 与挂起态（{@code ai:run:<runId>}）各有自己的 TTL，本类不复制它们的内容，
  * 也不做"会话不属于谁"的权限判定（DC-10：权限/认证不在本规格范围）。
  *
+ * <h2>身份归属（2026-10-30）</h2>
+ * 每条会话记录额外登记 {@code tenantId/userId}：值由服务端从请求身份上下文取得，
+ * 不读请求体。"会话属于谁"的判定本身（key 隔离、只带 runId 的入口核对快照）由后续任务接入；
+ * 本类只负责<b>登记</b>，键族仍为 {@code ai:session:<sessionId>}。
+ *
  * <h2>为什么"校验"其实是"创建或续期"</h2>
- * 会话 id 由前端页签生成并随请求携带（第一棒起就没有"建会话"接口），
- * 因此首轮必然是一个尚未存在的 id —— 校验语义只能是"存在则续期、不存在则登记"，
+ * 发号已改为后端接口（{@code POST /api/ai/session}，时间戳+实例位+序列），但历史页签仍可能携带
+ * 旧格式 id（前端迁移前），因此校验语义保持"存在则续期、不存在则登记"，
  * 结果里返回 {@code existed} 供日志与取证区分两种情形。
  */
 @Slf4j
@@ -49,11 +56,27 @@ public class AiSessionService {
 	}
 
 	/**
-	 * 校验并续期会话（滑动 TTL）。
+	 * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文（缺失则不登记归属）。
 	 *
 	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
 	 */
 	public boolean ensure(String sessionId) {
+		return ensureInternal(sessionId, RequestContextUtils.currentOrNull());
+	}
+
+	/**
+	 * 校验并续期会话，并<b>显式登记</b>这次操作的身份归属。
+	 *
+	 * <p>归属只认服务端传入的 {@code tenantId/userId}（HTTP 边界从请求头校验后取得），
+	 * 不读客户端请求体 —— 否则前端可以自报另一个租户。
+	 *
+	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
+	 */
+	public boolean ensure(String sessionId, long tenantId, long userId) {
+		return ensureInternal(sessionId, new TenantUser(tenantId, userId));
+	}
+
+	private boolean ensureInternal(String sessionId, TenantUser identity) {
 		String key = KEY_PREFIX + sessionId;
 		Duration ttl = this.properties.getSessionTtl();
 		try {
@@ -62,6 +85,11 @@ public class AiSessionService {
 			value.put("sessionId", sessionId);
 			value.put("lastActivity", Instant.now().toString());
 			value.put("rounds", roundOf(key) + 1);
+			if (identity != null) {
+				// 归属随会话记录落 Redis（本批不改键族；键形隔离由后续任务统一处理）
+				value.put("tenantId", identity.tenantId());
+				value.put("userId", identity.userId());
+			}
 			this.redis.opsForValue().set(key, this.objectMapper.writeValueAsString(value), ttl);
 			return existed;
 		}

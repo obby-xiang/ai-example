@@ -78,8 +78,12 @@ class AiConfigUnavailableSpringTest {
 
 	@Test
 	void chatStillReturns503WithoutBuildingAStream() throws Exception {
-		this.mockMvc.perform(post("/api/ai/chat").contentType(MediaType.APPLICATION_JSON)
-			.content("{\"sessionId\":\"s-unavailable\",\"message\":\"你好\"}"))
+		// 身份边界（2026-10-30）：/api/ai/chat 属于对话数据面，必须带身份头；无 key 的 503 语义不变。
+		this.mockMvc
+			.perform(post("/api/ai/chat").header("X-Tenant-Id", "1")
+				.header("X-User-Id", "101")
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("{\"sessionId\":\"s-unavailable\",\"message\":\"你好\"}"))
 			.andExpect(status().isServiceUnavailable())
 			.andExpect(jsonPath("$.code").value("AI_UNAVAILABLE"))
 			.andExpect(jsonPath("$.message")

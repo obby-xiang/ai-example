@@ -211,6 +211,13 @@ public class InMemoryRunStore extends RunStore {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
+		// 租户隔离：与真实 RunStore 同口径 —— 首轮创建时从上下文固定身份；缺失保持 0（不伪造）。
+		com.example.configmgr.ai.tenant.TenantUser identity =
+				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
+		if (identity != null) {
+			snapshot.setTenantId(identity.tenantId());
+			snapshot.setUserId(identity.userId());
+		}
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
 		// 模型配置专项批①：与真实实现同口径固化模型身份（additive 字段）

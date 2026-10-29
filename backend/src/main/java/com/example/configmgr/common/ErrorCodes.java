@@ -97,6 +97,10 @@ public final class ErrorCodes {
     public static final String FRONTEND_RESULT_TOO_LARGE = "FRONTEND_RESULT_TOO_LARGE";
     /** 503：上下文计量不可用。 */
     public static final String AI_CONTEXT_UNAVAILABLE = "AI_CONTEXT_UNAVAILABLE";
+    /** 400：AI 对话入口缺少租户/用户身份头（或格式非法/系统账号走 HTTP）——fail-closed。 */
+    public static final String TENANT_IDENTITY_REQUIRED = "TENANT_IDENTITY_REQUIRED";
+    /** 400：身份头齐全但该 (tenantId,userId) 组合不在预置目录内（含跨租户拼装）。 */
+    public static final String TENANT_IDENTITY_UNKNOWN = "TENANT_IDENTITY_UNKNOWN";
     /** 500：未捕获异常。 */
     public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
     /** 400：{@code @Valid} 校验失败（字段级，message 里带字段名）。 */

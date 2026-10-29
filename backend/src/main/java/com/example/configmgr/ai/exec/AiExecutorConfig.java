@@ -3,8 +3,10 @@ package com.example.configmgr.ai.exec;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiMdcTaskDecorator;
 import com.example.configmgr.ai.run.StreamWatchdog;
+import com.example.configmgr.ai.tenant.RequestContextTaskDecorator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.task.TaskDecorator;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.Executors;
@@ -49,7 +51,8 @@ public class AiExecutorConfig {
 		executor.setThreadNamePrefix("ai-suspend-");
 		executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
 		// 日志链路：本轮锚点在提交时刻随任务进池（平台线程不继承 MDC）
-		executor.setTaskDecorator(new AiMdcTaskDecorator());
+		// 身份传播：TTL 在提交时刻抓取租户/用户上下文，池线程执行首轮建快照/登记会话时身份不丢
+		executor.setTaskDecorator(aiTaskDecorator());
 		executor.setWaitForTasksToCompleteOnShutdown(false);
 		executor.initialize();
 		return executor;
@@ -94,10 +97,23 @@ public class AiExecutorConfig {
 		executor.setThreadNamePrefix("ai-resume-trigger-");
 		executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
 		// 日志链路：POST /confirm 线程上的锚点随"死卡兜底续跑"任务一起进池
-		executor.setTaskDecorator(new AiMdcTaskDecorator());
+		// 身份传播：同上，续跑触发线程同样需要请求身份
+		executor.setTaskDecorator(aiTaskDecorator());
 		executor.setWaitForTasksToCompleteOnShutdown(false);
 		executor.initialize();
 		return executor;
+	}
+
+	/**
+	 * 提交时刻同时抓取日志锚点（MDC）与身份上下文（TTL）。
+	 *
+	 * <p>顺序无关：两者各自捕获、各自恢复；MDC 只用于日志行首，TTL 才决定执行体看到的
+	 * {@code tenantId/userId}。
+	 */
+	private static TaskDecorator aiTaskDecorator() {
+		TaskDecorator mdc = new AiMdcTaskDecorator();
+		TaskDecorator identity = new RequestContextTaskDecorator();
+		return runnable -> identity.decorate(mdc.decorate(runnable));
 	}
 
 }
