@@ -401,13 +401,17 @@ test.describe('@stub S 流式稳定', () => {
     expect(Number(usage.frames)).toBeGreaterThan(1)
     expect(usage.promptTokens).toBe(4321)
 
-    // ③ 圆环与端点同值：唯一读数是一行 tooltip（只有占比；已用/上限不再上屏）
+    // ③ 圆环与端点同值：唯一读数是一行自定义 tooltip（native title 已退场，点击不展开）
     const pill = page.locator('[data-testid="context-pill"]')
+    const tip = page.locator('[data-testid="context-ring-tip"]')
     await expect(pill).toBeVisible()
     await expect(pill).toHaveText('')
+    await expect(pill).not.toHaveAttribute('title')
     const shownPercent = Number((context.percent as number).toFixed(1))
-    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
     await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    await expect(tip).toHaveText(`上下文占用 ${shownPercent}%`)
+    await pill.hover()
+    await expect(tip).toHaveCSS('opacity', '1')
     await expect(pill).toHaveAttribute('value', String(context.percent))
     await expect(pill).toHaveAttribute('max', '100')
     // ④ 七项拆分自洽：used = 六项之和（free 是余量），free + used = limit
@@ -1019,12 +1023,18 @@ test.describe('@stub R 刷新恢复', () => {
       breakdown: Array<{ key: string; tokens: number }>
     }
     const pill = page.locator('[data-testid="context-pill"]')
-    // 默认态零可见文字；读数只在 title / aria-label 的那一行
+    const tip = page.locator('[data-testid="context-ring-tip"]')
+    // 默认态零可见文字；读数只在自定义气泡 / aria-label 的那一行（native title 已退场）
     await expect(pill).toHaveText('')
+    await expect(pill).not.toHaveAttribute('title')
     const shownPercent = Number((context.percent as number).toFixed(1))
-    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
     await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    await expect(tip).toHaveText(`上下文占用 ${shownPercent}%`)
     await expect(pill).toHaveAttribute('value', String(context.percent))
+    // 悬停出气泡（面板同款深色单行），离开即收
+    await pill.hover()
+    await expect(tip).toHaveCSS('opacity', '1')
+    await expect(tip).toHaveCSS('white-space', 'nowrap')
 
     // 点击不是入口：不弹 popover、不吐分项行
     await pill.click()

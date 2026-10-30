@@ -170,10 +170,56 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     api.getContext.mockReset()
   })
 
-  it('无数据不渲染药丸', async () => {
+  it('无数据也显示中性轨道圆环：一行「暂无上下文占用」，无文字、无 value', async () => {
     const wrapper = mount(ContextPill)
     await flushPromises()
-    expect(wrapper.find('[data-testid="context-pill"]').exists()).toBe(false)
+
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    // 圆环始终在场（不再是"没数据就整块消失"）
+    expect(pill.exists()).toBe(true)
+    expect(pill.attributes('data-tier')).toBe('none')
+    expect(pill.element.hasAttribute('value')).toBe(false)
+    // 默认态没有任何可见文字；唯一读数是一行 tooltip
+    expect(pill.text()).toBe('')
+    const tip = wrapper.find('[data-testid="context-ring-tip"]')
+    expect(tip.exists()).toBe(true)
+    expect(tip.text()).toBe('暂无上下文占用')
+    expect(pill.attributes('aria-label')).toBe('暂无上下文占用')
+    // 与发送钮的间距 = 父容器 gap 6px + 圆环自身 18px = 24px
+    expect(wrapper.classes()).toContain('mr-[18px]')
+  })
+
+  it('原生 title 退场：自定义 tooltip 单行 + 箭头 + 仅键盘聚焦出气泡，aria-label 同文案', async () => {
+    const store = useAiStore()
+    store.contextUsage = measured(84213, 128000)
+    const wrapper = mount(ContextPill)
+    await flushPromises()
+
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    // 原生 title 会出第二套不可样式化的气泡 ⇒ 必须没有
+    expect(pill.attributes('title')).toBeUndefined()
+    // 唯一可聚焦点是外层触发槽（group）：只有 :focus-visible 才亮 ⇒ 鼠标点击不会把气泡钉住
+    expect(wrapper.attributes('tabindex')).toBe('0')
+    expect(wrapper.attributes('role')).toBe('group')
+    expect(wrapper.attributes('aria-label')).toBe('上下文占用 65.8%')
+    expect(pill.attributes('tabindex')).toBeUndefined()
+    expect(pill.attributes('aria-label')).toBe('上下文占用 65.8%')
+
+    const tip = wrapper.find('[data-testid="context-ring-tip"]')
+    expect(tip.text()).toBe('上下文占用 65.8%')
+    expect(tip.attributes('aria-hidden')).toBe('true')
+    // 项目同款深色气泡：单行 + 深底 + 悬停/键盘聚焦渐显 + 箭头
+    expect(tip.classes()).toContain('whitespace-nowrap')
+    expect(tip.classes()).toContain('bg-[#1f2328]')
+    expect(tip.classes()).toContain('group-hover/tip:opacity-100')
+    expect(tip.classes()).toContain('group-focus-visible/tip:opacity-100')
+    // focus-within 会把"点击聚焦"也算进来 ⇒ 气泡被钉住，必须没有
+    expect(tip.classes()).not.toContain('group-focus-within/tip:opacity-100')
+    const arrow = tip.find('.tip-arrow')
+    expect(arrow.exists()).toBe(true)
+    expect(arrow.attributes('aria-hidden')).toBe('true')
+    // 圆环自身仍然没有可见文字
+    expect(pill.text()).toBe('')
   })
 
   it('渲染为圆环：无可见文字、一行 tooltip、点击不展开、progress value 正确', async () => {
@@ -188,18 +234,17 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     expect(wrapper.find('button').exists()).toBe(false)
     // 默认态无任何可见文字（不出已用/上限/占比三件，也不出七项）
     expect(pill.text()).toBe('')
-    expect(wrapper.element.textContent).toBe('')
     // 圆环读的就是占比本身
     expect(pill.attributes('value')).toBe('65.8')
     expect(pill.attributes('max')).toBe('100')
     expect(pill.attributes('data-tier')).toBe('safe')
-    // hover 只有一行（title 与 aria-label 同源），不含已用/上限/占比三件
-    const title = pill.attributes('title') ?? ''
-    expect(title).toBe('上下文占用 65.8%')
-    expect(title).not.toMatch(/[\r\n]/)
-    expect(title).not.toContain('84.2k')
-    expect(title).not.toContain('128k')
-    expect(pill.attributes('aria-label')).toBe('上下文占用 65.8%')
+    // hover 只有一行（气泡与 aria-label 同源），不含已用/上限/占比三件
+    const label = pill.attributes('aria-label') ?? ''
+    expect(label).toBe('上下文占用 65.8%')
+    expect(label).not.toMatch(/[\r\n]/)
+    expect(label).not.toContain('84.2k')
+    expect(label).not.toContain('128k')
+    expect(wrapper.find('[data-testid="context-ring-tip"]').text()).toBe(label)
 
     // 点击不展开：不拉端点、不出详情、不留展开态 a11y 属性
     await pill.trigger('click')
@@ -222,7 +267,7 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     // 没有分母就没有占比：不写 value（原生不确定态），视觉只剩轨道，绝不用 0 冒充
     expect(pill.element.hasAttribute('value')).toBe(false)
     expect(pill.attributes('aria-label')).toBe('上下文已用 84.2k tokens')
-    expect(pill.attributes('title')).toBe('上下文已用 84.2k tokens')
+    expect(wrapper.find('[data-testid="context-ring-tip"]').text()).toBe('上下文已用 84.2k tokens')
   })
 
   it('估算态 tooltip 带「约」（估的数必须一眼看出来）', async () => {
@@ -233,8 +278,8 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     await flushPromises()
 
     const pill = wrapper.find('[data-testid="context-pill"]')
-    expect(pill.attributes('title')).toBe('上下文占用 约65.8%')
     expect(pill.attributes('aria-label')).toBe('上下文占用 约65.8%')
+    expect(wrapper.find('[data-testid="context-ring-tip"]').text()).toBe('上下文占用 约65.8%')
     expect(pill.text()).toBe('')
     wrapper.unmount()
   })
@@ -247,9 +292,10 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     await flushPromises()
 
     const pill = wrapper.find('[data-testid="context-pill"]')
-    expect(pill.attributes('title')).toBe('Context usage 65.8%')
-    expect(pill.attributes('aria-label')).toBe('Context usage 65.8%')
-    expect(pill.attributes('title')).not.toContain('已用')
+    const label = pill.attributes('aria-label') ?? ''
+    expect(label).toBe('Context usage 65.8%')
+    expect(label).not.toContain('已用')
+    expect(wrapper.find('[data-testid="context-ring-tip"]').text()).toBe(label)
     expect(pill.text()).toBe('')
     wrapper.unmount()
   })

@@ -524,10 +524,12 @@ export function tokensFromLabel(label: string): number {
 }
 
 /**
- * 上下文圆环的读数面：默认态**没有任何可见文字**，只有 hover 的一行 `title`（与 `aria-label` 同源）。
+ * 上下文圆环的读数面：默认态**没有任何可见文字**；唯一读数是一行自定义 tooltip
+ * （`[data-testid="context-ring-tip"]`，与 `aria-label` 同文案；native `title` 已退场）。
  *
- * <p>三种形态（zh / en 同义）：
- * `上下文占用 65.8%` / `上下文占用 约65.8%`（估算）/ `上下文已用 84.2k tokens`（上限未知）。
+ * <p>四种形态（zh / en 同义）：
+ * `上下文占用 65.8%` / `上下文占用 约65.8%`（估算）/ `上下文已用 84.2k tokens`（上限未知）/
+ * `暂无上下文占用`（没有记账，圆环仍以中性轨道在场）。
  * 上限未知时圆环不写 `value`（原生不确定态，只画轨道），界面也不再存在"上限 / 占比"这两个维度。
  */
 export interface PillView {
@@ -537,7 +539,7 @@ export interface PillView {
   used: number | null
 }
 
-export function parsePillTitle(raw: string | null): PillView {
+export function parseRingTip(raw: string | null): PillView {
   const text = (raw ?? '').trim()
   const percent = /^(?:上下文占用|Context usage) (?:(约|~) ?)?(\d+(?:\.\d+)?)%$/.exec(text)
   if (percent) {

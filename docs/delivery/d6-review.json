@@ -35,6 +35,13 @@
       "reason": "本批仅收敛编辑覆盖确认、上下文圆环和系统拒绝静默，不改变D6既有迁移接口、身份或帧类型契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:d3960d2d2dc7617ae49c39735b7cc7d929f328316db32d3513e23341e9b0ec0b",
+      "status": "not-affected",
+      "reason": "本批仅调整上下文圆环常驻、间距与焦点浮层展示，不改变D6既有迁移接口或后端契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

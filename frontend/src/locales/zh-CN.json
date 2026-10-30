@@ -356,6 +356,7 @@
     "context": {
       "pillAria": "上下文占用 {percent}%",
       "pillUsageEst": "上下文占用 约{percent}%",
+      "pillEmpty": "暂无上下文占用",
       "pillAriaNoPercent": "上下文占用 {text}",
       "used": "上下文已用 {used} tokens",
       "usedLimit": "上下文已用 {used} / {limit} tokens（占比 {percent}%）",

@@ -32,7 +32,7 @@ import {
   lastToolText,
   maxStubIndex,
   newSessionId,
-  parsePillTitle,
+  parseRingTip,
   systemTextOf,
   unwrapKnowledge,
   waitStubRequestsAfter
@@ -103,15 +103,19 @@ test('@stub E2E-C02 分母未知不显百分比：圆环不确定态（无 value
   await waitRoundSettled(page)
 
   const pill = page.locator('[data-testid="context-pill"]')
+  const tip = page.locator('[data-testid="context-ring-tip"]')
   await expect(pill).toBeVisible()
-  // 默认态零可见文字：读数只在 hover 的那一行里（title 与 aria-label 同源）
+  // 默认态零可见文字：读数只在自定义气泡 / aria-label 的那一行（native title 已退场）
   await expect(pill).toHaveText('')
-  const view = parsePillTitle(await pill.getAttribute('title'))
+  await expect(pill).not.toHaveAttribute('title')
+  const view = parseRingTip(await pill.getAttribute('aria-label'))
   expect(view.raw).not.toContain('%')
   expect(view.percent).toBeNull()
   expect((view.used as number)).toBeGreaterThan(0)
   expect(view.raw).toContain('已用')
-  await expect(pill).toHaveAttribute('aria-label', view.raw)
+  await expect(tip).toHaveText(view.raw)
+  await pill.hover()
+  await expect(tip).toHaveCSS('opacity', '1')
   // 没有分母就没有占比：不写 value（原生不确定态，视觉只剩轨道），绝不拿 0 冒充
   await expect(pill).not.toHaveAttribute('value')
   await expect(pill).toHaveAttribute('data-tier', 'none')

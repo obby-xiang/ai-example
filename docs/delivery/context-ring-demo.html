@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>上下文占用圆环 · 全场景 demo</title>
+<!--
+  上下文占用圆环的可交互全场景 demo（与 frontend/src/components/AiPanel/ContextPill.vue 同源契约）。
+
+  这份页面是**验收样板**，不是组件源码：样式值（空心圆环、档位配色、气泡、间距）与组件逐项对齐，
+  任何一项改动都必须同时改 ContextPill.vue 与本文件。
+  页面自包含：无外链、无构建、无本机路径，双击即可打开。
+-->
+<style>
+  :root {
+    --ink: #1f2328;
+    --ink-2: #57606a;
+    --line: #e3e6ea;
+    --track: #e3e6ea;
+    --tip-bg: #1f2328;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 28px 24px 64px;
+    background: #f6f8fa;
+    color: var(--ink);
+    font: 13px/1.6 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  h2 { margin: 28px 0 10px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+  p.lead { margin: 0 0 20px; color: var(--ink-2); }
+  code { font: 12px/1.5 ui-monospace, Consolas, monospace; background: #eff2f5; padding: 1px 4px; border-radius: 4px; }
+
+  .panel {
+    position: relative;
+    max-width: 720px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #fff;
+  }
+
+  /* ── 输入框底栏（形状照抄面板：gap 6px，圆环自身再让 18px ⇒ 与发送钮 24px） ── */
+  .composer-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px 7px;
+    border-top: 1px solid var(--line);
+  }
+  .composer-bar .spacer { flex: 1; }
+  .composer-count { font-size: 10.5px; color: #8b949e; margin-right: 2px; }
+  .send-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin-left: auto;
+    border: 0;
+    border-radius: 50%;
+    background: #2563eb;
+    color: #fff;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .send-btn:hover { filter: brightness(1.08); }
+
+  /* ── 圆环触发位：父容器 gap 6 + 自身 mr 18 = 24px ── */
+  .ring-slot {
+    position: relative;
+    flex: none;
+    margin-right: 18px;
+    display: inline-flex;
+  }
+
+  /* ── 圆环本体（与组件 scoped 样式同值：conic-gradient + mask 抠空心） ── */
+  .ring {
+    display: block;
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: conic-gradient(currentColor calc(var(--ring-value, 0) * 1%), var(--track) 0);
+    mask-image: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px + 0.5px));
+    -webkit-mask-image: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px + 0.5px));
+  }
+  .ring::-webkit-progress-bar { background: transparent; }
+  .ring::-webkit-progress-value { background: transparent; }
+  .ring::-moz-progress-bar { background: transparent; }
+  /* 不确定态（无 value）：只剩轨道，并关掉引擎自带的流动条纹 */
+  .ring:indeterminate::-webkit-progress-bar,
+  .ring:indeterminate::-webkit-progress-value { display: none; background: none; }
+  .ring:indeterminate::-moz-progress-bar { display: none; background: none; }
+
+  /* ── 档位配色（与 tierClass 的 text-* 五项逐字同值） ── */
+  .ring[data-tier="safe"], .ring[data-tier="none"] { color: #57606a; }
+  .ring[data-tier="warn"] { color: #9a6700; }
+  .ring[data-tier="high"] { color: #bc4c00; }
+  .ring[data-tier="danger"] { color: #d1242f; }
+
+  /* ── tooltip：面板同款深色气泡（TIP_CLASS / TIP_ARROW_CLASS 的等效 CSS） ── */
+  .tip {
+    position: absolute;
+    bottom: calc(100% + 7px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+    white-space: nowrap;
+    border-radius: 6px;
+    background: var(--tip-bg);
+    padding: 3px 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #fff;
+    opacity: 0;
+    transition: opacity 180ms;
+    pointer-events: none;
+  }
+  .tip-arrow {
+    position: absolute;
+    left: 50%;
+    top: 100%;
+    margin-left: -4px;
+    width: 8px;
+    height: 8px;
+    transform: translateY(-50%) rotate(45deg);
+    border-radius: 1px;
+    background: var(--tip-bg);
+  }
+  /* 悬停或键盘聚焦都出气泡；`:focus-visible` 只放行 Tab（鼠标点击不亮 ⇒ 气泡不会被钉住） */
+  .ring-slot:hover .tip,
+  .ring-slot:focus-visible .tip { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+
+  /* ── 状态切换 ── */
+  .states { display: flex; flex-wrap: wrap; gap: 6px; max-width: 720px; }
+  .states button {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .states button[aria-pressed="true"] { border-color: #2563eb; color: #2563eb; }
+
+  /* ── 全场景一览（同时展示六个状态，不必逐个点） ── */
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 10px;
+    max-width: 720px;
+  }
+  .cell {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fff;
+    padding: 10px 12px 12px;
+  }
+  .cell .slot-line { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+  .cell dl { margin: 8px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; font-size: 11.5px; color: var(--ink-2); }
+  .cell dt { color: #8b949e; }
+  .cell dd { margin: 0; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+
+  .meta { margin-top: 10px; font-size: 11.5px; color: var(--ink-2); }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .check { margin-top: 6px; font-size: 11.5px; }
+  .check .ok { color: #1a7f45; }
+  .check .bad { color: #d1242f; }
+</style>
+</head>
+<body>
+
+<h1>上下文占用圆环 · 全场景 demo</h1>
+<p class="lead">
+  默认只有一个空心圆环：没有可见文字（不出「已用 / 上限 / 占比」三件，也没有七项拆分）。
+  悬停或键盘聚焦出<b>一行</b>深色气泡；点击不展开任何详情。圆环与发送钮间距 <b>24px</b>。
+</p>
+
+<h2>① 悬停 / Tab 聚焦看气泡（点击无反应）</h2>
+<div class="panel">
+  <div style="padding: 4px 9px 10px; color: #8b949e; font-size: 12px;">对话输入框（示意）</div>
+  <div class="composer-bar" id="live-bar">
+    <span class="spacer"></span>
+    <span class="composer-count">128/40000</span>
+    <span class="ring-slot" id="live-slot" role="group" tabindex="0" aria-label="上下文占用 42%">
+      <progress class="ring" id="live-ring" data-testid="context-pill" max="100" value="42"
+                style="--ring-value:42" aria-label="上下文占用 42%"></progress>
+      <span class="tip" data-testid="context-ring-tip" aria-hidden="true">上下文占用 42%<span class="tip-arrow" aria-hidden="true"></span></span>
+    </span>
+    <button type="button" class="send-btn" id="live-send" aria-label="发送">↑</button>
+  </div>
+  <p class="meta">圆环右缘 → 发送钮左缘：<b id="gap-readout">测量中…</b></p>
+  <p class="meta">当前 tooltip 文案：<b id="label-readout">—</b>（与 <code>aria-label</code> 同文案）</p>
+</div>
+
+<h2>② 切换状态</h2>
+<div class="states" id="switcher"></div>
+
+<h2>③ 全场景一览（六个状态同时在场）</h2>
+<div class="gallery" id="gallery"></div>
+
+<p class="check" id="self-check"></p>
+
+<script>
+(function () {
+  'use strict'
+
+  var TIER_SAFE = 'safe'
+  var TIER_NONE = 'none'
+  var TIER_WARN = 'warn'
+  var TIER_HIGH = 'high'
+  var TIER_DANGER = 'danger'
+
+  /** 与 utils/context-usage.ts 同口径：70 / 85 / 95（边界归高档）。 */
+  function tierOf(percent) {
+    if (percent === null) return TIER_NONE
+    if (percent >= 95) return TIER_DANGER
+    if (percent >= 85) return TIER_HIGH
+    if (percent >= 70) return TIER_WARN
+    return TIER_SAFE
+  }
+
+  /** 与 formatTokens 同口径：< 1000 不缩写；>= 1000 用 k，整数不补 .0。 */
+  function formatTokens(tokens) {
+    if (tokens < 1000) return String(tokens)
+    var scaled = Math.round((tokens / 1000) * 10) / 10
+    return (scaled % 1 === 0 ? scaled.toFixed(0) : scaled.toFixed(1)) + 'k'
+  }
+
+  /** 与 formatPercent 同口径：整数不带小数，非整数保留一位。 */
+  function formatPercent(percent) {
+    var rounded = Math.round(percent * 10) / 10
+    return rounded % 1 === 0 ? String(rounded) : rounded.toFixed(1)
+  }
+
+  /** 一行 tooltip（唯一读数）：无数据 / 上限未知 / 有占比 三态。 */
+  function labelOf(state) {
+    if (!state.usage || (state.usage.percent === null && state.usage.usedTokens === 0)) {
+      return '暂无上下文占用'
+    }
+    var usage = state.usage
+    if (usage.percent === null) {
+      return '上下文已用 ' + (usage.est ? '≈' : '') + formatTokens(usage.usedTokens) + ' tokens'
+    }
+    var percent = formatPercent(usage.percent)
+    return usage.est ? '上下文占用 约' + percent + '%' : '上下文占用 ' + percent + '%'
+  }
+
+  var STATES = [
+    { id: 'exact', name: '精确 42%', usage: { usedTokens: 53760, limitTokens: 128000, percent: 42, est: false } },
+    { id: 'estimate', name: '估算 约42%', usage: { usedTokens: 53760, limitTokens: 128000, percent: 42, est: true } },
+    { id: 'high', name: '高档 90%', usage: { usedTokens: 115200, limitTokens: 128000, percent: 90, est: false } },
+    { id: 'danger', name: '临界 97%', usage: { usedTokens: 124160, limitTokens: 128000, percent: 97, est: false } },
+    { id: 'no-limit', name: '上限未知', usage: { usedTokens: 84213, limitTokens: null, percent: null, est: false } },
+    { id: 'empty', name: '暂无占用', usage: null }
+  ]
+
+  /** 把状态贴到一个圆环上：值、档位、工具提示、可访问名。 */
+  function applyState(slot, ring, state) {
+    var usage = state.usage
+    var percent = usage && usage.percent !== null ? usage.percent : null
+    var label = labelOf(state)
+
+    if (percent === null) {
+      ring.removeAttribute('value')
+      ring.style.setProperty('--ring-value', '0')
+    } else {
+      ring.setAttribute('value', String(percent))
+      ring.style.setProperty('--ring-value', String(percent))
+    }
+    ring.setAttribute('data-tier', tierOf(percent))
+    ring.setAttribute('aria-label', label)
+    // 可聚焦的是外层触发槽（group）：只有 :focus-visible 才亮气泡，鼠标点击不钉住
+    slot.setAttribute('role', 'group')
+    slot.setAttribute('tabindex', '0')
+    slot.setAttribute('aria-label', label)
+
+    var tip = slot.querySelector('.tip')
+    tip.firstChild.nodeValue = label
+  }
+
+  var liveSlot = document.getElementById('live-slot')
+  var liveRing = document.getElementById('live-ring')
+  var labelReadout = document.getElementById('label-readout')
+
+  var switcher = document.getElementById('switcher')
+  STATES.forEach(function (state, index) {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = state.name
+    button.setAttribute('aria-pressed', index === 0 ? 'true' : 'false')
+    button.addEventListener('click', function () {
+      applyState(liveSlot, liveRing, state)
+      labelReadout.textContent = labelOf(state)
+      Array.prototype.forEach.call(switcher.children, function (child) {
+        child.setAttribute('aria-pressed', child === button ? 'true' : 'false')
+      })
+    })
+    switcher.appendChild(button)
+  })
+
+  var gallery = document.getElementById('gallery')
+  STATES.forEach(function (state) {
+    var cell = document.createElement('div')
+    cell.className = 'cell'
+
+    var slot = document.createElement('span')
+    slot.className = 'ring-slot'
+    slot.style.marginRight = '18px'
+    var ring = document.createElement('progress')
+    ring.className = 'ring'
+    ring.setAttribute('max', '100')
+    var tip = document.createElement('span')
+    tip.className = 'tip'
+    tip.setAttribute('aria-hidden', 'true')
+    tip.appendChild(document.createTextNode(''))
+    var arrow = document.createElement('span')
+    arrow.className = 'tip-arrow'
+    arrow.setAttribute('aria-hidden', 'true')
+    tip.appendChild(arrow)
+    slot.appendChild(ring)
+    slot.appendChild(tip)
+    applyState(slot, ring, state)
+
+    var line = document.createElement('div')
+    line.className = 'slot-line'
+    var name = document.createElement('span')
+    name.textContent = state.name
+    line.appendChild(slot)
+    line.appendChild(name)
+
+    var dl = document.createElement('dl')
+    function row(term, value) {
+      var dt = document.createElement('dt')
+      dt.textContent = term
+      var dd = document.createElement('dd')
+      dd.textContent = value
+      dl.appendChild(dt)
+      dl.appendChild(dd)
+    }
+    row('data-tier', ring.getAttribute('data-tier'))
+    row('value', ring.hasAttribute('value') ? ring.getAttribute('value') : '(无 · 不确定态)')
+    row('tooltip', labelOf(state))
+
+    cell.appendChild(line)
+    cell.appendChild(dl)
+    gallery.appendChild(cell)
+  })
+
+  /** 自检：把页面自己量到的间距与「24px」对照，不一致就直接标红（demo 也要能自证）。 */
+  function measureGap() {
+    var slotRect = liveSlot.getBoundingClientRect()
+    var ringRect = liveRing.getBoundingClientRect()
+    var sendRect = document.getElementById('live-send').getBoundingClientRect()
+    var gap = Math.round(sendRect.left - (slotRect.left + ringRect.width))
+    var readout = document.getElementById('gap-readout')
+    readout.textContent = gap + 'px'
+    var check = document.getElementById('self-check')
+    check.innerHTML = gap === 24
+      ? '<span class="ok">✓ 间距自检通过：24px</span>'
+      : '<span class="bad">✗ 间距自检失败：实测 ' + gap + 'px，要求 24px</span>'
+  }
+
+  applyState(liveSlot, liveRing, STATES[0])
+  labelReadout.textContent = labelOf(STATES[0])
+  window.addEventListener('load', measureGap)
+  window.addEventListener('resize', measureGap)
+  measureGap()
+})()
+</script>
+</body>
+</html>

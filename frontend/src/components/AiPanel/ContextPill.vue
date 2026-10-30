@@ -5,8 +5,12 @@
  * <h2>为什么只剩一个圆环</h2>
  * 占用是"扫一眼"的状态量，不是要读的数字：默认态一律不出文字
  * （既不出 已用/上限/占比 三件，也不出七项拆分），只留一圈进度；
- * 精确值压到 hover 的一行 tooltip 里（`上下文占用 42%`，估算带「约」）。
+ * 精确值压到 hover/focus 的一行 tooltip 里（`上下文占用 42%`，估算带「约」）。
  * 点击不展开详情 —— 详情面板（ContextPopover）与药丸的点击逻辑一并退场。
+ *
+ * <h2>圆环始终在场</h2>
+ * 没有记账（`contextUsage === null`）不是"没有占用"：仍显示中性轨道 + 一行「暂无上下文占用」，
+ * 既不藏起来、也不谎报 0%。
  *
  * <h2>语义源</h2>
  * 视觉是 conic-gradient + mask-image 抠出的空心圆环，语义是原生 `<progress>`：
@@ -18,19 +22,16 @@
  * - `est` ⇒ tooltip 用「约」（这个数是估的必须说出来）；
  * - 上限未知（`percent === null`）⇒ 没有分母就没有占比：不写 `value`（原生不确定态，视觉只剩轨道），
  *   tooltip 只说已用；
- * - 无数据/未测 ⇒ 不渲染（不谎报 0%）。
+ * - 与发送钮的间距 = 父容器 `gap-[6px]` + 本组件 `mr-[18px]` = 24px（父容器不归本组件改）。
  */
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAiStore } from '@/stores/ai'
-import { contextPillText, contextTier, formatPercent, formatTokens, tierClass } from '@/utils/context-usage'
+import { contextTier, formatPercent, formatTokens, tierClass } from '@/utils/context-usage'
 
 const { t, te } = useI18n()
 
 const ai = useAiStore()
-
-/** 有值才露头：`contextPillText` 的"未测 ⇒ 空串"判定沿用（不谎报 0%）。 */
-const visible = computed(() => contextPillText(ai.contextUsage).length > 0)
 
 const tier = computed(() => contextTier(ai.contextUsage?.percent ?? null))
 
@@ -57,11 +58,26 @@ function contextText(key: string, params: Record<string, string>, fallback: stri
   return te(i18nKey) ? t(i18nKey, params) : fallback
 }
 
-/** 唯一的一行：`上下文占用 42%`；估算带「约」，上限未知只说已用。 */
-const tooltip = computed(() => {
+/**
+ * 面板同款 tooltip 配方（逐字对齐 `utils/markdown.ts` 的 `TIP_CLASS` / `TIP_ARROW_CLASS`：
+ * 深底 `#1f2328`、圆角 6、11px、单行 `whitespace-nowrap`、`pointer-events-none`、180ms 渐显 + 小三角）。
+ *
+ * 不直接 import 那两枚常量：`@/utils/markdown` 会把 markdown-it / DOMPurify / highlight.js 整条渲染链
+ * 拽进输入框底栏，而这里只需要两串 class。显隐触发也照面板配方：`hover` + `focus-visible`。
+ * 用 `:focus-visible` 而不是 `:focus-within`：后者把"鼠标点击"聚焦也算进来 ⇒ 点一下圆环气泡就被钉住；
+ * `:focus-visible` 只放行键盘聚焦（Tab），点击即走、hover 移开即收。
+ */
+const TIP_CLASS =
+  'pointer-events-none absolute bottom-[calc(100%+7px)] left-1/2 -translate-x-1/2 z-[6] whitespace-nowrap rounded-[6px] bg-[#1f2328] px-[8px] py-[3px] text-[11px] leading-[1.5] text-white opacity-0 transition-opacity duration-[180ms] motion-reduce:transition-none group-hover/tip:opacity-100 group-focus-visible/tip:opacity-100'
+
+const TIP_ARROW_CLASS =
+  'absolute left-1/2 top-full -ml-[4px] h-[8px] w-[8px] -translate-y-1/2 rotate-45 rounded-[1px] bg-[#1f2328]'
+
+/** 唯一的一行：无记账 ⇒「暂无上下文占用」；上限未知 ⇒ 只说已用；有占比 ⇒ `上下文占用 42%`。 */
+const label = computed(() => {
   const usage = ai.contextUsage
-  if (!usage) {
-    return ''
+  if (!usage || (usage.percent === null && usage.usedTokens === 0)) {
+    return contextText('pillEmpty', {}, '暂无上下文占用')
   }
   if (usage.percent === null) {
     const used = `${usage.est ? '≈' : ''}${formatTokens(usage.usedTokens)}`
@@ -76,18 +92,26 @@ const tooltip = computed(() => {
 </script>
 
 <template>
-  <progress
-    v-if="visible"
-    data-testid="context-pill"
-    class="context-ring flex-none"
-    :class="ringClass"
-    :data-tier="tier"
-    max="100"
-    :value="value ?? undefined"
-    :style="{ '--context-ring-value': value ?? 0 }"
-    :title="tooltip"
-    :aria-label="tooltip"
-  ></progress>
+  <span
+    class="group/tip relative mr-[18px] flex-none"
+    role="group"
+    tabindex="0"
+    :aria-label="label"
+  >
+    <progress
+      data-testid="context-pill"
+      class="context-ring"
+      :class="ringClass"
+      :data-tier="tier"
+      max="100"
+      :value="value ?? undefined"
+      :style="{ '--context-ring-value': value ?? 0 }"
+      :aria-label="label"
+    ></progress>
+    <span data-testid="context-ring-tip" class="tip" :class="TIP_CLASS" aria-hidden="true"
+      >{{ label }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span
+    ></span>
+  </span>
 </template>
 
 <style scoped>

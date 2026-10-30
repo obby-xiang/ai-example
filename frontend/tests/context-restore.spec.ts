@@ -125,14 +125,15 @@ describe('刷新恢复（C-35）', () => {
     expect(pill.element.tagName).toBe('PROGRESS')
     expect(pill.attributes('value')).toBe('65.8')
     expect(pill.text()).toBe('')
-    expect(pill.attributes('title')).toBe('上下文占用 65.8%')
+    expect(pill.attributes('aria-label')).toBe('上下文占用 65.8%')
+    expect(wrapper.find('[data-testid="context-ring-tip"]').text()).toBe('上下文占用 65.8%')
     // 端点确实被拉过（重建的唯一来源）
     expect(api.getContext).toHaveBeenCalled()
 
     wrapper.unmount()
   })
 
-  it('端点报"从未记账"（source=none）⇒ 不渲染药丸（不说谎成 0%）', async () => {
+  it('端点报"从未记账"（source=none）⇒ 中性轨道 + 一行「暂无上下文占用」（不谎报 0%）', async () => {
     api.getContext.mockResolvedValue({
       ...measuredSnapshot(0, 128000),
       percent: null,
@@ -141,15 +142,22 @@ describe('刷新恢复（C-35）', () => {
     })
     const wrapper = await mountPanel()
 
-    expect(wrapper.find('[data-testid="context-pill"]').exists()).toBe(false)
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    expect(pill.exists()).toBe(true)
+    expect(pill.attributes('data-tier')).toBe('none')
+    expect(pill.element.hasAttribute('value')).toBe(false)
+    expect(pill.attributes('aria-label')).toBe('暂无上下文占用')
     wrapper.unmount()
   })
 
-  it('端点 503 ⇒ 保持无药丸且不影响历史渲染', async () => {
+  it('端点 503 ⇒ 圆环仍在（中性轨道，不藏）且不影响历史渲染', async () => {
     api.getContext.mockRejectedValue(new Error('503'))
     const wrapper = await mountPanel()
 
-    expect(wrapper.find('[data-testid="context-pill"]').exists()).toBe(false)
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    expect(pill.exists()).toBe(true)
+    expect(pill.attributes('data-tier')).toBe('none')
+    expect(pill.attributes('aria-label')).toBe('暂无上下文占用')
     expect(wrapper.find('[data-testid="composer-input"]').exists()).toBe(true)
     wrapper.unmount()
   })

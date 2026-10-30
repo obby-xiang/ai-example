@@ -356,6 +356,7 @@
     "context": {
       "pillAria": "Context usage {percent}%",
       "pillUsageEst": "Context usage ~{percent}%",
+      "pillEmpty": "No context usage yet",
       "pillAriaNoPercent": "Context usage {text}",
       "used": "Context used {used} tokens",
       "usedLimit": "Context used {used} / {limit} tokens ({percent}% of limit)",

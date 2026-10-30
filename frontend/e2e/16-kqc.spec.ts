@@ -29,7 +29,7 @@ import {
   kbStatus,
   maxStubIndex,
   newSessionId,
-  parsePillTitle,
+  parseRingTip,
   readDocBody,
   readDocTail,
   redisExec,
@@ -610,10 +610,13 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     await waitRoundSettled(page)
 
     const pill = page.locator('[data-testid="context-pill"]')
+    const tip = page.locator('[data-testid="context-ring-tip"]')
     await expect(pill).toBeVisible()
     // 默认态零可见文字：已用 / 上限 / 占比 三件都不上屏
     await expect(pill).toHaveText('')
-    const view = parsePillTitle(await pill.getAttribute('title'))
+    // 原生 title 退场：读数只来自自定义气泡 / aria-label 的那一行
+    await expect(pill).not.toHaveAttribute('title')
+    const view = parseRingTip(await pill.getAttribute('aria-label'))
     const sid = await sessionId(page)
     const snapshot = await contextSnapshot(sid)
     const shownPercent = Number((snapshot.percent as number).toFixed(1))
@@ -622,9 +625,11 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     expect(snapshot.usedTokens).toBe(shapes.last.promptTokens)
     expect(view.percent).toBe(shownPercent)
     expect(view.used).toBeNull()
-    // 唯一一行 tooltip：只有占比（title 与 aria-label 同源，无已用/上限）
-    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
+    // 唯一一行 tooltip：只有占比（气泡与 aria-label 同文案，无已用/上限）
     await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    await expect(tip).toHaveText(`上下文占用 ${shownPercent}%`)
+    await pill.hover()
+    await expect(tip).toHaveCSS('opacity', '1')
     // 圆环读的就是占比本体
     await expect(pill).toHaveAttribute('value', String(snapshot.percent))
     await expect(pill).toHaveAttribute('max', '100')
@@ -689,9 +694,10 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     await waitRoundSettled(page)
 
     const pill = page.locator('[data-testid="context-pill"]')
+    const tip = page.locator('[data-testid="context-ring-tip"]')
     await expect(pill).toBeVisible()
     await expect(pill).toHaveText('')
-    const view = parsePillTitle(await pill.getAttribute('title'))
+    const view = parseRingTip(await pill.getAttribute('aria-label'))
     expect(view.estimate).toBe(true)
     expect(view.raw.startsWith('上下文占用 约')).toBe(true)
 
@@ -702,7 +708,10 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     expect(snapshot.usedTokens).toBeGreaterThan(0)
     // 估算不改口径：圆环仍读占比，只是 tooltip 的百分比前面多了「约」
     const shownPercent = Number((snapshot.percent as number).toFixed(1))
-    await expect(pill).toHaveAttribute('title', `上下文占用 约${shownPercent}%`)
+    await expect(pill).toHaveAttribute('aria-label', `上下文占用 约${shownPercent}%`)
+    await expect(tip).toHaveText(`上下文占用 约${shownPercent}%`)
+    await pill.hover()
+    await expect(tip).toHaveCSS('opacity', '1')
     await expect(pill).toHaveAttribute('value', String(snapshot.percent))
 
     // 第二轮：估算基线参与下一轮（分母仍来自同一单点，不因估算丢失）
@@ -720,12 +729,16 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     await waitRoundSettled(page)
 
     const pill = page.locator('[data-testid="context-pill"]')
+    const tip = page.locator('[data-testid="context-ring-tip"]')
     await expect(pill).toHaveText('')
     await pill.click()
-    // 点击不再是入口：不弹 popover、不吐分项行、可见文字仍为空
+    // 点击不再是入口：不弹 popover、不吐分项行、可见文字仍为空、气泡不会因点击常驻
     await expect(page.locator('[data-testid="context-popover"]')).toHaveCount(0)
     await expect(page.locator('[data-testid^="context-row-"]')).toHaveCount(0)
     await expect(pill).toHaveText('')
+    // 点击后把指针移开：气泡随即收回（点击不是"钉住"入口）
+    await page.mouse.move(0, 0)
+    await expect(tip).toHaveCSS('opacity', '0')
 
     // 分项在界面上已无载体 ⇒ 守恒在端点侧断言（数据真值，不再是 UI 断言）
     const sid = await sessionId(page)
@@ -1032,10 +1045,16 @@ test.describe('@stub 16 K/Q/C 桥接面', () => {
     expect(names).toContain('kb_lookup_term')
   })
 
-  test('E2E-C01b pill 未测前不渲染（新会话无记账 ⇒ 不出现 0%）', async ({ page }) => {
+  test('E2E-C01b 未测前也显示中性轨道（不藏、不谎报 0%）：一行「暂无上下文占用」', async ({ page }) => {
     await openApp(page)
     await expect(page.locator('[data-testid="empty-state"]')).toBeVisible()
-    await expect(page.locator('[data-testid="context-pill"]')).toHaveCount(0)
+    const pill = page.locator('[data-testid="context-pill"]')
+    await expect(pill).toHaveCount(1)
+    await expect(pill).toHaveAttribute('data-tier', 'none')
+    // 没有记账 = 不确定态：不写 value（绝不拿 0 冒充）
+    await expect(pill).not.toHaveAttribute('value')
+    await expect(pill).toHaveAttribute('aria-label', '暂无上下文占用')
+    await expect(page.locator('[data-testid="context-ring-tip"]')).toHaveText('暂无上下文占用')
   })
 
   test('E2E-Q01b 空态 chips 文案来自 ai.suggestions.*（与每轮建议同一词表）', async ({ page }) => {
