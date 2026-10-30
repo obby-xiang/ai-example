@@ -5,7 +5,7 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import io.micrometer.observation.ObservationRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiChatProperties;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -41,7 +41,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>复用的两件包装</h2>
  * {@link SpToolCallingManager}（bean 单例、无状态：确认门/前端挂起/可见性钩子都在那里，换 provider
- * 绝不能丢）与记忆 advisor（与今天同一个 bean，记忆仍按 {@code CONVERSATION_ID} 隔离）。
+ * 绝不能丢）与记忆 advisor（与今天同一个 bean，记忆仍按 {@code CONVERSATION_ID} 隔离；
+ * 实际 bean 是身份绑定装饰器，接口按官方 {@link BaseChatMemoryAdvisor} 依赖）。
  *
  * <h2>streamUsage 不许丢</h2>
  * {@code done} 终帧的 usage 来源就是请求里的 {@code stream_options.include_usage}（由
@@ -70,7 +71,7 @@ public class AiProviderRegistry {
 
     private final SpToolCallingManager toolCallingManager;
 
-    private final MessageChatMemoryAdvisor memoryAdvisor;
+    private final BaseChatMemoryAdvisor memoryAdvisor;
 
     private final ObjectProvider<RetryTemplate> retryTemplate;
 
@@ -124,7 +125,7 @@ public class AiProviderRegistry {
     static final Duration UPSTREAM_SOCKET_IDLE_TIMEOUT = Duration.ofSeconds(300);
 
     public AiProviderRegistry(AiConfigService configService, SpToolCallingManager toolCallingManager,
-            MessageChatMemoryAdvisor memoryAdvisor, ObjectProvider<RetryTemplate> retryTemplate,
+            BaseChatMemoryAdvisor memoryAdvisor, ObjectProvider<RetryTemplate> retryTemplate,
             ObjectProvider<ObservationRegistry> observationRegistry, OpenAiChatProperties chatProperties) {
         this.configService = configService;
         this.toolCallingManager = toolCallingManager;
