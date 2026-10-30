@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.slot.TaskIntent;
@@ -63,6 +64,12 @@ public class TaskTypeForm extends HostForm {
 
 	/** 字段标签。 */
 	public static final String FIELD_LABEL = "任务类型";
+
+	/** 英文标题（由 {@link ReplyLanguage} 选择，不新增翻译体系）。 */
+	public static final String TITLE_EN = "Select task type";
+
+	/** 英文字段标签。 */
+	public static final String FIELD_LABEL_EN = "Task type";
 
 	/** 宿主类型表单的 {@code toolCallId} 前缀（后接 runId：同一轮只会问一次）。 */
 	public static final String TOOL_CALL_ID_PREFIX = "host-type-form-";
@@ -133,22 +140,25 @@ public class TaskTypeForm extends HostForm {
 		if (alreadyIssued(runId, toolCallId(runId))) {
 			return Optional.empty();
 		}
-		return formArguments(buildForm());
+		return formArguments(buildForm(ReplyLanguage.current()));
 	}
 
 	/** 单个 enum 单选 {@code EXPORT/IMPORT}（形状与 {@link GenerativeFormRules#PURPOSE_TASK_TYPE} 一致）。 */
-	private static Map<String, Object> buildForm() {
+	private static Map<String, Object> buildForm(ReplyLanguage language) {
+		boolean english = language != null && language.english();
 		Map<String, Object> field = new LinkedHashMap<>();
 		field.put("key", FIELD_KEY);
-		field.put("label", FIELD_LABEL);
+		field.put("label", english ? FIELD_LABEL_EN : FIELD_LABEL);
 		field.put("type", "enum");
 		field.put("required", true);
-		field.put("options", List.of(option("EXPORT", "导出"), option("IMPORT", "导入")));
+		field.put("options", english
+				? List.of(option("EXPORT", "Export"), option("IMPORT", "Import"))
+				: List.of(option("EXPORT", "导出"), option("IMPORT", "导入")));
 
 		Map<String, Object> form = new LinkedHashMap<>();
 		form.put("scenario", "CLARIFY");
 		form.put("purpose", GenerativeFormRules.PURPOSE_TASK_TYPE);
-		form.put("title", TITLE);
+		form.put("title", english ? TITLE_EN : TITLE);
 		form.put("fields", List.of(field));
 		return form;
 	}

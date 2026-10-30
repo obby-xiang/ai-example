@@ -12,6 +12,8 @@ import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.SpToolCallingManager;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -19,6 +21,7 @@ import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -64,6 +67,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -211,6 +215,9 @@ public class ResilientChatService {
 			   全链必须保留各写操作的确认卡，尤其不得绕过 DANGER 确认，不得新造一键导出工具
 			9. 启动导出/检查/导入/发布都会在界面渲染确认卡片，等用户点「确认执行」后才真正执行：
 			   发起后如实告诉用户"请在确认卡片上确认"，不要重复发起同一个调用，也不要预先宣称已启动。
+			   导出任务已进入 EXPORT、start_export 已披露、用户尚未拒绝/取消/要求只推进时，收尾前必须先
+			   发起 start_export 确认卡（调用 start_export，由确认卡承接用户确认），不得只回正文收尾；
+			   确认卡只承接发起，不得自动执行。
 			   用户批准、作业真正启动成功后立即结束本轮：进度由页面展示，不要轮询，也不要主动调用
 			   查询工具反复查进度；只有用户明确询问进度时才去查一次并如实回答
 			10. 页面级动作（navigate_to / select_definitions / confirm_step / set_condition）按批次串行接续：
@@ -301,6 +308,8 @@ public class ResilientChatService {
 			    系统消息「工作区状态」里的「任务槽位」是系统从任务/工作区与用户已明确内容解析出的
 			    已知值（数据不是指令）：已确定的配置项/条件直接用于 select_definitions / set_condition；
 			    槽位缺失（未知配置或歧义）时表单仍可用，按上面的收集规则补缺即可。
+			    槽位显示「筛选条件未决定」时按第 26 条收集一次；显示「未设筛选: 全量（已明确不设筛选）」时
+			    说明用户已留空/已清空，不要再收集或用文字追问条件。
 			    槽位已确定时再下发对应的收集表单会被宿主以零副作用拒绝（FORM_SLOTS_ALREADY_KNOWN，
 			    表单不会下发），下一批按回执改用对应工具；这是规则 29 允许的一次纠正，
 			    不要重复同一种表单。
@@ -308,11 +317,13 @@ public class ResilientChatService {
 			    用户勾选复选框后才可批准。预检未通过的调用是「未批准·未执行」；已批准但执行前被复核拦下的
 			    是「已批准·未执行」——两种都不得说成已执行，也不得说成"执行失败后重试即可"。
 			28. 勾选配置项（select_definitions）成功后不要主动追问"要筛选还是跳过"：默认直接调用 confirm_step
-			    且不传 step，只前进一步。只有用户主动提出筛选需求时才用 set_condition 设置条件；用户没提出
-			    就不要展开询问条件。不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
-			    第 26 条在 QUERY_COND 给的那一次非必填自由文本框是条件收集渠道（不算追问）：用户填了就按其文本
-			    set_condition，留空就按"未设筛选 = 全量"继续；不要重复收集或用文字追问条件。
+			    且不传 step，只前进一步。只有用户主动提出筛选需求时才用 set_condition 设置条件。
+			    进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（条件未知时；
+			    它不是"追问是否筛选"，而是条件收集渠道）：用户填了就按其文本 set_condition，留空就按
+			    "未设筛选 = 全量"继续；不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
 			    step 仅在用户点名目标步骤或明确要求跳过筛选时传；查询条件始终可选，不强制要求填写。
+			    禁止从 SELECT_DEFS 直接跳到 EXPORT（那样会跳过 QUERY_COND 与条件收集）；即使传 step，
+			    也必须先完成 QUERY_COND 才能推进到 EXPORT。查询条件始终可选，不强制要求填写。
 			    步骤顺序不可跳过：即使已经提出筛选条件，只要当前还在 SELECT_DEFS，select_definitions
 			    之后也必须先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用 set_condition；
 			    不要在 SELECT_DEFS 这一批里直接调 set_condition（前端只允许在 QUERY_COND 调，会以步骤不符拒绝）。
@@ -345,6 +356,7 @@ public class ResilientChatService {
 			    generative_form(purpose=SELECT_DEFINITIONS)，选项平铺多选配置项；
 			    禁止"请告诉我导出哪个/要导出哪些配置"这类开放式文字反问，也禁止只把定义列表列在正文里让用户自己挑。
 			    筛选条件可选：进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（purpose=SET_CONDITIONS），
+			    但条件已知（用户已给/槽位已确定）时直接 set_condition、不再弹表；
 			    这是条件收集的唯一渠道；用户已给条件就直接 set_condition、不弹表单（含小写、别名等
 			    非规范写法：按配置定义字段的可选值理解后传结构化参数）；框内留空就直接 confirm_step
 			    推进（不设条件即全量）。条件只收集这一次，不得重复下发条件表单，也不得改用文字追问。
@@ -784,7 +796,9 @@ public class ResilientChatService {
 				log.info("首轮改为等人填任务类型（本拍不驱动模型）runId={}", runId);
 				return;
 			}
-			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
+			AiContext correctionContext = context;
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, correctionContext, request.message(),
+					"", attempt -> {
 				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
 				return Flux.defer(() -> {
 					var spec = runtime.chatClient().prompt()
@@ -798,7 +812,8 @@ public class ResilientChatService {
 					var withTools = tools.isEmpty() ? spec : spec.toolCallbacks(tools);
 					return withTools.stream().chatResponse();
 				});
-			});
+			}, (prefix, reasoning) -> correctionStream(runtime, runId, sessionId, correctionContext, List.of(), out,
+					prefix, reasoning));
 		}
 		finally {
 			// 终态/异常/取消/park 四条出口统一在这里兜底停表（runAttempts 在发终帧之前已先停一次，
@@ -891,13 +906,16 @@ public class ResilientChatService {
 		// 调用方 ResumeService 在同一个保活句柄上切相位完成。
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 		try {
-			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {
-				log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId, sessionId,
-						history.size());
-				Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
-						out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
-				return runtime.chatModel().stream(prompt);
-			});
+			String lastUserText = TaskIntent.lastRealUserText(history);
+			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
+					exportCorrectionPrefix(runId), attempt -> {
+						log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId,
+								sessionId, history.size());
+						Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
+								out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
+						return runtime.chatModel().stream(prompt);
+					}, (prefix, reasoning) -> correctionStream(runtime, runId, sessionId, context, history, out,
+							prefix, reasoning));
 		}
 		finally {
 			closeKeepalive(keepalive);
@@ -1245,6 +1263,8 @@ public class ResilientChatService {
 		Map<String, Object> context = new LinkedHashMap<>();
 		context.put("runId", runId);
 		context.put("sessionId", sessionId);
+		// 回答语言显式传播到工具线程（工具线程不继承请求上下文；与 ConfirmGate#dispatchResume 同口径）
+		context.put(SpToolCallingManager.TOOL_CONTEXT_REPLY_LOCALE, ReplyLanguage.current().tag());
 		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromSnapshot(snapshot, seqFloor);
 		if (envelope != null) {
 			context.put(ToolExecutionEnvelope.TOOL_CONTEXT_KEY, envelope);
@@ -1255,7 +1275,9 @@ public class ResilientChatService {
 	// ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
 	private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
-			TurnContext turn, TurnKeepalive keepalive, IntFunction<Flux<ChatResponse>> attemptStream) {
+			TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText,
+			String resumePrefix, IntFunction<Flux<ChatResponse>> attemptStream,
+			java.util.function.BiFunction<String, String, Flux<ChatResponse>> correctionStream) {
 		AiProperties.Resilience config = this.properties.getResilience();
 		// Reactor 事件回调跑在上游线程（Netty event loop）上，那里没有请求身份 ——
 		// 在驱动线程抓一次本轮身份，每个上游事件回放一次（消费帧/写归档的路径因此不丢身份）。
@@ -1266,17 +1288,35 @@ public class ResilientChatService {
 		// 空回复重试只给一次（AR-05）：本条记录"本轮已经因 EMPTY_REPLY 再试过一次"，
 		// 第二次仍空 ⇒ 直接落 FAILED（不无限重试、不在有产出的情况下重试）。
 		boolean emptyReplyRetried = false;
-		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+		// 导出收尾的一轮内部纠正（Task 1 第 5 项）：<b>run 级</b>最多一次（标记随快照持久化，含续跑），
+		// 且不占失败重试次数。前缀正文属于本轮已上屏内容，成功收尾时必须与纠正后的正文一起落库。
+		boolean exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
+		String prefixText = resumePrefix == null ? "" : resumePrefix;
+		String prefixReasoning = "";
+		boolean correcting = false;
+		int attempt = 0;
+		int budgetedAttempts = 0;
+		while (true) {
+			if (!correcting && budgetedAttempts >= maxAttempts) {
+				// 兜底：每次预算内尝试都应经 finish 收口；走到这里说明收口被绕过，不得静默退出无终帧
+				stopKeepalive(keepalive);
+				emptyReply(runId, sessionId, new Accumulator(runId), Math.max(1, budgetedAttempts), out, turn);
+				return;
+			}
+			attempt++;
+			if (!correcting) {
+				budgetedAttempts++;
+			}
 			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"本段剩余预算"里出。
 			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗本段预算。
-			if (attempt > 1) {
-				if (awaitRetryBackoff(runId, attempt - 1, turnStartedAtMs, config, retryAfterMs)) {
+			if (!correcting && budgetedAttempts > 1) {
+				if (awaitRetryBackoff(runId, budgetedAttempts - 1, turnStartedAtMs, config, retryAfterMs)) {
 					// 退避期已收到取消 ⇒ 不得再发一次尝试。W-30（run 40232440965 · runId 816aa484…）：
 					// 第 2 次尝试的请求没有工具结果，桩按"每路由一次"回纯文本，3ms 就正常收尾 ——
 					// 新看门狗一拍都没打（1s 节拍），工具事件边界也不存在，于是取消被吞、finish 写了 DONE。
 					// 这里直接进取消收尾，不赌"下一次尝试会被看门狗收口"。
 					stopKeepalive(keepalive);
-					cancelTerminal(runId, sessionId, null, attempt - 1, null, out, turn);
+					cancelTerminal(runId, sessionId, null, budgetedAttempts - 1, null, out, turn);
 					return;
 				}
 				retryAfterMs = null;
@@ -1288,12 +1328,19 @@ public class ResilientChatService {
 			long attemptStartedAtMs = System.currentTimeMillis();
 			long beaconBefore = this.beacon.startedCount(runId);
 			Accumulator accumulator = new Accumulator(runId);
+			if (StringUtils.hasText(prefixText)) {
+				// 纠正轮 / 纠正挂起后的续跑：正文/思考以已保存前缀起算，只用于计数、最终记忆与
+				// textEnd/chars，不重新 emit 前缀（deltas 仍只有本段）。
+				accumulator.seedPrefix(prefixText, prefixReasoning);
+			}
 			CompletableFuture<Void> settled = new CompletableFuture<>();
 			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, config, this.beacon,
 					this.cancellations, turnStartedAtMs, settled::completeExceptionally);
 			Disposable subscription = null;
 			try {
-				subscription = attemptStream.apply(attempt)
+				Flux<ChatResponse> stream = correcting
+						? correctionStream.apply(prefixText, prefixReasoning) : attemptStream.apply(attempt);
+				subscription = stream
 					.subscribe(response -> {
 						try (RunIdentityScope.Scope ignored = RunIdentityScope.open(upstreamIdentity)) {
 							watchdog.onUpstreamEvent();
@@ -1316,21 +1363,47 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
+				// 导出收尾前的一轮内部纠正：模型把 EXPORT 步的活干完却只回正文时，再问它一次，
+				// 要求发起 start_export 确认卡（不自动执行、不绕过确认）。run 级最多一次、不占失败重试次数；
+				// content_filter / length 优先（明确失败/截断不得被纠正掩盖）。
+				UpstreamErrorClassifier.Finish firstFinish = accumulator.finish();
+				boolean correctable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
+						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
+						&& firstFinish != UpstreamErrorClassifier.Finish.TOOL_CALLS
+						&& StringUtils.hasText(accumulator.text());
+				if (!exportCorrectionUsed && !correcting && correctable
+						&& exportWrapUpCorrectionDue(runId, context, lastUserText)
+						&& markExportCorrectionUsed(runId, accumulator.text())) {
+					exportCorrectionUsed = true;
+					correcting = true;
+					prefixText = accumulator.text();
+					prefixReasoning = accumulator.reasoningText();
+					log.info("导出收尾前补一次内部纠正：要求发起 start_export 确认卡（不自动执行）runId={} chars={}",
+							runId, prefixText.length());
+					if (keepalive != null) {
+						keepalive.rearm();
+					}
+					continue;
+				}
 				// 终态/非终态的分叉在 finish 内部：可再试一次（空回复）时它会发 retry 帧并返回 false。
 				// 先停表再进 finish：finish 若收终帧，终帧之后不得再有心跳（"终帧是本轮最后一帧"）；
 				// 若返回 false（同一轮继续），紧接着重新武装，退避与下一次尝试照样有保活。
 				stopKeepalive(keepalive);
-				boolean handled = finish(runId, sessionId, accumulator, attempt, watchdog, out, turn,
-						attemptStartedAtMs, beaconBefore, emptyReplyRetried);
+				boolean handled = finish(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
+						attemptStartedAtMs, beaconBefore, emptyReplyRetried, prefixText);
 				if (handled) {
 					return;
 				}
 				// 空回复的<b>仅模型步</b>再试一次（AR-05）：不追加用户消息、不改历史切片、
 				// 不重跑任何工具（本轮零副作用已由 emptyReplyRetryable 证明），只是再问模型一次。
+				// 纠正轮为空时已在 finish 里用前缀正文成功收尾，不会走到这里把已成功轮写 FAILED。
 				if (keepalive != null) {
 					keepalive.rearm();
 				}
 				emptyReplyRetried = true;
+				correcting = false;
+				prefixText = "";
+				prefixReasoning = "";
 				continue;
 			}
 			catch (Throwable error) {
@@ -1349,7 +1422,21 @@ public class ResilientChatService {
 				StreamViolationException violation = asViolation(error, outcome);
 				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
 					stopKeepalive(keepalive);
-					cancelTerminal(runId, sessionId, accumulator, attempt, watchdog, out, turn);
+					// 取消收尾沿用累计正文（纠正轮已含前缀）
+					cancelTerminal(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn);
+					return;
+				}
+				boolean parkedToolRound = isPersistedParkedToolRound(runId) || suspendedStatus(runId);
+				if (correcting && !parkedToolRound) {
+					// 纠正失败不重发同一请求、也不写成 FAILED：清掉纠正态，用"前缀 + 当前段"正常收尾。
+					// run 级"只纠正一次"由持久化标记保证，这里不会回到纠正分支。
+					// 若已 saveSuspended/SUSPENDED/in-flight（parkedToolRound），不得在这里 DONE —— 交给
+					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。
+					log.warn("收尾纠正失败，改按已上屏正文正常收尾 runId={} code={}：{}", runId,
+							violation.getCode(), violation.getMessage());
+					stopKeepalive(keepalive);
+					finishSuccessGuarded(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
+							prefixText, false);
 					return;
 				}
 				// 用户可见产出（正文或已上屏的思考）：隐藏思考不算，重试不会造成重复内容
@@ -1359,7 +1446,7 @@ public class ResilientChatService {
 						|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0;
 				boolean overBudget = segmentElapsedMs(runId, turnStartedAtMs)
 						>= config.getTotalBudget().toMillis();
-				boolean hasNext = attempt < maxAttempts;
+				boolean hasNext = budgetedAttempts < maxAttempts;
 				boolean retryable = outcome.retryable() && !emitted && !sideEffect && hasNext && !overBudget;
 				// ===== W-21 Fix A：挂起工具轮不得被当作"可重试的空轮" =====
 				// saveSuspended 在等待<b>之前</b>就写好 SUSPENDED + inFlightToolCalls，请求帧也已公布。
@@ -1370,7 +1457,6 @@ public class ResilientChatService {
 				// 只把线程交还，由 resume 物化这一轮。判据只看<b>权威快照</b>（不看 pending 的结算时机），
 				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedVisible=true）或最后一次尝试
 				// （hasNext=false）同样不能被 fail() 写成 FAILED —— 挂起轮一旦落库就只归 resume 收口。
-				boolean parkedToolRound = isPersistedParkedToolRound(runId);
 				if (parkedToolRound) {
 					retryable = false;
 				}
@@ -1380,7 +1466,7 @@ public class ResilientChatService {
 					long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 					if (outcome.retryAfterMillis() + RetryBackoff.BUDGET_MARGIN_MS > remaining) {
 						log.warn("略过重试 runId={} attempt={}/{} code={} Retry-After={}ms 超出剩余预算 {}ms",
-								runId, attempt, maxAttempts, violation.getCode(), outcome.retryAfterMillis(),
+								runId, budgetedAttempts, maxAttempts, violation.getCode(), outcome.retryAfterMillis(),
 								Math.max(0L, remaining));
 						retryable = false;
 					}
@@ -1390,22 +1476,22 @@ public class ResilientChatService {
 				long silenceMs = Math.max(0L, failedAtMs - watchdog.lastUpstreamAtMs());
 				long toolIdleMs = toolActivityIdleMs(runId, failedAtMs);
 				log.warn("本轮尝试失败 runId={} attempt={}/{} code={} 已产出={} 副作用={} 超预算={} 可重试={} 上游事件={} 静默={}ms 工具空闲={} 原因={} 末帧序列=[{}]",
-						runId, attempt, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
+						runId, budgetedAttempts, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), silenceMs, toolIdleMs, violation.getMessage(),
 						accumulator.tailSummary());
 				if (!retryable) {
 					stopKeepalive(keepalive);
 					if (parkedToolRound) {
-						handBackParkedToolRound(runId, sessionId, attempt, violation);
+						handBackParkedToolRound(runId, sessionId, budgetedAttempts, violation);
 						return;
 					}
-					fail(runId, sessionId, violation, attempt, emitted, sideEffect, accumulator, out, turn);
+					fail(runId, sessionId, violation, budgetedAttempts, emitted, sideEffect, accumulator, out, turn);
 					return;
 				}
 				// 只对紧接着的这次重试生效；下一轮尝试开始后不再沿用
 				retryAfterMs = outcome.retryAfterMillis();
 				Map<String, Object> retryFrame = new LinkedHashMap<>();
-				retryFrame.put("nextAttempt", attempt + 1);
+				retryFrame.put("nextAttempt", budgetedAttempts + 1);
 				retryFrame.put("code", violation.getCode());
 				retryFrame.put("reason", describe(violation));
 				retryFrame.put("upstreamEvents", watchdog.upstreamEvents());
@@ -1417,7 +1503,7 @@ public class ResilientChatService {
 				// 日志链路批：重试是"这一轮为什么慢/为什么贵"的第一解释项，必须有结构化行
 				// AI 日志最小补齐批：补上"这次尝试本身"的三个数（耗时 / 首包 / token），否则重试只能看整轮汇总
 				Map<String, Object> attemptUsage = accumulator.usage(turn.promptEstimate());
-				AiTrace.event("turn_retry", "attempt", attempt, "nextAttempt", attempt + 1, "code", violation.getCode(),
+				AiTrace.event("turn_retry", "attempt", budgetedAttempts, "nextAttempt", budgetedAttempts + 1, "code", violation.getCode(),
 						"reason", violation.getMessage(), "emitted", emitted, "sideEffect", sideEffect,
 						"upstreamEvents", watchdog.upstreamEvents(),
 						"attemptMs", System.currentTimeMillis() - attemptStartedAtMs,
@@ -1450,6 +1536,260 @@ public class ResilientChatService {
 	 *
 	 * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
 	 */
+	/**
+	 * 导出收尾的一轮内部纠正判据（Task 1 第 5 项）。
+	 *
+	 * <p>只在以下条件<b>全部</b>成立时为真：原导出意图已进入 {@code EXPORT}、{@code start_export}
+	 * 已在本次披露面里、本轮还没有任何 {@code start_export} 记录（未发起/未拒绝/未取消/未失败）、
+	 * 用户没有要求"只推进/先别启动"，且本轮尚未纠正过。为真时调用方只<b>再问模型一次</b>，
+	 * 要求它发起确认卡；<b>绝不自动执行</b>任何作业。
+	 */
+	static boolean needsExportWrapUpCorrection(AiContext context, boolean startExportDisclosed,
+			List<PendingToolCall> pendings, String lastUserText, boolean alreadyCorrected) {
+		if (alreadyCorrected || context == null || !startExportDisclosed) {
+			return false;
+		}
+		if (context.getTaskId() == null || !"EXPORT".equalsIgnoreCase(context.getTaskType())
+				|| !"EXPORT".equalsIgnoreCase(context.getStep())) {
+			return false;
+		}
+		if (pendings != null) {
+			for (PendingToolCall pending : pendings) {
+				if (pending != null && START_EXPORT.equals(pending.getName())) {
+					// 已发起/待确认/已拒绝/已取消/已失败：都不纠正（拒绝与取消是用户的明确决定）
+					return false;
+				}
+			}
+		}
+		return lastUserText == null || !ADVANCE_ONLY.matcher(lastUserText).find();
+	}
+
+	/** 用户明确"只推进/先别启动"（收尾纠正不得越过这句话）。 */
+	private static final Pattern ADVANCE_ONLY = Pattern.compile(
+			"(只推进|先推进|只到这一步|只做前面|不要启动|先不启动|先别启动|不要导出|先别导出|先不导出|不用导出)");
+
+	/** 内部纠正的指令文本（只在本次模型请求的系统段/续跑历史里出现，不写回快照）。 */
+	static String exportWrapUpCorrection(Long taskId) {
+		return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+				+ "原导出意图已进入 EXPORT、start_export 已披露，但尚未发起。"
+				+ "请在本次回复中调用一次 start_export" + (taskId == null ? "" : "(taskId=" + taskId + ")")
+				+ " 发起 start_export 确认卡，由既有确认卡承接用户确认；不得自动执行作业，"
+				+ "也不得用正文说明代替确认卡。";
+	}
+
+	/** 本轮披露面里是否有 {@code start_export}（按冻结上下文取，与请求侧同源）。 */
+	boolean disclosedStartExport(AiContext context) {
+		if (this.toolRegistry == null || context == null) {
+			return false;
+		}
+		try {
+			List<ToolCallback> tools = this.toolRegistry.forContext(context);
+			for (ToolCallback callback : tools == null ? List.<ToolCallback>of() : tools) {
+				if (callback != null && callback.getToolDefinition() != null
+						&& START_EXPORT.equals(callback.getToolDefinition().name())) {
+					return true;
+				}
+			}
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取披露面失败，收尾纠正按不触发处理：{}", ex.getMessage());
+		}
+		return false;
+	}
+
+	/** 导出启动工具名（与 {@code AiTools#startExport} 同一拼写）。 */
+	static final String START_EXPORT = "start_export";
+
+	/** 读本轮待决条目并判定收尾纠正（读失败 = 不纠正：宁可少问一次，也不在不确定状态多驱动一拍）。 */
+	/** run 级"已纠正"标记（随快照 context 持久化：跨实例/跨续跑都只纠正一次）。 */
+	static final String EXPORT_CORRECTION_MARKER = "exportCorrectionUsed";
+
+	/** 纠正轮已上屏前缀（随快照持久化：挂起后续跑用它 seed，最终成功/取消时去重）。 */
+	static final String EXPORT_CORRECTION_PREFIX_KEY = "exportCorrectionPrefix";
+
+	/** 终态后清掉"待合并前缀"：run 级"已纠正"标记保留（含续跑只纠正一次），前缀不再 seed。 */
+	private static void clearExportCorrectionPrefix(RunSnapshot snapshot) {
+		if (snapshot == null || snapshot.getContext() == null) {
+			return;
+		}
+		AiContext current = AiContext.fromMap(snapshot.getContext());
+		if (current.getExtra() == null || !current.getExtra().containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
+			return;
+		}
+		Map<String, Object> extra = new LinkedHashMap<>(current.getExtra());
+		extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+		snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
+				current.getTaskId(), current.getTaskStatus(), extra).toMap());
+	}
+
+	/**
+	 * 移除<b>本轮</b>正文恰好等于 prefix 的那一条 assistant（成功/取消/挂起共用的前缀去重）。
+	 *
+	 * <p>边界是"最后一条真实用户消息之后"：往轮出现过同文的 assistant 必须保留；只删本轮前缀，
+	 * 删到第一条匹配即停止（不横扫整段历史）。
+	 */
+	static int removeAssistantWithText(List<Message> history, String prefix) {
+		if (prefix == null || prefix.isEmpty() || history == null) {
+			return 0;
+		}
+		int lastRealUser = -1;
+		for (int i = history.size() - 1; i >= 0; i--) {
+			Message message = history.get(i);
+			if (message instanceof UserMessage && !SyntheticMessages.isSynthetic(message)) {
+				lastRealUser = i;
+				break;
+			}
+		}
+		for (int i = history.size() - 1; i > lastRealUser; i--) {
+			Message message = history.get(i);
+			if (message instanceof AssistantMessage assistant && prefix.equals(assistant.getText())) {
+				history.remove(i);
+				return 1;
+			}
+		}
+		return 0;
+	}
+
+	/** 本轮/本 run 是否已经补过收尾纠正（快照标记）。 */
+	boolean exportCorrectionAlreadyUsed(String runId) {
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null) {
+			return false;
+		}
+		try {
+			Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
+			return extra != null && Boolean.TRUE.equals(extra.get(EXPORT_CORRECTION_MARKER));
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取收尾纠正标记失败 runId={}（按未纠正处理）：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 纠正轮已保存的前缀（挂起后续跑 seed / 成功与取消去重）；没有则空串。 */
+	String exportCorrectionPrefix(String runId) {
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null) {
+			return "";
+		}
+		try {
+			Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
+			Object value = extra == null ? null : extra.get(EXPORT_CORRECTION_PREFIX_KEY);
+			return value == null ? "" : String.valueOf(value);
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取纠正前缀失败 runId={}（按无前缀处理）：{}", runId, ex.getMessage());
+			return "";
+		}
+	}
+
+	/** 写 run 级"已纠正"标记；写不进去 = 不纠正（宁可少问一次，也不在多实例/续跑里重复纠正）。 */
+	private boolean markExportCorrectionUsed(String runId, String prefixText) {
+		try {
+			if (!persistAllowed(runId, "收尾纠正标记")) {
+				return false;
+			}
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				return false;
+			}
+			AiContext current = AiContext.fromMap(snapshot.getContext());
+			Map<String, Object> extra = current.getExtra() == null ? new LinkedHashMap<>()
+					: new LinkedHashMap<>(current.getExtra());
+			if (Boolean.TRUE.equals(extra.get(EXPORT_CORRECTION_MARKER))) {
+				return true;
+			}
+			extra.put(EXPORT_CORRECTION_MARKER, Boolean.TRUE);
+			if (StringUtils.hasText(prefixText)) {
+				extra.put(EXPORT_CORRECTION_PREFIX_KEY, prefixText);
+			}
+			snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
+					current.getTaskId(), current.getTaskStatus(), extra).toMap());
+			this.store.save(snapshot);
+			return true;
+		}
+		catch (RuntimeException ex) {
+			log.warn("写入收尾纠正标记失败，本次不纠正 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 最新运行上下文（工具批会刷新快照 context）：同轮推进到 EXPORT 后才能触发收尾纠正。 */
+	private AiContext latestContext(String runId, AiContext fallback) {
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null) {
+			return fallback;
+		}
+		try {
+			return AiContext.fromMap(snapshot.getContext());
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取最新上下文失败 runId={}（回落到驱动上下文）：{}", runId, ex.getMessage());
+			return fallback;
+		}
+	}
+
+	/**
+	 * 收尾纠正的模型请求：历史取自<b>最新快照</b>（工具批已把本轮的 assistant(tool_calls) 与工具结果
+	 * 写进 {@code messageJson}），再补上第一次已上屏的 assistant 正文与内部纠正指令。
+	 *
+	 * <p>这样纠正请求看得到本轮全部工具消息（不会重复副作用），最终 assistant 正文也包含两段内容；
+	 * 请求不写回快照/记忆（finish 时按"前缀 + 增量"统一落库）。
+	 */
+	private Flux<ChatResponse> correctionStream(ProviderRuntime runtime, String runId, String sessionId,
+			AiContext fallbackContext, List<Message> fallbackHistory, SseChatEmitter out, String prefixText,
+			String prefixReasoning) {
+		RunSnapshot snapshot = this.store.get(runId);
+		AiContext latest = latestContext(runId, fallbackContext);
+		List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
+		history.add(new UserMessage(exportWrapUpCorrection(latest.getTaskId())));
+		Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
+				out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
+		log.info("收尾纠正请求：历史 {} 条（含工具消息），要求发起 start_export 确认卡 runId={}", history.size(),
+				runId);
+		return runtime.chatModel().stream(prompt);
+	}
+
+	/**
+	 * 纠正请求的历史：快照 {@code messageJson}（工具批已把 assistant(tool_calls) 与工具结果写进去）
+	 * 优先；缺失时回落驱动历史。第一次已上屏正文补成一条 assistant 消息（末条同文则幂等跳过）。
+	 */
+	List<Message> correctionHistory(RunSnapshot snapshot, List<Message> fallbackHistory, String prefixText,
+			String prefixReasoning) {
+		List<Message> history = new ArrayList<>();
+		if (snapshot != null && snapshot.getMessageJson() != null && !snapshot.getMessageJson().isEmpty()) {
+			history.addAll(this.codec.deserializeAll(snapshot.getMessageJson()));
+		}
+		else if (fallbackHistory != null) {
+			history.addAll(fallbackHistory);
+		}
+		if (StringUtils.hasText(prefixText) && !endsWithAssistantText(history, prefixText)) {
+			history.add(assistantMessage(prefixText, storedReasoning(prefixReasoning)));
+		}
+		return history;
+	}
+
+	private static boolean endsWithAssistantText(List<Message> history, String text) {
+		if (history.isEmpty()) {
+			return false;
+		}
+		Message last = history.get(history.size() - 1);
+		return last instanceof AssistantMessage assistant && text.equals(assistant.getText());
+	}
+
+	boolean exportWrapUpCorrectionDue(String runId, AiContext context, String lastUserText) {
+		List<PendingToolCall> pendings;
+		try {
+			pendings = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取本轮待决条目失败，收尾纠正跳过 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+		AiContext latest = latestContext(runId, context);
+		return needsExportWrapUpCorrection(latest, disclosedStartExport(latest), pendings, lastUserText, false);
+	}
+
 	private boolean awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,
 			AiProperties.Resilience config, Long retryAfterMillis) {
 		long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
@@ -1621,13 +1961,15 @@ public class ResilientChatService {
 	 */
 	private boolean finish(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, long attemptStartedAtMs,
-			long beaconBefore, boolean emptyReplyRetried) {
+			long beaconBefore, boolean emptyReplyRetried, String correctionPrefix) {
 		UpstreamErrorClassifier.Finish finish = accumulator.finish();
 		// content_filter = 明确失败（即使已有半截正文也不当作完成）
 		if (finish == UpstreamErrorClassifier.Finish.CONTENT_FILTER) {
 			contentFiltered(runId, sessionId, accumulator, attempts, out, turn);
 			return true;
 		}
+		// 纠正轮的 accumulator 已用第一次正文/思考做前缀（seedPrefix），这里统一按累计正文收口：
+		// message_end.chars、finalText、快照/记忆与前端 delta 拼接完全一致，不再只算第二段。
 		String text = accumulator.text();
 		if (!StringUtils.hasText(text)) {
 			if (emptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
@@ -1653,15 +1995,8 @@ public class ResilientChatService {
 		// 边界：monitor 只覆盖<b>本进程</b>；跨实例由 {@code RunStore#save} 的 DONE 状态 CAS（Lua 里
 		// cjson 检查当前快照）兜住"取消态不得被 DONE 覆盖"；不把两者说成分布式事务。
 		// （历史说明：数据库完整历史写入机在 2026-10-30 整条移除，临界区内不再有 DB 往返。）
-		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
-		if (monitor == null) {
-			// 轻装配/直接 new 的单测没有交棒器可提供监视器：维持单线程语义（与引入本批之前同形）。
-			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
-			return true;
-		}
-		synchronized (monitor) {
-			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, lengthTruncated);
-		}
+		finishSuccessGuarded(runId, sessionId, accumulator, attempts, watchdog, out, turn, correctionPrefix,
+				lengthTruncated);
 		return true;
 	}
 
@@ -1671,9 +2006,27 @@ public class ResilientChatService {
 	 *
 	 * <p>锁内重读快照与取消事实，再写历史/快照/终帧 —— 这样"判定 → 落库 → 出帧"对取消收尾是一个原子段。
 	 */
+	private void finishSuccessGuarded(String runId, String sessionId, Accumulator accumulator, int attempts,
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, String correctionPrefix,
+			boolean lengthTruncated) {
+		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
+		if (monitor == null) {
+			// 轻装配/直接 new 的单测没有交棒器可提供监视器：维持单线程语义（与引入本批之前同形）。
+			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, correctionPrefix,
+					lengthTruncated);
+			return;
+		}
+		synchronized (monitor) {
+			finishSuccess(runId, sessionId, accumulator, attempts, watchdog, out, turn, correctionPrefix,
+					lengthTruncated);
+		}
+	}
+
 	private void finishSuccess(String runId, String sessionId, Accumulator accumulator, int attempts,
-			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, boolean lengthTruncated) {
+			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, String correctionPrefix,
+			boolean lengthTruncated) {
 		String text = accumulator.text();
+		String reasoning = accumulator.reasoningText();
 		RunSnapshot snapshot = this.store.get(runId);
 		// ===== 取消优先（I-1 的反向）：成功终局绝不改写 CANCELLED =====
 		// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路，见 RunStore），
@@ -1696,8 +2049,11 @@ public class ResilientChatService {
 			// reasoningContent。存储面不删任何字（标记是 additive 的，隔离只作用于模型输入）。
 			// 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
 			AssistantMessage finalAssistant = ReasoningOrigin.stamp(
-					assistantMessage(text, storedReasoning(accumulator.reasoningText()), lengthTruncated),
+					assistantMessage(text, storedReasoning(reasoning), lengthTruncated),
 					snapshot.getProviderId(), snapshot.getModelId());
+			// 纠正轮的前缀 assistant 可能已随工具批 settle 进快照：先移除旧前缀（它属于工具调用之前），
+			// 再把合并后的完整回答按真实时间顺序追加到末尾 —— 不把完整回答移回工具调用之前，也不重复。
+			removeAssistantWithText(history, correctionPrefix);
 			history.add(finalAssistant);
 			snapshot.setMessageJson(this.codec.serializeAll(history));
 			snapshot.setInFlightToolCalls(new ArrayList<>());
@@ -1706,6 +2062,7 @@ public class ResilientChatService {
 			snapshot.setStatus(RunSnapshot.DONE);
 			snapshot.setCancelled(false);
 			snapshot.setAttempts(attempts);
+			clearExportCorrectionPrefix(snapshot);
 			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
 			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
 			if (persistAllowed(runId, "终态快照/记忆")) {
@@ -1761,7 +2118,7 @@ public class ResilientChatService {
 		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
-		emitTurnEnd(runId, sessionId, "done", null, attempts, accumulator, turn, watchdog);
+		emitTurnEnd(runId, sessionId, "done", null, attempts, accumulator, turn, watchdog, text.length());
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
 		clearTerminalRunState(runId);
 	}
@@ -1954,6 +2311,12 @@ public class ResilientChatService {
 	 */
 	private void emitTurnEnd(String runId, String sessionId, String status, String code, int attempts,
 			Accumulator accumulator, TurnContext turn, StreamWatchdog watchdog) {
+		emitTurnEnd(runId, sessionId, status, code, attempts, accumulator, turn, watchdog,
+				accumulator == null ? 0 : accumulator.text().length());
+	}
+
+	private void emitTurnEnd(String runId, String sessionId, String status, String code, int attempts,
+			Accumulator accumulator, TurnContext turn, StreamWatchdog watchdog, int chars) {
 		long totalMs = Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs());
 		long gateWaitMs = Math.max(0L, this.beacon.gateWaitMs(runId));
 		Map<String, Object> usage = accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate());
@@ -1963,7 +2326,7 @@ public class ResilientChatService {
 				"totalMs", totalMs, "activeMs", Math.max(0L, totalMs - gateWaitMs), "gateWaitMs", gateWaitMs,
 				// 排队耗时（turn_accepted → turn_start）与跨段总时长（run 创建 → 终态）：三个数一起才回答"慢在哪"
 				"queueMs", turn.queueMs(), "runTotalMs", runTotalMs(runId),
-				"toolCalls", this.beacon.startedCount(runId), "chars", accumulator == null ? 0 : accumulator.text().length(),
+				"toolCalls", this.beacon.startedCount(runId), "chars", chars,
 				"inputTokens", usage.getOrDefault("promptTokens", 0),
 				"outputTokens", usage.getOrDefault("completionTokens", 0),
 				"totalTokens", usage.getOrDefault("totalTokens", 0), "est", usage.getOrDefault("est", true),
@@ -2430,6 +2793,9 @@ public class ResilientChatService {
 		List<PendingToolCall> cancelledPendings = this.store.pendingsLenient(runId);
 		if (snapshot != null) {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+			// 纠正前缀已含在 partial 里：先移除旧前缀 assistant，避免取消时历史出现重复前缀；
+			// 合并后的停止消息追加在末尾（真实工具顺序之后）。
+			removeAssistantWithText(history, exportCorrectionPrefix(runId));
 			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
 					storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
 				history.add(stopped);
@@ -2440,6 +2806,7 @@ public class ResilientChatService {
 			snapshot.setStatus(RunSnapshot.CANCELLED);
 			snapshot.setCancelled(true);
 			snapshot.setAttempts(attempts);
+			clearExportCorrectionPrefix(snapshot);
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
 			// RT-20：取消态快照/记忆同样是答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
 			boolean persisted = persistAllowed(runId, "取消态快照/记忆");
@@ -3055,6 +3422,25 @@ public class ResilientChatService {
 
 		private final StringBuilder text = new StringBuilder();
 
+		/**
+		 * 收尾纠正轮：把第一次已上屏正文/思考作为前缀种入本累加器。
+		 *
+		 * <p>不置 {@code reasoningShown}（那不是本次上屏的），也不发新的帧；此后所有出口都按
+		 * "前缀 + 本次增量"统计与落库，与前端 delta 拼接一致。
+		 */
+		private void seedPrefix(String prefixText, String prefixReasoning) {
+			if (prefixText != null) {
+				this.text.append(prefixText);
+				this.seededBodyChars += prefixText.length();
+			}
+			if (prefixReasoning != null) {
+				this.reasoning.append(prefixReasoning);
+			}
+		}
+
+		/** seed 进来的前缀字符数（不算本次尝试的新产出；用于 emittedVisible/重试判据）。 */
+		private int seededBodyChars;
+
 		/** <b>L-91/L-98</b>：本尝试累计的思考全文（不进 {@link #text} —— 思考不是正文；原样进记忆元数据）。 */
 		private final StringBuilder reasoning = new StringBuilder();
 
@@ -3269,7 +3655,9 @@ public class ResilientChatService {
 		 * 也避免 {@code retry} 帧排在思考 delta 之后）。
 		 */
 		boolean emittedVisible() {
-			return this.text.length() > 0 || this.reasoningShown;
+			// seed 前缀只用于计数/最终记忆：本段没有新正文、思考也没上屏时仍是"零可见产出"，
+			// 不能因为前缀恒真而抑制正常重试。
+			return this.text.length() > this.seededBodyChars || this.reasoningShown;
 		}
 
 		String text() {
@@ -3413,6 +3801,17 @@ public class ResilientChatService {
 	 * <p>读失败按"不是挂起轮"处理：不能因为一次读抖动把一次可重试失败改成静默挂起（那会让轮次
 	 * 永远停在 RUNNING）。代价是这种极端情况下仍会走旧的重试路径（已知边界，见报告）。
 	 */
+	/** 快照是否已停在 SUSPENDED（即使 in-flight 清单意外为空也不得被纠正兜底写成 DONE）。 */
+	private boolean suspendedStatus(String runId) {
+		try {
+			RunSnapshot snapshot = this.store.get(runId);
+			return snapshot != null && RunSnapshot.SUSPENDED.equals(snapshot.getStatus());
+		}
+		catch (RuntimeException ex) {
+			return false;
+		}
+	}
+
 	private boolean isPersistedParkedToolRound(String runId) {
 		try {
 			RunSnapshot snapshot = this.store.get(runId);

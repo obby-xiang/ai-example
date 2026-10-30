@@ -196,8 +196,7 @@ class TaskTypeFormTest {
 	// ── ⑤ 宿主表单与模型自发表单同一份闸门（含"类型已知即拒绝"）──────────────
 
 	@Test
-	void theTypeFormPassesTheSameWhitelistGate() {
-		assertThat(park("创建一个任务")).isTrue();
+	void theTypeFormPassesTheSameWhitelistGate() {		assertThat(park("创建一个任务")).isTrue();
 		String arguments = onlyPending().getArguments();
 
 		assertThat(this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME, arguments, context(Map.of()))
@@ -206,6 +205,27 @@ class TaskTypeFormTest {
 				context(knownType("EXPORT"))).accepted())
 			.as("类型已知时同一张表被槽位放行拒绝 —— 宿主判据与闸门是同一份")
 			.isFalse();
+	}
+
+	/** Task 1 第 6 项：宿主表单标题/标签/选项复用 {@code ReplyLanguage}，英文请求不出现中文文案。 */
+	@Test
+	void typeFormCopyFollowsTheReplyLanguage() {
+		java.util.Locale previous = org.springframework.context.i18n.LocaleContextHolder.getLocale();
+		try {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(java.util.Locale.ENGLISH);
+			String arguments = this.form.argumentsIfDue(RUN_ID, context(Map.of()), "帮我创建一个任务")
+				.orElseThrow();
+
+			assertThat(arguments).contains(TaskTypeForm.TITLE_EN)
+				.contains(TaskTypeForm.FIELD_LABEL_EN)
+				.contains("Export")
+				.contains("Import")
+				.doesNotContain(TaskTypeForm.TITLE)
+				.doesNotContain(TaskTypeForm.FIELD_LABEL);
+		}
+		finally {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(previous);
+		}
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

@@ -15,6 +15,8 @@ import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.context.ToolResultShrink;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
+import com.example.configmgr.ai.form.ConditionsForm;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
@@ -58,6 +60,8 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.context.i18n.LocaleContext;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.execution.DefaultToolExecutionExceptionProcessor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -627,8 +631,41 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 	}
 
+	/**
+	 * 本轮回答语言的显式传播键（与 {@code ConfirmGate#dispatchResume} 同口径：在请求/提交线程
+	 * 取好 locale，再在工作线程显式设置）。工具线程不继承请求上下文，靠 ThreadLocal 残留会退回 zh。
+	 */
+	public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
+
 	@Override
 	public ToolExecutionResult executeToolCalls(Prompt prompt, ChatResponse chatResponse) {
+		Locale replyLocale = replyLocaleOf(prompt);
+		LocaleContext previous = LocaleContextHolder.getLocaleContext();
+		if (replyLocale != null) {
+			LocaleContextHolder.setLocale(replyLocale);
+		}
+		try {
+			return executeToolCallsInLocale(prompt, chatResponse);
+		}
+		finally {
+			LocaleContextHolder.setLocaleContext(previous);
+		}
+	}
+
+	private Locale replyLocaleOf(Prompt prompt) {
+		Object raw = toolContextOf(prompt).get(TOOL_CONTEXT_REPLY_LOCALE);
+		if (raw == null || String.valueOf(raw).isBlank()) {
+			return null;
+		}
+		try {
+			return Locale.forLanguageTag(String.valueOf(raw));
+		}
+		catch (RuntimeException ex) {
+			return null;
+		}
+	}
+
+	private ToolExecutionResult executeToolCallsInLocale(Prompt prompt, ChatResponse chatResponse) {
 		AssistantMessage assistant = chatResponse.getResult() == null ? null : chatResponse.getResult().getOutput();
 		if (assistant == null || !assistant.hasToolCalls()) {
 			return this.delegate.executeToolCalls(prompt, chatResponse);
@@ -704,21 +741,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 			this.store.markTurnBudget(runId, 0L, skipped);
 		}
 
-		// ===== confirm_step 的后置条件兜底（数据正确性）=====
-		// 模型可能跳过条件收集，直接 confirm_step（QUERY_COND→EXPORT）按全量执行。这里在
-		// <b>交给前端之前</b>按任务真实条件状态拦一次：条件未设置且本轮未收集 ⇒ 挂一张可选条件
-		// 表单，任务仍停 QUERY_COND；留空回灌后才允许下一次推进。只处理单条 confirm_step 批次
-		// （多工具批次保持既有语义，不做历史裁剪）。条件已知 / 已到 EXPORT / 已收集过 → 不拦。
-		if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null && pendings.size() == 1
-				&& this.toolRegistry.matchesContext(pendings.get(0).getName(), context)) {
-			checkCancelled(runId);
-			if (this.conditionsForm.parkIfConfirmStepAdvance(runId, context, pendings.get(0),
-					prompt.getInstructions())) {
-				throw new RunParkedException(runId, pendings.get(0).getToolCallId(),
-						PendingToolCall.KIND_FRONTEND);
-			}
-		}
-
 		// ===== F5：确认门之前先跑只读预检（不通过者根本不进门） =====
 		// 用户 2026-10-20 直裁：预检不通过 → 不进确认门、不弹卡；结构化失败回给模型，由 AI 用普通消息
 		// 说明原因与建议。因此"不通过"的条目在这里就地结算成 PRECHECK_FAILED（code 同名、
@@ -735,6 +757,24 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 已发过 tool_start 的 toolCallId（park 前置批次 + 执行循环共用）：每张卡恰一条，不重发。
 		Set<String> toolStarted = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
+			// confirm_step 条件闭环（ConditionsForm#inspectConfirmStep）：单条批次、已披露、未武装时复核；
+			// 拒绝零副作用、挂起先外置，均在 suspended 公告之前完成
+			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null && pendings.size() == 1
+					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
+				checkCancelled(runId);
+				ConditionsForm.ConfirmStepDecision conditionDecision = this.conditionsForm.inspectConfirmStep(runId,
+						context, pending, prompt.getInstructions());
+				if (conditionDecision.parked()) {
+					throw new RunParkedException(runId, pending.getToolCallId(),
+							PendingToolCall.KIND_FRONTEND);
+				}
+				if (conditionDecision.rejected()) {
+					settleFrontendRejected(runId, pending, conditionDecision.code(), conditionDecision.message(),
+							conditionDecision.reasons());
+					frontendRejected.add(pending.getToolCallId());
+					continue;
+				}
+			}
 			if (!budgetArmed && this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& ToolPreflightService.supports(pending.getName())
 					// MINOR-1：防线③先于预检 —— 越 scope 的调用本就不该读任务/产出预检报告，
@@ -830,7 +870,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			if (!budgetArmed && !suspended.isEmpty()) {
 				// 步数先落快照再挂起：跨进程续跑读的就是这份累计值（saveSuspended 会重新 get 快照）
 				persistToolSteps(runId, stepsUsed);
-				this.store.saveSuspended(runId, assistant.getText(), pendings, prompt.getInstructions(), this.codec,
+				this.store.saveSuspended(runId, assistant.getText(), pendings,
+					SyntheticMessages.withoutCorrectionInstruction(prompt.getInstructions()), this.codec,
 						assistant.getMetadata());
 				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
 						this.store.instanceId());
@@ -2070,18 +2111,27 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 	/** 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。 */
 	private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
-		String text = verdict.render();
+		return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons());
+	}
+
+	/**
+	 * 入参拒绝的结算（已有码/说明/原因的形态）：条件闭环的零副作用拒绝走这一条 ——
+	 * 不挂起、不下发、不执行，结论落成 {@code REJECTED_ARGUMENTS} 并把明确出口回给模型。
+	 */
+	private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
+			List<String> reasons) {
+		String text = FrontendToolGuard.Verdict.reject(code, message, reasons).render();
 		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
 		pending.setOutcome(ToolOutcome.REJECTED.wire());
-		pending.setCode(verdict.code());
-		pending.setReason(verdict.code());
+		pending.setCode(code);
+		pending.setReason(code);
 		pending.setExecuted(false);
 		pending.setExecutedBy(null);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		pending.setResultText(text);
 		this.store.putPending(runId, pending);
-		log.warn("前端工具入参被安全闸拒绝 runId={} tool={} code={}（未挂起、未下发、未执行）：{}",
-				runId, pending.getName(), verdict.code(), verdict.reasons());
+		log.warn("前端工具入参被条件闭环拒绝 runId={} tool={} code={}（未挂起、未下发、未执行）：{}",
+				runId, pending.getName(), code, reasons);
 		return text;
 	}
 
@@ -3051,6 +3101,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
 	/** 落定本轮：历史进快照、in-flight 清空、状态回到 RUNNING（工具已全部结算）。 */
 	private void settle(String runId, List<Message> history) {
+		history = SyntheticMessages.withoutCorrectionInstruction(history);
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot == null) {
 			return;

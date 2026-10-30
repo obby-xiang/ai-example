@@ -237,9 +237,10 @@ class SystemPromptHitlConfirmTest {
 			.contains("不要主动追问\"要筛选还是跳过\"")
 			.contains("默认直接调用 confirm_step")
 			.contains("不传 step，只前进一步");
-		assertThat(systemText).as("筛选只在用户主动提出时设置，未提不展开询问")
+		assertThat(systemText).as("筛选只在用户主动提出时才 set_condition；但 QUERY_COND 的那一次条件框不是追问")
 			.contains("只有用户主动提出筛选需求时才用 set_condition 设置条件")
-			.contains("不要展开询问条件");
+			.contains("它不是\"追问是否筛选\"")
+			.doesNotContain("不要展开询问条件");
 		assertThat(systemText).as("不设条件即全量导出并如实说明")
 			.contains("不设条件即全量导出");
 		assertThat(systemText).as("step 仅目标明确/跳过时才传，查询条件不强制")

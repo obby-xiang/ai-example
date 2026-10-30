@@ -60,7 +60,9 @@ import java.util.Set;
  * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：<b>有明确步骤时只有 {@code QUERY_COND} 允许</b>，
  * 其余步骤（{@code SELECT_DEFS}、{@code EXPORT}、{@code DONE}、导入链等）零副作用拒绝：
  * 前置步给"先 confirm_step 推进到 QUERY_COND"，后置步给"按既有步骤链继续，不重复收集"；
- * 条件已明确同样拒绝（既有判据）。步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
+ * 条件已明确时按<b>逐项三态</b>拒绝（{@link TaskSlots#needsConditionCollection()}：
+ * 任一配置项未决定/无法解析才算缺口，禁止"任一有条件即整体放行"）。
+ * 步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
  * </ul>
  */
 @Slf4j
@@ -174,12 +176,12 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"配置项已确定，选择表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
-		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && slots.conditionsCoverDefCodes()) {
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && !slots.needsConditionCollection()) {
 			String known = renderConditions(slots);
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
 					"已确定条件：" + known + "（来源：任务/工作区或用户明确值）"));
 			List<String> reasons = List.of(
-					"已确定条件：" + known + "（系统解析，不是猜测）",
+					"已确定条件：" + known + "（系统逐项核对：已设置或已明确不设，不是猜测）",
 					"下一步：按既有步骤链调用 set_condition；若当前是 SELECT_DEFS，先 confirm_step（不传 step）"
 							+ "推进到 QUERY_COND，下一批再 set_condition");
 			log.warn("generative_form 条件表单被槽位放行拒绝（条件已确定，未挂起、未下发前端）：{}", known);
@@ -243,7 +245,14 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		for (ConditionSlot condition : slots.conditions()) {
 			rendered.add(condition.defCode() + "." + condition.fieldCode() + " = " + condition.value());
 		}
-		return String.join("；", rendered);
+		// EQ 以外的算子/范围键同样是"已确定条件"（Task 1 第 1 项）：拒绝理由必须把它们说全，
+		// 否则模型会以为系统只认 EQ、再去收集一遍
+		for (String text : slots.conditionTexts()) {
+			if (!rendered.contains(text)) {
+				rendered.add(text);
+			}
+		}
+		return rendered.isEmpty() ? "（逐项核对：已明确不设筛选）" : String.join("；", rendered);
 	}
 
 	private static String quoted(String joined) {

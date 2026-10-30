@@ -4,6 +4,7 @@ import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
+import com.example.configmgr.ai.slot.ConditionAssessment;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
@@ -97,6 +98,12 @@ public class ToolPreflightService {
 
 	/** 目标任务与当前工作区绑定的任务一致（把执行前的 ToolTargetResolver 判据前移一份）。 */
 	public static final String CHECK_TARGET_CONSISTENT = "目标一致";
+
+	/** 导出必须先走到 EXPORT 步（直接 start_export 不得绕过 confirm_step 链）。 */
+	public static final String CHECK_STEP_READY = "步骤就绪";
+
+	/** 每个配置项的条件都已有答案（已设置或明确不设）；未决定/无法解析不得按全量发起。 */
+	public static final String CHECK_CONDITIONS_DECIDED = "条件已决定";
 
 	/** {@code create_task} 的类型判据。 */
 	public static final String CHECK_CREATE_TYPE = "创建类型合法";
@@ -220,6 +227,12 @@ public class ToolPreflightService {
 		// ⑥ 目标一致（把 ToolTargetResolver 的"参数目标 vs 工作区任务"判据前移；执行前仍复核）
 		checks.add(targetConsistencyCheck(taskId, task.isPresent(), context));
 
+		// ⑦ 导出：与 confirm_step 同一套步骤/条件预检（AI 直接 start_export 不得绕过条件收集）
+		if (TOOL_EXPORT.equals(toolName)) {
+			checks.add(exportStepCheck(taskId, task.orElse(null)));
+			checks.add(exportConditionCheck(taskId, task.orElse(null)));
+		}
+
 		Task present = task.orElse(null);
 		String impact = impactOf(toolName, taskId, present);
 		String conditionSummary = conditionSummaryOf(present);
@@ -303,6 +316,60 @@ public class ToolPreflightService {
 				"任务 #" + taskId + " 与当前工作区任务 #" + workspaceTaskId + " 不一致；请先切换到该任务再发起");
 	}
 
+	/**
+	 * 导出步骤检查：当前步骤必须已经是 {@code EXPORT}。
+	 *
+	 * <p>未知步骤（旧任务/直调测试没有 {@code currentStep}）不据此拦截 —— 但这不是把未知当通过，
+	 * 条件检查同样因"无法核对"而只作为说明；真正的执行前复核仍在 {@code JobService}。
+	 */
+	private static PreflightReport.Check exportStepCheck(Long taskId, Task task) {
+		if (task == null) {
+			return new PreflightReport.Check(CHECK_STEP_READY, false, "任务不存在，无法检查步骤");
+		}
+		String step = task.getCurrentStep() == null ? "" : task.getCurrentStep().trim();
+		if (step.isEmpty()) {
+			// fail-closed：步骤未知时不能声称"已到 EXPORT"，否则直接 start_export 会同时绕过步骤与条件
+			return new PreflightReport.Check(CHECK_STEP_READY, false,
+					"任务 #" + taskId + " 的当前步骤未知，不能确认可以发起导出；先打开导出向导让步骤事实落库");
+		}
+		if ("EXPORT".equalsIgnoreCase(step)) {
+			return new PreflightReport.Check(CHECK_STEP_READY, true, "");
+		}
+		return new PreflightReport.Check(CHECK_STEP_READY, false,
+				"任务 #" + taskId + " 当前步骤 " + step + "，不能直接发起导出；先按步骤链 confirm_step 推进到 EXPORT"
+						+ "（禁止跳过 QUERY_COND 等中间步骤）");
+	}
+
+	/**
+	 * 导出条件检查：每个配置项都必须已设置或明确不设（逐项核对）。
+	 *
+	 * <p>条件未决定/JSON 无法解析时不得按全量发起（Task 1 第 1/3 项）；明确不设（{@code "{}"}）
+	 * 与任何算子的已设置条件都算"有答案"。
+	 */
+	private static PreflightReport.Check exportConditionCheck(Long taskId, Task task) {
+		if (task == null) {
+			return new PreflightReport.Check(CHECK_CONDITIONS_DECIDED, false, "任务不存在，无法检查条件");
+		}
+		String step = task.getCurrentStep() == null ? "" : task.getCurrentStep().trim();
+		if (!step.isEmpty() && !"EXPORT".equalsIgnoreCase(step)) {
+			return new PreflightReport.Check(CHECK_CONDITIONS_DECIDED, true,
+					"步骤未到 EXPORT，条件收集由 confirm_step 链负责");
+		}
+		if (step.isEmpty()) {
+			return new PreflightReport.Check(CHECK_CONDITIONS_DECIDED, false,
+					"任务 #" + taskId + " 的当前步骤未知，条件状态无法逐项核对；先打开导出向导让步骤事实落库");
+		}
+		ConditionAssessment.Assessment assessment = ConditionAssessment.of(task);
+		List<String> undecided = assessment.undecidedDefCodes();
+		if (undecided.isEmpty()) {
+			return new PreflightReport.Check(CHECK_CONDITIONS_DECIDED, true, "");
+		}
+		String detail = "任务 #" + taskId + " 的条件未决定：" + String.join(", ", undecided)
+				+ (assessment.hasUnparseable() ? "（其中存在无法解析的条件 JSON）" : "")
+				+ "；先 set_condition 落库，或由用户明确留空确认全量，不能按全量直接发起导出";
+		return new PreflightReport.Check(CHECK_CONDITIONS_DECIDED, false, detail);
+	}
+
 	// ── 条件摘要 / 发布模式（AR-02：只三字段，不恢复旧预检区） ────────────────
 
 	/** 条件摘要（人读，后端算好；前端不反解条件文本）。 */
@@ -310,17 +377,22 @@ public class ToolPreflightService {
 		if (task == null || task.getItems() == null) {
 			return CONDITION_ALL;
 		}
+		ConditionAssessment.Assessment assessment = ConditionAssessment.of(task);
+		boolean export = task.getType() == Task.TaskType.EXPORT;
 		List<String> parts = new ArrayList<>();
-		for (TaskItem item : task.getItems()) {
-			String json = item.getConditionJson();
-			if (json == null || json.isBlank()) {
+		for (ConditionAssessment.ItemCondition item : assessment.items()) {
+			if (!export && item.state() == ConditionAssessment.State.UNDECIDED) {
+				// 导入没有筛选步：没有条件事实不等于"未决定"，不得渲染成缺口
 				continue;
 			}
-			String rendered = renderCondition(json);
-			if (rendered == null) {
-				continue;
+			switch (item.state()) {
+				case SET -> parts.add((item.defCode() == null ? "" : item.defCode() + "：")
+						+ renderFacts(item.facts()));
+				case EXPLICIT_UNSET -> parts.add((item.defCode() == null ? "" : item.defCode() + "：")
+						+ "未设筛选（全量）");
+				case UNDECIDED -> parts.add((item.defCode() == null ? "" : item.defCode() + "：")
+						+ (item.unparseable() ? "条件无法解析（不能按全量处理）" : "条件未决定（不能按全量处理）"));
 			}
-			parts.add(item.getDefCode() == null ? rendered : item.getDefCode() + "：" + rendered);
 		}
 		if (parts.isEmpty()) {
 			return CONDITION_ALL;
@@ -329,45 +401,18 @@ public class ToolPreflightService {
 		return summary.length() <= 240 ? summary : summary.substring(0, 239) + "…";
 	}
 
-	/** 单条 {@code conditionJson} → 人读摘要；无法解析返回 null（不编造条件）。 */
-	private static String renderCondition(String json) {
-		try {
-			JsonNode node = JSON.readTree(json);
-			if (node == null || !node.isObject()) {
-				return null;
+	private static String renderFacts(List<ConditionAssessment.ConditionFact> facts) {
+		List<String> rendered = new ArrayList<>(facts.size());
+		for (ConditionAssessment.ConditionFact fact : facts) {
+			if ("SCOPE".equals(fact.operator())) {
+				rendered.add("范围 = " + fact.value());
 			}
-			List<String> parts = new ArrayList<>();
-			JsonNode scopeKeys = node.get("scopeKeys");
-			if (scopeKeys != null && scopeKeys.isArray() && !scopeKeys.isEmpty()) {
-				List<String> keys = new ArrayList<>();
-				scopeKeys.forEach(key -> keys.add(key.asText()));
-				parts.add("范围 = " + String.join("、", keys));
+			else {
+				rendered.add(fact.fieldCode() + " " + operatorLabel(fact.operator())
+						+ (fact.value() == null || fact.value().isBlank() ? "" : " " + fact.value()));
 			}
-			JsonNode fields = node.get("fields");
-			if (fields != null && fields.isArray()) {
-				for (JsonNode field : fields) {
-					String code = field.path("fieldCode").asText("");
-					String operator = field.path("operator").asText("");
-					if (code.isBlank() || operator.isBlank()) {
-						continue;
-					}
-					JsonNode value = field.get("value");
-					String rendered = value == null || value.isNull() ? ""
-							: value.isArray() ? joinArray(value) : value.asText();
-					parts.add(code + " " + operatorLabel(operator) + (rendered.isBlank() ? "" : " " + rendered));
-				}
-			}
-			return parts.isEmpty() ? null : String.join("；", parts);
 		}
-		catch (Exception ex) {
-			return null;
-		}
-	}
-
-	private static String joinArray(JsonNode array) {
-		List<String> values = new ArrayList<>();
-		array.forEach(item -> values.add(item.asText()));
-		return String.join("、", values);
+		return String.join("；", rendered);
 	}
 
 	private static String operatorLabel(String operator) {

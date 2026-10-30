@@ -238,6 +238,78 @@ class ToolPreflightServiceTest {
 		assertThat(failure(report, "目标一致")).contains("任务 #5").contains("任务 #8");
 	}
 
+	// ── 直接 start_export：与 confirm_step 同一套步骤/条件预检（Task 1 第 3 项） ──
+
+	@Test
+	void directExportBeforeTheExportStepIsBlocked() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("QUERY_COND");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "步骤就绪")).contains("不能直接发起导出").contains("confirm_step");
+	}
+
+	@Test
+	void directExportWithUndecidedConditionIsBlocked() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson(null);
+		task.getItems().get(1).setConditionJson(null);
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "条件已决定")).contains("条件未决定").contains("set_condition");
+	}
+
+	@Test
+	void directExportWithExplicitlyUnsetConditionPasses() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson("{}");
+		task.getItems().get(1).setConditionJson("{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isTrue();
+		assertThat(report.conditionSummary()).contains("未设筛选");
+	}
+
+	@Test
+	void directExportWithNonEqConditionPasses() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson(
+				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"IN\",\"value\":[\"CNY\",\"USD\"]}]}");
+		task.getItems().get(1).setConditionJson("{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isTrue();
+		assertThat(report.conditionSummary()).contains("IN").contains("CNY");
+	}
+
+	/** 步骤未知不得"两边都放行"（fail-closed）：直接 start_export 不能绕过步骤事实。 */
+	@Test
+	void directExportWithUnknownStepFailsClosed() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep(null);
+		task.getItems().get(0).setConditionJson("{}");
+		task.getItems().get(1).setConditionJson("{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "步骤就绪")).contains("步骤未知").contains("不能确认");
+	}
+
 	@Test
 	void publishModeNeverComesFromConditionText() {
 		Task task = task(Task.TaskType.IMPORT, Task.TaskStatus.ACTIVE);
@@ -302,6 +374,7 @@ class ToolPreflightServiceTest {
 		task.setTitle("订单配置导入");
 		task.setType(type);
 		task.setStatus(status);
+		task.setCurrentStep(type == Task.TaskType.EXPORT ? "EXPORT" : null);
 		task.setItems(List.of(item("ORDER", 0), item("ORDER_LINE", 1)));
 		return task;
 	}
@@ -310,6 +383,8 @@ class ToolPreflightServiceTest {
 		TaskItem item = new TaskItem();
 		item.setDefCode(defCode);
 		item.setSortOrder(sortOrder);
+		// 默认"明确不设"（与前端清空后的落库形态一致）：本类的既有用例关注其它检查项
+		item.setConditionJson("{}");
 		return item;
 	}
 

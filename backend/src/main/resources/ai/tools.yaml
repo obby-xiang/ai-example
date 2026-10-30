@@ -36,10 +36,13 @@
 # 「有明确步骤时只有 QUERY_COND 允许 SET_CONDITIONS」（SELECT_DEFS/EXPORT/DONE/导入链一律零副作用拒绝）；
 # 规则 30 / confirm_step / set_condition 的描述统一为「进入 QUERY_COND 给一次非必填自由文本框，留空直接推进，
 # 不得重复收集或文字追问」，删除与规则 26 冲突的「不要为条件弹表单」旧口径。
+# 2026-10-27.11 → 2026-10-27.12（Task 1 导出条件与一轮闭环）：confirm_step 增加"禁止 SELECT_DEFS 直接跳 EXPORT"
+# 与"条件已知/非空回灌未落库时零副作用拒绝并指回 set_condition"；generative_form 的条件表回灌非空文本必须先
+# set_condition 落库再 confirm_step。改描述必升 version（破 prompt 缓存）。
 # 2026-10-27.10 → 2026-10-27.11（2026-10-29 已知信息口径补强）：配置已明确不只看编码 ——
 # 中文名称/别名、以及模型已用 list_config_defs / get_config_def 确认过的编码映射同样算已知，
 # 确认后直接 select_definitions，不下发选择表单（系统提示词总纲与规则 30 同批改）。
-version: 2026-10-27.11
+version: 2026-10-27.12
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -130,8 +133,12 @@ tools:
       允许一次不同的纠正动作；同参数/同目标仍在禁止之列）。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；
       导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。
       用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。
+      禁止从 SELECT_DEFS 直接跳到 EXPORT（那条路会跳过 QUERY_COND 与条件收集，会被宿主零副作用拒绝）；
+      即使传 step，也必须先完成 QUERY_COND 才能推进到 EXPORT。
       未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次
       非必填自由文本框（只此一次，留空即照常推进）；不要停在原地、重复收集或用文字追问是否筛选。
+      条件已知但尚未落库、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝
+      并指回 set_condition：先把条件落库，下一批再推进。
   - toolKey: generative_form
     title: 生成式表单
     # 批次4 集成返修：表单选项数据源此前只写了 definition_fields，`definitions`（层级→定义）虽已在
@@ -147,7 +154,8 @@ tools:
       类型已确定（任务槽位有「已确定任务类型」或用户已说明导出/导入）时会被零副作用拒绝并指回 create_task。
       SET_CONDITIONS 只在 QUERY_COND 收集：表单只有一个非必填自由文本框（type=text，可加 variant=longText），
       把用户文本解析成 set_condition 的结构化条件（fields[].fieldCode/operator/value）；留空即不设筛选，
-      直接 confirm_step 全量推进；条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝（SELECT_DEFS 先
+      直接 confirm_step 全量推进；非空文本必须先调用 set_condition 落库再 confirm_step（否则 confirm_step 会被
+      零副作用拒绝并指回 set_condition）；条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝（SELECT_DEFS 先
       confirm_step 推进，EXPORT 及之后一律拒绝），不再重复收集。
       系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
       请直接调用对应工具；未知配置或歧义时表单仍可用。配置项已明确（编码、中文名称/别名，或已用

@@ -118,4 +118,51 @@ class ContextBuilderTaskSlotsTest {
 		assertThat(text).contains("缺失（需要时按第 26 条收集，不要猜测）: 配置项");
 		assertThat(text).doesNotContain("未设筛选");
 	}
+
+	/**
+	 * Task 1 第 1/4 项：<b>未决定 ≠ 全量</b>。三态里仍有未决定的配置项时不得渲染
+	 * "未设筛选 = 全量"（那会把"还没问过"写成"用户选择导出全部"）。
+	 */
+	@Test
+	void undecidedConditionIsNotRenderedAsFullExport() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"), List.of(),
+				List.of(), List.of("CURRENCY"), List.of());
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", null,
+				Map.of(TaskSlots.EXTRA_KEY, slots.toMap()));
+
+		String text = this.builder.buildContextMessage(context);
+
+		assertThat(text).contains("筛选条件未决定");
+		assertThat(text).doesNotContain("未设筛选: 全量");
+	}
+
+	/** 逐项核对过且都不缺（明确不设/已设置）时才允许渲染"未设筛选: 全量"。 */
+	@Test
+	void explicitlyUnsetConditionRendersFullExport() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"), List.of(),
+				List.of(), List.of(), List.of());
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", null,
+				Map.of(TaskSlots.EXTRA_KEY, slots.toMap()));
+
+		String text = this.builder.buildContextMessage(context);
+
+		assertThat(text).contains("未设筛选: 全量");
+		assertThat(text).contains("已明确不设筛选");
+	}
+
+	/** 混合场景：已设置的 EQ、非 EQ 条件与未决定项必须同时可见（不得互相覆盖）。 */
+	@Test
+	void mixedConditionsShowSetNonEqAndUndecidedTogether() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY", "ORDER", "ROLE"), List.of(),
+				List.of("CURRENCY", "ORDER"), List.of("ROLE"), List.of("ORDER.code IN CNY"));
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", null,
+				Map.of(TaskSlots.EXTRA_KEY, slots.toMap()));
+
+		String text = this.builder.buildContextMessage(context);
+
+		assertThat(text).contains("已确定条件");
+		assertThat(text).contains("ORDER.code IN CNY");
+		assertThat(text).contains("筛选条件未决定: ROLE");
+		assertThat(text).doesNotContain("未设筛选: 全量");
+	}
 }

@@ -251,9 +251,12 @@ public class ContextBuilder {
      *
      * <p>文本形态刻意保持"数据行"（{@code - 已确定配置项: CURRENCY}），值逐个过
      * {@link #safeDelimitedField}（不可信的用户值 / 定义编码不能提前闭合定界）。
-     * 只有"配置项"是真正的缺失槽位（按规则 26 收集）；<b>筛选条件未设不是缺失</b>——
-     * 它的语义是"未设筛选 = 全量导出"（规则 28）。写成事实陈述，模型才不会每轮把条件当缺口
-     * 反复下发条件表单。已确定的槽位对应表单会在下发前被宿主拒绝（{@code GenerativeFormGuard}）。
+     *
+     * <p><b>条件三态（Task 1 第 1/4 项）</b>：已设置（含 EQ 以外的算子与范围键）渲染
+     * {@code 已确定条件}；<b>未决定/无法解析</b>渲染 {@code 筛选条件未决定}（不得写成全量）；
+     * 只有逐项核对过且都已有答案（已明确不设/已留空）才渲染 {@code 未设筛选: 全量}。
+     * 配置项仍是唯一"缺失槽位"（按规则 26 收集）；已确定的槽位对应表单会在下发前被宿主拒绝
+     * （{@code GenerativeFormGuard}）。
      */
     String renderTaskSlots(TaskSlots slots) {
         if (slots == null || slots.isEmpty()) {
@@ -271,18 +274,38 @@ public class ContextBuilder {
             }
             sb.append("- 已确定配置项: ").append(String.join(", ", safe)).append("\n");
         }
-        if (!slots.conditions().isEmpty()) {
-            List<String> rendered = new ArrayList<>(slots.conditions().size());
-            for (ConditionSlot condition : slots.conditions()) {
-                rendered.add(safeDelimitedField(condition.defCode(), SELECTED_DEF_MAX_CHARS) + "."
-                        + safeDelimitedField(condition.fieldCode(), SELECTED_DEF_MAX_CHARS) + " = "
-                        + safeDelimitedField(condition.value(), MAX_SLOT_VALUE_CHARS));
-            }
-            sb.append("- 已确定条件: ").append(String.join("；", rendered)).append("\n");
+        List<String> renderedConditions = new ArrayList<>();
+        for (ConditionSlot condition : slots.conditions()) {
+            renderedConditions.add(safeDelimitedField(condition.defCode(), SELECTED_DEF_MAX_CHARS) + "."
+                    + safeDelimitedField(condition.fieldCode(), SELECTED_DEF_MAX_CHARS) + " = "
+                    + safeDelimitedField(condition.value(), MAX_SLOT_VALUE_CHARS));
         }
-        else if (slots.hasDefCodes() && "EXPORT".equals(slots.taskType())) {
-            // 未设筛选是导出语义（QUERY_COND 无条件的正常状态）；导入没有筛选步，不得渲染"导出全部"
-            sb.append("- 未设筛选: 全量（未设置查询条件即导出全部，不要再收集条件或询问是否筛选）\n");
+        // EQ 以外的算子（IN/GT…）与 scopeKeys 同样是已设置条件（Task 1 第 1 项）：
+        // 不渲染它们＝模型以为没设条件，又去收集/询问一遍。与 EQ 条件同段展示，互不覆盖。
+        for (String condition : slots.conditionTexts()) {
+            String rendered = safeDelimitedField(condition, MAX_SLOT_VALUE_CHARS * 2);
+            if (!renderedConditions.contains(rendered)) {
+                renderedConditions.add(rendered);
+            }
+        }
+        if (!renderedConditions.isEmpty()) {
+            sb.append("- 已确定条件: ").append(String.join("；", renderedConditions)).append("\n");
+        }
+        if (slots.hasDefCodes() && "EXPORT".equals(slots.taskType())) {
+            if (slots.undecidedDefCodes() != null && !slots.undecidedDefCodes().isEmpty()) {
+                // 混合场景：已确定条件与未决定项必须同时可见（不得因为"有已设条件"就吞掉缺口）
+                List<String> safe = new ArrayList<>(slots.undecidedDefCodes().size());
+                for (String code : slots.undecidedDefCodes()) {
+                    safe.add(safeDelimitedField(code, SELECTED_DEF_MAX_CHARS));
+                }
+                sb.append("- 筛选条件未决定: ").append(String.join(", ", safe))
+                    .append("（进入 QUERY_COND 时按第 26 条收集一次；未决定前不得按全量导出）\n");
+            }
+            else if (renderedConditions.isEmpty()) {
+                // 未设筛选是导出语义（QUERY_COND 无条件的正常状态，含"明确留空"）；
+                // 导入没有筛选步，不得渲染"导出全部"。不再写"不要再收集条件"（与第 26 条的一次收集冲突）。
+                sb.append("- 未设筛选: 全量（已明确不设筛选）\n");
+            }
         }
         List<String> missing = new ArrayList<>();
         if (!slots.hasDefCodes()) {

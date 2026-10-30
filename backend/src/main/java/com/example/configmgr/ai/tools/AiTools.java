@@ -607,7 +607,9 @@ public class AiTools {
             + "推进成功后下一批按最新披露继续，推进失败即停"
             + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
             + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 时先按 generative_form(purpose=SET_CONDITIONS) 给一次"
-            + "非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选")
+            + "非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
+            + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但未落库、或条件表回灌了非空文本却还没 set_condition 时，"
+            + "confirm_step 会被零副作用拒绝并指回 set_condition（先落库，下一批再推进）")
     @ToolScope({ "task:EXPORT", "task:IMPORT" })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -694,7 +696,9 @@ public class AiTools {
             + "SET_CONDITIONS 只在 QUERY_COND 收集（其它步骤零副作用拒绝），形状固定为一个非必填自由文本框"
             + "（type=text，可加 variant=longText）："
             + "把用户文本解析成 set_condition 的结构化条件；留空即不设筛选（直接 confirm_step 全量推进）；"
-            + "条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝，不再重复收集。系统工作区状态里的「任务槽位」是已知值："
+            + "条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝，不再重复收集。"
+            + "条件表回灌了非空文本时，必须先按文本调用 set_condition 落库再 confirm_step；"
+            + "已知未落库时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："

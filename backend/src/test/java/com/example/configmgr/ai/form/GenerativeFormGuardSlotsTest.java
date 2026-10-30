@@ -112,6 +112,34 @@ class GenerativeFormGuardSlotsTest {
 		assertThat(condition.accepted()).as("配置项已知但条件槽位仍缺：条件表单可用").isTrue();
 	}
 
+	/**
+	 * Task 1 第 3 项：多配置<b>逐项核对</b>。任一配置项有条件不得整体放行 ——
+	 * 另一个配置项仍未决定时，条件表单仍有真实缺口（可以收集）。
+	 */
+	@Test
+	void partiallyConditionedMultiConfigStillAllowsTheForm() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY", "ORDER"), List.of(),
+				List.of("CURRENCY"), List.of("ORDER"), List.of("code = CNY"));
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				form("SET_CONDITIONS", "value"), context(slots.toMap()));
+
+		assertThat(verdict.accepted())
+			.as("CURRENCY 有条件 ≠ ORDER 也有条件：仍有缺口，不得按'任一有条件即整体放行'拒绝")
+			.isTrue();
+	}
+
+	/** 逐项都已有答案（已设置或明确不设）时，条件表单才被拒绝。 */
+	@Test
+	void fullyDecidedMultiConfigRejectsTheFormEvenWithoutConditionsOnEveryItem() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY", "ORDER"), List.of(),
+				List.of("CURRENCY"), List.of(), List.of("code = CNY"));
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				form("SET_CONDITIONS", "value"), context(slots.toMap()));
+
+		assertThat(verdict.accepted()).isFalse();
+		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+	}
+
 	@Test
 	void missingPurposeWithDefinitionsSourceIsStillReleasedAsSelection() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,

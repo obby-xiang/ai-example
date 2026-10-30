@@ -12,6 +12,17 @@ import java.util.Map;
  * <p>只表达三件事：任务类型、已确定配置项、已确定筛选条件。<b>空集合 = 缺失</b>，
  * 不表达"用户想选但还没选"之类的中间态 —— 调用方据此判断表单是否还有真实缺口。
  *
+ * <p><b>条件三态（Task 1 第 1 项）</b>：{@code conditions} 仍是模型可读的 EQ 槽位；另有两个
+ * 只服务放行判定的集合：
+ * <ul>
+ * <li>{@code conditionDefCodes}：已有条件事实的配置项（含 IN/GT 等非 EQ 算子与 {@code scopeKeys}，
+ * 由 {@link ConditionAssessment} 统一解析）；</li>
+ * <li>{@code undecidedDefCodes}：条件<b>未决定/无法解析</b>的配置项（{@code null} = 旧数据，
+ * 没有三态信息，按旧的"未覆盖即缺口"口径）。</li>
+ * </ul>
+ * 明确不设（{@code "{}"}）既不在 {@code conditionDefCodes} 也不在 {@code undecidedDefCodes} ——
+ * 它已经有答案，不需要再问。
+ *
  * <p><b>为什么不引入表单框架</b>：这里的用途只有两个 ——
  * <ol>
  * <li>作为 {@code AiContext.extra} 的白名单字段（{@link #EXTRA_KEY}）随快照传递，
@@ -24,7 +35,8 @@ import java.util.Map;
  * {@code ContextFieldGate} 的白名单丢掉（见 {@code ContextBuilder#SERVER_EXTRA_KEYS}），
  * 因此客户端无法用伪造槽位压掉表单。
  */
-public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions) {
+public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions,
+		List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts) {
 
 	/** {@code AiContext.extra} 里的键名（服务端写入，不来自客户端）。 */
 	public static final String EXTRA_KEY = "taskSlots";
@@ -33,6 +45,19 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		taskType = taskType == null || taskType.isBlank() ? null : taskType;
 		defCodes = defCodes == null ? List.of() : List.copyOf(defCodes);
 		conditions = conditions == null ? List.of() : List.copyOf(conditions);
+		conditionDefCodes = conditionDefCodes == null ? List.of() : List.copyOf(conditionDefCodes);
+		undecidedDefCodes = undecidedDefCodes == null ? null : List.copyOf(undecidedDefCodes);
+		conditionTexts = conditionTexts == null ? List.of() : List.copyOf(conditionTexts);
+	}
+
+	/**
+	 * 兼容构造器（三参）：没有三态信息（{@code undecidedDefCodes=null}）⇒ 放行判定退回旧的
+	 * "EQ 条件覆盖全部配置项"口径。生产路径由 {@link TaskSlotResolver} 提供完整三态。
+	 */
+	public TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions) {
+		this(taskType, defCodes, conditions,
+				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList(),
+				null, List.of());
 	}
 
 	public static TaskSlots empty() {
@@ -67,6 +92,29 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		return true;
 	}
 
+	/**
+	 * 逐项核对：是否还有<b>真实的条件缺口</b>（需要收集）。
+	 *
+	 * <p>三态口径：任一配置项 {@code UNDECIDED}（含无法解析）即缺口；明确不设与已设置都不是缺口。
+	 * 禁止"任一配置项有条件就整体放行"——多配置时必须逐项判断。
+	 */
+	public boolean needsConditionCollection() {
+		if (defCodes.isEmpty()) {
+			return false;
+		}
+		if (this.undecidedDefCodes == null) {
+			// 旧数据：没有三态信息，按旧的"未覆盖即缺口"口径（不把未知当全量）
+			return !conditionsCoverDefCodes();
+		}
+		for (String defCode : defCodes) {
+			if (this.undecidedDefCodes.contains(defCode)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+
 	/** 快照/上下文里的形态（只写有值的键，读侧见 {@link #fromValue(Object)}）。 */
 	public Map<String, Object> toMap() {
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -78,6 +126,16 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		}
 		if (!conditions.isEmpty()) {
 			out.put("conditions", conditions.stream().map(ConditionSlot::toMap).toList());
+		}
+		if (!conditionDefCodes.isEmpty()) {
+			out.put("conditionDefCodes", conditionDefCodes);
+		}
+		// 空列表也要写：它表示"逐项核对过、没有未决定的"，与"没有三态信息"必须可区分
+		if (this.undecidedDefCodes != null) {
+			out.put("undecidedDefCodes", this.undecidedDefCodes);
+		}
+		if (!conditionTexts.isEmpty()) {
+			out.put("conditionTexts", conditionTexts);
 		}
 		return out;
 	}
@@ -111,7 +169,25 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 				}
 			}
 		}
-		return new TaskSlots(taskType, defCodes, conditions);
+		List<String> conditionDefCodes = stringList(map.get("conditionDefCodes"));
+		List<String> conditionTexts = stringList(map.get("conditionTexts"));
+		// 键缺失 = 旧数据（没有三态信息）；键存在（含空列表）= 已逐项核对
+		List<String> undecidedDefCodes = map.containsKey("undecidedDefCodes")
+				? stringList(map.get("undecidedDefCodes")) : null;
+		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts);
+	}
+
+	private static List<String> stringList(Object raw) {
+		List<String> out = new ArrayList<>();
+		if (raw instanceof List<?> list) {
+			for (Object element : list) {
+				String value = text(element);
+				if (value != null && !out.contains(value)) {
+					out.add(value);
+				}
+			}
+		}
+		return out;
 	}
 
 	private static String text(Object raw) {

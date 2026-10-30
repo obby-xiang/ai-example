@@ -7,7 +7,6 @@ import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -74,7 +73,10 @@ public class TaskSlotResolver {
 		List<String> authoritativeDefCodes = pageDefCodes != null ? pageDefCodes : taskDefCodes;
 		// 权威空值不得回落历史：显式空勾选是"用户此刻什么都没选"，按历史重新勾选等于替用户改选择。
 		boolean selectionIsAuthoritative = pageDefCodes != null || !taskDefCodes.isEmpty();
-		List<ConditionSlot> authoritativeConditions = authoritativeConditions(ctx);
+		// 条件三态的唯一判据（Task 1 第 1 项）：EQ 以外的算子与 scopeKeys 同样是"已设置"，
+		// 坏 JSON/从未设置是"未决定"，{@code "{}"} 是"明确不设"。
+		ConditionAssessment.Assessment conditionAssessment = ConditionAssessment.of(task(ctx));
+		List<ConditionSlot> authoritativeConditions = eqConditions(conditionAssessment);
 		String authoritativeTaskType = ctx.getTaskType() == null || ctx.getTaskType().isBlank() ? null
 				: ctx.getTaskType();
 
@@ -111,7 +113,48 @@ public class TaskSlotResolver {
 		else {
 			conditions = conditions.stream().filter(c -> defCodes.contains(c.defCode())).distinct().toList();
 		}
-		return new TaskSlots(taskType, defCodes, conditions);
+		return withConditionState(taskType, defCodes, conditions, conditionAssessment,
+				current.condition() == TaskSlotParser.SlotState.CLEARED);
+	}
+
+	/**
+	 * 逐项条件三态（禁止"任一配置项有条件就整体放行"）：已设置/明确不设不是缺口，
+	 * 未决定/无法解析才是缺口；模型已知但未落库的条件也算"已有事实"，放行判定不得再弹表。
+	 */
+	private static TaskSlots withConditionState(String taskType, List<String> defCodes,
+			List<ConditionSlot> conditions, ConditionAssessment.Assessment assessment, boolean clearedNow) {
+		if (defCodes.isEmpty()) {
+			return new TaskSlots(taskType, List.of(), List.of(), List.of(), List.of(), List.of());
+		}
+		List<String> conditionDefCodes = new ArrayList<>();
+		List<String> undecidedDefCodes = new ArrayList<>();
+		List<String> conditionTexts = new ArrayList<>();
+		for (String defCode : defCodes) {
+			boolean userKnown = conditions.stream().anyMatch(slot -> defCode.equals(slot.defCode()));
+			ConditionAssessment.State state = assessment.stateOf(defCode);
+			if (userKnown || state == ConditionAssessment.State.SET) {
+				conditionDefCodes.add(defCode);
+			}
+			else if (clearedNow || state == ConditionAssessment.State.EXPLICIT_UNSET) {
+				// 明确不设：已有答案，不再收集
+				continue;
+			}
+			else {
+				undecidedDefCodes.add(defCode);
+			}
+		}
+		for (ConditionAssessment.ConditionFact fact : assessment.facts()) {
+			if (defCodes.contains(fact.defCode()) && !conditionTexts.contains(fact.render())) {
+				conditionTexts.add(fact.render());
+			}
+		}
+		for (ConditionSlot slot : conditions) {
+			String rendered = slot.fieldCode() + " = " + slot.value();
+			if (!conditionTexts.contains(rendered)) {
+				conditionTexts.add(rendered);
+			}
+		}
+		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts);
 	}
 
 	private static List<String> applySelection(TaskSlotParser.SlotState state, List<String> value,
@@ -225,35 +268,17 @@ public class TaskSlotResolver {
 		return codes;
 	}
 
-	private List<ConditionSlot> authoritativeConditions(AiContext context) {
-		Task task = task(context);
-		if (task == null || task.getItems() == null) {
-			return List.of();
-		}
+	private List<ConditionSlot> eqConditions(ConditionAssessment.Assessment assessment) {
 		List<ConditionSlot> out = new ArrayList<>();
-		for (TaskItem item : task.getItems()) {
-			String json = item.getConditionJson();
-			if (json == null || json.isBlank()) {
+		for (ConditionAssessment.ConditionFact fact : assessment.facts()) {
+			if (!"EQ".equalsIgnoreCase(fact.operator()) || fact.fieldCode() == null || fact.value() == null
+					|| fact.value().isBlank()) {
+				// 范围/IN/比较运算不进"EQ 槽位"这个最小模型；它们仍由 conditionDefCodes 记为已设置
 				continue;
 			}
-			try {
-				JsonNode root = this.objectMapper.readTree(json);
-				for (JsonNode field : root.path("fields")) {
-					if (!"EQ".equalsIgnoreCase(field.path("operator").asText())) {
-						// 范围/IN/比较运算不在最小槽位模型里：不猜，保持缺失
-						continue;
-					}
-					String fieldCode = field.path("fieldCode").asText(null);
-					JsonNode value = field.get("value");
-					if (fieldCode == null || value == null || value.isNull()) {
-						continue;
-					}
-					out.add(new ConditionSlot(item.getDefCode(), fieldCode, value.asText()));
-				}
-			}
-			catch (RuntimeException | java.io.IOException ex) {
-				log.debug("任务条目条件 JSON 解析失败，按无权威条件处理 defCode={}：{}", item.getDefCode(),
-						ex.getMessage());
+			ConditionSlot slot = new ConditionSlot(fact.defCode(), fact.fieldCode(), fact.value());
+			if (slot.isComplete() && !out.contains(slot)) {
+				out.add(slot);
 			}
 		}
 		return out;

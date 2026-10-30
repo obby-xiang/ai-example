@@ -381,6 +381,25 @@ class EmptyReplyTerminalTest {
 	}
 
 	/**
+	 * 两次空回复 + 仅 2 次尝试预算：仍必须先发一次 retry，再用唯一终帧收口（不得静默退出）。
+	 */
+	@Test
+	void twoEmptyRepliesWithTwoAttemptsStillEndWithOneRetryAndFailedTerminal() {
+		this.properties.getResilience().setMaxAttempts(2);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(terminal("stop")), Flux.just(terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).as("一次 retry + 一个 error 终帧，不得无终态退出")
+			.containsExactly("start", "retry", "error");
+		assertThat(FrameContract.oneOfType(frames, "error"))
+			.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	/**
 	 * <b>只有思考、正文为空 ⇒ 不重试</b>（L-91 同族）：{@code emittedAny()=true} 时重试会把已发过的
 	 * 思考段再吐一遍，且 {@code retry} 帧会落在思考 delta 之后（帧序契约禁止）。
 	 */

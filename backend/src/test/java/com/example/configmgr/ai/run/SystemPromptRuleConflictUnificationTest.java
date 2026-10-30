@@ -68,4 +68,27 @@ class SystemPromptRuleConflictUnificationTest {
 			.contains("查看编辑器也需用户有查看意图");
 	}
 
+	/**
+	 * Task 1 第 4/5 项：条件与收尾口径只有一套。
+	 * <ul>
+	 * <li>「用户没提出就不要展开询问条件」与第 26 条「QUERY_COND 给一次非必填条件框」互相矛盾，删除；</li>
+	 * <li>禁止 {@code SELECT_DEFS} 直接跳 {@code EXPORT}；</li>
+	 * <li>导出收尾前必须发起 {@code start_export} 确认卡，且不得自动执行。</li>
+	 * </ul>
+	 */
+	@Test
+	void conditionAndWrapUpRulesNoLongerContradict() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("旧的'用户没提出就不要展开询问条件'与第 26 条冲突，必须删除")
+			.doesNotContain("用户没提出就不要展开询问条件");
+		assertThat(prompt).as("禁止从 SELECT_DEFS 直接跳到 EXPORT")
+			.contains("禁止从 SELECT_DEFS 直接跳到 EXPORT");
+		assertThat(prompt).as("进入 EXPORT 且 start_export 已披露时先发起确认卡")
+			.contains("start_export 已披露")
+			.contains("发起 start_export 确认卡");
+		assertThat(prompt).as("确认卡只承接发起，不得自动执行")
+			.contains("不得自动执行");
+	}
+
 }
