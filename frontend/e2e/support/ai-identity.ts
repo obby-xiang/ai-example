@@ -17,7 +17,9 @@
  *   一样把它们留在边界内（漏带头 = 400，扫别人的轮在边界上就不成立）。业务数据（`/api/tasks` 等）
  *   与模型配置**不加**身份头。</li>
  * <li>{@link newAiSession}：先 `POST /api/ai/session` 取号，**只认 `sessionIdText`**（原始响应
- *   文本正则），禁止读 JSON `sessionId` number（约 1.7e18 > 2^53，double 会静默变值）。</li>
+ *   文本正则），禁止读 JSON `sessionId` number（`long` 可能超过 2^53，double 会静默变值）。
+ *   号值由后端 `IdGenerator` 发放（当前实现 = 毫秒时间戳），**不按位数**判定合法性；撞号（同毫秒）
+ *   由后端回 503 `SESSION_ID_UNAVAILABLE`，这里做有界重试。</li>
  * <li>页面身份 = `sessionStorage['ai-identity']`；直连身份必须与它一致（{@link expectSameIdentity}），
  *   否则取证会跨身份（读别人的历史 / 把镜像写到别的身份下）。</li>
  * </ul>
@@ -125,13 +127,19 @@ export function aiRequestOptions<T extends object>(
   return { ...options, headers: merged }
 }
 
+/** `java.lang.Long` 的十进制上界（后端发号是 `long`；超过它不可能是本端点发的号）。 */
+const LONG_MAX = 9223372036854775807n
+
 /**
  * 后端发号：`POST /api/ai/session` → **只认 `sessionIdText`**。
  *
- * <p>为什么不 `res.json()`：号值约 1.7×10^18，JSON number 在 JS 里会被解析成另一个数且不报错；
- * 这里从**原始文本**正则取字符串，并锁位数 ≥ 16（低于它说明拿到的是被截断/格式化的值）。
+ * <p>为什么不 `res.json()` 取号：号是 `long`，可能超过 `2^53`，JSON number 在 JS 里会被静默解析成
+ * 另一个数且不报错；`sessionIdText` 是后端 `Long.toString` 的**权威十进制字符串**。
  *
- * <p>用 Node 全局 `fetch`（不依赖 Playwright 的 `request` 夹具），便于任何用例/助手直接发号。
+ * <p><b>不按位数判定</b>：发号实现是 `TimestampIdGenerator`（`System.currentTimeMillis()`，当前 13 位），
+ * 位数字随实现变化（毫秒时间戳 / 雪花 / 序列号），拿固定位数当"精度丢失"判据必然漂移。
+ * 这里只校验三件事：十进制正整数（无前导零、非 0）、不超过 `long` 上界、与同一响应里的
+ * `sessionId` number 自洽（仅在该 number 可安全表示时逐字比对）。
  */
 export function parseSessionIdText(text: string): string {
   const matched = /"sessionIdText"\s*:\s*"([1-9]\d*)"/.exec(text)
@@ -139,20 +147,48 @@ export function parseSessionIdText(text: string): string {
     throw new Error(`POST /api/ai/session 未返回 sessionIdText（禁止读 JSON number）：${text.slice(0, 400)}`)
   }
   const sessionId = matched[1]
-  if (sessionId.length < 16) {
-    throw new Error(`sessionIdText 位数 ${sessionId.length} < 16（疑似精度丢失）：${sessionId}`)
+  if (BigInt(sessionId) > LONG_MAX) {
+    throw new Error(`sessionIdText 超出 long 上界（不是本端点发的号）：${sessionId}`)
+  }
+  // 与响应自洽：number 能安全表示时必须与文本逐字相等；超过 2^53 的 number 已失真，不回读比对。
+  const numberText = /"sessionId"\s*:\s*(-?\d+)/.exec(text)?.[1]
+  if (numberText !== undefined) {
+    const asNumber = Number(numberText)
+    if (Number.isSafeInteger(asNumber) && String(asNumber) !== sessionId) {
+      throw new Error(`sessionIdText 与响应 sessionId 不一致：${sessionId} vs ${numberText}`)
+    }
   }
   return sessionId
 }
 
+/** 撞号（同毫秒取到已占用的号）的有界重试：次数与间隔写死，不无限重试。 */
+const SESSION_ISSUE_ATTEMPTS = 3
+const SESSION_ISSUE_RETRY_MS = 5
+
 export async function newAiSession(base: string, identity: AiIdentity = AI_IDENTITY): Promise<string> {
   const url = `${base}/api/ai/session`
-  const res = await fetch(url, { method: 'POST', headers: aiIdentityHeaders(identity) })
-  const text = await res.text()
-  if (!res.ok) {
-    throw new Error(`POST /api/ai/session => HTTP ${res.status} ${text.slice(0, 400)}`)
+  let lastBody = ''
+  for (let attempt = 1; attempt <= SESSION_ISSUE_ATTEMPTS; attempt += 1) {
+    const res = await fetch(url, { method: 'POST', headers: aiIdentityHeaders(identity) })
+    const text = await res.text()
+    if (res.ok) {
+      return parseSessionIdText(text)
+    }
+    // 撞号：毫秒时间戳发号，同一毫秒（含跨实例）可能撞上已有会话 —— 后端保旧会话并回 503。
+    // 其它失败（400/500/身份头缺失）立即上抛，不重试。
+    if (res.status !== 503 || !text.includes('SESSION_ID_UNAVAILABLE')) {
+      throw new Error(`POST /api/ai/session => HTTP ${res.status} ${text.slice(0, 400)}`)
+    }
+    lastBody = text
+    if (attempt === SESSION_ISSUE_ATTEMPTS) {
+      break
+    }
+    // 隔一拍再取（跨过同一毫秒），次数有界。
+    await new Promise((done) => setTimeout(done, SESSION_ISSUE_RETRY_MS))
   }
-  return parseSessionIdText(text)
+  throw new Error(
+    `POST /api/ai/session => 连续 ${SESSION_ISSUE_ATTEMPTS} 次撞号（SESSION_ID_UNAVAILABLE）：${lastBody.slice(0, 400)}`
+  )
 }
 
 /**
@@ -187,6 +223,37 @@ export function pageMirrorKey(sessionId: string, identity: AiIdentity = AI_IDENT
 /** 草稿键前缀：`cm.ai.form.draft.<t>:<u>.`。 */
 export function pageDraftPrefix(identity: AiIdentity = AI_IDENTITY): string {
   return `cm.ai.form.draft.${identityFingerprint(identity)}.`
+}
+
+// ── 后端 Redis 键形（身份段，与 `TenantKeyScope` 逐字同构） ─────────────────────
+
+/**
+ * 会话记录键：`ai:session:<t>:<u>:<sid>`（后端 `AiSessionService.keyFor`，SET NX 创建、带会话 TTL）。
+ *
+ * <p>没有身份段就落到 **legacy 命名空间** `ai:session:<sid>`：带身份的读写永不触及它，
+ * 所以取证必须用带身份段的键 —— 否则会把"会话确实在"读成"键不存在"。
+ */
+export function sessionRecordKey(sessionId: string, identity: AiIdentity = AI_IDENTITY): string {
+  return `ai:session:${identityFingerprint(identity)}:${sessionId}`
+}
+
+/**
+ * 会话记忆键：`chat:mem:<t>:<u>:{<sid>}`（后端 `RedisChatMemoryRepository.key`）。
+ *
+ * <p>`{sid}` 是 hash tag（Cluster 同槽）：身份段在 tag **之前**，tag 内只有转义后的会话号。
+ */
+export function sessionMemoryKey(sessionId: string, identity: AiIdentity = AI_IDENTITY): string {
+  return `chat:mem:${identityFingerprint(identity)}:{${sessionId}}`
+}
+
+/** 会话上下文真值键：`ai:ctx:<t>:<u>:<sid>`（后端 `RunStore.contextKey`，HASH + 会话 TTL）。 */
+export function sessionContextKey(sessionId: string, identity: AiIdentity = AI_IDENTITY): string {
+  return `ai:ctx:${identityFingerprint(identity)}:${sessionId}`
+}
+
+/** 会话 run 索引键：`ai:session:runs:<t>:<u>:<sid>`（后端 `RunStore` 的 SESSION_RUNS，SET）。 */
+export function sessionRunsIndexKey(sessionId: string, identity: AiIdentity = AI_IDENTITY): string {
+  return `ai:session:runs:${identityFingerprint(identity)}:${sessionId}`
 }
 
 /** 页面当前身份（`ai-identity`；未落身份 = null）。 */

@@ -32,7 +32,14 @@ import {
   userBubbles,
   waitSettled
 } from './support/helpers-nfezui'
-import { newAiSession, seedSessionStorage } from './support/ai-identity'
+import {
+  newAiSession,
+  seedSessionStorage,
+  sessionContextKey,
+  sessionMemoryKey,
+  sessionRecordKey,
+  sessionRunsIndexKey
+} from './support/ai-identity'
 
 const TURN = 'turn-text 用例'
 const unique = (tag: string): string => `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -105,7 +112,9 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
       timeout: 15_000
     }).toBeGreaterThan(0)
     // 会话面/记忆面/上下文面的真键确实在位（Redis DB 13，本域独占）
-    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
+    // 键形带身份段：`ai:session:1:101:<sid>` / `chat:mem:1:101:{<sid>}` / `ai:ctx:1:101:<sid>`
+    // （后端 `TenantKeyScope`；裸键是 legacy 命名空间，带身份的读写永不触及）。
+    for (const key of [sessionRecordKey(sid), sessionMemoryKey(sid), sessionContextKey(sid)]) {
       expect(await redisInt(NFEZUI_REDIS_DB, ['EXISTS', key]), `${key} 销毁前应存在`).toBe(1)
     }
     // 业务数据基线：「只删 AI 自有数据」不是"顺手删干净"
@@ -167,7 +176,13 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     expect(ctxAfter.usedTokens).toBe(0)
     expect(ctxAfter.source).toBe('none')
     expect((await feedbackList(request)).filter((item) => item.sessionId === sid)).toEqual([])
-    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`, `ai:session:runs:${sid}`]) {
+    // 四个键一律按身份段取（裸键是 legacy 命名空间，本就不该有 —— 查裸键会"因为不存在而永远通过"）。
+    for (const key of [
+      sessionRecordKey(sid),
+      sessionMemoryKey(sid),
+      sessionContextKey(sid),
+      sessionRunsIndexKey(sid)
+    ]) {
       expect(await redisInt(NFEZUI_REDIS_DB, ['EXISTS', key]), `${key} 销毁后应不存在`).toBe(0)
     }
     const tasksAfter = await apiGet<{ totalElements?: number }>(request, '/api/tasks?page=0&size=1')
@@ -306,21 +321,23 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     await seedRound(page, 'N10-a')
     const sid = await sessionIdOf(page)
     // Redis 面（DB 13 独占）：会话键存在且带 TTL（默认 session-ttl 24h）
-    const ttl1 = await redisInt(NFEZUI_REDIS_DB, ['TTL', `ai:session:${sid}`])
+    // 键形带身份段（后端 `TenantKeyScope`）：`ai:session:1:101:<sid>`；裸键是 legacy 命名空间，恒不存在。
+    const sessionKey = sessionRecordKey(sid)
+    const ttl1 = await redisInt(NFEZUI_REDIS_DB, ['TTL', sessionKey])
     expect(ttl1).toBeGreaterThan(0)
     expect(ttl1).toBeLessThanOrEqual(86_400)
 
     // 静置 5s ⇒ TTL 自然下掉；再跑一轮 ⇒ 滑动续期把它抬回满值（先掉后回才可观测）
     await new Promise((done) => setTimeout(done, 5000))
-    const ttlIdle = await redisInt(NFEZUI_REDIS_DB, ['TTL', `ai:session:${sid}`])
+    const ttlIdle = await redisInt(NFEZUI_REDIS_DB, ['TTL', sessionKey])
     expect(ttlIdle).toBeLessThan(ttl1)
     await seedRound(page, 'N10-b')
-    const ttlFresh = await redisInt(NFEZUI_REDIS_DB, ['TTL', `ai:session:${sid}`])
+    const ttlFresh = await redisInt(NFEZUI_REDIS_DB, ['TTL', sessionKey])
     expect(ttlFresh).toBeGreaterThan(ttlIdle)
     expect(ttlFresh).toBeGreaterThanOrEqual(ttl1 - 1)
 
     // 静默过期的等价面：会话键 + 记忆键 + 上下文键一并按 TTL 消失
-    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
+    for (const key of [sessionRecordKey(sid), sessionMemoryKey(sid), sessionContextKey(sid)]) {
       await redisEval(NFEZUI_REDIS_DB, ['DEL', key])
     }
     expect((await historyOf(request, sid)).count).toBe(0)
@@ -330,7 +347,9 @@ test.describe('@stub 13a · N 会话管理与页签所有权', () => {
     await openPanel(page)
     await seedRound(page, 'N11-a')
     const sid = await sessionIdOf(page)
-    for (const key of [`ai:session:${sid}`, `chat:mem:{${sid}}`, `ai:ctx:${sid}`]) {
+    // 键形带身份段（后端 `TenantKeyScope`）：裸键 `ai:session:<sid>` 是 legacy 命名空间，恒不存在 ——
+    // 删裸键等于删空气，本用例会因此"永远通过"。这里必须删真键，才算真把会话置成到期态。
+    for (const key of [sessionRecordKey(sid), sessionMemoryKey(sid), sessionContextKey(sid)]) {
       await redisEval(NFEZUI_REDIS_DB, ['DEL', key])
     }
 
