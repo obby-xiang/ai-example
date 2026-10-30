@@ -2,11 +2,8 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
-import com.example.configmgr.ai.form.ConditionsForm;
-import com.example.configmgr.ai.form.GenerativeFormGuard;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.form.TaskTypeForm;
-import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
@@ -83,8 +80,6 @@ class TaskTypeFormResumeTest {
 
 	private final ToolResultLimiter limiter = new ToolResultLimiter(this.properties);
 
-	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
-
 	private ResumeService service;
 
 	@BeforeEach
@@ -109,10 +104,6 @@ class TaskTypeFormResumeTest {
 
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
-		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
-				this.beacon, List.of(new GenerativeFormGuard(new ObjectMapper())));
-		this.service.setConditionsForm(new ConditionsForm(this.store, this.registry, gate, this.codec,
-				this.properties));
 	}
 
 	@Test

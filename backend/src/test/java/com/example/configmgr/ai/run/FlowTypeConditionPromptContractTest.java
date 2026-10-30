@@ -129,17 +129,22 @@ class FlowTypeConditionPromptContractTest {
 	}
 
 	@Test
-	void promptDeclaresHostIssuedFormsAreAnsweredNotRepeated() {
+	void promptDeclaresTypeFormHostIssuedAndConditionFormModelIssued() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
-		assertThat(prompt).as("类型表单由宿主先行下发：收到回灌就直接 create_task")
+		assertThat(prompt).as("类型表单仍由宿主先行下发：收到回灌就直接 create_task")
 			.contains("宿主会先行下发那张类型表单")
 			.contains("收到它的回灌")
 			.contains("就直接按该值 create_task");
-		assertThat(prompt).as("条件文本框同理：回灌文本按规则 26 解析，留空直接推进")
-			.contains("宿主会先行下发那一次条件文本框")
-			.contains("留空就直接 confirm_step");
-		assertThat(prompt).as("宿主已经发过的那一张不得再发第二张（否则同一缺口弹两次）")
+		assertThat(prompt).as("条件文本框不再由宿主代发（否则模型没机会理解用户原话）")
+			.doesNotContain("宿主会先行下发那一次条件文本框");
+		assertThat(prompt).as("条件未知时由模型在 QUERY_COND 下发那一次条件文本框")
+			.contains("由你（模型）")
+			.contains("不要等宿主代发");
+		assertThat(prompt).as("已知条件不因大小写/别名写法被当成缺失")
+			.contains("含小写、别名等")
+			.contains("非规范写法");
+		assertThat(prompt).as("已经发过的那一张不得再发第二张（否则同一缺口弹两次）")
 			.contains("不得再下发第二张");
 	}
 

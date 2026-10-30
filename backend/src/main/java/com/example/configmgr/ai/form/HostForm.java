@@ -9,7 +9,6 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
-import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +21,7 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 宿主确定性表单的<b>共用挂起面</b>：三张宿主表单（选择配置项 / 任务类型 / 筛选条件）走的是
+ * 宿主确定性表单的<b>共用挂起面</b>：两张宿主表单（选择配置项 / 任务类型）走的是
  * <b>同一份</b>挂起、去重、序列化与失败收敛逻辑，只有"什么时候该发"这一条按节点各不相同。
  *
  * <h2>为什么抽出基类</h2>
@@ -263,14 +262,6 @@ abstract class HostForm {
 			}
 		}
 		return false;
-	}
-
-	/**
-	 * 交棒历史里最后一条<b>真实用户</b>原文 —— 委托 {@link TaskIntent#lastRealUserText} 的<b>唯一实现</b>
-	 * （跳过合成消息、与续跑侧交棒前的槽位重算同一口径；三处各写一遍必然漂移）。
-	 */
-	protected static String lastUserText(List<Message> history) {
-		return TaskIntent.lastRealUserText(history);
 	}
 
 	protected static JsonNode parseJson(String json) {

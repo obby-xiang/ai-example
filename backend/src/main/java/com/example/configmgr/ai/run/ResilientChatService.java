@@ -345,10 +345,12 @@ public class ResilientChatService {
 			    generative_form(purpose=SELECT_DEFINITIONS)，选项平铺多选配置项；
 			    禁止"请告诉我导出哪个/要导出哪些配置"这类开放式文字反问，也禁止只把定义列表列在正文里让用户自己挑。
 			    筛选条件可选：进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（purpose=SET_CONDITIONS），
-			    这是条件收集的唯一渠道；用户已给条件就直接 set_condition、不弹表单；框内留空就直接 confirm_step
+			    这是条件收集的唯一渠道；用户已给条件就直接 set_condition、不弹表单（含小写、别名等
+			    非规范写法：按配置定义字段的可选值理解后传结构化参数）；框内留空就直接 confirm_step
 			    推进（不设条件即全量）。条件只收集这一次，不得重复下发条件表单，也不得改用文字追问。
-			    进入 QUERY_COND 时宿主会先行下发那一次条件文本框：收到它的回灌就把文本按第 26 条解析成
-			    set_condition、留空就直接 confirm_step，不得再下发第二张，也不得改用文字追问。
+			    条件未知时才由你（模型）在 QUERY_COND 下发那一次条件文本框，不要等宿主代发：
+			    收到它的回灌就把文本按第 26 条解析成 set_condition、留空就直接 confirm_step，
+			    不得再下发第二张，也不得改用文字追问。
 			""";
 
 	/**
@@ -497,18 +499,6 @@ public class ResilientChatService {
 	@Autowired(required = false)
 	public void setTaskTypeForm(com.example.configmgr.ai.form.TaskTypeForm form) {
 		this.taskTypeForm = form;
-	}
-
-	/**
-	 * 宿主确定性筛选条件文本框（首轮就停在 {@code QUERY_COND} + 条件未给 + 主动任务链 ⇒ 宿主先挂起
-	 * 那个非必填 text 框）。续跑侧的同一判据在 {@code ResumeService} 的交棒点（两处共用一个组件）。
-	 */
-	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
-
-	/** 可选注入（缺席 = 不弹条件框，模型侧既有路径不变）。 */
-	@Autowired(required = false)
-	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
-		this.conditionsForm = form;
 	}
 
 	/** 可选注入（取消收尾的接管通路；缺失时退化为"拒写即退出"的旧口径）。 */
@@ -782,19 +772,16 @@ public class ResilientChatService {
 				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
 				return;
 			}
-			// ===== 宿主确定性收集表单（类型未知 / 停在条件步且条件未给）=====
+			// ===== 宿主确定性类型表单（类型未知）=====
 			// 位置在取消复查之后、驱动模型之前：判据只看用户原话与槽位（不看模型这一拍的输出），
 			// 于是"问什么"不再由模型的自由裁量决定；挂起面与续跑侧同一个组件（HostForm），
 			// 用户的提交/取消走既有回灌与既有续跑，确认卡与 HITL 一字不动。
+			// 筛选条件不在此列：条件写法（大小写/别名/自由文本）必须由模型理解用户原话后再决定，
+			// 宿主抢在模型之前发文本框会把"已知条件"误判成"缺失"，模型这一拍根本没有机会。
 			// 模型不支持工具调用时不下发（它连 create_task 都发不出来，问了也走不下去）。
 			if (toolsAllowed && this.taskTypeForm != null
 					&& this.taskTypeForm.parkIfDue(runId, context, request.message(), full)) {
 				log.info("首轮改为等人填任务类型（本拍不驱动模型）runId={}", runId);
-				return;
-			}
-			if (toolsAllowed && this.conditionsForm != null
-					&& this.conditionsForm.parkIfDue(runId, context, List.of(), full)) {
-				log.info("首轮改为等人填筛选条件（本拍不驱动模型）runId={} taskId={}", runId, context.getTaskId());
 				return;
 			}
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, attempt -> {

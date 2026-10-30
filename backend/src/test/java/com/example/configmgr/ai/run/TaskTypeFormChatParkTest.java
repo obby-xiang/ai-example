@@ -5,7 +5,6 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
-import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.form.GenerativeFormGuard;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.form.TaskTypeForm;
@@ -123,8 +122,6 @@ class TaskTypeFormChatParkTest {
 				this.cancellations, this.beacon, this.watchdogExecutor);
 		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog));
 		this.service.setTaskTypeForm(new TaskTypeForm(this.store, this.registry, this.gate, this.codec,
-				this.properties));
-		this.service.setConditionsForm(new ConditionsForm(this.store, this.registry, this.gate, this.codec,
 				this.properties));
 		stubFluentChain();
 		when(this.cancellations.isCancelled(anyString())).thenReturn(false);

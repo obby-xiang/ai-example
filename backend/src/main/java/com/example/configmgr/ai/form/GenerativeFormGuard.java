@@ -226,8 +226,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * 条件收集的步骤门：<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，
 	 * 其余步骤（{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链等）一律拒绝。
 	 *
-	 * <p>判据本体在 {@link GenerativeFormRules#conditionsStepAllowed} —— 宿主条件表单与这道闸门
-	 * <b>共用同一份实现</b>（两处各写一遍必然漂移："模型发的被拒、宿主发的照弹"）。
+	 * <p>判据本体在 {@link GenerativeFormRules#conditionsStepAllowed} —— 条件表单的下发与这道闸门
+	 * <b>共用同一份实现</b>（两处各写一遍必然漂移：表单发的与闸门判的不是同一步骤）。
 	 */
 	private static boolean conditionsStepAllowed(String step) {
 		return GenerativeFormRules.conditionsStepAllowed(step);
