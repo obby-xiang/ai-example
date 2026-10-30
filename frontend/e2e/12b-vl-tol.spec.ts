@@ -9,7 +9,7 @@
  *   - 后端工具：真模型路径（桩下发 → 后端执行 → 卡面）与只读披露端点 `GET /api/ai/tools`；
  *   - 前端工具：真模块直调 `executeFrontendTool`（真 DOM、真下载、真落库）。
  */
-import { expect, test, type APIRequestContext } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 import { api, createExportedTask, createImportTaskAtUpload, createUploadedImportTask, sendMessage, waitRoundSettled } from './support/helpers'
 import {
   ensureVlStack,
@@ -86,6 +86,46 @@ async function createExportTaskAtQueryCond(request: APIRequestContext, defCodes:
   await api.post(request, `/api/tasks/${task.id}/select-defs`, { defCodes })
   await api.put(request, `/api/tasks/${task.id}/step`, { step: 'QUERY_COND' })
   return task.id
+}
+
+/** 读任务条目里**业务库**的 `conditionJson` 原文（任务里没有该条目 ⇒ 空串）。 */
+async function conditionJsonOf(request: APIRequestContext, taskId: number, defCode: string): Promise<string> {
+  const task = await api.get<{ items?: Array<{ defCode: string; conditionJson: string | null }> }>(request, `/api/tasks/${taskId}`)
+  return task.items?.find((entry) => entry.defCode === defCode)?.conditionJson ?? ''
+}
+
+interface ConditionWrites {
+  /** 已发出的写请求 URL（按发出序）。 */
+  requests: string[]
+  /** 对应响应码（按到达序）。 */
+  statuses: number[]
+}
+
+/**
+ * 侦听页面发往「任务条目查询条件」的写请求（`PUT /api/tasks/{id}/items/{defCode}/condition`）。
+ *
+ * 草案口径（2026-10-30）：`set_condition` 只写页面草案、不碰业务库，唯一提交点是离开
+ * 查询条件步的 `persistStepData`（`confirm_step` / 开始导出）。于是"写了几次、写在哪一拍"
+ * 本身就是判据：草案阶段必须 0 次（提前写），推进时有且只有 1 次（重复写也是缺陷）。
+ * 事后读库只能证明"最终值对不对"，分辨不出这两类回归，故用页面真实写请求作证据面。
+ */
+function watchConditionWrites(page: Page, taskId: number, defCode: string): ConditionWrites {
+  const target = `/api/tasks/${taskId}/items/${defCode}/condition`
+  const matched = (url: string): boolean => {
+    try {
+      return new URL(url).pathname.endsWith(target)
+    } catch {
+      return false
+    }
+  }
+  const writes: ConditionWrites = { requests: [], statuses: [] }
+  page.on('request', (req) => {
+    if (req.method() === 'PUT' && matched(req.url())) writes.requests.push(req.url())
+  })
+  page.on('response', (res) => {
+    if (res.request().method() === 'PUT' && matched(res.url())) writes.statuses.push(res.status())
+  })
+  return writes
 }
 
 test.describe('@stub L 工具全量面（12b）', () => {
@@ -192,12 +232,14 @@ test.describe('@stub L 工具全量面（12b）', () => {
     await expect(page.locator('[data-ai-ref$=".NOT_A_DEF"]')).toHaveCount(0)
   })
 
-  test('E2E-L12 set_condition：筛选控件值真实变化且落库', async ({ page, request }) => {
+  test('E2E-L12 set_condition：只形成页面草案，下一步才提交一次', async ({ page, request }) => {
     const taskId = await createExportTaskAtQueryCond(request)
+    const writes = watchConditionWrites(page, taskId, 'CURRENCY')
     await vlOpenApp(page, `/export?taskId=${taskId}`)
     // L-109：区域注册可能晚于断言（首帧后页面还会被重载/重挂）⇒ 轮询到区域真出现在快照里
     const before = await vlSnapshotWithRegion(page, 'export.cond')
     expect(before.regionIds).toContain('export.cond')
+    expect(await conditionJsonOf(request, taskId, 'CURRENCY')).toBe('')
 
     const outcome = await callUntil(page, 'set_condition', {
       defCode: 'CURRENCY',
@@ -206,10 +248,11 @@ test.describe('@stub L 工具全量面（12b）', () => {
     expect(outcome.outcome).toBe('ok')
     expect(String(outcome.result)).toContain('CURRENCY')
 
-    // 落库：后端 conditionJson 是导出作业的唯一条件来源
-    const task = await api.get<{ items: Array<{ defCode: string; conditionJson: string | null }> }>(request, `/api/tasks/${taskId}`)
-    const item = task.items.find((entry) => entry.defCode === 'CURRENCY')
-    expect(item?.conditionJson ?? '').toContain('USD')
+    // 草案阶段（2026-10-30 提交边界）：设置条件只写页面草案，业务库仍是旧值 —— 本任务从无 ⇒ 空。
+    // 负断言留一个有界窗口：提前写入若发生，这一拍之内必然已经发到后端（否则读库只是抢在 HTTP 之前）。
+    await page.waitForTimeout(500)
+    expect(writes.requests).toHaveLength(0)
+    expect(await conditionJsonOf(request, taskId, 'CURRENCY')).toBe('')
 
     // 非法条件（缺 defCode）结构化失败。R6：除文本外必须断言 outcome=failed ——
     // 旧页面 handler 缺 defCode 时回**字符串**，`interpretHandlerOutcome` 会把它判成 ok（假成功）。
@@ -217,6 +260,23 @@ test.describe('@stub L 工具全量面（12b）', () => {
       (view) => String(view.outcome) === 'failed' && String(view.result ?? '').includes('缺少 defCode'))
     expect(String(bad.outcome)).toBe('failed')
     expect(String(bad.result ?? '')).toContain('缺少 defCode')
+
+    // 既有 confirm_step（「下一步」）是唯一提交点：草案在这一拍一次性落库。
+    // 次数判据比"最终值对不对"更细 —— 提前写（草案阶段 1 次）与重复写（推进后 2 次）都是缺陷。
+    const advanced = await callUntil(page, 'confirm_step', { step: 'EXPORT' },
+      (view) => view.outcome === 'ok' && String(view.result ?? '').includes('已推进'))
+    expect(advanced.outcome).toBe('ok')
+    await expect.poll(() => writes.requests.length, { timeout: 15_000 }).toBe(1)
+    await expect.poll(() => writes.statuses.length, { timeout: 15_000 }).toBe(1)
+    expect(writes.statuses[0]).toBeGreaterThanOrEqual(200)
+    expect(writes.statuses[0]).toBeLessThan(300)
+
+    // 落库：后端 conditionJson 是导出作业的唯一条件来源，且落的就是草案那一份（不多不少一条）
+    const raw = await conditionJsonOf(request, taskId, 'CURRENCY')
+    expect(raw).toContain('USD')
+    const parsed = JSON.parse(raw) as { fields?: Array<{ fieldCode: string; operator: string; value: unknown }> }
+    expect(parsed.fields).toHaveLength(1)
+    expect(parsed.fields?.[0]).toMatchObject({ fieldCode: 'code', operator: 'EQ', value: 'USD' })
   })
 
   test('E2E-L12b set_condition（多值 IN）：confirm_step 不得把条件换义（数组仍是数组）', async ({ page, request }) => {

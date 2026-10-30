@@ -14,8 +14,14 @@
  *
  * <p><b>明确停止点 = 筛选条件步（{@code currentStep=QUERY_COND}）</b>：任务书要求的就是
  * "创建、导航、选配置、推进、设条件"，本用例<b>不</b>覆盖 {@code start_export}（那是另一条
- * 有自己确认卡的链路）。因此提示词会显式说"到设条件就停下、不要启动导出"，断言也据此收口 ——
- * 这样"模型多走一步"才是被提示词约束住的偏差，而不是把产品多做的那一步误判成失败。
+ * 有自己确认卡的链路），提示词也显式要求"到设条件就停下、不要启动导出" —— 这样"模型多走一步"
+ * 才是被提示词约束住的偏差，而不是把产品多做的那一步误判成失败。
+ *
+ * <p>这个停止点同时是<b>条件提交边界</b>的判据（2026-10-30 裁决）：AI 的 {@code set_condition}
+ * 只形成页面草案，业务库 {@code items[].conditionJson} 在 QUERY_COND 阶段<b>必须仍为空</b>；
+ * 唯一提交点是离开查询条件步的 {@code persistStepData}。故本用例在停止点之后<b>点击页面自身的
+ * 「下一步」</b>（真实用户路径，与 AI 的 {@code confirm_step} 走同一个 {@code goStep}）完成推进，
+ * 再断言条件一次性落库 —— 不去驱动模型多走一步，也不替它造假。
  *
  * <h2>为什么必须真机 + 真模型</h2>
  * <ul>
@@ -32,9 +38,11 @@
  * <li><b>历史载荷</b> {@code GET /api/ai/history/{sid}}：工具调用名序列（{@code create_task} →
  * {@code navigate_to} → {@code select_definitions} → {@code confirm_step} → {@code set_condition}）
  * 与 {@code toolCallStates[].code}；{@code FORM_SLOTS_ALREADY_KNOWN} 一次都不许出现；</li>
- * <li><b>业务面（任务权威状态）</b> {@code GET /api/tasks/{id}}：{@code currentStep=QUERY_COND}
- * （本用例的明确停止点）且 {@code items[]} 里 {@code CURRENCY} 条目的 {@code conditionJson}
- * 已持久化并含 {@code code=CNY} —— 不再断言"存在 EXPORT 作业"（本用例根本不启动导出）。</li>
+ * <li><b>业务面（任务权威状态）</b> {@code GET /api/tasks/{id}}：停止点 {@code currentStep=QUERY_COND}
+ * 且 {@code items[]} 里 {@code CURRENCY} 条目的 {@code conditionJson} <b>仍为空</b>（草案没有提前落库，
+ * 页面也没有发出过条件写请求）；页面「下一步」之后 {@code currentStep=EXPORT}，同一条目的
+ * {@code conditionJson} 已含 {@code code=CNY}，且整个流程只发生过 <b>1 次</b>条件写（提前写 /
+ * 重复写都会被这条计数抓住）。不启动导出作业，故不虚构 EXPORT 作业断言。</li>
  * </ol>
  *
  * <p><b>运行方式</b>：{@code E2E_MODE=real AI_API_KEY=… AI_BASE_URL=… AI_MODEL=… npx playwright test 19-multistep-context}。
@@ -156,6 +164,28 @@ function collectConditionPairs(raw: string): Array<{ field: string; value: strin
 test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币字典）', () => {
   test('E2E-MC01 park 下创建→导航→选配置→推进→设条件全链走通，且全程无冗余表单', async ({ page, request }) => {
     test.setTimeout(600_000)
+
+    /**
+     * 业务库条件写入的唯一通道：页面发往任务条目的 `PUT /api/tasks/{id}/items/{code}/condition`。
+     * 草案口径下这是"写在哪一拍"的唯一可观测证据（事后读库只证明最终值）：草案阶段必须 0 次，
+     * 推进提交时恰好 1 次。监听在导航之前挂上，页面后续跳转不丢。
+     */
+    const conditionWrites: string[] = []
+    page.on('request', (req) => {
+      if (req.method() !== 'PUT') {
+        return
+      }
+      let pathname = ''
+      try {
+        pathname = new URL(req.url()).pathname
+      } catch {
+        return
+      }
+      if (/\/api\/tasks\/\d+\/items\/[^/]+\/condition$/.test(pathname)) {
+        conditionWrites.push(pathname)
+      }
+    })
+
     await openApp(page)
 
     let calls: HistoryCall[] = []
@@ -203,20 +233,48 @@ test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币�
     // 浏览器面同口径：整轮没有任何表单卡（提交/取消都算"多余的表单"）
     await expect(page.locator('[data-testid="gf-fields"]')).toHaveCount(0)
 
-    // ③ 业务面：任务真的建成了，并停在「筛选条件步」、条件已按 CURRENCY.code=CNY 持久化
-    //    停止点由提示词显式声明（"到筛选条件就结束、不要启动导出"）⇒ 这一步的多走一截是
-    //    可判定的偏差；本用例覆盖范围不含 start_export，故不虚构作业、也不放宽下面的状态断言。
+    // ③ 业务面（草案阶段）：任务真的建成了并停在「筛选条件步」，但业务库条件**仍为空** ——
+    //    AI 的 set_condition 只写页面草案（裁决 2026-10-30），提前落库就是本用例要抓的回归。
+    //    停止点由提示词显式声明（"到筛选条件就结束、不要启动导出"），故这一拍不会被模型自己推过。
     const created = calls.find((call) => call.name === 'create_task' && /#\d+/.test(call.result ?? ''))
     expect(created, 'create_task 的回执里没有真实任务号').toBeTruthy()
     const taskId = Number(/#(\d+)/.exec(created?.result ?? '')?.[1] ?? 0)
     expect(taskId).toBeGreaterThan(0)
-    const task = await api.get<{
+    const draft = await api.get<{
       currentStep?: string
       items?: Array<{ defCode?: string; conditionJson?: string | null }>
     }>(request, `/api/tasks/${taskId}`)
-    expect(task.currentStep, `任务未停在筛选条件步（实际 ${task.currentStep}）`).toBe('QUERY_COND')
-    const currency = (task.items ?? []).find((item) => (item.defCode ?? '').toUpperCase() === 'CURRENCY')
-    expect(currency, '任务条目里没有 CURRENCY').toBeTruthy()
+    expect(draft.currentStep, `任务未停在筛选条件步（实际 ${draft.currentStep}）`).toBe('QUERY_COND')
+    const draftCurrency = (draft.items ?? []).find((item) => (item.defCode ?? '').toUpperCase() === 'CURRENCY')
+    expect(draftCurrency, '任务条目里没有 CURRENCY').toBeTruthy()
+    expect(
+      conditionWrites,
+      `草案阶段就向业务库写了条件：${conditionWrites.join(' , ')}`
+    ).toHaveLength(0)
+    expect(
+      (draftCurrency?.conditionJson ?? '').trim(),
+      `草案阶段业务库已有条件：${draftCurrency?.conditionJson ?? '(null)'}`
+    ).toBe('')
+
+    // ④ 推进才是唯一提交点：用页面自身的「下一步」（真实用户路径，与 AI 的 confirm_step 走同一个
+    //    goStep → persistStepData）。断言三件事：页面确实停在条件步、任务推进到导出执行步、
+    //    条件写**恰好一次**（提前写 0+1、重复写 2 次，都会被这条计数抓住）。
+    await expect(page.locator('footer')).toContainText('task:EXPORT/QUERY_COND', { timeout: 15_000 })
+    await page.getByRole('button', { name: '下一步', exact: true }).click()
+    await expect.poll(
+      async () => (await api.get<{ currentStep?: string }>(request, `/api/tasks/${taskId}`)).currentStep,
+      { timeout: 60_000, message: '「下一步」没有把任务推进到导出执行步' }
+    ).toBe('EXPORT')
+    await expect.poll(
+      () => conditionWrites.length,
+      { timeout: 30_000, message: '条件提交次数不是 1 次（提前写 / 重复写）' }
+    ).toBe(1)
+
+    // ⑤ 推进后：条件已按 CURRENCY.code=CNY 持久化（提交的就是草案那一份）
+    const committed = await api.get<{
+      items?: Array<{ defCode?: string; conditionJson?: string | null }>
+    }>(request, `/api/tasks/${taskId}`)
+    const currency = (committed.items ?? []).find((item) => (item.defCode ?? '').toUpperCase() === 'CURRENCY')
     const conditionPairs = collectConditionPairs(currency?.conditionJson ?? '')
     expect(conditionPairs.length, `条件未持久化：${currency?.conditionJson ?? '(null)'}`).toBeGreaterThan(0)
     expect(
@@ -224,10 +282,10 @@ test.describe('@real 19 多步工作流上下文刷新（导出 CURRENCY 货币�
       `条件里没有 code=CNY：${currency?.conditionJson ?? '(null)'}`
     ).toBe(true)
 
-    // ④ 确实走了确认 / park 续跑（一次确认卡被批准 = 一条 HITL 路径被真机走过）
+    // ⑥ 确实走了确认 / park 续跑（一次确认卡被批准 = 一条 HITL 路径被真机走过）
     expect(approvals, '全程没有任何确认卡被批准 ⇒ 没走到 park→续跑链路').toBeGreaterThanOrEqual(1)
 
-    // ⑤ 用户面没有失败/中断提示（全程只有确认卡这一种人工介入）
+    // ⑦ 用户面没有失败/中断提示（全程只有确认卡与一次「下一步」这两种人工介入）
     await expect(page.locator('[data-testid^="error-card-"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="alert-interrupted"]')).toHaveCount(0)
   })
