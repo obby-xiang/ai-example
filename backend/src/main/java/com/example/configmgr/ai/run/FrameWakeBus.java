@@ -37,4 +37,31 @@ public interface FrameWakeBus {
 	/** 取消该 run 的订阅（最后一个本地订阅者断连时调用）。 */
 	void unsubscribe(String runId);
 
+	/**
+	 * <b>带订阅代次</b>的订阅：同一个（身份, run）的第 N 次订阅带代次 N。
+	 *
+	 * <p>为什么要代次：订阅/退订都在锁外做（Redis I/O），"旧代次的 subscribe 晚到"与"旧代次的
+	 * unsubscribe 晚到"都可能落在新订阅之后。代次让实现方能判定先后 ——
+	 * <ul>
+	 * <li>晚到的<b>旧</b> subscribe 不得顶掉更新的订阅（返回 false）；</li>
+	 * <li>晚到的<b>旧</b> unsubscribe 不得摘掉更新的订阅（no-op）。</li>
+	 * </ul>
+	 *
+	 * <p>默认实现退化为无代次版本（不区分先后的实现/单测替身用）；生产实现
+	 * {@code RedisFrameWakeBus} 覆写为按代次比较。
+	 */
+	default boolean subscribe(String runId, long generation, LongConsumer onWake) {
+		return subscribe(runId, onWake);
+	}
+
+	/**
+	 * <b>带订阅代次</b>的退订：只有"当前订阅就是这一代"才摘掉。
+	 *
+	 * <p>这是"旧桶补偿退订不得误退继任订阅"的实现面：退订按<b>代次 + 监听器对象</b>精确匹配，
+	 * 绝不按"频道当前监听器"摘。默认实现退化为无代次版本。
+	 */
+	default void unsubscribe(String runId, long generation) {
+		unsubscribe(runId);
+	}
+
 }

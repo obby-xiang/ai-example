@@ -12,8 +12,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 撞号保护：新号落在<b>已存在的会话键</b>上时，{@code ensure} 只能报告 existed 并续期 TTL，
  * <b>不得重写会话记录</b>（旧会话的归属与历史不能被另一个号覆盖）。
  *
- * <p>发号方（{@code POST /api/ai/session}）据 existed 换号重发；若第二次仍撞号则返回 503，
- * 而不是"登记成功"——静默覆盖等于把两个会话合并成一个。
+ * <p>发号方（{@code POST /api/ai/session}）据"已存在"<b>有界重取号</b>（最多
+ * {@code AiSessionController.SESSION_ID_ATTEMPTS} 次，每次重新向 {@code IdGenerator} 取号）；
+ * 重取到上界仍撞号才返回 503，而不是"登记成功"——静默覆盖等于把两个会话合并成一个。
  */
 class AiSessionCollisionProtectionTest {
 

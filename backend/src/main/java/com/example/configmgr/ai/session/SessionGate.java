@@ -253,7 +253,8 @@ public class SessionGate {
 	 * <p><b>取门与接管是同一条脚本</b>（{@link #ACQUIRE_SCRIPT}）：脚本内比对后才写，因此
 	 * "检查通过、写入已换主"的窗口不存在。三种结局：
 	 * <ul>
-	 * <li>脚本返回 1 ⇒ 已持有（取门或同 run 接管），换 token 并重启 watchdog；</li>
+	 * <li>脚本返回 1 ⇒ 已持有（取门或同 run 接管），换 token 并重启 watchdog，
+	 * 并<b>清掉此前的 {@code degraded}</b>（锁已由脚本确认 ⇒ 跨实例互斥已恢复，不得继续对外声称降级）；</li>
 	 * <li>脚本返回 0 ⇒ <b>另一轮持有</b>：按对方 runId 返回 {@link Busy}，
 	 * <b>不改</b>自己的 holder token、也不宣称接管成功（重入路径下 holder 仍是本轮的）；</li>
 	 * <li>异常 / 结果不可知 ⇒ 只保留进程内门（{@code degraded}），不写兜底、不宣称取到 Redis 锁。</li>
@@ -287,6 +288,9 @@ public class SessionGate {
 				previous.token = token;
 				previous.lockValue = encode(runId, token);
 				previous.lastConfirmedAtMs = nowMs();
+				// 脚本确认了这次持有：此前因降级/续期失败置上的 degraded 必须清掉 ——
+				// 否则跨实例互斥明明已恢复，409 的 degraded 与健康面却一直声称降级。
+				previous.degraded = false;
 				startWatchdog(gateKey, runId, previous.lockValue, previous);
 				return null;
 			}
@@ -502,6 +506,7 @@ public class SessionGate {
 	 * <p>取门时 Redis 不可用/结果不可知只把 holder 置 {@code degraded}（见
 	 * {@code acquire} 的降级分支），<b>不</b>累加 {@code lockLost}（那条路径没走到续期）。
 	 * 只按丢锁计数报降级会把这种最常见的降级形态漏报 —— 而它同样是"跨实例互斥已失效"。
+	 * 反之，脚本成功确认取锁/重入后 {@code degraded} 会被清掉（降级事实不是终身的）。
 	 */
 	public int degradedSessions() {
 		int degraded = 0;

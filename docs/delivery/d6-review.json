@@ -7,6 +7,13 @@
       "reason": "已同步前端身份切换、显式旧身份取消、会话所有权和归档截断响应头契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:85cf065fba5914d341bf129999283d1705328265b7acb2340585b8e60b972af5",
+      "status": "synced",
+      "reason": "已同步会话撞号有界重取、登记不可用和帧唤醒订阅代次隔离契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

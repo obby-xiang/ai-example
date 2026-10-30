@@ -32,8 +32,20 @@ import java.util.Set;
  * 无身份线程（断连回调/投递池）算出来的是 legacy 频道 ⇒ 真条目不被移除（僵尸订阅）。</li>
  * </ul>
  *
- * <p>因此每个目标登记时绑定<b>一个句柄</b>（{@link Registration}：身份 + runId + 分桶键），
+ * <p>因此每个目标登记时绑定<b>一个句柄</b>（{@link Registration}：身份 + runId + 分桶键 + <b>订阅代次</b>），
  * subscribe 与 unsubscribe 都用它 —— 退订不依赖"这一拍线程碰巧是谁"。
+ *
+ * <h2>并发口径（非阻塞 + 代次）</h2>
+ * 订阅/退订都是锁外 Redis I/O，期间可能穿插别的登记与注销。两条硬约束：
+ * <ul>
+ * <li><b>不阻塞调用方</b>：调用方可能是 Redis 订阅连接的分发线程（唤醒回调 → 写出器的
+ *     {@code applyWakeSync} → {@link #register}），在那里等待会把所有频道的投递一起拖住。
+ *     订阅在途时来的目标<b>照样进桶并保留</b>（订阅成功后与发起方一样收到唤醒），只是拿到
+ *     "未确认"（false）—— 调用方下次 attach/出帧再登记时就会拿到 true；</li>
+ * <li><b>代次退订</b>：旧桶的补偿退订可能晚于继任桶的订阅落地。退订带代次，只有"当前订阅就是
+ *     这一代"才摘得掉（{@link FrameWakeBus#unsubscribe(String, long)}），因此旧退订不会误退
+ *     继任订阅，继任者也<b>不必等待</b>旧退订完成。</li>
+ * </ul>
  *
  * <p>本类只做<b>扇出与生命周期</b>，不含 Redis 细节（{@link FrameWakeBus} 负责）；
  * 差量读取与去重在目标侧（{@link SseChatEmitter#onWake}）。
@@ -52,28 +64,84 @@ public class FrameWakeListener {
 
 	private final FrameWakeBus bus;
 
-	/** 分桶键（身份段 + runId）→ 目标集（guarded by {@code this}）。 */
-	private final Map<String, Set<WakeTarget>> targets = new HashMap<>();
-
-	/** 分桶键 → 该桶的身份与 runId（退订时按同一份身份重算频道）。 */
-	private final Map<String, Slot> slots = new HashMap<>();
+	/** 分桶键（身份段 + runId）→ 桶（目标集 + 订阅状态；guarded by {@code this}）。 */
+	private final Map<String, Bucket> buckets = new HashMap<>();
 
 	/** 目标 → 登记句柄（一个目标只属于一轮；退订按它精确回到同一桶/同一频道）。 */
 	private final Map<WakeTarget, Registration> registrations = new HashMap<>();
+
+	/** 订阅代次发号器（guarded by {@code this}）：每次建桶 = 一代，退订按代次精确匹配。 */
+	private long generationSeq;
 
 	public FrameWakeListener(FrameWakeBus bus) {
 		this.bus = bus;
 	}
 
 	/**
-	 * 一个目标在本实例的唤醒登记（身份 + runId + 分桶键）：subscribe/unsubscribe 的<b>同一句柄</b>。
+	 * 一个目标在本实例的唤醒登记（身份 + runId + 分桶键 + 订阅代次）：subscribe/unsubscribe 的<b>同一句柄</b>。
 	 */
-	public record Registration(TenantUser identity, String runId, String key) {
+	public record Registration(TenantUser identity, String runId, String key, long generation) {
 
 	}
 
-	/** 桶的身份与 runId（内部登记用）。 */
-	private record Slot(TenantUser identity, String runId) {
+	/**
+	 * 桶的订阅状态（guarded by 监听器锁）。
+	 *
+	 * <p>状态必须跟着桶走，不能靠"目标集非空"推断：订阅在锁外进行，期间桶里可能已有别的目标，
+	 * 而那一刻订阅<b>尚未建立</b>（见 {@link #register}）。
+	 */
+	private enum State {
+
+		/**
+		 * 有线程正在为该桶建订阅：桶内目标<b>已登记并保留</b>（订阅成功后即生效），但此刻不能对外
+		 * 宣称"已订阅"，因此后来者拿到的是"未确认"（false）而不是等待。
+		 */
+		SUBSCRIBING,
+
+		/** 订阅已建立：后来者直接加入。 */
+		SUBSCRIBED
+
+	}
+
+	/**
+	 * 一个（身份, runId）桶：目标集 + 订阅状态 + 订阅代次。
+	 *
+	 * <p>代次是"退订不误伤继任"的句柄：旧桶那条晚到的 {@code unsubscribe} 只有当代次仍是当前
+	 * 订阅时才摘监听器（见 {@link FrameWakeBus#unsubscribe(String, long)}）。
+	 */
+	private static final class Bucket {
+
+		private final TenantUser identity;
+
+		private final String runId;
+
+		/** 本次订阅的代次（本实例内单调递增，按 key 比较先后）。 */
+		private final long generation;
+
+		/** 桶内目标（guarded by 外层监听器的锁）。 */
+		private final Set<WakeTarget> targets = new LinkedHashSet<>();
+
+		/**
+		 * <b>已确认</b>的目标（{@code register} 返回过 true 的那些；guarded by 外层监听器的锁）。
+		 *
+		 * <p>订阅在途时加入的目标是<b>未确认</b>的：它照样在 {@link #targets} 里、订阅成功后照样收到
+		 * 唤醒，但调用方拿到的是 false —— 而调用方（{@code SseChatEmitter}）在 false 时不会来退订。
+		 * 因此不能让它无限期留在桶里：桶的订阅只由<b>已确认</b>的持有者支撑，最后一个确认者离开时
+		 * 整桶（含未确认的客人）一起摘掉 —— 客人拿到的是 false，会在下一次 attach/出帧时重新登记。
+		 * 这样"不丢目标"与"不留僵尸订阅"同时成立。
+		 */
+		private final Set<WakeTarget> confirmed = new LinkedHashSet<>();
+
+		/** 订阅状态（guarded by 外层监听器的锁）。 */
+		private State state;
+
+		Bucket(TenantUser identity, String runId, long generation, State state) {
+			this.identity = identity;
+			this.runId = runId;
+			this.generation = generation;
+			this.state = state;
+		}
+
 	}
 
 	/**
@@ -85,105 +153,159 @@ public class FrameWakeListener {
 	}
 
 	/**
-	 * 登记一个目标；该（身份, run）桶的第一个目标触发订阅。
+	 * 登记一个目标；该（身份, run）桶的<b>第一个</b>目标触发订阅。
 	 *
-	 * <p>锁内只维护目标集，{@code subscribe} 在<b>锁外</b>做（它有 Redis I/O 与容器启动，
+	 * <p>锁内只维护目标集与订阅状态，{@code subscribe} 在<b>锁外</b>做（它有 Redis I/O 与容器启动，
 	 * 锁内做会让"某个 run 首次挂连接"阻塞所有 run 的登记与唤醒快照）。
+	 *
+	 * <p><b>本方法绝不阻塞调用方</b>（调用方可能是 Redis 订阅连接的分发线程：唤醒回调 →
+	 * {@code SseChatEmitter.applyWakeSync} → 这里；在那条线程上等待会把<b>所有频道</b>的投递一起拖住）。
+	 * 三种结局：
+	 * <ul>
+	 * <li>桶已订阅 ⇒ 加入桶并返回 true；</li>
+	 * <li>桶正在建订阅 ⇒ 目标<b>照样加入桶</b>（订阅成功后它与发起方一样收到唤醒），
+	 *     但此刻不能宣称"已订阅"，返回 <b>false（未确认）</b>；调用方下一次 attach/出帧时会再登记，
+	 *     那时若已订阅就得到 true；</li>
+	 * <li>订阅失败 ⇒ <b>按桶完整回滚</b>（含在途期间加入的目标），失败方留在表里会让后来者
+	 *     被当成"已有订阅"。</li>
+	 * </ul>
 	 *
 	 * <p>身份取<b>登记线程</b>的当前身份（出帧/挂起路径带着请求或恢复身份），并随句柄固定下来：
 	 * 频道名与后续退订都用这一份，不受回调线程（Redis 监听线程 / 连接关闭线程）影响。
 	 *
-	 * @return true = 订阅已生效（或该目标本来就在）；false = 订阅失败，调用方必须回退登记位并等重试
+	 * @return true = 订阅已生效且本目标已在桶里（<b>已确认</b>）；false = <b>未确认</b>（目标已保留、
+	 * 订阅尚未建立）或订阅失败（整桶已回滚）。两种情形调用方都可安全重试
 	 */
 	public boolean register(String runId, WakeTarget target) {
 		TenantUser identity = RequestContextUtils.currentOrNull();
 		String key = keyOf(identity, runId);
-		boolean first;
+		Bucket bucket;
 		synchronized (this) {
-			Set<WakeTarget> set = this.targets.get(key);
-			if (set == null) {
-				set = new LinkedHashSet<>();
-				this.targets.put(key, set);
-				this.slots.put(key, new Slot(identity, runId));
+			Bucket current = this.buckets.get(key);
+			if (current != null) {
+				if (current.targets.add(target)) {
+					this.registrations.put(target, new Registration(identity, runId, key, current.generation));
+				}
+				if (current.state == State.SUBSCRIBED) {
+					current.confirmed.add(target);
+					return true;
+				}
+				// SUBSCRIBING：目标已保留（订阅成功后照样收到唤醒），但订阅尚未确认 ⇒ 如实回 false
+				return false;
 			}
-			first = set.isEmpty();
-			if (!set.add(target)) {
-				return true;
-			}
-			this.registrations.put(target, new Registration(identity, runId, key));
-		}
-		if (!first) {
-			return true;
+			bucket = new Bucket(identity, runId, ++this.generationSeq, State.SUBSCRIBING);
+			this.buckets.put(key, bucket);
+			bucket.targets.add(target);
+			this.registrations.put(target, new Registration(identity, runId, key, bucket.generation));
 		}
 		boolean subscribed;
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			// 订阅在<b>该桶身份</b>下执行：RedisFrameWakeBus 用线程身份拼频道名。
-			subscribed = this.bus.subscribe(runId, upper -> dispatch(key, runId, upper));
+			// 带代次：晚到的旧代次订阅不得顶掉继任订阅（见 FrameWakeBus#subscribe(String, long, LongConsumer)）。
+			subscribed = this.bus.subscribe(runId, bucket.generation,
+					upper -> dispatch(key, runId, upper));
 		}
 		catch (Exception ex) {
 			subscribed = false;
 		}
+		catch (Throwable error) {
+			// Error（如容器级 OOM/断言）也必须先把桶撤掉再抛出：否则该 key 永远停在"订阅在途"，
+			// 后续登记只能拿到"未确认"、这条 run 的唤醒再也建不起来。
+			rollback(key, bucket, runId, identity);
+			throw error;
+		}
 		if (!subscribed) {
-			// I-3：订阅没建立 ⇒ 把这次登记整体撤掉，下一次 attach/close 会重新走一遍（可重试）
-			synchronized (this) {
-				Set<WakeTarget> set = this.targets.get(key);
-				if (set != null && set.size() == 1 && set.contains(target)) {
-					this.targets.remove(key);
-					this.slots.remove(key);
-					this.registrations.remove(target);
-				}
-			}
-			log.warn("帧唤醒订阅建立失败 runId={} identity={}（跨实例实时补帧缺席；下一次 attach 重试）", runId,
-					identity);
+			// 订阅没建立 ⇒ 整桶回滚（含在途期间加入的目标），下一次 attach/close 会重新走一遍
+			rollback(key, bucket, runId, identity);
 			return false;
 		}
-		log.debug("帧唤醒订阅建立 runId={} identity={}", runId, identity);
-		// 订阅期间该桶的最后一个目标可能已注销（subscribe 在锁外）：补一次退订，避免空订阅泄漏
-		Slot slot = null;
+		boolean keep;
 		synchronized (this) {
-			if (!this.targets.containsKey(key)) {
-				slot = new Slot(identity, runId);
+			// 发起方在订阅在途期间可能已注销：那就没有任何"已确认"的持有者，这次订阅必须撤掉，
+			// 不能靠"未确认的客人"把订阅养着（客人拿到的是 false，会自行重试）。
+			keep = bucket.targets.contains(target);
+			if (keep) {
+				bucket.state = State.SUBSCRIBED;
+				bucket.confirmed.add(target);
+			}
+			else {
+				dropBucket(key, bucket);
 			}
 		}
-		if (slot != null) {
-			unsubscribe(new Registration(slot.identity(), runId, key));
+		if (!keep) {
+			// 补偿退订带代次：若继任桶已经订阅（新代次），这条退订是 no-op，绝不摘继任的监听器
+			unsubscribe(new Registration(identity, runId, key, bucket.generation));
 			return false;
 		}
+		log.debug("帧唤醒订阅建立 runId={} identity={} generation={}", runId, identity, bucket.generation);
 		return true;
 	}
 
-	/** 注销一个目标；最后一个目标触发退订（断连即 unsubscribe，不泄漏频道订阅）。 */
+	/**
+	 * 订阅失败后的<b>按桶完整回滚</b>：桶内所有目标一起撤（目标集、登记句柄、桶）。
+	 *
+	 * <p>为什么不是"只撤发起方"：这次订阅没建立，桶里任何目标都不算已订阅；把它们留在表里
+	 * 既永远等不到退订，又会让后来的登记看到"桶非空 ⇒ 已有订阅"而误记已订阅。
+	 */
+	private void rollback(String key, Bucket bucket, String runId, TenantUser identity) {
+		synchronized (this) {
+			dropBucket(key, bucket);
+		}
+		log.warn("帧唤醒订阅建立失败 runId={} identity={}（按桶整桶回滚登记；下一次 attach 重试）", runId, identity);
+	}
+
+	/** 摘掉整桶及其全部登记句柄（含"未确认"的客人）；guarded by {@code this}。 */
+	private void dropBucket(String key, Bucket bucket) {
+		for (WakeTarget target : bucket.targets) {
+			this.registrations.remove(target);
+		}
+		bucket.targets.clear();
+		bucket.confirmed.clear();
+		this.buckets.remove(key, bucket);
+	}
+
+	/**
+	 * 注销一个目标；最后一个<b>已确认</b>目标离开时触发退订（断连即 unsubscribe，不泄漏频道订阅）。
+	 *
+	 * <p>"未确认"的客人（{@code register} 回过 false 的目标）不支撑订阅：最后一个确认者离开时
+	 * 它们随整桶一起摘掉 —— 否则调用方（false ⇒ 不会来退订）会让这条频道订阅永远留着。
+	 */
 	public void unregister(String runId, WakeTarget target) {
 		Registration registration;
-		boolean last = false;
-		Slot slot;
+		Bucket bucket = null;
+		boolean releaseNow = false;
 		synchronized (this) {
 			registration = this.registrations.remove(target);
 			if (registration == null) {
 				return;
 			}
-			Set<WakeTarget> set = this.targets.get(registration.key());
-			if (set == null || !set.remove(target)) {
-				this.slots.remove(registration.key());
+			bucket = this.buckets.get(registration.key());
+			if (bucket == null || !bucket.targets.remove(target)) {
 				return;
 			}
-			last = set.isEmpty();
-			slot = last ? this.slots.remove(registration.key()) : null;
-			if (last) {
-				this.targets.remove(registration.key());
+			bucket.confirmed.remove(target);
+			boolean subscribed = bucket.state == State.SUBSCRIBED;
+			if (bucket.targets.isEmpty() || (subscribed && bucket.confirmed.isEmpty())) {
+				// 立刻摘桶 ⇒ 继任者可以马上建新桶订阅（不等旧退订完成）；
+				// 旧退订按代次比较，晚到也只会是 no-op，摘不掉继任的监听器。
+				dropBucket(registration.key(), bucket);
+				// 订阅还在途时不必在这里退订：发起方返回时会自己走"无可确认持有者 ⇒ 按代次退订"，
+				// 晚到的这条退订同样按代次判定，不会误伤继任。
+				releaseNow = subscribed;
 			}
 		}
-		if (last) {
-			unsubscribe(slot == null ? new Registration(null, runId, registration.key()) : new Registration(
-					slot.identity(), runId, registration.key()));
-			log.debug("帧唤醒订阅释放 runId={} identity={}", runId, registration.identity());
+		if (releaseNow) {
+			unsubscribe(new Registration(bucket.identity, registration.runId(), registration.key(),
+					bucket.generation));
+			log.debug("帧唤醒订阅释放 runId={} identity={} generation={}", runId, registration.identity(),
+					bucket.generation);
 		}
 	}
 
-	/** 退订：与 subscribe <b>同一身份</b>（频道名因此逐字相同），与调用线程身份无关。 */
+	/** 退订：与 subscribe <b>同一身份 + 同一代次</b>（频道名逐字相同，且旧代次不会误退新订阅）。 */
 	private void unsubscribe(Registration registration) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(registration.identity())) {
-			this.bus.unsubscribe(registration.runId());
+			this.bus.unsubscribe(registration.runId(), registration.generation());
 		}
 		catch (Exception ex) {
 			log.warn("帧唤醒退订失败 runId={} identity={}：{}", registration.runId(), registration.identity(),
@@ -199,24 +321,29 @@ public class FrameWakeListener {
 	 */
 	public synchronized int targetCount(String runId) {
 		int total = 0;
-		for (Slot slot : this.slots.values()) {
-			if (runId.equals(slot.runId())) {
-				Set<WakeTarget> set = this.targets.get(keyOf(slot.identity(), slot.runId()));
-				total += set == null ? 0 : set.size();
+		for (Bucket bucket : this.buckets.values()) {
+			if (runId.equals(bucket.runId)) {
+				total += bucket.targets.size();
 			}
 		}
 		return total;
 	}
 
-	/** 当前有订阅的（身份, run）桶数（诊断/断言用）。 */
+	/** 当前<b>订阅已建立</b>的（身份, run）桶数（诊断/断言用）。 */
 	public synchronized int subscribedRuns() {
-		return this.targets.size();
+		int subscribed = 0;
+		for (Bucket bucket : this.buckets.values()) {
+			if (bucket.state == State.SUBSCRIBED) {
+				subscribed++;
+			}
+		}
+		return subscribed;
 	}
 
 	/** 指定身份桶的目标数（诊断/断言用）。 */
 	public synchronized int targetCount(TenantUser identity, String runId) {
-		Set<WakeTarget> set = this.targets.get(keyOf(identity, runId));
-		return set == null ? 0 : set.size();
+		Bucket bucket = this.buckets.get(keyOf(identity, runId));
+		return bucket == null ? 0 : bucket.targets.size();
 	}
 
 	/**
@@ -232,11 +359,11 @@ public class FrameWakeListener {
 	void dispatch(String key, String runId, long upperBoundSeq) {
 		List<WakeTarget> snapshot;
 		synchronized (this) {
-			Set<WakeTarget> set = this.targets.get(key);
-			if (set == null || set.isEmpty()) {
+			Bucket bucket = this.buckets.get(key);
+			if (bucket == null || bucket.targets.isEmpty()) {
 				return;
 			}
-			snapshot = new ArrayList<>(set);
+			snapshot = new ArrayList<>(bucket.targets);
 		}
 		for (WakeTarget target : snapshot) {
 			try {

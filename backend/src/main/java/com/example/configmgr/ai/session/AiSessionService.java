@@ -38,13 +38,17 @@ import java.util.Map;
  *
  * <h2>为什么"校验"其实是"创建或续期"</h2>
  * 发号已改为后端接口（{@code POST /api/ai/session}，毫秒时间戳），但历史页签仍可能携带
- * 旧格式 id（前端迁移前），因此校验语义保持"存在则续期、不存在则登记"，
- * 结果里返回 {@code existed} 供日志与取证区分两种情形。
+ * 旧格式 id（前端迁移前），因此校验语义保持"存在则续期、不存在则登记"。
+ * 登记结局有两种口径：{@link #register} 回三态（{@link Registration}，发号入口用），
+ * {@link #ensure} 回旧布尔（{@code true = 已存在}，对话路径用；登记失败按"首次登记"处理，
+ * 只影响日志取证）。
  *
  * <h2>撞号保护（写一次 + 只续期）</h2>
  * 登记走 Redis 原子 {@code SET NX EX}：键不存在才写，已存在<b>只刷新 TTL、不重写记录</b>。
- * 因此发号若撞上已有号，旧会话的归属与内容原样保留，{@code existed=true} 让发号入口返回 503，
- * 绝不会把两条会话静默合并成一条。
+ * 因此发号若撞上已有号，旧会话的归属与内容原样保留，{@link #register} 报
+ * {@link Registration#EXISTED} 让发号入口<b>换号重取</b>（有界），绝不会把两条会话静默合并成一条。
+ * 登记失败（Redis 不可用）与"新建成功"必须分开报告（{@link Registration#UNAVAILABLE}）：
+ * 把没登记报成已创建，会让发号入口 200 返回一个本实例之外并不存在的会话号。
  */
 @Slf4j
 @Component
@@ -107,30 +111,69 @@ public class AiSessionService {
 		return ensureInternal(sessionId, new TenantUser(tenantId, userId));
 	}
 
-	private boolean ensureInternal(String sessionId, TenantUser identity) {
+	/**
+	 * 会话登记结局（发号入口据此决定换号重取还是报不可用）。
+	 */
+	public enum Registration {
+
+		/** 本次真正写入了新记录。 */
+		CREATED,
+
+		/** 号已存在（同身份撞号）：旧记录未被覆盖，调用方应换号重取。 */
+		EXISTED,
+
+		/**
+		 * 登记无法确认（Redis 异常/不可用）：记录<b>没有</b>写成。
+		 *
+		 * <p>必须与 {@link #CREATED} 分开：把"没登记"报成"已创建"会让发号入口 200 返回一个
+		 * 本实例之外并不存在的会话号（会话归属、记忆窗口、会话门全部落在空处）。
+		 */
+		UNAVAILABLE
+
+	}
+
+	/**
+	 * 登记会话并报告<b>结局</b>（发号入口 {@code POST /api/ai/session} 的唯一登记口）。
+	 *
+	 * <p>归属只认服务端传入的 {@code tenantId/userId}，不读客户端请求体 ——
+	 * 否则前端可以自报另一个租户。写路径与 {@link #ensure} 完全相同（{@code SET NX EX} +
+	 * 已存在只续期），区别只在异常：这里如实回 {@link Registration#UNAVAILABLE}，
+	 * 而不是压成与"首次登记"同义的 {@code false}。
+	 */
+	public Registration register(String sessionId, long tenantId, long userId) {
+		return registerInternal(sessionId, new TenantUser(tenantId, userId));
+	}
+
+	private Registration registerInternal(String sessionId, TenantUser identity) {
 		String key = keyFor(sessionId, identity);
 		Duration ttl = this.properties.getSessionTtl();
 		try {
 			// 原子"不存在才创建"（SET NX EX）：两个实例拿到同一个号时，只有先到者写入。
 			if (Boolean.TRUE.equals(this.redis.opsForValue().setIfAbsent(key, valueOf(sessionId, identity), ttl))) {
-				return false;
+				return Registration.CREATED;
 			}
 			// 已存在：只滑动 TTL，<b>不重写记录</b>。撞号时旧会话的归属/内容必须原样保留
-			// （发号入口据此返回 503，绝不把两条会话静默合成一条）。
+			// （发号入口据此换号重取，绝不把两条会话静默合成一条）。
 			this.redis.expire(key, ttl);
-			return true;
+			return Registration.EXISTED;
 		}
 		catch (Exception ex) {
-			// 会话登记失败不应阻断本轮对话：记忆与挂起态各自有键，AI 能力不因此降级
+			// 会话登记失败不应阻断本轮对话：记忆与挂起态各自有键，AI 能力不因此降级。
+			// 但"没登记"是事实，必须能传给发号入口（不得当创建成功）。
 			log.warn("会话登记失败 sessionId={}：{}", sessionId, ex.getMessage());
-			return false;
+			return Registration.UNAVAILABLE;
 		}
+	}
+
+	private boolean ensureInternal(String sessionId, TenantUser identity) {
+		// 布尔口径保持原语义：只有"已存在"才是 true；登记失败仍按"首次登记"处理（只影响日志取证）。
+		return registerInternal(sessionId, identity) == Registration.EXISTED;
 	}
 
 	private String valueOf(String sessionId, TenantUser identity) throws Exception {
 		Map<String, Object> value = new LinkedHashMap<>();
 		value.put("sessionId", sessionId);
-		// 首次登记时刻（记录写一次后不再改写，见 ensureInternal）。
+		// 首次登记时刻（记录写一次后不再改写，见 registerInternal）。
 		value.put("lastActivity", Instant.now().toString());
 		if (identity != null) {
 			// 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
