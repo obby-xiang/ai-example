@@ -32,6 +32,7 @@ import {
   createExportedTask,
   openPath,
   sessionId as pageSessionId,
+  until,
   waitJob,
   waitRoundSettled,
   type JobView
@@ -302,23 +303,35 @@ test.describe('@stub L 请求级工具路由', () => {
     expect(String(res2?.result ?? '')).not.toContain(`任务 #${taskId}`)
   })
 
-  /** L-05 `create_task`（WRITE）：真实落库、不经确认门、结果带任务 id。 */
-  test('E2E-L05 create_task：真实建任务、无确认门、无 gate 帧', async ({ request }) => {
+  /** L-05 `create_task`（DANGER）：EXPORT 必须显式带 conditions；确认卡批准后真实落库。 */
+  test('E2E-L05 create_task：conditions={} 过预检 → 确认卡 → 批准后真实建任务', async ({ request }) => {
     const title = `E2E-L05-${Date.now()}`
     const run = await chatStream(
       sid('l05'),
-      `tool=create_task&args={"type":"EXPORT","title":"${title}"} ${uniq('L05')}`,
+      `tool=create_task&args={"type":"EXPORT","title":"${title}","conditions":{}} ${uniq('L05')}`,
       { page: 'tasks' }
     )
-    const res = toolResults(run.frames).find((frame) => frame.name === 'create_task')
-    expect(res?.ok).toBe(true)
-    expect(String(res?.result)).toMatch(/任务|#\d+/)
-    // WRITE ≠ DANGER：不进确认门（`suspended` 帧是"本批在途工具"的通用信封，
-    // 后端工具也会有 —— 判据只能是 `confirm_request` 缺席 + 卡面无 hitl-gate）
-    expect(framesOf(run.frames, 'confirm_request')).toHaveLength(0)
+    // 新契约：create_task 是 DANGER，预检通过后进确认门；不再有"无 gate 帧"的直执行形态。
+    const gate = framesOf(run.frames, 'confirm_request')[0] as Record<string, unknown> | undefined
+    expect(gate, `未出确认卡（帧：${run.frames.map((frame) => frame.type).join(',')}）`).toBeTruthy()
+    const runId = String(gate?.runId ?? '')
+    const toolCallId = String(gate?.toolCallId ?? '')
+    expect(runId).not.toBe('')
+    expect(toolCallId).not.toBe('')
 
-    const tasks = await listTasks(request)
-    expect(tasks.some((task) => (task.title ?? '') === title)).toBe(true)
+    const approved = await request.post(
+      apiUrl('/api/ai/confirm'),
+      aiRequestOptions('/api/ai/confirm', { data: { runId, toolCallId, approved: true } })
+    )
+    expect(approved.status()).toBe(200)
+
+    await until(
+      async () => (await listTasks(request)).some((task) => (task.title ?? '') === title),
+      30_000,
+      '确认后任务真实落库'
+    )
+    const created = (await listTasks(request)).find((task) => (task.title ?? '') === title)
+    expect(created?.type).toBe('EXPORT')
   })
 
   /** L-06 `start_import`（DANGER）：预检通过后挂起；批准 ⇒ 真实作业；零 gate 副作用记录。 */

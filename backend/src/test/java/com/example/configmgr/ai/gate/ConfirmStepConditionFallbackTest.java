@@ -241,49 +241,30 @@ class ConfirmStepConditionFallbackTest {
 			.noneMatch(pending -> PendingToolCall.PENDING.equals(pending.getStatus()));
 	}
 
-	// ── ②d 模型已知（槽位）但未落库：同样指回 set_condition，不弹表单 ───────
+	// ── ②d 条件未决定：confirm_step 不自行落库，交还宿主挂一次条件表（单通道）──
 
+	/**
+	 * 新口径（2026-10-30 条件收集单通道）：槽位里"看起来已知"的条件不再由工作流自动落库
+	 * （文本可信链已删除）；任务条目无 conditionJson ⇒ 条件未决定 ⇒ confirm_step 交还线程，
+	 * 由宿主挂一次 {@code SET_CONDITIONS}（零副作用，不写库）。
+	 */
 	@Test
-	void knownConditionInSlotsIsPersistedByTheDeterministicWorkflow() {
+	void undecidedConditionAtConfirmStepParksTheHostConditionForm() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
 				+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
-				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[],"
+				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[\"CURRENCY\"],"
 				+ "\"conditionTexts\":[\"code = CNY\"],\"verifiedConditionDefCodes\":[\"CURRENCY\"]}");
 
-		ToolExecutionResult result = runConfirmStep("{}");
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> runConfirmStep("{}"))
+			.as("条件未决定 ⇒ 交还线程（park），不经过模型、也不自行写库")
+			.isInstanceOf(RunParkedException.class);
 
-		assertThat(envelopeOf(result, "call-confirm").outcome())
-			.as("已知结构化条件由工作流直接落库并放行，不经过模型").isEqualTo(ToolOutcome.OK.wire());
-		ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
-		verify(this.taskService).setCondition(eq(TASK_ID), eq("CURRENCY"), json.capture());
-		assertThat(json.getValue()).contains("\"fieldCode\":\"code\"").contains("\"operator\":\"EQ\"")
-			.contains("\"value\":\"CNY\"");
-		verify(this.gate).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
-		assertThat(this.store.pendingsLenient(RUN_ID))
-			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
-	}
-
-	/** Critical：未经验证的启发式 EQ 不得自动落库；零副作用指回 set_condition。 */
-	@Test
-	void unverifiedHeuristicConditionIsRejectedWithoutWriting() {
-		this.taskState.set(task("QUERY_COND", null));
-		seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
-				+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
-				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[],"
-				+ "\"conditionTexts\":[\"code = CNY\"],\"verifiedConditionDefCodes\":[]}");
-
-		ToolExecutionResult result = runConfirmStep("{}");
-
-		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition").contains("结构化");
 		verify(this.taskService, never()).setCondition(any(), anyString(), anyString());
-		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
-		// 系统拒绝静默用户面：实时/历史都不得落"内部术语"卡
-		verify(this.emitter, never()).toolStart(any(PendingToolCall.class));
-		verify(this.emitter, never()).frontendToolResult(any(PendingToolCall.class), anyBoolean(), anyString());
-		verify(this.emitter, never()).toolResult(any(PendingToolCall.class), anyBoolean(), anyBoolean(),
-				anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("宿主挂的是那张条件表（单通道）")
+			.anyMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName())
+					&& PendingToolCall.PENDING.equals(pending.getStatus()));
 	}
 
 	// ── ②e 禁止 SELECT_DEFS 直接跳 EXPORT ───────────────────────────────────

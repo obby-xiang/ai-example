@@ -46,22 +46,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * <b>首轮接入点</b>：类型未知的"新建任务"话术，在<b>驱动模型之前</b>就被宿主接住 —— 这一拍模型一次
- * 都没被调用（因此不可能出现"要创建导出还是导入任务？"这类文字反问）。
+ * <b>首轮接入点</b>：宿主不再从话术推断"新建任务 + 类型未知"（{@link TaskTypeForm#parkIfDue} 已恒 false）；
+ * 类型缺口的确定性挂起来自模型的结构化 {@code create_task}（缺/非法 {@code type}），
+ * 接线在 {@code SpToolCallingManager#parkIfCreateTaskMissingType}。
  *
- * <h2>为什么测在 chat() 上</h2>
- * 生产 {@code park=true} 时，{@code create_task}/{@code navigate_to} 这些后续节点都在续跑侧，但
- * <b>类型未知</b>这一节点在首轮：这一轮连可执行的工具都没有（{@code create_task} 缺 type），
- * "先问类型"是它最短的路径。接点必须在驱动模型之前 —— 否则模型先说话，宿主就没有确定性可言。
+ * <h2>本类现在锁什么</h2>
+ * 普通轮（措辞里提到新建/导出、或只是浏览既有任务）必须<b>照常驱动模型</b>，且不弹任何宿主表单 ——
+ * 即"首轮不被文本判据截断"。结构化缺口的表单形态与去重由 {@code TaskTypeFormTest} 锁。
  *
- * <h2>口径</h2>
- * <ol>
- * <li>类型未知 + 新建意图 ⇒ 宿主挂起类型单选，模型不被调用，快照进 SUSPENDED；</li>
- * <li>类型已给（"新建一个导出任务"）⇒ 照常驱动模型（直接进 create_task 的确认卡链路）；</li>
- * <li>普通浏览（打开既有任务）⇒ 照常驱动模型，不弹任何宿主表单。</li>
- * </ol>
- *
- * <p><b>证红</b>：首轮不接这张表 ⇒ 第 1 条红；判据不看槽位 ⇒ 第 2 条红；判据不看意图 ⇒ 第 3 条红。
+ * <p><b>证红</b>：把 {@code parkIfDue} 改回文本判据 ⇒ 第 2/3 条红（模型不再被驱动）。
  */
 class TaskTypeFormChatParkTest {
 
@@ -151,34 +144,20 @@ class TaskTypeFormChatParkTest {
 		this.watchdogExecutor.shutdownNow();
 	}
 
-	// ── ① 类型未知：宿主挂表，模型不被调用 ──────────────────────────────────
+	// ── ① 首轮不再被文本判据截断：普通轮一律驱动模型 ────────────────────────
 
 	@Test
-	void typeUnknownNewTaskTurnParksBeforeTheModelIsCalled() {
+	void textNewTaskTurnNoLongerParksBeforeTheModel() {
 		AiChatRequest request = new AiChatRequest(SESSION_ID, "帮我创建一个任务",
 				new AiChatRequest.Context("tasks", null, null, null, Map.of()), null, null);
 
 		this.service.chat(RUN_ID, request, this.emitter);
 
-		// 模型一次都没被问 ⇒ 不可能出现类型文字反问
-		verify(this.chatClient, never()).prompt();
-		verify(this.chatModel, never()).stream(any(org.springframework.ai.chat.prompt.Prompt.class));
-
-		PendingToolCall parked = this.store.pending(RUN_ID, TaskTypeForm.toolCallId(RUN_ID));
-		assertThat(parked).as("类型未知 + 新建意图 ⇒ 宿主必须先挂类型单选").isNotNull();
-		assertThat(parked.getName()).isEqualTo(GenerativeFormRules.TOOL_NAME);
-		assertThat(parked.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
-		assertThat(parked.getStatus()).isEqualTo(PendingToolCall.PENDING);
-		JsonNode field = parse(parked.getArguments()).path("form").path("fields").get(0);
-		assertThat(field.path("type").asText()).isEqualTo("enum");
-		assertThat(field.path("options").findValuesAsText("value")).containsExactly("EXPORT", "IMPORT");
-
-		RunSnapshot snapshot = this.store.get(RUN_ID);
-		assertThat(snapshot.getStatus()).as("挂起态：这一轮在等人填表").isEqualTo(RunSnapshot.SUSPENDED);
-		assertThat(snapshot.getInFlightToolCalls()).extracting(PendingToolCall::getToolCallId)
-			.containsExactly(TaskTypeForm.toolCallId(RUN_ID));
-		verify(this.emitter).suspended(eq(List.of(parked)), anyString(), anyString(), anyString());
-		verify(this.emitter).completeSubscriptions();
+		verify(this.chatClient).prompt();
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("宿主不再按话术挂类型表（缺口由结构化 create_task 触发）")
+			.noneMatch(pending -> pending.getToolCallId() != null
+					&& pending.getToolCallId().startsWith(TaskTypeForm.TOOL_CALL_ID_PREFIX));
 	}
 
 	// ── ② 已知信息/浏览：照常驱动模型，不弹宿主表单 ────────────────────────

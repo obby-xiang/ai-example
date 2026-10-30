@@ -16,20 +16,18 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 两个收集缺口的新口径（2026-10-29 闭环批）：
+ * 两个收集缺口的新口径（2026-10-29 闭环批；2026-10-30 条件单通道收口）：
  *
  * <ul>
  * <li><b>任务类型</b>（{@code purpose=TASK_TYPE}）：单个 enum 单选 {@code EXPORT/IMPORT}。
  * 类型已确定（槽位有值）⇒ 零副作用拒绝并指回 {@code create_task}；类型未知 ⇒ 放行。</li>
- * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：一个非必填自由文本框（{@code variant=longText} 可选），
- * 由模型把文本解析成 {@code set_condition} 结构；留空 = 不设筛选（直接推进）。
- * 条件已明确不重复收集；<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，其余步骤
- * （{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链）一律零副作用拒绝并给继续指引。</li>
+ * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：<b>只由宿主发放</b>（QUERY_COND 且条件未决定时一次），
+ * 模型自行下发一律零副作用拒绝；表单形状 = 一个非必填自由文本框，留空 = 不设筛选（直接推进）。</li>
  * </ul>
  *
  * <p><b>证红</b>：{@code TASK_TYPE} 未进 purpose 白名单 ⇒ 类型未知放行、类型表单形状两条红；
- * 去掉槽位判据 ⇒ 类型重复拒绝红；把步骤门收成"只拒 EXPORT/DONE" ⇒ {@code SELECT_DEFS} 拒绝红
- * （前置步与后置步的指引不同，断言两侧互斥）；去掉 SET_CONDITIONS 单框契约 ⇒ 条件表单形状红。
+ * 去掉槽位判据 ⇒ 类型重复拒绝红；把模型条件表单改成按步骤放行 ⇒ 单通道用例红；
+ * 去掉 SET_CONDITIONS 单框契约 ⇒ 条件表单形状红。
  */
 class GenerativeFormTaskTypeAndConditionTest {
 
@@ -89,56 +87,26 @@ class GenerativeFormTaskTypeAndConditionTest {
 			.isNotEmpty();
 	}
 
-	// ── 筛选条件（SET_CONDITIONS） ───────────────────────────────────────────
+	// ── 筛选条件（SET_CONDITIONS）：单通道 —— 只由宿主发放 ─────────────────────
 
+	/**
+	 * 新口径（2026-10-30 条件收集单通道）：模型自行下发 {@code SET_CONDITIONS} 一律零副作用拒绝，
+	 * 不论步骤与槽位（含 QUERY_COND、步骤未知）—— 避免模型与宿主双通道重复收集。
+	 */
 	@Test
-	void conditionFormIsAcceptedOnlyAtQueryCondStep() {
-		FrontendToolGuard.Verdict atQueryCond = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context("QUERY_COND", "EXPORT"));
-		assertThat(atQueryCond.accepted()).as("QUERY_COND 是条件收集的唯一现场").isTrue();
+	void modelConditionFormIsAlwaysRejectedWithHostOnlyGuidance() {
+		for (String step : new String[] { "QUERY_COND", "SELECT_DEFS", "EXPORT", "DONE", null }) {
+			FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+					conditionForm(), gapContext(step));
 
-		FrontendToolGuard.Verdict atSelectDefs = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context("SELECT_DEFS", "EXPORT"));
-		assertThat(atSelectDefs.accepted()).as("SELECT_DEFS 不下发条件表单：先推进到 QUERY_COND").isFalse();
-		assertThat(atSelectDefs.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
-		assertThat(atSelectDefs.render())
-			.as("前置步的指引是「先 confirm_step 推进到 QUERY_COND」，与后置步的「已关闭」可区分")
-			.contains("SELECT_DEFS")
-			.contains("先 confirm_step")
-			.contains("推进到 QUERY_COND")
-			.contains("未向前端下发表单")
-			.doesNotContain("已关闭");
-
-		FrontendToolGuard.Verdict atExport = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context("EXPORT", "EXPORT"));
-		assertThat(atExport.accepted()).as("EXPORT 步骤条件已定局：条件表单不再下发").isFalse();
-		assertThat(atExport.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
-		assertThat(atExport.render())
-			.contains("EXPORT")
-			.contains("QUERY_COND")
-			.contains("未向前端下发表单")
-			.as("后置步不再给「先推进到 QUERY_COND」的指引")
-			.doesNotContain("先 confirm_step");
-
-		FrontendToolGuard.Verdict atDone = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context("DONE", "EXPORT"));
-		assertThat(atDone.accepted()).as("DONE 在 EXPORT 之后，同样拒绝").isFalse();
-		assertThat(atDone.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
-
-		FrontendToolGuard.Verdict atPrecheck = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context("PRECHECK", "IMPORT"));
-		assertThat(atPrecheck.accepted()).as("其它步骤（导入链）同样不收集条件").isFalse();
-		assertThat(atPrecheck.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
-	}
-
-	@Test
-	void conditionFormStaysAllowedWhenStepIsUnknown() {
-		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				conditionForm(), context(null, "EXPORT"));
-
-		assertThat(verdict.accepted())
-			.as("步骤未知 ≠ 关闭：无上下文的既有调用仍按槽位规则放行（兼容）")
-			.isTrue();
+			assertThat(verdict.accepted()).as("步骤 %s：模型不得下发条件表单", step).isFalse();
+			assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+			assertThat(verdict.render())
+				.as("指引指向宿主单通道 + set_condition")
+				.contains("宿主")
+				.contains("零副作用")
+				.contains("set_condition");
+		}
 	}
 
 	@Test
@@ -165,7 +133,8 @@ class GenerativeFormTaskTypeAndConditionTest {
 		assertThat(verdict.accepted()).as("条件已明确：不重复收集").isFalse();
 		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 		assertThat(verdict.render())
-			.contains("CURRENCY.code = CNY")
+			.as("已知条件同样走宿主单通道，并指回 set_condition")
+			.contains("宿主")
 			.contains("set_condition");
 	}
 
@@ -233,6 +202,15 @@ class GenerativeFormTaskTypeAndConditionTest {
 	private static AiContext conditionsContext(String step) {
 		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"),
 				List.of(new ConditionSlot("CURRENCY", "code", "CNY")));
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
+		return AiContext.of("tasks", null, step, null, extra);
+	}
+
+	/** 有真实条件缺口的槽位上下文：配置项已知、条件逐项未决定（收集表单的合法时机）。 */
+	private static AiContext gapContext(String step) {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"), List.of(), List.of(),
+				List.of("CURRENCY"), List.of(), List.of());
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
 		return AiContext.of("tasks", null, step, null, extra);

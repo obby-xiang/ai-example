@@ -193,7 +193,7 @@ class ModelDrivenConditionCollectionResumeTest {
 
 	@Test
 	void lowercaseConditionInTheUserMessageIsLeftToTheModel() {
-		this.taskState.set(task(TASK_ID, "QUERY_COND"));
+		this.taskState.set(task(TASK_ID, "QUERY_COND", null));
 		seedCreatedTask();
 		seedSuspendedRun(List.of(), List.of("导出cny货币字典"),
 				AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of()));
@@ -219,7 +219,9 @@ class ModelDrivenConditionCollectionResumeTest {
 
 	@Test
 	void uppercaseKnownConditionDoesNotTriggerAHostForm() {
-		this.taskState.set(task(TASK_ID, "QUERY_COND"));
+		// 条件事实来自任务条目 conditionJson（结构化落库），不再由宿主从原话推断。
+		this.taskState.set(task(TASK_ID, "QUERY_COND",
+				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
 		seedCreatedTask();
 		seedSuspendedRun(List.of(), List.of("导出CNY货币字典"),
 				AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of()));
@@ -239,11 +241,11 @@ class ModelDrivenConditionCollectionResumeTest {
 			.containsExactly(org.assertj.core.groups.Tuple.tuple("CURRENCY", "code", "CNY"));
 	}
 
-	// ── ③ 未知条件：仍由模型发那张表单，宿主不抢先 ──────────────────────────
+	// ── ③ 未知条件：只由宿主发放，模型没有第二条通道 ────────────────────────
 
 	@Test
 	void unknownConditionStillLetsTheModelAskWithTheConditionForm() {
-		this.taskState.set(task(TASK_ID, "QUERY_COND"));
+		this.taskState.set(task(TASK_ID, "QUERY_COND", null));
 		seedCreatedTask();
 		seedSuspendedRun(List.of(), List.of("导出 CURRENCY 币种", "继续这个导出任务"),
 				AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of()));
@@ -261,7 +263,8 @@ class ModelDrivenConditionCollectionResumeTest {
 
 		FrontendToolGuard.Verdict verdict = new GenerativeFormGuard(this.mapper)
 			.inspectArguments(GenerativeFormRules.TOOL_NAME, CONDITION_FORM_JSON, contextOfDriveResumed());
-		assertThat(verdict.accepted()).as("条件未知时模型仍可用一次非必填条件表单收集").isTrue();
+		assertThat(verdict.accepted()).as("条件未知也只由宿主收集：模型的条件表单被单通道拒绝").isFalse();
+		assertThat(verdict.render()).contains("宿主");
 	}
 
 	// ── ④ 模型表单留空：交棒模型全量推进，不再补第二张 ──────────────────────
@@ -401,6 +404,25 @@ class ModelDrivenConditionCollectionResumeTest {
 		task.setCurrentStep(step);
 		task.setStatus(Task.TaskStatus.ACTIVE);
 		task.setTitle("任务 " + id);
+		return task;
+	}
+
+	/** 带一条结构化配置项条目（{@code conditionJson} = null 表示"未决定"）的任务。 */
+	private static Task task(Long id, String step, String conditionJson) {
+		Task task = new Task();
+		task.setId(id);
+		task.setType(Task.TaskType.EXPORT);
+		task.setCurrentStep(step);
+		task.setStatus(Task.TaskStatus.ACTIVE);
+		task.setTitle("任务 " + id);
+		com.example.configmgr.task.entity.TaskItem item = new com.example.configmgr.task.entity.TaskItem();
+		item.setTaskId(id);
+		item.setDefCode("CURRENCY");
+		item.setSortOrder(0);
+		item.setConditionJson(conditionJson);
+		List<com.example.configmgr.task.entity.TaskItem> items = new ArrayList<>();
+		items.add(item);
+		task.setItems(items);
 		return task;
 	}
 

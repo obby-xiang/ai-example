@@ -419,7 +419,7 @@
   "routes": [
     {
       "id": "GF-FILTER",
-      "note": "GF1/GF3/GF4 共用的 union 模板：keyword+minRows+effectiveDate 满足 GF1、keyword 满足 GF3、keyword+amount+scope 满足 GF4。只有 keyword 标 required:true —— GF4 的改值重发只带 keyword+scope，其余字段若必填会被回灌闸门 400 拒。",
+      "note": "GF1/GF3/GF4 共用的 union 模板：keyword+minRows+effectiveDate 满足 GF1、keyword 满足 GF3、keyword+amount+scope 满足 GF4。只有 keyword 标 required:true —— GF4 的改值重发只带 keyword+scope，其余字段若必填会被回灌闸门 400 拒。2026-10-30 起 SET_CONDITIONS 只由宿主在 QUERY_COND 发放；本路由验的是表单机制，显式 purpose=GENERAL_CLARIFY，避免被当成模型条件收集。",
       "match": {
         "messageAny": [
           "scenario=FILTER"
@@ -432,6 +432,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "导出筛选条件",
           "fields": [
             {
@@ -594,6 +595,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "七型渲染基线",
           "fields": [
             {
@@ -672,6 +674,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "联动三原语",
           "fields": [
             {
@@ -736,6 +739,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "表达式形态联动",
           "fields": [
             {
@@ -769,6 +773,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "超深联动",
           "fields": [
             {
@@ -822,6 +827,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "级联选项",
           "fields": [
             {
@@ -893,6 +899,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "选择配置项",
           "fields": [
             {
@@ -976,6 +983,7 @@
       "arguments": {
         "form": {
           "scenario": "FILTER",
+          "purpose": "GENERAL_CLARIFY",
           "title": "长文本",
           "fields": [
             {

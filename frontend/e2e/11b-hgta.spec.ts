@@ -24,6 +24,7 @@ import {
 import {
   API,
   apiGet,
+  apiPost,
   apiPostRaw,
   chatFrames,
   currentRun,
@@ -223,18 +224,39 @@ test.describe('@stub G 生成式表单', () => {
     expect(run.awaitingExternal ?? false).toBe(false)
 
     // 零卡帧 ≠ 任意静默：被拒的那次调用必须在账上留下**具体的联动拒绝**证据。
-    // 帧里没有它的 toolCallId（一条卡帧都不发），故按"工具名 + 终态"定位目标条目。
-    const pendings = await apiGet<Array<Record<string, unknown>>>(request, `/api/ai/pending/${String(run.runId)}`)
-    const rejected = pendings.filter(
-      (item) => String(item.name) === 'generative_form' && String(item.status) === 'REJECTED_ARGUMENTS'
-    )
-    expect(rejected).toHaveLength(1)
-    const target = rejected[0]
-    expect(String(target.toolCallId ?? '')).not.toBe('')
-    // 条目码 = schema 级系统拒绝（服务端写入的终态事实）；issues 级的具体码在 resultText 里
-    expect(String(target.code)).toBe('FORM_SCHEMA_REJECTED')
-    // 具体原因 = 联动条件表达式非法（不是"槽位已知"或别的静默原因）
-    expect(String(target.resultText ?? '')).toContain('LINKAGE_CONDITION_INVALID')
+    // 结算条目已不再出现在实时 /pending（0c74f20f 起清理更快），改从 /history 的
+    // toolCallStates（终态 + code）与 toolResponses（resultText）取证。
+    let code = ''
+    let result = ''
+    await until(async () => {
+      const history = await apiGet<{ messages: Array<Record<string, unknown>> }>(request, `/api/ai/history/${sid}`)
+      const responses = new Map<string, string>()
+      for (const message of history.messages) {
+        for (const response of (message.toolResponses as Array<Record<string, unknown>> | undefined) ?? []) {
+          const id = String(response.id ?? '')
+          if (id) responses.set(id, String(response.responseData ?? ''))
+        }
+      }
+      for (const message of history.messages) {
+        const states = (message.toolCallStates as Record<string, Record<string, unknown>> | undefined) ?? {}
+        for (const call of (message.toolCalls as Array<Record<string, unknown>> | undefined) ?? []) {
+          if (String(call.name) !== 'generative_form') continue
+          const id = String(call.id ?? '')
+          const state = states[id]
+          if (String(state?.status ?? '') !== 'REJECTED_ARGUMENTS') continue
+          code = String(state?.code ?? '')
+          result = responses.get(id) ?? ''
+          return true
+        }
+      }
+      return false
+    }, 15_000, '历史出现 generative_form 的 REJECTED_ARGUMENTS 证据')
+    // 条目码 = schema 级系统拒绝（服务端写入的终态事实）；具体原因在 result 文本里。
+    expect(code).toBe('FORM_SCHEMA_REJECTED')
+    // 具体原因 = 联动条件表达式非法（不是"槽位已知"或别的静默原因）。
+    // result 是回给模型的人读原因（不带错误码字面量），按字段与拒因断言。
+    expect(result).toContain('visibleWhen')
+    expect(result).toContain('不接受表达式字符串')
   })
 
   test('E2E-G08 longText 上限 2000 / text 上限 200：前端即时拦、后端 400 VALUE_TOO_LONG', async ({ page, request }) => {
@@ -492,99 +514,49 @@ async function fillFormBySchema(
 }
 
 test.describe('@real G 生成式表单（真模型）', () => {
-  /** C 级常规行为档（蓝本 §0.3）：N=10 ≥7；`E2E_REAL_SAMPLING` 只调小 N，阈值同比例推导。 */
-  const GF_SAMPLING = Math.max(1, Number(process.env.E2E_REAL_SAMPLING ?? '10'))
-  const GF_THRESHOLD = Math.ceil(GF_SAMPLING * 0.7)
-
   /**
-   * G-01（蓝本 §2.5 + §0.3）：FILTER 回灌续跑 = **常规行为**概率面 ⇒ N=10 / 阈值 ≥7。
-   *
-   * <p>采样化前置（L-92，2026-10-23）已落地：表单字段带**轮次唯一** testid
-   * `gf-field-<toolCallId>-<key>`，卡根 `gf-form-<toolCallId>`。修前字段只有静态 `id="gf-field-keyword"`，
-   * 同页留下上一轮的只读卡时第二轮定位就串卡（实测第 2 轮停在 `approval_suspend`）⇒ 只能单轮。
-   *
-   * <p>分层口径（§0.3「C 级只断形状 + 概率下限」）：
-   * <ul>
-   *   <li>**C 级（进概率计数）**：模型这一轮愿不愿意调 `generative_form`（表单卡有没有出现）；</li>
-   *   <li>**A/B 级（逐条硬断言，不计数）**：真出现了就必须对 —— 回灌 200、本轮续跑到落定、
-   *       表单退出可填态、无卡级错误、提交后助手气泡有续写内容。</li>
-   * </ul>
-   *
-   * <p>每轮用 `new-chat` 起**新会话**（采样独立性：不让上一轮的工具结果压进下一轮上下文）。
-   *
-   * <p>**填写面按 schema 驱动（2026-10-23，CI run 39977930803 定位）**：真模型的字段面不可假设 ——
-   * 首跑里模型把「范围」生成成 `multi_select` + `minItems 1`，用例只填关键字就提交，回灌被后端
-   * 按 schema 复核如实拒成 400 `FORM_RESULT_REJECTED`（`VALUE_TOO_FEW_ITEMS`：`scope` 至少 1 项）。
-   * 这是**用例的填写面不完整**，不是产品缺陷（后端拒得对、卡片按 `issues[].key` 点亮了字段）。
-   * 故提交前一律按本轮挂起条目的 `form.fields` 补齐（见 {@link fillFormBySchema}）。
+   * G-01（新契约，2026-10-30）：SET_CONDITIONS 表单只由宿主在 QUERY_COND 统一发放，
+   * 模型不得自行下发。本条因此不再按"模型愿不愿意发表单"做概率采样，而走确定性的宿主链：
+   * 任务真实停在 QUERY_COND + 条件未决定 ⇒ 下一轮 AI 由宿主挂出唯一一张条件表；
+   * 回灌后本轮收尾，不再出现第二张条件表。
    */
-  test(`E2E-G01 FILTER 回灌续跑（真模型，N=${GF_SAMPLING} ≥${GF_THRESHOLD}）`, async ({ page, request }) => {
-    test.setTimeout(900_000)
-    let triggered = 0
-    const problems: string[] = []
+  test('E2E-G01 宿主在 QUERY_COND 统一发条件表（真模型，单轮）', async ({ page, request }) => {
+    test.setTimeout(300_000)
+    const title = `E2E-G01-${uniq()}`
+    const task = await apiPost<{ id: number }>(request, '/api/tasks', { type: 'EXPORT', title })
+    await apiPost(request, `/api/tasks/${task.id}/select-defs`, { defCodes: ['CURRENCY'] })
+    const stepRes = await request.put(
+      `${API}/api/tasks/${task.id}/step`,
+      aiRequestOptions(`/api/tasks/${task.id}/step`, { data: { step: 'QUERY_COND' } })
+    )
+    expect(stepRes.status()).toBe(200)
 
-    await openApp(page)
-    for (let index = 1; index <= GF_SAMPLING; index += 1) {
-      await sendMessage(page, `请用生成式表单收集本次导出的筛选条件：关键字、范围（XN/HD），然后等我填写。采样 ${index}`)
+    await openPath(page, `/export?taskId=${task.id}`)
+    await expect(page.locator('footer')).toContainText('task:EXPORT/QUERY_COND', { timeout: 30_000 })
 
-      // 触发面（C 级）：本轮的 **live** 表单卡 —— 只认"卡内还有提交钮"的那张。
-      // 只用 `[data-testid^="gf-form-"]` 的 `.last()` 会撞上**只读回放卡**（scope 是卡片序号，
-      // 如 `gf-form-ro11`；字段是 disabled 的）。实测（本地 N=10，第 6 轮）：模型一轮内连发两张卡，
-      // 第一张以「未提交 ✗ 已取消」的只读态留在页面上，`.last()` 正好选中它 ⇒ 关键字 `fill` 永远等
-      // 可用状态。只读卡不带 `gf-submit`（渲染器 `v-if="!readonly"`），故用它把 live 卡钉死。
-      const form = page
-        .locator('[data-testid^="gf-form-"]')
-        .filter({ has: page.locator('[data-testid="gf-submit"]') })
-        .last()
-      const appeared = await form
-        .waitFor({ state: 'visible', timeout: 90_000 })
-        .then(() => true)
-        .catch(() => false)
-      if (!appeared) {
-        problems.push(`#${index} 模型未触发 generative_form（本轮按文本收尾）`)
-        // 收干净本轮：真模型可能在本轮里**先被入参闸门拒绝、再挂起一次**（2026-10-23 本地实测：
-        // `前端工具入参被安全闸拒绝` 之后紧跟一次 `approval_suspend`），而卡没渲染出来就没有
-        // 提交/取消入口 ⇒ 面板一直"挂起等待中"，下一轮 composer 落不了键、`sendMessage` 的
-        // `fill`（Playwright 默认 actionTimeout=0）会一直等到 15 分钟的测试上限。
-        const stopBtn = page.locator('[data-testid="stop-btn"]')
-        if ((await stopBtn.count()) > 0) await stopBtn.first().click({ timeout: 15_000 }).catch(() => undefined)
-        await waitRoundSettled(page, 60_000)
-      } else {
-        triggered += 1
-        // ── 以下 A/B 级：真触发了就必须对（不参与概率计数） ──────────────────
-        // 场景指定的关键字先填；模型可能没按 `keyword` 命名（那时靠 schema 驱动的文本字段兜底）
-        const keyword = form.locator('[data-testid$="-keyword"]')
-        if ((await keyword.count()) > 0) await keyword.fill(`真模型-${index}`, { timeout: 15_000 })
-        await fillFormBySchema(page, request, form, index)
+    // 下一轮 AI 进入 QUERY_COND 且条件未决定 ⇒ 宿主（不是模型）下发一次 SET_CONDITIONS 表单。
+    await sendMessage(page, `请继续处理任务 ${task.id} 的筛选条件。`)
+    const form = page
+      .locator('[data-testid^="gf-form-"]')
+      .filter({ has: page.locator('[data-testid="gf-submit"]') })
+      .last()
+    await expect(form).toBeVisible({ timeout: 60_000 })
+    // 宿主条件表形状：单个非必填长文本 conditions（不是模型自定义字段面）。
+    await expect(form.locator('#gf-field-conditions')).toBeVisible()
+    await expect(form).toContainText('筛选条件')
 
-        const posted = page.waitForResponse(
-          (res) => res.url().includes('/api/ai/frontend-tool-result') && res.request().method() === 'POST',
-          { timeout: 30_000 }
-        )
-        await form.locator('[data-testid="gf-submit"]').click({ timeout: 15_000 })
-        const response = await posted
-        // 非 200 时把拒绝体带进断言消息（FORM_RESULT_REJECTED 的 issues 是"哪一格没填对"的唯一真值）
-        const rejectBody = response.status() === 200 ? '' : (await response.text()).slice(0, 400)
-        expect(response.status(), `#${index} 回灌（FRONTEND_RESULT）非 200：${rejectBody}`).toBe(200)
+    await form.locator('#gf-field-conditions').fill('币种代码等于 CNY')
+    const posted = page.waitForResponse(
+      (res) => res.url().includes('/api/ai/frontend-tool-result') && res.request().method() === 'POST',
+      { timeout: 30_000 }
+    )
+    await form.locator('[data-testid="gf-submit"]').click()
+    expect((await posted).status()).toBe(200)
 
-        // 续跑里真模型会按槽位继续补问（例：FILTER 值已收到后再问"选哪个配置项"），也可能发起
-        // 需要确认的写操作 ⇒ 本轮合法停在挂起态。本用例的判据只有"回灌 200 + 卡收掉 + 续跑有内容"，
-        // 故把这些追加挂起面逐个收掉（拒绝门 / 取消追加表单，都不落业务数据）再等收敛。
-        await waitRoundSettledDismissingPending(page, 120_000)
-        await expect(page.locator('[data-testid="gf-submit"]'), `#${index} 提交后表单仍可填`).toHaveCount(0)
-        await expect(page.locator('[data-testid="gf-error"]'), `#${index} 卡级错误`).toHaveCount(0)
-        // 续跑真的跑了：提交后助手气泡有内容（桩面「模型收到值 JSON」由 G-02/G-04 的落档断言承载）
-        const bubbleText = await page.locator('[data-testid^="msg-bubble-"].w-full').last().innerText()
-        expect(bubbleText.trim().length, `#${index} 提交后续跑没有产生助手内容`).toBeGreaterThan(0)
-      }
-
-      await page.locator('[data-testid="new-chat"]').click({ timeout: 15_000 })
-      await expect(page.locator('[data-testid="empty-state"]')).toBeVisible({ timeout: 20_000 })
-    }
-
-    // eslint-disable-next-line no-console
-    console.log(`[G-01] N=${GF_SAMPLING} 触发=${triggered} 阈值≥${GF_THRESHOLD}`)
-    expect(triggered, `未达阈值的采样：\n${problems.join('\n')}`).toBeGreaterThanOrEqual(GF_THRESHOLD)
+    // 续跑里可能追加确认门/其它挂起面 ⇒ 逐个收掉再等收敛；条件表本身不得再发第二张。
+    await waitRoundSettledDismissingPending(page, 120_000)
+    await expect(page.locator('[data-testid^="gf-form-"]')).toHaveCount(1)
+    await expect(page.locator('[data-testid="gf-error"]')).toHaveCount(0)
   })
 })
 

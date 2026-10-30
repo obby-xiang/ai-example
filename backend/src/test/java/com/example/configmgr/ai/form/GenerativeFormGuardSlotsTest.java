@@ -21,8 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
  * <ul>
  * <li>{@code SELECT_DEFINITIONS} 且配置项已确定 ⇒ 拒绝，指向 {@code select_definitions}；</li>
- * <li>{@code SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ 拒绝，指向 confirm_step/QUERY_COND 链；</li>
- * <li>槽位缺失/歧义、{@code GENERAL_CLARIFY}、缺省 purpose ⇒ 正常放行（未知配置仍可用表单）。</li>
+ * <li>{@code SET_CONDITIONS}：<b>模型调用一律拒绝</b>（宿主单通道），不论槽位/步骤；</li>
+ * <li>槽位缺失、{@code GENERAL_CLARIFY}、缺省 purpose ⇒ 正常放行（未知配置仍可用表单）。</li>
  * </ul>
  */
 class GenerativeFormGuardSlotsTest {
@@ -45,7 +45,7 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
-	void setConditionsFormIsRejectedWhenConditionsKnown() {
+	void setConditionsFormIsRejectedEvenWhenConditionsKnown() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				form("SET_CONDITIONS", "value"), context(List.of("CURRENCY"),
 						List.of(new ConditionSlot("CURRENCY", "code", "CNY"))));
@@ -53,9 +53,8 @@ class GenerativeFormGuardSlotsTest {
 		assertThat(verdict.accepted()).isFalse();
 		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 		assertThat(verdict.render())
-			.contains("CURRENCY.code = CNY")
-			.contains("confirm_step")
-			.contains("QUERY_COND")
+			.as("条件已明确同样走宿主单通道，并指回 set_condition")
+			.contains("宿主")
 			.contains("set_condition");
 	}
 
@@ -68,14 +67,16 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
-	void ambiguousSlotsLetTheFormThrough() {
-		// 解析器对多候选只写 taskType、不写 defCodes：这就是"歧义 = 缺失"
+	void ambiguousSlotsDoNotReopenTheModelConditionForm() {
+		// 结构化口径下"歧义"已不存在；即使槽位只有 taskType（没有任何 defCodes），
+		// 模型的条件表单也被单通道拒绝 —— 收集由宿主在 QUERY_COND 统一做一次。
 		Map<String, Object> slots = new LinkedHashMap<>();
 		slots.put("taskType", "EXPORT");
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				form("SET_CONDITIONS", "value"), context(slots));
 
-		assertThat(verdict.accepted()).as("歧义时表单仍是可用的澄清手段").isTrue();
+		assertThat(verdict.accepted()).as("模型不再有第二张条件表单的通道").isFalse();
+		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 	}
 
 	@Test
@@ -106,26 +107,30 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
-	void conditionFormStillPassesWhenConditionsMissing() {
+	void conditionFormIsHostOnlyEvenWhenConditionsMissing() {
 		FrontendToolGuard.Verdict condition = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				form("SET_CONDITIONS", "value"), context(List.of("CURRENCY"), List.of()));
-		assertThat(condition.accepted()).as("配置项已知但条件槽位仍缺：条件表单可用").isTrue();
+		assertThat(condition.accepted())
+			.as("条件缺失也不给模型第二张条件表：由宿主在 QUERY_COND 统一发放")
+			.isFalse();
+		assertThat(condition.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 	}
 
 	/**
-	 * Task 1 第 3 项：多配置<b>逐项核对</b>。任一配置项有条件不得整体放行 ——
-	 * 另一个配置项仍未决定时，条件表单仍有真实缺口（可以收集）。
+	 * 多配置逐项核对（Task 1 第 3 项）已移到宿主侧判据（{@code ConditionsForm} 的 plan.undecided /
+	 * {@code ExportConditionWorkflow}）：模型这条通道现在恒被拒绝，不再按逐项缺口放行。
+	 * 这里锁的是"即使仍有真实缺口，模型也没有第二条收集通道"。
 	 */
 	@Test
-	void partiallyConditionedMultiConfigStillAllowsTheForm() {
+	void partiallyConditionedMultiConfigStillHasNoModelConditionForm() {
 		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY", "ORDER"), List.of(),
 				List.of("CURRENCY"), List.of("ORDER"), List.of("code = CNY"));
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				form("SET_CONDITIONS", "value"), context(slots.toMap()));
 
 		assertThat(verdict.accepted())
-			.as("CURRENCY 有条件 ≠ ORDER 也有条件：仍有缺口，不得按'任一有条件即整体放行'拒绝")
-			.isTrue();
+			.as("ORDER 仍未决定也由宿主收集，模型不得自行下发")
+			.isFalse();
 	}
 
 	/** 逐项都已有答案（已设置或明确不设）时，条件表单才被拒绝。 */

@@ -140,6 +140,21 @@ class ModelDrivenConditionCollectionChatTest {
 						org.springframework.ai.chat.metadata.ChatGenerationMetadata.builder()
 							.finishReason("stop")
 							.build())))));
+		seedCreateTaskExport();
+	}
+
+	/**
+	 * 收尾纠正的结构化前提：本 run 已 resolved 的 {@code create_task(type=EXPORT)}
+	 * （{@code exportProgressionObserved} 只认这一条事实，不认原话措辞）。
+	 */
+	private void seedCreateTaskExport() {
+		PendingToolCall createTask = new PendingToolCall();
+		createTask.setToolCallId("call-create-export");
+		createTask.setName("create_task");
+		createTask.setArguments("{\"type\":\"EXPORT\",\"conditions\":{}}");
+		createTask.setStatus(PendingToolCall.EXECUTED);
+		createTask.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		this.store.putPending(RUN_ID, createTask);
 	}
 
 	@AfterEach

@@ -265,7 +265,9 @@ class DefinitionFormResumeParkTest {
 
 	@Test
 	void knownConfigFromTheUserMessageDrivesTheModelWithoutAForm() {
-		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		// 已知配置来自任务条目（结构化 defCodes），不再由宿主解析原话。
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS",
+				Task.TaskStatus.ACTIVE, "CURRENCY", "ROLE_DICT"));
 		seedCreatedTask(NEW_TASK_ID);
 		seedSuspendedRun(List.of(navigateEntry(NEW_TASK_ID)),
 				"帮我新建一个导出任务，导出 CURRENCY 和 ROLE_DICT");
@@ -519,6 +521,23 @@ class DefinitionFormResumeParkTest {
 		task.setCurrentStep(step);
 		task.setStatus(status);
 		task.setTitle("任务 " + id);
+		return task;
+	}
+
+	/** 带结构化条目（仅 defCodes，条件未决定）的任务：已知配置的唯一事实来源。 */
+	private static Task taskWithDefs(Long id, Task.TaskType type, String step, Task.TaskStatus status,
+			String... defCodes) {
+		Task task = task(id, type, step, status);
+		List<com.example.configmgr.task.entity.TaskItem> items = new ArrayList<>();
+		int order = 0;
+		for (String defCode : defCodes) {
+			com.example.configmgr.task.entity.TaskItem item = new com.example.configmgr.task.entity.TaskItem();
+			item.setTaskId(id);
+			item.setDefCode(defCode);
+			item.setSortOrder(order++);
+			items.add(item);
+		}
+		task.setItems(items);
 		return task;
 	}
 

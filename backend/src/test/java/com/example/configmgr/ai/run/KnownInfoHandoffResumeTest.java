@@ -22,6 +22,7 @@ import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -182,14 +183,17 @@ class KnownInfoHandoffResumeTest {
 		}
 	}
 
-	// ── ① "导出CNY货币字典" → 导航到选择步：不弹表，配置与条件都在槽位里 ──────
+	// ── ① 结构化已知配置与条件：导航到选择步不弹表，都在槽位里 ───────────────
 
 	@Test
-	void knownDefinitionAndConditionFromTheUserMessageSurviveTheNavigationHandoff() {
-		this.taskState.set(task(TASK_ID, "SELECT_DEFS"));
+	void structuredKnownDefinitionAndConditionSurviveTheNavigationHandoff() {
+		// 已知事实来自任务条目（defCodes + conditionJson），不再由宿主解析原话；
+		// 页面尚未水合（未同步）⇒ 允许按任务条目回落，而不是"用户清空过"。
+		this.taskState.set(task(TASK_ID, "SELECT_DEFS",
+				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
 		seedCreatedTask();
 		seedSuspendedRun(List.of(navigateEntry()), List.of("导出CNY货币字典"),
-				wizardContext(emptySyncedSelection()));
+				wizardContext(unsyncedSelection()));
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
@@ -345,17 +349,37 @@ class KnownInfoHandoffResumeTest {
 		return pageSelection(List.of(), List.of("进入导出向导（来源：界面）", "绑定任务 #42（来源：界面）"));
 	}
 
+	/** 页面尚未水合：只有 pageId，没有 selectedDefs/selectionSynced（按"未同步"回落任务条目）。 */
+	private static Map<String, Object> unsyncedSelection() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("pageId", "export");
+		return extra;
+	}
+
 	private static AiContext wizardContext(Map<String, Object> extra) {
 		return AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", extra);
 	}
 
 	private static Task task(Long id, String step) {
+		return task(id, step, null);
+	}
+
+	/** 带一条结构化配置项条目（{@code conditionJson} = null 表示"未决定"）的任务。 */
+	private static Task task(Long id, String step, String conditionJson) {
 		Task task = new Task();
 		task.setId(id);
 		task.setType(Task.TaskType.EXPORT);
 		task.setCurrentStep(step);
 		task.setStatus(Task.TaskStatus.ACTIVE);
 		task.setTitle("任务 " + id);
+		TaskItem item = new TaskItem();
+		item.setTaskId(id);
+		item.setDefCode("CURRENCY");
+		item.setSortOrder(0);
+		item.setConditionJson(conditionJson);
+		List<TaskItem> items = new java.util.ArrayList<>();
+		items.add(item);
+		task.setItems(items);
 		return task;
 	}
 

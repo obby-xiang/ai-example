@@ -45,14 +45,15 @@ import static org.mockito.Mockito.when;
  * <ol>
  * <li><b>paramsLocked</b>：{@code allowUserParams=false} ⇒ 参数不生效，且 {@code done.extra.paramsLocked=true}
  *     （载体取 {@code done.extra} 的 additive 键 —— 帧型不变，故本用例同时是"没有第 17 种帧"的旁证）；</li>
- * <li><b>能力位降级</b>：模型 {@code supportsToolCalling=false} ⇒ 本轮<b>不取</b>工具、不发 {@code tool_start}；</li>
+ * <li><b>能力位降级</b>：模型 {@code supportsToolCalling=false} ⇒ 本轮<b>不把工具交给模型</b>、不发
+ *     {@code tool_start}（判据取 {@code ChatClient} 的工具面，不禁止内部的披露面读取）；</li>
  * <li><b>done.model 口径</b>：上游回显优先、回落本轮解析值。</li>
  * </ol>
  *
  * <h2>证红方式</h2>
  * <ul>
  * <li>去掉 {@code putParamsLocked} ⇒ 第 1 条红；</li>
- * <li>把 {@code tools} 恒取 {@code toolRegistry.forContext} ⇒ 第 2 条的 {@code never()} 红；</li>
+ * <li>把 {@code tools} 无条件交给模型（不判能力位）⇒ 第 2 条的 {@code toolCallbacks} 断言红；</li>
  * <li>把 {@code doneModel} 换成 {@code accumulator.model()} ⇒ 第 3 条"无回显时回落解析值"红。</li>
  * </ul>
  */
@@ -178,7 +179,10 @@ class ChatModelContractTest {
 
 		List<Map<String, Object>> frames = runChat(new AiChatRequest(SESSION_ID, "你好", null, "plain-model", null));
 
-		verify(this.toolRegistry, never()).forContext(any());
+		// 断言的是"交给模型的工具面"而不是内部读取：导出收尾的披露探测（disclosedStartExport）
+		// 会读一次 registry 的披露面，那不是把工具交给模型。
+		verify(this.requestSpec, never()).toolCallbacks(org.mockito.ArgumentMatchers
+			.<List<org.springframework.ai.tool.ToolCallback>>argThat(list -> list != null && !list.isEmpty()));
 		assertThat(FrameContract.ofType(frames, "tool_start")).as("不支持工具调用的模型不该有任何工具帧").isEmpty();
 		assertThat(FrameContract.oneOfType(frames, "done")).as("降级不是错误：正常 done 收尾").isNotNull();
 	}

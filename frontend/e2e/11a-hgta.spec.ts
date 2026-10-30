@@ -329,8 +329,8 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
     expect(currentPreflight).toEqual(framePreflight)
     expect(pendingPreflight).toEqual(framePreflight)
     const checks = (framePreflight?.checks ?? []) as Array<{ name: string; pass: boolean; detail: string }>
-    // 预检清单 = 后端 ToolPreflightService 的七项（55e6078 追加 ⑤配置项齐备 / ⑥上传文件齐备 /
-    // ⑦目标一致：「此前预检四项全过、批准后作业立刻 FAILED」的 review-03 第 4 项）。顺序即后端产出序。
+    // 预检清单 = 后端 ToolPreflightService 的九项（55e6078 追加 ⑤配置项齐备 / ⑥上传文件齐备 /
+    // ⑦目标一致；2026-10-30 起追加 ⑧步骤就绪 / ⑨条件已决定）。顺序即后端产出序。
     expect(checks.map((check) => check.name)).toEqual([
       '任务存在',
       '类型匹配',
@@ -338,7 +338,9 @@ test.describe('@stub H HITL 确认门（批③ 剩余条）', () => {
       '预检指纹新鲜',
       '配置项齐备',
       '上传文件齐备',
-      '目标一致'
+      '目标一致',
+      '步骤就绪',
+      '条件已决定'
     ])
     expect(checks.every((check) => check.pass)).toBe(true)
     expect(String(framePreflight?.impact ?? '')).toContain('将导出 1 个配置定义')

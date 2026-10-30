@@ -82,6 +82,7 @@ import {
   withModelWindow,
   type Frame
 } from './support/helpers-kqc'
+import { identityFingerprint } from './support/ai-identity'
 
 test.skip(
   process.env.E2E_KQC_COMPACT !== '1',
@@ -229,10 +230,12 @@ test('@stub E2E-C14 压缩归档可回溯：压缩前原文进 ai:ctx:archive:*�
     expect(ledger.length).toBeGreaterThan(0)
     expect(String(ledger[0].level)).toBe('L1')
 
-    // 归档键 = `ai:ctx:archive:<sid>:<压缩前 turnNo>`；逐个 turn 号探活（不依赖 KEYS 的顺序）
+    // 归档键带身份段：`ai:ctx:archive:<tenant>:<user>:<sid>:<压缩前 turnNo>`
+    // （后端 TenantKeyScope.scoped；裸 `ai:ctx:archive:<sid>:...` 恒不存在）。
+    const archivePrefix = `ai:ctx:archive:${identityFingerprint()}:${sid}`
     const archived: string[] = []
     for (let turnNo = 0; turnNo <= 12; turnNo += 1) {
-      const key = `ai:ctx:archive:${sid}:${turnNo}`
+      const key = `${archivePrefix}:${turnNo}`
       const exists = await redisExec(['EXISTS', key])
       if (exists.value === '1') archived.push(key)
     }
@@ -385,8 +388,8 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     )
 
     // ② 台账：条数 > 0、首条 L1、逐条只升一格、每条都真的省了 token。
-    // **谱系推进只看轮首事件**：轮内临时救场（L1 清除 / 硬截断）以 `turn_` 前缀标识，它们不推进谱系
-    // （N1：最多写 L2）；按时间混读会把"轮内 L1"误读成"谱系回退"。
+    // **谱系推进以轮首事件为主**：轮内临时救场（L1 清除 / 硬截断）以 `turn_` 前缀标识；
+    // 2026-10-30 起 L1 清除可能落在轮内并承担谱系起步，故轮首只要求 ≥1 条（见下方断言）。
     const ledger = await contextLedger(sid)
     const changed = chronological(ledger).filter((event) => levelOf(event.level) !== 'none')
     const roundStart = changed.filter((event) => !String(event.reason ?? '').startsWith('turn_'))
@@ -409,8 +412,10 @@ test('@stub E2E-C13 压缩谱系真验：小 max_context 模型行 ⇒ 台账 / 
     expect(changed.length, '压缩台账必须非空').toBeGreaterThanOrEqual(2)
     // 谱系起步 = 台账里第一条压缩事件（可能是**轮内** L1 清除，也可能是轮首 L1）：两者都写 L1
     expect(levelOf(changed[0].level), '谱系必须从 L1 起步').toBe('L1')
-    expect(roundStart.length, '轮首压缩事件必须 ≥ 2 条（否则谱系只靠轮内事件推进）').toBeGreaterThanOrEqual(2)
-    expect(stateWriters.length, '至少两条"真写档位"的轮首事件（L1 起步 + 一次进位）').toBeGreaterThanOrEqual(2)
+    // 2026-10-30 起 L1 清除可能落在轮内（reason=turn_*），轮首事件只保证 1 条起步；
+    // 谱系是否真的推进由上面的最终档位（≥L2）与逐条不跳格/不回退保证。
+    expect(roundStart.length, '轮首压缩事件至少 1 条（谱系其余推进可由轮内事件承担）').toBeGreaterThanOrEqual(1)
+    expect(stateWriters.length, '至少一条“真写档位”的轮首事件（L1 起步）').toBeGreaterThanOrEqual(1)
     for (let index = 1; index < stateWriters.length; index += 1) {
       const step = levelIndex(stateWriters[index].level) - levelIndex(stateWriters[index - 1].level)
       const trail = stateWriters.map((event) => levelOf(event.level)).join(' → ')

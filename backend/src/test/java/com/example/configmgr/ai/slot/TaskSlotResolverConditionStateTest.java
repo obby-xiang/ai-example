@@ -48,38 +48,48 @@ class TaskSlotResolverConditionStateTest {
 
 	@Test
 	void explicitNoFilterMakesConditionsDecided() {
-		when(this.taskService.findById(any())).thenReturn(task(null));
+		// "明确不筛选"的结构化表达 = 任务条目 conditionJson 为 "{}"（EXPLICIT_UNSET）；
+		// 自由文本不再参与判定（见 TaskSlotResolver 的自然语言信任边界）。
+		when(this.taskService.findById(any())).thenReturn(task("{}"));
 
 		TaskSlots slots = this.resolver.resolve(AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE",
-				Map.of()), "导出货币字典，不筛选", List.of());
+				Map.of()), null, List.of());
 
-		assertThat(slots.undecidedDefCodes()).as("用户明确不筛选 ⇒ 明确不设，不再收集").isEmpty();
+		assertThat(slots.undecidedDefCodes()).as("明确不设 ⇒ 已有答案，不再收集").isEmpty();
 		assertThat(slots.conditionDefCodes()).isEmpty();
+		assertThat(slots.conditions()).isEmpty();
 	}
 
-	/** Critical：非等值/排除/空值文本不得被当成已验证 EQ。 */
+	/**
+	 * 非 EQ 文本不再是任何"可信条件"的来源：它们连条件事实都不产生（原文已不参与解析）。
+	 * （原 {@code heuristicNonEqPhrasesAreNotVerifiedConditions} 只测已退役的文本可信链，已删。）
+	 */
 	@Test
-	void heuristicNonEqPhrasesAreNotVerifiedConditions() {
+	void freeTextConditionsAreNotFacts() {
 		when(this.taskService.findById(any())).thenReturn(task(null));
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 
-		assertThat(this.resolver.resolve(ctx, "导出 CURRENCY，code不等于CNY", List.of()).verifiedConditionDefCodes())
-			.as("不等于").isEmpty();
-		assertThat(this.resolver.resolve(ctx, "导出 CURRENCY，code为空", List.of()).verifiedConditionDefCodes())
-			.as("为空").isEmpty();
-		assertThat(this.resolver.resolve(ctx, "导出 CURRENCY，code是CNY以外", List.of()).verifiedConditionDefCodes())
-			.as("以外").isEmpty();
+		TaskSlots slots = this.resolver.resolve(ctx, "导出 CURRENCY，code不等于CNY", List.of());
+
+		assertThat(slots.conditions()).isEmpty();
+		assertThat(slots.conditionDefCodes()).isEmpty();
+		assertThat(slots.undecidedDefCodes()).containsExactly("CURRENCY");
 	}
 
-	/** 经验证的枚举等值条件仍标记为可信（自定义配置项同路径）。 */
+	/** 任务条目里的枚举等值条件（结构化）即"已设置"，且落成模型可读的 EQ 槽位。 */
 	@Test
-	void enumValidatedEqRemainsVerified() {
-		when(this.taskService.findById(any())).thenReturn(task(null));
+	void taskConditionJsonEqBecomesSetAndVerifiedSlot() {
+		when(this.taskService.findById(any())).thenReturn(task("{\"fields\":[{\"fieldCode\":\"code\","
+				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 
-		TaskSlots slots = this.resolver.resolve(ctx, "导出 CURRENCY，code = CNY", List.of());
+		TaskSlots slots = this.resolver.resolve(ctx, null, List.of());
 
-		assertThat(slots.verifiedConditionDefCodes()).containsExactly("CURRENCY");
+		assertThat(slots.conditions()).containsExactly(new TaskSlots.ConditionSlot("CURRENCY", "code", "CNY"));
+		assertThat(slots.conditionDefCodes()).containsExactly("CURRENCY");
+		assertThat(slots.undecidedDefCodes()).isEmpty();
+		// verifiedConditionDefCodes 是退役兼容字段（文本可信链删除后生产恒为空）
+		assertThat(slots.verifiedConditionDefCodes()).isEmpty();
 	}
 
 	/** Critical：同一配置项的多个等值字段必须全部无损落库。 */
@@ -90,47 +100,50 @@ class TaskSlotResolverConditionStateTest {
 						List.of(new SlotDefinition.SlotField("code", "代码", true, List.of("CNY", "USD")),
 								new SlotDefinition.SlotField("region", "区域", false, List.of("XN", "US"))))),
 				this.taskService, new com.fasterxml.jackson.databind.ObjectMapper());
-		when(this.taskService.findById(any())).thenReturn(task(null));
+		Task structured = task("{\"fields\":["
+				+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"},"
+				+ "{\"fieldCode\":\"region\",\"operator\":\"EQ\",\"value\":\"XN\"}]}");
+		when(this.taskService.findById(any())).thenReturn(structured);
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 
-		TaskSlots slots = multi.resolve(ctx, "导出 CURRENCY，code = CNY 且 region = XN", List.of());
+		TaskSlots slots = multi.resolve(ctx, null, List.of());
 
 		assertThat(slots.conditions()).extracting(TaskSlots.ConditionSlot::fieldCode)
 			.containsExactly("code", "region");
-		assertThat(slots.verifiedConditionDefCodes()).containsExactly("CURRENCY");
-		assertThat(new ExportConditionWorkflow(this.taskService).plan(task(null)).commands())
+		assertThat(slots.conditionDefCodes()).containsExactly("CURRENCY");
+		assertThat(new ExportConditionWorkflow(this.taskService).plan(structured).commands())
 			.extracting(com.example.configmgr.ai.slot.ConditionCommand::defCode).containsExactly("CURRENCY");
 	}
 
-	/** Critical：或/之外等不完整结构绝不 verified、绝不自动落 EQ。 */
+	/** Critical：没有任何条件事实时，导出条件工作流必须把该配置项判为"未决定"（不得凭空放行）。 */
 	@Test
-	void orAndBeyondTextsAreNeverVerifiedOrPersisted() {
+	void missingConditionFactsStayUndecidedInTheWorkflow() {
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 		when(this.taskService.findById(any())).thenReturn(task(null));
 
-		TaskSlots or = this.resolver.resolve(ctx, "导出 CURRENCY，code = CNY 或 USD", List.of());
-		assertThat(or.verifiedConditionDefCodes()).as("或").isEmpty();
-		TaskSlots beyond = this.resolver.resolve(ctx, "导出 CURRENCY，code = CNY之外", List.of());
-		assertThat(beyond.verifiedConditionDefCodes()).as("之外").isEmpty();
+		TaskSlots slots = this.resolver.resolve(ctx, "导出 CURRENCY，code = CNY 或 USD", List.of());
+		assertThat(slots.conditions()).as("原文里的“或”不产生结构化条件").isEmpty();
 
 		assertThat(new ExportConditionWorkflow(this.taskService).plan(task(null)).undecided())
 			.containsExactly("CURRENCY");
 	}
 
-	/** 无枚举值的自定义配置项：结构完整 + 字段存在即可 verified。 */
+	/** 无枚举值的自定义配置项：任务条目里的结构化 EQ 同样成事实（不再需要"枚举自证"）。 */
 	@Test
-	void noEnumCustomDefinitionCanBeVerified() {
+	void noEnumCustomDefinitionConditionIsAccepted() {
 		TaskSlotResolver custom = new TaskSlotResolver(
 				() -> List.of(new SlotDefinition("CUSTOM", "自定义字典",
 						List.of(new SlotDefinition.SlotField("code", "代码", true, List.of())))),
 				this.taskService, new com.fasterxml.jackson.databind.ObjectMapper());
-		Task customTask = task("CUSTOM", null);
+		Task customTask = task("CUSTOM", "{\"fields\":[{\"fieldCode\":\"code\","
+				+ "\"operator\":\"EQ\",\"value\":\"VIP\"}]}");
 		when(this.taskService.findById(any())).thenReturn(customTask);
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 
-		TaskSlots slots = custom.resolve(ctx, "导出 CUSTOM，code = VIP", List.of());
+		TaskSlots slots = custom.resolve(ctx, null, List.of());
 
-		assertThat(slots.verifiedConditionDefCodes()).containsExactly("CUSTOM");
+		assertThat(slots.conditions()).containsExactly(new TaskSlots.ConditionSlot("CUSTOM", "code", "VIP"));
+		assertThat(slots.conditionDefCodes()).containsExactly("CUSTOM");
 		assertThat(new ExportConditionWorkflow(this.taskService).plan(customTask).undecided()).isEmpty();
 	}
 
@@ -158,10 +171,13 @@ class TaskSlotResolverConditionStateTest {
 	/** N-2：权威步骤 EXPORT 的 null 与预检同口径（明确留空），ContextBuilder 也渲染全量。 */
 	@Test
 	void blankConditionAtExportIsExplicitUnsetInSlotsAndContext() {
-		when(this.taskService.findById(any())).thenReturn(task(null));
+		// 权威步骤只看任务条目（ctx.step 不参与）：任务已在 EXPORT，空白 = 明确留空。
+		Task exportTask = task(null);
+		exportTask.setCurrentStep("EXPORT");
+		when(this.taskService.findById(any())).thenReturn(exportTask);
 		AiContext context = AiContext.of("export", "EXPORT", "EXPORT", TASK_ID, "ACTIVE", Map.of());
 
-		TaskSlots slots = this.resolver.resolve(context, "继续这个导出任务", List.of("导出货币字典"));
+		TaskSlots slots = this.resolver.resolve(context, null, List.of());
 
 		assertThat(slots.undecidedDefCodes()).isEmpty();
 		String rendered = new ContextBuilder(null, new com.fasterxml.jackson.databind.ObjectMapper())

@@ -97,6 +97,7 @@ function formArgs(round) {
   return {
     form: {
       scenario: 'FILTER',
+      purpose: 'GENERAL_CLARIFY',
       title: `导出筛选条件（第 ${round} 轮）`,
       fields: [
         { key: 'keyword', label: '关键字', type: 'text', required: true, placeholder: '编码或名称关键字' },

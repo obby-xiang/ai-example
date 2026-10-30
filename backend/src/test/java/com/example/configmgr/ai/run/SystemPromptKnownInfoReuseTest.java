@@ -148,12 +148,11 @@ class SystemPromptKnownInfoReuseTest {
 		assertThat(prompt).as("缺省 purpose 兼容为 GENERAL_CLARIFY")
 			.contains("缺省");
 		assertThat(prompt).as("槽位缺失/未知配置时表单仍可用（不得删掉这条说明）")
-			.contains("未知配置")
-			.contains("歧义")
-			.contains("表单仍可用");
-		assertThat(prompt).as("槽位已确定的冗余表单由宿主拒绝，模型按回执纠正一次")
-			.contains("FORM_SLOTS_ALREADY_KNOWN")
-			.contains("零副作用");
+			.contains("真正缺失或存在歧义")
+			.contains("需要结构化补充");
+		assertThat(prompt).as("槽位已确定的冗余表单由宿主零副作用拒绝，模型按回执纠正一次")
+			.contains("零副作用拒绝")
+			.contains("第 29 条");
 	}
 
 	@Test

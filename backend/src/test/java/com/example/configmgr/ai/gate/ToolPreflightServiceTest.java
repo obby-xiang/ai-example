@@ -369,14 +369,38 @@ class ToolPreflightServiceTest {
 		assertThat(report.publishMode()).as("任务设置优先于上下文/模型文本").isEqualTo("MERGE");
 	}
 
+	/**
+	 * 2026-10-30 单通道口径：EXPORT 的 {@code create_task} 必须显式给出 conditions ——
+	 * 缺失即预检拒绝（不再"未提就省略"）；{@code {}} 合法 = 条件未决定，由宿主收集一次；
+	 * IMPORT 不要求（导入没有筛选步骤）。
+	 */
+	@Test
+	void createTaskPreflightRequiresConditionsDecisionForExport() {
+		ToolPreflightService.PreflightReport missing = this.service.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"title\":\"季度导出\"}", AiContext.empty());
+		assertThat(missing.pass()).as("缺 conditions 的导出创建必须被预检拒绝").isFalse();
+		assertThat(failure(missing, "创建条件合法"))
+			.contains("导出任务必须显式给出 conditions")
+			.contains("{}");
+
+		ToolPreflightService.PreflightReport undecided = this.service.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"title\":\"季度导出\",\"conditions\":{}}", AiContext.empty());
+		assertThat(undecided.pass()).as("{} = 条件未决定，合法").isTrue();
+		assertThat(undecided.conditionSummary()).contains("筛选条件未决定");
+
+		ToolPreflightService.PreflightReport importMissing = this.service.inspect("create_task",
+				"{\"type\":\"IMPORT\",\"title\":\"季度导入\"}", AiContext.empty());
+		assertThat(importMissing.pass()).as("导入没有筛选步骤，不要求 conditions").isTrue();
+	}
+
 	@Test
 	void createTaskPreflightValidatesTypeAndCarriesCreationImpact() {
 		ToolPreflightService.PreflightReport report = this.service.inspect("create_task",
-				"{\"type\":\"EXPORT\",\"title\":\"季度导出\"}", AiContext.empty());
+				"{\"type\":\"EXPORT\",\"title\":\"季度导出\",\"conditions\":{}}", AiContext.empty());
 
 		assertThat(report.pass()).isTrue();
 		assertThat(report.impact()).contains("创建").contains("创建≠执行");
-		assertThat(report.conditionSummary()).contains("创建任务");
+		assertThat(report.conditionSummary()).contains("筛选条件未决定");
 		assertThat(report.asMap().get("publishMode")).isNull();
 
 		ToolPreflightService.PreflightReport bad = this.service.inspect("create_task", "{\"type\":\"NOPE\"}");

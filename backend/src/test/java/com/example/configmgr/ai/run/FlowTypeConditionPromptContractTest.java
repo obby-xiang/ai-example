@@ -48,17 +48,15 @@ class FlowTypeConditionPromptContractTest {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
 		assertThat(prompt).as("条件表单：一个非必填自由文本框")
-			.contains("只有一个非必填自由文本框")
-			.contains("longText");
+			.contains("表单是单个非必填自由文本框");
 		assertThat(prompt).as("文本由模型解析成 set_condition 结构")
-			.contains("解析成 set_condition");
-		assertThat(prompt).as("留空 = 不设筛选，直接推进（全量导出）")
-			.contains("留空即不设筛选")
+			.contains("非空回灌由模型解析成 set_condition");
+		assertThat(prompt).as("留空（含 {}）= 不设筛选，直接推进（全量导出）")
+			.contains("留空（包括 {} 与空文本）即明确不设筛选")
 			.contains("confirm_step");
-		assertThat(prompt).as("只有 QUERY_COND 允许条件表单（SELECT_DEFS/EXPORT 及之后由宿主零副作用拒绝）")
-			.contains("只有 QUERY_COND 允许下发这张表")
-			.contains("SELECT_DEFS 要先")
-			.contains("EXPORT 及之后一律零副作用拒绝");
+		assertThat(prompt).as("单通道：只由宿主在 QUERY_COND 且条件未决定时发放一次，模型不得自行下发")
+			.contains("只由宿主在 QUERY_COND 且条件未决定时统一发放一次")
+			.contains("模型不得自行下发");
 	}
 
 	@Test
@@ -68,9 +66,9 @@ class FlowTypeConditionPromptContractTest {
 		assertThat(tool).isNotNull();
 		String annotation = tool.description();
 		assertThat(annotation).as("注解描述必须给出 TASK_TYPE 用途").contains("TASK_TYPE");
-		assertThat(annotation).as("注解描述必须给出条件表单的步骤与单框口径")
-			.contains("QUERY_COND")
-			.contains("非必填");
+		assertThat(annotation).as("注解描述必须给出条件表单的单通道口径")
+			.contains("SET_CONDITIONS 不由模型调用")
+			.contains("只由宿主在 QUERY_COND");
 
 		ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("generative_form");
 		assertThat(yaml).isNotNull();
@@ -78,22 +76,23 @@ class FlowTypeConditionPromptContractTest {
 		assertThat(yaml.description()).as("YAML 描述必须与注解同口径")
 			.contains("TASK_TYPE")
 			.contains("QUERY_COND")
-			.contains("非必填");
+			.contains("只由宿主在 QUERY_COND");
 	}
 
 	@Test
 	void promptDeclaresOneShotConditionBoxAfterEnteringQueryCond() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
-		assertThat(prompt).as("进入 QUERY_COND 给一次非必填自由文本框（规则 30 与规则 26 同口径）")
-			.contains("进入 QUERY_COND 后按第 26 条给一次非必填自由文本框");
-		assertThat(prompt).as("已有条件直接 set_condition，不弹表单")
-			.contains("用户已给条件就直接 set_condition");
-		assertThat(prompt).as("框内留空就直接 confirm_step 全量推进")
-			.contains("框内留空就直接 confirm_step");
+		assertThat(prompt).as("条件表只由宿主在 QUERY_COND 且条件未决定时发放一次")
+			.contains("条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次");
+		assertThat(prompt).as("已有条件直接用于工具，不弹表单")
+			.contains("条件已明确（槽位或用户已给）时直接用于工具");
+		assertThat(prompt).as("框内留空（含 {}）就直接 confirm_step 全量推进")
+			.contains("留空就直接 confirm_step");
 		assertThat(prompt).as("条件只收集一次，不重复收集")
-			.contains("不得重复下发条件表单");
-		assertThat(prompt).as("旧口径「不要为条件弹表单或追问」与规则 26 冲突，必须删除")
+			.contains("不得再下发第二张");
+		assertThat(prompt).as("模型代发条件表的旧口径必须删除")
+			.doesNotContain("由你（模型）")
 			.doesNotContain("不要为条件弹表单或追问");
 	}
 
@@ -102,23 +101,23 @@ class FlowTypeConditionPromptContractTest {
 		ToolDefinitionOverride confirmStep = new YamlToolDefinitionSource().load().find("confirm_step");
 		assertThat(confirmStep).isNotNull();
 		assertThat(confirmStep.description())
-			.as("YAML confirm_step 必须给出 QUERY_COND 的一次非必填空框（与提示词同口径）")
-			.contains("进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次")
+			.as("YAML confirm_step 必须说明条件表由宿主发放（模型不下发），留空即照常推进")
+			.contains("不要自行下发 SET_CONDITIONS 表单")
+			.contains("由宿主统一给一次非必填自由文本框")
 			.contains("留空即照常推进")
-			.doesNotContain("不要因此收集条件");
+			.doesNotContain("进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次");
 
 		ToolDefinitionOverride setCondition = new YamlToolDefinitionSource().load().find("set_condition");
 		assertThat(setCondition).isNotNull();
 		assertThat(setCondition.description())
 			.as("YAML set_condition 必须认可条件表单回填解析出的条件")
-			.contains("自由文本框回填后解析出的条件")
-			.doesNotContain("用户没提就不要设置条件");
+			.contains("自由文本框回填后解析出的条件");
 
 		Method confirmStepMethod = AiTools.class.getMethod("confirmStep", String.class);
 		String confirmStepAnnotation = confirmStepMethod.getAnnotation(Tool.class).description();
-		assertThat(confirmStepAnnotation).as("注解回落也要有这次条件框")
+		assertThat(confirmStepAnnotation).as("注解回落也要有这条单通道说明")
 			.contains("QUERY_COND")
-			.contains("非必填");
+			.contains("宿主统一给一次非必填自由文本框");
 
 		Method setConditionMethod = AiTools.class.getMethod("setCondition", String.class,
 				AiTools.FieldQueryCondition.class);
@@ -129,21 +128,20 @@ class FlowTypeConditionPromptContractTest {
 	}
 
 	@Test
-	void promptDeclaresTypeFormHostIssuedAndConditionFormModelIssued() {
+	void promptDeclaresBothFormsHostIssued() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
 		assertThat(prompt).as("类型表单仍由宿主先行下发：收到回灌就直接 create_task")
-			.contains("宿主会先行下发那张类型表单")
+			.contains("类型未知时宿主会先行下发那张类型表单")
 			.contains("收到它的回灌")
 			.contains("就直接按该值 create_task");
-		assertThat(prompt).as("条件文本框不再由宿主代发（否则模型没机会理解用户原话）")
-			.doesNotContain("宿主会先行下发那一次条件文本框");
-		assertThat(prompt).as("条件未知时由模型在 QUERY_COND 下发那一次条件文本框")
-			.contains("由你（模型）")
-			.contains("不要等宿主代发");
-		assertThat(prompt).as("已知条件不因大小写/别名写法被当成缺失")
-			.contains("含小写、别名等")
-			.contains("非规范写法");
+		assertThat(prompt).as("条件表也由宿主统一发放一次（单通道）")
+			.contains("条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次");
+		assertThat(prompt).as("模型代发条件表的旧口径必须删除")
+			.doesNotContain("由你（模型）")
+			.doesNotContain("不要等宿主代发");
+		assertThat(prompt).as("留空（含 {}）是明确不设筛选")
+			.contains("包括 {} 与空文本");
 		assertThat(prompt).as("已经发过的那一张不得再发第二张（否则同一缺口弹两次）")
 			.contains("不得再下发第二张");
 	}
@@ -154,6 +152,6 @@ class FlowTypeConditionPromptContractTest {
 
 		assertThat(shipped.version())
 			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.15");
+			.isEqualTo("2026-10-27.16");
 	}
 }

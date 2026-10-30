@@ -67,6 +67,11 @@ class GenerativeFormGateTest {
 	private static final String VALID_ARGS = "{\"form\":{\"scenario\":\"FILTER\",\"fields\":["
 			+ "{\"key\":\"keyword\",\"label\":\"关键字\",\"type\":\"text\",\"required\":true}]}}";
 
+	/** 可挂起的合法表单：显式通用澄清（{@code scenario=FILTER} 会推断成 SET_CONDITIONS，
+	 *  而模型的条件表单已按单通道一律零副作用拒绝，不再有挂起可能）。 */
+	private static final String SUSPEND_ARGS = "{\"form\":{\"purpose\":\"GENERAL_CLARIFY\",\"scenario\":\"CLARIFY\","
+			+ "\"fields\":[{\"key\":\"keyword\",\"label\":\"关键字\",\"type\":\"text\",\"required\":true}]}}";
+
 	/** 非法 schema：{@code type:"html"} 越白名单。 */
 	private static final String INVALID_ARGS = "{\"form\":{\"scenario\":\"FILTER\",\"fields\":["
 			+ "{\"key\":\"content\",\"label\":\"内容\",\"type\":\"html\",\"html\":\"<img onerror=alert(1)>\"}]}}";
@@ -140,7 +145,7 @@ class GenerativeFormGateTest {
 					});
 
 			ToolExecutionResult result = GenerativeFormGateTest.this.manager.executeToolCalls(
-					prompt(), response("generative_form", VALID_ARGS));
+					prompt(), response("generative_form", SUSPEND_ARGS));
 
 			// 回填模型的是前端回灌的值本体（统一信封的 message 字段；值本体一字不差）
 			ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));

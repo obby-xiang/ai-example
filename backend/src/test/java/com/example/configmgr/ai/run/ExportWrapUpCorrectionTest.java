@@ -38,10 +38,21 @@ class ExportWrapUpCorrectionTest {
 			Map.of());
 
 	@Test
-	void exportWrapUpWithoutStartExportNeedsOneCorrection() {
-		boolean due = ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), "创建并导出", false, false);
+	void exportWrapUpAfterStructuredProgressionNeedsOneCorrection() {
+		// 意图只认本 run 的结构化证据（resolved create_task(type=EXPORT)），不看原话措辞。
+		boolean due = ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), null, false,
+				true);
 
-		assertThat(due).as("EXPORT 步 + start_export 已披露 + 尚未发起 ⇒ 收尾前补一次纠正").isTrue();
+		assertThat(due).as("EXPORT 步 + start_export 已披露 + 尚未发起 + 已有导出推进 ⇒ 收尾前补一次纠正").isTrue();
+	}
+
+	/** 反向：只有"用户说了导出"的原话、没有结构化推进证据 ⇒ 不纠正（不得按关键词注入 start_export）。 */
+	@Test
+	void freeTextExportIntentAloneDoesNotTriggerCorrection() {
+		boolean due = ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
+				"创建并导出这个任务", false, false);
+
+		assertThat(due).as("原话不是结构化事实").isFalse();
 	}
 
 	@Test
@@ -111,13 +122,6 @@ class ExportWrapUpCorrectionTest {
 		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
 				"这个导出任务有多少条数据？", false, false))
 			.as("状态/条数问答不得触发 start_export").isFalse();
-	}
-
-	/** I-2：用户本轮明确导出 ⇒ 允许纠正。 */
-	@Test
-	void explicitExportIntentTriggersCorrection() {
-		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
-				"创建并导出这个任务", false, false)).isTrue();
 	}
 
 	/** I-2：用户本轮没提导出，但本 run 已执行过导出推进工具 ⇒ 仍允许纠正。 */
@@ -224,6 +228,14 @@ class ExportWrapUpCorrectionTest {
 		RunSnapshot snapshot = store.seedRun("run-correction-latest", "s-correction-latest");
 		snapshot.setContext(AiContext.of("export", "EXPORT", "QUERY_COND", 42L, "ACTIVE", Map.of()).toMap());
 		store.save(snapshot);
+		// 意图的结构化证据：本 run 已 resolved 的 create_task(type=EXPORT)（原话不参与判定）。
+		PendingToolCall createTask = new PendingToolCall();
+		createTask.setToolCallId("call-create-export");
+		createTask.setName("create_task");
+		createTask.setArguments("{\"type\":\"EXPORT\"}");
+		createTask.setStatus(PendingToolCall.EXECUTED);
+		createTask.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		store.putPending("run-correction-latest", createTask);
 		ToolRegistry toolRegistry = mock(ToolRegistry.class);
 		ToolCallback startExport = mock(ToolCallback.class);
 		ToolDefinition definition = mock(ToolDefinition.class);

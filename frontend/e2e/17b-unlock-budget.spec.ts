@@ -15,7 +15,7 @@
  * 断言仍是「形状 + 终态」（不落在模型语义上）。
  */
 import { expect, test, type APIRequestContext } from '@playwright/test'
-import { createPublishableImportTask, openPath, sessionId as pageSessionId, waitRoundSettled } from './support/helpers'
+import { api, createPublishableImportTask, openPath, sessionId as pageSessionId, waitRoundSettled } from './support/helpers'
 import {
   chatStream,
   createImportTaskAtStep,
@@ -113,11 +113,12 @@ test.describe('@stub A 上传交接的无超时面', () => {
     expect(panelText).not.toMatch(/超时|timeout/i)
 
     const sessionId = await pageSessionId(page)
-    const current = await request.get(
-      `http://127.0.0.1:${process.env.E2E_BACKEND_PORT ?? '19930'}/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`
+    // /api/ai/runs/current 属于对话数据面，必须带身份头（裸 request.get 会 400 → data=undefined）。
+    const current = await api.get<{ awaitingExternal?: boolean }>(
+      request,
+      `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`
     )
-    const json = (await current.json()) as { data?: { awaitingExternal?: boolean } }
-    expect(json.data?.awaitingExternal ?? false).toBe(true)
+    expect(current.awaitingExternal ?? false).toBe(true)
 
     // 仍可收口（不是只能等超时的死卡）
     await page.locator('[data-testid="upload-handoff-cancel"]').click()

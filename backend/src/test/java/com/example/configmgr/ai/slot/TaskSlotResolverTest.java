@@ -3,6 +3,10 @@ package com.example.configmgr.ai.slot;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.entity.TaskItem;
+import com.example.configmgr.task.service.TaskService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -12,203 +16,177 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * 任务槽位解析（Rasa Forms 式缺失槽位模式）：只放"已知"值，槽位为空即缺失。
  *
- * <p>本类不启 Spring：{@link DefinitionCatalog} 用固定目录，{@link TaskSlotResolver}
- * 只读 {@code AiContext} 与用户文本 —— 断言的是"解析口径"，不是模型行为。
+ * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：{@link TaskSlotResolver} 不再解析用户原话，
+ * 可信事实只有两类 —— 任务条目（{@code conditionJson} 由前端结构化
+ * {@code set_condition} / 确认门落库）与本轮结构化 {@code create_task(defCodes=…)} 候选
+ * （服务端写入 {@link TaskSlotResolver#CREATE_TASK_DEF_CODES_KEY}，且绑定创建它的任务号）。
+ * 因此本类断言的是"结构化事实 → 槽位"的口径；"自由文本不再被解析"由一条反向锁钉住。
+ *
+ * <p>本类不启 Spring：{@link DefinitionCatalog} 用固定目录，{@link TaskService} 用替身。
  */
 class TaskSlotResolverTest {
 
+	private static final long TASK_ID = 42L;
+
+	private final TaskService taskService = mock(TaskService.class);
+
 	private final TaskSlotResolver resolver = new TaskSlotResolver(catalog());
 
-	@Test
-	void knownCurrencyAndCnyResolveToDirectToolArguments() {
-		TaskSlots slots = resolve("帮我导出 CURRENCY，条件 code = CNY");
+	private final TaskSlotResolver withTasks = new TaskSlotResolver(catalog(), this.taskService, new ObjectMapper());
 
-		assertThat(slots.taskType()).isEqualTo("EXPORT");
-		assertThat(slots.defCodes()).containsExactly("CURRENCY");
-		assertThat(slots.conditions()).containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
+	// ── 信任边界：自由文本不再是事实来源 ───────────────────────────────────
+
+	/**
+	 * 反向锁：本轮原文与历史原文里明明写着配置项与条件，没有结构化事实时槽位仍必须是空的。
+	 * （旧实现会解析出 CURRENCY + code=CNY；那条文本可信链已按裁决删除。）
+	 */
+	@Test
+	void freeTextNoLongerFillsSlots() {
+		TaskSlots current = this.resolver.resolve(AiContext.empty(), "帮我导出 CURRENCY，条件 code = CNY", List.of());
+		assertThat(current.defCodes()).as("原文不是结构化事实：不解析").isEmpty();
+		assertThat(current.conditions()).isEmpty();
+		assertThat(current.taskType()).as("任务类型也不再由宿主从措辞推断").isNull();
+
+		TaskSlots history = this.resolver.resolve(AiContext.empty(), "继续",
+				List.of("帮我导出 CURRENCY，筛选 code = CNY"));
+		assertThat(history.defCodes()).as("历史原文同样不是事实来源").isEmpty();
+		assertThat(history.conditions()).isEmpty();
 	}
 
-	@Test
-	void unknownDefinitionLeavesSlotsMissing() {
-		TaskSlots slots = resolve("导出 NOT_A_DEFINITION");
-
-		assertThat(slots.defCodes()).isEmpty();
-		assertThat(slots.conditions()).isEmpty();
-	}
+	// ── create_task 结构化候选（任务条目尚未落库时） ──────────────────────────
 
 	@Test
-	void multipleExplicitDefinitionsAreOneSelection() {
-		TaskSlots slots = resolve("导出 CURRENCY 和 ROLE_DICT");
+	void createTaskCandidatesStandInForTheNewTask() {
+		TaskSlots slots = this.resolver.resolve(createTaskContext(TASK_ID, "CURRENCY", "ROLE_DICT"), null, List.of());
 
 		assertThat(slots.defCodes())
 			.as("多项明确配置是合法的多选导出，不是歧义")
 			.containsExactly("CURRENCY", "ROLE_DICT");
+		assertThat(slots.taskType()).as("任务类型来自上下文结构化值，不来自措辞").isEqualTo("EXPORT");
+	}
 
-		TaskSlots byNames = resolve("导出货币和角色字典");
-		assertThat(byNames.defCodes())
-			.as("唯一中文名同样可以作为多选的一项")
-			.containsExactly("CURRENCY", "ROLE_DICT");
+	/** 候选与创建它的任务号绑定：切到别的任务后旧候选不得压掉新任务的选择表。 */
+	@Test
+	void candidatesBoundToAnotherTaskAreIgnored() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlotResolver.CREATE_TASK_DEF_CODES_KEY, List.of("CURRENCY"));
+		extra.put(TaskSlotResolver.CREATE_TASK_TASK_ID_KEY, 7L);
+		AiContext otherTask = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra);
+
+		assertThat(this.resolver.resolve(otherTask, null, List.of()).defCodes()).isEmpty();
+	}
+
+	// ── 权威顺序：页面勾选 > 任务条目 > create_task 候选 ──────────────────────
+
+	@Test
+	void pageSelectionWinsOverCandidates() {
+		Map<String, Object> candidates = new LinkedHashMap<>();
+		candidates.put(TaskSlotResolver.CREATE_TASK_DEF_CODES_KEY, List.of("CURRENCY"));
+		candidates.put(TaskSlotResolver.CREATE_TASK_TASK_ID_KEY, TASK_ID);
+		Map<String, Object> selected = new LinkedHashMap<>(candidates);
+		selected.putAll(Map.of("pageId", "export", "selectedDefs", List.of("ROLE_DICT"), "selectionSynced", true));
+		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, selected);
+		Map<String, Object> reselected = new LinkedHashMap<>(candidates);
+		reselected.putAll(Map.of("pageId", "export", "selectedDefs", List.of("CURRENCY"), "selectionSynced", true));
+		AiContext replaced = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, reselected);
+
+		assertThat(this.resolver.resolve(workspace, null, List.of()).defCodes())
+			.as("页面已勾选 ⇒ 页面权威，候选不覆盖")
+			.containsExactly("ROLE_DICT");
+		assertThat(this.resolver.resolve(replaced, null, List.of()).defCodes())
+			.as("页面改选 ⇒ 以新的页面勾选为准")
+			.containsExactly("CURRENCY");
 	}
 
 	@Test
-	void sharedDisplayNameIsStillAmbiguous() {
-		TaskSlots slots = resolve("导出重复字典");
+	void taskItemsFillWhenPageHasNotSynced() {
+		when(this.taskService.findById(any())).thenReturn(task("CURRENCY", null));
 
-		assertThat(slots.defCodes())
-			.as("同一中文名对应多个定义编码，且没有编码消歧：不猜")
-			.isEmpty();
-	}
+		AiContext notHydrated = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID,
+				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", false));
+		assertThat(this.withTasks.resolve(notHydrated, null, List.of()).defCodes())
+			.as("未水合 ⇒ 按未同步回落任务条目")
+			.containsExactly("CURRENCY");
 
-	@Test
-	void cnyCurrencyDictionaryFillsConditionWithoutFilterKeyword() {
-		TaskSlots slots = resolve("导出CNY货币字典");
+		AiContext legacyClient = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID,
+				Map.of("pageId", "export", "selectedDefs", List.of()));
+		assertThat(this.withTasks.resolve(legacyClient, null, List.of()).defCodes())
+			.as("无标记（旧客户端）⇒ 同样按未同步处理")
+			.containsExactly("CURRENCY");
 
-		assertThat(slots.defCodes()).containsExactly("CURRENCY");
-		assertThat(slots.conditions())
-			.as("原文已给出唯一主键值：不要求出现“筛选/只要”等词")
-			.containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
-	}
-
-	@Test
-	void dictionaryQueryIsNotAnExportSelection() {
-		TaskSlots slots = resolve("查询货币字典");
-
-		assertThat(slots.taskType()).isNull();
-		assertThat(slots.defCodes())
-			.as("只有出现在导出/选择意图里的定义名才是选择")
-			.isEmpty();
-	}
-
-	@Test
-	void negatedSelectionClearsInsteadOfFilling() {
-		TaskSlots slots = resolve("不要导出 CURRENCY");
-
-		assertThat(slots.taskType()).isNull();
-		assertThat(slots.defCodes()).isEmpty();
-	}
-
-	@Test
-	void laterTurnReusesEarlierSlotsAndExplicitReplacementWins() {
-		TaskSlots reused = this.resolver.resolve(AiContext.empty(), "继续", List.of("帮我导出 CURRENCY"));
-		assertThat(reused.defCodes()).containsExactly("CURRENCY");
-
-		TaskSlots replaced = this.resolver.resolve(AiContext.empty(), "改选 ROLE_DICT", List.of("帮我导出 CURRENCY"));
-		assertThat(replaced.defCodes()).containsExactly("ROLE_DICT");
-
-		TaskSlots rewritten = this.resolver.resolve(AiContext.empty(), "改成 ROLE_DICT", List.of("帮我导出 CURRENCY"));
-		assertThat(rewritten.defCodes()).containsExactly("ROLE_DICT");
-	}
-
-	@Test
-	void historyConditionIsReusedAndCanBeOverridden() {
-		TaskSlots reused = this.resolver.resolve(AiContext.empty(), "继续",
-				List.of("导出 CURRENCY，筛选 CNY"));
-		assertThat(reused.conditions()).containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
-
-		TaskSlots overridden = this.resolver.resolve(AiContext.empty(), "条件改成 code = USD",
-				List.of("导出 CURRENCY，筛选 CNY"));
-		assertThat(overridden.conditions()).containsExactly(new ConditionSlot("CURRENCY", "code", "USD"));
-	}
-
-	@Test
-	void cancelClearsInheritedSlots() {
-		TaskSlots slots = this.resolver.resolve(AiContext.empty(), "取消",
-				List.of("导出 CURRENCY，筛选 CNY"));
-
-		assertThat(slots.defCodes()).isEmpty();
-		assertThat(slots.conditions()).isEmpty();
-	}
-
-	@Test
-	void noFilterIntentMeansNoConditions() {
-		TaskSlots slots = resolve("导出 CURRENCY");
-
-		assertThat(slots.defCodes()).containsExactly("CURRENCY");
-		assertThat(slots.conditions())
-			.as("用户没提筛选，不得凭定义/值造条件")
-			.isEmpty();
-	}
-
-	@Test
-	void ambiguousFilterValuesMeanNoConditions() {
-		TaskSlots slots = resolve("导出 CURRENCY，筛选 CNY 或 USD");
-
-		assertThat(slots.defCodes()).containsExactly("CURRENCY");
-		assertThat(slots.conditions()).isEmpty();
-	}
-
-	@Test
-	void conflictingExplicitValuesMeanNoConditions() {
-		TaskSlots slots = resolve("导出 CURRENCY，条件 code = CNY 或 code = USD");
-
-		assertThat(slots.defCodes()).containsExactly("CURRENCY");
-		assertThat(slots.conditions())
-			.as("同一字段两个不同值 = 歧义，不替用户挑一个")
-			.isEmpty();
-	}
-
-	@Test
-	void workspaceSelectionIsAuthoritativeUntilExplicitlyReplaced() {
-		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
-				Map.of("pageId", "export", "selectedDefs", List.of("ROLE_DICT")));
-
-		TaskSlots reused = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY"));
-		assertThat(reused.defCodes()).containsExactly("ROLE_DICT");
-
-		TaskSlots replaced = this.resolver.resolve(workspace, "改选 CURRENCY", List.of());
-		assertThat(replaced.defCodes()).containsExactly("CURRENCY");
+		AiContext unsynced = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, Map.of("pageId", "export"));
+		assertThat(this.withTasks.resolve(unsynced, null, List.of()).defCodes())
+			.as("页面从未同步 ⇒ 回落任务条目")
+			.containsExactly("CURRENCY");
 	}
 
 	/**
 	 * <b>页面显式空列表 = 权威空值</b>（与 {@code ContextBuilder#pageSelectedDefs} 同一口径）：
 	 * 用户在向导里把勾选全部取消、且任务详情已应用（{@code selectionSynced=true}）时，
-	 * 客户端上报的 {@code selectedDefs=[]} 是"现在什么都没选"的事实 —— 不得回落到历史原文把旧选择
-	 * 重新勾回来（那会让模型按用户已取消的选择继续推进）。
+	 * 客户端上报的 {@code selectedDefs=[]} 是"现在什么都没选"的事实 —— 不得回落到任务条目
+	 * 把旧选择重新勾回来（那会让模型按用户已取消的选择继续推进）。
 	 */
 	@Test
-	void explicitEmptyPageSelectionIsAuthoritativeAndDoesNotResurrectHistory() {
-		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
+	void explicitEmptyPageSelectionIsAuthoritativeAndDoesNotResurrectTaskItems() {
+		when(this.taskService.findById(any())).thenReturn(task("CURRENCY", "{\"fields\":[{\"fieldCode\":\"code\","
+				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
+		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID,
 				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", true));
 
-		TaskSlots slots = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY，筛选 CNY"));
+		TaskSlots slots = this.withTasks.resolve(workspace, null, List.of());
 
-		assertThat(slots.defCodes()).as("页面同步了空集合 ⇒ 权威空，不回落历史").isEmpty();
+		assertThat(slots.defCodes()).as("页面同步了空集合 ⇒ 权威空，不回落任务条目").isEmpty();
 		assertThat(slots.conditions()).as("没有配置项就没有可承载的条件").isEmpty();
 	}
 
-	/**
-	 * <b>未水合 ≠ 用户清空</b>（返修）：任务详情还没应用（{@code selectionSynced=false}）或旧客户端
-	 * 不带该标记时，{@code selectedDefs=[]} 只是"还不知道"，必须按未同步回落历史/任务条目 ——
-	 * 否则页面挂载到详情返回的窗口里会把用户已有的勾选误抹成空。
-	 */
-	@Test
-	void emptyPageSelectionWithoutSyncedDetailIsTreatedAsUnsynced() {
-		AiContext notHydrated = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
-				Map.of("pageId", "export", "selectedDefs", List.of(), "selectionSynced", false));
-		assertThat(this.resolver.resolve(notHydrated, "继续", List.of("导出 CURRENCY")).defCodes())
-			.as("未水合 ⇒ 按未同步回落历史").containsExactly("CURRENCY");
+	// ── 条件事实只来自任务 conditionJson ─────────────────────────────────────
 
-		AiContext legacyClient = AiContext.of("export", "EXPORT", "SELECT_DEFS", null,
-				Map.of("pageId", "export", "selectedDefs", List.of()));
-		assertThat(this.resolver.resolve(legacyClient, "继续", List.of("导出 CURRENCY")).defCodes())
-			.as("无标记（旧客户端）⇒ 同样按未同步处理，不误抹历史").containsExactly("CURRENCY");
+	@Test
+	void taskConditionJsonDrivesConditions() {
+		when(this.taskService.findById(any())).thenReturn(task("CURRENCY", "{\"fields\":[{\"fieldCode\":\"code\","
+				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
+
+		TaskSlots slots = this.withTasks.resolve(context, null, List.of());
+
+		assertThat(slots.defCodes()).containsExactly("CURRENCY");
+		assertThat(slots.conditions()).containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
+		assertThat(slots.conditionDefCodes()).containsExactly("CURRENCY");
+		assertThat(slots.undecidedDefCodes()).as("EQ 条件已成事实，不再算缺口").isEmpty();
 	}
 
-	/**
-	 * 反向/相邻：页面<b>从未同步</b> {@code selectedDefs}（键缺失或不在拥有选中集的页上）时，
-	 * 空值只表示"不知道"，仍允许按历史回落 —— 与 {@code ContextBuilder} 的 {@code null} 态同源。
-	 */
 	@Test
-	void unsyncedPageSelectionStillFallsBackToHistory() {
-		AiContext unsynced = AiContext.of("export", "EXPORT", "SELECT_DEFS", null, Map.of("pageId", "export"));
+	void noFilterIntentMeansNoConditions() {
+		when(this.taskService.findById(any())).thenReturn(task("CURRENCY", null));
+		AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
 
-		TaskSlots slots = this.resolver.resolve(unsynced, "继续", List.of("导出 CURRENCY"));
+		TaskSlots slots = this.withTasks.resolve(context, null, List.of());
 
-		assertThat(slots.defCodes()).as("未同步 ⇒ 允许历史回落").containsExactly("CURRENCY");
+		assertThat(slots.defCodes()).containsExactly("CURRENCY");
+		assertThat(slots.conditions())
+			.as("用户没给条件事实，不得凭定义/值造条件")
+			.isEmpty();
+		assertThat(slots.undecidedDefCodes()).as("从未设置的条件仍是缺口（要收集）").containsExactly("CURRENCY");
+	}
+
+	// ── extra 白名单与快照往返 ──────────────────────────────────────────────
+
+	@Test
+	void enrichWritesWhitelistedExtraAndSurvivesSnapshotRoundTrip() {
+		AiContext enriched = this.resolver.enrich(createTaskContext(TASK_ID, "CURRENCY"), null, List.of());
+
+		TaskSlots fromExtra = TaskSlots.fromExtra(enriched.getExtra());
+		assertThat(fromExtra.defCodes()).containsExactly("CURRENCY");
+		// 快照读写同一形态（RunSnapshot 落 Redis 后再重建上下文）
+		assertThat(TaskSlots.fromExtra(AiContext.fromMap(enriched.toMap()).getExtra()).defCodes())
+			.containsExactly("CURRENCY");
 	}
 
 	/**
@@ -240,29 +218,34 @@ class TaskSlotResolverTest {
 		extra.put("pageId", new StringBuilder("export"));
 		extra.put("selectedDefs", List.of());
 		extra.put("selectionSynced", true);
-		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", null, extra);
+		AiContext workspace = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, extra);
 
-		TaskSlots slots = this.resolver.resolve(workspace, "继续", List.of("导出 CURRENCY"));
+		TaskSlots slots = this.withTasks.resolve(workspace, null, List.of());
 
 		assertThat(slots.defCodes()).as("与 ContextBuilder 同一 String.valueOf 口径 ⇒ 已同步空选择").isEmpty();
 	}
 
-	@Test
-	void enrichWritesWhitelistedExtraAndSurvivesSnapshotRoundTrip() {
-		AiContext enriched = this.resolver.enrich(AiContext.empty(), "导出 CURRENCY，筛选 CNY", List.of());
-
-		TaskSlots fromExtra = TaskSlots.fromExtra(enriched.getExtra());
-		assertThat(fromExtra.defCodes()).containsExactly("CURRENCY");
-		assertThat(fromExtra.conditions()).containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
-		// 快照读写同一形态（RunSnapshot 落 Redis 后再重建上下文）
-		assertThat(TaskSlots.fromExtra(AiContext.fromMap(enriched.toMap()).getExtra()).conditions())
-			.containsExactly(new ConditionSlot("CURRENCY", "code", "CNY"));
-	}
-
 	// ── helpers ─────────────────────────────────────────────────────────────
 
-	private TaskSlots resolve(String message) {
-		return this.resolver.resolve(AiContext.empty(), message, List.of());
+	private static AiContext createTaskContext(long taskId, String... defCodes) {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlotResolver.CREATE_TASK_DEF_CODES_KEY, List.of(defCodes));
+		extra.put(TaskSlotResolver.CREATE_TASK_TASK_ID_KEY, taskId);
+		return AiContext.of("export", "EXPORT", "SELECT_DEFS", taskId, extra);
+	}
+
+	private static Task task(String defCode, String conditionJson) {
+		Task task = new Task();
+		task.setId(TASK_ID);
+		task.setType(Task.TaskType.EXPORT);
+		task.setCurrentStep("QUERY_COND");
+		task.setStatus(Task.TaskStatus.ACTIVE);
+		TaskItem item = new TaskItem();
+		item.setTaskId(TASK_ID);
+		item.setDefCode(defCode);
+		item.setConditionJson(conditionJson);
+		task.getItems().add(item);
+		return task;
 	}
 
 	private static DefinitionCatalog catalog() {

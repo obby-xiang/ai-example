@@ -83,6 +83,25 @@ class QueryCondConditionFormParkTest {
 		seedRun();
 	}
 
+	/**
+	 * 2026-10-30 新口径：真实空对象回灌（用户直接提交 = 留空）按"明确不设筛选"收口 ——
+	 * 条件事实落成 {@code "{}"}，且<b>不再弹第二张</b>（也不再要求模型补 set_condition）。
+	 */
+	@Test
+	void blankFormResultPersistsExplicitUnsetAndNoSecondCard() {
+		this.taskState.set(task(null));
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
+			.as("前置：条件未决定 ⇒ 宿主挂一张").isTrue();
+
+		PendingToolCall answered = this.store.pending(RUN_ID, ConditionsForm.toolCallId(RUN_ID, TASK_ID));
+		answered.setStatus(PendingToolCall.FRONTEND_RESULT);
+		answered.setResultText("{}");
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
+			.as("留空 = 明确不设筛选：落库后不再弹第二张").isFalse();
+		verify(this.taskService).setCondition(TASK_ID, "CURRENCY", "{}");
+	}
+
 	@Test
 	void unknownConditionParksExactlyOnceAndAKnownConditionNeverParks() {
 		// ── 上半：条件未决定（条目 conditionJson=null）⇒ 只挂一次 ──

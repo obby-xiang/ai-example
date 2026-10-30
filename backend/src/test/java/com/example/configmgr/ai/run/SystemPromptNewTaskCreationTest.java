@@ -40,9 +40,10 @@ class SystemPromptNewTaskCreationTest {
 		assertThat(rule).as("创建前禁止追问配置/筛选/文件，也禁止拿 list_config_defs 摸底代替创建")
 			.contains("不要先追问配置项、筛选条件或数据文件")
 			.contains("不得先用 list_config_defs 摸底再回来问");
-		assertThat(rule).as("create_task 的入参口径：只需类型 + 可选标题")
-			.contains("只需要任务类型")
-			.contains("可选 title")
+		assertThat(rule).as("create_task 的入参口径：类型 + 可选标题 + 导出必须显式给条件决策")
+			.contains("需要任务类型 type（EXPORT/IMPORT）与可选 title")
+			.contains("EXPORT 还必须显式传 conditions")
+			.contains("未决定传 {}")
 			.contains("标题不追问");
 		assertThat(rule).as("类型未知才用表单选类型，仍不用文字反问")
 			.contains("只有类型确实无法判断时才用 generative_form 选 EXPORT/IMPORT")
@@ -79,10 +80,11 @@ class SystemPromptNewTaskCreationTest {
 			.contains("请告诉我导出哪个")
 			.contains("开放式文字反问")
 			.contains("禁止只把定义列表列在正文里让用户自己挑");
-		assertThat(rule).as("筛选条件可选：QUERY_COND 给一次非必填空框，留空直接推进，不重复收集")
+		assertThat(rule).as("筛选条件：导出创建必须显式给决策，收集只由宿主发放一次")
 			.contains("筛选条件可选")
-			.contains("进入 QUERY_COND 后按第 26 条给一次非必填自由文本框")
-			.contains("不得重复下发条件表单");
+			.contains("创建 EXPORT 任务时必须显式传 conditions")
+			.contains("条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次")
+			.contains("不得再下发第二张");
 	}
 
 	@Test
@@ -94,6 +96,6 @@ class SystemPromptNewTaskCreationTest {
 		assertThat(rule29).isGreaterThan(0);
 		assertThat(rule30).isGreaterThan(rule29);
 		assertThat(prompt.substring(rule30)).as("30 是最后一条，正文到提示词结尾为止")
-			.contains("不得重复下发条件表单");
+			.contains("不得再下发第二张");
 	}
 }

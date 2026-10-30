@@ -1005,8 +1005,9 @@ test.describe('@real 16 KQC 真模型（CI 手工触发；本地不跑）', () =
         expect(Number(event.lostTokens ?? 0), `L2+ 的 lostTokens 必须 > 0：${JSON.stringify(event).slice(0, 200)}`)
           .toBeGreaterThan(0)
       }
-      // ④ 占用真下降：末条的 after 低于首条的 before
-      expect(Number(changed[changed.length - 1].after ?? 0)).toBeLessThan(Number(changed[0].before ?? 0))
+      // ④ 占用真下降：上面已逐条断言每个压缩事件的 after < 自己的 before。
+      // 不再比较"末条 after < 首条 before"：历史持续增长时，L1 只清旧工具结果，
+      // 新增轮次仍可能把总占用推高（0c74f20f 实测 3405 vs 2183），该累计判据不成立。
 
       // ⑤ 三面同源之一：快照 ≡ 台账末条
       const lastEvent = changed[changed.length - 1]
