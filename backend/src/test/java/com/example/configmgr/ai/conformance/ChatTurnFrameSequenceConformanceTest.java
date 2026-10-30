@@ -165,8 +165,16 @@ class ChatTurnFrameSequenceConformanceTest {
 		List<Map<String, Object>> frames = clientView(wire);
 		assertThat(FrameContract.types(frames)).containsExactly("start", "message_start", "delta", "delta",
 				"message_end", "done");
-		assertThat(FrameContract.types(wire.frames())).as("续跑轮不重发 start（首包归属首轮，已在归档里）")
-				.containsExactly("message_start", "delta", "delta", "message_end", "done");
+		// Task 2（2026-10-30 原子化帧序号与有序交付）：本地扇出先按订阅者游标补齐归档里的更低号再投本帧。
+		// 本用例的帧线由 {@code attach} 建立（不设游标 ⇒ 0），故实时帧之前先收到首轮已归档的 start(seq=1)。
+		// 续跑轮本身仍然不重发 start：线路上只有这一条 start，且它属于首轮。
+		assertThat(FrameContract.ofType(wire.frames(), "start"))
+			.as("线路上只有首轮那一条 start（续跑不重发，头部那条是归档补齐）")
+			.singleElement()
+			.satisfies(frame -> assertThat(frame).containsEntry("seq", 1L));
+		assertThat(FrameContract.types(framesAfter(wire.frames(), 1L)))
+			.as("续跑轮不重发 start（首包归属首轮，已在归档里）")
+			.containsExactly("message_start", "delta", "delta", "message_end", "done");
 		FrameContract.assertConformant(frames);
 
 		String concatenated = concatenatedDeltas(frames);
@@ -553,6 +561,18 @@ class ChatTurnFrameSequenceConformanceTest {
 		List<Map<String, Object>> all = new ArrayList<>(bySeq.values());
 		all.sort(Comparator.comparingLong(frame -> ((Number) frame.get("seq")).longValue()));
 		return all;
+	}
+
+	/**
+	 * 只保留本次驱动新落的帧（{@code seq} 大于归档下界）。
+	 *
+	 * <p>Task 2（2026-10-30）起，订阅者游标小于归档末号时，本地扇出会先把归档里的更低号补齐再投本帧
+	 * （见 {@code ReattachLastSeqConformanceTest}）；断言"本轮发了什么"必须把补齐帧排除在外。
+	 */
+	private static List<Map<String, Object>> framesAfter(List<Map<String, Object>> frames, long floorSeq) {
+		return frames.stream()
+			.filter(frame -> frame.get("seq") instanceof Number number && number.longValue() > floorSeq)
+			.toList();
 	}
 
 	/** 一个正文分片（无 finishReason）。 */

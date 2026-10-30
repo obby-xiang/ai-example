@@ -285,7 +285,15 @@ class CancelDuringRetryBackoffTest {
 		assertThat(archived).as("取消先落定 ⇒ done 仍恰一条（归档幂等挡住重复收尾）")
 			.hasSize(1)
 			.allSatisfy(frame -> assertThat(frame).containsEntry("cancelled", true));
-		assertThat(doneFrames(wire)).hasSize(0);
+		// Task 2（2026-10-30）：attach 不建立游标（= 0），本地扇出先补齐归档里的取消终帧（seq=1）——
+		// 线上那条 done 是补齐帧，不是本次驱动补发的；驱动自己不得再发任何更大的号。
+		long archivedDoneSeq = ((Number) archived.get(0).get("seq")).longValue();
+		assertThat(doneFrames(wire).stream()
+			.filter(frame -> ((Number) frame.get("seq")).longValue() > archivedDoneSeq)
+			.toList()).as("驱动不得补发新的 done（线上只有补齐的归档终帧 seq=" + archivedDoneSeq + "）")
+			.isEmpty();
+		assertThat(doneFrames(wire)).as("补齐的终帧仍是取消态").allSatisfy(
+				frame -> assertThat(frame).containsEntry("cancelled", true));
 		assertThat(((CopyStore) this.store).doneSaves()).as("取消先落定 ⇒ DONE 一次都不落").isZero();
 		assertThat(((CopyStore) this.store).cancelledSaves()).as("取消收尾落 CANCELLED 恰一次").isEqualTo(1);
 	}

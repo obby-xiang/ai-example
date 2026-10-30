@@ -324,7 +324,10 @@ class SseChatEmitterDeliveryInvariantTest {
 		assertThat(two.seq()).isZero();
 		assertThat(RedisDegradation.count(RedisDegradation.A7_FRAME_APPEND)).as("每帧未落档计一次（事件粒度 = 帧）")
 			.isEqualTo(before + 2);
-		assertThat(occurrences(output.getAll(), "事件日志原子落档失败")).as("日志每轮只吼一次（计数负责量级）")
+		// 生产在同一短语上刻意有两级：首帧 WARN（"后续同类失败只计数不再重复告警"），其后每帧 DEBUG。
+		// 本用例的口径是"每轮只<b>吼</b>一次"，所以只数 WARN 行 —— 把 DEBUG 也算进来，
+		// 断言就变成"不许有降噪日志"，与 kill 描述（每帧都 WARN）不符。
+		assertThat(warnLines(output.getAll(), "事件日志原子落档失败")).as("日志每轮只吼一次（计数负责量级）")
 			.isEqualTo(1);
 	}
 
@@ -485,12 +488,18 @@ class SseChatEmitterDeliveryInvariantTest {
 		};
 	}
 
-	private static int occurrences(String text, String needle) {
+	/**
+	 * 只数 <b>WARN</b> 行里出现的短语次数。
+	 *
+	 * <p>生产在降噪后会用<b>同一句短语</b>打 DEBUG（"已计数，本轮不再重复告警"），按全文数会把
+	 * "只吼一次"误判成"两次"。本方法按日志级别列（{@code %5p} 渲染出的 WARN）过滤。
+	 */
+	private static int warnLines(String text, String needle) {
 		int count = 0;
-		int index = text.indexOf(needle);
-		while (index >= 0) {
-			count++;
-			index = text.indexOf(needle, index + needle.length());
+		for (String line : text.split("\\R")) {
+			if (line.contains("WARN") && line.contains(needle)) {
+				count++;
+			}
 		}
 		return count;
 	}

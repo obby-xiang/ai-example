@@ -267,12 +267,19 @@ class ContextFrameWiringTest {
 		second.start(SESSION_ID);
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("再问")), second);
 
+		Map<String, Object> firstDone = FrameContract.oneOfType(framesOf(firstWire), "done");
 		@SuppressWarnings("unchecked")
-		Map<String, Object> firstContext = (Map<String, Object>) FrameContract.oneOfType(framesOf(firstWire), "done")
-			.get("context");
+		Map<String, Object> firstContext = (Map<String, Object>) firstDone.get("context");
+		// Task 2（2026-10-30）：第二条帧线 attach 时游标 = 0，本地扇出先把归档里的首轮帧（含 done）补齐
+		// 再投本轮 —— 断言只看本次驱动新落的 done（号更大）。
+		long firstDoneSeq = ((Number) firstDone.get("seq")).longValue();
+		List<Map<String, Object>> secondDones = FrameContract.ofType(framesOf(secondWire), "done")
+			.stream()
+			.filter(frame -> ((Number) frame.get("seq")).longValue() > firstDoneSeq)
+			.toList();
+		assertThat(secondDones).as("第二次驱动自己的 done 恰一条（更早的那条是归档补齐）").hasSize(1);
 		@SuppressWarnings("unchecked")
-		Map<String, Object> secondContext = (Map<String, Object>) FrameContract.oneOfType(framesOf(secondWire), "done")
-			.get("context");
+		Map<String, Object> secondContext = (Map<String, Object>) secondDones.get(0).get("context");
 		assertThat(firstContext).containsEntry("level", "L1");
 		assertThat(secondContext).as("交接读过即弃，不得残留").containsEntry("level", "none");
 	}

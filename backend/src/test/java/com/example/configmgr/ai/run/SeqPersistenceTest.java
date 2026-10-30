@@ -81,7 +81,10 @@ class SeqPersistenceTest {
 		resumed.attach(wire.emitter);
 		resumed.suspended(List.of(pending("c-2")), "k1", "k2", "i2");
 
-		assertThat(wire.seqs()).containsExactly(4L);
+		// Task 2（2026-10-30 原子化取号与有序交付）：attach 不建立游标（= 0），本地扇出先按游标
+		// 补齐归档里的更低号再投本帧 —— 归档只剩 seq 1（2/3 落档失败），故线上先补 1、再投续号的 4。
+		assertThat(wire.seqs()).as("先补齐归档里幸存的 seq 1，再投新实例续号后的 seq 4")
+			.containsExactly(1L, 4L);
 		assertThat(store.archivedSeqs(RUN_ID)).as("归档仍有序无重号").containsExactly(1L, 4L);
 		assertThat(store.lastIssuedSeq(RUN_ID)).isEqualTo(4L);
 	}

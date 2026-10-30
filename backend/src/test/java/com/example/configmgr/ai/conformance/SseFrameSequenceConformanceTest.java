@@ -237,11 +237,22 @@ class SseFrameSequenceConformanceTest {
 		FrameWire live = FrameWire.attachTo(resumed);
 		resumed.start("s-1");
 
-		Map<String, Object> firstResumedFrame = live.frames().get(0);
-		assertThat(firstResumedFrame).containsEntry("seq", 5L);
-		assertThat(((Number) firstResumedFrame.get("seq")).longValue())
+		// Task 2（2026-10-30）：attach 不建立游标（= 0），本地扇出先按游标补齐归档的 1..4，
+		// 再投本次新帧 5 —— 因此"新实例的第一条新帧"必须从补齐之后取，不能取 frames().get(0)
+		// （那条是旧进程的 start，属补齐）。补齐本身也锁住：连续、无重复、从 1 起。
+		assertThat(seqs(live.frames())).as("先补齐归档 1..4，再投新帧 5")
+			.containsExactly(1L, 2L, 3L, 4L, 5L);
+		List<Map<String, Object>> resumedOnly = live.frames()
+			.stream()
+			.filter(frame -> ((Number) frame.get("seq")).longValue() > clientLastSeq)
+			.toList();
+		assertThat(resumedOnly).singleElement().satisfies(frame -> {
+			assertThat(FrameContract.type(frame)).isEqualTo("start");
+			assertThat(frame).containsEntry("seq", 5L);
+			assertThat(((Number) frame.get("seq")).longValue())
 				.as("新帧的号必须严格大于客户端已知号，否则会被当作孤儿丢掉")
 				.isGreaterThan(clientLastSeq);
+		});
 
 		// 差量重挂：seq 5 必须被补发（DC-14 §3.6 的丢帧场景在此关闭）
 		FrameWire reattached = new FrameWire();
@@ -320,6 +331,15 @@ class SseFrameSequenceConformanceTest {
 			}
 		}
 		return max;
+	}
+
+	/** 帧线上的业务序号（按到达顺序；心跳没有业务号，天然不在其中）。 */
+	private static List<Long> seqs(List<Map<String, Object>> frames) {
+		return frames.stream()
+			.map(frame -> frame.get("seq"))
+			.filter(Number.class::isInstance)
+			.map(seq -> ((Number) seq).longValue())
+			.toList();
 	}
 
 	private static PendingToolCall pending(String toolCallId) {
