@@ -1,5 +1,6 @@
 package com.example.configmgr.job.service;
 
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.config.AppProperties;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -396,7 +397,13 @@ public class JobHeartbeatRegistry {
             }
             long periodMs = Math.max(1_000L, this.beatTtl.toMillis() / 3);
             ScheduledExecutorService svc = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "job-heartbeat-ticker");
+                Thread thread = new Thread(() -> {
+                    // 全局 ticker 不承载任何调用者身份：线程创建时先清掉从创建者继承来的 TTL 绑定，
+                    // 否则这条守护线程会把"最近启动 runner 的调用者"身份一直带在身上。
+                    try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+                        r.run();
+                    }
+                }, "job-heartbeat-ticker");
                 thread.setDaemon(true);
                 return thread;
             });
@@ -407,7 +414,9 @@ public class JobHeartbeatRegistry {
     }
 
     private void tickSafely() {
-        try {
+        // 心跳 ticker 是全局的，没有"单作业记录身份"：每拍显式 denied，清掉继承/上一拍残留的身份，
+        // 避免这条进程级线程长期持有最近启动者的租户/用户身份。
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
             tickOnce();
         } catch (Throwable t) {
             // 单个周期失败不终止 ticker（下个周期重试）；共享键失联由 TTL 兜底

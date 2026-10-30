@@ -1,5 +1,6 @@
 package com.example.configmgr.config;
 
+import com.example.configmgr.ai.tenant.RequestContextTaskDecorator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
@@ -48,6 +49,12 @@ import java.util.concurrent.ThreadPoolExecutor;
  * 10 条能同时持有连接，其余在 Hikari {@code connectionTimeout} 内排队。内网小并发下接受；若作业
  * 并发实测逼近上限，这两个数须一并重审（等待治理排查已登记为 R-68 同面）。
  *
+ * <p><b>身份传播（租户/用户上下文）</b>：作业是"提交者发起、池线程执行"的异步体，必须在提交时刻
+ * 捕获调用者身份、在池线程执行期间回放。TTL 是 {@code InheritableThreadLocal} 语义 —— 没有装饰器时，
+ * 池线程在"带身份的提交者"创建它的那一刻就把该身份永久继承下来：A 建好线程后，B 的任务会以 A 的身份
+ * 运行，无身份的任务也沿用 A。因此这里装 {@link RequestContextTaskDecorator}（AI 侧同一份基座），
+ * 提交为空身份时同样显式清空。只传播身份，不额外扩散装饰面。
+ *
  * <p>
  * {@code @EnableAsync} 由主类 {@code ConfigMgrApplication} 开启，这里只提供执行器。
  */
@@ -64,6 +71,8 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setQueueCapacity(200);
         executor.setThreadNamePrefix("job-async-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        // 身份传播：提交时刻抓 TTL 快照（含租户/用户身份），池线程执行时回放、结束后恢复池线程原状
+        executor.setTaskDecorator(new RequestContextTaskDecorator());
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();
