@@ -38,14 +38,13 @@ import java.util.regex.Pattern;
  * 相对基目录），调用方把 {@code key} 落库、把 {@code path} 交给写盘 API（如
  * {@code ExcelWriter#write}）；读取/摘要/删除一律经 {@link #resolve(String)} 还原成本实例路径。
  *
- * <h2>兼容与拒绝</h2>
+ * <h2>拒绝面</h2>
  * <ul>
- * <li><b>历史绝对路径仍可读</b>：{@code resolve} 见到绝对路径原样返回（不拼基目录），历史行不需要
- * 先迁移就能继续下载/预检查/导入；</li>
- * <li><b>新键拒绝上跳段</b>：相对键只要含 {@code ..} 段即抛 {@link IllegalArgumentException}，
+ * <li><b>绝对路径一律拒绝</b>：库里只有相对存储键，绝对路径只能来自错误调用（或错误数据）——
+ * {@code resolve} 见到绝对路径即抛 {@link IllegalArgumentException}，绝不按本机路径直读；</li>
+ * <li><b>相对键拒绝上跳段</b>：相对键只要含 {@code ..} 段即抛 {@link IllegalArgumentException}，
  * 解析结果也必须落在基目录之内 —— 存储键不接受任何调用方拼接的路径；</li>
- * <li>绝对路径的兼容口只面向"库里已存在的历史值"，不得用于请求参数：{@link #store}/
- * {@link #allocate} 从不接受外部键。</li>
+ * <li>{@link #store}/{@link #allocate} 从不接受外部键，键由本服务分配。</li>
  * </ul>
  */
 @Slf4j
@@ -101,39 +100,38 @@ public class FileStorageService {
     }
 
     /**
-     * 把库里的存储值解析成本实例可用的路径。
+     * 把库里的相对存储键解析成本实例可用的路径。
      *
-     * @param keyOrPath 相对存储键（新口径）或历史绝对路径（兼容读）
-     * @throws IllegalArgumentException 空值、非法路径、相对键含 {@code ..}、或解析结果越出基目录
+     * @param key 相对存储键（新口径；绝对路径不接受）
+     * @throws IllegalArgumentException 空值、绝对路径、非法路径、相对键含 {@code ..}、或解析结果越出基目录
      */
-    public Path resolve(String keyOrPath) {
-        if (keyOrPath == null || keyOrPath.isBlank()) {
+    public Path resolve(String key) {
+        if (key == null || key.isBlank()) {
             throw new IllegalArgumentException("文件存储键为空");
         }
         Path raw;
         try {
-            raw = Path.of(keyOrPath);
+            raw = Path.of(key);
         }
         catch (InvalidPathException e) {
-            throw new IllegalArgumentException("文件存储键非法: " + keyOrPath, e);
+            throw new IllegalArgumentException("文件存储键非法: " + key, e);
         }
         if (raw.isAbsolute()) {
-            // 历史绝对路径：库里曾经写死过本机路径，保住它们的可读性（不拼基目录、不重定位）。
-            return raw.normalize();
+            throw new IllegalArgumentException("文件存储键不得为绝对路径: " + key);
         }
         if (hasParentSegment(raw)) {
-            throw new IllegalArgumentException("文件存储键不得包含上跳段 '..': " + keyOrPath);
+            throw new IllegalArgumentException("文件存储键不得包含上跳段 '..': " + key);
         }
         Path base = baseDir();
         Path resolved = base.resolve(raw).normalize();
         if (!resolved.startsWith(base)) {
-            throw new IllegalArgumentException("文件存储键越出存储目录: " + keyOrPath);
+            throw new IllegalArgumentException("文件存储键越出存储目录: " + key);
         }
         return resolved;
     }
 
-    public byte[] read(String keyOrPath) throws IOException {
-        return Files.readAllBytes(resolve(keyOrPath));
+    public byte[] read(String key) throws IOException {
+        return Files.readAllBytes(resolve(key));
     }
 
     /**
@@ -146,7 +144,7 @@ public class FileStorageService {
      *
      * @return {@code sha256}（小写十六进制）+ {@code size}（真实字节数，与摘要同一次读得出）
      */
-    public FileDigest digest(String keyOrPath) throws IOException {
+    public FileDigest digest(String key) throws IOException {
         MessageDigest md;
         try {
             md = MessageDigest.getInstance("SHA-256");
@@ -156,7 +154,7 @@ public class FileStorageService {
         }
         long size = 0L;
         byte[] buffer = new byte[DIGEST_BUFFER_BYTES];
-        try (InputStream raw = Files.newInputStream(resolve(keyOrPath));
+        try (InputStream raw = Files.newInputStream(resolve(key));
                 DigestInputStream in = new DigestInputStream(raw, md)) {
             int read;
             while ((read = in.read(buffer)) != -1) {
@@ -181,12 +179,12 @@ public class FileStorageService {
         Files.write(target, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
     }
 
-    public void delete(String keyOrPath) {
+    public void delete(String key) {
         try {
-            Files.deleteIfExists(resolve(keyOrPath));
+            Files.deleteIfExists(resolve(key));
         }
         catch (IOException e) {
-            log.warn("Failed to delete file {}: {}", keyOrPath, e.getMessage());
+            log.warn("Failed to delete file {}: {}", key, e.getMessage());
         }
     }
 
@@ -205,18 +203,18 @@ public class FileStorageService {
      * <li><b>不重试</b>：没有扫描器（本批不做保留期/孤儿清理），失败件等下次覆盖或任务删除时再清。</li>
      * </ul>
      */
-    public void deleteAfterCommit(String keyOrPath) {
-        if (keyOrPath == null || keyOrPath.isBlank()) {
+    public void deleteAfterCommit(String key) {
+        if (key == null || key.isBlank()) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            deleteInCallback(keyOrPath);
+            deleteInCallback(key);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                deleteInCallback(keyOrPath);
+                deleteInCallback(key);
             }
         });
     }
@@ -237,19 +235,19 @@ public class FileStorageService {
      * <li><b>不重试</b>：与 {@link #deleteAfterCommit} 同一口径。</li>
      * </ul>
      */
-    public void deleteAfterRollback(String keyOrPath) {
-        if (keyOrPath == null || keyOrPath.isBlank()) {
+    public void deleteAfterRollback(String key) {
+        if (key == null || key.isBlank()) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            log.debug("无活动事务同步，跳过回滚清理登记: {}", keyOrPath);
+            log.debug("无活动事务同步，跳过回滚清理登记: {}", key);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCompletion(int status) {
                 if (status != TransactionSynchronization.STATUS_COMMITTED) {
-                    deleteInCallback(keyOrPath);
+                    deleteInCallback(key);
                 }
             }
         });
@@ -263,12 +261,12 @@ public class FileStorageService {
      * {@link IllegalArgumentException}、受管环境下还可能抛 {@code SecurityException} —— 这些从
      * {@code afterCommit} 抛出会中断 Spring 的同步器遍历，让排在其后的终态落写/回滚收敛静默不执行。
      */
-    private void deleteInCallback(String keyOrPath) {
+    private void deleteInCallback(String key) {
         try {
-            delete(keyOrPath);
+            delete(key);
         }
         catch (RuntimeException e) {
-            log.warn("事务回调删除文件失败（已忽略，不阻断后续同步器） key={}: {}", keyOrPath, e.toString());
+            log.warn("事务回调删除文件失败（已忽略，不阻断后续同步器） key={}: {}", key, e.toString());
         }
     }
 

@@ -160,34 +160,30 @@ class FileControllerStorageLifecycleTest {
         assertThat(first).as("旧导出件在提交成功后删除").doesNotExist();
     }
 
-    // ── ③b 历史绝对路径行：仍按原路径下载（不要求先迁移）──────────────
+    // ── ③b 绝对路径行：拒绝按本机路径读取（库里只有相对键）──────────────
 
     @Test
-    void legacyAbsolutePathRowIsStillDownloadable() throws Exception {
-        long taskId = taskWithDef("FLC-历史绝对路径");
-        Path legacy = Files.createTempFile("flc-legacy-", ".xlsx");
-        Files.writeString(legacy, "legacy-bytes");
+    void absolutePathRowIsRejectedInsteadOfReadFromDisk() throws Exception {
+        long taskId = taskWithDef("FLC-绝对路径拒绝");
+        Path outside = Files.createTempFile("flc-absolute-", ".xlsx");
+        Files.writeString(outside, "legacy-bytes");
         try {
             TaskFile tf = new TaskFile();
             tf.setTaskId(taskId);
             tf.setDefCode(DEF_CODE);
             tf.setFileType("EXPORT");
-            tf.setStoragePath(legacy.toAbsolutePath().toString());
-            tf.setOriginalPath(legacy.toAbsolutePath().toString());
+            tf.setStoragePath(outside.toAbsolutePath().toString());
+            tf.setOriginalPath(outside.toAbsolutePath().toString());
             tf.setFileName(DEF_CODE + ".xlsx");
             this.taskFileRepository.save(tf);
 
-            byte[] body = this.mockMvc
+            this.mockMvc
                 .perform(get("/api/tasks/{taskId}/files/{defCode}", taskId, DEF_CODE))
-                .andExpect(status().isOk())
-                .andReturn().getResponse().getContentAsByteArray();
-
-            assertThat(new String(body, java.nio.charset.StandardCharsets.UTF_8))
-                .as("历史绝对路径不经迁移也必须能读")
-                .isEqualTo("legacy-bytes");
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("ILLEGAL_ARGUMENT"));
         }
         finally {
-            Files.deleteIfExists(legacy);
+            Files.deleteIfExists(outside);
         }
     }
 

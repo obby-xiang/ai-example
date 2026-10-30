@@ -36,10 +36,8 @@ import java.util.regex.Pattern;
  * <li><b>新鲜度只看"键在不在"</b>（Redis TTL 权威，Redis 服务端时钟）。值里的时间戳仅作诊断，
  *     <b>绝不跨实例比较</b> —— 快/慢时钟（时区、NTP 漂移、容器时钟）都不影响判死。</li>
  * <li>键不存在时再看 {@code job:runner-active:<jobId>} 这个<b>长 TTL 锚点</b>：
- *     锚点带 {@code |v2} ⇒ {@link SharedBeatState#STALE}（新 runner 有 ticker、心跳已断，
- *     判死候选）；锚点<b>无版本标记</b> ⇒ {@link SharedBeatState#LEGACY}（旧 runner 只写裸
- *     anchor、从不写 beat，心跳判据不判死，由绝对上限有界收敛）；锚点也不在 ⇒
- *     {@link SharedBeatState#ABSENT}（从未有过运行痕迹/旧版本作业，保守不判，交给绝对上限）。</li>
+ *     锚点在 ⇒ {@link SharedBeatState#STALE}（runner 有 ticker、心跳已断，判死候选）；
+ *     锚点也不在 ⇒ {@link SharedBeatState#ABSENT}（从未有过运行痕迹，保守不判，交给绝对上限）。</li>
  * <li><b>held 不延长共享 TTL</b>：{@link #hold} 只是本实例的判死豁免；共享存活仍由 ticker 决定。
  *     旧实现把 held 写成 65m 长租约 ⇒ 持有者死掉要等 65m 才收敛，本批改为"hold 有上界"：
  *     持有者一死，键在 ≤ 判死窗内过期，对端立刻按 STALE 接管。</li>
@@ -93,18 +91,14 @@ public class JobHeartbeatRegistry {
     /** 共享心跳缺省 TTL = 缺省判死窗（30s × 3）。 */
     public static final Duration DEFAULT_BEAT_TTL = Duration.ofSeconds(90);
     /**
-     * 新 anchor 的版本标记（滚动升级兼容，复审必修项 1）：新 runner 写
-     * {@code runner-<host>-pid<pid>-<uniq>|v2}。旧 runner 只写裸 {@code runner-…}（且从不写
-     * {@code job:beat}），对端见到"无标记 anchor"必须按 {@link SharedBeatState#LEGACY} 处理。
+     * runner 实例标识形状：{@code runner-<host>-pid<pid>-<uniq>}（启动清理按它解析主机与 pid）。
      */
-    public static final String ANCHOR_VERSION_SUFFIX = "|v2";
+    private static final Pattern INSTANCE_ID_PATTERN =
+            Pattern.compile("^runner-(.+)-pid(\\d+)-([^-|]+)$");
 
     private static final String LOCAL_HOST = hostName();
     private static final String INSTANCE_ID = "runner-" + LOCAL_HOST + "-pid"
             + ProcessHandle.current().pid() + "-" + UUID.randomUUID().toString().substring(0, 6);
-    /** 兼容两形态：旧值（无版本后缀）与新值（{@code |v2}）。 */
-    private static final Pattern INSTANCE_ID_PATTERN =
-            Pattern.compile("^runner-(.+)-pid(\\d+)-([^-|]+)(?:\\|v2)?$");
 
     private final ConcurrentMap<Long, Long> lastBeatAtMs = new ConcurrentHashMap<>();
 
@@ -457,9 +451,8 @@ public class JobHeartbeatRegistry {
      * 读该作业的共享/本地心跳状态（<b>不抛异常</b>：判死侧据此 fail-closed）。
      *
      * <p>redis 模式：<b>只看键是否存在</b>（Redis TTL 权威）——
-     * 心跳键在 ⇒ {@link SharedBeatState#ALIVE}；心跳键不在但<b>带 |v2</b> 的 runner-active
-     * 锚点在 ⇒ {@link SharedBeatState#STALE}；锚点无版本标记（旧 runner）⇒
-     * {@link SharedBeatState#LEGACY}（心跳判据不判死，交给绝对上限）；
+     * 心跳键在 ⇒ {@link SharedBeatState#ALIVE}；心跳键不在但 runner-active
+     * 锚点在 ⇒ {@link SharedBeatState#STALE}（runner 有 ticker，beat 缺失就是真失联）；
      * 两者都不在 ⇒ {@link SharedBeatState#ABSENT}；读失败 ⇒ {@link SharedBeatState#UNAVAILABLE}。
      * 值里的时间戳<b>不参与判定</b>（快/慢时钟不会造成误杀或漏杀）。
      *
@@ -484,12 +477,8 @@ public class JobHeartbeatRegistry {
             if (anchor == null) {
                 return SharedBeat.absent();
             }
-            // 滚动升级（复审必修项 1）：旧 runner 只写裸 anchor、从不写 beat。
-            // 无版本标记 ⇒ LEGACY：心跳判据不判死，交给 30m 绝对上限（有界，不是永久豁免）；
-            // 新 runner（|v2）有 ticker，beat 缺失就是真失联 ⇒ STALE。
-            return anchor.endsWith(ANCHOR_VERSION_SUFFIX)
-                    ? new SharedBeat(SharedBeatState.STALE, instanceOf(anchor))
-                    : new SharedBeat(SharedBeatState.LEGACY, instanceOf(anchor));
+            // 锚点在、心跳键不在：runner 的 ticker 没续期 ⇒ 真失联，判死候选。
+            return new SharedBeat(SharedBeatState.STALE, instanceOf(anchor));
         } catch (RuntimeException e) {
             log.warn("共享心跳读取失败（判死 fail-closed，本轮不判死）jobId={}：{}", jobId, e.getMessage());
             return SharedBeat.unavailable();
@@ -642,9 +631,9 @@ public class JobHeartbeatRegistry {
         }
     }
 
-    /** 新 anchor 值：实例标识 + 版本标记（旧 runner 的值没有后缀，见 {@link #ANCHOR_VERSION_SUFFIX}）。 */
+    /** anchor 值 = 实例标识（心跳值另带 {@code |<写入时刻>}，见 {@link #beatValue}）。 */
     private String anchorValue() {
-        return INSTANCE_ID + ANCHOR_VERSION_SUFFIX;
+        return INSTANCE_ID;
     }
 
     /**
@@ -757,14 +746,9 @@ public class JobHeartbeatRegistry {
     public enum SharedBeatState {
         /** 共享心跳键存在（Redis TTL 内）：runner 活着。 */
         ALIVE,
-        /** 心跳键已不在、但<b>带 |v2</b> 的 runner-active 锚点还在（或 memory 模式本地心跳过期）：判死候选。 */
+        /** 心跳键已不在、但 runner-active 锚点还在（或 memory 模式本地心跳过期）：判死候选。 */
         STALE,
-        /**
-         * 心跳键不在、锚点也在但<b>无版本标记</b>：旧 runner（滚动升级窗口）只写裸 anchor、
-         * 从不写 beat —— 心跳判据不得判死，存活交给绝对上限（有界收敛，TTL 不延长）。
-         */
-        LEGACY,
-        /** 既无心跳键也无锚点（从未有过运行痕迹/旧版本作业）：保守不判，交给绝对上限。 */
+        /** 既无心跳键也无锚点（从未有过运行痕迹）：保守不判，交给绝对上限。 */
         ABSENT,
         /** 共享状态不可读：fail-closed，不得判死。 */
         UNAVAILABLE

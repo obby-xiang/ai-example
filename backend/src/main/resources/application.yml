@@ -195,11 +195,9 @@ app:
       fuse-threshold: 3
       fuse-cooldown: 10m
       # 已删键（AR-11）：summary-model 不再存在（绑定 + 本行空值一并删除）。
-      # 压缩只使用本轮主模型（同供应商 / 同模型 / 同 options），没有独立摘要模型分支；
-      # 外部配置仍写该键时由 AiRetiredKeysWarner 给一次退役 WARN（不静默、也不让启动失败）。
+      # 压缩只使用本轮主模型（同供应商 / 同模型 / 同 options），没有独立摘要模型分支。
     hitl:
       # 挂起等待上限（2026-10-20 用户裁决第 1/2 条后只剩一个键）：
-      #   confirm-timeout（确认门，等人）**已退役**：确认门不再超时，一直等到用户批准/拒绝/取消。
       #   frontend-tool-timeout（等机器）：**只**管即时执行类前端工具（navigate_to 等）的后端回执兜底；
       #     generative_form 不读本键（等的是人填表，无上限）。
       #     依据 = 业界依据 §6：MCP 只规定 SHOULD 设超时；实现层默认常见 60s，Vercel AI SDK
@@ -363,8 +361,7 @@ app:
       index-prune-interval: 10m
     result-budget:
       # G5 双通道对齐：工具结果的预算**只在这里配**（模型侧字符 / UI 单帧字节 / 回灌端点三条
-      # 阈值独立可调、同源可查）。旧键 app.ai.tool-result.* 与 app.ai.frame.max-bytes 已退役，
-      # 启动期由 AiRetiredKeysWarner 逐键 WARN（旧值不会被读取）。
+      # 阈值独立可调、同源可查）。
       model:
         # DC-14 T2：工具结果**回填模型**前的上限（行数/字符数）—— 防上下文爆炸。
         # 只约束"给模型看的"那一份：前端 tool_result 帧与 Redis 台账始终是全文。
@@ -483,11 +480,6 @@ app:
     storage-path: ./data/files
     # 显式多实例开关（默认 false）：没有多实例 profile 的部署用本键开启同样的绝对路径校验。
     multi-instance: false
-    # 历史绝对路径 → 相对键迁移（**显式 opt-in，默认关闭**，绝不自动启动）。
-    # 打开后 FileKeyMigrationRunner 在启动时执行一次：复制不移动、目标已存在不覆盖、源文件缺失不改行、可重复执行。
-    # 多实例同时打开时经 Redis 单飞锁（app:lock:file-key-migration，SET NX PX）保证只有一个实例执行。
-    key-migration:
-      enabled: false
   # ── 入站流量的信任边界（多实例专项）──────────────────────────────────────────
   # trusted-proxies：可信代理网段（CIDR 或单 IP，IPv4/IPv6）。**空 = 只认 RemoteAddr**（默认，
   #   直连形态，与改造前逐字一致）。

@@ -267,9 +267,8 @@ class JobWatchdogSharedBeatTest {
                 .isEqualTo(JobHeartbeatRegistry.JudgeLease.HELD);
 
         // C 读到的是 B 清理之前的锚点快照（真实并发里两次扫描可交错到这一形态）
-        // v2 标记：这是新 runner 的锚点（旧 runner 的裸锚点按 LEGACY 不判死，见 JobWatchdogLegacyAnchorTest）
         this.shared.seed(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + JOB_ID,
-                "runner-other-pid999-abcdef" + JobHeartbeatRegistry.ANCHOR_VERSION_SUFFIX,
+                "runner-other-pid999-abcdef",
                 this.instanceA.runnerActiveTtl());
         this.watchdogC.scan();
 

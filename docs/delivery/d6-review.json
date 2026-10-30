@@ -84,6 +84,13 @@
       "reason": "D6已明确sessionIdText权威值和身份头契约；本批只修正决策身份头实现、类型化直读及移除不存在的旧别名，不新增或改变迁移接口",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:2032764e6912010c2a2d71b00c50c0a773fee3019291ec75d7699cbacec1f737",
+      "status": "synced",
+      "reason": "已删除未上线文件键迁移与退役键告警运行时资产，保留Flyway历史，并同步D6测试替身清单",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 相对存储键口径（多实例共享文件存储）：<b>真实临时目录</b>，不起 Spring。
  *
  * <p>锁四件事：① 库里该存的值是 UUID 相对键（不含基目录/工作目录）；② 两个实例（同基目录的两个
- * {@link FileStorageService}）A 写 B 读；③ 历史绝对路径仍可读、相对键含 {@code ..} 一律拒绝；
+ * {@link FileStorageService}）A 写 B 读；③ 绝对路径一律拒绝、相对键含 {@code ..} 一律拒绝；
  * ④ 写盘/摘要/删除都经键解析，`allocate` 不建文件。
  */
 class FileStorageKeyTest {
@@ -29,7 +29,7 @@ class FileStorageKeyTest {
     Path storageRoot;
 
     @TempDir
-    Path legacyRoot;
+    Path outsideRoot;
 
     @Test
     void storeReturnsRelativeKeyAndWritesUnderTheConfiguredBase() throws IOException {
@@ -63,15 +63,16 @@ class FileStorageKeyTest {
     }
 
     @Test
-    void legacyAbsolutePathStaysReadableAfterTheKeyRefactor() throws IOException {
-        Path legacy = Files.writeString(this.legacyRoot.resolve("old-export.xlsx"), "legacy-bytes");
+    void resolveRejectsAbsolutePathsEvenWhenTheFileExists() throws IOException {
+        Path outside = Files.writeString(this.outsideRoot.resolve("old-export.xlsx"), "legacy-bytes");
         FileStorageService storage = storage(this.storageRoot);
 
-        assertThat(storage.resolve(legacy.toAbsolutePath().toString()))
-            .isEqualTo(legacy.toAbsolutePath().normalize());
-        assertThat(storage.read(legacy.toAbsolutePath().toString()))
-            .as("历史行存的是本机绝对路径：不迁移也必须能读")
-            .isEqualTo("legacy-bytes".getBytes(StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> storage.resolve(outside.toAbsolutePath().toString()))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("绝对路径");
+        assertThatThrownBy(() -> storage.read(outside.toAbsolutePath().toString()))
+            .as("绝对路径不得绕过基目录解析")
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -161,7 +162,7 @@ class FileStorageKeyTest {
     @Test
     void writeRejectsPathsOutsideTheConfiguredBase() {
         FileStorageService storage = storage(this.storageRoot);
-        Path outside = this.legacyRoot.resolve("outside.xlsx");
+        Path outside = this.outsideRoot.resolve("outside.xlsx");
 
         assertThatThrownBy(() -> storage.write(outside, "x".getBytes(StandardCharsets.UTF_8)))
             .isInstanceOf(IllegalArgumentException.class)

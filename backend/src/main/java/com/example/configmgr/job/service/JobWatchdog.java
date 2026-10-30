@@ -229,10 +229,8 @@ public class JobWatchdog {
      * <p>状态映射（与 {@link JobHeartbeatRegistry.SharedBeatState} 一一对应）：
      * <ul>
      * <li>{@code ALIVE}（键还在）⇒ 不判死；</li>
-     * <li>{@code STALE}（键没了、<b>带 |v2</b> 的 runner-active 锚点还在；memory = 本地心跳过期）⇒ 判死；</li>
-     * <li>{@code LEGACY}（键没了、锚点<b>无版本标记</b> = 旧 runner，从不写 beat）⇒ 不判死，
-     *     交给绝对上限有界收敛（滚动升级窗口不得误杀仍活的旧 runner）；</li>
-     * <li>{@code ABSENT}（既无键也无锚点：从未有过运行痕迹/旧版本作业）⇒ 保守不判，交给绝对上限；</li>
+     * <li>{@code STALE}（键没了、runner-active 锚点还在；memory = 本地心跳过期）⇒ 判死；</li>
+     * <li>{@code ABSENT}（既无键也无锚点：从未有过运行痕迹）⇒ 保守不判，交给绝对上限；</li>
      * <li>{@code UNAVAILABLE}（读失败）⇒ fail-closed，不判死并记降级计数。</li>
      * </ul>
      *
@@ -261,10 +259,6 @@ public class JobWatchdog {
             }
             case STALE -> {
                 return true;
-            }
-            case LEGACY -> {
-                // 旧 runner 无 beat（滚动升级窗口）：心跳判据不判死，绝对上限仍兜底
-                return false;
             }
             case ABSENT -> {
                 return false;

@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 摘要与对话轮次<b>同一供应商、同一模型、同一 options</b>：provider 由 {@link ProviderRuntime#chatModel()}
  * 承载，model 取自 {@link ProviderRuntime#modelId()}，options 从 {@link ProviderRuntime#options()} 复制。
  * 本类<b>不再</b>读取 {@code registry.current()} 的全局默认，也<b>没有</b>独立摘要模型分支
- * （原 {@code app.ai.context.summary-model} 键已按 AR-11 删除，外部仍配置它只得到一次退役 WARN）——
+ * （{@code app.ai.context.summary-model} 键已按 AR-11 删除）——
  * 本轮没有 runtime 就直接失败，由编排层保持历史原样。
  *
  * <h2>为什么不复用 {@code ProviderRuntime#chatClient}</h2>

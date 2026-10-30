@@ -737,7 +737,7 @@ public class AiProperties {
 		 * 三个表格写工具 {@code replace_values}/{@code update_rows}/{@code normalize_column}、
 		 * {@code undo_last_sheet_edit}、{@code ui_request_upload}（等用户手势给文件句柄）——
 		 * 共 <b>6 个</b>，按工具名集合 {@code ConfirmGate#HUMAN_WAIT_FRONTEND_TOOLS} 区分。
-		 * 确认门（等人决策）同样<b>没有上限</b>，原 {@code app.ai.hitl.confirm-timeout} 键已退役。
+		 * 确认门（等人决策）同样<b>没有上限</b>。
 		 * 区分点只有一个：{@code ConfirmGate#suspendWaitSeconds}（返回 null = 不设上限）。
 		 *
 		 * <p>取值依据（业界依据 §6「前端工具调用超时（AI 工具调用执行预算）」）：MCP 规范只要求
@@ -1383,9 +1383,7 @@ public class AiProperties {
 	 * <p>
 	 * <b>已删键（AR-11）</b>：{@code app.ai.context.summary-model} 的<b>绑定与出厂 yml 空值行都已删除</b>
 	 * —— 压缩只使用本轮同一供应商、同一模型（{@code ProviderRuntime}），<b>不存在</b>独立摘要模型分支，
-	 * 也不会再加回来。外部配置（部署 yml / 环境变量 / 命令行）仍写该键时，由
-	 * {@link AiRetiredKeysWarner} 给<b>一次</b>退役 WARN（经 {@code Environment} 检测，不依赖本类绑定），
-	 * 不静默吞掉。
+	 * 也不会再加回来。
 	 */
 	@Data
 	public static class Context {

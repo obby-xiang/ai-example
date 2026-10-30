@@ -88,25 +88,32 @@ class FileStorageServiceTransactionCallbackTest {
     }
 
     @Test
-    void wellFormedPathsAreStillDeletedOnCommitAndRollback() throws Exception {
-        Path commitFile = Files.createTempFile("flc-commit-", ".xlsx");
-        Path rollbackFile = Files.createTempFile("flc-rollback-", ".xlsx");
+    void wellFormedKeysAreStillDeletedOnCommitAndRollback() throws Exception {
+        Path root = Files.createTempDirectory("flc-tx-");
+        AppProperties properties = new AppProperties();
+        properties.getFile().setStoragePath(root.toString());
+        FileStorageService keyed = new FileStorageService(properties);
+        StoredFile commitFile = keyed.allocate(".xlsx");
+        StoredFile rollbackFile = keyed.allocate(".xlsx");
+        keyed.write(commitFile.path(), new byte[] { 1 });
+        keyed.write(rollbackFile.path(), new byte[] { 2 });
         try {
             TransactionSynchronizationManager.initSynchronization();
-            this.storage.deleteAfterCommit(commitFile.toString());
-            this.storage.deleteAfterRollback(rollbackFile.toString());
+            keyed.deleteAfterCommit(commitFile.key());
+            keyed.deleteAfterRollback(rollbackFile.key());
             TransactionSynchronizationUtils.invokeAfterCommit(TransactionSynchronizationManager.getSynchronizations());
             TransactionSynchronizationUtils.invokeAfterCompletion(
                     TransactionSynchronizationManager.getSynchronizations(),
                     TransactionSynchronization.STATUS_ROLLED_BACK);
 
-            assertThat(commitFile).doesNotExist();
-            assertThat(rollbackFile).doesNotExist();
+            assertThat(commitFile.path()).doesNotExist();
+            assertThat(rollbackFile.path()).doesNotExist();
         }
         finally {
             TransactionSynchronizationManager.clearSynchronization();
-            Files.deleteIfExists(commitFile);
-            Files.deleteIfExists(rollbackFile);
+            Files.deleteIfExists(commitFile.path());
+            Files.deleteIfExists(rollbackFile.path());
+            Files.deleteIfExists(root);
         }
     }
 

@@ -201,21 +201,6 @@ public class AppProperties {
          * {@link com.example.configmgr.file.FileStorageMultiInstanceGuard} 视为多实例部署。
          */
         private boolean multiInstance = false;
-
-        /**
-         * 历史绝对路径 → 相对存储键的显式迁移（{@code app.file.key-migration.*}）。
-         *
-         * <p><b>默认关闭、绝不自动启动</b>：迁移会复制文件并改写 {@code task_files} 行，属运维动作；
-         * 只有显式把 {@code app.file.key-migration.enabled} 置 true 才由
-         * {@link com.example.configmgr.file.FileKeyMigrationRunner} 在启动时执行一次。
-         * 多实例同时打开时通过 Redis 单飞锁（{@code SET NX PX}）保证只有一个实例执行。
-         */
-        private KeyMigration keyMigration = new KeyMigration();
-
-        @Data
-        public static class KeyMigration {
-            private boolean enabled = false;
-        }
     }
 
     /** 任务域配置（{@code app.task.*}）。 */

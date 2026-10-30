@@ -102,9 +102,9 @@ class JobHeartbeatCleanupOrderTest {
     }
 
     @Test
-    void legacyAnchorIsStillDeletedAfterBeat() {
-        this.shared.seed(this.anchorKey, "runner-legacy-host-pid4242-abcdef", this.runner.runnerActiveTtl());
-        this.shared.seed(this.beatKey, "runner-legacy-host-pid4242-abcdef", this.runner.beatTtl());
+    void anchorIsStillDeletedAfterBeat() {
+        this.shared.seed(this.anchorKey, "runner-other-host-pid4242-abcdef", this.runner.runnerActiveTtl());
+        this.shared.seed(this.beatKey, "runner-other-host-pid4242-abcdef", this.runner.beatTtl());
 
         this.runner.endRunner(JOB_ID);
 
