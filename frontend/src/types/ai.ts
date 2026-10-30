@@ -25,9 +25,19 @@ declare module './sse' {
   interface SseToolResultFrame {
     /** 工具结果的用户文案稳定代码；缺省表示沿用 result 原文。 */
     userTextCode?: string | null
+    /**
+     * 用户文案的**结构化插值**（与 `userTextCode` 配套，2026-10-30 结构化批）。
+     *
+     * <p>为什么需要：`userTextCode` 只说"用哪条词条"，词条里的 `{id}` 一类插值过去只能从
+     * **中文回执文本里正则反解**（如「本轮已创建任务 #12」）。有了本键，界面按 `code + args`
+     * 直接 `t(code, args)`，不再解析自然语言。
+     * 后端尚未发该键 ⇒ 缺省（界面按"无插值"渲染，见 AiPanel#toolResultText 的适配点）。
+     */
+    userTextArgs?: Record<string, unknown> | null
   }
   interface SseFrontendToolResultFrame {
     userTextCode?: string | null
+    userTextArgs?: Record<string, unknown> | null
   }
 }
 
@@ -564,6 +574,21 @@ export interface ToolPart extends MessagePartBase {
   result?: string | null
   /** 用户文案稳定代码；卡体优先按当前语言翻译，缺 code 或缺词条时回退 result。 */
   userTextCode?: string | null
+  /**
+   * 用户文案的结构化插值（与 `userTextCode` 配套；2026-10-30 结构化批）。
+   *
+   * <p>界面按 `t(code, userTextArgs)` 渲染。缺省 = 后端尚未发该键 / 旧帧 / 旧镜像
+   * （此时按"无插值"渲染，**不得**回头从中文回执里正则反解）。
+   */
+  userTextArgs?: Record<string, unknown> | null
+  /**
+   * 工具结果帧的结构化目标（`tool_result.target`，2026-10-30 结构化批）。
+   *
+   * <p>为什么落段：帧级 `target` 是 `userTextArgs` 之外的**第二个**结构化插值来源
+   * （后端 `start_*` 的 target 恒带 `taskId`）。不落段的话"回落到 target"就是死分支 ——
+   * 卡面取不到它，只能退化成无插值的通用档。
+   */
+  target?: Record<string, unknown> | null
   /** 拒绝原因 / 失败原因 */
   reason?: string | null
   /** DC-14 T5：结果铸为消息后的消息 id（`tool-<toolCallId>`） */
@@ -778,6 +803,16 @@ export interface ToolPartPatch {
   args?: string
   result?: string | null
   userTextCode?: string | null
+  /** 用户文案的结构化插值（见 {@link ToolPart.userTextArgs}） */
+  userTextArgs?: Record<string, unknown> | null
+  /**
+   * 工具结果帧的结构化目标（`tool_result.target`，2026-10-30 结构化批）。
+   *
+   * <p>为什么落段：帧级 `target` 是 `userTextArgs` 之外的**第二个**结构化插值来源
+   * （后端 `start_*` 的 target 恒带 `taskId`）。不落段的话"回落到 target"就是死分支 ——
+   * 卡面取不到它，只能退化成无插值的通用档。
+   */
+  target?: Record<string, unknown> | null
   reason?: string | null
   messageId?: string
   /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */

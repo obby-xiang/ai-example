@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.data.service.ConditionOperators;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
@@ -36,14 +37,13 @@ import java.util.regex.PatternSyntaxException;
 @Component
 public class SheetWriteGuard implements FrontendToolGuard {
 
-    /** 本复核器认领的写工具（撤销只有 defCode，仍按同一闸门走一遍）。 */
-    static final Set<String> SUPPORTED = Set.of("replace_values", "update_rows", "normalize_column",
-            "undo_last_sheet_edit");
+    /** 本复核器认领的写工具（撤销只有 defCode，仍按同一闸门走一遍；名字见 {@link AiToolNames}）。 */
+    static final Set<String> SUPPORTED = Set.of(AiToolNames.REPLACE_VALUES, AiToolNames.UPDATE_ROWS,
+            AiToolNames.NORMALIZE_COLUMN, AiToolNames.UNDO_LAST_SHEET_EDIT);
 
     private static final Set<String> SCOPES = Set.of("selection", "sheet", "columns", "rows", "predicate");
 
-    private static final Set<String> OPERATORS = Set.of(
-            "EQ", "NE", "CONTAINS", "LIKE", "STARTS_WITH", "IN", "EMPTY", "NOT_EMPTY", "GT", "GTE", "LT", "LTE");
+    private static final Set<String> OPERATORS = Set.copyOf(ConditionOperators.NAMES);
 
     private static final Set<String> MATCH_MODES = Set.of("wholeCell", "contains", "prefix", "wildcard", "regex");
 

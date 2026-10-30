@@ -37,6 +37,7 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
@@ -408,6 +409,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.conditionsForm = form;
 	}
 
+	/** 宿主类型表单（结构化 create_task 缺 type 时挂起；缺失 = 不挂，交给既有预检）。 */
+	private com.example.configmgr.ai.form.TaskTypeForm taskTypeForm;
+
+	@Autowired(required = false)
+	public void setTaskTypeForm(com.example.configmgr.ai.form.TaskTypeForm form) {
+		this.taskTypeForm = form;
+	}
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -758,6 +767,24 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 已发过 tool_start 的 toolCallId（park 前置批次 + 执行循环共用）：每张卡恰一条，不重发。
 		Set<String> toolStarted = new HashSet<>();
 		for (PendingToolCall pending : pendings) {
+			// 结构化类型缺口：create_task 缺少/非法 type（模型工具调用事实，不看中文措辞）。
+			// 先给该调用一个工具响应并把 type 表单挂起，续跑后模型拿到用户选择再重新 create_task。
+			if (!budgetArmed && this.taskTypeForm != null && pendings.size() == 1
+					&& TOOL_CREATE_TASK.equals(pending.getName())
+					&& PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+					&& com.example.configmgr.ai.form.TaskTypeForm
+						.typeMissingOrInvalid(pending.getArguments())) {
+				List<Message> typeHistory = new ArrayList<>(prompt.getInstructions());
+				typeHistory.add(assistant);
+				typeHistory.add(ToolResponseMessage.builder()
+					.responses(List.of(new ToolResponseMessage.ToolResponse(pending.getToolCallId(),
+							pending.getName(), "create_task 缺少合法 type（EXPORT/IMPORT），已改为类型表单收集")))
+					.build());
+				if (this.taskTypeForm.parkIfCreateTaskMissingType(runId, context, pending.getArguments(),
+						typeHistory)) {
+					throw new RunParkedException(runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
+				}
+			}
 			// confirm_step 条件闭环（ConditionsForm#inspectConfirmStep）：单条批次、已披露、未武装时复核；
 			// 拒绝零副作用、挂起先外置，均在 suspended 公告之前完成
 			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null && pendings.size() == 1
@@ -772,6 +799,43 @@ public class SpToolCallingManager implements ToolCallingManager {
 				if (conditionDecision.rejected()) {
 					settleFrontendRejected(runId, pending, conditionDecision.code(), conditionDecision.message(),
 							conditionDecision.reasons());
+					frontendRejected.add(pending.getToolCallId());
+					continue;
+				}
+			}
+			// set_condition 首次硬边界（ConditionsForm#inspectSetCondition）：本轮新建任务、尚无条件、
+			// 无 create_task(conditions) 候选且无条件表回灌时，第一次 set_condition 先挂该任务自己的
+			// 可选条件表；有候选/已收集/已取消才放行。
+			// 并批防护：本边界对任何含 set_condition 的批次都复核（不再要求 size==1），批内形态
+			//（多条 set_condition / 另有写类调用 / 另有任何调用）由 ConditionsForm 统一判定为
+			// 零副作用拒绝并要求单独下发 —— 新任务的首次条件不会被并批绕过。
+			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null
+					&& AiToolNames.SET_CONDITION.equals(pending.getName())
+					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
+				checkCancelled(runId);
+				int setConditionCalls = 0;
+				boolean foreignWrite = false;
+				for (PendingToolCall sibling : pendings) {
+					if (sibling == null) {
+						continue;
+					}
+					if (AiToolNames.SET_CONDITION.equals(sibling.getName())) {
+						setConditionCalls++;
+					}
+					else if (this.toolRegistry.riskOf(sibling.getName()) != ToolMeta.RiskLevel.READ) {
+						foreignWrite = true;
+					}
+				}
+				ConditionsForm.SetConditionDecision setConditionDecision = this.conditionsForm
+					.inspectSetCondition(runId, context, pending, pendings.size(), setConditionCalls, foreignWrite,
+							prompt.getInstructions());
+				if (setConditionDecision.parked()) {
+					throw new RunParkedException(runId, pending.getToolCallId(),
+							PendingToolCall.KIND_FRONTEND);
+				}
+				if (setConditionDecision.rejected()) {
+					settleFrontendRejected(runId, pending, setConditionDecision.code(),
+							setConditionDecision.message(), setConditionDecision.reasons());
 					frontendRejected.add(pending.getToolCallId());
 					continue;
 				}
@@ -1220,7 +1284,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public ToolResponseMessage.ToolResponse skipAsCreateTaskLimit(String runId, PendingToolCall pending,
 			CreateTaskInRun prior) {
 		String message = markCreateTaskLimit(runId, pending, prior);
-		this.registry.of(runId).toolResult(pending, false, false, message);
+		// 前端插值契约（additive）：单轮上限命中时把"本轮已创建的任务号"以结构化形式带上，
+		// 与 userTextCode 同一帧；没有 taskId（idUnknown/同批未结算）时不发该键。
+		java.util.Map<String, Object> userTextArgs = prior.taskId() == null ? null
+				: java.util.Map.of("taskId", prior.taskId());
+		this.registry.of(runId).toolResult(pending, false, false, message, null, userTextArgs);
 		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 				modelData(pending, message));
 	}
@@ -2160,7 +2228,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/** 创建任务工具名（AR-03：DANGER 确认门 + 宿主幂等 + 单轮上限 1）。 */
-	public static final String TOOL_CREATE_TASK = "create_task";
+	public static final String TOOL_CREATE_TASK = AiToolNames.CREATE_TASK;
 
 	/** 工具被"别人正在做同类动作"挡下时的固定口径（模型/帧/台账三面同文；禁 emoji）。 */
 	public static final String RESOURCE_LOCKED_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
@@ -3154,11 +3222,21 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 必须看见"哪一格要改"。
 	 */
 	private static boolean systemRejectedWithoutUserFrames(PendingToolCall pending) {
-		if (!GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
-			return false;
-		}
 		String code = pending.effectiveCode();
-		return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code) || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
+		if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
+			return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
+					|| ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
+		}
+		// set_condition 的"新建任务首次条件"边界拒绝是系统拒绝：模型面回执照旧，用户面零卡
+		//（用户看到的是随后的条件表/向导，而不是一张"失败"的工具卡）。
+		if (AiToolNames.SET_CONDITION.equals(pending.getName())) {
+			return ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code)
+					|| ConditionsForm.BATCH_SPLIT_CODE.equals(code);
+		}
+		// confirm_step 的"文本推断未验证"是系统拒绝（模型需改用 set_condition 结构化算子）：
+		// 用户面零卡（实时/历史同口径），模型回执照旧，保留纠正与后续 set_condition 通道。
+		return AiToolNames.CONFIRM_STEP.equals(pending.getName())
+				&& ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code);
 	}
 
 	/**

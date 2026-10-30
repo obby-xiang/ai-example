@@ -340,8 +340,11 @@ export interface OperationLogEntry {
   objectId: string | number
   /** 前值摘要（自由文本，后端日志同口径） */
   beforeSummary?: string
-  /** 来源：界面 / API / AI */
-  source: '界面' | 'API' | 'AI'
+  /**
+   * 来源数据码：`UI`（界面）/ `API` / `AI`。
+   * 旧记录里的 `'界面'` 由读入侧按 `normalizeWorkspaceActionSource` 归一（见 types/tools）。
+   */
+  source: 'UI' | 'API' | 'AI'
   /** 时刻（ISO 字符串） */
   at: string
 }

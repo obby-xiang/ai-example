@@ -35,12 +35,19 @@ public class DefinitionService {
     private final ConfigStagingRowRepository stagingRowRepository;
     private final TaskItemRepository taskItemRepository;
 
+    /**
+     * 全部定义（稳定顺序：{@code sortOrder, code}）。
+     *
+     * <p>顺序是 AI 工具 {@code list_config_defs} 的有界披露口径之一（同一份库两次调用必须同序，
+     * 否则"仅显示前 20 个"每次给出不同子集）。
+     */
     public List<ConfigDefinition> findAll() {
         return definitionRepository.findAllOrdered();
     }
 
+    /** 按层级筛选（<b>同一稳定顺序</b>：{@code sortOrder, code}；不再依赖数据库返回顺序）。 */
     public List<ConfigDefinition> findByLevel(ConfigDefinition.ConfigLevel level) {
-        return definitionRepository.findByLevel(level);
+        return definitionRepository.findByLevelOrdered(level);
     }
 
     public ConfigDefinition findByCode(String code) {

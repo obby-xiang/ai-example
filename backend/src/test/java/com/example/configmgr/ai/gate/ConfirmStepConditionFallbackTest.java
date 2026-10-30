@@ -31,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -53,6 +54,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -241,20 +244,46 @@ class ConfirmStepConditionFallbackTest {
 	// ── ②d 模型已知（槽位）但未落库：同样指回 set_condition，不弹表单 ───────
 
 	@Test
-	void knownConditionInSlotsButNotPersistedPointsBackToSetCondition() {
+	void knownConditionInSlotsIsPersistedByTheDeterministicWorkflow() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
 				+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
 				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[],"
-				+ "\"conditionTexts\":[\"code = CNY\"]}");
+				+ "\"conditionTexts\":[\"code = CNY\"],\"verifiedConditionDefCodes\":[\"CURRENCY\"]}");
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome())
+			.as("已知结构化条件由工作流直接落库并放行，不经过模型").isEqualTo(ToolOutcome.OK.wire());
+		ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+		verify(this.taskService).setCondition(eq(TASK_ID), eq("CURRENCY"), json.capture());
+		assertThat(json.getValue()).contains("\"fieldCode\":\"code\"").contains("\"operator\":\"EQ\"")
+			.contains("\"value\":\"CNY\"");
+		verify(this.gate).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+	}
+
+	/** Critical：未经验证的启发式 EQ 不得自动落库；零副作用指回 set_condition。 */
+	@Test
+	void unverifiedHeuristicConditionIsRejectedWithoutWriting() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+				+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
+				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[],"
+				+ "\"conditionTexts\":[\"code = CNY\"],\"verifiedConditionDefCodes\":[]}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition").contains("结构化");
+		verify(this.taskService, never()).setCondition(any(), anyString(), anyString());
 		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
-		assertThat(this.store.pendingsLenient(RUN_ID))
-			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+		// 系统拒绝静默用户面：实时/历史都不得落"内部术语"卡
+		verify(this.emitter, never()).toolStart(any(PendingToolCall.class));
+		verify(this.emitter, never()).frontendToolResult(any(PendingToolCall.class), anyBoolean(), anyString());
+		verify(this.emitter, never()).toolResult(any(PendingToolCall.class), anyBoolean(), anyBoolean(),
+				anyString());
 	}
 
 	// ── ②e 禁止 SELECT_DEFS 直接跳 EXPORT ───────────────────────────────────
@@ -441,7 +470,7 @@ class ConfirmStepConditionFallbackTest {
 		PendingToolCall form = seedFormWithStatus(PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"code = CNY\"}");
 		form.setResolvedAtMs(System.currentTimeMillis() - 1000L);
 		this.store.putPending(RUN_ID, form);
-		seedSetConditionLedger();
+		seedSetConditionFeedback();
 
 		assertThatThrownBy(() -> runConfirmStep("{}")).isInstanceOf(RunParkedException.class);
 		assertThat(this.store.pendingsLenient(RUN_ID))
@@ -558,14 +587,17 @@ class ConfirmStepConditionFallbackTest {
 		return form;
 	}
 
-	private void seedSetConditionLedger() {
+	/** N-1：FRONTEND set_condition 的回灌事实在待决条目里（不依赖 ai:ledger）。 */
+	private void seedSetConditionFeedback() {
 		PendingToolCall set = new PendingToolCall();
 		set.setToolCallId("call-set-condition");
 		set.setName("set_condition");
 		set.setKind(PendingToolCall.KIND_FRONTEND);
 		set.setStatus(PendingToolCall.FRONTEND_RESULT);
 		set.setOutcome(ToolOutcome.OK.wire());
-		this.store.appendLedger(RUN_ID, set, "已设置 CURRENCY 的条件");
+		set.setResolvedAtMs(System.currentTimeMillis());
+		set.setResultText("已设置 CURRENCY 的条件");
+		this.store.putPending(RUN_ID, set);
 	}
 
 	private ToolExecutionResult runConfirmStep(String arguments) {

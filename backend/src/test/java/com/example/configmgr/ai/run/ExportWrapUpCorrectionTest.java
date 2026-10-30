@@ -39,7 +39,7 @@ class ExportWrapUpCorrectionTest {
 
 	@Test
 	void exportWrapUpWithoutStartExportNeedsOneCorrection() {
-		boolean due = ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), "创建并导出", false);
+		boolean due = ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), "创建并导出", false, false);
 
 		assertThat(due).as("EXPORT 步 + start_export 已披露 + 尚未发起 ⇒ 收尾前补一次纠正").isTrue();
 	}
@@ -51,27 +51,27 @@ class ExportWrapUpCorrectionTest {
 		rejected.setStatus(PendingToolCall.REJECTED);
 
 		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(rejected),
-				"创建并导出", false)).as("用户已拒绝 ⇒ 不纠正").isFalse();
+				"创建并导出", false, false)).as("用户已拒绝 ⇒ 不纠正").isFalse();
 	}
 
 	@Test
 	void explicitAdvanceOnlySuppressesTheCorrection() {
 		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
-				"先只推进步骤，先不要启动导出", false)).as("用户明确只推进 ⇒ 不纠正").isFalse();
+				"先只推进步骤，先不要启动导出", false, false)).as("用户明确只推进 ⇒ 不纠正").isFalse();
 	}
 
 	@Test
 	void correctionIsAtMostOncePerRun() {
-		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), "创建并导出", true))
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(), "创建并导出", true, false))
 			.as("本轮已纠正过 ⇒ 不再补").isFalse();
 	}
 
 	@Test
 	void undisclosedOrNotAtExportStepDoesNotCorrect() {
-		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, false, List.of(), "创建并导出", false))
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, false, List.of(), "创建并导出", false, false))
 			.as("start_export 未披露 ⇒ 不纠正").isFalse();
 		AiContext queryCond = AiContext.of("export", "EXPORT", "QUERY_COND", 42L, "ACTIVE", Map.of());
-		assertThat(ResilientChatService.needsExportWrapUpCorrection(queryCond, true, List.of(), "创建并导出", false))
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(queryCond, true, List.of(), "创建并导出", false, false))
 			.as("还没到 EXPORT ⇒ 不纠正").isFalse();
 	}
 
@@ -103,6 +103,54 @@ class ExportWrapUpCorrectionTest {
 		assertThat(history).anyMatch(message -> message instanceof ToolResponseMessage);
 		assertThat(history).anyMatch(message -> message instanceof AssistantMessage assistant
 				&& "第一段".equals(assistant.getText()));
+	}
+
+	/** I-2：EXPORT 页面的状态/条数问答不是导出意图，不得触发收尾纠正。 */
+	@Test
+	void exportPageQuestionDoesNotTriggerCorrection() {
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
+				"这个导出任务有多少条数据？", false, false))
+			.as("状态/条数问答不得触发 start_export").isFalse();
+	}
+
+	/** I-2：用户本轮明确导出 ⇒ 允许纠正。 */
+	@Test
+	void explicitExportIntentTriggersCorrection() {
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
+				"创建并导出这个任务", false, false)).isTrue();
+	}
+
+	/** I-2：用户本轮没提导出，但本 run 已执行过导出推进工具 ⇒ 仍允许纠正。 */
+	@Test
+	void exportProgressionInThisRunTriggersCorrectionEvenWithoutExportWords() {
+		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
+				"继续这个任务", false, true))
+			.as("本 run 已有 create_task/select_definitions/confirm_step/set_condition 证据").isTrue();
+	}
+
+	/** 本 run 成功的 create_task(type=EXPORT) 即新建导出事实（不读 ai:ledger）。 */
+	@Test
+	void exportProgressionSeesCreateTaskWithoutLedger() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		ObjectMapper mapper = new ObjectMapper();
+		MessageJsonCodec codec = new MessageJsonCodec(mapper);
+		store.seedRun("run-progress-pending", "s-progress-pending");
+		PendingToolCall set = new PendingToolCall();
+		set.setToolCallId("call-create");
+		set.setName("create_task");
+		set.setKind(PendingToolCall.KIND_CONFIRM);
+		set.setStatus(PendingToolCall.EXECUTED);
+		set.setArguments("{\"type\":\"EXPORT\"}");
+		set.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		set.setResolvedAtMs(System.currentTimeMillis());
+		store.putPending("run-progress-pending", set);
+		ResilientChatService service = new ResilientChatService(
+				mock(AiProviderRegistry.class), mock(ChatMemory.class), codec, store, mock(RunRegistry.class),
+				mock(ToolRegistry.class), mock(ContextBuilder.class), mock(AiSessionService.class), new AiProperties(),
+				mock(CancellationRegistry.class), mock(ToolActivityBeacon.class), null);
+
+		assertThat(store.ledger("run-progress-pending")).as("没有台账也要识别").isEmpty();
+		assertThat(service.exportProgressionObserved("run-progress-pending")).isTrue();
 	}
 
 	/** Critical-B：纠正指令必须命中现有 synthetic 判据，不得被当成真实用户原话。 */

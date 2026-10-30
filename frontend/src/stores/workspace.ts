@@ -38,6 +38,7 @@ import { translate } from '@/composables/useCopy'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
+  normalizeWorkspaceActionSource,
   type UiEvent,
   type WorkspaceActionRecord,
   type WorkspaceActionSource,
@@ -211,7 +212,7 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.importMode = init.importMode
         }
       }
-      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, '界面', {
+      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI', {
         code: 'ai.workspace.enterPage',
         args: { page: translate(PAGE_LABEL_KEYS[this.pageId]) }
       })
@@ -220,12 +221,12 @@ export const useWorkspaceStore = defineStore('workspace', {
     setStep(step: string | null): void {
       this.step = step
       if (step) {
-        this.touch(`切换到步骤「${stepLabel(step)}」`, '界面', {
+        this.touch(`切换到步骤「${stepLabel(step)}」`, 'UI', {
           code: 'ai.workspace.switchStep',
           args: { step: stepLabel(step) }
         })
       } else {
-        this.touch('退出当前步骤', '界面', { code: 'ai.workspace.exitStep' })
+        this.touch('退出当前步骤', 'UI', { code: 'ai.workspace.exitStep' })
       }
     },
 
@@ -250,9 +251,9 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.taskType = taskType === undefined ? this.taskType : taskType
       this.taskStatus = status === undefined ? this.taskStatus : status
       if (taskId === null) {
-        this.touch('解除任务绑定', '界面', { code: 'ai.workspace.unbindTask' })
+        this.touch('解除任务绑定', 'UI', { code: 'ai.workspace.unbindTask' })
       } else {
-        this.touch(`绑定任务 #${taskId}`, '界面', {
+        this.touch(`绑定任务 #${taskId}`, 'UI', {
           code: 'ai.workspace.bindTask',
           args: { taskId }
         })
@@ -266,7 +267,7 @@ export const useWorkspaceStore = defineStore('workspace', {
      *   AI 经页面 handler 驱动的写入记「AI」—— 面板 chip 与 `recentActions` 展示该来源，
      *   标错会让模型以为"用户自己点的"。可选参数，既有 3 个调用点无需改动。
      */
-    setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = '界面'): void {
+    setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = 'UI'): void {
       if (mode === 'ADD') {
         this.selectedDefs = Array.from(new Set([...this.selectedDefs, ...codes]))
       } else {
@@ -281,7 +282,7 @@ export const useWorkspaceStore = defineStore('workspace', {
 
     setQueryConditions(defCode: string, conditions: QueryCondition | unknown): void {
       this.queryConditions = { ...this.queryConditions, [defCode]: conditions }
-      this.touch(`设置 ${defCode} 的查询条件`, '界面', {
+      this.touch(`设置 ${defCode} 的查询条件`, 'UI', {
         code: 'ai.workspace.queryConditions',
         args: { code: defCode }
       })
@@ -301,7 +302,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       const next = { ...this.queryConditions }
       delete next[defCode]
       this.queryConditions = next
-      this.touch(`清空 ${defCode} 的查询条件`, '界面', {
+      this.touch(`清空 ${defCode} 的查询条件`, 'UI', {
         code: 'ai.workspace.queryConditions',
         args: { code: defCode }
       })
@@ -314,7 +315,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         : mode === 'MERGE'
           ? translate('ai.workspace.importModeMerge')
           : translate('ai.workspace.importModeReplace')
-      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, '界面', {
+      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, 'UI', {
         code: 'ai.workspace.importMode',
         args: { mode: label }
       })
@@ -332,11 +333,12 @@ export const useWorkspaceStore = defineStore('workspace', {
      * 3. 广播 `workspace_changed` 契约事件给 AI 面板（deepseek 蓝本事件形态 + 版本号）。
      *
      * @param summary 中文动作摘要（同时是给模型看的一句话；C5：**不随 UI 语言变**）
-     * @param source  界面（用户手点）或 AI（经契约层下发）
+     * @param source  数据码：`UI`（用户手点）/ `API` / `AI`（经契约层下发）。旧码 `'界面'`
+     *   仍被 {@link normalizeWorkspaceActionSource} 归一为 `UI`（兼容旧调用点/旧记录）
      * @param display 可选的**界面**结构化形态（i18n L-69）：面板 chip 按当前语言重译，
      *   与 `summary` 是同一动作的两份受众面
      */
-    touch(summary: string, source: WorkspaceActionSource = '界面', display?: WorkspaceActionRecord['display']): number {
+    touch(summary: string, source: WorkspaceActionSource = 'UI', display?: WorkspaceActionRecord['display']): number {
       const record = this.recordAction(summary, source, display)
       emitWorkspaceEvent('workspace_changed', record)
       return record.version
@@ -360,7 +362,8 @@ export const useWorkspaceStore = defineStore('workspace', {
         version: this.dataVersion,
         summary,
         at: Date.now(),
-        source,
+        // 兼容面：旧调用点/旧记录可能仍传 `'界面'`，落库前统一归一到数据码（UI/API/AI）
+        source: normalizeWorkspaceActionSource(source),
         ...(display === undefined ? {} : { display })
       }
       this.recentActions = [...this.recentActions, record].slice(-WORKSPACE_ACTION_LIMIT)
@@ -541,11 +544,90 @@ function fail(message: string): UiEventResult {
  *
  * 为什么不在 run_job 的同步返回里等明细：发布作业分钟级才出终态，而 dispatch 链上有界等待
  * 是既有红线（R-11 / download 分支同族），故冲突检出时（终态后）经本出口异步回灌。
+ *
+ * @param display 面板 chip 的结构化展示面（i18n code + args）。**现役写点必须给**：
+ *   不给就只能落到本地化兜底词条（"工作区状态已更新"），具体信息（作业号/冲突条数）会丢。
+ *   兜底只服务于**旧记录**（历史事件没有 display）。
  */
-export function reportUiEventResult(event: string, message: string): void {
+export function reportUiEventResult(
+  event: string,
+  message: string,
+  display?: WorkspaceActionRecord['display']
+): void {
   const workspace = useWorkspaceStore()
-  workspace.touch(message, 'AI')
+  workspace.touch(message, 'AI', display)
   emitWorkspaceEvent('ui_event_result', { event, handled: true, message })
+}
+
+/**
+ * `ui_event` → 面板 chip 的**结构化展示面**（i18n code + args）。
+ *
+ * <p>为什么必须逐个映射：`dispatchUiEvent` 把页面 handler 的**回执文案**（中文、带具体任务/作业号）
+ * 记成工作区动作；chip 以前直接渲染那份字符串 —— en 界面就出中文。现役事件在这里给
+ * `code + args`（语义与 `runUiEvent` 的回执同源，但不依赖文案），只有**旧记录**才落到
+ * `ai.workspace.actionFallback`。
+ *
+ * <p>args 只取事件本身能确定的值，不臆造；缺失值一律空串/省略（词条不渲染空括号）。
+ */
+function uiEventDisplayOf(event: UiEvent): WorkspaceActionRecord['display'] {
+  /** 可选后缀位：有值才带分隔空格，避免词条尾部悬空空格。 */
+  const suffixOf = (value: string | number | undefined | null): string => (
+    value === undefined || value === null || `${value}` === '' ? '' : ` ${value}`
+  )
+  switch (event.type) {
+    case 'open_page':
+      return { code: 'ai.workspace.enterPage', args: { page: translate(PAGE_LABEL_KEYS[event.page]) } }
+    case 'restore_task':
+      return { code: 'ai.workspace.bindTask', args: { taskId: event.taskId } }
+    case 'goto_step':
+      return { code: 'ai.workspace.switchStep', args: { step: stepLabel(event.step) } }
+    case 'select_defs':
+      return {
+        code: 'ai.workspace.selectDefs',
+        // 多值连接符按当前语言（与条件摘要是同一套约定）
+        args: { defs: event.defCodes.join(translate('conditions.valueJoin')) || translate('ai.workspace.empty') }
+      }
+    case 'set_conditions':
+      return { code: 'ai.workspace.queryConditions', args: { code: event.defCode } }
+    case 'set_import_mode':
+      return {
+        code: 'ai.workspace.importMode',
+        args: {
+          mode: translate(event.mode === 'MERGE' ? 'ai.workspace.importModeMerge' : 'ai.workspace.importModeReplace')
+        }
+      }
+    case 'run_job':
+      return { code: 'ai.workspace.jobStarted', args: { jobType: event.jobType, taskId: event.taskId } }
+    case 'cancel_job':
+      return { code: 'ai.workspace.jobCancelled', args: { jobId: event.jobId } }
+    case 'export_started':
+      return { code: 'ai.workspace.exportStarted', args: { taskId: event.taskId } }
+    case 'import_batch':
+      return { code: 'ai.workspace.importBatch', args: { batchId: event.batchId } }
+    case 'import_action':
+      return {
+        code: 'ai.workspace.importAction',
+        args: {
+          action: event.action,
+          // 词条用 `{batch}` 后缀位：有批次号才带括号，缺失时不留悬空括号/空格（括号形态随语言）
+          batch: event.batchId === undefined
+            ? ''
+            : translate('ai.workspace.importActionBatch', { batchId: event.batchId })
+        }
+      }
+    case 'download':
+      // `{filename}` 是后缀位（有文件名才带空格），避免词条尾部悬空空格
+      return { code: 'ai.workspace.download', args: { filename: suffixOf(event.filename) } }
+    case 'refresh_defs':
+      return { code: 'ai.workspace.refreshDefs' }
+    case 'refresh_data':
+      return { code: 'ai.workspace.refreshData', args: { code: event.defCode ? ` ${event.defCode}` : '' } }
+    case 'refresh_tasks':
+      return { code: 'ai.workspace.refreshTasks' }
+    default:
+      // 事件类型闭集已穷尽；运行期出现未知 type（旧客户端/新后端）时退回兜底词条
+      return { code: 'ai.workspace.actionFallback' }
+  }
 }
 
 /**
@@ -606,10 +688,11 @@ export async function dispatchUiEvent(event: UiEvent, lifetime?: UiEventLifetime
     return result
   }
   const workspace = useWorkspaceStore()
+  const display = uiEventDisplayOf(event)
   if (result.handled) {
-    workspace.touch(result.message, 'AI')
+    workspace.touch(result.message, 'AI', display)
   } else {
-    workspace.recordAction(result.message, 'AI')
+    workspace.recordAction(result.message, 'AI', display)
   }
   emitWorkspaceEvent('ui_event_result', { event: event.type, ...result })
   return result
@@ -813,7 +896,10 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
                   useAiStore().attachPublishConflict(job.id ?? 0, summary, issues)
                 })
               }
-              reportUiEventResult('run_job', summary)
+              reportUiEventResult('run_job', summary, {
+                code: 'ai.workspace.publishConflict',
+                args: { jobId: job.id ?? 0, count: issues?.length ?? 0 }
+              })
             }
           })
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)

@@ -11,6 +11,7 @@ import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -105,8 +106,8 @@ public class DefinitionSelectionForm extends HostForm {
 	/** 宿主表单的 {@code toolCallId} 前缀（后接任务号：同一任务只会挂起一次）。 */
 	public static final String TOOL_CALL_ID_PREFIX = "host-def-form-";
 
-	/** 配置选择步骤（与 {@code TaskService} 的 EXPORT 首步、{@code @ToolScope} 同一字面量）。 */
-	static final String SELECT_DEFS_STEP = "SELECT_DEFS";
+	/** 配置选择步骤（唯一注册定义见 {@code TaskSteps}；此处只是既有调用点的别名）。 */
+	static final String SELECT_DEFS_STEP = com.example.configmgr.task.service.TaskSteps.SELECT_DEFS;
 
 	/** 导出向导页（{@link ContextBuilder#SELECTION_PAGE_IDS} 的成员）。 */
 	static final String EXPORT_PAGE = "export";
@@ -173,7 +174,7 @@ public class DefinitionSelectionForm extends HostForm {
 			// 还在旧任务上（或根本没到向导）：旧任务的配置不能被当成新任务的已知信息
 			return Optional.empty();
 		}
-		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, "select_definitions")) {
+		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, AiToolNames.SELECT_DEFINITIONS)) {
 			return Optional.empty();
 		}
 		if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {

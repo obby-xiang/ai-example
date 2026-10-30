@@ -123,7 +123,7 @@ public class TaskService {
         Task task = new Task();
         task.setType(type);
         task.setTitle(title);
-        task.setCurrentStep(type == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
+        task.setCurrentStep(TaskSteps.first(type));
         task = taskRepository.save(task);
         return task;
     }
@@ -172,7 +172,7 @@ public class TaskService {
             Task task = new Task();
             task.setType(type);
             task.setTitle(normalizedTitle);
-            task.setCurrentStep(type == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
+            task.setCurrentStep(TaskSteps.first(type));
             Map<String, Object> settings = new LinkedHashMap<>();
             settings.put("aiCreateKey", key);
             if (runToken != null) {
@@ -308,11 +308,10 @@ public class TaskService {
             }
         }
 
-        // 勾选后的权威步骤回落**该类型的首步**：EXPORT=SELECT_DEFS，IMPORT=UPLOAD
-        // （导入的步骤白名单是 UPLOAD/PRECHECK/IMPORT/PUBLISH，见 STEP_WHITELIST，没有 SELECT_DEFS；
-        // 写成 SELECT_DEFS 会让 AI 上下文按 task:IMPORT/SELECT_DEFS 刷新，该步不披露
-        // select_definitions 与表格工具）。
-        task.setCurrentStep(task.getType() == Task.TaskType.EXPORT ? "SELECT_DEFS" : "UPLOAD");
+        // 勾选后的权威步骤回落**该类型的首步**（见 {@link TaskSteps#first}）：EXPORT=SELECT_DEFS，
+        // IMPORT=UPLOAD。导入序列里没有 SELECT_DEFS；写成它会让 AI 上下文按
+        // task:IMPORT/SELECT_DEFS 刷新，该步不披露 select_definitions 与表格工具。
+        task.setCurrentStep(TaskSteps.first(task.getType()));
         // 必须先 flush 再 refresh：refresh 会以库里的状态覆盖内存，未 flush 的改动会被丢弃
         // （旧实现即因此从未真正写回步骤）；flush 后 refresh 仍按原意重读 EAGER 的 items 快照。
         task = taskRepository.saveAndFlush(task);
@@ -335,14 +334,10 @@ public class TaskService {
     }
 
     /**
-     * R-137（T4）步骤白名单（单处集中定义）：与前端 {@code types/task.ts#TaskSteps} 同构
-     * （注释明示"与后端 @ToolScope 的 task:&lt;type&gt;/&lt;step&gt; 标签一致"），完成态 DONE 通用。
-     * ExportJobRunner 写 "EXPORT"、PublishJobRunner 写 "PUBLISH"，均在各自序列内。
+     * R-137（T4）步骤白名单：<b>事实源已上收到 {@link TaskSteps}</b>（步骤名/序列/首步/前后关系
+     * 只有那一份；本类不再保留副本）。{@code DONE} 是两类任务通用的完成态。
+     * ExportJobRunner 写 {@code EXPORT}、PublishJobRunner 写 {@code PUBLISH}，均在各自序列内。
      */
-    private static final Map<Task.TaskType, List<String>> STEP_WHITELIST = Map.of(
-            Task.TaskType.EXPORT, List.of("SELECT_DEFS", "QUERY_COND", "EXPORT"),
-            Task.TaskType.IMPORT, List.of("UPLOAD", "PRECHECK", "IMPORT", "PUBLISH"));
-    private static final String STEP_DONE = "DONE";
     private static final java.util.regex.Pattern STEP_FORMAT = java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
 
     @Transactional
@@ -358,13 +353,12 @@ public class TaskService {
         String normalized = step.trim();
         if (!STEP_FORMAT.matcher(normalized).matches()) {
             throw new CodedIllegalArgumentException(ErrorCodes.STEP_INVALID, "目标步骤格式不合法：" + step
-                    + "（应为全大写字母/数字/下划线，如 SELECT_DEFS、QUERY_COND）");
+                    + "（应为全大写字母/数字/下划线，如 " + TaskSteps.SELECT_DEFS + "、" + TaskSteps.QUERY_COND + "）");
         }
-        if (!STEP_DONE.equals(normalized)
-                && !STEP_WHITELIST.getOrDefault(task.getType(), List.of()).contains(normalized)) {
+        if (!TaskSteps.isKnownFor(task.getType(), normalized)) {
             throw new CodedIllegalArgumentException(ErrorCodes.STEP_NOT_IN_SEQUENCE,
                     "目标步骤不在该任务类型的步骤序列内：" + step
-                    + "（" + task.getType() + " 可选：" + STEP_WHITELIST.get(task.getType()) + "）");
+                    + "（" + task.getType() + " 可选：" + TaskSteps.sequence(task.getType()) + "）");
         }
         task.setCurrentStep(normalized);
         task = taskRepository.save(task);

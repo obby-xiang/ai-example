@@ -235,7 +235,23 @@
       "empty": "(none)",
       "task": "Task #{id}",
       "step": "Step {label}",
-      "defsSelected": "{count} definitions selected"
+      "defsSelected": "{count} definitions selected",
+      "actionFallback": "Workspace state updated",
+      "exportSheetEditAi": "AI wrote changes into the export result sheet (not saved to the server file yet)",
+      "exportSheetEditUser": "Export result sheet modified (not saved to the server file yet)",
+      "importSheetEditAi": "AI wrote changes into the import editor (not written back to the server file yet)",
+      "importSheetEditUser": "Import editor modified (not written back to the server file yet)",
+      "publishConflict": "Publish job #{jobId} has {count} validation conflict(s)",
+      "jobStarted": "Started {jobType} job (task #{taskId})",
+      "jobCancelled": "Cancelled job #{jobId}",
+      "exportStarted": "Export started (task #{taskId})",
+      "importBatch": "Opened import batch #{batchId}",
+      "importAction": "Import batch action {action}{batch}",
+      "importActionBatch": " (batch #{batchId})",
+      "download": "Downloaded file{filename}",
+      "refreshDefs": "Refreshed definitions",
+      "refreshData": "Refreshed data{code}",
+      "refreshTasks": "Refreshed the task list"
     },
     "settings": {
       "copy": {
@@ -661,6 +677,32 @@
       "cancel": "Cancel"
     }
   },
+  "conditions": {
+    "none": "All data (no conditions)",
+    "scope": "Scope = {keys}",
+    "field": "{field} {op}",
+    "fieldValue": "{field} {op} {value}",
+    "clauseJoin": "; ",
+    "valueJoin": ", ",
+    "op": {
+      "eq": "equals",
+      "ne": "not equals",
+      "contains": "contains",
+      "containsText": "contains text",
+      "like": "matches like",
+      "startsWith": "starts with",
+      "in": "in",
+      "inMulti": "is one of (multi-select)",
+      "empty": "is empty",
+      "notEmpty": "is not empty",
+      "gt": "greater than",
+      "gte": "greater or equal",
+      "lt": "less than",
+      "lte": "less or equal",
+      "between": "between",
+      "unknown": "unknown operator"
+    }
+  },
   "nav": {
     "tasks": "Tasks",
     "definitions": "Definitions",
@@ -1077,6 +1119,7 @@
       "field": "Field",
       "operator": "Operator",
       "option": "Option",
+      "optionMulti": "Options (multi-select)",
       "value": "Value",
       "date": "Date",
       "yes": "Yes (true)",
@@ -1302,6 +1345,9 @@
         "cancelRequested": "Job cancellation requested",
         "cancelFailed": "Failed to cancel the job",
         "pickDownload": "Select the definitions to download",
+        "previewAll": "{code}: {count} rows in total",
+        "previewMatched": "{code}: {count} rows matched ({summary})",
+        "previewFailed": "Failed to preview the row count",
         "downloadInFlight": "{code} download already in progress; not started again",
         "downloaded": "Downloaded {name}",
         "downloadFailed": "Download failed",

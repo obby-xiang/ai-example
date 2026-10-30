@@ -7,7 +7,6 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
-import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.tool.AiContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -28,18 +27,11 @@ import java.util.Optional;
  * 开放式文本：用户得打字、模型还得再解析一次，且两边都可能跑偏。用户口径是确定性的：
  * <b>新建意图 + 类型未知 ⇒ 宿主直接发单选</b>。
  *
- * <h2>触发判据（全部成立才挂起）</h2>
- * <ol>
- * <li><b>主动新建意图</b>：用户原话命中 {@link TaskIntent#isNewTaskIntent}（问规则/否定一律不算）；</li>
- * <li><b>本轮原话没说类型</b>：{@link TaskIntent#explicitTaskType} 为 {@code null}（导出/导入要<b>明说</b>）
- * —— 明说时直接 {@code create_task}，不弹表。<b>只看本轮用户原话</b>：
- * {@code context.getTaskType()}（旧任务页面的类型）与 {@code extra[taskSlots].taskType} 都属于<b>当前
- * 打开的那条旧任务</b>，不得当作新任务的类型 —— 也就是说，在旧 EXPORT 任务的向导页里说"创建任务"
- * 仍必须弹表；说"创建导入任务"才不弹（导入是新任务自己的类型，不是旧页面的）。</li>
- * <li><b>本轮还没建成任务</b>：台账里没有成功的 {@code create_task}（建过就不缺类型了）；</li>
- * <li><b>同一轮只问一次</b>：{@code toolCallId} 由 {@code runId} 决定，待决条目里已有同号即视为已挂过
- * （刷新恢复、重挂都不会再来一张）。</li>
- * </ol>
+ * <h2>触发判据（当前不再由宿主从文本推断）</h2>
+ * <p>自然语言意图只由<b>既有模型工具调用</b>输出：类型未知时模型用
+ * {@code generative_form(purpose=TASK_TYPE)} 收集，或直接 {@code create_task(type=...)}。
+ * 宿主不再用 {@link com.example.configmgr.ai.slot.TaskIntent} 的中文正则判断"新建意图/是否说了类型"，
+ * 因此 {@link #parkIfDue} 在生产链路上恒为 {@code false}（保留类与挂起面作兼容）。
  *
  * <p><b>与放行闸门的分工</b>：{@link GenerativeFormGuard} 仍按槽位拒绝<b>模型自发</b>的类型表单
  * （槽位已定 = 模型不该再问）；宿主只负责"这一次由谁来问"，所以它的判据是"本轮原话"而不是旧任务
@@ -95,25 +87,8 @@ public class TaskTypeForm extends HostForm {
 	 * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型
 	 */
 	public boolean parkIfDue(String runId, AiContext context, String userMessage, List<Message> history) {
-		if (runId == null || context == null || history == null) {
-			return false;
-		}
-		if (!parkEnabled()) {
-			// 阻塞式等待不承接这条流程（见 HostForm 类注：不新增中断路径）
-			return false;
-		}
-		try {
-			Optional<String> arguments = argumentsIfDue(runId, context, userMessage);
-			if (arguments.isEmpty()) {
-				return false;
-			}
-			return park(runId, history, frontendForm(toolCallId(runId), arguments.get()));
-		}
-		catch (RuntimeException ex) {
-			// fail-safe：这是"让交互确定"的增强，不是这一轮的判定面
-			log.warn("宿主任务类型表单未能挂起（按既有路径继续）runId={}：{}", runId, ex.getMessage());
-			return false;
-		}
+		// 宿主不再从用户原话推断任务类型：类型未知由模型经 generative_form(TASK_TYPE) / create_task 处理。
+		return false;
 	}
 
 	/**
@@ -124,26 +99,55 @@ public class TaskTypeForm extends HostForm {
 	 * 决定新任务。保留这个参数只为与另外两张宿主表单同形（调用点一处、判据一处）。
 	 */
 	Optional<String> argumentsIfDue(String runId, AiContext context, String userMessage) {
-		if (!TaskIntent.isNewTaskIntent(userMessage)) {
-			return Optional.empty();
-		}
-		if (TaskIntent.explicitTaskType(userMessage) != null) {
-			// 本句已明说导出/导入 ⇒ 直接 create_task：类型不是缺口。
-			// 只看**本轮用户原文**：旧任务页面的 taskType 与槽位都属于那条旧任务，不得带入新任务
-			// （在旧 EXPORT 页说"创建任务"仍必须弹表，否则新任务会被旧任务的类型决定）。
-			return Optional.empty();
-		}
-		if (createdTaskInRun(runId) != null) {
-			// 本轮已经建成任务：类型不是缺口
-			return Optional.empty();
-		}
-		if (alreadyIssued(runId, toolCallId(runId))) {
-			return Optional.empty();
-		}
-		return formArguments(buildForm(ReplyLanguage.current()));
+		// 兼容入口：宿主不再从文本推断类型（生产判断不经过中文正则）。
+		return Optional.empty();
 	}
 
-	/** 单个 enum 单选 {@code EXPORT/IMPORT}（形状与 {@link GenerativeFormRules#PURPOSE_TASK_TYPE} 一致）。 */
+	/**
+	 * <b>结构化类型缺口</b>：模型发起了 {@code create_task} 但缺少/非法 {@code type}。
+	 *
+	 * <p>这是模型工具调用（结构化事实），不是用户中文措辞。宿主据此挂一次
+	 * {@code purpose=TASK_TYPE} 单选；同一 run 只挂一次。调用方必须在真正执行 create_task 前
+	 * 调用，并把 {@code history} 构造成"assistant(tool_calls) + 该调用的工具响应"，
+	 * 保证挂起后续跑的 tool_calls/tool 响应对完整。
+	 */
+	public boolean parkIfCreateTaskMissingType(String runId, AiContext context, String argumentsJson,
+			List<Message> history) {
+		if (runId == null || context == null || history == null || !parkEnabled()) {
+			return false;
+		}
+		if (!typeMissingOrInvalid(argumentsJson)) {
+			return false;
+		}
+		if (alreadyIssued(runId, toolCallId(runId))) {
+			return false;
+		}
+		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
+		if (arguments.isEmpty()) {
+			return false;
+		}
+		log.info("create_task 缺少合法 type，宿主挂一次 TASK_TYPE 表单 runId={}", runId);
+		return park(runId, history, frontendForm(toolCallId(runId), arguments.get()));
+	}
+
+	/** type 缺失/空白/不在 EXPORT|IMPORT 闭集。 */
+	public static boolean typeMissingOrInvalid(String argumentsJson) {
+		if (argumentsJson == null || argumentsJson.isBlank()) {
+			return true;
+		}
+		try {
+			com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper()
+				.readTree(argumentsJson);
+			com.fasterxml.jackson.databind.JsonNode type = node == null ? null : node.get("type");
+			String text = type == null || type.isNull() ? "" : type.asText("").trim();
+			return !("EXPORT".equalsIgnoreCase(text) || "IMPORT".equalsIgnoreCase(text));
+		}
+		catch (Exception ex) {
+			return true;
+		}
+	}
+
+	/** 单个 enum 单选 {@code EXPORT/IMPORT}（形状与 {@link FormPurposes#TASK_TYPE} 一致）。 */
 	private static Map<String, Object> buildForm(ReplyLanguage language) {
 		boolean english = language != null && language.english();
 		Map<String, Object> field = new LinkedHashMap<>();
@@ -157,7 +161,7 @@ public class TaskTypeForm extends HostForm {
 
 		Map<String, Object> form = new LinkedHashMap<>();
 		form.put("scenario", "CLARIFY");
-		form.put("purpose", GenerativeFormRules.PURPOSE_TASK_TYPE);
+		form.put("purpose", FormPurposes.TASK_TYPE);
 		form.put("title", english ? TITLE_EN : TITLE);
 		form.put("fields", List.of(field));
 		return form;

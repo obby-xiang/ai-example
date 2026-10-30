@@ -24,9 +24,8 @@ import java.util.Set;
  */
 public final class ConditionEvaluator {
 
-    /** 已登记的操作符（{@link #validate} 与 {@link #matchesOp} 同源，杜绝两处口径漂移）。 */
-    private static final Set<String> OPERATORS = Set.of(
-            "EMPTY", "NOT_EMPTY", "EQ", "NE", "CONTAINS", "LIKE", "STARTS_WITH", "IN", "GT", "GTE", "LT", "LTE");
+    /** 已登记的操作符（唯一注册定义在 {@link ConditionOperators}；{@link #validate} 与 {@link #matchesOp} 同源）。 */
+    private static final Set<String> OPERATORS = Set.copyOf(ConditionOperators.NAMES);
 
     private ConditionEvaluator() {
     }

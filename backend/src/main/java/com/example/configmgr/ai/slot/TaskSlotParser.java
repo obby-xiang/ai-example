@@ -54,6 +54,18 @@ final class TaskSlotParser {
 	private static final Pattern UPPER_TOKEN = Pattern
 		.compile("(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{1,63}(?![A-Za-z0-9_])");
 
+	/**
+	 * 条件文本里允许出现在结构之外的中性词（意图/连接/语气）。
+	 *
+	 * <p>验证方向是"整段文本全部消费"：抽取出的字段/算子/值之外，除这些中性词与标点外
+	 * 不得有任何残余（残余 = 结构不完整 = 未验证，如"或/之外/除了/不等"）。这不是否定词黑名单，
+	 * 而是完整结构校验的允许集。
+	 */
+	private static final Pattern STRUCTURAL_FILLER = Pattern.compile(
+			"(where|导出|导入|筛选|过滤|条件|只要|仅要|仅导出|只导出|限定|选择|勾选|选定|选用|改选|改成|换成|换为"
+					+ "|以及|和|且|与|的|了|中|里|把|给|一下)",
+			Pattern.CASE_INSENSITIVE);
+
 	/** 裸大写词里明显不是筛选值的保留词（避免把步骤/层级/算子当值）。 */
 	private static final Set<String> UPPER_STOP_WORDS = Set.of("EQ", "NE", "IN", "AND", "OR", "NOT", "WHERE",
 			"GLOBAL", "REGION", "PROJECT", "EXPORT", "IMPORT", "SELECT_DEFS", "QUERY_COND", "UPLOAD", "PRECHECK",
@@ -72,10 +84,10 @@ final class TaskSlotParser {
 	 * {@code taskType} 与选择/条件独立（"导出" 本身就给了任务类型）。
 	 */
 	record Intent(SlotState selection, List<String> defCodes, SlotState condition,
-			List<ConditionSlot> conditions, String taskType) {
+			List<ConditionSlot> conditions, List<String> verifiedConditionDefCodes, String taskType) {
 
 		static Intent absent() {
-			return new Intent(SlotState.ABSENT, List.of(), SlotState.ABSENT, List.of(), null);
+			return new Intent(SlotState.ABSENT, List.of(), SlotState.ABSENT, List.of(), List.of(), null);
 		}
 	}
 
@@ -123,15 +135,17 @@ final class TaskSlotParser {
 
 		SlotState condition;
 		List<ConditionSlot> conditions = List.of();
+		List<String> verifiedConditionDefCodes = List.of();
 		if (clearAll || CLEAR_CONDITION.matcher(text).find()) {
 			condition = SlotState.CLEARED;
 		}
 		else if (effectiveDefCodes.size() == 1) {
 			SlotDefinition def = definitionOf(definitions, effectiveDefCodes.get(0));
-			List<ConditionSlot> explicit = def == null ? null : explicitConditions(text, def);
-			if (explicit != null && !explicit.isEmpty()) {
+			ParsedConditions explicit = def == null ? null : explicitConditions(text, def);
+			if (explicit != null && !explicit.slots().isEmpty()) {
 				condition = SlotState.DETERMINED;
-				conditions = explicit;
+				conditions = explicit.slots();
+				verifiedConditionDefCodes = explicit.verified() ? List.of(def.code()) : List.of();
 			}
 			else if (def != null && (selection == SlotState.DETERMINED
 					|| FILTER_INTENT.matcher(text).find())) {
@@ -140,6 +154,7 @@ final class TaskSlotParser {
 				ShorthandResult shorthand = shorthandCondition(text, def);
 				condition = shorthand.state();
 				conditions = shorthand.slot() == null ? List.of() : List.of(shorthand.slot());
+				verifiedConditionDefCodes = shorthand.verified() ? List.of(def.code()) : List.of();
 			}
 			else {
 				condition = SlotState.ABSENT;
@@ -153,7 +168,8 @@ final class TaskSlotParser {
 			condition = SlotState.ABSENT;
 		}
 
-		return new Intent(selection, defCodes, condition, conditions, taskType(text, negated));
+		return new Intent(selection, defCodes, condition, conditions, verifiedConditionDefCodes,
+				taskType(text, negated));
 	}
 
 	// ── 配置定义识别 ─────────────────────────────────────────────────────────
@@ -225,50 +241,114 @@ final class TaskSlotParser {
 	// ── 条件识别 ─────────────────────────────────────────────────────────────
 
 	/**
-	 * 明确"字段为/=值"：同一字段两个不同值 ⇒ 歧义（返回 null，不造条件）。
-	 * 只在该配置定义的字段里找（不跨定义关联）。
+	 * 明确"字段为/=值"：<b>整段结构校验</b>——字段必须存在于配置元数据、每个值必须是单一字面量
+	 * （ASCII 字符集或配置枚举内的完整值），且抽取后不得有任何结构残余（或/和/之外/否定/范围等）。
+	 * 同一字段两个不同值 ⇒ 歧义（返回 null，不造条件）。
 	 */
-	private static List<ConditionSlot> explicitConditions(String text, SlotDefinition definition) {
+	private static ParsedConditions explicitConditions(String text, SlotDefinition definition) {
 		Map<String, String> byField = new LinkedHashMap<>();
+		List<int[]> spans = new ArrayList<>();
+		boolean valuesValid = true;
 		for (SlotDefinition.SlotField field : definition.fields()) {
 			if (field == null || field.code() == null) {
 				continue;
 			}
-			List<String> values = explicitValues(text, field);
-			if (values.isEmpty()) {
+			List<ValueMatch> matches = explicitValues(text, field);
+			if (matches.isEmpty()) {
 				continue;
 			}
-			if (values.size() > 1) {
+			Set<String> distinct = new LinkedHashSet<>();
+			for (ValueMatch match : matches) {
+				distinct.add(match.value());
+				spans.add(new int[] { match.start(), match.end() });
+			}
+			if (distinct.size() > 1) {
 				// 同一字段出现多个不同值（"code = CNY 或 code = USD"）：歧义，不造条件
 				return null;
 			}
-			byField.put(field.code(), values.get(0));
+			String value = distinct.iterator().next();
+			if (!isSingleValueToken(value, field)) {
+				valuesValid = false;
+			}
+			byField.put(field.code(), value);
 		}
 		if (byField.isEmpty()) {
-			return List.of();
+			return new ParsedConditions(List.of(), false);
 		}
 		List<ConditionSlot> out = new ArrayList<>();
 		for (Map.Entry<String, String> entry : byField.entrySet()) {
 			out.add(new ConditionSlot(definition.code(), entry.getKey(), entry.getValue()));
 		}
-		return out;
+		boolean verified = valuesValid && structuralResidual(text, definition, spans, List.of()).isEmpty();
+		return new ParsedConditions(out, verified);
 	}
 
-	/** 该字段在文本里被明确赋过的所有不同值（按出现顺序）。 */
-	private static List<String> explicitValues(String text, SlotDefinition.SlotField field) {
-		List<String> values = new ArrayList<>();
+	private record ParsedConditions(List<ConditionSlot> slots, boolean verified) {
+	}
+
+	private record ValueMatch(String value, int start, int end) {
+	}
+
+	/** 单一字面量：ASCII 标识符/数字，或配置枚举里的完整值（引号内允许原样）。 */
+	private static boolean isSingleValueToken(String raw, SlotDefinition.SlotField field) {
+		String value = raw == null ? "" : raw.trim();
+		if (value.isEmpty()) {
+			return false;
+		}
+		if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+			return value.length() > 2;
+		}
+		if (value.matches("[A-Za-z0-9_.\\-]+")) {
+			return true;
+		}
+		return field.optionValues().contains(value);
+	}
+
+	/**
+	 * 抽取后的残余：去掉已匹配片段、配置定义编码/名称、允许的中性词与标点；
+	 * 返回空串 = 整段文本被完整消费（才可能 verified）。
+	 */
+	private static String structuralResidual(String text, SlotDefinition definition, List<int[]> spans,
+			List<String> extraLiterals) {
+		char[] chars = text.toCharArray();
+		for (int[] span : spans) {
+			for (int i = Math.max(0, span[0]); i < Math.min(chars.length, span[1]); i++) {
+				chars[i] = ' ';
+			}
+		}
+		String residual = new String(chars);
+		List<String> literals = new ArrayList<>(extraLiterals);
+		if (definition.code() != null) {
+			literals.add(definition.code());
+		}
+		if (definition.name() != null) {
+			literals.add(definition.name());
+		}
+		for (String literal : literals) {
+			if (literal != null && !literal.isBlank()) {
+				residual = residual.replace(literal, " ");
+			}
+		}
+		residual = STRUCTURAL_FILLER.matcher(residual).replaceAll(" ");
+		residual = residual.replaceAll("[\\s\\p{Punct}，。；、：！？（）【】]", "");
+		return residual.trim();
+	}
+
+	/** 该字段在文本里被明确赋过的所有匹配（按出现顺序）。 */
+	private static List<ValueMatch> explicitValues(String text, SlotDefinition.SlotField field) {
+		List<ValueMatch> out = new ArrayList<>();
 		for (String token : tokens(field)) {
 			Pattern pattern = Pattern.compile(token + FIELD_VALUE_CONNECTOR + FIELD_VALUE_LITERAL,
 					Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 			Matcher matcher = pattern.matcher(text);
 			while (matcher.find()) {
 				String value = matcher.group(1);
-				if (value != null && !value.isBlank() && !values.contains(value)) {
-					values.add(value);
+				if (value != null && !value.isBlank()) {
+					out.add(new ValueMatch(value, matcher.start(), matcher.end()));
 				}
 			}
 		}
-		return values;
+		return out;
 	}
 
 	/** 字段的匹配记号：编码带词边界，中文标签按原文（>1 字才用）。 */
@@ -291,7 +371,7 @@ final class TaskSlotParser {
 	private static ShorthandResult shorthandCondition(String text, SlotDefinition definition) {
 		SlotDefinition.SlotField key = definition.keyField().orElse(null);
 		if (key == null) {
-			return new ShorthandResult(SlotState.ABSENT, null);
+			return new ShorthandResult(SlotState.ABSENT, null, false);
 		}
 		Set<String> excluded = new LinkedHashSet<>();
 		excluded.add(definition.code().toLowerCase(Locale.ROOT));
@@ -313,20 +393,23 @@ final class TaskSlotParser {
 			}
 		}
 		if (candidates.isEmpty()) {
-			return new ShorthandResult(SlotState.ABSENT, null);
+			return new ShorthandResult(SlotState.ABSENT, null, false);
 		}
 		if (candidates.size() > 1) {
-			return new ShorthandResult(SlotState.AMBIGUOUS, null);
+			return new ShorthandResult(SlotState.AMBIGUOUS, null, false);
 		}
 		String value = candidates.get(0);
 		if (!key.optionValues().isEmpty() && !key.optionValues().contains(value)) {
 			// 有枚举就按枚举校验：不在可选值里不是"筛选"，是另一个词
-			return new ShorthandResult(SlotState.ABSENT, null);
+			return new ShorthandResult(SlotState.ABSENT, null, false);
 		}
-		return new ShorthandResult(SlotState.DETERMINED, new ConditionSlot(definition.code(), key.code(), value));
+		boolean verified = !key.optionValues().isEmpty() && key.optionValues().contains(value)
+				&& structuralResidual(text, definition, List.of(), List.of(value)).isEmpty();
+		return new ShorthandResult(SlotState.DETERMINED,
+				new ConditionSlot(definition.code(), key.code(), value), verified);
 	}
 
-	private record ShorthandResult(SlotState state, ConditionSlot slot) {
+	private record ShorthandResult(SlotState state, ConditionSlot slot, boolean verified) {
 	}
 
 	// ── 任务类型 ─────────────────────────────────────────────────────────────

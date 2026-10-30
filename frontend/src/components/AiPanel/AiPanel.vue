@@ -1532,7 +1532,7 @@ import {
   resolveBlockExpanded,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, partDiagnosticOf, partDiagnosticText, partResultIsInternal, type PartDiagnostic } from '@/utils/parts'
+import { deriveCopyText, numericArgOf, partDiagnosticOf, partDiagnosticText, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
@@ -4411,13 +4411,14 @@ function toolResultText(part: ToolPart): string | null | undefined {
   if (!code) {
     return part.result
   }
-  const createdTaskId = code === 'CREATE_TASK_TURN_LIMIT'
-    ? /本轮已创建任务 #(\d+)/.exec(part.result ?? '')?.[1]
-    : undefined
-  const key = createdTaskId
+  // 2026-10-30 结构化批：插值只认结构化 args（`userTextArgs` / `target`），**不再**从中文回执
+  // （「本轮已创建任务 #12」）正则反解 id。后端尚未发该键 ⇒ 无插值渲染（同一词条的通用档）。
+  const args = userTextArgsOf(part) ?? {}
+  const createdTaskId = code === 'CREATE_TASK_TURN_LIMIT' ? numericArgOf(args, 'taskId') : null
+  const key = createdTaskId !== null
     ? 'ai.panel.toolResult.CREATE_TASK_TURN_LIMIT_WITH_ID'
     : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
-  const translated = t(key, { id: createdTaskId ?? '' })
+  const translated = t(key, { ...args, id: createdTaskId ?? '' })
   return translated === key ? part.result : translated
 }
 
@@ -4601,14 +4602,19 @@ const noticeText = computed(() => ai.noticeText)
 
 /**
  * 「工作区已同步」chip 的动作摘要（i18n L-69）：记录带 `display`（结构化 code + args）时按当前语言重译，
- * 否则回落 `summary`（送模型那一份中文摘要 / 旧记录）。页面名在 `touch()` 时按当时语言取好。
+ * 否则回落**本地化兜底词条**（`ai.workspace.actionFallback`）。
+ *
+ * <p>2026-10-30 结构化批：**不再**直接渲染 `record.summary` —— 那是送模型的中文串（C5），
+ * 旧记录/无 display 的载荷在 en 界面会冒出中文（"旧 summary 直接当 UI 文案"）。
  */
 const contextSyncText = computed(() => {
   const record = ai.contextSync
   if (!record) {
     return ''
   }
-  return record.display ? t(record.display.code, record.display.args ?? {}) : record.summary
+  return record.display
+    ? t(record.display.code, record.display.args ?? {})
+    : t('ai.workspace.actionFallback')
 })
 
 function alertBox(tone: keyof typeof ALERT_TONE): string {

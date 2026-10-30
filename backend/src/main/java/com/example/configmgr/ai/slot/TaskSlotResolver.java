@@ -1,6 +1,5 @@
 package com.example.configmgr.ai.slot;
 
-import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
@@ -21,14 +20,16 @@ import java.util.Map;
 /**
  * 槽位解析器（小型、可测试，不引入新框架）。
  *
- * <p><b>优先级</b>（用户的硬要求）：权威任务/工作区 → 当前用户明确值 → 历史未修改值。
- * 当前文本里明确给出的选择/条件是对前值的<b>替换</b>（"后文明确替换则新值优先"）；
- * 明确取消/否定则清空；无法确定（同名多义、多值歧义）保持缺失，严禁猜测。
- * 多项明确配置是合法的多选（`defCodes` 全部填入），不按"多候选 = 歧义"处理。
+ * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：本类<b>不解析用户原话</b>，
+ * 不调用 {@link TaskSlotParser}/中文正则。可信事实只有任务条目与工作区页面结构化选择：
+ * 配置项来自 {@code selectedDefs}/任务条目，条件来自任务 {@code conditionJson}
+ * （由前端结构化 {@code set_condition} / 确认门落库）。自然语言只经既有模型工具调用
+ * 变成结构化意图，不再由宿主猜测。
  *
- * <p><b>与 {@code ContextBuilder} 同一套两态</b>：页面上报的 {@code selectedDefs} 是<b>显式空列表</b>
- * （用户把勾选全部取消）时它是权威空值，不得回落历史重新勾选；只有页面<b>从未同步</b>
- * （无该键 / 不在拥有选中集的向导页上）才允许按历史回落。
+ * <p><b>与 {@code ContextBuilder} 同一套两态</b>：页面上报的 {@code selectedDefs} 非空时它是权威值；
+ * 显式空列表（任务条目也为空、例如刚建好尚未落条目的新任务）时以本轮结构化
+ * {@code create_task(defCodes=…)} 的候选为准；页面<b>从未同步</b>（无该键 / 不在拥有选中集的向导页上）
+ * 则回落任务条目。候选是用户原话经模型工具调用产出的结构化事实，宿主不再解析文本。
  *
  * <p>解析结果写入 {@code AiContext.extra[taskSlots]}（{@link TaskSlots#EXTRA_KEY}），
  * 随 run 快照传递，并由 {@link ContextBuilder} 展示给模型。
@@ -36,6 +37,12 @@ import java.util.Map;
 @Slf4j
 @Component
 public class TaskSlotResolver {
+
+	/** 结构化 create_task 参数里的候选配置项（服务端写入；不落任务条目）。 */
+	public static final String CREATE_TASK_DEF_CODES_KEY = "createTaskDefCodes";
+
+	/** create_task 候选（defCodes/conditions）所属的任务号：候选只对创建它的任务有效。 */
+	public static final String CREATE_TASK_TASK_ID_KEY = "createTaskTaskId";
 
 	private final DefinitionCatalog catalog;
 
@@ -63,58 +70,59 @@ public class TaskSlotResolver {
 	 * @param historyUserMessages 历史用户原文（按时间顺序；只看用户说过的话）
 	 */
 	public TaskSlots resolve(AiContext context, String currentMessage, List<String> historyUserMessages) {
-		List<SlotDefinition> definitions = definitions();
 		AiContext ctx = context == null ? AiContext.empty() : context;
-
-		// 页面实时勾选的三态（与 ContextBuilder#pageSelectedDefs 同源）：null = 页面从未同步，
-		// 空列表 = 页面同步了"什么都没选"（权威空值）。
+		Task task = task(ctx);
+		// 自然语言不经这里：不解析 currentMessage/historyUserMessages（保留签名兼容）。
+		// 可信事实只有任务条目/工作区页面结构化选择；条件事实来自任务 conditionJson。
 		List<String> pageDefCodes = pageSelectedDefCodes(ctx);
-		List<String> taskDefCodes = taskDefCodes(ctx);
-		List<String> authoritativeDefCodes = pageDefCodes != null ? pageDefCodes : taskDefCodes;
-		// 权威空值不得回落历史：显式空勾选是"用户此刻什么都没选"，按历史重新勾选等于替用户改选择。
-		boolean selectionIsAuthoritative = pageDefCodes != null || !taskDefCodes.isEmpty();
-		// 条件三态的唯一判据（Task 1 第 1 项）：EQ 以外的算子与 scopeKeys 同样是"已设置"，
-		// 坏 JSON/从未设置是"未决定"，{@code "{}"} 是"明确不设"。
-		ConditionAssessment.Assessment conditionAssessment = ConditionAssessment.of(task(ctx));
-		List<ConditionSlot> authoritativeConditions = eqConditions(conditionAssessment);
-		String authoritativeTaskType = ctx.getTaskType() == null || ctx.getTaskType().isBlank() ? null
-				: ctx.getTaskType();
-
-		List<String> historyDefCodes = List.of();
-		List<ConditionSlot> historyConditions = List.of();
-		String historyTaskType = null;
-		for (String text : historyUserMessages == null ? List.<String>of() : historyUserMessages) {
-			TaskSlotParser.Intent intent = TaskSlotParser.parse(text, definitions, historyDefCodes);
-			historyDefCodes = applySelection(intent.selection(), intent.defCodes(), historyDefCodes);
-			historyConditions = applyConditions(intent.condition(), intent.conditions(), historyConditions);
-			if (intent.taskType() != null) {
-				historyTaskType = intent.taskType();
-			}
+		List<String> taskDefCodes = taskDefCodes(task);
+		List<String> createTaskDefCodes = createTaskDefCodes(ctx);
+		// 权威顺序：页面非空勾选 > 任务已存条目（页面未同步）> create_task 候选。
+		// 页面同步了空集合 = 用户清空，仍压过任务条目；只有任务还没有任何条目
+		// （刚建好、尚未 select_definitions）时，空页面只表示"向导里还没勾"，
+		// 以本轮结构化 create_task(defCodes=…) 候选为准 —— 那是用户原话经模型工具调用
+		// 给出的已知事实，不是宿主编造。
+		List<String> authoritativeDefCodes;
+		if (pageDefCodes != null && !pageDefCodes.isEmpty()) {
+			authoritativeDefCodes = pageDefCodes;
 		}
-
-		List<String> fallbackDefCodes = selectionIsAuthoritative ? authoritativeDefCodes : historyDefCodes;
-		TaskSlotParser.Intent current = TaskSlotParser.parse(currentMessage, definitions, fallbackDefCodes);
-
-		String taskType = authoritativeTaskType != null ? authoritativeTaskType
-				: current.taskType() != null ? current.taskType() : historyTaskType;
-		List<String> defCodes = switch (current.selection()) {
-			case DETERMINED -> current.defCodes();
-			case CLEARED, AMBIGUOUS -> List.of();
-			case ABSENT -> fallbackDefCodes;
-		};
-		List<ConditionSlot> conditions = switch (current.condition()) {
-			case DETERMINED -> current.conditions();
-			case CLEARED, AMBIGUOUS -> List.of();
-			case ABSENT -> !authoritativeConditions.isEmpty() ? authoritativeConditions : historyConditions;
-		};
+		else if (!taskDefCodes.isEmpty()) {
+			authoritativeDefCodes = pageDefCodes != null ? List.of() : taskDefCodes;
+		}
+		else {
+			authoritativeDefCodes = createTaskDefCodes;
+		}
+		ConditionAssessment.Assessment conditionAssessment = ConditionAssessment.of(task);
+		List<ConditionSlot> conditions = eqConditions(conditionAssessment);
+		List<String> defCodes = authoritativeDefCodes;
 		if (defCodes.isEmpty()) {
 			conditions = List.of();
 		}
 		else {
 			conditions = conditions.stream().filter(c -> defCodes.contains(c.defCode())).distinct().toList();
 		}
-		return withConditionState(taskType, defCodes, conditions, conditionAssessment,
-				current.condition() == TaskSlotParser.SlotState.CLEARED);
+		String taskType = ctx.getTaskType() == null || ctx.getTaskType().isBlank() ? null : ctx.getTaskType();
+		boolean atExport = task != null && "EXPORT".equalsIgnoreCase(trimStep(task.getCurrentStep()));
+		return withConditionState(taskType, defCodes, conditions, conditionAssessment, task, atExport);
+	}
+
+	/**
+	 * 首轮/续跑交棒前的槽位补齐：只读任务/工作区权威值，<b>不解析自由文本</b>
+	 * （currentMessage/history 保留形参兼容；自然语言只由模型工具调用输出结构化意图）。
+	 */
+	public AiContext enrich(AiContext context, String currentMessage, List<Message> history) {
+		AiContext source = context == null ? AiContext.empty() : context;
+		TaskSlots slots = resolve(source, null, List.of());
+		Map<String, Object> extra = source.getExtra() == null ? new LinkedHashMap<>()
+				: new LinkedHashMap<>(source.getExtra());
+		if (slots.isEmpty()) {
+			extra.remove(TaskSlots.EXTRA_KEY);
+		}
+		else {
+			extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
+		}
+		return AiContext.of(source.getPage(), source.getTaskType(), source.getStep(), source.getTaskId(),
+				source.getTaskStatus(), extra);
 	}
 
 	/**
@@ -122,9 +130,10 @@ public class TaskSlotResolver {
 	 * 未决定/无法解析才是缺口；模型已知但未落库的条件也算"已有事实"，放行判定不得再弹表。
 	 */
 	private static TaskSlots withConditionState(String taskType, List<String> defCodes,
-			List<ConditionSlot> conditions, ConditionAssessment.Assessment assessment, boolean clearedNow) {
+			List<ConditionSlot> conditions, ConditionAssessment.Assessment assessment, Task task,
+			boolean atExport) {
 		if (defCodes.isEmpty()) {
-			return new TaskSlots(taskType, List.of(), List.of(), List.of(), List.of(), List.of());
+			return new TaskSlots(taskType, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
 		}
 		List<String> conditionDefCodes = new ArrayList<>();
 		List<String> undecidedDefCodes = new ArrayList<>();
@@ -135,8 +144,11 @@ public class TaskSlotResolver {
 			if (userKnown || state == ConditionAssessment.State.SET) {
 				conditionDefCodes.add(defCode);
 			}
-			else if (clearedNow || state == ConditionAssessment.State.EXPLICIT_UNSET) {
-				// 明确不设：已有答案，不再收集
+			else if (state == ConditionAssessment.State.EXPLICIT_UNSET
+					|| (atExport && state == ConditionAssessment.State.UNDECIDED && blankCondition(task, defCode))) {
+				// 明确不设：已有答案，不再收集。
+				// N-2：权威步骤已是 EXPORT 的 null/空白 = 用户留空（与预检同一口径）；
+				// 坏结构（unparseable）不在此列，仍是未决定。
 				continue;
 			}
 			else {
@@ -154,51 +166,26 @@ public class TaskSlotResolver {
 				conditionTexts.add(rendered);
 			}
 		}
-		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts);
+		// 文本可信链已删除：verifiedConditionDefCodes 仅为兼容字段，恒为空（不参与生产判断）。
+		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
+				List.of());
 	}
 
-	private static List<String> applySelection(TaskSlotParser.SlotState state, List<String> value,
-			List<String> previous) {
-		return switch (state) {
-			case DETERMINED -> value;
-			case CLEARED, AMBIGUOUS -> List.of();
-			case ABSENT -> previous;
-		};
-	}
-
-	private static List<ConditionSlot> applyConditions(TaskSlotParser.SlotState state, List<ConditionSlot> value,
-			List<ConditionSlot> previous) {
-		return switch (state) {
-			case DETERMINED -> value;
-			case CLEARED, AMBIGUOUS -> List.of();
-			case ABSENT -> previous;
-		};
-	}
-
-	/** 首轮出口：把解析结果放进 extra（空槽位则移除键，避免每轮都渲染"缺失"）。 */
-	public AiContext enrich(AiContext context, String currentMessage, List<Message> history) {
-		AiContext source = context == null ? AiContext.empty() : context;
-		List<String> historyTexts = new ArrayList<>();
-		if (history != null) {
-			for (Message message : history) {
-				// 压缩摘要/步数收尾等合成 user 消息不是用户原话：把它们当输入会把旧选择"复活"
-				if (message instanceof UserMessage user && !SyntheticMessages.isSynthetic(message)
-						&& user.getText() != null) {
-					historyTexts.add(user.getText());
-				}
+	/** 该配置项的任务条件 JSON 是否为空/空白（坏 JSON 不算；只有 null/空串）。 */
+	private static boolean blankCondition(Task task, String defCode) {
+		if (task == null || task.getItems() == null || defCode == null) {
+			return false;
+		}
+		for (TaskItem item : task.getItems()) {
+			if (item != null && defCode.equals(item.getDefCode())) {
+				return item.getConditionJson() == null || item.getConditionJson().isBlank();
 			}
 		}
-		TaskSlots slots = resolve(source, currentMessage, historyTexts);
-		Map<String, Object> extra = source.getExtra() == null ? new LinkedHashMap<>()
-				: new LinkedHashMap<>(source.getExtra());
-		if (slots.isEmpty()) {
-			extra.remove(TaskSlots.EXTRA_KEY);
-		}
-		else {
-			extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
-		}
-		return AiContext.of(source.getPage(), source.getTaskType(), source.getStep(), source.getTaskId(),
-				source.getTaskStatus(), extra);
+		return false;
+	}
+
+	private static String trimStep(String step) {
+		return step == null ? "" : step.trim();
 	}
 
 	// ── 权威值（任务/工作区） ────────────────────────────────────────────────
@@ -253,9 +240,49 @@ public class TaskSlotResolver {
 		return codes;
 	}
 
+	/**
+	 * 本 run 结构化 create_task 的候选配置项（任务条目尚未落库时使用）。
+	 *
+	 * <p><b>只对创建它的任务有效</b>：候选与 {@link #CREATE_TASK_TASK_ID_KEY} 绑定；上下文任务号不匹配
+	 * （切到别的任务）时视为没有候选 —— 旧任务的配置不得压掉新任务的选择表。
+	 */
+	private static List<String> createTaskDefCodes(AiContext context) {
+		if (context == null || context.getExtra() == null
+				|| !(context.getExtra().get(CREATE_TASK_DEF_CODES_KEY) instanceof List<?> raw)) {
+			return List.of();
+		}
+		Long boundTaskId = longOf(context.getExtra().get(CREATE_TASK_TASK_ID_KEY));
+		if (boundTaskId == null || !boundTaskId.equals(context.getTaskId())) {
+			return List.of();
+		}
+		List<String> out = new ArrayList<>();
+		for (Object element : raw) {
+			if (element != null && !String.valueOf(element).isBlank()
+					&& !out.contains(String.valueOf(element))) {
+				out.add(String.valueOf(element));
+			}
+		}
+		return out;
+	}
+
+	/** 服务端 extra 里的任务号（数字或数字文本；其它形态 = 没有绑定）。 */
+	private static Long longOf(Object raw) {
+		if (raw instanceof Number number) {
+			return number.longValue();
+		}
+		if (raw == null) {
+			return null;
+		}
+		try {
+			return Long.valueOf(String.valueOf(raw).trim());
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
 	/** 任务已存条目（页面未同步时的权威来源；没有任务 = 空）。 */
-	private List<String> taskDefCodes(AiContext context) {
-		Task task = task(context);
+	private List<String> taskDefCodes(Task task) {
 		if (task == null || task.getItems() == null) {
 			return List.of();
 		}

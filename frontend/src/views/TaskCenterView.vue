@@ -175,7 +175,7 @@ import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
 import type { Job } from '@/types/job'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const taskStore = useTaskStore()
 const workspace = useWorkspaceStore()
@@ -394,11 +394,11 @@ async function removeTask(row: TaskSummary): Promise<void> {
  * 口径与两处向导的自动建任务一致（ExportWizardView/ImportWizardView 的 createAndBindTask）。
  */
 function defaultTaskTitle(type: TaskType): string {
-  // 任务名是**数据**（落库、进列表、随历史回读）：只翻「任务」这个模板词，时间戳口径保持 zh-CN
-  // —— 换日期格式会改变已生成任务名的形态，与"数据不是文案"同一口径。
+  // 任务名是**数据**（落库、进列表、随历史回读）：模板词与时间戳都按**当前 locale** 生成
+  // （2026-10-30 结构化批：原时间戳写死 zh-CN，en 界面会生成中文格式的任务名）。
   return t('views.tasks.autoName', {
     type: t(type === 'EXPORT' ? 'views.tasks.exportType' : 'views.tasks.importType'),
-    time: new Date().toLocaleString('zh-CN')
+    time: new Date().toLocaleString(locale.value)
   })
 }
 

@@ -68,7 +68,7 @@ class ToolPreflightServiceTest {
 			.containsEntry("status", "ACTIVE");
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> checks = (List<Map<String, Object>>) map.get("checks");
-		assertThat(checks.get(0)).containsOnlyKeys("name", "pass", "detail");
+		assertThat(checks.get(0)).containsOnlyKeys("code", "name", "pass", "detail", "args");
 		assertThat(checks.get(3).get("detail")).asString().isNotEmpty();
 	}
 
@@ -252,10 +252,11 @@ class ToolPreflightServiceTest {
 		assertThat(failure(report, "步骤就绪")).contains("不能直接发起导出").contains("confirm_step");
 	}
 
+	/** I-1：SELECT_DEFS/QUERY_COND 的 null 仍是未决定，必须收集。 */
 	@Test
-	void directExportWithUndecidedConditionIsBlocked() {
+	void directExportAtQueryCondWithBlankConditionIsStillBlocked() {
 		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
-		task.setCurrentStep("EXPORT");
+		task.setCurrentStep("QUERY_COND");
 		task.getItems().get(0).setConditionJson(null);
 		task.getItems().get(1).setConditionJson(null);
 		stubTask(task);
@@ -264,6 +265,51 @@ class ToolPreflightServiceTest {
 
 		assertThat(report.pass()).isFalse();
 		assertThat(failure(report, "条件已决定")).contains("条件未决定").contains("set_condition");
+	}
+
+	/** I-1：手工已推进到 EXPORT 的空白条件代表用户留空，start_export 可启动。 */
+	@Test
+	void directExportAtExportStepWithBlankConditionPasses() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson(null);
+		task.getItems().get(1).setConditionJson(null);
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isTrue();
+		assertThat(report.conditionSummary()).contains("未设筛选（全量）");
+	}
+
+	/** I-1：坏 JSON 即使已到 EXPORT 也继续拒绝。 */
+	@Test
+	void directExportAtExportStepWithBadJsonStillFails() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson("{bad json");
+		task.getItems().get(1).setConditionJson("{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "条件已决定")).contains("无法解析");
+	}
+
+	/** I-1：残缺结构（未知键）即使已到 EXPORT 也继续拒绝。 */
+	@Test
+	void directExportAtExportStepWithMalformedStructureStillFails() {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		task.setCurrentStep("EXPORT");
+		task.getItems().get(0).setConditionJson("{\"filters\":[]}");
+		task.getItems().get(1).setConditionJson("{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.pass()).isFalse();
+		assertThat(failure(report, "条件已决定")).contains("无法解析");
 	}
 
 	@Test

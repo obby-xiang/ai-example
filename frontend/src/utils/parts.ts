@@ -244,6 +244,61 @@ export function findToolPart(message: ChatMessage, toolCallId: string): ToolPart
 }
 
 /**
+ * 工具段的**用户文案结构化插值**（`userTextCode` 的配套 args）。
+ *
+ * <p>2026-10-30 结构化批：卡面文案一律 `t(code, args)`，**不许**再从中文回执里正则反解参数
+ * （旧实现从「本轮已创建任务 #12」抠 id）。字段来源优先级：
+ * <ol>
+ * <li>段上的 `userTextArgs`（帧/历史透传；后端尚未发 ⇒ 缺省）；</li>
+ * <li>帧级 `target`（`tool_result.target` 的结构化目标，部分工具会带 `taskId`/`jobId`）。</li>
+ * </ol>
+ * 都没有 ⇒ `null` = 按"无插值"渲染（词条里的 `{id}` 空串）。这是**唯一的适配点**：
+ * 后端补发 `userTextArgs` 后无需再改 UI。
+ */
+export function userTextArgsOf(part: Pick<ToolPart, 'userTextArgs' | 'target'>): Record<string, unknown> | null {
+  const args = part.userTextArgs
+  if (args && typeof args === 'object') {
+    return args
+  }
+  const target = part.target
+  return target && typeof target === 'object' ? target : null
+}
+
+/** 结构化插值里的数值参数（`12` 与 `"12"` 同义）；非整正数一律 `null`。 */
+export function numericArgOf(args: Record<string, unknown> | null, key: string): number | null {
+  if (args === null) {
+    return null
+  }
+  const raw = args[key]
+  const parsed = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+/**
+ * 作业号的**兼容适配点**（唯一一处）：`tool_result` 帧目前只在人读文本里带「作业 #N」，
+ * 后端尚未给结构化 `jobId`。这里集中反解，调用方一律走本函数（不要再各写一份正则）。
+ *
+ * <p>优先级：结构化 `target.jobId` / `userTextArgs.jobId`（后端补上即自动生效）→ 旧文本反解。
+ * 后端补齐结构化字段后，删除末尾的 legacy 分支即可（本函数签名不变）。
+ */
+export function jobIdOfToolResult(
+  result: unknown,
+  structured?: Record<string, unknown> | null
+): number | null {
+  const fromStructured = numericArgOf(structured ?? null, 'jobId')
+  if (fromStructured !== null) {
+    return fromStructured
+  }
+  if (typeof result !== 'string') {
+    return null
+  }
+  // legacy：中文回执「作业 #N」——过渡期唯一反解处，勿扩散。
+  const matched = /作业 #(\d+)/.exec(result)
+  const jobId = matched ? Number(matched[1]) : Number.NaN
+  return Number.isInteger(jobId) && jobId > 0 ? jobId : null
+}
+
+/**
  * 工具帧 → `parts` 的**唯一写点**：与旧的 `upsertToolRun` 同语义
  * （按 toolCallId 就地 spread 合并，不产生重复段）。
  *
@@ -793,6 +848,8 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           // 信封文案（后端 skippedMessage 同文放帧 result）；message 仅作旧帧缺 result 时的回落。
           result: frame.result ?? frame.message ?? null,
           ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
+          ...(frame.userTextArgs !== undefined ? { userTextArgs: frame.userTextArgs } : {}),
+          ...(frame.target != null ? { target: frame.target } : {}),
           truncated: frame.truncated ?? false,
           truncatedReason: frame.truncatedReason ?? null,
           ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
@@ -841,6 +898,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         messageId: frame.messageId,
         result: frame.result ?? null,
         ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
+        ...(frame.userTextArgs !== undefined ? { userTextArgs: frame.userTextArgs } : {}),
+        // 结构化目标随段落库：`userTextArgs` 缺省时卡面用它取 taskId 一类插值（不落段就是死分支）
+        ...(frame.target != null ? { target: frame.target } : {}),
         // R-154 #2 / A10 R-15：消费帧侧截断标记（noticeCode + 结构化数字优先；
         // truncatedReason 仅作旧帧/旧客户端兼容），随段持久化供卡面「已截断」角标渲染。
         truncated: frame.truncated ?? false,
@@ -995,6 +1055,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         messageId: frame.messageId,
         result: frame.result ?? null,
         ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
+        ...(frame.userTextArgs !== undefined ? { userTextArgs: frame.userTextArgs } : {}),
+        // 结构化目标随段落库：`userTextArgs` 缺省时卡面用它取 taskId 一类插值（不落段就是死分支）
+        ...(frame.target != null ? { target: frame.target } : {}),
         // A10 R-15 I-B：frontend_tool_result 帧同样会挂截断四件套（模型侧预裁 / 帧字节裁），
         // 必须随段透传；缺省帧不产生 undefined 键（旧帧零变化）。
         ...(frame.truncated !== undefined ? { truncated: frame.truncated } : {}),

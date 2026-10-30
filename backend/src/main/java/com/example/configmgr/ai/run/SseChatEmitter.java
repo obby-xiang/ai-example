@@ -1725,6 +1725,17 @@ public class SseChatEmitter {
 	 */
 	public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result,
 			ResultView resultView) {
+		toolResult(pending, ok, reused, result, resultView, null);
+	}
+
+	/**
+	 * 带<b>结构化用户文案参数</b>的工具结局帧（additive；帧类型不变）。
+	 *
+	 * <p>{@code userTextArgs} 供前端 {@code t(code, args)} 插值（如 create_task 单轮上限的
+	 * {@code taskId}）；缺省 null = 帧键集合与旧版逐字一致。
+	 */
+	public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result,
+			ResultView resultView, java.util.Map<String, Object> userTextArgs) {
 		ToolOutcome outcome = pending.effectiveOutcome();
 		// M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
 		// 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
@@ -1752,6 +1763,9 @@ public class SseChatEmitter {
 		// markModelView 仍用<b>原文</b>判定模型视图是否被截断，显示摘要不改变机器可读事实。
 		frame.put("result", ToolResultUserText.forUser(code, result));
 		frame.put("userTextCode", ToolResultUserText.userTextCode(code));
+		if (userTextArgs != null && !userTextArgs.isEmpty()) {
+			frame.put("userTextArgs", userTextArgs);
+		}
 		if (resultView != null) {
 			frame.put("resultView", resultView.toMap());
 		}

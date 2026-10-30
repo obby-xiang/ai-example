@@ -59,7 +59,7 @@ public class ToolRegistry {
     public static final String TASK_STATUS_COMPLETED = "COMPLETED";
 
     /** 被终态收窄的工具（只收这一支：COMPLETED 不改变导入/发布链的披露）。 */
-    private static final String TOOL_START_EXPORT = "start_export";
+    private static final String TOOL_START_EXPORT = AiToolNames.START_EXPORT;
 
     @PostConstruct
     public void init() {

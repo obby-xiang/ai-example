@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.data.service.ConditionOperators;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
@@ -52,7 +53,7 @@ import java.util.Set;
 public class WizardActionGuard implements FrontendToolGuard {
 
     /** 本复核器认领的两个向导动作（按模型给出的工具名原文判定，不做形状推断）。 */
-    static final Set<String> SUPPORTED = Set.of("set_condition", "select_definitions");
+    static final Set<String> SUPPORTED = Set.of(AiToolNames.SET_CONDITION, AiToolNames.SELECT_DEFINITIONS);
 
     /** 拒绝码（与 {@code SHEET_ARGUMENTS_REJECTED} / {@code UI_PRIMITIVE_ARGUMENTS_REJECTED} 同族）。 */
     public static final String REJECTED_CODE = "WIZARD_ARGUMENTS_REJECTED";
@@ -69,13 +70,12 @@ public class WizardActionGuard implements FrontendToolGuard {
 
     /**
      * 字段算子白名单 = 前端 {@code ConditionOperator} 与后端 {@code ConditionEvaluator} 的交集
-     * （与 {@link SheetWriteGuard} 同一份 11 个，不新造 DSL）。
+     * （唯一注册定义在 {@link ConditionOperators}，{@link SheetWriteGuard} 与本类共用，不新造 DSL）。
      */
-    private static final Set<String> OPERATORS = Set.of(
-            "EQ", "NE", "CONTAINS", "LIKE", "STARTS_WITH", "IN", "EMPTY", "NOT_EMPTY", "GT", "GTE", "LT", "LTE");
+    private static final Set<String> OPERATORS = Set.copyOf(ConditionOperators.NAMES);
 
     /** 不带取值的算子（带值反而说明模型在猜语义）。 */
-    private static final Set<String> VALUELESS_OPERATORS = Set.of("EMPTY", "NOT_EMPTY");
+    private static final Set<String> VALUELESS_OPERATORS = ConditionOperators.VALUELESS;
 
     private final DefinitionService definitionService;
 
@@ -97,7 +97,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         if (root == null) {
             return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CURRENCY\",\"conditions\":{...}}）。");
         }
-        String tool = root.has("defCode") || root.has("conditions") ? "set_condition" : "select_definitions";
+        String tool = root.has("defCode") || root.has("conditions") ? AiToolNames.SET_CONDITION : AiToolNames.SELECT_DEFINITIONS;
         return decide(tool, root);
     }
 
@@ -111,7 +111,8 @@ public class WizardActionGuard implements FrontendToolGuard {
             return Verdict.accept();
         }
         if (argumentsJson == null || argumentsJson.isBlank()) {
-            return reject("入参不能为空：至少要有 " + ("select_definitions".equals(toolName) ? "codes" : "defCode/conditions") + "。");
+            return reject("入参不能为空：至少要有 "
+                    + (AiToolNames.SELECT_DEFINITIONS.equals(toolName) ? "codes" : "defCode/conditions") + "。");
         }
         JsonNode root = parse(argumentsJson);
         if (root == null) {
@@ -135,7 +136,7 @@ public class WizardActionGuard implements FrontendToolGuard {
     // ── 分流 ────────────────────────────────────────────────────────────────
 
     private Verdict decide(String toolName, JsonNode root) {
-        List<String> reasons = "select_definitions".equals(toolName) ? validateSelect(root)
+        List<String> reasons = AiToolNames.SELECT_DEFINITIONS.equals(toolName) ? validateSelect(root)
                 : validateCondition(root);
         if (reasons.isEmpty()) {
             return Verdict.accept();

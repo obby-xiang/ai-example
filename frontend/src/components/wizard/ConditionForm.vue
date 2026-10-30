@@ -34,22 +34,59 @@
         />
       </el-select>
       <el-select
-        v-model="row.operator"
+        :model-value="row.operator"
         :disabled="props.disabled"
         :placeholder="t('wizard.condition.operator')"
         class="w-[130px]"
+        @update:model-value="onOperatorChange(row, $event)"
         v-bind="aiAttrs(row, 'op', { role: 'combobox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '操作符') })"
       >
         <el-option
           v-for="option in operatorsOf(row.field)"
           :key="option.value"
-          :label="option.label"
+          :label="t(option.labelCode)"
           :value="option.value"
         />
       </el-select>
 
       <template v-if="typeOf(row.field) === 'ENUM'">
+        <!-- 枚举/引用面的三种取值形态必须分开（2026-10-30 消歧）：
+             ① `CONTAINS/LIKE/STARTS_WITH` = 文本输入（按标签/编码含匹配）；
+             ② `IN` = 多选（命中任一即可）；③ 其余（EQ/NE）= 单选。 -->
+        <el-input
+          v-if="isTextOperator(row.operator)"
+          v-model="row.value"
+          :disabled="props.disabled || !operatorNeedsValue(row.operator)"
+          :placeholder="valuePlaceholder(row)"
+          class="w-[180px]"
+          v-bind="aiAttrs(row, 'value', {
+            'data-ai-fill': 'allow',
+            'data-ai-risk': 'mutate-local',
+            'data-ai-verbs': 'fill,highlight,scroll',
+            'data-ai-label': aiLabelOf(row, '取值')
+          })"
+        />
         <el-select
+          v-else-if="isMultiValueOperator(row.operator)"
+          :model-value="multiValuesOf(row)"
+          multiple
+          :disabled="props.disabled"
+          :placeholder="t('wizard.condition.optionMulti')"
+          class="w-[180px]"
+          clearable
+          filterable
+          @update:model-value="setMultiValues(row, $event)"
+          v-bind="aiAttrs(row, 'value', { role: 'combobox', 'data-ai-verbs': 'highlight,scroll', 'data-ai-label': aiLabelOf(row, '取值') })"
+        >
+          <el-option
+            v-for="option in optionsOf(row.field)"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-select
+          v-else
           v-model="row.value"
           :disabled="props.disabled"
           :placeholder="t('wizard.condition.option')"
@@ -290,6 +327,56 @@ function typeOf(code: string): FieldType | null {
 function operatorsOf(code: string): OperatorOption[] {
   const type = typeOf(code)
   return type ? operatorsForFieldType(type) : operatorsForFieldType('STRING')
+}
+
+/**
+ * 文本形态算子：对**枚举/引用**字段也要让用户输入文本（按标签/编码做"含"/"前缀"匹配），
+ * 不能继续用枚举选择器 —— 否则 ENUM 的 `CONTAINS` 变成"从下拉里挑一个值"，语义不对。
+ */
+function isTextOperator(operator: DraftOperator): boolean {
+  return operator === 'CONTAINS' || operator === 'LIKE' || operator === 'STARTS_WITH'
+}
+
+/** 多值算子（`IN`）：枚举/引用面用多选，不能和单选的 EQ/NE 共用一个控件。 */
+function isMultiValueOperator(operator: DraftOperator): boolean {
+  return operator === 'IN'
+}
+
+/** 草案里的 `value` 对 `IN` 是逗号串（后端按字符串比较的承载约定），多选控件在此双向转换。 */
+function multiValuesOf(row: DraftRow): string[] {
+  return row.value.split(',').map((item) => item.trim()).filter((item) => item !== '')
+}
+
+function setMultiValues(row: DraftRow, values: unknown): void {
+  const list = Array.isArray(values) ? values.map((item) => String(item)) : String(values ?? '').split(',')
+  row.value = list.map((item) => item.trim()).filter((item) => item !== '').join(',')
+}
+
+/**
+ * 算子切换的**取值归一**（2026-10-30 复审 I-A）。
+ *
+ * <p>为什么必须归一：`IN` 的取值是"逗号串"承载的多值（`multiValuesOf` 约定）。从 `IN` 切到
+ * `EQ`/`NE`/文本类算子时若原样保留，提交的就是 `EQ "CNY,USD"` —— 后端按**字符串**比较，
+ * 这条条件几乎永不命中，而本地校验也看不出问题（"值非空"）。
+ *
+ * <p>规则（只从 `IN` **切出**时归一，其余方向不动，避免误伤自由文本里的逗号）：
+ * <ul>
+ *   <li>`IN → 非 IN`：取首段（多值时保留第一个值），无段 ⇒ 清空；</li>
+ *   <li>任意切换：复位 `value2`（BETWEEN 的上限、以及非 BETWEEN 的历史残留都不该跟着走）；</li>
+ *   <li>`→ IN`：不清空（空选保持空串 ⇒ 压平时落 `EMPTY_IN` 阻断，**不**静默变成全量导出）。</li>
+ * </ul>
+ */
+function onOperatorChange(row: DraftRow, next: DraftOperator): void {
+  const previous = row.operator
+  if (next === previous) {
+    return
+  }
+  row.operator = next
+  // 上限位不跨算子复用：BETWEEN 的两个框与单值算子的取值是不同语义
+  row.value2 = ''
+  if (previous === 'IN' && !isMultiValueOperator(next)) {
+    row.value = multiValuesOf(row)[0] ?? ''
+  }
 }
 
 function optionsOf(code: string) {

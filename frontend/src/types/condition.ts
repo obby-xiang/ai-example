@@ -73,9 +73,17 @@ export interface FieldQueryCondition {
   fields?: FieldCondition[]
 }
 
-/** 操作符选项（中文标签 + 需要值的形态）。 */
+/**
+ * 操作符选项（**i18n code** + 需要值的形态）。
+ *
+ * <p>2026-10-30 结构化批：UI 只用 `labelCode`（`t(labelCode)`，词条在 `conditions.op.*`）；
+ * `label` 保留为**送模型/诊断**的中文名（C5 红线：送模型的串不随 UI 语言变），界面不得再直接用它。
+ */
 export interface OperatorOption {
   value: DraftOperator
+  /** 界面标签的 i18n code（`conditions.op.*`）—— 组件用 `t(labelCode)` 渲染 */
+  labelCode: string
+  /** @deprecated 中文名（送模型/诊断用）；界面请用 {@link OperatorOption.labelCode} */
   label: string
   /** 是否需要用户填值（EMPTY/NOT_EMPTY 不需要） */
   needsValue: boolean
@@ -85,42 +93,61 @@ export interface OperatorOption {
 
 const OP_NEEDS_NO_VALUE: readonly ConditionOperator[] = ['EMPTY', 'NOT_EMPTY']
 
+/** 操作符选项装配（`labelCode` 与中文名同源，避免两套表漂移）。 */
+function operatorOption(
+  value: DraftOperator,
+  label: string,
+  needsValue: boolean,
+  range?: boolean,
+  labelCode?: string
+): OperatorOption {
+  return {
+    value,
+    labelCode: labelCode ?? operatorLabelCode(value),
+    label,
+    needsValue,
+    ...(range ? { range: true } : {})
+  }
+}
+
 /** 按字段类型给出可选操作符（类型感知：枚举/布尔用 EQ/NE/IN，数值/日期加区间）。 */
 export function operatorsForFieldType(type: FieldType): OperatorOption[] {
   switch (type) {
     case 'NUMBER':
     case 'DATE':
       return [
-        { value: 'EQ', label: '等于', needsValue: true },
-        { value: 'NE', label: '不等于', needsValue: true },
-        { value: 'BETWEEN', label: '介于', needsValue: true, range: true },
-        { value: 'GT', label: '大于', needsValue: true },
-        { value: 'GTE', label: '大于等于', needsValue: true },
-        { value: 'LT', label: '小于', needsValue: true },
-        { value: 'LTE', label: '小于等于', needsValue: true }
+        operatorOption('EQ', '等于', true),
+        operatorOption('NE', '不等于', true),
+        operatorOption('BETWEEN', '介于', true, true),
+        operatorOption('GT', '大于', true),
+        operatorOption('GTE', '大于等于', true),
+        operatorOption('LT', '小于', true),
+        operatorOption('LTE', '小于等于', true)
       ]
     case 'ENUM':
     case 'REFERENCE':
+      // 枚举/引用面的 IN 与 CONTAINS 语义不同（多选命中 vs 文本包含），下拉标签必须消歧：
+      // 用本类型专属词条（`conditions.op.inMulti` / `containsText`），摘要仍用中性的 `conditions.op.in/contains`。
       return [
-        { value: 'EQ', label: '等于', needsValue: true },
-        { value: 'NE', label: '不等于', needsValue: true },
-        { value: 'IN', label: '包含于（多选）', needsValue: true },
-        { value: 'CONTAINS', label: '包含文本', needsValue: true }
+        operatorOption('EQ', '等于', true),
+        operatorOption('NE', '不等于', true),
+        operatorOption('IN', '包含于（多选）', true, false, 'conditions.op.inMulti'),
+        operatorOption('CONTAINS', '包含文本', true, false, 'conditions.op.containsText')
       ]
     case 'BOOLEAN':
       return [
-        { value: 'EQ', label: '等于', needsValue: true },
-        { value: 'NE', label: '不等于', needsValue: true }
+        operatorOption('EQ', '等于', true),
+        operatorOption('NE', '不等于', true)
       ]
     case 'STRING':
     default:
       return [
-        { value: 'EQ', label: '等于', needsValue: true },
-        { value: 'NE', label: '不等于', needsValue: true },
-        { value: 'CONTAINS', label: '包含', needsValue: true },
-        { value: 'STARTS_WITH', label: '以…开头', needsValue: true },
-        { value: 'EMPTY', label: '为空', needsValue: false },
-        { value: 'NOT_EMPTY', label: '不为空', needsValue: false }
+        operatorOption('EQ', '等于', true),
+        operatorOption('NE', '不等于', true),
+        operatorOption('CONTAINS', '包含', true),
+        operatorOption('STARTS_WITH', '以…开头', true),
+        operatorOption('EMPTY', '为空', false),
+        operatorOption('NOT_EMPTY', '不为空', false)
       ]
   }
 }
@@ -494,23 +521,30 @@ export function parseConditionJson(json: string | null | undefined): FieldQueryC
   }
 }
 
-/** 条件 → 中文摘要（列表/详情/工具结果文案）。 */
+/**
+ * 条件 → **中文摘要**（送模型 / 诊断 / 旧口径回退用）。
+ *
+ * <p>2026-10-30 结构化批：**界面不得再直接渲染本函数的返回值**（切 en 会出中文）。
+ * 界面走 {@link conditionSummaryView} + {@link conditionSummaryText}（i18n code + args），
+ * 本函数只保留给"给模型看的那一句"（C5 红线：送模型的串不随 UI 语言变）。
+ */
 export function conditionSummary(condition: FieldQueryCondition | null | undefined): string {
-  if (isConditionEmpty(condition)) {
+  const view = conditionSummaryView(condition)
+  if (view.empty) {
     return '全部数据（无条件）'
   }
   const parts: string[] = []
-  if (condition?.scopeKeys && condition.scopeKeys.length > 0) {
-    parts.push(`范围 = ${condition.scopeKeys.join('、')}`)
+  if (view.scopeKeys.length > 0) {
+    parts.push(`范围 = ${view.scopeKeys.join('、')}`)
   }
-  for (const field of condition?.fields ?? []) {
-    const value = Array.isArray(field.value) ? field.value.join('、') : field.value === undefined ? '' : String(field.value)
+  for (const field of view.fields) {
+    const value = field.values.join('、')
     parts.push(`${field.fieldCode} ${operatorLabel(field.operator)}${value === '' ? '' : ` ${value}`}`)
   }
   return parts.join('；')
 }
 
-/** 操作符中文名。 */
+/** 操作符中文名（送模型/诊断用；界面用 {@link operatorLabelCode} + `t()`）。 */
 export function operatorLabel(operator: ConditionOperator): string {
   const table: Record<ConditionOperator, string> = {
     EQ: '等于',
@@ -527,6 +561,103 @@ export function operatorLabel(operator: ConditionOperator): string {
     LTE: '小于等于'
   }
   return table[operator] ?? operator
+}
+
+/** 操作符 → 界面 i18n code（`conditions.op.*`；未知算子回落通用档）。 */
+export function operatorLabelCode(operator: DraftOperator): string {
+  const table: Record<DraftOperator, string> = {
+    EQ: 'conditions.op.eq',
+    NE: 'conditions.op.ne',
+    CONTAINS: 'conditions.op.contains',
+    LIKE: 'conditions.op.like',
+    STARTS_WITH: 'conditions.op.startsWith',
+    IN: 'conditions.op.in',
+    EMPTY: 'conditions.op.empty',
+    NOT_EMPTY: 'conditions.op.notEmpty',
+    GT: 'conditions.op.gt',
+    GTE: 'conditions.op.gte',
+    LT: 'conditions.op.lt',
+    LTE: 'conditions.op.lte',
+    BETWEEN: 'conditions.op.between'
+  }
+  return table[operator] ?? 'conditions.op.unknown'
+}
+
+/**
+ * 条件摘要的**结构化视图**（无任何自然语言）：界面按当前语言渲染，见
+ * {@link conditionSummaryText}。多值以数组给出，拼接（含分隔符）交给渲染层。
+ */
+export interface ConditionSummaryView {
+  /** 无条件 = 全部数据 */
+  empty: boolean
+  /** 范围过滤键（GLOBAL 级配置通常为空） */
+  scopeKeys: string[]
+  fields: Array<{
+    fieldCode: string
+    operator: ConditionOperator
+    /** 展示值（多值时**未拼接**，由 {@link conditionSummaryText} 用本地化分隔符拼） */
+    values: string[]
+  }>
+}
+
+/** 条件 → 结构化摘要视图（纯数据，无中文；界面/日志/测试都从这里取）。 */
+export function conditionSummaryView(condition: FieldQueryCondition | null | undefined): ConditionSummaryView {
+  if (isConditionEmpty(condition)) {
+    return { empty: true, scopeKeys: [], fields: [] }
+  }
+  const fields = (condition?.fields ?? []).map((field) => ({
+    fieldCode: field.fieldCode,
+    operator: field.operator,
+    values: Array.isArray(field.value)
+      ? field.value.map((item) => String(item))
+      : field.value === undefined || field.value === null
+        ? []
+        : [String(field.value)]
+  }))
+  return {
+    empty: false,
+    scopeKeys: [...(condition?.scopeKeys ?? [])],
+    fields
+  }
+}
+
+/** 命名插值参数（与 `composables/useCopy.ts` 的 `CopyArgs` 同形，避免 types 反向依赖）。 */
+export type ConditionTranslateArgs = Record<string, string | number>
+
+/** 翻译出口签名（组件传 `useCopy().t`，脚本侧传 `translate`）。 */
+export type ConditionTranslate = (key: string, args?: ConditionTranslateArgs) => string
+
+/**
+ * 结构化摘要 → 当前语言成文（**i18n code + args 唯一入口**）。
+ *
+ * <p>词条：`conditions.none` / `conditions.scope` / `conditions.field` / `conditions.fieldValue` /
+ * `conditions.clauseJoin` / `conditions.valueJoin`；算子名走 `operatorLabelCode`。
+ */
+export function conditionSummaryText(view: ConditionSummaryView, t: ConditionTranslate): string {
+  if (view.empty) {
+    return t('conditions.none')
+  }
+  const valueJoin = t('conditions.valueJoin')
+  const clauses: string[] = []
+  if (view.scopeKeys.length > 0) {
+    clauses.push(t('conditions.scope', { keys: view.scopeKeys.join(valueJoin) }))
+  }
+  for (const field of view.fields) {
+    const operator = t(operatorLabelCode(field.operator))
+    // 空串值（`EQ ""` / 多值里的空项）不参与展示：否则 `"{field} {op} {value}"` 会留一个
+    // 尾随空格（并让"没有值"看起来像"值为空"）。全空 ⇒ 走无值词条。
+    const shown = field.values.filter((value) => value !== '')
+    if (shown.length === 0) {
+      clauses.push(t('conditions.field', { field: field.fieldCode, op: operator }))
+      continue
+    }
+    clauses.push(t('conditions.fieldValue', {
+      field: field.fieldCode,
+      op: operator,
+      value: shown.join(valueJoin)
+    }))
+  }
+  return clauses.join(t('conditions.clauseJoin'))
 }
 
 // ── 展示辅助 ─────────────────────────────────────────────────────────────────

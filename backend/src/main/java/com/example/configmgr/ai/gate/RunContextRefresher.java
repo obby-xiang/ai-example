@@ -1,7 +1,11 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.slot.TaskSlotResolver;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
+import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
@@ -10,7 +14,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -49,19 +55,38 @@ import java.util.Optional;
 @Component
 public class RunContextRefresher {
 
-	/** 页面导航工具名（前端通道；成功回执代表"页面真的到了"）。 */
-	public static final String TOOL_NAVIGATE = "navigate_to";
+	/** 页面导航工具名（唯一注册定义在 {@link AiToolNames}；前端通道，成功回执代表"页面真的到了"）。 */
+	public static final String TOOL_NAVIGATE = AiToolNames.NAVIGATE_TO;
 
 	/** 任务创建工具名（后端确认门；回执里带真实任务号）。 */
-	public static final String TOOL_CREATE_TASK = "create_task";
+	public static final String TOOL_CREATE_TASK = AiToolNames.CREATE_TASK;
 
 	/** 步骤推进工具名（前端通道；成功回执代表前端已把任务推进并落库）。 */
-	public static final String TOOL_CONFIRM_STEP = "confirm_step";
+	public static final String TOOL_CONFIRM_STEP = AiToolNames.CONFIRM_STEP;
 
 	/** 页面里已注册 AI 区域的数量（{@code ui:on} 标签的判据）。键名与 {@code ToolRegistry} 同源。 */
 	public static final String EXTRA_UI_REGION_COUNT = "uiRegionCount";
 
 	private static final ObjectMapper JSON = new ObjectMapper();
+
+	/** 结构化 create_task 参数里的候选配置项（宿主槽位/表单放行判定用，不落任务条目）。 */
+	public static final String EXTRA_CREATE_TASK_DEF_CODES = TaskSlotResolver.CREATE_TASK_DEF_CODES_KEY;
+
+	/**
+	 * 结构化 {@code create_task(conditions=…)} 的筛选条件（服务端键；{@link TaskSlotResolver} 不读，
+	 * 由 {@code ConditionsForm} 在 QUERY_COND 用同一份校验落库）。只作候选，创建时不写任务条目。
+	 */
+	public static final String EXTRA_CREATE_TASK_CONDITIONS = "createTaskConditions";
+
+	/** create_task 候选（defCodes/conditions）所属的任务号：候选只对创建它的任务有效。 */
+	public static final String EXTRA_CREATE_TASK_TASK_ID = TaskSlotResolver.CREATE_TASK_TASK_ID_KEY;
+
+	/**
+	 * 本次 {@code create_task} 的<b>结算时刻</b>（epoch 毫秒）：只接受这个时刻之后产生/回灌的
+	 * {@code SET_CONDITIONS} 表单。之前的历史表单（例如上一个任务 A 的回灌/取消）一律不算，
+	 * 防止新任务 B 继承 A 的条件收集状态。
+	 */
+	public static final String EXTRA_CREATE_TASK_REQUESTED_AT = "createTaskRequestedAtMs";
 
 	private final TaskService taskService;
 
@@ -134,11 +159,13 @@ public class RunContextRefresher {
 		String page = text(args == null ? null : args.get("page"));
 		Long taskId = longOf(args == null ? null : args.get("taskId"));
 		if (taskId == null) {
-			// 无任务导航：旧任务的类型/步骤/状态必须清掉，否则新页面仍在旧任务的披露面里
+			// 无任务导航：旧任务的类型/步骤/状态必须清掉，否则新页面仍在旧任务的披露面里；
+			// 任务作用域的服务端 extra（槽位/创建候选）同样作废。
 			base.setTaskId(null);
 			base.setTaskType(null);
 			base.setStep(null);
 			base.setTaskStatus(null);
+			clearTaskScopedExtra(base);
 		}
 		else {
 			Task task = requireTask(taskId);
@@ -161,9 +188,66 @@ public class RunContextRefresher {
 		}
 		Task task = requireTask(taskId);
 		applyTask(base, task);
+		// 创建/复用新任务 = 全新任务作用域：无论任务号是否变化，先完整重置旧任务槽位与创建候选
+		//（含页面勾选事实），再绑定本次 create_task 的候选。新任务无条件从 UNDECIDED 开始，
+		// 旧任务（A）的条件/配置永不继承；页面与目标任务事实由 TaskSlotResolver 重算。
+		clearTaskScopedExtra(base);
+		bindCreateTaskCandidates(base, taskId);
+		applyCreateTaskDefCodes(base, settled);
+		applyCreateTaskConditions(base, settled);
 		if (base.getPage() == null || base.getPage().isBlank()) {
 			applyPage(base, pageOf(task.getType()));
 		}
+	}
+
+	/** 候选（defCodes/conditions）只对创建它的任务有效：写入绑定任务号与本次创建结算时刻。 */
+	private static void bindCreateTaskCandidates(AiContext base, Long taskId) {
+		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
+		extra.put(EXTRA_CREATE_TASK_TASK_ID, taskId);
+		// 只把"此刻之后"的 SET_CONDITIONS 表单算作本任务的收集事实（历史任务 A 的表单不算）
+		extra.put(EXTRA_CREATE_TASK_REQUESTED_AT, System.currentTimeMillis());
+		base.setExtra(extra);
+	}
+
+	/**
+	 * 结构化 {@code create_task(defCodes=…)} 的候选配置项：只写进运行上下文（{@code extra}），
+	 * 供 {@code TaskSlotResolver}/表单放行判定当作"已知配置"使用。
+	 *
+	 * <p><b>不落任务条目</b>：条目仍由 {@code select_definitions} 创建（创建≠选配置项）。
+	 * 同批后续的 {@code generative_form(purpose=SELECT_DEFINITIONS)} 因此被
+	 * {@code FORM_SLOTS_ALREADY_KNOWN} 零副作用拒绝，模型直接 {@code select_definitions}；
+	 * 未传 {@code defCodes} 时这里什么都不写，宿主仍只弹一次配置表。
+	 */
+	private static void applyCreateTaskDefCodes(AiContext base, PendingToolCall settled) {
+		List<String> defCodes = defCodesOf(parse(settled.getArguments()));
+		if (defCodes.isEmpty()) {
+			return;
+		}
+		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
+		extra.put(EXTRA_CREATE_TASK_DEF_CODES, defCodes);
+		// undecidedDefCodes = 候选本身：条件仍需在 QUERY_COND 收集，配置项已无需再问
+		extra.put(TaskSlots.EXTRA_KEY, new TaskSlots(base.getTaskType(), defCodes, List.of(), List.of(), defCodes,
+				List.of(), List.of()).toMap());
+		base.setExtra(extra);
+	}
+
+	/**
+	 * 结构化 {@code create_task(conditions=…)} 的候选筛选条件：只写进运行上下文（{@code extra}），
+	 * 由 {@code ConditionsForm} 在 QUERY_COND 用与 {@code set_condition} 同一份
+	 * {@code WizardActionGuard} 复核后经 {@code TaskService#setCondition} 落库。
+	 *
+	 * <p><b>创建时不落库</b>：任务条目尚无该配置项（条目由 {@code select_definitions} 建立），
+	 * 条件只能在其后写入；未传 {@code conditions} 时这里什么都不写（宿主仍只弹一张条件表）。
+	 */
+	private static void applyCreateTaskConditions(AiContext base, PendingToolCall settled) {
+		JsonNode args = parse(settled.getArguments());
+		JsonNode conditions = args == null ? null : args.get("conditions");
+		if (conditions == null || !conditions.isObject() || conditions.isEmpty()) {
+			return;
+		}
+		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
+		extra.put(EXTRA_CREATE_TASK_CONDITIONS, JSON.convertValue(conditions, Map.class));
+		base.setExtra(extra);
 	}
 
 	/**
@@ -195,11 +279,41 @@ public class RunContextRefresher {
 		}
 	}
 
+	/**
+	 * 任务权威值落到上下文。**任务号变化时清掉任务作用域的服务端 extra**（旧任务槽位与
+	 * create_task 候选），下一跳由 {@link TaskSlotResolver} 按目标任务重算 ——
+	 * 防止旧任务的配置/条件压掉新任务的选择表或条件收集。
+	 */
 	private static void applyTask(AiContext base, Task task) {
+		Long previous = base.getTaskId();
 		base.setTaskId(task.getId());
 		base.setTaskType(task.getType() == null ? null : task.getType().name());
 		base.setStep(task.getCurrentStep());
 		base.setTaskStatus(task.getStatus() == null ? null : task.getStatus().name());
+		if (previous == null || !previous.equals(task.getId())) {
+			clearTaskScopedExtra(base);
+		}
+	}
+
+	/**
+	 * 任务作用域的服务端 extra：换任务/新建任务后一律作废（槽位由 resolver 按目标任务重算）。
+	 *
+	 * <p>同时清掉页面勾选事实（{@code selectedDefs}/{@code selectionSynced}）：它们属于旧任务的
+	 * 向导页面，留着会让 {@link TaskSlotResolver} 把旧任务的勾选当成新任务的"页面权威值"。
+	 * 清掉后 resolver 按目标任务条目/本次 create_task 候选重算，等客户端上报新页勾选再覆盖。
+	 */
+	private static void clearTaskScopedExtra(AiContext base) {
+		Map<String, Object> extra = base.getExtra();
+		if (extra == null) {
+			return;
+		}
+		extra.remove(TaskSlots.EXTRA_KEY);
+		extra.remove(EXTRA_CREATE_TASK_DEF_CODES);
+		extra.remove(EXTRA_CREATE_TASK_CONDITIONS);
+		extra.remove(EXTRA_CREATE_TASK_TASK_ID);
+		extra.remove(EXTRA_CREATE_TASK_REQUESTED_AT);
+		extra.remove("selectedDefs");
+		extra.remove(ContextBuilder.SELECTION_SYNCED_KEY);
 	}
 
 	/**
@@ -294,6 +408,24 @@ public class RunContextRefresher {
 		catch (Exception ex) {
 			return null;
 		}
+	}
+
+	private static List<String> defCodesOf(JsonNode args) {
+		if (args == null) {
+			return List.of();
+		}
+		JsonNode raw = args.get("defCodes");
+		if (raw == null || !raw.isArray()) {
+			return List.of();
+		}
+		List<String> out = new ArrayList<>();
+		for (JsonNode element : raw) {
+			if (element != null && element.isTextual() && !element.asText().isBlank()
+					&& !out.contains(element.asText().trim())) {
+				out.add(element.asText().trim());
+			}
+		}
+		return out;
 	}
 
 	private static String text(JsonNode node) {

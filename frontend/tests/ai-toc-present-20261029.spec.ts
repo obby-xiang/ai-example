@@ -170,7 +170,8 @@ describe('1 · 同一事实只留一个提示面', () => {
     // ① 失败回执（handled=false）是**另一件事**：不得被无关的「工作区已同步」压掉
     store.lastUiEventResult = { event: 'select_defs', handled: false, message: '当前没有进行中的任务' }
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])])
-    expect(wrapper.find('[data-testid="panel-context-bar"]').text()).toContain('选择了 2 个配置定义')
+    // 2026-10-30 结构化批：无 display 的旧记录不再把送模型的 summary 当 UI 文案，改走本地化兜底词条
+    expect(wrapper.find('[data-testid="panel-context-bar"]').text()).toContain('工作区状态已更新')
     expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(true)
 
     // ② 成功回执（handled=true）：同步反馈已在报同一件事 ⇒ 回执位让位
@@ -543,7 +544,7 @@ describe('7 · 技术词只进诊断', () => {
     expect(line.text()).not.toContain('数据版本')
     const synced = wrapper.find('[data-testid="context-synced"]')
     // 「已同步」只留人话摘要（不带版本号 / 来源机读词）
-    expect(synced.text()).toContain('选择了 2 个配置定义')
+    expect(synced.text()).toContain('工作区状态已更新')
     expect(synced.text()).not.toContain('v7')
     expect(synced.text()).not.toContain('界面')
 

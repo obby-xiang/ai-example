@@ -12,6 +12,9 @@ import java.util.Map;
  * <p>只表达三件事：任务类型、已确定配置项、已确定筛选条件。<b>空集合 = 缺失</b>，
  * 不表达"用户想选但还没选"之类的中间态 —— 调用方据此判断表单是否还有真实缺口。
  *
+ * <p><b>{@code verifiedConditionDefCodes} 已退役</b>：文本可信链删除后生产恒为空，
+ * 仅为旧快照/构造器兼容保留，不参与任何生产判断（工作流只认任务 conditionJson 与结构化回灌）。
+ *
  * <p><b>条件三态（Task 1 第 1 项）</b>：{@code conditions} 仍是模型可读的 EQ 槽位；另有两个
  * 只服务放行判定的集合：
  * <ul>
@@ -36,7 +39,8 @@ import java.util.Map;
  * 因此客户端无法用伪造槽位压掉表单。
  */
 public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions,
-		List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts) {
+		List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts,
+		List<String> verifiedConditionDefCodes) {
 
 	/** {@code AiContext.extra} 里的键名（服务端写入，不来自客户端）。 */
 	public static final String EXTRA_KEY = "taskSlots";
@@ -48,6 +52,8 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		conditionDefCodes = conditionDefCodes == null ? List.of() : List.copyOf(conditionDefCodes);
 		undecidedDefCodes = undecidedDefCodes == null ? null : List.copyOf(undecidedDefCodes);
 		conditionTexts = conditionTexts == null ? List.of() : List.copyOf(conditionTexts);
+		verifiedConditionDefCodes = verifiedConditionDefCodes == null ? List.of()
+				: List.copyOf(verifiedConditionDefCodes);
 	}
 
 	/**
@@ -57,7 +63,15 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 	public TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions) {
 		this(taskType, defCodes, conditions,
 				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList(),
-				null, List.of());
+				null, List.of(),
+				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList());
+	}
+
+	/** 兼容构造器（六参）：verified 默认与 conditionDefCodes 相同（旧快照/旧调用）。 */
+	public TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions,
+			List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts) {
+		this(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
+				conditionDefCodes);
 	}
 
 	public static TaskSlots empty() {
@@ -137,6 +151,9 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		if (!conditionTexts.isEmpty()) {
 			out.put("conditionTexts", conditionTexts);
 		}
+		if (!verifiedConditionDefCodes.isEmpty()) {
+			out.put("verifiedConditionDefCodes", verifiedConditionDefCodes);
+		}
 		return out;
 	}
 
@@ -171,10 +188,13 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		}
 		List<String> conditionDefCodes = stringList(map.get("conditionDefCodes"));
 		List<String> conditionTexts = stringList(map.get("conditionTexts"));
+		// 缺键 = 旧快照/未声明：按未验证处理（启发式文本不得因子段缺失被自动落库）
+		List<String> verifiedConditionDefCodes = stringList(map.get("verifiedConditionDefCodes"));
 		// 键缺失 = 旧数据（没有三态信息）；键存在（含空列表）= 已逐项核对
 		List<String> undecidedDefCodes = map.containsKey("undecidedDefCodes")
 				? stringList(map.get("undecidedDefCodes")) : null;
-		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts);
+		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
+				verifiedConditionDefCodes);
 	}
 
 	private static List<String> stringList(Object raw) {

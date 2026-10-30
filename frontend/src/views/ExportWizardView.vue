@@ -82,13 +82,13 @@
         </el-button>
         <template v-if="exportResults.length">
           <el-divider direction="vertical" />
-          <el-button size="small" :loading="downloading === activeTab" @click="downloadOne(activeTab)">
+          <el-button size="small" :loading="isDownloadingDef(activeTab)" @click="downloadOne(activeTab)">
             {{ t('views.export.downloadCurrent') }}
           </el-button>
-          <el-button size="small" :disabled="!checkedDefs.length" :loading="downloading === 'checked'" @click="downloadChecked">
+          <el-button size="small" :disabled="!checkedDefs.length" :loading="isDownloadingPack('checked')" @click="downloadChecked">
             {{ t('views.export.downloadChecked', { count: checkedDefs.length }) }}
           </el-button>
-          <el-button size="small" :loading="downloading === 'all'" @click="downloadAll">{{ t('views.export.downloadAll') }}</el-button>
+          <el-button size="small" :loading="isDownloadingPack('all')" @click="downloadAll">{{ t('views.export.downloadAll') }}</el-button>
           <el-button v-if="!isReadOnly" size="small" :loading="savingFiles" @click="saveEdits">{{ t('views.export.saveEdits') }}</el-button>
         </template>
       </div>
@@ -180,6 +180,8 @@ import {
   InvalidConditionInputError,
   isConditionEmpty,
   conditionSummary,
+  conditionSummaryText,
+  conditionSummaryView,
   parseConditionJson,
   stringifyCondition,
   type ConditionDraftModel,
@@ -213,7 +215,7 @@ import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import { uiAbandonGuard, uiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 /** 表格宿主的最小接口（defineExpose 出来的方法）。 */
 interface GridApi {
@@ -279,7 +281,50 @@ const condErrors = reactive<Record<string, string>>({})
 const persisting = ref(false)
 const startingExport = ref(false)
 const savingFiles = ref(false)
-const downloading = ref<string | null>(null)
+
+/**
+ * 下载槽（2026-10-30 结构化批）。
+ *
+ * <p>为什么拆：旧实现用**一个 string** 同时承载"用户勾选打包 / 全部打包 / AI 批量打包"三个哨兵
+ * （`'checked'` / `'all'` / `'ai-batch'`）与"某个配置编码"——一个 defCode 恰好叫 `all` 或 `checked`
+ * 就与哨兵撞车：按钮 loading 串台、文案张冠李戴、甚至在途防重判错。
+ * 现在 `kind` 与 `defCode` 是两个维度，永不可能互相冒充（`def` 档才带编码）。
+ */
+type DownloadSlot =
+  | { kind: 'def'; defCode: string }
+  | { kind: 'checked' }
+  | { kind: 'all' }
+  | { kind: 'ai-batch' }
+
+const downloading = ref<DownloadSlot | null>(null)
+
+/** 单配置下载槽。 */
+function defSlot(defCode: string): DownloadSlot {
+  return { kind: 'def', defCode }
+}
+
+/** 当前是否正在下载**该编码**（配置编码与打包哨兵不再同域比较）。 */
+function isDownloadingDef(defCode: string): boolean {
+  const slot = downloading.value
+  return slot !== null && slot.kind === 'def' && slot.defCode === defCode
+}
+
+/** 当前是否正在某类**打包**下载。 */
+function isDownloadingPack(kind: 'checked' | 'all' | 'ai-batch'): boolean {
+  return downloading.value?.kind === kind
+}
+
+/** 只有"当前槽就是这一格"才复位（否则别把别人/别的批的槽清掉）。 */
+function releaseDownloadSlot(slot: DownloadSlot): void {
+  const current = downloading.value
+  if (current === null || current.kind !== slot.kind) {
+    return
+  }
+  if (current.kind === 'def' && slot.kind === 'def' && current.defCode !== slot.defCode) {
+    return
+  }
+  downloading.value = null
+}
 
 const exportJob = ref<Job | null>(null)
 const currentIssues = ref<ValidationIssue[]>([])
@@ -342,12 +387,13 @@ let taskGeneration = 0
  */
 const inFlightDownloads = new Set<string>()
 /**
- * AI 批量打包中的页面态哨兵（R-156 `download_export_files` ≥2 码）。
+ * AI 批量打包的下载槽（R-156 `download_export_files` ≥2 码）。
  *
- * 与用户侧打包的两个哨兵（`'checked'` / `'all'`）区分开：它们的语义是"哪一批用户勾选"，
- * 而本哨兵表示"AI 发起的一笔多文件打包"—— 两者在途时互不冒充（`downloadingLabel` 也各给文案）。
+ * 与用户侧两个打包槽（`{kind:'checked'}` / `{kind:'all'}`）同域：`kind` 已经区分了"AI 发起的一笔
+ * 多文件打包"与"哪一批用户勾选"，`downloadingLabel` 各给文案；与配置编码（`{kind:'def'}`）
+ * 天然不同域，不会互相冒充。
  */
-const AI_BATCH_DOWNLOADING = 'ai-batch'
+const AI_BATCH_DOWNLOAD_SLOT: DownloadSlot = { kind: 'ai-batch' }
 let stopWatchJob: (() => void) | null = null
 let gridDirty = false
 /**
@@ -446,7 +492,7 @@ const jobErrorMessage = computed(() => {
  * 本函数**不**调 `tasksApi.selectDefs`：逐个勾选都落库会把后端 `currentStep` 回退到该类型的首步
  * （导出 SELECT_DEFS / 导入 UPLOAD，遗留 L-1），落库仍只发生在切步/开始导出时的 `persistStepData`。
  */
-function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): void {
+function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = 'UI'): void {
   const codes = [...selectedDefs.value]
   const current = new Set(workspace.selectedDefs)
   if (current.size === codes.length && codes.every((code) => current.has(code))) {
@@ -837,6 +883,22 @@ function resetTaskScopedState(): void {
   filesLoadError.value = null
   jobsLoadError.value = null
   retryingLists.value = false
+  // 条件草案是**任务级**现场：换任务即整份作废（连同"改过标记 / 行数预览 / 字段错误"）。
+  //
+  // 为什么必须清（用户纯 UI 复现）：B 的任务详情还在路上时点「下一步」，
+  // `goStep → persistStepData` 遍历的是**新任务**的勾选集，却从 `draftModels` 取条件 ——
+  // A 的草案（非空且未标 touched）会被当成 B 的条件 PUT 上去（"说 A 实际给 B"的条件版）。
+  // 清空后由任务详情按 B 的 `items[].conditionJson` **重新水合**（`applyLoaded` 同一处），
+  // 本任务内切步骤、以及"停止时未提交表单草稿"的既有口径都不受影响（本函数只在换任务时跑）。
+  for (const code of Object.keys(draftModels)) {
+    delete draftModels[code]
+  }
+  for (const code of Object.keys(counts)) {
+    delete counts[code]
+  }
+  for (const code of Object.keys(condErrors)) {
+    delete condErrors[code]
+  }
   touchedConditions.clear()
   exportResults.value = []
   checkedDefs.value = []
@@ -847,8 +909,8 @@ function resetTaskScopedState(): void {
   gridLoads.clear()
   // 在途集合也是任务级状态：跨任务改绑后残留的是**旧任务**的编码，AI 侧 preflight 读到它会把
   // 「旧任务在途的同码下载」当成新任务的在途，回灌 ack 分支②的"无需重试"（issue #2 的同源失真），
-  // 用户侧 downloadOne 也会被误拦。复位安全：在途 promise 的 finally 有 `downloading.value === code`
-  // 守卫、`Set.delete` 幂等，中途清空不会误改新任务的状态。
+  // 用户侧 downloadOne 也会被误拦。复位安全：在途 promise 的 finally 走 `releaseDownloadSlot`
+  // （只在"槽还是自己那一格"时复位）、`Set.delete` 幂等，中途清空不会误改新任务的状态。
   inFlightDownloads.clear()
   downloading.value = null
   // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
@@ -1221,13 +1283,19 @@ async function previewCount(code: string): Promise<void> {
     const result = await dataApiCount(code, condition)
     counts[code] = result
     delete condErrors[code]
+    // 界面文案走 i18n code + args（2026-10-30 结构化批）：条件摘要用结构化视图本地化，
+    // 不再把中文摘要拼进 toast。
     ElMessage.success(
       isConditionEmpty(condition)
-        ? `${code}：全部数据 ${result} 行`
-        : `${code}：命中 ${result} 行（${conditionSummary(condition)}）`
+        ? t('views.export.msg.previewAll', { code, count: result })
+        : t('views.export.msg.previewMatched', {
+          code,
+          count: result,
+          summary: conditionSummaryText(conditionSummaryView(condition), t)
+        })
     )
   } catch (error) {
-    const reason = error instanceof Error ? error.message : '行数预览失败'
+    const reason = error instanceof Error ? error.message : t('views.export.msg.previewFailed')
     // 挂账 L-67：服务端校验失败必须留痕在区域里（`ElMessage` 只负责即时提示，不承担可读性）
     condErrors[code] = reason
     ElMessage.error(reason)
@@ -1634,11 +1702,15 @@ function onGridChanged(origin: 'user' | 'ai' = 'user'): void {
       origin === 'ai'
         ? 'AI 已把改动写入导出结果表格（尚未保存到服务端文件）'
         : '导出结果表格内容已修改（尚未保存到服务端文件）',
-      origin === 'ai' ? 'AI' : '界面'
+      origin === 'ai' ? 'AI' : 'UI',
+      // 面板 chip 的结构化展示面（2026-10-30）：现役写点给 display，只有旧记录才落兜底词条
+      { code: origin === 'ai' ? 'ai.workspace.exportSheetEditAi' : 'ai.workspace.exportSheetEditUser' }
     )
   } else if (origin === 'user' && wasAiOnly) {
     // 之前只有 AI 写过，现在用户也改了：补一条「界面」来源，别让用户改动挂在 AI 名下
-    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）', '界面')
+    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）', 'UI', {
+      code: 'ai.workspace.exportSheetEditUser'
+    })
   }
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeTab.value)
@@ -1830,7 +1902,8 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
     return { ok: false, reason: `${code} 的下载已在进行中` }
   }
   inFlightDownloads.add(code)
-  downloading.value = code
+  const slot = defSlot(code)
+  downloading.value = slot
   try {
     const built = await startDownload(code)
     ElMessage.success(downloadedText(built))
@@ -1841,14 +1914,13 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
       ElMessage.info(error.message)
       return { ok: false, reason: error.message }
     }
-    const reason = error instanceof Error ? error.message : '下载失败'
+    // 失败原因：后端给的是 error.message（数据），无 message 时走 i18n 词条（界面文案不硬编码）
+    const reason = error instanceof Error ? error.message : t('views.export.msg.downloadFailed')
     ElMessage.error(reason)
     return { ok: false, reason }
   } finally {
     inFlightDownloads.delete(code)
-    if (downloading.value === code) {
-      downloading.value = null
-    }
+    releaseDownloadSlot(slot)
   }
 }
 
@@ -1865,7 +1937,8 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
  */
 function startDownloadInBackground(code: string): void {
   inFlightDownloads.add(code)
-  downloading.value = code
+  const slot = defSlot(code)
+  downloading.value = slot
   startDownload(code)
     .then((built) => {
       ElMessage.success(downloadedText(built))
@@ -1880,9 +1953,7 @@ function startDownloadInBackground(code: string): void {
     })
     .finally(() => {
       inFlightDownloads.delete(code)
-      if (downloading.value === code) {
-        downloading.value = null
-      }
+      releaseDownloadSlot(slot)
     })
 }
 
@@ -1904,7 +1975,7 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
   for (const code of batch) {
     inFlightDownloads.add(code)
   }
-  downloading.value = AI_BATCH_DOWNLOADING
+  downloading.value = AI_BATCH_DOWNLOAD_SLOT
   Promise.all(batch.map(async (code) => {
     const { blob, fileName } = await buildXlsx(code)
     return { name: fileName, blob }
@@ -1940,9 +2011,7 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       for (const code of batch) {
         inFlightDownloads.delete(code)
       }
-      if (downloading.value === AI_BATCH_DOWNLOADING) {
-        downloading.value = null
-      }
+      releaseDownloadSlot(AI_BATCH_DOWNLOAD_SLOT)
     })
 }
 
@@ -1952,7 +2021,8 @@ async function downloadChecked(): Promise<void> {
     return
   }
   const batch = [...checkedDefs.value]
-  downloading.value = 'checked'
+  const slot: DownloadSlot = { kind: 'checked' }
+  downloading.value = slot
   try {
     if (batch.length === 1) {
       // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
@@ -1971,9 +2041,7 @@ async function downloadChecked(): Promise<void> {
       reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
     }))
   } finally {
-    if (downloading.value === 'checked') {
-      downloading.value = null
-    }
+    releaseDownloadSlot(slot)
   }
 }
 
@@ -1983,7 +2051,8 @@ async function downloadAll(): Promise<void> {
     return
   }
   const batch = exportResults.value.map((item) => item.defCode)
-  downloading.value = 'all'
+  const slot: DownloadSlot = { kind: 'all' }
+  downloading.value = slot
   try {
     if (batch.length === 1) {
       // 单文件：结局（含失败原因）由 `downloadOne` 自己 toast，此处不判读返回值、也不重复报错
@@ -2002,9 +2071,7 @@ async function downloadAll(): Promise<void> {
       reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
     }))
   } finally {
-    if (downloading.value === 'all') {
-      downloading.value = null
-    }
+    releaseDownloadSlot(slot)
   }
 }
 
@@ -2227,18 +2294,24 @@ function noResultMessage(defCode: string): string {
   return `任务 #${taskId.value} 里没有 ${defCode} 的导出结果文件（该任务现有导出结果：${existing || '（无）'}）`
 }
 
-/** `downloading` 单值/在途编码的中文口径（'checked' / 'all' / 'ai-batch' 是打包下载的哨兵值，其余是配置编码）。 */
-function downloadingLabel(value: string): string {
-  if (value === 'checked') {
-    return '勾选项打包下载'
+/**
+ * 下载槽的中文口径（**送模型**的回执文本用；C5：不随 UI 语言变）。
+ *
+ * <p>按 `kind` 分档，配置编码只在 `def` 档参与 —— 因此不会出现"编码叫 all 就被说成全部打包"。
+ */
+function downloadingLabel(slot: DownloadSlot): string {
+  switch (slot.kind) {
+    case 'checked':
+      return '勾选项打包下载'
+    case 'all':
+      return '全部打包下载'
+    case 'ai-batch':
+      return 'AI 批量打包下载'
+    case 'def':
+      return `${slot.defCode} 的下载`
+    default:
+      return ''
   }
-  if (value === 'all') {
-    return '全部打包下载'
-  }
-  if (value === AI_BATCH_DOWNLOADING) {
-    return 'AI 批量打包下载'
-  }
-  return `${value} 的下载`
 }
 
 /**
@@ -2717,9 +2790,9 @@ function registerHandlers(): void {
     if (defCodes.length === 1) {
       const defCode = defCodes[0] ?? ''
       const requestedInFlight = inFlightDownloads.has(defCode)
-      if (requestedInFlight || busy === defCode) {
+      if (requestedInFlight || isDownloadingDef(defCode)) {
         return `任务 #${taskId.value} 的 ${defCode} 导出文件：页面上已有一次下载在进行中`
-          + `（${downloadingLabel(busy ?? defCode)}），本次未重复发起。`
+          + `（${downloadingLabel(busy ?? defSlot(defCode))}），本次未重复发起。`
           + '下载由浏览器执行，文件落盘以浏览器下载目录为准；本次调用到此结束，无需重试。'
       }
       if (busy !== null) {
@@ -2738,7 +2811,7 @@ function registerHandlers(): void {
     const requestedInFlight = defCodes.every((code) => inFlightDownloads.has(code))
     if (requestedInFlight) {
       return `任务 #${taskId.value} 的 ${codeList} 导出文件（共 ${defCodes.length} 个）：页面上已有一次下载在进行中`
-        + `（${downloadingLabel(busy ?? defCodes[0] ?? '')}），本次未重复发起。`
+        + `（${downloadingLabel(busy ?? defSlot(defCodes[0] ?? ''))}），本次未重复发起。`
         + '下载由浏览器执行，文件落盘以浏览器下载目录为准；本次调用到此结束，无需重试。'
     }
     if (busy !== null) {
@@ -2821,7 +2894,8 @@ async function createAndBindTask(): Promise<void> {
   try {
     const created = await taskStore.createTask('EXPORT', t('views.tasks.autoName', {
       type: t('views.tasks.exportType'),
-      time: new Date().toLocaleString('zh-CN')
+      // 2026-10-30 结构化批：自动名的时间戳**跟随当前 locale**（原写死 zh-CN ⇒ en 界面出的仍是中文格式）
+      time: new Date().toLocaleString(locale.value)
     }))
     if (!created || created.id === undefined) {
       ElMessage.error(taskStore.actionError ?? t('views.export.msg.taskCreateFailed'))

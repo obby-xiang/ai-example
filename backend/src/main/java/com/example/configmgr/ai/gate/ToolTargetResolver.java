@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.task.entity.Task;
@@ -40,18 +41,25 @@ import java.util.Optional;
 @Component
 public class ToolTargetResolver {
 
-	/** 四个作业发起工具（与 {@code AiTools} 的 {@code @ToolCategory(J/P)} 一一对应）。 */
-	public static final String TOOL_EXPORT = "start_export";
+	/** 四个作业发起工具（唯一注册定义在 {@link AiToolNames.ConfirmTool}；此处是既有调用点的别名）。 */
+	public static final String TOOL_EXPORT = AiToolNames.START_EXPORT;
 
-	public static final String TOOL_PRECHECK = "start_precheck";
+	public static final String TOOL_PRECHECK = AiToolNames.START_PRECHECK;
 
-	public static final String TOOL_IMPORT = "start_import";
+	public static final String TOOL_IMPORT = AiToolNames.START_IMPORT;
 
-	public static final String TOOL_PUBLISH = "start_publish";
+	public static final String TOOL_PUBLISH = AiToolNames.START_PUBLISH;
 
 	/** 工具名 → 该工具发起的作业类型（同时是"是否校验"的判据：不在表里即不校验）。 */
-	private static final Map<String, Job.JobType> JOB_TOOLS = Map.of(TOOL_EXPORT, Job.JobType.EXPORT,
-			TOOL_PRECHECK, Job.JobType.PRECHECK, TOOL_IMPORT, Job.JobType.IMPORT, TOOL_PUBLISH, Job.JobType.PUBLISH);
+	private static final Map<String, Job.JobType> JOB_TOOLS = jobTools();
+
+	private static Map<String, Job.JobType> jobTools() {
+		Map<String, Job.JobType> map = new java.util.LinkedHashMap<>();
+		for (AiToolNames.ConfirmTool tool : AiToolNames.ConfirmTool.values()) {
+			map.put(tool.toolName(), tool.jobType());
+		}
+		return Map.copyOf(map);
+	}
 
 	private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -73,7 +81,12 @@ public class ToolTargetResolver {
 
 	/** 该作业类型要求任务本身是哪一类（导出任务发 EXPORT，其余都发在导入任务上）。 */
 	public static Task.TaskType expectedTaskType(Job.JobType jobType) {
-		return jobType == Job.JobType.EXPORT ? Task.TaskType.EXPORT : Task.TaskType.IMPORT;
+		for (AiToolNames.ConfirmTool tool : AiToolNames.ConfirmTool.values()) {
+			if (tool.jobType() == jobType) {
+				return tool.taskType();
+			}
+		}
+		return Task.TaskType.IMPORT;
 	}
 
 	/**

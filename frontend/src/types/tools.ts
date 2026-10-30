@@ -530,8 +530,31 @@ export const UI_EVENT_TYPES: readonly UiEvent['type'][] = [
 /** 工作区 → AI 的通知主题（AI 面板据此更新上下文 chip）。 */
 export type WorkspaceTopic = 'workspace_changed' | 'ui_event_result'
 
-/** 工作区动作来源（契约事件与 AI 上下文标注用）。 */
-export type WorkspaceActionSource = '界面' | 'AI'
+/**
+ * 工作区动作来源的数据码（契约事件与 AI 上下文标注用）。
+ *
+ * <p>2026-10-30 结构化批：统一为 `UI` / `API` / `AI`（原 `'界面'` 是中文数据码，无法做码表与断言）。
+ * 旧码 `'界面'` 仍会被读入侧接受并归一为 `UI`（见 {@link normalizeWorkspaceActionSource}），
+ * 但**不得再写出**。
+ */
+export type WorkspaceActionSource = 'UI' | 'API' | 'AI'
+
+/** 旧数据码（历史记录 / 旧调用点）：只在读入侧兼容，禁止再写入。 */
+export const LEGACY_WORKSPACE_ACTION_SOURCE_UI = '界面'
+
+/** 任意来源取值 → 数据码。`'界面'`（旧）/缺失/未知一律归一为 `UI`（与旧默认同义）。 */
+export function normalizeWorkspaceActionSource(raw: unknown): WorkspaceActionSource {
+  if (raw === 'UI' || raw === LEGACY_WORKSPACE_ACTION_SOURCE_UI) {
+    return 'UI'
+  }
+  if (raw === 'API') {
+    return 'API'
+  }
+  if (raw === 'AI') {
+    return 'AI'
+  }
+  return 'UI'
+}
 
 /**
  * 一次工作区动作记录（deepseek 蓝本 workspaceContract 的事件形态 + 版本号）。

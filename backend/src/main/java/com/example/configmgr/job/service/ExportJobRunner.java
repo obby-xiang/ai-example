@@ -14,6 +14,7 @@ import com.example.configmgr.file.StoredFile;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
+import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
@@ -306,7 +307,7 @@ public class ExportJobRunner {
         snapshot.total = totalRows;
         snapshot.errors = errorCount;
         terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
-                doneEvent(job, status), "EXPORT");
+                doneEvent(job, status), TaskSteps.EXPORT);
     }
 
     /** 当前事务是否已标记回滚（此时提交会被整批丢弃，继续跑只是白写）。 */

@@ -21,15 +21,16 @@ import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
-import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
@@ -513,6 +514,19 @@ public class ResilientChatService {
 		this.taskTypeForm = form;
 	}
 
+	/**
+	 * 宿主条件表单（进入 QUERY_COND 后直接挂一次；可选注入）。
+	 *
+	 * <p>缺失 = 不在续跑交棒点代模型挂表（既有轻装配/单测行为不变）。
+	 */
+	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+	/** 可选注入（进入 QUERY_COND 的宿主条件表单）。 */
+	@Autowired(required = false)
+	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
+		this.conditionsForm = form;
+	}
+
 	/** 可选注入（取消收尾的接管通路；缺失时退化为"拒写即退出"的旧口径）。 */
 	@Autowired(required = false)
 	public void setCancelFinalizer(CancelledRunFinalizer finalizer) {
@@ -906,7 +920,8 @@ public class ResilientChatService {
 		// 调用方 ResumeService 在同一个保活句柄上切相位完成。
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 		try {
-			String lastUserText = TaskIntent.lastRealUserText(history);
+			// 意图不再由中文/原话关键词判断：只认模型结构化工具调用（run 内回灌/台账事实）。
+			String lastUserText = null;
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
 					exportCorrectionPrefix(runId), attempt -> {
 						log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId,
@@ -1363,6 +1378,17 @@ public class ResilientChatService {
 							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
 									+ watchdog.upstreamEvents() + " 个");
 				}
+				// 进入 QUERY_COND 后先给模型一次结构化 set_condition 机会；只有模型即将以正文收尾、
+				// 条件仍未决定时，才由宿主直接挂一次条件表单（不经过模型询问/文字追问）。
+				UpstreamErrorClassifier.Finish wrapUpFinish = accumulator.finish();
+				if (!correcting && StringUtils.hasText(accumulator.text())
+						&& (wrapUpFinish == UpstreamErrorClassifier.Finish.STOP
+								|| wrapUpFinish == UpstreamErrorClassifier.Finish.UNKNOWN)
+						&& parkConditionsAtWrapUp(runId, accumulator)) {
+					log.info("模型正文收尾时条件仍未决定，宿主已挂一次条件表单 runId={}", runId);
+					stopKeepalive(keepalive);
+					return;
+				}
 				// 导出收尾前的一轮内部纠正：模型把 EXPORT 步的活干完却只回正文时，再问它一次，
 				// 要求发起 start_export 确认卡（不自动执行、不绕过确认）。run 级最多一次、不占失败重试次数；
 				// content_filter / length 优先（明确失败/截断不得被纠正掩盖）。
@@ -1541,32 +1567,35 @@ public class ResilientChatService {
 	 *
 	 * <p>只在以下条件<b>全部</b>成立时为真：原导出意图已进入 {@code EXPORT}、{@code start_export}
 	 * 已在本次披露面里、本轮还没有任何 {@code start_export} 记录（未发起/未拒绝/未取消/未失败）、
-	 * 用户没有要求"只推进/先别启动"，且本轮尚未纠正过。为真时调用方只<b>再问模型一次</b>，
+	 * 本轮尚未纠正过。为真时调用方只<b>再问模型一次</b>，
 	 * 要求它发起确认卡；<b>绝不自动执行</b>任何作业。
 	 */
 	static boolean needsExportWrapUpCorrection(AiContext context, boolean startExportDisclosed,
-			List<PendingToolCall> pendings, String lastUserText, boolean alreadyCorrected) {
+			List<PendingToolCall> pendings, String lastUserText, boolean alreadyCorrected,
+			boolean exportProgressionObserved) {
 		if (alreadyCorrected || context == null || !startExportDisclosed) {
 			return false;
 		}
+		// 意图不由中文/原话关键词判断：只认本 run 已执行过的模型结构化导出推进工具。
+		// EXPORT 页面的状态/条数/条件问答、只是打开旧任务，都不得仅凭 step 注入 start_export。
+		if (!exportProgressionObserved) {
+			return false;
+		}
 		if (context.getTaskId() == null || !"EXPORT".equalsIgnoreCase(context.getTaskType())
-				|| !"EXPORT".equalsIgnoreCase(context.getStep())) {
+				|| !TaskSteps.isExportExecutionStep(context.getStep())) {
 			return false;
 		}
 		if (pendings != null) {
 			for (PendingToolCall pending : pendings) {
-				if (pending != null && START_EXPORT.equals(pending.getName())) {
+				if (pending != null && AiToolNames.START_EXPORT.equals(pending.getName())) {
 					// 已发起/待确认/已拒绝/已取消/已失败：都不纠正（拒绝与取消是用户的明确决定）
 					return false;
 				}
 			}
 		}
-		return lastUserText == null || !ADVANCE_ONLY.matcher(lastUserText).find();
+		// lastUserText 保留形参仅为兼容；意图/取消/只推进一律不以中文关键词判断。
+		return true;
 	}
-
-	/** 用户明确"只推进/先别启动"（收尾纠正不得越过这句话）。 */
-	private static final Pattern ADVANCE_ONLY = Pattern.compile(
-			"(只推进|先推进|只到这一步|只做前面|不要启动|先不启动|先别启动|不要导出|先别导出|先不导出|不用导出)");
 
 	/** 内部纠正的指令文本（只在本次模型请求的系统段/续跑历史里出现，不写回快照）。 */
 	static String exportWrapUpCorrection(Long taskId) {
@@ -1586,7 +1615,7 @@ public class ResilientChatService {
 			List<ToolCallback> tools = this.toolRegistry.forContext(context);
 			for (ToolCallback callback : tools == null ? List.<ToolCallback>of() : tools) {
 				if (callback != null && callback.getToolDefinition() != null
-						&& START_EXPORT.equals(callback.getToolDefinition().name())) {
+						&& AiToolNames.START_EXPORT.equals(callback.getToolDefinition().name())) {
 					return true;
 				}
 			}
@@ -1596,9 +1625,6 @@ public class ResilientChatService {
 		}
 		return false;
 	}
-
-	/** 导出启动工具名（与 {@code AiTools#startExport} 同一拼写）。 */
-	static final String START_EXPORT = "start_export";
 
 	/** 读本轮待决条目并判定收尾纠正（读失败 = 不纠正：宁可少问一次，也不在不确定状态多驱动一拍）。 */
 	/** run 级"已纠正"标记（随快照 context 持久化：跨实例/跨续跑都只纠正一次）。 */
@@ -1729,6 +1755,24 @@ public class ResilientChatService {
 		}
 	}
 
+	/** 模型正文收尾前：宿主按最新任务状态挂一次 QUERY_COND 条件表单（不解析文本）。 */
+	private boolean parkConditionsAtWrapUp(String runId, Accumulator accumulator) {
+		if (this.conditionsForm == null || accumulator == null || !StringUtils.hasText(accumulator.text())) {
+			return false;
+		}
+		RunSnapshot snapshot = this.store.get(runId);
+		if (snapshot == null) {
+			return false;
+		}
+		AiContext latest = AiContext.fromMap(snapshot.getContext());
+		List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+		String text = accumulator.text();
+		if (!endsWithAssistantText(history, text)) {
+			history.add(assistantMessage(text, storedReasoning(accumulator.reasoningText())));
+		}
+		return this.conditionsForm.parkIfDueAtQueryCond(runId, latest, history);
+	}
+
 	/**
 	 * 收尾纠正的模型请求：历史取自<b>最新快照</b>（工具批已把本轮的 assistant(tool_calls) 与工具结果
 	 * 写进 {@code messageJson}），再补上第一次已上屏的 assistant 正文与内部纠正指令。
@@ -1787,7 +1831,51 @@ public class ResilientChatService {
 			return false;
 		}
 		AiContext latest = latestContext(runId, context);
-		return needsExportWrapUpCorrection(latest, disclosedStartExport(latest), pendings, lastUserText, false);
+		return needsExportWrapUpCorrection(latest, disclosedStartExport(latest), pendings, lastUserText, false,
+				exportProgressionObserved(runId));
+	}
+
+	/**
+	 * 本 run 是否已经有<b>明确新建导出任务</b>的结构化事实（只认 create_task(type=EXPORT)）。
+	 *
+	 * <p>仅凭 confirm_step/select_definitions/set_condition 不能推导"用户本轮要启动导出"
+	 * （可能只是继续旧任务/只推进）；收尾纠正不得据此索要 start_export。
+	 * 读取真实待决条目的工具入参（<b>不读 ai:ledger</b>）。
+	 */
+	boolean exportProgressionObserved(String runId) {
+		List<PendingToolCall> pendings;
+		try {
+			pendings = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取待决条目失败，收尾纠正按无新建导出证据处理 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+			if (pending == null || !AiToolNames.CREATE_TASK.equals(pending.getName()) || !pending.resolved()
+					|| pending.effectiveOutcome() != ToolOutcome.OK) {
+				continue;
+			}
+			if (createdExportTask(pending.getArguments())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean createdExportTask(String argumentsJson) {
+		if (argumentsJson == null || argumentsJson.isBlank()) {
+			return false;
+		}
+		try {
+			com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper()
+				.readTree(argumentsJson);
+			com.fasterxml.jackson.databind.JsonNode type = node == null ? null : node.get("type");
+			return type != null && type.isTextual() && "EXPORT".equalsIgnoreCase(type.asText().trim());
+		}
+		catch (Exception ex) {
+			return false;
+		}
 	}
 
 	private boolean awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,

@@ -173,7 +173,7 @@ describe('R1 AI 应用的写入归因给 AI', () => {
     await flushPromises()
 
     const last = workspace.recentActions.at(-1)
-    expect(last?.source).toBe('界面')
+    expect(last?.source).toBe('UI')
   })
 
   it('只有 AI 改动时 start_export 回执不再说"用户未保存"，而是点名 AI 改动且仍不建作业', async () => {

@@ -156,7 +156,8 @@ import { masterDataApi } from '@/api/masterdata'
 import { useWorkspaceStore } from '@/stores/workspace'
 import {
   buildQueryCondition,
-  conditionSummary,
+  conditionSummaryText,
+  conditionSummaryView,
   displayFieldValue,
   emptyDraftModel,
   isConditionEmpty,
@@ -204,7 +205,7 @@ const browserNote = computed(() => {
     return t('views.data.conditionNone')
   }
   return t('views.data.conditionApplied', {
-    summary: conditionSummary(condition.value),
+    summary: conditionSummaryText(conditionSummaryView(condition.value), t),
     total: total.value
   })
 })

@@ -42,6 +42,13 @@
       "reason": "本批仅调整上下文圆环常驻、间距与焦点浮层展示，不改变D6既有迁移接口或后端契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:463c254fae1db0711de27ba13657cf252ad7e0a1046938a75f8668f48762ad3b",
+      "status": "synced",
+      "reason": "已同步结构化语义、确定性条件工作流、配置元数据注册表及任务隔离边界",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

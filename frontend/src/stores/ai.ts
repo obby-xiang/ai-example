@@ -45,7 +45,7 @@ import { useTaskStore } from '@/stores/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
-import { UI_HANDOFF_TOOLS } from '@/types/tools'
+import { UI_HANDOFF_TOOLS, normalizeWorkspaceActionSource } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
@@ -94,6 +94,7 @@ import {
   findToolPart,
   historyToolCallStatus,
   isSystemRejectPhantom,
+  jobIdOfToolResult,
   markApplied,
   openStreamPart,
   outcomeStatus,
@@ -1995,9 +1996,10 @@ function historyTruncationFields(
  * 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。导出仅为单测锁形状。
  *
  * <p>2026-10-29 收口：`display`（结构化展示面：locale code + 命名插值）必须**随记录保留** ——
- * 面板 chip 用它按当前语言重译，丢了它就只能回落到 `summary` 那份送模型的中文串（切 en 不变）。
- * `source` 仍是两值闭集（`AI` / `界面`）原样保留：只认已知值，超出闭集/缺失才回落到「界面」默认，
- * 不臆造第三个值、也不丢已知值。
+ * 面板 chip 用它按当前语言重译，丢了它就只能回落到兜底文案（不再回落到 `summary`，见
+ * AiPanel 的 `contextSyncText`）。
+ * <p>2026-10-30 结构化批：`source` 统一为数据码 `UI` / `API` / `AI`；旧码 `'界面'` 与缺失值
+ * 经 {@link normalizeWorkspaceActionSource} 归一为 `UI`（不丢已知值、不臆造第三值）。
  */
 export function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
   if (!payload || typeof payload !== 'object') {
@@ -2012,7 +2014,7 @@ export function readActionRecord(payload: unknown): WorkspaceActionRecord | null
     version: record.version,
     summary: record.summary,
     at: typeof record.at === 'number' ? record.at : Date.now(),
-    source: record.source === 'AI' || record.source === '界面' ? record.source : '界面',
+    source: normalizeWorkspaceActionSource(record.source),
     ...(display === null ? {} : { display })
   }
 }
@@ -9491,17 +9493,16 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * R-155：start_publish 工具结果帧取号 jobId（结果文本「作业 #N」），登记 jobId→toolCallId
-     * 并武装发布冲突跟踪（复用 task store watchPublishOutcome，终态冲突经 onConflict 回此）。
+     * R-155：start_publish 工具结果帧取号 jobId（结构化优先，见 `jobIdOfToolResult` 的兼容适配点），
+     * 登记 jobId→toolCallId 并武装发布冲突跟踪（复用 task store watchPublishOutcome，终态冲突经 onConflict 回此）。
      * 任一环取不到号（非 start_publish / 未执行 / 无 jobId / 无 taskId）静默跳过。
      */
     armPublishConflictWatch(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
-      if (frame.name !== 'start_publish' || !frame.ok || typeof frame.result !== 'string') {
+      if (frame.name !== 'start_publish' || !frame.ok) {
         return
       }
-      const matched = /作业 #(\d+)/.exec(frame.result)
-      const jobId = matched ? Number(matched[1]) : Number.NaN
-      if (!Number.isInteger(jobId)) {
+      const jobId = jobIdOfToolResult(frame.result, frame.target ?? null)
+      if (jobId === null) {
         return
       }
       const part = findToolPart(message, frame.toolCallId)
@@ -9514,7 +9515,11 @@ export const useAiStore = defineStore('ai', {
       useTaskStore().watchPublishOutcome(taskId, jobId, {
         onConflict: (summary, issues) => {
           this.attachPublishConflict(jobId, summary, issues)
-          reportUiEventResult('start_publish', summary)
+          // 面板 chip 的结构化展示面（2026-10-30）：现役写点必须给 display，别落成兜底文案
+          reportUiEventResult('start_publish', summary, {
+            code: 'ai.workspace.publishConflict',
+            args: { jobId, count: issues?.length ?? 0 }
+          })
         }
       })
     },
@@ -9522,8 +9527,9 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批 D · D3（问题 6）：AI 触发作业后把"任务号 + 作业号"同步给工作区页面。
      *
-     * 仿 {@link armPublishConflictWatch} 体例：结果文本取 `作业 #N`、工具段 args 取 `taskId`，
-     * 再调页面自己注册的能力（{@link START_JOB_SYNC}：`export.syncJob` / `import.syncJob`）。
+     * 仿 {@link armPublishConflictWatch} 体例：作业号走 `jobIdOfToolResult`（结构化优先，唯一的
+     * 旧文本兼容点）、任务号取工具段 args 的 `taskId`，再调页面自己注册的能力
+     * （{@link START_JOB_SYNC}：`export.syncJob` / `import.syncJob`）。
      * 页面 handler 负责"绑定 + 进跟踪"（既有 `resumeJobs()`），AI 侧不 import 任何视图。
      *
      * 批次 5B 两处变化：
@@ -9538,12 +9544,11 @@ export const useAiStore = defineStore('ai', {
      */
     armStartJobSync(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
       const handlerName = START_JOB_SYNC[frame.name]
-      if (!handlerName || !frame.ok || typeof frame.result !== 'string') {
+      if (!handlerName || !frame.ok) {
         return
       }
-      const matched = /作业 #(\d+)/.exec(frame.result)
-      const jobId = matched ? Number(matched[1]) : Number.NaN
-      if (!Number.isInteger(jobId)) {
+      const jobId = jobIdOfToolResult(frame.result, frame.target ?? null)
+      if (jobId === null) {
         return
       }
       const part = findToolPart(message, frame.toolCallId)

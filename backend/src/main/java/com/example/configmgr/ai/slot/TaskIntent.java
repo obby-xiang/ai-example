@@ -37,6 +37,10 @@ public final class TaskIntent {
 	private static final Pattern QUESTION = Pattern.compile(
 			"(怎么|如何|为什么|为何|是什么|什么是|说明一下|介绍一下|规则|文档|教程)");
 
+	/** 页面状态/条数/进度类问答：即使提到"导出"，也不是导出执行意图。 */
+	private static final Pattern EXPORT_QUESTION = Pattern.compile(
+			"(多少|几条|几行|几个|多大|状态|进度|完成了吗|成功了吗|结果如何|怎么样|在哪|怎么回事)");
+
 	private TaskIntent() {
 	}
 
@@ -59,6 +63,23 @@ public final class TaskIntent {
 	 */
 	public static String explicitTaskType(String text) {
 		return TaskSlotParser.explicitTaskType(text);
+	}
+
+	/**
+	 * 本轮真实用户是否明确提出导出（导出/创建导出任务）——收尾纠正的意图前提。
+	 *
+	 * <p>只认"明确导出"且不是问句/状态条数问答/否定；EXPORT 页面上的状态、条数、条件问答
+	 * 不得触发 start_export 的收尾纠正。
+	 */
+	public static boolean isExportIntent(String text) {
+		if (text == null || text.isBlank()) {
+			return false;
+		}
+		if (NEGATED_CREATE.matcher(text).find() || QUESTION.matcher(text).find()
+				|| EXPORT_QUESTION.matcher(text).find()) {
+			return false;
+		}
+		return "EXPORT".equals(explicitTaskType(text));
 	}
 
 	/**

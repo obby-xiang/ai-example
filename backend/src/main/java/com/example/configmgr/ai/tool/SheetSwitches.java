@@ -42,15 +42,16 @@ public final class SheetSwitches {
 	/** 投影列数硬顶（与前端 {@code SHEET_TOOL_MAX_COLUMNS} 同值）。 */
 	public static final int HARD_MAX_PROJECTION_COLUMNS = 5;
 
-	/** 纯读工具（5 个；随读闸）。 */
-	public static final Set<String> READ_TOOLS = Set.of("read_sheet_summary", "aggregate_sheet",
-			"inspect_columns", "review_cells", "find_rows");
+	/** 纯读工具（5 个；随读闸）。工具名唯一注册定义在 {@link AiToolNames}。 */
+	public static final Set<String> READ_TOOLS = Set.of(AiToolNames.READ_SHEET_SUMMARY, AiToolNames.AGGREGATE_SHEET,
+			AiToolNames.INSPECT_COLUMNS, AiToolNames.REVIEW_CELLS, AiToolNames.FIND_ROWS);
 
 	/** 纯写工具（3 个；随写闸。撤销随写闸：没有写就没有可撤）。 */
-	public static final Set<String> WRITE_TOOLS = Set.of("replace_values", "update_rows", "undo_last_sheet_edit");
+	public static final Set<String> WRITE_TOOLS = Set.of(AiToolNames.REPLACE_VALUES, AiToolNames.UPDATE_ROWS,
+			AiToolNames.UNDO_LAST_SHEET_EDIT);
 
 	/** 双档工具（1 个；`read AND write` 才披露）。 */
-	public static final Set<String> DUAL_TOOLS = Set.of("normalize_column");
+	public static final Set<String> DUAL_TOOLS = Set.of(AiToolNames.NORMALIZE_COLUMN);
 
 	/** 全部受治理的表格工具（9 个；S-02 的矩阵基数）。 */
 	public static final Set<String> SHEET_TOOLS = union();

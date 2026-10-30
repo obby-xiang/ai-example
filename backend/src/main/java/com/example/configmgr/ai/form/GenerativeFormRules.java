@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.task.service.TaskSteps;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -79,13 +81,13 @@ import java.util.regex.Pattern;
 public final class GenerativeFormRules {
 
 	/**
-	 * 工具名（与 {@code AiTools#generativeForm} 的 {@code @Tool(name)} 一致，由用例对账锁定）。
+	 * 工具名（唯一注册定义在 {@link AiToolNames#GENERATIVE_FORM}；本常量只是兼容别名）。
 	 * <p>
 	 * <b>双侧同步约束（T2b 顺手项⑤）</b>：前端判定同一字面量用的是
 	 * {@code frontend/src/types/ai.ts} 的 {@code GENERATIVE_FORM_TOOL} 常量 ——
 	 * 本值变更必须同步改该常量（前端不从后端接口读工具名，字面量漂移会导致挂起卡/守卫判定失灵）。
 	 */
-	public static final String TOOL_NAME = "generative_form";
+	public static final String TOOL_NAME = AiToolNames.GENERATIVE_FORM;
 
 	/** schema 级拒绝码（下发前端之前，工具错误结果）。 */
 	public static final String SCHEMA_REJECTED = ErrorCodes.FORM_SCHEMA_REJECTED;
@@ -107,23 +109,25 @@ public final class GenerativeFormRules {
 	/**
 	 * 表单<b>用途</b>（槽位放行的判据，不是渲染属性）：宿主只按这个字段判断"这张表是来补哪个缺口的"，
 	 * 绝不按标题猜。缺省时按结构推断（见 {@link #purposeOf}），推断不出才是 {@link #DEFAULT_PURPOSE}。
+	 *
+	 * <p><b>唯一注册定义在 {@link FormPurposes}</b>：这里的常量只是既有调用点的兼容别名，
+	 * 不再各自维护取值；解析也只走 {@link FormPurposes#resolve}。
 	 */
-	public static final String PURPOSE_SELECT_DEFINITIONS = "SELECT_DEFINITIONS";
+	public static final String PURPOSE_SELECT_DEFINITIONS = FormPurposes.SELECT_DEFINITIONS;
 
-	public static final String PURPOSE_SET_CONDITIONS = "SET_CONDITIONS";
+	public static final String PURPOSE_SET_CONDITIONS = FormPurposes.SET_CONDITIONS;
 
 	/**
 	 * 收集<b>任务类型</b>的用途（2026-10-29 闭环批）：只在类型未知时下发，
 	 * 形状固定为"单个 enum 单选 {@code EXPORT/IMPORT}"（见 {@link #taskTypeShapeIssues}）——
 	 * 用自由文本问类型等于把结构化缺口退回文字反问。
 	 */
-	public static final String PURPOSE_TASK_TYPE = "TASK_TYPE";
+	public static final String PURPOSE_TASK_TYPE = FormPurposes.TASK_TYPE;
 
 	/** 缺省用途：兼容既有 {@code generative_form} 调用（它们没有 purpose 字段）。 */
-	public static final String DEFAULT_PURPOSE = "GENERAL_CLARIFY";
+	public static final String DEFAULT_PURPOSE = FormPurposes.DEFAULT;
 
-	public static final List<String> FORM_PURPOSES = List.of(PURPOSE_SELECT_DEFINITIONS, PURPOSE_SET_CONDITIONS,
-			PURPOSE_TASK_TYPE, DEFAULT_PURPOSE);
+	public static final List<String> FORM_PURPOSES = FormPurposes.ALL;
 
 	/** 任务类型表单的选项闭集（与 {@code Task.TaskType} 同名）。 */
 	public static final List<String> TASK_TYPES = List.of("EXPORT", "IMPORT");
@@ -192,16 +196,17 @@ public final class GenerativeFormRules {
 
 	public static final int MAX_OPTION_TEXT_CHARS = 100;
 
-	/** 条件收集步（导出向导）：条件表单<b>只有</b>这一步允许下发。 */
-	public static final String STEP_QUERY_COND = "QUERY_COND";
+	/** 条件收集步（导出向导）：条件表单<b>只有</b>这一步允许下发（步骤名的唯一注册定义在 {@link TaskSteps}）。 */
+	public static final String STEP_QUERY_COND = TaskSteps.QUERY_COND;
 
 	/**
 	 * 条件收集的<b>步骤门</b>（{@code GenerativeFormGuard} 下发前按这一份判据拦截）。
 	 *
-	 * <p>未知步骤（{@code null}/空）不算关闭 —— 未知不等于"已过条件步"，既有兼容口径不变。
+	 * <p>判据本体在 {@link TaskSteps#allowsConditionCollection}：未知步骤（{@code null}/空）不算关闭 ——
+	 * 未知不等于"已过条件步"，既有兼容口径不变。
 	 */
 	public static boolean conditionsStepAllowed(String step) {
-		return step == null || step.isBlank() || STEP_QUERY_COND.equalsIgnoreCase(step.trim());
+		return TaskSteps.allowsConditionCollection(step);
 	}
 
 	/** 普通 text 的硬顶（保留；前端同源）。 */
@@ -304,12 +309,18 @@ public final class GenerativeFormRules {
 					"scenario 必填且必须是 " + String.join("/", sorted(SCENARIOS)) + " 之一（实际："
 							+ (scenario == null ? "缺失" : scenario.asText()) + "）"));
 		}
-		JsonNode purpose = form.get("purpose");
-		if (purpose != null
-				&& (!purpose.isTextual() || !FORM_PURPOSES.contains(purpose.asText()))) {
+		// 用途校验走唯一解析入口：显式值非法才报 FORM_PURPOSE_INVALID（缺省/空白交给 resolve 的结构推断）
+		String explicitPurpose = FormPurposes.explicit(form);
+		if (explicitPurpose != null && !FormPurposes.isRegistered(explicitPurpose)) {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_PURPOSE_INVALID,
 					"purpose 只能取 " + String.join("/", FORM_PURPOSES) + " 之一（缺省 = "
-							+ DEFAULT_PURPOSE + "）；实际：" + (purpose.isTextual() ? purpose.asText() : purpose)));
+							+ DEFAULT_PURPOSE + "）；实际：" + explicitPurpose));
+		}
+		JsonNode purpose = form.get("purpose");
+		if (purpose != null && !purpose.isTextual()) {
+			issues.add(FormIssue.form(FormIssueCodes.FORM_PURPOSE_INVALID,
+					"purpose 只能取 " + String.join("/", FORM_PURPOSES) + " 之一（缺省 = "
+							+ DEFAULT_PURPOSE + "）；实际：" + purpose));
 		}
 		issues.addAll(purposeShapeIssues(form));
 		JsonNode title = form.get("title");
@@ -419,7 +430,7 @@ public final class GenerativeFormRules {
 	 * <p>形状不合规 = <b>schema 级拒绝</b>（零副作用：表单不下发、不挂起），模型改一版即可用。
 	 */
 	private static List<FormIssue> purposeShapeIssues(JsonNode form) {
-		String purpose = textOrNull(form.get("purpose"));
+		String purpose = FormPurposes.explicit(form);
 		JsonNode fields = form.get("fields");
 		if (purpose == null || fields == null || !fields.isArray() || fields.isEmpty()) {
 			// 缺 fields / 空 fields 由既有规则报，这里不重复
@@ -1525,44 +1536,18 @@ public final class GenerativeFormRules {
 	// ── 小工具 ───────────────────────────────────────────────────────────────
 
 	/**
-	 * 表单用途：显式值优先；<b>只有缺省时</b>才按结构推断 ——
-	 * <ol>
-	 * <li>字段 {@code optionsFrom.sourceId=definitions}（层级 → 定义的配置选择结构）⇒
-	 * {@code SELECT_DEFINITIONS}；</li>
-	 * <li>否则 {@code scenario=FILTER} ⇒ {@code SET_CONDITIONS}；</li>
-	 * <li>其它形状（含标题/label）一律 {@code GENERAL_CLARIFY}。</li>
-	 * </ol>
-	 * 显式 {@code GENERAL_CLARIFY} 直接返回，不被形状覆盖（旧表单的绕行口在缺省时堵住，
-	 * 显式澄清不受影响）。非法值由 schema 校验拒绝，不进入本方法。
+	 * 表单用途：显式值优先；<b>只有缺省时</b>才按结构推断 —— 判据与解析全部在
+	 * {@link FormPurposes#resolve}（唯一入口，本方法只是既有调用点的别名）。
 	 *
 	 * @param form 表单 schema 节点（可为 null）
 	 */
 	public static String purposeOf(JsonNode form) {
-		if (form == null || !form.isObject()) {
-			return DEFAULT_PURPOSE;
-		}
-		JsonNode purpose = form.get("purpose");
-		if (purpose != null && purpose.isTextual() && !purpose.asText().isBlank()) {
-			return purpose.asText();
-		}
-		if (hasDefinitionsSelection(form)) {
-			return PURPOSE_SELECT_DEFINITIONS;
-		}
-		JsonNode scenario = form.get("scenario");
-		if (scenario != null && scenario.isTextual() && "FILTER".equals(scenario.asText())) {
-			return PURPOSE_SET_CONDITIONS;
-		}
-		return DEFAULT_PURPOSE;
+		return FormPurposes.resolve(form);
 	}
 
-	/** 表单里是否有"配置定义选择"的明确结构：{@code optionsFrom.sourceId=definitions}。 */
-	private static boolean hasDefinitionsSelection(JsonNode form) {
-		for (JsonNode field : form.path("fields")) {
-			if ("definitions".equals(field.path("optionsFrom").path("sourceId").asText())) {
-				return true;
-			}
-		}
-		return false;
+	/** 该表单是否就是 {@code purpose} 这种用途（宿主识别表单用，与 {@link #purposeOf} 同源）。 */
+	public static boolean isPurpose(JsonNode form, String purpose) {
+		return FormPurposes.is(form, purpose);
 	}
 
 	/** 结构化清单 → 人读清单（{@code schemaReasons/resultReasons/argumentReasons} 的唯一出口）。 */

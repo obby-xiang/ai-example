@@ -128,7 +128,7 @@ class AiToolsInvocationTest {
 
     @Test
     void createTaskFromAiPersistsTaskAndReportsNextAction() {
-        String text = aiTools.createTask("EXPORT", null, ctx("s5a-create-1"));
+        String text = aiTools.createTask("EXPORT", null, null, null, ctx("s5a-create-1"));
 
         assertThat(text).contains("已创建导出任务").contains("SELECT_DEFS").contains("navigate_to");
         long taskId = firstId(text);
@@ -137,32 +137,32 @@ class AiToolsInvocationTest {
         assertThat(task.getTitle()).as("缺省标题按类型生成").isEqualTo("导出任务");
         assertThat(task.getCurrentStep()).isEqualTo("SELECT_DEFS");
 
-        String importText = aiTools.createTask("IMPORT", "S5A-AI-导入任务", ctx("s5a-create-2"));
+        String importText = aiTools.createTask("IMPORT", "S5A-AI-导入任务", null, null, ctx("s5a-create-2"));
         assertThat(importText).contains("导入任务").contains("UPLOAD");
         assertThat(taskRepository.findById(firstId(importText)).orElseThrow().getCurrentStep())
                 .isEqualTo("UPLOAD");
 
         // 类型非法 → 抛带 ILLEGAL_ARGUMENT 码的业务异常（由统一信封回填，不再伪造成功文本）
-        assertThatThrownBy(() -> aiTools.createTask("NOPE", null, ctx("s5a-create-3")))
+        assertThatThrownBy(() -> aiTools.createTask("NOPE", null, null, null, ctx("s5a-create-3")))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("任务类型不合法");
     }
 
     @Test
     void createTaskHostIdempotencyAndSingleTurnLimit() {
-        String first = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-1"));
+        String first = aiTools.createTask("EXPORT", "同轮幂等任务", null, null, ctx("run-idem-1"));
         long firstId = firstId(first);
 
-        String repeated = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-1"));
+        String repeated = aiTools.createTask("EXPORT", "同轮幂等任务", null, null, ctx("run-idem-1"));
         assertThat(firstId(repeated)).as("同轮同键复用，绝不二次创建").isEqualTo(firstId);
         assertThat(repeated).contains("复用");
 
-        assertThatThrownBy(() -> aiTools.createTask("EXPORT", "同轮另一个标题", ctx("run-idem-1")))
+        assertThatThrownBy(() -> aiTools.createTask("EXPORT", "同轮另一个标题", null, null, ctx("run-idem-1")))
             .as("同轮不同键 = 明确冲突，不是静默丢弃")
             .isInstanceOf(ConflictException.class)
             .hasMessageContaining("同一轮只允许创建一次");
 
-        String nextTurn = aiTools.createTask("EXPORT", "同轮幂等任务", ctx("run-idem-2"));
+        String nextTurn = aiTools.createTask("EXPORT", "同轮幂等任务", null, null, ctx("run-idem-2"));
         assertThat(firstId(nextTurn)).as("新一轮可再创建（幂等按轮作用域）").isNotEqualTo(firstId);
     }
 
@@ -170,7 +170,7 @@ class AiToolsInvocationTest {
 
     @Test
     void exportToolChainRunsRealJobAndWritesFile() throws Exception {
-        long taskId = firstId(aiTools.createTask("EXPORT", "S5A-AI-导出", ctx("s5a-create-4")));
+        long taskId = firstId(aiTools.createTask("EXPORT", "S5A-AI-导出", null, null, ctx("s5a-create-4")));
         taskService.selectDefs(taskId, List.of(SYS_PARAM));
         taskService.setCondition(taskId, SYS_PARAM,
                 "{\"fields\":[{\"fieldCode\":\"paramKey\",\"operator\":\"CONTAINS\",\"value\":\"param.2\"}]}");
@@ -192,7 +192,7 @@ class AiToolsInvocationTest {
 
     @Test
     void importToolChainRunsPrecheckImportAndPublish() throws Exception {
-        long taskId = firstId(aiTools.createTask("IMPORT", "S5A-AI-导入", ctx("s5a-create-5")));
+        long taskId = firstId(aiTools.createTask("IMPORT", "S5A-AI-导入", null, null, ctx("s5a-create-5")));
         taskService.selectDefs(taskId, List.of(ROLE_DICT));
         upload(taskId, ROLE_DICT, List.of(
                 row("roleCode", "NEW_R", "roleName", "新角色", "permissionLevel", "3", "builtin", "false")));
@@ -239,7 +239,7 @@ class AiToolsInvocationTest {
 
     @Test
     void startImportReportsGuardWhenPrecheckNotPassed() {
-        long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫", ctx("s5a-create-6")));
+        long taskId = firstId(aiTools.createTask("IMPORT", "S5F-AI-守卫", null, null, ctx("s5a-create-6")));
         taskService.selectDefs(taskId, List.of(ROLE_DICT));
 
         assertThatThrownBy(() -> aiTools.startImport(taskId))

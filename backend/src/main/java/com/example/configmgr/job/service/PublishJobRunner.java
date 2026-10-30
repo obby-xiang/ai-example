@@ -12,6 +12,7 @@ import com.example.configmgr.definition.service.DependencyResolver;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
+import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskRepository;
@@ -119,7 +120,7 @@ public class PublishJobRunner {
                 finalOutcome.processedRows(), finalOutcome.totalRows(),
                 Map.of("jobId", job.getId(), "jobType", "PUBLISH",
                         "status", status, "errors", finalOutcome.totalErrors()),
-                "PUBLISH");
+                TaskSteps.PUBLISH);
     }
 
     /**

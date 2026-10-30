@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
@@ -7,6 +8,7 @@ import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.file.FileStorageService;
+import com.example.configmgr.task.service.TaskSteps;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -145,9 +147,11 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
 					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
-		return inspectSlots(GenerativeFormRules.purposeOf(arguments.get("form")),
+		return inspectSlots(FormPurposes.resolve(arguments.get("form")),
 				TaskSlots.fromExtra(context == null ? null : context.getExtra()),
-				context == null ? null : context.getStep());
+				context == null ? null : context.getStep(),
+				context == null ? null : context.getExtra(),
+				context == null ? null : context.getTaskId());
 	}
 
 	/**
@@ -164,7 +168,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * 拒绝并指引按既有步骤链继续；步骤未知时按槽位规则兼容放行（未知 ≠ 关闭）。</li>
 	 * </ul>
 	 */
-	private Verdict inspectSlots(String purpose, TaskSlots slots, String step) {
+	private Verdict inspectSlots(String purpose, TaskSlots slots, String step, Map<String, Object> extra,
+			Long taskId) {
 		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose) && slots.hasDefCodes()) {
 			String known = String.join(", ", slots.defCodes());
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
@@ -175,6 +180,17 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			log.warn("generative_form 选择表单被槽位放行拒绝（槽位已确定，未挂起、未下发前端）：{}", known);
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"配置项已确定，选择表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && hasCreateTaskConditions(extra, taskId)) {
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"创建任务时已给出结构化筛选条件（待宿主在 QUERY_COND 落库）"));
+			List<String> reasons = List.of(
+					"创建任务时已给出结构化筛选条件（随 create_task 参数进入运行上下文，不是猜测）",
+					"下一步：直接 confirm_step；到 QUERY_COND 时宿主会按同一份校验落库。若用户本轮要求改条件，"
+							+ "直接调用 set_condition，不要再用表单重复收集");
+			log.warn("generative_form 条件表单被 create_task 的结构化条件拒绝（未挂起、未下发前端）");
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"筛选条件已给出，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
 		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && !slots.needsConditionCollection()) {
 			String known = renderConditions(slots);
@@ -237,7 +253,39 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 
 	/** 是否还在 {@code QUERY_COND} 之前的前置步：指引是"先 confirm_step 推进"，而不是"步已关闭"。 */
 	private static boolean beforeConditionStep(String step) {
-		return "SELECT_DEFS".equalsIgnoreCase(step) || "UPLOAD".equalsIgnoreCase(step);
+		return TaskSteps.isBeforeConditionStep(step);
+	}
+
+	/**
+	 * 本轮 {@code create_task(conditions=…)} 是否已给出结构化筛选条件（服务端 extra，待 QUERY_COND 落库）。
+	 *
+	 * <p>条件表单因此没有真实缺口：模型不应再下发第二张表；宿主 {@code ConditionsForm} 会在
+	 * QUERY_COND 用同一份 {@code WizardActionGuard} 复核并落库。
+	 */
+	private static boolean hasCreateTaskConditions(Map<String, Object> extra, Long taskId) {
+		if (extra == null || taskId == null
+				|| !(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS) instanceof Map<?, ?> conditions)
+				|| conditions.isEmpty()) {
+			return false;
+		}
+		// 候选只属于创建它的任务：切任务后不得再据此压掉新任务的条件表
+		return taskId.equals(boundTaskId(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID)));
+	}
+
+	/** 绑定任务号（数字或数字文本；其它形态 = 没有绑定）。 */
+	private static Long boundTaskId(Object raw) {
+		if (raw instanceof Number number) {
+			return number.longValue();
+		}
+		if (raw == null) {
+			return null;
+		}
+		try {
+			return Long.valueOf(String.valueOf(raw).trim());
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
 	}
 
 	private static String renderConditions(TaskSlots slots) {

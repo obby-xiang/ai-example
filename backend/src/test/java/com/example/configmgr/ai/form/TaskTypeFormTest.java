@@ -228,6 +228,36 @@ class TaskTypeFormTest {
 		}
 	}
 
+	// ── ⑥ 结构化 create_task 缺 type：宿主确定性单 enum 单选 ──────────────────
+
+	/**
+	 * 模型已经发出结构化 {@code create_task} 但 {@code type} 缺失/非法时，宿主挂的就是<b>那张</b>
+	 * 单 enum 单选（EXPORT/IMPORT），toolCallId 确定性；类型已给出时一张都不挂。
+	 *
+	 * <p>证红：让 {@link TaskTypeForm#parkIfCreateTaskMissingType} 入口直接返回 {@code false}
+	 * （旧路径：缺 type 只靠模型文字反问）⇒ 本用例红。
+	 */
+	@Test
+	void missingTypeInStructuredCreateTaskParksTheDeterministicSingleSelect() {
+		boolean parked = this.form.parkIfCreateTaskMissingType(RUN_ID, context(Map.of()),
+				"{\"title\":\"币种导出\"}", history("创建一个任务"));
+
+		assertThat(parked).as("create_task 缺 type ⇒ 宿主直接发单选，不退化成文字反问").isTrue();
+		PendingToolCall pending = onlyPending();
+		assertThat(pending.getToolCallId()).isEqualTo(TaskTypeForm.toolCallId(RUN_ID));
+		JsonNode form = parse(pending.getArguments()).path("form");
+		assertThat(form.path("purpose").asText()).isEqualTo(GenerativeFormRules.PURPOSE_TASK_TYPE);
+		JsonNode fields = form.path("fields");
+		assertThat(fields).as("类型表单只有一个字段").hasSize(1);
+		assertThat(fields.get(0).path("type").asText()).isEqualTo("enum");
+		assertThat(fields.get(0).path("options").findValuesAsText("value")).containsExactly("EXPORT", "IMPORT");
+		assertThat(fields.get(0).has("defaultValue")).isFalse();
+
+		assertThat(this.form.parkIfCreateTaskMissingType("run-type-valid", context(Map.of()),
+				"{\"type\":\"EXPORT\"}", history("创建导出任务")))
+			.as("type 已给出 ⇒ 不弹类型表（直接 create_task）").isFalse();
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private boolean park(String message) {

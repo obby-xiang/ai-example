@@ -284,7 +284,7 @@ import type { Job, ValidationIssue } from '@/types/job'
 import { readImportMode, TaskSteps, type ImportMode, type Task } from '@/types/task'
 import type { WorkspaceActionSource } from '@/types/tools'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 interface GridApi {
   loadFromXlsx(blob: Blob, fields: readonly ConfigField[]): Promise<{ missingHeaders: string[] }>
@@ -553,7 +553,7 @@ function cellValue(row: ConfigStagingRow, fieldCode: string): string {
  * 相等短路 ⇒ 恢复任务（`loadTask` 同步块内先赋 ref、紧接着 `enterPage({selectedDefs})`）
  * 不会二次 touch；比较按集合（顺序不敏感，裁决⑤）。
  */
-function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = '界面'): void {
+function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = 'UI'): void {
   const codes = [...selectedDefs.value]
   const current = new Set(workspace.selectedDefs)
   if (current.size === codes.length && codes.every((code) => current.has(code))) {
@@ -1295,7 +1295,9 @@ function onGridChanged(defCode: string | undefined, origin: 'user' | 'ai' = 'use
     origin === 'ai'
       ? 'AI 已把改动写入导入编辑区（尚未写回服务端文件）'
       : '导入编辑区内容已修改（尚未写回服务端文件）',
-    origin === 'ai' ? 'AI' : '界面'
+    origin === 'ai' ? 'AI' : 'UI',
+    // 面板 chip 的结构化展示面（2026-10-30）：现役写点给 display，只有旧记录才落兜底词条
+    { code: origin === 'ai' ? 'ai.workspace.importSheetEditAi' : 'ai.workspace.importSheetEditUser' }
   )
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeEditorCode())
@@ -2738,7 +2740,8 @@ async function createAndBindTask(): Promise<void> {
   try {
     const created = await taskStore.createTask('IMPORT', t('views.tasks.autoName', {
       type: t('views.tasks.importType'),
-      time: new Date().toLocaleString('zh-CN')
+      // 2026-10-30 结构化批：自动名的时间戳跟随当前 locale（原写死 zh-CN，en 界面出中文格式）
+      time: new Date().toLocaleString(locale.value)
     }))
     if (!created || created.id === undefined) {
       ElMessage.error(taskStore.actionError ?? t('views.import.msg.taskCreateFailed'))

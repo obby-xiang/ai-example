@@ -45,8 +45,13 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 		Map<String, Object> target, Object evidence, String message, boolean truncated, String strategy,
 		int originalChars, int returnedChars, String notice) {
 
-	/** 目标资源提取的字段白名单（顺序即序列化顺序）。 */
-	private static final List<String> TARGET_KEYS = List.of("taskId", "defCode", "step", "page");
+	/**
+	 * 目标资源提取的字段白名单（顺序即序列化顺序）。
+	 *
+	 * <p>{@code code} 是<b>配置定义编码</b>（{@code get_config_def} 的入参名）：失败信封因此带上
+	 * "出错的参数值"，模型/前端拿到的是 {@code code + 参数} 而不是只能靠中文关键词猜的文案。
+	 */
+	private static final List<String> TARGET_KEYS = List.of("taskId", "defCode", "code", "step", "page");
 
 	/** 模型侧工具结果的定界符（防护批② B2-3；spotlighting delimiting 的最小形态）。 */
 	public static final String TOOL_RESULT_OPEN = "<tool_result>";

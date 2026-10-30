@@ -42,13 +42,13 @@ describe('双受众红线（C5）', () => {
     expect(enSummaries).toEqual(['进入任务中心', '绑定任务 #12', '已选择配置项：CURRENCY、TAX_RATE'])
   })
 
-  it('切 en 后 buildContext 的 extra.recentActions 仍带中文摘要与中文来源标记', () => {
+  it('切 en 后 buildContext 的 extra.recentActions 仍带中文摘要，来源用数据码 UI', () => {
     useLocaleStore().setLocale('en-US')
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'export', page: 'export' })
     const context = workspace.buildContext()
     const recent = (context.extra as { recentActions: string[] }).recentActions
-    expect(recent[0]).toBe('进入导出向导（来源：界面）')
+    expect(recent[0]).toBe('进入导出向导（来源：UI）')
   })
 
   it('上下文摘要（UI chip）在 zh 下逐字不变', () => {

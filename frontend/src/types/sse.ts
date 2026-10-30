@@ -84,11 +84,22 @@ export interface ToolPreflightTarget {
 
 /** 单项预检结论（`pass=false` 在门卡形态下不会出现 —— 预检失败后端不弹卡）。 */
 export interface ToolPreflightCheck {
+  /**
+   * 稳定机器码（`ToolPreflightService.CheckCode`，如 `TASK_EXISTS` / `CONDITIONS_DECIDED`）。
+   * 协议面：按码与 `args` 分支；`name`/`detail` 只是人读渲染（随 ReplyLanguage 变）。
+   * 缺省 = 旧帧（后端升级前）
+   */
+  code?: string
   /** 检查项名（demo：「任务存在」/「预检已通过」） */
   name: string
   pass: boolean
   /** 补充说明（demo：指纹「3a9f…」），缺省 = 只显示检查项名 */
   detail?: string | null
+  /**
+   * 结构化参数（如 `taskId` / `jobType` / `undecided`）。协议面：与 `code` 一起构成可分支的结论；
+   * 缺省 = 旧帧
+   */
+  args?: Record<string, unknown>
 }
 
 /** 预检摘要载荷（suspended 帧 toolCalls[] / confirm_request 帧可选字段）。 */

@@ -3,6 +3,7 @@ package com.example.configmgr.ai.tools;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.PlainTextToolResultConverter;
 import com.example.configmgr.ai.tool.ToolCategory;
 import com.example.configmgr.ai.tool.ToolChannel;
@@ -10,7 +11,10 @@ import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
+import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
+import com.example.configmgr.data.service.ConditionOperators;
 import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -18,6 +22,7 @@ import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
+import com.example.configmgr.task.service.TaskSteps;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
@@ -86,6 +91,19 @@ import java.util.stream.Collectors;
  *
  * <p>创建任务的缺口已在 S4.4e 补齐（{@link #createTask}）：{@code create_task} 走 BACKEND 通道，
  * 与任务中心/REST 同一服务层，P1 N7 到此收口。
+ *
+ * <h2>元数据单一来源（2026-10-30 协议统一批）</h2>
+ * 本类的工具<b>不再散写元数据副本</b>：
+ * <ul>
+ * <li>工具名 → {@link AiToolNames}（含 {@code ConfirmTool} 的"工具 → 作业/任务类型"表，
+ *     预检/目标校验/资源锁共用）；{@code @ToolScope} 的步骤级标签也由该表的常量组合，</li>
+ * <li>步骤名/序列/条件步 → {@code TaskSteps}（见 {@link ToolParam} 描述里的 step 枚举），</li>
+ * <li>表单用途 → {@code FormPurposes}（{@code GenerativeFormRules#purposeOf} 是同一入口），</li>
+ * <li>算子闭集 → {@link ConditionOperators}（{@code ConditionEvaluator}、向导守卫、表格写守卫、
+ *     预检摘要共用；{@code @ToolParam} 描述引用 {@link ConditionOperators#JOINED_NAMES}，类初始化对账）。</li>
+ * </ul>
+ * 配置定义目录（{@link #listConfigDefs}）遵循<b>有界披露 + 总数 + 稳定顺序</b>；未知编码
+ * （{@link #getConfigDef}）以"稳定码 + 入参编码"进统一信封的 {@code target}，不靠中文关键字表达。
  */
 @Component
 @RequiredArgsConstructor
@@ -101,7 +119,41 @@ public class AiTools {
 
     // ==================== 只读：配置定义 ====================
 
-    @Tool(name = "list_config_defs", description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选",
+    /**
+     * {@code list_config_defs} 一轮最多回填给模型的配置定义条数（有界披露）。
+     *
+     * <p>与 {@link #LIST_TASKS_MAX_ROWS} 同一口径：模型上下文是有限预算，配置定义条数由业务随时可增，
+     * 全量返回会让一份只读结果独占窗口、把真正的任务上下文挤出去。取值同样取业界分页默认（20），
+     * 且必须 &lt; {@code app.ai.result-budget.model.max-rows}（200），否则二次截断会先于本上限生效，
+     * 下方"共 N 个仅显示前 M 个"的告知就成了假话。
+     */
+    public static final int LIST_CONFIG_DEFS_MAX_ROWS = 20;
+
+    /** 结果行格式（归档/诊断按此前缀识别人读行；顺序 = 稳定排序后的定义）。 */
+    public static final String LIST_CONFIG_DEFS_ROW_PREFIX = "- ";
+
+    /** 零定义时的原文（与既有文案逐字一致：模型的"确实没有"判据）。 */
+    public static final String LIST_CONFIG_DEFS_EMPTY_TEXT = "没有找到配置定义";
+
+    /** 超限告知的前缀与后缀（中间是总条数）。 */
+    public static final String LIST_CONFIG_DEFS_TOTAL_PREFIX = "（共 ";
+
+    public static final String LIST_CONFIG_DEFS_TOTAL_SUFFIX = " 个，仅显示前 " + LIST_CONFIG_DEFS_MAX_ROWS
+            + " 个；可用 level 过滤，或用 get_config_def 查看指定编码）";
+
+    /**
+     * 列出配置定义（编码/名称/层级/字段数），可按层级筛选。
+     *
+     * <p><b>有界披露 + 总数 + 稳定顺序（本批收口）</b>：
+     * <ul>
+     * <li>排序：{@code sortOrder, code}（与 {@code DefinitionService#findAll} 同一口径；
+     * 按层级筛选也走同一排序，不再依赖数据库返回顺序）；</li>
+     * <li>上限 {@link #LIST_CONFIG_DEFS_MAX_ROWS}，超出时追加"共 N 个，仅显示前 M 个"——
+     * 模型因此知道这不是全集，而不是把截断清单当完整目录；</li>
+     * <li>非法 {@code level} 仍以带码异常浮出（不返回 ok=true 的失败文案）。</li>
+     * </ul>
+     */
+    @Tool(name = AiToolNames.LIST_CONFIG_DEFS, description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选，最多返回前 20 个，超出时给出总数",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -122,22 +174,42 @@ public class AiTools {
         List<ConfigDefinition> defs = parsedLevel != null
                 ? definitionService.findByLevel(parsedLevel)
                 : definitionService.findAll();
-        if (defs.isEmpty()) return "没有找到配置定义";
-        return defs.stream().map(d ->
-                String.format("- %s（%s）层级:%s 字段数:%d",
-                        d.getCode(), d.getName(), d.getLevel().name(),
+        if (defs.isEmpty()) return LIST_CONFIG_DEFS_EMPTY_TEXT;
+        String rows = defs.stream().limit(LIST_CONFIG_DEFS_MAX_ROWS).map(d ->
+                String.format("%s%s（%s）层级:%s 字段数:%d",
+                        LIST_CONFIG_DEFS_ROW_PREFIX, d.getCode(), d.getName(), d.getLevel().name(),
                         d.getFields() != null ? d.getFields().size() : 0))
                 .collect(Collectors.joining("\n"));
+        if (defs.size() <= LIST_CONFIG_DEFS_MAX_ROWS) return rows;
+        return rows + "\n" + LIST_CONFIG_DEFS_TOTAL_PREFIX + defs.size() + LIST_CONFIG_DEFS_TOTAL_SUFFIX;
     }
 
-    @Tool(name = "get_config_def", description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）",
+    /**
+     * 读取单个配置定义的字段详情。
+     *
+     * <p><b>未知编码 = 结构化 not-found（本批收口）</b>：不再让 {@code definitionService.findByCode}
+     * 的默认文案直接上抛，而是抛携带稳定码 {@code RESOURCE_NOT_FOUND} 的
+     * {@link com.example.configmgr.common.ResourceNotFoundException}，并把<b>入参编码</b>放进统一信封的
+     * {@code target}（{@code ToolResultEnvelope#TARGET_KEYS} 已登记 {@code code}）—— 模型/前端拿到的是
+     * "码 + 参数"，不是一句只能靠关键词猜的中文。人读文案按本轮 {@link ReplyLanguage} 渲染。
+     */
+    @Tool(name = AiToolNames.GET_CONFIG_DEF, description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String getConfigDef(
-            @ToolParam(description = "配置定义编码，例如 CURRENCY") String code) {
-        ConfigDefinition def = definitionService.findByCode(code);
+            @ToolParam(description = "配置定义编码（必填，大小写敏感）") String code) {
+        String requested = code == null ? "" : code.trim();
+        ConfigDefinition def;
+        try {
+            def = definitionService.findByCode(requested);
+        }
+        catch (ResourceNotFoundException ex) {
+            throw new ResourceNotFoundException(ex.getCode(), ReplyLanguage.current().english()
+                    ? "Config definition not found: " + requested + " (use list_config_defs to look up codes)"
+                    : "配置定义不存在: " + requested + "（可用 list_config_defs 查编码）");
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("配置定义: ").append(def.getCode()).append("（").append(def.getName()).append("）\n");
         sb.append("层级: ").append(def.getLevel()).append("\n");
@@ -199,7 +271,7 @@ public class AiTools {
     // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
     // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 20 条"与"超出时给出总条数"是
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
-    @Tool(name = "list_tasks", description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数",
+    @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({"*", "page:tasks"})
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -217,7 +289,7 @@ public class AiTools {
         return rows + "\n" + LIST_TASKS_TOTAL_PREFIX + tasks.size() + LIST_TASKS_TOTAL_SUFFIX;
     }
 
-    @Tool(name = "get_workspace_state", description = "获取当前工作区的任务状态快照",
+    @Tool(name = AiToolNames.GET_WORKSPACE_STATE, description = "获取当前工作区的任务状态快照",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -238,7 +310,7 @@ public class AiTools {
         return sb.toString();
     }
 
-    @Tool(name = "check_job_status", description = "查询作业状态和进度",
+    @Tool(name = AiToolNames.CHECK_JOB_STATUS, description = "查询作业状态和进度",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("task:*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -251,9 +323,9 @@ public class AiTools {
                 job.getProgress(), job.getTotal(), job.getErrorCount());
     }
 
-    @Tool(name = "get_row_count", description = "预估指定配置项的数据行数",
+    @Tool(name = AiToolNames.GET_ROW_COUNT, description = "预估指定配置项的数据行数",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({"*", "task:EXPORT/QUERY_COND", "task:EXPORT/EXPORT"})
+    @ToolScope({"*", AiToolNames.SCOPE_EXPORT_QUERY_COND, AiToolNames.SCOPE_EXPORT_EXECUTION})
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String getRowCount(
@@ -301,14 +373,16 @@ public class AiTools {
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = "create_task", description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。创建只需要任务类型 type（EXPORT/IMPORT）与可选 title：标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，不自动带入，除非用户明确要求沿用。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。只需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes 与可选 conditions：只有用户在本轮已明确说出配置定义/中文名/别名时才传 defCodes（结构化数组，例如 [\"CURRENCY\"]），未提就省略（宿主随后只弹一次配置项选择表单）；只有用户本轮已明确说出筛选条件时才传 conditions（与 set_condition 同一 FieldQueryCondition 结构，必须与 defCodes 同时给出），未提就省略（不设筛选=全量），宿主会在勾选配置项后用同一份校验落库、不再弹条件表；标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，不自动带入，除非用户明确要求沿用。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业，也不隐式落配置项/条件）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({ "page:tasks", "task:EXPORT", "task:IMPORT" })
+    @ToolScope({ "page:tasks", AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.W)
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
+            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CURRENCY\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "可选（仅导出任务）：用户本轮已明确的筛选条件（与 set_condition 同一 FieldQueryCondition 结构：{\"scopeKeys\":[...],\"fields\":[{\"fieldCode\":\"...\",\"operator\":\"EQ\",\"value\":\"...\"}]}）；未明确就不传（不设筛选=全量）。必须与 defCodes 同时给出：宿主预检按该配置定义校验字段/算子，通过后在勾选配置项后落库，不再弹条件表；非法结构会被预检拒绝，不得创建", required = false) FieldQueryCondition conditions,
             ToolContext toolContext) {
         Task.TaskType taskType;
         try {
@@ -327,8 +401,10 @@ public class AiTools {
             Task task = outcome.task();
             String prefix = outcome.reused() ? "该任务已在同一轮创建过，本次复用任务" : "已创建" + (export ? "导出" : "导入") + "任务";
             return String.format(
-                    "%s #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业。下一步："
-                            + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项。",
+                    "%s #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
+                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也尚未落库。下一步："
+                            + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项；"
+                            + "勾选后由宿主按同一份校验把条件落库，不要重复调用 set_condition，也不要声称已设置/已勾选。",
                     prefix, task.getId(), task.getTitle(), task.getCurrentStep(),
                     export ? "export" : "import", task.getId());
         }
@@ -367,9 +443,9 @@ public class AiTools {
      * 机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
      * 此处不新增工具名清单。披露范围不变。
      */
-    @Tool(name = "start_export", description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_EXPORT, description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({ "page:tasks", "task:EXPORT/EXPORT" })
+    @ToolScope({ "page:tasks", AiToolNames.SCOPE_EXPORT_EXECUTION })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
     public String startExport(
@@ -388,9 +464,9 @@ public class AiTools {
      * 风险等级同为 {@code DANGER}（确认门，S4.4e 裁决⑥；FR-5.3 把"启动检查"与"启动导出/导入/发布"
      * 并列写进确认清单）。
      */
-    @Tool(name = "start_precheck", description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）",
+    @Tool(name = AiToolNames.START_PRECHECK, description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({ "page:tasks", "task:IMPORT/PRECHECK" })
+    @ToolScope({ "page:tasks", AiToolNames.SCOPE_IMPORT_PRECHECK })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
     public String startPrecheck(
@@ -405,9 +481,9 @@ public class AiTools {
      * 只有向导走到「导入执行」步才披露）；风险等级 {@code DANGER}（确认门，S4.4e 裁决⑥）——
      * 它会真正写暂存区，人工确认的必要性不低于导出。
      */
-    @Tool(name = "start_import", description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_IMPORT, description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope("task:IMPORT/IMPORT")
+    @ToolScope(AiToolNames.SCOPE_IMPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.J)
     public String startImport(
@@ -417,9 +493,9 @@ public class AiTools {
         return String.format("导入作业已启动（作业 #%d），进度由页面展示；发布前可预览暂存数据", job.getId());
     }
 
-    @Tool(name = "start_publish", description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_PUBLISH, description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope("task:IMPORT/PUBLISH")
+    @ToolScope(AiToolNames.SCOPE_IMPORT_PUBLISH)
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
     @ToolCategory(ToolMeta.Category.P)
     public String startPublish(
@@ -439,8 +515,8 @@ public class AiTools {
      */
     static final String FRONTEND_STUB = "FRONTEND_STUB_SHOULD_NOT_RUN";
 
-    @Tool(name = "open_export_file_editor", description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
-    @ToolScope("task:EXPORT/EXPORT")
+    @Tool(name = AiToolNames.OPEN_EXPORT_FILE_EDITOR, description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
+    @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -459,14 +535,14 @@ public class AiTools {
      * <li>码不在当前可导出清单里 ⇒ 整体失败并回执可用码清单，不静默丢弃。</li>
      * </ul>
      */
-    @Tool(name = "download_export_files", description = "触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载")
-    @ToolScope("task:EXPORT/EXPORT")
+    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载")
+    @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.F)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String downloadExportFiles(
             @ToolParam(description = "任务ID") Long taskId,
-            @ToolParam(description = "配置定义编码列表（必填非空），例如 [\"CURRENCY\"]") String[] defCodes) {
+            @ToolParam(description = "配置定义编码列表（必填非空）") String[] defCodes) {
         return FRONTEND_STUB;
     }
 
@@ -476,7 +552,7 @@ public class AiTools {
      * 页面导航。披露范围为 {@code *}：它是任意页面进入向导的唯一入口动作，
      * 目标页面的合法性由前端动作表白名单（{@code allowPages}）兜底校验。
      */
-    @Tool(name = "navigate_to", description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导。"
+    @Tool(name = AiToolNames.NAVIGATE_TO, description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导。"
             + "导航成功不是本轮终点：下一批按最新披露继续页面动作，同一目标页不要重复导航")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -502,14 +578,14 @@ public class AiTools {
      * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
-    @Tool(name = "select_definitions", description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）。"
+    @Tool(name = AiToolNames.SELECT_DEFINITIONS, description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）。"
             + "用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs/get_config_def 确认的映射都算已明确）")
-    @ToolScope({ "task:EXPORT/SELECT_DEFS", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_SELECT_DEFS, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String selectDefinitions(
-            @ToolParam(description = "配置定义编码列表，例如 [\"CURRENCY\"]") String[] codes,
+            @ToolParam(description = "配置定义编码列表") String[] codes,
             @ToolParam(description = "选择模式：REPLACE（替换，默认）/ ADD（追加）", required = false) String mode) {
         return FRONTEND_STUB;
     }
@@ -551,18 +627,18 @@ public class AiTools {
      * {@code scopeKeys} 又无有效 {@code fields} 时<b>不挂起、不下发</b>，并把"要导出全部就不要调本工具"
      * 写进拒绝原因。未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
-    @Tool(name = "set_condition", description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
+    @Tool(name = AiToolNames.SET_CONDITION, description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
             + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
             + "用户给出条件（含条件表单回填文本解析出的条件）时才调用，没给条件就不设筛选（不设条件即全量）；"
             + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链）。本工具只能在 QUERY_COND 步骤调用："
             + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
-    @ToolScope({ "task:EXPORT/QUERY_COND" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_QUERY_COND })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String setCondition(
-            @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
-            @ToolParam(description = "查询条件对象，形如 {\"scopeKeys\":[\"XN\"],\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}") FieldQueryCondition conditions) {
+            @ToolParam(description = "配置定义编码") String defCode,
+            @ToolParam(description = "查询条件对象，形如 {\"scopeKeys\":[\"<范围键>\"],\"fields\":[{\"fieldCode\":\"<字段>\",\"operator\":\"EQ\",\"value\":\"<值>\"}]}") FieldQueryCondition conditions) {
         return FRONTEND_STUB;
     }
 
@@ -582,13 +658,13 @@ public class AiTools {
     /**
      * 单字段条件 —— 前端契约 {@code types/condition.ts#FieldCondition} 的逐字段镜像。
      *
-     * @param fieldCode 字段编码（必须是该配置定义的字段，如 CURRENCY 的 {@code code}）
+     * @param fieldCode 字段编码（必须是该配置定义的字段）
      * @param operator  操作符（前端 {@code ConditionOperator} + 后端 {@code ConditionEvaluator} 的交集）
      * @param value     条件值；EMPTY/NOT_EMPTY 不带值，IN 传字符串数组
      */
     public record FieldCondition(
             @ToolParam(description = "字段编码，例如 code") String fieldCode,
-            @ToolParam(description = "操作符：EQ/NE/CONTAINS/LIKE/STARTS_WITH/IN/EMPTY/NOT_EMPTY/GT/GTE/LT/LTE") String operator,
+            @ToolParam(description = "操作符（闭集，见 ConditionOperators）：" + ConditionOperators.JOINED_NAMES) String operator,
             @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
     }
 
@@ -602,7 +678,7 @@ public class AiTools {
      * 通道判定优先于风险等级，WRITE 不会触发后端确认卡；用户点页面「下一步」与 AI 调用
      * {@code confirm_step} 仍是同一条路径。回执必须如实说明实际写回了哪些配置项。
      */
-    @Tool(name = "confirm_step", description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
+    @Tool(name = AiToolNames.CONFIRM_STEP, description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
             + "推进成功后下一批按最新披露继续，推进失败即停"
             + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
@@ -610,7 +686,7 @@ public class AiTools {
             + "非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
             + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但未落库、或条件表回灌了非空文本却还没 set_condition 时，"
             + "confirm_step 会被零副作用拒绝并指回 set_condition（先落库，下一批再推进）")
-    @ToolScope({ "task:EXPORT", "task:IMPORT" })
+    @ToolScope({ AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -686,7 +762,7 @@ public class AiTools {
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/
      * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
      */
-    @Tool(name = "generative_form", description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件、"
+    @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件、"
             + "任务类型，或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
             + "不用于已知信息、预填确认或取消后自动重问；表单用途必须显式给出 purpose="
             + "SELECT_DEFINITIONS（收集配置项选择）/SET_CONDITIONS（收集筛选条件）/TASK_TYPE（收集任务类型 EXPORT/IMPORT）"
@@ -876,15 +952,15 @@ public class AiTools {
      * <p>回灌契约（设计稿 §4.2）：读工具恒带“共 N 行/处/组”；写工具成功文本必含“用户已确认”与
      * “未保存/可撤销”；工具描述里写死“最多 20 行”，与前端常量同源。
      */
-    @Tool(name = "read_sheet_summary", description = "读取当前激活表格的结构与采样摘要（全量业务行不出浏览器；"
+    @Tool(name = AiToolNames.READ_SHEET_SUMMARY, description = "读取当前激活表格的结构与采样摘要（全量业务行不出浏览器；"
             + "仅投影采样 ≤20 行 / 2000 字符进模型；缺省投影 = 主键列 + 前 4 列，采样逐格带单元格地址如 E15）；"
             + "末尾恒回“共 N 行”。适用于“这表有多少行/某地区几行/有哪些列”")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String readSheetSummary(
-            @ToolParam(description = "配置定义编码，例如 CURRENCY") String defCode,
+            @ToolParam(description = "配置定义编码") String defCode,
             @ToolParam(description = "范围：selection（默认）/sheet/columns/rows", required = false) String scope,
             @ToolParam(description = "投影列（字段编码，最多 5 列）", required = false) String[] columnCodes,
             @ToolParam(description = "scope=rows 时的 Excel 行号区间，例如 2-41（表头为第 1 行）", required = false) String rowRange,
@@ -893,11 +969,11 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "aggregate_sheet", description = "按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；"
+    @Tool(name = AiToolNames.AGGREGATE_SHEET, description = "按条件/分组聚合当前表格（最多 20 组），只回聚合值不回原始行；"
             + "分组结果默认按首个度量**降序**（Top-N：截断发生在排序之后，故“哪个地区最多”一次可答），"
             + "sort 可改判定口径（metric/metricAsc/labelAsc/labelDesc/none 或某个度量名）；"
             + "兼作写操作的计数级预览引擎（0 行业务数据）。适用于“各地区几行/哪个地区最多/总额/空值率”")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -913,9 +989,9 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "inspect_columns", description = "诊断当前表头与字段定义的映射（已匹配/缺失/多余/疑似映射，"
+    @Tool(name = AiToolNames.INSPECT_COLUMNS, description = "诊断当前表头与字段定义的映射（已匹配/缺失/多余/疑似映射，"
             + "候选最多 20 条），只给建议、不改文件也不改定义")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -923,9 +999,9 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "review_cells", description = "对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），"
+    @Tool(name = AiToolNames.REVIEW_CELLS, description = "对当前表格做本地校验并聚合报告（必填/类型/枚举/主键重复），"
             + "明细最多 20 条、恒回“共 N 处”，明细带单元格地址；只报告不修复，不替代服务端预检")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -937,10 +1013,10 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "find_rows", description = "在当前表格里检索关键字（默认全列 contains，可 equals/prefix），"
+    @Tool(name = AiToolNames.FIND_ROWS, description = "在当前表格里检索关键字（默认全列 contains，可 equals/prefix），"
             + "回命中行号 + 命中单元格地址（如 E15）+ 采样 ≤20 行，恒回“共 N 行”；"
             + "命中总数不受采样影响，只读不改表格。适用于“哪几行提到某值/这个值在哪一行”")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -956,11 +1032,11 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "normalize_column", description = "列归一化：commit=false 只出建议（零写入、采样最多 20 行）；"
+    @Tool(name = AiToolNames.NORMALIZE_COLUMN, description = "列归一化：commit=false 只出建议（零写入、采样最多 20 行）；"
             + "commit=true 只允许 trim/case/width，且必须由用户在预览卡上确认后应用；"
             + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
             + "（导出向导需点「保存编辑到服务端」）")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -974,11 +1050,11 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "replace_values", description = "按列查找替换（wholeCell/contains/prefix/wildcard/regex），"
+    @Tool(name = AiToolNames.REPLACE_VALUES, description = "按列查找替换（wholeCell/contains/prefix/wildcard/regex），"
             + "必须先给用户看预览（采样最多 20 行）并由用户确认；"
             + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
             + "（导出向导需点「保存编辑到服务端」）")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -996,11 +1072,11 @@ public class AiTools {
         return FRONTEND_STUB;
     }
 
-    @Tool(name = "update_rows", description = "按条件更新命中行（literal/fillDown/fillSeries/template），"
+    @Tool(name = AiToolNames.UPDATE_ROWS, description = "按条件更新命中行（literal/fillDown/fillSeries/template），"
             + "必须先给用户看预览（采样最多 20 行）并由用户确认；"
             + "改动默认只作用于当前表格，导入向导第 1 步离开（「下一步」/ confirm_step）时会整表写回服务端文件"
             + "（导出向导需点「保存编辑到服务端」）")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -1027,10 +1103,10 @@ public class AiTools {
      * 确认门放行后只会执行桩体（{@link #FRONTEND_STUB}）—— 对前端写操作而言那是一张只有打扰、
      * 没有保护力的卡（{@code kindOf} 的通道优先判定即为此）。
      */
-    @Tool(name = "undo_last_sheet_edit", description = "撤销最近一次 AI 对当前表格的修改（反向补丁、最多 3 层；"
+    @Tool(name = AiToolNames.UNDO_LAST_SHEET_EDIT, description = "撤销最近一次 AI 对当前表格的修改（反向补丁、最多 3 层；"
             + "执行前由用户在预览卡上确认；回灌说明最多 20 行），不改服务端数据；"
             + "没有可撤销修改时如实回“没有可撤销的 AI 修改”")
-    @ToolScope({ "task:EXPORT/EXPORT", "task:IMPORT/UPLOAD" })
+    @ToolScope({ AiToolNames.SCOPE_EXPORT_EXECUTION, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.W)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
@@ -1051,7 +1127,7 @@ public class AiTools {
      * （可见文案 / 表头 / 校验错误；600 字符 / 12 行硬顶，计入 2000 总闸且控件行优先）。
      * 缺省关闭：不付成本的调用方拿到的快照逐字不变。
      */
-    @Tool(name = "ui_snapshot", description = "查看当前页面已注册区域内的可操作控件（一行一个：ref / 角色 / 标签 / 状态），"
+    @Tool(name = AiToolNames.UI_SNAPSHOT, description = "查看当前页面已注册区域内的可操作控件（一行一个：ref / 角色 / 标签 / 状态），"
             + "最多 40 行 / 2000 字符，尾行恒回「共 N 个元素（本次回 M 个）」；参数 regions/kinds/limit 可收窄。"
             + "text=true 时在控件行之后追加区域内只读文本（可见文案 / 表头 / 校验错误；600 字符 / 12 行硬顶，"
             + "计入 2000 总闸且控件行优先），用来回答「这页在说什么 / 刚才为什么失败」。"
@@ -1072,7 +1148,7 @@ public class AiTools {
     }
 
     /** 点界面元素：按风险分级；后果性动作（consequential）**拒执并指路注册动作**。 */
-    @Tool(name = "ui_click", description = "点击快照里的一个元素（按风险分级）：read 直接点；mutate-local 点后记撤销点；"
+    @Tool(name = AiToolNames.UI_CLICK, description = "点击快照里的一个元素（按风险分级）：read 直接点；mutate-local 点后记撤销点；"
             + "data-ai-risk=consequential 的后果性动作一律拒绝执行并指路注册动作（不会先点再提示）。"
             + "入参只接受 ref + epoch，不接受任何 selector/XPath/HTML。本页没有已注册区域时本工具不披露。")
     @ToolScope({ "ui:on" })
@@ -1086,7 +1162,7 @@ public class AiTools {
     }
 
     /** 填输入框：只有声明 fill=allow 的原生输入框可写；写后回读不一致如实报失败。 */
-    @Tool(name = "ui_fill", description = "给声明了 data-ai-fill=allow 的原生输入框写值（≤200 字符），写后回读；"
+    @Tool(name = AiToolNames.UI_FILL, description = "给声明了 data-ai-fill=allow 的原生输入框写值（≤200 字符），写后回读；"
             + "回读不一致就如实报「值未生效」而不是谎报成功。原值记入撤销栈（深度 1，只有用户能撤销）。"
             + "本页没有已注册区域时本工具不披露。")
     @ToolScope({ "ui:on" })
@@ -1101,7 +1177,7 @@ public class AiTools {
     }
 
     /** 选选项：setter 优先，回退「点开→精确匹配 data-ai-option→点选→回读」。 */
-    @Tool(name = "ui_select", description = "选择一个选项的**语义值**（不是索引）：优先走页面注册的 setter；"
+    @Tool(name = AiToolNames.UI_SELECT, description = "选择一个选项的**语义值**（不是索引）：优先走页面注册的 setter；"
             + "回退为点开 → 精确匹配 data-ai-option → 点选 → 回读。选项不存在时如实报「下拉选项里没有…」。"
             + "本页没有已注册区域时本工具不披露。")
     @ToolScope({ "ui:on" })
@@ -1116,7 +1192,7 @@ public class AiTools {
     }
 
     /** 滚动：只改视口，不动数据。 */
-    @Tool(name = "ui_scroll", description = "滚动到某元素或按像素滚动容器（±2000）；只改视口，"
+    @Tool(name = AiToolNames.UI_SCROLL, description = "滚动到某元素或按像素滚动容器（±2000）；只改视口，"
             + "不改任何数据、不记撤销点、不递增数据版本。本页没有已注册区域时本工具不披露。")
     @ToolScope({ "ui:on" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -1131,7 +1207,7 @@ public class AiTools {
     }
 
     /** 高亮：把用户送到入口（描边 + 图标 + 文案三重冗余）。 */
-    @Tool(name = "ui_highlight", description = "高亮一个元素并把用户送过去（描边 + 图标 + 文案三重冗余，附 aria-live 播报）；"
+    @Tool(name = AiToolNames.UI_HIGHLIGHT, description = "高亮一个元素并把用户送过去（描边 + 图标 + 文案三重冗余，附 aria-live 播报）；"
             + "note ≤60 字符。只读，不改任何数据、不记撤销点。本页没有已注册区域时本工具不披露。")
     @ToolScope({ "ui:on" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -1145,7 +1221,7 @@ public class AiTools {
     }
 
     /** 上传交接：本专项唯一的「等人」工具（用户手势选文件，永不经手路径）。 */
-    @Tool(name = "ui_request_upload", description = "需要用户用浏览器手势选一个文件时用：对话内出交接卡"
+    @Tool(name = AiToolNames.UI_REQUEST_UPLOAD, description = "需要用户用浏览器手势选一个文件时用：对话内出交接卡"
             + "（「选择文件」+「放弃」）并高亮页面入口。永不经手文件路径、永不读文件内容——"
             + "不接受 path/filePath/selector 一类入参；无浏览器支持时回退为「请用户点左侧高亮按钮或拖到高亮区域」。"
             + "本页没有已注册区域时本工具不披露。")

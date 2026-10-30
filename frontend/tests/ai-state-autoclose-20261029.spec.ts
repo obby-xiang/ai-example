@@ -450,11 +450,12 @@ describe('7 · readActionRecord 保留 display，source 不丢', () => {
       source: 'AI',
       display: { code: 'ai.workspace.bindTask', args: { taskId: 9 } }
     })
+    // 旧数据码 '界面' 仍被读入侧接受：归一为数据码 'UI'（兼容面，不丢已知值）
     expect(readActionRecord({ version: 8, summary: '选配置项', source: '界面' }))
-      .toMatchObject({ source: '界面' })
+      .toMatchObject({ source: 'UI' })
     // 非法 display 不塞给面板（不臆造 code），记录本身仍可用
     expect(readActionRecord({ version: 9, summary: 'x', source: '界面', display: { args: { a: 1 } } }))
-      .toMatchObject({ summary: 'x', source: '界面' })
+      .toMatchObject({ summary: 'x', source: 'UI' })
   })
 })
 
