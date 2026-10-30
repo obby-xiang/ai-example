@@ -1976,22 +1976,79 @@ function uniqueId(prefix) {
   return `${prefix}-${crypto.randomBytes(4).toString('hex')}`
 }
 
+/** `POST /api/ai/session` 撞号 503 的机器可读码（同一毫秒取到已存在的号）。 */
+const SESSION_ID_UNAVAILABLE = 'SESSION_ID_UNAVAILABLE'
+
+/** 撞号重试上限：每次请求都会自然落到新毫秒，3 次足够；用尽即判失败，不无限重试。 */
+const SESSION_ID_MAX_ATTEMPTS = 3
+
+/** 会话号的文本判据：十进制正整数（不按位数、不要求雪花号）。 */
+function assertSessionIdText(raw, label) {
+  check(/^\d+$/.test(raw), `sessionIdText（${label}）不是十进制字符串：${JSON.stringify(raw)}`)
+  check(BigInt(raw) > 0n, `sessionIdText（${label}）不是正整数：${raw}`)
+  return raw
+}
+
+/** 只有"毫秒撞号"这一种 503 可重试；其余状态/错误码一律立即失败，不许被重试吞掉。 */
+function isSessionIdCollision(record, body) {
+  return record.status === 503 && Boolean(body) && body.code === SESSION_ID_UNAVAILABLE
+}
+
+/**
+ * 数值字段 `sessionId` 只为存量兼容：可安全表示时必须与权威文本同值；
+ * 超安全整数时 JSON number 本就会静默变值，那种情况只认文本（这正是两字段并存的原因）。
+ */
+function assertSessionIdEcho(body, sessionIdText, label) {
+  check(
+    body && body.success === true && body.data,
+    `POST /api/ai/session（${label}）响应体缺 success/data：${JSON.stringify(body)}`
+  )
+  const numeric = body.data.sessionId
+  check(numeric !== undefined && numeric !== null, `POST /api/ai/session（${label}）响应缺数值字段 sessionId`)
+  if (!Number.isSafeInteger(numeric)) return '文本为权威（数值字段超安全整数）'
+  checkEq(String(numeric), sessionIdText, `sessionId 数值字段与 sessionIdText 不一致（${label}）`)
+  return sessionIdText
+}
+
 /**
  * 会话号只由后端发（`POST /api/ai/session`）：返回值取 **sessionIdText**（十进制字符串，权威值）。
  *
- * <p>为什么不能读数值字段也不能本地造号：号值 ≈1.7×10^18 超出 `Number.MAX_SAFE_INTEGER`，
- * `JSON.parse` 会把 `sessionId` 静默换成另一个数（double 在该量级间隔 256），后续 chat 打到的
- * 就是另一条会话；本地 `uniqueId` 则绕过了"多实例/同毫秒唯一 + 归属登记"这两件产品保证。
- * 故这里从**原始响应文本**用正则取字符串（与 `sessionId` 数字字段并存时以文本为准）。
+ * <p>当前契约：`IdGenerator.nextId()` = `System.currentTimeMillis()`，即 13 位毫秒时间戳，
+ * 只保证**十进制正整数**，不保证位数、也不再要求超出 `Number.MAX_SAFE_INTEGER`（雪花号已下线）。
+ * 号值仍从**原始响应文本**用正则取（不经 `JSON.parse` 的数值字段）；数值字段存在时再断言两者同值。
+ *
+ * <p>本地 `uniqueId` 不用于会话号：那会绕过"后端发号 + 归属登记"这两件产品保证。
+ *
+ * <p>撞号（同一毫秒取到已存在的号）由后端登记侧 `SET NX` 兜底并返回 503 `SESSION_ID_UNAVAILABLE`；
+ * 这里**只对这一种 503 有界重试**（下一次请求自然进入新毫秒），其它错误原样失败。
  */
 async function newSession(key, tag, { identity = null } = {}) {
-  const { record } = await postJson(key, '/api/ai/session', {}, { identity })
-  checkEq(record.status, 200, `POST /api/ai/session（${key}/${tag}）HTTP：${record.text.slice(0, 300)}`)
-  const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(record.text)
-  check(matched, `POST /api/ai/session（${key}/${tag}）响应缺权威字段 sessionIdText：${record.text.slice(0, 300)}`)
-  const sessionId = matched[1]
-  check(sessionId.length >= 16, `sessionIdText（${key}/${tag}）= ${sessionId} 未超出 2^53 安全整数范围`)
-  return sessionId
+  const label = `${key}/${tag}`
+  let last = null
+  for (let attempt = 1; attempt <= SESSION_ID_MAX_ATTEMPTS; attempt += 1) {
+    const { record, body } = await postJson(key, '/api/ai/session', {}, { identity })
+    last = record
+    if (record.status === 200) {
+      const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(record.text)
+      check(matched, `POST /api/ai/session（${label}）响应缺权威字段 sessionIdText：${record.text.slice(0, 300)}`)
+      const sessionId = assertSessionIdText(matched[1], label)
+      assertSessionIdEcho(body, sessionId, label)
+      if (attempt > 1) caseLog(`会话号第 ${attempt} 次取号成功（前 ${attempt - 1} 次同毫秒撞号）：${sessionId}`)
+      return sessionId
+    }
+    check(
+      isSessionIdCollision(record, body),
+      `POST /api/ai/session（${label}）HTTP ${record.status}：${record.text.slice(0, 300)}`
+    )
+    if (attempt < SESSION_ID_MAX_ATTEMPTS) {
+      caseLog(
+        `会话号撞号 503（第 ${attempt}/${SESSION_ID_MAX_ATTEMPTS} 次），立即重取：${record.text.slice(0, 200)}`
+      )
+    }
+  }
+  throw new Error(
+    `POST /api/ai/session（${label}）连续 ${SESSION_ID_MAX_ATTEMPTS} 次撞号 503 ${SESSION_ID_UNAVAILABLE}：${last.text.slice(0, 300)}`
+  )
 }
 
 async function createTask(key, type, title) {
@@ -7109,6 +7166,63 @@ function probeFunctionSource(name) {
 }
 
 /**
+ * 会话号契约自证（`newSession`）：发号已从雪花号改为 `System.currentTimeMillis()`，
+ * 判据只剩"十进制正整数 + 文本与数值同值 + 撞号 503 有界重试"，不再按位数放行/拦截。
+ * 反例都走 `selfExpectThrow`，防止把判据写成"恒真"。
+ */
+function selfTestSessionIdContract() {
+  // 正例：13 位毫秒时间戳（当前形态）/ 安全整数边界 / 19 位旧雪花号——都不按位数判。
+  for (const accepted of ['1793328873442', '9007199254740991', '1731234567890123456']) {
+    checkEq(assertSessionIdText(accepted, 'self'), accepted, `会话号正例 ${accepted}`)
+  }
+  for (const rejected of ['', '0', '-1793328873442', '1.5', '12a', ' 1793328873442', 'abc']) {
+    selfExpectThrow(() => assertSessionIdText(rejected, 'self'), `自检：会话号 ${JSON.stringify(rejected)} 必须红`)
+  }
+
+  checkEq(
+    assertSessionIdEcho({ success: true, data: { sessionId: 1793328873442 } }, '1793328873442', 'self'),
+    '1793328873442',
+    '数值与文本同值'
+  )
+  selfExpectThrow(
+    () => assertSessionIdEcho({ success: true, data: { sessionId: 1793328873443 } }, '1793328873442', 'self'),
+    '自检：数值与文本不一致必须红'
+  )
+  selfExpectThrow(
+    () => assertSessionIdEcho({ success: true, data: {} }, '1793328873442', 'self'),
+    '自检：缺数值字段必须红'
+  )
+  selfExpectThrow(() => assertSessionIdEcho(null, '1793328873442', 'self'), '自检：响应体缺 data 必须红')
+  // 超安全整数时数值字段本就不可信：不算错，只以文本为准（两字段并存的原因）。
+  checkIncludes(
+    assertSessionIdEcho({ success: true, data: { sessionId: 1731234567890123500 } }, '1731234567890123456', 'self'),
+    '文本为权威',
+    '超安全整数时以文本为准'
+  )
+
+  // 只认"503 + SESSION_ID_UNAVAILABLE"这一种可重试，其它错误不得被重试吞掉。
+  checkEq(SESSION_ID_MAX_ATTEMPTS, 3, '撞号重试上限')
+  check(isSessionIdCollision({ status: 503 }, { code: SESSION_ID_UNAVAILABLE }), '503+撞号码必须判撞号')
+  check(!isSessionIdCollision({ status: 503 }, { code: 'AI_REDIS_UNAVAILABLE' }), '503 但非撞号码不得判撞号')
+  check(!isSessionIdCollision({ status: 500 }, { code: SESSION_ID_UNAVAILABLE }), '非 503 不得判撞号')
+  check(!isSessionIdCollision({ status: 503 }, null), '无响应体不得判撞号')
+  check(!isSessionIdCollision({ status: 200 }, { code: SESSION_ID_UNAVAILABLE }), '200 不得判撞号')
+
+  // 源码契约：重试循环与两条判据都必须在 newSession 里，且不得再按位数（雪花号 ≥16）判。
+  const src = probeFunctionSource('newSession')
+  for (const needle of [
+    'attempt <= SESSION_ID_MAX_ATTEMPTS',
+    'isSessionIdCollision(record, body)',
+    'assertSessionIdText(',
+    'assertSessionIdEcho('
+  ]) {
+    checkIncludes(src, needle, `newSession 缺判据 ${needle}`)
+  }
+  check(!/length\s*>=\s*16/.test(src), 'newSession 不得再按位数判会话号')
+  return '7 反例 + 3 正例 + 5 条撞号判定 + 源码契约'
+}
+
+/**
  * 双身份用例的内容契约（防"注册了但把断言删空"）：
  * ① 基线 16 条仍在 `CASES` 的**前 16 位**（顺序不变）且仍全在 `REQUIRED_CASE_IDS`；
  * ② 两条新用例在 `CASES`/`REQUIRED_CASE_IDS`/`BASELINE` 之外各自成立；
@@ -7379,6 +7493,7 @@ async function selfCheckMain() {
   console.log('cluster3-probe --self-check（不启动 Java/Docker、不连接任何端口）\n')
   selfCheck(`用例注册覆盖用户清单（${REQUIRED_CASE_IDS.length} 条）`, selfTestCaseRegistry)
   selfCheck('结果状态只有 PASS/FAIL（无 SKIP）', () => RESULT_STATUSES.join(',') === 'PASS,FAIL' ? 'PASS/FAIL' : (() => { throw new Error(RESULT_STATUSES.join(',')) })())
+  selfCheck('会话号契约（十进制正整数 / 文本=数值 / 503 撞号有界重试）', selfTestSessionIdContract)
   selfCheck('端口段 231xx 且禁用端口不出现', selfTestPortHygiene)
   selfCheck('静态 import 全部为 node: 内置模块', selfTestStaticImports)
   selfCheck('seq 断言（递增/乱序/重复）', selfTestSeqAndAssertions)
