@@ -63,12 +63,18 @@ public final class TenantKeyScope {
 	}
 
 	/**
-	 * 记录里是否带<b>可用身份</b>（租户正数、用户非 0；{@code -1} 是系统账号，允许）。
+	 * 记录里是否带<b>可用身份</b>（租户正数、用户为正数或系统账号 {@code -1}）。
+	 *
+	 * <p>判据与 {@link TenantUser} 的构造约束、{@link RunIdentityScope#usable(long, long)} 逐字同源：
+	 * 只有 {@code > 0} 与 {@code -1}（系统账号）可用，其余负值都是<b>坏值</b>。
+	 * {@code -1} 以外的负值若被当成身份，下游 {@code new TenantUser(...)} 会抛异常，
+	 * 恢复循环（如 {@code SessionPurgePendingStore#recoverOrphans}）因此整批中断。
 	 *
 	 * <p>旧记录没有身份字段（反序列化为 {@code null}/{@code 0}）：它们是 legacy，不能冒充任何新身份。
 	 */
 	public static boolean hasIdentity(Long tenantId, Long userId) {
-		return tenantId != null && userId != null && tenantId > 0 && userId != 0;
+		return tenantId != null && userId != null && tenantId > 0
+				&& (userId > 0 || userId == TenantUser.SYSTEM_USER_ID);
 	}
 
 }

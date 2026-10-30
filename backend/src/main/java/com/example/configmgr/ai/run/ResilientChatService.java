@@ -981,6 +981,11 @@ public class ResilientChatService {
 	 *     （没有租约语义，fencing 不参与）；<b>设施不可确认</b>时是 {@code UNAVAILABLE} ⇒ 写口
 	 *     <b>只读</b>（这一轮的快照/帧会被拒）。两者都不是"本方法兜住"的，这里只决定要不要驱动。</li>
 	 * </ul>
+	 *
+	 * <p><b>身份随租约显式携带</b>：续租回调跑在 {@link LeaseService} 自建的裸线程上，那里没有请求身份，
+	 * 而快照键由身份拼出。因此登记时把<b>请求身份</b>（本方法所在线程的身份 —— 就是建出这条记录的那一对）
+	 * 一并交给续租任务，判据用 {@link RunStore#get(String, long, long)} 显式读快照，
+	 * 不按"续租线程这一拍碰巧是谁"算键。
 	 */
 	private DriveOwnership takeDriveOwnership(String runId) {
 		// 先登记：续租的存活判据立刻为真（顺序反了会让第一拍就当"驱动已死"而自行还租）
@@ -1001,7 +1006,11 @@ public class ResilientChatService {
 		LeaseService.Lease lease = acquired.lease();
 		LeaseService leases = this.store.leaseService();
 		if (lease != null && leases != null) {
-			leases.markDriving(lease, () -> this.drivingRuns.contains(runId) && snapshotNotTerminal(runId));
+			// 捕获请求身份：续租线程没有它（也不能靠池线程 TTL 残留）。
+			TenantUser requestIdentity = RequestContextUtils.currentOrNull();
+			leases.markDriving(lease,
+					() -> this.drivingRuns.contains(runId) && snapshotNotTerminal(runId, requestIdentity),
+					requestIdentity);
 		}
 		return new DriveOwnership(lease, true, acquired.created());
 	}
@@ -1049,12 +1058,20 @@ public class ResilientChatService {
 	/**
 	 * 续租的存活判据：快照仍非终态（与 {@code ResumeService} 的同名判据同口径）。
 	 *
+	 * <p><b>按记录身份显式读</b>：本判据跑在 {@link LeaseService} 的续租线程上，快照键由身份拼出 ——
+	 * 用 {@link RunStore#get(String, long, long)}（{@code identity != null} 时）读，
+	 * 而不是"这一拍线程碰巧是谁"。隐式读在无身份的续租线程上只会命中 legacy 键（恒 {@code null}），
+	 * 于是首拍就判"驱动者已不在" ⇒ 提前还租、fencing 失效。
+	 *
 	 * <p>读失败按"还要活着"（异常分支返回 {@code true}）：一次 Redis 抖动不得让续租自己放弃租约；
 	 * 快照<b>不存在</b>（轮次已被销毁）则按终态处理，别再为空轮续租。
+	 *
+	 * @param identity 本轮记录身份（{@code null} = 记录无身份：按 legacy 口径读）
 	 */
-	private boolean snapshotNotTerminal(String runId) {
+	private boolean snapshotNotTerminal(String runId, TenantUser identity) {
 		try {
-			RunSnapshot snapshot = this.store.get(runId);
+			RunSnapshot snapshot = identity == null ? this.store.get(runId)
+					: this.store.get(runId, identity.tenantId(), identity.userId());
 			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
 		}
 		catch (RuntimeException ex) {

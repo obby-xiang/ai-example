@@ -691,7 +691,7 @@ public class ConfirmGate {
 				// 本分支不在下方 try/finally 内，取消监听者要在这里注销。
 				closeCancelHandle(cancelHandle, runId);
 				handedOff = true;
-				handOffLease(lease);
+				handOffLease(lease, runId);
 				return settled;
 			}
 			// 未决：还租与摘闸门已在锁内完成，lease 已归还，finally 不得重复释放。
@@ -767,7 +767,7 @@ public class ConfirmGate {
 				if (fresh != null && fresh.resolved()) {
 					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
 					handedOff = true;
-					handOffLease(lease);
+					handOffLease(lease, runId);
 					return fresh;
 				}
 				long sliceMs = HEARTBEAT_SECONDS * 1000L;
@@ -779,7 +779,7 @@ public class ConfirmGate {
 						// 旧实现走 finally 的"未交棒即还租"，等于在轮次仍在跑的时候把续跑权扔回池子：
 						// fencing 失效，另一实例的死卡兜底可以据此接管并双驱动同一轮。
 						handedOff = true;
-						handOffLease(lease);
+						handOffLease(lease, runId);
 						return expireFrontend(runId, pending, timeoutSeconds);
 					}
 					sliceMs = Math.min(sliceMs, remain);
@@ -906,21 +906,25 @@ public class ConfirmGate {
 	 * <p><b>I7 存活判据</b>：续租任务每一拍先问"这一轮还需要我活着吗" —— 快照存在且<b>非终态</b>，
 	 * 且本进程仍是这一任租约的主人（{@code heldRunEpoch == lease.epoch}）。判据转假 ⇒ 停续租 + 释放，
 	 * 于是"驱动线程悄悄死掉、快照停在 RUNNING"不会留下一个永远续租的僵尸租约。
+	 *
+	 * <p><b>身份一律按记录显式携带</b>（{@code runId} 由调用方给出，租约键形不认得时也一样）：
+	 * 两参 {@code markDriving(lease)} 取的是"登记这一拍的线程身份"，而交棒线程未必带身份
+	 * （恢复型入口 / 池化线程），续租回调就会在空身份下读身份定键的数据。
 	 */
-	private void handOffLease(LeaseService.Lease lease) {
+	private void handOffLease(LeaseService.Lease lease, String runId) {
 		if (lease == null) {
 			return;
 		}
-		String runId = runIdOf(lease);
-		if (runId == null) {
-			// 键形不认得（非本类拼的键）：没有可靠的存活判据，退回"调用方自己 release"的旧口径
+		String leaseRunId = runIdOf(lease);
+		if (leaseRunId == null) {
+			// 键形不认得（非本类拼的键）：没有可靠的存活判据（判据恒真），但身份仍按记录显式带进来
 			LeaseService holder = leases();
 			if (holder != null) {
-				holder.markDriving(lease);
+				holder.markDriving(lease, null, recordIdentityNow(runId));
 			}
 			return;
 		}
-		markDrivingGuarded(lease, runId);
+		markDrivingGuarded(lease, leaseRunId);
 	}
 
 	/**

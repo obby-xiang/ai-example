@@ -370,6 +370,11 @@ public class SessionGate {
 	 *
 	 * <p>Redis 侧是单键脚本（{@link #RELEASE_DEAD_SCRIPT}）：只删 {@code runId} 或
 	 * {@code runId|*} 形态的锁；另一轮的锁一个字节都不动。
+	 *
+	 * <p><b>匹配持有者时同时核对身份</b>：进程内门按锁键（含身份段）分桶，但"按记录找持有者"的兜底
+	 * 扫描跨全部桶 —— 只按 {@code sessionId + runId} 匹配会让<b>别的身份</b>的同名轮被误释放
+	 * （摘进程内门、取消 watchdog、并把锁键换成对方那把 ⇒ 删掉对方的会话锁）。
+	 * 无身份（legacy 视图）只匹配 legacy 持有者；不同身份之间永不互相强释放。
 	 */
 	public void releaseDeadHeld(String sessionId, String runId) {
 		if (runId == null || runId.isBlank()) {
@@ -379,11 +384,12 @@ public class SessionGate {
 			return;
 		}
 		String gateKey = gateKey(sessionId);
+		TenantUser identity = RequestContextUtils.currentOrNull();
 		Holder holder = this.inProcess.get(gateKey);
-		if (holder == null && RequestContextUtils.currentOrNull() == null) {
-			holder = findDeadHolder(sessionId, runId);
+		if (holder == null) {
+			holder = findDeadHolder(sessionId, runId, identity);
 		}
-		if (holder != null && holder.runId.equals(runId)) {
+		if (holder != null && holder.runId.equals(runId) && sameIdentity(holder, identity)) {
 			this.inProcess.remove(holder.gateKey, holder);
 			cancelWatchdog(holder);
 			gateKey = holder.gateKey;
@@ -439,14 +445,28 @@ public class SessionGate {
 		return degraded;
 	}
 
-	/** 按记录（sessionId+runId）定位持有者（只用于未带身份的判死强释放）。 */
-	private Holder findDeadHolder(String sessionId, String runId) {
+	/**
+	 * 按记录（sessionId + runId + <b>身份</b>）定位持有者（只用于判死强释放的兜底扫描）。
+	 *
+	 * <p>身份必须相同：{@code null}（legacy 视图）只匹配 legacy 持有者。同 sessionId/runId
+	 * 在不同身份下是<b>两轮互不相干的门</b>，跨身份匹配会误释放别人那一任。
+	 */
+	private Holder findDeadHolder(String sessionId, String runId, TenantUser identity) {
 		for (Holder holder : this.inProcess.values()) {
-			if (holder.sessionId.equals(sessionId) && holder.runId.equals(runId)) {
+			if (holder.sessionId.equals(sessionId) && holder.runId.equals(runId)
+					&& sameIdentity(holder, identity)) {
 				return holder;
 			}
 		}
 		return null;
+	}
+
+	/** 持有者身份与给定身份是否同一（{@code null} 只等于 {@code null}：legacy 不冒充任何身份）。 */
+	private static boolean sameIdentity(Holder holder, TenantUser identity) {
+		if (holder.identity == null || identity == null) {
+			return holder.identity == null && identity == null;
+		}
+		return holder.identity.equals(identity);
 	}
 
 	/**
