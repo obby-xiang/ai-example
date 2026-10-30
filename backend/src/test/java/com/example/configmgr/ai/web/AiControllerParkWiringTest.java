@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CancelledRunFinalizer;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -151,6 +152,57 @@ class AiControllerParkWiringTest {
 		Map<String, Object> body = (Map<String, Object>) response.getBody();
 		assertThat(body).containsEntry("parkedResume", "DISPATCHED");
 		verify(this.confirmGate).triggerResumeForParked(RUN_ID);
+	}
+
+	/**
+	 * <b>F3：运行中但驱动进程已死时，/cancel 不能只写旗标。</b>
+	 *
+	 * <p>写旗标之后没有任何进程内触发点（驱动线程已死 / 在别的实例），必须把取消收尾
+	 * 交棒给 {@link CancelledRunFinalizer}（它重新取租、走既有 {@code cancelConfirmed}，
+	 * 不驱动模型）。正常驱动内的取消路径（事件边界由驱动线程收尾）不受影响。
+	 */
+	@Test
+	void cancelOfADeadRunningRoundHandsOffTheCancelFinalization() {
+		RunSnapshot snapshot = snapshot(RunSnapshot.RUNNING);
+		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
+		CancelledRunFinalizer finalizer = mock(CancelledRunFinalizer.class);
+		when(finalizer.handOff(RUN_ID, "REQUEST_CANCEL")).thenReturn(true);
+		wireCancelFinalizer(this.controller, finalizer);
+
+		ResponseEntity<?> response = this.controller.cancel(RUN_ID);
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> body = (Map<String, Object>) response.getBody();
+		assertThat(body).containsEntry("cancelFinalize", "HANDED_OFF");
+		verify(finalizer).handOff(RUN_ID, "REQUEST_CANCEL");
+	}
+
+	/** 装配取消收尾交棒（旧实现没有该接线时保持未注入，对应用例必须因缺键而红）。 */
+	private static void wireCancelFinalizer(AiController controller, CancelledRunFinalizer finalizer) {
+		if (org.springframework.util.ReflectionUtils.findField(AiController.class, "cancelFinalizer") != null) {
+			ReflectionTestUtils.setField(controller, "cancelFinalizer", finalizer);
+		}
+	}
+
+	/**
+	 * <b>F4：会话门判死也必须用严格读取口</b>。{@code isHeld} 吞异常返回 false 时，仍有租约的
+	 * 活轮会被判死并强释放会话门（同一会话可并发两轮）；严格读取口的异常由 fail-closed 兜住。
+	 */
+	@Test
+	void leaseProbeFailureDoesNotJudgeTheHeldRoundDead() {
+		RunSnapshot snapshot = snapshot(RunSnapshot.SUSPENDED);
+		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
+		when(this.runStore.lastActivityAtMs(RUN_ID)).thenReturn(0L);
+		com.example.configmgr.ai.run.LeaseService leases = mock(com.example.configmgr.ai.run.LeaseService.class);
+		when(this.runStore.leaseService()).thenReturn(leases);
+		when(this.runStore.runLeaseKey(RUN_ID)).thenReturn("ai:lease:run:{run:" + RUN_ID + "}");
+		when(leases.isHeldStrict(anyString())).thenThrow(new IllegalStateException("redis down"));
+		when(this.runRegistry.hasLiveSubscriber(RUN_ID)).thenReturn(false);
+
+		Object dead = ReflectionTestUtils.invokeMethod(this.controller, "isDeadRound", RUN_ID);
+
+		assertThat(dead).as("租约读不出来 ≠ 没人持有：不得释放会话门").isEqualTo(Boolean.FALSE);
+		verify(this.runRegistry, never()).recycleIfIdle(RUN_ID);
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────

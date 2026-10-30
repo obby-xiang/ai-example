@@ -159,7 +159,8 @@ class StartupResumeRunnerRuntimeSweepTest {
 	void sweepDoesNotTakeOverWhenTheLeaseIsHeldElsewhere() {
 		seed(RUN_ZOMBIE, RunSnapshot.RUNNING, STALE);
 		LeaseService leases = mock(LeaseService.class);
-		when(leases.isHeld(anyString())).thenReturn(true);
+		// 判死路径用的是严格读取口（F4）：isHeld 吞异常的口径只留给对账。
+		when(leases.isHeldStrict(anyString())).thenReturn(true);
 		this.store.useLeaseFacility(leases);
 
 		Map<String, Object> report = this.runner.sweep();
@@ -168,7 +169,13 @@ class StartupResumeRunnerRuntimeSweepTest {
 		assertThat(skippedReasons(report)).containsEntry(RUN_ZOMBIE, "ACTIVE");
 	}
 
-	/** 取消旗标与未决外部输入都优先于"超龄"：一个不复活，一个不绕开人审。 */
+	/**
+	 * 取消旗标与未决外部输入都优先于"超龄"：一个不复活、一个不绕开人审。
+	 *
+	 * <p>F3 起取消旗标不再等于"跳过"：非终态时扫描会尝试一次取消收尾
+	 * （{@code cancelConfirmed}）；本用例的收尾设施是桩（终帧判据不可知），故落定在
+	 * {@code CANCEL_*} 跳过项 —— 关键是<b>没有被续跑</b>，也没有被驱动。
+	 */
 	@Test
 	void sweepSkipsCancelledAndPendingUnresolvedRuns() {
 		seed(RUN_CANCELLED, RunSnapshot.SUSPENDED, STALE);
@@ -184,9 +191,13 @@ class StartupResumeRunnerRuntimeSweepTest {
 
 		Map<String, Object> report = this.runner.sweep();
 
-		assertThat(resumedRunIds(report)).isEmpty();
-		assertThat(skippedReasons(report)).containsEntry(RUN_CANCELLED, "CANCELLED")
-			.containsEntry(RUN_PENDING, "PENDING_UNRESOLVED");
+		assertThat(resumedRunIds(report)).doesNotContain(RUN_CANCELLED, RUN_PENDING);
+		assertThat(skippedReasons(report)).containsEntry(RUN_PENDING, "PENDING_UNRESOLVED");
+		assertThat(skippedReasons(report).getOrDefault(RUN_CANCELLED, ""))
+			.as("取消轮不再被记成 CANCELLED 跳过：它必须进入取消收尾（结果可能是 CANCEL_*）")
+			.startsWith("CANCEL_");
+		assertThat(this.store.get(RUN_CANCELLED).getStatus()).as("取消收尾失败也不得因此驱动").isEqualTo(
+				RunSnapshot.SUSPENDED);
 	}
 
 	/** 定时器：开关关掉不注册、启动后可停（{@code @PreDestroy} 走同一入口）。 */

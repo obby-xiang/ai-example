@@ -1100,6 +1100,26 @@ public class LeaseService {
 		}
 	}
 
+	/**
+	 * <b>严格读取口</b>：该键上是否有租约，异常<b>上抛</b>（不吞、不折叠成 {@code false}）。
+	 *
+	 * <p>与 {@link #isHeld(String)} 的分工：
+	 * <ul>
+	 * <li>{@link #isHeld} 是对账口径（{@code ToolUnknownReconciler} / {@code ToolResourceLocks}）：
+	 *     "锁还在不在"只影响文案，失败按"没有锁"降级，不抛；</li>
+	 * <li>本方法是<b>判死口径</b>（{@code AiController#isDeadRound} /
+	 *     {@code StartupResumeRunner#deadWithoutDriver}）：调用方的错误方向是"并发双跑"，
+	 *     "读不出来"必须能被 catch 成"可能有人持有"（fail-closed）。吞异常的 {@code false}
+	 *     会让一次 MOVED/TRYAGAIN/单节点故障把仍有租约的活轮判死并接管。</li>
+	 * </ul>
+	 */
+	public boolean isHeldStrict(String key) {
+		if (key == null) {
+			return false;
+		}
+		return Boolean.TRUE.equals(this.redis.hasKey(key));
+	}
+
 	// ── 健康度 ──────────────────────────────────────────────────────────────
 
 	/**

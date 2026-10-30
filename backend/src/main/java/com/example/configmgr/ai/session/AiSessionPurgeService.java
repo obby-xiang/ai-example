@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -157,6 +158,16 @@ public class AiSessionPurgeService {
 	private final SessionGate sessionGate;
 
 	private final CancellationRegistry cancellations;
+
+	/**
+	 * 取消收尾的窄入口（F3）：取消旗标写完之后，驱动进程已死的轮次没有任何人写终态 ——
+	 * 只等 {@code awaitTerminal} 必然超时，13 键被无限延后（{@code ai:purge:pending} 无 TTL
+	 * ⇒ 会话永久 410 且删不掉）。**字段注入 + ObjectProvider** 保持构造器签名（多份既有用例
+	 * 直接 {@code new}），也不把销毁流程与 AI 运行面的创建顺序耦合；未装配（轻装配/单测）时
+	 * 保持旧行为：只写旗标 + 等一个短窗口。
+	 */
+	@Autowired(required = false)
+	private org.springframework.beans.factory.ObjectProvider<ResumeService> resumeServiceProvider;
 
 	private final ChatMemoryRepository chatMemoryRepository;
 
@@ -843,6 +854,7 @@ public class AiSessionPurgeService {
 			if (!run.active()) {
 				continue;
 			}
+			boolean cancelled = false;
 			try {
 				// 已经确定取消的轮不重复调 cancel（重复取消会再写一次权威键；虽然语义幂等，
 				// 但"活跃 run 不重复副作用"要求我们不做无意义的第二次动作）。
@@ -851,11 +863,48 @@ public class AiSessionPurgeService {
 					if (!result.redisWritten()) {
 						warnings.add("run[" + run.runId() + "]: 取消标志未能写入 Redis（仅进程内生效）");
 					}
+					cancelled = result.redisWritten();
+				}
+				else {
+					cancelled = true;
 				}
 			}
 			catch (RuntimeException ex) {
 				warnings.add("run[" + run.runId() + "]: 取消失败（" + rootMessage(ex) + "）");
 			}
+			// F3：旗标已确认之后，收敛不能再等"驱动线程自己收尾" —— 驱动进程已死时它永远不会来。
+			if (cancelled) {
+				finalizeCancelledRun(run, warnings);
+			}
+		}
+	}
+
+	/**
+	 * 对"已确认取消"的活跃轮执行一次取消收尾（F3）：走既有
+	 * {@link ResumeService#cancelConfirmed(String)}（重取租约 + 校验取消事实 + 按归档终帧幂等），
+	 * <b>不驱动模型/工具</b>。
+	 *
+	 * <p>没在本次落定（租约在别处 / 会话门被占 / 这拍不可确认）不是错误：随后的
+	 * {@link #awaitTerminal} 与 {@code deferred} 重试照旧兜底；这里只负责把"无人收尾"这一种
+	 * 永久卡死消掉。
+	 */
+	private void finalizeCancelledRun(RunTarget run, List<String> warnings) {
+		ResumeService resumeService = this.resumeServiceProvider == null ? null
+				: this.resumeServiceProvider.getIfAvailable();
+		if (resumeService == null) {
+			return;
+		}
+		try {
+			ResumeService.CancelFinalize outcome = resumeService.cancelConfirmed(run.runId());
+			if (outcome != ResumeService.CancelFinalize.FINALIZED
+					&& outcome != ResumeService.CancelFinalize.ALREADY_TERMINAL
+					&& outcome != ResumeService.CancelFinalize.NO_RUN) {
+				log.info("会话销毁：取消收尾本次未落定 runId={} outcome={}（交给 awaitTerminal/deferred 重试）",
+						run.runId(), outcome);
+			}
+		}
+		catch (RuntimeException ex) {
+			warnings.add("run[" + run.runId() + "]: 取消收尾失败（" + rootMessage(ex) + "）");
 		}
 	}
 

@@ -787,7 +787,19 @@ public class ConfirmGate {
 						// fencing 失效，另一实例的死卡兜底可以据此接管并双驱动同一轮。
 						handedOff = true;
 						handOffLease(lease, runId);
-						return expireFrontend(runId, pending, timeoutSeconds);
+						try {
+							return expireFrontend(runId, pending, timeoutSeconds);
+						}
+						catch (RuntimeException ex) {
+							// F2 失败关闭：到期结论的决策 guard 不可用 ⇒ 这一拍<b>不落库、不发结局帧、
+							// 不派发续跑</b>（否则跨实例会各写一次 TIMEOUT）。条目保持 PENDING，
+							// 等一拍再回来重试；期间的决策/取消仍经闸门唤醒走循环顶部的既有两个出口。
+							log.warn("前端回执到期裁决的决策 guard 不可用 runId={} toolCallId={}"
+									+ "（保持 PENDING，下一拍重试；不落库/不发帧）：{}", runId,
+									pending.getToolCallId(), ex.getMessage());
+							latch.await(HEARTBEAT_SECONDS * 1000L);
+							continue;
+						}
 					}
 					sliceMs = Math.min(sliceMs, remain);
 				}
@@ -1156,13 +1168,113 @@ public class ConfirmGate {
 	 * 产生 {@code decision=timeout} 帧。
 	 */
 	private PendingToolCall expireFrontend(String runId, PendingToolCall pending, int timeoutSeconds) {
+		return expireFrontendClaimed(runId, pending, timeoutSeconds).entry();
+	}
+
+	/**
+	 * 前端回执超时的<b>单写者</b>版本：先用决策 guard（{@code ai:decided} 的 {@code HSETNX}）
+	 * 抢一次"这张卡的结论"，抢到才落库/发结局帧。
+	 *
+	 * <p>为什么需要 guard：到期判定现在有<b>两个</b>入口 —— 原实例进程内的 park 定时器，与任一实例的
+	 * 运行期扫描/重挂（{@code convergeExpiredParkedFrontend}）。两边同时到点会各写一次 {@code TIMEOUT}、
+	 * 各发一条 {@code frontend_tool_result}。guard 与人工决策/回灌共用同一把，于是"同一张卡只有
+	 * 一个结论写者"在跨实例上也成立；败方按幂等返回（不落库、不再发帧）。
+	 *
+	 * <p>降级口径：{@code tryRecordDecision} 返回 {@code null}（轻装配/替身不提供 guard）时保持旧行为 ——
+	 * 单写路径本来就没有第二个并发方；<b>抛异常</b>（guard 设施不可用）则失败关闭、原样上抛：
+	 * 本方法不落库、不发帧，由调用方的 catch 记录后下一拍重试。
+	 */
+	private ExpiryResult expireFrontendClaimed(String runId, PendingToolCall pending, int timeoutSeconds) {
 		PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 		if (fresh == null) {
 			fresh = pending;
 		}
 		if (!PendingToolCall.PENDING.equals(fresh.getStatus())) {
-			return fresh;
+			return new ExpiryResult(fresh, false, false);
 		}
+		RunStore.DecisionClaim claim = claimExpiry(runId, fresh.getToolCallId());
+		if (claim != null && !claim.won()) {
+			// 结论已由别的写者抢到（人工决策/另一实例的到期收敛）：本写者不再落库、不再发帧。
+			PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
+			PendingToolCall entry = current == null ? fresh : current;
+			if (PendingToolCall.PENDING.equals(entry.getStatus()) && isStaleExpiryClaim(claim.recorded())) {
+				// WAL 修补：guard 的持有者已超龄（死在"抢 guard → 落库"之间）。补齐存储让状态收敛，
+				// 但<b>不发结局帧</b> —— 帧的发送权仍属于 guard 的（已死的）持有者，补发会造出第二条。
+				PendingToolCall raw = rawOr(entry, runId, pending.getToolCallId());
+				if (PendingToolCall.PENDING.equals(raw.getStatus())) {
+					PendingToolCall repaired = applyFrontendTimeout(raw, timeoutSeconds);
+					this.store.putPending(runId, repaired);
+					return new ExpiryResult(repaired, true, false);
+				}
+			}
+			return new ExpiryResult(entry, false, false);
+		}
+		PendingToolCall target = claim == null ? fresh : rawOr(fresh, runId, pending.getToolCallId());
+		if (!PendingToolCall.PENDING.equals(target.getStatus())) {
+			return new ExpiryResult(target, false, false);
+		}
+		return new ExpiryResult(writeFrontendTimeout(runId, target, timeoutSeconds), true, true);
+	}
+
+	/**
+	 * 到期 guard 是否已经"超龄到可以判定持有者已死"（{@code <status>|<atMs>|<instanceId>}）。
+	 *
+	 * <p>阈值刻意远大于一次正常落库（毫秒级），只用来修补"抢到 guard 后进程崩溃"这一种现场；
+	 * 正常双写竞争里败方看到的 guard 恒是新鲜的 ⇒ 不会补写、不会造第二条帧。
+	 */
+	private static boolean isStaleExpiryClaim(String recorded) {
+		if (recorded == null) {
+			return false;
+		}
+		String[] parts = recorded.split(java.util.regex.Pattern.quote("|"), -1);
+		if (parts.length < 2 || !PendingToolCall.TIMEOUT.equals(parts[0])) {
+			return false;
+		}
+		try {
+			long atMs = Long.parseLong(parts[1]);
+			return atMs > 0L && System.currentTimeMillis() - atMs > EXPIRY_CLAIM_STALE_MS;
+		}
+		catch (NumberFormatException ex) {
+			return false;
+		}
+	}
+
+	/**
+	 * 抢"这张卡已到期"的写权。
+	 *
+	 * <p><b>失败关闭</b>：这里<b>不</b> catch —— 返回 {@code null}（轻装配/替身不支持 guard）才退回旧
+	 * 单写路径；<b>抛异常</b>（guard 设施不可用）必须原样上抛，由各到期入口的外层 catch 记录并
+	 * <b>不落库、不发结局帧、不派发续跑</b>，下一拍再试。把异常吞成 {@code null} 会让两个实例同时
+	 * 认为自己拿到了写权 —— 正是一定要消灭的"双 TIMEOUT/双结局帧"。
+	 */
+	private RunStore.DecisionClaim claimExpiry(String runId, String toolCallId) {
+		return this.store.tryRecordDecision(runId, toolCallId, PendingToolCall.TIMEOUT);
+	}
+
+	/** guard 抢到后必须看<b>原始</b>条目（{@code pendingLenient} 已把刚写的 guard 合进视图）。 */
+	private PendingToolCall rawOr(PendingToolCall fallback, String runId, String toolCallId) {
+		try {
+			PendingToolCall raw = this.store.pendingRaw(runId, toolCallId);
+			return raw == null ? fallback : raw;
+		}
+		catch (RuntimeException ex) {
+			log.debug("读取待决条目原始态失败 runId={} toolCallId={}（用已读到的副本）：{}", runId, toolCallId,
+					ex.getMessage());
+			return fallback;
+		}
+	}
+
+	/** 落库 + 结局帧（调用方必须已经确定"本写者是这张卡的结论持有者"）。 */
+	private PendingToolCall writeFrontendTimeout(String runId, PendingToolCall fresh, int timeoutSeconds) {
+		PendingToolCall timedOut = applyFrontendTimeout(fresh, timeoutSeconds);
+		this.store.putPending(runId, timedOut);
+		this.registry.of(runId).frontendToolResult(timedOut, false, timedOut.getResultText());
+		traceDecision(runId, timedOut.getToolCallId(), "timeout", timedOut, "ACCEPTED", "system");
+		return timedOut;
+	}
+
+	/** 只设置结局字段（不落库/不发帧）：WAL 修补复用同一份文案与字段口径。 */
+	private static PendingToolCall applyFrontendTimeout(PendingToolCall fresh, int timeoutSeconds) {
 		fresh.setStatus(PendingToolCall.TIMEOUT);
 		fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
 		fresh.setCode(ToolOutcome.CODE_FRONTEND_TIMEOUT);
@@ -1171,11 +1283,21 @@ public class ConfirmGate {
 		fresh.setResolvedAtMs(System.currentTimeMillis());
 		fresh.setResultText(
 				"前端工具 " + fresh.getName() + " 未在 " + timeoutSeconds + " 秒内收到前端回执，本次调用结局未知（不表示未发生）。");
-		this.store.putPending(runId, fresh);
-		this.registry.of(runId).frontendToolResult(fresh, false, fresh.getResultText());
-		traceDecision(runId, pending.getToolCallId(), "timeout", fresh, "ACCEPTED", "system");
 		return fresh;
 	}
+
+	/**
+	 * 一次到期收敛的结论。
+	 *
+	 * @param entry 最终条目视图
+	 * @param winner 本次是否由我完成收敛（落库；正常路径也发帧）
+	 * @param frameSent 本次是否发出了结局帧（{@code false} 仅出现在"修补已死 guard 持有者"的 WAL 路径）
+	 */
+	private record ExpiryResult(PendingToolCall entry, boolean winner, boolean frameSent) {
+	}
+
+	/** 到期 guard 可判定"持有者已死"的阈值：远大于一次正常落库，避免正常竞争里误修补。 */
+	private static final long EXPIRY_CLAIM_STALE_MS = 30_000L;
 
 	/**
 	 * <b>I4：park 之后按 {@code expiresAt} 排一次前端回执到期收敛</b>。
@@ -1213,13 +1335,20 @@ public class ConfirmGate {
 					if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
 						return;
 					}
-					PendingToolCall expired = expireFrontend(runId, fresh, timeoutSeconds);
+					ExpiryResult result = expireFrontendClaimed(runId, fresh, timeoutSeconds);
+					if (!result.winner()) {
+						// 结论已由别的写者抢到（人工决策 / 另一实例的到期收敛）：不发第二条结局帧。
+						log.info("park 后的前端回执到期裁决已被别的写者取得 runId={} toolCallId={}（本拍不改状态）",
+								runId, toolCallId);
+						return;
+					}
+					PendingToolCall expired = result.entry();
 					settleParkedToolCall(runId, expired, expired.getResultText());
 					AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
 							toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
-					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={}"
+					log.info("park 后的前端回执到期，条目已收敛 runId={} toolCallId={} tool={} timeoutS={} frame={}"
 							+ "（派发一次续跑：轮次必须继续收尾，不能停在「没有驱动方也没有终帧」）",
-							runId, toolCallId, toolName, timeoutSeconds);
+							runId, toolCallId, toolName, timeoutSeconds, result.frameSent());
 					// 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
 					triggerResume(runId, false, true);
 				}
@@ -1233,6 +1362,88 @@ public class ConfirmGate {
 			log.warn("park 后的前端回执到期收敛未排上 runId={} toolCallId={}：{}", runId, toolCallId,
 					ex.getMessage());
 		}
+	}
+
+	/**
+	 * <b>F2：消费持久化的 {@code expiresAt}</b> —— 任一实例都可调用（运行期扫描 / 重挂 / 运维）。
+	 *
+	 * <h2>为什么需要读侧</h2>
+	 * park 后的到期收敛原来只有原实例进程内的定时器（{@link #scheduleParkedFrontendExpiry}）：
+	 * 实例被杀、或客户端重挂到别的实例时，{@code PendingToolCall.expiresAt} 虽然已经落库，
+	 * 却<b>没有任何读侧用它</b> —— 条目永远 {@code PENDING}，该轮永远 {@code SUSPENDED}。
+	 *
+	 * <h2>只收敛"有时限的即时前端工具"</h2>
+	 * 判据沿用 {@link #suspendWaitSeconds(PendingToolCall)}：确认门 / {@code generative_form} /
+	 * 表格写工具都返回 {@code null}（等人，无上限）⇒ 本方法<b>不碰</b>，无限等待语义不变。
+	 * 还要求 {@code expiresAt > 0 && expiresAt <= now} 且条目仍是 {@code PENDING}。
+	 *
+	 * <h2>只赢一次</h2>
+	 * 收敛走 {@link #expireFrontendClaimed}：先抢决策 guard（与人工决策/回灌同一把
+	 * {@code ai:decided} {@code HSETNX}），抢到才落库 + 发结局帧；败方什么都不写。
+	 * 到期是系统裁决：胜者随后派发一次续跑（与决策/回灌同一条有界派发），绝不驱动模型本身。
+	 *
+	 * <p>调用方负责该轮<b>记录身份</b>的作用域（扫描线程用 {@code RunIdentityScope}；
+	 * HTTP 重挂线程本来就有身份）。读失败/写失败只留日志、不改变任何状态。
+	 *
+	 * @return 本拍由本实例收敛的条目数（0 = 没有到期条目，或都已被别的写者取得）
+	 */
+	public int convergeExpiredParkedFrontend(String runId) {
+		if (runId == null || runId.isBlank()) {
+			return 0;
+		}
+		List<PendingToolCall> pendings;
+		try {
+			pendings = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("park 到期收敛读取待决条目失败 runId={}（这拍不消费，下一拍重试）：{}", runId,
+					ex.getMessage());
+			return 0;
+		}
+		long now = System.currentTimeMillis();
+		int converged = 0;
+		for (PendingToolCall pending : pendings) {
+			if (!PendingToolCall.PENDING.equals(pending.getStatus())
+					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+				continue;
+			}
+			Long expiresAt = pending.getExpiresAt();
+			if (expiresAt == null || expiresAt <= 0L || expiresAt > now) {
+				continue;
+			}
+			Integer timeoutSeconds = suspendWaitSeconds(pending);
+			if (timeoutSeconds == null) {
+				// 确认门 / 表单 / 表格写工具：等的是人，没有上限 —— 到期字段（若有）不作数。
+				continue;
+			}
+			String toolCallId = pending.getToolCallId();
+			String toolName = pending.getName();
+			try {
+				ExpiryResult result = expireFrontendClaimed(runId, pending, timeoutSeconds);
+				if (!result.winner()) {
+					continue;
+				}
+				PendingToolCall expired = result.entry();
+				settleParkedToolCall(runId, expired, expired.getResultText());
+				AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
+						toolCallId, "tool", toolName, "timeoutS", timeoutSeconds, "source", "converge");
+				log.info("park 到期条目已由本实例收敛 runId={} toolCallId={} tool={} timeoutS={}", runId,
+						toolCallId, toolName, timeoutSeconds);
+				converged++;
+			}
+			catch (RuntimeException ex) {
+				log.warn("park 到期条目收敛失败 runId={} toolCallId={}（不改状态，下一拍重试）：{}", runId,
+						toolCallId, ex.getMessage());
+			}
+		}
+		if (converged > 0) {
+			// 到期是系统裁决：条目已收敛，这一轮必须继续。同一轮的多张卡共用一次派发
+			// （租约/会话门会挡住重复驱动，但没必要多打几拍）。
+			log.info("park 到期收敛完成 runId={}（{} 个条目；派发一次续跑：轮次不能停在「没有驱动方也没有终帧」）",
+					runId, converged);
+			triggerResume(runId, false, true);
+		}
+		return converged;
 	}
 
 	private Map<String, Object> heartbeatData(String runId, PendingToolCall pending, boolean confirm,

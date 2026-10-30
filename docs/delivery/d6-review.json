@@ -91,6 +91,13 @@
       "reason": "已删除未上线文件键迁移与退役键告警运行时资产，保留Flyway历史，并同步D6测试替身清单",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:32a78c3b43cd9f3ad9610a67a6c6ee24b6a974c6ff4577004be10645848135c0",
+      "status": "not-affected",
+      "reason": "本批仅收敛既有取消、到期与租约判读的多实例可靠性，不新增迁移资产、配置键、帧类型或接口契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

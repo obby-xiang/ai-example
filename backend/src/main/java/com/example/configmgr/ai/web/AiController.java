@@ -17,6 +17,7 @@ import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CancelledRunFinalizer;
 import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -157,6 +158,14 @@ public class AiController {
 	private final RunRegistry runRegistry;
 
 	private final CancellationRegistry cancellations;
+
+	/**
+	 * 取消收尾的接棒者（F3）：{@code POST /cancel} 只写旗标时，驱动线程已死/在别的实例就没有
+	 * 任何进程内触发点。**字段注入**（构造器签名不变 ⇒ 既有 {@code new AiController(...)} 用例零触碰）；
+	 * 未注入（standalone 单测）时退化为"只写旗标 + 事件边界收尾"的旧行为。
+	 */
+	@Autowired(required = false)
+	private CancelledRunFinalizer cancelFinalizer;
 
 	private final RedisAvailability redisAvailability;
 
@@ -1045,7 +1054,24 @@ public class AiController {
 		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
 		if (snapshot != null && this.properties.getPark().isEnabled()
 				&& RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
-			if (stillWaitingForInput(runId)) {
+			// ===== F2：重挂也是"任实例可消费 expiresAt"的入口 =====
+			// park 后的到期收敛原来只有原实例进程内定时器；实例被杀后重挂方只看到 PENDING 就
+			// 收流/等待，条目永远不收敛。这里在"是否还在等人"之前先用持久化 expiresAt 收一次
+			// （既有 expireFrontend + 决策 guard；确认门/表单无上限，不会被消费）。
+			int expired = 0;
+			try {
+				expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
+			}
+			catch (RuntimeException ex) {
+				log.warn("reattach 消费 park 到期条目失败 runId={}（按仍在等人处理，不泄漏订阅）：{}", runId,
+						ex.getMessage());
+			}
+			if (expired > 0 && !stillWaitingForInput(runId)) {
+				// 到期收敛已派发一次续跑：保留订阅，让随后产出的 done/error 能从这条连接到达。
+				log.info("reattach 消费了 {} 个到期前端条目 runId={}（续跑已派发，保留连接等终帧）", expired,
+						runId);
+			}
+			else if (stillWaitingForInput(runId)) {
 				out.completeSubscriptions();
 			}
 			else {
@@ -1336,7 +1362,9 @@ public class AiController {
 		boolean leaseHeld = false;
 		try {
 			com.example.configmgr.ai.run.LeaseService leases = this.runStore.leaseService();
-			leaseHeld = leases != null && leases.isHeld(this.runStore.runLeaseKey(heldRunId));
+			// 判死口径必须用严格读取口：isHeld 吞异常返回 false，会把"读不出来"当成"没人持有"
+			// ⇒ 仍有租约的活轮被判死放行（同一会话双驱动）。异常由下面 catch 折成 fail-closed。
+			leaseHeld = leases != null && leases.isHeldStrict(this.runStore.runLeaseKey(heldRunId));
 		}
 		catch (Exception ex) {
 			// 租约设施不可读 ⇒ 按"可能有人持有"处理（不放行），与 E3 的保守方向相反是因为
@@ -1408,7 +1436,18 @@ public class AiController {
 			body.put("note", "取消以 Redis 标志为准；挂起中的轮已触发一次收敛派发（parkedResume）");
 		}
 		else {
-			body.put("note", "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
+			boolean handedOff = false;
+			if (snapshot != null && !isTerminal(snapshot.getStatus())) {
+				// F3：运行中（或 park 关闭的挂起态）没有进程内触发点时，取消收尾必须交棒 ——
+				// 否则驱动进程一死，旗标就只是一个没人消费的事实（快照永远 RUNNING，销毁永久重试）。
+				// 交棒只做取消收尾（重取租约 + 校验取消事实 + 归档终帧幂等），绝不驱动模型。
+				handedOff = this.cancelFinalizer != null
+						&& this.cancelFinalizer.handOff(runId, CancelledRunFinalizer.CAUSE_REQUEST);
+				body.put("cancelFinalize", handedOff ? "HANDED_OFF" : "IN_PROCESS_OR_UNAVAILABLE");
+			}
+			body.put("note", handedOff
+					? "取消以 Redis 标志为准；本实例已交棒一次取消收尾（重取租约后落 CANCELLED 终态/终帧）"
+					: "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
 		}
 		return ResponseEntity.ok(body);
 	}

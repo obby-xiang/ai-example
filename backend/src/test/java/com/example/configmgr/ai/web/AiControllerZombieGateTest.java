@@ -80,7 +80,7 @@ class AiControllerZombieGateTest {
 		when(this.runStore.lastActivityAtMs(deadRun)).thenReturn(0L);
 		when(this.runStore.runLeaseKey(deadRun)).thenReturn("ai:lease:run:" + deadRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
-		when(this.leases.isHeld("ai:lease:run:" + deadRun)).thenReturn(false);
+		when(this.leases.isHeldStrict("ai:lease:run:" + deadRun)).thenReturn(false);
 		when(this.runRegistry.hasLiveSubscriber(deadRun)).thenReturn(false);
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(deadRun, false), null);
@@ -128,7 +128,7 @@ class AiControllerZombieGateTest {
 		when(this.runStore.lastEventAtMs(stalledRun)).thenReturn(System.currentTimeMillis());
 		when(this.runStore.runLeaseKey(stalledRun)).thenReturn("ai:lease:run:" + stalledRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
-		when(this.leases.isHeld("ai:lease:run:" + stalledRun)).thenReturn(false);
+		when(this.leases.isHeldStrict("ai:lease:run:" + stalledRun)).thenReturn(false);
 		when(this.runRegistry.hasLiveSubscriber(stalledRun)).thenReturn(false);
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(stalledRun, false), null);
@@ -160,7 +160,7 @@ class AiControllerZombieGateTest {
 		when(this.runStore.lastEventAtMs(waitingRun)).thenReturn(System.currentTimeMillis());
 		when(this.runStore.runLeaseKey(waitingRun)).thenReturn("ai:lease:run:" + waitingRun);
 		when(this.runStore.leaseService()).thenReturn(this.leases);
-		when(this.leases.isHeld("ai:lease:run:" + waitingRun)).thenReturn(false);
+		when(this.leases.isHeldStrict("ai:lease:run:" + waitingRun)).thenReturn(false);
 		when(this.runRegistry.hasLiveSubscriber(waitingRun)).thenReturn(false);
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(waitingRun, false), null);

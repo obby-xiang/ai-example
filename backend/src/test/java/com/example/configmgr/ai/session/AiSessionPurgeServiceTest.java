@@ -9,6 +9,7 @@ import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -27,6 +28,7 @@ import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -326,8 +328,58 @@ class AiSessionPurgeServiceTest {
 		verify(this.fixture.cancellations, times(1)).cancel("run-a", "test");
 	}
 
+	/**
+	 * <b>F3：驱动已死的取消轮必须被销毁流程收尾，销毁才能 complete</b>。
+	 *
+	 * <h2>缺陷</h2>
+	 * {@code cancelActiveRuns} 只写 Redis 旗标，然后 {@code awaitTerminal} 等一个短窗口；
+	 * 驱动进程已死（或被 kill -9）时没人写终态 ⇒ 该 run 永远 {@code RUN_ACTIVE} /
+	 * {@code deferred}，而 {@code ai:purge:pending} 无 TTL ⇒ <b>会话永久 410 且删不掉</b>。
+	 *
+	 * <h2>本批口径</h2>
+	 * 已确认取消（旗标存在）的活跃 run 调既有 {@link ResumeService#cancelConfirmed(String)}
+	 * （抢租约 + 校验取消事实 + 按归档终帧幂等，绝不驱动模型）；收敛成终态后按既有路径删键。
+	 */
+	@Test
+	void canceledRunWithoutDriverIsFinalizedSoThePurgeCompletes() throws Exception {
+		seedRun("run-a", SESSION_A, RunSnapshot.RUNNING);
+		seedPending("run-a", "call-a");
+		seedMemory(SESSION_A);
+		when(this.fixture.gate.currentRunId(SESSION_A)).thenReturn("run-a");
+
+		ResumeService resume = mock(ResumeService.class);
+		when(resume.cancelConfirmed("run-a")).thenAnswer(invocation -> {
+			// 复刻 cancelConfirmed 的可判定后果：取消事实成立 ⇒ 快照落 CANCELLED（终帧归档判据另测）。
+			writeSnapshot("run-a", SESSION_A, RunSnapshot.CANCELLED);
+			return ResumeService.CancelFinalize.FINALIZED;
+		});
+		wireResumeService(this.fixture.service, resume);
+
+		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(result.deferred()).as("无驱动方的取消轮不得再被当成活跃 run 延后").isEmpty();
+		assertThat(result.complete()).as("取消收尾落终态后，销毁必须能完成（不再永久重试）").isTrue();
+		verify(resume).cancelConfirmed("run-a");
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.pendingKey("run-a"));
+	}
+
+	/**
+	 * 装配"取消收尾窄入口"；旧实现没有这条接线时保持未注入 —— 上面的用例随后必须因
+	 * "活跃 run 被延后、销毁不 complete"而红（RED 证据见交付报告）。
+	 */
+	private static void wireResumeService(AiSessionPurgeService service, ResumeService resume) {
+		if (org.springframework.util.ReflectionUtils.findField(AiSessionPurgeService.class,
+				"resumeServiceProvider") != null) {
+			ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
+			when(provider.getIfAvailable()).thenReturn(resume);
+			ReflectionTestUtils.setField(service, "resumeServiceProvider", provider);
+		}
+	}
+
 	@Test
 	void purgeGuardBlocksLateMemoryWriteBack() throws Exception {
+		seedFullSession(SESSION_A, "run-a", "call-a");
 		seedMemory(SESSION_A);
 
 		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");

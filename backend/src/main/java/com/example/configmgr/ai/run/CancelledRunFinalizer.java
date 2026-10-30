@@ -63,6 +63,13 @@ public class CancelledRunFinalizer {
 	public static final String CAUSE_PARK_EXIT = "PARK_CANCEL_UNWRITABLE";
 
 	/**
+	 * {@code POST /api/ai/cancel/{runId}} 的交棒原因：取消旗标已写，但这一轮<b>不存在</b>进程内
+	 * 触发点（驱动线程已死/在别的实例）—— 必须由交棒执行体重新取租后走
+	 * {@link ResumeService#cancelConfirmed(String)} 收敛，不能只留一个旗标。
+	 */
+	public static final String CAUSE_REQUEST = "REQUEST_CANCEL";
+
+	/**
 	 * 延迟重试的调度缝（默认 = 守护线程单线程调度器）。
 	 *
 	 * <p>为什么是接口：用例要断言"这一拍不可确认 ⇒ 排一次重试；恢复后重试成功"，

@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -70,6 +71,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 业务活动锚点），判死窗口仍是 {@code zombie-age}（180s，<b>不放宽</b>）；终态不复活、仍 {@code PENDING}
  * 的外部项不碰。定时器由 {@code app.ai.resume.runtime-sweep-enabled} 控制，应用停机经
  * {@code @PreDestroy} 关闭（同一入口 {@link #stopRuntimeSweep()}）。
+ *
+ * <p><b>两路非续跑的收敛</b>（F3/F2）：①<b>取消旗标存在 + 快照非终态</b> ⇒ 不跳过、也不续跑，
+ * 走 {@link ResumeService#cancelConfirmed(String)} 落 CANCELLED 终态/终帧（驱动进程已死时这是唯一
+ * 会消费该旗标的执行体）；②<b>park 到期</b> ⇒ 调 {@code ConfirmGate#convergeExpiredParkedFrontend}
+ * 消费持久化的 {@code expiresAt}（任实例可做，决策 guard 保证同一张卡只赢一次）。两者都不驱动模型。
  */
 @Slf4j
 @Component
@@ -99,6 +105,16 @@ public class StartupResumeRunner {
 	 * 没有它也不新增第二套活度逻辑 —— 租约与业务活动锚点仍是主判据（见 {@link RunLiveness}）。
 	 */
 	private final RunRegistry registry;
+
+	/**
+	 * 前端工具到期收敛的入口（{@link ConfirmGate#convergeExpiredParkedFrontend(String)}）。
+	 *
+	 * <p><b>字段注入</b>：构造器被多份既有用例直接 {@code new}（{@code StartupResumeRunner*Test}），
+	 * 改签名等于让它们跟改。未注入（轻装配/单测）时只跳过"消费 expiresAt"这一路 —— 扫描的其余
+	 * 判据与行为不变。
+	 */
+	@Autowired(required = false)
+	private ConfirmGate confirmGate;
 
 	private final AtomicBoolean scanned = new AtomicBoolean();
 
@@ -391,6 +407,18 @@ public class StartupResumeRunner {
 	 * <p>
 	 * 本方法本身不判"该不该开定时器"（开关只管注册，见 {@link #startRuntimeSweep()}），
 	 * 因此单测/运维可以直接同步驱动一拍，与 {@code SessionPurgeRetryRunner#runOnce()} 同姿态。
+	 *
+	 * <h2>F3 / F2：两条"不续跑但必须收敛"的旁路</h2>
+	 * <ul>
+	 * <li><b>取消旗标 + 非终态</b>：不跳过、不续跑，走 {@link ResumeService#cancelConfirmed(String)}
+	 *     （抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。报告记入 {@code finalized}；
+	 *     没落定的（租约在别处/会话门被占/不可确认）记入 {@code skipped} 的 {@code CANCEL_*} 原因，
+	 *     下一拍再试。</li>
+	 * <li><b>park 到期</b>：非终态轮次在 {@code PENDING_UNRESOLVED} 判定之前先让确认门消费持久化的
+	 *     {@code expiresAt}（{@code confirmGate.convergeExpiredParkedFrontend}）；本拍收敛过就记入
+	 *     {@code expired} 并跳过（到期收敛内部已派发一次续跑，避免重复驱动）。</li>
+	 * </ul>
+	 * 两条都按<b>记录身份</b>开作用域（不扫描租户列表），预算仍与续跑共用 {@code max-on-startup}。
 	 */
 	public Map<String, Object> sweep() {
 		if (!this.availability.isAvailable()) {
@@ -422,6 +450,10 @@ public class StartupResumeRunner {
 		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
 		List<Map<String, Object>> resumed = new ArrayList<>();
 		List<Map<String, Object>> skipped = new ArrayList<>();
+		// F3：取消旗标 + 非终态 ⇒ 本拍走取消收尾（不是续跑）。与续跑分开记账，报告里可解释。
+		List<Map<String, Object>> finalized = new ArrayList<>();
+		// F2：本拍消费了持久化 expiresAt 的轮次（到期收敛已派发一次续跑）。
+		List<Map<String, Object>> expired = new ArrayList<>();
 		for (Map<String, Object> run : candidates) {
 			String runId = String.valueOf(run.get("runId"));
 			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
@@ -434,6 +466,59 @@ public class StartupResumeRunner {
 				log.info("运行期扫描跳过无身份的 legacy 轮次 runId={}（reason={}，不驱动模型/工具）", runId,
 						LEGACY_NO_IDENTITY);
 				continue;
+			}
+			// ===== F3：取消旗标优先于"跳过" =====
+			// 旧实现把 cancelled=true 直接记 CANCELLED 跳过：驱动进程死了就再没人写终态/终帧，
+			// 连带会话销毁永远 deferred。取消是<b>已确认的事实</b>，不是"别碰"的理由 ——
+			// 交给既有 cancelConfirmed（抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。
+			if (Boolean.TRUE.equals(run.get("cancelled")) && !RunSnapshot.isTerminal(status)) {
+				if (resumed.size() + finalized.size() + expired.size() >= limit) {
+					skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+					continue;
+				}
+				ResumeService.CancelFinalize outcome;
+				try {
+					outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
+				}
+				catch (RuntimeException ex) {
+					skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
+					log.warn("运行期扫描的取消收尾异常 runId={}（下一拍重试）：{}", runId, ex.getMessage());
+					continue;
+				}
+				if (outcome == ResumeService.CancelFinalize.FINALIZED
+						|| outcome == ResumeService.CancelFinalize.ALREADY_TERMINAL
+						|| outcome == ResumeService.CancelFinalize.NO_RUN) {
+					Map<String, Object> item = new LinkedHashMap<>();
+					item.put("runId", runId);
+					item.put("tenantId", recordTenantId);
+					item.put("userId", recordUserId);
+					item.put("statusBeforeSweep", status);
+					item.put("outcome", outcome.name());
+					finalized.add(item);
+				}
+				else {
+					// 租约在别处/会话门被占/这拍不可确认：不是终态，也不得因此驱动 ⇒ 下一拍再收尾。
+					skipped.add(sweepSkipItem(runId, status, "CANCEL_" + outcome));
+				}
+				continue;
+			}
+			// ===== F2：消费持久化的 expiresAt =====
+			// park 后的到期收敛只有原实例进程内定时器；实例被杀后没有任何读侧看 expiresAt。
+			// 任一实例的扫描都可以做这件事（真前端工具才有时限；确认门/表单无上限，不消费）。
+			if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
+					&& resumed.size() + finalized.size() + expired.size() < limit) {
+				int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
+				if (converged > 0) {
+					Map<String, Object> item = new LinkedHashMap<>();
+					item.put("runId", runId);
+					item.put("tenantId", recordTenantId);
+					item.put("userId", recordUserId);
+					item.put("statusBeforeSweep", status);
+					item.put("expired", converged);
+					expired.add(item);
+					// 到期收敛已派发一次续跑（系统裁决）：本拍不再重复续跑同一轮。
+					continue;
+				}
 			}
 			Discovery discovery = discoveryOf(run);
 			if (discovery != Discovery.TAKEABLE) {
@@ -480,11 +565,14 @@ public class StartupResumeRunner {
 		report.put("instanceId", this.store.instanceId());
 		report.put("candidates", candidates.size());
 		report.put("resumed", resumed);
+		report.put("finalized", finalized);
+		report.put("expired", expired);
 		report.put("skipped", skipped);
 		report.put("zombieAgeMs", zombieAgeMs);
 		this.lastSweep = report;
-		log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，跳过 {} 轮（判死窗口 {}）",
-				candidates.size(), resumed.size(), skipped.size(), this.properties.getResume().getZombieAge());
+		log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}）",
+				candidates.size(), resumed.size(), finalized.size(), expired.size(), skipped.size(),
+				this.properties.getResume().getZombieAge());
 		return report;
 	}
 
@@ -576,6 +664,35 @@ public class StartupResumeRunner {
 		}
 	}
 
+	/**
+	 * 以该轮<b>记录身份</b>执行一次取消收尾（与 {@link #resumeWithRunIdentity} 同一条身份纪律）。
+	 *
+	 * <p>扫描线程没有请求身份，而 {@code cancelConfirmed} 的第一步 {@code store.get(runId)} 就要按
+	 * 快照键（身份拼出）读取 —— 不在记录身份作用域里调用，只会读到 {@code null}。
+	 */
+	private ResumeService.CancelFinalize cancelWithRunIdentity(String runId, long tenantId, long userId) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			return this.resumeService.cancelConfirmed(runId);
+		}
+	}
+
+	/**
+	 * 以该轮<b>记录身份</b>消费持久化的 {@code expiresAt}（F2）：任何实例都可做，收敛动作本身
+	 * 由 {@link ConfirmGate#convergeExpiredParkedFrontend(String)} 用既有 {@code expireFrontend}
+	 * + 决策 guard 完成（同一张卡只赢一次）。
+	 *
+	 * @return 本拍收敛的条目数（0 = 没有到期条目/读不可知）
+	 */
+	private int expireParkedWithRunIdentity(String runId, long tenantId, long userId) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			return this.confirmGate == null ? 0 : this.confirmGate.convergeExpiredParkedFrontend(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("运行期扫描的 park 到期收敛失败 runId={}（不改任何状态，下一拍重试）：{}", runId, ex.getMessage());
+			return 0;
+		}
+	}
+
 	/** 调度线程绝不能被单轮异常杀死：异常只留痕，下一拍照常。 */
 	private void sweepQuietly() {
 		try {
@@ -601,9 +718,11 @@ public class StartupResumeRunner {
 		boolean leaseHeld;
 		try {
 			LeaseService leases = this.store.leaseService();
+			// 判死口径必须用严格读取口：isHeld 吞异常返回 false 会把"读不出来"当成"没人持有"
+			// ⇒ 仍有租约的活轮被判死接管（双驱动）。异常由下面 catch 折成 fail-closed。
 			// 租约键由身份拼出：按<b>索引成员里的记录身份</b>取键（扫描线程没有身份，用线程身份取到的是
 			// legacy 租约 ⇒ 恒"无人持有" ⇒ 活跃轮被判死并接管 = 双驱动）。
-			leaseHeld = leases != null && leases.isHeld(leaseKeyOf(run, runId));
+			leaseHeld = leases != null && leases.isHeldStrict(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
 			log.debug("运行期扫描读取续跑租约失败 runId={}（按活跃处理，不接管）：{}", runId, ex.getMessage());
@@ -634,7 +753,11 @@ public class StartupResumeRunner {
 		/** 可以交给续跑漏斗（是否真的驱动仍由租约/会话门/待决条目在漏斗里决定）。 */
 		TAKEABLE,
 
-		/** 取消旗标（Redis 为准）：已取消的轮不得被任何扫描拾起。 */
+		/**
+		 * 取消旗标（Redis 为准）。<b>启动扫描</b>不拾起（重启不复活被取消的轮）；<b>运行期扫描</b>在
+		 * 快照非终态时改走取消收尾（{@code cancelConfirmed}，F3）—— 取消是已确认的事实，
+		 * 驱动进程死后必须有执行体把它落成终态。
+		 */
 		CANCELLED,
 
 		/** 仍有 PENDING 的外部项（确认门/前端工具）：自动补执行不能代替人决策。 */
