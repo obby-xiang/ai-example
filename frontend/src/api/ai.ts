@@ -48,14 +48,26 @@ export function reattachRun(
   return reattach(runId, handlers, options)
 }
 
-/** POST /api/ai/confirm（HITL 放行/拒绝；重复 toolCallId → 409 DUPLICATE_TOOL_CALL_ID）。 */
-export function confirm(request: ConfirmRequest): Promise<ConfirmResult> {
-  return post<ConfirmResult>('/ai/confirm', withWorkspaceContext(request))
+/**
+ * POST /api/ai/confirm（HITL 放行/拒绝；重复 toolCallId → 409 DUPLICATE_TOOL_CALL_ID）。
+ *
+ * <p>`config` 只用于**显式身份头**：axios 拦截器在微任务里才跑，点击后立刻切身份时它读到的已是
+ * 新身份 —— 调用方须把点击时捕获的身份放进 `headers`（与 `cancel` 同口径；拦截器只补缺省、不覆盖）。
+ */
+export function confirm(request: ConfirmRequest, config?: AxiosRequestConfig): Promise<ConfirmResult> {
+  return post<ConfirmResult>('/ai/confirm', withWorkspaceContext(request), config)
 }
 
-/** POST /api/ai/frontend-tool-result（前端工具回灌；重复 → 409，未知 → 409）。 */
-export function frontendToolResult(request: FrontendToolResultRequest): Promise<FrontendToolResultAck> {
-  return post<FrontendToolResultAck>('/ai/frontend-tool-result', withWorkspaceContext(request))
+/**
+ * POST /api/ai/frontend-tool-result（前端工具回灌；重复 → 409，未知 → 409）。
+ *
+ * <p>`config` 同 {@link confirm}：提交时身份显式随请求发出，避免切换到新身份后旧回灌被 409 丢弃。
+ */
+export function frontendToolResult(
+  request: FrontendToolResultRequest,
+  config?: AxiosRequestConfig
+): Promise<FrontendToolResultAck> {
+  return post<FrontendToolResultAck>('/ai/frontend-tool-result', withWorkspaceContext(request), config)
 }
 
 /**
@@ -92,21 +104,15 @@ function currentWorkspaceContext(): AiChatContext | undefined {
   }
 }
 
-/** POST /api/ai/session 的响应（契约：`{sessionId:number(long)}`）。 */
-export interface AiSessionIssue {
-  sessionId: number
-}
-
 /**
  * POST /api/ai/session（**唯一**的会话发号入口）。
  *
  * <p>前端不再自己造 sessionId：切换身份、复制页签、410 恢复、刷新后无会话时统一走这里。
  *
- * <p><b>为什么按文本取数字</b>：后端按 `时间戳(ms) × 10^6 + …` 发号，量级约 1.7×10^18，
- * **超出 JS `Number.MAX_SAFE_INTEGER`（9×10^15）** —— 先 `JSON.parse` 成 number 会静默丢低位，
- * 前端就会拿一个"看起来对、实际错"的号去请求。这里让 axios 保留原始文本，用正则取出十进制
- * 数字串（JSON 文本里的数字本身不丢精度），全程按字符串存储/发送；后端 Jackson 把十进制字符串
- * 反序列化为 long 是标准行为。
+ * <p><b>权威值 = `sessionIdText`</b>（十进制字符串，与后端 `AiSessionController` 契约同名）：
+ * 会话号是 long，JSON number 在消费端不可安全往返，故一律按字符串存储/发送；后端 Jackson 把
+ * 十进制字符串反序列化为 long 是标准行为。响应里的数值 `sessionId` 只作旧后端/旧夹具的
+ * **兼容回读**（同样按原始文本读，不经过 `JSON.parse`），绝不作为权威值。
  */
 export async function createSession(): Promise<string> {
   const response = await http.post('/ai/session', undefined, {
@@ -123,16 +129,28 @@ export async function createSession(): Promise<string> {
 /** 从原始响应文本（或已解析对象）里取十进制会话号；非法一律 ''。 */
 function extractSessionId(body: unknown): string {
   if (typeof body === 'string') {
-    // 只认 `data` 对象里的那个字段（响应若回显请求体，裸扫全串可能命中第二处 `sessionId`）。
+    // 只认 `data` 对象里的字段（响应若回显请求体，裸扫全串可能命中第二处 `sessionId`）。
     // 没有 `data` 包装时退回整串（裸对象契约）。从 `"data"` 起点往后找，避免被 data 内的嵌套对象截断。
     const dataIndex = body.search(/"data"\s*:\s*\{/)
     const scope = dataIndex >= 0 ? body.slice(dataIndex) : body
-    const match = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(scope)
-    return match ? match[1] : ''
+    // 权威值：`sessionIdText` 十进制字符串。旧后端只有数值 `sessionId` 时按原始文本回读（兼容）。
+    const authoritative = /"sessionIdText"\s*:\s*"([1-9]\d*)"/.exec(scope)
+    if (authoritative) {
+      return authoritative[1]
+    }
+    const legacy = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(scope)
+    return legacy ? legacy[1] : ''
   }
   if (body && typeof body === 'object') {
-    const envelope = body as { sessionId?: unknown; data?: { sessionId?: unknown } }
-    return normalizeSessionId(envelope.sessionId ?? envelope.data?.sessionId)
+    const envelope = body as {
+      sessionIdText?: unknown
+      sessionId?: unknown
+      data?: { sessionIdText?: unknown; sessionId?: unknown }
+    }
+    return normalizeSessionId(envelope.sessionIdText)
+      || normalizeSessionId(envelope.data?.sessionIdText)
+      || normalizeSessionId(envelope.sessionId)
+      || normalizeSessionId(envelope.data?.sessionId)
   }
   return ''
 }

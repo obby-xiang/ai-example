@@ -77,6 +77,13 @@
       "reason": "已删除未上线Redis迁移工具链，并同步D6为仅迁移库内AI配置与反馈数据",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:4322d8fc29cbc15531a187c1ff9ac7aacec1c438484519e074a3ae33d191f351",
+      "status": "not-affected",
+      "reason": "D6已明确sessionIdText权威值和身份头契约；本批只修正决策身份头实现、类型化直读及移除不存在的旧别名，不新增或改变迁移接口",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

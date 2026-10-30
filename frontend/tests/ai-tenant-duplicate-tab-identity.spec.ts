@@ -73,7 +73,7 @@ beforeEach(() => {
   vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel)
 
   api.tenantUsers.mockResolvedValue([{ tenantId: 7, users: [{ userId: 71, displayName: '甲' }] }])
-  api.createSession.mockResolvedValue({ sessionId: Number(NEW_SESSION) })
+  api.createSession.mockResolvedValue(NEW_SESSION)
   api.history.mockResolvedValue({ sessionId: NEW_SESSION, count: 0, messages: [] })
   api.getContext.mockRejectedValue(new Error('no context'))
   api.runsCurrent.mockResolvedValue({

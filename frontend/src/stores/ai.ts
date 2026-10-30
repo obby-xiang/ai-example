@@ -6214,7 +6214,11 @@ export const useAiStore = defineStore('ai', {
         stillSameRound(roundAtDecision, this.sessionId, runId)
         && isSameIdentity(identityAtDecision, this.sessionIdentity)
       try {
-        await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
+        await aiApi.confirm(
+          { runId, toolCallId, approved, reason: reason ?? null },
+          // R7：身份头显式随请求发出（拦截器在微任务里跑，点击后立刻切身份时它读到的是新身份）。
+          { headers: identityHeaders(identityAtDecision) }
+        )
         if (!stillLive()) {
           return
         }
@@ -6363,7 +6367,9 @@ export const useAiStore = defineStore('ai', {
                 ...(sheetMeta !== undefined ? { sheetMeta } : {}),
                 // 批 A：机器码 additive（非法值在 `makeExecution` 已被闭集丢弃，这里不会产脏码）
                 ...(code !== undefined ? { code } : {})
-              }
+              },
+          // R7：身份头显式随请求发出（拦截器在微任务里跑，提交后立刻切身份时它读到的是新身份）。
+          { headers: identityHeaders(identityAtSubmit) }
         )
         if (!stillLive()) {
           return { ok: false }
@@ -8344,10 +8350,8 @@ export const useAiStore = defineStore('ai', {
       const task = (async (): Promise<string> => {
         let issued = ''
         try {
-          const response: unknown = await issue()
-          issued = typeof response === 'string'
-            ? normalizeSessionId(response)
-            : normalizeSessionId((response as { sessionId?: unknown } | null)?.sessionId)
+          // 权威值由 `createSession()` 收口（`sessionIdText` 优先，旧后端数值只作兼容回读）。
+          issued = normalizeSessionId(await issue())
         } catch {
           if (token === sessionGateToken) {
             // 返修 round3：显式失败态（横幅据此显示），与"正在发号"区分，避免正常窗口闪红条。

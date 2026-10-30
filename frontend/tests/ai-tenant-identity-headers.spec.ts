@@ -15,9 +15,9 @@ import { http } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import { resetAiIdentityCache, writeAiIdentity } from '@/utils/ai-identity'
 
-/** 超出 JS 安全整数的真实量级（时间戳 ms × 10^6）。 */
+/** 超出 JS 安全整数的真实量级（时间戳 ms × 10^6）；JSON number 在该量级已丢精度。 */
 const LONG_SESSION_ID = '1731234567890123456'
-const LONG_SESSION_TEXT = `{"success":true,"data":{"sessionId":${LONG_SESSION_ID}}}`
+const LONG_SESSION_TEXT = `{"success":true,"data":{"sessionId":1731234567890123500,"sessionIdText":"${LONG_SESSION_ID}"}}`
 
 let captured: InternalAxiosRequestConfig[] = []
 
@@ -93,7 +93,7 @@ describe('Task 4 返修 C2/I3：身份头与长号发号', () => {
       .toEqual(['/ai/tenants'])
   })
 
-  it('19 位 long 长号按原始文本精确解析（不经过 JSON.parse）', async () => {
+  it('19 位 long 长号取权威 sessionIdText（不经过 JSON.parse）', async () => {
     writeAiIdentity({ tenantId: 7, userId: 71 })
     const sessionId = await aiApi.createSession()
 

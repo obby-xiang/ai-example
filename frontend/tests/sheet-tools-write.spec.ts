@@ -153,7 +153,10 @@ describe('T-12/T-13 应用与取消', () => {
     await store.openWritePreview(message, frame)
     await store.cancelWritePreview()
     expect(sheet.writes).toHaveLength(0)
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     // 取消路径沿用既有 `cancelled=true`（回灌体不新增 result 字段）—— “未改动”落在工具段上供卡面展示。
     const part = store.messages
       .flatMap((item) => item.parts)

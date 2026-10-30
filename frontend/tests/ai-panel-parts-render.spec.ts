@@ -6107,7 +6107,10 @@ describe('AI 表格操作专项 T-17：写预览段的无 plan 收口', () => {
 
     await wrapper.find('[data-testid="sheet-preview-abandon"]').trigger('click')
     await flushPromises()
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     wrapper.unmount()
   })
 })

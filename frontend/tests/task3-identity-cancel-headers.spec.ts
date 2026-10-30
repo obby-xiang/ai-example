@@ -44,7 +44,7 @@ beforeEach(() => {
     captured.push(internal)
     const url = config.url ?? ''
     if (url === '/ai/session') {
-      return respond(internal, { sessionId: 8101 })
+      return respond(internal, { success: true, data: { sessionId: 8101, sessionIdText: '8101' } })
     }
     if (url.startsWith('/ai/cancel/')) {
       return respond(internal, { cancelled: true, alreadyCancelled: false })

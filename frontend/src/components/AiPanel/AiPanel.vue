@@ -1658,52 +1658,23 @@ const stageBar = computed<{ mode: 'compacting' | 'preparing'; startedAtMs: numbe
  * 继续隔离字段/动作名的变化，避免模板直接拼状态）。
  *
  * <p>面板只经下面这组函数读状态 / 调动作；store 侧字段或 action 名变化时**只改这里**。
- * 已对齐并行落地的实际契约（2026-10-26）：`historyError` / `currentError`（`AiLoadErrorView`，
- * 只有 code/status，不含文案）、`retryLoadHistory()` / `retryRestoreSnapshot()`、
- * `busyRun`（`AiBusyRunRef`）+ `reattachBusyRun()`、`message.unconfirmed` 与
- * `lastRoundOutcome='unconfirmed'`。其余候选名只为兼容旧基线，缺省即不渲染，不伪造状态。
+ * 已对齐 store 的实际契约（类型化直读，不再按候选名嗅探）：
+ * `historyError` / `currentError`（`AiLoadErrorView`，只有 code/status，不含文案）、
+ * `retryLoadHistory()` / `retryRestoreSnapshot()`、`busyRun`（`AiBusyRunRef`）+ `reattachBusyRun()`、
+ * `message.unconfirmed` 与 `lastRoundOutcome='unconfirmed'`。
  * <ul>
- * <li>历史/快照恢复错误：`historyError` / `currentError`（对象或字符串）；重试
- *     `retryLoadHistory`（history）/ `retryRestoreSnapshot`（current），缺省回落 `loadHistory()`。</li>
- * <li>409 在途轮：`busyRun.runId`；动作 `reattachBusyRun()`（一次性对账 + 静默续收），
- *     缺省回落 `reattachActive(runId)`。runId 不进任何用户可见文本。</li>
- * <li>unconfirmed：`message.unconfirmed=true`（兼容旧字段名）；重新载入优先
- *     `retryLoadHistory`，缺省 `loadHistory()`。</li>
+ * <li>历史/快照恢复错误：`historyError` / `currentError`；重试
+ *     `retryLoadHistory`（history）/ `retryRestoreSnapshot`（current）。</li>
+ * <li>409 在途轮：`busyRun.runId`；动作 `reattachBusyRun()`（一次性对账 + 静默续收）。
+ *     runId 不进任何用户可见文本；没有 `busyRun` 就不出入口（不拿 `activeRunId` 猜）。</li>
+ * <li>unconfirmed：`message.unconfirmed=true`，或最后一轮的 `lastRoundOutcome='unconfirmed'`；
+ *     重新载入走 `retryLoadHistory()`。</li>
  * <li>三动作（AR-09 / AR-05 / AR-17）：继续 = `send(..., { skipUserRecord: true })`（保持既有口径）；
  *     重试本轮 = 「仅模型步重跑」真实 store action（`retryModelStep` → 后端窄入口 → 既有 events 重挂；
  *     只认 `message.runId` 归属，无证据不出入口）；
  *     普通 regenerate = **本批不做、入口整体隐藏**（无禁用 / unsupported 死 UI，也不本地截断重发）。</li>
  * </ul>
  */
-type RecoveryStoreView = Record<string, unknown>
-
-function storeView(): RecoveryStoreView {
-  return ai as unknown as RecoveryStoreView
-}
-
-/** 按候选名取第一个非 null/undefined 的 store 字段。 */
-function storeField<T>(...names: string[]): T | undefined {
-  const view = storeView()
-  for (const name of names) {
-    const value = view[name]
-    if (value !== undefined && value !== null) {
-      return value as T
-    }
-  }
-  return undefined
-}
-
-/** 按候选名取第一个函数型 store action（不存在 = null，不抛错）。 */
-function storeAction(...names: string[]): ((...args: unknown[]) => unknown) | null {
-  const view = storeView()
-  for (const name of names) {
-    const value = view[name]
-    if (typeof value === 'function') {
-      return value as (...args: unknown[]) => unknown
-    }
-  }
-  return null
-}
 
 /** 恢复失败的视图（scope 决定标签与重试动作；detail 是本地化人话，code/status 只作分档）。 */
 interface RecoveryLoadError {
@@ -1715,10 +1686,7 @@ interface RecoveryLoadError {
  * store 只落机器可读现场（`AiLoadErrorView`：scope/code/status/at），**不落用户文案** ——
  * 这里按 code/status 选一条本地化短句；机器码本身不进用户可见文本。
  */
-function loadErrorDetail(view: AiLoadErrorView | string): string {
-  if (typeof view === 'string') {
-    return view
-  }
+function loadErrorDetail(view: AiLoadErrorView): string {
   if (view.code === 'NETWORK_ERROR' || view.status === 0) {
     return t('ai.panel.loadErrorNetwork')
   }
@@ -1729,13 +1697,11 @@ function loadErrorDetail(view: AiLoadErrorView | string): string {
 }
 
 function recoveryLoadError(): RecoveryLoadError | null {
-  const history = storeField<AiLoadErrorView | string>('historyError', 'restoreError', 'historyLoadError')
-  if (history !== undefined) {
-    return { scope: 'history', detail: loadErrorDetail(history) }
+  if (ai.historyError !== null) {
+    return { scope: 'history', detail: loadErrorDetail(ai.historyError) }
   }
-  const current = storeField<AiLoadErrorView | string>('currentError', 'snapshotError')
-  if (current !== undefined) {
-    return { scope: 'current', detail: loadErrorDetail(current) }
+  if (ai.currentError !== null) {
+    return { scope: 'current', detail: loadErrorDetail(ai.currentError) }
   }
   return null
 }
@@ -1752,18 +1718,10 @@ function recoveryErrorText(): string | null {
 
 function retryRecoveryLoad(): void {
   if (recoveryLoadError()?.scope === 'current') {
-    const restore = storeAction('retryRestoreSnapshot', 'retryCurrentSnapshot')
-    if (restore !== null) {
-      void restore.call(ai)
-      return
-    }
-  }
-  const history = storeAction('retryLoadHistory', 'retryHistory', 'reloadHistory')
-  if (history !== null) {
-    void history.call(ai)
+    void ai.retryRestoreSnapshot()
     return
   }
-  void ai.loadHistory()
+  void ai.retryLoadHistory()
 }
 
 /**
@@ -1779,30 +1737,10 @@ const recoveryErrorVisible = computed(() => recoveryErrorText() !== null)
 const recoveryGapBarVisible = computed(() => !recoveryErrorVisible.value && ai.recoveryGap !== null)
 const recoveryNoticeVisible = computed(() => recoveryErrorVisible.value || ai.recoveryGap !== null)
 
-/** 409 回执里的进行中轮（`busyRun.runId`）；旧字段名仅作兼容。 */
+/** 409 回执里的进行中轮（`busyRun.runId`）；null = 后端没给可信 runId ⇒ 不出入口（不拿 activeRunId 猜）。 */
 function busyRunId(): string | null {
-  const view = storeView()
-  // 并行落地的 store 以 `busyRun` 为权威：为 null = 后端没给可信 runId ⇒ 不出入口（不拿旧 activeRunId 猜）。
-  if ('busyRun' in view) {
-    const busy = view.busyRun
-    if (busy !== null && typeof busy === 'object') {
-      const runId = (busy as Record<string, unknown>).runId
-      if (typeof runId === 'string' && runId.trim() !== '') {
-        return runId
-      }
-    }
-    return null
-  }
-  const explicit = storeField<unknown>('busyRunId', 'sessionBusyRunId', 'conflictRunId', 'blockedByRunId')
-  if (typeof explicit === 'string' && explicit.trim() !== '') {
-    return explicit
-  }
-  // 旧基线（无 busyRun 字段）的兜底：409 的本地通知码 + 既有在途 runId（不显示 runId 本身）。
-  if (ai.noticeCode === 'ai.notice.sendFailed'
-    && typeof ai.activeRunId === 'string' && ai.activeRunId !== '') {
-    return ai.activeRunId
-  }
-  return null
+  const runId = ai.busyRun?.runId
+  return typeof runId === 'string' && runId.trim() !== '' ? runId : null
 }
 
 function canReturnToActiveRun(): boolean {
@@ -1810,15 +1748,7 @@ function canReturnToActiveRun(): boolean {
 }
 
 function returnToActiveRun(): void {
-  const action = storeAction('reattachBusyRun', 'returnToActiveRun', 'resumeActiveRun')
-  if (action !== null) {
-    void action.call(ai)
-    return
-  }
-  const runId = busyRunId()
-  if (runId !== null) {
-    void ai.reattachActive(runId)
-  }
+  void ai.reattachBusyRun()
 }
 
 /**
@@ -1835,43 +1765,15 @@ function unconfirmedOf(message: ChatMessage): boolean {
   if (message.role !== 'assistant') {
     return false
   }
-  const view = message as unknown as RecoveryStoreView
-  if (view.turnUnconfirmed === true || view.unconfirmed === true) {
+  if (message.unconfirmed === true) {
     return true
   }
-  for (const key of ['turnState', 'turnStatus', 'endState', 'turnEnd']) {
-    const value = view[key]
-    if (value === 'unconfirmed' || value === 'UNCONFIRMED') {
-      return true
-    }
-  }
-  const messageId = storeField<string>('unconfirmedMessageId', 'unconfirmedTurnMessageId')
-  if (messageId !== undefined && messageId === message.id) {
-    return true
-  }
-  const last = ai.messages[ai.messages.length - 1]
-  if (ai.lastRoundOutcome === 'unconfirmed' && last === message) {
-    return true
-  }
-  const storeFlag = storeField<unknown>('turnUnconfirmed', 'unconfirmed')
-  if (storeFlag === true && last === message) {
-    return true
-  }
-  const storeState = storeField<unknown>('turnEnd', 'turnState', 'turnStatus')
-  if ((storeState === 'unconfirmed' || storeState === 'UNCONFIRMED') && last === message) {
-    return true
-  }
-  const runId = storeField<string>('unconfirmedRunId')
-  return runId !== undefined && runId === ai.activeRunId && last === message
+  return ai.lastRoundOutcome === 'unconfirmed'
+    && ai.messages[ai.messages.length - 1] === message
 }
 
 function reloadTurnState(): void {
-  const action = storeAction('retryLoadHistory', 'reloadUnconfirmedTurn', 'reloadTurnState', 'reloadFromServer')
-  if (action !== null) {
-    void action.call(ai)
-    return
-  }
-  void ai.loadHistory()
+  void ai.retryLoadHistory()
 }
 
 /**
@@ -3808,7 +3710,7 @@ watch(
  * 只看 `loading` 就会「批准瞬间折叠 → 重连后展开」闪一下。
  *
  * <p><b>为什么不直接写 `runPhase ≠ 'idle'`</b>：那个条件把 `recovering` 也算进来，而
- * `loadHistory` / `retryRestoreSnapshot` / `returnToActiveRun` 在 `restoringRecovery` 期间
+ * `loadHistory` / `retryRestoreSnapshot` / `reattachBusyRun` 在 `restoringRecovery` 期间
  * 就**同步**把镜像消息落屏 —— 刷新/重新载入时，末条消息里的已决只读卡会先被强制展开、
  * HTTP 回来再折叠，正是本批要消掉的那类闪动。批准瞬间的闪动另有**决策在途 / GF 提交在途**
  * 两条证据覆盖，不依赖 `recovering`。

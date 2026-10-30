@@ -122,11 +122,6 @@ function identityAtIssue(): AiIdentity {
   return fixtureIdentity
 }
 
-function sessionIdOf(raw: unknown): number | string {
-  const normalized = normalizeSessionId(raw)
-  return normalized === '' ? '' : Number(normalized)
-}
-
 /**
  * 把 `tenantUsers` / `createSession` 装到被测的 `@/api/ai` 桩上。
  *
@@ -164,7 +159,7 @@ function patchApi(options: IdentityFixtureOptions): void {
         const pointer = sessionStorage.getItem(sessionIdStorageKey(identity))
         value = known !== undefined && pointer === known ? known : nextSessionNumber(identity)
       }
-      return { sessionId: sessionIdOf(value) }
+      return value
     })
   }
 }

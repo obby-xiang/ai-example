@@ -97,8 +97,8 @@ describe('Task 4 返修 round 2：身份切换竞态 / 发号失败重试', () =
     await Promise.resolve()
 
     // 后发起的 A 先拿到号；先发起的 B 回包后到，必须被令牌/身份校验丢弃。
-    resolveA({ sessionId: '1003' })
-    resolveB({ sessionId: '9002' })
+    resolveA('1003')
+    resolveB('9002')
     await Promise.all([toB, backToA])
 
     // 最终只能是"A 身份 + A 的新会话号"，绝不能出现 A 会话配 B 身份。
@@ -125,7 +125,7 @@ describe('Task 4 返修 round 2：身份切换竞态 / 发号失败重试', () =
     api.createSession
       .mockRejectedValueOnce(new Error('session endpoint down'))
       .mockRejectedValueOnce(new Error('session endpoint still down'))
-      .mockResolvedValue({ sessionId: 5001 })
+      .mockResolvedValue('5001')
     api.chat.mockImplementation((_request: unknown, handlers: any) => {
       handlers.onFrame?.({ type: 'done', runId: 'run-r', seq: 1, cancelled: false })
       return Promise.resolve({ terminal: true })

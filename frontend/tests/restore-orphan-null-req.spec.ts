@@ -125,7 +125,10 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
 
     await store.confirm(true, undefined, 'c1')
 
-    expect(api.confirm).toHaveBeenCalledWith({ runId: 'run-m2b', toolCallId: 'c1', approved: true, reason: null })
+    expect(api.confirm).toHaveBeenCalledWith(
+      { runId: 'run-m2b', toolCallId: 'c1', approved: true, reason: null },
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(visiblePendingIds(store.messages)).toEqual([])
     // 中间态静默：成功路径不得出现「同步中 / 失败」假象
     expect(store.notice).toBeNull()
@@ -174,7 +177,10 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
 
     await store.abandonStalePreview()
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ toolCallId: 'p1', cancelled: true }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ toolCallId: 'p1', cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(store.stalePreviewToolCallId).toBeNull()
     expect(visiblePendingIds(store.messages)).toEqual(['c2'])
     expect(store.notice).toBeNull()

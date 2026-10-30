@@ -74,9 +74,9 @@ beforeEach(() => {
   }
   api.tenantUsers.mockResolvedValue(DIRECTORY)
   api.createSession
-    .mockResolvedValueOnce({ sessionId: 1001 })
-    .mockResolvedValueOnce({ sessionId: 1002 })
-    .mockResolvedValue({ sessionId: 1003 })
+    .mockResolvedValueOnce('1001')
+    .mockResolvedValueOnce('1002')
+    .mockResolvedValue('1003')
   api.health.mockResolvedValue({
     available: true, code: 'OK', model: 'm', baseUrl: 'b', memoryBackend: 'redis', sessionTtl: '1h',
     frontendToolTimeoutSeconds: 120, suspendPoolSize: 4, activeSuspendGates: 0, heldSessions: 0,

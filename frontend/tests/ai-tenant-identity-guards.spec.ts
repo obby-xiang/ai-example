@@ -50,7 +50,7 @@ beforeEach(() => {
     fn.mockReset()
   }
   api.tenantUsers.mockResolvedValue(DIRECTORY)
-  api.createSession.mockResolvedValue({ sessionId: 1001 })
+  api.createSession.mockResolvedValue('1001')
   api.history.mockResolvedValue({ sessionId: '1001', count: 0, messages: [] })
   api.getContext.mockRejectedValue(new Error('no context'))
   api.runsCurrent.mockResolvedValue({
@@ -135,7 +135,7 @@ describe('Task 4 返修：身份守卫单点', () => {
   it('发号成功后补判所有权（启动期无号跳过的判定不会永久关闭）', async () => {
     api.createSession
       .mockRejectedValueOnce(new Error('session endpoint down'))
-      .mockResolvedValueOnce({ sessionId: 3001 })
+      .mockResolvedValueOnce('3001')
     const store = useAiStore()
     await store.loadTenantDirectory()
     // 首次发号失败：有身份、无会话，目录本身是就绪的。
@@ -171,8 +171,8 @@ describe('Task 4 返修：身份守卫单点', () => {
 
   it('410 会话已销毁 ⇒ 本地换会话并向后端重新取号（旧指针被新号替换）', async () => {
     api.createSession
-      .mockResolvedValueOnce({ sessionId: 1001 })
-      .mockResolvedValueOnce({ sessionId: 1002 })
+      .mockResolvedValueOnce('1001')
+      .mockResolvedValueOnce('1002')
     api.chat.mockRejectedValue(new ApiError(
       '会话已销毁', 410, ErrorCode.SESSION_PURGED, { code: ErrorCode.SESSION_PURGED }
     ))

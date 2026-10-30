@@ -569,7 +569,7 @@ describe('8 · 共用有界自动恢复（零副作用面）', () => {
       const store = freshStore()
       expect(store.sessionId).toBe('4401')
       // 换会话必须拿到**新**号（后端发号）
-      api.createSession.mockResolvedValueOnce({ sessionId: 4402 })
+      api.createSession.mockResolvedValueOnce('4402')
       api.chat.mockRejectedValueOnce(new ApiError('purged', 410, 'SESSION_PURGED', {
         code: 'SESSION_PURGED',
         message: 'purged',

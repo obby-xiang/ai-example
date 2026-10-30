@@ -279,7 +279,7 @@ describe('治理 P0-1 ⑤：回灌 POST 请求体携带前端执行器 outcome',
       result: '结果文本',
       source: 'frontend-executor',
       outcome: 'failed'
-    })
+    }, expect.objectContaining({ headers: expect.any(Object) }))
 
     api.frontendToolResult.mockClear()
     await store.submitFrontendToolResult('t2', '结果文本', 'frontend-executor', false, 'run-1')
@@ -309,7 +309,8 @@ describe('治理 P0-1 ⑤：回灌 POST 请求体携带前端执行器 outcome',
     })
 
     await vi.waitFor(() => expect(api.frontendToolResult).toHaveBeenCalledWith(
-      expect.objectContaining({ runId: 'run-1', toolCallId: 'r1', outcome: 'failed' })
+      expect.objectContaining({ runId: 'run-1', toolCallId: 'r1', outcome: 'failed' }),
+      expect.objectContaining({ headers: expect.any(Object) })
     ))
     expect(toolPart(assistant, 'r1')).toMatchObject({ status: 'failed', requiresAction: false })
   })

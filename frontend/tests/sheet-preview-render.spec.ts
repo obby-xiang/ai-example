@@ -146,7 +146,10 @@ describe('②/③ 刷新恢复：无本地 plan ⇒ stale + 放弃回灌 cancell
 
     await flushPromises()
     await store.abandonStalePreview()
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true, toolCallId: 't1' }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ cancelled: true, toolCallId: 't1' }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(store.stalePreviewToolCallId).toBeNull()
   })
 })

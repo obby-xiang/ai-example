@@ -277,7 +277,8 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
     expect(assistant.pendingCall).toBeNull()
     expect(soleToolPart(assistant)).toMatchObject({ toolCallId: 'g1', status: 'cancelled', requiresAction: false })
     expect(api.frontendToolResult).toHaveBeenCalledWith(
-      expect.objectContaining({ runId: 'run-1', toolCallId: 'g1', cancelled: true })
+      expect.objectContaining({ runId: 'run-1', toolCallId: 'g1', cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
     )
   })
 
@@ -626,7 +627,8 @@ describe('施工项3：m-R2 六写点回归锁', () => {
     expect(assistant.toolRuns[0]).toMatchObject({ toolCallId: 'g9', status: 'failed' })
     expect(soleToolPart(assistant)).toMatchObject({ toolCallId: 'g9', status: 'failed', requiresAction: false })
     await vi.waitFor(() => expect(api.frontendToolResult).toHaveBeenCalledWith(
-      expect.objectContaining({ toolCallId: 'g9', cancelled: true })
+      expect.objectContaining({ toolCallId: 'g9', cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
     ))
   })
 

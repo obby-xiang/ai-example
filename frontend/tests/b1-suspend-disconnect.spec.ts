@@ -186,7 +186,10 @@ describe('B1 裁决 9：决策 POST 成功后带 lastSeq 重连收流', () => {
 
     await store.confirm(true, undefined, 'c1')
 
-    expect(api.confirm).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', toolCallId: 'c1', approved: true }))
+    expect(api.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-1', toolCallId: 'c1', approved: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     const [runId, , options] = api.reattachRun.mock.calls[0] as [string, unknown, { lastSeq?: number }]
     expect(runId).toBe('run-1')
@@ -222,7 +225,10 @@ describe('B1 裁决 9：决策 POST 成功后带 lastSeq 重连收流', () => {
 
     await store.submitGenerativeForm({ k: 'v' })
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-1', toolCallId: 'gf-1' }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-1', toolCallId: 'gf-1' }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     const [runId, , options] = api.reattachRun.mock.calls[0] as [string, unknown, { lastSeq?: number }]
     expect(runId).toBe('run-1')
@@ -255,7 +261,10 @@ describe('B1 裁决 9：决策 POST 成功后带 lastSeq 重连收流', () => {
 
     await store.cancelGenerativeForm()
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     const [, , options] = api.reattachRun.mock.calls[0] as [string, unknown, { lastSeq?: number }]
     expect(options.lastSeq).toBe(3)
   })
@@ -487,12 +496,15 @@ describe('B1 收口修 C-1：慢前端工具晚于挂起收流返回仍回灌', 
     await flushPromises()
 
     expect(api.frontendToolResult).toHaveBeenCalledTimes(1)
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-1',
-      toolCallId: 'f1',
-      result: '已切换页面',
-      outcome: 'ok'
-    }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        toolCallId: 'f1',
+        result: '已切换页面',
+        outcome: 'ok'
+      }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'succeeded', requiresAction: false })
   }, 20_000)
 
@@ -527,11 +539,14 @@ describe('B1 收口修 C-1：慢前端工具晚于挂起收流返回仍回灌', 
     await flushPromises()
     await flushPromises()
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-1',
-      toolCallId: 'f1',
-      result: '已切换页面'
-    }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        toolCallId: 'f1',
+        result: '已切换页面'
+      }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'succeeded' })
   }, 20_000)
 

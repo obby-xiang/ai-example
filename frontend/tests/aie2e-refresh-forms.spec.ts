@@ -366,9 +366,11 @@ describe('A2（R-06 · P0）：HITL 挂起中刷新的三部分形态', () => {
 
     await store.confirm(true, undefined, 'c6')
 
-    expect(api.confirm).toHaveBeenCalledWith({
-      runId: 'run-a2b', toolCallId: 'c6', approved: true, reason: null
-    })
+    expect(api.confirm).toHaveBeenCalledWith(
+      { runId: 'run-a2b', toolCallId: 'c6', approved: true, reason: null },
+      // R7：点击时的身份头显式随请求发出（与 cancel 同口径，拦截器不得改读切身份后的新身份）。
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     const host = store.messages[1]
     const card = toolSegments(host).find((part) => part.toolCallId === 'c6')
     expect(card).toMatchObject({ status: 'succeeded', requiresAction: false })
@@ -572,12 +574,15 @@ describe('A4（R-08 · P1）：GF 挂起中刷新的结构重建与提交后续�
     await store.loadHistory()
     await store.submitGenerativeForm(DRAFT_VALUES)
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-a4b',
-      toolCallId: 'gf-1',
-      result: JSON.stringify(DRAFT_VALUES),
-      source: 'http-post'
-    }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-a4b',
+        toolCallId: 'gf-1',
+        result: JSON.stringify(DRAFT_VALUES),
+        source: 'http-post'
+      }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     const card = toolSegments(store.messages[1]).find((part) => part.toolCallId === 'gf-1')
     expect(card).toMatchObject({ status: 'succeeded', requiresAction: false })
     expect(card?.submittedValues).toEqual(DRAFT_VALUES) // 提交值落段（只读态可回看）
@@ -765,9 +770,10 @@ describe('A6（R-16 · P1）：刷新后预览卡失效收口（不得出现可�
     await store.loadHistory()
     await store.abandonStalePreview()
 
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-a6b', toolCallId: 'p1', cancelled: true
-    }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-a6b', toolCallId: 'p1', cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(store.stalePreviewToolCallId).toBeNull()
     expect(toolSegments(store.messages[1]).find((part) => part.toolCallId === 'p1'))
       .toMatchObject({ status: 'cancelled', requiresAction: false })
@@ -827,9 +833,10 @@ describe('A7（R-17 · P2）：附件交接卡刷新后的两态', () => {
     await store.cancelUploadHandoff()
 
     expect(api.frontendToolResult).toHaveBeenCalledTimes(1) // 恰一次，不循环
-    expect(api.frontendToolResult).toHaveBeenCalledWith(expect.objectContaining({
-      runId: 'run-a7b', toolCallId: 'u1', cancelled: true
-    }))
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-a7b', toolCallId: 'u1', cancelled: true }),
+      expect.objectContaining({ headers: expect.any(Object) })
+    )
     expect(store.activeUploadHandoff).toBeNull()
     expect(toolSegments(store.messages[1]).find((part) => part.toolCallId === 'u1'))
       .toMatchObject({ status: 'cancelled', requiresAction: false })
