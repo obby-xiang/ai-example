@@ -20,6 +20,7 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -989,7 +990,9 @@ public class ResilientChatService {
 	 */
 	private DriveOwnership takeDriveOwnership(String runId) {
 		// 先登记：续租的存活判据立刻为真（顺序反了会让第一拍就当"驱动已死"而自行还租）
-		this.drivingRuns.add(runId);
+		// 键 = 身份 + runId：另一身份的同名轮次不得被本条登记判成"本进程还有驱动方"。
+		String drivingKey = LocalRunKey.of(runId);
+		this.drivingRuns.add(drivingKey);
 		LeaseService.AcquireResult acquired;
 		try {
 			acquired = this.store.acquireRunLease(runId);
@@ -1000,7 +1003,7 @@ public class ResilientChatService {
 			return DriveOwnership.none();
 		}
 		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-			this.drivingRuns.remove(runId);
+			this.drivingRuns.remove(drivingKey);
 			return DriveOwnership.foreign();
 		}
 		LeaseService.Lease lease = acquired.lease();
@@ -1009,7 +1012,7 @@ public class ResilientChatService {
 			// 捕获请求身份：续租线程没有它（也不能靠池线程 TTL 残留）。
 			TenantUser requestIdentity = RequestContextUtils.currentOrNull();
 			leases.markDriving(lease,
-					() -> this.drivingRuns.contains(runId) && snapshotNotTerminal(runId, requestIdentity),
+					() -> this.drivingRuns.contains(drivingKey) && snapshotNotTerminal(runId, requestIdentity),
 					requestIdentity);
 		}
 		return new DriveOwnership(lease, true, acquired.created());
@@ -1023,7 +1026,7 @@ public class ResilientChatService {
 	 * 同主重入（{@code created=false}）同样不还：那一任属于别的驱动方。
 	 */
 	private void releaseDriveOwnership(String runId, DriveOwnership ownership) {
-		this.drivingRuns.remove(runId);
+		this.drivingRuns.remove(LocalRunKey.of(runId));
 		if (ownership == null || ownership.lease() == null || !ownership.created()) {
 			return;
 		}
@@ -1052,7 +1055,7 @@ public class ResilientChatService {
 	 * 同实例里"抢到租约"并不能证明原驱动已死（见 {@link #drivingRuns}）。
 	 */
 	public boolean isDriving(String runId) {
-		return runId != null && this.drivingRuns.contains(runId);
+		return runId != null && this.drivingRuns.contains(LocalRunKey.of(runId));
 	}
 
 	/**
@@ -3584,12 +3587,15 @@ public class ResilientChatService {
 	 * 压完才交棒，轮起点比压缩时刻更晚。因此级别由压缩方<b>显式交接</b>，驱动侧读后即弃。
 	 *
 	 * <p>容量：一轮一个键、读完即删；即便某轮在交棒前失败，条目也只留到该轮结束（runId 不复用）。
+	 *
+	 * <p><b>键 = 身份 + runId</b>（{@link LocalRunKey}）：runId 不是跨身份唯一定性 —— 按裸 runId
+	 * 交接会让 B 的同名轮次消费掉 A 的级别，{@code done.context.level} 于是说了一次没做过的压缩。
 	 */
 	private final Map<String, String> compactionLevels = new ConcurrentHashMap<>();
 
 	/**
-	 * 本进程此刻<b>登记在册的驱动方</b>（{@code runId}）：首轮 {@code chat()} 在取得续跑权那一笔记入、
-	 * 在轮次收尾的 {@code finally} 抹掉。
+	 * 本进程此刻<b>登记在册的驱动方</b>（<b>身份 + runId</b>）：首轮 {@code chat()} 在取得续跑权那一笔
+	 * 记入、在轮次收尾的 {@code finally} 抹掉。
 	 *
 	 * <h2>为什么需要这张表（2026-10-29）</h2>
 	 * 续跑权租约能拦<b>跨实例</b>的接管，但<b>同实例</b>是拦不住的：{@code LeaseService} 的抢租对同一
@@ -3599,6 +3605,9 @@ public class ResilientChatService {
 	 *
 	 * <p>它同时是续租的<b>存活判据</b>（与续跑的 {@code resuming} 同口径）：驱动方收尾后下一拍即停续租并还租，
 	 * 于是"驱动线程悄悄死掉、快照停在 RUNNING"不会留下一个永远续租的僵尸租约。
+	 *
+	 * <p><b>键必须带身份</b>：按裸 runId 登记会让另一身份的同名轮次被"本进程还有驱动方"驳回
+	 * （它的僵尸接管永远不成立），续租的存活判据也会读错别人的登记。
 	 */
 	private final Set<String> drivingRuns = ConcurrentHashMap.newKeySet();
 
@@ -3608,7 +3617,7 @@ public class ResilientChatService {
 	 * @param level 实际级别（{@code none}/{@code L1}/{@code L2}/{@code L3}）；{@code null} 按 {@code none}
 	 */
 	public void noteCompaction(String runId, String level) {
-		this.compactionLevels.put(runId, level == null ? "none" : level);
+		this.compactionLevels.put(LocalRunKey.of(runId), level == null ? "none" : level);
 	}
 
 	/**
@@ -3620,7 +3629,17 @@ public class ResilientChatService {
 	 * 论证失真。{@code noteCompaction(runId, null)} 写的是 {@code "none"}（仍占位），不是清除。
 	 */
 	public void clearCompaction(String runId) {
-		this.compactionLevels.remove(runId);
+		this.compactionLevels.remove(LocalRunKey.of(runId));
+	}
+
+	/**
+	 * 尚未被驱动侧消费的压缩级别交接（{@code null} = 没有交接）。
+	 *
+	 * <p>包内可见：只给"交接不得跨身份串"的用例与排障面用 —— 生产读取点仍是
+	 * {@link #resumedTurn}（<b>读后即弃</b>），本方法<b>不</b>摘除条目。
+	 */
+	String pendingCompactionLevel(String runId) {
+		return this.compactionLevels.get(LocalRunKey.of(runId));
 	}
 
 	/** 续跑侧的装配锚点（历史里的 system 即是人设 + 工作区快照的合成体；级别来自一次性交接）。 */
@@ -3635,7 +3654,7 @@ public class ResilientChatService {
 		int toolsTokens = ContextEstimator.estimateToolSchemas(this.toolRegistry.forContext(context));
 		int historyTokens = ContextEstimator.estimateMessages(history);
 		int limit = this.contextCompactor == null ? 0 : this.contextCompactor.limitTokens(null, model);
-		String level = this.compactionLevels.remove(runId);
+		String level = this.compactionLevels.remove(LocalRunKey.of(runId));
 		if (level == null) {
 			level = "none";
 		}

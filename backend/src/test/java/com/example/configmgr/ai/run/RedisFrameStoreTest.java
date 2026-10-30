@@ -127,31 +127,164 @@ class RedisFrameStoreTest {
 		assertThat(seqs(store.readFrom(RUN_ID, 0L, 0))).as("日志里无同号重号").doesNotHaveDuplicates();
 	}
 
-	// ── I-2：物理序 ≠ seq 序（乱序落档）不得让低号帧永久不可读 ────────────────
+	// ── I-2：晚到的低号帧仍可读（落档改为"重分配号"，而不是自动 ID 兜底） ────────
 
 	/**
-	 * 低号帧后到（跨实例并发出帧 / 降级号回退）：显式 ID 被拒 ⇒ 落档改用自动 ID（物理位次靠后），
-	 * 但读侧按 {@code (afterSeq-0} 起读 + 按 seq 过滤，<b>两个号都读得到</b>。
+	 * 低号帧后到（跨实例并发出帧 / 降级号回退）：显式 ID {@code 4-0} 已被表尾越过
+	 * ⇒ 落档<b>重分配号</b>后再写（本批口径），于是流里每条记录的 ID 仍等于它自己的 {@code seq}，
+	 * 读者的 {@code XRANGE <afterSeq+1>-0 +} 仍是精确差量：<b>三帧都读得到、不重、不整窗</b>。
 	 *
-	 * <p>kill：把读法退回"按 {@code 末号 − afterSeq} 估条数取尾部"⇒ {@code readFrom(3)} 只拿到 5/6，
-	 * 4 号帧永久不可见，本用例变红。
+	 * <p>旧口径在这条路径改用自动 ID：物理位次靠后但 seq 字段是原号，读侧要靠"整窗 + 按 seq 过滤"
+	 * 兜住，末号探测也会被墙钟 ID 干扰（RT-31）。
+	 *
+	 * <p>kill：退回 {@code XADD *} 兜底 ⇒ ID == seq 断言红；丢掉被拒的帧 ⇒ "三帧都在"红。
 	 */
 	@Test
-	void lateLowSeqFrameStaysReadableAfterPhysicalReorder() {
+	void lateLowSeqAppendIsResequencedAndStaysReadable() {
 		FakeFrameRedis redis = new FakeFrameRedis();
 		RedisFrameStore store = store(redis);
 		appendRaw(store, frame("delta", 5L));
 		appendRaw(store, frame("delta", 6L));
 
-		// 乱序：4 号在 5/6 之后才落档
+		// 乱序：4 号在 5/6 之后才落档（显式 ID 4-0 已小于表尾）
 		appendRaw(store, frame("delta", 4L));
 
-		assertThat(redis.streamIds(store.streamKey(RUN_ID))).as("物理序已越过 4（自动 ID 兜底）")
-				.hasSize(3)
-				.last().isNotEqualTo("4-0");
-		assertThat(seqs(store.readFrom(RUN_ID, 3L, 0))).as("低号帧必须仍可读（对所有读者）")
-				.containsExactly(4L, 5L, 6L);
-		assertThat(seqs(store.readFrom(RUN_ID, 4L, 0))).containsExactly(5L, 6L);
+		assertPhysicalIdsMatchBusinessSeqs(redis, store.streamKey(RUN_ID));
+		assertThat(redis.stream(store.streamKey(RUN_ID))).as("低号帧不得丢（重分配后仍落档）").hasSize(3);
+
+		List<Long> archived = seqs(store.readFrom(RUN_ID, 0L, 0));
+		assertThat(archived).as("低号帧必须仍可读（对所有读者）、按号升序、不重")
+			.hasSize(3)
+			.doesNotHaveDuplicates()
+			.isSorted();
+		assertThat(seqs(store.readFrom(RUN_ID, archived.get(0), 0))).as("差量读精确（不是整窗回退）")
+			.containsExactly(archived.get(1), archived.get(2));
+		assertThat(store.lastSeq(RUN_ID)).as("末号精确").isEqualTo(archived.get(2));
+	}
+
+	// ── 多实例并发写同一轮：物理 ID 必须恒等于业务 seq（禁止自动 ID 兜底） ──────
+
+	/**
+	 * <b>多实例并发落档</b>：另一实例（confirm / frontend-tool-result）先落档了更高的号，
+	 * 驱动随后才落自己的低号帧 —— 显式 ID {@code <seq>-0} 被表尾越过。
+	 *
+	 * <p>判据（本批要钉的唯一一条）：<b>物理 Stream ID 必须始终等于业务 seq</b>
+	 * ——每条记录的 ID 毫秒段、{@code seq} 字段、帧体内的 {@code seq} 三者同值，
+	 * 且<b>绝不</b>退回 {@code XADD *}（自动 ID）。
+	 *
+	 * <p>为什么自动 ID 是缺陷而不是兜底：自动 ID 的毫秒段是写入时刻的墙钟（≈1.7e12），
+	 * 远大于任何 {@code seq-0} ⇒ 一旦出现一条，<b>此后每一条</b>显式 ID 都会被拒、
+	 * 全部帧都改成墙钟序落档：物理序与 seq 序从此分叉，末号探测（末
+	 * {@value RedisFrameStore#TAIL_PROBE} 条取 max）在乱序 ≥ 该条数时低估 ⇒ 读者拿到
+	 * "空结果且 degraded=false"（永久缺段）、前端 lastSeq 倒退、差量读退化为整窗。
+	 *
+	 * <p>正确口径：被表尾越过时<b>重分配序号</b>（Redis 原子抬号，仍落在同一槽）并重试落档 ——
+	 * 帧不丢、ID 与 seq 仍一一对应；重复写同一帧则幂等跳过（见 {@link #repeatedAppendIsIdempotent}）。
+	 *
+	 * <p>kill：改回 {@code XADD *} 兜底 ⇒ 首条断言（ID == seq）即红；
+	 * 丢掉被拒的帧 ⇒ "两帧都在"红；按 {@code seq} 之外的口径算末号 ⇒ 末号断言红。
+	 */
+	@Test
+	void concurrentInstancesNeverFallBackToAutoIds() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore driver = store(redis);
+		RedisFrameStore confirm = store(redis);
+
+		long driverSeq = driver.nextSeq(RUN_ID);
+		long confirmSeq = confirm.nextSeq(RUN_ID);
+		assertThat(driverSeq).as("两实例共享同一号源（跨实例原子自增）").isEqualTo(1L);
+		assertThat(confirmSeq).isEqualTo(2L);
+
+		// 另一实例先落档高号；驱动的低号帧随后才到（跨实例并发的真实交错）
+		confirm.append(RUN_ID, frame("tool_result", confirmSeq));
+		driver.append(RUN_ID, frame("delta", driverSeq));
+
+		assertPhysicalIdsMatchBusinessSeqs(redis, driver.streamKey(RUN_ID));
+		assertThat(redis.stream(driver.streamKey(RUN_ID))).as("低号帧不得丢（重分配后必须仍落档）").hasSize(2);
+
+		List<Long> archived = seqs(driver.readFrom(RUN_ID, 0L, 0));
+		assertThat(archived).as("两帧都读得到、按号升序、不重").hasSize(2).doesNotHaveDuplicates();
+		long maxSeq = archived.get(1);
+		assertThat(driver.lastSeq(RUN_ID)).as("末号必须精确（不得低估）").isEqualTo(maxSeq);
+		assertThat(seqs(driver.readFrom(RUN_ID, maxSeq, 0))).as("afterSeq = 末号：无差量（不回退成整窗读）").isEmpty();
+		assertThat(seqs(driver.readFrom(RUN_ID, confirmSeq, 0))).as("差量读只给 > afterSeq 的帧")
+			.containsExactly(maxSeq);
+	}
+
+	/** 记录的物理 ID、{@code seq} 字段与帧体里的 {@code seq} 必须同值（{@code <seq>-0}）。 */
+	private static void assertPhysicalIdsMatchBusinessSeqs(FakeFrameRedis redis, String streamKey) {
+		List<String> ids = redis.streamIds(streamKey);
+		assertThat(ids).hasSameSizeAs(redis.stream(streamKey));
+		for (int i = 0; i < ids.size(); i++) {
+			assertPhysicalIdMatchesBusinessSeq(redis, streamKey, i);
+		}
+	}
+
+	/** 第 {@code index} 条（物理序）记录的 ID / {@code seq} 字段 / 帧体 {@code seq} 必须同值。 */
+	private static void assertPhysicalIdMatchesBusinessSeq(FakeFrameRedis redis, String streamKey, int index) {
+		String id = redis.streamIds(streamKey).get(index);
+		Map<String, byte[]> fields = FakeFrameRedis.asMap(redis.stream(streamKey).get(index));
+		long seq = Long.parseLong(new String(fields.get(RedisFrameStore.FIELD_SEQ),
+				java.nio.charset.StandardCharsets.UTF_8));
+		assertThat(id).as("物理 ID 必须等于业务 seq（禁止自动 ID 兜底）").isEqualTo(seq + "-0");
+		String body = new String(fields.get(RedisFrameStore.FIELD_FRAME), java.nio.charset.StandardCharsets.UTF_8);
+		assertThat(body).as("帧体内的 seq 必须与记录 ID 一致（重分配后重新序列化）")
+			.contains("\"seq\":" + seq);
+	}
+
+	/**
+	 * <b>幂等</b>：同一份帧（同号 + 同帧体）被重复落档（重试 / 重复调用）时不得写出第二条记录。
+	 *
+	 * <p>旧实现在这里落到"显式 ID 被拒 ⇒ 自动 ID 兜底"：同一个 {@code seq} 在流里有两条记录，
+	 * 回放时同号合并（{@code mergeBySeq}）只能留一条，前端 {@code lastSeq} 也会因为墙钟 ID 而错位。
+	 * 新口径：表尾就是同一 {@code seq} 且帧体逐字节相同 ⇒ 视为已落档（只续期，不写第二条）。
+	 */
+	@Test
+	void repeatedAppendIsIdempotent() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+
+		long seq = store.nextSeq(RUN_ID);
+		Map<String, Object> frame = frame("delta", seq);
+		store.append(RUN_ID, frame);
+		store.append(RUN_ID, frame);
+
+		assertThat(redis.stream(store.streamKey(RUN_ID))).as("同一帧重试不得写出第二条（同号重复会丢一帧）")
+			.hasSize(1);
+		assertPhysicalIdsMatchBusinessSeqs(redis, store.streamKey(RUN_ID));
+		assertThat(store.lastSeq(RUN_ID)).isEqualTo(seq);
+	}
+
+	/**
+	 * <b>升级兼容</b>：表尾遗留旧实现的"自动 ID 兜底"记录（墙钟毫秒 ID）时，新的落档
+	 * 既不得继续用自动 ID，也不得因为"任何 {@code seq-0} 都小于墙钟 ID"而被永久拒绝（= 整轮静默丢帧）。
+	 *
+	 * <p>口径：按表尾 ID 的毫秒段作地板<b>重分配</b>一次号（于是这次跳号），此后 ID == seq 恢复。
+	 * 不处理这一形态的代价：部署后 24h 内（遗留记录的 TTL）所有落档都被拒 ⇒ 事件日志整段不可见。
+	 */
+	@Test
+	void appendAboveALegacyAutoIdTailResequencesInsteadOfUsingAutoIds() {
+		FakeFrameRedis redis = new FakeFrameRedis();
+		RedisFrameStore store = store(redis);
+		long legacySeq = store.nextSeq(RUN_ID);
+		seedAutoIdEntry(redis, store.streamKey(RUN_ID), legacySeq, "{\"type\":\"delta\",\"seq\":1}");
+
+		long nextSeq = store.nextSeq(RUN_ID);
+		store.append(RUN_ID, frame("delta", nextSeq));
+
+		assertThat(redis.stream(store.streamKey(RUN_ID))).as("表尾是墙钟 ID 时也不得丢帧").hasSize(2);
+		// 第 0 条是刻意铺的旧形态记录（它本就违反 ID == seq）；新落档的第 1 条必须符合不变量。
+		assertPhysicalIdMatchesBusinessSeq(redis, store.streamKey(RUN_ID), 1);
+		assertThat(store.lastSeq(RUN_ID)).as("末号 = 新落档的号（精确，不低估）")
+			.isGreaterThan(legacySeq);
+	}
+
+	/** 用原始 {@code XADD ... *} 铺一条旧实现的自动 ID 记录（本批之前的落档形态）。 */
+	private static void seedAutoIdEntry(FakeFrameRedis redis, String key, long seq, String frameJson) {
+		java.nio.charset.Charset utf8 = java.nio.charset.StandardCharsets.UTF_8;
+		redis.connection.execute("XADD", key.getBytes(utf8), "*".getBytes(utf8),
+				RedisFrameStore.FIELD_SEQ.getBytes(utf8), String.valueOf(seq).getBytes(utf8),
+				RedisFrameStore.FIELD_FRAME.getBytes(utf8), frameJson.getBytes(utf8));
 	}
 
 	// ── M2 readFrom 边界 ────────────────────────────────────────────────────

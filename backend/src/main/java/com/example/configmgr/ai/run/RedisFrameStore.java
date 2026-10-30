@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,14 +52,23 @@ import java.util.function.LongSupplier;
  * 仍把它串在 Stream 前面（按 {@code seq} 拼接去重），TTL 到期自然消亡，不做搬迁。</li>
  * </ul>
  *
- * <h2>顺序口径（I-2 收口）</h2>
- * entry ID 用<b>显式 {@code <seq>-0}</b> ⇒ <b>物理序 = seq 序</b>（自动 ID 兜底态除外），{@link #readFrom} 因此可以用
+ * <h2>顺序口径（I-2 收口 + 显式 ID 恒定批）</h2>
+ * entry ID 用<b>显式 {@code <seq>-0}</b>，且<b>只可能是显式 ID</b> ⇒ <b>物理序恒等于 seq 序</b>，
+ * {@link #readFrom} 因此可以用
  * {@code XRANGE key <afterSeq+1>-0 +}（<b>闭区间</b>，见 {@code streamFramesAbove}）精确取差量
  * （O(差量)，且不依赖"低号帧一定先落"）。<b>不用排他下限 {@code (afterSeq-0}：那是 Redis 6.2 的语法，
  * 目标部署 5.0.14 会直接报错</b>，报错被 catch 折成空 ⇒ 差量读 0 帧。
- * 跨实例并发出帧时显式 ID 可能被 Redis 拒（新 ID 必须大于表尾）⇒ 落档改用**自动 ID 兜底**并 WARN 一次：
- * 该帧物理位次靠后但 {@code seq} 字段仍是原号，读者从 {@code <afterSeq+1>-0} 起读时仍会看到它
- * （自动 ID 远大于任何 {@code seq-0}），再按 {@code seq} 过滤。
+ *
+ * <p><b>显式 ID 被拒（表尾已越过本号）不再退化为自动 ID</b>：跨实例并发出帧
+ * （confirm / frontend-tool-result 与驱动同时写同一轮）或降级号回退时，显式 ID 会被 Redis 拒
+ * （新 ID 必须大于表尾）。旧口径改用 {@code XADD *} 兜底 —— 那条路的自动 ID 毫秒段是写入时刻的墙钟
+ * （≈1.7e12），<b>大于任何 {@code seq-0}</b>，于是此后每条显式 ID 都被拒、全部帧改走自动 ID：
+ * 物理序与 seq 序永久分叉，末号探测（末 {@value #TAIL_PROBE} 条取 max）随之低估
+ * ⇒ 读者拿到"空结果且 {@code degraded=false}"（永久缺段）、前端 {@code lastSeq} 倒退、
+ * 差量读退化为整窗。现在改为 {@link #append} 内的<b>幂等判定 + 重分配重试</b>：
+ * 同一号同一帧体 ⇒ 视为已落档（只续期）；否则用取号脚本<b>原子</b>抬号到表尾之后
+ * （{@code INCR}/{@code INCRBY}，绝不 {@code SET}）并重写帧体的 {@code seq} 后重试。
+ * 于是不变量只有一条：<b>每条记录的 ID 毫秒段 == 它的 {@code seq} 字段</b>。
  *
  * <p>另：{@link #readFrom} 的输出一律按 {@code seq} 升序（同号以 Stream 为准），
  * 于是"跨实例取号不重不回退"由 {@code INCR} 保证，"订阅者看到的顺序"由排序保证，两者互不牵连。
@@ -107,7 +117,7 @@ public class RedisFrameStore implements FrameStore {
 	 */
 	public static final long ENTRY_OVERHEAD_BYTES = 256L;
 
-	/** 末号探测读取的末尾条数（见 {@code streamTailSeq}：乱序兜底态下物理末位可能是低号帧）。 */
+	/** 末号探测读取的末尾条数（见 {@code streamTailSeq}：升级期残留的自动 ID 记录会打乱物理位次）。 */
 	static final int TAIL_PROBE = 16;
 
 	/** Stream 记录里的两个字段名。 */
@@ -218,6 +228,14 @@ public class RedisFrameStore implements FrameStore {
 	 */
 	static final int SEQ_ALLOCATE_ATTEMPTS = 2;
 
+	/**
+	 * 落档的<b>最多尝试次数</b>（显式 ID 恒定批）：显式 ID 被表尾越过时，按表尾原子重分配一个号
+	 * 再试。取 3 = "一次原号 + 两次重分配" —— 每次重分配都把号抬到<b>该次读到的表尾之后</b>，
+	 * 并发竞争下第二拍通常就落定；不收敛就只记日志（该帧跨实例不可见），
+	 * <b>绝不</b>退回自动 ID（那会让物理序与 seq 序永久分叉），也不无限重试（不阻塞出帧线程）。
+	 */
+	static final int APPEND_ATTEMPTS = 3;
+
 	/** 进程内时钟（单测可注入，让"归档到期"可确定性地推进）。 */
 	private final LongSupplier clock;
 
@@ -259,8 +277,14 @@ public class RedisFrameStore implements FrameStore {
 		 */
 		final AtomicLong observedPayloadBytes = new AtomicLong();
 
-		/** 已就"显式 ID 落档被拒"告警过（同一轮只吼一次，避免乱序期刷日志）。 */
-		final AtomicBoolean outOfOrderWarned = new AtomicBoolean();
+		/**
+		 * 已就"显式 ID 落档被表尾越过 ⇒ 重分配序号"告警过（同一轮只吼一次，避免并发竞争期刷日志）。
+		 *
+		 * <p>它记录的是<b>号被上移</b>这件事（原号已被更高的帧占位，物理上无法再写 {@code <原号>-0}）：
+		 * 这不再是"物理序漂移"（ID 仍等于落档后的 seq），但仍值得每轮留一条痕 ——
+		 * 它意味着调用方先前拿到的号与归档号不一致（帧内容不变，只是号跳了一格）。
+		 */
+		final AtomicBoolean reseqWarned = new AtomicBoolean();
 
 		/** 已就"字节预算成为约束"告警过。 */
 		final AtomicBoolean byteCapWarned = new AtomicBoolean();
@@ -458,25 +482,48 @@ public class RedisFrameStore implements FrameStore {
 
 	@Override
 	public void append(String runId, Map<String, Object> frame) {
+		appendAndGetSeq(runId, frame);
+	}
+
+	/**
+	 * 落档并返回<b>实际落档号 + 归档的帧体原文</b>（显式 ID 恒定批）。
+	 *
+	 * <p>为什么要回传：{@code <seq>-0} 被表尾越过时本方法会<b>重分配号</b>再写（见
+	 * {@link #appendAt}），那一帧的最终号不是帧体里的号 —— 出帧方必须用回传的号做实时投递/唤醒，
+	 * 否则同一帧在实时流与回放里是两个号（{@code lastSeq} 与按号去重都会错位）。
+	 * 回传的 {@code payload} 是<b>写进 Stream 的那一份字节</b>（重分配时已按新号重新序列化），
+	 * 出帧方据此让实时字节与归档逐字节一致。
+	 */
+	@Override
+	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame) {
+		return appendAndGetSeq(runId, frame, null);
+	}
+
+	/**
+	 * 落档并返回实际落档号 + 归档字节；<b>带工厂时负载在"最终号"下生成</b>（同号、同字节、不越界）。
+	 *
+	 * <p>工厂在<b>每一次尝试</b>前被调用（首次 = 取号号；重分配后 = 新号），拿到的是已写入最终号的帧
+	 * 体：它就地截断/序列化（{@code FrameSizeLimiter.apply}），所以"截断"与"落档号"同源。
+	 * 成功落档的那一份字节即归档字节，出帧方原样投递 —— 贴着单帧上限的帧也不会因为号变宽而越界
+	 * （旧口径先按取号号截断、改号后多出"号宽"字节，必然越过 max-frame-bytes）。
+	 */
+	@Override
+	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory) {
 		String type = String.valueOf(frame.get("type"));
 		if (RunStore.HEARTBEAT_TYPE.equals(type)) {
 			// T7 原样：心跳不入事件日志（活动戳由调用方 touchActivity 留痕）。
-			return;
+			return AppendResult.skipped();
 		}
 		long seq = seqOf(frame);
 		if (seq <= 0L) {
 			// N-4：无 seq 的帧不进 Stream（否则会写入一条 seq=0 记录，被 streamTailSeq 当成末号）。
 			log.debug("事件日志跳过无 seq 帧 runId={} type={}", runId, type);
-			return;
+			return AppendResult.skipped();
 		}
 		byte[] key = bytes(streamKey(runId));
-		byte[] payload;
-		try {
-			payload = this.mapper.writeValueAsBytes(frame);
-		}
-		catch (Exception ex) {
-			log.warn("事件日志序列化失败 runId={} type={}（该帧未落档，跨实例不可见）：{}", runId, type, ex.getMessage());
-			return;
+		byte[] payload = producePayload(runId, type, frame, payloadFactory);
+		if (payload == null) {
+			return AppendResult.skipped();
 		}
 		long ttlSeconds = Math.max(1L, ttl().toSeconds());
 		// 容量治理（Redis 容量专项 A）：先落"本轮见过的最大载荷"，再据它算本条落档用的窗口 ——
@@ -484,49 +531,235 @@ public class RedisFrameStore implements FrameStore {
 		RunState state = state(runId);
 		int window = windowForPayload(state.observedPayloadBytes.accumulateAndGet(payload.length, Math::max));
 		noteByteGovernance(runId, state, window);
+		return appendAt(runId, type, frame, key, seq, payload, ttlSeconds, window, state, payloadFactory);
+	}
+
+	/**
+	 * 产出本条落档用的负载：带工厂时由工厂就地截断/序列化（帧体已含当前尝试的最终号），
+	 * 否则由本类序列化帧体。失败只 WARN（该帧不落档，不抛给出帧线程）。
+	 */
+	private byte[] producePayload(String runId, String type, Map<String, Object> frame,
+			PayloadFactory payloadFactory) {
+		if (payloadFactory != null) {
+			byte[] payload = payloadFactory.payload(frame);
+			if (payload == null) {
+				log.warn("事件日志负载生成失败 runId={} type={}（该帧未落档，跨实例不可见）", runId, type);
+			}
+			return payload;
+		}
 		try {
-			xadd(key, seq + "-0", seq, payload, ttlSeconds, window);
+			return this.mapper.writeValueAsBytes(frame);
 		}
 		catch (Exception ex) {
-			// 显式 ID 被拒 = 物理序已经越过这个号（跨实例并发出帧 / 降级号回退）。帧不能丢：
-			// 改用自动 ID 追加（物理位次靠后，但 seq 字段仍在，读侧按 <afterSeq+1>-0 起读 + 按 seq 过滤仍可读到）。
-			if (state.outOfOrderWarned.compareAndSet(false, true)) {
-				log.warn("事件日志显式 ID 落档被拒 runId={} seq={}（改用自动 ID 兜底；物理序与 seq 序将不再一致）：{}",
-						runId, seq, ex.getMessage());
-			}
-			try {
-				xadd(key, "*", seq, payload, ttlSeconds, window);
-			}
-			catch (Exception retryEx) {
-				// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
-				log.warn("事件日志追加失败 runId={} type={} seq={}（该帧跨实例不可见）：{}", runId, type, seq,
-						retryEx.getMessage());
-			}
+			log.warn("事件日志序列化失败 runId={} type={}（该帧未落档，跨实例不可见）：{}", runId, type, ex.getMessage());
+			return null;
 		}
 	}
 
 	/**
-	 * 追加一条 Stream 记录：{@code XADD key MAXLEN ~ <窗口> <id> seq <n> frame <json>}，随后续期 TTL。
+	 * 以<b>显式 ID {@code <seq>-0}</b> 落档；被表尾越过时按"幂等判定 → 原子重分配 → 重试"收口。
+	 *
+	 * <p><b>绝不使用自动 ID（{@code XADD *}）</b>：自动 ID 的毫秒段是写入时刻的墙钟，一条落下就会让
+	 * 此后每条显式 ID 都被拒（见类注）——物理序与 seq 序永久分叉、末号低估、差量读退化为整窗。
+	 *
+	 * <p>被拒只有两种成因，分别有确定的收口：
+	 * <ol>
+	 * <li><b>同一次落档的重试</b>（上一拍其实已成功 / 调用方重复提交）：表尾记录的 ID 毫秒段 == 本号
+	 * 且帧体逐字节相同 ⇒ <b>幂等</b>，只续期、不写第二条；</li>
+	 * <li><b>号被更高的帧越过</b>（跨实例并发出帧 / 降级号回退）：表尾必须严格更大，{@code <原号>-0}
+	 * 物理上写不进去 ⇒ 用取号脚本<b>原子</b>抬号到表尾之后（{@code INCR}+{@code INCRBY}，绝不 {@code SET}），
+	 * 按新号重写帧体的 {@code seq} 后重试。</li>
+	 * </ol>
+	 *
+	 * <p>重分配的代价与边界：这一帧的归档号<b>上移</b>（内容不变），因此与取号时拿到的号不同 ——
+	 * 因此本方法把<b>最终号与归档字节</b>一并回传（{@link #appendAndGetSeq}），出帧方据此改号和投递，
+	 * 实时流、回放、唤醒、{@code lastSeq} 才同号。号上移只是"跳一格"（ID == seq 仍成立、不会同号重复），
+	 * 而自动 ID 会让此后<b>整轮</b>的物理序都不可信。
+	 * 重试次数有界（{@value #APPEND_ATTEMPTS}），不收敛只记日志 —— 落档失败不影响本轮运行。
+	 *
+	 * @return 实际落档号 + 写进 Stream 的帧体原文；{@link AppendResult#skipped()} = 本次未落档
+	 */
+	private AppendResult appendAt(String runId, String type, Map<String, Object> frame, byte[] key, long seq,
+			byte[] payload, long ttlSeconds, int window, RunState state, PayloadFactory payloadFactory) {
+		long attemptSeq = seq;
+		byte[] attemptPayload = payload;
+		for (int attempt = 1; attempt <= APPEND_ATTEMPTS; attempt++) {
+			try {
+				xadd(key, attemptSeq, attemptPayload, ttlSeconds, window);
+				if (attempt > 1) {
+					// 重分配已在上面的"被表尾越过"WARN（每轮一次）里说明；这里只留最终落档号，避免刷日志。
+					log.debug("事件日志落档已按表尾重分配序号 runId={} type={} 原 seq={} 落档 seq={}", runId, type, seq,
+							attemptSeq);
+				}
+				return new AppendResult(attemptSeq, attemptPayload);
+			}
+			catch (Exception ex) {
+				TailRecord tail = tailRecord(runId);
+				if (tail != null && tail.idMs() == attemptSeq && Arrays.equals(tail.frame(), attemptPayload)) {
+					// 幂等：同一号 + 同一份帧体已在表尾（重试 / 重复调用）—— 不写第二条，只续期。
+					refreshTtl(key, ttlSeconds);
+					return new AppendResult(attemptSeq, attemptPayload);
+				}
+				if (attempt == APPEND_ATTEMPTS) {
+					// 帧留档失败不影响本轮运行（外置是"更耐久"，不是"更正确"的前提）
+					log.warn("事件日志追加失败 runId={} type={} seq={}（重分配后仍被表尾拒绝，该帧跨实例不可见）：{}",
+							runId, type, attemptSeq, ex.getMessage());
+					return AppendResult.skipped();
+				}
+				long floor = tail == null ? attemptSeq : Math.max(tail.idMs(), attemptSeq);
+				long fresh;
+				try {
+					fresh = allocateAbove(runId, floor, state);
+				}
+				catch (Exception allocEx) {
+					log.warn("事件日志重分配序号失败 runId={} type={} seq={}（该帧跨实例不可见）：{}", runId, type,
+							attemptSeq, allocEx.getMessage());
+					return AppendResult.skipped();
+				}
+				if (fresh <= 0L) {
+					log.warn("事件日志重分配序号无法确认唯一性 runId={} type={} seq={}（该帧未落档）", runId, type,
+							attemptSeq);
+					return AppendResult.skipped();
+				}
+				if (state.reseqWarned.compareAndSet(false, true)) {
+					log.warn("事件日志显式 ID 落档被表尾越过 runId={} type={} 原 seq={}（重分配为 {} 后重试；"
+							+ "不再改用自动 ID —— 物理 ID 必须等于业务 seq）", runId, type, seq, fresh);
+				}
+				attemptSeq = Math.max(fresh, floor + 1L);
+				if (payloadFactory != null) {
+					// 工厂就地截断/序列化：先把最终号写回调用方的帧，再产负载 ——
+					// 于是"截断"与"落档号"同源（贴着上限的帧也不会因号变宽而越界）。
+					frame.put("seq", attemptSeq);
+					byte[] regenerated = producePayload(runId, type, frame, payloadFactory);
+					if (regenerated == null) {
+						return AppendResult.skipped();
+					}
+					attemptPayload = regenerated;
+				}
+				else {
+					Map<String, Object> stored = new LinkedHashMap<>(frame);
+					stored.put("seq", attemptSeq);
+					try {
+						attemptPayload = this.mapper.writeValueAsBytes(stored);
+					}
+					catch (Exception serEx) {
+						log.warn("事件日志序列化失败 runId={} type={} seq={}（重分配后仍无法落档）：{}", runId, type,
+								attemptSeq, serEx.getMessage());
+						return AppendResult.skipped();
+					}
+				}
+				window = windowForPayload(state.observedPayloadBytes.accumulateAndGet(attemptPayload.length, Math::max));
+			}
+		}
+		return AppendResult.skipped();
+	}
+
+	/** Stream 表尾一条记录的可判定面：ID 的毫秒段 + {@code frame} 字段原文。 */
+	private record TailRecord(long idMs, byte[] frame) {
+	}
+
+	/**
+	 * 读表尾一条记录（{@code XREVRANGE key + - COUNT 1}）：幂等判定与重分配地板的唯一输入。
+	 *
+	 * <p>地板取<b>ID 的毫秒段</b>而不是 {@code seq} 字段：旧实现落的自动 ID 记录 ID 是墙钟
+	 * （远大于任何 {@code seq-0}），此时"任何 {@code seq-0} 都小于表尾"，只看 {@code seq} 字段算出的新号
+	 * 永远写不进去（部署后遗留记录的 24h TTL 内整轮静默丢帧）。按 ID 毫秒段做地板 ⇒ 号一次跳到墙钟量级，
+	 * 此后 ID == seq 恢复（只影响"已经漂移过"的那一轮）。
+	 *
+	 * <p>读不出来（连接抖动 / 键类型错）返回 {@code null} 并 WARN + 计入 A4：调用方退回"按本号 + 1 重分配"，
+	 * 有界重试后仍失败就只记日志 —— 不抛给调用链，也不把"读不出表尾"说成"落档成功"。
+	 */
+	private TailRecord tailRecord(String runId) {
+		try {
+			byte[] key = bytes(streamKey(runId));
+			return this.redis.execute((RedisCallback<TailRecord>) connection -> {
+				List<ByteRecord> records = connection.xRevRange(key, Range.unbounded(),
+						org.springframework.data.redis.connection.Limit.limit().count(1));
+				if (records == null || records.isEmpty()) {
+					return null;
+				}
+				ByteRecord record = records.get(0);
+				var id = record.getId();
+				long idMs = id == null || id.getTimestamp() == null ? 0L : id.getTimestamp();
+				return new TailRecord(idMs, frameFieldOf(record));
+			});
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
+			log.warn("事件日志表尾读取失败 runId={}（无法判定幂等/重分配地板，本次按本号 + 1 重分配）：{}", runId,
+					ex.toString());
+			return null;
+		}
+	}
+
+	/**
+	 * 重分配序号（<b>原子</b>，同槽）：{@code INCR} → 抬到地板之上（{@code INCRBY}）→ {@code EXPIRE}。
+	 *
+	 * <p>复用取号脚本（{@code forceRepair=1}，地板作为 {@code fallbackLast}）：三键仍带同一
+	 * {@code {run:<runId>}} hash tag ⇒ Cluster 下多键脚本合法；抬号只做增量（{@code INCRBY}），
+	 * <b>绝不</b> {@code SET} —— 无条件写会把并发方刚取走的号压低（那正是 M-1 的成因）。
+	 *
+	 * @return 新号；{@code <= 0} = 脚本无法确认唯一性（刚重建 + 锚点读不出），调用方据此放弃本帧
+	 */
+	private long allocateAbove(String runId, long floor, RunState state) {
+		long ttlSeconds = Math.max(1L, ttl().toSeconds());
+		List<?> result = this.redis.execute(SEQ_NEXT_SCRIPT,
+				List.of(seqKey(runId), streamKey(runId), legacyListKey(runId)),
+				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, floor)), String.valueOf(TAIL_PROBE), "1");
+		if (result == null || result.isEmpty()) {
+			throw new IllegalStateException("取号脚本返回空");
+		}
+		state.repairDegraded.set(result.size() > 1 && scriptSeq(result.get(1)) != 0L);
+		return scriptSeq(result.get(0));
+	}
+
+	/** 幂等命中时补一次续期（该拍没有 {@code XADD}，滑动 TTL 仍要前进）。 */
+	private void refreshTtl(byte[] key, long ttlSeconds) {
+		try {
+			this.redis.execute((RedisCallback<Object>) connection -> {
+				connection.expire(key, ttlSeconds);
+				return null;
+			});
+		}
+		catch (Exception ex) {
+			log.debug("事件日志续期失败（幂等命中，按已有记录继续）：{}", ex.getMessage());
+		}
+	}
+
+	/** 只取一条 Stream 记录的 {@code frame} 字段原文（幂等比对用；不反序列化帧体）。 */
+	private static byte[] frameFieldOf(MapRecord<byte[], byte[], byte[]> record) {
+		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
+			if (FIELD_FRAME.equals(new String(entry.getKey(), StandardCharsets.UTF_8))) {
+				return entry.getValue();
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * 追加一条 Stream 记录：{@code XADD key MAXLEN ~ <窗口> <seq>-0 seq <n> frame <json>}，随后续期 TTL。
 	 *
 	 * <p>
 	 * <b>为什么用原始命令而不是 {@code StreamOperations} / {@code RedisConnection#xAdd(record, options)}</b>：
 	 * 后者无法指定 entry ID（一律自动），而本批的正确性依赖 <b>ID = {@code seq}-0</b>：
-	 * 物理序恒等于 seq 序（自动 ID 兜底态除外），于是"按 {@code XRANGE <afterSeq+1>-0 +} 读差量"既完整又只要 O(差量) ——
+	 * 物理序恒等于 seq 序，于是"按 {@code XRANGE <afterSeq+1>-0 +} 读差量"既完整又只要 O(差量) ——
 	 * 这是 I-2（物理序 ≠ seq 序时低号帧永久不可读）的根治口径。{@code MAXLEN ~} 仍走近似裁剪。
+	 *
+	 * <p><b>entry ID 只由本方法构造</b>（不接收调用方传入的 ID 串）：自动 ID（{@code *}）在类型上就被排除，
+	 * 想退回"自动 ID 兜底"必须先改签名 —— 见 {@link #append} 的重分配口径。
 	 *
 	 * <p><b>MAXLEN 的窗口</b>由 {@link #windowForPayload(long)} 给出（Redis 容量专项 A）：条数窗口
 	 * {@link #STREAM_WINDOW} 与字节预算推导出的等效窗口取小；命令行仍是 {@code MAXLEN ~ n}（近似裁剪），
 	 * 语义与 5.0 / Cluster 完全兼容 —— 没有引入新命令，也没有按字节裁剪（那需要 {@code MEMORY USAGE}
 	 * 之类的额外协议）。
 	 *
-	 * @param idToken 显式 ID（{@code "<seq>-0"}）或 {@code "*"}（乱序兜底）
-	 * @param window  本条落档用的 MAXLEN 窗口（&gt; 0）
+	 * @param window 本条落档用的 MAXLEN 窗口（&gt; 0）
 	 */
-	private void xadd(byte[] key, String idToken, long seq, byte[] payload, long ttlSeconds, int window) {
+	private void xadd(byte[] key, long seq, byte[] payload, long ttlSeconds, int window) {
 		this.redis.execute((RedisCallback<Object>) connection -> {
 			connection.execute("XADD", key,
 					bytes("MAXLEN"), bytes("~"), bytes(String.valueOf(window)),
-					bytes(idToken),
+					bytes(seq + "-0"),
 					bytes(FIELD_SEQ), bytes(String.valueOf(seq)),
 					bytes(FIELD_FRAME), payload);
 			connection.expire(key, ttlSeconds);
@@ -546,9 +779,9 @@ public class RedisFrameStore implements FrameStore {
 	 * {@code (afterSeq}）：目标部署 5.0.14 会拒绝排他区间，而拒绝会被折成空结果 ⇒ 0 帧。
 	 *
 	 * <p>
-	 * <b>乱序兜底</b>：显式 ID 被拒时落档会改用自动 ID（见 {@code append}），这类记录的 ID
-	 * 远大于任何 {@code seq-0}，因此同样落在 {@code <afterSeq+1>-0} 的读取范围内，再按 {@code seq}
-	 * 字段过滤；代价是这种降级态下读取会退化为整窗（≤ 窗口条），并在 {@code append} 处 WARN 一次。
+	 * <b>ID 与 seq 一一对应</b>（显式 ID 恒定批）：落档只用 {@code <seq>-0}，被表尾越过时改的是
+	 * <b>号</b>而不是 ID 形态（见 {@link #append}）。因此流里不存在"ID 远大于 seq 的自动 ID 记录"，
+	 * 读取不必为此退化成整窗：下限 {@code <afterSeq+1>-0} 就是精确的差量边界。
 	 *
 	 * <p>
 	 * <b>空流与读失败</b>：两者返回值都是空列表（调用链只把"空"当"暂无差量"，抛异常会让
@@ -599,7 +832,7 @@ public class RedisFrameStore implements FrameStore {
 	 * {@code ERR Invalid stream ID specified as stream command argument}），而报错会被本方法的
 	 * catch 折成空结果 —— 表现就是<b>差量读回 0 帧</b>。长 run 首次回放同样中招：{@code afterSeq=0}
 	 * 但下限已被夹到 {@code tail − 窗口 > 0}。改用 {@code inclusive (from+1)-0} 等价：
-	 * 记录 ID 只可能是 {@code <seq>-0} 或远大于任何 {@code seq-0} 的自动 ID，两者都
+	 * 记录 ID 恒为 {@code <seq>-0}（显式 ID 恒定批起没有自动 ID），故
 	 * {@code ≥ (from+1)-0 ⇔ seq > from}，语义与排他下限完全一致，且 5.0 可用。
 	 *
 	 * <p>
@@ -794,10 +1027,10 @@ public class RedisFrameStore implements FrameStore {
 	 * Stream 末号 = 末尾 {@value #TAIL_PROBE} 条的<b>最大</b> {@code seq}（一次 {@code XREVRANGE COUNT n}）。
 	 *
 	 * <p>
-	 * 为什么不只读物理最后一条：乱序兜底态下（显式 ID 被拒 ⇒ 自动 ID）物理末位可能是<b>低号</b>帧，
-	 * 只读一条会把末号判小 —— 而末号是"读取下限夹取"（M′）与"号回退修复"（M-1）的共同锚点。
-	 * 同一 run 的 seq 由 {@code INCR} 单调发放，乱序只会发生在个别晚到帧上，因此末尾 16 条取 max
-	 * 在工程上足够（且仍是一次往返、只解析 {@code seq} 字段、不做 JSON 反序列化）。
+	 * 为什么不只读物理最后一条：本批起 ID == seq，物理末位就是最大号；但<b>升级期</b>流里可能残留
+	 * 旧实现落的自动 ID 记录（ID 是墙钟，物理位次与号无关），此时末位未必是最大号。只读一条会把末号判小
+	 * —— 而末号是"读取下限夹取"（M′）与"号回退修复"（M-1）的共同锚点。取末尾
+	 * {@value #TAIL_PROBE} 条的最大 {@code seq} 仍是一次往返、只解析 {@code seq} 字段、不做 JSON 反序列化。
 	 */
 	private StreamTail streamTailSeq(String runId) {
 		try {

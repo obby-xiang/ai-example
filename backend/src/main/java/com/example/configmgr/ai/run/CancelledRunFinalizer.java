@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -151,17 +152,25 @@ public class CancelledRunFinalizer {
 		}
 	}
 
-	/** 取消收尾的进程内互斥对象（同一 run 恒返回同一个）。 */
+	/**
+	 * 取消收尾的进程内互斥对象（同一身份 + 同一 run 恒返回同一个）。
+	 *
+	 * <p>条带的键是 {@link LocalRunKey}（身份 + runId）：A、B 的同名轮次落进同一条带只是<b>串行化</b>
+	 * （损失并行度），不会共享任何状态 —— 状态表本身按同一把键分条。
+	 */
 	public Object finalizeMonitor(String runId) {
-		int hash = runId == null ? 0 : runId.hashCode();
+		int hash = runId == null ? 0 : LocalRunKey.of(runId).hashCode();
 		return this.finalizeMonitors[(hash & 0x7fffffff) % MONITOR_STRIPES];
 	}
 
 	/**
 	 * 交棒一次取消收尾。
 	 *
-	 * <p>幂等/去重：同一 run 已有交棒在飞时返回 {@code false}（不重复派发；正在飞的那次会自己
-	 * 决定"成功 / 重试 / 用尽"）。交棒本身不阻塞调用线程，也不读快照。
+	 * <p>幂等/去重：同一<b>身份 + run</b> 已有交棒在飞时返回 {@code false}（不重复派发；正在飞的那次会
+	 * 自己决定"成功 / 重试 / 用尽"）。交棒本身不阻塞调用线程，也不读快照。
+	 *
+	 * <p>去重粒度为什么必须带身份：runId 只在<b>一轮</b>内唯一，两个租户各自生成同形 runId 是合法且
+	 * 必然的。按裸 runId 去重会让 B 的取消收尾被 A 的在飞任务<b>静默拒绝</b> —— B 的终帧与终态都没人落。
 	 *
 	 * @return 本次是否真的派发了一次
 	 */
@@ -169,12 +178,16 @@ public class CancelledRunFinalizer {
 		if (runId == null || runId.isBlank()) {
 			return false;
 		}
-		if (!this.inFlight.add(runId)) {
+		// 身份先定（交棒线程上还有身份 / 快照还没建时用提交线程身份），再拼本地键 —— 键必须与
+		// 执行体、重试、终态清理用的那把完全一致。
+		TenantUser identity = recordIdentityNow(runId);
+		String key = LocalRunKey.of(identity, runId);
+		if (!this.inFlight.add(key)) {
 			log.debug("取消收尾已在交棒中，本次不重复派发 runId={} cause={}", runId, cause);
 			return false;
 		}
-		this.attempts.put(runId, new AtomicInteger());
-		submit(runId, cause, recordIdentityNow(runId));
+		this.attempts.put(key, new AtomicInteger());
+		submit(runId, key, cause, identity);
 		return true;
 	}
 
@@ -206,23 +219,23 @@ public class CancelledRunFinalizer {
 		return current;
 	}
 
-	private void submit(String runId, String cause, TenantUser identity) {
+	private void submit(String runId, String key, String cause, TenantUser identity) {
 		try {
-			this.executor.execute(() -> attempt(runId, cause, identity));
+			this.executor.execute(() -> attempt(runId, key, cause, identity));
 		}
 		catch (RejectedExecutionException ex) {
 			// 触发池饱和：交棒动作本身很短，排一次重试即可 —— 但同样受 maxDispatchRetries 约束
 			// （M-3：旧实现这条路径绕过上限，池满时会无界重排）。
 			log.warn("取消收尾交棒未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false, identity);
+			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (RuntimeException ex) {
 			log.warn("取消收尾交棒派发失败 runId={}：{}", runId, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false, identity);
+			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (Error ex) {
 			// 派发阶段就抛 Error（执行器实现异常/OOM）：交棒位必须释放，否则后续交棒永久被去重拒绝。
-			finish(runId);
+			finish(key);
 			throw ex;
 		}
 	}
@@ -245,27 +258,27 @@ public class CancelledRunFinalizer {
 		if (runId == null || runId.isBlank()) {
 			return;
 		}
-		finish(runId);
+		finish(LocalRunKey.of(runId));
 	}
 
-	private void attempt(String runId, String cause, TenantUser identity) {
+	private void attempt(String runId, String key, String cause, TenantUser identity) {
 		try {
-			runAttempt(runId, cause, identity);
+			runAttempt(runId, key, cause, identity);
 		}
 		catch (Error ex) {
 			// Error（OOM/断言失败等）若不释放交棒位，该 run 会永久 inFlight：后续交棒全被静默拒绝，
 			// 重试链也无人重启。先清进程内状态再把 Error 原样上抛（不吞、不改写语义）。
-			finish(runId);
+			finish(key);
 			throw ex;
 		}
 	}
 
-	private void runAttempt(String runId, String cause, TenantUser identity) {
+	private void runAttempt(String runId, String key, String cause, TenantUser identity) {
 		ResumeService service = this.resumeServiceProvider == null ? null
 				: this.resumeServiceProvider.getIfAvailable();
 		if (service == null) {
 			log.info("取消收尾交棒放弃 runId={}（本实例无续跑服务：无 AI key 的降级装配）", runId);
-			finish(runId);
+			finish(key);
 			return;
 		}
 		ResumeService.CancelFinalize outcome;
@@ -277,61 +290,62 @@ public class CancelledRunFinalizer {
 		}
 		catch (RuntimeException ex) {
 			log.warn("取消收尾交棒执行异常 runId={} cause={}：{}", runId, cause, ex.getMessage());
-			rescheduleOrGiveUp(runId, cause, false, identity);
+			rescheduleOrGiveUp(runId, key, cause, false, identity);
 			return;
 		}
 		if (outcome == null) {
-			rescheduleOrGiveUp(runId, cause, false, identity);
+			rescheduleOrGiveUp(runId, key, cause, false, identity);
 			return;
 		}
 		switch (outcome) {
 			case FINALIZED, ALREADY_TERMINAL, NO_RUN -> {
 				log.info("取消收尾交棒完成 runId={} outcome={} cause={}", runId, outcome, cause);
-				finish(runId);
+				finish(key);
 			}
 			// 租约在别的实例手里：不抢、不覆盖；按租约 TTL 之后再确认一次（holder 死了也能接管）。
-			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, cause, true, identity);
+			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, key, cause, true, identity);
 			// 取消事实不可见 / 取消状态不可读 / 设施不可用 / 同进程已有执行体 / 会话门被占 /
 			// 写门仍拒写：一律"这拍没落定"，有界重试；**绝不**宣告完成（M-6），**绝不**驱动。
-			default -> rescheduleOrGiveUp(runId, cause, false, identity);
+			default -> rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 	}
 
-	private void rescheduleOrGiveUp(String runId, String cause, boolean leaseHeldElsewhere, TenantUser identity) {
-		int attempt = nextAttempt(runId);
+	private void rescheduleOrGiveUp(String runId, String key, String cause, boolean leaseHeldElsewhere,
+			TenantUser identity) {
+		int attempt = nextAttempt(key);
 		int max = this.properties.getPark().getMaxDispatchRetries();
 		if (max <= 0 || attempt > max) {
-			this.inFlight.remove(runId);
-			this.attempts.remove(runId);
+			this.inFlight.remove(key);
+			this.attempts.remove(key);
 			log.error("取消收尾在 {} 次交棒后仍未落定 runId={} cause={}（取消事实仍在 ai:cancel:<tenantId>:<userId>:<runId>；"
 					+ "下一次取消/续跑/启动扫描会重新触发）", max, runId, cause);
 			return;
 		}
-		reschedule(runId, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt), identity);
+		reschedule(runId, key, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt), identity);
 	}
 
-	private void reschedule(String runId, String cause, Duration delay, TenantUser identity) {
+	private void reschedule(String runId, String key, String cause, Duration delay, TenantUser identity) {
 		try {
-			this.scheduler.schedule(() -> attempt(runId, cause, identity), delay);
+			this.scheduler.schedule(() -> attempt(runId, key, cause, identity), delay);
 		}
 		catch (RuntimeException ex) {
-			this.inFlight.remove(runId);
-			this.attempts.remove(runId);
+			this.inFlight.remove(key);
+			this.attempts.remove(key);
 			log.warn("取消收尾重试未排上 runId={}：{}", runId, ex.getMessage());
 		}
 		catch (Error ex) {
-			finish(runId);
+			finish(key);
 			throw ex;
 		}
 	}
 
-	private void finish(String runId) {
-		this.inFlight.remove(runId);
-		this.attempts.remove(runId);
+	private void finish(String key) {
+		this.inFlight.remove(key);
+		this.attempts.remove(key);
 	}
 
-	private int nextAttempt(String runId) {
-		AtomicInteger counter = this.attempts.computeIfAbsent(runId, ignored -> new AtomicInteger());
+	private int nextAttempt(String key) {
+		AtomicInteger counter = this.attempts.computeIfAbsent(key, ignored -> new AtomicInteger());
 		return counter.incrementAndGet();
 	}
 

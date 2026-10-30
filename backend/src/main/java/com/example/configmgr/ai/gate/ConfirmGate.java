@@ -16,6 +16,7 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -193,7 +194,11 @@ public class ConfirmGate {
 	private final Executor resumeTriggerExecutor;
 
 	/**
-	 * toolCallId → 进程内唤醒闸门（不承载状态）。
+	 * <b>本地键（身份 + runId + toolCallId）</b> → 进程内唤醒闸门（不承载状态）。
+	 *
+	 * <p>键里带身份：runId 不是跨身份唯一定性，toolCallId 也是模型给的、跨租户可能同形。按裸
+	 * {@code runId|toolCallId} 定键会让 A 的等待闸门让 B 被判成"本进程有人在等"
+	 * （B 的死卡兜底因此永不触发），B 的 {@code disarm}/{@code signal} 还会命中 A 的闸门。
 	 *
 	 * <p><b>F8</b>：闸门可以由 {@link #arm} 在 {@code suspended} 帧<b>之前</b>预登记 —— 帧一到前端
 	 * 用户就能点击，那条路径上的 {@code signal} 必须能找到闸门；{@link #await} 复用同一把
@@ -205,7 +210,7 @@ public class ConfirmGate {
 	private final Set<String> armedKeys = ConcurrentHashMap.newKeySet();
 
 	/**
-	 * runId → 本批挂起的起点（{@link #arm} 置位、{@link #disarm} 清除）。
+	 * 本地键（身份 + runId）→ 本批挂起的起点（{@link #arm} 置位、{@link #disarm} 清除）。
 	 *
 	 * <p>用途只有一个：{@code approval_decided.suspendMs}（挂起开始 → 决策）。为什么不落 Redis：
 	 * 它是<b>本实例视角</b>的时钟（谁驱动这一轮谁记），跨实例决策读不到时写 {@code -1} 而不是编一个数。
@@ -242,9 +247,11 @@ public class ConfirmGate {
 	 *     于是同一个周期内的其它链、以及已排期任务的后续拍都看见同一份"已耗尽"，既不新建预算也不
 	 *     再排期。旧实现耗尽即 remove，晚醒的链会各自拿到一整套新预算（一个周期内 15 × 链数）；</li>
 	 * <li><b>不清零</b>：调度器内部的续派（{@code allowRetry=false}）与任何 {@code runResume} 结局
-	 *     都不清 —— 否则"有界"只成立到"下一条链醒过来"。代价是计数会留到下一次外部触发（每个 runId
-	 *     一个小 AtomicInteger），这是有意的：宁可多留一行状态，也不要在故障期悄悄续命。</li>
+	 *     都不清 —— 否则"有界"只成立到"下一条链醒过来"。代价是计数会留到下一次外部触发（每个
+	 *     身份 + runId 一个小 AtomicInteger），这是有意的：宁可多留一行状态，也不要在故障期悄悄续命。</li>
 	 * </ul>
+	 *
+	 * <p><b>键 = 身份 + runId</b>（{@link LocalRunKey}）：A 的重派发失败次数不得吃光 B 的同名轮次预算。
 	 */
 	private final Map<String, java.util.concurrent.atomic.AtomicInteger> dispatchRetries =
 			new ConcurrentHashMap<>();
@@ -466,7 +473,7 @@ public class ConfirmGate {
 		}
 		// 挂起起点（AI 日志最小补齐批）：一批多卡时"挂起开始 → 每张卡决策"的间隔各不相同，
 		// 而卡送达 → 决策（waitedMs）只覆盖单张卡。suspendMs 用它当减数。
-		this.suspensionStartedAtMs.putIfAbsent(runId, System.currentTimeMillis());
+		this.suspensionStartedAtMs.putIfAbsent(LocalRunKey.of(runId), System.currentTimeMillis());
 		for (String toolCallId : toolCallIds) {
 			if (toolCallId == null) {
 				continue;
@@ -488,7 +495,7 @@ public class ConfirmGate {
 		if (runId == null || toolCallIds == null) {
 			return;
 		}
-		this.suspensionStartedAtMs.remove(runId);
+		this.suspensionStartedAtMs.remove(LocalRunKey.of(runId));
 		for (String toolCallId : toolCallIds) {
 			if (toolCallId == null) {
 				continue;
@@ -883,7 +890,7 @@ public class ConfirmGate {
 	 * {@link #hasActiveLatch} 恒真，挡住死卡兜底。
 	 */
 	private void clearWaiterLatches(String runId) {
-		String prefix = runId + "|";
+		String prefix = latchPrefix(runId);
 		for (String key : this.latches.keySet()) {
 			if (!key.startsWith(prefix)) {
 				continue;
@@ -1446,7 +1453,7 @@ public class ConfirmGate {
 		long resolvedAtMs = pending == null ? 0L : pending.getResolvedAtMs();
 		// suspendMs = 挂起开始（arm，即 suspended 帧之前）→ 决策；与 waitedMs（单张卡送达 → 决策）区分：
 		// 一批多卡时后面的卡 suspendMs 明显更长（它在前几张卡的等待里排过队）
-		long suspendStartedAtMs = this.suspensionStartedAtMs.getOrDefault(runId, 0L);
+		long suspendStartedAtMs = this.suspensionStartedAtMs.getOrDefault(LocalRunKey.of(runId), 0L);
 		// 同一毫秒内决策 = 0ms（用 >= 而不是 >：毫秒粒度下"同一毫秒"是常态，不能因此写成 -1）
 		long suspendMs = suspendStartedAtMs > 0L && resolvedAtMs >= suspendStartedAtMs
 				? resolvedAtMs - suspendStartedAtMs : -1L;
@@ -2103,7 +2110,7 @@ public class ConfirmGate {
 		if (allowRetry) {
 			// 外部触发入口：开一个新的重派发周期。放在最前面（即便下面因 woke/latch/状态被跳过），
 			// 语义仍是"用户/系统的这次明确动作重新拥有完整预算"。调度器内部续派不会走到这里。
-			this.dispatchRetries.remove(runId);
+			this.dispatchRetries.remove(LocalRunKey.of(runId));
 		}
 		if (woke) {
 			return ResumeTrigger.skipped("WOKE_IN_PROCESS_GATE", null);
@@ -2256,8 +2263,8 @@ public class ConfirmGate {
 		if (max <= 0) {
 			return;
 		}
-		java.util.concurrent.atomic.AtomicInteger counter = this.dispatchRetries.computeIfAbsent(runId,
-				ignored -> new java.util.concurrent.atomic.AtomicInteger());
+		java.util.concurrent.atomic.AtomicInteger counter = this.dispatchRetries
+			.computeIfAbsent(LocalRunKey.of(runId), ignored -> new java.util.concurrent.atomic.AtomicInteger());
 		int attempt = counter.incrementAndGet();
 		if (attempt > max) {
 			// 钉死（不 remove）：并发链/后续拍看到的是同一份"已耗尽"，不会 computeIfAbsent 出
@@ -2391,7 +2398,7 @@ public class ConfirmGate {
 		if (runId == null || runId.isBlank()) {
 			return;
 		}
-		this.dispatchRetries.remove(runId);
+		this.dispatchRetries.remove(LocalRunKey.of(runId));
 	}
 
 	/** 第 {@code attempt} 次重派发的间隔：{@code base × 2^(attempt-1)}，按 {@code max-delay} 封顶。 */
@@ -2572,7 +2579,7 @@ public class ConfirmGate {
 		if (runId == null) {
 			return false;
 		}
-		String prefix = runId + "|";
+		String prefix = latchPrefix(runId);
 		for (String key : this.latches.keySet()) {
 			if (key.startsWith(prefix)) {
 				return true;
@@ -2610,8 +2617,19 @@ public class ConfirmGate {
 		return this.latches.size();
 	}
 
+	/**
+	 * 闸门键 = <b>身份 + runId + toolCallId</b>（{@link LocalRunKey}）。
+	 *
+	 * <p>三段都用 {@code |} 分隔：前缀扫描（{@link #hasActiveLatch} / {@code clearWaiterLatches}）
+	 * 只看"身份 + runId"，与具体哪张卡无关；身份段在前，别的身份的同名轮次永远不会命中本前缀。
+	 */
 	private static String key(String runId, String toolCallId) {
-		return runId + "|" + toolCallId;
+		return latchPrefix(runId) + toolCallId;
+	}
+
+	/** 闸门键的前缀（身份 + runId + 分隔符）：同身份同名轮次的多张卡共享它。 */
+	private static String latchPrefix(String runId) {
+		return LocalRunKey.of(runId) + "|";
 	}
 
 	/** 进程内闸门：只做唤醒，不承载状态。 */

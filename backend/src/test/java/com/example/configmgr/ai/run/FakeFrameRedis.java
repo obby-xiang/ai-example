@@ -36,9 +36,9 @@ import static org.mockito.Mockito.when;
  * <ul>
  * <li>{@code INCR ai:seq} / {@code SET ai:seq}（取号与号回退修复）；</li>
  * <li>{@code XADD key MAXLEN ~ n <id> seq n frame json} —— <b>显式 ID 语义按 Redis 实现</b>：
- * ID 必须严格大于表尾，否则抛错（产品据此走自动 ID 兜底）；{@code MAXLEN} 从<b>命令实参</b>读
- * （不是替身构造参数），因此"删掉实现的 MAXLEN ⇒ 本替身不裁剪"成立；</li>
- * <li>{@code XRANGE key (afterSeq-0 + COUNT n}（ID 区间差量读）与 {@code XREVRANGE key + - COUNT 1}（末号）；</li>
+ * ID 必须严格大于表尾，否则抛错（产品因此必须重分配号重试，<b>不得</b>改用自动 ID）；
+ * {@code MAXLEN} 从<b>命令实参</b>读（不是替身构造参数），因此"删掉实现的 MAXLEN ⇒ 本替身不裁剪"成立；</li>
+ * <li>{@code XRANGE key (afterSeq-0 + COUNT n}（ID 区间差量读）与 {@code XREVRANGE key + - COUNT 1}（末号/表尾）；</li>
  * <li>{@code EXPIRE}（只记录值）、{@code LRANGE}（兼容期 LIST 只读）。</li>
  * </ul>
  *
@@ -48,8 +48,8 @@ import static org.mockito.Mockito.when;
  * 于是"实现里用了排他下限"在单测里就表现为<b>一次读失败</b>（产品侧若吞掉异常，就是 0 帧），
  * 这正是线上那条路径的形态。
  *
- * <p>替身<b>刻意支持乱序落档</b>（显式 ID 被拒 ⇒ 产品用 {@code *} 兜底，替身按自动 ID 追加），
- * 这是 I-2（物理序 ≠ seq 序）用例得以复现的前提。
+ * <p>替身仍支持 {@code XADD ... *}（自动 ID，毫秒段取固定大值），但<b>只用于铺陈升级期遗留状态</b>：
+ * 产品侧的落档不允许走这条路（显式 ID 恒定批），用例据此复现"表尾已被墙钟 ID 越过"的形态。
  */
 @SuppressWarnings({ "unchecked", "rawtypes" })
 final class FakeFrameRedis {
@@ -242,7 +242,8 @@ final class FakeFrameRedis {
 
 	/**
 	 * {@code XADD key [MAXLEN|~ n] <id|*> field value ...}：显式 ID 必须大于表尾（Redis 语义），
-	 * 否则抛错让产品走自动 ID 兜底；{@code MAXLEN} 取自命令实参（M-5）。
+	 * 否则抛错 —— 产品必须据此<b>重分配号重试</b>（不得改用自动 ID）；{@code *} 只用于铺设升级期遗留状态。
+	 * {@code MAXLEN} 取自命令实参（M-5）。
 	 */
 	private byte[] handleXadd(byte[][] args) {
 		if (this.failXadd) {
@@ -536,9 +537,10 @@ final class FakeFrameRedis {
 	}
 
 	private static ByteRecord record(Entry entry) {
-		// ByteRecord 构造器是包内可见的：替身用桩件复刻"读到一条记录"的最小面
-		// （getStream/getValue），读取侧只用这两个方法。
+		// ByteRecord 是接口：替身用桩件复刻"读到一条记录"的最小面
+		// （getId/getStream/getValue），读取侧只用这三个方法。
 		ByteRecord record = mock(ByteRecord.class);
+		when(record.getId()).thenReturn(org.springframework.data.redis.connection.stream.RecordId.of(entry.id));
 		when(record.getStream()).thenReturn(new byte[0]);
 		when(record.getValue()).thenReturn(entry.fields);
 		return record;

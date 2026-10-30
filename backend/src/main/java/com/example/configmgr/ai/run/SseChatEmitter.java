@@ -52,12 +52,21 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>
  * <b>B23L1 批①（2026-10-21）多实例</b>：出帧 = 取号（{@link FrameStore#nextSeq}，生产为
- * {@code INCR ai:seq:<runId>}）→ 截断 → 落档（{@link FrameStore#append}）→
+ * {@code INCR ai:seq:<runId>}）→ 截断 → 落档（{@link FrameStore#appendAndGetSeq}）→
  * {@code PUBLISH ai:wake:<runId>（仅上界 seq）} → 本地扇出（同实例快路径）。
  * 其它实例的连接由 {@link FrameWakeListener} 收到唤醒后从事件日志补差量，
  * 去重按<b>每订阅者</b>的已投递游标（{@link Subscription#wakeFloor}，回放/实时/唤醒共同推进）：
  * 读取下界取各订阅者游标的最小值，逐订阅者只投其未见的帧；
  * 连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
+ *
+ * <p>
+ * <b>显式 ID 恒定批（2026-10-30）落档号收口</b>：落档的 entry ID 是显式 {@code <seq>-0}，
+ * 表尾已被别的实例写高时落档会<b>重分配号</b>。因此出帧改用
+ * {@link FrameStore#appendAndGetSeq(String, java.util.Map, FrameStore.PayloadFactory)}
+ * 并把<b>截断做成负载工厂</b>：工厂在最终落档号下只跑一次，成功落档的那份字节既是归档帧也是
+ * 实时投递帧，并用最终号做本地扇出游标、{@code lastFanoutSeq} 与唤醒上界 ——
+ * 实时帧、归档帧、Stream entry ID、唤醒与 {@code lastSeq} 同号同字节，
+ * 且贴着单帧上限的帧也不会因号变宽而越界。
  *
  * <p>
  * <b>L-91（2026-10-23）思考段 = 既有三段式 + 一个可选键</b>：上游 {@code reasoning_content}
@@ -1291,6 +1300,26 @@ public class SseChatEmitter {
 		return this.subscribers.size();
 	}
 
+	/**
+	 * 是否已进入<b>终态收尾</b>（{@link #complete()} 之后）。
+	 *
+	 * <p>包内可见：空闲回收（{@code RunRegistry#sweepIdle}）的判据之一 —— 收尾中的条目由写出器
+	 * 自己的终态钩子收，抢在它前面摘会让仍在排空的尾帧失去归属。
+	 */
+	boolean isTerminating() {
+		return this.terminating.get();
+	}
+
+	/**
+	 * 正在 {@link #emit} 内的线程数（含已进入方法、还在等 {@code emitLock} 的那一段）。
+	 *
+	 * <p>包内可见：空闲回收的判据之一 —— 非零表示"已宣告出帧、尚未落档/入队"，这时摘掉条目会让
+	 * 同一轮在进程内出现第二个写出器（帧号与扇出分家）。
+	 */
+	int inFlightEmits() {
+		return this.emitting.get();
+	}
+
 	// ── 帧 ──────────────────────────────────────────────────────────────────
 
 	/** 首包：runId 由服务端生成，前端据此做 reattach。 */
@@ -2048,8 +2077,12 @@ public class SseChatEmitter {
 	 * </ol>
 	 *
 	 * <p>
-	 * <b>锁内顺序不可调换</b>：取号 → 截断（判定含 seq，A19）→ 落档 → 入队。
-	 * 落档必须拿到截断后的帧（否则事件日志里躺着未截断帧，回放与实时流分叉）。
+	 * <b>锁内顺序不可调换</b>：取号 → 落档（<b>在最终号下</b>截断/序列化）→ 入队。
+	 * 落档与入队必须拿到同一份截断后的字节（否则事件日志里躺着未截断帧、或实时与回放分叉）。
+	 * <b>显式 ID 恒定批</b>：截断做成负载工厂交给
+	 * {@link FrameStore#appendAndGetSeq(String, java.util.Map, FrameStore.PayloadFactory)}，
+	 * 于是在"表尾已被别的实例越过 ⇒ 重分配号"时，截断按<b>最终号</b>只做一次 ——
+	 * 实时字节 == 归档字节，且绝不越过 {@code max-frame-bytes}（号变宽也不会把贴上限的帧顶出去）。
 	 * <b>资源修复批</b>：唤醒发布（PUBLISH）已挪到<b>锁外</b>，但"发布必须在落档之后"不变 ——
 	 * 锁内只累计上界（{@link #requestWakePublish}），最外层锁出口才真正发。
 	 */
@@ -2094,7 +2127,7 @@ public class SseChatEmitter {
 		long wakeSeq;
 		try {
 			synchronized (this.emitLock) {
-				final byte[] payloadBytes;
+				byte[] payloadBytes;
 				// 本地实时帧的业务号（心跳为 0）：用于把每个订阅者的已投递游标推进到本帧。
 				long liveSeq = 0L;
 				if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
@@ -2118,15 +2151,24 @@ public class SseChatEmitter {
 					// B23L1：取号 = 事件日志的取号口（生产 = Redis INCR，跨实例不重不回退）。
 					long seq = this.frames.nextSeq(this.runId);
 					frame.put("seq", seq);
-					// T3-10：单帧上限的字段级截断在"取号<b>之后</b>、落档与入队之前"——
-					// 判定口径是<b>整帧</b>（含 seq）的 UTF-8 字节数（A19），故必须先补 seq 再判；
-					// 落档与投递据此拿到同一份帧（否则重挂回放与实时流会分叉）。
-					// 返回值即最终负载（未超限时复用同一次序列化，不重复算）。
+					// T3-10：单帧上限的字段级截断必须在"取号之后"、判定口径是<b>整帧</b>（含 seq）的
+					// UTF-8 字节数（A19）—— 但<b>取号号未必是落档号</b>：跨实例并发时表尾可能已被更高的号
+					// 越过，落档会重分配号。<b>截断必须发生在最终落档号确定之后</b>，否则帧会多出"号宽"字节、
+					// 越过单帧上限（贴上限的帧必然越界）。因此把截断做成<b>负载工厂</b>交给落档：
+					// 它在每次尝试的最终号下跑一次（{@link FrameSizeLimiter#apply}），成功落档的那份字节
+					// 既是归档帧也是实时投递帧 —— 同号、同字节、绝不越限。
 					// 流式正文（delta.text）已在 emitDeltaText 里按同一上限拆成多条 delta，这里对本路径
 					// 只会是 no-op（拆分保证每片 ≤ 上限）；非 delta 帧（如 tool_result.result）仍按字段降采样。
-					// 心跳帧不在此列：它没有 text/result，负载由常量字段构成（事件载荷固定小）。
-					payloadBytes = FrameSizeLimiter.apply(frame, this.objectMapper, this.maxFrameBytes);
-					if (payloadBytes == null) {
+					FrameStore.PayloadFactory payloadFactory = f ->
+							FrameSizeLimiter.apply(f, this.objectMapper, this.maxFrameBytes);
+					FrameStore.AppendResult archived = this.frames.appendAndGetSeq(this.runId, frame, payloadFactory);
+					// 落档失败（Redis 抖动等）不阻断出帧：号用帧体里的（重分配会就地写回最终号），
+					// 负载仍由同一个工厂在本地产出（≤ 上限），与"落档失败但帧已发出"的既有口径一致。
+					long frameSeq = archived.seq() > 0L ? archived.seq() : frameSeqOf(frame, seq);
+					frame.put("seq", frameSeq);
+					byte[] finalPayload = archived.payload() != null ? archived.payload()
+							: payloadFactory.payload(frame);
+					if (finalPayload == null) {
 						// 序列化失败：帧不落档、不发订阅者（与 T3-1"锁内只做取号/落档/入队"同口径）
 						log.error("SSE 帧序列化失败 runId={} type={}（本帧已跳过）", this.runId, frame.get("type"));
 						return;
@@ -2136,13 +2178,13 @@ public class SseChatEmitter {
 					Object atMs = frame.get("atMs");
 					this.store.touchBusinessActivity(this.runId,
 							atMs instanceof Number number ? number.longValue() : System.currentTimeMillis());
-					this.frames.append(this.runId, frame);
 					// B23L1：落档之后才允许发布唤醒（否则别的实例被唤醒后读不到这一帧）。
 					// <b>资源修复批</b>：PUBLISH 已挪到锁外（{@link #requestWakePublish}）—— 锁内只记上界。
 					// 自唤醒的幂等仍由每订阅者游标保证：onWake 只在成功入队后推进 wakeFloor，
 					// 本地扇出按同一游标跳过已交付的号（见 liveSeq <= sub.wakeFloor 分支）。
-					liveSeq = seq;
-					this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
+					payloadBytes = finalPayload;
+					liveSeq = frameSeq;
+					this.lastFanoutSeq.accumulateAndGet(frameSeq, Math::max);
 				}
 				if (this.subscribers.isEmpty() || this.terminating.get()) {
 					// S1-1：轮终态已置 ⇒ 不再向订阅者收新帧（帧照旧取号落档，重挂回放仍可见）——
@@ -2159,6 +2201,14 @@ public class SseChatEmitter {
 			flushWakeSyncIfUnlocked();
 		}
 		requestWakePublish(wakeSeq);
+	}
+
+	/**
+	 * 帧体当前携带的业务号（落档失败时用）：重分配会就地写回最终号，故优先读帧体。
+	 */
+	private static long frameSeqOf(Map<String, Object> frame, long fallback) {
+		Object seq = frame.get("seq");
+		return seq instanceof Number number ? number.longValue() : fallback;
 	}
 
 	/**

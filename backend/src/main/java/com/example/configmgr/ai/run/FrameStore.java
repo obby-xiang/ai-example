@@ -8,8 +8,9 @@ import java.util.OptionalLong;
  * 轮次事件日志的抽象（B23L1 批① / 设计稿 §2.1）。
  *
  * <p>
- * 三个职责、四个方法：<b>取号</b>（{@link #nextSeq}）、<b>落档</b>（{@link #append}）、
- * <b>按号回读</b>（{@link #readFrom}）与<b>末号</b>（{@link #lastSeq}）。生产装配只有一个实现
+ * 三个职责、五个方法：<b>取号</b>（{@link #nextSeq}）、<b>落档</b>（{@link #append} /
+ * {@link #appendAndGetSeq}）、<b>按号回读</b>（{@link #readFrom}）与<b>末号</b>（{@link #lastSeq}）。
+ * 生产装配只有一个实现
  * ——{@link RedisFrameStore}（Redis Stream + {@code INCR ai:seq:<runId>}），
  * <b>单实例与多实例完全同一实现</b>（不引内存环，消灭"单机走内存、集群走 Redis"的分支）。
  *
@@ -19,6 +20,12 @@ import java.util.OptionalLong;
  * 于是出帧路径固定为「取号 → 注入 {@code seq} → 截断/序列化 → 落档」，
  * 取号与落档因此必须是两个可分别调用的步骤（{@code append(runId, frame) → seq} 的单方法形态
  * 会把落档提前到截断之前）。
+ *
+ * <p>
+ * <b>但落档可能改号</b>：事件日志的 entry ID 是显式 {@code <seq>-0}，Redis 要求新 ID 严格大于表尾；
+ * 跨实例并发时表尾可能已被更高的号越过，生产实现会重分配号后落档。因此出帧路径必须用
+ * {@link #appendAndGetSeq} 的返回值（最终落档号 + 归档字节）做实时投递与唤醒，
+ * 否则同一帧在实时流与回放里是两个号（{@link SseChatEmitter} 已按此口径接线）。
  *
  * <h2>心跳不入日志</h2>
  * {@code heartbeat} 帧不取业务号、不落档（T7 口径原样保留）：{@link #append} 收到心跳帧是 no-op，
@@ -45,8 +52,86 @@ public interface FrameStore {
 	/**
 	 * 落档一帧（帧体已带 {@code seq}）。心跳帧 no-op。写失败只记日志，不抛出 ——
 	 * 外置是"更耐久"，不是"更正确"的前提（与 B1 起 {@code RunStore#appendEvent} 同口径）。
+	 *
+	 * <p><b>落档号可能与帧体里的号不同</b>（见 {@link #appendAndGetSeq}）：出帧路径必须用后者，
+	 * 本方法是"不在意最终号"的调用方（兼容写口/单测）的入口。
 	 */
 	void append(String runId, Map<String, Object> frame);
+
+	/**
+	 * 落档一帧并返回<b>实际落档的序号</b>（默认实现 = {@link #append} + 帧体里的 {@code seq}）。
+	 *
+	 * <p>为什么必须有这个口：事件日志的 entry ID 是显式 {@code <seq>-0}，而 Redis 要求新 ID
+	 * <b>严格大于表尾</b> —— 跨实例并发写同一轮（confirm / frontend-tool-result 与驱动同时出帧）时，
+	 * 本帧的号可能已被别人落档的更高号越过。生产实现此时<b>重分配号</b>后落档
+	 * （{@link RedisFrameStore#appendAndGetSeq}），于是"帧体里的 seq"不再是最终落档号。
+	 *
+	 * <p><b>出帧路径必须用返回的号</b>：否则同一帧在实时流里一个号、在回放/唤醒里另一个号，
+	 * 前端 {@code lastSeq} 与按号去重都会错位（同一帧被当两帧渲染，或被同号合并丢掉一帧）。
+	 * 返回的 {@code payload} 是<b>落档的那一份帧体原文</b>，实时投递据此与归档逐字节一致
+	 * （含截断结果）；实现不回传时调用方沿用自己那份。
+	 *
+	 * @return {@code seq <= 0} = 未落档（心跳 / 无号 / 写失败）；{@code payload == null} = 未回传字节
+	 */
+	default AppendResult appendAndGetSeq(String runId, Map<String, Object> frame) {
+		append(runId, frame);
+		Object seq = frame.get("seq");
+		return new AppendResult(seq instanceof Number number ? number.longValue() : 0L, null);
+	}
+
+	/**
+	 * 落档并返回实际落档号 + 归档字节，<b>负载在最终落档号确定之后才生成</b>。
+	 *
+	 * <p>为什么必须先定号再产负载：{@code <seq>-0} 被表尾越过时落档会<b>重分配号</b>。
+	 * 若截断/序列化先按取号号做完再改号，帧就会多出"号宽"字节 —— 贴着单帧上限的帧必然越界；
+	 * 反过来（先产负载再改号）也无法保证归档字节与实时字节同源。本口把工厂交给落档实现：
+	 * 每一次尝试（含重分配后的新号）都用工厂在<b>那一次的最终号</b>下产出负载，
+	 * 成功落档的那一份即归档字节，调用方原样投递 —— 同号、同字节、绝不越界。
+	 *
+	 * <p>默认实现（兼容实现用）：号不会被重分配，因此<b>先跑工厂</b>（它就地把截断结果写回帧体）
+	 * 再落档 —— 归档里的帧体与实时负载因此是同一份截断结果（与"取号 → 截断 → 落档"的旧口径一致）。
+	 * 工厂返回 {@code null}（无法序列化）时不落档，返回 {@code skipped()}。
+	 * 生产实现（{@link RedisFrameStore}）在最终号下产负载并直接写该字节，故返回的字节即归档字节。
+	 */
+	default AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory) {
+		if (payloadFactory == null) {
+			return appendAndGetSeq(runId, frame);
+		}
+		byte[] payload = payloadFactory.payload(frame);
+		if (payload == null) {
+			return AppendResult.skipped();
+		}
+		AppendResult archived = appendAndGetSeq(runId, frame);
+		if (archived.payload() != null) {
+			// 实现自己回传了落档字节：以它为准（可能已重分配号）。
+			return archived;
+		}
+		return new AppendResult(archived.seq(), payload);
+	}
+
+	/**
+	 * 落档负载工厂：为一帧产出<b>最终负载字节</b>（{@link #appendAndGetSeq(String, Map, PayloadFactory)}
+	 * 的回调，在最终落档号确定之后调用）。
+	 */
+	@FunctionalInterface
+	interface PayloadFactory {
+
+		/**
+		 * @param frame 已把<b>最终号</b>写入 {@code seq} 的帧（实现可就地截断它，如
+		 *              {@link FrameSizeLimiter#apply(Map, com.fasterxml.jackson.databind.ObjectMapper, int)}）
+		 * @return 负载字节；{@code null} = 无法生成（该帧不落档）
+		 */
+		byte[] payload(Map<String, Object> frame);
+	}
+
+	/** 一次落档的结果：实际落档号 + 落档的帧体原文（实时投递据此与归档同一份字节）。 */
+	record AppendResult(long seq, byte[] payload) {
+
+		/** 未落档（心跳 / 无号 / 写失败）。 */
+		public static AppendResult skipped() {
+			return new AppendResult(0L, null);
+		}
+	}
 
 	/**
 	 * 按序号回读：返回 {@code seq > afterSeq} 的帧（升序）。

@@ -16,6 +16,7 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
@@ -305,7 +306,13 @@ public class ResumeService {
 		this.conditionsForm = form;
 	}
 
-	/** 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。 */
+	/**
+	 * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
+	 *
+	 * <p>键 = <b>身份 + runId</b>（{@link LocalRunKey}）：runId 不是跨身份唯一定性，A 在续跑 X 时
+	 * B 的同名轮次必须能照常续跑（否则 B 会被永久报成 {@code IN_PROGRESS}）。无身份 = legacy 桶，
+	 * 不伪造默认身份。键在入口定一次、全程沿用（交棒任务与 finally 都用那把键摘除）。
+	 */
 	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
 
 	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
@@ -791,6 +798,10 @@ public class ResumeService {
 		// 又会被另一实例当成"无人持有"再次接管（双驱动）。因此身份必须在<b>进入本方法时</b>就定下来：
 		// 调用方（启动扫描 = 索引成员身份 / 确认门 = 交棒时的记录身份 / HTTP = 请求身份）负责给出。
 		TenantUser identity = RequestContextUtils.currentOrNull();
+		// 进程内互斥的本地键（身份 + runId）：同 runId 不同身份是两轮，不得互相判成 IN_PROGRESS。
+		// 键在<b>入口</b>定一次并一路沿用 —— 中途的 RunIdentityScope 会按记录身份覆盖线程身份
+		// （旧记录 0/0 时甚至是清空），若在 finally 里现取，摘除键会与登记键不同（互斥位永久占住）。
+		String resumeKey = LocalRunKey.of(identity, runId);
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			// ===== 接管前初检（M-1）=====
 			// 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
@@ -823,7 +834,7 @@ public class ResumeService {
 			}
 			ResumeResult result;
 			try {
-				result = resumeInternal(runId, forceTakeover, lease, fresh, resumeReason, replyLocale);
+				result = resumeInternal(runId, resumeKey, forceTakeover, lease, fresh, resumeReason, replyLocale);
 			}
 			catch (RuntimeException ex) {
 				if (fresh) {
@@ -836,9 +847,11 @@ public class ResumeService {
 					// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
 					// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
 					// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
-					// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）。
+					// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）；
+					// 互斥键也用<b>本拍登记的那一把</b>（续租线程没有身份，现取会落到 legacy 桶）。
 					leases.markDriving(lease,
-							() -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId, identity), identity);
+							() -> this.resuming.containsKey(resumeKey) && snapshotNotTerminal(runId, identity),
+							identity);
 				}
 				else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
 					// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
@@ -962,7 +975,7 @@ public class ResumeService {
 		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）。
 		// fresh=false：租约由调用方持有（本方法不抢也不还），抢租后的复核因此可以安全否决
 		// （拒绝不动租约 ⇒ 不会出现"fence 已推进 + 无人驱动"，见 {@link #takeoverPreCheck}）。
-		return resumeInternal(runId, forceTakeover, lease, false, RESUME_REATTACH,
+		return resumeInternal(runId, LocalRunKey.of(runId), forceTakeover, lease, false, RESUME_REATTACH,
 				ErrorBodyFactory.requestLocale());
 	}
 
@@ -1009,6 +1022,8 @@ public class ResumeService {
 
 	/** 仅模型步重跑（带请求 locale；回答语言与错误文案都按它取）。 */
 	public ResumeResult retryModelStep(String runId, Locale replyLocale) {
+		// 进程内互斥的本地键（身份 + runId）：与续跑同一张表、同一口径。
+		String resumeKey = LocalRunKey.of(runId);
 		LeaseService leases = this.store.leaseService();
 		boolean fresh = false;
 		LeaseService.Lease lease = null;
@@ -1023,7 +1038,7 @@ public class ResumeService {
 		}
 		ResumeResult result;
 		try {
-			result = retryModelStepInternal(runId, lease, replyLocale);
+			result = retryModelStepInternal(runId, resumeKey, lease, replyLocale);
 		}
 		catch (RuntimeException ex) {
 			if (fresh) {
@@ -1035,7 +1050,8 @@ public class ResumeService {
 			if (result.outcome() == Outcome.ACCEPTED) {
 				TenantUser identity = RequestContextUtils.currentOrNull();
 				leases.markDriving(lease,
-						() -> this.resuming.containsKey(runId) && snapshotNotTerminal(runId, identity), identity);
+						() -> this.resuming.containsKey(resumeKey) && snapshotNotTerminal(runId, identity),
+						identity);
 			}
 			else if (result.outcome().releasesLease()) {
 				this.store.releaseRunLease(runId);
@@ -1044,7 +1060,8 @@ public class ResumeService {
 		return result;
 	}
 
-	private ResumeResult retryModelStepInternal(String runId, LeaseService.Lease lease, Locale replyLocale) {
+	private ResumeResult retryModelStepInternal(String runId, String resumeKey, LeaseService.Lease lease,
+			Locale replyLocale) {
 		if (lease != null) {
 			LeaseService leases = this.store.leaseService();
 			LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
@@ -1054,7 +1071,7 @@ public class ResumeService {
 						"retried", false, "reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
 			}
 		}
-		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
+		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
 			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false, "retried", false,
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
 		}
@@ -1221,7 +1238,7 @@ public class ResumeService {
 					}
 					finally {
 						LocaleContextHolder.resetLocaleContext();
-						this.resuming.remove(runId);
+						this.resuming.remove(resumeKey);
 						if (this.registry != null) {
 							this.registry.close(runId);
 						}
@@ -1249,7 +1266,7 @@ public class ResumeService {
 		}
 		finally {
 			if (!handedOff) {
-				this.resuming.remove(runId);
+				this.resuming.remove(resumeKey);
 			}
 			if (!handedOff && this.sessionGate != null && gateHeld.getAndSet(false) && gateSessionId != null) {
 				this.sessionGate.release(gateSessionId, runId, gateToken);
@@ -1505,8 +1522,8 @@ public class ResumeService {
 		return AI_RESUME_FAILED_MESSAGE_EN;
 	}
 
-	private ResumeResult resumeInternal(String runId, boolean forceTakeover, LeaseService.Lease lease,
-			boolean freshLease, String resumeReason, Locale replyLocale) {
+	private ResumeResult resumeInternal(String runId, String resumeKey, boolean forceTakeover,
+			LeaseService.Lease lease, boolean freshLease, String resumeReason, Locale replyLocale) {
 		if (lease != null) {
 			// I3：归属校验对着 Redis 真值做（一次往返），不用进程内视图 —— 视图在"TTL 已到、续租还没失败"
 			// 的窗口里会说谎，而这个判定正是"要不要驱动这一轮"的入口。
@@ -1524,7 +1541,7 @@ public class ResumeService {
 			// UNAVAILABLE：设施不可用 ⇒ 与 I4 同口径放行（本方法仍是"调用方已持租"的语义，
 			// 只是这一拍校验不了；后面的杀招是 fence 写与 claimExecution 的 STALE_EPOCH）。
 		}
-		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
+		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
 			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false,
 					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
 		}
@@ -2080,7 +2097,9 @@ public class ResumeService {
 						// 轮终态：完成订阅者 + 摘掉进程内互斥（ADR-5 的"轮终态主动释放"同族语义）。
 						// 续跑权租约不在这里还：终态写进 RunStore.save 时 best-effort 释放（同一个
 						// 唯一写口），此处再还一次只会在"写终态前"制造一个别人可接管的窗口。
-						this.resuming.remove(runId);
+						// 摘的是<b>本拍登记的那把键</b>（身份 + runId）：换一个身份的同名轮次不受影响，
+						// 池化线程上现取身份会落到 legacy 桶、把互斥位永久占住。
+						this.resuming.remove(resumeKey);
 						this.registry.close(runId);
 						// park 批：恢复执行取回的会话门到这里归还（二次 park 也一样 —— 任务结束即释放，
 						// 下一次恢复重新 acquire；看门狗随 release 停掉，不会无限续期）。
@@ -2112,7 +2131,7 @@ public class ResumeService {
 		}
 		finally {
 			if (!handedOff) {
-				this.resuming.remove(runId);
+				this.resuming.remove(resumeKey);
 			}
 			// park 批：<b>只有没交棒</b>（池饱和/会话被占/异常）才由本线程归还会话门。
 			// 交棒之后门归驱动任务所有（它在自己的 finally 按同一 token 释放）—— 这里若也释放，
@@ -2622,7 +2641,10 @@ public class ResumeService {
 	 * </ul>
 	 */
 	public CancelFinalize cancelConfirmed(String runId) {
-		if (this.resuming.putIfAbsent(runId, Boolean.TRUE) != null) {
+		// 与续跑共用同一张进程内互斥表，键同口径（身份 + runId）：A 的取消收尾不得把 B 的同名轮次
+		// 报成 IN_PROGRESS（那会让 B 的交棒链一直重试到预算耗尽）。
+		String resumeKey = LocalRunKey.of(runId);
+		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
 			log.info("取消收尾暂缓：本进程已有执行体在推进这一轮 runId={}（交棒侧有界重试）", runId);
 			return CancelFinalize.IN_PROGRESS;
 		}
@@ -2721,7 +2743,7 @@ public class ResumeService {
 			if (fresh && lease != null) {
 				releaseQuietly(leases, lease);
 			}
-			this.resuming.remove(runId);
+			this.resuming.remove(resumeKey);
 			if (identityScope != null) {
 				identityScope.close();
 			}
