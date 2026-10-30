@@ -38,7 +38,8 @@
 # 不得重复收集或文字追问」，删除与规则 26 冲突的「不要为条件弹表单」旧口径。
 # 2026-10-27.11 → 2026-10-27.12（Task 1 导出条件与一轮闭环）：confirm_step 增加"禁止 SELECT_DEFS 直接跳 EXPORT"
 # 与"条件已知/非空回灌未落库时零副作用拒绝并指回 set_condition"；generative_form 的条件表回灌非空文本必须先
-# set_condition 落库再 confirm_step。改描述必升 version（破 prompt 缓存）。
+# set_condition 落库再 confirm_step（**该条的"落库"表述已被 .17 的草案口径取代**：只形成草案，业务库由前端
+# 在下一步/启动作业前提交；历史句保留不改）。改描述必升 version（破 prompt 缓存）。
 # 2026-10-27.10 → 2026-10-27.11（2026-10-29 已知信息口径补强）：配置已明确不只看编码 ——
 # 中文名称/别名、以及模型已用 list_config_defs / get_config_def 确认过的编码映射同样算已知，
 # 确认后直接 select_definitions，不下发选择表单（系统提示词总纲与规则 30 同批改）。
@@ -48,7 +49,12 @@
 # （有界披露与稳定顺序），改描述必升 version（破 prompt 缓存）。
 # 2026-10-27.15 → 2026-10-27.16（2026-10-30 条件收集单通道）：EXPORT 创建必须显式给 conditions
 # （已知传结构、未决定传 {}）；SET_CONDITIONS 只由宿主发放，真实空对象回灌按明确不设筛选收口。
-version: 2026-10-27.16
+# 2026-10-27.16 → 2026-10-27.17（2026-10-30 条件草案与提交边界，提示词/文档批）：create_task 的
+# defCodes/conditions 只是候选，不在创建时写业务条目；select_definitions/set_condition 只形成前端草案，
+# 业务库只由前端在下一步/启动作业前 persistStepData 提交；confirm_step 认可本轮已结算的结构化草案与
+# 留空（明确不设）决定，start_export 预检仍校验业务库最终条件。create_task 恢复「任务中心、已有任务
+# 或已完成任务页面都适用」。改描述必升 version（破 prompt 缓存）。
+version: 2026-10-27.17
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -66,13 +72,17 @@ tools:
   - toolKey: create_task
     title: 创建任务
     description: >-
-      用户明确要新建导出/导入任务时直接调用：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。
+      用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：
+      不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。
       需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：
       已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}，不得省略。
+      defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。
       只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。
-      条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；
-      类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；
-      同一轮最多一次；创建不等于执行。批准后用 navigate_to(page=..., taskId=...) 打开向导。
+      条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次
+      非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用
+      SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。
+      旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。
+      批准后用 navigate_to(page=..., taskId=...) 打开向导。
   - toolKey: start_export
     title: 启动导出作业
     description: >-
@@ -113,17 +123,21 @@ tools:
   - toolKey: select_definitions
     title: 选择配置项
     description: >-
-      在工作区勾选配置项（前端执行，勾选即落任务项）。前置：已打开对应导出/导入向导并绑定 taskId，
+      在工作区勾选配置项（前端执行，勾选只形成前端草案，业务库由前端在下一步/启动作业前提交）。前置：已打开对应导出/导入向导并绑定 taskId，
       且当前在「选择配置」步（导出 SELECT_DEFS / 导入 UPLOAD）—— 只在它被披露的步骤调用。
       选择项优先用本工具，不要用开放式文字询问。用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs / get_config_def 确认的映射都算已明确）。
+      勾选后不要声称已写入业务库：确认与提交由下一步（confirm_step）完成。
   - toolKey: set_condition
     title: 设置查询条件
     description: >-
-      设置导出查询条件（前端执行，立即落库）。前置：EXPORT 任务且当前在 QUERY_COND 步骤；
+      设置导出查询条件的草案（前端执行：只写前端草案/会话内候选，不写业务库条件）。
+      前置：EXPORT 任务且当前在 QUERY_COND 步骤；
       条件必须是结构化对象（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数。
       用户给出条件（含 generative_form(purpose=SET_CONDITIONS) 自由文本框回填后解析出的条件）时才调用；
       用户没给条件就不设筛选（不设条件即全量），不要为凑条件而调用。
       已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链。
+      设置后不要说"已落库/已生效"：业务库由前端在下一步（confirm_step）或启动作业前 persistStepData 提交。
+      留空或不设是明确不设筛选（= 全量），不要把空条件当成"清空已有条件"。
       本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）
       推进到 QUERY_COND，下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。
   - toolKey: confirm_step
@@ -140,8 +154,9 @@ tools:
       即使传 step，也必须先完成 QUERY_COND 才能推进到 EXPORT。
       未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单；
       条件未决定时由宿主统一给一次非必填自由文本框（只此一次，留空即照常推进），不要重复收集或用文字追问。
-      条件已知但尚未落库、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝
-      并指回 set_condition：先把条件落库，下一批再推进。
+      条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝
+      并指回 set_condition：先形成草案，下一批再推进（业务库由前端在本步提交，模型不写库）。
+      本步认可本轮已结算的结构化草案与"留空=明确不设"的决定；start_export 预检仍校验业务库里的最终条件。
   - toolKey: generative_form
     title: 生成式表单
     description: >-
@@ -149,8 +164,9 @@ tools:
       只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问。
       表单用途必须显式给出 purpose=SELECT_DEFINITIONS / TASK_TYPE / GENERAL_CLARIFY；宿主只按 purpose 判断用途。
       SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，
-      模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition；宿主条件表回灌非空文本后，
-      先解析并调用 set_condition 落库，再 confirm_step；留空（{} 或空文本）则直接 confirm_step 全量推进。
+      模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；
+      宿主条件表回灌非空文本后，先解析并调用 set_condition 形成草案，再 confirm_step 由前端提交；
+      留空（{} 或空文本）是明确不设筛选，直接 confirm_step 全量推进。
       TASK_TYPE 只在任务类型未知时用：表单只有一个 enum 字段做单选项，选项正好 EXPORT/IMPORT，不附其它字段；
       类型已确定时会被零副作用拒绝并指回 create_task。
       系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），

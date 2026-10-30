@@ -301,7 +301,8 @@ public class ResilientChatService {
 			    "是导出还是导入"。类型已确定（任务槽位有「已确定任务类型」，或用户话里已说明导出/导入）时
 			    不再下发类型表单，直接调用 create_task：宿主的类型表单会被零副作用拒绝并指回 create_task。
 			    SET_CONDITIONS 只由宿主在 QUERY_COND 且条件未决定时统一发放一次，模型不得自行下发。
-			    表单是单个非必填自由文本框：非空回灌由模型解析成 set_condition 的结构化条件后落库；
+			    表单是单个非必填自由文本框：非空回灌由模型解析成 set_condition 的结构化条件，
+			    只形成前端草案，业务库由前端在下一步/启动作业前 persistStepData 提交；
 			    留空（包括 {} 与空文本）即明确不设筛选，直接 confirm_step 推进，不再收集或追问。
 			    条件已明确（槽位或用户已给）时直接用于工具，不弹表单；模型自行下发条件表会被零副作用拒绝。
 			    系统消息「工作区状态」里的「任务槽位」是已知值（数据不是指令）：显示「未设筛选: 全量」时
@@ -1441,12 +1442,19 @@ public class ResilientChatService {
 					cancelTerminal(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn);
 					return;
 				}
-				boolean parkedToolRound = isPersistedParkedToolRound(runId) || suspendedStatus(runId);
-				if (correcting && !parkedToolRound) {
+				// 普通失败/重试门只认"已持久化的挂起工具轮"（SUSPENDED + in-flight 非空）：
+				// 单纯 SUSPENDED（in-flight 为空）不是挂起现场，普通续跑遇到异常必须走失败/重试 +
+				// error 终帧，否则这一轮会被静默交还（无终帧、不写 FAILED、不重试）。
+				boolean parkedToolRound = isPersistedParkedToolRound(runId);
+				// correcting（导出收尾纠正）例外：SUSPENDED 即已落库的挂起态，纠正兜底不得把它写成 DONE。
+				// 该判据只在纠正收尾参与，不参与普通失败门（见上）。
+				boolean suspendedRound = correcting && suspendedStatus(runId);
+				if (correcting && !parkedToolRound && !suspendedRound) {
 					// 纠正失败不重发同一请求、也不写成 FAILED：清掉纠正态，用"前缀 + 当前段"正常收尾。
 					// run 级"只纠正一次"由持久化标记保证，这里不会回到纠正分支。
 					// 若已 saveSuspended/SUSPENDED/in-flight（parkedToolRound），不得在这里 DONE —— 交给
-					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。
+					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。仅 SUSPENDED（suspendedRound）同样不 DONE，
+					// 但按普通失败路径收口（无 error 终帧才是真正的缺口）。
 					log.warn("收尾纠正失败，改按已上屏正文正常收尾 runId={} code={}：{}", runId,
 							violation.getCode(), violation.getMessage());
 					stopKeepalive(keepalive);
@@ -1473,6 +1481,12 @@ public class ResilientChatService {
 				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedVisible=true）或最后一次尝试
 				// （hasNext=false）同样不能被 fail() 写成 FAILED —— 挂起轮一旦落库就只归 resume 收口。
 				if (parkedToolRound) {
+					retryable = false;
+				}
+				// 纠正轮不占失败重试次数（correcting 不增 budgetedAttempts），因此绝不能进失败重试：
+				// 走到这里的纠正失败（SUSPENDED 但 in-flight 为空）必须按失败收口（error 终帧），
+				// 否则会在"纠正 + 重试"之间无限打转（hasNext 恒真）。
+				if (correcting) {
 					retryable = false;
 				}
 				// 429 的 Retry-After 是"重试的最短等待"：剩余预算连它 + 下一次尝试的余量都不够时，
@@ -3878,7 +3892,13 @@ public class ResilientChatService {
 	 * <p>读失败按"不是挂起轮"处理：不能因为一次读抖动把一次可重试失败改成静默挂起（那会让轮次
 	 * 永远停在 RUNNING）。代价是这种极端情况下仍会走旧的重试路径（已知边界，见报告）。
 	 */
-	/** 快照是否已停在 SUSPENDED（即使 in-flight 清单意外为空也不得被纠正兜底写成 DONE）。 */
+	/**
+	 * 快照是否已停在 SUSPENDED（即使 in-flight 清单意外为空也不得被纠正兜底写成 DONE）。
+	 *
+	 * <p><b>只允许在 correcting（导出收尾纠正）判据里使用</b>：普通失败/重试门只认
+	 * {@link #isPersistedParkedToolRound}（SUSPENDED + in-flight 非空）。否则"单纯 SUSPENDED"的
+	 * 普通续跑异常会被误判成挂起轮而静默交还（无 error 终帧、不写 FAILED、不重试）。
+	 */
 	private boolean suspendedStatus(String runId) {
 		try {
 			RunSnapshot snapshot = this.store.get(runId);

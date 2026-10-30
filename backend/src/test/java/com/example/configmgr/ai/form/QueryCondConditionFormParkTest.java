@@ -31,11 +31,12 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -95,11 +96,11 @@ class QueryCondConditionFormParkTest {
 	}
 
 	/**
-	 * 2026-10-30 新口径：真实空对象回灌（用户直接提交 = 留空）按"明确不设筛选"收口 ——
-	 * 条件事实落成 {@code "{}"}，且<b>不再弹第二张</b>（也不再要求模型补 set_condition）。
+	 * 留空回灌只表示"明确不设筛选"，<b>后端零业务写</b>：由前端在离开 QUERY_COND 的
+	 * {@code persistStepData} 提交 {@code "{}"}。宿主也不再弹第二张。
 	 */
 	@Test
-	void blankFormResultPersistsExplicitUnsetAndNoSecondCard() {
+	void blankFormResultAllowsAdvanceWithoutBackendWrite() {
 		this.taskState.set(task(null));
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
 			.as("前置：条件未决定 ⇒ 宿主挂一张").isTrue();
@@ -109,8 +110,8 @@ class QueryCondConditionFormParkTest {
 		answered.setResultText("{}");
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
-			.as("留空 = 明确不设筛选：落库后不再弹第二张").isFalse();
-		verify(this.taskService).setCondition(TASK_ID, "CURRENCY", "{}");
+			.as("留空 = 明确不设筛选：不再弹第二张").isFalse();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
 	@Test
@@ -147,19 +148,12 @@ class QueryCondConditionFormParkTest {
 
 	/**
 	 * {@code create_task(conditions=…)} 的候选是<b>结构化事实</b>：复杂条件（范围键 + IN 多值 + 数值比较）
-	 * 通过同一份 {@code WizardActionGuard} 校验后直接落库，<b>不弹条件表</b>。
+	 * 通过同一份 {@code WizardActionGuard} 校验后，复用前端 {@code set_condition} 通道生成<b>页面草案</b>：
+	 * 不弹条件表、不写业务库（真正的提交由前端 {@code persistStepData} 在下一步完成）。
 	 */
 	@Test
-	void complexCreateTaskCandidateLandsWithoutForm() {
+	void createTaskCandidateDispatchesSetConditionDraftWithoutFormOrDbWrite() {
 		this.taskState.set(task(null));
-		doAnswer(invocation -> {
-			String defCode = invocation.getArgument(1);
-			String conditionJson = invocation.getArgument(2);
-			this.taskState.get().getItems().stream()
-				.filter(item -> defCode.equals(item.getDefCode()))
-				.forEach(item -> item.setConditionJson(conditionJson));
-			return null;
-		}).when(this.taskService).setCondition(eq(TASK_ID), anyString(), anyString());
 		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code", "monthlyFee"));
 		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
 
@@ -175,8 +169,113 @@ class QueryCondConditionFormParkTest {
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history()))
-			.as("候选已由宿主按同一份校验落库 ⇒ 不再弹条件表").isFalse();
-		verify(this.taskService).setCondition(eq(TASK_ID), eq("CURRENCY"), contains("\"operator\":\"IN\""));
+			.as("候选合法 ⇒ 挂起 set_condition 草案（不是条件表）").isTrue();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("不得弹 SET_CONDITIONS 表单").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+
+		String draftId = "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY";
+		PendingToolCall draft = this.store.pending(RUN_ID, draftId);
+		assertThat(draft).as("确定性 toolCallId = 幂等").isNotNull();
+		assertThat(draft.getName()).isEqualTo("set_condition");
+		assertThat(draft.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
+		assertThat(draft.getStatus()).isEqualTo(PendingToolCall.PENDING);
+		assertThat(draft.getArguments()).contains("\"defCode\":\"CURRENCY\"").contains("\"operator\":\"IN\"");
+		verify(this.emitter).suspended(eq(List.of(draft)), anyString(), anyString(), anyString());
+	}
+
+	/** 已知 CNY 候选：零条件表、零 TaskService.setCondition，只下发一张 set_condition 草案。 */
+	@Test
+	void knownCnyCandidateNeverAsksAndNeverWritesTheBusinessDatabase() {
+		this.taskState.set(task(null));
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history())).isTrue();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("已知 CNY 候选不弹条件表").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+		assertThat(this.store.pending(RUN_ID, "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY"))
+			.as("复用前端 set_condition 通道生成页面草案").isNotNull();
+	}
+
+	/** 多 defCodes 候选：每个配置项各一张草案，仍不弹条件表、不写库。 */
+	@Test
+	void multiDefCodeCandidateDispatchesOneDraftPerItem() {
+		Task task = task(null);
+		TaskItem second = new TaskItem();
+		second.setTaskId(TASK_ID);
+		second.setDefCode("RATE");
+		task.getItems().add(second);
+		this.taskState.set(task);
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		when(this.definitionService.findByCode("RATE")).thenReturn(definition("RATE", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY", "RATE"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history())).isTrue();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID)).filteredOn(pending -> "set_condition".equals(pending.getName()))
+			.extracting(PendingToolCall::getToolCallId)
+			.containsExactlyInAnyOrder(
+					"host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY",
+					"host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-RATE");
+	}
+
+	/**
+	 * 候选绑定错误/校验失败不得转化成"再问用户一次"：零表单、零业务写，只留 WARN。
+	 */
+	@Test
+	void invalidCreateTaskCandidateFailsWithoutFormOrDbWrite() {
+		this.taskState.set(task(null));
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("fields", List.of(Map.of("fieldCode", "unknownField", "operator", "EQ", "value", "CNY")));
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history()))
+			.as("内部失败口径：不交代表单、不弹表").isFalse();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
+	}
+
+	@Test
+	void invalidCandidateBindingFailsWithoutFormOrDbWrite() {
+		this.taskState.set(task(null));
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
+		AiContext otherTask = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, 99L,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, otherTask, history())).isFalse();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 	}
 

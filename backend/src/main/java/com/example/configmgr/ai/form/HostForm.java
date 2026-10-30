@@ -136,38 +136,54 @@ abstract class HostForm {
 	 * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型（这一轮在等人填表）
 	 */
 	protected boolean park(String runId, List<Message> history, PendingToolCall pending) {
+		return parkAll(runId, history, List.of(pending));
+	}
+
+	/**
+	 * 一次挂起<b>多条</b>前端条目（同一批请求帧整批公布）。除条目数量外与单条挂起逐字同语义：
+	 * 先外置、再 {@code suspended}、再逐条请求帧、最后收流；失败时全部收敛成终态，绝不留
+	 * "看不见的 PENDING"挡住续跑。
+	 *
+	 * <p>用于宿主一次性下发的多条结构化草案（例如多个 {@code defCodes} 的 {@code set_condition}）：
+	 * 逐条 {@code saveSuspended} 会互相覆盖 {@code inFlightToolCalls}，只留最后一条。
+	 */
+	protected boolean parkAll(String runId, List<Message> history, List<PendingToolCall> pendings) {
+		if (pendings == null || pendings.isEmpty()) {
+			return false;
+		}
 		try {
 			RunSnapshot current = this.store.get(runId);
-			this.store.saveSuspended(runId, current == null ? null : current.getAssistantContent(),
-					List.of(pending), history, this.codec,
-					current == null ? null : current.getAssistantMetadata());
+			this.store.saveSuspended(runId, current == null ? null : current.getAssistantContent(), pendings, history,
+					this.codec, current == null ? null : current.getAssistantMetadata());
 		}
 		catch (RuntimeException ex) {
 			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，
 			// 快照那一步失败时条目会留在 Redis 里；前端没有请求帧、用户看不到卡，而后续续跑会被
 			// 既有 PENDING_UNRESOLVED 前置挡住 —— 一轮就此卡死）。这里尽力把它收敛成终态。
-			convergeAfterParkFailure(runId, pending, ex);
+			for (PendingToolCall pending : pendings) {
+				convergeAfterParkFailure(runId, pending, ex);
+			}
 			return false;
 		}
 		SseChatEmitter out;
 		try {
 			out = this.registry.of(runId);
-			out.suspended(List.of(pending), this.store.runKey(runId), this.store.pendingKey(runId),
+			out.suspended(pendings, this.store.runKey(runId), this.store.pendingKey(runId),
 					this.store.instanceId());
 		}
 		catch (RuntimeException ex) {
 			// 快照已成功挂起 ⇒ 这一拍<b>绝不能</b>交回模型（否则 SUSPENDED + 待决条目 + 模型在跑 =
 			// 双驱动：同一轮的帧与历史会分叉）。发帧是观测面，失败只告警，等恢复。
-			log.warn("宿主表单已挂起，但 suspended 帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
-					runId, pending.getToolCallId(), ex.getMessage());
+			log.warn("宿主表单已挂起，但 suspended 帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallIds={}：{}",
+					runId, toolCallIds(pendings), ex.getMessage());
 			return true;
 		}
 		try {
-			this.gate.publishRequestsForParkedBatch(runId, List.of(pending));
+			this.gate.publishRequestsForParkedBatch(runId, pendings);
 		}
 		catch (RuntimeException ex) {
-			log.warn("宿主表单已挂起，但请求帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallId={}：{}",
-					runId, pending.getToolCallId(), ex.getMessage());
+			log.warn("宿主表单已挂起，但请求帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallIds={}：{}",
+					runId, toolCallIds(pendings), ex.getMessage());
 			return true;
 		}
 		try {
@@ -176,11 +192,19 @@ abstract class HostForm {
 		}
 		catch (RuntimeException ex) {
 			// 收流失败不回退：条目与快照已就位，重挂/刷新仍能取到这张卡
-			log.warn("宿主表单已挂起，但本轮收流失败（不影响挂起态）runId={} toolCallId={}：{}", runId,
-					pending.getToolCallId(), ex.getMessage());
+			log.warn("宿主表单已挂起，但本轮收流失败（不影响挂起态）runId={} toolCallIds={}：{}", runId,
+					toolCallIds(pendings), ex.getMessage());
 		}
-		log.info("宿主已挂起表单 runId={} toolCallId={}（等用户填写）", runId, pending.getToolCallId());
+		log.info("宿主已挂起表单 runId={} toolCallIds={}（等用户填写）", runId, toolCallIds(pendings));
 		return true;
+	}
+
+	private static List<String> toolCallIds(List<PendingToolCall> pendings) {
+		List<String> ids = new java.util.ArrayList<>(pendings.size());
+		for (PendingToolCall pending : pendings) {
+			ids.add(pending.getToolCallId());
+		}
+		return ids;
 	}
 
 	/** 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。 */
@@ -204,13 +228,21 @@ abstract class HostForm {
 
 	/** 待决条目的形状（与模型自发的 {@code generative_form} 同形）：前端工具、非不可逆。 */
 	protected static PendingToolCall frontendForm(String toolCallId, String arguments) {
+		return frontendTool(toolCallId, GenerativeFormRules.TOOL_NAME, arguments);
+	}
+
+	/**
+	 * 任意前端工具的确定性待决条目（宿主代替模型下发时用，例如结构化 {@code set_condition} 草案）。
+	 * 形状与模型自己的调用一致：前端通道、可逆、非确认门。
+	 */
+	protected static PendingToolCall frontendTool(String toolCallId, String name, String arguments) {
 		PendingToolCall pending = new PendingToolCall();
 		pending.setToolCallId(toolCallId);
-		pending.setName(GenerativeFormRules.TOOL_NAME);
+		pending.setName(name);
 		pending.setType("function");
 		pending.setArguments(arguments);
 		pending.setKind(PendingToolCall.KIND_FRONTEND);
-		// 表单是"收集值"，不是不可逆写：不要不确定性的复选框语义
+		// 前端动作是"收集/应用值"，不是不可逆写：不要不确定性的复选框语义
 		pending.setIrreversible(false);
 		return pending;
 	}

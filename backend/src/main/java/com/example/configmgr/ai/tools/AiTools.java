@@ -373,7 +373,7 @@ public class AiTools {
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}，不得省略。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}，不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -402,9 +402,10 @@ public class AiTools {
             String prefix = outcome.reused() ? "该任务已在同一轮创建过，本次复用任务" : "已创建" + (export ? "导出" : "导入") + "任务";
             return String.format(
                     "%s #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
-                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也尚未落库。下一步："
+                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。下一步："
                             + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项；"
-                            + "勾选后由宿主按同一份校验把条件落库，不要重复调用 set_condition，也不要声称已设置/已勾选。",
+                            + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
+                            + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
                     prefix, task.getId(), task.getTitle(), task.getCurrentStep(),
                     export ? "export" : "import", task.getId());
         }
@@ -568,17 +569,20 @@ public class AiTools {
      * 选择配置项（勾选态写入）。
      *
      * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：本工具改的是任务的
-     * 工作选择 —— 勾选结果决定后续导出/导入处理哪些配置项（handler 缺失时还会回落
-     * {@code select_defs} 直接落库）。它<b>可逆、可见、可重选</b>，且真正的数据出口
+     * 工作选择 —— 勾选结果决定后续导出/导入处理哪些配置项。它<b>可逆、可见、可重选</b>，且真正的数据出口
      * （{@code start_export}/{@code start_import}/{@code start_publish}）各有 DANGER 确认门，
      * 因此按实际后果分级为 {@code WRITE}、<b>不进确认门</b>（多弹一次卡只是无意义打扰；
      * 且 FRONTEND 通道优先，DANGER 在这里也只会变成"标注了却不生效"的失真）。
+     *
+     * <p><b>草案口径（2026-10-30 条件草案与提交边界裁决）</b>：勾选只形成<b>前端草案</b>
+     * （AI 对话候选存 Redis 会话），不在调用时写业务条目；业务数据库由前端在下一步
+     * （{@code confirm_step}）或启动作业前 {@code persistStepData} 提交。
      *
      * <p><b>下发前的硬校验</b>（{@code ai/tool/WizardActionGuard}）：未知顶层键、空 {@code codes}、
      * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
-    @Tool(name = AiToolNames.SELECT_DEFINITIONS, description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤）。"
+    @Tool(name = AiToolNames.SELECT_DEFINITIONS, description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤；勾选只形成前端草案，业务库由前端在下一步提交）。"
             + "用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs/get_config_def 确认的映射都算已明确）")
     @ToolScope({ AiToolNames.SCOPE_EXPORT_SELECT_DEFS, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
@@ -606,7 +610,14 @@ public class AiTools {
      *
      * <p>顺序约束（前端/后端的既有事实，不是本工具的约束）：{@code set_condition} 只对<b>已勾选</b>
      * 的配置项有效 —— 未选中时表单里没有该卡片（页面 handler 只写表单模型），
-     * 而落库（{@code conditionJson}）发生在向导推进步骤时（前端 {@code persistStepData}）。
+     * 业务库落库（{@code conditionJson}）只发生在向导推进步骤时（前端 {@code persistStepData}）。
+     *
+     * <p><b>草案口径（2026-10-30 条件草案与提交边界裁决）</b>：本工具<b>只形成前端草案</b>
+     * （AI 对话里仅存 Redis 会话候选），不写业务条目、不改 {@code conditionJson}；
+     * 业务数据库只在下一步（{@code confirm_step}）或启动作业前由前端 {@code persistStepData} 提交。
+     * 因此回执与正文都不得声称"已落库/已生效"；{@code start_export} 预检校验的仍是业务库里的最终条件。
+     * 已知条件由前端 {@code set_condition} 形成草案、宿主不弹条件表；未知条件才由宿主给一次非必填表单，
+     * 留空 = 明确不设（下一步提交 {@code {}}）。
      *
      * <p><b>步骤约束（2026-10-28 步骤披露收口）</b>：本工具的披露面只有
      * {@code task:EXPORT/QUERY_COND}，前端动作表同样只允许 {@code allowSteps: ['QUERY_COND']}。
@@ -615,11 +626,12 @@ public class AiTools {
      * <b>下一批</b>再 {@code set_condition}。"一批只做一步"照旧成立；本工具不自动跨步、也不自动
      * {@code confirm_step}（守卫与披露同源，缺一不可）。
      *
-     * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：导出向导的
-     * {@code export.setConditions} handler 会立即 {@code PUT} 落库，{@code conditionJson} 是导出作业的
-     * 唯一条件来源 —— 它改变的是"后续动作的工作选择"，不能再用 {@code READ}（"no side effects"）的语义。
-     * 但它可逆、可在条件表单里看见，且真正的数据出口仍有 {@code start_export} 的 DANGER 确认门，
-     * 故按实际后果分级为 {@code WRITE}、不进确认门。
+     * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：本工具改变的是"后续动作的
+     * 工作选择"，{@code conditionJson}（提交后）是导出作业的唯一条件来源，不能再用 {@code READ}
+     * （"no side effects"）的语义；但草案可逆、可在条件表单里看见，且真正的数据出口仍有
+     * {@code start_export} 的 DANGER 确认门，故按实际后果分级为 {@code WRITE}、不进确认门。
+     * （旧口径"{@code export.setConditions} handler 会立即 {@code PUT} 落库"已由 2026-10-30 裁决废止：
+     * 设置只形成草案，业务库由前端在下一步提交。）
      *
      * <p><b>空条件一律拒（{@code ai/tool/WizardActionGuard}）</b>：前端 {@code normalizeActionArgs}
      * 会把缺失的 {@code conditions} 补成 {@code {}}，而 {@code {}} 的语义是"不设条件 = 导出全部" ——
@@ -627,10 +639,12 @@ public class AiTools {
      * {@code scopeKeys} 又无有效 {@code fields} 时<b>不挂起、不下发</b>，并把"要导出全部就不要调本工具"
      * 写进拒绝原因。未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
-    @Tool(name = AiToolNames.SET_CONDITION, description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件（conditions 必须至少给 scopeKeys 或 fields 之一；"
-            + "空条件会被拒绝，清空条件只能由用户在向导里手动操作；需已导航到导出向导并已勾选该配置项；"
+    @Tool(name = AiToolNames.SET_CONDITION, description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件的草案（只写前端草案，不写业务库条件；业务库由前端在下一步或启动作业前提交。"
+            + "conditions 必须至少给 scopeKeys 或 fields 之一；空条件会被拒绝，清空条件只能由用户在向导里手动操作；"
+            + "需已导航到导出向导并已勾选该配置项；"
             + "用户给出条件（含条件表单回填文本解析出的条件）时才调用，没给条件就不设筛选（不设条件即全量）；"
-            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链）。本工具只能在 QUERY_COND 步骤调用："
+            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链；设置后不要声称已落库/已生效）。"
+            + "本工具只能在 QUERY_COND 步骤调用："
             + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
     @ToolScope({ AiToolNames.SCOPE_EXPORT_QUERY_COND })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
@@ -684,8 +698,9 @@ public class AiTools {
             + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
             + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单："
             + "条件未决定时由宿主统一给一次非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
-            + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但未落库、或条件表回灌了非空文本却还没 set_condition 时，"
-            + "confirm_step 会被零副作用拒绝并指回 set_condition（先落库，下一批再推进）")
+            + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，"
+            + "confirm_step 会被零副作用拒绝并指回 set_condition（先形成草案，下一批再推进；业务库由前端在本步提交）。"
+            + "本步认可本轮已结算的结构化草案与留空=明确不设的决定；start_export 预检仍校验业务库最终条件")
     @ToolScope({ AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -720,6 +735,10 @@ public class AiTools {
      * 已确定时零副作用拒绝并指回 {@code create_task}）；{@code SET_CONDITIONS} 固定为单个非必填自由文本框
      * （有明确步骤时只有 {@code QUERY_COND} 允许下发，留空=不设筛选；{@code SELECT_DEFS}/{@code EXPORT} 及之后
      * 等其它步骤零副作用拒绝）。
+     *
+     * <p>2026-10-30（条件草案与提交边界）：条件表回灌后的结构化条件只经 {@code set_condition} 形成<b>草案</b>，
+     * 本工具与草案都不写业务库；业务数据库由前端在下一步（{@code confirm_step}）/启动作业前
+     * {@code persistStepData} 提交。已知条件走 {@code set_condition} 草案时不弹表，留空=明确不设（提交 {@code {}}）。
      *
      * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
      * 两个场景的现场都在"任务驱动"这条链路上：
@@ -770,9 +789,9 @@ public class AiTools {
             + "宿主只按 purpose 判断用途，禁止靠标题猜。TASK_TYPE 只在任务类型未知时用，形状固定为单个 enum 单选"
             + "（选项正好 EXPORT/IMPORT，不附其它字段）；类型已确定时会被零副作用拒绝并指回 create_task。"
             + "SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，"
-            + "模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition；"
-            + "宿主条件表回灌了非空文本时，必须先按文本调用 set_condition 落库再 confirm_step；"
-            + "已知未落库时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
+            + "模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；"
+            + "宿主条件表回灌了非空文本时，必须先按文本调用 set_condition 形成草案再 confirm_step（业务库由前端在下一步提交）；"
+            + "还没有草案时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
             + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："

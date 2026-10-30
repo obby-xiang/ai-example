@@ -24,6 +24,11 @@ import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
+import com.example.configmgr.ai.tool.WizardActionGuard;
+import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.entity.ConfigField;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
@@ -55,6 +60,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -119,6 +125,8 @@ class ConfirmStepConditionFallbackTest {
 
 	private final TaskService taskService = mock(TaskService.class);
 
+	private final DefinitionService definitionService = mock(DefinitionService.class);
+
 	private final AtomicReference<Task> taskState = new AtomicReference<>();
 
 	private AnnotationConfigApplicationContext registryContext;
@@ -151,11 +159,14 @@ class ConfirmStepConditionFallbackTest {
 			return pending;
 		});
 
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
 		this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
 				this.beacon, this.cancellations, this.limiter,
 				List.of(new GenerativeFormGuard(this.mapper)));
-		this.manager.setConditionsForm(new ConditionsForm(this.store, this.registry, this.gate, this.codec,
-				this.properties, this.taskService));
+		ConditionsForm conditionsForm = new ConditionsForm(this.store, this.registry, this.gate, this.codec,
+				this.properties, this.taskService);
+		conditionsForm.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+		this.manager.setConditionsForm(conditionsForm);
 	}
 
 	@AfterEach
@@ -235,7 +246,7 @@ class ConfirmStepConditionFallbackTest {
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
 		assertThat(envelopeOf(result, "call-confirm").message())
 			.contains("set_condition")
-			.contains("尚未落库");
+			.contains("尚未生成草案");
 		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
 		assertThat(this.store.pendingsLenient(RUN_ID)).as("已知未落库不得再弹表单")
 			.noneMatch(pending -> PendingToolCall.PENDING.equals(pending.getStatus()));
@@ -415,9 +426,9 @@ class ConfirmStepConditionFallbackTest {
 		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
 	}
 
-	/** Critical-A：部分缺口卡的留空回灌必须落库为全量并放行，不能被"已发过"挡住卡死。 */
+	/** Critical-A：部分缺口卡的留空回灌必须放行，但<b>后端零业务写</b>（由前端离开 QUERY_COND 时提交 {}）。 */
 	@Test
-	void gapScopedHostFormBlankFeedbackPersistsUnsetAndAllowsTheAdvance() {
+	void gapScopedHostFormBlankFeedbackAllowsTheAdvanceWithoutBackendWrite() {
 		Task task = task("QUERY_COND", "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}");
 		TaskItem remaining = new TaskItem();
 		remaining.setTaskId(TASK_ID);
@@ -431,15 +442,15 @@ class ConfirmStepConditionFallbackTest {
 		ToolExecutionResult result = runConfirmStep("{}");
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.OK.wire());
-		verify(this.taskService).setCondition(TASK_ID, "ORDER", "{}");
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
 	/**
-	 * 多配置按配置项推进：一次非空文本已被 set_condition 处理（台账有落库记录）后，
-	 * 剩余未决定项不得被同一张回灌永久挡住 —— 必须为剩余项重新收集。
+	 * 非空表单回灌必须按表单覆盖的 defCode 逐项生成草案：只处理了已设置的 CURRENCY、没有处理
+	 * 尚未决定的 ORDER ⇒ 零副作用拒绝并指回 set_condition（不换卡重问，也不误放行）。
 	 */
 	@Test
-	void handledFeedbackForOneItemStillCollectsTheRemainingItem() {
+	void unhandledRemainingItemInNonEmptyFeedbackRejectsWithoutAnotherForm() {
 		Task task = task("QUERY_COND", "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}");
 		TaskItem remaining = new TaskItem();
 		remaining.setTaskId(TASK_ID);
@@ -453,10 +464,13 @@ class ConfirmStepConditionFallbackTest {
 		this.store.putPending(RUN_ID, form);
 		seedSetConditionFeedback();
 
-		assertThatThrownBy(() -> runConfirmStep("{}")).isInstanceOf(RunParkedException.class);
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition").contains("ORDER");
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.filteredOn(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()))
-			.as("已处理过的回灌不再挡路：为剩余 ORDER 重新收集一张").hasSizeGreaterThan(1);
+			.as("未处理的是非空回灌，不得换卡再问用户").hasSize(1);
 	}
 
 	@Test
@@ -472,7 +486,114 @@ class ConfirmStepConditionFallbackTest {
 		assertThat(this.store.pendingsLenient(RUN_ID)).as("留空回灌后不得再补第二张")
 			.filteredOn(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()))
 			.hasSize(1);
-		verify(this.taskService).setCondition(TASK_ID, "CURRENCY", "{}");
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+	}
+
+	// ── ③b 已成功结算的 set_condition 草案：confirm 认可，不要求 conditionJson 已存在 ──
+
+	@Test
+	void settledSetConditionDraftAllowsTheAdvanceWithoutTaskConditionJson() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshot("QUERY_COND");
+		seedSetConditionDraft("CURRENCY", "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}");
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome())
+			.as("草案已成功结算 ⇒ 前端会在下一步 persistStepData 提交，不再要求提前落库").isEqualTo(ToolOutcome.OK.wire());
+		verify(this.gate).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+		assertThat(this.store.pendingsLenient(RUN_ID)).as("已有草案不得再弹条件表")
+			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+	}
+
+	@Test
+	void failedSetConditionDraftRejectsWithoutAskingAgain() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshot("QUERY_COND");
+		seedSetConditionDraft("CURRENCY",
+				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}", ToolOutcome.FAILED.wire());
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").code()).isEqualTo(ErrorCodes.TOOL_EXECUTION_FAILED);
+		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID)).as("内部执行失败不得转化成再次询问用户")
+			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+	}
+
+	// ── ③c 候选绑定错误/校验失败：内部失败，不弹表、不写库 ─────────────────
+
+	@Test
+	void invalidCreateTaskCandidateAtConfirmRejectsWithoutForm() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshotWithExtra("QUERY_COND", candidateExtra(Map.of(
+				"fields", List.of(Map.of("fieldCode", "unknownField", "operator", "EQ", "value", "CNY")))));
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").code()).isEqualTo(ErrorCodes.TOOL_EXECUTION_FAILED);
+		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("候选校验失败不得改成再问用户一次").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+	}
+
+	@Test
+	void invalidCreateTaskCandidateBindingAtConfirmRejectsWithoutForm() {
+		this.taskState.set(task("QUERY_COND", null));
+		Map<String, Object> extra = new java.util.LinkedHashMap<>();
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID + 1);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS,
+				Map.of("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY"))));
+		seedSnapshotWithExtra("QUERY_COND", extra);
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").code()).isEqualTo(ErrorCodes.TOOL_EXECUTION_FAILED);
+		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+	}
+
+	/** 非空表单回灌压过 create_task 候选：必须先由模型解析成草案，不能自动下发候选。 */
+	@Test
+	void nonEmptyFeedbackIsNotOverriddenByCreateTaskCandidate() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshotWithExtra("QUERY_COND", candidateExtra(Map.of(
+				"fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")))));
+		seedFormWithStatus(PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"code = USD\"}");
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("非空回灌未解析前不得下发候选草案").noneMatch(pending -> "set_condition".equals(pending.getName()));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+	}
+
+	/** 留空回灌压过 create_task 候选：允许推进，零草案、零业务写。 */
+	@Test
+	void blankFeedbackIsNotOverriddenByCreateTaskCandidate() {
+		this.taskState.set(task("QUERY_COND", null));
+		seedSnapshotWithExtra("QUERY_COND", candidateExtra(Map.of(
+				"fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")))));
+		seedCollectedForm("{\"conditions\":\"\"}");
+
+		ToolExecutionResult result = runConfirmStep("{}");
+
+		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.OK.wire());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("留空 = 全量：不得再下发候选草案").noneMatch(pending -> "set_condition".equals(pending.getName()));
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
 	// ── ④ 重复不弹：同一轮已有宿主条件表单，再 confirm_step 不再挂 ──────────
@@ -518,6 +639,10 @@ class ConfirmStepConditionFallbackTest {
 		if (slotsJson != null) {
 			extra.put(TaskSlots.EXTRA_KEY, slotsMap(slotsJson));
 		}
+		seedSnapshotWithExtra(step, extra);
+	}
+
+	private void seedSnapshotWithExtra(String step, Map<String, Object> extra) {
 		AiContext context = AiContext.of("export", "EXPORT", step, TASK_ID, "ACTIVE", extra);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setStatus(RunSnapshot.RUNNING);
@@ -526,6 +651,15 @@ class ConfirmStepConditionFallbackTest {
 				List.of(new SystemMessage("PERSONA"), new UserMessage("导出货币字典"))));
 		snapshot.setInFlightToolCalls(new ArrayList<>());
 		this.store.save(snapshot);
+	}
+
+	private static Map<String, Object> candidateExtra(Map<String, Object> conditions) {
+		Map<String, Object> extra = new java.util.LinkedHashMap<>();
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions);
+		return extra;
 	}
 
 	/** 槽位 JSON → extra 里的 Map 形态（与 {@code TaskSlots.fromValue} 同一读法）。 */
@@ -570,14 +704,25 @@ class ConfirmStepConditionFallbackTest {
 
 	/** N-1：FRONTEND set_condition 的回灌事实在待决条目里（不依赖 ai:ledger）。 */
 	private void seedSetConditionFeedback() {
+		seedSetConditionDraft("CURRENCY",
+				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}");
+	}
+
+	private void seedSetConditionDraft(String defCode, String conditionsJson) {
+		seedSetConditionDraft(defCode, conditionsJson, ToolOutcome.OK.wire());
+	}
+
+	/** 成功结算的 set_condition 草案（前端只改页面草案，业务库仍为空）；outcome 可铺失败语料。 */
+	private void seedSetConditionDraft(String defCode, String conditionsJson, String outcome) {
 		PendingToolCall set = new PendingToolCall();
-		set.setToolCallId("call-set-condition");
+		set.setToolCallId("call-set-draft-" + defCode);
 		set.setName("set_condition");
 		set.setKind(PendingToolCall.KIND_FRONTEND);
 		set.setStatus(PendingToolCall.FRONTEND_RESULT);
-		set.setOutcome(ToolOutcome.OK.wire());
+		set.setOutcome(outcome);
+		set.setArguments("{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}");
 		set.setResolvedAtMs(System.currentTimeMillis());
-		set.setResultText("已设置 CURRENCY 的条件");
+		set.setResultText(ToolOutcome.OK.wire().equals(outcome) ? "已设置 " + defCode + " 的条件" : "设置条件失败");
 		this.store.putPending(RUN_ID, set);
 	}
 
@@ -631,6 +776,21 @@ class ConfirmStepConditionFallbackTest {
 		item.setConditionJson(conditionJson);
 		task.getItems().add(item);
 		return task;
+	}
+
+	private static ConfigDefinition definition(String code, String... fieldCodes) {
+		ConfigDefinition definition = new ConfigDefinition();
+		definition.setCode(code);
+		definition.setName(code);
+		List<ConfigField> fields = new ArrayList<>();
+		for (String fieldCode : fieldCodes) {
+			ConfigField field = new ConfigField();
+			field.setCode(fieldCode);
+			field.setLabel(fieldCode);
+			fields.add(field);
+		}
+		definition.setFields(fields);
+		return definition;
 	}
 
 	/** 只声明本用例关心的披露面（与 {@code AiTools} 的真实注解同源）：工具体永不执行。 */

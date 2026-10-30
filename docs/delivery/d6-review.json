@@ -63,6 +63,13 @@
       "reason": "已同步合法结构化条件直接落库、宿主补发边界及候选失效诊断契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:0f1cb18b8b7a22ebd07f6f33ef002c8419f1a9af5509ddd6d4d8c6eadfc512a3",
+      "status": "synced",
+      "reason": "已同步Redis条件候选、前端草案、下一步提交业务库、多草案挂起及普通异常终帧契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
