@@ -5,6 +5,7 @@
  * http.ts 的 post/get，由拦截器原样放行。
  */
 
+import type { AxiosRequestConfig } from 'axios'
 import { ApiError, del, get, http, post } from './http'
 import { reattach, streamChat } from './sse'
 import type { SseFrameHandlers, SseStreamOptions } from './sse'
@@ -148,8 +149,8 @@ export function tenantUsers(): Promise<TenantUsersEntry[]> {
 }
 
 /** POST /api/ai/cancel/{runId}（取消一轮；幂等，重复返回 alreadyCancelled=true）。 */
-export function cancel(runId: string): Promise<AiCancelResult> {
-  return post<AiCancelResult>(`/ai/cancel/${encodeURIComponent(runId)}`)
+export function cancel(runId: string, config?: AxiosRequestConfig): Promise<AiCancelResult> {
+  return post<AiCancelResult>(`/ai/cancel/${encodeURIComponent(runId)}`, undefined, config)
 }
 
 /** GET /api/ai/cancel/{runId}（取消标志现状，取证用）。 */

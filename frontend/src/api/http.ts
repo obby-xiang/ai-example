@@ -150,8 +150,17 @@ http.interceptors.request.use((config) => {
   config.headers.set('Accept-Language', acceptLanguage())
   const url = typeof config.url === 'string' ? config.url : ''
   if (url && isAiConversationPath(url)) {
+    /**
+     * 只补**缺省**：调用方显式给的 `X-Tenant-Id` / `X-User-Id` 优先。
+     *
+     * <p>为什么不能让拦截器无条件覆盖：拦截器在**微任务**里才跑，而身份切换/换会话是同步的 ——
+     * 切身份时"按旧身份发"的 cancel 等请求会被贴上**新身份**头（后端按新身份找不到那一轮）。
+     * 显式值 = 调用方在动作入口捕获的身份，是更可信的事实源。
+     */
     for (const [name, value] of Object.entries(identityHeaders())) {
-      config.headers.set(name, value)
+      if (!config.headers.has(name)) {
+        config.headers.set(name, value)
+      }
     }
   }
   return config

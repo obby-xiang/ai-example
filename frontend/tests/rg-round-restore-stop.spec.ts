@@ -409,7 +409,8 @@ describe('批G · S1：停止即本地收敛（HITL 挂起不再锁死）', () =
     expect(store.suspended).toBe(false)
     expect(store.loading).toBe(false)
     expect(store.canSend).toBe(true) // 输入框解禁 = 会话不再锁死
-    expect(api.cancel).toHaveBeenCalledWith('run-s1')
+    // Task 3：cancel 现在显式携带身份头（第二参），本用例只关心停止收敛对的是哪一轮。
+    expect(api.cancel.mock.calls[0]?.[0]).toBe('run-s1')
   })
 
   it('执行中的工具段（running）同样收敛为 cancelled（不再永久「调用中…」）', async () => {

@@ -309,7 +309,7 @@ describe('B1 裁决 10：挂起中停止按钮可见 + 停止收口', () => {
 
     await store.stop()
 
-    expect(api.cancel).toHaveBeenCalledWith('run-1')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-1')
     expect(store.suspended).toBe(false)
     expect(store.activeForm).toBeNull()
   })
@@ -579,7 +579,7 @@ describe('B1 收口修 C-1：慢前端工具晚于挂起收流返回仍回灌', 
     await flushPromises()
 
     await store.stop()
-    expect(api.cancel).toHaveBeenCalledWith('run-1')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-1')
 
     deferred.resolve(OK_EXECUTION)
     await flushPromises()

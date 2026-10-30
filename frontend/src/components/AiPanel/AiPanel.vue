@@ -44,7 +44,8 @@
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
         <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。每次实际切换都即时清屏并由后端
-             新建会话（含切回旧身份），旧身份镜像与后端记录保留在原身份下，不删除、不混用。 -->
+             新建会话（含切回旧身份）；Task 3 起同时清掉输入草稿、编辑锚点与那份已不可达的旧会话
+             浏览器镜像（后端历史保留，不删），新旧身份不混用。 -->
         <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
           <select
             data-testid="tenant-select"
@@ -4724,8 +4725,16 @@ function scrollBottom(force = false): void {
  *
  * 批次2（AR-09）：编辑是**不可逆删除**，点击编辑时先按实测条数提示「将删除此后 N 条消息」，
  * 用户确认后才进入编辑态；N = 该消息之后的消息条数（不是固定文案）。N=0 不弹删除确认。
+ *
+ * Task 3：锚点改由 store 持有（`ai.editAnchorId`）—— 它属于**当前会话**的现场，换身份/换会话
+ * 由 `adoptFreshSession` 统一清空；面板只读写这一个事实源，不再自己存一份。
  */
-const editingMessageId = ref<string | null>(null)
+const editingMessageId = computed<string | null>({
+  get: () => ai.editAnchorId,
+  set: (value) => {
+    ai.editAnchorId = value
+  }
+})
 
 function editMessage(m: ChatMessage): void {
   const index = ai.messages.indexOf(m)
@@ -5405,13 +5414,30 @@ const currentTenantUsers = computed(() => {
   return ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)?.users ?? []
 })
 
+/**
+ * Task 3：**只有实际切换**才清输入草稿与编辑锚点（重选当前身份不是切换，草稿必须留着）。
+ *
+ * 草稿属于面板本地态（用户为旧身份的上下文打的字），编辑锚点属于旧会话的消息；切走时同步清掉，
+ * 不等后端（切换本身也不等）。旧会话那份已不可达的浏览器镜像由 store 的切换路径清掉，
+ * **后端历史保留**（不调 purge）。
+ */
+function switchIdentityFromPanel(tenantId: number, userId: number): void {
+  const current = ai.identity
+  if (current !== null && current.tenantId === tenantId && current.userId === userId) {
+    return
+  }
+  inputText.value = ''
+  editingMessageId.value = null
+  void ai.switchIdentity(tenantId, userId)
+}
+
 /** 切租户：落到该租户第一项用户（目录第一项口径不跨租户沿用旧用户）。 */
 function onTenantChange(event: Event): void {
   const tenantId = Number((event.target as HTMLSelectElement).value)
   const tenant = ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)
   const user = tenant?.users[0]
   if (tenant && user) {
-    void ai.switchIdentity(tenant.tenantId, user.userId)
+    switchIdentityFromPanel(tenant.tenantId, user.userId)
   }
 }
 
@@ -5420,7 +5446,7 @@ function onUserChange(event: Event): void {
   const tenantId = ai.identity?.tenantId
   const userId = Number((event.target as HTMLSelectElement).value)
   if (tenantId !== undefined && Number.isInteger(userId)) {
-    void ai.switchIdentity(tenantId, userId)
+    switchIdentityFromPanel(tenantId, userId)
   }
 }
 

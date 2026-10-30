@@ -21,6 +21,7 @@ import {
   AI_SESSION_LOCK_PREFIX,
   currentAiIdentity,
   identityFingerprint,
+  identityHeaders,
   isPositiveId,
   isSameIdentity,
   mirrorStorageKey,
@@ -32,7 +33,13 @@ import {
   type AiIdentity,
   type TenantUsersEntry
 } from '@/utils/ai-identity'
-import { SSE_TIMEOUT_CODES, probeReattach, type SseFrameHandlers, type SseStreamOptions } from '@/api/sse'
+import {
+  SSE_TIMEOUT_CODES,
+  probeReattach,
+  type ArchiveTrimSignal,
+  type SseFrameHandlers,
+  type SseStreamOptions
+} from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
@@ -466,6 +473,15 @@ export const STOP_INTENT_TTL_MS = 60_000
  */
 let stopSettleGate: Promise<void> | null = null
 
+/**
+ * Task 3：**正在进行的那一次**停止的归属令牌（与 `stopSettleGate` 成对）。
+ *
+ * <p>`stop()` 的 `finally` 只能清自己那一次：第一次停止的 cancel 在途时若已换会话（新建对话 /
+ * 切身份会把 `stopping` 本地复位）并又发起了一次停止，迟到的 `finally` 不得把第二次的
+ * `stopping` / 落闸门抹掉 —— 否则新发送不等 cancel 落地就开流，撞上停止尚未传播的 409。
+ */
+let activeStopToken: object | null = null
+
 /** 等停止落地（有界：见 {@link STOP_SETTLE_MAX_WAIT_MS}）。无停止在途 = 立即返回。 */
 function waitForStopSettlement(): Promise<void> {
   const gate = stopSettleGate
@@ -874,6 +890,8 @@ let tabStore: TabOwnershipSink | null = null
 /** 生命周期回调需要的 store 最小面（避免闭包捕获某一个 pinia 实例）。 */
 interface TabOwnershipSink {
   revalidateTabOwnership(): Promise<void>
+  /** 该 store 当前**会话**归属的身份（Task 3：生命周期广播按它发，不现读全局身份）。 */
+  sessionIdentity: AiIdentity | null
 }
 
 function sleep(ms: number): Promise<void> {
@@ -960,9 +978,19 @@ function ownershipIdentityMatches(message: OwnershipMessage, identity: AiIdentit
     && message.userId === identity.userId
 }
 
-function postOwnership(kind: OwnershipMessage['kind'], sessionId: string): void {
+/**
+ * 广播一条所有权消息。
+ *
+ * <p>Task 3：身份**由调用方在所有权动作入口捕获**后传入 —— 广播描述的是"这个**会话**归谁"，
+ * 不是"广播这一刻界面选中的是谁"。若在回调里现读 `currentAiIdentity()`，探活/退避期间发生的
+ * 身份切换会把旧会话的 claim 贴上**新**身份指纹（接管方据此拒绝接手，旧会话变成谁都接不了的孤儿）。
+ */
+function postOwnership(
+  kind: OwnershipMessage['kind'],
+  sessionId: string,
+  identity: AiIdentity | null
+): void {
   // 身份指纹随消息发出（接管方据此拒绝跨租户/跨用户接手）；无身份时省略字段，保持旧单用户口径。
-  const identity = currentAiIdentity()
   const message: OwnershipMessage = {
     kind,
     sessionId,
@@ -994,13 +1022,19 @@ function lockManager(): LockManager | null {
  * <p>API 失败（`request` 同步抛错 / promise reject）一律判 'unsupported'，**绝不**判 'occupied'：
  * 前者只说明"无法确认"，后者是"另一文档确持锁"的正面证据。判定下游连着不可恢复的整份清空
  * （{@link clearDuplicatedTabStorage}），把"问不到"当"确认复制"会误删现场。
+ *
+ * <p>Task 3：锁名按**传入的身份**算（缺省 = 当前身份）。会话属于哪个身份就探哪把锁 ——
+ * 探活期间身份被切走/全局身份漂移时，不能改探（或认领）新身份名下的同名会话锁。
  */
-async function probeSessionLock(sessionId: string): Promise<'granted' | 'occupied' | 'unsupported'> {
+async function probeSessionLock(
+  sessionId: string,
+  identity: AiIdentity | null = currentAiIdentity()
+): Promise<'granted' | 'occupied' | 'unsupported'> {
   const locks = lockManager()
   if (!locks) {
     return 'unsupported'
   }
-  const name = sessionLockName(sessionId)
+  const name = sessionLockName(sessionId, identity)
   if (heldLock?.name === name) {
     // 同一文档重复探活：锁已在手（自持锁的 ifAvailable 请求会被判"不可用"）
     return 'granted'
@@ -1054,11 +1088,16 @@ function releaseSessionLock(): void {
  * <p>两种环境：**supported**（有 Web Locks）按上面的账本释放；**unsupported**（旧浏览器 /
  * jsdom，`ownedSessionId` 恒为 null）两者都是空操作 —— 没有锁可泄漏，也不需要额外分支。
  */
-function releaseOwnLock(sessionId: string): void {
+function releaseOwnLock(
+  sessionId: string,
+  identity: AiIdentity | null = currentAiIdentity()
+): void {
   if (ownedSessionId !== sessionId) {
     return
   }
-  if (heldLock !== null && heldLock.name !== sessionLockName(sessionId)) {
+  // Task 3：锁名按操作入口捕获的身份算 —— 全局身份漂移时不能拿"新身份名下"的锁名去比，
+  // 否则会误判成"不是我持有的那把"，跳过释放、让旧锁一直占到文档销毁。
+  if (heldLock !== null && heldLock.name !== sessionLockName(sessionId, identity)) {
     ownedSessionId = null
     return
   }
@@ -1075,8 +1114,10 @@ function cancelPendingTakeover(): void {
 }
 
 /** 记下"本页签刚从 pagehide 离开"的意向（刷新/慢重载回来后据此认出自己不是复制品）。 */
-function rememberReturnIntent(sessionId: string): void {
-  const identity = currentAiIdentity()
+function rememberReturnIntent(
+  sessionId: string,
+  identity: AiIdentity | null = currentAiIdentity()
+): void {
   try {
     sessionStorage.setItem(
       RETURN_INTENT_KEY,
@@ -1132,9 +1173,12 @@ function takeReturnIntent(sessionId: string): boolean {
  * <p>`duplicate` 只能由**每一次探活都真实收到 `null` 回调**得出；探活 API 失败（'unsupported'）
  * 按无 Web Locks 保守处理，返回终态 'unsupported'（不换身份、不清空、不重试）。
  */
-async function resolveTabOwnership(sessionId: string): Promise<TabOwnership> {
+async function resolveTabOwnership(
+  sessionId: string,
+  identity: AiIdentity | null = currentAiIdentity()
+): Promise<TabOwnership> {
   for (let attempt = 1; attempt <= LOCK_PROBE_ATTEMPTS; attempt += 1) {
-    const verdict = await probeSessionLock(sessionId)
+    const verdict = await probeSessionLock(sessionId, identity)
     if (verdict === 'unsupported') {
       return 'unsupported'
     }
@@ -1171,8 +1215,10 @@ function bindOwnershipLifecycle(): void {
       return
     }
     const sid = ownedSessionId
-    postOwnership('released', sid)
-    rememberReturnIntent(sid)
+    // Task 3：让渡/返回意向的身份 = **该会话**的身份（捕获于认领时），不是现读的全局身份。
+    const identity = tabStore?.sessionIdentity ?? currentAiIdentity()
+    postOwnership('released', sid, identity)
+    rememberReturnIntent(sid, identity)
     // 卸载路径上这个计时器不会跑（文档先销毁，锁由浏览器释放）；跑得到说明文档还活着 ⇒ 释放不占着
     setTimeout(() => {
       if (ownedSessionId === sid) {
@@ -2363,6 +2409,13 @@ export const useAiStore = defineStore('ai', {
     /** AI 面板是否展开（裁剪性：收起后业务照常；页签级记忆，刷新后保持用户的选择） */
     expanded: initExpanded(),
     messages: [] as ChatMessage[],
+    /**
+     * 输入区「编辑重跑」锚点（面板 composer 的唯一事实源）。
+     *
+     * <p>锚点属于**当前会话**的现场：换会话/换身份（`adoptFreshSession`）即清空 —— 旧身份的
+     * 消息 id 在新会话里既不存在也不可改写，留着它会让下一次发送按旧锚点改写/截断。
+     */
+    editAnchorId: null as string | null,
     /** 是否有轮次在进行 */
     loading: false,
     /** 当前轮 runId（来自 start 帧） */
@@ -3968,7 +4021,7 @@ export const useAiStore = defineStore('ai', {
       this.restoredPendingQueue = []
       // AR-07：同批排队的表单同样以快照为权威口径（不在快照里的表单不该再被补出来）
       this.clearQueuedForms()
-      // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口另行按续收首帧判定）
+      // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口只认后端明确标记，另行登记）
       this.currentError = null
       // 2026-10-29 收口：权威快照读到**在途轮** ⇒ 上一轮的"快照不可用"缺口作废。
       // 复审返修（I-1）：`found=false`（轮已消失/保留期到期）**不是**"已解决"——
@@ -4090,12 +4143,15 @@ export const useAiStore = defineStore('ai', {
       if (pendingEntries.length === 0) {
         return
       }
-      const lastAssistant = [...this.messages].reverse().find((item) => item.role === 'assistant')
-      if (lastAssistant) {
-        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, lastAssistant.id, awaitingInput)
-        return
-      }
-      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, undefined, awaitingInput)
+      // 宿主只认**本轮**：优先 `findInFlightHost()`（最后一条用户消息之后的未收尾助手消息）；
+      // 其次是"**同一 runId** 的已封口宿主"（镜像里的本轮宿主被上一条终帧封口，续流要把它
+      // 重新置为活动态 —— 它自证归属，不是上一轮）。绝不回落到任意"最后一条助手消息"：
+      // 那可能是上一轮已收尾的回答，本轮帧会把它的正文续写/覆盖（污染上一轮，实证见 R2）。
+      const sameRunHost = [...this.messages].reverse().find(
+        (item) => item.role === 'assistant' && item.runId === current.runId
+      ) ?? null
+      const inFlightHost = this.findInFlightHost() ?? sameRunHost
+      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, inFlightHost?.id, awaitingInput)
     },
 
     /**
@@ -4331,8 +4387,9 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批次2：显式登记"不可完整恢复"（中性事实）。
      *
-     * <p>`archive-window` 由续收首帧的序号断层检出（见 {@link noteArchiveGap}）；历史/快照不可用
-     * 由 {@link sealRecovery} 登记。缺口**不是**轮失败：不改 `lastRoundOutcome`、不挂错误卡。
+     * <p>`archive-window` 只由后端**明确**的裁剪标记登记（见 {@link noteArchiveTrim}）；
+     * 历史/快照不可用由 {@link sealRecovery} 登记。缺口**不是**轮失败：不改 `lastRoundOutcome`、
+     * 不挂错误卡。
      *
      * @param span 已知缺口区间（含端点）；省略 = 区间不可知（不臆造）
      */
@@ -4344,24 +4401,20 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批次2：续收连接的**首帧序号断层**判定 —— 归档窗口裁掉中间帧 ⇒ 不可完整恢复。
+     * 批次2 / Task 3：登记**后端明确告知**的归档裁剪缺口（`archive-window` ⇒ 不可完整恢复）。
      *
-     * <p>口径：业务帧的 `seq` 每轮从 1 起连续递增（心跳不占 seq）。以 `anchor`（本连接请求的
-     * `lastSeq`，全量回放为 0）为期望位置，首帧 `seq > anchor + 1` 即说明 `(anchor, seq)` 之间的
-     * 帧已不在归档里。只在**首帧**判一次（后续跳号可能是并发连接的正常交错，不据此下结论）。
+     * <p>唯一事实源是 reattach 的**响应头**（`api/sse.ts#archiveTrimSignalOfHeaders`，经
+     * `SseFrameHandlers.onArchiveTrim` 交付）：生产允许多实例跳号，前端**不再**用
+     * "首帧 `seq > 锚点 + 1`"推断缺帧（正常跳号会被误报成缺口），也不看心跳。
      * 判定只落缺口标记，不伪造轮失败。
      *
-     * @returns 是否检出缺口（调用方据此只报一次）
+     * @returns 是否登记了缺口（调用方据此只报一次）
      */
-    noteArchiveGap(anchor: number | null, seq: number | null): boolean {
-      if (anchor === null || seq === null) {
+    noteArchiveTrim(signal: ArchiveTrimSignal | null): boolean {
+      if (signal === null) {
         return false
       }
-      const expected = Math.max(0, anchor) + 1
-      if (seq <= expected) {
-        return false
-      }
-      this.markRecoveryGap('archive-window', { fromSeq: expected, toSeq: seq - 1 })
+      this.markRecoveryGap('archive-window', { fromSeq: signal.fromSeq, toSeq: signal.toSeq })
       const host = this.messages.find((item) => item.id === activeRoundHostId)
         ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
       if (host) {
@@ -4605,10 +4658,22 @@ export const useAiStore = defineStore('ai', {
       this.loading = true
       // B2：点火在途时记住现场 —— 回来若已换会话/换轮，这条旧 run 不得挂进新会话
       const roundAtRetry = captureRound(this.sessionId, runId)
+      const identityAtRetry = this.sessionIdentity
+      /**
+       * Task 3：**成功/失败出口共用的现场判据** —— 轮次（会话 + 纪元）与会话身份都不得变。
+       * 换身份 = 换会话：旧身份那一轮的重试回包（成功或失败）一律作废，不改新身份的
+       * `loading` / 通知 / 结局 / 消息。
+       */
+      const stillLive = (): boolean =>
+        stillSameRound(roundAtRetry, this.sessionId, null)
+        && isSameIdentity(identityAtRetry, this.sessionIdentity)
       let body: Record<string, unknown>
       try {
         body = await aiApi.retryModelStep(runId)
       } catch (error) {
+        if (!stillLive()) {
+          return 'denied'
+        }
         this.loading = false
         if (error instanceof ApiError) {
           const failedCheck = failedCheckOf(error)
@@ -4655,7 +4720,8 @@ export const useAiStore = defineStore('ai', {
       }
       // B2：点火在途时换了会话/轮次 ⇒ 旧 run 不得挂进新会话（不写 activeRunId、不重建消息、
       // 不重挂）。新会话的 loading 属于它自己的轮次，这里也不得复位。
-      if (!stillSameRound(roundAtRetry, this.sessionId, null)) {
+      // Task 3：判据与失败出口共用（含会话身份）—— 换身份后的成功回包同样整体作废。
+      if (!stillLive()) {
         return 'denied'
       }
       this.loading = false
@@ -4880,8 +4946,6 @@ export const useAiStore = defineStore('ai', {
        */
       const streamEpoch = roundEpoch
       const isCurrentRound = (): boolean => currentAbort === controller && roundEpoch === streamEpoch
-      /** 批次2：归档缺口只按**首帧**判一次（后续跳号可能是并发交错的正常现象）。 */
-      let gapChecked = false
       /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
       const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
@@ -4895,15 +4959,14 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              // 批次2：续收**首帧**序号断层 = 归档窗口缺口（不可完整恢复，中性）。只判一次。
-              if (!gapChecked) {
-                const firstSeq = frameSeq(frame)
-                if (firstSeq !== null) {
-                  gapChecked = true
-                  this.noteArchiveGap(lastSeq ?? null, firstSeq)
-                }
-              }
               this.handleFrame(frame, hostMessageId)
+            },
+            // Task 3：归档缺口只认**后端响应头**的明确标记（正常跳号/心跳一律不推断）。
+            onArchiveTrim: (signal) => {
+              if (!isCurrentRound()) {
+                return
+              }
+              this.noteArchiveTrim(signal)
             },
             onReconnect: (attempt, delayMs) => {
               if (!isCurrentRound()) {
@@ -5307,11 +5370,8 @@ export const useAiStore = defineStore('ai', {
             // 新 id 的锁归本页签（新发号必然空闲）—— 与 resetSession 同口径，别让本页签
             // 换完 id 却不持锁（否则页签生命周期的重认领/让渡对它全部失灵）。
             // Task 4：取号必须等后端发号（恢复面只到"给新会话做一次对账"）；取不到就不认领。
-            const recoveredId = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
-            if (recoveredId !== '') {
-              this.tabOwnership = 'owner'
-              void this.claimSessionOwnership(recoveredId)
-            }
+            // Task 3：认领由 `ensureSession()` 统一完成（只探一次、只 claim 一次；无锁环境保持 unsupported）。
+            await this.ensureSession()
             setNotice(this, 'ai.notice.sessionPurged')
             purgedRecovered = true
             // 2026-10-29 收口（共用有界自动恢复）：410 是**开新轮前**的销毁守卫拦下的，
@@ -5592,8 +5652,6 @@ export const useAiStore = defineStore('ai', {
        */
       const streamEpoch = roundEpoch
       const isCurrentRound = (): boolean => currentAbort === controller && roundEpoch === streamEpoch
-      /** 批次2：归档缺口只按**首帧**判一次（续收锚点 = lastSeq）。 */
-      let gapChecked = false
       /** 批次3：探测确认 runId 不存在 ⇒ 已封口，onClose 不得再报"断流"。 */
       let unavailableNotified = false
       /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
@@ -5626,14 +5684,14 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              if (!gapChecked) {
-                const firstSeq = frameSeq(frame)
-                if (firstSeq !== null) {
-                  gapChecked = true
-                  this.noteArchiveGap(lastSeq ?? null, firstSeq)
-                }
-              }
               this.handleFrame(frame, assistant.id)
+            },
+            // Task 3：归档缺口只认**后端响应头**的明确标记（正常跳号/心跳一律不推断）。
+            onArchiveTrim: (signal) => {
+              if (!isCurrentRound()) {
+                return
+              }
+              this.noteArchiveTrim(signal)
             },
             onReconnect: (attempt, delayMs) => {
               if (!isCurrentRound()) {
@@ -6151,8 +6209,20 @@ export const useAiStore = defineStore('ai', {
       const terminalSeqAtDecision = roundTerminalSeq
       // B2：提交在途期间的现场 —— 失败回退前要比一次，已取消/已换轮的卡不得被改回待决
       const roundAtDecision = captureRound(this.sessionId, runId)
+      const identityAtDecision = this.sessionIdentity
+      /**
+       * Task 3：HITL 的**成功/失败出口共用**现场判据 —— 轮次（会话 + 纪元 + run）与会话身份
+       * 都必须原样。换身份 = 换会话：旧身份那张卡的 POST 回包一律作废（不重连、不补卡、
+       * 不改挂起态、不写通知），否则旧轮的失败会盖住新身份的通知槽。
+       */
+      const stillLive = (): boolean =>
+        stillSameRound(roundAtDecision, this.sessionId, runId)
+        && isSameIdentity(identityAtDecision, this.sessionIdentity)
       try {
         await aiApi.confirm({ runId, toolCallId, approved, reason: reason ?? null })
+        if (!stillLive()) {
+          return
+        }
         // 批4-D：决策送达 ⇒ 勾选态复位（该卡已收尾，不留"已同意"的残影）
         this.clearGateAck(toolCallId)
         // B1（2026-10-20 裁决 9）：决策送达 ⇒ 带 lastSeq 重连收流（挂起期连接已被服务端收掉）。
@@ -6165,6 +6235,10 @@ export const useAiStore = defineStore('ai', {
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
         this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
+        // Task 3：换身份/换轮之后的旧卡回包 —— 整段作废（不写通知、不改新身份的挂起/门状态）。
+        if (!stillLive()) {
+          return
+        }
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
           // R-166 口径③：409 只说"这条已有决策"，**不说是哪一个** —— 旧口径一律硬写
           // `approved`+`running`，于是"其实已被拒/已超时"也会被显示成「已批准」（诚实性缺陷）。
@@ -6220,9 +6294,11 @@ export const useAiStore = defineStore('ai', {
           })
           deriveProjections(host)
         }
-        if (error instanceof Error) {
+        if (error instanceof ApiError) {
+          // 后端 `message` 已按请求语言本地化（与既有口径一致），可原样上屏。
           setRawNotice(this, error.message)
         } else {
+          // Task 3：非后端错误（TypeError / 内部异常 / 桩）一律落本地化兜底 —— 原文不上屏。
           setNotice(this, 'ai.notice.decisionFailed')
         }
       }
@@ -6270,6 +6346,13 @@ export const useAiStore = defineStore('ai', {
       // M-d（fix2）：提交前的现场快照（结局帧可能先于 POST 响应抵达；inline 执行时不在挂起态）
       const parkedAtDecision = this.suspended
       const terminalSeqAtDecision = roundTerminalSeq
+      // Task 3：回灌的**成功/失败出口共用**现场判据 —— 轮次（会话 + 纪元 + run）与会话身份。
+      // 换身份 = 换会话：旧身份那次回灌的回包一律作废（不重连、不补卡、不写通知）。
+      const roundAtSubmit = captureRound(this.sessionId, targetRunId)
+      const identityAtSubmit = this.sessionIdentity
+      const stillLive = (): boolean =>
+        stillSameRound(roundAtSubmit, this.sessionId, targetRunId)
+        && isSameIdentity(identityAtSubmit, this.sessionIdentity)
       try {
         await aiApi.frontendToolResult(
           cancelled
@@ -6287,6 +6370,9 @@ export const useAiStore = defineStore('ai', {
                 ...(code !== undefined ? { code } : {})
               }
         )
+        if (!stillLive()) {
+          return { ok: false }
+        }
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
         // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
         // M-d：帧先到时 `suspended` 已被清掉，由 `parkedAtDecision` + 轮次身份补回这条连接；
@@ -6296,6 +6382,10 @@ export const useAiStore = defineStore('ai', {
         this.revealNextRestoredPendingCard(targetRunId)
         return { ok: true }
       } catch (error) {
+        // Task 3：换身份/换轮之后的旧回灌包 —— 整段作废（不写通知、不改新身份的卡/挂起态）。
+        if (!stillLive()) {
+          return { ok: false }
+        }
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
           // T2a-D#4：409 DUPLICATE 是中性终态（不报错）：按响应体携带的条目 status
           // 收敛 pendingCall 投影（帧未到达/丢失时的就地收敛；响应体 status 与帧同口径）
@@ -6355,9 +6445,14 @@ export const useAiStore = defineStore('ai', {
             ...(issues.some((issue) => issue.code === 'RESULT_TOO_LARGE') ? { tooLarge: true } : {})
           }
         }
-        const message = error instanceof Error ? error.message : translate('ai.notice.toolSubmitFailed')
-        setRawNotice(this, message)
-        return { ok: false, message }
+        if (error instanceof ApiError) {
+          setRawNotice(this, error.message)
+          return { ok: false, message: error.message }
+        }
+        // Task 3：非后端错误（内部异常 / 网络桩）一律落本地化兜底 —— 原文不上屏、也不回给表单。
+        const fallback = translate('ai.notice.toolSubmitFailed')
+        setNotice(this, 'ai.notice.toolSubmitFailed')
+        return { ok: false, message: fallback }
       }
     },
 
@@ -7706,7 +7801,7 @@ export const useAiStore = defineStore('ai', {
         this.busyRun = null
       }
       // C2：拿到 runId 才关本地连接 —— 先发 cancel，再收掉这条已经没用的 /chat 传输
-      void this.cancelStoppedRun(runId)
+      void this.cancelStoppedRun(runId, this.sessionIdentity)
       intent.transport?.abort()
       return true
     },
@@ -7724,11 +7819,19 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * M-19：补发的 cancel（失败不写技术文案 —— 本地停止早已收敛，与 `stop()` 同口径）。
+     * best-effort cancel（失败不写技术文案 —— 本地收敛早已完成，与 `stop()` 同口径）。
+     *
+     * <p>两个调用点：① M-19 的 start 帧之前停止后补发；② Task 3 的身份切换前按旧身份停掉旧轮
+     * （不等待回包，也不重发对话/重跑工具）。
+     *
+     * <p><b>身份头必须显式随请求发出</b>（缺省 = 当前会话身份）：axios 拦截器在微任务里才跑，
+     * 切身份时那里读到的已经是**新身份**。参数里的 `identity` 由调用方在动作入口捕获，
+     * `http` 拦截器只补缺省、不覆盖显式值。
      */
-    async cancelStoppedRun(runId: string): Promise<void> {
+    async cancelStoppedRun(runId: string, identity?: AiIdentity | null): Promise<void> {
+      const identityAtSend = identity === undefined ? this.sessionIdentity : identity
       try {
-        await aiApi.cancel(runId)
+        await aiApi.cancel(runId, { headers: identityHeaders(identityAtSend) })
       } catch {
         // 后端不可达不影响本地已落地的停止
       }
@@ -7767,10 +7870,14 @@ export const useAiStore = defineStore('ai', {
       this.stopping = true
       // O02：停止的落地闸门 —— 同 tick 的发送/忙态判断先等它（见 waitForStopSettlement）。
       // 本地收敛在本函数里**同步**完成，闸门只等 cancel 送达后端。
+      // Task 3：闸门与进行态都带**本次停止**的归属令牌，`finally` 只清自己那一次。
+      const stopToken = {}
+      activeStopToken = stopToken
       let releaseStopGate: () => void = () => {}
-      stopSettleGate = new Promise<void>((resolve) => {
+      const stopGate = new Promise<void>((resolve) => {
         releaseStopGate = resolve
       })
+      stopSettleGate = stopGate
       // O02：本端已对这条 run 作出停止决定 —— 此后指回它的 409 只是"停止尚未传播"的残影，
       // 不是"上一轮仍在进行中"（判据见 isAuthoritativeBusyRun）；同时撤掉指向它的忙提示。
       if (runId !== null) {
@@ -7852,22 +7959,39 @@ export const useAiStore = defineStore('ai', {
       // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped 与半截正文）
       this.markStoppedMessage()
       this.writeMirrorNow()
+      // Task 3：cancel 回包可能很慢（后端不可达时到 HTTP 上限）—— 期间可能已换身份/换会话/起新轮。
+      // 轮次与身份现场在这里捕获，回包写 `lastRoundOutcome` 前必须仍原样。
+      const roundAtCancel = captureRound(this.sessionId, runId)
+      const identityAtCancel = this.sessionIdentity
+      const stillOwnStop = (): boolean =>
+        stillSameRound(roundAtCancel, this.sessionId, null)
+        && isSameIdentity(identityAtCancel, this.sessionIdentity)
       try {
         if (runId) {
-          const response = (await aiApi.cancel(runId)) as { alreadyCancelled?: boolean } | undefined
+          // Task 3：身份头显式随请求发出（拦截器在微任务里跑，不能让它现读"那时"的身份）。
+          const response = (await aiApi.cancel(runId, {
+            headers: identityHeaders(identityAtCancel)
+          })) as { alreadyCancelled?: boolean } | undefined
           // S2：读 alreadyCancelled —— 服务端幂等已生效（另一页签/重复点击已取消过）。
           // 本地收口在上方早就完成，这里只对齐轮次结局，不追加任何提示（同一件事不说两遍）。
-          if (response?.alreadyCancelled === true) {
+          // Task 3：迟到回包不得改写**新身份/新轮**的结局（旧轮的取消是旧轮的事实）。
+          if (response?.alreadyCancelled === true && stillOwnStop()) {
             this.lastRoundOutcome = 'cancelled'
           }
         }
       } catch {
         // 后端不可达不影响本地停止（上面已收敛）；不写技术文案，用户看到的仍是「已停止」
       } finally {
-        this.stopping = false
-        // O02：停止落地 —— 等在闸门上的发送可以开始判断"能不能发 / 是不是忙态"了
+        // O02：停止落地 —— 等在**本次**闸门上的发送可以开始判断"能不能发 / 是不是忙态"了。
+        // Task 3：只清属于自己那次停止的闸门与进行态（迟到的一次不得抹掉后一次停止的现场）。
         releaseStopGate()
-        stopSettleGate = null
+        if (stopSettleGate === stopGate) {
+          stopSettleGate = null
+        }
+        if (activeStopToken === stopToken) {
+          activeStopToken = null
+          this.stopping = false
+        }
       }
     },
 
@@ -7967,8 +8091,8 @@ export const useAiStore = defineStore('ai', {
      * <ul>
      * <li>已存身份仍在目录里 ⇒ 沿用（刷新/重开页签的恢复路径），随后 `ensureSession()` 取该身份的
      *   会话（有存量就用存量，没有才向后端发号）；</li>
-     * <li>没有身份 / 身份已不在目录 ⇒ 落到**目录第一项**，进入身份模式并发号；旧身份会话与镜像
-     *   原样留在旧身份键下（`keepMirror` / `keepSessionPointer`），不删除、不混用；</li>
+     * <li>没有身份 / 身份已不在目录 ⇒ 落到**目录第一项**，进入身份模式并发号；这两个入口
+     *   （`enterIdentity` 缺省 = 启动补入）保留旧指针与旧镜像（同一身份的会话可恢复），不混用；</li>
      * <li>目录不可用（端点缺失 / 请求失败 / 空目录）⇒ `directoryStatus = 'unavailable'`：面板给
      *   明确横幅 + 重试，**发送禁用**。绝不静默切到"本地造号 + 无身份头"的旧分支。</li>
      * </ul>
@@ -8060,15 +8184,28 @@ export const useAiStore = defineStore('ai', {
     /**
      * 切换租户/用户（面板下拉入口）。
      *
-     * <p>切换**任一**维度（租户或用户）都等于换身份：本页签先清掉当前会话指针/锁/草稿展示
-     * （旧身份镜像与后端记录保留），再强制由后端新建会话；切回旧身份同样发新号，不恢复旧指针。
+     * <p>切换**任一**维度（租户或用户）都等于换身份：本页签先清掉当前会话指针/锁/草稿展示，
+     * 再强制由后端新建会话；切回旧身份同样发新号，不恢复旧指针。旧会话那份浏览器镜像在本页签
+     * 已**不可达**（切回也是新会话）⇒ 随切换清掉；**后端历史保留**（不调 purge）。
      * 旧身份在途轮的帧/回包由 `adoptFreshSession` 的轮次纪元 + 会话身份守卫丢弃。
      * 同一身份重复选择是空操作（不白换会话、不重复发号）。
+     *
+     * <p>切走之前按**旧身份**对在途旧轮做一次 best-effort cancel：旧身份在本函数入口捕获，
+     * cancel 请求**显式携带**该身份的 `X-Tenant-Id` / `X-User-Id`（不依赖 axios 拦截器在微任务里
+     * 现读身份 —— 那时身份已被写成新的；拦截器只补缺省头，不覆盖显式值）；请求在写新身份之前发出，
+     * 且**不等待回包**（后端不可达/慢响应不得拖住本地切换）。这里只发 cancel，不重发对话、
+     * 不重试模型步、不重跑任何工具。
      */
     async switchIdentity(tenantId: number, userId: number): Promise<void> {
       const next = normalizeIdentity({ tenantId, userId })
       if (next === null || isSameIdentity(next, this.identity)) {
         return
+      }
+      // 身份在**这里**捕获：旧轮属于旧身份；cancel 的身份头显式随请求发出（不被拦截器换成新身份）。
+      const oldRunId = this.activeRunId
+      const oldIdentity = this.sessionIdentity
+      if (oldRunId !== null && oldRunId !== '') {
+        void this.cancelStoppedRun(oldRunId, oldIdentity)
       }
       await this.enterIdentity(next, { forceNewSession: true })
     },
@@ -8078,7 +8215,8 @@ export const useAiStore = defineStore('ai', {
      * 缺省（目录首次落身份/刷新补入）保留指针恢复语义。
      *
      * <p>顺序不可反：
-     * ① 清场时持有的是**旧身份**，镜像键/锁名按旧身份算；旧身份镜像与后端记录保留；
+     * ① 清场时持有的是**旧身份**，镜像键/锁名按旧身份算；后端记录保留（`forceNewSession` 时
+     *   旧会话那份已不可达的浏览器镜像随切换清掉，见下）；
      * ② 落身份之后才取号 —— 会话号必须属于新身份；
      * ③ 恢复分支：新身份已有会话指针 ⇒ 先按所有权判定，拿得到就恢复原会话（镜像/历史）；
      *   指针不存在（首次进入）或该会话已被另一页签持有 ⇒ 由后端发新号（返修 I8/C1）。
@@ -8088,8 +8226,12 @@ export const useAiStore = defineStore('ai', {
       options: { forceNewSession?: boolean } = {}
     ): Promise<void> {
       if (options.forceNewSession) {
-        // 强制新建：清当前页签指针/锁/草稿展示（keepMirror 保留旧身份镜像），发号前不读旧指针。
-        this.adoptFreshSession({ keepMirror: true })
+        // 强制新建：清当前页签指针/锁/草稿展示，发号前不读旧指针。
+        // Task 3（不用 keepMirror）：旧会话切走后**本页签已不可达**（切回同一身份也由后端发新号，
+        // 新会话 ≠ 旧会话）⇒ `adoptFreshSession()` 按旧身份键删掉那份失效镜像、并按旧身份前缀
+        // 清孤儿表单草稿（释放 sessionStorage 配额）。此时身份仍是旧的，键形才对。
+        // **后端历史原样保留**（不调任何 purge 端点）。
+        this.adoptFreshSession()
         writeAiIdentity(identity)
         this.identity = identity
         this.sessionIdentity = identity
@@ -8099,14 +8241,8 @@ export const useAiStore = defineStore('ai', {
         } catch {
           // 隐私模式/配额：本页签内存态照常
         }
-        const issued = await this.ensureSession()
-        if (issued === '') {
-          return
-        }
-        if (this.tabOwnership !== 'unknown') {
-          this.tabOwnership = 'owner'
-        }
-        void this.claimSessionOwnership(issued)
+        // 发号成功后的所有权认领由 `ensureSession()` **统一**完成（只探一次、只 claim 一次）。
+        await this.ensureSession()
         return
       }
       const pointer = storedSessionPointer(identity)
@@ -8117,18 +8253,17 @@ export const useAiStore = defineStore('ai', {
       this.identity = identity
       this.sessionIdentity = identity
       if (pointer !== '') {
-        const verdict = await probeSessionLock(pointer)
+        const verdict = await probeSessionLock(pointer, identity)
         // 返修 I-1：探活是异步的（最多 3×150ms），期间用户可能已经又切了身份/换了会话。
         // 三道再校验缺一不可：令牌（清场/发号已换代）、身份（仍是本次目标）、会话号仍空
         // （别把 A 的号写到 B 已发号的会话上）。任一不符即**整体放弃**本次恢复。
         if (entryToken !== sessionGateToken
           || !isSameIdentity(this.identity, identity)
           || this.sessionId !== '') {
-          // 返修 round3：本次探活若真的拿到了锁（verdict !== 'occupied'），必须**还回去** ——
-          // 它已经把账本改成这把锁；带着"放弃"返回会把当前身份的会话锁句柄覆盖掉/泄漏，
-          // 之后本页签再也认领不到自己的会话锁。这里只能用文档级 releaseSessionLock()
-          // （释放的正是本次刚探到的那把）；不能用 releaseOwnLock(pointer)：它按**当前**身份
-          // 重算锁名，身份已切走时名字不匹配 ⇒ 不会释放。
+          // 返修 round3（Task 3 更新）：本次探活若真的拿到了锁（verdict !== 'occupied'），必须
+          // **还回去** —— 它已经把账本改成这把锁；带着"放弃"返回会把会话锁句柄覆盖掉/泄漏，
+          // 之后本页签再也认领不到自己的会话锁。这里用文档级 releaseSessionLock()（释放的正是
+          // 本次刚探到的那把），不依赖任何身份重算锁名。
           if (verdict !== 'occupied') {
             releaseSessionLock()
           }
@@ -8141,31 +8276,23 @@ export const useAiStore = defineStore('ai', {
           if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
             clearNotice(this)
           }
-          // 号确定之后才记 owner（发号失败/被抢占时不得留下"owner 但无会话"的假状态）。
-          // 返修 round3：启动期（角色仍 unknown）走这条分支时，先补一次所有权判定，完成
-          // BroadcastChannel / pagehide-pageshow 的绑定，否则本页签不会响应别人的 released。
+          // 号确定之后才认领（探活/认领口只在锁真的到手时记 owner；发号失败/被抢占时不得留下
+          // "owner 但无会话"的假状态）。返修 round3：启动期（角色仍 unknown）先补一次所有权判定，
+          // 完成 BroadcastChannel / pagehide-pageshow 的绑定，否则本页签不会响应别人的 released。
           if (this.tabOwnership === 'unknown') {
             const pending = this.ensureTabOwnership()
             if (pending !== null) {
-              void pending
+              await pending
             }
           }
-          this.tabOwnership = 'owner'
           await this.loadHistory()
-          void this.claimSessionOwnership(pointer)
+          await this.claimSessionOwnership(pointer)
           return
         }
         // 指针被另一页签持有：落到发号（原指针会被新号覆盖，属可接受的降级——旧会话在那里活着）。
       }
-      const issued = await this.ensureSession()
-      if (issued === '') {
-        return
-      }
-      // 运行期显式切换：号已确定，记 owner；启动期（仍 unknown）交给 I2 的所有权补判。
-      if (this.tabOwnership !== 'unknown') {
-        this.tabOwnership = 'owner'
-      }
-      void this.claimSessionOwnership(issued)
+      // 发号成功后的所有权认领由 `ensureSession()` **统一**完成（只探一次、只 claim 一次）。
+      await this.ensureSession()
     },
 
     /**
@@ -8242,12 +8369,19 @@ export const useAiStore = defineStore('ai', {
         } catch {
           // 隐私模式/配额：本页签内存态照常使用（刷新后重新发号）
         }
-        // 返修 I2：启动期若因"暂无会话号"跳过了所有权判定，发号成功后补判一次（含复制页签识别）。
+        // 返修 I2 + Task 3：发号成功 = 本页签自己的**新会话** ⇒ 在这里**统一**补齐所有权
+        // （只探一次、只 claim 一次；enterIdentity / 发号重试等入口不再各自补探）：
+        // 启动期（角色仍 unknown）先补一次判定（绑定生命周期 / 识别复制页签，判定内部会认领）；
+        // 其余情形（复制页签/切换/新建对话的发号重试成功）直接认领新号 —— 不能停在
+        // 'duplicate' / 无锁，否则别的页签会把本页签的新会话当"空白副本"接手。
+        // 无 Web Locks 的环境由认领口置 'unsupported'，**不得冒充 owner**。
         if (this.tabOwnership === 'unknown') {
           const pending = this.ensureTabOwnership()
           if (pending !== null) {
             void pending
           }
+        } else {
+          await this.claimSessionOwnership(issued)
         }
         return issued
       })()
@@ -8276,7 +8410,7 @@ export const useAiStore = defineStore('ai', {
       // 收口（③）：换 id 前只释放**本页签文档持有、且属于旧会话**的锁 —— 否则新会话的锁随后
       // 覆盖 `heldLock`，旧锁的释放句柄丢失，会一直占着到文档销毁（别的页签探活被误判"原页签还在"）。
       // 不广播 `released`：旧会话可能已被本页签销毁（新建对话），邀请别人接手只会接到一个空壳。
-      releaseOwnLock(oldSessionId)
+      releaseOwnLock(oldSessionId, oldIdentity)
       // 待接手的让渡属于"上一身份"，换会话即作废
       cancelPendingTakeover()
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
@@ -8304,7 +8438,8 @@ export const useAiStore = defineStore('ai', {
       const nextId = ''
       const scopeIdentity = this.identity
       try {
-        // 旧镜像按**旧身份**键删（保留开关见 keepMirror：身份切换/接管要留下旧身份现场）。
+        // 旧镜像按**旧身份**键删。`keepMirror` 只剩"启动补入"那条恢复入口用（指针还在、
+        // 会话可恢复 ⇒ 镜像必须留着给 `loadHistory` 读）；用户身份切换/新建对话/接管一律删。
         if (!options.keepMirror && oldSessionId !== '') {
           sessionStorage.removeItem(mirrorStorageKey(oldSessionId, oldIdentity))
         }
@@ -8326,6 +8461,8 @@ export const useAiStore = defineStore('ai', {
       this.sessionIssueFailed = false
       this.messages = []
       this.activeRunId = null
+      // 编辑锚点属于旧会话的消息（新会话里既找不到也不该改写），换会话即清。
+      this.editAnchorId = null
       // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
       this.runSeq = {}
       // AR-10：运行态寿命锚点属于旧会话/旧轮 —— 不带走（卡面寿命只对本轮成立）
@@ -8384,7 +8521,8 @@ export const useAiStore = defineStore('ai', {
       this.clearPreparingRun()
       // 批次6B（N10）：换会话 = 旧草稿全部失去引用 ⇒ 按 draft 前缀清孤儿键
       // （活动/排队表单已在上面的 dropActiveForm 收口；禁止整份 sessionStorage.clear()）。
-      // Task 4：身份切换（keepMirror）保留旧身份现场 —— 旧草稿也留在旧身份前缀下，不在这里清。
+      // Task 3：身份切换也走这里（`enterIdentity(forceNewSession)` 不再传 keepMirror）——
+      // 旧身份前缀下的孤儿表单草稿随实际切换清掉，不在浏览器里留不可达的残值。
       if (!options.keepMirror) {
         this.pruneOrphanFormDrafts()
       }
@@ -8436,10 +8574,12 @@ export const useAiStore = defineStore('ai', {
         return null
       }
       const sid = this.sessionId
+      // Task 3：判定/认领/广播都按**入口捕获**的会话身份（探活是异步的，期间身份可能被切走）。
+      const identityAtEntry = this.sessionIdentity
       // 返回意向一次性消费：无论这次判成 owner 还是 duplicate，都不能留到下一次刷新
       const returning = takeReturnIntent(sid)
       const task = (async (): Promise<void> => {
-        const role = await resolveTabOwnership(sid)
+        const role = await resolveTabOwnership(sid, identityAtEntry)
         if (this.sessionId !== sid) {
           // 探活在途期间会话已被换掉（新建对话 / 让渡）：不为旧会话落任何角色
           return
@@ -8447,7 +8587,8 @@ export const useAiStore = defineStore('ai', {
         this.tabOwnership = role
         if (role === 'owner') {
           ownedSessionId = sid
-          postOwnership('claim', sid)
+          // Task 3：探活期间身份可能已切走 —— claim 按**该会话**的身份发（入口捕获）。
+          postOwnership('claim', sid, this.sessionIdentity)
           return
         }
         if (role === 'duplicate') {
@@ -8464,11 +8605,8 @@ export const useAiStore = defineStore('ai', {
           rotatePageId()
           // Task 4：先判完所有权（到这里才确定"本页签要自己的会话"）再向后端取号；
           // 取号失败就保持"未就绪"（后续请求被引导门拦住），绝不发空 id。
-          const issued = await this.ensureSession()
-          if (issued !== '') {
-            this.tabOwnership = 'owner'
-            await this.claimSessionOwnership(issued)
-          }
+          // Task 3：认领已由 `ensureSession()` 统一完成，这里不再重复探活/claim。
+          await this.ensureSession()
         }
       })()
       const tracked = task.finally(() => {
@@ -8502,14 +8640,15 @@ export const useAiStore = defineStore('ai', {
       // （自持锁的 ifAvailable 探活会因短路而谎报 granted）⇒ 先扔掉账本、再**真**探一次。
       // 仍然空闲 ⇒ 锁还是我们的（重新认领）；已被别人拿走 ⇒ 对方就是新 owner（降级）。
       releaseSessionLock()
-      const role = await resolveTabOwnership(sid)
+      const identityAtEntry = this.sessionIdentity
+      const role = await resolveTabOwnership(sid, identityAtEntry)
       // 探活在途期间现场已变（换会话 / 已降级）⇒ 不落任何结论
       if (this.sessionId !== sid || this.tabOwnership !== 'owner') {
         return
       }
       if (role === 'owner') {
         ownedSessionId = sid
-        postOwnership('claim', sid)
+        postOwnership('claim', sid, this.sessionIdentity)
         return
       }
       if (role === 'duplicate') {
@@ -8518,17 +8657,33 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** RC-4 ②：为本页签会话认领所有权锁（新会话 id 必然空闲），拿到后广播 `claim`。 */
+    /**
+     * RC-4 ②：为本页签会话认领所有权锁（新会话 id 必然空闲），拿到后广播 `claim`。
+     *
+     * <p>Task 3：探活与广播都按**该会话**的身份（`sessionIdentity`）—— 探活是异步的，期间身份
+     * 可能已被切走；此刻若现读全局身份，会去探/认领**新身份**名下的同名会话锁，并把旧会话的
+     * claim 贴上错误指纹（真正的主人再也接不回来）。
+     */
     async claimSessionOwnership(sessionId: string): Promise<void> {
       if (sessionId === '') {
         return
       }
-      const verdict = await probeSessionLock(sessionId)
+      const identity = this.sessionIdentity
+      const verdict = await probeSessionLock(sessionId, identity)
+      if (verdict === 'unsupported') {
+        // Task 3：无 Web Locks ⇒ 只能按"无锁能力"记，绝不冒充 owner（否则页签关闭后
+        // 别的页签会以为原页签仍持锁）。
+        if (this.sessionId === sessionId) {
+          this.tabOwnership = 'unsupported'
+        }
+        return
+      }
       if (verdict !== 'granted' || this.sessionId !== sessionId) {
         return
       }
       ownedSessionId = sessionId
-      postOwnership('claim', sessionId)
+      this.tabOwnership = 'owner'
+      postOwnership('claim', sessionId, identity)
     },
 
     /**
@@ -8588,23 +8743,23 @@ export const useAiStore = defineStore('ai', {
       const previous = this.sessionId
       const previousLock = ownedSessionId === previous ? heldLock : null
       const identityAtEntry = this.identity
-      const verdict = await probeSessionLock(sessionId)
+      const verdict = await probeSessionLock(sessionId, identityAtEntry)
       if (verdict !== 'granted') {
         return
       }
       // Task 4：探活是异步的，期间身份可能已切走 —— 不同身份不得接手（锁已探到也要还回去）。
       if (!isSameIdentity(identityAtEntry, this.identity)) {
-        releaseOwnLock(sessionId)
+        releaseOwnLock(sessionId, identityAtEntry)
         return
       }
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
         // 探活已把账本换成"待接手"的锁，但二次判据不允许接手 ⇒ 立刻还回去（不占别人的会话）
-        releaseOwnLock(sessionId)
+        releaseOwnLock(sessionId, identityAtEntry)
         return
       }
       if (previousLock !== null) {
         // 放弃本页签那个空白会话：把它的所有权一并让出去（不占着不再使用的锁）
-        postOwnership('released', previous)
+        postOwnership('released', previous, identityAtEntry)
         try {
           previousLock.release()
         } catch {
@@ -8626,7 +8781,8 @@ export const useAiStore = defineStore('ai', {
       }
       this.tabOwnership = 'owner'
       ownedSessionId = sessionId
-      postOwnership('claim', sessionId)
+      // Task 3：claim 的身份 = 接手入口捕获的身份（探活期间切走的身份不参与这条会话的广播）。
+      postOwnership('claim', sessionId, identityAtEntry)
       // 批次6B（N7）：接手的是**另一个会话**，上一身份的 chip / ui_event 回执 / 轮结局不带走。
       this.contextSync = null
       this.lastUiEventResult = null
@@ -8660,16 +8816,14 @@ export const useAiStore = defineStore('ai', {
       const purgeIdentity = this.identity
       this.adoptFreshSession()
       // Task 4：先判完所有权（本页签新建）再向后端取号；取号失败则保持未就绪，不得用空 id 发请求。
+      // Task 3：所有权认领由 `ensureSession()` 统一完成（新号只可能是本页签的；无锁环境保持
+      // unsupported，不冒充 owner），这里不再重复探活/claim。
       const issued = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
-      // RC-4：新会话的锁归本页签（新发号必然空闲）；用户显式新建对话后不再算"待接手的复制品"
-      this.tabOwnership = 'owner'
-      if (issued !== '') {
-        void this.claimSessionOwnership(issued)
-      }
       // best-effort 停掉后端仍在跑的旧轮（只断本地连接不停后端，故必须显式 POST）
       if (oldRunId) {
         try {
-          await aiApi.cancel(oldRunId)
+          // Task 3：旧轮属于旧身份 —— 身份头显式随请求发出（不靠拦截器现读）。
+          await aiApi.cancel(oldRunId, { headers: identityHeaders(purgeIdentity) })
         } catch {
           // 忽略：取消请求失败只意味着后端可能多跑一轮，不影响新建对话
         }

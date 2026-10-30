@@ -137,6 +137,64 @@ export interface ReattachProbe {
   preparing: PreparingProbe | null
 }
 
+/**
+ * Task 3：**归档裁剪的唯一事实源**（不可完整恢复的中性缺口）。
+ *
+ * <h2>为什么不能再自己推断</h2>
+ * 旧口径用"续收首帧 `seq > 锚点 + 1`"推断归档窗口裁掉了中间帧。生产允许**多实例**发号
+ * （每 run 唯一、单调、允许跳号，不要求 +1 连续）——正常跳号会被这条推断误报成"不可完整恢复"。
+ * 缺帧只能由**后端明确告知**，前端不得猜测；心跳/帧序与这条判定无关。
+ *
+ * <h2>契约（Task 2）</h2>
+ * reattach（`GET /api/ai/events/{runId}`）的**响应头**携带明确截断状态：
+ * `archive-trimmed: true` + `archive-from: <seq>` + `archive-to: <seq>`（区间含端点；
+ * from/to 缺失 = 区间不可知）。响应头只在"确实被归档窗口裁掉"时出现。
+ *
+ * <h2>唯一适配点</h2>
+ * 读取口 = {@link archiveTrimSignalOfHeaders}，交付口 = `SseFrameHandlers.onArchiveTrim`
+ * （每条 reattach 连接最多一次）。后端若调整头名/取值，只改这里的 {@link ARCHIVE_TRIM_HEADERS}
+ * 与解析，store 不需要动。不得回到按帧序号推断。
+ */
+export interface ArchiveTrimSignal {
+  /** 缺口起始序号（含）；null = 不可知 */
+  fromSeq: number | null
+  /** 缺口结束序号（含）；null = 不可知 */
+  toSeq: number | null
+}
+
+/** 归档截断响应头（Task 2 契约；`X-` 前缀别名一并认，大小写不敏感）。 */
+export const ARCHIVE_TRIM_HEADERS = {
+  trimmed: 'archive-trimmed',
+  from: 'archive-from',
+  to: 'archive-to'
+} as const
+
+/** 读一组响应头；没有明确截断标记 ⇒ null（未知/非法值一律不猜）。 */
+export function archiveTrimSignalOfHeaders(headers: Headers | null | undefined): ArchiveTrimSignal | null {
+  if (!headers) {
+    return null
+  }
+  const pick = (name: string): string | null => {
+    const direct = headers.get(name)
+    if (direct !== null) {
+      return direct
+    }
+    return headers.get(`x-${name}`)
+  }
+  const trimmed = (pick(ARCHIVE_TRIM_HEADERS.trimmed) ?? '').trim().toLowerCase()
+  if (trimmed !== 'true' && trimmed !== '1') {
+    return null
+  }
+  const seqOf = (name: string): number | null => {
+    const raw = (pick(name) ?? '').trim()
+    if (!/^\d+$/.test(raw)) {
+      return null
+    }
+    return Number(raw)
+  }
+  return { fromSeq: seqOf(ARCHIVE_TRIM_HEADERS.from), toSeq: seqOf(ARCHIVE_TRIM_HEADERS.to) }
+}
+
 /** 帧回调集合。 */
 export interface SseFrameHandlers {
   /** 每收到一帧调用一次（含心跳） */
@@ -162,6 +220,11 @@ export interface SseFrameHandlers {
   onPreparing?: (probe: PreparingProbe) => void
   /** 批次3：探测确认该 runId 在服务端不存在（404）——调用方应封口镜像里的在途轮。 */
   onUnavailable?: () => void
+  /**
+   * Task 3：reattach 响应头携带**后端明确**的归档裁剪状态（见 {@link ArchiveTrimSignal}）。
+   * 每条连接最多回调一次；没有头 ⇒ 不回调（正常跳号不报缺口）。
+   */
+  onArchiveTrim?: (signal: ArchiveTrimSignal) => void
 }
 
 /** 流选项。 */
@@ -637,7 +700,7 @@ interface LiveStream {
 function openLiveStream(
   path: string,
   handlers: {
-    onOpen: () => void
+    onOpen: (headers: Headers) => void
     onData: (payload: string) => void
     onFailure: (reason: string) => void
   }
@@ -699,7 +762,7 @@ function openLiveStream(
         handlers.onFailure('重挂连接中断')
         return
       }
-      handlers.onOpen()
+      handlers.onOpen(response.headers)
       if (!response.body) {
         handlers.onFailure('重挂连接中断')
         return
@@ -926,6 +989,8 @@ export async function reattach(
     let connectionEstablished = false
     /** 本次 EventSource 连接是否已做过 202 准备中探测（每次 open 重置，避免重复探测）。 */
     let probedThisConnection = false
+    /** Task 3：归档截断只通报一次（重连拿到同一个头不重复登记）。 */
+    let archiveTrimAnnounced = false
     /**
      * 连接世代（I1）：每次 `open()` 递增。探测结果只对"发起它的那一代连接"有效 ——
      * 上一代的慢 202 不得替下一代（或退役后的空窗）做决定。
@@ -1073,9 +1138,17 @@ export async function reattach(
       // 故此处与构造之间没有可丢失事件的窗口）
       startConnect()
       source = openLiveStream(SSE_PATHS.events(runId, since ?? undefined), {
-        onOpen: () => {
+        onOpen: (headers) => {
           if (settled) {
             return
+          }
+          // Task 3：归档裁剪只认响应头的明确标记（与帧序号/心跳无关），每条连接最多通报一次。
+          if (!archiveTrimAnnounced) {
+            const signal = archiveTrimSignalOfHeaders(headers)
+            if (signal !== null) {
+              archiveTrimAnnounced = true
+              handlers.onArchiveTrim?.(signal)
+            }
           }
           handlers.onOpen?.()
           startIdle()

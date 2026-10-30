@@ -386,7 +386,7 @@ describe('M-19 start 帧之前停止（C2：传输保留 + 真实补 cancel）',
     await flushPromises()
 
     expect(api.cancel).toHaveBeenCalledTimes(1)
-    expect(api.cancel).toHaveBeenCalledWith('run-late')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-late')
     expect(store.stoppedRunId).toBe('run-late')
     expect(transport.aborted).toBe(true)
 
@@ -659,7 +659,7 @@ describe('N5 新轮 start 让旧停止意向失效时收掉旧传输', () => {
     round.transport.emit({ type: 'start', runId: 'run-own' } as SseFrame)
     await flushPromises()
 
-    expect(api.cancel).toHaveBeenCalledWith('run-own')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-own')
     expect(round.transport.aborted).toBe(true)
 
     await round.sending

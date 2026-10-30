@@ -165,7 +165,9 @@ describe('B10-02 提交：拒绝不受勾选限制，批准必须已勾选', () 
     const part = store.messages[0]!.parts[0] as ToolPart
     expect(part.requiresAction).toBe(true)
     expect(part.status).toBe('pending')
-    expect(store.notice).toContain('网络中断')
+    // Task 3：非后端错误（裸 Error）的原文不上屏 —— 落本地化兜底文案。
+    expect(store.noticeCode).toBe('ai.notice.decisionFailed')
+    expect(store.notice ?? '').not.toContain('网络中断')
   })
 })
 

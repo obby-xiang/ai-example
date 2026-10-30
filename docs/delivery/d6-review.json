@@ -1,4 +1,12 @@
 {
   "version": 1,
-  "reviews": []
+  "reviews": [
+    {
+      "fingerprint": "sha256:615db656dad84c808a31b4b2ce79c1b7b583d1441d954cb86944060faaee8384",
+      "status": "synced",
+      "reason": "已同步前端身份切换、显式旧身份取消、会话所有权和归档截断响应头契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
+    }
+  ]
 }

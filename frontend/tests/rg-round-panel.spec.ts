@@ -174,7 +174,7 @@ describe('批G · G8：刷新后在途轮恢复停止入口', () => {
     expect(stopBtn.attributes('disabled')).toBeUndefined()
 
     await stopBtn.trigger('click')
-    expect(api.cancel).toHaveBeenCalledWith('run-g8')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-g8')
     wrapper.unmount()
   })
 })

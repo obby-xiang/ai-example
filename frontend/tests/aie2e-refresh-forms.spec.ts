@@ -980,7 +980,7 @@ describe('B11（第三种挂起形态 · ui_request_upload）：停止与刷新'
     expect(store.suspended).toBe(false)
     expect(store.loading).toBe(false)
     expect(store.canSend).toBe(true)
-    expect(api.cancel).toHaveBeenCalledWith('run-b11')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-b11')
     expect(toolSegments(store.messages[1]).find((part) => part.toolCallId === 'u1'))
       .toMatchObject({ status: 'cancelled', requiresAction: false })
     expect(visiblePendingIds(store)).toEqual([])
@@ -1252,7 +1252,7 @@ describe('R-12 三件套：刷新恢复的在途轮 + 停止 + done(cancelled) �
     expect(store.messages[1]?.content).toBe('半截正文')
 
     await store.stop()
-    expect(api.cancel).toHaveBeenCalledWith('run-sp4')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-sp4')
     expect(store.canSend).toBe(true) // 刷新恢复的轮也能停、也能立刻继续用
 
     live.handlers?.onFrame(frame({ type: 'done', runId: 'run-sp4', seq: 6, cancelled: true }))

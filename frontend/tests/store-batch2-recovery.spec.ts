@@ -419,13 +419,19 @@ describe('批次2 · 上下文明细三态（ContextPopover）', () => {
   })
 })
 
-describe('批次2 · 归档窗口缺口', () => {
-  it('续收首帧序号跳过已知区间：记为 archive-window 缺口（不可完整恢复，不伪造失败）', async () => {
+describe('批次2 · 归档窗口缺口（Task 3：只认后端明确的响应头标记，不按序号跳号推断）', () => {
+  it('reattach 明确回调归档裁剪区间：记为 archive-window 缺口（不可完整恢复，不伪造失败）', async () => {
     const store = freshStore()
     store.historyLoaded = true
     const host = store.appendAssistantMessage()
-    api.reattachRun.mockImplementation((_runId: string, handlers: { onFrame?: (frame: SseFrame) => void }) => {
+    api.reattachRun.mockImplementation((_runId: string, handlers: {
+      onFrame?: (frame: SseFrame) => void
+      onArchiveTrim?: (signal: { fromSeq: number | null; toSeq: number | null }) => void
+    }) => {
+      // Task 3：缺帧只能由后端明确告知（reattach 响应头 → onArchiveTrim）；
+      // 生产多实例发号正常跳号（seq 9 / 锚点 5）本身不是证据。
       handlers.onFrame?.({ type: 'delta', runId: 'run-gap', seq: 9, text: '后半段' } as SseFrame)
+      handlers.onArchiveTrim?.({ fromSeq: 6, toSeq: 8 })
       return new Promise(() => {})
     })
 

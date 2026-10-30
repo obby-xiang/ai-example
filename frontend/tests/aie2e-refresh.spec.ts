@@ -334,7 +334,7 @@ describe('R-12（P0）：刷新后存在在途轮 ⇒ 停止入口可用', () =>
 
     await store.stop()
 
-    expect(api.cancel).toHaveBeenCalledWith('run-12')
+    expect(api.cancel.mock.calls.map((call) => call[0])).toContain('run-12')
     expect(store.loading).toBe(false) // 输入框随即可用
     expect(store.suspended).toBe(false)
     expect(store.stopping).toBe(false)
