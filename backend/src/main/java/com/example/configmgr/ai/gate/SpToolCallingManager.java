@@ -389,6 +389,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.contextRefresher = refresher;
 	}
 
+	/**
+	 * confirm_step 的后置条件兜底（数据正确性）：缺失 = 不兜底（轻装配面 / 既有单测行为不变）。
+	 *
+	 * <p>只在单条 {@code confirm_step} 批次、且任务真实状态满足"QUERY_COND + 无条件 + 本轮未收集"
+	 * 时挂起可选条件表单；条件已知 / 已到 EXPORT / 已收集过一律不拦。
+	 */
+	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+	/** 可选注入（缺失 = 不做 confirm_step 条件兜底）。 */
+	@Autowired(required = false)
+	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
+		this.conditionsForm = form;
+	}
+
 	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
 			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -688,6 +702,21 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// AR-10 第 3 条：武装后拦下的批次计数随快照落库 —— park 恢复后继续累计，
 			// 到顶仍按既有上界收尾（`MAX_ARMED_BATCHES` 的输入不因挂起而清零）。
 			this.store.markTurnBudget(runId, 0L, skipped);
+		}
+
+		// ===== confirm_step 的后置条件兜底（数据正确性）=====
+		// 模型可能跳过条件收集，直接 confirm_step（QUERY_COND→EXPORT）按全量执行。这里在
+		// <b>交给前端之前</b>按任务真实条件状态拦一次：条件未设置且本轮未收集 ⇒ 挂一张可选条件
+		// 表单，任务仍停 QUERY_COND；留空回灌后才允许下一次推进。只处理单条 confirm_step 批次
+		// （多工具批次保持既有语义，不做历史裁剪）。条件已知 / 已到 EXPORT / 已收集过 → 不拦。
+		if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null && pendings.size() == 1
+				&& this.toolRegistry.matchesContext(pendings.get(0).getName(), context)) {
+			checkCancelled(runId);
+			if (this.conditionsForm.parkIfConfirmStepAdvance(runId, context, pendings.get(0),
+					prompt.getInstructions())) {
+				throw new RunParkedException(runId, pendings.get(0).getToolCallId(),
+						PendingToolCall.KIND_FRONTEND);
+			}
 		}
 
 		// ===== F5：确认门之前先跑只读预检（不通过者根本不进门） =====
