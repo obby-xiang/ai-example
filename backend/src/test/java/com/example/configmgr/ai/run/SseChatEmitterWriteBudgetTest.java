@@ -235,10 +235,14 @@ class SseChatEmitterWriteBudgetTest {
 	 * 也可能来自另一条通道（写池由 AI 通道与任务通道共用）。本用例的断言口径因此是
 	 * 「<b>最后无法获得写线程者</b>」，不是「只摘慢订阅者」—— 代价是一次重挂，不是丢帧（帧都在归档里）。
 	 *
-	 * <p>本用例把上限压到 1（生产 = 256，形状相同）：
+	 * <p>本用例把上限压到 1（生产 = 256，形状相同）。两段<b>分时</b>执行，把"谁先抢到写线程"变成
+	 * 可判定（同一帧里两条订阅者同时提交时，先后取决于两个投递线程的抢跑与工作线程回队的窄窗 ——
+	 * CI 实证：慢订阅者反而先被判饱和，{@code awaitFirstSend} 恒 false）：
 	 * <ol>
-	 * <li>慢订阅者的首帧写出卡住唯一的写线程（直到释放）；</li>
-	 * <li>健康订阅者的写出提交被拒 ⇒ {@code SATURATED} ⇒ 它被摘除，且<b>调用线程不等超时</b>；</li>
+	 * <li>先只挂慢订阅者并发帧：唯一的写线程<b>必然</b>被它的首帧写出占住（阻塞到 {@code release}）；</li>
+	 * <li>慢订阅者按预算被判写超时并摘除（写线程仍卡在那次 {@code send} 里）；</li>
+	 * <li>再挂健康订阅者并发帧：它挤不进唯一的写线程 ⇒ {@code SATURATED} ⇒ 被摘除，且
+	 * <b>调用线程不等超时</b>、该帧一字节都没写出；</li>
 	 * <li>写线程数始终 ≤ 1（旧池在这里会再开一条线程、把帧发出去 —— 也就是"无界线程"）。</li>
 	 * </ol>
 	 */
@@ -257,22 +261,24 @@ class SseChatEmitterWriteBudgetTest {
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
 					SseWriteBudget.on(singleWriter, 300L));
 			MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
-			FrameWire healthy = FrameWire.attachTo(out);
+			// ① 只挂慢订阅者：没有竞争者 ⇒ 唯一的写线程必然被它的首帧写出占住（顺序可判定）
 			out.attach(slow.emitter());
 
 			long saturationsBefore = SseWriteBudget.saturations();
 			out.delta("占住唯一的写线程");
-			assertThat(slow.awaitFirstSend(5L)).as("慢订阅者的写出卡在唯一的写线程上").isTrue();
+			assertThat(slow.awaitFirstSend(5L)).as("慢订阅者的写出先进入唯一的写线程并卡住").isTrue();
+			assertThat(awaitSubscriberCount(out, 0, 5L)).as("写超时先摘慢订阅者（写线程仍卡在那次写出里）").isTrue();
 
+			// ② 再挂健康订阅者并发帧：写线程此刻确定被 slow.send 占着（真实阻塞写忽略中断、等 release）
+			//    ⇒ 健康订阅者的提交必然被拒（SATURATED），这一帧一字节都没写出。
+			FrameWire healthy = FrameWire.attachTo(out);
 			out.delta("健康订阅者的帧");
-			assertThat(awaitSubscriberCount(out, 0, 5L)).as("两条订阅者最终都离开订阅表（超时 + 饱和各摘一条）")
-				.isTrue();
+			assertThat(awaitSubscriberCount(out, 0, 5L)).as("健康订阅者抢不到写线程 ⇒ 饱和摘除").isTrue();
 			assertThat(SseWriteBudget.saturations()).as("饱和计数 +1（与写超时分开可观测）")
 				.isGreaterThan(saturationsBefore);
 			assertThat(FrameWire.normalize(healthy.frames())).as("饱和的那一帧没有写出（改由前端带 lastSeq 重挂补回）")
-				.extracting(frame -> frame.get("type"))
-				.containsExactly("delta");
-			assertThat(healthy.size()).as("健康订阅者只收到饱和之前的那一帧").isEqualTo(1);
+				.isEmpty();
+			assertThat(healthy.size()).as("健康订阅者一帧都没拿到（它唯一的写出就被饱和摘除）").isZero();
 			assertThat(singleWriter.getPoolSize()).as("写线程数不超过硬上限（不再无界扩线程）").isLessThanOrEqualTo(1);
 
 			slow.release();

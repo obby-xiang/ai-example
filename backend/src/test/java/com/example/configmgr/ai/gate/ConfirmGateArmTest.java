@@ -7,6 +7,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -210,18 +211,21 @@ class ConfirmGateArmTest {
         field.setAccessible(true);
         @SuppressWarnings("unchecked")
         Map<String, AtomicInteger> retries = (Map<String, AtomicInteger>) field.get(this.gate);
-        retries.put(RUN_ID, new AtomicInteger(3));
+        // 表键是 {@code LocalRunKey.of(runId)}（身份 + runId 的 hash tag），不是裸 runId ——
+        // 用裸键注入，清理删的是带身份 tag 的那一格，注入的那格永远留下（假红）。
+        String retryKey = LocalRunKey.of(RUN_ID);
+        retries.put(retryKey, new AtomicInteger(3));
 
         this.gate.arm(RUN_ID, List.of(TOOL_CALL_ID));
         this.gate.clearRunState(RUN_ID);
 
-        assertThat(retries).as("终态清理释放派发重试计数").doesNotContainKey(RUN_ID);
+        assertThat(retries).as("终态清理释放派发重试计数").doesNotContainKey(retryKey);
         assertThat(this.gate.hasActiveLatch(RUN_ID)).as("只清计数：等待中的闸门不受影响").isTrue();
 
         // 幂等 + null 安全
         this.gate.clearRunState(RUN_ID);
         this.gate.clearRunState(null);
-        assertThat(retries).doesNotContainKey(RUN_ID);
+        assertThat(retries).doesNotContainKey(retryKey);
         this.gate.disarm(RUN_ID, List.of(TOOL_CALL_ID));
     }
 

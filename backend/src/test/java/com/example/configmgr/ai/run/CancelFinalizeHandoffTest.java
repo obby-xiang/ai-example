@@ -8,6 +8,7 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -347,14 +348,17 @@ class CancelFinalizeHandoffTest {
 		Map<String, Boolean> resuming = (Map<String, Boolean>) ReflectionTestUtils.getField(this.resumeService,
 				"resuming");
 		assertThat(resuming).isNotNull();
-		resuming.put(RUN_ID, Boolean.TRUE);
+		// 表键是 {@code LocalRunKey.of(runId)}（身份 + runId 的 hash tag），不是裸 runId ——
+		// 用裸键占用，`cancelConfirmed` 的 putIfAbsent 撞不到，互斥形同不存在（假红）。
+		String resumeKey = LocalRunKey.of(RUN_ID);
+		resuming.put(resumeKey, Boolean.TRUE);
 		try {
 			assertThat(this.resumeService.cancelConfirmed(RUN_ID))
 				.as("同进程已有执行体在推进这一轮 ⇒ 本拍不并发")
 				.isEqualTo(ResumeService.CancelFinalize.IN_PROGRESS);
 		}
 		finally {
-			resuming.remove(RUN_ID);
+			resuming.remove(resumeKey);
 		}
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
 		assertThat(archivedTypes()).isEmpty();
