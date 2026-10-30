@@ -1982,10 +1982,15 @@ const SESSION_ID_UNAVAILABLE = 'SESSION_ID_UNAVAILABLE'
 /** 撞号重试上限：每次请求都会自然落到新毫秒，3 次足够；用尽即判失败，不无限重试。 */
 const SESSION_ID_MAX_ATTEMPTS = 3
 
-/** 会话号的文本判据：十进制正整数（不按位数、不要求雪花号）。 */
+/** 后端发号值域上限（Java `Long.MAX_VALUE`）：判据是十进制正整数且不溢出 long，与位数无关。 */
+const SESSION_ID_LONG_MAX = 9223372036854775807n
+
+/** 会话号的文本判据：十进制正整数、不超过 `Long.MAX_VALUE`（不按位数、不要求雪花号）。 */
 function assertSessionIdText(raw, label) {
   check(/^\d+$/.test(raw), `sessionIdText（${label}）不是十进制字符串：${JSON.stringify(raw)}`)
-  check(BigInt(raw) > 0n, `sessionIdText（${label}）不是正整数：${raw}`)
+  const value = BigInt(raw)
+  check(value > 0n, `sessionIdText（${label}）不是正整数：${raw}`)
+  check(value <= SESSION_ID_LONG_MAX, `sessionIdText（${label}）超出 long 上限：${raw}`)
   return raw
 }
 
@@ -1995,8 +2000,9 @@ function isSessionIdCollision(record, body) {
 }
 
 /**
- * 数值字段 `sessionId` 只为存量兼容：可安全表示时必须与权威文本同值；
- * 超安全整数时 JSON number 本就会静默变值，那种情况只认文本（这正是两字段并存的原因）。
+ * 数值字段 `sessionId` 只为存量兼容，**不是**权威值（权威值是 `sessionIdText`）：
+ * 存在且可安全表示（`Number.isSafeInteger`）时才要求与文本同值；缺失或超安全整数都不算错，
+ * 后者 JSON number 本就静默变值，只能以文本为准。
  */
 function assertSessionIdEcho(body, sessionIdText, label) {
   check(
@@ -2004,7 +2010,7 @@ function assertSessionIdEcho(body, sessionIdText, label) {
     `POST /api/ai/session（${label}）响应体缺 success/data：${JSON.stringify(body)}`
   )
   const numeric = body.data.sessionId
-  check(numeric !== undefined && numeric !== null, `POST /api/ai/session（${label}）响应缺数值字段 sessionId`)
+  if (numeric === undefined || numeric === null) return '文本为权威（响应无数值字段）'
   if (!Number.isSafeInteger(numeric)) return '文本为权威（数值字段超安全整数）'
   checkEq(String(numeric), sessionIdText, `sessionId 数值字段与 sessionIdText 不一致（${label}）`)
   return sessionIdText
@@ -2014,8 +2020,9 @@ function assertSessionIdEcho(body, sessionIdText, label) {
  * 会话号只由后端发（`POST /api/ai/session`）：返回值取 **sessionIdText**（十进制字符串，权威值）。
  *
  * <p>当前契约：`IdGenerator.nextId()` = `System.currentTimeMillis()`，即 13 位毫秒时间戳，
- * 只保证**十进制正整数**，不保证位数、也不再要求超出 `Number.MAX_SAFE_INTEGER`（雪花号已下线）。
- * 号值仍从**原始响应文本**用正则取（不经 `JSON.parse` 的数值字段）；数值字段存在时再断言两者同值。
+ * 只保证**十进制正整数且不超过 `Long.MAX_VALUE`**，不保证位数、也不再要求超出
+ * `Number.MAX_SAFE_INTEGER`（雪花号已下线；将来换回 19 位雪花号也只是更大的合法正整数）。
+ * 号值仍从**原始响应文本**用正则取（不经 `JSON.parse` 的数值字段）；数值字段存在且可安全表示时再断言两者同值。
  *
  * <p>本地 `uniqueId` 不用于会话号：那会绕过"后端发号 + 归属登记"这两件产品保证。
  *
@@ -7199,15 +7206,17 @@ function probeFunctionSource(name) {
 
 /**
  * 会话号契约自证（`newSession`）：发号已从雪花号改为 `System.currentTimeMillis()`，
- * 判据只剩"十进制正整数 + 文本与数值同值 + 撞号 503 有界重试"，不再按位数放行/拦截。
+ * 判据只剩"十进制正整数且 ≤ Long.MAX_VALUE + 数值存在且可安全表示时同值 + 撞号 503 有界重试"，
+ * 不再按位数放行/拦截。
  * 反例都走 `selfExpectThrow`，防止把判据写成"恒真"。
  */
 function selfTestSessionIdContract() {
-  // 正例：13 位毫秒时间戳（当前形态）/ 安全整数边界 / 19 位旧雪花号——都不按位数判。
-  for (const accepted of ['1793328873442', '9007199254740991', '1731234567890123456']) {
+  // 正例：13 位毫秒时间戳（当前形态）/ 安全整数边界 / long 上限 / 19 位雪花号
+  // （雪花号只作"未来发号器换回时字符串保真"的场景，不是当前位数契约）——都不按位数判。
+  for (const accepted of ['1793328873442', '9007199254740991', '9223372036854775807', '1731234567890123456']) {
     checkEq(assertSessionIdText(accepted, 'self'), accepted, `会话号正例 ${accepted}`)
   }
-  for (const rejected of ['', '0', '-1793328873442', '1.5', '12a', ' 1793328873442', 'abc']) {
+  for (const rejected of ['', '0', '-1793328873442', '1.5', '12a', ' 1793328873442', 'abc', '9223372036854775808', '99999999999999999999']) {
     selfExpectThrow(() => assertSessionIdText(rejected, 'self'), `自检：会话号 ${JSON.stringify(rejected)} 必须红`)
   }
 
@@ -7220,9 +7229,16 @@ function selfTestSessionIdContract() {
     () => assertSessionIdEcho({ success: true, data: { sessionId: 1793328873443 } }, '1793328873442', 'self'),
     '自检：数值与文本不一致必须红'
   )
-  selfExpectThrow(
-    () => assertSessionIdEcho({ success: true, data: {} }, '1793328873442', 'self'),
-    '自检：缺数值字段必须红'
+  // 数值字段只是兼容回读，不强制存在：缺失/null 都只以文本为准，不得判红。
+  checkIncludes(
+    assertSessionIdEcho({ success: true, data: {} }, '1793328873442', 'self'),
+    '文本为权威',
+    '缺数值字段时以文本为准'
+  )
+  checkIncludes(
+    assertSessionIdEcho({ success: true, data: { sessionId: null } }, '1793328873442', 'self'),
+    '文本为权威',
+    '数值字段为 null 时以文本为准'
   )
   selfExpectThrow(() => assertSessionIdEcho(null, '1793328873442', 'self'), '自检：响应体缺 data 必须红')
   // 超安全整数时数值字段本就不可信：不算错，只以文本为准（两字段并存的原因）。
@@ -7250,8 +7266,12 @@ function selfTestSessionIdContract() {
   ]) {
     checkIncludes(src, needle, `newSession 缺判据 ${needle}`)
   }
-  check(!/length\s*>=\s*16/.test(src), 'newSession 不得再按位数判会话号')
-  return '7 反例 + 3 正例 + 5 条撞号判定 + 源码契约'
+  check(!/length\s*[<>]=?\s*16/.test(src), 'newSession 不得再按位数判会话号')
+  // 判据函数自身也必须按 long 上限判，而不是位数。
+  const textSrc = probeFunctionSource('assertSessionIdText')
+  checkIncludes(textSrc, 'SESSION_ID_LONG_MAX', 'assertSessionIdText 缺 long 上限判据')
+  check(!/length\s*[<>]=?\s*16/.test(textSrc), 'assertSessionIdText 不得按位数判会话号')
+  return '9 反例 + 4 正例 + 5 条撞号判定 + 源码契约'
 }
 
 /**

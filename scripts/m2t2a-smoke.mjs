@@ -109,10 +109,14 @@ async function identityFingerprint() {
   if (!aiIdentity) aiIdentity = await pageAiIdentity()
   return `${aiIdentity.tenantId}:${aiIdentity.userId}`
 }
+/** 后端发号值域上限（Java `Long.MAX_VALUE`）；判据不按位数，只按十进制正整数 + 不溢出 long。 */
+const SESSION_ID_LONG_MAX = 9223372036854775807n
+
 /**
  * 会话号只由后端发（`POST /api/ai/session`）；取 **sessionIdText**（十进制字符串，权威值）。
- * 禁止读 `sessionId` 数字字段：号值 ≈1.7e18 > `Number.MAX_SAFE_INTEGER`，`JSON.parse` 会静默改值；
+ * 禁止读 `sessionId` 数字字段：超 `Number.MAX_SAFE_INTEGER` 时 `JSON.parse` 会静默改值；
  * 也禁止本地造号（会绕过"多实例/同毫秒唯一 + 归属登记"）。
+ * 判据不按位数：当前发号器 = 13 位毫秒时间戳，将来换回 19 位雪花号同样是合法值。
  */
 async function newAiSession() {
   const res = await fetch(`${API}/api/ai/session`, { method: 'POST', headers: { Accept: 'application/json', ...await aiHeaders() } })
@@ -120,8 +124,16 @@ async function newAiSession() {
   if (!res.ok) throw new Error(`POST /api/ai/session → HTTP ${res.status}：${text.slice(0, 300)}`)
   const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(text)
   if (!matched) throw new Error(`POST /api/ai/session 响应缺权威字段 sessionIdText：${text.slice(0, 300)}`)
-  if (matched[1].length < 16) throw new Error(`sessionIdText=${matched[1]} 未超出 2^53 安全整数范围`)
-  return matched[1]
+  return assertSessionIdText(matched[1], 'POST /api/ai/session')
+}
+
+/** 十进制正整数且不超过 `Long.MAX_VALUE`（不按位数判；非数字/0/负数/超 long 一律拒）。 */
+function assertSessionIdText(raw, label) {
+  if (!/^\d+$/.test(raw)) throw new Error(`sessionIdText（${label}）不是十进制正整数：${JSON.stringify(raw)}`)
+  const value = BigInt(raw)
+  if (value <= 0n) throw new Error(`sessionIdText（${label}）不是正整数：${raw}`)
+  if (value > SESSION_ID_LONG_MAX) throw new Error(`sessionIdText（${label}）超出 long 上限：${raw}`)
+  return raw
 }
 
 // ── R-137（T7/N-6 收编）：合成帧与收敛轮询的集中常量 ──────────────────────────

@@ -56,7 +56,7 @@
 #   与 providers/models/settings 子树）的**每个**请求都由本脚本统一附加 X-Tenant-Id / X-User-Id
 #   （默认身份 tenant=1 / user=101；业务数据与模型配置不加）。会话号一律由后端发
 #   （POST /api/ai/session，取权威字段 sessionIdText 十进制字符串），脚本不再本地造号：
-#   号值 ≈1.7e18 > 2^53，JSON number 会被静默改值。
+#   号超出 2^53 时 JSON number 会被静默改值（当前是 13 位毫秒时间戳，字符串取法同样成立）。
 #   `startup-resume` 的读取与 `POST /scan` 也在数据面内（只处理当前身份的轮次）：它们**必须**带头，
 #   TENANT-AI-1 用"裸请求必须 400 / 带头 2xx"钉住这条边界。
 #   末尾 TENANT-AI-1..4 是租户验收（身份边界 / 发号契约 / 会话归属 / 对话隔离），计入主 PASS/FAIL。
@@ -255,8 +255,8 @@ function Expect-Fail($method, $path, $body, $what) {
 # 返回 `sessionId`(long，仅兼容) + `sessionIdText`(十进制字符串，**权威值**)。脚本不再本地造号
 # （旧实现 `aie2e-<tag>-<guid>`）：多实例/同毫秒唯一性与会话归属（tenantId/userId）只有后端能保证；
 # 本地号还会让"销毁后按归属恢复 / 复制页签取新号"失去语义。
-# 取号必须用 `sessionIdText`：号值 ≈1.7e18 > 2^53，`ConvertFrom-Json` 的 JSON number 在该量级
-# 间隔 256，会**静默**换成另一个号（不报错）—— 故这里从原始响应文本正则取，绝不读 data.sessionId。
+# 取号必须用 `sessionIdText`：号值是十进制字符串，而 `ConvertFrom-Json` 的 JSON number 会丢精度
+# （超出 2^53 时**静默**换成另一个号、不报错）—— 故这里从原始响应文本正则取，绝不把 data.sessionId 当权威值。
 function Get-SessionIdText([string]$json) {
     if (-not $json) { return $null }
     $m = [regex]::Match($json, '"sessionIdText"\s*:\s*"([0-9]+)"')
@@ -264,13 +264,23 @@ function Get-SessionIdText([string]$json) {
     return $m.Groups[1].Value
 }
 
+# 会话号判据：十进制正整数且不超过 long 上限（`[long]::TryParse` 溢出即 false）。
+# **不按位数**：当前发号器 = 13 位毫秒时间戳；将来若换回 19 位雪花号，也只是"更大的正整数"。
+# ">=16 位 / 必须超出 2^53"这类断言会误拒当前 13 位号，故一律不写。
+function Test-SessionIdText([string]$sid) {
+    if ($sid -notmatch '^[0-9]+$') { return $false }
+    $value = [long]0
+    if (-not [long]::TryParse($sid, [ref]$value)) { return $false }
+    return ($value -gt 0)
+}
+
 function Ai-NewSid($tag, $identity = $null) {
     $r = Invoke-Api 'POST' '/api/ai/session' $null $identity
     if (-not $r.ok) { throw "POST /api/ai/session（$tag）=> HTTP $($r.status) $($r.text)" }
     $sid = Get-SessionIdText $r.text
     if (-not $sid) { throw "POST /api/ai/session（$tag）响应缺权威字段 sessionIdText：$($r.text)" }
-    # 契约强度锁：号必须超出 JS 安全整数范围（否则"必须用字符串"没有可观测意义）
-    if ($sid.Length -lt 16) { throw "sessionIdText（$tag）= $sid 只有 $($sid.Length) 位，未超出 2^53 安全整数范围" }
+    # 判据同上：十进制正整数且不溢出 long（不按位数；当前 13 位毫秒时间戳必须放行）
+    if (-not (Test-SessionIdText $sid)) { throw "sessionIdText（$tag）= $sid 不是十进制正整数或超出 long 范围" }
     return $sid
 }
 
@@ -6379,18 +6389,23 @@ try {
     $textA = Get-SessionIdText $issueA.text
     $textB = Get-SessionIdText $issueB.text
     if (-not $textA -or -not $textB) { throw "发号响应缺 sessionIdText（A=$($issueA.text) B=$($issueB.text)）" }
-    if ($textA -notmatch '^[0-9]+$') { throw "sessionIdText 不是纯十进制：$textA" }
-    if ($textA.Length -lt 16 -or $textB.Length -lt 16) {
-        throw "号未超出 2^53 安全整数范围（A=$textA 位数 $($textA.Length)）：sessionIdText 失去意义"
+    if (-not (Test-SessionIdText $textA) -or -not (Test-SessionIdText $textB)) {
+        throw "sessionIdText 不是十进制正整数或超出 long 范围（A=$textA B=$textB）"
     }
     if ($textA -eq $textB) { throw "两个身份取到同一个号 $textA（发号未区分实例/身份）" }
-    # 兼容字段必须在（旧消费方），且不能被脚本当权威值使用
-    if ($issueA.text -notmatch '"sessionId"\s*:\s*[0-9]+') { throw "发号响应缺兼容字段 sessionId（long）：$($issueA.text)" }
-    $rawNumber = [regex]::Match($issueA.text, '"sessionId"\s*:\s*([0-9]+)').Groups[1].Value
-    if ($rawNumber -ne $textA) { throw "sessionId 与 sessionIdText 不是同一个值（$rawNumber vs $textA）" }
+    # 数值字段 sessionId 仅为存量兼容，不是权威值：存在且可安全表示（long 内）时才要求与文本同值；
+    # 缺该字段不算错，超 long 的数值字段无法精确回读，同样只认文本。
+    $numMatch = [regex]::Match($issueA.text, '"sessionId"\s*:\s*(-?[0-9]+)')
+    if ($numMatch.Success) {
+        $numText = $numMatch.Groups[1].Value
+        $numValue = [long]0
+        if ([long]::TryParse($numText, [ref]$numValue) -and $numText -ne $textA) {
+            throw "sessionId 与 sessionIdText 不是同一个值（$numText vs $textA）"
+        }
+    }
     Invoke-Api 'DELETE' "/api/ai/session/$textA" $null $script:identA | Out-Null
     Invoke-Api 'DELETE' "/api/ai/session/$textB" $null $script:identB | Out-Null
-    Ok "TENANT-AI-2 后端发号：sessionIdText 十进制 $($textA.Length) 位（>2^53）、两身份互异、sessionId 兼容字段同值"
+    Ok "TENANT-AI-2 后端发号：sessionIdText 十进制正整数（long 范围内，本次 $($textA.Length) 位）、两身份互异、数值 sessionId 存在且可安全表示时同值"
 } catch { No 'TENANT-AI-2 后端发号契约' $_.Exception.Message }
 
 # ---- TENANT-AI-3：会话归属（跨租户/同租户他人不得销毁我的会话） ----

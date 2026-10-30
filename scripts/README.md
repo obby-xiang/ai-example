@@ -28,7 +28,7 @@
   - 建议启动参数 `--app.job.batch-size=10 --app.job.demo-batch-delay-ms=150`（TC11 断言 `JOB_PROGRESS` 事件流；`batch-size` 为默认 100 时小配置项不会跨分片边界）；
   - 日志级别 `com.example.configmgr=DEBUG`（TC10 与 Q8 的日志类断言依赖它）。
 - **数据面安全**：脚本只创建/删除自己的 `S5B-*` / `AIE2E-*` 任务与 `E2E_TEMP` 定义；`CURRENCY` 演示数据在 TC13 被替换为 3 行，TC19 用全量导出件恢复为 5 行。
-- **租户/用户身份**：AI 对话数据面（`/api/ai` 下除 `health` / `tools` / `tenants` / `startup-resume` 与 `providers` / `models` / `settings` 子树）的每个请求都要带 `X-Tenant-Id` / `X-User-Id`，后端缺头即 400。脚本统一在 HTTP/SSE 帮助函数里附加（默认 tenant=1 / user=101），业务数据与模型配置**不**加；会话号只取后端 `POST /api/ai/session` 的权威字段 `sessionIdText`（十进制字符串，禁止用 JSON number，>2^53 会丢精度）。
+- **租户/用户身份**：AI 对话数据面（`/api/ai` 下除 `health` / `tools` / `tenants` / `startup-resume` 与 `providers` / `models` / `settings` 子树）的每个请求都要带 `X-Tenant-Id` / `X-User-Id`，后端缺头即 400。脚本统一在 HTTP/SSE 帮助函数里附加（默认 tenant=1 / user=101），业务数据与模型配置**不**加；会话号只取后端 `POST /api/ai/session` 的权威字段 `sessionIdText`（十进制正整数、不超过 long 上限，**不按位数**：当前发号器是 13 位毫秒时间戳；禁止用 JSON number，超 2^53 会丢精度）。
 - **批① 88 条（AIE2E-*）**：接口级、桩模式下**零 SKIP**（本节不调用 `Gf-Skip`），末尾 `AIE2E-MANIFEST` 自校验「条数 88 / 逐域分布 / P0-P1-P2=12-50-26」；P0/P1 红 ⇒ `exit 1`，**P2 红只计数不阻塞**（设计稿 §4.2 第 5 项）。用例名单推导链见脚本第 3 节的注释（154 = 88 + 10 nightly + 41 UI + 7 多实例 + 8 收编）。
 
 ### 1.2 参数表
@@ -226,7 +226,7 @@ config 只做"加载期 `??=` 补默认值"（显式 env 永远优先），起�
 
 前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据），并对 `RedisHost:RedisPort` 做连通预检（harness 不自起 Redis，不通即 FAIL）。挂起类用例会在 A 侧自建一个真实 `EXPORT` 任务并 `select-defs`：确认门前的只读预检要求任务存在，chat 也必须带 `context`（否则 `start_export` 不在披露清单里，桩会退化为文本轮）。
 
-**AI 身份与发号（租户任务 5）**：所有 `/api/ai` 对话数据面请求（chat / events / confirm / runs / history / session / pending / frontend-tool-result / cancel）统一带 `X-Tenant-Id` 与 `X-User-Id`（默认 tenant=1 / user=101；业务 `POST /api/tasks`、`select-defs` 不加）；会话号一律 `POST /api/ai/session` 取 `sessionIdText`，脚本不本地造号。
+**AI 身份与发号（租户任务 5）**：所有 `/api/ai` 对话数据面请求（chat / events / confirm / runs / history / session / pending / frontend-tool-result / cancel）统一带 `X-Tenant-Id` 与 `X-User-Id`（默认 tenant=1 / user=101；业务 `POST /api/tasks`、`select-defs` 不加）；会话号一律 `POST /api/ai/session` 取 `sessionIdText`，脚本不本地造号。发号判据只有"十进制正整数且不超过 long 上限"，**不按位数**（当前 13 位毫秒时间戳；"≥16 位 / 必须 >2^53"会误拒它）。
 
 **L-12 / `-SharedDb` 边界**：默认两实例各用独立 H2，跨实例同 `taskId` 时另一侧预检会先失败（任务不存在），走不到资源锁；`instance-kill` 的 B 接管也会因 B 库无任务而被 `ToolTargetResolver` 前置拦截（`blocked/TARGET_INVALID`，不写台账、不执行）——这是设计内形态。`-SharedDb` 把两实例指到同一 H2 文件（`jdbc:h2:file:<绝对路径>/h2/b23l1_shared;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1`），`resource-lock` 才会跑跨实例竞态版，`instance-kill` 才可能走"台账 1 条 executedBy=B"的形态甲。**I-2 竞态重试**：跨实例版的临界区是毫秒级 `createAndStart`，两轮可能不重叠（两轮都执行）——该变体最多跑 **3 轮**（每轮新 task + 两个新 run 同刻发令），任一命中「恰一个 RESOURCE_LOCKED + 恰一个执行 + 台账合计 1 + 作业 1」即 PASS；3 轮全未命中判 **SKIP**（不判 FAIL，行为可能完全正确；跨实例资源互斥证据以 H3 确定性变体为准）。H2 共享不可行（启动不健康）时 harness **直接 FAIL 并点名该边界**，可去掉 `-SharedDb` 改用 H3 预置锁变体。**桩指纹约束**：跨实例变体同一 taskId 的两条消息必须带互异后缀（桩的会话指纹 = 首条 user 消息文本；同 taskId + 同一句话会被判成同一会话，后到者因 `bucket.used` 已占 TC16-EXPORT 退化为文本轮、不弹确认卡）。**守卫**：`-SharedDb` 与 `instance-kill`/`lease-scripts` 同棒会因"杀 A = 杀 H2 AUTO_SERVER 服务端、B 的连接随之断开"而必然半路崩，脚本在起进程前直接 FAIL 要求分两棒跑。`idempotency` 不需要 SharedDb：第二次决策只在 Redis 上读 `ai:decided:`/pending，不触碰任务库。
 

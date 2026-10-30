@@ -143,12 +143,21 @@ function Add-AiIdentityHeaders($req) {
 
 # 会话号只由后端发（POST /api/ai/session）；权威值是 data.sessionIdText（十进制字符串）。
 # 不得本地造号：多实例/同毫秒唯一性与会话归属只有后端能保证；也不得读 JSON number
-# （≈1.7e18 > 2^53，double 会静默改值）—— 故从原始响应文本正则取字符串。
+# （超 2^53 时 double 会静默改值）—— 故从原始响应文本正则取字符串。
 function Get-SessionIdText([string]$json) {
     if (-not $json) { return $null }
     $m = [regex]::Match($json, '"sessionIdText"\s*:\s*"([0-9]+)"')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
+}
+
+# 会话号判据：十进制正整数且不超过 long 上限（`[long]::TryParse` 溢出即 false）。
+# **不按位数**：当前发号器 = 13 位毫秒时间戳；"未超出 2^53 / 不足 16 位"这类断言会误拒它。
+function Test-SessionIdText([string]$sid) {
+    if ($sid -notmatch '^[0-9]+$') { return $false }
+    $value = [long]0
+    if (-not [long]::TryParse($sid, [ref]$value)) { return $false }
+    return ($value -gt 0)
 }
 
 function New-AiSession($base, $tag) {
@@ -160,7 +169,7 @@ function New-AiSession($base, $tag) {
     if (-not $resp.IsSuccessStatusCode) { throw "POST /api/ai/session（$tag）=> HTTP $([int]$resp.StatusCode) $text" }
     $sid = Get-SessionIdText $text
     if (-not $sid) { throw "POST /api/ai/session（$tag）响应缺权威字段 sessionIdText：$text" }
-    if ($sid.Length -lt 16) { throw "sessionIdText（$tag）只有 $($sid.Length) 位，未超出 2^53 安全整数范围" }
+    if (-not (Test-SessionIdText $sid)) { throw "sessionIdText（$tag）= $sid 不是十进制正整数或超出 long 范围" }
     return $sid
 }
 
