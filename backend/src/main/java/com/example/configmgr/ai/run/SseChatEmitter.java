@@ -28,13 +28,17 @@ import java.util.OptionalLong;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 单轮对话的 SSE 帧写出器（S4.2 §3 时序的终端契约）。
@@ -167,6 +171,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * 定时器）。反向窗口（快照非终态、回放已含终帧即收尾）的前提是<b>终帧之后不再追加业务帧</b> ——
  * 该前提在协议侧由"恰好一个 done/error 且它是最后一帧"保证。</li>
  * </ul>
+ *
+ * <h2>F1：非驱动方 attach 连接的本地保活（2026-10-31）</h2>
+ * 驱动在 A、客户端重挂到 B（非粘滞代理下任意实例都可 serve reattach）时，心跳<b>不落档、不发布唤醒</b>
+ * ⇒ A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或上游静默时，B 的 attach 连接一帧都收不到，
+ * 前端 30s 首帧 / 45s 帧间看门狗于是把正常轮次判死。<b>本实例不是该 run 驱动方</b>（{@link #beginDrive()}
+ * 从未在本写出器上调用）时，本类为该写出器起<b>一个</b>本地保活节拍（共享单线程调度器，见
+ * {@link #sharedAttachKeepaliveScheduler()}），发无业务 {@code seq} 的 {@code heartbeat}：
+ * 不入档、不取业务号、不写 {@code ai:beat}/{@code ai:activity}、不发唤醒 —— 归档、序号、有序交付
+ * 与真实驱动路径全部不变。终帧投出（含回放/唤醒补到的终帧）、{@link #complete()}、最后一个订阅者
+ * 离开、或本实例转为驱动方都会停机；节拍体还会自检条件并自我取消（不漏停，也不"每 attach 一个定时器"）。
  *
  * <h2>包②：SSE 写侧超时预算（{@link SseWriteBudget}）</h2>
  * T3-1 解决了"慢订阅者不阻塞整轮"，但没有解决"慢订阅者占住投递池线程" ——
@@ -351,6 +365,51 @@ public class SseChatEmitter {
 	 * 又与业务时间线彻底解耦。
 	 */
 	private final AtomicLong heartbeatSeq = new AtomicLong(0);
+
+	// ── F1：非驱动方 attach 连接的本地保活 ─────────────────────────────────────
+
+	/**
+	 * F1：本地保活节拍（与驱动侧 {@code TurnKeepalive} 的流式心跳同节拍）。
+	 *
+	 * <p>取值：前端首帧看门狗 30s / 帧间 45s（{@code frontend/src/api/sse.ts}），驱动侧心跳 5s。
+	 * 本地保活必须<b>明显早于</b>两条看门狗，又不必比驱动侧更密 —— 取同一个 5s。
+	 */
+	public static final long DEFAULT_ATTACH_KEEPALIVE_INTERVAL_MILLIS = 5_000L;
+
+	/**
+	 * F1：进程级<b>共享</b>保活调度器（单守护线程；未装配时 {@code null}）。
+	 *
+	 * <p>为什么是共享而不是每写出器/每连接一个线程：非驱动方的 attach 连接在长跑实例上可以很多，
+	 * "每条连接一个定时器/线程"就是确定性泄漏。这里只有<b>一个</b>线程，每个写出器最多<b>一个</b>
+	 * 定时任务（{@link #attachKeepaliveFuture}），节拍体只做"序列化 + 入队"（网络写出仍走既有投递池）。
+	 */
+	private static volatile ScheduledExecutorService sharedAttachKeepaliveScheduler;
+
+	/** 装配进来的保活调度器（{@code null} = 不启用本地保活：单测/非 Spring 路径）。 */
+	private volatile ScheduledExecutorService attachKeepaliveScheduler;
+
+	/** 本写出器的保活节拍（毫秒）。 */
+	private volatile long attachKeepaliveIntervalMs = DEFAULT_ATTACH_KEEPALIVE_INTERVAL_MILLIS;
+
+	/** 本写出器当前唯一的保活定时任务（{@code null} = 未运行）。 */
+	private final AtomicReference<ScheduledFuture<?>> attachKeepaliveFuture = new AtomicReference<>();
+
+	/**
+	 * F1：<b>本实例驱动过这一轮</b>（{@link #beginDrive()} 在驱动入口置位）。
+	 *
+	 * <p>这是"本实例不是该 run 驱动方"的本地判据：只有驱动入口会调 {@code beginDrive}，
+	 * 纯 attach/重挂（跨实例落在非驱动方）不会。为真 ⇒ 不启动本地保活（真实驱动路径的
+	 * {@code TurnKeepalive} 已在发心跳，再加一份只会重复）。
+	 */
+	private final AtomicBoolean drivingHere = new AtomicBoolean(false);
+
+	/**
+	 * F1：本轮<b>终帧已经投给订阅者</b>（done/error，含回放与唤醒补帧）。
+	 *
+	 * <p>终帧必须是最后一帧 ⇒ 之后不得再有本地保活；同时它也是保活任务的停机信号
+	 * （非驱动方实例没有 {@code complete()} 调用点，终帧只能从归档/唤醒得知）。
+	 */
+	private final AtomicBoolean terminalFrameSeen = new AtomicBoolean(false);
 
 	/**
 	 * 出帧互斥（S5c-3 / S5c-2）：取号 → 落归档 → 入队必须是一次不可分割的动作。
@@ -648,6 +707,45 @@ public class SseChatEmitter {
 		return metrics;
 	}
 
+	/**
+	 * F1：进程级<b>共享</b>保活调度器（懒建、幂等；单守护线程，进程寿命）。
+	 *
+	 * <p>它只服务"本实例不是该 run 驱动方"的 attach 连接：每写出器最多一个定时任务，
+	 * 且只在有订阅者且未终态期间存在（见 {@link #syncAttachKeepalive()} / {@link #stopAttachKeepalive()}）。
+	 */
+	public static ScheduledExecutorService sharedAttachKeepaliveScheduler() {
+		ScheduledExecutorService scheduler = sharedAttachKeepaliveScheduler;
+		if (scheduler != null) {
+			return scheduler;
+		}
+		synchronized (SseChatEmitter.class) {
+			if (sharedAttachKeepaliveScheduler == null) {
+				sharedAttachKeepaliveScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+					Thread thread = new Thread(runnable, "sse-attach-keepalive");
+					thread.setDaemon(true);
+					return thread;
+				});
+			}
+			return sharedAttachKeepaliveScheduler;
+		}
+	}
+
+	/**
+	 * F1：装配"非驱动方 attach 连接"的本地保活（{@link RunRegistry} 的生产装配调用一次；幂等）。
+	 *
+	 * <p>不传调度器（单测/非 Spring 装配）⇒ 本地保活不启用，行为与修复前逐字一致。
+	 */
+	public void enableAttachKeepalive(ScheduledExecutorService scheduler) {
+		enableAttachKeepalive(scheduler, DEFAULT_ATTACH_KEEPALIVE_INTERVAL_MILLIS);
+	}
+
+	/** 同 {@link #enableAttachKeepalive(ScheduledExecutorService)}，显式节拍（用例把它压到毫秒级）。 */
+	public void enableAttachKeepalive(ScheduledExecutorService scheduler, long intervalMs) {
+		this.attachKeepaliveIntervalMs = Math.max(1L, intervalMs);
+		this.attachKeepaliveScheduler = scheduler;
+		syncAttachKeepalive();
+	}
+
 	public String runId() {
 		return this.runId;
 	}
@@ -687,6 +785,124 @@ public class SseChatEmitter {
 		sub.emitter.onError(ex -> closeSubscription(sub, "生命周期 onError"));
 		// B23L1：本实例的第一个订阅者出现 ⇒ 建立该 run 的唤醒订阅（按连接，不是按实例全量）。
 		syncWakeSubscription();
+		// F1：本实例不是驱动方时，这条 attach 连接在驱动侧静默阶段收不到任何帧 —— 起本地保活。
+		syncAttachKeepalive();
+	}
+
+	/**
+	 * F1：<b>本实例不是该 run 驱动方</b>的 attach 连接，由本实例本地保活（无 {@code seq} 心跳）。
+	 *
+	 * <h2>缺陷形态</h2>
+	 * 驱动在 A、客户端重挂到 B（非粘滞代理下任意实例都可 serve reattach）。心跳<b>不发布唤醒、不入档</b>
+	 * （见 {@code emitInternal} 的心跳分支），于是 A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或
+	 * 上游静默时，B 的 attach 连接<b>一个帧都收不到</b>：回放是空的（A 还没产出新帧），实时帧在 A 上。
+	 * 前端 30s 首帧 / 45s 帧间看门狗因此把正常的一轮判死，重连 4 次后报错。
+	 *
+	 * <h2>本实现的边界（只做保活，不改变任何既有语义）</h2>
+	 * <ul>
+	 * <li><b>本地</b>：只投给本写出器当前的订阅者；不落档、不取业务号、不写 {@code ai:beat}/
+	 * {@code ai:activity}、不发唤醒 —— 归档、序号、有序交付、真实驱动路径全部不变；</li>
+	 * <li><b>无 seq</b>：走既有 {@code heartbeat} 帧形态（独立 {@code heartbeatSeq}，帧类型集不变 16）；
+	 * 入队与业务帧共用 {@code emitLock}，因此"到达顺序 = 入队顺序"不变；</li>
+	 * <li><b>仅非驱动方</b>：{@link #beginDrive()} 置 {@link #drivingHere}；驱动侧由
+	 * {@code TurnKeepalive} 发真实心跳，不再叠加本地保活；</li>
+	 * <li><b>终态/退订即停</b>：终帧投出（{@link #terminalFrameSeen}）、{@link #complete()}、
+	 * 最后一个订阅者离开、或本实例转为驱动方，都取消唯一那个定时任务；</li>
+	 * <li><b>不泄漏</b>：进程级共享调度器单线程；每写出器最多<b>一个</b> {@link ScheduledFuture}，
+	 * 不是"每 attach 一个"。节拍体还会自检条件并自我取消（兜住漏停的路径）。</li>
+	 * </ul>
+	 */
+	private void syncAttachKeepalive() {
+		if (!attachKeepaliveNeeded()) {
+			return;
+		}
+		ScheduledExecutorService scheduler = this.attachKeepaliveScheduler;
+		if (scheduler == null) {
+			return;
+		}
+		if (this.attachKeepaliveFuture.get() != null) {
+			return;
+		}
+		ScheduledFuture<?> scheduled;
+		try {
+			scheduled = scheduler.scheduleAtFixedRate(AiTrace.wrap(this::attachKeepaliveBeat),
+					this.attachKeepaliveIntervalMs, this.attachKeepaliveIntervalMs, TimeUnit.MILLISECONDS);
+		}
+		catch (RejectedExecutionException ex) {
+			// 调度器已关闭（停机/单测提前 shutdown）：保活缺席不影响轮次正确性
+			log.debug("attach 保活定时器未排上 runId={}（调度器已关闭）：{}", this.runId, ex.getMessage());
+			return;
+		}
+		if (!this.attachKeepaliveFuture.compareAndSet(null, scheduled)) {
+			scheduled.cancel(false);
+			return;
+		}
+		if (!attachKeepaliveNeeded()) {
+			// 排上与条件翻转的窄窗（终态/最后一个订阅者已走）：立即收掉，不留空转任务。
+			stopAttachKeepalive();
+		}
+	}
+
+	/** 保活条件：装配了调度器 + 有订阅者 + 非终态 + 本实例不是驱动方。 */
+	private boolean attachKeepaliveNeeded() {
+		return this.attachKeepaliveScheduler != null
+				&& !this.drivingHere.get()
+				&& !this.terminating.get()
+				&& !this.terminalFrameSeen.get()
+				&& !this.subscribers.isEmpty();
+	}
+
+	/** 取消本写出器唯一的保活任务（幂等）。 */
+	private void stopAttachKeepalive() {
+		ScheduledFuture<?> future = this.attachKeepaliveFuture.getAndSet(null);
+		if (future != null) {
+			future.cancel(false);
+		}
+	}
+
+	/** 本写出器当前是否有保活任务在跑（包内可见：用例锚定"一个写出器一个定时器"与停机）。 */
+	boolean attachKeepaliveActive() {
+		return this.attachKeepaliveFuture.get() != null;
+	}
+
+	/**
+	 * F1 保活节拍：一帧本地 {@code heartbeat}（无业务 {@code seq}、不入档、不发唤醒）。
+	 *
+	 * <p>序列化在锁外，<b>入队与终态复核在 {@code emitLock} 内</b>：心跳与业务帧共享同一把出帧锁，
+	 * 因此"终帧之后再入队一帧心跳"的窗口不存在（终帧的落档/入队会先把
+	 * {@link #terminalFrameSeen} 置位，本节拍看到即停）。
+	 */
+	private void attachKeepaliveBeat() {
+		if (!attachKeepaliveNeeded()) {
+			stopAttachKeepalive();
+			return;
+		}
+		Map<String, Object> frame = frame(RunStore.HEARTBEAT_TYPE);
+		frame.put("runId", this.runId);
+		frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
+		final byte[] payload;
+		try {
+			payload = this.objectMapper.writeValueAsBytes(frame);
+		}
+		catch (Exception ex) {
+			log.debug("attach 保活帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
+			return;
+		}
+		try {
+			synchronized (this.emitLock) {
+				if (!attachKeepaliveNeeded()) {
+					return;
+				}
+				// liveSeq = 0 ⇒ 既有心跳扇出分支：不补齐、不推进游标、不发布唤醒。
+				fanOutToSubscribers(payload, 0L);
+			}
+		}
+		finally {
+			flushWakeSyncIfUnlocked();
+		}
+		if (!attachKeepaliveNeeded()) {
+			stopAttachKeepalive();
+		}
 	}
 
 	/**
@@ -717,6 +933,10 @@ public class SseChatEmitter {
 		sub.draining.set(false);
 		// B23L1：本实例最后一个订阅者消失 ⇒ 释放该 run 的唤醒订阅（断连即 unsubscribe）。
 		syncWakeSubscription();
+		// F1：最后一个订阅者离开 ⇒ 停掉本地保活（否则定时器随断开的连接一直空转）。
+		if (this.subscribers.isEmpty()) {
+			stopAttachKeepalive();
+		}
 		// 资源修复批：轮已终态且订阅者排空 ⇒ 通知注册表摘掉本条目（"最后一个离开的人关灯"）。
 		fireRecycleIfTerminal();
 		log.debug("订阅者投递上下文已关闭 runId={} reason={}", this.runId, reason);
@@ -988,6 +1208,10 @@ public class SseChatEmitter {
 		finally {
 			flushWakeSyncIfUnlocked();
 		}
+		if (this.terminalFrameSeen.get()) {
+			// F1：回放已含终帧 ⇒ 本轮不会再有心跳，停本地保活（其余订阅者也不再需要它）。
+			stopAttachKeepalive();
+		}
 		// I-2（评审）：退订/重挂交错 —— 旧连接的退订可能把这期间建立的唤醒订阅撤掉，
 		// 于是"回放读之后、唤醒重新登记之前"落档的那一帧没有接收者。顺序很关键：
 		// ①先按<b>当前</b>订阅表把唤醒订阅收敛回来（applyWakeSync，锁外，幂等）；
@@ -1101,6 +1325,11 @@ public class SseChatEmitter {
 	 * 跨实例并发下"终帧恰好一条"仍需要原子终帧位（与 fence 同事务的条件写），本批<b>未做</b>。
 	 */
 	public void beginDrive() {
+		// F1：本实例成为这一轮的驱动方 ⇒ 真实心跳由 TurnKeepalive 发；停掉（并禁止再起）本地保活。
+		// 同时复位终帧标记：同一 runId 会被驱动多次（retry-model-step），上一次驱动的 done/error 不代表本次。
+		this.drivingHere.set(true);
+		this.terminalFrameSeen.set(false);
+		stopAttachKeepalive();
 		long floor = -1L;
 		if (this.frames != null) {
 			try {
@@ -1301,6 +1530,8 @@ public class SseChatEmitter {
 			String type = String.valueOf(frame.get("type"));
 			if ("done".equals(type) || "error".equals(type)) {
 				terminalFrame = true;
+				// F1：归档里已有终帧 ⇒ 本轮不会再有心跳（本地保活据此停机；调用方持 emitLock）。
+				this.terminalFrameSeen.set(true);
 			}
 			Object seqValue = frame.get("seq");
 			if (seqValue instanceof Number number && number.longValue() > maxReadSeq) {
@@ -2040,6 +2271,8 @@ public class SseChatEmitter {
 					sub.queue.add(new QueuedFrame(payload, false));
 					targets.add(sub);
 				}
+				// F1：合成终帧也是本连接的终点 ⇒ 本地保活此后不得再入队。
+				this.terminalFrameSeen.set(true);
 			}
 		}
 		finally {
@@ -2049,6 +2282,10 @@ public class SseChatEmitter {
 		// synchronized，持锁调用会把出帧线程一起拖住）。
 		for (Subscription sub : targets) {
 			completeWhenDrained(sub);
+		}
+		if (this.terminalFrameSeen.get()) {
+			// F1：合成终帧已投出 ⇒ 停本地保活。
+			stopAttachKeepalive();
 		}
 		log.info("续跑降级结局已投递 runId={} subscribers={} code={}", this.runId, targets.size(), code);
 		return targets.size();
@@ -2280,6 +2517,11 @@ public class SseChatEmitter {
 						// 本地扇出按同一游标跳过已交付的号（见 liveSeq <= sub.wakeFloor 分支）。
 						liveSeq = frameSeq;
 						this.lastFanoutSeq.accumulateAndGet(frameSeq, Math::max);
+						if ("done".equals(frameType) || "error".equals(frameType)) {
+							// F1：终帧已落档、即将扇出 ⇒ 本地保活此后不得再入队（否则心跳会排在
+							// 本轮最后一帧之后）。必须在锁内置位：保活节拍同锁复核该标志。
+							this.terminalFrameSeen.set(true);
+						}
 					}
 				}
 				if (!archivedOk) {
@@ -2303,6 +2545,10 @@ public class SseChatEmitter {
 		}
 		if (terminalUnarchived) {
 			closeSubscribersAfterUnarchivedTerminal();
+		}
+		if ("done".equals(frameType) || "error".equals(frameType)) {
+			// F1：终帧之后不再有本地保活（终帧未归档时上面的恢复失败链已发合成终帧）。
+			stopAttachKeepalive();
 		}
 		requestWakePublish(wakeSeq);
 	}
@@ -2621,6 +2867,12 @@ public class SseChatEmitter {
 						continue;
 					}
 					long seq = number.longValue();
+					String frameType = String.valueOf(frame.get("type"));
+					if ("done".equals(frameType) || "error".equals(frameType)) {
+						// F1：终帧经唤醒补到本实例 ⇒ 本地保活此后不得再入队（心跳不许排在终帧之后）。
+						// 非驱动方实例没有 complete() 调用点，终帧只能从这里得知。
+						this.terminalFrameSeen.set(true);
+					}
 					final String payload;
 					try {
 						payload = this.objectMapper.writeValueAsString(frame);
@@ -2651,6 +2903,10 @@ public class SseChatEmitter {
 		}
 		finally {
 			flushWakeSyncIfUnlocked();
+		}
+		if (this.terminalFrameSeen.get()) {
+			// F1：终帧已经投出（回放/唤醒两条路径）⇒ 停本地保活。
+			stopAttachKeepalive();
 		}
 	}
 
@@ -3237,6 +3493,9 @@ public class SseChatEmitter {
 	 */
 	public void complete() {
 		this.terminating.set(true);
+		// F1：终态 ⇒ 本地保活立即停（终帧之后不得再有心跳；冷路径上也没有订阅者需要它了）。
+		this.terminalFrameSeen.set(true);
+		stopAttachKeepalive();
 		for (Subscription sub : this.subscribers) {
 			completeWhenDrained(sub);
 		}

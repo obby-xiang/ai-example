@@ -98,6 +98,13 @@
       "reason": "本批仅收敛既有取消、到期与租约判读的多实例可靠性，不新增迁移资产、配置键、帧类型或接口契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:2d8ac8b384e7f5f32eb1b9a66fcdbb2cc47c588b129a2aeaaaac36d2c31a65f5",
+      "status": "not-affected",
+      "reason": "本批仅在非驱动实例的既有attach连接补发无业务seq心跳，不改变迁移接口、归档序号或帧类型契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

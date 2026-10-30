@@ -178,14 +178,7 @@ public class RunRegistry {
 		int maxFrameBytes = this.properties != null ? this.properties.getResultBudget().getUi().getMaxFrameBytes()
 				: AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES;
 		EmitterEntry entry = this.emitters.computeIfAbsent(key, ignored -> new EmitterEntry(runId,
-				this.frames == null
-						? new SseChatEmitter(runId, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
-								this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
-								this.resultLimiter)
-						: new SseChatEmitter(runId, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
-								queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
-								this.resultLimiter),
-				nowMs));
+				newEmitter(runId, queueCapacity, maxFrameBytes), nowMs));
 		// 空闲回收的"活性"口径 = 这一轮在本进程里还有人 {@code of()}（每次出帧/挂订阅都会取用）。
 		entry.touch(nowMs);
 		// 资源修复批：终态回收钩子 —— 轮终态且订阅者排空后，写出器把自己从表里摘掉（幂等；
@@ -195,6 +188,27 @@ public class RunRegistry {
 		// 惰性空闲回收（摊还到 of 上，不额外占线程）：零订阅条目不会永久留在表里。
 		maybeSweep(nowMs);
 		return entry.emitter();
+	}
+
+	/**
+	 * 建一个写出器，并装配装配期的可选能力。
+	 *
+	 * <p><b>F1</b>：只有生产装配（{@code properties != null}）才启用"非驱动方 attach 连接"的本地保活；
+	 * 非 Spring/单测路径显式传 {@code null} properties，行为与修复前逐字一致（不起定时器）。
+	 * 保活调度器由 {@link SseChatEmitter#sharedAttachKeepaliveScheduler()} 提供（进程级单守护线程）。
+	 */
+	private SseChatEmitter newEmitter(String runId, int queueCapacity, int maxFrameBytes) {
+		SseChatEmitter emitter = this.frames == null
+				? new SseChatEmitter(runId, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
+						this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
+						this.resultLimiter)
+				: new SseChatEmitter(runId, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
+						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
+						this.resultLimiter);
+		if (this.properties != null) {
+			emitter.enableAttachKeepalive(SseChatEmitter.sharedAttachKeepaliveScheduler());
+		}
+		return emitter;
 	}
 
 	/** 只在已有写出器时返回（避免"查一下"就凭空造出一个）。 */
