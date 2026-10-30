@@ -8,11 +8,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,6 +97,95 @@ class SseChatEmitterIdentityTest {
 		}
 		finally {
 			deliveryPool.shutdownNow();
+		}
+	}
+
+	/**
+	 * 窄窗身份竞态：首次解析还在读记录时，并发调用方<b>不得</b>返回"尚未落定"的 {@code null}。
+	 *
+	 * <p>旧实现的 {@code identityProbed.compareAndSet} 失败方直接 {@code return this.deliveryIdentity}：
+	 * 首次解析者（CAS 成功）此时正阻塞在记录读取里、还没写回结果，失败方于是拿到 {@code null} ——
+	 * 首批帧/seq/events 会按 legacy 键落档，与本轮记录身份分叉。这里把 CAS 之后的读取窗口
+	 * 用闸门固定住：线程 A 进入 {@code store.get} 并阻塞，线程 B 在此窗口内调用同一方法。
+	 * <p>断言：B 在 A 落定之前不得返回；A、B 拿到同一个已完成的解析结果，且只解析了一次。
+	 */
+	@Test
+	void concurrentCallerWaitsForTheFirstResolutionInsteadOfSeeingAnUnsettledNull() throws Exception {
+		seedRun();
+		CountDownLatch resolutionEntered = new CountDownLatch(1);
+		CountDownLatch releaseResolution = new CountDownLatch(1);
+		AtomicInteger reads = new AtomicInteger();
+		RunStore blockingStore = new RunStore(this.fake.redis, this.mapper, this.properties) {
+			@Override
+			public RunSnapshot get(String runId, long tenantId, long userId) {
+				reads.incrementAndGet();
+				resolutionEntered.countDown();
+				try {
+					if (!releaseResolution.await(5, TimeUnit.SECONDS)) {
+						throw new IllegalStateException("测试未放行首次身份解析");
+					}
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+					throw new IllegalStateException("测试被中断", ex);
+				}
+				return super.get(runId, tenantId, userId);
+			}
+		};
+		SseChatEmitter out;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
+				RECORD_IDENTITY.userId())) {
+			out = new SseChatEmitter(RUN_ID, blockingStore, this.mapper, Runnable::run, 256);
+		}
+
+		Method deliveryIdentity = SseChatEmitter.class.getDeclaredMethod("deliveryIdentity");
+		deliveryIdentity.setAccessible(true);
+
+		AtomicReference<TenantUser> first = new AtomicReference<>();
+		AtomicReference<TenantUser> second = new AtomicReference<>();
+		ExecutorService workers = Executors.newFixedThreadPool(2);
+		try {
+			Future<?> firstCall = workers.submit(() -> first.set(resolveIdentity(deliveryIdentity, out)));
+			assertThat(resolutionEntered.await(5, TimeUnit.SECONDS)).as("首次解析应进入记录读取").isTrue();
+
+			CountDownLatch secondStarted = new CountDownLatch(1);
+			CountDownLatch secondDone = new CountDownLatch(1);
+			Future<?> secondCall = workers.submit(() -> {
+				secondStarted.countDown();
+				try {
+					second.set(resolveIdentity(deliveryIdentity, out));
+				}
+				finally {
+					secondDone.countDown();
+				}
+			});
+			assertThat(secondStarted.await(5, TimeUnit.SECONDS)).isTrue();
+			boolean returnedBeforeResolutionCompleted = secondDone.await(500, TimeUnit.MILLISECONDS);
+			assertThat(returnedBeforeResolutionCompleted ? second.get() : RECORD_IDENTITY)
+				.as("首次解析落定之前，并发调用方不得返回（旧实现返回尚未写回的 null）")
+				.isEqualTo(RECORD_IDENTITY);
+
+			releaseResolution.countDown();
+			assertThat(secondDone.await(5, TimeUnit.SECONDS)).as("并发调用方应在首次解析落定后返回").isTrue();
+			firstCall.get(5, TimeUnit.SECONDS);
+			secondCall.get(5, TimeUnit.SECONDS);
+
+			assertThat(first.get()).as("首次解析结果 = 记录身份").isEqualTo(RECORD_IDENTITY);
+			assertThat(second.get()).as("并发调用方必须拿到同一次已完成的解析结果").isEqualTo(RECORD_IDENTITY);
+			assertThat(reads.get()).as("身份只解析一次").isEqualTo(1);
+		}
+		finally {
+			releaseResolution.countDown();
+			workers.shutdownNow();
+		}
+	}
+
+	private static TenantUser resolveIdentity(Method deliveryIdentity, SseChatEmitter out) {
+		try {
+			return (TenantUser) deliveryIdentity.invoke(out);
+		}
+		catch (ReflectiveOperationException ex) {
+			throw new IllegalStateException("调用 deliveryIdentity 失败", ex);
 		}
 	}
 

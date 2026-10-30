@@ -245,8 +245,21 @@ public class SseChatEmitter {
 	/** 构造线程的当前身份（只用于"按身份拼键去读记录"，不作权威身份）。 */
 	private final TenantUser requestIdentityHint;
 
-	/** 快照身份只探测一次（记录一旦有身份就不会再变；首轮在快照建立前出的帧由提示身份兜底）。 */
-	private final AtomicBoolean identityProbed = new AtomicBoolean();
+	/**
+	 * 首次解析的落定锁：并发调用方必须共享<b>同一次</b>已完成的解析结果。
+	 *
+	 * <p>"CAS 抢首次、失败方直接读字段"的写法有窄窗竞态：首次解析者还阻塞在记录读取里、
+	 * 尚未把结果写回时，失败方会拿到<b>尚未落定</b>的 {@code null}，首批帧/seq/events 因此
+	 * 按 legacy 键落档，与本轮记录身份分叉。解析整段在锁内完成，落定前其他调用方在锁上等待。
+	 */
+	private final Object identityLock = new Object();
+
+	/**
+	 * 首次解析是否已落定（只表示"解析完成"，落定值可以是 {@code null}）。
+	 *
+	 * <p>只在 {@link #identityLock} 内读写 —— 没有它就无法区分"还没解析"与"解析结果就是无身份"。
+	 */
+	private boolean identityResolved;
 
 	/**
 	 * 包②：单帧写出的<b>超时预算</b>（{@link SseWriteBudget}）。
@@ -2371,36 +2384,44 @@ public class SseChatEmitter {
 	 * <li>记录存在但无归属（0/0）或读不出来 ⇒ {@code null}：不 adopt、不回落线程身份。</li>
 	 * </ol>
 	 * 解析失败不改变投递行为：返回 {@code null} 即"没有身份可恢复"，绝不回落到默认租户。
+	 *
+	 * <p><b>并发契约</b>：首次解析在 {@link #identityLock} 内完成，落定之后才写回
+	 * {@link #deliveryIdentity}；落定前并发的调用方在锁上等待，因此要么直接读到已落定的值，
+	 * 要么等到同一次解析完成 —— <b>不存在</b>"返回尚未落定的 {@code null}"的窗口，也不会重复读记录。
+	 * 最终无身份（记录 0/0、记录不存在且无提示、读失败）时所有调用方拿到同一个 {@code null}。
 	 */
 	private TenantUser deliveryIdentity() {
 		TenantUser known = this.deliveryIdentity;
 		if (known != null) {
 			return known;
 		}
-		if (!this.identityProbed.compareAndSet(false, true)) {
-			return this.deliveryIdentity;
-		}
-		TenantUser hint = this.requestIdentityHint;
-		TenantUser resolved = null;
-		if (this.store != null && hint != null) {
-			try {
-				RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
-				if (snapshot != null) {
-					resolved = RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
-							? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+		synchronized (this.identityLock) {
+			if (this.identityResolved) {
+				return this.deliveryIdentity;
+			}
+			TenantUser hint = this.requestIdentityHint;
+			TenantUser resolved = null;
+			if (this.store != null && hint != null) {
+				try {
+					RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
+					if (snapshot != null) {
+						resolved = RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
+								? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
+					}
+					else {
+						// 记录还没建：首轮的帧写在"即将创建这一轮"的身份下（提示 = 请求身份，不是覆盖记录）
+						resolved = hint;
+					}
 				}
-				else {
-					// 记录还没建：首轮的帧写在"即将创建这一轮"的身份下（提示 = 请求身份，不是覆盖记录）
-					resolved = hint;
+				catch (RuntimeException ex) {
+					log.debug("SSE 投递身份读取失败（按无身份投递，不伪造默认租户）runId={}：{}", this.runId,
+							ex.getMessage());
 				}
 			}
-			catch (RuntimeException ex) {
-				log.debug("SSE 投递身份读取失败（按无身份投递，不伪造默认租户）runId={}：{}", this.runId,
-						ex.getMessage());
-			}
+			this.deliveryIdentity = resolved;
+			this.identityResolved = true;
+			return resolved;
 		}
-		this.deliveryIdentity = resolved;
-		return resolved;
 	}
 
 	/**
