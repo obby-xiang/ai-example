@@ -224,6 +224,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private static final Map<Integer, ExecutorService> TOOL_TIMEOUT_EXECUTORS = new ConcurrentHashMap<>();
 
+	/**
+	 * 没有可依的记录身份时<b>不建立</b>作用域：沿用调用线程身份（正常请求路径就是这样，行为不变）。
+	 *
+	 * <p>刻意不用 {@link RunIdentityScope#denied()}：那是"这条记录没有身份"的显式语义（会清空线程
+	 * 身份），而这里只是"没有记录可读"—— 首次读仍需按调用线程身份走既有路径。
+	 */
+	private static final RunIdentityScope.Scope NO_RECORD_SCOPE = () -> {
+	};
+
 	/** 配置容量（{@code app.ai.suspend.pool-size}），非法值回落缺省 20。 */
 	private static int toolTimeoutThreads(AiProperties properties) {
 		int configured = properties == null ? 0 : properties.getSuspend().getPoolSize();
@@ -469,7 +478,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 			if (runId == null) {
 				return delegated;
 			}
-			RunSnapshot snapshot = this.store.get(runId);
+			// 与执行点同一顺序红线：这次重算跑在官方上游线程（boundedElastic）上 —— 那里没有请求身份，
+			// 池化线程上还可能残留别人的身份。先按本轮可信执行信封的<b>记录身份</b>开作用域再读快照：
+			// 否则无身份线程只读 legacy 键、拿不到快照 ⇒ 回落冻结集合（navigate_to 之后新披露的工具在
+			// 下一跳永不出现）；残留身份则会读到别人的同名 runId 快照，把披露面换成别人的上下文。
+			RunSnapshot snapshot;
+			try (RunIdentityScope.Scope ignored = recordIdentityScope(
+					ToolExecutionEnvelope.fromToolContext(chatOptions.getToolContext()), runId)) {
+				snapshot = this.store.get(runId);
+			}
 			if (snapshot == null) {
 				return delegated;
 			}
@@ -604,14 +621,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 
 		String runId = runIdOf(prompt);
-		RunSnapshot snapshot = runId == null ? null : this.store.get(runId);
 		// 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
 		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt));
-		if (runId == null || snapshot == null) {
-			// ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
-			snapshot = recoverSnapshot(envelope, runId);
-			if (snapshot != null) {
-				runId = snapshot.getRunId();
+		// ===== 记录身份必须先于首次读 =====
+		// 官方工具线程（Reactor 上游线程）没有请求身份，而快照/待决/帧的键都由<b>记录身份</b>拼出。
+		// 旧顺序（先 store.get 再开作用域）在这种线程上只会命中 legacy 键：已存在的身份快照被当成
+		// "缺失"，恢复的写后复核同样读 legacy 键 ⇒ 判成"未落库" ⇒ 前端工具被当成不可恢复而拒绝。
+		// 快照存在时也必须在记录身份下读 —— 池化线程上残留的他人身份会让首次读命中<b>别人的</b>
+		// 同名轮次（串轮）。
+		RunSnapshot snapshot;
+		try (RunIdentityScope.Scope ignored = recordIdentityScope(envelope, runId)) {
+			snapshot = runId == null ? null : this.store.get(runId);
+			if (runId == null || snapshot == null) {
+				// ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
+				snapshot = recoverSnapshot(envelope, runId);
+				if (snapshot != null) {
+					runId = snapshot.getRunId();
+				}
 			}
 		}
 		// 官方工具线程（Reactor 上游线程）没有请求身份：按记录（快照 → 信封）恢复。
@@ -3118,8 +3144,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * </ul>
 	 *
 	 * <p>恢复即落库（挂起与续跑都读 {@code ai:run:<runId>}）；落库前再读一次，若并发中已出现快照则直接
-	 * 用那一份，避免用较旧的信封覆盖更新的状态。落库复读成功后、任何后续帧之前抬号并复读校验
-	 * （抬不上去 ⇒ {@code null}，不发出会重号的帧）。任一环节失败 ⇒ {@code null}（调用方失败关闭）。
+	 * 用那一份，避免用较旧的信封覆盖更新的状态。重建写入走<b>条件创建</b>
+	 * （{@link RunStore#createIfAbsent}：存在性判定与写在同一原子步），于是"读无 → 写"之间冒出来的
+	 * 并发创建者不会被覆盖 —— 条件创建返回 {@code false} 时改读并发那一份。落库复读成功后、任何后续帧
+	 * 之前抬号并复读校验（抬不上去 ⇒ {@code null}，不发出会重号的帧）。任一环节失败 ⇒ {@code null}
+	 * （调用方失败关闭）。
+	 *
+	 * <h2>身份锚点 = 记录身份（不读线程身份）</h2>
+	 * 本方法可能跑在<b>没有请求身份</b>的官方上游线程上（也可能跑在残留了他人身份的池化线程上），
+	 * 而快照/序号键由记录身份拼出。因此这里先按信封身份开作用域，再把并发读、落库、写后复核、
+	 * 抬号统统放在它里面；并发读与写后复核另用<b>显式身份读口</b>（{@link #readRecordSnapshot}），
+	 * 使"有没有活快照"的判据不依赖当前线程恰巧是谁。旧实现用线程身份读：无身份线程只命中 legacy
+	 * 键 ⇒ 活快照被当成缺失 ⇒ 信封快照<b>覆盖</b>活快照（{@code messageJson} 丢失、
+	 * {@code round}/{@code toolSteps} 回拨），写后复核又读不回来 ⇒ 整轮按不可恢复失败关闭。
 	 *
 	 * @return 可用于本轮执行的快照；{@code null} = 信封缺失/不可信/恢复失败
 	 */
@@ -3133,42 +3170,91 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return null;
 		}
 		RunSnapshot restored = envelope.toSnapshot();
-		try {
-			RunSnapshot concurrent = this.store.get(restored.getRunId());
-			if (concurrent != null) {
-				return concurrent;
+		// 0/0 旧信封 ⇒ 显式无身份作用域：只认 legacy 键，不伪造默认租户，也不沿用调用者身份。
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(restored.getTenantId(), restored.getUserId())) {
+			try {
+				RunSnapshot concurrent = readRecordSnapshot(restored);
+				if (concurrent != null) {
+					return concurrent;
+				}
+				// 条件创建（原子）：读与写之间若有并发创建者，这里<b>不会</b>覆盖它 —— 返回 false 后改读
+				// 并发那一份。之前的无条件 save 会把对方刚写下的 messageJson/round/toolSteps 抹成信封旧值。
+				if (!this.store.createIfAbsent(restored)) {
+					RunSnapshot winner = readRecordSnapshot(restored);
+					if (winner == null) {
+						log.warn("凭执行信封恢复未落库 runId={}（无写权限/丢租/条件创建被拒）："
+								+ "按失败关闭，危险/前端工具不得直执行", restored.getRunId());
+						return null;
+					}
+					log.warn("凭执行信封恢复时已有并发创建的快照 runId={}（采用并发那一份，未覆盖）",
+							restored.getRunId());
+					return winner;
+				}
+				// 写后复核（刚创建成功理应可读；身份/设施异常时仍按失败关闭）。
+				if (readRecordSnapshot(restored) == null) {
+					log.warn("凭执行信封恢复未落库 runId={}（无写权限/丢租）：按失败关闭，危险/前端工具不得直执行",
+							restored.getRunId());
+					return null;
+				}
 			}
-			this.store.save(restored);
-			// 写权不在本实例（续跑权已转移/丢失）时 save 只 WARN 不抛 —— 必须复读确认真的落库，
-			// 否则后续 saveSuspended 会以"找不到快照"把整轮打穿；这里宁可判成不可恢复（失败关闭）。
-			if (this.store.get(restored.getRunId()) == null) {
-				log.warn("凭执行信封恢复未落库 runId={}（无写权限/丢租）：按失败关闭，危险/前端工具不得直执行",
-						restored.getRunId());
+			catch (RuntimeException ex) {
+				log.warn("凭执行信封恢复轮次快照失败 runId={}：{}（按失败关闭：危险/前端工具不得直执行）",
+						restored.getRunId(), ex.getMessage());
 				return null;
 			}
+			// 序号下界：ai:run 与 ai:seq/归档可能同时丢失；抬到信封的 seqFloor（只升不降）后，
+			// 下一帧由 max(归档末帧, ai:seq)+1 / INCR ai:seq 得出，必然 > seqFloor，重挂不会丢卡。
+			// 位置在落库复读之后、任何后续帧之前（本方法只在 emit 之前被调用）；键按记录身份拼。
+			this.store.ensureIssuedSeqAtLeast(restored.getRunId(), envelope.seqFloor());
+			if (envelope.seqFloor() > 0L && this.store.lastIssuedSeq(restored.getRunId()) < envelope.seqFloor()) {
+				log.warn("恢复后业务序号下界未生效 runId={} seqFloor={} current={}（按失败关闭：不发出会重号的帧）",
+						restored.getRunId(), envelope.seqFloor(), this.store.lastIssuedSeq(restored.getRunId()));
+				return null;
+			}
+			// 预算口径跨 park/恢复不重置：进程内信标按信封原值重新点亮（armed 与已跳过批次数）。
+			this.beacon.restoreBudgetArmed(restored.getRunId(), envelope.budgetArmedAtMs());
+			this.beacon.restoreBudgetSkippedBatches(restored.getRunId(), envelope.budgetSkippedBatches());
+			log.warn("轮次快照缺失，已凭本实例权威执行信封恢复 runId={} createdAtMs={} round={} steps={} "
+					+ "budgetArmedAtMs={} skipped={} seqFloor={}（seq 已抬到下界，未伪造审批/台账/认领）",
+					restored.getRunId(), restored.getCreatedAtMs(), envelope.round(), envelope.toolSteps(),
+					envelope.budgetArmedAtMs(), envelope.budgetSkippedBatches(), envelope.seqFloor());
+			return restored;
 		}
-		catch (RuntimeException ex) {
-			log.warn("凭执行信封恢复轮次快照失败 runId={}：{}（按失败关闭：危险/前端工具不得直执行）",
-					restored.getRunId(), ex.getMessage());
-			return null;
+	}
+
+	/**
+	 * <b>按记录身份</b>读轮次快照（身份是入参，不是"当前线程碰巧是谁"）。
+	 *
+	 * <p>为什么不能用 {@code store.get(runId)}：那个读口的键由<b>当前线程</b>身份拼出 —— 官方上游线程
+	 * 没有身份时只会命中 legacy 键，于是已存在的身份快照被当成"缺失"（随后恢复写覆盖活快照），
+	 * 写后复核也读不回来（把恢复判成"未落库"）。
+	 *
+	 * <p>记录身份 0/0（本字段引入前的旧信封）⇒ 显式无身份作用域下读 legacy 键：不伪造默认租户，
+	 * 也不沿用池化线程上可能残留的身份。
+	 */
+	private RunSnapshot readRecordSnapshot(RunSnapshot record) {
+		long tenantId = record.getTenantId();
+		long userId = record.getUserId();
+		if (RunIdentityScope.usable(tenantId, userId)) {
+			return this.store.get(record.getRunId(), tenantId, userId);
 		}
-		// 序号下界：ai:run 与 ai:seq/归档可能同时丢失；抬到信封的 seqFloor（只升不降）后，
-		// 下一帧由 max(归档末帧, ai:seq)+1 / INCR ai:seq 得出，必然 > seqFloor，重挂不会丢卡。
-		// 位置在落库复读之后、任何后续帧之前（本方法只在 emit 之前被调用）。
-		this.store.ensureIssuedSeqAtLeast(restored.getRunId(), envelope.seqFloor());
-		if (envelope.seqFloor() > 0L && this.store.lastIssuedSeq(restored.getRunId()) < envelope.seqFloor()) {
-			log.warn("恢复后业务序号下界未生效 runId={} seqFloor={} current={}（按失败关闭：不发出会重号的帧）",
-					restored.getRunId(), envelope.seqFloor(), this.store.lastIssuedSeq(restored.getRunId()));
-			return null;
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+			return this.store.get(record.getRunId());
 		}
-		// 预算口径跨 park/恢复不重置：进程内信标按信封原值重新点亮（armed 与已跳过批次数）。
-		this.beacon.restoreBudgetArmed(restored.getRunId(), envelope.budgetArmedAtMs());
-		this.beacon.restoreBudgetSkippedBatches(restored.getRunId(), envelope.budgetSkippedBatches());
-		log.warn("轮次快照缺失，已凭本实例权威执行信封恢复 runId={} createdAtMs={} round={} steps={} "
-				+ "budgetArmedAtMs={} skipped={} seqFloor={}（seq 已抬到下界，未伪造审批/台账/认领）",
-				restored.getRunId(), restored.getCreatedAtMs(), envelope.round(), envelope.toolSteps(),
-				envelope.budgetArmedAtMs(), envelope.budgetSkippedBatches(), envelope.seqFloor());
-		return restored;
+	}
+
+	/**
+	 * 本轮<b>记录身份</b>的作用域（首次读与恢复都必须在它里面）。
+	 *
+	 * <p>身份只认本实例创建、且 runId 对得上的执行信封（与 {@link #recoverSnapshot} 同一信任边界）。
+	 * 没有可用信封 ⇒ 不建立作用域（{@link #NO_RECORD_SCOPE}）：沿用调用线程身份 —— 正常请求路径
+	 * 就发生在带身份的请求线程上，行为不变。
+	 */
+	private RunIdentityScope.Scope recordIdentityScope(ToolExecutionEnvelope envelope, String runId) {
+		if (envelope == null || !envelope.restorableBy(runId, this.store.instanceId())) {
+			return NO_RECORD_SCOPE;
+		}
+		return RunIdentityScope.open(envelope.tenantId(), envelope.userId());
 	}
 
 	/**

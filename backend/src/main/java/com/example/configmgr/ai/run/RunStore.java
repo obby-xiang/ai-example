@@ -386,6 +386,40 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
+	/**
+	 * <b>仅当快照不存在时创建</b>（无租约分支）：恢复路径的条件写口。
+	 *
+	 * <p>为什么必须是原子步："读到不存在 ⇒ 用执行信封重建"之间若有并发创建者（另一实例刚恢复、
+	 * 或这一轮刚被别处重建），无条件 {@code SET} 会把那份更新的运行事实覆盖掉。存在性判定与写
+	 * 在同一 {@code EVAL} 内：已存在 ⇒ 0（调用方改读并发那一份），不存在 ⇒ 写并返回 1。
+	 */
+	private static final RedisScript<Long> CREATE_IF_ABSENT_SCRIPT = new DefaultRedisScript<>("""
+			-- RUN_CREATE_IF_ABSENT
+			if redis.call('EXISTS', KEYS[1]) == 1 then
+			  return 0
+			end
+			redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+			return 1
+			""", Long.class);
+
+	/**
+	 * 持租分支的<b>仅当不存在时创建</b>：同一原子段内先判存在性，再判 fence（陈旧 epoch 不建），
+	 * 创建成功才把 fence 推到本次 epoch —— fencing 语义与 {@link #FENCED_SET_SCRIPT} 一致。
+	 */
+	private static final RedisScript<Long> FENCED_CREATE_IF_ABSENT_SCRIPT = new DefaultRedisScript<>("""
+			-- RUN_FENCED_CREATE_IF_ABSENT
+			if redis.call('EXISTS', KEYS[1]) == 1 then
+			  return 0
+			end
+			local fence = redis.call('GET', KEYS[2])
+			if fence and tonumber(fence) > tonumber(ARGV[2]) then
+			  return 0
+			end
+			redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+			redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+			return 1
+			""", Long.class);
+
 	/** C1 / Minor3：值匹配才删认领字段（避免误删他人重新认领的值）。 */
 	private static final RedisScript<Long> CLAIM_ROLLBACK_SCRIPT = new DefaultRedisScript<>("""
 			-- CLAIM_ROLLBACK
@@ -958,6 +992,74 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	/**
+	 * <b>仅当该轮快照尚不存在时创建</b>（恢复路径的条件写口；<b>绝不覆盖活快照</b>）。
+	 *
+	 * <h2>为什么需要它</h2>
+	 * 恢复的形态是"读到不存在 ⇒ 用执行信封重建一份"。读与写之间若有并发创建者（另一实例刚恢复，
+	 * 或这一轮刚被别处重建），无条件 {@link #save} 会把那份更新的运行事实覆盖掉 ——
+	 * {@code messageJson} 被清空、{@code round}/{@code toolSteps} 回拨到信封时的旧值。
+	 * 本方法把"存在性判定 + 写"放进<b>同一个原子步</b>（{@link #CREATE_IF_ABSENT_SCRIPT} /
+	 * {@link #FENCED_CREATE_IF_ABSENT_SCRIPT}）：已存在 ⇒ 不写并返回 {@code false}，
+	 * 由调用方改读并发那一份（不得用信封快照覆盖）。
+	 *
+	 * <h2>与 {@link #save} 同一套守卫</h2>
+	 * 身份键由<b>记录身份</b>拼（{@link #openSnapshotWriteScope}：错身份直接拒写，0/0 记录只进 legacy
+	 * 命名空间）；续跑权只读（LOST/UNAVAILABLE）、持租时 fence 陈旧、快照已存在 ⇒ 都不写。
+	 * 创建成功后与 {@link #save} 走同一段联动（session→current 索引 / 会话索引续期）。
+	 *
+	 * @return {@code true} = 本次创建并落库；{@code false} = 已有快照（不覆盖）或无写权限
+	 */
+	public boolean createIfAbsent(RunSnapshot snapshot) {
+		try (RunIdentityScope.Scope ignored = openSnapshotWriteScope(snapshot)) {
+			return createIfAbsentInScope(snapshot);
+		}
+	}
+
+	private boolean createIfAbsentInScope(RunSnapshot snapshot) {
+		snapshot.setUpdatedAtMs(System.currentTimeMillis());
+		String runId = snapshot.getRunId();
+		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
+		if (authority.readOnly()) {
+			warnReadOnly(runId, authority, "轮次快照（条件创建）");
+			return false;
+		}
+		long epoch = heldRunEpoch(runId);
+		if (epoch > 0L) {
+			snapshot.setRunEpoch(epoch);
+		}
+		String json;
+		try {
+			json = this.mapper.writeValueAsString(snapshot);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法序列化轮次快照 " + runId, ex);
+		}
+		Duration ttl = ttlFor(runId);
+		Long created;
+		try {
+			created = epoch > 0L
+					? this.redis.execute(FENCED_CREATE_IF_ABSENT_SCRIPT, List.of(runKey(runId), fenceKey(runId)),
+							json, String.valueOf(epoch), String.valueOf(ttl.toMillis()))
+					: this.redis.execute(CREATE_IF_ABSENT_SCRIPT, List.of(runKey(runId)), json,
+							String.valueOf(ttl.toMillis()));
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+		}
+		if (created == null) {
+			// 生产脚本恒回 0/1；null 只可能来自"脚本没被执行"（替身未建模）。条件语义此时不可判定 ⇒
+			// 按未创建处理：调用方改读并发那一份，读不到就失败关闭（绝不退回无条件写）。
+			log.warn("条件创建轮次快照未得到脚本结果 runId={}（按未创建处理，调用方改读现有快照）", runId);
+			return false;
+		}
+		if (created <= 0L) {
+			return false;
+		}
+		afterSnapshotWrite(snapshot, runId);
+		return true;
+	}
+
+	/**
 	 * 取消优先终态写的<b>可判定变体</b>（失败现场批次2）：与 {@link #save} <b>同一条写路径、同一个
 	 * 原子判据</b>，只是把"这一笔到底有没有落库"如实返回给调用方。
 	 *
@@ -1100,6 +1202,18 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// `/runs/current` 对该轮恒 `found:false`，刷新后前端没有任何"这一轮还在跑"的可发现面
 		// （实证 A/A3/B/C2：整条回答静默消失）。终态照旧清除（取消后不留索引）。
 		// T3-7（A14）：终态分支改调统一判定函数（不再散点比对字面量）。
+		afterSnapshotWrite(snapshot, runId);
+		return true;
+	}
+
+	/**
+	 * 快照写成功后的<b>唯一联动段</b>（{@link #persistInScope} 与 {@link #createIfAbsentInScope} 共用）：
+	 * session → current 轮索引、会话→run 索引续期；终态清索引并释放续跑租约。
+	 *
+	 * <p>刻意抽出来而不是两处各写一遍：这两段联动是"快照落库后该发生什么"的单一事实源，
+	 * 条件创建若漏掉它，"恢复出来的轮"就不会出现在 {@code /runs/current} 上。
+	 */
+	private void afterSnapshotWrite(RunSnapshot snapshot, String runId) {
 		String status = snapshot.getStatus();
 		if (RunSnapshot.SUSPENDED.equals(status) || RunSnapshot.RUNNING.equals(status)) {
 			markSessionCurrent(snapshot.getSessionId(), runId);
@@ -1119,8 +1233,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				log.debug("续期会话→run 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
 			}
 		}
-		return true;
 	}
+
 
 	/**
 	 * 该状态是否走取消优先守卫：<b>一切非取消状态</b>（RUNNING / SUSPENDED / DONE / FAILED，

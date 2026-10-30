@@ -298,6 +298,36 @@ public class InMemoryRunStore extends RunStore {
 		return true;
 	}
 
+	/**
+	 * 条件创建（与真实现 {@code RunStore#createIfAbsent} 同语义）：只有快照键不存在时才写；
+	 * 已存在 ⇒ {@code false} 且<b>不改动</b>现有快照。
+	 *
+	 * <p>为什么替身必须复刻它：它是 {@code SpToolCallingManager#recoverSnapshot} 的恢复写口。不覆写就会
+	 * 落到生产实现（Lua 脚本 + 真实 Redis），而替身的 {@code redis} 为 null ⇒ 恢复被判失败 ——
+	 * 用例看到的"不可恢复"就不再是被测语义。<b>存在性判定与写在同一段代码内</b>（单进程替身即原子）。
+	 */
+	@Override
+	public boolean createIfAbsent(RunSnapshot snapshot) {
+		snapshot.setUpdatedAtMs(System.currentTimeMillis());
+		// 与 save 同一写权限口径：丢租/设施不可确认 ⇒ 不写（这一笔不是创建，也不该有副作用）。
+		if (runLeaseAuthority(snapshot.getRunId()).readOnly()) {
+			return false;
+		}
+		if (this.runs.putIfAbsent(snapshot.getRunId(), snapshot) != null) {
+			return false;
+		}
+		// 与 save 同一联动口径：RUNNING/SUSPENDED 建会话索引、终态清索引并释放租约。
+		String status = snapshot.getStatus();
+		if (RunSnapshot.SUSPENDED.equals(status) || RunSnapshot.RUNNING.equals(status)) {
+			markSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+		}
+		else if (RunSnapshot.isTerminal(status)) {
+			clearSessionCurrent(snapshot.getSessionId(), snapshot.getRunId());
+			releaseRunLease(snapshot.getRunId());
+		}
+		return true;
+	}
+
 	/** 轮内预算 armed 的进程内持久化（AR-10 第 3 条）：直接挂在快照对象上，语义与真实实现一致。 */
 	@Override
 	public void markTurnBudget(String runId, long armedAtMs, int skippedBatches) {
@@ -497,9 +527,28 @@ public class InMemoryRunStore extends RunStore {
 		deleteRun(ref.runId(), ref.tenantId(), ref.userId());
 	}
 
+	/**
+	 * 索引发现面的进程内替身：与真实现同口径按<b>当前身份</b>过滤 —— 有身份只看自己的成员；
+	 * 无身份（系统扫描线程）只看 legacy（{@code 0/0}）成员。
+	 *
+	 * <p>不这样过滤的话，带身份的轮次会同时从 {@code ResumeService.listRuns()} 的复合成员与
+	 * legacy 分支被列出两次 —— 真实现里 legacy 分支读的是旧键形，对带身份的轮次恒为 {@code null}。
+	 */
 	@Override
 	public List<String> allRunIds() {
-		List<String> ids = new ArrayList<>(this.runs.keySet());
+		com.example.configmgr.ai.tenant.TenantUser current =
+				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
+		List<String> ids = new ArrayList<>();
+		for (RunSnapshot snapshot : this.runs.values()) {
+			boolean usable = com.example.configmgr.ai.tenant.RunIdentityScope.usable(snapshot.getTenantId(),
+					snapshot.getUserId());
+			boolean visible = current == null ? !usable
+					: usable && current.tenantId() == snapshot.getTenantId()
+							&& current.userId() == snapshot.getUserId();
+			if (visible) {
+				ids.add(snapshot.getRunId());
+			}
+		}
 		Collections.sort(ids);
 		return ids;
 	}

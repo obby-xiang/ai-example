@@ -100,6 +100,12 @@ public final class FakeLeaseRedis {
 
 	static final String FENCED_TERMINAL_SET_MARK = "FENCED_TERMINAL_SET";
 
+	/** 恢复路径的<b>条件创建</b>（无租约）：仅当快照键不存在时写。 */
+	static final String CREATE_IF_ABSENT_MARK = "RUN_CREATE_IF_ABSENT";
+
+	/** 恢复路径的<b>条件创建</b>（持租）：存在性与 fence 在同一原子步里判。 */
+	static final String FENCED_CREATE_IF_ABSENT_MARK = "RUN_FENCED_CREATE_IF_ABSENT";
+
 	/** 台账 + 幂等索引的同一原子步（B23L1 批③a）。 */
 	static final String IDEM_PUSH_MARK = "IDEM_PUSH";
 
@@ -243,6 +249,22 @@ public final class FakeLeaseRedis {
 	 * 这正是"取号与占用不可分"要证明的东西。
 	 */
 	volatile Runnable beforeAcquire;
+
+	/**
+	 * 快照写脚本<b>执行前</b>的一次性注入点（恢复"读无 → 创建"与并发创建者的交错缝）。
+	 *
+	 * <p>为什么需要：真实竞态是"某实例刚恢复/刚建好这一轮"恰好落在另一个实例的
+	 * {@code 读无} 与 {@code 写} 之间；用例要<b>确定性</b>地把这次并发创建插进快照写脚本之前。
+	 * 它位于 {@code EVAL} 之外 —— 条件创建的"存在性判定 + 写"仍然原子（这正是要证明的东西）。
+	 * 只对快照写类脚本生效（{@link #CREATE_IF_ABSENT_MARK} / {@link #FENCED_CREATE_IF_ABSENT_MARK} /
+	 * {@link #TERMINAL_SET_IF_NOT_CANCELLED_MARK} / {@link #FENCED_TERMINAL_SET_MARK}），取走即置空。
+	 */
+	private volatile Runnable beforeSnapshotWrite;
+
+	/** 装配"快照写之前"的一次性交错缝（见 {@link #beforeSnapshotWrite}）。 */
+	public void beforeSnapshotWrite(Runnable hook) {
+		this.beforeSnapshotWrite = hook;
+	}
 
 	/**
 	 * 读 HASH 字段的并发注入点（读到之后、返回之前调用一次）。
@@ -562,6 +584,10 @@ public final class FakeLeaseRedis {
 		String body = script.getScriptAsString();
 		this.lastScriptBody = body;
 		this.lastScriptKeys = new ArrayList<>(keys);
+		if (body.contains(CREATE_IF_ABSENT_MARK) || body.contains(FENCED_CREATE_IF_ABSENT_MARK)
+				|| body.contains(TERMINAL_SET_IF_NOT_CANCELLED_MARK) || body.contains(FENCED_TERMINAL_SET_MARK)) {
+			runSnapshotWriteHook();
+		}
 		if (body.contains(ACQUIRE_UNTAGGED_MARK)) {
 			runAcquireHook();
 			return acquireUntagged(str(keys.get(0)), str(args.get(0)),
@@ -590,6 +616,14 @@ public final class FakeLeaseRedis {
 		}
 		if (body.contains(RELEASE_MARK)) {
 			return release(str(keys.get(0)), str(args.get(0)));
+		}
+		if (body.contains(FENCED_CREATE_IF_ABSENT_MARK)) {
+			return fencedCreateIfAbsent(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
+					Long.parseLong(str(args.get(1))), Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+		}
+		if (body.contains(CREATE_IF_ABSENT_MARK)) {
+			return createIfAbsent(str(keys.get(0)), str(args.get(0)),
+					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
 		}
 		if (body.contains(FENCED_TERMINAL_SET_MARK)) {
 			return fenceTerminalSet(str(keys.get(0)), str(keys.get(1)), str(args.get(0)),
@@ -642,6 +676,51 @@ public final class FakeLeaseRedis {
 			this.beforeAcquire = null;
 			hook.run();
 		}
+	}
+
+	/** 快照写脚本之前的交错缝（取走即置空，见 {@link #beforeSnapshotWrite}）。 */
+	private void runSnapshotWriteHook() {
+		Runnable hook = this.beforeSnapshotWrite;
+		if (hook != null) {
+			this.beforeSnapshotWrite = null;
+			hook.run();
+		}
+	}
+
+	/**
+	 * {@code -- RUN_CREATE_IF_ABSENT}：键已存在 ⇒ 0（不写）；否则 {@code SET PX} 并返回 1。
+	 *
+	 * <p>与真 Redis 同一判据：{@code EXISTS} 与 {@code SET} 在<b>同一个 EVAL</b> 内串行执行，
+	 * 因此"读到不存在"与"写入"之间不可能插进并发创建者。
+	 */
+	private Long createIfAbsent(String runKey, String json, Duration ttl) {
+		if (this.strings.containsKey(runKey)) {
+			return 0L;
+		}
+		this.strings.put(runKey, json);
+		touchTtl(runKey, ttl);
+		this.sets.incrementAndGet();
+		return 1L;
+	}
+
+	/**
+	 * {@code -- RUN_FENCED_CREATE_IF_ABSENT}：存在 ⇒ 0；fence 已越过本次 epoch ⇒ 0；
+	 * 否则写快照并把 fence 推到本次 epoch（与 {@link #fenceSet} 同一 fencing 语义）。
+	 */
+	private Long fencedCreateIfAbsent(String runKey, String fenceKey, String json, long epoch, Duration ttl) {
+		if (this.strings.containsKey(runKey)) {
+			return 0L;
+		}
+		String fence = this.strings.get(fenceKey);
+		if (fence != null && Long.parseLong(fence) > epoch) {
+			return 0L;
+		}
+		this.strings.put(runKey, json);
+		touchTtl(runKey, ttl);
+		this.strings.put(fenceKey, String.valueOf(epoch));
+		touchTtl(fenceKey, ttl);
+		this.sets.incrementAndGet();
+		return 1L;
 	}
 
 	/**
