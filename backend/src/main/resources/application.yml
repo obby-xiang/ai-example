@@ -122,6 +122,15 @@ spring:
           stream-usage: true
 
 app:
+  # ── 会话发号实例位（多实例部署必须逐实例唯一）────────────────────────────────
+  # sessionId = 时间戳(ms) × 10^6 + 实例位(0..999) × 10^3 + 实例内序列(0..999)，
+  # 实例位是"同毫秒两个实例各自取号也不重复"的唯一来源。
+  # 空 = 单实例默认实例位 0；判据（与 file/FileStorageMultiInstanceGuard 同一口径）任一成立
+  # 而本键为空 ⇒ **启动失败**（fail-closed，不允许随机实例标识兜底）：
+  #   app.file.multi-instance=true，或激活 profile cluster / multi-instance / h2tcp / postgresql，
+  #   或 spring.datasource.url 以 jdbc:h2:tcp:、jdbc:h2:ssl:、jdbc:postgresql: 开头。
+  # 多实例部署：每个实例配置不同的 instance-slot（0..999），环境变量 APP_INSTANCE_SLOT。
+  instance-slot: ""
   # ── S4.2 规格 §4 配置键表（app.ai 只由 ai/config/AiProperties 绑定；基座那套
   #    max-iterations/session-ttl-minutes/hitl-timeout-minutes/thinking-disabled 已删除，
   #    其中 thinking-disabled 在新运行时早已失效：官方循环 + reasoning 补丁不设 extraBody.thinking）──

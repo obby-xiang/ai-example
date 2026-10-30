@@ -66,6 +66,48 @@ class SessionIdGeneratorTest {
 	}
 
 	@Test
+	void explicitMultiInstanceFlagWithoutSlotFailsClosed() {
+		MockEnvironment multiInstance = new MockEnvironment();
+		multiInstance.setProperty("app.file.multi-instance", "true");
+
+		assertThatThrownBy(() -> new SessionIdGenerator(multiInstance))
+			.as("显式多实例开关（没有多实例 profile）也必须要求实例位")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("APP_INSTANCE_SLOT")
+			.hasMessageContaining("app.file.multi-instance=true");
+
+		multiInstance.setProperty("app.instance-slot", "5");
+		assertThat(new SessionIdGenerator(multiInstance).instanceSlot()).isEqualTo(5L);
+	}
+
+	@Test
+	void sharedDatasourceWithoutProfileAlsoRequiresAnExplicitInstanceSlot() {
+		MockEnvironment h2tcp = datasource("jdbc:h2:tcp://127.0.0.1:9092/./config_mgr");
+		assertThatThrownBy(() -> new SessionIdGenerator(h2tcp))
+			.as("H2 TCP 共享库本身就是多实例，未配置实例位必须启动失败")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("APP_INSTANCE_SLOT")
+			.hasMessageContaining("jdbc:h2:tcp:");
+
+		MockEnvironment h2ssl = datasource("jdbc:h2:ssl://127.0.0.1:9092/./config_mgr");
+		assertThatThrownBy(() -> new SessionIdGenerator(h2ssl)).as("H2 SSL 远程库同样算多实例")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("jdbc:h2:ssl:");
+
+		MockEnvironment postgresql = datasource("jdbc:postgresql://db:5432/config_mgr");
+		assertThatThrownBy(() -> new SessionIdGenerator(postgresql)).as("PostgreSQL 共享库同样算多实例")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("jdbc:postgresql:");
+
+		MockEnvironment localFile = datasource("jdbc:h2:file:./data/config_mgr_db");
+		assertThat(new SessionIdGenerator(localFile).instanceSlot()).as("本地文件库仍是单实例，默认实例位 0").isZero();
+
+		MockEnvironment configured = datasource("jdbc:h2:tcp://127.0.0.1:9092/./config_mgr");
+		configured.setProperty("app.instance-slot", "9");
+		assertThat(new SessionIdGenerator(configured).instanceSlot()).isEqualTo(9L);
+	}
+
+	@Test
 	void clusterDeploymentRequiresAnExplicitAuditableInstanceSlot() {
 		MockEnvironment cluster = new MockEnvironment();
 		cluster.setActiveProfiles("cluster");
@@ -82,6 +124,12 @@ class SessionIdGeneratorTest {
 		configured.setActiveProfiles("cluster");
 		configured.setProperty("app.instance-slot", "3");
 		assertThat(new SessionIdGenerator(configured).instanceSlot()).isEqualTo(3L);
+	}
+
+	private static MockEnvironment datasource(String url) {
+		MockEnvironment environment = new MockEnvironment();
+		environment.setProperty("spring.datasource.url", url);
+		return environment;
 	}
 
 }

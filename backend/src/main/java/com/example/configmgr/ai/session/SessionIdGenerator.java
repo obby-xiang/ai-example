@@ -187,17 +187,19 @@ public class SessionIdGenerator {
 		return slot;
 	}
 
-	/** 多实例判据（复用文件存储守卫的 profile 集合；null = 单实例）。 */
+	/**
+	 * 多实例判据（与 {@link FileStorageMultiInstanceGuard} 同一口径；null = 单实例）。
+	 *
+	 * <p>判据：显式开关 {@code app.file.multi-instance=true}、多实例 profile，或数据源本身已跨进程共享
+	 * （{@code jdbc:h2:tcp:} / {@code jdbc:h2:ssl:} / {@code jdbc:postgresql:}）。判据一旦成立，
+	 * 缺少实例位即 {@code fail-closed}（{@link #resolveInstanceSlot}）。
+	 */
 	static String multiInstanceReason(Environment environment) {
 		if (environment == null) {
 			return null;
 		}
-		for (String profile : environment.getActiveProfiles()) {
-			if (FileStorageMultiInstanceGuard.MULTI_INSTANCE_PROFILES.contains(profile)) {
-				return "profile=" + profile;
-			}
-		}
-		return null;
+		String reason = String.join(" / ", FileStorageMultiInstanceGuard.multiInstanceReasons(environment));
+		return reason.isEmpty() ? null : reason;
 	}
 
 	/**

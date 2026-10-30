@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -52,6 +53,52 @@ class AiSessionControllerTest {
 			.as("sessionIdText 必须与 long 值逐位一致（JSON number 不是权威值）")
 			.isEqualTo(expectedId);
 		verify(sessions).ensure(String.valueOf(expectedId), 1L, 101L);
+	}
+
+	@Test
+	void aCollidingNumberIsRetriedOnceWithAFreshNumber() {
+		SessionIdGenerator generator = mock(SessionIdGenerator.class);
+		when(generator.next()).thenReturn(1_700_000_000_000_000_000L, 1_700_000_000_000_001_000L);
+		AiSessionService sessions = mock(AiSessionService.class);
+		when(sessions.ensure("1700000000000000000", 1L, 101L)).thenReturn(true);
+		when(sessions.ensure("1700000000000001000", 1L, 101L)).thenReturn(false);
+		AiSessionController controller = new AiSessionController(generator, sessions);
+
+		ResponseEntity<ApiResponse<Map<String, Object>>> response;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			response = controller.create();
+		}
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().isSuccess()).isTrue();
+		assertThat(response.getBody().getData()).containsEntry("sessionId", 1_700_000_000_000_001_000L);
+		verify(sessions).ensure("1700000000000000000", 1L, 101L);
+		verify(sessions).ensure("1700000000000001000", 1L, 101L);
+	}
+
+	@Test
+	void aPersistentCollisionReturns503WithoutOverwritingTheExistingSession() {
+		SessionIdGenerator generator = mock(SessionIdGenerator.class);
+		when(generator.next()).thenReturn(1_700_000_000_000_000_000L, 1_700_000_000_000_001_000L);
+		AiSessionService sessions = mock(AiSessionService.class);
+		when(sessions.ensure("1700000000000000000", 1L, 101L)).thenReturn(true);
+		when(sessions.ensure("1700000000000001000", 1L, 101L)).thenReturn(true);
+		AiSessionController controller = new AiSessionController(generator, sessions);
+
+		ResponseEntity<ApiResponse<Map<String, Object>>> response;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			response = controller.create();
+		}
+
+		assertThat(response.getStatusCode()).as("连续撞号不得静默成功，必须 503 可重试")
+			.isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		assertThat(response.getBody()).isNotNull();
+		assertThat(response.getBody().isSuccess()).isFalse();
+		assertThat(response.getBody().getCode()).isEqualTo(AiSessionController.SESSION_ID_UNAVAILABLE);
+		verify(sessions).ensure("1700000000000000000", 1L, 101L);
+		verify(sessions).ensure("1700000000000001000", 1L, 101L);
+		verifyNoMoreInteractions(sessions);
 	}
 
 	@Test

@@ -65,6 +65,9 @@ public class FileStorageMultiInstanceGuard {
     public static final Set<String> MULTI_INSTANCE_PROFILES =
             Set.of(CLUSTER_PROFILE, MULTI_INSTANCE_PROFILE, H2TCP_PROFILE, POSTGRESQL_PROFILE);
 
+    /** 显式多实例开关属性名（无专属 profile 的部署用）。 */
+    public static final String MULTI_INSTANCE_PROPERTY = "app.file.multi-instance";
+
     /** 属性名（与 {@code app.file.storage-path} 同键）。 */
     public static final String STORAGE_PATH_PROPERTY = "app.file.storage-path";
 
@@ -81,9 +84,25 @@ public class FileStorageMultiInstanceGuard {
 
     /** 多实例判据（返回触发原因，空 = 单实例，不校验）。 */
     static List<String> multiInstanceReasons(AppProperties appProperties, Environment environment) {
+        return multiInstanceReasons(appProperties.getFile().isMultiInstance(), environment);
+    }
+
+    /**
+     * 多实例判据（<b>只读 {@link Environment}</b>，供其他启动期组件复用同一口径）。
+     *
+     * <p>与 {@link #multiInstanceReasons(AppProperties, Environment)} 的唯一差别是显式开关
+     * {@code app.file.multi-instance} 直接从环境读取（调用方没有绑定好的 {@link AppProperties}）。
+     */
+    public static List<String> multiInstanceReasons(Environment environment) {
+        boolean explicit = environment != null
+                && Boolean.parseBoolean(environment.getProperty(MULTI_INSTANCE_PROPERTY));
+        return multiInstanceReasons(explicit, environment);
+    }
+
+    private static List<String> multiInstanceReasons(boolean explicitSwitch, Environment environment) {
         List<String> reasons = new ArrayList<>();
-        if (appProperties.getFile().isMultiInstance()) {
-            reasons.add("app.file.multi-instance=true");
+        if (explicitSwitch) {
+            reasons.add(MULTI_INSTANCE_PROPERTY + "=true");
         }
         if (environment != null) {
             for (String profile : environment.getActiveProfiles()) {
