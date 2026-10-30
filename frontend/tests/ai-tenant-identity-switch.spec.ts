@@ -14,7 +14,12 @@ import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { ChatMessage } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
-import { resetAiIdentityCache } from '@/utils/ai-identity'
+import {
+  identityHeaders,
+  mirrorStorageKey,
+  resetAiIdentityCache,
+  sessionLockName
+} from '@/utils/ai-identity'
 
 const api = vi.hoisted(() => ({
   tenantUsers: vi.fn(),
@@ -179,5 +184,63 @@ describe('Task 4：身份切换的会话发号与存储隔离', () => {
     expect(api.createSession.mock.calls.length).toBe(callsBefore)
     expect(store.messages.some((message) => message.content.includes('甲的旧会话'))).toBe(true)
     expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
+  })
+
+  it('同租户换用户：后端发新号，旧用户指针与镜像保留，新用户头锁镜像独立', async () => {
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+    expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
+    expect(store.sessionId).toBe('1001')
+
+    const oldPointerKey = 'ai-session-id:7:71'
+    const oldMirrorKey = 'ai-mirror:7:71:1001'
+    const oldLockName = sessionLockName('1001')
+    store.historyLoaded = true
+    store.messages = [messageOf('甲的旧会话')]
+    store.writeMirrorNow()
+    expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
+
+    // 同 tenant 8 换用户 72：仍是换身份，必须由后端重新发号。
+    await store.switchIdentity(7, 72)
+    expect(store.identity).toEqual({ tenantId: 7, userId: 72 })
+    expect(api.createSession).toHaveBeenCalledTimes(2)
+    expect(store.sessionId).toBe('1002')
+    expect(store.messages).toEqual([])
+
+    // 旧用户现场原样保留；新用户指针独立。
+    expect(sessionStorage.getItem(oldPointerKey)).toBe('1001')
+    expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
+    expect(sessionStorage.getItem('ai-session-id:7:72')).toBe('1002')
+
+    // 请求头、锁名、镜像键全部跟着新用户走，与旧用户不共享。
+    expect(identityHeaders()).toEqual({ 'X-Tenant-Id': '7', 'X-User-Id': '72' })
+    expect(sessionLockName(store.sessionId)).toBe('ai-session-7:72:1002')
+    expect(sessionLockName(store.sessionId)).not.toBe(oldLockName)
+    expect(mirrorStorageKey(store.sessionId)).toBe('ai-mirror:7:72:1002')
+    expect(sessionStorage.getItem('ai-mirror:7:72:1002')).toBeNull()
+  })
+
+  it('19 位会话号经 store 到指针镜像键锁名全链路保持字符串', async () => {
+    // 后端 createSession 的真实契约就是**原始文本**（时间戳 ms × 10^6，已越过 2^53）。
+    const LONG_SESSION_ID = '1731234567890123456'
+    api.createSession.mockReset()
+    api.createSession.mockResolvedValue(LONG_SESSION_ID)
+
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+
+    expect(store.sessionId).toBe(LONG_SESSION_ID)
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe(LONG_SESSION_ID)
+    // 反证：只要中途经过 number，低位就会被改写（17 位十进制已超出安全整数）。
+    expect(String(Number(LONG_SESSION_ID))).not.toBe(LONG_SESSION_ID)
+
+    store.historyLoaded = true
+    store.messages = [messageOf('长号会话')]
+    store.writeMirrorNow()
+
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe(LONG_SESSION_ID)
+    expect(mirrorStorageKey(store.sessionId)).toBe(`ai-mirror:7:71:${LONG_SESSION_ID}`)
+    expect(sessionLockName(store.sessionId)).toBe(`ai-session-7:71:${LONG_SESSION_ID}`)
+    expect(sessionStorage.getItem(`ai-mirror:7:71:${LONG_SESSION_ID}`)).toContain('长号会话')
   })
 })

@@ -197,25 +197,39 @@ export function normalizeSessionId(raw: unknown): string {
 }
 
 /**
+ * 不纳入身份域的**精确路径**（不做子路径匹配）：健康探针、静态工具清单、身份目录。
+ * 与后端 `TenantIdentityFilter.EXCLUDED_EXACT` 同口径 —— 子路径默认仍受保护，
+ * 新增的数据接口（如 `/ai/tools/...`）不会静默逃出身份边界。
+ */
+const IDENTITY_EXCLUDED_EXACT = ['/ai/health', '/ai/tools', '/ai/tenants']
+
+/** 模型配置命名空间：整棵子树不参与租户隔离（与后端 `CONFIG_SUBTREES` 同口径）。 */
+const IDENTITY_CONFIG_SUBTREES = ['/ai/providers', '/ai/models', '/ai/settings']
+
+/**
  * 该 AI 端点是否属于**对话域**（需要身份头）。
  *
- * <p>排除：模型配置 / provider / 健康探针 / 工具清单 / 身份目录 —— 它们是"业务与模型配置"面，
- * 不参与租户隔离（健康探针与目录还要在选身份之前可用）。与后端 `TenantIdentityFilter` 的
- * 排除前缀保持一致。
+ * <p>与后端 `TenantIdentityFilter` 的边界逐条对齐：`/ai` 根路径及其下除
+ * {@link IDENTITY_EXCLUDED_EXACT}（仅精确路径）与 {@link IDENTITY_CONFIG_SUBTREES}（整棵子树）
+ * 之外的全部入口都带身份头 —— 包括 `startup-resume` 的读取/扫描，以及 `tools/...` 子路径。
  */
 export function isAiConversationPath(url: string): boolean {
-  const path = url.startsWith('/api/') ? url.slice(4) : url
-  if (!path.startsWith('/ai/')) {
+  let path = url.startsWith('/api/') ? url.slice(4) : url
+  const query = path.indexOf('?')
+  if (query >= 0) {
+    path = path.slice(0, query)
+  }
+  // 后端只剥一个结尾斜杠再比对（`/api/ai/tools/` 视同精确路径）。
+  if (path.length > 1 && path.endsWith('/')) {
+    path = path.slice(0, -1)
+  }
+  if (path !== '/ai' && !path.startsWith('/ai/')) {
     return false
   }
-  const excluded = [
-    '/ai/providers',
-    '/ai/models',
-    '/ai/settings',
-    '/ai/health',
-    '/ai/tools',
-    '/ai/tenants',
-    '/ai/startup-resume'
-  ]
-  return !excluded.some((prefix) => path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}?`))
+  if (IDENTITY_EXCLUDED_EXACT.includes(path)) {
+    return false
+  }
+  return !IDENTITY_CONFIG_SUBTREES.some(
+    (prefix) => path === prefix || path.startsWith(`${prefix}/`)
+  )
 }
