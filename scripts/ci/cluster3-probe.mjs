@@ -48,6 +48,22 @@
  *     **不是**服务端 `archiveMaxSeq`（终态会清 session→current 索引，权威末号只在 SUSPENDED/RUNNING
  *     时通过 `/runs/current` 可读，见 park/kill 边界的两处断言）。
  *
+ * 双身份 × 三实例（两条新用例，排在基线 16 条之后；基线 16 条的身份头仍是默认身份 `1/101`）：
+ *   - `identity-cross-instance`：A 身份（`1/101`，默认）在实例 A 起确认门挂起轮 → **B 身份**（`1/102`，
+ *     同租户另一用户，产品 `TenantUserDirectory` 里已登记）在实例 B 上对 `events`（含 `?probe=1`）、
+ *     `runs/{id}`、`runs/current`、`pending`、`history` **全部不可见**，`/confirm` 与
+ *     `/frontend-tool-result` **双双 409 UNKNOWN_TOOL_CALL**；随后 A 身份在实例 C 重读的运行态指纹
+ *     必须**逐字段不变**（零副作用），并在 C 上确认成功、全量帧册与台账照旧。
+ *   - `identity-frontend-cross-instance`：同一条跨身份判据走**前端工具通道**（`frontend_tool_request`）——
+ *     用桩路由表既有的 `TC16-NAVIGATE`（`navigate_to`，产品元数据 `@ToolChannel(FRONTEND)`）构造，
+ *     不新造产品能力；B 身份在实例 B 对 `frontend-tool-result` 也不可见，A 身份在 C 回灌成功并按
+ *     前端通道的帧册断言（有 `frontend_tool_result`，**无** `tool_result`/`confirm_decision`）。
+ *   - 零副作用的**两面**都测：① A 身份观察到的运行态指纹（状态/归档末号/待决条目/台账）不变；
+ *     ② 直接读 Redis 的 `PTTL`：B 的请求不得给 A 的 `ai:run:{1:101:run:<id>}` /
+ *     `ai:pending:{1:101:run:<id>}` **续期**（读侧 `touchActiveRun` 必须按当前身份定键）。
+ *   - 身份头来源：A/B 都在 `--self-check` 里静态断言"已登记在同租户"（未登记的组合会被 HTTP 边界 400，
+ *     用例会变成假红）；`--self-check` 同时断言三实例实例位**两两不等**（声明面 + 生效面各判一次）。
+ *
  * 用法：
  *   node scripts/ci/cluster3-probe.mjs --self-check
  *   node scripts/ci/cluster3-probe.mjs --run --artifacts <dir> --run-dir <dir> --jar <jar>
@@ -58,6 +74,7 @@
  *        --ports 'a=23181,b=23182,c=23183,h2=23190,redis=23179'
  *        [--ready-timeout 180] [--job-fail-timeout 90] [--kill-takeover-timeout 120]
  *        [--case preexec-cancel-grid]      # 单点/子集执行（实测 L-150 三格时用；不写 = 全套）
+ *                                           # 双身份两条：identity-cross-instance / identity-frontend-cross-instance
  *
  * 退出码：0 = 全部 PASS；1 = 有 FAIL；2 = 环境/参数错误（基线起不来，后续用例无意义）。
  * 退出码 0 只代表**本次实际执行的用例**都通过：用了 `--case` 时 summary 会显式标注"子集"。
@@ -111,6 +128,19 @@ const INSTANCES = Object.freeze([
 // 业务数据与模型配置**不做租户隔离**，本探针不给它们加身份头。
 const AI_TENANT_ID = '1'
 const AI_USER_ID = '101'
+/**
+ * 探针用到的两个身份（跨身份不可见用例）。
+ *
+ * <p>A = 既有默认身份（`1/101`，前面 16 条用例逐字不变）；B = **同租户的另一个用户**（`1/102`）。
+ * 两者都在产品 `TenantUserDirectory` 的登记清单里（未登记的组合在 HTTP 边界就 400，"不可见"根本测不到）。
+ *
+ * <p>为什么是"同租户不同用户"而不是"跨租户"：键面身份段是 `tenantId:userId` 两段拼接，
+ * 同租户下只换用户已经能钉住"只按租户定键"这类欠隔离（那种实现下本用例会红）；换租户反而会
+ * **掩盖**它（tenant 段本来就不同）。`--self-check` 静态断言两人同租户且都在目录里。
+ */
+const IDENTITY_A = Object.freeze({ tenantId: Number(AI_TENANT_ID), userId: Number(AI_USER_ID) })
+const IDENTITY_B = Object.freeze({ tenantId: Number(AI_TENANT_ID), userId: 102 })
+const PROBE_IDENTITIES = Object.freeze({ a: IDENTITY_A, b: IDENTITY_B })
 const AI_PUBLIC_EXACT_PATHS = Object.freeze([
   '/api/ai/health',
   '/api/ai/tools',
@@ -133,16 +163,27 @@ function aiDataPath(pathname) {
   return true
 }
 
-/** 对话数据面身份头（非数据面返回空对象，便于统一展开）。 */
-function aiIdentityHeaders(pathname) {
+/** 对话数据面身份头（非数据面返回空对象，便于统一展开）。缺省 = 既有默认身份 A。 */
+function aiIdentityHeaders(pathname, identity = null) {
   if (!aiDataPath(pathname)) return {}
-  return { 'X-Tenant-Id': AI_TENANT_ID, 'X-User-Id': AI_USER_ID }
+  const who = identity || IDENTITY_A
+  return { 'X-Tenant-Id': String(who.tenantId), 'X-User-Id': String(who.userId) }
+}
+
+/** 身份的人读标签（`租户/用户`），只用于断言文案与证据文件名，不参与判定。 */
+function identityTag(identity) {
+  return `${identity.tenantId}/${identity.userId}`
 }
 
 const RESULT_STATUSES = Object.freeze(['PASS', 'FAIL'])
 
-/** 用户要求的覆盖面（--self-check 逐条断言 CASES 注册齐全）。 */
-const REQUIRED_CASE_IDS = Object.freeze([
+/**
+ * **基线 16 条**（合入基线的覆盖面，逐条保留、标题不变、执行顺序不变）。
+ *
+ * <p>单独抽出来是为了让"不削弱"可被机器检查：`--self-check` 断言这 16 条**全部**仍在
+ * `REQUIRED_CASE_IDS` 里、且仍占满 `CASES` 的**前 16 个执行位**（删一条/被新用例挤走立刻红）。
+ */
+const BASELINE_CASE_IDS = Object.freeze([
   'cold-start-3',
   'proxy-no-sticky',
   'same-tcp-across-abc',
@@ -160,6 +201,12 @@ const REQUIRED_CASE_IDS = Object.freeze([
   'redis-outage-recovery',
   'preexec-cancel-grid'
 ])
+
+/** 新增的双身份覆盖面（两条：确认门通道 / 前端工具通道）。 */
+const IDENTITY_CASE_IDS = Object.freeze(['identity-cross-instance', 'identity-frontend-cross-instance'])
+
+/** 用户要求的覆盖面（--self-check 逐条断言 CASES 注册齐全）= 基线 16 条 + 双身份 2 条。 */
+const REQUIRED_CASE_IDS = Object.freeze([...BASELINE_CASE_IDS, ...IDENTITY_CASE_IDS])
 
 const PLACEHOLDER_KEY = 'cluster3-stub-placeholder'
 const STUB_MODEL = 'ci-stub'
@@ -851,8 +898,8 @@ function httpRequest(url, options = {}) {
     const started = Date.now()
     const headers = { ...(options.headers || {}) }
     // 对话数据面统一身份头：漏带会 400，且"回放/重挂/决策"会静默落到别的口径上；
-    // 业务/模型配置不加（它们不做租户隔离）。
-    Object.assign(headers, aiIdentityHeaders(target.pathname))
+    // 业务/模型配置不加（它们不做租户隔离）。`options.identity` 缺省 = 默认身份 A。
+    Object.assign(headers, aiIdentityHeaders(target.pathname, options.identity || null))
     const agent = options.agent === undefined ? false : options.agent
     const req = http.request({
       hostname: target.hostname,
@@ -1150,7 +1197,7 @@ function openSse(url, options = {}) {
       headers: {
         Accept: 'text/event-stream',
         ...(options.headers || {}),
-        ...aiIdentityHeaders(target.pathname)
+        ...aiIdentityHeaders(target.pathname, options.identity || null)
       }
     }, (res) => {
       if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -1820,22 +1867,24 @@ function proxyUrl(apiPath) {
   return `${RUN.proxyUrl}${apiPath}`
 }
 
-async function getJson(key, apiPath, { timeoutMs = 15000 } = {}) {
+async function getJson(key, apiPath, { timeoutMs = 15000, identity = null } = {}) {
   const record = await httpRequest(directUrl(key, apiPath), {
     timeoutMs,
+    identity,
     routeKind: 'api',
     directNode: directNode(key)
   })
   return { record, body: record.text ? jsonOf(record, `${key} ${apiPath}`) : null }
 }
 
-async function postJson(key, apiPath, body, { timeoutMs = 20000 } = {}) {
+async function postJson(key, apiPath, body, { timeoutMs = 20000, identity = null } = {}) {
   const payload = Buffer.from(JSON.stringify(body), 'utf8')
   const record = await httpRequest(directUrl(key, apiPath), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
     timeoutMs,
+    identity,
     routeKind: 'api',
     directNode: directNode(key)
   })
@@ -1901,8 +1950,8 @@ function uniqueId(prefix) {
  * 就是另一条会话；本地 `uniqueId` 则绕过了"多实例/同毫秒唯一 + 归属登记"这两件产品保证。
  * 故这里从**原始响应文本**用正则取字符串（与 `sessionId` 数字字段并存时以文本为准）。
  */
-async function newSession(key, tag) {
-  const { record } = await postJson(key, '/api/ai/session', {})
+async function newSession(key, tag, { identity = null } = {}) {
+  const { record } = await postJson(key, '/api/ai/session', {}, { identity })
   checkEq(record.status, 200, `POST /api/ai/session（${key}/${tag}）HTTP：${record.text.slice(0, 300)}`)
   const matched = /"sessionIdText"\s*:\s*"(\d+)"/.exec(record.text)
   check(matched, `POST /api/ai/session（${key}/${tag}）响应缺权威字段 sessionIdText：${record.text.slice(0, 300)}`)
@@ -1953,22 +2002,26 @@ async function jobIssues(key, jobId) {
   return body.data
 }
 
-async function runDetail(key, runId) {
-  const { record, body } = await getJson(key, `/api/ai/runs/${runId}`)
+async function runDetail(key, runId, { identity = null } = {}) {
+  const { record, body } = await getJson(key, `/api/ai/runs/${runId}`, { identity })
   checkEq(record.status, 200, `GET /api/ai/runs/${runId}（${key}）HTTP`)
   check(body && body.success === true && body.data, `run 详情异常：${record.text.slice(0, 400)}`)
   return body.data
 }
 
-async function currentRun(key, sessionId) {
-  const { record, body } = await getJson(key, `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+async function currentRun(key, sessionId, { identity = null } = {}) {
+  const { record, body } = await getJson(
+    key,
+    `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`,
+    { identity }
+  )
   checkEq(record.status, 200, `GET /api/ai/runs/current（${key}）HTTP`)
   check(body && body.success === true && body.data, `runs/current 异常：${record.text.slice(0, 400)}`)
   return body.data
 }
 
-async function historyOf(key, sessionId) {
-  const { record, body } = await getJson(key, `/api/ai/history/${encodeURIComponent(sessionId)}`)
+async function historyOf(key, sessionId, { identity = null } = {}) {
+  const { record, body } = await getJson(key, `/api/ai/history/${encodeURIComponent(sessionId)}`, { identity })
   return { record, body }
 }
 
@@ -2017,6 +2070,7 @@ async function chatOn(key, { sessionId, message, context }, options = {}) {
     timeoutMs: options.timeoutMs || 120000,
     headers: { 'Content-Type': 'application/json' },
     body: payload,
+    identity: options.identity || null,
     directNode: options.viaProxy ? null : directNode(key)
   })
 }
@@ -2025,20 +2079,38 @@ async function reattachOn(key, runId, lastSeq, options = {}) {
   const query = lastSeq === undefined || lastSeq === null ? '' : `?lastSeq=${lastSeq}`
   return openSse(directUrl(key, `/api/ai/events/${runId}${query}`), {
     timeoutMs: options.timeoutMs || 120000,
+    identity: options.identity || null,
     directNode: directNode(key)
   })
 }
 
-async function confirmOn(key, { runId, toolCallId, approved = true, reason = 'cluster3 probe' }) {
-  return postJson(key, '/api/ai/confirm', { runId, toolCallId, approved, reason })
+async function confirmOn(key, { runId, toolCallId, approved = true, reason = 'cluster3 probe' }, options = {}) {
+  return postJson(
+    key,
+    '/api/ai/confirm',
+    { runId, toolCallId, approved, reason },
+    { identity: options.identity || null }
+  )
+}
+
+/** `POST /api/ai/frontend-tool-result`（前端工具回灌；只接受 kind=FRONTEND 的条目）。 */
+async function frontendToolResultOn(
+  key,
+  { runId, toolCallId, result, source = 'cluster3-probe', cancelled = false, outcome = null },
+  options = {}
+) {
+  const body = { runId, toolCallId, result, source, cancelled }
+  if (outcome !== null) body.outcome = outcome
+  return postJson(key, '/api/ai/frontend-tool-result', body, { identity: options.identity || null })
 }
 
 /**
  * 全量回放到终帧。`evidenceName` 给了就在**退出前**（成功或失败）把当时收到的帧落盘 ——
  * 「done 缺失」正是最需要帧证据的形态，不能只在成功路径写。
+ * `options.identity` = 回放所用身份（缺省 = 默认身份 A），跨身份用例用它证明"别人看不到"。
  */
-async function fullReplay(key, runId, timeoutMs = 90000, evidenceName = null) {
-  const stream = await reattachOn(key, runId, 0, { timeoutMs })
+async function fullReplay(key, runId, timeoutMs = 90000, evidenceName = null, options = {}) {
+  const stream = await reattachOn(key, runId, 0, { timeoutMs, identity: options.identity || null })
   try {
     await stream.waitTerminal(timeoutMs)
     return stream.frames.slice()
@@ -2060,11 +2132,11 @@ async function fullReplay(key, runId, timeoutMs = 90000, evidenceName = null) {
  * 这里短延迟重试，只有 4 次仍无终帧才 FAIL —— 不掩盖真实的 done 缺失。
  * 每次尝试都会（按 evidenceName）覆盖同一份证据文件，于是最后一次失败的帧也能留下。
  */
-async function fullReplayToTerminal(key, runId, timeoutMs = 90000, evidenceName = null) {
+async function fullReplayToTerminal(key, runId, timeoutMs = 90000, evidenceName = null, options = {}) {
   let lastError = null
   for (let attempt = 1; attempt <= 4; attempt += 1) {
     try {
-      return await fullReplay(key, runId, timeoutMs, evidenceName)
+      return await fullReplay(key, runId, timeoutMs, evidenceName, options)
     } catch (e) {
       lastError = e
       await sleep(500)
@@ -2133,13 +2205,13 @@ async function settleParkBoundary(stream, { toolCallId, timeoutMs = PARK_SETTLE_
  */
 async function createSuspendedRun(
   key,
-  { prefix, taskId, messageSuffix = '', contextPage = 'tasks', waitForPark = true, evidenceName = null }
+  { prefix, taskId, messageSuffix = '', contextPage = 'tasks', waitForPark = true, evidenceName = null, identity = null }
 ) {
-  const sessionId = await newSession(key, prefix)
+  const sessionId = await newSession(key, prefix, { identity })
   const context = { page: contextPage, taskType: 'EXPORT', step: 'EXPORT', taskId }
   const message = `start_export 帮我导出 taskId=${taskId}${messageSuffix}`
   const evidence = evidenceName || (waitForPark ? 'A-parked.jsonl' : 'A-park-transition.jsonl')
-  const stream = await chatOn(key, { sessionId, message, context })
+  const stream = await chatOn(key, { sessionId, message, context }, { identity })
   let runId = null
   let toolCallId = null
   let observed = null
@@ -2196,12 +2268,217 @@ async function createSuspendedRun(
   if (waitForPark) {
     // 客户端已收到的末号必须等于服务端归档末号：否则"已收流"与"已落档"之间有洞。
     // 早杀路径不做这条（被杀后归档可能比客户端多一帧 —— 那正是要观测的信息）。
-    const current = await currentRun(key, sessionId)
+    const current = await currentRun(key, sessionId, { identity })
     checkEq(current.runId, runId, `park 后 /runs/current 指向的 runId（${key}）`)
     checkEq(current.snapshotStatus, 'SUSPENDED', `park 后快照状态（${key}）`)
     checkEqNumber(current.archiveMaxSeq, observed.lastSeq, `park 后归档末号（${key}）`)
   }
   return result
+}
+
+// ── 前端通道（kind=FRONTEND）的 park 契约 ────────────────────────────────────
+// 前端工具的帧面与确认门不同，不能套用 `confirm_request` 那套断言（那会把合法帧判成缺帧/白名单外）：
+//   · 请求帧 = `frontend_tool_request`（帧里带 callback 回灌地址）；
+//   · 结局帧 = `frontend_tool_result`，**没有** `tool_result`，也**没有** `confirm_decision`
+//     （后端执行体是哨兵桩，副作用在浏览器里）；
+//   · 请求帧之前同样要求 `suspended`（先外置再公布），并先于 `tool_start` 之后到达。
+// 这里只钉产品**已经**给出的帧面（不新造能力）：用桩路由表既有的 TC16-NAVIGATE（navigate_to）构造。
+const FRONTEND_PRE_PARK_BUSINESS_TYPES = Object.freeze(['start', 'suspended', 'frontend_tool_request', 'tool_start'])
+
+/** "前端工具请求帧已到"的最小帧契约（park 边界用）。 */
+function assertFrontendCardReachedFrameSet(frames, toolCallId, label = '前端工具请求帧集') {
+  check(frames.length > 0, `${label}：一帧都没收到（已收=${typesOf(frames).join(',') || '空'}）`)
+  const seqs = seqsOf(frames, label)
+  const business = businessFrames(frames)
+  check(business.length > 0, `${label}：一个业务帧都没收到（已收=${typesOf(frames).join(',')}）`)
+  checkEq(business[0].type, 'start', `${label}：首个业务帧必须是 start（实得 ${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'start'), 1, `${label}：start 帧数`)
+  checkEq(countOf(business, 'suspended'), 1, `${label}：suspended 帧数`)
+  checkEq(
+    countOf(business, 'frontend_tool_request', toolCallId),
+    1,
+    `${label}：frontend_tool_request 帧数（toolCallId=${toolCallId}）`
+  )
+  checkEq(
+    countOf(business, 'confirm_request'),
+    0,
+    `${label}：前端通道不得出现确认卡（confirm_request）—— 两种挂起种类互斥`
+  )
+  checkEq(countOf(business, 'done') + countOf(business, 'error'), 0, `${label}：请求帧之前不得出现终帧`)
+  const allowed = new Set([...FRONTEND_PRE_PARK_BUSINESS_TYPES, ...PRE_PARK_NOISE_TYPES])
+  const unexpected = typesOf(business).filter((type) => !allowed.has(type))
+  checkEq(unexpected.join(','), '', `${label}：出现请求帧之前不该有的帧型（已收=${typesOf(business).join(',')}）`)
+  check(
+    indexOf(business, 'suspended') < indexOf(business, 'frontend_tool_request'),
+    `${label}：suspended 必须先于 frontend_tool_request（实得 ${typesOf(business).join(',')}）`
+  )
+  checkSeqContiguous(seqs, 1, label)
+  return { lastSeq: seqs[seqs.length - 1], types: typesOf(business).join(','), heartbeats: frames.length - business.length }
+}
+
+/** 前端通道的 park 边界帧集：在请求帧契约之上多要求 `tool_start` 恰一次（收流完成 ⇒ 已落档）。 */
+function assertFrontendParkedFrameSet(frames, toolCallId, label = '前端 park 边界帧集') {
+  const summary = assertFrontendCardReachedFrameSet(frames, toolCallId, label)
+  checkEq(
+    countOf(businessFrames(frames), 'tool_start', toolCallId),
+    1,
+    `${label}：tool_start 帧数（收流完成 ⇒ 该帧必须已落档；toolCallId=${toolCallId}）`
+  )
+  return summary
+}
+
+/** 前端通道 park 阶段的关键载荷（name/args/callback/kind 与 suspended 公告必须自洽）。 */
+function assertFrontendParkedPayloads(frames, { toolCallId, label = '前端 park 载荷' }) {
+  const card = findOf(frames, 'frontend_tool_request', toolCallId)
+  check(card, `${label}：缺少 frontend_tool_request（toolCallId=${toolCallId}）`)
+  checkNonEmptyString(card.name, `${label}：frontend_tool_request.name`)
+  checkPresent(card.args, `${label}：frontend_tool_request.args`)
+  checkNonEmptyString(card.callback, `${label}：frontend_tool_request.callback（回灌地址）`)
+
+  const suspended = findOf(frames, 'suspended')
+  check(suspended, `${label}：缺少 suspended 帧`)
+  checkNonEmptyString(suspended.runId, `${label}：suspended.runId`)
+  check(Array.isArray(suspended.toolCalls), `${label}：suspended.toolCalls 必须是数组`)
+  const entry = suspended.toolCalls.find((item) => item && item.toolCallId === toolCallId)
+  check(entry, `${label}：suspended.toolCalls 未列出 ${toolCallId}`)
+  checkEq(entry.name, card.name, `${label}：suspended.toolCalls[].name 必须与请求帧一致`)
+  checkEq(entry.kind, 'FRONTEND', `${label}：suspended.toolCalls[].kind`)
+  checkEq(String(entry.arguments), String(card.args), `${label}：suspended.toolCalls[].arguments 必须等于请求帧 args`)
+
+  const start = findOf(frames, 'tool_start', toolCallId)
+  if (start) {
+    checkEq(start.name, card.name, `${label}：tool_start.name 必须等于请求帧 name`)
+    checkEq(start.kind, 'FRONTEND', `${label}：tool_start.kind`)
+    checkEq(JSON.stringify(start.args), JSON.stringify(card.args), `${label}：tool_start.args 必须等于请求帧 args`)
+  }
+  return { name: card.name }
+}
+
+/**
+ * 前端通道的完整帧册（一轮已 done）：帧型白名单 + seq 逐号连续 + 关键帧各恰一次 + 顺序 +
+ * `frontend_tool_result` 的载荷/结局。**明确断言后端没有**发 `tool_result`/`confirm_decision`：
+ * 那是"前端工具被错当后端工具执行"的形态，正是要暴露的缺陷。
+ */
+function assertFrontendLedger(frames, { toolCallId, expectedName = null, expectedResult = null, label = '前端工具帧册' }) {
+  check(frames.length > 0, `${label}：一帧都没收到`)
+  const seqs = seqsOf(frames, label)
+  const business = businessFrames(frames)
+  const unknown = typesOf(business).filter((type) => !ARCHIVED_FRAME_TYPES.includes(type))
+  checkEq(unknown.join(','), '', `${label}：出现白名单外的帧型（已收=${typesOf(business).join(',')}）`)
+  checkEq(business[0].type, 'start', `${label}：首帧必须是 start（实得 ${typesOf(business).join(',')}）`)
+  checkEq(business[business.length - 1].type, 'done', `${label}：末帧必须是 done（实得 ${typesOf(business).join(',')}）`)
+  checkEq(countOf(business, 'done'), 1, `${label}：done 帧数`)
+  checkEq(countOf(business, 'error'), 0, `${label}：不得出现 error 帧`)
+  checkEq(countOf(business, 'start'), 1, `${label}：start 帧数`)
+  checkEq(countOf(business, 'suspended'), 1, `${label}：suspended 帧数`)
+  checkEq(countOf(business, 'frontend_tool_request', toolCallId), 1, `${label}：frontend_tool_request 帧数`)
+  checkEq(countOf(business, 'frontend_tool_result', toolCallId), 1, `${label}：frontend_tool_result 帧数`)
+  checkEq(countOf(business, 'tool_start', toolCallId), 1, `${label}：tool_start 帧数`)
+  checkEq(countOf(business, 'confirm_request', toolCallId), 0, `${label}：前端通道不得出现 confirm_request`)
+  checkEq(countOf(business, 'confirm_decision', toolCallId), 0, `${label}：前端通道不得出现 confirm_decision`)
+  checkEq(countOf(business, 'tool_result', toolCallId), 0, `${label}：前端工具由浏览器执行，后端不得发 tool_result`)
+  check(
+    indexOf(business, 'suspended') < indexOf(business, 'frontend_tool_request', toolCallId),
+    `${label}：suspended 必须先于 frontend_tool_request（实得 ${typesOf(business).join(',')}）`
+  )
+  check(
+    indexOf(business, 'tool_start', toolCallId) < indexOf(business, 'frontend_tool_result', toolCallId),
+    `${label}：tool_start 必须先于 frontend_tool_result（实得 ${typesOf(business).join(',')}）`
+  )
+  check(
+    indexOf(business, 'frontend_tool_request', toolCallId) < indexOf(business, 'frontend_tool_result', toolCallId),
+    `${label}：frontend_tool_request 必须先于 frontend_tool_result`
+  )
+  checkSeqContiguous(seqs, 1, label)
+  const lastSeq = seqs[seqs.length - 1]
+  checkEq(findOf(business, 'done').seq, lastSeq, `${label}：done.seq 必须等于本次全量回放的末号（replay tip）`)
+
+  const { name } = assertFrontendParkedPayloads(frames, { toolCallId, label })
+  const result = findOf(business, 'frontend_tool_result', toolCallId)
+  checkEq(result.ok, true, `${label}：frontend_tool_result.ok`)
+  checkEq(result.outcome, 'ok', `${label}：frontend_tool_result.outcome`)
+  checkEq(result.executed, false, `${label}：frontend_tool_result.executed 必须为 false（后端未执行）`)
+  checkEq(result.status, 'FRONTEND_RESULT', `${label}：frontend_tool_result.status`)
+  if (expectedName) checkEq(result.name, expectedName, `${label}：frontend_tool_result.name`)
+  checkNonEmptyString(result.result, `${label}：frontend_tool_result.result 不得为空`)
+  if (expectedResult !== null) checkEq(result.result, expectedResult, `${label}：frontend_tool_result.result 必须原样回传回灌值`)
+  const deltas = business.filter((frame) => frame.type === 'delta')
+  check(deltas.length > 0, `${label}：续跑必须至少有一帧 delta（正文）`)
+  return { lastSeq, types: typesOf(business).join(','), name, deltas: deltas.length }
+}
+
+/**
+ * 前端通道的挂起轮：用桩路由表既有的 **TC16-NAVIGATE**（提示词含"导出向导" ⇒ `navigate_to`，
+ * 产品元数据里是 `@ToolChannel(FRONTEND)`）构造，不新造产品能力、也不伪造工具。
+ *
+ * <p>与 `createSuspendedRun` 的差别只在"等哪一帧"与"用哪套帧集断言"：等 `frontend_tool_request`，
+ * 断言前端通道的帧面（无确认卡）。同样在服务端收流之后才返回，park 起点因此是确定的。
+ */
+async function createFrontendParkedRun(
+  key,
+  { prefix, taskId, messageSuffix = '', evidenceName = 'A-frontend-parked.jsonl', identity = null }
+) {
+  const sessionId = await newSession(key, prefix, { identity })
+  const context = { page: 'tasks', taskType: 'EXPORT', step: 'EXPORT', taskId }
+  const message = `打开导出向导 taskId=${taskId}${messageSuffix}`
+  const stream = await chatOn(key, { sessionId, message, context }, { identity })
+  let runId = null
+  let toolCallId = null
+  let observed = null
+  try {
+    const frame = await stream.waitFor(
+      (f) => f.type === 'frontend_tool_request' || f.type === 'confirm_request' || f.type === 'done' || f.type === 'error',
+      { timeoutMs: 120000, label: '等待前端工具请求帧' }
+    )
+    if (frame.type !== 'frontend_tool_request') {
+      throw new Error(`期望前端工具请求帧，实得 ${frame.type}：${JSON.stringify(frame).slice(0, 500)}`)
+    }
+    toolCallId = frame.toolCallId
+    saveFrames(evidenceName, stream.frames)
+    let how = null
+    try {
+      how = await stream.waitClosed(PARK_SETTLE_TIMEOUT_MS, '等待前端工具 park 收流')
+    } finally {
+      saveFrames(evidenceName, stream.frames)
+    }
+    checkEq(how, 'end', '前端工具 park 必须是服务端正常收尾（连接重置不算已 park）')
+    const summary = assertFrontendParkedFrameSet(stream.frames, toolCallId)
+    const payload = assertFrontendParkedPayloads(stream.frames, { toolCallId, label: '前端 park 载荷' })
+    observed = {
+      frames: stream.frames.slice(),
+      lastSeq: summary.lastSeq,
+      types: summary.types,
+      name: payload.name,
+      heartbeats: summary.heartbeats
+    }
+    const start = observed.frames.find((f) => f.type === 'start')
+    runId = start ? start.runId : null
+  } finally {
+    try {
+      saveFrames(evidenceName, stream.frames)
+    } catch {
+      /* 证据写失败不覆盖原始失败 */
+    }
+    stream.close()
+  }
+  check(runId, `未收到 start 帧（runId 缺失）；已收帧=${observed ? observed.types : '空'}`)
+  check(toolCallId, `前端工具请求帧缺少 toolCallId；已收帧=${observed ? observed.types : '空'}`)
+  const current = await currentRun(key, sessionId, { identity })
+  checkEq(current.runId, runId, `前端 park 后 /runs/current 指向的 runId（${key}）`)
+  checkEq(current.snapshotStatus, 'SUSPENDED', `前端 park 后快照状态（${key}）`)
+  checkEqNumber(current.archiveMaxSeq, observed.lastSeq, `前端 park 后归档末号（${key}）`)
+  return {
+    sessionId,
+    taskId,
+    runId,
+    toolCallId,
+    lastSeq: observed.lastSeq,
+    frames: observed.frames,
+    toolName: observed.name,
+    heartbeats: observed.heartbeats,
+    evidence: evidenceName,
+    message
+  }
 }
 
 function checkEqNumber(actual, expected, label) {
@@ -2251,7 +2528,10 @@ const CASES = [
   { id: 'job-kill-a', title: '作业中 kill A → 幸存实例看门狗收敛 FAILED → 重启清理后 B 重试成功', fn: caseJobKillA },
   { id: 'readiness-removal', title: 'readiness 摘除：无 key 不摘 A；SIGTERM/draining 摘 A 并由 B/C 接管；重启后重新纳入', fn: caseReadinessRemoval },
   { id: 'redis-outage-recovery', title: 'Redis 故障恢复：暂停期间 503/业务可用 → 恢复后跨实例健康与对话可用', fn: caseRedisOutageRecovery },
-  { id: 'preexec-cancel-grid', title: 'L-150 三格：UNKNOWN 不得执行 / 已 CANCELLED 不得误认领 / claim 哈希-only 不得伪未执行（三格独立断言）', fn: casePreexecCancelGrid }
+  { id: 'preexec-cancel-grid', title: 'L-150 三格：UNKNOWN 不得执行 / 已 CANCELLED 不得误认领 / claim 哈希-only 不得伪未执行（三格独立断言）', fn: casePreexecCancelGrid },
+  // 双身份 × 三实例（排在基线 16 条之后：前面 16 条的执行顺序与判据逐字不变）。
+  { id: 'identity-cross-instance', title: '双身份：A 身份在 A 挂起确认门 → B 身份在 B 对 events/runs/confirm 不可见且零副作用 → A 身份在 C 可确认', fn: caseIdentityCrossInstance },
+  { id: 'identity-frontend-cross-instance', title: '双身份（前端通道）：A 身份在 A 起 frontend_tool_request 挂起 → B 身份在 B 对 events/runs/回灌不可见且零副作用 → A 身份在 C 可回灌并收敛', fn: caseIdentityFrontendCrossInstance }
 ]
 
 const CTX = {
@@ -4708,6 +4988,532 @@ async function casePreexecCancelGrid() {
   caseLog('L-150 三格全部按各自判据通过（三格独立断言，不互相代偿）')
 }
 
+// ── 用例：双身份 × 三实例（确认门 / 前端工具两条通道各一条）──────────────────
+
+/**
+ * 身份侧效应指纹：只取"另一个身份**能看到**的运行态事实"。
+ *
+ * <p>刻意**不含** TTL/时间戳（`snapshotRemainingMs`/`snapshotExpiresAt`/`snapshot.atMs`）：
+ * 读侧续期本来就会刷新它们，那不是副作用。含的是"被写过才会变"的事实：
+ * 快照状态、归档末号、待决条目的状态/结局/结果文本/决态时刻、台账计数。
+ *
+ * <p>两侧都按 toolCallId 排序，比较用 `stableStringify`（键序无关），避免假红。
+ */
+function identityStateFingerprint(current, detail) {
+  const byId = (a, b) => String(a.toolCallId).localeCompare(String(b.toolCallId))
+  const pendingEntries = (current.pendingEntries || [])
+    .filter((entry) => entry && entry.toolCallId)
+    .map((entry) => ({
+      toolCallId: entry.toolCallId,
+      entryStatus: entry.entryStatus,
+      kind: entry.kind,
+      name: entry.name,
+      arguments: entry.arguments,
+      req: entry.req
+    }))
+    .sort(byId)
+  const pending = (detail.pending || [])
+    .filter((entry) => entry && entry.toolCallId)
+    .map((entry) => ({
+      toolCallId: entry.toolCallId,
+      status: entry.status,
+      outcome: entry.outcome,
+      executed: entry.executed,
+      executedBy: entry.executedBy,
+      resultText: entry.resultText,
+      resolvedAtMs: entry.resolvedAtMs,
+      claimedAtMs: entry.claimedAtMs
+    }))
+    .sort(byId)
+  return {
+    runId: current.runId,
+    snapshotStatus: current.snapshotStatus,
+    awaitingExternal: current.awaitingExternal,
+    archiveMaxSeq: current.archiveMaxSeq,
+    unresolvedExternal: (current.unresolvedExternal || []).slice().sort(),
+    pendingEntries,
+    pending,
+    ledgerCounts: detail.ledgerCounts || {},
+    ledger: (detail.ledger || []).map((row) => ({
+      toolCallId: row.toolCallId,
+      status: row.status,
+      outcome: row.outcome,
+      executedBy: row.executedBy
+    }))
+  }
+}
+
+/**
+ * **B 身份**在实例 `key` 上对"别人的轮"的全部探测：必须不可见，且两个写入口都必须被拒。
+ *
+ * <p>期望形态来自产品源码（不是猜的）：
+ * <ul>
+ * <li>`AiController#ownedRun` ⇒ 归属不符按"不存在"处理，事件走 `preparingOrUnknown` ⇒
+ *     <b>404 UNKNOWN_RUN</b>（归档也按身份定键，B 侧一帧都没有 ⇒ 不会 202）；</li>
+ * <li>`GET /api/ai/runs/{runId}` ⇒ 200 + `data.exists === false`（不回显"在别人手里"）；
+ *     `GET /api/ai/runs/current` ⇒ 200 + `found=false`；`GET /api/ai/pending/{runId}` ⇒ 空列表；</li>
+ * <li>`POST /api/ai/confirm` 与 `POST /api/ai/frontend-tool-result` ⇒ 409 UNKNOWN_TOOL_CALL：
+ *     两个入口都先读"当前身份的待决条目"（`pendingForWrite`），读不到直接 NOT_FOUND，
+ *     **不写决策 guard、不改条目、不发帧**（所以才是"零副作用"）；</li>
+ * <li>跨身份时**不会**给出 TOOL_KIND_MISMATCH：条目根本读不到，报 kind 等于泄漏"这条 id 属于哪种挂起种类"。</li>
+ * </ul>
+ *
+ * <p>两种通道都探两个写入口（确认门的轮也发一次回灌、前端工具的轮也发一次决策），
+ * 这样"错入口被拒"与"跨身份被拒"不会被混为一谈。
+ *
+ * @param frontendEntry 该轮是前端工具通道（只影响证据标注与日志；断言口径两通道相同）
+ */
+async function probeIdentityInvisible(key, { runId, sessionId, toolCallId, evidenceName, frontendEntry = false }) {
+  const whoB = PROBE_IDENTITIES.b
+  const evidence = {
+    identity: identityTag(whoB),
+    instance: key,
+    runId,
+    toolCallId,
+    entryKind: frontendEntry ? 'FRONTEND' : 'CONFIRM',
+    at: nowIso(),
+    probes: {}
+  }
+  // ① 正式 SSE 通道（声明 text/event-stream）：必须是 404 JSON，而不是一条订阅/一条回放。
+  const events = await httpRequest(directUrl(key, `/api/ai/events/${runId}`), {
+    headers: { Accept: 'text/event-stream' },
+    identity: whoB,
+    timeoutMs: 15000,
+    routeKind: 'api',
+    directNode: directNode(key)
+  })
+  evidence.probes.events = {
+    status: events.status,
+    contentType: events.headers['content-type'] || null,
+    framesInBody: events.text.includes('data:'),
+    body: events.text.slice(0, 800)
+  }
+  // ② 轻量探测通道。
+  const probeRecord = await getJson(key, `/api/ai/events/${runId}?probe=1`, { identity: whoB })
+  evidence.probes.eventsProbe = { status: probeRecord.record.status, body: probeRecord.body }
+  // ③ 运行态三面：run 详情 / session 当前轮 / 待决条目。
+  const detail = await getJson(key, `/api/ai/runs/${runId}`, { identity: whoB })
+  evidence.probes.runs = { status: detail.record.status, body: detail.body }
+  const current = await getJson(
+    key,
+    `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`,
+    { identity: whoB }
+  )
+  evidence.probes.runsCurrent = { status: current.record.status, body: current.body }
+  const pending = await getJson(key, `/api/ai/pending/${runId}`, { identity: whoB })
+  evidence.probes.pending = { status: pending.record.status, body: pending.body }
+  // ④ 历史（记忆窗口按身份定键）。
+  const history = await historyOf(key, sessionId, { identity: whoB })
+  evidence.probes.history = { status: history.record.status, body: history.body }
+  // ⑤ 两个写入口都必须被拒。
+  const confirm = await confirmOn(
+    key,
+    { runId, toolCallId, approved: true, reason: 'cluster3 identity probe B（必须被拒）' },
+    { identity: whoB }
+  )
+  evidence.probes.confirm = { status: confirm.record.status, body: confirm.body }
+  const frontend = await frontendToolResultOn(
+    key,
+    { runId, toolCallId, result: 'cluster3 identity probe B（必须被拒）', outcome: 'ok' },
+    { identity: whoB }
+  )
+  evidence.probes.frontend = { status: frontend.record.status, body: frontend.body }
+  saveEvidence(evidenceName, evidence)
+
+  const label = `B 身份（${identityTag(whoB)}）在实例 ${key}`
+  checkEq(events.status, 404, `${label} 重挂 HTTP（不得回 200 帧流）`)
+  check(
+    !String(events.headers['content-type'] || '').includes('text/event-stream'),
+    `${label} 重挂不得返回 SSE 内容类型（实得 ${events.headers['content-type']}）`
+  )
+  checkEq(events.text.includes('data:'), false, `${label} 重挂不得返回任何 SSE 帧`)
+  const eventsBody = jsonParse(events.text, `${label} 重挂响应体`)
+  checkEq(eventsBody.code, 'UNKNOWN_RUN', `${label} 重挂错误码（不得回显"这一轮在别人手里"）`)
+  checkEq(probeRecord.record.status, 404, `${label} 探测 HTTP`)
+  checkEq(probeRecord.body && probeRecord.body.code, 'UNKNOWN_RUN', `${label} 探测错误码`)
+
+  checkEq(detail.record.status, 200, `${label} 读取 run 详情 HTTP`)
+  checkEq(detail.body && detail.body.success, true, `${label} 读取 run 详情 success`)
+  checkEq(detail.body.data.exists, false, `${label} 必须把别人的轮按"不存在"回答（exists=false）`)
+  checkEq(detail.body.data.snapshot, undefined, `${label} 不得回显快照`)
+  checkEq(detail.body.data.ledger, undefined, `${label} 不得回显台账`)
+
+  checkEq(current.record.status, 200, `${label} 读取 runs/current HTTP`)
+  checkEq(current.body.data.found, false, `${label} 的 runs/current 必须是空态（found=false）`)
+  checkEq(current.body.data.runId, null, `${label} 的 runs/current 不得给出 runId`)
+  checkEq((current.body.data.pendingEntries || []).length, 0, `${label} 的 runs/current 不得列出待决条目`)
+  checkEqNumber(current.body.data.archiveMaxSeq, 0, `${label} 的 runs/current 归档末号`)
+
+  checkEq(pending.record.status, 200, `${label} 读取 pending HTTP`)
+  checkEq(Array.isArray(pending.body.data) && pending.body.data.length, 0, `${label} 的 pending 必须是空列表`)
+
+  checkEq(history.record.status, 200, `${label} 读取 history HTTP`)
+  checkEq(history.body.data.total, 0, `${label} 的 history 不得包含别人的会话内容`)
+
+  checkEq(confirm.record.status, 409, `${label} 决策必须被拒（409）`)
+  checkEq(confirm.body && confirm.body.code, 'UNKNOWN_TOOL_CALL', `${label} 决策拒绝码`)
+  checkEq(frontend.record.status, 409, `${label} 回灌必须被拒（409）`)
+  checkEq(frontend.body && frontend.body.code, 'UNKNOWN_TOOL_CALL', `${label} 回灌拒绝码`)
+  return evidence
+}
+
+/**
+ * 身份作用域的 run 级键（与产品 `RunKeyScope.tag` 同形：`<prefix>{<tenantId>:<userId>:run:<runId>}`）。
+ *
+ * <p>只用于**只读**取证（`PTTL`）：证明"另一个身份的请求没有给这一轮续期"。
+ */
+function identityScopedRunKey(prefix, identity, runId) {
+  return `${prefix}{${identity.tenantId}:${identity.userId}:run:${runId}}`
+}
+
+/** 直接问 Redis 要键的剩余寿命（毫秒；`-1` = 无 TTL，`-2` = 键不存在）。 */
+function pttlOf(redisKey) {
+  const raw = String(redisCli('PTTL', redisKey)).trim()
+  const value = Number(raw)
+  check(Number.isFinite(value), `PTTL ${redisKey} 返回值不可解析：${raw}`)
+  return value
+}
+
+/**
+ * 零副作用的**侧证**：B 身份发过请求之后，A 身份那些键的剩余寿命只能变短。
+ *
+ * <p>为什么单独测这一面：`/confirm` 与 `/frontend-tool-result` 都会在"读待决条目"**之前**
+ * 调 `runStore.touchActiveRun(runId)`（读侧续期）。它按**当前身份**取快照键，所以 B 取不到
+ * A 的快照 ⇒ 什么都不续；但这一面在 `runs/current` 的响应里看不见（A 自己一读就又续满了），
+ * 只能直接读 Redis 的 `PTTL`。续期会让 PTTL **变长**，因此"不增"是可判定的硬断言。
+ *
+ * @return 落盘用的快照（键、前后 PTTL）
+ */
+function assertNoCrossIdentityRenewal(label, keys, before, after, { ttlRequired = [] } = {}) {
+  const rows = {}
+  for (const name of Object.keys(keys)) {
+    rows[name] = { key: keys[name], pttlBefore: before[name], pttlAfter: after[name] }
+    check(
+      before[name] !== -2,
+      `${label}：${name} 键必须存在（PTTL=-2 = 键形拼错或这一轮根本不在 Redis）：${keys[name]}`
+    )
+    if (before[name] > 0) {
+      check(after[name] > 0, `${label}：${name} 键在 B 的探测期间不应消失（PTTL ${before[name]} → ${after[name]}）`)
+      check(
+        after[name] <= before[name],
+        `${label}：B 的请求不得给 A 的 ${name} 键续期（PTTL 必须不增：${before[name]} → ${after[name]}）`
+      )
+    } else {
+      checkEq(after[name], before[name], `${label}：${name} 键的 PTTL 状态不得变化（无 TTL/不存在）`)
+    }
+    if (ttlRequired.includes(name)) {
+      check(before[name] > 0, `${label}：${name} 键必须带 TTL（产品快照键是 SET...PX 写入；实得 PTTL=${before[name]}）`)
+    }
+  }
+  return rows
+}
+
+async function caseIdentityCrossInstance() {
+  await ensureUp()
+  const whoA = PROBE_IDENTITIES.a
+  const whoB = PROBE_IDENTITIES.b
+  const suffix = uniqueId('ident')
+  const task = await createTask('c', 'EXPORT', `cluster3-identity-${suffix}`)
+  await selectDefs('c', task.id, ['CURRENCY'])
+
+  // ① A 身份在实例 A 挂起（确认门），且已 park 收流。
+  const run = await createSuspendedRun('a', {
+    prefix: 'cluster3-identity',
+    taskId: task.id,
+    messageSuffix: ` ${suffix}`,
+    identity: whoA,
+    evidenceName: 'A-parked.jsonl'
+  })
+  caseLog(
+    `A 身份（${identityTag(whoA)}）在实例 A 挂起 runId=${run.runId} toolCallId=${run.toolCallId} `
+      + `tool=${run.toolName} lastSeq=${run.lastSeq}（证据 ${run.evidence}）`
+  )
+
+  // ② 副作用基线：A 身份在实例 C 能读到的事实（含待决条目与归档末号）。
+  const beforeCurrent = await currentRun('c', run.sessionId, { identity: whoA })
+  const beforeDetail = await runDetail('c', run.runId, { identity: whoA })
+  checkEq(beforeDetail.exists, true, 'A 身份在 C 必须看得到这一轮（基线前置）')
+  const before = identityStateFingerprint(beforeCurrent, beforeDetail)
+  saveEvidence('A-state-before-b.json', { identity: identityTag(whoA), at: nowIso(), fingerprint: before })
+  checkEq(before.snapshotStatus, 'SUSPENDED', '基线：park 后快照 SUSPENDED')
+  checkEq(before.pending.length, 1, '基线：待决条目恰一条')
+  checkEqNumber(before.archiveMaxSeq, run.lastSeq, '基线：归档末号 = park 末号')
+
+  // ②b 续期基线（直接读 Redis：A 自己的 HTTP 读会续期，所以必须先量后发 B 的请求）。
+  const pttlKeys = {
+    snapshot: identityScopedRunKey('ai:run:', whoA, run.runId),
+    pending: identityScopedRunKey('ai:pending:', whoA, run.runId)
+  }
+  const pttlBefore = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
+
+  // ③ B 身份在实例 B 的八项探测：events / probe / runs / runs-current / pending / history / confirm / frontend。
+  await probeIdentityInvisible('b', {
+    runId: run.runId,
+    sessionId: run.sessionId,
+    toolCallId: run.toolCallId,
+    evidenceName: 'B-identity-invisible.json'
+  })
+  const pttlAfter = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
+  saveEvidence('A-ttl-no-renewal.json', {
+    identity: identityTag(whoA),
+    keys: pttlKeys,
+    before: pttlBefore,
+    after: pttlAfter
+  })
+  assertNoCrossIdentityRenewal('B 身份跨身份探测', pttlKeys, pttlBefore, pttlAfter, { ttlRequired: ['snapshot'] })
+
+  // ④ 零副作用：A 身份在实例 C 重读的指纹必须与基线逐字段相同（并逐项再钉，防"两边都为空"）。
+  const afterCurrent = await currentRun('c', run.sessionId, { identity: whoA })
+  const afterDetail = await runDetail('c', run.runId, { identity: whoA })
+  const after = identityStateFingerprint(afterCurrent, afterDetail)
+  saveEvidence('A-state-after-b.json', { identity: identityTag(whoA), at: nowIso(), fingerprint: after })
+  checkEq(
+    stableStringify(after),
+    stableStringify(before),
+    'B 身份的全部探测必须零副作用（A 身份在 C 观察到的运行态指纹必须逐字段不变）'
+  )
+  checkEq(after.snapshotStatus, 'SUSPENDED', 'B 探测后快照仍必须是 SUSPENDED')
+  check(after.awaitingExternal === true, 'B 探测后 awaitingExternal 必须仍为 true')
+  check(
+    after.pendingEntries.some((entry) => entry.toolCallId === run.toolCallId && entry.entryStatus === 'PENDING'),
+    'B 探测后待决条目必须仍是 PENDING'
+  )
+  checkEqNumber(after.archiveMaxSeq, run.lastSeq, 'B 探测后归档末号不得增长（B 不得产生任何帧）')
+  checkEq(after.pending.length, 1, 'B 探测后待决条目数')
+  checkEq(after.pending[0].outcome, before.pending[0].outcome, 'B 探测后待决条目 outcome 不得改变')
+  checkEq(after.pending[0].resolvedAtMs, before.pending[0].resolvedAtMs, 'B 探测后待决条目决态时刻不得改变')
+  checkEq(after.pending[0].resultText, before.pending[0].resultText, 'B 探测后待决条目结果文本不得被写')
+  checkEq(after.ledger.length, 0, 'B 探测后台账仍必须为空（没有任何执行）')
+
+  // ⑤ A 身份在实例 C 决策：同一身份 + 另一实例 ⇒ 可确认（证据先落盘再断言）。
+  const confirm = await confirmOn(
+    'c',
+    { runId: run.runId, toolCallId: run.toolCallId, reason: 'cluster3 identity decision on C' },
+    { identity: whoA }
+  )
+  evidenceFirst(
+    (body) => saveEvidence('confirm.json', body),
+    () => confirm.body || { status: confirm.record.status, text: confirm.record.text },
+    () => {
+      checkEq(confirm.record.status, 200, 'A 身份在 C 的决策 HTTP')
+      check(confirm.body && confirm.body.accepted === true, `A 身份在 C 的决策未被接受：${confirm.record.text.slice(0, 500)}`)
+      checkEq(confirm.body.storedBy, STATE.instanceIds.c, 'A 身份决策的 storedBy 必须是 C 的 instanceId')
+      checkIn(confirm.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'A 身份在 C 的 resumeOutcome')
+    }
+  )
+
+  // ⑥ 决策之后 B 身份仍然看不到（终态同样不越权）。
+  const bAfterDetail = await getJson('b', `/api/ai/runs/${run.runId}`, { identity: whoB })
+  const bAfterEvents = await getJson('b', `/api/ai/events/${run.runId}?probe=1`, { identity: whoB })
+  saveEvidence('B-after-decision.json', {
+    identity: identityTag(whoB),
+    runs: { status: bAfterDetail.record.status, body: bAfterDetail.body },
+    eventsProbe: { status: bAfterEvents.record.status, body: bAfterEvents.body }
+  })
+  checkEq(bAfterDetail.body.data.exists, false, '决策后 B 身份仍必须把这一轮按"不存在"回答')
+  checkEq(bAfterEvents.record.status, 404, '决策后 B 身份重挂探测仍必须 404')
+
+  // ⑦ A 身份在 C 全量回放：整本帧册（关键帧恰一次 + seq 连续 + 载荷），并核对台账。
+  const full = await fullReplayToTerminal('c', run.runId, 90000, 'C-full.jsonl', { identity: whoA })
+  const ledgerSummary = assertFrameLedger(full, { toolCallId: run.toolCallId })
+  const detail = await runDetail('c', run.runId, { identity: whoA })
+  const ledger = ledgerFor(detail, run.toolCallId)
+  evidenceFirst(
+    (snapshot) => saveEvidence('run-detail.json', snapshot),
+    () => ({
+      runId: run.runId,
+      status: detail.snapshot ? detail.snapshot.status : null,
+      ledgerCounts: detail.ledgerCounts,
+      ledger,
+      frameLedger: ledgerSummary.types,
+      lastSeqScope: ledgerSummary.lastSeqScope,
+      before,
+      after
+    }),
+    () => {
+      checkEq(detail.snapshot.status, 'DONE', 'A 身份在 C 决策后的 run 终态')
+      checkEq(ledger.length, 1, '该 toolCallId 的台账条目数')
+      checkIn(
+        ledger[0].executedBy,
+        [STATE.instanceIds.a, STATE.instanceIds.c],
+        '台账执行实例（A 的等待方或 C 的接管者）'
+      )
+      checkEq(ledger[0].outcome, 'ok', '跨身份决策后台账 outcome 必须是 ok')
+      checkNonEmptyString(ledger[0].resultText, '跨身份决策后台账 resultText')
+    }
+  )
+  caseLog(
+    `A 身份（${identityTag(whoA)}）挂起 → B 身份（${identityTag(whoB)}）在实例 B 的 events/probe/runs/runs-current/`
+      + 'pending/history 全部不可见、confirm/frontend-tool-result 双双 409 UNKNOWN_TOOL_CALL，'
+      + 'A 身份在 C 重读的运行态指纹逐字段不变（零副作用）→ A 身份在 C 决策成功'
+      + `（storedBy=C，outcome=${confirm.body.resumeOutcome}）→ C 全量帧册=${ledgerSummary.types}，`
+      + `台账 executedBy=${ledger[0].executedBy} outcome=ok；决策后 B 身份仍看不到这一轮`
+  )
+}
+
+async function caseIdentityFrontendCrossInstance() {
+  await ensureUp()
+  const whoA = PROBE_IDENTITIES.a
+  const whoB = PROBE_IDENTITIES.b
+  const suffix = uniqueId('identfe')
+  const task = await createTask('c', 'EXPORT', `cluster3-identity-frontend-${suffix}`)
+  await selectDefs('c', task.id, ['CURRENCY'])
+
+  // ① A 身份在实例 A 起"前端工具"挂起轮：桩路由 TC16-NAVIGATE（navigate_to，产品侧 @ToolChannel(FRONTEND)）。
+  const park = await createFrontendParkedRun('a', {
+    prefix: 'cluster3-identity-frontend',
+    taskId: task.id,
+    messageSuffix: ` ${suffix}`,
+    identity: whoA,
+    evidenceName: 'A-frontend-parked.jsonl'
+  })
+  checkEq(park.toolName, 'navigate_to', '前端通道工具名（桩路由 TC16-NAVIGATE）')
+  caseLog(
+    `A 身份（${identityTag(whoA)}）在实例 A 起前端工具挂起轮 runId=${park.runId} toolCallId=${park.toolCallId} `
+      + `tool=${park.toolName} lastSeq=${park.lastSeq}（证据 ${park.evidence}）`
+  )
+
+  // ② 副作用基线（A 身份在实例 C 读到的事实）。
+  const beforeCurrent = await currentRun('c', park.sessionId, { identity: whoA })
+  const beforeDetail = await runDetail('c', park.runId, { identity: whoA })
+  checkEq(beforeDetail.exists, true, 'A 身份在 C 必须看得到这条前端挂起轮（基线前置）')
+  checkEq(beforeDetail.pending[0] && beforeDetail.pending[0].kind, 'FRONTEND', '基线：待决条目 kind=FRONTEND')
+  const before = identityStateFingerprint(beforeCurrent, beforeDetail)
+  saveEvidence('A-state-before-b.json', { identity: identityTag(whoA), at: nowIso(), fingerprint: before })
+  checkEqNumber(before.archiveMaxSeq, park.lastSeq, '基线：归档末号 = 前端 park 末号')
+
+  // ②b 续期基线（同确认门用例：B 的请求不得给 A 的快照/待决键续期）。
+  const pttlKeys = {
+    snapshot: identityScopedRunKey('ai:run:', whoA, park.runId),
+    pending: identityScopedRunKey('ai:pending:', whoA, park.runId)
+  }
+  const pttlBefore = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
+
+  // ③ B 身份在实例 B：同一条轮的八项探测（含 frontend-tool-result 与 confirm 两个写入口）。
+  await probeIdentityInvisible('b', {
+    runId: park.runId,
+    sessionId: park.sessionId,
+    toolCallId: park.toolCallId,
+    evidenceName: 'B-frontend-invisible.json',
+    frontendEntry: true
+  })
+  const pttlAfter = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
+  saveEvidence('A-ttl-no-renewal.json', {
+    identity: identityTag(whoA),
+    keys: pttlKeys,
+    before: pttlBefore,
+    after: pttlAfter
+  })
+  assertNoCrossIdentityRenewal('B 身份跨身份探测（前端通道）', pttlKeys, pttlBefore, pttlAfter, {
+    ttlRequired: ['snapshot']
+  })
+
+  // ④ 零副作用：A 身份在 C 的指纹不变；且带 park 末号的重挂必须 0 帧 + 被服务端收流
+  //    （B 若写过任何帧/挪过末号，这里立刻红）。
+  const afterCurrent = await currentRun('c', park.sessionId, { identity: whoA })
+  const afterDetail = await runDetail('c', park.runId, { identity: whoA })
+  const after = identityStateFingerprint(afterCurrent, afterDetail)
+  saveEvidence('A-state-after-b.json', { identity: identityTag(whoA), at: nowIso(), fingerprint: after })
+  checkEq(
+    stableStringify(after),
+    stableStringify(before),
+    'B 身份的全部探测必须零副作用（A 身份在 C 观察到的前端挂起轮指纹必须逐字段不变）'
+  )
+  checkEq(after.snapshotStatus, 'SUSPENDED', 'B 探测后快照仍必须是 SUSPENDED')
+  check(after.awaitingExternal === true, 'B 探测后 awaitingExternal 必须仍为 true')
+  checkEqNumber(after.archiveMaxSeq, park.lastSeq, 'B 探测后归档末号不得增长（B 不得产生任何帧）')
+  checkEq(after.pending.length, 1, 'B 探测后待决条目数')
+  checkEq(after.pending[0].status, 'PENDING', 'B 探测后待决条目必须仍是 PENDING')
+
+  const pre = await reattachOn('c', park.runId, park.lastSeq, { timeoutMs: 30000, identity: whoA })
+  let preHow = null
+  try {
+    preHow = await pre.waitClosed(PARK_SETTLE_TIMEOUT_MS, '前端 park 决策前重挂收流')
+    saveFrames('C-predecision-frontend.jsonl', pre.frames)
+    checkEq(preHow, 'end', '前端 park 决策前重挂必须是服务端正常收尾（连接重置不算）')
+    checkEq(
+      businessFrames(pre.frames).length,
+      0,
+      `前端 park 决策前重挂（lastSeq=${park.lastSeq}）不得有未归档帧（已收=${typesOf(pre.frames).join(',') || '空'}）`
+    )
+  } finally {
+    saveFrames('C-predecision-frontend.jsonl', pre.frames)
+    pre.close()
+  }
+
+  // ⑤ A 身份在实例 C 回灌前端结果：跨实例、同身份 ⇒ 可回灌（kind=FRONTEND 的门只对它开）。
+  const resultText = `已打开导出向导（taskId=${task.id}）`
+  const submit = await frontendToolResultOn(
+    'c',
+    { runId: park.runId, toolCallId: park.toolCallId, result: resultText, outcome: 'ok' },
+    { identity: whoA }
+  )
+  evidenceFirst(
+    (body) => saveEvidence('C-frontend-result.json', body),
+    () => submit.body || { status: submit.record.status, text: submit.record.text },
+    () => {
+      checkEq(submit.record.status, 200, 'A 身份在 C 的前端回灌 HTTP')
+      check(submit.body && submit.body.accepted === true, `A 身份在 C 的前端回灌未被接受：${submit.record.text.slice(0, 500)}`)
+      checkEq(submit.body.duplicate, false, '前端回灌 duplicate')
+      checkEq(submit.body.cancelled, false, '前端回灌 cancelled')
+      checkEq(submit.body.executed, false, '前端工具后端不得执行（executed=false）')
+      checkEq(submit.body.storedBy, STATE.instanceIds.c, '前端回灌 storedBy 必须是 C 的 instanceId')
+      checkIn(submit.body.resumeOutcome, ['LEASE_HELD_ELSEWHERE', 'SCHEDULED'], 'A 身份在 C 的前端回灌 resumeOutcome')
+    }
+  )
+
+  // ⑥ A 身份在 C 全量回放：前端通道的整本帧册（frontend_tool_result、无 tool_result/confirm_decision）。
+  const full = await fullReplayToTerminal('c', park.runId, 90000, 'C-frontend-full.jsonl', { identity: whoA })
+  const summary = assertFrontendLedger(full, {
+    toolCallId: park.toolCallId,
+    expectedName: 'navigate_to',
+    expectedResult: resultText
+  })
+  const detail = await runDetail('c', park.runId, { identity: whoA })
+  evidenceFirst(
+    (snapshot) => saveEvidence('run-detail.json', snapshot),
+    () => ({
+      runId: park.runId,
+      status: detail.snapshot ? detail.snapshot.status : null,
+      ledgerCounts: detail.ledgerCounts,
+      pending: detail.pending,
+      frameLedger: summary.types,
+      lastSeqScope: FULL_REPLAY_TIP_SCOPE,
+      before,
+      after
+    }),
+    () => {
+      checkEq(detail.snapshot.status, 'DONE', 'A 身份在 C 回灌后的 run 终态')
+      const settled = (detail.pending || []).find((entry) => entry && entry.toolCallId === park.toolCallId)
+      check(settled, 'run 详情必须仍列出该待决条目')
+      checkEq(settled.status, 'FRONTEND_RESULT', '待决条目终态必须是 FRONTEND_RESULT')
+      checkEq(settled.kind, 'FRONTEND', '待决条目 kind 必须仍是 FRONTEND')
+      checkEq(settled.executed, false, '前端工具不得被后端执行')
+      checkEq(settled.resultText, resultText, '待决条目结果文本必须原样保存回灌值')
+    }
+  )
+
+  // ⑦ 终态后 B 身份仍不可见。
+  const bAfterDetail = await getJson('b', `/api/ai/runs/${park.runId}`, { identity: whoB })
+  const bAfterEvents = await getJson('b', `/api/ai/events/${park.runId}?probe=1`, { identity: whoB })
+  saveEvidence('B-after-decision.json', {
+    identity: identityTag(whoB),
+    runs: { status: bAfterDetail.record.status, body: bAfterDetail.body },
+    eventsProbe: { status: bAfterEvents.record.status, body: bAfterEvents.body }
+  })
+  checkEq(bAfterDetail.body.data.exists, false, '回灌后 B 身份仍必须把这一轮按"不存在"回答')
+  checkEq(bAfterEvents.record.status, 404, '回灌后 B 身份重挂探测仍必须 404')
+
+  caseLog(
+    `A 身份（${identityTag(whoA)}）在实例 A 起前端工具挂起轮（${park.toolName}，frontend_tool_request）→ `
+      + `B 身份（${identityTag(whoB)}）在实例 B 全部不可见、两个写入口双 409，A 身份在 C 重读指纹不变 `
+      + `（决策前重挂 ${preHow} 且 0 帧）→ A 身份在 C 回灌 200（storedBy=C，executed=false，`
+      + `outcome=${submit.body.resumeOutcome}）→ C 全量帧册=${summary.types}（含 frontend_tool_result，`
+      + `无 tool_result/confirm_decision），条目 ${detail.pending && detail.pending[0] ? detail.pending[0].status : '?'}；`
+      + '回灌后 B 身份仍看不到这一轮'
+  )
+}
+
 // ── 结果与摘要 ─────────────────────────────────────────────────────────────
 
 function initArtifacts() {
@@ -5744,6 +6550,8 @@ function selfTestProductContract() {
     '@GetMapping("/runs/current")',
     'body.put("snapshotStatus"',
     'body.put("awaitingExternal"',
+    '@GetMapping("/pending/{runId}")',
+    '@PostMapping("/frontend-tool-result")',
     '@PostMapping("/startup-resume/scan")',
     '@PostMapping(value = "/runs/{runId}/resume"'
   ])
@@ -5809,6 +6617,47 @@ function selfTestStubContract() {
   return `routes=${routes.routes.length}`
 }
 
+/**
+ * 实例位（`app.instance-slot`）契约：三实例**两两不等**（不是"集合大小相等"就够 ——
+ * 两两判定在读的时候就能指出是哪一对撞了），且声明面（`INSTANCES`）与生效面（真正拼进启动参数的值）
+ * 逐字一致、都在 `0..999`。h2tcp 属多实例 profile，缺配置后端启动即失败；撞号则同一毫秒
+ * 两侧可能发出同一个 sessionId（会话静默合并）。
+ */
+function selfTestInstanceSlotDistinct() {
+  const declared = INSTANCES.map((inst) => ({ key: inst.key, node: inst.node, port: inst.port, slot: inst.slot }))
+  checkEq(declared.length, 3, '实例数')
+  for (let i = 0; i < declared.length; i += 1) {
+    const left = declared[i]
+    check(Number.isInteger(left.slot) && left.slot >= 0 && left.slot < 1000, `实例 ${left.key} 声明的实例位越界：${left.slot}`)
+    for (let j = i + 1; j < declared.length; j += 1) {
+      const right = declared[j]
+      checkEq(left.key === right.key, false, `实例 key 重复（${left.key}）`)
+      checkEq(left.node === right.node, false, `实例节点名重复（${left.node}）`)
+      checkEq(left.port === right.port, false, `实例 ${left.key}/${right.key} 端口相同（${left.port}）`)
+      checkEq(left.slot === right.slot, false, `实例 ${left.key}/${right.key} 实例位相同（${left.slot}）`)
+    }
+  }
+  const effective = INSTANCES.map((inst) => {
+    const arg = instanceArgs(inst.key).find((item) => item.startsWith('--app.instance-slot='))
+    check(arg, `实例 ${inst.key} 启动参数缺 --app.instance-slot`)
+    const value = Number(arg.split('=')[1])
+    check(Number.isInteger(value) && value >= 0 && value < 1000, `实例 ${inst.key} 实例位越界：${arg}`)
+    checkEq(value, inst.slot, `实例 ${inst.key} 启动参数实例位与 INSTANCES 声明不一致`)
+    return value
+  })
+  for (let i = 0; i < effective.length; i += 1) {
+    for (let j = i + 1; j < effective.length; j += 1) {
+      checkEq(
+        effective[i] === effective[j],
+        false,
+        `生效实例位必须两两不等（${INSTANCES[i].key}=${effective[i]} / ${INSTANCES[j].key}=${effective[j]}）`
+      )
+    }
+  }
+  checkEq(new Set(effective).size, INSTANCES.length, `三实例实例位必须互不相同（实得 ${JSON.stringify(effective)}）`)
+  return `实例位 ${INSTANCES.map((inst, index) => `${inst.key}=${effective[index]}`).join(' / ')} 两两不等`
+}
+
 /** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段 / 实例位。 */
 function selfTestInstanceArgs() {
   const args = instanceArgs('a')
@@ -5816,16 +6665,8 @@ function selfTestInstanceArgs() {
   checkIncludes(args.join(' '), '--spring.profiles.active=h2tcp', '实例启动参数 profile')
   check(dbArg && dbArg.includes('LOCK_TIMEOUT=60000'), `H2 JDBC URL 必须带 LOCK_TIMEOUT=60000：${dbArg}`)
   checkIncludes(args.join(' '), '--app.web.trusted-proxies=127.0.0.1/32', '可信代理网段')
-  // 实例位：多实例 profile 下后端强制显式配置（0..999），且各实例必须不同（撞号 = 会话静默合并）。
-  const slots = INSTANCES.map((inst) => {
-    const arg = instanceArgs(inst.key).find((item) => item.startsWith('--app.instance-slot='))
-    check(arg, `实例 ${inst.key} 启动参数缺 --app.instance-slot`)
-    const value = Number(arg.split('=')[1])
-    check(Number.isInteger(value) && value >= 0 && value < 1000, `实例 ${inst.key} 实例位越界：${arg}`)
-    return value
-  })
-  checkEq(new Set(slots).size, INSTANCES.length, `三实例实例位必须互不相同（实得 ${JSON.stringify(slots)}）`)
-  return 'h2tcp + LOCK_TIMEOUT + trusted-proxies + instance-slot'
+  const slots = selfTestInstanceSlotDistinct()
+  return `h2tcp + LOCK_TIMEOUT + trusted-proxies + instance-slot（${slots}）`
 }
 
 /** 复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、二元绑定删回去）。 */
@@ -5977,6 +6818,384 @@ function selfTestHygiene() {
   return `${files.length} 个文件`
 }
 
+// ── 双身份覆盖面的自证（身份登记 / 用例内容 / 前端通道帧集）─────────────────────
+
+/** 产品目录 `TenantUserDirectory` 里某租户那**一行**（到下一个 `new TenantView(` 为止）。 */
+function tenantDirectoryRow(source, tenantId) {
+  const marker = `new TenantView(${tenantId}L`
+  const at = source.indexOf(marker)
+  check(at >= 0, `TenantUserDirectory 未声明租户 ${tenantId}L（双身份用例的身份组合不成立）`)
+  const next = source.indexOf('new TenantView(', at + marker.length)
+  return source.slice(at, next < 0 ? source.length : next)
+}
+
+/**
+ * 双身份登记契约：A/B 必须都**真实登记**在产品目录里、且互不相同、且同租户。
+ *
+ * <p>为什么必须断言登记：`TenantIdentityFilter` 对未登记组合直接 400，"不可见"根本无从测起；
+ * 脚本自造一个 id 会把用例做成"永远 400 的假红"。
+ *
+ * <p>为什么必须同租户：键面身份段是 `tenantId:userId` 两段拼接，同租户下只换用户才能钉住
+ * "只按租户定键"这类欠隔离；换租户会把这种欠隔离掩盖掉。
+ */
+function selfTestProbeIdentities() {
+  const whoA = PROBE_IDENTITIES.a
+  const whoB = PROBE_IDENTITIES.b
+  checkEq(identityTag(whoA), `${AI_TENANT_ID}/${AI_USER_ID}`, 'A 身份必须是既有默认身份（基线 16 条的身份头逐字不变）')
+  checkEq(whoA.tenantId === whoB.tenantId, true, 'A/B 必须同租户（否则掩盖"只按租户定键"的欠隔离）')
+  checkEq(whoA.userId === whoB.userId, false, 'A/B 的用户必须不同')
+  checkEq(stableStringify(aiIdentityHeaders('/api/ai/events/run-self', whoA)) === stableStringify(aiIdentityHeaders('/api/ai/events/run-self', whoB)), false, 'A/B 的身份头不得相同')
+
+  const directory = readProduct('backend/src/main/java/com/example/configmgr/ai/tenant/TenantUserDirectory.java')
+  const row = tenantDirectoryRow(directory, whoA.tenantId)
+  for (const who of [whoA, whoB]) {
+    checkIncludes(row, `new UserView(${who.userId}L`, `身份 ${identityTag(who)} 未登记在租户 ${who.tenantId} 下`)
+  }
+  // 头面口径：数据面带身份、公开面/业务面不带（与 TenantIdentityFilter#shouldNotFilter 同源）。
+  const dataHeaders = aiIdentityHeaders('/api/ai/runs/current', whoB)
+  checkEq(dataHeaders['X-Tenant-Id'], String(whoB.tenantId), 'B 身份 tenant 头')
+  checkEq(dataHeaders['X-User-Id'], String(whoB.userId), 'B 身份 user 头')
+  for (const openPath of ['/api/ai/health', '/api/ai/tools', '/api/ai/tenants', '/api/ai/providers', '/api/tasks']) {
+    checkEq(Object.keys(aiIdentityHeaders(openPath, whoB)).length, 0, `${openPath} 不得带身份头（排除面）`)
+  }
+  checkEq(aiIdentityHeaders('/api/ai/events/run-self')['X-User-Id'], AI_USER_ID, '缺省身份必须仍是 A')
+
+  // run 级键形必须与产品 `RunKeyScope.tag` 一致，且两个身份**落在不同的键**上
+  // （零副作用侧证靠 PTTL 直接读这两个键，键拼错就会读到别人的/读不到）。
+  checkEq(identityScopedRunKey('ai:run:', whoA, 'run-self'), 'ai:run:{1:101:run:run-self}', 'A 的 run 级键形')
+  checkEq(identityScopedRunKey('ai:pending:', whoB, 'run-self'), `ai:pending:{${whoB.tenantId}:${whoB.userId}:run:run-self}`, 'B 的 run 级键形')
+  checkEq(
+    identityScopedRunKey('ai:run:', whoA, 'run-self') === identityScopedRunKey('ai:run:', whoB, 'run-self'),
+    false,
+    '同一 runId 在两个身份下必须落在不同键上'
+  )
+  // 零副作用侧证会红（PTTL 变长 = 被续期）—— 用假的读数证明它真的在看这一面。
+  selfExpectThrow(
+    () =>
+      assertNoCrossIdentityRenewal(
+        '自检',
+        { snapshot: 'ai:run:{1:101:run:r}' },
+        { snapshot: 8000 },
+        { snapshot: 24000 }
+      ),
+    '自检：PTTL 变长（被另一个身份续期）必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertNoCrossIdentityRenewal(
+        '自检',
+        { snapshot: 'ai:run:{1:101:run:r}' },
+        { snapshot: 8000 },
+        { snapshot: -2 }
+      ),
+    '自检：键在探测期间消失必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertNoCrossIdentityRenewal(
+        '自检',
+        { snapshot: 'ai:run:{1:101:run:wrong}' },
+        { snapshot: -2 },
+        { snapshot: -2 }
+      ),
+    '自检：键形拼错（PTTL=-2，键根本不存在）必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertNoCrossIdentityRenewal(
+        '自检',
+        { snapshot: 'ai:run:{1:101:run:r}' },
+        { snapshot: -1 },
+        { snapshot: -1 },
+        { ttlRequired: ['snapshot'] }
+      ),
+    '自检：要求 TTL 的键没有 TTL 必须红'
+  )
+  assertNoCrossIdentityRenewal('自检正例', { snapshot: 'ai:run:{1:101:run:r}' }, { snapshot: 8000 }, { snapshot: 6500 })
+  assertNoCrossIdentityRenewal(
+    '自检正例（无 TTL 键）',
+    { pending: 'ai:pending:{1:101:run:r}' },
+    { pending: -1 },
+    { pending: -1 }
+  )
+  return `${identityTag(whoA)} vs ${identityTag(whoB)}（同租户、均登记、键形互异）`
+}
+
+/** 取本文件顶层函数体（`function name(` 到行首 `}`）：用于"这段判据还在不在"的静态自证。 */
+function probeFunctionSource(name) {
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const at = source.indexOf(`function ${name}(`)
+  check(at >= 0, `探针源码里找不到函数 ${name}`)
+  const end = source.indexOf('\n}', at)
+  check(end > at, `函数 ${name} 的结尾无法定位`)
+  return source.slice(at, end + 2)
+}
+
+/**
+ * 双身份用例的内容契约（防"注册了但把断言删空"）：
+ * ① 基线 16 条仍在 `CASES` 的**前 16 位**（顺序不变）且仍全在 `REQUIRED_CASE_IDS`；
+ * ② 两条新用例在 `CASES`/`REQUIRED_CASE_IDS`/`BASELINE` 之外各自成立；
+ * ③ 新用例与探测助手的函数体里真的包含那些判据（404/409/零副作用指纹/前端帧册）。
+ */
+function selfTestIdentityCaseContract() {
+  checkEq(BASELINE_CASE_IDS.length, 16, '基线用例数必须恰为 16（不削弱）')
+  const ids = CASES.map((def) => def.id)
+  // 基线 16 条必须仍占满**前 16 个执行位**（新用例只许追加在后面）：删一条/插一条都立刻红。
+  const prefix = ids.slice(0, BASELINE_CASE_IDS.length)
+  checkEq(prefix.length, BASELINE_CASE_IDS.length, 'CASES 前 16 位不足（基线用例被删）')
+  checkEq(new Set(prefix).size, BASELINE_CASE_IDS.length, `CASES 前 16 位必须恰是基线 16 条（实得 ${JSON.stringify(prefix)}）`)
+  for (const id of BASELINE_CASE_IDS) {
+    check(prefix.includes(id), `基线用例 ${id} 不在前 16 个执行位（被删除或被新用例挤走）`)
+    checkIncludes(REQUIRED_CASE_IDS.join(','), id, `REQUIRED_CASE_IDS 缺基线用例 ${id}`)
+  }
+  for (const id of IDENTITY_CASE_IDS) {
+    check(ids.includes(id), `CASES 缺双身份用例 ${id}`)
+    check(REQUIRED_CASE_IDS.includes(id), `REQUIRED_CASE_IDS 缺双身份用例 ${id}`)
+  }
+  checkEq(ids.length, REQUIRED_CASE_IDS.length, '用例数量与必需清单')
+
+  const probe = probeFunctionSource('probeIdentityInvisible')
+  for (const needle of [
+    '/api/ai/events/${runId}?probe=1',
+    "checkEq(events.status, 404",
+    "'UNKNOWN_RUN'",
+    'exists, false',
+    'found, false',
+    'history.body.data.total, 0',
+    "'UNKNOWN_TOOL_CALL'",
+    'frontendToolResultOn(',
+    'saveEvidence(evidenceName, evidence)'
+  ]) {
+    checkIncludes(probe, needle, `B 身份探测助手缺判据 ${needle}`)
+  }
+
+  const confirmCase = probeFunctionSource('caseIdentityCrossInstance')
+  for (const needle of [
+    'identityStateFingerprint',
+    'stableStringify(after)',
+    'pttlOf(',
+    'assertNoCrossIdentityRenewal(',
+    'confirmOn(',
+    'STATE.instanceIds.c',
+    'assertFrameLedger(full',
+    'after.archiveMaxSeq, run.lastSeq'
+  ]) {
+    checkIncludes(confirmCase, needle, `确认门双身份用例缺判据 ${needle}`)
+  }
+
+  const frontendCase = probeFunctionSource('caseIdentityFrontendCrossInstance')
+  for (const needle of [
+    'createFrontendParkedRun(',
+    'frontendEntry: true',
+    'assertFrontendLedger(full',
+    'expectedResult: resultText',
+    "'FRONTEND_RESULT'",
+    'stableStringify(after)',
+    'assertNoCrossIdentityRenewal(',
+    "reattachOn('c', park.runId, park.lastSeq"
+  ]) {
+    checkIncludes(frontendCase, needle, `前端通道双身份用例缺判据 ${needle}`)
+  }
+  return `基线 ${BASELINE_CASE_IDS.length} + 双身份 ${IDENTITY_CASE_IDS.length}（探测助手 9 条判据）`
+}
+
+/**
+ * 身份侧效应指纹的自证：同态（只差 TTL/时间戳）必须相等，任一"被写过才会变"的字段变了必须不相等。
+ * 这套判据是"零副作用"的主证，如果它对单字段不敏感，用例就会变成只比"两边都非空"。
+ */
+function selfTestIdentityFingerprint() {
+  const current = {
+    runId: 'r-self-id',
+    snapshotStatus: 'SUSPENDED',
+    awaitingExternal: true,
+    archiveMaxSeq: 7,
+    unresolvedExternal: ['tc-self'],
+    pendingEntries: [
+      { toolCallId: 'tc-self', entryStatus: 'PENDING', kind: 'CONFIRM', name: 'start_export', arguments: '{"taskId":1}', req: true }
+    ],
+    snapshotRemainingMs: 1000,
+    snapshotExpiresAt: 111
+  }
+  const detail = {
+    exists: true,
+    snapshot: { status: 'SUSPENDED', atMs: 1 },
+    pending: [
+      {
+        toolCallId: 'tc-self',
+        status: 'PENDING',
+        outcome: null,
+        executed: false,
+        executedBy: null,
+        resultText: null,
+        resolvedAtMs: 0,
+        claimedAtMs: 0
+      }
+    ],
+    ledger: [],
+    ledgerCounts: { start_export: 1 }
+  }
+  const base = identityStateFingerprint(current, detail)
+  const same = identityStateFingerprint(
+    { ...current, snapshotRemainingMs: 999, snapshotExpiresAt: 222 },
+    { ...detail, snapshot: { status: 'SUSPENDED', atMs: 99 } }
+  )
+  checkEq(stableStringify(same), stableStringify(base), '身份指纹不得把 TTL/时间戳算成副作用')
+  const mutations = [
+    ['快照状态', () => identityStateFingerprint({ ...current, snapshotStatus: 'DONE' }, detail)],
+    ['归档末号', () => identityStateFingerprint({ ...current, archiveMaxSeq: 8 }, detail)],
+    ['awaitingExternal', () => identityStateFingerprint({ ...current, awaitingExternal: false }, detail)],
+    [
+      '待决条目状态',
+      () => identityStateFingerprint(current, { ...detail, pending: [{ ...detail.pending[0], status: 'APPROVED' }] })
+    ],
+    [
+      '待决条目结果文本',
+      () => identityStateFingerprint(current, { ...detail, pending: [{ ...detail.pending[0], resultText: '被写了' }] })
+    ],
+    [
+      '待决条目决态时刻',
+      () => identityStateFingerprint(current, { ...detail, pending: [{ ...detail.pending[0], resolvedAtMs: 123 }] })
+    ],
+    ['台账计数', () => identityStateFingerprint(current, { ...detail, ledgerCounts: { start_export: 2 } })]
+  ]
+  for (const [name, mutate] of mutations) {
+    checkEq(
+      stableStringify(mutate()) === stableStringify(base),
+      false,
+      `身份指纹必须对"${name}"的变化敏感（否则"零副作用"会被静默放行）`
+    )
+  }
+  return `1 正例 + ${mutations.length} 个单字段反例`
+}
+
+/** 前端通道帧册 fixture（帧面按产品 `SseChatEmitter#frontendToolRequest/frontendToolResult` 的字段）。 */
+function frontendLedgerFixture() {
+  const args = '{"page":"export","taskId":1}'
+  return [
+    { type: 'start', seq: 1, runId: 'r-self-fe', sessionId: 's-self-fe' },
+    {
+      type: 'suspended',
+      seq: 2,
+      runId: 'r-self-fe',
+      toolCalls: [{ toolCallId: 'tc-fe', name: 'navigate_to', kind: 'FRONTEND', arguments: args }],
+      stateKey: 'ai:run:1:101:{run:r-self-fe}',
+      pendingKey: 'ai:pending:1:101:{run:r-self-fe}',
+      writtenBy: 'instance-self'
+    },
+    { type: 'tool_start', seq: 3, toolCallId: 'tc-fe', name: 'navigate_to', kind: 'FRONTEND', args },
+    {
+      type: 'frontend_tool_request',
+      seq: 4,
+      toolCallId: 'tc-fe',
+      name: 'navigate_to',
+      args,
+      timeoutSeconds: 120,
+      callback: 'POST /api/ai/frontend-tool-result {runId, toolCallId, result}'
+    },
+    {
+      type: 'frontend_tool_result',
+      seq: 5,
+      toolCallId: 'tc-fe',
+      name: 'navigate_to',
+      ok: true,
+      executed: false,
+      status: 'FRONTEND_RESULT',
+      outcome: 'ok',
+      result: '已打开导出向导'
+    },
+    { type: 'message_start', seq: 6 },
+    { type: 'delta', seq: 7, text: '向导已打开，请继续' },
+    { type: 'message_end', seq: 8 },
+    { type: 'done', seq: 9 }
+  ]
+}
+
+/**
+ * 前端通道帧集断言的自证（正例 + 8 个反例）：证明这套断言**会红**，不是橡皮图章。
+ * 反例覆盖：混入确认卡 / 缺 tool_start / kind 写错 / 结局帧被写成 tool_result /
+ * ok=false / 请求帧缺 callback / seq 断号 / 出现 error 帧。
+ */
+function selfTestFrontendFrameContract() {
+  const ledger = frontendLedgerFixture()
+  const summary = assertFrontendLedger(ledger, {
+    toolCallId: 'tc-fe',
+    expectedName: 'navigate_to',
+    expectedResult: '已打开导出向导'
+  })
+  checkEq(
+    summary.types,
+    'start,suspended,tool_start,frontend_tool_request,frontend_tool_result,message_start,delta,message_end,done',
+    '自检前端帧册帧型'
+  )
+  // 决策前重挂的最小帧集：首 4 帧（request 已到、已收流）。
+  const parked = ledger.filter((frame) => frame.seq <= 4)
+  assertFrontendParkedFrameSet(parked, 'tc-fe')
+  assertFrontendParkedPayloads(parked, { toolCallId: 'tc-fe' })
+
+  const rebuild = (mutate) => {
+    const copy = ledger.map((frame) => ({ ...frame }))
+    mutate(copy)
+    return copy
+  }
+  selfExpectThrow(
+    () => assertFrontendLedger([...parked, { type: 'confirm_request', seq: 5, toolCallId: 'tc-fe', name: 'navigate_to', args: '{}' }], { toolCallId: 'tc-fe' }),
+    '自检：前端通道混入 confirm_request 必须红'
+  )
+  selfExpectThrow(
+    () => assertFrontendLedger(ledger.filter((frame) => frame.type !== 'tool_start'), { toolCallId: 'tc-fe' }),
+    '自检：前端帧册缺 tool_start 必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertFrontendLedger(
+        rebuild((copy) => {
+          copy[1].toolCalls[0].kind = 'CONFIRM'
+        }),
+        { toolCallId: 'tc-fe' }
+      ),
+    '自检：suspended 公告把 kind 写成 CONFIRM 必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertFrontendLedger(
+        rebuild((copy) => {
+          copy[4].type = 'tool_result'
+        }),
+        { toolCallId: 'tc-fe' }
+      ),
+    '自检：前端结局帧被写成 tool_result 必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertFrontendLedger(
+        rebuild((copy) => {
+          copy[4].ok = false
+        }),
+        { toolCallId: 'tc-fe' }
+      ),
+    '自检：frontend_tool_result.ok=false 必须红'
+  )
+  selfExpectThrow(
+    () => assertFrontendParkedPayloads(parked.map((frame) => (frame.type === 'frontend_tool_request' ? { ...frame, callback: undefined } : frame)), { toolCallId: 'tc-fe' }),
+    '自检：请求帧缺 callback 必须红'
+  )
+  selfExpectThrow(
+    () =>
+      assertFrontendLedger(
+        rebuild((copy) => {
+          copy[6].seq = 9
+        }),
+        { toolCallId: 'tc-fe' }
+      ),
+    '自检：前端帧册 seq 断号必须红'
+  )
+  selfExpectThrow(
+    () => assertFrontendLedger([...ledger.slice(0, 8), { type: 'error', seq: 9 }], { toolCallId: 'tc-fe' }),
+    '自检：前端帧册出现 error 帧必须红'
+  )
+  return `9 帧 + 8 个反例`
+}
+
 async function selfCheckMain() {
   console.log('cluster3-probe --self-check（不启动 Java/Docker、不连接任何端口）\n')
   selfCheck(`用例注册覆盖用户清单（${REQUIRED_CASE_IDS.length} 条）`, selfTestCaseRegistry)
@@ -6001,6 +7220,10 @@ async function selfCheckMain() {
   selfCheck('产品端点/字段静态契约', selfTestProductContract)
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)
   selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
+  selfCheck('双身份登记（A/B 同租户、均在产品目录、身份头口径）', selfTestProbeIdentities)
+  selfCheck('双身份用例内容契约（基线 16 条不变 + 新用例判据仍在）', selfTestIdentityCaseContract)
+  selfCheck('身份侧效应指纹（TTL 不算副作用 / 单字段变化必红）', selfTestIdentityFingerprint)
+  selfCheck('前端通道帧集断言（frontend_tool_request/result 正例 + 8 反例）', selfTestFrontendFrameContract)
   selfCheck('复审契约（SIGSTOP/deferred / 分档码 / providerId 绑定）', selfTestReviewContracts)
   selfCheck('冷启动种子身份（非合成库行 + 三实例一致）', selfTestColdProviderIdentity)
   selfCheck('L-150 三格契约（取消键/认领表/判据方法 + 探针断言仍在）', selfTestL150GridContract)
@@ -6036,7 +7259,8 @@ async function main() {
        --stats-url 'http://127.0.0.1:23189/stats;csv'
        --ports 'a=23181,b=23182,c=23183,h2=23190,redis=23179'
        [--case preexec-cancel-grid]   # 单点/子集（逗号分隔多个 id）；不写 = 全套
-                                      # L-150 三格请用：--case preexec-cancel-grid`)
+                                      # L-150 三格请用：--case preexec-cancel-grid
+                                      # 双身份两条请用：--case identity-cross-instance,identity-frontend-cross-instance`)
     return 0
   }
   if (MODE_SELF_CHECK) return selfCheckMain()
