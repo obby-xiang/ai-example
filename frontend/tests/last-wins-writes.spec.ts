@@ -2,9 +2,12 @@
  * last-wins（并发形态）回归：三处"旧响应/旧任务结果覆盖新现场"的收口。
  *
  * ① `stores/task.ts#load`：快速翻页不得因为"已有请求在途"把新请求丢掉；旧页响应晚到不得覆盖新页。
- * ② `stores/workspace.ts#dispatchUiEvent(goto_step)`：PUT 在途期间换了任务 ⇒ 不得把步骤写到新任务。
- * ③ `utils/frontend-tools.ts#executeFrontendTool` 预算到点：被抛弃的续体不得再写工作区（`setStep` /
- *    `recentActions`）。
+ * ② `stores/workspace.ts#dispatchUiEvent(set_import_mode)`：PUT 在途期间换了任务 ⇒ 不得把模式写到新任务。
+ *    （草案写类 `select_defs` / `set_conditions` / `goto_step` 已改为**只认页面 handler**、
+ *    契约层不再自己发写请求，故这两条的"在途换任务"守卫随之收窄到仍由契约层直写的 `set_import_mode`；
+ *    页面未挂载时的零写语义见 `workspace-ui-*-guard.spec.ts` / `goto-step-readonly-guard.spec.ts`。）
+ * ③ `utils/frontend-tools.ts#executeFrontendTool` 预算到点：被抛弃的续体不得再写工作区
+ *    （`setImportMode` / `recentActions`）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -120,7 +123,7 @@ describe('stores/task.ts · 快速翻页 last-wins', () => {
 })
 
 describe('stores/workspace.ts · 旧任务结果不写新任务', () => {
-  it('goto_step 在途换任务：步骤不写到新任务的工作区', async () => {
+  it('set_import_mode 在途换任务：模式不写到新任务的工作区', async () => {
     const workspace = useWorkspaceStore()
     workspace.enterPage({
       pageId: 'export',
@@ -132,58 +135,29 @@ describe('stores/workspace.ts · 旧任务结果不写新任务', () => {
     })
 
     const pending = deferred<unknown>()
-    api.goToStep.mockReturnValue(pending.promise)
+    api.setImportMode.mockReturnValue(pending.promise)
 
-    const done = dispatchUiEvent({ type: 'goto_step', step: 'QUERY_COND' })
+    const done = dispatchUiEvent({ type: 'set_import_mode', mode: 'MERGE' })
     await flush()
-    expect(api.goToStep).toHaveBeenCalledWith(1, 'QUERY_COND')
+    expect(api.setImportMode).toHaveBeenCalledWith(1, 'MERGE')
 
-    // PUT 在途：用户/AI 换到了任务 2（新任务自己的步骤是 SELECT_DEFS）
+    // PUT 在途：用户/AI 换到了任务 2（新任务自己的模式是 REPLACE）
     workspace.setTaskId(2)
-    workspace.setStep('SELECT_DEFS')
+    workspace.setImportMode('REPLACE')
 
     pending.resolve({})
     const result = await done
 
     expect(result.handled).toBe(false)
     expect(result.message).toContain('任务已切换')
-    // 关键断言：任务 1 的步骤变更没有落到任务 2 的工作区状态上
+    // 关键断言：任务 1 的模式变更没有落到任务 2 的工作区状态上
     expect(workspace.taskId).toBe(2)
-    expect(workspace.step).toBe('SELECT_DEFS')
-  })
-
-  it('select_defs 在途换任务：选中集不写到新任务的工作区', async () => {
-    const workspace = useWorkspaceStore()
-    workspace.enterPage({
-      pageId: 'export',
-      page: 'export',
-      taskType: 'EXPORT',
-      step: 'SELECT_DEFS',
-      taskId: 1,
-      taskStatus: 'ACTIVE',
-      selectedDefs: ['A']
-    })
-
-    const pending = deferred<unknown>()
-    api.selectDefs.mockReturnValue(pending.promise)
-
-    const done = dispatchUiEvent({ type: 'select_defs', task: 'export', defCodes: ['B'] })
-    await flush()
-    expect(api.selectDefs).toHaveBeenCalledWith(1, ['B'])
-
-    workspace.setTaskId(2)
-    workspace.setSelectedDefs(['C'])
-
-    pending.resolve({})
-    const result = await done
-
-    expect(result.handled).toBe(false)
-    expect(workspace.selectedDefs).toEqual(['C'])
+    expect(workspace.importMode).toBe('REPLACE')
   })
 })
 
 describe('utils/frontend-tools.ts · 预算到点后不得继续写工作区', () => {
-  it('超时回灌后，晚到的 goto_step 续体不写 step / 不记动作', async () => {
+  it('超时回灌后，晚到的 set_import_mode 续体不写 importMode / 不记动作', async () => {
     const workspace = useWorkspaceStore()
     workspace.enterPage({
       pageId: 'export',
@@ -195,22 +169,22 @@ describe('utils/frontend-tools.ts · 预算到点后不得继续写工作区', (
     })
 
     const pending = deferred<unknown>()
-    api.goToStep.mockReturnValue(pending.promise)
+    api.setImportMode.mockReturnValue(pending.promise)
     const actionsBefore = workspace.recentActions.length
 
     const execution = await executeFrontendTool({
-      name: 'goto_step',
-      args: { step: 'QUERY_COND' },
+      name: 'set_import_mode',
+      args: { mode: 'MERGE' },
       budgetMs: 10
     })
     expect(execution.code).toBe('UI_BUDGET_EXHAUSTED')
     expect(execution.outcome).toBe('timeout')
 
     // 预算已到点：此时被抛弃的续体才拿到响应
-    pending.resolve({ status: 'ACTIVE', currentStep: 'QUERY_COND' })
+    pending.resolve({ status: 'ACTIVE', importMode: 'MERGE' })
     await flush()
 
-    expect(workspace.step).toBe('SELECT_DEFS')
+    expect(workspace.importMode).toBeNull()
     expect(workspace.recentActions.length).toBe(actionsBefore)
   })
 })

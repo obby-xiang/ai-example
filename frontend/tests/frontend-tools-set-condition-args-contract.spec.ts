@@ -5,8 +5,11 @@
  * ui_event 同名动作 `set_conditions` 的归一化都写了 `conditions: args.conditions ?? {}` ——
  * 页面未挂载（契约层兜底）时，漏参会被当成"显式清空"：PUT `{}` 并回成功。
  *
- * 收口口径：`conditions` 必填；漏传（undefined / null）⇒ 参数不完整失败，零 PUT、零工作区写；
- * 只有**显式 `{}`** 才清空。
+ * 收口口径：`conditions` 必填；漏传（undefined / null）⇒ 参数不完整失败，零 PUT、零工作区写。
+ *
+ * <p><b>兜底直写已移除</b>（写类 ui_event 收口）：契约层不再替页面 PUT 条件 —— 页面能力 handler
+ * 未注册时一律「页面未就绪」确定性失败（零 PUT、零工作区写），显式 `{}` 的"清空"语义只在页面
+ * handler 里成立（`frontend-tools-set-condition-args-page.spec.ts` 覆盖正常 handler 路径）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -97,8 +100,8 @@ describe('契约层路由：漏传 conditions 不得当清空（R5）', () => {
   })
 })
 
-describe('契约层路由：显式 {} 与合法条件仍正常（相邻正向）', () => {
-  it('显式 {} ⇒ 照旧清空（PUT "{}"），工作区不留占位', async () => {
+describe('契约层兜底不再直写：页面 handler 未注册 ⇒ 确定性失败（零 PUT、零工作区写）', () => {
+  it('set_condition 显式 {} ⇒ 「页面未就绪」，零 PUT、工作区不留占位', async () => {
     const workspace = bindExportContext()
 
     const execution = await executeFrontendTool({
@@ -107,38 +110,26 @@ describe('契约层路由：显式 {} 与合法条件仍正常（相邻正向）
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(true)
-    expect(api.setCondition).toHaveBeenCalledTimes(1)
-    expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
+    // 修复前（RED）：落到 dispatchUiEvent 的兜底分支 ⇒ PUT "{}" 并回成功（假同步）
+    expect(execution.ok).toBe(false)
+    expect(String(execution.result)).toContain('页面未就绪')
+    expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 
-  it('别名 set_conditions 显式 {} ⇒ 同样清空', async () => {
-    const workspace = bindExportContext()
-
-    const execution = await executeFrontendTool({
-      name: 'set_conditions',
-      args: { defCode: 'CURRENCY', conditions: {} },
-      budgetMs: 5_000
-    })
-
-    expect(execution.ok).toBe(true)
-    expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
-  })
-
-  it('合法条件 ⇒ 按内容原样落库并写回工作区', async () => {
+  it('别名 set_conditions 合法条件 ⇒ 「页面未就绪」，零 PUT、零工作区写', async () => {
     const workspace = bindExportContext()
     const condition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
 
     const execution = await executeFrontendTool({
-      name: 'set_condition',
+      name: 'set_conditions',
       args: { defCode: 'CURRENCY', conditions: condition },
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(true)
-    expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
-    expect(workspace.queryConditions.CURRENCY).toEqual(condition)
+    expect(execution.ok).toBe(false)
+    expect(String(execution.result)).toContain('页面未就绪')
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 })

@@ -25,11 +25,8 @@ import { saveBlob } from '@/api/http'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
-import { definitionsApi } from '@/api/definitions'
 import { useTaskStore } from '@/stores/task'
 import { stepLabel } from '@/utils/format'
-import { validateConditionPayload } from '@/utils/condition-payload'
-import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { findPublishTool } from '@/utils/publish-links'
@@ -519,6 +516,109 @@ export function notifyWorkspaceChanged(summary: string): void {
 // ── ui_event 统一分发（AI → 业务，与用户点击同一套 action） ───────────────────
 
 /**
+ * 草案写类事件：改的是任务里的选中集 / 条件 / 步骤。
+ *
+ * <p><b>只认页面能力 handler</b>：这三个动作的落库判据长在页面上（编码是否存在于当前定义列表、
+ * 条件载荷是否合法、推进步骤前必须先把勾选集/条件 `persistStepData` 落库）。契约层自己发写请求
+ * 等于绕过页面状态直接改任务 —— 页面挂载后按任务详情回灌，界面与 AI 看到的是两份互相覆盖的事实；
+ * `goto_step` 尤其危险：跳过 `persistStepData` 就"推进成功"，用户看到的是"已到下一步、什么都没有"。
+ *
+ * <p>因此页面未注册能力时一律**确定性失败**（「页面未就绪」，零业务 API、零工作区写），
+ * 已注册则原样交给页面（与用户手点同路径）。
+ */
+type DraftWriteEvent = 'select_defs' | 'set_conditions' | 'goto_step'
+
+/** 草案写动作所属向导。 */
+type DraftWizard = 'export' | 'import'
+
+/** 草案写动作 → 页面能力名（`registerPageHandler` 的名字即 handler 名）。 */
+const DRAFT_WRITE_HANDLERS: Record<DraftWriteEvent, Record<DraftWizard, string | null>> = {
+  select_defs: { export: 'export.selectDefs', import: 'import.selectDefs' },
+  // 导入向导没有「编辑查询条件」这一能力（与后端 `set_condition` 的 allowPages 一致）
+  set_conditions: { export: 'export.setConditions', import: null },
+  goto_step: { export: 'export.nextStep', import: 'import.nextStep' }
+}
+
+/** 回执文案：动作名 / 未落地时如实陈述 / 交给页面且没拿到具体文案时的通用成功语。 */
+const DRAFT_WRITE_LABELS: Record<DraftWriteEvent, { action: string; undone: string; done: string }> = {
+  select_defs: { action: '选择配置项', undone: '未变更所选配置项', done: '已变更所选配置项' },
+  set_conditions: { action: '设置查询条件', undone: '未设置查询条件', done: '已设置查询条件' },
+  goto_step: { action: '推进步骤', undone: '未跳转步骤', done: '已跳转步骤' }
+}
+
+/**
+ * 事件落在哪个向导：**工作区绑定任务的类型是事实源**，`select_defs.task` 只是模型给的草案目标
+ * （两者不一致时以任务为准 —— 写错的向导页不可能同时挂载）。
+ */
+function draftWizardOf(workspace: { taskType: TaskType | null }, hint?: DraftWizard): DraftWizard | null {
+  if (workspace.taskType === 'IMPORT') {
+    return 'import'
+  }
+  if (workspace.taskType === 'EXPORT') {
+    return 'export'
+  }
+  return hint ?? null
+}
+
+/**
+ * 取该动作为当前向导登记的页面能力。
+ *
+ * 返回 null = 页面未就绪（页面没挂载 / 还在加载 / 该页没有这项能力）：调用方必须落「未就绪」，
+ * 不得自己写业务后台。任务类型未知（未绑定任务的冷启动）时两种向导都问一次。
+ */
+function draftPageHandlerOf(event: DraftWriteEvent, wizard: DraftWizard | null): PageHandler | null {
+  const candidates: DraftWizard[] = wizard === null ? ['export', 'import'] : [wizard]
+  for (const candidate of candidates) {
+    const name = DRAFT_WRITE_HANDLERS[event][candidate]
+    const handler = name === null ? null : getPageHandler(name)
+    if (handler) {
+      return handler
+    }
+  }
+  return null
+}
+
+/** 「页面未就绪」的确定性失败回执（零业务写入；文案点名动作与缺失的页面）。 */
+function draftNotReady(event: DraftWriteEvent, wizard: DraftWizard | null): UiEventResult {
+  const page = wizard === null ? '目标向导页' : PAGE_LABELS[wizard]
+  const { action, undone } = DRAFT_WRITE_LABELS[event]
+  return fail(
+    `页面未就绪：${page}未注册「${action}」能力（页面未打开或仍在加载），本次${undone}`
+    + '（未落库、未写工作区）。请先打开该任务的向导，或由用户在界面上手动完成。'
+  )
+}
+
+/**
+ * 把草案写事件交给页面能力 handler —— 与用户手点同一套页面逻辑（含页面状态更新）。
+ *
+ * <p>返回值口径与 `utils/frontend-tools.ts#interpretHandlerOutcome` 同源：字符串 = 成功回执；
+ * `{ ok:false, reason }` = **确定性失败**（不得折回成功）；`{ ok:true, result? }` = 成功。
+ */
+async function runDraftHandler(
+  handler: PageHandler,
+  payload: Record<string, unknown>,
+  event: DraftWriteEvent,
+  lifetime: UiEventLifetime | undefined
+): Promise<UiEventResult> {
+  const outcome = await handler(payload, lifetime)
+  if (typeof outcome === 'string') {
+    return ok(outcome)
+  }
+  if (outcome !== null && typeof outcome === 'object' && 'ok' in outcome) {
+    const structured = outcome as { ok?: unknown; reason?: unknown; result?: unknown }
+    if (structured.ok === false) {
+      return fail(
+        typeof structured.reason === 'string' && structured.reason !== ''
+          ? structured.reason
+          : '页面执行失败，本次动作未完成'
+      )
+    }
+    return ok(typeof structured.result === 'string' ? structured.result : DRAFT_WRITE_LABELS[event].done)
+  }
+  return ok(DRAFT_WRITE_LABELS[event].done)
+}
+
+/**
  * `ui_event download` 的下载请求上限（毫秒）：<b>代码同源</b> = `utils/time-constants.ts` 的
  * {@link HTTP_TIMEOUT_MS}（axios 单请求上限）。两者都是"拉字节"类请求、延迟分布同类，
  * 故不各写一个字面量（超时面治理批① 第 4 项：此前是 `60_000` 字面量 + 注释对齐）。
@@ -672,6 +772,12 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
  * 每个分支都落到**与用户手点相同**的 API/action 上，因此 AI 驱动与手工操作
  * 的后端副作用完全一致（不新建"AI 专用后门"）。
  *
+ * <p>草案写类事件（`select_defs` / `set_conditions` / `goto_step`）**只认页面能力 handler**：
+ * 页面未注册能力时返回「页面未就绪」的确定性失败，零业务 API、零工作区写 ——
+ * 契约层不替页面落库（否则会绕过页面的编码/载荷判据与 `persistStepData`，
+ * 见 {@link DRAFT_WRITE_HANDLERS}）。导航类（`open_page` / `restore_task` / `export_started` …）
+ * 与刷新类不受影响。
+ *
  * 契约联动（批次5A 语义收口）：
  * - **成功**（`handled=true`）：记入工作区动作并广播 `workspace_changed`（面板出「工作区已同步」chip，
  *   `source=AI` 的动作随下一轮请求回到模型）；
@@ -742,16 +848,15 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未跳转步骤')
         }
-        await tasksApi.goToStep(taskId, event.step)
-        // 写回前必须核对：改的是**发起时那个任务**的工作区状态（换任务后不得写到新任务上）
-        if (abandoned()) {
-          return fail(`前端工具预算已到点：步骤变更已提交给任务 #${taskId}，未写入当前工作区`)
+        // 草案写类只认页面能力：页面未挂载时**不再** `tasksApi.goToStep` —— 那会绕过页面的
+        // `persistStepData`（勾选集/条件没落库却报「已推进」），页面随后按任务详情回灌，
+        // 用户看到的是"已到下一步、什么都没有"。未注册 ⇒ 确定性失败，零写。
+        const wizard = draftWizardOf(workspace)
+        const handler = draftPageHandlerOf('goto_step', wizard)
+        if (!handler) {
+          return draftNotReady('goto_step', wizard)
         }
-        if (!taskStill(taskId)) {
-          return switched(taskId)
-        }
-        workspace.setStep(event.step)
-        return ok(`已跳转到步骤 ${event.step}`)
+        return await runDraftHandler(handler, { step: event.step }, 'goto_step', lifetime)
       }
       case 'select_defs': {
         const taskId = workspace.taskId
@@ -765,36 +870,19 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未变更所选配置项')
         }
-        // R1 返修（reviewer Important）：兜底分支此前**不校验编码** —— 页面未挂载时，
-        // 非法码照样落库并写进 `extra.selectedDefs`。这里用**权威定义服务**做与页面同口径的
-        // 校验；定义不可用 / 编码非法一律零写（不落库、不写工作区）。
-        const codes = normalizeDefinitionCodes(event.defCodes)
-        let available: string[] = []
-        try {
-          available = (await definitionsApi.listDefinitions()).map((def) => def.code)
-        } catch {
-          // 定义服务不可用 ⇒ 无法校验 ⇒ 零写；文案由同一判据生成（空清单必返回原因，无需兜底）
-          return fail(definitionCodesProblem(codes, []))
+        // 编码是否存在于**当前**定义列表由页面 handler 判（`selectDefsProblem`，与用户勾选同口径）；
+        // 契约层不再自己落库 —— 页面未挂载时零写、确定性失败（见 {@link DRAFT_WRITE_HANDLERS}）。
+        const wizard = draftWizardOf(workspace, event.task)
+        const handler = draftPageHandlerOf('select_defs', wizard)
+        if (!handler) {
+          return draftNotReady('select_defs', wizard)
         }
-        if (abandoned()) {
-          return fail('前端工具预算已到点：本次未变更所选配置项')
-        }
-        const problem = definitionCodesProblem(codes, available)
-        if (problem !== null) {
-          return fail(problem)
-        }
-        if (!taskStill(taskId)) {
-          return switched(taskId)
-        }
-        await tasksApi.selectDefs(taskId, codes)
-        if (abandoned()) {
-          return fail(`前端工具预算已到点：所选配置项已提交给任务 #${taskId}，未写入当前工作区`)
-        }
-        if (!taskStill(taskId)) {
-          return switched(taskId)
-        }
-        workspace.setSelectedDefs(codes)
-        return ok(`已选择配置项：${codes.join('、') || '（空）'}`)
+        return await runDraftHandler(
+          handler,
+          { defCodes: event.defCodes, mode: 'REPLACE' },
+          'select_defs',
+          lifetime
+        )
       }
       case 'set_conditions': {
         const taskId = workspace.taskId
@@ -808,31 +896,20 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (abandoned()) {
           return fail('前端工具预算已到点：本次未设置查询条件')
         }
-        // R3 返修（reviewer Important）：兜底分支此前把模型载荷**原样** PUT 并写工作区 ——
-        // `IN []` / 空值 / 坏 JSON 都能落库。这里用与页面完全相同的判据链
-        // （parseConditionJson → draftModelFromCondition → buildConditionOutcome）先校验：
-        // 非法 / 不可解析 ⇒ 零写；显式空条件（`{}`）与坏载荷分开，绝不把坏载荷当"全量"。
-        const verdict = validateConditionPayload(event.conditions)
-        if (!verdict.ok) {
-          return fail(verdict.reason)
+        // 载荷校验与"显式 {} = 清空"的语义都在页面 handler（`export.setConditions`，与用户手点
+        // 同一判据链 `validateConditionPayload`）；契约层不再自己 PUT —— 页面未挂载时零写、
+        // 确定性失败（见 {@link DRAFT_WRITE_HANDLERS}）。
+        const wizard = draftWizardOf(workspace)
+        const handler = draftPageHandlerOf('set_conditions', wizard)
+        if (!handler) {
+          return draftNotReady('set_conditions', wizard)
         }
-        if (!taskStill(taskId)) {
-          return switched(taskId)
-        }
-        await tasksApi.setCondition(taskId, event.defCode, verdict.serialized)
-        if (abandoned()) {
-          return fail(`前端工具预算已到点：查询条件已提交给任务 #${taskId}，未写入当前工作区`)
-        }
-        if (!taskStill(taskId)) {
-          return switched(taskId)
-        }
-        if (verdict.condition === null) {
-          // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与页面同形）
-          workspace.clearQueryConditions(event.defCode)
-        } else {
-          workspace.setQueryConditions(event.defCode, verdict.condition)
-        }
-        return ok(`已设置 ${event.defCode} 的查询条件`)
+        return await runDraftHandler(
+          handler,
+          { defCode: event.defCode, conditions: event.conditions },
+          'set_conditions',
+          lifetime
+        )
       }
       case 'set_import_mode': {
         const taskId = workspace.taskId
