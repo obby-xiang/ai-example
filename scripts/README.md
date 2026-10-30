@@ -6,7 +6,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `scripts/verify-e2e.ps1` | 端到端验证脚本（123 用例 = 既有 35 + 批① 桩模式 88，PowerShell）。断言对象是**已启动的后端**，脚本自身不启动任何服务。AI 对话请求统一带 `X-Tenant-Id`/`X-User-Id`（默认 tenant=1 / user=101），会话号一律取自后端 `POST /api/ai/session` 的 `sessionIdText` |
-| `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。两实例实例位 `--app.instance-slot=0/1`（会话号不撞），AI 请求统一带身份头。只交付、施工期不运行 |
+| `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。AI 请求统一带身份头。只交付、施工期不运行 |
 | `scripts/redis5-cluster-smoke.sh` | **Redis 5.0.14 真集群冒烟网**（3 主 3 从、Docker）。`--static` 只做静态检查（**不连 Redis，不得当"5.0.14 已验证"**）；真集群模式才产出环境级证据，且**不替代**产品链路断言 |
 | `scripts/redis-run-migration.mjs` | **AI run 键族离线迁移**（旧裸键 → 带身份 tagged 键 `{<tenantId>:<userId>:run:<runId>}`；未声明身份时落到 legacy `{run:<runId>}`）。**默认 dry-run**，`--apply` 才写、`--rollback` 反向且支持带身份/legacy tagged 双形回退；正向带身份迁移把 `ai:run` 快照的 `tenantId/userId` 写成声明值（写后回读校验身份相等）并把 `ai:runs` 成员重写为 `tenantId/userId/runId`；未声明身份逐字节保留、仅归档。只 `SCAN` 不用 `KEYS`，目标已存在则逐值对账、不一致即失败且不覆盖 |
 | `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
@@ -218,13 +218,13 @@ config 只做"加载期 `??=` 补默认值"（显式 env 永远优先），起�
 
 | 组件 | 默认 | 说明 |
 | --- | --- | --- |
-| 实例 A / B | `8081` / `8082` | 默认各自独立 H2 文件（避免文件锁冲突）；`-SharedDb` 时共享同一 H2 文件（绝对路径 + `AUTO_SERVER=TRUE`）；Redis 共享。实例位固定 A=`0` / B=`1`（`--app.instance-slot`，多实例会话发号必须不同号） |
+| 实例 A / B | `8081` / `8082` | 默认各自独立 H2 文件（避免文件锁冲突）；`-SharedDb` 时共享同一 H2 文件（绝对路径 + `AUTO_SERVER=TRUE`）；Redis 共享 |
 | 共享 Redis | `127.0.0.1:6379` | 事件日志 `ai:xevents:`、唤醒频道 `ai:wake:`、序号 `ai:seq:`、续跑权 `ai:lease:run:`、资源锁 `ai:lock:*`、幂等索引 `ai:idem:` 都在这里 |
 | 上游桩 | `18399` | `scripts/ci/stub-upstream.mjs`（零密钥）；实例以 `AI_API_KEY=b23l1-stub-placeholder` 启动 |
 
 前置：后端 jar 已打包（`mvn -DskipTests package`）、环境有 `java` 与 `node`。脚本自己起子进程并做健康等待：判据 = `/api/ai/health` **扁平响应体**的 `available && redis.available`（该端点无 `data` 包装、也无 `ai` 子对象；AI 不可用时返回 503 但体形不变），缺项整棒 FAIL。起进程前先做 8081/8082/18399 的端口连通性预检（端口被占 ⇒ 直接 FAIL，避免在"旧的健康实例"上产出假绿证据），并对 `RedisHost:RedisPort` 做连通预检（harness 不自起 Redis，不通即 FAIL）。挂起类用例会在 A 侧自建一个真实 `EXPORT` 任务并 `select-defs`：确认门前的只读预检要求任务存在，chat 也必须带 `context`（否则 `start_export` 不在披露清单里，桩会退化为文本轮）。
 
-**AI 身份与发号（租户任务 5）**：所有 `/api/ai` 对话数据面请求（chat / events / confirm / runs / history / session / pending / frontend-tool-result / cancel）统一带 `X-Tenant-Id` 与 `X-User-Id`（默认 tenant=1 / user=101；业务 `POST /api/tasks`、`select-defs` 不加）；会话号一律 `POST /api/ai/session` 取 `sessionIdText`，脚本不本地造号。`-NoStart` 接已就绪实例时，请确认两实例启动参数分别带 `--app.instance-slot=0` / `=1`（或 `APP_INSTANCE_SLOT`），否则同毫秒可能发出同一个会话号。
+**AI 身份与发号（租户任务 5）**：所有 `/api/ai` 对话数据面请求（chat / events / confirm / runs / history / session / pending / frontend-tool-result / cancel）统一带 `X-Tenant-Id` 与 `X-User-Id`（默认 tenant=1 / user=101；业务 `POST /api/tasks`、`select-defs` 不加）；会话号一律 `POST /api/ai/session` 取 `sessionIdText`，脚本不本地造号。
 
 **L-12 / `-SharedDb` 边界**：默认两实例各用独立 H2，跨实例同 `taskId` 时另一侧预检会先失败（任务不存在），走不到资源锁；`instance-kill` 的 B 接管也会因 B 库无任务而被 `ToolTargetResolver` 前置拦截（`blocked/TARGET_INVALID`，不写台账、不执行）——这是设计内形态。`-SharedDb` 把两实例指到同一 H2 文件（`jdbc:h2:file:<绝对路径>/h2/b23l1_shared;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1`），`resource-lock` 才会跑跨实例竞态版，`instance-kill` 才可能走"台账 1 条 executedBy=B"的形态甲。**I-2 竞态重试**：跨实例版的临界区是毫秒级 `createAndStart`，两轮可能不重叠（两轮都执行）——该变体最多跑 **3 轮**（每轮新 task + 两个新 run 同刻发令），任一命中「恰一个 RESOURCE_LOCKED + 恰一个执行 + 台账合计 1 + 作业 1」即 PASS；3 轮全未命中判 **SKIP**（不判 FAIL，行为可能完全正确；跨实例资源互斥证据以 H3 确定性变体为准）。H2 共享不可行（启动不健康）时 harness **直接 FAIL 并点名该边界**，可去掉 `-SharedDb` 改用 H3 预置锁变体。**桩指纹约束**：跨实例变体同一 taskId 的两条消息必须带互异后缀（桩的会话指纹 = 首条 user 消息文本；同 taskId + 同一句话会被判成同一会话，后到者因 `bucket.used` 已占 TC16-EXPORT 退化为文本轮、不弹确认卡）。**守卫**：`-SharedDb` 与 `instance-kill`/`lease-scripts` 同棒会因"杀 A = 杀 H2 AUTO_SERVER 服务端、B 的连接随之断开"而必然半路崩，脚本在起进程前直接 FAIL 要求分两棒跑。`idempotency` 不需要 SharedDb：第二次决策只在 Redis 上读 `ai:decided:`/pending，不触碰任务库。
 

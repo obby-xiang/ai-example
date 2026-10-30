@@ -33,8 +33,8 @@
 - [ ] 新增不可变身份上下文、RequestContextUtils、SafeCloseable、HTTP Filter/Interceptor。
 - [ ] 增加 TTL 依赖与统一执行器装饰/适配，缺失身份 fail-closed。
 - [ ] RunSnapshot 增加 tenantId/userId，创建时固定；所有 AI HTTP 入口校验归属。
-- [ ] 新增后端建会话接口，long 时间戳+实例序列+实例位发号。
-- [ ] 单点覆盖嵌套还原、系统账号、缺失拒绝、同毫秒发号。
+- [ ] 新增后端建会话接口，通用 IdGenerator（当前毫秒时间戳）发号。
+- [ ] 单点覆盖嵌套还原、系统账号、缺失拒绝、发号与撞号 503。
 
 ### Task 2: 全部对话 Redis 键族隔离
 

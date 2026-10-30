@@ -29,9 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.username=sa",
         "spring.datasource.password=",
         "app.job.demo-batch-delay-ms=0",
-        "app.ai.resume.on-startup=false",
-        // h2tcp 属多实例 profile：会话发号要求显式实例位（单进程测试固定 0），否则上下文起不来。
-        "app.instance-slot=0"
+        "app.ai.resume.on-startup=false"
 })
 class FlywayStartupLockContextTest {
 

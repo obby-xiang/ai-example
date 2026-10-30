@@ -38,9 +38,6 @@
 
 .PARAMETER NoStart
   不自起服务：只用已就绪的 8081/8082（脚本仍做健康等待，不达标即整棒 FAIL）。
-  注意：多实例各实例的会话发号实例位必须不同（自起时脚本给 A=0 / B=1）；用已就绪实例时
-  请确认两边启动参数分别带 `--app.instance-slot=0` / `=1`（或环境变量 APP_INSTANCE_SLOT），
-  否则同一毫秒两侧可能发出同一个会话号。
 
 .PARAMETER KeepAlive
   用例跑完不杀进程（默认会收掉本脚本起来的全部子进程）。
@@ -322,10 +319,6 @@ function Start-Instance($pair, $jarPath) {
         "--spring.data.redis.host=$RedisHost",
         "--spring.data.redis.port=$RedisPort",
         $dsArg,
-        # 会话发号的实例位（app.instance-slot，0..999）：两实例**必须不同**，否则同一毫秒
-        # 两侧可能发出同一个 sessionId（唯一性不等于隔离，但撞号会让"谁的会话"无从判断）。
-        # 显式写死 A=0 / B=1，不依赖 Profile 判据（本 harness 不起多实例 profile）。
-        "--app.instance-slot=$($pair.slot)",
         '--app.job.batch-size=10'
     ) -join ' '
     $env = @{
@@ -1630,7 +1623,7 @@ try {
         New-Item -ItemType Directory -Force -Path $stubLogDir | Out-Null
         Start-Child 'stub' 'node' ("scripts/ci/stub-upstream.mjs --port " + $StubPort + " --dir `"" + $stubLogDir + "`"") $RepoRoot $null | Out-Null
 
-        $pairs = @(@{ name = 'instance-a'; port = $PortA; slot = 0 }, @{ name = 'instance-b'; port = $PortB; slot = 1 })
+        $pairs = @(@{ name = 'instance-a'; port = $PortA }, @{ name = 'instance-b'; port = $PortB })
         if ($SharedDb) {
             # 交错启动：A 先起并等健康（H2 AUTO_SERVER 服务端就绪），再起 B 连接同一文件。
             Start-Instance $pairs[0] $jarPath
