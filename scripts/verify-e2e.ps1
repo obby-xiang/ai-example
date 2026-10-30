@@ -52,11 +52,13 @@
 # 数据面安全：本脚本只创建/删除自己的 S5B-*/AIE2E-* 任务与 E2E_TEMP 定义；
 #   CURRENCY 演示数据在 TC13 会被替换为 3 行，TC19 用全量导出件恢复为 5 行。
 #
-# 租户/用户身份（租户任务 5）：AI 对话数据面（/api/ai 下除 health/tools/tenants/startup-resume
+# 租户/用户身份（租户任务 5）：AI 对话数据面（/api/ai 下除 health/tools/tenants
 #   与 providers/models/settings 子树）的**每个**请求都由本脚本统一附加 X-Tenant-Id / X-User-Id
 #   （默认身份 tenant=1 / user=101；业务数据与模型配置不加）。会话号一律由后端发
 #   （POST /api/ai/session，取权威字段 sessionIdText 十进制字符串），脚本不再本地造号：
 #   号值 ≈1.7e18 > 2^53，JSON number 会被静默改值。
+#   `startup-resume` 的读取与 `POST /scan` 也在数据面内（只处理当前身份的轮次）：它们**必须**带头，
+#   TENANT-AI-1 用"裸请求必须 400 / 带头 2xx"钉住这条边界。
 #   末尾 TENANT-AI-1..4 是租户验收（身份边界 / 发号契约 / 会话归属 / 对话隔离），计入主 PASS/FAIL。
 #
 # 结果口径：166 个用例计入 PASS/FAIL —— 既有 35 + 批① 91（AIE2E-*）+ V1 34（AIE2E-W-*）+ V2 4 + V5 2
@@ -140,8 +142,10 @@ $http.Timeout = [TimeSpan]::FromMilliseconds($script:HttpTimeoutMs)
 
 # ---------- 身份（租户/用户）：AI 对话数据面每个请求都带 X-Tenant-Id / X-User-Id ----------
 # 产品口径（后端 TenantIdentityFilter）：/api/ai 下的**对话数据面**缺头即 400；排除面只有两类
-#   · 精确路径：health / tools / tenants / startup-resume(+scan)（其子路径不排除）
+#   · 精确路径：health / tools / tenants（其子路径不排除）
 #   · 模型配置子树：providers / models / settings（AiConfigController）
+# `startup-resume` 的读取与 `POST startup-resume/scan` **在数据面内**（只处理当前身份的轮次）：
+# 漏带头 400，因此本脚本对它们照常附加身份头；TENANT-AI-1 用"裸请求必须 400"钉住这条边界。
 # 业务数据（/api/tasks、/api/jobs、/api/definitions…）与模型配置**不做租户隔离**，脚本也不给它们
 # 附加身份头 —— 加了会让人误以为它们也隔离，且会让"漏带头的对话请求 400"这类回归失去判据。
 $script:AiTenantId = 1
@@ -151,8 +155,7 @@ $script:AiOtherTenantId = 2
 $script:AiOtherTenantUserId = 201
 $script:AiSameTenantOtherUserId = 102
 
-$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants',
-    '/api/ai/startup-resume', '/api/ai/startup-resume/scan')
+$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants')
 $script:AiConfigSubtrees = @('/api/ai/providers', '/api/ai/models', '/api/ai/settings')
 
 # 与后端 shouldNotFilter 同一判定（子路径默认受保护：新增 /api/ai/* 数据接口不会静默逃出身份边界）
@@ -6348,7 +6351,22 @@ try {
     if ($cfg.status -eq 400 -and $cfg.json -and $cfg.json.code -like 'TENANT_IDENTITY*') {
         throw '模型配置面被纳入身份边界（/api/ai/providers 因缺头 400）：分界线与后端 filter 不一致'
     }
-    Ok 'TENANT-AI-1 身份边界：缺头/半头/目录外/系统账号/tenant=0 均 400，合法身份 200，模型配置面不强制身份头'
+    # startup-resume 与其 scan **在身份边界内**（HTTP 边界收紧后只处理当前身份的轮次）：
+    #   负控 = 裸请求必须 400（零副作用：filter 在业务链之前拒绝）；
+    #   正控 = 带合法身份的 scan 必须进入业务链（2xx）—— 这一条同时证明"脚本实际发的 scan 带头"。
+    # 少了这两条，把 startup-resume 当"公开面"的脚本会全绿，而真实调用已经被 400 挡住。
+    $bareScan = Invoke-AiRaw 'POST' '/api/ai/startup-resume/scan' $null
+    if ($bareScan.status -ne 400) { throw "缺身份头 POST /api/ai/startup-resume/scan => HTTP $($bareScan.status)，期望 400（该路径在身份边界内）" }
+    if ($bareScan.json.code -ne 'TENANT_IDENTITY_REQUIRED') { throw "缺头 scan 错误码 $($bareScan.json.code)，期望 TENANT_IDENTITY_REQUIRED" }
+    $bareReport = Invoke-AiRaw 'GET' '/api/ai/startup-resume' $null
+    if ($bareReport.status -ne 400) { throw "缺身份头 GET /api/ai/startup-resume => HTTP $($bareReport.status)，期望 400（该路径在身份边界内）" }
+    # 正控走脚本自己的 Invoke-Api ⇒ Add-AiIdentityHeaders ⇒ Test-AiDataPath：它证明"脚本实际发的
+    # scan 会带头"。若哪天把 startup-resume 放回排除集，这里会因缺头 400 而红（而不是静默变成空扫）。
+    $headScan = Invoke-Api 'POST' '/api/ai/startup-resume/scan' @{} $script:identA
+    if (-not $headScan.ok -or -not $headScan.json -or -not $headScan.json.success) {
+        throw "带合法身份的 POST /api/ai/startup-resume/scan => HTTP $($headScan.status) $($headScan.text)"
+    }
+    Ok 'TENANT-AI-1 身份边界：缺头/半头/目录外/系统账号/tenant=0 均 400，合法身份 200，模型配置面不强制身份头，startup-resume(+scan) 在边界内（裸请求 400 / 经脚本带头 2xx）'
 } catch { No 'TENANT-AI-1 身份边界' $_.Exception.Message }
 
 # ---- TENANT-AI-2：后端发号契约（sessionIdText 权威，long 仅兼容） ----

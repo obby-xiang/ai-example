@@ -11,8 +11,10 @@
  * <h2>口径（与后端逐条同构）</h2>
  * <ul>
  * <li>{@link isAiConversationPath}：`/api/ai` 与 `/api/ai/` 下**除**精确排除路径
- *   （`health` / `tools` / `tenants` / `startup-resume(+scan)`）与**模型配置子树**
- *   （`providers` / `models` / `settings`）之外全部受保护。业务数据（`/api/tasks` 等）
+ *   （`health` / `tools` / `tenants`）与**模型配置子树**（`providers` / `models` / `settings`）
+ *   之外全部受保护 —— **包括** `startup-resume` 的读取与 `POST startup-resume/scan`：两者都只处理
+ *   **当前身份**的轮次，所以和前端 `utils/ai-identity.ts`、后端 `TenantIdentityFilter.EXCLUDED_EXACT`
+ *   一样把它们留在边界内（漏带头 = 400，扫别人的轮在边界上就不成立）。业务数据（`/api/tasks` 等）
  *   与模型配置**不加**身份头。</li>
  * <li>{@link newAiSession}：先 `POST /api/ai/session` 取号，**只认 `sessionIdText`**（原始响应
  *   文本正则），禁止读 JSON `sessionId` number（约 1.7e18 > 2^53，double 会静默变值）。</li>
@@ -46,14 +48,14 @@ export function aiIdentityHeaders(identity: AiIdentity = AI_IDENTITY): Record<st
   }
 }
 
-/** 后端 `TenantIdentityFilter` 的精确排除路径（子路径**不**排除）。 */
-const EXCLUDED_EXACT = new Set([
-  '/api/ai/health',
-  '/api/ai/tools',
-  '/api/ai/tenants',
-  '/api/ai/startup-resume',
-  '/api/ai/startup-resume/scan'
-])
+/**
+ * 后端 `TenantIdentityFilter.EXCLUDED_EXACT` 的**逐字同集**（只有三条；子路径**不**排除）。
+ *
+ * <p>`startup-resume` 与其 `POST /scan` 刻意**不在**这里：HTTP 边界收紧后两者都要求身份头、
+ * 且只处理当前身份的轮次 —— 把它们当"公开面"会让 E2E 直连的 scan 变成 400，也会掩盖
+ * "越权扫别人的轮"这一整类回归。
+ */
+const EXCLUDED_EXACT = new Set(['/api/ai/health', '/api/ai/tools', '/api/ai/tenants'])
 
 /** 模型配置命名空间（整个子树不做租户隔离）。 */
 const CONFIG_SUBTREES = ['/api/ai/providers', '/api/ai/models', '/api/ai/settings']

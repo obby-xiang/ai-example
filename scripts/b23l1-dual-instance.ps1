@@ -105,13 +105,14 @@ $script:http.Timeout = [TimeSpan]::FromMinutes(3)
 
 # ── 身份（租户/用户）：AI 对话数据面每个请求都带 X-Tenant-Id / X-User-Id ──────────
 # 与后端 TenantIdentityFilter 同一分界：/api/ai 下的**对话数据面**缺头即 400；排除面只有
-#   · 精确路径 health / tools / tenants / startup-resume(+scan)（子路径不排除）
+#   · 精确路径 health / tools / tenants（子路径不排除）
 #   · 模型配置子树 providers / models / settings
+# `startup-resume` 的读取与 `POST startup-resume/scan` **在数据面内**（只处理当前身份的轮次，
+# 漏带头 400），因此本脚本对它们照常加身份头；"scan" 不是可以裸调用的运维面。
 # 业务数据（/api/tasks、select-defs…）与模型配置**不做租户隔离**，本脚本也不给它们加身份头。
 $script:AiTenantId = 1
 $script:AiUserId = 101
-$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants',
-    '/api/ai/startup-resume', '/api/ai/startup-resume/scan')
+$script:AiExcludedExactPaths = @('/api/ai/health', '/api/ai/tools', '/api/ai/tenants')
 $script:AiConfigSubtrees = @('/api/ai/providers', '/api/ai/models', '/api/ai/settings')
 
 function Test-AiDataPath([string]$path) {
@@ -528,9 +529,9 @@ function Start-PostJob($base, $path, $bodyObj, [int64]$fireAtMs = 0) {
         $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, ($base + $path))
         $req.Content = $content
         $p = $path.Split('?')[0]
+        # 与 Test-AiDataPath 同一分界：精确排除只有 health/tools/tenants（startup-resume + scan 在边界内）
         $isAiData = ($p -eq '/api/ai' -or $p.StartsWith('/api/ai/')) -and
-            -not (@('/api/ai/health', '/api/ai/tools', '/api/ai/tenants', '/api/ai/startup-resume',
-                '/api/ai/startup-resume/scan') -contains $p) -and
+            -not (@('/api/ai/health', '/api/ai/tools', '/api/ai/tenants') -contains $p) -and
             -not ($p.StartsWith('/api/ai/providers') -or $p.StartsWith('/api/ai/models') -or $p.StartsWith('/api/ai/settings'))
         if ($isAiData) {
             $req.Headers.TryAddWithoutValidation('X-Tenant-Id', $tenantId) | Out-Null

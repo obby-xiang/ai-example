@@ -20,8 +20,9 @@ export function apiUrl(path: string, base = API): string {
 }
 
 /**
- * 统一 HTTP 取值口：AI 对话数据面（`/api/ai` 下除 health/tools/tenants/startup-resume 与
+ * 统一 HTTP 取值口：AI 对话数据面（`/api/ai` 下除 health/tools/tenants 与
  * providers/models/settings 子树）**自动带身份头**；业务数据与模型配置原样不加。
+ * `startup-resume` 的读取与 `POST /scan` 属于数据面（只处理当前身份的轮次），因此这里同样带头。
  */
 async function data<T>(request: APIRequestContext, method: 'get' | 'post' | 'put', path: string, body?: unknown): Promise<T> {
   const headers = aiHeaders(path)

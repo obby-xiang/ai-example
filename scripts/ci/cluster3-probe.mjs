@@ -51,8 +51,9 @@
  * 双身份 × 三实例（两条新用例，排在基线 16 条之后；基线 16 条的身份头仍是默认身份 `1/101`）：
  *   - `identity-cross-instance`：A 身份（`1/101`，默认）在实例 A 起确认门挂起轮 → **B 身份**（`1/102`，
  *     同租户另一用户，产品 `TenantUserDirectory` 里已登记）在实例 B 上对 `events`（含 `?probe=1`）、
- *     `runs/{id}`、`runs/current`、`pending`、`history` **全部不可见**，`/confirm` 与
- *     `/frontend-tool-result` **双双 409 UNKNOWN_TOOL_CALL**；随后 A 身份在实例 C 重读的运行态指纹
+ *     `runs/{id}`、`runs/current`、`pending`、`history`、`startup-resume` 报告 **全部不可见**
+ *     （报告的原文里连 A 的 `runId` 都不许出现），`/confirm` 与 `/frontend-tool-result`
+ *     **双双 409 UNKNOWN_TOOL_CALL**；随后 A 身份在实例 C 重读的运行态指纹
  *     必须**逐字段不变**（零副作用），并在 C 上确认成功、全量帧册与台账照旧。
  *   - `identity-frontend-cross-instance`：同一条跨身份判据走**前端工具通道**（`frontend_tool_request`）——
  *     用桩路由表既有的 `TC16-NAVIGATE`（`navigate_to`，产品元数据 `@ToolChannel(FRONTEND)`）构造，
@@ -62,7 +63,11 @@
  *     ② 直接读 Redis 的 `PTTL`：B 的请求不得给 A 的 `ai:run:{1:101:run:<id>}` /
  *     `ai:pending:{1:101:run:<id>}` **续期**（读侧 `touchActiveRun` 必须按当前身份定键）。
  *   - 身份头来源：A/B 都在 `--self-check` 里静态断言"已登记在同租户"（未登记的组合会被 HTTP 边界 400，
- *     用例会变成假红）；`--self-check` 同时断言三实例实例位**两两不等**（声明面 + 生效面各判一次）。
+ *     用例会变成假红）。
+ *   - **边界口径**（HTTP 边界收紧后）：`/api/ai` 下只有 `health`/`tools`/`tenants`（精确）与
+ *     `providers`/`models`/`settings`（子树）不带身份头；`startup-resume` 的读取与
+ *     `POST startup-resume/scan` **在数据面内**（只处理当前身份的轮次）。探针的 scan 带头（正控），
+ *     并额外发一次**裸请求**证明它缺头必 400（负控）——`--self-check` 断言这五处口径同集。
  *
  * 用法：
  *   node scripts/ci/cluster3-probe.mjs --self-check
@@ -114,17 +119,16 @@ const PORTS = Object.freeze({
 })
 
 const INSTANCES = Object.freeze([
-  // slot = 会话发号实例位（app.instance-slot，0..999）：**三实例必须不同**。
-  // h2tcp 属多实例 profile，后端未显式配置实例位即启动失败（SessionIdGenerator 的 fail-closed）；
-  // 配成同一个值则同一毫秒两侧可能发出同一个 sessionId（撞号）。
-  { key: 'a', node: 'node-a', port: PORTS.a, slot: 0 },
-  { key: 'b', node: 'node-b', port: PORTS.b, slot: 1 },
-  { key: 'c', node: 'node-c', port: PORTS.c, slot: 2 }
+  { key: 'a', node: 'node-a', port: PORTS.a },
+  { key: 'b', node: 'node-b', port: PORTS.b },
+  { key: 'c', node: 'node-c', port: PORTS.c }
 ])
 
 // ── AI 对话数据面身份（X-Tenant-Id / X-User-Id）────────────────────────────
 // 与后端 TenantIdentityFilter 同一分界：/api/ai 下的对话数据面缺头即 400；排除面只有
-// 精确路径（health/tools/tenants/startup-resume(+scan)）与模型配置子树（providers/models/settings）。
+// 精确路径（health/tools/tenants）与模型配置子树（providers/models/settings）。
+// `startup-resume` 的读取与 `POST startup-resume/scan` **在边界内**（只处理当前身份的轮次），
+// 探针照常给它加身份头，并用"裸请求必须 400"作负控（见 forceZombieResume）。
 // 业务数据与模型配置**不做租户隔离**，本探针不给它们加身份头。
 const AI_TENANT_ID = '1'
 const AI_USER_ID = '101'
@@ -141,13 +145,14 @@ const AI_USER_ID = '101'
 const IDENTITY_A = Object.freeze({ tenantId: Number(AI_TENANT_ID), userId: Number(AI_USER_ID) })
 const IDENTITY_B = Object.freeze({ tenantId: Number(AI_TENANT_ID), userId: 102 })
 const PROBE_IDENTITIES = Object.freeze({ a: IDENTITY_A, b: IDENTITY_B })
-const AI_PUBLIC_EXACT_PATHS = Object.freeze([
-  '/api/ai/health',
-  '/api/ai/tools',
-  '/api/ai/tenants',
-  '/api/ai/startup-resume',
-  '/api/ai/startup-resume/scan'
-])
+/**
+ * 后端 `TenantIdentityFilter.EXCLUDED_EXACT` 的**逐字同集**（只有三条；子路径**不**排除）。
+ *
+ * <p>`startup-resume` 与 `POST startup-resume/scan` 已随 HTTP 边界收紧进入数据面：它们要求身份头、
+ * 且只处理**当前身份**的轮次。把它们留在排除集里会让探针的 scan 变成 400（或在产品尚未收紧时
+ * 掩盖越权），因此这里**只有**健康/工具/身份目录三条。
+ */
+const AI_PUBLIC_EXACT_PATHS = Object.freeze(['/api/ai/health', '/api/ai/tools', '/api/ai/tenants'])
 const AI_CONFIG_SUBTREES = Object.freeze(['/api/ai/providers', '/api/ai/models', '/api/ai/settings'])
 
 /** 该路径是否属于"必须带身份头"的对话数据面（与后端 shouldNotFilter 同口径，子路径默认受保护）。 */
@@ -899,7 +904,8 @@ function httpRequest(url, options = {}) {
     const headers = { ...(options.headers || {}) }
     // 对话数据面统一身份头：漏带会 400，且"回放/重挂/决策"会静默落到别的口径上；
     // 业务/模型配置不加（它们不做租户隔离）。`options.identity` 缺省 = 默认身份 A。
-    Object.assign(headers, aiIdentityHeaders(target.pathname, options.identity || null))
+    // `options.omitIdentity` = 负控：**不带**任何身份头（用来证明某条路径确实在身份边界内）。
+    Object.assign(headers, options.omitIdentity ? {} : aiIdentityHeaders(target.pathname, options.identity || null))
     const agent = options.agent === undefined ? false : options.agent
     const req = http.request({
       hostname: target.hostname,
@@ -1482,8 +1488,6 @@ function instanceArgs(key, { apiKey = PLACEHOLDER_KEY, extraArgs = [] } = {}) {
     RUN.jar,
     '--spring.profiles.active=h2tcp',
     `--server.port=${inst.port}`,
-    // 实例位：h2tcp 属多实例 profile，后端要求显式配置且各实例不同（否则启动失败/撞号）。
-    `--app.instance-slot=${inst.slot}`,
     `--spring.datasource.url=${dbUrl}`,
     '--spring.datasource.username=sa',
     '--spring.datasource.password=',
@@ -1892,6 +1896,36 @@ async function postJson(key, apiPath, body, { timeoutMs = 20000, identity = null
   if (record.text) {
     try {
       parsed = jsonOf(record, `${key} POST ${apiPath}`)
+    } catch {
+      parsed = null
+    }
+  }
+  return { record, body: parsed }
+}
+
+/**
+ * **负控请求**：同样的 URL/方法，但**一个身份头都不带**。
+ *
+ * <p>用途只有一个：证明某条 `/api/ai/...` 路径确实在身份边界内（缺头必须 400）。产品把路径
+ * 放回排除集时这条会红（拿到 2xx）；而"带头的正控"（同一路径带身份 → 2xx）证明探针确实带了头。
+ * 两者成对才说明"这条路径要求身份，且我们满足它"，单独任何一条都可能是假绿。
+ */
+async function bareRequest(key, method, apiPath, body = null) {
+  const payload = body === null ? undefined : Buffer.from(JSON.stringify(body), 'utf8')
+  const record = await httpRequest(directUrl(key, apiPath), {
+    method,
+    headers: payload === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: payload,
+    timeoutMs: 15000,
+    identity: null,
+    omitIdentity: true,
+    routeKind: 'api',
+    directNode: directNode(key)
+  })
+  let parsed = null
+  if (record.text) {
+    try {
+      parsed = jsonParse(record.text, `bare ${method} ${apiPath}`)
     } catch {
       parsed = null
     }
@@ -3865,6 +3899,14 @@ async function caseSuspendKillA() {
 // ── 用例 11：流式中 kill A → 僵尸扫描接管 ─────────────────────────────────
 
 async function forceZombieResume(runId) {
+  // 负控（一次性）：`startup-resume/scan` 在身份边界内 —— 裸请求必须 400 TENANT_IDENTITY_REQUIRED。
+  // 与下面的正控（带身份 scan 必须 200）成对：只有正控时，"产品把该路径放回排除集"不会被发现；
+  // 只有负控时，"探针忘了带头"不会被发现。负控本身零副作用（filter 在业务链之前拒绝）。
+  const bare = await bareRequest('b', 'POST', '/api/ai/startup-resume/scan', {})
+  saveEvidence('startup-resume-scan-bare.json', { status: bare.record.status, body: bare.body })
+  checkEq(bare.record.status, 400, '不带身份头的 POST /api/ai/startup-resume/scan 必须 400（该路径在身份边界内）')
+  checkEq(bare.body && bare.body.code, 'TENANT_IDENTITY_REQUIRED', '缺头 scan 的错误码')
+
   let lastReport = null
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const { record, body } = await postJson('b', '/api/ai/startup-resume/scan', {}, { timeoutMs: 60000 })
@@ -4115,7 +4157,7 @@ async function caseReadinessRemoval() {
   check(stillIncluded.includes('node-b') && stillIncluded.includes('node-c'), `无 key 时流量仍应覆盖 B/C：${JSON.stringify(stillIncluded)}`)
 
   // 无 key 时 /chat 在开流前 503 AI_UNAVAILABLE（能力面，不是实例就绪面）。
-  // 会话号从 B 取（A 此刻无 key；取号只需要身份 + 实例位，不依赖 AI key）。
+  // 会话号从 B 取（A 此刻无 key；取号只需要身份，不依赖 AI key）。
   const readinessSession = await newSession('b', 'cluster3-readiness')
   const readinessChat = await httpRequest(directUrl('a', '/api/ai/chat'), {
     method: 'POST',
@@ -5052,6 +5094,9 @@ function identityStateFingerprint(current, detail) {
  *     <b>404 UNKNOWN_RUN</b>（归档也按身份定键，B 侧一帧都没有 ⇒ 不会 202）；</li>
  * <li>`GET /api/ai/runs/{runId}` ⇒ 200 + `data.exists === false`（不回显"在别人手里"）；
  *     `GET /api/ai/runs/current` ⇒ 200 + `found=false`；`GET /api/ai/pending/{runId}` ⇒ 空列表；</li>
+ * <li>`GET /api/ai/startup-resume` ⇒ 200，但报告里**没有**别人的 `runId`
+ *     （`StartupResumeRunner` 对非调用者身份的记录直接 `continue`，`lastScanForIdentity` 再过滤一层）；
+ *     该路径在数据面内，所以这条探测本身也证明了"探针给 startup-resume 带了身份头"；</li>
  * <li>`POST /api/ai/confirm` 与 `POST /api/ai/frontend-tool-result` ⇒ 409 UNKNOWN_TOOL_CALL：
  *     两个入口都先读"当前身份的待决条目"（`pendingForWrite`），读不到直接 NOT_FOUND，
  *     **不写决策 guard、不改条目、不发帧**（所以才是"零副作用"）；</li>
@@ -5105,6 +5150,15 @@ async function probeIdentityInvisible(key, { runId, sessionId, toolCallId, evide
   // ④ 历史（记忆窗口按身份定键）。
   const history = await historyOf(key, sessionId, { identity: whoB })
   evidence.probes.history = { status: history.record.status, body: history.body }
+  // ④b startup-resume 报告：HTTP 边界收紧后它在数据面内，且**只回显当前身份的轮次**
+  //     （产品 `StartupResumeRunner` 对非调用者身份的记录直接 continue、`lastScanForIdentity` 再过滤）。
+  //     于是 B 侧回执里不得出现 A 的 runId —— 连"别人的轮存在"这件事都不能泄漏。
+  const resumeReport = await getJson(key, '/api/ai/startup-resume', { identity: whoB })
+  evidence.probes.startupResume = {
+    status: resumeReport.record.status,
+    leaksRunId: resumeReport.record.text.includes(runId),
+    body: resumeReport.body
+  }
   // ⑤ 两个写入口都必须被拒。
   const confirm = await confirmOn(
     key,
@@ -5149,6 +5203,13 @@ async function probeIdentityInvisible(key, { runId, sessionId, toolCallId, evide
 
   checkEq(history.record.status, 200, `${label} 读取 history HTTP`)
   checkEq(history.body.data.total, 0, `${label} 的 history 不得包含别人的会话内容`)
+
+  checkEq(resumeReport.record.status, 200, `${label} 读取 startup-resume 报告 HTTP（该路径在数据面内，必须带身份头）`)
+  checkEq(
+    resumeReport.record.text.includes(runId),
+    false,
+    `${label} 的 startup-resume 报告不得出现别人的 runId（越权扫别人的轮）`
+  )
 
   checkEq(confirm.record.status, 409, `${label} 决策必须被拒（409）`)
   checkEq(confirm.body && confirm.body.code, 'UNKNOWN_TOOL_CALL', `${label} 决策拒绝码`)
@@ -5246,7 +5307,8 @@ async function caseIdentityCrossInstance() {
   }
   const pttlBefore = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
 
-  // ③ B 身份在实例 B 的八项探测：events / probe / runs / runs-current / pending / history / confirm / frontend。
+  // ③ B 身份在实例 B 的九项探测：events / probe / runs / runs-current / pending / history /
+  //    startup-resume 报告 / confirm / frontend-tool-result。
   await probeIdentityInvisible('b', {
     runId: run.runId,
     sessionId: run.sessionId,
@@ -5389,7 +5451,7 @@ async function caseIdentityFrontendCrossInstance() {
   }
   const pttlBefore = { snapshot: pttlOf(pttlKeys.snapshot), pending: pttlOf(pttlKeys.pending) }
 
-  // ③ B 身份在实例 B：同一条轮的八项探测（含 frontend-tool-result 与 confirm 两个写入口）。
+  // ③ B 身份在实例 B：同一条轮的九项探测（含 startup-resume 报告、frontend-tool-result 与 confirm 两个写入口）。
   await probeIdentityInvisible('b', {
     runId: park.runId,
     sessionId: park.sessionId,
@@ -6617,56 +6679,14 @@ function selfTestStubContract() {
   return `routes=${routes.routes.length}`
 }
 
-/**
- * 实例位（`app.instance-slot`）契约：三实例**两两不等**（不是"集合大小相等"就够 ——
- * 两两判定在读的时候就能指出是哪一对撞了），且声明面（`INSTANCES`）与生效面（真正拼进启动参数的值）
- * 逐字一致、都在 `0..999`。h2tcp 属多实例 profile，缺配置后端启动即失败；撞号则同一毫秒
- * 两侧可能发出同一个 sessionId（会话静默合并）。
- */
-function selfTestInstanceSlotDistinct() {
-  const declared = INSTANCES.map((inst) => ({ key: inst.key, node: inst.node, port: inst.port, slot: inst.slot }))
-  checkEq(declared.length, 3, '实例数')
-  for (let i = 0; i < declared.length; i += 1) {
-    const left = declared[i]
-    check(Number.isInteger(left.slot) && left.slot >= 0 && left.slot < 1000, `实例 ${left.key} 声明的实例位越界：${left.slot}`)
-    for (let j = i + 1; j < declared.length; j += 1) {
-      const right = declared[j]
-      checkEq(left.key === right.key, false, `实例 key 重复（${left.key}）`)
-      checkEq(left.node === right.node, false, `实例节点名重复（${left.node}）`)
-      checkEq(left.port === right.port, false, `实例 ${left.key}/${right.key} 端口相同（${left.port}）`)
-      checkEq(left.slot === right.slot, false, `实例 ${left.key}/${right.key} 实例位相同（${left.slot}）`)
-    }
-  }
-  const effective = INSTANCES.map((inst) => {
-    const arg = instanceArgs(inst.key).find((item) => item.startsWith('--app.instance-slot='))
-    check(arg, `实例 ${inst.key} 启动参数缺 --app.instance-slot`)
-    const value = Number(arg.split('=')[1])
-    check(Number.isInteger(value) && value >= 0 && value < 1000, `实例 ${inst.key} 实例位越界：${arg}`)
-    checkEq(value, inst.slot, `实例 ${inst.key} 启动参数实例位与 INSTANCES 声明不一致`)
-    return value
-  })
-  for (let i = 0; i < effective.length; i += 1) {
-    for (let j = i + 1; j < effective.length; j += 1) {
-      checkEq(
-        effective[i] === effective[j],
-        false,
-        `生效实例位必须两两不等（${INSTANCES[i].key}=${effective[i]} / ${INSTANCES[j].key}=${effective[j]}）`
-      )
-    }
-  }
-  checkEq(new Set(effective).size, INSTANCES.length, `三实例实例位必须互不相同（实得 ${JSON.stringify(effective)}）`)
-  return `实例位 ${INSTANCES.map((inst, index) => `${inst.key}=${effective[index]}`).join(' / ')} 两两不等`
-}
-
-/** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段 / 实例位。 */
+/** 实例启动参数契约：h2tcp profile（含 graceful shutdown）/ LOCK_TIMEOUT / 可信代理网段。 */
 function selfTestInstanceArgs() {
   const args = instanceArgs('a')
   const dbArg = args.find((arg) => arg.startsWith('--spring.datasource.url='))
   checkIncludes(args.join(' '), '--spring.profiles.active=h2tcp', '实例启动参数 profile')
   check(dbArg && dbArg.includes('LOCK_TIMEOUT=60000'), `H2 JDBC URL 必须带 LOCK_TIMEOUT=60000：${dbArg}`)
   checkIncludes(args.join(' '), '--app.web.trusted-proxies=127.0.0.1/32', '可信代理网段')
-  const slots = selfTestInstanceSlotDistinct()
-  return `h2tcp + LOCK_TIMEOUT + trusted-proxies + instance-slot（${slots}）`
+  return 'h2tcp + LOCK_TIMEOUT + trusted-proxies'
 }
 
 /** 复审契约的自证（防止后续编辑把 SIGSTOP/deferred、分档码、二元绑定删回去）。 */
@@ -6838,6 +6858,163 @@ function tenantDirectoryRow(source, tenantId) {
  * <p>为什么必须同租户：键面身份段是 `tenantId:userId` 两段拼接，同租户下只换用户才能钉住
  * "只按租户定键"这类欠隔离；换租户会把这种欠隔离掩盖掉。
  */
+/**
+ * **身份边界口径**的自证（HTTP 边界收紧后：`startup-resume` 与其 `POST /scan` 在数据面内）。
+ *
+ * <p>三组判据：
+ * <ul>
+ * <li>**必带头的路径**：`/api/ai/startup-resume`、`.../scan`（含结尾斜杠与 query 形态）必须
+ *     `aiDataPath === true`，且 `aiIdentityHeaders` 给出两个头 —— 这就是"实际 POST /scan 会带头"
+ *     的那一步（探针的 `postJson` 走同一个函数）；</li>
+ * <li>**保留的排除面**：health/tools/tenants（精确匹配，子路径仍受保护）与
+ *     providers/models/settings（整棵子树）必须 `false`；业务面（`/api/tasks`）同样 `false`；</li>
+ * <li>**清单本身**：`AI_PUBLIC_EXACT_PATHS` 必须恰三条、无 `startup-resume`（类型级防回退）。</li>
+ * </ul>
+ */
+function selfTestIdentityBoundary() {
+  const headerPaths = [
+    '/api/ai/startup-resume',
+    '/api/ai/startup-resume/',
+    '/api/ai/startup-resume/scan',
+    '/api/ai/startup-resume/scan?lastSeq=1',
+    '/api/ai/startup-resume/scan/'
+  ]
+  for (const pathname of headerPaths) {
+    checkEq(aiDataPath(pathname), true, `${pathname} 必须属于数据面（HTTP 边界已收紧，缺头即 400）`)
+    const headers = aiIdentityHeaders(pathname)
+    checkEq(headers['X-Tenant-Id'], AI_TENANT_ID, `${pathname} 必须带 tenant 头`)
+    checkEq(headers['X-User-Id'], AI_USER_ID, `${pathname} 必须带 user 头`)
+  }
+  const excluded = [
+    '/api/ai/health',
+    '/api/ai/health/',
+    '/api/ai/tools',
+    '/api/ai/tenants',
+    '/api/ai/providers',
+    '/api/ai/providers/1/keys',
+    '/api/ai/models',
+    '/api/ai/models/1',
+    '/api/ai/settings/x',
+    '/api/tasks',
+    '/api/ai-health'
+  ]
+  for (const pathname of excluded) {
+    checkEq(aiDataPath(pathname), false, `${pathname} 必须不在数据面（排除面/业务面）`)
+    checkEq(Object.keys(aiIdentityHeaders(pathname)).length, 0, `${pathname} 不得带身份头`)
+  }
+  // 子路径默认受保护：精确排除**不**外溢（新增数据接口不会静默逃出边界）。
+  for (const pathname of ['/api/ai', '/api/ai/session', '/api/ai/events/run-1', '/api/ai/runs/current', '/api/ai/frontend-tool-result', '/api/ai/healthz', '/api/ai/tools/x']) {
+    checkEq(aiDataPath(pathname), true, `${pathname} 必须属于数据面（子路径默认受保护）`)
+  }
+  assertExactPathList(`[${AI_PUBLIC_EXACT_PATHS.join(',')}]`, '探针 AI_PUBLIC_EXACT_PATHS')
+  // 反例：这条判据必须真的会红（否则"五处一致"只是把同一份错误读两遍）。
+  selfExpectThrow(
+    () =>
+      assertExactPathList(
+        "['/api/ai/health','/api/ai/tools','/api/ai/tenants','/api/ai/startup-resume','/api/ai/startup-resume/scan']",
+        '自检：旧形态'
+      ),
+    '自检：精确排除集里留着 startup-resume(+scan) 必须红'
+  )
+  selfExpectThrow(
+    () => assertExactPathList("['/api/ai/health','/api/ai/tools']", '自检：少一条'),
+    '自检：精确排除集少一条必须红'
+  )
+  selfExpectThrow(
+    () => assertExactPathList("['/api/ai/health','/api/ai/tools','/api/ai/tenants','/api/ai/tenants']", '自检：重复'),
+    '自检：精确排除集重复必须红'
+  )
+  return `带头 ${headerPaths.length} 条 / 排除 ${excluded.length} 条 / 子路径 7 条 / 3 个反例`
+}
+
+/** 从 `marker` 起截一段"路径清单"文本（到 `terminator` 为止），用于跨文件口径比对。 */
+function pathListSlice(text, marker, terminator, label) {
+  const at = text.indexOf(marker)
+  check(at >= 0, `${label}：找不到清单起点 ${marker}`)
+  const end = text.indexOf(terminator, at + marker.length)
+  check(end > at, `${label}：找不到清单终点 ${terminator}`)
+  return text.slice(at, end)
+}
+
+/**
+ * 一段"精确排除清单"必须**只有** health/tools/tenants：
+ * 重复、缺一条、多一条、或把 `startup-resume(+scan)` 放回来，都立刻红。
+ */
+function assertExactPathList(slice, label) {
+  const found = slice.match(/\/api\/ai\/[A-Za-z0-9_./-]+/g) || []
+  checkEq(new Set(found).size, found.length, `${label}：清单里有重复路径（${found.join(',')}）`)
+  checkEq(found.length, 3, `${label}：精确排除必须恰三条（实得 ${JSON.stringify(found)}）`)
+  for (const required of ['/api/ai/health', '/api/ai/tools', '/api/ai/tenants']) {
+    check(found.includes(required), `${label}：缺少 ${required}（实得 ${JSON.stringify(found)}）`)
+  }
+  check(
+    !found.some((path) => path.startsWith('/api/ai/startup-resume')),
+    `${label}：startup-resume(+scan) 不得留在精确排除集里（它在数据面内，必须带身份头）`
+  )
+}
+
+/**
+ * **五处口径一致**（产品源码 + 探针 + Playwright 支持 + 两个 PowerShell 脚本）：
+ * 精确排除集都是 `health / tools / tenants`，都不含 `startup-resume`。
+ *
+ * <p>为什么值得单独自证：边界改一次要改五处，漏一处就会出现"脚本不带头的 scan 被 400"
+ * 或"脚本以为 scan 是公开面"的静默错配 —— 前者在真实集群里是红，后者是假绿。
+ */
+function selfTestIdentityBoundaryConsistency() {
+  const filter = readProduct('backend/src/main/java/com/example/configmgr/ai/tenant/TenantIdentityFilter.java')
+  assertExactPathList(
+    pathListSlice(filter, 'EXCLUDED_EXACT = Set.of(', ');', 'TenantIdentityFilter.EXCLUDED_EXACT'),
+    '产品 TenantIdentityFilter'
+  )
+  const e2eIdentity = readProduct('frontend/e2e/support/ai-identity.ts')
+  assertExactPathList(
+    pathListSlice(e2eIdentity, 'const EXCLUDED_EXACT = new Set([', '])', 'e2e support ai-identity.ts'),
+    'e2e support ai-identity.ts'
+  )
+  const verify = readProduct('scripts/verify-e2e.ps1')
+  assertExactPathList(
+    pathListSlice(verify, '$script:AiExcludedExactPaths = @(', ')', 'verify-e2e.ps1'),
+    'verify-e2e.ps1'
+  )
+  const b23l1 = readProduct('scripts/b23l1-dual-instance.ps1')
+  assertExactPathList(
+    pathListSlice(b23l1, '$script:AiExcludedExactPaths = @(', ')', 'b23l1-dual-instance.ps1'),
+    'b23l1-dual-instance.ps1'
+  )
+  // 同一脚本里另有一处内联清单（Start-Job 的脚本块不能引用父作用域变量，只能重复字面量）。
+  assertExactPathList(
+    pathListSlice(b23l1, "-not (@('/api/ai/health'", ') -contains', 'b23l1 内联清单'),
+    'b23l1-dual-instance.ps1 内联清单'
+  )
+  // 前端生产实现是同一份口径的锚点（本查询不改它，只断言它没被改回去）。
+  const frontendUtil = readProduct('frontend/src/utils/ai-identity.ts')
+  checkIncludes(
+    frontendUtil,
+    "const IDENTITY_EXCLUDED_EXACT = ['/ai/health', '/ai/tools', '/ai/tenants']",
+    '前端 utils/ai-identity.ts 的精确排除集'
+  )
+  // 两个 PowerShell 脚本的"裸请求必须 400"负控与"经脚本头帮助函数带头 → 2xx"正控都必须还在。
+  for (const needle of [
+    "'/api/ai/startup-resume/scan' $null",
+    'TENANT_IDENTITY_REQUIRED',
+    "Invoke-Api 'POST' '/api/ai/startup-resume/scan'",
+    '$headScan.ok'
+  ]) {
+    checkIncludes(verify, needle, `verify-e2e.ps1 TENANT-AI-1 边界判据 ${needle}`)
+  }
+  // 双实例脚本的内联清单（Start-Job 里重复的字面量）同样不得把 startup-resume 当公开面。
+  check(
+    !pathListSlice(b23l1, "-not (@('/api/ai/health'", ') -contains', 'b23l1 内联清单').includes('startup-resume'),
+    'b23l1-dual-instance.ps1 内联清单不得把 startup-resume 当公开面'
+  )
+  // 探针自己的负控/正控（run 模式）也必须还在。
+  const zombie = probeFunctionSource('forceZombieResume')
+  for (const needle of ["bareRequest('b', 'POST', '/api/ai/startup-resume/scan'", 'TENANT_IDENTITY_REQUIRED', "postJson('b', '/api/ai/startup-resume/scan'"]) {
+    checkIncludes(zombie, needle, `探针 forceZombieResume 缺判据 ${needle}`)
+  }
+  return '产品 + 探针 + Playwright + 2 个 PowerShell 脚本同集（health/tools/tenants）'
+}
+
 function selfTestProbeIdentities() {
   const whoA = PROBE_IDENTITIES.a
   const whoB = PROBE_IDENTITIES.b
@@ -6962,6 +7139,8 @@ function selfTestIdentityCaseContract() {
     'exists, false',
     'found, false',
     'history.body.data.total, 0',
+    "getJson(key, '/api/ai/startup-resume'",
+    'resumeReport.record.text.includes(runId)',
     "'UNKNOWN_TOOL_CALL'",
     'frontendToolResultOn(',
     'saveEvidence(evidenceName, evidence)'
@@ -6996,7 +7175,7 @@ function selfTestIdentityCaseContract() {
   ]) {
     checkIncludes(frontendCase, needle, `前端通道双身份用例缺判据 ${needle}`)
   }
-  return `基线 ${BASELINE_CASE_IDS.length} + 双身份 ${IDENTITY_CASE_IDS.length}（探测助手 9 条判据）`
+  return `基线 ${BASELINE_CASE_IDS.length} + 双身份 ${IDENTITY_CASE_IDS.length}（探测助手 11 条判据）`
 }
 
 /**
@@ -7221,6 +7400,8 @@ async function selfCheckMain() {
   selfCheck('桩路由表契约（TC16-EXPORT）', selfTestStubContract)
   selfCheck('实例启动参数（h2tcp / LOCK_TIMEOUT / trusted-proxies）', selfTestInstanceArgs)
   selfCheck('双身份登记（A/B 同租户、均在产品目录、身份头口径）', selfTestProbeIdentities)
+  selfCheck('身份边界（startup-resume(+scan) 在数据面内 / 排除面只剩 health+tools+tenants）', selfTestIdentityBoundary)
+  selfCheck('身份边界五处口径一致（产品 + 探针 + Playwright + 2 个 PowerShell 脚本）', selfTestIdentityBoundaryConsistency)
   selfCheck('双身份用例内容契约（基线 16 条不变 + 新用例判据仍在）', selfTestIdentityCaseContract)
   selfCheck('身份侧效应指纹（TTL 不算副作用 / 单字段变化必红）', selfTestIdentityFingerprint)
   selfCheck('前端通道帧集断言（frontend_tool_request/result 正例 + 8 反例）', selfTestFrontendFrameContract)
