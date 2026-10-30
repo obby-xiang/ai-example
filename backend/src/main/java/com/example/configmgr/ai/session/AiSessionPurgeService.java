@@ -122,7 +122,7 @@ public class AiSessionPurgeService {
 	 * 结算观测位键前缀（{@code ai:observed:<tenantId>:<userId>:<runId>}，HASH，首写即置 session-ttl）。
 	 *
 	 * <p>键形与 {@code SettlementObservationStore#observedKey} 同一拼接口（{@link TenantKeyScope}，
-	 * 与 {@code ai:beat:}/{@code ai:activity:} 同族）：<b>store 拥有写入与迁移排除清单，本类只负责
+	 * 与 {@code ai:beat:}/{@code ai:activity:} 同族）：<b>store 拥有写入，本类只负责
 	 * "销毁时按当前身份的 runId 删掉同一把键"</b>。此处只引用前缀常量而不引用 store 类 —— 单键 DEL
 	 * 一个不存在的键是 no-op，前向兼容；但身份段必须从同一处算，否则会删错（跨租户同 runId）。
 	 */

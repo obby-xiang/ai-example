@@ -44,8 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <li><b>purge</b>：<b>会话销毁必须删</b>（绑定要求：删除全部 AI 归属数据，不能只等 TTL）。
  * 销毁方调用 {@link #purge(String)}（或按 {@link #observedKey(String)} 取键一并 DEL），
  * 两个面（Redis + 进程内）同时清；TTL 只是兜底，不是销毁手段；</li>
- * <li><b>迁移</b>：<b>不搬</b> —— 一次性仲裁位，跨世代没有要保留的事实；
- * 已登记在 {@code scripts/redis-run-migration.mjs} 的 {@code EXCLUDED_KEY_PREFIXES}；</li>
+ * <li><b>迁移</b>：<b>不搬</b> —— 一次性仲裁位，跨世代没有要保留的事实；</li>
  * <li><b>降级</b>：Redis 读写失败 ⇒ {@link #claim} 返回 {@code true}（fail-open）——
  * 观测面宁可极小概率双记，也不能在依赖抖动时整片缺行。每次失败计一次
  * {@link RedisDegradation#O1_OBSERVATION_CLAIM}（否则"仲裁整体失效"在现网零信号）；</li>

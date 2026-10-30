@@ -70,6 +70,13 @@
       "reason": "已同步Redis条件候选、前端草案、下一步提交业务库、多草案挂起及普通异常终帧契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:cfae60ae24e79a0daee24c0a20a44de806d60a9d730942dc433b843b1aee7810",
+      "status": "synced",
+      "reason": "已删除未上线Redis迁移工具链，并同步D6为仅迁移库内AI配置与反馈数据",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
