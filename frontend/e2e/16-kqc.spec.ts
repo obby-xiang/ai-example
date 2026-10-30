@@ -29,13 +29,12 @@ import {
   kbStatus,
   maxStubIndex,
   newSessionId,
-  parsePillText,
+  parsePillTitle,
   readDocBody,
   readDocTail,
   redisExec,
   roleTextsOf,
   systemTextOf,
-  tokensFromLabel,
   toolEnvelope,
   toolNames,
   lastToolContent,
@@ -604,7 +603,7 @@ test.describe('@stub 16 Q 快捷建议', () => {
 })
 
 test.describe('@stub 16 C 上下文统计与压缩', () => {
-  test('E2E-C01 pill 与端点同值：百分比/已用/上限三处一致、档位按服务端百分比', async ({ page }) => {
+  test('E2E-C01 圆环与端点同值：tooltip 百分比 / value / 档位一致，默认态无文字', async ({ page }) => {
     const shapes = usageShapes()
     await openApp(page)
     await sendMessage(page, `上下文用例 ${fingerprint('C01')} usage-shape=last`)
@@ -612,19 +611,25 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
 
     const pill = page.locator('[data-testid="context-pill"]')
     await expect(pill).toBeVisible()
-    const view = parsePillText(await pill.innerText())
+    // 默认态零可见文字：已用 / 上限 / 占比 三件都不上屏
+    await expect(pill).toHaveText('')
+    const view = parsePillTitle(await pill.getAttribute('title'))
     const sid = await sessionId(page)
     const snapshot = await contextSnapshot(sid)
+    const shownPercent = Number((snapshot.percent as number).toFixed(1))
 
     expect(snapshot.source).toBe('stream')
     expect(snapshot.usedTokens).toBe(shapes.last.promptTokens)
-    expect(view.used).toBe(snapshot.usedTokens)
-    expect(view.limit).toBe(snapshot.limitTokens)
-    expect(view.percent).toBe(snapshot.percent)
+    expect(view.percent).toBe(shownPercent)
+    expect(view.used).toBeNull()
+    // 唯一一行 tooltip：只有占比（title 与 aria-label 同源，无已用/上限）
+    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
+    await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    // 圆环读的就是占比本体
+    await expect(pill).toHaveAttribute('value', String(snapshot.percent))
+    await expect(pill).toHaveAttribute('max', '100')
     // 档位由服务端百分比决定（本形状远低于 70 ⇒ safe）
     await expect(pill).toHaveAttribute('data-tier', 'safe')
-    // aria 带百分比语义
-    await expect(pill).toHaveAttribute('aria-label', new RegExp(`${snapshot.percent}%`))
 
     // 分母单点：/health 的 contextLimitTokens 与端点 limitTokens 同值
     const health = await aiHealth()
@@ -678,24 +683,27 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     expect(snapshot.usedTokens).toBe(usage.promptTokens)
   })
 
-  test('E2E-C06 无 usage 回退估算：标 ≈、source=estimate、下一轮仍按估算收敛', async ({ page }) => {
+  test('E2E-C06 无 usage 回退估算：tooltip 带「约」、source=estimate、下一轮仍按估算收敛', async ({ page }) => {
     await openApp(page)
     await sendMessage(page, `上下文用例 ${fingerprint('C06')} usage-shape=none`)
     await waitRoundSettled(page)
 
     const pill = page.locator('[data-testid="context-pill"]')
     await expect(pill).toBeVisible()
-    const view = parsePillText(await pill.innerText())
+    await expect(pill).toHaveText('')
+    const view = parsePillTitle(await pill.getAttribute('title'))
     expect(view.estimate).toBe(true)
-    expect(view.raw.startsWith('≈')).toBe(true)
+    expect(view.raw.startsWith('上下文占用 约')).toBe(true)
 
     const sid = await sessionId(page)
     const snapshot = await contextSnapshot(sid)
     expect(snapshot.estimated).toBe(true)
     expect(snapshot.source).toBe('estimate')
     expect(snapshot.usedTokens).toBeGreaterThan(0)
-    // pill 用 k 缩写展示（5.7k），与真值之间有显示取整 ⇒ 容差 100 token
-    expect(Math.abs((view.used as number) - snapshot.usedTokens)).toBeLessThan(100)
+    // 估算不改口径：圆环仍读占比，只是 tooltip 的百分比前面多了「约」
+    const shownPercent = Number((snapshot.percent as number).toFixed(1))
+    await expect(pill).toHaveAttribute('title', `上下文占用 约${shownPercent}%`)
+    await expect(pill).toHaveAttribute('value', String(snapshot.percent))
 
     // 第二轮：估算基线参与下一轮（分母仍来自同一单点，不因估算丢失）
     await sendMessage(page, `上下文用例 ${fingerprint('C06b')} usage-shape=none`)
@@ -706,35 +714,31 @@ test.describe('@stub 16 C 上下文统计与压缩', () => {
     expect(second.usedTokens).toBeGreaterThan(0)
   })
 
-  test('E2E-C07 六项拆分守恒：Σ context-row-* == used，free 为派生、顺序固定', async ({ page }) => {
+  test('E2E-C07 点击不展开详情：无 popover、无分项行；拆分守恒改由 /context 端点断言', async ({ page }) => {
     await openApp(page)
     await sendMessage(page, `上下文用例 ${fingerprint('C07')} usage-shape=last`)
     await waitRoundSettled(page)
 
-    await page.locator('[data-testid="context-pill"]').click()
-    const popover = page.locator('[data-testid="context-popover"]')
-    await expect(popover).toBeVisible()
-    await expect(page.locator('[data-testid="context-row-history"]')).toBeVisible()
+    const pill = page.locator('[data-testid="context-pill"]')
+    await expect(pill).toHaveText('')
+    await pill.click()
+    // 点击不再是入口：不弹 popover、不吐分项行、可见文字仍为空
+    await expect(page.locator('[data-testid="context-popover"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="context-row-"]')).toHaveCount(0)
+    await expect(pill).toHaveText('')
 
-    const rows = await popover.locator('[data-testid^="context-row-"]').evaluateAll((nodes) =>
-      nodes.map((node) => ({
-        key: (node.getAttribute('data-testid') ?? '').replace('context-row-', ''),
-        tokens: (node.querySelector('span:last-child')?.textContent ?? '').trim()
-      })))
-    expect(rows.map((row) => row.key)).toEqual(['history', 'toolResults', 'summary', 'system', 'tools', 'input', 'free'])
-
-    const usedRows = rows.filter((row) => row.key !== 'free')
-    const sum = usedRows.reduce((total, row) => total + tokensFromLabel(row.tokens.replace(' tokens', '')), 0)
+    // 分项在界面上已无载体 ⇒ 守恒在端点侧断言（数据真值，不再是 UI 断言）
     const sid = await sessionId(page)
     const snapshot = await contextSnapshot(sid)
-    expect(sum).toBe(snapshot.usedTokens)
+    const breakdown = snapshot.breakdown ?? []
+    expect(breakdown.length).toBeGreaterThan(0)
+    const usedSum = breakdown
+      .filter((row) => row.key !== 'free')
+      .reduce((sum, row) => sum + row.tokens, 0)
+    expect(usedSum).toBe(snapshot.usedTokens)
     // free = limit - used（派生量，不参与守恒）
-    const free = rows.find((row) => row.key === 'free')!
-    if (free.tokens.startsWith('已超')) {
-      expect(tokensFromLabel(free.tokens.replace('已超 ', ''))).toBe(snapshot.usedTokens - (snapshot.limitTokens as number))
-    } else {
-      expect(tokensFromLabel(free.tokens.replace(' tokens', ''))).toBe((snapshot.limitTokens as number) - snapshot.usedTokens)
-    }
+    const free = breakdown.find((row) => row.key === 'free')
+    expect((free?.tokens ?? 0) + snapshot.usedTokens).toBe(snapshot.limitTokens as number)
   })
 
   test('E2E-C12 CONTEXT_OVERFLOW 识别：越窗 400 认成上下文超窗、不重试、用户面安全文案', async () => {

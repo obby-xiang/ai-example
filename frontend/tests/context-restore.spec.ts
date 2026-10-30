@@ -121,7 +121,11 @@ describe('刷新恢复（C-35）', () => {
 
     const pill = wrapper.find('[data-testid="context-pill"]')
     expect(pill.exists()).toBe(true)
-    expect(pill.text()).toBe('65.8% · 84.2k/128k')
+    // 圆环：语义是 <progress>，值就是占比；可见文字为空，说明只有一行 tooltip
+    expect(pill.element.tagName).toBe('PROGRESS')
+    expect(pill.attributes('value')).toBe('65.8')
+    expect(pill.text()).toBe('')
+    expect(pill.attributes('title')).toBe('上下文占用 65.8%')
     // 端点确实被拉过（重建的唯一来源）
     expect(api.getContext).toHaveBeenCalled()
 

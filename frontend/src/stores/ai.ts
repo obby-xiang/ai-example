@@ -93,7 +93,7 @@ import {
   deriveProjections,
   findToolPart,
   historyToolCallStatus,
-  isSlotReleasePhantom,
+  isSystemRejectPhantom,
   markApplied,
   openStreamPart,
   outcomeStatus,
@@ -138,7 +138,7 @@ export interface QueuedGenerativeForm {
   form: FormSpec
 }
 
-/** `send()` 收尾结果：composer 据此决定是否保稿、是否设编辑锚点。 */
+/** `send()` 收尾结果：composer 据此决定是否保稿与回稿。 */
 export type AiSendOutcome = 'ok' | 'error' | 'interrupted' | 'cancelled' | 'not-sent'
 export interface AiSendResult {
   outcome: AiSendOutcome
@@ -2409,13 +2409,6 @@ export const useAiStore = defineStore('ai', {
     /** AI 面板是否展开（裁剪性：收起后业务照常；页签级记忆，刷新后保持用户的选择） */
     expanded: initExpanded(),
     messages: [] as ChatMessage[],
-    /**
-     * 输入区「编辑重跑」锚点（面板 composer 的唯一事实源）。
-     *
-     * <p>锚点属于**当前会话**的现场：换会话/换身份（`adoptFreshSession`）即清空 —— 旧身份的
-     * 消息 id 在新会话里既不存在也不可改写，留着它会让下一次发送按旧锚点改写/截断。
-     */
-    editAnchorId: null as string | null,
     /** 是否有轮次在进行 */
     loading: false,
     /** 当前轮 runId（来自 start 帧） */
@@ -3498,18 +3491,19 @@ export const useAiStore = defineStore('ai', {
       // ③ 混排先 id 后序位；④ 仍不中 result=null（卡片保留不丢）。
       const responsePool: NonNullable<AiHistoryMessage['toolResponses']>[number][] = []
       const responseIndex = new Map<string, NonNullable<AiHistoryMessage['toolResponses']>[number]>()
-      // 槽位放行的幻影卡（2026-10-29）：后端对 FORM_SLOTS_ALREADY_KNOWN 已不发用户可见的工具帧，
-      // 但条目/历史照旧（审计与模型回执要留）。历史面按同一口径隐藏该 toolCallId 的段与响应，
-      // 否则"实时看不到、刷新后又冒出来一张"——同一件事两个答案。
+      // 系统拒绝的幻影卡（2026-10-30 浏览器实测批）：后端对 FORM_SLOTS_ALREADY_KNOWN /
+      // FORM_SCHEMA_REJECTED 都不发用户可见的工具帧（连结局帧也不发），但条目/历史照旧（审计与
+      // 模型回执要留）。历史面按同一口径隐藏该 toolCallId 的段与响应，否则"实时看不到、刷新后又
+      // 冒出来一张已拒绝卡"——同一件事两个答案。
       // 响应也要一并摘掉：留着会让"序位兜底"把它错配给另一张未配对卡（错配比缺失更糟）。
-      const silentSlotFormIds = new Set<string>()
+      const silentSystemRejectIds = new Set<string>()
       for (const item of history.messages) {
         for (const call of item.toolCalls ?? []) {
           const state = call.id !== null && call.id !== undefined && call.id !== ''
             ? item.toolCallStates?.[call.id]
             : undefined
-          if (call.id && isSlotReleasePhantom(call.name, state?.code)) {
-            silentSlotFormIds.add(call.id)
+          if (call.id && isSystemRejectPhantom(call.name, state?.code)) {
+            silentSystemRejectIds.add(call.id)
           }
         }
       }
@@ -3518,7 +3512,7 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         for (const response of item.toolResponses ?? []) {
-          if (response.id && silentSlotFormIds.has(response.id)) {
+          if (response.id && silentSystemRejectIds.has(response.id)) {
             continue
           }
           responsePool.push(response)
@@ -3554,10 +3548,10 @@ export const useAiStore = defineStore('ai', {
         // R-144（C-6）保序：text 空白且 toolCalls ≥ 1 ⇒ **不产空前导 text 段**（载荷无段序字段，
         // 同条目 text↔toolCalls 相对序不可知，消「空 text 段打头」渲染面）；工具段 seg = 构造后
         // 数组下标（有 text 段时 = toolIndex+1，无 = toolIndex；R-150 合并 pass 仍全局重排）。
-        // 槽位放行的幻影卡（FORM_SLOTS_ALREADY_KNOWN）不进段：后端已不为它发用户可见的工具帧，
-        // 历史面必须同口径（否则刷新后又冒出一张卡）。它的响应也已从 responsePool 摘除，
-        // 因此这里过滤掉之后不会把"无主响应"错配给它后面的卡。
-        const calls = (item.toolCalls ?? []).filter((call) => !(call.id && silentSlotFormIds.has(call.id)))
+        // 系统拒绝的幻影卡（FORM_SLOTS_ALREADY_KNOWN / FORM_SCHEMA_REJECTED）不进段：后端已不为它发
+        // 任何用户可见的工具帧，历史面必须同口径（否则刷新后又冒出一张已拒绝卡）。它的响应也已从
+        // responsePool 摘除，因此这里过滤掉之后不会把"无主响应"错配给它后面的卡。
+        const calls = (item.toolCalls ?? []).filter((call) => !(call.id && silentSystemRejectIds.has(call.id)))
         const blankText = (item.text ?? '').trim() === ''
         // 全部调用都被隐藏（本条只剩幻影卡）⇒ 不补空 text 段：那会留下一个空气泡。
         const allCallsSilenced = (item.toolCalls ?? []).length > 0 && calls.length === 0
@@ -5085,9 +5079,8 @@ export const useAiStore = defineStore('ai', {
     /**
      * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
     /**
-     * @param resend.skipUserRecord 截断后重发通道（R-157 收口 MAJOR-1）：调用方已把用户消息
-     *   原地保留/更新并截断其后消息（编辑重跑），send 不得再追加新用户消息 ——
-     *   否则旧文本与新文本并存（编辑）或同一提问重复两次（重试）。
+     * @param resend.skipUserRecord append-drive 通道（「继续」）：调用方已就地续写同一轮，
+     *   send 不得再追加新用户消息 —— 否则同一提问会重复两次、屏上多出一条伪用户气泡。
      */
     async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
       const content = text.trim()
@@ -5399,7 +5392,7 @@ export const useAiStore = defineStore('ai', {
           )
         }
         // 410 恢复换了会话 ⇒ 这次发送**确实失败**（不是"被别的轮打断"）：outcome 必须是 'error'，
-        // 面板据此回稿且不把已清空的旧消息设成编辑锚点。其余情形仍按"是否还是本轮"判定。
+        // 面板据此回稿。其余情形仍按"是否还是本轮"判定。
         outcome = purgedRecovered ? 'error' : settleOutcome('error')
       } finally {
         if (isCurrentRound() && !firstFrameRecovery) {
@@ -8461,8 +8454,6 @@ export const useAiStore = defineStore('ai', {
       this.sessionIssueFailed = false
       this.messages = []
       this.activeRunId = null
-      // 编辑锚点属于旧会话的消息（新会话里既找不到也不该改写），换会话即清。
-      this.editAnchorId = null
       // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
       this.runSeq = {}
       // AR-10：运行态寿命锚点属于旧会话/旧轮 —— 不带走（卡面寿命只对本轮成立）

@@ -28,6 +28,13 @@
       "reason": "已同步条件三态、多配置逐项收集、取消边界和导出收尾单次纠正契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:6631b3ae78cfb186b6357e8db4cde3ec066a19dbe7fbf315546fd0e0f987750a",
+      "status": "not-affected",
+      "reason": "本批仅收敛编辑覆盖确认、上下文圆环和系统拒绝静默，不改变D6既有迁移接口、身份或帧类型契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

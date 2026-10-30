@@ -168,14 +168,17 @@ class GenerativeFormGateTest {
 					any(PendingToolCall.class));
 			verify(GenerativeFormGateTest.this.store, never()).claimExecution(anyString(), anyString(), anyString());
 
-			// ③ 挂起条目不留在 PENDING（续跑不会把它当成"等人/等前端"），结局帧 ok=false
+			// ③ 挂起条目不留在 PENDING（续跑不会把它当成"等人/等前端"），用户面也看不到任何卡片帧
 			ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
 			verify(GenerativeFormGateTest.this.store).putPending(eq(RUN_ID), captor.capture());
 			assertThat(captor.getValue().getStatus()).isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
 			assertThat(captor.getValue().getReason()).isEqualTo(GenerativeFormRules.SCHEMA_REJECTED);
 			assertThat(captor.getValue().isExecuted()).isFalse();
-			verify(GenerativeFormGateTest.this.emitter).frontendToolResult(any(PendingToolCall.class), eq(false),
-					anyString());
+			// 浏览器实测修复：schema 系统拒绝只回执模型 —— 不发 tool_start / 结局帧（否则用户先看到一张
+			// "已拒绝"的表单卡，模型改对后再落一张可用卡）。用户可见面零帧，模型回执不受影响。
+			verify(GenerativeFormGateTest.this.emitter, never()).toolStart(any(PendingToolCall.class));
+			verify(GenerativeFormGateTest.this.emitter, never()).frontendToolResult(any(PendingToolCall.class),
+					anyBoolean(), anyString());
 		}
 	}
 

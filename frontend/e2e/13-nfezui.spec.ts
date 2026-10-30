@@ -506,7 +506,7 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
     await expect(page.locator('[data-testid="ai-feedback-view"]')).toContainText('暂无')
   })
 
-  test('E2E-F06 编辑用户消息重跑：非空先弹确认、回填原文、发送后截断其后消息并重跑', async ({ page }) => {
+  test('E2E-F06 编辑用户消息（2026-10-30 直裁：只回填）：不弹确认、不删其后消息；随后发送是普通新消息', async ({ page }) => {
     await openPanel(page)
     await seedRound(page, 'F06-一')
     await seedRound(page, 'F06-二')
@@ -517,10 +517,8 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
     const originalText = (await firstUser.innerText()).trim()
     const editId = ((await firstUser.getAttribute('data-testid')) ?? '').replace('msg-bubble-', '')
 
-    // 输入框非空 ⇒ 编辑有两道确认（批次2 / AR-09 起）：
-    //   ① 编辑是**不可逆删除** —— 先按实测条数提示「将删除此后 N 条消息」（本条之后 3 条）；
-    //   ② 输入框非空白时再弹「覆盖现有输入」。
-    // 旧判据只挂 `page.once('dialog')`（只收第一个），且断言其含「覆盖」⇒ 漏掉了前置的删除确认。
+    // 覆盖保护（2026-10-30 补充规格）：输入框有非空白草稿 ⇒ 先弹**一次**「覆盖」确认；
+    // 删除提示已随重跑入口退役，这里不再有第二道确认。
     await page.locator('[data-testid="composer-input"]').fill('草稿占位')
     const dialogs: string[] = []
     const onDialog = async (dialog: { message(): string; accept(): Promise<void> }): Promise<void> => {
@@ -529,21 +527,30 @@ test.describe('@stub 13a · F 反馈与消息操作', () => {
     }
     page.on('dialog', onDialog)
     await page.locator(`[data-testid="edit-msg-${editId}"]`).click()
-    await expect.poll(async () => dialogs.length).toBe(2)
-    page.off('dialog', onDialog)
-    expect(dialogs[0]).toContain('删除此后 3 条')
-    expect(dialogs[1]).toContain('覆盖')
+    await expect.poll(async () => dialogs.length).toBe(1)
+    expect(dialogs[0]).toContain('覆盖')
     await expect(page.locator('[data-testid="composer-input"]')).toHaveValue(originalText)
 
-    // 改完从该条重跑：该条之后的消息被截断，不新增用户气泡
+    // 全空白草稿不算「用户真的有草稿」：不弹确认，直接回填
+    await page.locator('[data-testid="composer-input"]').fill('   ')
+    await page.locator(`[data-testid="edit-msg-${editId}"]`).click()
+    await expect(page.locator('[data-testid="composer-input"]')).toHaveValue(originalText)
+    page.off('dialog', onDialog)
+    expect(dialogs).toHaveLength(1)
+    // 其后消息一条不删：两轮对话原样在屏上
+    expect(await userBubbles(page).count()).toBe(2)
+    await expect(assistantBubbles(page)).toHaveCount(2)
+
+    // 改完自己点发送 = 普通新消息：追加第 3 条用户气泡与第 3 条回答，前两轮一字不动
     const rewritten = `改写后的问题 ${unique('F06')}`
     await page.locator('[data-testid="composer-input"]').fill(rewritten)
     await page.locator('[data-testid="send-btn"]').click()
     await waitSettled(page)
 
-    expect(await userBubbles(page).count()).toBe(1)
-    expect((await userBubbles(page).first().innerText()).trim()).toBe(rewritten)
-    await expect(assistantBubbles(page)).toHaveCount(1)
+    expect(await userBubbles(page).count()).toBe(3)
+    expect((await userBubbles(page).last().innerText()).trim()).toBe(rewritten)
+    expect((await userBubbles(page).first().innerText()).trim()).toBe(originalText)
+    await expect(assistantBubbles(page)).toHaveCount(3)
   })
 
   test('E2E-F07 「继续」入口语义：出错轮出继续、被停止轮不出、点击作新用户消息发送', async ({ page }) => {

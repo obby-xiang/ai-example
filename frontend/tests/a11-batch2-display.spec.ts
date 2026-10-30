@@ -316,8 +316,8 @@ describe('批次2 · 409 回到进行中的回答', () => {
   })
 })
 
-describe('批次2 · 编辑用户消息的删除后果提示', () => {
-  it('编辑前提示将删除 N 条后续消息；取消则不进入编辑态', async () => {
+describe('批次2 · 编辑用户消息（2026-10-30 直裁：只回填、无删除提示）', () => {
+  it('编辑不弹「将删除 N 条」：直接回填该条正文，后续消息一条不删', async () => {
     const user = userMessage('u-edit', '原提问')
     const a1 = buildMessage([{ kind: 'text', seg: 0, text: '回答一', streaming: false }])
     a1.id = 'a-1'
@@ -326,12 +326,13 @@ describe('批次2 · 编辑用户消息的删除后果提示', () => {
     const wrapper = await mountPanel([user, a1, a2])
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
-    expect(confirmSpy).toHaveBeenCalledTimes(1)
-    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain('2')
-    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('')
-    confirmSpy.mockReturnValue(true)
-    await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
+    // 编辑不再有删除后果：不弹任何确认，正文直接回填
+    expect(confirmSpy).not.toHaveBeenCalled()
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('原提问')
+    // 后的两条消息仍在屏上（编辑是纯回填，不删不截断）
+    expect(wrapper.find('[data-testid="msg-bubble-a-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="msg-bubble-a-2"]').exists()).toBe(true)
+    confirmSpy.mockRestore()
     wrapper.unmount()
   })
 })

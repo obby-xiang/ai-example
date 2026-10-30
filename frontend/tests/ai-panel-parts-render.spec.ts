@@ -1271,14 +1271,14 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#9：编辑（R-157 #2 收窄为用户消息）= 回填输入框并记住锚点；发送时才截断重跑', async () => {
+  it('#9：编辑（2026-10-30 直裁 = 只回填正文）= 输入框拿到该条正文，消息数组一字不动', async () => {
     const message = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
     message.role = 'user'
     const wrapper = await mountPanelWith([message])
     await wrapper.find('[data-testid="edit-msg-a-1"]').trigger('click')
     await wrapper.vm.$nextTick()
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('用户原话')
-    // 编辑动作本身不截断/不改消息数组（截断发生在发送，见 R-157 编辑重跑用例）
+    // 编辑只回填：不发送、不截断、不改写原消息（重跑入口已退役，见 edit-copy-only 规格）
     expect(message.parts).toHaveLength(1)
     expect(message.content).toBe('用户原话')
     wrapper.unmount()
@@ -1485,9 +1485,9 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
 })
 
 /**
- * R-157 前端面：操作行挪卡片下方 / 编辑收窄+重跑 / 呼吸点 / 发送滚底 / 头像去文字。
+ * R-157 前端面：操作行挪卡片下方 / 编辑收窄+回填 / 呼吸点 / 发送滚底 / 头像去文字。
  */
-describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 新头像', () => {
+describe('R-157：操作行外置 + role 过滤 + 编辑回填 + 发送滚底 + 新头像', () => {
   const stubsWithInput = {
     ...stubs,
     'el-input': {
@@ -1560,7 +1560,7 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     wrapper.unmount()
   })
 
-  it('#2 编辑重跑（MAJOR-1 语义版）：该条文本原地更新 + 截断其后 + 不重复追加用户消息', async () => {
+  it('#2 编辑后发送（2026-10-30 直裁）：走「普通新消息」——追加气泡、不截断其后消息', async () => {
     const store = useAiStore()
     store.messages = pair()
     store.historyLoaded = true
@@ -1570,21 +1570,24 @@ describe('R-157：操作行外置 + role 过滤 + 编辑重跑 + 发送滚底 + 
     const wrapper = mount(AiPanel, { global: { stubs: stubsWithInput } })
     await wrapper.vm.$nextTick()
 
-    // AR-09：编辑点击先弹「将删除此后 N 条」确认；jsdom 的 confirm 未实现（恒 false），
-    // 不桩掉会丢掉编辑锚点，发送退化成新消息（本用例断言不追加用户消息）。
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    // 编辑只回填正文（无确认弹窗、不设锚点）；随后发送不再有「改完从该条重跑」这条入口。
     await wrapper.find('[data-testid="edit-msg-u-1"]').trigger('click')
     const input = wrapper.find('[data-testid="composer-input"]')
+    expect((input.element as HTMLTextAreaElement).value).toBe('原始提问')
     await input.setValue('改写后的提问')
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
     await wrapper.vm.$nextTick()
+    await flushPromises()
 
-    // 语义：u-1 文本原地更新（旧文本不残留），其后截断，重发只起新助手消息（不追加第二条用户消息）
-    expect(store.messages.map((m) => m.id)).toEqual(['u-1', expect.stringMatching(/^a-/)])
-    expect(store.messages[0]?.content).toBe('改写后的提问')
     expect(api.chat).toHaveBeenCalledTimes(1)
-    expect(api.chat.mock.calls[0][0].message).toBe('改写后的提问')
-    confirmSpy.mockRestore()
+    expect((api.chat.mock.calls[0][0] as Record<string, unknown>).message).toBe('改写后的提问')
+    // 不截断：原三条按原序仍在，原提问文本未被改写
+    expect(store.messages.slice(0, 3).map((m) => m.id)).toEqual(['u-1', 'a-1', 'u-2'])
+    // 新文本 = 独立的新用户消息（屏上第三条用户气泡），不是把第一条原地改写
+    expect(store.messages.filter((m) => m.role === 'user').map((m) => m.content))
+      .toEqual(['原始提问', '后续追问', '改写后的提问'])
+    expect(wrapper.findAll('[data-testid^="edit-msg-"]')).toHaveLength(3)
+    expect(wrapper.text()).toContain('改写后的提问')
     wrapper.unmount()
   })
 
@@ -3452,7 +3455,7 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     wrapper.unmount()
   })
 
-  it('T4：编辑防覆盖 —— 输入框非空白先弹确认（确认才回填，取消不覆盖）', async () => {
+  it('T4：编辑的覆盖保护 —— 草稿非空白先弹确认（确认才回填，取消不覆盖）', async () => {
     const store = useAiStore()
     const user = buildMessage([{ kind: 'text', seg: 0, text: '用户原话', streaming: false }])
     user.id = 'u-edit'
@@ -3464,13 +3467,15 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     await wrapper.vm.$nextTick()
     const input = wrapper.find('[data-testid="composer-input"]')
     await input.setValue('草稿内容')
+    // 覆盖保护（2026-10-30 补充规格）：草稿含非空白字符 ⇒ 先确认；取消原样保留
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
-    expect(confirmSpy).toHaveBeenCalled()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('草稿内容') // 未覆盖
+    // 确认后才复制该条正文（仍然不发送、不重跑）
     confirmSpy.mockReturnValue(true)
     await wrapper.find('[data-testid="edit-msg-u-edit"]').trigger('click')
-    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('用户原话') // 确认后回填
+    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('用户原话')
     confirmSpy.mockRestore()
     wrapper.unmount()
   })
@@ -4455,7 +4460,7 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     wrapper.unmount()
   })
 
-  it('阶段二 新消息失败后重发：走编辑重跑，用户消息数不增加', async () => {
+  it('阶段二 新消息失败后重发：按普通新消息重发（不回填旧消息、不重跑）', async () => {
     const { store, wrapper } = await mountPhase1()
     const box = wrapper.find('[data-testid="composer-input"]')
     await box.setValue('失败重发草稿')
@@ -4468,14 +4473,15 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
     await flushPromises()
+    // 2026-10-30 直裁：发送入口不再把上一条失败消息当锚点改写，重发 = 追加一条新用户消息
     const users = store.messages.filter((message) => message.role === 'user')
-    expect(users).toHaveLength(1)
-    expect(users[0]?.content).toBe('失败重发草稿')
+    expect(users).toHaveLength(2)
+    expect(users[1]?.content).toBe('失败重发草稿')
     expect(api.chat).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
 
-  it('阶段二 编辑重跑失败：沿用发送前 editId，重发仍不新增用户消息', async () => {
+  it('阶段二 编辑回填后发送失败：草稿回流，再发自成新消息（不重跑、不截断）', async () => {
     const { store, wrapper } = await mountPhase1({ messages: [buildUser('u-edit-p2', '原提问')] })
     const box = wrapper.find('[data-testid="composer-input"]')
     api.chat.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(undefined)
@@ -4487,15 +4493,17 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
 
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
     await flushPromises()
-    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1)
+    // 失败：原提问那条原样还在（编辑不删不改），新文本回到输入框
+    expect(store.messages.filter((message) => message.role === 'user').map((message) => message.content))
+      .toEqual(['原提问', '改写后的提问'])
     expect((box.element as HTMLTextAreaElement).value).toBe('改写后的提问')
 
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
     await flushPromises()
+    // 第二次发送仍是普通新消息 ⇒ 用户消息再 +1，原提问一字未动（旧实现会按锚点原地改写、截断）
     const users = store.messages.filter((message) => message.role === 'user')
-    expect(users).toHaveLength(1)
+    expect(users.map((message) => message.content)).toEqual(['原提问', '改写后的提问', '改写后的提问'])
     expect(users[0]?.id).toBe('u-edit-p2')
-    expect(users[0]?.content).toBe('改写后的提问')
     expect(api.chat).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
@@ -6057,10 +6065,10 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
     expect(result.userMessageId).toBe(store.messages[0]?.id)
   })
 
-  it('skipUserRecord：不记录用户消息，userMessageId=null', async () => {
+  it('skipUserRecord（「继续」append-drive 通道）：不记录用户消息，userMessageId=null', async () => {
     const store = useAiStore()
     api.chat.mockResolvedValue(undefined)
-    const result = await store.send('编辑重跑', { skipUserRecord: true })
+    const result = await store.send('继续', { skipUserRecord: true })
     expect(result).toEqual({ outcome: 'ok', userMessageId: null })
     expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(0)
   })

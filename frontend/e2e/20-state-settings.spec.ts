@@ -71,28 +71,29 @@ test.describe('@stub 2026-10-29 状态与设置守卫', () => {
     await waitRoundSettled(page, 60_000)
   })
 
-  test('E2E-M16 编辑重跑发送失败：被删回答回插、原文还原', async ({ page }) => {
-    acceptDialogs(page)
+  test('E2E-M16 编辑 = 只回填正文（2026-10-30 直裁）：不发送、不删除、不重跑', async ({ page }) => {
     await openApp(page)
     await sendMessage(page, 'turn-text')
     await waitRoundSettled(page)
     const reply = await assistantText(page)
     expect(reply.length).toBeGreaterThan(10)
 
-    // 编辑本轮提问，随后让重跑请求失败
-    await page.locator('[data-testid^="edit-msg-"]').first().click()
-    await page.locator('[data-testid="composer-input"]').fill('改完之后重跑')
-    await page.route(chatPath, (route) => route.fulfill({
-      status: 500,
-      contentType: 'application/json',
-      body: JSON.stringify({ success: false, code: 'INTERNAL_ERROR', message: 'boom' })
-    }))
-    await page.locator('[data-testid="send-btn"]').click()
+    let chatCalls = 0
+    await page.route(chatPath, (route) => {
+      chatCalls += 1
+      void route.continue()
+    })
+    const bubblesBefore = await page.locator('[data-testid^="msg-bubble-"]').count()
 
-    // 失败后：原来的回答回到屏上（不再只能靠刷新找回），草稿回到输入框
-    await expect(assistantBubbles(page)).toHaveCount(1, { timeout: 20_000 })
-    await expect(assistantBubble(page)).toHaveText(reply, { timeout: 20_000 })
-    await expect(page.locator('[data-testid="composer-input"]')).toHaveValue('改完之后重跑', { timeout: 10_000 })
+    // 编辑本轮提问：只回填（输入框为空 ⇒ 覆盖保护不弹确认），不再有「删除 N 条」确认
+    await page.locator('[data-testid^="edit-msg-"]').first().click()
+
+    await expect(page.locator('[data-testid="composer-input"]')).toHaveValue(/\S/, { timeout: 10_000 })
+    // 消息一条不少、原回答原样在屏上
+    expect(await page.locator('[data-testid^="msg-bubble-"]').count()).toBe(bubblesBefore)
+    await expect(assistantBubble(page)).toHaveText(reply, { timeout: 10_000 })
+    // 不发送、不重跑：编辑本身一个请求都不发
+    expect(chatCalls).toBe(0)
   })
 
   test('E2E-M17 历史重载在途时开新轮：不整体替换在途消息（同一轮不出两条气泡）', async ({ page }) => {

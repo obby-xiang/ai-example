@@ -27,7 +27,6 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import { useAiStore } from '@/stores/ai'
-import { installIdentityFixture } from './ai-identity-fixture'
 import type { ContextUsage } from '@/types/ai'
 import {
   CONTEXT_TIER_DANGER,
@@ -177,85 +176,81 @@ describe('组件（C-33 / C-34 的 DOM 面）', () => {
     expect(wrapper.find('[data-testid="context-pill"]').exists()).toBe(false)
   })
 
-  it('渲染文本 + 档位标记 + 点击展开七项（按服务端顺序）', async () => {
-    // Task 4：`/context` 属于对话域请求，带后端发号的会话 —— 无号不发请求
-    installIdentityFixture()
+  it('渲染为圆环：无可见文字、一行 tooltip、点击不展开、progress value 正确', async () => {
     const store = useAiStore()
     store.contextUsage = measured(84213, 128000)
     const wrapper = mount(ContextPill)
     await flushPromises()
 
     const pill = wrapper.find('[data-testid="context-pill"]')
-    expect(pill.text()).toBe('65.8% · 84.2k/128k')
+    // 语义源是原生 <progress>，不是按钮
+    expect(pill.element.tagName).toBe('PROGRESS')
+    expect(wrapper.find('button').exists()).toBe(false)
+    // 默认态无任何可见文字（不出已用/上限/占比三件，也不出七项）
+    expect(pill.text()).toBe('')
+    expect(wrapper.element.textContent).toBe('')
+    // 圆环读的就是占比本身
+    expect(pill.attributes('value')).toBe('65.8')
+    expect(pill.attributes('max')).toBe('100')
     expect(pill.attributes('data-tier')).toBe('safe')
-    expect(pill.attributes('title')).toContain('84.2k / 128k')
-    // 批 E · E3：hover tooltip 另给占比（已用 / 上限 / 占比 三件齐全），并带 a11y 名
-    expect(pill.attributes('title')).toContain('占比 65.8%')
-    expect(pill.attributes('aria-label')).toContain('65.8')
+    // hover 只有一行（title 与 aria-label 同源），不含已用/上限/占比三件
+    const title = pill.attributes('title') ?? ''
+    expect(title).toBe('上下文占用 65.8%')
+    expect(title).not.toMatch(/[\r\n]/)
+    expect(title).not.toContain('84.2k')
+    expect(title).not.toContain('128k')
+    expect(pill.attributes('aria-label')).toBe('上下文占用 65.8%')
 
-    // 点开：端点拉七项（拆分不进 done 帧）
-    api.getContext.mockResolvedValue({
-      sessionId: 's-1',
-      model: 'deepseek-flash',
-      turnNo: 7,
-      measuredAtMs: 1,
-      limitTokens: 128000,
-      usedTokens: 84213,
-      percent: 65.8,
-      source: 'stream',
-      estimated: false,
-      breakdown: [
-        { key: 'history', tokens: 41000 },
-        { key: 'toolResults', tokens: 34080 },
-        { key: 'summary', tokens: 0 },
-        { key: 'system', tokens: 3120 },
-        { key: 'tools', tokens: 5120 },
-        { key: 'input', tokens: 93 },
-        { key: 'free', tokens: -1200 }
-      ],
-      compaction: { level: 'none', compactedTurns: 0, lostTokens: 0, lastAtMs: null, reason: null, circuit: 'closed', fuseFails: 0 }
-    })
+    // 点击不展开：不拉端点、不出详情、不留展开态 a11y 属性
     await pill.trigger('click')
     await flushPromises()
-
-    const rows = wrapper.findAll('[data-testid^="context-row-"]')
-    expect(rows.map((row) => row.attributes('data-testid'))).toEqual([
-      'context-row-history',
-      'context-row-toolResults',
-      'context-row-summary',
-      'context-row-system',
-      'context-row-tools',
-      'context-row-input',
-      'context-row-free'
-    ])
-    expect(wrapper.find('[data-testid="context-row-free"]').text()).toContain('已超 1.2k')
-    expect(wrapper.find('[data-testid="context-row-history"]').text()).toContain('41k tokens')
+    expect(api.getContext).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid^="context-row-"]').exists()).toBe(false)
+    expect(pill.attributes('aria-expanded')).toBeUndefined()
+    expect(pill.attributes('aria-haspopup')).toBeUndefined()
   })
 
-  it('未知上限：药丸只显示已用且档位为 none', async () => {
+  it('未知上限：圆环不确定态（无 value、不谎报 0%），档位 none、tooltip 只说已用', async () => {
     const store = useAiStore()
     store.contextUsage = measured(84213, null)
     const wrapper = mount(ContextPill)
     await flushPromises()
 
     const pill = wrapper.find('[data-testid="context-pill"]')
-    expect(pill.text()).toBe('已用 84.2k')
+    expect(pill.text()).toBe('')
     expect(pill.attributes('data-tier')).toBe('none')
+    // 没有分母就没有占比：不写 value（原生不确定态），视觉只剩轨道，绝不用 0 冒充
+    expect(pill.element.hasAttribute('value')).toBe(false)
+    expect(pill.attributes('aria-label')).toBe('上下文已用 84.2k tokens')
+    expect(pill.attributes('title')).toBe('上下文已用 84.2k tokens')
   })
 
-  it('英文界面 tooltip 走 en-US 文案（已用 / 上限 / 占比 双语）', async () => {
+  it('估算态 tooltip 带「约」（估的数必须一眼看出来）', async () => {
+    applyLocale('zh-CN')
+    const store = useAiStore()
+    store.contextUsage = measured(84213, 128000, true)
+    const wrapper = mount(ContextPill)
+    await flushPromises()
+
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    expect(pill.attributes('title')).toBe('上下文占用 约65.8%')
+    expect(pill.attributes('aria-label')).toBe('上下文占用 约65.8%')
+    expect(pill.text()).toBe('')
+    wrapper.unmount()
+  })
+
+  it('英文界面 tooltip 走 en-US 一行文案', async () => {
     applyLocale('en-US')
     const store = useAiStore()
     store.contextUsage = measured(84213, 128000)
     const wrapper = mount(ContextPill)
     await flushPromises()
 
-    const title = wrapper.find('[data-testid="context-pill"]').attributes('title') ?? ''
-    expect(title).toContain('84.2k')
-    expect(title).toContain('128k')
-    expect(title).toContain('65.8')
-    expect(title).toMatch(/[A-Za-z]/)
-    expect(title).not.toContain('已用')
+    const pill = wrapper.find('[data-testid="context-pill"]')
+    expect(pill.attributes('title')).toBe('Context usage 65.8%')
+    expect(pill.attributes('aria-label')).toBe('Context usage 65.8%')
+    expect(pill.attributes('title')).not.toContain('已用')
+    expect(pill.text()).toBe('')
     wrapper.unmount()
   })
 })

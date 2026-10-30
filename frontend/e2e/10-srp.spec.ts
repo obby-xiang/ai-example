@@ -370,7 +370,7 @@ test.describe('@stub S 流式稳定', () => {
    * S-08 usage 末帧去重（网关 repeat 形态）：pill / done.usage / `/context` 三方同值。
    * 桩 `usage-shape=repeat` 让每个分片都挂同一份 usage（旧缺陷：逐帧累加放大）。
    */
-  test('E2E-S08 usage 三方一致：pill ↔ done.usage ↔ /context 逐值相等（repeat 形态不放大）', async ({ page, request }) => {
+  test('E2E-S08 usage 三方一致：圆环 ↔ done.usage ↔ /context 同值（repeat 形态不放大）', async ({ page, request }) => {
     const chat = captureChat(page)
     await openApp(page)
     await sendMessage(page, P('turn-text usage-shape=repeat S08'))
@@ -388,6 +388,7 @@ test.describe('@stub S 流式稳定', () => {
     const context = (await contextResponse.json()) as {
       usedTokens: number
       limitTokens: number | null
+      percent: number | null
       breakdown: Array<{ key: string; tokens: number }>
     }
 
@@ -400,13 +401,15 @@ test.describe('@stub S 流式稳定', () => {
     expect(Number(usage.frames)).toBeGreaterThan(1)
     expect(usage.promptTokens).toBe(4321)
 
-    // ③ pill 与端点同值（title 里的「已用 / 上限」是数值真值面）
+    // ③ 圆环与端点同值：唯一读数是一行 tooltip（只有占比；已用/上限不再上屏）
     const pill = page.locator('[data-testid="context-pill"]')
     await expect(pill).toBeVisible()
-    const title = (await pill.getAttribute('title')) ?? ''
-    expect(title).toContain('4.3k')
-    expect(title).toContain('128k')
-    expect(title).toContain('3.4%')
+    await expect(pill).toHaveText('')
+    const shownPercent = Number((context.percent as number).toFixed(1))
+    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
+    await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    await expect(pill).toHaveAttribute('value', String(context.percent))
+    await expect(pill).toHaveAttribute('max', '100')
     // ④ 七项拆分自洽：used = 六项之和（free 是余量），free + used = limit
     const usedKeys = context.breakdown.filter((row) => row.key !== 'free')
     const usedSum = usedKeys.reduce((sum, row) => sum + row.tokens, 0)
@@ -996,9 +999,9 @@ test.describe('@stub R 刷新恢复', () => {
   })
 
   /**
-   * R-15 刷新后上下文指示器恢复：pill 值与 `/context` 一致；popover 七项自洽。
+   * R-15 刷新后上下文指示器恢复：圆环的一行 tooltip / value 与 `/context` 一致；点击不展开详情。
    */
-  test('E2E-R15 刷新后上下文 pill 恢复：与 /context 一致，popover 七项自洽', async ({ page, request }) => {
+  test('E2E-R15 刷新后上下文圆环恢复：与 /context 一致，点击不展开详情', async ({ page, request }) => {
     await openApp(page)
     await sendMessage(page, P('turn-text R15'))
     await waitRoundSettled(page, 60_000)
@@ -1016,12 +1019,20 @@ test.describe('@stub R 刷新恢复', () => {
       breakdown: Array<{ key: string; tokens: number }>
     }
     const pill = page.locator('[data-testid="context-pill"]')
-    const title = (await pill.getAttribute('title')) ?? ''
-    expect(title).toContain(`${context.percent}%`)
-    expect(await pill.innerText()).toContain(`${context.percent}%`)
+    // 默认态零可见文字；读数只在 title / aria-label 的那一行
+    await expect(pill).toHaveText('')
+    const shownPercent = Number((context.percent as number).toFixed(1))
+    await expect(pill).toHaveAttribute('title', `上下文占用 ${shownPercent}%`)
+    await expect(pill).toHaveAttribute('aria-label', `上下文占用 ${shownPercent}%`)
+    await expect(pill).toHaveAttribute('value', String(context.percent))
 
+    // 点击不是入口：不弹 popover、不吐分项行
     await pill.click()
-    await expect(page.locator('[data-testid^="context-row-"]')).toHaveCount(7, { timeout: 10_000 })
+    await expect(page.locator('[data-testid="context-popover"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="context-row-"]')).toHaveCount(0)
+    await expect(pill).toHaveText('')
+
+    // 拆分守恒在端点侧断言（界面已无分项载体）
     const usedSum = context.breakdown
       .filter((row) => row.key !== 'free')
       .reduce((sum, row) => sum + row.tokens, 0)

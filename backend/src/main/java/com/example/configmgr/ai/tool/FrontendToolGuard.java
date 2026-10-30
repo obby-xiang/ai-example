@@ -18,9 +18,11 @@ import java.util.List;
  *
  * <h2>两道闸门的位置（都在挂起机制里，不在工具方法体里）</h2>
  * <ol>
- * <li><b>下发前</b>（{@code SpToolCallingManager#awaitFrontend}）：入参不合法 ⇒
+ * <li><b>下发前</b>（{@code SpToolCallingManager#inspectFrontendArguments}，在<b>任何</b>
+ * {@code tool_start} / {@code frontend_tool_request} / {@code confirm_request} 帧之前）：入参不合法 ⇒
  * <b>不挂起、不发 {@code frontend_tool_request}</b>，直接把结构化错误结果回填模型
- * （前端根本看不到非法表单）；</li>
+ * （前端根本看不到非法表单）。生成式表单的<b>系统拒绝</b>（schema 白名单 / 槽位放行）连
+ * "未执行"的结局帧也不发 —— 只回执模型，用户面零卡片、不改任何既有表单状态；</li>
  * <li><b>回灌前</b>（{@code ConfirmGate#submitFrontendResult}）：回灌结果不合法 ⇒
  * <b>不消费挂起</b>（条目保持 {@code PENDING}，可修正后重试），HTTP 400 带被拒原因清单。</li>
  * </ol>

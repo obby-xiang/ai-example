@@ -523,34 +523,31 @@ export function tokensFromLabel(label: string): number {
   return value
 }
 
-/** pill 文案三种形态：`66% · 84k/128k` / `≈已用 84k` / 空串。 */
+/**
+ * 上下文圆环的读数面：默认态**没有任何可见文字**，只有 hover 的一行 `title`（与 `aria-label` 同源）。
+ *
+ * <p>三种形态（zh / en 同义）：
+ * `上下文占用 65.8%` / `上下文占用 约65.8%`（估算）/ `上下文已用 84.2k tokens`（上限未知）。
+ * 上限未知时圆环不写 `value`（原生不确定态，只画轨道），界面也不再存在"上限 / 占比"这两个维度。
+ */
 export interface PillView {
   raw: string
   estimate: boolean
   percent: number | null
   used: number | null
-  limit: number | null
 }
 
-export function parsePillText(raw: string): PillView {
-  const text = raw.trim()
-  const estimate = text.startsWith('≈')
-  const body = estimate ? text.slice(1) : text
-  const full = /^(\d+(?:\.\d+)?)% · ([0-9.]+[kM]?)\/([0-9.]+[kM]?)$/.exec(body)
-  if (full) {
-    return {
-      raw: text,
-      estimate,
-      percent: Number(full[1]),
-      used: tokensFromLabel(full[2]),
-      limit: tokensFromLabel(full[3])
-    }
+export function parsePillTitle(raw: string | null): PillView {
+  const text = (raw ?? '').trim()
+  const percent = /^(?:上下文占用|Context usage) (?:(约|~) ?)?(\d+(?:\.\d+)?)%$/.exec(text)
+  if (percent) {
+    return { raw: text, estimate: Boolean(percent[1]), percent: Number(percent[2]), used: null }
   }
-  const usedOnly = /^已用 ([0-9.]+[kM]?)$/.exec(body)
+  const usedOnly = /^(?:上下文已用|Context used) (?:≈)?([0-9.]+[kM]?) tokens?$/.exec(text)
   if (usedOnly) {
-    return { raw: text, estimate, percent: null, used: tokensFromLabel(usedOnly[1]), limit: null }
+    return { raw: text, estimate: text.includes('≈'), percent: null, used: tokensFromLabel(usedOnly[1]) }
   }
-  return { raw: text, estimate, percent: null, used: null, limit: null }
+  return { raw: text, estimate: false, percent: null, used: null }
 }
 
 export async function sleep(ms: number): Promise<void> {

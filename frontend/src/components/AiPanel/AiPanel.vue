@@ -44,7 +44,7 @@
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
         <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。每次实际切换都即时清屏并由后端
-             新建会话（含切回旧身份）；Task 3 起同时清掉输入草稿、编辑锚点与那份已不可达的旧会话
+             新建会话（含切回旧身份）；Task 3 起同时清掉输入草稿与那份已不可达的旧会话
              浏览器镜像（后端历史保留，不删），新旧身份不混用。 -->
         <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
           <select
@@ -1532,7 +1532,7 @@ import {
   resolveBlockExpanded,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, deriveProjections, partDiagnosticOf, partDiagnosticText, partResultIsInternal, type PartDiagnostic } from '@/utils/parts'
+import { deriveCopyText, partDiagnosticOf, partDiagnosticText, partResultIsInternal, type PartDiagnostic } from '@/utils/parts'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
@@ -2398,7 +2398,7 @@ const canSubmit = computed(
 /**
  * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
  * 四档（判据见下方 composerTier）：常态灰 `剩余 N 字` → 余量 ≤ 500 转琥珀 → 到顶（= 8192，仍可发送）
- * `已达 8192 字上限` → 超限（只可能来自程序化回填，如编辑重跑把超长原文塞回输入框）标红并关发送闸。
+ * `已达 8192 字上限` → 超限（只可能来自程序化回填，如编辑把超长原文塞回输入框）标红并关发送闸。
  * 前端不留"点了必然 400"的按钮，但绝不替用户截断。
  */
 const composerRemaining = computed(() => MESSAGE_MAX_CHARS - inputText.value.length)
@@ -4719,40 +4719,23 @@ function scrollBottom(force = false): void {
  */
 
 /**
- * R-157 #2 → R-163 T4：编辑 = 「改完从该条重跑」——回填该条正文并记住锚点；发送时（send）截断
- * 该条之后的消息、以输入框新文本重发。仅用户消息可编辑（模板 v-if role 过滤）。
- * T4：输入框**非空白**（非全空白字符）时先弹确认防覆盖（window.confirm，spec 桩断言）。
+ * 2026-10-30 用户直裁：编辑 = **只把该条正文回填到输入框并聚焦**。
  *
- * 批次2（AR-09）：编辑是**不可逆删除**，点击编辑时先按实测条数提示「将删除此后 N 条消息」，
- * 用户确认后才进入编辑态；N = 该消息之后的消息条数（不是固定文案）。N=0 不弹删除确认。
+ * <p>不发送、不重跑、不删除/截断原消息、不设编辑/重跑锚点：之后用户自己点发送，
+ * 就是一条普通新消息（`send` 不再有改写/截断分支，见 send）。
+ * 仅用户消息可编辑（模板 v-if role 过滤）。正文口径与「复制该条消息正文」同源
+ * （`deriveCopyText`：parts 的 text 段，段间空行）。
  *
- * Task 3：锚点改由 store 持有（`ai.editAnchorId`）—— 它属于**当前会话**的现场，换身份/换会话
- * 由 `adoptFreshSession` 统一清空；面板只读写这一个事实源，不再自己存一份。
+ * <p>覆盖保护（同日补充规格）：输入框**含任何非空白字符**时先弹 `window.confirm`
+ * （`ai.panel.overwriteConfirm`）—— 确认才复制并聚焦，取消则输入框与消息完全不变；
+ * 空 / 全空白字符不打扰，直接复制聚焦。确认只决定"敢不敢覆盖草稿"，与发送/重跑无关。
  */
-const editingMessageId = computed<string | null>({
-  get: () => ai.editAnchorId,
-  set: (value) => {
-    ai.editAnchorId = value
-  }
-})
-
 function editMessage(m: ChatMessage): void {
-  const index = ai.messages.indexOf(m)
-  const laterCount = index >= 0 ? ai.messages.length - index - 1 : 0
-  if (laterCount > 0) {
-    const confirmed = window.confirm(t('ai.panel.editDeleteConfirm', { count: laterCount }))
-    if (!confirmed) {
-      return
-    }
+  if (inputText.value.trim() !== '' && !window.confirm(t('ai.panel.overwriteConfirm'))) {
+    return
   }
-  if (inputText.value.trim() !== '') {
-    const confirmed = window.confirm(t('ai.panel.overwriteConfirm'))
-    if (!confirmed) {
-      return
-    }
-  }
-  inputText.value = m.content
-  editingMessageId.value = m.id
+  inputText.value = deriveCopyText(m)
+  composerRef.value?.focus({ preventScroll: true })
 }
 
 /** 本轮是否仍可给出消息级恢复入口（最后一条助手消息 + 失败/断流/取消 + 未被停止）。 */
@@ -4894,43 +4877,6 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
  */
 let sendGeneration = 0
 
-/** M-16 / I3：编辑重跑的删除现场（失败时原样回插/还原）。 */
-interface EditRerunUndo {
-  /** 发起这一轮编辑时的会话（跨会话不得把旧消息回插进新会话） */
-  sessionId: string
-  /** 编辑锚点在删除时刻的下标（目标消息已不在数组里时用它定位） */
-  index: number
-  target: ChatMessage
-  /** 被改写前的段（原文唯一真值：正文投影由它派生） */
-  parts: ChatMessage['parts']
-  /** 被 splice 掉的后继消息（保持原序） */
-  removed: ChatMessage[]
-}
-
-/**
- * M-16（2026-10-29）/ I8（R1）：把编辑重跑删掉的东西放回去 —— 用户原文 + 其后的消息。
- *
- * <p>回插位置 = 编辑锚点（那条用户消息）之后：被删消息本来就是"这条提问的回答与后续"，
- * 放回提问后面才与删除前的对话形态一致。本次失败轮自己的助手气泡（错误卡宿主）留在末尾。
- *
- * <p>I3：会话已换（410 SESSION_PURGED / 他端接管）时**不得回插** —— 那是旧会话的消息，
- * 复活进新会话等于把两条时间线拼在一起；此时只靠调用方回填草稿（用户刚改的文本没被服务端收过）。
- *
- * <p>I8：还原后立即落镜像 —— 否则刷新一次又把刚救回来的旧回答丢掉（镜像里还是删除后的现场）。
- */
-function restoreEditRerun(undo: EditRerunUndo): void {
-  if (ai.sessionId !== undo.sessionId) {
-    return
-  }
-  undo.target.parts = undo.parts
-  deriveProjections(undo.target)
-  const at = ai.messages.indexOf(undo.target)
-  const index = at >= 0 ? at : undo.index
-  ai.messages.splice(index + 1, 0, ...undo.removed)
-  ai.writeMirrorNow()
-  pinBottom()
-}
-
 async function send(): Promise<void> {
   const draft = inputText.value
   const text = draft.trim()
@@ -4949,50 +4895,20 @@ async function send(): Promise<void> {
   }
   // R-157 #4 → R-161：发送即统一 pinBottom 强制钉底（上滑暂停不挡住主动发送）。
   pinBottom()
-  // R-157 #2（收口 MAJOR-1 语义版）：编辑锚点在 ⇒ 「改完从该条重跑」——该条文本原地更新为
-  // 输入框新文本、截断其后消息、从该条重跑（skipUserRecord：不另起新用户消息）。
-  const editId = editingMessageId.value
-  let skipUserRecord = false
-  /** M-16（2026-10-29）：编辑重跑是"先删后发"——发送前把删除现场留一份，失败时原样还原。 */
-  let editUndo: EditRerunUndo | null = null
-  if (editId) {
-    editingMessageId.value = null
-    const cut = ai.messages.findIndex((item) => item.id === editId)
-    if (cut >= 0) {
-      const target = ai.messages[cut] as ChatMessage
-      const originalParts = target.parts
-      const removed = ai.messages.slice(cut + 1)
-      target.parts = [{ kind: 'text', seg: 0, text, streaming: false }]
-      deriveProjections(target)
-      markUserMsgDirty(target.id)
-      ai.messages.splice(cut + 1)
-      editUndo = { sessionId: ai.sessionId, index: cut, target, parts: originalParts, removed }
-      pinBottom()
-      skipUserRecord = true
-    }
-  }
   const generation = ++sendGeneration
   inputText.value = ''
   composerRef.value?.focus({ preventScroll: true })
-  const result = skipUserRecord
-    ? await ai.send(text, { skipUserRecord: true })
-    : await ai.send(text)
-  // 已被更晚的发送取代：这一轮不再拥有输入框 —— 草稿/编辑锚点一律不写（L-83：否则旧轮的
+  const result = await ai.send(text)
+  // 已被更晚的发送取代：这一轮不再拥有输入框 —— 草稿一律不写（L-83：否则旧轮的
   // 还原会把上一条用户消息盖到新轮草稿上，新轮再因"输入框非空"放弃还原）。
   if (generation !== sendGeneration) {
     return
-  }
-  // M-16（2026-10-29）/ I8（R1）：失败 / 断流 / 未发送 / **用户主动停止** ⇒ 先把"先删后发"的现场
-  // 还原 —— 被删消息原序回插、被改写的用户原文还原。停止同样是"这一轮没跑成"：不还原等于
-  // 让一次停止把旧回答永久删掉。I3：会话已换时 restoreEditRerun 内部直接跳过（只回填草稿）。
-  if (result.outcome !== 'ok' && editUndo) {
-    restoreEditRerun(editUndo)
   }
   // 成功 / 主动停止：草稿保持已清空（既有口径：停止不是失败，不把刚发出去的文本塞回输入框）。
   if (result.outcome === 'ok' || result.outcome === 'cancelled') {
     return
   }
-  // 用户已在流式中写入新内容：不覆盖，也不把失败消息设成新的编辑锚点。
+  // 用户已在流式中写入新内容：不覆盖。
   if (inputText.value !== '') {
     return
   }
@@ -5012,9 +4928,8 @@ async function send(): Promise<void> {
   if (takenOverByRecovery) {
     return
   }
-  // 失败 / 断流 / 未发送：原稿回流并聚焦；新消息锚到本轮用户消息，编辑重跑沿用发送前 editId。
+  // 失败 / 断流 / 未发送：原稿回流并聚焦。
   inputText.value = draft
-  editingMessageId.value = result.userMessageId ?? editId ?? null
   composerRef.value?.focus({ preventScroll: true })
 }
 
@@ -5234,7 +5149,7 @@ watch(
       contentChanged = true
     }
     stickShape = shape
-    // R-165 S4：用户消息长度也会随历史回读 / 编辑重跑变化 —— 只把**末条用户消息**标脏，
+    // R-165 S4：用户消息长度也会随历史回读变化 —— 只把**末条用户消息**标脏，
     // 不再逐 token 扫全部用户正文；助手流式 token 不产生任何 measure。
     const last = ai.messages[ai.messages.length - 1]
     if (last?.role === 'user') {
@@ -5415,9 +5330,9 @@ const currentTenantUsers = computed(() => {
 })
 
 /**
- * Task 3：**只有实际切换**才清输入草稿与编辑锚点（重选当前身份不是切换，草稿必须留着）。
+ * Task 3：**只有实际切换**才清输入草稿（重选当前身份不是切换，草稿必须留着）。
  *
- * 草稿属于面板本地态（用户为旧身份的上下文打的字），编辑锚点属于旧会话的消息；切走时同步清掉，
+ * 草稿属于面板本地态（用户为旧身份的上下文打的字）；切走时同步清掉，
  * 不等后端（切换本身也不等）。旧会话那份已不可达的浏览器镜像由 store 的切换路径清掉，
  * **后端历史保留**（不调 purge）。
  */
@@ -5427,7 +5342,6 @@ function switchIdentityFromPanel(tenantId: number, userId: number): void {
     return
   }
   inputText.value = ''
-  editingMessageId.value = null
   void ai.switchIdentity(tenantId, userId)
 }
 

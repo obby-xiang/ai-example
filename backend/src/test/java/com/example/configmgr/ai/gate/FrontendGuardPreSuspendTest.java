@@ -51,8 +51,11 @@ import static org.mockito.Mockito.when;
  *
  * <h2>本批口径</h2>
  * 前端通道条目的入参复核<b>前移到挂起前</b>（与确认门的 F5 预检同一位置）：不通过即结算
- * {@code REJECTED_ARGUMENTS} 并<b>排除出 suspended</b>，因此不会公告、不会下发；
- * 结局帧仍在执行循环里成对产出（{@code tool_start} + {@code frontend_tool_result}），
+ * {@code REJECTED_ARGUMENTS} 并<b>排除出 suspended</b>，因此不会公告、不会下发。
+ *
+ * <p>浏览器实测批（{@code FORM_SCHEMA_REJECTED} 零卡片）：结局帧<b>也不再产出</b> ——
+ * 生成式表单的系统拒绝只回执模型。此前执行循环仍补 {@code tool_start} + {@code frontend_tool_result}，
+ * 用户屏幕上就先落一张"已拒绝"的表单卡，模型改对后再落一张可用卡（两张卡、一次收集意图）。
  * 模型照样拿到结构化拒绝并可以改值重试。
  */
 class FrontendGuardPreSuspendTest {
@@ -117,8 +120,8 @@ class FrontendGuardPreSuspendTest {
 			.as("非法入参不得公告挂起、不得下发请求帧（前端看不到这张卡）")
 			.doesNotContain("suspended", "frontend_tool_request");
 		assertThat(this.store.archivedTypes(RUN_ID))
-			.as("拒绝仍要产出结局帧（ok=false + 结构化码），模型据此改值重试")
-			.contains("frontend_tool_result");
+			.as("schema 系统拒绝连结局帧也不发：用户面零卡片（模型回执不受影响）")
+			.doesNotContain("tool_start", "frontend_tool_result", "confirm_request");
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus())
 			.isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getCode()).isEqualTo(REJECT_CODE);

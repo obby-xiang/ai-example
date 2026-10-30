@@ -439,24 +439,35 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
- * 槽位放行的拒绝码（与后端 {@code ErrorCodes.FORM_SLOTS_ALREADY_KNOWN} 同值）。
+ * 生成式表单的<b>系统拒绝</b>码（与后端 {@code ErrorCodes} 同值）。
  *
- * <p>它是"表单想收集的东西已经知道"而不是"出错了"：零副作用、有明确纠正出口。
+ * <p>共同点：被判的是<b>模型给的 schema / 槽位</b>，不是用户的动作 —— 零副作用、有明确纠正出口，
+ * 后端只把结论回执模型，不对用户发任何卡片帧。
+ * <ul>
+ * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：表单想收集的东西已经知道（"没有缺口"而不是"出错了"）；</li>
+ * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）。</li>
+ * </ul>
  */
 export const FORM_SLOTS_ALREADY_KNOWN = 'FORM_SLOTS_ALREADY_KNOWN'
 
+/** 与后端 {@code ErrorCodes.FORM_SCHEMA_REJECTED} 同值（本模块内判据用；对外码表见 {@code ErrorCode}）。 */
+const FORM_SCHEMA_REJECTED = 'FORM_SCHEMA_REJECTED'
+
+const SYSTEM_REJECT_FORM_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, FORM_SCHEMA_REJECTED])
+
 /**
- * 该 toolCall 是否是<b>槽位放行的幻影表单卡</b>（历史面唯一判据）。
+ * 该 toolCall 是否是<b>系统拒绝的幻影表单卡</b>（历史面唯一判据）。
  *
- * <p>为什么需要：后端对这一个码静默了用户可见的工具帧（{@code tool_start} /
- * {@code frontend_tool_result} 都不发），但条目、日志与模型回执照旧保留 —— 于是历史载荷里仍有
- * 这条调用。前端若照常建段，就会出现"实时流里没有、刷新后多出一张"的幻影卡。
+ * <p>为什么需要：后端对系统拒绝静默了全部用户可见的工具帧（{@code tool_start} /
+ * {@code frontend_tool_request} / {@code frontend_tool_result} 都不发），但条目、日志与模型回执
+ * 照旧保留 —— 于是历史载荷里仍有这条调用。前端若照常建段，就会出现"实时流里没有、刷新后多出一张"
+ * 的幻影卡（浏览器实测的"已拒绝卡 + 可用卡"正是这两面各说一套）。
  *
- * <p>判据 = 工具名 + 错误码，两者缺一不可：其它拒绝（如 {@code FORM_SCHEMA_REJECTED}）必须
- * 让用户看到"这张表为什么没成"；别的工具即便带同名码也不隐藏（不借码绕过可见性）。
+ * <p>判据 = 工具名 + 错误码，两者缺一不可：其它拒绝仍要让用户看到"这次为什么没执行"；
+ * 别的工具即便带同名码也不隐藏（不借码绕过可见性）。
  */
-export function isSlotReleasePhantom(name: unknown, code?: string | null): boolean {
-  return name === GENERATIVE_FORM_TOOL && code === FORM_SLOTS_ALREADY_KNOWN
+export function isSystemRejectPhantom(name: unknown, code?: string | null): boolean {
+  return name === GENERATIVE_FORM_TOOL && typeof code === 'string' && SYSTEM_REJECT_FORM_CODES.has(code)
 }
 
 /**

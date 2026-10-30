@@ -1,8 +1,8 @@
 /**
- * Task 3：跨身份草稿与编辑锚点的精确用例（一条用例锁一个行为）。
+ * Task 3：跨身份草稿的精确用例（一条用例锁一个行为）。
  *
- * <p>切换租户/用户 = 换会话：输入框草稿与「编辑重跑」锚点都属于**旧身份**的现场，
- * 切走后不得留在输入区，也不得让下一次发送按旧锚点改写/截断消息。
+ * <p>切换租户/用户 = 换会话：输入框草稿属于**旧身份**的现场，切走后不得留在输入区。
+ * （「编辑」自 2026-10-30 用户直裁起只回填正文、不设锚点，故不再有「编辑锚点」这个现场。）
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
@@ -96,8 +96,8 @@ beforeEach(() => {
 
 enableAutoUnmount(afterEach)
 
-describe('Task 3 · 跨身份草稿与编辑锚点', () => {
-  it('切换用户时清掉输入草稿、编辑锚点与失效旧身份镜像（后端历史不删）', async () => {
+describe('Task 3 · 跨身份草稿', () => {
+  it('切换用户时清掉输入草稿与失效旧身份镜像（后端历史不删）', async () => {
     const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
     const wrapper = mount(AiPanel, { global: { stubs } })
     await flushPromises()
@@ -113,12 +113,13 @@ describe('Task 3 · 跨身份草稿与编辑锚点', () => {
     store.writeMirrorNow()
     expect(sessionStorage.getItem(oldMirrorKey)).not.toBeNull()
 
-    // 先打一份草稿，再进「编辑重跑」态（输入框被回填旧提问，锚点指向 u-1）。
+    // 先打一份草稿，再点「编辑」：覆盖保护要求先确认，确认后只回填该条正文。
     await wrapper.find('[data-testid="composer-input"]').setValue('还没发出去的草稿')
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await wrapper.find('[data-testid="edit-msg-u-1"]').trigger('click')
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value)
       .toBe('原始问题')
+    confirmSpy.mockRestore()
 
     // 同租户换用户 → 换身份/换会话。
     await wrapper.find('[data-testid="user-select"]').setValue('72')
@@ -127,7 +128,6 @@ describe('Task 3 · 跨身份草稿与编辑锚点', () => {
     expect(store.identity).toEqual({ tenantId: 7, userId: 72 })
     expect(store.sessionId).toBe('7002')
     expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toBe('')
-    expect(store.editAnchorId).toBeNull()
     // 失效的旧身份镜像被清掉（新身份下不会冒出旧会话的镜像）；后端历史不在前端处理范围内。
     expect(sessionStorage.getItem(oldMirrorKey)).toBeNull()
     expect(api.deleteHistory).not.toHaveBeenCalled()

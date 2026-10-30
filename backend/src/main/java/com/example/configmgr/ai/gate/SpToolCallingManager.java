@@ -111,8 +111,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <li><b>前端工具挂起</b>：通道为 {@code FRONTEND} 的工具（{@code @ToolChannel}）不执行后端桩体，
  * 下发 {@code frontend_tool_request} 并阻塞等 {@code POST /api/ai/frontend-tool-result} 回灌；
  * 另有<b>第五件事</b>：声明了复核器的前端工具（{@link FrontendToolGuard}，DC-15）在<b>挂起之前</b>
- * 先过一道入参安全闸 —— 不合法就<b>不挂起、不下发</b>，只把结构化错误结果回填模型
- * （见 {@link #awaitFrontend}）。</li>
+ * （即任何 {@code tool_start}/{@code frontend_tool_request}/{@code confirm_request} 帧之前）先过一道
+ * 入参安全闸 —— 不合法就<b>不挂起、不下发</b>，只把结构化错误结果回填模型；生成式表单的<b>系统拒绝</b>
+ * （schema 白名单 / 槽位放行）连"未执行"结局帧也不发，用户面零卡片（见 {@link #awaitFrontend}）。</li>
  * <li><b>轮内上下文预算</b>（工具轮内上下文预算批）：每批工具结束、下一次上游调用之前，
  * 用 {@link TurnBudgetPlan} 判一次"下一发请求会不会越窗" —— 达 L1 线只清旧工具结果
  * （本地动作，无模型调用），达收尾线追加收尾指令并<b>武装</b>本轮（此后工具一律不执行），
@@ -824,6 +825,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// 复核对入参是确定性的；放到 await 里再判，"不挂起、不下发"的契约会被
 			// publishRequestsForParkedBatch 打破（非法 schema 先拿到 suspended + frontend_tool_request，
 			// 随后才被判 REJECTED_ARGUMENTS —— E2E GF6/G-13/X-10 的实测帧序正是如此）。
+			// 这是生成式表单 schema/槽位<b>系统校验的唯一入口</b>：本批所有前端条目都在任何
+			// tool_start / frontend_tool_request / confirm_request 帧之前过完这一道，用户面不会先见到
+			// 一张"已拒绝"的表单卡、再见到模型改对后的那张（浏览器实测的"两张卡"缺陷）。
 			if (!budgetArmed && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
 				FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
 				if (verdict != null && !verdict.accepted()) {
@@ -924,14 +928,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 							pending.getName(), pending.getToolCallId());
 					continue;
 				}
-				// 挂起前被入参闸门拒掉的条目：没有卡、没有请求帧，只有一张「未执行」的结局帧
-				// （与预检未通过同形的两条帧：tool_start → frontend_tool_result）。
-				// 例外：槽位放行（FORM_SLOTS_ALREADY_KNOWN）是"没有缺口"而不是"出了错" —— 条目、
-				// 日志与模型回执照旧，但<b>一条会产生用户卡片的帧都不发</b>：用户不该为一张"系统已经
-				// 知道答案"的表单看见失败卡，也让模型只剩"改调 select_definitions"这一个出口。
+				// 挂起前被入参闸门拒掉的条目：没有请求帧（前端根本不知道这次调用）。
+				// 生成式表单的<b>系统拒绝</b>（schema 白名单 / 槽位放行）连「未执行」的结局帧也不发 ——
+				// 见 {@link #systemRejectedWithoutUserFrames}：条目、日志与模型回执照旧，用户面零卡片。
+				// 其它前端工具的入参拒绝仍发与预检未通过同形的两条帧（tool_start → frontend_tool_result），
+				// 让用户看见"这次为什么没执行"。
 				if (frontendRejected.contains(pending.getToolCallId())) {
 					String text = frameText(pending.getResultText());
-					if (!silentlyReleased(pending)) {
+					if (!systemRejectedWithoutUserFrames(pending)) {
 						emitToolStartOnce(runId, toolStarted, pending);
 						out.frontendToolResult(pending, false, text);
 					}
@@ -2056,12 +2060,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 前端工具：先过入参安全闸（DC-15），再挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。
+	 * 前端工具：挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。
 	 *
-	 * <p>闸门（{@link FrontendToolGuard#inspectArguments}）不通过时<b>不挂起</b>：不发
-	 * {@code frontend_tool_request}、不占等待上限、前端看不到这份非法入参；结构化错误结果
-	 * （机器可读码 + 原因清单）作为该次调用的工具结果回填模型，官方循环照常继续
-	 * ——模型读到"哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
+	 * <p>入参安全闸（DC-15）在<b>挂起前</b>已经跑过（{@code executeToolCallsResolved} 的
+	 * {@code inspectFrontendArguments}），走到这里的条目都过了闸；本方法里的那次复查是兜底
+	 * （预检后入参不会变，确定性复核器下不可达）：一旦兜底才判不通过，仍<b>不挂起</b>、不发
+	 * {@code frontend_tool_request}、不占等待上限，只把结构化错误结果回填模型 —— 模型读到
+	 * "哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
 	 */
 	private String awaitFrontend(String runId, PendingToolCall pending, AiContext context) {
 		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
@@ -2093,11 +2098,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/**
 	 * 入参被安全闸拒绝（DC-15）：与防线③（{@link #blockOutOfScope}）同一手法 ——
 	 * <b>不产生任何副作用</b>（不挂起、不下发前端、不认领、不记台账），只把结构化错误结果
-	 * 回填模型，让人机都能看见"这次没执行、为什么"。
+	 * 回填模型并收敛成终态（不留在 {@code PENDING}，否则续跑会把它当成"等人/等前端"）。
 	 *
-	 * <p>结局帧用 {@code frontend_tool_result}（ok=false）：这次调用走的是前端通道且就此收敛，
-	 * 与"前端超时"（{@code FRONTEND_TIMEOUT}）同帧型 —— 前端不必为"没被问到的那次调用"再解析
-	 * 一种新帧；待决条目不留在 {@code PENDING}（否则续跑会把它当成"等人/等前端"）。
+	 * <p>帧面分两种：一般入参拒绝给一条 {@code frontend_tool_result}（ok=false，与
+	 * "前端超时"同帧型，让用户看见"这次没执行、为什么"）；生成式表单的<b>系统拒绝</b>
+	 * （{@link #systemRejectedWithoutUserFrames}）一条都不发 —— 被判的是模型给的 schema，
+	 * 用户没有动作可看，发帧只会落一张"已拒绝"的空卡。
 	 *
 	 * <p>正常路径（挂起前的预检）只做 {@link #settleFrontendRejected}（写条目 + 日志），帧由
 	 * 执行循环按既有帧序发；本方法保留给 {@link #awaitFrontend} 的兜底复查（预检后入参不会变，
@@ -2105,6 +2111,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
 		String text = settleFrontendRejected(runId, pending, verdict);
+		if (systemRejectedWithoutUserFrames(pending)) {
+			// 兜底复查才发现系统拒绝：此时 tool_start 已随执行循环发出（确定性复核器下不可达），
+			// 但表单本身仍不能下发 —— 不给用户再补一张"已拒绝"的结局卡。
+			log.warn("生成式表单在挂起后复查才被系统拒绝（预期不可达）runId={} toolCallId={} code={}：不发结局帧",
+					runId, pending.getToolCallId(), pending.effectiveCode());
+			return text;
+		}
 		this.registry.of(runId).frontendToolResult(pending, false, text);
 		return text;
 	}
@@ -3115,24 +3128,37 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（只此一码）。
+	 * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（生成式表单的系统拒绝：schema 白名单 / 槽位放行）。
 	 *
-	 * <p>{@code FORM_SLOTS_ALREADY_KNOWN} = 生成式表单想收集的槽位已由任务/工作区或用户明确值确定：
-	 * 它是"没有缺口"，不是"输入有错"，拒绝本身零副作用且有明确纠正出口（直接调
-	 * {@code select_definitions} / {@code set_condition}）。因此三面照旧、帧面静默：
+	 * <p>两类拒绝的共同点：<b>被判的是模型给的 schema，不是用户的动作</b>，而且都零副作用、都有明确
+	 * 纠正出口。浏览器实测的缺陷正是"先落一张'已拒绝'的表单卡，模型改对后再落一张可用卡"——
+	 * 用户看到两张卡，实际只有一次收集意图。
+	 *
+	 * <ul>
+	 * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）；</li>
+	 * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：这张表想收集的槽位已由任务/工作区或用户明确值确定
+	 * （"没有缺口"而不是"输错了"）。</li>
+	 * </ul>
+	 *
+	 * <p>静默的是<b>用户面</b>，其余三面一字不改：
 	 * <ul>
 	 * <li>条目：仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障）；</li>
 	 * <li>日志：{@code settleFrontendRejected} 的 WARN 照旧；</li>
-	 * <li>模型：统一信封回执照旧（含码与"下一步"指引）；</li>
-	 * <li>用户：{@code tool_start} 与 {@code frontend_tool_result} <b>都不发</b> —— 前端不建段，就不会有卡。</li>
+	 * <li>模型：统一信封回执照旧（含码与逐条"改哪一处"）；</li>
+	 * <li>用户：{@code tool_start} / {@code frontend_tool_request} / {@code frontend_tool_result}
+	 * <b>一条都不发</b> —— 前端不建段，就不会有卡，也不会更新任何既有的表单状态。</li>
 	 * </ul>
 	 *
-	 * <p>只认这一个码：其它入参拒绝（schema 白名单等）必须让用户看到"这张表为什么没成"。
-	 * 工具名同时校验，是为了不让别的工具"借用"这个码绕过可见性。
+	 * <p>只认<b>生成式表单 + 这两个码</b>：别的工具即便带同名码也不静默（不借码绕过可见性），
+	 * 生成式表单的其它拒绝（例如回灌值不合法）走的是回灌闸门、不是这里 —— 那里用户已经填过表，
+	 * 必须看见"哪一格要改"。
 	 */
-	private static boolean silentlyReleased(PendingToolCall pending) {
-		return GenerativeFormRules.TOOL_NAME.equals(pending.getName())
-				&& ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(pending.effectiveCode());
+	private static boolean systemRejectedWithoutUserFrames(PendingToolCall pending) {
+		if (!GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
+			return false;
+		}
+		String code = pending.effectiveCode();
+		return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code) || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
 	}
 
 	/**

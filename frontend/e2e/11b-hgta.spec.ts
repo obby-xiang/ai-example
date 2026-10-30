@@ -209,12 +209,32 @@ test.describe('@stub G 生成式表单', () => {
     const chat = await chatFrames(request, { sessionId: sid, message: `gf-expr-linkage 用例G06-${uniq()}`, context: { page: 'tasks' } })
     expect(chat.status).toBe(200)
     const types = chat.frames.map((frame) => String(frame.type))
+    // schema 系统拒绝只回执模型（浏览器实测批）：不下发请求帧、不落任何卡片帧 ——
+    // 否则用户先看见一张"已拒绝"的表单卡，模型改对后又落一张可用卡。
+    // 不再用正文里出现错误码代理"模型被告知"：帧静默后 SSE 正文只剩模型自己的措辞。
     expect(types).not.toContain('frontend_tool_request')
-    expect(chat.text).toMatch(/LINKAGE_CONDITION_INVALID|FORM_SCHEMA_REJECTED|REJECTED_ARGUMENTS/)
+    expect(types).not.toContain('frontend_tool_result')
+    expect(
+      chat.frames.filter((frame) => String(frame.type) === 'tool_start' && String(frame.name) === 'generative_form')
+    ).toHaveLength(0)
     // 轮继续并正常收尾
     expect(types).toContain('done')
     const run = await currentRun(request, sid)
     expect(run.awaitingExternal ?? false).toBe(false)
+
+    // 零卡帧 ≠ 任意静默：被拒的那次调用必须在账上留下**具体的联动拒绝**证据。
+    // 帧里没有它的 toolCallId（一条卡帧都不发），故按"工具名 + 终态"定位目标条目。
+    const pendings = await apiGet<Array<Record<string, unknown>>>(request, `/api/ai/pending/${String(run.runId)}`)
+    const rejected = pendings.filter(
+      (item) => String(item.name) === 'generative_form' && String(item.status) === 'REJECTED_ARGUMENTS'
+    )
+    expect(rejected).toHaveLength(1)
+    const target = rejected[0]
+    expect(String(target.toolCallId ?? '')).not.toBe('')
+    // 条目码 = schema 级系统拒绝（服务端写入的终态事实）；issues 级的具体码在 resultText 里
+    expect(String(target.code)).toBe('FORM_SCHEMA_REJECTED')
+    // 具体原因 = 联动条件表达式非法（不是"槽位已知"或别的静默原因）
+    expect(String(target.resultText ?? '')).toContain('LINKAGE_CONDITION_INVALID')
   })
 
   test('E2E-G08 longText 上限 2000 / text 上限 200：前端即时拦、后端 400 VALUE_TOO_LONG', async ({ page, request }) => {
@@ -324,8 +344,14 @@ test.describe('@stub G 生成式表单', () => {
     const chat = await chatFrames(request, { sessionId: sid, message: `gf-deep-linkage 用例G13-${uniq()}`, context: { page: 'tasks' } })
     expect(chat.status).toBe(200)
     const types = chat.frames.map((frame) => String(frame.type))
+    // 与 G06 同口径：schema 系统拒绝只回执模型，用户面零卡片（不下发请求帧、不落失败卡帧）
     expect(types).not.toContain('frontend_tool_request')
-    expect(chat.text).toMatch(/LINKAGE_DEPTH|DEPTH|FORM_SCHEMA_REJECTED|REJECTED_ARGUMENTS/)
+    expect(types).not.toContain('frontend_tool_result')
+    expect(
+      chat.frames.filter((frame) => String(frame.type) === 'tool_start' && String(frame.name) === 'generative_form')
+    ).toHaveLength(0)
+    // 轮继续并正常收尾
+    expect(types).toContain('done')
     const run = await currentRun(request, sid)
     expect(run.awaitingExternal ?? false).toBe(false)
   })

@@ -32,7 +32,7 @@ import {
   lastToolText,
   maxStubIndex,
   newSessionId,
-  parsePillText,
+  parsePillTitle,
   systemTextOf,
   unwrapKnowledge,
   waitStubRequestsAfter
@@ -70,7 +70,7 @@ test('@stub E2E-K06 索引未就绪文案分流：status 如实 available=false�
   expect(system).not.toContain('<knowledge_catalog>')
 })
 
-test('@stub E2E-C02 分母未知不显百分比：pill 只显已用、端点 limitTokens/percent 为 null、不崩', async ({ page }) => {
+test('@stub E2E-C02 分母未知不显百分比：圆环不确定态（无 value）只留轨道、tooltip 只说已用、端点 limitTokens/percent 为 null、不崩', async ({ page }) => {
   // 分母未知的合法入口：allowlist 里加一个**没有声明 max_context** 的模型并设为默认。
   // 此时 ContextLimitResolver 回落到过渡键（本棒用 E2E_EXTRA_BACKEND_ARGS 置 0）⇒ limitTokens = 未知。
   const providers = await apiData<Array<{ id: number; code: string; enabled: boolean }>>('/api/ai/providers')
@@ -104,12 +104,17 @@ test('@stub E2E-C02 分母未知不显百分比：pill 只显已用、端点 lim
 
   const pill = page.locator('[data-testid="context-pill"]')
   await expect(pill).toBeVisible()
-  const view = parsePillText(await pill.innerText())
+  // 默认态零可见文字：读数只在 hover 的那一行里（title 与 aria-label 同源）
+  await expect(pill).toHaveText('')
+  const view = parsePillTitle(await pill.getAttribute('title'))
   expect(view.raw).not.toContain('%')
   expect(view.percent).toBeNull()
-  expect(view.limit).toBeNull()
   expect((view.used as number)).toBeGreaterThan(0)
   expect(view.raw).toContain('已用')
+  await expect(pill).toHaveAttribute('aria-label', view.raw)
+  // 没有分母就没有占比：不写 value（原生不确定态，视觉只剩轨道），绝不拿 0 冒充
+  await expect(pill).not.toHaveAttribute('value')
+  await expect(pill).toHaveAttribute('data-tier', 'none')
 
   const sid = await sessionId(page)
   const snapshot = await contextSnapshot(sid)
@@ -118,9 +123,8 @@ test('@stub E2E-C02 分母未知不显百分比：pill 只显已用、端点 lim
   expect(snapshot.source).toBe('stream')
   expect(Math.abs((view.used as number) - snapshot.usedTokens)).toBeLessThan(100)
 
-  // 展开分项：没有分母就没有剩余项，界面显式写"上限未知"（不是静默 0）
+  // 点击不展开详情：上限未知也不给分项，界面上不再有"上限未知"面板
   await pill.click()
-  await expect(page.locator('[data-testid="context-popover"]')).toBeVisible()
-  await expect(page.locator('[data-testid="context-popover"]')).toContainText('上限未知')
-  await expect(page.locator('[data-testid="context-row-free"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="context-popover"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid^="context-row-"]')).toHaveCount(0)
 })

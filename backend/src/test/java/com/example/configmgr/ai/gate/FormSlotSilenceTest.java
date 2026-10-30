@@ -48,12 +48,14 @@ import static org.mockito.Mockito.when;
  * 用户看到的却是"我什么都没收到就多了一张卡"。这条卡既不能填也不能点，属于纯噪声。
  *
  * <h2>本批口径</h2>
- * 只对<b>这一个错误码</b>（{@link ErrorCodes#FORM_SLOTS_ALREADY_KNOWN}）静默用户可见的工具帧，
- * 其余三面<b>一字不改</b>：条目仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障可查）、
- * 日志照旧 WARN、模型照旧收到结构化的纠正回执（含"下一步直接调 select_definitions"的指引）。
+ * 生成式表单的<b>系统拒绝</b>（schema 白名单 {@code FORM_SCHEMA_REJECTED} 与槽位放行
+ * {@link ErrorCodes#FORM_SLOTS_ALREADY_KNOWN}）静默用户可见的工具帧，其余三面<b>一字不改</b>：
+ * 条目仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障可查）、日志照旧 WARN、
+ * 模型照旧收到结构化的纠正回执（含"下一步直接调 select_definitions"的指引）。
+ * schema 那一半的用例见 {@link GenerativeFormSchemaRejectSilenceTest}。
  *
  * <p>两条反向用例钉住"不修复过度"：①槽位未知/歧义 ⇒ 表单照旧下发（挂起 + 请求帧 + 工具卡全在）；
- * ②其它拒绝码（如 {@code FORM_SCHEMA_REJECTED}）⇒ 失败卡照旧可见（用户要知道模型给的表单为什么没成）。
+ * ②其它拒绝码（不属于系统拒绝的入参拒绝）⇒ 失败卡照旧可见（用户要知道这次为什么没执行）。
  */
 class FormSlotSilenceTest {
 
@@ -128,11 +130,12 @@ class FormSlotSilenceTest {
 
 	@Test
 	void otherFrontendRejectionsStillShowTheirFailureCard() {
-		this.manager(rejecting("FORM_SCHEMA_REJECTED")).executeToolCalls(prompt(), response());
+		// 合成的"非系统拒绝"码：钉住静默面只认 schema/槽位这两个码，不按工具名一刀切
+		this.manager(rejecting("SOME_OTHER_ARGUMENT_REJECTION")).executeToolCalls(prompt(), response());
 
-		// 只有槽位放行那一个码静默；schema 被拒要让用户看见"这张表为什么没成"
+		// 系统拒绝之外的入参拒绝照旧给用户一张"这次没执行"的卡
 		assertThat(this.store.archivedTypes(RUN_ID)).contains("tool_start", "frontend_tool_result");
-		assertThat(this.store.pending(RUN_ID, CALL_ID).getCode()).isEqualTo("FORM_SCHEMA_REJECTED");
+		assertThat(this.store.pending(RUN_ID, CALL_ID).getCode()).isEqualTo("SOME_OTHER_ARGUMENT_REJECTION");
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
