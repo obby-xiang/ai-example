@@ -373,7 +373,7 @@ public class AiTools {
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。只需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes 与可选 conditions：只有用户在本轮已明确说出配置定义/中文名/别名时才传 defCodes（结构化数组，例如 [\"CURRENCY\"]），未提就省略（宿主随后只弹一次配置项选择表单）；只有用户本轮已明确说出筛选条件时才传 conditions（与 set_condition 同一 FieldQueryCondition 结构，必须与 defCodes 同时给出），未提就省略（不设筛选=全量），宿主会在勾选配置项后用同一份校验落库、不再弹条件表；标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务的配置项、筛选条件、步骤与完成状态不属于新任务，不自动带入，除非用户明确要求沿用。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行（不启动作业，也不隐式落配置项/条件）。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}，不得省略。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -382,7 +382,7 @@ public class AiTools {
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
             @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CURRENCY\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
-            @ToolParam(description = "可选（仅导出任务）：用户本轮已明确的筛选条件（与 set_condition 同一 FieldQueryCondition 结构：{\"scopeKeys\":[...],\"fields\":[{\"fieldCode\":\"...\",\"operator\":\"EQ\",\"value\":\"...\"}]}）；未明确就不传（不设筛选=全量）。必须与 defCodes 同时给出：宿主预检按该配置定义校验字段/算子，通过后在勾选配置项后落库，不再弹条件表；非法结构会被预检拒绝，不得创建", required = false) FieldQueryCondition conditions,
+            @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             ToolContext toolContext) {
         Task.TaskType taskType;
         try {
@@ -682,8 +682,8 @@ public class AiTools {
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
             + "推进成功后下一批按最新披露继续，推进失败即停"
             + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
-            + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 时先按 generative_form(purpose=SET_CONDITIONS) 给一次"
-            + "非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
+            + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单："
+            + "条件未决定时由宿主统一给一次非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
             + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但未落库、或条件表回灌了非空文本却还没 set_condition 时，"
             + "confirm_step 会被零副作用拒绝并指回 set_condition（先落库，下一批再推进）")
     @ToolScope({ AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
@@ -769,11 +769,9 @@ public class AiTools {
             + "/GENERAL_CLARIFY（通用澄清，缺省）；"
             + "宿主只按 purpose 判断用途，禁止靠标题猜。TASK_TYPE 只在任务类型未知时用，形状固定为单个 enum 单选"
             + "（选项正好 EXPORT/IMPORT，不附其它字段）；类型已确定时会被零副作用拒绝并指回 create_task。"
-            + "SET_CONDITIONS 只在 QUERY_COND 收集（其它步骤零副作用拒绝），形状固定为一个非必填自由文本框"
-            + "（type=text，可加 variant=longText）："
-            + "把用户文本解析成 set_condition 的结构化条件；留空即不设筛选（直接 confirm_step 全量推进）；"
-            + "条件已明确或当前步骤不是 QUERY_COND 会被零副作用拒绝，不再重复收集。"
-            + "条件表回灌了非空文本时，必须先按文本调用 set_condition 落库再 confirm_step；"
+            + "SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，"
+            + "模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition；"
+            + "宿主条件表回灌了非空文本时，必须先按文本调用 set_condition 落库再 confirm_step；"
             + "已知未落库时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"

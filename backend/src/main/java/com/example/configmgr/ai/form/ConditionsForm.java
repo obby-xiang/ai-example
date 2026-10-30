@@ -241,8 +241,12 @@ public class ConditionsForm extends HostForm {
 				return false;
 			}
 			ConditionFeedback feedback = feedbackOf(runId, taskId, createTaskBoundary(context));
-			if (feedback.cancelled() || feedback.blank() || feedback.nonEmpty()) {
-				// 已收集/留空/取消：不自动重问（取消恢复通道由 confirm_step 拒绝说明）
+			if (feedback.blank()) {
+				persistExplicitUnset(taskId, plan.undecided());
+				return false;
+			}
+			if (feedback.cancelled() || feedback.nonEmpty()) {
+				// 已收集/取消：不自动重问（取消恢复通道由 confirm_step 拒绝说明）
 				return false;
 			}
 			String toolCallId = toolCallId(runId, taskId, plan.undecided(), taskDefCodesFor(task));
@@ -714,8 +718,8 @@ public class ConditionsForm extends HostForm {
 	}
 
 	/**
-	 * 本轮 {@code SET_CONDITIONS} 表单的回灌事实（模型表单与宿主表单<b>同一份</b>：
-	 * 都持久化在同一个 run 的待决条目里，跨实例、跨续跑都读得到）。
+	 * 本轮 {@code SET_CONDITIONS} 表单的回灌事实（宿主表单持久化在同一个 run 的待决条目里，
+	 * 跨实例、跨续跑都读得到；旧模型表单仅作历史兼容）。
 	 *
 	 * <p><b>任务时间边界</b>：{@code boundaryMs > 0} 时只认该时刻<b>之后产生</b>的表单
 	 * （{@code requestedAtMs}，旧条目回落 {@code resolvedAtMs}）—— 上一个任务（A）的回灌/取消
@@ -853,6 +857,9 @@ public class ConditionsForm extends HostForm {
 		JsonNode values = parseJson(resultText);
 		if (values == null || !values.isObject()) {
 			return null;
+		}
+		if (values.isEmpty()) {
+			return "";
 		}
 		List<String> declaredKeys = textFieldKeys(argumentsJson);
 		if (!declaredKeys.isEmpty()) {

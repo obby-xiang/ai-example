@@ -449,7 +449,12 @@ public class ToolPreflightService {
 		// 非法结构一律不得进入（预检失败 ⇒ 不挂确认卡、不创建）。
 		ConditionsRequest requestedConditions = conditionsOf(argumentsJson);
 		JsonNode conditionsNode = requestedConditions.node();
-		if (requestedConditions.present()) {
+		if (!requestedConditions.present() && "EXPORT".equalsIgnoreCase(type)) {
+			checks.add(PreflightReport.check(CheckCode.CREATE_CONDITIONS, false,
+					argsOf("reason", "missing conditions"),
+					"导出任务必须显式给出 conditions：已知条件传结构化对象，未决定传 {}（本次未创建）"));
+		}
+		else if (requestedConditions.present()) {
 			List<String> conditionIssues = new ArrayList<>();
 			boolean conditionsValid = true;
 			Map<String, Object> conditionsMap = conditionsMap(conditionsNode);
@@ -459,25 +464,25 @@ public class ToolPreflightService {
 						? "conditions apply to EXPORT tasks only (import tasks have no filter step)"
 						: "conditions 仅适用于导出（EXPORT）任务（导入没有筛选步骤）");
 			}
-			else if (conditionsNode == null || !conditionsNode.isObject() || conditionsNode.isEmpty()) {
+			else if (conditionsNode == null || !conditionsNode.isObject()) {
 				conditionsValid = false;
 				conditionIssues.add(english
-						? "conditions must be a non-empty object ({\"scopeKeys\":[...],\"fields\":[...]})"
-						: "conditions 必须是非空对象（形如 {\"scopeKeys\":[...],\"fields\":[...]}）");
+						? "conditions must be an object; use {} when undecided"
+						: "conditions 必须是对象；条件未决定时传 {}");
 			}
-			else if (!requested.present() || requested.invalid() || defCodes.isEmpty()) {
+			else if (!conditionsNode.isEmpty() && (!requested.present() || requested.invalid() || defCodes.isEmpty())) {
 				conditionsValid = false;
 				conditionIssues.add(english
 						? "conditions need a valid defCodes array: conditions target specific definitions"
 						: "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）");
 			}
-			else if (this.definitionService == null) {
+			else if (!conditionsNode.isEmpty() && this.definitionService == null) {
 				conditionsValid = false;
 				conditionIssues.add(english
 						? "Definition validation is unavailable; cannot create a task with conditions"
 						: "配置定义校验不可用，不能带 conditions 创建任务");
 			}
-			else {
+			else if (!conditionsNode.isEmpty()) {
 				WizardActionGuard guard = new WizardActionGuard(this.definitionService);
 				for (String defCode : defCodes) {
 					String probe;
@@ -522,10 +527,12 @@ public class ToolPreflightService {
 						+ (title == null || title.isBlank() ? "" : "「" + title.trim() + "」") + codesText
 						+ "（创建≠执行，不启动作业）";
 		String conditionText = requestedConditions.present()
-				? (english
-						? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
-						: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）")
-				: (english ? "No filter conditions (create task)" : "无筛选条件（创建任务）");
+				? (conditionsNode != null && conditionsNode.isEmpty()
+						? (english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次")
+						: (english
+								? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
+								: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）"))
+				: (english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建");
 		boolean pass = checks.stream().allMatch(PreflightReport.Check::pass);
 		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks,
 				"create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"

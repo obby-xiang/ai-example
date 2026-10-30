@@ -49,6 +49,13 @@
       "reason": "已同步结构化语义、确定性条件工作流、配置元数据注册表及任务隔离边界",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:9d2d2add2eec79271c2213811c1365c3a0903d03877058bec38ebb5a9b9d889d",
+      "status": "synced",
+      "reason": "已同步导出条件决策、条件表单宿主单通道、真实空对象留空收口及页签会话归属判定契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

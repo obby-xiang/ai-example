@@ -5105,7 +5105,7 @@ export const useAiStore = defineStore('ai', {
       }
       // Task 4 引导门：会话必须由后端发号；拿不到号（身份未就绪/发号失败）就**不发请求**，
       // 也绝不把空 id 交给后端（前端已在入口处拒绝，服务端 identity/session 校验才有意义）。
-      const sessionId = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
+      const sessionId = await this.ensureSession()
       if (sessionId === '') {
         return { outcome: 'not-sent', userMessageId: null }
       }
@@ -5874,7 +5874,7 @@ export const useAiStore = defineStore('ai', {
     async syncGateFromAuthority(toolCallId: string): Promise<void> {
       // Task 4 返修 I1：409 校正计时器可能落在身份切换/发号失败窗口 —— 空号一律早退，
       // 绝不给 `/runs/current?sessionId=` 发空 id 请求。
-      const sid = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
+      const sid = await this.ensureSession()
       if (sid === '') {
         this.retryOrGiveUpGateSync(toolCallId)
         return
@@ -8063,7 +8063,7 @@ export const useAiStore = defineStore('ai', {
         return false
       }
       // Task 4 引导门：反馈属于对话域（带身份头 + 会话号），未就绪不发空 id。
-      const sessionId = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
+      const sessionId = await this.ensureSession()
       if (sessionId === '') {
         return false
       }
@@ -8303,6 +8303,13 @@ export const useAiStore = defineStore('ai', {
      */
     async ensureSession(): Promise<string> {
       if (this.sessionId !== '') {
+        const ownership = this.ensureTabOwnership()
+        if (ownership !== null) {
+          await ownership
+        }
+        if (this.sessionId === '') {
+          return ''
+        }
         // 已有号即视为恢复：清掉上一次失败态/失败通知（如切回有指针的身份后）。
         if (this.sessionIssueFailed) {
           this.sessionIssueFailed = false
@@ -8811,7 +8818,7 @@ export const useAiStore = defineStore('ai', {
       // Task 4：先判完所有权（本页签新建）再向后端取号；取号失败则保持未就绪，不得用空 id 发请求。
       // Task 3：所有权认领由 `ensureSession()` 统一完成（新号只可能是本页签的；无锁环境保持
       // unsupported，不冒充 owner），这里不再重复探活/claim。
-      const issued = this.sessionId !== '' ? this.sessionId : await this.ensureSession()
+      const issued = await this.ensureSession()
       // best-effort 停掉后端仍在跑的旧轮（只断本地连接不停后端，故必须显式 POST）
       if (oldRunId) {
         try {

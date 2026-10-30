@@ -59,12 +59,8 @@ import java.util.Set;
  * <ul>
  * <li><b>任务类型</b>（{@code purpose=TASK_TYPE}）：槽位里已有任务类型 ⇒ 零副作用拒绝并指回
  * {@code create_task(type=…)}；类型未知 ⇒ 放行（此时表单是唯一合法的收集方式，不能退回文字反问）。</li>
- * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：<b>有明确步骤时只有 {@code QUERY_COND} 允许</b>，
- * 其余步骤（{@code SELECT_DEFS}、{@code EXPORT}、{@code DONE}、导入链等）零副作用拒绝：
- * 前置步给"先 confirm_step 推进到 QUERY_COND"，后置步给"按既有步骤链继续，不重复收集"；
- * 条件已明确时按<b>逐项三态</b>拒绝（{@link TaskSlots#needsConditionCollection()}：
- * 任一配置项未决定/无法解析才算缺口，禁止"任一有条件即整体放行"）。
- * 步骤未知时不判关闭（未知 ≠ 关闭），此时只按槽位规则。</li>
+ * <li><b>筛选条件</b>（{@code purpose=SET_CONDITIONS}）：模型调用一律零副作用拒绝；
+ * 只能由宿主在 QUERY_COND 且条件未决定时统一发放一次，避免模型与宿主双通道重复收集。</li>
  * </ul>
  */
 @Slf4j
@@ -170,6 +166,13 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 */
 	private Verdict inspectSlots(String purpose, TaskSlots slots, String step, Map<String, Object> extra,
 			Long taskId) {
+		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose)) {
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"条件表单由宿主统一发放，本次模型表单未下发（零副作用）",
+					List.of("模型只负责传递结构化条件，不得自行下发 SET_CONDITIONS 表单",
+							"已知条件直接调用 set_condition；条件未决定时由宿主在 QUERY_COND 统一收集一次"),
+					List.of(), null);
+		}
 		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose) && slots.hasDefCodes()) {
 			String known = String.join(", ", slots.defCodes());
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
