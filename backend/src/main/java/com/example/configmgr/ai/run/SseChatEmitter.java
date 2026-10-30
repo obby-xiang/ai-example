@@ -1986,11 +1986,19 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * 递增早于 {@link #emitLock}：等锁的 emit 也算在飞，收尾持锁判空时必须能看到它。
+	 *
+	 * <p><b>出帧身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：{@link #emitInternal} 下游的
+	 * 取号/事件日志/活动锚点（以及锁外发布前的累计）全都按<b>调用线程身份</b>拼键。调用方不一定开过
+	 * 作用域（定时线程、池化线程、未来新增入口都没有请求身份），漏开就会把帧写进 legacy 键形 ——
+	 * 帧看似发出，重挂回放与跨实例唤醒却读不到。这里统一兜底：与投递路径同源、同一份已解析身份，
+	 * 嵌套时由作用域关闭还原调用方原身份（{@link RunIdentityScope}）。
 	 */
 	private void emit(Map<String, Object> frame) {
 		this.emitting.incrementAndGet();
 		try {
-			emitInternal(frame);
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+				emitInternal(frame);
+			}
 		}
 		finally {
 			this.emitting.decrementAndGet();
@@ -2214,13 +2222,21 @@ public class SseChatEmitter {
 		}
 	}
 
-	/** 唤醒发布（载荷仅上界 seq；失败只记日志 —— 唤醒可丢，正确性由 ?lastSeq 重连兜底）。 */
+	/**
+	 * 唤醒发布（载荷仅上界 seq；失败只记日志 —— 唤醒可丢，正确性由 ?lastSeq 重连兜底）。
+	 *
+	 * <p><b>频道身份 = 本轮记录身份</b>：发布被刻意让位到 {@code emitLock} 之外
+	 * （{@link #requestWakePublish} / {@link #flushWakePublish}），{@code delta} 等外层临界区的
+	 * 发布因此发生在 {@link #emit} 的身份作用域<b>关闭之后</b> —— 只靠 emit 入口兜底不够。
+	 * 发布点再按同一份 {@link #deliveryIdentity()} 建立作用域，保证漏开作用域的调用方也不会把
+	 * 唤醒发到 legacy 频道。
+	 */
 	private void publishWake(long seq) {
 		FrameWakeBus bus = this.wakeBus;
 		if (bus == null) {
 			return;
 		}
-		try {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
 			bus.publish(this.runId, seq);
 		}
 		catch (Exception ex) {

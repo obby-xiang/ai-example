@@ -7,12 +7,14 @@ import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.assertj.core.api.SoftAssertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -228,6 +230,64 @@ class SseChatEmitterIdentityTest {
 			.containsExactly(channelOf(RECORD_IDENTITY));
 	}
 
+	/**
+	 * 出帧身份兜底：{@code emit} 下游的 seq / events / activity / 唤醒频道全都由<b>调用线程身份</b>
+	 * 拼键。任何漏开作用域的调用方（定时线程、池化线程、未来新增的入口）在没有请求身份时出帧，
+	 * 这些写都会落到 legacy 键形 —— 帧"发出去了"，但重挂回放、跨实例唤醒与活动锚点全都读不到。
+	 *
+	 * <p>{@code emit} 入口按 {@link SseChatEmitter} 自己解析出的记录身份（{@code deliveryIdentity()}）
+	 * 建立作用域后：无身份调用方的帧仍写在<b>本轮记录身份</b>的键/频道上，legacy 面保持干净。
+	 */
+	@Test
+	void framesEmittedFromAnIdentityLessCallerUseTheRecordIdentityKeysAndWakeChannel() {
+		seedRun();
+		ChannelRecordingBus bus = new ChannelRecordingBus();
+		SseChatEmitter out;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
+				RECORD_IDENTITY.userId())) {
+			out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null);
+		}
+
+		// 漏开作用域的调用方：没有请求身份
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+			assertThat(RequestContextUtils.currentOrNull()).isNull();
+			out.delta("无身份调用方");
+		}
+
+		SoftAssertions softly = new SoftAssertions();
+		softly.assertThat(readFrames(RECORD_IDENTITY)).as("帧必须落在本轮记录身份的事件键上")
+			.extracting(frame -> String.valueOf(frame.get("type")))
+			.containsExactly("delta");
+		softly.assertThat(readFrames(null)).as("legacy 事件键不得出现这一帧").isEmpty();
+		softly.assertThat(issuedSeq(RECORD_IDENTITY)).as("序号登记必须落在记录身份的 ai:seq 键上").isPositive();
+		softly.assertThat(issuedSeq(null)).as("legacy 序号键不得被写").isZero();
+		softly.assertThat(activityAt(RECORD_IDENTITY)).as("业务活动锚点必须落在记录身份的键上").isPositive();
+		softly.assertThat(bus.publishedChannels).as("唤醒必须发布到本轮记录身份的频道")
+			.containsExactly(channelOf(RECORD_IDENTITY));
+		softly.assertAll();
+	}
+
+	/** 按给定身份读事件日志（{@code null} = 显式无身份 ⇒ legacy 键）。 */
+	private List<Map<String, Object>> readFrames(TenantUser identity) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return RunStoreFrameStore.of(this.store).readFrom(RUN_ID, 0L, 0);
+		}
+	}
+
+	private long issuedSeq(TenantUser identity) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return this.store.lastIssuedSeq(RUN_ID);
+		}
+	}
+
+	private long activityAt(TenantUser identity) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return this.store.lastActivityAtMs(RUN_ID);
+		}
+	}
+
 	private static TenantUser resolveIdentity(Method deliveryIdentity, SseChatEmitter out) {
 		try {
 			return (TenantUser) deliveryIdentity.invoke(out);
@@ -253,15 +313,18 @@ class SseChatEmitterIdentityTest {
 		return emitter;
 	}
 
-	/** 按频道名记录订阅的总线替身（频道名由当前线程身份算出，与生产实现同一拼法）。 */
+	/** 按频道名记录订阅/发布的总线替身（频道名由当前线程身份算出，与生产实现同一拼法）。 */
 	private static final class ChannelRecordingBus implements FrameWakeBus {
 
 		private final List<String> subscribedChannels = new CopyOnWriteArrayList<>();
+
+		private final List<String> publishedChannels = new CopyOnWriteArrayList<>();
 
 		private volatile boolean subscribeSucceeds = true;
 
 		@Override
 		public void publish(String runId, long upperBoundSeq) {
+			this.publishedChannels.add(RedisFrameWakeBus.channel(runId));
 		}
 
 		@Override
