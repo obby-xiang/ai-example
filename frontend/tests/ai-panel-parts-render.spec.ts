@@ -672,10 +672,11 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     await wrapper.vm.$nextTick()
 
     // D-C2 形状：段 reason 写入（同源自 form.error，D11 文案逐字）
+    // 括注取 ai.notice.toolSubmitFailed（Task 3 裁决：非后端错误一律落本地化兜底，桩抛出的原文不上屏）
     const segment = store.messages[0]!.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'g1')
-    expect(segment).toMatchObject({ reason: '取消回灌未送达（网络异常），后端将在超时后自动收尾' })
+    expect(segment).toMatchObject({ reason: '取消回灌未送达（前端工具结果回灌失败），后端将在超时后自动收尾' })
     // G-C2：语境文案对用户可见（段 reason 位渲染，非 notice 单槽位）
-    expect(wrapper.text()).toContain('取消回灌未送达（网络异常），后端将在超时后自动收尾')
+    expect(wrapper.text()).toContain('取消回灌未送达（前端工具结果回灌失败），后端将在超时后自动收尾')
     wrapper.unmount()
   })
 

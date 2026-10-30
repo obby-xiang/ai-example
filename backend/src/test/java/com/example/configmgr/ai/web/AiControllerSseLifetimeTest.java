@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -88,7 +89,9 @@ class AiControllerSseLifetimeTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		when(this.runStore.get("r-reattach")).thenReturn(snapshot);
 		when(this.runRegistry.of("r-reattach")).thenReturn(this.out);
-		when(this.out.replayAndAttach(any(SseEmitter.class), any(), any(Boolean.class))).thenReturn(0);
+		// 控制器走回放+挂接的带状态出口（回放帧数/截断位由 ReplayResult 承载），替身也要给同一个出口。
+		when(this.out.replayAndAttachWithStatus(any(SseEmitter.class), any(), anyBoolean()))
+			.thenReturn(new SseChatEmitter.ReplayResult(0, false, false));
 
 		// 重挂是 HTTP 数据面入口：生产里必然带身份（无上下文时归属复核 fail-closed）
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {

@@ -99,7 +99,7 @@ describe('批① 闸门 1：composer 8192 字上限（maxlength / 剩余字数 /
     wrapper.unmount()
   })
 
-  it('空输入不显示计数；有输入显示剩余字数，且紧邻发送钮左侧（底栏内）', async () => {
+  it('空输入不显示计数；有输入显示剩余字数，且在底栏内紧邻上下文圆环左侧', async () => {
     const wrapper = await mountPanel()
     expect(wrapper.find('[data-testid="composer-count"]').exists()).toBe(false)
 
@@ -109,12 +109,14 @@ describe('批① 闸门 1：composer 8192 字上限（maxlength / 剩余字数 /
     expect(count.exists()).toBe(true)
     expect(count.text()).toBe('剩余 8184 字')
     expect(count.classes()).toEqual(expect.arrayContaining(['text-[10.5px]', 'tabular-nums', 'text-[#8b949e]']))
-    // 位置：底栏最后一个 flex 子元素 = 发送钮，计数紧随其前
+    // 位置：底栏最后一个 flex 子元素 = 发送钮；其左是上下文圆环（056ac3a9 起常驻，不再按有无记账隐藏），
+    // 计数再往左 —— 三者相邻，计数因此是倒数第三个子元素（不再是"发送钮前一个"）。
     const box = wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement
     const footer = box.parentElement!.lastElementChild as HTMLElement
     const children = Array.from(footer.children)
-    expect(children.indexOf(count.element as HTMLElement)).toBe(children.length - 2)
     expect((children[children.length - 1] as HTMLElement).getAttribute('data-testid')).toBe('send-btn')
+    expect((children[children.length - 2] as HTMLElement).querySelector('[data-testid="context-pill"]')).not.toBeNull()
+    expect(children.indexOf(count.element as HTMLElement)).toBe(children.length - 3)
     wrapper.unmount()
   })
 

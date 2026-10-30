@@ -30,6 +30,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -151,6 +152,9 @@ class AiControllerSuspendedTouchTest {
 		RunSnapshot snapshot = snapshot(RunSnapshot.SUSPENDED);
 		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
 		when(this.runRegistry.of(RUN_ID)).thenReturn(this.emitter);
+		// 控制器用带状态的回放出口；替身不桩就返回 null（NPE），这里给"空回放、未截断"。
+		when(this.emitter.replayAndAttachWithStatus(any(), any(), anyBoolean()))
+			.thenReturn(new SseChatEmitter.ReplayResult(0, false, false));
 
 		this.mockMvc.perform(get("/api/ai/events/{runId}", RUN_ID)).andExpect(status().isOk());
 

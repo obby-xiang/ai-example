@@ -2065,6 +2065,22 @@ async function selectDefs(key, taskId, defCodes) {
   return body.data
 }
 
+/**
+ * 把任务推进到 EXPORT 步（`PUT /api/tasks/{id}/step`）。
+ *
+ * 产品自「统一导出条件状态与单轮闭环」起，导出预检是 fail-closed：任务不在 EXPORT 步就拒绝
+ * `start_export`（STEP_READY），任一配置项条件未决定也拒绝（CONDITIONS_DECIDED，除非已在 EXPORT 步
+ * 且条件留空 = 用户明确全量）。本网的挂起/接管用例要的是一个"用户已走到导出步、条件留空"的就绪任务，
+ * 否则 start_export 只回预检失败文本，连确认卡都到不了 —— 那不是本网要验的语义。
+ */
+async function readyToExport(key, taskId) {
+  const { record, body } = await putJson(key, `/api/tasks/${taskId}/step`, { step: 'EXPORT' })
+  checkEq(record.status, 200, `PUT step=EXPORT（${key}）HTTP`)
+  check(body && body.success === true && body.data, `推进到 EXPORT 失败：${record.text.slice(0, 400)}`)
+  checkEq(body.data.currentStep, 'EXPORT', `任务 ${taskId} 的权威步骤`)
+  return body.data
+}
+
 async function getTask(key, taskId) {
   const { record, body } = await getJson(key, `/api/tasks/${taskId}`)
   checkEq(record.status, 200, `GET /api/tasks/${taskId}（${key}）HTTP`)
@@ -3123,6 +3139,7 @@ async function caseSuspendCrossInstance() {
   const suffix = uniqueId('cross')
   const task = await createTask('c', 'EXPORT', `cluster3-suspend-${suffix}`)
   await selectDefs('c', task.id, ['CURRENCY'])
+  await readyToExport('c', task.id)
   const run = await createSuspendedRun('a', { prefix: 'cluster3-suspend', taskId: task.id, messageSuffix: ` ${suffix}` })
   caseLog(`挂起在 A（已 park 收流）runId=${run.runId} toolCallId=${run.toolCallId} taskId=${task.id} lastSeq=${run.lastSeq} 帧=${run.frames.map((f) => f.type).join(',')}（证据 ${run.evidence}）`)
 
@@ -3287,6 +3304,7 @@ async function caseSuspendCrossInstance() {
 async function newSuspendedTask(prefix) {
   const task = await createTask('a', 'EXPORT', `${prefix}-${uniqueId('t')}`)
   await selectDefs('a', task.id, ['CURRENCY'])
+  await readyToExport('a', task.id)
   return task
 }
 
@@ -3775,6 +3793,7 @@ async function createUploadedFixture(prefix) {
   const uploadBody = jsonOf(uploaded, `fixture 上传响应（${prefix}）`)
   check(uploadBody && uploadBody.success === true, `fixture 上传响应 success !== true：${uploaded.text.slice(0, 400)}`)
   checkEq(Number(uploadBody.data.count), 1, `fixture 上传匹配文件数（${prefix}）`)
+  await readyToExport('a', task.id)
   return { taskId: task.id, sha256: sha256(template.body), bytes: template.body.length }
 }
 
@@ -5333,6 +5352,7 @@ async function caseIdentityCrossInstance() {
   const suffix = uniqueId('ident')
   const task = await createTask('c', 'EXPORT', `cluster3-identity-${suffix}`)
   await selectDefs('c', task.id, ['CURRENCY'])
+  await readyToExport('c', task.id)
 
   // ① A 身份在实例 A 挂起（确认门），且已 park 收流。
   const run = await createSuspendedRun('a', {

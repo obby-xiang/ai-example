@@ -125,14 +125,15 @@ class AiControllerParkWiringTest {
 		// （覆盖在 AiControllerEventsParkCloseTest：续跑的终帧只能从这条连接到达）。
 		when(this.runStore.pendings(RUN_ID)).thenReturn(List.of(pending(PendingToolCall.PENDING)));
 		when(this.runRegistry.of(RUN_ID)).thenReturn(this.out);
-		when(this.out.replayAndAttach(any(), any(), anyBoolean())).thenReturn(3);
+		when(this.out.replayAndAttachWithStatus(any(), any(), anyBoolean()))
+			.thenReturn(new SseChatEmitter.ReplayResult(3, false, false));
 		when(this.out.completeSubscriptions()).thenReturn(1);
 
 		ResponseEntity<?> response = this.controller.events(RUN_ID, null);
 
 		assertThat(response.getStatusCode().value()).isEqualTo(200);
 		verify(this.out, never()).replayTo(any(), any());
-		verify(this.out).replayAndAttach(any(), any(), anyBoolean());
+		verify(this.out).replayAndAttachWithStatus(any(), any(), anyBoolean());
 		verify(this.out).completeSubscriptions();
 	}
 
