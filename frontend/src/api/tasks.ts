@@ -51,8 +51,14 @@ export function getFiles(id: number): Promise<TaskFile[]> {
   return get<TaskFile[]>(`/tasks/${id}/files`)
 }
 
-/** 上传文件（.xlsx 或 .zip 批量；文件名需含配置编码）。 */
-export function uploadFile(id: number, file: File): Promise<{
+/**
+ * 上传文件（.xlsx 或 .zip 批量）。
+ *
+ * <p>`defCodes` = 页面此刻的草案选择集，随同一个 multipart 请求携带：后端按这批编码做文件名
+ * 匹配，因此上传不需要先 `POST /select-defs`（选择集的提交点是"下一步"，不是上传）。
+ * 不传时后端退回"任务已选条目"匹配（旧调用面零变化）。
+ */
+export function uploadFile(id: number, file: File, defCodes: readonly string[] = []): Promise<{
   defCode?: string
   fileName?: string
   matchedFiles: Array<{ defCode: string; fileName: string }>
@@ -61,6 +67,9 @@ export function uploadFile(id: number, file: File): Promise<{
 }> {
   const form = new FormData()
   form.append('file', file)
+  for (const code of defCodes) {
+    form.append('defCodes', code)
+  }
   return upload(`/tasks/${id}/files/upload`, form)
 }
 

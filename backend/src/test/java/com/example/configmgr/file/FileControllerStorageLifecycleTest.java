@@ -251,7 +251,7 @@ class FileControllerStorageLifecycleTest {
         MockMultipartFile file = new MockMultipartFile("file", DEF_CODE + ".xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 content.getBytes());
-        this.fileController.upload(taskId, file);
+        this.fileController.upload(taskId, file, List.of(DEF_CODE));
     }
 
     private Path storagePath(long taskId, String fileType) {

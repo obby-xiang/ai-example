@@ -52,12 +52,23 @@ public class FileController {
     private final DefinitionService definitionService;
     private final ExcelTemplateBuilder templateBuilder;
 
+    /**
+     * 上传单个 xlsx / zip 批量文件。
+     *
+     * <p>文件名 → 配置编码的匹配用<b>请求携带的 {@code defCodes}</b>（页面草案选择集）：
+     * 配置项选择只有"下一步"才提交 task_items，上传是独立的用户动作，落库对象是
+     * {@code task_files} + 文件存储 —— 不得为了匹配文件名先把选择集写进任务。
+     * 未携带时退回任务已选条目（旧调用面零变化）。
+     */
     @PostMapping("/upload")
     @Transactional
     public ApiResponse<Map<String, Object>> upload(@PathVariable Long taskId,
-                                                    @RequestParam("file") MultipartFile file) throws Exception {
+                                                    @RequestParam("file") MultipartFile file,
+                                                    @RequestParam(value = "defCodes", required = false) List<String> defCodes)
+            throws Exception {
         lockTask(taskId);
         String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload.xlsx";
+        List<String> matchCodes = resolveMatchDefCodes(taskId, defCodes);
 
         if (originalName.toLowerCase().endsWith(".zip")) {
             // ZIP 批量上传：解压后按文件名逐个匹配配置编码
@@ -72,7 +83,7 @@ public class FileController {
                         unmatched.add(name + "（非 Excel 文件）");
                         continue;
                     }
-                    String defCode = matchDefCode(taskId, name);
+                    String defCode = matchDefCode(matchCodes, name);
                     if (defCode == null) {
                         unmatched.add(name + "（无法匹配配置编码）");
                         continue;
@@ -99,7 +110,7 @@ public class FileController {
             throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED, "仅支持 .xlsx 或 .zip 文件");
         }
 
-        String defCode = matchDefCode(taskId, originalName);
+        String defCode = matchDefCode(matchCodes, originalName);
         if (defCode == null) {
             throw new IllegalArgumentException(
                     "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传");
@@ -392,17 +403,54 @@ public class FileController {
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
     }
 
-    private String matchDefCode(Long taskId, String filename) {
-        List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
+    /**
+     * 本次上传可匹配的配置编码。
+     *
+     * <p>请求携带 {@code defCodes}（页面草案选择集）时以它为准，并逐个校验为<b>已存在的配置定义</b>；
+     * 未知编码整单拒绝（400），既不进入文件名匹配，也不产生任何文件写入。未携带时退回任务已选
+     * 条目 —— 与改动前行为一致，旧客户端/既有调用面零变化。
+     */
+    private List<String> resolveMatchDefCodes(Long taskId, List<String> requested) {
+        if (requested == null || requested.isEmpty()) {
+            return taskItemRepository.findByTaskIdOrderBySortOrder(taskId).stream()
+                    .map(TaskItem::getDefCode)
+                    .toList();
+        }
+        List<String> codes = new ArrayList<>();
+        for (String raw : requested) {
+            String code = raw == null ? "" : raw.trim();
+            if (code.isEmpty() || codes.contains(code)) {
+                continue;
+            }
+            assertDefinitionExists(code);
+            codes.add(code);
+        }
+        // 只给了空串：按"未携带"处理（不拿空编码去匹配文件名）
+        if (codes.isEmpty()) {
+            return resolveMatchDefCodes(taskId, null);
+        }
+        return codes;
+    }
+
+    private void assertDefinitionExists(String defCode) {
+        try {
+            definitionService.findByCode(defCode);
+        } catch (ResourceNotFoundException e) {
+            throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
+                    "defCodes 含未知配置编码：" + defCode + "（只能上传当前勾选配置项的文件）");
+        }
+    }
+
+    private String matchDefCode(List<String> defCodes, String filename) {
         String base = filename.replaceAll("(?i)\\.xlsx?$", "").toUpperCase();
         // Match by code prefix in filename（取最长前缀匹配，避免 PROJECT_PRICE 被 PROJECT 抢先命中）
         String best = null;
         int bestLen = 0;
-        for (TaskItem item : items) {
-            String code = item.getDefCode().toUpperCase();
+        for (String defCode : defCodes) {
+            String code = defCode.toUpperCase();
             if (base.equals(code) || base.startsWith(code + "_") || base.startsWith(code + "-")) {
                 if (code.length() > bestLen) {
-                    best = item.getDefCode();
+                    best = defCode;
                     bestLen = code.length();
                 }
             }

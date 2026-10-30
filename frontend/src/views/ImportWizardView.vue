@@ -549,7 +549,7 @@ function cellValue(row: ConfigStagingRow, fieldCode: string): string {
  *
  * 与导出向导同因同修：手动勾选（`DefSelector` 的 v-model）与 AI 的 `select_definitions`
  * 页面 handler 此前都只改本页 `selectedDefs` ref，`workspace.selectedDefs` 要等到
- * `persistSelection()`（下载模板/上传等动作）才更新 ⇒ AI 侧 `buildContext()` 读到旧值。
+ * `persistSelection()`（推进步骤等动作）才更新 ⇒ AI 侧 `buildContext()` 读到旧值。
  * 相等短路 ⇒ 恢复任务（`loadTask` 同步块内先赋 ref、紧接着 `enterPage({selectedDefs})`）
  * 不会二次 touch；比较按集合（顺序不敏感，裁决⑤）。
  */
@@ -968,7 +968,13 @@ async function attachJob(
 
 // ── 第 1 步：模板 / 上传 / 在线编辑 ────────────────────────────────────────────
 
-/** 选中集落库（默认写到当前绑定任务；换任务在途的调用方传入口捕获的任务号）。 */
+/**
+ * 选中集落库（默认写到当前绑定任务；换任务在途的调用方传入口捕获的任务号）。
+ *
+ * <p>**唯一提交点是"下一步"**（`flushEditors`）：配置项选择在页面上是草案，下载模板/上传
+ * 只读草案、各自携带编码请求即可（见 {@link downloadTemplates} / {@link uploadOne}），
+ * 不得借这两个动作把选择集写进 task_items。
+ */
 async function persistSelection(forTask: number | null = taskId.value): Promise<void> {
   if (forTask === null || selectedDefs.value.length === 0) {
     return
@@ -978,6 +984,11 @@ async function persistSelection(forTask: number | null = taskId.value): Promise<
   syncSelectedDefsToWorkspace()
 }
 
+/**
+ * 下载模板：只按当前草案的选中集取模板字节（`GET /files/templates?codes=…`）。
+ *
+ * <p>不提交选择集 —— 下载模板不改变服务端任务，选择集的提交点是"下一步"（`flushEditors`）。
+ */
 async function downloadTemplates(): Promise<void> {
   if (taskId.value === null) {
     ElMessage.warning(t('views.import.msg.noTaskBound'))
@@ -989,7 +1000,6 @@ async function downloadTemplates(): Promise<void> {
   }
   busy.value = 'templates'
   try {
-    await persistSelection()
     const blob = await tasksApi.downloadTemplates(taskId.value, [...selectedDefs.value])
     const name = selectedDefs.value.length === 1
       ? xlsxFileName(selectedDefs.value[0] ?? '', defName(selectedDefs.value[0] ?? ''))
@@ -1044,8 +1054,11 @@ async function confirmDirtyBeforeUpload(): Promise<boolean> {
  * AI 可视可操作专项：单个文件的上传（`handleUpload` 与上传交接共用的**唯一**链路）。
  *
  * 抽出来后两条入口（用户手点 el-upload / 交接卡的 `import.receiveFile`）行为完全一致：
- * 选择持久化 → `tasksApi.uploadFile` → 匹配回填 → 刷新编辑区 → 通知 AI 交接收口。
+ * 携带当前草案 `defCodes` 上传 → 匹配回填 → 刷新编辑区 → 通知 AI 交接收口。
  * 返回一句页面摘要（**不含路径**），作为 `ui_request_upload` 的回灌素材。
+ *
+ * <p>上传**不提交选择集**：落库对象是 `task_files` + 文件存储，文件名匹配由后端按请求携带的
+ * `defCodes` 完成（选择集的提交点仍是"下一步"）。
  */
 async function uploadOne(file: File): Promise<string> {
   // F9：扩展名 / 大小前置拦截。三条入口（手点 el-upload、AI 交接 `import.receiveFile`、
@@ -1070,10 +1083,11 @@ async function uploadOne(file: File): Promise<string> {
   }
   const generation = taskGeneration
   const forTask = taskId.value
+  // 草案选择集的快照：上传在途时用户可能继续勾选，匹配口径必须是"发起这一刻"的选中集
+  const draftDefCodes = [...selectedDefs.value]
   busy.value = 'upload'
   try {
-    await persistSelection(forTask)
-    const result = await tasksApi.uploadFile(forTask, file)
+    const result = await tasksApi.uploadFile(forTask, file, draftDefCodes)
     // 上传在途时换了任务：结果属于旧任务，不得把文件名/标签挂到新任务上（I5）
     if (generation !== taskGeneration) {
       return '上传已提交给原任务，但页面已切换到别的任务，本次结果未应用到当前页面'
