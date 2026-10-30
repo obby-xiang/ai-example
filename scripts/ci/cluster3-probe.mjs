@@ -5093,7 +5093,19 @@ async function gridClaimHashOnlyMustNotFakeNotExecuted() {
         caseLog(`R-3 收尾失败（取消标志键保留以免该轮以后被执行）：${e.message}`)
       }
     }
-    if (cleanupOk) redisCli('DEL', flagKey)
+    if (cleanupOk) {
+      redisCli('DEL', flagKey)
+      // 与 R-1 同口径的隔离屏障：注入的 WRONGTYPE 读失败会让三实例各进一次「5s 内不读 Redis、
+      // 一律答 UNKNOWN」的退避。不等它清掉就交棒，下一条用例（双身份）第一次尝试就会在工具边界
+      // 读到 UNKNOWN ⇒ 可重试失败 ⇒ 重试时桩的「每提示词只发一次工具调用」闸把轮次收成文本 done
+      // （run 41048125091：第 17/18 格即因此假红，attempts=2、upstreamEvents=4）。
+      try {
+        await awaitCancelReadableAll(run.runId)
+        caseLog('R-3 收尾：三实例取消状态读取已恢复（degraded 退避已清）')
+      } catch (e) {
+        caseLog(`R-3 收尾：取消状态读取未恢复（${e.message}）`)
+      }
+    }
   }
 }
 
