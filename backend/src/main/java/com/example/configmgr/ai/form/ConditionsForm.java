@@ -80,12 +80,6 @@ public class ConditionsForm extends HostForm {
 	/** 宿主条件表单的 {@code toolCallId} 前缀（后接 runId 与任务号：同一轮同一任务只问一次）。 */
 	public static final String TOOL_CALL_ID_PREFIX = "host-cond-form-";
 
-	/**
-	 * 并批拒绝码：新建任务首次条件必须单独下发 {@code set_condition}（系统拒绝，模型面回执；
-	 * 用户面不发失败卡，见 {@code SpToolCallingManager#systemRejectedWithoutUserFrames}）。
-	 */
-	public static final String BATCH_SPLIT_CODE = "SET_CONDITION_BATCH_SPLIT_REQUIRED";
-
 	/** 推进工具名（唯一注册表）。 */
 	private static final String TOOL_CONFIRM_STEP = AiToolNames.CONFIRM_STEP;
 
@@ -355,11 +349,14 @@ public class ConditionsForm extends HostForm {
 		// 只认创建它的任务：切任务后旧候选不得写到新任务
 		Long boundTaskId = longOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID));
 		if (boundTaskId == null || !boundTaskId.equals(taskId)) {
+			log.warn("create_task 的结构化条件绑定任务 #{} 与当前任务 #{} 不一致，不落库 runId={}", boundTaskId, taskId,
+					runId);
 			return task;
 		}
 		// 只认 create_task 明确给出的配置项：后续新增的条目不在候选范围
 		List<String> candidateDefCodes = stringList(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES));
 		if (candidateDefCodes.isEmpty()) {
+			log.warn("create_task 的结构化条件缺少可落库的 defCodes 候选，不落库 runId={} taskId={}", runId, taskId);
 			return task;
 		}
 		List<TaskItem> items = task.getItems();
@@ -376,11 +373,13 @@ public class ConditionsForm extends HostForm {
 			return task;
 		}
 		boolean wrote = false;
+		boolean matched = false;
 		for (TaskItem item : items) {
 			String defCode = item == null ? null : item.getDefCode();
 			if (defCode == null || defCode.isBlank() || !candidateDefCodes.contains(defCode)) {
 				continue;
 			}
+			matched = true;
 			if (item.getConditionJson() != null && !item.getConditionJson().isBlank()) {
 				continue;
 			}
@@ -409,6 +408,10 @@ public class ConditionsForm extends HostForm {
 				log.warn("create_task 的结构化条件落库失败（交回三态收集）runId={} taskId={} defCode={}：{}", runId,
 						taskId, defCode, ex.getMessage());
 			}
+		}
+		if (!matched) {
+			log.warn("create_task 的结构化条件候选 {} 与任务条目不相交，不落库 runId={} taskId={}", candidateDefCodes,
+					runId, taskId);
 		}
 		Task refreshed = wrote ? readTask(taskId) : task;
 		Task effective = refreshed == null ? task : refreshed;
@@ -470,186 +473,6 @@ public class ConditionsForm extends HostForm {
 		catch (NumberFormatException ex) {
 			return null;
 		}
-	}
-
-	/**
-	 * <b>新建任务的 {@code set_condition} 首次硬边界</b>：当上下文指向本 run 由
-	 * {@code create_task} 创建的任务、任务尚无条件、且既没有 {@code create_task(conditions=…)}
-	 * 候选、也没有本轮条件表有效回灌时，第一次 {@code set_condition} <b>不得直接下发前端</b> ——
-	 * 先由宿主给这个新任务挂一次它自己的可选条件表（复用既有挂起面，不弹内部错误卡）。
-	 *
-	 * <p>放行（任一成立）：非本 run 新建任务（既有任务手工设置不受影响）／有结构化候选（
-	 * {@code create_task} 带 conditions，宿主会在 QUERY_COND 落库）／任务条目已有条件或明确不设／
-	 * 本轮条件表已有效回灌（留空或非空）／条件表已取消（{@code set_condition} 是恢复通道）。
-	 * 条件表仍 PENDING ⇒ 零副作用拒绝并等待填写（不允许绕过）。
-	 *
-	 * <p><b>并批防护</b>：本边界需要挂表时，只接受“本批恰好一个 {@code set_condition} 且没有其它调用”
-	 * 的形态 —— 多调用批里挂表单拿不到同批其它调用的工具响应（历史会出现无配对的 tool_calls），
-	 * 因此改为<b>零副作用拒绝</b>并要求模型下一批单独下发；批内若还有非 READ 类调用同样拒绝
-	 * （不允许用并批绕过新任务的首次条件收集）。
-	 *
-	 * @param batchSize         本批待决条目数（含本次）
-	 * @param setConditionCalls 本批 {@code set_condition} 条目数
-	 * @param foreignWrite      本批是否还有 {@code set_condition} 之外的写类调用
-	 */
-	public SetConditionDecision inspectSetCondition(String runId, AiContext context, PendingToolCall pending,
-			int batchSize, int setConditionCalls, boolean foreignWrite, List<Message> history) {
-		if (!parkEnabled() || runId == null || context == null || pending == null || history == null) {
-			return SetConditionDecision.allow();
-		}
-		if (!AiToolNames.SET_CONDITION.equals(pending.getName())) {
-			return SetConditionDecision.allow();
-		}
-		// 入参不合法交给既有 WizardActionGuard（它在本循环稍后统一零副作用拒绝）：本边界只约束
-		// "参数合法但属于新建任务首次手写条件"的情况，不替它做参数校验，也不抢先把非法调用挂成表。
-		if (this.wizardActionGuard != null
-				&& !this.wizardActionGuard.inspectArgumentsFor(AiToolNames.SET_CONDITION,
-						pending.getArguments()).accepted()) {
-			return SetConditionDecision.allow();
-		}
-		Long taskId = context.getTaskId();
-		if (taskId == null) {
-			return SetConditionDecision.allow();
-		}
-		Map<String, Object> extra = context.getExtra();
-		Long createdTaskId = extra == null ? null
-				: longOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID));
-		if (createdTaskId == null || !createdTaskId.equals(taskId)) {
-			// 既有任务：手工设置条件走原有路径
-			return SetConditionDecision.allow();
-		}
-		Object candidate = extra.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS);
-		if (candidate instanceof Map<?, ?> conditions && !conditions.isEmpty()) {
-			// create_task 已带结构化条件：宿主负责落库，不弹表
-			return SetConditionDecision.allow();
-		}
-		Task task = readTask(taskId);
-		if (task == null || task.getType() != Task.TaskType.EXPORT
-				|| task.getItems() == null || task.getItems().isEmpty()) {
-			return SetConditionDecision.allow();
-		}
-		if (!TaskSteps.QUERY_COND.equals(TaskSteps.normalize(task.getCurrentStep()))) {
-			// 不在条件步：交给既有步骤/披露边界（前端会拒），不在错误步骤挂表
-			return SetConditionDecision.allow();
-		}
-		if (hasAnyCondition(task)) {
-			// 已有条件事实（含明确不设 "{}"）
-			return SetConditionDecision.allow();
-		}
-		long boundaryMs = createTaskBoundary(context);
-		ConditionFeedback feedback = feedbackOf(runId, taskId, boundaryMs);
-		if (feedback.blank() || feedback.nonEmpty()) {
-			// 本轮条件表已有效回灌：set_condition 落地用户给出的答案
-			return SetConditionDecision.allow();
-		}
-		if (conditionFormPending(runId, taskId, boundaryMs)) {
-			log.info("新建任务的条件表仍待填写，set_condition 零副作用拒绝 runId={} taskId={}", runId, taskId);
-			return SetConditionDecision.reject(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
-					"条件表已下发、尚未填写，set_condition 未执行（未下发前端）",
-					List.of("这是本轮新建任务第一次设置条件：先让用户在条件表里填写或留空",
-							"条件表回灌后再按用户答案落地；不要用 set_condition 绕过"));
-		}
-		if (feedback.cancelled()) {
-			// 取消后 set_condition 是用户/模型的恢复通道，不再挂第二张表
-			return SetConditionDecision.allow();
-		}
-		ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
-		if (plan.malformed() || plan.undecided().isEmpty()) {
-			return SetConditionDecision.allow();
-		}
-		// 并批防护：需要挂表时只接受"本批只有这一条调用"，否则零副作用拒绝并要求单独下发
-		if (setConditionCalls > 1 || batchSize > 1 || foreignWrite) {
-			String reason = foreignWrite
-					? "本批含写类调用：新建任务首次筛选条件必须单独下发 set_condition（本批未执行、零副作用）"
-					: setConditionCalls > 1
-							? "本批有多个 set_condition：新建任务首次筛选条件必须单独确认（本批未执行、零副作用）"
-							: "本批还有其它调用：新建任务首次筛选条件必须单独下发 set_condition，"
-									+ "宿主要先给该任务挂一次条件表（本批未执行、零副作用）";
-			log.info("新建任务首次 set_condition 被并批拦截 runId={} taskId={} batch={} setCalls={} foreignWrite={}",
-					runId, taskId, batchSize, setConditionCalls, foreignWrite);
-			return SetConditionDecision.reject(BATCH_SPLIT_CODE,
-					"新建任务的首次筛选条件不能与其它调用并批，set_condition 未执行（未下发前端）",
-					List.of(reason, "下一批只发这一条 set_condition；宿主会先挂一次该任务的条件表再落地"));
-		}
-		String toolCallId = toolCallId(runId, taskId, plan.undecided(), taskDefCodesFor(task));
-		if (alreadyIssued(runId, toolCallId)) {
-			return SetConditionDecision.allow();
-		}
-		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
-		if (arguments.isEmpty()) {
-			return SetConditionDecision.allow();
-		}
-		log.info("新建任务首次 set_condition：先挂一次该任务自己的条件表 runId={} taskId={} defs={}", runId, taskId,
-				plan.undecided());
-		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()));
-		return parked ? SetConditionDecision.parkedDecision() : SetConditionDecision.allow();
-	}
-
-	/** {@code set_condition} 首次边界结论：放行 / 已挂起条件表单 / 零副作用拒绝。 */
-	public record SetConditionDecision(Outcome outcome, String code, String message, List<String> reasons) {
-
-		public enum Outcome {
-			ALLOW, PARKED, REJECTED
-		}
-
-		public SetConditionDecision {
-			reasons = reasons == null ? List.of() : List.copyOf(reasons);
-		}
-
-		static SetConditionDecision allow() {
-			return new SetConditionDecision(Outcome.ALLOW, null, null, List.of());
-		}
-
-		static SetConditionDecision parkedDecision() {
-			return new SetConditionDecision(Outcome.PARKED, null, null, List.of());
-		}
-
-		static SetConditionDecision reject(String code, String message, List<String> reasons) {
-			return new SetConditionDecision(Outcome.REJECTED, code, message, reasons);
-		}
-
-		public boolean parked() {
-			return this.outcome == Outcome.PARKED;
-		}
-
-		public boolean rejected() {
-			return this.outcome == Outcome.REJECTED;
-		}
-	}
-
-	/** 任务条目上是否已有任何条件事实（非空白 {@code conditionJson}，含明确不设 {@code "{}"}）。 */
-	private static boolean hasAnyCondition(Task task) {
-		if (task == null || task.getItems() == null) {
-			return false;
-		}
-		for (TaskItem item : task.getItems()) {
-			if (item != null && item.getConditionJson() != null && !item.getConditionJson().isBlank()) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** 本 run 是否有一张仍待填写的条件表（宿主或模型下发；取消/已回灌不算）。 */
-	private boolean conditionFormPending(String runId, long taskId, long boundaryMs) {
-		List<PendingToolCall> pendings;
-		try {
-			pendings = this.store.pendingsLenient(runId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("读取待决条件表失败（按无待填写表处理）runId={}：{}", runId, ex.getMessage());
-			return false;
-		}
-		for (PendingToolCall form : pendings == null ? List.<PendingToolCall>of() : pendings) {
-			if (form != null && PendingToolCall.PENDING.equals(form.getStatus())
-					&& GenerativeFormRules.TOOL_NAME.equals(form.getName())
-					&& isConditionForm(form.getArguments())
-					&& belongsToTask(form.getToolCallId(), runId, taskId)
-					&& (boundaryMs <= 0 || requestedAtOf(form) >= boundaryMs)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private ConfirmStepDecision conditionGate(String runId, long taskId, Task task, AiContext context,

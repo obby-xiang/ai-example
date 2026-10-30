@@ -3,12 +3,17 @@ package com.example.configmgr.ai.form;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.WizardActionGuard;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.entity.ConfigField;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
@@ -20,12 +25,16 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -68,6 +77,8 @@ class QueryCondConditionFormParkTest {
 	private final AiProperties properties = new AiProperties();
 
 	private final TaskService taskService = mock(TaskService.class);
+
+	private final DefinitionService definitionService = mock(DefinitionService.class);
 
 	private final AtomicReference<Task> taskState = new AtomicReference<>();
 
@@ -132,6 +143,56 @@ class QueryCondConditionFormParkTest {
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
 			.as("条件已落库 ⇒ 不再收集").isFalse();
+	}
+
+	/**
+	 * {@code create_task(conditions=…)} 的候选是<b>结构化事实</b>：复杂条件（范围键 + IN 多值 + 数值比较）
+	 * 通过同一份 {@code WizardActionGuard} 校验后直接落库，<b>不弹条件表</b>。
+	 */
+	@Test
+	void complexCreateTaskCandidateLandsWithoutForm() {
+		this.taskState.set(task(null));
+		doAnswer(invocation -> {
+			String defCode = invocation.getArgument(1);
+			String conditionJson = invocation.getArgument(2);
+			this.taskState.get().getItems().stream()
+				.filter(item -> defCode.equals(item.getDefCode()))
+				.forEach(item -> item.setConditionJson(conditionJson));
+			return null;
+		}).when(this.taskService).setCondition(eq(TASK_ID), anyString(), anyString());
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code", "monthlyFee"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("scopeKeys", List.of("XN"));
+		conditions.put("fields", List.of(
+				Map.of("fieldCode", "code", "operator", "IN", "value", List.of("CNY", "USD")),
+				Map.of("fieldCode", "monthlyFee", "operator", "GTE", "value", 100)));
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history()))
+			.as("候选已由宿主按同一份校验落库 ⇒ 不再弹条件表").isFalse();
+		verify(this.taskService).setCondition(eq(TASK_ID), eq("CURRENCY"), contains("\"operator\":\"IN\""));
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
+	}
+
+	private static ConfigDefinition definition(String code, String... fieldCodes) {
+		ConfigDefinition definition = new ConfigDefinition();
+		definition.setCode(code);
+		definition.setName("货币字典");
+		List<ConfigField> fields = new ArrayList<>();
+		for (String fieldCode : fieldCodes) {
+			ConfigField field = new ConfigField();
+			field.setCode(fieldCode);
+			field.setLabel(fieldCode);
+			fields.add(field);
+		}
+		definition.setFields(fields);
+		return definition;
 	}
 
 	private void seedRun() {

@@ -803,43 +803,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 					continue;
 				}
 			}
-			// set_condition 首次硬边界（ConditionsForm#inspectSetCondition）：本轮新建任务、尚无条件、
-			// 无 create_task(conditions) 候选且无条件表回灌时，第一次 set_condition 先挂该任务自己的
-			// 可选条件表；有候选/已收集/已取消才放行。
-			// 并批防护：本边界对任何含 set_condition 的批次都复核（不再要求 size==1），批内形态
-			//（多条 set_condition / 另有写类调用 / 另有任何调用）由 ConditionsForm 统一判定为
-			// 零副作用拒绝并要求单独下发 —— 新任务的首次条件不会被并批绕过。
-			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null
-					&& AiToolNames.SET_CONDITION.equals(pending.getName())
-					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
-				checkCancelled(runId);
-				int setConditionCalls = 0;
-				boolean foreignWrite = false;
-				for (PendingToolCall sibling : pendings) {
-					if (sibling == null) {
-						continue;
-					}
-					if (AiToolNames.SET_CONDITION.equals(sibling.getName())) {
-						setConditionCalls++;
-					}
-					else if (this.toolRegistry.riskOf(sibling.getName()) != ToolMeta.RiskLevel.READ) {
-						foreignWrite = true;
-					}
-				}
-				ConditionsForm.SetConditionDecision setConditionDecision = this.conditionsForm
-					.inspectSetCondition(runId, context, pending, pendings.size(), setConditionCalls, foreignWrite,
-							prompt.getInstructions());
-				if (setConditionDecision.parked()) {
-					throw new RunParkedException(runId, pending.getToolCallId(),
-							PendingToolCall.KIND_FRONTEND);
-				}
-				if (setConditionDecision.rejected()) {
-					settleFrontendRejected(runId, pending, setConditionDecision.code(),
-							setConditionDecision.message(), setConditionDecision.reasons());
-					frontendRejected.add(pending.getToolCallId());
-					continue;
-				}
-			}
 			if (!budgetArmed && this.preflight != null && PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& ToolPreflightService.supports(pending.getName())
 					// MINOR-1：防线③先于预检 —— 越 scope 的调用本就不该读任务/产出预检报告，
@@ -3226,12 +3189,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
 			return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
 					|| ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
-		}
-		// set_condition 的"新建任务首次条件"边界拒绝是系统拒绝：模型面回执照旧，用户面零卡
-		//（用户看到的是随后的条件表/向导，而不是一张"失败"的工具卡）。
-		if (AiToolNames.SET_CONDITION.equals(pending.getName())) {
-			return ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code)
-					|| ConditionsForm.BATCH_SPLIT_CODE.equals(code);
 		}
 		// confirm_step 的"文本推断未验证"是系统拒绝（模型需改用 set_condition 结构化算子）：
 		// 用户面零卡（实时/历史同口径），模型回执照旧，保留纠正与后续 set_condition 通道。

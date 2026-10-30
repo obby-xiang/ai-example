@@ -56,6 +56,13 @@
       "reason": "已同步导出条件决策、条件表单宿主单通道、真实空对象留空收口及页签会话归属判定契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:b42ac5f5493c5165acdf94bf0efbcb02b96c1591e16f7cca492416a03b6af7a9",
+      "status": "synced",
+      "reason": "已同步合法结构化条件直接落库、宿主补发边界及候选失效诊断契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }
