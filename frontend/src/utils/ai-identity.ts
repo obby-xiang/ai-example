@@ -181,9 +181,13 @@ export function sessionLockName(
 /**
  * 会话号收窄：契约是 `{sessionId:number(long)}`，内部统一转成十进制字符串
  * （镜像键、锁名、路径参数都按字符串拼；空/非法一律 ''，调用方不得发送）。
+ *
+ * <p>number 分支只收**安全整数**：超过 2^53-1 的 long 若经 `JSON.parse` 变成 number，
+ * 值已经被舍成另一个整数；此时返回 ''（不发请求），而不是把失真号当会话号发出去。
+ * 长整精度由十进制字符串分支承载，字符串原样保留。
  */
 export function normalizeSessionId(raw: unknown): string {
-  if (typeof raw === 'number' && Number.isFinite(raw) && Number.isInteger(raw) && raw > 0) {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) {
     return String(raw)
   }
   if (typeof raw === 'string' && /^[1-9]\d*$/.test(raw)) {
