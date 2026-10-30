@@ -6059,7 +6059,9 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
         })
     )
     const pending = store.send('停止我')
-    await Promise.resolve()
+    // 3d801ff1：`send()` 取号前先 `await ensureSession()`（含页签归属判定）—— 等这一轮真的
+    // 开起来（/chat 已建立、start 帧已到）再停止，否则 stop() 看到"无可停之轮"直接返回。
+    await flushPromises()
     await store.stop()
     const result = await pending
     expect(result.outcome).toBe('cancelled')

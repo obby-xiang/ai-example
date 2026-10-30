@@ -154,6 +154,34 @@ function freshStore(): ReturnType<typeof useAiStore> {
   return useAiStore()
 }
 
+/**
+ * 有界条件等待：只推进微任务，直到 `condition` 成立。
+ *
+ * <p>不能用 `flushPromises()`：它内部走 `setImmediate`，本文件大量用例开着 fake timers，
+ * 那些计时器不会自己跑。3d801ff1 起 `send()` 取号前先 `await ensureSession()`（已有 sessionId
+ * 也先等页签归属判定），`/chat` 不再落在 `send()` 的第一个微任务里 —— 因此要等到"传输真的建立"。
+ */
+async function until(condition: () => boolean, label: string): Promise<void> {
+  for (let tick = 0; tick < 500; tick += 1) {
+    if (condition()) {
+      return
+    }
+    await Promise.resolve()
+  }
+  throw new Error(`等待超时：${label}`)
+}
+
+/** 起一轮并拿到真实传输句柄（`send()` 的取号门控跑完 = `/chat` 已建立）。 */
+async function startRound(
+  store: ReturnType<typeof useAiStore>,
+  text: string
+): Promise<ChatTransport> {
+  const before = chat.transports.length
+  void store.send(text)
+  await until(() => chat.transports.length > before, 'send() 没有走到 aiApi.chat')
+  return chat.last()
+}
+
 let chat: ReturnType<typeof createChatStub>
 
 beforeEach(() => {
@@ -330,9 +358,7 @@ describe('4 · 重连进度通知与空回复重试口径', () => {
     const store = freshStore()
     store.sessionId = 'sess-notice'
     store.historyLoaded = true
-    void store.send('跑一个长任务')
-    await Promise.resolve()
-    const transport = chat.last()
+    const transport = await startRound(store, '跑一个长任务')
 
     transport.handlers.onReconnect?.(2, 1_000)
     expect(store.noticeCode).toBe('ai.notice.reconnect')
@@ -430,7 +456,8 @@ describe('6 · uiAnnouncement 按轮收口', () => {
     expect(store.uiAnnouncement).toBeNull()
 
     store.uiAnnouncement = '已选择配置项：B'
-    void store.send('下一轮')
+    // 3d801ff1：新轮清理播报排在取号门（`ensureSession`）之后 ⇒ 等本轮真正开起来再断言
+    await startRound(store, '下一轮')
     expect(store.uiAnnouncement).toBeNull()
   })
 })
@@ -466,9 +493,7 @@ describe('8 · 共用有界自动恢复（零副作用面）', () => {
       const store = freshStore()
       store.sessionId = 'sess-first-frame'
       store.historyLoaded = true
-      void store.send('跑一个长任务')
-      await Promise.resolve()
-      const transport = chat.last()
+      const transport = await startRound(store, '跑一个长任务')
       api.runsCurrent.mockResolvedValue(runningRun('run-ff', 4))
       let reattachSink: SseFrameHandlers | null = null
       api.reattachRun.mockImplementation((_runId: string, sink: SseFrameHandlers) => {
@@ -652,9 +677,7 @@ describe('R1 · M-2 首帧超时恢复以"真接回"为判据', () => {
       const store = freshStore()
       store.sessionId = 'sess-ff-noconn'
       store.historyLoaded = true
-      void store.send('跑一个长任务')
-      await Promise.resolve()
-      const transport = chat.last()
+      const transport = await startRound(store, '跑一个长任务')
       const host = store.messages.find((message) => message.role === 'assistant')
       expect(host).toBeTruthy()
       api.runsCurrent.mockResolvedValue(runningRun('run-ff-x', 3))
@@ -756,9 +779,7 @@ describe('9 · 恢复期标志覆盖自动恢复入口（2026-10-29 返修 I-1�
       const store = freshStore()
       store.sessionId = 'sess-i1-first-frame'
       store.historyLoaded = true
-      void store.send('跑一个长任务')
-      await Promise.resolve()
-      const transport = chat.last()
+      const transport = await startRound(store, '跑一个长任务')
       const release = pendingRunsCurrent()
 
       transport.close({ terminal: false, timeoutStage: 'first-frame', reason: '首帧超时' })

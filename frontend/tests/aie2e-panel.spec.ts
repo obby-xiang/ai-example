@@ -401,14 +401,16 @@ describe('L-83（P1）：409 竞态停止时输入框 == 用户原草稿（不�
     const composer = wrapper.find('[data-testid="composer-input"]')
     await composer.setValue('上一条用户消息')
     ;(wrapper.find('[data-testid="send-btn"]').element as HTMLElement).click()
-    await wrapper.vm.$nextTick()
+    // 3d801ff1：`send()` 取号前先 `await ensureSession()`（含页签归属判定），/chat 不再落在
+    // 点击后的第一个微任务里 —— 等整条异步链落定再看请求次数。
+    await flushPromises()
     expect(api.chat).toHaveBeenCalledTimes(1)
 
     // 同 tick：停止 + 回车（用户刚打的草稿在输入框里）
     await composer.setValue('用户刚打的草稿')
     ;(wrapper.find('[data-testid="stop-btn"]').element as HTMLElement).click()
     composer.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }))
-    await wrapper.vm.$nextTick()
+    await flushPromises()
     expect(api.chat).toHaveBeenCalledTimes(2)
 
     if (busyFirst) {

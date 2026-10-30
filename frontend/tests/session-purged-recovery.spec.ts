@@ -71,6 +71,22 @@ function seedPurgedTab(): ReturnType<typeof useAiStore> {
   return useAiStore()
 }
 
+/**
+ * 有界条件等待（只推进微任务）。
+ *
+ * <p>3d801ff1 起 `send()` 取号前先 `await ensureSession()`（已有 sessionId 也先等页签归属判定），
+ * `/chat` 不再落在 `send()` 的第一个微任务里 —— 要等"请求真的发出去"，不能只等一个 `Promise.resolve()`。
+ */
+async function until(condition: () => boolean, label: string): Promise<void> {
+  for (let tick = 0; tick < 500; tick += 1) {
+    if (condition()) {
+      return
+    }
+    await Promise.resolve()
+  }
+  throw new Error(`等待超时：${label}`)
+}
+
 beforeEach(() => {
   sessionStorage.clear()
   setActivePinia(createPinia())
@@ -165,7 +181,7 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
     }))
 
     const sending = store.send('慢请求')
-    await Promise.resolve()
+    await until(() => reject !== null, 'send() 没有走到 aiApi.chat')
     // 期间用户点了「新建对话」：本轮已不是当前轮
     const adopted = store.adoptFreshSession()
     reject!(purged())

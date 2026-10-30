@@ -113,6 +113,22 @@ async function mountPanel(): Promise<ReturnType<typeof mount>> {
   return wrapper
 }
 
+/**
+ * 有界条件等待（只推进微任务）。
+ *
+ * <p>3d801ff1 起 `send()` 取号前先 `await ensureSession()`（已有 sessionId 也先等页签归属判定），
+ * `/chat` 不再落在 `send()` 的第一个微任务里 —— "同 tick" 用例要等到这一轮真的开起来再动手。
+ */
+async function until(condition: () => boolean, label: string): Promise<void> {
+  for (let tick = 0; tick < 500; tick += 1) {
+    if (condition()) {
+      return
+    }
+    await Promise.resolve()
+  }
+  throw new Error(`等待超时：${label}`)
+}
+
 function assistantTexts(messages: ChatMessage[]): string[] {
   return messages.filter((message) => message.role === 'assistant').map((message) => message.content)
 }
@@ -146,6 +162,9 @@ describe('C8-02 发送与停止同 tick', () => {
     const store = useAiStore()
 
     const sending = store.send('查任务进度')
+    // 3d801ff1：发送要过取号门（`ensureSession`）才建立 /chat —— 先等这一轮真的开起来，
+    // 再在紧邻的一刻停止（否则 stop() 看到"无可停之轮"直接返回，连接就永远没人收）。
+    await until(() => api.chat.mock.calls.length === 1, 'send() 没有走到 aiApi.chat')
     const stopping = store.stop()
 
     await Promise.all([sending, stopping])

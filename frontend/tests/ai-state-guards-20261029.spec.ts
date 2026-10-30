@@ -70,7 +70,9 @@ async function startRound(
   text = '开始'
 ): Promise<{ sending: Promise<unknown>; transport: FakeTransport; host: ChatMessage }> {
   const sending = store.send(text)
-  await Promise.resolve()
+  // 2026-10-30（3d801ff1）：`send()` 取号前先 `await ensureSession()`，已有 sessionId 也先等
+  // 页签归属判定 —— /chat 不再落在 send 的第一个微任务里，必须整条异步链 flush 完再看传输。
+  await flushPromises()
   const transport = fakeChat.last()
   const host = store.messages.find((message) => message.role === 'assistant')
   if (!host) {
