@@ -5,6 +5,7 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -19,6 +20,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
  * 同 sessionId 单值门（S4.2 §2 {@code session/SessionGate}，ADR-5 会话串行化）。
@@ -88,6 +90,18 @@ import java.util.concurrent.atomic.AtomicLong;
  * 续期跑在 {@code ai-session-lock-watchdog} 单线程上，<b>没有请求身份</b>。看门狗在调度时
  * 记录了这次持有属于哪个身份，每次续期都用 {@link RequestContextUtils#useContext} 恢复它再算锁键 ——
  * 否则续期会算到 legacy 键上（续不上 ⇒ 误判丢锁 / 给别人续命）。
+ *
+ * <h2>释放与清扫也不得因"当拍身份"漏收（2026-10-30）</h2>
+ * <ul>
+ * <li><b>释放</b>：终态 {@code finally} 可能跑在带<b>别身份</b>上下文的线程上。直接身份桶没命中时
+ * 一律按<b>完整持有记录</b>（sessionId + runId + token + 记录里的身份，且只有唯一命中）定位 holder，
+ * 并落在<b>持有者自己的</b>锁键上释放 —— 既不永久残留，也不跨身份误放（见 {@link #release}）；</li>
+ * <li><b>过期清扫</b>：进程内记录没有 Redis TTL，任何一条"取门后没走到释放"、且 watchdog 已停
+ * （丢锁自停 / 取门降级从未启动）的路径都会把会话永久钉在 409。取门即将 409 时先清掉
+ * "过期、watchdog 已停、且已不再持锁"的残留，<b>仍活跃的持有不会被清</b>
+ * （见 {@link #sweepExpiredHolders(long)}）。仍被 watchdog 续期的僵尸轮由判死路径
+ * （{@code AiController} 的 isDeadRound → {@link #releaseDeadHeld}）收口，不在本清扫的判定面。</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -201,9 +215,19 @@ public class SessionGate {
 	 */
 	private final AtomicLong lockLost = new AtomicLong();
 
+	/** 时钟（过期清扫判据用；单测注入可控时钟，生产 = 系统时钟）。 */
+	private final LongSupplier clock;
+
+	@Autowired
 	public SessionGate(StringRedisTemplate redis, AiProperties properties) {
+		this(redis, properties, System::currentTimeMillis);
+	}
+
+	/** 单测装配：可控时钟（过期清扫需要确定性地跨过一个 TTL）。 */
+	SessionGate(StringRedisTemplate redis, AiProperties properties, LongSupplier clock) {
 		this.redis = redis;
 		this.lockProperties = properties.getSession().getLock();
+		this.clock = clock;
 		this.watchdog = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "ai-session-lock-watchdog");
 			thread.setDaemon(true);
@@ -235,12 +259,24 @@ public class SessionGate {
 	 * <li>异常 / 结果不可知 ⇒ 只保留进程内门（{@code degraded}），不写兜底、不宣称取到 Redis 锁。</li>
 	 * </ul>
 	 *
+	 * <p><b>防永久 409</b>：进程内门已被一轮占着且 runId 不同时，先按 {@link #sweepExpiredHolders(long)}
+	 * 清一次"过期、watchdog 已停、且已不再持锁"的残留，再重试一次占位 —— 泄漏的 holder 因此最多
+	 * 多钉一个 TTL；仍活跃的持有不受影响。
+	 *
 	 * @return {@code null} = 取到门（含同轮接管）；非 null = 另一轮在跑
 	 */
 	public Busy acquire(String sessionId, String runId, String token) {
 		String gateKey = gateKey(sessionId);
 		Holder candidate = new Holder(sessionId, gateKey, RequestContextUtils.currentOrNull(), runId, token);
+		candidate.acquiredAtMs = nowMs();
 		Holder previous = this.inProcess.putIfAbsent(gateKey, candidate);
+		if (previous != null && !previous.runId.equals(runId)) {
+			// 防永久 409 的兜底：这一拍就要拒绝，先把"已过期且不再持锁"的残留清掉再试一次。
+			// 仍持有 Redis 锁的活跃门不会被清（见 sweepExpiredHolders），因此单值门语义不变。
+			if (sweepExpiredHolders(nowMs()) > 0) {
+				previous = this.inProcess.putIfAbsent(gateKey, candidate);
+			}
+		}
 		if (previous != null) {
 			if (!previous.runId.equals(runId)) {
 				return new Busy(previous.runId, previous.degraded);
@@ -250,6 +286,7 @@ public class SessionGate {
 			if (Boolean.TRUE.equals(taken)) {
 				previous.token = token;
 				previous.lockValue = encode(runId, token);
+				previous.lastConfirmedAtMs = nowMs();
 				startWatchdog(gateKey, runId, previous.lockValue, previous);
 				return null;
 			}
@@ -270,6 +307,7 @@ public class SessionGate {
 		Boolean taken = takeLock(gateKey, runId, token);
 		if (Boolean.TRUE.equals(taken)) {
 			candidate.lockValue = encode(runId, token);
+			candidate.lastConfirmedAtMs = nowMs();
 			startWatchdog(gateKey, runId, candidate.lockValue, candidate);
 			return null;
 		}
@@ -310,8 +348,14 @@ public class SessionGate {
 	 *
 	 * <p>要释放的值取<b>本 holder 上一次确认过的锁值</b>（{@code lockValue}）：降级/结果不可知
 	 * 之后锁里可能仍是上一个 token 的值，而调用方手里已经是新 token —— 仍按真值释放，
-	 * 且脚本会验证它确实属于本轮。没有 holder（跨线程/进程收尾）时按协议值
+	 * 且脚本会验证它确实属于本轮。没有匹配的 holder（跨线程/进程收尾）时按协议值
 	 * {@code runId|token} 释放，同样由脚本精确验证。
+	 *
+	 * <p><b>当拍身份与 acquire 身份不一致时也必须收得回</b>（2026-10-30）：轮终态的 {@code finally}
+	 * 可能跑在带着<b>别身份</b>上下文的线程上（异步收尾/池化线程），按当拍身份算键会找不到 holder；
+	 * 旧实现只有"无身份"线程才按记录兜底 ⇒ holder 与其 watchdog 永久留在进程内表（锁被一直续期、
+	 * 之后同会话永远 409）。现在直接桶没命中就一律按<b>完整持有记录</b>（sessionId + runId + token
+	 * + 记录里的身份，见 {@link #findHolder}）唯一定位，并落在<b>持有者自己的</b>锁键上释放。
 	 *
 	 * @return 是否真的释放了（进程内门或 Redis 锁任一）；Redis 异常/结果不可知时只报进程内事实
 	 */
@@ -321,11 +365,7 @@ public class SessionGate {
 		String gateKey = gateKey(sessionId);
 		Holder holder = this.inProcess.get(gateKey);
 		if (!matches(holder, runId, token)) {
-			// 异步收尾线程可能没带身份（TTL 尚未接线/Task 3 之前的路径）：按<b>记录</b>
-			// （sessionId + runId + token）找到真正持有者，用它的锁键释放 ——
-			// runId+token 只属于那一轮，不会跨身份误放。带身份时不做这层兜底（严格按身份桶）。
-			Holder recorded = RequestContextUtils.currentOrNull() == null
-					? findHolder(sessionId, runId, token) : null;
+			Holder recorded = findHolder(sessionId, runId, token);
 			if (recorded != null) {
 				holder = recorded;
 				gateKey = recorded.gateKey;
@@ -354,14 +394,42 @@ public class SessionGate {
 		return holder != null && holder.runId.equals(runId) && token.equals(holder.token);
 	}
 
-	/** 按记录（sessionId+runId+token）定位持有者（只用于未带身份的异步收尾）。 */
+	/**
+	 * 按<b>完整持有记录</b>定位持有者：{@code sessionId + runId + token + 身份}。
+	 *
+	 * <p>token 是每次 acquire 的一次性值，只属于那一轮；再加上 sessionId/runId 与<b>记录里的身份</b>
+	 * （必须能拼出该 holder 的锁键，即记录自洽）之后，跨身份误放不可能发生 —— 别的身份即使
+	 * sessionId 相同，也是<b>另一把门</b>。同一三元组若出现在多个身份桶（正常调用下不会发生，
+	 * 只可能来自伪造/复用的 token），<b>拒绝释放</b>：宁可让各自按身份收尾，也不猜。
+	 *
+	 * <p>调用方（{@code release}）在直接身份桶没命中时用它兜底，覆盖"当拍身份 ≠ acquire 身份"
+	 * 的正常收尾线程。
+	 */
 	private Holder findHolder(String sessionId, String runId, String token) {
+		Holder found = null;
 		for (Holder holder : this.inProcess.values()) {
-			if (holder.sessionId.equals(sessionId) && matches(holder, runId, token)) {
-				return holder;
+			if (!holder.sessionId.equals(sessionId) || !matches(holder, runId, token)) {
+				continue;
 			}
+			if (!holder.gateKey.equals(gateKeyOf(holder))) {
+				// 记录自洽校验：身份必须与锁键逐字对应（防止按记录兜底时用错身份段的键）
+				continue;
+			}
+			if (found != null) {
+				log.warn("会话门释放命中多个身份的持有记录，拒绝猜测 sessionId={} runId={}（各自按身份释放）",
+						sessionId, runId);
+				return null;
+			}
+			found = holder;
 		}
-		return null;
+		return found;
+	}
+
+	/** holder 的锁键必须与它记录的身份一致（{@code identity == null} = legacy 键形）。 */
+	private static String gateKeyOf(Holder holder) {
+		return holder.identity == null ? LOCK_PREFIX + holder.sessionId
+				: TenantKeyScope.scoped(LOCK_PREFIX, holder.identity.tenantId(), holder.identity.userId(),
+						holder.sessionId);
 	}
 
 	/**
@@ -478,20 +546,96 @@ public class SessionGate {
 	 * @return true = 确实续到了自己的锁；false = 键已不存在或已换主
 	 */
 	boolean renewLockOnce(String sessionId, String expectedValue) {
-		return renewLockAt(gateKey(sessionId), sessionId, expectedValue);
+		String gateKey = gateKey(sessionId);
+		return renewLockAt(gateKey, sessionId, expectedValue, this.inProcess.get(gateKey));
 	}
 
 	/**
 	 * 按<b>锁键</b>续期（watchdog 用：它在调度时已把锁键与身份记在 holder 里，
 	 * 不能在续期线程上重新按"当前上下文"算键 —— 那算到的是别的身份/legacy 键）。
+	 *
+	 * <p>续期成功即"这一条持有记录还活着"的证据：刷新 {@code lastConfirmedAtMs}，
+	 * 过期清扫因此不会碰仍在续期的活跃门（见 {@link #sweepExpiredHolders(long)}）。
 	 */
-	private boolean renewLockAt(String gateKey, String sessionId, String expectedValue) {
+	private boolean renewLockAt(String gateKey, String sessionId, String expectedValue, Holder holder) {
 		Long renewed = this.redis.execute(RENEW_SCRIPT, List.of(gateKey), expectedValue, ttlMs());
 		if (renewed == null || renewed != 1L) {
 			return false;
 		}
 		this.renewals.incrementAndGet();
+		if (holder != null && expectedValue.equals(holder.lockValue)) {
+			holder.lastConfirmedAtMs = nowMs();
+		}
 		return true;
+	}
+
+	/**
+	 * 过期清扫（防永久 409 的兜底）：剔除"过期且不再持锁"的进程内记录，返回剔除条数。
+	 *
+	 * <p><b>只在取门即将 409 时调用</b>（以及单测直调）：泄漏的 holder 最多把会话多钉一个 TTL，
+	 * 不会永久。判据缺一不可：
+	 * <ul>
+	 * <li><b>过期</b>：自 {@code lastConfirmedAtMs}（取门成功/续期成功刷新）起超过一个锁 TTL；
+	 *     降级持有没有可确认的锁，改用 2×TTL 的保守窗口（单轮机器预算 300s 远小于它，
+	 *     且挂起等人期间门是释放的）；</li>
+	 * <li><b>watchdog 已停</b>：续期任务还在跑 = 这次持有仍在主动保活，<b>不删</b>；</li>
+	 * <li><b>已不持锁</b>：按记录里的锁值回读它自己的锁键，值仍相等 ⇒ 它确实还持有 ⇒ <b>不删</b>；
+	 *     回读失败同样不删（证明不了是残留就不猜）。</li>
+	 * </ul>
+	 * 因此活跃持有（watchdog 在续期、锁值仍是自己的）永远不会被清掉。
+	 */
+	int sweepExpiredHolders(long nowMs) {
+		int removed = 0;
+		for (Holder holder : this.inProcess.values()) {
+			if (!expired(holder, nowMs) || watchdogRunning(holder) || stillHoldsLock(holder)) {
+				continue;
+			}
+			if (this.inProcess.remove(holder.gateKey, holder)) {
+				cancelWatchdog(holder);
+				removed++;
+				log.warn("会话门进程内残留已过期，清扫 sessionId={} runId={} key={}（watchdog 已停且已不再持锁；"
+						+ "活跃持有不会被清）", holder.sessionId, holder.runId, holder.gateKey);
+			}
+		}
+		return removed;
+	}
+
+	/** 续期任务是否仍在跑（= 这次持有仍在主动保活）。 */
+	private static boolean watchdogRunning(Holder holder) {
+		ScheduledFuture<?> future = holder.watchdog;
+		return future != null && !future.isCancelled() && !future.isDone();
+	}
+
+	/** 过期判据：最后一次确认活着的时刻 + 宽限（降级记录用更长的保守窗口）。 */
+	private boolean expired(Holder holder, long nowMs) {
+		long last = holder.lastConfirmedAtMs > 0L ? holder.lastConfirmedAtMs : holder.acquiredAtMs;
+		if (last <= 0L) {
+			return false;
+		}
+		long grace = holder.lockValue == null ? 2L * expiredAfterMs() : expiredAfterMs();
+		return nowMs - last >= grace;
+	}
+
+	private long expiredAfterMs() {
+		return Math.max(1L, this.lockProperties.getTtl().toMillis());
+	}
+
+	/** 记录是否仍真的持有那把锁（读不到 ⇒ true：证明不了是残留，保留）。 */
+	private boolean stillHoldsLock(Holder holder) {
+		if (holder.lockValue == null) {
+			return false;
+		}
+		try {
+			return holder.lockValue.equals(this.redis.opsForValue().get(holder.gateKey));
+		}
+		catch (Exception ex) {
+			log.debug("会话门过期清扫无法核对锁 key={}（按仍持有处理）：{}", holder.gateKey, ex.getMessage());
+			return true;
+		}
+	}
+
+	private long nowMs() {
+		return this.clock.getAsLong();
 	}
 
 	/**
@@ -568,7 +712,7 @@ public class SessionGate {
 		String sessionId = holder.sessionId;
 		holder.watchdog = this.watchdog.scheduleAtFixedRate(() -> {
 			try (RequestContextUtils.SafeCloseable scope = holder.useIdentity()) {
-				if (!renewLockAt(gateKey, sessionId, expectedValue)) {
+				if (!renewLockAt(gateKey, sessionId, expectedValue, holder)) {
 					// RT-34：续期返回 0 是"锁已失效/换主"的确定结论 —— 必须与异常同口径记降级，
 					// 否则只在日志里说一句就没了，调用方看到的仍是"一切正常"。
 					holder.degraded = true;
@@ -661,6 +805,15 @@ public class SessionGate {
 		private volatile boolean degraded;
 
 		private volatile ScheduledFuture<?> watchdog;
+
+		/** 这条记录的建立时刻（过期清扫在从未确认过锁时以它为起点）。 */
+		private volatile long acquiredAtMs;
+
+		/**
+		 * <b>最后一次确认"这次持有还活着"</b>的时刻（取门成功与每次续期成功刷新；
+		 * 0 = 从未确认）。过期清扫只认它 —— 仍在续期的活跃门因此不会被判过期。
+		 */
+		private volatile long lastConfirmedAtMs;
 
 		Holder(String sessionId, String gateKey, TenantUser identity, String runId, String token) {
 			this.sessionId = sessionId;

@@ -21,6 +21,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * {@code ai:runs} 索引的<b>惰性清理</b>（Redis 容量专项 A 的第二半）。
@@ -98,6 +100,53 @@ class RunStoreRunIndexPruneTest {
 		assertThat(this.fake.templateDeletes).as("不得对索引键发 DEL（单键剔成员即可）").hasValue(0);
 		assertThat(this.fake.lastDeletedKeys).isEmpty();
 		assertThat(members()).containsExactly(LIVE);
+	}
+
+	/**
+	 * <b>带身份的请求线程只清理自己的成员</b>：别的身份的成员（无论死活）既不做 {@code EXISTS}
+	 * 探测，也不得 {@code SREM} —— 即使按"快照键还在不在"看它确实是死的。legacy 成员同样不归
+	 * 请求线程判（那是系统线程的视图）。无身份系统线程仍可全表清理（见
+	 * {@link #systemThreadWithoutIdentityStillPrunesTheWholeIndexAndKeepsLegacyLiveness()}）。
+	 */
+	@Test
+	void identityRequestPrunesOnlyItsOwnMembersAndNeverProbesForeignOnes() {
+		seedIndex(STALE, LIVE);
+		seedSnapshot(LIVE);
+		this.fake.setsByKey.get(RunStore.RUN_INDEX)
+			.add(RunKeyScope.indexMember(2L, 202L, "run-foreign"));
+		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy");
+
+		int removed = this.store.pruneRunIndex();
+
+		assertThat(removed).as("只剔除本身份的死成员").isEqualTo(1);
+		assertThat(members()).as("别的身份的成员与 legacy 成员原样保留")
+			.containsExactlyInAnyOrder(LIVE, "run-foreign", "run-legacy");
+		verify(this.fake.redis, never())
+			.hasKey(RunKeyScope.scoped(RunStore.RUN_PREFIX, 2L, 202L, "run-foreign"));
+		verify(this.fake.redis, never()).hasKey(RunStore.legacyRunKey(RunStore.RUN_PREFIX, "run-legacy"));
+	}
+
+	/**
+	 * 对照：<b>无身份的系统线程</b>仍全表清理 —— 成员自带的身份段决定判活键，legacy 成员按旧键形
+	 * 判活（活 legacy 保留、死 legacy 剔除）。修复"请求线程不越界"不得把系统收敛一起关掉。
+	 */
+	@Test
+	void systemThreadWithoutIdentityStillPrunesTheWholeIndexAndKeepsLegacyLiveness() {
+		seedIndex(LIVE);
+		seedSnapshot(LIVE);
+		this.fake.setsByKey.get(RunStore.RUN_INDEX)
+			.add(RunKeyScope.indexMember(2L, 202L, "run-foreign"));
+		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy-live");
+		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy-dead");
+		this.fake.strings.put(RunStore.legacyRunKey(RunStore.RUN_PREFIX, "run-legacy-live"), "{}");
+		this.tenantScope.close();
+		this.tenantScope = null;
+		assertThat(RequestContextUtils.currentOrNull()).as("前置：无身份（系统线程视图）").isNull();
+
+		int removed = this.store.pruneRunIndex();
+
+		assertThat(removed).as("死成员跨身份全表剔除；活 legacy 不误杀").isEqualTo(2);
+		assertThat(members()).containsExactlyInAnyOrder(LIVE, "run-legacy-live");
 	}
 
 	/** 最后一个 stale 成员被剔除后，空 SET 由 Redis 自动消失（不留空键）。 */

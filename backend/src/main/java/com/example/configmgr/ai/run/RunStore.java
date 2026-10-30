@@ -2365,6 +2365,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * {@code ResumeService.listRuns} 的入口，快照 TTL 到期后才是真正的死亡）。清理只认
 	 * "快照已不在"，不猜业务状态。
 	 *
+	 * <p><b>按身份分视界</b>：带身份的请求线程只对<b>自己身份</b>的成员做 {@code EXISTS} 与
+	 * {@code SREM} —— 别人的成员既不探测也不删除（探测就是跨身份读，删除更是替别人决定那一轮
+	 * 的发现面；那一身份可能正要用它续跑）。legacy 成员（旧形 {@code runId}）只属于"无身份"视图。
+	 * 无身份的系统线程仍全表清理（成员自带身份，逐成员按<b>记录里</b>的身份判活；legacy 成员按
+	 * 旧键形判活），与 {@link #allRunRecords()} 的发现面同一口径。
+	 *
 	 * <p><b>失败不抛</b>：清理是运维卫生动作，不能让它挡住 {@code create}（调用点在创建路径上）。
 	 * 失败计入 {@link RedisDegradation#C1_RUN_INDEX_PRUNE} 并 WARN，下一拍重试。
 	 *
@@ -2381,15 +2387,26 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if (ids == null || ids.isEmpty()) {
 				return 0;
 			}
+			TenantUser current = RequestContextUtils.currentOrNull();
 			List<String> dead = new ArrayList<>();
 			for (String member : ids) {
 				RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
-				boolean exists = ref != null
-						? Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(),
-								ref.userId(), ref.runId())))
-						// legacy 成员（旧形 runId）：按<b>旧键形</b>判定（不读线程身份；不动它）
-						: Boolean.TRUE.equals(this.redis.hasKey(legacyRunKey(RUN_PREFIX, member)));
-				if (!exists) {
+				if (ref != null) {
+					if (current != null && !current.equals(ref.identity())) {
+						// 请求线程的视界 = 自己身份：不探测、不清理别人的成员
+						continue;
+					}
+					if (!Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(),
+							ref.userId(), ref.runId())))) {
+						dead.add(member);
+					}
+					continue;
+				}
+				// legacy 成员（旧形 runId）：只有无身份的系统线程判得着（与 allRunIds 同一视图口径）
+				if (current != null) {
+					continue;
+				}
+				if (!Boolean.TRUE.equals(this.redis.hasKey(legacyRunKey(RUN_PREFIX, member)))) {
 					dead.add(member);
 				}
 			}
