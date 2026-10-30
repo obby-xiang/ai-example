@@ -791,6 +791,13 @@ public class SseChatEmitter {
 	 * I-1 要求"唤醒订阅先于回放读"（否则回读与登记之间落档的帧谁也接不住），
 	 * 而登记本身是 Redis I/O、不能放进锁里 —— 于是顺序变成
 	 * 「登记（锁外）→ 挂订阅 + 回放读（锁内）」，两条要求同时成立。
+	 *
+	 * <p><b>登记身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：调用点既可能是带请求身份的
+	 * 挂起/重挂线程，也可能是<b>没有请求身份</b>的容器回调线程（{@code onCompletion/onTimeout/onError}
+	 * → {@link #closeSubscription} → {@link #applyWakeSync}）。{@code FrameWakeListener#register}
+	 * 按调用线程的当前身份拼频道，回调线程现读会是 {@code null} ⇒ 登记到 legacy 频道
+	 * {@code ai:wake:<runId>}，与发布侧的身份频道分叉、跨实例唤醒静默缺席。因此这里显式按记录身份
+	 * 建立作用域（无身份时清空，不回落到调用线程的残留身份），与投递路径同源。
 	 */
 	private void ensureWakeSubscribed() {
 		FrameWakeListener listener = this.wakeListener;
@@ -801,7 +808,7 @@ public class SseChatEmitter {
 			return;
 		}
 		boolean registered;
-		try {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
 			registered = listener.register(this.runId, this.wakeTarget);
 		}
 		catch (Exception ex) {

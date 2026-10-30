@@ -2,14 +2,18 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,6 +21,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -180,6 +185,49 @@ class SseChatEmitterIdentityTest {
 		}
 	}
 
+	/**
+	 * 唤醒登记的窄窗身份竞态：容器回调线程（{@code onCompletion/onTimeout/onError}）没有请求身份。
+	 * 若首次登记恰好发生在那里，{@link FrameWakeListener#register} 按"当前身份 = null"把频道落到
+	 * legacy 形 {@code ai:wake:<runId>}，而发布侧写的是 {@code ai:wake:<tenantId>:<userId>:<runId>}
+	 * —— 跨实例唤醒整段静默缺席（重挂时只能靠 {@code ?lastSeq} 兜底）。
+	 *
+	 * <p>复现窗口：先让订阅降级（登记失败、{@code wakeRegistered} 回退为 false，订阅者仍挂着），
+	 * 再在<b>无身份</b>回调里关掉其中一个订阅者触发 {@code ensureWakeSubscribed}。登记必须复用
+	 * 写出器按记录解析出的身份，而不是回调线程的当前上下文。
+	 */
+	@Test
+	void wakeRegistrationFromAnIdentityLessCallbackUsesTheRecordIdentity() throws Exception {
+		seedRun();
+		ChannelRecordingBus bus = new ChannelRecordingBus();
+		FrameWakeListener listener = new FrameWakeListener(bus);
+
+		SseChatEmitter out;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
+				RECORD_IDENTITY.userId())) {
+			out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, listener);
+		}
+
+		// 订阅降级：两次登记都失败 ⇒ wakeRegistered 回退为 false，而两个订阅者仍然挂着
+		bus.subscribeSucceeds = false;
+		List<Runnable> completions = new ArrayList<>();
+		out.attach(capturingEmitter(completions));
+		out.attach(capturingEmitter(completions));
+		assertThat(bus.subscribedChannels).as("降级期间没有任何订阅").isEmpty();
+		assertThat(listener.subscribedRuns()).isZero();
+
+		// 容器回调线程：没有请求身份；关掉一个订阅者，另一个还在 ⇒ 走 ensureWakeSubscribed
+		bus.subscribeSucceeds = true;
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+			assertThat(RequestContextUtils.currentOrNull()).isNull();
+			completions.get(1).run();
+		}
+
+		assertThat(bus.subscribedChannels).as("无身份回调里的登记必须复用本轮记录身份（不是 legacy 频道）")
+			.containsExactly(channelOf(RECORD_IDENTITY));
+	}
+
 	private static TenantUser resolveIdentity(Method deliveryIdentity, SseChatEmitter out) {
 		try {
 			return (TenantUser) deliveryIdentity.invoke(out);
@@ -187,6 +235,48 @@ class SseChatEmitterIdentityTest {
 		catch (ReflectiveOperationException ex) {
 			throw new IllegalStateException("调用 deliveryIdentity 失败", ex);
 		}
+	}
+
+	private static String channelOf(TenantUser identity) {
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(identity.tenantId(),
+				identity.userId())) {
+			return RedisFrameWakeBus.channel(RUN_ID);
+		}
+	}
+
+	private static SseEmitter capturingEmitter(List<Runnable> completions) {
+		SseEmitter emitter = mock(SseEmitter.class);
+		doAnswer(invocation -> {
+			completions.add(invocation.getArgument(0));
+			return null;
+		}).when(emitter).onCompletion(any(Runnable.class));
+		return emitter;
+	}
+
+	/** 按频道名记录订阅的总线替身（频道名由当前线程身份算出，与生产实现同一拼法）。 */
+	private static final class ChannelRecordingBus implements FrameWakeBus {
+
+		private final List<String> subscribedChannels = new CopyOnWriteArrayList<>();
+
+		private volatile boolean subscribeSucceeds = true;
+
+		@Override
+		public void publish(String runId, long upperBoundSeq) {
+		}
+
+		@Override
+		public boolean subscribe(String runId, LongConsumer onWake) {
+			if (!this.subscribeSucceeds) {
+				return false;
+			}
+			this.subscribedChannels.add(RedisFrameWakeBus.channel(runId));
+			return true;
+		}
+
+		@Override
+		public void unsubscribe(String runId) {
+		}
+
 	}
 
 	private void seedRun() {
