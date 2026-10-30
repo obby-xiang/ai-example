@@ -1,6 +1,7 @@
 package com.example.configmgr.config;
 
 import com.example.configmgr.ai.tenant.TenantIdentityFilter;
+import com.example.configmgr.ai.web.AiController;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -27,12 +28,7 @@ public class WebConfig implements WebMvcConfigurer {
      */
     @Bean
     public FilterRegistrationBean<CorsFilter> corsFilter() {
-        CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
-        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-        config.setAllowedHeaders(List.of("*"));
-        config.setAllowCredentials(true);
-        config.setMaxAge(3600L);
+        CorsConfiguration config = corsConfiguration();
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);
@@ -42,6 +38,26 @@ public class WebConfig implements WebMvcConfigurer {
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 5);
         registration.setName("corsFilter");
         return registration;
+    }
+
+    /**
+     * CORS 配置本体（包内可见：用例要断言"自定义响应头可被前端读到"）。
+     *
+     * <p><b>exposedHeaders（C-1）</b>：浏览器只把 {@code Access-Control-Expose-Headers} 里列出的
+     * 自定义响应头交给 JS。reattach 用 {@code archive-trimmed/archive-from/archive-to} 告知
+     * "归档缺口"，不加这一项时后端发了、跨源前端 {@code headers.get(...)} 恒为 null
+     * （静默降级成"永远没有裁剪"）。前端走 fetch 消费 SSE，因此这里是契约的一部分。
+     */
+    static CorsConfiguration corsConfiguration() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+        config.setAllowedHeaders(List.of("*"));
+        config.setExposedHeaders(List.of(AiController.HEADER_ARCHIVE_TRIMMED, AiController.HEADER_ARCHIVE_FROM,
+                AiController.HEADER_ARCHIVE_TO));
+        config.setAllowCredentials(true);
+        config.setMaxAge(3600L);
+        return config;
     }
 
     /**

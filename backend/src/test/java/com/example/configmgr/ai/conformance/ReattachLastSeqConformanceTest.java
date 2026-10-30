@@ -303,8 +303,12 @@ class ReattachLastSeqConformanceTest {
 	 * 否则归档里会出现两段重叠序号，前端的 lastSeq 差量会漏帧。
 	 *
 	 * <p>
-	 * kill：把 {@code nextSeq()} 的初值改成 0（不从归档续号）⇒ 新帧从 1 起号，
-	 * 与旧帧重号，本用例变红。
+	 * kill：把取号初值改成 0（不从归档续号）⇒ 新帧从 1 起号，与旧帧重号，本用例变红。
+	 *
+	 * <p><b>范围（2026-10-30 Task 2）</b>：本用例走<b>兼容/单实例</b>实现
+	 * （{@code RunStoreFrameStore}：号锚 = max(归档末号, ai:seq)）。生产多实例的续号由
+	 * Redis {@code ai:seq} 计数 + 原子落档的表尾单调保险保证，<b>允许跳号</b> ——
+	 * "从末号 +1 续上"是单实例形态，不是跨实例的连续保证。
 	 */
 	@Test
 	void seqContinuesFromTheArchiveTailAcrossAProcessRestart() {
@@ -317,7 +321,12 @@ class ReattachLastSeqConformanceTest {
 		resumed.suspended(List.of(pending("c-2")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
 				this.store.instanceId());
 
-		assertThat(seqs(live.frames())).containsExactly(42L);
+		// Task 2 返修第 1 条：本地扇出<b>先按游标补齐归档里的更低号</b>再投本帧 —— 这里订阅者的游标是 0
+		// （attach 不走回放），于是它先拿到归档的 1..41、再拿到本帧 42：连续、无跳号、无重复。
+		// 生产路径的订阅者经 replayAndAttach 建立游标（lastSeq/回放末号），因此不会重复收历史。
+		assertThat(seqs(live.frames())).containsExactly(
+				java.util.stream.LongStream.rangeClosed(1L, 42L).boxed().toArray(Long[]::new));
+		assertThat(seqs(live.frames())).doesNotHaveDuplicates().isSorted();
 
 		// 前端 lastSeq = 41（它收到了旧进程的全部归档帧）⇒ 补发恰好是这一帧，不重不漏
 		FrameWire reattached = new FrameWire();

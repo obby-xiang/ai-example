@@ -36,8 +36,10 @@ import static org.mockito.Mockito.when;
  * <ul>
  * <li>{@code INCR ai:seq} / {@code SET ai:seq}（取号与号回退修复）；</li>
  * <li>{@code XADD key MAXLEN ~ n <id> seq n frame json} —— <b>显式 ID 语义按 Redis 实现</b>：
- * ID 必须严格大于表尾，否则抛错（产品因此必须重分配号重试，<b>不得</b>改用自动 ID）；
+ * ID 必须严格大于表尾，否则抛错（产品因此<b>不得</b>改用自动 ID；Task 2 起也不改号 ——
+ * 出帧路径用一次脚本把"定号 + XADD"做成同一拍，手工写口被越过就丢帧）；
  * {@code MAXLEN} 从<b>命令实参</b>读（不是替身构造参数），因此"删掉实现的 MAXLEN ⇒ 本替身不裁剪"成立；</li>
+ * <li>脚本 {@code AI_FRAME_APPEND}（原子落档：幂等标记 → INCR → 表尾单调保险 → XADD → 标记/续期）；</li>
  * <li>{@code XRANGE key (afterSeq-0 + COUNT n}（ID 区间差量读）与 {@code XREVRANGE key + - COUNT 1}（末号/表尾）；</li>
  * <li>{@code EXPIRE}（只记录值）、{@code LRANGE}（兼容期 LIST 只读）。</li>
  * </ul>
@@ -95,6 +97,31 @@ final class FakeFrameRedis {
 
 	/** 置 true = 模拟 {@code XADD} 失败（M-4：落档失败只告警、不中断出帧）。 */
 	volatile boolean failXadd;
+
+	/**
+	 * <b>只让接下来 N 次原子落档的脚本执行"先写入、再抛错"</b>（{@code XADD} 已生效，回包丢失）。
+	 *
+	 * <p>这是"XADD 成功但回包失败"的唯一可确定性复现形态：真实故障是连接在回包前断掉，
+	 * 客户端只看到异常，服务端已经写进去了。命中一次即递减。
+	 */
+	volatile int failAppendReplyTimes;
+
+	/** 幂等标记（{@code ai:xack:<token>:<tag>} → seq 文本）：{@code 原子落档脚本} 的幂等面。 */
+	final Map<String, String> acks = new ConcurrentHashMap<>();
+
+	/** 最近一次原子落档脚本收到的 {@code KEYS}（键形 / 同槽断言用）。 */
+	volatile List<String> lastAppendScriptKeys = List.of();
+
+	/** 原子落档脚本的调用次数（"任何生产帧都走原子落档"的判据：退化路径不会计入）。 */
+	volatile int atomicAppendCalls;
+
+	/**
+	 * 置 true = 回包丢失时<b>顺手清空所有 TTL</b>（模拟"重试前键的 TTL 已经走完/被清"）。
+	 *
+	 * <p>用来证明幂等命中与"拒绝交出低号"这两条早退路径<b>也</b>续/补 TTL ——
+	 * 否则滑动 TTL 会在重试窗口里倒退，归档可能先于会话过期。
+	 */
+	volatile boolean clearExpiriesOnLostReply;
 
 	/** 置 true = 模拟 {@code XRANGE} 读失败（真实连接层异常，不是"读不到"）。 */
 	volatile boolean failRangeRead;
@@ -213,21 +240,43 @@ final class FakeFrameRedis {
 					Limit limit = invocation.getArgument(2);
 					return selectRange(key, range, limit);
 				});
+		when(this.connection.xLen(any(byte[].class))).thenAnswer(invocation -> {
+			String key = new String((byte[]) invocation.getArgument(0), StandardCharsets.UTF_8);
+			return (long) entries(key).size();
+		});
 		when(this.connection.xRevRange(any(byte[].class), any(Range.class), any(Limit.class)))
 				.thenAnswer(invocation -> {
 					if (this.failTailRead) {
 						throw new org.springframework.data.redis.RedisConnectionFailureException("XREVRANGE 失败（模拟连接层异常）");
 					}
 					String key = new String((byte[]) invocation.getArgument(0), StandardCharsets.UTF_8);
-					rejectExclusiveBounds(invocation.getArgument(1));
+					Range<String> range = invocation.getArgument(1);
+					rejectExclusiveBounds(range);
 					List<Entry> entries = entries(key);
+					String lower = range.getLowerBound().isBounded()
+							? range.getLowerBound().getValue().orElse("-") : "-";
+					String upper = range.getUpperBound().isBounded()
+							? range.getUpperBound().getValue().orElse("+") : "+";
+					// XREVRANGE 的边界语义与 XRANGE 相同（只是倒序返回），COUNT 截的是"倒序的前 N 条"。
+					List<Entry> matched = new ArrayList<>();
+					synchronized (entries) {
+						for (Entry entry : entries) {
+							if (!"-".equals(lower) && compareIds(entry.id, lower) < 0) {
+								continue;
+							}
+							if (!"+".equals(upper) && compareIds(entry.id, upper) > 0) {
+								continue;
+							}
+							matched.add(entry);
+						}
+					}
 					List<ByteRecord> reversed = new ArrayList<>();
 					Limit limit = invocation.getArgument(2);
-					for (int i = entries.size() - 1; i >= 0; i--) {
+					for (int i = matched.size() - 1; i >= 0; i--) {
 						if (limit.getCount() > 0 && reversed.size() >= limit.getCount()) {
 							break;
 						}
-						reversed.add(record(entries.get(i)));
+						reversed.add(record(matched.get(i)));
 					}
 					return reversed;
 				});
@@ -242,7 +291,7 @@ final class FakeFrameRedis {
 
 	/**
 	 * {@code XADD key [MAXLEN|~ n] <id|*> field value ...}：显式 ID 必须大于表尾（Redis 语义），
-	 * 否则抛错 —— 产品必须据此<b>重分配号重试</b>（不得改用自动 ID）；{@code *} 只用于铺设升级期遗留状态。
+	 * 否则抛错 —— 产品必须据此丢帧/判幂等（<b>不得</b>改用自动 ID，也不改号）；{@code *} 只用于铺设升级期遗留状态。
 	 * {@code MAXLEN} 取自命令实参（M-5）。
 	 */
 	private byte[] handleXadd(byte[][] args) {
@@ -423,6 +472,21 @@ final class FakeFrameRedis {
 		if (body.contains(RedisFrameStore.SEQ_NEXT_MARK)) {
 			return seqNext(keys, args);
 		}
+		if (body.contains(RedisFrameStore.APPEND_MARK)) {
+			return atomicAppend(keys, args);
+		}
+		if (body.contains(RedisFrameStore.XTRIM_MARK)) {
+			// 只升不降的低水位标记（GET → max → EXPIRE）。
+			String key = String.valueOf(keys.get(0));
+			long next = Long.parseLong(String.valueOf(args.get(0)));
+			long ttl = Long.parseLong(String.valueOf(args.get(1)));
+			long known = this.counters.getOrDefault(key, 0L);
+			if (next > known) {
+				this.counters.put(key, next);
+			}
+			this.expiries.put(key, Duration.ofSeconds(ttl));
+			return List.of(Math.max(next, known));
+		}
 		if (!body.contains(ACTIVITY_TOUCH_MARK)) {
 			throw new UnsupportedOperationException("未建模的脚本：" + body);
 		}
@@ -458,6 +522,7 @@ final class FakeFrameRedis {
 		int probe = Integer.parseInt(String.valueOf(args.get(2)));
 		boolean forceRepair = args.size() > 3 && "1".equals(String.valueOf(args.get(3)));
 
+		// 真实裁剪检测（与生产脚本逐字一致）：XADD 前后各看一次幸存首条。
 		long cur = this.counters.merge(seqKey, 1L, Long::sum);
 		long degraded = 0L;
 		if (cur == 1L || cur <= fallbackLast || forceRepair) {
@@ -513,6 +578,188 @@ final class FakeFrameRedis {
 					String.valueOf(degraded).getBytes(StandardCharsets.UTF_8));
 		}
 		return List.of(seq, degraded);
+	}
+
+	/**
+	 * 原子落档脚本（{@code RedisFrameStore} 的 {@code AI_FRAME_APPEND}）：返回 {@code [seq, degraded, idempotent]}。
+	 *
+	 * <p>逐条镜像脚本语义（{@code synchronized} 由 {@link #handleScript} 提供 = Redis 串行执行脚本）：
+	 * 幂等标记（token → seq，按<b>精确 ID</b> 读出并<b>逐字节</b>比对本次帧体）→ {@code INCR} →
+	 * 表尾单调保险 / 计数器重建重锚 → {@code XADD <seq>-0} → 落标记 → 续期。
+	 *
+	 * <p>关节行：{@code failAppendReplyTimes} = "已写入、回包丢失"（服务端成功、客户端只看到异常）；
+	 * 表尾 ID 的比较按 Redis 语义（显式 ID 必须严格大于表尾）。
+	 */
+	private List<Object> atomicAppend(List<?> keys, List<Object> args) {
+		if (this.failIncrement) {
+			throw new IllegalStateException("原子落档脚本失败（模拟 Redis 抖动）");
+		}
+		String seqKey = String.valueOf(keys.get(0));
+		String streamKey = String.valueOf(keys.get(1));
+		String legacyKey = String.valueOf(keys.get(2));
+		this.atomicAppendCalls++;
+		String ackKeyFromScript = String.valueOf(keys.get(3));
+		String trimKey = keys.size() > 4 ? String.valueOf(keys.get(4)) : String.valueOf(keys.get(3));
+		this.lastAppendScriptKeys = List.of(seqKey, streamKey, legacyKey, ackKeyFromScript);
+		long ttlSeconds = Long.parseLong(String.valueOf(args.get(0)));
+		long fallbackLast = Long.parseLong(String.valueOf(args.get(1)));
+		int probe = Integer.parseInt(String.valueOf(args.get(2)));
+		long window = Long.parseLong(String.valueOf(args.get(3)));
+		boolean forceRepair = "1".equals(String.valueOf(args.get(4)));
+		long ackTtl = Long.parseLong(String.valueOf(args.get(5)));
+		String token = String.valueOf(args.get(6));
+		String head = String.valueOf(args.get(7));
+		String tail = String.valueOf(args.get(8));
+		// 与生产脚本逐字一致：KEYS[4] 已是完整键（含 token），脚本不再拼一次。
+		String ackKey = ackKeyFromScript;
+
+		String prev = this.acks.get(ackKey);
+		if (prev != null) {
+			String expected = head + prev + tail;
+			Entry exact = exactEntry(streamKey, prev + "-0");
+			if (exact != null && expected.equals(str(field(exact, RedisFrameStore.FIELD_FRAME)))) {
+				// 与生产脚本一致：幂等命中也要续 ack/seq/stream 三处 TTL。
+				this.expiries.put(ackKey, Duration.ofSeconds(ackTtl));
+				this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
+				this.expiries.put(streamKey, Duration.ofSeconds(ttlSeconds));
+				return List.of(Long.parseLong(prev), 0L, 1L);
+			}
+		}
+
+		// 真实裁剪检测（与生产脚本逐字一致）：XADD 前后各看一次幸存首条。
+		List<Entry> entries = entries(streamKey);
+		long headBefore = entries.isEmpty() ? -1L : seqFieldOfEntry(entries.get(0));
+		long cur = this.counters.merge(seqKey, 1L, Long::sum);
+		long degraded = 0L;
+		long tailMs = 0L;
+		if (this.failTailRead || this.failTailReadTimes > 0) {
+			if (this.failTailReadTimes > 0) {
+				this.failTailReadTimes--;
+			}
+			degraded = 1L;
+		}
+		else if (!entries.isEmpty()) {
+			tailMs = parseId(entries.get(entries.size() - 1).id())[0];
+		}
+		if (cur == 1L || forceRepair) {
+			long anchor = Math.max(fallbackLast, tailMs);
+			if (degraded == 0L) {
+				synchronized (entries) {
+					for (int i = entries.size() - 1; i >= 0 && i >= entries.size() - probe; i--) {
+						for (Map.Entry<byte[], byte[]> field : entries.get(i).fields.entrySet()) {
+							if (RedisFrameStore.FIELD_SEQ.equals(str(field.getKey()))) {
+								anchor = Math.max(anchor, Long.parseLong(str(field.getValue())));
+							}
+						}
+					}
+				}
+				if (this.failListTailProbe) {
+					degraded = 1L;
+				}
+				else {
+					List<String> legacy = this.lists.getOrDefault(legacyKey, List.of());
+					if (!legacy.isEmpty()) {
+						java.util.regex.Matcher matcher = SEQ_FIELD.matcher(legacy.get(legacy.size() - 1));
+						if (matcher.find()) {
+							anchor = Math.max(anchor, Long.parseLong(matcher.group(1)));
+						}
+					}
+				}
+			}
+			if (anchor >= cur) {
+				cur = anchor + 1L;
+				this.counters.put(seqKey, cur);
+			}
+		}
+		else if (tailMs >= cur) {
+			cur = tailMs + 1L;
+			this.counters.put(seqKey, cur);
+		}
+		this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
+		if (degraded != 0L && cur == 1L) {
+			// 与生产脚本一致：拒绝返回前已经给刚 INCR 出来的键补了 TTL（见上面的 put）。
+			return List.of(0L, 1L, 0L);
+		}
+		if (this.failXadd) {
+			throw new IllegalStateException("XADD 失败（模拟 Redis 抖动）");
+		}
+		String idToken = cur + "-0";
+		String body = head + cur + tail;
+		Map<byte[], byte[]> fields = new LinkedHashMap<>();
+		fields.put(RedisFrameStore.FIELD_SEQ.getBytes(StandardCharsets.UTF_8),
+				String.valueOf(cur).getBytes(StandardCharsets.UTF_8));
+		fields.put(RedisFrameStore.FIELD_FRAME.getBytes(StandardCharsets.UTF_8),
+				body.getBytes(StandardCharsets.UTF_8));
+		synchronized (entries) {
+			if (!entries.isEmpty() && compareIds(idToken, entries.get(entries.size() - 1).id()) <= 0) {
+				throw new IllegalStateException(
+						"ERR The ID specified in XADD is equal or smaller than the target stream top item");
+			}
+			entries.add(new Entry(idToken, fields));
+			if (window > 0) {
+				long limit = window + Math.max(0, this.retainExtra);
+				while (entries.size() > limit) {
+					entries.remove(0);
+				}
+			}
+		}
+		long headAfter = entries(streamKey).isEmpty() ? -1L : seqFieldOfEntry(entries(streamKey).get(0));
+		if (headBefore >= 0L && headAfter > headBefore) {
+			long known = this.counters.getOrDefault(trimKey, 0L);
+			if (headAfter > known) {
+				this.counters.put(trimKey, headAfter);
+			}
+			this.expiries.put(trimKey, Duration.ofSeconds(ttlSeconds));
+		}
+		this.acks.put(ackKey, String.valueOf(cur));
+		this.expiries.put(ackKey, Duration.ofSeconds(ackTtl));
+		this.expiries.put(streamKey, Duration.ofSeconds(ttlSeconds));
+		if (this.failAppendReplyTimes > 0) {
+			this.failAppendReplyTimes--;
+			if (this.clearExpiriesOnLostReply) {
+				this.expiries.clear();
+			}
+			throw new IllegalStateException("原子落档回包丢失（模拟连接在回包前断开，XADD 已生效）");
+		}
+		return List.of(cur, degraded, 0L);
+	}
+
+	/** 一条记录的业务 {@code seq} 字段（缺失/坏值回落 ID 毫秒段）。 */
+	private static long seqFieldOfEntry(Entry entry) {
+		byte[] seq = field(entry, RedisFrameStore.FIELD_SEQ);
+		if (seq != null) {
+			try {
+				return Long.parseLong(str(seq));
+			}
+			catch (NumberFormatException ignored) {
+				// 坏值 ⇒ 视为无法确认
+			}
+		}
+		// 与生产脚本一致：<b>没有/读不出业务 seq 就不确认</b>，绝不回落到 ID 毫秒段。
+		return -1L;
+	}
+
+	/** 精确 ID 的记录（{@code XRANGE key id id COUNT 1}）；不存在返回 {@code null}。 */
+	private Entry exactEntry(String streamKey, String id) {
+		List<Entry> entries = entries(streamKey);
+		synchronized (entries) {
+			for (Entry entry : entries) {
+				if (entry.id().equals(id)) {
+					return entry;
+				}
+			}
+		}
+		return null;
+	}
+
+	/** 一条记录里的某个字段值（不存在返回 {@code null}）。 */
+	private static byte[] field(Entry entry, String name) {
+		for (Map.Entry<byte[], byte[]> item : entry.fields.entrySet()) {
+			if (name.equals(str(item.getKey()))) {
+				return item.getValue();
+			}
+		}
+		return null;
 	}
 
 	/** 兼容期 LIST 末帧里的 {@code "seq":<n>}（只读一个 {@code seq} 字段，不反序列化整帧）。 */

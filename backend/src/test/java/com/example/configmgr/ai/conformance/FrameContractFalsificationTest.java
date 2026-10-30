@@ -51,7 +51,12 @@ class FrameContractFalsificationTest {
 
 	// ── 规则 1：seq ─────────────────────────────────────────────────────────
 
-	/** kill：把 {@code nextSeq()} 改成"每次 +2"（或让某类帧不写 seq）⇒ 出现缺口。 */
+	/**
+	 * kill：让出帧的号"每次 +2"（或让某类帧不写 seq）⇒ 出现缺口。
+	 *
+	 * <p><b>范围</b>：本类校验的是<b>单实例/兼容路径</b>的连续性；生产多实例允许跳号
+	 * （降级重试/遗留墙钟 ID 都会跳），跨实例只承诺"唯一、单调、按归档序交付"。
+	 */
 	@Test
 	void killsSeqGapAndMissingSeq() {
 		List<Map<String, Object>> gap = List.of(fixture("start", 1), fixture("delta", 3, "messageId", "m-1", "text", "x"),

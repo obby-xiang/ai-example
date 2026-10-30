@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -89,14 +90,15 @@ class SseChatEmitterIdentityTest {
 	@Test
 	void withoutARecordIdentityThePoolIdentityIsNotAdopted() throws Exception {
 		// 记录存在但写出器创建时没有任何身份（跨实例唤醒路径）：没有"取键提示"就读不到记录，
-		// 于这一轮没有可恢复的身份 —— 投递线程上的残留身份不得被沿用。
+		// 于这一轮没有可恢复的身份 —— 投递线程上的残留身份不得被沿用（也不伪造默认租户）。
 		seedRun();
 		ExecutorService deliveryPool = poolThreadCarrying(STALE_POOL_IDENTITY);
 		try {
 			AtomicReference<TenantUser> observed = new AtomicReference<>();
 			CountDownLatch sent = new CountDownLatch(1);
 			SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.mapper, deliveryPool, 256);
-			out.attach(sseEmitter(observed, sent));
+			SseEmitter emitter = sseEmitter(observed, sent);
+			out.attach(emitter);
 			out.delta("第一段");
 
 			assertThat(sent.await(5, TimeUnit.SECONDS)).as("投递池应写出该帧").isTrue();
@@ -274,6 +276,68 @@ class SseChatEmitterIdentityTest {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			return RunStoreFrameStore.of(this.store).readFrom(RUN_ID, 0L, 0);
 		}
+	}
+
+	// ── Task 2：身份读取失败 ⇒ 不缓存 null、不写 legacy、下一拍重试 ───────────────
+
+	/**
+	 * <b>身份读取一次失败后必须恢复</b>（Task 2 第 4 条）。
+	 *
+	 * <h2>缺陷形态</h2>
+	 * 旧实现把"读取抛异常"和"这一轮确实没有身份"折叠成同一个结果：catch 里
+	 * {@code resolved = null}，随后 {@code deliveryIdentity = null; identityResolved = true}
+	 * —— 一次 Redis 抖动就把整个写出器<b>永久</b>钉在"无身份"上，此后每一帧/每个唤醒都按 legacy 键族
+	 * 走（{@code ai:xevents:{run:<id>}} 裸 tag）。重挂回放与跨实例唤醒读的是身份键族，于是整轮帧
+	 * 既写不进本轮的键、也读不出来（看起来像"这一轮没有帧"）。
+	 *
+	 * <h2>本批口径</h2>
+	 * 读取异常 = <b>不可知</b>，不是"无身份"：① 不缓存（下一拍重试）；② 这一拍用<b>已校验的 hint</b>
+	 * （构造线程的请求身份，就是拼读记录键的那一份）继续写本轮的键族；③ <b>绝不</b>写 legacy 键。
+	 *
+	 * <p>判据：两帧都落在记录身份的事件键上、legacy 键族为空、身份读取确实重试过（读到第 2 次）。
+	 *
+	 * <p>kill：把 catch 改回"缓存 null + 置 identityResolved"⇒ 第 1 帧就落进 legacy 键族，
+	 * "legacy 事件键为空"与"记录身份下 2 帧"同时红。
+	 */
+	@Test
+	void identityReadFailureIsNotCachedAndDoesNotLeakToLegacyKeys() {
+		seedRun();
+		AtomicInteger reads = new AtomicInteger();
+		RunStore flaky = new RunStore(this.fake.redis, this.mapper, this.properties) {
+			@Override
+			public RunSnapshot get(String runId, long tenantId, long userId) {
+				if (reads.incrementAndGet() == 1) {
+					throw new org.springframework.dao.QueryTimeoutException("身份读取失败（模拟 Redis 抖动）");
+				}
+				return super.get(runId, tenantId, userId);
+			}
+		};
+		ChannelRecordingBus bus = new ChannelRecordingBus();
+		SseChatEmitter out;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
+				RECORD_IDENTITY.userId())) {
+			out = new SseChatEmitter(RUN_ID, flaky, RunStoreFrameStore.of(flaky), this.mapper, Runnable::run,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null);
+		}
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.delta("第一拍：身份读取失败");
+		out.delta("第二拍：Redis 已恢复");
+
+		SoftAssertions softly = new SoftAssertions();
+		softly.assertThat(reads.get()).as("身份读取失败不得被缓存：下一拍必须重试").isEqualTo(2);
+		softly.assertThat(readFrames(RECORD_IDENTITY))
+			.as("两帧都必须落在本轮记录身份的事件键上（失败那一拍用已校验 hint）")
+			.extracting(frame -> String.valueOf(frame.get("type")))
+			.containsExactly("delta", "delta");
+		softly.assertThat(readFrames(null)).as("身份读取失败不得写 legacy 事件键").isEmpty();
+		softly.assertThat(issuedSeq(null)).as("legacy 序号键不得被写").isZero();
+		softly.assertThat(issuedSeq(RECORD_IDENTITY)).as("序号仍登记在本轮身份上").isPositive();
+		softly.assertThat(wire.frames()).as("两帧都要实时投递（不因一次读抖动整段静音）").hasSize(2);
+		softly.assertThat(bus.publishedChannels).as("唤醒仍发布到本轮身份的频道")
+			.containsOnly(channelOf(RECORD_IDENTITY));
+		softly.assertAll();
 	}
 
 	private long issuedSeq(TenantUser identity) {

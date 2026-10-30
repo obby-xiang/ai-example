@@ -51,8 +51,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ol>
  *
  * <p>
- * <b>B23L1 批①（2026-10-21）多实例</b>：出帧 = 取号（{@link FrameStore#nextSeq}，生产为
- * {@code INCR ai:seq:<runId>}）→ 截断 → 落档（{@link FrameStore#appendAndGetSeq}）→
+ * <b>B23L1 批①（2026-10-21）多实例</b>：出帧 = 原子落档（{@link FrameStore#appendAndAllocateSeq}：
+ * 定最终号 + 追加 Stream 记录同一次 Redis 脚本，截断在号占位下完成）→
  * {@code PUBLISH ai:wake:<runId>（仅上界 seq）} → 本地扇出（同实例快路径）。
  * 其它实例的连接由 {@link FrameWakeListener} 收到唤醒后从事件日志补差量，
  * 去重按<b>每订阅者</b>的已投递游标（{@link Subscription#wakeFloor}，回放/实时/唤醒共同推进）：
@@ -60,13 +60,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * 连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
  *
  * <p>
- * <b>显式 ID 恒定批（2026-10-30）落档号收口</b>：落档的 entry ID 是显式 {@code <seq>-0}，
- * 表尾已被别的实例写高时落档会<b>重分配号</b>。因此出帧改用
- * {@link FrameStore#appendAndGetSeq(String, java.util.Map, FrameStore.PayloadFactory)}
- * 并把<b>截断做成负载工厂</b>：工厂在最终落档号下只跑一次，成功落档的那份字节既是归档帧也是
- * 实时投递帧，并用最终号做本地扇出游标、{@code lastFanoutSeq} 与唤醒上界 ——
- * 实时帧、归档帧、Stream entry ID、唤醒与 {@code lastSeq} 同号同字节，
- * 且贴着单帧上限的帧也不会因号变宽而越界。
+ * <b>Task 2（2026-10-30）落档号收口：号与归档同一拍</b>：出帧只用
+ * {@link FrameStore#appendAndAllocateSeq(String, java.util.Map, FrameStore.PayloadFactory)} ——
+ * 实现在<b>一次 Redis 脚本</b>里定最终号并追加 {@code <seq>-0}，于是
+ * <b>分配序 == 归档序 == 交付序</b>，不再有"先取低号、被越过后改高号"的中间态（那一形态会让
+ * 实时流与回放两个号，并让"低号后到"的帧被所有已越过它的游标永久跳过）。
+ * <b>没有归档就没有交付</b>：落档返回"未归档"时本帧不扇出、不推进游标、不发唤醒。
+ * <b>跳号是正常形态</b>（降级重试/遗留墙钟 ID 都会跳）；单实例无竞争时号看起来连续，
+ * 那<b>只是单实例形态</b> —— conformance 的 "+1 连续"断言不等于跨实例连续保证，
+ * 跨实例只保证"每轮唯一、单调、按归档序交付"。
  *
  * <p>
  * <b>L-91（2026-10-23）思考段 = 既有三段式 + 一个可选键</b>：上游 {@code reasoning_content}
@@ -442,6 +444,18 @@ public class SseChatEmitter {
 	private final AtomicBoolean readOnlyWarned = new AtomicBoolean();
 
 	/**
+	 * "本帧没有归档 ⇒ 不交付"的告警节流（每轮一条）：Redis 抖动期可能连丢多帧，
+	 * 逐帧 WARN 会刷屏，但"整轮都丢了"必须至少留一条痕（之后降到 debug）。
+	 */
+	private final AtomicBoolean archiveFailureWarned = new AtomicBoolean();
+
+	/**
+	 * "身份读不出来 ⇒ 本帧明确失败"的告警节流（每轮一条）：一次 Redis 抖动可能连续跳过几帧，
+	 * 但"这一轮的身份当时读不出来"必须留一条痕。
+	 */
+	private final AtomicBoolean identityFailureWarned = new AtomicBoolean();
+
+	/**
 	 * <b>终态回收钩子</b>（资源修复批）：轮终态且订阅者排空后调用一次，由注册表把它自己从
 	 * {@code runId → emitter} 表里摘掉。
 	 *
@@ -782,7 +796,13 @@ public class SseChatEmitter {
 		if (!this.subscribers.isEmpty()) {
 			ensureWakeSubscribed();
 		}
-		else if (this.wakeRegistered.compareAndSet(true, false)) {
+		else {
+			// <b>无条件退订</b>（返修第 1 条/四轮）：不能只看 {@code wakeRegistered} 的 CAS ——
+			// 被"提升"的客人从未拿到 true（{@code register} 当时回的是 false，登记位已回退），
+			// 但它在监听器的桶里；若只在 CAS 成功时退订，客人的连接关闭后这个 target 与登记句柄
+			// 会永久留在监听器里（桶不空 ⇒ 订阅永不释放，写出器也被 map 引用）。
+			// 监听器按 target 精确匹配，<b>没登记过时是 no-op</b>（幂等），因此这里不需要 CAS。
+			this.wakeRegistered.set(false);
 			try {
 				listener.unregister(this.runId, this.wakeTarget);
 			}
@@ -816,8 +836,16 @@ public class SseChatEmitter {
 		if (!this.wakeRegistered.compareAndSet(false, true)) {
 			return;
 		}
+		IdentityOutcome identity = deliveryIdentityOutcome();
+		if (identity.readFailure() && identity.identity() == null) {
+			// 身份不可确认 ⇒ 不登记（否则会登记到 legacy 频道，发布侧在身份频道上，跨实例唤醒静默缺席）。
+			// 回退登记位，等下一次订阅触达或身份可读时再试。
+			this.wakeRegistered.set(false);
+			log.warn("帧唤醒订阅跳过 runId={}（身份不可确认，下一拍重试；不以 legacy 频道代替）", this.runId);
+			return;
+		}
 		boolean registered;
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 			registered = listener.register(this.runId, this.wakeTarget);
 		}
 		catch (Exception ex) {
@@ -1184,10 +1212,34 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * 回放结果：{@code staged} = 实际入队帧数；{@code degraded} = 本次回放有读失败/窗口跳过；
-	 * {@code terminalFrame} = 已读到 done/error 终帧（不得再补 degraded error）。
+	 * 回放结果：{@code staged} = 实际入队帧数；{@code degraded} = 本次回放有读失败；
+	 * {@code terminalFrame} = 已读到 done/error 终帧（不得再补 degraded error）；
+	 * {@code truncated} = <b>后端明确告知</b>"游标早于幸存窗口，确实少了一段"。
+	 *
+	 * <p>{@code truncated} 与 {@code degraded} 的分工（Task 2）：{@code degraded} 是"这次读失败，
+	 * 结果可信度未知"（前端应重试）；{@code truncated} 是"读成功了，但归档窗口已经翻过去"
+	 * （前端应提示"不可完整恢复"，不必重试）。消费方<b>不得</b>再用
+	 * "首帧号 &gt; lastSeq + 1" 推断缺口 —— 生产上跳号是正常形态（降级/失败重试都会跳），
+	 * 那样猜会把跳号误报成丢帧。
+ *
+ * <p>{@code trimmedFromSeq}/{@code trimmedToSeq} = <b>缺口区间</b>（含端点：
+ * {@code afterSeq+1} 到 {@code 裁剪低水位-1}；未截断为 {@code 0/0}），由
+ * {@code GET /api/ai/events/{runId}} 作为响应头 {@code archive-from}/{@code archive-to} 暴露
+ * （与 {@code archive-trimmed} 一起构成前端唯一可信的「归档是否被裁」信号；业务帧形态不变）。
+ * <b>不是</b>回放区间 —— 前端用它告诉用户"哪一段不可完整恢复"。
 	 */
-	public record ReplayResult(int staged, boolean degraded, boolean terminalFrame) {
+	public record ReplayResult(int staged, boolean degraded, boolean terminalFrame, boolean truncated,
+			long trimmedFromSeq, long trimmedToSeq) {
+
+		/** 兼容构造（未截断、无区间）：不需要区分这些位的调用方/替身用它。 */
+		public ReplayResult(int staged, boolean degraded, boolean terminalFrame) {
+			this(staged, degraded, terminalFrame, false, 0L, 0L);
+		}
+
+		/** 兼容构造（只有截断位、无缺口区间）。 */
+		public ReplayResult(int staged, boolean degraded, boolean terminalFrame, boolean truncated) {
+			this(staged, degraded, terminalFrame, truncated, 0L, 0L);
+		}
 	}
 
 	/**
@@ -1239,7 +1291,7 @@ public class SseChatEmitter {
 		FrameStore.ReadResult read = this.frames.readFromWithStatus(this.runId, afterSeq, 0);
 		if (read.degraded() && afterSeq <= 0L && read.frames().isEmpty()) {
 			// I-1：全量回放时末号未知且没有可读帧 —— 不能用"最旧窗口"冒充最新帧，宁可这一拍不回放。
-			return new ReplayResult(0, true, false);
+			return new ReplayResult(0, true, false, false, 0L, 0L);
 		}
 		List<Map<String, Object>> frames = read.frames();
 		int staged = 0;
@@ -1281,7 +1333,8 @@ public class SseChatEmitter {
 		if (maxReadSeq > 0L) {
 			this.lastFanoutSeq.accumulateAndGet(maxReadSeq, Math::max);
 		}
-		return new ReplayResult(staged, read.degraded(), terminalFrame);
+		return new ReplayResult(staged, read.degraded(), terminalFrame, read.truncated(), read.trimmedFromSeq(),
+				read.trimmedToSeq());
 	}
 
 	/** 孤儿判定：帧序号不大于前端已知的最大序号 ⇒ 该帧前端已有，不重发。 */
@@ -2021,11 +2074,26 @@ public class SseChatEmitter {
 	 * 作用域（定时线程、池化线程、未来新增入口都没有请求身份），漏开就会把帧写进 legacy 键形 ——
 	 * 帧看似发出，重挂回放与跨实例唤醒却读不到。这里统一兜底：与投递路径同源、同一份已解析身份，
 	 * 嵌套时由作用域关闭还原调用方原身份（{@link RunIdentityScope}）。
+	 *
+	 * <p><b>身份不可确认 ⇒ 这一拍明确失败</b>（Task 2）：解析因<b>读异常</b>失败且没有已校验提示时，
+	 * 本帧不落档、不投递（跳过），下一拍重试。绝不按 legacy 键写 —— 那条路会让帧落进"无身份"键族，
+	 * 而重挂回放/跨实例唤醒读的是身份键族，等于把帧丢进一个没人读的地方。
 	 */
 	private void emit(Map<String, Object> frame) {
 		this.emitting.incrementAndGet();
 		try {
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+			IdentityOutcome identity = deliveryIdentityOutcome();
+			if (identity.readFailure() && identity.identity() == null) {
+				if (this.identityFailureWarned.compareAndSet(false, true)) {
+					log.warn("SSE 投递身份不可确认，本帧不落档/不投递（下一拍重试，绝不以 legacy 键代替）runId={} type={}",
+							this.runId, frame.get("type"));
+				}
+				else {
+					log.debug("SSE 投递身份不可确认，本帧跳过 runId={} type={}", this.runId, frame.get("type"));
+				}
+				return;
+			}
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 				emitInternal(frame);
 			}
 		}
@@ -2077,12 +2145,13 @@ public class SseChatEmitter {
 	 * </ol>
 	 *
 	 * <p>
-	 * <b>锁内顺序不可调换</b>：取号 → 落档（<b>在最终号下</b>截断/序列化）→ 入队。
-	 * 落档与入队必须拿到同一份截断后的字节（否则事件日志里躺着未截断帧、或实时与回放分叉）。
-	 * <b>显式 ID 恒定批</b>：截断做成负载工厂交给
-	 * {@link FrameStore#appendAndGetSeq(String, java.util.Map, FrameStore.PayloadFactory)}，
-	 * 于是在"表尾已被别的实例越过 ⇒ 重分配号"时，截断按<b>最终号</b>只做一次 ——
-	 * 实时字节 == 归档字节，且绝不越过 {@code max-frame-bytes}（号变宽也不会把贴上限的帧顶出去）。
+	 * <b>锁内顺序不可调换</b>：原子落档（定号 + 归档；截断在号占位下完成）→ 入队。
+	 * 落档与入队必须拿到同一份字节（否则事件日志里躺着未截断帧、或实时与回放分叉）。
+	 * <b>Task 2</b>：截断做成负载工厂交给
+	 * {@link FrameStore#appendAndAllocateSeq(String, java.util.Map, FrameStore.PayloadFactory)}，
+	 * 实现在<b>最宽号占位</b>下跑工厂、归档前把真号拼进去 —— 实时字节 == 归档字节，
+	 * 且号比占位更窄，贴上限的帧也不会被号宽顶出去。
+	 * <b>只有归档成功才交付</b>：返回"未归档"时本帧不扇出、不推进游标、不发唤醒。
 	 * <b>资源修复批</b>：唤醒发布（PUBLISH）已挪到<b>锁外</b>，但"发布必须在落档之后"不变 ——
 	 * 锁内只累计上界（{@link #requestWakePublish}），最外层锁出口才真正发。
 	 */
@@ -2125,9 +2194,13 @@ public class SseChatEmitter {
 		// 由投递池异步完成（T3-1 慢订阅者隔离），单订阅者 FIFO 由 CAS drain 独占标志保证。
 		// 资源修复批：唤醒发布（Redis PUBLISH）挪到锁外 —— 锁内只算号，发布值最后由本方法发出。
 		long wakeSeq;
+		// I-5：终帧归档失败 ⇒ 解锁后走既有恢复失败链（typed error + 收流），不让在线端静默等到超时。
+		boolean terminalUnarchived = false;
 		try {
 			synchronized (this.emitLock) {
-				byte[] payloadBytes;
+				byte[] payloadBytes = null;
+				// 本帧是否真的进了事件日志（心跳视为"无需归档"⇒ true）。
+				boolean archivedOk = true;
 				// 本地实时帧的业务号（心跳为 0）：用于把每个订阅者的已投递游标推进到本帧。
 				long liveSeq = 0L;
 				if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
@@ -2148,45 +2221,58 @@ public class SseChatEmitter {
 					}
 				}
 				else {
-					// B23L1：取号 = 事件日志的取号口（生产 = Redis INCR，跨实例不重不回退）。
-					long seq = this.frames.nextSeq(this.runId);
-					frame.put("seq", seq);
-					// T3-10：单帧上限的字段级截断必须在"取号之后"、判定口径是<b>整帧</b>（含 seq）的
-					// UTF-8 字节数（A19）—— 但<b>取号号未必是落档号</b>：跨实例并发时表尾可能已被更高的号
-					// 越过，落档会重分配号。<b>截断必须发生在最终落档号确定之后</b>，否则帧会多出"号宽"字节、
-					// 越过单帧上限（贴上限的帧必然越界）。因此把截断做成<b>负载工厂</b>交给落档：
-					// 它在每次尝试的最终号下跑一次（{@link FrameSizeLimiter#apply}），成功落档的那份字节
-					// 既是归档帧也是实时投递帧 —— 同号、同字节、绝不越限。
-					// 流式正文（delta.text）已在 emitDeltaText 里按同一上限拆成多条 delta，这里对本路径
-					// 只会是 no-op（拆分保证每片 ≤ 上限）；非 delta 帧（如 tool_result.result）仍按字段降采样。
+					// <b>2026-10-30（Task 2）：号与归档同一拍</b>。出帧只调
+					// {@link FrameStore#appendAndAllocateSeq} —— 实现在<b>一次 Redis 脚本</b>里定最终号并
+					// 追加 {@code <seq>-0}，于是"分配序 == 归档序 == 交付序"，不存在"先取低号、被越过后改高号"
+					// 的窗口；因此这里<b>不再</b>先 {@code nextSeq} 再落档（那个两步窗口正是本批要消灭的形态）。
+					// T3-10：截断仍做成<b>负载工厂</b>（判据是整帧含 seq 的 UTF-8 字节数）——
+					// 实现会把号占位（每帧随机 18 位数字，恒 ≥ 任何真实号）交给工厂，最终号只会更窄
+					// ⇒ 绝不越过 max-frame-bytes。
+					// 流式正文（delta.text）已在 emitDeltaText 里拆成多条 delta，这里对它是 no-op；
+					// 非 delta 帧（如 tool_result.result）仍按字段降采样。
 					FrameStore.PayloadFactory payloadFactory = f ->
 							FrameSizeLimiter.apply(f, this.objectMapper, this.maxFrameBytes);
-					FrameStore.AppendResult archived = this.frames.appendAndGetSeq(this.runId, frame, payloadFactory);
-					// 落档失败（Redis 抖动等）不阻断出帧：号用帧体里的（重分配会就地写回最终号），
-					// 负载仍由同一个工厂在本地产出（≤ 上限），与"落档失败但帧已发出"的既有口径一致。
-					long frameSeq = archived.seq() > 0L ? archived.seq() : frameSeqOf(frame, seq);
-					frame.put("seq", frameSeq);
-					byte[] finalPayload = archived.payload() != null ? archived.payload()
-							: payloadFactory.payload(frame);
-					if (finalPayload == null) {
-						// 序列化失败：帧不落档、不发订阅者（与 T3-1"锁内只做取号/落档/入队"同口径）
-						log.error("SSE 帧序列化失败 runId={} type={}（本帧已跳过）", this.runId, frame.get("type"));
-						return;
+					FrameStore.AppendResult archived = this.frames.appendAndAllocateSeq(this.runId, frame,
+							payloadFactory);
+					if (archived.seq() <= 0L || archived.payload() == null) {
+						// <b>归档没成功 ⇒ 不交付</b>（Task 2 的核心不变量）：没有归档号就没有可交付的顺序事实。
+						// 旧口径在这里用"取号号"照发，于是订阅者看到一帧永不入档的号：游标被推过它之后，
+						// 重挂/唤醒的差量读再也不会把它补回来（帧永久缺）。宁可不发（前端看门狗/重挂会收敛），
+						// 也不发一个"顺序上不存在"的帧。
+						if (this.archiveFailureWarned.compareAndSet(false, true)) {
+							log.warn("事件帧未归档，本帧不交付 runId={} type={}（多实例顺序只在归档成功后成立；"
+									+ "后续同类丢弃不再重复告警）", this.runId, frame.get("type"));
+						}
+						else {
+							log.debug("事件帧未归档，本帧不交付 runId={} type={}", this.runId, frame.get("type"));
+						}
+						// 终帧（done/error）没进归档时，在线端不能"什么都不发生"：连接会一直挂着一个
+						// 永远不会再发的终帧，直到前端看门狗超时。解锁后走既有恢复失败链收流。
+						terminalUnarchived = "done".equals(frame.get("type")) || "error".equals(frame.get("type"));
+						archivedOk = false;
 					}
-					// R1-09：任何业务帧（非纯心跳）都推进真实业务活动锚点。必须留在出帧点/锁内 ——
-					// 只靠心跳会掩盖卡死，只靠归档尾部则会漏掉"落档失败但帧已发出"的窗口。
-					Object atMs = frame.get("atMs");
-					this.store.touchBusinessActivity(this.runId,
-							atMs instanceof Number number ? number.longValue() : System.currentTimeMillis());
-					// B23L1：落档之后才允许发布唤醒（否则别的实例被唤醒后读不到这一帧）。
-					// <b>资源修复批</b>：PUBLISH 已挪到锁外（{@link #requestWakePublish}）—— 锁内只记上界。
-					// 自唤醒的幂等仍由每订阅者游标保证：onWake 只在成功入队后推进 wakeFloor，
-					// 本地扇出按同一游标跳过已交付的号（见 liveSeq <= sub.wakeFloor 分支）。
-					payloadBytes = finalPayload;
-					liveSeq = frameSeq;
-					this.lastFanoutSeq.accumulateAndGet(frameSeq, Math::max);
+					else {
+						long frameSeq = archived.seq();
+						frame.put("seq", frameSeq);
+						payloadBytes = archived.payload();
+						// R1-09：任何业务帧（非纯心跳）都推进真实业务活动锚点。必须留在出帧点/锁内 ——
+						// 只靠心跳会掩盖卡死，只靠归档尾部则会漏掉"归档成功但投递失败"的窗口。
+						Object atMs = frame.get("atMs");
+						this.store.touchBusinessActivity(this.runId,
+								atMs instanceof Number number ? number.longValue() : System.currentTimeMillis());
+						// B23L1：落档之后才允许发布唤醒（否则别的实例被唤醒后读不到这一帧）。
+						// <b>资源修复批</b>：PUBLISH 已挪到锁外（{@link #requestWakePublish}）—— 锁内只记上界。
+						// 自唤醒的幂等仍由每订阅者游标保证：onWake 只在成功入队后推进 wakeFloor，
+						// 本地扇出按同一游标跳过已交付的号（见 liveSeq <= sub.wakeFloor 分支）。
+						liveSeq = frameSeq;
+						this.lastFanoutSeq.accumulateAndGet(frameSeq, Math::max);
+					}
 				}
-				if (this.subscribers.isEmpty() || this.terminating.get()) {
+				if (!archivedOk) {
+					// 未归档：不扇出、不发布（没有归档号就没有可交付的顺序事实）。
+					wakeSeq = 0L;
+				}
+				else if (this.subscribers.isEmpty() || this.terminating.get()) {
 					// S1-1：轮终态已置 ⇒ 不再向订阅者收新帧（帧照旧取号落档，重挂回放仍可见）——
 					// 否则终态之后的新帧会把各 drain 的"排空"无限推迟，收尾永远等不到队空。
 					// 注意这里<b>不能</b> return：唤醒（跨实例补帧）仍须发布 —— 上面的发布已挪到锁外。
@@ -2198,17 +2284,42 @@ public class SseChatEmitter {
 			}
 		}
 		finally {
+			// 注意：`return` 会跳过下面的 requestWakePublish，但 flushWakeSync 仍必须跑。
 			flushWakeSyncIfUnlocked();
+		}
+		if (terminalUnarchived) {
+			closeSubscribersAfterUnarchivedTerminal();
 		}
 		requestWakePublish(wakeSeq);
 	}
 
 	/**
-	 * 帧体当前携带的业务号（落档失败时用）：重分配会就地写回最终号，故优先读帧体。
+	 * 终帧未归档时的收口（I-5）：<b>不投未归档终帧</b>，改走<b>既有恢复失败链</b>。
+	 *
+	 * <p>两条路都不能接受：① 什么都不做 ⇒ 连接挂着一个永远不会再发的终帧，用户看到转圈到超时；
+	 * ② 投递一个未归档的终帧 ⇒ 重挂回放里没有它（归档视角这一轮永远没结束），
+	 * {@code terminalFrameArchived} 也会一直说"没有终帧"，取消收尾会重复发终帧。
+	 *
+	 * <p>因此复用 N-2 / AR-05 的中性结局：给每个仍挂着的订阅者补一帧 typed error
+	 * （{@code AI_REDIS_UNAVAILABLE} + {@code retryable} + {@code degraded}），排空后收流 ——
+	 * 客户端拿到<b>明确失败</b>并断开，重挂/看门狗按既有路径收敛。
 	 */
-	private static long frameSeqOf(Map<String, Object> frame, long fallback) {
-		Object seq = frame.get("seq");
-		return seq instanceof Number number ? number.longValue() : fallback;
+	private void closeSubscribersAfterUnarchivedTerminal() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put("degraded", true);
+		extra.put("retryable", true);
+		extra.put("unarchivedTerminal", true);
+		int delivered = unresolvedEnding(ErrorCodes.AI_REDIS_UNAVAILABLE, "AI 服务暂不可用，请稍后重试。", extra);
+		// <b>收口</b>（返修第 5 条）：合成终帧已表达"这一轮在这个连接上的终点"。
+		// 置 terminating ⇒ 之后的心跳/业务帧不再扇出（否则前端会在已终结的流上收到迟到内容，
+		// 把终态又拉回进行中）；新订阅者进来也只会回放 + 立即收尾。
+		this.terminating.set(true);
+		// 收口后补一次终态回收判定：常规回收是"最后一个订阅者离开时由 closeSubscription 触发"，
+		// 而那条路径刚刚已经跑过（当时 terminating 还没置）—— 不在这里补，这条"已终态 + 无订阅者"
+		// 的写出器会一直留在注册表里（持有订阅表/队列/唤醒目标）。recycled 的 CAS 保证只跑一次。
+		fireRecycleIfTerminal();
+		log.warn("终帧未归档：已按恢复失败链收流 runId={} subscribers={}（客户端拿到 typed error，不再等一个不会来的终帧）",
+				this.runId, delivered);
 	}
 
 	/**
@@ -2219,15 +2330,42 @@ public class SseChatEmitter {
 	 */
 	private long fanOutToSubscribers(byte[] payloadBytes, long liveSeq) {
 		final String payload = new String(payloadBytes, java.nio.charset.StandardCharsets.UTF_8);
+		// <b>交付前补齐更低号</b>（Task 2 返修第 1 条）：原子分配保证"归档序 == 分配序"，
+		// 但<b>不</b>保证唤醒先到 —— 实例 A 归档 1、实例 B 归档 2；若 B 直接把 2 投给订阅者，
+		// 游标推到 2 之后 A 的唤醒（上界 1）就被 onWake 的"上界 ≤ 最小游标 ⇒ 无差量"短路，
+		// 1 号<b>永久缺帧</b>。
+		//
+		// 因此扇出前先从归档补出"各订阅者游标与本帧号之间"的帧（升序、按游标去重），再投本帧。
+		// 读一次覆盖全部订阅者（取最小游标作下界），逐订阅者只投自己没见过的号。
+		List<FrameStore.RawFrame> catchUp = catchUpFramesLocked(liveSeq);
 		for (Subscription sub : this.subscribers) {
 			if (sub.closed) {
 				// S3-1：生命周期回调已清理该订阅者（COW 快照与摘除的窄窗）—— 不再入队、不再抢 drain
 				continue;
 			}
-			if (liveSeq > 0L && liveSeq <= sub.wakeFloor) {
+			if (liveSeq <= 0L) {
+				// 心跳：没有业务号，直接投（补齐只对业务号有意义）。
+				if (enqueueLive(sub, payload)) {
+					kickDrain(sub);
+				}
+				else {
+					evict(sub, "实时队列溢出（容量 " + this.queueCapacity + "）");
+				}
+				continue;
+			}
+			if (liveSeq <= sub.wakeFloor) {
 				// 自唤醒（同步总线 / 进程内分发 / 本实例锁外发布）已经把这一帧投给本订阅者：
 				// 游标只在成功入队之后推进（onWake 与本分支同一口径），故"游标已过该号"等价于
 				// "这一帧已交付"；此处再投就会让订阅者收到同一个 seq 两次。
+				continue;
+			}
+			if (!deliverCatchUpLocked(sub, catchUp, liveSeq)) {
+				// 补不完整（批上限 / 队列容量）⇒ 本帧先不投：游标停在已交付处，
+				// 下一次唤醒或下一次扇出从这里继续 —— 绝不能越过中间号。
+				continue;
+			}
+			if (liveSeq <= sub.wakeFloor) {
+				// 补齐过程本身已经把本帧投出去了（归档里已有它）。
 				continue;
 			}
 			if (!enqueueLive(sub, payload)) {
@@ -2236,13 +2374,119 @@ public class SseChatEmitter {
 				evict(sub, "实时队列溢出（容量 " + this.queueCapacity + "）");
 				continue;
 			}
-			if (liveSeq > 0L) {
-				// 本地已投递 ⇒ 本订阅者的游标推进（唤醒补帧的读下界取各订阅者最小值）。
-				sub.wakeFloor = Math.max(sub.wakeFloor, liveSeq);
-			}
+			// 本地已投递 ⇒ 本订阅者的游标推进（唤醒补帧的读下界取各订阅者最小值）。
+			sub.wakeFloor = Math.max(sub.wakeFloor, liveSeq);
 			kickDrain(sub);
 		}
 		return liveSeq;
+	}
+
+	/**
+	 * 读"各订阅者游标与本帧号之间"的归档帧（调用方持 {@code emitLock}）。
+	 *
+	 * <p>只在<b>确实有订阅者落后</b>时读（{@code 游标 + 1 < 本帧号}）：正常单实例出帧时
+	 * 游标总是"紧跟上一次扇出"，这里不会产生额外往返。
+	 *
+	 * <p><b>上限 = min(实时队列容量, 唤醒批上限)</b>（返修第 3 条）：补齐是"补历史"，不是"搬整个归档"——
+	 * 一次读 6000 条再逐帧序列化，既吃 CPU/延迟，也会把"落后很远"这件事掩盖成一次巨型突发。
+	 * 一批补不完就交给下一次唤醒/下一次扇出继续（游标只推进到已交付处，不丢帧）。
+	 *
+	 * <p><b>拿归档原文</b>：优先 {@link FrameStore#readRawFrom}（生产实现返回落档时写进 Stream 的
+	 * 那段字节）；不支持时回落到 {@code readFrom} + 本地序列化 —— 后者只是<b>语义等价</b>，
+	 * 不承诺与归档逐字节一致（接口注释已写明边界）。
+	 */
+	private List<FrameStore.RawFrame> catchUpFramesLocked(long liveSeq) {
+		if (liveSeq <= 1L || this.subscribers.isEmpty()) {
+			return List.of();
+		}
+		long from = Long.MAX_VALUE;
+		boolean lagging = false;
+		for (Subscription sub : this.subscribers) {
+			if (sub.closed) {
+				continue;
+			}
+			if (sub.wakeFloor < liveSeq - 1L) {
+				lagging = true;
+				from = Math.min(from, sub.wakeFloor);
+			}
+		}
+		if (!lagging || from == Long.MAX_VALUE) {
+			return List.of();
+		}
+		int limit = Math.max(1, Math.min(this.queueCapacity, FrameStore.WAKE_BATCH_LIMIT));
+		List<FrameStore.RawFrame> raw = this.frames.readRawFrom(this.runId, from, limit);
+		if (!raw.isEmpty()) {
+			return raw;
+		}
+		List<Map<String, Object>> fallback = this.frames.readFrom(this.runId, from, limit);
+		if (fallback.isEmpty()) {
+			return List.of();
+		}
+		List<FrameStore.RawFrame> converted = new ArrayList<>(fallback.size());
+		for (Map<String, Object> frame : fallback) {
+			Object seqValue = frame.get("seq");
+			if (!(seqValue instanceof Number number)) {
+				continue;
+			}
+			try {
+				converted.add(new FrameStore.RawFrame(number.longValue(), this.objectMapper.writeValueAsString(frame)));
+			}
+			catch (Exception ex) {
+				log.error("补齐帧序列化失败 runId={} seq={}：{}", this.runId, number.longValue(), ex.getMessage());
+			}
+		}
+		return converted;
+	}
+
+	/**
+	 * 把补齐帧按序投给一个订阅者（调用方持 {@code emitLock}），返回"现在是否可以安全投本帧"。
+	 *
+	 * <p>安全条件：补到 {@code 本帧号 - 1} 为止（游标到达 {@code liveSeq - 1}，或归档里本帧已存在
+	 * ⇒ 游标到达本帧号）。批上限/容量不足时返回 {@code false}，本帧推迟到下一次唤醒 ——
+	 * 游标只推进到已交付处，中间号不会被跳过。
+	 *
+	 * <p><b>统一容量闸</b>（返修第 3 条）：补齐帧同样走 {@link #enqueueLive} —— 队列满就
+	 * <b>摘除订阅者</b>（前端带 lastSeq 重挂走差量补发），既不静默灌爆无界队列，也不把
+	 * "落后"伪装成一次不受控的突发。整段在 {@code emitLock} 内完成，<b>不得</b>挪到锁外
+	 * （那会让补齐与本帧和其它线程的扇出交错，重新打开"高号先交付"的乱序窗口）。
+	 */
+	private boolean deliverCatchUpLocked(Subscription sub, List<FrameStore.RawFrame> catchUp, long liveSeq) {
+		if (catchUp.isEmpty()) {
+			// 读不到补齐帧：若订阅者确实落后，无法证明"没有中间号" ⇒ 这一拍不投本帧。
+			return sub.wakeFloor >= liveSeq - 1L;
+		}
+		boolean covered = false;
+		boolean enqueued = false;
+		for (FrameStore.RawFrame frame : catchUp) {
+			if (sub.closed) {
+				// 生命周期回调已摘除该订阅者（COW 快照与摘除的窄窗）：不再往死队列里塞帧。
+				return false;
+			}
+			long seq = frame.seq();
+			if (seq <= sub.wakeFloor) {
+				continue;
+			}
+			if (seq > liveSeq) {
+				break;
+			}
+			if (!enqueueLive(sub, frame.json())) {
+				// S2-1 同口径：溢出 = 主动断连（重挂补帧），绝不绕开容量闸硬塞。
+				evict(sub, "补齐帧超出实时队列容量（容量 " + this.queueCapacity + "）");
+				return false;
+			}
+			sub.wakeFloor = seq;
+			enqueued = true;
+			if (seq >= liveSeq - 1L) {
+				covered = true;
+			}
+		}
+		if (sub.wakeFloor >= liveSeq - 1L) {
+			covered = true;
+		}
+		if (enqueued) {
+			kickDrain(sub);
+		}
+		return covered;
 	}
 
 	/**
@@ -2286,7 +2530,14 @@ public class SseChatEmitter {
 		if (bus == null) {
 			return;
 		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+		IdentityOutcome identity = deliveryIdentityOutcome();
+		if (identity.readFailure() && identity.identity() == null) {
+			// 身份不可确认 ⇒ 不发布（绝不发到 legacy 频道：订阅侧在身份频道上，发了也没人收，
+			// 却会让人误以为"唤醒已广播"）。帧已归档，别的实例下次收到唤醒或重挂时仍能补上。
+			log.warn("帧唤醒发布跳过 runId={} seq={}（身份不可确认，不以 legacy 频道代替）", this.runId, seq);
+			return;
+		}
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 			bus.publish(this.runId, seq);
 		}
 		catch (Exception ex) {
@@ -2316,7 +2567,14 @@ public class SseChatEmitter {
 		}
 		// 唤醒回调跑在 Redis 订阅线程上，没有请求身份：按本写出器的本轮身份建立作用域
 		// （补帧读归档/入队与出帧同一身份口径）。
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+		// 身份不可确认（读异常且无已校验提示）⇒ 本拍不读归档：以 legacy 键族去读只会读到空/别人的键，
+		// 却把"读不到"伪装成"没有差量"。下一次唤醒或客户端重挂会补上。
+		IdentityOutcome identity = deliveryIdentityOutcome();
+		if (identity.readFailure() && identity.identity() == null) {
+			log.warn("帧唤醒补帧跳过 runId={}（身份不可确认，下一拍重试）", this.runId);
+			return;
+		}
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 			onWakeScoped(upperBoundSeq);
 		}
 	}
@@ -2461,16 +2719,36 @@ public class SseChatEmitter {
 	 * <p><b>并发契约</b>：首次解析在 {@link #identityLock} 内完成，落定之后才写回
 	 * {@link #deliveryIdentity}；落定前并发的调用方在锁上等待，因此要么直接读到已落定的值，
 	 * 要么等到同一次解析完成 —— <b>不存在</b>"返回尚未落定的 {@code null}"的窗口，也不会重复读记录。
-	 * 最终无身份（记录 0/0、记录不存在且无提示、读失败）时所有调用方拿到同一个 {@code null}。
+	 *
+	 * <p><b>读取异常 ≠ 无身份</b>（2026-10-30 Task 2）：读记录抛异常时<b>不缓存</b>
+	 * （{@link #identityResolved} 保持 false，下一拍重试）、<b>不</b>按 legacy 键继续写 ——
+	 * 这一拍用<b>已校验的提示身份</b>（{@link #requestIdentityHint}，请求身份，也是拼读记录键的那一份），
+	 * 没有可用提示时由调用方<b>明确失败</b>（跳过这一帧）。旧实现在 catch 里把结果折成
+	 * {@code null} 并置"已解析"，一次 Redis 抖动就把整条写出器<b>永久</b>钉在无身份（legacy 键族）上，
+	 * 而重挂回放与跨实例唤醒读的是身份键族 —— 整轮帧看起来"从未存在"。
 	 */
 	private TenantUser deliveryIdentity() {
+		return deliveryIdentityOutcome().identity();
+	}
+
+	/**
+	 * 身份解析的<b>完整结果</b>：身份 + "本次是因为读异常而未解析出来"。
+	 *
+	 * <p>为什么要把后者单独标出来：{@code null} 有两种含义（"这一轮确实没有身份" vs "读不出来"），
+	 * 二者的处置完全不同 —— 前者按既有口径走 legacy 键族（兼容旧数据），后者<b>不得</b>写 legacy，
+	 * 只能"用已校验提示"或"明确失败并下一拍重试"。
+	 */
+	record IdentityOutcome(TenantUser identity, boolean readFailure) {
+	}
+
+	IdentityOutcome deliveryIdentityOutcome() {
 		TenantUser known = this.deliveryIdentity;
 		if (known != null) {
-			return known;
+			return new IdentityOutcome(known, false);
 		}
 		synchronized (this.identityLock) {
 			if (this.identityResolved) {
-				return this.deliveryIdentity;
+				return new IdentityOutcome(this.deliveryIdentity, false);
 			}
 			TenantUser hint = this.requestIdentityHint;
 			TenantUser resolved = null;
@@ -2487,14 +2765,41 @@ public class SseChatEmitter {
 					}
 				}
 				catch (RuntimeException ex) {
-					log.debug("SSE 投递身份读取失败（按无身份投递，不伪造默认租户）runId={}：{}", this.runId,
-							ex.getMessage());
+					// 读异常 = 不可知：① 不缓存（identityResolved 保持 false ⇒ 下一拍重试）；
+					// ② 这一拍用已校验提示（hint 就是请求身份，键形与本轮一致，不会串租户）；
+					// ③ 没有可用提示时返回 readFailure ⇒ 调用方明确失败（绝不写 legacy）。
+					TenantUser validated = RunIdentityScope.usable(hint.tenantId(), hint.userId()) ? hint : null;
+					log.warn("SSE 投递身份读取失败 runId={}（不缓存、下一拍重试；本次按{}处理）：{}", this.runId,
+							validated == null ? "明确失败（跳过该帧）" : "已校验提示身份", ex.getMessage());
+					return new IdentityOutcome(validated, validated == null);
 				}
 			}
 			this.deliveryIdentity = resolved;
 			this.identityResolved = true;
-			return resolved;
+			return new IdentityOutcome(resolved, false);
 		}
+	}
+
+	/**
+	 * <b>身份是否"不可确认"</b>（返修第 4 条）：投递/写投递链<b>不得</b>在身份不可确认时继续。
+	 *
+	 * <p><b>唯一判据</b>：{@code identity == null} 且 {@link IdentityOutcome#readFailure()}
+	 * —— 也就是"读记录<b>抛异常</b>、且没有可校验提示可退"（{@code deliveryIdentityOutcome}
+	 * 只在 {@code validated == null} 时把 {@code readFailure} 置真）。
+	 *
+	 * <p><b>不含</b>"从头就没有提示"（{@code requestIdentityHint == null}）的情形：那种写出器
+	 * 连读记录的键都拼不出来，本轮按既有 fail-closed 语义处理（不 adopt 池化身份、不伪造租户），
+	 * 但<b>不摘除</b>订阅者 —— 它可能是确认门/恢复等非请求线程先建好的、随后被 HTTP 重挂接管的
+	 * 写出器；一律摘除会让这类轮次<b>每次重挂都被摘</b>，永远无法流式投递。
+	 *
+	 * <p>也不含"<b>确认</b>无身份"：记录存在但归属是 0/0（旧数据）⇒ 有提示、能读、读到的就是 0/0
+	 * ⇒ 这是<b>确认过的</b>无身份，按既有 legacy 语义继续投递（否则老轮永远重连不上）。
+	 */
+	private boolean identityUnconfirmable(IdentityOutcome identity) {
+		if (identity.identity() != null) {
+			return false;
+		}
+		return identity.readFailure();
 	}
 
 	/**
@@ -2507,7 +2812,18 @@ public class SseChatEmitter {
 			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
 				AiTrace.bind(this.runId, null);
 				// 身份链路：投递池线程同样没有请求身份 —— 按本写出器已解析的本轮身份建立作用域。
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+				// <b>身份不可确认（读异常且无已校验提示）⇒ 本拍不投</b>：绝不带着"null 身份"
+				// （= legacy 键形）进投递链。帧仍在队列里，下一拍（下一次 kick / 唤醒）重新解析身份后继续。
+				IdentityOutcome identity = deliveryIdentityOutcome();
+				if (identityUnconfirmable(identity)) {
+					// <b>不得静默停队列</b>（返修第 4 条）：把帧留在队列里"等下一次 kick"会让连接
+					// 挂着一个永远不动的队列（用户看到转圈），而重试又没有退出条件、容易形成忙环。
+					// 主动摘除 ⇒ 前端带 lastSeq 重挂，重挂会重新解析身份并回放归档（既有恢复链）。
+					log.warn("投递前身份不可确认 runId={}（主动断连，前端重挂补帧）", this.runId);
+					evict(sub, "投递前身份不可确认");
+					return;
+				}
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 					drain(sub);
 				}
 			}));
@@ -2658,6 +2974,15 @@ public class SseChatEmitter {
 				return false;
 			}
 		}
+		// <b>写投递前先确认身份</b>（Task 2 返修 Minor）：身份不可确认（读异常且无已校验提示）时
+		// 不得带着"null 身份"（legacy 键形）进投递链 —— 主动断连，让前端带 lastSeq 重挂，
+		// 走既有恢复链（重挂会重新解析身份并回放归档）。
+		IdentityOutcome writeIdentity = deliveryIdentityOutcome();
+		if (identityUnconfirmable(writeIdentity)) {
+			log.warn("写投递前身份不可确认 runId={}（主动断连，前端重挂补帧）", this.runId);
+			evict(sub, "写投递前身份不可确认");
+			return false;
+		}
 		// 先置"写在飞"：此后任何线程的 completeOne 都不会去碰 emitter 监视器（写线程正持有它），
 		// 而是把收尾交接给本 lambda 的 finally（那时 send 已返回/抛出，监视器已释放）。
 		sub.completePending = false;
@@ -2669,7 +2994,7 @@ public class SseChatEmitter {
 			started.set(true);
 			try {
 				// 写出跑了弹性写出池线程（不是投递线程）：同一份本轮身份再建立一次作用域。
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(deliveryIdentity())) {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(writeIdentity.identity())) {
 					sub.emitter.send(payload);
 				}
 			}

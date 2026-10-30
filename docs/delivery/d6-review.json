@@ -14,6 +14,13 @@
       "reason": "已同步会话撞号有界重取、登记不可用和帧唤醒订阅代次隔离契约",
       "reviewedAt": "2026-10-30",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:b7fd21be48388d87146aac7d31ec0b85cbcbbb2023b65e0e3e92039eb44a95f0",
+      "status": "synced",
+      "reason": "已同步Redis原子取号归档、按游标补齐交付、真实裁剪水位及多实例跳号契约",
+      "reviewedAt": "2026-10-30",
+      "reviewer": "Kimi主控"
     }
   ]
 }

@@ -37,7 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <tr><th>规则</th><th>内容</th><th>kill（哪一行实现改动会让它红）</th></tr>
  * <tr><td>{@link #seqContract}</td><td>每帧带 {@code seq}、严格递增、自 1 起无缺口（业务帧口径；
  * 心跳走独立序号空间，见 S5c-1）</td>
- * <td>{@code SseChatEmitter#nextSeq} 改成常量/每次自增 2/不写 seq</td></tr>
+ * <td>让出帧跳过原子落档的号（例如把自己的号改成常量/每次自增 2/不写 seq）—— 注意本条只对
+ * <b>单实例/兼容路径</b>成立：生产多实例允许跳号（见 {@link #seqContract} 的适用范围段）</td></tr>
  * <tr><td>{@link #terminalContract}</td><td>首帧 {@code start}；恰好一个终帧；终帧之后无任何帧</td>
  * <td>在 {@code finish()} 的 {@code out.done(...)} 之后再补一帧（或终帧发两次）</td></tr>
  * <tr><td>{@link #toolPairingContract}</td><td>每个 {@code tool_start} 恰有一个配对结局帧
@@ -103,10 +104,19 @@ public final class FrameContract {
 	 * 每个订阅者收到的帧流：每帧带 {@code seq}、严格递增、自 1 起连续。
 	 *
 	 * <p>
-	 * <b>为什么"无缺口"是对的</b>：序号在 {@code emit()} 里逐帧自增，且每一帧都要广播给订阅者。
+	 * <b>为什么"无缺口"是对的</b>：序号在 {@code emit()} 里由<b>同一次原子落档</b>给出
+	 * （定号 + 归档同一拍），每一帧都要广播给订阅者。
 	 * {@code S5c-1} 修复后<b>只有业务帧占号</b>：心跳走独立的 {@code heartbeatSeq} 空间
 	 * （它不落归档，因此也不参与业务时间线），所以"订阅者视角"与"归档视角"的业务 seq
 	 * 完全一致。
+	 *
+	 * <p>
+	 * <b>本规则的适用范围（2026-10-30 Task 2）</b>：它跑在<b>单实例 / 兼容实现</b>路径上
+	 * （{@code InMemoryFrameStore} / {@code RunStoreFrameStore}：号由本进程串行发放，无竞争 ⇒ 连续）。
+	 * <b>生产（多实例、Redis 原子落档）允许跳号</b>：降级重试、遗留墙钟 ID、落档失败后重试都会让号
+	 * 出现洞 —— 跨实例<b>只承诺"每轮唯一、单调、按归档序交付"</b>，<b>不承诺 +1 连续</b>。
+	 * 因此本用例绿 ≠ 跨实例连续；跨实例顺序的判据是"归档序 == 交付序"（见
+	 * {@code RedisFrameStoreAtomicAppendTest} 与 {@code SseChatEmitterDeliveryInvariantTest}）。
 	 *
 	 * <p>
 	 * <b>心跳帧按类型跳过（AR-06 / Task 5）</b>：阶段帧（{@code heartbeat{phase}}）也是心跳通道，

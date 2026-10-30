@@ -46,6 +46,7 @@ import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -118,6 +119,22 @@ import java.util.concurrent.RejectedExecutionException;
 @RestController
 @RequestMapping("/api/ai")
 public class AiController {
+
+	/**
+	 * 归档截断响应头（<b>跨端契约</b>，与 {@code frontend/src/api/sse.ts} 的
+	 * {@code ARCHIVE_TRIM_HEADERS} 逐字一致）。
+	 *
+	 * <p>{@code archive-trimmed} = 本次 reattach 是否跳过了不可回放的区间；
+	 * {@code archive-from}/{@code archive-to} = <b>缺口区间</b>（含端点，{@code afterSeq+1} 到
+	 * {@code 裁剪低水位-1}），<b>不是</b>回放区间。未截断时三个头都不出现（前端"出现即裁剪"）。
+	 * 自定义头必须同时在 CORS 的 exposed 列表里（见 {@code WebConfig#corsConfiguration()}），
+	 * 否则兄弟源前端读不到。
+	 */
+	public static final String HEADER_ARCHIVE_TRIMMED = "archive-trimmed";
+
+	public static final String HEADER_ARCHIVE_FROM = "archive-from";
+
+	public static final String HEADER_ARCHIVE_TO = "archive-to";
 
 	private final AiAvailability availability;
 
@@ -948,6 +965,17 @@ public class AiController {
 	// ── reattach / 发现 / 续跑 ──────────────────────────────────────────────
 
 	/**
+	 * reattach 的<b>无响应句柄</b>重载（测试/内部直调）：等于"不写 archiveTrimmed 头"的那条路径。
+	 *
+	 * <p>为什么留这个重载：既有用例直接 {@code controller.events(runId, lastSeq)} 断言状态与语义
+	 * （park 收流、准备中、未知轮），加响应头不应迫使它们全部改签名。响应头是<b>纯增量</b>：
+	 * 直调路径不写头，HTTP 路径（带 {@link HttpServletResponse}）写头。
+	 */
+	public ResponseEntity<?> events(String runId, Long lastSeq) {
+		return events(runId, lastSeq, null);
+	}
+
+	/**
 	 * 重挂进行中（或刚结束）那一轮的流：先回放外置的状态类帧，再续接实时帧。
 	 * 挂起态外置的直接收益 —— 进程死亡后重挂仍能看到"这一轮挂在哪、谁在等什么"。
 	 *
@@ -973,7 +1001,7 @@ public class AiController {
 	 */
 	@GetMapping(value = "/events/{runId}", params = "probe!=1", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 	public ResponseEntity<?> events(@PathVariable String runId,
-			@RequestParam(required = false) Long lastSeq) {
+			@RequestParam(required = false) Long lastSeq, HttpServletResponse response) {
 		RunSnapshot snapshot = ownedRun(runId);
 		if (snapshot == null) {
 			// ===== AR-06：已 start、快照未建 =====
@@ -1004,10 +1032,12 @@ public class AiController {
 		SseChatEmitter out = this.runRegistry.of(runId);
 		// 快照缺失但归档已有终帧 ⇒ 按终态回放（归档里有没有终帧才决定"回放完收尾"还是"留挂"，
 		// 见 SseChatEmitter 的 L-143 口径）。
-		int replayed = out.replayAndAttach(emitter, lastSeq,
+		SseChatEmitter.ReplayResult replay = out.replayAndAttachWithStatus(emitter, lastSeq,
 				snapshot == null || isTerminal(snapshot.getStatus()));
-		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={}", runId,
-				snapshot == null ? "(无快照)" : snapshot.getStatus(), lastSeq, replayed);
+		int replayed = replay.staged();
+		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={} 截断={} 缺口={}..{}", runId,
+				snapshot == null ? "(无快照)" : snapshot.getStatus(), lastSeq, replayed, replay.truncated(),
+				replay.trimmedFromSeq(), replay.trimmedToSeq());
 		// park 的挂起轮：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
 		// 只在<b>确实还在等人</b>（仍有 PENDING 条目）时收流：条目已全部结算 ⇒ 决策/回灌已落库、
 		// 续跑在即（快照要等驱动方才能翻 RUNNING），此刻收流会把续跑随后产出的 done/error 挡在
@@ -1040,6 +1070,18 @@ public class AiController {
 					out.completeSubscriptions();
 				}
 			}
+		}
+		// <b>C-1（Task 2 返修第 2 轮）：归档截断由后端明确告知，头名与前端已落地契约一致</b>。
+		// 前端<b>不得</b>再用"首帧号 > lastSeq + 1"推断缺口（跳号是正常形态，猜会把跳号误报成丢帧）；
+		// 后端也不再拿"幸存首条"猜 —— 截断只来自原子落档脚本记录的<b>真实裁剪低水位</b>。
+		// 只加<b>响应头</b>（业务帧形态与数量一律不变），且必须在 SSE 开始写出之前落到响应上：
+		//   archive-trimmed: true —— 本次回放确实跳过了不可回放的区间；
+		//   archive-from / archive-to —— <b>缺口</b>区间（含端点），不是回放区间。
+		if (response != null && replay.truncated()) {
+			// 只在确实被裁过时出现（前端：出现即裁剪，缺失 = 没裁/不可知）。
+			response.setHeader(HEADER_ARCHIVE_TRIMMED, "true");
+			response.setHeader(HEADER_ARCHIVE_FROM, Long.toString(replay.trimmedFromSeq()));
+			response.setHeader(HEADER_ARCHIVE_TO, Long.toString(replay.trimmedToSeq()));
 		}
 		return ResponseEntity.ok(emitter);
 	}
@@ -1574,8 +1616,11 @@ public class AiController {
 					if (first.get("seq") instanceof Number number) {
 						firstSeq = number.longValue();
 					}
-					gap = !"start".equals(String.valueOf(first.get("type")));
 				}
+				// <b>权威位 = 后端读归档时是否真跳过了不可回放的区间</b>（Task 2 / I-3）。
+				// 旧口径用"首帧不是 start"猜测：跳号（降级重试 / 遗留墙钟 ID）会让它误报，
+				// 而窗口按条数裁（不是按号裁）时它又会漏报 —— 猜出来的缺口不能当权威。
+				gap = read.truncated();
 			}
 			catch (RuntimeException ex) {
 				readable = false;
@@ -1584,6 +1629,7 @@ public class AiController {
 		}
 		body.put("archiveFirstSeq", firstSeq);
 		body.put("archiveReadable", readable);
+		body.put("archiveTrimmed", gap);
 		body.put("archiveGap", gap);
 		body.put("recoverable", readable && !gap ? "complete" : "partial");
 	}

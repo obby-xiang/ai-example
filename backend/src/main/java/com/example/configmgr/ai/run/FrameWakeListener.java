@@ -126,9 +126,10 @@ public class FrameWakeListener {
 		 *
 		 * <p>订阅在途时加入的目标是<b>未确认</b>的：它照样在 {@link #targets} 里、订阅成功后照样收到
 		 * 唤醒，但调用方拿到的是 false —— 而调用方（{@code SseChatEmitter}）在 false 时不会来退订。
-		 * 因此不能让它无限期留在桶里：桶的订阅只由<b>已确认</b>的持有者支撑，最后一个确认者离开时
-		 * 整桶（含未确认的客人）一起摘掉 —— 客人拿到的是 false，会在下一次 attach/出帧时重新登记。
-		 * 这样"不丢目标"与"不留僵尸订阅"同时成立。
+		 * 因此桶的订阅由<b>已确认</b>的持有者支撑，但最后一个确认者离开时<b>不是整桶摘掉</b>：
+		 * 只要桶里还有存活目标，就<b>就地提升</b>一个为确认者、保留现有订阅（自愈，不必等下一次
+		 * attach/出帧）；只有真正没有目标时才退订。这样"不丢目标"与"不留僵尸订阅"同时成立，
+		 * 也避免"整桶摘 + 客人重新登记"造成的订阅/退订抖动。
 		 */
 		private final Set<WakeTarget> confirmed = new LinkedHashSet<>();
 
@@ -264,11 +265,17 @@ public class FrameWakeListener {
 		this.buckets.remove(key, bucket);
 	}
 
+	/** 当前登记句柄数（诊断/断言用：被提升的客人关闭后必须归零，否则写出器被 map 引用）。 */
+	synchronized int registrationCount() {
+		return this.registrations.size();
+	}
+
 	/**
 	 * 注销一个目标；最后一个<b>已确认</b>目标离开时触发退订（断连即 unsubscribe，不泄漏频道订阅）。
 	 *
-	 * <p>"未确认"的客人（{@code register} 回过 false 的目标）不支撑订阅：最后一个确认者离开时
-	 * 它们随整桶一起摘掉 —— 否则调用方（false ⇒ 不会来退订）会让这条频道订阅永远留着。
+	 * <p>"未确认"的客人（{@code register} 回过 false 的目标）在<b>最后一个确认者离开</b>时被
+	 * <b>就地提升</b>为确认者、订阅保持不变（它们仍在正常收流；摘掉订阅会让这条 run 的跨实例唤醒
+	 * 静默缺席到下一次出帧/重挂）。只有<b>真正没有目标</b>时才退订。
 	 */
 	public void unregister(String runId, WakeTarget target) {
 		Registration registration;
@@ -285,13 +292,24 @@ public class FrameWakeListener {
 			}
 			bucket.confirmed.remove(target);
 			boolean subscribed = bucket.state == State.SUBSCRIBED;
-			if (bucket.targets.isEmpty() || (subscribed && bucket.confirmed.isEmpty())) {
+			if (bucket.targets.isEmpty()) {
 				// 立刻摘桶 ⇒ 继任者可以马上建新桶订阅（不等旧退订完成）；
 				// 旧退订按代次比较，晚到也只会是 no-op，摘不掉继任的监听器。
 				dropBucket(registration.key(), bucket);
 				// 订阅还在途时不必在这里退订：发起方返回时会自己走"无可确认持有者 ⇒ 按代次退订"，
 				// 晚到的这条退订同样按代次判定，不会误伤继任。
 				releaseNow = subscribed;
+			}
+			else if (subscribed && bucket.confirmed.isEmpty()) {
+				// <b>返修第 3 条（并入 Task 4 复审遗留）</b>：最后一个确认者离开，但桶里还有存活目标
+				// （订阅在途时登记、拿到"未确认"的客人）—— 它们<b>仍在正常收流</b>，只是调用方还没再
+				// 登记过。整桶摘掉会让这条 run 的跨实例唤醒从这一刻起静默缺席，直到客人自己再出帧/重挂
+				// （期间只能靠前端看门狗兜底）。正确做法是<b>就地提升</b>一个客人为确认者：订阅保持不变
+				// （同代次、零次 unsubscribe），自愈；客人之后再登记只会拿到 true（幂等）。
+				WakeTarget promoted = bucket.targets.iterator().next();
+				bucket.confirmed.add(promoted);
+				log.debug("帧唤醒最后一个确认者离开但有存活目标 ⇒ 提升为确认者并保留订阅 runId={} identity={} "
+						+ "generation={}", registration.runId(), registration.identity(), bucket.generation);
 			}
 		}
 		if (releaseNow) {

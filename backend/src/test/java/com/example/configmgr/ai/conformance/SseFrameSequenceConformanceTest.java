@@ -135,8 +135,11 @@ class SseFrameSequenceConformanceTest {
 	 * 心跳仍不入档 —— 于是"心跳不占号"这条仍是本用例的主断言；归档侧只剩"心跳不占位"。
 	 *
 	 * <p>
-	 * kill：把 {@code SseChatEmitter#emit} 的心跳分支改回 {@code frame.put("seq", nextSeq())}
-	 * ⇒ 业务序号出现缺口、归档与订阅者视角不再一致，本用例变红。
+	 * kill：把 {@code SseChatEmitter#emit} 的心跳分支改回"占用业务号"（
+	 * {@code frame.put("seq", ...)}）⇒ 业务序号出现缺口、归档与订阅者视角不再一致，本用例变红。
+	 *
+	 * <p><b>范围（2026-10-30 Task 2）</b>：本用例走单实例发出器的内存事件日志，
+	 * 因此断言"连续"；生产多实例允许跳号（见 {@code FrameContract#seqContract} 的适用范围段）。
 	 */
 	@Test
 	void heartbeatKeepsItsOwnSequenceSpaceAndNeverTouchesTheBusinessAnchor() {

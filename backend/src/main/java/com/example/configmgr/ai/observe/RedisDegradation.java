@@ -78,6 +78,15 @@ public final class RedisDegradation {
 	/** C1：回放的 {@code afterSeq} 早于幸存窗口（本次回放跳过了一段），不得伪装成"没有新帧"。 */
 	public static final String C1_STREAM_REPLAY_GAP = "c1.streamReplayGap";
 
+	/**
+	 * A7：<b>原子落档失败</b>（一次出帧的"定号 + 归档"脚本连续重试后仍未归档 ⇒ 该帧不交付）。
+	 *
+	 * <p>为什么要单独计：事件日志是跨实例顺序的唯一事实源，一帧没进去就<b>谁也不会再看到它</b>
+	 * （重挂回放也补不回来）。只有 WARN 时，"整轮帧都没落档"会被轮询日志刷掉；
+	 * 计数按<b>帧</b>累加（事件粒度），日志按<b>轮</b>节流（避免抖动期刷屏）。
+	 */
+	public static final String A7_FRAME_APPEND = "a7.frameAppend";
+
 	/** C1：{@code ai:runs} 索引惰性清理失败（快照键探测/成员剔除），本轮跳过、下一拍重试。 */
 	public static final String C1_RUN_INDEX_PRUNE = "c1.runIndexPrune";
 
@@ -99,7 +108,8 @@ public final class RedisDegradation {
 	public static final String O1_OBSERVATION_CLAIM = "o1.observationClaim";
 
 	private static final String[] KNOWN = { A1_FENCE_READ, A3_FRAME_RANGE_READ, A4_FRAME_TAIL_READ, A5_CANCEL_READ,
-			A5_CANCEL_UNKNOWN, A6_DECISION_GUARD_READ, A6_PENDING_READ, L139_RENEW_KEY, L139_RENEW_NOT_ATTEMPTED,
+			A5_CANCEL_UNKNOWN, A6_DECISION_GUARD_READ, A6_PENDING_READ, A7_FRAME_APPEND, L139_RENEW_KEY,
+			L139_RENEW_NOT_ATTEMPTED,
 			B3_ATTACHMENT_REGISTER, B3_ATTACHMENT_READ, B3_ATTACHMENT_CONSUME, B3_ATTACHMENT_TOMBSTONE,
 			C1_STREAM_BYTE_CAP, C1_STREAM_BYTE_FLOOR, C1_STREAM_REPLAY_GAP, C1_RUN_INDEX_PRUNE, W1_MEMORY_WRITE,
 			O1_OBSERVATION_CLAIM };
