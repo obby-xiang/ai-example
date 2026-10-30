@@ -8060,28 +8060,55 @@ export const useAiStore = defineStore('ai', {
     /**
      * 切换租户/用户（面板下拉入口）。
      *
-     * <p>切换**任一**维度（租户或用户）都等于换身份：旧会话与镜像留在旧身份下，本页签清屏并
-     * 由后端发新会话号；旧身份在途轮的帧/回包由 `adoptFreshSession` 的轮次纪元 + 会话身份守卫丢弃。
-     * 同一身份重复选择是空操作（不白换会话）。
+     * <p>切换**任一**维度（租户或用户）都等于换身份：本页签先清掉当前会话指针/锁/草稿展示
+     * （旧身份镜像与后端记录保留），再强制由后端新建会话；切回旧身份同样发新号，不恢复旧指针。
+     * 旧身份在途轮的帧/回包由 `adoptFreshSession` 的轮次纪元 + 会话身份守卫丢弃。
+     * 同一身份重复选择是空操作（不白换会话、不重复发号）。
      */
     async switchIdentity(tenantId: number, userId: number): Promise<void> {
       const next = normalizeIdentity({ tenantId, userId })
       if (next === null || isSameIdentity(next, this.identity)) {
         return
       }
-      await this.enterIdentity(next)
+      await this.enterIdentity(next, { forceNewSession: true })
     },
 
     /**
-     * 进入（或切换到）某个身份：先清场（旧镜像/旧会话指针按旧身份保留），再落身份，再恢复或发号。
+     * 进入某个身份。`forceNewSession`（用户显式切换）⇒ **一律**由后端新建会话，不读旧指针；
+     * 缺省（目录首次落身份/刷新补入）保留指针恢复语义。
      *
      * <p>顺序不可反：
-     * ① 清场时持有的是**旧身份**，镜像键/锁名按旧身份算；
+     * ① 清场时持有的是**旧身份**，镜像键/锁名按旧身份算；旧身份镜像与后端记录保留；
      * ② 落身份之后才取号 —— 会话号必须属于新身份；
-     * ③ 新身份**已有会话指针**（切回原身份）⇒ 先按所有权判定，拿得到就恢复原会话（镜像/历史）；
+     * ③ 恢复分支：新身份已有会话指针 ⇒ 先按所有权判定，拿得到就恢复原会话（镜像/历史）；
      *   指针不存在（首次进入）或该会话已被另一页签持有 ⇒ 由后端发新号（返修 I8/C1）。
      */
-    async enterIdentity(identity: AiIdentity): Promise<void> {
+    async enterIdentity(
+      identity: AiIdentity,
+      options: { forceNewSession?: boolean } = {}
+    ): Promise<void> {
+      if (options.forceNewSession) {
+        // 强制新建：清当前页签指针/锁/草稿展示（keepMirror 保留旧身份镜像），发号前不读旧指针。
+        this.adoptFreshSession({ keepMirror: true })
+        writeAiIdentity(identity)
+        this.identity = identity
+        this.sessionIdentity = identity
+        // 目标身份若残留旧指针（复制页签继承等），一并清掉：发号失败时刷新也不得复活旧会话。
+        try {
+          sessionStorage.removeItem(sessionIdStorageKey(identity))
+        } catch {
+          // 隐私模式/配额：本页签内存态照常
+        }
+        const issued = await this.ensureSession()
+        if (issued === '') {
+          return
+        }
+        if (this.tabOwnership !== 'unknown') {
+          this.tabOwnership = 'owner'
+        }
+        void this.claimSessionOwnership(issued)
+        return
+      }
       const pointer = storedSessionPointer(identity)
       this.adoptFreshSession({ keepMirror: true, keepSessionPointer: true })
       // 发号令牌在**清场之后**取：清场会递增令牌，之后的任何切换都会让本入口的续体作废。
@@ -8281,8 +8308,8 @@ export const useAiStore = defineStore('ai', {
         if (!options.keepMirror && oldSessionId !== '') {
           sessionStorage.removeItem(mirrorStorageKey(oldSessionId, oldIdentity))
         }
-        // 会话指针：普通换会话（新建对话/410/复制页签）要抹掉，避免刷新把已销毁的会话复活；
-        // 身份切换（keepSessionPointer）保留旧身份的指针，切回时可恢复原会话（返修 I8）。
+        // 会话指针：普通换会话（新建对话/410/复制页签）与用户身份切换都要抹掉，避免刷新复活旧会话；
+        // 只有启动补入（keepSessionPointer：目录首次落身份）保留指针，按它恢复原会话。
         if (!options.keepSessionPointer) {
           sessionStorage.removeItem(sessionIdStorageKey(scopeIdentity))
         }

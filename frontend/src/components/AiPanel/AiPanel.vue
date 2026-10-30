@@ -43,8 +43,8 @@
            硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
         <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
-        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。切到新身份即时清屏并由后端发号；
-             切回有会话指针的身份则恢复原会话。旧会话与镜像保留在旧身份下，不删除、不混用。 -->
+        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。每次实际切换都即时清屏并由后端
+             新建会话（含切回旧身份），旧身份镜像与后端记录保留在原身份下，不删除、不混用。 -->
         <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
           <select
             data-testid="tenant-select"

@@ -3,8 +3,9 @@
  *
  * <p>锁住四件事（一条用例，避免"整文件/批量"式的测试面）：
  * <ol>
- * <li><b>切换即取新号</b>：身份切换后由后端 `POST /api/ai/session` 发号，前端不再自己造 id；</li>
- * <li><b>旧会话与镜像保留在原身份下</b>：旧身份的镜像键不被删除，新身份看不到它；</li>
+ * <li><b>切换即发新号（含切回旧身份）</b>：每次实际切换都由后端 `POST /api/ai/session` 新建会话，
+ *   前端不自己造 id、也不把旧指针当当前会话；同身份重复选择不重复发号；</li>
+ * <li><b>旧身份镜像与后端记录保留</b>：旧身份的镜像键不被删除（本页签旧指针清掉），新身份看不到它；</li>
  * <li><b>旧响应不写入新会话</b>：切换前在途的那一轮回来时，新会话消息/镜像都不得变化；</li>
  * <li><b>复制页签/换会话先判所有权再取号</b>：本地清场不提前发号，真正需要会话时才走后端取号门。</li>
  * </ol>
@@ -161,7 +162,7 @@ describe('Task 4：身份切换的会话发号与存储隔离', () => {
     expect(sentSessionIds.every((id) => typeof id === 'string' && id !== '')).toBe(true)
   })
 
-  it('切回旧身份恢复原会话指针与镜像（不重新发号、不删除旧指针）', async () => {
+  it('切回旧身份也由后端重新发号：不恢复旧指针，旧镜像保留', async () => {
     const store = useAiStore()
     await store.loadTenantDirectory()
     expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
@@ -170,23 +171,42 @@ describe('Task 4：身份切换的会话发号与存储隔离', () => {
     store.historyLoaded = true
     store.messages = [messageOf('甲的旧会话')]
     store.writeMirrorNow()
+    const oldMirrorKey = 'ai-mirror:7:71:1001'
+    expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
 
+    // 7:71 → 8:81：新号；离开时本页签会话指针清掉，旧身份镜像留在原键下。
     await store.switchIdentity(8, 81)
+    expect(api.createSession).toHaveBeenCalledTimes(2)
+    expect(store.identity).toEqual({ tenantId: 8, userId: 81 })
     expect(store.sessionId).toBe('1002')
-    // 离开身份 7 时保留它的会话指针（返修 I8）。
-    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBeNull()
     expect(sessionStorage.getItem('ai-session-id:8:81')).toBe('1002')
+    expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
 
+    // 8:81 → 7:71（切回）：同样由后端发新号，不复用 1001，也不读旧镜像/旧指针。
+    // 故意种一份目标身份的旧指针（旧实现会据此恢复）：新规格必须无视它。
+    sessionStorage.setItem('ai-session-id:7:71', '9999')
     const callsBefore = api.createSession.mock.calls.length
     await store.switchIdentity(7, 71)
-    // 切回：恢复原会话号（不再发号），镜像里的旧会话重新可见。
-    expect(store.sessionId).toBe('1001')
-    expect(api.createSession.mock.calls.length).toBe(callsBefore)
-    expect(store.messages.some((message) => message.content.includes('甲的旧会话'))).toBe(true)
-    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1001')
+    expect(api.createSession.mock.calls.length).toBe(callsBefore + 1)
+    expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
+    expect(store.sessionId).toBe('1003')
+    expect(store.sessionId).not.toBe('1001')
+    expect(store.sessionId).not.toBe('9999')
+    expect(store.messages).toEqual([])
+    expect(sessionStorage.getItem('ai-session-id:8:81')).toBeNull()
+    expect(sessionStorage.getItem('ai-session-id:7:71')).toBe('1003')
+    expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
+    expect(sessionStorage.getItem('ai-mirror:7:71:1003')).toBeNull()
+
+    // 同身份重复选择：空操作，不重复发号。
+    const afterReselect = api.createSession.mock.calls.length
+    await store.switchIdentity(7, 71)
+    expect(api.createSession.mock.calls.length).toBe(afterReselect)
+    expect(store.sessionId).toBe('1003')
   })
 
-  it('同租户换用户：后端发新号，旧用户指针与镜像保留，新用户头锁镜像独立', async () => {
+  it('同租户换用户：后端发新号，旧用户镜像保留，新用户头锁镜像独立', async () => {
     const store = useAiStore()
     await store.loadTenantDirectory()
     expect(store.identity).toEqual({ tenantId: 7, userId: 71 })
@@ -207,8 +227,8 @@ describe('Task 4：身份切换的会话发号与存储隔离', () => {
     expect(store.sessionId).toBe('1002')
     expect(store.messages).toEqual([])
 
-    // 旧用户现场原样保留；新用户指针独立。
-    expect(sessionStorage.getItem(oldPointerKey)).toBe('1001')
+    // 旧用户镜像原样保留；本页签旧指针清掉，新用户指针独立。
+    expect(sessionStorage.getItem(oldPointerKey)).toBeNull()
     expect(sessionStorage.getItem(oldMirrorKey)).toContain('甲的旧会话')
     expect(sessionStorage.getItem('ai-session-id:7:72')).toBe('1002')
 
