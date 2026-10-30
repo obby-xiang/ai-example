@@ -6,6 +6,7 @@ import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,6 +47,11 @@ class StartupResumeRunnerSessionGateTest {
 
 	private static final String SESSION_ID = "s-startup-gate";
 
+	/** 语料带归属：启动扫描只推进带身份的轮次（无身份 legacy 轮一律跳过，见 LEGACY_NO_IDENTITY）。 */
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
 	private final Map<String, String> locks = new ConcurrentHashMap<>();
 
 	private final AiProperties properties = new AiProperties();
@@ -83,12 +89,17 @@ class StartupResumeRunnerSessionGateTest {
 	@Test
 	void startupScanReportsSessionBusyWithoutTouchingTheSnapshot() {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
 		this.store.save(snapshot);
 		snapshot.setUpdatedAtMs(777L);
-		assertThat(this.gate.acquire(SESSION_ID, OTHER_RUN)).isNull();
+		// 会话门的键按身份分桶（TenantKeyScope）：语料带归属后，抢门的也必须在同一身份下抢
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			assertThat(this.gate.acquire(SESSION_ID, OTHER_RUN)).isNull();
+		}
 
 		Map<String, Object> report = new StartupResumeRunner(this.service, this.store, this.properties,
 				this.availability).scan(true);
@@ -100,7 +111,9 @@ class StartupResumeRunnerSessionGateTest {
 		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
 		assertThat(snapshot.getUpdatedAtMs()).as("SESSION_BUSY 不得写快照").isEqualTo(777L);
 		verify(this.executor, never()).execute(any(Runnable.class));
-		assertThat(this.gate.currentRunId(SESSION_ID)).as("不得误释放别的轮的门").isEqualTo(OTHER_RUN);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			assertThat(this.gate.currentRunId(SESSION_ID)).as("不得误释放别的轮的门").isEqualTo(OTHER_RUN);
+		}
 	}
 
 	@SuppressWarnings("unchecked")

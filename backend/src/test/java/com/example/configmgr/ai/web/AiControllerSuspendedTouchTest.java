@@ -12,7 +12,10 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -71,6 +74,21 @@ class AiControllerSuspendedTouchTest {
 	private final SseChatEmitter emitter = mock(SseChatEmitter.class);
 
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller()).build();
+
+	private RequestContextUtils.SafeCloseable identityScope;
+
+	@BeforeEach
+	void openIdentityScope() {
+		// 这些端点都是 HTTP 数据面入口：生产里必然带身份，测试同样先建立身份作用域
+		this.identityScope = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentityScope() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
+	}
 
 	// ── T1 /runs/current ───────────────────────────────────────────────────
 
@@ -168,6 +186,8 @@ class AiControllerSuspendedTouchTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId(SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(status);
 		return snapshot;
 	}

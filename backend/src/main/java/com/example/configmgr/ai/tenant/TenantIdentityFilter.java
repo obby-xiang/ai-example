@@ -22,17 +22,17 @@ import java.util.Set;
  *
  * <h2>纳入边界的范围</h2>
  * 只覆盖<b>对话数据面</b>：{@code /api/ai} 与 {@code /api/ai/} 下除下列之外的全部入口
- * （chat/confirm/events/runs/history/session/context/pending/feedback/cancel/表单附件等）。
- * <b>默认受保护</b>，排除面只有两类：
+ * （chat/confirm/events/runs/history/session/context/pending/feedback/cancel/表单附件，
+ * 以及 startup-resume 的读取与手工扫描）。<b>默认受保护</b>，排除面只有两类：
  * <ul>
- * <li><b>精确路径</b>：{@code health}、{@code tools}、{@code tenants}、{@code startup-resume}
- * （含 {@code /scan}）。其<b>子路径不排除</b> —— 新增数据接口不会静默逃逸；{@code /api/ai}
- * 本身仍在边界内（缺头 = 400）；</li>
+ * <li><b>精确路径</b>：{@code health}、{@code tools}、{@code tenants}。其<b>子路径不排除</b> ——
+ * 新增数据接口不会静默逃逸；{@code /api/ai} 本身仍在边界内（缺头 = 400）；</li>
  * <li><b>模型配置子树</b>：{@code providers}/{@code models}/{@code settings} 及其子资源
  * （{@code AiConfigController} 的全部映射）。</li>
  * </ul>
- * 健康面/工具清单/身份目录不纳入，是因为它们不是对话数据，且前端必须在选身份之前就能读到目录；
- * {@code startup-resume} 是系统运维触发，恢复身份来自每条 run 的快照而非请求头。
+ * 健康面/工具清单/身份目录不纳入，是因为它们不是对话数据，且前端必须在选身份之前就能读到目录。
+ * {@code startup-resume}（读取报告 / 手工扫描）<b>在边界内</b>：两者都只处理<b>当前身份</b>的轮次，
+ * 缺头即 400；应用启动时的自动扫描不经过 HTTP，仍在无身份线程上按每轮记录身份推进。
  *
  * <h2>为什么拒绝而不是补默认身份</h2>
  * "取不到就算 tenant=0"会让一次漏带请求头的调用读写到另一个身份的数据；这类跨身份错误
@@ -55,15 +55,18 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 	private static final String AI_PREFIX = AI_ROOT + "/";
 
 	/**
-	 * 不纳入租户边界的<b>精确路径</b>（不做子路径匹配）：健康面、静态工具清单、身份目录，
-	 * 以及运维触发的 {@code startup-resume}（恢复身份来自每条 run 的快照，不来自请求头）。
+	 * 不纳入租户边界的<b>精确路径</b>（不做子路径匹配）：健康面、静态工具清单、身份目录。
 	 *
 	 * <p>
 	 * 只认精确路径是有意的：若按前缀放行，任何新增的 {@code /api/ai/tools/...} 之类
 	 * <b>数据</b>接口都会静默逃出身份边界。子路径默认仍受保护，新增路由必须显式分类。
+	 *
+	 * <p>
+	 * {@code startup-resume}（读取报告 / 手工扫描）<b>不在这里</b>：它的语义是"当前身份的轮次"，
+	 * 不是"全租户运维面"；身份来自请求头。
 	 */
 	private static final Set<String> EXCLUDED_EXACT = Set.of("/api/ai/health", "/api/ai/tools",
-			"/api/ai/tenants", "/api/ai/startup-resume", "/api/ai/startup-resume/scan");
+			"/api/ai/tenants");
 
 	/**
 	 * 模型配置命名空间（{@code AiConfigController}）：整个子树不做租户隔离

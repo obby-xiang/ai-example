@@ -12,12 +12,14 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.GlobalExceptionHandler;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -76,6 +78,11 @@ class AiControllerEventsProbeTest {
 
 	private static final String SESSION_ID = "s-probe";
 
+	/** 探测/重挂都是 HTTP 数据面入口：生产里必然带身份，测试同样先建立身份作用域。 */
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final RunStore store = mock(RunStore.class);
@@ -90,6 +97,8 @@ class AiControllerEventsProbeTest {
 
 	private MockMvc mvc;
 
+	private RequestContextUtils.SafeCloseable identityScope;
+
 	@BeforeEach
 	void setUp() {
 		AiController controller = new AiController(mock(AiAvailability.class), provider(), provider(), provider(),
@@ -103,6 +112,14 @@ class AiControllerEventsProbeTest {
 		this.mvc = MockMvcBuilders.standaloneSetup(controller)
 			.setControllerAdvice(new GlobalExceptionHandler(new ErrorBodyFactory(provider())))
 			.build();
+		this.identityScope = RequestContextUtils.useContext(TENANT_ID, USER_ID);
+	}
+
+	@AfterEach
+	void tearDown() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
 	}
 
 	@Test
@@ -238,6 +255,8 @@ class AiControllerEventsProbeTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId(SESSION_ID);
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
 		snapshot.setStatus(status);
 		return snapshot;
 	}

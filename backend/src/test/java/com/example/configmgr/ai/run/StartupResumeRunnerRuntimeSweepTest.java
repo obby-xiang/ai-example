@@ -65,6 +65,11 @@ class StartupResumeRunnerRuntimeSweepTest {
 	/** 僵尸窗口内（150s < 180s）：最长合法静默 + 余量都在里面的活轮。 */
 	private static final Duration INSIDE_WINDOW = Duration.ofSeconds(150);
 
+	/** 本组语料都带归属（生产里的活轮恒如此）；无身份 legacy 轮的扫描口径另见 {@code StartupResumeLegacyNoIdentityTest}。 */
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
 	private final AiProperties properties = new AiProperties();
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
@@ -200,9 +205,12 @@ class StartupResumeRunnerRuntimeSweepTest {
 		assertThat(this.runner.isRuntimeSweepRunning()).as("应用停机/显式停止后不得留线程").isFalse();
 	}
 
-	/** 铺一轮：状态 + 消息历史 + 业务活动锚点（活动年龄决定"活/死"）。 */
+	/** 铺一轮：归属 + 状态 + 消息历史 + 业务活动锚点（活动年龄决定"活/死"）。 */
 	private RunSnapshot seed(String runId, String status, Duration businessAge) {
 		RunSnapshot snapshot = this.store.create(runId, "s-" + runId, AiContext.empty(), List.of(), this.codec);
+		// 归属显式铺：扫描只会推进带身份的轮次（0/0 是 legacy，见 LEGACY_NO_IDENTITY）
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
 		snapshot.setStatus(status);
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
 		// save() 会把 updatedAtMs 刷成当下 —— 超龄现场必须在保存<b>之后</b>铺

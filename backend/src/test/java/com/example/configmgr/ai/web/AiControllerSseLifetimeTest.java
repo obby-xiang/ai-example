@@ -11,6 +11,7 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -82,15 +83,20 @@ class AiControllerSseLifetimeTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId("r-reattach");
 		snapshot.setSessionId("s-reattach");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		when(this.runStore.get("r-reattach")).thenReturn(snapshot);
 		when(this.runRegistry.of("r-reattach")).thenReturn(this.out);
 		when(this.out.replayAndAttach(any(SseEmitter.class), any(), any(Boolean.class))).thenReturn(0);
 
-		ResponseEntity<?> response = this.controller.events("r-reattach", null);
+		// 重挂是 HTTP 数据面入口：生产里必然带身份（无上下文时归属复核 fail-closed）
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			ResponseEntity<?> response = this.controller.events("r-reattach", null);
 
-		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-		assertThat(((SseEmitter) response.getBody()).getTimeout()).isEqualTo(-1L);
+			assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+			assertThat(((SseEmitter) response.getBody()).getTimeout()).isEqualTo(-1L);
+		}
 	}
 
 	private AiController controller(AiProperties props) {

@@ -127,6 +127,37 @@ class TenantIdentityFilterTest {
 		assertThat(configSubtreeChain).as("模型配置子树（providers/models/settings）仍不纳入").isTrue();
 	}
 
+	@Test
+	void startupResumeReportRequiresIdentity() throws Exception {
+		MockHttpServletResponse response = new MockHttpServletResponse();
+		AtomicBoolean chainCalled = new AtomicBoolean(false);
+
+		new TenantIdentityFilter(this.mapper).doFilter(new MockHttpServletRequest("GET", "/api/ai/startup-resume"),
+				response, (req, res) -> chainCalled.set(true));
+
+		assertThat(chainCalled).as("GET startup-resume 也在身份边界内：缺头不得进入业务链").isFalse();
+		assertThat(response.getStatus()).isEqualTo(400);
+		JsonNode body = this.mapper.readTree(response.getContentAsByteArray());
+		assertThat(body.path("code").asText()).isEqualTo(ErrorCodes.TENANT_IDENTITY_REQUIRED);
+		assertThat(RequestContextUtils.currentOrNull()).isNull();
+	}
+
+	@Test
+	void startupResumeScanRequiresIdentity() throws Exception {
+		MockHttpServletResponse response = new MockHttpServletResponse();
+		AtomicBoolean chainCalled = new AtomicBoolean(false);
+
+		new TenantIdentityFilter(this.mapper).doFilter(
+				new MockHttpServletRequest("POST", "/api/ai/startup-resume/scan"), response,
+				(req, res) -> chainCalled.set(true));
+
+		assertThat(chainCalled).as("POST startup-resume/scan 触发续跑：缺身份不得进入业务链").isFalse();
+		assertThat(response.getStatus()).isEqualTo(400);
+		JsonNode body = this.mapper.readTree(response.getContentAsByteArray());
+		assertThat(body.path("code").asText()).isEqualTo(ErrorCodes.TENANT_IDENTITY_REQUIRED);
+		assertThat(RequestContextUtils.currentOrNull()).isNull();
+	}
+
 	private static MockHttpServletRequest request(String method, String path, String tenantId, String userId) {
 		MockHttpServletRequest request = new MockHttpServletRequest(method, path);
 		request.addHeader(TENANT_HEADER, tenantId);

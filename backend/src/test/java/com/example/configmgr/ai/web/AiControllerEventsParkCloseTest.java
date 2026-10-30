@@ -10,9 +10,11 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -73,17 +75,31 @@ class AiControllerEventsParkCloseTest {
 
 	private AiController controller;
 
+	private RequestContextUtils.SafeCloseable identityScope;
+
 	@BeforeEach
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
+		// 重挂是 HTTP 数据面入口：请求线程必须有身份（无上下文时归属复核 fail-closed）
+		this.identityScope = RequestContextUtils.useContext(1L, 101L);
 		this.controller = new AiController(mock(AiAvailability.class), provider(), provider(), provider(),
 				mock(ChatMemory.class), mock(ChatMemoryRepository.class), mock(SessionGate.class),
 				this.confirmGate, this.store, this.registry, mock(CancellationRegistry.class),
 				mock(RedisAvailability.class), mock(ThreadPoolTaskExecutor.class), this.mapper, this.properties,
 				mock(Environment.class), mock(JobWatchdog.class));
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		// 替身的 seedRun 不读线程身份：显式钉上记录身份，与"HTTP 面必然带身份"同形
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		this.store.save(snapshot);
+	}
+
+	@AfterEach
+	void tearDown() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
 	}
 
 	@Test

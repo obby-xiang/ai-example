@@ -13,6 +13,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.ai.web.AiController;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -201,20 +202,27 @@ class SessionBusyFrameIsolationConformanceTest {
 	 */
 	@Test
 	void reattachEndpointAcceptsLastSeqAndRejectsUnknownRuns() {
-		this.store.seedRun("run-reattach-endpoint", SESSION_ID);
-		this.store.seedArchive("run-reattach-endpoint",
-				FrameContract.fixture("start", 1L, "runId", "run-reattach-endpoint", "sessionId", SESSION_ID),
-				FrameContract.fixture("suspended", 2L));
-		this.store.get("run-reattach-endpoint").setStatus(RunSnapshot.SUSPENDED);
+		// 重挂是 HTTP 数据面入口：在本身份作用域内 seed（快照带记录身份）+ 调用，
+		// 否则无上下文的归属复核按 fail-closed 判"不存在"。
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			RunSnapshot seeded = this.store.seedRun("run-reattach-endpoint", SESSION_ID);
+			// 替身的 seedRun 不读线程身份：显式钉上记录身份，与"HTTP 面必然带身份"同形
+			seeded.setTenantId(1L);
+			seeded.setUserId(101L);
+			this.store.seedArchive("run-reattach-endpoint",
+					FrameContract.fixture("start", 1L, "runId", "run-reattach-endpoint", "sessionId", SESSION_ID),
+					FrameContract.fixture("suspended", 2L));
+			this.store.get("run-reattach-endpoint").setStatus(RunSnapshot.SUSPENDED);
 
-		ResponseEntity<?> reattached = this.controller.events("run-reattach-endpoint", 1L);
-		assertThat(reattached.getStatusCode()).isEqualTo(HttpStatus.OK);
-		assertThat(reattached.getBody()).as("重挂成功时回体是 SSE 流（回放帧写在 controller 自建的 emitter 上）")
-				.isInstanceOf(SseEmitter.class);
+			ResponseEntity<?> reattached = this.controller.events("run-reattach-endpoint", 1L);
+			assertThat(reattached.getStatusCode()).isEqualTo(HttpStatus.OK);
+			assertThat(reattached.getBody()).as("重挂成功时回体是 SSE 流（回放帧写在 controller 自建的 emitter 上）")
+					.isInstanceOf(SseEmitter.class);
 
-		ResponseEntity<?> unknown = this.controller.events("run-does-not-exist", null);
-		assertThat(unknown.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-		assertThat(bodyOf(unknown)).containsEntry("code", "UNKNOWN_RUN");
+			ResponseEntity<?> unknown = this.controller.events("run-does-not-exist", null);
+			assertThat(unknown.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+			assertThat(bodyOf(unknown)).containsEntry("code", "UNKNOWN_RUN");
+		}
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

@@ -3,7 +3,9 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,6 +51,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 扫描结果留在 {@link #lastScan()} 里（供 {@code GET /api/ai/startup-resume} 与证据文档读取），
  * 不静默：跳过的每一轮都带 reason。
  *
+ * <h2>两个面：系统扫描 vs 请求面手工扫描</h2>
+ * <ul>
+ * <li><b>系统面</b>（应用启动的自动扫描、运行期扫描）：跑在无身份线程上，候选来自
+ * {@code ai:runs} 的复合成员，逐轮按<b>该轮记录身份</b>推进 —— 不扫描租户列表、也不沿用线程身份。
+ * 记录<b>没有可用身份</b>（pre-deploy 的 {@code 0/0} legacy 轮）时两条扫描都<b>不续跑</b>：
+ * 续跑只会在无身份下驱动模型/工具，故一律记 {@link #LEGACY_NO_IDENTITY}（不伪造归属）。</li>
+ * <li><b>请求面</b>（{@code POST /api/ai/startup-resume/scan}，线程有身份）：<b>只处理当前身份</b>的轮次。
+ * 若候选里混入别的身份（列表实现变化、桩数据等），一律<b>既不续跑、也不进报告</b> —— runId 本身
+ * 就是跨身份信息，不能借"跳过原因"回显。报告面（GET）同样按调用身份切片，
+ * 见 {@link #lastScanForIdentity(TenantUser)}。</li>
+ * </ul>
+ *
  * <h2>运行期低频死轮扫描（批次8B / Task 12 Step 3）</h2>
  * 启动扫描每个实例只跑一拍，之后"死在调用中间 / 决策已落库却没人执行 / 重挂自愈那一下抖了"的轮次
  * 会一直挂着。{@link #sweep()} 按 {@code app.ai.resume.runtime-sweep-interval} 补一拍兜底：
@@ -60,6 +74,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Slf4j
 @Component
 public class StartupResumeRunner {
+
+	/**
+	 * 系统扫描对<b>没有可用身份</b>的 legacy 轮次的明确跳过原因（{@code tenantId<=0} 或
+	 * {@code userId<=0 且 != -1}，即 pre-deploy 的 {@code 0/0} 记录）。
+	 *
+	 * <p>这类轮次没有身份可恢复：{@link RunIdentityScope#open(long, long)} 只会清空线程身份，
+	 * 续跑就在"谁都不是"的情况下驱动模型与工具。不伪造归属、也不沿用扫描线程身份 —— 只留事实。
+	 */
+	public static final String LEGACY_NO_IDENTITY = "LEGACY_NO_IDENTITY";
 
 	private final ResumeService resumeService;
 
@@ -174,13 +197,41 @@ public class StartupResumeRunner {
 		List<Map<String, Object>> resumed = new ArrayList<>();
 		List<Map<String, Object>> skipped = new ArrayList<>();
 		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
+		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
+		TenantUser caller = RequestContextUtils.currentOrNull();
 		for (Map<String, Object> run : candidates) {
 			String runId = String.valueOf(run.get("runId"));
+			long recordTenantId = identityField(run, "tenantId");
+			long recordUserId = identityField(run, "userId");
+			if (caller != null && !sameIdentity(caller, recordTenantId, recordUserId)) {
+				// 别人的轮次：不续跑、也不进报告（runId 与跳过原因都属于跨身份信息）。
+				log.debug("启动扫描跳过非当前身份的轮次 runId={}（记录身份 {}/{}，调用身份 {}）", runId, recordTenantId,
+						recordUserId, caller);
+				continue;
+			}
+			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
+				// pre-deploy 的 0/0 legacy 轮：没有身份可恢复。续跑只会在无身份下驱动模型与工具
+				// （RunIdentityScope.open 会清空线程身份），既跑不出用户那一轮也无归属可解释 ⇒ 不驱动、只留事实。
+				Map<String, Object> skippedItem = new LinkedHashMap<>();
+				skippedItem.put("runId", runId);
+				skippedItem.put("tenantId", recordTenantId);
+				skippedItem.put("userId", recordUserId);
+				skippedItem.put("status", run.get("status"));
+				skippedItem.put("reason", LEGACY_NO_IDENTITY);
+				skippedItem.put("unresolvedExternal", run.get("unresolvedExternal"));
+				skipped.add(skippedItem);
+				log.info("启动扫描跳过无身份的 legacy 轮次 runId={}（reason={}，不驱动模型/工具）", runId,
+						LEGACY_NO_IDENTITY);
+				continue;
+			}
 			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
 			Discovery discovery = discoveryOf(run);
 			if (discovery != Discovery.TAKEABLE) {
 				Map<String, Object> skippedItem = new LinkedHashMap<>();
 				skippedItem.put("runId", runId);
+				// 报告项带记录身份：GET 面据此只回显当前身份的轮次（见 lastScanForIdentity）
+				skippedItem.put("tenantId", recordTenantId);
+				skippedItem.put("userId", recordUserId);
 				skippedItem.put("status", run.get("status"));
 				skippedItem.put("reason", scanSkipReason(discovery));
 				skippedItem.put("unresolvedExternal", run.get("unresolvedExternal"));
@@ -190,6 +241,8 @@ public class StartupResumeRunner {
 			if (resumed.size() >= limit) {
 				Map<String, Object> skippedItem = new LinkedHashMap<>();
 				skippedItem.put("runId", runId);
+				skippedItem.put("tenantId", recordTenantId);
+				skippedItem.put("userId", recordUserId);
 				skippedItem.put("reason", "MAX_ON_STARTUP_REACHED");
 				skipped.add(skippedItem);
 				continue;
@@ -197,10 +250,12 @@ public class StartupResumeRunner {
 			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie,
-						identityField(run, "tenantId"), identityField(run, "userId"));
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie, recordTenantId,
+						recordUserId);
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
+				item.put("tenantId", recordTenantId);
+				item.put("userId", recordUserId);
 				item.put("zombieTakeover", zombie);
 				item.put("outcome", result.outcome().name());
 				item.put("body", result.body());
@@ -209,6 +264,8 @@ public class StartupResumeRunner {
 			catch (Exception ex) {
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
+				item.put("tenantId", recordTenantId);
+				item.put("userId", recordUserId);
 				item.put("outcome", "EXCEPTION");
 				item.put("error", String.valueOf(ex.getMessage()));
 				resumed.add(item);
@@ -238,6 +295,65 @@ public class StartupResumeRunner {
 	}
 
 	/**
+	 * 最近一次扫描在<b>给定身份</b>下的视图（{@code GET /api/ai/startup-resume} 的唯一取数口）。
+	 *
+	 * <p>系统面的自动扫描看到的是全部租户的轮次；报告面不能原样回给任意调用者 ——
+	 * 别人的 runId 与跳过原因都属于跨身份信息。这里按<b>报告项自带的记录身份</b>切片
+	 * （扫描时逐项写入），不扫描租户列表、不额外读别人的键。
+	 *
+	 * <p>没有身份（{@code null}）⇒ fail-closed，回 {@code scanned=false, reason=IDENTITY_REQUIRED}，
+	 * 绝不回全局事实。HTTP 面上该分支不可达（身份边界先拒）。
+	 *
+	 * <p>切片后的 {@code candidates} 按本身份的条目数重算；{@code identityScoped=true} 标明这是切片视图
+	 * （与系统面的全局报告可区分）。
+	 */
+	public Map<String, Object> lastScanForIdentity(TenantUser identity) {
+		if (identity == null) {
+			return Map.of("scanned", false, "reason", "IDENTITY_REQUIRED");
+		}
+		Map<String, Object> report = this.lastScan;
+		Map<String, Object> scoped = new LinkedHashMap<>(report);
+		List<Map<String, Object>> resumed = ownedItems(report.get("resumed"), identity);
+		List<Map<String, Object>> skipped = ownedItems(report.get("skipped"), identity);
+		if (report.containsKey("resumed")) {
+			scoped.put("resumed", resumed);
+		}
+		if (report.containsKey("skipped")) {
+			scoped.put("skipped", skipped);
+		}
+		if (report.containsKey("candidates")) {
+			scoped.put("candidates", resumed.size() + skipped.size());
+		}
+		scoped.put("identityScoped", true);
+		return scoped;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Map<String, Object>> ownedItems(Object raw, TenantUser identity) {
+		if (!(raw instanceof List<?> list)) {
+			return List.of();
+		}
+		List<Map<String, Object>> owned = new ArrayList<>();
+		for (Object item : list) {
+			if (item instanceof Map<?, ?> map
+					&& sameIdentity(identity, asLong(map.get("tenantId")), asLong(map.get("userId")))) {
+				owned.add((Map<String, Object>) map);
+			}
+		}
+		return owned;
+	}
+
+	/**
+	 * 记录身份是否等于给定身份：两侧都必须<b>可用</b>（{@code tenantId>0}、
+	 * {@code userId>0 或 -1}）。{@code 0/0} 的 legacy 记录不属于任何身份 —— 不得被"恰好没有身份"
+	 * 的调用方认领，也不得被请求面扫描拾起。
+	 */
+	private static boolean sameIdentity(TenantUser identity, long tenantId, long userId) {
+		return identity != null && RunIdentityScope.usable(tenantId, userId) && identity.tenantId() == tenantId
+				&& identity.userId() == userId;
+	}
+
+	/**
 	 * <b>运行期低频死轮扫描</b>（批次8B / Task 12 Step 3）：把"没有驾驶方、但仍有活要干"的轮次交给
 	 * 与启动扫描<b>同一条</b>续跑路径。
 	 *
@@ -259,8 +375,10 @@ public class StartupResumeRunner {
 	 * 也<b>不</b>把心跳算成业务活动（心跳只证明进程活着）。</li>
 	 * </ul>
 	 *
-	 * <h2>三条不再扩大语义的边界</h2>
+	 * <h2>四条不再扩大语义的边界</h2>
 	 * <ol>
+	 * <li><b>无身份不驱动</b>：{@code tenantId/userId} 不可用的 legacy 轮没有身份可恢复，
+	 * 一律记 {@link #LEGACY_NO_IDENTITY}、不调续跑（否则就是"谁都不是"地驱动模型与工具）；</li>
 	 * <li><b>终态不复活</b>：{@code DONE/FAILED/CANCELLED} 在候选过滤就跳过（失败现场、完成事实不改写）；</li>
 	 * <li><b>不绕开人审</b>：仍有 {@code PENDING} 外部项（确认门/前端工具）一律跳过，与启动扫描同义；</li>
 	 * <li><b>挂起已决、无驱动才接管</b>：{@code SUSPENDED} 且条目全结算、活动超龄 ⇒ 按非僵尸续跑
@@ -307,6 +425,16 @@ public class StartupResumeRunner {
 		for (Map<String, Object> run : candidates) {
 			String runId = String.valueOf(run.get("runId"));
 			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
+			long recordTenantId = identityField(run, "tenantId");
+			long recordUserId = identityField(run, "userId");
+			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
+				// 与启动扫描同一道门：pre-deploy 的 0/0 legacy 轮没有身份可恢复，
+				// 续跑只会在无身份下驱动模型与工具 ⇒ 这拍不碰，只留事实（不伪造归属）。
+				skipped.add(sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
+				log.info("运行期扫描跳过无身份的 legacy 轮次 runId={}（reason={}，不驱动模型/工具）", runId,
+						LEGACY_NO_IDENTITY);
+				continue;
+			}
 			Discovery discovery = discoveryOf(run);
 			if (discovery != Discovery.TAKEABLE) {
 				skipped.add(sweepSkipItem(runId, status, sweepSkipReason(discovery)));
@@ -324,8 +452,8 @@ public class StartupResumeRunner {
 			boolean takeover = RunSnapshot.RUNNING.equals(status);
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover,
-						identityField(run, "tenantId"), identityField(run, "userId"));
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover, recordTenantId,
+						recordUserId);
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
 				item.put("statusBeforeSweep", status);
@@ -434,8 +562,10 @@ public class StartupResumeRunner {
 	 * 由 {@code ResumeService.listRuns()} 随条目交下来）—— 不是"先读快照再猜身份"：
 	 * 快照键本身由身份拼出，在无身份线程上先读只能读到 {@code null}（那条链会静默退化成空作用域）。
 	 *
-	 * <p>旧快照 / 无归属成员（{@code 0/0}）没有身份可恢复：{@link RunIdentityScope#open(long, long)}
-	 * 会<b>清空</b>线程身份（不沿用调用者），续跑入口因此按 legacy 口径或 fail-closed 处理。
+	 * <p>旧快照 / 无归属成员（{@code 0/0}）没有身份可恢复：调用方（两条扫描）在进本方法<b>之前</b>就按
+	 * {@link #LEGACY_NO_IDENTITY} 跳过 —— 绝不靠 {@link RunIdentityScope#open(long, long)} 清空身份后
+	 * 硬着头皮续跑（那等于在"谁都不是"的情况下驱动模型与工具）。因此本方法只接受
+	 * {@link RunIdentityScope#usable(long, long)} 为真的记录身份。
 	 *
 	 * <p>作用域只包住这一次续跑调用，扫描循环（下一轮可能是另一个租户）不继承身份。
 	 */

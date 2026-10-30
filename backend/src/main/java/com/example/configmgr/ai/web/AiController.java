@@ -1413,7 +1413,12 @@ public class AiController {
 	 * 无归属旧快照（{@code tenantId=0/userId=0}）同样不算"我的"—— 它不得进入新身份读路径。
 	 *
 	 * <p>返回 {@code false} 时调用方一律按<b>不存在</b>处理（不回显"这一轮在别人手里"）。
-	 * 没有身份上下文的直达调用（单测 / 非 HTTP 入口）由 {@link RunStore} 的键面兜底，这里不额外拒绝。
+	 *
+	 * <h2>无上下文 = fail-closed</h2>
+	 * 没有身份上下文时<b>不能</b>放行：无身份线程读到的正是 legacy 命名空间
+	 * （{@code ai:run:{run:<runId>}}），放行等于让旧快照（{@code tenantId=0/userId=0}）进入新的
+	 * 读/写路径 —— 归属复核就此形同虚设。归属只能由<b>显式作用域</b>（HTTP 头 /
+	 * {@link RunIdentityScope}）证明，因此这里返回 {@code false}，调用方按"不存在"处理。
 	 */
 	private boolean ownedByCurrentIdentity(RunSnapshot snapshot) {
 		if (snapshot == null) {
@@ -1421,7 +1426,9 @@ public class AiController {
 		}
 		TenantUser current = RequestContextUtils.currentOrNull();
 		if (current == null) {
-			return true;
+			log.warn("拒绝归属复核：当前线程没有身份上下文 runId={}（fail-closed，按不存在处理）",
+					snapshot.getRunId());
+			return false;
 		}
 		if (!RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())) {
 			return false;
@@ -1452,7 +1459,15 @@ public class AiController {
 
 	// ── 启动自动续跑（N3/N8） ───────────────────────────────────────────────
 
-	/** 最近一次启动扫描的结果（含跳过原因）；未开启开关时返回 scanned=false + 原因。 */
+	/**
+	 * 最近一次启动扫描的结果，<b>只含当前身份</b>的轮次（含跳过原因）；未开启开关时返回
+	 * scanned=false + 原因（该分支不含任何轮次信息，与身份无关）。
+	 *
+	 * <p>系统面的启动扫描（无身份线程）看到的是全部租户；报告面按调用身份切片 ——
+	 * 别人的 runId 既不回显、也不计入 {@code candidates}（见
+	 * {@link StartupResumeRunner#lastScanForIdentity}）。缺身份在本端点不可达（身份边界先 400），
+	 * runner 侧仍 fail-closed，绝不回全局事实。
+	 */
 	@GetMapping("/startup-resume")
 	public ApiResponse<Map<String, Object>> startupResume() {
 		StartupResumeRunner runner = this.startupResumeRunner.getIfAvailable();
@@ -1470,12 +1485,18 @@ public class AiController {
 			body.put("message", this.availability.reason());
 			return ApiResponse.ok(body);
 		}
-		return ApiResponse.ok(runner.lastScan());
+		return ApiResponse.ok(runner.lastScanForIdentity(RequestContextUtils.currentOrNull()));
 	}
 
 	/**
-	 * 手工触发一次启动口径的扫描（运维用）：<b>强制重扫</b>（自动扫描每实例只跑一次，
-	 * 于是"进程起来 20 秒后才发现某个轮次超龄成僵尸"这种情形需要人来踢一脚）。
+	 * 手工触发一次启动口径的扫描：<b>只扫当前身份</b>的轮次（身份来自请求头，缺头在边界处 400）。
+	 *
+	 * <p>为什么仍然保留这个入口：自动扫描每实例只跑一次，于是"进程起来 20 秒后才发现某个轮次
+	 * 超龄成僵尸"这种情形需要有人踢一脚。<b>强制重扫</b>（force）语义不变。
+	 *
+	 * <p>与系统面的分工：应用启动时的自动扫描不经过 HTTP，仍在无身份线程上按每轮记录身份推进；
+	 * 本入口不是"全租户运维开关" —— 别人的候选既不续跑、也不进响应（不引入 ops token、
+	 * 不扫描租户列表）。
 	 */
 	@PostMapping("/startup-resume/scan")
 	public ApiResponse<Map<String, Object>> startupResumeScan() {

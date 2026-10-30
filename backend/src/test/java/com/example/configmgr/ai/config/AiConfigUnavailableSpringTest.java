@@ -97,7 +97,9 @@ class AiConfigUnavailableSpringTest {
 			.andExpect(jsonPath("$.success").value(true))
 			.andExpect(jsonPath("$.data").isEmpty());
 
-		this.mockMvc.perform(get("/api/ai/startup-resume"))
+		// 2026-10-30 身份边界修复：startup-resume 两个入口纳入身份边界（缺头 400），
+		// 它报告的/触发的都只是当前身份的轮次；这里仍走到"AI 不可用"分支，响应体不变。
+		this.mockMvc.perform(get("/api/ai/startup-resume").header("X-Tenant-Id", "1").header("X-User-Id", "101"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.success").value(true))
 			.andExpect(jsonPath("$.data.scanned").value(false))

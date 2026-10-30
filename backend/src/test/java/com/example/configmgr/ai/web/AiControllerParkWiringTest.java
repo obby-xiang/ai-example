@@ -13,8 +13,11 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -70,6 +73,21 @@ class AiControllerParkWiringTest {
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
 	private final AiController controller = controller();
+
+	private RequestContextUtils.SafeCloseable identityScope;
+
+	@BeforeEach
+	void openIdentityScope() {
+		// 重挂/取消都是 HTTP 数据面入口：生产里必然带身份，测试同样先建立身份作用域
+		this.identityScope = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentityScope() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
+	}
 
 	@Test
 	void emptyEmitterDoesNotKeepTheSessionBusyForever() {
@@ -140,6 +158,8 @@ class AiControllerParkWiringTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId(SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(status);
 		snapshot.setUpdatedAtMs(System.currentTimeMillis() - 10 * 60 * 1000L);
 		return snapshot;
