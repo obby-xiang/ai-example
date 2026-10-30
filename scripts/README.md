@@ -12,7 +12,9 @@
 | `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
-| `scripts/githooks/` | 提交前敏感信息扫描（DC-08 落地），详见 `scripts/githooks/README.md` |
+| `scripts/githooks/` | 提交前两道检查：敏感信息扫描（DC-08）+ **D6 同步复核**，详见 `scripts/githooks/README.md` |
+| `scripts/ci/check-d6-sync.mjs` | **D6 同步复核门禁**：暂存 AI 对话核心文件（block 面）时要求同批新增 `docs/delivery/d6-review.json` 有效确认；测试/模拟设施只告警，docs/infra/业务文件不阻断。指纹 = 规则版本 + 暂存 block 文件的状态/blob/路径 |
+| `docs/delivery/d6-review.json` | D6 复核确认记录（`synced` / `not-affected`，每条带指纹）。门禁阻断时会打印可直接粘贴的模板；该文件自身不计入指纹 |
 
 ---
 
@@ -318,3 +320,50 @@ node scripts/ci/forbid-redis-cluster-unsafe.mjs --root <dir> # 指定目录（�
 ```
 
 禁止进入 `backend/src/main` 的面：**多库**（`database:` / URL 库号 / `setDatabase`）、**单机全量命令**（`KEYS` / `FLUSHDB` / `FLUSHALL` / 跨键 `SCAN`）、**5.0 不支持的排他流 ID**（`Range.Bound.exclusive` / 字符串 `(123-0`）。keys/scan 规则只认 Redis 侧接收者（避开 JPA 原生 SQL 与业务方法 `scan(` 的误报），配置规则要求文件处于 Redis 上下文；原生命令字面量同样按接收者判定，且豁免 fail-closed：先剥离注释与字符串字面量、再按"同文件 + 同作用域包住调用点 + 同名无其它类型遮蔽"认定 `Statement` / `PreparedStatement` / `CallableStatement` 变量为 JDBC，Redis 侧别名（`conn` / `client` / `connection` …）永不豁免 —— 例如 `statement.execute("SELECT pg_advisory_lock(...)")` 是 PostgreSQL SQL，不是 Redis `SELECT`。`ci.yml` 里 `--self-check` 与主扫各一步。
+
+---
+
+## 6. `scripts/ci/check-d6-sync.mjs` —— D6 同步复核门禁（2026-10-30，D6 Task 2）
+
+> **一句话边界**：这是一道**人工确认门禁**，不是语义验证。它只保证"改 AI 对话核心文件的人在同一笔提交里留了一条当次专用确认"，**不保证** D6 正文写对了，也**不校验** `reason` 是否属实。
+
+```sh
+node scripts/ci/check-d6-sync.mjs             # 读当前暂存区（pre-commit 就是这么调的）
+node scripts/ci/check-d6-sync.mjs --root <仓库根>
+node scripts/ci/check-d6-sync.mjs --help
+```
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 暂存区没有 block 面文件，或确认有效 |
+| `1` | 有 block 面文件但确认缺失 / 指纹不符 / `synced` 未同批改 D6 / `not-affected` 理由不具体 / 复用了历史记录 |
+| `2` | `d6-review.json` 非法 JSON、`reviews` 结构错误、`version` 不符、非 git 仓库（**fail-closed**，不会被当成"无确认"放行） |
+
+**路径分类（轻量，只 block 一处阻断）**
+
+| 分类 | 覆盖 | 阻断 |
+| --- | --- | --- |
+| `block` | `backend/src/main/java/.../ai/**`、`backend/src/main/resources/ai/**`、`common/id/**`、`common/sse/**`、`frontend/src/components/AiPanel/**`、`stores/ai.ts`、`api/{ai,aiConfig,sse,http}.ts`、`types/{ai,sse,tools}.ts`、`utils/{ai-*,frontend-tools,context-usage,parts}.ts`、`locales/**` | 是 |
+| `warn` | 后端 AI/发号/SSE 测试、前端单测与 `e2e/**`、`scripts/ci/stub-*`、`verify-e2e.ps1`、`b23l1-dual-instance.ps1`、`messages_*.properties`、`stores/locale.ts` | 否（只告警） |
+| `doc` | `docs/**` 与任意 `*.md`（含 `docs/delivery/d6-review.json`） | 否 |
+| `infra` | `scripts/**`、`.github/**`、构建配置（`pom.xml` / `package.json` / `tsconfig*` / `vite.config.*` / `application*.yml`） | 否 |
+| 其余 | 业务文件 | 否（忽略） |
+
+> 缩写口径：后端路径前缀 `backend/src/main/java/com/example/configmgr/`，前端路径前缀 `frontend/src/`；完整判定表见 `scripts/githooks/README.md` §4.1.1。
+
+**确认记录**（`docs/delivery/d6-review.json`，`version: 1` + `reviews` 数组）：每条含 `fingerprint` / `status` / `reason` / `reviewedAt` / `reviewer`。
+
+- `status=synced`：本批**同时**更新了 `docs/delivery/06-新项目复用与落地指南.md`（门禁核对它确实在暂存区）；
+- `status=not-affected`：本次改动不影响 D6 描述的迁移面，`reason` 必须具体（去空白后 ≥8 字，且不是 `n/a` / `无` / `待补`）；
+- **确认必须本次新增**：HEAD 里已有的同指纹记录不复用；改文件内容或增减 block 文件都会改变指纹，旧确认立即失效（重跑门禁即可拿到新指纹与可粘贴模板）；
+- `d6-review.json` 自身不参与指纹计算。
+
+**单测**（**逐条**跑，禁止一次跑全部；本仓库测试口径要求精确单点命令）：
+
+```sh
+node --test --test-name-pattern="核心 AI 文件未带 d6-review.json 变更时阻断" scripts/ci/check-d6-sync.test.mjs
+node --test --test-name-pattern="synced 确认且同批含 D6 时通过" scripts/ci/check-d6-sync.test.mjs
+node --test --test-name-pattern="指纹变化使旧确认失效" scripts/ci/check-d6-sync.test.mjs
+```
+
+**局限（如实）**：① 未安装 Node.js 时 pre-commit **明确告警并跳过**这一道（提交不被拦）；② 本批**没有**新增 CI job，未启用 `core.hooksPath` 的克隆、图形客户端与 `--no-verify` 都不会执行；③ 门禁只证明"有人留了确认"，不证明"确认是对的"。改分类表或指纹算法必须升 `RULE_VERSION`（`scripts/ci/check-d6-sync.mjs`），否则旧确认不会失效。

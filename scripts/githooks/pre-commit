@@ -1,35 +1,44 @@
 #!/bin/sh
 # =====================================================================
-# pre-commit 敏感信息扫描钩子（阻断式）
+# pre-commit 提交前门禁（两道，任一不过即阻止提交）
 #
-#   覆盖范围：本次暂存区（git diff --cached）新增/修改的行，三条规则：
-#     SECRET  API 密钥 / 令牌 / 私钥头 / Bearer 长串
-#     PATH    本机绝对路径（盘符路径、Git Bash 挂载路径）
-#     USER    个人用户名（动态取 git config user.name，不写死）
+#   ① 敏感信息扫描（阻断式，规则在 scan-lib.sh）
+#      覆盖范围：本次暂存区（git diff --cached）新增/修改的行，三条规则：
+#        SECRET  API 密钥 / 令牌 / 私钥头 / Bearer 长串
+#        PATH    本机绝对路径（盘符路径、Git Bash 挂载路径）
+#        USER    个人用户名（动态取 git config user.name，不写死）
+#      误报放行：AI_SECRETS_ALLOW=1 git commit ...  —— 降级为警告并在输出中明示
+#      （该逃生口**只**对敏感信息扫描生效，不影响下一条）
+#
+#   ② D6 同步复核（scripts/ci/check-d6-sync.mjs）
+#      本次暂存 AI 对话核心文件（block 面：backend ai/**、common/id、common/sse、
+#      resources/ai/**、frontend AiPanel/stores/ai/api/types/utils/locales）时，
+#      要求同一笔提交里**新增**一条 docs/delivery/d6-review.json 有效确认：
+#        synced       本批已同时更新 D6 正文
+#        not-affected 本次改动不影响 D6 描述的迁移面，reason 写清具体原因
+#      测试 / 模拟设施只告警，docs 与 scripts/.github/构建配置不阻断。
+#      未安装 node 时**明确告警并跳过**（不静默）；本门禁只证明人工确认存在，
+#      不证明 D6 内容正确，CI / 人工复核仍是必要补充。
 #
 #   启用方式（仓库根执行一次）：git config core.hooksPath scripts/githooks
-#   误报放行：AI_SECRETS_ALLOW=1 git commit ...  —— 降级为警告并在输出中明示
-#   完全跳过：git commit --no-verify —— 慎用
+#   完全跳过：git commit --no-verify —— 慎用：①② 同时失效且不留痕
 #
-#   所有规则字面量均在 scan-lib.sh 中拼接构造，避免扫描器自我误报（DC-08）。
+#   所有扫描规则字面量均在 scan-lib.sh 中拼接构造，避免扫描器自我误报（DC-08）。
 # =====================================================================
 set -u
 
 hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || hook_dir=""
+top=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [ -z "$hook_dir" ] || [ ! -f "$hook_dir/scan-lib.sh" ]; then
-  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
   if [ -n "$top" ] && [ -f "$top/scripts/githooks/scan-lib.sh" ]; then
     hook_dir="$top/scripts/githooks"
   fi
 fi
 
-if [ ! -f "$hook_dir/scan-lib.sh" ]; then
-  echo "⚠ [pre-commit] 未找到扫描引擎 scan-lib.sh（$hook_dir），本次跳过敏感信息扫描" >&2
-  exit 0
+if [ -f "$hook_dir/scan-lib.sh" ]; then
+  . "$hook_dir/scan-lib.sh"
+  scan_init
 fi
-. "$hook_dir/scan-lib.sh"
-
-scan_init
 
 allow=0
 [ "${AI_SECRETS_ALLOW:-0}" = "1" ] && allow=1
@@ -37,40 +46,126 @@ for arg in "$@"; do
   [ "$arg" = "--allow-secrets" ] && allow=1
 done
 
-hits=$(git -c core.quotepath=false diff --cached --unified=0 --no-color \
-         --no-ext-diff --no-textconv --diff-filter=ACMR 2>/dev/null \
-       | LC_ALL=C awk "$SCAN_DIFF_AWK" \
-       | scan_engine_stream \
-       | LC_ALL=C sort -u)
+# ── ① 敏感信息扫描 ─────────────────────────────────────────────────────────
+secret_scan() {
+  if [ ! -f "$hook_dir/scan-lib.sh" ]; then
+    echo "⚠ [pre-commit] 未找到扫描引擎 scan-lib.sh（$hook_dir），本次跳过敏感信息扫描"
+    secret_skipped=1
+    return 0
+  fi
 
-if [ -z "$hits" ]; then
-  echo "✓ [pre-commit] 敏感信息扫描通过（暂存区无命中）"
-  scan_user_note
-  exit 0
+  hits=$(git -c core.quotepath=false diff --cached --unified=0 --no-color \
+           --no-ext-diff --no-textconv --diff-filter=ACMR 2>/dev/null \
+         | LC_ALL=C awk "$SCAN_DIFF_AWK" \
+         | scan_engine_stream \
+         | LC_ALL=C sort -u)
+
+  if [ -z "$hits" ]; then
+    echo "✓ [pre-commit] 敏感信息扫描通过（暂存区无命中）"
+    return 0
+  fi
+
+  count=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
+
+  if [ "$allow" = 1 ]; then
+    echo ""
+    echo "⚠ [pre-commit] 逃生口已启用（AI_SECRETS_ALLOW=1）：以下 $count 处命中仅告警，本次提交被放行"
+    printf '%s\n' "$hits" | scan_format
+    scan_legend
+    echo "⚠ 放行即人为豁免：请在提交说明中留痕，并按 DC-08 在后续提交清理。"
+    return 0
+  fi
+
+  echo "" >&2
+  echo "✖ [pre-commit] 暂存区命中 $count 处敏感信息，提交已阻止：" >&2
+  printf '%s\n' "$hits" | scan_format >&2
+  scan_legend >&2
+  echo "" >&2
+  echo "处理方式：" >&2
+  echo "  1) 密钥/令牌改为环境变量或未追踪的本地配置引用，不要写进仓库；" >&2
+  echo "  2) 文档/证据中的本机绝对路径按 DC-08 换成占位符（尖括号占位符不会被误报）；" >&2
+  echo "  3) 个人用户名不要出现在入库正文中；" >&2
+  echo "  4) 确认误报可临时放行：AI_SECRETS_ALLOW=1 git commit ...（输出中会明示放行）；" >&2
+  echo "  5) 完全跳过：git commit --no-verify（慎用）。" >&2
+  return 1
+}
+
+# ── ② D6 同步复核 ─────────────────────────────────────────────────────────
+d6_sync_check() {
+  ci_script=""
+  if [ -n "$top" ] && [ -f "$top/scripts/ci/check-d6-sync.mjs" ]; then
+    ci_script="$top/scripts/ci/check-d6-sync.mjs"
+  elif [ -n "$hook_dir" ] && [ -f "$hook_dir/../ci/check-d6-sync.mjs" ]; then
+    ci_script="$hook_dir/../ci/check-d6-sync.mjs"
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo ""
+    echo "⚠ [pre-commit] 未找到 node，本次**跳过 D6 同步复核检查**（不静默，也不算通过）"
+    echo "   若本次改动了 AI 对话核心文件（backend ai/**、common/id、common/sse、frontend AiPanel/…），"
+    echo "   这笔提交不会被本钩子拦截：请人工复核 docs/delivery/06-新项目复用与落地指南.md 是否需要更新，"
+    echo "   并在 docs/delivery/d6-review.json 留下本次确认；或改用装有 Node.js 的环境提交。"
+    echo "   门禁只证明人工确认存在，不证明 D6 内容正确；CI / 人工复核仍是必要补充。"
+    d6_skipped=1
+    return 0
+  fi
+
+  if [ -z "$ci_script" ]; then
+    echo ""
+    echo "⚠ [pre-commit] 未找到 scripts/ci/check-d6-sync.mjs，本次跳过 D6 同步复核检查（需人工/CI 复核 D6）"
+    d6_skipped=1
+    return 0
+  fi
+
+  if [ -n "$top" ]; then
+    node "$ci_script" --root "$top"
+  else
+    node "$ci_script"
+  fi
+  rc=$?
+
+  case "$rc" in
+    0)
+      return 0
+      ;;
+    1)
+      echo "" >&2
+      echo "✖ [pre-commit] D6 同步复核未通过，提交已阻止（上方有逐条原因与可直接粘贴的确认模板）" >&2
+      echo "   synced = 本批同时更新 D6 正文；not-affected = 写清为什么 D6 不需要改。" >&2
+      return 1
+      ;;
+    *)
+      echo "" >&2
+      echo "✖ [pre-commit] D6 同步复核脚本异常退出（rc=$rc），按失败处理" >&2
+      echo "   先确认 docs/delivery/d6-review.json 是合法 JSON（version: 1、reviews 数组），再重试。" >&2
+      echo "   不要用 --no-verify 绕过：那会同时跳过敏感信息扫描。" >&2
+      return 1
+      ;;
+  esac
+}
+
+secret_status=0
+secret_skipped=0
+d6_status=0
+d6_skipped=0
+
+secret_scan || secret_status=$?
+d6_sync_check || d6_status=$?
+
+if [ "$secret_status" -ne 0 ] || [ "$d6_status" -ne 0 ]; then
+  exit 1
 fi
 
-count=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
-
-if [ "$allow" = 1 ]; then
-  echo ""
-  echo "⚠ [pre-commit] 逃生口已启用（AI_SECRETS_ALLOW=1）：以下 $count 处命中仅告警，本次提交被放行"
-  printf '%s\n' "$hits" | scan_format
-  scan_legend
-  echo "⚠ 放行即人为豁免：请在提交说明中留痕，并按 DC-08 在后续提交清理。"
-  scan_user_note
-  exit 0
+echo ""
+if [ "$secret_skipped" -eq 1 ] || [ "$d6_skipped" -eq 1 ]; then
+  if [ "$secret_skipped" -eq 1 ]; then secret_text="跳过"; else secret_text="通过"; fi
+  if [ "$d6_skipped" -eq 1 ]; then d6_text="跳过"; else d6_text="通过"; fi
+  echo "⚠ [pre-commit] 检查结束：敏感信息扫描=$secret_text，D6 同步复核=$d6_text（跳过项不算通过，需人工/CI 补齐）"
+else
+  echo "✓ [pre-commit] 两道检查均通过（敏感信息扫描 + D6 同步复核）"
 fi
 
-echo "" >&2
-echo "✖ [pre-commit] 暂存区命中 $count 处敏感信息，提交已阻止：" >&2
-printf '%s\n' "$hits" | scan_format >&2
-scan_legend >&2
-scan_user_note
-echo "" >&2
-echo "处理方式：" >&2
-echo "  1) 密钥/令牌改为环境变量或未追踪的本地配置引用，不要写进仓库；" >&2
-echo "  2) 文档/证据中的本机绝对路径按 DC-08 换成占位符（尖括号占位符不会被误报）；" >&2
-echo "  3) 个人用户名不要出现在入库正文中；" >&2
-echo "  4) 确认误报可临时放行：AI_SECRETS_ALLOW=1 git commit ...（输出中会明示放行）；" >&2
-echo "  5) 完全跳过：git commit --no-verify（慎用）。" >&2
-exit 1
+if [ -f "$hook_dir/scan-lib.sh" ]; then
+  scan_user_note
+fi
+exit 0
