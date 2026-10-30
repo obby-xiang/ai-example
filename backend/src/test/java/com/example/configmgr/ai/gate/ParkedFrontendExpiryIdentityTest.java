@@ -12,6 +12,7 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -68,6 +69,17 @@ class ParkedFrontendExpiryIdentityTest {
 	private static final String CALL_ID = "call-nav-identity";
 
 	private static final TenantUser RECORD_IDENTITY = new TenantUser(9001L, 7L);
+
+	/** 调度线程上<b>残留</b>的另一个身份（池化/复用线程的真实形态）。 */
+	private static final TenantUser RESIDUAL_IDENTITY = new TenantUser(9002L, 8L);
+
+	private static final String RESIDUAL_RUN_ID = "run-parked-expiry-residual-identity";
+
+	private static final String RESIDUAL_SESSION_A = "s-parked-expiry-a";
+
+	private static final String RESIDUAL_SESSION_B = "s-parked-expiry-b";
+
+	private static final String RESIDUAL_CALL_ID = "call-nav-residual";
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -151,6 +163,94 @@ class ParkedFrontendExpiryIdentityTest {
 		assertThat(RequestContextUtils.currentOrNull()).as("到期裁决结束不得在调度线程残留身份").isNull();
 	}
 
+	/**
+	 * <b>调度线程残留另一个身份时，到期裁决仍只收敛记录主人。</b>
+	 *
+	 * <h2>被钉住的缺陷</h2>
+	 * 池化/定时线程可能带着上一位使用者的身份（{@code TransmittableThreadLocal} 的继承语义）。
+	 * 若任务体<b>不覆盖</b>为记录身份，{@code store.get(runId)} / {@code pendingLenient} /
+	 * {@code putPending} 全部按残留身份定键：A 的卡永远 PENDING（没人收敛），而 B 的同名 runId
+	 * 条目被误收敛、误发结局帧 —— 一次"别人的超时"落进另一个租户的轮次。
+	 *
+	 * <p>本用例的 B 侧就是那条诱饵：同 runId、同 toolCallId、同样过期且仍 PENDING。
+	 * 正确实现下只有 A 的条目变 TIMEOUT，B 的条目与快照一个字段都不动。
+	 */
+	@Test
+	void schedulerThreadCarryingAnotherIdentityStillConvergesOnlyTheRecordOwner() throws Exception {
+		long foreignUpdatedAt = seedForeignParkedRun();
+
+		AtomicReference<TenantUser> schedulerIdentityAtBirth = new AtomicReference<>();
+		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+			Thread thread = new Thread(runnable, "park-expiry-residual-identity");
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(
+					RESIDUAL_IDENTITY.tenantId(), RESIDUAL_IDENTITY.userId())) {
+				executor.submit(() -> schedulerIdentityAtBirth.set(RequestContextUtils.currentOrNull()))
+					.get(5, TimeUnit.SECONDS);
+			}
+			catch (Exception ex) {
+				throw new IllegalStateException("预热带残留身份的到期裁决线程失败", ex);
+			}
+			assertThat(schedulerIdentityAtBirth.get()).as("前置：到期裁决线程出生时带着另一个身份")
+				.isEqualTo(RESIDUAL_IDENTITY);
+
+			ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
+			when(provider.getIfAvailable()).thenReturn(this.resumeService);
+			ConfirmGate.RetryScheduler retryScheduler = (task, delay) -> {
+				long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
+				var future = executor.schedule(task, millis, TimeUnit.MILLISECONDS);
+				return () -> future.cancel(false);
+			};
+			ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
+					this.beacon, List.of(), provider, Runnable::run, null, retryScheduler);
+			SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, gate,
+					this.toolRegistry, this.codec, this.beacon, this.cancellations,
+					new ToolResultLimiter(this.properties), List.of());
+
+			try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
+					RECORD_IDENTITY.userId())) {
+				this.store.create(RESIDUAL_RUN_ID, RESIDUAL_SESSION_A, AiContext.empty(),
+						List.of(new UserMessage("跳到编辑器")), this.codec);
+				RunSnapshot snapshot = this.store.get(RESIDUAL_RUN_ID);
+				snapshot.setContext(AiContext.empty().toMap());
+				this.store.save(snapshot);
+				assertThatThrownBy(() -> manager.executeToolCalls(prompt(RESIDUAL_RUN_ID),
+						response(RESIDUAL_CALL_ID))).isInstanceOf(RunParkedException.class);
+			}
+
+			awaitTrue(() -> {
+				PendingToolCall current = pendingAs(RECORD_IDENTITY, RESIDUAL_RUN_ID, RESIDUAL_CALL_ID);
+				return current != null && !PendingToolCall.PENDING.equals(current.getStatus());
+			}, 8000, "残留 B 身份的调度线程上，A 的 park 条目必须按 A 的记录身份收敛");
+
+			PendingToolCall owner = pendingAs(RECORD_IDENTITY, RESIDUAL_RUN_ID, RESIDUAL_CALL_ID);
+			assertThat(owner.getStatus()).as("A 的条目照常收敛为 TIMEOUT").isEqualTo(PendingToolCall.TIMEOUT);
+			assertThat(owner.getReason()).isEqualTo("FRONTEND_TIMEOUT");
+			verify(this.resumeService, timeout(3000)).resume(RESIDUAL_RUN_ID);
+
+			PendingToolCall foreign = pendingAs(RESIDUAL_IDENTITY, RESIDUAL_RUN_ID, RESIDUAL_CALL_ID);
+			assertThat(foreign.getStatus()).as("残留身份 B 的同名条目不得被 A 的到期裁决打到")
+				.isEqualTo(PendingToolCall.PENDING);
+			assertThat(foreign.getOutcome()).isNull();
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(RESIDUAL_IDENTITY)) {
+				RunSnapshot foreignSnapshot = this.store.get(RESIDUAL_RUN_ID);
+				assertThat(foreignSnapshot.getSessionId()).isEqualTo(RESIDUAL_SESSION_B);
+				assertThat(foreignSnapshot.getStatus()).as("B 的快照不得被改写").isEqualTo(RunSnapshot.RUNNING);
+				assertThat(foreignSnapshot.getUpdatedAtMs()).as("B 的快照一个字段都不该动")
+					.isEqualTo(foreignUpdatedAt);
+			}
+			assertThat(executor.submit(RequestContextUtils::currentOrNull).get(5, TimeUnit.SECONDS))
+				.as("任务体关闭 A 的作用域后回到线程原本的残留身份（A 的身份不得漏到池线程）")
+				.isEqualTo(RESIDUAL_IDENTITY);
+		}
+		finally {
+			executor.shutdownNow();
+		}
+	}
+
 	@AfterEach
 	void tearDown() {
 		if (this.expiryExecutor != null) {
@@ -183,23 +283,53 @@ class ParkedFrontendExpiryIdentityTest {
 
 	/** 按<b>记录身份</b>读待决条目（待决键同样由身份拼出：用例主线程没有身份）。 */
 	private PendingToolCall pendingAsRecord() {
-		try (com.example.configmgr.ai.tenant.RunIdentityScope.Scope ignored =
-				com.example.configmgr.ai.tenant.RunIdentityScope.open(RECORD_IDENTITY)) {
-			return this.store.pendingLenient(RUN_ID, CALL_ID);
+		return pendingAs(RECORD_IDENTITY, RUN_ID, CALL_ID);
+	}
+
+	/** 按给定身份读待决条目（跨身份核对"有没有打到别人的键"）。 */
+	private PendingToolCall pendingAs(TenantUser identity, String runId, String callId) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return this.store.pendingLenient(runId, callId);
+		}
+	}
+
+	/** B 侧诱饵：同 runId / 同 toolCallId 的已过期待决条目（残留身份若被沿用就会收敛到它）。 */
+	private long seedForeignParkedRun() {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(RESIDUAL_IDENTITY)) {
+			RunSnapshot snapshot = this.store.create(RESIDUAL_RUN_ID, RESIDUAL_SESSION_B, AiContext.empty(),
+					List.of(new UserMessage("B 的轮")), this.codec);
+			PendingToolCall bait = new PendingToolCall();
+			bait.setToolCallId(RESIDUAL_CALL_ID);
+			bait.setName("navigate_to");
+			bait.setKind(PendingToolCall.KIND_FRONTEND);
+			bait.setArguments("{\"page\":\"editor\"}");
+			long now = System.currentTimeMillis();
+			bait.setAtMs(now - 60_000L);
+			bait.setExpiresAt(now - 1_000L);
+			this.store.putPending(RESIDUAL_RUN_ID, bait);
+			return snapshot.getUpdatedAtMs();
 		}
 	}
 
 	private static Prompt prompt() {
+		return prompt(RUN_ID);
+	}
+
+	private static Prompt prompt(String runId) {
 		ToolCallingChatOptions options = ToolCallingChatOptions.builder()
 			.toolCallbacks(List.of())
-			.toolContext(Map.of("runId", RUN_ID))
+			.toolContext(Map.of("runId", runId))
 			.build();
 		return new Prompt(List.of(new UserMessage("跳到编辑器")), options);
 	}
 
 	private static ChatResponse response() {
+		return response(CALL_ID);
+	}
+
+	private static ChatResponse response(String callId) {
 		AssistantMessage assistant = AssistantMessage.builder()
-			.toolCalls(List.of(new AssistantMessage.ToolCall(CALL_ID, "function", "navigate_to",
+			.toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", "navigate_to",
 					"{\"page\":\"editor\"}")))
 			.build();
 		return new ChatResponse(List.of(new Generation(assistant)));
