@@ -1,13 +1,13 @@
 /**
- * 契约层 `ui_event.set_conditions` 的**载荷校验**（R3 返修，与页面 handler 同判据链）。
+ * `ui_event.set_conditions` 的**载荷校验**（单一判据，由页面 handler 调用）。
  *
- * 页面未挂载时 `dispatchUiEvent` 兜底执行 `set_conditions`：它拿到的 `conditions` 是
- * **模型给的原始载荷**（对象或 JSON 字符串）。旧实现原样 `PUT` 并写工作区，于是
- * `IN []` / 值算子空串会落库成"0 行/空值"条件，坏 JSON 甚至会被当成字符串或空条件
- * （= 无条件 = 导出全部）。
+ * 写类兜底已移除：`dispatchUiEvent` 只认页面能力 handler（`export.setConditions`），页面未就绪
+ * 即返回确定性失败，契约层不再替页面 `PUT` 或写工作区；校验由页面 handler 负责。handler 拿到的
+ * `conditions` 是**模型给的原始载荷**（对象或 JSON 字符串）：放行坏载荷会让 `IN []` /
+ * 值算子空串写成"0 行/空值"条件，坏 JSON 甚至会被当成字符串或空条件（= 无条件 = 导出全部）。
  *
  * 收口口径：`parseConditionJson` → `draftModelFromCondition` → `buildConditionOutcome`
- * （与 `export.setConditions` / `persistStepData` 完全同一判据）：
+ * （与 `persistStepData` 完全同一判据，条件只形成前端草案，业务库由页面在下一步/启动作业前提交）：
  * - 不可解析 / 结构坏 / 非法空值 ⇒ 失败（调用方零 PUT、零工作区写）；
  * - **显式 `{}`**（空对象）⇒ 清空（与页面一致：PUT `{}`）；有结构但没内容的载荷按坏载荷拒绝；
  * - 合法复杂条件 ⇒ 按内容原样落库（同字段多条件、含逗号 IN 都不改写）。
