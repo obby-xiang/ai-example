@@ -1,14 +1,17 @@
 /**
  * AI 向导数据正确性 · 条件面（视图级）：`confirm_step` 不得把 AI 设置的条件**换义**。
  *
- * 现场：`export.setConditions` 先按原样落库，再把条件转成表单草案；`confirm_step` →
- * `goStep` → `persistStepData` 用草案重建条件并 PUT。旧实现里草案对
- * 「多值 IN」「同字段多条件」是有损的 ⇒ 服务端条件被重写：
+ * 现场：`export.setConditions` 把条件转成表单草案；`confirm_step` → `goStep` → `persistStepData`
+ * 用草案重建条件并 PUT。旧实现里草案对「多值 IN」「同字段多条件」是有损的 ⇒ 服务端条件被重写：
  * - `IN ["CNY","USD"]` → `IN "CNY,USD"`；
  * - `EQ CNY` + `NE USD` → 只剩 `EQ CNY`。
  *
- * 收口口径（不等价禁止覆盖）：草案带 `verbatim`（原始条件）时，`persistStepData` 不再
- * 用草案覆盖服务端；能无损表达的条件照旧落库（防过度拦截）；被用户/AI 改过的草案按新值落库。
+ * 收口口径（不等价禁止覆盖）：草案带 `verbatim`（原始条件）时，重建按字段合并（未编辑字段用
+ * 原条件），`persistStepData` 落库的内容与服务端等价；能无损表达的条件照旧落库（防过度拦截）；
+ * 被用户/AI 改过的草案按新值落库。
+ *
+ * 2026-10-30 提交点收口：`set_condition` 只写草案（零 `setCondition`），`confirm_step` 才是唯一的
+ * 提交点 —— 所以下面每条写入断言都先要求"设置时零 PUT"，再要求 confirm_step 的那一次写入保真。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
@@ -125,7 +128,7 @@ beforeEach(() => {
 })
 
 describe('AI 设置的条件在 confirm_step 时不得被草案重写（多值 IN）', () => {
-  it('多值 IN：confirm_step 的每次写入都保持数组语义（不得压成逗号串）', async () => {
+  it('多值 IN：设置时零 PUT，confirm_step 恰好一次且保持数组语义（不得压成逗号串）', async () => {
     await mountWizard()
 
     const setConditions = getPageHandler('export.setConditions')
@@ -137,56 +140,54 @@ describe('AI 设置的条件在 confirm_step 时不得被草案重写（多值 I
     expect(reply).toEqual(expect.stringContaining('已设置'))
     await flushPromises()
 
-    const firstWrite = conditionWrites()[0]
-    expect(firstWrite?.[1]).toBe('CURRENCY')
-    expect(JSON.parse(firstWrite?.[2] ?? '{}')).toEqual({ fields: [{ fieldCode: 'code', operator: 'IN', value: ['CNY', 'USD'] }] })
+    // 修复前（RED）：设置条件当场 PUT（"设置即落库"），confirm_step 再写一次
+    expect(conditionWrites()).toEqual([])
 
     await confirmStep()
     await flushPromises()
 
     // 修复前（RED）：confirm_step 把 IN 数组压成 "CNY,USD" 再 PUT（换义）。
-    // 收口后允许"等价重写"，但每份写入都必须是 IN 数组。
     const writes = conditionWrites().filter((call) => call[1] === 'CURRENCY')
-    expect(writes.length).toBeGreaterThanOrEqual(1)
-    for (const write of writes) {
-      expect(write[2]).not.toContain('CNY,USD')
-      expect(JSON.parse(write[2])).toEqual({
-        fields: [{ fieldCode: 'code', operator: 'IN', value: ['CNY', 'USD'] }]
-      })
-    }
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.[2]).not.toContain('CNY,USD')
+    expect(JSON.parse(writes[0]?.[2] ?? '{}')).toEqual({
+      fields: [{ fieldCode: 'code', operator: 'IN', value: ['CNY', 'USD'] }]
+    })
   })
 
-  it('同字段多条件：confirm_step 不得只留第一条（保留原始条件）', async () => {
+  it('同字段多条件：设置时零 PUT，confirm_step 只写一次且保留原始条件', async () => {
     await mountWizard()
 
     const setConditions = getPageHandler('export.setConditions')
     await setConditions?.({ defCode: 'CURRENCY', conditions: LOSSY_CONDITION })
     await flushPromises()
+    expect(conditionWrites()).toEqual([])
 
     await confirmStep()
     await flushPromises()
 
     const writes = conditionWrites().filter((call) => call[1] === 'CURRENCY')
-    // 草案无法无损表达 ⇒ 一次都不再覆盖（服务端仍是 AI 原样落库的那份）
+    // 草案无法无损表达 ⇒ `verbatim` 按字段合并，写出的仍是同一份条件（不得只剩第一条）
     expect(writes).toHaveLength(1)
     expect(JSON.parse(writes[0]?.[2] ?? '{}')).toEqual(LOSSY_CONDITION)
   })
 })
 
 describe('相邻路径：能无损表达的条件照旧落库（不得过度拦截）', () => {
-  it('AI set_condition（EQ）后 confirm_step 仍落库等价条件', async () => {
+  it('AI set_condition（EQ）后 confirm_step 落库等价条件（一次）', async () => {
     await mountWizard()
 
     const setConditions = getPageHandler('export.setConditions')
     await setConditions?.({ defCode: 'CURRENCY', conditions: REPRESENTABLE_CONDITION })
     await flushPromises()
+    expect(conditionWrites()).toEqual([])
 
     await confirmStep()
     await flushPromises()
 
     const writes = conditionWrites().filter((call) => call[1] === 'CURRENCY')
-    expect(writes.length).toBeGreaterThanOrEqual(2)
-    expect(JSON.parse(writes.at(-1)?.[2] ?? '{}')).toEqual(REPRESENTABLE_CONDITION)
+    expect(writes).toHaveLength(1)
+    expect(JSON.parse(writes[0]?.[2] ?? '{}')).toEqual(REPRESENTABLE_CONDITION)
   })
 })
 
@@ -213,7 +214,7 @@ describe('持久化回读：恢复任务后的草案同样不得覆盖服务端�
 })
 
 describe('改过即覆盖：AI 再次设置可表达条件后 confirm_step 落库新值', () => {
-  it('先设多值 IN（有损）再设 EQ（可表达）⇒ confirm_step 写 EQ', async () => {
+  it('先设多值 IN（有损）再设 EQ（可表达）⇒ confirm_step 只写 EQ', async () => {
     await mountWizard()
     const setConditions = getPageHandler('export.setConditions')
     await setConditions?.({
@@ -223,11 +224,13 @@ describe('改过即覆盖：AI 再次设置可表达条件后 confirm_step 落�
     await flushPromises()
     await setConditions?.({ defCode: 'CURRENCY', conditions: REPRESENTABLE_CONDITION })
     await flushPromises()
+    expect(conditionWrites()).toEqual([])
 
     await confirmStep()
     await flushPromises()
 
     const writes = conditionWrites().filter((call) => call[1] === 'CURRENCY')
-    expect(JSON.parse(writes.at(-1)?.[2] ?? '{}')).toEqual(REPRESENTABLE_CONDITION)
+    expect(writes).toHaveLength(1)
+    expect(JSON.parse(writes[0]?.[2] ?? '{}')).toEqual(REPRESENTABLE_CONDITION)
   })
 })

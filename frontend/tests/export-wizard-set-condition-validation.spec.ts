@@ -9,6 +9,10 @@
  * 收口口径：在任何状态/网络写入前用**同一** `buildConditionOutcome` 校验；非法 ⇒
  * `{ok:false}` + 可行动文案、零 `setCondition`、零 `workspace.setQueryConditions`、
  * 不动草案/touched（后续 confirm_step 也不会写它）；合法复杂条件仍**原样**落库。
+ *
+ * 2026-10-30 提交点收口：`set_condition` 只写草案（零 `setCondition`），落库发生在
+ * `goStep → persistStepData`（`confirm_step`）。因此下面正向用例一律断言"先零 PUT，
+ * confirm_step 后恰好一次正确提交"，不允许放宽成"设置时就 PUT"。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
@@ -96,6 +100,13 @@ async function setCondition(conditions: unknown): Promise<unknown> {
   return await handler?.({ defCode: 'CURRENCY', conditions })
 }
 
+/** 条件提交点：离开 QUERY_COND（`confirm_step` → `goStep` → `persistStepData`）。 */
+async function confirmStep(): Promise<unknown> {
+  const handler = getPageHandler('export.nextStep')
+  expect(handler).not.toBeNull()
+  return await handler?.({ step: 'EXPORT' })
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
@@ -141,7 +152,7 @@ describe('set_condition 非法条件：零 PUT、零工作区写、可行动失�
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 
-  it('非法条件被拒后 confirm_step 也不会补写（草案/touched 均未改动）', async () => {
+  it('非法条件被拒后 confirm_step 也不会补写它（草案/touched 均未改动）', async () => {
     await mountWizard()
     await setCondition({ fields: [{ fieldCode: 'code', operator: 'IN', value: [] }] })
     await flushPromises()
@@ -151,8 +162,9 @@ describe('set_condition 非法条件：零 PUT、零工作区写、可行动失�
     await nextStep?.({ step: 'EXPORT' })
     await flushPromises()
 
-    // 修复前（RED）：非法条件先落库（1 次），confirm_step 还会再按草案写第 2 次
-    expect(api.setCondition).not.toHaveBeenCalled()
+    // 修复前（RED）：非法条件先落库（1 次），confirm_step 还会再按草案写第 2 次。
+    // 现在 confirm_step 只为"确实空白的草案"提交一次 `{}`（明确不设）；非法条件本身从未写出去。
+    expect(api.setCondition.mock.calls.map((call) => [call[1], String(call[2])])).toEqual([['CURRENCY', '{}']])
   })
 })
 
@@ -223,7 +235,7 @@ describe('set_condition 四类坏载荷：失败且零 PUT、零工作区写（R
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 
-  it('显式 {} 才清空：PUT "{}"，且工作区**不留**该配置项占位（R4）', async () => {
+  it('显式 {} 才清空：设置时零 PUT、工作区**不留**占位；confirm_step 才提交 "{}"（R4）', async () => {
     await mountWizard()
     const workspace = useWorkspaceStore()
 
@@ -232,10 +244,15 @@ describe('set_condition 四类坏载荷：失败且零 PUT、零工作区写（R
 
     expect(typeof reply).toBe('string')
     expect(String(reply)).toContain('已设置')
-    expect(api.setCondition).toHaveBeenCalledTimes(1)
-    expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
+    // 修复前（RED）：设置条件当场 PUT "{}"（"设置即落库"），confirm_step 再写一次
+    expect(api.setCondition).not.toHaveBeenCalled()
     // 修复前（RED）：清空写成 queryConditions.CURRENCY = null（占位 "已设置条件"）
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+
+    await confirmStep()
+    await flushPromises()
+
+    expect(api.setCondition.mock.calls.map((call) => [call[1], String(call[2])])).toEqual([['CURRENCY', '{}']])
   })
 })
 
@@ -270,8 +287,8 @@ describe('set_condition 缺 defCode：结构化失败（字符串会被当成功
   })
 })
 
-describe('set_condition 合法条件：仍按原样落库（相邻正向）', () => {
-  it('复杂合法条件（同字段多条件 + 含逗号 IN）⇒ 原字节落库且写回工作区', async () => {
+describe('set_condition 合法条件：先写草案，confirm_step 按原样落库（相邻正向）', () => {
+  it('复杂合法条件（同字段多条件 + 含逗号 IN）⇒ 设置时零 PUT、confirm_step 原字节落库且写回工作区', async () => {
     await mountWizard()
     const workspace = useWorkspaceStore()
     const condition = {
@@ -287,12 +304,18 @@ describe('set_condition 合法条件：仍按原样落库（相邻正向）', ()
 
     expect(typeof reply).toBe('string')
     expect(String(reply)).toContain('已设置')
+    // 修复前（RED）：设置条件当场 PUT（"设置即落库"）
+    expect(api.setCondition).not.toHaveBeenCalled()
+    expect(workspace.queryConditions.CURRENCY).toEqual(condition)
+
+    await confirmStep()
+    await flushPromises()
+
     expect(api.setCondition).toHaveBeenCalledTimes(1)
     expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
-    expect(workspace.queryConditions.CURRENCY).toEqual(condition)
   })
 
-  it('可表达条件（EQ）⇒ 落库并写回工作区', async () => {
+  it('可表达条件（EQ）⇒ 设置时零 PUT、confirm_step 落库并写回工作区', async () => {
     await mountWizard()
     const workspace = useWorkspaceStore()
     const condition = { scopeKeys: ['XN'], fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
@@ -301,7 +324,13 @@ describe('set_condition 合法条件：仍按原样落库（相邻正向）', ()
     await flushPromises()
 
     expect(String(reply)).toContain('已设置')
-    expect(api.setCondition).toHaveBeenCalledTimes(1)
+    expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions.CURRENCY).toEqual(condition)
+
+    await confirmStep()
+    await flushPromises()
+
+    expect(api.setCondition).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
   })
 })

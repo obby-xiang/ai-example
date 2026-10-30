@@ -89,6 +89,13 @@ async function runSetCondition(args: Record<string, unknown>): ReturnType<typeof
   return await executeFrontendTool({ name: 'set_condition', args, budgetMs: 5_000 })
 }
 
+/** 条件提交点：离开 QUERY_COND（`confirm_step` → `goStep` → `persistStepData`）。 */
+async function confirmStep(): Promise<unknown> {
+  const handler = getPageHandler('export.nextStep')
+  expect(handler).not.toBeNull()
+  return await handler?.({ step: 'EXPORT' })
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
@@ -150,7 +157,7 @@ describe('页面 handler 路由：漏传 conditions 不得当清空（R5）', ()
 })
 
 describe('页面 handler 路由：显式 {} 与合法条件仍正常（相邻正向）', () => {
-  it('显式 {} ⇒ 照旧清空（PUT "{}"），工作区删键', async () => {
+  it('显式 {} ⇒ 设置时零 PUT、工作区删键；confirm_step 才提交 "{}"', async () => {
     await mountWizard()
     const workspace = useWorkspaceStore()
 
@@ -158,12 +165,17 @@ describe('页面 handler 路由：显式 {} 与合法条件仍正常（相邻正
     await flushPromises()
 
     expect(execution.ok).toBe(true)
-    expect(api.setCondition).toHaveBeenCalledTimes(1)
-    expect(api.setCondition.mock.calls[0]?.[2]).toBe('{}')
+    // 修复前（RED）：设置条件当场 PUT "{}"（"设置即落库"），confirm_step 再写一次
+    expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+
+    await confirmStep()
+    await flushPromises()
+
+    expect(api.setCondition.mock.calls.map((call) => [call[1], String(call[2])])).toEqual([['CURRENCY', '{}']])
   })
 
-  it('合法条件仍在正确路由下原样落库', async () => {
+  it('合法条件：设置时零 PUT，confirm_step 在正确路由下原样提交', async () => {
     await mountWizard()
     const workspace = useWorkspaceStore()
     const condition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
@@ -172,7 +184,13 @@ describe('页面 handler 路由：显式 {} 与合法条件仍正常（相邻正
     await flushPromises()
 
     expect(execution.ok).toBe(true)
-    expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
+    expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions.CURRENCY).toEqual(condition)
+
+    await confirmStep()
+    await flushPromises()
+
+    expect(api.setCondition).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
   })
 })

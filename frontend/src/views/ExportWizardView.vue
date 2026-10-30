@@ -149,7 +149,8 @@ import { useI18n } from 'vue-i18n'
  *
  * 与蓝本的关键差别（功能差异，理由见证据文档 V6）：
  * 1. 条件表单与选中集**落库**（`POST /tasks/{id}/select-defs`、`PUT /tasks/{id}/items/{code}/condition`），
- *    刷新页面/换机恢复不丢；蓝本是前端 stepData 单存；
+ *    刷新页面/换机恢复不丢；蓝本是前端 stepData 单存。**写入点只有一个**：`persistStepData`
+ *    （推进步骤 `confirm_step` / 开始导出），AI 的 `set_condition` 只改页面草案，不写业务后台；
  * 2. 导出结果来自后端已落盘的 EXPORT 文件（`GET /tasks/{id}/files/{code}`）而不是内存行数组，
  *    与后端 ExportJobRunner/发布链路同源；
  * 3. 进度通道为 SSE（`JOB_PROGRESS`/`JOB_DONE`）+ 轮询兜底，蓝本是纯轮询。
@@ -237,6 +238,13 @@ interface ExportResultItem {
 
 /** 步骤 key（与后端 @ToolScope 标签一致） */
 const STEP_KEYS = TaskSteps.EXPORT
+/**
+ * 「查询条件」步的下标：**离开**该步时，条件草案才提交给任务（`goStep → persistStepData`）。
+ *
+ * 为什么单独成一个常量：空白草案默认不写（防止把"还没水合/没改"当成"无条件"），唯一例外是
+ * 离开本步时提交 `{}` 表示"明确不设"（承接宿主条件表留空后的 `confirm_step`）。
+ */
+const QUERY_COND_STEP_INDEX = STEP_KEYS.findIndex((key) => key === 'QUERY_COND')
 /** 步骤文案（与蓝本同名页一致；i18n L-69：label 由 locale 派生，渲染期读 ⇒ 切语言即重算） */
 const WIZARD_STEPS = computed(() => [
   { key: STEP_KEYS[0], label: t('views.export.steps.select') },
@@ -516,6 +524,17 @@ function defName(code: string): string {
 
 function fieldsOf(code: string): readonly ConfigField[] {
   return defOf(code)?.fields ?? []
+}
+
+/**
+ * 任务条目里**服务端**现存的条件（`conditionJson`）；`null` = 没有条件 / 读不到 / 任务未加载。
+ *
+ * 用途：空草案的 `{}` 提交只允许发生在"服务端本来就没条件"的情形 —— 服务端已有条件
+ * （别的客户端 / 另一次 AI 刚写、本页草案还没水合到）时空草案不得覆盖它。
+ */
+function serverConditionOf(code: string): FieldQueryCondition | null {
+  const item = (task.value?.items ?? []).find((entry) => entry.defCode === code)
+  return parseConditionJson(item?.conditionJson)
 }
 
 /**
@@ -1163,6 +1182,8 @@ async function persistStepData(
     if (generation !== taskGeneration) {
       return { ok: false, reason: '任务已切换，本次未落库（未把上一个任务的选中集写到新任务上）' }
     }
+    // 当前步是不是「查询条件」步：只有**离开**它时，空白草案才需要显式提交 `{}`（"明确不设"）。
+    const leavingQueryCond = stepIndex.value === QUERY_COND_STEP_INDEX
     for (const code of selectedDefs.value) {
       const model = draftModels[code]
       if (!model) {
@@ -1172,18 +1193,26 @@ async function persistStepData(
       // `InvalidConditionInputError` 由下方 catch 统一成文（condErrors + 阻断建作业），
       // 绝不把"非法空输入"当"全部数据"落库（否则一次切步就变成全量导出）。
       const condition = assertConditionBuildable(model)
-      // 未改动且带 `verbatim` ⇒ **不写**：服务端保存的就是这份原条件（AI `set_condition` 已按
-      // 原样落库，或从任务 `conditionJson` 恢复），按字段合并出来的结果与之等价；再 PUT 一次
-      // 只是重复网络写，且在"服务端已被别处（另一次 AI / 用户操作）更新"时会把旧值写回去。
+      // 未改动且带 `verbatim` ⇒ **不写**：服务端保存的就是这份原条件（从任务 `conditionJson`
+      // 恢复），按字段合并出来的结果与之等价；再 PUT 一次只是重复网络写，且在"服务端已被
+      // 别处（另一次 AI / 用户操作）更新"时会把旧值写回去。
       // 真正改动过（`touchedConditions`）才按合并结果落库 —— 那才是"界面上的新条件"。
+      // （AI `set_condition` 只写草案并登记 touched，因此它设置的条件仍然会在本提交点落库。）
       if (!touchedConditions.has(code) && model.verbatim !== undefined) {
         continue
       }
-      // 草案未改且解析为空 ⇒ **什么都不写**。服务端可能已有 AI 设置的条件（页面草案只是
+      // 草案未改且解析为空 ⇒ **默认什么都不写**。服务端可能已有 AI 设置的条件（页面草案只是
       // 还没载入/没回填）；这里一度无条件下发 `{}`，等于把"AI 说设了条件"改成"无条件导出全量"。
       // 草案改过的（用户/AI 动过表单，含"故意清空"）与非空条件照原样落库。
+      //
+      // 唯一例外（2026-10-30 提交点收口）：**离开查询条件步**时，若草案确已按服务端事实水合
+      // （`taskDetailReady`）且服务端本来就没有条件，提交 `{}` 是"明确不设"的反馈 —— 否则
+      // 宿主把条件表留空后 `confirm_step`，后端条件闸看不到任何结算证据。选择配置步（以及
+      // 服务端已有条件）绝不因空草案写条件。
       if (!touchedConditions.has(code) && isConditionEmpty(condition)) {
-        continue
+        if (!leavingQueryCond || !taskDetailReady.value || !isConditionEmpty(serverConditionOf(code))) {
+          continue
+        }
       }
       await tasksApi.setCondition(forTask, code, stringifyCondition(condition))
       if (generation !== taskGeneration) {
@@ -2519,8 +2548,8 @@ function registerHandlers(): void {
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
   })
 
-  registerPageHandler('export.setConditions', async (payload, lifetime) => {
-    // 施工卡 §S3e（§2.4 零写清单：setCondition 页面 + AI handler 两处）：只读态拦在落库之前
+  registerPageHandler('export.setConditions', (payload, lifetime) => {
+    // 施工卡 §S3e（§2.4 零写清单）：只读态拦在写草案之前
     if (isReadOnly.value) {
       return '任务已结束，仅供查看，未设置查询条件'
     }
@@ -2532,7 +2561,7 @@ function registerHandlers(): void {
     if (!defCode) {
       // R6：**必须结构化失败**。字符串返回会被 `interpretHandlerOutcome` 当成功（兼容解读），
       // 缺参就变成"假成功"（AI 以为条件已设置，实际什么都没写）。
-      return { ok: false, reason: '缺少 defCode，未设置条件（未落库、未改动页面条件）' }
+      return { ok: false, reason: '缺少 defCode，未设置条件（未改动页面条件）' }
     }
     // R5：`conditions` 必填 —— 漏参（缺键 / undefined / null）必须明确失败，不能走
     // `validateConditionPayload(undefined)` 的"无法序列化"模糊文案，更不能补 `{}` 当清空。
@@ -2541,70 +2570,52 @@ function registerHandlers(): void {
       || payload.conditions === null) {
       return {
         ok: false,
-        reason: '缺少 conditions（查询条件对象；清空条件请显式传空对象）：本次未设置查询条件（未落库、未改动页面条件）'
+        reason: '缺少 conditions（查询条件对象；清空条件请显式传空对象）：本次未设置查询条件（未改动页面条件）'
       }
     }
     // 先校验、后写（R4 返修）：统一复用契约层同一个载荷校验 —— `validateConditionPayload`
     // 内含 `parseConditionJson → draftModelFromCondition → buildConditionOutcome`，并**先做**
     // 结构完整性检查。旧实现只靠 `parseConditionJson` 的 null：空串 / 坏 JSON / 非对象 /
-    // 结构坏全被当成 "cleared"，于是 PUT "{}" 清空并回成功（把坏载荷静默变成全量导出）。
+    // 结构坏全被当成 "cleared"，于是当"显式清空"并回成功（把坏载荷静默变成全量导出）。
     const verdict = validateConditionPayload(payload.conditions)
     if (!verdict.ok) {
       const reason = verdict.issues !== undefined && verdict.issues.length > 0
         ? `${describeConditionInputIssues(verdict.issues)} 本次未设置 ${defCode} 的查询条件`
-          + '（未落库、未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
+          + '（未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
           + '要表达"空值判断"请用 EMPTY / NOT_EMPTY。'
         : verdict.reason
       return { ok: false, reason }
     }
     const condition = verdict.condition
-    // 校验通过：此时才写页面状态（草案 / 已改登记 / 行数预览失效）
+    // 校验通过：只写**页面草案**（草案 / 已改登记 / 行数预览失效）。
+    //
+    // 2026-10-30 提交点收口：这里**不**写业务后台。任务条目的 `conditionJson` 只在
+    // `goStep → persistStepData`（`confirm_step`）与 `startExport` 两个提交点统一落库 ——
+    // 设置条件就 PUT 会让"仅仅表达查询意图"变成一次业务写，并在 confirm_step 时重复写一遍。
     draftModels[defCode] = draftModelFromCondition(condition)
-    // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此落库（含故意清空为无条件）
+    // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此提交（含故意清空为无条件）
     touchedConditions.add(defCode)
     counts[defCode] = null
     const summary = conditionSummary(condition)
+    // 工作区是**页面态**（AI 上下文里的"查询意图"），立刻同步让模型看到自己刚设的条件；
+    // 但这不是落库 —— 提交发生在推进步骤 / 开始导出时。
+    if (condition === null) {
+      // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与契约层同形）
+      workspace.clearQueryConditions(defCode)
+    } else {
+      workspace.setQueryConditions(defCode, condition)
+    }
     if (taskId.value === null) {
-      return `已设置 ${defCode} 的查询条件：${summary}（当前未绑定任务，条件只存在于本页表单，推进步骤时会尝试落库）`
+      return `已设置 ${defCode} 的查询条件草案：${summary}（当前未绑定任务，条件只存在于本页表单；`
+        + '推进步骤或开始导出时一并提交）'
     }
-    // F1（DC-14）：与 confirm_step 同口径 —— 设置即落库，不再"只在推进步骤时落库"。
-    // 为什么必须落库：后端 conditionJson 是导出作业与 data 列表的**唯一**条件来源；
-    // 只写表单模型的话，AI 说"已设置条件"之后若用户没点下一步就刷新（或直接由 AI 触发起作业），
-    // 落库的条件仍是旧的 —— 表现为"AI 说设了但导出全量"。
-    // B：PUT 之后的工作区写回要核对任务代次 —— 在途换任务时，这条条件属于旧任务，
-    // 写到新任务的工作区就是"说 A 实际给 B"（与导入侧模式写回同口径）。
-    const generation = taskGeneration
-    const forTask = taskId.value
-    try {
-      await tasksApi.setCondition(forTask, defCode, verdict.serialized)
-      if (generation !== taskGeneration || taskId.value !== forTask) {
-        return `查询条件已提交给任务 #${forTask}，但页面已切换到别的任务：本次未写入当前任务的工作区`
-      }
-      if (uiAbandoned(lifetime)) {
-        // 已作废（预算到点 / 停止）：PUT 已发出无法撤回，但工作区不得再写 —— 否则一次
-        // 已回灌"超时/已停止"的动作又会在上下文里变成"条件已同步"。
-        return {
-          ok: false,
-          reason: `前端工具预算已到点或本轮已停止：查询条件已提交给任务 #${forTask}，未写入当前工作区`
-        }
-      }
-      // 已落库 ⇒ 草案与服务端一致，后续切步不必重复写（失败则保留登记，切步时重试）
-      touchedConditions.delete(defCode)
-      if (condition === null) {
-        // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与契约层同形）
-        workspace.clearQueryConditions(defCode)
-      } else {
-        workspace.setQueryConditions(defCode, condition)
-      }
-      return `已设置 ${defCode} 的查询条件并落库：${summary}`
-    } catch (error) {
-      if (generation !== taskGeneration || taskId.value !== forTask) {
-        return `查询条件提交给任务 #${forTask} 失败：${error instanceof Error ? error.message : String(error)}（页面已切换到别的任务，本次未改动当前页面）`
-      }
-      const reason = error instanceof Error ? error.message : String(error)
-      return `已设置 ${defCode} 的查询条件（${summary}），但落库失败：${reason}。`
-        + '请提示用户先在「选择配置」步勾选该配置项，或手动在界面上重设条件。'
+    if (!selectedDefs.value.includes(defCode)) {
+      // 提交点只遍历选中集：未勾选的配置项没有任务条目，条件无法在推进步骤时提交 ——
+      // 回执必须如实说明，别让模型以为"条件已就绪"。
+      return `已设置 ${defCode} 的查询条件草案：${summary}（该配置项不在当前选中集：推进步骤时不会提交，`
+        + '请先在「选择配置」步勾选它）'
     }
+    return `已设置 ${defCode} 的查询条件草案：${summary}（推进步骤或开始导出时一并提交给任务 #${taskId.value}）`
   })
 
   registerPageHandler('export.start', async (_payload, lifetime) => {
