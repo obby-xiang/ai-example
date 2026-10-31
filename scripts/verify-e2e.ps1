@@ -1845,6 +1845,57 @@ function Gf-FinalAssistantText($sessionId) {
     return [string]$asst[$asst.Count - 1].text
 }
 
+# **某一次回灌那一轮**的助手文本（回显断言的作用域，2026-10-31 复盘 CI run41180685589）：
+# 先在会话记忆里定位本次回灌对应的 TOOL 段（`toolResponses[].id` == 本次 toolCallId），再只收它
+# 之后、**下一条工具结果之前**的助手文本 —— 那才是"这一次回灌的那一轮"的模型输出。
+# 为什么不能取会话最后一条：GF2 的现场里宿主条件表（`ConditionsForm#parkIfDueAtQueryCond`）是在
+# **续跑交棒给模型之前**挂起的（ResumeService 的确定性步骤动作先于模型），驱动取消它之后模型还会
+# 再答一次；旧实现取最后一条即把作用域错配到它（CI 报"值回显缺 exportScope=ALL"）。
+# 宿主表管道（`$transparentToolCallIds` = 驱动按 purpose 识别并取消掉的宿主表 toolCallId）在轮次
+# 边界上**透明**：它的工具调用/结果由宿主挂起、由驱动取消，不是模型自发的工具轮，模型对本次回灌
+# 的续答会落到它之后（同一轮）。其余工具轮仍按"出现新工具结果 = 本轮结束"截断，不跨轮借位。
+# 判据不放宽：轮内文本仍必须包含**实际回灌的全部值**（Gf-Assert-Echo）。
+function Gf-RoundAssistantText($sessionId, $toolCallId, [string[]]$transparentToolCallIds = @()) {
+    if (-not $toolCallId) { throw "会话 $sessionId 回显断言缺 toolCallId（无法定位回灌那一轮）" }
+    $transparent = @{}
+    foreach ($t in @($transparentToolCallIds)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$t)) { $transparent[[string]$t] = $true }
+    }
+    $hist = GetJson "/api/ai/history/$sessionId"
+    $msgs = @($hist.messages)
+    $idx = -1
+    for ($i = 0; $i -lt $msgs.Count; $i++) {
+        $ids = @(@($msgs[$i].toolResponses) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
+        if ($ids -contains [string]$toolCallId) { $idx = $i; break }
+    }
+    if ($idx -lt 0) { throw "会话 $sessionId 历史里没有 toolCallId=$toolCallId 的工具结果段（回显断言无作用域）" }
+    $texts = New-Object System.Collections.ArrayList
+    $sawAsst = $false
+    for ($i = $idx + 1; $i -lt $msgs.Count; $i++) {
+        $m = $msgs[$i]
+        $respIds = @(@($m.toolResponses) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
+        $callIds = @(@($m.toolCalls) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
+        $hasResp = $respIds.Count -gt 0 -or $m.type -eq 'TOOL'
+        if ($hasResp) {
+            # 宿主表管道的结果不进轮次边界；还没产出助手消息的工具结果与本次回灌同批（并行调用）也属本轮。
+            if ($respIds.Count -gt 0 -and @($respIds | Where-Object { -not $transparent.ContainsKey($_) }).Count -eq 0) { continue }
+            if ($sawAsst) { break }
+            continue
+        }
+        if ($m.type -eq 'USER') { break }   # 新用户消息 = 新轮次
+        if ($m.type -eq 'ASSISTANT') {
+            # 只承载宿主表调用的助手消息（文本为空）同样透明，不算"本轮已产出助手消息"。
+            $carrierTransparent = $callIds.Count -gt 0 -and @($callIds | Where-Object { -not $transparent.ContainsKey($_) }).Count -eq 0
+            if (-not $carrierTransparent) { $sawAsst = $true }
+            if (-not [string]::IsNullOrWhiteSpace([string]$m.text)) { $texts.Add([string]$m.text) | Out-Null }
+        }
+    }
+    if ($texts.Count -lt 1) {
+        throw "CLARIFY 轮（toolCallId=$toolCallId）没有助手文本：回灌后模型未在本轮产出回显（后续其它工具轮次的文本不借位）"
+    }
+    return ($texts -join "`n")
+}
+
 # 值回显断言（裁决 #1）：会话最终助手文本必须包含**本次实际回灌的全部值**。
 # 关键：断言对象取自**实际 POST 的值 JSON**（$postedJson），而不是提示词里列出的字段——
 # 因为设计上"required=false 的字段被 New-FormValues 跳过"（验证可选字段缺省合法），
@@ -2016,7 +2067,9 @@ try {
         if ($gf2Purpose -eq 'SET_CONDITIONS') {
             # 宿主条件表：只取消，不占 gf2Run/gf2Call，也不参与 CLARIFY 的任何断言。
             # 计数用 +=（`++` 会把旧值写进管道，污染回调的返回值 → Invoke-FormTurn 读不到 payload）。
+            # 记下它的 toolCallId：回显断言用它把宿主表管道在轮次边界上标为透明（见 Gf-RoundAssistantText）。
             $script:gf2HostForms += 1
+            $script:gf2HostCalls += @([string]$f.toolCallId)
             return @{ payload = @{ cancelled = $true; source = 'e2e-host' } }
         }
         $script:gf2Run = $runId
@@ -2046,6 +2099,7 @@ try {
         $script:gf2Run = $null
         $script:gf2Call = $null
         $script:gf2HostForms = 0
+        $script:gf2HostCalls = @()
         $script:gf2PostIndex = -1
         # 挂起轮数上限 6：宿主条件表 + CLARIFY 表 + 可能的追加挂起面都在同一条 turn 里
         $turn = Invoke-FormTurn $sessionGf2 $promptGf2 $ctxGf2 $handlerGf2 6
@@ -2093,15 +2147,19 @@ try {
     if ($ftr.Count -ne 1 -or $ftr[0].ok -ne $true) { throw "frontend_tool_result 异常（$($ftr.Count) 条 / ok=$($ftr[0].ok)）" }
     if (@($turn.frames | Where-Object { $_.type -eq 'done' }).Count -ne 1) { throw 'done 帧不恰为 1 条' }
     if (@($turn.frames | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw '出现 error 帧' }
-    # A6 值回显（裁决 #1）：权威通道 = 会话记忆的最终助手文本（服务端持久化）。delta 通道降级为纯 INFO。
-    $echoGf2 = Gf-FinalAssistantText $sessionGf2
+    # A6 值回显（裁决 #1）：证据通道仍是会话记忆的助手文本（服务端持久化），但**作用域限定到 CLARIFY
+    # 这一轮**——从本次回灌的 TOOL 段起、到下一条（非宿主表）工具结果止。宿主条件表由宿主挂起、由驱动
+    # 取消，在轮次边界上透明：模型对 CLARIFY 回灌的续答会落到它之后（`scripts/ci/stub-upstream.mjs` 的
+    # GF-CLARIFY 轮次按真实模型行为同时复述回灌值与宿主表取消）。取会话最后一条即错配到别轮。
+    # 判据不放宽：本轮文本必须包含实际回灌的全部值。delta 通道仍降级为纯 INFO。
+    $echoGf2 = Gf-RoundAssistantText $sessionGf2 $script:gf2Call $script:gf2HostCalls
     Gf-Assert-Echo 'GF2' $echoGf2 $script:gf2Posted
     $deltaGf2 = ($turn.frames | Where-Object { $_.type -eq 'delta' } | ForEach-Object { [string]$_.text }) -join "`n"
     Write-Host ("  [INFO] GF2 delta 弱旁证（不判 FAIL）：{0}" -f $(if ($deltaGf2) { "采到 $($deltaGf2.Length) 字符" } else { '未采到（回灌→重挂间隙，属预期）' })) -ForegroundColor DarkGray
     # A7 fixture 用例内自删
     DeleteJson "/api/tasks/$tGf2" | Out-Null
     Gf-Dump 'GF2' $turn.frames
-    Ok ("GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（会话记忆通道，断言对象=实际回灌值）+ fixture 自删（宿主条件表取消 {0} 条）" -f $script:gf2HostForms)
+    Ok ("GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（CLARIFY 轮助手文本，断言对象=实际回灌值）+ fixture 自删（宿主条件表取消 {0} 条）" -f $script:gf2HostForms)
 } catch {
     if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF2' $_.Exception.Message.Substring(8); Gf-Dump 'GF2' $turn.frames }
     else { Gf-Converge $script:gf2Run $script:gf2Call; Gf-Dump 'GF2' $turn.frames; No 'GF2' $_.Exception.Message }

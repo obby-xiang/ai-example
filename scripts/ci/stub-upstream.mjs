@@ -649,6 +649,39 @@ function echoText(messages) {
 }
 
 /**
+ * 续轮要「复述**本轮全部**工具结果」的路由（2026-10-31，GF2 收尾）。
+ *
+ * 真实模型在同一轮里收到多个工具结果时会一起复述；桩的默认策略仍是只回显**最后一个**（{@link echoText}）。
+ * GF2 现场恰恰是两个结果同批进模型：`generative_form`（CLARIFY）回灌成功 + 宿主条件表取消
+ * （`host-cond-form-*`，`FRONTEND_CANCELLED`）—— 只回显最后一个就把 CLARIFY 的回填值从助手文本里
+ * 彻底抹掉，`Gf-Assert-Echo` 无值可断言。故只对这些**路由**的轮次逐条复述（按本提示词的轮次台账
+ * `bucket.used` 判定，见 {@link decide}），其余路由的续轮文本逐字节不变。
+ */
+const ECHO_ALL_ROUND_ROUTES = new Set(['GF-CLARIFY'])
+
+/**
+ * 逐条复述本轮工具结果（仅供 {@link ECHO_ALL_ROUND_ROUTES} 命中的轮次使用）：每个可解析的工具结果
+ * 各出一段 `key=值`；多于一个结果时在段首标注序号与来源，保持输出确定。
+ */
+function echoRoundText(messages) {
+  const results = roundToolResults(messages)
+  const labels = results.map((m) => String(m?.name || m?.tool_call_id || 'tool'))
+  const blocks = []
+  results.forEach((message, index) => {
+    const parsed = extractJsonObject(textOf(message))
+    if (!parsed) return
+    const keys = Object.keys(parsed)
+    if (keys.length === 0) return
+    const lines = []
+    if (results.length > 1) lines.push(`[${index + 1}/${results.length}] ${labels[index]}`)
+    for (const key of keys) lines.push(`${key}=${formatValue(parsed[key])}`)
+    blocks.push(lines.join('\n'))
+  })
+  if (blocks.length === 0) return CLOSING_TEXT
+  return ['已按 key=值 原样回报（本轮全部工具结果）：', ...blocks].join('\n')
+}
+
+/**
  * **本轮**已出现的工具结果 = 最后一条 `user` 消息之后的 `role=tool`（收敛契约 ③ 的判据）。
  *
  * 判据必须按「本轮起点」裁，不能按「上下文里有没有 role=tool」：新用户轮的上下文同样带着
@@ -698,8 +731,15 @@ function decide(body, routes, turns, overrides = {}) {
   bucket.calls += 1
 
   if (roundToolResults(messages).length > 0) {
-    // 收敛契约 ③：本轮已出现工具结果 = 续轮，只发文本
-    return { kind: 'text', text: echoText(messages), reason: '续轮（本轮已出现工具结果）' }
+    // 收敛契约 ③：本轮已出现工具结果 = 续轮，只发文本。
+    // 回显策略按本提示词的轮次台账（`bucket.used` = 本轮已命中的路由，即发起那几次工具调用的路由）：
+    // 只有 ECHO_ALL_ROUND_ROUTES 里的路由逐条复述本轮全部结果，其余仍只回显最后一个（逐字节不变）。
+    const echoesAll = bucket.used.some((id) => ECHO_ALL_ROUND_ROUTES.has(id))
+    return {
+      kind: 'text',
+      text: echoesAll ? echoRoundText(messages) : echoText(messages),
+      reason: '续轮（本轮已出现工具结果）'
+    }
   }
   if (bucket.calls > maxCalls) {
     // 收敛契约 ②：轮次上限兜底
@@ -1647,6 +1687,42 @@ function selfCheck() {
     if (tail.kind !== 'text') bad(`新用户轮自证：路由 ${route.id} 的新轮内续轮仍发起工具调用（契约 ③ 被放宽）`)
   }
   ok('新用户轮自证通过（历史里的工具结果不被误判为续轮；新轮内的续轮仍只发文本）')
+
+  section()
+  // ④d 续轮回显策略自证（2026-10-31）：ECHO_ALL_ROUND_ROUTES 里的路由（GF2 = CLARIFY 回灌 +
+  // 宿主条件表取消同批）续轮要复述**本轮全部**工具结果；其余路由的续轮文本仍只含最后一个结果。
+  // 判据直接跑 decide()，不复制实现——策略漂移即红（与 ③/④/④c 同一口径）。
+  const roundEnvelopes = [
+    { id: 'c1', content: '<tool_result>{"ok":true,"message":"{\\"exportScope\\":\\"ALL\\",\\"includeInactive\\":true}"}</tool_result>' },
+    { id: 'host-1', content: '<tool_result>{"ok":false,"code":"FRONTEND_CANCELLED","outcome":"cancelled"}</tool_result>' }
+  ]
+  for (const route of ROUTES.routes || []) {
+    // 每条路由独立台账：路由可共用同一 match 提示词，共用台账会让"本轮已用路由"互相污染。
+    const echoSim = new Map()
+    const userText = (route.match?.messageAny || [])[0]
+    const tools = route.match?.requiresTools || []
+    const base = [{ role: 'system', content: 'sys' }, { role: 'user', content: userText }]
+    const first = decide({}, ROUTES, echoSim, { messages: base, tools })
+    if (first.kind !== 'tool_call') continue
+    const messages = base.concat(
+      roundEnvelopes.flatMap((env) => [
+        { role: 'assistant', content: '', tool_calls: [{ id: env.id, type: 'function', function: { name: route.tool, arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: env.id, name: route.tool, content: env.content }
+      ])
+    )
+    const d = decide({}, ROUTES, echoSim, { messages, tools })
+    const text = String(d.text || '')
+    const hasFirst = text.includes('exportScope')
+    const hasLast = text.includes('FRONTEND_CANCELLED')
+    if (ECHO_ALL_ROUND_ROUTES.has(route.id)) {
+      if (d.kind !== 'text' || !hasFirst || !hasLast) {
+        bad(`续轮回显自证：路由 ${route.id} 的续轮文本未同时复述本轮全部工具结果（首结果=${hasFirst} 末结果=${hasLast}）`)
+      }
+    } else if (hasFirst || !hasLast) {
+      bad(`续轮回显自证：路由 ${route.id} 不在复述全部结果的路由内，续轮文本却偏离"只回显最后一个"（首结果=${hasFirst} 末结果=${hasLast}）`)
+    }
+  }
+  ok('续轮回显策略自证通过（复述全部结果的路由逐条复述；其余路由仍只回显最后一个结果）')
 
   section()
   // ⑤ 披露清单驱动：tools[] 为空时不得发出任何工具调用
