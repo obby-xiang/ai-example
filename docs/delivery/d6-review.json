@@ -189,6 +189,13 @@
       "reason": "已同步会话任务草案改为单键原子写（HSET+PEXPIRE 同批）：失败或进程中断不再留下无 TTL 的残留键，键族/身份隔离/会话销毁单键 DEL 与扫描边界不变",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:8810ab171f3339dc4a0d21ddcaa5a5a31bd961556dc4cf3922eeb8c1700d8ada",
+      "status": "not-affected",
+      "reason": "本批仅在前端既有刷新恢复链路增加快照对账与步骤幂等保护，不新增或改变迁移接口、存储键及跨实例契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

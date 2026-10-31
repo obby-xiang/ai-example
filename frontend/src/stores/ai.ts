@@ -42,10 +42,11 @@ import {
 } from '@/api/sse'
 import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
+import { TaskSteps } from '@/types/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
-import { UI_HANDOFF_TOOLS, normalizeWorkspaceActionSource } from '@/types/tools'
+import { UI_HANDOFF_TOOLS, findFrontendTool, normalizeWorkspaceActionSource } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
@@ -1695,6 +1696,118 @@ const frontendToolsInFlight = new Set<string>()
  * 且不含任何内部栈/技术措辞。
  */
 const EXECUTOR_CRASH_TEXT = '前端工具执行异常，本次未完成。请提示用户手动重试'
+
+/**
+ * 刷新回放期间的后端条目事实（F6 残留，2026-11-01）。
+ *
+ * <h2>为什么还需要它</h2>
+ * 上一轮的两道防线都只覆盖"本地知道这条已决"的情形：
+ * <ul>
+ * <li>旁路保留的已决 id（{@link replayedDecidedToolCalls}）—— 段在本地是 `running` 时不是已决，
+ *   进不去；</li>
+ * <li>执行中占位（{@link frontendToolsInFlight}）—— 内存态，刷新即空。</li>
+ * </ul>
+ * 于是"工具已经真的执行完、但回灌 POST 还在途 / 结果帧还没到"的刷新现场，重放会**再执行一遍**
+ * （`confirm_step` 二次推进、`set_condition` 二次落库），而 409 只能拒绝回灌、撤不回副作用。
+ * 唯一能证明"这条已经执行过"的外部事实是后端快照：`runs/current.pendingEntries` 里该条目
+ * **已非 PENDING**。故重放前把这份事实记下来，逐条（按 toolCallId）对账 —— 已决的只补展示。
+ *
+ * <p>`trusted === false`（拿不到条目清单 / 形状不可信）：本页签无法证明任何写工具是否已经执行过
+ * ⇒ 重放期间**保守不执行有副作用的工具**，并给一条可恢复提示（宁可少做、绝不多做）。
+ */
+interface ReplayToolFacts {
+  runId: string
+  /** 后端快照里**已非 PENDING** 的 toolCallId（权威已决） */
+  decided: Set<string>
+  /** 条目清单是否可用（false = 读不到 ⇒ 写工具一律不执行） */
+  trusted: boolean
+}
+
+let replayToolFacts: ReplayToolFacts | null = null
+
+function replayFactsOf(runId: string, entries: AiRunCurrentEntry[] | undefined): ReplayToolFacts {
+  if (!Array.isArray(entries)) {
+    return { runId, decided: new Set(), trusted: false }
+  }
+  return {
+    runId,
+    decided: new Set(
+      entries
+        .filter((item) => item !== null && item !== undefined
+          && typeof item.toolCallId === 'string' && item.toolCallId !== '')
+        .filter((item) => item.entryStatus !== 'PENDING')
+        .map((item) => item.toolCallId)
+    ),
+    trusted: true
+  }
+}
+
+function clearReplayToolFacts(): void {
+  replayToolFacts = null
+}
+
+/**
+ * 有副作用的工具名（重放期间"无法证明已执行"时一律不执行）。
+ *
+ * <p>两份来源：工作区动作表里的写动作（`select_definitions` / `set_condition` / `confirm_step`
+ * 及其蓝本别名 —— 它们不在 `FRONTEND_TOOLS` 里），以及 `FRONTEND_TOOLS` 中 `riskLevel !== 'READ'`
+ * 的登记工具。只读工具不在此列：保守策略不该把"读一读"也停掉。
+ */
+const SIDE_EFFECT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'select_definitions',
+  'select_config_defs',
+  'set_condition',
+  'set_query_conditions',
+  'confirm_step',
+  'goto_step',
+  'advance_step'
+])
+
+function isSideEffectFrontendTool(name: string): boolean {
+  if (SIDE_EFFECT_TOOL_NAMES.has(name)) {
+    return true
+  }
+  const descriptor = findFrontendTool(name)
+  return descriptor !== null && descriptor.riskLevel !== 'READ'
+}
+
+/** 无快照事实时跳过的写工具回执（落段 + 回灌给模型）。 */
+const REPLAY_UNVERIFIED_RECEIPT = '刷新恢复时未能确认本轮工具的执行状态，已跳过本步以避免重复执行。'
+  + '请提示用户刷新页面后重试，或由用户手动完成这一步。'
+
+/** 同上的用户可见提示（可恢复：刷新后重试）。 */
+const REPLAY_UNVERIFIED_NOTICE = '刷新恢复时未取到本轮的执行快照，已跳过可能有副作用的操作；'
+  + '请刷新页面后重试。'
+
+/** `confirm_step` 的三种到达名（工具名与两个蓝本别名，见 WORKSPACE_ACTION_ALIASES）。 */
+const CONFIRM_STEP_TOOL_NAMES: ReadonlySet<string> = new Set(['confirm_step', 'goto_step', 'advance_step'])
+
+/**
+ * 目标步骤是否**已经到达**（`confirm_step` 幂等判据，F6 残留 2026-11-01）。
+ *
+ * <p>步骤顺序取 {@link TaskSteps}：当前步骤 = 目标 ⇒ 已达；当前步骤在目标**之后**（或已是终态
+ * `DONE`）⇒ 也已达（再推进只会后退或二次落库）；仍在前序步骤 ⇒ 未达。任一步骤不在本任务类型
+ * 的顺序表里（含步骤未知）⇒ 未达 —— 判据不猜。
+ */
+function stepAlreadyReached(
+  current: string | null,
+  target: string,
+  taskType: 'EXPORT' | 'IMPORT' | null
+): boolean {
+  if (current === null || current === '') {
+    return false
+  }
+  if (current === target || current === TaskSteps.DONE) {
+    return true
+  }
+  if (taskType !== 'EXPORT' && taskType !== 'IMPORT') {
+    return false
+  }
+  const order: readonly string[] = taskType === 'EXPORT' ? TaskSteps.EXPORT : TaskSteps.IMPORT
+  const currentIndex = order.indexOf(current)
+  const targetIndex = order.indexOf(target)
+  return currentIndex >= 0 && targetIndex >= 0 && currentIndex >= targetIndex
+}
 
 /* ============================ 批次7B（P1⑤）：镜像增量 / 有界 / idle 落盘 ============================
  * 旧实现每次节流窗口都把**整个会话**重新 deep `JSON.stringify`（O(会话)），长会话在流式每帧
@@ -4354,6 +4467,10 @@ export const useAiStore = defineStore('ai', {
           part.kind === 'tool' && isFrameDecidedPendingStatus(part.status) ? [part.toolCallId] : []
         )
       )
+      // F6 残留（2026-11-01）：本地段仍 `running`（执行完但回灌在途 / 结果帧未到）时旁路里没有它，
+      // 唯一能证明"已经执行过"的是后端快照。按 toolCallId 逐条记下**已非 PENDING** 的条目 ——
+      // 重放时它们只补展示、不再执行；条目清单不可用则记 untrusted（写工具一律不执行）。
+      replayToolFacts = replayFactsOf(runId, current.pendingEntries)
       // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
       host.parts = [{ kind: 'text', seg: 0, text: '', streaming: true }]
       host.content = ''
@@ -5783,6 +5900,13 @@ export const useAiStore = defineStore('ai', {
       this.clearQueuedForms()
       const previous = currentAbort
       const lastSeq = options.lastSeq ?? this.runSeq[targetRunId]
+      // F6 残留（2026-11-01）：**全量重放**（lastSeq 为 0 / 缺省）而调用方没有给出后端条目事实
+      // ⇒ 本页签无法证明哪些有副作用的工具已经执行过：记 untrusted，重放期间写工具一律不执行
+      // （restoreInFlightRound 会先以可信事实置位，故这里不会覆盖它）。
+      if ((lastSeq ?? 0) === 0
+        && (replayToolFacts === null || replayToolFacts.runId !== targetRunId)) {
+        replayToolFacts = { runId: targetRunId, decided: new Set(), trusted: false }
+      }
       const host = options.hostMessageId
         ? this.messages.find((item) => item.id === options.hostMessageId)
         : [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
@@ -8088,6 +8212,8 @@ export const useAiStore = defineStore('ai', {
       clearFrontendToolChains()
       // #1：停止 = 放弃这一轮 ⇒ 回放保留的"已决 id"也随轮作废（不带到后续任何一轮）
       clearReplayedDecidedTools()
+      // F6 残留：回放期后端条目事实同属这一轮，随停止作废
+      clearReplayToolFacts()
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
@@ -8616,6 +8742,8 @@ export const useAiStore = defineStore('ai', {
       clearFrontendToolChains()
       // #1：回放保留的"已决 id"属于旧会话/旧 run —— 换会话即清（不跨会话、不跨 run 生效）
       clearReplayedDecidedTools()
+      // F6 残留：后端条目事实同样属于旧会话/旧 run
+      clearReplayToolFacts()
       // M-2b：旧会话的快照串行队列不得落进新会话
       this.restoredPendingQueue = []
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
@@ -9457,12 +9585,15 @@ export const useAiStore = defineStore('ai', {
           // pending+requiresAction（挂起卡复活）。已决判据统一 8 态（含 unknown/failed/skipped）。
           // 原 GF 前缀守卫的行为对 GF 用例不变（回归锁见 frontend-tool-result-terminal.spec.ts）。
           if (this.hasDecidedPendingResidue(frame.toolCallId)
-            || frontendToolsInFlight.has(frame.toolCallId)) {
+            || frontendToolsInFlight.has(frame.toolCallId)
+            || this.replaySaysDecided(frame.toolCallId)) {
             // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
             //（不落 requiresAction 段、不置 suspended、不武装 activeForm），
             // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛。
             // #2（2026-10-31）：**执行中的同 id** 同口径拦下 —— P03 起回灌受理前段是 running，
             // 重复投递/重放若照常 apply，会把 running 翻回 pending 并再排一次执行。
+            // F6 残留（2026-11-01）：**后端快照说已非 PENDING** 的同口径拦下 —— 段在本地还是
+            // running（执行完但回灌在途）时只有快照能证明"已经执行过"，展示交给重放的结果帧。
             break
           }
           this.suspended = true
@@ -9742,6 +9873,10 @@ export const useAiStore = defineStore('ai', {
         if (terminalRunId !== null) {
           this.forgetRunStreamDrive(terminalRunId)
         }
+        // F6 残留：本轮结束 ⇒ 为它记录的后端条目事实作废（不再参与任何执行判定）
+        if (replayToolFacts !== null && replayToolFacts.runId === terminalRunId) {
+          clearReplayToolFacts()
+        }
       }
     },
 
@@ -10013,6 +10148,50 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * F6 残留（2026-11-01）：**回放快照**说该 toolCallId 已非 PENDING ⇒ 只补展示、不再执行。
+     *
+     * <p>与 {@link hasDecidedPendingResidue} 的分工：后者是本地已决（段/回放保留的 id）；
+     * 本方法读的是后端 `runs/current.pendingEntries` 的权威条目状态 —— 覆盖"本地段还是 running
+     * （执行完但回灌在途）、旁路与内存占位都没有它"的刷新现场。按 toolCallId 逐条判定，
+     * 不因某一条缺失牵连其它条目。
+     */
+    replaySaysDecided(toolCallId: string): boolean {
+      return replayToolFacts !== null
+        && replayToolFacts.runId === this.activeRunId
+        && replayToolFacts.decided.has(toolCallId)
+    },
+
+    /**
+     * F6 残留（2026-11-01）：`confirm_step` 的目标步骤是否**已经到达**（⇒ 不再重复推进）。
+     *
+     * <p>判据只看**可观测的工作区步骤**（`workspace.step`）与任务类型里的步骤顺序：
+     * 已到目标（或已越过目标 / 已是终态 DONE）⇒ 已达；仍在前序步骤 ⇒ 未达（照常执行）。
+     * 步骤未知（页面还没恢复出任务上下文）时不猜"已达"，保持既有行为（此时由快照闸兜底）。
+     */
+    confirmStepAlreadyReached(
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
+    ): Awaited<ReturnType<typeof executeFrontendTool>> | null {
+      if (!CONFIRM_STEP_TOOL_NAMES.has(frame.name)) {
+        return null
+      }
+      const args = parseToolArgs(frame.args)
+      const target = typeof args.step === 'string' ? args.step.trim() : ''
+      if (target === '') {
+        return null
+      }
+      const workspace = useWorkspaceStore()
+      if (!stepAlreadyReached(workspace.step, target, workspace.taskType)) {
+        return null
+      }
+      return {
+        ok: true,
+        outcome: 'ok',
+        availability: 'available',
+        result: `目标步骤（${target}）已到达（当前 ${workspace.step ?? '—'}），本次未重复推进向导。`
+      }
+    },
+
+    /**
      * #4（2026-10-31）：段仍无结论（pending / running）时**中性收敛**为 `unknown`（结局未知）。
      *
      * <p>只用于"这一轮的结局再也不会有人写"的出口（换轮 / 409 已决但后端没给可翻译状态）：
@@ -10094,15 +10273,38 @@ export const useAiStore = defineStore('ai', {
     /**
      * `runFrontendTool` 的执行体（去重占位在调用方，`finally` 保证释放）。
      *
-     * <p>顺序（P03 + #3 + #4）：落 running → 执行 → 回灌受理 → **仍在同轮**才落终态；
+     * <p>顺序（P03 + #3 + #4）：快照闸 → 落 running → 执行 → 回灌受理 → **仍在同轮**才落终态；
      * 409 DUPLICATE 时后端权威终态已由 {@link applyFrontendToolTerminal} 纠正，本地这次
      * （重复执行）的 outcome 不得覆盖；轮次已不在场则中性收敛，不留永久 running。
+     *
+     * <p>快照闸放在**执行体**的最前面（而不是只放在 `runFrontendTool`）：帧路是直接调本函数
+     * （占位在入队时就取），只挡入口等于没挡。
      */
     async runFrontendToolAttempt(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard
     ): Promise<void> {
+      // F6 残留（2026-11-01）：回放期间的两道快照闸 —— 都在**执行之前**，直接决定"跑不跑"。
+      if (this.replaySaysDecided(frame.toolCallId)) {
+        // 后端快照说该条目已非 PENDING ⇒ 只补展示（重放的结果帧负责落段），绝不执行
+        return
+      }
+      if (replayToolFacts !== null && replayToolFacts.runId === this.activeRunId
+        && !replayToolFacts.trusted && isSideEffectFrontendTool(frame.name)) {
+        // 条目清单不可用 ⇒ 无法证明写工具是否已执行：保守不执行 + 可恢复提示（只读工具不在此列）。
+        this.upsertToolPart(message, {
+          toolCallId: frame.toolCallId,
+          name: frame.name,
+          kind2: 'FRONTEND',
+          status: 'unknown',
+          result: REPLAY_UNVERIFIED_RECEIPT,
+          requiresAction: false
+        }, false)
+        deriveProjections(message)
+        setRawNotice(this, REPLAY_UNVERIFIED_NOTICE, 'warning')
+        return
+      }
       // AI 可视可操作专项：单轮配额与"停止后零执行"按轮次 token 归零（同 runId 不重置）
       beginUiTurn(frame.runId ?? this.activeRunId ?? 'local')
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
@@ -10118,19 +10320,25 @@ export const useAiStore = defineStore('ai', {
       }, false)
       deriveProjections(message)
       const undoBefore = peekUiUndo()
+      // F6 残留（2026-11-01）：`confirm_step` 幂等 —— 目标步骤**已经到达**（刷新回放 / 重复投递 /
+      // 回灌 409 后的重放）就不再 goStep / persistStepData：那会真的把向导再推进一次（导入向导
+      // 离开第 1 步还会整表写回服务端文件）。仍停在原步骤时才真正执行。
+      const stepAlreadyReached = this.confirmStepAlreadyReached(frame)
       // P03：执行器的未预期异常同样必须收敛（契约上它不抛，但抛出来绝不能把卡留在永久
       // 「调用中」）。`null` = 异常哨兵；正常路径照旧拿到完整执行信封。
-      let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = null
-      try {
-        execution = await executeFrontendTool({
-          name: frame.name,
-          toolCallId: frame.toolCallId,
-          runId: frame.runId ?? this.activeRunId ?? undefined,
-          args: parseToolArgs(frame.args),
-          budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
-        })
-      } catch {
-        execution = null
+      let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = stepAlreadyReached
+      if (execution === null) {
+        try {
+          execution = await executeFrontendTool({
+            name: frame.name,
+            toolCallId: frame.toolCallId,
+            runId: frame.runId ?? this.activeRunId ?? undefined,
+            args: parseToolArgs(frame.args),
+            budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
+          })
+        } catch {
+          execution = null
+        }
       }
       const stillHere = (): boolean => stillSameRound(round, this.sessionId, this.activeRunId ?? null)
       if (execution === null) {
