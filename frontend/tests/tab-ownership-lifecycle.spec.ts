@@ -111,11 +111,10 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     expect(store.tabOwnership).toBe('owner')
 
     // 原页签刷新：pagehide 只广播「让渡意向」，锁随文档销毁由浏览器裁决（此处仍在）
-    broadcast({ kind: 'released', sessionId: '9201', pageId: 'page-orig' })
+    broadcast({ kind: 'released', sessionId: '9201', pageId: 'page-orig', tenantId: 7, userId: 71 })
     await wait(OWNERSHIP_RELEASE_GRACE_MS / 3)
     expect(store.sessionId).toBe(ownSession)
-
-    // 原页签的新文档在宽限内拿到同一把锁并重新认领
+    // 空白副本已在宽限排队（资格成立）；原页签的新文档在宽限内拿到同一把锁并重新认领 ⇒ 撤销
     broadcast({ kind: 'claim', sessionId: '9201', pageId: 'page-orig' })
     await wait(GRACE_BUDGET_MS)
 
@@ -125,7 +124,7 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     expect(api.history).not.toHaveBeenCalledWith('9201')
   })
 
-  it('真关闭（锁随文档释放）⇒ 复制页签也不接手原会话（Task 4：已持有自己的会话）', async () => {
+  it('真关闭（锁随文档释放）⇒ 空白复制页签按复制来源接手原会话', async () => {
     seedTab('9202')
     locks.hold(sessionLockName('9202'))
 
@@ -134,24 +133,30 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     const ownSession = store.sessionId
     expect(ownSession).not.toBe('9202')
 
-    broadcast({ kind: 'released', sessionId: '9202', pageId: 'page-orig' })
+    broadcast({ kind: 'released', sessionId: '9202', pageId: 'page-orig', tenantId: 7, userId: 71 })
     // 宽限内不接手（旧实现会立刻抢）
     await wait(OWNERSHIP_RELEASE_GRACE_MS / 3)
     expect(store.sessionId).toBe(ownSession)
     expect(api.history).not.toHaveBeenCalledWith('9202')
 
-    // 文档销毁 ⇒ 别人的锁释放；宽限到期后本页签**不**改认原会话（发号成功即 owner，接手路径不可达）
+    // 文档销毁 ⇒ 别人的锁释放；宽限到期后按**复制来源**接手原会话（N09/M07：
+    // 角色已是 owner 的空白副本同样有资格 —— 旧实现把这条路径写成不可达）
     locks.release(sessionLockName('9202'))
     await wait(GRACE_BUDGET_MS)
+    await flushPromises()
 
-    expect(store.sessionId).toBe(ownSession)
+    expect(store.sessionId).toBe('9202')
     expect(store.tabOwnership).toBe('owner')
-    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(ownSession)
-    expect(api.history).not.toHaveBeenCalledWith('9202')
-    expect(locks.isHeld(sessionLockName('9202'))).toBe(false)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9202')
+    expect(api.history).toHaveBeenCalledWith('9202')
+    // 原会话的锁归本页签，空白会话的锁已让出
+    expect(locks.isHeld(sessionLockName('9202'))).toBe(true)
+    expect(locks.isHeld(sessionLockName(ownSession))).toBe(false)
+    // 接手是静默的：不新增提示
+    expect(store.notice).toBeNull()
   })
 
-  it('让渡广播不改变本页签会话：自己的会话与锁原样保留，也不替原会话认领', async () => {
+  it('别人的会话让渡不改变本页签会话：自己的会话与锁原样保留，也不替它认领', async () => {
     seedTab('9203')
     locks.hold(sessionLockName('9203'))
 
@@ -160,16 +165,19 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     const blankSession = store.sessionId
     expect(locks.isHeld(sessionLockName(blankSession))).toBe(true)
 
-    locks.release(sessionLockName('9203'))
-    broadcast({ kind: 'released', sessionId: '9203', pageId: 'page-orig' })
+    // 9211 不是本页签的复制来源（复制来源是 9203）⇒ 即便锁空闲也不接手（资格只认记录下来的那段）
+    locks.hold(sessionLockName('9211'))
+    locks.release(sessionLockName('9211'))
+    broadcast({ kind: 'released', sessionId: '9211', pageId: 'page-other', tenantId: 7, userId: 71 })
     await wait(GRACE_BUDGET_MS)
     await flushPromises()
 
     expect(store.sessionId).toBe(blankSession)
     // 自己的会话锁仍在手（账本不泄漏：换会话时旧锁已显式释放，这里没有多占）
     expect(locks.isHeld(sessionLockName(blankSession))).toBe(true)
-    // 原会话的锁没有被本页签冒领
-    expect(locks.isHeld(sessionLockName('9203'))).toBe(false)
+    // 别人会话的锁没有被本页签冒领
+    expect(locks.isHeld(sessionLockName('9211'))).toBe(false)
+    expect(api.history).not.toHaveBeenCalledWith('9211')
   })
 
   it('慢重载（宽限已过、会话已被副本接手）⇒ 回来的原页签不清屏/不换 id，只降级', async () => {

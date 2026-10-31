@@ -1168,6 +1168,35 @@ function takeReturnIntent(sessionId: string): boolean {
 }
 
 /**
+ * 复制来源会话（N09/M07）：被判为复制页签时记下"从哪个会话复制来的"，作为让渡**接手资格**。
+ *
+ * <p>为什么不能只看角色：复制页签判完就向后端取自己的号并认领锁 ⇒ 角色立刻是 'owner'
+ * （Task 4 口径），而 `onOwnershipMessage` 旧实现只认 'duplicate' 的页签接手 `released`
+ * —— "原页签关闭 ⇒ 空白副本接手原会话"整条路径因此**永远不可达**（关掉原页签后另一个页签
+ * 只剩一个空会话）。资格只对**这一段记录**生效（别的会话的 `released` 一律不接手，防劫持），
+ * 并在用户主动新建对话 / 切换身份时作废（那时页签已有自己的会话意图，再换会话就是串会话）。
+ */
+let handoffOrigin: { sessionId: string; fingerprint: string } | null = null
+
+function rememberHandoffOrigin(sessionId: string, identity: AiIdentity | null): void {
+  handoffOrigin = {
+    sessionId,
+    fingerprint: identity ? identityFingerprint(identity) : ''
+  }
+}
+
+function clearHandoffOrigin(): void {
+  handoffOrigin = null
+}
+
+function handoffOriginMatches(sessionId: string, identity: AiIdentity | null): boolean {
+  if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId) {
+    return false
+  }
+  return handoffOrigin.fingerprint === (identity ? identityFingerprint(identity) : '')
+}
+
+/**
  * 三层握手的判定入口（RC-4）：锁被占**限次重试**（`LOCK_PROBE_ATTEMPTS` × `LOCK_PROBE_RETRY_MS`）
  * —— 刷新场景里旧文档的锁可能尚未随文档销毁释放，早判会把刷新误判成复制品。
  *
@@ -3346,11 +3375,9 @@ export const useAiStore = defineStore('ai', {
 
     async loadHistoryInner(): Promise<void> {
       const sid = this.sessionId
-      // M-17（2026-10-29）：取历史期间用户可能已发出新一轮（`send()` 递增 `roundEpoch` 并换
-      // `currentAbort`）。轮次身份必须在入口捕获 —— 否则历史回来时会整体替换 `messages`，
-      // 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
-      const epochAtEntry = roundEpoch
-      const abortAtEntry = currentAbort
+      // M-17（2026-10-29）：取历史期间用户可能已发出新一轮。历史回来时会整体替换 `messages`
+      // —— 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
+      // 判据见下方"真轮是否占场"（R04 起不再用轮次纪元，理由在那里）。
       // I4（R1 返修）：入口时本端已有在途轮（用户在本轮里点"重试/重新载入"就是这条路）⇒ 镜像
       // 是**滞后现场**，不得先拿它把屏上本轮换掉；历史回来也只能"对账不替换"。判据放在这里而不是
       // 只靠 await 后比对：镜像物化发生在 await **之前**，只比对轮次身份拦不住它。
@@ -3438,17 +3465,19 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId !== sid) {
         return
       }
-      // M-17 / I4：取数窗口内已起新轮 / 换了连接，或**入口时本端就在途** ⇒ 这份历史属于过期现场，
+      // M-17 / I4：取数窗口内**真轮占场**，或**入口时本端就在途** ⇒ 这份历史属于过期现场，
       // 只对账不替换。保留屏上的在途现场（镜像 + 实时帧），本次历史整体丢弃；`historyLoaded` 仍落定
       // （对账已结束，镜像写入恢复正常），后续帧继续写原来的宿主。历史这一路**成功**了，故历史错误与
       // "历史不可用"缺口一并作废（否则重试成功后错误条还挂着）。
-      // N-1（R3）：**停止后只比对轮次纪元**。C2 特意保留的 pre-start 连接会在 await 期间被收
-      //（`currentAbort` 置 null）—— 那是"被放弃的那一轮"的连接收尾，不是换了轮；再拿连接身份判就
-      // 会把这次合法重载整份丢掉（停止后再也刷不出历史）。未停止时维持原双判据（换连接 = 换轮）。
-      const roundChanged = this.stopped
-        ? roundEpoch !== epochAtEntry
-        : (roundEpoch !== epochAtEntry || currentAbort !== abortAtEntry)
-      if (inFlightAtEntry || roundChanged) {
+      // R04（2026-10-31）：判据从"轮次纪元变没变"改成"现场里有没有一条真轮" —— `send()` 在
+      // **开流之前**就递增纪元，一条撞 409 SESSION_BUSY 的发送（后端拒绝、本轮从未开始）同样让纪元
+      // 变化；拿纪元当判据会把刷新恢复要接回的那条在途轮整份否决（历史不落盘、停止入口不见）。
+      // 真轮占场的结构性证据只有三样：`loading`（在跑）、`suspended`（卡在等人）、`currentAbort`
+      // （连接句柄未收）；`stopped` 之后的残留句柄不算（C2 特意保留的 pre-start 传输是"被放弃的
+      // 那一轮"的收尾，N-1/R3 口径）。
+      const newRoundOccupies = this.loading || this.suspended
+        || (currentAbort !== null && !this.stopped)
+      if (inFlightAtEntry || newRoundOccupies) {
         this.historyLoaded = true
         this.historyError = null
         this.recoveryGap = null
@@ -8232,6 +8261,8 @@ export const useAiStore = defineStore('ai', {
         // 新会话 ≠ 旧会话）⇒ `adoptFreshSession()` 按旧身份键删掉那份失效镜像、并按旧身份前缀
         // 清孤儿表单草稿（释放 sessionStorage 配额）。此时身份仍是旧的，键形才对。
         // **后端历史原样保留**（不调任何 purge 端点）。
+        // N09/M07：用户主动切身份 = 换会话意图 ⇒ 复制来源的接手资格作废（防跨身份/串会话接手）。
+        clearHandoffOrigin()
         this.adoptFreshSession()
         writeAiIdentity(identity)
         this.identity = identity
@@ -8544,7 +8575,8 @@ export const useAiStore = defineStore('ai', {
      * - **复制页签**（锁被原页签持有）⇒ 对本页签整份 `sessionStorage` 清**一次**（继承的会话镜像、
      *   未提交表单草稿、业务页签键都不带走；`localStorage` 不动），随后 `adoptFreshSession()` 起
      *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；复制提示保持静默；
-     *   让渡监听随之装上（原页签关闭后由 `onOwnershipMessage` 决定是否接手）；
+     *   同时记下**复制来源会话**（N09/M07 的接手资格），让渡监听随之装上（原页签关闭后由
+     *   `onOwnershipMessage` 按资格 + 锁决定是否接手）；
      * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
      *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
      *   那条兜底 —— 会话确实不归本页签了，但用户眼前的记录不该被当成复制品抹掉。
@@ -8600,6 +8632,10 @@ export const useAiStore = defineStore('ai', {
             // 回来的原页签：会话已被别人接手 —— 降级但不清场（见方法注释）
             return
           }
+          // N09/M07：记下**复制来源**作为让渡接手资格。复制页签取号后角色就变 'owner'，
+          // 旧判据（只认 'duplicate'）会让"原页签关闭 ⇒ 空白副本接手"不可达；资格本身不换
+          // 会话、不读历史，只在**该会话**的 `released` 到达且本页签仍空白时才生效。
+          rememberHandoffOrigin(sid, identityAtEntry)
           // 复制页签：确认复制之后，先对本页签整份 sessionStorage 清一次（继承来的镜像、未提交
           // 草稿、业务页签键一律不带走），再起新会话、轮换 pageId（同源广播里两个页签的 pageId
           // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
@@ -8697,8 +8733,10 @@ export const useAiStore = defineStore('ai', {
      * - `released`：**让渡意向**，不是"立刻交接" —— 空白副本等 {@link OWNERSHIP_RELEASE_GRACE_MS}
      *   再探活接手（`takeOverSession` 内的探活仍是最终裁决）。
      *
-     * 只有"被判为复制品、且自己这边**还没产生任何内容**"的页签接手 —— 已经在自己会话里说过话的
-     * 页签不换会话（换掉会让用户眼前内容跳变）。其余消息（自己的回声 / 别人的会话 id）一律忽略。
+     * 只有"**有接手资格**、且自己这边**还没产生任何内容**"的页签接手 —— 已经在自己会话里说过话的
+     * 页签不换会话（换掉会让用户眼前内容跳变）。资格有两条：① 角色仍是 `duplicate`（待接手的
+     * 空白副本）；② 角色已是 `owner`，但本页签是**从这条会话复制来的**（N09/M07 记下的复制来源，
+     * 用户主动新建 / 切身份即作废）。其余消息（自己的回声 / 别人的会话 id）一律忽略。
      */
     onOwnershipMessage(message: OwnershipMessage): void {
       // Task 4：不同身份（租户/用户）的页签不互相认领/让渡 —— 接管必须同 tenant + user。
@@ -8714,7 +8752,12 @@ export const useAiStore = defineStore('ai', {
         }
         return
       }
-      if (this.tabOwnership !== 'duplicate') {
+      // N09/M07：接手资格有两条并列来源 —— ① 仍在"待接手"的 duplicate（旧口径）；
+      // ② 角色已是 owner，但本页签是**从这条会话复制来的空白页签**（复制来源已记录）。
+      // 旧实现只看 ①，而复制页签取号后角色立刻变 owner ⇒ ② 这条路径永远不可达。
+      const handoff = this.tabOwnership === 'duplicate'
+        || handoffOriginMatches(message.sessionId, this.identity)
+      if (!handoff) {
         return
       }
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
@@ -8725,8 +8768,9 @@ export const useAiStore = defineStore('ai', {
       const sessionId = message.sessionId
       const timer = setTimeout(() => {
         pendingTakeover = null
-        // 宽限期间角色可能已被换掉（用户新建对话 / 接管完成 / 降级）：只有仍是"空白复制品"才接手
-        if (this.tabOwnership !== 'duplicate') {
+        // 宽限期间现场可能已变（用户新建对话 / 接管完成 / 降级 / 已说话）：只有仍具资格才接手
+        if (this.tabOwnership !== 'duplicate'
+          && !handoffOriginMatches(sessionId, this.identity)) {
           return
         }
         void this.takeOverSession(sessionId)
@@ -8759,6 +8803,10 @@ export const useAiStore = defineStore('ai', {
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
         // 探活已把账本换成"待接手"的锁，但二次判据不允许接手 ⇒ 立刻还回去（不占别人的会话）
         releaseOwnLock(sessionId, identityAtEntry)
+        // 用户已经在这页签说话 ⇒ 复制来源的接手资格作废（不把眼前内容换掉，也不再反复重试）
+        if (handoffOriginMatches(sessionId, identityAtEntry)) {
+          clearHandoffOrigin()
+        }
         return
       }
       if (previousLock !== null) {
@@ -8785,6 +8833,8 @@ export const useAiStore = defineStore('ai', {
       }
       this.tabOwnership = 'owner'
       ownedSessionId = sessionId
+      // 资格一次性：接手完成后不再对后续 `released` 生效（本页签已是这条会话的主人）
+      clearHandoffOrigin()
       // Task 3：claim 的身份 = 接手入口捕获的身份（探活期间切走的身份不参与这条会话的广播）。
       postOwnership('claim', sessionId, identityAtEntry)
       // 批次6B（N7）：接手的是**另一个会话**，上一身份的 chip / ui_event 回执 / 轮结局不带走。
@@ -8818,6 +8868,9 @@ export const useAiStore = defineStore('ai', {
       const oldRunId = this.activeRunId
       // 销毁回包会用到**旧身份**的镜像键/草稿前缀 —— 必须在清场之前捕获。
       const purgeIdentity = this.identity
+      // N09/M07：用户主动新建对话 = 本页签自己的会话意图 ⇒ 复制来源的接手资格作废
+      // （此后原会话让渡也不接手，防"新建完之后又被换回原会话"的串会话）。
+      clearHandoffOrigin()
       this.adoptFreshSession()
       // Task 4：先判完所有权（本页签新建）再向后端取号；取号失败则保持未就绪，不得用空 id 发请求。
       // Task 3：所有权认领由 `ensureSession()` 统一完成（新号只可能是本页签的；无锁环境保持
@@ -9670,6 +9723,9 @@ export const useAiStore = defineStore('ai', {
      * `generative_form` 不走本函数（帧 handler 特判 `openGenerativeForm`），其挂起等的是
      * 用户填写，不受本预算影响。
      *
+     * <p>顺序口径（P03）：**先回灌受理、再写段终态**。回灌是真实 await 窗口（最坏 60s），
+     * 窗口内段保持 `running` 才可能被「停止」取消；只在后端受理后、且仍在同轮时才落最终状态。
+     *
      * @param guard 入队时捕获的轮次现场（B2）。省略 = 入口即现场（直接调用方）。
      */
     async runFrontendTool(
@@ -9703,13 +9759,37 @@ export const useAiStore = defineStore('ai', {
       }, false)
       deriveProjections(message)
       const undoBefore = peekUiUndo()
-      const execution = await executeFrontendTool({
-        name: frame.name,
-        toolCallId: frame.toolCallId,
-        runId: frame.runId ?? this.activeRunId ?? undefined,
-        args: parseToolArgs(frame.args),
-        budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
-      })
+      // P03：执行器的未预期异常同样必须收敛（契约上它不抛，但抛出来绝不能把卡留在永久
+      // 「调用中」）。`null` = 异常哨兵；正常路径照旧拿到完整执行信封。
+      let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = null
+      try {
+        execution = await executeFrontendTool({
+          name: frame.name,
+          toolCallId: frame.toolCallId,
+          runId: frame.runId ?? this.activeRunId ?? undefined,
+          args: parseToolArgs(frame.args),
+          budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
+        })
+      } catch {
+        execution = null
+      }
+      const stillHere = (): boolean => stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+      if (execution === null) {
+        // 异常收敛：段落 failed（不留 running）。停止/换轮后**不覆盖** —— 停止已把段收成
+        // cancelled，那是用户可见的既有决策，晚到的异常结论不该把它翻成失败。
+        if (stillHere()) {
+          this.upsertToolPart(message, {
+            toolCallId: frame.toolCallId,
+            name: frame.name,
+            kind2: 'FRONTEND',
+            status: 'failed',
+            result: '前端工具执行异常，本次未完成。请提示用户手动重试',
+            requiresAction: false
+          })
+          deriveProjections(message)
+        }
+        return
+      }
       // B1 收口修（C-1）：await 返回后比对**轮次现场** —— 只有"真正换轮"（`send()` 起新轮 /
       // `reattachActive()` 重挂 / `adoptFreshSession()` 换会话 / `stop()` 取消本轮）才丢弃晚到
       // 结局：段终态写与回灌 POST（`submitFrontendToolResult`）整体不落，防晚到结局覆盖已收尾
@@ -9717,12 +9797,30 @@ export const useAiStore = defineStore('ai', {
       // **不**递增纪元 ⇒ 工具回灌照常（C-1 的原始缺陷即栽在"controller 引用变了"这条判据上）。
       // 本轮正常结束（done）后晚到的执行器同属本轮：段落真实结局、回灌交给 409 幂等收敛，
       // 不把卡留在 running 假态（后端此时已超时/取消，重复回灌只会被幂等拒绝）。
-      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!stillHere()) {
         return
       }
       // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/
       // cancelled/skipped 各有落点，不再一律折成 failed）。
       const status: ToolRunStatus = toolStatusOfOutcome(execution.outcome)
+      // 治理 P0-1 / P03：**先回灌受理，再写最终状态**。回灌是一段真实 await 窗口（最坏 60s）：
+      // 这段里用户仍可点「停止」，而 `cancelRoundParts` 只收 pending/running 段 —— 先把段写成
+      // succeeded 就等于把这个窗口关掉（本轮已停、卡却仍写「已成功」）。顺序反过来之后：
+      // 窗口内段仍是 running（可被停止取消），后端受理后**仍在同轮**才落终态。
+      await this.submitFrontendToolResult(
+        frame.toolCallId,
+        execution.result,
+        'frontend-executor',
+        false,
+        undefined,
+        execution.outcome,
+        execution.sheetMeta,
+        execution.code
+      )
+      // 回灌窗口内可能已停止/换轮：本地已收口的 cancelled（或新轮现场）不得被旧结局覆盖。
+      if (!stillHere()) {
+        return
+      }
       // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生
       this.upsertToolPart(message, {
         toolCallId: frame.toolCallId,
@@ -9736,17 +9834,6 @@ export const useAiStore = defineStore('ai', {
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
         setRawNotice(this, execution.result)
       }
-      // 治理 P0-1：前端执行器的结局八态随回灌上送（后端台账/回帧以此为权威结局）
-      await this.submitFrontendToolResult(
-        frame.toolCallId,
-        execution.result,
-        'frontend-executor',
-        false,
-        undefined,
-        execution.outcome,
-        execution.sheetMeta,
-        execution.code
-      )
       // AI 可视可操作专项：把原语运行时的一次性状态（撤销点 / 播报）同步给面板
       this.syncUiRuntimeState()
       this.uiUndoToolCallId = this.uiUndoEntry !== null && this.uiUndoEntry !== undoBefore

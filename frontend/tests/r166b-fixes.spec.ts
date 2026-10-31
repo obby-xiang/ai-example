@@ -573,7 +573,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     expect(sessionStorage.getItem(mirrorStorageKey('9403'))).not.toBeNull()
   })
 
-  it('③ 原页签关闭广播 ⇒ 复制页签**不**接手原会话（Task 4：发号成功即 owner，不提供接回入口）', async () => {
+  it('③ 原页签关闭广播 ⇒ 空白复制页签按复制来源接手原会话（N09/M07）', async () => {
     seedTab('9404')
     locks.hold(sessionLockName('9404'))
 
@@ -588,7 +588,9 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     new FakeBroadcastChannel(OWNERSHIP_CHANNEL_NAME).postMessage({
       kind: 'released',
       sessionId: '9404',
-      pageId: 'page-original'
+      pageId: 'page-original',
+      tenantId: 7,
+      userId: 71
     })
     // 宽限内不抢：原页签可能只是刷新，回来后会重播 claim（见 tab-ownership-lifecycle.spec.ts）
     await flushPromises()
@@ -596,12 +598,15 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
 
     await wait(OWNERSHIP_RELEASE_GRACE_MS + PROBE_BUDGET_MS)
 
-    // 宽限到期也不接手：本页签已持有自己的会话与锁，原会话只是被释放
-    expect(store.sessionId).toBe(ownSession)
+    // 宽限到期且锁已空闲 ⇒ 空白副本按**复制来源**静默接手原会话（旧实现把这条路径写成不可达）
+    expect(store.sessionId).toBe('9404')
     expect(store.tabOwnership).toBe('owner')
-    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(ownSession)
-    expect(api.history).not.toHaveBeenCalledWith('9404')
-    expect(locks.isHeld(sessionLockName('9404'))).toBe(false)
+    expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9404')
+    expect(api.history).toHaveBeenCalledWith('9404')
+    expect(locks.isHeld(sessionLockName('9404'))).toBe(true)
+    // 静默接手：不新增提示，也不删原会话的后端记忆
+    expect(store.notice).toBeNull()
+    expect(api.deleteHistory).not.toHaveBeenCalled()
   })
 
   it('③ 锁仍被占 ⇒ 广播不可信，复制页签不接管原会话（宽限之后也不接管）', async () => {

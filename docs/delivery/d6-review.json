@@ -133,6 +133,13 @@
       "reason": "已同步条件结构化标记、披露与执行同源的四工具限制、合成指令及离开条件步骤后的工具面恢复",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:48cd1af62fc52cb5789927a8073e8e01ac45b3611f80b7b769c96e1d1fb58e2e",
+      "status": "not-affected",
+      "reason": "本批仅修正既有刷新恢复、工具停止结算和复制页签接管行为，不新增或改变迁移接口、存储键及跨实例契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
