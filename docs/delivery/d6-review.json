@@ -196,6 +196,13 @@
       "reason": "本批仅在前端既有刷新恢复链路增加快照对账与步骤幂等保护，不新增或改变迁移接口、存储键及跨实例契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:a6b052e1b1351a9ea4a84e39f0cb1067c9f88ba382b8578c5af643085b26552e",
+      "status": "not-affected",
+      "reason": "本批仅收紧既有SSE调度线程身份清理、缺失身份不投递及心跳序号入队顺序，不新增迁移接口、键族或跨实例契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

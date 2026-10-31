@@ -113,6 +113,14 @@ public class RunRegistry {
 	private final FrameWakeListener wakeListener;
 
 	/**
+	 * 是否"本轮记录身份是唯一权威"（生产装配 = Spring 注入的那个构造；见 {@link #newEmitter}）。
+	 *
+	 * <p>关闭时（三参/六参的轻装配与单测）写出器在"没有取键提示"时仍按 legacy 键写 ——
+	 * 那里的 legacy 是唯一命名空间；打开时必须 fail-closed（绝不写第二套归档）。
+	 */
+	private final boolean recordIdentityRequired;
+
+	/**
 	 * 非 Spring/单测装配（三参）：事件日志走 {@code ai:events:} LIST 兼容口径、不跨实例唤醒。
 	 *
 	 * <p>
@@ -130,10 +138,13 @@ public class RunRegistry {
 	 * <p>
 	 * {@code frames/wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时写出器
 	 * 退回兼容口径（LIST 写、不跨实例广播），语义与 B1 收官一致。
+	 *
+	 * <p><b>轻装配（三参/六参）不是"记录身份唯一权威"的口径</b>：这里的 legacy 命名空间是唯一命名空间，
+	 * 写出器在"没有取键提示"时继续按 legacy 键写（与改造前逐字一致）。
 	 */
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
-		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null);
+		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null, false);
 	}
 
 	/**
@@ -141,16 +152,28 @@ public class RunRegistry {
 	 *
 	 * <p>{@code resultLimiter} 允许为 null（局部上下文/测试）：为 null 时写出器不标注模型侧视图，
 	 * 帧面其余语义不变。
+	 *
+	 * <p><b>这条 {@code @Autowired} 构造 = Spring 里唯一的装配入口</b>，因此也是"本轮记录身份是唯一权威"
+	 * 的唯一开关点：新建的写出器会被标记 {@link SseChatEmitter#requireRecordIdentity()} ——
+	 * 没有取键提示时不许"永久缓存无身份"并照旧写 legacy 键族（那是与本轮身份键族平行的第二套归档）。
 	 */
 	@Autowired
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter) {
+		this(store, objectMapper, properties, frames, wakeBus, wakeListener, resultLimiter, true);
+	}
+
+	/** 全部字段的唯一赋值点；{@code recordIdentityRequired} 只由两条装配路径决定（见上面两个构造器）。 */
+	private RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
+			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter,
+			boolean recordIdentityRequired) {
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
 		this.frames = frames;
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
+		this.recordIdentityRequired = recordIdentityRequired;
 		// 非 Spring 装配（三参/六参）也要有模型侧标注：裁剪器是无状态、纯配置驱动的，
 		// 这里按同一份 AiProperties 现造一个，判定与 Spring 注入的 bean 完全一致。
 		this.resultLimiter = resultLimiter != null || properties == null ? resultLimiter
@@ -207,6 +230,11 @@ public class RunRegistry {
 						this.resultLimiter);
 		if (this.properties != null) {
 			emitter.enableAttachKeepalive(SseChatEmitter.sharedAttachKeepaliveScheduler());
+		}
+		if (this.recordIdentityRequired) {
+			// 生产装配：本轮身份只认记录。没有取键提示时按"身份不可确认"失败，绝不写 legacy 键族
+			// （见 SseChatEmitter#recordIdentityRequired）。
+			emitter.requireRecordIdentity();
 		}
 		return emitter;
 	}

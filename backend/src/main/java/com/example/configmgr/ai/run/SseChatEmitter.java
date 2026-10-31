@@ -264,6 +264,10 @@ public class SseChatEmitter {
 	 *
 	 * <p>解析不到（记录还没建 / 0/0 旧轮 / Redis 抖动）就保持 {@code null}：帧面照常，
 	 * 但身份相关的键走 legacy 口径 —— 不伪造默认租户，也不回落到调用线程的残留身份。
+	 *
+	 * <p><b>没有提示</b>（{@link #requestIdentityHint} 为 {@code null}，见 {@link #recordIdentityRequired}）
+	 * 时是另一件事：拼不出记录键 ⇒ 身份<b>不可确认</b>。生产装配下<b>不</b>落定、<b>不</b>写 legacy，
+	 * 由调用方按"本拍明确失败"处理；只有轻装配/单测（legacy 是唯一命名空间）才继续走 legacy 口径。
 	 */
 	private volatile TenantUser deliveryIdentity;
 
@@ -285,6 +289,20 @@ public class SseChatEmitter {
 	 * <p>只在 {@link #identityLock} 内读写 —— 没有它就无法区分"还没解析"与"解析结果就是无身份"。
 	 */
 	private boolean identityResolved;
+
+	/**
+	 * <b>本轮记录身份是唯一权威</b>（生产装配标记；由 {@link RunRegistry} 的生产构造打开）。
+	 *
+	 * <p>打开后，"没有取键提示"（{@link #requestIdentityHint} 为 {@code null}）不再被当成
+	 * "确认这一轮没有身份"：拼不出记录键 ⇒ 身份<b>不可确认</b>，调用方按既有失败分支处理
+	 * （本拍不落档、不投递、不发布唤醒），<b>绝不</b>回落到 legacy 键族 ——
+	 * {@code ai:xevents:{run:<id>}} 与本轮真实的 {@code ai:xevents:{<t>:<u>:run:<id>}} 是两套归档，
+	 * 写进前者等于"帧发出去了但重挂/唤醒读不到"。
+	 *
+	 * <p>不打开（轻装配/单测的三参、六参 {@link RunRegistry}）：legacy 命名空间是<b>唯一</b>命名空间，
+	 * 不存在两套归档分叉，行为与改造前逐字一致。
+	 */
+	private volatile boolean recordIdentityRequired;
 
 	/**
 	 * 包②：单帧写出的<b>超时预算</b>（{@link SseWriteBudget}）。
@@ -721,7 +739,15 @@ public class SseChatEmitter {
 		synchronized (SseChatEmitter.class) {
 			if (sharedAttachKeepaliveScheduler == null) {
 				sharedAttachKeepaliveScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-					Thread thread = new Thread(runnable, "sse-attach-keepalive");
+					Thread thread = new Thread(() -> {
+						// 进程级守护线程不承载任何调用者身份：它是<b>按需</b>创建的（第一个挂 attach 连接的
+						// 请求线程触发），而 TTL 是 InheritableThreadLocal 语义 —— 不在工厂里显式清空，
+						// 这条线程会把"首个触发者"的租户/用户长期带在身上（之后所有写出器的节拍都跑在
+						// 别人的身份下）。与 JobHeartbeatRegistry 的进程级 ticker 同一纪律。
+						try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+							runnable.run();
+						}
+					}, "sse-attach-keepalive");
 					thread.setDaemon(true);
 					return thread;
 				});
@@ -748,6 +774,18 @@ public class SseChatEmitter {
 
 	public String runId() {
 		return this.runId;
+	}
+
+	/**
+	 * <b>生产装配标记</b>：本轮记录身份是唯一权威（见 {@link #recordIdentityRequired}）。
+	 *
+	 * <p>由 {@link RunRegistry} 的<b>生产构造</b>（Spring 注入的那个）在新建写出器时调用一次；
+	 * 轻装配/单测路径不调用，于是它们的 legacy 命名空间语义保持不变。
+	 *
+	 * <p>包内可见：这是装配期开关，不是运行期行为面 —— 生产装配之外没有第二个合法调用方。
+	 */
+	void requireRecordIdentity() {
+		this.recordIdentityRequired = true;
 	}
 
 	/**
@@ -868,29 +906,38 @@ public class SseChatEmitter {
 	/**
 	 * F1 保活节拍：一帧本地 {@code heartbeat}（无业务 {@code seq}、不入档、不发唤醒）。
 	 *
-	 * <p>序列化在锁外，<b>入队与终态复核在 {@code emitLock} 内</b>：心跳与业务帧共享同一把出帧锁，
-	 * 因此"终帧之后再入队一帧心跳"的窗口不存在（终帧的落档/入队会先把
-	 * {@link #terminalFrameSeen} 置位，本节拍看到即停）。
+	 * <p><b>取号、序列化、入队全在 {@code emitLock} 内</b>：心跳有两个生产者（驱动侧
+	 * {@link #heartbeat(Map)} + 本节的保活节拍），而"心跳序号随到达顺序单调"是可观测面的事实。
+	 * 旧实现把 {@code heartbeatSeq.incrementAndGet()} 留在锁外，取号与入队之间就有一段窗口 ——
+	 * 另一个生产者能在这段窗口里拿到更大的号并先入队，订阅者收到的号因此<b>回退</b>（2 之后再来 1）。
+	 * 与业务帧同一口径（{@code emitInternal} 的取号也在锁内），这条窗口就不存在了。
+	 *
+	 * <p>顺带保留既有的两条不变量：① 心跳与业务帧共享同一把出帧锁 ⇒ "终帧之后再入队一帧心跳"的
+	 * 窗口不存在（终帧的落档/入队会先把 {@link #terminalFrameSeen} 置位，本节拍看到即停）；
+	 * ② {@code liveSeq = 0} 的"心跳扇出分支"照旧：不补齐、不推进游标、不发布唤醒。
+	 *
+	 * <p>锁内只有一次 JSON 序列化与入队（无网络 I/O、无 Redis）：锁外补做的仍是
+	 * 被让位的唤醒同步（{@link #flushWakeSyncIfUnlocked()}），因此不引入锁序倒置。
 	 */
 	private void attachKeepaliveBeat() {
 		if (!attachKeepaliveNeeded()) {
 			stopAttachKeepalive();
 			return;
 		}
-		Map<String, Object> frame = frame(RunStore.HEARTBEAT_TYPE);
-		frame.put("runId", this.runId);
-		frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
-		final byte[] payload;
-		try {
-			payload = this.objectMapper.writeValueAsBytes(frame);
-		}
-		catch (Exception ex) {
-			log.debug("attach 保活帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
-			return;
-		}
 		try {
 			synchronized (this.emitLock) {
 				if (!attachKeepaliveNeeded()) {
+					return;
+				}
+				Map<String, Object> frame = frame(RunStore.HEARTBEAT_TYPE);
+				frame.put("runId", this.runId);
+				frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
+				final byte[] payload;
+				try {
+					payload = this.objectMapper.writeValueAsBytes(frame);
+				}
+				catch (Exception ex) {
+					log.debug("attach 保活帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
 					return;
 				}
 				// liveSeq = 0 ⇒ 既有心跳扇出分支：不补齐、不推进游标、不发布唤醒。
@@ -3021,8 +3068,16 @@ public class SseChatEmitter {
 				return new IdentityOutcome(this.deliveryIdentity, false);
 			}
 			TenantUser hint = this.requestIdentityHint;
+			if (hint == null) {
+				// 没有"取键提示"就拼不出记录键 ⇒ 身份<b>不可确认</b>（不是"确认这一轮没有身份"）。
+				// 刻意<b>不落定</b>：{@link #identityResolved} 保持 false，绝不把 null 写成"已解析结果"
+				// —— 那正是"一次异常/一个身份缺失就永久钉在 legacy 键族"的形态。
+				// 生产装配（{@link #recordIdentityRequired}）下同时要求调用方按失败处理：
+				// 本拍不落档/不投递/不发布唤醒，绝不写 legacy 键族（那是与本轮身份键族平行的第二套归档）。
+				return new IdentityOutcome(null, this.recordIdentityRequired);
+			}
 			TenantUser resolved = null;
-			if (this.store != null && hint != null) {
+			if (this.store != null) {
 				try {
 					RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
 					if (snapshot != null) {
@@ -3054,13 +3109,14 @@ public class SseChatEmitter {
 	 * <b>身份是否"不可确认"</b>（返修第 4 条）：投递/写投递链<b>不得</b>在身份不可确认时继续。
 	 *
 	 * <p><b>唯一判据</b>：{@code identity == null} 且 {@link IdentityOutcome#readFailure()}
-	 * —— 也就是"读记录<b>抛异常</b>、且没有可校验提示可退"（{@code deliveryIdentityOutcome}
-	 * 只在 {@code validated == null} 时把 {@code readFailure} 置真）。
+	 * —— 即"记录读不出来"或（生产装配下）"没有取键提示、拼不出记录键"这两种<b>不可知</b>，
+	 * 都不是"确认这一轮没有身份"。
 	 *
-	 * <p><b>不含</b>"从头就没有提示"（{@code requestIdentityHint == null}）的情形：那种写出器
-	 * 连读记录的键都拼不出来，本轮按既有 fail-closed 语义处理（不 adopt 池化身份、不伪造租户），
-	 * 但<b>不摘除</b>订阅者 —— 它可能是确认门/恢复等非请求线程先建好的、随后被 HTTP 重挂接管的
-	 * 写出器；一律摘除会让这类轮次<b>每次重挂都被摘</b>，永远无法流式投递。
+	 * <p><b>"从头就没有提示"（{@code requestIdentityHint == null}）</b>：<b>生产装配</b>下同样算
+	 * "不可确认"（{@link #recordIdentityRequired}：拼不出记录键 ⇒ 不能猜、更不能按 legacy 键族写，
+	 * 那是与本轮身份键族平行的第二套归档）；<b>轻装配/单测</b>下不算 —— 那里的 legacy 命名空间是
+	 * 唯一命名空间，且这类写出器可能是确认门/恢复等非请求线程先建好的、随后由同一注册表键接管的，
+	 * 一律摘除会让它们永远无法投递。
 	 *
 	 * <p>也不含"<b>确认</b>无身份"：记录存在但归属是 0/0（旧数据）⇒ 有提示、能读、读到的就是 0/0
 	 * ⇒ 这是<b>确认过的</b>无身份，按既有 legacy 语义继续投递（否则老轮永远重连不上）。
