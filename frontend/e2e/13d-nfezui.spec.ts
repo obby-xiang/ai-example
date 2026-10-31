@@ -11,6 +11,7 @@
  */
 import { expect, test, type Page } from '@playwright/test'
 import {
+  LIST_TASKS_MAX_ROWS,
   assistantBubbles,
   cjkHits,
   createTask,
@@ -142,9 +143,10 @@ test.describe('@stub 13d · Z 结果视图（text / fallback）+ I 工具面双�
   })
 
   test('E2E-I07 表格卡与结果视图文案双语：en 下表格列名/截断说明全英文', async ({ page, request }) => {
-    // 夹具：把任务造到 22 条以上，触发视图的 truncated 说明
+    // 夹具：把任务造到上限 + 2 条，触发视图的 truncated 说明
+    const target = LIST_TASKS_MAX_ROWS + 2
     const current = (await listTasks(request)).length
-    for (let index = current; index < 22; index += 1) {
+    for (let index = current; index < target; index += 1) {
       await createTask(request, `NFEZUI-I07-${index}-${unique('t')}`)
     }
 

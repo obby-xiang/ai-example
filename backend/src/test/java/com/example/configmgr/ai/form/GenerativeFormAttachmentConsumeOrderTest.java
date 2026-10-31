@@ -117,9 +117,9 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		GenerativeFormGuard productionGuard = new GenerativeFormGuard(new ObjectMapper(), production,
 				storageService());
 		FormAttachmentStore.Attachment first = production.register("run-1", "call-1", "sess-1", "evidence.pdf",
-				sizeOf(evidence), "application/pdf", evidence.toString());
+				sizeOf(evidence), "application/pdf", evidence.getFileName().toString());
 		FormAttachmentStore.Attachment second = production.register("run-1", "call-1", "sess-1", "contract.pdf",
-				sizeOf(contract), "application/pdf", contract.toString());
+				sizeOf(contract), "application/pdf", contract.getFileName().toString());
 		production.failConsumeFor = second.fileId();
 		String submitted = "{\"evidence\":\"" + first.fileId() + "\",\"contract\":\"" + second.fileId() + "\"}";
 
@@ -288,7 +288,7 @@ class GenerativeFormAttachmentConsumeOrderTest {
 
 	private FormAttachmentStore.Attachment register(String fileName, Path file) {
 		return this.store.register("run-1", "call-1", "sess-1", fileName, sizeOf(file), "application/pdf",
-				file == null ? null : file.toString());
+				file == null ? null : file.getFileName().toString());
 	}
 
 	private static long sizeOf(Path file) {

@@ -386,7 +386,7 @@ test.describe('@stub L 工具全量面（12b）', () => {
     const taskId = await createExportedTask(request)
     // 真机把定义列表打成空（后端仍在，但页面拿不到字段）——0 字段不得按成功载入，更不得
     // 产出空 xlsx 交给浏览器。路由必须在打开页面前挂上（页面挂载即拉定义）。
-    await page.route('**/api/definitions*', (route) => route.fulfill({
+    await page.route(/\/api\/definitions(\?|$)/, (route) => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ success: true, data: [] })

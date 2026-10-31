@@ -58,6 +58,20 @@ function unexpectedCjk(text: string): string[] {
   return cjkHits(text).filter((hit) => !KNOWN_CJK_RESIDUE.has(hit))
 }
 
+/**
+ * 面板文本，剔除身份切换器（租户/用户下拉）。
+ *
+ * 下拉的 option 文案来自后端身份目录的业务数据（预置「租户一/租户二/用户101…」），
+ * 与消息正文同属数据面，不是硬编码 chrome；i18n 用例只锁 chrome。
+ */
+async function panelTextWithoutIdentityData(page: Page): Promise<string> {
+  return page.locator('.ai-chat').evaluate((el) => {
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('[data-testid="identity-switcher"]').forEach((node) => node.remove())
+    return clone.innerText
+  })
+}
+
 const IMPORT_PAGE = '/import'
 const unique = (tag: string): string => `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
@@ -234,7 +248,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     expect(cjkHits(zhText).length).toBeGreaterThan(0)
 
     await switchToEnglish(page)
-    const enText = await page.locator('.ai-chat').innerText()
+    const enText = await panelTextWithoutIdentityData(page)
     // 工作区状态条 / 可用性标签是已知残留（见 KNOWN_CJK_RESIDUE 的两条发现项），
     // 其余 chrome 一律零 CJK —— 出现新的中文即判红。
     expect(unexpectedCjk(enText)).toEqual([])
@@ -292,7 +306,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     await openPanel(page)
     await switchToEnglish(page)
     // 空态（无消息正文）时的面板全量文本（已知残留见 KNOWN_CJK_RESIDUE）
-    const full = await page.locator('.ai-chat').innerText()
+    const full = await panelTextWithoutIdentityData(page)
     expect(unexpectedCjk(full)).toEqual([])
 
     const attrs = await page.locator('.ai-chat [aria-label], .ai-chat [title]').evaluateAll((nodes) =>
@@ -306,7 +320,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     // 呼吸点带淡出动画：等它真的退场再扫，避免把「流式中标签」当静态 chrome
     await expect(page.locator('[data-testid="loading-breath"]')).toHaveCount(0, { timeout: 20_000 })
     const answer = (await assistantBubbles(page).last().innerText()).trim()
-    const withRound = await page.locator('.ai-chat').innerText()
+    const withRound = await panelTextWithoutIdentityData(page)
     const stripped = withRound.split(question).join('').split(answer).join('')
     expect(unexpectedCjk(stripped)).toEqual([])
   })

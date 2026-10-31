@@ -59,7 +59,7 @@ class GenerativeFormAttachmentConsumeCleanupTest {
     void consumedAttachmentFileIsDeletedAndTheRegistrationStaysOneShot() throws IOException {
         Path file = Files.writeString(STORAGE_ROOT.resolve("evidence.pdf"), "pdf-bytes");
         FormAttachmentStore.Attachment attachment = this.store.register("run-1", "call-1", "sess-1",
-                "evidence.pdf", 9, "application/pdf", file.toString());
+                "evidence.pdf", 9, "application/pdf", file.getFileName().toString());
 
         FrontendToolGuard.Verdict accepted = inspect("run-1", "call-1", attachment.fileId());
         assertThat(accepted.accepted()).isTrue();
@@ -81,7 +81,7 @@ class GenerativeFormAttachmentConsumeCleanupTest {
     void rejectedSubmissionKeepsTheFileAndTheRegistration() throws IOException {
         Path file = Files.writeString(STORAGE_ROOT.resolve("evidence-keep.pdf"), "pdf-bytes");
         FormAttachmentStore.Attachment attachment = this.store.register("run-1", "call-1", "sess-1",
-                "evidence-keep.pdf", 9, "application/pdf", file.toString());
+                "evidence-keep.pdf", 9, "application/pdf", file.getFileName().toString());
 
         FrontendToolGuard.Verdict otherRun = inspect("run-2", "call-1", attachment.fileId());
         assertThat(otherRun.accepted()).isFalse();
@@ -116,7 +116,7 @@ class GenerativeFormAttachmentConsumeCleanupTest {
     void missingPhysicalFileDoesNotBreakConsumption() {
         // 盘上文件已被外部清掉（本批不做扫描器，只保证消费路径不因删盘异常而失败）
         FormAttachmentStore.Attachment attachment = this.store.register("run-1", "call-1", "sess-1",
-                "gone.pdf", 3, "application/pdf", STORAGE_ROOT.resolve("gone-never-written.pdf").toString());
+                "gone.pdf", 3, "application/pdf", "gone-never-written.pdf");
 
         assertThat(inspect("run-1", "call-1", attachment.fileId()).accepted()).isTrue();
         settle("run-1", "call-1", attachment.fileId());

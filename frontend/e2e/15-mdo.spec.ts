@@ -215,10 +215,10 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     expect(jobs.length).toBe(1)
   })
 
-  test('E2E-M06 TARGET_INVALID 审批后拦截：批准也执行前拦，零作业零台账', async ({ request }) => {
-    // 目标校验（ToolTargetResolver）在**放行之后**执行：要拿到"批准后仍被拦"的路径，
-    // 必须让出卡前的预检通过、而执行前的对账不成立。手法 = 上下文任务与入参任务不一致
-    // （预检不看上下文，只有 resolver 的"是否同一任务"一条能拦）。
+  test('E2E-M06 TARGET_INVALID 预检即拦：不进入确认门，零作业零台账', async ({ request }) => {
+    // 目标校验（ToolTargetResolver 的「是否同一任务」）现已并入**开卡前预检**（TARGET_CONSISTENT）：
+    // 上下文任务与入参任务不一致时预检直接失败，根本不会挂起/发确认请求，更不会执行 ——
+    // 这比"批准后再拦"更早一道，安全判据（零作业零台账）不变。
     const contextTaskId = await createPublishableImportTask(request)
     const targetTaskId = await createPublishableImportTask(request)
     expect(targetTaskId).not.toBe(contextTaskId)
@@ -226,32 +226,21 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     const result = await postChat(sessionId, `请立即调用 start_publish 发布任务 ${targetTaskId}`, {
       context: PUBLISH_CONTEXT(contextTaskId)
     })
+    const start = result.frames.find((frame) => frame.type === 'start')
+    expect(start, `未收到 start 帧（HTTP ${result.status}）`).toBeTruthy()
+    const runId = String(start!.runId)
     const requestFrame = result.frames.find((frame) => frame.type === 'confirm_request')
-    expect(requestFrame, `未出确认卡（HTTP ${result.status}，帧：${result.frames.map((f) => f.type).join(',')}）`)
-      .toBeTruthy()
-    const runId = String(requestFrame!.runId)
-    const toolCallId = String(requestFrame!.toolCallId)
+    expect(requestFrame, `预检未通过时不得进入确认门（帧：${result.frames.map((f) => f.type).join(',')}）`)
+      .toBeUndefined()
 
-    const decided = await confirmOn(API, runId, toolCallId, true)
-    expect(decided.status).toBe(200)
-
-    // L-110：谓词必须是**终态白名单**。`status !== 'PENDING'` 会捞到 `APPROVED`
-    // （已批准、待执行）这个中间态 ⇒ 整文件首跑 `Expected BLOCKED, Received APPROVED`
-    // （修前实测同一句：21 passed / 1 failed，红的就是这一行）。
-    const settled = await waitDecisionSettled(runId, toolCallId, 30_000, '条目落到终态（BLOCKED/REJECTED/EXECUTED/FAILED）')
-    expect(settled.status).toBe('BLOCKED')
-    expect(settled.code).toBe('TARGET_INVALID')
-    expect(settled.executed).toBe(false)
+    const toolResult = result.frames.find((frame) => frame.type === 'tool_result')
+    expect(String(toolResult?.code)).toBe('PRECHECK_FAILED')
+    expect(toolResult?.executed).toBe(false)
 
     const done = await waitTerminal(runId, 60_000)
     expect(done.snapshot?.status).toBe('DONE')
     expect((done.ledger ?? []).length).toBe(0)
     expect((await publishJobs(request, targetTaskId)).length).toBe(0)
-    // 拦截发生在执行前：帧上 ok=false + 不执行
-    const frames = await eventsFrames(runId)
-    const toolResult = frames.find((frame) => frame.type === 'tool_result')
-    expect(String(toolResult?.code)).toBe('TARGET_INVALID')
-    expect(toolResult?.executed).toBe(false)
   })
 
   test('E2E-M09 lastSeq 差量 + 孤儿过滤：只补 seq>K、心跳零回放、DOM 无重复卡', async ({ request }) => {

@@ -161,7 +161,7 @@ test.describe('@stub 2026-10-29 状态与设置守卫', () => {
     await page.locator('[data-testid="manual-model-id"]').fill(modelId)
     await page.locator('[data-testid="manual-model-submit"]').click()
     await expect
-      .poll(async () => cards.first().locator('[data-testid="model-row"]').count(), { timeout: 30_000 })
+      .poll(async () => page.locator('[data-testid="model-section"] [data-testid="model-row"]').count(), { timeout: 30_000 })
       .toBeGreaterThan(0)
 
     // 重载之后脏密钥与改名都还在
@@ -181,6 +181,8 @@ test.describe('@stub 2026-10-29 状态与设置守卫', () => {
     const row = page.locator('[data-testid="model-row"]').filter({ hasText: modelId })
     if (await row.count() > 0) {
       await row.first().locator('[data-testid="remove-model-row"]').click()
+      // 删除走 ElMessageBox.confirm（组件弹层，非原生 confirm），必须点掉确认钮才会发 DELETE
+      await page.locator('.el-message-box__btns .el-button--primary').click()
       await expect(row).toHaveCount(0, { timeout: 20_000 })
     }
   })

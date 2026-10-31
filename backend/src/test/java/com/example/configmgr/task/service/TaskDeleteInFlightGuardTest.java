@@ -3,6 +3,7 @@ package com.example.configmgr.task.service;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.data.entity.ConfigStagingRow;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
+import com.example.configmgr.file.FileStorageService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.entity.JobItem;
 import com.example.configmgr.job.entity.ValidationIssue;
@@ -76,6 +77,8 @@ class TaskDeleteInFlightGuardTest {
     private TaskFileRepository taskFileRepository;
     @Autowired
     private ConfigStagingRowRepository stagingRowRepository;
+    @Autowired
+    private FileStorageService fileStorageService;
 
     @Test
     void pendingJobBlocksDeleteWithoutCascade() throws Exception {
@@ -247,13 +250,14 @@ class TaskDeleteInFlightGuardTest {
         item.setStatus("READY");
         taskItemRepository.save(item);
 
-        Path physical = Files.createTempFile("r113-", ".xlsx");
+        // 存储键必须是相对基目录的键：绝对路径在新契约下被 resolve 拒绝，删盘会静默失败。
+        Path physical = Files.createTempFile(fileStorageService.baseDir(), "r113-", ".xlsx");
         Files.writeString(physical, "artifact");
         TaskFile file = new TaskFile();
         file.setTaskId(taskId);
         file.setDefCode(DEF_CODE);
         file.setFileType("EXPORT");
-        file.setStoragePath(physical.toString());
+        file.setStoragePath(physical.getFileName().toString());
         file.setFileName("r113.xlsx");
         taskFileRepository.save(file);
 

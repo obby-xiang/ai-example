@@ -13,6 +13,7 @@
  */
 import { expect, test } from '@playwright/test'
 import {
+  LIST_TASKS_MAX_ROWS,
   MARK,
   NFEZUI_APP,
   NFEZUI_DEGRADED_APP,
@@ -249,7 +250,7 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     }
   })
 
-  test('E2E-E09 notice 单槽位不堆叠：连造三条错误提示，屏上只留最新一条', async ({ page }) => {
+  test('E2E-E09 notice 单槽位不堆叠：错误只进各轮错误卡，通知条零条', async ({ page }) => {
     await openPanel(page)
     const codes: Array<[string, number, string, string]> = [
       [MARK.quota, 429, '429', 'rate limit exceeded (quota)'],
@@ -264,29 +265,30 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
       await expect(page.locator('[data-testid^="error-card-"][data-variant]').last()).toBeVisible({ timeout: 40_000 })
       await waitSettled(page, 30_000)
     }
-    // AR-13（stores/ai.ts 错误终帧分支）：关键错误归**错误卡**、不进通知条（出卡即 clearNotice）
-    // ⇒「单槽位不堆叠」的现行形态：错误不再落顶部通知条，屏上只留**最新一条**错误卡
-    // （前三轮都是开流前失败、服务端无历史可恢复，故 DOM 里只剩本轮的卡与消息）。
+    // AR-13（stores/ai.ts 错误终帧分支）：关键错误归**错误卡**、不进通知条（出卡即 clearNotice）。
+    // 「单槽位不堆叠」锁的是**顶部通知条**：它恒为 0 条；错误卡按轮内联（demo v7.7 裁决区 08），
+    // 三次失败 = 三条各归属于自己那一轮的卡，不是同一个槽位里叠三条。
     const bars = page.locator('[data-testid="notice-bar"]')
     await expect(bars).toHaveCount(0)
     const cards = page.locator('[data-testid^="error-card-"][data-variant]')
-    await expect(cards).toHaveCount(1)
+    await expect(cards).toHaveCount(codes.length)
     await expect(cards.last()).toContainText('本轮出错')
     await expect(cards.last()).not.toContainText('rate limit exceeded')
     await expect(cards.last()).not.toContainText('content_filter triggered')
   })
 
-  test('E2E-E10 ui_event 回执：工作区动作执行后出 alert-ui-event（含事件名与处理结果）', async ({ page }) => {
+  test('E2E-E10 ui_event 回执：工作区动作真执行，导航成功走「无噪声」不叠回执', async ({ page }) => {
+    // navigate_to 的导出目标必须能解析到真实任务：桩从提示词里取任务号，缺任务时前端 fail-closed
+    // （“无法确认任务 #N 的类型”），动作根本不会执行。故先造一条导出任务并用「任务 N」显式指定。
+    const task = await createTask(page.request, `NFEZUI-E10-${unique('t')}`)
     await openPanel(page, '/tasks')
-    await send(page, `导出向导 用例-E10-${unique('nav')}`)
-    const alert = page.locator('[data-testid="alert-ui-event"]')
-    await expect(alert).toBeVisible({ timeout: 60_000 })
-    const text = await alert.innerText()
-    expect(text.length).toBeGreaterThan(0)
-    // 回执带事件名（navigate/导航类），且不是空白壳
-    expect(text).toMatch(/navigat|导航|导出|export/i)
-    // 真页面确实被带到了导出向导（动作真执行，不只是回执）
-    await expect.poll(async () => new URL(page.url()).pathname, { timeout: 30_000 }).toContain('export')
+    await send(page, `导出向导 任务 ${task.id} 用例-E10-${unique('nav')}`)
+    // 真页面确实被带到了导出向导（动作真执行，不回执位也照样可证）
+    await expect.poll(async () => new URL(page.url()).pathname, { timeout: 60_000 }).toContain('export')
+    // 2026-10-29 呈现减负（stores/ai.ts SILENT_SUCCESS_UI_EVENTS）：open_page 属于"用户已看见结果"的
+    // 无噪声成功 ⇒ 不写 lastUiEventResult、不出 alert-ui-event；同一事实只由「工作区已同步」条承载。
+    await expect(page.locator('[data-testid="alert-ui-event"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="context-synced"]')).toBeVisible({ timeout: 30_000 })
     await waitSettled(page, 60_000)
   })
 
@@ -361,10 +363,10 @@ test.describe('@stub 13b · Z 结果视图渲染', () => {
     const rows = table.locator('[data-testid="resultview-row"]')
     const rowCount = await rows.count()
     expect(rowCount).toBeGreaterThan(0)
-    expect(rowCount).toBeLessThanOrEqual(20)
-    // 行数 == 真任务数（≤20 时不截断，视图与任务中心同源）
+    expect(rowCount).toBeLessThanOrEqual(LIST_TASKS_MAX_ROWS)
+    // 行数 == 真任务数（≤上限时不截断，视图与任务中心同源）
     const total = (await listTasks(page.request)).length
-    expect(rowCount).toBe(Math.min(total, 20))
+    expect(rowCount).toBe(Math.min(total, LIST_TASKS_MAX_ROWS))
     // 首列是编号（整数列），单元格是可读文本而不是 JSON
     const firstCell = (await rows.first().locator('td').first().innerText()).trim()
     expect(firstCell).toMatch(/^\d+$/)
@@ -372,12 +374,13 @@ test.describe('@stub 13b · Z 结果视图渲染', () => {
   })
 
   test('E2E-Z05 截断视图：任务数超上限时出现 resultview-truncated 并说明「已显示 N/M 行」', async ({ page }) => {
-    // 夹具：造到 22 条以上任务（list_tasks 上限 20 ⇒ 视图 meta.truncated 生效）
+    // 夹具：造到上限 + 2 条任务（list_tasks 上限 50 ⇒ 视图 meta.truncated 生效）
+    const target = LIST_TASKS_MAX_ROWS + 2
     const current = (await listTasks(page.request)).length
-    for (let index = current; index < 22; index += 1) {
+    for (let index = current; index < target; index += 1) {
       await createTask(page.request, `NFEZUI-Z05-${index}-${unique('t')}`)
     }
-    expect((await listTasks(page.request)).length).toBeGreaterThanOrEqual(22)
+    expect((await listTasks(page.request)).length).toBeGreaterThanOrEqual(target)
 
     await openPanel(page, '/tasks')
     await send(page, `${MARK.listTasks} 用例-Z05-${unique('t')}`)
@@ -386,13 +389,13 @@ test.describe('@stub 13b · Z 结果视图渲染', () => {
     await expandToolCard(page, await lastToolCallId(page))
     const table = page.locator('[data-testid="resultview-table"]').last()
     await expect(table).toBeVisible({ timeout: 30_000 })
-    expect(await table.locator('[data-testid="resultview-row"]').count()).toBe(20)
+    expect(await table.locator('[data-testid="resultview-row"]').count()).toBe(LIST_TASKS_MAX_ROWS)
 
     const note = page.locator('[data-testid="resultview-truncated"]').last()
     await expect(note).toBeVisible()
     const text = await note.innerText()
     expect(text).toMatch(/共\s*\d+\s*行/)
-    expect(text).toContain('20')
+    expect(text).toContain(String(LIST_TASKS_MAX_ROWS))
     await waitSettled(page, 60_000)
   })
 

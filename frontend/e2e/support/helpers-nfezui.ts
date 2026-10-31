@@ -28,6 +28,12 @@ export const MARK = {
   generic: 'NFZ-GENERIC'
 } as const
 
+/**
+ * `list_tasks` 单轮回填上限（事实源 = 后端 `AiTools.LIST_TASKS_MAX_ROWS`，2026-10-31 由 20 调为 50）。
+ * 截断用例造到上限 + 2 条才会看到 `resultview-truncated`。
+ */
+export const LIST_TASKS_MAX_ROWS = 50
+
 export interface ApiEnvelope<T> {
   success?: boolean
   data?: T
