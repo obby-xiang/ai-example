@@ -85,7 +85,7 @@ public final class ResultViews {
 	}
 
 	/**
-	 * 逐工具已先自行裁行的造口（如 {@code list_tasks} 只取前 20 条）：{@code totalRows} 是
+	 * 逐工具已先自行裁行的造口（如 {@code list_tasks} 只取前 50 条）：{@code totalRows} 是
 	 * <b>真实总数</b>，供截断三件套如实表达"还有多少没展示"——传 {@code -1} = 以 {@code rows.size()} 为准。
 	 */
 	public static ResultView table(String id, String title, List<ResultViewColumn> columns,

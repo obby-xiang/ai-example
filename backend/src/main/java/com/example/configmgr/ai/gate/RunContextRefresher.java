@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.slot.TaskSlots;
@@ -9,9 +10,11 @@ import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -32,7 +35,10 @@ import java.util.Optional;
  * <p>本类只做一件事：把<b>已结算且成功</b>的页面动作翻译成新的 {@link AiContext}：
  * <ul>
  * <li>{@code navigate_to}：按入参更新 {@code page}/{@code taskId}；</li>
- * <li>{@code create_task}：从回执里取<b>真实任务号</b>（{@code #123}）；</li>
+ * <li>{@code create_task}：从回执里取<b>真实任务号</b>（{@code #123}），并把结构化的
+ * {@code defCodes}/{@code conditions} 另存一份<b>会话级 Redis 草案</b>（{@link CreateTaskDraftStore}：
+ * 键按会话、字段 = taskId，不写业务库）—— {@code extra} 只在单轮上下文里活着，草案让候选跨轮仍可回落，
+ * 且会话销毁能按一个已知键精确删除；</li>
  * <li>{@code confirm_step}：<b>只按 {@link TaskService} 的权威 {@code currentStep} 更新步骤</b> ——
  * 绝不照抄入参里的 {@code step}（模型可能自报"已跳到 EXPORT"，而域层根本没前进：
  * 步骤决定 {@code start_export} 等工具的披露面，猜错就是把假入口给模型）；</li>
@@ -49,7 +55,9 @@ import java.util.Optional;
  * 刷新是"让下一步更准"的增强，不是授权面，<b>绝不能因为一次读库失败让整轮工具执行失败</b>；
  * 也绝不拿猜出来的 type/step 去替换权威值。
  *
- * <p>本类不改 {@link TaskService}、不新增持久面、不新增帧类型：它只产出 {@link AiContext}。
+ * <p>本类不改 {@link TaskService}、不新增帧类型：除了 {@code create_task} 候选的任务级草案
+ * （{@link CreateTaskDraftStore}，Redis 单键 + {@code session-ttl}，<b>不写业务库</b>）之外，
+ * 它只产出 {@link AiContext}。
  */
 @Slf4j
 @Component
@@ -90,8 +98,21 @@ public class RunContextRefresher {
 
 	private final TaskService taskService;
 
+	/**
+	 * 任务级 create_task 候选草案（可选依赖）：{@code create_task} 结算时把结构化的
+	 * {@code defCodes}/{@code conditions} 按 当前tenant/user + 会话（runId 解析；字段 = taskId）
+	 * 落到 Redis，供后续轮次（extra 丢失时）继续当作候选事实。缺席 = 不持久化
+	 * （仅 extra 路径，行为与改造前一致）。
+	 */
+	private CreateTaskDraftStore draftStore;
+
 	public RunContextRefresher(TaskService taskService) {
 		this.taskService = taskService;
+	}
+
+	@Autowired(required = false)
+	public void setDraftStore(CreateTaskDraftStore draftStore) {
+		this.draftStore = draftStore;
 	}
 
 	/** 该工具是否会推进运行上下文（调用方据此跳过无谓的 Redis 读）。 */
@@ -101,15 +122,25 @@ public class RunContextRefresher {
 	}
 
 	/**
+	 * 按一条<b>已结算</b>工具结果算下一份运行上下文（不带 runId 的兼容入口）。
+	 *
+	 * @see #next(String, AiContext, PendingToolCall)
+	 */
+	public Optional<AiContext> next(AiContext current, PendingToolCall settled) {
+		return next(null, current, settled);
+	}
+
+	/**
 	 * 按一条<b>已结算</b>工具结果算下一份运行上下文。
 	 *
+	 * @param runId   本轮 id（{@code create_task} 结算时写任务级草案要用它解析会话号；null = 不写草案）
 	 * @param current 当前上下文（null 按空上下文处理）
 	 * @param settled 已结算的待决条目：只认 {@code outcome=OK} 的
 	 *                {@code navigate_to}/{@code create_task}/{@code confirm_step}
 	 * @return 新上下文；{@code empty} = 这个结果不改变上下文
 	 * @throws IllegalStateException 权威任务读不到/读取失败（调用方必须保留旧上下文）
 	 */
-	public Optional<AiContext> next(AiContext current, PendingToolCall settled) {
+	public Optional<AiContext> next(String runId, AiContext current, PendingToolCall settled) {
 		if (settled == null || !supports(settled.getName())) {
 			return Optional.empty();
 		}
@@ -123,7 +154,7 @@ public class RunContextRefresher {
 			applyNavigate(base, settled);
 		}
 		else if (TOOL_CREATE_TASK.equals(settled.getName())) {
-			applyCreateTask(base, settled);
+			applyCreateTask(runId, base, settled);
 		}
 		else {
 			applyConfirmStep(base, settled);
@@ -178,7 +209,7 @@ public class RunContextRefresher {
 	}
 
 	/** 创建：任务号只能从回执里取（真实任务号），字段仍以任务权威值为准。 */
-	private void applyCreateTask(AiContext base, PendingToolCall settled) {
+	private void applyCreateTask(String runId, AiContext base, PendingToolCall settled) {
 		Long taskId = taskIdFromText(settled.getResultText());
 		if (taskId == null) {
 			// 回执里没有任务号：不编造 ID，也不动上下文
@@ -195,6 +226,7 @@ public class RunContextRefresher {
 		bindCreateTaskCandidates(base, taskId);
 		applyCreateTaskDefCodes(base, settled);
 		applyCreateTaskConditions(base, settled);
+		persistCreateTaskDraft(runId, taskId, settled);
 		if (base.getPage() == null || base.getPage().isBlank()) {
 			applyPage(base, pageOf(task.getType()));
 		}
@@ -242,13 +274,58 @@ public class RunContextRefresher {
 	 */
 	private static void applyCreateTaskConditions(AiContext base, PendingToolCall settled) {
 		JsonNode args = parse(settled.getArguments());
-		JsonNode conditions = args == null ? null : args.get("conditions");
-		if (conditions == null || !conditions.isObject() || conditions.isEmpty()) {
+		Map<String, Object> conditions = conditionsOf(args == null ? null : args.get("conditions"));
+		if (conditions.isEmpty()) {
 			return;
 		}
 		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
-		extra.put(EXTRA_CREATE_TASK_CONDITIONS, JSON.convertValue(conditions, Map.class));
+		extra.put(EXTRA_CREATE_TASK_CONDITIONS, conditions);
 		base.setExtra(extra);
+	}
+
+	/**
+	 * 把本次 {@code create_task} 的结构化候选（{@code defCodes}/{@code conditions}）按
+	 * <b>当前tenant/user + 会话（runId 解析）</b>落到任务级 Redis 草案（字段 = taskId）。
+	 *
+	 * <p><b>为什么在结算点写</b>：{@code extra} 只在单轮 run 的上下文快照里活着 —— 换轮、上下文重建、
+	 * 续跑都可能丢；丢了之后条件候选再也找不回来，宿主只能把"用户已经说过的条件"当未知反复问。
+	 * 任务号是跨轮稳定的锚点，写一份即可跨轮回落；键按<b>会话</b>而不是按任务号独立建键，是为了让
+	 * 会话销毁能按一个已知键精确删除（见 {@link CreateTaskDraftStore} 的生命周期说明）。
+	 *
+	 * <p><b>不写业务库</b>：草案只是候选事实，任务条目的条件仍只由前端 {@code persistStepData} 提交。
+	 * 空 {@code conditions={}} 不表示"已知"（{@link CreateTaskDraftStore#save} 忽略空项，不覆盖明确候选）。
+	 *
+	 * <p>写失败只 WARN：本轮 {@code extra} 仍然有效，缺草案只是少了"跨轮回落"这一手，
+	 * 不能让一次正常的上下文刷新失败。
+	 */
+	private void persistCreateTaskDraft(String runId, Long taskId, PendingToolCall settled) {
+		CreateTaskDraftStore store = this.draftStore;
+		if (store == null || runId == null || taskId == null) {
+			// runId 缺席（兼容入口/轻装配）时解不出会话号，不写
+			return;
+		}
+		JsonNode args = parse(settled.getArguments());
+		Map<String, Object> conditions = conditionsOf(args == null ? null : args.get("conditions"));
+		List<String> defCodes = defCodesOf(args);
+		if (conditions.isEmpty() && defCodes.isEmpty()) {
+			return;
+		}
+		try {
+			store.save(runId, taskId, defCodes, conditions);
+		}
+		catch (RuntimeException ex) {
+			log.warn("结构化 create_task 候选未能写入会话任务草案（extra 仍在，跨轮回落不可用）taskId={}：{}", taskId,
+					ex.getMessage());
+		}
+	}
+
+	/** {@code create_task} 的结构化条件：空对象/缺键 = 空（<b>不是</b>"明确无筛选"）。 */
+	private static Map<String, Object> conditionsOf(JsonNode node) {
+		if (node == null || !node.isObject() || node.isEmpty()) {
+			return Map.of();
+		}
+		return JSON.convertValue(node, new TypeReference<Map<String, Object>>() {
+		});
 	}
 
 	/**

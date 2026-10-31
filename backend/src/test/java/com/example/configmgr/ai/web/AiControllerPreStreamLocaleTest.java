@@ -114,7 +114,7 @@ class AiControllerPreStreamLocaleTest {
 			.andExpect(status().isBadRequest())
 			.andExpect(jsonPath("$.code").value(ErrorCodes.MESSAGE_TOO_LONG))
 			.andExpect(jsonPath("$.message").value(containsString("消息长度")))
-			.andExpect(jsonPath("$.limit").value(8192));
+			.andExpect(jsonPath("$.limit").value(2000));
 	}
 
 	@Test
@@ -126,8 +126,8 @@ class AiControllerPreStreamLocaleTest {
 			.andExpect(jsonPath("$.code").value(ErrorCodes.MESSAGE_TOO_LONG))
 			.andExpect(jsonPath("$.message").value("Message exceeds the length limit"))
 			// 数字仍在结构字段里：本地化不吞掉可定位信息
-			.andExpect(jsonPath("$.length").value(8193))
-			.andExpect(jsonPath("$.limit").value(8192));
+			.andExpect(jsonPath("$.length").value(2001))
+			.andExpect(jsonPath("$.limit").value(2000));
 	}
 
 	@Test
@@ -438,7 +438,7 @@ class AiControllerPreStreamLocaleTest {
 	}
 
 	private static org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder overlongRequest() {
-		return chatRequest("中".repeat(8193));
+		return chatRequest("中".repeat(2001));
 	}
 
 	private static org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder chatRequest() {

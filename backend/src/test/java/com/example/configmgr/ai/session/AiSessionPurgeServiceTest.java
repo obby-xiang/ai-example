@@ -7,6 +7,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResumeService;
@@ -217,6 +218,43 @@ class AiSessionPurgeServiceTest {
 		assertThat(second.complete()).isTrue();
 		assertThat(this.fixture.fake.strings).as("按自己的 sessionId 销毁时，该记录才应被删")
 			.doesNotContainKey(foreignRecordKey);
+	}
+
+	// ── 会话级 create_task 候选草案（ai:ctdraft）：精确单键删除 + 失败可重试 ─────
+
+	@Test
+	void purgeDeletesTheSessionCreateTaskDraftKey() {
+		// 没有独立索引/枚举面的会话键：只有草案时 found 也必须为真，且按同一键拼接口精确删除。
+		String draftKey = CreateTaskDraftStore.sessionKey(SESSION_A);
+		this.fixture.fake.hashes.put(draftKey, new LinkedHashMap<>(Map.of("42", "{}")));
+
+		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(result.complete()).isTrue();
+		assertThat(result.found()).as("草案键存在即计入 found（不靠 TTL 静默残留）").isTrue();
+		assertThat(this.fixture.fake.hashes).doesNotContainKey(draftKey);
+		assertThat(this.fixture.fake.deleted).contains(draftKey);
+	}
+
+	@Test
+	void createTaskDraftDeleteFailureIsReportedThenRetriedToCompletion() {
+		String draftKey = CreateTaskDraftStore.sessionKey(SESSION_A);
+		this.fixture.fake.hashes.put(draftKey, new LinkedHashMap<>(Map.of("42", "{}")));
+		this.fixture.fake.failDeleteContaining = "ai:ctdraft:";
+
+		AiSessionPurgeService.PurgeResult partial = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(partial.complete()).as("草案键没删掉不得报成功").isFalse();
+		assertThat(partial.errors()).as("失败必须如实列出（可重试）").anyMatch(error -> error.contains("ctdraft"));
+		assertThat(this.fixture.fake.hashes).as("键仍在 ⇒ 由 pending/重试补删").containsKey(draftKey);
+		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("失败保留 pending").isNotNull();
+
+		this.fixture.fake.failDeleteContaining = null;
+		AiSessionPurgeService.PurgeResult retry = this.fixture.service.purge(SESSION_A, "test");
+
+		assertThat(retry.complete()).as("修复后重试应完成").isTrue();
+		assertThat(retry.errors()).isEmpty();
+		assertThat(this.fixture.fake.hashes).doesNotContainKey(draftKey);
 	}
 
 	@Test
@@ -781,7 +819,7 @@ class AiSessionPurgeServiceTest {
 					+ "VALUES (?, ?, ?, ?, ?)", "msg-a", SESSION_A, 1, TENANT_A, USER_A);
 			fileA = writeFile("att-a.pdf", "attachment-a");
 			attachmentA = this.fixture.attachments.register("run-a", "call-a", SESSION_A, "att-a.pdf", 10L,
-					"application/pdf", fileA.toString());
+					"application/pdf", fileA.getFileName().toString());
 		}
 		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
 			seedIdentitySession("run-b", "call-b");
@@ -789,7 +827,7 @@ class AiSessionPurgeServiceTest {
 					+ "VALUES (?, ?, ?, ?, ?)", "msg-b", SESSION_A, -1, TENANT_B, USER_B);
 			fileB = writeFile("att-b.pdf", "attachment-b");
 			attachmentB = this.fixture.attachments.register("run-b", "call-b", SESSION_A, "att-b.pdf", 10L,
-					"application/pdf", fileB.toString());
+					"application/pdf", fileB.getFileName().toString());
 		}
 
 		AiSessionPurgeService.PurgeResult result;
@@ -947,7 +985,7 @@ class AiSessionPurgeServiceTest {
 		String fileId = sessionId.equals(SESSION_A) ? "att-a" : "att-b";
 		Path file = writeFile(fileId + ".pdf", "attachment-" + fileId);
 		FormAttachmentStore.Attachment stored = this.fixture.attachments.register(runId, toolCallId, sessionId,
-				fileId + ".pdf", 10L, "application/pdf", file.toString());
+				fileId + ".pdf", 10L, "application/pdf", file.getFileName().toString());
 		if (sessionId.equals(SESSION_A)) {
 			this.fixture.fileA = file;
 			this.fixture.attachmentA = stored;

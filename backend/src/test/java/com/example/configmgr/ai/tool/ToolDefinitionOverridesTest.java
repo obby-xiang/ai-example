@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.17", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.18", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -359,7 +359,7 @@ class ToolDefinitionOverridesTest {
         assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
         assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
 
-        assertEquals("2026-10-27.17", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.18", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -387,7 +387,7 @@ class ToolDefinitionOverridesTest {
             assertTrue(description.contains("navigate_to"), description);
         }
 
-        assertEquals("2026-10-27.17", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.18", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
     }
 
     private static String createTaskDescriptionFromYaml() {

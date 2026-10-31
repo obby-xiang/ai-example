@@ -4,7 +4,7 @@
  *
  * 本 spec 锁的契约（假时钟 + 受控 http.get + EventSource 全局桩）：
  * - **事件驱动**：发布跟踪 = watchJob（SSE 主通道 + 3s 兜底 + 帧空闲看门狗），终态判定以快照为准；
- * - **300s 墙钟 = 独立定时器**：非终态到达 ⇒ 提示恰好 1 次 + 收摊；终态到达 ⇒ 墙钟**即清**；
+ * - **360s 墙钟 = 独立定时器**：非终态到达 ⇒ 提示恰好 1 次 + 收摊；终态到达 ⇒ 墙钟**即清**；
  * - **watchingJobId 闸（F4）**：旧作业晚到的终态不覆盖/清空新作业的冲突出口；
  * - **注册表归属单一**：同 taskId+jobId 的 publish watcher 不得双开；
  * - **取消链路 = dispose 形态（C1，唯一机制）**：轮次收尾调用即静默收摊（不弹提示、不上抛）；
@@ -87,9 +87,9 @@ function jobPollCount(): number {
   return http.get.mock.calls.filter(([url]) => String(url).startsWith('/jobs/')).length
 }
 
-/** 推进假时钟越过 300s 墙钟（分片推进，逼出链式定时器）。 */
+/** 推进假时钟越过 360s 墙钟（分片推进，逼出链式定时器）：5 × 80s = 400s。 */
 async function advancePastWallClock(): Promise<void> {
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     await vi.advanceTimersByTimeAsync(80_000)
   }
 }
@@ -113,8 +113,8 @@ afterEach(() => {
 })
 
 describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮询）→ R-94 双通道出口', () => {
-  it('wall-clock-const-300s：发布跟踪墙钟 = 300_000ms（独立定时器口径）', () => {
-    expect(PUBLISH_WATCH_WALL_CLOCK_MS).toBe(300_000)
+  it('wall-clock-const-360s：发布跟踪墙钟 = 360_000ms（独立定时器口径）', () => {
+    expect(PUBLISH_WATCH_WALL_CLOCK_MS).toBe(360_000)
   })
 
   it('failed-dual-channel：开局快照即 FAILED ⇒ 单次 ElMessage + onConflict 收明细摘要（共 N 处）', async () => {
@@ -184,7 +184,7 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮
     expect(onConflict).not.toHaveBeenCalled()
   })
 
-  it('wall-clock-300s-exit：300s 未终态 ⇒ 超时提示恰好 1 次、watcher 收摊（帧不再驱动取数）', async () => {
+  it('wall-clock-360s-exit：360s 未终态 ⇒ 超时提示恰好 1 次、watcher 收摊（帧不再驱动取数）', async () => {
     http.get.mockResolvedValue(makeJob('RUNNING'))
     const store = useTaskStore()
 
@@ -202,7 +202,7 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮
     expect(jobPollCount()).toBe(pollsAtExit)
   })
 
-  it('wall-clock-cleared-on-final：FAILED 终态到达即清墙钟 —— 之后再推进超 300s 也不重复提示', async () => {
+  it('wall-clock-cleared-on-final：FAILED 终态到达即清墙钟 —— 之后再推进超 360s 也不重复提示', async () => {
     let calls = 0
     http.get.mockImplementation((url: string) => {
       if (url.includes('/issues')) {
@@ -219,7 +219,7 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮
     expect(toast.warning).toHaveBeenCalledTimes(1) // 失败提示恰好 1 次（空清单 ⇒ 0 处形态）
     expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('发布冲突'))
 
-    await advancePastWallClock() // 远超 300s：墙钟已清 ⇒ 不再超时提示
+    await advancePastWallClock() // 远超 360s：墙钟已清 ⇒ 不再超时提示
     expect(toast.warning).toHaveBeenCalledTimes(1)
   })
 

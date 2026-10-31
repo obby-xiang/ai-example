@@ -43,8 +43,8 @@ spring:
       # 依据 = 业界依据 §7「数据库连接池（HikariCP）」：官方默认 maximumPoolSize = 10，
       # 且官方明确"不要按并发数放大池子"（连接多了会可测量地拖慢性能）；内网小用户量、
       # 单实例下默认值即推荐值。
-      # 改本值须知连带看：config/AsyncConfig 的业务作业池上限（16）大于本上限时，超出的作业线程
-      # 会在 Hikari connectionTimeout 内排队；两个数须一并复核（见该类"已知张力"注释）。
+      # 改本值须知连带看：config/AsyncConfig 的业务作业池上限（8）不得大于本上限，否则超出的作业线程
+      # 会在 Hikari connectionTimeout 内排队；两个数须一并复核（见该类"Hikari 容量关系"注释）。
       # minimumIdle 刻意不设 —— 同节官方建议不设（默认 = maximum-pool-size，让池表现为固定大小）。
       # 本项取框架缺省 10（= HikariCP 官方默认 maximumPoolSize），不显式写出；如需调剂再显式加回。
 
@@ -389,11 +389,10 @@ app:
     input:
       # 安全防护专项批① 闸门 1（界面 §5.1 #1；数据最小化 R5）：单条 message 的字符上限。
       # 判据 = UTF-16 码元数，与前端 <textarea maxlength> / JS String#length **同一把尺**
-      #   ⇒ 8192 个汉字（24576 字节）照常放行，中文不会被 UTF-8 字节数提前判死。
+      #   ⇒ 2000 个汉字（6000 字节）照常放行，中文不会被 UTF-8 字节数提前判死。
       # 超限 **400 MESSAGE_TOO_LONG 拒绝**，不截断（裁决 A1：截断会让模型基于半句话下结论）。
-      # 取值 8192 = 与"未知工具兜底档"（result-budget.model.fallback-max-chars 8000）同量级：
-      # 超过它就不再是"一句话需求"。
-      max-chars: 8192
+      # 取值 2000 = 一条需求描述的量级（前端同值 MESSAGE_MAX_CHARS）；超过它就不再是"一句话需求"。
+      max-chars: 2000
     limit:
       # 安全防护专项批① 闸门 3：POST /api/ai/chat 的滑动窗口限流（Redis 单键 Lua 原子）。
       # 键族 ai:rate:session:<sessionId> / ai:rate:ip:<RemoteAddr>（窗口外成员在同一脚本里回收）。

@@ -56,8 +56,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <table>
  * <caption>用例矩阵</caption>
- * <tr><td>G1 长度</td><td>8191 过 / 8192 过 / 8193 拒（400 {@code MESSAGE_TOO_LONG}，不截断）</td></tr>
- * <tr><td>G1 口径</td><td>按<b>字符</b>计数（8192 个汉字 = 24576 字节，仍须放行）</td></tr>
+ * <tr><td>G1 长度</td><td>1999 过 / 2000 过 / 2001 拒（400 {@code MESSAGE_TOO_LONG}，不截断）</td></tr>
+ * <tr><td>G1 口径</td><td>按<b>字符</b>计数（2000 个汉字 = 6000 字节，仍须放行）</td></tr>
  * <tr><td>G2 归一化</td><td>零宽字符在进模型前被剥离（送进 {@code ResilientChatService} 的是归一文本）</td></tr>
  * <tr><td>G3 限流</td><td>同会话 20 次/分：第 21 次 429 {@code RATE_LIMITED} + {@code Retry-After}</td></tr>
  * <tr><td>G3 降级</td><td>Redis 计数不可用 ⇒ 放行（WARN），不把业务一起判死</td></tr>
@@ -97,12 +97,12 @@ class AiControllerChatGateTest {
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(this.controller).build();
 
 	@Test
-	void chatAccepts8191And8192Characters() {
-		assertThat(this.controller.chat(new AiChatRequest(SESSION, "中".repeat(8191), null), null).getStatusCode())
-				.as("8191 字符：上限之内")
+	void chatAccepts1999And2000Characters() {
+		assertThat(this.controller.chat(new AiChatRequest(SESSION, "中".repeat(1999), null), null).getStatusCode())
+				.as("1999 字符：上限之内")
 				.isEqualTo(HttpStatus.OK);
-		assertThat(this.controller.chat(new AiChatRequest(SESSION + "-2", "中".repeat(8192), null), null)
-				.getStatusCode()).as("8192 字符：边界值放行（含 8192 个多字节字符 = 24576 字节 ⇒ 按字符数而非字节数）")
+		assertThat(this.controller.chat(new AiChatRequest(SESSION + "-2", "中".repeat(2000), null), null)
+				.getStatusCode()).as("2000 字符：边界值放行（含 2000 个多字节字符 = 6000 字节 ⇒ 按字符数而非字节数）")
 				.isEqualTo(HttpStatus.OK);
 	}
 
@@ -195,17 +195,17 @@ class AiControllerChatGateTest {
 	}
 
 	@Test
-	void chatRejects8193CharactersWithoutTruncating() {
-		String tooLong = "中".repeat(8193);
+	void chatRejects2001CharactersWithoutTruncating() {
+		String tooLong = "中".repeat(2001);
 
 		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, tooLong, null), null);
 
 		assertThat(response.getStatusCode()).as("超限一律拒绝（裁决：不截断）").isEqualTo(HttpStatus.BAD_REQUEST);
 		Map<?, ?> body = (Map<?, ?>) response.getBody();
 		assertThat(body.get("code")).isEqualTo("MESSAGE_TOO_LONG");
-		assertThat(body.get("limit")).isEqualTo(8192);
-		assertThat(body.get("length")).isEqualTo(8193);
-		assertThat(String.valueOf(body.get("message"))).as("中文提示文案").contains("8192");
+		assertThat(body.get("limit")).isEqualTo(2000);
+		assertThat(body.get("length")).isEqualTo(2001);
+		assertThat(String.valueOf(body.get("message"))).as("中文提示文案").contains("2000");
 
 		verify(this.service, org.mockito.Mockito.after(300).never()).chat(anyString(), any(AiChatRequest.class),
 				any(SseChatEmitter.class));
@@ -277,7 +277,7 @@ class AiControllerChatGateTest {
 	void overlongMessagesStillGet400AndConsumeTheRateQuota() {
 		for (int i = 1; i <= 20; i++) {
 			ResponseEntity<?> rejected = this.controller
-					.chat(new AiChatRequest(SESSION, "中".repeat(8193), null), null);
+					.chat(new AiChatRequest(SESSION, "中".repeat(2001), null), null);
 			assertThat(rejected.getStatusCode()).as("第 %d 条超长仍按长度拒（400）", i)
 					.isEqualTo(HttpStatus.BAD_REQUEST);
 			assertThat(((Map<?, ?>) rejected.getBody()).get("code")).isEqualTo("MESSAGE_TOO_LONG");
@@ -370,11 +370,11 @@ class AiControllerChatGateTest {
 	void overlongMessageIsRejectedOverHttpWithJsonBody() throws Exception {
 		this.mockMvc
 				.perform(post("/api/ai/chat").contentType(org.springframework.http.MediaType.APPLICATION_JSON)
-						.content("{\"sessionId\":\"s-mvc\",\"message\":\"" + "中".repeat(8193) + "\"}"))
+						.content("{\"sessionId\":\"s-mvc\",\"message\":\"" + "中".repeat(2001) + "\"}"))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().contentTypeCompatibleWith(org.springframework.http.MediaType.APPLICATION_JSON))
 				.andExpect(jsonPath("$.code").value("MESSAGE_TOO_LONG"))
-				.andExpect(jsonPath("$.limit").value(8192));
+				.andExpect(jsonPath("$.limit").value(2000));
 	}
 
 	@Test

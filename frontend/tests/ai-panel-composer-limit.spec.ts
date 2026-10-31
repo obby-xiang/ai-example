@@ -1,5 +1,5 @@
 /**
- * 安全防护专项批① 闸门 1（前端面）：composer 的 8192 字上限、剩余字数提示、以及 M5 的播报节流。
+ * 安全防护专项批① 闸门 1（前端面）：composer 的 2000 字上限、剩余字数提示、以及 M5 的播报节流。
  *
  * <h2>为什么单独成文件（复审 C1 + M6 收口）</h2>
  * 这 5 例原先落在 `ai-panel-parts-render.spec.ts` 的末尾，那里的 `@/api/ai` 桩只在**部分**用例里
@@ -91,11 +91,11 @@ async function mountPanel(): Promise<ReturnType<typeof mount>> {
   return wrapper
 }
 
-describe('批① 闸门 1：composer 8192 字上限（maxlength / 剩余字数 / 到顶与超限）', { timeout: 20_000 }, () => {
-  it('textarea 带 maxlength=8192（与后端 app.ai.input.max-chars 同值同尺）', async () => {
+describe('批① 闸门 1：composer 2000 字上限（maxlength / 剩余字数 / 到顶与超限）', { timeout: 20_000 }, () => {
+  it('textarea 带 maxlength=2000（与后端 app.ai.input.max-chars 同值同尺）', async () => {
     const wrapper = await mountPanel()
     const box = wrapper.find('[data-testid="composer-input"]')
-    expect(box.attributes('maxlength')).toBe('8192')
+    expect(box.attributes('maxlength')).toBe('2000')
     wrapper.unmount()
   })
 
@@ -107,7 +107,7 @@ describe('批① 闸门 1：composer 8192 字上限（maxlength / 剩余字数 /
 
     const count = wrapper.find('[data-testid="composer-count"]')
     expect(count.exists()).toBe(true)
-    expect(count.text()).toBe('剩余 8184 字')
+    expect(count.text()).toBe('剩余 1992 字')
     expect(count.classes()).toEqual(expect.arrayContaining(['text-[10.5px]', 'tabular-nums', 'text-[#8b949e]']))
     // 位置：底栏最后一个 flex 子元素 = 发送钮；其左是上下文圆环（056ac3a9 起常驻，不再按有无记账隐藏），
     // 计数再往左 —— 三者相邻，计数因此是倒数第三个子元素（不再是"发送钮前一个"）。
@@ -120,33 +120,33 @@ describe('批① 闸门 1：composer 8192 字上限（maxlength / 剩余字数 /
     wrapper.unmount()
   })
 
-  it('到顶（8192）改为「已达上限」提示 + 琥珀色，且不被前端拦下（后端边界仍是 8192 放行）', async () => {
+  it('到顶（恰好 2000）改为「已达上限」提示 + 琥珀色，且不被前端拦下（后端边界仍是 2000 放行）', async () => {
     const wrapper = await mountPanel()
-    await wrapper.find('[data-testid="composer-input"]').setValue('中'.repeat(8192))
+    await wrapper.find('[data-testid="composer-input"]').setValue('中'.repeat(2000))
 
     const count = wrapper.find('[data-testid="composer-count"]')
-    expect(count.text()).toBe('已达 8192 字上限')
+    expect(count.text()).toBe('已达 2000 字上限')
     expect(count.classes()).toContain('text-[#b45309]')
     expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it('超限（程序化回填 8193）标红并关闭发送闸 —— 不替用户截断', async () => {
+  it('超限（程序化回填 2001）标红并关闭发送闸 —— 不替用户截断', async () => {
     const wrapper = await mountPanel()
-    await wrapper.find('[data-testid="composer-input"]').setValue('中'.repeat(8193))
+    await wrapper.find('[data-testid="composer-input"]').setValue('中'.repeat(2001))
 
     const count = wrapper.find('[data-testid="composer-count"]')
     expect(count.text()).toBe('已超 1 字上限')
     expect(count.classes()).toContain('text-[#c0392b]')
     expect(wrapper.find('[data-testid="send-btn"]').attributes('disabled')).toBeDefined()
     // 输入框内容一字不少（截断是后端明确否掉的方案）
-    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toHaveLength(8193)
+    expect((wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement).value).toHaveLength(2001)
     wrapper.unmount()
   })
 
-  it('8191 字正常发送：payload 原样（不做前端裁剪）', async () => {
+  it('1999 字正常发送：payload 原样（不做前端裁剪）', async () => {
     const wrapper = await mountPanel()
-    const text = `${'中'.repeat(8190)}!`
+    const text = `${'中'.repeat(1998)}!`
     await wrapper.find('[data-testid="composer-input"]').setValue(text)
     expect(wrapper.find('[data-testid="composer-count"]').text()).toBe('剩余 1 字')
 
@@ -189,13 +189,13 @@ describe('批① 闸门 1（M5）：计数不逐字播报，只在档位跃迁�
   it('跃迁到余量不足档只说一次常量文案（不含剩余数字）', async () => {
     const wrapper = await mountPanel()
     const box = wrapper.find('[data-testid="composer-input"]')
-    await box.setValue('中'.repeat(7691)) // 余量 501：仍是常规档
+    await box.setValue('中'.repeat(1499)) // 余量 501：仍是常规档
     expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('')
 
-    await box.setValue('中'.repeat(7692)) // 余量 500：进 near 档
+    await box.setValue('中'.repeat(1500)) // 余量 500：进 near 档
     expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('剩余字数不足 500 字')
 
-    await box.setValue('中'.repeat(7695)) // 同档内继续输入：文案不变（不逐字播报）
+    await box.setValue('中'.repeat(1503)) // 同档内继续输入：文案不变（不逐字播报）
     expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('剩余字数不足 500 字')
     wrapper.unmount()
   })
@@ -204,10 +204,10 @@ describe('批① 闸门 1（M5）：计数不逐字播报，只在档位跃迁�
     const wrapper = await mountPanel()
     const box = wrapper.find('[data-testid="composer-input"]')
 
-    await box.setValue('中'.repeat(8192))
-    expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('已达 8192 字上限')
+    await box.setValue('中'.repeat(2000))
+    expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('已达 2000 字上限')
 
-    await box.setValue('中'.repeat(8193))
+    await box.setValue('中'.repeat(2001))
     expect(wrapper.find('[data-testid="composer-count-live"]').text()).toBe('已超出上限，无法发送')
     wrapper.unmount()
   })

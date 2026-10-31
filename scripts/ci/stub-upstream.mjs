@@ -308,7 +308,7 @@ function faultsOf(body) {
 }
 
 /** 开关默认值（`stub-routes.json` 的 `faults.switches[*].default`；缺失回落内建同值）。 */
-const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 50000, 'stall-headers': 30000, 'kill-stream': 3000,
+const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 95000, 'stall-headers': 30000, 'kill-stream': 3000,
   'slow-tool': 130000, 'multi-card': 3, 'huge-frame': 102400, 'tool-loop': 26,
   'slow-first-byte': 8000, 'slow-tool-exec': 8000, 'slow-tail-frames': 1200, 'late-frames': 2,
   // reasoning：数值空间以 0 起，0 = 关闭；裸标记（无 `=<chars>`）因此也是关闭，

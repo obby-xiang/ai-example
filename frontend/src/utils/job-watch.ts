@@ -14,7 +14,7 @@
  * 任务级通道**无周期心跳**，SSE 连上后若一直无帧，旧口径靠 30s 保底轮询顺带发现假死
  * （浪费：正常态下 30s 一拍全是空转）。新口径：
  * - SSE 连上（onopen）后**兜底表停表**（realtime 期间零周期快照），改由看门狗盯帧：
- *   连续 `FRAME_IDLE_WATCHDOG_MS`（90s，可注入 —— 测试/E2E 注小值）**无任何 SSE 帧**
+ *   连续 `FRAME_IDLE_WATCHDOG_MS`（120s，可注入 —— 测试/E2E 注小值）**无任何 SSE 帧**
  *   ⇒ 判通道死亡 ⇒ 降 3s polling；
  * - **复位源只有两个**：SSE 帧到达、onopen —— **polling 快照落地不复位**（F3：
  *   兜底 tick 是"通道已死"期间的自愈手段，不能反过来给死通道续命）；
@@ -41,7 +41,7 @@ export const JOB_FALLBACK_POLL_MS = 3000
  * 帧空闲看门狗阈值（M3）：SSE 连上后连续无帧达此值 ⇒ 判通道死亡 ⇒ 降 3s polling。
  * **可注入**（`JobWatchOptions.frameIdleWatchdogMs`）：测试/E2E 注入小值驱动降级/恢复路径。
  */
-export const FRAME_IDLE_WATCHDOG_MS = 90_000
+export const FRAME_IDLE_WATCHDOG_MS = 120_000
 
 /** SSE 通道状态（供 UI 显示"实时通道已降级"）。 */
 export type JobChannelState = 'connecting' | 'realtime' | 'polling'
@@ -59,7 +59,7 @@ export interface JobWatchOptions {
   onChannel?: (state: JobChannelState) => void
   /** 兜底轮询间隔（降级后的自愈节奏；缺省 JOB_FALLBACK_POLL_MS = 3s） */
   pollIntervalMs?: number
-  /** 帧空闲看门狗阈值（缺省 FRAME_IDLE_WATCHDOG_MS = 90s；测试/E2E 注入小值） */
+  /** 帧空闲看门狗阈值（缺省 FRAME_IDLE_WATCHDOG_MS = 120s；测试/E2E 注入小值） */
   frameIdleWatchdogMs?: number
   /** 拉取快照失败时的回调（网络抖动不该打断跟踪） */
   onError?: (error: unknown) => void
@@ -94,7 +94,7 @@ export function watchJob(options: JobWatchOptions): () => void {
   /** realtime 期间的"停表"节奏：约 24.8 天的间隔 = 不起周期 tick（refreshNow 不受影响）。
    *  取 2^31-1 是定时器延时的 32 位安全上界：更大的值现代规范（HTML Timers）为**钳制**到可表示
    *  上界而非回绕（早期 fake-timers/旧实现才有溢出回绕表现，注释原表述有误，C2 修正）；反正
-   *  帧空闲看门狗（90s）远早于此触发降级，本节奏永不抵达。 */
+   *  帧空闲看门狗（120s）远早于此触发降级，本节奏永不抵达。 */
   const REALTIME_IDLE_MS = 2_147_483_647
   const emitChannel = (state: JobChannelState): void => {
     if (disposed) {

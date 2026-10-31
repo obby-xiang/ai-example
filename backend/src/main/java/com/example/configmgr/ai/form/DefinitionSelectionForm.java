@@ -2,7 +2,6 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -13,8 +12,6 @@ import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
-import com.example.configmgr.ai.tool.ToolOutcome;
-import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,12 +26,12 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * <b>宿主确定性的定义选择表单</b>：新建任务 → 导航到配置选择步骤后，若配置未知，由宿主自己挂起一张
- * 平铺多选表单（{@code purpose=SELECT_DEFINITIONS}），不再把这一交互留给模型自由决定。
+ * <b>宿主确定性的定义选择表单</b>：新建任务后若配置未知，由宿主自己在选择步骤挂起一张平铺多选表单
+ * （{@code purpose=SELECT_DEFINITIONS}），不再把这一交互留给模型自由决定。
  *
  * <h2>被替换掉的自由裁量</h2>
  * 同一现场下模型的输出不可控：它可能写成文字反问（"请告诉我导出哪个配置"），也可能自己拼一份
- * 带层级 / 级联的 options。用户口径是确定性的：<b>新任务 + 导航成功 + 配置未知 ⇒ 宿主直接发
+ * 带层级 / 级联的 options。用户口径是确定性的：<b>新任务 + 停在选择步骤 + 配置未知 ⇒ 宿主直接发
  * 平铺多选</b>，选项来自 {@link DefinitionCatalog}（{@code value=defCode}、{@code label=定义名称}），
  * 不需要 {@code dependsOn}、不需要模型先 {@code list_config_defs}。
  *
@@ -43,10 +40,12 @@ import java.util.Set;
  * <li><b>新任务链</b>：本轮台账里有 {@code create_task} 且回执带真实任务号 —— 这是"用户主动新建"
  * 的<b>唯一</b>证据。用户只是浏览/打开既有页面（没有 create_task）时一律不弹，旧任务配置也不会
  * 成为"新任务的已知配置"（判据只看本轮台账与<b>新任务</b>自己的权威值）；</li>
- * <li><b>刚导航到那个任务</b>：本批已结算条目里有一条 {@code navigate_to}，{@code outcome=OK}
- * 且入参 {@code taskId} 等于上面那个任务号 —— 判据挂在"导航成功"这条边上，而不是挂在一段时间
- * 或某个任务状态上，因此同一轮里后续的批（表单回灌、选择配置项）不会再触发；</li>
- * <li><b>停在选择步骤</b>：上下文页是导出向导、权威步骤 {@code SELECT_DEFS}；</li>
+ * <li><b>判据按任务状态而非导航瞬时成功</b>：{@code page}/{@code taskId}/{@code step} 的判定
+ * （见下一条）全部来自权威上下文。<b>不</b>要求本批有一条成功的 {@code navigate_to}：前端导航有
+ * 等待上限，超时（现场 8 秒）时页面可能早已被用户/前端带到选择步骤，而"导航成功"这条瞬时边永远
+ * 等不到 —— 把它当门槛会让表单在真实现场<b>永不出现</b>。去重不靠这条边，靠"同一任务只挂一次"的
+ * 确定性 {@code toolCallId}（最后一条）；</li>
+ * <li><b>停在选择步骤</b>：上下文页是导出向导、任务号就是本轮新建的那个、权威步骤 {@code SELECT_DEFS}；</li>
  * <li><b>配置未知</b>：任务槽位里没有 {@code defCodes}（与 {@link GenerativeFormGuard} 的放行判据
  * 同一份 {@link TaskSlots}）—— 已知配置时宿主不弹，让模型直接走 {@code select_definitions}；</li>
  * <li><b>目录可枚举</b>：目录非空、可读，且条数不超过平铺上限
@@ -83,7 +82,7 @@ import java.util.Set;
  * <h2>唯一的接入点：{@code ResumeService} 的批间交棒点</h2>
  * {@code navigate_to} 是前端工具 —— 生产 {@code park=true} 时它在等待处就结束了首轮执行
  * （{@code RunParkedException}），结算、批间上下文刷新与"下一跳"全部发生在
- * {@code ResumeService#resume}。于是"导航成功之后、模型再被问之前"的确定点只有一个：
+ * {@code ResumeService#resume}。于是"新任务到达选择步骤之后、模型再被问之前"的确定点只有一个：
  * 续跑侧<b>整批结算 + 权威同步 + 工作区段重写之后、记忆窗口/压缩与交棒之前</b>（那里的
  * {@code nextHopContext} 才是"下一跳那份上下文"，槽位也已按新任务的权威值重算过）。
  * 首轮执行循环的尾部因此<b>不</b>另挂一处：park 下那条路只在"前端抢在 park 判定之前回灌"的
@@ -162,6 +161,10 @@ public class DefinitionSelectionForm extends HostForm {
 	/**
 	 * 判据 + 表单正文（不含任何外置写）。
 	 *
+	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、页/步骤是
+	 * 导出向导的 {@code SELECT_DEFS}、槽位尚无 {@code defCodes}、本批未被处理、同一任务未挂过。
+	 * <b>不</b>看本批是否有一条成功的 {@code navigate_to}（前端导航超时不再挡住表单）。
+	 *
 	 * @return {@code empty} = 不该由宿主发这张表单
 	 */
 	Optional<String> argumentsIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch) {
@@ -180,9 +183,6 @@ public class DefinitionSelectionForm extends HostForm {
 		if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
 			return Optional.empty();
 		}
-		if (!navigatedTo(settledBatch, createdTaskId)) {
-			return Optional.empty();
-		}
 		if (TaskSlots.fromExtra(context.getExtra()).hasDefCodes()) {
 			// 配置已知 ⇒ 直接走 select_definitions，不弹表单（与槽位放行同一判据）
 			return Optional.empty();
@@ -191,27 +191,6 @@ public class DefinitionSelectionForm extends HostForm {
 			return Optional.empty();
 		}
 		return buildArguments(createdTaskId);
-	}
-
-	/** 本批是否有一次<b>成功</b>的导航，且目标正是本轮新建的那个任务。 */
-	private static boolean navigatedTo(List<PendingToolCall> settledBatch, Long createdTaskId) {
-		if (settledBatch == null || settledBatch.isEmpty()) {
-			return false;
-		}
-		for (PendingToolCall settled : settledBatch) {
-			if (settled == null || !RunContextRefresher.TOOL_NAVIGATE.equals(settled.getName())) {
-				continue;
-			}
-			if (!settled.resolved() || settled.effectiveOutcome() != ToolOutcome.OK) {
-				continue;
-			}
-			JsonNode args = parseJson(settled.getArguments());
-			Long target = longOf(args == null ? null : args.get("taskId"));
-			if (createdTaskId.equals(target)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/**
@@ -280,24 +259,6 @@ public class DefinitionSelectionForm extends HostForm {
 		String trimmed = name.trim();
 		return trimmed.length() > GenerativeFormRules.MAX_OPTION_TEXT_CHARS
 				? trimmed.substring(0, GenerativeFormRules.MAX_OPTION_TEXT_CHARS) : trimmed;
-	}
-
-	private static Long longOf(JsonNode node) {
-		if (node == null || node.isNull() || node.isFloatingPointNumber() || node.isBoolean()) {
-			return null;
-		}
-		if (node.isIntegralNumber()) {
-			return node.asLong();
-		}
-		if (node.isTextual()) {
-			try {
-				return Long.parseLong(node.asText().trim());
-			}
-			catch (NumberFormatException ex) {
-				return null;
-			}
-		}
-		return null;
 	}
 
 }

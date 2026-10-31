@@ -37,19 +37,20 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * 宿主确定性定义选择表单：<b>新任务 + 导航到选择步骤 + 配置未知</b> ⇒ 宿主自己挂起一张平铺多选表单。
+ * 宿主确定性定义选择表单：<b>新任务 + 停在选择步骤 + 配置未知</b> ⇒ 宿主自己挂起一张平铺多选表单。
  *
  * <h2>被钉住的缺陷</h2>
  * 过去这一步完全交给模型自由决定：同一现场下它可能写成文字反问（"请告诉我导出哪个配置"），
- * 也可能自己拼一份层级 options 的表单。用户口径是<b>确定性的</b>：新建任务 → 导航成功 →
+ * 也可能自己拼一份层级 options 的表单。用户口径是<b>确定性的</b>：新建任务 → 上下文到达选择步骤 →
  * 配置未知 ⇒ 宿主直接挂起 {@code purpose=SELECT_DEFINITIONS} 的平铺多选，选项来自
  * {@code DefinitionCatalog}（{@code value=defCode}、{@code label=定义名称}），不需要
  * {@code dependsOn} / 层级，也不需要模型先 {@code list_config_defs}。
  *
  * <h2>本用例锁的口径</h2>
  * <ol>
- * <li>只在新任务链（本轮台账里确有 {@code create_task} 成功）+ 导航到<b>那个</b>任务 +
- * {@code SELECT_DEFS} + 配置未知时挂起；普通浏览既有页面不弹；</li>
+ * <li>只在新任务链（本轮台账里确有 {@code create_task} 成功）+ 权威上下文的 taskId 是<b>那个</b>任务 +
+ * 页/步骤是 {@code export}/{@code SELECT_DEFS} + 配置未知时挂起；导航是否成功、导航到哪都不参与判定
+ * （前端导航有等待上限，瞬时边等不到时表单仍须出现）；普通浏览既有页面不弹；</li>
  * <li>已知配置（槽位里有 defCodes）不弹 —— 仍走 {@code select_definitions}；</li>
  * <li>目录为空/读取失败/超出平铺上限 ⇒ <b>不生成空表单</b>（走既有失败恢复，模型侧照旧）；</li>
  * <li>表单正文仍由既有白名单闸门（{@link GenerativeFormGuard}）与既有回灌/取消路径承认 ——
@@ -214,7 +215,7 @@ class DefinitionSelectionFormTest {
 		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 
-	// ── ③ 不在新任务链上：普通浏览 / 别的页面 / 别的步骤都不弹 ────────────────
+	// ── ③ 权威状态判据：导航边不参与；普通浏览 / 别的页面 / 别的步骤 / 别的任务不弹 ──
 
 	@Test
 	void browsingAnExistingTaskNeverPopsTheForm() {
@@ -228,20 +229,33 @@ class DefinitionSelectionFormTest {
 	}
 
 	@Test
-	void navigatingAnotherTaskNeverPopsTheForm() {
+	void navigationTargetIsNotPartOfTheStateCriterion() {
 		boolean parked = this.form.parkIfDue(RUN_ID, selectionStepContext(Map.of()),
 				List.of(navigateTo(7L, ToolOutcome.OK)), history());
 
-		assertThat(parked).as("导航到的不是本轮新建的那个任务 ⇒ 不弹").isFalse();
-		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
+		assertThat(parked).as("判据看权威上下文（page/taskId/step），导航到哪个任务不参与判定").isTrue();
+		assertThat(capturedPending().getToolCallId()).isEqualTo(DefinitionSelectionForm.toolCallId(TASK_ID));
 	}
 
 	@Test
-	void failedNavigationNeverPopsTheForm() {
+	void failedNavigationStillPopsTheFormWhenPageTaskAndStepMatch() {
 		boolean parked = this.form.parkIfDue(RUN_ID, selectionStepContext(Map.of()),
 				List.of(navigateTo(TASK_ID, ToolOutcome.FAILED)), history());
 
-		assertThat(parked).isFalse();
+		assertThat(parked).as("page/taskId/step 满足 + 配置未知 ⇒ 导航 failed 也必须发表单").isTrue();
+		JsonNode form = parse(capturedPending().getArguments()).path("form");
+		assertThat(form.path("purpose").asText()).isEqualTo(GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS);
+		assertThat(form.path("fields")).hasSize(1);
+		assertThat(form.path("fields").get(0).path("key").asText()).isEqualTo(DefinitionSelectionForm.FIELD_KEY);
+	}
+
+	@Test
+	void contextPointingAtAnotherTaskNeverPopsTheForm() {
+		AiContext context = AiContext.of("export", "EXPORT", "SELECT_DEFS", 7L, "ACTIVE", Map.of());
+
+		boolean parked = this.form.parkIfDue(RUN_ID, context, List.of(navigateTo(7L, ToolOutcome.OK)), history());
+
+		assertThat(parked).as("上下文任务号不是本轮新建任务 ⇒ 即使页/步骤对也不弹").isFalse();
 		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
 	}
 

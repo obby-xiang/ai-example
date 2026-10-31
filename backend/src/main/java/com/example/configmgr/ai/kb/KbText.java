@@ -19,7 +19,8 @@ import java.util.regex.Pattern;
  * 全角尖括号形式 —— 否则一份知识文就能提前闭合定界，把后续内容顶到定界之外；控制字符/零宽字符
  * 同样剥掉（它们可在定界内伪造换行与不可见指令）；</li>
  * <li><b>8000 字符闸</b>：单次工具结果 ≤ {@value #MAX_RESULT_CHARS} 字符（含定界与截断标记），
- * 与 {@code app.ai.result-budget.model.fallback-max-chars}（8000）同量级 —— 不依赖下游裁剪也能保证不越 8192 输入闸。</li>
+ * 与 {@code app.ai.result-budget.model.fallback-max-chars}（8000）同量级 —— 不依赖下游裁剪也能保证结果有界；
+ * 用户输入闸（{@code app.ai.input.max-chars}，2000）只校验用户 message，不约束本类工具结果。</li>
  * </ol>
  *
  * <p><b>原始 BM25 分永不出现在这里</b>：{@link KbSearchHit} 结构上就没有分数字段，只有

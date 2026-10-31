@@ -63,7 +63,9 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] }
+      // 设备预设自带 viewport 1280×720，会覆盖顶层 use 的同名键（project.use 合并在后）；
+      // 故在展开之后显式写回 1440×900，保证实际生效的是顶层口径。
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }
     }
   ]
 })

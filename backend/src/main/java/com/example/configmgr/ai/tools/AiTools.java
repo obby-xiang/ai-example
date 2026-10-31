@@ -123,11 +123,11 @@ public class AiTools {
      * {@code list_config_defs} 一轮最多回填给模型的配置定义条数（有界披露）。
      *
      * <p>与 {@link #LIST_TASKS_MAX_ROWS} 同一口径：模型上下文是有限预算，配置定义条数由业务随时可增，
-     * 全量返回会让一份只读结果独占窗口、把真正的任务上下文挤出去。取值同样取业界分页默认（20），
-     * 且必须 &lt; {@code app.ai.result-budget.model.max-rows}（200），否则二次截断会先于本上限生效，
+     * 全量返回会让一份只读结果独占窗口、把真正的任务上下文挤出去。取值与 {@link #LIST_TASKS_MAX_ROWS}
+     * 同级（50），且必须 &lt; {@code app.ai.result-budget.model.max-rows}（200），否则二次截断会先于本上限生效，
      * 下方"共 N 个仅显示前 M 个"的告知就成了假话。
      */
-    public static final int LIST_CONFIG_DEFS_MAX_ROWS = 20;
+    public static final int LIST_CONFIG_DEFS_MAX_ROWS = 50;
 
     /** 结果行格式（归档/诊断按此前缀识别人读行；顺序 = 稳定排序后的定义）。 */
     public static final String LIST_CONFIG_DEFS_ROW_PREFIX = "- ";
@@ -153,7 +153,7 @@ public class AiTools {
      * <li>非法 {@code level} 仍以带码异常浮出（不返回 ok=true 的失败文案）。</li>
      * </ul>
      */
-    @Tool(name = AiToolNames.LIST_CONFIG_DEFS, description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选，最多返回前 20 个，超出时给出总数",
+    @Tool(name = AiToolNames.LIST_CONFIG_DEFS, description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选，最多返回前 50 个，超出时给出总数",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -234,14 +234,14 @@ public class AiTools {
      * {@code list_tasks} 一轮最多回填给模型的任务条数。
      *
      * <p>取值依据（业界依据 §8「分页大小主流默认」）：GitHub 默认 30 / 上限 100，Stripe 默认 10，
-     * 内网小数据量场景推荐<b>默认 20</b> —— 本值即该推荐值。且必须
+     * 内网小数据量场景取<b>50</b>（落在 GitHub 默认 30～上限 100 的区间内）—— 本值即该取值。且必须
      * <b>&lt; {@code app.ai.result-budget.model.max-rows}</b>（200，见 application.yml），
      * 否则二次截断会先于本上限生效，下方"共 N 条仅显示前 M 条"的告知就成了假话。
      *
      * <p>为什么必须带告知：本工具是模型判断"任务是否存在、处于哪一步"的入口；静默截断会让模型把
      * 不完整清单当完整清单（2026-10-10 数字规格清点裁决②：原值 10 无注释、无告知、无截断标记）。
      */
-    public static final int LIST_TASKS_MAX_ROWS = 20;
+    public static final int LIST_TASKS_MAX_ROWS = 50;
 
     /**
      * {@code list_tasks} 结果行格式（{@code - #7 [EXPORT] 标题 步骤:SELECT_DEFS 状态:ACTIVE}）。
@@ -269,9 +269,9 @@ public class AiTools {
     public static final String LIST_TASKS_TOTAL_SUFFIX = " 条，仅显示前 " + LIST_TASKS_MAX_ROWS + " 条）";
 
     // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
-    // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 20 条"与"超出时给出总条数"是
+    // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 50 条"与"超出时给出总条数"是
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
-    @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 20 条，超出时给出总条数",
+    @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 50 条，超出时给出总条数",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({"*", "page:tasks"})
     @ToolRisk(ToolMeta.RiskLevel.READ)

@@ -3,7 +3,7 @@
  *
  * 口径：
  * - 建连超时（响应头未回）→ 抛 `ApiError{code:CHAT_CONNECT_TIMEOUT}`；
- * - 首帧超时（已连上但 0 帧）→ `StreamCloseInfo.timeoutStage='first-frame'`，不重挂；
+ * - 首帧超时 40s（覆盖服务端首包 30s 预算 + 传输余量）→ `StreamCloseInfo.timeoutStage='first-frame'`，不重挂；
  * - 帧间 45s **不变**，`start` 后的 `heartbeat{phase:'compacting'}` 照常续命（不放宽上限）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -68,10 +68,10 @@ afterEach(() => {
 })
 
 describe('批次3 · POST /chat 分阶段超时', () => {
-  it('常量口径：建连 15s < 首帧 30s < 帧间 45s（后者不放宽）', () => {
+  it('常量口径：建连 15s < 首帧 40s < 帧间 45s（后者不放宽）', () => {
     expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(45_000)
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(15_000)
-    expect(DEFAULT_FIRST_FRAME_TIMEOUT_MS).toBe(30_000)
+    expect(DEFAULT_FIRST_FRAME_TIMEOUT_MS).toBe(40_000)
     expect(DEFAULT_FIRST_FRAME_TIMEOUT_MS).toBeLessThan(DEFAULT_IDLE_TIMEOUT_MS)
   })
 

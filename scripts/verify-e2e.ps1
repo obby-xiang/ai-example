@@ -3406,8 +3406,9 @@ Add-AiCase 'S-12' 'P0' '迟到帧闸门：终帧之后不再有业务帧、不�
     $runId = Ai-RunId $turn.frames
     Ai-DoneIsLast $turn.frames
     $max = Ai-MaxSeq $turn.frames
-    # 归档末号之后不得再有业务帧被补发（迟到帧的唯一入口是差量重挂）
-    $brief = Read-Sse-Brief "/api/ai/events/$runId`?lastSeq=$max" 3000
+    # 归档末号之后不得再有业务帧被补发（迟到帧的唯一入口是差量重挂）；观察窗 5000ms
+    # 与 Read-Sse-Brief 的判据一致（≥ 2 个心跳周期 + 抖动余量）
+    $brief = Read-Sse-Brief "/api/ai/events/$runId`?lastSeq=$max" 5000
     $late = @($brief | Where-Object { $_.type -in @('delta', 'tool_start', 'tool_result', 'confirm_request') })
     if ($late.Count -gt 0) { throw "done 之后又收到 $($late.Count) 个业务帧（迟到帧闸门失效）" }
     return $null

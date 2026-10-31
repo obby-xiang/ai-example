@@ -105,6 +105,13 @@
       "reason": "本批仅在非驱动实例的既有attach连接补发无业务seq心跳，不改变迁移接口、归档序号或帧类型契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:3db7496029994eed9cd2d79f4a7c9bedbeca4b89b96206e3fafbd2537eed01fb",
+      "status": "synced",
+      "reason": "已同步配置表任务状态判据、create_task会话级Redis草案、读取回落与会话销毁生命周期，以及批准的列表、输入和超时数字",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

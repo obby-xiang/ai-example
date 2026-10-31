@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -74,6 +75,9 @@ import java.util.regex.Pattern;
  * <li>{@code ai_feedback} 表<b>该身份 + 该会话</b>的行（H2 先行；按 {@code sessionId + tenantId + userId}
  * 三元组定位，跨租户同 sessionId 不误删；无身份上下文 = legacy {@code (0,0)} 命名空间）；</li>
  * <li>{@code ai:session:current:<sid>} 与 {@code ai:session:<sid>}；</li>
+ * <li><b>会话级 {@code create_task} 候选草案</b>（{@code ai:ctdraft:{<t>:<u>:session:<sid>}}，单键 HASH，
+ * 字段 = taskId）：按同一份键拼接口精确 {@code DEL}，<b>不扫描</b>；失败进 {@code errors} ⇒
+ * {@code complete=false} + pending 保留（与其它会话键同一可重试口径，绝不静默残留到 TTL）；</li>
  * <li>浏览器本地镜像/草稿：服务端无法访问 sessionStorage，结果里给出精确的
  * {@code clientCleanup}（镜像键 + 草稿键前缀 + 本轮 toolCallId 清单），由前端执行删除。</li>
  * </ol>
@@ -683,12 +687,14 @@ public class AiSessionPurgeService {
 				this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
 		boolean sessionRecordExisted = Boolean.TRUE.equals(
 				this.redis.hasKey(AiSessionService.keyFor(sessionId)));
+		// 会话级 create_task 候选草案（ai:ctdraft，字段 = taskId）：没有独立索引，存在即计入 found
+		boolean draftExisted = Boolean.TRUE.equals(this.redis.hasKey(CreateTaskDraftStore.sessionKey(sessionId)));
 
 		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
 		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
 
 		boolean found = memoryExisted || !runs.isEmpty() || context.any() || !attachmentList.isEmpty()
-				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted;
+				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted || draftExisted;
 
 		ClientCleanup cleanup = clientCleanup(sessionId, toolCallIds, RequestContextUtils.currentOrNull());
 		return new Enumeration(runs, attachmentList, context, memoryExisted, memoryMessages, memoryKey, db,
@@ -1405,6 +1411,10 @@ public class AiSessionPurgeService {
 		// 会话→活跃轮有序索引（ZSET，带 TTL）：销毁后成员指向已删的轮，留着只会让"活跃轮"的
 		// 加速面指向空快照；按类型删除，别的身份的键前缀里带自己的身份段，不会命中。
 		deleteKeyIfType(this.runStore.sessionActiveKey(sessionId), DataType.ZSET, errors, warnings, "sessionActive");
+		// 会话级 create_task 候选草案（ai:ctdraft，HASH，字段 = taskId）：不按任务号独立建键、也没有
+		// 索引，只能按"会话一个键"精确 DEL（与写入方同一个键拼接口）。失败进 errors ⇒ complete=false
+		// + pending 保留，由调度/手动重试补删 —— 绝不静默残留到 session-ttl。
+		deleteKeyIfType(CreateTaskDraftStore.sessionKey(sessionId), DataType.HASH, errors, warnings, "ctdraft");
 		return new SessionView(currentDeleted, recordDeleted);
 	}
 

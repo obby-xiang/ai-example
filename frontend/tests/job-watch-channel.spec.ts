@@ -4,8 +4,8 @@
  * 口径反转（有意为之，替代一期 D8"无帧是正常态"）：
  * - **删除** realtime 30s 保底（`JOB_REALTIME_FALLBACK_POLL_MS`）：SSE 连上后兜底表**停表**，
  *   不再有任何低频周期快照（触发源收敛为三类：SSE 帧 / onopen 一发 / 3s 兜底表）；
- * - **新增帧空闲看门狗** `FRAME_IDLE_WATCHDOG_MS = 90_000`（可注入，测试/E2E 注小值）：
- *   连续 90s 无 SSE 帧 ⇒ 判通道死亡 ⇒ 降 3s polling；此后任意新帧到达 ⇒ 回事件驱动
+ * - **新增帧空闲看门狗** `FRAME_IDLE_WATCHDOG_MS = 120_000`（可注入，测试/E2E 注小值）：
+ *   连续 120s 无 SSE 帧 ⇒ 判通道死亡 ⇒ 降 3s polling；此后任意新帧到达 ⇒ 回事件驱动
  *   （realtime：兜底表停 + 重新武装看门狗）；
  * - **复位源只有两个**：SSE 帧到达与 onopen —— **polling 快照落地不复位**（F3：
  *   兜底 tick 是"通道已死"期间的自愈手段，不能反过来给死通道续命）；
@@ -26,7 +26,7 @@ import type { Job, JobStatus } from '@/types/job'
 /** 兜底轮询间隔（3s：看门狗降级后的自愈节奏）。 */
 const POLL_MS = JOB_FALLBACK_POLL_MS // 3000
 
-/** 看门狗测试阈值：注入小值（默认 90s  production 常量另行断言）。 */
+/** 看门狗测试阈值：注入小值（默认 120s  production 常量另行断言）。 */
 const WATCHDOG_MS = 10_000
 
 /** 错峰桩默认值：0.5 ⇒ 125ms（与 utils/polling.ts 的 0~250ms 窗口同口径）。 */
@@ -170,9 +170,9 @@ afterEach(() => {
   delete (globalThis as unknown as { EventSource?: unknown }).EventSource
 })
 
-describe('utils/job-watch.ts · 帧空闲看门狗（M3：90s 无帧即判通道死亡降级）', () => {
-  it('watchdog-default-90s：生产缺省阈值 = 90_000（可注入面之外的真实常量）', () => {
-    expect(FRAME_IDLE_WATCHDOG_MS).toBe(90_000)
+describe('utils/job-watch.ts · 帧空闲看门狗（M3：120s 无帧即判通道死亡降级）', () => {
+  it('watchdog-default-120s：生产缺省阈值 = 120_000（可注入面之外的真实常量）', () => {
+    expect(FRAME_IDLE_WATCHDOG_MS).toBe(120_000)
     expect(JOB_FALLBACK_POLL_MS).toBe(3000)
   })
 

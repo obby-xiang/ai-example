@@ -119,7 +119,7 @@
       "stall-frames": {
         "layer": "stub",
         "value": "ms",
-        "default": 50000,
+        "default": 95000,
         "note": "帧间静默（首帧后每帧前等 ms）",
         "cases": [
           "S-04"

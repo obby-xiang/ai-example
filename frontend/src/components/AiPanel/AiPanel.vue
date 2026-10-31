@@ -1809,11 +1809,11 @@ function retryTurn(message: ChatMessage): void {
 
 const inputText = ref('')
 /**
- * 安全防护专项批①：单条消息的字符上限——与后端 {@code app.ai.input.max-chars}（8192）**同值同尺**
+ * 安全防护专项批①：单条消息的字符上限——与后端 {@code app.ai.input.max-chars}（2000）**同值同尺**
  * （判据 = UTF-16 码元数，即 JS `String#length` / `<textarea maxlength>` 的计数口径，中文按 1 字算）。
  * 前端只做"不让写出超限文本 + 提前告知"，真正的拒绝仍在后端（400 MESSAGE_TOO_LONG，不截断）。
  */
-const MESSAGE_MAX_CHARS = 8192
+const MESSAGE_MAX_CHARS = 2000
 const msgWrapRef = ref<HTMLElement | null>(null)
 /**
  * 批 D · D2②：滚动容器内的**内容层**。RO 观测它（而不是滚动容器本身）——
@@ -2299,8 +2299,8 @@ const canSubmit = computed(
 
 /**
  * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
- * 四档（判据见下方 composerTier）：常态灰 `剩余 N 字` → 余量 ≤ 500 转琥珀 → 到顶（= 8192，仍可发送）
- * `已达 8192 字上限` → 超限（只可能来自程序化回填，如编辑把超长原文塞回输入框）标红并关发送闸。
+ * 四档（判据见下方 composerTier）：常态灰 `剩余 N 字` → 余量 ≤ 500 转琥珀 → 到顶（= 2000，仍可发送）
+ * `已达 2000 字上限` → 超限（只可能来自程序化回填，如编辑把超长原文塞回输入框）标红并关发送闸。
  * 前端不留"点了必然 400"的按钮，但绝不替用户截断。
  */
 const composerRemaining = computed(() => MESSAGE_MAX_CHARS - inputText.value.length)

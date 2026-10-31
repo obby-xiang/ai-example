@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -43,7 +44,10 @@ import java.util.Set;
  * <li>{@code create_task(conditions=…)} 的候选：进入 {@code QUERY_COND} 后，按 {@code defCodes}
  * 逐项用与 {@code set_condition} 同一份 {@link WizardActionGuard} 校验；合法项复用既有前端
  * {@code set_condition} 通道生成<b>页面草案</b>（确定性 {@code toolCallId} + 幂等），不弹
- * {@code SET_CONDITIONS} 表单；绑定错误/校验失败/下发失败只记 WARN，走内部失败口径，不转化为再次询问用户；</li>
+ * {@code SET_CONDITIONS} 表单；绑定错误/校验失败/下发失败只记 WARN，走内部失败口径，不转化为再次询问用户。
+ * <b>候选来源</b>：{@code extra} 优先，缺失或绑定信息丢失时回落本轮已结算 {@code create_task}
+ * 原始入参/会话级 Redis 草案（{@link CreateTaskDraftStore}：runId 解析会话号、字段 = taskId，
+ * 跨轮存活）；读取异常按内部失败处理；</li>
  * <li>真正的未知条件：宿主只挂<b>一次</b>非必填自由文本框（{@code purpose=SET_CONDITIONS}）；
  * 已知候选、已有草案、已明确留空都不弹；</li>
  * <li>{@code confirm_step} 推进到 {@code EXPORT} 前复核：任务条目已落库条件、本轮已成功结算的
@@ -109,6 +113,12 @@ public class ConditionsForm extends HostForm {
 	 */
 	private WizardActionGuard wizardActionGuard;
 
+	/**
+	 * 会话级 create_task 候选草案（可选依赖）：{@code extra} 丢失/绑定信息丢失时的跨轮回落。
+	 * 缺席 = 只用 {@code extra} 与本轮已结算 args（行为与改造前一致）。
+	 */
+	private CreateTaskDraftStore draftStore;
+
 	@Autowired
 	public ConditionsForm(RunStore store, RunRegistry registry, ConfirmGate gate, MessageJsonCodec codec,
 			AiProperties properties, TaskService taskService, ExportConditionWorkflow conditionWorkflow) {
@@ -128,6 +138,12 @@ public class ConditionsForm extends HostForm {
 	@Autowired(required = false)
 	public void setWizardActionGuard(WizardActionGuard guard) {
 		this.wizardActionGuard = guard;
+	}
+
+	/** 可选注入（生产装配）：任务级 create_task 候选草案的跨轮回落。 */
+	@Autowired(required = false)
+	public void setCreateTaskDraftStore(CreateTaskDraftStore draftStore) {
+		this.draftStore = draftStore;
 	}
 
 	/** 宿主为某个 run 的某个任务生成的条件表单 {@code toolCallId}（确定性 = 天然去重）。 */
@@ -385,9 +401,14 @@ public class ConditionsForm extends HostForm {
 	 * 把本轮结构化 {@code create_task(conditions=…)} 的候选<b>下发成前端 {@code set_condition} 页面草案</b>
 	 * （<b>不写业务库</b>；真正的提交由前端 {@code persistStepData} 在下一步完成）。
 	 *
+	 * <p><b>候选来源</b>（见 {@link #resolveCandidateSource}）：运行上下文 {@code extra} 优先；
+	 * {@code extra} 缺失或绑定信息丢失时回落<b>本轮已结算 {@code create_task} 的原始入参</b>与
+	 * <b>会话级 Redis 草案</b>（{@link CreateTaskDraftStore}：runId 解析会话号、字段 = taskId，
+	 * 跨轮存活）。读取异常按内部失败处理（WARN、不弹条件表、不再问用户），不伪装成"条件未知"。
+	 *
 	 * <p><b>绑定范围</b>：候选只属于 {@code create_task} 创建的那个任务，且只处理
 	 * {@code create_task(defCodes=…)} 给出的配置项 —— 上下文任务号必须与
-	 * {@code extra.createTaskTaskId} 一致、条目 {@code defCode} 必须在 {@code extra.createTaskDefCodes} 里；
+	 * {@code extra.createTaskTaskId} 一致、条目 {@code defCode} 必须在候选 {@code defCodes} 里；
 	 * 切到别的任务、或后续新增的配置项都不会被下发。
 	 *
 	 * <p>校验与 {@code set_condition} 同一份（{@link WizardActionGuard}）：定义存在、字段属于该定义、
@@ -399,9 +420,13 @@ public class ConditionsForm extends HostForm {
 	 */
 	private CandidateDispatch dispatchCreateTaskCandidates(String runId, long taskId, AiContext context, Task task,
 			DraftFacts drafts) {
-		Map<String, Object> extra = context == null ? null : context.getExtra();
-		Object raw = extra == null ? null : extra.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS);
-		if (!(raw instanceof Map<?, ?> conditions) || conditions.isEmpty()) {
+		CandidateSource source = resolveCandidateSource(runId, taskId, context);
+		if (source.failure()) {
+			// 绑定错误/读取基础设施故障：内部失败口径（不弹表、不写库）；WARN 已在解析处留痕
+			return new CandidateDispatch(true, List.of());
+		}
+		Map<?, ?> conditions = source.conditions();
+		if (conditions.isEmpty()) {
 			return CandidateDispatch.none();
 		}
 		if (this.wizardActionGuard == null) {
@@ -409,15 +434,8 @@ public class ConditionsForm extends HostForm {
 					taskId);
 			return new CandidateDispatch(true, List.of());
 		}
-		// 只认创建它的任务：切任务后旧候选不得写到新任务
-		Long boundTaskId = longOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID));
-		if (boundTaskId == null || !boundTaskId.equals(taskId)) {
-			log.warn("create_task 的结构化条件绑定任务 #{} 与当前任务 #{} 不一致，不生成草案 runId={}", boundTaskId,
-					taskId, runId);
-			return new CandidateDispatch(true, List.of());
-		}
 		// 只认 create_task 明确给出的配置项：后续新增的条目不在候选范围
-		List<String> candidateDefCodes = stringList(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES));
+		List<String> candidateDefCodes = source.defCodes();
 		if (candidateDefCodes.isEmpty()) {
 			log.warn("create_task 的结构化条件缺少 defCodes 候选，不生成草案 runId={} taskId={}", runId, taskId);
 			return new CandidateDispatch(true, List.of());
@@ -475,6 +493,176 @@ public class ConditionsForm extends HostForm {
 			issued.add(defCode);
 		}
 		return new CandidateDispatch(failure, List.copyOf(draftsToPark));
+	}
+
+	/**
+	 * {@code create_task} 候选的<b>来源解析</b>（按可信度）：
+	 * <ol>
+	 * <li><b>运行上下文 {@code extra}</b>：本轮的即时事实；带绑定任务号时必须与当前任务一致；</li>
+	 * <li><b>本轮已结算 {@code create_task} 的原始入参</b>：结算事实（extra 丢了它还在）；</li>
+	 * <li><b>会话级 Redis 草案</b>（{@link CreateTaskDraftStore}）：按 当前tenant/user + 会话
+	 *     （runId 解析）存、字段 = taskId，跨轮存活 —— {@code extra} 缺失或绑定信息丢失时的回落。</li>
+	 * </ol>
+	 *
+	 * <p><b>空 {@code conditions={}} 不表示已知</b>：任何一层为空都继续看下一层；任务级草案的写侧
+	 * 也不会用空值覆盖明确的非空候选。
+	 *
+	 * <p><b>读取异常 = 内部失败</b>：Redis 读失败/草案内容损坏一律返回 {@code failure}
+	 * （不弹条件表、不写库、不再问用户），绝不把基础设施故障伪装成"条件未知"。
+	 */
+	private CandidateSource resolveCandidateSource(String runId, long taskId, AiContext context) {
+		Map<String, Object> extra = context == null ? null : context.getExtra();
+		Long boundTaskId = extra == null ? null : longOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID));
+		if (boundTaskId != null && !boundTaskId.equals(taskId)) {
+			// 只认创建它的任务：切任务后旧候选不得写到新任务
+			log.warn("create_task 的结构化条件绑定任务 #{} 与当前任务 #{} 不一致，不生成草案 runId={}", boundTaskId,
+					taskId, runId);
+			return CandidateSource.internalFailure();
+		}
+		Map<?, ?> extraConditions = extra == null ? Map.of()
+				: conditionsOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS));
+		if (boundTaskId != null && !extraConditions.isEmpty()) {
+			// 绑定确认过的即时事实：defCodes 也只认 extra（缺 = 由内部失败口径收敛）
+			return new CandidateSource(false, stringList(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES)),
+					extraConditions);
+		}
+		// extra 缺失 / 绑定信息丢失：回落到按任务号归属的事实
+		CandidateSource fallback = taskScopedCandidate(runId, taskId);
+		if (fallback.failure()) {
+			return fallback;
+		}
+		if (!fallback.conditions().isEmpty()) {
+			List<String> defCodes = fallback.defCodes();
+			if (defCodes.isEmpty() && extra != null) {
+				defCodes = stringList(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES));
+			}
+			return new CandidateSource(false, defCodes, fallback.conditions());
+		}
+		if (!extraConditions.isEmpty()) {
+			// 有候选但归属无法确认（绑定信息丢失且没有任务级事实）：不得把无主候选写到当前任务
+			log.warn("create_task 的结构化条件缺少任务绑定且没有任务级草案，不生成草案 runId={} taskId={}", runId,
+					taskId);
+			return CandidateSource.internalFailure();
+		}
+		return CandidateSource.none();
+	}
+
+	/** 按任务号归属的候选事实：本轮已结算 {@code create_task} 原始入参优先，其次会话级 Redis 草案。 */
+	private CandidateSource taskScopedCandidate(String runId, long taskId) {
+		CandidateSource settled = settledCreateTaskCandidate(runId, taskId);
+		if (settled.failure()) {
+			return settled;
+		}
+		CandidateSource draft = taskDraftCandidate(runId, taskId);
+		if (draft.failure()) {
+			return draft;
+		}
+		return new CandidateSource(false, settled.defCodes().isEmpty() ? draft.defCodes() : settled.defCodes(),
+				settled.conditions().isEmpty() ? draft.conditions() : settled.conditions());
+	}
+
+	/** 本轮已结算 {@code create_task} 的原始入参（成功且回执任务号正是当前任务的那一条）。 */
+	private CandidateSource settledCreateTaskCandidate(String runId, long taskId) {
+		if (runId == null || this.store == null) {
+			return CandidateSource.none();
+		}
+		List<PendingToolCall> pendings;
+		try {
+			// 强一致读口：读不出来按内部失败处理（不能用 lenient 的空表把故障伪装成"没有候选"）
+			pendings = this.store.pendings(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取本轮 create_task 原始入参失败（内部失败，不弹条件表）runId={} taskId={}：{}", runId, taskId,
+					ex.getMessage());
+			return CandidateSource.internalFailure();
+		}
+		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+			if (pending == null || !AiToolNames.CREATE_TASK.equals(pending.getName()) || !pending.resolved()
+					|| pending.effectiveOutcome() != ToolOutcome.OK) {
+				continue;
+			}
+			Long created = RunContextRefresher.taskIdFromText(pending.getResultText());
+			if (created == null || !created.equals(taskId)) {
+				continue;
+			}
+			JsonNode args = parseJson(pending.getArguments());
+			Map<?, ?> conditions = conditionsOf(args == null ? null : args.get("conditions"));
+			if (conditions.isEmpty()) {
+				continue;
+			}
+			return new CandidateSource(false, defCodesOf(args), conditions);
+		}
+		return CandidateSource.none();
+	}
+
+	/** 会话级 Redis 草案（runId → 会话号，字段 = taskId；跨轮存活）；读失败/内容损坏 = 内部失败。 */
+	private CandidateSource taskDraftCandidate(String runId, long taskId) {
+		CreateTaskDraftStore draftStore = this.draftStore;
+		if (draftStore == null) {
+			return CandidateSource.none();
+		}
+		CreateTaskDraftStore.Draft draft;
+		try {
+			draft = draftStore.read(runId, taskId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取会话任务草案失败（内部失败，不弹条件表）runId={} taskId={}：{}", runId, taskId,
+					ex.getMessage());
+			return CandidateSource.internalFailure();
+		}
+		if (draft == null) {
+			return CandidateSource.none();
+		}
+		return new CandidateSource(false, draft.defCodes(), draft.conditions());
+	}
+
+	/** extra/草案里的结构化条件（非 Map 或空对象 = 空；空不表示"已知"）。 */
+	private static Map<?, ?> conditionsOf(Object raw) {
+		return raw instanceof Map<?, ?> map && !map.isEmpty() ? map : Map.of();
+	}
+
+	/** {@code create_task} 入参里的结构化条件（缺键/非对象/空对象 = 空）。 */
+	private static Map<?, ?> conditionsOf(JsonNode node) {
+		if (node == null || !node.isObject() || node.isEmpty()) {
+			return Map.of();
+		}
+		return JSON.convertValue(node, Map.class);
+	}
+
+	/** {@code create_task} 入参里的 defCodes（非数组/空白项忽略；保持原顺序）。 */
+	private static List<String> defCodesOf(JsonNode args) {
+		JsonNode raw = args == null ? null : args.get("defCodes");
+		if (raw == null || !raw.isArray()) {
+			return List.of();
+		}
+		List<String> out = new ArrayList<>();
+		for (JsonNode element : raw) {
+			if (element == null || !element.isTextual()) {
+				continue;
+			}
+			String value = element.asText("").trim();
+			if (!value.isEmpty() && !out.contains(value)) {
+				out.add(value);
+			}
+		}
+		return out;
+	}
+
+	/** create_task 候选来源：{@code failure} = 绑定/结构/读取的内部失败（不弹表、不写库）。 */
+	private record CandidateSource(boolean failure, List<String> defCodes, Map<?, ?> conditions) {
+
+		static CandidateSource none() {
+			return new CandidateSource(false, List.of(), Map.of());
+		}
+
+		static CandidateSource internalFailure() {
+			return new CandidateSource(true, List.of(), Map.of());
+		}
+
+		CandidateSource {
+			defCodes = defCodes == null ? List.of() : List.copyOf(defCodes);
+			conditions = conditions == null ? Map.of() : conditions;
+		}
 	}
 
 	/** 即时执行类前端工具的到期时刻（与确认门同一口径；等人填写的表单不会走到这里）。 */

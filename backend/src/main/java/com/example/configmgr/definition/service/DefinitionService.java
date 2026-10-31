@@ -39,7 +39,7 @@ public class DefinitionService {
      * 全部定义（稳定顺序：{@code sortOrder, code}）。
      *
      * <p>顺序是 AI 工具 {@code list_config_defs} 的有界披露口径之一（同一份库两次调用必须同序，
-     * 否则"仅显示前 20 个"每次给出不同子集）。
+     * 否则"仅显示前 50 个"每次给出不同子集）。
      */
     public List<ConfigDefinition> findAll() {
         return definitionRepository.findAllOrdered();

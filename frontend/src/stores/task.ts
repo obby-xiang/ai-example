@@ -95,9 +95,9 @@ let loadSeq = 0
 let inFlightLoads = 0
 
 /**
- * 发布跟踪的 300s 墙钟（M4）：独立定时器，**终态到达即清**。非终态到达 ⇒ 提示恰好 1 次 + 收摊。
+ * 发布跟踪的 360s 墙钟（M4）：独立定时器，**终态到达即清**。非终态到达 ⇒ 提示恰好 1 次 + 收摊。
  */
-export const PUBLISH_WATCH_WALL_CLOCK_MS = 300_000
+export const PUBLISH_WATCH_WALL_CLOCK_MS = 360_000
 
 /**
  * 列表里是否存在**非终态作业**（AR-08 条件②，也是 AR-16「只探测 PENDING/RUNNING」的同族判据）。
@@ -458,7 +458,7 @@ export const useTaskStore = defineStore('task', {
      * 出口语义（调用点是 stores/workspace.ts 的 `void` 调用，不接 rejection）：
      * - **取消链路 = dispose 形态（唯一机制，C1 收口修对齐 M4）**：调用方持有返回的 dispose，
      *   轮次收尾/新一轮发起时调用即静默收摊（不弹提示）；不上抛（上抛即 unhandled rejection）；
-     * - 300s 墙钟（独立定时器，终态到达即清）→ 非终态到达：提示恰好 1 次 + 收摊；
+     * - 360s 墙钟（独立定时器，终态到达即清）→ 非终态到达：提示恰好 1 次 + 收摊；
      * - 失败/成功终态 → onFinal 内收口（R-94 范围 B 双通道：ElMessage 瞬时提示 +
      *   onConflict 明细摘要回灌，见 {@link applyPublishOutcome}）。
      *
@@ -501,7 +501,7 @@ export const useTaskStore = defineStore('task', {
         taskId,
         jobId,
         onFinal: (job) => {
-          clearWallClock() // 终态到达即清墙钟（300s 出口只在"没等到终态"时发生）
+          clearWallClock() // 终态到达即清墙钟（360s 出口只在"没等到终态"时发生）
           dispose()
           void this.applyPublishOutcome(jobId, job, handlers)
         },
@@ -514,7 +514,7 @@ export const useTaskStore = defineStore('task', {
         }
       })
       publishWatchers.set(key, dispose)
-      // 300s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
+      // 360s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
       wallClockTimer = setTimeout(() => {
         wallClockTimer = null
         notifyJobWatch(translate('views.tasks.msg.watchTimeout', { jobId }))

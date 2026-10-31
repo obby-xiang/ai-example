@@ -14,7 +14,8 @@ import {
   executeFrontendTool,
   makeExecution,
   registerFrontendToolExecutor,
-  unregisterFrontendToolExecutor
+  unregisterFrontendToolExecutor,
+  waitForPageReady
 } from '@/utils/frontend-tools'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import type { FrontendToolExecution } from '@/types/tools'
@@ -168,5 +169,34 @@ describe('批3③a T4 → 批 A A-04：动作表等待上界耗尽 ⇒ failed + 
     expect(execution.result).toContain('导航已提交')
     expect(execution.result).toContain('本轮不要重复导航')
     expect(execution.result).not.toContain('结局未知')
+  })
+})
+
+describe('pollUntilReady 终点口径（frontend-tools）：到点后的最后一拍现场就绪 ⇒ 按成功处理', () => {
+  it('到点那一拍仍是旧值、delay(0) 之后的一拍已就绪 ⇒ waitForPageReady 返回 true，且上界不延长', async () => {
+    // 现场（实测形态）：8.000s 读到 false、页面约 8.0–8.13s 才就绪 —— 判定若只用"到点那一拍"，
+    // 页面正好落在 deadline 与回执之间的空档里。本回归把这一拍做成可控：
+    // 到点前恒未就绪；到点后的第一次读仍是旧值；紧接着（delay(0) 之后）的那次读已经就绪。
+    const TIMEOUT_MS = 200
+    const workspace = useWorkspaceStore()
+    const startedAt = Date.now()
+    let observesAfterDeadline = 0
+    Object.defineProperty(workspace, 'pageId', {
+      configurable: true,
+      get(): string {
+        if (Date.now() < startedAt + TIMEOUT_MS) return 'import'
+        observesAfterDeadline += 1
+        return observesAfterDeadline === 1 ? 'import' : 'tasks'
+      }
+    })
+
+    const pending = waitForPageReady('tasks', TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS) // 到点那一拍（到点前恒未就绪，故这一拍仍是旧值）
+    await vi.advanceTimersByTimeAsync(1) // 让到点后结算的那一拍（delay(0)）跑完
+
+    await expect(pending).resolves.toBe(true)
+    expect(observesAfterDeadline).toBe(2) // 到点一拍 + 结算后的最后一拍
+    // 上界不延长：多花的是"结算一拍"的 1ms，不是一个轮询间隔（50ms），更没有重试
+    expect(Date.now() - startedAt).toBeLessThanOrEqual(TIMEOUT_MS + 1)
   })
 })

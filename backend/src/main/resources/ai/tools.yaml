@@ -54,7 +54,10 @@
 # 业务库只由前端在下一步/启动作业前 persistStepData 提交；confirm_step 认可本轮已结算的结构化草案与
 # 留空（明确不设）决定，start_export 预检仍校验业务库最终条件。create_task 恢复「任务中心、已有任务
 # 或已完成任务页面都适用」。改描述必升 version（破 prompt 缓存）。
-version: 2026-10-27.17
+# 2026-10-27.17 → 2026-10-27.18（2026-10-31 有界披露上限上调）：list_config_defs / list_tasks 的
+# @Tool 描述上限 20 → 50（截断告知与总条数后缀随 AiTools 常量自动变 50，仍 < result-budget.model.max-rows
+# 的 200）；本文件对这两个工具仍只覆盖 title，描述真值在 @Tool 注解。改描述必升 version（破 prompt 缓存）。
+version: 2026-10-27.18
 lang: zh
 tools:
   - toolKey: list_config_defs

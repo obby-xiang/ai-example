@@ -262,11 +262,12 @@ public class ResumeService {
 	}
 
 	/**
-	 * 宿主确定性定义选择表单（新建任务 → 导航到选择步骤 → 配置未知 ⇒ 宿主自己挂起平铺多选）。
+	 * 宿主确定性定义选择表单（新建任务 → 停在选择步骤 → 配置未知 ⇒ 宿主自己挂起平铺多选）。
 	 *
 	 * <p>为什么挂在续跑侧：{@code navigate_to} 是前端工具，生产 {@code park=true} 时它在首轮的
-	 * 等待处就结束了执行，真正的结算与"下一跳上下文"都在本类 —— 于是"导航成功"之后、
+	 * 等待处就结束了执行，真正的结算与"下一跳上下文"都在本类 —— 于是"新任务已到选择步骤"之后、
 	 * 模型再次被问之前的<b>唯一</b>确定点就在这里（既不改前端，也不新增中断路径）。
+	 * 判据按任务状态而非导航瞬时成功（前端导航超时不再挡住表单）。
 	 *
 	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）；缺席 = 不挂起，行为与改造前一致。
 	 */
@@ -1749,7 +1750,7 @@ public class ResumeService {
 			AiContext nextHopContext = context;
 			// 本批<b>已结算</b>条目（结算后回读的真值）：整批结算完再统一折算上下文，
 			// 不在循环里逐条刷新（逐条刷新会让同批后面的条目拿到"刚刚才解锁"的披露面 = 批内扩权）。
-			// 声明在分支之外：无在飞工具时为空列表，"宿主定义选择表单"的判据（本批是否刚导航成功）
+			// 声明在分支之外：无在飞工具时为空列表，"宿主定义选择表单"的判据（本批是否已处理过配置选择）
 			// 因此对两个分支是同一份输入。
 			List<PendingToolCall> settledInBatch = new ArrayList<>(snapshot.getInFlightToolCalls().size());
 
@@ -1879,14 +1880,15 @@ public class ResumeService {
 				}
 			}
 
-			// ===== 宿主确定性定义选择表单（新建任务 → 导航到选择步骤 → 配置未知）=====
+			// ===== 宿主确定性定义选择表单（新建任务 → 停在选择步骤 → 配置未知）=====
 			// 位置刻意在"整批结算 + 权威同步 + 工作区段重写"之后、记忆窗口/压缩与交棒之前：
 			//   · 判据读的是**下一跳**那份上下文（批间刷新后的页面/任务/步骤 + 重算后的槽位），
-			//     不是请求边界那份，于是"刚导航到新任务"这件事在判据里成立；
+			//     不是请求边界那份，于是"新任务已到选择步骤"这件事在判据里成立；
 			//   · 挂起用既有面（saveSuspended → suspended 帧 → 请求帧 → 收流），与模型自己下发的
 			//     generative_form 完全同一条路；用户的提交/取消走既有回灌与既有续跑；
-			//   · 判据只看"本批是否刚成功导航到本轮新建的那个任务"，因此表单回灌后的下一次续跑
-			//     （settledBatch 里没有那次 navigate_to）不会重复问同一件事。
+			//   · 判据按任务状态（create_task 成功 + 任务号/页/步骤 + 槽位无 defCodes）而非
+			//     "本批刚有一条成功的 navigate_to"：前端导航超时不再挡住表单；
+			//     去重靠同一任务只挂一次（确定性 toolCallId），续跑不会重复问同一件事。
 			if (this.definitionSelectionForm != null
 					&& this.definitionSelectionForm.parkIfDue(runId, nextHopContext, settledInBatch, history)) {
 				body.put("resumed", false);
@@ -2162,7 +2164,7 @@ public class ResumeService {
 				continue;
 			}
 			try {
-				Optional<AiContext> next = refresher.next(current, entry);
+				Optional<AiContext> next = refresher.next(runId, current, entry);
 				if (next != null && next.isPresent()) {
 					current = next.get();
 				}

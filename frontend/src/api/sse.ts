@@ -80,10 +80,11 @@ export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
  *
  * 与建连超时分开计：建连是"响应头都还没回来"，首帧是"连上了但一个帧都没来"。
  * 批次3 起后端把 `start` 前移到同步压缩之前，`start` 是首帧且应立刻到达，故这条预算
- * 可以显著短于帧间 45s；压缩期的保活由服务端**独立定时器**发 `heartbeat{phase:'compacting'}`，
+ * 可以显著短于帧间 45s（取 40s：覆盖服务端首包 30s 预算 + 传输余量）；
+ * 压缩期的保活由服务端**独立定时器**发 `heartbeat{phase:'compacting'}`，
  * 只要心跳到达就算"已有首帧"，后续一律回到 45s 帧间看门狗 —— **45s 本身不放宽**。
  */
-export const DEFAULT_FIRST_FRAME_TIMEOUT_MS = 30_000
+export const DEFAULT_FIRST_FRAME_TIMEOUT_MS = 40_000
 
 /**
  * 超时阶段（批次3）：三种失败必须能被调用方区分，不能一律说成"断流"。

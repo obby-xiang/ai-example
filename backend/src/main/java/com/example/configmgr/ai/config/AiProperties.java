@@ -1327,7 +1327,7 @@ public class AiProperties {
 	 * <p>
 	 * <b>只约束用户输入的那一条 message</b>（不是整包请求体）：判据 = UTF-16 码元数，与前端
 	 * {@code <textarea maxlength>} / JS {@code String#length} <b>同一把尺</b>，故中文不会因为
-	 * UTF-8 三字节而被提前判死（8192 个汉字 = 24576 字节，仍须放行）。
+	 * UTF-8 三字节而被提前判死（2000 个汉字 = 6000 字节，仍须放行）。
 	 *
 	 * <p>
 	 * 超限<b>拒绝</b>而非截断（用户裁决 A1 建议 400）：截断会让模型基于半句话下结论。
@@ -1336,9 +1336,9 @@ public class AiProperties {
 	public static class Input {
 
 		/** 单条 message 的字符上限的<b>单一事实源</b>（前端 {@code MESSAGE_MAX_CHARS} 与它同值）。 */
-		public static final int DEFAULT_MAX_CHARS = 8192;
+		public static final int DEFAULT_MAX_CHARS = 2000;
 
-		/** 单条 message 的字符上限（8192）。 */
+		/** 单条 message 的字符上限（2000）。 */
 		private int maxChars = DEFAULT_MAX_CHARS;
 	}
 

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.resultview;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tools.AiTools;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import org.junit.jupiter.api.Test;
@@ -21,7 +22,7 @@ import static org.mockito.Mockito.when;
  * <ul>
  * <li>只认领 {@code list_tasks}，其余工具一律不认（缺视图 = 旧卡面）；</li>
  * <li>实时帧的行来自服务层<b>结构化数据</b>（不是把结果文本反解回来）；归档通道见下。</li>
- * <li>行数超过工具自身上限（20）⇒ {@code status=partial} + {@code meta.truncated}；</li>
+ * <li>行数超过工具自身上限（50）⇒ {@code status=partial} + {@code meta.truncated}；</li>
  * <li>零任务 ⇒ {@code status=empty} + {@code empty.text}；</li>
  * <li>取数异常 ⇒ 返回 null（视图构造失败不能拖垮工具执行/帧）。</li>
  * </ul>
@@ -69,17 +70,18 @@ class ListTasksResultViewProviderTest {
 	@Test
 	void rowsBeyondTheToolLimitAreMarkedPartial() {
 		List<Task> tasks = new ArrayList<>();
-		for (int i = 0; i < 25; i++) {
+		for (int i = 0; i < AiTools.LIST_TASKS_MAX_ROWS + 1; i++) {
 			tasks.add(task((long) i, Task.TaskType.EXPORT, "任务 " + i, "EXPORT", Task.TaskStatus.ACTIVE));
 		}
 		when(this.taskService.findAll()).thenReturn(tasks);
 
 		Map<String, Object> map = provider().build("call-1", "list_tasks", "rows").toMap();
-		assertThat(ResultViewTest.rowsOf(map)).hasSize(20);
+		assertThat(ResultViewTest.rowsOf(map)).hasSize(AiTools.LIST_TASKS_MAX_ROWS);
 		assertThat(map).containsEntry("status", "partial");
 		@SuppressWarnings("unchecked")
 		Map<String, Object> truncated = (Map<String, Object>) ((Map<String, Object>) map.get("meta")).get("truncated");
-		assertThat(truncated).containsEntry("shownRows", 20).containsEntry("totalRows", 25);
+		assertThat(truncated).containsEntry("shownRows", AiTools.LIST_TASKS_MAX_ROWS)
+				.containsEntry("totalRows", AiTools.LIST_TASKS_MAX_ROWS + 1);
 	}
 
 	@Test

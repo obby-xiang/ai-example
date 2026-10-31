@@ -63,7 +63,7 @@ class ListTasksHistoryProjectionTest {
 			text.append("- #").append(100 + i).append(" [EXPORT] 任务 ").append(i)
 					.append(" 步骤:EXPORT 状态:ACTIVE\n");
 		}
-		text.append(AiTools.LIST_TASKS_TOTAL_PREFIX).append(25).append(AiTools.LIST_TASKS_TOTAL_SUFFIX);
+		text.append(AiTools.LIST_TASKS_TOTAL_PREFIX).append(75).append(AiTools.LIST_TASKS_TOTAL_SUFFIX);
 
 		Map<String, Object> map = provider().build("call-2", "list_tasks", text.toString(), true).toMap();
 
@@ -72,9 +72,9 @@ class ListTasksHistoryProjectionTest {
 		@SuppressWarnings("unchecked")
 		Map<String, Object> truncated = (Map<String, Object>) ((Map<String, Object>) map.get("meta")).get("truncated");
 		assertThat(truncated)
-				.as("截断三件套必须是当时的数字（25 条 / 显示 20 条），不得随当前库重算")
+				.as("截断三件套必须是当时的数字（75 条 / 显示 50 条），不得随当前库重算")
 				.containsEntry("shownRows", AiTools.LIST_TASKS_MAX_ROWS)
-				.containsEntry("totalRows", 25);
+				.containsEntry("totalRows", 75);
 		verify(this.taskService, never()).findAll();
 	}
 
@@ -160,7 +160,7 @@ class ListTasksHistoryProjectionTest {
 		String truncated = aiTools().listTasks();
 		assertThat(truncated.lines().count()).isEqualTo(AiTools.LIST_TASKS_MAX_ROWS + 1);
 		assertThat(truncated)
-				.endsWith("\n（共 21 条，仅显示前 20 条）")
+				.endsWith("\n（共 51 条，仅显示前 50 条）")
 				.startsWith("- #0 [EXPORT] 任务 0 步骤:EXPORT 状态:ACTIVE");
 	}
 

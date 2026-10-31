@@ -3227,7 +3227,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				return;
 			}
 			AiContext before = AiContext.fromMap(fresh.getContext());
-			Optional<AiContext> next = refresher.next(before, settled);
+			Optional<AiContext> next = refresher.next(runId, before, settled);
 			if (next == null || next.isEmpty()) {
 				return;
 			}

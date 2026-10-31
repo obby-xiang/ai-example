@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 会话级键族登记表（超时面治理批① 第 11 项）。
  *
- * <p>锁三件事：<b>清点不缺项</b>（run 级 12 + session 级 5）、<b>续期面口径不变</b>
+ * <p>锁三件事：<b>清点不缺项</b>（run 级 14 + session 级 6）、<b>续期面口径不变</b>
  * （心跳 exactly 5；读侧 = 心跳 5 + 契约位 3 + 取消 1 = 9 个<b>新增</b>面）、
  * <b>取消信号的 TTL 与会话同寿</b>（600s → 24h）。
  */
@@ -20,17 +20,18 @@ class SessionKeyRegistryTest {
 
 	@Test
 	void registryCoversRunAndSessionScopesWithoutGaps() {
-		assertThat(SessionKeyRegistry.entries()).hasSize(19);
+		assertThat(SessionKeyRegistry.entries()).hasSize(20);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.RUN)
 			.as("run 级 14 条（含 per-run 取号计数器与业务活动锚点）")
 			.hasSize(14);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.SESSION)
-			.as("session 级 5 条（session:current + ctx 三件套 + safety）")
-			.hasSize(5);
+			.as("session 级 6 条（session:current + ctx 三件套 + safety + create_task 草案）")
+			.hasSize(6);
 		assertThat(SessionKeyRegistry.entries()).extracting(SessionKeyRegistry.Entry::prefix)
 			.contains("ai:run:", "ai:pending:", "ai:events:", "ai:seq:", "ai:xevents:", "ai:req:", "ai:decided:",
 					"ai:fence:run:", "ai:lease:epoch:", "ai:cancel:", "ai:beat:", "ai:activity:", "ai:ledger:",
-					"ai:idem:", "ai:session:current:", "ai:ctx:", "ai:ctx:ledger:", "ai:ctx:archive:", "ai:safety:");
+					"ai:idem:", "ai:session:current:", "ai:ctx:", "ai:ctx:ledger:", "ai:ctx:archive:", "ai:safety:",
+					"ai:ctdraft:");
 	}
 
 	@Test

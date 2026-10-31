@@ -415,26 +415,34 @@ test.describe('@stub D 降级与错误码', () => {
     expect(other.status).toBe(200)
   })
 
-  test('E2E-D06 输入超长 8192：前端到顶文案 + API 400 且不回显原文', async ({ page, request }) => {
+  test('E2E-D06 输入超长 2000：前端到顶文案 + API 400 且不回显原文', async ({ page, request }) => {
     await openApp(page)
     const composer = page.locator('[data-testid="composer-input"]')
-    await expect(composer).toHaveAttribute('maxlength', '8192')
+    await expect(composer).toHaveAttribute('maxlength', '2000')
 
-    const text = '汉'.repeat(8192)
-    await composer.fill(text)
-    const length = await composer.evaluate((el) => (el as HTMLTextAreaElement).value.length)
-    expect(length).toBe(8192)
-    // 到顶档：计数文案逐字为「已达 8192 字上限」，且此时仍可发送（上限是"恰好"不是"超出"）
-    await expect(page.locator('[data-testid="composer-count"]')).toHaveText('已达 8192 字上限')
+    // 下限一侧（1999）：还差 1 字到顶，计数如实、发送可用
+    await composer.fill('汉'.repeat(1999))
+    const belowLength = await composer.evaluate((el) => (el as HTMLTextAreaElement).value.length)
+    expect(belowLength).toBe(1999)
+    await expect(page.locator('[data-testid="composer-count"]')).toHaveText('剩余 1 字')
     await expect(page.locator('[data-testid="send-btn"]')).toBeEnabled()
 
-    // 绕过前端直打 API：400 MESSAGE_TOO_LONG，limit=8192，且响应体不回显原文
+    // 到顶一侧（2000）
+    const text = '汉'.repeat(2000)
+    await composer.fill(text)
+    const length = await composer.evaluate((el) => (el as HTMLTextAreaElement).value.length)
+    expect(length).toBe(2000)
+    // 到顶档：计数文案逐字为「已达 2000 字上限」，且此时仍可发送（上限是"恰好"不是"超出"）
+    await expect(page.locator('[data-testid="composer-count"]')).toHaveText('已达 2000 字上限')
+    await expect(page.locator('[data-testid="send-btn"]')).toBeEnabled()
+
+    // 绕过前端直打 API（2001 = 越界 1 字）：400 MESSAGE_TOO_LONG，limit=2000，且响应体不回显原文
     const sessionId = await newAiSession(API)
     const marker = '超长哨兵串-D06-'
-    const result = await chatError(request, sessionId, `${marker}${'汉'.repeat(8193)}`)
+    const result = await chatError(request, sessionId, `${marker}${'汉'.repeat(2001)}`)
     expect(result.status).toBe(400)
     expect(result.body.code).toBe('MESSAGE_TOO_LONG')
-    expect(Number(result.body.limit)).toBe(8192)
+    expect(Number(result.body.limit)).toBe(2000)
     expect(JSON.stringify(result.body)).not.toContain(marker)
   })
 

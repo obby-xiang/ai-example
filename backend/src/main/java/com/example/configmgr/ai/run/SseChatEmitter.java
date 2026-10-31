@@ -175,7 +175,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * <h2>F1：非驱动方 attach 连接的本地保活（2026-10-31）</h2>
  * 驱动在 A、客户端重挂到 B（非粘滞代理下任意实例都可 serve reattach）时，心跳<b>不落档、不发布唤醒</b>
  * ⇒ A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或上游静默时，B 的 attach 连接一帧都收不到，
- * 前端 30s 首帧 / 45s 帧间看门狗于是把正常轮次判死。<b>本实例不是该 run 驱动方</b>（{@link #beginDrive()}
+ * 前端 40s 首帧 / 45s 帧间看门狗于是把正常轮次判死。<b>本实例不是该 run 驱动方</b>（{@link #beginDrive()}
  * 从未在本写出器上调用）时，本类为该写出器起<b>一个</b>本地保活节拍（共享单线程调度器，见
  * {@link #sharedAttachKeepaliveScheduler()}），发无业务 {@code seq} 的 {@code heartbeat}：
  * 不入档、不取业务号、不写 {@code ai:beat}/{@code ai:activity}、不发唤醒 —— 归档、序号、有序交付
@@ -796,7 +796,7 @@ public class SseChatEmitter {
 	 * 驱动在 A、客户端重挂到 B（非粘滞代理下任意实例都可 serve reattach）。心跳<b>不发布唤醒、不入档</b>
 	 * （见 {@code emitInternal} 的心跳分支），于是 A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或
 	 * 上游静默时，B 的 attach 连接<b>一个帧都收不到</b>：回放是空的（A 还没产出新帧），实时帧在 A 上。
-	 * 前端 30s 首帧 / 45s 帧间看门狗因此把正常的一轮判死，重连 4 次后报错。
+	 * 前端 40s 首帧 / 45s 帧间看门狗因此把正常的一轮判死，重连 4 次后报错。
 	 *
 	 * <h2>本实现的边界（只做保活，不改变任何既有语义）</h2>
 	 * <ul>

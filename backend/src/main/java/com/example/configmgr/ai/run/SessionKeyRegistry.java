@@ -192,10 +192,13 @@ public final class SessionKeyRegistry {
 				Scope.SESSION, List.of(Renewal.WRITE), "压缩前原文"));
 		all.add(new Entry(RunStore.SAFETY_PREFIX, RunStore.SAFETY_PREFIX + "<sessionId>", Scope.SESSION,
 				List.of(Renewal.WRITE), "安全事件台账 LIST"));
+		all.add(new Entry(CreateTaskDraftStore.KEY_PREFIX,
+				CreateTaskDraftStore.KEY_PREFIX + "{<tenantId>:<userId>:session:<sessionId>}", Scope.SESSION,
+				List.of(Renewal.WRITE), "create_task 候选草案 HASH（字段 = taskId；会话销毁按同一键删除）"));
 		return Collections.unmodifiableList(all);
 	}
 
-	/** 全部登记（run 级 14 条 + session 级 5 条）。 */
+	/** 全部登记（run 级 14 条 + session 级 6 条）。 */
 	public static List<Entry> entries() {
 		return ENTRIES;
 	}

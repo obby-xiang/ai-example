@@ -835,6 +835,39 @@ const PAGE_READY_PROBES: Record<WorkspacePageId, readonly string[]> = {
 /** 页面就绪等待上限（毫秒）：超过即如实告知"仍在加载"，不无限等。 */
 export const PAGE_READY_TIMEOUT_MS = 8_000
 
+/** 就绪轮询间隔（毫秒）：页面 / 任务绑定 / 详情 / 无类型导航四类等待共用。 */
+const READY_POLL_INTERVAL_MS = 50
+
+/**
+ * 在上界内轮询现场，返回**最后一拍**的现场（成败都由调用方按它判）。
+ *
+ * 终点口径：判"到点仍未就绪"必须建立在**到点之后读到**的现场上，不能用到点那一刻（或更早）
+ * 读到的那一拍 —— 实测 8.000s 读到 false、页面约 8.0–8.13s 就绪、8.126s 才回
+ * `UI_PAGE_NOT_READY`：判定用的现场比回执早了一百多毫秒，页面正好落在空档里。所以到点后
+ * 先结算一拍已排队的更新（`delay(0)`，一个宏任务，不占等待预算），再同步读最后一拍并直接
+ * 返回；读与返回之间不再有 sleep，也就不会把"刚就绪"漏在 deadline 与结果回执之间。
+ *
+ * 上界不放宽：到点后不再等一个完整轮询间隔、也不重试 —— `timeoutMs` 仍是硬边界。
+ */
+async function pollUntilReady<T>(
+  observe: () => T,
+  isReady: (state: T) => boolean,
+  timeoutMs: number
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const state = observe()
+    if (isReady(state)) {
+      return state
+    }
+    if (Date.now() >= deadline) {
+      await delay(0)
+      return observe()
+    }
+    await delay(READY_POLL_INTERVAL_MS)
+  }
+}
+
 /**
  * 等待目标页面就绪（F3，参照 kimi-k3 蓝本"导航后等页面可用再动作"的实践）。
  *
@@ -843,23 +876,19 @@ export const PAGE_READY_TIMEOUT_MS = 8_000
  * 才注册 handler；后者若在那之前执行，会落到"页面不支持该动作"的 degraded 分支，
  * 模型据此误判"这条路走不通"（而界面上明明可以）。
  *
- * @returns true = 目标页面已就绪；false = 超时（调用方据此在回灌文本里如实说明）
+ * @returns true = 目标页面已就绪；false = 上界内未就绪（按最后一拍现场判，见 {@link pollUntilReady}）
  */
 export async function waitForPageReady(page: WorkspacePageId, timeoutMs = PAGE_READY_TIMEOUT_MS): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
   const probes = PAGE_READY_PROBES[page]
-  for (;;) {
-    const workspace = useWorkspaceStore()
-    const ready = workspace.pageId === page
-      && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null))
-    if (ready) {
-      return true
-    }
-    if (Date.now() >= deadline) {
-      return false
-    }
-    await delay(50)
-  }
+  return await pollUntilReady(
+    () => {
+      const workspace = useWorkspaceStore()
+      return workspace.pageId === page
+        && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null))
+    },
+    (ready) => ready,
+    timeoutMs
+  )
 }
 
 /**
@@ -905,22 +934,13 @@ function isTaskDetailReady(page: WorkspacePageId): boolean {
 /**
  * 等"任务详情已应用"（同页幂等早退用：页面没变、任务已绑，但详情可能才刚起飞）。
  *
- * @returns true = 详情已应用（或该维度不适用）；false = 等待上界内仍未应用
+ * @returns true = 详情已应用（或该维度不适用）；false = 上界内仍未应用（按最后一拍现场判）
  */
 export async function waitForTaskDetailApplied(
   page: WorkspacePageId,
   timeoutMs = PAGE_READY_TIMEOUT_MS
 ): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    if (isTaskDetailReady(page)) {
-      return true
-    }
-    if (Date.now() >= deadline) {
-      return false
-    }
-    await delay(50)
-  }
+  return await pollUntilReady(() => isTaskDetailReady(page), (ready) => ready, timeoutMs)
 }
 
 /** "页面就绪 + 任务绑定 + 详情已应用"三个维度的等待结局（分开返回，供调用方给出不同的回灌文案）。 */
@@ -947,29 +967,28 @@ export interface TaskBindWaitResult {
  * 详情维度由页面自报，**不等**定义列表 / 结果文件 / 作业 / SpreadJS / 编辑器。
  *
  * 超时口径与 `waitForPageReady` 一致（默认 {@link PAGE_READY_TIMEOUT_MS}，轮询 50ms），
- * **不无限等**：到点即如实返回三维现状，由调用方决定降级文案（不得当成成功）。
+ * **不无限等**：到点后的**最后一拍现场**如实返回三维现状（见 {@link pollUntilReady}），
+ * 由调用方决定降级文案（不得当成成功）。
  */
 export async function waitForTaskBound(
   page: WorkspacePageId,
   expectedTaskId: number,
   timeoutMs = PAGE_READY_TIMEOUT_MS
 ): Promise<TaskBindWaitResult> {
-  const deadline = Date.now() + timeoutMs
   const probes = PAGE_READY_PROBES[page]
-  for (;;) {
-    const workspace = useWorkspaceStore()
-    const pageReady = workspace.pageId === page
-      && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null))
-    const taskBound = workspace.taskId === expectedTaskId
-    const detailReady = isTaskDetailReady(page)
-    if (pageReady && taskBound && detailReady) {
-      return { pageReady: true, taskBound: true, detailReady: true }
-    }
-    if (Date.now() >= deadline) {
-      return { pageReady, taskBound, detailReady }
-    }
-    await delay(50)
-  }
+  return await pollUntilReady(
+    () => {
+      const workspace = useWorkspaceStore()
+      return {
+        pageReady: workspace.pageId === page
+          && (probes.length === 0 || probes.some((name) => getPageHandler(name) !== null)),
+        taskBound: workspace.taskId === expectedTaskId,
+        detailReady: isTaskDetailReady(page)
+      }
+    },
+    (state) => state.pageReady && state.taskBound && state.detailReady,
+    timeoutMs
+  )
 }
 
 function delay(ms: number): Promise<void> {
@@ -990,22 +1009,18 @@ async function waitForTaskOpened(
   expectedTaskId: number,
   timeoutMs = PAGE_READY_TIMEOUT_MS
 ): Promise<{ opened: boolean; detailReady: boolean }> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const workspace = useWorkspaceStore()
-    const page = workspace.pageId
-    const wizardReady = (page === 'export' || page === 'import')
-      && PAGE_READY_PROBES[page].some((name) => getPageHandler(name) !== null)
-    const opened = wizardReady && workspace.taskId === expectedTaskId
-    const detailReady = opened && isTaskDetailReady(page)
-    if (opened && detailReady) {
-      return { opened: true, detailReady: true }
-    }
-    if (Date.now() >= deadline) {
-      return { opened, detailReady }
-    }
-    await delay(50)
-  }
+  return await pollUntilReady(
+    () => {
+      const workspace = useWorkspaceStore()
+      const page = workspace.pageId
+      const wizardReady = (page === 'export' || page === 'import')
+        && PAGE_READY_PROBES[page].some((name) => getPageHandler(name) !== null)
+      const opened = wizardReady && workspace.taskId === expectedTaskId
+      return { opened, detailReady: opened && isTaskDetailReady(page) }
+    },
+    (state) => state.opened && state.detailReady,
+    timeoutMs
+  )
 }
 
 /** `restore_task` 的目标页（任务类型 → 向导页）：类型由服务端给定，不由调用方猜。 */

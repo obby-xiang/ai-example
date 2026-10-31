@@ -5,7 +5,7 @@
  *
  * <p>与既有覆盖的分界（不重复断言）：
  * <ul>
- * <li>草稿 8192：`ai-panel-composer-limit.spec.ts` 锁的是**计数文案与发送钮 disabled**；
+ * <li>草稿 2000：`ai-panel-composer-limit.spec.ts` 锁的是**计数文案与发送钮 disabled**；
  * 本文件锁**键盘路径也不放行 + 草稿一字不丢 + 零请求**（用户实际按 Enter 的那条路）；</li>
  * <li>快照 2000：`ai-perception-batch-c.spec.ts#C-03` 锁「控件行吃掉大半预算、文本段被压缩」；
  * 本文件锁**控件行自己就超 2000** 的另一分支（文本段整段让位，尾行仍诚实）；</li>
@@ -160,20 +160,20 @@ describe('C6-02 附件 MIME：扩展名白名单（accept 只是软过滤，仍�
 })
 
 describe('C6-03 草稿长度：按住 Enter 也发不出去，草稿一字不丢', () => {
-  it('8193 字 + Enter ⇒ 零 /chat 请求；输入框原样保留 8193 字，计数标红', async () => {
+  it('2001 字 + Enter ⇒ 零 /chat 请求；输入框原样保留 2001 字，计数标红', async () => {
     const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
     const wrapper = mount(AiPanel, { global: { stubs } })
     await wrapper.vm.$nextTick()
     await flushPromises()
 
     const box = wrapper.find('[data-testid="composer-input"]')
-    const draft = '中'.repeat(8193)
+    const draft = '中'.repeat(2001)
     await box.setValue(draft)
     await box.trigger('keydown', { key: 'Enter' })
     await flushPromises()
 
     expect(api.chat).not.toHaveBeenCalled()
-    expect((box.element as HTMLTextAreaElement).value).toHaveLength(8193)
+    expect((box.element as HTMLTextAreaElement).value).toHaveLength(2001)
     expect(wrapper.find('[data-testid="composer-count"]').text()).toBe('已超 1 字上限')
     expect(wrapper.find('[data-testid="composer-count"]').classes()).toContain('text-[#c0392b]')
     wrapper.unmount()

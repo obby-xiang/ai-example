@@ -141,10 +141,10 @@ function assertSessionIdText(raw, label) {
 // 生产侧经 ConfirmGate.frontendToolTimeoutSeconds() 单点取值、无硬编码——本批前置复核结论）
 // 语义对齐；改配置时此处同改（N-6 收缩为脚本侧收编，生产面无硬编码可改）。
 const FRAME_TIMEOUT_SECONDS = Number(process.env.SMOKE_FRAME_TIMEOUT_SECONDS ?? 120)
-// 阶段 2 取消收敛轮询：12 次 × 500ms（合计 6s 上限）—— 与挂起超时无语义关系，
+// 阶段 2 取消收敛轮询：40 次 × 500ms（合计 20s 上限）—— 与挂起超时无语义关系，
 // 是“前端状态机把取消终态收敛到 DOM”的观察窗口，集中常量 + 注释即满足 N-6 收编口径
-// （会审一致：不挂配置键）。
-const CONVERGE_POLLS = 12
+// （会审一致：不挂配置键）。20s 覆盖取消重试节奏 2s/6s/14s 的第三次重试后仍有余量。
+const CONVERGE_POLLS = 40
 const CONVERGE_POLL_INTERVAL_MS = 500
 // 分轮保留：每轮写独立结果文件（UTC 时间戳），复跑不覆盖上一轮证据
 const STAMP = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
