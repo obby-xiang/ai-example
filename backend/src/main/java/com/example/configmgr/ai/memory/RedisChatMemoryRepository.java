@@ -80,6 +80,10 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * staging 写入走<b>单键</b> Lua，数据与 TTL 同时生效（finally 的 DEL 再失败也不会留下无 TTL 的孤儿）；
  * 随后 {@code RENAME staging final} 原子覆盖。RENAME 成功前旧历史一直可读；任一步失败只清理
  * staging，<b>绝不先删旧历史</b>。TTL 随 RENAME 继承到 final，仍为滑动过期。</li>
+ * <li><b>整窗替换（{@link #replaceWindow}）= 压缩/记忆窗口写回的专用面</b>：内容就是压缩算出来的那一份
+ * （含别的 run 的块），以调用方读到的 {@link MemoryWindowSnapshot}（版本 + 代次）为 CAS 基线<b>一次</b>
+ * 落盘；基线已变 ⇒ <b>放弃</b>（返回 {@code false}，不重试、不重算）。绝不"整窗覆盖 + CAS 重试" ——
+ * 重试仍是旧内容，会把并发写者这期间写入的新消息覆盖掉。</li>
  * <li><b>索引后置</b>：RENAME 成功后才 {@code SADD chat:mem:__ids__}。索引更新失败只 WARN
  * （带 conversationId / 数据键，便于对账），<b>不回退已提交的新历史</b>；下一次成功保存会自愈。</li>
  * <li><b>清空 = 一条同槽脚本</b>（{@code DEL} 数据键 + {@code INCR :gen} + {@code INCR :ver} + 续 TTL，
@@ -120,7 +124,10 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * <li>合并写有<b>有界</b>重试（{@value #MERGE_ATTEMPTS} 次）：并发写密集到每次 CAS 都落空时本次记忆写
  * 失败并计入降级（{@code W1_MEMORY_WRITE}），不无限重试、不改变对话结果；旧历史保持可读。</li>
  * <li>{@link #saveAll}（官方 SPI 的整窗覆盖）仍是能力面：它不参与合并也不看版本键，
- * 生产写入口已全部换到 {@link #upsertRun}；两者混用时 {@code saveAll} 仍是最后写入者胜。</li>
+ * 生产写入口已全部换到 {@link #upsertRun} / {@link #replaceWindow}；与它们混用时 {@code saveAll}
+ * 仍是最后写入者胜。</li>
+ * <li>整窗替换（压缩写回）被并发写顶掉时<b>这一轮的压缩结果不落窗口</b>（只进台账/快照）：
+ * 下一轮重新压缩；窗口内容因此在两轮之间保持"未压"的旧形态，属预期（不允许覆盖新消息换压缩）。</li>
  * <li>客户端超时但服务端 RENAME 已成功：调用方看到失败且跳过 SADD，数据已提交、索引缺失，
  * 由下次保存自愈。</li>
  * <li>删除的 SREM 与并发保存的 SADD 仍有窄窗口：SREM 可能抹掉刚 SADD 的活成员，由下次保存自愈；
@@ -705,6 +712,88 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** 合并 CAS 的版本键：与数据键同 hash tag（Cluster 同槽，脚本不跨槽）。 */
 	private String versionKey(String dataKey) {
 		return dataKey + VERSION_SUFFIX;
+	}
+
+	/**
+	 * 读一次窗口快照（版本 + 清空代次 + 消息）：压缩写回用它当 CAS 基线。
+	 *
+	 * <p>计数器<b>先读</b>、窗口<b>后读</b>：这期间任何写者推进版本，写回时的 CAS 必然落空
+	 * （保守方向：宁可放弃一次压缩写，也不拿旧内容覆盖新消息）。
+	 */
+	@Override
+	public MemoryWindowSnapshot readWindow(String conversationId) {
+		String finalKey = key(conversationId);
+		long version = counterValue(readCounter(versionKey(finalKey)));
+		long generation = counterValue(readCounter(generationKey(finalKey)));
+		List<String> raw = rawWindow(finalKey, legacyEligible(conversationId) ? legacyKey(conversationId) : null);
+		return new MemoryWindowSnapshot(version, generation,
+				raw.isEmpty() ? List.of() : this.codec.deserializeAll(raw));
+	}
+
+	/**
+	 * 整窗替换（压缩 / 记忆窗口写回专用，见 {@link RunUpsertChatMemoryRepository#replaceWindow}）。
+	 *
+	 * <p><b>一次 CAS，不重试</b>：内容就是压缩算出来的那一份；重试等于拿旧内容覆盖别人在这期间写入的
+	 * 新消息。版本或代次与基线不符 ⇒ 放弃（返回 {@code false}），调用方记 WARN + W1，下一轮重算。
+	 * 落盘仍是 staging + {@code RENAME}（失败安全与整窗写同口径），并复用同一个 {@code MERGE_CAS}
+	 * 脚本（比对版本/代次 → 覆盖 → 推进版本），因此清空守卫、TTL、Cluster 同槽都不变。
+	 */
+	@Override
+	public boolean replaceWindow(String conversationId, MemoryWindowSnapshot baseline, List<Message> messages) {
+		if (baseline == null) {
+			throw new IllegalArgumentException("整窗写回必须带压缩计算时的窗口快照（否则无法判断是否被并发改写）");
+		}
+		String finalKey = key(conversationId); // 先校验 id
+		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
+			log.warn("会话已销毁（purge guard 生效），拒绝整窗写回记忆 conversationId={} key={}", conversationId, finalKey);
+			return false;
+		}
+		String legacyKeyOrNull = legacyEligible(conversationId) ? legacyKey(conversationId) : null;
+		List<String> payload = this.codec.serializeAll(messages == null ? List.of() : messages);
+		String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, UUID.randomUUID().toString());
+		if (stagingKey != null) {
+			stagePayload(stagingKey, payload);
+		}
+		Long applied;
+		try {
+			applied = this.redis.execute(MERGE_CAS,
+					List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey(finalKey),
+							generationKey(finalKey)),
+					Long.toString(baseline.version()), Long.toString(baseline.generation()),
+					payload.isEmpty() ? "delete" : "rename", Long.toString(stagingTtlMillis()));
+		}
+		catch (RuntimeException ex) {
+			if (stagingKey != null) {
+				deleteStagingQuietly(stagingKey);
+			}
+			throw ex;
+		}
+		if (applied != null && applied == CAS_SUPERSEDED) {
+			if (stagingKey != null) {
+				deleteStagingQuietly(stagingKey);
+			}
+			log.warn("整窗写回放弃：压缩期间会话被清空 conversationId={}（不写回、不重试）", conversationId);
+			return false;
+		}
+		if (applied != null && applied > 0L) {
+			afterMergeLanded(conversationId, finalKey, legacyKeyOrNull, payload.isEmpty());
+			return true;
+		}
+		if (stagingKey != null) {
+			deleteStagingQuietly(stagingKey);
+		}
+		log.warn("整窗写回放弃：窗口在压缩计算后被其它写者改写（期望 version={}）conversationId={}"
+				+ "（不重试、不用旧内容覆盖）", baseline.version(), conversationId);
+		return false;
+	}
+
+	private static long counterValue(String raw) {
+		try {
+			return Long.parseLong(raw);
+		}
+		catch (NumberFormatException ex) {
+			return 0L;
+		}
 	}
 
 	/** 清空代次键（tombstone）：与数据键同 hash tag（Cluster 同槽）。 */

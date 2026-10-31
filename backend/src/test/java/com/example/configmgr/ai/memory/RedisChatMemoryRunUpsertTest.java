@@ -205,6 +205,45 @@ class RedisChatMemoryRunUpsertTest {
 		assertThat(this.repository.findByConversationId(CID)).as("被清空的历史不得被重试写回来").isEmpty();
 	}
 
+	/**
+	 * <b>整窗写回（压缩）与并发写者的交错</b>：压缩算完之后、落盘之前，别的 run 往窗口里写了一条新消息。
+	 *
+	 * <p>压缩的输入是<b>旧窗口</b>，因此"整窗覆盖 + CAS 重试"会在重试里把新旧内容一起盖掉 —— 新消息丢失。
+	 * 正确口径：版本对不上就<b>放弃这一次压缩写</b>（不重试、不重算），新消息原样保留。
+	 */
+	@Test
+	void replaceWindowAbandonsWhenAnotherWriterLandsAfterTheBaseline() {
+		this.repository.upsertRun(CID, A, history("A问", "A答"), WINDOW, true);
+		MemoryWindowSnapshot baseline = this.repository.readWindow(CID);
+		// 压缩期间：另一条 run 写下自己的成功轮
+		this.repository.upsertRun(CID, B, history("B问", "B答"), WINDOW, true);
+
+		boolean applied = this.repository.replaceWindow(CID, baseline,
+				List.of(new UserMessage("压缩算出的旧内容"), new AssistantMessage("压缩算出的旧回答")));
+
+		assertThat(applied).as("基线已被改写 ⇒ 放弃本次整窗写回（不重试、不覆盖）").isFalse();
+		assertThat(texts(this.repository.findByConversationId(CID)))
+			.as("并发写者的新消息不得被压缩的旧内容覆盖").containsExactly("A问", "A答", "B问", "B答");
+	}
+
+	/** 基线仍成立时整窗写回原样落地（L1 占位/L2 摘要/L3 裁轮都依赖它）。 */
+	@Test
+	void replaceWindowLandsTheWholeWindowWhenTheBaselineIsStillCurrent() {
+		this.repository.upsertRun(CID, A, history("A问", "A答"), WINDOW, true);
+		MemoryWindowSnapshot baseline = this.repository.readWindow(CID);
+		this.repository.upsertRun(CID, B, history("B问", "B答"), WINDOW, true);
+		MemoryWindowSnapshot current = this.repository.readWindow(CID);
+
+		boolean applied = this.repository.replaceWindow(CID, current,
+				List.of(new UserMessage("[压缩摘要]"), new UserMessage("保留的问题")));
+
+		assertThat(applied).isTrue();
+		assertThat(texts(this.repository.findByConversationId(CID)))
+			.as("整窗内容必须原样落盘（跨 run 改写不被按 run 合并跳过）")
+			.containsExactly("[压缩摘要]", "保留的问题");
+		assertThat(current.version()).isEqualTo(baseline.version() + 1);
+	}
+
 	/** 清空是"清历史"不是"封会话"：之后的新轮必须能重新写（tombstone 只让清空前的写者失效）。 */
 	@Test
 	void aNewRunCanWriteAgainAfterTheHistoryWasCleared() {

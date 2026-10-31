@@ -17,6 +17,7 @@ import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.kb.KbPromptSection;
 import com.example.configmgr.ai.memory.MemoryTurn;
+import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
@@ -623,7 +624,10 @@ public class ResilientChatService {
 		boolean existed = this.sessionService.ensure(sessionId);
 		long turnStartedAtMs = System.currentTimeMillis();
 
-		List<Message> memory = this.chatMemory.get(sessionId);
+		// 本轮窗口快照（版本 + 代次 + 消息）：压缩/记忆窗口要整窗改写，必须用"读到的那一份"当 CAS 基线
+		// —— 否则压缩期间别人写入的新消息会被旧内容覆盖，或反过来把压缩结果丢掉。
+		MemoryWindowSnapshot windowSnapshot = memoryWindowSnapshot(sessionId);
+		List<Message> memory = windowSnapshot != null ? windowSnapshot.messages() : this.chatMemory.get(sessionId);
 		// 槽位解析（槽位放行批）：任务/工作区 + 用户已明确值 + 历史未修改值 → extra[taskSlots]。
 		// 必须在 systemPromptText 与 forContext 之前完成：前者要把槽位作为数据展示给模型，
 		// 后者（表单放行）在下一批从同一个上下文读它。空槽位不写键（不引入噪声）。
@@ -693,7 +697,7 @@ public class ResilientChatService {
 		DriveOwnership ownership = DriveOwnership.none();
 		try {
 			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
-					toolsTokens, 0, keepalive);
+					toolsTokens, 0, keepalive, windowSnapshot);
 			memory = compaction.memory();
 			// 摘要结束（或压根没压）：立即回到 streaming，前端阶段条随即退场。
 			// 只在相位真的变过时才公告（L1/L3/未压缩路径的 streaming 是同相位，不重复出帧）。
@@ -3954,11 +3958,17 @@ public class ResilientChatService {
 	 * <p>
 	 * <b>为什么窗口必须写回记忆</b>：官方 {@code MessageChatMemoryAdvisor} 是<b>自己</b>从
 	 * {@code ChatMemory} 读历史的（不读本方法的返回值）。只算不写回 ⇒ 快照里是短的、模型看到的是长的，
-	 * 比不裁剪更坏。故"窗口改了"与"压缩改了"合并成<b>一次</b>覆盖写。
+	 * 比不裁剪更坏。故"窗口改了"与"压缩改了"合并成<b>一次</b>写回。
+	 *
+	 * <p>
+	 * <b>写回方式 = 整窗替换（{@code replaceWindow}），不是按 run 合并</b>：L1 的占位符、L2 的摘要、
+	 * L3 的裁轮改的大多是<b>别的 run</b> 的块，按 run 合并会以"当前窗口"为准整段跳过（台账说压了、
+	 * 窗口没动）。整窗替换以本轮起点读到的 {@code windowSnapshot} 为 CAS 基线：这期间别的写者改了
+	 * 窗口就<b>放弃本次写回</b>（WARN + W1，下一轮重算），绝不用压缩前的旧内容覆盖新消息。
 	 */
 	private Compaction compactBeforeRequest(String runId, String sessionId, ProviderRuntime runtime,
 			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure,
-			TurnKeepalive keepalive) {
+			TurnKeepalive keepalive, MemoryWindowSnapshot windowSnapshot) {
 		int limit = this.contextCompactor == null ? 0
 				: this.contextCompactor.limitTokens(runtime.providerId(), runtime.modelId());
 		if (memory == null || memory.isEmpty()) {
@@ -3971,7 +3981,7 @@ public class ResilientChatService {
 		MemoryWindow.emit(runId, sessionId, window, windowBudget);
 		List<Message> windowed = window.messages();
 		if (this.contextCompactor == null) {
-			writeBackMemory(runId, sessionId, windowed, window.changed(), "记忆窗口");
+			writeBackMemory(runId, sessionId, windowed, window.changed(), "记忆窗口", windowSnapshot);
 			return new Compaction(windowed, 0, null);
 		}
 		// ── ② 上下文压缩：按模型上限占比兜底（窗口之后的历史才是它的输入） ──
@@ -3985,7 +3995,8 @@ public class ResilientChatService {
 				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
 				protectedIds, runtime), null, onSummaryStart);
 		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
-		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩");
+		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩",
+				windowSnapshot);
 		return new Compaction(finalMessages, limit, outcome);
 	}
 
@@ -4069,21 +4080,85 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 记忆整体覆盖写（与 {@link #convergeMemory} 同一通道）：不写回的话下一轮又读到未裁剪的那份。
+	 * 压缩 / 记忆窗口的<b>整窗写回</b>（跨 run 改写：L1 占位、L2 摘要、L3 裁轮都在这条路上）。
 	 *
-	 * <p>注入仓储时直落 {@code saveAll}（staging + RENAME 的原子整窗替换），空窗同样走
-	 * {@code saveAll(empty)} 完成删除 —— 不再有"先 clear 再 add"的两步窗口。
+	 * <p>为什么不能用按 run upsert：这类改写改的多数是<b>别的 run 的块</b>（旧工具结果、旧轮次），
+	 * 按 run 合并会以"当前窗口"为准把改写整段跳过 —— 台账说压了、窗口没动，下一轮模型仍看到原文
+	 * （KQC C-08/C-13 的回归形态）。因此这里走 {@link RunUpsertChatMemoryRepository#replaceWindow}：
+	 * 以本轮起点读到的快照为 CAS 基线<b>整窗</b>落盘。
+	 *
+	 * <p><b>并发口径</b>：基线在压缩计算之后被别人改写（版本变）或被清空（代次变）⇒ <b>放弃本次写回，
+	 * 不重试、不拿旧内容重算</b>（重试只会把别人新写的消息覆盖掉）；下一轮重新压缩。放弃也按写失败
+	 * 记账（WARN + {@link RedisDegradation#W1_MEMORY_WRITE}），避免"台账说压了、窗口没动"被静默吞掉。
 	 *
 	 * <p>顺序（记忆先于快照）见 {@link #compactBeforeRequest} 方法注：{@code store.create} 失败时
 	 * 不留"快照已裁、记忆未裁"组合。写失败只 WARN：观测面/存储抖动不得让本轮对话直接失败
 	 * （这一轮仍按裁剪后的列表发请求，快照也写这一份 —— 三者的一致性由返回值保证）。
 	 */
-	private void writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed,
-			String stage) {
+	private void writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed, String stage,
+			MemoryWindowSnapshot windowSnapshot) {
 		if (!changed || messages == null) {
 			return;
 		}
+		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
+			persistWindowReplace(runId, sessionId, messages, stage + "后记忆写回", windowSnapshot, upsert);
+			return;
+		}
+		// 非按轮仓储（测试替身/自定义实现）：保持旧的整窗写语义。
 		persistMemory(runId, sessionId, messages, stage + "后记忆写回");
+	}
+
+	/**
+	 * 整窗写回的执行体：守卫 → CAS 整窗替换 → 放弃/失败都 WARN + W1。
+	 *
+	 * <p>没有基线（仓储支持整窗写但本轮读快照失败）时<b>不写</b>：此时按 run 合并会静默跳过跨 run 的
+	 * 改写，整窗覆盖又没有并发保护 —— 两者都比"这轮不写、下轮重算"更坏。
+	 */
+	private void persistWindowReplace(String runId, String sessionId, List<Message> messages, String stage,
+			MemoryWindowSnapshot windowSnapshot, RunUpsertChatMemoryRepository upsert) {
+		if (!persistAllowed(runId, stage)) {
+			return;
+		}
+		if (windowSnapshot == null) {
+			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
+					new IllegalStateException("记忆窗口写回缺少快照基线"));
+			log.warn("{}跳过：本轮没有窗口快照基线（整窗写回需要 CAS 基线，不能盲目覆盖）sessionId={} runId={}", stage,
+					sessionId, runId);
+			return;
+		}
+		try {
+			if (upsert.replaceWindow(sessionId, windowSnapshot, messages)) {
+				return;
+			}
+			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
+					new IllegalStateException("记忆窗口在压缩计算后被改写，整窗写回放弃"));
+			log.warn("{}放弃：窗口在压缩计算后已被其它写者改写/清空（不覆盖新消息；下一轮重新压缩）sessionId={} runId={}",
+					stage, sessionId, runId);
+		}
+		catch (RuntimeException ex) {
+			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
+			log.warn("{}失败 sessionId={}：{}", stage, sessionId, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 本轮起点读到的窗口快照（仓储不支持按轮写时返回 {@code null}，调用方回落旧读取路径）。
+	 *
+	 * <p>读失败<b>不抛</b>：本轮照常发请求（压缩写回随后会因"没有基线"跳过并 W1），不能让一次快照
+	 * 读取失败把对话打断；真正的 Redis 不可用会在紧接着的 {@code ChatMemory#get} 上如实失败。
+	 */
+	private MemoryWindowSnapshot memoryWindowSnapshot(String sessionId) {
+		if (!(this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert)) {
+			return null;
+		}
+		try {
+			return upsert.readWindow(sessionId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("读记忆窗口快照失败（本轮压缩写回将跳过：没有基线的整窗覆盖不安全）sessionId={}：{}", sessionId,
+					ex.getMessage());
+			return null;
+		}
 	}
 
 	/**

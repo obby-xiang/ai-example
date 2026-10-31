@@ -11,6 +11,7 @@ import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MemoryTurn;
+import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
@@ -409,6 +410,9 @@ class ResilientChatServiceMemoryWriteTest {
 
 		private boolean failOnWrite;
 
+		/** 会话级合并版本（与真实仓储同口径：每次成功写入 +1，供整窗写回的 CAS 基线用）。 */
+		private long version;
+
 		void seed(String conversationId, List<Message> messages) {
 			this.store.put(conversationId, new ArrayList<>(messages));
 		}
@@ -441,6 +445,34 @@ class ResilientChatServiceMemoryWriteTest {
 			else {
 				this.store.put(conversationId, new ArrayList<>(merged));
 			}
+			this.version++;
+			return true;
+		}
+
+		@Override
+		public MemoryWindowSnapshot readWindow(String conversationId) {
+			return new MemoryWindowSnapshot(this.version, 0L, findByConversationId(conversationId));
+		}
+
+		@Override
+		public boolean replaceWindow(String conversationId, MemoryWindowSnapshot baseline, List<Message> messages) {
+			this.ops.add("replaceWindow");
+			if (this.failOnWrite) {
+				throw new IllegalStateException("redis down");
+			}
+			if (baseline == null || baseline.version() != this.version) {
+				return false;
+			}
+			this.writes++;
+			this.lastWrite = messages == null ? List.of() : List.copyOf(messages);
+			if (messages == null || messages.isEmpty()) {
+				this.store.remove(conversationId);
+				this.deletes++;
+			}
+			else {
+				this.store.put(conversationId, new ArrayList<>(messages));
+			}
+			this.version++;
 			return true;
 		}
 

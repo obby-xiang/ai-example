@@ -154,6 +154,13 @@
       "reason": "本批仅恢复既有Verdict机器可读原因在结算文本中的保留，不改变迁移接口、存储结构或拒绝行为",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:daca6b8d57ade9e70d41a8df747404a0f7d25fa028e1cbebd677b22d63292b4b",
+      "status": "synced",
+      "reason": "已同步压缩整窗写回与按轮合并的固定分工、窗口快照CAS基线及并发冲突放弃重算契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
