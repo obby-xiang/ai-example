@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -54,9 +55,16 @@ import reactor.core.scheduler.Scheduler;
  * </ol>
  *
  * <h2>不接管官方语义</h2>
- * 读写时机、system 置顶、窗口裁剪仍全部由官方 {@link MessageChatMemoryAdvisor} +
- * {@code MessageWindowChatMemory} 完成（每个请求 new 一个官方实例，只是换掉它持有的
- * {@link ChatMemory}）；本类只负责"用谁的身份"。
+ * 读写时机、system 置顶仍全部由官方 {@link MessageChatMemoryAdvisor} 完成（每个请求 new 一个官方
+ * 实例，只是换掉它持有的 {@link ChatMemory}）；本类只负责"用谁的身份、算哪一轮"。
+ *
+ * <h2>写入口：按轮合并（挂起轮 A + 新轮 B 互删）</h2>
+ * 官方 advisor 的 {@code before}/{@code after} 是<b>增量写</b>（本轮用户消息 + 本轮助手回答）。
+ * 若让它落到 {@code MessageWindowChatMemory#add}（读整窗 → 追加 → 整窗 {@code saveAll}），它会把
+ * "读到的旧窗 + 自己两条"整窗覆盖：同一会话里另一条 run（挂起轮续跑 + 用户新开一轮）的整轮就从
+ * {@code /history}（唯一读源）消失。因此本类把<b>本轮归属</b>（{@link MemoryTurn}：runId + 本轮起点）
+ * 一并绑定到记忆句柄上，写落到 {@link RunScopedChatMemory#add(String, MemoryTurn, List)} ——
+ * 与人工收敛/压缩写回同一个按轮合并 + 会话级 CAS 的写入口。
  */
 public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvisor {
 
@@ -98,36 +106,61 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	@Override
 	public Flux<ChatClientResponse> adviseStream(ChatClientRequest chatClientRequest,
 			StreamAdvisorChain streamAdvisorChain) {
-		return official(resolveIdentity(chatClientRequest)).adviseStream(chatClientRequest, streamAdvisorChain);
+		return official(resolveIdentity(chatClientRequest), resolveTurn(chatClientRequest)).adviseStream(chatClientRequest,
+				streamAdvisorChain);
 	}
 
 	@Override
 	public ChatClientResponse adviseCall(ChatClientRequest chatClientRequest, CallAdvisorChain callAdvisorChain) {
-		return official(resolveIdentity(chatClientRequest)).adviseCall(chatClientRequest, callAdvisorChain);
+		return official(resolveIdentity(chatClientRequest), resolveTurn(chatClientRequest)).adviseCall(chatClientRequest,
+				callAdvisorChain);
 	}
 
 	/**
 	 * 兜底钩子（正常链路不会走到：{@link #adviseCall}/{@link #adviseStream} 已整段接管）。
 	 *
-	 * <p>这里只能取线程身份 —— 没有请求可读。取不到时 {@link IdentityBoundChatMemory} 失败关闭，
+	 * <p>这里只能取线程身份与线程锚点 —— 没有请求可读。取不到时 {@link IdentityBoundChatMemory} 失败关闭，
 	 * 同样不会写出无归属正文。
 	 */
 	@Override
 	public ChatClientRequest before(ChatClientRequest chatClientRequest, AdvisorChain advisorChain) {
-		return official(RequestContextUtils.currentOrNull()).before(chatClientRequest, advisorChain);
+		return official(RequestContextUtils.currentOrNull(), threadTurn()).before(chatClientRequest, advisorChain);
 	}
 
 	@Override
 	public ChatClientResponse after(ChatClientResponse chatClientResponse, AdvisorChain advisorChain) {
-		return official(RequestContextUtils.currentOrNull()).after(chatClientResponse, advisorChain);
+		return official(RequestContextUtils.currentOrNull(), threadTurn()).after(chatClientResponse, advisorChain);
 	}
 
-	/** 本次调用专用的官方 advisor（读写时机/窗口裁剪语义逐字沿用官方实现）。 */
-	private MessageChatMemoryAdvisor official(TenantUser identity) {
-		return MessageChatMemoryAdvisor.builder(new IdentityBoundChatMemory(this.chatMemory, identity))
+	/** 本次调用专用的官方 advisor（读写时机与系统提示置顶逐字沿用官方实现；窗口裁剪由按轮合并保证）。 */
+	private MessageChatMemoryAdvisor official(TenantUser identity, MemoryTurn turn) {
+		return MessageChatMemoryAdvisor.builder(new IdentityBoundChatMemory(this.chatMemory, identity, turn))
 			.order(this.order)
 			.scheduler(this.scheduler)
 			.build();
+	}
+
+	/**
+	 * 本轮归属：<b>请求里的记录事实优先</b>（{@link ToolExecutionEnvelope} 的 runId + 创建时刻），
+	 * 其次发起调用这一拍的日志锚点 {@link AiTrace#currentRunId()}；都没有 ⇒ {@code null}
+	 * （记忆按"无归属"块追加，不整窗覆盖别的 run）。
+	 *
+	 * <p>起点用信封的 {@code createdAtMs}（= 快照创建时刻）：续跑沿用<b>块里已有的</b>起点，
+	 * 不会因为"续跑是后来才发生的"把这一轮挪到新轮后面。
+	 */
+	static MemoryTurn resolveTurn(ChatClientRequest chatClientRequest) {
+		ToolExecutionEnvelope envelope = envelopeOf(chatClientRequest);
+		if (envelope != null) {
+			MemoryTurn fromRecord = MemoryTurn.of(envelope.runId(), envelope.createdAtMs());
+			if (fromRecord != null) {
+				return fromRecord;
+			}
+		}
+		return threadTurn();
+	}
+
+	private static MemoryTurn threadTurn() {
+		return MemoryTurn.of(AiTrace.currentRunId(), 0L);
 	}
 
 	/**
@@ -135,27 +168,26 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	 * （调用方失败关闭，不伪造默认租户）。
 	 */
 	private static TenantUser resolveIdentity(ChatClientRequest chatClientRequest) {
-		TenantUser fromRecord = recordIdentity(chatClientRequest);
+		ToolExecutionEnvelope envelope = envelopeOf(chatClientRequest);
+		TenantUser fromRecord = envelope != null && RunIdentityScope.usable(envelope.tenantId(), envelope.userId())
+				? new TenantUser(envelope.tenantId(), envelope.userId()) : null;
 		return fromRecord != null ? fromRecord : RequestContextUtils.currentOrNull();
 	}
 
 	/**
-	 * 请求携带的<b>记录身份</b>（{@link ToolExecutionEnvelope}）。
+	 * 请求携带的<b>记录事实</b>（{@link ToolExecutionEnvelope}）。
 	 *
 	 * <p>信封由本轮请求边界冻结（{@code ResilientChatService#toolContext}），随
-	 * {@code ToolCallingChatOptions.toolContext} 进请求；它不是客户端可填的字段，因此可作身份来源。
-	 * 旧快照的 {@code 0/0} 信封<b>没有身份</b>：返回 {@code null}，不伪造默认租户。
+	 * {@code ToolCallingChatOptions.toolContext} 进请求；它不是客户端可填的字段，因此可作身份与
+	 * 轮次归属的来源。旧快照的 {@code 0/0} 信封<b>没有身份</b>（返回的信封仍可用于 runId，
+	 * 身份侧由 {@link RunIdentityScope#usable} 判定）。
 	 */
-	private static TenantUser recordIdentity(ChatClientRequest chatClientRequest) {
+	private static ToolExecutionEnvelope envelopeOf(ChatClientRequest chatClientRequest) {
 		Map<String, Object> toolContext = toolContextOf(chatClientRequest);
 		if (toolContext == null) {
 			return null;
 		}
-		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(toolContext);
-		if (envelope == null || !RunIdentityScope.usable(envelope.tenantId(), envelope.userId())) {
-			return null;
-		}
-		return new TenantUser(envelope.tenantId(), envelope.userId());
+		return ToolExecutionEnvelope.fromToolContext(toolContext);
 	}
 
 	private static Map<String, Object> toolContextOf(ChatClientRequest chatClientRequest) {
@@ -167,10 +199,14 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	}
 
 	/**
-	 * 一次调用内<b>绑定身份</b>的记忆句柄：每次读写都在显式身份作用域里执行，让仓储按身份拼键。
+	 * 一次调用内<b>绑定身份与轮次</b>的记忆句柄：每次读写都在显式身份作用域里执行，让仓储按身份拼键；
+	 * 写走 {@link RunScopedChatMemory#add(String, MemoryTurn, List)}（按轮合并），其余 run 的块不受影响。
 	 *
 	 * <p>身份为 {@code null} 时失败关闭：读返回空、写丢弃（+ WARN），<b>不</b>回落到无归属 legacy
 	 * 命名空间 —— 那正是本类要消灭的"销毁删不掉、别的身份读得到"的正文。
+	 *
+	 * <p>轮次为 {@code null}（旧快照且没有日志锚点）时回落到官方 {@code add}：那是"没有本轮"的
+	 * 兼容形态，只在无信封的旧请求上出现。
 	 */
 	static final class IdentityBoundChatMemory implements ChatMemory {
 
@@ -179,9 +215,13 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 		/** {@code null} = 本轮没有可用身份（失败关闭）。 */
 		private final TenantUser identity;
 
-		IdentityBoundChatMemory(ChatMemory delegate, TenantUser identity) {
+		/** {@code null} = 本轮没有可用轮次（回落到官方写入口）。 */
+		private final MemoryTurn turn;
+
+		IdentityBoundChatMemory(ChatMemory delegate, TenantUser identity, MemoryTurn turn) {
 			this.delegate = delegate;
 			this.identity = identity;
+			this.turn = turn;
 		}
 
 		@Override
@@ -190,6 +230,10 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 				return;
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
+				if (this.turn != null && this.delegate instanceof RunScopedChatMemory scoped) {
+					scoped.add(conversationId, this.turn, messages);
+					return;
+				}
 				this.delegate.add(conversationId, messages);
 			}
 		}

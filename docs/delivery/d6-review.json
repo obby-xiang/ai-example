@@ -140,6 +140,13 @@
       "reason": "本批仅修正既有刷新恢复、工具停止结算和复制页签接管行为，不新增或改变迁移接口、存储键及跨实例契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:983429ff983bb958fa1dcf128b1a5108832d157316c228360114c2daadbec86b",
+      "status": "synced",
+      "reason": "已同步按run有序合并、会话级CAS版本、清空代次tombstone、统一advisor与收敛写入口及Cluster同槽契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

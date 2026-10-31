@@ -16,8 +16,11 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.kb.KbPromptSection;
+import com.example.configmgr.ai.memory.MemoryTurn;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
+import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
@@ -373,9 +376,10 @@ public class ResilientChatService {
 	 * 记忆存储层（边界修复后的写入通道）。
 	 *
 	 * <p>生产由 {@code AiModelConfig} 的 {@code ChatMemoryRepository} bean 注入；直接 {@code new} 本类的
-	 * 单测可走 12 参兼容构造器（为 {@code null}，回落 {@link ChatMemory} 的旧写入口）。注入后
-	 * <b>整窗覆盖写一律直落 {@code saveAll}</b>，不经 {@code MessageWindowChatMemory.add} 的追加/合并
-	 * （后者会把"覆盖写"退化成"追加写"）。</p>
+	 * 单测可走 12 参兼容构造器（为 {@code null}，回落 {@link ChatMemory} 的旧写入口）。注入的是
+	 * {@link RunUpsertChatMemoryRepository} 时，写回一律走
+	 * {@link RunUpsertChatMemoryRepository#upsertRun}（按 run 块 upsert + 会话级 CAS）——
+	 * 同一会话里并存的另一条 run（挂起轮续跑 + 新开一轮）的块因此不会被整窗覆盖删掉。</p>
 	 */
 	private final ChatMemoryRepository chatMemoryRepository;
 
@@ -580,10 +584,10 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 生产装配构造器：多一个 {@link ChatMemoryRepository}，整窗覆盖写直落 {@code saveAll}。
+	 * 生产装配构造器：多一个 {@link ChatMemoryRepository}，写回走按轮合并（{@code upsertRun}）。
 	 *
 	 * <p>保留 12 参重载只为不动既有直接 {@code new} 的单测（它们用 {@link ChatMemory} 桩观察写入）；
-	 * 生产路径永远走本构造器，因此"先 clear 再 add"不会出现在真实链路上。</p>
+	 * 生产路径永远走本构造器，因此"先 clear 再 add"与"整窗覆盖别的 run"都不会出现在真实链路上。</p>
 	 */
 	@Autowired
 	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
@@ -3198,13 +3202,16 @@ public class ResilientChatService {
 		List<Message> memoryPortion = history.stream()
 			.filter(message -> message.getMessageType() != MessageType.SYSTEM)
 			.toList();
+		// 本轮起点：快照创建时刻（续跑不改写它）—— 块还不存在时用它定序，保证"先问的那一轮"
+		// 排在后面开的轮之前，即使它到很晚才收敛。
+		RunSnapshot snapshot = this.store.get(runId);
+		long turnStartedAtMs = snapshot == null ? 0L : snapshot.getCreatedAtMs();
 		if (memoryPortion.isEmpty()) {
-			// 空窗 = 删除（saveAll(empty) 在 Redis 实现里等价于 deleteByConversationId）。
-			// 不再"空窗直接 return"：旧历史若在（例如只剩 system 提示的异常轮），必须被清掉。
-			persistMemory(runId, sessionId, List.of(), "记忆收敛");
+			// 空窗 = 只清<b>本 run 的块</b>（仓储按轮合并；同会话其它 run 的成功轮不得被删）。
+			// 不再"空窗直接 return"：本 run 旧历史若在（例如只剩 system 提示的异常轮），必须被清掉。
+			persistMemory(runId, sessionId, List.of(), "记忆收敛", turnStartedAtMs);
 			return;
 		}
-		RunSnapshot snapshot = this.store.get(runId);
 		String snapshotStatus = snapshot == null ? null : snapshot.getStatus();
 		Map<String, PendingToolCall> pendingsById = new LinkedHashMap<>();
 		for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
@@ -3223,27 +3230,38 @@ public class ResilientChatService {
 		}
 		List<Message> windowed = trimKeepingToolPairs(withStates,
 				this.properties.getMemory().getMaxMessages());
-		persistMemory(runId, sessionId, windowed, "记忆收敛");
+		persistMemory(runId, sessionId, windowed, "记忆收敛", turnStartedAtMs);
 	}
 
 	/**
-	 * 记忆整体覆盖写（单一写口）。
+	 * 记忆写回（单一写口）。
 	 *
-	 * <p>注入 {@link ChatMemoryRepository} 时<b>直接 {@code saveAll}</b>：仓储的 staging + RENAME
-	 * 是原子整窗替换；走 {@code MessageWindowChatMemory.add} 会先读旧窗、再追加合并，既多一次读，
-	 * 也让"覆盖写"语义依赖窗口实现的细节。空列表仍交给 {@code saveAll}（仓储据此删除该会话），
-	 * 因此"空窗"与"写空"不会分叉。</p>
+	 * <p>注入<b>支持按轮合并</b>的仓储（生产 {@link RedisChatMemoryRepository}）时走
+	 * {@link RunUpsertChatMemoryRepository#upsertRun}：只替换<b>本 run 的块</b>，别的 run 的块原样保留，
+	 * 并在会话级 CAS 里完成读-改-写。整窗 {@code saveAll} 不行 —— 同一会话可以同时有挂起轮 A 与
+	 * 新轮 B，谁是最后收敛者谁就把对方整轮删掉（{@code /history} 只读这份窗口）。</p>
 	 *
-	 * <p>未注入（直接 {@code new} 的单测）时回落旧 {@link ChatMemory} 写入口；失败不重试、只 WARN +
-	 * 计一次 {@link RedisDegradation#W1_MEMORY_WRITE} —— 记忆写不得让本轮对话失败，但"刷新后可能
-	 * 丢本轮历史"必须可观测。</p>
+	 * <p>注入普通 {@link ChatMemoryRepository}（测试替身/非 Redis 实现）时保持旧 {@code saveAll}
+	 * 整窗语义；未注入（直接 {@code new} 的单测）时回落旧 {@link ChatMemory} 写入口。失败不重试、
+	 * 只 WARN + 计一次 {@link RedisDegradation#W1_MEMORY_WRITE} —— 记忆写不得让本轮对话失败，但
+	 * "刷新后可能丢本轮历史"必须可观测。</p>
 	 *
 	 * <p><b>RT-20</b>：带上 runId 时先问一次续跑权（{@link #persistAllowed}）—— 丢租/不可确认/
-	 * fence 已被接管的旧驱动<b>不得</b>整窗覆写会话记忆（新主人的回答才是真值）。
+	 * fence 已被接管的旧驱动<b>不得</b>写回会话记忆（新主人的回答才是真值）。</p>
 	 */
 	void persistMemory(String runId, String sessionId, List<Message> messages, String stage) {
+		persistMemory(runId, sessionId, messages, stage, 0L);
+	}
+
+	/**
+	 * 记忆写回（带本轮起点）。
+	 *
+	 * @param turnStartedAtMs 本轮起点（{@code 0} = 沿用窗口里本 run 块已有的起点，没有块才用当前时刻）：
+	 *                        用于"块还不存在"时定序，保证先问的那一轮排在后面开的轮之前
+	 */
+	void persistMemory(String runId, String sessionId, List<Message> messages, String stage, long turnStartedAtMs) {
 		// null = "调用方没算出窗口"（异常/误传），不等于"窗口确知为空"。
-		// 后者才是删除语义（saveAll(empty)）；把 null 当空列表会静默清掉真实旧记忆。
+		// 后者才是删除语义（upsert/saveAll(empty)）；把 null 当空列表会静默清掉真实旧记忆。
 		if (messages == null) {
 			log.warn("{}收到 null 消息窗口（不当作空窗删除）sessionId={}", stage, sessionId);
 			return;
@@ -3252,6 +3270,12 @@ public class ResilientChatService {
 			return;
 		}
 		try {
+			if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
+				MemoryTurn turn = MemoryTurn.of(runId, turnStartedAtMs);
+				upsert.upsertRun(sessionId, turn == null ? MemoryTurn.UNATTRIBUTED : turn, messages,
+						this.properties.getMemory().getMaxMessages(), true);
+				return;
+			}
 			if (this.chatMemoryRepository != null) {
 				this.chatMemoryRepository.saveAll(sessionId, messages);
 				return;

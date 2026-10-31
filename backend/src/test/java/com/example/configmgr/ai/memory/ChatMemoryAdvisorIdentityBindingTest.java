@@ -8,6 +8,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import com.example.configmgr.ai.config.AiModelConfig;
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -16,7 +17,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
-import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -72,10 +72,10 @@ class ChatMemoryAdvisorIdentityBindingTest {
 
 	private final ChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis, this.codec, TTL);
 
-	private final ChatMemory memory = MessageWindowChatMemory.builder()
-		.chatMemoryRepository(this.repository)
-		.maxMessages(40)
-		.build();
+	private final AiProperties properties = new AiProperties();
+
+	/** 生产装配的记忆 bean（按轮合并装饰器）：advisor 的写必须走同一个写入口。 */
+	private final ChatMemory memory = new AiModelConfig().chatMemory(this.repository, this.properties);
 
 	private final UpstreamStreamingModel model = new UpstreamStreamingModel();
 

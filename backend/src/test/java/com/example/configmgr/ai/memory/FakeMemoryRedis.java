@@ -16,6 +16,7 @@ import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -55,8 +56,17 @@ final class FakeMemoryRedis {
 
 	static final String STAGE_WRITE_MARK = "STAGE_WRITE";
 
+	/** 按轮合并 CAS 脚本标记（与仓储脚本正文一致）。 */
+	static final String MERGE_CAS_MARK = "MERGE_CAS";
+
+	/** 清空脚本标记（与仓储脚本正文一致）。 */
+	static final String CLEAR_MARK = "MEMORY_CLEAR";
+
 	/** LIST 键面（tagged final / legacy / staging）。 */
 	final Map<String, List<String>> lists = new ConcurrentHashMap<>();
+
+	/** STRING 键面（会话级合并 CAS 的版本键）。 */
+	final Map<String, String> values = new ConcurrentHashMap<>();
 
 	/** SET 键面（全局会话 id 索引 {@code chat:mem:__ids__}）。 */
 	final Map<String, Set<String>> sets = new ConcurrentHashMap<>();
@@ -101,7 +111,14 @@ final class FakeMemoryRedis {
 	/** staging 写完、RENAME 之前的并发注入点。 */
 	volatile Runnable afterStageWrite;
 
+	/**
+	 * 合并 CAS 脚本执行<b>之前</b>的并发注入点（模拟"另一实例在两拍之间落下自己的写"）。
+	 */
+	volatile Runnable beforeScript;
+
 	final AtomicInteger scriptCalls = new AtomicInteger();
+
+	final AtomicInteger casAttempts = new AtomicInteger();
 
 	final AtomicInteger stageWrites = new AtomicInteger();
 
@@ -134,9 +151,21 @@ final class FakeMemoryRedis {
 
 	private final SetOperations<String, String> setOps = mock(SetOperations.class);
 
+	private final ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+
 	FakeMemoryRedis() {
 		when(this.redis.opsForList()).thenReturn(this.listOps);
 		when(this.redis.opsForSet()).thenReturn(this.setOps);
+		when(this.redis.opsForValue()).thenReturn(this.valueOps);
+
+		when(this.valueOps.get(anyString())).thenAnswer(invocation -> this.values.get(invocation.getArgument(0)));
+		when(this.valueOps.increment(anyString(), anyLong())).thenAnswer(invocation -> {
+			String key = invocation.getArgument(0);
+			long delta = invocation.getArgument(1);
+			long next = Long.parseLong(this.values.getOrDefault(key, "0")) + delta;
+			this.values.put(key, Long.toString(next));
+			return next;
+		});
 
 		when(this.listOps.rightPushAll(anyString(), anyCollection())).thenAnswer(invocation -> {
 			String key = invocation.getArgument(0);
@@ -268,6 +297,12 @@ final class FakeMemoryRedis {
 			if (body.contains(STAGE_WRITE_MARK)) {
 				return stageWrite(String.valueOf(keys.get(0)), tail(invocation.getArguments(), 2));
 			}
+			if (body.contains(MERGE_CAS_MARK)) {
+				return mergeCas(keys.stream().map(String::valueOf).toList(), tail(invocation.getArguments(), 2));
+			}
+			if (body.contains(CLEAR_MARK)) {
+				return memoryClear(keys.stream().map(String::valueOf).toList(), tail(invocation.getArguments(), 2));
+			}
 			throw new UnsupportedOperationException("未建模的脚本：" + body);
 		});
 	}
@@ -301,6 +336,88 @@ final class FakeMemoryRedis {
 		this.stageWrites.incrementAndGet();
 		afterStageWritten();
 		return (long) values.size();
+	}
+
+	// ── 脚本语义：MERGE_CAS（会话级 CAS + RENAME/DEL） ─────────────────────
+
+	/**
+	 * {@code MERGE_CAS} 的替身：先跑并发注入点（模拟另一实例在两拍之间落下自己的写），再按
+	 * 版本键做 CAS —— 不匹配返回 {@code -1}（调用方重读再合并），匹配则 RENAME staging→final
+	 * （或 DEL）并推进版本。ARGV[1]=expected、ARGV[2]=mode、ARGV[3]=ttl 毫秒。
+	 */
+	private Long mergeCas(List<String> keys, Object[] args) {
+		this.casAttempts.incrementAndGet();
+		Runnable hook = this.beforeScript;
+		if (hook != null) {
+			hook.run();
+		}
+		String expected = String.valueOf(args[0]);
+		String expectedGen = String.valueOf(args[1]);
+		String mode = String.valueOf(args[2]);
+		long ttlMillis = Long.parseLong(String.valueOf(args[3]));
+		String versionKey = keys.get(2);
+		String generationKey = keys.get(3);
+		String gen = this.values.getOrDefault(generationKey, "0");
+		if (!gen.equals(expectedGen)) {
+			return -2L;
+		}
+		String current = this.values.getOrDefault(versionKey, "0");
+		if (!current.equals(expected)) {
+			return -1L;
+		}
+		if ("delete".equals(mode)) {
+			remove(keys.get(1));
+		}
+		else {
+			String staging = keys.get(0);
+			List<String> source = this.lists.get(staging);
+			if (source == null) {
+				throw new RedisSystemException("ERR no such key（MERGE_CAS source 不存在：" + staging + "）", null);
+			}
+			List<String> copy;
+			synchronized (source) {
+				copy = new ArrayList<>(source);
+			}
+			this.lists.put(keys.get(1), new CopyOnWriteArrayList<>(copy));
+			this.lists.remove(staging);
+			Duration ttl = this.expiries.remove(staging);
+			if (ttl != null) {
+				this.expiries.put(keys.get(1), ttl);
+			}
+			this.renames.incrementAndGet();
+			this.renameSources.add(staging);
+			this.lastRenameSource = staging;
+			this.lastRenameTarget = keys.get(1);
+		}
+		if (ttlMillis > 0L) {
+			this.expiries.put(versionKey, Duration.ofMillis(ttlMillis));
+			this.expiries.put(generationKey, Duration.ofMillis(ttlMillis));
+		}
+		long next = Long.parseLong(this.values.getOrDefault(versionKey, "0")) + 1L;
+		this.values.put(versionKey, Long.toString(next));
+		return 1L;
+	}
+
+	/**
+	 * {@code MEMORY_CLEAR} 的替身：一条脚本里 DEL 数据键 + 推进代次 + 推进版本 + 续 TTL
+	 * （ARGV[1] = TTL 毫秒；KEYS = [data, version, generation]，调用方已保证同槽）。
+	 */
+	private Long memoryClear(List<String> keys, Object[] args) {
+		long ttlMillis = Long.parseLong(String.valueOf(args[0]));
+		String dataKey = keys.get(0);
+		String versionKey = keys.get(1);
+		String generationKey = keys.get(2);
+		this.deletes.incrementAndGet();
+		this.deletedKeys.add(dataKey);
+		this.lastDeletedKeys = List.of(dataKey);
+		remove(dataKey);
+		this.values.put(generationKey, Long.toString(Long.parseLong(this.values.getOrDefault(generationKey, "0")) + 1L));
+		this.values.put(versionKey, Long.toString(Long.parseLong(this.values.getOrDefault(versionKey, "0")) + 1L));
+		if (ttlMillis > 0L) {
+			this.expiries.put(versionKey, Duration.ofMillis(ttlMillis));
+			this.expiries.put(generationKey, Duration.ofMillis(ttlMillis));
+		}
+		return 1L;
 	}
 
 	private void afterStageWritten() {
@@ -421,6 +538,7 @@ final class FakeMemoryRedis {
 	private boolean remove(String key) {
 		boolean existed = this.lists.remove(key) != null;
 		existed = this.sets.remove(key) != null || existed;
+		existed = this.values.remove(key) != null || existed;
 		this.expiries.remove(key);
 		return existed;
 	}

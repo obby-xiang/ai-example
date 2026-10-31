@@ -91,7 +91,8 @@ public final class RedisDegradation {
 	public static final String C1_RUN_INDEX_PRUNE = "c1.runIndexPrune";
 
 	/**
-	 * W1：会话记忆<b>整窗写回</b>失败（{@code ChatMemoryRepository#saveAll} 或旧 {@code ChatMemory} 通道）。
+	 * W1：会话记忆<b>写回</b>失败（按轮合并写 {@code RunUpsertChatMemoryRepository#upsertRun}、
+	 * 兼容面的 {@code saveAll} 或旧 {@code ChatMemory} 通道）。
 	 *
 	 * <p>此前只有 WARN：刷新后可能丢掉本轮历史，属于必须可观测的降级。一次失败的写只计一次
 	 * （不重试、不改变写协议）；WARN 原文保留（带 stage 与 sessionId）。

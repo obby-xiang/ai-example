@@ -413,6 +413,23 @@ final class PurgeFakeRedis {
 				}
 				return 0L;
 			}
+			if (body.contains("MEMORY_CLEAR")) {
+				// 清空记忆：DEL 数据键 + 推进代次 + 推进版本 + 续 TTL（三个键同 hash tag）。
+				long ttlMillis = Long.parseLong(String.valueOf(args[0]));
+				String dataKey = String.valueOf(keys.get(0));
+				String versionKey = String.valueOf(keys.get(1));
+				String generationKey = String.valueOf(keys.get(2));
+				remove(dataKey);
+				this.strings.put(generationKey,
+						Long.toString(Long.parseLong(this.strings.getOrDefault(generationKey, "0")) + 1L));
+				this.strings.put(versionKey,
+						Long.toString(Long.parseLong(this.strings.getOrDefault(versionKey, "0")) + 1L));
+				if (ttlMillis > 0L) {
+					this.ttls.put(versionKey, Duration.ofMillis(ttlMillis));
+					this.ttls.put(generationKey, Duration.ofMillis(ttlMillis));
+				}
+				return 1L;
+			}
 			throw new IllegalStateException("未建模的脚本：" + body);
 		});
 	}

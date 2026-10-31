@@ -663,7 +663,8 @@ public class AiSessionPurgeService {
 		boolean memoryExisted;
 		int memoryMessages = 0;
 		String memoryKey;
-		// 在飞 saveAll 的中间态也是本会话的 AI 数据（正常路径 RENAME 后消失，清理失败/进程中断时按 TTL 自清）。
+		// 在飞写回（saveAll / 按轮合并 upsert）的中间态也是本会话的 AI 数据
+		// （正常路径 RENAME 后消失，清理失败/进程中断时按 TTL 自清）。
 		// 只带 staging 的会话今天会被误报 found=false + complete=true 后残留，故这里一并枚举。
 		boolean memoryStaged = !stagingKeys(sessionId).isEmpty();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
@@ -815,7 +816,8 @@ public class AiSessionPurgeService {
 	/**
 	 * 本会话的记忆 staging 键（{@code chat:mem:staging:{<escapedId>}:<uuid>}）。
 	 *
-	 * <p>为什么销毁必须管它们：staging 是<b>在飞 {@code saveAll} 的中间态</b>，正常路径 RENAME 后消失，
+	 * <p>为什么销毁必须管它们：staging 是<b>在飞写回（{@code saveAll} / 按轮合并 {@code upsertRun}）的中间态</b>，
+	 * 正常路径 RENAME 后消失，
 	 * 清理失败/进程中断时靠 TTL 自清。销毁只删 tagged/legacy 时，这类键既让"只带 staging 的会话"被
 	 * 误报 {@code found=false}，也会在 {@code complete=true} 之后因 RENAME 落地而变成残留
 	 * （此时索引成员已被 SREM，{@code isConversationIndexed} 根本看不见它）。

@@ -57,10 +57,10 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 	private final RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis,
 			new MessageJsonCodec(new ObjectMapper()), TTL);
 
-	// ── 1. 删除：tagged + legacy 各自单键 DEL，再单键 SREM ──────────────────
+	// ── 1. 清空：一条同槽脚本（删数据 + 推进代次/版本）+ legacy 单键 DEL + 单键 SREM ──────
 
 	@Test
-	void deleteClearsTaggedLegacyAndIndexWithoutAnyScript() {
+	void deleteClearsTaggedLegacyAndIndexWithOneSameSlotScript() {
 		this.fake.enableClusterMode();
 		this.repository.saveAll(CID, List.of(new UserMessage("tagged")));
 		String legacyKey = legacyKey();
@@ -68,13 +68,16 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		assertTrue(this.fake.set(IDS).contains(CID), "前置：索引成员存在");
 		this.fake.resetCounters();
 
-		assertDoesNotThrow(() -> this.repository.deleteByConversationId(CID), "三条单键命令不得跨槽");
+		// 同槽脚本（数据/版本/代次三键同 tag）+ legacy 单键 DEL + 单键 SREM：任何一条都不得跨槽
+		assertDoesNotThrow(() -> this.repository.deleteByConversationId(CID), "清空不得跨槽");
 
 		assertFalse(this.fake.hasKey(finalKey()), "tagged 数据键应被删除");
 		assertFalse(this.fake.hasKey(legacyKey), "legacy 数据键应被删除");
 		assertTrue(this.fake.set(IDS).isEmpty(), "SREM 应清掉索引成员（防无界增长）");
-		assertEquals(0, this.fake.scriptCalls.get(), "删除不得再发 Lua");
-		assertEquals(List.of(finalKey(), legacyKey), this.fake.deletedKeys, "删除顺序 = tagged、legacy");
+		assertEquals(1, this.fake.scriptCalls.get(),
+				"清空用一条同槽脚本（拆成多条命令会留下『代次已推进、数据未删』的复活窗口）");
+		assertEquals(List.of(finalKey(), legacyKey), this.fake.deletedKeys,
+				"数据键（脚本内 DEL）+ legacy（单键 DEL）；计数器保留并推进");
 		assertEquals(1, this.fake.indexRemoves.get());
 	}
 
@@ -308,8 +311,9 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		assertFalse(this.fake.hasKey(finalKey()));
 		assertFalse(this.fake.hasKey(legacyKey()));
 		assertTrue(this.fake.set(IDS).isEmpty());
-		assertEquals(0, this.fake.scriptCalls.get());
-		assertEquals(0, this.fake.renames.get());
+		assertEquals(1, this.fake.scriptCalls.get(), "清空走一条同槽脚本（删数据 + 推进代次/版本）");
+		assertEquals(0, this.fake.renames.get(), "清空不做 RENAME");
+		assertTrue(this.fake.values.values().contains("1"), "清空推进了代次/版本（tombstone）");
 		assertEquals(List.of(finalKey(), legacyKey()), this.fake.deletedKeys);
 		assertEquals(1, this.fake.indexRemoves.get());
 	}

@@ -10,7 +10,10 @@ import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
+import com.example.configmgr.ai.memory.MemoryTurn;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.RunMemoryMerge;
+import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
@@ -26,7 +29,6 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -58,23 +60,25 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 记忆边界的生产写入面：{@link ResilientChatService} 注入 {@link ChatMemoryRepository} 后，
- * 整窗覆盖写<b>直落 {@code saveAll}</b> —— 不经 {@code MessageWindowChatMemory.add} 的追加/合并，
- * 也不再先 {@code clear}。
+ * 记忆边界的生产写入面：{@link ResilientChatService} 注入<b>按轮合并</b>仓储
+ * （{@link RunUpsertChatMemoryRepository}）后，轮末收敛直落 {@code upsertRun} —— 不经
+ * {@code MessageWindowChatMemory.add} 的整窗覆盖，也不再先 {@code clear}，更不用整窗 {@code saveAll}
+ * （那会把同会话另一条 run 的成功轮删掉）。
  *
  * <p>四条锁：
  * <ol>
- * <li>普通收尾：一次 {@code saveAll(整窗)}，{@link ChatMemory} 的 {@code clear/add} 零调用；</li>
- * <li>{@code saveAll} 失败：旧历史保持可读（staging + RENAME 的失败安全），本轮仍正常收尾；</li>
- * <li>{@code saveAll} 失败只 WARN 的旧口径保留，但<b>同时</b>进统一降级计数
+ * <li>普通收尾：一次 {@code upsertRun}，{@link ChatMemory} 的 {@code clear/add} 与 {@code saveAll} 零调用；</li>
+ * <li>{@code upsertRun} 失败：旧历史保持可读，本轮仍正常收尾；</li>
+ * <li>失败只 WARN 的旧口径保留，但<b>同时</b>进统一降级计数
  * （{@link RedisDegradation#W1_MEMORY_WRITE}，{@code /api/ai/health} 的
  * {@code redis.degradations} 可见）—— 刷新可能丢本轮历史，不能只留一行会被轮询刷掉的日志；</li>
- * <li>空窗：仍走 {@code saveAll(empty)}（= 删除），不把"空"当成"不写"；</li>
- * <li>窗口裁剪/思考元数据语义不变（沿用 {@code trimKeepingToolPairs} / maxMessages）。</li>
+ * <li>空窗：仍是一次写入（只清本 run 的块），不把"空"当成"不写"；</li>
+ * <li>窗口裁剪/思考元数据语义不变（沿用 {@code trimKeepingToolPairs} / maxMessages）；</li>
+ * <li>两条 run 先后收敛到同一个会话：<b>两条都在窗口里</b>（按各自起点排序）—— 这是本批的验收面。</li>
  * </ol>
  *
  * <p><b>不重试、不改写协议</b>：一次失败的写只记一次计数（在 {@code persistMemory} 的唯一 catch 里），
- * 不重放、不改变 {@link ChatMemoryRepository#saveAll} 的调用形态。
+ * 不重放、不改变 `upsertRun` 的调用形态。
  */
 @ExtendWith(OutputCaptureExtension.class)
 class ResilientChatServiceMemoryWriteTest {
@@ -82,6 +86,8 @@ class ResilientChatServiceMemoryWriteTest {
 	private static final String RUN_ID = "run-memory-write";
 
 	private static final String SESSION_ID = "s-memory-write";
+
+	private static final String RUN_B_ID = "run-memory-write-b";
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
@@ -146,7 +152,7 @@ class ResilientChatServiceMemoryWriteTest {
 	}
 
 	@Test
-	void normalFinishWritesTheWholeWindowWithOneSaveAllAndNeverClearsChatMemory() {
+	void normalFinishWritesOnceThroughTheRunScopedEntryAndNeverClearsChatMemory() {
 		RunSnapshot seeded = this.store.get(RUN_ID);
 		seeded.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("第一轮问题"))));
 		this.store.save(seeded);
@@ -154,21 +160,21 @@ class ResilientChatServiceMemoryWriteTest {
 
 		runTurn();
 
-		assertThat(this.repository.saves).isEqualTo(1);
+		assertThat(this.repository.writes).isEqualTo(1);
 		List<Message> written = this.repository.findByConversationId(SESSION_ID);
 		assertThat(written).hasSize(2);
 		assertThat(written.get(0)).isInstanceOf(UserMessage.class);
 		assertThat(((AssistantMessage) written.get(1)).getText()).isEqualTo("答案");
-		assertThat(this.repository.ops).containsExactly("saveAll");
+		assertThat(this.repository.ops).as("按轮合并写入口（不是整窗 saveAll）").containsExactly("upsertRun");
 		verify(this.chatMemory, never()).clear(anyString());
 		verify(this.chatMemory, never()).add(anyString(), anyList());
 	}
 
 	@Test
-	void failedSaveAllKeepsTheOldHistoryAndDoesNotClearFirst() {
+	void failedRunUpsertKeepsTheOldHistoryAndDoesNotClearFirst() {
 		List<Message> old = List.of(new UserMessage("旧历史"));
 		this.repository.seed(SESSION_ID, old);
-		this.repository.failOnSave = true;
+		this.repository.failOnWrite = true;
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("新答案"), terminal("stop")));
 
 		runTurn();
@@ -176,7 +182,7 @@ class ResilientChatServiceMemoryWriteTest {
 		assertThat(this.repository.findByConversationId(SESSION_ID)).hasSize(1)
 			.first()
 			.isInstanceOf(UserMessage.class);
-		assertThat(this.repository.ops).containsExactly("saveAll");
+		assertThat(this.repository.ops).containsExactly("upsertRun");
 		assertThat(this.store.get(RUN_ID).getStatus()).as("记忆写失败不得让本轮对话失败").isEqualTo(RunSnapshot.DONE);
 		verify(this.chatMemory, never()).clear(anyString());
 	}
@@ -190,8 +196,8 @@ class ResilientChatServiceMemoryWriteTest {
 	 * <p>kill：在 catch 之外再计一次（或同时计 WARN/计数两处）⇒ 计数变成 2，本用例变红。
 	 */
 	@Test
-	void failedSaveAllIsCountedExactlyOnceAndStillWarns(CapturedOutput output) {
-		this.repository.failOnSave = true;
+	void failedRunUpsertIsCountedExactlyOnceAndStillWarns(CapturedOutput output) {
+		this.repository.failOnWrite = true;
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("新答案"), terminal("stop")));
 		long before = RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE);
 
@@ -206,7 +212,7 @@ class ResilientChatServiceMemoryWriteTest {
 
 	/** 正常写回不得把降级计数打脏（"从没失败过"与"计数面没接线"必须可区分）。 */
 	@Test
-	void successfulSaveAllDoesNotTouchTheDegradationCounter() {
+	void successfulRunUpsertDoesNotTouchTheDegradationCounter() {
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("答案"), terminal("stop")));
 		long before = RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE);
 
@@ -222,13 +228,13 @@ class ResilientChatServiceMemoryWriteTest {
 
 		this.service.persistMemory(SESSION_ID, null, "null-window");
 
-		assertThat(this.repository.saves).as("null 不得被当作空窗 saveAll(empty)").isZero();
+		assertThat(this.repository.writes).as("null 不得被当作空窗写回").isZero();
 		assertThat(this.repository.ops).isEmpty();
 		assertThat(this.repository.findByConversationId(SESSION_ID)).hasSize(1);
 	}
 
 	@Test
-	void emptyWindowStillCallsSaveAllWithEmptyListWhichDeletes() {
+	void emptyWindowStillWritesOnceAndRemovesOnlyThisRunsBlock() {
 		RunSnapshot seeded = this.store.get(RUN_ID);
 		seeded.setMessageJson(this.codec.serializeAll(List.of(new SystemMessage("只有系统提示"))));
 		this.store.save(seeded);
@@ -240,8 +246,8 @@ class ResilientChatServiceMemoryWriteTest {
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new SystemMessage("只有系统提示")), out);
 
-		assertThat(this.repository.ops).containsExactly("saveAll");
-		assertThat(this.repository.lastSave).isEmpty();
+		assertThat(this.repository.ops).containsExactly("upsertRun");
+		assertThat(this.repository.lastWrite).isEmpty();
 		assertThat(this.repository.findByConversationId(SESSION_ID)).isEmpty();
 		assertThat(this.repository.deletes).isEqualTo(1);
 		verify(this.chatMemory, never()).clear(anyString());
@@ -263,6 +269,43 @@ class ResilientChatServiceMemoryWriteTest {
 			.isEqualTo("第二轮回答");
 		// 输入历史 + 本轮回答 = 3 条；maxMessages=2 ⇒ 裁掉最旧一条（第一轮问题）
 		assertThat(this.repository.findByConversationId(SESSION_ID).get(0)).isInstanceOf(AssistantMessage.class);
+	}
+
+	/**
+	 * 同一会话的两条 run 先后收敛：<b>两条都在窗口里</b>，按各自快照创建时刻排序。
+	 *
+	 * <p>这是"挂起轮 A + 新轮 B 整窗覆盖互删"在服务写入口上的验收面：任一 run 的收敛都不得删掉
+	 * 另一条 run 的成功轮（{@code /history} 只读这份窗口）。
+	 */
+	@Test
+	void twoRunsConvergingOnTheSameSessionBothStayInTheWindow() {
+		RunSnapshot runA = this.store.get(RUN_ID);
+		runA.setCreatedAtMs(1_000L);
+		this.store.save(runA);
+		RunSnapshot runB = this.store.seedRun(RUN_B_ID, SESSION_ID);
+		runB.setContext(AiContext.empty().toMap());
+		runB.setCreatedAtMs(2_000L);
+		this.store.save(runB);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("A答"), terminal("stop")))
+			.thenReturn(Flux.just(chunk("B答"), terminal("stop")));
+
+		drive(RUN_ID, "A问");
+		drive(RUN_B_ID, "B问");
+
+		List<Message> window = this.repository.findByConversationId(SESSION_ID);
+		assertThat(window).extracting(Message::getText).as("两条 run 的成功轮都必须留在窗口里")
+			.containsExactly("A问", "A答", "B问", "B答");
+		assertThat(RunMemoryMerge.runIdOf(window.get(0))).isEqualTo(RUN_ID);
+		assertThat(RunMemoryMerge.runIdOf(window.get(3))).isEqualTo(RUN_B_ID);
+	}
+
+	private void drive(String runId, String question) {
+		RunSnapshot snapshot = this.store.get(runId);
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage(question))));
+		this.store.save(snapshot);
+		this.store.seedArchive(runId, FrameContract.fixture("start", 1L, "runId", runId, "sessionId", SESSION_ID));
+		this.service.driveResumed(runId, SESSION_ID, AiContext.empty(), new ArrayList<>(List.of(new UserMessage(question))),
+				this.registry.of(runId));
 	}
 
 	@Test
@@ -351,20 +394,20 @@ class ResilientChatServiceMemoryWriteTest {
 				ChatGenerationMetadata.builder().finishReason(finishReason).build())));
 	}
 
-	/** 记录型仓储：看"写了几次/是否先删"，并能在写入时失败以验证旧历史保留。 */
-	private static final class RecordingRepository implements ChatMemoryRepository {
+	/** 记录型仓储：按轮合并（真合并，不是打桩），并能注失败以验证旧历史保留。 */
+	private static final class RecordingRepository implements RunUpsertChatMemoryRepository {
 
 		private final Map<String, List<Message>> store = new LinkedHashMap<>();
 
 		private final List<String> ops = new ArrayList<>();
 
-		private List<Message> lastSave = List.of();
+		private List<Message> lastWrite = List.of();
 
-		private int saves;
+		private int writes;
 
 		private int deletes;
 
-		private boolean failOnSave;
+		private boolean failOnWrite;
 
 		void seed(String conversationId, List<Message> messages) {
 			this.store.put(conversationId, new ArrayList<>(messages));
@@ -381,11 +424,32 @@ class ResilientChatServiceMemoryWriteTest {
 		}
 
 		@Override
+		public boolean upsertRun(String conversationId, MemoryTurn turn, List<Message> messages, int maxMessages,
+				boolean replaceRunBlock) {
+			this.ops.add("upsertRun");
+			this.writes++;
+			if (this.failOnWrite) {
+				throw new IllegalStateException("redis down");
+			}
+			List<Message> merged = RunMemoryMerge.merge(this.store.getOrDefault(conversationId, List.of()), messages,
+					turn, replaceRunBlock, maxMessages);
+			this.lastWrite = List.copyOf(merged);
+			if (merged.isEmpty()) {
+				this.store.remove(conversationId);
+				this.deletes++;
+			}
+			else {
+				this.store.put(conversationId, new ArrayList<>(merged));
+			}
+			return true;
+		}
+
+		@Override
 		public void saveAll(String conversationId, List<Message> messages) {
 			this.ops.add("saveAll");
-			this.saves++;
-			this.lastSave = messages == null ? List.of() : List.copyOf(messages);
-			if (this.failOnSave) {
+			this.writes++;
+			this.lastWrite = messages == null ? List.of() : List.copyOf(messages);
+			if (this.failOnWrite) {
 				throw new IllegalStateException("redis down");
 			}
 			if (messages == null || messages.isEmpty()) {

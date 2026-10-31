@@ -32,21 +32,29 @@ class RedisChatMemoryRepositoryDeleteTest {
 			new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(6));
 
 	@Test
-	void deleteClearsTaggedLegacyAndIndexWithSingleKeyCommands() {
+	void deleteClearsTaggedLegacyAndIndexAndKeepsTombstoneCounters() {
 		this.fake.enableClusterMode();
+		String versionKey = this.repository.keyFor(CID) + RedisChatMemoryRepository.VERSION_SUFFIX;
+		String generationKey = this.repository.keyFor(CID) + RedisChatMemoryRepository.GENERATION_SUFFIX;
 		this.fake.lists.put(this.repository.keyFor(CID),
 				new java.util.concurrent.CopyOnWriteArrayList<>(List.of("tagged")));
 		this.fake.lists.put(LEGACY_KEY, new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
 		this.fake.sets.computeIfAbsent(IDS, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(CID);
+		this.fake.values.put(versionKey, "7");
 
 		this.repository.deleteByConversationId(CID);
 
 		assertFalse(this.fake.hasKey(this.repository.keyFor(CID)), "tagged 键应删除");
 		assertFalse(this.fake.hasKey(LEGACY_KEY), "legacy 键应删除");
 		assertTrue(this.fake.set(IDS).isEmpty(), "索引成员应被 SREM");
-		assertEquals(0, this.fake.scriptCalls.get(), "删除不得发 Lua（含跨槽两键脚本）");
+		assertEquals(1, this.fake.scriptCalls.get(),
+				"清空必须是一条同槽脚本（删数据 + 推进代次/版本 + 续 TTL 原子完成），不得拆成多条命令");
 		assertEquals(List.of(this.repository.keyFor(CID), LEGACY_KEY), this.fake.deletedKeys,
-				"只允许 tagged / legacy 两条单键 DEL");
+				"只删数据键与 legacy；计数器不删");
+		assertEquals("8", this.fake.values.get(versionKey), "清空要推进合并版本：清空前的 expected 版本一律失效");
+		assertEquals("1", this.fake.values.get(generationKey), "清空要推进代次（tombstone）");
+		assertEquals(java.time.Duration.ofHours(6), this.fake.expiry(versionKey), "版本键保留并续会话 TTL");
+		assertEquals(java.time.Duration.ofHours(6), this.fake.expiry(generationKey), "代次键保留并续会话 TTL");
 		assertEquals(1, this.fake.indexRemoves.get(), "索引只做一次单键 SREM");
 	}
 

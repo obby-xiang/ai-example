@@ -46,8 +46,9 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 		assertFalse(fake.hasKey("chat:mem:{s-1}"));
 		assertFalse(fake.hasKey("chat:mem:s-1"));
 		assertTrue(fake.set(IDS_KEY).isEmpty());
-		assertEquals(0, fake.scriptCalls.get());
-		assertEquals(List.of("chat:mem:{s-1}", "chat:mem:s-1"), fake.deletedKeys);
+		assertEquals(1, fake.scriptCalls.get(), "清空是一条同槽脚本（删数据 + 推进代次/版本 + 续 TTL）");
+		assertEquals(List.of("chat:mem:{s-1}", "chat:mem:s-1"), fake.deletedKeys,
+				"数据键（脚本内 DEL）+ legacy（单键 DEL）；计数器保留并推进");
 	}
 
 	@Test
@@ -62,7 +63,7 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 
 		assertFalse(fake.hasKey("chat:mem:{s-1}"));
 		assertFalse(fake.hasKey("chat:mem:s-1"));
-		assertEquals(0, fake.scriptCalls.get());
+		assertEquals(1, fake.scriptCalls.get(), "清空走一条同槽脚本（删数据 + 推进代次/版本）");
 	}
 
 	// ── 真 Redis 行为实证：独立 DB 9（不可用时跳过） ──────────────────────────

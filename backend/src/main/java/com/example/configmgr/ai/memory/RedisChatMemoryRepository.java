@@ -35,8 +35,10 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * </ol>
  * <p>
  * 因此按 DC-05「Spring AI 已有能力禁止自研；官方能力不存在时实现官方 SPI 扩展点」实现本类。
- * <b>对话循环与记忆挂载仍全部走官方</b>：{@code MessageWindowChatMemory}（窗口裁剪）+
- * {@code MessageChatMemoryAdvisor}（记忆读写时机）——本类只提供存储层。
+ * <b>对话循环、记忆读写时机与窗口上限仍走官方</b>：{@code MessageChatMemoryAdvisor} 决定何时读写、
+ * {@code MessageWindowChatMemory} 的 {@code max-messages} 仍是窗口上限；本类只提供存储层，另加一个
+ * 官方 SPI 的扩展面 {@link RunUpsertChatMemoryRepository}（按 run 块合并 + 会话级 CAS），
+ * 因为"整窗覆盖"撑不住"同一会话多条 run"这条已确认的规格。
  *
  * <h2>存储结构（Cluster 安全）</h2>
  * <ul>
@@ -53,6 +55,12 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * 保存成功 RENAME 后删除它，完成自然迁移。<b>只在 {@code id} 不落进别的键族命名空间时可用</b>
  * （见 {@code legacyEligible}）：{@code id="{x}"} 的 legacy 键正是会话 {@code x} 的 tagged 键，
  * {@code id="__ids__"} 的 legacy 键正是全局索引 —— 那两类 id 一律不做 legacy 回落/清理/删除。</li>
+ * <li>{@code chat:mem:<tenantId>:<userId>:{<escapedId>}:ver} — <b>按轮合并 CAS 的版本键</b>（STRING）。
+ * 与数据键逐字共用同一个 hash tag（Cluster 同槽），{@code MERGE_CAS} 脚本据此"比对版本 → 落盘 → 推进版本"；
+ * 随会话 TTL 滑动。</li>
+ * <li>{@code chat:mem:<tenantId>:<userId>:{<escapedId>}:gen} — <b>清空代次键</b>（STRING，tombstone）。
+ * 同样共用该 hash tag；清空/销毁时 {@code INCR} 它（<b>不删</b>），使"清空前读到代次"的在飞写回
+ * 在之后的每一次 CAS（含重试）都被判作废。</li>
  * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，成员是<b>复合成员</b>
  * {@code tenantId/userId/<conversationId>}（无身份过渡期写旧形 id）：枚举按成员归属过滤，
  * 不遍历租户列表。<b>刻意不加 hash tag</b>：给全局索引
@@ -62,15 +70,23 @@ import com.example.configmgr.ai.tenant.TenantUser;
  *
  * <h2>语义与失败安全</h2>
  * <ul>
+ * <li><b>按轮合并写（{@link #upsertRun}）= 读窗口 → 合并本 run 的块 → staging → CAS + RENAME</b>：
+ * 会话只有一份窗口，而同一会话可以同时有多条 run（挂起轮续跑 + 新开一轮）。合并写只替换/追加
+ * <b>本 run 的块</b>，别的 run 的块原样保留，块间按本轮起点有序（见 {@link RunMemoryMerge}）；
+ * 读-改-写由会话级版本键做 CAS —— 版本不符就重读重算，<b>不</b>用"拒绝旧写"代替合并；
+ * <b>清空代次不符则直接作废且不重试</b>（清空之后不许把旧历史写回来）。
+ * 落盘仍是 staging + {@code RENAME}：CAS 成功前旧历史一直可读。</li>
  * <li><b>非空 {@link #saveAll} = staging 原子写入（RPUSH + PEXPIRE）+ {@code RENAME}</b>：
  * staging 写入走<b>单键</b> Lua，数据与 TTL 同时生效（finally 的 DEL 再失败也不会留下无 TTL 的孤儿）；
  * 随后 {@code RENAME staging final} 原子覆盖。RENAME 成功前旧历史一直可读；任一步失败只清理
  * staging，<b>绝不先删旧历史</b>。TTL 随 RENAME 继承到 final，仍为滑动过期。</li>
  * <li><b>索引后置</b>：RENAME 成功后才 {@code SADD chat:mem:__ids__}。索引更新失败只 WARN
  * （带 conversationId / 数据键，便于对账），<b>不回退已提交的新历史</b>；下一次成功保存会自愈。</li>
- * <li><b>删除 = tagged 单键 DEL + legacy 单键 DEL + 索引单键 SREM</b>：三条单键命令，任何一条都不跨槽；
- * SREM 让索引在删除时立即收敛，避免 {@code chat:mem:__ids__} 随会话数无界增长。SREM 失败只 WARN，
- * 数据删除结果不受影响。legacy 只在命名空间守卫允许时参与（见上）。</li>
+ * <li><b>清空 = 一条同槽脚本</b>（{@code DEL} 数据键 + {@code INCR :gen} + {@code INCR :ver} + 续 TTL，
+ * 三个键同 hash tag ⇒ 不跨槽）+ legacy 单键 DEL + 索引单键 SREM。两个计数器<b>不删</b>（删掉就把代次/
+ * 版本退回 0，清空前的在飞写又能对上）—— 只续会话 TTL。脚本是刻意的：分开执行会留下"代次已推进、
+ * 数据未删"的中间态，那期间启动的写者能把旧历史原样写回来。SREM 失败只 WARN，数据删除结果不受影响；
+ * legacy 只在命名空间守卫允许时参与（见上）。</li>
  * <li><b>销毁与写回的交错</b>：{@code saveAll} 入口问一次销毁守卫，RENAME 之后<b>再复检一次</b>
  * （复检放在 {@code finally}：RENAME 可能<b>服务端已生效、回包丢失</b>，那时异常虽已抛出，落地仍要撤销）
  * —— 入口通过之后销毁才装守卫的窗口里，复检命中即删掉该会话的记忆键并<b>不写索引</b>；异常照旧上抛。
@@ -86,7 +102,7 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * tagged / legacy 都不存在的成员移除；{@link #isConversationIndexed(String)} 同时要求索引成员与
  * 任一数据键存活，因此删除后立即判为"不在索引"。</li>
  * <li><b>缺失成员</b>（RENAME 成功但 SADD 失败）：索引不会自动发现它；历史按 id 仍可读，
- * 下一次成功 {@link #saveAll} 会重新 SADD。日志中的 conversationId / 数据键即为对账线索。</li>
+ * 下一次成功 {@link #saveAll}/{@link #upsertRun} 会重新 SADD。日志中的 conversationId / 数据键即为对账线索。</li>
  * <li>调用方<strong>不需要额外 {@code clear()}</strong>：删除语义已含数据键清理与索引 SREM；索引
  * 异常由上述惰性路径/下次保存收敛。</li>
  * </ul>
@@ -101,8 +117,10 @@ import com.example.configmgr.ai.tenant.TenantUser;
  *
  * <h2>已知未覆盖</h2>
  * <ul>
- * <li>无跨实例互斥：同一 conversationId 的并发写是"最后写入者胜"（staging 带 UUID，互不覆盖）；
- * 并发读只会看到旧窗或某个完整新窗。</li>
+ * <li>合并写有<b>有界</b>重试（{@value #MERGE_ATTEMPTS} 次）：并发写密集到每次 CAS 都落空时本次记忆写
+ * 失败并计入降级（{@code W1_MEMORY_WRITE}），不无限重试、不改变对话结果；旧历史保持可读。</li>
+ * <li>{@link #saveAll}（官方 SPI 的整窗覆盖）仍是能力面：它不参与合并也不看版本键，
+ * 生产写入口已全部换到 {@link #upsertRun}；两者混用时 {@code saveAll} 仍是最后写入者胜。</li>
  * <li>客户端超时但服务端 RENAME 已成功：调用方看到失败且跳过 SADD，数据已提交、索引缺失，
  * 由下次保存自愈。</li>
  * <li>删除的 SREM 与并发保存的 SADD 仍有窄窗口：SREM 可能抹掉刚 SADD 的活成员，由下次保存自愈；
@@ -111,7 +129,7 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * （WARN 里带键名，由销毁重试对账补删）——不为此引入跨键事务。</li>
  * </ul>
  */
-public class RedisChatMemoryRepository implements ChatMemoryRepository {
+public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository {
 
 	private static final Logger log = LoggerFactory.getLogger(RedisChatMemoryRepository.class);
 
@@ -137,6 +155,77 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 					+ "for i = 2, #ARGV do redis.call('RPUSH', KEYS[1], ARGV[i]) end\n"
 					+ "if ttl and ttl > 0 then redis.call('PEXPIRE', KEYS[1], ttl) end\n" + "return #ARGV - 1",
 			Long.class);
+
+	/** 合并 CAS 脚本标记（测试替身据此分派；不要改动与脚本正文不一致）。 */
+	static final String MERGE_CAS_MARK = "MERGE_CAS";
+
+	/**
+	 * 会话级 CAS + 落盘：四个键 {@code [staging, final, version, generation]} 共用一个 hash tag（Cluster 同槽）。
+	 *
+	 * <p>ARGV[1] = 期望版本（{@code "0"} = 尚未写过），ARGV[2] = 期望清空代次，
+	 * ARGV[3] = {@code rename}|{@code delete}，ARGV[4] = TTL 毫秒。
+	 * <ul>
+	 * <li><b>代次不符 ⇒ {@code -2}</b>：本次写回启动之后会话被清空过 ⇒ <b>直接作废</b>；调用方
+	 *     <b>不得</b>重试（重试会拿"新版本 + 空窗"把它手里那份清空前的历史再写一遍）；</li>
+	 * <li><b>版本不符 ⇒ {@code -1}</b>：另一写者先落地 ⇒ 调用方重读再合并（不丢自己这一块）；</li>
+	 * <li>都对上才把 staging {@code RENAME} 成 final（或 {@code DEL} 掉 final），续 TTL 并推进版本。</li>
+	 * </ul>
+	 *
+	 * <p>为什么 CAS 必须在脚本里：读窗口 → 算合并 → 写回 是三步，多实例下必须"比对版本 + 落地"
+	 * 原子完成，否则两个写者的整窗结果会互相覆盖（正是本批要消灭的形态）。
+	 */
+	private static final RedisScript<Long> MERGE_CAS = new DefaultRedisScript<>(
+			"-- MERGE_CAS\n" + "local expected = ARGV[1]\n" + "local expectedGen = ARGV[2]\n"
+					+ "local mode = ARGV[3]\n" + "local ttl = tonumber(ARGV[4])\n"
+					+ "local gen = redis.call('GET', KEYS[4])\n" + "if not gen then gen = '0' end\n"
+					+ "if gen ~= expectedGen then return -2 end\n"
+					+ "local current = redis.call('GET', KEYS[3])\n"
+					+ "if not current then current = '0' end\n" + "if current ~= expected then return -1 end\n"
+					+ "if mode == 'delete' then\n" + "  redis.call('DEL', KEYS[2])\n" + "else\n"
+					+ "  redis.call('RENAME', KEYS[1], KEYS[2])\n" + "end\n" + "if ttl and ttl > 0 then\n"
+					+ "  if mode ~= 'delete' then redis.call('PEXPIRE', KEYS[2], ttl) end\n"
+					+ "  redis.call('PEXPIRE', KEYS[3], ttl)\n" + "  redis.call('PEXPIRE', KEYS[4], ttl)\n"
+					+ "end\n" + "redis.call('INCR', KEYS[3])\n" + "return 1\n",
+			Long.class);
+
+	/** 合并 CAS 版本键后缀（同 hash tag ⇒ 同槽）。 */
+	static final String VERSION_SUFFIX = ":ver";
+
+	/**
+	 * 清空代次键后缀（tombstone；同 hash tag ⇒ 同槽）。
+	 *
+	 * <p>清空/销毁时<b>推进</b>这个计数器（不是删除版本键）：写者启动时读到的代次一旦与落地时的
+	 * 代次不同，就说明"我读完之后历史被清空过"，本次写回（含全部重试）必须作废。
+	 */
+	static final String GENERATION_SUFFIX = ":gen";
+
+	/** {@code MERGE_CAS} 的返回值：代次已变（写回期间被清空）⇒ 放弃本次写回、不重试。 */
+	private static final long CAS_SUPERSEDED = -2L;
+
+	/** 清空脚本标记（测试替身据此分派；不要改动与脚本正文不一致）。 */
+	static final String CLEAR_MARK = "MEMORY_CLEAR";
+
+	/**
+	 * 原子清空：{@code DEL} 数据键 + 推进代次（tombstone）+ 推进版本 + 续两个计数器的 TTL。
+	 *
+	 * <p>三个键 {@code [data, version, generation]} 共用一个 hash tag（Cluster 同槽）。
+	 *
+	 * <p>为什么必须是一条脚本而不是三条单键命令：若清空分三步执行，会出现"代次已推进、数据还没删"
+	 * 的中间态 —— 这期间启动的写者会读到<b>新代次 + 旧窗口</b>，它的 CAS 与清空同时成立，于是把
+	 * 旧历史原样写回来（清空的原子性缺口）。脚本里"删数据"与"推进代次"同一时刻生效，写者只可能
+	 * 落在清空<b>之前</b>（代次被推进 ⇒ 作废）或<b>之后</b>（看到空窗与新代次 ⇒ 正常写自己的块）。
+	 *
+	 * <p>ARGV[1] = TTL 毫秒（0 = 不续 TTL）。
+	 */
+	private static final RedisScript<Long> MEMORY_CLEAR = new DefaultRedisScript<>(
+			"-- MEMORY_CLEAR\n" + "local ttl = tonumber(ARGV[1])\n" + "redis.call('DEL', KEYS[1])\n"
+					+ "redis.call('INCR', KEYS[3])\n" + "redis.call('INCR', KEYS[2])\n"
+					+ "if ttl and ttl > 0 then\n" + "  redis.call('PEXPIRE', KEYS[2], ttl)\n"
+					+ "  redis.call('PEXPIRE', KEYS[3], ttl)\n" + "end\n" + "return 1\n",
+			Long.class);
+
+	/** 合并写的最多重试次数（每次重试都重读窗口再合并）。 */
+	static final int MERGE_ATTEMPTS = 5;
 
 	private final StringRedisTemplate redis;
 
@@ -476,12 +565,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		boolean renamed = false;
 		boolean aborted = false;
 		try {
-			Object[] args = new Object[payload.size() + 1];
-			args[0] = Long.toString(stagingTtlMillis());
-			for (int i = 0; i < payload.size(); i++) {
-				args[i + 1] = payload.get(i);
-			}
-			this.redis.execute(STAGE_WRITE, List.of(stagingKey), args);
+			stagePayload(stagingKey, payload);
 			this.redis.rename(stagingKey, finalKey);
 			renamed = true;
 		}
@@ -504,6 +588,157 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 		}
 		deleteLegacyQuietly(legacyKeyOrNull, conversationId);
 		addToIndex(conversationId, finalKey);
+	}
+
+	/**
+	 * 按轮合并写回（{@link RunUpsertChatMemoryRepository} 的唯一实现）。
+	 *
+	 * <h2>为什么不是"整窗覆盖"</h2>
+	 * 同一会话可以同时有多条 run 在写（挂起轮续跑 + 新开一轮是明确允许的规格），每个 run 只持有自己
+	 * 的快照历史。整窗覆盖会把另一条 run 的成功轮从 {@code /history}（唯一读源）里删掉。这里按
+	 * {@link MemoryTurn} 只替换/追加<b>本 run 的块</b>，其余块原样保留（见 {@link RunMemoryMerge}）。
+	 *
+	 * <h2>读-改-写必须是会话级 CAS</h2>
+	 * 合并结果依赖"读到的窗口"，多实例下两个写者会读到同一份旧窗。因此：
+	 * <ol>
+	 * <li>先读<b>版本键</b> {@code chat:mem:<t>:<u>:{<id>}:ver} 与<b>清空代次</b>
+	 *     {@code chat:mem:<t>:<u>:{<id>}:gen}（同 hash tag ⇒ 同槽），以及窗口原文；</li>
+	 * <li>在本地算出合并后的窗口，写入 staging（与 final 同槽，单键脚本带 TTL）；</li>
+	 * <li>{@code MERGE_CAS} 脚本原子地"比对版本与代次 → RENAME staging 到 final → 推进版本"；
+	 *     版本不符 = 有人在我们读之后写过 ⇒ <b>清 staging、重读、重算</b>（不丢自己这一块，
+	 *     也不覆盖别人那一块 —— "只拒绝旧写"仍会丢掉一个成功轮）；</li>
+	 * <li><b>代次不符 = 本次写回期间历史被清空过 ⇒ 直接放弃、不重试</b>。代次在<b>本次调用开始时
+	 *     读一次</b>并贯穿所有重试：重试若改用清空后的新代次，就等于把手里那份清空前的历史再写一遍。</li>
+	 * <li>重试用尽才上抛（调用方按记忆写失败计数，不改变本轮对话结果）。</li>
+	 * </ol>
+	 * 两个计数器都随会话 TTL 滑动；{@link #deleteByConversationId} <b>推进</b>它们（tombstone），
+	 * 而不是删除 —— 删掉版本键会让"清空前读到 0、清空后仍读 0"的写者重新对上版本，历史因此复活。
+	 *
+	 * <p><b>失败安全</b>与整窗写同口径：新窗口先落到 staging，CAS 成功前旧历史一直可读；
+	 * 任一步失败只清理 staging，<b>绝不先删旧历史</b>。销毁守卫（入口 + 落盘后复检）照旧生效。
+	 */
+	@Override
+	public boolean upsertRun(String conversationId, MemoryTurn turn, List<Message> messages, int maxMessages,
+			boolean replaceRunBlock) {
+		String finalKey = key(conversationId); // 先校验 id：空白 id 在序列化/Redis 之前失败
+		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
+			log.warn("会话已销毁（purge guard 生效），拒绝按轮写回记忆 conversationId={} key={} runId={}",
+					conversationId, finalKey, turn == null ? null : turn.runId());
+			return false;
+		}
+		String legacyKeyOrNull = legacyEligible(conversationId) ? legacyKey(conversationId) : null;
+		String versionKey = versionKey(finalKey);
+		String generationKey = generationKey(finalKey);
+		List<Message> incoming = messages == null ? List.of() : messages;
+		// 代次只读一次：本次写回启动之后发生的任何清空，都会让下面每一次 CAS（含重试）作废。
+		String expectedGeneration = readCounter(generationKey);
+		for (int attempt = 1; attempt <= MERGE_ATTEMPTS; attempt++) {
+			String expectedVersion = readCounter(versionKey);
+			List<String> currentRaw = rawWindow(finalKey, legacyKeyOrNull);
+			List<Message> merged = RunMemoryMerge.merge(
+					currentRaw.isEmpty() ? List.of() : this.codec.deserializeAll(currentRaw), incoming, turn,
+					replaceRunBlock, maxMessages);
+			List<String> payload = this.codec.serializeAll(merged);
+			if (payload.equals(currentRaw)) {
+				// 窗口没变：不写、不推进版本（避免无谓 CAS 与把并发写者的版本顶掉）。
+				if (!merged.isEmpty()) {
+					addToIndex(conversationId, finalKey);
+				}
+				return true;
+			}
+			String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, UUID.randomUUID().toString());
+			if (stagingKey != null) {
+				stagePayload(stagingKey, payload);
+			}
+			Long applied;
+			try {
+				applied = this.redis.execute(MERGE_CAS,
+						List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey, generationKey),
+						expectedVersion, expectedGeneration, payload.isEmpty() ? "delete" : "rename",
+						Long.toString(stagingTtlMillis()));
+			}
+			catch (RuntimeException ex) {
+				if (stagingKey != null) {
+					deleteStagingQuietly(stagingKey);
+				}
+				throw ex;
+			}
+			if (applied != null && applied == CAS_SUPERSEDED) {
+				if (stagingKey != null) {
+					deleteStagingQuietly(stagingKey);
+				}
+				// 写回期间历史被清空：放弃这一笔。重试等于把手里那份清空前的历史再写一遍。
+				log.warn("记忆在本次写回期间被清空（清空代次已变），放弃写回 conversationId={} runId={}"
+						+ "（清空之后的旧轮不得把历史写回来）", conversationId, turn == null ? null : turn.runId());
+				return false;
+			}
+			if (applied != null && applied > 0L) {
+				afterMergeLanded(conversationId, finalKey, legacyKeyOrNull, payload.isEmpty());
+				return true;
+			}
+			// CAS 落空：另一写者在我们读之后动了窗口 ⇒ 清 staging、重读、重算。
+			if (stagingKey != null) {
+				deleteStagingQuietly(stagingKey);
+			}
+			log.debug("记忆窗口合并 CAS 落空（重试 {}/{}）conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
+					conversationId, turn == null ? null : turn.runId());
+		}
+		throw new IllegalStateException(
+				"记忆窗口合并写 CAS 连续 " + MERGE_ATTEMPTS + " 次落空（并发写过于密集）conversationId=" + conversationId);
+	}
+
+	/** 合并结果已落盘：销毁复检 → 索引/legacy 收尾。 */
+	private void afterMergeLanded(String conversationId, String finalKey, String legacyKeyOrNull, boolean empty) {
+		if (purgeArmedAfterWrite(conversationId, finalKey)) {
+			discardWrittenMemory(conversationId, finalKey);
+			return;
+		}
+		// 空窗口也要清 legacy：否则读侧的 legacy 回落会把刚清掉的历史当成"旧会话"再读出来。
+		deleteLegacyQuietly(legacyKeyOrNull, conversationId);
+		if (empty) {
+			removeFromIndexQuietly(conversationId);
+			return;
+		}
+		addToIndex(conversationId, finalKey);
+	}
+
+	/** 合并 CAS 的版本键：与数据键同 hash tag（Cluster 同槽，脚本不跨槽）。 */
+	private String versionKey(String dataKey) {
+		return dataKey + VERSION_SUFFIX;
+	}
+
+	/** 清空代次键（tombstone）：与数据键同 hash tag（Cluster 同槽）。 */
+	private String generationKey(String dataKey) {
+		return dataKey + GENERATION_SUFFIX;
+	}
+
+	/**
+	 * 读合并 CAS 的计数器（未写过 = {@code "0"}）。
+	 *
+	 * <p>读失败<b>不吞</b>：没有版本/代次就无法参与 CAS，继续写下去等于无保护的整窗覆盖 —— 宁可本次
+	 * 记忆写失败（调用方计入降级），也不能在"版本未知"时赌一把。
+	 */
+	private String readCounter(String counterKey) {
+		String current = this.redis.opsForValue().get(counterKey);
+		return current == null || current.isBlank() ? "0" : current;
+	}
+
+	/** 当前窗口原文：tagged 优先，迁移期 legacy 回落（与 {@link #findByConversationId} 同口径）。 */
+	private List<String> rawWindow(String finalKey, String legacyKeyOrNull) {
+		List<String> raw = this.redis.opsForList().range(finalKey, 0, -1);
+		if ((raw == null || raw.isEmpty()) && legacyKeyOrNull != null) {
+			raw = this.redis.opsForList().range(legacyKeyOrNull, 0, -1);
+		}
+		return raw == null ? List.of() : raw;
+	}
+
+	private void stagePayload(String stagingKey, List<String> payload) {
+		Object[] args = new Object[payload.size() + 1];
+		args[0] = Long.toString(stagingTtlMillis());
+		for (int i = 0; i < payload.size(); i++) {
+			args[i + 1] = payload.get(i);
+		}
+		this.redis.execute(STAGE_WRITE, List.of(stagingKey), args);
 	}
 
 	/**
@@ -551,18 +786,30 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
 	}
 
 	/**
-	 * 删除会话历史：tagged 单键 DEL、legacy 单键 DEL、索引单键 SREM。
+	 * 清空会话历史：<b>一条同槽脚本</b>完成"删数据 + 推进清空代次（tombstone）+ 推进合并版本 + 续 TTL"，
+	 * 再清 legacy 与索引。
 	 *
-	 * <p>不再把数据键与全局索引合成 Lua：两者不同槽，Cluster 下整条脚本 {@code CROSSSLOT}。
-	 * SREM 让索引立即收敛；SREM 失败只 WARN（数据已删，索引 stale 由
-	 * {@link #findConversationIds()} / {@link #isConversationIndexed(String)} 兜住）。
+	 * <h2>为什么不能只删版本键</h2>
+	 * 在飞写回的顺序是"读代次/版本 → 读窗口 → 算合并 → CAS"。若清空把版本键<b>删掉</b>（缺失当 0），
+	 * 一个"清空前读到 0"的写者清空后重新读到 0 仍然对得上 ⇒ CAS 通过、历史复活。因此清空必须让
+	 * <b>清空前拿到的版本全部失效</b>：
+	 * <ol>
+	 * <li>{@code INCR :gen} —— 推进清空代次。在飞写者在本次调用开始时读过代次，此后任何一次 CAS
+	 *     （含重试）都会拿到 {@code -2} 直接作废，不会再写回旧历史；</li>
+	 * <li>{@code DEL} 数据键；</li>
+	 * <li>{@code INCR :ver} —— 即使某个写者没看代次，清空前的 expected 版本也对不上。</li>
+	 * </ol>
+	 * 三步在<b>同一条脚本</b>里（三个键同 hash tag ⇒ 同槽，Cluster 安全）：分开执行会出现"代次已推进、
+	 * 数据未删"的中间态，那期间启动的写者读到"新代次 + 旧窗口"，CAS 与清空同时成立 ⇒ 旧历史照样复活。
 	 *
-	 * <p>legacy 只在 {@link #legacyEligible} 允许时删（特殊 id 的 legacy 键可能正是别的会话的数据键
-	 * 或全局索引键）。
+	 * <p><b>计数器不删</b>（删了就把代次退回 0，旧写者又能对上）：只续会话 TTL，随会话自然过期；
+	 * 清空之后的新写者读到新代次，照常可写。legacy 键与全局索引不同槽，仍在脚本之后各自单键处理。
 	 */
 	@Override
 	public void deleteByConversationId(String conversationId) {
-		this.redis.delete(key(conversationId));
+		String finalKey = key(conversationId);
+		this.redis.execute(MEMORY_CLEAR, List.of(finalKey, versionKey(finalKey), generationKey(finalKey)),
+				Long.toString(stagingTtlMillis()));
 		if (legacyEligible(conversationId)) {
 			this.redis.delete(legacyKey(conversationId));
 		}

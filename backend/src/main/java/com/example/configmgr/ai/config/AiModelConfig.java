@@ -2,7 +2,9 @@ package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.memory.IdentityBoundChatMemoryAdvisor;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.PerRunChatMemory;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
@@ -24,10 +26,12 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  *
  * <h2>官方扩展点优先（DC-05）</h2>
  * <ul>
- * <li>记忆：官方 {@link MessageWindowChatMemory}（窗口裁剪）+ 官方
+ * <li>记忆：官方 {@link MessageWindowChatMemory}（窗口上限）+ 官方
  * {@link MessageChatMemoryAdvisor}（读写时机，外面套身份绑定装饰器
  * {@link IdentityBoundChatMemoryAdvisor}：读写发生在无线程身份的上游回调上，身份必须随请求显式绑定），
- * 存储层用官方 SPI {@link ChatMemoryRepository} 的自实现 {@link RedisChatMemoryRepository}；</li>
+ * 存储层用官方 SPI {@link ChatMemoryRepository} 的自实现 {@link RedisChatMemoryRepository}；
+ * 写路径再套一层按轮合并装饰器 {@link PerRunChatMemory}：同一会话允许"挂起轮续跑 + 新开一轮"并存，
+ * 官方窗口 {@code add} 的"读整窗 → 整窗覆盖"会删掉另一条 run 的成功轮。</li>
  * <li>模型：官方 {@code OpenAiChatModel} + {@code ReasoningAwareOpenAiChatModel} 补丁，由
  * {@link AiProviderRegistry} 按 provider 装配（{@code SpToolCallingManager} 与记忆 advisor 仍是
  * 这里的单例 bean，跨 provider 复用）。</li>
@@ -71,10 +75,17 @@ public class AiModelConfig {
 	@Bean
 	@ConditionalOnMissingBean
 	public ChatMemory chatMemory(ChatMemoryRepository chatMemoryRepository, AiProperties properties) {
-		return MessageWindowChatMemory.builder()
+		ChatMemory window = MessageWindowChatMemory.builder()
 			.chatMemoryRepository(chatMemoryRepository)
 			.maxMessages(properties.getMemory().getMaxMessages())
 			.build();
+		// 按轮 upsert：advisor 的 before/after 是"只带本轮增量"的写，官方窗口的 add 会拿读到的整窗
+		// 再 saveAll 覆盖 —— 同一会话的另一条 run（挂起轮续跑 + 新开一轮）会被整轮删掉。仓储支持
+		// 按轮合并时把 add 换到那个写入口；其它实现（测试替身/非 Redis）保持官方语义。
+		if (chatMemoryRepository instanceof RunUpsertChatMemoryRepository runRepository) {
+			return new PerRunChatMemory(window, runRepository, properties.getMemory().getMaxMessages());
+		}
+		return window;
 	}
 
 	/**
