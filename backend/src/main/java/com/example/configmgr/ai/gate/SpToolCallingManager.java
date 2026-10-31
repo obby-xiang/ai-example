@@ -16,6 +16,7 @@ import com.example.configmgr.ai.context.ToolResultShrink;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
 
 import com.example.configmgr.ai.form.ConditionsForm;
+import com.example.configmgr.ai.form.FormIssue;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -2153,9 +2154,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return text;
 	}
 
-	/** 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。 */
+	/**
+	 * 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。
+	 *
+	 * <p>复核结论<b>整份</b>带下去（含 {@code issues}）：拆成 code/message/reasons 再重建会把
+	 * 结构化清单丢掉，结算文本里就再也找不到 {@code LINKAGE_*} 这类按码定位的机器事实。
+	 */
 	private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
-		return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons());
+		return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons(),
+				verdict.issues());
 	}
 
 	/**
@@ -2164,7 +2171,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
 			List<String> reasons) {
-		String text = FrontendToolGuard.Verdict.reject(code, message, reasons).render();
+		return settleFrontendRejected(runId, pending, code, message, reasons, List.of());
+	}
+
+	/** 入参拒绝的结算（带结构化清单）：{@code issues} 原样进 render，机器可读段不丢。 */
+	private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
+			List<String> reasons, List<FormIssue> issues) {
+		String text = new FrontendToolGuard.Verdict(false, code, message, reasons, issues, null).render();
 		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
 		pending.setOutcome(ToolOutcome.REJECTED.wire());
 		pending.setCode(code);

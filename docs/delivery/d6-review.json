@@ -147,6 +147,13 @@
       "reason": "已同步按run有序合并、会话级CAS版本、清空代次tombstone、统一advisor与收敛写入口及Cluster同槽契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:a899c758957f3c5f04030526969cb94009d927505bd0a8a147a0359118a62671",
+      "status": "not-affected",
+      "reason": "本批仅恢复既有Verdict机器可读原因在结算文本中的保留，不改变迁移接口、存储结构或拒绝行为",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
