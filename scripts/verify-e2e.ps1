@@ -484,16 +484,26 @@ function Ai-AssertParkedBeforeTool($info, $label) {
         throw "$label（run $($info.runId)）inFlight=$($info.inFlight)：没有停在未执行的工具调用前（判据无对象）"
     }
 }
-# 完成轮自身的尾部形态：末条 ASSISTANT、其前恰一条 USER（再往前是边界或开头）。
+# 完成轮自身的尾部形态：末条 ASSISTANT、其前恰一条 USER（再往前是会话前序，不判连续）。
 # 只适用于已完成/已取消的轮（挂起轮用 Ai-AssertParkedBeforeTool）。
-function Ai-AssertSingleTurnTail($info, $label) {
+#
+# 2026-10-30 误报收口：**不再用"尾部连续两条 USER"判重复**。同一会话里前一轮可能仍是挂起轮
+# （RunStore#saveSuspended 的快照不含在飞 assistant ⇒ 它自己的尾部就是那条 USER），于是本轮的
+# USER 紧随其后 ⇒ 合法快照尾部就是 `… USER_A(挂起轮) USER_B(本轮) ASSISTANT`，连续 USER
+# 并不等于"同一次发送落了两次"。重复与否改由**本轮唯一 token 在会话窗口里出现恰一次**判定
+# （$token 必填：每次发送都带一个只有本轮才有的 ASCII token；断言对象 = USER 原话本身）。
+function Ai-AssertSingleTurnTail($info, $label, $sid, $token) {
+    if ([string]::IsNullOrWhiteSpace([string]$token)) { throw "$label：判据缺本轮唯一 token（不得空判）" }
     $roles = @($info.roles)
     $n = $roles.Count
     if ($n -lt 2) { throw "$label（run $($info.runId)）historyRoles 只有 $n 条（判据无对象）" }
     if ($roles[$n - 1] -ne 'ASSISTANT') { throw "$label（run $($info.runId)）末条角色是 $($roles[$n - 1])，期望 ASSISTANT" }
     if ($roles[$n - 2] -ne 'USER') { throw "$label（run $($info.runId)）末条前一条是 $($roles[$n - 2])，期望 USER（本轮用户原话）" }
-    if ($n -ge 3 -and $roles[$n - 3] -eq 'USER') {
-        throw "$label（run $($info.runId)）尾部连续出现两条 USER（同一次发送落了两次用户原话）"
+    # 本轮用户原话恰一条：先有界等它收敛进窗口（收敛由轮次收尾触发，不是固定 sleep），再按 token 计数。
+    $null = Ai-WaitWindowToken $sid $token 20
+    $hits = @((Ai-Window $sid) | Where-Object { $_.type -eq 'USER' -and ([string]$_.text) -like "*$token*" })
+    if ($hits.Count -ne 1) {
+        throw "$label：本轮用户原话（token=$token）在会话窗口里出现 $($hits.Count) 次，期望恰 1 次（同一次发送落了多次或没落）"
     }
 }
 # 旧段不被改写：第二次发送之后，挂起轮自己的快照必须与发送前逐项一致（状态 / 消息数 / 角色序列）。
@@ -1755,6 +1765,18 @@ function Gf-PendingEntry($runId, $toolCallId) {
     return $entry
 }
 
+# 某一轮的全部待决条目（读不到 = 空集）。静默拒绝类判据的载体：生成式表单的**系统拒绝**
+# （FORM_SCHEMA_REJECTED / FORM_SLOTS_ALREADY_KNOWN）零用户可见帧（tool_start /
+# frontend_tool_request / frontend_tool_result 一条都不发），结论只落条目面
+# （status=REJECTED_ARGUMENTS + code + resultText 的逐条原因/机器可读清单）。
+function Gf-PendingEntries($runId) {
+    # 返回"0..N 条"的数组（不用 `,@()`：那会把空集也裹成 1 条）——调用方一律 `@(...)` 收口。
+    if ([string]::IsNullOrWhiteSpace([string]$runId)) { return @() }
+    $pend = Invoke-Api 'GET' "/api/ai/pending/$runId" $null
+    if (-not $pend.ok -or -not $pend.json -or -not $pend.json.success -or -not $pend.json.data) { return @() }
+    return @($pend.json.data | Where-Object { $null -ne $_ })
+}
+
 # 失败分支收尾兜底（设计稿 §8）：已记录 toolCallId 且 pending 仍 PENDING 时，FAIL 前 POST
 # cancelled:true 收敛挂起，避免 120s 悬置拖慢后续用例
 function Gf-Converge($runId, $toolCallId) {
@@ -1966,6 +1988,8 @@ try {
 # ============================================================
 # GF2 生成式表单：CLARIFY 回灌续跑（设计稿 §4 GF2；提示词为设计稿原文）
 #   fixture 任务推到查询条件步；用例内自删（A7）
+#   现场含**宿主条件表**（ConditionsForm 在 QUERY_COND 统一发放，purpose=SET_CONDITIONS）：
+#   驱动按 purpose 识别后只取消它（零副作用），CLARIFY 的断言面仍只落在模型那张表上。
 # ============================================================
 Say '--- GF2 生成式表单：CLARIFY 回灌续跑 ---'
 $script:gf2Run = $null
@@ -1978,10 +2002,23 @@ try {
     $toolsGf2 = GetJson '/api/ai/tools?page=export&taskType=EXPORT&step=QUERY_COND'
     if (@($toolsGf2.toolNames) -notcontains 'generative_form') { throw '披露端点 task:EXPORT/QUERY_COND 未列出 generative_form' }
 
+    # GF2 的现场里会出现**两张**表单：模型这张 CLARIFY 表，以及**宿主条件表**
+    # （`ConditionsForm#parkIfDueAtQueryCond` 在 QUERY_COND 统一发放，`form.purpose=SET_CONDITIONS`）。
+    # 宿主表是产品行为、本用例之外的合法表单（不改产品）：驱动只**取消**它（`cancelled=true`，
+    # 零副作用）后继续等 CLARIFY；若把它当 CLARIFY 去解析，只会得到"scenario 漂移"的假红。
     $handlerGf2 = {
         param($f, $runId)
         if ($f.type -eq 'confirm_request') { return @{ approved = $false } }
         if ($f.name -ne 'generative_form') { return @{ payload = @{ result = '{"ok":true,"source":"e2e"}' } } }
+        $gf2Args = $null
+        try { $gf2Args = $f.args | ConvertFrom-Json } catch { $gf2Args = $null }
+        $gf2Purpose = if ($gf2Args -and $gf2Args.form) { [string]$gf2Args.form.purpose } else { '' }
+        if ($gf2Purpose -eq 'SET_CONDITIONS') {
+            # 宿主条件表：只取消，不占 gf2Run/gf2Call，也不参与 CLARIFY 的任何断言。
+            # 计数用 +=（`++` 会把旧值写进管道，污染回调的返回值 → Invoke-FormTurn 读不到 payload）。
+            $script:gf2HostForms += 1
+            return @{ payload = @{ cancelled = $true; source = 'e2e-host' } }
+        }
         $script:gf2Run = $runId
         $script:gf2Call = $f.toolCallId
         Gf-Assert-FrameContract $f
@@ -1989,6 +2026,9 @@ try {
         if (-not $form) { return @{ break = $true } }
         $values = New-FormValues $form @{ 'exportScope' = 'ALL' } @('includeInactive')
         $script:gf2Posted = $values
+        # 回灌 POST 的序号 = 当前已收集条数（Invoke-FormTurn 在本回调返回之后才追加响应）：
+        # 宿主表的取消 POST 也混在 $script:gfPosts 里，断言必须按序号取 CLARIFY 那一条。
+        $script:gf2PostIndex = @($script:gfPosts).Count
         return @{ payload = @{ result = $values; source = 'e2e-gf' } }
     }
     $attempt = 0
@@ -2003,24 +2043,44 @@ try {
         $script:gfPosts = @()
         $script:gfHttp = @()   # 裁决 #4：HTTP 原文按用例重置，避免 gfc-<case>.http.txt 累积前序用例的请求
         $script:gfSchemaDrift = $null
-        $turn = Invoke-FormTurn $sessionGf2 $promptGf2 $ctxGf2 $handlerGf2 4
-        $fe = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
+        $script:gf2Run = $null
+        $script:gf2Call = $null
+        $script:gf2HostForms = 0
+        $script:gf2PostIndex = -1
+        # 挂起轮数上限 6：宿主条件表 + CLARIFY 表 + 可能的追加挂起面都在同一条 turn 里
+        $turn = Invoke-FormTurn $sessionGf2 $promptGf2 $ctxGf2 $handlerGf2 6
+        $fe = if ($script:gf2Call) {
+            @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' -and $_.toolCallId -eq $script:gf2Call })
+        } else { @() }
         # schema 漂移（缺 needKeys，模型行为）与"未触发表单"分开：漂移记数并继续重试，3 次皆漂移才 SKIP（§3.3）
         if ($script:gfSchemaDrift) { $drift = $script:gfSchemaDrift; $driftCount++; Start-Sleep -Seconds 2; continue }
-        if ($fe.Count -ge 1) { $formOk = $true; break }
+        if ($fe.Count -ge 1 -and $script:gf2PostIndex -ge 0) { $formOk = $true; break }
         # SKIP 前置校验（§3.3 判定表第 1 行）：本轮已有 tool_start(generative_form) 却无 frontend_tool_request、
-        # 也无 REJECTED_ARGUMENTS 结局帧 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
+        # 也无拒绝条目 → 挂起帧未下发属产品缺陷，判 FAIL，不得记 SKIP
         $toolStartN = @($turn.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count
-        $rejN = @($turn.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
-        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 结局帧）——挂起帧未下发，产品缺陷" }
+        $rejN = @(Gf-PendingEntries $turn.runId | Where-Object { $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' }).Count
+        if ($toolStartN -gt 0 -and $rejN -lt 1) { throw "模型已 tool_start(generative_form) 但未收到 frontend_tool_request（亦无 REJECTED_ARGUMENTS 条目）——挂起帧未下发，产品缺陷" }
         Start-Sleep -Seconds 2
     }
     if (-not $formOk) {
+        # 归因（静默拒绝批）：生成式表单的 schema 系统拒绝**零用户面帧**，结论只在条目面
+        # （REJECTED_ARGUMENTS + FORM_SCHEMA_REJECTED）。那是产品/模型给出的 schema 不合规，
+        # 不是"模型没触发表单"，不得记 SKIP。
+        $rejGf2 = @(Gf-PendingEntries $turn.runId | Where-Object { $_.name -eq 'generative_form' -and $_.status -eq 'REJECTED_ARGUMENTS' })
+        if ($rejGf2.Count -gt 0) {
+            $codes = @($rejGf2 | ForEach-Object { [string]$_.code }) -join ','
+            if ((@($rejGf2) | Where-Object { [string]$_.code -eq 'FORM_SCHEMA_REJECTED' }).Count -gt 0) {
+                throw "generative_form 被 schema 闸拒绝（条目码 $codes，用户面零帧），CLARIFY 表未下发 —— 判 schema 不合规（产品/模型），不记 SKIP"
+            }
+        }
         if ($driftCount -gt 0) { throw "GF-SKIP:模型 $driftCount/3 次尝试 schema 漂移（最近：$drift），判模型行为" }
         throw 'GF-SKIP:模型 3 次尝试均未触发表单（披露正常），判模型行为'
     }
 
-    $post = @($script:gfPosts)[0]
+    if ($script:gf2PostIndex -lt 0 -or $script:gf2PostIndex -ge @($script:gfPosts).Count) {
+        throw "CLARIFY 回灌 POST 序号 $($script:gf2PostIndex) 越界（实收 $((@($script:gfPosts)).Count) 条，宿主表取消 $($script:gf2HostForms) 条）"
+    }
+    $post = @($script:gfPosts)[$script:gf2PostIndex]
     if (-not $post) { throw '未执行回灌 POST' }
     if ($post.status -ne 200 -or -not $post.json) { throw "回灌 POST => HTTP $($post.status) $($post.text)" }
     if ($post.json.status -ne 'FRONTEND_RESULT' -or $post.json.accepted -ne $true -or $post.json.executed -ne $false) {
@@ -2041,7 +2101,7 @@ try {
     # A7 fixture 用例内自删
     DeleteJson "/api/tasks/$tGf2" | Out-Null
     Gf-Dump 'GF2' $turn.frames
-    Ok 'GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（会话记忆通道，断言对象=实际回灌值）+ fixture 自删'
+    Ok ("GF2 CLARIFY 表单：schema 下发→值回灌 200→续跑回显（会话记忆通道，断言对象=实际回灌值）+ fixture 自删（宿主条件表取消 {0} 条）" -f $script:gf2HostForms)
 } catch {
     if ($_.Exception.Message -like 'GF-SKIP:*') { Gf-Skip 'GF2' $_.Exception.Message.Substring(8); Gf-Dump 'GF2' $turn.frames }
     else { Gf-Converge $script:gf2Run $script:gf2Call; Gf-Dump 'GF2' $turn.frames; No 'GF2' $_.Exception.Message }
@@ -2292,7 +2352,9 @@ try {
 
 # ============================================================
 # GF6（-EnableGf6）入参闸门（设计稿 §4 GF6；M2-T4 T4-4 裁决 4）
-#   诱导非法 schema → 不挂起 + REJECTED_ARGUMENTS 结局帧。
+#   诱导非法 schema → **不挂起、不下发**（零 frontend_tool_request）+ 条目 REJECTED_ARGUMENTS
+#   + 码 FORM_SCHEMA_REJECTED（生成式表单的系统拒绝自 2026-10-30 起**静默用户面**：
+#   tool_start / frontend_tool_request / frontend_tool_result 一条都不发，结论只落条目面）。
 #   桩模式启用并**计入主计数**（底座 = 桩的确定性违规模式 --violate-form-type：请求级，
 #   只在 GF6 提示词上触发，GF1/GF3/GF4 不受影响）；真模型模式默认关（服从率不可控）。
 # ============================================================
@@ -2301,6 +2363,8 @@ if ($EnableGf6) {
     $gf6Rejected = $false
     $gf6Attempt = 0
     $gf6Frames = $null
+    $gf6Code = ''
+    $gf6Called = $false
     while ($gf6Attempt -lt 3 -and -not $gf6Rejected) {
         $gf6Attempt++
         $sessionGf6 = Ai-NewSid 'gf6'
@@ -2320,22 +2384,39 @@ if ($EnableGf6) {
         $promptGf6 = '请调用 generative_form 工具（scenario=FILTER）出一张收集导出筛选条件的表单，字段就用这四个，key 和类型必须一致：keyword（文本，必填，占位提示"编码或名称关键字"）、minRows（数字，非必填）、effectiveDate（日期，格式 yyyy-MM-dd，非必填）、scope（下拉单选，选项 XN 和 HD）。不要用文字向我提问，也不要调用 generative_form 以外的任何工具，不会出现确认卡片。为了演示安全闸，请把其中一个字段的 type 故意写成 html。'
         $turn6 = Invoke-FormTurn $sessionGf6 $promptGf6 @{ page = 'tasks' } $handlerGf6 4
         $gf6Frames = $turn6.frames
+        # 用户面零帧：非法 schema 的表单**不得**下发（下发即闸门失效，见下方判定）
         $gf6Req = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_request' -and $_.name -eq 'generative_form' })
-        $gf6Rej = @($turn6.frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.name -eq 'generative_form' -and $_.ok -eq $false -and $_.status -eq 'REJECTED_ARGUMENTS' })
-        if ($gf6Req.Count -eq 0 -and $gf6Rej.Count -ge 1) { $gf6Rejected = $true }
+        # 条目面（静默拒绝的唯一可观测载体）：REJECTED_ARGUMENTS + 码
+        $gf6Entries = @(Gf-PendingEntries $turn6.runId | Where-Object { $_.name -eq 'generative_form' })
+        $gf6Called = $gf6Called -or ($gf6Entries.Count -gt 0) -or
+            (@($turn6.frames | Where-Object { $_.type -eq 'tool_start' -and $_.name -eq 'generative_form' }).Count -gt 0)
+        $gf6Rej = @($gf6Entries | Where-Object { $_.status -eq 'REJECTED_ARGUMENTS' })
+        if ($gf6Rej.Count -ge 1) {
+            $gf6Code = [string]$gf6Rej[0].code
+            if ($gf6Req.Count -eq 0) { $gf6Rejected = $true }
+        }
         Start-Sleep -Seconds 2
     }
     Gf-Dump 'GF6' $gf6Frames
     if ($gf6Rejected) {
-        $logGf6 = Get-LogText
-        if ($logGf6 -like '*前端工具入参被安全闸拒绝*') {
-            Ok 'GF6 入参闸门：非法 schema 不挂起 + REJECTED_ARGUMENTS 结局帧 + 闸门日志'
+        if ($gf6Code -ne 'FORM_SCHEMA_REJECTED') {
+            # 归因（同步错误归因）：码不对说明拒的不是 schema 白名单这一道闸
+            No 'GF6 入参闸门' ("条目码 {0}，期望 FORM_SCHEMA_REJECTED（拒错了闸：非法 type 应由 schema 白名单拦下）" -f $gf6Code)
         } else {
-            No 'GF6 入参闸门' '日志缺"前端工具入参被安全闸拒绝"行'
+            $logGf6 = Get-LogText
+            if ($logGf6 -like '*前端工具入参被条件闭环拒绝*' -and $logGf6 -like '*FORM_SCHEMA_REJECTED*') {
+                Ok 'GF6 入参闸门：非法 schema 不挂起（零 frontend_tool_request）+ 条目 FORM_SCHEMA_REJECTED + 闸门日志'
+            } else {
+                No 'GF6 入参闸门' '日志缺"前端工具入参被条件闭环拒绝 ... FORM_SCHEMA_REJECTED"行'
+            }
         }
     } elseif ($env:E2E_STUB_MODE -eq '1') {
-        # 桩是确定性替身：非法 schema 由 --violate-form-type 构造保证 ⇒ 未产出即桩/产品链路异常
-        No 'GF6 入参闸门' '桩模式 3 次均未产出非法 schema（应由 --violate-form-type 构造保证，属桩路由或产品链路异常）'
+        if ($gf6Called) {
+            # 模型确实调用过 generative_form，却没有拒绝条目 ⇒ 闸门没有结论（产品链路异常）
+            No 'GF6 入参闸门' '桩模式：generative_form 已被调用但既未下发合法表也无 REJECTED_ARGUMENTS 条目（闸门无结论，属桩路由或产品链路异常）'
+        } else {
+            No 'GF6 入参闸门' '桩模式 3 次均未产出非法 schema（应由 --violate-form-type 构造保证，属桩路由或产品链路异常）'
+        }
     } else {
         Gf-Skip 'GF6' '模型 3 次均未产出非法 schema（真模型服从率不可控，观察项；桩模式下该分支不可达）'
     }
@@ -2735,7 +2816,7 @@ try {
         if ([string]$st18[0].runId -eq [string]$runId18) { throw 'TC18 受理轮复用了挂起轮的 runId（两路共写一条流）' }
         # 本轮快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $busyInfo18 = Ai-RunRoleInfo ([string]$st18[0].runId)
-        Ai-AssertSingleTurnTail $busyInfo18 'TC18 并发受理轮'
+        Ai-AssertSingleTurnTail $busyInfo18 'TC18 并发受理轮' $sc $token18
         $ids18b = Ai-AssistantIds $busy.frames
         if ($ids18b.Count -eq 0) { throw 'TC18 并发受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
         if ($ids18b.Count -ne 1) {
@@ -2783,7 +2864,7 @@ try {
         if ((@($again.frames | Where-Object { $_.type -eq 'error' })).Count -ne 0) { throw 'TC18 取消后再发出现 error 帧' }
         if ([string]$st18c[0].runId -eq [string]$runId18) { throw 'TC18 取消后再发复用了已取消轮的 runId' }
         $againInfo18 = Ai-RunRoleInfo ([string]$st18c[0].runId)
-        Ai-AssertSingleTurnTail $againInfo18 'TC18 取消后再发受理轮'
+        Ai-AssertSingleTurnTail $againInfo18 'TC18 取消后再发受理轮' $sc $token18c
         $ids18c = Ai-AssistantIds $again.frames
         if ($ids18c.Count -eq 0) { throw 'TC18 取消后再发受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
         if ($ids18c.Count -ne 1) {
@@ -3985,17 +4066,30 @@ Add-AiCase 'G-13' 'P2' '依赖深度上限 2：四层依赖被后端拒（不静
     Read-Sse '/api/ai/chat' @{ sessionId = $sid; message = '【AIE2E】gf-deep-linkage 请按标记出表单。' ; context = @{ page = 'tasks' } } `
         @('frontend_tool_request', 'done', 'error') $frames $null
     $req = Ai-One $frames 'frontend_tool_request'
-    $rej = @($frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.ok -eq $false })
     if ($req) {
-        # 若产品把表单下发下来，它必须**没有**丢掉 d 字段（静默裁剪比拒绝更坏）
+        # 下发即闸门失效（静默裁剪比拒绝更坏）：把实收字段列进失败原因，便于定位是哪一层被放过
         $argsObj = $req.args | ConvertFrom-Json
         $keys = @($argsObj.form.fields | ForEach-Object { $_.key })
-        if ($keys -notcontains 'd') { throw "超深联动被静默裁剪（字段：$($keys -join ',')）——应整体判非法" }
-        throw '四层依赖的表单被下发到前端（MAX_LINKAGE_DEPTH 未生效）'
+        throw "四层依赖的表单被下发到前端（MAX_LINKAGE_DEPTH 未生效；字段：$($keys -join ',')）"
     }
-    if ($rej.Count -lt 1) { throw '超深联动既没被拒也没下发（入参闸门无结论）' }
-    $code = [string]$rej[$rej.Count - 1].status
-    if ([string]::IsNullOrWhiteSpace($code)) { throw '拒绝帧缺 status/code（无法归因）' }
+    # 2026-10-30 起生成式表单的 schema 系统拒绝**静默用户面**（tool_start / frontend_tool_request /
+    # frontend_tool_result 一条都不发）：判据改到条目面 —— REJECTED_ARGUMENTS + FORM_SCHEMA_REJECTED，
+    # 原因清单须点名 LINKAGE_DEPTH_EXCEEDED（"拒了，但拒错原因"同样是缺陷）。
+    $runId = Ai-RunId $frames
+    $entries = @(Gf-PendingEntries $runId | Where-Object { $_.name -eq 'generative_form' })
+    if ($entries.Count -eq 0) {
+        throw "超深联动既没下发也没落条目（run=$runId：模型未调用 generative_form 或产品未记录拒绝，判据无对象）"
+    }
+    $entry = $entries[0]
+    if ([string]$entry.status -ne 'REJECTED_ARGUMENTS') { throw "超深联动的条目状态 $($entry.status)，期望 REJECTED_ARGUMENTS" }
+    $code = [string]$entry.code
+    if ($code -ne 'FORM_SCHEMA_REJECTED') {
+        throw "超深联动拒绝码 $code，期望 FORM_SCHEMA_REJECTED（同步错误归因：非法 schema 应走白名单闸）"
+    }
+    $reason = [string]$entry.resultText
+    if ($reason -notlike '*LINKAGE_DEPTH_EXCEEDED*') {
+        throw "超深联动被拒但原因未点名 LINKAGE_DEPTH_EXCEEDED（实收：$reason）"
+    }
     return $null
 }
 
@@ -4501,7 +4595,7 @@ Add-AiCase 'Q-05' 'P1' '流式中禁用（AR-04 两果都合法）：同会话�
         if ($secondRun5 -eq [string]$cr.runId) { throw '受理轮复用了挂起轮的 runId（新轮没有真正开起来）' }
         # 本轮快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $secondInfo5 = Ai-RunRoleInfo $secondRun5
-        Ai-AssertSingleTurnTail $secondInfo5 'Q-05 受理轮'
+        Ai-AssertSingleTurnTail $secondInfo5 'Q-05 受理轮' $sid $token
         $ids5 = Ai-AssistantIds $second.frames
         if ($ids5.Count -eq 0) { throw '受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
         if ($ids5.Count -ne 1) { throw "受理轮 assistant messageId 有 $($ids5.Count) 个（同一条消息被拆成多身份）：$($ids5 -join ',')" }
@@ -4623,7 +4717,7 @@ Add-AiCase 'Q-08' 'P1' '点即发与 409 的交互（AR-04）：同会话再发�
         if ($run2 -eq [string]$cr.runId) { throw '受理轮复用了挂起轮的 runId（新轮没有真正开起来）' }
         # 本轮（已完成）快照尾部恰 USER + ASSISTANT（开轮证据：上面 start 恰 1 + runId 不复用，下面 /runs/{runId} 角色 + 身份）。
         $secondInfo8 = Ai-RunRoleInfo $run2
-        Ai-AssertSingleTurnTail $secondInfo8 'Q-08 受理轮'
+        Ai-AssertSingleTurnTail $secondInfo8 'Q-08 受理轮' $sid $token
         $ids8 = Ai-AssistantIds $second.frames
         if ($ids8.Count -eq 0) { throw '受理轮没有任何 assistant 消息身份（判据无对象，不得当通过）' }
         if ($ids8.Count -ne 1) {
@@ -5199,9 +5293,23 @@ Add-AiCase 'X-10' 'P1' '联动条件写成表达式：判非法、不 eval、不
         @('frontend_tool_request', 'done', 'error') $frames $null
     $req = Ai-One $frames 'frontend_tool_request'
     if ($req) { throw '表达式形态的联动被下发到前端（fail-closed 失效）' }
-    $rej = @($frames | Where-Object { $_.type -eq 'frontend_tool_result' -and $_.ok -eq $false })
-    if ($rej.Count -lt 1) { throw '表达式联动既没下发也没被拒（入参闸门无结论）' }
-    if ([string]::IsNullOrWhiteSpace([string]$rej[$rej.Count - 1].status)) { throw '拒绝帧缺 status/code' }
+    # 静默拒绝（2026-10-30）：非法 schema 零用户面帧，结论只在条目面 ——
+    # REJECTED_ARGUMENTS + FORM_SCHEMA_REJECTED + 原因点名 LINKAGE_CONDITION_INVALID。
+    $runId = Ai-RunId $frames
+    $entries = @(Gf-PendingEntries $runId | Where-Object { $_.name -eq 'generative_form' })
+    if ($entries.Count -eq 0) {
+        throw "表达式联动既没下发也没落条目（run=$runId：模型未调用 generative_form 或产品未记录拒绝，判据无对象）"
+    }
+    $entry = $entries[0]
+    if ([string]$entry.status -ne 'REJECTED_ARGUMENTS') { throw "表达式联动的条目状态 $($entry.status)，期望 REJECTED_ARGUMENTS" }
+    $code = [string]$entry.code
+    if ($code -ne 'FORM_SCHEMA_REJECTED') {
+        throw "表达式联动拒绝码 $code，期望 FORM_SCHEMA_REJECTED（同步错误归因：非法条件应走白名单闸）"
+    }
+    $reason = [string]$entry.resultText
+    if ($reason -notlike '*LINKAGE_CONDITION_INVALID*') {
+        throw "表达式联动被拒但原因未点名 LINKAGE_CONDITION_INVALID（实收：$reason）"
+    }
     return $null
 }
 

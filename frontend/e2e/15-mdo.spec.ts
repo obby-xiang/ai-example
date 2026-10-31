@@ -61,6 +61,41 @@ async function clickSameTick(page: Page, first: string, second: string): Promise
   }, [first, second])
 }
 
+/**
+ * 「发送 ↔ 停止」同 tick 竞态的**稳定结局**采样（O02 / O02b）。
+ *
+ * <p>乐观用户气泡在 `store.send()` 里**入口即入列**，这一轮若被停止/409 回滚，气泡与草稿会在
+ * 回滚落定后一起复原。回滚在飞时采样会把"2 条瞬态"当成"发送胜出"（O02b 实测假红：
+ * 采到 2 条 → 断言输入框空 → 下一拍回滚把草稿塞回输入框）。
+ *
+ * <p>判据因此是**结局**而不是某一拍快照：同一结论连续成立 {@link stableForMs}（默认 1.2s，
+ * 远大于一次回滚的重渲染）才认，全程有界（{@link timeoutMs} 内不成立即如实失败）。
+ */
+async function waitStableOutcome<T>(
+  sample: () => Promise<T | null>,
+  timeoutMs: number,
+  label: string,
+  stableForMs = 1_200
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  let current: T | null = null
+  let key: string | null = null
+  let since = 0
+  while (Date.now() < deadline) {
+    const next = await sample()
+    const nextKey = next === null ? null : JSON.stringify(next)
+    if (nextKey !== null && nextKey === key) {
+      if (Date.now() - since >= stableForMs) return current as T
+    } else {
+      current = next
+      key = nextKey
+      since = Date.now()
+    }
+    await new Promise((done) => setTimeout(done, 300))
+  }
+  throw new Error(`等待超时：${label}`)
+}
+
 /** 起一轮会挂起在确认门上的发布调用，返回 runId 与 toolCallId。 */
 async function suspendOnPublish(
   taskId: number,
@@ -329,13 +364,14 @@ test.describe('@stub M 多实例与跨实例重连', () => {
   test('E2E-M08 重连 4 次退避 + jitter：≤5 条连接、1/2/4/8s(±25%)、耗尽后显式提示', async ({ page }) => {
     const attempts: number[] = []
     const probes: string[] = []
-    // 网络层真故障注入：**只** abort 真实的 EventSource 连接（真 EventSource + 真退避计时器）。
-    // M08 口径：探测请求（`?probe=1`，resourceType=fetch/xhr）不计入连接预算 ——
-    // 修复前探测打正式端点、与 EventSource 混在同一个计数里，5 次预算被探测抢走一半。
+    // 网络层真故障注入：**只** abort 真实的重挂连接（真 fetch 流 + 真退避计时器）。
+    // 判据按 **URL 语义**（不是 resourceType）：reattach 自"带身份头的 fetch 流"改造后
+    // （`src/api/sse.ts#openLiveStream`）与 `?probe=1` 只读探测同样是 fetch，resourceType 无法区分；
+    // 同一路径里只有 `probe=1` 是"只想看看状态"的轻量探测，不占连接预算，其余一律是真重挂。
     await page.route('**/api/ai/events/**', (route) => {
-      const request = route.request()
-      if (request.resourceType() !== 'eventsource') {
-        probes.push(request.url())
+      const url = route.request().url()
+      if (url.includes('probe=1')) {
+        probes.push(url)
         return route.continue()
       }
       attempts.push(Date.now())
@@ -592,13 +628,24 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
 
     await waitRoundSettled(page, 90_000)
     // 「二选一」：停止优先（1 条气泡）或 发送优先（2 条气泡），二者必居其一。
+    // 采样走**稳定结局**（waitStableOutcome）：乐观气泡在回滚前的"2 条瞬态"不得被当成发送胜出，
+    // 否则 `last()` 的正文断言会撞上"气泡刚被删掉"（实测假红）。
     // 输入框草稿内容与消息级「已停止」标识都不在本用例断言面内（同 tick 竞态下两者都会抖，
-    // 见 E2E-O02b 已挂账缺陷与报告"发现"一节）。
-    const bubbles = await userBubbles(page).count()
-    expect([1, 2]).toContain(bubbles)
-    if (bubbles === 2) {
+    // 见 E2E-O02b 的稳定结局口径）。
+    const outcome = await waitStableOutcome(async () => {
+      const bubbles = userBubbles(page)
+      const count = await bubbles.count()
+      if (count < 1 || count > 2) return null
+      return {
+        count,
+        lastText: count === 2 ? await bubbles.last().innerText().catch(() => '') : '',
+        composer: await page.locator('[data-testid="composer-input"]').inputValue().catch(() => '')
+      }
+    }, 30_000, '停止/发送任一稳定结局（O02）')
+    expect([1, 2]).toContain(outcome.count)
+    if (outcome.count === 2) {
       // 发出胜出：第二条确实是新消息（会话门在第二请求时已释放，不可能同轮双跑）
-      expect(await userBubbles(page).last().innerText()).toContain('下一条消息 o02')
+      expect(outcome.lastText).toContain('下一条消息 o02')
     }
     // 「不出现两轮同时跑」的后端判据：该会话的所有轮次都已终态，没有 RUNNING/SUSPENDED 孤儿
     const runs = await (await request.get(`${API}/api/ai/runs`, aiRequestOptions('/api/ai/runs'))).json() as {
@@ -653,14 +700,27 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     //                旧轮迟到收尾不得把上一条用户消息回填进来）；
     //   发送先落地 ⇒ 草稿真的成为一条用户消息，输入框清空是正确行为（不是"草稿被吞"）。
     // 只看"输入框非空"会在第二支上假红（实测 2/2 落在该支，草稿生成的消息气泡可证）。
-    const bubbles = userBubbles(page)
-    const bubbleCount = await bubbles.count()
-    if (bubbleCount === 1) {
-      await expect(composer).toHaveValue('草稿必须保留 o02b')
+    //
+    // 采样必须是**稳定结局**（waitStableOutcome）：发送侧会先落一条乐观用户气泡，该轮被停止/409
+    // 回滚时气泡会被删、草稿会被写回 —— 回滚落定前采到"2 条气泡"就断言"输入框空"必然假红。
+    // 判据把气泡数、末条正文与输入框三者绑在一起连续成立 ≥1.2s 才算结局。
+    const outcome = await waitStableOutcome(async () => {
+      const bubbles = userBubbles(page)
+      const count = await bubbles.count()
+      if (count < 1 || count > 2) return null
+      return {
+        count,
+        lastText: count === 2 ? await bubbles.last().innerText().catch(() => '') : '',
+        composer: await composer.inputValue().catch(() => '')
+      }
+    }, 30_000, '停止/发送任一稳定结局（O02b）')
+
+    if (outcome.count === 1) {
+      expect(outcome.composer, '停止优先：新草稿必须逐字留在输入框').toBe('草稿必须保留 o02b')
     } else {
-      expect(bubbleCount, '同 tick 只允许「停止优先 1 条」或「发送优先 2 条」').toBe(2)
-      await expect(bubbles.last()).toContainText('草稿必须保留 o02b')
-      await expect(composer).toHaveValue('')
+      expect(outcome.count, '同 tick 只允许「停止优先 1 条」或「发送优先 2 条」').toBe(2)
+      expect(outcome.lastText, '发送优先：草稿成了第二条用户消息').toContain('草稿必须保留 o02b')
+      expect(outcome.composer, '发送优先：输入框已清空').toBe('')
     }
   })
 

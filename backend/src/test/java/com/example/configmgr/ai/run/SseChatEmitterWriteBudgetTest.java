@@ -9,6 +9,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -70,6 +71,38 @@ class SseChatEmitterWriteBudgetTest {
 	void tearDown() {
 		this.deliveryPool.shutdownNow();
 		this.writerPool.shutdownNow();
+	}
+
+	/**
+	 * 装配预热（时序，不改断言）：预算模式的 300ms 预算从<b>提交</b>起算，包住"现场建写线程"这段时延；
+	 * {@code writerPool} 是 {@code corePoolSize=0} 的弹性池，高负载 runner 上第一笔提交的建线程时延
+	 * 可以整段吃掉预算 ⇒ 写还没进入就被判超时、订阅者先被摘，用例卡在 {@code awaitFirstSend}
+	 * （与 {@link #warmUpWriter} 记录的 CI 实证同一机理）。
+	 *
+	 * <p>预建 <b>2</b> 条空线程：卡住的那次写占 1 条，健康订阅者的写另有 1 条可直接接单 ——
+	 * 预算只衡量"写出被卡住"的时长。预热任务用同一把闸挡住，保证两条线程都现场建出来后才放行。
+	 */
+	@BeforeEach
+	void warmUpWriterPool() throws Exception {
+		CountDownLatch ready = new CountDownLatch(2);
+		CountDownLatch hold = new CountDownLatch(1);
+		for (int i = 0; i < 2; i++) {
+			this.writerPool.execute(() -> {
+				ready.countDown();
+				try {
+					hold.await(5L, TimeUnit.SECONDS);
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+			});
+		}
+		try {
+			assertThat(ready.await(5L, TimeUnit.SECONDS)).as("写出线程预热完成（把建线程时延移出写预算）").isTrue();
+		}
+		finally {
+			hold.countDown();
+		}
 	}
 
 	// ── S1 红→绿：卡住的写不再占住共享投递池 ────────────────────────────────
@@ -309,6 +342,9 @@ class SseChatEmitterWriteBudgetTest {
 		ThreadPoolExecutor singleWriter = new ThreadPoolExecutor(0, 1, 60L, TimeUnit.SECONDS,
 				new SynchronousQueue<>(), daemon("saturated-writer"), new ThreadPoolExecutor.AbortPolicy());
 		try {
+			// 同 writerPoolSaturation* 的预热：300ms 预算不得被"现场建唯一写线程"的时延吃掉，
+			// 否则慢订阅者的首帧写还没进入就被判超时，本用例"先超时、后饱和各摘一条"的判据不成立。
+			warmUpWriter(singleWriter);
 			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
 					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(singleWriter, 300L));

@@ -8,6 +8,7 @@
  */
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import type { DOMWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
@@ -84,6 +85,52 @@ async function mountPanel(): Promise<ReturnType<typeof mount>> {
   return wrapper
 }
 
+/** 行出现的有界等待预算（渲染是异步的，单次 `$nextTick` 在负载下会读到空 DOMWrapper）。 */
+const ROW_TIMEOUT_MS = 5_000
+
+/**
+ * 有界条件等待：等某个选择器真的渲染出来（微任务 + 一拍宏任务，最多 {@link ROW_TIMEOUT_MS}）。
+ *
+ * <p>为什么不能只 `await nextTick()`：面板挂载期还有 `onMounted` 里的异步收尾（挂起快照重建、
+ * 观测器绑定等），消息树可能在若干微任务/宏任务之后才落地；单拍读取会拿到空 DOMWrapper
+ * （`find(...)` 的 `trigger` 直接抛 "Cannot call trigger on an empty DOMWrapper"）。
+ */
+async function waitForSelector(
+  wrapper: ReturnType<typeof mount>,
+  selector: string
+): Promise<DOMWrapper<Element>> {
+  const deadline = Date.now() + ROW_TIMEOUT_MS
+  let found = wrapper.find(selector)
+  while (!found.exists() && Date.now() < deadline) {
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    found = wrapper.find(selector)
+  }
+  if (!found.exists()) {
+    throw new Error(`等待 ${selector} 出现超时（${ROW_TIMEOUT_MS}ms）：消息树未渲染`)
+  }
+  return found
+}
+
+/**
+ * 装载现场并挂载面板：**先 seed 再挂载**。
+ *
+ * <p>装配口径：`onMounted` 只在 `messages` 为空时才读历史（`loadHistory`），先种消息就杜绝
+ * "历史回包在种消息之后落地"的竞态；挂载后按有界条件等首行渲染，不再赌单次 tick。
+ */
+async function mountSeeded(): Promise<{
+  wrapper: ReturnType<typeof mount>
+  store: ReturnType<typeof useAiStore>
+}> {
+  const store = useAiStore()
+  store.messages = seed()
+  store.historyLoaded = true
+  const wrapper = await mountPanel()
+  await waitForSelector(wrapper, '[data-testid="edit-msg-u-1"]')
+  return { wrapper, store }
+}
+
 function chatMessage(id: string, role: 'user' | 'assistant', text: string): ChatMessage {
   return {
     id,
@@ -119,11 +166,7 @@ function snapshot(store: ReturnType<typeof useAiStore>): unknown[] {
 
 describe('2026-10-30 直裁：编辑 = 只回填正文（不重跑）', { timeout: 20_000 }, () => {
   it('编辑只回填正文并聚焦：不发送、不改/不删消息、不弹确认', async () => {
-    const wrapper = await mountPanel()
-    const store = useAiStore()
-    store.messages = seed()
-    store.historyLoaded = true
-    await wrapper.vm.$nextTick()
+    const { wrapper, store } = await mountSeeded()
     const before = snapshot(store)
     const confirmSpy = vi.spyOn(window, 'confirm')
     const sendSpy = vi.spyOn(store, 'send')
@@ -152,11 +195,7 @@ describe('2026-10-30 直裁：编辑 = 只回填正文（不重跑）', { timeou
   })
 
   it('回填后主动发送 = 普通新消息：原消息不截断、新文本追加、不带 skipUserRecord', async () => {
-    const wrapper = await mountPanel()
-    const store = useAiStore()
-    store.messages = seed()
-    store.historyLoaded = true
-    await wrapper.vm.$nextTick()
+    const { wrapper, store } = await mountSeeded()
     // 点击编辑时输入框为空 ⇒ 新实现不弹确认；桩恒 true 只是为了让**改造前**的实现（删除条数确认）
     // 也能走到底，RED 才落在「发送走了重跑通道」而不是被弹窗掩掉。
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -206,11 +245,7 @@ describe('2026-10-30 补充：编辑的覆盖保护（草稿非空先确认）',
     input: HTMLTextAreaElement
     before: unknown[]
   }> {
-    const wrapper = await mountPanel()
-    const store = useAiStore()
-    store.messages = seed()
-    store.historyLoaded = true
-    await wrapper.vm.$nextTick()
+    const { wrapper, store } = await mountSeeded()
     const before = snapshot(store)
     const box = wrapper.find('[data-testid="composer-input"]')
     await box.setValue(draft)
