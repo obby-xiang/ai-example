@@ -257,13 +257,26 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
       [MARK.filter, 400, 'content_filter', 'content_filter triggered'],
       [MARK.generic, 500, 'NFEZUI_UNKNOWN', 'third-generic-notice']
     ]
+    // 逐轮现场：提问原文（用来判"这张卡是不是挂在它自己那一轮"）、卡片 messageId、卡片全文
+    const rounds: Array<{ code: string; detail: string; question: string; messageId: string; text: string }> = []
     for (const [marker, status, code, message] of codes) {
       await failChatWith(page, marker, status, { success: false, code, message })
-      await send(page, `${marker} 用例-E09-${unique(code)}`)
+      const question = `${marker} 用例-E09-${unique(code)}`
+      await send(page, question)
       // 卡片根节点的判据要看 `[data-variant]`：裸前缀还会命中 `error-card-detail-*` / `error-card-code-*`
       // 这类子节点（在折叠的「诊断详情」里 ⇒ hidden），`.last()` 会选到隐藏后代。
-      await expect(page.locator('[data-testid^="error-card-"][data-variant]').last()).toBeVisible({ timeout: 40_000 })
+      const card = page.locator('[data-testid^="error-card-"][data-variant]').last()
+      await expect(card).toBeVisible({ timeout: 40_000 })
       await waitSettled(page, 30_000)
+      const testId = String((await card.getAttribute('data-testid')) ?? '')
+      rounds.push({
+        code,
+        detail: message,
+        question,
+        messageId: testId.replace('error-card-', ''),
+        // `textContent`（不是 innerText）：机器码与后端原文收在折叠的「诊断详情」里，innerText 读不到
+        text: (await card.textContent()) ?? ''
+      })
     }
     // AR-13（stores/ai.ts 错误终帧分支）：关键错误归**错误卡**、不进通知条（出卡即 clearNotice）。
     // 「单槽位不堆叠」锁的是**顶部通知条**：它恒为 0 条；错误卡按轮内联（demo v7.7 裁决区 08），
@@ -275,6 +288,41 @@ test.describe('@stub 13b · E 空态与错误卡族', () => {
     await expect(cards.last()).toContainText('本轮出错')
     await expect(cards.last()).not.toContainText('rate limit exceeded')
     await expect(cards.last()).not.toContainText('content_filter triggered')
+
+    // ── 归属：三条卡各自挂在**它那一轮**的助手消息上（messageId 互异，且同 id 的 msg-bubble 存在）──
+    expect(new Set(rounds.map((round) => round.messageId)).size, `三张卡不是三条独立消息：${rounds.map((round) => round.messageId).join(',')}`)
+      .toBe(codes.length)
+    for (const round of rounds) {
+      await expect(
+        page.locator(`[data-testid="msg-bubble-${round.messageId}"]`),
+        `错误卡 ${round.messageId} 没有对应的助手消息气泡（归属判据无对象）`
+      ).toHaveCount(1)
+    }
+
+    // ── 归属：卡紧跟在**本轮提问**之后（前一条消息就是本次 send 的用户气泡），不串到别轮 ──
+    // 判据载体 = 面板里 message 气泡的 DOM 顺序（用户/助手交替，卡挂在助手消息上）：
+    // 卡片 id 里的 messageId 前一条必须是本轮提问那条用户消息。不用父节点遍历 ——
+    // 卡的 DOM 层级由模板决定，按"消息序列"判归属才是用户可观察的事实。
+    const bubbleIds = await page.locator('.ai-chat [data-testid^="msg-bubble-"]').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('data-testid') ?? ''))
+    for (const [index, round] of rounds.entries()) {
+      const position = bubbleIds.indexOf(`msg-bubble-${round.messageId}`)
+      expect(position, `第 ${index + 1} 张卡的助手消息不在消息序列里（归属判据无对象）`).toBeGreaterThan(0)
+      const previousId = bubbleIds[position - 1]
+      const previousText = (await page.locator(`[data-testid="${previousId}"]`).textContent()) ?? ''
+      expect(previousText, `第 ${index + 1} 张错误卡不属于它自己那一轮（前一条消息不是本次提问）`)
+        .toContain(round.question)
+    }
+
+    // ── 逐轮归属 + 无串轮：第 i 张卡只带自己的码与后端原文，别的轮次的原文一个都不许出现 ──
+    rounds.forEach((round, index) => {
+      expect(round.text, `第 ${index + 1} 张卡的机器码不是它自己那条响应：${round.code}`).toContain(round.code)
+      expect(round.text, `第 ${index + 1} 张卡缺后端原文：${round.detail}`).toContain(round.detail)
+      for (const other of rounds.filter((_, otherIndex) => otherIndex !== index)) {
+        expect(round.text, `第 ${index + 1} 张卡串入了第 ${rounds.indexOf(other) + 1} 轮的内容（${other.detail}）`)
+          .not.toContain(other.detail)
+      }
+    })
   })
 
   test('E2E-E10 ui_event 回执：工作区动作真执行，导航成功走「无噪声」不叠回执', async ({ page }) => {

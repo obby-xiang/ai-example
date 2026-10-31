@@ -59,15 +59,18 @@ function unexpectedCjk(text: string): string[] {
 }
 
 /**
- * 面板文本，剔除身份切换器（租户/用户下拉）。
+ * 面板文本，只剔除身份切换器的**option 数据**（租户/用户下拉里的业务数据）。
  *
- * 下拉的 option 文案来自后端身份目录的业务数据（预置「租户一/租户二/用户101…」），
- * 与消息正文同属数据面，不是硬编码 chrome；i18n 用例只锁 chrome。
+ * <p>下拉的 option 文案来自后端身份目录（预置「租户一/租户二/用户101…」），与消息正文同属数据面，
+ * 不是硬编码 chrome，因此不参与 CJK 扫描。<b>但切换器本体的 chrome 必须留在扫描面内</b>：
+ * 旧实现整块 `remove()` 掉 `identity-switcher`，把 select（及其 aria-label / 未来的标签文案）
+ * 一起摘掉 —— 那一块的 i18n 回归（切到 en 之后仍带中文）根本测不到。这里只摘 `<option>`（数据），
+ * select 元素与其属性保留（aria-label 另由 I03 的 attrs 断言逐条覆盖）。
  */
-async function panelTextWithoutIdentityData(page: Page): Promise<string> {
+async function panelTextWithoutIdentityOptions(page: Page): Promise<string> {
   return page.locator('.ai-chat').evaluate((el) => {
     const clone = el.cloneNode(true) as HTMLElement
-    clone.querySelectorAll('[data-testid="identity-switcher"]').forEach((node) => node.remove())
+    clone.querySelectorAll('[data-testid="identity-switcher"] option').forEach((node) => node.remove())
     return clone.innerText
   })
 }
@@ -248,7 +251,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     expect(cjkHits(zhText).length).toBeGreaterThan(0)
 
     await switchToEnglish(page)
-    const enText = await panelTextWithoutIdentityData(page)
+    const enText = await panelTextWithoutIdentityOptions(page)
     // 工作区状态条 / 可用性标签是已知残留（见 KNOWN_CJK_RESIDUE 的两条发现项），
     // 其余 chrome 一律零 CJK —— 出现新的中文即判红。
     expect(unexpectedCjk(enText)).toEqual([])
@@ -306,7 +309,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     await openPanel(page)
     await switchToEnglish(page)
     // 空态（无消息正文）时的面板全量文本（已知残留见 KNOWN_CJK_RESIDUE）
-    const full = await panelTextWithoutIdentityData(page)
+    const full = await panelTextWithoutIdentityOptions(page)
     expect(unexpectedCjk(full)).toEqual([])
 
     const attrs = await page.locator('.ai-chat [aria-label], .ai-chat [title]').evaluateAll((nodes) =>
@@ -320,7 +323,7 @@ test.describe('@stub 13c · I i18n 双语', () => {
     // 呼吸点带淡出动画：等它真的退场再扫，避免把「流式中标签」当静态 chrome
     await expect(page.locator('[data-testid="loading-breath"]')).toHaveCount(0, { timeout: 20_000 })
     const answer = (await assistantBubbles(page).last().innerText()).trim()
-    const withRound = await panelTextWithoutIdentityData(page)
+    const withRound = await panelTextWithoutIdentityOptions(page)
     const stripped = withRound.split(question).join('').split(answer).join('')
     expect(unexpectedCjk(stripped)).toEqual([])
   })

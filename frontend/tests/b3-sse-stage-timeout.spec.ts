@@ -7,6 +7,8 @@
  * - 帧间 45s **不变**，`start` 后的 `heartbeat{phase:'compacting'}` 照常续命（不放宽上限）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import {
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_FIRST_FRAME_TIMEOUT_MS,
@@ -157,5 +159,57 @@ describe('批次3 · POST /chat 分阶段超时', () => {
     body.send({ type: 'done', runId: 'run-b3' })
     const info = await pending
     expect(info.terminal).toBe(true)
+  })
+})
+
+/**
+ * 前后端**首帧阈值**的静态契约（跨仓只读，不起服务）。
+ *
+ * <p>为什么需要：这一层有三个各自独立的数字 —— 后端上游首包预算（`app.ai.resilience.first-byte-timeout`）、
+ * 前端首帧看门狗（{@link DEFAULT_FIRST_FRAME_TIMEOUT_MS}）、以及桩的 `stall-headers`（E2E 用它构造
+ * "上游迟迟不回响应头"）。三者的**相对大小**决定用例是谁判的死：
+ * <ul>
+ * <li>后端首包 ≥ 前端首帧 ⇒ 前端先判 `CHAT_FIRST_FRAME_TIMEOUT`，S-03 拿不到后端 retry/error 帧，
+ * 用例以错误的原因红/绿；</li>
+ * <li>桩 stall ≤ 后端首包 ⇒ 看门狗根本不响（上游"按时"返回），S-03 退化成一次正常对话；</li>
+ * <li>桩 stall == 前端首帧（历史值 40000 vs 40s）⇒ **撞线**：两侧同刻判死，谁先到凭调度抖动。</li>
+ * </ul>
+ * 故这里把"后端首包 &lt; 桩 stall &lt; 前端首帧"锁成严格不等式，并把 40000 那次的撞线钉成回归。
+ */
+describe('批次3 · 前后端首帧阈值静态契约（阈值不等式 + stall-headers 不撞线）', () => {
+  const REPO = path.resolve(process.cwd(), '..')
+  const BACKEND_YML = path.join(REPO, 'backend', 'src', 'main', 'resources', 'application.yml')
+  const SRP_SPEC = path.join(process.cwd(), 'e2e', '10-srp.spec.ts')
+
+  /** 后端上游首包预算（`first-byte-timeout: 30s`）；读不到即口径已变，必须同步本契约。 */
+  function backendFirstByteMs(): number {
+    const yml = readFileSync(BACKEND_YML, 'utf8')
+    const match = /first-byte-timeout:\s*(\d+)s/.exec(yml)
+    expect(match, 'application.yml 里读不到 app.ai.resilience.first-byte-timeout（需同步本契约）').toBeTruthy()
+    return Number(match![1]) * 1000
+  }
+
+  /** S-03 实际用的桩 stall-headers（毫秒）。 */
+  function e2eStallHeadersMs(): number {
+    const source = readFileSync(SRP_SPEC, 'utf8')
+    const match = /stall-headers=(\d+)/.exec(source)
+    expect(match, '10-srp.spec.ts 里读不到 stall-headers=<ms>（S-03 的构造面已变，需同步本契约）').toBeTruthy()
+    return Number(match![1])
+  }
+
+  it('后端首包 30s 严格小于前端首帧 40s（前端不得抢先判超时）', () => {
+    expect(backendFirstByteMs()).toBe(30_000)
+    expect(DEFAULT_FIRST_FRAME_TIMEOUT_MS).toBe(40_000)
+    expect(DEFAULT_FIRST_FRAME_TIMEOUT_MS).toBeGreaterThan(backendFirstByteMs())
+  })
+
+  it('S-03 的 stall-headers 落在两侧阈值之间（严格，不与任一阈值撞线）', () => {
+    const stall = e2eStallHeadersMs()
+    // 小于/等于后端首包 ⇒ 看门狗不响，用例空转
+    expect(stall).toBeGreaterThan(backendFirstByteMs())
+    // 大于/等于前端首帧 ⇒ 前端先判死（40000 == 40s 就是这次要排掉的撞线）
+    expect(stall).toBeLessThan(DEFAULT_FIRST_FRAME_TIMEOUT_MS)
+    expect(stall).not.toBe(DEFAULT_FIRST_FRAME_TIMEOUT_MS)
+    expect(stall).not.toBe(backendFirstByteMs())
   })
 })

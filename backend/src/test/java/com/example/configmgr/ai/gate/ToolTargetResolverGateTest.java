@@ -200,6 +200,46 @@ class ToolTargetResolverGateTest {
 		assertThat(this.store.ledger(RUN_ID)).hasSize(1);
 	}
 
+	// ── F2-b：确认卡**批准后**的执行前复核（approve → TARGET_INVALID 仍存在） ──────
+
+	/**
+	 * 批准不是执行授权：卡是"目标还在时"挂起的，批准前目标被删（E2E 里就是用例自己删 fixture），
+	 * 续跑结算（{@link SpToolCallingManager#resolvePending}，ResumeService 的唯一入口）必须再过一次
+	 * F2 ⇒ {@code blocked/TARGET_INVALID}，且不认领、不记台账、不执行。
+	 *
+	 * <p>与 F1 的分工：F1 走的是**开卡前**的批次路径（预检 TARGET_CONSISTENT 先拦）；本条走的是
+	 * "卡已批准、执行前"的那一段 —— 预检在挂起时是过的，只有 F2 能挡住目标消失。两条路径都必须在册，
+	 * 否则"批准后目标没了"会变成一次静默执行。
+	 */
+	@Test
+	void approvedCardWithVanishedTargetIsBlockedWithoutClaimOrLedger() {
+		FrameWire wire = attach();
+		when(this.tasks.findById(TASK_ID)).thenReturn(Optional.empty());
+		PendingToolCall approved = approvedPending("start_import", "{\"taskId\":7}");
+
+		String text = this.manager.resolvePending(RUN_ID, prompt(RUN_ID), approved);
+
+		Map<String, Object> frame = FrameContract.oneOfType(wire.frames(), "tool_result");
+		assertThat(frame).containsEntry("outcome", ToolOutcome.BLOCKED.wire())
+			.containsEntry("code", ToolOutcome.CODE_TARGET_INVALID)
+			.containsEntry("retryable", false)
+			.containsEntry("status", PendingToolCall.BLOCKED)
+			.containsEntry("executed", false);
+		assertThat(text).contains("目标资源不存在或不在当前任务内，本次未执行").contains("任务 #7 不存在");
+
+		// 安全判据：不执行、不占认领、不记台账
+		assertThat(this.importTool.invocations.get()).isZero();
+		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
+		assertThat(this.store.ledger(RUN_ID)).isEmpty();
+		assertThat(this.store.ledgerFor(RUN_ID, CALL_ID)).isNull();
+
+		// 条目落成 blocked + 码（不是 failed/unknown：门根本没开）
+		PendingToolCall stored = this.store.pending(RUN_ID, CALL_ID);
+		assertThat(stored.getStatus()).isEqualTo(PendingToolCall.BLOCKED);
+		assertThat(stored.getCode()).isEqualTo(ToolOutcome.CODE_TARGET_INVALID);
+		assertThat(stored.isExecuted()).isFalse();
+	}
+
 	// ── 对照：非作业发起工具没有 taskId ⇒ 不校验、照常执行 ────────────────────
 
 	@Test
@@ -232,6 +272,21 @@ class ToolTargetResolverGateTest {
 		FrameWire wire = FrameWire.attachTo(out);
 		out.start(SESSION_ID);
 		return wire;
+	}
+
+	/**
+	 * 造一张"已批准、尚未执行"的确认门条目：正是 ResumeService 在用户点「批准」之后读到的那份状态
+	 * （{@code APPROVED} + {@code KIND_CONFIRM}）。写入待决表是必须的 —— 结算会读回同一条目。
+	 */
+	private PendingToolCall approvedPending(String toolName, String argumentsJson) {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId(CALL_ID);
+		pending.setName(toolName);
+		pending.setKind(PendingToolCall.KIND_CONFIRM);
+		pending.setStatus(PendingToolCall.APPROVED);
+		pending.setArguments(argumentsJson);
+		this.store.putPending(RUN_ID, pending);
+		return pending;
 	}
 
 	private void finish() {

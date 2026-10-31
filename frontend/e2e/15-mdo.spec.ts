@@ -250,10 +250,12 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     expect(jobs.length).toBe(1)
   })
 
-  test('E2E-M06 TARGET_INVALID 预检即拦：不进入确认门，零作业零台账', async ({ request }) => {
+  test('E2E-M06 目标不一致预检即拦：TARGET_CONSISTENT 未通过、不进入确认门、零作业零台账', async ({ request }) => {
     // 目标校验（ToolTargetResolver 的「是否同一任务」）现已并入**开卡前预检**（TARGET_CONSISTENT）：
     // 上下文任务与入参任务不一致时预检直接失败，根本不会挂起/发确认请求，更不会执行 ——
     // 这比"批准后再拦"更早一道，安全判据（零作业零台账）不变。
+    // 批准后那一段的 TARGET_INVALID（目标在执行前消失）不在这里构造：E2E 里它会被预检重放
+    // 先拦成 PRECHECK_STALE，该路径的确定性覆盖见 ToolTargetResolverGateTest#approvedCardWithVanishedTarget*。
     const contextTaskId = await createPublishableImportTask(request)
     const targetTaskId = await createPublishableImportTask(request)
     expect(targetTaskId).not.toBe(contextTaskId)
@@ -276,6 +278,26 @@ test.describe('@stub M 多实例与跨实例重连', () => {
     expect(done.snapshot?.status).toBe('DONE')
     expect((done.ledger ?? []).length).toBe(0)
     expect((await publishJobs(request, targetTaskId)).length).toBe(0)
+
+    // 预检项必须**点名 TARGET_CONSISTENT**（「目标一致」）。只断 PRECHECK_FAILED 会被任何别的预检失败
+    // 顶成假绿（在途作业 / 未上传 / 步骤不符都给同一个码），而本用例要钉的正是"任务号对不上"这一项。
+    // 载体 = 待决条目上的预检报告（`PRECHECK_FAILED` 的 `tool_result` 帧不带 preflight，条目面才有）。
+    const entry = (done.pending ?? []).find((item) => item.name === 'start_publish')
+    expect(entry, '未落 start_publish 的待决条目（预检项判据无对象）').toBeTruthy()
+    const report = entry?.preflight as { checks?: Array<Record<string, unknown>> } | null | undefined
+    const checks = Array.isArray(report?.checks) ? report!.checks! : []
+    const failedCodes = checks.filter((check) => check.pass === false).map((check) => String(check.code))
+    const target = checks.find((check) => String(check.code) === 'TARGET_CONSISTENT')
+    expect(target, `预检报告里没有 TARGET_CONSISTENT（实收检查项：${checks.map((check) => String(check.code)).join(',') || '空'}；失败项：${failedCodes.join(',') || '空'}）`)
+      .toBeTruthy()
+    expect(target?.pass, 'TARGET_CONSISTENT 必须落在未通过项上（否则拦下这次调用的不是目标核对）').toBe(false)
+    // 具体原因也要对得上：入参任务 vs 工作区任务（只断"有个 TARGET_CONSISTENT 红了"仍可能张冠李戴）
+    const detail = String(target?.detail ?? '')
+    expect(detail).toContain(`任务 #${targetTaskId}`)
+    expect(detail).toContain(`当前工作区任务 #${contextTaskId}`)
+    const args = target?.args as { taskId?: number; workspaceTaskId?: number } | undefined
+    expect(args?.taskId).toBe(targetTaskId)
+    expect(args?.workspaceTaskId).toBe(contextTaskId)
   })
 
   test('E2E-M09 lastSeq 差量 + 孤儿过滤：只补 seq>K、心跳零回放、DOM 无重复卡', async ({ request }) => {

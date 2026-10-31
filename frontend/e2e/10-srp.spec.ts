@@ -135,14 +135,20 @@ test.describe('@stub S 流式稳定', () => {
 
   /**
    * S-03 响应头挂起不误判断流：首包看门狗（默认 30s）触发 → 先 retry、再显式错误卡。
-   * 桩 stall-headers=40000 ⇒ 两个尝试都拿不到首包，最终以 FIRST_BYTE_TIMEOUT 收敛。
+   * 桩 stall-headers=35000 ⇒ 两个尝试都拿不到首包，最终以 FIRST_BYTE_TIMEOUT 收敛。
+   *
+   * 取值口径（静态契约见 `tests/b3-sse-stage-timeout.spec.ts` 的"首帧阈值"一组）：
+   * 后端 first-byte（30s） < **本值** < 前端 first-frame（40s）。取 35000 而不是 40000：
+   * 40000 与前端首帧阈值**逐值相等**（撞线），一旦后端判定晚一拍，前端就会抢先判
+   * CHAT_FIRST_FRAME_TIMEOUT，用例以错误的原因红/绿。与 ps1 的 S-03（`firstByte*1000 + 5000`）
+   * 同一余量。
    */
   test('E2E-S03 响应头挂起：30s 首包看门狗触发重试与可重试错误卡（不静默干等）', async ({ page }) => {
     test.setTimeout(120_000)
     const chat = captureChat(page)
     await openApp(page)
     const sentAt = Date.now()
-    await sendMessage(page, P('turn-text stall-headers=40000 S03'))
+    await sendMessage(page, P('turn-text stall-headers=35000 S03'))
 
     // ① 期间没有任何正文（"已发送但无任何状态变化"是缺陷，必须由重试提示打破）
     await expect(page.locator('[data-testid="notice-bar"]')).toContainText('正在重试', { timeout: 45_000 })

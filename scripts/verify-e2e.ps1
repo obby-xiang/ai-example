@@ -1853,7 +1853,10 @@ function Gf-FinalAssistantText($sessionId) {
 # 再答一次；旧实现取最后一条即把作用域错配到它（CI 报"值回显缺 exportScope=ALL"）。
 # 宿主表管道（`$transparentToolCallIds` = 驱动按 purpose 识别并取消掉的宿主表 toolCallId）在轮次
 # 边界上**透明**：它的工具调用/结果由宿主挂起、由驱动取消，不是模型自发的工具轮，模型对本次回灌
-# 的续答会落到它之后（同一轮）。其余工具轮仍按"出现新工具结果 = 本轮结束"截断，不跨轮借位。
+# 的续答会落到它之后（同一轮）。
+# **只许同批并行**（2026-10-31 全量审查）：同一批（同一条 assistant 的 toolCalls）的兄弟结果仍属本次
+# 回灌的同一次模型步，允许跳过；除此之外**任何**工具结果（含无 id 的 TOOL 消息、载体被合并掉的孤儿
+# 结果）都结束作用域 —— 本轮没有助手文本时**不得穿过它去借后一轮的文本**（旧实现会，属假绿）。
 # 判据不放宽：轮内文本仍必须包含**实际回灌的全部值**（Gf-Assert-Echo）。
 function Gf-RoundAssistantText($sessionId, $toolCallId, [string[]]$transparentToolCallIds = @()) {
     if (-not $toolCallId) { throw "会话 $sessionId 回显断言缺 toolCallId（无法定位回灌那一轮）" }
@@ -1869,25 +1872,39 @@ function Gf-RoundAssistantText($sessionId, $toolCallId, [string[]]$transparentTo
         if ($ids -contains [string]$toolCallId) { $idx = $i; break }
     }
     if ($idx -lt 0) { throw "会话 $sessionId 历史里没有 toolCallId=$toolCallId 的工具结果段（回显断言无作用域）" }
+    # 本次回灌**那一批**（同一条 assistant 的 toolCalls）：只有它们的兄弟结果属于"同一次模型步"。
+    # 历史里若找不到载体（被合并/裁剪掉），$batchIds 只有本次自身 —— 于是任何别的工具结果都会结束
+    # 本轮作用域（fail-closed：宁可不借位，也不把后一轮的文本算到这一次回灌头上）。
+    $batchIds = @{}
+    $batchIds[[string]$toolCallId] = $true
+    for ($i = $idx; $i -ge 0; $i--) {
+        $carrierIds = @(@($msgs[$i].toolCalls) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
+        if ($carrierIds -contains [string]$toolCallId) {
+            foreach ($id in $carrierIds) { if (-not [string]::IsNullOrWhiteSpace($id)) { $batchIds[$id] = $true } }
+            break
+        }
+        if ($msgs[$i].type -eq 'USER') { break }
+    }
     $texts = New-Object System.Collections.ArrayList
-    $sawAsst = $false
     for ($i = $idx + 1; $i -lt $msgs.Count; $i++) {
         $m = $msgs[$i]
         $respIds = @(@($m.toolResponses) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
-        $callIds = @(@($m.toolCalls) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
         $hasResp = $respIds.Count -gt 0 -or $m.type -eq 'TOOL'
         if ($hasResp) {
-            # 宿主表管道的结果不进轮次边界；还没产出助手消息的工具结果与本次回灌同批（并行调用）也属本轮。
+            # ① 宿主表管道（驱动按 purpose 取消掉的那张表）在轮次边界上透明：它不是模型自发的工具轮。
             if ($respIds.Count -gt 0 -and @($respIds | Where-Object { -not $transparent.ContainsKey($_) }).Count -eq 0) { continue }
-            if ($sawAsst) { break }
-            continue
+            # ② 本轮已产出助手文本 ⇒ 再遇工具结果就是翻页。
+            if ($texts.Count -gt 0) { break }
+            # ③ **只许同批并行**：同一批的兄弟结果仍属本次回灌的同一次模型步；
+            #    其余任何工具结果（含无 id 的 TOOL 消息、被合并掉载体的孤儿结果）都结束作用域 ——
+            #    旧实现这里 `continue`，于是"本轮没有助手文本"时会穿过别的工具结果去借后一轮的文本。
+            if ($respIds.Count -gt 0 -and @($respIds | Where-Object { -not $batchIds.ContainsKey($_) }).Count -eq 0) { continue }
+            break
         }
         if ($m.type -eq 'USER') { break }   # 新用户消息 = 新轮次
-        if ($m.type -eq 'ASSISTANT') {
-            # 只承载宿主表调用的助手消息（文本为空）同样透明，不算"本轮已产出助手消息"。
-            $carrierTransparent = $callIds.Count -gt 0 -and @($callIds | Where-Object { -not $transparent.ContainsKey($_) }).Count -eq 0
-            if (-not $carrierTransparent) { $sawAsst = $true }
-            if (-not [string]::IsNullOrWhiteSpace([string]$m.text)) { $texts.Add([string]$m.text) | Out-Null }
+        if ($m.type -eq 'ASSISTANT' -and -not [string]::IsNullOrWhiteSpace([string]$m.text)) {
+            # 只承载宿主表调用的助手消息（文本为空）不产出文本，也不影响作用域判定（透明度在上面的 ① 收口）。
+            $texts.Add([string]$m.text) | Out-Null
         }
     }
     if ($texts.Count -lt 1) {
@@ -4986,12 +5003,30 @@ Add-AiCase 'D-05' 'P2' '限流不误伤：连续 5 次短请求无 429' {
     return $null
 }
 
-Add-AiCase 'D-06' 'P1' '输入超长 8193：400 MESSAGE_TOO_LONG、不截断、不回显原文' {
+Add-AiCase 'D-06' 'P1' '输入长度边界 2000：恰 2000 放行、2001 拒（MESSAGE_TOO_LONG、limit=2000、不截断、不回显原文）' {
+    # 上限的唯一事实源 = 后端 `app.ai.input.max-chars`（AiProperties.Input.DEFAULT_MAX_CHARS = 2000），
+    # 前端 AiPanel 的 MESSAGE_MAX_CHARS 与它同值。旧写法只发 8193（> 上限的任意值）：8192 的上限
+    # 与 2000 的上限都能把它拦住 —— "上限到底是多少"被盖住，属弱断言（上限被改成 8000 也照样绿）。
+    # 现在两侧各打一次：恰 2000 必须**放行**（实现是 `> maxChars` 才拒，等于上限是合法的），
+    # 2001 必须 400 —— 边界一旦漂移（改 ≥ 或改上限值）立刻红。
+    $limit = 2000
+    $sidOk = Ai-NewSid 'd06ok'
+    $ok = Ai-ChatSse $sidOk ('A' * $limit) @{ page = 'tasks' } @('done', 'error') $null
+    if ([int]$ok.status -ne 200) {
+        throw "恰 $limit 码元 HTTP $($ok.status)（$($ok.text)），期望 200：上限应含等于，多一个字符才拒"
+    }
+    if (@($ok.frames | Where-Object { $_.type -eq 'done' }).Count -ne 1) {
+        throw "恰 $limit 码元缺 done 帧（实收帧：$((@($ok.frames | ForEach-Object { $_.type })) -join ',')）"
+    }
+    if (@($ok.frames | Where-Object { $_.type -eq 'error' }).Count -gt 0) { throw "恰 $limit 码元出现 error 帧" }
+
     $sid = Ai-NewSid 'd06'
-    $long = 'A' * 8193
-    $r = Invoke-Api 'POST' '/api/ai/chat' @{ sessionId = $sid; message = $long; context = @{ page = 'tasks' } }
-    if ($r.status -ne 400) { throw "8193 码元 HTTP $($r.status)，期望 400" }
-    if ($r.json.code -ne 'MESSAGE_TOO_LONG') { throw "code=$($r.json.code)，期望 MESSAGE_TOO_LONG" }
+    $r = Invoke-Api 'POST' '/api/ai/chat' @{ sessionId = $sid; message = ('A' * ($limit + 1)); context = @{ page = 'tasks' } }
+    if ($r.status -ne 400) { throw "$($limit + 1) 码元 HTTP $($r.status)，期望 400" }
+    if ([string]$r.json.code -ne 'MESSAGE_TOO_LONG') { throw "code=$($r.json.code)，期望 MESSAGE_TOO_LONG" }
+    # 结构字段里的两枚数字是"上限到底是多少"的可读证据：口径漂移（2000 → 其它）必须红
+    if ([int]$r.json.limit -ne $limit) { throw "limit=$($r.json.limit)，期望 $limit（上限口径漂移，边界不再被锁）" }
+    if ([int]$r.json.length -ne ($limit + 1)) { throw "length=$($r.json.length)，期望 $($limit + 1)" }
     if ($r.text -like ('*' + ('A' * 200) + '*')) { throw '错误响应回显了超长原文' }
     return $null
 }
