@@ -522,6 +522,86 @@ class DefinitionFormResumeParkTest {
 			.as("首次 confirm 交棒 false ⇒ 后续非 confirm 交棒 true").containsExactly(false, true);
 	}
 
+	// ── ⑦″ 首次交棒注入一条合成指令：不冒充用户原话，也不落快照 ──────────────
+
+	/**
+	 * 首次 {@code confirm_step} 成功进入 {@code QUERY_COND}、条件仍未决定时，交棒历史末尾有<b>恰好一条</b>
+	 * 合成内部指令（查定义 / 设条件 / 推进，且明确禁止正文反问）；真实用户原话原样保留，
+	 * 快照里的历史也不被这条指令污染（下一轮/再次续跑读到的仍是用户那条）。
+	 */
+	@Test
+	void firstConditionHandoffAddsOneSyntheticInstructionWithoutPollutingTheUserHistory() {
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "QUERY_COND",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
+				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())), "帮我新建一个导出任务",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
+		// 生产里标记由 ConditionsForm 在 allowUnknownForm=false 且确实未决定时写入；
+		// 本类把条件表换成桩，故只复刻这一次写入（写入本身由 ConditionsFormStructureHandoffTest 锁）。
+		when(this.conditionsForm.parkIfDueAtQueryCond(eq(RUN_ID), any(AiContext.class), any(), eq(false)))
+			.thenAnswer(invocation -> {
+				AiContext context = invocation.getArgument(1);
+				Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
+				extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+				context.setExtra(extra);
+				return false;
+			});
+
+		this.service.resume(RUN_ID);
+
+		List<Message> handed = historyOfDriveResumed();
+		assertThat(handed).filteredOn(DefinitionFormResumeParkTest::isConditionStructureInstruction)
+			.as("首次交棒恰好一条合成内部指令").hasSize(1);
+		Message last = handed.get(handed.size() - 1);
+		assertThat(last).as("合成指令是本跳最后一条（模型紧接着做结构化）").isInstanceOf(UserMessage.class);
+		assertThat(last.getText())
+			.startsWith(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX)
+			.contains("get_config_def", "set_condition", "confirm_step")
+			.contains("反问");
+		// 真实用户原话不被替换/重排
+		assertThat(handed).filteredOn(message -> "帮我新建一个导出任务".equals(message.getText())).hasSize(1);
+		// 快照（真实历史/审计面）不含合成指令：它只属于这一跳的交棒视图
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.filteredOn(DefinitionFormResumeParkTest::isConditionStructureInstruction).isEmpty();
+		// 仍在 QUERY_COND：下一跳继续受限（标记保留）
+		assertThat(contextOfDriveResumed().getExtra())
+			.containsEntry(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+	}
+
+	// ── ⑦‴ 离开 QUERY_COND：清除标记并恢复完整工具面 ────────────────────────
+
+	@Test
+	void leavingQueryCondClearsTheHandoffMarkerBeforeHandoff() {
+		// 挂起期用户在向导里推进了步骤：上下文还停在 QUERY_COND 且带着标记，任务权威步骤已是 EXPORT
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "EXPORT",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+		seedSuspendedRun(List.of(), "导出吧",
+				AiContext.of("export", "EXPORT", "QUERY_COND", NEW_TASK_ID, "ACTIVE", extra));
+
+		this.service.resume(RUN_ID);
+
+		AiContext handoff = contextOfDriveResumed();
+		assertThat(handoff.getStep()).isEqualTo("EXPORT");
+		assertThat(handoff.getExtra())
+			.as("离开 QUERY_COND ⇒ 标记清除（披露面恢复为完整工具面）")
+			.doesNotContainKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+		assertThat(AiContext.fromMap(this.store.get(RUN_ID).getContext()).getExtra())
+			.as("快照上下文同样不带标记").doesNotContainKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+		assertThat(historyOfDriveResumed())
+			.as("非首次 confirm 交棒不注入合成指令")
+			.filteredOn(DefinitionFormResumeParkTest::isConditionStructureInstruction).isEmpty();
+	}
+
+	/** 与 {@code SyntheticMessages#isSynthetic} 同一判据：导出收尾/条件交棒共用的内部指令前缀。 */
+	private static boolean isConditionStructureInstruction(Message message) {
+		String text = message == null ? null : message.getText();
+		return text != null
+				&& text.startsWith(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX);
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n页面：任务中心\n"

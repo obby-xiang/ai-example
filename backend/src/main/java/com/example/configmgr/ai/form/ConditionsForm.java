@@ -310,7 +310,10 @@ public class ConditionsForm extends HostForm {
 				return false;
 			}
 			if (!allowUnknownForm) {
-				// 刚进入条件步骤：先交棒模型按原对话做结构化；下一拍仍未知才由宿主收集。
+				// 刚进入条件步骤：只披露查定义、设置条件与推进，先让模型完成结构化。
+				Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
+				extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+				context.setExtra(extra);
 				return false;
 			}
 			String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));

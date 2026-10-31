@@ -126,6 +126,13 @@
       "reason": "已同步空条件候选的首次模型结构化、后续单次表单收集、create_task台账判据与分类纠正前缀契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:5ecf13094b830906e13a49f63612c3dfc89c05f07b0b3648a80bb17cac53f36a",
+      "status": "synced",
+      "reason": "已同步条件结构化标记、披露与执行同源的四工具限制、合成指令及离开条件步骤后的工具面恢复",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

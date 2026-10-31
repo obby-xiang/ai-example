@@ -31,6 +31,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -1907,6 +1908,21 @@ public class ResumeService {
 				body.put("reason", "CONDITIONS_FORM_PARKED");
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
+			if (enteredQueryCond && "QUERY_COND".equals(nextHopContext.getStep()) && nextHopContext.getExtra() != null
+					&& Boolean.TRUE.equals(nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF))) {
+				history = new ArrayList<>(history);
+				history.add(new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+						+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
+						+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。"));
+			}
+			if (!"QUERY_COND".equals(nextHopContext.getStep()) && nextHopContext.getExtra() != null
+					&& nextHopContext.getExtra().containsKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF)) {
+				Map<String, Object> extra = new LinkedHashMap<>(nextHopContext.getExtra());
+				extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+				nextHopContext = AiContext.of(nextHopContext.getPage(), nextHopContext.getTaskType(),
+						nextHopContext.getStep(), nextHopContext.getTaskId(), nextHopContext.getTaskStatus(), extra);
+				snapshot.setContext(nextHopContext.toMap());
 			}
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──

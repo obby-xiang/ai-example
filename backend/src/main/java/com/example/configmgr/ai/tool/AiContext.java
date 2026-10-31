@@ -16,6 +16,8 @@ import java.util.Map;
 @Data
 public class AiContext {
 
+	public static final String EXTRA_CONDITION_STRUCTURE_HANDOFF = "conditionStructureHandoff";
+
 	private String page = "";
 
 	private Long taskId;
