@@ -1909,21 +1909,36 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
-			if (enteredQueryCond && "QUERY_COND".equals(nextHopContext.getStep()) && nextHopContext.getExtra() != null
-					&& Boolean.TRUE.equals(nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF))) {
-				history = new ArrayList<>(history);
-				history.add(new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-						+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
-						+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。"));
-			}
-			if (!"QUERY_COND".equals(nextHopContext.getStep()) && nextHopContext.getExtra() != null
-					&& nextHopContext.getExtra().containsKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF)) {
+			// ===== 条件结构化交棒的标记：随快照持久化 =====
+			// 披露面（{@code forContext}）用的是本跳这份上下文，而执行面的第三道防线
+			// （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文
+			// （{@code SpToolCallingManager} 里 {@code AiContext.fromMap(snapshot.getContext())}）。
+			// 只改内存对象 ⇒ guard 永远看不到；离开 QUERY_COND 的清理同理，不落库等于没清。
+			// 写入走取消优先 + 租约的同一道写门：被拒 ⇒ 本拍不得驱动模型（与其它交棒写点同口径）。
+			boolean conditionHandoff = nextHopContext.getExtra() != null
+					&& Boolean.TRUE.equals(nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF));
+			if (conditionHandoff && !"QUERY_COND".equals(nextHopContext.getStep())) {
 				Map<String, Object> extra = new LinkedHashMap<>(nextHopContext.getExtra());
 				extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
 				nextHopContext = AiContext.of(nextHopContext.getPage(), nextHopContext.getTaskType(),
 						nextHopContext.getStep(), nextHopContext.getTaskId(), nextHopContext.getTaskStatus(), extra);
-				snapshot.setContext(nextHopContext.toMap());
+				conditionHandoff = false;
+				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
+					return resumeStatusWriteRefused(runId, body);
+				}
 			}
+			else if (conditionHandoff) {
+				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
+					return resumeStatusWriteRefused(runId, body);
+				}
+			}
+			// 合成内部指令：只属于<b>这一跳</b>的交棒视图，在窗口/压缩之后才追加（见下），
+			// 既不进压缩输入也不随压缩写回快照/记忆（详见 SyntheticMessages#withoutCorrectionInstruction）。
+			Message conditionInstruction = enteredQueryCond && conditionHandoff
+					? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+							+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
+							+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
+					: null;
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
 			// 为什么续跑更需要它：这里是完整 run 历史（挂起期越长越大），没有条数窗口兜着 ——
@@ -1961,8 +1976,12 @@ public class ResumeService {
 								TurnKeepalive.PHASE_STREAMING, true);
 				try {
 					ContextState state = this.contextCompactor.readState(sessionId);
+					// 压缩输入与写回都必须先滤掉"内部纠正"这类合成指令：
+					// 它只属于本跳交棒视图，进摘要/写回快照等于把系统提示伪装成用户消息（还会被记忆收敛带走）。
+					List<Message> compactorInput = com.example.configmgr.ai.history.SyntheticMessages
+						.withoutCorrectionInstruction(history);
 					int systemTokens = 0;
-					for (Message message : history) {
+					for (Message message : compactorInput) {
 						if (message.getMessageType() == MessageType.SYSTEM) {
 							systemTokens += ContextEstimator.estimate(message.getText());
 						}
@@ -1974,7 +1993,8 @@ public class ResumeService {
 					Runnable onSummaryStart = keepalive == null ? null
 							: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
 					compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
-							runId, snapshot.getModelId(), snapshot.getProviderId(), history, this.codec.serializeAll(history),
+							runId, snapshot.getModelId(), snapshot.getProviderId(), compactorInput,
+							this.codec.serializeAll(compactorInput),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
 							// 披露面的额度必须按<b>交棒那一份</b>上下文算：刷新后工具集变了，用旧的会算错
 							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime),
@@ -1994,7 +2014,8 @@ public class ResumeService {
 					}
 				}
 				if (compaction.changed()) {
-					history = compaction.messages();
+					history = com.example.configmgr.ai.history.SyntheticMessages
+						.withoutCorrectionInstruction(compaction.messages());
 					snapshot.setMessageJson(this.codec.serializeAll(history));
 					// N4：压缩是长窗口（L2 = N 次串行摘要），结束时取消可能已经先到 —— 这一笔同样
 					// 不得把 CANCELLED 翻回 RUNNING；被拒 ⇒ 不写 context 交接位、不交棒驱动。
@@ -2012,6 +2033,14 @@ public class ResumeService {
 					body.put("contextCompaction", "none");
 					body.put("contextCompactionReason", compaction.reason());
 				}
+			}
+
+			// 合成内部指令在窗口/压缩<b>之后</b>才进交棒视图：它既不参与窗口预算、也不进压缩输入，
+			// 更不会随压缩写回快照/记忆（条件结构化交棒的记忆污染面）；模型这一跳仍看得到它，
+			// 且它是历史最后一条（模型紧接着做结构化）。
+			if (conditionInstruction != null) {
+				history = new ArrayList<>(history);
+				history.add(conditionInstruction);
 			}
 
 			body.put("resumed", true);
@@ -2288,6 +2317,26 @@ public class ResumeService {
 			log.warn("续跑交棒前任务槽位重算失败，保留旧槽位（不阻断续跑）runId={}：{}", runId, ex.getMessage());
 			return context;
 		}
+	}
+
+	/**
+	 * 把<b>交棒上下文</b>写回快照：条件结构化标记的持久化/清理都走这里。
+	 *
+	 * <p>为什么必须落库：执行面的第三道防线（{@code ToolRegistry#matchesContext}）读的是
+	 * 快照上下文（{@code SpToolCallingManager} 里的 {@code AiContext.fromMap(snapshot.getContext())}），
+	 * 而 {@link AiContext#fromMap} 是拷贝 —— 只改内存对象，guard 与下一次续跑都看不到。
+	 *
+	 * <p>写门与其它交棒写点同源（{@code saveStatusUnlessCancelled}）：取消已先到 / 租约只读 /
+	 * fence 陈旧 ⇒ {@code false}，调用方必须<b>不驱动模型</b>（本方法不驱动任何东西，不引入双驱动）。
+	 */
+	private boolean persistHandoffContext(String runId, RunSnapshot snapshot, AiContext context) {
+		snapshot.setContext(context.toMap());
+		if (this.store.saveStatusUnlessCancelled(snapshot)) {
+			return true;
+		}
+		log.info("交棒上下文写回被写门拒绝 runId={} step={}（复核取消态/续跑权后收口，不驱动）", runId,
+				context.getStep());
+		return false;
 	}
 
 	/**

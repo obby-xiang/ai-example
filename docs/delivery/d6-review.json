@@ -168,6 +168,13 @@
       "reason": "已同步L1清除的会话级单调事实及L2摘要独立前缀块、不得被run收养或重复累积的窗口契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:675b6be1693dece1f1f16cca5541c1fc5a552384e793ab859ee69d2f292fdefc",
+      "status": "synced",
+      "reason": "已同步宿主推进显式QUERY_COND目标、按每条confirm_step复核条件闭环、交棒标记快照持久化与压缩过滤合成指令",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

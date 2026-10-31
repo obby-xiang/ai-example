@@ -108,6 +108,9 @@ public class DefinitionSelectionForm extends HostForm {
 	/** 配置选择步骤（唯一注册定义见 {@code TaskSteps}；此处只是既有调用点的别名）。 */
 	static final String SELECT_DEFS_STEP = com.example.configmgr.task.service.TaskSteps.SELECT_DEFS;
 
+	/** 条件收集步骤（宿主推进的显式目标：不交给前端按页面位置推断）。 */
+	static final String QUERY_COND_STEP = com.example.configmgr.task.service.TaskSteps.QUERY_COND;
+
 	/** 导出向导页（{@link ContextBuilder#SELECTION_PAGE_IDS} 的成员）。 */
 	static final String EXPORT_PAGE = "export";
 
@@ -161,6 +164,10 @@ public class DefinitionSelectionForm extends HostForm {
 	/**
 	 * 配置选择成功后，由宿主经既有前端 {@code confirm_step} 通道推进到条件步骤。
 	 * 本批已有推进调用、选择失败或页面已离开选择步骤时不重复下发。
+	 *
+	 * <p>目标步骤<b>显式</b>写 {@code step=QUERY_COND}（而不是留空交给前端按"页面当前位置 +1"）：
+	 * 空参数时前端的目标来自 {@code stepIndex+1}，页面状态与任务权威步骤不一致就会二次推进
+	 * （QUERY_COND→EXPORT，跳过条件收集）或直接以"缺少 step"失败。确定性目标也让回执可对账。
 	 */
 	public boolean parkAdvanceIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
 			List<Message> history) {
@@ -176,7 +183,8 @@ public class DefinitionSelectionForm extends HostForm {
 		if (alreadyIssued(runId, toolCallId)) {
 			return false;
 		}
-		PendingToolCall advance = frontendTool(toolCallId, AiToolNames.CONFIRM_STEP, "{}");
+		PendingToolCall advance = frontendTool(toolCallId, AiToolNames.CONFIRM_STEP,
+				"{\"step\":\"" + QUERY_COND_STEP + "\"}");
 		Integer waitSeconds = this.gate.suspendWaitSeconds(advance);
 		if (waitSeconds != null && waitSeconds > 0) {
 			long now = System.currentTimeMillis();

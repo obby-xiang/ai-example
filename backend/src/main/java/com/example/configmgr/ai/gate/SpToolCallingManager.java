@@ -786,9 +786,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 					throw new RunParkedException(runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
 				}
 			}
-			// confirm_step 条件闭环（ConditionsForm#inspectConfirmStep）：单条批次、已披露、未武装时复核；
-			// 拒绝零副作用、挂起先外置，均在 suspended 公告之前完成
-			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null && pendings.size() == 1
+			// confirm_step 条件闭环（ConditionsForm#inspectConfirmStep）：逐条复核、已披露、未武装；
+			// 拒绝零副作用、挂起先外置，均在 suspended 公告之前完成。
+			// 判据<b>不</b>看批次大小：模型可以把 confirm_step 与 get_config_def 等放进同一批，
+			// 只按"单条批次"复核会让这类批次整段跳过条件收集、直接推进到 EXPORT（按全量导出）。
+			if (!budgetArmed && stepsUsed < maxToolSteps && this.conditionsForm != null
+					&& AiToolNames.CONFIRM_STEP.equals(pending.getName())
 					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
 				checkCancelled(runId);
 				ConditionsForm.ConfirmStepDecision conditionDecision = this.conditionsForm.inspectConfirmStep(runId,

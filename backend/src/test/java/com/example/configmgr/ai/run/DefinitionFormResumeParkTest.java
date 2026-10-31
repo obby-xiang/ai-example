@@ -77,9 +77,9 @@ import static org.mockito.Mockito.when;
  * <li>旧任务的槽位/任务号不得污染新任务：旧槽位不压制新任务的表单，表单也不预填旧选择；</li>
  * <li>已完成的旧任务（普通浏览，本轮没有 {@code create_task}）⇒ 不弹；</li>
  * <li>表单回灌后的续跑：照常交棒（选择值进历史）；</li>
- * <li>选择成功后的连续节点（{@code select_definitions} 成功 → 宿主挂起确定性 {@code confirm_step}）⇒
- * 宿主代替模型推进、不驱动模型，也不再问第二次配置；到 {@code QUERY_COND} 之后交棒前会先问条件表单，
- * 它挂起时同样不驱动模型。</li>
+ * <li>选择成功后的连续节点（{@code select_definitions} 成功 → 宿主挂起确定性 {@code confirm_step}，
+ * 且目标步骤显式写 {@code QUERY_COND}）⇒ 宿主代替模型推进、不驱动模型，也不再问第二次配置；
+ * 到 {@code QUERY_COND} 之后交棒前会先问条件表单，它挂起时同样不驱动模型。</li>
  * </ol>
  */
 class DefinitionFormResumeParkTest {
@@ -422,7 +422,7 @@ class DefinitionFormResumeParkTest {
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
 
-		// ② 挂起面是既有前端通道上的确定性条目（不是第二张配置表，也不代填推进参数/不直接写业务库）
+		// ② 挂起面是既有前端通道上的确定性条目（不是第二张配置表，也不直接写业务库）
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.as("勾选成功后不重复问配置").noneMatch(pending -> CALL_FORM.equals(pending.getToolCallId()));
 		RunSnapshot snapshot = this.store.get(RUN_ID);
@@ -434,8 +434,9 @@ class DefinitionFormResumeParkTest {
 		assertThat(advance.getName()).isEqualTo("confirm_step");
 		assertThat(advance.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
 		assertThat(advance.getStatus()).isEqualTo(PendingToolCall.PENDING);
-		assertThat(parse(advance.getArguments()).size()).as("推进目标由页面/守卫决定，宿主不代填步骤")
-			.isZero();
+		assertThat(parse(advance.getArguments()).path("step").asText())
+			.as("推进目标是确定性的 QUERY_COND（不交给前端按页面位置推断：否则页面领先时会二次推进）")
+			.isEqualTo("QUERY_COND");
 		verify(this.emitter).suspended(eq(List.of(advance)), anyString(), anyString(), anyString());
 		verify(this.emitter).frontendToolRequest(eq(advance), any());
 		// 停在选择步骤的推进处时，条件表单根本没有被问到（顺序：推进 → 配置表 → 条件表）
