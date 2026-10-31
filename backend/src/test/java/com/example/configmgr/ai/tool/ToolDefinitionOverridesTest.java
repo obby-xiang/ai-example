@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.18", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.20", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -359,7 +359,7 @@ class ToolDefinitionOverridesTest {
         assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
         assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
 
-        assertEquals("2026-10-27.18", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.20", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -384,10 +384,12 @@ class ToolDefinitionOverridesTest {
             // 2026-10-27.16（条件收集单通道）引入，本条断言随当前 pin 同步：导出创建必须显式给 conditions，未决定传 {}
             assertTrue(description.contains("必须显式传 conditions"), description);
             assertTrue(description.contains("未决定传 {}"), description);
+            // 2026-10-27.20：create_task 的 {} 仍只表示条件未决定，不得与 set_condition 的"明确不设"混用
+            assertTrue(description.contains("只表示条件未决定"), description);
             assertTrue(description.contains("navigate_to"), description);
         }
 
-        assertEquals("2026-10-27.18", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.20", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
     }
 
     private static String createTaskDescriptionFromYaml() {

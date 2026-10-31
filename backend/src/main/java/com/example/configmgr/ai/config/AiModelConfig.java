@@ -5,6 +5,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.PerRunChatMemory;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
+import com.example.configmgr.ai.run.RunStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
@@ -68,8 +69,9 @@ public class AiModelConfig {
 	@Bean
 	@ConditionalOnMissingBean
 	public ChatMemoryRepository chatMemoryRepository(StringRedisTemplate redisTemplate, MessageJsonCodec codec,
-			AiProperties properties, com.example.configmgr.ai.session.SessionPurgeGuard purgeGuard) {
-		return new RedisChatMemoryRepository(redisTemplate, codec, properties.getSessionTtl(), purgeGuard);
+			AiProperties properties, com.example.configmgr.ai.session.SessionPurgeGuard purgeGuard, RunStore runStore) {
+		return new RedisChatMemoryRepository(redisTemplate, codec, properties.getSessionTtl(), purgeGuard,
+				runStore::activeRunIds);
 	}
 
 	@Bean

@@ -194,14 +194,21 @@ describe('confirm_step（离开 QUERY_COND）是条件提交点', () => {
     expect(conditionWrites()).toEqual([[7, 'CURRENCY', '{}']])
   })
 
-  it('未选中的配置项：条件只写草案，回执如实说明"推进步骤时不会提交"', async () => {
+  it('未勾选的配置项：结构化失败、零草案、零提交（F8）', async () => {
     await mountWizard()
 
     const reply = await setCondition(CNY_CONDITION, 'RATE')
     await flushPromises()
 
+    // 旧口径：先写草案、再回一句"不在当前选中集"（成功回执 + 永远不提交的隐形草案）
+    expect(reply).toMatchObject({ ok: false })
+    expect(String((reply as { reason?: string }).reason ?? '')).toContain('未勾选')
     expect(api.setCondition).not.toHaveBeenCalled()
-    expect(String(reply)).toContain('不在当前选中集')
+
+    // 提交点只遍历选中集：RATE 也没有被顺带提交
+    await confirmStep()
+    await flushPromises()
+    expect(conditionWrites()).toEqual([[7, 'CURRENCY', '{}']])
   })
 
   it('服务端存的空条件（"{}"）同样提交 {}：留空仍是一次明确反馈', async () => {

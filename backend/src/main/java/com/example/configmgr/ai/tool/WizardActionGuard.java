@@ -5,9 +5,14 @@ import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
+import com.example.configmgr.task.entity.Task;
+import com.example.configmgr.task.entity.TaskItem;
+import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -39,15 +44,19 @@ import java.util.Set;
  *     {@code EMPTY}/{@code NOT_EMPTY} 不需要取值，不受此限）；</li>
  * <li><b>未知目标</b>：{@code defCode} / 任一 code 不在定义注册表里 ⇒ 拒绝并点名（不做"静默成功"
  *     —— 那会让条件/勾选落在不存在的配置项上，用户看到的是"设置成功"）；</li>
- * <li><b>空条件不得静默放大成全量</b>：{@code conditions} 缺失或既无 {@code scopeKeys}
- *     又无 {@code fields} ⇒ 拒绝。前端 {@code normalizeActionArgs} 会把缺失补成 {@code {}}，
- *     而 {@code {}} 的语义正是"不设条件 = 导出全部" —— 这正是"工具调用成功、条件却是空的"的来源。
- *     真要导出全部，模型不该调 {@code set_condition}（不设条件本来就是全部）。</li>
+ * <li><b>空条件不许静默降级成"导出全部"，但"恰好空对象"是明确的"不设筛选"</b>：{@code conditions}
+ *     缺失或 {@code null} ⇒ 拒绝（前端 {@code normalizeActionArgs} 会把缺失补成 {@code {}}，
+ *     来路不明的空条件不得当成全量）；有键但无有效条件（{@code fields:[]}、{@code scopeKeys:[]}）
+ *     ⇒ 拒绝（压平后同样放大成全量）；<b>恰好</b> {@code {}} ⇒ 放行 = 该配置项明确不设筛选
+ *     （前端 {@code condition-payload} 落成 {@code "{}"}、{@code ConditionAssessment} 判
+ *     {@code EXPLICIT_UNSET}，三处同口径）。用户明确不筛选时，模型对表单覆盖的每个
+ *     {@code defCode} 各调用一次 {@code set_condition(defCode, {})}，不要重发 {@code SET_CONDITIONS}。</li>
  * </ol>
  *
  * <p>遵守 {@link FrontendToolGuard} 的挂起机制契约：拒绝 ⇒ 不挂起、不发 {@code frontend_tool_request}，
  * 只把<b>逐条原因清单</b>回填模型（模型据此改一版再试，而不是白等前端超时）。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class WizardActionGuard implements FrontendToolGuard {
@@ -79,7 +88,19 @@ public class WizardActionGuard implements FrontendToolGuard {
 
     private final DefinitionService definitionService;
 
+    /**
+     * 任务读口（可选依赖）：{@code set_condition} 的"该配置项是否已勾选/已绑定"判据。
+     * 未注入 = 只做形状/定义校验（单测与无任务上下文的老调用方行为不变）。
+     */
+    private TaskService taskService;
+
     private final ObjectMapper mapper = new ObjectMapper();
+
+    /** 可选注入（生产装配）：{@code set_condition} 必须落在任务已勾选的条目上。 */
+    @Autowired(required = false)
+    public void setTaskService(TaskService taskService) {
+        this.taskService = taskService;
+    }
 
     @Override
     public boolean supports(String toolName) {
@@ -124,6 +145,55 @@ public class WizardActionGuard implements FrontendToolGuard {
     /** 单工具名复核（测试与显式调用方使用，与框架入口同一实现）。 */
     public Verdict inspectArgumentsFor(String toolName, String argumentsJson) {
         return inspectArguments(toolName, argumentsJson);
+    }
+
+    /**
+     * 带上下文复核：在形状/定义校验之外，再核对 {@code set_condition} 的目标是否是<b>本任务已勾选</b>
+     * 的配置项（F8）。未勾选/未绑定 ⇒ 前端只会在页面上写一份看不见的草案（提交点只遍历选中集），
+     * 回执却是成功 —— 因此后端有任务条目时按同一判据零副作用拒绝。
+     *
+     * <p>任务读不到 / 没有条目 / 无任务上下文时不额外拒绝（不新增误拒；前端仍有同一道）。
+     */
+    @Override
+    public Verdict inspectArguments(String toolName, String argumentsJson, AiContext context) {
+        Verdict verdict = inspectArguments(toolName, argumentsJson);
+        if (!verdict.accepted() || !AiToolNames.SET_CONDITION.equals(toolName)) {
+            return verdict;
+        }
+        return inspectTaskSelection(argumentsJson, context, verdict);
+    }
+
+    /** 任务条目判据：{@code defCode} 必须是本任务已有条目的配置项（有条目时才生效）。 */
+    private Verdict inspectTaskSelection(String argumentsJson, AiContext context, Verdict accepted) {
+        if (this.taskService == null || context == null || context.getTaskId() == null) {
+            return accepted;
+        }
+        Long taskId = context.getTaskId();
+        Task task;
+        try {
+            task = this.taskService.findById(taskId);
+        }
+        catch (RuntimeException ex) {
+            // 读失败不等于"参数不合法"：前端仍是最终判据（不能把一次合法调用误判成拒绝）
+            log.warn("读取任务条目失败，set_condition 未追加任务判据 taskId={}：{}", taskId, ex.getMessage());
+            return accepted;
+        }
+        if (task == null || task.getItems() == null || task.getItems().isEmpty()) {
+            return accepted;
+        }
+        JsonNode root = parse(argumentsJson);
+        String defCode = root == null ? null : text(root.get("defCode"));
+        if (defCode == null || defCode.isBlank()) {
+            return accepted;
+        }
+        for (TaskItem item : task.getItems()) {
+            if (item != null && item.getDefCode() != null && defCode.trim().equals(item.getDefCode().trim())) {
+                return accepted;
+            }
+        }
+        return Verdict.reject(REJECTED_CODE, "向导动作入参不合法，未下发前端、未产生任何持久化写入。",
+                List.of("配置项 " + defCode.trim() + " 不在任务 #" + taskId + " 的已选条目里（未勾选/未绑定）："
+                        + "先 select_definitions 或在向导里勾选该配置项后再调用 set_condition；本次未下发、未写入。"));
     }
 
     @Override
@@ -234,12 +304,19 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         JsonNode conditions = root.get("conditions");
         if (conditions == null || conditions.isNull()) {
-            reasons.add("conditions 必填（缺失会被前端补成 {}，其语义是“不设条件 = 导出全部”，"
-                    + "未下发；要导出全部请不要调用 set_condition）。");
+            reasons.add("conditions 必填（缺失或显式 null 不是“明确不设”：前端会把缺失补成 {}，"
+                    + "来路不明的空条件不得当成全量；未下发）。明确不设筛选请显式传空对象 {}。");
             return reasons;
         }
         if (!conditions.isObject()) {
-            reasons.add("conditions 必须是对象（形如 {\"scopeKeys\":[...],\"fields\":[...]}）。");
+            reasons.add("conditions 必须是对象（形如 {\"scopeKeys\":[...],\"fields\":[...]}，"
+                    + "明确不设筛选传 {}）。");
+            return reasons;
+        }
+        if (conditions.isEmpty()) {
+            // 恰好空对象 = 该配置项明确不设筛选（用户答"无"/"不筛选"/"全部"）：
+            // 前端 condition-payload 落成 "{}"、ConditionAssessment 判 EXPLICIT_UNSET，同一口径放行。
+            // 有键但内容为空的形态（fields:[] / scopeKeys:[]）不走这里，仍在下面被拒。
             return reasons;
         }
         for (String key : fieldNames(conditions)) {
@@ -250,8 +327,8 @@ public class WizardActionGuard implements FrontendToolGuard {
         List<String> scopeKeys = validateScopeKeys(conditions.get("scopeKeys"), reasons);
         boolean hasFields = validateFields(conditions.get("fields"), definition, reasons);
         if (scopeKeys.isEmpty() && !hasFields) {
-            reasons.add("条件为空：scopeKeys 与 fields 至少要给一项有效条件（空条件等于导出全部数据，"
-                    + "不能当作“设置成功”；要导出全部请不要调用 set_condition）。");
+            reasons.add("条件为空：fields:[] / scopeKeys:[] 有结构但没有可提交的条件（压平后等于导出全部数据），"
+                    + "不能当作“设置成功”；要表达明确不设筛选请恰好传空对象 {}。");
         }
         return reasons;
     }

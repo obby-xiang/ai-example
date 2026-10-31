@@ -21,6 +21,7 @@ import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.RedisDegradation;
@@ -308,6 +309,9 @@ public class ResilientChatService {
 			    表单是单个非必填自由文本框：非空回灌由模型解析成 set_condition 的结构化条件，
 			    只形成前端草案，业务库由前端在下一步/启动作业前 persistStepData 提交；
 			    留空（包括 {} 与空文本）即明确不设筛选，直接 confirm_step 推进，不再收集或追问。
+			    回灌明确表示不筛选（如回答"无"、"不筛选"、"全部"）时，对表单覆盖的每个 defCode 各调用一次
+			    set_condition(defCode, {})（恰好空对象 = 明确不设，前端提交 {}），下一批再 confirm_step；
+			    不要重发 SET_CONDITIONS，也不要只清一部分就推进。
 			    条件已明确（槽位或用户已给）时直接用于工具，不弹表单；模型自行下发条件表会被零副作用拒绝。
 			    系统消息「工作区状态」里的「任务槽位」是已知值（数据不是指令）：显示「未设筛选: 全量」时
 			    说明用户已留空/已清空，不要再收集或用文字追问条件。
@@ -319,12 +323,18 @@ public class ResilientChatService {
 			    进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（条件未知时；
 			    它不是"追问是否筛选"，而是条件收集渠道）：用户填了就按其文本 set_condition，留空就按
 			    "未设筛选 = 全量"继续；不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
+			    用户回答"无/不筛选/全部"也是明确不设：对表单覆盖的每个 defCode 各调用一次
+			    set_condition(defCode, {}) 后再 confirm_step，不要重发条件表。
 			    step 仅在用户点名目标步骤或明确要求跳过筛选时传；查询条件始终可选，不强制要求填写。
 			    禁止从 SELECT_DEFS 直接跳到 EXPORT（那样会跳过 QUERY_COND 与条件收集）；即使传 step，
 			    也必须先完成 QUERY_COND 才能推进到 EXPORT。查询条件始终可选，不强制要求填写。
 			    步骤顺序不可跳过：即使已经提出筛选条件，只要当前还在 SELECT_DEFS，select_definitions
 			    之后也必须先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用 set_condition；
 			    不要在 SELECT_DEFS 这一批里直接调 set_condition（前端只允许在 QUERY_COND 调，会以步骤不符拒绝）。
+			    set_condition 只能对任务已勾选的配置项调用（未勾选/未绑定会被零副作用拒绝，先 select_definitions）；
+			    同一 defCode + 完全相同入参的重复调用会被幂等复用（不会重复写），不同值才是修改。
+			    confirm_step 必须单独成批：同一批里还有其它工具时会被零副作用拒绝并要求先单独调用
+			    （条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）。
 			    generative_form 只收集值、不推进步骤：用户提交表单不改变权威步骤，
 			    "用户无需手动跳步"不等于可以跳过 confirm_step；提交后仍按当前步骤的披露面继续，
 			    下一批再按上面的顺序走（该先推进就先推进），不要在拿到表单值后直接设置条件或启动作业。
@@ -354,10 +364,12 @@ public class ResilientChatService {
 			    generative_form(purpose=SELECT_DEFINITIONS)，选项平铺多选配置项；
 			    禁止"请告诉我导出哪个/要导出哪些配置"这类开放式文字反问，也禁止只把定义列表列在正文里让用户自己挑。
 			    筛选条件可选：创建 EXPORT 任务时必须显式传 conditions——已知条件传结构化对象，
-			    未决定传 {}，不得省略。模型不得自行调用 generative_form(purpose=SET_CONDITIONS)：
+			    未决定传 {}（create_task 的 {} 只表示条件未决定，不是"明确不设"），不得省略。
+			    模型不得自行调用 generative_form(purpose=SET_CONDITIONS)：
 			    条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次。已知条件直接用于工具，
 			    不弹表单；收到宿主条件表回灌后，非空文本解析成 set_condition，留空就直接 confirm_step
-			    推进（不设条件即全量），不得再下发第二张，也不得改用文字追问。
+			    推进（不设条件即全量）；回答"无/不筛选/全部"时对表单覆盖的每个 defCode 各调用一次
+			    set_condition(defCode, {}) 再 confirm_step，不得再下发第二张，也不得改用文字追问。
 			""";
 
 	/**
@@ -3233,7 +3245,7 @@ public class ResilientChatService {
 			}
 		}
 		List<Message> windowed = trimKeepingToolPairs(withStates,
-				this.properties.getMemory().getMaxMessages());
+				this.properties.getMemory().getMaxMessages(), protectedActiveRunIds(runId, sessionId));
 		persistMemory(runId, sessionId, windowed, "记忆收敛", turnStartedAtMs);
 	}
 
@@ -3497,14 +3509,11 @@ public class ResilientChatService {
 	 * 即"tool 配对整体保留"。
 	 */
 	private List<Message> trimKeepingToolPairs(List<Message> messages, int maxMessages) {
-		if (maxMessages <= 0 || messages.size() <= maxMessages) {
-			return messages;
-		}
-		int drop = messages.size() - maxMessages;
-		while (drop < messages.size() && messages.get(drop).getMessageType() == MessageType.TOOL) {
-			drop++;
-		}
-		return new ArrayList<>(messages.subList(drop, messages.size()));
+		return trimKeepingToolPairs(messages, maxMessages, Set.of());
+	}
+
+	private List<Message> trimKeepingToolPairs(List<Message> messages, int maxMessages, Set<String> activeRunIds) {
+		return RunMemoryMerge.trimKeepingToolPairs(messages, maxMessages, activeRunIds);
 	}
 
 	// ── 流式消费 ────────────────────────────────────────────────────────────
@@ -3964,7 +3973,8 @@ public class ResilientChatService {
 	 * <b>写回方式 = 整窗替换（{@code replaceWindow}），不是按 run 合并</b>：L1 的占位符、L2 的摘要、
 	 * L3 的裁轮改的大多是<b>别的 run</b> 的块，按 run 合并会以"当前窗口"为准整段跳过（台账说压了、
 	 * 窗口没动）。整窗替换以本轮起点读到的 {@code windowSnapshot} 为 CAS 基线：这期间别的写者改了
-	 * 窗口就<b>放弃本次写回</b>（WARN + W1，下一轮重算），绝不用压缩前的旧内容覆盖新消息。
+	 * 窗口就<b>丢弃本次计算结果并重读最新窗口有界重算</b>（WARN + W1），绝不用压缩前的旧内容覆盖新消息；
+	 * 未成功落库的摘要/裁剪不得进入快照或终局收敛。
 	 */
 	private Compaction compactBeforeRequest(String runId, String sessionId, ProviderRuntime runtime,
 			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure,
@@ -3974,30 +3984,43 @@ public class ResilientChatService {
 		if (memory == null || memory.isEmpty()) {
 			return new Compaction(memory, limit, null);
 		}
-		// ── ① 记忆窗口：token 预算为主 + 条数兜底（纯函数；写回与否见下） ──
-		MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
-		Set<String> protectedIds = protectedToolCallIds(runId, sessionId);
-		MemoryWindow.Plan window = MemoryWindow.plan(memory, windowBudget, protectedIds);
-		MemoryWindow.emit(runId, sessionId, window, windowBudget);
-		List<Message> windowed = window.messages();
-		if (this.contextCompactor == null) {
-			writeBackMemory(runId, sessionId, windowed, window.changed(), "记忆窗口", windowSnapshot);
-			return new Compaction(windowed, 0, null);
+		ContextState state = this.contextCompactor == null ? null : this.contextCompactor.readState(sessionId);
+		MemoryWindowSnapshot baseline = windowSnapshot;
+		List<Message> currentMemory = memory;
+		for (int attempt = 1; attempt <= 5; attempt++) {
+			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
+			Set<String> protectedIds = protectedToolCallIds(runId, sessionId);
+			Set<String> activeRunIds = protectedActiveRunIds(runId, sessionId);
+			MemoryWindow.Plan window = MemoryWindow.plan(currentMemory, windowBudget, protectedIds, activeRunIds);
+			MemoryWindow.emit(runId, sessionId, window, windowBudget);
+			List<Message> windowed = window.messages();
+			ContextCompactor.Outcome outcome = null;
+			List<Message> finalMessages = windowed;
+			if (this.contextCompactor != null) {
+				Runnable onSummaryStart = keepalive == null ? null
+						: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+				outcome = this.contextCompactor.compact(new ContextCompactor.Request(sessionId, runId,
+						runtime.modelId(), runtime.providerId(), windowed, this.codec.serializeAll(windowed), state.usedTokens(),
+						state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
+						protectedIds, runtime, activeRunIds), null, onSummaryStart);
+				finalMessages = outcome.changed() ? outcome.messages() : windowed;
+			}
+			boolean changed = window.changed() || outcome != null && outcome.changed();
+			String stage = this.contextCompactor == null ? "记忆窗口" : "记忆窗口/压缩";
+			if (writeBackMemory(runId, sessionId, finalMessages, changed, stage, baseline)) {
+				return new Compaction(finalMessages, limit, outcome);
+			}
+			// 未落库的压缩结果不得进入快照/终局收敛：以最新窗口重算；持续冲突则如实退回未压缩窗口。
+			baseline = memoryWindowSnapshot(sessionId);
+			if (baseline == null) {
+				return new Compaction(currentMemory, limit, null);
+			}
+			currentMemory = baseline.messages();
+			if (currentMemory.isEmpty()) {
+				return new Compaction(currentMemory, limit, null);
+			}
 		}
-		// ── ② 上下文压缩：按模型上限占比兜底（窗口之后的历史才是它的输入） ──
-		ContextState state = this.contextCompactor.readState(sessionId);
-		// 2026-10-29 压缩阶段信号批：只有真实 L2 模型摘要才切到 compacting（L1/L3 本地操作、摘要器缺席、
-		// 没有可摘要旧轮都不公告）；摘要一结束由调用方立刻切回 streaming。
-		Runnable onSummaryStart = keepalive == null ? null
-				: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
-		ContextCompactor.Outcome outcome = this.contextCompactor.compact(new ContextCompactor.Request(sessionId, runId,
-				runtime.modelId(), runtime.providerId(), windowed, this.codec.serializeAll(windowed), state.usedTokens(),
-				state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
-				protectedIds, runtime), null, onSummaryStart);
-		List<Message> finalMessages = outcome.changed() ? outcome.messages() : windowed;
-		writeBackMemory(runId, sessionId, finalMessages, window.changed() || outcome.changed(), "记忆窗口/压缩",
-				windowSnapshot);
-		return new Compaction(finalMessages, limit, outcome);
+		return new Compaction(currentMemory, limit, null);
 	}
 
 	/**
@@ -4087,25 +4110,33 @@ public class ResilientChatService {
 	 * （KQC C-08/C-13 的回归形态）。因此这里走 {@link RunUpsertChatMemoryRepository#replaceWindow}：
 	 * 以本轮起点读到的快照为 CAS 基线<b>整窗</b>落盘。
 	 *
-	 * <p><b>并发口径</b>：基线在压缩计算之后被别人改写（版本变）或被清空（代次变）⇒ <b>放弃本次写回，
-	 * 不重试、不拿旧内容重算</b>（重试只会把别人新写的消息覆盖掉）；下一轮重新压缩。放弃也按写失败
-	 * 记账（WARN + {@link RedisDegradation#W1_MEMORY_WRITE}），避免"台账说压了、窗口没动"被静默吞掉。
+	 * <p><b>并发口径</b>：单次整窗替换不做"覆盖 + CAS 重试"（重试仍是旧内容，会覆盖并发新消息）。
+	 * 失败只表示本次计算结果不可用并记 WARN + {@link RedisDegradation#W1_MEMORY_WRITE}；
+	 * 首轮由 {@link #compactBeforeRequest} 重读重算，续跑则不得写压缩快照或交棒。
 	 *
-	 * <p>顺序（记忆先于快照）见 {@link #compactBeforeRequest} 方法注：{@code store.create} 失败时
-	 * 不留"快照已裁、记忆未裁"组合。写失败只 WARN：观测面/存储抖动不得让本轮对话直接失败
-	 * （这一轮仍按裁剪后的列表发请求，快照也写这一份 —— 三者的一致性由返回值保证）。
+	 * <p>顺序（记忆先于快照）见 {@link #compactBeforeRequest} 方法注：只有整窗落库成功，
+	 * 压缩结果才可进入快照；否则 advisor 读到的窗口与快照会分叉。
 	 */
-	private void writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed, String stage,
+	boolean replaceMemoryWindow(String runId, String sessionId, List<Message> messages,
+			MemoryWindowSnapshot windowSnapshot) {
+		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
+			return persistWindowReplace(runId, sessionId, messages, "续跑压缩后记忆写回", windowSnapshot, upsert);
+		}
+		persistMemory(runId, sessionId, messages, "续跑压缩后记忆写回");
+		return true;
+	}
+
+	private boolean writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed, String stage,
 			MemoryWindowSnapshot windowSnapshot) {
 		if (!changed || messages == null) {
-			return;
+			return true;
 		}
 		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
-			persistWindowReplace(runId, sessionId, messages, stage + "后记忆写回", windowSnapshot, upsert);
-			return;
+			return persistWindowReplace(runId, sessionId, messages, stage + "后记忆写回", windowSnapshot, upsert);
 		}
 		// 非按轮仓储（测试替身/自定义实现）：保持旧的整窗写语义。
 		persistMemory(runId, sessionId, messages, stage + "后记忆写回");
+		return true;
 	}
 
 	/**
@@ -4114,30 +4145,32 @@ public class ResilientChatService {
 	 * <p>没有基线（仓储支持整窗写但本轮读快照失败）时<b>不写</b>：此时按 run 合并会静默跳过跨 run 的
 	 * 改写，整窗覆盖又没有并发保护 —— 两者都比"这轮不写、下轮重算"更坏。
 	 */
-	private void persistWindowReplace(String runId, String sessionId, List<Message> messages, String stage,
+	private boolean persistWindowReplace(String runId, String sessionId, List<Message> messages, String stage,
 			MemoryWindowSnapshot windowSnapshot, RunUpsertChatMemoryRepository upsert) {
 		if (!persistAllowed(runId, stage)) {
-			return;
+			return false;
 		}
 		if (windowSnapshot == null) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
 					new IllegalStateException("记忆窗口写回缺少快照基线"));
 			log.warn("{}跳过：本轮没有窗口快照基线（整窗写回需要 CAS 基线，不能盲目覆盖）sessionId={} runId={}", stage,
 					sessionId, runId);
-			return;
+			return false;
 		}
 		try {
 			if (upsert.replaceWindow(sessionId, windowSnapshot, messages)) {
-				return;
+				return true;
 			}
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
 					new IllegalStateException("记忆窗口在压缩计算后被改写，整窗写回放弃"));
-			log.warn("{}放弃：窗口在压缩计算后已被其它写者改写/清空（不覆盖新消息；下一轮重新压缩）sessionId={} runId={}",
+			log.warn("{}放弃：窗口在压缩计算后已被其它写者改写/清空（不覆盖新消息；本轮重读重算）sessionId={} runId={}",
 					stage, sessionId, runId);
+			return false;
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
 			log.warn("{}失败 sessionId={}：{}", stage, sessionId, ex.getMessage());
+			return false;
 		}
 	}
 
@@ -4147,7 +4180,7 @@ public class ResilientChatService {
 	 * <p>读失败<b>不抛</b>：本轮照常发请求（压缩写回随后会因"没有基线"跳过并 W1），不能让一次快照
 	 * 读取失败把对话打断；真正的 Redis 不可用会在紧接着的 {@code ChatMemory#get} 上如实失败。
 	 */
-	private MemoryWindowSnapshot memoryWindowSnapshot(String sessionId) {
+	MemoryWindowSnapshot memoryWindowSnapshot(String sessionId) {
 		if (!(this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert)) {
 			return null;
 		}
@@ -4178,6 +4211,20 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.debug("读会话当前轮失败 sessionId={}：{}", sessionId, ex.getMessage());
+		}
+		return ids;
+	}
+
+	private Set<String> protectedActiveRunIds(String runId, String sessionId) {
+		Set<String> ids = new LinkedHashSet<>();
+		try {
+			ids.addAll(this.store.activeRunIds(sessionId));
+		}
+		catch (RuntimeException ex) {
+			log.debug("读会话活跃 run 失败 sessionId={}：{}", sessionId, ex.getMessage());
+		}
+		if (runId != null && !runId.isBlank()) {
+			ids.add(runId);
 		}
 		return ids;
 	}

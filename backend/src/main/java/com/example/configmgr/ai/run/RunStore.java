@@ -1457,6 +1457,38 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
+	/**
+	 * 本会话所有非终态 runId（记忆窗口/压缩的裁剪 pin）。快照不可读时保守按活跃处理。
+	 */
+	public Set<String> activeRunIds(String sessionId) {
+		if (sessionId == null || sessionId.isBlank()) {
+			return Set.of();
+		}
+		Set<String> candidates = new java.util.LinkedHashSet<>();
+		Set<ZSetOperations.TypedTuple<String>> ordered = activeRunOrder(sessionId);
+		if (ordered != null) {
+			for (ZSetOperations.TypedTuple<String> tuple : ordered) {
+				candidates.add(tuple.getValue());
+			}
+		}
+		else {
+			candidates.addAll(sessionRunIds(sessionId));
+		}
+		Set<String> active = new java.util.LinkedHashSet<>();
+		for (String runId : candidates) {
+			try {
+				RunSnapshot snapshot = get(runId);
+				if (snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus())) {
+					active.add(runId);
+				}
+			}
+			catch (RuntimeException ex) {
+				active.add(runId);
+			}
+		}
+		return active;
+	}
+
 	/** 会话→全部 runId 的轻量索引键名（{@code ai:session:runs:<tenantId>:<userId>:<sessionId>}）。 */
 	public String sessionRunsKey(String sessionId) {
 		return TenantKeyScope.scoped(SESSION_RUNS_PREFIX, sessionId);

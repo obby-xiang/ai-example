@@ -71,6 +71,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -760,6 +761,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		Set<String> preflightBlocked = new HashSet<>();
 		Set<String> createTaskBlocked = new HashSet<>();
 		Set<String> frontendRejected = new HashSet<>();
+		// F11：完全相同的 set_condition 已在本 run/任务/defCode 成功结算 ⇒ 幂等重放（不再下发前端）
+		Map<String, String> idempotentReplay = new HashMap<>();
+		// F11（同批）：同一批次内完全相同的 set_condition 只挂起第一条，其余按首条的结局幂等收口
+		Map<String, String> batchSetConditionSeen = new HashMap<>();
+		Map<String, String> batchDuplicateOf = new HashMap<>();
 		// AR-03 单轮上限 1：同一轮只允许创建一次任务。批内重复在挂起前就拒绝（不弹第二张卡），
 		// 跨批重复按台账判定（第一笔执行后 ledger 已有记录）。
 		boolean createTaskSeenInBatch = false;
@@ -795,7 +801,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
 				checkCancelled(runId);
 				ConditionsForm.ConfirmStepDecision conditionDecision = this.conditionsForm.inspectConfirmStep(runId,
-						context, pending, prompt.getInstructions());
+						context, pending, prompt.getInstructions(), pendings.size() == 1);
 				if (conditionDecision.parked()) {
 					throw new RunParkedException(runId, pending.getToolCallId(),
 							PendingToolCall.KIND_FRONTEND);
@@ -865,6 +871,27 @@ public class SpToolCallingManager implements ToolCallingManager {
 					settleFrontendRejected(runId, pending, verdict);
 					frontendRejected.add(pending.getToolCallId());
 					continue;
+				}
+				// F11：同 run/任务/defCode + 完全相同入参且已成功结算 ⇒ 幂等重放（不再下发一次前端，
+				// 避免重复草案/重复写）。不同值 = 修改，settledSetConditionReplay 返回 null 照常执行。
+				if (this.conditionsForm != null && AiToolNames.SET_CONDITION.equals(pending.getName())) {
+					String replay = this.conditionsForm.settledSetConditionReplay(runId, context,
+							pending.getArguments());
+					if (replay != null) {
+						settleIdempotentReplay(runId, pending, replay);
+						idempotentReplay.put(pending.getToolCallId(), replay);
+						continue;
+					}
+					// 同一批次内的完全重复：只让第一条挂起（第二条在首条结算后按同一结局收口）
+					String signature = ConditionsForm.setConditionSignature(pending.getArguments());
+					if (signature != null) {
+						String firstCallId = batchSetConditionSeen.get(signature);
+						if (firstCallId != null) {
+							batchDuplicateOf.put(pending.getToolCallId(), firstCallId);
+							continue;
+						}
+						batchSetConditionSeen.put(signature, pending.getToolCallId());
+					}
 				}
 			}
 			suspended.add(pending);
@@ -973,6 +1000,49 @@ public class SpToolCallingManager implements ToolCallingManager {
 					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
 							modelData(pending, text, modelBudget)));
 					traceToolSkipped(runId, snapshot.getSessionId(), pending, pending.effectiveCode());
+					continue;
+				}
+				// F11：完全相同入参的 set_condition 复用首次回执（未下发前端、未重复写）。
+				// 帧面与普通成功同形（tool_start → frontend_tool_result ok），模型拿到同一份回执。
+				String replayText = idempotentReplay.get(pending.getToolCallId());
+				if (replayText != null) {
+					emitToolStartOnce(runId, toolStarted, pending);
+					out.frontendToolResult(pending, true, replayText);
+					ToolCallEndTrace.emitOnce(this.settlementObservations, runId, snapshot.getSessionId(), pending,
+							pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, replayText,
+							this.sheetAudit);
+					responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+							modelData(pending, replayText, modelBudget)));
+					continue;
+				}
+				// F11（同批）：完全重复的 set_condition 按首条结局收口 —— 首条成功 ⇒ 幂等复用同一回执；
+				// 首条未成功 ⇒ 本条同样零副作用失败（不重复下发、不重复写）。
+				String duplicateOf = batchDuplicateOf.get(pending.getToolCallId());
+				if (duplicateOf != null) {
+					PendingToolCall first = this.store.pendingLenient(runId, duplicateOf);
+					emitToolStartOnce(runId, toolStarted, pending);
+					if (first != null && first.effectiveOutcome() == ToolOutcome.OK) {
+						String text = first.getResultText() == null ? "" : first.getResultText();
+						settleIdempotentReplay(runId, pending, text);
+						out.frontendToolResult(pending, true, text);
+						ToolCallEndTrace.emitOnce(this.settlementObservations, runId, snapshot.getSessionId(),
+								pending, pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, text,
+								this.sheetAudit);
+						responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+								modelData(pending, text, modelBudget)));
+					}
+					else {
+						String code = first == null ? ToolOutcome.CODE_TOOL_EXECUTION_FAILED : first.effectiveCode();
+						settleFrontendRejected(runId, pending, code,
+								"同批重复的 set_condition 未重复执行（首次未成功）",
+								List.of("同一批里出现了两条完全相同的 set_condition：只执行第一条，本条未下发前端",
+										"首次调用的结局："
+												+ (first == null ? "未结算" : first.effectiveOutcome().wire())));
+						String text = frameText(pending.getResultText());
+						out.frontendToolResult(pending, false, text);
+						responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+								modelData(pending, text, modelBudget)));
+					}
 					continue;
 				}
 				// F5：预检未通过的条目没有确认卡（没有 suspended/confirm_request），只有一张
@@ -2166,6 +2236,26 @@ public class SpToolCallingManager implements ToolCallingManager {
 	private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
 		return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons(),
 				verdict.issues());
+	}
+
+	/**
+	 * F11：完全相同入参的 {@code set_condition} 幂等重放的结算 —— 条目落成 {@code FRONTEND_RESULT/OK}
+	 * （模型看到与首次一致的成功回执），但<b>本次没有下发前端、没有重复写</b>：
+	 * {@code executed=false}（副作用属于首次调用），也不发会触发前端动作的请求帧。
+	 */
+	private String settleIdempotentReplay(String runId, PendingToolCall pending, String resultText) {
+		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+		pending.setOutcome(ToolOutcome.OK.wire());
+		pending.setCode(null);
+		pending.setReason(null);
+		pending.setExecuted(false);
+		pending.setExecutedBy(null);
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		pending.setResultText(resultText);
+		this.store.putPending(runId, pending);
+		log.info("set_condition 相同入参重复调用，幂等重放（未重复下发前端）runId={} toolCallId={}", runId,
+				pending.getToolCallId());
+		return resultText;
 	}
 
 	/**

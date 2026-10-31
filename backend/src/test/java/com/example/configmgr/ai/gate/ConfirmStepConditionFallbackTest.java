@@ -311,28 +311,35 @@ class ConfirmStepConditionFallbackTest {
 	// ── ②g 同批多工具：条件闭环不得因为"批次不单条"被整段跳过 ────────────────
 
 	/**
-	 * 现场：模型把 {@code confirm_step} 和 {@code get_config_def} 放进同一批。
+	 * 现场：模型把 {@code confirm_step} 与 {@code get_config_def} 放进同一批。
 	 * 条件闭环若只在 {@code pendings.size() == 1} 时复核，这一批会绕过条件收集直接推进到
 	 * EXPORT（前端拿到 {@code confirm_step} 就落库），最终按全量导出 —— 数据正确性问题。
-	 * 判据必须是"批次里的每个 confirm_step 都复核"，与同批还有哪些工具无关。
+	 *
+	 * <p>2026-10-31（F4）：混批<b>不再 park</b>（park 会先于同批其它调用把整批历史外置，吞掉它们的
+	 * 卡/回执）。改成零副作用拒绝 confirm_step 并明确"先单独调用 confirm_step"，让模型分批；
+	 * 同批其它调用照常结算。
 	 */
 	@Test
-	void batchedConfirmStepWithOtherToolsStillRunsTheConditionGate() {
+	void batchedConfirmStepWithOtherToolsIsRejectedInsteadOfParking() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshot("QUERY_COND");
 
-		assertThatThrownBy(() -> runBatch(Map.of("runId", RUN_ID),
+		ToolExecutionResult result = runBatch(Map.of("runId", RUN_ID),
 				new AssistantMessage.ToolCall("call-confirm", "function", "confirm_step", "{}"),
 				new AssistantMessage.ToolCall("call-config", "function", "get_config_def",
-						"{\"code\":\"CURRENCY\"}")))
-			.as("同批还有别的工具时，confirm_step 不得绕过条件闭环直接推进")
-			.isInstanceOf(RunParkedException.class);
+						"{\"code\":\"CURRENCY\"}"));
 
+		assertThat(envelopeOf(result, "call-confirm").outcome())
+			.as("同批还有别的工具时，confirm_step 不得绕过条件闭环直接推进")
+			.isEqualTo(ToolOutcome.REJECTED.wire());
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("先单独调用 confirm_step");
 		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
 		assertThat(this.taskState.get().getCurrentStep()).as("任务仍停 QUERY_COND（前端没有被调用）")
 			.isEqualTo("QUERY_COND");
-		assertThat(this.store.pending(RUN_ID, HOST_FORM_ID)).as("同批也要挂一次可选条件表单").isNotNull();
-		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		assertThat(this.store.pending(RUN_ID, HOST_FORM_ID)).as("混批不挂条件表（不能先挂再改）").isNull();
+		assertThat(this.store.get(RUN_ID).getStatus()).isNotEqualTo(RunSnapshot.SUSPENDED);
+		// 同批的其它调用没有被 park 吞掉：它有模型侧回执
+		assertThat(hasResponse(result, "call-config")).isTrue();
 	}
 
 	// ── ②f 宿主条件表单文案复用回答语言（Task 1 第 6 项）─────────────────────
@@ -793,6 +800,19 @@ class ConfirmStepConditionFallbackTest {
 			}
 		}
 		return ToolResultEnvelope.fromJson(text);
+	}
+
+	private static boolean hasResponse(ToolExecutionResult result, String toolCallId) {
+		for (Message message : result.conversationHistory()) {
+			if (message instanceof ToolResponseMessage toolMessage) {
+				for (ToolResponseMessage.ToolResponse response : toolMessage.getResponses()) {
+					if (toolCallId.equals(response.id())) {
+						return response.responseData() != null;
+					}
+				}
+			}
+		}
+		return false;
 	}
 
 	private static Task task(String step, String conditionJson) {

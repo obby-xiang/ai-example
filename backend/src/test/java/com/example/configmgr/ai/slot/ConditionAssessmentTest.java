@@ -64,14 +64,27 @@ class ConditionAssessmentTest {
 		assertThat(assessment.hasUnparseable()).isTrue();
 	}
 
-	/** 只有合法空数组才是"明确不设"。 */
+	/**
+	 * <b>恰好空对象</b>才是"明确不设"（F5）。空数组（{@code fields:[]} / {@code scopeKeys:[]}）
+	 * 是"有结构但没有条件"的非法写入形态：不得当 {@code EXPLICIT_UNSET}（= 全量），按未决定处理。
+	 */
 	@Test
-	void legalEmptyArraysAreExplicitlyUnset() {
-		ConditionAssessment.Assessment assessment = ConditionAssessment.ofItems(List.of(item("CURRENCY",
+	void emptyArraysAreUndecidedWhileExactlyEmptyObjectIsExplicitUnset() {
+		ConditionAssessment.Assessment emptyArrays = ConditionAssessment.ofItems(List.of(item("CURRENCY",
 				"{\"fields\":[],\"scopeKeys\":[]}")));
+		assertThat(emptyArrays.stateOf("CURRENCY")).isEqualTo(State.UNDECIDED);
+		assertThat(emptyArrays.hasUnparseable()).isTrue();
 
-		assertThat(assessment.stateOf("CURRENCY")).isEqualTo(State.EXPLICIT_UNSET);
-		assertThat(assessment.hasUnparseable()).isFalse();
+		assertThat(ConditionAssessment.assess("CURRENCY", "{\"fields\":[]}").state())
+			.isEqualTo(State.UNDECIDED);
+		assertThat(ConditionAssessment.assess("CURRENCY", "{\"scopeKeys\":[]}").state())
+			.isEqualTo(State.UNDECIDED);
+
+		assertThat(ConditionAssessment.assess("CURRENCY", "{}").state())
+			.isEqualTo(State.EXPLICIT_UNSET);
+		// 有范围键时，空的 fields 数组不影响"已设置"（与写入面 guard 同口径：只要有一项有效条件）
+		assertThat(ConditionAssessment.assess("CURRENCY", "{\"fields\":[],\"scopeKeys\":[\"XN\"]}").state())
+			.isEqualTo(State.SET);
 	}
 
 	private static TaskItem item(String defCode, String conditionJson) {

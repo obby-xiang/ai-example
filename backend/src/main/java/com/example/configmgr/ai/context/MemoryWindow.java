@@ -132,6 +132,11 @@ public final class MemoryWindow {
 	 * @param protectedToolCallIds 未决 HITL 条目的 toolCallId（工具结果永不清除；可为 null）
 	 */
 	public static Plan plan(List<Message> messages, Budget budget, Set<String> protectedToolCallIds) {
+		return plan(messages, budget, protectedToolCallIds, Set.of());
+	}
+
+	public static Plan plan(List<Message> messages, Budget budget, Set<String> protectedToolCallIds,
+			Set<String> protectedRunIds) {
 		List<Message> original = messages == null ? List.of() : messages;
 		int beforeTokens = ContextEstimator.estimateMessages(original);
 		int beforeCount = original.size();
@@ -167,7 +172,7 @@ public final class MemoryWindow {
 		int tokens = ContextEstimator.estimateMessages(current);
 		if (config.tokenBudget() > 0 && tokens > config.tokenBudget()) {
 			Drop drop = dropOldestTurns(current, ContextEstimator::estimateMessages,
-					measure -> measure > config.tokenBudget(), Math.max(1, config.minMessages()));
+					measure -> measure > config.tokenBudget(), Math.max(1, config.minMessages()), protectedRunIds);
 			current = drop.messages();
 			dropped += drop.turns();
 			tokens = ContextEstimator.estimateMessages(current);
@@ -175,7 +180,8 @@ public final class MemoryWindow {
 
 		// ③ 条数上限（官方窗口的兜底仍在）：同样按 turn 整轮淘汰，不拆配对
 		if (config.maxMessages() > 0 && current.size() > config.maxMessages()) {
-			Drop drop = dropOldestTurns(current, List::size, measure -> measure > config.maxMessages(), 1);
+			Drop drop = dropOldestTurns(current, List::size, measure -> measure > config.maxMessages(), 1,
+					protectedRunIds);
 			current = drop.messages();
 			dropped += drop.turns();
 			tokens = ContextEstimator.estimateMessages(current);
@@ -217,14 +223,18 @@ public final class MemoryWindow {
 	 * @param stillOver 该度量的越线判据
 	 */
 	private static Drop dropOldestTurns(List<Message> messages, java.util.function.ToIntFunction<List<Message>> measure,
-			java.util.function.IntPredicate stillOver, int floorMessages) {
+			java.util.function.IntPredicate stillOver, int floorMessages, Set<String> protectedRunIds) {
 		List<ConversationTurns.Segment> segments = ConversationTurns.split(messages);
 		if (segments.size() <= 1) {
 			return new Drop(messages, 0);
 		}
+		Set<String> activeRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
 		int cut = 0;
 		while (cut < segments.size() - 1) {
 			ConversationTurns.Segment next = segments.get(cut);
+			if (ConversationTurns.containsRun(messages, next, activeRuns)) {
+				break;
+			}
 			int kept = messages.size() - next.startIndex() - next.size();
 			if (kept < floorMessages) {
 				break;

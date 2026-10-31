@@ -110,9 +110,49 @@ class KnownInfoToolDescriptionsTest {
         assertTrue(form.description().contains("中文名称/别名"), form.description());
     }
 
+    /**
+     * 2026-10-31 明确不设筛选：{@code set_condition} 的"恰好空对象"是写入口，必须逐项下发；
+     * 注解与 YAML 两面同批（YAML 是可选覆盖，写反了模型看到两套口径）。
+     */
+    @Test
+    void setConditionDescriptionDeclaresPerDefinitionExplicitUnset() throws Exception {
+        String annotation = annotationDescription("setCondition", String.class, AiTools.FieldQueryCondition.class);
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("set_condition");
+        assertNotNull(yaml);
+        assertTrue(yaml.hasDescription(), "set_condition 必须保留 YAML 描述覆盖");
+
+        for (String description : java.util.List.of(annotation, yaml.description())) {
+            assertTrue(description.contains("每个 defCode 各调用一次"), description);
+            assertTrue(description.contains("set_condition(defCode, {})"), description);
+            assertTrue(description.contains("不要重发 SET_CONDITIONS"), description);
+            assertTrue(description.contains("fields:[]"), "空数组仍拒绝的口径必须写明：" + description);
+            // 2026-10-27.20：未勾选不得假成功；相同入参幂等、不同值才是修改
+            assertTrue(description.contains("未勾选"), description);
+            assertTrue(description.contains("幂等复用"), description);
+        }
+    }
+
+    /**
+     * F4（2026-10-31）：{@code confirm_step} 必须单独成批 —— 混批会被零副作用拒绝并指回
+     * "先单独调用 confirm_step"（host park 会先外置整批历史、吞掉同批调用）。
+     */
+    @Test
+    void confirmStepDescriptionRequiresItsOwnBatch() throws Exception {
+        String annotation = annotationDescription("confirmStep", String.class);
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("confirm_step");
+        assertNotNull(yaml);
+        assertTrue(yaml.hasDescription(), "confirm_step 必须保留 YAML 描述覆盖");
+
+        for (String description : java.util.List.of(annotation, yaml.description())) {
+            assertTrue(description.contains("单独成批"), description);
+            assertTrue(description.contains("先单独调用 confirm_step"), description);
+            assertTrue(description.contains("吞掉同批"), description);
+        }
+    }
+
     @Test
     void toolsVersionBumpedForKnownInfoDescriptions() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        assertEquals("2026-10-27.18", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
+        assertEquals("2026-10-27.20", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
     }
 }

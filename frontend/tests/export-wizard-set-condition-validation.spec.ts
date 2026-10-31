@@ -334,3 +334,36 @@ describe('set_condition 合法条件：先写草案，confirm_step 按原样落�
     expect(JSON.parse(String(api.setCondition.mock.calls[0]?.[2] ?? '{}'))).toEqual(condition)
   })
 })
+
+/**
+ * F8（2026-10-31）：{@code set_condition} 的目标必须是**本任务已勾选**的配置项。
+ * 旧实现先写草案、再在回执里补一句"该配置项不在当前选中集" —— 模型拿到的是成功回执，
+ * 页面上却有一份看不见的草案（提交点只遍历选中集，永远不落库）。现在必须**写前**拒绝。
+ */
+describe('set_condition 未勾选/未绑定的配置项：结构化失败、零写入', () => {
+  it('未勾选的 defCode ⇒ {ok:false} + 零草案/零工作区/零提交', async () => {
+    await mountWizard()
+    const workspace = useWorkspaceStore()
+    const handler = getPageHandler('export.setConditions')
+    expect(handler).not.toBeNull()
+
+    const reply = await handler?.({
+      defCode: 'ORDER',
+      conditions: { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
+    })
+    await flushPromises()
+
+    expect(reply).toMatchObject({ ok: false })
+    const reason = String((reply as { reason?: string }).reason ?? '')
+    expect(reason).toContain('未勾选')
+    expect(reason).toContain('ORDER')
+    // 工作区不留任何 ORDER 占位（草案没写）
+    expect(workspace.queryConditions).not.toHaveProperty('ORDER')
+    expect(api.setCondition).not.toHaveBeenCalled()
+
+    // 提交点只遍历选中集：既没草案，也就不会顺带提交 ORDER
+    await confirmStep()
+    await flushPromises()
+    expect(api.setCondition.mock.calls.map((call) => [call[1], String(call[2])])).toEqual([['CURRENCY', '{}']])
+  })
+})

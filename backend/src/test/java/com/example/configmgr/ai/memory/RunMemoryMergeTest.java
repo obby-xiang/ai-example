@@ -171,6 +171,34 @@ class RunMemoryMergeTest {
 		assertThat(texts(afterLate)).containsExactly("摘要正文", "旧问题", "旧回答", "迟到问题", "迟到回答");
 	}
 
+	@Test
+	void aLateOlderDigestCannotReplaceANewerDigest() {
+		Message oldDigest = digestAt("旧摘要", 1_000L);
+		Message newDigest = digestAt("新摘要", 2_000L);
+		List<Message> window = RunMemoryMerge.merge(List.of(),
+				List.of(newDigest, user("保留问题"), assistant("保留回答")), B, true, WINDOW);
+
+		List<Message> after = RunMemoryMerge.merge(window, List.of(oldDigest, user("A问"), assistant("A答")), A, true,
+				WINDOW);
+
+		assertThat(after.get(0)).as("迟到旧摘要不得回滚较新的折叠范围").isSameAs(newDigest);
+		assertThat(texts(after)).containsExactly("新摘要", "A问", "A答", "保留问题", "保留回答");
+	}
+
+	@Test
+	void aNewerDigestReplacesTheOlderDigest() {
+		Message oldDigest = digestAt("旧摘要", 1_000L);
+		Message newDigest = digestAt("新摘要", 2_000L);
+		List<Message> window = RunMemoryMerge.merge(List.of(),
+				List.of(oldDigest, user("保留问题"), assistant("保留回答")), B, true, WINDOW);
+
+		List<Message> after = RunMemoryMerge.merge(window, List.of(newDigest, user("A问"), assistant("A答")), A, true,
+				WINDOW);
+
+		assertThat(after.get(0)).as("较新的摘要仍可正常推进").isSameAs(newDigest);
+		assertThat(texts(after)).containsExactly("新摘要", "A问", "A答", "保留问题", "保留回答");
+	}
+
 	/**
 	 * <b>轮内 L1 清除（别的 run 的工具结果）不得被按 run 合并还原成原文</b>（KQC C-13 回归）。
 	 *
@@ -210,6 +238,64 @@ class RunMemoryMergeTest {
 
 		assertThat(toolResponse(after, "c-b")).as("迟到的原文不得覆盖已清除的占位符")
 			.startsWith("[工具结果已清除：");
+	}
+
+	@Test
+	void aRawCopyFromTheSameRunNeverOverridesItsClearedWindowResult() {
+		List<Message> rawWindow = RunMemoryMerge.merge(List.of(),
+				List.of(user("A问"), toolCall("A1", "c-a"), toolResult("c-a", "A原文结果")), A, true, WINDOW);
+		List<Message> clearedWindow = replaceResult(rawWindow, "c-a", CLEARED_PLACEHOLDER);
+		List<Message> staleSameRun = new ArrayList<>(rawWindow);
+		staleSameRun.add(assistant("A迟到的回答"));
+
+		List<Message> after = RunMemoryMerge.merge(clearedWindow, staleSameRun, A, true, WINDOW);
+
+		assertThat(toolResponse(after, "c-a")).as("本 run 块被替换时也不得恢复已清除原文")
+			.startsWith("[工具结果已清除：");
+	}
+
+	/**
+	 * <b>无归属旧消息不得被替换写整段删掉</b>（迁移期/旧版本写下的消息没有 runId）。
+	 *
+	 * <p>替换写只会带来<b>本轮</b>的历史：窗口里那些不在本轮历史里的无归属消息若被当成"已经在历史里"
+	 * 丢掉，就会整段丢失旧会话内容。它们必须原样留在窗口（且不得被盖成本轮的 runId）。
+	 */
+	@Test
+	void legacyMessagesOutsideTheIncomingHistorySurviveAReplaceWrite() {
+		List<Message> legacyWindow = List.of(user("旧会话问题"), assistant("旧会话回答"));
+
+		List<Message> after = RunMemoryMerge.merge(legacyWindow, history("B问", "B答"), B, true, WINDOW);
+
+		assertThat(texts(after)).as("无归属旧消息必须保留，且排在最前").containsExactly("旧会话问题", "旧会话回答", "B问", "B答");
+		assertThat(RunMemoryMerge.runIdOf(after.get(0))).as("保留的旧消息不得被误归本轮").isNull();
+		assertThat(RunMemoryMerge.runIdOf(after.get(1))).isNull();
+		assertThat(RunMemoryMerge.runIdOf(after.get(2))).isEqualTo(B.runId());
+	}
+
+	/** 本轮历史里已经带着同一批旧消息 ⇒ 保留的那份不能与它重复（按类型+正文+toolCallId 去重）。 */
+	@Test
+	void legacyMessagesCarriedInTheHistoryAreNotDuplicated() {
+		List<Message> legacyWindow = List.of(user("旧会话问题"), assistant("旧会话回答"));
+		List<Message> incoming = new ArrayList<>(legacyWindow);
+		incoming.addAll(history("B问", "B答"));
+
+		List<Message> after = RunMemoryMerge.merge(legacyWindow, incoming, B, true, WINDOW);
+
+		assertThat(texts(after)).as("旧消息只能出现一次").containsExactly("旧会话问题", "旧会话回答", "B问", "B答");
+	}
+
+	/** 工具结果也一样：内容相同（同一 toolCallId）的旧消息不重复。 */
+	@Test
+	void legacyToolResultsAreDeduplicatedByToolCallId() {
+		List<Message> legacyWindow = List.of(user("旧会话问题"), toolCall("T1", "c-old"), toolResult("c-old", "旧结果"));
+		List<Message> incoming = new ArrayList<>(legacyWindow);
+		incoming.addAll(history("B问", "B答"));
+
+		List<Message> after = RunMemoryMerge.merge(legacyWindow, incoming, B, true, WINDOW);
+
+		assertThat(after.stream().filter(m -> m instanceof ToolResponseMessage)).as("旧工具结果只保留一条").hasSize(1);
+		assertThat(toolResponse(after, "c-old")).isEqualTo("旧结果");
+		assertThat(texts(after)).containsExactly("旧会话问题", "T1", "", "B问", "B答");
 	}
 
 	/** 占位符前缀与清除生产方（{@code ToolResultClearing#PLACEHOLDER_PREFIX}）必须同源。 */
@@ -336,6 +422,13 @@ class RunMemoryMergeTest {
 	/** 压缩摘要（与 {@code RollingSummarizer} 写出的形态一致：UserMessage + {@code compacted=true}）。 */
 	private static Message digest(String text) {
 		return UserMessage.builder().text(text).metadata(Map.of(RunMemoryMerge.COMPACTED_KEY, true)).build();
+	}
+
+	private static Message digestAt(String text, long atMs) {
+		return UserMessage.builder()
+			.text(text)
+			.metadata(Map.of(RunMemoryMerge.COMPACTED_KEY, true, "atMs", atMs))
+			.build();
 	}
 
 	private static Message toolCall(String text, String callId) {

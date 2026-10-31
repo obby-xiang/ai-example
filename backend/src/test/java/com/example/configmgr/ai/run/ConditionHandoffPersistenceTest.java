@@ -162,6 +162,7 @@ class ConditionHandoffPersistenceTest {
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenAnswer(invocation -> new Prompt(invocation.<List<Message>>getArgument(3),
 					ToolCallingChatOptions.builder().build()));
+		when(this.chatService.replaceMemoryWindow(any(), any(), any(), any())).thenReturn(true);
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;

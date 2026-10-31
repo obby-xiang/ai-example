@@ -14,6 +14,7 @@ import com.example.configmgr.ai.context.SystemMessages;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tenant.LocalRunKey;
@@ -1952,8 +1953,10 @@ public class ResumeService {
 					protectedIds.add(pending.getToolCallId());
 				}
 			}
+			Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(sessionId));
+			activeRunIds.add(runId);
 			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
-			MemoryWindow.Plan window = MemoryWindow.plan(history, windowBudget, protectedIds);
+			MemoryWindow.Plan window = MemoryWindow.plan(history, windowBudget, protectedIds, activeRunIds);
 			MemoryWindow.emit(runId, sessionId, window, windowBudget);
 			history = window.messages();
 			body.put("memoryWindowTrimmed", window.changed());
@@ -1965,6 +1968,8 @@ public class ResumeService {
 			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
 			ContextCompactor.Outcome compaction = null;
+			MemoryWindowSnapshot windowSnapshot = this.chatService == null ? null
+					: this.chatService.memoryWindowSnapshot(sessionId);
 			if (this.contextCompactor != null && !history.isEmpty()) {
 				// ===== AR-06 / Task 5 Step 3 + 2026-10-29 压缩阶段信号批 =====
 				// 与首轮同构：初始相位是 streaming（普通续跑不出现任何压缩/准备阶段条）；压缩调用自身
@@ -1997,7 +2002,8 @@ public class ResumeService {
 							this.codec.serializeAll(compactorInput),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
 							// 披露面的额度必须按<b>交棒那一份</b>上下文算：刷新后工具集变了，用旧的会算错
-							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime),
+							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime,
+							activeRunIds),
 							// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s）。这个回调只刷新<b>业务活动锚点</b>
 							// （避免长压缩被别的实例判成僵尸并接管），它<b>不发帧</b> —— 压缩期的可见性由上面
 							// 那枚独立定时器的 stage 心跳承担（"压缩不伪称持续发帧"）。
@@ -2016,6 +2022,14 @@ public class ResumeService {
 				if (compaction.changed()) {
 					history = com.example.configmgr.ai.history.SyntheticMessages
 						.withoutCorrectionInstruction(compaction.messages());
+					// 跨 run 的摘要/裁轮必须先整窗落库；轮末按 run 收敛只负责本 run，不能代替这一步。
+					List<Message> memoryWindow = history.stream()
+						.filter(message -> message.getMessageType() != MessageType.SYSTEM)
+						.toList();
+					if (!this.chatService.replaceMemoryWindow(runId, sessionId, memoryWindow, windowSnapshot)) {
+						log.warn("续跑压缩整窗写回失败 runId={} sessionId={}（不写压缩快照、不交棒驱动）", runId, sessionId);
+						return resumeStatusWriteRefused(runId, body);
+					}
 					snapshot.setMessageJson(this.codec.serializeAll(history));
 					// N4：压缩是长窗口（L2 = N 次串行摘要），结束时取消可能已经先到 —— 这一笔同样
 					// 不得把 CANCELLED 翻回 RUNNING；被拒 ⇒ 不写 context 交接位、不交棒驱动。
@@ -2024,10 +2038,6 @@ public class ResumeService {
 						return resumeStatusWriteRefused(runId, body);
 					}
 					body.put("contextCompaction", compaction.levelWire());
-					// 落库顺序（本路径）= 归档 → 快照 → 记忆（轮末 converge 时）。与首轮路径的
-					// "记忆 → 快照"不同，原因是本类拿不到 ChatMemory：轮末 convergeMemory 会以快照为准
-					// 整体覆盖写回，故偏差窗口的方向是"记忆更旧"（不会多算术、不会丢配对），
-					// 也不会出现首轮路径要防的"快照已压、记忆未压"长期分叉。
 				}
 				else {
 					body.put("contextCompaction", "none");

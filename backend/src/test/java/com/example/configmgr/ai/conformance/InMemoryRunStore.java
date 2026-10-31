@@ -635,6 +635,15 @@ public class InMemoryRunStore extends RunStore {
 		return sessionId == null ? null : this.sessionCurrent.get(sessionId);
 	}
 
+	@Override
+	public Set<String> activeRunIds(String sessionId) {
+		return this.runs.values().stream()
+			.filter(snapshot -> sessionId != null && sessionId.equals(snapshot.getSessionId()))
+			.filter(snapshot -> !RunSnapshot.isTerminal(snapshot.getStatus()))
+			.map(RunSnapshot::getRunId)
+			.collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+	}
+
 	/**
 	 * I2①：与生产同口径的读侧合并（只并"可重建"的三种结论；grant-only）。
 	 * 本替身默认返回同一对象引用，故合并会"就地"改到表里那份 —— 与真实实现（每次反序列化新副本）

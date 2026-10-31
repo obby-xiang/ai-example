@@ -152,6 +152,43 @@ class FlowTypeConditionPromptContractTest {
 
 		assertThat(shipped.version())
 			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.18");
+			.isEqualTo("2026-10-27.20");
+	}
+
+	/**
+	 * 2026-10-31 明确不设筛选：用户答"无/不筛选/全部"时，模型必须<b>逐项</b>下发
+	 * {@code set_condition(defCode, {})}，而不是重发条件表 —— 否则闸门以空条件拒绝、
+	 * {@code confirm_step} 又以"非空回灌无草案"拒绝，两边互锁。
+	 */
+	@Test
+	void promptDeclaresPerDefinitionExplicitUnsetViaEmptyObject() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("明确不设 = 逐项 set_condition(defCode, {})")
+			.contains("对表单覆盖的每个 defCode 各调用一次")
+			.contains("set_condition(defCode, {})");
+		assertThat(prompt).as("不得重发条件表，也不得只清一部分就推进")
+			.contains("不要重发 SET_CONDITIONS")
+			.contains("也不要只清一部分就推进");
+		assertThat(prompt).as("create_task 的 {} 仍只表示条件未决定（不等于明确不设）")
+			.contains("create_task 的 {} 只表示条件未决定");
+	}
+
+	/**
+	 * 2026-10-31 条件链 fail-closed（F4/F8/F11）：confirm_step 必须单独成批；set_condition 只对
+	 * 已勾选配置项调用、相同入参幂等复用（不同值才是修改）。
+	 */
+	@Test
+	void promptDeclaresConditionChainBatchAndIdempotencyRules() {
+		String prompt = ResilientChatService.SYSTEM_PROMPT;
+
+		assertThat(prompt).as("confirm_step 单独成批（混批会吞掉同批调用）")
+			.contains("confirm_step 必须单独成批")
+			.contains("先单独调用");
+		assertThat(prompt).as("set_condition 只对已勾选配置项调用")
+			.contains("只能对任务已勾选的配置项调用");
+		assertThat(prompt).as("相同入参幂等复用、不同值才是修改")
+			.contains("幂等复用")
+			.contains("不同值才是修改");
 	}
 }

@@ -5,6 +5,8 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
+import com.example.configmgr.ai.memory.RunMemoryMerge;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -69,11 +71,22 @@ public final class ConversationTurns {
 	 */
 	public static int firstPinnedTurn(List<Message> messages, List<Segment> segments, int keepRecentTurns,
 			Set<String> protectedToolCallIds) {
+		return firstPinnedTurn(messages, segments, keepRecentTurns, protectedToolCallIds, Set.of());
+	}
+
+	public static int firstPinnedTurn(List<Message> messages, List<Segment> segments, int keepRecentTurns,
+			Set<String> protectedToolCallIds, Set<String> protectedRunIds) {
 		if (segments == null || segments.isEmpty()) {
 			return 0;
 		}
 		int cut = Math.max(0, segments.size() - Math.max(0, keepRecentTurns));
 		cut = Math.min(cut, segments.size() - 1);
+		Set<String> activeRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
+		for (int i = 0; i < cut; i++) {
+			if (containsRun(messages, segments.get(i), activeRuns)) {
+				return i;
+			}
+		}
 		Set<String> protectedIds = protectedToolCallIds == null ? Set.of() : protectedToolCallIds;
 		if (protectedIds.isEmpty()) {
 			return cut;
@@ -84,6 +97,16 @@ public final class ConversationTurns {
 			}
 		}
 		return cut;
+	}
+
+	public static boolean containsRun(List<Message> messages, Segment segment, Set<String> runIds) {
+		for (int i = segment.startIndex(); i < segment.endIndex(); i++) {
+			String runId = RunMemoryMerge.runIdOf(messages.get(i));
+			if (runId != null && runIds.contains(runId)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 段内是否含受保护的 toolCallId（assistant 的 tool_calls 与 tool 响应两侧都算）。 */

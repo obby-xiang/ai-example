@@ -57,7 +57,18 @@
 # 2026-10-27.17 → 2026-10-27.18（2026-10-31 有界披露上限上调）：list_config_defs / list_tasks 的
 # @Tool 描述上限 20 → 50（截断告知与总条数后缀随 AiTools 常量自动变 50，仍 < result-budget.model.max-rows
 # 的 200）；本文件对这两个工具仍只覆盖 title，描述真值在 @Tool 注解。改描述必升 version（破 prompt 缓存）。
-version: 2026-10-27.18
+# 2026-10-27.18 → 2026-10-27.19（2026-10-31 明确不设筛选的写入口径）：set_condition 的**恰好空对象** {}
+# 是"该配置项明确不设筛选"（前端 condition-payload 落成 "{}"、ConditionAssessment 判 EXPLICIT_UNSET、后端
+# WizardActionGuard 放行）；缺失/null/fields:[]/scopeKeys:[] 仍拒绝。用户答"无/不筛选/全部"时，模型对表单
+# 覆盖的每个 defCode 各调用一次 set_condition(defCode, {})，不要重发 SET_CONDITIONS；confirm_step 认可逐项
+# 结算的空对象草案，拒绝理由只点名仍无草案的剩余项。create_task 的 {} 仍是"条件未决定"，不等于明确不设。
+# YAML 与 AiTools 注解、系统提示词同批改，改描述必升 version（破 prompt 缓存）。
+# 2026-10-27.19 → 2026-10-27.20（2026-10-31 条件链 fail-closed 收口）：set_condition 只能对任务已勾选的
+# 配置项调用（未勾选/未绑定零副作用拒绝），相同 defCode + 完全相同入参的重复调用幂等复用（不同值=修改照常执行）；
+# confirm_step 必须单独成批（混批时零副作用拒绝并要求先单独调用，避免 park 先外置整批历史、吞掉同批调用）；
+# 条件收集失败（park 未启用/挂起写失败/读任务异常/条件表未结算）一律零副作用拒绝，不再按全量放行。
+# YAML 与 AiTools 注解、系统提示词同批改，改描述必升 version（破 prompt 缓存）。
+version: 2026-10-27.20
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -78,7 +89,8 @@ tools:
       用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：
       不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。
       需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：
-      已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}，不得省略。
+      已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}（这里的 {} 只表示条件未决定，
+      不是 set_condition 的“明确不设”），不得省略。
       defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。
       只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。
       条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次
@@ -140,7 +152,11 @@ tools:
       用户没给条件就不设筛选（不设条件即全量），不要为凑条件而调用。
       已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链。
       设置后不要说"已落库/已生效"：业务库由前端在下一步（confirm_step）或启动作业前 persistStepData 提交。
-      留空或不设是明确不设筛选（= 全量），不要把空条件当成"清空已有条件"。
+      用户明确不设筛选（如条件表回答"无"、"不筛选"、"全部"）时，对表单覆盖的每个 defCode 各调用一次
+      set_condition(defCode, {})（恰好空对象 = 明确不设 = 清空该配置项条件），不要重发 SET_CONDITIONS；
+      conditions 缺失、null、fields:[]、scopeKeys:[] 仍会被拒绝。
+      只能对任务已勾选的配置项调用（未勾选/未绑定会被零副作用拒绝：先 select_definitions 或让用户勾选）；
+      同一 defCode + 完全相同入参的重复调用幂等复用（不再下发前端；不同值 = 修改，照常执行）。
       本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）
       推进到 QUERY_COND，下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。
   - toolKey: confirm_step
@@ -159,7 +175,10 @@ tools:
       条件未决定时由宿主统一给一次非必填自由文本框（只此一次，留空即照常推进），不要重复收集或用文字追问。
       条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝
       并指回 set_condition：先形成草案，下一批再推进（业务库由前端在本步提交，模型不写库）。
-      本步认可本轮已结算的结构化草案与"留空=明确不设"的决定；start_export 预检仍校验业务库里的最终条件。
+      本步认可本轮已结算的结构化草案（含逐项 set_condition(defCode, {}) 的明确不设）与"留空=明确不设"的决定；
+      本工具必须单独成批：同一批里还有其它工具时会被零副作用拒绝并要求先单独调用 confirm_step
+      （条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）；
+      start_export 预检仍校验业务库里的最终条件。
   - toolKey: generative_form
     title: 生成式表单
     description: >-
@@ -169,6 +188,8 @@ tools:
       SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，
       模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；
       宿主条件表回灌非空文本后，先解析并调用 set_condition 形成草案，再 confirm_step 由前端提交；
+      回灌明确表示不筛选（如"无"、"不筛选"、"全部"）时，对表单覆盖的每个 defCode 各调用一次
+      set_condition(defCode, {})（恰好空对象 = 明确不设），不要重发 SET_CONDITIONS；
       留空（{} 或空文本）是明确不设筛选，直接 confirm_step 全量推进。
       TASK_TYPE 只在任务类型未知时用：表单只有一个 enum 字段做单选项，选项正好 EXPORT/IMPORT，不附其它字段；
       类型已确定时会被零副作用拒绝并指回 create_task。

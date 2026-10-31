@@ -103,6 +103,40 @@ class TaskConditionJsonTest {
         assertThat(storedCondition(taskId)).isEqualTo("{}");
     }
 
+    /**
+     * F5：空数组不是"明确不设"（只有恰好 {@code {}} 才是）——REST 写入口与
+     * {@code ConditionAssessment} / {@code WizardActionGuard} 同口径，新写入非法形态一律 400、零落库。
+     */
+    @Test
+    void emptyArrayConditionsAreRejectedWith400AndNothingIsStored() throws Exception {
+        long taskId = newTask();
+
+        for (String body : java.util.List.of(
+                "{\"condition\":{\"fields\":[]}}",
+                "{\"condition\":{\"scopeKeys\":[]}}",
+                "{\"condition\":{\"fields\":[],\"scopeKeys\":[]}}")) {
+            this.mockMvc.perform(put("/api/tasks/{id}/items/{def}/condition", taskId, DEF_CODE)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("明确不设")));
+        }
+        assertThat(storedConditionOrNull(taskId)).as("被拒的非法形态不得落库").isNull();
+    }
+
+    /** 恰好空对象仍是"明确不设"的唯一写法（REST 允许）。 */
+    @Test
+    void explicitEmptyObjectIsStillAcceptedAsExplicitUnset() throws Exception {
+        long taskId = newTask();
+
+        this.mockMvc.perform(put("/api/tasks/{id}/items/{def}/condition", taskId, DEF_CODE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"condition\":{}}"))
+                .andExpect(status().isOk());
+
+        assertThat(storedCondition(taskId)).isEqualTo("{}");
+    }
+
     private long newTask() throws Exception {
         String created = this.mockMvc.perform(post("/api/tasks")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -124,6 +158,12 @@ class TaskConditionJsonTest {
         return this.taskItemRepository.findByTaskIdAndDefCode(taskId, DEF_CODE)
                 .map(item -> item.getConditionJson())
                 .orElseThrow(() -> new AssertionError("条件未落库：task=" + taskId));
+    }
+
+    private String storedConditionOrNull(long taskId) {
+        return this.taskItemRepository.findByTaskIdAndDefCode(taskId, DEF_CODE)
+                .map(item -> item.getConditionJson())
+                .orElse(null);
     }
 
 }

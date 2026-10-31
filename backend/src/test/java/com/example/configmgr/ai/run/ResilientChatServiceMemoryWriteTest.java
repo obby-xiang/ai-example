@@ -239,7 +239,10 @@ class ResilientChatServiceMemoryWriteTest {
 		RunSnapshot seeded = this.store.get(RUN_ID);
 		seeded.setMessageJson(this.codec.serializeAll(List.of(new SystemMessage("只有系统提示"))));
 		this.store.save(seeded);
-		this.repository.seed(SESSION_ID, List.of(new UserMessage("旧历史")));
+		// 另一个 run 的成功轮：空窗收敛只清本 run 的块，别的 run 的块必须保留（不删整窗）
+		this.repository.upsertRun(SESSION_ID, new MemoryTurn("run-old", 1_000L), List.of(new UserMessage("旧历史")), 40,
+				true);
+		this.repository.ops.clear();
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.error(new StreamViolationException(StreamViolationException.CANCELLED, "本轮已取消")));
 
@@ -248,9 +251,9 @@ class ResilientChatServiceMemoryWriteTest {
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new SystemMessage("只有系统提示")), out);
 
 		assertThat(this.repository.ops).containsExactly("upsertRun");
-		assertThat(this.repository.lastWrite).isEmpty();
-		assertThat(this.repository.findByConversationId(SESSION_ID)).isEmpty();
-		assertThat(this.repository.deletes).isEqualTo(1);
+		assertThat(this.repository.findByConversationId(SESSION_ID)).extracting(Message::getText)
+			.as("空的收敛不删别的 run 的块").containsExactly("旧历史");
+		assertThat(this.repository.deletes).isZero();
 		verify(this.chatMemory, never()).clear(anyString());
 	}
 

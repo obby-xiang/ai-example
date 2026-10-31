@@ -109,6 +109,7 @@ class ResumeContextCompactionTest {
 		this.wire = FrameWire.attachTo(this.emitter);
 		// start 由原轮发出（生产上已在归档里），此处模拟"客户端已看过 start"的视角
 		this.emitter.start(SESSION_ID);
+		when(this.chatService.replaceMemoryWindow(any(), any(), any(), any())).thenReturn(true);
 	}
 
 	@Test

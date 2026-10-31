@@ -19,6 +19,7 @@ import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.context.RollingSummarizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
+import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
@@ -84,8 +85,16 @@ class MemoryCompactionWriteBackTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
+	private final java.util.concurrent.atomic.AtomicInteger windowReplacements = new java.util.concurrent.atomic.AtomicInteger();
+
 	private final RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis, this.codec,
-			Duration.ofHours(24));
+			Duration.ofHours(24)) {
+		@Override
+		public boolean replaceWindow(String conversationId, MemoryWindowSnapshot baseline, List<Message> messages) {
+			windowReplacements.incrementAndGet();
+			return super.replaceWindow(conversationId, baseline, messages);
+		}
+	};
 
 	private final AiProperties properties = new AiProperties();
 
@@ -110,6 +119,8 @@ class MemoryCompactionWriteBackTest {
 	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
 
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
+
+	private ContextCompactor compactor;
 
 	private final ChatModel chatModel = mock(ChatModel.class);
 
@@ -140,6 +151,8 @@ class MemoryCompactionWriteBackTest {
 
 	private ResilientChatService service;
 
+	private PromptRecordingModel advisorModel;
+
 	@BeforeEach
 	void setUp() {
 		this.identity = RequestContextUtils.useContext(TENANT, USER);
@@ -151,6 +164,7 @@ class MemoryCompactionWriteBackTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.repository, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
+		this.repository.setActiveRunLookup(this.store::activeRunIds);
 		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
@@ -261,11 +275,154 @@ class MemoryCompactionWriteBackTest {
 			.as("放弃也是一次没落地的写回：必须计入 W1，不能静默").isEqualTo(w1Before + 1);
 	}
 
+	@Test
+	void l2CasConflictRecomputesAgainstTheLatestWindowBeforeTheRealAdvisorReadsIt() {
+		installCompactor((system, user, promptRuntime) -> "重算后的摘要");
+		this.properties.getContext().setHysteresisPercent(100);
+		seedContext("L1", 95_000);
+		seedWindow(longTurns());
+		useRealAdvisor();
+		RedisChatMemoryRepository otherInstance = new RedisChatMemoryRepository(this.fake.redis, this.codec,
+				Duration.ofHours(24));
+		java.util.concurrent.atomic.AtomicBoolean injected = new java.util.concurrent.atomic.AtomicBoolean();
+		this.fake.beforeScript = () -> {
+			if (!injected.compareAndSet(false, true)) {
+				return;
+			}
+			otherInstance.upsertRun(SESSION_ID, new MemoryTurn("run-concurrent", 99_000L),
+					List.of(new UserMessage("并发写者的问题"), AssistantMessage.builder().content("并发写者的回答").build()),
+					40, true);
+		};
+
+		runChat();
+
+		List<String> window = windowText();
+		assertThat(window).as("并发写者必须保留").contains("并发写者的问题", "并发写者的回答");
+		assertThat(window).as("重算成功后不得留下摘要折叠前的原文").doesNotContain("第1轮问题");
+		assertThat(window.stream().filter(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX)))
+			.as("窗口只有一份摘要").hasSize(1);
+		assertThat(this.advisorModel.promptTexts).singleElement().satisfies(prompt -> {
+			assertThat(prompt).as("真实 advisor 读到的是重算落库后的窗口").contains("并发写者的问题");
+			assertThat(prompt).anyMatch(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX));
+			assertThat(prompt).doesNotContain("第1轮问题");
+		});
+	}
+
+	@Test
+	void resumedL2ReplacesTheRealWindowInsteadOfAppendingADigestToRawRuns() {
+		installCompactor((system, user, promptRuntime) -> "续跑摘要");
+		this.properties.getContext().setHysteresisPercent(100);
+		seedContext("L1", 95_000);
+		seedWindow(longTurns());
+		seedSuspendedResume();
+		useRealAdvisor();
+
+		ResumeService.ResumeResult result = runResume();
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.store.permittedToWrite(RUN_ID, "测试写门")).as("续跑终局写门必须放行").isTrue();
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.extracting(Message::getText)
+			.as("压缩快照必须包含本轮消息")
+			.contains("挂起问题", "好了");
+		assertThat(this.windowReplacements).as("续跑必须走整窗写回").hasValue(1);
+		assertThat(this.repository.findByConversationId(SESSION_ID))
+			.as("system 只留快照，不得经续跑整窗写回混入记忆")
+			.noneMatch(message -> message.getMessageType() == org.springframework.ai.chat.messages.MessageType.SYSTEM);
+		List<String> window = windowText();
+		assertThat(window).anyMatch(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX));
+		assertThat(window).as("续跑摘要折叠的原文不得被按 run 合并保留").doesNotContain("第1轮问题");
+		assertThat(window).contains("挂起问题", "好了");
+	}
+
+	@Test
+	void resumedL3ReplacesTheRealWindowBeforeDriving() {
+		installCompactor(null);
+		this.properties.getContext().setHysteresisPercent(100);
+		seedContext("L2", 109_500);
+		seedWindow(longTurns());
+		seedSuspendedResume();
+		useRealAdvisor();
+
+		ResumeService.ResumeResult result = runResume();
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.windowReplacements).hasValue(1);
+		List<String> window = windowText();
+		assertThat(window).as("续跑 L3 裁掉的 run 不得被按 run 合并保留").doesNotContain("第1轮问题");
+		assertThat(window).contains("第9轮问题", "挂起问题", "好了");
+	}
+
+	@Test
+	void resumedCompactionCasFailureDoesNotWriteCompressedSnapshotOrDrive() {
+		installCompactor((system, user, promptRuntime) -> "不得落库的摘要");
+		this.properties.getContext().setHysteresisPercent(100);
+		seedContext("L1", 95_000);
+		seedWindow(longTurns());
+		seedSuspendedResume();
+		useRealAdvisor();
+		RedisChatMemoryRepository otherInstance = new RedisChatMemoryRepository(this.fake.redis, this.codec,
+				Duration.ofHours(24));
+		java.util.concurrent.atomic.AtomicBoolean injected = new java.util.concurrent.atomic.AtomicBoolean();
+		this.fake.beforeScript = () -> {
+			if (!injected.compareAndSet(false, true)) {
+				return;
+			}
+			otherInstance.upsertRun(SESSION_ID, new MemoryTurn("run-concurrent", 99_000L),
+					List.of(new UserMessage("并发写者的问题"), AssistantMessage.builder().content("并发写者的回答").build()),
+					40, true);
+		};
+
+		ResumeService.ResumeResult result = runResume();
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.STATE_UNKNOWN);
+		assertThat(this.advisorModel.promptTexts).as("CAS 失败不得交棒模型").isEmpty();
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.extracting(Message::getText)
+			.as("未落库的摘要不得进入快照")
+			.noneMatch(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX));
+		assertThat(windowText()).contains("并发写者的问题", "第1轮问题");
+		assertThat(windowText()).noneMatch(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX));
+	}
+
+	@Test
+	void advisorAndMaxMessagesCannotTrimAnActiveRunBlock() {
+		this.properties.getMemory().setMaxMessages(2);
+		MemoryTurn active = new MemoryTurn("run-active-a", 1_000L);
+		this.repository.upsertRun(SESSION_ID, active,
+				List.of(new UserMessage("活跃A问"), AssistantMessage.builder().content("活跃A答").build()), 40, true);
+		seedActiveRun(active.runId());
+		useRealAdvisor();
+
+		runChat();
+
+		assertThat(windowText()).as("活跃块与本轮完整块都保留，活跃 pin 优先于条数上限")
+			.containsExactly("活跃A问", "活跃A答", "你好", "好了");
+	}
+
+	@Test
+	void l3TrimsInactivePrefixWithoutDroppingAnActiveRun() {
+		installCompactor(null);
+		this.properties.getContext().setHysteresisPercent(100);
+		seedContext("L2", 109_500);
+		seedWindow(longTurns());
+		seedActiveRun("run-old-2");
+		useRealAdvisor();
+
+		runChat();
+
+		List<String> window = windowText();
+		assertThat(window).as("更早的非活跃前缀仍可裁").doesNotContain("第1轮问题");
+		assertThat(window).as("活跃 run 不得被 L3 裁掉").contains("第2轮问题", "第2轮回答");
+	}
+
 	// ───────────────────────── harness ─────────────────────────
 
 	private void installCompactor(RollingSummarizer.Summarizer summarizer) {
-		ReflectionTestUtils.setField(this.service, "contextCompactor", new ContextCompactor(this.properties,
-				new ContextLimitResolver(this.properties), this.contextStore, summarizer));
+		this.compactor = new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore,
+				summarizer);
+		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 	}
 
 	/** 会话的压缩基线（真值口径：压缩触发/滞回都看它）。 */
@@ -284,6 +441,14 @@ class MemoryCompactionWriteBackTest {
 					true);
 			startedAt += 1_000L;
 		}
+	}
+
+	private void seedActiveRun(String runId) {
+		RunSnapshot snapshot = this.store.seedRun(runId, SESSION_ID);
+		snapshot.setTenantId(TENANT);
+		snapshot.setUserId(USER);
+		snapshot.setStatus(RunSnapshot.RUNNING);
+		this.store.save(snapshot);
 	}
 
 	/** L1 素材：一条带大工具结果的旧轮 + 一条普通旧轮。 */
@@ -316,6 +481,35 @@ class MemoryCompactionWriteBackTest {
 		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), this.registry.of(RUN_ID));
 	}
 
+	private void seedSuspendedResume() {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		snapshot.setTenantId(TENANT);
+		snapshot.setUserId(USER);
+		snapshot.setProviderId(7L);
+		snapshot.setModelId("test-model");
+		snapshot.setInFlightToolCalls(new ArrayList<>());
+		List<Message> history = new ArrayList<>(this.repository.findByConversationId(SESSION_ID));
+		history.add(new UserMessage("挂起问题"));
+		snapshot.setMessageJson(this.codec.serializeAll(history));
+		this.store.save(snapshot);
+		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
+	}
+
+	private ResumeService.ResumeResult runResume() {
+		org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor executor = org.mockito.Mockito
+			.mock(org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor.class);
+		org.mockito.Mockito.doAnswer(invocation -> {
+			invocation.getArgument(0, Runnable.class).run();
+			return null;
+		}).when(executor).execute(any(Runnable.class));
+		ResumeService resumeService = new ResumeService(this.store, this.registry, this.codec, this.service,
+				org.mockito.Mockito.mock(com.example.configmgr.ai.gate.SpToolCallingManager.class), executor, this.fake.redis,
+				this.properties, this.cancellations, new com.example.configmgr.ai.tool.ToolResultLimiter(this.properties));
+		ReflectionTestUtils.setField(resumeService, "contextCompactor", this.compactor);
+		return resumeService.resume(RUN_ID);
+	}
+
 	private List<String> windowText() {
 		return this.repository.findByConversationId(SESSION_ID).stream().map(Message::getText).toList();
 	}
@@ -331,6 +525,23 @@ class MemoryCompactionWriteBackTest {
 			}
 		}
 		return "";
+	}
+
+	private void useRealAdvisor() {
+		this.advisorModel = new PromptRecordingModel();
+		ChatClient realClient = ChatClient.builder(this.advisorModel)
+			.defaultAdvisors(new AiModelConfig().messageChatMemoryAdvisor(this.chatMemory))
+			.build();
+		ProviderRuntime realRuntime = new ProviderRuntime(7L, "deepseek", "test-model", "http://placeholder",
+				"/chat/completions", "7|fp|u|p", null, null, this.advisorModel, realClient);
+		when(this.providerRegistry.current()).thenReturn(realRuntime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(realRuntime));
+		when(this.providerRegistry.target(7L, "test-model")).thenReturn(java.util.Optional.of(
+				new com.example.configmgr.ai.config.AiConfigService.ChatTarget(
+						new com.example.configmgr.ai.config.AiConfigService.ResolvedProvider(7L, "deepseek",
+								"http://placeholder", "/chat/completions", "test-model", "sk-test-0123456789", "fp", true),
+						"test-model", true)));
+		when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(realRuntime);
 	}
 
 	private void stubFluentChain() {
@@ -353,6 +564,22 @@ class MemoryCompactionWriteBackTest {
 				List.of(new Generation(AssistantMessage.builder().content("").build(),
 						org.springframework.ai.chat.metadata.ChatGenerationMetadata.builder().finishReason("stop").build())),
 				org.springframework.ai.chat.metadata.ChatResponseMetadata.builder().model("test-model").build());
+	}
+
+	private static final class PromptRecordingModel implements ChatModel {
+
+		private final List<List<String>> promptTexts = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+		@Override
+		public ChatResponse call(org.springframework.ai.chat.prompt.Prompt prompt) {
+			throw new UnsupportedOperationException("本用例只走流式调用");
+		}
+
+		@Override
+		public Flux<ChatResponse> stream(org.springframework.ai.chat.prompt.Prompt prompt) {
+			this.promptTexts.add(prompt.getInstructions().stream().map(Message::getText).toList());
+			return Flux.just(chunk("好了"), terminal());
+		}
 	}
 
 }

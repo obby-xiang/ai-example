@@ -9,7 +9,9 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -250,16 +252,28 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 
 	private volatile Duration ttl;
 
+	private volatile java.util.function.Function<String, Set<String>> activeRunLookup;
+
 	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl) {
 		this(redis, codec, ttl, null);
 	}
 
 	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl,
 			SessionPurgeGuard purgeGuard) {
+		this(redis, codec, ttl, purgeGuard, null);
+	}
+
+	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl,
+			SessionPurgeGuard purgeGuard, java.util.function.Function<String, Set<String>> activeRunLookup) {
 		this.redis = redis;
 		this.codec = codec;
 		this.ttl = ttl;
 		this.purgeGuard = purgeGuard;
+		this.activeRunLookup = activeRunLookup;
+	}
+
+	public void setActiveRunLookup(java.util.function.Function<String, Set<String>> activeRunLookup) {
+		this.activeRunLookup = activeRunLookup;
 	}
 
 	/** 运行期覆盖默认 TTL（V-c2 短 TTL 实验使用）。 */
@@ -594,6 +608,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return;
 		}
 		deleteLegacyQuietly(legacyKeyOrNull, conversationId);
+		slideCasCounters(finalKey);
 		addToIndex(conversationId, finalKey);
 	}
 
@@ -637,17 +652,22 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		String versionKey = versionKey(finalKey);
 		String generationKey = generationKey(finalKey);
 		List<Message> incoming = messages == null ? List.of() : messages;
+		Set<String> pinnedRunIds = pinnedRunIds(conversationId);
 		// 代次只读一次：本次写回启动之后发生的任何清空，都会让下面每一次 CAS（含重试）作废。
 		String expectedGeneration = readCounter(generationKey);
 		for (int attempt = 1; attempt <= MERGE_ATTEMPTS; attempt++) {
 			String expectedVersion = readCounter(versionKey);
 			List<String> currentRaw = rawWindow(finalKey, legacyKeyOrNull);
-			List<Message> merged = RunMemoryMerge.merge(
-					currentRaw.isEmpty() ? List.of() : this.codec.deserializeAll(currentRaw), incoming, turn,
-					replaceRunBlock, maxMessages);
+			List<Message> current = currentRaw.isEmpty() ? List.of() : this.codec.deserializeAll(currentRaw);
+			List<Message> merged = RunMemoryMerge.merge(current, incoming, turn, replaceRunBlock, maxMessages,
+					pinnedRunIds);
 			List<String> payload = this.codec.serializeAll(merged);
-			if (payload.equals(currentRaw)) {
+			// 窗口没变 = 逐条"语义相等"（类型/正文/工具调用/结果/metadata 整份相等），
+			// 不拿 JSON 字符串比：metadata 的键序会随构造路径变化，字节比较会让这条早退形同虚设。
+			if (sameWindow(merged, current)) {
 				// 窗口没变：不写、不推进版本（避免无谓 CAS 与把并发写者的版本顶掉）。
+				// 计数器仍要跟着续：否则它们会先于数据键过期，:gen 归 0 会让在飞写回被误判成"被清空"。
+				slideCasCounters(finalKey);
 				if (!merged.isEmpty()) {
 					addToIndex(conversationId, finalKey);
 				}
@@ -709,6 +729,21 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		addToIndex(conversationId, finalKey);
 	}
 
+	private Set<String> pinnedRunIds(String conversationId) {
+		java.util.function.Function<String, Set<String>> lookup = this.activeRunLookup;
+		if (lookup == null) {
+			return Set.of();
+		}
+		try {
+			Set<String> active = lookup.apply(conversationId);
+			return active == null ? Set.of() : active;
+		}
+		catch (RuntimeException ex) {
+			log.warn("活跃 run 读取失败，本次记忆合并暂停条数裁剪 conversationId={}：{}", conversationId, ex.getMessage());
+			return null;
+		}
+	}
+
 	/** 合并 CAS 的版本键：与数据键同 hash tag（Cluster 同槽，脚本不跨槽）。 */
 	private String versionKey(String dataKey) {
 		return dataKey + VERSION_SUFFIX;
@@ -723,6 +758,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	@Override
 	public MemoryWindowSnapshot readWindow(String conversationId) {
 		String finalKey = key(conversationId);
+		// 基线读出来之后，计数器不能在写回前先过期（:gen 归 0 = 误判"被清空"）：与数据键一起续 TTL。
+		slideCasCounters(finalKey);
 		long version = counterValue(readCounter(versionKey(finalKey)));
 		long generation = counterValue(readCounter(generationKey(finalKey)));
 		List<String> raw = rawWindow(finalKey, legacyEligible(conversationId) ? legacyKey(conversationId) : null);
@@ -802,6 +839,35 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	/**
+	 * 把两个 CAS 计数器与数据键<b>一起续到同一会话 TTL</b>。
+	 *
+	 * <p>为什么每条路径都要续：数据键的 TTL 在每次成功写入（以及等值早退/读快照）时被看作"会话还活着"，
+	 * 而计数器只在合并写与清空时设过 TTL —— 不一起续就会<b>先于数据键过期</b>：{@code :gen} 归 0 之后，
+	 * 一个"写回期间并没有被清空"的写者会拿到 {@code -2}，被误判成清空而放弃写回（历史静默不落盘）。
+	 *
+	 * <p>EXPIRE 不存在的键是空操作（不会凭空造键）；TTL 未配置（{@code <=0}）时整段跳过。
+	 */
+	private void slideCasCounters(String dataKey) {
+		long ttlMillis = stagingTtlMillis();
+		if (ttlMillis <= 0L) {
+			return;
+		}
+		Duration ttl = Duration.ofMillis(ttlMillis);
+		expireQuietly(versionKey(dataKey), ttl);
+		expireQuietly(generationKey(dataKey), ttl);
+	}
+
+	/** 续 TTL 失败只 WARN：数据本身没变，下一次成功写入会再续。 */
+	private void expireQuietly(String counterKey, Duration ttl) {
+		try {
+			this.redis.expire(counterKey, ttl);
+		}
+		catch (RuntimeException ex) {
+			log.warn("会话记忆计数器续 TTL 失败（下一次成功写入会再续）key={}：{}", counterKey, ex.getMessage());
+		}
+	}
+
+	/**
 	 * 读合并 CAS 的计数器（未写过 = {@code "0"}）。
 	 *
 	 * <p>读失败<b>不吞</b>：没有版本/代次就无法参与 CAS，继续写下去等于无保护的整窗覆盖 —— 宁可本次
@@ -810,6 +876,52 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	private String readCounter(String counterKey) {
 		String current = this.redis.opsForValue().get(counterKey);
 		return current == null || current.isBlank() ? "0" : current;
+	}
+
+	/**
+	 * 两份窗口是否<b>语义相等</b>（用于"没有变化就不写"的早退）。
+	 *
+	 * <p>逐条比较消息类型、正文、工具调用、工具结果与 metadata（{@link Map#equals} 与键序无关）。
+	 * 刻意不比较序列化后的 JSON 字符串：metadata 的键序随构造路径（编解码/重建/盖章）变化，
+	 * 字节比较会让早退几乎不成立 —— 每次收敛都白写一次、白推一次版本。
+	 */
+	private static boolean sameWindow(List<Message> left, List<Message> right) {
+		if (left.size() != right.size()) {
+			return false;
+		}
+		for (int index = 0; index < left.size(); index++) {
+			if (!sameMessage(left.get(index), right.get(index))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean sameMessage(Message left, Message right) {
+		if (left == right) {
+			return true;
+		}
+		if (left == null || right == null || left.getMessageType() != right.getMessageType()) {
+			return false;
+		}
+		if (!java.util.Objects.equals(left.getText(), right.getText())) {
+			return false;
+		}
+		if (!java.util.Objects.equals(left.getMetadata(), right.getMetadata())) {
+			return false;
+		}
+		List<AssistantMessage.ToolCall> leftCalls = left instanceof AssistantMessage assistant
+				? assistant.getToolCalls() : List.of();
+		List<AssistantMessage.ToolCall> rightCalls = right instanceof AssistantMessage assistant
+				? assistant.getToolCalls() : List.of();
+		if (!leftCalls.equals(rightCalls)) {
+			return false;
+		}
+		List<ToolResponseMessage.ToolResponse> leftResponses = left instanceof ToolResponseMessage toolResponse
+				? toolResponse.getResponses() : List.of();
+		List<ToolResponseMessage.ToolResponse> rightResponses = right instanceof ToolResponseMessage toolResponse
+				? toolResponse.getResponses() : List.of();
+		return leftResponses.equals(rightResponses);
 	}
 
 	/** 当前窗口原文：tagged 优先，迁移期 legacy 回落（与 {@link #findByConversationId} 同口径）。 */

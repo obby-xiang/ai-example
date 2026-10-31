@@ -203,6 +203,20 @@
       "reason": "本批仅收紧既有SSE调度线程身份清理、缺失身份不投递及心跳序号入队顺序，不新增迁移接口、键族或跨实例契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:07f7d824e8284baefbd8c44e7ebc911ebedf66957b87f90203909d970cadf8a5",
+      "status": "synced",
+      "reason": "已同步续跑先replaceWindow再交棒且SYSTEM只留快照、首轮CAS失败重读重算且未落库压缩结果不进快照、摘要atMs单调、current+incoming L1、legacy并发去重及活跃run pin契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:baec737a22443b91558bc99fb2f3d3e5bd0cae00ce6c7df898c272efcac94d68",
+      "status": "synced",
+      "reason": "已合并同步显式空对象不设筛选、条件收集失败拒绝、混批拒绝、空数组非全量、条件幂等与全部记忆压缩并发契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

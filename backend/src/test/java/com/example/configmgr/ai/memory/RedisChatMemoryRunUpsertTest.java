@@ -1,7 +1,9 @@
 package com.example.configmgr.ai.memory;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -149,7 +151,10 @@ class RedisChatMemoryRunUpsertTest {
 	@Test
 	void writerThatReadBeforeAClearCannotRestoreTheClearedHistory() {
 		this.repository.upsertRun(CID, A, history("A问", "A答"), WINDOW, true);
-		List<Message> inFlightHistory = this.repository.findByConversationId(CID);
+		// 本轮收敛会带上本轮的新消息（真的会写）；窗口没变时的"等值早退"不走 CAS，测不到交错
+		List<Message> inFlightHistory = new ArrayList<>(this.repository.findByConversationId(CID));
+		inFlightHistory.add(new UserMessage("A续问"));
+		inFlightHistory.add(AssistantMessage.builder().content("A续答").build());
 		int casBefore = this.fake.casAttempts.get();
 		AtomicBoolean cleared = new AtomicBoolean();
 		this.fake.beforeScript = () -> {
@@ -174,7 +179,9 @@ class RedisChatMemoryRunUpsertTest {
 	@Test
 	void clearDuringCasRetryAlsoAbortsInsteadOfRestoringHistory() {
 		this.repository.upsertRun(CID, A, history("A问", "A答"), WINDOW, true);
-		List<Message> inFlightHistory = this.repository.findByConversationId(CID);
+		List<Message> inFlightHistory = new ArrayList<>(this.repository.findByConversationId(CID));
+		inFlightHistory.add(new UserMessage("A续问"));
+		inFlightHistory.add(AssistantMessage.builder().content("A续答").build());
 		AtomicInteger attempts = new AtomicInteger();
 		AtomicBoolean inHook = new AtomicBoolean();
 		this.fake.beforeScript = () -> {
@@ -242,6 +249,61 @@ class RedisChatMemoryRunUpsertTest {
 			.as("整窗内容必须原样落盘（跨 run 改写不被按 run 合并跳过）")
 			.containsExactly("[压缩摘要]", "保留的问题");
 		assertThat(current.version()).isEqualTo(baseline.version() + 1);
+	}
+
+	/**
+	 * <b>无归属旧消息不得被另一个 run 的收敛整段删掉</b>（迁移期/旧版本写下的消息没有 runId）。
+	 *
+	 * <p>替换写只带来本轮历史：窗口里那些不在本轮历史里的无归属消息若被当成"已经在历史里"丢弃，
+	 * 旧会话内容就整段丢失。它们必须原样留在窗口最前，且不得被误归本轮。
+	 */
+	@Test
+	void legacyMessagesWithoutRunIdSurviveAnotherRunsConvergence() {
+		this.fake.lists.put(this.repository.keyFor(CID), new CopyOnWriteArrayList<>(this.codec
+			.serializeAll(List.of(new UserMessage("旧会话问题"), new AssistantMessage("旧会话回答")))));
+
+		this.repository.upsertRun(CID, B, history("B问", "B答"), WINDOW, true);
+
+		List<Message> window = this.repository.findByConversationId(CID);
+		assertThat(texts(window)).as("无归属旧消息必须保留").containsExactly("旧会话问题", "旧会话回答", "B问", "B答");
+		assertThat(RunMemoryMerge.runIdOf(window.get(0))).as("保留的旧消息不得被误归本轮").isNull();
+		assertThat(RunMemoryMerge.runIdOf(window.get(1))).isNull();
+		assertThat(RunMemoryMerge.runIdOf(window.get(2))).isEqualTo(B.runId());
+	}
+
+	/** 本轮历史里带着同一批旧消息 ⇒ 窗口里只留一份（去重后由本轮块重新盖章）。 */
+	@Test
+	void legacyMessagesCarriedInTheRunHistoryAreNotDuplicated() {
+		this.fake.lists.put(this.repository.keyFor(CID), new CopyOnWriteArrayList<>(this.codec
+			.serializeAll(List.of(new UserMessage("旧会话问题"), new AssistantMessage("旧会话回答")))));
+		List<Message> incoming = new ArrayList<>(this.repository.findByConversationId(CID));
+		incoming.addAll(history("B问", "B答"));
+
+		this.repository.upsertRun(CID, B, incoming, WINDOW, true);
+
+		assertThat(texts(this.repository.findByConversationId(CID))).as("旧消息只能出现一次")
+			.containsExactly("旧会话问题", "旧会话回答", "B问", "B答");
+	}
+
+	@Test
+	void concurrentRunsMigrateTheSameLegacyWindowOnlyOnce() {
+		this.fake.lists.put(this.repository.keyFor(CID), new CopyOnWriteArrayList<>(this.codec
+			.serializeAll(List.of(new UserMessage("旧会话问题"), new AssistantMessage("旧会话回答")))));
+		List<Message> aIncoming = new ArrayList<>(this.repository.findByConversationId(CID));
+		aIncoming.addAll(history("A问", "A答"));
+		List<Message> bIncoming = new ArrayList<>(this.repository.findByConversationId(CID));
+		bIncoming.addAll(history("B问", "B答"));
+
+		this.repository.upsertRun(CID, A, aIncoming, WINDOW, true);
+		this.repository.upsertRun(CID, B, bIncoming, WINDOW, true);
+
+		List<Message> window = this.repository.findByConversationId(CID);
+		assertThat(texts(window)).as("stale incoming 不得把已被其他 run 收养的旧消息再盖一次")
+			.containsExactly("旧会话问题", "旧会话回答", "A问", "A答", "B问", "B答");
+		assertThat(RunMemoryMerge.runIdOf(window.get(0))).isEqualTo(A.runId());
+		assertThat(RunMemoryMerge.runIdOf(window.get(1))).isEqualTo(A.runId());
+		assertThat(RunMemoryMerge.runIdOf(window.get(4))).as("本轮新消息仍归属本轮").isEqualTo(B.runId());
+		assertThat(RunMemoryMerge.runIdOf(window.get(5))).isEqualTo(B.runId());
 	}
 
 	/** 清空是"清历史"不是"封会话"：之后的新轮必须能重新写（tombstone 只让清空前的写者失效）。 */

@@ -2587,6 +2587,16 @@ function registerHandlers(): void {
       return { ok: false, reason }
     }
     const condition = verdict.condition
+    // F8（2026-10-31）：提交点只遍历 `selectedDefs` —— 未勾选/未绑定的配置项即使写了草案也永远不会
+    // 提交，而回执却是"成功"（AI 以为条件已设置、页面上却看不见）。因此必须在**任何写入之前**
+    // 结构化失败：零草案、零工作区写、零提交。
+    if (!selectedDefs.value.includes(defCode)) {
+      return {
+        ok: false,
+        reason: `配置项 ${defCode} 未勾选（不在当前任务的选中集）：本次未设置查询条件（未改动页面条件）。`
+          + '请先调用 select_definitions，或让用户在「选择配置」步勾选该配置项后再重试。'
+      }
+    }
     // 校验通过：只写**页面草案**（草案 / 已改登记 / 行数预览失效）。
     //
     // 2026-10-30 提交点收口：这里**不**写业务后台。任务条目的 `conditionJson` 只在
@@ -2608,12 +2618,6 @@ function registerHandlers(): void {
     if (taskId.value === null) {
       return `已设置 ${defCode} 的查询条件草案：${summary}（当前未绑定任务，条件只存在于本页表单；`
         + '推进步骤或开始导出时一并提交）'
-    }
-    if (!selectedDefs.value.includes(defCode)) {
-      // 提交点只遍历选中集：未勾选的配置项没有任务条目，条件无法在推进步骤时提交 ——
-      // 回执必须如实说明，别让模型以为"条件已就绪"。
-      return `已设置 ${defCode} 的查询条件草案：${summary}（该配置项不在当前选中集：推进步骤时不会提交，`
-        + '请先在「选择配置」步勾选它）'
     }
     return `已设置 ${defCode} 的查询条件草案：${summary}（推进步骤或开始导出时一并提交给任务 #${taskId.value}）`
   })

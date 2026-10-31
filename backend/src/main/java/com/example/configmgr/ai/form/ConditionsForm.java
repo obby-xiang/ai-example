@@ -345,10 +345,27 @@ public class ConditionsForm extends HostForm {
 	 * <li><b>表单回灌</b>：明确留空允许推进（前端 {@code persistStepData} 提交 {@code {}}）；
 	 * 非空文本必须已按表单覆盖的 defCode 解析成草案，否则零副作用拒绝并指回 {@code set_condition}；</li>
 	 * <li><b>逐项核对</b>：真正未知的配置项才挂一次可选条件表单；取消过的表单不换卡重问。</li>
+	 * <li><b>收集失败不得 allow（F3）</b>：{@code park} 未启用、挂起写失败、读任务异常、同一缺口的
+	 * 条件表已存在且未结算 —— 条件仍 {@code UNDECIDED} 时一律 {@code TOOL_EXECUTION_FAILED}
+	 * 零副作用拒绝；只有已明确 {@code SET}/{@code EXPLICIT_UNSET}/已结算草案/明确留空才放行。</li>
+	 * <li><b>混批不 park（F4）</b>：{@code allowPark=false} 时零副作用拒绝并明确"先单独调用
+	 * confirm_step"（host park 会先外置整批历史、吞掉同批其它调用）。</li>
 	 * </ol>
 	 */
 	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
 			List<Message> history) {
+		return inspectConfirmStep(runId, context, pending, history, true);
+	}
+
+	/**
+	 * 带"本批是否允许挂起"的复核（F4）。
+	 *
+	 * <p>{@code allowPark=false}（同一批还有其它工具）：<b>不</b>在 {@code confirm_step} 的复核里挂条件表 ——
+	 * 宿主 park 会先于同批其它调用把整批历史外置，它们的确认卡/回执随之丢失。此时零副作用拒绝并
+	 * 明确"先单独调用 confirm_step"，让模型分批。
+	 */
+	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
+			List<Message> history, boolean allowPark) {
 		if (runId == null || context == null || pending == null || history == null) {
 			return ConfirmStepDecision.allow();
 		}
@@ -360,7 +377,21 @@ public class ConditionsForm extends HostForm {
 			if (taskId == null) {
 				return ConfirmStepDecision.allow();
 			}
-			Task task = readTask(taskId);
+			Task task;
+			try {
+				task = readTask(taskId);
+			}
+			catch (RuntimeException ex) {
+				if (!conditionGateExpected(context)) {
+					log.warn("读取任务失败，confirm_step 按既有推进路径继续 runId={} taskId={}：{}", runId, taskId,
+							ex.getMessage());
+					return ConfirmStepDecision.allow();
+				}
+				// F3：读异常时无法确认条件状态 —— 条件链上必须 fail-closed，不能按全量放行
+				log.warn("confirm_step 条件复核读取任务失败，零副作用拒绝 runId={} taskId={}：{}", runId, taskId,
+						ex.getMessage());
+				return readFailureDecision(taskId);
+			}
 			if (task == null || task.getType() != Task.TaskType.EXPORT) {
 				return ConfirmStepDecision.allow();
 			}
@@ -386,12 +417,42 @@ public class ConditionsForm extends HostForm {
 				// 没有已选配置项就没有"条件"可收集（这类任务本就推进不下去）
 				return ConfirmStepDecision.allow();
 			}
-			return conditionGate(runId, taskId, task, context, pending, history);
+			return conditionGate(runId, taskId, task, context, pending, history, allowPark);
 		}
 		catch (RuntimeException ex) {
-			log.warn("confirm_step 的条件复核未能完成（按既有推进路径继续）runId={}：{}", runId, ex.getMessage());
-			return ConfirmStepDecision.allow();
+			if (!conditionGateExpected(context)) {
+				log.warn("confirm_step 的条件复核未能完成（按既有推进路径继续）runId={}：{}", runId, ex.getMessage());
+				return ConfirmStepDecision.allow();
+			}
+			// F3：条件链上的意外异常同样 fail-closed（不能因为复核炸了就按全量推进）
+			log.warn("confirm_step 条件复核异常，零副作用拒绝 runId={}：{}", runId, ex.getMessage());
+			return internalConditionFailure("条件复核未能完成（内部执行失败），confirm_step 未执行（未向前端推进）",
+					List.of("条件状态无法确认，不能按全量推进",
+							"请稍后重试 confirm_step；若持续失败请检查任务服务/存储健康"));
 		}
+	}
+
+	/**
+	 * 上下文是否落在"导出 QUERY_COND"这个条件链上（读任务失败/复核异常时的 fail-closed 判据）。
+	 *
+	 * <p>只看上下文：任务本身读不出来时这是唯一可用的事实。导入没有 QUERY_COND 步，因此不会误伤。
+	 */
+	private static boolean conditionGateExpected(AiContext context) {
+		if (context == null) {
+			return false;
+		}
+		String step = TaskSteps.normalize(context.getStep());
+		if (!TaskSteps.QUERY_COND.equals(step)) {
+			return false;
+		}
+		String type = trim(context.getTaskType());
+		return type.isEmpty() || Task.TaskType.EXPORT.name().equalsIgnoreCase(type);
+	}
+
+	private static ConfirmStepDecision readFailureDecision(long taskId) {
+		return internalConditionFailure("条件复核读取任务失败（内部执行失败），confirm_step 未执行（未向前端推进）",
+				List.of("任务 #" + taskId + " 的条件状态无法确认：不能按全量推进",
+						"请稍后重试 confirm_step；若持续失败请检查任务服务/存储健康"));
 	}
 
 	/** 一个配置项的条件草案事实（全部来自 Redis 待决条目；业务库只读）。 */
@@ -766,6 +827,93 @@ public class ConditionsForm extends HostForm {
 		return value.isEmpty() ? null : value;
 	}
 
+	/**
+	 * <b>同一 run + 当前任务 + 同 {@code defCode} + 完全相同入参</b>的 {@code set_condition} 已成功结算
+	 * ⇒ 返回原回执（幂等重放，F11）。
+	 *
+	 * <p>为什么要这一层：模型常在同一轮里把同一个条件再发一次（换个措辞、或重试），
+	 * 前端会再写一遍同一份草案（重复写）。完全相同 = 结果必然相同，直接复用已结算回执即可；
+	 * <b>不同值必须视为修改照常执行</b> —— 因此判据是"defCode + conditions 结构相同"，
+	 * 不是"同 defCode 就跳过"。
+	 *
+	 * @return 可复用的回执文本；{@code null} = 没有可复用的成功调用（照常下发）
+	 */
+	public String settledSetConditionReplay(String runId, AiContext context, String argumentsJson) {
+		if (runId == null || context == null || context.getTaskId() == null || argumentsJson == null) {
+			return null;
+		}
+		JsonNode arguments = parseJson(argumentsJson);
+		JsonNode conditions = arguments == null ? null : arguments.get("conditions");
+		String defCode = defCodeOf(argumentsJson);
+		if (defCode == null || conditions == null || !conditions.isObject()) {
+			return null;
+		}
+		Task task;
+		try {
+			task = readTask(context.getTaskId());
+		}
+		catch (RuntimeException ex) {
+			// 读不到当前任务就不做幂等（宁可多一次下发，也不把结果复用到别的任务上）
+			return null;
+		}
+		if (task == null || !taskDefCodesFor(task).contains(defCode)) {
+			return null;
+		}
+		long boundaryMs = createTaskBoundary(context);
+		long taskId = task.getId() == null ? 0L : task.getId();
+		List<PendingToolCall> pendings;
+		try {
+			pendings = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			return null;
+		}
+		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+			if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
+					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
+					|| !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
+					|| pending.effectiveOutcome() != ToolOutcome.OK) {
+				continue;
+			}
+			if (!defCode.equals(defCodeOf(pending.getArguments()))
+					|| !sameConditions(pending.getArguments(), conditions)) {
+				continue;
+			}
+			boolean hostDraft = pending.getToolCallId() != null
+					&& pending.getToolCallId().startsWith(DRAFT_TOOL_CALL_ID_PREFIX);
+			if (hostDraft && !isDraftForTask(pending.getToolCallId(), runId, taskId)) {
+				// 别的任务的宿主草案：不得当作当前任务的幂等事实
+				continue;
+			}
+			if (!hostDraft && boundaryMs > 0 && requestedAtOf(pending) < boundaryMs) {
+				// 本任务创建之前的历史成功调用：不复用
+				continue;
+			}
+			return pending.getResultText() == null ? "" : pending.getResultText();
+		}
+		return null;
+	}
+
+	private static boolean sameConditions(String argumentsJson, JsonNode conditions) {
+		JsonNode arguments = parseJson(argumentsJson);
+		JsonNode other = arguments == null ? null : arguments.get("conditions");
+		return other != null && other.equals(conditions);
+	}
+
+	/**
+	 * {@code set_condition} 入参的内容签名（{@code defCode + conditions 结构}；坏 JSON/缺键 = {@code null}）。
+	 * 供同一批次内的重复调用去重（F11）：一次批次里出现两条完全相同的调用时，第二条不再挂起。
+	 */
+	public static String setConditionSignature(String argumentsJson) {
+		String defCode = defCodeOf(argumentsJson);
+		JsonNode arguments = parseJson(argumentsJson);
+		JsonNode conditions = arguments == null ? null : arguments.get("conditions");
+		if (defCode == null || conditions == null || !conditions.isObject()) {
+			return null;
+		}
+		return defCode + '\u0001' + conditions;
+	}
+
 	/** {@code remaining = all - covered}（保持原顺序）。 */
 	private static List<String> subtract(List<String> all, Set<String> covered) {
 		List<String> out = new ArrayList<>();
@@ -822,7 +970,7 @@ public class ConditionsForm extends HostForm {
 	}
 
 	private ConfirmStepDecision conditionGate(String runId, long taskId, Task task, AiContext context,
-			PendingToolCall pending, List<Message> history) {
+			PendingToolCall pending, List<Message> history, boolean allowPark) {
 		// ① 草案事实只来自 Redis 待决条目：任务 conditionJson 已落库条件 + 本轮成功的 set_condition 草案，
 		// 以及表单明确留空。坏 JSON/残缺结构明确拒绝，不按全量放行。
 		long boundaryMs = createTaskBoundary(context);
@@ -846,16 +994,23 @@ public class ConditionsForm extends HostForm {
 		if (feedback.blank()) {
 			return ConfirmStepDecision.allow();
 		}
-		// ③ 非空回灌必须先由模型解析成 set_condition 草案；在此之前不得下发候选或换卡重问
+		// ③ 非空回灌必须先由模型解析成 set_condition 草案；在此之前不得下发候选或换卡重问。
+		// 拒绝清单只点名**还没有草案**的剩余项：已按 set_condition(defCode, {}) 结算的配置项不算缺口。
 		if (feedback.nonEmpty() && !feedback.handled()) {
 			log.info("confirm_step 时条件表已收到非空文本但尚无对应草案，零副作用拒绝 runId={} taskId={}", runId, taskId);
-			return unparsedFeedbackDecision(plan.undecided());
+			return unparsedFeedbackDecision(remaining);
 		}
 		// ④ 合法 create_task 候选：复用前端 set_condition 通道生成页面草案（不弹条件表、不写库）
 		CandidateDispatch candidates = parkEnabled()
 				? dispatchCreateTaskCandidates(runId, taskId, context, task, drafts)
 				: CandidateDispatch.none();
 		if (!candidates.drafts().isEmpty()) {
+			if (!allowPark) {
+				// F4：混批不能在这里 park（同样会先外置整批历史、吞掉同批调用）
+				log.info("混批中 confirm_step 需要下发条件草案，零副作用拒绝（要求单独调用）runId={} taskId={}",
+						runId, taskId);
+				return mixedBatchDecision();
+			}
 			boolean parked = parkAll(runId, history, candidates.drafts());
 			if (parked) {
 				log.info("confirm_step 前下发条件草案 runId={} taskId={} drafts={}", runId, taskId,
@@ -893,33 +1048,89 @@ public class ConditionsForm extends HostForm {
 							"恢复通道：由用户下一轮明确选择——给出筛选条件（模型先 set_condition）"
 									+ "或明确按全量导出；本 run 不再自动弹条件表"));
 		}
-		// ⑦ 真正未知的条件：同一缺口只问一次
+		// ⑦ 真正未知的条件：同一缺口只问一次。
+		//
+		// F3：以下每条"收不到答案"的路径都必须 fail-closed —— 条件仍 UNDECIDED 时不能 allow
+		// （allow 会让 confirm_step 把一次"宿主没问成"变成全量导出）。只有 SET / EXPLICIT_UNSET /
+		// 已结算草案 / 明确留空才走上面的放行分支。
 		String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
-		if (!parkEnabled() || alreadyIssued(runId, toolCallId)) {
-			// 阻塞式等待不承接这条流程（见 HostForm 类注：不新增中断路径）
-			return ConfirmStepDecision.allow();
+		if (!parkEnabled()) {
+			log.warn("条件未决定但宿主表单挂起未启用，零副作用拒绝 runId={} taskId={} defs={}", runId, taskId,
+					remaining);
+			return internalConditionFailure("条件未决定且宿主表单挂起未启用（app.ai.park.enabled=false），"
+					+ "confirm_step 未执行（未向前端推进）",
+					List.of("条件仍未决定，不能按全量推进",
+							"下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
+									+ "或让用户明确按全量导出后再 confirm_step",
+							"宿主不会在未挂起状态下等待用户填表"));
+		}
+		if (!allowPark) {
+			// F4：混批 park 会先外置整批历史，吞掉同批其它调用的卡/回执 —— 改成让模型分批
+			log.info("混批中 confirm_step 需要收集条件，零副作用拒绝（要求单独调用）runId={} taskId={}", runId,
+					taskId);
+			return mixedBatchDecision();
+		}
+		if (alreadyIssued(runId, toolCallId)) {
+			log.warn("同一缺口的条件表已存在且未结算，零副作用拒绝（不换第二张）runId={} taskId={} toolCallId={}",
+					runId, taskId, toolCallId);
+			return internalConditionFailure("同一缺口的条件表已下发但未结算（或已作废），条件仍未决定，"
+					+ "confirm_step 未执行（未向前端推进）",
+					List.of("条件表 " + toolCallId + " 的状态不是成功回灌：不能重复下发第二张，也不能按全量推进",
+							"恢复通道：由用户明确给出条件（模型先 set_condition；不设请对每个 defCode 传 {}）"
+									+ "或明确按全量导出后再 confirm_step"));
 		}
 		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
 		if (arguments.isEmpty()) {
-			return ConfirmStepDecision.allow();
+			log.warn("条件表未通过白名单/长度校验，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			return internalConditionFailure("条件表无法生成（未通过表单白名单或超长），条件仍未决定，"
+					+ "confirm_step 未执行（未向前端推进）",
+					List.of("宿主无法下发一张自己都过不了闸门的表",
+							"下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
+									+ "或让用户明确按全量导出后再 confirm_step"));
 		}
 		log.info("confirm_step 推进前条件未决定，改为收集一次可选条件 runId={} taskId={} defs={}", runId, taskId,
 				remaining);
 		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()));
-		return parked ? ConfirmStepDecision.parkedDecision() : ConfirmStepDecision.allow();
+		if (!parked) {
+			// F3：挂起写失败（saveSuspended/converge 失败）同样不能 allow
+			log.warn("条件表挂起失败，条件仍未决定，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			return internalConditionFailure("条件表挂起失败（内部执行失败），条件仍未决定，"
+					+ "confirm_step 未执行（未向前端推进）",
+					List.of("宿主没有把条件表挂起成功（本拍未下发、未推进）",
+							"请稍后重试 confirm_step；若持续失败请检查存储/会话状态",
+							"不会在条件未决定时按全量推进"));
+		}
+		return ConfirmStepDecision.parkedDecision();
 	}
 
 	private static ConfirmStepDecision internalConditionFailure(String message, List<String> reasons) {
 		return ConfirmStepDecision.reject(ErrorCodes.TOOL_EXECUTION_FAILED, message, reasons);
 	}
 
-	/** 非空表单回灌尚未被模型解析成 set_condition 草案：零副作用拒绝，不换卡重问。 */
+	/** 混批需要挂起时的统一拒绝（F4）：让模型把 confirm_step 单独成批。 */
+	private static ConfirmStepDecision mixedBatchDecision() {
+		return internalConditionFailure("同一批里还有其它工具，条件表不能在混批中挂起，"
+				+ "confirm_step 未执行（未向前端推进）",
+				List.of("先单独调用 confirm_step（不传 step，只提交这一个工具），下一批再执行其它工具",
+						"混批挂起会先外置整批历史，吞掉同批其它调用的卡与回执",
+						"条件仍未决定：本批不会按全量推进"));
+	}
+
+	/**
+	 * 非空表单回灌尚未被模型解析成 set_condition 草案：零副作用拒绝，不换卡重问。
+	 *
+	 * <p>{@code remaining} = 还没有成功草案的配置项（已结算的不再点名）。用户可能用"无"/"不筛选"
+	 * 回答条件表 —— 那是<b>逐项明确不设</b>，对表单覆盖的每个 {@code defCode} 各调用一次
+	 * {@code set_condition(defCode, {})}（恰好空对象 = EXPLICIT_UNSET），不要重发条件表。
+	 */
 	private static ConfirmStepDecision unparsedFeedbackDecision(List<String> remaining) {
 		return ConfirmStepDecision.reject(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 				"条件表已填写但尚未生成草案，confirm_step 未执行（未向前端推进）",
 				List.of("条件表回灌了非空文本，但对应配置项还没有成功的 set_condition 草案",
 						"尚未生成草案的配置项：" + String.join("、", remaining),
 						"下一步：先把该文本解析成结构化条件并调用 set_condition（草案，不写库），下一批再 confirm_step",
+						"若用户已明确不设筛选（如回答“无”“不筛选”“全部”），对表单覆盖的每个 defCode 各调用一次 "
+								+ "set_condition(defCode, {})（恰好空对象 = 明确不设），不要重发 SET_CONDITIONS",
 						"不得改用第二张条件表单重复收集"));
 	}
 
@@ -1170,17 +1381,16 @@ public class ConditionsForm extends HostForm {
 	}
 
 	/** 读任务真实状态；读不到 = 不兜底（fail-safe，交回既有推进路径）。 */
+	/**
+	 * 任务读口：读失败<b>抛出</b>（F3）。条件链上"读不到"必须可区分于"任务不存在" ——
+	 * 吞成 {@code null} 会让 confirm_step 按"没有条件可核对"放行（全量导出）。
+	 * 非条件链的调用方（{@link #parkIfDueAtQueryCond}）各自 catch 后按既有路径继续。
+	 */
 	private Task readTask(Long taskId) {
 		if (this.taskService == null) {
 			return null;
 		}
-		try {
-			return this.taskService.findById(taskId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("读取任务真实条件状态失败，confirm_step 条件兜底跳过 taskId={}：{}", taskId, ex.getMessage());
-			return null;
-		}
+		return this.taskService.findById(taskId);
 	}
 
 	/** 单个非必填 text 框（形状与 {@link FormPurposes#SET_CONDITIONS} 一致）。 */

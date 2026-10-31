@@ -50,6 +50,11 @@ public final class HardTrim {
 	 * @param protectedToolCallIds 未决 HITL 条目的 toolCallId（所在 Turn 一刀不剪；可为 null）
 	 */
 	public static Plan plan(List<Message> messages, int keepRecentTurns, Set<String> protectedToolCallIds) {
+		return plan(messages, keepRecentTurns, protectedToolCallIds, Set.of());
+	}
+
+	public static Plan plan(List<Message> messages, int keepRecentTurns, Set<String> protectedToolCallIds,
+			Set<String> protectedRunIds) {
 		if (messages == null || messages.isEmpty()) {
 			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}
@@ -60,7 +65,8 @@ public final class HardTrim {
 			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}
 		List<ConversationTurns.Segment> segments = ConversationTurns.split(body);
-		int cut = ConversationTurns.firstPinnedTurn(body, segments, keepRecentTurns, protectedToolCallIds);
+		int cut = ConversationTurns.firstPinnedTurn(body, segments, keepRecentTurns, protectedToolCallIds,
+				protectedRunIds);
 		if (cut <= 0) {
 			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}

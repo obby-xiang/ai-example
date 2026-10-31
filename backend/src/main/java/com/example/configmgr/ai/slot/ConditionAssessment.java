@@ -26,9 +26,11 @@ import java.util.Set;
  * <ul>
  * <li>{@link State#SET}：任一配置项条目里有合法 {@code fields[]}（{@code fieldCode}+{@code operator}
  * 均非空，算子不限于 EQ）或非空 {@code scopeKeys}；</li>
- * <li>{@link State#EXPLICIT_UNSET}：JSON 是对象但既无合法字段也无范围键（典型 {@code "{}"}）——
+ * <li>{@link State#EXPLICIT_UNSET}：<b>恰好空对象 {@code {}}</b>（没有任何键）——
  * 这是前端在用户清空条件后落库的形态，语义是"明确不设 = 全量"；</li>
- * <li>{@link State#UNDECIDED}：空串/空白（从未决定）、坏 JSON、非对象 —— <b>不得</b>当成全量。</li>
+ * <li>{@link State#UNDECIDED}：空串/空白（从未决定）、坏 JSON、非对象、<b>空数组形态</b>
+ * （{@code fields:[]} / {@code scopeKeys:[]} 有键但没有条件）、未知键/残缺字段 —— <b>不得</b>
+ * 当成全量。</li>
  * </ul>
  *
  * <p>判据只认结构，不认具体字段名/值/大小写，因此不绑定任何业务配置项（不是写死 CNY/CURRENCY）。
@@ -183,7 +185,13 @@ public final class ConditionAssessment {
 		return new Assessment(new ArrayList<>(merged.values()));
 	}
 
-	/** 单条 {@code conditionJson} 的三态判定。 */
+	/**
+	 * 单条 {@code conditionJson} 的三态判定。
+	 *
+	 * <p><b>只有恰好空对象 {@code {}}</b> 是 {@link State#EXPLICIT_UNSET}（用户明确不设 = 全量）：
+	 * 空数组形态（{@code {"fields":[]}} / {@code {"scopeKeys":[]}}）是"有结构但没有条件"的非法写入，
+	 * 按 {@code UNDECIDED + unparseable} 处理（既不能当全量，也不能当已设置）。
+	 */
 	public static ItemCondition assess(String defCode, String conditionJson) {
 		if (conditionJson == null || conditionJson.isBlank()) {
 			return new ItemCondition(defCode, State.UNDECIDED, false, List.of());
@@ -230,7 +238,11 @@ public final class ConditionAssessment {
 		if (!facts.isEmpty()) {
 			return new ItemCondition(defCode, State.SET, false, facts);
 		}
-		return new ItemCondition(defCode, State.EXPLICIT_UNSET, false, List.of());
+		if (node.isEmpty()) {
+			return new ItemCondition(defCode, State.EXPLICIT_UNSET, false, List.of());
+		}
+		// 有键但没有任何可用条件（fields:[] / scopeKeys:[]）：非法写入形态，不得当"明确不设"。
+		return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 	}
 
 	/**

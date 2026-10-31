@@ -113,11 +113,21 @@ public final class ContextCompactor {
 	 * @param toolsTokens             本轮披露 schema 估算
 	 * @param protectedToolCallIds    未决 HITL 条目（永不清除）
 	 * @param runtime                 本轮运行态（摘要的 provider/model/options 唯一来源；null = 摘要不可用）
+	 * @param protectedRunIds         活跃 run（L3 不得裁掉，防止迟到写回复活旧块）
 	 */
 	public record Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
 			List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
 			int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
-			ProviderRuntime runtime) {
+			ProviderRuntime runtime, Set<String> protectedRunIds) {
+
+		public Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
+				List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
+				int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
+				ProviderRuntime runtime) {
+			this(sessionId, runId, model, providerId, messages, messageJsonBefore, usedTokens, completionTokens,
+					inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens, protectedToolCallIds, runtime,
+					Set.of());
+		}
 	}
 
 	/**
@@ -357,7 +367,7 @@ public final class ContextCompactor {
 			else if (target == ContextTrigger.Level.L3) {
 				reason = HardTrim.REASON_HARD_TRIM;
 				HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(),
-						request.protectedToolCallIds());
+						request.protectedToolCallIds(), request.protectedRunIds());
 				// N-D：`clear` 在本节之前就已算好（零代价、未落任何存储），判据必须计入它的收益 ——
 				// 旧实现只减 `trim.lostTokens()`，"清掉旧结果就能过"的一轮被误判成"裁了也没用"。
 				int afterClear = decision.nextEst() - clear.savedTokens();

@@ -11,6 +11,7 @@ import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -122,6 +123,11 @@ public class TaskController {
      * <p>
      * 两种入参形态都支持：字符串则按"已是 JSON 文本"处理，但**必须校验可解析**
      * （非法文本同样会造成上述脏数据）；对象/数组则用 Jackson 序列化。
+     *
+     * <p>
+     * 2026-10-31（F5）：写入面只把<b>恰好 {@code {}}</b> 当"明确不设"。空数组形态
+     * （{@code fields:[]} / {@code scopeKeys:[]}）以及非对象载荷一律 400、零落库 ——
+     * 它们曾被读侧当成 {@code EXPLICIT_UNSET}（全量），与"明确不设"的唯一写法混淆。
      */
     private String conditionJson(Object condition) {
         if (condition == null) {
@@ -142,13 +148,35 @@ public class TaskController {
                 throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 无法序列化为 JSON：" + e.getMessage());
             }
         }
+        // F5（2026-10-31）：写入面只把**恰好 {}** 当"明确不设"。空数组形态
+        // （fields:[] / scopeKeys:[]）是"有结构但没有条件"，落库后会被读侧当 EXPLICIT_UNSET（全量），
+        // 与"恰好 {}"的语义混淆 —— 在这里直接 400，零落库（读侧也按未决定处理，见 ConditionAssessment）。
+        JsonNode parsed;
         try {
-            objectMapper.readTree(text);
+            parsed = objectMapper.readTree(text);
         }
         catch (Exception e) {
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 不是合法 JSON：" + e.getMessage());
         }
+        if (parsed == null || !parsed.isObject()) {
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
+                    "condition 必须是 JSON 对象（明确不设请恰好传 {}）：" + text);
+        }
+        if (parsed.size() > 0 && !hasConditionContent(parsed)) {
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
+                    "condition 不能是空数组形态（fields:[] / scopeKeys:[] 不是“明确不设”，明确不设请恰好传 {}）：" + text);
+        }
         return text;
+    }
+
+    /** 条件是否至少有一项可提交的内容（与 {@code ConditionAssessment} 的"有事实"同口径）。 */
+    private static boolean hasConditionContent(JsonNode condition) {
+        JsonNode fields = condition.get("fields");
+        if (fields != null && fields.isArray() && !fields.isEmpty()) {
+            return true;
+        }
+        JsonNode scopeKeys = condition.get("scopeKeys");
+        return scopeKeys != null && scopeKeys.isArray() && !scopeKeys.isEmpty();
     }
 
     @PutMapping("/{id}/step")
