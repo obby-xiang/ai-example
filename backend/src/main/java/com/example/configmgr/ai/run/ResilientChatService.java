@@ -913,7 +913,7 @@ public class ResilientChatService {
 			// 意图不再由中文/原话关键词判断：只认模型结构化工具调用（run 内回灌/台账事实）。
 			String lastUserText = null;
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
-					exportCorrectionPrefix(runId), attempt -> {
+					correctionPrefix(runId), attempt -> {
 						log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId,
 								sessionId, history.size());
 						Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
@@ -1296,6 +1296,7 @@ public class ResilientChatService {
 		// 导出收尾的一轮内部纠正（Task 1 第 5 项）：<b>run 级</b>最多一次（标记随快照持久化，含续跑），
 		// 且不占失败重试次数。前缀正文属于本轮已上屏内容，成功收尾时必须与纠正后的正文一起落库。
 		boolean exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
+		boolean createTaskCorrectionUsed = correctionAlreadyUsed(runId, CREATE_TASK_CORRECTION_MARKER);
 		String prefixText = resumePrefix == null ? "" : resumePrefix;
 		String prefixReasoning = "";
 		boolean correcting = false;
@@ -1387,6 +1388,20 @@ public class ResilientChatService {
 						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
 						&& firstFinish != UpstreamErrorClassifier.Finish.TOOL_CALLS
 						&& StringUtils.hasText(accumulator.text());
+				if (!createTaskCorrectionUsed && !correcting && correctable
+						&& createTaskWrapUpCorrectionDue(runId, context)
+						&& markCorrectionUsed(runId, accumulator.text(), CREATE_TASK_CORRECTION_MARKER,
+								CREATE_TASK_CORRECTION_PREFIX_KEY)) {
+					createTaskCorrectionUsed = true;
+					correcting = true;
+					prefixText = accumulator.text();
+					prefixReasoning = accumulator.reasoningText();
+					log.info("创建任务动作缺失，补一次通用工具纠正 runId={} chars={}", runId, prefixText.length());
+					if (keepalive != null) {
+						keepalive.rearm();
+					}
+					continue;
+				}
 				if (!exportCorrectionUsed && !correcting && correctable
 						&& exportWrapUpCorrectionDue(runId, context, lastUserText)
 						&& markExportCorrectionUsed(runId, accumulator.text())) {
@@ -1565,6 +1580,50 @@ public class ResilientChatService {
 	 *
 	 * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
 	 */
+	static final String CREATE_TASK_CORRECTION_MARKER = "createTaskCorrectionUsed";
+
+	static final String CREATE_TASK_CORRECTION_PREFIX_KEY = "createTaskCorrectionPrefix";
+
+	private boolean createTaskWrapUpCorrectionDue(String runId, AiContext fallback) {
+		AiContext context = latestContext(runId, fallback);
+		if (context == null || context.getTaskId() != null || !"tasks".equals(context.getPage())
+				|| !disclosedTool(context, AiToolNames.CREATE_TASK)) {
+			return false;
+		}
+		try {
+			for (PendingToolCall pending : this.store.pendings(runId)) {
+				if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
+					return false;
+				}
+			}
+			boolean definitionsRead = false;
+			for (Map<String, Object> record : this.store.ledger(runId)) {
+				if (record == null) {
+					continue;
+				}
+				String name = String.valueOf(record.get("name"));
+				if (AiToolNames.CREATE_TASK.equals(name)) {
+					return false;
+				}
+				if ((AiToolNames.LIST_CONFIG_DEFS.equals(name) || AiToolNames.GET_CONFIG_DEF.equals(name))
+						&& ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
+					definitionsRead = true;
+				}
+			}
+			return definitionsRead;
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取创建工具收尾事实失败，本次不纠正 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	static String createTaskWrapUpCorrection() {
+		return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+				+ "如果用户本轮是在要求新建任务，请调用一次 create_task；不要只列配置或用文字反问。"
+				+ "如果用户只是查询配置而不要求新建，直接给出查询结果。不得重复已经执行的工具，也不得自动批准创建。";
+	}
+
 	/**
 	 * 导出收尾的一轮内部纠正判据（Task 1 第 5 项）。
 	 *
@@ -1611,14 +1670,18 @@ public class ResilientChatService {
 
 	/** 本轮披露面里是否有 {@code start_export}（按冻结上下文取，与请求侧同源）。 */
 	boolean disclosedStartExport(AiContext context) {
-		if (this.toolRegistry == null || context == null) {
+		return disclosedTool(context, AiToolNames.START_EXPORT);
+	}
+
+	boolean disclosedTool(AiContext context, String toolName) {
+		if (this.toolRegistry == null || context == null || toolName == null) {
 			return false;
 		}
 		try {
 			List<ToolCallback> tools = this.toolRegistry.forContext(context);
 			for (ToolCallback callback : tools == null ? List.<ToolCallback>of() : tools) {
 				if (callback != null && callback.getToolDefinition() != null
-						&& AiToolNames.START_EXPORT.equals(callback.getToolDefinition().name())) {
+						&& toolName.equals(callback.getToolDefinition().name())) {
 					return true;
 				}
 			}
@@ -1642,11 +1705,12 @@ public class ResilientChatService {
 			return;
 		}
 		AiContext current = AiContext.fromMap(snapshot.getContext());
-		if (current.getExtra() == null || !current.getExtra().containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
+		if (current.getExtra() == null) {
 			return;
 		}
 		Map<String, Object> extra = new LinkedHashMap<>(current.getExtra());
 		extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+		extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
 		snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
 				current.getTaskId(), current.getTaskStatus(), extra).toMap());
 	}
@@ -1681,13 +1745,17 @@ public class ResilientChatService {
 
 	/** 本轮/本 run 是否已经补过收尾纠正（快照标记）。 */
 	boolean exportCorrectionAlreadyUsed(String runId) {
+		return correctionAlreadyUsed(runId, EXPORT_CORRECTION_MARKER);
+	}
+
+	boolean correctionAlreadyUsed(String runId, String marker) {
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot == null) {
 			return false;
 		}
 		try {
 			Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-			return extra != null && Boolean.TRUE.equals(extra.get(EXPORT_CORRECTION_MARKER));
+			return extra != null && Boolean.TRUE.equals(extra.get(marker));
 		}
 		catch (RuntimeException ex) {
 			log.debug("读取收尾纠正标记失败 runId={}（按未纠正处理）：{}", runId, ex.getMessage());
@@ -1697,23 +1765,37 @@ public class ResilientChatService {
 
 	/** 纠正轮已保存的前缀（挂起后续跑 seed / 成功与取消去重）；没有则空串。 */
 	String exportCorrectionPrefix(String runId) {
-		RunSnapshot snapshot = this.store.get(runId);
+		return correctionPrefix(runId);
+	}
+
+	String correctionPrefix(RunSnapshot snapshot) {
 		if (snapshot == null) {
 			return "";
 		}
 		try {
 			Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-			Object value = extra == null ? null : extra.get(EXPORT_CORRECTION_PREFIX_KEY);
+			Object value = extra == null ? null : extra.get(CREATE_TASK_CORRECTION_PREFIX_KEY);
+			if (value == null && extra != null) {
+				value = extra.get(EXPORT_CORRECTION_PREFIX_KEY);
+			}
 			return value == null ? "" : String.valueOf(value);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取纠正前缀失败 runId={}（按无前缀处理）：{}", runId, ex.getMessage());
+			log.debug("读取纠正前缀失败（按无前缀处理）：{}", ex.getMessage());
 			return "";
 		}
 	}
 
+	String correctionPrefix(String runId) {
+		return correctionPrefix(this.store.get(runId));
+	}
+
 	/** 写 run 级"已纠正"标记；写不进去 = 不纠正（宁可少问一次，也不在多实例/续跑里重复纠正）。 */
 	private boolean markExportCorrectionUsed(String runId, String prefixText) {
+		return markCorrectionUsed(runId, prefixText, EXPORT_CORRECTION_MARKER, EXPORT_CORRECTION_PREFIX_KEY);
+	}
+
+	private boolean markCorrectionUsed(String runId, String prefixText, String marker, String prefixKey) {
 		try {
 			if (!persistAllowed(runId, "收尾纠正标记")) {
 				return false;
@@ -1725,12 +1807,14 @@ public class ResilientChatService {
 			AiContext current = AiContext.fromMap(snapshot.getContext());
 			Map<String, Object> extra = current.getExtra() == null ? new LinkedHashMap<>()
 					: new LinkedHashMap<>(current.getExtra());
-			if (Boolean.TRUE.equals(extra.get(EXPORT_CORRECTION_MARKER))) {
-				return true;
+			if (Boolean.TRUE.equals(extra.get(marker))) {
+				return false;
 			}
-			extra.put(EXPORT_CORRECTION_MARKER, Boolean.TRUE);
+			extra.put(marker, Boolean.TRUE);
+			extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+			extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
 			if (StringUtils.hasText(prefixText)) {
-				extra.put(EXPORT_CORRECTION_PREFIX_KEY, prefixText);
+				extra.put(prefixKey, prefixText);
 			}
 			snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
 					current.getTaskId(), current.getTaskStatus(), extra).toMap());
@@ -1789,11 +1873,14 @@ public class ResilientChatService {
 		RunSnapshot snapshot = this.store.get(runId);
 		AiContext latest = latestContext(runId, fallbackContext);
 		List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
-		history.add(new UserMessage(exportWrapUpCorrection(latest.getTaskId())));
+		boolean createTaskCorrection = snapshot != null && AiContext.fromMap(snapshot.getContext()).getExtra() != null
+				&& AiContext.fromMap(snapshot.getContext()).getExtra().containsKey(CREATE_TASK_CORRECTION_PREFIX_KEY);
+		history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection()
+				: exportWrapUpCorrection(latest.getTaskId())));
 		Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
 				out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
-		log.info("收尾纠正请求：历史 {} 条（含工具消息），要求发起 start_export 确认卡 runId={}", history.size(),
-				runId);
+		log.info("收尾纠正请求：历史 {} 条（含工具消息），类型={} runId={}", history.size(),
+				createTaskCorrection ? "create_task" : "start_export", runId);
 		return runtime.chatModel().stream(prompt);
 	}
 
@@ -2886,7 +2973,7 @@ public class ResilientChatService {
 			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			// 纠正前缀已含在 partial 里：先移除旧前缀 assistant，避免取消时历史出现重复前缀；
 			// 合并后的停止消息追加在末尾（真实工具顺序之后）。
-			removeAssistantWithText(history, exportCorrectionPrefix(runId));
+			removeAssistantWithText(history, correctionPrefix(runId));
 			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
 					storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
 				history.add(stopped);

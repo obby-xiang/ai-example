@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -438,7 +439,8 @@ class DefinitionFormResumeParkTest {
 		verify(this.emitter).suspended(eq(List.of(advance)), anyString(), anyString(), anyString());
 		verify(this.emitter).frontendToolRequest(eq(advance), any());
 		// 停在选择步骤的推进处时，条件表单根本没有被问到（顺序：推进 → 配置表 → 条件表）
-		verify(this.conditionsForm, never()).parkIfDueAtQueryCond(anyString(), any(AiContext.class), any());
+		verify(this.conditionsForm, never()).parkIfDueAtQueryCond(anyString(), any(AiContext.class), any(),
+				anyBoolean());
 
 		// ③ 用户点过确认卡（回灌成功）后到 QUERY_COND：不再弹配置表，照常交棒
 		settle(CALL_ADVANCE);
@@ -464,7 +466,7 @@ class DefinitionFormResumeParkTest {
 		seedSuspendedRun(List.of(entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
 				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())), "帮我新建一个导出任务",
 				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
-		when(this.conditionsForm.parkIfDueAtQueryCond(eq(RUN_ID), any(AiContext.class), any()))
+		when(this.conditionsForm.parkIfDueAtQueryCond(eq(RUN_ID), any(AiContext.class), any(), anyBoolean()))
 			.thenReturn(true);
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
@@ -474,13 +476,50 @@ class DefinitionFormResumeParkTest {
 		assertThat(result.body()).containsEntry("resumed", false);
 		// 调用点就是交棒前那一份上下文（步骤已按任务权威值同步到 QUERY_COND）
 		ArgumentCaptor<AiContext> handoff = ArgumentCaptor.forClass(AiContext.class);
-		verify(this.conditionsForm).parkIfDueAtQueryCond(eq(RUN_ID), handoff.capture(), any());
+		ArgumentCaptor<Boolean> allowUnknownForm = ArgumentCaptor.forClass(Boolean.class);
+		verify(this.conditionsForm).parkIfDueAtQueryCond(eq(RUN_ID), handoff.capture(), any(),
+				allowUnknownForm.capture());
 		assertThat(handoff.getValue().getStep()).isEqualTo("QUERY_COND");
 		assertThat(handoff.getValue().getTaskId()).isEqualTo(NEW_TASK_ID);
+		assertThat(allowUnknownForm.getValue())
+			.as("confirm_step 成功进入 QUERY_COND 的首次交棒：未知条件先交模型结构化").isFalse();
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				any());
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
+	}
+
+	// ── ⑦′ 首次 confirm 交棒 false；下一拍（非 confirm）交棒 true ─────────────
+
+	@Test
+	void confirmHandoffDisallowsTheUnknownFormOnceAndTheNextHandoffAllowsIt() {
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "QUERY_COND",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
+				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())), "帮我新建一个导出任务",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
+
+		this.service.resume(RUN_ID);
+
+		ArgumentCaptor<Boolean> allowUnknownForm = ArgumentCaptor.forClass(Boolean.class);
+		verify(this.conditionsForm).parkIfDueAtQueryCond(eq(RUN_ID), any(AiContext.class), any(),
+				allowUnknownForm.capture());
+		assertThat(allowUnknownForm.getValue())
+			.as("首次交棒（confirm_step 成功进入 QUERY_COND）⇒ 不替模型决定未知条件").isFalse();
+		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
+				eq(this.emitter));
+
+		// 下一拍：本批没有 confirm_step（条件草案结算回灌），仍未知时宿主才收集
+		repark(List.of(entry("call-set-condition", "set_condition", "{}", PendingToolCall.KIND_FRONTEND,
+				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())));
+		this.service.resume(RUN_ID);
+
+		ArgumentCaptor<Boolean> allHandoffs = ArgumentCaptor.forClass(Boolean.class);
+		verify(this.conditionsForm, org.mockito.Mockito.times(2)).parkIfDueAtQueryCond(eq(RUN_ID),
+				any(AiContext.class), any(), allHandoffs.capture());
+		assertThat(allHandoffs.getAllValues())
+			.as("首次 confirm 交棒 false ⇒ 后续非 confirm 交棒 true").containsExactly(false, true);
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

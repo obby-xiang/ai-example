@@ -244,12 +244,18 @@ public class ConditionsForm extends HostForm {
 	 * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
 	 * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
 	 * <li>表单已明确留空/取消/非空回灌：不自动重问，也不代写 {@code "{}"}；</li>
-	 * <li>仍 {@code UNDECIDED}：宿主挂一次非必填 {@code SET_CONDITIONS} 表单；</li>
+	 * <li>仍 {@code UNDECIDED}：{@code allowUnknownForm=false} 时先交模型结构化，否则宿主挂一次非必填
+	 *     {@code SET_CONDITIONS} 表单；</li>
 	 * <li>坏 JSON/残缺结构：不弹表（交给向导修正/模型结构化路径），零副作用。</li>
 	 * </ul>
 	 * 不改变 {@code start_export} 确认门，也不自动执行/下载。
 	 */
 	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history) {
+		return parkIfDueAtQueryCond(runId, context, history, true);
+	}
+
+	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
+			boolean allowUnknownForm) {
 		if (runId == null || context == null || history == null || !parkEnabled()) {
 			return false;
 		}
@@ -301,6 +307,10 @@ public class ConditionsForm extends HostForm {
 			}
 			if (feedback.cancelled()) {
 				// 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
+				return false;
+			}
+			if (!allowUnknownForm) {
+				// 刚进入条件步骤：先交棒模型按原对话做结构化；下一拍仍未知才由宿主收集。
 				return false;
 			}
 			String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));

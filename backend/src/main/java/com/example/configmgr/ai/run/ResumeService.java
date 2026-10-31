@@ -1898,8 +1898,11 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
+			boolean enteredQueryCond = settledInBatch != null && settledInBatch.stream()
+					.anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
+							&& com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
 			if (this.conditionsForm != null
-					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history)) {
+					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history, !enteredQueryCond)) {
 				body.put("resumed", false);
 				body.put("reason", "CONDITIONS_FORM_PARKED");
 				body.put("taskId", nextHopContext.getTaskId());

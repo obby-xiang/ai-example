@@ -207,6 +207,51 @@ class QueryCondConditionFormParkTest {
 			.as("复用前端 set_condition 通道生成页面草案").isNotNull();
 	}
 
+	/**
+	 * 刚进入 {@code QUERY_COND} 的首次交棒（{@code allowUnknownForm=false}）：条件仍未知时宿主<b>不抢答</b>，
+	 * 先交棒模型按原对话做结构化；已落库的条件在两种交棒口径下都保持静默。
+	 */
+	@Test
+	void unknownConditionDoesNotParkOnTheFirstHandoff() {
+		this.taskState.set(task(null));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history(), false))
+			.as("首次交棒 + 条件未知 ⇒ 交棒模型，宿主不弹表").isFalse();
+		assertThat(this.store.pendingsLenient(RUN_ID)).as("不留下任何条件表/草案").isEmpty();
+		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
+
+		this.taskState.set(task("{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history(), false))
+			.as("条件已落库：首次交棒口径同样不收集").isFalse();
+	}
+
+	/**
+	 * {@code allowUnknownForm=false} 只暂缓<b>未知条件</b>的宿主收集：已知 {@code create_task} 候选
+	 * 仍照旧下发 {@code set_condition} 草案（不弹表、不写库）。
+	 */
+	@Test
+	void knownCnyCandidateStillDispatchesTheDraftWhenUnknownFormIsDisallowed() {
+		this.taskState.set(task(null));
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+
+		Map<String, Object> conditions = new LinkedHashMap<>();
+		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
+				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
+				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
+				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
+				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history(), false))
+			.as("已知 CNY 候选在首次交棒口径下仍下发草案").isTrue();
+		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
+		assertThat(this.store.pendingsLenient(RUN_ID))
+			.as("已知候选不弹条件表").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+		assertThat(this.store.pending(RUN_ID, "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY"))
+			.as("复用前端 set_condition 通道生成页面草案").isNotNull();
+	}
+
 	/** 多 defCodes 候选：每个配置项各一张草案，仍不弹条件表、不写库。 */
 	@Test
 	void multiDefCodeCandidateDispatchesOneDraftPerItem() {
