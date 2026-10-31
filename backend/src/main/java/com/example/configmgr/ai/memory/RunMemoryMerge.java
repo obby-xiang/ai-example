@@ -29,7 +29,16 @@ import org.springframework.ai.chat.messages.UserMessage;
  *     本 run 块尾；</li>
  * <li><b>无归属</b>的消息（迁移期旧消息）在替换写里被丢弃 —— 它们已经在本次历史里（会被重新盖章），
  *     留着就会与历史重复；在追加写里保留（增量历史里没有它们，丢就是丢历史）；</li>
- * <li>历史里带着<b>别的 run</b> 的旧副本时直接忽略：它们的权威版本在窗口里由它们自己的写者维护。</li>
+ * <li><b>压缩摘要（L2 的合成前缀）单独成块、永远排在最前</b>：它不是任何一轮的消息，替换写或追加写
+ *     都<b>不许</b>把它收养进某个 run 的块。被收养的摘要会随该块排到窗口中间 —— 之后既不会被后续
+ *     L2 折叠（它落在 keep-recent-turns 的 pin 区里），又占掉一个 pin 位置，窗口于是再也压不下去
+ *     （压缩台账说压了、占用却不降）。本轮带来了新摘要就整体替换前缀块；没带就保留窗口里那份
+ *     （迟到的旧轮历史可能没有摘要，丢了等于抹掉已折叠的旧轮）；</li>
+ * <li>历史里带着<b>别的 run</b> 的旧副本时直接忽略：它们的权威版本在窗口里由它们自己的写者维护；
+ *     <b>唯一例外是 L1 占位符</b> —— 工具结果"已清除"是<b>会话级单调事实</b>，incoming 里带占位符的
+ *     那一条会覆盖窗口里的原文（轮内工具预算清除只改本轮请求的历史副本，被清的多是别的 run 的结果；
+ *     不让它落地就等于每轮重清一次，窗口永远压不下去）。原文仍可从工具台账/归档回取，因此这是
+ *     "只减不增"的无损动作，不构成对并发写者内容的覆盖；</li>
  * </ul>
  *
  * <h2>裁剪</h2>
@@ -44,7 +53,33 @@ public final class RunMemoryMerge {
 	/** 消息 metadata 里的本轮起点键。 */
 	public static final String TURN_STARTED_AT_KEY = "turnStartedAtMs";
 
+	/**
+	 * 压缩摘要的 metadata 标记键（与 {@code ContextEstimator#COMPACTED_KEY} 同值）。
+	 *
+	 * <p>刻意不在 {@code ai.memory} 里引 {@code ai.context} 的类：摘要的<b>生产者</b>在 context 包，
+	 * 这里只认一个稳定的 metadata 键（有一条单测断言两处取值一致，改名会立刻红）。
+	 */
+	public static final String COMPACTED_KEY = "compacted";
+
+	/**
+	 * L1 工具结果占位符前缀（与 {@code ToolResultClearing#PLACEHOLDER_PREFIX} 同值；单测钉住）。
+	 *
+	 * <p>清除是<b>会话级单调事实</b>：占位符一旦落下，任何写者都不许把同一条结果还原成原文 ——
+	 * 轮内的工具预算清除只改"本轮请求"的历史副本，被清的多是别的 run 的结果；若收敛时整块保留旧块，
+	 * 清除就永远丢（窗口原文还在、下一轮再清一次、L3 永远"清一下就够了"，谱系停在 L2）。
+	 */
+	public static final String CLEARED_TOOL_RESULT_PREFIX = "[工具结果已清除：";
+
 	private RunMemoryMerge() {
+	}
+
+	/** 是否是压缩摘要（L2 写下的合成前缀消息）。 */
+	public static boolean isCompactionDigest(Message message) {
+		if (message == null || message.getMetadata() == null) {
+			return false;
+		}
+		Object flag = message.getMetadata().get(COMPACTED_KEY);
+		return Boolean.TRUE.equals(flag) || "true".equalsIgnoreCase(String.valueOf(flag));
 	}
 
 	/** 消息所属的 run（无归属 = {@code null}）。 */
@@ -77,7 +112,8 @@ public final class RunMemoryMerge {
 	 * 仍属于它原来那一轮），否则"谁最后写谁拥有全部历史"，块划分就失去意义。
 	 */
 	public static Message stamp(Message message, MemoryTurn turn) {
-		if (message == null || turn == null || runIdOf(message) != null) {
+		// 压缩摘要是"整个会话的前缀"，不属于任何一轮：盖章会把它带进本轮的块（位置随之漂到中间）。
+		if (message == null || turn == null || runIdOf(message) != null || isCompactionDigest(message)) {
 			return message;
 		}
 		Map<String, Object> metadata = new LinkedHashMap<>(message.getMetadata());
@@ -98,11 +134,34 @@ public final class RunMemoryMerge {
 	public static List<Message> merge(List<Message> current, List<Message> incoming, MemoryTurn turn,
 			boolean replaceRunBlock, int maxMessages) {
 		MemoryTurn owner = turn == null ? MemoryTurn.UNATTRIBUTED : turn;
+		// 压缩摘要（合成前缀）先摘出来：它不属于任何 run，必须留在窗口最前、按前缀块处理。
+		// 若把它当成本轮消息收养，它就会跟着本轮的块排到中间 —— 之后既不会被后续 L2 折叠，
+		// 又会占掉 keep-recent-turns 的一个位置，窗口就再也压不下去（C-13 的"summary 没换来进展"）。
+		List<Message> prefix = new ArrayList<>();
+		List<Message> body = new ArrayList<>();
+		if (incoming != null) {
+			for (Message message : incoming) {
+				if (message == null) {
+					continue;
+				}
+				if (isCompactionDigest(message)) {
+					prefix.add(message);
+				}
+				else {
+					body.add(message);
+				}
+			}
+		}
+		boolean replacePrefix = !prefix.isEmpty();
 		Map<String, Block> kept = new LinkedHashMap<>();
 		Block existingOwn = null;
 		for (Block block : blocksOf(current)) {
 			if (block.runId == null) {
-				if (!replaceRunBlock) {
+				// 窗口里的前缀块（旧摘要）：本轮带来了新的 ⇒ 整体替换；没带且块里确实有摘要 ⇒ 原样保留
+				// （迟到的旧轮历史里可能没有摘要，丢了就等于把已折叠的旧轮凭空抹掉）。
+				// 迁移期的无归属旧消息不在这个例外里：替换写照旧丢弃（它们就在本次历史里）。
+				boolean hasDigest = block.messages.stream().anyMatch(RunMemoryMerge::isCompactionDigest);
+				if (!replaceRunBlock || !replacePrefix && hasDigest) {
 					kept.put(UNOWNED, block);
 				}
 				continue;
@@ -113,22 +172,20 @@ public final class RunMemoryMerge {
 			}
 			kept.put(block.runId, block);
 		}
+		if (replacePrefix) {
+			kept.put(UNOWNED, new Block(null, 0L, prefix));
+		}
 
 		List<Message> own = new ArrayList<>();
 		if (!replaceRunBlock && existingOwn != null) {
 			own.addAll(existingOwn.messages);
 		}
-		if (incoming != null) {
-			for (Message message : incoming) {
-				if (message == null) {
-					continue;
-				}
-				String messageOwner = runIdOf(message);
-				if (messageOwner != null && !messageOwner.equals(owner.runId())) {
-					continue;
-				}
-				own.add(stamp(message, owner));
+		for (Message message : body) {
+			String messageOwner = runIdOf(message);
+			if (messageOwner != null && !messageOwner.equals(owner.runId())) {
+				continue;
 			}
+			own.add(stamp(message, owner));
 		}
 		if (!own.isEmpty()) {
 			// 起点：块已存在 ⇒ 沿用（续跑不漂移）；块是新建的 ⇒ 用本轮起点；本轮起点未知（0）
@@ -141,9 +198,13 @@ public final class RunMemoryMerge {
 		List<Block> ordered = new ArrayList<>(kept.values());
 		ordered.sort(Comparator.comparingLong((Block block) -> block.turnStartedAtMs)
 			.thenComparing(block -> block.runId == null ? "" : block.runId));
+		// 清除单调：incoming 里已清除的工具结果（多为轮内清除，属别的 run 的块）不许被窗口里的原文盖回去。
+		Map<String, String> clearedById = clearedToolResults(body);
 		List<Message> merged = new ArrayList<>();
 		for (Block block : ordered) {
-			merged.addAll(block.messages);
+			for (Message message : block.messages) {
+				merged.add(clearedCopy(message, clearedById));
+			}
 		}
 		return trimKeepingToolPairs(merged, maxMessages);
 	}
@@ -160,6 +221,49 @@ public final class RunMemoryMerge {
 			drop++;
 		}
 		return new ArrayList<>(messages.subList(drop, messages.size()));
+	}
+
+	// ── 清除单调（L1 占位符单向优先） ──────────────────────────────────────────
+
+	/** incoming 里已清除的工具结果：{@code toolCallId → 占位符正文}。 */
+	private static Map<String, String> clearedToolResults(List<Message> messages) {
+		Map<String, String> cleared = new LinkedHashMap<>();
+		for (Message message : messages) {
+			if (message instanceof ToolResponseMessage toolResponse) {
+				for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+					if (response.responseData() != null
+							&& response.responseData().startsWith(CLEARED_TOOL_RESULT_PREFIX)) {
+						cleared.put(response.id(), response.responseData());
+					}
+				}
+			}
+		}
+		return cleared;
+	}
+
+	/** 把消息里对应的工具结果换成占位符（已是占位符/无对应项时原样返回）。 */
+	private static Message clearedCopy(Message message, Map<String, String> clearedById) {
+		if (clearedById.isEmpty() || !(message instanceof ToolResponseMessage toolResponse)) {
+			return message;
+		}
+		List<ToolResponseMessage.ToolResponse> responses = null;
+		List<ToolResponseMessage.ToolResponse> current = toolResponse.getResponses();
+		for (int index = 0; index < current.size(); index++) {
+			ToolResponseMessage.ToolResponse response = current.get(index);
+			String placeholder = clearedById.get(response.id());
+			if (placeholder == null || response.responseData() == null
+					|| response.responseData().startsWith(CLEARED_TOOL_RESULT_PREFIX)) {
+				continue;
+			}
+			if (responses == null) {
+				responses = new ArrayList<>(current);
+			}
+			responses.set(index, new ToolResponseMessage.ToolResponse(response.id(), response.name(), placeholder));
+		}
+		if (responses == null) {
+			return message;
+		}
+		return ToolResponseMessage.builder().responses(responses).metadata(toolResponse.getMetadata()).build();
 	}
 
 	// ── 分块 ────────────────────────────────────────────────────────────────

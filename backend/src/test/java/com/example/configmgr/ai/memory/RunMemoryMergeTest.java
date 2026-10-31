@@ -35,6 +35,8 @@ class RunMemoryMergeTest {
 
 	private static final int WINDOW = 40;
 
+	private static final String CLEARED_PLACEHOLDER = "[工具结果已清除：get_config_def · ≈12 tokens · toolCallId=c-b]";
+
 	@Test
 	void earlierRunConvergingAfterTheLaterOneKeepsBothBlocksInStartOrder() {
 		List<Message> window = RunMemoryMerge.merge(List.of(), history("B问", "B答"), B, true, WINDOW);
@@ -115,6 +117,115 @@ class RunMemoryMergeTest {
 			.containsExactly("B问", "B答");
 	}
 
+	/**
+	 * <b>压缩摘要（L2 合成前缀）不得被轮末收敛收养</b>（KQC C-13 回归）。
+	 *
+	 * <p>压缩把摘要写在窗口最前；若收敛时按"无归属消息"把它盖成本轮的 runId，它就会随本轮的块排到
+	 * 窗口中间 —— 之后既不会被后续 L2 折叠（落进 keep-recent-turns 的 pin 区），又占掉一个 pin 位置，
+	 * 窗口再也压不下去（台账说压了、占用不降）。摘要必须留在最前且不带任何 run 归属。
+	 */
+	@Test
+	void compactionDigestStaysAtTheHeadAndIsNeverAdoptedByTheConvergingRun() {
+		Message digest = digest("摘要正文");
+		// 压缩写下的窗口 = 摘要 + 上一轮（B）的块
+		List<Message> window = RunMemoryMerge.merge(List.of(),
+				List.of(digest, user("B问"), assistant("B答")), B, true, WINDOW);
+
+		// 本轮（A）轮末收敛：历史里带着同一条摘要
+		List<Message> afterConverge = RunMemoryMerge.merge(window,
+				List.of(digest, user("A问"), assistant("A答")), A, true, WINDOW);
+
+		assertThat(afterConverge.get(0)).as("摘要必须仍在窗口最前").isSameAs(digest);
+		assertThat(RunMemoryMerge.runIdOf(afterConverge.get(0))).as("摘要不得被任何 run 收养").isNull();
+		assertThat(texts(afterConverge)).as("摘要最前，其余块按本轮起点排序").containsExactly("摘要正文", "A问", "A答", "B问",
+				"B答");
+	}
+
+	/** 摘要不进 pin 计数：下一轮收敛不会再加一份，窗口里始终只有一条摘要。 */
+	@Test
+	void repeatedConvergenceKeepsASingleDigestAtTheHead() {
+		Message digest = digest("摘要正文");
+		MemoryTurn old = new MemoryTurn("run-old", 500L);
+		List<Message> window = RunMemoryMerge.merge(List.of(), List.of(digest, user("旧问题"), assistant("旧回答")), old,
+				true, WINDOW);
+		window = RunMemoryMerge.merge(window, List.of(digest, user("A问"), assistant("A答")), A, true, WINDOW);
+		window = RunMemoryMerge.merge(window, List.of(digest, user("B问"), assistant("B答")), B, true, WINDOW);
+
+		assertThat(window.stream().filter(RunMemoryMerge::isCompactionDigest)).as("摘要不得累积")
+			.hasSize(1);
+		assertThat(window.get(0)).as("摘要仍在最前").isSameAs(digest);
+		assertThat(texts(window)).containsExactly("摘要正文", "旧问题", "旧回答", "A问", "A答", "B问", "B答");
+	}
+
+	/** 未带摘要的旧轮（迟到的收敛）不得把窗口里已有的摘要冲掉。 */
+	@Test
+	void aLateRunWithoutADigestDoesNotDropTheExistingDigest() {
+		Message digest = digest("摘要正文");
+		List<Message> window = RunMemoryMerge.merge(List.of(),
+				List.of(digest, user("旧问题"), assistant("旧回答")), A, true, WINDOW);
+
+		List<Message> afterLate = RunMemoryMerge.merge(window, List.of(user("迟到问题"), assistant("迟到回答")), B, true,
+				WINDOW);
+
+		assertThat(afterLate.stream().filter(RunMemoryMerge::isCompactionDigest)).hasSize(1);
+		assertThat(texts(afterLate)).containsExactly("摘要正文", "旧问题", "旧回答", "迟到问题", "迟到回答");
+	}
+
+	/**
+	 * <b>轮内 L1 清除（别的 run 的工具结果）不得被按 run 合并还原成原文</b>（KQC C-13 回归）。
+	 *
+	 * <p>工具预算的轮内清除只改"本轮请求"里的历史副本：被清的结果大多属于<b>别的 run</b>。轮末收敛
+	 * 按 run 合并时若整块保留窗口里的旧块，清除就被丢掉 —— 窗口里原文还在，下一轮再清一次，永远压不
+	 * 下去（台账说清了、占用不降，L3 也就永远"清一下就够了"，谱系停在 L2）。
+	 *
+	 * <p>因此清除是<b>会话级单调事实</b>：占位符版本永远优先于原文版本，任何写者都不许把它还原。
+	 */
+	@Test
+	void aClearedToolResultIsNeverRestoredToItsRawTextByAnotherRunsConverge() {
+		List<Message> window = RunMemoryMerge.merge(List.of(),
+				List.of(user("B问"), toolCall("B1", "c-b"), toolResult("c-b", "原文结果")), B, true, WINDOW);
+		// 本轮（A）的历史里，同一条结果已被轮内 L1 换成占位符（归属仍是 B）
+		List<Message> history = new ArrayList<>(replaceResult(window, "c-b", CLEARED_PLACEHOLDER));
+		history.add(user("A问"));
+		history.add(assistant("A答"));
+
+		List<Message> after = RunMemoryMerge.merge(window, history, A, true, WINDOW);
+
+		assertThat(toolResponse(after, "c-b")).as("占位符是会话级单调事实，不得被旧块还原成原文")
+			.startsWith("[工具结果已清除：");
+		assertThat(texts(after)).as("原文不得在窗口里留下第二份").doesNotContain("原文结果");
+	}
+
+	@Test
+	void aRawCopyInTheWindowNeverOverridesAPlaceholderFromTheIncomingHistory() {
+		// 反序也成立：窗口里已是占位符、迟到的旧轮历史里还是原文 ⇒ 保留占位符
+		List<Message> clearedWindow = RunMemoryMerge.merge(List.of(),
+				List.of(user("B问"), toolCall("B1", "c-b"), toolResult("c-b", "原文结果")), B, true, WINDOW);
+		List<Message> window = new ArrayList<>(replaceResult(clearedWindow, "c-b", CLEARED_PLACEHOLDER));
+		List<Message> staleHistory = new ArrayList<>(clearedWindow);
+		staleHistory.add(user("A问"));
+		staleHistory.add(assistant("A答"));
+
+		List<Message> after = RunMemoryMerge.merge(window, staleHistory, A, true, WINDOW);
+
+		assertThat(toolResponse(after, "c-b")).as("迟到的原文不得覆盖已清除的占位符")
+			.startsWith("[工具结果已清除：");
+	}
+
+	/** 占位符前缀与清除生产方（{@code ToolResultClearing#PLACEHOLDER_PREFIX}）必须同源。 */
+	@Test
+	void clearedPrefixMatchesTheProducerConstant() {
+		assertThat(RunMemoryMerge.CLEARED_TOOL_RESULT_PREFIX)
+			.isEqualTo(com.example.configmgr.ai.context.ToolResultClearing.PLACEHOLDER_PREFIX);
+	}
+
+	/** 摘要的 metadata 键与压缩生产方（{@code ContextEstimator#COMPACTED_KEY}）必须同源。 */
+	@Test
+	void digestMarkerMatchesTheProducerKey() {
+		assertThat(RunMemoryMerge.COMPACTED_KEY)
+			.isEqualTo(com.example.configmgr.ai.context.ContextEstimator.COMPACTED_KEY);
+	}
+
 	@Test
 	void windowTrimNeverStartsWithAnOrphanToolResultAndKeepsThePair() {
 		// [u1, a1(tool), t1, a2(tool), t2, a3]，窗口上限 4 ⇒ 丢弃前 2 条会落在 t1（TOOL）上。
@@ -176,6 +287,40 @@ class RunMemoryMergeTest {
 		return out;
 	}
 
+	/** 把指定 toolCallId 的结果正文换成占位符（保留原 metadata，模拟轮内 L1 清除后的历史副本）。 */
+	private static List<Message> replaceResult(List<Message> messages, String toolCallId, String placeholder) {
+		List<Message> out = new ArrayList<>(messages.size());
+		for (Message message : messages) {
+			if (message instanceof ToolResponseMessage toolResponse) {
+				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+				for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+					responses.add(toolCallId.equals(response.id())
+							? new ToolResponseMessage.ToolResponse(response.id(), response.name(), placeholder)
+							: response);
+				}
+				out.add(ToolResponseMessage.builder().responses(responses).metadata(toolResponse.getMetadata()).build());
+			}
+			else {
+				out.add(message);
+			}
+		}
+		return out;
+	}
+
+	/** 窗口里指定 toolCallId 的结果正文（缺失返回空串）。 */
+	private static String toolResponse(List<Message> messages, String toolCallId) {
+		for (Message message : messages) {
+			if (message instanceof ToolResponseMessage toolResponse) {
+				for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+					if (toolCallId.equals(response.id())) {
+						return response.responseData();
+					}
+				}
+			}
+		}
+		return "";
+	}
+
 	private static List<String> texts(List<Message> messages) {
 		return messages.stream().map(Message::getText).toList();
 	}
@@ -186,6 +331,11 @@ class RunMemoryMergeTest {
 
 	private static Message assistant(String text) {
 		return AssistantMessage.builder().content(text).build();
+	}
+
+	/** 压缩摘要（与 {@code RollingSummarizer} 写出的形态一致：UserMessage + {@code compacted=true}）。 */
+	private static Message digest(String text) {
+		return UserMessage.builder().text(text).metadata(Map.of(RunMemoryMerge.COMPACTED_KEY, true)).build();
 	}
 
 	private static Message toolCall(String text, String callId) {

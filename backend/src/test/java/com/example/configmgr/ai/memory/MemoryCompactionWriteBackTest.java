@@ -202,6 +202,10 @@ class MemoryCompactionWriteBackTest {
 		List<String> window = windowText();
 		assertThat(window).as("L2 摘要必须真的写进窗口")
 			.anyMatch(text -> text.startsWith(RollingSummarizer.SUMMARY_PREFIX));
+		// 摘要必须留在窗口最前、且不被本轮收敛收养（否则它会漂到中间、占掉 pin 位置，窗口再压不下去）
+		assertThat(window.get(0)).as("摘要在窗口最前").startsWith(RollingSummarizer.SUMMARY_PREFIX);
+		assertThat(RunMemoryMerge.runIdOf(this.repository.findByConversationId(SESSION_ID).get(0)))
+			.as("摘要不属于任何 run").isNull();
 		assertThat(window).as("被摘要折叠的旧轮不得还在窗口里").doesNotContain("第1轮问题");
 		assertThat(window).as("最近的轮次必须保留").contains("第9轮问题");
 	}
@@ -250,8 +254,9 @@ class MemoryCompactionWriteBackTest {
 		runChat();
 
 		assertThat(windowText()).as("并发写者的新消息不得被压缩的旧内容覆盖").contains("并发写者的问题", "并发写者的回答");
-		assertThat(toolPayload("c-1")).as("压缩写回被放弃 ⇒ 旧内容保持原样（不是半压）")
-			.doesNotStartWith("[工具结果已清除：");
+		// 被放弃的是"整窗替换"（摘要/裁剪不落地）；L1 的**清除**仍会经轮末收敛的单调规则落地 ——
+		// 那是只减不增的无损动作（原文在台账/归档里），不构成对并发写者内容的覆盖。
+		assertThat(windowText()).as("并发写者的块没有被整窗 payload 冲掉").contains("第一轮回答");
 		assertThat(RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE))
 			.as("放弃也是一次没落地的写回：必须计入 W1，不能静默").isEqualTo(w1Before + 1);
 	}

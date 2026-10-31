@@ -161,6 +161,13 @@
       "reason": "已同步压缩整窗写回与按轮合并的固定分工、窗口快照CAS基线及并发冲突放弃重算契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:b7656c9de0a4415b45797681577ec10a24afe4adf4ff22ff85e9de608a3d93e4",
+      "status": "synced",
+      "reason": "已同步L1清除的会话级单调事实及L2摘要独立前缀块、不得被run收养或重复累积的窗口契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
