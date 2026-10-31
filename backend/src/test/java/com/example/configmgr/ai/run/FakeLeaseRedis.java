@@ -123,6 +123,12 @@ public final class FakeLeaseRedis {
 	/** session→current 的单键 compare-and-PEXPIRE（MI2）：值仍匹配才续期。 */
 	static final String SESSION_CURRENT_CAS_PEXPIRE_MARK = "SESSION_CURRENT_CAS_PEXPIRE";
 
+	/**
+	 * 会话任务草案的单键原子写（{@code HSET} + {@code PEXPIRE}）：值与 TTL 同批送达，
+	 * 不会出现"有值无 TTL"的残留 HASH（见 {@code CreateTaskDraftStore#save}）。
+	 */
+	static final String CTDRAFT_PUT_MARK = "CTDRAFT_PUT";
+
 	/** STRING 键面（快照 JSON、租约现值、全局 epoch 计数）。 */
 	final Map<String, String> strings = new ConcurrentHashMap<>();
 
@@ -665,6 +671,14 @@ public final class FakeLeaseRedis {
 		if (body.contains(SESSION_CURRENT_CAS_PEXPIRE_MARK)) {
 			return sessionCurrentCasPexpire(str(keys.get(0)), str(args.get(0)),
 					Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+		}
+		if (body.contains(CTDRAFT_PUT_MARK)) {
+			// 值与 TTL 在同一个 EVAL 内（真 Redis 的脚本是原子的）—— 替身也一次写两个面：
+			// 不存在"字段已落、TTL 未设"的中间态可被下一个断言看见
+			String key = str(keys.get(0));
+			table(key).put(str(args.get(0)), str(args.get(1)));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+			return 1L;
 		}
 		throw new UnsupportedOperationException("未建模的脚本：" + body);
 	}

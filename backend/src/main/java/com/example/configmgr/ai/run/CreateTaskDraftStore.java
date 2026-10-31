@@ -8,6 +8,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -34,8 +36,9 @@ import java.util.Map;
  * <li><b>会话销毁只删一个已知键</b>：{@code AiSessionPurgeService} 按同一个
  * {@link #sessionKey(String)} 精确 {@code DEL}，<b>不需要扫描</b>；这是本族键刻意不按 taskId 独立
  * 建键的原因 —— 那种键在会话销毁时既枚举不到、也没有任何索引可依，只能等 TTL 自清（残留）；</li>
- * <li><b>单键</b>：{@code HSET}/{@code HGET}/{@code DEL} 都是单键命令 ⇒ Cluster 下不存在
- * {@code CROSSSLOT}；tag 只用于键族识别与同槽书写规范，读路径<b>不</b>做多键脚本；</li>
+ * <li><b>单键</b>：写入是一条单键 EVAL（{@code HSET}+{@code PEXPIRE} 原子）、读取 {@code HGET}、会话销毁
+ * {@code DEL} ⇒ Cluster 下不存在 {@code CROSSSLOT}；值和 TTL 同批送达，因此不会有"有值无 TTL"的残留键，
+ * tag 只用于键族识别与同槽书写规范，读路径<b>不</b>做多键脚本；</li>
  * <li><b>tag 含身份</b>：与 {@link TenantKeyScope} 同一口径 —— 两个租户可以拥有同名 sessionId，
  * 键本身就不同；无身份过渡期退回 {@code {session:<sid>}} 独立命名空间（不冒充任何真实身份）；</li>
  * <li><b>TTL = {@code app.ai.session-ttl}</b>：与会话/待决条目/快照同一把尺；每次写入续满。</li>
@@ -64,6 +67,24 @@ public class CreateTaskDraftStore {
 
 	/** 兜底 TTL：与 {@link AiProperties#getSessionTtl()} 的默认值一致（24h）。 */
 	static final Duration DEFAULT_TTL = Duration.ofHours(24);
+
+	/**
+	 * 写入某任务字段并<b>同批</b>续满 TTL（单键 EVAL：{@code HSET} + {@code PEXPIRE}）。
+	 *
+	 * <p>为什么必须是一条命令：{@code HSET} 与 {@code EXPIRE} 分两条发时，两步之间进程被杀 /
+	 * 连接断掉就会留下<b>有值无 TTL</b> 的草案 HASH —— 会话销毁的精确 {@code DEL} 只覆盖已知会话，
+	 * 这类键既枚举不到也永不消失。单键脚本因此同时满足三件事：值与 TTL 原子、Cluster 无
+	 * {@code CROSSSLOT}（只触碰一个键）、不需要扫描或索引。
+	 *
+	 * @param KEYS[1] {@code ai:ctdraft:{<tenantId>:<userId>:session:<escapedSessionId>}}
+	 * @param ARGV[1] 字段（taskId）、ARGV[2] 草案 JSON、ARGV[3] TTL（毫秒）
+	 */
+	private static final RedisScript<Long> PUT_DRAFT_SCRIPT = new DefaultRedisScript<>("""
+			-- CTDRAFT_PUT
+			redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+			redis.call('PEXPIRE', KEYS[1], ARGV[3])
+			return 1
+			""", Long.class);
 
 	private static final ObjectMapper FALLBACK_MAPPER = new ObjectMapper();
 
@@ -111,6 +132,9 @@ public class CreateTaskDraftStore {
 	/**
 	 * 写入（或合并）某轮所属会话的任务草案。
 	 *
+	 * <p>写入是<b>一条</b>单键原子命令（值 + TTL 同批）：不存在"值已写、TTL 未设"的中间态，
+	 * 因此写入失败/进程中断不会留下无 TTL 的草案键；命令失败照旧抛 {@link IllegalStateException}。
+	 *
 	 * @param runId      本轮 id（经快照解析 sessionId；null/快照缺失 = 不写）
 	 * @param taskId     任务号（{@code <= 0} = 不写）
 	 * @param defCodes   本次 create_task 明确给出的配置项（空 = 不覆盖已有）
@@ -140,8 +164,10 @@ public class CreateTaskDraftStore {
 			return;
 		}
 		try {
-			redis.opsForHash().put(key, field, write(merged));
-			redis.expire(key, this.ttl);
+			// 值与 TTL <b>同一条单键命令</b>：先 HSET 再 EXPIRE 的两条写法在两步之间被杀/断连会留下
+			// 无 TTL 的草案 HASH（会话销毁只删已知键，这种键只能等人工清理）。单键 EVAL ⇒ Cluster
+			// 无 CROSSSLOT，也不需要新增任何扫描或索引。
+			redis.execute(PUT_DRAFT_SCRIPT, List.of(key), field, write(merged), Long.toString(this.ttl.toMillis()));
 		}
 		catch (RuntimeException ex) {
 			throw new IllegalStateException("写入会话任务草案失败 sessionId=" + sessionId + " taskId=" + taskId, ex);

@@ -182,6 +182,13 @@
       "reason": "本批仅修正既有前端刷新回放、工具去重、历史恢复与页签接管行为，不新增或改变迁移接口、存储键及跨实例契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:1359bdd0a1638f5ec851f3a593bdbce4be6e2ad9133e34475f2c780c7319bd5f",
+      "status": "synced",
+      "reason": "已同步会话任务草案改为单键原子写（HSET+PEXPIRE 同批）：失败或进程中断不再留下无 TTL 的残留键，键族/身份隔离/会话销毁单键 DEL 与扫描边界不变",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }
