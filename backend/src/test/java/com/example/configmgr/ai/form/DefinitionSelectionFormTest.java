@@ -55,6 +55,8 @@ import static org.mockito.Mockito.when;
  * <li>目录为空/读取失败/超出平铺上限 ⇒ <b>不生成空表单</b>（走既有失败恢复，模型侧照旧）；</li>
  * <li>表单正文仍由既有白名单闸门（{@link GenerativeFormGuard}）与既有回灌/取消路径承认 ——
  * 本批不新增表单框架，也不新增中断路径。</li>
+ * <li>选择成功后的推进由宿主经既有 {@code confirm_step} 通道完成；选择失败或本批已有推进时
+ * <b>不重复下发</b>（避免同一批里推进两次）。</li>
  * </ol>
  */
 class DefinitionSelectionFormTest {
@@ -367,6 +369,36 @@ class DefinitionSelectionFormTest {
 		verifyNoInteractions(this.gate);
 	}
 
+	// ── ⑥ 选择成功后的宿主推进：失败/本批已处理时不重复下发 ────────────────
+
+	@Test
+	void failedSelectionNeverAdvancesTheWizardFromTheHost() {
+		PendingToolCall failedSelection = entry("call-select", "select_definitions",
+				"{\"codes\":[\"CURRENCY\"]}", PendingToolCall.KIND_FRONTEND, ToolOutcome.FAILED);
+
+		boolean parked = this.form.parkAdvanceIfDue(RUN_ID, selectionStepContext(knownConfig()),
+				List.of(failedSelection), history());
+
+		assertThat(parked).as("选择失败 ⇒ 宿主不得代替用户/模型推进步骤").isFalse();
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
+		verifyNoInteractions(this.gate);
+	}
+
+	@Test
+	void batchThatAlreadyAdvancedIsNotAdvancedTwice() {
+		PendingToolCall selected = entry("call-select", "select_definitions",
+				"{\"codes\":[\"CURRENCY\"]}", PendingToolCall.KIND_FRONTEND, ToolOutcome.OK);
+		PendingToolCall alreadyAdvanced = entry("call-step", "confirm_step", "{}",
+				PendingToolCall.KIND_FRONTEND, ToolOutcome.OK);
+
+		boolean parked = this.form.parkAdvanceIfDue(RUN_ID, selectionStepContext(knownConfig()),
+				List.of(selected, alreadyAdvanced), history());
+
+		assertThat(parked).as("本批已有 confirm_step ⇒ 宿主不再重复推进").isFalse();
+		verify(this.store, never()).saveSuspended(anyString(), any(), any(), any(), any(), any());
+		verifyNoInteractions(this.gate);
+	}
+
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private PendingToolCall capturedPending() {
@@ -384,6 +416,13 @@ class DefinitionSelectionFormTest {
 
 	private static AiContext selectionStepContext(Map<String, Object> extra) {
 		return AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", extra);
+	}
+
+	/** 已落条目的已知配置（选择成功之后交棒上下文里应有的槽位）。 */
+	private static Map<String, Object> knownConfig() {
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlots.EXTRA_KEY, new TaskSlots("EXPORT", List.of("CURRENCY"), List.of()).toMap());
+		return extra;
 	}
 
 	private static Map<String, Object> createTaskRecord(long taskId) {

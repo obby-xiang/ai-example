@@ -279,6 +279,9 @@ public class ResumeService {
 		this.definitionSelectionForm = form;
 	}
 
+	@Autowired(required = false)
+	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
 	/**
 	 * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
 	 *
@@ -1880,28 +1883,28 @@ public class ResumeService {
 				}
 			}
 
-			// ===== 宿主确定性定义选择表单（新建任务 → 停在选择步骤 → 配置未知）=====
-			// 位置刻意在"整批结算 + 权威同步 + 工作区段重写"之后、记忆窗口/压缩与交棒之前：
-			//   · 判据读的是**下一跳**那份上下文（批间刷新后的页面/任务/步骤 + 重算后的槽位），
-			//     不是请求边界那份，于是"新任务已到选择步骤"这件事在判据里成立；
-			//   · 挂起用既有面（saveSuspended → suspended 帧 → 请求帧 → 收流），与模型自己下发的
-			//     generative_form 完全同一条路；用户的提交/取消走既有回灌与既有续跑；
-			//   · 判据按任务状态（create_task 成功 + 任务号/页/步骤 + 槽位无 defCodes）而非
-			//     "本批刚有一条成功的 navigate_to"：前端导航超时不再挡住表单；
-			//     去重靠同一任务只挂一次（确定性 toolCallId），续跑不会重复问同一件事。
+			// 工具批已结算、页面事实已同步：确定性步骤动作先于模型交棒，仍复用既有前端工具与挂起面。
+			if (this.definitionSelectionForm != null && this.definitionSelectionForm.parkAdvanceIfDue(runId,
+					nextHopContext, settledInBatch, history)) {
+				body.put("resumed", false);
+				body.put("reason", "DEFINITION_STEP_ADVANCE_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
 			if (this.definitionSelectionForm != null
 					&& this.definitionSelectionForm.parkIfDue(runId, nextHopContext, settledInBatch, history)) {
 				body.put("resumed", false);
 				body.put("reason", "DEFINITION_FORM_PARKED");
 				body.put("taskId", nextHopContext.getTaskId());
-				log.info("续跑改为等人填配置项表单（本拍不驱动模型）runId={} taskId={}", runId,
-						nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
-
-			// 筛选条件不在这里代发：条件写法（大小写/别名/自由文本）必须由模型理解用户原话后再决定，
-			// 宿主抢在模型之前发文本框会把"已知条件"误判成"缺失"。条件确实缺失时由模型按既有
-			// generative_form(purpose=SET_CONDITIONS) 链路发一次；留空即不设筛选（全量推进）。
+			if (this.conditionsForm != null
+					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history)) {
+				body.put("resumed", false);
+				body.put("reason", "CONDITIONS_FORM_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
 			// 为什么续跑更需要它：这里是完整 run 历史（挂起期越长越大），没有条数窗口兜着 ——

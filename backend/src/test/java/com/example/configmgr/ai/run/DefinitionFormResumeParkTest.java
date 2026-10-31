@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.form.DefinitionSelectionForm;
 import com.example.configmgr.ai.form.GenerativeFormGuard;
 import com.example.configmgr.ai.form.GenerativeFormRules;
@@ -40,6 +41,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -73,7 +75,10 @@ import static org.mockito.Mockito.when;
  * <li>用户已明确配置（本轮原话里点名编码）⇒ 不弹，照常交棒模型去 {@code select_definitions}；</li>
  * <li>旧任务的槽位/任务号不得污染新任务：旧槽位不压制新任务的表单，表单也不预填旧选择；</li>
  * <li>已完成的旧任务（普通浏览，本轮没有 {@code create_task}）⇒ 不弹；</li>
- * <li>表单回灌后的续跑、以及之后连续节点（{@code select_definitions} → {@code confirm_step}）⇒ 不再问第二次。</li>
+ * <li>表单回灌后的续跑：照常交棒（选择值进历史）；</li>
+ * <li>选择成功后的连续节点（{@code select_definitions} 成功 → 宿主挂起确定性 {@code confirm_step}）⇒
+ * 宿主代替模型推进、不驱动模型，也不再问第二次配置；到 {@code QUERY_COND} 之后交棒前会先问条件表单，
+ * 它挂起时同样不驱动模型。</li>
  * </ol>
  */
 class DefinitionFormResumeParkTest {
@@ -95,6 +100,9 @@ class DefinitionFormResumeParkTest {
 	private static final String CALL_STEP = "call-step";
 
 	private static final String CALL_FORM = DefinitionSelectionForm.toolCallId(NEW_TASK_ID);
+
+	/** 宿主在配置选择成功后代替模型下发的确定性推进条目（id 由任务号决定）。 */
+	private static final String CALL_ADVANCE = "host-def-next-" + NEW_TASK_ID;
 
 	private InMemoryRunStore store = new InMemoryRunStore();
 
@@ -123,6 +131,8 @@ class DefinitionFormResumeParkTest {
 	private final TaskService taskService = mock(TaskService.class);
 
 	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
+
+	private final ConditionsForm conditionsForm = mock(ConditionsForm.class);
 
 	private final AtomicReference<Task> taskState = new AtomicReference<>();
 
@@ -181,6 +191,8 @@ class DefinitionFormResumeParkTest {
 				this.beacon, List.of(new GenerativeFormGuard(new ObjectMapper())));
 		this.service.setDefinitionSelectionForm(new DefinitionSelectionForm(this.store, this.registry, gate,
 				this.codec, this.properties, this.catalog));
+		// 条件表在真实链路上是同一次交棒前的最后一个宿主动作；桩只回答"该不该挂起"，候选用例不在本类。
+		ReflectionTestUtils.setField(this.service, "conditionsForm", this.conditionsForm);
 	}
 
 	@AfterEach
@@ -384,25 +396,54 @@ class DefinitionFormResumeParkTest {
 		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(1);
 	}
 
-	// ── ⑥ 连续节点：select_definitions → confirm_step 不再重复问 ────────────
+	// ── ⑥ 连续节点：select_definitions 成功 → 宿主挂起 confirm_step，不再问/不再驱动模型 ──
 
 	@Test
 	void consecutiveStepsAfterSelectionNeverAskAgain() {
-		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		// 勾选成功的现场：任务条目已落（defCodes 已知），上下文停在新任务的 SELECT_DEFS
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
 		seedCreatedTask(NEW_TASK_ID);
 		seedSuspendedRun(List.of(entry(CALL_SELECT, "select_definitions",
 				"{\"codes\":[\"CURRENCY\"]}", PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT,
 				ToolOutcome.OK.wire())), "帮我新建一个导出任务",
 				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
 
-		this.service.resume(RUN_ID);
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
-				eq(this.emitter));
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		// ① 宿主代替模型把确定性 confirm_step 挂起：本拍不驱动模型（也就不会再来一次文字反问/重复配置表）
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(result.body()).containsEntry("reason", "DEFINITION_STEP_ADVANCE_PARKED");
+		assertThat(result.body()).containsEntry("resumed", false);
+		assertThat(result.body()).containsEntry("taskId", NEW_TASK_ID);
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
+
+		// ② 挂起面是既有前端通道上的确定性条目（不是第二张配置表，也不代填推进参数/不直接写业务库）
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.as("勾选成功后不重复问配置").noneMatch(pending -> CALL_FORM.equals(pending.getToolCallId()));
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		assertThat(snapshot.getInFlightToolCalls()).extracting(PendingToolCall::getToolCallId)
+			.containsExactly(CALL_ADVANCE);
+		PendingToolCall advance = this.store.pending(RUN_ID, CALL_ADVANCE);
+		assertThat(advance).as("同一任务只会下发一次确定性推进").isNotNull();
+		assertThat(advance.getName()).isEqualTo("confirm_step");
+		assertThat(advance.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
+		assertThat(advance.getStatus()).isEqualTo(PendingToolCall.PENDING);
+		assertThat(parse(advance.getArguments()).size()).as("推进目标由页面/守卫决定，宿主不代填步骤")
+			.isZero();
+		verify(this.emitter).suspended(eq(List.of(advance)), anyString(), anyString(), anyString());
+		verify(this.emitter).frontendToolRequest(eq(advance), any());
+		// 停在选择步骤的推进处时，条件表单根本没有被问到（顺序：推进 → 配置表 → 条件表）
+		verify(this.conditionsForm, never()).parkIfDueAtQueryCond(anyString(), any(AiContext.class), any());
 
-		// 下一个节点：confirm_step 推进到 QUERY_COND 之后照旧不弹（步骤也早已不是 SELECT_DEFS）
-		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE));
+		// ③ 用户点过确认卡（回灌成功）后到 QUERY_COND：不再弹配置表，照常交棒
+		settle(CALL_ADVANCE);
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "QUERY_COND",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
 		repark(List.of(entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
 				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())));
 		this.service.resume(RUN_ID);
@@ -411,6 +452,35 @@ class DefinitionFormResumeParkTest {
 			.as("条件步骤同样不得被当成配置缺口再问一次").noneMatch(pending -> CALL_FORM.equals(pending.getToolCallId()));
 		AiContext second = contextOfDriveResumed();
 		assertThat(second.getStep()).isEqualTo("QUERY_COND");
+	}
+
+	// ── ⑦ QUERY_COND 交棒前先问条件表：它挂起时同样不驱动模型 ─────────────────
+
+	@Test
+	void queryCondParksTheConditionsFormBeforeHandoffAndThenNeverDrivesTheModel() {
+		this.taskState.set(taskWithDefs(NEW_TASK_ID, Task.TaskType.EXPORT, "QUERY_COND",
+				Task.TaskStatus.ACTIVE, "CURRENCY"));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(entry(CALL_STEP, "confirm_step", "{}", PendingToolCall.KIND_FRONTEND,
+				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())), "帮我新建一个导出任务",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
+		when(this.conditionsForm.parkIfDueAtQueryCond(eq(RUN_ID), any(AiContext.class), any()))
+			.thenReturn(true);
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(result.body()).containsEntry("reason", "CONDITIONS_FORM_PARKED");
+		assertThat(result.body()).containsEntry("resumed", false);
+		// 调用点就是交棒前那一份上下文（步骤已按任务权威值同步到 QUERY_COND）
+		ArgumentCaptor<AiContext> handoff = ArgumentCaptor.forClass(AiContext.class);
+		verify(this.conditionsForm).parkIfDueAtQueryCond(eq(RUN_ID), handoff.capture(), any());
+		assertThat(handoff.getValue().getStep()).isEqualTo("QUERY_COND");
+		assertThat(handoff.getValue().getTaskId()).isEqualTo(NEW_TASK_ID);
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
+				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
@@ -466,6 +536,16 @@ class DefinitionFormResumeParkTest {
 		for (PendingToolCall pending : inFlight) {
 			this.store.putPending(RUN_ID, pending);
 		}
+	}
+
+	/** 模拟用户回灌一张挂起卡（续跑前置会拒绝仍 PENDING 的外部条目）。 */
+	private void settle(String toolCallId) {
+		PendingToolCall pending = this.store.pending(RUN_ID, toolCallId);
+		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+		pending.setOutcome(ToolOutcome.OK.wire());
+		pending.setResultText("前端已执行：" + pending.getName());
+		pending.setResolvedAtMs(System.currentTimeMillis());
+		this.store.putPending(RUN_ID, pending);
 	}
 
 	private static PendingToolCall navigateEntry(long taskId) {

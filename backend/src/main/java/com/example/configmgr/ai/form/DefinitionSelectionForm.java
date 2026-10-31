@@ -159,6 +159,48 @@ public class DefinitionSelectionForm extends HostForm {
 	}
 
 	/**
+	 * 配置选择成功后，由宿主经既有前端 {@code confirm_step} 通道推进到条件步骤。
+	 * 本批已有推进调用、选择失败或页面已离开选择步骤时不重复下发。
+	 */
+	public boolean parkAdvanceIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
+			List<Message> history) {
+		if (runId == null || context == null || history == null || !parkEnabled()
+				|| context.getTaskId() == null || !EXPORT_PAGE.equals(context.getPage())
+				|| !SELECT_DEFS_STEP.equals(context.getStep())
+				|| !TaskSlots.fromExtra(context.getExtra()).hasDefCodes()
+				|| handledInBatch(settledBatch, AiToolNames.CONFIRM_STEP)
+				|| !successfulSelection(settledBatch)) {
+			return false;
+		}
+		String toolCallId = "host-def-next-" + context.getTaskId();
+		if (alreadyIssued(runId, toolCallId)) {
+			return false;
+		}
+		PendingToolCall advance = frontendTool(toolCallId, AiToolNames.CONFIRM_STEP, "{}");
+		Integer waitSeconds = this.gate.suspendWaitSeconds(advance);
+		if (waitSeconds != null && waitSeconds > 0) {
+			long now = System.currentTimeMillis();
+			advance.setAtMs(now);
+			advance.setExpiresAt(now + waitSeconds * 1000L);
+		}
+		log.info("配置选择成功，宿主下发 confirm_step 推进条件步骤 runId={} taskId={}", runId, context.getTaskId());
+		return park(runId, history, advance);
+	}
+
+	private static boolean successfulSelection(List<PendingToolCall> settledBatch) {
+		if (settledBatch == null) {
+			return false;
+		}
+		for (PendingToolCall settled : settledBatch) {
+			if (settled != null && AiToolNames.SELECT_DEFINITIONS.equals(settled.getName())
+					&& com.example.configmgr.ai.tool.ToolOutcome.OK == settled.effectiveOutcome()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * 判据 + 表单正文（不含任何外置写）。
 	 *
 	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、页/步骤是
