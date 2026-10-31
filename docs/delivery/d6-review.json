@@ -175,6 +175,13 @@
       "reason": "已同步宿主推进显式QUERY_COND目标、按每条confirm_step复核条件闭环、交棒标记快照持久化与压缩过滤合成指令",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:7a8e39d0fb286feeb87b016920a160a5567df12b3b414f8ddc9e199741cf4bea",
+      "status": "not-affected",
+      "reason": "本批仅修正既有前端刷新回放、工具去重、历史恢复与页签接管行为，不新增或改变迁移接口、存储键及跨实例契约",
+      "reviewedAt": "2026-10-31",
+      "reviewer": "Kimi主控"
     }
   ]
 }

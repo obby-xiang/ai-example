@@ -227,6 +227,16 @@ let activeRoundHostId: string | null = null
 let roundEpoch = 0
 
 /**
+ * 真轮**开流**的单调计数（F3，2026-10-31）：只在收到 `start` 帧时 +1。
+ *
+ * <p>为什么不复用 `roundEpoch`：`send()` 在**开流之前**就递增纪元，一条撞 409 SESSION_BUSY 的
+ * 发送（后端拒绝、本轮从未开始）也会让它变化 —— 拿纪元判"取数窗口内起过真轮"正是 R04 修掉的误判。
+ * `start` 帧是后端对"这一轮真的开始了"的正面证据，且只增不减：即使这一轮在窗口内**已收尾**
+ * （loading/suspended/currentAbort 全部复位），计数也已前进，历史不得再整替。
+ */
+let roundStartSeq = 0
+
+/**
  * 轮次现场快照（B2 共性代次）：异步动作**入队/发起时**取一份，回到现场再比一次。
  *
  * <p>三件一起判：会话身份（换会话后旧现场不得落进新会话）、轮次纪元（停止/换轮即失效）、
@@ -866,6 +876,14 @@ export interface OwnershipMessage {
    */
   tenantId?: number
   userId?: number
+  /**
+   * F1（2026-10-31）：**返回意向**标记 —— 来自"慢重载回来的原页签"的 `claim`。
+   *
+   * <p>它在探活时被判为 duplicate（会话已被空白副本接手），但又确实带着有效的
+   * `pagehide` 返回意向 ⇒ 当前持有者应当**静默让回**（否则 1500ms 宽限一过，原页签回来就
+   * 只能降级坐等，会话永远归副本）。接收方只在"本页签正是接管方、且仍然空白"时才动作。
+   */
+  returning?: boolean
 }
 
 /** 本页签持有的会话锁与自有会话 id（模块级：文档级资源，不进响应式状态）。 */
@@ -947,7 +965,9 @@ function openOwnershipChannel(onMessage: (message: OwnershipMessage) => void): v
         sessionId: data.sessionId,
         pageId: typeof data.pageId === 'string' ? data.pageId : '',
         ...(typeof data.tenantId === 'number' ? { tenantId: data.tenantId } : {}),
-        ...(typeof data.userId === 'number' ? { userId: data.userId } : {})
+        ...(typeof data.userId === 'number' ? { userId: data.userId } : {}),
+        // F1：返回意向必须随消息透传（被丢弃就等于"慢重载只能坐等被抢"）
+        ...(data.returning === true ? { returning: true } : {})
       })
     }
     ownershipChannel = channel
@@ -989,14 +1009,17 @@ function ownershipIdentityMatches(message: OwnershipMessage, identity: AiIdentit
 function postOwnership(
   kind: OwnershipMessage['kind'],
   sessionId: string,
-  identity: AiIdentity | null
+  identity: AiIdentity | null,
+  options: { returning?: boolean } = {}
 ): void {
   // 身份指纹随消息发出（接管方据此拒绝跨租户/跨用户接手）；无身份时省略字段，保持旧单用户口径。
   const message: OwnershipMessage = {
     kind,
     sessionId,
     pageId: readPageId(),
-    ...(identity ? { tenantId: identity.tenantId, userId: identity.userId } : {})
+    ...(identity ? { tenantId: identity.tenantId, userId: identity.userId } : {}),
+    // F1：返回意向（只由"带有效返回意向、却被判 duplicate 的原页签"发出）
+    ...(options.returning === true ? { returning: true } : {})
   }
   try {
     ownershipChannel?.postMessage(message)
@@ -1175,13 +1198,28 @@ function takeReturnIntent(sessionId: string): boolean {
  * —— "原页签关闭 ⇒ 空白副本接手原会话"整条路径因此**永远不可达**（关掉原页签后另一个页签
  * 只剩一个空会话）。资格只对**这一段记录**生效（别的会话的 `released` 一律不接手，防劫持），
  * 并在用户主动新建对话 / 切换身份时作废（那时页签已有自己的会话意图，再换会话就是串会话）。
+ *
+ * <p>`takenOver`（F1）：资格用掉之后**不删记录**，改标记"本页签是接管来的" —— 慢重载回来的
+ * 原页签带有效返回意向广播 `claim.returning` 时，只有这个标记能证明"该让回"。
  */
-let handoffOrigin: { sessionId: string; fingerprint: string } | null = null
+let handoffOrigin: { sessionId: string; fingerprint: string; takenOver: boolean } | null = null
 
 function rememberHandoffOrigin(sessionId: string, identity: AiIdentity | null): void {
   handoffOrigin = {
     sessionId,
-    fingerprint: identity ? identityFingerprint(identity) : ''
+    fingerprint: identity ? identityFingerprint(identity) : '',
+    takenOver: false
+  }
+}
+
+function markHandoffTakenOver(sessionId: string, identity: AiIdentity | null): void {
+  if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId) {
+    return
+  }
+  handoffOrigin = {
+    ...handoffOrigin,
+    fingerprint: identity ? identityFingerprint(identity) : handoffOrigin.fingerprint,
+    takenOver: true
   }
 }
 
@@ -1189,11 +1227,33 @@ function clearHandoffOrigin(): void {
   handoffOrigin = null
 }
 
+/** 接手**资格**（尚未用过）：仍是复制来源那一段、且身份一致。 */
 function handoffOriginMatches(sessionId: string, identity: AiIdentity | null): boolean {
-  if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId) {
+  if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId || handoffOrigin.takenOver) {
     return false
   }
   return handoffOrigin.fingerprint === (identity ? identityFingerprint(identity) : '')
+}
+
+/** F1 回让资格：本页签**确实是从这条会话接管来的**（资格已用掉），且身份一致。 */
+function tookOverOriginMatches(sessionId: string, identity: AiIdentity | null): boolean {
+  if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId || !handoffOrigin.takenOver) {
+    return false
+  }
+  return handoffOrigin.fingerprint === (identity ? identityFingerprint(identity) : '')
+}
+
+/**
+ * 本页签"带着有效返回意向、但会话已被接收手"的待收回记录（F1）。
+ *
+ * <p>慢重载的原页签回来时探活必然 occupied（会话归副本）⇒ 只能降级 duplicate。它把返回意向
+ * 随 `claim` 广播出去；接管方空白时静默让回（先放锁再广播 `released`）。本页签收到"自己这条
+ * 会话的 released"时据此重新探活认领 —— 不靠宽限、不靠重试，只靠这两条可观测消息。
+ */
+let returnIntentPending: { sessionId: string; fingerprint: string } | null = null
+
+function clearReturnIntentPending(): void {
+  returnIntentPending = null
 }
 
 /**
@@ -1559,12 +1619,18 @@ const frontendToolChains = new Map<string, Promise<void>>()
 function enqueueFrontendTool(
   messageId: string,
   stillCurrent: () => boolean,
-  run: () => Promise<void>
+  run: () => Promise<void>,
+  onSettled?: () => void
 ): void {
   const previous = frontendToolChains.get(messageId) ?? Promise.resolve()
   const settled = previous
     .then(() => (stillCurrent() ? run() : undefined))
     .catch(() => undefined)
+    .finally(() => {
+      // #2（2026-10-31）：入队占位（执行中 toolCallId 去重）必须在**结算**时释放 ——
+      // 包括"轮到它时已被 stillCurrent 判掉"的分支（否则占位永久泄漏，后续同名调用全被挡）。
+      onSettled?.()
+    })
   frontendToolChains.set(messageId, settled)
   void settled.then(() => {
     if (frontendToolChains.get(messageId) === settled) {
@@ -1584,6 +1650,51 @@ function enqueueFrontendTool(
 function clearFrontendToolChains(): void {
   frontendToolChains.clear()
 }
+
+/**
+ * 回放保留的"本轮已决 toolCallId"（刷新恢复 #1，2026-10-31 阻断）。
+ *
+ * <p>`restoreInFlightRound` 必须**清段 + lastSeq=0 全量重放**（镜像正文滞后，增量续收必缺口）。
+ * 但段一清，重放回来的 `frontend_tool_request` 就读不到"这条工具已经成功过"——
+ * `hasDecidedPendingResidue` 读段读不到 ⇒ **二次真实执行**：第二次页面往往未就绪 ⇒ 本地 failed
+ * 覆盖 succeeded（用户实测 `select_definitions` / `set_condition` 刷新后显示失败，实际第一次成功），
+ * `confirm_step` 这类写工具甚至会真的再推进一次。
+ *
+ * <p>口径：清段**前**把已决 id 记到旁路（**只记 id、不保留段** —— 保留段会让正文/卡片重复拼接、
+ * 顺序错乱），重放期间由 `hasDecidedPendingResidue` 并入判定。作用域 = 该 run（记录带 runId，
+ * 只在 `activeRunId` 仍是它时生效）⇒ 不跨 run 生效；换会话 / 停止即清理。
+ */
+const replayedDecidedToolCalls = new Map<string, { runId: string; toolCallIds: Set<string> }>()
+
+function rememberReplayedDecidedTools(messageId: string, runId: string, toolCallIds: string[]): void {
+  const unique = [...new Set(toolCallIds)]
+  if (unique.length === 0) {
+    replayedDecidedToolCalls.delete(messageId)
+    return
+  }
+  replayedDecidedToolCalls.set(messageId, { runId, toolCallIds: new Set(unique) })
+}
+
+function clearReplayedDecidedTools(): void {
+  replayedDecidedToolCalls.clear()
+}
+
+/**
+ * 执行中的前端工具 toolCallId（回灌窗口去重 #2）。
+ *
+ * <p>P03 起回灌 POST 受理前段仍是 `running`（这样"停止"能取消它），于是重复投递 / 重连重放的
+ * `frontend_tool_request` **不再被段状态挡住** —— 同 id 会再跑一遍（二次浏览器副作用，
+ * `confirm_step` 会二次推进）。占位范围 = 执行 → 回灌受理；结束（含异常）即释放。
+ */
+const frontendToolsInFlight = new Set<string>()
+
+/**
+ * 执行器**未预期异常**时的回灌/落卡文案（F4）。
+ *
+ * <p>与"超时"分开说：这是确定性失败（执行器抛错，本次未完成），文案要可行动（提示模型让用户手动重试），
+ * 且不含任何内部栈/技术措辞。
+ */
+const EXECUTOR_CRASH_TEXT = '前端工具执行异常，本次未完成。请提示用户手动重试'
 
 /* ============================ 批次7B（P1⑤）：镜像增量 / 有界 / idle 落盘 ============================
  * 旧实现每次节流窗口都把**整个会话**重新 deep `JSON.stringify`（O(会话)），长会话在流式每帧
@@ -3384,6 +3495,10 @@ export const useAiStore = defineStore('ai', {
       // N3（R2）：`stopped` 之后保留的旧传输（C2 为等 start 特意不 abort）不算"在途轮"—— 这一轮
       // 已被放弃，历史重载必须能照常落盘，否则停止后再也刷不出历史。
       const inFlightAtEntry = this.loading || (currentAbort !== null && !this.stopped)
+      // F3（2026-10-31）：真轮的**单调证据**在入口捕获 —— 只认 `start` 帧（开流成功）。
+      // 409 的未起轮永远没有 start 帧，故不会回退 R04 的误判修复；而"开轮并在窗口内收尾"的轮
+      // 三个现场判据（loading/suspended/currentAbort）都已复位，只有它还能证明"真轮占过场"。
+      const roundStartAtEntry = roundStartSeq
       this.startMirror()
       const mirror = readMirror(this.sessionId)
       // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
@@ -3475,8 +3590,16 @@ export const useAiStore = defineStore('ai', {
       // 真轮占场的结构性证据只有三样：`loading`（在跑）、`suspended`（卡在等人）、`currentAbort`
       // （连接句柄未收）；`stopped` 之后的残留句柄不算（C2 特意保留的 pre-start 传输是"被放弃的
       // 那一轮"的收尾，N-1/R3 口径）。
+      // 真轮占场的结构性证据：`loading`（在跑）、`suspended`（卡在等人）、`currentAbort`
+      // （连接句柄未收）——三者都是**瞬时**现场，覆盖不了"窗口内开流并收尾"的那一轮
+      // （`loading` 已复位、句柄已收）。故再并入入口→出口的 **start 帧单调序号**（F3）：
+      // 只要窗口内真的开过流，这份历史就是过期现场，不得整替掉刚完成的问答/错误卡。
+      // `stopped` 之后的残留句柄不算（C2 特意保留的 pre-start 传输是"被放弃的那一轮"的收尾，
+      // N-1/R3 口径）；409 未起轮的发送不产生 start 帧，故仍不会误判（R04 口径不变）。
+      const roundStartedDuringFetch = roundStartSeq !== roundStartAtEntry
       const newRoundOccupies = this.loading || this.suspended
         || (currentAbort !== null && !this.stopped)
+        || roundStartedDuringFetch
       if (inFlightAtEntry || newRoundOccupies) {
         this.historyLoaded = true
         this.historyError = null
@@ -4221,6 +4344,16 @@ export const useAiStore = defineStore('ai', {
       }
       // 批次2：在途恢复的宿主归属该 run（重试入口只认 message.runId）
       host.runId = runId
+      // #1（2026-10-31 阻断）：清段前把本轮**已决**的 toolCallId 记到旁路（只记 id、不留段）。
+      // 重放回来的 `frontend_tool_request` 据此零执行/零回灌；段仍必须清空 —— 保留段会让正文与
+      // 卡片重复拼接、段序错乱。资格按 run 记账（换 run / 换会话即不生效）。
+      rememberReplayedDecidedTools(
+        host.id,
+        runId,
+        host.parts.flatMap((part) =>
+          part.kind === 'tool' && isFrameDecidedPendingStatus(part.status) ? [part.toolCallId] : []
+        )
+      )
       // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
       host.parts = [{ kind: 'text', seg: 0, text: '', streaming: true }]
       host.content = ''
@@ -6496,6 +6629,27 @@ export const useAiStore = defineStore('ai', {
     hasDecidedPendingResidue(toolCallId: string): boolean {
       // 批2（权威翻转）：判据改读**段** —— 挂起投影不再保留终态（终态段 requiresAction=false，
       // 派生出的 pendingCall 为 null），若继续读投影这个守卫会静默失效（取消竞态重挂复活）。
+      if (this.hasDecidedToolPart(toolCallId)) {
+        return true
+      }
+      // #1：刷新回放清段时按 run 保留的已决 id（段已清空，事实不能跟着丢）。
+      // 只在该 run 仍是当前活动 run 时生效 —— 换 run/换会话后一律不认，避免挡住新轮的同名调用。
+      for (const entry of replayedDecidedToolCalls.values()) {
+        if (entry.runId === this.activeRunId && entry.toolCallIds.has(toolCallId)) {
+          return true
+        }
+      }
+      return false
+    },
+
+    /**
+     * 只看**段**的已决判定（不含"回放保留的 id"）。
+     *
+     * <p>跨宿主终帧守卫（`handleFrame` 的 D6(B)）用它：那一层的语义是"另一条消息上还有一个
+     * 已决段，不要在建不出段的新宿主上再造一张矛盾卡"。回放场景恰恰相反 —— 段是被**有意清空**
+     * 的（等归档重放重建），此时必须让重放的终帧正常建段。
+     */
+    hasDecidedToolPart(toolCallId: string): boolean {
       return this.messages.some(
         (item) => item.parts.some(
           (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
@@ -7932,6 +8086,8 @@ export const useAiStore = defineStore('ai', {
       // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
       // 轮到它们时零执行；这里只丢掉链表，不把新会话的新动作排到旧链尾。
       clearFrontendToolChains()
+      // #1：停止 = 放弃这一轮 ⇒ 回放保留的"已决 id"也随轮作废（不带到后续任何一轮）
+      clearReplayedDecidedTools()
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
@@ -8450,10 +8606,16 @@ export const useAiStore = defineStore('ai', {
       releaseOwnLock(oldSessionId, oldIdentity)
       // 待接手的让渡属于"上一身份"，换会话即作废
       cancelPendingTakeover()
+      // F7：换会话 = 本页签换了会话意图 ⇒ 复制来源的接手资格、以及"等待收回"的返回意向一并作废
+      // （410 SESSION_PURGED 走的正是 adoptFreshSession：不清就会在这之后去接管原会话）。
+      clearHandoffOrigin()
+      clearReturnIntentPending()
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
       roundEpoch += 1
       // B2：旧会话排队中的工具随会话作废（判据见 `enqueueFrontendTool`）
       clearFrontendToolChains()
+      // #1：回放保留的"已决 id"属于旧会话/旧 run —— 换会话即清（不跨会话、不跨 run 生效）
+      clearReplayedDecidedTools()
       // M-2b：旧会话的快照串行队列不得落进新会话
       this.restoredPendingQueue = []
       // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
@@ -8577,9 +8739,9 @@ export const useAiStore = defineStore('ai', {
      *   新会话 + 轮换 pageId：**不接管**原会话、**不删**原会话的后端记忆；复制提示保持静默；
      *   同时记下**复制来源会话**（N09/M07 的接手资格），让渡监听随之装上（原页签关闭后由
      *   `onOwnershipMessage` 按资格 + 锁决定是否接手）；
-     * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 只把角色
-     *   降级为 'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**。这是"比宽限还慢的重载"
-     *   那条兜底 —— 会话确实不归本页签了，但用户眼前的记录不该被当成复制品抹掉。
+     * - **慢重载回来的原页签**（带着 `pagehide` 写下的返回意向、锁却已被副本接手）⇒ 角色降级为
+     *   'duplicate'：**不清会话、不清屏、不轮换 pageId、不认领锁**；同时把**返回意向随 `claim`
+     *   广播出去**（F1）—— 接管方若仍是空白就静默让回，本页签收到让回后重新认领（不靠宽限）。
      *
      * 幂等：判定过一次（角色非 'unknown'）即不再重复探活。
      *
@@ -8623,24 +8785,34 @@ export const useAiStore = defineStore('ai', {
         this.tabOwnership = role
         if (role === 'owner') {
           ownedSessionId = sid
+          // 锁到手 = 会话回到本页签，返回意向的待收回记录不再需要
+          clearReturnIntentPending()
           // Task 3：探活期间身份可能已切走 —— claim 按**该会话**的身份发（入口捕获）。
           postOwnership('claim', sid, this.sessionIdentity)
           return
         }
         if (role === 'duplicate') {
           if (returning) {
-            // 回来的原页签：会话已被别人接手 —— 降级但不清场（见方法注释）
+            // 慢重载回来的原页签（F1）：会话已被别人接手 —— 降级但不清场（见方法注释），
+            // 并把**返回意向随 claim 广播出去**：接管方若仍是空白就静默让回。不延长宽限、
+            // 不猜"某个毫秒之后对方一定死了"——让回与收回都由可观测消息驱动。
+            returnIntentPending = {
+              sessionId: sid,
+              fingerprint: identityAtEntry ? identityFingerprint(identityAtEntry) : ''
+            }
+            postOwnership('claim', sid, this.sessionIdentity, { returning: true })
             return
           }
-          // N09/M07：记下**复制来源**作为让渡接手资格。复制页签取号后角色就变 'owner'，
-          // 旧判据（只认 'duplicate'）会让"原页签关闭 ⇒ 空白副本接手"不可达；资格本身不换
-          // 会话、不读历史，只在**该会话**的 `released` 到达且本页签仍空白时才生效。
-          rememberHandoffOrigin(sid, identityAtEntry)
           // 复制页签：确认复制之后，先对本页签整份 sessionStorage 清一次（继承来的镜像、未提交
           // 草稿、业务页签键一律不带走），再起新会话、轮换 pageId（同源广播里两个页签的 pageId
           // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
           clearDuplicatedTabStorage(this.identity)
           this.adoptFreshSession()
+          // N09/M07：记下**复制来源**作为让渡接手资格（必须在 adoptFreshSession **之后**记：
+          // F7 起 adoptFreshSession 会作废资格）。复制页签取号后角色就变 'owner'，旧判据
+          // （只认 'duplicate'）会让"原页签关闭 ⇒ 空白副本接手"不可达；资格本身不换会话、
+          // 不读历史，只在**该会话**的 `released` 到达且本页签仍空白时才生效。
+          rememberHandoffOrigin(sid, identityAtEntry)
           // 复制页签只换本地会话并保持静默；不提供接回入口，也不在这里读原会话历史。
           rotatePageId()
           // Task 4：先判完所有权（到这里才确定"本页签要自己的会话"）再向后端取号；
@@ -8729,9 +8901,12 @@ export const useAiStore = defineStore('ai', {
     /**
      * RC-4 ③：所有权广播处理。
      *
-     * - `claim`：原页签（刷新回来的新文档）重新认领 ⇒ 撤销本页签待接手的让渡（宽限的意义所在）；
+     * - `claim`：原页签（刷新回来的新文档）重新认领 ⇒ 撤销本页签待接手的让渡（宽限的意义所在）。
+     *   带 `returning` 的 `claim` = **慢重载回来的原页签**（F1）：本页签若正是"从这条会话复制来的
+     *   接管方"且仍空白 ⇒ **静默让回**（不靠延长宽限）。
      * - `released`：**让渡意向**，不是"立刻交接" —— 空白副本等 {@link OWNERSHIP_RELEASE_GRACE_MS}
-     *   再探活接手（`takeOverSession` 内的探活仍是最终裁决）。
+     *   再探活接手（`takeOverSession` 内的探活仍是最终裁决）。若本页签正带着返回意向、且这条正是
+     *   自己那条会话的让回 ⇒ 重新认领（F1 的另一半）。
      *
      * 只有"**有接手资格**、且自己这边**还没产生任何内容**"的页签接手 —— 已经在自己会话里说过话的
      * 页签不换会话（换掉会让用户眼前内容跳变）。资格有两条：① 角色仍是 `duplicate`（待接手的
@@ -8743,24 +8918,45 @@ export const useAiStore = defineStore('ai', {
       if (!ownershipIdentityMatches(message, this.identity)) {
         return
       }
-      if (message.sessionId === this.sessionId) {
-        return
-      }
+      // F8：资格/让回属于**会话**，一律按 `sessionIdentity` 判（界面当前选中的 identity 可能已切走）。
+      const sessionIdentity = this.sessionIdentity
       if (message.kind === 'claim') {
+        // F1：慢重载回来的原页签带有效返回意向 ⇒ 本页签是接管方且仍空白就让回（静默）。
+        if (message.returning === true
+          && this.sessionId === message.sessionId
+          && this.tabOwnership === 'owner'
+          && tookOverOriginMatches(message.sessionId, sessionIdentity)) {
+          void this.giveBackTakenOverSession(message.sessionId)
+          return
+        }
         if (pendingTakeover?.sessionId === message.sessionId) {
           cancelPendingTakeover()
         }
+        return
+      }
+      // F1（另一半）：本页签带着返回意向、且这条 released 正是**自己那条会话**的让回 ⇒ 重新认领。
+      if (returnIntentPending !== null
+        && returnIntentPending.sessionId === message.sessionId
+        && this.sessionId === message.sessionId) {
+        void this.reclaimReturnedSession(message.sessionId)
+        return
+      }
+      if (message.sessionId === this.sessionId) {
         return
       }
       // N09/M07：接手资格有两条并列来源 —— ① 仍在"待接手"的 duplicate（旧口径）；
       // ② 角色已是 owner，但本页签是**从这条会话复制来的空白页签**（复制来源已记录）。
       // 旧实现只看 ①，而复制页签取号后角色立刻变 owner ⇒ ② 这条路径永远不可达。
       const handoff = this.tabOwnership === 'duplicate'
-        || handoffOriginMatches(message.sessionId, this.identity)
+        || handoffOriginMatches(message.sessionId, sessionIdentity)
       if (!handoff) {
         return
       }
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
+        // F7：已经在这页签产生内容 ⇒ 永不接手，且**资格作废**（此后即便屏被清空也不得再回头接手）
+        if (handoffOriginMatches(message.sessionId, sessionIdentity)) {
+          clearHandoffOrigin()
+        }
         return
       }
       // 宽限后再探活：原页签在此期间重播 claim（刷新回来）⇒ 计时器已撤销，本页签不抢
@@ -8770,12 +8966,73 @@ export const useAiStore = defineStore('ai', {
         pendingTakeover = null
         // 宽限期间现场可能已变（用户新建对话 / 接管完成 / 降级 / 已说话）：只有仍具资格才接手
         if (this.tabOwnership !== 'duplicate'
-          && !handoffOriginMatches(sessionId, this.identity)) {
+          && !handoffOriginMatches(sessionId, this.sessionIdentity)) {
           return
         }
         void this.takeOverSession(sessionId)
       }, OWNERSHIP_RELEASE_GRACE_MS)
       pendingTakeover = { sessionId, timer }
+    },
+
+    /**
+     * F1：**静默让回**接手的会话 —— 慢重载回来的原页签带着有效返回意向要它。
+     *
+     * <p>顺序不可反：先放锁、再广播 `released` —— 对方据此重新探活，探到"锁空闲"才认账。
+     * 让回只在本页签**仍是接管方 + 仍空白 + 身份一致**时成立（已产生内容就不换会话；身份分叉不碰）。
+     * 让回后本页签回到自己的空白会话（取新号并认领），全程无提示。
+     */
+    async giveBackTakenOverSession(sessionId: string): Promise<void> {
+      const identityAtEntry = this.sessionIdentity
+      if (!tookOverOriginMatches(sessionId, identityAtEntry)) {
+        return
+      }
+      if (this.sessionId !== sessionId || this.tabOwnership !== 'owner') {
+        return
+      }
+      if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
+        // 已经在这条会话里产生了内容 ⇒ 让回会换掉用户眼前内容：保持现状，资格作废（不再反复让回）
+        clearHandoffOrigin()
+        return
+      }
+      releaseOwnLock(sessionId, identityAtEntry)
+      postOwnership('released', sessionId, identityAtEntry)
+      // adoptFreshSession 会一并清掉资格与返回意向记录（F7），随后取自己的新号并认领。
+      this.adoptFreshSession()
+      await this.ensureSession()
+    },
+
+    /**
+     * F1：**重新认领**被让回的原会话 —— 本页签带着有效返回意向、且收到自己那条会话的 `released`。
+     *
+     * <p>以锁为唯一裁决（限次探活）：拿到 ⇒ 恢复 owner 并重播 `claim`；拿不到 ⇒ 保持 duplicate
+     * （别人抢先就是别人），不留任何"半认领"状态。全程静默、不重读历史（屏上内容本来就是这条会话的）。
+     */
+    async reclaimReturnedSession(sessionId: string): Promise<void> {
+      const pending = returnIntentPending
+      if (pending === null || pending.sessionId !== sessionId) {
+        return
+      }
+      const identityAtEntry = this.sessionIdentity
+      if (pending.fingerprint !== (identityAtEntry ? identityFingerprint(identityAtEntry) : '')) {
+        clearReturnIntentPending()
+        return
+      }
+      if (this.sessionId !== sessionId || this.tabOwnership !== 'duplicate') {
+        clearReturnIntentPending()
+        return
+      }
+      const verdict = await probeSessionLock(sessionId, identityAtEntry)
+      // 探活期间现场可能已变（换会话 / 已有人认领 / 意向已被消费）
+      if (returnIntentPending !== pending || this.sessionId !== sessionId) {
+        return
+      }
+      clearReturnIntentPending()
+      if (verdict !== 'granted') {
+        return
+      }
+      ownedSessionId = sessionId
+      this.tabOwnership = 'owner'
+      postOwnership('claim', sessionId, identityAtEntry)
     },
 
     /**
@@ -8790,13 +9047,22 @@ export const useAiStore = defineStore('ai', {
     async takeOverSession(sessionId: string): Promise<void> {
       const previous = this.sessionId
       const previousLock = ownedSessionId === previous ? heldLock : null
-      const identityAtEntry = this.identity
+      // F8：资格属于会话 —— 探活/广播都按 `sessionIdentity`（不是界面当前选中的 identity）。
+      const identityAtEntry = this.sessionIdentity
       const verdict = await probeSessionLock(sessionId, identityAtEntry)
       if (verdict !== 'granted') {
         return
       }
       // Task 4：探活是异步的，期间身份可能已切走 —— 不同身份不得接手（锁已探到也要还回去）。
-      if (!isSameIdentity(identityAtEntry, this.identity)) {
+      if (!isSameIdentity(identityAtEntry, this.sessionIdentity)) {
+        releaseOwnLock(sessionId, identityAtEntry)
+        return
+      }
+      // F2（2026-10-31）：探活是异步的 —— 期间用户可能**主动新建对话 / 换会话**（adoptFreshSession
+      // 已清场换号），也可能资格已被作废。会话身份变了、或"待接手角色 / 接手资格"都不再成立
+      // ⇒ 整体放弃并把锁还回去（否则探活回来会把刚新建的会话直接覆盖掉）。
+      if (this.sessionId !== previous
+        || !(this.tabOwnership === 'duplicate' || handoffOriginMatches(sessionId, identityAtEntry))) {
         releaseOwnLock(sessionId, identityAtEntry)
         return
       }
@@ -8833,8 +9099,8 @@ export const useAiStore = defineStore('ai', {
       }
       this.tabOwnership = 'owner'
       ownedSessionId = sessionId
-      // 资格一次性：接手完成后不再对后续 `released` 生效（本页签已是这条会话的主人）
-      clearHandoffOrigin()
+      // 资格用掉 ⇒ 标记"这条会话是本页签接管来的"（F1：原页签带返回意向回来时据此静默让回）。
+      markHandoffTakenOver(sessionId, identityAtEntry)
       // Task 3：claim 的身份 = 接手入口捕获的身份（探活期间切走的身份不参与这条会话的广播）。
       postOwnership('claim', sessionId, identityAtEntry)
       // 批次6B（N7）：接手的是**另一个会话**，上一身份的 chip / ui_event 回执 / 轮结局不带走。
@@ -9067,14 +9333,16 @@ export const useAiStore = defineStore('ai', {
       }
 
       // 批3③b D6(B)（R-141①，店级守卫）：跨宿主"已决"终帧守卫 —— 重挂/续收回放时，若帧的
-      // toolCallId 已在**其他消息**上持有已决段（hasDecidedPendingResidue，统一 8 态），且当前
+      // toolCallId 已在**其他消息**上持有已决段（hasDecidedToolPart，统一 8 态），且当前
       // 宿主消息没有它的段，则整帧跳过：不得在新宿主重建同 id 段（旧卡 unknown/failed/cancelled
       // 仍在 ⇒ 第二张状态矛盾卡）。当前宿主已持段的正常收敛不受影响（含 T1 生死线的 first-wins）。
       // 挂起语义帧（request/suspended/confirm_request）的拦截由 D8 各 case 守卫承担；本守卫只覆盖
       // 工具终态/起始帧。契约前提：后端不重发已终态 toolCallId、toolCallId 跨轮不复用（UUID）。
+      // #1（2026-10-31）：判据只认**段** —— 刷新回放时段是被有意清空的（"已决"事实暂存在旁路），
+      // 该终帧正是重建这条段的那一帧，不得跳过（否则卡片整条消失）。
       if ((frame.type === 'tool_start' || frame.type === 'tool_result'
         || frame.type === 'frontend_tool_result' || frame.type === 'confirm_decision')
-        && this.hasDecidedPendingResidue(frame.toolCallId)
+        && this.hasDecidedToolPart(frame.toolCallId)
         && !findToolPart(message, frame.toolCallId)) {
         return
       }
@@ -9086,6 +9354,9 @@ export const useAiStore = defineStore('ai', {
 
       switch (frame.type) {
         case 'start':
+          // F3：`start` 帧 = "这一轮真的开始了"的**单调**证据（409 的未起轮没有它）。
+          // 刷新恢复的取数窗口用它区分"真轮在窗口内开流并收尾"与"只是撞了 409"。
+          roundStartSeq += 1
           this.activeRunId = frame.runId
           // M08：本轮 runId 一到就登记活动连接（single-flight 判据的一部分：send 开的流同样
           // 占有这个 runId，恢复入口据此并入而不是另开一条）。
@@ -9185,10 +9456,13 @@ export const useAiStore = defineStore('ai', {
           // 不再触发第二次 runFrontendTool（二次浏览器副作用）、不把已终态段改回
           // pending+requiresAction（挂起卡复活）。已决判据统一 8 态（含 unknown/failed/skipped）。
           // 原 GF 前缀守卫的行为对 GF 用例不变（回归锁见 frontend-tool-result-terminal.spec.ts）。
-          if (this.hasDecidedPendingResidue(frame.toolCallId)) {
+          if (this.hasDecidedPendingResidue(frame.toolCallId)
+            || frontendToolsInFlight.has(frame.toolCallId)) {
             // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
             //（不落 requiresAction 段、不置 suspended、不武装 activeForm），
-            // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛
+            // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛。
+            // #2（2026-10-31）：**执行中的同 id** 同口径拦下 —— P03 起回灌受理前段是 running，
+            // 重复投递/重放若照常 apply，会把 running 翻回 pending 并再排一次执行。
             break
           }
           this.suspended = true
@@ -9219,10 +9493,18 @@ export const useAiStore = defineStore('ai', {
           // 发出后才启动下一条（并发会让紧随导航的动作打在"页面还没挂载 / 任务还没绑定"的窗口上）
           // B2：**入队即捕获轮次现场** —— 排队期间被停止/换会话后，这条不执行任何动作
           const round = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
+          // #2（2026-10-31 阻断）：执行中 toolCallId 去重 —— 占位在**入队**就取（同一批复放
+          // 可能在首条开跑前就把两条同 id 请求都送达），释放交给队列结算（含"轮到它时已被
+          // stillCurrent 判掉"的分支）。不占位 ⇒ P03 的回灌窗口里会真的再跑一遍。
+          if (frontendToolsInFlight.has(frame.toolCallId)) {
+            break
+          }
+          frontendToolsInFlight.add(frame.toolCallId)
           enqueueFrontendTool(
             message.id,
             () => stillSameRound(round, this.sessionId, this.activeRunId ?? null),
-            () => this.runFrontendTool(message, frame, round)
+            () => this.runFrontendToolAttempt(message, frame, round),
+            () => frontendToolsInFlight.delete(frame.toolCallId)
           )
           break
         }
@@ -9490,9 +9772,15 @@ export const useAiStore = defineStore('ai', {
     /**
      * 前端工具结局的**段级**终态收口。与 {@link applyPendingTerminal} 的差别是**只对
      * generative_form 落终态**：通用 FRONTEND 工具（navigate_to / download_export_files 等）
-     * 只收 requiresAction（结局由结果帧承载），因为它的挂起卡本来就该收掉（留着会与工具卡
+     * 默认只收 requiresAction（结局由结果帧承载），因为它的挂起卡本来就该收掉（留着会与工具卡
      * 叠成一张冗余"已执行"卡）。判定依据取段自身的既有字段（kind2 + name），不依赖帧字段。
      * `status === null` = 未给可翻译终态（旧后端口径）：只收 requiresAction。
+     *
+     * <p>#3（2026-10-31）：通用 FRONTEND 的**本地单次结论**（failed / unknown）与**在跑段**
+     * （running）允许被 mapped 纠正 —— 409 DUPLICATE / 续收快照给的是后端权威终态，
+     * 本地那次失败可能只是"重复执行的副产物"（刷新回放把已成功的工具又跑了一遍）。
+     * 已定终态（succeeded / cancelled / rejected / blocked / skipped / expired）与待决的
+     * `pending`（等结果帧）仍不动。
      *
      * 调用点（F2 收口修后**只剩非帧路径**）：
      * - 409 DUPLICATE 响应体的条目 status（{@link submitFrontendToolResult}）；
@@ -9517,8 +9805,19 @@ export const useAiStore = defineStore('ai', {
         }
         const generative = part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL
         if (!generative) {
-          // 通用 FRONTEND：只收 requiresAction；终态段状态由结果帧 / 本地结局的写点承载，不动
-          if (part.requiresAction) {
+          // 通用 FRONTEND：默认只收 requiresAction；终态段状态由结果帧 / 本地结局的写点承载。
+          // #3（权威纠偏，2026-10-31 阻断，最小口径）：`failed` / `unknown` 是**本地这一次执行**的
+          // 结论，`running` 是"我们这边正在/刚刚执行、还没有后端裁决"—— 三者都不是后端裁决。
+          // 409 DUPLICATE 的响应体 / 续收快照给出的 mapped 才是**后端权威终态**（例如第一次执行
+          // 已 FRONTEND_RESULT），此时必须能纠正它们；反向绝不：本地已定 succeeded / cancelled /
+          // rejected / blocked / skipped / expired 一律不动（first-wins 单调不变）。
+          // `pending` 不在此列：那时的终态由随后到达的结果帧承载（既有契约，旧测试锁定）。
+          const correctable = part.status === 'failed' || part.status === 'unknown'
+            || part.status === 'running'
+          if (mapped !== null && correctable) {
+            item.parts.splice(partIndex, 1, { ...part, requiresAction: false, status: mapped })
+            deriveProjections(item)
+          } else if (part.requiresAction) {
             item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
             deriveProjections(item)
           }
@@ -9714,6 +10013,40 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * #4（2026-10-31）：段仍无结论（pending / running）时**中性收敛**为 `unknown`（结局未知）。
+     *
+     * <p>只用于"这一轮的结局再也不会有人写"的出口（换轮 / 409 已决但后端没给可翻译状态）：
+     * 不写 failed（不能把已成功误判成失败）、不写 cancelled（不是用户决策）、不新建段。
+     */
+    settleUnfinishedToolPart(message: ChatMessage, toolCallId: string): void {
+      const part = findToolPart(message, toolCallId)
+      if (!part || (part.status !== 'pending' && part.status !== 'running')) {
+        return
+      }
+      this.upsertToolPart(message, {
+        toolCallId,
+        name: part.name,
+        kind2: part.kind2,
+        status: 'unknown',
+        requiresAction: false
+      }, false)
+      deriveProjections(message)
+    },
+
+    /**
+     * `stillHere=false` 的出口：轮次已不在场（新轮 / 换会话）时把本段中性收口，避免永久 running。
+     *
+     * <p>**同一 run 的宿主仍是本轮宿主时不动作** —— 那是重挂/重放在同一轮里接管，段的终态由
+     * 帧写点给出（此处收成 unknown 反而会盖掉刚重建出来的真实结局）。
+     */
+    settleAbandonedToolPart(message: ChatMessage, toolCallId: string): void {
+      if (activeRoundHostId !== null && activeRoundHostId === message.id) {
+        return
+      }
+      this.settleUnfinishedToolPart(message, toolCallId)
+    },
+
+    /**
      * 执行前端工具并把结果回灌（三级可用性兜底 + **统一超时预算**在 utils/frontend-tools.ts）。
      *
      * 预算由帧里的**服务端**挂起上限折算（`timeoutSeconds`，默认 120s → 60s = 上限 −
@@ -9744,6 +10077,32 @@ export const useAiStore = defineStore('ai', {
       if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return
       }
+      // #2（2026-10-31 阻断）：同一 toolCallId 的执行去重。P03 起回灌受理前段仍是 running，
+      // 重复投递 / 重连重放的请求帧不再被段状态挡住 —— 无占位就会再跑一遍（二次浏览器副作用，
+      // `confirm_step` 会真的二次推进）。占位范围 = 执行 → 回灌受理结束；`finally` 释放。
+      if (frontendToolsInFlight.has(frame.toolCallId)) {
+        return
+      }
+      frontendToolsInFlight.add(frame.toolCallId)
+      try {
+        await this.runFrontendToolAttempt(message, frame, round)
+      } finally {
+        frontendToolsInFlight.delete(frame.toolCallId)
+      }
+    },
+
+    /**
+     * `runFrontendTool` 的执行体（去重占位在调用方，`finally` 保证释放）。
+     *
+     * <p>顺序（P03 + #3 + #4）：落 running → 执行 → 回灌受理 → **仍在同轮**才落终态；
+     * 409 DUPLICATE 时后端权威终态已由 {@link applyFrontendToolTerminal} 纠正，本地这次
+     * （重复执行）的 outcome 不得覆盖；轮次已不在场则中性收敛，不留永久 running。
+     */
+    async runFrontendToolAttempt(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
+      round: RoundGuard
+    ): Promise<void> {
       // AI 可视可操作专项：单轮配额与"停止后零执行"按轮次 token 归零（同 runId 不重置）
       beginUiTurn(frame.runId ?? this.activeRunId ?? 'local')
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
@@ -9775,18 +10134,32 @@ export const useAiStore = defineStore('ai', {
       }
       const stillHere = (): boolean => stillSameRound(round, this.sessionId, this.activeRunId ?? null)
       if (execution === null) {
-        // 异常收敛：段落 failed（不留 running）。停止/换轮后**不覆盖** —— 停止已把段收成
-        // cancelled，那是用户可见的既有决策，晚到的异常结论不该把它翻成失败。
+        // P03/F4：异常同样要**回灌失败事实** —— 只落本地 failed 的话，后端的挂起条目只能等满
+        // 120s 前端工具上限（`FRONTEND_TIMEOUT`），这一轮也挂在那不动。回灌用 cancelled=false +
+        // outcome='failed'（这是"确定性失败"，不是用户取消，故不写 cancelled）。
+        // 停止/换轮后**不覆盖** —— 停止已把段收成 cancelled，晚到的异常结论不该把它翻成失败。
+        if (stillHere()) {
+          await this.submitFrontendToolResult(
+            frame.toolCallId,
+            EXECUTOR_CRASH_TEXT,
+            'frontend-executor',
+            false,
+            undefined,
+            'failed'
+          )
+        }
         if (stillHere()) {
           this.upsertToolPart(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
             kind2: 'FRONTEND',
             status: 'failed',
-            result: '前端工具执行异常，本次未完成。请提示用户手动重试',
+            result: EXECUTOR_CRASH_TEXT,
             requiresAction: false
           })
           deriveProjections(message)
+        } else {
+          this.settleAbandonedToolPart(message, frame.toolCallId)
         }
         return
       }
@@ -9798,6 +10171,8 @@ export const useAiStore = defineStore('ai', {
       // 本轮正常结束（done）后晚到的执行器同属本轮：段落真实结局、回灌交给 409 幂等收敛，
       // 不把卡留在 running 假态（后端此时已超时/取消，重复回灌只会被幂等拒绝）。
       if (!stillHere()) {
+        // #4：轮次已不在场 ⇒ 中性收敛（不留永久 running；不误判 failed）
+        this.settleAbandonedToolPart(message, frame.toolCallId)
         return
       }
       // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/
@@ -9807,7 +10182,7 @@ export const useAiStore = defineStore('ai', {
       // 这段里用户仍可点「停止」，而 `cancelRoundParts` 只收 pending/running 段 —— 先把段写成
       // succeeded 就等于把这个窗口关掉（本轮已停、卡却仍写「已成功」）。顺序反过来之后：
       // 窗口内段仍是 running（可被停止取消），后端受理后**仍在同轮**才落终态。
-      await this.submitFrontendToolResult(
+      const submitted = await this.submitFrontendToolResult(
         frame.toolCallId,
         execution.result,
         'frontend-executor',
@@ -9819,6 +10194,34 @@ export const useAiStore = defineStore('ai', {
       )
       // 回灌窗口内可能已停止/换轮：本地已收口的 cancelled（或新轮现场）不得被旧结局覆盖。
       if (!stillHere()) {
+        this.settleAbandonedToolPart(message, frame.toolCallId)
+        return
+      }
+      if (submitted.duplicate) {
+        // #3：409 DUPLICATE = 该 toolCallId 已有裁决（第一次执行真的成功了 / 他端先提交）。
+        // 后端权威终态已由 `applyFrontendToolTerminal` 就地纠正（failed/unknown/pending/running
+        // → mapped）—— 本地这次重复执行的 outcome **不得覆盖它**（否则"已成功"被写成"失败"）。
+        // mapped 缺失（旧后端不带 status）时退到中性收敛，绝不把 running 留成永久卡。
+        this.settleUnfinishedToolPart(message, frame.toolCallId)
+        return
+      }
+      if (!submitted.ok) {
+        // F6：回灌没被受理（非 duplicate：网络/服务端错误、缺 runId、格式化被拒…）⇒ 本地这次执行
+        // 的结论**不能自称终态**（后端根本没收下）。保留后端规范文本（`message` / `rejected`），
+        // 段收成中性 `unknown`（结局未知）；已终态的段（帧已给结论）保持原值。
+        const detail = submitted.rejected ?? submitted.message ?? ''
+        const part = findToolPart(message, frame.toolCallId)
+        if (!part || !isFrameDecidedPendingStatus(part.status)) {
+          this.upsertToolPart(message, {
+            toolCallId: frame.toolCallId,
+            name: frame.name,
+            kind2: 'FRONTEND',
+            status: 'unknown',
+            ...(detail !== '' ? { reason: detail } : {}),
+            requiresAction: false
+          }, false)
+          deriveProjections(message)
+        }
         return
       }
       // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生

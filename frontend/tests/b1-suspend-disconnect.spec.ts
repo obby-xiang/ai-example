@@ -577,7 +577,9 @@ describe('B1 收口修 C-1：慢前端工具晚于挂起收流返回仍回灌', 
     await flushPromises()
 
     expect(api.frontendToolResult).not.toHaveBeenCalled()
-    expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'running' }) // 旧段落不写终态
+    // 旧轮不写终态（不回灌、不谎报成功/失败）；但也不能永久停在 running —— #4（2026-10-31）
+    // 起中性收敛为 unknown（结局未知）：它是"这一轮已经不在了"，不是"执行失败"。
+    expect(toolPartOf(store, 'f1')).toMatchObject({ status: 'unknown' })
   }, 20_000)
 
   it('挂起态 stop() 后旧工具结局仍丢弃（不向已取消轮回灌）', async () => {
