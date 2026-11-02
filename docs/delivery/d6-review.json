@@ -245,6 +245,13 @@
       "reason": "已同步停止闭环新增的clientRequestId取消端点、ai:creq会话级身份隔离键、单键Cluster边界及重复请求接回契约",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:04bae2cc6da49e5c541a05516e7326e4515aac88ee9f1e0e54ee147371e56648",
+      "status": "not-affected",
+      "reason": "本批仅让继续操作与普通发送一致展示用户消息并修正现行规格文档，D6迁移接口、存储键及跨实例契约均未变化",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

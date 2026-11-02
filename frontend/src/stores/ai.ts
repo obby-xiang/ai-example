@@ -151,7 +151,7 @@ export interface QueuedGenerativeForm {
 export type AiSendOutcome = 'ok' | 'error' | 'interrupted' | 'cancelled' | 'not-sent'
 export interface AiSendResult {
   outcome: AiSendOutcome
-  /** 本轮新记录的用户消息 id；`skipUserRecord` / 早退为 null。 */
+  /** 本轮新记录的用户消息 id；发送前早退时为 null。 */
   userMessageId: string | null
 }
 
@@ -5092,7 +5092,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批次2 / AR-05：**重试本轮 = 仅模型步重跑**（真实后端窄入口，不本地截断、不追加用户消息）。
      *
-     * <p>与旧假实现的区别：旧路径在"store 没有 action"时把本地消息截断后 `send(skipUserRecord)`，
+     * <p>与旧假实现的区别：旧路径在"store 没有 action"时把本地消息截断后重新发送，
      * 那是**重发请求**（会重建上下文、可能重放工具），不是"从固定历史重跑模型步"。这里只调
      * `POST /api/ai/runs/{runId}/retry-model-step`；202 受理后用**既有 events 通道**重挂
      * （`lastSeq` = 本端已见的最大帧序号），由同一套帧处理续写这条助手消息。
@@ -5586,12 +5586,10 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。 */
-    /**
-     * @param resend.skipUserRecord append-drive 通道（「继续」）：调用方已就地续写同一轮，
-     *   send 不得再追加新用户消息 —— 否则同一提问会重复两次、屏上多出一条伪用户气泡。
+     * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。
+     * 第二参数仅保留旧调用签名；所有发送都必须记录并展示用户消息，不再支持跳过。
      */
-    async send(text: string, resend: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
+    async send(text: string, _legacyOptions: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
       const content = text.trim()
       if (!content) {
         // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
@@ -5625,8 +5623,8 @@ export const useAiStore = defineStore('ai', {
       this.restoredPendingQueue = []
       // AR-07：同批排队的表单同理 —— 换轮即整队作废（连同各自草稿）
       this.clearQueuedForms()
-      const userMessage = resend.skipUserRecord ? null : this.recordUserMessage(content)
-      const userMessageId = userMessage?.id ?? null
+      const userMessage = this.recordUserMessage(content)
+      const userMessageId = userMessage.id
       const assistant = this.appendAssistantMessage()
       this.loading = true
       this.stopped = false

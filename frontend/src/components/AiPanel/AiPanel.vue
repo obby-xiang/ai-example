@@ -964,10 +964,10 @@
               {{ t('ai.round.truncated') }}
               <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
-            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有正文/思考的失败轮，append-drive）/
+            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有正文/思考的失败轮，正常发送并显示一条「继续」用户消息）/
                  重试本轮（零正文零思考且归属可证明的失败轮，含仅工具已结算的轮，走仅模型步重跑窄入口）/
                  普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。
-                 前两者都不追加伪用户气泡；同轮「继续 / 重试本轮」互斥。 -->
+                 同轮「继续 / 重试本轮」互斥。 -->
             <button
               v-if="showContinue(m)"
               type="button"
@@ -1536,7 +1536,7 @@ const stageBar = computed<{ mode: 'compacting' | 'preparing'; startedAtMs: numbe
  *     runId 不进任何用户可见文本；没有 `busyRun` 就不出入口（不拿 `activeRunId` 猜）。</li>
  * <li>unconfirmed：`message.unconfirmed=true`，或最后一轮的 `lastRoundOutcome='unconfirmed'`；
  *     重新载入走 `retryLoadHistory()`。</li>
- * <li>三动作（AR-09 / AR-05 / AR-17）：继续 = `send(..., { skipUserRecord: true })`（保持既有口径）；
+ * <li>三动作（AR-09 / AR-05 / AR-17）：继续 = 正常 `send('继续')`，立即显示用户消息并进入历史；
  *     重试本轮 = 「仅模型步重跑」真实 store action（`retryModelStep` → 后端窄入口 → 既有 events 重挂；
  *     只认 `message.runId` 归属，无证据不出入口）；
  *     普通 regenerate = **本批不做、入口整体隐藏**（无禁用 / unsupported 死 UI，也不本地截断重发）。</li>
@@ -1656,16 +1656,16 @@ function hasTextOrReasoning(message: ChatMessage): boolean {
   )
 }
 
-/** 继续（append-drive）：追加驱动，不删历史、**不追加用户气泡**（保持既有 skipUserRecord 口径）。 */
+/** 继续：以用户身份正常发送「继续」，与手动输入一样立即显示并进入对话历史。 */
 function continueTurn(_message: ChatMessage): void {
   clearStreamMdCache()
-  void ai.send(t('ai.panel.continue'), { skipUserRecord: true })
+  void ai.send(t('ai.panel.continue'))
 }
 
 /**
  * 重试本轮（retry-turn）：走 store 的**真实 action**（仅模型步重跑窄入口）。
  *
- * <p>批次2 修：旧实现是"store 没有 action 时本地截断 + `send(skipUserRecord)` —— 那是**重发请求**，
+ * <p>批次2 修：旧实现是"store 没有 action 时本地截断后重新发送" —— 那是**重发请求**，
  * 不是仅模型步重跑（会重建上下文、可能重放工具），属于危险假实现。这里不存在任何本地回退：
  * 后端不允许（非 FAILED / 有半截 / 待决未清）就由 store 按 `failedCheck` 显示对应状态。
  */
@@ -4307,7 +4307,7 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
 
 /**
  * AR-09 / AR-17：动作语义分离后的显示判据。
- * - 继续（append-drive）：**有正文/思考**的失败轮才出（续写/追加驱动，不删历史、不加用户气泡）；
+ * - 继续：**有正文/思考**的失败轮才出（正常发送一条用户可见的「继续」，不删历史）；
  * - 重试本轮（retry-turn）：**零正文零思考 + 归属可证明**的失败轮才出（工具已结算但没写出文字的
  *   轮次也归此类 —— 无半截内容可续，只能仅模型步重跑；替换本轮、不加用户气泡）；
  * - 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
