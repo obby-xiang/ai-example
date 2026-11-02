@@ -17,8 +17,6 @@ import type { FormSpec } from '@/types/form-schema'
 import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
-import zhCN from '@/locales/zh-CN.json'
-import enUS from '@/locales/en-US.json'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 
 const api = vi.hoisted(() => ({
@@ -1553,7 +1551,7 @@ describe('R-157：操作行外置 + role 过滤 + 编辑回填 + 发送滚底 + 
     expect(wrapper.find('[data-testid="edit-msg-u-1"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="retry-msg-u-1"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="edit-msg-a-1"]').exists()).toBe(false)
-    // R-158 #4：用户直裁去除重试 —— AI 回复操作行仅剩复制（skipUserRecord 通道在 store 层保留）
+    // R-158 #4：用户直裁去除重试 —— AI 回复操作行仅剩复制（发送通道只有普通 send）
     expect(wrapper.find('[data-testid="retry-msg-a-1"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="copy-msg-a-1"]').exists()).toBe(true)
     // 图标化：复制按钮内是 SVG，无「复制」文字按钮
@@ -3515,7 +3513,12 @@ describe('R-163：Markdown 正文链路 / 白名单 / 工具摘要 / 赞踩 / �
     const wrapper = mount(AiPanel, { global: { stubs } })
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    // 取消不是可恢复失败（停止是用户终态决定）⇒ 仍然不出
     store.lastRoundOutcome = 'cancelled'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    // 断流才是可恢复失败：只出在末条助手消息上
+    store.lastRoundOutcome = 'interrupted'
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="msg-ops-a-new"]').find('[data-testid="continue-round"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="msg-ops-a-old"]').find('[data-testid="continue-round"]').exists()).toBe(false)
@@ -4454,10 +4457,10 @@ describe('R-165 S3a：输入区 v7 结构 + GF 表单卡 v7 结构 + R6/R7/R11 �
     await flushPromises()
     expect((box.element as HTMLTextAreaElement).value).toBe('用户新输入')
 
-    // 未把失败的 userMessageId 设为锚点：下一次发送仍按新消息走（不带 skipUserRecord）
+    // 未把失败的 userMessageId 设为锚点：下一次发送仍按新消息走（普通一次调用，无附加参数）
     await wrapper.find('[data-testid="send-btn"]').trigger('click')
     await flushPromises()
-    expect(sendSpy.mock.calls[1]?.[1]?.skipUserRecord).not.toBe(true)
+    expect(sendSpy.mock.calls[1]).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -5450,7 +5453,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(buildErrorCard('AI_REDIS_UNAVAILABLE', 'redis down')).toBeNull()
     // 三变体文案（demo 逐字）+ 通用红卡无动作钮
     expect(buildErrorCard('429', '配额用尽')).toMatchObject({
-      variant: 'quota', title: '请求超出配额', guide: '引导：稍后重试；若在批量任务里，先降低并发再重发。', action: '稍后重试', detail: '配额用尽'
+      variant: 'quota', title: '请求超出配额', guide: '可以点击「继续」重新发起本轮。', action: '继续', detail: '配额用尽'
     })
     expect(buildErrorCard('content_filter', '被拦截')).toMatchObject({
       variant: 'filter', title: '内容被安全策略拦截', action: '改写后重发', detail: '被拦截'
@@ -5637,7 +5640,7 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     expect(cardOf('q').text()).toContain('!')
     expect(cardOf('q').text()).toContain('请求超出配额')
     expect(cardOf('q').text()).toContain('上游 429')
-    expect(cardOf('q').text()).toContain('引导：稍后重试')
+    expect(cardOf('q').text()).toContain('可以点击「继续」重新发起本轮')
     expect(cardOf('f').text()).toContain('⊘')
     expect(cardOf('f').text()).toContain('改写后重发')
     expect(cardOf('c').text()).toContain('i')
@@ -5663,9 +5666,13 @@ describe('R-165 S5c：错误卡族（三变体分派 + 内联位置 + 动作钮�
     const wrapper = await mountPanel([ask, mk('f2', 'content_filter', '被拦截'), mk('c2', 'context_length_exceeded', '超限'), mk('q2', '429', '配额用尽')])
     const composer = wrapper.find('[data-testid="composer-input"]').element as HTMLTextAreaElement
     const focusSpy = vi.spyOn(composer, 'focus')
-    // AR-17：有产出的普通已完成轮没有真实 regenerate 入口 ⇒ quota 卡的「稍后重试」直接隐藏，
-    // 不做禁用 / unsupported 假动作，也不本地截断后 send。
-    expect(wrapper.find('[data-testid="error-card-action-q2"]').exists()).toBe(false)
+    // 统一继续：末条失败消息的 quota 卡只出「继续」（不是 regenerate、不本地截断后 send）；
+    // 该入口与元信息行互斥，消息行不重复。
+    const quotaAction = wrapper.find('[data-testid="error-card-action-q2"]')
+    expect(quotaAction.exists()).toBe(true)
+    expect(quotaAction.text()).toContain('继续')
+    expect(wrapper.find('[data-testid="regenerate-msg-q2"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(0)
     await wrapper.find('[data-testid="error-card-action-f2"]').trigger('click')
     expect(focusSpy).toHaveBeenCalled()
     await wrapper.find('[data-testid="error-card-action-c2"]').trigger('click')
@@ -6068,13 +6075,6 @@ describe('问题4 composer v2 阶段二：store send outcome 映射', () => {
     expect(result.userMessageId).toBe(store.messages[0]?.id)
   })
 
-  it('skipUserRecord（「继续」append-drive 通道）：不记录用户消息，userMessageId=null', async () => {
-    const store = useAiStore()
-    api.chat.mockResolvedValue(undefined)
-    const result = await store.send('继续', { skipUserRecord: true })
-    expect(result).toEqual({ outcome: 'ok', userMessageId: null })
-    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(0)
-  })
 })
 
 /**
@@ -6644,30 +6644,6 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     const diagnostic = wrapper.find('[data-testid="ro-diagnostics-stale1"]')
     expect(diagnostic.exists()).toBe(true)
     expect(wrapper.find('[data-testid="ro-diagnostics-text-stale1"]').text()).toContain('runId/toolCallId')
-    wrapper.unmount()
-  })
-
-  it('AR-14：复制页签通知不在 AiPanel 展示，locale 仅为旧镜像兼容保留', async () => {
-    expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('新会话')
-    expect((enUS as { ai: { notice: Record<string, string> } }).ai.notice.copiedNewTab).toContain('new conversation')
-    expect((zhCN as { ai: { notice: Record<string, string> } }).ai.notice.staleConfirmCard).toContain('已失效')
-    expect((enUS as { ai: { notice: Record<string, string> } }).ai.notice.staleConfirmCard).toContain('no longer available')
-
-    const store = useAiStore()
-    store.messages = []
-    store.historyLoaded = true
-    store.noticeCode = 'ai.notice.copiedNewTab'
-    store.noticeArgs = {}
-    store.notice = '已在新页签开始新会话；原页签的对话不受影响。'
-    store.noticeSeverity = 'info'
-    api.history.mockResolvedValue({ sessionId: 's-6a-copy', count: 0, messages: [] })
-    const wrapper = await mountPanel([])
-
-    const bar = wrapper.find('[data-testid="notice-bar"]')
-    expect(bar.exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('已在新页签开始新会话')
-    // 不展示通知，也不提供接回原会话入口。
-    expect(wrapper.find('[data-testid="return-active-run"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

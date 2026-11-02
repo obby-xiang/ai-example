@@ -1467,8 +1467,8 @@ public class SseChatEmitter {
 	 * 正是同一判据同时拒绝了两者）。判据只能是归档本身。
 	 *
 	 * <p><b>口径 = 整个 runId 的归档，不区分驱动代次</b>：取消收尾要回答的是"这一轮有没有任何终帧"
-	 * （有 ⇒ 不再补取消终帧）。失败出口<b>不能</b>用它 —— 同一 runId 会被驱动多次
-	 * （{@code retry-model-step}），见 {@link #terminalFrameArchivedSinceDriveStart()}。
+	 * （有 ⇒ 不再补取消终帧）。失败出口<b>不能</b>用它 —— 同一 runId 会被续跑/重挂驱动多次，
+	 * 见 {@link #terminalFrameArchivedSinceDriveStart()}。
 	 *
 	 * @return {@code TRUE} 已落档 / {@code FALSE} 确认没有 / {@code null} 读不出来（读降级或未装配
 	 *         帧存储）。调用方<b>不得</b>把 {@code null} 折叠成任何一侧：取消收尾按"继续收尾"处理，
@@ -1500,10 +1500,10 @@ public class SseChatEmitter {
 	 * 标记"<b>一次驱动</b>从这里开始"：记下此刻归档里<b>已落档</b>的最大序号作为本次驱动的下界。
 	 *
 	 * <h2>为什么归档判据必须按驱动分段</h2>
-	 * 归档是 per-runId 的，而同一 runId 会被驱动<b>多次</b>：{@code retry-model-step} 接受 FAILED 轮、
-	 * 改回 RUNNING 再驱动一次，归档<b>不清理</b>也不追加代次。只问"归档里有没有任何终帧"会把
+	 * 归档是 per-runId 的，而同一 runId 会被续跑/重挂入口驱动<b>多次</b>：失败轮可能被改回 RUNNING
+	 * 再驱动一次，归档<b>不清理</b>也不追加代次。只问"归档里有没有任何终帧"会把
 	 * <b>上一次</b>驱动的 error 当成"本次已收尾" —— 本次失败的 {@code textEnd}/{@code error} 被整条吞掉
-	 * （用户看不到"重试也失败了"，且已落档的 delta 段没有 {@code message_end}）。
+	 * （用户看不到本次失败，且已落档的 delta 段没有 {@code message_end}）。
 	 * 于是判据改成"<b>seq &gt; 本驱动下界</b>的 done/error"：上一次驱动的终帧天然落在下界之内，
 	 * 本次驱动自己落的终帧仍会被认出来（同一驱动的重复发射照旧被拦）。
 	 *
@@ -1517,7 +1517,7 @@ public class SseChatEmitter {
 	 */
 	public void beginDrive() {
 		// F1：本实例成为这一轮的驱动方 ⇒ 真实心跳由 TurnKeepalive 发；停掉（并禁止再起）本地保活。
-		// 同时复位终帧标记：同一 runId 会被驱动多次（retry-model-step），上一次驱动的 done/error 不代表本次。
+		// 同时复位终帧标记：同一 runId 会被续跑/重挂驱动多次，上一次驱动的 done/error 不代表本次。
 		// 与离线终帧宽限的"复查+合成"同锁：driveGeneration 的变化对宽限任务是原子的。
 		synchronized (this.emitLock) {
 			this.drivingHere.set(true);
@@ -2905,6 +2905,8 @@ public class SseChatEmitter {
 		if (data != null) {
 			frame.putAll(data);
 		}
+		// B3：事件归属必须由发帧侧显式给出（不靠前端 activeRunId 猜；跨实例/重挂时后者可能为空）
+		frame.put("runId", this.runId);
 		emit(frame);
 	}
 

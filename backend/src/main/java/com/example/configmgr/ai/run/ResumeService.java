@@ -11,6 +11,7 @@ import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.context.SystemMessages;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
@@ -148,22 +149,6 @@ public class ResumeService {
 	 */
 	public static final String LEASE_REARMED_KEY = "leaseRearmed";
 
-	/**
-	 * 仅模型步重跑被前置条件拒绝的用户面短句（409 响应体的 {@code message}）。
-	 *
-	 * <p>与 {@link #PROVIDER_GONE_MESSAGE} 同一形态：<b>一句话说清"为什么不能这么做 + 该怎么做"</b>，
-	 * 精确到哪一条没满足由响应体的 {@code failedCheck} 承载（前端按枚举出更细的提示）。
-	 * 不新增码表项（{@code messages_*}/{@link com.example.configmgr.common.ErrorCodes#ALL} 的完备性
-	 * 约束由既有契约测试锁定），因此这句中文原文与 en 译文各一份放在本类。
-	 */
-	public static final String RETRY_DENIED_MESSAGE = "本轮不满足「仅模型步重跑」的条件（需已失败、无在途执行、"
-			+ "工具已全部结算且入出参配对、无半截正文或思考、同一模型、同一份固定历史），请新开一轮。";
-
-	/** en 白名单兜底（不裸露内部信息）。 */
-	public static final String RETRY_DENIED_MESSAGE_EN = "This turn does not qualify for a model-step-only retry "
-			+ "(it must be failed, with no execution in flight, all tool calls settled and paired, no partial content "
-			+ "or reasoning, the same model and the same fixed history). Please start a new turn.";
-
 	private final RunStore store;
 
 	private final RunRegistry registry;
@@ -200,6 +185,13 @@ public class ResumeService {
 	 */
 	@Autowired(required = false)
 	private ContextCompactor contextCompactor;
+
+	/**
+	 * 用户展示历史（B2）：续跑是"同会话运行中升级/重启"的另一条入口，必须在压缩/窗口之前
+	 * 用快照历史补一次 baseline，避免 transcript 缺失时刷新只剩本轮。
+	 */
+	@Autowired(required = false)
+	private ConversationTranscriptStore transcript;
 
 	/**
 	 * 模型配置快照（批③ 的 {@code PROVIDER_GONE} 判据）。
@@ -346,17 +338,7 @@ public class ResumeService {
 		 * 由派发方按 {@code app.ai.park.max-dispatch-retries} <b>有界重派发</b>；
 		 * 对 HTTP 面是 409（{@code SESSION_BUSY}，与"会话已有一轮"同一语义）。
 		 */
-		SESSION_BUSY,
-
-		/**
-		 * 批次2 / AR-05：<b>仅模型步重跑</b>的前置条件不满足（七条件里有任一条为假）。
-		 *
-		 * <p>它不是"没找到"也不是"服务不可用"：轮次在、服务在，只是<b>这一轮不允许</b>用窄入口重跑
-		 * （已取消 / 未失败 / 还有待决工具 / 有半截正文或思考 / 工具配对不完整 / 模型身份变了）。
-		 * 对外 409 + 既有稳定码 {@code ILLEGAL_STATE}（"当前状态不允许该操作"，不新增码表项）
-		 * + {@code failedCheck}，前端据此在三种失败形态间选动作（重跑 / 中性未确认视图 / 新开一轮）。
-		 */
-		RETRY_PRECONDITION_FAILED;
+		SESSION_BUSY;
 
 		/**
 		 * 该结局下，<b>自抢租约的调用方</b>是否可以归还租约（<b>归还白名单</b>，默认不还）。
@@ -389,9 +371,7 @@ public class ResumeService {
 					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED
 					|| this == PROVIDER_GONE || this == CANCEL_STATE_UNKNOWN || this == STATE_UNKNOWN
 					// park 批：会话被别的轮占着 ⇒ 本拍没有驱动者，租约还给派发方（重试时再抢）
-					|| this == SESSION_BUSY
-					// 批次2（AR-05）：前置条件不满足 = 本拍没有任何执行者接手这一轮的驱动权 ⇒ 还租
-					|| this == RETRY_PRECONDITION_FAILED;
+					|| this == SESSION_BUSY;
 		}
 
 	}
@@ -680,13 +660,9 @@ public class ResumeService {
 		out.put("ledger", this.store.ledger(runId));
 		out.put("ledgerCounts", this.store.ledgerCounts(runId));
 		out.put("instanceId", this.store.instanceId());
-		// 批次2（AR-05 / AR-09）：**失败现场**与"三种失败形态该给哪个动作"的只读判据。
-		// 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写；前端据此在
-		// "仅模型步重跑 / 中性未确认视图 + 新开一轮"之间选，不需要自己反解历史。
+		// 批次2（AR-01 / AR-09）：**失败现场**只读判据。
+		// 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写。
 		out.put("failureScene", failureScene(snapshot, pendings, history));
-		ModelStepRetryCheck retryCheck = checkModelStepRetry(snapshot, pendings, history, reasoningVisible());
-		out.put("canRetryModelStep", retryCheck.allowed());
-		out.put("retryModelStepDeniedBy", retryCheck.failedCheck());
 		out.put("keys", describeKeys(runId, snapshot));
 		return out;
 	}
@@ -1025,335 +1001,6 @@ public class ResumeService {
 	}
 
 	/**
-	 * <b>仅模型步重跑</b>的窄入口（AR-05 / 批次2 Task 4 Step 5）—— 前端"重试本轮"按钮的后端面。
-	 *
-	 * <h2>它做什么</h2>
-	 * 对一个<b>已失败</b>的轮，只重跑<b>模型步</b>：以快照里<b>固定的那份历史</b>直接再发一次请求
-	 * （{@code driveResumed}），随后按既有终局路径落定（DONE/FAILED/取消）。它<b>不做</b>：
-	 * 不重建工具轮、不重执行任何工具、不追加用户消息、不换模型、不改历史切片（不压缩、不重算记忆窗口、
-	 * 不重建 system）。
-	 *
-	 * <h2>七条前置（全满足才允许）</h2>
-	 * <ol>
-	 * <li>该轮<b>已失败</b>（{@code status=FAILED}）；DONE / CANCELLED / 运行中一律不重跑；</li>
-	 * <li><b>无在途执行</b>：取到本轮续跑权租约（别的实例持有 ⇒ {@code LEASE_HELD_ELSEWHERE}）
-	 *     且进程内互斥为空（{@code IN_PROGRESS}）；</li>
-	 * <li>待决工具<b>全结算</b>（仍有外部 PENDING ⇒ {@code PENDING_UNRESOLVED}，复用既有结局）；</li>
-	 * <li>工具<b>入出参配对完整</b>（history 里的 {@code tool_calls} 与 {@code tool} 响应 id 集合相等）；</li>
-	 * <li><b>无半截正文/半截思考</b>（{@code assistantContent} 为空、无 {@code stopped} 半截、
-	 *     {@code finalText} 为空、快照 metadata 无思考全文）；</li>
-	 * <li><b>同模型</b>：快照的 provider/model 此刻仍可解析成<b>同一个</b>模型（下架 ⇒
-	 *     {@code PROVIDER_GONE}；解析到别的模型 ⇒ 前置失败 {@code MODEL_CHANGED}）；</li>
-	 * <li><b>同固定历史</b>：直接拿 {@link RunSnapshot#getMessageJson()}，不做任何改写。</li>
-	 * </ol>
-	 *
-	 * <h2>为什么不做"失效替换"</h2>
-	 * 有半截正文/思考时（第 5 条不满足）<b>不</b>给自动"把半截换成新结果"的路径 —— 那需要新的帧序
-	 * 协议（旧的半截怎么作废、seq 怎么续、重连怎么对齐），收益远小于风险。此时只给
-	 * <b>中性"状态未确认"视图 + 手动入口</b>（重新载入 / 新开一轮），由前端按 409 的
-	 * {@code failedCheck=PARTIAL_CONTENT} 呈现。
-	 *
-	 * <h2>取消优先（批次2）</h2>
-	 * 入口检查不是原子的：取消可能恰在检查之后、状态写 RUNNING 之前落库。因此状态转换必须走
-	 * {@link RunStore#saveStatusUnlessCancelled(RunSnapshot)}（<b>不是</b>普通 {@code save}）——
-	 * 当前快照已是取消态时这一笔被拒写，本方法返回 {@link Outcome#ALREADY_CANCELLED}
-	 * （{@code retried=false / reason=ALREADY_CANCELLED}）且<b>不交棒线程池</b>。
-	 *
-	 * @return 202（{@code ACCEPTED}）/ 200（已收尾，幂等不动作）/ 409（在途或前置失败）/ 404 / 503
-	 */
-	public ResumeResult retryModelStep(String runId) {
-		return retryModelStep(runId, ErrorBodyFactory.requestLocale());
-	}
-
-	/** 仅模型步重跑（带请求 locale；回答语言与错误文案都按它取）。 */
-	public ResumeResult retryModelStep(String runId, Locale replyLocale) {
-		// 进程内互斥的本地键（身份 + runId）：与续跑同一张表、同一口径。
-		String resumeKey = LocalRunKey.of(runId);
-		LeaseService leases = this.store.leaseService();
-		boolean fresh = false;
-		LeaseService.Lease lease = null;
-		if (leases != null) {
-			LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
-			if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
-						"retried", false, "reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
-			}
-			lease = acquired.lease();
-			fresh = acquired.created();
-		}
-		ResumeResult result;
-		try {
-			result = retryModelStepInternal(runId, resumeKey, lease, replyLocale);
-		}
-		catch (RuntimeException ex) {
-			if (fresh) {
-				this.store.releaseRunLease(runId);
-			}
-			throw ex;
-		}
-		if (fresh) {
-			if (result.outcome() == Outcome.ACCEPTED) {
-				TenantUser identity = RequestContextUtils.currentOrNull();
-				leases.markDriving(lease,
-						() -> this.resuming.containsKey(resumeKey) && snapshotNotTerminal(runId, identity),
-						identity);
-			}
-			else if (result.outcome().releasesLease()) {
-				this.store.releaseRunLease(runId);
-			}
-		}
-		return result;
-	}
-
-	private ResumeResult retryModelStepInternal(String runId, String resumeKey, LeaseService.Lease lease,
-			Locale replyLocale) {
-		if (lease != null) {
-			LeaseService leases = this.store.leaseService();
-			LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
-					: leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
-			if (hold == LeaseService.Hold.LOST) {
-				return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
-						"retried", false, "reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
-			}
-		}
-		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
-			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false, "retried", false,
-					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
-		}
-		boolean handedOff = false;
-		RunIdentityScope.Scope identityScope = null;
-		java.util.concurrent.atomic.AtomicBoolean gateHeld = new java.util.concurrent.atomic.AtomicBoolean();
-		String gateSessionId = null;
-		String gateToken = UUID.randomUUID().toString();
-		try {
-			RunSnapshot snapshot = this.store.get(runId);
-			if (snapshot == null) {
-				return new ResumeResult(Outcome.NOT_FOUND, Map.of("runId", runId, "resumed", false, "retried", false,
-						"reason", "UNKNOWN_RUN", "instanceId", this.store.instanceId()));
-			}
-			// 仅模型步重跑同样是恢复型入口：身份只从本轮记录恢复。
-			identityScope = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId());
-			String sessionId = snapshot.getSessionId();
-			AiTrace.bind(runId, sessionId);
-			AiTrace.markResumeReason(RESUME_MANUAL);
-			Map<String, Object> body = new LinkedHashMap<>();
-			body.put("runId", runId);
-			body.put("sessionId", sessionId);
-			body.put("retried", false);
-			body.put("modelStepOnly", true);
-			body.put("statusBeforeRetry", snapshot.getStatus());
-			body.put("instanceId", this.store.instanceId());
-
-			// 取消优先：取消事实成立 ⇒ 不重跑（沿用既有结局与文案）
-			ResumeResult cancelAtEntry = cancelStateOutcome(runId, body);
-			if (cancelAtEntry != null) {
-				return cancelAtEntry;
-			}
-			List<PendingToolCall> pendings;
-			try {
-				pendings = this.store.pendings(runId);
-			}
-			catch (RuntimeException ex) {
-				log.warn("仅模型步重跑读取待决条目失败 runId={}（按未知拒绝，不驱动）", runId, ex);
-				body.put("reason", "STATE_UNKNOWN");
-				body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-				return new ResumeResult(Outcome.STATE_UNKNOWN, body);
-			}
-			List<Message> fixedHistory = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			// ①②③④⑤⑦：状态/待决/配对/半截/历史形状（②的跨实例面已由租约+verifyHeld 证明）
-			ModelStepRetryCheck check = checkModelStepRetry(snapshot, pendings, fixedHistory, reasoningVisible());
-			if (!check.allowed()) {
-				if ("PENDING_TOOLS".equals(check.failedCheck())) {
-					body.put("reason", "PENDING_UNRESOLVED");
-					body.put("unresolved", pendings.stream()
-						.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-						.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-						.map(PendingToolCall::asMap)
-						.toList());
-					return new ResumeResult(Outcome.PENDING_UNRESOLVED, body);
-				}
-				return retryPreconditionDenied(body, check);
-			}
-			// ⑥ 同模型：此刻仍可解析成<b>同一个</b> provider/模型（下架 ⇒ PROVIDER_GONE）
-			String identityProblem = sameModelProblem(runId, snapshot);
-			if ("GONE".equals(identityProblem)) {
-				return providerGone(runId, snapshot, "该 provider/模型此刻不可用");
-			}
-			if ("UNKNOWN".equals(identityProblem)) {
-				return stateUnknown(runId, snapshot, "同一模型此刻不可确认");
-			}
-			if (identityProblem != null) {
-				return retryPreconditionDenied(body,
-						new ModelStepRetryCheck(false, "MODEL_CHANGED", identityProblem));
-			}
-			// 会话门（与续跑同源：同 sessionId 单值门；park 期间可能被另一轮占着）
-			if (this.sessionGate != null) {
-				SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId, gateToken);
-				if (busy != null && !runId.equals(busy.runId())) {
-					body.put("reason", "SESSION_BUSY");
-					body.put("heldBy", busy.runId());
-					body.put("message", "该会话当前有另一轮在跑；本轮的重跑已拒绝，请稍后再试。");
-					return new ResumeResult(Outcome.SESSION_BUSY, body);
-				}
-				gateHeld.set(true);
-				gateSessionId = sessionId;
-			}
-			LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
-			if (authority != null && authority.readOnly()) {
-				body.put("reason", authority == LeaseService.LeaseAuthority.LOST ? "LEASE_HELD_ELSEWHERE"
-						: "LEASE_UNAVAILABLE");
-				body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-				return new ResumeResult(authority == LeaseService.LeaseAuthority.LOST ? Outcome.LEASE_HELD_ELSEWHERE
-						: Outcome.STATE_UNKNOWN, body);
-			}
-			// ===== 只重跑模型步：固定历史原样交给 driveResumed（不压缩、不重算窗口、不重建 system）=====
-			// 交棒前与正常续跑同口径：按任务权威值同步 type/step/status，重算槽位并重写工作区段 ——
-			// 挂起/失败期用户手动改的步骤不产生任何"刷新类工具结算"，这个入口也没有客户端 context 可补。
-			final AiContext handoffContext = syncAuthorityForHandoff(runId,
-					AiContext.fromMap(snapshot.getContext()), fixedHistory);
-			final List<Message> handoffHistory = rewriteWorkspaceState(new ArrayList<>(fixedHistory),
-					handoffContext, runId);
-			// 状态转换必须走取消优先的原子守卫（不能用普通 save）：入口的 cancelStateOutcome 与本笔
-			// 记账之间没有原子性 —— 取消恰在这段窗口落库时，普通 save 会把 CANCELLED 改回 RUNNING，
-			// 随后还会交棒线程池把一条"已被用户停止"的轮重新驱动起来（前端也会重挂到它上面）。
-			// saveStatusUnlessCancelled 把"这一笔有没有落库"变成可分支的事实：false ⇒ 取消已先到，
-			// 返回取消语义并<b>不</b>驱动。
-			snapshot.setStatus(RunSnapshot.RUNNING);
-			snapshot.setContext(handoffContext.toMap());
-			if (!handoffHistory.equals(fixedHistory)) {
-				// 工作区段已按权威值重写：与上下文同一笔落库，避免"模型看到新的、快照还是旧的"
-				snapshot.setMessageJson(this.codec.serializeAll(handoffHistory));
-			}
-			snapshot.setAssistantContent(null);
-			snapshot.setInFlightToolCalls(new ArrayList<>());
-			snapshot.setFinalText(null);
-			snapshot.setError(null);
-			snapshot.getResumedBy().add(this.store.instanceId());
-			if (!this.store.saveStatusUnlessCancelled(snapshot)) {
-				log.info("仅模型步重跑的状态转换被写门拒绝 runId={}（复核取消态/续跑权后返回 typed 结局）", runId);
-				return modelStepStatusWriteRefused(runId, body);
-			}
-			// 交棒前再看一次取消事实：状态写成功 ≠ 取消没发生（取消可能恰好落在"写 RUNNING"之后）。
-			// 取消已成立 ⇒ 返回取消语义、绝不交棒驱动（窗口更窄，但不声称是分布式事务；
-			// 交棒之后的取消由驱动侧逐条 cancelStateOutcome 与 RunStore 的状态守卫兜住）。
-			ResumeResult cancelBeforeHandoff = cancelStateOutcome(runId, body);
-			if (cancelBeforeHandoff != null) {
-				return cancelBeforeHandoff;
-			}
-
-			body.put("retried", true);
-			body.put("resumed", true);
-			body.put("reason", "MODEL_STEP_RETRY_ACCEPTED");
-			body.put("retryOfStatus", RunSnapshot.FAILED);
-			body.put("reusedToolLedger", true);
-			body.put("appendedUserMessages", 0);
-			body.put("promptMessageCount", fixedHistory.size());
-			body.put("promptRoles",
-					fixedHistory.stream().map(message -> message.getMessageType().name()).toList());
-			body.put("resumedBy", this.store.instanceId());
-
-			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
-			String sessionForTask = sessionId;
-			try {
-				this.suspendExecutor.execute(() -> withRunIdentity(snapshot, () -> {
-					if (replyLocale == null) {
-						LocaleContextHolder.resetLocaleContext();
-					}
-					else {
-						LocaleContextHolder.setLocale(replyLocale);
-					}
-					try {
-						if (snapshot.getProviderId() == null) {
-							this.chatService.driveResumed(runId, sessionForTask, handoffContext, handoffHistory, out);
-						}
-						else {
-							this.chatService.driveResumed(runId, sessionForTask, handoffContext, handoffHistory,
-									snapshot.getProviderId(), snapshot.getModelId(), out);
-						}
-					}
-					catch (Exception ex) {
-						log.error("仅模型步重跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
-						// N2：失败终态与失败终帧由同一个写口在监视器内完成 —— 取消已先到时两者都不发。
-						// 本批：发 error 之前先问归档有没有终帧（另一驱动方/取消收尾已落终帧时不得再补一条）。
-						markDriveFailure(snapshot, ex, () -> {
-							if (out != null) {
-								emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED, resumeFailedMessage());
-							}
-						});
-					}
-					finally {
-						LocaleContextHolder.resetLocaleContext();
-						this.resuming.remove(resumeKey);
-						if (this.registry != null) {
-							this.registry.close(runId);
-						}
-						if (this.sessionGate != null && gateHeld.get()) {
-							this.sessionGate.release(sessionForTask, runId, gateToken);
-							gateHeld.set(false);
-						}
-					}
-				}));
-				handedOff = true;
-			}
-			catch (RejectedExecutionException ex) {
-				body.put("retried", false);
-				body.put("resumed", false);
-				body.put("reason", "SUSPEND_POOL_SATURATED");
-				snapshot.setStatus(RunSnapshot.SUSPENDED);
-				// 同一取消守卫：池饱和落 SUSPENDED 也不得把并发取消翻案（false ⇒ 复核后给 typed 结局，
-				// 不把"已取消"报成"池满可重试"——那会让用户反复点一个不该再跑的入口）。
-				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
-					return modelStepStatusWriteRefused(runId, body);
-				}
-				return new ResumeResult(Outcome.POOL_SATURATED, body);
-			}
-			return new ResumeResult(Outcome.ACCEPTED, body);
-		}
-		finally {
-			if (!handedOff) {
-				this.resuming.remove(resumeKey);
-			}
-			if (!handedOff && this.sessionGate != null && gateHeld.getAndSet(false) && gateSessionId != null) {
-				this.sessionGate.release(gateSessionId, runId, gateToken);
-			}
-			AiTrace.clear();
-			if (identityScope != null) {
-				identityScope.close();
-			}
-		}
-	}
-
-	/**
-	 * 仅模型步重跑的<b>状态写被拒</b>后的 typed 结局：区分"取消已先到"与"续跑权已丢/不可确认"。
-	 *
-	 * <p>为什么必须再读一次：{@link RunStore#saveStatusUnlessCancelled} 的 {@code false} 同时覆盖
-	 * 取消守卫与只读写门（丢租 / 设施不可用 / fence 已被接管）—— 把后者也报成"已取消"会误导用户
-	 * 以为是自己停止的轮。取消 ⇒ {@code ALREADY_CANCELLED}（200）；否则按续跑权/状态未知处理
-	 * （409/503），两者都不驱动。
-	 */
-	private ResumeResult modelStepStatusWriteRefused(String runId, Map<String, Object> body) {
-		body.put("retried", false);
-		body.put("resumed", false);
-		RunSnapshot latest;
-		try {
-			latest = this.store.get(runId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("仅模型步重跑：状态写被拒后复核快照失败 runId={}（按状态未知收尾，不驱动）：{}", runId,
-					ex.getMessage());
-			body.put("reason", "STATE_UNKNOWN");
-			body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-			return new ResumeResult(Outcome.STATE_UNKNOWN, body);
-		}
-		if (latest != null && (RunSnapshot.CANCELLED.equals(latest.getStatus()) || latest.isCancelled())) {
-			body.put("reason", "ALREADY_CANCELLED");
-			return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
-		}
-		body.put("reason", "LEASE_HELD_ELSEWHERE");
-		return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, body);
-	}
-
-	/**
 	 * 续跑的<b>状态写被拒</b>后的 typed 结局（N4）：区分"取消已先到"与"续跑权已丢/不可确认"。
 	 *
 	 * <p>为什么必须再读一次：{@link RunStore#saveStatusUnlessCancelled} 的 {@code false} 同时覆盖取消守卫
@@ -1370,112 +1017,6 @@ public class ResumeService {
 		body.put("reason", "STATE_UNKNOWN");
 		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
 		return new ResumeResult(Outcome.STATE_UNKNOWN, body);
-	}
-
-	/** 前置失败的 typed 结局（对外 409 + 稳定码 + 具体是哪一条没满足）。 */
-	private ResumeResult retryPreconditionDenied(Map<String, Object> body, ModelStepRetryCheck check) {
-		body.put("resumed", false);
-		body.put("retried", false);
-		body.put("reason", "RETRY_PRECONDITION_FAILED");
-		// 码用既有登记码（ILLEGAL_STATE = "当前状态不允许该操作"）：不新增码表项，
-		// 前端镜像与 messages_* 的完备性约束因此不受影响；精确原因走 failedCheck。
-		body.put("code", ErrorCodes.ILLEGAL_STATE);
-		body.put("failedCheck", check.failedCheck());
-		body.put("message", retryDeniedMessage());
-		log.info("仅模型步重跑被前置条件拒绝 runId={} failedCheck={}（{}）", body.get("runId"), check.failedCheck(),
-				check.reason());
-		return new ResumeResult(Outcome.RETRY_PRECONDITION_FAILED, body);
-	}
-
-	/** 用户面短句（zh 原文 / en 译文各自一份，与 {@code PROVIDER_GONE_MESSAGE} 同形，不入 messages 键表）。 */
-	private static String retryDeniedMessage() {
-		return ReplyLanguage.current().english() ? RETRY_DENIED_MESSAGE_EN : RETRY_DENIED_MESSAGE;
-	}
-
-	/**
-	 * 仅模型步重跑的<b>纯判定</b>（七条件里可在无副作用前提下静态判定的五条）—— 供入口与
-	 * {@link #describe(String)}（{@code canRetryModelStep}）共用，也便于单测直接覆盖。
-	 *
-	 * <p>三参重载 = 兼容旧调用口径：思考按"用户可见"（最保守）处理。
-	 *
-	 * @param snapshot 当前快照（非 null）
-	 * @param pendings 待决条目（强一致读口的结果）
-	 * @param history  快照历史（原样）
-	 */
-	public static ModelStepRetryCheck checkModelStepRetry(RunSnapshot snapshot, List<PendingToolCall> pendings,
-			List<Message> history) {
-		return checkModelStepRetry(snapshot, pendings, history, true);
-	}
-
-	/**
-	 * 仅模型步重跑的纯判定（<b>思考展示口径显式化</b>）。
-	 *
-	 * @param reasoningVisible {@code true} = 这一轮的思考已经以 {@code reasoning} 帧给用户看过
-	 *                         （半截思考因此不可被静默替换）；{@code false} = 隐藏思考从未上屏，
-	 *                         它不构成"用户可见的半截产出"，不阻断重跑
-	 */
-	public static ModelStepRetryCheck checkModelStepRetry(RunSnapshot snapshot, List<PendingToolCall> pendings,
-			List<Message> history, boolean reasoningVisible) {
-		if (snapshot == null) {
-			return new ModelStepRetryCheck(false, "NOT_FAILED", "轮次不存在");
-		}
-		String status = snapshot.getStatus();
-		if (RunSnapshot.CANCELLED.equals(status) || snapshot.isCancelled()) {
-			return new ModelStepRetryCheck(false, "CANCELLED", "该轮已取消：取消优先，不重跑");
-		}
-		if (!RunSnapshot.FAILED.equals(status)) {
-			return new ModelStepRetryCheck(false, "NOT_FAILED", "只有已失败的轮才允许仅模型步重跑（当前 " + status + "）");
-		}
-		// ③ 待决工具全结算
-		List<PendingToolCall> unsettled = pendings == null ? List.of()
-				: pendings.stream()
-					.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-					.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-					.toList();
-		if (!unsettled.isEmpty()) {
-			return new ModelStepRetryCheck(false, "PENDING_TOOLS",
-					"仍有未结算的待决工具 " + unsettled.size() + " 条");
-		}
-		List<Message> messages = history == null ? List.of() : history;
-		// ⑤ 无半截正文 / 半截可见思考
-		if (StringUtils.hasText(snapshot.getAssistantContent())) {
-			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有半截正文（不可自动替换）");
-		}
-		if (StringUtils.hasText(snapshot.getFinalText())) {
-			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有最终正文（已被写成完整答案）");
-		}
-		// 思考只在"上过屏"时才算半截产出：展示关闭的隐藏思考用户从未看到，重跑不会出现两段思考。
-		Map<String, Object> assistantMetadata = snapshot.getAssistantMetadata();
-		if (reasoningVisible && assistantMetadata != null && StringUtils.hasText(
-				assistantMetadata.get(ResilientChatService.REASONING_METADATA_KEY) == null ? null
-						: String.valueOf(assistantMetadata.get(ResilientChatService.REASONING_METADATA_KEY)))) {
-			return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "本轮留有半截思考");
-		}
-		for (Message message : messages) {
-			if (message instanceof AssistantMessage assistant && assistant.getMetadata() != null
-					&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY))) {
-				return new ModelStepRetryCheck(false, "PARTIAL_CONTENT", "历史里有被停止的半截 assistant");
-			}
-		}
-		// ④ 工具入出参配对完整
-		if (!toolPairsComplete(messages)) {
-			return new ModelStepRetryCheck(false, "TOOL_PAIRING_INCOMPLETE",
-					"工具调用与工具响应不配对（悬空 tool_calls 会被上游拒绝）");
-		}
-		return new ModelStepRetryCheck(true, null, null);
-	}
-
-	/**
-	 * 这一轮（以及此刻的配置）思考是否曾以 {@code reasoning} 帧上屏：
-	 * {@code app.ai.reasoning.display-enabled} 是全局开关，关闭（默认）时思考只进记忆、不上屏，
-	 * 因此快照里的 {@code reasoningContent} 不构成"用户可见的半截产出"。
-	 *
-	 * <p>口径边界：判定用<b>当前</b>配置。开关在一轮生成与重跑之间被翻转不是支持场景
-	 * （翻转后重跑会按新口径重问模型）；本判据只回答"用户端现在有没有看到过这段思考"。
-	 */
-	private boolean reasoningVisible() {
-		return this.properties != null && this.properties.getReasoning() != null
-				&& this.properties.getReasoning().isDisplayEnabled();
 	}
 
 	/** 历史里的 {@code tool_calls} 与 {@code tool} 响应 id 集合必须相等（配对完整）。 */
@@ -1499,53 +1040,6 @@ public class ResumeService {
 			}
 		}
 		return calls.equals(responses);
-	}
-
-	/**
-	 * ⑥ 同模型：快照的 provider/model 此刻仍可解析成<b>同一个</b>模型。
-	 *
-	 * <p>与续跑的 PROVIDER_GONE 判据<b>同一个解析口</b>（{@link #resolveForResume}：命中即用、否则重载一次、
-	 * 再看行级状态），因此"续跑会 409 的情形"与"重跑会 409 的情形"不会分叉。
-	 *
-	 * @return {@code null} = 同一模型可用；{@code "GONE"} = 端点/模型已不可用（409 {@code PROVIDER_GONE}）；
-	 *         {@code "UNKNOWN"} = 配置此刻不可确认（503，不判死）；其它字符串 = 解析到了不同模型
-	 *         （前置失败 {@code MODEL_CHANGED}）
-	 */
-	private String sameModelProblem(String runId, RunSnapshot snapshot) {
-		String modelId = snapshot.getModelId();
-		if (!StringUtils.hasText(modelId)) {
-			// 旧快照没有模型身份：无法证明"同模型"，按前置失败拒绝（宁可让用户新开一轮，也不静默换模型）
-			return "该轮快照没有模型身份，无法证明按同一模型重跑";
-		}
-		if (this.aiConfigService == null) {
-			return null;
-		}
-		ResolvedIdentity identity = resolveForResume(runId,
-				() -> this.aiConfigService.resolveChatTarget(snapshot.getProviderId(), modelId),
-				() -> this.aiConfigService.bindingState(snapshot.getProviderId(), modelId));
-		if (identity.unknown()) {
-			return "UNKNOWN";
-		}
-		if (identity.target() == null) {
-			return "GONE";
-		}
-		String resolvedModel = identity.target().modelId();
-		if (resolvedModel == null || !modelId.equalsIgnoreCase(resolvedModel)) {
-			return "该模型当前解析到 " + resolvedModel + "（与快照 " + modelId + " 不同）";
-		}
-		return null;
-	}
-
-	/**
-	 * 仅模型步重跑的前置判定结果（七条件里可静态判定的那几条）。
-	 *
-	 * @param allowed    是否允许重跑
-	 * @param failedCheck 失败的是哪一条（{@code NOT_FAILED} / {@code CANCELLED} / {@code PENDING_TOOLS} /
-	 *                    {@code PARTIAL_CONTENT} / {@code TOOL_PAIRING_INCOMPLETE} / {@code MODEL_CHANGED}）；
-	 *                    通过时 {@code null}
-	 * @param reason     人类可读的拒绝原因（日志用；用户面走 {@code messages_*} 的完整码文案）
-	 */
-	public record ModelStepRetryCheck(boolean allowed, String failedCheck, String reason) {
 	}
 
 	/**
@@ -2022,14 +1516,25 @@ public class ResumeService {
 			}
 			Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(sessionId));
 			activeRunIds.add(runId);
+			// B2：续跑入口（含"运行中升级到本版本"）先用快照历史补 baseline；
+			// 放在窗口/压缩之前，保证复制的是完整重建历史而不是已整理视图。
+			if (this.transcript != null && snapshot != null) {
+				try {
+					if (this.store.permittedToWrite(runId, "transcript")) {
+						this.transcript.ensureBaseline(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
+								history);
+					}
+				}
+				catch (RuntimeException ex) {
+					log.debug("transcript baseline 写入权判定失败 runId={}（本次不复制）：{}", runId, ex.getMessage());
+				}
+			}
 			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
 			MemoryWindow.Plan window = MemoryWindow.plan(history, windowBudget, protectedIds, activeRunIds);
 			MemoryWindow.emit(runId, sessionId, window, windowBudget);
 			history = window.messages();
-			body.put("memoryWindowTrimmed", window.changed());
-			if (window.changed()) {
-				body.put("memoryWindow", window.summary());
-			}
+			// B5：不再返回 memoryWindow/memoryWindowTrimmed（无前端/脚本消费者；窗口事实仍进
+			// trace 的 event=memory_window，不丢观测）。
 
 			// ── 上下文专项批①：续跑前压缩（与首轮同源：同一个 ContextCompactor） ──
 			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
@@ -2046,6 +1551,8 @@ public class ResumeService {
 				TurnKeepalive keepalive = this.chatService == null || this.registry == null ? null
 						: this.chatService.startKeepalive(runId, this.registry.of(runId),
 								TurnKeepalive.PHASE_STREAMING, true);
+				ContextCompactor.Request compactionRequest = null;
+				ContextCompactor.Plan compactionPlan = null;
 				try {
 					ContextState state = this.contextCompactor.readState(sessionId);
 					// 压缩输入与写回都必须先滤掉"内部纠正"这类合成指令：
@@ -2064,13 +1571,17 @@ public class ResumeService {
 									snapshot.getModelId());
 					Runnable onSummaryStart = keepalive == null ? null
 							: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
-					compaction = this.contextCompactor.compact(new ContextCompactor.Request(sessionId,
+					int maxOutput = snapshot.getMaxTokens() == null ? 0 : Math.max(0, snapshot.getMaxTokens());
+					compactionRequest = new ContextCompactor.Request(sessionId,
 							runId, snapshot.getModelId(), snapshot.getProviderId(), compactorInput,
 							this.codec.serializeAll(compactorInput),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
 							// 披露面的额度必须按<b>交棒那一份</b>上下文算：刷新后工具集变了，用旧的会算错
 							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime,
-							activeRunIds),
+							activeRunIds, maxOutput, window.stillOverBudget(), "resume",
+							ContextCompactor.lastToolCallId(compactorInput));
+					// B1：窗口只做整轮淘汰；绝对预算越线时 l1Due 让压缩器唯一地清一次工具结果
+					compactionPlan = this.contextCompactor.plan(compactionRequest,
 							// R1-09 M-1：L2 是 N 次串行摘要（每次最长 60s）。这个回调只刷新<b>业务活动锚点</b>
 							// （避免长压缩被别的实例判成僵尸并接管），它<b>不发帧</b> —— 压缩期的可见性由上面
 							// 那枚独立定时器的 stage 心跳承担（"压缩不伪称持续发帧"）。
@@ -2086,9 +1597,10 @@ public class ResumeService {
 						keepalive.close();
 					}
 				}
-				if (compaction.changed()) {
+				// plan 为 null 与 "无规划结果" 同义：按未压缩处理（commit 已容忍 null）；不得在这里空指针。
+				if (compactionPlan != null && compactionPlan.changed()) {
 					history = com.example.configmgr.ai.history.SyntheticMessages
-						.withoutCorrectionInstruction(compaction.messages());
+						.withoutCorrectionInstruction(compactionPlan.messages());
 					// 跨 run 的摘要/裁轮必须先整窗落库；轮末按 run 收敛只负责本 run，不能代替这一步。
 					List<Message> memoryWindow = history.stream()
 						.filter(message -> message.getMessageType() != MessageType.SYSTEM)
@@ -2104,6 +1616,14 @@ public class ResumeService {
 						log.info("续跑压缩后的快照写被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
 						return resumeStatusWriteRefused(runId, body);
 					}
+					// B1 / I5：记忆 CAS 与快照写都成功之后才提交压缩状态/台账
+					compaction = this.contextCompactor.commit(compactionRequest, compactionPlan);
+				}
+				else {
+					// 摘要失败仍需落一次熔断计数（没有历史变更，不涉及 CAS）
+					compaction = this.contextCompactor.commit(compactionRequest, compactionPlan);
+				}
+				if (compaction.changed()) {
 					body.put("contextCompaction", compaction.levelWire());
 				}
 				else {
@@ -2136,7 +1656,7 @@ public class ResumeService {
 			// ── I-1：续跑侧压缩也要即时可见（与首轮同一份 outcome 载荷）──
 			// 位置：start 已由原轮发出（归档里），本帧在此处取号 ⇒ 必然晚于 start、且早于交棒后的
 			// 首个 delta（交棒在下面 execute 里，本帧在提交之前同步发出）。
-			if (compaction != null && compaction.changed()) {
+			if (compaction != null && compaction.changed() && compaction.committed()) {
 				// 发帧是观测面，不决定续跑成败：写失败（客户端已断/emitter 已关闭/序列化异常）
 				// 只降级为 WARN —— 级别交接与交棒都必须照常进行，否则"看得见"反噬"跑得成"。
 				try {
@@ -2564,7 +2084,7 @@ public class ResumeService {
 	 *
 	 * <p>判据 = {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}（本次驱动入口之后的
 	 * done/error），入口下界由 {@code ResilientChatService#driveResumed} 在驱动开始时记一次。
-	 * 这样"上一次驱动（{@code retry-model-step}）留下的 error"不会把本次的失败终帧吞掉。
+	 * 这样"上一次续跑/重挂驱动留下的 error"不会把本次的失败终帧吞掉。
 	 *
 	 * <p><b>边界</b>：这是"读 → 判 → 发"的顺序判据，只覆盖<b>同一驱动</b>（含同进程重复收尾）与
 	 * <b>同一 runId 的相邻驱动</b>；跨实例并发的"恰好一条终帧"需要原子终帧位（本批未做，不声称根治）。

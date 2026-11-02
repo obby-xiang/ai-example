@@ -602,7 +602,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
     expect(store.sessionId).toBe('9404')
     expect(store.tabOwnership).toBe('owner')
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9404')
-    expect(api.history).toHaveBeenCalledWith('9404')
+    expect(api.history).toHaveBeenCalledWith('9404', { offset: 0, limit: 1 })
     expect(locks.isHeld(sessionLockName('9404'))).toBe(true)
     // 静默接手：不新增提示，也不删原会话的后端记忆
     expect(store.notice).toBeNull()
@@ -627,7 +627,7 @@ describe('RC-4：复制页签三层握手（pageId + Web Locks + BroadcastChanne
 
     expect(store.sessionId).toBe(ownSession)
     expect(store.tabOwnership).toBe('owner')
-    expect(api.history).not.toHaveBeenCalledWith('9405')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9405')
   })
 
   it('③ 复制页签已产生内容 ⇒ 不接手（不把用户眼前内容换掉）', async () => {

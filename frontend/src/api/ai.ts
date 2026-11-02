@@ -194,9 +194,24 @@ export function cancelClientRequest(
   return post('/ai/cancel/client-request', request, config)
 }
 
-/** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。 */
-export function history(sessionId: string): Promise<AiHistory> {
-  return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}`)
+/** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。
+ *
+ * <p>R-154 #16 分页（additive）：`offset`/`limit` 切记忆窗口内的条目；不传 = 全量语义。
+ * 长会话首屏只取最近一页，更早条目由「加载更早」按需向前取。
+ */
+export function history(
+  sessionId: string,
+  page: { offset?: number; limit?: number } = {}
+): Promise<AiHistory> {
+  const query = new URLSearchParams()
+  if (typeof page.offset === 'number') {
+    query.set('offset', String(page.offset))
+  }
+  if (typeof page.limit === 'number') {
+    query.set('limit', String(page.limit))
+  }
+  const suffix = query.toString() === '' ? '' : `?${query.toString()}`
+  return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}${suffix}`)
 }
 
 /**
@@ -311,17 +326,6 @@ export async function health(): Promise<AiHealth> {
 }
 
 /**
- * POST /api/ai/runs/{runId}/retry-model-step（批次2 / AR-05：仅模型步重跑）。
- *
- * 202 = 已受理（随后用既有 `GET /api/ai/events/{runId}` 重挂；**不追加用户消息**）；
- * 200 = 已收尾/已取消（幂等空操作）；409 = 在途或前置失败（`failedCheck`）；
- * 404 = 轮次不存在；503 = AI/Redis 不可用（可重试）。
- */
-export function retryModelStep(runId: string): Promise<Record<string, unknown>> {
-  return post<Record<string, unknown>>(`/ai/runs/${encodeURIComponent(runId)}/retry-model-step`)
-}
-
-/**
  * GET /api/ai/runs/current?sessionId=（T2b-D#3：刷新后挂起快照重建的数据源）。
  * 空态（索引缺失/进程已死/快照已清）为 found=false 的同一个体。
  */
@@ -342,7 +346,6 @@ export const aiApi = {
   getContext,
   deleteHistory,
   health,
-  retryModelStep,
   runsCurrent,
   feedbackSubmit,
   feedbackList

@@ -29,4 +29,21 @@ public interface ContextStateStore {
 	/** 压缩前原文归档（{@code ai:ctx:archive:<sessionId>:<turnNo>}，TTL 同会话）。 */
 	void archive(String sessionId, int turnNo, List<String> messageJson);
 
+	/**
+	 * 会话内单调压缩序号（B3）：{@code HINCRBY ai:ctx:<sid> compSeq 1}。
+	 *
+	 * <p>单键原子递增，跨实例唯一；只在<b>真实提交</b>时调用（no-op/失败/未提交不取号）。
+	 */
+	long nextCompactionSeq(String sessionId);
+
+	/**
+	 * 追加一条已提交的压缩事实（B3）：{@code ai:ctx:events:<sid>} LIST，LTRIM 200，TTL 同会话。
+	 *
+	 * <p>单键操作（Cluster 安全）；不扫描、不跨槽。
+	 */
+	void appendEvent(String sessionId, Map<String, Object> event);
+
+	/** 读已提交压缩事实（新→旧；调用方负责按 atMs/eventId 排序）。 */
+	List<Map<String, Object>> events(String sessionId);
+
 }

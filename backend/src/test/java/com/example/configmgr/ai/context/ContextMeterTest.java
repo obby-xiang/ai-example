@@ -107,6 +107,25 @@ class ContextMeterTest {
 		assertThat(meter.frames()).isEqualTo(2);
 	}
 
+	/**
+	 * B1：本轮开始前压缩过时，更小的 prompt 是<b>新基线</b>，不是脏帧。
+	 *
+	 * <p>R4 默认仍拦回退（C-05）；只有调用方显式 {@code allowPromptDecline()}（压缩已改写历史）
+	 * 才采纳最后一个值。未显式声明时行为与 C-05 逐字相同。
+	 */
+	@Test
+	void lastPromptWinsAfterCompaction() {
+		ContextMeter meter = new ContextMeter();
+		meter.allowPromptDecline();
+		meter.accept(usage(900, 20, 920));
+		meter.accept(usage(300, 20, 320));
+
+		assertThat(meter.promptTokens()).as("压缩后的合法下降必须被采纳").isEqualTo(300);
+		assertThat(meter.lastPromptTokens()).isEqualTo(300);
+		assertThat(meter.lastMeasured()).isTrue();
+		assertThat(meter.dirty()).as("合法下降不计脏帧").isZero();
+	}
+
 	/** C-06：每次尝试各建一个计量器 ⇒ 失败尝试不污染成功尝试（R6）。kill：跨 attempt 复用 ⇒ 混值。 */
 	@Test
 	void c06AttemptsDoNotShareState() {

@@ -1,6 +1,11 @@
 package com.example.configmgr.ai.config;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -70,6 +75,35 @@ class AiPropertiesMemoryGuardTest {
 		properties.getMemory().setMinMessages(60);
 
 		assertThatCode(properties::verifyMemory).doesNotThrowAnyException();
+	}
+
+	/**
+	 * A4（B1 诚实化）：min = max 合法但必须 WARN，说明 token 预算只能触达工具结果清理。
+	 *
+	 * <p>主控裁决：默认 min/max 保持 40/40，不降 12、不新开放裁轮；只做诚实注释/告警。
+	 */
+	@Test
+	void minEqualsMaxWarnsNotFails() {
+		Logger logger = (Logger) LoggerFactory.getLogger(AiProperties.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		AiProperties properties = props();
+		properties.getMemory().setMaxMessages(60);
+		properties.getMemory().setMinMessages(60);
+		try {
+			assertThatCode(properties::verifyMemory).doesNotThrowAnyException();
+		}
+		finally {
+			logger.detachAppender(appender);
+		}
+
+		assertThat(appender.list).hasSize(1);
+		assertThat(appender.list.get(0).getLevel()).isEqualTo(Level.WARN);
+		assertThat(appender.list.get(0).getFormattedMessage())
+			.contains("min-messages == max-messages")
+			.contains("工具结果清理")
+			.contains("整轮淘汰不可达");
 	}
 
 	/** 负预算 = 每轮都判越线。 */

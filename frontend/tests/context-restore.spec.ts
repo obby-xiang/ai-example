@@ -175,7 +175,6 @@ describe('刷新恢复（C-35）', () => {
     store.adoptFreshSession()
 
     expect(store.contextUsage).toBeNull()
-    expect(store.contextBreakdown).toBeNull()
   })
 })
 
@@ -220,8 +219,6 @@ describe('流式中不跳动（C-36）', () => {
     )
     expect(store.contextUsage?.usedTokens).toBe(90000)
     expect(store.contextUsage?.level).toBe('L1')
-    // 拆分随轮末置脏（下次开 popover 重新拉，避免旧七项配新总量）
-    expect(store.contextBreakdown).toBeNull()
     // 占位断言：宿主消息仍在（本用例不关心渲染，只要帧处理没抛）
     expect(host.id).toBeTruthy()
   })
@@ -263,7 +260,5 @@ describe('流式中不跳动（C-36）', () => {
     )
 
     expect(store.contextUsage?.usedTokens).toBe(42000)
-    expect(store.contextCompaction?.level).toBe('L1')
-    expect(store.contextCompaction?.reason).toBe('l1_tool_result_clearing')
   })
 })

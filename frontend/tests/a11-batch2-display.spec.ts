@@ -7,10 +7,9 @@
  * 3. 历史恢复错误条 + 重试（store 适配器）；
  * 4. 409「回到进行中的回答」按钮（store 适配器）；
  * 5. 编辑用户消息前提示「将删除 N 条后续消息」并确认；
- * 6. 继续 / 重试本轮分离；普通 regenerate 本批不做（AR-17）⇒ 入口整体隐藏。
+ * 6. 失败/断流末条统一「继续」；普通 regenerate 本批不做（AR-17）⇒ 入口整体隐藏。
  *
- * 本 spec 只通过 store 的**公开字段 / action** 注入状态与动作；「重试本轮」走
- * `store.retryModelStep`（真实窄入口，且要求 `message.runId` 归属可证明）。
+ * 本 spec 只通过 store 的**公开字段 / action** 注入状态与动作；「继续」走 `store.send('继续')`。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
@@ -20,6 +19,7 @@ import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
 import { applyLocale } from '@/locales'
 import { buildErrorCard } from '@/utils/error-card'
+import { mirrorStorageKey } from '@/utils/ai-identity'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -337,32 +337,30 @@ describe('批次2 · 编辑用户消息（2026-10-30 直裁：只回填、无删
   })
 })
 
-describe('批次2 · 继续 / 重试本轮（AR-17：普通 regenerate 本批不做）', () => {
-  it('有产出且失败 ⇒ 只出「继续」，不出「重试本轮」、不出 regenerate', async () => {
+describe('批次2 · 继续（唯一恢复入口；普通 regenerate 本批不做）', () => {
+  it('有产出且失败 ⇒ 只出「继续」，不出 regenerate', async () => {
     const user = userMessage('u-1', '提问')
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '部分回答', streaming: false }])
     reply.id = 'a-1'
     reply.runId = 'run-a1'
     const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'interrupted' })
-    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="retry-turn"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="regenerate-msg-a-1"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('零产出失败且归属可证明 ⇒ 只出「重试本轮」，不出「继续」', async () => {
+  it('零产出失败 ⇒ 同样出「继续」（统一入口，不再有「重试本轮」）', async () => {
     const user = userMessage('u-1', '提问')
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: false }])
     reply.id = 'a-1'
     reply.runId = 'run-a1'
     const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'error' })
-    expect(wrapper.find('[data-testid="retry-turn"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="regenerate-msg-a-1"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('零正文零思考但工具已结算的失败轮 ⇒ 重试本轮走仅模型步重跑', async () => {
+  it('零正文零思考但工具已结算的失败轮 ⇒ 点「继续」走正常发送（不本地截断、不重跑工具）', async () => {
     const user = userMessage('u-1', '提问')
     const reply = buildMessage([{
       kind: 'tool',
@@ -377,24 +375,14 @@ describe('批次2 · 继续 / 重试本轮（AR-17：普通 regenerate 本批不
     reply.id = 'a-1'
     reply.runId = 'run-a1'
     const store = useAiStore()
-    const retry = vi.spyOn(store, 'retryModelStep').mockResolvedValue('accepted')
     const send = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
     const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'error' })
-    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
-    const button = wrapper.find('[data-testid="retry-turn"]')
+    const button = wrapper.find('[data-testid="continue-round"]')
     expect(button.exists()).toBe(true)
     await button.trigger('click')
-    expect(retry).toHaveBeenCalledWith(reply)
-    expect(send).not.toHaveBeenCalled()
-    wrapper.unmount()
-  })
-
-  it('零产出失败但无 runId 归属证据 ⇒ 不出「重试本轮」（不得重试错轮）', async () => {
-    const user = userMessage('u-1', '提问')
-    const reply = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: false }])
-    reply.id = 'a-1'
-    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'error', activeRunId: 'run-other' })
-    expect(wrapper.find('[data-testid="retry-turn"]').exists()).toBe(false)
+    expect(send).toHaveBeenCalledWith('继续')
+    // 旧半截与工具卡原样保留（继续 = 新开一轮，不删历史）
+    expect(store.messages.some((message) => message.id === 'a-1')).toBe(true)
     wrapper.unmount()
   })
 
@@ -412,47 +400,49 @@ describe('批次2 · 继续 / 重试本轮（AR-17：普通 regenerate 本批不
     wrapper.unmount()
   })
 
-  it('重试本轮走真实 store action（仅模型步重跑），不本地截断、不追加气泡', async () => {
+  it('刷新后（lastRoundOutcome 仍是 ok）：消息级失败事实 ⇒ 仍有且仅有一个「继续」', async () => {
+    const user = userMessage('u-1', '提问')
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '出错了', streaming: false }])
+    reply.id = 'a-1'
+    // 镜像可恢复的失败现场（/history 不带，由 carryMirrorOutcomeMarkers 补回）
+    reply.errorCard = buildErrorCard('UPSTREAM_STREAM_ERROR', 'boom')
+    const store = useAiStore()
+    const send = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'ok' })
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(1)
+    await wrapper.find('[data-testid="continue-round"]').trigger('click')
+    expect(send).toHaveBeenCalledWith('继续')
+    wrapper.unmount()
+  })
+
+  it('刷新后：断流消息级事实 ⇒ 仍有且仅有一个「继续」', async () => {
+    const user = userMessage('u-1', '提问')
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '半截回答', streaming: false }])
+    reply.id = 'a-1'
+    reply.interrupted = true
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'ok' })
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('刷新后：配额错误卡的「继续」是唯一入口（元信息行不重复）', async () => {
     const user = userMessage('u-1', '提问')
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: false }])
     reply.id = 'a-1'
-    reply.runId = 'run-a1'
+    reply.errorCard = buildErrorCard('429', '配额用尽')
     const store = useAiStore()
-    const retry = vi.spyOn(store, 'retryModelStep').mockResolvedValue('denied')
     const send = vi.spyOn(store, 'send').mockResolvedValue({ outcome: 'ok', userMessageId: null })
-    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'error' })
-    await wrapper.find('[data-testid="retry-turn"]').trigger('click')
-    expect(retry).toHaveBeenCalledWith(reply)
-    expect(send).not.toHaveBeenCalled()
-    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1)
-    expect(store.messages.some((message) => message.id === 'a-1')).toBe(true)
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'ok' })
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    const action = wrapper.find('[data-testid="error-card-action-a-1"]')
+    expect(action.exists()).toBe(true)
+    await action.trigger('click')
+    expect(send).toHaveBeenCalledWith('继续')
     wrapper.unmount()
   })
 })
 
-describe('批次2 · synthetic 与 recoveryGap 的中性呈现', () => {
-  it('synthetic 历史条目渲染为系统级「已压缩」提示，不画用户气泡、不显示内部键', async () => {
-    const synthetic: ChatMessage = {
-      id: 'history-0',
-      role: 'system',
-      content: '[上下文压缩摘要]',
-      parts: [{ kind: 'text', seg: 0, text: '[上下文压缩摘要]', streaming: false }],
-      reasoning: '',
-      toolRuns: [],
-      pendingCall: null,
-      streaming: false,
-      done: true,
-      synthetic: true
-    }
-    const wrapper = await mountPanel([synthetic])
-    const notice = wrapper.find('[data-testid="synthetic-notice-history-0"]')
-    expect(notice.exists()).toBe(true)
-    expect(notice.text()).toContain('已压缩')
-    expect(notice.text()).not.toContain('compactedFrom')
-    expect(wrapper.find('[data-testid="msg-bubble-history-0"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
+describe('批次2 · recoveryGap 的中性呈现', () => {
   it('recoveryGap 渲染中性「不可完整恢复」提示，不是错误卡', async () => {
     const reply = buildMessage([{ kind: 'text', seg: 0, text: '缓存内容', streaming: false }])
     reply.id = 'a-gap'
@@ -484,5 +474,176 @@ describe('批次2 · 错误卡两层文案', () => {
       .toBe('UPSTREAM_STREAM_INCOMPLETE_AFTER_TOOL_SIDE_EFFECT')
     expect(card.find('[data-testid="error-card-detail-a-err"]').text()).toBe('上游流提前结束')
     wrapper.unmount()
+  })
+})
+
+describe('批次2 · 续跑成功（#5）', () => {
+  it('非取消 done 复位轮次结局：完成回答上不再出「继续」', async () => {
+    const user = userMessage('u-1', '提问')
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '断流前的半截', streaming: true }], null, true)
+    reply.id = 'a-1'
+    reply.runId = 'run-a'
+    reply.interrupted = true
+    const store = useAiStore()
+    store.messages = [user, reply]
+    store.historyLoaded = true
+    store.loading = true
+    store.activeRunId = 'run-a'
+    store.lastRoundOutcome = 'interrupted'
+
+    // 续跑拿到非取消 done：轮次结局复位、断流事实清除
+    store.handleFrame({ type: 'done', runId: 'run-a', seq: 9 } as never)
+
+    expect(store.lastRoundOutcome).toBe('ok')
+    expect(reply.interrupted).toBeUndefined()
+    expect(reply.done).toBe(true)
+
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'ok' })
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('批次2 · 失败判据的终态守卫（#6）', () => {
+  it('未收尾的断流事实（done=false / streaming=true）不出「继续」', async () => {
+    const user = userMessage('u-1', '提问')
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '续跑中', streaming: true }], null, true)
+    reply.id = 'a-1'
+    reply.runId = 'run-a'
+    reply.interrupted = true
+    const wrapper = await mountPanel([user, reply], { lastRoundOutcome: 'interrupted' })
+
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="error-card-action-a-1"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('未收尾时配额卡的「继续」动作同样不露出（错误卡动作不在 invisible 组内）', async () => {
+    const reply = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
+    reply.id = 'a-1'
+    reply.runId = 'run-a'
+    reply.errorCard = buildErrorCard('429', '配额用尽')
+    const wrapper = await mountPanel([userMessage('u-1', '提问'), reply], { lastRoundOutcome: 'error' })
+
+    expect(wrapper.find('[data-testid="error-card-action-a-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="continue-round"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('批次2 · 历史已完成时镜像断流标记不得搬运（#1 反向）', () => {
+  it('镜像 interrupted+inFlight，历史以该轮完整回答结尾 ⇒ 完成回答无 interrupted、0 个「继续」', async () => {
+    const sessionId = 'sess-done-carry'
+    sessionStorage.setItem(mirrorStorageKey(sessionId), JSON.stringify({
+      v: 2,
+      savedAt: Date.now(),
+      inFlight: true,
+      lastRunId: 'run-done',
+      messages: [
+        {
+          id: 'u-m',
+          role: 'user',
+          content: '问一句',
+          parts: [{ kind: 'text', seg: 0, text: '问一句', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        },
+        {
+          id: 'a-m',
+          role: 'assistant',
+          content: '断网时的半截',
+          runId: 'run-done',
+          interrupted: true,
+          parts: [{ kind: 'text', seg: 0, text: '断网时的半截', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        }
+      ]
+    }))
+    api.history.mockResolvedValue({
+      sessionId,
+      count: 2,
+      total: 2,
+      messages: [
+        { type: 'USER', text: '问一句' },
+        { type: 'ASSISTANT', text: '后端已完成的完整回答', runId: 'run-done' }
+      ]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false })
+
+    const store = useAiStore()
+    store.sessionId = sessionId
+    await store.loadHistory()
+    await store.restoreSnapshotGuarded()
+
+    expect(store.messages).toHaveLength(2)
+    const last = store.messages[1]
+    expect(last).toMatchObject({ role: 'assistant', content: '后端已完成的完整回答' })
+    expect(last?.interrupted).toBeUndefined()
+
+    const wrapper = await mountPanel(store.messages, { lastRoundOutcome: store.lastRoundOutcome })
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+})
+
+describe('批次2 · 断流后刷新（#1 端到端）', () => {
+  it('send 断流 ⇒ 镜像 inFlight 保留半截；刷新后仍有且仅有一个「继续」', async () => {
+    const sessionId = 'sess-int-e2e'
+    const store = useAiStore()
+    store.sessionId = sessionId
+    store.historyLoaded = true
+    api.chat.mockImplementation((
+      _req: unknown,
+      handlers: {
+        onFrame?: (frame: { type: string; runId: string; seq: number; sessionId?: string; text?: string }) => void
+        onClose?: (info: { terminal: boolean; reason?: string }) => void
+      }
+    ) => {
+      handlers.onFrame?.({ type: 'start', runId: 'run-int-e2e', sessionId, seq: 1 })
+      handlers.onFrame?.({ type: 'delta', runId: 'run-int-e2e', seq: 2, text: '半截回答' })
+      handlers.onClose?.({ terminal: false, reason: '断流' })
+      return Promise.resolve({ terminal: false, reason: '断流' })
+    })
+
+    const result = await store.send('问一句')
+    expect(result.outcome).toBe('interrupted')
+    store.writeMirrorNow()
+
+    const raw = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sessionId)) ?? '{}') as {
+      inFlight?: boolean
+      messages?: Array<{ role: string; content: string; interrupted?: boolean }>
+    }
+    expect(raw.inFlight).toBe(true)
+    expect(raw.messages?.at(-1)).toMatchObject({ role: 'assistant', content: '半截回答', interrupted: true })
+
+    // 刷新：历史里本轮只有 USER（断流轮没有 assistant 终态条目）
+    api.history.mockResolvedValue({
+      sessionId,
+      count: 1,
+      total: 1,
+      messages: [{ type: 'USER', text: '问一句' }]
+    })
+    api.runsCurrent.mockResolvedValue({ found: false })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 404 })))
+
+    setActivePinia(createPinia())
+    const reloaded = useAiStore()
+    reloaded.sessionId = sessionId
+    await reloaded.loadHistory()
+    await reloaded.restoreSnapshotGuarded()
+
+    const tail = reloaded.messages[reloaded.messages.length - 1]
+    expect(tail).toMatchObject({ role: 'assistant', content: '半截回答', done: true })
+    expect(tail?.interrupted).toBe(true)
+
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('[data-testid="continue-round"]')).toHaveLength(1)
+    wrapper.unmount()
+    vi.unstubAllGlobals()
   })
 })

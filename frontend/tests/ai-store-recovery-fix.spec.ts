@@ -18,8 +18,7 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  getContext: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -138,9 +137,9 @@ describe('AI store 恢复与重试收口', () => {
     expect(store.suspended).toBe(false)
   })
 
-  it('缺少正序号锚点拒绝重试并保留失败现场，恢复失败清掉本地待决锁', async () => {
+  it('恢复失败清掉本地待决锁并保留失败现场', async () => {
     const store = useAiStore()
-    store.sessionId = 'sess-retry-guard'
+    store.sessionId = 'sess-recovery-fail'
     store.historyLoaded = true
     const host = store.appendAssistantMessage('失败前的正文')
     host.runId = 'run-fail'
@@ -148,17 +147,6 @@ describe('AI store 恢复与重试收口', () => {
     host.streaming = false
     host.errorCard = buildErrorCard('EMPTY_REPLY', '保留失败现场')
     store.lastRoundOutcome = 'error'
-    api.retryModelStep.mockResolvedValue({ retried: true })
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('denied')
-    expect(store.noticeCode).toBe('ai.notice.retryRunUnknown')
-    expect(api.retryModelStep).not.toHaveBeenCalled()
-    expect(api.reattachRun).not.toHaveBeenCalled()
-    expect(host.errorCard?.code).toBe('EMPTY_REPLY')
-    expect(host.content).toBe('失败前的正文')
-    expect(store.lastRoundOutcome).toBe('error')
 
     store.upsertToolPart(host, {
       toolCallId: 'confirm-recovery',

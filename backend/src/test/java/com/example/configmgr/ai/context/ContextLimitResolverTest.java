@@ -58,6 +58,43 @@ class ContextLimitResolverTest {
 		assertThat(resolver.resolve(1L, "m")).isZero();
 	}
 
+	/**
+	 * A6：已知模型缺 {@code max_context} 时保留回退，但来源必须如实标 {@code fallback}。
+	 *
+	 * <p>直接改成"未知"会让没有配 max_context 的存量模型全部停掉压缩；这里锁的是"回退保留、
+	 * 不再静默"：诊断面能区分 schema / fallback / unknown。
+	 */
+	@Test
+	void knownModelWithoutMaxContextReportsFallbackSource() {
+		ContextLimitResolver resolver = new ContextLimitResolver(props(128000), (providerId, modelId) -> null);
+
+		ContextLimitResolver.ResolveResult result = resolver.resolveDetailed(1L, "deepseek-flash");
+
+		assertThat(result.limitTokens()).as("回退值保留").isEqualTo(128000);
+		assertThat(result.source()).isEqualTo(ContextLimitResolver.Source.FALLBACK);
+		assertThat(result.source().wire()).isEqualTo("fallback");
+	}
+
+	/** 模型行声明了 max_context ⇒ 来源 schema（不再走回退）。 */
+	@Test
+	void declaredMaxContextReportsSchemaSource() {
+		ContextLimitResolver resolver = new ContextLimitResolver(props(128000), (providerId, modelId) -> 64000);
+
+		assertThat(resolver.resolveDetailed(1L, "deepseek-flash").source())
+			.isEqualTo(ContextLimitResolver.Source.SCHEMA);
+	}
+
+	/** 两级都没有 ⇒ unknown（降级态）。 */
+	@Test
+	void neitherSourceReportsUnknown() {
+		ContextLimitResolver resolver = new ContextLimitResolver(props(0), (providerId, modelId) -> null);
+
+		ContextLimitResolver.ResolveResult result = resolver.resolveDetailed(1L, "m");
+
+		assertThat(result.limitTokens()).isZero();
+		assertThat(result.source()).isEqualTo(ContextLimitResolver.Source.UNKNOWN);
+	}
+
 	/** DB 源抛错（配置快照读失败）不得让解析失败：回落过渡键。 */
 	@Test
 	void databaseFailureDegradesToConfigured() {

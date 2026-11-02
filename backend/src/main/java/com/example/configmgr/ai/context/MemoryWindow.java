@@ -11,7 +11,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 记忆窗口（记忆窗口批）：<b>token 预算为主 + 条数兜底 + 旧工具结果优先清除</b>。
+ * 记忆窗口（记忆窗口批）：<b>token 预算为主 + 条数兜底</b>。
  *
  * <h2>它补的是哪一段</h2>
  * 此前窗口只有条数一个维度（{@code MessageWindowChatMemory#maxMessages=40}）。条数在
@@ -19,29 +19,35 @@ import java.util.Set;
  * {@code read_sheet_summary} 之后就吃掉 3 万 token，也可以在纯寒暄里只占 2 千 token ——
  * 同一个数字，两种体量。本类把窗口的主判据换成 <b>token 预算</b>，条数退化为兜底（上限 + 下限）。
  *
- * <h2>与压缩谱系（L1/L2/L3）的分工</h2>
+ * <h2>与压缩谱系（L1/L2/L3）的分工（B1：工具结果清理只有一个 mutator）</h2>
  * 两者都动历史，但判据与时机不同，<b>不是同一件事的两种写法</b>：
  * <ul>
  * <li>{@link ContextCompactor} 判的是"<b>下一次请求会不会撞到模型上限</b>"（对
- * {@code limit − reserve} 取比，70/80/95%），是所有上下文（含 system、tools）的<b>安全网</b>；</li>
+ * {@code limit − reserve} 取比，70/80/95%），是所有上下文（含 system、tools）的<b>安全网</b>；
+ * 轮首/续跑的 L1 工具结果清除<b>只由它执行</b>（含 pin 窗口、HITL、活跃 run 保护与记账/归档；
+ * 轮内工具回环有 {@code SpToolCallingManager} 自己的入口与同一套清除函数）；</li>
  * <li>本类判的是"<b>从记忆里读出来的历史本身该有多长</b>"（绝对 token 预算，与模型上限无关），
- * 目的是让长会话不管跑在 32K 还是 128K 的模型上，历史体量都稳定、可预期；</li>
- * <li>清除机制<b>复用</b> L1 的 {@link ToolResultClearing}（同一个占位符、同一个幂等判据、
- * 同一套 HITL 保护）—— 两套文案会让"已清除"识别失效、同一结果被清两次并重复记账。</li>
+ * 只做<b>按 turn 整轮淘汰</b>，不改写任何消息内容；越预算且淘汰到下限仍不够时只
+ * {@link Plan#stillOverBudget() 如实上报}，由调用方把 {@code l1Due} 交给 {@link ContextCompactor}
+ * 做一次 L1 —— 同一份工具结果不会被两个 mutator 各清一次、各记一次账；</li>
  * </ul>
  * 顺序上本类先跑（读入即在预算内），压缩谱系后跑（按占比兜底）。二者都不做摘要
- * （摘要留给 L2；本批不引入）。
+ * （摘要留给 L2）。
  *
  * <h2>三条硬约束</h2>
  * <ol>
- * <li><b>先清后删</b>：越预算时先替换最旧的工具结果（不删消息、不动配对骨架），
- * 够用就<b>一条消息都不删</b>；</li>
  * <li><b>按 turn 整轮淘汰</b>：切口永远落在 {@code UserMessage} 上，{@code tool_call} ↔
  * {@code tool_result} 配对不得被拆散（上游 400 的经典成因）；最后一轮一刀不剪；</li>
  * <li><b>条数下限不击穿</b>：预算再紧也不淘汰到 {@code min-messages} 以下 —— 预算把窗口压到
  * "只剩最后一轮"是失忆，不是省 token；淘汰到下限仍越线就<b>如实上报</b>
- * （{@link Plan#stillOverBudget()}），交给压缩谱系与上游，绝不静默继续砍。</li>
+ * （{@link Plan#stillOverBudget()}），交给压缩谱系与上游，绝不静默继续砍；</li>
+ * <li><b>不动消息内容</b>：本类不替换文本（工具结果清除归 {@link ContextCompactor} 与轮内预算的
+ * 各自入口），因此窗口结果始终是"原文或已清除的原文"，不存在第三种形态。</li>
  * </ol>
+ *
+ * <p><b>预算口径 = 历史口径</b>：{@link ContextEstimator#estimateMessages} 跳过 {@code SYSTEM}
+ * （人设 + 工作区快照在装配点单列），所以本类的 token 预算也只量 {@code SYSTEM} 之后的 body；
+ * 不把不可裁剪的 SYSTEM 计进预算，否则固定前缀会让窗口永久呈现 over-budget。
  *
  * <h2>纯函数</h2>
  * 本类不写任何存储：{@link #plan} 只算"该长什么样"，写回由调用方决定（首轮写回 {@code ChatMemory}
@@ -57,10 +63,7 @@ public final class MemoryWindow {
 	/** 越预算/越条数，但没有可动的东西（首段即最后一轮 / 全是受保护项）。 */
 	public static final String REASON_NOTHING_TO_TRIM = "nothing_to_trim";
 
-	/** 只清了工具结果（未删任何消息）。 */
-	public static final String REASON_TOOL_RESULT_CLEARING = "tool_result_clearing";
-
-	/** 按 turn 整轮淘汰了最旧的若干轮（可能同时清了工具结果）。 */
+	/** 按 turn 整轮淘汰了最旧的若干轮。 */
 	public static final String REASON_TURN_TRIM = "turn_trim";
 
 	/**
@@ -70,8 +73,9 @@ public final class MemoryWindow {
 	 *                       {@code AiProperties#verifyMemory}）
 	 * @param minMessages    条数下限（预算淘汰不得击穿它）
 	 * @param maxMessages    条数上限（{@code <=0} = 不限；与官方窗口同一个数）
-	 * @param keepToolResults 最近多少个工具结果不清理（与 {@code app.ai.context.keep-tool-pairs}
-	 *                       同源：同一套 pin 窗口，避免"窗口清一半、L1 清一半"的两套口径）
+	 * @param keepToolResults <b>本类已不再使用</b>（B1：工具结果清理的唯一 mutator 是
+	 *                        {@link ContextCompactor}）；字段保留只为装配签名稳定，pin 窗口由
+	 *                        {@code app.ai.context.keep-tool-pairs} 在 L1 处读取
 	 */
 	public record Budget(int tokenBudget, int minMessages, int maxMessages, int keepToolResults) {
 
@@ -93,16 +97,16 @@ public final class MemoryWindow {
 	 * @param afterTokens        规划后历史估算
 	 * @param beforeCount        规划前消息条数
 	 * @param afterCount         规划后消息条数
-	 * @param clearedToolResults 被清除的工具结果条数（占位符替换，条数不变）
 	 * @param droppedTurns       被整轮淘汰的轮数
-	 * @param stillOverBudget    淘汰到下限后仍越预算（如实上报，供压缩谱系接手的观测面）
+	 * @param stillOverBudget    淘汰到下限后仍越预算（调用方据此给 {@link ContextCompactor} 传
+	 *                           {@code l1Due}；L1 执行与记账只发生在那一个 mutator 里）
 	 * @param reason             执行/跳过原因（见本类常量）
 	 */
 	public record Plan(List<Message> messages, int beforeTokens, int afterTokens, int beforeCount, int afterCount,
-			int clearedToolResults, int droppedTurns, boolean stillOverBudget, String reason) {
+			int droppedTurns, boolean stillOverBudget, String reason) {
 
 		public boolean changed() {
-			return this.clearedToolResults > 0 || this.droppedTurns > 0;
+			return this.droppedTurns > 0;
 		}
 
 		/** 对外载荷（续跑响应体 / 事件同一份键）。 */
@@ -112,7 +116,6 @@ public final class MemoryWindow {
 			body.put("after", this.afterCount);
 			body.put("tokensBefore", this.beforeTokens);
 			body.put("tokensAfter", this.afterTokens);
-			body.put("clearedToolResults", this.clearedToolResults);
 			body.put("droppedTurns", this.droppedTurns);
 			body.put("stillOverBudget", this.stillOverBudget);
 			body.put("reason", this.reason);
@@ -129,7 +132,8 @@ public final class MemoryWindow {
 	 *
 	 * @param messages             当前历史（原消息对象不被修改）
 	 * @param budget               窗口预算（null = 缺省配置，防御性）
-	 * @param protectedToolCallIds 未决 HITL 条目的 toolCallId（工具结果永不清除；可为 null）
+	 * @param protectedToolCallIds <b>已不由本类消费</b>（B1：HITL 保护在 L1 的唯一 mutator 处执行）；
+	 *                             保留参数只为调用点签名稳定
 	 */
 	public static Plan plan(List<Message> messages, Budget budget, Set<String> protectedToolCallIds) {
 		return plan(messages, budget, protectedToolCallIds, Set.of());
@@ -141,33 +145,25 @@ public final class MemoryWindow {
 		int beforeTokens = ContextEstimator.estimateMessages(original);
 		int beforeCount = original.size();
 		if (original.isEmpty()) {
-			return new Plan(original, 0, 0, 0, 0, 0, 0, false, REASON_NOTHING_TO_TRIM);
+			return new Plan(original, 0, 0, 0, 0, 0, false, REASON_NOTHING_TO_TRIM);
 		}
 		Budget config = budget == null ? new Budget(0, 1, 0, 5) : budget;
 		boolean overBudget = config.tokenBudget() > 0 && beforeTokens > config.tokenBudget();
 		boolean overCount = config.maxMessages() > 0 && beforeCount > config.maxMessages();
 		if (!overBudget && !overCount) {
-			return new Plan(original, beforeTokens, beforeTokens, beforeCount, beforeCount, 0, 0, false,
+			return new Plan(original, beforeTokens, beforeTokens, beforeCount, beforeCount, 0, false,
 					REASON_UNDER_BUDGET);
 		}
-		// 续跑保 system 批：SYSTEM 不是可裁剪历史 —— 只对系统段之后的 body 做清除/淘汰，
-		// 最后原样复位到最前。预算仍按整份历史计（SYSTEM 的 token 不能被当成"可以省掉的量"）。
+		// 续跑保 system 批：SYSTEM 不是可裁剪历史 —— 只对系统段之后的 body 做淘汰，
+		// 最后原样复位到最前。预算只量 body（ContextEstimator#estimateMessages 跳过 SYSTEM）。
 		List<Message> system = SystemMessages.leading(original);
 		List<Message> body = SystemMessages.body(original);
 
-		// ① 先清旧工具结果（越预算才动它：没越线时清掉等于白丢信息）
+		// B1：本类不再替换工具结果 —— 越预算只做整轮淘汰；淘汰到下限仍越线时如实上报，
+		// 由调用方把 l1Due 交给 ContextCompactor（工具结果清理的唯一 mutator）。
 		List<Message> current = body;
-		int cleared = 0;
-		if (overBudget) {
-			ToolResultClearing.Plan clear = ToolResultClearing.plan(body, config.keepToolResults(),
-					protectedToolCallIds);
-			if (clear.changed()) {
-				current = clear.messages();
-				cleared = clear.cleared().size();
-			}
-		}
 
-		// ② 仍越预算 ⇒ 按 turn 整轮淘汰最旧（不击穿条数下限、不动最后一轮）
+		// ① 按 turn 整轮淘汰最旧（不击穿条数下限、不动最后一轮）
 		int dropped = 0;
 		int tokens = ContextEstimator.estimateMessages(current);
 		if (config.tokenBudget() > 0 && tokens > config.tokenBudget()) {
@@ -178,7 +174,7 @@ public final class MemoryWindow {
 			tokens = ContextEstimator.estimateMessages(current);
 		}
 
-		// ③ 条数上限（官方窗口的兜底仍在）：同样按 turn 整轮淘汰，不拆配对
+		// ② 条数上限（官方窗口的兜底仍在）：同样按 turn 整轮淘汰，不拆配对
 		if (config.maxMessages() > 0 && current.size() > config.maxMessages()) {
 			Drop drop = dropOldestTurns(current, List::size, measure -> measure > config.maxMessages(), 1,
 					protectedRunIds);
@@ -189,10 +185,9 @@ public final class MemoryWindow {
 
 		List<Message> planned = SystemMessages.reattach(system, current);
 		boolean stillOver = config.tokenBudget() > 0 && ContextEstimator.estimateMessages(planned) > config.tokenBudget();
-		String reason = dropped > 0 ? REASON_TURN_TRIM
-				: (cleared > 0 ? REASON_TOOL_RESULT_CLEARING : REASON_NOTHING_TO_TRIM);
+		String reason = dropped > 0 ? REASON_TURN_TRIM : REASON_NOTHING_TO_TRIM;
 		return new Plan(planned, beforeTokens, ContextEstimator.estimateMessages(planned), beforeCount,
-				planned.size(), cleared, dropped, stillOver, reason);
+				planned.size(), dropped, stillOver, reason);
 	}
 
 	/**
@@ -209,8 +204,7 @@ public final class MemoryWindow {
 		int tokensBudget = budget == null ? 0 : budget.tokenBudget();
 		AiTrace.eventOn(runId, sessionId, "memory_window", "reason", plan.reason(), "before", plan.beforeCount(),
 				"after", plan.afterCount(), "tokensBefore", plan.beforeTokens(), "tokensAfter", plan.afterTokens(),
-				"budget", tokensBudget, "droppedTurns", plan.droppedTurns(), "clearedToolResults",
-				plan.clearedToolResults(), "stillOver", plan.stillOverBudget());
+				"budget", tokensBudget, "droppedTurns", plan.droppedTurns(), "stillOver", plan.stillOverBudget());
 	}
 
 	/**

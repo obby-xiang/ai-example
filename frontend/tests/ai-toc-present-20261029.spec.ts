@@ -2,7 +2,7 @@
  * ToC 前端呈现减负批（2026-10-29）：同一事实只留一个提示面 / 准备中阶段条 / GF 提交后只读锁定 /
  * 失效确认卡禁用决策 / 展开按本轮未终态 / 不可提交表单只读 / 技术词只进诊断 / 硬编码走 locale。
  *
- * <p>本文件只覆盖**呈现层**（AiPanel / FormRenderer / UploadHandoffCard / ContextPopover / locales），
+ * <p>本文件只覆盖**呈现层**（AiPanel / FormRenderer / UploadHandoffCard / locales），
  * 不动 `stores/ai.ts`（并行批）：所有现场都用 store 公开字段直接摆好，断言只看 DOM 与 locale 词条。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -15,7 +15,6 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { applyLocale } from '@/locales'
 import zhCN from '@/locales/zh-CN.json'
 import enUS from '@/locales/en-US.json'
-import ContextPopover from '@/components/AiPanel/ContextPopover.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import type { ActiveGenerativeForm, ChatMessage, MessagePart, PendingToolCall, ToolPart } from '@/types/ai'
 import type { FormSpec } from '@/types/form-schema'
@@ -30,8 +29,7 @@ const api = vi.hoisted(() => ({
   confirm: vi.fn(),
   frontendToolResult: vi.fn(),
   deleteHistory: vi.fn(),
-  getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  getContext: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -224,18 +222,17 @@ describe('2 · 挂载准备中出阶段条', () => {
     wrapper.unmount()
   })
 
-  it('压缩心跳期间出 compacting 阶段条', async () => {
+  it('压缩心跳期间只给宿主消息紫色过程态，顶部无压缩条', async () => {
     const store = useAiStore()
     store.loading = true
-    store.compactionPhase = 'compacting'
-    store.compactionStartedAtMs = Date.now() - 12_000
-    store.compactionElapsedMs = 12_000
+    const host = buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)
+    host.compactingStartedAtMs = Date.now() - 12_000
 
-    const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)])
-    const bar = wrapper.find('[data-testid="compaction-status"]')
-    expect(bar.exists()).toBe(true)
-    expect(bar.attributes('data-stage')).toBe('compacting')
-    expect(bar.text()).toMatch(/已用 1[23] 秒/)
+    const wrapper = await mountPanel([host])
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    const compacting = wrapper.find('[data-testid="compaction-message"]')
+    expect(compacting.exists()).toBe(true)
+    expect(compacting.text()).toMatch(/已用 1[23] 秒/)
     wrapper.unmount()
   })
 })
@@ -625,18 +622,6 @@ describe('8 · 硬编码走 locale', () => {
     degraded.unmount()
   })
 
-  it('ContextPopover 上限未知文案走 locale（英文界面不夹中文）', async () => {
-    applyLocale('en-US')
-    const store = useAiStore()
-    store.contextUsage = { usedTokens: 1000, limitTokens: null, percent: null, level: 'none', est: false, circuit: 'closed' }
-    store.contextBreakdown = []
-    store.contextStatus = 'ready'
-    const wrapper = mount(ContextPopover)
-    await nextTick()
-    const text = wrapper.find('[data-testid="context-popover"]').text()
-    expect(text).not.toMatch(/[\u4e00-\u9fa5]/)
-    wrapper.unmount()
-  })
 })
 
 describe('9 · 自动恢复接管本条时面板不回稿', () => {

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.context;
 
+import com.example.configmgr.ai.memory.RunMemoryMerge;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
@@ -28,16 +29,26 @@ import java.util.Set;
  *
  * <h2>原文不丢</h2>
  * 工具结果原文仍在台账里（{@code ai:ledger:<runId>} 本就是全文，见 {@code RunStore#appendLedger}），
- * 占位符只给 {@code toolCallId} 这一个回取键 —— 台账键是<b>内部 Redis 键</b>，写进面向模型的文本
- * 既没有模型用得上的信息量，还会诱导它去"查台账"（2026-10-22 用户裁「占位符文案：改吧」）。
+ * 占位符是<b>固定中性串</b>（B5）：不写工具名、token 估算或 {@code toolCallId} —— 这些技术标识
+ * 对模型没有额外信息量，落在用户面还会暴露内部键。原文仍可从台账/归档回取。
  * 占位符<b>刻意不复用</b>
  * {@code ToolResultLimiter.TRUNCATION_MARKER}：那个标记的语义是"上游结果过长被截断"，
  * 复用会让 {@code ToolResultLimiter#truncated} 把"已清理"误判成"被截断"。
  */
 public final class ToolResultClearing {
 
-	/** 占位符前缀（幂等判据：已清除的一条不再重复清除/重复计费）。 */
-	public static final String PLACEHOLDER_PREFIX = "[工具结果已清除：";
+	/**
+	 * 占位符正文（模型面/用户面同一份中性文案；B5 起不含工具名、token 估算或 toolCallId）。
+	 *
+	 * <p>旧前缀 {@link #LEGACY_PLACEHOLDER_PREFIX} 仍被识别（幂等与迁移期历史），但新写入只用这一份。
+	 */
+	public static final String PLACEHOLDER_TEXT = "[较早的工具结果已清理]";
+
+	/** 占位符前缀（= 中性正文；幂等判据：已清除的一条不再重复清除/重复计费）。 */
+	public static final String PLACEHOLDER_PREFIX = PLACEHOLDER_TEXT;
+
+	/** 旧占位符前缀（B5 前写入的历史仍须识别，避免重复清除/重复记账）。 */
+	public static final String LEGACY_PLACEHOLDER_PREFIX = "[工具结果已清除：";
 
 	/**
 	 * 一对被清除的工具结果。
@@ -78,10 +89,26 @@ public final class ToolResultClearing {
 	 * @param protectedToolCallIds  未决 HITL 条目的 toolCallId（永不清除；可为 null）
 	 */
 	public static Plan plan(List<Message> messages, int keepToolPairs, Set<String> protectedToolCallIds) {
+		return plan(messages, keepToolPairs, protectedToolCallIds, Set.of());
+	}
+
+	/**
+	 * 规划一次 L1 清除（带<b>活跃 run 保护</b>；B1）。
+	 *
+	 * <p>
+	 * 工具结果被清掉后原文只能从台账回取，而<b>别的活跃 run</b> 可能还没收尾、正需要这条结果继续
+	 * 同一轮工具回环 —— 清掉它等于让另一轮"读到的现场"和它自己写下的不一样。故这些 run 的
+	 * 工具结果一律跳过（只清"已经结束的轮"与当前轮的结果）。
+	 *
+	 * @param protectedRunIds 受保护的 run（调用方传入<b>除本轮之外</b>的活跃 run；可为 null）
+	 */
+	public static Plan plan(List<Message> messages, int keepToolPairs, Set<String> protectedToolCallIds,
+			Set<String> protectedRunIds) {
 		if (messages == null || messages.isEmpty()) {
 			return new Plan(messages, List.of(), 0);
 		}
 		Set<String> protectedIds = protectedToolCallIds == null ? Set.of() : protectedToolCallIds;
+		Set<String> protectedRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
 		List<Slot> slots = new ArrayList<>();
 		for (int i = 0; i < messages.size(); i++) {
 			Message message = messages.get(i);
@@ -108,6 +135,9 @@ public final class ToolResultClearing {
 				continue;
 			}
 			if (slot.toolCallId() != null && protectedIds.contains(slot.toolCallId())) {
+				continue;
+			}
+			if (!protectedRuns.isEmpty() && inProtectedRun(messages.get(slot.messageIndex()), protectedRuns)) {
 				continue;
 			}
 			if (isAlreadyCleared(slot.data())) {
@@ -137,15 +167,28 @@ public final class ToolResultClearing {
 		return new Plan(out, List.copyOf(cleared), Math.max(0, savedTokens));
 	}
 
-	/** 是否已是占位符（幂等判据）。 */
-	public static boolean isAlreadyCleared(String data) {
-		return data != null && data.startsWith(PLACEHOLDER_PREFIX);
+	/** 该消息是否属于受保护的 run（metadata.runId 命中；无归属的迁移期消息不保护）。 */
+	private static boolean inProtectedRun(Message message, Set<String> protectedRuns) {
+		if (message == null || message.getMetadata() == null) {
+			return false;
+		}
+		Object runId = message.getMetadata().get(RunMemoryMerge.RUN_ID_KEY);
+		return runId != null && protectedRuns.contains(String.valueOf(runId));
 	}
 
-	/** 占位符正文（格式即契约：C-16 逐字断言前缀 + 工具名 + 估算 token + toolCallId）。 */
+	/** 是否已是占位符（幂等判据；新旧前缀都认）。 */
+	public static boolean isAlreadyCleared(String data) {
+		return data != null
+				&& (data.startsWith(PLACEHOLDER_PREFIX) || data.startsWith(LEGACY_PLACEHOLDER_PREFIX));
+	}
+
+	/**
+	 * 占位符正文（B5 起为固定中性串：不含工具名、token 估算、toolCallId 等技术标识）。
+	 *
+	 * <p>参数保留仅为既有调用点兼容；正文不再使用它们。
+	 */
 	public static String placeholder(String name, int tokens, String toolCallId) {
-		return PLACEHOLDER_PREFIX + (name == null ? "(unknown)" : name) + " · ≈" + tokens + " tokens · toolCallId="
-				+ (toolCallId == null ? "(none)" : toolCallId) + "]";
+		return PLACEHOLDER_TEXT;
 	}
 
 	private static ToolResponseMessage rebuild(ToolResponseMessage original, Map<Integer, String> patch) {

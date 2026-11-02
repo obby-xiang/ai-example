@@ -30,8 +30,7 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  getContext: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -264,7 +263,6 @@ describe('批次7B · 新字段与旧镜像兼容', () => {
         },
         code: 'EMPTY_REPLY',
         unconfirmed: true,
-        synthetic: true,
         recoveryGap: true,
         stopped: true,
         truncated: true,
@@ -282,7 +280,8 @@ describe('批次7B · 新字段与旧镜像兼容', () => {
     expect(saved.code).toBe('EMPTY_REPLY')
     expect((saved.errorCard as { code?: string } | undefined)?.code).toBe('EMPTY_REPLY')
     expect(saved.unconfirmed).toBe(true)
-    expect(saved.synthetic).toBe(true)
+    // B5：synthetic 已退出消息模型，镜像不再落该键
+    expect('synthetic' in saved).toBe(false)
     expect(saved.recoveryGap).toBe(true)
     expect(saved.stopped).toBe(true)
     expect(saved.truncated).toBe(true)

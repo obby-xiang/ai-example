@@ -21,7 +21,11 @@ import com.example.configmgr.ai.config.AiProperties;
  *
  * <p><b>预留按实际窗口收口（C13）</b>：上面的自洽性只在"预留远小于窗口"时成立。小窗口模型
  * （如 15000）上 13000 的绝对预留会把分母压成 2000 —— 任何请求都判成三倍越线，比例阈值失效。
- * 故分母一律用 {@link #effectiveReserve}：预留最多占窗口一半。
+ * 故分母一律用 {@link #effectiveReserve}：预留最多占窗口一半。</p>
+ *
+ * <p><b>真实输出预留（B1）</b>：本轮请求声明了大于配置预留的 {@code max_tokens} 时，输出空间
+ * 就是那个数 —— 预留取两者较大值再按窗口一半收口。轮首触发、滞回解锁、轮内预算三处同一公式
+ * （{@link #effectiveReserve(int, int, int)}）。</p>
  *
  * <h2>分母由调用方注入（L-89）</h2>
  * 本类<b>不读</b> {@code app.ai.context.limit-tokens}：分母以参数传入，调用方
@@ -119,11 +123,48 @@ public final class ContextTrigger {
 	 * @param reserveTokens 配置的预留（{@code <=0} = 无预留）
 	 */
 	public static int effectiveReserve(int limitTokens, int reserveTokens) {
-		int reserve = Math.max(0, reserveTokens);
+		return effectiveReserve(limitTokens, reserveTokens, 0);
+	}
+
+	/**
+	 * 预留额度按<b>实际窗口 + 真实输出预留</b>收口（B1：轮首/轮内同一个公式）。
+	 *
+	 * <p>
+	 * 配置的 {@code reserve-tokens} 是一个静态缓冲（默认 13000），但当本轮请求真的声明了
+	 * {@code max_tokens}（例如 32000）时，上游实际需要的输出空间就是 32000 —— 仍按 13000
+	 * 扣预留会把触发线整体推高，压缩在该压的时候判不出来。故取 {两者较大值}，再按窗口一半收口
+	 * （小窗口上绝对预留仍不得把分母压成个位数）。
+	 *
+	 * @param maxOutputTokens 本轮请求的生效 {@code max_tokens}（{@code <=0} = 未声明，沿用配置预留）
+	 */
+	public static int effectiveReserve(int limitTokens, int reserveTokens, int maxOutputTokens) {
+		int reserve = Math.max(Math.max(0, reserveTokens), Math.max(0, maxOutputTokens));
 		if (limitTokens <= 0) {
 			return reserve;
 		}
 		return Math.min(reserve, Math.max(1, limitTokens / 2));
+	}
+
+	/**
+	 * 谱系升级是否被允许（滞回只锁<b>同级重复</b>，不阻止升级）。
+	 *
+	 * <p>B1 修复的缺陷现场：{@code armed=false} 时 {@link #decide} 直接把 decision 压成 NONE，
+	 * 连"原始占比已经要求更高一级"也一起挡掉。升级的判据只能看<b>原始目标级</b>与谱系位置。
+	 */
+	public static boolean upgradeAllowed(Level raw, Level lineage) {
+		Level target = raw == null ? Level.NONE : raw;
+		Level current = lineage == null ? Level.NONE : lineage;
+		return target.ordinal() > current.ordinal();
+	}
+
+	/**
+	 * 硬越窗（下一发 prompt 估算已经吃满整个窗口，连输出空间都没有）。
+	 *
+	 * <p>这一档必须能逃逸滞回：否则一次"压完刚好落在 60% 以上"的会话会被永久锁死，
+	 * 下一次请求直接撞上游 400，而本地还在报 {@code hysteresis_locked}。
+	 */
+	public static boolean hardOverflow(int nextEst, int limitTokens) {
+		return limitTokens > 0 && nextEst >= limitTokens;
 	}
 
 	/**
@@ -160,6 +201,21 @@ public final class ContextTrigger {
 	 */
 	public Decision decide(int limitTokens, int usedPrompt, int lastCompletion, int newInputTokens,
 			int toolResultsSinceMeasure, int wholeRequestEstimate, boolean thresholdsArmed) {
+		return decide(limitTokens, usedPrompt, lastCompletion, newInputTokens, toolResultsSinceMeasure,
+				wholeRequestEstimate, thresholdsArmed, 0);
+	}
+
+	/**
+	 * 触发判定（带<b>真实输出预留</b>；B1）。
+	 *
+	 * <p>分母与滞回、轮内预算统一用 {@link #effectiveReserve(int, int, int)}：本轮请求声明的
+	 * {@code max_tokens} 大于配置预留时，触发线必须按真实输出空间收口，否则"这一发连输出都放不下"
+	 * 会被判成未达线。
+	 *
+	 * @param maxOutputTokens 本轮请求的生效 {@code max_tokens}（{@code <=0} = 未声明）
+	 */
+	public Decision decide(int limitTokens, int usedPrompt, int lastCompletion, int newInputTokens,
+			int toolResultsSinceMeasure, int wholeRequestEstimate, boolean thresholdsArmed, int maxOutputTokens) {
 		long nextEst;
 		if (usedPrompt > 0) {
 			nextEst = Math.max(0, usedPrompt) + Math.max(0, lastCompletion) + Math.max(0, newInputTokens)
@@ -173,7 +229,7 @@ public final class ContextTrigger {
 		else {
 			nextEst = Math.max(0, lastCompletion) + Math.max(0, newInputTokens) + Math.max(0, toolResultsSinceMeasure);
 		}
-		int reserve = effectiveReserve(limitTokens, this.config.getReserveTokens());
+		int reserve = effectiveReserve(limitTokens, this.config.getReserveTokens(), maxOutputTokens);
 		if (limitTokens <= 0) {
 			return new Decision(Level.NONE, 0d, (int) nextEst, 0, reserve);
 		}
@@ -218,6 +274,17 @@ public final class ContextTrigger {
 	 * @param everCompacted      本会话是否压缩过
 	 */
 	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted) {
+		return hysteresisUnlocked(usedNow, fixedPrefixTokens, limitTokens, everCompacted, 0);
+	}
+
+	/**
+	 * 滞回解锁（带真实输出预留；B1）。
+	 *
+	 * <p>分母必须与 {@link #decide} 完全一致（{@code limit − effectiveReserve(limit, reserve, maxOutput)}）：
+	 * 触发看一个分母、解锁看另一个分母，会在小窗口/大 max_tokens 的模型上互相打架。
+	 */
+	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted,
+			int maxOutputTokens) {
 		if (!everCompacted) {
 			return true;
 		}
@@ -226,7 +293,7 @@ public final class ContextTrigger {
 		}
 		int compressible = Math.max(0, Math.max(0, usedNow) - Math.max(0, fixedPrefixTokens));
 		long denominator = Math.max(1L,
-				(long) limitTokens - effectiveReserve(limitTokens, this.config.getReserveTokens()));
+				(long) limitTokens - effectiveReserve(limitTokens, this.config.getReserveTokens(), maxOutputTokens));
 		return (double) compressible * 100d / denominator < this.config.getHysteresisPercent();
 	}
 

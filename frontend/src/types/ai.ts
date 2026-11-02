@@ -306,9 +306,15 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   timestamp?: unknown
   /**
    * 所属 runId（additive；服务端条目带则透传，40 条记忆窗口通常不带）。
-   * 有则前端把它落到 {@link ChatMessage.runId}，作为「重试本轮」的归属证据。
+   * 有则前端把它落到 {@link ChatMessage.runId}，供断流重挂/恢复链路定位 run。
    */
   runId?: string
+  /**
+   * B5：合成提示的明确类别（`compaction` / `step_limit` / `turn_budget` / `correction`）。
+   * 仅作 additive 诊断：展示历史一律丢弃带 `synthetic` 的条目，不据类别补造节点；
+   * 真实压缩节点只由 B3 已提交事件恢复。缺省 = 旧后端。
+   */
+  syntheticKind?: 'compaction' | 'step_limit' | 'turn_budget' | 'correction' | string
   /**
    * 批G · S4：这一条 assistant 是**被用户停止**的半截正文（后端 {@code stopped} 元数据透出）。
    * 前端据此渲染「已停止」，而不是把半句话当完整答案。
@@ -324,8 +330,9 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   truncated?: boolean
   /**
    * 批次2 / AR-01 第 5 条：该条是<b>合成/系统提示</b>（上下文压缩摘要、工具步数/预算收尾），
-   * 不是用户原话、也不是模型答复。后端 `toHistoryItem` 按与写侧同源的判据加本键；
-   * 前端据此把它转成系统级「已压缩」提示（不画成用户气泡，也不展示任何内部配置键）。
+   * 不是用户原话、也不是模型答复。后端 `toHistoryItem` 按与写侧同源的判据加本键。
+   * B5：带本键的条目一律<b>不进展示历史</b>（含旧后端缺 `syntheticKind` 的情形），
+   * 不再转成消息或灰条；真实压缩节点只由 B3 已提交事件恢复。
    */
   synthetic?: boolean
   /**
@@ -340,10 +347,30 @@ export interface AiHistoryMessage extends MessageTruncationFields {
 }
 
 /** 会话历史响应（GET /api/ai/history/{sessionId} 的 data）。 */
+/** 已提交压缩事实（B3；`/history.events`）。位置按 `runId` + `anchorToolCallId` 恢复到 parts。 */
+export interface AiHistoryCompactionEvent {
+  eventId: string
+  runId: string
+  /** 后端 `RunStore.events` 原样透传，可能是 null。 */
+  atMs?: number | null
+  anchorToolCallId?: string | null
+}
+
 export interface AiHistory {
   sessionId: string
   count: number
   messages: AiHistoryMessage[]
+  /** B3 additive：已提交压缩事实（已按 atMs,eventId 升序）；缺省 = 旧后端/无事件。 */
+  events?: AiHistoryCompactionEvent[]
+  /** B2/B5 additive：更早的展示历史因容量上限未在本机保留（消息流内中性标记，非压缩事件）。 */
+  truncated?: boolean
+  /**
+   * R-154 #16 additive：窗口内条目总数（不受本次切片影响）。
+   * 缺省 = 旧后端不支持分页（等价于本次返回即全量）。
+   */
+  total?: number
+  /** R-154 #16 additive：本次切片之前还有更早条目（`offset > 0` 时为真）。 */
+  hasMore?: boolean
 }
 
 /**
@@ -414,9 +441,9 @@ export interface ChatMessage {
   /**
    * 批次2：这条消息所属的 **run**（后端 `start` / `message_start` 帧的 `runId`）。
    *
-   * <p>用途 = 「重试本轮」的唯一归属证据：`retryModelStep` 只按本字段定位后端 run，
-   * **不再**拿 `activeRunId` 猜（刷新后它可能为空或指向更晚的一轮）。缺键 = 归属不可证明
-   * （旧镜像 / 历史通道），此类消息不出「重试本轮」入口，也不得回退到别的轮。
+   * <p>用途 = 断流重挂与恢复链路定位后端 run 的归属证据（不拿 `activeRunId` 猜：
+   * 刷新后它可能为空或指向更晚的一轮）。缺键 = 归属不可证明（旧镜像 / 历史通道），
+   * 不得回退到别的轮。
    */
   runId?: string
   content: string
@@ -440,6 +467,20 @@ export interface ChatMessage {
   streaming: boolean
   /** 已收到终帧 */
   done: boolean
+  /**
+   * B4：真实 L2 压缩的紫色过程态起点（客户端锚点，epoch 毫秒）。
+   *
+   * <p>只由 `heartbeat{phase:'compacting'}` 写、由 `context`/`streaming`/`done`/`error`/本地停止/换轮清除。
+   * **纯内存态，不入镜像**（[`AiSessionMirror`] 的字段白名单不含它）⇒ 刷新后不伪造"压缩中"。
+   */
+  compactingStartedAtMs?: number
+  /**
+   * 本轮以**断流**收尾（缺 done/error 终帧，ADR-6）—— 消息级事实，入镜像。
+   *
+   * <p>为什么不复用 `lastRoundOutcome`：那是纯内存轮次态，刷新即丢；失败末条的「继续」入口
+   * 必须以消息级事实为准。续收拿到 `start`/终帧后清除（成功轮不再算断流）。
+   */
+  interrupted?: boolean
   /**
    * R-154 #17：消息时间戳（epoch 毫秒或 ISO 字符串，载荷原样透传）。历史路 = 后端历史条目
    * metadata 的 timestamp（AiHistoryMessage.timestamp，后端已回传）；实时路 = message_start 帧的
@@ -489,7 +530,7 @@ export interface ChatMessage {
    * 都写这个字段；**入镜像**（刷新后标记仍在），不入历史载荷之外的任何持久化。
    *
    * <p>停止是**消息级事实**：即使本轮零产出（无正文、无工具段），主动停止也必须写它 ——
-   * 恢复入口（继续 / 重试本轮）一律据此排除，不能因为"没内容可续"退回成可重试的失败轮。
+   * 恢复入口（继续）一律据此排除，不能因为"没内容可续"退回成可恢复的失败轮。
    */
   stopped?: boolean
   /**
@@ -501,14 +542,6 @@ export interface ChatMessage {
    * **入镜像**（刷新后仍能提示"这不是完整答案"）；缺键 = 未截断，不写 {@code false}。
    */
   truncated?: boolean
-  /**
-   * 批次2 / AR-01 第 5 条：**系统级合成提示**（历史 `synthetic=true` 的条目转成）。
-   *
-   * <p>面板按系统提示渲染（局部中性条 + 「已压缩」文案），**不**画成用户气泡、**不**把摘要正文
-   * 当用户原话，也不展示任何内部配置键（如 `compactedFrom`）。
-   * 缺键 = 普通消息；入镜像（刷新后提示仍在）。
-   */
-  synthetic?: boolean
 }
 
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
@@ -785,8 +818,22 @@ export interface SheetWritePlan {
   runId?: string
 }
 
+/**
+ * 压缩事件段（B3）：消息 parts 时序里的全宽流程分隔行 `已压缩上下文`。
+ *
+ * <p>不是回复属性、不是工具卡：不参与正文投影/复制/工具查找/展开态；只按 `eventId` 幂等去重。
+ * 不含摘要正文、toolCallId、token、秒表或级别。
+ */
+export interface CompactionEventPart extends MessagePartBase {
+  kind: 'event'
+  eventType: 'compaction'
+  eventId: string
+  /** 服务端提交时刻（仅用于同轮多事件的稳定排序，不上屏）。 */
+  atMs?: number
+}
+
 /** 消息段判别联合（按 `kind` 判别）。 */
-export type MessagePart = TextPart | ReasoningPart | ToolPart
+export type MessagePart = TextPart | ReasoningPart | ToolPart | CompactionEventPart
 
 /**
  * `upsertToolPart` 的补丁口径：前三项定位与建立段所需，其余为可选就地更新字段。
@@ -898,8 +945,9 @@ export interface GateSubmission {
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  *
  * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
- * `recoveryGap` / `synthetic` / `runId` —— 刷新后失败现场、中性态、系统级合成提示与 run 归属
- * 仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而重试错轮。
+ * `recoveryGap` / `interrupted` / `runId` —— 刷新后失败现场、中性态、断流事实与 run 归属
+ * 仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
+ * （`synthetic` 自 B5 起不再入镜像；旧镜像读取侧按同一口径过滤。）
  *
  * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧组合自洽
  * （新前端把缺键读成"无现场"），段结构未变。将来若出现**必填**新键或段结构变化，再升 `v`。
@@ -908,7 +956,7 @@ export interface AiSessionMirror {
   /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'synthetic' | 'runId'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**
@@ -1030,17 +1078,6 @@ export interface AiBusyRunRef {
   /** 后端给的 `/api/ai/events/{runId}`；与 `runId` 不一致时置 null（不指向编造地址） */
   reattach: string | null
 }
-
-/**
- * 批次2 / AR-05：`retryModelStep` 的本地结局（只用于面板/状态分派，不是后端码表）。
- *
- * - accepted：202 已受理，随后由既有 events 通道重挂；
- * - cancelled / partial：取消已先到 / 有半截内容（中性未确认视图，不再自动重跑）；
- * - in-progress：本端已有轮在跑/挂起（或后端 409 在途），本次不动作；
- * - denied：前置不满足（非失败轮 / 待决工具 / 历史不配对 / 模型已变）；
- * - error：网络/服务不可用等可重试失败。
- */
-export type AiRetryModelStepOutcome = 'accepted' | 'cancelled' | 'partial' | 'in-progress' | 'denied' | 'error'
 
 /** SSE 一轮的收尾判定结果。 */
 export interface StreamCloseInfo {
@@ -1181,9 +1218,6 @@ export interface AiRunCurrent {
   /** 上述剩余额对应的到期时刻（epoch 毫秒，服务端钟）；与 `snapshotRemainingMs` 同一次取值。 */
   snapshotExpiresAt?: number | null
 }
-
-/** 批次3：一次压缩的视图阶段（不复用 `contextCompaction` —— 后者是"压了什么"的数据，本类型是"正在做什么"）。 */
-export type CompactionPhase = 'idle' | 'compacting' | 'done'
 
 /**
  * 批次3：快照未建时的"准备中"现场（可重试，不是错误）。

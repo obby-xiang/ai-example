@@ -159,6 +159,53 @@ class ContextTriggerTest {
 			.isEqualTo(ContextTrigger.Level.L2);
 	}
 
+	/**
+	 * B1 / I1：滞回只锁<b>同级重复</b>，不阻止升级。
+	 *
+	 * <p>判据是原始目标级 vs 谱系位置：{@code rawLevel > lineage} ⇒ 允许触发；
+	 * 同级重复仍由 {@code hysteresisUnlocked} 抑制（调用方据此组合 armed）。
+	 */
+	@Test
+	void hysteresisLocksSameLevelButAllowsUpgrade() {
+		assertThat(ContextTrigger.upgradeAllowed(ContextTrigger.Level.L2, ContextTrigger.Level.L1))
+			.as("raw=L2 > lineage=L1 ⇒ 允许升级").isTrue();
+		assertThat(ContextTrigger.upgradeAllowed(ContextTrigger.Level.L3, ContextTrigger.Level.L2)).isTrue();
+		assertThat(ContextTrigger.upgradeAllowed(ContextTrigger.Level.L1, ContextTrigger.Level.L1))
+			.as("同级重复不允许借升级逃逸").isFalse();
+		assertThat(ContextTrigger.upgradeAllowed(ContextTrigger.Level.NONE, ContextTrigger.Level.L1)).isFalse();
+	}
+
+	/**
+	 * B1 / A2：硬越窗必须逃逸滞回（{@code nextEst >= limit}）。
+	 *
+	 * <p>缺陷现场：{@code armed=false} 把"压完仍 ≥60%"的会话永久锁死，下一次请求直接撞上游 400，
+	 * 本地还在报 {@code hysteresis_locked}。
+	 */
+	@Test
+	void hardOverflowBypassesHysteresis() {
+		ContextTrigger trigger = trigger();
+
+		assertThat(trigger.hysteresisUnlocked(79360, 0, 128000, true)).as("62% ⇒ 滞回锁住").isFalse();
+		assertThat(ContextTrigger.hardOverflow(128000, 128000)).as("nextEst == limit ⇒ 硬越窗").isTrue();
+		assertThat(ContextTrigger.hardOverflow(130000, 128000)).isTrue();
+		assertThat(ContextTrigger.hardOverflow(127999, 128000)).isFalse();
+		assertThat(ContextTrigger.hardOverflow(100, 0)).as("上限未知不构成硬越窗").isFalse();
+	}
+
+	/** B1：预留必须取"配置预留 / 本轮真实 max_tokens"的较大值，再按窗口一半收口。 */
+	@Test
+	void reserveIncludesMaxOutput() {
+		assertThat(ContextTrigger.effectiveReserve(128000, 13000, 0)).isEqualTo(13000);
+		assertThat(ContextTrigger.effectiveReserve(128000, 13000, 32000))
+			.as("真实 max_tokens 32000 > 配置预留 ⇒ 按 32000 留输出空间").isEqualTo(32000);
+		assertThat(ContextTrigger.effectiveReserve(15000, 13000, 20000))
+			.as("小窗口仍按一半收口，避免退化分母").isEqualTo(7500);
+		// 轮首判定用同一公式：32000 输出预留把分母压到 96000
+		ContextTrigger.Decision decision = trigger().decide(128000, 60000, 0, 0, 0, 0, true, 32000);
+		assertThat(decision.reserveTokens()).isEqualTo(32000);
+		assertThat(decision.ratio()).isCloseTo(60000d / 96000d, org.assertj.core.data.Offset.offset(1e-9));
+	}
+
 	/** 上限未知（降级态）：不发比例判定，ratio 恒 0。 */
 	@Test
 	void degradedWhenLimitUnknown() {

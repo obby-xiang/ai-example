@@ -113,10 +113,20 @@ public final class TurnBudgetPlan {
 	 * @param deltaSinceUsageTokens  真值口径下"发出上一跳之后新增"的部分（本批工具结果 + 追加指令）
 	 * @param armed                  本轮是否已进入收尾（armed）
 	 * @param armedBatches           本轮 armed 之后已被拦下的工具批次数
+	 * @param maxOutputTokens        本轮请求的生效 {@code max_tokens}（B1：预留取它与配置预留的较大值；
+	 *                               {@code <=0} = 未声明，沿用配置预留）
 	 */
 	public record Request(int limitTokens, int reserveTokens, int l1Percent, int wrapUpPercent,
 			boolean usageMeasured, int usedPromptTokens, int lastCompletionTokens, int estimateTokens,
-			int deltaSinceUsageTokens, boolean armed, int armedBatches) {
+			int deltaSinceUsageTokens, boolean armed, int armedBatches, int maxOutputTokens) {
+
+		/** 旧签名（不带真实输出预留；单测/轻装配面行为不变）。 */
+		public Request(int limitTokens, int reserveTokens, int l1Percent, int wrapUpPercent, boolean usageMeasured,
+				int usedPromptTokens, int lastCompletionTokens, int estimateTokens, int deltaSinceUsageTokens,
+				boolean armed, int armedBatches) {
+			this(limitTokens, reserveTokens, l1Percent, wrapUpPercent, usageMeasured, usedPromptTokens,
+					lastCompletionTokens, estimateTokens, deltaSinceUsageTokens, armed, armedBatches, 0);
+		}
 
 		/**
 		 * 下一跳请求的 prompt 估算（判据值）。
@@ -177,8 +187,9 @@ public final class TurnBudgetPlan {
 			return new Decision(Action.PROCEED, 0d, 0, 0, 0, true, REASON_LIMIT_UNKNOWN);
 		}
 		int limit = Math.max(0, request.limitTokens());
-		// C13：预留按实际窗口收口（小窗口下绝对预留会把分母压成个位数 ⇒ 退化分母）
-		int reserve = ContextTrigger.effectiveReserve(limit, request.reserveTokens());
+		// C13/B1：预留按实际窗口收口（小窗口下绝对预留会把分母压成个位数 ⇒ 退化分母），
+		// 并与轮首同口径考虑本轮真实 max_tokens（声明 32000 时按 32000 留输出空间）
+		int reserve = ContextTrigger.effectiveReserve(limit, request.reserveTokens(), request.maxOutputTokens());
 		int nextEst = request.nextEstimate();
 		if (limit <= 0) {
 			return new Decision(Action.PROCEED, 0d, nextEst, 0, reserve, true, REASON_LIMIT_UNKNOWN);

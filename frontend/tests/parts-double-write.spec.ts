@@ -62,7 +62,7 @@ function segDigest(parts: MessagePart[]): string {
   return JSON.stringify(parts.map((part) => ({
     kind: part.kind,
     seg: part.seg,
-    text: part.kind === 'tool' ? '' : part.text
+    text: part.kind === 'text' || part.kind === 'reasoning' ? part.text : ''
   })))
 }
 

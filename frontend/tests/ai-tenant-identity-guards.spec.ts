@@ -29,7 +29,6 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  retryModelStep: vi.fn(),
   feedbackSubmit: vi.fn()
 }))
 
@@ -166,7 +165,7 @@ describe('Task 4 返修：身份守卫单点', () => {
     expect(store.sessionId).toBe('1001')
     expect(api.createSession).toHaveBeenCalledTimes(1)
     expect(api.history).toHaveBeenCalledTimes(1)
-    expect(api.history).toHaveBeenCalledWith('1001')
+    expect(api.history).toHaveBeenCalledWith('1001', { offset: 0, limit: 1 })
   })
 
   it('410 会话已销毁 ⇒ 本地换会话并向后端重新取号（旧指针被新号替换）', async () => {

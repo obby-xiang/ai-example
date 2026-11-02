@@ -140,7 +140,7 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
     expect(store.contextSync).toBeNull()
     expect(store.lastUiEventResult).toBeNull()
     // 不接回原会话：不读原历史、不把旧 id 写回本页签
-    expect(api.history).not.toHaveBeenCalledWith('9301')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9301')
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(store.sessionId)
   })
 })

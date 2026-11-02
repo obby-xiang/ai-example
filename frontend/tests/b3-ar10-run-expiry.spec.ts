@@ -26,8 +26,7 @@ const api = vi.hoisted(() => ({
   confirm: vi.fn(),
   frontendToolResult: vi.fn(),
   deleteHistory: vi.fn(),
-  getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  getContext: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))

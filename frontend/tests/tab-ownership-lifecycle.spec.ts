@@ -121,7 +121,7 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     expect(store.sessionId).toBe(ownSession)
     expect(store.tabOwnership).toBe('owner')
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe(ownSession)
-    expect(api.history).not.toHaveBeenCalledWith('9201')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9201')
   })
 
   it('真关闭（锁随文档释放）⇒ 空白复制页签按复制来源接手原会话', async () => {
@@ -137,7 +137,7 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     // 宽限内不接手（旧实现会立刻抢）
     await wait(OWNERSHIP_RELEASE_GRACE_MS / 3)
     expect(store.sessionId).toBe(ownSession)
-    expect(api.history).not.toHaveBeenCalledWith('9202')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9202')
 
     // 文档销毁 ⇒ 别人的锁释放；宽限到期后按**复制来源**接手原会话（N09/M07：
     // 角色已是 owner 的空白副本同样有资格 —— 旧实现把这条路径写成不可达）
@@ -148,7 +148,7 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     expect(store.sessionId).toBe('9202')
     expect(store.tabOwnership).toBe('owner')
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9202')
-    expect(api.history).toHaveBeenCalledWith('9202')
+    expect(api.history).toHaveBeenCalledWith('9202', { offset: 0, limit: 1 })
     // 原会话的锁归本页签，空白会话的锁已让出
     expect(locks.isHeld(sessionLockName('9202'))).toBe(true)
     expect(locks.isHeld(sessionLockName(ownSession))).toBe(false)
@@ -177,7 +177,7 @@ describe('② 让渡宽限：刷新 / 慢重载不把原会话让给空白副本
     expect(locks.isHeld(sessionLockName(blankSession))).toBe(true)
     // 别人会话的锁没有被本页签冒领
     expect(locks.isHeld(sessionLockName('9211'))).toBe(false)
-    expect(api.history).not.toHaveBeenCalledWith('9211')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9211')
   })
 
   it('慢重载（宽限已过、会话已被副本接手）⇒ 回来的原页签不清屏/不换 id，只降级', async () => {

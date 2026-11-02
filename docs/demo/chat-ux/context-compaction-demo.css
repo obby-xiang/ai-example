@@ -7,8 +7,6 @@
     --blue: #2563eb;
     --blue-soft: #eff4ff;
     --blue-line: #cddcff;
-    --panel-blue-soft: #eff6ff;
-    --panel-blue-line: #dbeafe;
     --amber: #b45309;
     --amber-soft: #fffbeb;
     --amber-line: #fde68a;
@@ -476,51 +474,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-
-  .ai-stage-host { flex: none; }
-
-  .stage-bar {
-    margin: 8px 8px 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border: 1px solid var(--panel-blue-line);
-    border-radius: 9px;
-    background: var(--panel-blue-soft);
-    padding: 7px 11px;
-  }
-  .stage-dot {
-    width: 7px;
-    height: 7px;
-    flex: none;
-    border-radius: 50%;
-    background: var(--blue);
-    animation: breathe 1.5s ease-in-out infinite;
-  }
-  .stage-main { min-width: 0; flex: 1; }
-  .stage-title {
-    font-size: 12.4px;
-    line-height: 1.5;
-    color: var(--ink);
-  }
-  .stage-hint {
-    font-size: 11.5px;
-    line-height: 1.5;
-    color: var(--ink-2);
-  }
-  .stage-retry {
-    flex: none;
-    white-space: nowrap;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: #fff;
-    padding: 4px 11px;
-    font-size: 12.2px;
-    line-height: 1.5;
-    color: var(--ink-2);
-    transition: border-color .15s, color .15s;
-  }
-  .stage-retry:hover { border-color: var(--ink-3); color: var(--ink); }
 
   .ai-messages {
     flex: 1;
@@ -1047,7 +1000,7 @@
   @keyframes fadeOut { to { opacity: 0; } }
 
   @media (prefers-reduced-motion: reduce) {
-    .stage-dot, .breathing-dot, .waiting-dot, .breathing-text, .waiting-text { animation: none; }
+    .breathing-dot, .waiting-dot, .breathing-text, .waiting-text { animation: none; }
     .breathing.fade-out { animation: none; }
     .tip { transition: none; }
   }

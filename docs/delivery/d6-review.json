@@ -252,6 +252,13 @@
       "reason": "本批仅让继续操作与普通发送一致展示用户消息并修正现行规格文档，D6迁移接口、存储键及跨实例契约均未变化",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:4aac660d77802ad896e794f154e585e5dcb60d3825a64cf6d2443df4fa3bc3c6",
+      "status": "synced",
+      "reason": "已同步压缩plan/commit、transcript展示历史、分页、压缩事件、同槽计数与TTL/purge及统一继续契约",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

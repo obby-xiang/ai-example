@@ -3,6 +3,7 @@ package com.example.configmgr.ai.config;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
@@ -24,6 +25,7 @@ import java.util.Map;
  * 模型侧参数不在这里，走官方 {@code spring.ai.openai.*}（DC-01 全配置化）。
  */
 @Data
+@Slf4j
 @ConfigurationProperties(prefix = "app.ai")
 public class AiProperties {
 
@@ -245,6 +247,22 @@ public class AiProperties {
 			throw new IllegalStateException("app.ai.sse.write-timeout 必须 > 0（当前 = " + writeTimeout
 					+ "）：0/负值会被 SseWriteBudget 静默回落为缺省 15s，运行行为与配置文件不符"
 					+ "（排障误导）；收紧写侧释放只需配一个更小的正值");
+		}
+	}
+
+	/**
+	 * 启动期校验 {@code app.ai.session-ttl} 必须为正。
+	 *
+	 * <p>
+	 * transcript（用户展示历史）把它当唯一 TTL：无效时 store 会<b>拒写</b>以杜绝永久键，
+	 * 若不在启动期失败，表现就是"展示历史整体静默停写"——直到有人发现刷新后历史不回显。
+	 * 与 {@link #verifySseWriteTimeout()} 同一姿态：这类配置错没有降级解释空间。
+	 */
+	@PostConstruct
+	void verifySessionTtl() {
+		if (this.sessionTtl == null || this.sessionTtl.isZero() || this.sessionTtl.isNegative()) {
+			throw new IllegalStateException("app.ai.session-ttl 必须 > 0（当前 = " + this.sessionTtl
+					+ "）：transcript 依赖它给展示历史设置 TTL；无效值会让写入被拒、历史静默不再落盘");
 		}
 	}
 
@@ -509,6 +527,14 @@ public class AiProperties {
 					+ "）不得大于 max-messages（" + memory.getMaxMessages()
 					+ "）：两套兜底互相打穿（上限永远不生效，窗口只剩预算一个维度）");
 		}
+		if (memory.getMinMessages() == memory.getMaxMessages()) {
+			// A4：默认 min = max = 40 不是坏配置（条数钉死是明确口径），但必须诚实告知它的实际语义：
+			// token 预算只能推动工具结果清理（ContextCompactor 的 L1），按 turn 整轮淘汰不可达。
+			// 不在这里擅自降低下限（那会改变用户可见工作上下文的轮数，属另一批的展示历史分离）。
+			log.warn("app.ai.memory.min-messages == max-messages（{}）：条数被钉死，token 预算只能触达工具结果清理"
+					+ "（ContextCompactor L1），按 turn 整轮淘汰不可达；要开放裁轮请把 min-messages 调到小于 max-messages",
+					memory.getMinMessages());
+		}
 	}
 
 	private static void checkPercent(String key, int value) {
@@ -659,6 +685,11 @@ public class AiProperties {
 		 * 发生（min = max = 40 的实际语义 —— 窗口是"40 条的滑动历史"，预算只决定这 40 条里有多少工具
 		 * 结果还留着原文）。业界调研区间"保留最近 3–8 轮"是按轮算，本仓按条计（一轮提问+回答 = 2 条），
 		 * 40 条 ≈ 20 轮 ≈ 调研区间上限的 2–6 倍 —— 48k 预算才是真正起作用的那个维度。
+		 *
+		 * <p><b>B1 诚实化（2026-11-03）</b>：工具结果清理已经收敛到 {@code ContextCompactor}（唯一的
+		 * mutator），{@code MemoryWindow} 不再清内容、只做整轮淘汰；因此 min = max 时 token 预算
+		 * <b>只能触发一次 L1 清理</b>，按轮淘汰确实不可达。默认值保持不变（A4 主控裁决：不降 12、
+		 * 不新开放额外裁轮行为），启动期由 {@link #verifyMemory()} WARN 一次。
 		 */
 		private int minMessages = 40;
 

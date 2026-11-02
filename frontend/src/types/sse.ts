@@ -161,7 +161,7 @@ export const SseFrameTypes = [
    * 上下文压缩事件（上下文统计与压缩专项批①；帧类型集 15 → 16 的**唯一**新增）。
    *
    * 位置：压缩发生在**请求前**，故它必然出现在本轮第一个 `delta` / `tool_start` 之前；
-   * 载荷 `{level, before, after, turns, lostTokens, reason, est, savedTokens, clearedPairs}`。
+   * 载荷 `{level, before, after, turns, lostTokens, reason, est, eventId, committed, cause, anchorToolCallId, runId, atMs}`。
    * 未发生压缩则**一帧不发**（不是"每轮发一个 level=none"）。
    */
   'context',
@@ -545,8 +545,13 @@ export interface SseContextFrame extends SseFrameBase {
   lostTokens: number
   reason: string
   est: boolean
-  savedTokens?: number
-  clearedPairs?: number
+  /** B3（additive）：稳定事实身份；只有已提交压缩才有。 */
+  eventId?: string
+  committed?: boolean
+  cause?: string
+  anchorToolCallId?: string | null
+  runId?: string
+  atMs?: number
 }
 
 /** 终帧：error。 */

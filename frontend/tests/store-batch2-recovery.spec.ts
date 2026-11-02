@@ -7,12 +7,10 @@
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
 import { ApiError } from '@/api/http'
 import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
 import { mirrorStorageKey } from '@/utils/ai-identity'
-import ContextPopover from '@/components/AiPanel/ContextPopover.vue'
 import type { AiRunCurrent, ChatMessage } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 
@@ -25,8 +23,7 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  getContext: vi.fn(),
-  retryModelStep: vi.fn()
+  getContext: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -347,78 +344,6 @@ describe('批次2 · park 等待状态与 unconfirmed 中性态', () => {
   })
 })
 
-describe('批次2 · 上下文明细三态（ContextPopover）', () => {
-  function snapshot() {
-    return {
-      sessionId: 'sess-ctx',
-      model: 'm',
-      turnNo: 1,
-      measuredAtMs: 1,
-      limitTokens: 128000,
-      usedTokens: 84000,
-      percent: 65.6,
-      source: 'stream',
-      estimated: false,
-      breakdown: [
-        { key: 'history', tokens: 50000 },
-        { key: 'free', tokens: 44000 }
-      ],
-      compaction: {
-        level: 'none', compactedTurns: 0, lostTokens: 0, lastAtMs: null, reason: null, circuit: 'closed', fuseFails: 0
-      }
-    }
-  }
-
-  it('store：loading → ready → error；失败不覆盖已有数据，重试是唯一再取路径', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-ctx'
-    api.getContext.mockResolvedValue(snapshot())
-
-    const pending = store.loadContext()
-    expect(store.contextStatus).toBe('loading')
-    await pending
-    expect(store.contextStatus).toBe('ready')
-    expect(store.contextError).toBeNull()
-    const previous = store.contextBreakdown
-    expect(previous).toHaveLength(2)
-
-    api.getContext.mockRejectedValue(new ApiError('down', 503, 'AI_REDIS_UNAVAILABLE', null))
-    await store.retryLoadContext()
-    expect(store.contextStatus).toBe('error')
-    expect(store.contextError).toMatchObject({ scope: 'context', status: 503 })
-    // 读不到 ≠ 用了 0：旧数据原样保留
-    expect(store.contextBreakdown).toBe(previous)
-    expect(store.contextUsage?.usedTokens).toBe(84000)
-  })
-
-  it('ContextPopover：loading / error+retry / 数据 三态各自可判，失败且有过期数据时两者并存', async () => {
-    const pinia = createPinia()
-    setActivePinia(pinia)
-    const store = useAiStore()
-    const wrapper = mount(ContextPopover, { global: { plugins: [pinia] } })
-
-    store.contextStatus = 'loading'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="context-popover-loading"]').exists()).toBe(true)
-
-    store.contextStatus = 'error'
-    store.contextBreakdown = null
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="context-popover-error"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="context-popover-retry"]').exists()).toBe(true)
-
-    store.contextBreakdown = [{ key: 'history', tokens: 10 }, { key: 'free', tokens: 5 }]
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="context-popover-stale"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="context-row-history"]').exists()).toBe(true)
-
-    store.contextStatus = 'ready'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="context-popover-stale"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="context-row-free"]').exists()).toBe(true)
-  })
-})
-
 describe('批次2 · 归档窗口缺口（Task 3：只认后端明确的响应头标记，不按序号跳号推断）', () => {
   it('reattach 明确回调归档裁剪区间：记为 archive-window 缺口（不可完整恢复，不伪造失败）', async () => {
     const store = freshStore()
@@ -484,104 +409,8 @@ describe('批次2 · 开流前瞬时失败的有界重试', () => {
   }, 15000)
 })
 
-describe('批次2 · 仅模型步重跑（真实窄入口）', () => {
-  it('202 受理后不追加用户消息、不本地截断：调用窄入口并用既有 events 重挂', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-retry-step'
-    store.activeRunId = 'run-fail'
-    store.runSeq = { 'run-fail': 4 }
-    store.historyLoaded = true
-    const host = store.appendAssistantMessage('')
-    host.done = true
-    host.runId = 'run-fail'
-    api.retryModelStep.mockResolvedValue({ retried: true, reason: 'MODEL_STEP_RETRY_ACCEPTED' })
-    api.reattachRun.mockImplementation(() => new Promise(() => {}))
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('accepted')
-    expect(api.retryModelStep).toHaveBeenCalledWith('run-fail')
-    expect(api.reattachRun).toHaveBeenCalled()
-    expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-fail')
-    // 只重跑既有轮：用户消息数不变（这里本来就没有）
-    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(0)
-    expect(host.streaming).toBe(true)
-  })
-
-  it('409 CANCELLED ⇒ 返回取消语义，不驱动、不把消息改成成功', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-retry-cancel'
-    store.activeRunId = 'run-cancelled'
-    store.runSeq = { 'run-cancelled': 2 }
-    const host = store.appendAssistantMessage('')
-    host.done = true
-    host.runId = 'run-cancelled'
-    api.retryModelStep.mockRejectedValue(new ApiError('denied', 409, 'ILLEGAL_STATE', {
-      reason: 'RETRY_PRECONDITION_FAILED',
-      failedCheck: 'CANCELLED'
-    }))
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('cancelled')
-    expect(store.lastRoundOutcome).toBe('cancelled')
-    expect(api.reattachRun).not.toHaveBeenCalled()
-  })
-
-  it('409 PARTIAL_CONTENT ⇒ 中性「状态未确认」视图，不自动替换半截内容', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-retry-partial'
-    store.activeRunId = 'run-partial'
-    store.runSeq = { 'run-partial': 3 }
-    const host = store.appendAssistantMessage('')
-    host.done = true
-    host.runId = 'run-partial'
-    api.retryModelStep.mockRejectedValue(new ApiError('denied', 409, 'ILLEGAL_STATE', {
-      reason: 'RETRY_PRECONDITION_FAILED',
-      failedCheck: 'PARTIAL_CONTENT'
-    }))
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('partial')
-    expect(host.unconfirmed).toBe(true)
-    expect(host.errorCard ?? null).toBeNull()
-    expect(api.reattachRun).not.toHaveBeenCalled()
-  })
-
-  it('message.runId 优先于 activeRunId（刷新后 activeRunId 指向别的轮也不得重试错轮）', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-retry-own'
-    store.activeRunId = 'run-other'
-    store.runSeq = { 'run-own': 5 }
-    const host = store.appendAssistantMessage('')
-    host.done = true
-    host.runId = 'run-own'
-    api.retryModelStep.mockResolvedValue({ retried: true, reason: 'MODEL_STEP_RETRY_ACCEPTED' })
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('accepted')
-    expect(api.retryModelStep).toHaveBeenCalledWith('run-own')
-  })
-
-  it('无 runId 归属证据 ⇒ 拒绝重试（不回退 activeRunId、不调用窄入口）', async () => {
-    const store = freshStore()
-    store.sessionId = 'sess-retry-unknown'
-    store.activeRunId = 'run-maybe-other'
-    const host = store.appendAssistantMessage('')
-    host.done = true
-
-    const outcome = await store.retryModelStep(host)
-
-    expect(outcome).toBe('denied')
-    expect(store.retryRunIdFor(host)).toBeNull()
-    expect(api.retryModelStep).not.toHaveBeenCalled()
-  })
-})
-
 describe('批次2 · synthetic 历史条目', () => {
-  it('synthetic=true 的 USER 条目转成 SYSTEM 消息并保留 synthetic 标记', async () => {
+  it('synthetic=true 的 USER 条目（旧后端缺 kind）也不进展示历史', async () => {
     api.history.mockResolvedValue({
       sessionId: 'sess-syn',
       count: 1,
@@ -592,9 +421,179 @@ describe('批次2 · synthetic 历史条目', () => {
 
     await store.loadHistory()
 
-    const message = store.messages[0]
-    expect(message?.role).toBe('system')
-    expect(message?.synthetic).toBe(true)
+    expect(store.messages).toEqual([])
+  })
+
+  it('旧镜像里的 synthetic 摘要在读侧被过滤（不当普通消息渲染）', async () => {
+    sessionStorage.setItem(mirrorStorageKey('sess-legacy-syn'), JSON.stringify({
+      v: 2,
+      savedAt: Date.now(),
+      messages: [
+        {
+          id: 'u-keep',
+          role: 'user',
+          content: '原话',
+          parts: [{ kind: 'text', seg: 0, text: '原话', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        },
+        {
+          id: 'sys-drop',
+          role: 'system',
+          content: '压缩摘要正文',
+          synthetic: true,
+          parts: [{ kind: 'text', seg: 0, text: '压缩摘要正文', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        }
+      ]
+    }))
+    api.history.mockResolvedValue({ sessionId: 'sess-legacy-syn', count: 0, messages: [] })
+    const store = freshStore()
+    store.sessionId = 'sess-legacy-syn'
+
+    await store.loadHistory()
+
+    expect(store.messages.map((message) => message.id)).toEqual(['u-keep'])
+  })
+
+  it('synthetic 抑制会断开 assistant 合并窗（不造气泡、不并掉后一条的 runId）', () => {
+    const store = freshStore()
+
+    const built = store.buildHistoryMessages([
+      { type: 'ASSISTANT', text: 'A1', runId: 'run-1' },
+      { type: 'USER', text: '[上下文压缩摘要]', synthetic: true, syntheticKind: 'compaction' },
+      { type: 'ASSISTANT', text: 'A2', runId: 'run-2' }
+    ])
+
+    expect(built).toHaveLength(2)
+    expect(built.map((message) => message.content)).toEqual(['A1', 'A2'])
+    expect(built.map((message) => message.runId)).toEqual(['run-1', 'run-2'])
+  })
+})
+
+describe('批次2 · 接管清掉断流事实（#6）', () => {
+  it('reattachActive 接管宿主时清除上一段 interrupted', async () => {
+    const store = freshStore()
+    store.sessionId = 'sess-int-clear'
+    store.historyLoaded = true
+    const host = store.appendAssistantMessage('半截回答')
+    host.runId = 'run-int-clear'
+    host.done = true
+    host.streaming = false
+    host.interrupted = true
+    api.reattachRun.mockResolvedValue({ terminal: false, reason: '断流' })
+
+    await store.reattachActive('run-int-clear', { hostMessageId: host.id, lastSeq: 1 })
+
+    expect(host.interrupted).toBeUndefined()
+  })
+})
+
+describe('批次2 · 结局标记不得贴到上一轮回答', () => {
+  it('历史末条是本轮 USER（本轮答复未落历史）⇒ 不补标记、不补 runId', async () => {
+    sessionStorage.setItem(mirrorStorageKey('sess-carry-guard'), JSON.stringify({
+      v: 2,
+      savedAt: Date.now(),
+      inFlight: false,
+      messages: [
+        {
+          id: 'u-cur',
+          role: 'user',
+          content: '本轮提问',
+          parts: [{ kind: 'text', seg: 0, text: '本轮提问', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        },
+        {
+          id: 'a-cur',
+          role: 'assistant',
+          content: '失败正文',
+          runId: 'run-cur',
+          code: 'EMPTY_REPLY',
+          errorCard: { variant: 'generic', code: 'EMPTY_REPLY', title: '本轮出错', guide: '', action: '', detail: '' },
+          parts: [{ kind: 'text', seg: 0, text: '失败正文', streaming: false }],
+          reasoning: '',
+          toolRuns: [],
+          pendingCall: null
+        }
+      ]
+    }))
+    api.history.mockResolvedValue({
+      sessionId: 'sess-carry-guard',
+      count: 3,
+      total: 3,
+      messages: [
+        { type: 'USER', text: '上一轮提问' },
+        { type: 'ASSISTANT', text: '上一轮回答' },
+        { type: 'USER', text: '本轮提问' }
+      ]
+    })
+    const store = freshStore()
+    store.sessionId = 'sess-carry-guard'
+
+    await store.loadHistory()
+
+    expect(store.messages).toHaveLength(3)
+    expect(store.messages[2]).toMatchObject({ role: 'user', content: '本轮提问' })
+    const previous = store.messages[1]
+    expect(previous?.role).toBe('assistant')
+    expect(previous?.content).toBe('上一轮回答')
+    expect(previous?.errorCard ?? null).toBeNull()
+    expect(previous?.code ?? null).toBeNull()
+    expect(previous?.runId ?? null).toBeNull()
+    expect(previous?.interrupted ?? false).toBe(false)
+  })
+})
+
+describe('批次2 · 断流是消息级事实（刷新可恢复）', () => {
+  it('断流入镜像；历史已含该轮 assistant（=已终态）时不再搬断流标记', async () => {
+    const store = freshStore()
+    store.sessionId = 'sess-int'
+    store.historyLoaded = true
+    store.recordUserMessage('问一句')
+    const host = store.appendAssistantMessage('已经收到的半截正文')
+    host.id = 'a-int'
+    host.runId = 'run-int'
+    api.reattachRun.mockImplementation((
+      _runId: string,
+      handlers: { onClose?: (info: { terminal: boolean; reason?: string }) => void }
+    ) => {
+      handlers.onClose?.({ terminal: false, reason: '断流' })
+      return Promise.resolve({ terminal: false, reason: '断流' })
+    })
+
+    await store.reattachActive('run-int', { hostMessageId: 'a-int', lastSeq: 1 })
+
+    expect(store.lastRoundOutcome).toBe('interrupted')
+    expect(host.interrupted).toBe(true)
+    // 连接收尾后 loading 已复位：镜像按"不在途"重写（真实页签的下一次落盘即此形态）
+    store.writeMirrorNow()
+    const raw = readMirrorRaw('sess-int')
+    expect(raw.messages.find((message) => message.id === 'a-int')?.interrupted).toBe(true)
+
+    // 刷新：历史里已有该轮 assistant 条目（transcript 只写终态）⇒ 该轮不是断流，
+    // 镜像的 interrupted 不得搬到这条完成回答上（否则完成轮会冒出「继续」）。
+    api.history.mockResolvedValue({
+      sessionId: 'sess-int',
+      count: 2,
+      messages: [
+        { type: 'USER', text: '问一句' },
+        { type: 'ASSISTANT', text: '后端已完成的回答', runId: 'run-int' }
+      ]
+    })
+    const reloaded = freshStore()
+    reloaded.sessionId = 'sess-int'
+
+    await reloaded.loadHistory()
+
+    expect(reloaded.lastRoundOutcome).toBe('ok') // 纯内存轮次态确实丢了
+    const historicalTail = reloaded.messages[reloaded.messages.length - 1]
+    expect(historicalTail?.content).toBe('后端已完成的回答')
+    expect(historicalTail?.interrupted ?? false).toBe(false)
   })
 })
 

@@ -471,7 +471,7 @@ event=turn_end runId=.. sessionId=.. status=done code=none attempts=1 attempt=1 
 | `elapsedMs` | 本轮已耗时 |
 
 > **与 `turn_retry` 的分工**：`turn_retry` = **上游断流**类可重试失败（三条件：剩余次数 / 未超机器段预算 / 未产出且无副作用）；`turn_empty_retry` = **零产出空回复**的一次"仅模型步重跑"（不重执行工具、不追加用户消息、同模型、同固定历史）。两者**不可互相替代**，也不共用 `code` 语义。
-> 人工触发的 `POST /api/ai/runs/{runId}/retry-model-step` 走**续跑入口**，日志形如 `turn_start(resumed=true, resumeReason=…)`，**不写** `turn_empty_retry`。
+> 人工「重试本轮 / 仅模型步重跑」入口（`POST /api/ai/runs/{runId}/retry-model-step`）已移除。失败 / 断流后的恢复由普通「继续」承载：前端按正常发送新建普通轮次（`ai.send('继续')`），**不写** `turn_empty_retry`，也不再产生专用重试链路日志。
 
 ### 8.3 `turn_accepted.chars` 不再含 DLP（更正 §2.1）
 

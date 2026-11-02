@@ -73,7 +73,6 @@ class MemoryWindowLogTraceTest {
 			.contains("tokensAfter=6000")
 			.contains("budget=6000")
 			.contains("droppedTurns=7")
-			.contains("clearedToolResults=0")
 			.contains("stillOver=false");
 	}
 

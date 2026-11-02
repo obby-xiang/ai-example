@@ -65,21 +65,77 @@ public final class ContextLimitResolver {
 	}
 
 	/**
-	 * 解析上限。
+	 * 上限的来源（A6：回退不再静默）。
+	 *
+	 * <p>只用于现有只读诊断面（{@code /context}、{@code /health}），不新增用户强提示：
+	 * 界面仍按 {@code limitTokens} 的正常/未知两态显示。
+	 */
+	public enum Source {
+
+		/** 模型行明确声明了 {@code max_context}。 */
+		SCHEMA("schema"),
+
+		/** 模型行缺 {@code max_context}（或没有模型身份）⇒ 回落到过渡键。 */
+		FALLBACK("fallback"),
+
+		/** 两级都没有 ⇒ 未知（降级态，不做比例判定）。 */
+		UNKNOWN("unknown");
+
+		private final String wire;
+
+		Source(String wire) {
+			this.wire = wire;
+		}
+
+		public String wire() {
+			return this.wire;
+		}
+
+	}
+
+	/**
+	 * 解析结果（限值 + 来源）。
+	 *
+	 * @param limitTokens {@code > 0} 的 token 上限；{@code 0} = 未知
+	 * @param source     取数来源（{@link Source#wire()} 是线上值）
+	 */
+	public record ResolveResult(int limitTokens, Source source) {
+
+		public boolean known() {
+			return this.limitTokens > 0;
+		}
+
+	}
+
+	private final java.util.concurrent.atomic.AtomicBoolean fallbackWarned = new java.util.concurrent.atomic.AtomicBoolean();
+
+	/**
+	 * 解析上限（只要数值；保留给既有调用点）。
 	 *
 	 * @return {@code > 0} 的 token 上限；{@code 0} = 未知（降级态）
 	 */
 	public int resolve(Long providerId, String modelId) {
+		return resolveDetailed(providerId, modelId).limitTokens();
+	}
+
+	/**
+	 * 解析上限与来源（A6）。
+	 *
+	 * <p>已知模型缺 {@code max_context} 时<b>保留</b>过渡键回退（直接改成"未知"会让存量模型
+	 * 全部停掉压缩，断崖式回归），但不再静默：来源如实标 {@link Source#FALLBACK}，
+	 * 且首次命中只 WARN 一次（不每轮刷屏）。
+	 */
+	public ResolveResult resolveDetailed(Long providerId, String modelId) {
 		if (modelId == null || modelId.isBlank()) {
 			// 没有模型身份就无从查 DB —— 过渡键仍可用（"未指定模型"是合法调用：端点重建时快照里没模型）
-			return configured();
+			return fromConfigured(Source.FALLBACK, null);
 		}
 		return fromDatabase(providerId, modelId);
 	}
 
-	private int fromDatabase(Long providerId, String modelId) {
+	private ResolveResult fromDatabase(Long providerId, String modelId) {
 		if (this.source == null) {
-			return configured();
+			return fromConfigured(Source.FALLBACK, modelId);
 		}
 		Integer maxContext;
 		try {
@@ -89,12 +145,26 @@ public final class ContextLimitResolver {
 			// 配置快照读失败不该让一轮对话失败：上限是观测/压缩的输入，降级到过渡键即可
 			log.warn("读取 ai_model.max_context 失败 model={}：{}（回落 app.ai.context.limit-tokens）", modelId,
 					ex.getMessage());
-			return configured();
+			return fromConfigured(Source.FALLBACK, modelId);
 		}
 		if (maxContext == null || maxContext <= 0) {
-			return configured();
+			return fromConfigured(Source.FALLBACK, modelId);
 		}
-		return maxContext;
+		return new ResolveResult(maxContext, Source.SCHEMA);
+	}
+
+	private ResolveResult fromConfigured(Source sourceWhenKnown, String modelId) {
+		int fallback = configured();
+		if (fallback <= 0) {
+			return new ResolveResult(0, Source.UNKNOWN);
+		}
+		if (sourceWhenKnown == Source.FALLBACK && modelId != null && !modelId.isBlank()
+				&& this.fallbackWarned.compareAndSet(false, true)) {
+			log.warn("模型 {} 未声明 ai_model.max_context：上限回落到 app.ai.context.limit-tokens={}（limitSource=fallback）。"
+					+ "回退保留（未直接判未知，避免存量模型停掉压缩），但请补齐模型行的 max_context；本提示只记一次",
+					modelId, fallback);
+		}
+		return new ResolveResult(fallback, sourceWhenKnown);
 	}
 
 	/**

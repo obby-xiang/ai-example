@@ -1,8 +1,8 @@
 /**
  * 批次3 前端 · 压缩阶段可见性（批次3 聚焦 RED/GREEN = 本文件第一条用例）。
  *
- * 覆盖：`heartbeat{phase:'compacting'}` 的真实已用时间、`context` 帧后的完成提示、
- * 不伪造占用百分比；其余用例（准备中 / 面板渲染 / 终态收口）只写不跑。
+ * 覆盖：`heartbeat{phase:'compacting'}` 只给宿主消息落真实起点、`context`/`streaming`/终态/本地停止清除、
+ * 不伪造占用百分比；准备中用例保持原口径。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -65,9 +65,9 @@ beforeEach(() => {
 })
 
 describe('批次3 · 压缩阶段', () => {
-  it('compacting 心跳只写服务端已用时间，context 后标记完成且不改占用百分比', () => {
+  it('compacting 心跳只给宿主消息落真实起点，context 后清除且不改占用百分比', () => {
     const store = freshStore()
-    store.appendAssistantMessage('')
+    const host = store.appendAssistantMessage('')
 
     store.handleFrame(asFrame({ type: 'start', runId: 'run-c', sessionId: 'sess' }))
     store.handleFrame(asFrame({
@@ -77,11 +77,8 @@ describe('批次3 · 压缩阶段', () => {
       atMs: Date.now()
     }))
 
-    expect(store.compactionPhase).toBe('compacting')
-    expect(store.compactionElapsedMs).toBe(12_000)
-    expect(store.compactionStartedAtMs).toBeTypeOf('number')
-    expect(Date.now() - (store.compactionStartedAtMs as number)).toBeGreaterThanOrEqual(11_500)
-    expect(store.compactionCompletedAtMs).toBeNull()
+    expect(host.compactingStartedAtMs).toBeTypeOf('number')
+    expect(Date.now() - (host.compactingStartedAtMs as number)).toBeGreaterThanOrEqual(11_500)
     // 压缩阶段不是"占用已变化"：占用百分比只认 done.context（不伪造进度）
     expect(store.contextUsage).toBeNull()
 
@@ -96,38 +93,46 @@ describe('批次3 · 压缩阶段', () => {
       est: false
     }))
 
-    expect(store.compactionPhase).toBe('done')
-    expect(store.compactionCompletedAtMs).toBeTypeOf('number')
-    expect(store.contextCompaction?.level).toBe('L2')
+    expect(host.compactingStartedAtMs).toBeUndefined()
     expect(store.contextUsage).toBeNull()
   })
 
-  it('streaming 心跳同时清掉准备中与压缩两个阶段（摘要结束立即恢复工作中）', () => {
+  it('streaming 心跳同时清掉准备中与消息压缩过程态（摘要结束立即恢复工作中）', () => {
     const store = freshStore()
-    store.appendAssistantMessage('')
+    const host = store.appendAssistantMessage('')
     store.handleFrame(asFrame({ type: 'start', runId: 'run-s', sessionId: 'sess' }))
     store.handleFrame(asFrame({ type: 'heartbeat', phase: 'compacting', elapsedMs: 3_000 }))
     store.notePreparingHeartbeat('run-s', 1_000)
 
-    expect(store.compactionPhase).toBe('compacting')
+    expect(host.compactingStartedAtMs).toBeTypeOf('number')
     expect(store.preparingRun).not.toBeNull()
 
     store.handleFrame(asFrame({ type: 'heartbeat', phase: 'streaming', elapsedMs: 0 }))
 
     expect(store.preparingRun).toBeNull()
-    expect(store.compactionPhase).toBe('done')
+    expect(host.compactingStartedAtMs).toBeUndefined()
   })
 
-  it('终帧收口压缩阶段，不让完成提示跨轮残留', () => {
+  it('终帧收口消息压缩过程态，不让过程态跨轮残留', () => {
     const store = freshStore()
-    store.appendAssistantMessage('')
+    const host = store.appendAssistantMessage('')
     store.handleFrame(asFrame({ type: 'start', runId: 'run-d', sessionId: 'sess' }))
     store.handleFrame(asFrame({ type: 'heartbeat', phase: 'compacting', elapsedMs: 1_000 }))
     store.handleFrame(asFrame({ type: 'context', level: 'L1', before: 1, after: 0, turns: 0, lostTokens: 0, reason: 'l1', est: false }))
     store.handleFrame(asFrame({ type: 'done', runId: 'run-d' }))
 
-    expect(store.compactionPhase).toBe('idle')
-    expect(store.compactionStartedAtMs).toBeNull()
+    expect(host.compactingStartedAtMs).toBeUndefined()
+  })
+
+  it('本地停止立即清除消息压缩过程态', async () => {
+    const store = freshStore()
+    const host = store.appendAssistantMessage('')
+    host.compactingStartedAtMs = Date.now() - 1_000
+    store.loading = true
+
+    await store.stop()
+
+    expect(host.compactingStartedAtMs).toBeUndefined()
   })
 
   it('快照未建：/runs/current 空态 + 重挂 202 preparing ⇒ 可恢复准备中，不封口、不落错误', async () => {
@@ -195,6 +200,6 @@ describe('批次3 · 压缩阶段', () => {
 
     expect(host.unconfirmed).toBe(true)
     expect(host.errorCard ?? null).toBeNull()
-    expect(store.compactionPhase).toBe('idle')
+    expect(host.compactingStartedAtMs).toBeUndefined()
   })
 })

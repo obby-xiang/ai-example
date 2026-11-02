@@ -26,8 +26,9 @@ import java.util.Map;
  * <tr><td>R1 采集</td><td>三维全 ≤0 = 空帧，不参与</td><td>去掉空帧判定 ⇒ 末帧 0/0/0 被当真值</td></tr>
  * <tr><td>R2 去重</td><td>与已采纳值三维全等 = 只计一次</td><td>删去重并改成累加 ⇒ 值 ×N</td></tr>
  * <tr><td>R3 取最后</td><td>采纳最后一个<b>非空</b>候选</td><td>改成取第一帧 ⇒ 值不等</td></tr>
- * <tr><td>R4 单调</td><td>新候选 {@code prompt} 小于已采纳值 ⇒ 判脏帧、保留旧值、{@code dirty++}，不抛错</td>
- * <td>删 R4 ⇒ 脏帧把值拉小</td></tr>
+ * <tr><td>R4 单调</td><td>新候选 {@code prompt} 小于已采纳值 ⇒ 判脏帧、保留旧值、{@code dirty++}，不抛错；
+ * 仅当调用方 {@link #allowPromptDecline()}（本轮开始前压缩过）时采纳更小值、不计脏帧</td>
+ * <td>删 R4 ⇒ 脏帧把值拉小；无条件放宽 ⇒ 真抖动帧把值拉小</td></tr>
  * <tr><td>R5 回退</td><td>全轮无有效候选 ⇒ {@code est=true}、{@code source=estimate}，值取估算器</td>
  * <td>{@code est} 恒 false ⇒ 前端 {@code ≈} 断言红</td></tr>
  * <tr><td>R6 作用域</td><td>每次 attempt 新建本类实例（调用方保证）⇒ 重试天然不串值</td>
@@ -71,6 +72,21 @@ public final class ContextMeter {
 
 	private String model;
 
+	/** 最后一个非空帧的 {@code prompt_tokens}（不论 R4 是否采纳；B1 诊断/合法下降用）。 */
+	private int lastPromptTokens;
+
+	private boolean lastMeasured;
+
+	/**
+	 * 是否允许 prompt 合法下降（B1）。
+	 *
+	 * <p>默认关闭 —— R4 仍是"同一测量内回退即脏帧"的护栏（C-05 冻结）。只有调用方<b>明确知道</b>
+	 * 本轮开始前发生过上下文压缩时（{@code ContextCompactor} 已改写历史、上游可能补发压缩前的
+	 * 旧 prompt 帧）才打开：此时"后到的更小 prompt"是新的合法基线，不是脏帧，采纳最后一个值。
+	 * <b>不</b>做成全局开关：那会让真正的抖动帧把真值拉小。
+	 */
+	private boolean promptDeclineAllowed;
+
 	/**
 	 * 采集一个上游响应（R1–R4）。
 	 *
@@ -101,12 +117,16 @@ public final class ContextMeter {
 			return;
 		}
 		this.frames++;
+		// B1：记录"最后一个非空帧"的原值（诊断面；R4 采纳值另存一份）
+		this.lastPromptTokens = pv;
+		this.lastMeasured = true;
 		// R2：与已采纳值三维全等 ⇒ 重复帧，不重复计（治"每个 chunk 都挂同一份 usage"）
 		if (this.measured && pv == this.promptTokens && cv == this.completionTokens && tv == this.totalTokens) {
 			return;
 		}
-		// R4：prompt 回退 ⇒ 脏帧。保留已采纳的较大值、计数，绝不抛错（计量不能打断轮次）
-		if (this.measured && pv < this.promptTokens) {
+		// R4：prompt 回退 ⇒ 默认判脏帧。保留已采纳的较大值、计数，绝不抛错（计量不能打断轮次）。
+		// B1：调用方明确声明"本轮开始前压缩过"时，更小的 prompt 是压缩后的新基线 ⇒ 采纳最后一个值、不计脏帧。
+		if (this.measured && pv < this.promptTokens && !this.promptDeclineAllowed) {
 			this.dirty++;
 			return;
 		}
@@ -120,6 +140,30 @@ public final class ContextMeter {
 
 	public boolean measured() {
 		return this.measured;
+	}
+
+	/**
+	 * 最后一个非空 usage 帧的 prompt（B1：诊断/R4 合法下降的对照值；无帧 ⇒ 0）。
+	 *
+	 * <p>与 {@link #promptTokens()} 的区别：后者是 R4 采纳后的值（默认不回退），本值是上游最后
+	 * 一次真正说了什么 —— 二者不同只可能是 R4 拦下了回退帧。
+	 */
+	public int lastPromptTokens() {
+		return this.lastMeasured ? this.lastPromptTokens : 0;
+	}
+
+	/** 是否至少见过一个非空 usage 帧（含被 R4 判脏的帧）。 */
+	public boolean lastMeasured() {
+		return this.lastMeasured;
+	}
+
+	/**
+	 * 允许 prompt 合法下降（B1）：只在"本轮开始前真的压缩过"时由调用方打开。
+	 *
+	 * <p>见 {@link #promptDeclineAllowed} 的注释 —— 它不是"放宽 R4"，而是声明一个新的测量基线。
+	 */
+	public void allowPromptDecline() {
+		this.promptDeclineAllowed = true;
 	}
 
 	public int promptTokens() {

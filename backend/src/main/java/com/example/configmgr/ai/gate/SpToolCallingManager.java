@@ -13,7 +13,11 @@ import com.example.configmgr.ai.context.ContextTrigger;
 import com.example.configmgr.ai.context.HardTrim;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.context.ToolResultShrink;
+import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.TurnBudgetPlan;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.TranscriptEntries;
+import com.example.configmgr.ai.history.TranscriptEntry;
 
 import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.form.FormIssue;
@@ -36,6 +40,7 @@ import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.resultview.ToolResultViewProvider;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
@@ -403,7 +408,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 轮内 L1 的记账面（压缩台账 / 归档 / 会话状态）。生产 = {@code RunStore}（它实现
+	 * 轮内 L1 的记账面（压缩台账 / 会话状态）。生产 = {@code RunStore}（它实现
 	 * {@link ContextStateStore}，三键族与轮首压缩同住一处）。
 	 *
 	 * <p><b>为什么可选注入</b>：与 {@link #setContextLimitResolver} 同因 —— 本类构造器被多份
@@ -413,10 +418,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private ContextStateStore contextStateStore;
 
-	/** 可选注入：轮内 L1 的台账/归档/状态。缺失 = 只清结果、不记账（轻装配面）。 */
+	/** 可选注入：轮内 L1 的台账/状态。缺失 = 只清结果、不记账（轻装配面）。 */
 	@Autowired(required = false)
 	public void setContextStateStore(ContextStateStore store) {
 		this.contextStateStore = store;
+	}
+
+	/** 用户展示历史（B2）：挂起时补 pending 工具卡条目，终态由收尾写点覆盖。 */
+	private ConversationTranscriptStore transcript;
+
+	@Autowired(required = false)
+	public void setConversationTranscriptStore(ConversationTranscriptStore transcript) {
+		this.transcript = transcript;
 	}
 
 	/**
@@ -1006,6 +1019,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 				this.store.saveSuspended(runId, assistant.getText(), pendings,
 					SyntheticMessages.withoutCorrectionInstruction(prompt.getInstructions()), this.codec,
 						assistant.getMetadata());
+				// B2：挂起即写 pending 工具卡（刷新停在挂起态时 /history 已有这张卡）；
+				// 终态由 finish/cancel/fail 的同一 entryId 覆盖（last-wins），不伪造在途终稿。
+				recordPendingTranscript(runId, snapshot, prompt, assistant, pendings);
 				out.suspended(suspended, this.store.runKey(runId), this.store.pendingKey(runId),
 						this.store.instanceId());
 				// ===== 帧序契约：tool_start 必须先于 request（park 开启时两者都前移）=====
@@ -1535,14 +1551,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 				- ContextEstimator.estimateMessages(prompt.getInstructions())
 				- ContextEstimator.estimateMessage(assistant));
 		Set<String> protectedIds = pendingToolCallIds(runId).orElse(null);
+		// B1 / I6：轮内 L1/L3 同样保护同会话其他活跃 run（它们的工具结果与轮次可能仍未收尾）
+		Set<String> activeRunIds = activeRunIds(runId, snapshot);
+		Set<String> otherActiveRuns = new HashSet<>(activeRunIds);
+		otherActiveRuns.remove(runId);
 		// I3：本轮请求的固定前缀（system + tools）—— 记账基线要用<b>它</b>，不是 state 里上一轮的旧值
 		int systemTokens = systemTokensOf(prompt);
 		int toolsTokens = toolsTokensOf(prompt);
 		List<Message> current = history;
 		int cleared = 0;
 		boolean armedNow = armed;
+		int maxOutput = snapshot == null || snapshot.getMaxTokens() == null ? 0
+				: Math.max(0, snapshot.getMaxTokens());
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt,
-				history, delta, armedNow, runId));
+				history, delta, armedNow, runId, maxOutput));
 		// 判据值（真值优先；无真值时就是整包估算）。之后的每次本地变更都原地递推它。
 		int nextEst = decision.nextEst();
 		boolean needRejudge = false;
@@ -1550,10 +1572,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		//   ① L1 清旧结果（I1：越窗也先试，零代价的一刀排在最前）；
 		//   ③ 收窄最新未保护的工具结果（pin 窗口内也允许；HITL 不动、配对不动；至多两轮，
 		//      第二轮只为吸收"随后按 95% 规则追加的收尾指令"那几十 token）；
-		//   ④ 丢最旧的固定历史轮次（HardTrim 同一套纯函数 + 与轮首 L3 同账：归档/档位/台账）。
+		//   ④ 丢最旧的固定历史轮次（HardTrim 同一套纯函数 + 与轮首 L3 同账：档位/台账）。
 		// 做不动就按原判据收尾（真发不出去的上游 400 不该被假装成成功）。
 		// L1 记账每批只试一次：失败后 plan 仍会 changed（清除没落地），后续 pass 再试只会重复写
-		// 归档/状态，结果注定一样 —— 认一次失败，把机会让给后面的收窄/截断。
+		// 状态，结果注定一样 —— 认一次失败，把机会让给后面的收窄/截断。
 		boolean clearAttempted = false;
 		int shrunkResults = 0;
 		int shrinkRounds = 0;
@@ -1562,7 +1584,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			if (pass > 0) {
 				decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, config.getReserveTokens(),
 						config.getL1Percent(), config.getL3Percent(), false, 0, 0, nextEst, 0, armedNow,
-						this.beacon.budgetSkippedBatches(runId)));
+						this.beacon.budgetSkippedBatches(runId), maxOutput));
 			}
 			needRejudge = false;
 			boolean overflowNow = decision.action() == TurnBudgetPlan.Action.OVERFLOW
@@ -1574,7 +1596,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 					&& !clearAttempted && protectedIds != null) {
 				List<Message> beforeClear = current;
 				ToolResultClearing.Plan plan = ToolResultClearing.plan(current, config.getKeepToolPairs(),
-						protectedIds);
+						protectedIds, otherActiveRuns);
 				if (plan.changed()) {
 					clearAttempted = true;
 				}
@@ -1606,16 +1628,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 					}
 				}
 				// ④ 仍超窗：压缩固定历史（丢最旧轮），随后这一跳<b>只调模型</b>（工具一个都不重跑）。
-				// 与轮首 L3 同账（I5）：先归档 → 再写档位/轮数/lostTokens → 再写台账；
+				// 与轮首 L3 同账（I5）：先写档位/轮数/lostTokens → 再写台账；
 				// 记账失败就<b>不应用</b>这次截断（模型看到的历史绝不因一次 Redis 抖动少一半）。
 				if (trimmedTurns == 0) {
-					HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(), protectedIds);
+					HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(), protectedIds,
+							activeRunIds);
 					// N-C（与轮首 L3 同口径）：先按<b>裁后估算</b>判 ——
 					// after = nextEst − lostTokens；只有 after + 有效预留 <= limit 才允许裁。
 					// 裁完仍放不下时，这一刀只丢用户历史、换不回可用请求（下一发照样 400）⇒ 不裁，
 					// 原样交给调用方按越窗如实收尾（历史留着还能换窗口/换模型重试）。
 					if (trim.changed() && nextEst - trim.lostTokens()
-							+ ContextTrigger.effectiveReserve(limit, config.getReserveTokens()) > limit) {
+							+ ContextTrigger.effectiveReserve(limit, config.getReserveTokens(), maxOutput) > limit) {
 						break;
 					}
 					if (trim.changed() && recordTurnTrim(runId, snapshot, current, trim, systemTokens, toolsTokens)) {
@@ -1649,7 +1672,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (needRejudge) {
 			decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, config.getReserveTokens(),
 					config.getL1Percent(), config.getL3Percent(), false, 0, 0, nextEst, 0, armedNow,
-					this.beacon.budgetSkippedBatches(runId)));
+					this.beacon.budgetSkippedBatches(runId), maxOutput));
 		}
 		int after = estimateRequestTokens(prompt, current);
 		if ((decision.triggered() && !(decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS && cleared == 0))
@@ -1669,6 +1692,68 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
+	 * B3：轮内 L1/L3 真实提交后的压缩事实 + {@code context} 帧。
+	 *
+	 * <p>只有状态/台账已经写成功才调用；取号（HINCRBY）/写事实失败只 WARN，不出帧 ——
+	 * 宁可少一条可见节点，也不伪造"已压缩"。事件与帧同一份 eventId/atMs/anchor，刷新后由
+	 * {@code /history.events} 恢复同一节点。
+	 *
+	 * <p>帧键集与 {@code ContextCompactor#framePayload} 同口径：{@code savedTokens}/{@code clearedPairs}
+	 * 无前端消费者，轮内帧也不写（台账/日志仍保留这两项）。{@code est} 取写回的 {@link ContextState#est()}
+	 * （轮内 L1/L3 的基线本就是估算），不在这里硬编码。
+	 */
+	private void emitTurnCompactionEvent(String runId, RunSnapshot snapshot, ContextTrigger.Level level, int before,
+			int after, int turns, int lostTokens, String reason, List<Message> beforeMessages, ContextState state) {
+		if (this.contextStateStore == null || this.registry == null || snapshot == null || runId == null
+				|| snapshot.getSessionId() == null) {
+			return;
+		}
+		String sessionId = snapshot.getSessionId();
+		long atMs = System.currentTimeMillis();
+		try {
+			long seq = this.contextStateStore.nextCompactionSeq(sessionId);
+			String eventId = runId + ":c" + seq;
+			String anchor = ContextCompactor.lastToolCallId(beforeMessages);
+			Map<String, Object> event = new LinkedHashMap<>();
+			event.put("eventId", eventId);
+			event.put("runId", runId);
+			event.put("atMs", atMs);
+			event.put("cause", "turn_loop");
+			event.put("level", level.wire());
+			event.put("anchorToolCallId", anchor);
+			event.put("turns", turns);
+			event.put("lostTokens", lostTokens);
+			this.contextStateStore.appendEvent(sessionId, event);
+			Map<String, Object> payload = new LinkedHashMap<>();
+			payload.put("level", level.wire());
+			payload.put("before", before);
+			payload.put("after", after);
+			payload.put("turns", turns);
+			payload.put("lostTokens", lostTokens);
+			payload.put("reason", reason);
+			// P3-1：与写回状态同源（轮内 L1/L3 的基线是估算，不能声明 est=false）。
+			payload.put("est", state != null && state.est());
+			// B5：savedTokens/clearedPairs 无前端消费者，与 ContextCompactor#framePayload 同口径不写帧。
+			payload.put("eventId", eventId);
+			payload.put("committed", true);
+			payload.put("cause", "turn_loop");
+			payload.put("anchorToolCallId", anchor);
+			payload.put("runId", runId);
+			payload.put("atMs", atMs);
+			try {
+				this.registry.of(runId).context(payload);
+			}
+			catch (RuntimeException ex) {
+				log.warn("轮内压缩 context 帧发送失败（已忽略，不影响本轮）runId={}：{}", runId, ex.getMessage());
+			}
+		}
+		catch (RuntimeException ex) {
+			log.warn("轮内压缩事实写入失败 runId={} sessionId={}：{}（本次不发 context 帧）", runId, sessionId,
+					ex.getMessage());
+		}
+	}
+
+	/**
 	 * 轮内 L1 的记账（与轮首压缩 {@code ContextCompactor#compact} 的 L1 收尾<b>同账</b>）。
 	 *
 	 * <h2>为什么必须记</h2>
@@ -1677,10 +1762,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 真的变了，运维面 {@code ?ledger=1} 与快照 {@code compaction.level} 却仍说"从未压缩"</b> ——
 	 * 同一件事两套口径。
 	 *
-	 * <h2>与轮首的逐项对齐（唯一的差异：谱系已高于 L1 时只记台账/归档、不改状态）</h2>
+	 * <h2>与轮首的逐项对齐（唯一的差异：谱系已高于 L1 时只记台账、不改状态）</h2>
 	 * <ul>
-	 * <li>顺序同轮首：<b>先归档 → 再写真值 → 再写台账</b>；任一步失败 ⇒ 本批<b>不清</b>（history 原样）。</li>
-	 * <li><b>不宣称原子</b>：三步是三个独立的 Redis 写，没有事务、也没有回滚 —— ②成功而③失败时
+	 * <li>顺序同轮首：<b>先写真值 → 再写台账</b>；任一步失败 ⇒ 本批<b>不清</b>（history 原样）。</li>
+	 * <li><b>不宣称原子</b>：两步是独立的 Redis 写，没有事务、也没有回滚 —— 状态成功而台账失败时
 	 * {@code ai:ctx:<sid>} 已落 {@code level=L1/atMs} 而台账缺这一条（{@code /context} 说"压过"、
 	 * {@code ?ledger=1} 说"没压过"）。这是已知的部分失败窗口，靠下一次清除/轮首压缩收敛；不为此新增
 	 * 锁、回滚或新的键协议；</li>
@@ -1688,13 +1773,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * system/tools 的整包估算 —— 与轮首 {@code ledgerEvent} 同一口径；</li>
 	 * <li>{@code level=L1}、{@code turns=0}、{@code lostTokens=0}：L1 只清结果、不折叠轮次（"省了多少"
 	 * 看 before−after，不记在 lostTokens 里）；</li>
-	 * <li>归档内容 = <b>清除前模型看到的那一份</b>（历史里本就是经 {@code ToolResultLimiter} 限流后的
-	 * 文本），不把截断前的上游原文说成"原文"；</li>
-	 * <li>归档键轮号 = {@code state.turnNo() + 1}（本轮，尚未由轮末 {@code recordTurn} 推进）；
-	 * 沿用轮首的键族与 TTL，不另建轮号协议；</li>
-	 * <li><b>只升不降</b>：{@code level} 同时是谱系当前位置（{@code ContextTrigger#advanceTo} 从这里
+		 * <li><b>只升不降</b>：{@code level} 同时是谱系当前位置（{@code ContextTrigger#advanceTo} 从这里
 	 * 往上推一格）。已到 L2/L3 的会话不因一次轮内 L1 回退成 L1（否则下一轮会重爬 L1→L2、摘要重做），
-	 * 此时只写台账与归档、不改状态；</li>
+	 * 此时只写台账、不改状态；</li>
 	 * <li><b>usage 基线同轮首</b>：写完 {@code level} 立刻把基线置为"清除后规模估算"
 	 * （{@code withUsage(after, …, est=true)}，同 {@code ContextCompactor} 的成功路径）。这不是伪造真值：
 	 * 它是有 {@code est=true} 标记的临时估算，轮末 {@code recordTurn} 仍用上游真值整份覆盖。
@@ -1708,8 +1789,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 可清条目（{@code plan.changed()=false}）⇒ 根本进不到本方法（前提是调用方喂的是清除后的历史）。
 	 * 同一 run 的并发驱动通常被 run 租约挡住；但上下文台账（{@code appendLedger(sessionId,…)}）没有
 	 * run 围栏，已失去租约的僵尸实例仍可能补写一条。同轮<b>多次</b> L1 清除（后续批次又清掉别的对）
-	 * 会各记一条事件，这是两件真事；但归档键按轮号命名 ⇒ 后一次会覆盖前一次，下一轮轮首压缩也会
-	 * 复用这个键（被覆盖工具结果的原文仍可从 {@code ai:ledger:<runId>} 的工具台账回取）。
+	 * 会各记一条事件，这是两件真事；B5 起不再写 archive，原文由台账/transcript 承担。
 	 * 本方法不引入任何新锁，也不承诺跨进程 exactly-once。
 	 *
 	 * @return 是否允许把清除结果落到历史（{@code false} = 记账失败，本批不清）
@@ -1731,9 +1811,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			int before = ContextEstimator.estimateMessages(beforeClear);
 			int after = ContextEstimator.estimateMessages(plan.messages());
 			int turnNo = state.turnNo() + 1;
-			// ① 归档清除前原文（与轮首同一个键族 / 同一个 TTL；内容 = 模型当时看到的那份）
-			store.archive(sessionId, turnNo, this.codec.serializeAll(beforeClear));
-			// ② 真值：level 必须被快照看到（否则"清了但显示没压过"）；turns/lostTokens 与轮首 L1 同口径。
+			// B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
+			// ① 真值：level 必须被快照看到（否则"清了但显示没压过"）；turns/lostTokens 与轮首 L1 同口径。
 			// 只升不降：`level` 同时是谱系的"当前位置"（ContextTrigger#advanceTo 从这里往上推一格），
 			// 已经到 L2/L3 的会话不能被一次轮内 L1 回退成 L1 —— 那会让下一轮重新爬 L1→L2（摘要重做、
 			// 档位看起来"降级"）。故仅在当前级 ≤ L1 时改写状态；更高的谱系保持原样（台账照记这次 L1 事件）。
@@ -1749,7 +1828,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 				int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
 				clearedState = state.withCompaction(ContextTrigger.Level.L1, 0, 0, TurnBudgetPlan.REASON_L1, now)
 					.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
-							Math.max(0, systemTokens), Math.max(0, toolsTokens), state.inputTokens());
+							snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
+							state.inputTokens());
 				store.write(sessionId, clearedState);
 			}
 			// ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致
@@ -1757,12 +1837,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 					clearedState.circuit()));
 			log.info("轮内 L1 清除已记账 runId={} sessionId={} turnNo={} before={} after={} clearedPairs={}",
 					runId, sessionId, turnNo, before, after, plan.cleared().size());
+			emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L1, before, after, 0, 0,
+					TurnBudgetPlan.REASON_L1, beforeClear, clearedState);
 			return true;
 		}
 		catch (RuntimeException ex) {
-			// 三步各自独立写、无事务：此刻归档与 ai:ctx:<sid>（level=L1/atMs）可能已落盘，而台账缺一条。
+			// 两步各自独立写、无事务：此刻 ai:ctx:<sid>（level=L1/atMs）可能已落盘，而台账缺一条。
 			// 本批不清（history 原样）；残留靠下一次清除/轮首压缩收敛 —— 不在这里做回滚。
-			log.warn("轮内 L1 清除未能记账 runId={}：{}（本批不清；归档/状态可能已写、台账缺一条：三步无事务）",
+			log.warn("轮内 L1 清除未能记账 runId={}：{}（本批不清；状态可能已写、台账缺一条：两步无事务）",
 					runId, ex.getMessage());
 			return false;
 		}
@@ -1774,11 +1856,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <h2>为什么必须记</h2>
 	 * 越窗恢复会真的丢最旧几轮（模型看到的上下文变了）。只发一条 trace 的结果是：{@code ?ledger=1}
 	 * 说"从未压缩"，{@code /context} 的 {@code compaction.level/turns/lostTokens} 也不动，
-	 * 归档里取不回被丢掉的那几轮 —— 同一件事三套口径，且用户/运维无法追溯"哪些轮没了"。
+	 * 台账/事件里没有记录 —— 同一件事多套口径，且用户/运维无法追溯"哪些轮没了"。
 	 *
 	 * <h2>顺序与失败语义（与轮内 L1 逐项对齐）</h2>
-	 * <b>先归档 → 再写真值/档位 → 再写台账</b>；任一步抛错 ⇒ 本批<b>不应用</b>这次截断
-	 * （{@code false}）。与 L1 一样<b>不宣称原子</b>：三步是三个独立的 Redis 写，②成功而③失败时
+	 * <b>先写真值/档位 → 再写台账</b>；任一步抛错 ⇒ 本批<b>不应用</b>这次截断
+	 * （{@code false}）。与 L1 一样<b>不宣称原子</b>：两步是独立的 Redis 写，状态成功而台账失败时
 	 * {@code ai:ctx:<sid>} 已是 {@code level=L3} 而台账缺这一条（已知的部分失败窗口，靠下一次
 	 * 轮首压缩收敛）；不为此新增锁或回滚协议。
 	 *
@@ -1804,12 +1886,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 			int before = ContextEstimator.estimateMessages(beforeTrim);
 			int after = ContextEstimator.estimateMessages(plan.messages());
 			int turnNo = state.turnNo() + 1;
-			// ① 归档压缩前原文（与轮首/轮内 L1 同一个键族与 TTL）
-			store.archive(sessionId, turnNo, this.codec.serializeAll(beforeTrim));
-			// ② 真值/档位：基线同轮首（含本轮 system + tools）。
+			// B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
+			// ① 真值/档位：基线同轮首（含本轮 system + tools）。
 			// N1：<b>至多升一级</b> —— 当前 NONE/L1 ⇒ 最多写 L2，已到 L2/L3 保持原级。
 			// 为什么不是无条件 L3：`level` 同时是谱系当前位置（advanceTo 从这里往上推一格、只升不降），
-			// 写死 L3 之后 ① 之后每轮目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于永久关掉）；
+			// 写死 L3 之后每轮目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于永久关掉）；
 			// ② 一次"临时救场"的轮内截断被永久记成"这个会话已经硬截断过"。台账仍如实记本次 L3。
 			int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
 			ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
@@ -1818,13 +1899,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 			ContextState trimmed = state
 				.withCompaction(written, plan.droppedTurns(), plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, now)
 				.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
-						Math.max(0, systemTokens), Math.max(0, toolsTokens), state.inputTokens());
+						snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
+						state.inputTokens());
 			store.write(sessionId, trimmed);
 			// ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致（L3 带 turns/lostTokens）
 			store.appendLedger(sessionId,
 					turnTrimLedgerEvent(before, after, plan, snapshot, now, trimmed.circuit()));
 			log.info("轮内 L3 硬截断已记账 runId={} sessionId={} turnNo={} before={} after={} turns={} lostTokens={}",
 					runId, sessionId, turnNo, before, after, plan.droppedTurns(), plan.lostTokens());
+			emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L3, before, after, plan.droppedTurns(),
+					plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, beforeTrim, trimmed);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -1839,7 +1923,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 				log.warn("轮内 L3 硬截断失败后状态回写也失败 runId={}：{}（档位可能残留，等下一次轮首压缩收敛）",
 						runId, rollback.getMessage());
 			}
-			log.warn("轮内 L3 硬截断未能记账 runId={}：{}（本次不截断；已尝试回写状态，归档可能已写）", runId,
+			log.warn("轮内 L3 硬截断未能记账 runId={}：{}（本次不截断；已尝试回写状态）", runId,
 					ex.getMessage());
 			return false;
 		}
@@ -1890,10 +1974,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 由它按"真值优先"选判据值。
 	 */
 	private TurnBudgetPlan.Request turnBudgetRequest(int limit, AiProperties.Context config, ContextMeter meter,
-			Prompt prompt, List<Message> history, int delta, boolean armed, String runId) {
+			Prompt prompt, List<Message> history, int delta, boolean armed, String runId, int maxOutputTokens) {
 		return new TurnBudgetPlan.Request(limit, config.getReserveTokens(), config.getL1Percent(),
 				config.getL3Percent(), meter.measured(), meter.promptTokens(), meter.completionTokens(),
-				estimateRequestTokens(prompt, history), delta, armed, this.beacon.budgetSkippedBatches(runId));
+				estimateRequestTokens(prompt, history), delta, armed, this.beacon.budgetSkippedBatches(runId),
+				maxOutputTokens);
 	}
 
 	/**
@@ -1937,12 +2022,36 @@ public class SpToolCallingManager implements ToolCallingManager {
 				? ContextEstimator.estimateToolSchemas(options.getToolCallbacks()) : 0;
 	}
 
+	/**
+	 * 本会话的活跃 run（含本轮；B1：L1 不清、L3 不裁其他活跃 run 的上下文）。
+	 *
+	 * <p>读失败按"只有本轮是活跃的"处理：宁可不裁/不清，也不把别的活跃轮当成已结束。
+	 */
+	private Set<String> activeRunIds(String runId, RunSnapshot snapshot) {
+		Set<String> ids = new HashSet<>();
+		if (snapshot != null && snapshot.getSessionId() != null) {
+			try {
+				ids.addAll(this.store.activeRunIds(snapshot.getSessionId()));
+			}
+			catch (RuntimeException ex) {
+				log.debug("读取活跃 run 失败 runId={}（本次只按本轮保护）：{}", runId, ex.getMessage());
+			}
+		}
+		if (runId != null && !runId.isBlank()) {
+			ids.add(runId);
+		}
+		return ids;
+	}
+
 	/** 未决 HITL 条目的 toolCallId（工具结果永不清除：用户还要在卡片上复核"批的是什么"）。 */
 	private java.util.Optional<Set<String>> pendingToolCallIds(String runId) {
 		try {
 			Set<String> ids = new HashSet<>();
 			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
-				if (PendingToolCall.PENDING.equals(pending.getStatus()) && pending.getToolCallId() != null) {
+				// 与轮首同一"未决"口径：待处理，或已批准但尚未执行（用户可能正在复核）
+				boolean unresolved = PendingToolCall.PENDING.equals(pending.getStatus())
+						|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted());
+				if (unresolved && pending.getToolCallId() != null) {
 					ids.add(pending.getToolCallId());
 				}
 			}
@@ -3318,6 +3427,52 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return PendingToolCall.KIND_CONFIRM;
 		}
 		return PendingToolCall.KIND_BACKEND;
+	}
+
+	/**
+	 * B2：挂起时把本批工具卡写进 transcript（status=pending 的进展示历史）。
+	 *
+	 * <p>只写用户面原文：assistant 的工具调用（id/name/arguments）+ 每条 pending 的
+	 * {@code resultText}（已执行的那些就是原文）。后续终态写点用同一 {@code entryId} 覆盖，
+	 * 因此 pending → 已决/失败/取消不会留下两张卡。
+	 */
+	private void recordPendingTranscript(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
+			List<PendingToolCall> pendings) {
+		if (this.transcript == null || snapshot == null || pendings == null || pendings.isEmpty()
+				|| !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
+			return;
+		}
+		try {
+			if (!this.store.permittedToWrite(runId, "transcript")) {
+				return;
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("transcript 写入权判定失败 runId={}（本次不写）：{}", runId, ex.getMessage());
+			return;
+		}
+		try {
+			List<TranscriptEntry.ToolCallView> calls = new ArrayList<>(pendings.size());
+			for (PendingToolCall pending : pendings) {
+				calls.add(new TranscriptEntry.ToolCallView(pending.getToolCallId(),
+						pending.getType() == null ? "function" : pending.getType(), pending.getName(),
+						pending.getArguments()));
+			}
+			List<TranscriptEntry> entries = new ArrayList<>(pendings.size() + 1);
+			entries.add(TranscriptEntries.assistant(runId, snapshot.getCreatedAtMs(), System.currentTimeMillis(),
+					assistant.getText(), calls, TranscriptEntries.pendingStates(pendings)));
+			for (PendingToolCall pending : pendings) {
+				entries.add(TranscriptEntries.tool(runId, snapshot.getCreatedAtMs(), System.currentTimeMillis(),
+						pending.getToolCallId(), pending.getName(), pending.getKind(), pending.getStatus(),
+						pending.getResultText()));
+			}
+			this.transcript.ensureBaseline(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(),
+					prompt == null ? List.of() : prompt.getInstructions());
+			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries);
+		}
+		catch (RuntimeException ex) {
+			log.warn("transcript 挂起条目写入失败 runId={}：{}（挂起/等待不受影响）", runId, ex.getMessage());
+		}
 	}
 
 	/** 落定本轮：历史进快照、in-flight 清空、状态回到 RUNNING（工具已全部结算）。 */

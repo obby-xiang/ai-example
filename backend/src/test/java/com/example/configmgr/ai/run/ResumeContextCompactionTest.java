@@ -154,8 +154,8 @@ class ResumeContextCompactionTest {
 		Map<String, Object> contextFrame = FrameContract.oneOfType(frames, "context");
 		assertThat(contextFrame).containsEntry("level", "L1").containsEntry("turns", 0L)
 			.containsEntry("lostTokens", 0L).containsEntry("reason", "l1_tool_result_clearing")
-			.containsEntry("est", false)
-			.containsKeys("before", "after", "savedTokens", "clearedPairs");
+			.containsEntry("est", true)
+			.containsKeys("before", "after");
 
 		// ── I-1：级别随交棒传给驱动侧（否则续跑轮的 done.context.level 恒为 none）──
 		verify(this.chatService).noteCompaction(RUN_ID, "L1");

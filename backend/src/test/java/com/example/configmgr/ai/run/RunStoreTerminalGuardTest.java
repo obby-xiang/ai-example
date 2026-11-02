@@ -49,10 +49,10 @@ class RunStoreTerminalGuardTest {
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties, this.leases);
 
 	/**
-	 * <b>本批唯一实跑的聚焦用例</b>（RED → GREEN）：重跑模型步的状态转换（FAILED → RUNNING）
+	 * <b>本批唯一实跑的聚焦用例</b>（RED → GREEN）：续跑的状态转换（FAILED → RUNNING）
 	 * 不得在并发取消之后把 CANCELLED 改回 RUNNING。
 	 *
-	 * <p>为什么它比"FAILED 不得覆盖 CANCELLED"更关键：{@code ResumeService.retryModelStepInternal}
+	 * <p>为什么它比"FAILED 不得覆盖 CANCELLED"更关键：{@code ResumeService} 的续跑入口
 	 * 在入口检查（{@code cancelStateOutcome}）通过之后才写 RUNNING，检查与写之间没有原子性 ——
 	 * 取消恰在这段窗口落库时，旧实现的普通 {@code save} 会把取消终态直接翻案，随后前端重挂到
 	 * 一条"其实已被用户停止"的轮上。守卫必须覆盖<b>所有非取消状态</b>，不只是终态。

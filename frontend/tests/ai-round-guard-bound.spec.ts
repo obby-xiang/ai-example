@@ -4,7 +4,7 @@
  * <p>锁住的四类缺陷：
  * <ol>
  * <li>排队中的前端工具在停止/换会话后仍执行（副作用、回灌旧 run）；</li>
- * <li>await 回来的旧 run 被挂进新会话（`retryModelStep` 的 202 分支）；</li>
+ * <li>await 回来的旧现场被挂进新会话（已删除轮次入口的迟到分支）；</li>
  * <li>await 回来的旧现场在新会话里"复活"（表格写预览建卡 / 取消卡被失败回退改回待决 /
  *     迟到交接收口摘掉新卡）；</li>
  * <li>序号台账无界（`runSeq` 全量累积、`appliedSeqs` 无窗口）。</li>
@@ -32,7 +32,6 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  retryModelStep: vi.fn(),
   feedbackSubmit: vi.fn()
 }))
 
@@ -80,49 +79,6 @@ beforeEach(() => {
   api.reattachRun.mockImplementation(() => new Promise(() => undefined))
   api.frontendToolResult.mockResolvedValue({ ok: true, duplicate: false })
   api.cancel.mockResolvedValue({})
-})
-
-describe('B2-01 retryModelStep：await 期间换会话 ⇒ 旧 run 不挂进新会话', () => {
-  it('202 点火在途时 adoptFreshSession ⇒ 回 denied、不写 activeRunId、不重挂', async () => {
-    const store = useAiStore()
-    const message = store.appendAssistantMessage()
-    message.runId = 'run-1'
-    message.appliedSeqs = [4]
-    store.activeRunId = 'run-1'
-
-    const gate = defer()
-    api.retryModelStep.mockImplementation(async () => {
-      await gate.promise
-      return { retried: true }
-    })
-
-    const pending = store.retryModelStep(message)
-    await vi.waitFor(() => expect(api.retryModelStep).toHaveBeenCalledWith('run-1'))
-
-    store.adoptFreshSession()
-    const freshSession = store.sessionId
-    gate.release()
-
-    await expect(pending).resolves.toBe('denied')
-    expect(store.sessionId).toBe(freshSession)
-    expect(store.activeRunId).toBeNull()
-    expect(api.reattachRun).not.toHaveBeenCalled()
-  })
-
-  it('同会话正常受理仍是 accepted（守卫不误伤）', async () => {
-    // Task 4：受理后要重挂 SSE，而重挂带身份头与会话号 ⇒ 现场必须先有"身份 + 已发号"的会话
-    installIdentityFixture()
-    const store = useAiStore()
-    const message = store.appendAssistantMessage()
-    message.runId = 'run-1'
-    message.appliedSeqs = [4]
-    store.activeRunId = 'run-1'
-    api.retryModelStep.mockResolvedValue({ retried: true })
-
-    await expect(store.retryModelStep(message)).resolves.toBe('accepted')
-    expect(store.activeRunId).toBe('run-1')
-    expect(api.reattachRun).toHaveBeenCalled()
-  })
 })
 
 describe('B2-02 confirm：提交失败不得把已取消的卡改回待决', () => {

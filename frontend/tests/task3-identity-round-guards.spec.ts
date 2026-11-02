@@ -28,7 +28,6 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  retryModelStep: vi.fn(),
   feedbackSubmit: vi.fn()
 }))
 
@@ -115,9 +114,8 @@ describe('Task 3 · 切换身份：旧轮 best-effort 取消', () => {
 
     // 取消请求携带**旧身份**的显式身份头（切换入口捕获，不依赖 axios 拦截器当刻读到的身份）。
     expect(cancelCalls).toEqual([{ runId: 'run-old', headers: { 'X-Tenant-Id': '7', 'X-User-Id': '71' } }])
-    // 切换不重发对话、不重试模型步、不重跑/回灌工具。
+    // 切换不重发对话、不重跑/回灌工具。
     expect(api.chat).toHaveBeenCalledTimes(1)
-    expect(api.retryModelStep).not.toHaveBeenCalled()
     expect(api.frontendToolResult).not.toHaveBeenCalled()
 
     releaseCancel()
@@ -166,35 +164,6 @@ function pendingConfirmHost(toolCallId: string): ChatMessage {
 }
 
 describe('Task 3 · 异步回包的轮次与身份守卫', () => {
-  it('旧重试失败：切换身份后回包不得把失败提示/结局写进新身份', async () => {
-    const store = useAiStore()
-    await store.loadTenantDirectory()
-    const message = assistantMessage()
-    store.messages = [message]
-
-    let rejectRetry: (error: unknown) => void = () => undefined
-    api.retryModelStep.mockImplementation(() => new Promise((_resolve, reject) => {
-      rejectRetry = reject
-    }))
-    const retry = store.retryModelStep(message)
-    await flushPromises()
-    expect(api.retryModelStep).toHaveBeenCalledWith('run-old')
-    expect(store.loading).toBe(true)
-
-    await store.switchIdentity(NEW.tenantId, NEW.userId)
-    expect(store.sessionId).toBe('8001')
-    expect(store.messages).toEqual([])
-    const noticeAfterSwitch = store.notice
-
-    // 旧身份那一轮的重试 503 迟到：提示/结局/loading 都不得落到新身份里。
-    rejectRetry(new ApiError('upstream down', 503, 'AI_UNAVAILABLE', null))
-    await expect(retry).resolves.toBe('denied')
-    expect(store.notice).toBe(noticeAfterSwitch)
-    expect(store.noticeCode).toBeNull()
-    expect(store.lastRoundOutcome).toBe('ok')
-    expect(store.loading).toBe(false)
-  })
-
   it('旧 HITL 失败：切换身份后回包不得把失败提示写进新身份', async () => {
     const store = useAiStore()
     await store.loadTenantDirectory()

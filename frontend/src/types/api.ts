@@ -55,13 +55,7 @@ export interface ApiErrorBody {
 export const ErrorCode = {
   BAD_REQUEST: 'BAD_REQUEST',
   ILLEGAL_ARGUMENT: 'ILLEGAL_ARGUMENT',
-  /**
-   * 当前状态不允许该操作（409）。
-   *
-   * <p>批次2：`POST /api/ai/runs/{runId}/retry-model-step` 的前置拒绝也用它（**不新增码表项**），
-   * 具体是哪一条不满足走响应体的 `failedCheck`（NOT_FAILED / CANCELLED / PENDING_TOOLS /
-   * PARTIAL_CONTENT / TOOL_PAIRING_INCOMPLETE / MODEL_CHANGED），前端不得拿本码猜原因。
-   */
+  /** 当前状态不允许该操作（409）。 */
   ILLEGAL_STATE: 'ILLEGAL_STATE',
   RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
   SESSION_BUSY: 'SESSION_BUSY',

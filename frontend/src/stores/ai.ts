@@ -13,6 +13,7 @@
  */
 
 import { defineStore, getActivePinia } from 'pinia'
+import { markRaw } from 'vue'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi } from '@/api/ai'
 import {
@@ -91,9 +92,11 @@ import {
 import {
   alreadyApplied,
   applyFrameToParts,
+  compareCompactionEvents,
   deriveProjections,
   findToolPart,
   historyToolCallStatus,
+  insertCompactionEvent,
   isSystemRejectPhantom,
   jobIdOfToolResult,
   markApplied,
@@ -114,7 +117,7 @@ import {
   type ToolOutcome,
   type TruncationNoticeCode
 } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextCompaction, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, loadFormDraft, pruneFormDrafts, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -360,6 +363,9 @@ let mirrorIdleHandle: number | null = null
 /** 批G · G4：最后一次真实落盘时刻（throttle 的 leading 判据）与节流窗口。 */
 let mirrorLastWriteAt = 0
 const MIRROR_THROTTLE_MS = 300
+
+/** 展示历史每页条目数（首屏只取最接近现在的一页；「加载更早」每次再向前取一页）。 */
+export const HISTORY_PAGE_SIZE = 200
 
 /** 取消待写的 trailing（timer + idle 各一），pagehide/可见性 flush 前必须先取消，避免重复写。 */
 function cancelMirrorSchedule(): void {
@@ -841,50 +847,12 @@ function isUnconfirmedTerminal(frame: unknown): boolean {
  *
  * <p>取消有时由后端以 `error` 帧送达（`AI_RUN_CANCELLED`，可能带 `_AFTER_PARTIAL` /
  * `_AFTER_TOOL_SIDE_EFFECT` 派生后缀）。它和 `done{cancelled:true}` 是同一事实：不是失败、
- * 不出错误卡/错误通知、`lastRoundOutcome='cancelled'`、消息打 `stopped`，因此也不会出现继续/重试。
+ * 不出错误卡/错误通知、`lastRoundOutcome='cancelled'`、消息打 `stopped`，因此也不会出现继续。
  * 只认基础码为 `AI_RUN_CANCELLED`；其它错误码一律不受影响。
  */
 function isCancelledTerminalError(frame: unknown): boolean {
   const code = (frame as { code?: unknown }).code
   return typeof code === 'string' && code !== '' && baseErrorCode(code) === ErrorCode.AI_RUN_CANCELLED
-}
-
-/**
- * 批次2 / AR-05：仅模型步重跑的 409 前置失败码（后端 `failedCheck`）。
- *
- * <p>只从**结构化回执**读取；不拿文案猜。缺省 = 普通可重试失败。
- */
-function failedCheckOf(error: unknown): string | null {
-  if (!(error instanceof ApiError)) {
-    return null
-  }
-  const body = error.bodyAs<{ failedCheck?: unknown }>()
-  return body && typeof body.failedCheck === 'string' ? body.failedCheck : null
-}
-
-/** 重跑窄入口 409 回执里的 `reason`（在后端未给 `failedCheck` 时用于区分在途/已取消）。 */
-function retryReasonOf(error: unknown): string | null {
-  if (!(error instanceof ApiError)) {
-    return null
-  }
-  const body = error.bodyAs<{ reason?: unknown }>()
-  return body && typeof body.reason === 'string' ? body.reason : null
-}
-
-/** 把 `failedCheck` 映射到用户可读的本地化通知码（未知值走通用句）。 */
-function retryDeniedNoticeKey(failedCheck: string | null): string {
-  switch (failedCheck) {
-    case 'NOT_FAILED':
-      return 'ai.notice.retryDeniedNotFailed'
-    case 'PENDING_TOOLS':
-      return 'ai.notice.retryDeniedPending'
-    case 'TOOL_PAIRING_INCOMPLETE':
-      return 'ai.notice.retryDeniedHistory'
-    case 'MODEL_CHANGED':
-      return 'ai.notice.retryDeniedModel'
-    default:
-      return 'ai.notice.retryDenied'
-  }
 }
 
 /**
@@ -2043,7 +2011,7 @@ const MIRROR_MESSAGE_SCALAR_KEYS = [
   'code',
   'unconfirmed',
   'recoveryGap',
-  'synthetic',
+  'interrupted',
   'runId'
 ] as const
 
@@ -2124,11 +2092,35 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
     ...(message.code ? { code: message.code } : {}),
     ...(message.unconfirmed ? { unconfirmed: true } : {}),
     ...(message.recoveryGap ? { recoveryGap: true } : {}),
-    // 批次2：系统级合成提示（压缩摘要）也必须活过刷新，不能回退成用户气泡
-    ...(message.synthetic ? { synthetic: true } : {}),
-    // 批次2：run 归属必须活过刷新 —— 「重试本轮」只按它定位后端 run（不得猜 activeRunId）
+    // 断流是消息级事实：刷新后仍要能出「继续」（轮次级 lastRoundOutcome 不落盘）
+    ...(message.interrupted ? { interrupted: true } : {}),
+    // 批次2：run 归属必须活过刷新 —— 断流重挂/恢复链路按它定位后端 run（不得猜 activeRunId）
     ...(message.runId ? { runId: message.runId } : {})
   }
+}
+
+/** 末条 assistant 是否以断流收尾（镜像 `inFlight` 判据：#1 断流后仍要能刷新恢复半截 + 继续）。 */
+function lastAssistantInterrupted(messages: ChatMessage[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role === 'assistant') {
+      return message.interrupted === true && message.stopped !== true
+    }
+  }
+  return false
+}
+
+/** 移除一条消息里的压缩事件段并重排 seg（分页后事件需要从粗宿主校正到锚点宿主）。 */
+function removeCompactionEventPart(message: ChatMessage, eventId: string): boolean {
+  const index = message.parts.findIndex((part) => part.kind === 'event' && part.eventId === eventId)
+  if (index < 0) {
+    return false
+  }
+  message.parts.splice(index, 1)
+  message.parts.forEach((part, seg) => {
+    part.seg = seg
+  })
+  return true
 }
 
 function mirrorMessageJsonOf(message: ChatMessage): string {
@@ -2641,6 +2633,7 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.formCancelFailed': 'error',
   'ai.notice.uploadReceiveFailed': 'error',
   'ai.notice.networkError': 'error',
+  'ai.notice.historyEarlierFailed': 'error',
   'ai.notice.interruptedSuspended': 'warning',
   'ai.notice.interruptedKeep': 'warning',
   'ai.notice.interruptedKeepShort': 'warning',
@@ -2847,6 +2840,35 @@ export const useAiStore = defineStore('ai', {
     /** 历史对账是否完成（UI 可用它做骨架屏） */
     historyLoaded: false,
     /**
+     * B5：`/history.truncated=true` —— 更早的展示历史因容量上限未在本机保留。
+     * 只在消息流顶部显示一条中性标记；不是压缩事件、不入镜像、不提供按钮。
+     */
+    historyTruncated: false,
+    /**
+     * 分页：本页已加载窗口之前还有更早的展示历史（`/history.hasMore`）。
+     * 与 {@link historyTruncated} 语义分开：本项 = 还能向前取；后者 = 已被容量裁掉。
+     */
+    historyHasMore: false,
+    /** 分页：当前窗口在服务端条目列表中的起始下标（0 = 已到最早）。 */
+    historyOffset: 0,
+    /** 分页：服务端条目总数（最近一次 `/history` 的 `total`）。 */
+    historyTotal: 0,
+    /** 分页：`loadEarlierHistory` 在途（入口置 disabled，防重复请求）。 */
+    historyPageLoading: false,
+    /** 分页：最近一次 `/history.events`（加载更早页后按同一批事件再补一轮节点，幂等）。 */
+    historyEvents: [] as AiHistoryCompactionEvent[],
+    /**
+     * 分页：当前窗口的**原始条目**（旧→新，含 TOOL 条目）。
+     * 「加载更早」把它作为跨页配对的附加窗口：页边界切开的 toolCall / TOOL 响应按 id 回填，
+     * 而不是按名字猜（见 {@link buildHistoryMessages} 的 `pairingEntries`）。
+     */
+    historyWindowEntries: markRaw([]) as AiHistoryMessage[],
+    /**
+     * B4：最近一次**已提交**压缩事实的 eventId（`context{committed:true,eventId}`）。
+     * 供面板把「压缩完成」播报绑定到真实提交事实，而不是紫色退场（未提交/失败/停止也会退场）。
+     */
+    lastCommittedCompactionEventId: null as string | null,
+    /**
      * 本轮是否已被用户停止。
      * 只由 `stop()` 置位；复位点仅限「**新连接**建立处」—— `send()` / `reattachActive()` /
      * `resumeSnapshotStream()`（新连接 ≠ 被停止的那条连接，红队 MINOR-1 收口）—— 与 `resetSession()`。
@@ -2972,25 +2994,6 @@ export const useAiStore = defineStore('ai', {
      * 七项明细随 ContextPopover 一并退场；ContextPill 只消费本摘要。
      */
     contextUsage: null as ContextUsage | null,
-    /** 端点返回的压缩态（"压了什么"的数据；面板另有"正在做什么"的阶段态，见下） */
-    contextCompaction: null as ContextCompaction | null,
-    /**
-     * 批次3：压缩**过程**阶段（`idle` / `compacting` / `done`）。
-     *
-     * 与 `contextCompaction` 分工：后者是压缩结果的账（level/before/after），只在 `context` 帧
-     * 到达时写；本组字段是"此刻是否正在压缩"，由 `heartbeat{phase:'compacting'}` 推进，
-     * 供面板显示"正在压缩 · 已用 N 秒"。**不含百分比**——压缩没有可伪造的进度刻度。
-     */
-    compactionPhase: 'idle' as CompactionPhase,
-    /**
-     * 压缩阶段起点（客户端锚点）。收到服务端 `elapsedMs` 时按"此刻 − elapsedMs"折算，
-     * 之后由面板的局部时钟推进；没有服务端数字时退回本地首帧时刻（不编造历史耗时）。
-     */
-    compactionStartedAtMs: null as number | null,
-    /** 最近一次服务端给出的已用毫秒（null = 服务端没给，面板只用本地 elapsed）。 */
-    compactionElapsedMs: null as number | null,
-    /** 压缩完成时刻（`context` 帧或压缩后的 `streaming` 心跳）；null = 未完成。 */
-    compactionCompletedAtMs: null as number | null,
     /**
      * 批次3 / AR-06：快照未建的"准备中"现场（可重试，不是错误、不是"轮不存在"）。
      * `null` = 当前没有该阶段。
@@ -3239,43 +3242,17 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批次3：清零压缩阶段（新轮 / 终态 / 换会话）。**不碰** `contextCompaction`
-     * —— 那是上一轮"压了什么"的账，由会话重置或下一轮 `context` 帧自己更新。
-     */
-    resetCompactionProgress(): void {
-      this.compactionPhase = 'idle'
-      this.compactionStartedAtMs = null
-      this.compactionElapsedMs = null
-      this.compactionCompletedAtMs = null
-    },
-
-    /**
-     * 批次3：消费 `heartbeat{phase:'compacting'}` —— 只记**真实已用时间**，不推进任何百分比。
+     * B4：清除所有消息上的压缩过程态（新轮 / 换会话 / 本地停止）。
      *
-     * <p>起点锚定：服务端给了 `elapsedMs` 就按"此刻 − elapsedMs"回推（首帧心跳即可显示真实
-     * 已用时长）；后续心跳只校正锚点，不重新从 0 计时。服务端没给数字时退回本地首帧时刻。
+     * <p>过程态是消息级内存态（`ChatMessage.compactingStartedAtMs`），**不入镜像**；
+     * 清除只发生在明确的边界，不伪造刷新后的"还在压缩"。
      */
-    noteCompactionHeartbeat(frame: { elapsedMs?: unknown }): void {
-      const elapsed = heartbeatElapsedMs(frame)
-      if (this.compactionPhase !== 'compacting') {
-        this.compactionStartedAtMs = elapsed !== null ? Date.now() - elapsed : Date.now()
-        this.compactionCompletedAtMs = null
-      } else if (elapsed !== null) {
-        this.compactionStartedAtMs = Date.now() - elapsed
+    clearCompactingMessages(): void {
+      for (const message of this.messages) {
+        if (message.compactingStartedAtMs !== undefined) {
+          message.compactingStartedAtMs = undefined
+        }
       }
-      if (elapsed !== null) {
-        this.compactionElapsedMs = elapsed
-      }
-      this.compactionPhase = 'compacting'
-    },
-
-    /** 批次3：`context` 帧（或压缩后的 `streaming` 心跳）落地 = 压缩完成提示的唯一来源。 */
-    markCompactionDone(): void {
-      if (this.compactionPhase !== 'compacting') {
-        return
-      }
-      this.compactionPhase = 'done'
-      this.compactionCompletedAtMs = Date.now()
     },
 
     /**
@@ -3565,7 +3542,11 @@ export const useAiStore = defineStore('ai', {
         // "还在等决策的一轮"标成不在途，刷新后 `mergeMirrorInFlightRound` 首行直接返回，
         // 只存在于镜像里的同段正文与已执行卡全丢（真机：5 张卡只剩一张重建的确认卡）。
         // 已停止的轮**不算在途**：停止是终态决定，镜像不得把宿主标成"还要续收"（问题3/8）。
-        inFlight: (this.loading || this.suspended) && !this.stopped,
+        // 断流是"这一轮还没有终态"的消息级事实：`send` 的收尾会先把 loading 复位、再落
+        // interrupted，若只看 loading，镜像会把断流轮的半截回答标成"不在途"，刷新后被历史
+        // 整体替换且不出现「继续」。只认**末条** assistant（新轮一开始就不再命中）。
+        inFlight: (this.loading || this.suspended || lastAssistantInterrupted(this.messages))
+          && !this.stopped,
         runSeq: this.runSeq,
         // run 级停止墓碑：cancel 可能失败（后端不可达），刷新后靠它拒绝自动接回这一轮。
         stoppedRunId: this.stoppedRunId,
@@ -3678,7 +3659,6 @@ export const useAiStore = defineStore('ai', {
         if (this.sessionId !== sid) {
           return
         }
-        this.contextCompaction = snapshot.compaction ?? null
         if (snapshot.source === 'none') {
           this.contextUsage = null
           return
@@ -3737,7 +3717,7 @@ export const useAiStore = defineStore('ai', {
       // M-17（2026-10-29）：取历史期间用户可能已发出新一轮。历史回来时会整体替换 `messages`
       // —— 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
       // 判据见下方"真轮是否占场"（R04 起不再用轮次纪元，理由在那里）。
-      // I4（R1 返修）：入口时本端已有在途轮（用户在本轮里点"重试/重新载入"就是这条路）⇒ 镜像
+      // I4（R1 返修）：入口时本端已有在途轮（用户在本轮里点"重新载入"就是这条路）⇒ 镜像
       // 是**滞后现场**，不得先拿它把屏上本轮换掉；历史回来也只能"对账不替换"。判据放在这里而不是
       // 只靠 await 后比对：镜像物化发生在 await **之前**，只比对轮次身份拦不住它。
       // N3（R2）：`stopped` 之后保留的旧传输（C2 为等 start 特意不 abort）不算"在途轮"—— 这一轮
@@ -3756,7 +3736,11 @@ export const useAiStore = defineStore('ai', {
       let mirrorMessages: ChatMessage[] = []
       // 当前协议且结构完整才用镜像；旧版本 / 损坏镜像直接丢弃（服务端 history 会重建）。
       if (!inFlightAtEntry && mirror && isCurrentMirror(mirror) && mirror.messages.length > 0) {
-        this.messages = mirror.messages.map((message) => ({
+        // B5 读侧收口：旧镜像可能仍带 `synthetic=true`（压缩摘要等系统提示）—— 与历史侧同口径
+        // 逐条丢弃，绝不把摘要正文当普通消息渲染；新镜像已不再写该键。
+        this.messages = mirror.messages
+          .filter((message) => (message as { synthetic?: unknown }).synthetic !== true)
+          .map((message) => ({
           ...message,
           streaming: false,
           done: true,
@@ -3815,8 +3799,33 @@ export const useAiStore = defineStore('ai', {
       }
 
       let history: AiHistory
+      /** 本次历史窗口在服务端条目列表中的起始下标（0 = 从头取，即已到最早）。 */
+      let pageOffset = 0
+      /** 后端是否真的支持 offset/limit（旧后端忽略 limit 时按"本次即全量"处理）。 */
+      let paginationSupported = true
       try {
-        history = await aiApi.history(this.sessionId)
+        // 首屏探测只取 1 条（仅为拿 total，避免先拖一整页再丢弃）；随后取最近一页。
+        const probe = await aiApi.history(this.sessionId, { offset: 0, limit: 1 })
+        const probeCount = probe.messages?.length ?? 0
+        const total = typeof probe.total === 'number' ? probe.total : probeCount
+        if (probeCount > 1) {
+          // 旧后端忽略 limit，直接把全量塞回来 ⇒ 不支持分页：本次即全量，不再二次请求。
+          history = probe
+          paginationSupported = false
+        } else if (total <= 1) {
+          history = probe
+        } else if (total > HISTORY_PAGE_SIZE) {
+          const start = total - HISTORY_PAGE_SIZE
+          history = await aiApi.history(this.sessionId, { offset: start, limit: HISTORY_PAGE_SIZE })
+          pageOffset = start
+        } else {
+          history = await aiApi.history(this.sessionId, { offset: 0, limit: HISTORY_PAGE_SIZE })
+        }
+        if (paginationSupported && (history.messages?.length ?? 0) > HISTORY_PAGE_SIZE) {
+          // 第二道闸：分页请求仍返回超页（服务端忽略 limit）⇒ 按全量处理，绝不二次全量取。
+          pageOffset = 0
+          paginationSupported = false
+        }
       } catch (error) {
         if (this.sessionId !== sid) {
           return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
@@ -3872,6 +3881,17 @@ export const useAiStore = defineStore('ai', {
       // 批次2：历史拿到了 ⇒ 历史错误与"历史不可用"类缺口一并作废（归档缺口可能在续收时另行检出）
       this.historyError = null
       this.recoveryGap = null
+      // B5：容量裁剪标记来自服务端；只在消息流顶部渲染中性提示，不伪造压缩事件
+      this.historyTruncated = history.truncated === true
+      // 分页：首屏窗口 = 最近一页；旧后端无分页（或忽略 limit）时按"本次即全量"处理。
+      this.historyTotal = typeof history.total === 'number'
+        ? history.total
+        : pageOffset + (history.messages?.length ?? 0)
+      this.historyOffset = pageOffset
+      this.historyHasMore = paginationSupported && (history.hasMore === true || pageOffset > 0)
+      this.historyEvents = history.events ?? []
+      // 跨页配对用原始条目窗口（含 TOOL）；「加载更早」把它当附加配对窗口。
+      this.historyWindowEntries = markRaw(history.messages ?? [])
 
       // 上下文专项批①：占用条在刷新后必须由服务端重建（本地 store 是内存态，刷新即丢）。
       // 与历史并行拉，不阻塞历史渲染（pill 慢一拍可接受，历史渲染慢一拍不可接受）。
@@ -3894,6 +3914,37 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      // 分页：本页条目 → 展示消息（工具对账 / 幻影卡过滤 / 同轮 ASSISTANT 合并）。
+      const mergedMessages = this.buildHistoryMessages(history.messages, pageOffset)
+      // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
+      // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
+      // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
+      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
+      // 批次2：历史通道不带失败现场（errorCard/code/unconfirmed）—— 由镜像侧把它补回**同一轮**，
+      // 否则刷新后一次失败会被"历史整体替换"归一成一条完整回答（看起来像成功）。
+      this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
+      // B3：已提交压缩事实按 runId/anchor 恢复到 parts 时序（与实时帧同一 eventId 幂等）。
+      // **必须在 runId 补写之后**：历史通道通常不带 runId，旧 `chat:mem` 数据更没有归属；
+      // 先补 runId 再按它找宿主，否则事件会因 `hosts=[]` 被静默跳过。
+      this.applyHistoryCompactionEvents(history.events)
+      // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
+      this.historyLoaded = true
+      // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
+      // 消除历史整体替换与挂起重建之间的写后写竞态）
+      await this.restoreSnapshotGuarded()
+    },
+
+    /**
+     * 一页历史条目（旧→新）→ 展示消息：工具响应对账 + 幻影卡过滤 + R-150 同轮 ASSISTANT 合并。
+     *
+     * <p>分页（R-154 #16）：`idBase` = 本页首条在服务端条目列表中的下标 —— 消息 id 与兜底
+     * toolCallId 以它起算，保证「加载更早」前后的 id 不撞车且同一页可复现。
+     */
+    buildHistoryMessages(
+      entries: AiHistoryMessage[],
+      idBase = 0,
+      pairingEntries: AiHistoryMessage[] = []
+    ): ChatMessage[] {
       // 批3③b D7(B)（R-141②）注记 **R-144 改判 (A)**（依据 = docs/evidence/补档-CHATTIMELINE-批3③b-决策卡-K3.md:180
       // 「R-144 落地 ⇒ 本项必须改判 (A)（读真实状态）」）：后端历史载荷按 toolCallId 携载
       // `toolCallStates`（types/ai.ts AiHistoryMessage），下方段构造**有状态 ⇒ 经词表单表
@@ -3906,15 +3957,36 @@ export const useAiStore = defineStore('ai', {
       // 配对规则：① call.id 三态为真按 id 匹配（consume-on-match：命中即从索引摘除）；
       // ② 未中退序位兜底：未配对 call × 未消费 response 按序互配 + name 相等闸；
       // ③ 混排先 id 后序位；④ 仍不中 result=null（卡片保留不丢）。
+      // 跨页配对窗口：本页 + 相邻窗口的**原始条目**（含 TOOL）。页边界切开 call 与 TOOL 条目时，
+      // 结果按 id 从相邻窗口回填，绝不按名字把孤儿响应配给别的卡。
+      const pairingWindow = pairingEntries.length > 0 ? [...entries, ...pairingEntries] : entries
+      const windowCallIds = new Set<string>()
+      const primaryCallIds = new Set<string>()
+      for (const item of entries) {
+        for (const call of item.toolCalls ?? []) {
+          if (call.id !== null && call.id !== undefined && call.id !== '') {
+            primaryCallIds.add(call.id)
+          }
+        }
+      }
+      for (const item of pairingWindow) {
+        for (const call of item.toolCalls ?? []) {
+          if (call.id !== null && call.id !== undefined && call.id !== '') {
+            windowCallIds.add(call.id)
+          }
+        }
+      }
       const responsePool: NonNullable<AiHistoryMessage['toolResponses']>[number][] = []
       const responseIndex = new Map<string, NonNullable<AiHistoryMessage['toolResponses']>[number]>()
+      /** 来自相邻窗口（非本页）的响应：只允许按 id 精确配对，不参与序位/名字兜底。 */
+      const crossWindowResponses = new Set<object>()
       // 系统拒绝的幻影卡（2026-10-30 浏览器实测批）：后端对 FORM_SLOTS_ALREADY_KNOWN /
       // FORM_SCHEMA_REJECTED 都不发用户可见的工具帧（连结局帧也不发），但条目/历史照旧（审计与
       // 模型回执要留）。历史面按同一口径隐藏该 toolCallId 的段与响应，否则"实时看不到、刷新后又
       // 冒出来一张已拒绝卡"——同一件事两个答案。
       // 响应也要一并摘掉：留着会让"序位兜底"把它错配给另一张未配对卡（错配比缺失更糟）。
       const silentSystemRejectIds = new Set<string>()
-      for (const item of history.messages) {
+      for (const item of pairingWindow) {
         for (const call of item.toolCalls ?? []) {
           const state = call.id !== null && call.id !== undefined && call.id !== ''
             ? item.toolCallStates?.[call.id]
@@ -3924,21 +3996,36 @@ export const useAiStore = defineStore('ai', {
           }
         }
       }
-      for (const item of history.messages) {
-        if ((item.type || '').toUpperCase() !== 'TOOL') {
-          continue
-        }
-        for (const response of item.toolResponses ?? []) {
-          if (response.id && silentSystemRejectIds.has(response.id)) {
+      const poolResponses = (items: AiHistoryMessage[], crossWindow: boolean): void => {
+        for (const item of items) {
+          if ((item.type || '').toUpperCase() !== 'TOOL') {
             continue
           }
-          responsePool.push(response)
-          // 防御性 tie-break（C2，红队 O-1）：后端 Spring AI 的 toolCallId 唯一、实际不产重复 id；
-          // 万一载荷出现重复 id，后出现覆盖先出现仅作**确定性兜底**，不宣称符合后端实际产出序
-          if (response.id !== null && response.id !== undefined && response.id !== '') {
-            responseIndex.set(response.id, response)
+          for (const response of item.toolResponses ?? []) {
+            if (response.id && silentSystemRejectIds.has(response.id)) {
+              continue
+            }
+            // 其 call 不在配对窗口内 = 孤儿响应（call 在更早页，尚未加载）：丢弃而不是按名字
+            // 配给本页的同名未配对卡（错配比缺失更糟）。
+            if (response.id !== null && response.id !== undefined && response.id !== ''
+              && !windowCallIds.has(response.id)) {
+              continue
+            }
+            responsePool.push(response)
+            if (crossWindow) {
+              crossWindowResponses.add(response)
+            }
+            // 防御性 tie-break（C2，红队 O-1）：后端 Spring AI 的 toolCallId 唯一、实际不产重复 id；
+            // 万一载荷出现重复 id，后出现覆盖先出现仅作**确定性兜底**，不宣称符合后端实际产出序
+            if (response.id !== null && response.id !== undefined && response.id !== '') {
+              responseIndex.set(response.id, response)
+            }
           }
         }
+      }
+      poolResponses(entries, false)
+      if (pairingEntries.length > 0) {
+        poolResponses(pairingEntries, true)
       }
       const consumedResponses = new Set<object>()
       const unmatchedCalls: Array<{ name: string; part: ToolPart }> = []
@@ -3947,15 +4034,23 @@ export const useAiStore = defineStore('ai', {
       // 掉了一条而不告诉它，后续每条都会拿到上一条的消息、末尾读到 undefined（合并时直接抛错，
       // 异常被 loadHistory 吞成 historyError，界面表现为历史加载失败 + 内容错位）。
       const suppressedHistoryIndexes = new Set<number>()
-      this.messages = history.messages.flatMap((item, index) => {
+      // 其中属于 synthetic 抑制的下标：**断合并窗**（旧行为里 synthetic 是 SYSTEM 条目，会把
+      // R-150 的连续 ASSISTANT 分组切断）。不断窗会把两条 ASSISTANT 合成一条并丢掉后者的 runId。
+      const syntheticSuppressedIndexes = new Set<number>()
+      const builtMessages = entries.flatMap((item, index) => {
         if ((item.type || '').toUpperCase() === 'TOOL') {
           return [] // TOOL 条目：响应已并入 ASSISTANT 工具段，本身不再产生消息
         }
-        // 批次2 / AR-01 第 5 条：后端 `synthetic=true` 的条目是合成/系统提示（压缩摘要、步数收尾），
-        // **不得**按 USER 建成用户气泡。这里统一转成 SYSTEM 消息并保留 `synthetic` 标记，
-        // 面板据此渲染系统级「已压缩」提示（不展示内部配置键、不冒充用户原话）。
-        const synthetic = item.synthetic === true
-        const role: ChatMessage['role'] = synthetic ? 'system' : roleOf(item.type)
+        // B5：合成/系统提示（压缩摘要、步数/预算收尾、内部纠正）一律不进展示历史。
+        // 旧后端的 `synthetic=true`（无 kind）同样丢弃；真实压缩节点只由 B3 已提交事件恢复，
+        // 不从 synthetic 补造 —— 否则记忆回落或旧后端会让界面凭空多出「已压缩」灰条。
+        // 展示历史里也不再保留 `synthetic` 标记（消息级灰条已随之下线）。
+        if (item.synthetic === true) {
+          suppressedHistoryIndexes.add(index)
+          syntheticSuppressedIndexes.add(index)
+          return []
+        }
+        const role: ChatMessage['role'] = roleOf(item.type)
         // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
         // result 由 TOOL 条目的 toolResponses 回填（id 优先、序位兜底）；历史条目没有待决语义，
         // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns。
@@ -4022,7 +4117,7 @@ export const useAiStore = defineStore('ai', {
             const part: ToolPart = {
               kind: 'tool',
               seg: toolSegBase + toolIndex,
-              toolCallId: call.id ?? `history-${index}-${call.name ?? 'tool'}`,
+              toolCallId: call.id ?? `history-${idBase + index}-${call.name ?? 'tool'}`,
               name,
               kind2: kind === 'CONFIRM' || kind === 'FRONTEND' || kind === 'BACKEND' ? kind : 'UNKNOWN',
               status: mappedStatus ?? 'succeeded',
@@ -4073,13 +4168,13 @@ export const useAiStore = defineStore('ai', {
         ]
         if (parts.length === 0) {
           // 本条的段全被隐藏（例如整条只带一张槽位放行的幻影表单卡）⇒ 不产空消息；
-          // 下标登记给 R-150 合并 pass，保证"按位游标"与 `history.messages` 不错位。
+          // 下标登记给 R-150 合并 pass，保证"按位游标"与 `entries` 不错位。
           suppressedHistoryIndexes.add(index)
           return []
         }
         const message: ChatMessage = {
           // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）
-          id: `history-${index}`,
+          id: `history-${idBase + index}`,
           role,
           content: '',
           parts,
@@ -4090,23 +4185,26 @@ export const useAiStore = defineStore('ai', {
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
-          // 批次2：服务端条目带 runId 时落消息，作为「重试本轮」的归属证据（40 条记忆窗口通常无此键）
+          // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
           // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
           ...(item.stopped === true ? { stopped: true } : {}),
           // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
-          ...(item.truncated === true ? { truncated: true } : {}),
-          // 批次2：系统级合成提示（压缩摘要/步数收尾）—— 面板不画用户气泡、不显示内部键
-          ...(synthetic ? { synthetic: true } : {})
+          ...(item.truncated === true ? { truncated: true } : {})
         }
         deriveProjections(message)
         return [message]
       })
       // 序位兜底（R-149②）：未配对 call × 未消费 response 按序互配，name 相等才配；
-      // 仍不中的 call 保持 result=null —— 卡片保留不丢（残缺历史无主 response 在此一并兜底丢弃）
+      // 仍不中的 call 保持 result=null —— 卡片保留不丢（残缺历史无主 response 在此一并兜底丢弃）。
+      // 跨页窗口的响应**只认 id**：按名字兜底会把相邻页的结果配给本页同名卡。
       for (const unmatched of unmatchedCalls) {
         const hitIndex = responsePool.findIndex(
-          (response) => !consumedResponses.has(response) && (response.name ?? '未知工具') === unmatched.name
+          (response) => !consumedResponses.has(response)
+            && !crossWindowResponses.has(response)
+            && (response.id === null || response.id === undefined || response.id === ''
+              || primaryCallIds.has(response.id))
+            && (response.name ?? '未知工具') === unmatched.name
         )
         if (hitIndex < 0) {
           continue
@@ -4120,7 +4218,7 @@ export const useAiStore = defineStore('ai', {
       // C1（复核 m-1）：序位兜底在 deriveProjections（flatMap 内）**之后**才写 part.result ——
       // 投影按值快照（parts.ts）会滞留 null。对含工具段的受影响消息重跑 deriveProjections
       // （幂等纯函数；契约：段字段落段后须同步派生投影），兜底命中的 toolRuns[].result 随之就位。
-      this.messages.forEach((message) => {
+      builtMessages.forEach((message) => {
         if (message.parts.some((part) => part.kind === 'tool')) {
           deriveProjections(message)
         }
@@ -4132,7 +4230,7 @@ export const useAiStore = defineStore('ai', {
       // 与前端配对启发成败无关。悬空 A(T)（无任何可配对 TOOL）不并不吞、也不开窗（纵深防御，
       // S0 实证该形态后端不可达，闸保留防旧镜像/未来形态）。drop：无 toolCalls 且 text 空的
       // ASSISTANT 直接丢弃（防旧镜像空白块复活），丢弃同时断窗。
-      const toolWindowEntries = history.messages.filter((item) => (item.type || '').toUpperCase() === 'TOOL')
+      const toolWindowEntries = pairingWindow.filter((item) => (item.type || '').toUpperCase() === 'TOOL')
       const hasPairableResponse = (call: { id?: string | null; name?: string }): boolean => {
         const callId = call.id ?? null
         return toolWindowEntries.some((entry) =>
@@ -4144,7 +4242,6 @@ export const useAiStore = defineStore('ai', {
           })
         )
       }
-      const builtMessages = this.messages
       const mergedMessages: ChatMessage[] = []
       let builtCursor = 0
       let group: ChatMessage[] = []
@@ -4166,14 +4263,18 @@ export const useAiStore = defineStore('ai', {
         }
         group = []
       }
-      for (const [historyIndex, item] of history.messages.entries()) {
+      for (const [historyIndex, item] of entries.entries()) {
         const type = (item.type || '').toUpperCase()
         if (type === 'TOOL') {
           continue // 无消息产出（R-149 已跳过），不断窗
         }
         if (suppressedHistoryIndexes.has(historyIndex)) {
-          // 该条目整条未产出消息（只带槽位放行幻影卡）：不推进游标、也不断窗 ——
-          // 它没有可见内容，等价于"这一条什么都没说"，前后同一用户轮的 assistant 仍按既有口径合并。
+          // 该条目整条未产出消息（只带槽位放行幻影卡 / synthetic 系统提示）：不推进游标。
+          // synthetic 额外**断开 assistant 合并窗**（它原本是 SYSTEM 条目）—— 否则前后两条
+          // ASSISTANT 会被并成一条、后者 runId 丢失；断窗不会造出任何气泡。
+          if (syntheticSuppressedIndexes.has(historyIndex)) {
+            flushGroup()
+          }
           continue
         }
         const message = builtMessages[builtCursor] as ChatMessage
@@ -4200,18 +4301,154 @@ export const useAiStore = defineStore('ai', {
         group.push(message)
       }
       flushGroup()
-      // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
-      // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
-      // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
-      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
-      // 批次2：历史通道不带失败现场（errorCard/code/unconfirmed）—— 由镜像侧把它补回**同一轮**，
-      // 否则刷新后一次失败会被"历史整体替换"归一成一条完整回答（看起来像成功）。
-      this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
-      // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
-      this.historyLoaded = true
-      // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
-      // 消除历史整体替换与挂起重建之间的写后写竞态）
-      await this.restoreSnapshotGuarded()
+      return mergedMessages
+    },
+
+    /**
+     * B3：把 `/history.events` 的已提交压缩事实插回消息 parts。
+     *
+     * <p>定位：优先同 run 且包含 anchor 工具段的消息；否则同 run 最后一条 assistant；
+     * 未知 run 不补节点（I13）。重复调用/与实时帧重叠由 `insertCompactionEvent` 的 eventId 去重兜住。
+     */
+    applyHistoryCompactionEvents(events?: AiHistory['events']): void {
+      if (!events || events.length === 0) {
+        return
+      }
+      // 先 atMs，同毫秒按 eventId 的数值序号（c2 < c10）；解析失败才回退字符串序
+      const ordered = [...events].sort(compareCompactionEvents)
+      for (const event of ordered) {
+        if (!event.runId || !event.eventId) {
+          continue
+        }
+        const hosts = this.messages.filter(
+          (item) => item.role === 'assistant' && item.runId === event.runId
+        )
+        if (hosts.length === 0) {
+          continue
+        }
+        const anchored = event.anchorToolCallId
+          ? hosts.find((item) => findToolPart(item, event.anchorToolCallId as string))
+          : undefined
+        const target = anchored ?? hosts[hosts.length - 1]
+        if (!target) {
+          continue
+        }
+        const existing = this.messages.find((item) => item.parts.some(
+          (part) => part.kind === 'event' && part.eventId === event.eventId
+        ))
+        if (existing) {
+          // 全局唯一不变；分页锚点到达后允许**校正位置**：从粗宿主移到锚点宿主，
+          // 或同消息内从锚点工具段之前移到其后（首个窗口没锚点时会落在开头）。
+          if (anchored && existing === anchored) {
+            const eventIndex = anchored.parts.findIndex(
+              (part) => part.kind === 'event' && part.eventId === event.eventId
+            )
+            const anchorIndex = event.anchorToolCallId
+              ? anchored.parts.findIndex(
+                (part) => part.kind === 'tool' && part.toolCallId === event.anchorToolCallId
+              )
+              : -1
+            if (anchorIndex >= 0 && eventIndex >= 0 && eventIndex < anchorIndex) {
+              removeCompactionEventPart(anchored, event.eventId)
+              insertCompactionEvent(anchored, {
+                eventId: event.eventId,
+                anchorToolCallId: event.anchorToolCallId,
+                atMs: typeof event.atMs === 'number' ? event.atMs : undefined
+              })
+            }
+          } else if (anchored && existing !== anchored) {
+            removeCompactionEventPart(existing, event.eventId)
+            insertCompactionEvent(anchored, {
+              eventId: event.eventId,
+              anchorToolCallId: event.anchorToolCallId,
+              atMs: typeof event.atMs === 'number' ? event.atMs : undefined
+            })
+          }
+          continue
+        }
+        insertCompactionEvent(target, {
+          eventId: event.eventId,
+          anchorToolCallId: event.anchorToolCallId,
+          atMs: typeof event.atMs === 'number' ? event.atMs : undefined
+        })
+      }
+    },
+
+    /**
+     * 分页：向前加载一页更早的展示历史（首屏只取最近 {@link HISTORY_PAGE_SIZE} 条）。
+     *
+     * <p>只**前插**，不重跑首屏链路：不替换整表、不重做镜像在途轮合并、不碰滚动跟随；
+     * 视图位置由面板在 DOM 更新后补偿（见 AiPanel `loadEarlierHistory`）。
+     * `truncated`（容量裁掉）与本入口的 `hasMore`（还能向前取）是两件事，互不替代。
+     */
+    async loadEarlierHistory(): Promise<void> {
+      if (this.historyPageLoading || !this.historyHasMore || this.historyOffset <= 0) {
+        return
+      }
+      const sid = this.sessionId
+      const start = Math.max(0, this.historyOffset - HISTORY_PAGE_SIZE)
+      const limit = this.historyOffset - start
+      this.historyPageLoading = true
+      try {
+        const page = await aiApi.history(sid, { offset: start, limit })
+        // 会话已换 / 首屏窗口已被重载替换 ⇒ 这一页作废
+        if (this.sessionId !== sid || this.historyOffset !== start + limit) {
+          return
+        }
+        const pageMessages = page.messages ?? []
+        // 旧后端忽略 limit（返回超页）⇒ 不分页：停止入口，丢弃本页，避免 id 撞车/重复渲染。
+        if (pageMessages.length > limit) {
+          this.historyHasMore = false
+          return
+        }
+        const older = pageMessages.length > 0
+          ? this.buildHistoryMessages(pageMessages, start, this.historyWindowEntries)
+          : []
+        this.prependHistoryMessages(older)
+        // 有返回就推进窗口（即便整页都是不产消息的系统条目，也算已消费）；空片不推进。
+        if (pageMessages.length > 0) {
+          this.historyOffset = start
+          this.historyWindowEntries = markRaw([...pageMessages, ...this.historyWindowEntries])
+        }
+        this.historyTotal = typeof page.total === 'number' ? page.total : this.historyTotal
+        // 空片（例如 transcript 已按容量裁过、旧 offset 越界）⇒ 停止再向前取，避免入口空转。
+        this.historyHasMore = pageMessages.length > 0
+          && (page.hasMore === true || start > 0)
+        // 事件恢复按新窗口再补一轮（eventId 全局幂等，不会重复落节点）
+        this.applyHistoryCompactionEvents(this.historyEvents)
+      } catch (error) {
+        if (this.sessionId !== sid) {
+          return
+        }
+        // 失败可见且可重试：入口保留，用户再点一次即可。
+        setNotice(this, 'ai.notice.historyEarlierFailed', { message: errorText(error) }, 'error')
+      } finally {
+        this.historyPageLoading = false
+      }
+    },
+
+    /**
+     * 分页：把更早一页的消息前插到当前消息流头部。
+     *
+     * <p>跨页边界若两侧都是 assistant（页边界落在一轮中间，中间没有 USER/SYSTEM），按 R-150
+     * 同口径合并成一条，避免同一轮被拆成两个气泡。保留**当前首条**的 id（屏上块的展开态不跳）。
+     */
+    prependHistoryMessages(older: ChatMessage[]): void {
+      if (older.length === 0) {
+        return
+      }
+      const head = this.messages[0]
+      const tail = older[older.length - 1]
+      if (head && tail && head.role === 'assistant' && tail.role === 'assistant') {
+        head.parts = [...tail.parts, ...head.parts]
+          .map((part, seg) => ({ ...part, seg })) as MessagePart[]
+        if (!head.runId && tail.runId) {
+          head.runId = tail.runId
+        }
+        deriveProjections(head)
+        older = older.slice(0, -1)
+      }
+      this.messages = [...older, ...this.messages]
     },
 
     /**
@@ -4285,11 +4522,14 @@ export const useAiStore = defineStore('ai', {
      *
      * <p>判据（宁可少补、不可错配）：
      * <ol>
-     * <li>镜像末条是 assistant 且带任一结局标记；</li>
+     * <li>镜像末条是 assistant 且带任一**失败/中性**结局标记（`interrupted` 不搬，见下）；</li>
      * <li>历史末条 assistant 未带同类标记（历史口径优先，已有就不覆盖）；</li>
      * <li>两侧最后一条用户消息**归一后同句**（同一轮才补；对不上即放弃）。</li>
      * </ol>
      * 只补标记，不改正文/段/状态。
+     *
+     * <p>`interrupted` 是断流（没有终态）的事实，与"历史里已有该轮完整 assistant"互斥：
+     * 后者证明该轮正常完成，不能把断流标记搬到完成回答上。
      */
     carryMirrorOutcomeMarkers(historical: ChatMessage[], mirrorMessages: ChatMessage[]): void {
       if (mirrorMessages.length === 0) {
@@ -4299,13 +4539,20 @@ export const useAiStore = defineStore('ai', {
       if (!tail || tail.role !== 'assistant') {
         return
       }
+      // transcript 只在**有终态**时写该轮 assistant 条目 ⇒ 历史末条是 assistant 即证明该轮
+      // 不是断流；镜像里的 `interrupted` 只可能属于"没有终态的那一半"，因此**不搬运**
+      // （搬过来会让已完成回答凭空多出「继续」）。需要保留半截的场景由
+      // `mergeMirrorInFlightRound` 在历史无该轮答复时整体并入 tail（`interrupted` 随 tail 自带）。
       const hasOutcome = tail.errorCard != null || tail.code != null || tail.unconfirmed === true
         || tail.recoveryGap === true
       if (!hasOutcome) {
         return
       }
-      const target = [...historical].reverse().find((item) => item.role === 'assistant')
-      if (!target) {
+      // 只认**历史末条**且必须是 assistant：末条是 USER 说明历史里还没有本轮答复
+      // （断流轮 transcript 不写 assistant 终态）—— 此时绝不能回落到"上一条 assistant"，
+      // 那会把 interrupted/errorCard/runId 贴到上一轮的成功回答上。
+      const target = historical[historical.length - 1]
+      if (!target || target.role !== 'assistant') {
         return
       }
       const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
@@ -4315,7 +4562,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 批次2：run 归属与结局标记同一轮才搬运；即使目标已有结局标记，也补 runId
-      // （历史通道通常不带 runId，缺了它「重试本轮」就没有可证明的归属）。
+      // （历史通道通常不带 runId，缺了它后续断流重挂/恢复就缺少可证明的归属）。
       if (!target.runId && tail.runId) {
         target.runId = tail.runId
       }
@@ -4657,6 +4904,8 @@ export const useAiStore = defineStore('ai', {
       }
       // 批次2：在途恢复的宿主归属该 run（重试入口只认 message.runId）
       host.runId = runId
+      // 接管/续收 = 这一轮又有活的驱动：上一段断流事实作废（续跑成功不得留着「继续」）
+      delete host.interrupted
       // #1（2026-10-31 阻断）：清段前把本轮**已决**的 toolCallId 记到旁路（只记 id、不留段）。
       // 重放回来的 `frontend_tool_request` 据此零执行/零回灌；段仍必须清空 —— 保留段会让正文与
       // 卡片重复拼接、段序错乱。资格按 run 记账（换 run / 换会话即不生效）。
@@ -4774,6 +5023,8 @@ export const useAiStore = defineStore('ai', {
       }
       host.streaming = false
       host.done = true
+      // 断流是消息级事实（入镜像）：刷新后仍能出唯一的「继续」入口，不依赖内存轮次态。
+      host.interrupted = true
       sealTrailingStreamPart(host)
       deriveProjections(host)
       this.writeMirrorNow()
@@ -5090,176 +5341,6 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批次2 / AR-05：**重试本轮 = 仅模型步重跑**（真实后端窄入口，不本地截断、不追加用户消息）。
-     *
-     * <p>与旧假实现的区别：旧路径在"store 没有 action"时把本地消息截断后重新发送，
-     * 那是**重发请求**（会重建上下文、可能重放工具），不是"从固定历史重跑模型步"。这里只调
-     * `POST /api/ai/runs/{runId}/retry-model-step`；202 受理后用**既有 events 通道**重挂
-     * （`lastSeq` = 本端已见的最大帧序号），由同一套帧处理续写这条助手消息。
-     *
-     * <p>失败按后端 `failedCheck` 落到对应状态（不伪造成功、不猜）：
-     * 取消 ⇒ `cancelled`；有半截内容 ⇒ 中性 `unconfirmed`；在途 ⇒ `in-progress`；
-     * 其它前置失败 ⇒ 本地化说明；网络/503 ⇒ `error`。
-     */
-    retryRunIdFor(message: ChatMessage): string | null {
-      if (typeof message.runId === 'string' && message.runId.trim() !== '') {
-        return message.runId
-      }
-      // 唯一可证明的 activeRunId 回退：这条消息就是**当前在途轮**的宿主（run 身份在连接期仍活着）。
-      // 其余情况（刷新后 activeRunId 为空 / 指向更晚一轮 / 历史通道无 runId）一律拒绝 ——
-      // 宁可不出入口，也不重试错轮。
-      if (activeRoundHostId !== null && activeRoundHostId === message.id && this.activeRunId) {
-        return this.activeRunId
-      }
-      return null
-    },
-
-    async retryModelStep(message: ChatMessage): Promise<AiRetryModelStepOutcome> {
-      if (this.loading || this.suspended) {
-        return 'in-progress'
-      }
-      const runId = this.retryRunIdFor(message)
-      /**
-       * 问题1：停止轮（含零产出）的**静默守卫** —— 停止是终态决定，不是可重试的失败轮。
-       * 面板已不渲染入口；这里兜住程序化/键盘/残留 DOM 的点击，绝不发起请求、也不写提示。
-       */
-      if (message.stopped === true || (runId !== null && this.stoppedRunId === runId)) {
-        return 'denied'
-      }
-      if (!runId) {
-        // 归属不可证明 ⇒ 不猜、不本地重发、不回退 activeRunId（伪造功能比不动作更糟）
-        setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
-        return 'denied'
-      }
-      // 重挂锚点：取本端已见的最大帧序号。业务帧序号从 1 开始，0 不是可靠的重挂锚点；
-      // 缺锚时禁止用 0 全量回放旧 error，也保留原失败现场，交由用户重新载入或新开一轮。
-      // B2：`reduce` 取最大值 —— 展开运算符在长轮里既费栈又会在十万级序号记账上退化。
-      const appliedMax = message.appliedSeqs && message.appliedSeqs.length > 0
-        ? message.appliedSeqs.reduce((max, seq) => (seq > max ? seq : max), 0)
-        : 0
-      const lastSeq = Math.max(this.runSeq[runId] ?? 0, appliedMax)
-      if (!Number.isFinite(lastSeq) || lastSeq <= 0) {
-        setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
-        return 'denied'
-      }
-      this.loading = true
-      // B2：点火在途时记住现场 —— 回来若已换会话/换轮，这条旧 run 不得挂进新会话
-      const roundAtRetry = captureRound(this.sessionId, runId)
-      const identityAtRetry = this.sessionIdentity
-      /**
-       * Task 3：**成功/失败出口共用的现场判据** —— 轮次（会话 + 纪元）与会话身份都不得变。
-       * 换身份 = 换会话：旧身份那一轮的重试回包（成功或失败）一律作废，不改新身份的
-       * `loading` / 通知 / 结局 / 消息。
-       */
-      const stillLive = (): boolean =>
-        stillSameRound(roundAtRetry, this.sessionId, null)
-        && isSameIdentity(identityAtRetry, this.sessionIdentity)
-      let body: Record<string, unknown>
-      try {
-        body = await aiApi.retryModelStep(runId)
-      } catch (error) {
-        if (!stillLive()) {
-          return 'denied'
-        }
-        this.loading = false
-        if (error instanceof ApiError) {
-          const failedCheck = failedCheckOf(error)
-          const reason = retryReasonOf(error)
-          if (failedCheck === 'CANCELLED' || reason === 'ALREADY_CANCELLED') {
-            this.lastRoundOutcome = 'cancelled'
-            // 取消是终态：打上 stopped 让面板收起「重试本轮」入口（不再反复撞 409）
-            message.stopped = true
-            setNotice(this, 'ai.notice.retryCancelled')
-            return 'cancelled'
-          }
-          if (reason === 'RESUME_IN_PROGRESS' || reason === 'LEASE_HELD_ELSEWHERE'
-            || reason === 'ALREADY_RUNNING') {
-            setNotice(this, 'ai.notice.retryInProgress')
-            return 'in-progress'
-          }
-          if (error.code === ErrorCode.UNKNOWN_RUN || error.status === 404) {
-            setNotice(this, 'ai.notice.retryDeniedNotFailed', {}, 'error')
-            return 'denied'
-          }
-          if (failedCheck === 'PARTIAL_CONTENT') {
-            // AR-05：有半截正文/思考 ⇒ 不做"失效替换"，给中性「状态未确认」视图
-            message.unconfirmed = true
-            this.lastRoundOutcome = 'unconfirmed'
-            setNotice(this, 'ai.notice.retryPartial')
-            return 'partial'
-          }
-          if (error.code === ErrorCode.SESSION_BUSY) {
-            setNotice(this, 'ai.notice.retryInProgress')
-            return 'in-progress'
-          }
-          if (error.status === 503 || error.code === ErrorCode.AI_REDIS_UNAVAILABLE
-            || error.code === ErrorCode.AI_UNAVAILABLE) {
-            setNotice(this, 'ai.notice.retryUnavailable', {}, 'error')
-            return 'error'
-          }
-          if (failedCheck !== null) {
-            setNotice(this, retryDeniedNoticeKey(failedCheck), {}, 'error')
-            return 'denied'
-          }
-        }
-        setNotice(this, 'ai.notice.retryUnavailable', {}, 'error')
-        return 'error'
-      }
-      // B2：点火在途时换了会话/轮次 ⇒ 旧 run 不得挂进新会话（不写 activeRunId、不重建消息、
-      // 不重挂）。新会话的 loading 属于它自己的轮次，这里也不得复位。
-      // Task 3：判据与失败出口共用（含会话身份）—— 换身份后的成功回包同样整体作废。
-      if (!stillLive()) {
-        return 'denied'
-      }
-      this.loading = false
-      // 200（幂等空操作）也可能带 retried:false —— 只有明确 retried:true 才进入重挂
-      if (body?.retried !== true) {
-        const reason = typeof body?.reason === 'string' ? body.reason : ''
-        if (reason === 'ALREADY_CANCELLED') {
-          this.lastRoundOutcome = 'cancelled'
-          message.stopped = true
-          setNotice(this, 'ai.notice.retryCancelled')
-          return 'cancelled'
-        }
-        if (reason === 'PENDING_UNRESOLVED') {
-          setNotice(this, 'ai.notice.retryDeniedPending', {}, 'error')
-          return 'denied'
-        }
-        setNotice(this, 'ai.notice.retryDeniedNotFailed', {}, 'error')
-        return 'denied'
-      }
-      // 202 已受理：清掉失败现场，把宿主重新置为流式态（内容由 events 回放/续收重建）
-      this.activeRunId = runId
-      this.streamInterrupted = false
-      this.stopped = false
-      this.busyRun = null
-      this.followupReady = false
-      this.lastRoundOutcome = 'ok'
-      message.parts = []
-      message.content = ''
-      message.reasoning = ''
-      message.toolRuns = []
-      message.pendingCall = null
-      message.done = false
-      message.streaming = true
-      delete message.errorCard
-      delete message.code
-      delete message.unconfirmed
-      delete message.recoveryGap
-      delete message.stopped
-      delete message.truncated
-      delete message.synthetic
-      delete message.appliedSeqs
-      deriveProjections(message)
-      // M08-R2：用户显式"重试本轮" ⇒ 重新接管该 run 的驱动（预算重置；挂起连接作废）
-      this.restartRunStreamDrive(runId)
-      // 受理即返回：重挂是长连接（持续到本轮结束），不阻塞调用方；失败由重挂路径自己的
-      // onClose/断流口径处理（与既有刷新恢复同一条通道）。
-      void this.reattachActive(runId, { hostMessageId: message.id, lastSeq })
-      return 'accepted'
-    },
-
-    /**
      * M-2b（2026-10-22）：把一条快照待决条目重建为挂起卡（刷新恢复与「串行补下一张」共用）。
      *
      * 宿主消息：优先镜像/历史里已持该工具**段**的消息；否则最后一条助手消息；都没有才
@@ -5276,7 +5357,7 @@ export const useAiStore = defineStore('ai', {
       if (!host) {
         host = this.appendAssistantMessage('')
       }
-      // 批次2：快照重建的宿主由该 run 的待决条目决定归属（「重试本轮」的归属证据，不得留空/留旧）。
+      // 批次2：快照重建的宿主由该 run 的待决条目决定归属（恢复链路的 run 归属，不得留空/留旧）。
       // 待决条目证明本轮仍有后续续跑；只恢复这个宿主的活动事实，不把历史助手一律标成流式。
       host.runId = runId
       host.streaming = true
@@ -5450,6 +5531,8 @@ export const useAiStore = defineStore('ai', {
       if (host && (!host.done || host.runId === runId)) {
         host.streaming = true
         host.done = false
+        // 续收 = 这一轮又有活的驱动：上一段断流事实作废
+        delete host.interrupted
       }
       /**
        * R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。
@@ -5587,9 +5670,9 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 发一轮消息（含渐进披露上下文注入 + 工作区动作同步）。
-     * 第二参数仅保留旧调用签名；所有发送都必须记录并展示用户消息，不再支持跳过。
+     * 所有发送都会记录并展示用户消息（不存在"跳过用户气泡"的通道）。
      */
-    async send(text: string, _legacyOptions: { skipUserRecord?: boolean } = {}): Promise<AiSendResult> {
+    async send(text: string): Promise<AiSendResult> {
       const content = text.trim()
       if (!content) {
         // 空内容依旧静默（面板层已用 trim 拦过，此处只是防御）
@@ -5631,7 +5714,7 @@ export const useAiStore = defineStore('ai', {
       clearNotice(this)
       this.streamInterrupted = false
       // 批次3：新轮不继承上一轮的压缩/准备中阶段（首帧到达前也不残留旧提示）
-      this.resetCompactionProgress()
+      this.clearCompactingMessages()
       this.clearPreparingRun()
       this.lastRoundOutcome = 'ok' // R-163 T4：新轮复位「继续」入口判据
       // 回执位是**轮次现场**：上一轮的 ui_event 回执不带到新轮（成功类导航本就不写，
@@ -5984,6 +6067,11 @@ export const useAiStore = defineStore('ai', {
           if (target && !target.done && !suspendedClose && !firstFrameRecovery) {
             target.streaming = false
             target.done = true
+            // 断流（ADR-6）落消息级事实：刷新/重载后「继续」入口据此判定（镜像可恢复）。
+            if (this.streamInterrupted && !this.stopped) {
+              target.interrupted = true
+              this.writeMirrorNow()
+            }
           }
         }
       }
@@ -6231,8 +6319,10 @@ export const useAiStore = defineStore('ai', {
         : [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
           ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
       const assistant = host ?? this.appendAssistantMessage('')
-      // 批次2：重挂的宿主就是这一 run 的消息 —— 归属必须钉住（后续重试按 message.runId 定位）
+      // 批次2：重挂的宿主就是这一 run 的消息 —— 归属必须钉住（后续重挂/恢复按 message.runId 定位）
       assistant.runId = targetRunId
+      // 接管 = 重新建立活连接：上一段断流事实作废（与 `stopped=false` 同处）
+      delete assistant.interrupted
       this.loading = true
       this.streamInterrupted = false
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
@@ -9087,8 +9177,8 @@ export const useAiStore = defineStore('ai', {
       this.activeStreamParked = false
       this.loading = false
       this.suspended = false
-      // 批次3：停止后压缩/准备中阶段一并收口（否则阶段条会挂在一个已放弃的轮上）
-      this.resetCompactionProgress()
+      // B4：停止后消息压缩过程态 / 准备中一并收口（否则紫色「压缩中…」会挂在已放弃的轮上）
+      this.clearCompactingMessages()
       this.clearPreparingRun()
       // 问题9：停止收敛本轮残留的恢复期与提示（不新增提示；已停止内容照旧保留）。
       this.restoringRecovery = false
@@ -9216,7 +9306,7 @@ export const useAiStore = defineStore('ai', {
      * 停止是消息级事实：一旦打上不再由后续帧推导覆盖（迟到帧只补段状态，不改这个标记）。
      *
      * <p>问题1：旧实现只在"有正文或工具段"时写 `stopped`，零产出轮因此没有停止事实 ——
-     * 面板把 `lastRoundOutcome='cancelled'` 当恢复候选，停止后仍冒出「重试本轮」。现在
+     * 面板把 `lastRoundOutcome='cancelled'` 当恢复候选，停止后仍冒出「继续」。现在
      * 零产出轮同样落 `stopped`（恢复入口的统一排除依据；不新增任何 UI）。
      */
     markStoppedMessage(): void {
@@ -9240,6 +9330,8 @@ export const useAiStore = defineStore('ai', {
       deriveProjections(last)
       last.stopped = true
       last.errorCard = null
+      // 停止是终态决定：上一段断流事实作废（「继续」入口由 stopped 统一排除）
+      delete last.interrupted
     },
 
     /**
@@ -9732,9 +9824,17 @@ export const useAiStore = defineStore('ai', {
       this.followupReady = false
       // 上下文专项批①：占用摘要随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
       this.contextUsage = null
-      this.contextCompaction = null
-      // 批次3：压缩/准备中阶段是内存态，跨会话不带走
-      this.resetCompactionProgress()
+      this.historyTruncated = false
+      // 分页：窗口/事件/在途标记随会话清空（新会话的首屏由它自己的 /history 建立）
+      this.historyHasMore = false
+      this.historyOffset = 0
+      this.historyTotal = 0
+      this.historyPageLoading = false
+      this.historyEvents = []
+      this.historyWindowEntries = markRaw([])
+      this.lastCommittedCompactionEventId = null
+      // B4：压缩过程态是消息级内存态，跨会话不带走
+      this.clearCompactingMessages()
       this.clearPreparingRun()
       // 批次6B（N10）：换会话 = 旧草稿全部失去引用 ⇒ 按 draft 前缀清孤儿键
       // （活动/排队表单已在上面的 dropActiveForm 收口；禁止整份 sessionStorage.clear()）。
@@ -10389,14 +10489,16 @@ export const useAiStore = defineStore('ai', {
           // M08：本轮 runId 一到就登记活动连接（single-flight 判据的一部分：send 开的流同样
           // 占有这个 runId，恢复入口据此并入而不是另开一条）。
           this.activeStreamRunId = frame.runId
-          // 批次2：把 run 归属钉在宿主消息上 —— 「重试本轮」只认它（刷新后 activeRunId 可能为空/换轮）
+          // 批次2：把 run 归属钉在宿主消息上 —— 断流重挂/恢复只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
           }
           // 批次3：start 仍是首帧（压缩已前移到它之后）—— 新轮的阶段态从零开始；
-          // 普通轮的 streaming 心跳不改任何阶段条；只有真实 L2 的 compacting 心跳才落"正在压缩"。
-          this.resetCompactionProgress()
+          // 普通轮的 streaming 心跳不改任何过程态；只有真实 L2 的 compacting 心跳才给宿主落紫色「压缩中…」。
+          this.clearCompactingMessages()
           this.clearPreparingRun()
+          // 续收/重连拿到 start ⇒ 上一段断流事实作废（成功续跑不再算断流）
+          delete message.interrupted
           // 批次3 / AR-06：runId 一到就落一次镜像。否则刷新落在节流窗口（300ms）内时，
           // 本地没有 runId 可探测，压缩窗口会被误判成空态。
           // 只在本轮历史已就绪时写：loadHistory/回放期间的空态无权覆盖更完整的现场。
@@ -10596,21 +10698,31 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'context': {
-          // 上下文专项批①：压缩事件（帧类型 15 → 16 的唯一新增）。本批**不渲染**提示条
-          // （设计稿 §6.4 把它排在批④），只记一段现场（排障/取证 + 供批次④ 直接消费）。
-          // 刻意不刷新 pill：pill 的口径是"轮末占用"，压缩帧带来的是"压前/压后"的过程量。
-          this.contextCompaction = {
-            level: frame.level,
-            compactedTurns: frame.turns,
-            lostTokens: frame.lostTokens,
-            lastAtMs: typeof frame.atMs === 'number' ? frame.atMs : null,
-            reason: frame.reason,
-            circuit: this.contextUsage?.circuit ?? 'closed',
-            fuseFails: 0
+          // B3：已提交压缩事实 → 消息 parts 时序节点（按 eventId 幂等；失败/未提交帧没有 eventId）。
+          if (frame.committed === true && typeof frame.eventId === 'string' && frame.eventId !== '') {
+            const runId = typeof frame.runId === 'string' && frame.runId !== '' ? frame.runId : this.activeRunId
+            const hosts = runId
+              ? this.messages.filter((item) => item.role === 'assistant' && item.runId === runId)
+              : []
+            const anchored = frame.anchorToolCallId
+              ? hosts.find((item) => findToolPart(item, frame.anchorToolCallId as string))
+              : undefined
+            // 找不到锚点/无锚点 ⇒ 本 run 最后一条 assistant（没有则本帧宿主）
+            const target = anchored ?? hosts[hosts.length - 1]
+              ?? ((!message.runId || !runId || message.runId === runId) ? message : undefined)
+            if (target) {
+              insertCompactionEvent(target, {
+                eventId: frame.eventId,
+                anchorToolCallId: frame.anchorToolCallId,
+                atMs: typeof frame.atMs === 'number' ? frame.atMs : undefined
+              })
+            }
+            // B4：只有「已提交 + 有稳定事实 id」才允许播报"压缩完成"（紫色退场不是成功）。
+            this.lastCommittedCompactionEventId = frame.eventId
           }
-          // 批次3：压缩完成提示只在"本轮确实进过 compacting"时给 —— 重挂回放的旧 `context`
-          // 帧不得在刷新后凭空冒出一条"压缩完成"。
-          this.markCompactionDone()
+          // B4：`context` 帧 = 本次压缩已提交 ⇒ 宿主消息的紫色过程态到此结束
+          // （结果节点由 B3 的 event part 承担；顶部不再出现任何压缩提示）。
+          message.compactingStartedAtMs = undefined
           break
         }
         case 'heartbeat': {
@@ -10619,9 +10731,16 @@ export const useAiStore = defineStore('ai', {
           // 批次3：阶段心跳另带 `phase` —— 这是压缩期/准备期唯一的前端进度来源（帧间 45s
           // 由心跳自然续命，**不放宽**该上限）。只消费真实已用毫秒，不伪造百分比。
           if (frame.phase === 'compacting') {
-            // 压缩心跳 = 已在出帧，"准备中"阶段结束（阶段条切到压缩）。
+            // B4：真实 L2 压缩心跳 ⇒ 只给**当前宿主**消息落紫色过程态与真实起点。
+            // 服务端给了 elapsedMs 就按"此刻 − elapsedMs"回推；后续心跳只校正锚点，不重置计时。
+            // 过程态是内存态：不写镜像（刷新后不伪造"还在压缩"）。
             this.clearPreparingRun()
-            this.noteCompactionHeartbeat(frame)
+            if (!message.done) {
+              const elapsed = heartbeatElapsedMs(frame)
+              message.compactingStartedAtMs = elapsed !== null
+                ? Date.now() - elapsed
+                : message.compactingStartedAtMs ?? Date.now()
+            }
           } else if (frame.phase === 'preparing') {
             const runId = typeof frame.runId === 'string' && frame.runId !== ''
               ? frame.runId
@@ -10630,10 +10749,10 @@ export const useAiStore = defineStore('ai', {
               this.notePreparingHeartbeat(runId, heartbeatElapsedMs(frame))
             }
           } else if (frame.phase === 'streaming') {
-            // 压缩后恢复上游流：阶段条**立即**退场 —— 压缩完成帧（context）可能缺失，
-            // 而"准备中"也是同一段窗口的残留。两条阶段态一起清，之后只保留"工作中"。
+            // 压缩后恢复上游流：紫色过程态**立即**退场（`context` 帧可能缺失）；
+            // "准备中"也是同一段窗口的残留，两条一起清，之后只保留"工作中"。
             this.clearPreparingRun()
-            this.markCompactionDone()
+            message.compactingStartedAtMs = undefined
           }
           break
         }
@@ -10654,10 +10773,12 @@ export const useAiStore = defineStore('ai', {
           // 停止闭环：终态后本轮 clientRequestId 关联结束（刷新不再按旧 id 取消）。
           this.clearClientRequestRound()
           // 批次3：轮末清掉阶段态（完成提示不跨轮残留；runId 不随阶段态外溢）
-          this.resetCompactionProgress()
+          this.clearCompactingMessages()
           this.clearPreparingRun()
           message.streaming = false
           message.done = true
+          // 终帧到达 = 本轮有确定结局，上一段断流事实作废
+          delete message.interrupted
           // o-R1：轮终态封口末尾流式段（否则已完成的消息里仍留着 streaming 段的假态，且会被
           // 镜像持久化）+ 批2 前置：仍在等动作的工具段一并过期降级（与空历史 expired 降级惯例一致）。
           // 旧口径的 `message.pendingCall = pendingCall?.status === 'pending' ? null : ...` 直写
@@ -10682,6 +10803,10 @@ export const useAiStore = defineStore('ai', {
             this.cancelRoundParts()
             message.stopped = true
             this.lastRoundOutcome = 'cancelled'
+          } else {
+            // 非取消 done = 本轮正常收尾：复位轮次结局，避免断流后续跑成功仍带着
+            // `interrupted` 的旧轮次态在已完成回答上冒出「继续」。
+            this.lastRoundOutcome = 'ok'
           }
           // 截断专项：`done.extra.truncated` 只在 finish_reason=length 时出现（后端口径）。
           // 消息级标记 —— 面板据此显示「已截断」，刷新后由历史/镜像恢复；取消轮不写（cancelled 优先）。
@@ -10704,7 +10829,7 @@ export const useAiStore = defineStore('ai', {
           // 停止闭环：终态后本轮 clientRequestId 关联结束（刷新不再按旧 id 取消）。
           this.clearClientRequestRound()
           // 批次3：终态清掉阶段态；批次2 的 unconfirmed / 错误卡语义不受影响（本处不碰）
-          this.resetCompactionProgress()
+          this.clearCompactingMessages()
           this.clearPreparingRun()
           /**
            * 问题4：已停止轮的后到 error 帧**不写错误卡、不写错误正文、不改轮次结局**。
@@ -10724,6 +10849,7 @@ export const useAiStore = defineStore('ai', {
           message.streaming = false
           message.done = true
           // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级
+          delete message.interrupted
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
           // FE-25：与 done 同口径 —— 人围栏单例全部收口（轮已经结束，卡不能再推动它）
@@ -10735,14 +10861,14 @@ export const useAiStore = defineStore('ai', {
           /**
            * 停止闭环：`AI_RUN_CANCELLED`（含派生后缀）是**用户取消**的中性终态，不是错误。
            * 与 `done{cancelled:true}` 同等收口：未提交段就地取消（已提交/结果在途段保留），
-           * 消息打 `stopped`，`lastRoundOutcome='cancelled'`；不写错误卡、错误通知，也不出继续/重试。
+           * 消息打 `stopped`，`lastRoundOutcome='cancelled'`；不写错误卡、错误通知，也不出继续。
            * 只处理基础码 `AI_RUN_CANCELLED`，其它错误码行为不变。
            */
           if (isCancelledTerminalError(frame)) {
             this.cancelRoundParts()
             message.stopped = true
             message.errorCard = null
-            // 取消不是断流、不是错误：本轮残留的重试/断流提示一并收口（不新增提示）。
+            // 取消不是断流、不是错误：本轮残留的断流提示一并收口（不新增提示）。
             this.streamInterrupted = false
             clearNotice(this)
             this.lastRoundOutcome = 'cancelled'
@@ -10773,7 +10899,7 @@ export const useAiStore = defineStore('ai', {
             setNotice(this, 'ai.notice.turnError', { message: frame.message }, 'error')
           }
           this.lastRoundOutcome = 'error'
-          // 批 E · E2：出错轮不出建议（用户下一步是"继续/重试"，不是换话题）
+          // 批 E · E2：出错轮不出建议（用户下一步是"继续"，不是换话题）
           this.followupReady = false
           // R-166：与 done 同口径收口提交在途态
           this.clearGateSubmissions()

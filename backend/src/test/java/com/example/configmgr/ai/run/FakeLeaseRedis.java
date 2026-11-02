@@ -115,6 +115,9 @@ public final class FakeLeaseRedis {
 	/** 业务活动锚点的单键原子 max + 续期（R1-09 / I-3）。 */
 	static final String ACTIVITY_TOUCH_MARK = "ACTIVITY_TOUCH";
 
+	/** 压缩事实 LIST 的有界追加（LPUSH + LTRIM + PEXPIRE，同脚本原子）。 */
+	static final String CONTEXT_EVENT_APPEND_MARK = "CONTEXT_EVENT_APPEND";
+
 	/** session→current 的单键 compare-and-write（MI1）：值仍匹配才 DEL / SET fallback。 */
 	static final String SESSION_CURRENT_CAS_DELETE_MARK = "SESSION_CURRENT_CAS_DELETE";
 
@@ -128,6 +131,9 @@ public final class FakeLeaseRedis {
 	 * 不会出现"有值无 TTL"的残留 HASH（见 {@code CreateTaskDraftStore#save}）。
 	 */
 	static final String CTDRAFT_PUT_MARK = "CTDRAFT_PUT";
+
+	/** 会话→run 索引登记（{@code SADD} + {@code PEXPIRE}，同脚本原子）。 */
+	static final String SESSION_RUNS_REGISTER_MARK = "SESSION_RUNS_REGISTER";
 
 	/** STRING 键面（快照 JSON、租约现值、全局 epoch 计数）。 */
 	final Map<String, String> strings = new ConcurrentHashMap<>();
@@ -677,6 +683,23 @@ public final class FakeLeaseRedis {
 			// 不存在"字段已落、TTL 未设"的中间态可被下一个断言看见
 			String key = str(keys.get(0));
 			table(key).put(str(args.get(0)), str(args.get(1)));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+			return 1L;
+		}
+		if (body.contains(SESSION_RUNS_REGISTER_MARK)) {
+			String key = str(keys.get(0));
+			this.setsByKey.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet()).add(str(args.get(0)));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+			return 1L;
+		}
+		if (body.contains(CONTEXT_EVENT_APPEND_MARK)) {
+			String key = str(keys.get(0));
+			List<String> list = this.lists.computeIfAbsent(key, ignored -> new java.util.ArrayList<>());
+			list.add(0, str(args.get(0)));
+			int max = Integer.parseInt(str(args.get(1)));
+			while (list.size() > max) {
+				list.remove(list.size() - 1);
+			}
 			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
 			return 1L;
 		}

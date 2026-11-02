@@ -1,21 +1,20 @@
 <script setup lang="ts">
 /**
- * 批次3：压缩 / 准备中的阶段条。
+ * B4：顶部「准备中」阶段条（原压缩/准备中两态组件）。
  *
- * <p>为什么单独一个组件：秒数要每秒推进，但**只有这一小块**该重渲染 —— 长会话（正是需要压缩
- * 的那种）里让整个 AiPanel 每秒重建一次，等于把问题1 的主线程成本再放大一遍。这里把本地时钟
- * 关在组件内，面板其余部分零影响。
+ * <p>压缩过程态已下沉到消息元信息行，本组件只保留 `preparing`（准备中 + 立即重试）；
+ * 压缩的 compacting/done 分支与词条随 B4 删除。
+ *
+ * <p>为什么单独一个组件：秒数要每秒推进，但**只有这一小块**该重渲染。这里把本地时钟关在
+ * 组件内，面板其余部分零影响。
  *
  * <p>播报口径（"不逐秒播报"）：秒数文本**不是** live region 的后代；旁边的 `aria-live` 只随
- * 阶段变化（进入压缩 / 完成 / 准备中）播一次，不随 N 秒重复念。
- *
- * <p>只显示真实已用时间：服务端给了 `elapsedMs` 就按它锚定；没给就从本地首帧时刻起算，
- * 不编造进度、不显示百分比。
+ * 阶段变化播一次，不随 N 秒重复念。只显示真实已用时间，不编造进度/百分比。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-type StageMode = 'compacting' | 'preparing' | 'done'
+type StageMode = 'preparing'
 
 const props = defineProps<{
   mode: StageMode
@@ -40,9 +39,6 @@ function stopTicker(): void {
 function startTicker(): void {
   stopTicker()
   now.value = Date.now()
-  if (props.mode === 'done') {
-    return
-  }
   ticker = setInterval(() => {
     now.value = Date.now()
   }, 1000)
@@ -59,18 +55,12 @@ const seconds = computed(() => {
   return Math.max(0, Math.floor((now.value - props.startedAtMs) / 1000))
 })
 
-const active = computed(() => props.mode !== 'done')
-const titleKey = computed(() => (props.mode === 'done'
-  ? 'ai.panel.compactionDone'
-  : `ai.panel.${props.mode}`))
-const ariaKey = computed(() => (props.mode === 'done'
-  ? 'ai.panel.compactionDoneAria'
-  : `ai.panel.${props.mode}Aria`))
+const titleKey = 'ai.panel.preparing'
+const ariaKey = 'ai.panel.preparingAria'
 </script>
 
 <template>
   <div
-    v-if="active"
     class="mx-2 mt-2 flex items-center gap-[8px] rounded-[9px] border border-solid border-[#dbeafe] bg-[#eff6ff] px-[11px] py-[7px]"
     data-testid="compaction-status"
     :data-stage="mode"
@@ -95,15 +85,5 @@ const ariaKey = computed(() => (props.mode === 'done'
     </button>
     <!-- 读屏只在阶段变化时播一次；秒数不在 live region 内（不逐秒打断） -->
     <span class="sr-only" aria-live="polite" data-testid="compaction-aria">{{ t(ariaKey) }}</span>
-  </div>
-
-  <div
-    v-else
-    class="mx-2 mt-2 flex items-center gap-[8px] rounded-[9px] border border-solid border-[#d1fae5] bg-[#ecfdf5] px-[11px] py-[7px] text-[12.4px] leading-[1.5] text-[#065f46]"
-    data-testid="compaction-done"
-  >
-    <span class="w-[7px] h-[7px] flex-none rounded-full bg-[#059669]" aria-hidden="true"></span>
-    <span class="min-w-0 flex-1">{{ t('ai.panel.compactionDone') }}</span>
-    <span class="sr-only" aria-live="polite">{{ t('ai.panel.compactionDoneAria') }}</span>
   </div>
 </template>

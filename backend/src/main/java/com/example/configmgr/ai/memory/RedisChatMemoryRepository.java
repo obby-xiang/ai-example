@@ -337,20 +337,17 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	private static String requireId(String conversationId) {
-		if (conversationId == null || conversationId.isBlank()) {
-			throw new IllegalArgumentException("conversationId 不得为空白");
-		}
-		return conversationId;
+		return SessionKeyCodec.requireId(conversationId);
 	}
 
 	/**
-	 * 无碰撞转义：先 {@code %}，再 {@code {} / {@code }}。
+	 * 无碰撞转义（B2 起共用 {@link SessionKeyCodec}，与 transcript 键同一份实现）。
 	 *
-	 * <p>顺序不能反：先把 {@code %} 变成 {@code %25}，后续替换产生的 {@code %} 才不会被二次转义。
-	 * 转义后 id 不含花括号，作为 hash tag 内容时非空且与 staging/final 一致。
+	 * <p>不在这里保留第二份字符串替换：两套转义一旦漂移，同一会话的记忆键与 transcript 键会落到
+	 * 不同 slot（Cluster 下同会话多键的 RENAME/共槽前提直接失效）。
 	 */
 	private static String escapedId(String conversationId) {
-		return requireId(conversationId).replace("%", "%25").replace("{", "%7B").replace("}", "%7D");
+		return SessionKeyCodec.escapedId(conversationId);
 	}
 
 	/**

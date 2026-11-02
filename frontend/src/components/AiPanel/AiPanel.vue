@@ -209,9 +209,8 @@
       </div>
     </div>
 
-    <!-- 批次3 阶段条（2026-10-29 ToC 呈现减负批恢复）：压缩 / 准备中**必须有一个说明位** ——
-         挂载准备期（preparingRun）与压缩心跳都落在这里；组件内部自带秒表（只有这一小块每秒重渲），
-         文案走 locale，runId 一律不上屏。压缩完成不另起提示（减法：`loading-breath` 已表示还在产出）。 -->
+    <!-- B4：顶部阶段条只保留「准备中」（挂载准备期，组件内部自带秒表，runId 不上屏）。
+         压缩过程态已下沉到消息元信息行；顶部不再出现压缩提示。 -->
     <CompactionStatus
       v-if="stageBar !== null"
       :mode="stageBar.mode"
@@ -247,6 +246,8 @@
     </div>
     <!-- 读屏播报（只读动词也播报；视觉零占位）：与操作条同一句，前缀只在 `uiOperating` 出现一次 -->
     <div class="sr-only" aria-live="polite" data-testid="ai-live-region">{{ uiOperatingText }}</div>
+    <!-- B4：压缩进入/退出各播报一次（文本只在过渡时变，秒表不在 live region 内） -->
+    <div class="sr-only" aria-live="polite" data-testid="compaction-live">{{ compactionAnnouncement }}</div>
 
     <!-- 消息流（蓝本 AiPanel.vue:21-89）；R-154 #5：外层 relative 壳承载「回到底部」浮钮 -->
     <div class="flex-1 relative min-h-0 flex flex-col">
@@ -316,6 +317,31 @@
         </div>
       </div>
 
+      <!-- 分页（R-154 #16）：本机还留着更早的展示历史 ⇒ 消息流内**单个**「加载更早」入口。
+           与下方 truncated 标记语义分开：本入口 = 还能向前取；标记 = 更早已被容量裁掉。 -->
+      <div v-if="ai.historyHasMore" class="mb-2 flex justify-center">
+        <button
+          type="button"
+          data-testid="load-earlier-history"
+          :disabled="ai.historyPageLoading"
+          :class="SUGGESTION_CHIP"
+          @click="loadEarlierHistory"
+        >
+          {{ ai.historyPageLoading ? t('ai.panel.loadEarlierHistoryLoading') : t('ai.panel.loadEarlierHistory') }}
+        </button>
+      </div>
+
+      <!-- B5：更早的展示历史因容量上限未在本机保留 —— 消息流内单条中性标记。
+           不是压缩事件、不提供按钮、不加顶部提示。 -->
+      <div
+        v-if="ai.historyTruncated"
+        role="note"
+        data-testid="history-truncated"
+        class="my-2 text-center text-[11.5px] leading-[1.6] text-[#8b949e]"
+      >
+        {{ t('ai.panel.historyTruncated') }}
+      </div>
+
       <!-- R-165 S3a（R6 指挥官裁决）：消息行原 `mb-3.5`(=14px) 与末行元信息行 `mb-[18px]` 叠加成实测 32px，
            与 v7 turn 间距（`.afoot` 单值 18px）不符 ⇒ 撤消息行下外边距，间距回归元信息行单值 18px。
            （无元信息行的消息——仅工具卡无正文——仍由卡片自身下外边距兜底，不会贴死；
@@ -323,23 +349,14 @@
       <div
         v-for="(m, mi) in ai.messages"
         :key="m.id"
+        :data-msg-id="m.id"
         v-memo="messageMemo(m, mi)"
         class="group flex"
         :class="m.role === 'user' ? 'flex-row-reverse' : ''"
       >
-        <!-- 批次2 / AR-01 第 5 条：历史 `synthetic=true` 的合成/系统提示（压缩摘要、步数收尾）
-             转成**系统级「已压缩」提示** —— 不作为用户气泡、不渲染摘要内部键，也不出任何消息操作。 -->
-        <div
-          v-if="syntheticOf(m)"
-          class="w-full border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[6px] text-[11.6px] leading-[1.6] text-[#57606a]"
-          :data-testid="'synthetic-notice-' + m.id"
-        >
-          <b class="[font-weight:650] text-[#1f2328]">{{ t('ai.panel.compacted') }}</b>
-          <span class="ml-1">{{ t('ai.panel.compactedHint') }}</span>
-        </div>
         <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
         <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
-        <div v-else class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
+        <div class="min-w-0 flex-1 flex flex-col" :class="m.role === 'user' ? 'items-end' : 'items-start'">
         <!-- R-160 M4（issue #14③ 方案 A）：容器层一刀切 —— overflow:hidden + min-width:0；
              R-163 T3：用户消息 = 内容-only 卡片；助手回复 = 无气泡全宽（透明底）。
              R-163B G3：用户气泡对齐 demo —— 中性灰 #f6f7f9 + 1px #eef0f3 边框 +
@@ -399,6 +416,21 @@
               :title="textTruncationTitle(block)"
               data-testid="text-truncated-badge"
             ></span>
+
+            <!-- B3：压缩事件节点（全宽细线 + 居中灰字；role=separator，无按钮/摘要/token/级别）。
+                 可见文字 aria-hidden，可访问名称走 aria-label；不参与复制与任何交互。 -->
+            <div
+              v-else-if="block.kind === 'event'"
+              v-memo="blockMemo(block, m)"
+              role="separator"
+              :aria-label="t('ai.panel.compactionEventAria')"
+              class="my-2.5 flex select-none items-center gap-2 text-[11.5px] text-[#8b949e]"
+              data-testid="compaction-event"
+            >
+              <span class="h-px flex-1 bg-[#e3e6ea]" aria-hidden="true"></span>
+              <span aria-hidden="true">{{ t('ai.panel.compactionEvent') }}</span>
+              <span class="h-px flex-1 bg-[#e3e6ea]" aria-hidden="true"></span>
+            </div>
 
             <!-- S6 批1（裁决 2026-10-15 第 3 条）：HITL **独立回执块退役** —— 原 `block.kind === 'receipt'`
                  分支（徽标行 + 「查看详情 ⇄ 收起详情」钮 + 单层 mono JSON 盒）整段删除；
@@ -924,6 +956,14 @@
               <span class="animate-breathe-text">{{ t('ai.panel.waiting') }}</span>
             </span>
             <span
+              v-else-if="isCompacting(m)"
+              data-testid="compaction-message"
+              class="inline-flex items-center gap-[5px] text-[12.2px] text-[#7c3aed] tracking-[.3px]"
+            >
+              <span class="w-[7px] h-[7px] rounded-full bg-[#7c3aed] animate-breathe" aria-hidden="true"></span>
+              <span class="animate-breathe-text">{{ compactingLabel(m) }}</span>
+            </span>
+            <span
               v-else-if="isBreathing(m) || isFading(m)"
               :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
@@ -964,10 +1004,10 @@
               {{ t('ai.round.truncated') }}
               <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
-            <!-- 批次2（AR-09 / AR-05 / AR-17）：三动作语义分离 —— 继续（有正文/思考的失败轮，正常发送并显示一条「继续」用户消息）/
-                 重试本轮（零正文零思考且归属可证明的失败轮，含仅工具已结算的轮，走仅模型步重跑窄入口）/
-                 普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。
-                 同轮「继续 / 重试本轮」互斥。 -->
+            <!-- 失败/断流的最后一条助手消息统一给「继续」：无论有无正文/思考，都走正常发送并显示一条
+                 「继续」用户消息；停止/取消、unconfirmed、非末轮不出。配额错误卡已带「继续」时，
+                 元信息行不再重复（见 errorCardContinueVisible）。
+                 普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。 -->
             <button
               v-if="showContinue(m)"
               type="button"
@@ -978,17 +1018,6 @@
             >
               {{ t('ai.panel.continue') }}
               <span :class="TIP_CLASS">{{ t('ai.panel.resumeChat') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
-            </button>
-            <button
-              v-if="showRetryTurn(m)"
-              type="button"
-              data-testid="retry-turn"
-              :aria-label="t('ai.panel.retryTurnHint')"
-              class="group/tip relative inline-flex items-center justify-center h-7 rounded-[8px] border-0 bg-transparent px-[6px] text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
-              @click="retryTurn(m)"
-            >
-              {{ t('ai.panel.retryTurn') }}
-              <span :class="TIP_CLASS">{{ t('ai.panel.retryTurnHint') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
             </button>
             <!-- R-163 T3：赞踩（仅助手行）——28×28 热区、本地态、选中互斥可取消；
                  R-165 S1：全 Tailwind 图标按钮（demo v7 `.icon-btn` 配方），SVG 照搬 v7（描边 1.6/15×15）；
@@ -1089,7 +1118,7 @@
             :class="ERROR_CARD_TONE[m.errorCard.variant].action"
             :data-testid="'error-card-action-' + m.id"
             @click="runErrorCardAction(m)"
-          ><span class="border-b border-[#e3e6ea]">{{ m.errorCard.action }}</span></button>
+          ><span class="border-b border-[#e3e6ea]">{{ errorCardActionLabel(m) }}</span></button>
         </div>
         <!-- 批次2（AR-05）：中性「状态未确认」视图 —— 只展示、不写乐观 done，也不冒充错误卡。
              消费 store/消息侧已有的 unconfirmed 状态（字段约定见顶部 recoveryBridge 注释）；
@@ -1502,23 +1531,105 @@ const logBusy = computed(() => !ai.historyLoaded
   || ai.messages.some((message) => message.streaming))
 
 /**
- * 阶段条现场（批次3 CompactionStatus）：只有**进行中**的两态才显示 ——
- * 压缩完成不另起一条提示（减法：「工作中」呼吸已表示本轮仍在产出）。
+ * 顶部阶段条现场（B4）：**只剩准备中**。
+ *
+ * <p>压缩过程态已下沉到消息元信息行（紫色「压缩中…」，见 `isCompacting`）；顶部不再出现
+ * 任何压缩提示，`preparing` 的既有交互（立即重试）原样保留。
  */
-const stageBar = computed<{ mode: 'compacting' | 'preparing'; startedAtMs: number | null; elapsedMs: number | null } | null>(() => {
-  if (ai.compactionPhase === 'compacting') {
-    return {
-      mode: 'compacting',
-      startedAtMs: ai.compactionStartedAtMs,
-      elapsedMs: ai.compactionElapsedMs
+const stageBar = computed<{ mode: 'preparing'; startedAtMs: number | null; elapsedMs: number | null } | null>(() => {
+  const preparing = ai.preparingRun
+  return preparing === null
+    ? null
+    : { mode: 'preparing', startedAtMs: preparing.startedAtMs, elapsedMs: preparing.elapsedMs }
+})
+
+/**
+ * B4：消息级压缩秒表 —— 只在本轮真实处于压缩中时每秒推进，组件卸载/压缩结束即停。
+ * 服务端首帧给了 elapsedMs，store 已折算成客户端起点；这里只做展示，不伪造进度。
+ */
+const compactingNow = ref(Date.now())
+let compactingTicker: ReturnType<typeof setInterval> | null = null
+
+function stopCompactingTicker(): void {
+  if (compactingTicker !== null) {
+    clearInterval(compactingTicker)
+    compactingTicker = null
+  }
+}
+
+watch(
+  () => ai.messages.some((message) => message.compactingStartedAtMs !== undefined && !message.done),
+  (active) => {
+    stopCompactingTicker()
+    compactingNow.value = Date.now()
+    if (active) {
+      compactingTicker = setInterval(() => {
+        compactingNow.value = Date.now()
+      }, 1000)
+    }
+  },
+  { immediate: true }
+)
+onBeforeUnmount(stopCompactingTicker)
+
+function compactingSeconds(message: ChatMessage): number {
+  if (message.compactingStartedAtMs === undefined) {
+    return 0
+  }
+  return Math.max(0, Math.floor((compactingNow.value - message.compactingStartedAtMs) / 1000))
+}
+
+function compactingLabel(message: ChatMessage): string {
+  const seconds = compactingSeconds(message)
+  return seconds > 0
+    ? t('ai.panel.compactingMessageElapsed', { seconds })
+    : t('ai.panel.compactingMessage')
+}
+
+/**
+ * B4 可访问播报：只播**进入压缩**与**已提交完成**（`context{committed:true,eventId}`）。
+ * 紫色退场不是事实（失败/停止/未提交都会退场），因此不播退出；秒表只走可见文本，
+ * 不在 live region 内 —— 读屏不会被逐秒打断。
+ */
+const compactingActive = computed(() => ai.messages.some((message) => isCompacting(message)))
+const compactionAnnouncement = ref('')
+/** 播报序号：清空→写入两步之间若又有新事件，旧的那次作废（只播最新事实）。 */
+let compactionAnnounceSeq = 0
+/**
+ * live region 只在**文本变化**时播报：先清空并等一帧，再写入目标文案。
+ * 这样连续两次相同文案（如两次 L1 提交都播「完成」）也各产生一次 DOM 变化，读屏会重读。
+ */
+async function announceCompaction(text: string): Promise<void> {
+  const seq = ++compactionAnnounceSeq
+  compactionAnnouncement.value = ''
+  await nextTick()
+  if (seq !== compactionAnnounceSeq) {
+    return
+  }
+  compactionAnnouncement.value = text
+}
+watch(compactingActive, (active, was) => {
+  if (active && !was) {
+    void announceCompaction(t('ai.panel.compactingMessageAria'))
+  }
+})
+// 没有紫色过程态（L1 / 回放）时，已提交事实到达也播一次完成（相同文案也会重播）
+watch(
+  () => ai.lastCommittedCompactionEventId,
+  (eventId) => {
+    if (eventId !== null && eventId !== '') {
+      void announceCompaction(t('ai.panel.compactionFinishedAria'))
     }
   }
-  const preparing = ai.preparingRun
-  if (preparing !== null) {
-    return { mode: 'preparing', startedAtMs: preparing.startedAtMs, elapsedMs: preparing.elapsedMs }
+)
+// 换会话：播报现场不跨会话（否则下一会话的首次同文案会被当成"没变化"吞掉）
+watch(
+  () => ai.sessionId,
+  () => {
+    compactionAnnounceSeq += 1
+    compactionAnnouncement.value = ''
   }
-  return null
-})
+)
 
 /**
  * 批次2 的恢复与轮次动作**唯一适配层**（批次3 起 store 由本批维护；适配层保留，
@@ -1536,9 +1647,9 @@ const stageBar = computed<{ mode: 'compacting' | 'preparing'; startedAtMs: numbe
  *     runId 不进任何用户可见文本；没有 `busyRun` 就不出入口（不拿 `activeRunId` 猜）。</li>
  * <li>unconfirmed：`message.unconfirmed=true`，或最后一轮的 `lastRoundOutcome='unconfirmed'`；
  *     重新载入走 `retryLoadHistory()`。</li>
- * <li>三动作（AR-09 / AR-05 / AR-17）：继续 = 正常 `send('继续')`，立即显示用户消息并进入历史；
- *     重试本轮 = 「仅模型步重跑」真实 store action（`retryModelStep` → 后端窄入口 → 既有 events 重挂；
- *     只认 `message.runId` 归属，无证据不出入口）；
+ * <li>继续（唯一恢复动作）：失败/断流的最后一条助手消息，无论有无正文/思考，都走正常
+ *     `send('继续')`，立即显示用户消息并新建普通轮次；停止/取消、unconfirmed、非末轮不出。
+ *     配额错误卡带「继续」时，元信息行不重复该入口。
  *     普通 regenerate = **本批不做、入口整体隐藏**（无禁用 / unsupported 死 UI，也不本地截断重发）。</li>
  * </ul>
  */
@@ -1618,16 +1729,6 @@ function returnToActiveRun(): void {
   void ai.reattachBusyRun()
 }
 
-/**
- * 批次2 / AR-01 第 5 条：该条历史消息是**合成/系统提示**（后端 `synthetic=true`）。
- *
- * <p>面板把它渲染为系统级「已压缩」提示，而不是用户气泡；摘要正文不直接展示
- * （其中可能含内部配置键/占位符），也不参与「继续/重试/regenerate」等消息级动作。
- */
-function syntheticOf(message: ChatMessage): boolean {
-  return message.synthetic === true
-}
-
 function unconfirmedOf(message: ChatMessage): boolean {
   if (message.role !== 'assistant') {
     return false
@@ -1643,35 +1744,10 @@ function reloadTurnState(): void {
   void ai.retryLoadHistory()
 }
 
-/**
- * 一轮是否已有**文字产出**：非空正文 / 非空思考。
- *
- * <p>工具段**不算**文字产出：工具已结算但模型没写出任何正文/思考的失败轮，续写没有可承接的半截答案，
- * 应走「重试本轮」（仅模型步重跑）；有文字才走「继续」（append-drive）。旧判据把工具段并入「有产出」，
- * 导致这类轮只出「继续」而不出「重试本轮」。
- */
-function hasTextOrReasoning(message: ChatMessage): boolean {
-  return message.parts.some(
-    (part) => (part.kind === 'text' || part.kind === 'reasoning') && part.text.trim() !== ''
-  )
-}
-
 /** 继续：以用户身份正常发送「继续」，与手动输入一样立即显示并进入对话历史。 */
 function continueTurn(_message: ChatMessage): void {
   clearStreamMdCache()
   void ai.send(t('ai.panel.continue'))
-}
-
-/**
- * 重试本轮（retry-turn）：走 store 的**真实 action**（仅模型步重跑窄入口）。
- *
- * <p>批次2 修：旧实现是"store 没有 action 时本地截断后重新发送" —— 那是**重发请求**，
- * 不是仅模型步重跑（会重建上下文、可能重放工具），属于危险假实现。这里不存在任何本地回退：
- * 后端不允许（非 FAILED / 有半截 / 待决未清）就由 store 按 `failedCheck` 显示对应状态。
- */
-function retryTurn(message: ChatMessage): void {
-  clearStreamMdCache()
-  void ai.retryModelStep(message)
 }
 
 const inputText = ref('')
@@ -1873,9 +1949,26 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
 }
 
 /**
- * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「稍后重试」只在**归属可证明的零文字产出失败轮**
- * 上出现（真实窄入口）。普通已完成 / 有半截内容没有对应的后端入口 —— 该动作**直接隐藏**，
- * 不做"禁用但仍可点出 unsupported"的死 UI。
+ * 配额错误卡上的「继续」：只在失败/断流的最后一条助手消息上出现（与元信息行同一判据）。
+ * 该动作显示时，元信息行不再重复出「继续」（{@link showContinue} 已排除）。
+ */
+function errorCardContinueVisible(message: ChatMessage): boolean {
+  const card = message.errorCard
+  return card != null && card.variant === 'quota'
+    && Boolean(card.action)
+    && isFailedLastAssistant(message)
+}
+
+/** 错误卡动作文案：quota 卡固定按当前语言取「继续」（旧镜像里定格的旧文案不复活）。 */
+function errorCardActionLabel(message: ChatMessage): string {
+  return message.errorCard?.variant === 'quota'
+    ? t('ai.card.error.quota.action')
+    : message.errorCard?.action ?? ''
+}
+
+/**
+ * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「继续」按 {@link errorCardContinueVisible}；
+ * 其它变体的动作维持既有入口。不满足条件的动作**直接隐藏**，不做禁用 / unsupported 死 UI。
  */
 function errorCardActionVisible(message: ChatMessage): boolean {
   const card = message.errorCard
@@ -1883,13 +1976,13 @@ function errorCardActionVisible(message: ChatMessage): boolean {
     return false
   }
   if (card.variant === 'quota') {
-    return showRetryTurn(message)
+    return errorCardContinueVisible(message)
   }
   return true
 }
 
 /** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
- *  「稍后重试」= 零文字产出且归属可证明 ⇒ **重试本轮**（仅模型步重跑窄入口）；否则该动作隐藏（AR-17）；
+ *  「继续」= 与消息元信息行同一出口（{@link continueTurn}，正常发送「继续」）；
  *  「改写后重发」= 把焦点交回输入框（改写是用户动作，面板只能把落点指过去）；
  *  「开新会话」= 既有 `newChat()`（与面板头「新建对话」同一出口）。
  *  分派按 **variant**（i18n L-69 后 `action` 文案随 UI 语言变，字符串比对会断；variant → 动作是一对一）。 */
@@ -1899,8 +1992,8 @@ function runErrorCardAction(message: ChatMessage): void {
     return
   }
   if (card.variant === 'quota') {
-    if (showRetryTurn(message)) {
-      retryTurn(message)
+    if (errorCardContinueVisible(message)) {
+      continueTurn(message)
     }
     return
   }
@@ -2291,12 +2384,27 @@ function waitingForAction(message: ChatMessage): boolean {
     && (part.kind2 === 'CONFIRM' || part.name === GENERATIVE_FORM_TOOL || isSheetPreviewPart(part) || isUploadHandoffPart(part)))
 }
 
+/**
+ * B4：真实 L2 压缩的紫色过程态。
+ *
+ * <p>归属 = 触发这次压缩的宿主 assistant；HITL/表单等待优先（等待中不与压缩抢同一状态位），
+ * done/unconfirmed 不显示。L1/L3/MemoryWindow/no-op 后端不发 `compacting` 心跳，因此天然不出现。
+ */
+function isCompacting(message: ChatMessage): boolean {
+  return message.role === 'assistant'
+    && !message.done
+    && message.compactingStartedAtMs !== undefined
+    && !waitingForAction(message)
+    && !unconfirmedOf(message)
+}
+
 function isBreathing(message: ChatMessage): boolean {
   const active = message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
   return message.role === 'assistant'
     && active
     && !message.done
     && !waitingForAction(message)
+    && !isCompacting(message)
     && !unconfirmedOf(message)
 }
 
@@ -2321,10 +2429,11 @@ function showTimestamp(message: ChatMessage): boolean {
 function showMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || isBreathing(message)
+    || isCompacting(message)
     || waitingForAction(message)
     || unconfirmedOf(message)
     || showContinue(message)
-    || showRetryTurn(message)
+    || errorCardContinueVisible(message)
     || message.stopped === true
     || message.truncated === true
 }
@@ -3497,7 +3606,7 @@ function toggleBlock(block: Block): void {
  *
  * 现行口径：全局现场只以**本消息的判定结果**入场（`isBreathing` / `waitingForAction` /
  * `isBlockExpanded` 等）—— 结果没变 ⇒ 本行不失效（历史消息一格不动）；结果变了 ⇒ 本行照常
- * 更新（末条消息的呼吸点、挂起等待、卡展开态、继续/重试入口都在）。
+ * 更新（末条消息的呼吸点、挂起等待、卡展开态、继续入口都在）。
  * 输入框 `inputText` 是组件本地态，不在这些依赖里 —— 打字只重渲 composer，不重渲消息列表。
  */
 function partMemo(part: MessagePart, block: Block): unknown[] {
@@ -3524,6 +3633,11 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
       part.originalChars,
       part.returnedChars
     )
+    return deps
+  }
+  if (part.kind === 'event') {
+    // 事件节点只依赖稳定 id（文案随 locale，已在基础 deps）
+    deps.push(part.eventType, part.eventId)
     return deps
   }
   if (part.kind === 'text') {
@@ -3615,7 +3729,6 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     message.done,
     message.stopped,
     message.truncated,
-    message.synthetic,
     message.timestamp,
     message.pendingCall,
     message.pendingCall?.status,
@@ -3628,10 +3741,12 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     message.errorCard?.code,
     message.errorCard?.detail,
     message.errorCard?.action,
+    // 失败/断流的消息级事实（刷新后「继续」判据；不仅靠上面的判定结果缓存）
+    message.code,
+    message.interrupted,
     index,
     msgGapClass(index),
     locale.value,
-    syntheticOf(message),
     unconfirmedOf(message),
     // 元信息行 / 恢复入口的**判定结果**（各自已经把 loading / runPhase / 末条身份算进去了）。
     // 全局现场本身不入 memo：否则历史行跟着每一次收流翻转一起失效（整屏闪根因）。
@@ -3639,9 +3754,11 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     showTimestamp(message),
     waitingForAction(message),
     isBreathing(message),
+    isCompacting(message),
+    isCompacting(message) ? compactingLabel(message) : '',
     isFading(message),
     showContinue(message),
-    showRetryTurn(message),
+    errorCardContinueVisible(message),
     feedbackOf(message.id),
     isMsgCopied(message.id),
     copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
@@ -4264,6 +4381,41 @@ function scrollBottom(force = false): void {
 }
 
 /**
+ * 分页：加载更早一页并**保持视口不跳**。
+ *
+ * <p>用**原首条消息元素**作锚点（`getBoundingClientRect().top` 的前后差）补偿，而不是容器
+ * `scrollHeight` 差 —— 后者会把底部流式新增的高度也算进去，用户上翻阅读时会被多滚一段。
+ * 贴底跟随交给统一 stick 逻辑；浏览器原生滚动锚定已补偿时不重复补。
+ */
+async function loadEarlierHistory(): Promise<void> {
+  const wrap = msgWrapRef.value
+  const firstId = ai.messages[0]?.id ?? null
+  const beforeTop = wrap?.scrollTop ?? 0
+  const anchorBefore = firstId === null
+    ? null
+    : msgWrapRef.value?.querySelector(`[data-msg-id="${firstId}"]`) as HTMLElement | null
+  const beforeAnchorTop = anchorBefore?.getBoundingClientRect().top ?? null
+  await ai.loadEarlierHistory()
+  if (!wrap || firstId === null || beforeAnchorTop === null || followBottom.value) {
+    return
+  }
+  await nextTick()
+  if (Math.abs(wrap.scrollTop - beforeTop) > 1) {
+    return // 浏览器原生锚定已经补偿过
+  }
+  const anchorAfter = wrap.querySelector(`[data-msg-id="${firstId}"]`) as HTMLElement | null
+  if (!anchorAfter) {
+    return
+  }
+  const shifted = anchorAfter.getBoundingClientRect().top - beforeAnchorTop
+  if (shifted <= 0) {
+    return
+  }
+  wrap.scrollTop = beforeTop + shifted
+  pinGuardTop = wrap.scrollTop
+}
+
+/**
  * R-154 #17 → R-162 M2：消息时间戳渲染（仅展示、可选）改走 `formatProgressiveTs`
  * （utils/format.ts 集中来源；历史路 = 后端条目 metadata.timestamp，实时路 = message_start 帧
  * atMs；无法解析 / 缺失 ⇒ 空串不渲染时间位）。R-158 #10 回执决策时刻同口径。
@@ -4292,36 +4444,38 @@ function editMessage(m: ChatMessage): void {
 /**
  * 本轮是否仍可给出消息级恢复入口（最后一条助手消息 + 真实失败/断流 + 未被停止）。
  *
- * <p>取消（`cancelled`）**不是**可恢复的失败轮：停止是用户的终态决定，恢复入口（继续 /
- * 重试本轮）必须彻底排除。消息级 `stopped` 是首要判据（含零产出轮），`lastRoundOutcome`
- * 里的取消态不再作为候选 —— 旧会话残留的取消结局不得复活出重试按钮。
+ * <p>取消（`cancelled`）**不是**可恢复的失败轮：停止是用户的终态决定，恢复入口（继续）
+ * 必须彻底排除。消息级 `stopped` 是首要判据（含零产出轮）。
+ * `unconfirmed` 是"终态暂不可确认"，不是普通失败，同样不出继续。
+ *
+ * <p>判据以**消息级事实**为准（`errorCard` / `code` / `interrupted`）—— 它们都会随镜像活过
+ * 刷新；`lastRoundOutcome` 只是本场会话的即时补充（纯内存，刷新后是初值 'ok'），不得单独依赖。
+ * 否则刷新后失败/断流末条会一个「继续」都不出。
  */
 function isFailedLastAssistant(message: ChatMessage): boolean {
   const last = ai.messages[ai.messages.length - 1]
   return message.role === 'assistant'
     && last === message
+    // 只对**已收尾**的消息出恢复入口：流式/接管中的消息不是"失败的末条"
+    && message.done === true
+    && message.streaming !== true
     && message.stopped !== true
     && !unconfirmedOf(message)
-    && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted')
+    && (message.errorCard != null
+      || message.code != null
+      || message.interrupted === true
+      || ai.lastRoundOutcome === 'error'
+      || ai.lastRoundOutcome === 'interrupted')
 }
 
 /**
- * AR-09 / AR-17：动作语义分离后的显示判据。
- * - 继续：**有正文/思考**的失败轮才出（正常发送一条用户可见的「继续」，不删历史）；
- * - 重试本轮（retry-turn）：**零正文零思考 + 归属可证明**的失败轮才出（工具已结算但没写出文字的
- *   轮次也归此类 —— 无半截内容可续，只能仅模型步重跑；替换本轮、不加用户气泡）；
- * - 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
- * 同一轮「继续 / 重试本轮」互斥，避免把两种语义塞进同一个按钮。
+ * 继续：失败/断流的最后一条助手消息，无论有无正文/思考都可出（正常发送一条用户可见的
+ * 「继续」，不删历史）；停止/取消、unconfirmed、非末轮不出。
+ * 配额错误卡已带「继续」时，元信息行不重复该入口。
+ * 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
  */
 function showContinue(message: ChatMessage): boolean {
-  return isFailedLastAssistant(message) && hasTextOrReasoning(message)
-}
-
-function showRetryTurn(message: ChatMessage): boolean {
-  // 归属不可证明（无 message.runId，且不是当前在途宿主）⇒ 不出「重试本轮」入口：
-  // 刷新后 activeRunId 可能为空或指向更晚的一轮，猜它就会重试错轮。
-  return isFailedLastAssistant(message) && !hasTextOrReasoning(message)
-    && ai.retryRunIdFor(message) !== null
+  return isFailedLastAssistant(message) && !errorCardContinueVisible(message)
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的

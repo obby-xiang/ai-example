@@ -2,7 +2,7 @@
  * 2026-10-30 用户直裁：AiPanel 用户消息「编辑」= **只把该条正文回填到输入框并聚焦**。
  *
  * <p>不发送、不重跑、不删除/截断原消息、不设编辑/重跑锚点；之后用户自己点发送，
- * 就是一条普通新消息（追加、不截断、不带 `skipUserRecord`）。
+ * 就是一条普通新消息（追加、不截断、不带任何旧的跳过记录参数）。
  *
  * <p>本文件只锁这两条口径（每条一个精确用例）；旧的「编辑后重跑」用例已随该入口一并退役。
  */
@@ -194,7 +194,7 @@ describe('2026-10-30 直裁：编辑 = 只回填正文（不重跑）', { timeou
     wrapper.unmount()
   })
 
-  it('回填后主动发送 = 普通新消息：原消息不截断、新文本追加、不带 skipUserRecord', async () => {
+  it('回填后主动发送 = 普通新消息：原消息不截断、新文本追加、无附加参数', async () => {
     const { wrapper, store } = await mountSeeded()
     // 点击编辑时输入框为空 ⇒ 新实现不弹确认；桩恒 true 只是为了让**改造前**的实现（删除条数确认）
     // 也能走到底，RED 才落在「发送走了重跑通道」而不是被弹窗掩掉。
@@ -211,7 +211,7 @@ describe('2026-10-30 直裁：编辑 = 只回填正文（不重跑）', { timeou
 
     expect(api.chat).toHaveBeenCalledTimes(1)
     expect((api.chat.mock.calls[0][0] as Record<string, unknown>).message).toBe('改写后的提问')
-    // 普通新消息：send 不带第二参（旧重跑通道 skipUserRecord 不再被这个入口触发）
+    // 普通新消息：send 只有正文一个参数（旧重跑通道已删除）
     expect(sendSpy.mock.calls[0]?.[1]).toBeUndefined()
 
     // 不截断：原三条按原序仍在，原文本未被改写

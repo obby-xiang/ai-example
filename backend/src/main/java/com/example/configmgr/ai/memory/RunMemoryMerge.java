@@ -70,7 +70,16 @@ public final class RunMemoryMerge {
 	 * 轮内的工具预算清除只改"本轮请求"的历史副本，被清的多是别的 run 的结果；若收敛时整块保留旧块，
 	 * 清除就永远丢（窗口原文还在、下一轮再清一次、L3 永远"清一下就够了"，谱系停在 L2）。
 	 */
-	public static final String CLEARED_TOOL_RESULT_PREFIX = "[工具结果已清除：";
+	public static final String CLEARED_TOOL_RESULT_PREFIX = "[较早的工具结果已清理]";
+
+	/** 旧占位符前缀（B5 前写入的历史仍须识别为"已清除"）。 */
+	public static final String LEGACY_CLEARED_TOOL_RESULT_PREFIX = "[工具结果已清除：";
+
+	/** 新/旧占位符任一命中即"已清除"（会话级单调事实，不因文案升级而失效）。 */
+	private static boolean isClearedPlaceholder(String data) {
+		return data != null && (data.startsWith(CLEARED_TOOL_RESULT_PREFIX)
+				|| data.startsWith(LEGACY_CLEARED_TOOL_RESULT_PREFIX));
+	}
 
 	private RunMemoryMerge() {
 	}
@@ -339,8 +348,7 @@ public final class RunMemoryMerge {
 		for (Message message : messages) {
 			if (message instanceof ToolResponseMessage toolResponse) {
 				for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
-					if (response.responseData() != null
-							&& response.responseData().startsWith(CLEARED_TOOL_RESULT_PREFIX)) {
+					if (isClearedPlaceholder(response.responseData())) {
 						cleared.put(response.id(), response.responseData());
 					}
 				}
@@ -359,8 +367,7 @@ public final class RunMemoryMerge {
 		for (int index = 0; index < current.size(); index++) {
 			ToolResponseMessage.ToolResponse response = current.get(index);
 			String placeholder = clearedById.get(response.id());
-			if (placeholder == null || response.responseData() == null
-					|| response.responseData().startsWith(CLEARED_TOOL_RESULT_PREFIX)) {
+			if (placeholder == null || isClearedPlaceholder(response.responseData())) {
 				continue;
 			}
 			if (responses == null) {

@@ -50,7 +50,7 @@ import static org.mockito.Mockito.when;
  * <h2>判据（返修 I-2 后按<b>每次驱动</b>）</h2>
  * 判据是 {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}：驱动入口记一次归档序号下界，
  * 只认 {@code seq > 下界} 的 done/error。**不能**用整轮归档（{@code terminalFrameArchived()}）——
- * 同一 runId 会被驱动多次（{@code retry-model-step}），上一次的 error 会把本次失败整条吞掉；
+ * 同一 runId 可能被驱动多次（续跑/重挂），上一次的 error 会把本次失败整条吞掉；
  * 本类下半部分的两条用例正是那个反向证据。
  *
  * <p><b>不用 AtomicBoolean</b>：进程内布尔只挡自己，也不解决"多次驱动"的代次问题；
@@ -128,7 +128,7 @@ class FailureTerminalFrameIdempotencyTest {
 
 	/**
 	 * <b>返修 I-2 后的口径</b>：上一次驱动留下的 error <b>不属于</b>本次驱动 ⇒ 本次失败出口
-	 * <b>必须</b>照发自己的终帧（这正是 {@code retry-model-step} 二次驱动失败的场景）。
+	 * <b>必须</b>照发自己的终帧（这正是同一 runId 二次驱动失败的场景）。
 	 *
 	 * <p>旧口径（"归档里有没有任何终帧"）会在这里把本次的 error 与 {@code textEnd} 一起吞掉 ——
 	 * 本用例在返修前是反向断言（{@code noneMatch(error)}），返修后倒转，锁的是同一条判据的另一面。

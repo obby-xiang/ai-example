@@ -55,13 +55,12 @@ import static org.mockito.Mockito.when;
  *
  * <h2>被钉住的三条</h2>
  * <ol>
- * <li><b>无归属 ⇒ 不驱动</b>：{@code POST /api/ai/runs/{runId}/resume} 与
- *     {@code POST /api/ai/runs/{runId}/retry-model-step} 在调用身份没有这一轮时以
+ * <li><b>无归属 ⇒ 不驱动</b>：{@code POST /api/ai/runs/{runId}/resume} 在调用身份没有这一轮时以
  *     {@code 404 UNKNOWN_RUN} 拒绝，别人的快照/待决/租约一个都不动，也不交棒驱动；</li>
  * <li><b>同 runId 各动自己的</b>：A、B 各有同一 runId 的轮次时，B 的续跑只把 B 的快照推进到
  *     {@code RUNNING}（驱动 B 的会话），A 的仍停在 {@code SUSPENDED}、租约键为空；</li>
- * <li><b>本人仍可按契约执行</b>：A 自己的 resume / retry-model-step 照常受理（{@code 202}）并驱动
- *     一轮 —— 归属收窄不得把正常路径关掉。</li>
+ * <li><b>本人仍可按契约执行</b>：A 自己的 resume 照常受理（{@code 202}）并驱动一轮 ——
+ *     归属收窄不得把正常路径关掉。</li>
  * </ol>
  */
 class ResumeCrossTenantSameRunIdTest {
@@ -81,8 +80,6 @@ class ResumeCrossTenantSameRunIdTest {
 	private static final long TENANT_B = 2L;
 
 	private static final long USER_B = 202L;
-
-	private static final String MODEL_ID = "test-model";
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -199,57 +196,6 @@ class ResumeCrossTenantSameRunIdTest {
 		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_A), any(AiContext.class), any(), same(this.emitter));
 	}
 
-	@Test
-	void retryModelStepWithoutOwnRecordNeverDrivesTheOtherIdentitysRun() {
-		seedFailed(TENANT_A, USER_A, SESSION_A);
-
-		ResponseEntity<?> response;
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			response = controller().retryModelStep(RUN_ID);
-		}
-
-		assertThat(response.getStatusCode().value()).as("B 没有自己这一轮 ⇒ 404").isEqualTo(404);
-		assertThat(bodyOf(response)).containsEntry("reason", "UNKNOWN_RUN");
-
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			assertThat(this.store.get(RUN_ID).getStatus()).as("A 的失败轮不得被 B 重跑")
-				.isEqualTo(RunSnapshot.FAILED);
-			assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("不得抢 A 的续跑权租约").isNull();
-		}
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(), any());
-	}
-
-	@Test
-	void retryModelStepOfOwnFailedRunRunsItWhileTheOtherIdentitysRunStaysUntouched() {
-		seedFailed(TENANT_A, USER_A, SESSION_A);
-		seedFailed(TENANT_B, USER_B, SESSION_B);
-
-		ResponseEntity<?> forB;
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			forB = controller().retryModelStep(RUN_ID);
-		}
-		assertThat(forB.getStatusCode().value()).as("B 自己的重跑必须受理").isEqualTo(202);
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.RUNNING);
-		}
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			assertThat(this.store.get(RUN_ID).getStatus()).as("A 的失败轮不得被 B 的重跑带走")
-				.isEqualTo(RunSnapshot.FAILED);
-			assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("B 不得持有/改动 A 的续跑租约").isNull();
-		}
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_B), any(AiContext.class), any(), same(this.emitter));
-
-		ResponseEntity<?> forA;
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			forA = controller().retryModelStep(RUN_ID);
-		}
-		assertThat(forA.getStatusCode().value()).as("A 自己的重跑照常按契约受理").isEqualTo(202);
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.RUNNING);
-		}
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_A), any(AiContext.class), any(), same(this.emitter));
-	}
-
 	// ───────────────────────── helpers ─────────────────────────
 
 	private void seedSuspendedPending(long tenantId, long userId, String sessionId) {
@@ -274,16 +220,6 @@ class ResumeCrossTenantSameRunIdTest {
 			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec);
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
-			this.store.save(snapshot);
-		}
-	}
-
-	private void seedFailed(long tenantId, long userId, String sessionId) {
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(tenantId, userId)) {
-			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec);
-			RunSnapshot snapshot = this.store.get(RUN_ID);
-			snapshot.setModelId(MODEL_ID);
-			snapshot.setStatus(RunSnapshot.FAILED);
 			this.store.save(snapshot);
 		}
 	}

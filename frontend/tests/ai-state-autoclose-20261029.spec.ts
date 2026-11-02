@@ -43,7 +43,6 @@ const api = vi.hoisted(() => ({
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
   getContext: vi.fn(),
-  retryModelStep: vi.fn(),
   // Task 4：会话号只由后端发号（410 换会话等路径要真发一次号）
   createSession: vi.fn()
 }))
@@ -198,7 +197,6 @@ beforeEach(() => {
   api.cancel.mockResolvedValue({})
   api.deleteHistory.mockResolvedValue({})
   api.frontendToolResult.mockResolvedValue({})
-  api.retryModelStep.mockResolvedValue({ retried: true })
   api.getContext.mockRejectedValue(new ApiError('no context', 404, 'NOT_FOUND', null))
   chat = createChatStub()
   api.chat.mockImplementation(chat.impl as never)

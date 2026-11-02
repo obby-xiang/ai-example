@@ -36,15 +36,19 @@ export interface Block {
   id: string
   /** 所属消息 id（消息命名空间前缀的原文）——「回合是否仍在进行」判据用（已决终态回合未结束时保持展开）。 */
   messageId: string
-  kind: 'text' | 'activity'
-  /** 恒 1 个元素（R-154 #13+14：每段一卡）；成员 kind ∈ {'reasoning','tool'} */
+  kind: 'text' | 'activity' | 'event'
+  /** 恒 1 个元素（R-154 #13+14：每段一卡；B3 事件段也独立成块） */
   parts: MessagePart[]
   /** requiresAction 段 true（强制展开）；已决 HITL 多态一律折叠（见 {@link readOnlyDefaultExpanded}）；其余 false */
   defaultExpanded: boolean
 }
 
 function stablePartId(part: MessagePart, messageId: string): string {
-  const base = part.kind === 'tool' ? part.toolCallId : `${part.kind}-${part.seg}`
+  const base = part.kind === 'tool'
+    ? part.toolCallId
+    : part.kind === 'event'
+      ? `event-${part.eventId}`
+      : `${part.kind}-${part.seg}`
   // F1（红队 M-1）：seg 逐消息自 0 起（parts.ts nextSeg），跨消息同 seg 会撞 id ⇒ 全量加消息命名空间前缀
   return `${messageId}:${base}`
 }
@@ -95,6 +99,11 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
         continue
       }
       blocks.push({ id: stablePartId(part, messageId), messageId, kind: 'text', parts: [part], defaultExpanded: true })
+      continue
+    }
+    if (part.kind === 'event') {
+      // B3：压缩事件独立成块（全宽分隔行，不参与展开/工具查找/复制）
+      blocks.push({ id: stablePartId(part, messageId), messageId, kind: 'event', parts: [part], defaultExpanded: false })
       continue
     }
     if (!isActivityPart(part)) {

@@ -5,6 +5,7 @@ import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.ContextTrigger;
+import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
@@ -268,17 +269,27 @@ class ConditionHandoffPersistenceTest {
 		seedSuspendedConfirmStep();
 		ContextCompactor compactor = mock(ContextCompactor.class);
 		when(compactor.readState(SESSION_ID)).thenReturn(ContextState.EMPTY);
-		when(compactor.compact(any(ContextCompactor.Request.class), any(), any())).thenAnswer(invocation -> {
+		when(compactor.plan(any(ContextCompactor.Request.class), any(), any())).thenAnswer(invocation -> {
 			ContextCompactor.Request request = invocation.getArgument(0);
-			return new ContextCompactor.Outcome(ContextTrigger.Level.L1, new ArrayList<>(request.messages()),
-					100, 40, 60, 0, List.of(), "l1_cleared", 0, 40, true, "closed", 0.9, 0, 0, 0, 0);
+			return new ContextCompactor.Plan(ContextState.EMPTY, ContextTrigger.Level.L1,
+					new ArrayList<>(request.messages()), 100, 40, 60,
+					new ToolResultClearing.Plan(List.of(), List.of(), 0), 0, 0, 0, "l1_cleared", 0L,
+					false, false, false, false,
+					new ContextTrigger.Decision(ContextTrigger.Level.L1, 0.9, 0, 0, 0));
 		});
+		when(compactor.commit(any(ContextCompactor.Request.class), any(ContextCompactor.Plan.class)))
+			.thenAnswer(invocation -> {
+				ContextCompactor.Request request = invocation.getArgument(0);
+				return new ContextCompactor.Outcome(ContextTrigger.Level.L1, new ArrayList<>(request.messages()),
+						100, 40, 60, 0, List.of(), "l1_cleared", 0, 40, true, "closed", 0.9, 0, 0, 0, 0,
+						true, "evt-cond-handoff", RUN_ID, "l1", null, 0L);
+			});
 		ReflectionTestUtils.setField(this.service, "contextCompactor", compactor);
 
 		this.service.resume(RUN_ID);
 
 		ArgumentCaptor<ContextCompactor.Request> request = ArgumentCaptor.forClass(ContextCompactor.Request.class);
-		verify(compactor).compact(request.capture(), any(), any());
+		verify(compactor).plan(request.capture(), any(), any());
 		assertThat(request.getValue().messages())
 			.as("压缩输入不得包含内部指令（否则它会进摘要/记忆）")
 			.noneMatch(ConditionHandoffPersistenceTest::isSyntheticInstruction);

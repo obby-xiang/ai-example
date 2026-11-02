@@ -248,8 +248,9 @@ class MemoryWindowWiringTest {
 		assertThat(captor.history).hasSize(6);
 		assertThat(ContextEstimator.estimateMessages(captor.history)).isLessThanOrEqualTo(6_000);
 		assertThat(captor.history.get(0).getMessageType()).isEqualTo(MessageType.USER);
-		assertThat(result.body()).as("续跑侧也要如实报告窗口（运维/取证面）")
-			.containsEntry("memoryWindowTrimmed", true);
+		assertThat(result.body()).as("B5：不再返回无消费者的 memoryWindow* 载荷")
+			.doesNotContainKey("memoryWindowTrimmed")
+			.doesNotContainKey("memoryWindow");
 		assertThat(eventLines()).anyMatch(line -> line.startsWith("event=memory_window "));
 	}
 
@@ -265,7 +266,7 @@ class MemoryWindowWiringTest {
 		ResumeService.ResumeResult result = this.resumeService.resume(RUN_ID);
 
 		assertThat(captureHandedOffHistory().history).hasSize(4);
-		assertThat(result.body()).containsEntry("memoryWindowTrimmed", false);
+		assertThat(result.body()).doesNotContainKey("memoryWindowTrimmed");
 		assertThat(eventLines()).noneMatch(line -> line.startsWith("event=memory_window "));
 	}
 

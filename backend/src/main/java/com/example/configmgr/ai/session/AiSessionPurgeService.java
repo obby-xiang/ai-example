@@ -246,6 +246,10 @@ public class AiSessionPurgeService {
 	public record SessionView(boolean currentDeleted, boolean recordDeleted) {
 	}
 
+	/** 用户展示历史面（B2）：{@code entries} 为枚举时的条目数；{@code deleted} = 任一关联键已删。 */
+	public record TranscriptView(boolean existed, long entries, boolean deleted) {
+	}
+
 	/** 浏览器本地镜像/草稿的清理指令（服务端无法直接删 sessionStorage）。 */
 	public record ClientCleanup(String mirrorKey, String draftPrefix, List<String> draftToolCallIds) {
 	}
@@ -253,7 +257,7 @@ public class AiSessionPurgeService {
 	/** 一次销毁的完整结果（{@code complete=false} 时看 {@code errors}/{@code deferred}）。 */
 	public record PurgeResult(String sessionId, String purgeId, boolean complete, boolean found, String phase,
 			SessionPurgeDatabase.Snapshot databaseSnapshot, SessionPurgeDatabase.Deleted databaseDeleted,
-			MemoryView memory, List<RunView> runs, List<DeferredView> deferred,
+			MemoryView memory, TranscriptView transcript, List<RunView> runs, List<DeferredView> deferred,
 			ContextView context, AttachmentView attachments, SessionView session,
 			ClientCleanup clientCleanup, List<String> errors, List<String> warnings) {
 
@@ -272,6 +276,8 @@ public class AiSessionPurgeService {
 			body.put("database", db);
 			body.put("memory", Map.of("existed", this.memory.existed(), "messages", this.memory.messages(),
 					"deleted", this.memory.deleted()));
+			body.put("transcript", Map.of("existed", this.transcript.existed(), "entries", this.transcript.entries(),
+					"deleted", this.transcript.deleted()));
 			body.put("runs", this.runs.stream().map(run -> {
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", run.runId());
@@ -467,6 +473,8 @@ public class AiSessionPurgeService {
 		// 状态刷新阶段读到的终态快照随枚举结果带下来：删除阶段对同一把键不再整份重读
 		// （活跃轮不受影响 —— 它们仍要重新读一次判活，见 deleteOrDefer）。
 		MemoryView memory = deleteMemory(sessionId, current, errors);
+		TranscriptView transcriptView = deleteTranscript(sessionId, current.transcriptExisted(),
+				current.transcriptEntries(), errors, warnings);
 		List<RunView> runViews = new ArrayList<>();
 		List<DeferredView> deferred = new ArrayList<>();
 		for (RunTarget target : current.runs()) {
@@ -521,7 +529,7 @@ public class AiSessionPurgeService {
 
 		boolean complete = errors.isEmpty() && deferred.isEmpty();
 		PurgeResult result = new PurgeResult(sessionId, purgeId, complete, current.found(), null,
-				current.database(), dbDeleted, memory, runViews, deferred, context,
+				current.database(), dbDeleted, memory, transcriptView, runViews, deferred, context,
 				attachmentView, session, current.clientCleanup(), errors, warnings);
 		log.info("会话销毁完成 sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
 				+ "memoryExisted={} feedbackDeleted={} attachments={}/{}",
@@ -635,12 +643,25 @@ public class AiSessionPurgeService {
 			memoryMessages = memory == null ? 0 : memory.size();
 			memoryExisted = memoryMessages > 0 || memoryStaged;
 		}
+		// B2：用户展示历史独立于记忆；存在即计入 found（只删精确键，不扫描）。
+		// 计数键也算"展示历史残留"：body 已删但 :bytes 还在时，found 必须如实为 true。
+		String transcriptKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
+		String transcriptBytesKey = com.example.configmgr.ai.history.ConversationTranscriptStore.bytesKey(sessionId);
+		boolean transcriptListExisted = Boolean.TRUE.equals(this.redis.hasKey(transcriptKey));
+		boolean transcriptExisted = transcriptListExisted
+				|| Boolean.TRUE.equals(this.redis.hasKey(transcriptBytesKey));
+		long transcriptEntries = 0L;
+		if (transcriptListExisted) {
+			Long size = this.redis.opsForList().size(transcriptKey);
+			transcriptEntries = size == null ? 0L : size;
+		}
 
 		ContextTargets context = new ContextTargets(
 				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
 				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
 				archiveKeys(sessionId),
-				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))));
+				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
 
 		boolean sessionCurrentExisted = Boolean.TRUE.equals(
 				this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
@@ -652,13 +673,14 @@ public class AiSessionPurgeService {
 		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
 		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
 
-		boolean found = memoryExisted || !runs.isEmpty() || context.any() || !attachmentList.isEmpty()
-				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted || draftExisted;
+		boolean found = memoryExisted || transcriptExisted || !runs.isEmpty() || context.any()
+				|| !attachmentList.isEmpty() || db.feedbackRows() > 0 || sessionCurrentExisted
+				|| sessionRecordExisted || draftExisted;
 
 		ClientCleanup cleanup = clientCleanup(sessionId, toolCallIds, RequestContextUtils.currentOrNull());
 		return new Enumeration(runs, Map.of(), attachmentList, context, memoryExisted, memoryMessages,
-				List.copyOf(staging), db, sessionCurrentExisted, sessionRecordExisted, found, cleanup,
-				List.copyOf(warnings));
+				transcriptExisted, transcriptEntries, List.copyOf(staging), db, sessionCurrentExisted,
+				sessionRecordExisted, found, cleanup, List.copyOf(warnings));
 	}
 
 	/**
@@ -1260,6 +1282,26 @@ public class AiSessionPurgeService {
 				: this.database.delete(sessionId, identity.tenantId(), identity.userId());
 	}
 
+	/**
+	 * B2：删除用户展示历史（精确键 + 类型校验）。
+	 *
+	 * <p>只删本会话的数据键、字节计数键、baseline 标记键与截断标记键；<b>不扫描</b>、不跨槽。
+	 * 类型不符说明前缀碰撞（别的会话/别的结构），按既有 {@link #deleteKeyIfType} 口径记 warning
+	 * 而不硬删。
+	 */
+	TranscriptView deleteTranscript(String sessionId, boolean existed, long entries, List<String> errors,
+			List<String> warnings) {
+		String dataKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
+		String bytesKey = com.example.configmgr.ai.history.ConversationTranscriptStore.bytesKey(sessionId);
+		String readyKey = com.example.configmgr.ai.history.ConversationTranscriptStore.readyKey(sessionId);
+		String truncatedKey = com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId);
+		int deleted = deleteKeyIfType(dataKey, DataType.LIST, errors, warnings, "transcript");
+		deleted += deleteKeyIfType(bytesKey, DataType.STRING, errors, warnings, "transcriptBytes");
+		deleted += deleteKeyIfType(readyKey, DataType.STRING, errors, warnings, "transcriptReady");
+		deleted += deleteKeyIfType(truncatedKey, DataType.STRING, errors, warnings, "transcriptTruncated");
+		return new TranscriptView(existed, entries, deleted > 0);
+	}
+
 	private ContextView deleteContext(String sessionId, ContextTargets targets, List<String> errors,
 			List<String> warnings) {
 		int deleted = 0;
@@ -1271,6 +1313,9 @@ public class AiSessionPurgeService {
 		}
 		deleted += deleteKeyIfType(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), DataType.LIST, errors,
 				warnings, "safety");
+		// B3：已提交压缩事实（精确键 + LIST 类型；不扫描）
+		deleted += deleteKeyIfType(this.runStore.contextEventsKey(sessionId), DataType.LIST, errors, warnings,
+				"ctxEvents");
 		return new ContextView(targets.context(), targets.ledger(), targets.archives().size(), targets.safety(),
 				deleted);
 	}
@@ -1467,8 +1512,8 @@ public class AiSessionPurgeService {
 
 	/** 枚举失败时的占位结果（不读取任何依赖，保证"失败不半删"可判定）。 */
 	private static Enumeration enumerationForFailure(String sessionId, TenantUser identity) {
-		return new Enumeration(List.of(), Map.of(), List.of(), new ContextTargets(false, false, List.of(), false), false,
-				0, List.of(), new SessionPurgeDatabase.Snapshot(0), false, false, false,
+		return new Enumeration(List.of(), Map.of(), List.of(), new ContextTargets(false, false, List.of(), false, false),
+				false, 0, false, 0L, List.of(), new SessionPurgeDatabase.Snapshot(0), false, false, false,
 				clientCleanup(sessionId, List.of(), identity), List.of());
 	}
 
@@ -1476,6 +1521,7 @@ public class AiSessionPurgeService {
 			RuntimeException error) {
 		return new PurgeResult(sessionId, purgeId, false, enumeration.found(), phase, enumeration.database(), null,
 				new MemoryView(enumeration.memoryExisted(), enumeration.memoryMessages(), false),
+				new TranscriptView(enumeration.transcriptExisted(), enumeration.transcriptEntries(), false),
 				List.of(), List.of(),
 				new ContextView(enumeration.context().context(), enumeration.context().ledger(),
 						enumeration.context().archives().size(), enumeration.context().safety(), 0),
@@ -1489,10 +1535,11 @@ public class AiSessionPurgeService {
 	private record RunTarget(String runId, String status, boolean active) {
 	}
 
-	private record ContextTargets(boolean context, boolean ledger, List<String> archives, boolean safety) {
+	private record ContextTargets(boolean context, boolean ledger, List<String> archives, boolean safety,
+			boolean events) {
 
 		boolean any() {
-			return this.context || this.ledger || !this.archives.isEmpty() || this.safety;
+			return this.context || this.ledger || !this.archives.isEmpty() || this.safety || this.events;
 		}
 
 	}
@@ -1506,14 +1553,15 @@ public class AiSessionPurgeService {
 	 */
 	private record Enumeration(List<RunTarget> runs, Map<String, RunSnapshot> settledSnapshots,
 			List<FormAttachmentStore.Attachment> attachments, ContextTargets context, boolean memoryExisted,
-			int memoryMessages, List<String> stagingKeys, SessionPurgeDatabase.Snapshot database,
-			boolean sessionCurrentExisted, boolean sessionRecordExisted, boolean found, ClientCleanup clientCleanup,
-			List<String> warnings) {
+			int memoryMessages, boolean transcriptExisted, long transcriptEntries, List<String> stagingKeys,
+			SessionPurgeDatabase.Snapshot database, boolean sessionCurrentExisted, boolean sessionRecordExisted,
+			boolean found, ClientCleanup clientCleanup, List<String> warnings) {
 
 		Enumeration withRuns(List<RunTarget> refreshed, Map<String, RunSnapshot> settled) {
 			return new Enumeration(refreshed, settled, this.attachments, this.context, this.memoryExisted,
-					this.memoryMessages, this.stagingKeys, this.database, this.sessionCurrentExisted,
-					this.sessionRecordExisted, this.found, this.clientCleanup, this.warnings);
+					this.memoryMessages, this.transcriptExisted, this.transcriptEntries, this.stagingKeys,
+					this.database, this.sessionCurrentExisted, this.sessionRecordExisted, this.found,
+					this.clientCleanup, this.warnings);
 		}
 
 	}

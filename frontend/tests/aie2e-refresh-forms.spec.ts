@@ -144,7 +144,6 @@ async function freshStoreClean(): Promise<Store> {
   store.activeUploadHandoff = null
   store.contextUsage = null
   store.contextBreakdown = null
-  store.contextCompaction = null
   store.gateSubmissions = {}
   store.gateAcks = {}
   return store

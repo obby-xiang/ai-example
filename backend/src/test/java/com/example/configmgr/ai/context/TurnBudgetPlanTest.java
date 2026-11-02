@@ -67,6 +67,19 @@ class TurnBudgetPlanTest {
 		assertThat(decision.ratio()).isCloseTo(9500d / 8000d, org.assertj.core.data.Offset.offset(1e-9));
 	}
 
+	/** B1 / I7：轮内预留与轮首同口径 —— 取配置预留与本轮真实 max_tokens 的较大值。 */
+	@Test
+	void reserveIncludesMaxOutput() {
+		// 配置预留 2000、真实 max_tokens 5000 ⇒ 预留 5000；6000/(10000-5000)=1.2 ⇒ 收尾
+		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 2000, 70, 95, false, 0, 0, 6000, 0,
+				false, 0, 5000);
+
+		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request);
+
+		assertThat(decision.reserveTokens()).isEqualTo(5000);
+		assertThat(decision.ratio()).isCloseTo(6000d / 5000d, org.assertj.core.data.Offset.offset(1e-9));
+	}
+
 	@Test
 	void reserveIsSubtractedBeforeTheRatio() {
 		// 6000/(10000-2000)=0.75 ⇒ CLEAR；若忘了扣 reserve 会算成 0.60 ⇒ PROCEED

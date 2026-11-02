@@ -29,7 +29,6 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  retryModelStep: vi.fn(),
   feedbackSubmit: vi.fn()
 }))
 

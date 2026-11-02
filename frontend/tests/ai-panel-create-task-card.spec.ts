@@ -24,7 +24,6 @@ const api = vi.hoisted(() => ({
   runs: vi.fn(),
   run: vi.fn(),
   resume: vi.fn(),
-  retryModelStep: vi.fn(),
   pending: vi.fn(),
   reattachRun: vi.fn(),
   chat: vi.fn(),

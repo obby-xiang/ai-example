@@ -48,7 +48,10 @@ public final class ContextBreakdownService {
 	 */
 	public Map<String, Object> snapshot(String sessionId, List<Message> memory, boolean ledger) {
 		ContextState state = this.compactor.readState(sessionId);
-		int limit = this.compactor.limitTokens(null, state.model());
+		// B1：provider 与 model 成对解析（同名模型在不同 provider 下窗口不同）；旧状态无 provider ⇒ 仍按全局匹配
+		ContextLimitResolver.ResolveResult resolved = this.compactor.resolveLimit(
+				state.providerId() == null || state.providerId() <= 0L ? null : state.providerId(), state.model());
+		int limit = resolved.limitTokens();
 		int used = state.usedTokens();
 		Map<String, Integer> categories = ContextBreakdown.estimateCategories(memory, state.systemTokens(),
 				state.toolsTokens());
@@ -62,9 +65,14 @@ public final class ContextBreakdownService {
 		body.put("turnNo", state.turnNo());
 		body.put("measuredAtMs", state.atMs() > 0L ? state.atMs() : null);
 		body.put("limitTokens", limit > 0 ? limit : null);
+		// A6：来源进只读诊断（schema / fallback / unknown），不新增用户强提示
+		body.put("limitSource", resolved.source().wire());
 		body.put("usedTokens", used);
 		// 未测过（会话刚开始/记账失败）时不发百分比：0% 会被读成"很空"，而事实是"不知道"
 		body.put("percent", state.measured() && limit > 0 ? percent(used, limit) : null);
+		// A8：下一发压力的粗估（账单 + 上一发输出；工具增量不在状态里）。只进 tooltip，不改颜色档位。
+		body.put("pressurePercent", state.measured() && limit > 0
+				? percent(Math.max(0, used) + Math.max(0, state.completionTokens()), limit) : null);
 		body.put("source", !state.measured() ? "none"
 				: (state.est() ? ContextMeter.SOURCE_ESTIMATE : ContextMeter.SOURCE_STREAM));
 		body.put("estimated", state.est());

@@ -41,8 +41,8 @@ import static org.mockito.Mockito.when;
  * <b>终帧判据的"每次驱动"口径</b>（2026-10-29 返修，复审 I-2）。
  *
  * <h2>被钉住的缺陷</h2>
- * 归档是 <b>per-runId</b> 的，而同一个 runId 会被驱动<b>多次</b>：`POST /api/ai/runs/{runId}/retry-model-step`
- * 接受 FAILED 轮，把快照改回 RUNNING 再 `driveResumed` 一次（归档<b>不清理</b>、也不追加驱动代次）。
+ * 归档是 <b>per-runId</b> 的，而同一个 runId 可能被驱动<b>多次</b>（续跑/重挂会把快照改回 RUNNING
+ * 再 `driveResumed` 一次；归档<b>不清理</b>、也不追加驱动代次）。
  * 上一版失败出口的判据是"归档里有没有<b>任何</b> done/error"——于是第二次驱动失败时读到的是<b>上一次</b>
  * 的 error：
  * <ol>
@@ -146,7 +146,7 @@ class PerDriveTerminalFrameTest {
 		assertThat(terminalTypes(afterFirst)).as("第一次驱动恰好一条终帧").containsExactly("error");
 		String firstCode = terminalCode(afterFirst.get(afterFirst.size() - 1));
 
-		// retry-model-step 的语义：快照改回 RUNNING 再驱动一次（归档保留上一次的 error）
+		// 二次驱动的语义：快照改回 RUNNING 再驱动一次（归档保留上一次的 error）
 		RunSnapshot running = this.store.get(RUN_ID);
 		running.setStatus(RunSnapshot.RUNNING);
 		this.store.save(running);

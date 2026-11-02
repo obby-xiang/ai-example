@@ -21,6 +21,10 @@ public class InMemoryContextStateStore implements ContextStateStore {
 
 	private final Map<String, List<String>> archives = new LinkedHashMap<>();
 
+	private final Map<String, Long> compSeqs = new LinkedHashMap<>();
+
+	private final Map<String, List<Map<String, Object>>> events = new LinkedHashMap<>();
+
 	/** 归档写入次数（"未压缩就不归档"的判据）。 */
 	private int archiveCount;
 
@@ -52,6 +56,23 @@ public class InMemoryContextStateStore implements ContextStateStore {
 	public void archive(String sessionId, int turnNo, List<String> messageJson) {
 		this.archiveCount++;
 		this.archives.put(sessionId + ":" + turnNo, messageJson);
+	}
+
+	@Override
+	public long nextCompactionSeq(String sessionId) {
+		long next = this.compSeqs.getOrDefault(sessionId, 0L) + 1L;
+		this.compSeqs.put(sessionId, next);
+		return next;
+	}
+
+	@Override
+	public void appendEvent(String sessionId, Map<String, Object> event) {
+		this.events.computeIfAbsent(sessionId, key -> new ArrayList<>()).add(0, event);
+	}
+
+	@Override
+	public List<Map<String, Object>> events(String sessionId) {
+		return this.events.getOrDefault(sessionId, List.of());
 	}
 
 	public int archiveCount() {

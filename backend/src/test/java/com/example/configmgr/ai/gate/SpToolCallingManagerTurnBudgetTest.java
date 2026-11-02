@@ -161,6 +161,29 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertPairing(history);
 	}
 
+	/** B3：轮内 L1 真实提交后写 event + context 帧（cause=turn_loop，anchor=变更前最后一条工具 id）。 */
+	@Test
+	void inRoundL1CommitWritesEventAndContextFrame() {
+		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
+
+		assertThat(this.contextStore.events(SESSION_ID)).hasSize(1);
+		Map<String, Object> event = this.contextStore.events(SESSION_ID).get(0);
+		assertThat(event).containsEntry("cause", "turn_loop").containsEntry("level", "L1")
+			.containsEntry("anchorToolCallId", "c-1");
+		assertThat(String.valueOf(event.get("eventId"))).startsWith(RUN_ID + ":c");
+
+		@SuppressWarnings("unchecked")
+		org.mockito.ArgumentCaptor<Map<String, Object>> frame = org.mockito.ArgumentCaptor.forClass(Map.class);
+		org.mockito.Mockito.verify(this.emitter).context(frame.capture());
+		assertThat(frame.getValue()).containsEntry("eventId", event.get("eventId"))
+			.containsEntry("committed", true).containsEntry("runId", RUN_ID)
+			.containsEntry("cause", "turn_loop").containsEntry("anchorToolCallId", "c-1")
+			// P3-1：轮内 L1 写回的基线是估算，帧必须同源声明 est=true
+			.containsEntry("est", true)
+			// B5：与轮首 framePayload 同口径，无消费的 savedTokens/clearedPairs 不进帧
+			.doesNotContainKeys("savedTokens", "clearedPairs");
+	}
+
 	@Test
 	void pendingHitlToolResultIsNeverCleared() {
 		PendingToolCall unresolved = new PendingToolCall();
@@ -466,12 +489,9 @@ class SpToolCallingManagerTurnBudgetTest {
 
 		List<Message> history = result.conversationHistory();
 		assertThat(history.size()).as("固定历史被压缩").isLessThan(longHistory.size() + 2);
-		// ① 归档：被丢掉的那几轮原文必须可回溯
-		assertThat(this.contextStore.archiveCount()).as("硬截断也必须先归档").isEqualTo(1);
-		List<String> archived = this.contextStore.archived(SESSION_ID, 1);
-		assertThat(archived).isNotNull();
-		assertThat(String.join(" | ", archived)).contains("第 1 个问题").contains("这是第 1 轮的回答");
-		// ② 状态：档位/轮数/lostTokens 与台账同值
+		// B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）
+		assertThat(this.contextStore.archiveCount()).as("B5：轮内硬截断不再写 archive").isZero();
+		// ① 状态：档位/轮数/lostTokens 与台账同值
 		ContextState state = this.contextStore.read(SESSION_ID);
 		// N1：写进谱系的至多是 L2（NONE/L1 ⇒ L2；L2/L3 保持原级）；本次动作仍是硬截断（台账记 L3）
 		assertThat(state.level()).as("谱系至多升一级，不得写死 L3").isEqualTo("L2");
@@ -488,6 +508,11 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(((Number) event.get("lostTokens")).intValue()).isEqualTo(state.lostTokens());
 		assertThat(((Number) event.get("after")).intValue()).isLessThan(((Number) event.get("before")).intValue());
 		assertThat(this.executed).as("恢复不重跑工具").containsExactly("c-1");
+		// B3：同一提交产生一条 L3 事实（cause=turn_loop）
+		assertThat(this.contextStore.events(SESSION_ID)).hasSize(1);
+		Map<String, Object> fact = this.contextStore.events(SESSION_ID).get(0);
+		assertThat(fact).containsEntry("cause", "turn_loop").containsEntry("level", "L3")
+			.containsEntry("anchorToolCallId", "c-1");
 	}
 
 	/**
@@ -547,9 +572,11 @@ class SpToolCallingManagerTurnBudgetTest {
 		this.properties.getContext().setReserveTokens(0);
 		this.properties.getContext().setKeepToolPairs(2);
 		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		java.util.concurrent.atomic.AtomicInteger ledgerAttempts = new java.util.concurrent.atomic.AtomicInteger();
 		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
 			@Override
 			public void appendLedger(String sessionId, Map<String, Object> event) {
+				ledgerAttempts.incrementAndGet();
 				throw new IllegalStateException("redis down");
 			}
 		};
@@ -559,7 +586,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt(history),
 				response(ContextEstimator.estimateMessages(history), 0, "c-1"));
 
-		assertThat(broken.archiveCount()).as("一批里只尝试一次 L1 记账").isEqualTo(1);
+		assertThat(ledgerAttempts.get()).as("一批里只尝试一次 L1 记账").isEqualTo(1);
 		assertThat(broken.contextLedger(SESSION_ID)).isEmpty();
 		assertThat(oldResultText(result.conversationHistory(), "old-1")).as("记账失败 ⇒ 清除未落地")
 			.isNotEqualTo(ToolResultClearing.placeholder("list_tasks", 1, "old-1"))
@@ -649,7 +676,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
 			.as("截断没记账 ⇒ 不应用；快照里第 1 轮还在").hasSize(longHistory.size() + 2);
 		assertThat(broken.contextLedger(SESSION_ID)).isEmpty();
-		assertThat(broken.archiveCount()).as("归档先于台账（已知的部分失败窗口）").isEqualTo(1);
+		assertThat(broken.archiveCount()).as("B5：不再写 archive（部分失败窗口只剩状态/台账）").isZero();
 		// N1：记账失败不得把"压过"留在状态里 —— 否则这个会话被永久记成"已 L2/L3 截断过"
 		assertThat(broken.read(SESSION_ID).level()).as("失败路径不得留档位").isEqualTo("none");
 		assertThat(broken.read(SESSION_ID).compactedTurns()).isZero();
@@ -865,16 +892,13 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(event.get("before")).isEqualTo(after + saved);
 	}
 
-	/** 归档的是"清除前模型看到的那份内容"（不是上游截断前的无限大原文）。 */
+	/** B5：轮内 L1 不再写只写不读的 archive。 */
 	@Test
-	void l1ClearArchivesTheContentTheModelActuallyHad() {
+	void l1ClearNoLongerWritesArchive() {
 		this.manager.executeToolCalls(prompt(historyWithOldResults()), response(7200, 0, "c-1"));
 
-		assertThat(this.contextStore.archiveCount()).as("一次 L1 清除恰一次归档").isEqualTo(1);
-		List<String> archived = this.contextStore.archived(SESSION_ID, 1);
-		assertThat(archived).as("归档键 = ai:ctx:archive:<sid>:<轮号>（本会话首轮 ⇒ 1）").isNotNull();
-		assertThat(String.join("\n", archived)).contains("旧结果一：任务列表 A").contains("旧结果二：任务列表 B");
-		assertThat(String.join("\n", archived)).as("归档是清除前的内容").doesNotContain(ToolResultClearing.PLACEHOLDER_PREFIX);
+		assertThat(this.contextStore.archiveCount()).as("B5：不再写 archive").isZero();
+		assertThat(this.contextStore.archived(SESSION_ID, 1)).isNull();
 	}
 
 	/** `/context` 快照的 level 必须能看到这次轮内 L1（否则"清了但显示没压过"）。 */
@@ -1031,7 +1055,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(countPlaceholders(result.conversationHistory())).isZero();
 		assertPairing(result.conversationHistory());
 		// ② 但归档与 level=L1 在台账失败之前已经写下 —— 已知窗口，不是回滚
-		assertThat(broken.archiveCount()).as("归档先于台账，已落盘").isEqualTo(1);
+		assertThat(broken.archiveCount()).as("B5：不再写 archive").isZero();
 		assertThat(broken.read(SESSION_ID).level()).as("状态先于台账，已写 L1").isEqualTo("L1");
 		assertThat(broken.contextLedger(SESSION_ID)).as("台账缺这一条（/context 与 ?ledger=1 在此窗口不一致）")
 			.isEmpty();

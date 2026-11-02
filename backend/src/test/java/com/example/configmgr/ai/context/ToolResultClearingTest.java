@@ -9,6 +9,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,19 +72,18 @@ class ToolResultClearingTest {
 			.allSatisfy(message -> assertThat(((AssistantMessage) message).getToolCalls()).hasSize(1));
 	}
 
-	/** C-16：占位符 = 工具名 + 估算 token + toolCallId；不含截断标记、不暴露内部 Redis 台账键。 */
+	/** B5：占位符是固定中性串，不含工具名 / token 估算 / toolCallId / 内部台账键。 */
 	@Test
-	void c16PlaceholderCarriesNameTokensAndToolCallIdWithoutTruncationMarker() {
+	void c16PlaceholderIsNeutralWithoutTechnicalIdentifiers() {
 		List<Message> messages = turns(6);
 		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 5, Set.of());
 		String placeholder = responseData(plan.messages()).get(0);
-		int tokens = ContextEstimator.estimate(responseData(messages).get(0));
 
-		// 文案即契约（2026-10-22 用户裁「占位符文案：改吧」）：前缀 + 工具名 + 估算 token + toolCallId
-		// 逐字锁定；改格式必须同步改断言，不允许"contains 差不离"放过
-		assertThat(placeholder).isEqualTo("[工具结果已清除：list_tasks · ≈" + tokens + " tokens · toolCallId=c-1]");
+		assertThat(placeholder).isEqualTo("[较早的工具结果已清理]");
 		assertThat(placeholder).startsWith(ToolResultClearing.PLACEHOLDER_PREFIX)
-			.as("面向模型的文案不带内部 Redis 台账键（jargon 无信息量，还会诱导模型去查台账）")
+			.doesNotContain("list_tasks")
+			.doesNotContain("toolCallId")
+			.doesNotContain("tokens")
 			.doesNotContain("ai:ledger")
 			.doesNotContain("原文见台账");
 		ToolResultLimiter limiter = new ToolResultLimiter(new com.example.configmgr.ai.config.AiProperties());
@@ -105,14 +105,24 @@ class ToolResultClearingTest {
 					.build(),
 				new UserMessage("继续"));
 
-		assertThat(ToolResultClearing.isAlreadyCleared(legacy)).as("幂等判据只认新前缀").isFalse();
+		assertThat(ToolResultClearing.isAlreadyCleared(legacy)).as("不认识的旧文案不当作已清除").isFalse();
 
 		ToolResultClearing.Plan first = ToolResultClearing.plan(messages, 0, Set.of());
 		assertThat(first.clearedIds()).containsExactly("c-9");
-		assertThat(responseData(first.messages()).get(0)).startsWith("[工具结果已清除：").doesNotContain("ai:ledger");
+		assertThat(responseData(first.messages()).get(0)).isEqualTo(ToolResultClearing.PLACEHOLDER_TEXT)
+			.doesNotContain("ai:ledger");
 
 		assertThat(ToolResultClearing.plan(first.messages(), 0, Set.of()).cleared()).as("改写只发生一次")
 			.isEmpty();
+	}
+
+	/** B5：旧版 `[工具结果已清除：…]` 仍识别为已清除（迁移期历史不重复清除/重复记账）。 */
+	@Test
+	void legacyClearedPrefixIsStillRecognized() {
+		String legacy = "[工具结果已清除：list_tasks · ≈120 tokens · toolCallId=c-1]";
+
+		assertThat(ToolResultClearing.isAlreadyCleared(legacy)).isTrue();
+		assertThat(ToolResultClearing.isAlreadyCleared(ToolResultClearing.PLACEHOLDER_TEXT)).isTrue();
 	}
 
 	/** 幂等：已清除的占位符不再重复清除（重复跑压缩不该反复记账）。 */
@@ -187,6 +197,32 @@ class ToolResultClearingTest {
 		assertThat(ToolResultClearing.plan(List.of(), 5, Set.of()).changed()).isFalse();
 		assertThat(ToolResultClearing.plan(List.of(new UserMessage("你好")), 5, Set.of()).changed()).isFalse();
 		assertThat(ToolResultClearing.plan(null, 5, Set.of()).changed()).isFalse();
+	}
+
+	/**
+	 * B1 / I6：其他活跃 run 的工具结果不清（那些轮可能还没收尾，正需要同一份现场）。
+	 *
+	 * <p>本 run 由调用方从受保护集合中剔除，故这里只保护 {@code run-other}。
+	 */
+	@Test
+	void otherActiveRunsToolResultsAreNotCleared() {
+		List<Message> messages = new ArrayList<>();
+		for (int i = 1; i <= 4; i++) {
+			messages.add(new UserMessage("第 " + i + " 个问题"));
+			messages.add(AssistantMessage.builder()
+				.toolCalls(List.of(new AssistantMessage.ToolCall("c-" + i, "function", "list_tasks", "{}")))
+				.build());
+			messages.add(ToolResponseMessage.builder()
+				.responses(List.of(new ToolResponseMessage.ToolResponse("c-" + i, "list_tasks",
+						"任务列表内容".repeat(50) + i)))
+				.metadata(Map.of("runId", i == 1 ? "run-other" : "run-self"))
+				.build());
+		}
+
+		ToolResultClearing.Plan plan = ToolResultClearing.plan(messages, 2, Set.of(), Set.of("run-other"));
+
+		assertThat(plan.clearedIds()).as("受保护 run 的最旧结果跳过，清下一个").containsExactly("c-2");
+		assertThat(responseData(plan.messages()).get(0)).isEqualTo(responseData(messages).get(0));
 	}
 
 	/** 一条 ToolResponseMessage 里多份响应：只清该清的那几份，消息本身与其余响应不动。 */

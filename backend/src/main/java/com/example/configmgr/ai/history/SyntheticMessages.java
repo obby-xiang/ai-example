@@ -17,16 +17,17 @@ import java.util.Map;
  * <li>轮内上下文预算的收尾提示（{@link SpToolCallingManager#TURN_BUDGET_WRAP_UP}）。</li>
  * </ul>
  *
- * <h2>判据只保留一份（展示 + 槽位解析必须同源）</h2>
+ * <h2>判据只保留一份（读侧标记 + 槽位解析必须同源）</h2>
  * 本判据有两个消费面，二者<b>必须同源</b>，否则会出现"一处当合成、另一处当用户原话"的分叉：
  * <ol>
- * <li><b>展示（读侧）</b> {@code AiController#toHistoryItem}：给历史回显条目加 {@code synthetic=true}，
- *     前端据此按"系统消息"呈现（<b>摘要不冒充用户</b>，也不显示内部配置键）；</li>
+ * <li><b>读侧标记</b> {@code AiController#toHistoryItem}：给历史回显条目加 {@code synthetic=true}
+ *     与 {@code syntheticKind}（additive 诊断）；前端据此把整条合成提示<b>从展示历史中丢弃</b>
+ *     （不画用户气泡、也不画摘要/灰条；真实压缩节点只由已提交压缩事件恢复）；</li>
  * <li><b>槽位解析（写侧输入面）</b> {@code TaskIntent#lastRealUserText} 与
  *     {@code TaskSlotResolver#enrich}：以"最后一个<b>真实</b> user"取用户原话，合成提示不得当成
  *     用户输入 —— 否则压缩摘要/步数收尾会把"最后一句话变成了系统提示"，让旧选择凭空复活。</li>
  * </ol>
- * 展示过滤本身不改变模型记忆里的既有结构（AR-01 明确保留这条边界）：消息照旧在窗口里，
+ * 标记本身不改变模型记忆里的既有结构（AR-01 明确保留这条边界）：消息照旧在窗口里，
  * 只是回显时打标、解析时跳过。
  */
 public final class SyntheticMessages {
@@ -47,29 +48,79 @@ public final class SyntheticMessages {
 	public static final String EXPORT_CORRECTION_PREFIX = "（内部纠正，不要向用户复述本段）";
 
 	/**
-	 * 历史回显通道的展示标记键（additive；{@code true} = 该条是合成/系统提示）。
+	 * 历史回显通道的合成标记键（additive；{@code true} = 该条是合成/系统提示）。
 	 *
-	 * <p>前端契约：<b>带该键的条目按系统消息呈现</b>（不画成用户气泡、不当成助手答复），
-	 * 正文仍原样透出（不做二次改写、不暴露内部配置键）。
+	 * <p>前端契约：<b>带该键的条目一律从展示历史中丢弃</b>（不画成用户气泡、不当成助手答复，
+	 * 也不画"已压缩"灰条）；真实压缩节点只由已提交压缩事件恢复。
 	 */
 	public static final String DISPLAY_KEY = "synthetic";
+
+	/** 合成提示的明确类别（additive 诊断；前端不据类别补造展示节点）。 */
+	public enum Kind {
+
+		/** 上下文压缩摘要（正文永不上屏）。 */
+		COMPACTION("compaction"),
+
+		/** 工具步数上限收尾提示。 */
+		STEP_LIMIT("step_limit"),
+
+		/** 轮内上下文预算收尾提示。 */
+		TURN_BUDGET("turn_budget"),
+
+		/** 导出/创建收尾的内部纠正指令。 */
+		CORRECTION("correction");
+
+		private final String wire;
+
+		Kind(String wire) {
+			this.wire = wire;
+		}
+
+		public String wire() {
+			return this.wire;
+		}
+
+	}
 
 	private SyntheticMessages() {
 	}
 
-	/** 该消息是不是合成/系统提示（判据见类注；{@code null} 安全）。 */
-	public static boolean isSynthetic(Message message) {
+	/**
+	 * 该消息的合成类别（{@code null} = 不是合成提示）。
+	 *
+	 * <p>判据只有这一份：{@link #isSynthetic(Message)} 由它派生，展示/槽位解析不得再各写一套前缀表。
+	 * 压缩优先于其它前缀（摘要正文本身可能包含任意文本）。
+	 */
+	public static Kind kindOf(Message message) {
 		if (message == null) {
-			return false;
+			return null;
 		}
 		Map<String, Object> metadata = message.getMetadata();
 		if (metadata != null && metadata.containsKey(COMPACTED_FROM)) {
-			return true;
+			return Kind.COMPACTION;
 		}
 		String text = message.getText();
-		return text != null && (SUMMARY_PLACEHOLDER.equals(text) || text.startsWith(STEP_LIMIT_PREFIX)
-				|| text.startsWith(SpToolCallingManager.TURN_BUDGET_WRAP_UP)
-				|| text.startsWith(EXPORT_CORRECTION_PREFIX));
+		if (text == null) {
+			return null;
+		}
+		if (text.equals(SUMMARY_PLACEHOLDER) || text.startsWith(SUMMARY_PLACEHOLDER)) {
+			return Kind.COMPACTION;
+		}
+		if (text.startsWith(STEP_LIMIT_PREFIX)) {
+			return Kind.STEP_LIMIT;
+		}
+		if (text.startsWith(SpToolCallingManager.TURN_BUDGET_WRAP_UP)) {
+			return Kind.TURN_BUDGET;
+		}
+		if (text.startsWith(EXPORT_CORRECTION_PREFIX)) {
+			return Kind.CORRECTION;
+		}
+		return null;
+	}
+
+	/** 该消息是不是合成/系统提示（判据见类注；{@code null} 安全）。 */
+	public static boolean isSynthetic(Message message) {
+		return kindOf(message) != null;
 	}
 
 	/**

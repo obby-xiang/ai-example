@@ -198,7 +198,7 @@ class MemoryCompactionWriteBackTest {
 
 		assertThat(this.contextStore.read(SESSION_ID).level()).as("前置：压缩真的跑到了 L1").isEqualTo("L1");
 		assertThat(toolPayload("c-1")).as("L1 占位符必须真的写进窗口（不是只写台账）")
-			.startsWith("[工具结果已清除：");
+			.startsWith(com.example.configmgr.ai.context.ToolResultClearing.PLACEHOLDER_PREFIX);
 		assertThat(windowText()).as("原文不得再出现在窗口里").doesNotContain(TOOL_PAYLOAD_MARKER);
 	}
 

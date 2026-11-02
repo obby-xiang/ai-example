@@ -97,7 +97,8 @@ describe('L-69-② 错误卡（error-card.ts）随语言，detail 不被翻译',
     expect(quota).toMatchObject({
       variant: 'quota',
       title: '请求超出配额',
-      action: '稍后重试',
+      guide: '可以点击「继续」重新发起本轮。',
+      action: '继续',
       detail: '上游 429'
     })
     applyLocale('en-US')
@@ -105,8 +106,8 @@ describe('L-69-② 错误卡（error-card.ts）随语言，detail 不被翻译',
     expect(quotaEn).toMatchObject({
       variant: 'quota',
       title: 'Request over quota',
-      guide: 'Tip: retry later; for batch jobs, lower concurrency before resending.',
-      action: 'Retry later',
+      guide: 'Click Continue to start this turn again.',
+      action: 'Continue',
       // 后端原文 = 数据，不翻译
       detail: 'upstream 429'
     })

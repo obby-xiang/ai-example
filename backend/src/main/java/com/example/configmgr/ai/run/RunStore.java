@@ -162,6 +162,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 压缩前原文前缀（{@code ai:ctx:archive:<sessionId>:<turnNo>}）。 */
 	public static final String CONTEXT_ARCHIVE_PREFIX = "ai:ctx:archive:";
 
+	/** 已提交压缩事实（B3）：{@code ai:ctx:events:<tenantId>:<userId>:<sessionId>} LIST，新→旧。 */
+	public static final String CONTEXT_EVENTS_PREFIX = "ai:ctx:events:";
+
+	/** 压缩事实 LIST 上限（B3；超过从最旧裁）。 */
+	public static final int CONTEXT_EVENTS_MAX = 200;
+
+	/** 会话上下文 HASH 里的压缩序号字段（HINCRBY；不进 {@code ContextState#toFields}）。 */
+	public static final String CONTEXT_COMP_SEQ_FIELD = "compSeq";
+
 	/** 上下文台账保留条数（设计稿 §3.6：最近 20 条）。 */
 	public static final int CONTEXT_LEDGER_MAX = 20;
 
@@ -606,6 +615,23 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			  return redis.call('DEL', KEYS[1])
 			end
 			return 0
+			""", Long.class);
+
+	/**
+	 * 压缩事实 LIST 的<b>有界追加 + TTL</b>（同键脚本原子完成）：LPUSH、LTRIM、PEXPIRE 在一步里，
+	 * 进程在 push 与 expire 之间退出不会留下永不过期的键。单键脚本，Cluster 同槽安全。
+	 *
+	 * @param KEYS[1] {@code ai:ctx:events:<tenantId>:<userId>:<sessionId>}
+	 * @param ARGV[1] 事件 JSON
+	 * @param ARGV[2] 上限条数（{@link #CONTEXT_EVENTS_MAX}）
+	 * @param ARGV[3] TTL（毫秒）
+	 */
+	private static final RedisScript<Long> CONTEXT_EVENT_APPEND_SCRIPT = new DefaultRedisScript<>("""
+			-- CONTEXT_EVENT_APPEND
+			redis.call('LPUSH', KEYS[1], ARGV[1])
+			redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
+			redis.call('PEXPIRE', KEYS[1], ARGV[3])
+			return 1
 			""", Long.class);
 
 	/**
@@ -1175,7 +1201,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * （同 TTL），状态键因此不会与快照分叉，并随快照<b>同生同死</b>（{@link #deleteRun} 一并删）。
 	 * fence 语义不变；{@code CANCELLED} 自己的写不受限（幂等重写取消态照常落库）。
 	 *
-	 * <p><b>为什么 RUNNING / SUSPENDED 也在守卫内</b>：续跑与"仅模型步重跑"都是先检查取消、
+	 * <p><b>为什么 RUNNING / SUSPENDED 也在守卫内</b>：续跑入口都是先检查取消、
 	 * 再把快照写成 RUNNING —— 检查与写之间取消可能恰好落库。旧口径只守终态，这条
 	 * CANCELLED → RUNNING 的翻案会把用户已停止的轮重新驱动起来（比 FAILED 翻案更危险：
 	 * 前端会重挂到一条不该再跑的轮上）。<b>不变量：任何状态写入都不得从 CANCELLED 转出。</b>
@@ -4882,6 +4908,62 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			log.warn("读安全台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
+		}
+		return out;
+	}
+
+	/** {@code ai:ctx:events:<tenantId>:<userId>:<sessionId>} —— 已提交压缩事实（LIST，新→旧）。 */
+	public String contextEventsKey(String sessionId) {
+		return TenantKeyScope.scoped(CONTEXT_EVENTS_PREFIX, sessionId);
+	}
+
+	/** 会话内单调压缩序号（HINCRBY；与 {@code ai:ctx:<sid>} 同键、同 TTL）。 */
+	@Override
+	public long nextCompactionSeq(String sessionId) {
+		String key = contextKey(sessionId);
+		Long seq;
+		try {
+			seq = this.redis.opsForHash().increment(key, CONTEXT_COMP_SEQ_FIELD, 1L);
+			touchContextTtl(key);
+		}
+		catch (RuntimeException ex) {
+			throw new IllegalStateException("无法分配压缩事件序号 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
+		}
+		return seq == null ? 0L : seq;
+	}
+
+	/** 追加已提交压缩事实（LPUSH + LTRIM 200 + EXPIRE；单键 Cluster 安全）。 */
+	@Override
+	public void appendEvent(String sessionId, Map<String, Object> event) {
+		String key = contextEventsKey(sessionId);
+		try {
+			// P2：push/裁剪/TTL 同脚本原子完成 —— 消除"push 成功、EXPIRE 未到"留下永久键的窗口。
+			this.redis.execute(CONTEXT_EVENT_APPEND_SCRIPT, List.of(key),
+					this.mapper.writeValueAsString(event), String.valueOf(CONTEXT_EVENTS_MAX),
+					String.valueOf(this.properties.getSessionTtl().toMillis()));
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法写入压缩事实 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
+		}
+	}
+
+	/** 读已提交压缩事实（新→旧；最多 {@value #CONTEXT_EVENTS_MAX} 条）。 */
+	@Override
+	public List<Map<String, Object>> events(String sessionId) {
+		List<Map<String, Object>> out = new ArrayList<>();
+		try {
+			List<String> raw = this.redis.opsForList().range(contextEventsKey(sessionId), 0, CONTEXT_EVENTS_MAX - 1);
+			if (raw == null) {
+				return out;
+			}
+			for (String item : raw) {
+				out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
+				}));
+			}
+			touchContextTtl(contextEventsKey(sessionId));
+		}
+		catch (Exception ex) {
+			log.warn("读压缩事实失败 sessionId={}：{}（按空事件处理）", sessionId, ex.getMessage());
 		}
 		return out;
 	}

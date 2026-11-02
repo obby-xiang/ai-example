@@ -15,19 +15,18 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 记忆窗口（token 预算 + 条数兜底 + 旧工具结果清除）的纯函数用例。
+ * 记忆窗口（token 预算 + 条数兜底）的纯函数用例。
  *
  * <h2>红线（每条一个用例，改坏即红）</h2>
  * <ol>
  * <li><b>预算内一条不动</b>：同引用返回 —— "没发生"不能被实现成"发生但值相等"；</li>
- * <li><b>token 预算为主</b>：越预算时先淘汰最旧（不是砍最新，也不是砍中间）；</li>
- * <li><b>工具结果优先清除</b>：越预算时先清最旧工具结果，这一步够用时<b>一条消息都不删</b>；</li>
- * <li><b>最近 N 个工具结果原文保留</b>（{@code keep-tool-results}）；</li>
+ * <li><b>token 预算为主</b>：越预算时淘汰最旧（不是砍最新，也不是砍中间）；</li>
+ * <li><b>不改写消息内容</b>：B1 起工具结果清除的唯一 mutator 是 {@code ContextCompactor}，
+ * 窗口只做整轮淘汰；越预算到下限仍不够时只上报 {@code stillOverBudget}；</li>
  * <li><b>条数下限不击穿</b>：预算再紧，淘汰后也不少于 {@code min-messages} 条；</li>
  * <li><b>turn 边界整轮淘汰</b>：切口永远落在 {@code UserMessage} 上，
  * {@code tool_call} ↔ {@code tool_result} 配对不得被拆散（上游 400 的经典成因）；</li>
- * <li><b>占位符文案</b>：复用 L1 的占位符与幂等判据（两套文案会让"已清除"识别失效）；</li>
- * <li><b>未决 HITL 条目的工具结果不清</b>（P3 的可执行投影，与 L1 同口径）。</li>
+ * <li><b>预算口径 = 历史口径</b>：{@code SYSTEM} 不计入 token 预算（装配点单列）。</li>
  * </ol>
  */
 class MemoryWindowTest {
@@ -127,7 +126,6 @@ class MemoryWindowTest {
 			.isSameAs(messages);
 		assertThat(plan.reason()).isEqualTo(MemoryWindow.REASON_UNDER_BUDGET);
 		assertThat(plan.droppedTurns()).isZero();
-		assertThat(plan.clearedToolResults()).isZero();
 		assertThat(plan.stillOverBudget()).isFalse();
 	}
 
@@ -154,62 +152,52 @@ class MemoryWindowTest {
 			.isSameAs(messages.get(14));
 	}
 
-	// ── ③ 工具结果优先清除：够用就一条消息都不删 ──────────────────────────
+	// ── ③ 窗口不改写消息内容（工具结果清理的唯一 mutator 是 ContextCompactor） ──
 
 	@Test
-	void toolResultClearingComesFirstAndDropsNoMessage() {
+	void tokenBudgetNeverTouchesToolResults() {
 		List<Message> messages = toolTurns(6, 1700);
-		int before = ContextEstimator.estimateMessages(messages);
-		assertThat(before).isGreaterThan(6_000);
+		List<String> original = toolData(messages);
+		assertThat(ContextEstimator.estimateMessages(messages)).isGreaterThan(6_000);
 
-		// 预算 3000：只清 5 个最旧结果就够（keep-tool-results=1 ⇒ 只留最后一个）
+		// 预算 3000、下限 8 条：只能整轮淘汰；到下限仍越线 ⇒ 如实上报给压缩器做 L1
 		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(3_000, 8, 40, 1), Set.of());
 
-		assertThat(plan.droppedTurns()).as("清除够用 ⇒ 不许淘汰整轮（删除比替换更贵）").isZero();
-		assertThat(plan.clearedToolResults()).isEqualTo(5);
-		assertThat(plan.afterCount()).as("清除不改条数").isEqualTo(messages.size());
-		assertThat(plan.afterTokens()).isLessThanOrEqualTo(3_000);
-		assertThat(plan.stillOverBudget()).isFalse();
-		assertThat(plan.reason()).isEqualTo(MemoryWindow.REASON_TOOL_RESULT_CLEARING);
+		assertThat(plan.droppedTurns()).isPositive();
+		assertThat(plan.stillOverBudget()).as("淘汰到下限仍越预算 ⇒ 交压缩谱系，不静默继续砍").isTrue();
+		assertThat(toolData(plan.messages())).as("窗口不得替换任何工具结果（否则与 L1 重复清/重复记账）")
+			.containsExactlyElementsOf(original.subList(plan.droppedTurns(), original.size()));
 		assertPairing(plan.messages());
 	}
 
 	@Test
-	void lastToolResultsAreKeptVerbatim() {
-		List<Message> messages = toolTurns(6, 1700);
-		List<String> original = toolData(messages);
+	void windowDropsWholeTurnsWithoutRewritingKeptContent() {
+		List<Message> messages = toolTurns(4, 1700);
 
-		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(3_000, 8, 40, 2), Set.of());
-		List<String> after = toolData(plan.messages());
+		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(3_000, 8, 40, 1), Set.of("c-1"));
 
-		assertThat(plan.clearedToolResults()).isEqualTo(4);
-		for (int i = 4; i < original.size(); i++) {
-			assertThat(after.get(i)).as("最近 2 个结果必须原文保留").isEqualTo(original.get(i));
-		}
-		for (int i = 0; i < 4; i++) {
-			assertThat(ToolResultClearing.isAlreadyCleared(after.get(i))).isTrue();
-		}
+		// 窗口只做整轮淘汰：留下的结果必须逐字原文（HITL 保护不在本类，真覆盖见
+		// SpToolCallingManagerTurnBudgetTest#pendingHitlToolResultIsNeverCleared）
+		assertThat(toolData(plan.messages()))
+			.containsExactlyElementsOf(toolData(messages).subList(plan.droppedTurns(), messages.size() / 3));
 	}
 
-	// ── ④ 占位符文案 + 幂等 ──────────────────────────────────────────────
+	// ── ④ 预算口径 = 历史口径（SYSTEM 单列） ─────────────────────────────
 
 	@Test
-	void placeholderIsTheL1OneAndStaysIdempotent() {
-		List<Message> messages = toolTurns(6, 1700);
+	void systemTokensNotCountedInBudget() {
+		String body = "问" + "长".repeat(1699);
+		List<Message> messages = List.of(
+				new org.springframework.ai.chat.messages.SystemMessage("人设".repeat(2_000)),
+				new UserMessage(body),
+				new AssistantMessage(body));
 
-		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(3_000, 8, 40, 1), Set.of());
-		String placeholder = toolData(plan.messages()).get(0);
+		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(2_500, 1, 40, 5), Set.of());
 
-		// 与 L1 同一份文案（2026-10-22 改版）：窗口与压缩两条路径共用一套判据，文案漂移 = 清两次
-		assertThat(placeholder)
-			.isEqualTo("[工具结果已清除：list_tasks · ≈" + ContextEstimator.estimate(toolData(messages).get(0))
-					+ " tokens · toolCallId=c-1]")
-			.startsWith(ToolResultClearing.PLACEHOLDER_PREFIX)
-			.doesNotContain("ai:ledger");
-		assertThat(ToolResultClearing.isAlreadyCleared(placeholder)).isTrue();
-		// 幂等：同一份历史再规划一次不得重复清除（重复清除 = 重复记账）
-		MemoryWindow.Plan again = MemoryWindow.plan(plan.messages(), budget(3_000, 8, 40, 1), Set.of());
-		assertThat(again.clearedToolResults()).isZero();
+		assertThat(plan.reason()).as("SYSTEM 不可裁剪，不得计入窗口预算（否则永久 over-budget）")
+			.isEqualTo(MemoryWindow.REASON_UNDER_BUDGET);
+		assertThat(plan.changed()).isFalse();
+		assertThat(plan.messages()).isSameAs(messages);
 	}
 
 	// ── ⑤ 条数下限不击穿 ─────────────────────────────────────────────────
@@ -269,27 +257,15 @@ class MemoryWindowTest {
 		assertThat(plan.messages().get(0).getMessageType()).isEqualTo(MessageType.USER);
 	}
 
-	// ── ⑧ 未决 HITL 条目不清 ─────────────────────────────────────────────
-
-	@Test
-	void pendingHitlToolResultsAreNotCleared() {
-		List<Message> messages = toolTurns(4, 1700);
-
-		MemoryWindow.Plan plan = MemoryWindow.plan(messages, budget(3_000, 8, 40, 1), Set.of("c-1"));
-
-		// 候选 = c-1..c-3（c-4 在 pin 窗内）；c-1 受保护 ⇒ 只清 c-2 / c-3
-		assertThat(plan.clearedToolResults()).isEqualTo(2);
-		assertThat(toolData(plan.messages()).get(0)).isEqualTo(toolData(messages).get(0));
-	}
-
-	// ── ⑨ 默认口径 min = max = 40（2026-10-22 用户裁「业界主流的来吧，40」）────
+	// ── ⑧ 默认口径 min = max = 40（2026-10-22 用户裁「业界主流的来吧，40」）────
 
 	/**
-	 * 默认配置下条数是<b>硬地板也是硬天花板</b>：窗口恰好 40 条时，超预算也只能靠清工具结果、
-	 * 一条消息都不许删（再删就击穿下限）；只有条数 <b>&gt; 40</b> 时才按 turn 淘汰到 40。
+	 * 默认配置下条数是<b>硬地板也是硬天花板</b>：窗口恰好 40 条时，超预算也一条消息都不许删
+	 * （再删就击穿下限）；只有条数 <b>&gt; 40</b> 时才按 turn 淘汰到 40。
 	 *
 	 * <p>这条锁的是 min=max=40 的实际语义 —— 没有它，"下限 40" 与 "上限 40" 各自为政时多删一轮
-	 * 也不会被任何断言发现。
+	 * 也不会被任何断言发现。B1 起"清工具结果"不再由窗口承担，故 40 条时只如实上报
+	 * {@code stillOverBudget}（由调用方传给压缩器做 L1）。
 	 */
 	@Test
 	void defaultFortyNeverTrimsBelowFortyAndTrimsTurnsOnlyWhenOverForty() {

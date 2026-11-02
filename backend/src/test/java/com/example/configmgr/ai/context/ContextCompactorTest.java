@@ -62,7 +62,7 @@ class ContextCompactorTest {
 				usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
 	}
 
-	/** 越线 ⇒ L1 执行：归档 + 台账 + 真值重置为估算基线。 */
+	/** 越线 ⇒ L1 执行：台账 + 真值重置为估算基线（B5 起不再写 archive）。 */
 	@Test
 	void overThresholdClearsToolResultsArchivesAndRecords() {
 		List<Message> messages = turns(6);
@@ -74,13 +74,13 @@ class ContextCompactorTest {
 		assertThat(outcome.clearedToolCallIds()).containsExactly("c-1");
 		assertThat(outcome.messages()).hasSameSizeAs(messages);
 		assertThat(outcome.after()).isLessThan(outcome.before());
-		assertThat(this.store.archiveCount()).as("先归档：原文必须可回溯").isEqualTo(1);
-		assertThat(this.store.archived(SESSION_ID, 0)).containsExactly("{\"m\":1}");
+		assertThat(this.store.archiveCount()).as("B5：不再写只写不读的 archive").isZero();
 		assertThat(this.store.ledgerCount()).isEqualTo(1);
 
 		ContextState state = this.store.read(SESSION_ID);
 		assertThat(state.level()).isEqualTo("L1");
 		assertThat(state.est()).as("压缩后基线是估算值，等下一次真值回填").isTrue();
+		assertThat(state.providerId()).as("压缩提交按本轮 provider 身份记账").isEqualTo(1L);
 		// C13：基线 = 压缩后历史估算 + system(3000) + tools(4000) —— 上游真值本就含这两项，
 		// 只写历史估算会让下一轮 nextEst 永远少算前缀（见 c13CompactionBaselineIncludesSystemAndTools）
 		assertThat(state.usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
@@ -206,12 +206,12 @@ class ContextCompactorTest {
 		assertThat(this.store.archiveCount()).isZero();
 	}
 
-	/** 归档失败 ⇒ 返回原消息（本轮照常发请求），reason=compaction_failed。 */
+	/** 状态写失败 ⇒ 返回原消息（本轮照常发请求），reason=compaction_failed。 */
 	@Test
 	void archiveFailureKeepsHistoryUntouched() {
 		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
 			@Override
-			public void archive(String sessionId, int turnNo, List<String> messageJson) {
+			public void write(String sessionId, ContextState state) {
 				throw new IllegalStateException("Redis 不可用");
 			}
 		};
@@ -238,13 +238,15 @@ class ContextCompactorTest {
 	/** 轮末记账：真值 + 三个分项锚点写入 {@code ai:ctx:}（端点重建的唯一来源）。 */
 	@Test
 	void recordTurnWritesTruthAndAnchors() {
-		this.compactor.recordTurn(SESSION_ID, "deepseek-flash", 42000, 900, 3, false, 3100, 5200, 90);
+		this.compactor.recordTurn(SESSION_ID, 7L, "deepseek-flash", 42000, 900, 3, false, 3100, 5200, 90);
 
 		ContextState state = this.store.read(SESSION_ID);
 		assertThat(state.usedTokens()).isEqualTo(42000);
 		assertThat(state.completionTokens()).isEqualTo(900);
 		assertThat(state.turnNo()).isEqualTo(3);
 		assertThat(state.model()).isEqualTo("deepseek-flash");
+		// B1：provider 与 model 成对落库（端点/触发按同一身份解析分母）
+		assertThat(state.providerId()).isEqualTo(7L);
 		assertThat(state.est()).isFalse();
 		assertThat(state.systemTokens()).isEqualTo(3100);
 		assertThat(state.toolsTokens()).isEqualTo(5200);
@@ -399,7 +401,7 @@ class ContextCompactorTest {
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
 		assertThat(this.store.read(SESSION_ID).level()).isEqualTo("L3");
-		assertThat(this.store.archiveCount()).as("硬截断先归档（原文可回溯）").isEqualTo(1);
+		assertThat(this.store.archiveCount()).as("B5：硬截断也不再写 archive").isZero();
 	}
 
 	/**
@@ -485,7 +487,7 @@ class ContextCompactorTest {
 		assertThat(outcome.level()).as("裁后能放下 ⇒ 保留 L3").isEqualTo(ContextTrigger.Level.L3);
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
-		assertThat(this.store.archiveCount()).isEqualTo(1);
+		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 	}
 
 	/**
@@ -519,7 +521,7 @@ class ContextCompactorTest {
 		assertThat(outcome.clearedPairs()).as("旧结果必须被清掉（不是只丢轮）").isEqualTo(1);
 		assertThat(outcome.turns()).as("丢最旧 3 轮").isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
-		assertThat(this.store.archiveCount()).isEqualTo(1);
+		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event.get("level")).isEqualTo("L3");
 		assertThat(event.get("clearedPairs")).isEqualTo(1);
@@ -550,7 +552,7 @@ class ContextCompactorTest {
 		assertThat(outcome.lostTokens()).isZero();
 		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");
 		assertThat(outcome.messages()).as("历史一条没少").hasSameSizeAs(history);
-		assertThat(this.store.archiveCount()).as("归档的是这次 L1 清除（不是硬裁）").isEqualTo(1);
+		assertThat(this.store.archiveCount()).as("B5：L1 清除不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event.get("level")).as("台账记 L1（本次动作），不写硬裁事件").isEqualTo("L1");
 		assertThat(event.get("reason")).isEqualTo("l1_tool_result_clearing");
@@ -703,7 +705,7 @@ class ContextCompactorTest {
 		assertThat(outcome.lostTokens()).isEqualTo(outcome.before() - outcome.after());
 		assertThat(outcome.lostTokens()).isPositive();
 		assertThat(outcome.summaryChars()).isEqualTo("摘要正文".length());
-		assertThat(this.store.archiveCount()).isEqualTo(1);
+		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event).containsEntry("level", "L2")
 			.containsEntry("turns", 3)
@@ -754,7 +756,224 @@ class ContextCompactorTest {
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_SUMMARY_UNAVAILABLE);
 		assertThat(outcome.messages()).isSameAs(messages);
 		assertThat(this.store.archiveCount()).isZero();
-		assertThat(this.store.read(SESSION_ID).fuseFails()).isEqualTo(1);
+		// B1：没有发生摘要尝试（摘要器/runtime 缺失是配置问题），不计入熔断失败
+		assertThat(this.store.read(SESSION_ID).fuseFails()).isZero();
+	}
+
+	// ── B1：触发语义 / 计量 / 提交顺序（2026-11-03） ─────────────────────────────
+
+	/** 8 轮图文轮（每轮两条工具结果）：摘要窗口切掉前 2 轮，保留后缀里仍有一条可清的旧结果。 */
+	private static List<Message> toolTurns(int pairs, String resultText) {
+		List<Message> messages = new ArrayList<>();
+		for (int i = 1; i <= pairs; i++) {
+			messages.add(new UserMessage("第 " + i + " 轮问题"));
+			messages.add(AssistantMessage.builder()
+				.toolCalls(List.of(
+						new AssistantMessage.ToolCall("a-" + i, "function", "list_tasks", "{}"),
+						new AssistantMessage.ToolCall("b-" + i, "function", "list_tasks", "{}")))
+				.build());
+			messages.add(ToolResponseMessage.builder()
+				.responses(List.of(
+						new ToolResponseMessage.ToolResponse("a-" + i, "list_tasks", resultText + i),
+						new ToolResponseMessage.ToolResponse("b-" + i, "list_tasks", resultText + i)))
+				.build());
+		}
+		return messages;
+	}
+
+	/**
+	 * A1 的最稳默认：L1 空操作 <b>不得</b>在 L2 线以下强行摘要。
+	 *
+	 * <p>70% 出头、纯文本（无可清结果）时只允许"L1 什么也没做"并如实报 noop；
+	 * 不能因为"L1 没得清"就去改写整个前缀（缓存整段重建，且用户在 80% 线以下不该被摘要）。
+	 */
+	@Test
+	void l1NoopDoesNotSkipLevelBelowL2Line() {
+		java.util.concurrent.atomic.AtomicInteger summaryCalls = new java.util.concurrent.atomic.AtomicInteger();
+		ContextCompactor service = compactorWith((system, user, runtime) -> {
+			summaryCalls.incrementAndGet();
+			return "摘要正文";
+		});
+		// 85000 / 115000 = 73.9% ⇒ 原始判定 L1；谱系 none ⇒ 最多执行 L1
+		ContextCompactor.Outcome outcome = service.compact(request(longTurns(), 85000, List.of("{}")));
+
+		assertThat(outcome.changed()).isFalse();
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.NONE);
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_NOTHING_TO_CLEAR);
+		assertThat(summaryCalls.get()).as("L1 空操作不得升级为 L2 摘要").isZero();
+		assertThat(this.store.archiveCount()).isZero();
+	}
+
+	/**
+	 * I2：L2 的摘要输入必须是<b>未清除</b>的工具结果。
+	 *
+	 * <p>缺陷现场：旧实现先跑 L1 把结果换成占位符，摘要模型只看到空壳 —— 资源 ID、参数、
+	 * 未决事项全丢，而它们正是摘要六项保留清单要保的东西。
+	 */
+	@Test
+	void l2SeesUnclearedToolResults() {
+		seed("L1", 70000);
+		String originalResult = "原始工具结果" + "内".repeat(1_800);
+		List<Message> messages = toolTurns(8, originalResult);
+		java.util.concurrent.atomic.AtomicReference<String> transcript = new java.util.concurrent.atomic.AtomicReference<>();
+
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> {
+			transcript.set(user);
+			return "摘要正文";
+		}).compact(requestWith(messages, 70000, 25000, Set.of()));
+
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(transcript.get()).as("摘要输入不得是 L1 占位符").doesNotContain(ToolResultClearing.PLACEHOLDER_PREFIX)
+			.contains("原始工具结果");
+	}
+
+	/**
+	 * A1：谱系已到 L2，但本次占比只要求 L1 时，<b>不得</b>在 L2 线以下重复一次摘要。
+	 *
+	 * <p>旧实现用 {@code lineage.advanceTo(decision)}：lineage=L2、raw=L1 会返回 L2 ——
+	 * 于是一份 73% 的请求被整段重写（缓存全灭），而它根本没到 L2 线。
+	 */
+	@Test
+	void l2LineageDoesNotSummarizeBelowL2Line() {
+		AiProperties smallWindow = new AiProperties();
+		smallWindow.getContext().setLimitTokens(15000);
+		seed("L2", 5500);
+		java.util.concurrent.atomic.AtomicInteger summaryCalls = new java.util.concurrent.atomic.AtomicInteger();
+		ContextCompactor withSummary = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+				this.store, (system, user, runtime) -> {
+					summaryCalls.incrementAndGet();
+					return "摘要正文";
+				});
+
+		ContextCompactor.Outcome outcome = withSummary.compact(requestWith(longTurns(), 5500, 0, Set.of()));
+
+		assertThat(outcome.changed()).isFalse();
+		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
+		assertThat(summaryCalls.get()).as("lineage=L2 不得在 L1 占比下重复摘要").isZero();
+		assertThat(this.store.read(SESSION_ID).level()).as("谱系只升不降").isEqualTo("L2");
+	}
+
+	/** I4：L3（本地硬截断）成功/失败都不碰摘要熔断 —— 只有真实 L2 摘要成功才 onSuccess。 */
+	@Test
+	void l3DoesNotCloseFuse() {
+		long now = System.currentTimeMillis();
+		this.store.write(SESSION_ID, ContextState.EMPTY
+			.withUsage(70000, 0, 1, false, now, "deepseek-flash", 0, 0, 0)
+			.withCompaction(ContextTrigger.Level.L2, 0, 0, "seed", now)
+			.withFuse(CompactionFuse.HALF_OPEN, 3, 0L));
+
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文")
+			.compact(requestWith(longTurns(), 70000, 40000, Set.of()));
+
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L3);
+		ContextState state = this.store.read(SESSION_ID);
+		assertThat(state.circuit()).as("L3 不得把半开熔断误关成 closed").isEqualTo(CompactionFuse.HALF_OPEN);
+		assertThat(state.fuseFails()).isEqualTo(3);
+	}
+
+	/** I3：lostTokens 只含 L2 折叠量；同次 L1 后缀清理的节省只能体现在 savedTokens。 */
+	@Test
+	void lostTokensExcludesL1Savings() {
+		seed("L1", 70000);
+		List<Message> messages = toolTurns(9, "工具结果" + "长".repeat(1_800));
+
+		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "摘要正文")
+			.compact(requestWith(messages, 70000, 25000, Set.of()));
+
+		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L2);
+		assertThat(outcome.clearedPairs()).as("保留后缀里仍有一条旧结果被 L1 清理").isPositive();
+		assertThat(outcome.savedTokens()).isGreaterThan(outcome.lostTokens());
+		assertThat(outcome.lostTokens()).as("lostTokens 不得混入 L1 节省").isLessThan(outcome.before() - outcome.after());
+	}
+
+	/**
+	 * I5：plan 不写任何存储；commit 才写。
+	 *
+	 * <p>生产两个调用点在整窗记忆 CAS 成功之后才 commit —— 这个用例把"规划阶段零写入"钉死，
+	 * 防止有人把归档/台账/状态又挪回 plan。
+	 */
+	@Test
+	void noStateWriteBeforeMemoryCas() {
+		java.util.concurrent.atomic.AtomicInteger writes = new java.util.concurrent.atomic.AtomicInteger();
+		InMemoryContextStateStore counting = new InMemoryContextStateStore() {
+			@Override
+			public void write(String sessionId, ContextState state) {
+				writes.incrementAndGet();
+				super.write(sessionId, state);
+			}
+
+			@Override
+			public void appendLedger(String sessionId, Map<String, Object> event) {
+				writes.incrementAndGet();
+				super.appendLedger(sessionId, event);
+			}
+
+			@Override
+			public void archive(String sessionId, int turnNo, List<String> messageJson) {
+				writes.incrementAndGet();
+				super.archive(sessionId, turnNo, messageJson);
+			}
+		};
+		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, counting);
+		ContextCompactor.Request request = request(turns(6), 81000, List.of("{}"));
+
+		ContextCompactor.Plan plan = service.plan(request);
+
+		assertThat(plan.changed()).isTrue();
+		assertThat(writes.get()).as("CAS 之前不得归档/写状态/写台账").isZero();
+
+		ContextCompactor.Outcome outcome = service.commit(request, plan);
+
+		assertThat(outcome.committed()).isTrue();
+		assertThat(writes.get()).isPositive();
+	}
+
+	// ── B3：已提交压缩事实（eventId 只在 commit 成功时分配） ─────────────────────
+
+	@Test
+	void eventIdAllocatedOnlyOnCommit() {
+		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				turns(6), List.of("{}"), 81000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(),
+				Set.of(), 0, false, "first_turn", "c-9");
+
+		ContextCompactor.Plan plan = this.compactor.plan(request);
+
+		assertThat(this.store.events(SESSION_ID)).as("plan 不写事件").isEmpty();
+		ContextCompactor.Outcome first = this.compactor.commit(request, plan);
+		assertThat(first.committed()).isTrue();
+		assertThat(first.eventId()).isEqualTo(RUN_ID + ":c1");
+		assertThat(this.store.events(SESSION_ID)).hasSize(1);
+		Map<String, Object> event = this.store.events(SESSION_ID).get(0);
+		assertThat(event).containsEntry("eventId", RUN_ID + ":c1")
+			.containsEntry("cause", "first_turn")
+			.containsEntry("anchorToolCallId", "c-9");
+
+		seed("L1", 60000);
+		ContextCompactor.Request second = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
+				turns(6), List.of("{}"), 60000, 25000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(),
+				Set.of(), 0, false, "resume", null);
+		ContextCompactor.Outcome secondOutcome = this.compactor.commit(second, this.compactor.plan(second));
+
+		assertThat(secondOutcome.eventId()).isEqualTo(RUN_ID + ":c2");
+		assertThat(this.store.events(SESSION_ID)).extracting(item -> item.get("eventId"))
+			.containsExactly(RUN_ID + ":c2", RUN_ID + ":c1");
+	}
+
+	@Test
+	void noEventForNoopOrSummaryFailure() {
+		ContextCompactor.Outcome noop = this.compactor.compact(request(turns(2), 1000, List.of("{}")));
+		assertThat(noop.committed()).isTrue();
+		assertThat(noop.eventId()).isNull();
+		assertThat(this.store.events(SESSION_ID)).isEmpty();
+
+		seed("L1", 70000);
+		ContextCompactor.Outcome failed = compactorWith((system, user, runtime) -> {
+			throw new IllegalStateException("摘要失败");
+		}).compact(requestWith(longTurns(), 70000, 25000, Set.of()));
+
+		assertThat(failed.changed()).isFalse();
+		assertThat(failed.eventId()).isNull();
+		assertThat(this.store.events(SESSION_ID)).isEmpty();
 	}
 
 	/** 帧契约冻结：`context` 帧载荷键集不变，turns/lostTokens 从恒 0 改为如实值。 */
@@ -768,9 +987,12 @@ class ContextCompactorTest {
 		Map<String, Object> payload = ContextCompactor.framePayload(outcome);
 
 		assertThat(payload.keySet()).containsExactlyInAnyOrder("level", "before", "after", "turns", "lostTokens",
-				"reason", "est", "savedTokens", "clearedPairs");
-		assertThat(payload).containsEntry("level", "L2").containsEntry("turns", 3);
+				"reason", "est", "eventId", "committed", "cause", "anchorToolCallId", "runId", "atMs");
+		assertThat(payload).containsEntry("level", "L2").containsEntry("turns", 3)
+			.containsEntry("committed", true).containsEntry("runId", RUN_ID)
+			.containsEntry("est", true);
 		assertThat((Integer) payload.get("lostTokens")).isPositive();
+		assertThat(String.valueOf(payload.get("eventId"))).startsWith(RUN_ID + ":c");
 	}
 
 }

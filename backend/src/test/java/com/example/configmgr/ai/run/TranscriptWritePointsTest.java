@@ -1,0 +1,200 @@
+package com.example.configmgr.ai.run;
+
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.SpToolCallingManager;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.TranscriptEntry;
+import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tool.ContextBuilder;
+import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * B2 写点接线：轮首 / 终态（成功、取消）/ 失败 / 挂起都必须真的把条目交给
+ * {@link ConversationTranscriptStore}，且终态写点要补写同 entryId 的用户原文（P1）。
+ *
+ * <p>这些写点是 private 的（公开入口是整轮驱动），这里直接调用写点本身并断言它交给存储的条目，
+ * 避免为了展示面再起一套模型流；断言语义与生产调用点逐条对应。
+ */
+class TranscriptWritePointsTest {
+
+	private static final String RUN_ID = "run-tx-wiring";
+
+	private static final String SESSION_ID = "s-tx-wiring";
+
+	private static final long TENANT = 1L;
+
+	private static final long USER = 101L;
+
+	private final ObjectMapper mapper = new ObjectMapper();
+
+	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
+
+	private final RunStore store = mock(RunStore.class);
+
+	private final ConversationTranscriptStore transcript = mock(ConversationTranscriptStore.class);
+
+	private final AiProperties properties = new AiProperties();
+
+	private ResilientChatService service;
+
+	@BeforeEach
+	void setUp() {
+		this.service = new ResilientChatService(mock(AiProviderRegistry.class), mock(ChatMemory.class), this.codec,
+				this.store, mock(RunRegistry.class), mock(ToolRegistry.class), mock(ContextBuilder.class),
+				mock(AiSessionService.class), this.properties, mock(CancellationRegistry.class),
+				mock(ToolActivityBeacon.class), mock(ScheduledExecutorService.class));
+		ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
+		when(this.store.permittedToWrite(anyString(), eq("transcript"))).thenReturn(true);
+	}
+
+	@Test
+	void turnStartWritesTheUserEntryWithStableEntryId() {
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
+			ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L,
+					List.of(new UserMessage("原话")));
+		}
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).singleElement()
+			.extracting(TranscriptEntry::entryId, TranscriptEntry::kind, TranscriptEntry::text)
+			.containsExactly(RUN_ID + ":user", "user", "原话");
+	}
+
+	@Test
+	void turnStartWithoutIdentitySkipsWrite() {
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L,
+				List.of(new UserMessage("原话")));
+
+		verify(this.transcript, never()).append(anyString(), anyLong(), anyLong(), any());
+	}
+
+	@Test
+	void successTerminalBackfillsTheUserTextWithTheSameEntryId() {
+		RunSnapshot snapshot = snapshot();
+		when(this.store.get(RUN_ID)).thenReturn(snapshot);
+		List<Message> history = List.of(new UserMessage("原话"), new AssistantMessage("答"));
+
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID, history, true);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).extracting(TranscriptEntry::kind)
+			.containsExactly("user", "assistant");
+		assertThat(entries.getValue().get(0).entryId()).isEqualTo(RUN_ID + ":user");
+		assertThat(entries.getValue().get(0).text()).isEqualTo("原话");
+		assertThat(entries.getValue().get(0).turnStartedAtMs()).isEqualTo(snapshot.getCreatedAtMs());
+	}
+
+	@Test
+	void cancelTerminalKeepsTheStoppedAssistantAndTheUserText() {
+		RunSnapshot snapshot = snapshot();
+		when(this.store.get(RUN_ID)).thenReturn(snapshot);
+		AssistantMessage stopped = AssistantMessage.builder().content("半截").build();
+		List<Message> history = List.of(new UserMessage("原话"), stopped);
+
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID, history, true);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).extracting(TranscriptEntry::text).containsExactly("原话", "半截");
+	}
+
+	@Test
+	void failureTerminalStillBackfillsTheUserTextWithoutAppendingTheLastAssistant() {
+		RunSnapshot snapshot = snapshot();
+		when(this.store.get(RUN_ID)).thenReturn(snapshot);
+
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID,
+				List.of(new UserMessage("原话"), new AssistantMessage("上一轮终稿")), false);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).extracting(TranscriptEntry::kind, TranscriptEntry::text)
+			.containsExactly(org.assertj.core.groups.Tuple.tuple("user", "原话"));
+	}
+
+	@Test
+	void failureWritePointReadsTheSnapshotHistory() {
+		RunSnapshot snapshot = snapshot();
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("原话"))));
+		when(this.store.get(RUN_ID)).thenReturn(snapshot);
+
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptFromSnapshot", RUN_ID, SESSION_ID);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).extracting(TranscriptEntry::text).containsExactly("原话");
+	}
+
+	@Test
+	void suspendWritesThePendingToolCardToo() {
+		SpToolCallingManager manager = new SpToolCallingManager(this.store, mock(RunRegistry.class),
+				mock(ConfirmGate.class), mock(ToolRegistry.class), this.codec, mock(ToolActivityBeacon.class),
+				mock(CancellationRegistry.class), new ToolResultLimiter(this.properties), List.of());
+		manager.setConversationTranscriptStore(this.transcript);
+		RunSnapshot snapshot = snapshot();
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("c-1");
+		pending.setName("list_tasks");
+		pending.setKind(PendingToolCall.KIND_BACKEND);
+		pending.setStatus(PendingToolCall.PENDING);
+		AssistantMessage assistant = AssistantMessage.builder()
+			.content("")
+			.toolCalls(List.of(new AssistantMessage.ToolCall("c-1", "function", "list_tasks", "{}")))
+			.build();
+
+		ReflectionTestUtils.invokeMethod(manager, "recordPendingTranscript", RUN_ID, snapshot,
+				new Prompt(List.of(new UserMessage("原话"))), assistant, List.of(pending));
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		assertThat(entries.getValue()).extracting(TranscriptEntry::kind)
+			.containsExactly("assistant", "tool");
+		assertThat(entries.getValue().get(1).toolCallId()).isEqualTo("c-1");
+	}
+
+	private RunSnapshot snapshot() {
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setSessionId(SESSION_ID);
+		snapshot.setTenantId(TENANT);
+		snapshot.setUserId(USER);
+		snapshot.setCreatedAtMs(500L);
+		return snapshot;
+	}
+
+}

@@ -123,7 +123,7 @@ describe('N09/M07：空白复制页签按复制来源接手（静默）', () => 
     expect(store.tabOwnership).toBe('owner')
     expect(sessionStorage.getItem(sessionIdStorageKey())).toBe('9601')
     // 原会话的历史照常读回（接管 = 静默换回原会话，不是新建）
-    expect(api.history).toHaveBeenCalledWith('9601')
+    expect(api.history).toHaveBeenCalledWith('9601', { offset: 0, limit: 1 })
     // 原会话的锁归本页签（不再占着已放弃的空白会话锁）
     expect(locks.isHeld(sessionLockName('9601'))).toBe(true)
     expect(locks.isHeld(sessionLockName(copySession))).toBe(false)
@@ -152,7 +152,7 @@ describe('N09/M07：空白复制页签按复制来源接手（静默）', () => 
     await flushPromises()
 
     expect(store.sessionId).toBe(afterNew)
-    expect(api.history).not.toHaveBeenCalledWith('9602')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9602')
   })
 
   it('用户切换身份（切走再切回）⇒ 资格作废：同身份的让渡也不再接手', async () => {
@@ -179,7 +179,7 @@ describe('N09/M07：空白复制页签按复制来源接手（静默）', () => 
     await flushPromises()
 
     expect(store.sessionId).toBe(afterSwitch)
-    expect(api.history).not.toHaveBeenCalledWith('9603')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9603')
   })
 
   it('资格只认记录下来的复制来源：别的会话 released 不接手（防劫持）', async () => {
@@ -196,7 +196,7 @@ describe('N09/M07：空白复制页签按复制来源接手（静默）', () => 
     await flushPromises()
 
     expect(store.sessionId).toBe(copySession)
-    expect(api.history).not.toHaveBeenCalledWith('9699')
+    expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9699')
     expect(locks.isHeld(sessionLockName('9699'))).toBe(false)
   })
 })

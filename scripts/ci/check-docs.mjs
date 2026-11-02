@@ -83,6 +83,8 @@ function gitLsFiles() {
   return execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
     .split('\0')
     .filter(Boolean)
+    // 工作树检查只读当前仍存在的文件；已暂存/未暂存的合法删除不再被当成读取失败。
+    .filter((file) => exists(file))
 }
 
 // ── ① 导航文档无盘符绝对路径 ────────────────────────────────────────────────

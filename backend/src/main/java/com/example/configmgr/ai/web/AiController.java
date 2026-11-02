@@ -6,6 +6,8 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
+import com.example.configmgr.ai.context.ContextLimitResolver;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
@@ -266,6 +268,13 @@ public class AiController {
 
 	@Autowired(required = false)
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
+
+	/**
+	 * B2：用户展示历史（transcript）。字段注入（构造器签名不变 ⇒ 既有单测零触碰）；
+	 * 未注入时 {@code /history} 保持旧口径（回落 {@code chat:mem}）。
+	 */
+	@Autowired(required = false)
+	private com.example.configmgr.ai.history.ConversationTranscriptStore transcript;
 
 	/**
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
@@ -746,7 +755,7 @@ public class AiController {
 	 * <li><b>{@code importMode} 同样保留服务端已有值</b>（{@code reportHash} 的 publishMode 输入）；
 	 *     快照没有时才采纳客户端。</li>
 	 * <li><b>保留服务端 {@code extra.taskSlots}</b>：重算只是增强，不能让这次写把槽位抹掉
-	 *     （{@code retryModelStep} 不重算，抹掉会退化成表单 fail-open）。</li>
+	 *     （抹掉会退化成表单 fail-open）。</li>
 	 * <li><b>可选字段</b>：旧客户端不带 {@code context} ⇒ 不读不写，行为与改造前逐字一致；</li>
 	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），客户端无法
 	 *     伪造服务端槽位或越过终态收窄；</li>
@@ -1832,52 +1841,6 @@ public class AiController {
 	}
 
 	/**
-	 * <b>仅模型步重跑</b>（AR-05 / 批次2）：{@code POST /api/ai/runs/{runId}/retry-model-step}。
-	 *
-	 * <h2>契约（前端可直接用）</h2>
-	 * <ul>
-	 * <li><b>202</b>：已受理 —— {@code {runId, sessionId, retried:true, modelStepOnly:true,
-	 *     reason:"MODEL_STEP_RETRY_ACCEPTED", reusedToolLedger:true, appendedUserMessages:0,
-	 *     promptMessageCount, promptRoles, retryOfStatus:"FAILED"}}。前端接着走既有
-	 *     {@code GET /api/ai/events/{runId}?lastSeq=} 重挂即可（帧流与续跑同一条）；
-	 *     <b>不要</b>再追加一条用户消息，也<b>不要</b>把它当成"重试本轮 = 重发消息"；</li>
-	 * <li><b>200</b>：已收尾/已取消（幂等空操作，{@code retried:false}）；</li>
-	 * <li><b>409</b>：在途（{@code LEASE_HELD_ELSEWHERE} / {@code RESUME_IN_PROGRESS} /
-	 *     {@code ALREADY_RUNNING}），或前置失败
-	 *     （{@code reason:"RETRY_PRECONDITION_FAILED", code:"ILLEGAL_STATE",
-	 *     failedCheck:"NOT_FAILED|CANCELLED|PENDING_TOOLS|PARTIAL_CONTENT|TOOL_PAIRING_INCOMPLETE|MODEL_CHANGED"}）
-	 *     —— {@code PARTIAL_CONTENT} 表示"状态未确认"，前端应给中性视图 + 新开一轮，而不是重跑；</li>
-	 * <li><b>404</b>：轮次不存在；<b>503</b>：AI/Redis 不可用（可重试）。</li>
-	 * </ul>
-	 *
-	 * <p>语义边界（AR-05）：<b>不</b>做"半截自动替换"，<b>不</b>重执行已结算工具，
-	 * <b>不</b>追加用户消息，<b>不</b>换模型，<b>不</b>改历史切片。
-	 */
-	@PostMapping(value = "/runs/{runId}/retry-model-step", produces = MediaType.APPLICATION_JSON_VALUE)
-	public ResponseEntity<?> retryModelStep(@PathVariable String runId) {
-		if (!ownedOrAbsent(runId)) {
-			return json(HttpStatus.NOT_FOUND, errorBody(ErrorCodes.UNKNOWN_RUN, "轮次不存在"));
-		}
-		ResumeService service = this.resumeService.getIfAvailable();
-		if (!this.availability.isAvailable() || service == null) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
-		}
-		if (!this.redisAvailability.isAvailable()) {
-			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-		}
-		ResumeService.ResumeResult result = service.retryModelStep(runId, ErrorBodyFactory.requestLocale());
-		return switch (result.outcome()) {
-			case ACCEPTED -> ResponseEntity.accepted().contentType(MediaType.APPLICATION_JSON).body(result.body());
-			case ALREADY_DONE, ALREADY_CANCELLED ->
-				ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(result.body());
-			case NOT_FOUND -> json(HttpStatus.NOT_FOUND, result.body());
-			case POOL_SATURATED, CANCEL_STATE_UNKNOWN, STATE_UNKNOWN ->
-				json(HttpStatus.SERVICE_UNAVAILABLE, result.body());
-			default -> json(HttpStatus.CONFLICT, result.body());
-		};
-	}
-
-	/**
 	 * session 当前挂起轮的快照（T2b-D#2）：{@code GET /api/ai/runs/current?sessionId=}。
 	 *
 	 * <h2>三分支语义（红队 D1）</h2>
@@ -2152,24 +2115,235 @@ public class AiController {
 	 * 切片之前还有更早条目（offset 越界则空片、hasMore=false）。既有字段 {@code sessionId}/{@code count}/{@code messages} 形状不变。
 	 */
 	@GetMapping("/history/{sessionId}")
-	public ApiResponse<Map<String, Object>> history(@PathVariable String sessionId,
+	public ResponseEntity<?> history(@PathVariable String sessionId,
 			@RequestParam(name = "offset", required = false) Integer offset,
 			@RequestParam(name = "limit", required = false) Integer limit) {
 		List<Map<String, Object>> items = new ArrayList<>();
-		for (Message message : this.chatMemory.get(sessionId)) {
-			items.add(toHistoryItem(message));
+		List<com.example.configmgr.ai.history.TranscriptEntry> transcriptEntries = List.of();
+		boolean truncated = false;
+		boolean usedTranscript = false;
+		// B2：展示历史优先读独立 transcript（用户可见原文，压缩/窗口不改它）；
+		// transcript 为空（旧会话/升级前）才回落 chat:mem 工作上下文。
+		if (this.transcript != null) {
+			try {
+				ConversationTranscriptStore.ReadResult read = this.transcript.read(sessionId);
+				if (!read.isEmpty()) {
+					// P2-1：先按可投影性过滤 entries 并切片，再只对<b>本页</b>做昂贵投影
+					// （信封解析 / 文案码 / resultView provider）。长会话下每请求从 O(total) 投影降为 O(page)。
+					transcriptEntries = projectableTranscriptEntries(read.entries());
+					truncated = read.truncated();
+					usedTranscript = true;
+				}
+			}
+			catch (RuntimeException ex) {
+				// 读失败必须可见/可重试：与 /context 同口径回 503，绝不伪装成"空历史"
+				log.warn("history transcript 读取失败 sessionId={}：{}", sessionId, ex.getMessage());
+				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+			}
 		}
-		int total = items.size();
+		if (!usedTranscript) {
+			try {
+				for (Message message : this.chatMemory.get(sessionId)) {
+					items.add(toHistoryItem(message));
+				}
+			}
+			catch (RuntimeException ex) {
+				log.warn("history 记忆读取失败 sessionId={}：{}", sessionId, ex.getMessage());
+				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+			}
+		}
+		int total = usedTranscript ? transcriptEntries.size() : items.size();
 		int from = Math.min(total, Math.max(0, offset == null ? 0 : offset));
 		int to = limit == null ? total : (int) Math.min((long) total, (long) from + Math.max(0, limit));
-		List<Map<String, Object>> page = new ArrayList<>(items.subList(from, to));
+		List<Map<String, Object>> page = usedTranscript
+				? transcriptItems(transcriptEntries.subList(from, to))
+				: new ArrayList<>(items.subList(from, to));
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("sessionId", sessionId);
 		body.put("count", page.size());
 		body.put("messages", page);
 		body.put("total", total);
 		body.put("hasMore", from > 0 && from < total);
-		return ApiResponse.ok(body);
+		if (truncated) {
+			// 中性标记：更早的展示历史因容量上限不在本机保留；不新增顶部提示
+			body.put("truncated", true);
+		}
+		// B3：已提交压缩事实（按 atMs,eventId 升序）；读失败只降级为空事件，不拖垮历史正文。
+		body.put("events", historyCompactionEvents(sessionId));
+		return ResponseEntity.ok(ApiResponse.ok(body));
+	}
+
+	private List<Map<String, Object>> historyCompactionEvents(String sessionId) {
+		if (this.runStore == null) {
+			return List.of();
+		}
+		List<Map<String, Object>> raw;
+		try {
+			raw = this.runStore.events(sessionId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("history 压缩事实读取失败 sessionId={}：{}（按空事件返回）", sessionId, ex.getMessage());
+			return List.of();
+		}
+		if (raw == null || raw.isEmpty()) {
+			return List.of();
+		}
+		List<Map<String, Object>> sorted = new ArrayList<>(raw);
+		sorted.sort((left, right) -> {
+			long leftAt = longOf(left.get("atMs"));
+			long rightAt = longOf(right.get("atMs"));
+			int byAt = Long.compare(leftAt, rightAt);
+			return byAt != 0 ? byAt : String.valueOf(left.get("eventId"))
+				.compareTo(String.valueOf(right.get("eventId")));
+		});
+		List<Map<String, Object>> out = new ArrayList<>(sorted.size());
+		for (Map<String, Object> event : sorted) {
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("eventId", event.get("eventId"));
+			item.put("runId", event.get("runId"));
+			item.put("atMs", event.get("atMs"));
+			item.put("anchorToolCallId", event.get("anchorToolCallId"));
+			out.add(item);
+		}
+		return out;
+	}
+
+	private static long longOf(Object value) {
+		if (value instanceof Number number) {
+			return number.longValue();
+		}
+		if (value instanceof String text) {
+			try {
+				return Long.parseLong(text.trim());
+			}
+			catch (NumberFormatException ex) {
+				return 0L;
+			}
+		}
+		return 0L;
+	}
+
+	/**
+	 * B2：transcript 条目 → 既有 history 载荷形状。
+	 *
+	 * <p>只做形状映射，不做排序/去重（存储读取时已完成 last-wins + turnStartedAtMs 排序）。
+	 * 工具结果仍走 {@link #historyToolResponses} 同一份用户面投影（信封解包 / 文案码 / resultView），
+	 * 因此 transcript 与回落路径的卡面语义一致。
+	 */
+	private List<Map<String, Object>> transcriptItems(List<com.example.configmgr.ai.history.TranscriptEntry> entries) {
+		List<Map<String, Object>> items = new ArrayList<>(entries.size());
+		for (com.example.configmgr.ai.history.TranscriptEntry entry : entries) {
+			Map<String, Object> item = transcriptItem(entry);
+			if (item != null) {
+				items.add(item);
+			}
+		}
+		return items;
+	}
+
+	/** 只保留能投影成 USER/ASSISTANT/TOOL 的条目（计数与切片都只用它，避免全量建 map）。 */
+	private static List<com.example.configmgr.ai.history.TranscriptEntry> projectableTranscriptEntries(
+			List<com.example.configmgr.ai.history.TranscriptEntry> entries) {
+		List<com.example.configmgr.ai.history.TranscriptEntry> out = new ArrayList<>(entries.size());
+		for (com.example.configmgr.ai.history.TranscriptEntry entry : entries) {
+			if (transcriptType(entry) != null) {
+				out.add(entry);
+			}
+		}
+		return out;
+	}
+
+	private static String transcriptType(com.example.configmgr.ai.history.TranscriptEntry entry) {
+		String kind = entry.kind() == null ? "" : entry.kind();
+		String role = "baseline".equals(kind) ? entry.role() : kind;
+		if (role == null) {
+			return null;
+		}
+		String type = role.toUpperCase();
+		return "USER".equals(type) || "ASSISTANT".equals(type) || "TOOL".equals(type) ? type : null;
+	}
+
+	private Map<String, Object> transcriptItem(com.example.configmgr.ai.history.TranscriptEntry entry) {
+		String type = transcriptType(entry);
+		if (type == null) {
+			return null;
+		}
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("type", type);
+		item.put("text", entry.text() == null ? "" : entry.text());
+		if (entry.runId() != null) {
+			item.put("runId", entry.runId());
+		}
+		if (entry.atMs() > 0L) {
+			item.put("timestamp", entry.atMs());
+		}
+		if ("ASSISTANT".equals(type)) {
+			if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
+				List<Map<String, Object>> calls = new ArrayList<>(entry.toolCalls().size());
+				for (com.example.configmgr.ai.history.TranscriptEntry.ToolCallView call : entry.toolCalls()) {
+					Map<String, Object> view = new LinkedHashMap<>();
+					view.put("id", call.id());
+					view.put("type", call.type());
+					view.put("name", call.name());
+					view.put("arguments", call.arguments());
+					calls.add(view);
+				}
+				item.put("toolCalls", calls);
+			}
+			if (entry.toolCallStates() != null && !entry.toolCallStates().isEmpty()) {
+				item.put("toolCallStates", entry.toolCallStates());
+			}
+			if (this.properties.getReasoning().isDisplayEnabled() && entry.reasoning() != null
+					&& !entry.reasoning().isBlank()) {
+				item.put(ResilientChatService.REASONING_METADATA_KEY, entry.reasoning());
+			}
+			if (Boolean.TRUE.equals(entry.stopped())) {
+				item.put("stopped", true);
+			}
+			if (Boolean.TRUE.equals(entry.truncated())) {
+				item.put(ResilientChatService.TRUNCATED_KEY, true);
+			}
+		}
+		if ("TOOL".equals(type)) {
+			item.put("toolResponses", List.of(transcriptToolResponse(entry)));
+		}
+		return item;
+	}
+
+	private Map<String, Object> transcriptToolResponse(com.example.configmgr.ai.history.TranscriptEntry entry) {
+		ToolResponseMessage single = ToolResponseMessage.builder()
+			.responses(List.of(new ToolResponseMessage.ToolResponse(entry.toolCallId(), entry.name(),
+					entry.result() == null ? "" : entry.result())))
+			.build();
+		List<Map<String, Object>> responses = historyToolResponses(single);
+		Map<String, Object> item = !responses.isEmpty() ? responses.get(0) : new LinkedHashMap<>();
+		if (item.isEmpty()) {
+			item.put("id", entry.toolCallId());
+			item.put("name", entry.name());
+			item.put("responseData", entry.result());
+		}
+		// P2：transcript 只存用户面原文，信封里的 code 与截断事实在写入时另存；
+		// 读取时按它们还原 userTextCode / 截断五字段 —— 与 chat:mem 的信封路径同形。
+		if (entry.code() != null && !entry.code().isBlank()) {
+			item.put("responseData", ToolResultUserText.forUser(entry.code(),
+					item.get("responseData") == null ? null : String.valueOf(item.get("responseData"))));
+			item.put("userTextCode", ToolResultUserText.userTextCode(entry.code()));
+		}
+		if (Boolean.TRUE.equals(entry.toolTruncated())) {
+			item.put(TruncationContract.TRUNCATED_FIELD, true);
+			item.put(TruncationContract.NOTICE_CODE_FIELD,
+					TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
+			if (entry.toolStrategy() != null) {
+				item.put(TruncationContract.STRATEGY_FIELD, entry.toolStrategy());
+			}
+			if (entry.toolOriginalChars() != null) {
+				item.put(TruncationContract.ORIGINAL_CHARS_FIELD, entry.toolOriginalChars());
+			}
+			if (entry.toolReturnedChars() != null) {
+				item.put(TruncationContract.RETURNED_CHARS_FIELD, entry.toolReturnedChars());
+			}
+		}
+		return item;
 	}
 
 	/**
@@ -2178,8 +2352,8 @@ public class AiController {
 	 * <p><b>批次2 / AR-01 第 5 条：synthetic 展示过滤（读侧）</b> —— 合成/系统提示（上下文压缩摘要、
 	 * 步数收尾、轮内预算收尾）在记忆里是真实消息，但对人不是"用户原话"也不是"助手答复"。
 	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与槽位解析同一份</b>，不许各写一套），
-	 * 命中即加 additive 键 {@code synthetic=true}：前端据此按系统消息呈现，
-	 * <b>摘要不冒充用户</b>、不显示内部配置键；正文与角色字段一律原样（不改写、不改模型记忆）。
+	 * 命中即加 additive 键 {@code synthetic=true}：前端将条目整条排除在展示历史之外，
+	 * <b>摘要不冒充用户</b>、不显示内部配置键；真实压缩结果只由已提交事件节点呈现。
 	 *
 	 * <p><b>AR-12（只读展示）</b> —— assistant 条目已有的 {@code metadata.reasoningContent}
 	 * 以 additive 可选键 {@code reasoningContent} 原样透出（记忆窗口通道）；
@@ -2190,9 +2364,12 @@ public class AiController {
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("type", message.getMessageType().name());
 		item.put("text", message.getText());
-		boolean synthetic = SyntheticMessages.isSynthetic(message);
+		SyntheticMessages.Kind syntheticKind = SyntheticMessages.kindOf(message);
+		boolean synthetic = syntheticKind != null;
 		if (synthetic) {
 			item.put(SyntheticMessages.DISPLAY_KEY, true);
+			// B5（additive）：明确类别；非压缩提示不得被前端误标成"已压缩"。
+			item.put("syntheticKind", syntheticKind.wire());
 		}
 		// AR-12（只读展示）：历史 assistant 已有的思考正文只从 metadata.reasoningContent 原样透出，
 		// 不新增表/列/持久化，也不透出 startedAt/endedAt 等计时（历史已完成轮不显示耗时、不回算）。
@@ -2228,6 +2405,13 @@ public class AiController {
 		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
 		if (timestamp != null) {
 			item.put("timestamp", timestamp);
+		}
+		// B2（additive）：回落记忆路径也透出轮次归属，前端可按 runId 对账（缺省 = 旧数据/无归属）。
+		if (message.getMetadata() != null) {
+			Object runId = message.getMetadata().get(com.example.configmgr.ai.memory.RunMemoryMerge.RUN_ID_KEY);
+			if (runId != null && !String.valueOf(runId).isBlank()) {
+				item.put("runId", String.valueOf(runId));
+			}
 		}
 		return item;
 	}
@@ -2499,10 +2683,14 @@ public class AiController {
 		body.put("defaultModelId", resolved != null ? resolved.modelId() : null);
 		// 上下文专项批①（additive，仅观测）：分母的实际取值 + 压缩是否真的会被判。
 		// 上限未知（null）时压缩不做比例判定（降级态），故 compactionOn 也随之为 false —— 两者同源。
-		int contextLimitTokens = this.contextCompactor == null ? 0
-				: this.contextCompactor.limitTokens(resolved != null ? resolved.providerId() : null,
+		ContextLimitResolver.ResolveResult contextLimit = this.contextCompactor == null
+				? new ContextLimitResolver.ResolveResult(0, ContextLimitResolver.Source.UNKNOWN)
+				: this.contextCompactor.resolveLimit(resolved != null ? resolved.providerId() : null,
 						resolved != null ? resolved.modelId() : null);
+		int contextLimitTokens = contextLimit.limitTokens();
 		body.put("contextLimitTokens", contextLimitTokens > 0 ? contextLimitTokens : null);
+		// A6（additive）：schema / fallback / unknown —— 回退保留但不再静默；只进只读诊断，不做用户强提示
+		body.put("contextLimitSource", contextLimit.source().wire());
 		body.put("compactionOn", this.contextCompactor != null && contextLimitTokens > 0);
 		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
 		// 批③（additive）：面板据此决定参数 popover 是否可用、初值取什么。

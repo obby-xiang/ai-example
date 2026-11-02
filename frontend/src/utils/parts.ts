@@ -14,6 +14,7 @@
 import {
   GENERATIVE_FORM_TOOL,
   type ChatMessage,
+  type CompactionEventPart,
   type MessagePart,
   type PendingToolCall,
   type ReasoningPart,
@@ -401,6 +402,10 @@ export function deriveProjections(message: ChatMessage): void {
   const runs: ToolRun[] = []
   let pending: PendingToolCall | null = null
   for (const part of message.parts) {
+    if (part.kind === 'event') {
+      // 事件节点不参与正文/工具投影（B3 / I14）
+      continue
+    }
     if (part.kind === 'text') {
       texts.push(part.text)
       continue
@@ -434,6 +439,96 @@ export function deriveProjections(message: ChatMessage): void {
   message.reasoning = reasonings.join('')
   message.toolRuns = runs
   message.pendingCall = pending
+}
+
+/** 一次已提交压缩事实在 parts 里的落点（B3）。 */
+export interface CompactionEventPlacement {
+  eventId: string
+  anchorToolCallId?: string | null
+  atMs?: number
+}
+
+/**
+ * 从协议 eventId `<runId>:c<compSeq>` 严格解析数值序号。
+ *
+ * <p>只认结尾的 `:c` + 非负整数（不接受小数/负号/额外后缀）；无法解析返回 null，
+ * 调用方走安全的字符串兜底，不臆造序号。
+ */
+export function compactionEventSeq(eventId: string | null | undefined): number | null {
+  if (!eventId) {
+    return null
+  }
+  const match = /:c(\d+)$/.exec(eventId)
+  if (!match) {
+    return null
+  }
+  const seq = Number(match[1])
+  return Number.isSafeInteger(seq) ? seq : null
+}
+
+/**
+ * 压缩事件的稳定排序：先 `atMs`，同毫秒按 eventId 的**数值序号**（c2 < c10）。
+ *
+ * <p>两处消费者（实时插入 / history 恢复）共用这一份，避免 c10 被字符串序排到 c2 前。
+ * 任一侧序号不可解析时保持既有字符串序兜底（确定性、不丢事件）。
+ */
+export function compareCompactionEvents(
+  left: { eventId: string; atMs?: number | null },
+  right: { eventId: string; atMs?: number | null }
+): number {
+  const byAt = (left.atMs ?? 0) - (right.atMs ?? 0)
+  if (byAt !== 0) {
+    return byAt
+  }
+  const leftSeq = compactionEventSeq(left.eventId)
+  const rightSeq = compactionEventSeq(right.eventId)
+  if (leftSeq !== null && rightSeq !== null && leftSeq !== rightSeq) {
+    return leftSeq - rightSeq
+  }
+  return left.eventId.localeCompare(right.eventId)
+}
+
+/**
+ * 把已提交压缩事实插入消息 parts（B3 / I13-I14）。
+ *
+ * <p>规则：
+ * <ul>
+ * <li>按 `eventId` 幂等：已存在同 id 事件段 ⇒ 返回 false（实时/重挂/镜像/历史都不重复）；</li>
+ * <li>有锚点 ⇒ 插到该工具段之后；找不到锚点／无锚点 ⇒ 插到本消息 parts 开头；</li>
+ * <li>同一落点已有多条事件时按 `atMs` + eventId 数值序号排序插入（不依赖到达顺序；
+ *     乱序重放也不会让 c10 排到 c2 前）；</li>
+ * <li>插入后重排 `seg`（渲染 key 稳定）；不调用投影（事件不参与正文/工具派生）。</li>
+ * </ul>
+ */
+export function insertCompactionEvent(message: ChatMessage, event: CompactionEventPlacement): boolean {
+  if (message.parts.some((part) => part.kind === 'event' && part.eventId === event.eventId)) {
+    return false
+  }
+  const anchorIndex = event.anchorToolCallId
+    ? message.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === event.anchorToolCallId)
+    : -1
+  let index = anchorIndex >= 0 ? anchorIndex + 1 : 0
+  // 同一位置已有事件段：按 atMs + eventId 数值序号插到首个更大的事件之前
+  // （c2 < c10；乱序重放也稳定，不会因字符串序把 c10 排到 c2 前）
+  while (index < message.parts.length && message.parts[index]?.kind === 'event') {
+    const existing = message.parts[index] as CompactionEventPart
+    if (compareCompactionEvents(existing, event) > 0) {
+      break
+    }
+    index += 1
+  }
+  const part: CompactionEventPart = {
+    kind: 'event',
+    eventType: 'compaction',
+    eventId: event.eventId,
+    atMs: event.atMs,
+    seg: index
+  }
+  message.parts.splice(index, 0, part)
+  message.parts.forEach((item, seg) => {
+    item.seg = seg
+  })
+  return true
 }
 
 /**

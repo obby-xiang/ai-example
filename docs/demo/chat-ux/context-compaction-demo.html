@@ -10,14 +10,14 @@
 <div class="demo-page">
   <header class="demo-head">
     <div class="demo-eyebrow">
-      <span class="demo-chip blue">目标设计讨论稿</span>
-      <span class="demo-chip">方向已确认 · 仍非定稿</span>
+      <span class="demo-chip blue">设计已批准并落地</span>
+      <span class="demo-chip">落地后交互 Demo</span>
       <span class="demo-chip">静态 HTML · 无依赖</span>
       <span class="demo-chip">不连接后端</span>
     </div>
     <h1>上下文压缩 · 目标设计交互 Demo</h1>
     <p class="lede">
-      本页展示刚讨论的目标设计，不是旧现状复刻。压缩状态归属于具体助手消息，不再出现在顶部；
+      本页展示已批准并落地的交互口径，不是旧现状复刻。压缩状态归属于具体助手消息，不再出现在顶部；
       压缩完成事实是<b>消息流时序中的流程分隔行</b>，不是页脚标签，也不是可操作卡片。
       <b>摘要正文绝不展示</b>；用户原始展示历史保留，只有模型工作上下文被压缩。
       左侧场景切换、变体选择与说明都属于 <b>Demo 外壳</b>，不冒充产品 UI。
@@ -40,8 +40,7 @@
         <button class="nav-btn" type="button" data-scene="10"><span class="nav-num">10</span><span class="nav-label">刷新 / 重连 / 接管</span></button>
         <button class="nav-btn" type="button" data-scene="11"><span class="nav-num">11</span><span class="nav-label">同轮多次压缩（两节点）</span></button>
         <button class="nav-btn" type="button" data-scene="12"><span class="nav-num">12</span><span class="nav-label">轮内工具回环</span></button>
-        <button class="nav-btn" type="button" data-scene="13"><span class="nav-num">13</span><span class="nav-label">准备中对照</span></button>
-        <button class="nav-btn" type="button" data-scene="14"><span class="nav-num">14</span><span class="nav-label">上下文圆环</span></button>
+        <button class="nav-btn" type="button" data-scene="13"><span class="nav-num">13</span><span class="nav-label">上下文圆环</span></button>
       </div>
       <div class="nav-note">
         <b>操作：</b>切换场景立即重播；带时间线的场景可点“重播本场景”。压缩中秒表真实递增，但不逐秒进入读屏播报。
@@ -54,7 +53,7 @@
         <div class="scene-head">
           <span class="scene-num" id="scene-num">01</span>
           <div class="scene-head-main">
-            <div class="scene-kicker" id="scene-kicker">场景 01 / 14</div>
+            <div class="scene-kicker" id="scene-kicker">场景 01 / 13</div>
             <h2 id="scene-title">普通生成，无压缩</h2>
           </div>
           <span class="scene-tag tag-silent" id="scene-tag">无阶段条</span>
@@ -96,8 +95,6 @@
               <select aria-label="选择用户" tabindex="-1"><option>演示用户</option></select>
               <span class="context-summary">工作区 · 配置管理 / 任务列表</span>
             </div>
-
-            <div class="ai-stage-host" id="stage-host"></div>
 
             <div class="ai-messages" id="messages" role="log" aria-label="对话消息" aria-busy="false"></div>
 
@@ -286,14 +283,16 @@
       tag: '持久事实',
       tone: 'recovery',
       brief: [
-        '刷新时仍在压缩：按服务端阶段恢复「压缩中…」与真实秒表。',
-        '刷新时已提交：按持久事件 id 恢复「已压缩上下文」流程行，位置不变（本例在工具卡之后、正文之前）；同一事件重复下发不重复渲染。',
+        '刷新前压缩中：紫色「压缩中…」与秒表只是该消息的内存态（compactingStartedAtMs）；心跳只保活、不归档。',
+        '刷新后过程态退场：不恢复「压缩中…」、不重算秒表；按服务端现有恢复阶段显示「工作中…」（仍在准备窗口时为既有准备态，属顶部提示专项），未提交就没有节点。',
+        '刷新前已提交：按持久事件 id 恢复「已压缩上下文」流程行，位置不变（本例在工具卡之后、正文之前）；同一事件重复下发不重复渲染。',
         '另一实例接管完成：结果节点来自持久化事实，保持原时序位置，不靠本地动画猜测。'
       ],
       evidence: [
-        '目标设计 §4.5：过程态可恢复；结果态必须来自已提交事实，事件按 id 幂等。',
-        '目标设计 §3.2：展示历史与 working context 分离，刷新后原文仍可见。',
-        '本场景对同一持久事件下发两次，DOM 仍只有一个节点。'
+        '过程态口径：compactingStartedAtMs 是消息级内存态，心跳不写镜像，新轮 / 停止 / 换会话清空（ai.ts:3208-3220,10571-10600）。',
+        '刷新续收只把宿主置回 streaming（ai.ts:4722-4786），元信息行显示既有「工作中…」；准备窗口的既有准备态由 preparingRun 驱动（AiPanel.vue:1532-1543），本 Demo 不复刻顶部提示。',
+        '结果节点由 context 帧的 eventId 幂等插入（ai.ts:10545-10564）；目标设计 §4.4 / §4.5 已按此口径修订。',
+        '「已提交」变体对同一持久事件下发两次，DOM 仍只有一个节点。'
       ]
     },
     11: {
@@ -327,19 +326,6 @@
       ]
     },
     13: {
-      title: '准备中对照',
-      tag: '仅对照',
-      tone: 'visible',
-      brief: [
-        '准备中是快照未建的阶段，可保留顶部条；它不是压缩。',
-        '本场景不出现压缩中、不出现已压缩流程行；不混入压缩条。'
-      ],
-      evidence: [
-        '目标设计 §4.2：准备中/错误/恢复留给独立专项；顶部不再放压缩。',
-        '现有准备条 CompactionStatus.vue:79-95；AiPanel.vue:1516-1519。'
-      ]
-    },
-    14: {
       title: '上下文圆环',
       tag: 'tooltip',
       tone: 'silent',
@@ -358,7 +344,6 @@
     messages: [],
     loading: false,
     suspended: false,
-    preparing: null,
     ring: null,
     copiedId: null,
     feedback: {},
@@ -369,9 +354,9 @@
       5: 'fail',
       6: 'afterError',
       7: 'before',
-      10: 'compacting',
+      10: 'inflight',
       12: 'l1',
-      14: 'real42'
+      13: 'real42'
     }
   };
 
@@ -379,7 +364,6 @@
   let cardSeq = 0;
   let compactionSeq = 0;
   let timers = [];
-  let preparingAutoId = null;
   let feedbackTimer = null;
   let announceTimer = null;
   let pinBottom = true;
@@ -390,7 +374,6 @@
 
   const panel = document.getElementById('ai-panel');
   const messagesEl = document.getElementById('messages');
-  const stageHost = document.getElementById('stage-host');
   const composer = document.getElementById('composer');
   const sendSlot = document.getElementById('send-slot');
   const composerCount = document.getElementById('composer-count');
@@ -484,10 +467,6 @@
       clearInterval(id);
     }
     timers = [];
-    if (preparingAutoId !== null) {
-      clearTimeout(preparingAutoId);
-      preparingAutoId = null;
-    }
   }
 
   function later(fn, ms) {
@@ -897,23 +876,6 @@
     scrollMessages();
   }
 
-  function renderStage() {
-    if (!state.preparing) {
-      stageHost.innerHTML = '';
-      return;
-    }
-    const seconds = secondsOf(state.preparing.startedAt);
-    stageHost.innerHTML = '<div class="stage-bar" data-testid="preparing-status" data-stage="preparing">'
-      + '<span class="stage-dot" aria-hidden="true"></span>'
-      + '<div class="stage-main">'
-      + '<div class="stage-title">正在准备本轮回答 · 已用 <span data-live-seconds>' + seconds + '</span> 秒</div>'
-      + '<div class="stage-hint">服务端正在建立本轮上下文，不会丢失；可稍候或立即重试。</div>'
-      + '</div>'
-      + '<button type="button" class="stage-retry" data-action="retry-preparing" data-testid="preparing-retry">立即重试</button>'
-      + '<span class="sr-only" aria-live="polite">正在准备本轮回答</span>'
-      + '</div>';
-  }
-
   function updateRing() {
     const usage = state.ring;
     const label = ringLabel(usage);
@@ -993,7 +955,6 @@
   }
 
   function renderAll() {
-    renderStage();
     renderMessages();
     updateComposerState();
     updateRing();
@@ -1084,12 +1045,12 @@
         + '<span class="control-label">恢复来源（Demo 外壳）</span>'
         + '<div class="seg-row">'
         + segmentButtons([
-          { value: 'compacting', label: '刷新时仍在压缩' },
-          { value: 'committed', label: '刷新时已提交' },
+          { value: 'inflight', label: '刷新前压缩中（未提交）' },
+          { value: 'committed', label: '刷新前已提交' },
           { value: 'takeover', label: '另一实例接管' }
         ], 'data-refresh', state.variants[10])
         + '</div>'
-        + '<p class="control-hint">过程态按服务端阶段恢复；结果流程行只从持久提交事实恢复，同一事件按 id 去重。三种视图都保留用户原文。</p>'
+        + '<p class="control-hint">过程态是纯内存：刷新后紫色「压缩中…」与秒表直接退场、不恢复，按现有恢复阶段显示「工作中…」或既有准备态；结果流程行只从持久提交事实恢复，同一事件按 id 去重。三种视图都保留用户原文。</p>'
         + '</div>';
       return;
     }
@@ -1108,7 +1069,7 @@
         + '</div>';
       return;
     }
-    if (state.scenario === 14) {
+    if (state.scenario === 13) {
       sceneExtra.innerHTML = '<div class="shell-control">'
         + '<span class="control-label">圆环数据状态（Demo 外壳）</span>'
         + '<div class="seg-row">'
@@ -1119,7 +1080,7 @@
           { value: 'unknown', label: '上限未知 · 8.4k' },
           { value: 'unknownEst', label: '上限未知 · 估算' },
           { value: 'danger96', label: '高危 96%' }
-        ], 'data-ring', state.variants[14])
+        ], 'data-ring', state.variants[13])
         + '</div>'
         + '<p class="control-hint">当前 tooltip：<code id="ring-current">' + esc(ringLabel(state.ring)) + '</code>　hover 或 Tab 聚焦输入框右下的 14px 圆环。</p>'
         + '</div>';
@@ -1131,7 +1092,7 @@
   function updateSceneCard() {
     const scene = SCENES[state.scenario];
     sceneNum.textContent = String(state.scenario).padStart(2, '0');
-    sceneKicker.textContent = '场景 ' + String(state.scenario).padStart(2, '0') + ' / 14';
+    sceneKicker.textContent = '场景 ' + String(state.scenario).padStart(2, '0') + ' / 13';
     sceneTitle.textContent = scene.title;
     sceneTag.textContent = scene.tag;
     sceneTag.className = 'scene-tag tag-' + scene.tone;
@@ -1173,7 +1134,7 @@
       unknownEst: { percent: null, used: 8400, est: true },
       danger96: { percent: 96, used: 122880, est: false }
     };
-    const config = map[state.variants[14]] || map.real42;
+    const config = map[state.variants[13]] || map.real42;
     state.ring = config.none ? null : ringData(config.percent, config.used, config.est);
   }
 
@@ -1300,20 +1261,6 @@
     state.loading = false;
     state.suspended = false;
     renderAll();
-  }
-
-  function schedulePreparingResolve() {
-    if (preparingAutoId !== null) {
-      clearTimeout(preparingAutoId);
-      preparingAutoId = null;
-    }
-    preparingAutoId = setTimeout(() => {
-      preparingAutoId = null;
-      if (state.scenario !== 13 || !state.preparing) return;
-      state.preparing = null;
-      renderStage();
-      startStream('本轮上下文已建立。任务 #12 已完成，导入任务 #7 正在运行。', ringData(46, 58880));
-    }, 9000);
   }
 
   const ORIGINAL_CONFIG_RESULT = '共 12 个配置定义：ORDER_STATUS、ORDER_TYPE、EXPORT_FORMAT、IMPORT_MODE、RETRY_LIMIT、AUDIT_LEVEL、TASK_OWNER、NOTIFY_CHANNEL、ROW_LIMIT、BATCH_SIZE、TIMEZONE、FEATURE_FLAG';
@@ -1580,13 +1527,24 @@
       userMessage('继续刚才的核对。', 5);
       const variant = state.variants[10];
       state.ring = ringData(78, 99840);
-      if (variant === 'compacting') {
-        assistantMessage({
+      if (variant === 'inflight') {
+        // 刷新前：压缩过程态只在本页内存里（compactingStartedAtMs），心跳只保活、不归档。
+        const message = assistantMessage({
           streaming: true,
           compactionPhase: 'compacting',
-          compactionStartedAt: Date.now() - 12000
+          compactionStartedAt: Date.now() - 3000
         });
         state.loading = true;
+        announcePhase('开始压缩上下文');
+        later(() => {
+          if (state.messages.indexOf(message) === -1) return;
+          // 刷新：过程态不恢复、秒表不重算；宿主回到既有续收态，元信息行显示「工作中…」。
+          message.compactionPhase = 'idle';
+          renderAll();
+          announcePhase('压缩过程态已退场');
+          showDemoFeedback('刷新：不恢复「压缩中…」，也不重算秒表；按现有恢复阶段显示「工作中…」，未提交则没有节点。');
+          later(() => streamTextInto(message, '刷新后续收：任务 #12 已完成，失败原因列表为空。', ringData(70, 89600)), 1400);
+        }, 2600);
         return;
       }
       const resumedCard = () => makeToolCard({
@@ -1753,15 +1711,6 @@
     }
 
     if (id === 13) {
-      userMessage('重新整理一下任务 #12 的失败原因。', 2);
-      state.ring = ringData(12, 15360);
-      state.loading = true;
-      state.preparing = { startedAt: Date.now() - 3000 };
-      schedulePreparingResolve();
-      return;
-    }
-
-    if (id === 14) {
       userMessage('现在上下文占用大概多少？', 3);
       assistantMessage({
         text: '输入框右下角的圆环就是最新一轮的上下文占用；本轮结束后才会刷新，流式中不会跳动。',
@@ -1788,7 +1737,6 @@
     state.messages = [];
     state.loading = false;
     state.suspended = false;
-    state.preparing = null;
     state.ring = null;
     state.copiedId = null;
     state.feedback = {};
@@ -1833,7 +1781,6 @@
     clearTimers();
     state.loading = false;
     state.suspended = false;
-    state.preparing = null;
     const last = [...state.messages].reverse().find((m) => m.role === 'assistant');
     if (last) {
       last.streaming = false;
@@ -1877,14 +1824,6 @@
       state.ring = ringData(61, 78080);
       renderAll();
     }
-  }
-
-  function retryPreparing() {
-    if (!state.preparing) return;
-    state.preparing = { startedAt: Date.now() };
-    renderStage();
-    schedulePreparingResolve();
-    showDemoFeedback('Demo：已模拟准备中重试，秒表归零，阶段仍为准备中。');
   }
 
   async function copyText(text) {
@@ -1966,7 +1905,6 @@
     if (action === 'toggle-card') { toggleCard(actionEl.dataset.cardKey); return; }
     if (action === 'approve') { decideCard(true); return; }
     if (action === 'reject') { decideCard(false); return; }
-    if (action === 'retry-preparing') { retryPreparing(); return; }
     if (action === 'reload-turn') {
       startScenario(state.scenario);
       showDemoFeedback('Demo：已重新载入当前场景。');
@@ -2069,7 +2007,7 @@
       return;
     }
     if (button.dataset.ring) {
-      state.variants[14] = button.dataset.ring;
+      state.variants[13] = button.dataset.ring;
       applyRingVariant();
       renderSceneExtra();
       updateRing();
@@ -2082,9 +2020,6 @@
   });
 
   setInterval(() => {
-    document.querySelectorAll('[data-live-seconds]').forEach((el) => {
-      if (state.preparing) el.textContent = String(secondsOf(state.preparing.startedAt));
-    });
     document.querySelectorAll('[data-compaction-seconds]').forEach((el) => {
       const startedAt = Number(el.getAttribute('data-started-at'));
       if (Number.isFinite(startedAt) && startedAt > 0) {
