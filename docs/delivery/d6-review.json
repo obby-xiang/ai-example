@@ -231,6 +231,13 @@
       "reason": "已同步13个run核心键与runstate、扫描和销毁单飞、SSE分页异步写、索引续期、记忆索引退役及留空条件直接推进契约",
       "reviewedAt": "2026-11-02",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:b7cc56d1c48f4996dfd3c6526f606d623870e37b0c1edf597f9f800cf3a7b55f",
+      "status": "not-affected",
+      "reason": "本批移除预估行数工具、业务页面入口和计数端点，并新增压缩现状Demo；D6未描述该功能，迁移接口、存储键及多实例契约不变",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

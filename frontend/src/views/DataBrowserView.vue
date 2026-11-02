@@ -48,8 +48,6 @@
           <el-option v-for="project in projects" :key="project.code" :label="`${project.name}（${project.code}）`" :value="project.code" />
         </el-select>
         <el-button type="primary" :loading="loading" @click="reloadData">{{ t('views.data.search') }}</el-button>
-        <el-button :loading="counting" @click="previewCount">{{ t('views.data.estimateRows') }}</el-button>
-        <el-tag v-if="serverCount !== null" size="small" type="success">{{ t('views.data.serverCount', { count: serverCount }) }}</el-tag>
       </div>
 
       <ConditionForm
@@ -142,7 +140,6 @@ import { useI18n } from 'vue-i18n'
  * 口径（S4.4c 修正：后端 P2 已给列表端点补 `conditions` 入参）：
  * - **范围过滤与字段级条件**都是服务端口径（`scopeType`/`scopeKey`/`conditions` 三个后端入参），
  *   分页由后端做，`total` 即命中总数 —— 前端不再做任何"只筛当前页"的镜像求值；
- * - 行数预估（`/count`）与列表（`/{defCode}`）同源同口径，两者对同一条件的命中数应一致；
  * - 行数据来自 `dataJson` 字符串，渲染时按定义字段做中文标签转换（ENUM/BOOLEAN）。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -192,8 +189,6 @@ const page = ref(0)
 // 本值不是新值（前端一直是 20）；改本值须连带改后端 DataController 的 defaultValue 与上方 :page-sizes 选项表。
 const size = ref(20)
 const loading = ref(false)
-const counting = ref(false)
-const serverCount = ref<number | null>(null)
 
 const currentDef = computed(() => defs.value.find((item) => item.code === defCode.value) ?? null)
 const currentFields = computed<readonly ConfigField[]>(() => currentDef.value?.fields ?? [])
@@ -216,7 +211,6 @@ function dataOf(row: ConfigDataRow): Record<string, unknown> {
 
 function onModelChange(value: ConditionDraftModel): void {
   draftModel.value = value
-  serverCount.value = null
 }
 
 async function fetchDefinitions(): Promise<ConfigDefinition[] | null> {
@@ -234,7 +228,6 @@ function applyDefSelection(code: string): void {
   scopeType.value = def ? (def.level as ScopeType) : ''
   scopeKey.value = ''
   draftModel.value = emptyDraftModel()
-  serverCount.value = null
   page.value = 0
   // 批次5A：页面级上下文「声明即全集」。数据页只拥有「正在浏览哪个定义」（selectedDefs），
   // 任务态（taskId / taskStatus / step / 查询条件 / 导入模式）显式声明为中性值 ——
@@ -305,69 +298,6 @@ async function loadData(): Promise<void> {
 }
 
 /**
- * 行数预估（`/count`）的请求序号（last-wins）—— **与 `loadSeq` 独立**。
- *
- * <p>为什么不与列表共享一个代次：计数与列表是两个端点、两种触发（点「预估」vs 翻页/查询）。
- * 共享序号时，翻页会把还在途的计数判成"旧请求"（用户点完预估再翻页，计数结果被丢掉），
- * 计数也会把在途列表判旧 —— 正是"相互把对方当旧请求"。两者各管各的先后。
- *
- * <p>但"序号新"不等于"条件还是那一份"：改条件/换定义/换范围不一定发起新的计数请求，
- * 所以在途计数还必须核对**发起时的入参身份**（见 `stale`），否则旧响应/旧错误会覆盖新条件的结论。
- */
-let countSeq = 0
-
-async function previewCount(): Promise<void> {
-  if (!defCode.value) {
-    ElMessage.warning(t('views.data.msg.pickDefinition'))
-    return
-  }
-  const seq = ++countSeq
-  const forDef = defCode.value
-  const forScopeType = scopeType.value
-  const forScopeKey = scopeKey.value
-  const forConditions = isConditionEmpty(condition.value) ? '' : stringifyCondition(condition.value)
-  /**
-   * 响应/错误落地前的一致性判据：序号仍是最新 **且** 当前入参与发起时完全相同。
-   *
-   * 两个条件缺一不可 —— 只看序号漏掉"改条件后旧计数回来"，只看入参漏掉"同参连点两次、
-   * 第一次晚到"（它同样是旧结论）。
-   */
-  const stale = (): boolean => seq !== countSeq
-    || defCode.value !== forDef
-    || scopeType.value !== forScopeType
-    || scopeKey.value !== forScopeKey
-    || (isConditionEmpty(condition.value) ? '' : stringifyCondition(condition.value)) !== forConditions
-  counting.value = true
-  try {
-    const params: { scopeType?: ScopeType; scopeKey?: string; conditions?: string } = {}
-    if (forScopeType) {
-      params.scopeType = forScopeType
-    }
-    if (forScopeKey) {
-      params.scopeKey = forScopeKey
-    }
-    if (forConditions !== '') {
-      params.conditions = forConditions
-    }
-    const result = await dataApi.countData(forDef, params)
-    if (stale()) {
-      return // 旧条件/旧请求的计数：不得覆盖当前条件的结论
-    }
-    serverCount.value = result.count
-    ElMessage.success(t('views.data.msg.serverCount', { count: result.count }))
-  } catch (error) {
-    if (stale()) {
-      return // 旧计数失败不得弹在当前条件上
-    }
-    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.estimateFailed'))
-  } finally {
-    if (seq === countSeq) {
-      counting.value = false
-    }
-  }
-}
-
-/**
  * 重拉定义列表：当前 defCode 仍有效时**不动**范围/条件/页码（查询/刷新共用）；
  * 只有失效或未选时才按 route/首项初始化。失败直接返回，不回退任何用户状态。
  */
@@ -388,7 +318,6 @@ async function refreshDefinitions(): Promise<void> {
 
 /** 只按当前筛选拉数据（不重拉定义、不隐式重置页码）。 */
 async function reloadData(): Promise<void> {
-  serverCount.value = null
   if (defCode.value) {
     await loadData()
   }
@@ -403,7 +332,6 @@ async function reload(): Promise<void> {
 function resetAll(): void {
   draftModel.value = emptyDraftModel()
   scopeKey.value = ''
-  serverCount.value = null
   page.value = 0
   void reloadData()
 }

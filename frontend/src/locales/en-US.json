@@ -329,12 +329,10 @@
       "listDefs": "List all definitions",
       "workspaceState": "Show workspace state",
       "taskProgress": "View task #{id} progress",
-      "exportEstimate": "Estimate export rows",
       "startExport": "Start export job",
       "precheckImport": "Precheck import data",
       "startImport": "Start import job",
-      "newExportTask": "Create an export task",
-      "dataRowCount": "Count current rows"
+      "newExportTask": "Create an export task"
     },
     "context": {
       "pillAria": "Context usage {percent}%",
@@ -547,7 +545,7 @@
       "stop": "Stop",
       "undo": "Undo",
       "reasonPrefix": "Reason: {text}",
-      "welcome1": "I can look up definitions and fields, view tasks, estimate data rows,",
+      "welcome1": "I can look up definitions and fields, view tasks,",
       "welcome2": "open the export editor online, download export files,",
       "welcome3": "and start export, pre-check, import or publish jobs.",
       "collapseMsg": "Collapse ▴",
@@ -668,13 +666,6 @@
       "title": "Check job status",
       "summary": "Check job status",
       "withJob": "Check job status (job #{jobId})"
-    },
-    "get_row_count": {
-      "title": "Estimate row count",
-      "summary": "Estimate row count",
-      "withDef": "Estimate row count ({def})",
-      "withDefScope": "Estimate row count ({def} · {scope})",
-      "withScope": "Estimate row count ({scope})"
     },
     "create_task": {
       "title": "Create task",
@@ -1092,7 +1083,6 @@
       "region": "Region (REGION)",
       "project": "Project (PROJECT)",
       "search": "Search",
-      "estimateRows": "Estimate matching rows",
       "scopeHint": "How the scope works",
       "rowKey": "Business key",
       "scope": "Scope",
@@ -1101,18 +1091,14 @@
       "regionShort": "Region",
       "projectShort": "Project",
       "subtitle": "Browse published configuration data with paging, scope filters and field-level conditions (FR-1.1)",
-      "serverCount": "Server-side match: {count} rows",
-      "hint": "Conditions are sent to the server with \"Search\" (same semantics as the row estimate); leave empty for no conditions.",
+      "hint": "Conditions are sent to the server with \"Search\"; leave empty for no conditions.",
       "emptyPick": "Select a definition",
       "emptyScope": "No data in this scope",
       "conditionNone": "No field conditions: the server returns paged data filtered by scope (paging and total hits are server-side).",
-      "conditionApplied": "Field conditions: {summary}; the list and row estimate share the same server-side conditions (no client-side evaluation here). Currently {total} rows match.",
+      "conditionApplied": "Field conditions: {summary}; the list is filtered server-side by the same conditions (no client-side evaluation here). Currently {total} rows match.",
       "msg": {
         "defsLoadFailed": "Failed to load definitions",
-        "dataLoadFailed": "Failed to load data",
-        "pickDefinition": "Select a definition first",
-        "serverCount": "Server reports {count} matching rows",
-        "estimateFailed": "Failed to estimate rows"
+        "dataLoadFailed": "Failed to load data"
       }
     },
     "definitions": {
@@ -1204,7 +1190,6 @@
     "export": {
       "title": "Export wizard",
       "noTask": "No task bound",
-      "previewRows": "Preview rows",
       "downloadAll": "Download all as zip",
       "saveEdits": "Save edits to server",
       "editorHint": "Table content can be edited online; edits only affect the downloaded file and files written by \"Save edits to server\", never the database directly.",
@@ -1212,7 +1197,6 @@
       "createAndEnter": "Create an export task and enter",
       "selectedSummary": "{count} definitions selected; definitions with dependencies are exported in dependency order.",
       "emptySelect": "Select definitions in step 1 first",
-      "hits": "{count} rows matched",
       "reExport": "Export again",
       "startExport": "Start export",
       "downloadCurrent": "Download this definition as xlsx",
@@ -1259,9 +1243,6 @@
         "cancelRequested": "Job cancellation requested",
         "cancelFailed": "Failed to cancel the job",
         "pickDownload": "Select the definitions to download",
-        "previewAll": "{code}: {count} rows in total",
-        "previewMatched": "{code}: {count} rows matched ({summary})",
-        "previewFailed": "Failed to preview the row count",
         "downloadInFlight": "{code} download already in progress; not started again",
         "downloaded": "Downloaded {name}",
         "downloadFailed": "Download failed",

@@ -15,7 +15,6 @@ import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.service.ConditionOperators;
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.job.entity.Job;
@@ -37,7 +36,7 @@ import java.util.stream.Collectors;
  * AI 业务工具集（S4.2 §2 tools/AiTools）：基座业务工具到官方 {@code @Tool} 形态的桥接。
  *
  * <h2>与 REST 同服务层（单一事实源 FR-5.4/D2）</h2>
- * 每个工具方法都直接调用基座业务服务（DefinitionService/TaskService/ConfigDataService/JobService），
+ * 每个工具方法都直接调用基座业务服务（DefinitionService/TaskService/JobService），
  * 与 REST 控制器走同一服务层，不复制业务逻辑、不另建数据访问路径；JSON Schema 由 Spring AI 从
  * 方法签名生成（不自建工具协议）。渐进披露标签见 {@link ToolScope}，风险等级见 {@link ToolRisk}，
  * 执行通道见 {@link ToolChannel}，批策略类别见 {@link ToolCategory} —— 这四份元数据正是
@@ -46,7 +45,7 @@ import java.util.stream.Collectors;
  *
  * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
- * <li><b>只读</b>：查询定义/任务/数据行数/作业状态 —— 无副作用，直接执行；</li>
+ * <li><b>只读</b>：查询定义/任务/作业状态 —— 无副作用，直接执行；</li>
  * <li><b>任务创建</b>：{@code create_task}（AR-03 起 {@code @ToolRisk(DANGER)}，进确认门；
  * 宿主幂等 + 单轮上限 1）—— 批准后才落库，返回任务 id（S4.4e 裁决② + AR-03，见 {@link #createTask}）；</li>
  * <li><b>作业发起（确认门）</b>：{@code start_export} / {@code start_precheck} / {@code start_import} /
@@ -112,8 +111,6 @@ public class AiTools {
     private final DefinitionService definitionService;
 
     private final TaskService taskService;
-
-    private final ConfigDataService dataService;
 
     private final JobService jobService;
 
@@ -321,21 +318,6 @@ public class AiTools {
         return String.format("作业 #%d [%s] 状态:%s 进度:%d/%d 错误:%d",
                 job.getId(), job.getJobType(), job.getStatus(),
                 job.getProgress(), job.getTotal(), job.getErrorCount());
-    }
-
-    @Tool(name = AiToolNames.GET_ROW_COUNT, description = "预估指定配置项的数据行数",
-            resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({"*", AiToolNames.SCOPE_EXPORT_QUERY_COND, AiToolNames.SCOPE_EXPORT_EXECUTION})
-    @ToolRisk(ToolMeta.RiskLevel.READ)
-    @ToolCategory(ToolMeta.Category.R)
-    public String getRowCount(
-            @ToolParam(description = "配置定义编码") String defCode,
-            @ToolParam(description = "范围类型: GLOBAL/REGION/PROJECT", required = false) String scopeType,
-            @ToolParam(description = "范围键值（地区或项目编码）", required = false) String scopeKey) {
-        // 先校验配置定义存在：不存在时抛带 RESOURCE_NOT_FOUND 的异常，而不是回"0 行"伪造成功。
-        definitionService.findByCode(defCode);
-        long count = dataService.count(defCode, scopeType, scopeKey);
-        return String.format("%s 共有 %d 行数据", defCode, count);
     }
 
     // ==================== 任务创建（S4.4e 裁决②：AI 可从零创建任务） ====================

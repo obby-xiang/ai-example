@@ -2025,9 +2025,9 @@ function isMsgCopied(messageId: string): boolean {
 
 /**
  * 批 E · E2：空态快捷 chips（模板 id 与「每轮建议」同一份词表 `ai.suggestions.*`）。
- * 顺序 = 用户最常用的四件事：看定义 / 看工作区 / 估行数 / 启动作业。
+ * 顺序 = 用户最常用的三件事：看定义 / 看工作区 / 启动作业。
  */
-const EMPTY_STATE_CHIPS = ['listDefs', 'workspaceState', 'exportEstimate', 'startExport'] as const
+const EMPTY_STATE_CHIPS = ['listDefs', 'workspaceState', 'startExport'] as const
 const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'precheckImport'])
 /**
  * M-15（2026-10-29）：**探针失败**不等于"服务不可用"。

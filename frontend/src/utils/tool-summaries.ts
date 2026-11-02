@@ -11,7 +11,7 @@
  *
  * 全集来源（逐个核名，非凭猜）：
  * - 后端 @Tool（AiTools.java）：list_config_defs / get_config_def / list_tasks /
- *   get_workspace_state / check_job_status / get_row_count / create_task /
+ *   get_workspace_state / check_job_status / create_task /
  *   start_export / start_precheck / start_import / start_publish / download_export_files /
  *   navigate_to / open_export_file_editor / generative_form / 9 个表格工具
  * - 前端工具（utils/frontend-tools.ts 执行器）：navigate_to（别名 open_page / restore_task /
@@ -105,14 +105,6 @@ function summaryFor(name: string, args: ToolArgs): string | null {
     case 'check_job_status': {
       const jobId = num(args, 'jobId')
       return jobId ? optional('tool.check_job_status.withJob', { jobId }) : optional('tool.check_job_status.summary')
-    }
-    case 'get_row_count': {
-      const defCode = str(args, 'defCode')
-      const scope = str(args, 'scopeType')
-      if (defCode && scope) return optional('tool.get_row_count.withDefScope', { def: defCode, scope })
-      if (defCode) return optional('tool.get_row_count.withDef', { def: defCode })
-      if (scope) return optional('tool.get_row_count.withScope', { scope })
-      return optional('tool.get_row_count.summary')
     }
     case 'create_task': {
       const label = taskTypeLabel(args)

@@ -11,13 +11,13 @@ import java.util.Set;
 
 /**
  * 查询条件求值器：对动态 JSON 行应用范围过滤与字段级过滤。
- * 导出作业与行数预估共用，保证两处口径一致。
+ * 导出作业与带条件的列表查询共用，保证两处口径一致。
  *
  * <p><b>未知操作符 = 异常，不再静默放行</b>（M1 收尾守卫③，S5.a 待裁决 #3 的裁决落地）：
  * 原实现对未登记的操作符走 {@code default → true}（等于忽略该条件），后果是<b>导出范围比用户预期更宽</b>
  * （数据面风险：用户以为筛掉了，实际全量导出/发布）。现改为抛 {@link IllegalArgumentException}：
  * <ul>
- * <li>列表/计数端点：{@link ConfigDataService#parseCondition} 先用 {@link #validate} 早失败 → 400；</li>
+ * <li>列表端点：{@link ConfigDataService#parseCondition} 先用 {@link #validate} 早失败 → 400；</li>
  * <li>导出作业：{@link com.example.configmgr.job.service.ExportJobRunner} 逐配置项捕获 → 该配置项与作业
  *     {@code FAILED}（不产出"更宽"的文件）。</li>
  * </ul>

@@ -68,7 +68,9 @@
 # confirm_step 必须单独成批（混批时零副作用拒绝并要求先单独调用，避免 park 先外置整批历史、吞掉同批调用）；
 # 条件收集失败（park 未启用/挂起写失败/读任务异常/条件表未结算）一律零副作用拒绝，不再按全量放行。
 # YAML 与 AiTools 注解、系统提示词同批改，改描述必升 version（破 prompt 缓存）。
-version: 2026-10-27.20
+# 2026-10-27.20 → 2026-10-27.21（2026-11-03 移除预估行数）：预估数据行数工具整体下线（AiTools 注解、
+# AiToolNames 注册表、本文件对应 toolKey 三处同批删除）；模型不再有"预估数据行数"这一读取能力。
+version: 2026-10-27.21
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -81,8 +83,6 @@ tools:
     title: 读取工作区状态
   - toolKey: check_job_status
     title: 查询作业状态
-  - toolKey: get_row_count
-    title: 预估数据行数
   - toolKey: create_task
     title: 创建任务
     description: >-

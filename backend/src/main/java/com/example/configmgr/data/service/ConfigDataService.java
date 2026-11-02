@@ -53,11 +53,11 @@ public class ConfigDataService {
     /**
      * 带查询条件的分页列表（S4.4b 遗留 3：列表端点补 {@code conditions} 入参）。
      *
-     * <p>口径与 {@code GET /api/data/{defCode}/count}、导出作业（{@link com.example.configmgr.job.service.ExportJobRunner}）
-     * <b>同源</b>：都走 {@link ConditionEvaluator} 逐行求值，故"前端预估命中行数"与"翻页看到的行"不会打架。
+     * <p>口径与导出作业（{@link com.example.configmgr.job.service.ExportJobRunner}）<b>同源</b>：
+     * 都走 {@link ConditionEvaluator} 逐行求值，故"翻页看到的行"与"导出的行"不会打架。
      *
-     * <p>注意口径细节（与 /count 一致）：有条件时按该配置的<b>全部已发布行</b>过滤（仅按 scopeKey 收窄，
-     * 不再按 scopeType 收窄），这是既有 /count 的实现语义；无条件时仍走 DB 分页并按 scopeType + scopeKey 收窄。
+     * <p>注意口径细节：有条件时按该配置的<b>全部已发布行</b>过滤（仅按 scopeKey 收窄，
+     * 不再按 scopeType 收窄）；无条件时仍走 DB 分页并按 scopeType + scopeKey 收窄。
      */
     public Page<ConfigDataRow> findPagedFiltered(String defCode, String scopeKey, QueryCondition condition,
                                                   int page, int size) {
@@ -68,13 +68,8 @@ public class ConfigDataService {
         return new PageImpl<>(matched.subList(from, to), pageable, matched.size());
     }
 
-    /** 条件命中行数（与 {@link #findPagedFiltered} 同一份过滤逻辑）。 */
-    public long countFiltered(String defCode, String scopeKey, QueryCondition condition) {
-        return filterRows(defCode, scopeKey, condition).size();
-    }
-
     /**
-     * 条件 JSON（可为空）→ {@link QueryCondition}；解析失败或操作符未登记即 400（口径与 /count 一致）。
+     * 条件 JSON（可为空）→ {@link QueryCondition}；解析失败或操作符未登记即 400（口径与导出作业一致）。
      *
      * <p>M1 收尾守卫③：这里在<b>逐行求值之前</b>做操作符白名单校验（{@link ConditionEvaluator#validate}），
      * 故"未知操作符"不依赖行数据是否命中即可得到 400（行数为 0 时同样失败），
@@ -109,11 +104,6 @@ public class ConfigDataService {
                     return ConditionEvaluator.matches(data, cond);
                 })
                 .toList();
-    }
-
-    public long count(String defCode, String scopeType, String scopeKey) {
-        return dataRowRepository.countByScope(defCode,
-                scopeType != null ? scopeType : "GLOBAL", scopeKey);
     }
 
     @Transactional

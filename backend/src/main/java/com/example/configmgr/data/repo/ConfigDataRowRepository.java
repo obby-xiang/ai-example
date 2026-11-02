@@ -41,12 +41,6 @@ public interface ConfigDataRowRepository extends JpaRepository<ConfigDataRow, Lo
                                              @Param("scopeKey") String scopeKey,
                                              Pageable pageable);
 
-    @Query("SELECT COUNT(r) FROM ConfigDataRow r WHERE r.defCode = :defCode AND r.scopeType = :scopeType "
-            + "AND (:scopeKey IS NULL OR r.scopeKey = :scopeKey)")
-    long countByScope(@Param("defCode") String defCode,
-                      @Param("scopeType") String scopeType,
-                      @Param("scopeKey") String scopeKey);
-
     List<ConfigDataRow> findByDefCodeOrderByRowKey(String defCode);
 
     /** 已发布行数（定义删除的"有数据禁止删除"检查 / 导出作业分母预估）。 */

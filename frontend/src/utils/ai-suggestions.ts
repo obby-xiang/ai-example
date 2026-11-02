@@ -17,7 +17,7 @@
  *
  * <h2>排序</h2>
  * 当前任务进度优先（用户最可能想知道"我这单到哪了"）；其次按页面/向导给 2–3 条动作。
- * 导出/导入向导按**当前步骤**决定先后：已到执行步 ⇒ 启动在前（下一步就是它）。
+ * 导入向导按**当前步骤**决定先后：已到执行步 ⇒ 启动在前（下一步就是它）。
  */
 
 /** 单条建议文案的字符上限（中文按字计；窄面板一行一条）。 */
@@ -34,14 +34,12 @@ export interface SuggestionContext {
 /** 建议模板 id（= `ai.suggestions.<id>` 的 i18n 键尾；也是稳定 DOM 锚点）。 */
 export type SuggestionId =
   | 'taskProgress'
-  | 'exportEstimate'
   | 'startExport'
   | 'precheckImport'
   | 'startImport'
   | 'listDefs'
   | 'workspaceState'
   | 'newExportTask'
-  | 'dataRowCount'
 
 export interface FollowupSuggestion {
   /** 模板 id（去重键 + `data-suggestion-id`） */
@@ -51,9 +49,6 @@ export interface FollowupSuggestion {
   /** 插值参数（目前只有任务号） */
   params?: Record<string, string | number>
 }
-
-/** 导出执行步：下一步就是"启动导出作业"。 */
-const EXPORT_RUN_STEPS = new Set(['EXPORT'])
 
 /** 导入的后段步（上传/预检查之后）：启动导入更贴近下一步。 */
 const IMPORT_RUN_STEPS = new Set(['IMPORT', 'PUBLISH'])
@@ -77,10 +72,7 @@ export function buildFollowups(context: SuggestionContext): FollowupSuggestion[]
   }
 
   if (context.taskType === 'EXPORT') {
-    const runFirst = context.step !== null && EXPORT_RUN_STEPS.has(context.step)
-    for (const id of runFirst ? (['startExport', 'exportEstimate'] as const) : (['exportEstimate', 'startExport'] as const)) {
-      push(id)
-    }
+    push('startExport')
   } else if (context.taskType === 'IMPORT') {
     const runFirst = context.step !== null && IMPORT_RUN_STEPS.has(context.step)
     for (const id of runFirst ? (['startImport', 'precheckImport'] as const) : (['precheckImport', 'startImport'] as const)) {
@@ -88,9 +80,6 @@ export function buildFollowups(context: SuggestionContext): FollowupSuggestion[]
     }
   } else if (context.page === 'definitions') {
     push('listDefs')
-    push('workspaceState')
-  } else if (context.page === 'data') {
-    push('dataRowCount')
     push('workspaceState')
   } else if (context.page === 'tasks') {
     push('listDefs')

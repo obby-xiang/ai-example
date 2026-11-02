@@ -9,15 +9,6 @@ export function listData(defCode: string, params: DataQuery = {}): Promise<PageR
   return get<PageResult<ConfigDataRow>>(`/data/${encodeURIComponent(defCode)}`, { params })
 }
 
-/** 预估行数（可带查询条件，与导出作业同口径）。 */
-export function countData(
-  defCode: string,
-  params: { scopeType?: string; scopeKey?: string; conditions?: string } = {}
-): Promise<{ count: number }> {
-  return get<{ count: number }>(`/data/${encodeURIComponent(defCode)}/count`, { params })
-}
-
 export const dataApi = {
-  listData,
-  countData
+  listData
 }

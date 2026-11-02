@@ -329,12 +329,10 @@
       "listDefs": "列出全部配置定义",
       "workspaceState": "查看当前工作区状态",
       "taskProgress": "查看任务 #{id} 进度",
-      "exportEstimate": "预估导出数据行数",
       "startExport": "启动导出作业",
       "precheckImport": "预检查导入数据",
       "startImport": "启动导入作业",
-      "newExportTask": "新建一个导出任务",
-      "dataRowCount": "统计当前数据行数"
+      "newExportTask": "新建一个导出任务"
     },
     "context": {
       "pillAria": "上下文占用 {percent}%",
@@ -547,7 +545,7 @@
       "stop": "停止",
       "undo": "撤销",
       "reasonPrefix": "原因：{text}",
-      "welcome1": "我可以帮您查询配置项与字段、查看任务、预估数据行数、",
+      "welcome1": "我可以帮您查询配置项与字段、查看任务、",
       "welcome2": "打开导出结果在线编辑器、下载导出文件，",
       "welcome3": "并启动导出/预检查/导入/发布作业。",
       "collapseMsg": "收起 ▴",
@@ -668,13 +666,6 @@
       "title": "查询作业状态",
       "summary": "查询作业状态",
       "withJob": "查询作业状态（作业 #{jobId}）"
-    },
-    "get_row_count": {
-      "title": "预估数据行数",
-      "summary": "预估数据行数",
-      "withDef": "预估数据行数（{def}）",
-      "withDefScope": "预估数据行数（{def} · {scope}）",
-      "withScope": "预估数据行数（{scope}）"
     },
     "create_task": {
       "title": "创建任务",
@@ -1092,7 +1083,6 @@
       "region": "地区（REGION）",
       "project": "项目（PROJECT）",
       "search": "查询",
-      "estimateRows": "预估命中行数",
       "scopeHint": "口径说明",
       "rowKey": "业务键",
       "scope": "范围",
@@ -1101,18 +1091,14 @@
       "regionShort": "地区",
       "projectShort": "项目",
       "subtitle": "已发布配置数据分页浏览 + 范围过滤 + 字段级条件（FR-1.1）",
-      "serverCount": "服务端口径命中 {count} 行",
-      "hint": "条件随「查询」一并提交服务端（与行数预估同口径）；清空表示不设条件",
+      "hint": "条件随「查询」一并提交服务端；清空表示不设条件",
       "emptyPick": "请选择配置项",
       "emptyScope": "该范围下暂无数据",
       "conditionNone": "未设置字段条件：展示服务端按范围过滤后的分页数据（分页与命中总数均为服务端口径）。",
-      "conditionApplied": "字段条件：{summary}；列表与行数预估走同一个服务端 conditions 口径（前端不再做本页求值），当前命中 {total} 行。",
+      "conditionApplied": "字段条件：{summary}；列表由服务端按同一份 conditions 过滤（前端不再做本页求值），当前命中 {total} 行。",
       "msg": {
         "defsLoadFailed": "配置定义加载失败",
-        "dataLoadFailed": "数据加载失败",
-        "pickDefinition": "请先选择配置项",
-        "serverCount": "服务端口径命中 {count} 行",
-        "estimateFailed": "行数预估失败"
+        "dataLoadFailed": "数据加载失败"
       }
     },
     "definitions": {
@@ -1204,7 +1190,6 @@
     "export": {
       "title": "导出配置向导",
       "noTask": "尚未绑定任务",
-      "previewRows": "预览行数",
       "downloadAll": "全部打包 zip",
       "saveEdits": "保存编辑到服务端",
       "editorHint": "可在线编辑表格内容；编辑只影响下载的文件与「保存编辑到服务端」写入的文件，不会直接改数据库。",
@@ -1212,7 +1197,6 @@
       "createAndEnter": "创建导出任务并进入",
       "selectedSummary": "已选 {count} 个配置项；存在依赖关系的配置项将按依赖顺序导出。",
       "emptySelect": "请先在第 1 步选择配置项",
-      "hits": "命中 {count} 行",
       "reExport": "重新导出",
       "startExport": "开始导出",
       "downloadCurrent": "下载当前配置项 xlsx",
@@ -1259,9 +1243,6 @@
         "cancelRequested": "已请求取消作业",
         "cancelFailed": "取消作业失败",
         "pickDownload": "请选择要下载的配置项",
-        "previewAll": "{code}：全部数据 {count} 行",
-        "previewMatched": "{code}：命中 {count} 行（{summary}）",
-        "previewFailed": "行数预览失败",
         "downloadInFlight": "{code} 的下载已在进行中，本次未重复发起",
         "downloaded": "已下载 {name}",
         "downloadFailed": "下载失败",

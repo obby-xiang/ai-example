@@ -13,7 +13,6 @@
  * | list_tasks | `*`, `page:tasks` | READ | BACKEND |
  * | get_workspace_state | `*` | READ | BACKEND |
  * | check_job_status | `task:*` | READ | BACKEND |
- * | get_row_count | `*`, `task:EXPORT/QUERY_COND`, `task:EXPORT/EXPORT` | READ | BACKEND |
  * | create_task | `page:tasks`, `task:EXPORT`, `task:IMPORT` | WRITE | BACKEND |
  * | start_export | `page:tasks`, `task:EXPORT/EXPORT` | **DANGER**（确认门） | BACKEND |
  * | start_precheck | `page:tasks`, `task:IMPORT/PRECHECK` | **DANGER**（确认门） | BACKEND |

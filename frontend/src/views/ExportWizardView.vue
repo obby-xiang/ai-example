@@ -45,16 +45,6 @@
         <template #header>
           <div class="flex items-center gap-3">
             <span class="font-semibold mr-auto">{{ defName(code) }}（{{ code }}）</span>
-            <el-button
-              v-if="!isReadOnly"
-              size="small"
-              :loading="countLoading[code] === true"
-              :data-ai-ref="`export.cond.${code}.count`"
-              data-ai-verbs="click,highlight"
-              :data-ai-label="`预览 ${code} 行数`"
-              @click="previewCount(code)"
-            >{{ t('views.export.previewRows') }}</el-button>
-            <el-tag v-if="counts[code] !== undefined" size="small" type="success">{{ t('views.export.hits', { count: counts[code] }) }}</el-tag>
           </div>
         </template>
         <ConditionForm
@@ -164,7 +154,6 @@ import JobProgress from '@/components/JobProgress.vue'
 import SpreadGrid from '@/components/SpreadGrid.vue'
 import TaskWizard from '@/components/TaskWizard.vue'
 import { definitionsApi } from '@/api/definitions'
-import { dataApi } from '@/api/data'
 import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
@@ -173,16 +162,12 @@ import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-reg
 import {
   applyDraftEdit,
   assertConditionBuildable,
-  buildConditionOutcome,
-  buildQueryCondition,
   draftContentEqual,
   draftModelFromCondition,
   emptyDraftModel,
   InvalidConditionInputError,
   isConditionEmpty,
   conditionSummary,
-  conditionSummaryText,
-  conditionSummaryView,
   parseConditionJson,
   stringifyCondition,
   type ConditionDraftModel,
@@ -277,8 +262,6 @@ const selectedDefs = ref<string[]>([])
  */
 const taskDetailReady = ref(false)
 const draftModels = reactive<Record<string, ConditionDraftModel>>({})
-const counts = reactive<Record<string, number | null>>({})
-const countLoading = reactive<Record<string, boolean>>({})
 /**
  * 第 2 步的**服务端**校验失败原因（按配置项编码）。挂账 L-67：这类失败此前只有
  * 一闪而过的 `ElMessage`，模型在 `export.cond` 上读不到「为什么不行」；现在它落到
@@ -902,7 +885,7 @@ function resetTaskScopedState(): void {
   filesLoadError.value = null
   jobsLoadError.value = null
   retryingLists.value = false
-  // 条件草案是**任务级**现场：换任务即整份作废（连同"改过标记 / 行数预览 / 字段错误"）。
+  // 条件草案是**任务级**现场：换任务即整份作废（连同"改过标记 / 字段错误"）。
   //
   // 为什么必须清（用户纯 UI 复现）：B 的任务详情还在路上时点「下一步」，
   // `goStep → persistStepData` 遍历的是**新任务**的勾选集，却从 `draftModels` 取条件 ——
@@ -911,9 +894,6 @@ function resetTaskScopedState(): void {
   // 本任务内切步骤、以及"停止时未提交表单草稿"的既有口径都不受影响（本函数只在换任务时跑）。
   for (const code of Object.keys(draftModels)) {
     delete draftModels[code]
-  }
-  for (const code of Object.keys(counts)) {
-    delete counts[code]
   }
   for (const code of Object.keys(condErrors)) {
     delete condErrors[code]
@@ -933,13 +913,10 @@ function resetTaskScopedState(): void {
   inFlightDownloads.clear()
   downloading.value = null
   // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
-  // 不复位就是新任务页面上的按钮永久转圈（下一步/保存编辑/开始导出/预览行数，直到刷新页面）。
+  // 不复位就是新任务页面上的按钮永久转圈（下一步/保存编辑/开始导出，直到刷新页面）。
   persisting.value = false
   startingExport.value = false
   savingFiles.value = false
-  for (const code of Object.keys(countLoading)) {
-    delete countLoading[code]
-  }
 }
 
 /**
@@ -1130,7 +1107,7 @@ function nextStep(): void {
  * 非法空输入 → 本地化成文（批次1A）。
  *
  * `issues` 只带 fieldCode / issue code，文案全部在 `views.export.conditionInput.*`：
- * 逐条成文后再由完整模板包住。落库闸与行数预览共用同一套模板，本文件不新增硬编码中文。
+ * 逐条成文后再由完整模板包住。落库闸与条件校验共用同一套模板，本文件不新增硬编码中文。
  */
 function describeConditionInputIssues(issues: readonly ConditionInputIssue[]): string {
   const separator = t('views.export.conditionInput.separator')
@@ -1256,7 +1233,7 @@ async function persistStepData(
   }
 }
 
-// ── 第 2 步：行数预览 ──────────────────────────────────────────────────────────
+// ── 第 2 步：查询条件 ──────────────────────────────────────────────────────────
 
 /**
  * 条件表单改动（用户 / AI 回填都走这里）：写入草案模型并清掉该配置项上一次的服务端错误
@@ -1285,61 +1262,6 @@ function onConditionChange(code: string, value: ConditionDraftModel): void {
   // 改过就登记：即使改成了空条件，也要落库（"故意清空"是用户的显式决定，不能被当成"未改"跳过）
   touchedConditions.add(code)
   delete condErrors[code]
-}
-
-/**
- * 行数预览：先判"压平结局"，非法空输入不得按"无条件 = 全部数据"去问服务端。
- *
- * - `invalid`（值算子空串 / IN 空取值）：**不发** count 请求；本地化原因落 `condErrors`
- *   （条件表单区域内 `role=alert` 可读），并清掉上一次的旧行数 —— 否则"全部数据 N 行"
- *   会把畸形输入说成合法全量；
- * - `cleared`（显式清空）：语义不变，仍按无条件预览"全部数据 N 行"；
- * - `ok`：正常计数。
- */
-async function previewCount(code: string): Promise<void> {
-  countLoading[code] = true
-  try {
-    const model = draftModels[code] ?? emptyDraftModel()
-    const outcome = buildConditionOutcome(model)
-    if (outcome.status === 'invalid') {
-      const reason = describeConditionInputIssues(outcome.issues)
-      condErrors[code] = reason
-      delete counts[code]
-      ElMessage.error(reason)
-      return
-    }
-    const condition = outcome.condition
-    const result = await dataApiCount(code, condition)
-    counts[code] = result
-    delete condErrors[code]
-    // 界面文案走 i18n code + args（2026-10-30 结构化批）：条件摘要用结构化视图本地化，
-    // 不再把中文摘要拼进 toast。
-    ElMessage.success(
-      isConditionEmpty(condition)
-        ? t('views.export.msg.previewAll', { code, count: result })
-        : t('views.export.msg.previewMatched', {
-          code,
-          count: result,
-          summary: conditionSummaryText(conditionSummaryView(condition), t)
-        })
-    )
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : t('views.export.msg.previewFailed')
-    // 挂账 L-67：服务端校验失败必须留痕在区域里（`ElMessage` 只负责即时提示，不承担可读性）
-    condErrors[code] = reason
-    ElMessage.error(reason)
-  } finally {
-    countLoading[code] = false
-  }
-}
-
-async function dataApiCount(code: string, condition: ReturnType<typeof buildQueryCondition>): Promise<number> {
-  const params: { conditions?: string } = {}
-  if (!isConditionEmpty(condition)) {
-    params.conditions = stringifyCondition(condition)
-  }
-  const response = await dataApi.countData(code, params)
-  return response.count
 }
 
 // ── 第 3 步：导出作业 ──────────────────────────────────────────────────────────
@@ -2593,7 +2515,7 @@ function registerHandlers(): void {
           + '请先调用 select_definitions，或让用户在「选择配置」步勾选该配置项后再重试。'
       }
     }
-    // 校验通过：只写**页面草案**（草案 / 已改登记 / 行数预览失效）。
+    // 校验通过：只写**页面草案**（草案 / 已改登记）。
     //
     // 2026-10-30 提交点收口：这里**不**写业务后台。任务条目的 `conditionJson` 只在
     // `goStep → persistStepData`（`confirm_step`）与 `startExport` 两个提交点统一落库 ——
@@ -2601,7 +2523,6 @@ function registerHandlers(): void {
     draftModels[defCode] = draftModelFromCondition(condition)
     // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此提交（含故意清空为无条件）
     touchedConditions.add(defCode)
-    counts[defCode] = null
     const summary = conditionSummary(condition)
     // 工作区是**页面态**（AI 上下文里的"查询意图"），立刻同步让模型看到自己刚设的条件；
     // 但这不是落库 —— 提交发生在推进步骤 / 开始导出时。

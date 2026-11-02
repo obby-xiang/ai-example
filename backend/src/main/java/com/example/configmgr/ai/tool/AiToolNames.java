@@ -38,8 +38,6 @@ public final class AiToolNames {
 
 	public static final String CHECK_JOB_STATUS = "check_job_status";
 
-	public static final String GET_ROW_COUNT = "get_row_count";
-
 	public static final String CREATE_TASK = "create_task";
 
 	public static final String START_EXPORT = "start_export";
@@ -102,7 +100,7 @@ public final class AiToolNames {
 
 	/** 全部业务工具名（顺序 = {@code AiTools} 的声明顺序，便于对照）。 */
 	public static final List<String> ALL = List.of(LIST_CONFIG_DEFS, GET_CONFIG_DEF, LIST_TASKS, GET_WORKSPACE_STATE,
-			CHECK_JOB_STATUS, GET_ROW_COUNT, CREATE_TASK, START_EXPORT, START_PRECHECK, START_IMPORT, START_PUBLISH,
+			CHECK_JOB_STATUS, CREATE_TASK, START_EXPORT, START_PRECHECK, START_IMPORT, START_PUBLISH,
 			OPEN_EXPORT_FILE_EDITOR, DOWNLOAD_EXPORT_FILES, NAVIGATE_TO, SELECT_DEFINITIONS, SET_CONDITION,
 			CONFIRM_STEP, GENERATIVE_FORM, READ_SHEET_SUMMARY, AGGREGATE_SHEET, INSPECT_COLUMNS, REVIEW_CELLS,
 			FIND_ROWS, NORMALIZE_COLUMN, REPLACE_VALUES, UPDATE_ROWS, UNDO_LAST_SHEET_EDIT, UI_SNAPSHOT, UI_CLICK,

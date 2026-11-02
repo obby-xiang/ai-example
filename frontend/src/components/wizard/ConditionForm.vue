@@ -227,7 +227,7 @@ const props = withDefaults(
     /** AI 标注前缀（形如 `export.cond.CURRENCY`）；缺省不标注（数据浏览页零变化） */
     aiRefPrefix?: string
     /**
-     * 服务端校验失败的原因（如预览行数接口的 400 文案）；与本地校验共用区域内
+     * 服务端校验失败的原因（如提交/查询时服务端返回的 400 文案）；与本地校验共用区域内
      * `role=alert` 承载 —— 不再只靠一闪而过的 ElMessage（挂账 L-67）。
      */
     error?: string
@@ -423,7 +423,7 @@ const draftModel = computed<ConditionDraftModel>(() => {
   return model
 })
 
-/** 当前草案展开成后端条件（预览行数/提交共用，保证展示与提交同口径）。 */
+/** 当前草案展开成后端条件（校验/提交共用，保证展示与提交同口径）。 */
 const fieldConditions = computed(() => buildFieldConditions(draftModel.value))
 
 /**
