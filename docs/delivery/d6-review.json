@@ -224,6 +224,13 @@
       "reason": "已同步移除应用内限流及可信代理配套、帧日志Stream单轨、12个run核心键、销毁会话索引与ZSET到期重试、精确唤醒句柄及前端精简契约",
       "reviewedAt": "2026-11-02",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:7997aa03330919a15033971c8a60f5cb90311fbfc43c300ab59015a4597e4dac",
+      "status": "synced",
+      "reason": "已同步13个run核心键与runstate、扫描和销毁单飞、SSE分页异步写、索引续期、记忆索引退役及留空条件直接推进契约",
+      "reviewedAt": "2026-11-02",
+      "reviewer": "Kimi主控"
     }
   ]
 }

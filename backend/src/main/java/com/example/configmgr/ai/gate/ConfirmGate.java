@@ -27,6 +27,7 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.common.ErrorCodes;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,6 +48,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 确认门状态机（S4.2 §2 {@code gate/ConfirmGate}）：放行 / 拒绝（原因回填）。
@@ -117,7 +120,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <h2>续跑权 fencing（B23L1 批②b）</h2>
  * 多实例下"谁在等这张卡 / 谁能推进这一轮"必须有<b>跨进程</b>的答案，进程内的 {@code latches}
- * 与 {@code submitLock} 都只是实例内事实。两条接线的落点：
+ * 与提交锁（{@link #submitLockFor(String)} 的 run 条带）都只是实例内事实。两条接线的落点：
  * <ul>
  * <li><b>等待方持租</b>（{@link #await}）：进入挂起等待即抢 {@code ai:lease:run:<runId>}，
  * 心跳按 {@code lease.renew-interval} 续租；决策到达时<b>交棒不释放</b>（原循环接手驱动），
@@ -137,6 +140,43 @@ public class ConfirmGate {
 
 	/** 心跳与"跨进程决策发现"的节拍（秒）。 */
 	public static final int HEARTBEAT_SECONDS = 2;
+
+	/**
+	 * 长 TTL 资源续期的<b>默认/上限间隔</b>（60s）：{@code session-ttl} 足够大时按这一档，
+	 * 避免每 2s 拍发 10+ 条续期（换成批脚本后也要 2–3 次往返）。
+	 */
+	static final long RESOURCE_RENEW_MAX_INTERVAL_MS = 60_000L;
+
+	/**
+	 * 长 TTL 资源（轮键族 / session:current / 会话→run 索引 / 附件登记）在心跳里的<b>续期跳数</b>：
+	 * 按 {@code app.ai.session-ttl} 自适应（见 {@link #longTtlRenewTicksFor(Duration)}），默认 24h ⇒ 30 跳
+	 * （≈60s）。
+	 */
+	private final long longTtlRenewTicks;
+
+	/**
+	 * 续期间隔 → 心跳跳数：<b>间隔不超过 {@code session-ttl / 3}</b>，也不超过
+	 * {@link #RESOURCE_RENEW_MAX_INTERVAL_MS}（60s），且不慢于心跳本身。
+	 *
+	 * <p>为什么必须有 TTL/3 这条上界：这两个数原来是一把写死的 60s —— 运维把
+	 * {@code app.ai.session-ttl} 调到 90s（或更短）时，资源会在两次续期之间<b>先过期</b>：
+	 * 卡还在、待决条目/帧归档/会话索引已经没了，人点批准反而找不到挂起态。TTL/3 与续跑租约的
+	 * {@code ttl : renew = 3 : 1} 同口径，容忍连续两次续期失败。
+	 *
+	 * <p><b>粒度下限</b>：心跳就是 2s 一拍，所以 1 跳 = 2s 是能达到的最快续期；{@code session-ttl}
+	 * 小于 6s 时 TTL/3 已小于 2s，这条上界在该量级不可达（续期已经按每一拍执行）。
+	 *
+	 * @param sessionTtl {@code app.ai.session-ttl}；{@code null}/非正 ⇒ 按默认 24h
+	 * @return 跳数（≥ 1）
+	 */
+	static long longTtlRenewTicksFor(Duration sessionTtl) {
+		long ttlMs = sessionTtl == null || sessionTtl.isZero() || sessionTtl.isNegative()
+				? Duration.ofHours(24).toMillis() : sessionTtl.toMillis();
+		long tickMs = HEARTBEAT_SECONDS * 1000L;
+		long intervalMs = Math.min(RESOURCE_RENEW_MAX_INTERVAL_MS, ttlMs / 3L);
+		// 向下取整：宁可续得比 TTL/3 更勤，也不要跨过过期边界
+		return Math.max(1L, intervalMs / tickMs);
+	}
 
 	/**
 	 * 等**人**的前端工具名单（等待无上限；设计稿 §3.4 / §7-裁 1 选项 A）。
@@ -219,6 +259,12 @@ public class ConfirmGate {
 	private final Map<String, Long> suspensionStartedAtMs = new ConcurrentHashMap<>();
 
 	/**
+	 * 提交侧互斥的<b>条带数</b>（2 的幂 ⇒ 位与取模；64 条足以覆盖实例内并发，且<b>不按 run 建监视器</b>
+	 * —— 后者会随轮次数常驻增长，需要一套终态清理才能不泄漏）。
+	 */
+	private static final int SUBMIT_LOCK_STRIPES = 64;
+
+	/**
 	 * 提交侧的互斥（S5c-6）：<b>状态落库 → 发回执帧 → 唤醒</b>是一次不可分割的动作。
 	 *
 	 * <p>
@@ -227,8 +273,30 @@ public class ConfirmGate {
 	 * 极端调度下回执帧甚至落到 {@code done} 之后（违反"终帧之后不得再有帧"）。
 	 * 等待侧的 Redis 轮询也读同一把锁：否则"决策已落库、回执帧还没发"这一瞬间，
 	 * 跨进程轮询路径会把同一个窗口重新打开。
+	 *
+	 * <p><b>按 run 条带化（本批）</b>：旧实现是一把<b>实例级</b>监视器 —— 所有 run 的决策/回灌/挂起
+	 * 生命周期切换互相排队，一次慢 Redis 往返会把无关 run 的决策一起堵住（与独立复审 I-2 同形态）。
+	 * 现在按<b>裸 runId</b> 映射到同一条带（不掺线程身份，理由见 {@link #submitLockFor(String)}）：
+	 * <b>同一轮仍然完全串行</b>（所有 {@code synchronized} 点都走这同一个映射），不同 run 只在
+	 * 哈希碰撞时共享条带 —— 那只是串行化，不共享任何状态。条带是构造期分配的常量数组，
+	 * 没有"每 run 一个监视器"的常驻增长，因此不需要终态清理。
 	 */
-	private final Object submitLock = new Object();
+	private final Object[] submitLocks = new Object[SUBMIT_LOCK_STRIPES];
+
+	/**
+	 * 该轮的提交侧监视器（<b>唯一入口</b>）：<b>只按裸 runId</b> 取模。
+	 *
+	 * <p>为什么不能用 {@link LocalRunKey}（身份 + runId）：那把键要读<b>当前线程身份</b>，而进入
+	 * 这把锁的线程身份并不总相同（HTTP 线程带请求身份、池化/恢复线程可能没有，或作用域恰好没覆盖到）。
+	 * 一旦两条路径算出不同的条带，同一轮就会出现<b>两个 monitor</b> —— "落库 → 回执帧 → 唤醒"
+	 * 不再互斥（回执帧晚于唤醒、甚至落到 done 之后）。裸 runId 与身份无关：同一轮在任何线程、
+	 * 任何身份上下文里都落到同一个 monitor；不同身份的同名 runId 落同一 monitor 只是串行化，
+	 * 不共享任何状态（各自身份表/键族仍然分开）。
+	 */
+	private Object submitLockFor(String runId) {
+		int hash = runId == null ? 0 : runId.hashCode();
+		return this.submitLocks[(hash & 0x7FFFFFFF) % SUBMIT_LOCK_STRIPES];
+	}
 
 	/**
 	 * 派发失败的<b>有界</b>重试计数（park 批，按 runId，<b>按外部触发周期</b>）。
@@ -271,6 +339,16 @@ public class ConfirmGate {
 	private final RetryScheduler retryScheduler;
 
 	/**
+	 * 本实例登记的那一代默认调度器（{@code null} = 注入的调度器，生命周期归注入方）。
+	 *
+	 * <p>停机时只释放这一份：别的 context 还在用就不再是"最后 owner"，不会关掉它在用的线程池。
+	 */
+	private final RetryExecutorGeneration retryGeneration;
+
+	/** 释放只做一次（{@code @PreDestroy} 幂等；避免重复扣减 owner 计数）。 */
+	private boolean retryGenerationReleased;
+
+	/**
 	 * 抢租失败后的<b>一次性</b>延迟重试调度缝（默认 = 守护线程单线程调度器）。
 	 *
 	 * <p>为什么是接口：用例要断言"35s 后重试一次、holder 还活着就不动作、且不再排下一次"，
@@ -282,20 +360,139 @@ public class ConfirmGate {
 
 	}
 
+	/**
+	 * 默认调度器的<b>一代</b>：执行器（懒建）+ 仍在使用它的 owner 数。
+	 *
+	 * <p><b>为什么需要"代 + owner 计数"</b>（本批复查）：默认调度器是<b>进程级静态</b>资源，
+	 * 同一个 JVM 里可能有多个 Spring Context（父子上下文、集成测试、嵌入式部署）。旧口径
+	 * "任一 context 关闭就关当前这一代"会让<b>先关闭的 context 掐掉其它仍在运行 context 的既排期重试</b>
+	 * —— {@code shutdown()} 之后有界等待 1s 就 {@code shutdownNow()}，别人的延时任务被静默取消
+	 * （那条已落库的决策于是"没人再派发"，直到下一次交互/启动扫描）。
+	 *
+	 * <p>现在：<b>构造时登记一个 owner，关闭时只释放自己那一份；只有最后一个 owner 释放才真正关闭
+	 * 当前代</b>，且用 CAS 把"自己登记的那一代"从全局摘下 —— 别人已经换代时绝不碰新代。
+	 * 代价是一个保守方向：直接构造（无 {@code @PreDestroy}）的实例会让该代"永远不关"，
+	 * 这与引入本机制之前"进程寿命"的口径一致（不新增失效面，只少一次回收）。
+	 */
+	private static final class RetryExecutorGeneration {
+
+		private final AtomicReference<ScheduledExecutorService> executor = new AtomicReference<>();
+
+		private final AtomicInteger owners = new AtomicInteger();
+
+		ScheduledExecutorService executor() {
+			ScheduledExecutorService current = this.executor.get();
+			if (current != null) {
+				return current;
+			}
+			synchronized (this.executor) {
+				current = this.executor.get();
+				if (current == null) {
+					current = Executors.newSingleThreadScheduledExecutor(runnable -> {
+						Thread thread = new Thread(runnable, "ai-resume-lease-retry");
+						thread.setDaemon(true);
+						return thread;
+					});
+					this.executor.set(current);
+				}
+				return current;
+			}
+		}
+
+		/** 关闭本代执行器（幂等；{@code null} = 早已关闭）。 */
+		void shutdownExecutor() {
+			ScheduledExecutorService current = this.executor.getAndSet(null);
+			if (current == null) {
+				return;
+			}
+			current.shutdown();
+			try {
+				if (!current.awaitTermination(RETRY_SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS)) {
+					current.shutdownNow();
+				}
+			}
+			catch (InterruptedException ex) {
+				current.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/** 当前默认调度器代（{@code null} = 上一代已由最后的 owner 关闭；下一次取用/登记会重建）。 */
+	private static final AtomicReference<RetryExecutorGeneration> DEFAULT_RETRY_GENERATION =
+			new AtomicReference<>();
+
 	/** 默认重试调度器（守护线程，不阻止 JVM 退出；单线程足够：重试任务是"一次 Redis 读 + 转投"）。 */
 	static final RetryScheduler DEFAULT_RETRY_SCHEDULER = defaultRetryScheduler();
 
+	/** 停机时有界等待在飞重试任务收尾的时间；超时即 {@code shutdownNow()}。 */
+	private static final long RETRY_SHUTDOWN_WAIT_MS = 1_000L;
+
+	/** 取当前代（不存在则建新一代）。登记与取用共用同一入口，代际只在"最后一 owner 释放"时消失。 */
+	private static RetryExecutorGeneration currentRetryGeneration() {
+		RetryExecutorGeneration current = DEFAULT_RETRY_GENERATION.get();
+		if (current != null) {
+			return current;
+		}
+		synchronized (DEFAULT_RETRY_GENERATION) {
+			current = DEFAULT_RETRY_GENERATION.get();
+			if (current == null) {
+				current = new RetryExecutorGeneration();
+				DEFAULT_RETRY_GENERATION.set(current);
+			}
+			return current;
+		}
+	}
+
 	private static RetryScheduler defaultRetryScheduler() {
-		ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-			Thread thread = new Thread(runnable, "ai-resume-lease-retry");
-			thread.setDaemon(true);
-			return thread;
-		});
 		return (task, delay) -> {
 			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
-			var future = executor.schedule(task, millis, TimeUnit.MILLISECONDS);
+			var future = currentRetryGeneration().executor().schedule(task, millis, TimeUnit.MILLISECONDS);
 			return () -> future.cancel(false);
 		};
+	}
+
+	/**
+	 * 登记本实例对默认调度器的使用权（返回 {@code null} = 注入的调度器：生命周期归注入方，不登记）。
+	 *
+	 * <p>登记发生在<b>构造</b>：此刻还不知道谁会先关闭，先记一份"还有人在用"，别人的关闭就不会
+	 * 把本实例在用的执行器关掉。
+	 */
+	private static RetryExecutorGeneration acquireDefaultRetryGeneration(RetryScheduler scheduler) {
+		if (scheduler != DEFAULT_RETRY_SCHEDULER) {
+			return null;
+		}
+		synchronized (DEFAULT_RETRY_GENERATION) {
+			RetryExecutorGeneration generation = DEFAULT_RETRY_GENERATION.get();
+			if (generation == null) {
+				generation = new RetryExecutorGeneration();
+				DEFAULT_RETRY_GENERATION.set(generation);
+			}
+			generation.owners.incrementAndGet();
+			return generation;
+		}
+	}
+
+	/**
+	 * 释放本实例登记的那一代：<b>只有最后一个 owner 释放才关</b>，且只关"自己登记的那一代"
+	 * （CAS 成功才关；别人已经换代时不动新代）。
+	 */
+	private static void releaseDefaultRetryGeneration(RetryExecutorGeneration generation) {
+		if (generation == null) {
+			return;
+		}
+		boolean lastOwner;
+		synchronized (DEFAULT_RETRY_GENERATION) {
+			lastOwner = generation.owners.decrementAndGet() <= 0;
+			if (lastOwner) {
+				// 先摘引用：摘掉之后的新登记会建新一代，绝不会落回这个"正在关闭"的代
+				DEFAULT_RETRY_GENERATION.compareAndSet(generation, null);
+			}
+		}
+		if (lastOwner) {
+			// 关闭放在锁外：有界等待最长 1s，不阻塞其它上下文的登记/取用
+			generation.shutdownExecutor();
+		}
 	}
 
 	/** 兼容构造（6 参：既有单测）：无续跑通路、无租约设施。 */
@@ -346,6 +543,35 @@ public class ConfirmGate {
 		this.resumeTriggerExecutor = resumeTriggerExecutor;
 		this.leaseService = leaseService;
 		this.retryScheduler = retryScheduler == null ? DEFAULT_RETRY_SCHEDULER : retryScheduler;
+		// 默认调度器是进程级共享资源：构造即登记一份使用权，停机只释放自己那一份
+		// （别人还在用 ⇒ 不关；见 RetryExecutorGeneration 的注释）。
+		this.retryGeneration = acquireDefaultRetryGeneration(this.retryScheduler);
+		this.longTtlRenewTicks = longTtlRenewTicksFor(this.properties == null ? null : this.properties.getSessionTtl());
+		for (int i = 0; i < SUBMIT_LOCK_STRIPES; i++) {
+			this.submitLocks[i] = new Object();
+		}
+	}
+
+	/**
+	 * <b>应用停机</b>：释放本实例对默认重试调度器的使用权（幂等）。
+	 *
+	 * <p>为什么必须显式关：{@link #DEFAULT_RETRY_SCHEDULER} 是<b>进程级静态</b>守护线程 ——
+	 * 不阻止 JVM 退出，但会跨 Spring Context 存活：旧上下文的线程与在飞任务引用不会被释放，
+	 * 也不再有归属者回收。这里只收敛调度线程本身：<b>不</b>取消已落库的决策、<b>不</b>清重派发计数、
+	 * <b>不</b>碰租约 —— 最坏后果只是"停机后不再重派发"，而下一次明确交互/重挂/启动扫描会重建链路。
+	 *
+	 * <p><b>只释放自己那一份（同 JVM 多 Context 安全）</b>：登记在构造（{@link #retryGeneration}），
+	 * 释放时递减 owner 计数；<b>还有别的 owner 就不关</b>（否则先关闭的 context 会掐掉别人在排期的
+	 * 重试），只有最后一位 owner 释放才关闭"自己登记的那一代"，且不碰别人已换代的新代。
+	 * 注入的调度器（用例/manual 推进）不登记也不释放 —— 它不是本类的进程级资源。
+	 */
+	@PreDestroy
+	void shutdown() {
+		if (this.retryGenerationReleased) {
+			return;
+		}
+		this.retryGenerationReleased = true;
+		releaseDefaultRetryGeneration(this.retryGeneration);
 	}
 
 	/**
@@ -558,7 +784,7 @@ public class ConfirmGate {
 			}
 			long atMs = System.currentTimeMillis();
 			PendingToolCall marked;
-			synchronized (this.submitLock) {
+			synchronized (submitLockFor(runId)) {
 				PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 				if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
 					// 已决/已消失：交给 await 的 L0 分支直接消费既有决策，这里不补发
@@ -685,7 +911,7 @@ public class ConfirmGate {
 				handOffCancelFinalizationIfUnwritable(runId);
 				return cancelled;
 			}
-			// ===== park 退出 = 一次原子生命周期切换（与决策写共用 submitLock）=====
+			// ===== park 退出 = 一次原子生命周期切换（与决策写共用同一把 run 条带锁）=====
 			// 缺陷形态（主 CI run 40174289141 / H-01）：旧实现在"预登记闸门之后、还租之前"无锁地做
 			// 还租（Redis 往返 1–3ms）。决策落在窗口内 ⇒ signal 命中这把<b>没人 await</b> 的闸门
 			// （woke=true）⇒ 决策侧按 WOKE_IN_PROCESS_GATE 静默跳过派发；本线程随后还租、退出
@@ -767,7 +993,7 @@ public class ConfirmGate {
 				PendingToolCall fresh;
 				// S5c-6：与提交侧读同一把锁 —— 提交方在锁内完成"落库 + 发回执帧 + 唤醒"，
 				// 因此这里读到的"已决"状态一定伴随着已经写出去的回执帧。
-				synchronized (this.submitLock) {
+				synchronized (submitLockFor(runId)) {
 					// C2：guard 读失败不得让等待线程退出（卡仍 PENDING、工具会被记成执行失败）；
 					// 用非抛读口，把"读不出来"降级为"这一拍没合并 guard"。
 					fresh = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -809,15 +1035,28 @@ public class ConfirmGate {
 					heartbeatTicks++;
 					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
 					this.beacon.pulse(runId);
-					// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐 session-ttl，与会话同寿）
-					if (sessionId != null) {
-						this.store.renewSessionCurrent(sessionId, runId);
+					// ===== 续期分两档（本批）=====
+					// · 2s 一拍只做"必要心跳"：心跳帧（下面）、取消轮询（循环顶部）、租约续期（下面的
+					//   renew-interval）—— 这几件是秒级判定，晚一拍就改语义；
+					// · 长 TTL 资源（轮键族 / session:current / 会话→run 索引 / 附件登记）每
+					//   {@code longTtlRenewTicks} 跳整额续期一次：间隔 = min(60s, session-ttl/3)
+					//   （默认 24h ⇒ 约 60s；TTL 调小则跟着变密，绝不晚于 TTL/3 过期）。
+					// 节流状态是<b>本等待循环的局部计数</b>（不按 run 建表）⇒ 没有"终态要清理"的常驻
+					// 状态，也就不会因为等待线程异常退出而留下泄漏。
+					if (heartbeatTicks == 1L || heartbeatTicks % this.longTtlRenewTicks == 0L) {
+						// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐 session-ttl，与会话同寿）
+						if (sessionId != null) {
+							this.store.renewSessionCurrent(sessionId, runId);
+							// 会话→run 索引是会话销毁的<b>唯一发现面</b>：长挂起只续 current 不够 ——
+							// 索引先过期，销毁时就再也看不见这条挂起轮（清不干净的轮次）。
+							this.store.renewSessionRunsIndex(sessionId, runId);
+						}
+						// 裁决第 4 条：续期卡的后台数据（快照/待决/归档/序号），
+						// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
+						this.store.renewSuspensionTtl(runId);
+						// 同拍续期复核器持有的一次性资源（表单附件登记）：卡活着，附件也得活着
+						touchSuspendedResources(runId);
 					}
-					// 裁决第 4 条：心跳同时续期卡的后台数据（快照/待决/归档/序号），
-					// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
-					this.store.renewSuspensionTtl(runId);
-					// 同拍续期复核器持有的一次性资源（表单附件登记）：卡活着，附件也得活着
-					touchSuspendedResources(runId);
 					// B23L1 批②b：续跑权租约按 lease.renew-interval 续期（默认 10s = 5 跳；
 					// 与 TTL 30s 的关系是 3:1，容忍两次连续续租失败）。等多久都不会"把租约等丢"。
 					if (lease != null && heartbeatTicks % renewEveryTicks == 0L) {
@@ -867,7 +1106,7 @@ public class ConfirmGate {
 
 	/**
 	 * <b>park 退出的原子生命周期切换</b>：与 {@code submitDecision}/{@code submitFrontendResult} 的
-	 * "落库 → 回执帧 → 唤醒"共用 {@link #submitLock}。
+	 * "落库 → 回执帧 → 唤醒"共用<b>同一把 run 条带锁</b>（{@link #submitLockFor(String)}）。
 	 *
 	 * <p>为什么必须原子：旧实现把"还租"留在锁外，形成"闸门已预登记、但没人 {@code await}"的窗口。
 	 * 决策落在窗口内时 {@code signal} 返回 true（唤醒的是预登记闸门），决策侧据此不再派发续跑；
@@ -885,7 +1124,7 @@ public class ConfirmGate {
 	 * </ul>
 	 */
 	private PendingToolCall switchParkedLifecycle(String runId, PendingToolCall pending, LeaseService.Lease lease) {
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			// C2：非抛读口 —— 读失败不得把"还租 + 摘闸门 + park"整条路变成异常出口。
 			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 			if (fresh != null && fresh.resolved()) {
@@ -966,18 +1205,22 @@ public class ConfirmGate {
 	/**
 	 * 交棒后的存活判据（I7）：快照仍非终态，且本进程仍是该租约的主人。
 	 *
-	 * <p><b>身份</b>：本判据跑在续租线程上，那里没有请求身份；快照键与租约键都由身份拼出。
-	 * 用 {@link RunStore#get(String, long, long)}（显式记录身份）读，否则带身份的轮次第一拍就判
-	 * "驱动者已不在" ⇒ 提前还租 ⇒ 另一实例可接管（双驱动）。
+	 * <p><b>轻量状态口（本批）</b>：以前为回答"是否终态"要 {@link RunStore#get} 反序列化整份快照
+	 * （含整窗 {@code messageJson}），而这个判据在<b>续租线程</b>上每 {@code lease.renew-interval}
+	 * （默认 10s）跑一拍。现在改调 {@link RunStore#snapshotNotTerminal(String, TenantUser)}：
+	 * 只读轻量状态键（{@code ai:runstate:}，缺失才回退快照原文的顶层 {@code status}），口径逐字不变 ——
+	 * <b>不存在/终态</b> ⇒ false；<b>读失败</b> ⇒ true（保守）。
 	 *
-	 * <p>读快照失败（Redis 抖动）按"仍活着"处理：判据误判为假会提前放掉一个正在跑的轮的续跑权，
+	 * <p><b>身份</b>：本判据跑在续租线程上，那里没有请求身份；状态键与租约键都由身份拼出。
+	 * 用显式记录身份的重载，否则带身份的轮次第一拍就判"驱动者已不在" ⇒ 提前还租 ⇒ 另一实例可接管
+	 * （双驱动）。
+	 *
+	 * <p>读失败（Redis 抖动）按"仍活着"处理：判据误判为假会提前放掉一个正在跑的轮的续跑权，
 	 * 代价远大于多续一拍（续租本身会失败并走 {@code renewTick} 的既有降级）。
 	 */
 	private boolean stillDriving(String runId, LeaseService.Lease lease, TenantUser identity) {
 		try {
-			RunSnapshot snapshot = identity == null ? this.store.get(runId)
-					: this.store.get(runId, identity.tenantId(), identity.userId());
-			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+			if (!this.store.snapshotNotTerminal(runId, identity)) {
 				return false;
 			}
 			return this.store.heldRunEpoch(runId) == lease.epoch();
@@ -1056,7 +1299,7 @@ public class ConfirmGate {
 	 * @return 已决条目（调用方直接消费）；未决返回 null（请求帧已获准发射、req 位已落）
 	 */
 	private PendingToolCall reserveRequestSlot(String runId, PendingToolCall pending) {
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			// C2：guard 读失败不得让"请求帧发射"路径整体失败；非抛读口仍能拿到原始条目。
 			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
 			if (fresh != null && fresh.resolved()) {
@@ -1620,7 +1863,7 @@ public class ConfirmGate {
 		boolean woke;
 		// S5c-6：落库 → 发回执帧 → 唤醒，一次不可分割（顺序不可交换：唤醒会让等待方立刻产出
 		// "后果帧"，回执若晚于它就变成"工具结局先到、人的决策后到"，极端时晚于 done）。
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			this.store.putPending(runId, pending);
 			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
 			woke = signal(runId, toolCallId);
@@ -1780,7 +2023,7 @@ public class ConfirmGate {
 			pending.setOutcome(ToolOutcome.CANCELLED.wire());
 			pending.setCode(ToolOutcome.CODE_RUN_CANCELLED);
 		}
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			this.store.putPending(runId, pending);
 		}
 		log.warn("决策 guard 已被另一写者持有 runId={} toolCallId={} guard={}（按幂等拒绝；条目按 WAL 补齐，不补发回执帧）",
@@ -1960,7 +2203,7 @@ public class ConfirmGate {
 		pending.setResultText(resultText);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		boolean woke;
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			this.store.putPending(runId, pending);
 			// ===== 决策侧帧册收口（suspend-kill-a 的 FRONTEND_RESULT 残支）=====
 			// 前端卡的结局帧由本方法发出、<b>早于</b>续跑 —— 续跑侧再补只会排在 result 之后，
@@ -1983,18 +2226,18 @@ public class ConfirmGate {
 			out.frontendToolResult(pending, ok, resultText);
 			woke = signal(runId, toolCallId);
 		}
-		// ===== park 结算：决策写胜者也是候选发点（在 submitLock 之外）=====
+		// ===== park 结算：决策写胜者也是候选发点（在提交锁之外）=====
 		// ① 不判 woke（那是实例内事实，见 settleParkedToolCall 的方法注）：park 开启时本行与源实例
 		//    批循环可能先后都到，由 ai:observed 的首写者仲裁；非 park 时结算权始终在等待线程手上。
-		// ② 必须在锁外：submitLock 是实例级（跨 run）决策/挂起锁，每次回灌都持锁做一次 Redis 往返
-		//    会把无关 run 的决策一起排队（独立复审 I-2）。次序不变：落库 → 结局帧 → 唤醒 之后才发这一行，
-		//    再往后才是续跑派发（maybeTriggerResume），因此"帧先于 end、end 先于续跑"仍然成立。
+		// ② 必须在锁外：提交锁按 run 条带化后不再跨 run 排队，但持锁做 Redis/删盘往返仍会推迟
+		//    <b>同一轮</b>的决策可见性（等待侧也读这把锁，见 await）。次序不变：落库 → 结局帧 → 唤醒
+		//    之后才发这一行，再往后才是续跑派发（maybeTriggerResume），因此"帧先于 end、end 先于续跑"仍成立。
 		if (publishesRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, resultText);
 		}
 		// ===== 校验与消费分离（2026-10-29 修复批）=====
 		// 一次性资源（表单附件）的消费挪到这里：结论已落库（上面 putPending 成功）、结局帧已发、
-		// 唤醒已完成。放在锁外是因为消费是 Redis + 删盘往返，不得占用实例级的 submitLock。
+		// 唤醒已完成。放在锁外是因为消费是 Redis + 删盘往返，不得占用提交锁（同一轮的决策可见性）。
 		// 钩子内部只告警不抛：走到这一步"可修正后重试"已经不可能，任何失败都不能改写结论。
 		settleAccepted(runId, pending, result);
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
@@ -2141,7 +2384,7 @@ public class ConfirmGate {
 				+ "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
 		pending.setResultText(text);
 		boolean woke;
-		synchronized (this.submitLock) {
+		synchronized (submitLockFor(runId)) {
 			this.store.putPending(runId, pending);
 			this.registry.of(runId).frontendToolResult(pending, false, text);
 			woke = signal(runId, pending.getToolCallId());

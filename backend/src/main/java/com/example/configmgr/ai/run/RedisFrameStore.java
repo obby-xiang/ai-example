@@ -39,7 +39,7 @@ import java.util.function.LongSupplier;
  * <p>各族键名都带身份化的 {@code {<tenantId>:<userId>:run:<runId>}} hash tag
  * （{@code <prefix>{[<t>:<u>:]run:<runId>}}，见 {@link RunStore#runScopedKey(String, String)}）：
  * 它们与快照/台账等同属 {@code deleteRun} 的
- * "一轮 12 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
+ * "一轮 13 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ <窗口> <seq>-0
  * seq <n> frame <json>}（近似裁剪；<b>窗口 = min(条数窗口 {@link #STREAM_WINDOW}, 字节预算推导的等效窗口)</b>，
@@ -317,6 +317,8 @@ public class RedisFrameStore implements FrameStore {
 			        redis.call('EXPIRE', ackKey, ackTtl)
 			        redis.call('EXPIRE', KEYS[1], ttl)
 			        redis.call('EXPIRE', KEYS[2], ttl)
+			        -- 裁剪低水位与归档同寿：幂等命中/无新裁剪也要续期，避免水位先过期后读侧误判"未截断"。
+			        redis.call('EXPIRE', KEYS[4], ttl)
 			        return {prevSeq, 0, 1}
 			      end
 			    end
@@ -374,6 +376,9 @@ public class RedisFrameStore implements FrameStore {
 			redis.call('SET', ackKey, seqText, 'EX', ackTtl)
 			redis.call('EXPIRE', KEYS[1], ttl)
 			redis.call('EXPIRE', KEYS[2], ttl)
+			-- 裁剪低水位与归档同寿：本次没有触发裁剪也续期（避免水位先过期，读侧把"截断过"
+			-- 误判成"未截断"；EXPIRE 对不存在的键是 no-op）。
+			redis.call('EXPIRE', KEYS[4], ttl)
 			-- 真实裁剪检测：首条从 nil/旧值被推到更大的号 ⇒ 更早的条目已经被 MAXLEN 丢掉。
 			-- 记下新的首条号作为低水位（只升不降），读侧只按它判截断（不按"号是否连续"猜）。
 			local headAfter = headSeq()
@@ -958,6 +963,7 @@ public class RedisFrameStore implements FrameStore {
 		Long headBefore = survivingHeadSeq(runId);
 		try {
 			xadd(key, seq, payload, ttlSeconds, window);
+			refreshTrimTtl(runId, ttlSeconds);
 			markTrimIfHeadAdvanced(runId, headBefore, ttlSeconds);
 			return new AppendResult(seq, payload);
 		}
@@ -966,6 +972,7 @@ public class RedisFrameStore implements FrameStore {
 			if (exact.exists() && Arrays.equals(exact.frame(), payload)) {
 				// 幂等：同一号 + 同一份帧体已在归档里（重试 / 回包丢失）—— 不写第二条，只续期。
 				refreshTtl(key, ttlSeconds);
+				refreshTrimTtl(runId, ttlSeconds);
 				return new AppendResult(seq, payload);
 			}
 			if (exact.exists()) {
@@ -1135,6 +1142,14 @@ public class RedisFrameStore implements FrameStore {
 		}
 	}
 
+	/**
+	 * 裁剪低水位随归档续期：{@code ai:xtrim} 若比 {@code ai:xevents} 先过期，读侧会把
+	 * "确实被裁过"误判成"未截断"（archive-trimmed 头失真）。续期对不存在的键是 no-op。
+	 */
+	private void refreshTrimTtl(String runId, long ttlSeconds) {
+		refreshTtl(bytes(trimKey(runId)), ttlSeconds);
+	}
+
 	/** 只取一条 Stream 记录的 {@code frame} 字段原文（幂等比对用；不反序列化帧体）。 */
 	private static byte[] frameFieldOf(MapRecord<byte[], byte[], byte[]> record) {
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
@@ -1220,6 +1235,27 @@ public class RedisFrameStore implements FrameStore {
 		// 缺口区间 [trimmedFromSeq, trimmedToSeq] 一并带出：reattach 用 archive-from/archive-to 暴露。
 		return new FrameStore.ReadResult(result, stream.degraded(), stream.truncated(), stream.trimmedFromSeq(),
 				stream.trimmedToSeq());
+	}
+
+	/**
+	 * 回放元数据的廉价探测（I1）：末号（tail）+ 裁剪低水位，各一次命令，<b>不读正文帧</b>。
+	 *
+	 * <p>分页回放按 {@code readRawFrom} 从游标向前 COUNT 读取，不再"先取最新窗口再裁剪"，
+	 * 因此截断判据只认<b>真实裁剪低水位</b>（{@code ai:xtrim}）：{@code afterSeq+1 < 低水位}
+	 * 即"游标之后到低水位之前这一段不可回放"。没有水位 ⇒ 不下结论（与
+	 * {@link #streamFramesAbove} 同一口径，但不做窗口溢出推断 —— 分页从前往后读，不会跳过窗口）。
+	 */
+	@Override
+	public FrameStore.ReadResult replayMeta(String runId, long afterSeq) {
+		StreamTail tail = streamTailSeq(runId);
+		Long watermark = trimWatermark(runId);
+		boolean truncated = watermark != null && afterSeq + 1L < watermark;
+		long gapFrom = truncated ? afterSeq + 1L : 0L;
+		long gapTo = truncated ? watermark - 1L : 0L;
+		if (!tail.ok()) {
+			return new FrameStore.ReadResult(List.of(), true, truncated, gapFrom, gapTo);
+		}
+		return new FrameStore.ReadResult(List.of(), false, truncated, gapFrom, gapTo);
 	}
 
 	/**

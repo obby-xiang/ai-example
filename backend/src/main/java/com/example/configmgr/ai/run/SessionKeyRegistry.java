@@ -12,14 +12,16 @@ import java.util.function.Function;
  *
  * <h2>为什么要有这张表</h2>
  * 到批① 为止，"哪些 Redis 键活多久、由谁续期"散在三处：{@link RunStore#renewSuspensionTtl}
- * （挂起期 2s 心跳 4 类）、{@link RunStore#touchActiveRun}（读/决策追加 5 类）、
+ * （挂起期心跳约 60s 一拍、5 类）、{@link RunStore#touchActiveRun}（读/决策追加 5 类）、
  * {@link CancellationRegistry}（取消标志，TTL 自己算 `total-budget × 2`）。三个地方各写各的
  * ⇒ 新增一个"与会话同寿"的键时必然漏一处（取消标志就是漏掉的那一处：会话 24h、取消信号只有 10min）。
  * 本表把"键族 → 作用域 → 续期面 → 说明"一次登记，续期动作只从本表派生。
  *
  * <h2>三档续期面（口径固定；改档 = 改语义，须同步用例）</h2>
  * <ul>
- * <li>{@link Renewal#HEARTBEAT}：挂起期心跳（`ConfirmGate` 2s）逐拍整额续期。<b>键数 = 5</b>；
+ * <li>{@link Renewal#HEARTBEAT}：挂起期心跳（`ConfirmGate` 的心跳按约 60s 的资源档触发；
+ * 2s 那一拍只做心跳帧/取消轮询/租约续期）整额续期。<b>键数 = 5</b>
+ * （快照 / 轻量状态 / 待决 / seq / 事件 Stream）；
  * {@code RunStoreSlidingTtlTest} 断言<b>每个应续的键都续到了</b>（L-139 后不再锁调用次数形态，
  * 因为逐键 try 下"某键失败"不应改变其余键的续期）。</li>
  * <li>{@link Renewal#READ}：任何实例的读/决策（{@code touchActiveRun}）在心跳面<b>之上追加</b>的键
@@ -38,30 +40,31 @@ import java.util.function.Function;
  * {@code ai:claim:<runId>}（认领位，写路径自带 TTL，无独立续期口径）。</li>
  * </ul>
  *
- * <h2>两套数字要说清（评审 Minor 2；R1-09 后为 13 / 12）</h2>
+ * <h2>两套数字要说清（评审 Minor 2；R1-09 后为 14 / 13）</h2>
  * <ul>
- * <li><b>本表的 run 级登记 = 13 条</b>（见 {@link #RUN_KEY_COUNT}）：快照 / 待决 / seq /
- * 事件 Stream（心跳 4）＋ req / decided / fence / cancel（读侧 4）＋ beat / ledger / idem / activity
+ * <li><b>本表的 run 级登记 = 14 条</b>（见 {@link #RUN_KEY_COUNT}）：快照 / 轻量状态 / 待决 / seq /
+ * 事件 Stream（心跳 5）＋ req / decided / fence / cancel（读侧 4）＋ beat / ledger / idem / activity
  * （随写 4）＋ <b>取号计数器</b>（读侧，与 fence 同面）。本表只登记"谁需要被续期"，不登记"谁要被删除"。</li>
- * <li><b>{@code deleteRun} 手里的 = 12 个</b>：本表 13 条里去掉 {@code ai:beat:} / {@code ai:activity:}
+ * <li><b>{@code deleteRun} 手里的 = 13 个</b>：本表 14 条里去掉 {@code ai:beat:} / {@code ai:activity:}
  * / {@code ai:cancel:}（各自按 TTL 走），加上本表不登记的 {@code ai:claim:} 与 {@code ai:lease:run:}。
  * 两套数字不同不是笔误 —— 一个是"续期面"，一个是"同生同死面"。</li>
  * </ul>
  *
  * <h2>hash tag 口径（B23L1 批① Cluster 硬阻断）</h2>
- * 判定标准 = <b>"它是不是 {@code deleteRun} 手里那一轮 12 键中的一员"</b>（这一族全部同 tag ⇒ 同槽）：
+ * 判定标准 = <b>"它是不是 {@code deleteRun} 手里那一轮 13 键中的一员"</b>（这一族全部同 tag ⇒ 同槽）：
  * <ul>
- * <li><b>带 {@code {<tenantId>:<userId>:run:<runId>}} tag</b>（12 键，全在 {@link RunStore} 的键方法里；
+ * <li><b>带 {@code {<tenantId>:<userId>:run:<runId>}} tag</b>（13 键，全在 {@link RunStore} 的键方法里；
  * 无身份上下文的过渡期路径退回 legacy 形 {@code {run:<runId>}}）：
- * {@code ai:run:} / {@code ai:pending:} / {@code ai:claim:} / {@code ai:ledger:} / {@code ai:idem:} /
+ * {@code ai:run:} / {@code ai:runstate:} / {@code ai:pending:} / {@code ai:claim:} /
+ * {@code ai:ledger:} / {@code ai:idem:} /
  * {@code ai:seq:} / {@code ai:xevents:} / {@code ai:lease:run:} /
  * {@code ai:fence:run:} / {@code ai:req:} / {@code ai:decided:} / {@code ai:lease:epoch:}（取号）。
  * 三条多键脚本靠它同槽：{@code FENCED_SET}（快照+fence）、{@code IDEM_PUSH}（台账+索引）、
- * {@code ACQUIRE}（租约+计数器 —— 号与占用必须同序，评审 I-1）；{@code deleteRun} 的 12 键
+ * {@code ACQUIRE}（租约+计数器 —— 号与占用必须同序，评审 I-1）；{@code deleteRun} 的 13 键
  * {@code DEL} 也靠它回到"一条命令、原子生效"。
  * 取键一律走 {@link RunStore#runScopedKey(String, String)}（{@code RedisFrameStore} 的两族键同理）；</li>
  * <li><b>裸前缀 + 身份段</b>（{@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
- * {@code ai:observed:}）：只进单键命令、不在 12 键里，无需同槽 —— 给它们加 tag 只牺牲分布，
+ * {@code ai:observed:}）：只进单键命令、不在 13 键里，无需同槽 —— 给它们加 tag 只牺牲分布，
  * 没有收益（{@code ai:activity} 的写是单键 Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。
  * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag；
  * 本表登记同样用 {@code TenantKeyScope.scoped(prefix, runId)} 装配，与
@@ -80,7 +83,7 @@ public final class SessionKeyRegistry {
 	/** 续期面。 */
 	public enum Renewal {
 
-		/** 挂起期心跳逐拍续期（4 类，计数被用例锁定）。 */
+		/** 挂起期心跳逐拍续期（5 类，计数被用例锁定）。 */
 		HEARTBEAT,
 
 		/**
@@ -130,7 +133,7 @@ public final class SessionKeyRegistry {
 
 	private static final List<Entry> ENTRIES = buildEntries();
 
-	/** run 级登记条数（13：4 心跳 + 5 读侧追加〔含取号计数器〕+ 4 随写）。 */
+	/** run 级登记条数（14：5 心跳 + 5 读侧追加〔含取号计数器〕+ 4 随写）。 */
 	public static final int RUN_KEY_COUNT = RUN_KEYS.size();
 
 	private SessionKeyRegistry() {
@@ -138,9 +141,12 @@ public final class SessionKeyRegistry {
 
 	private static List<RunKey> runKeys() {
 		List<RunKey> keys = new ArrayList<>();
-		// 1) 挂起期心跳面（4 类）：会话活着，卡的后台数据就活着
+		// 1) 挂起期心跳面（5 类）：会话活着，卡的后台数据就活着
 		keys.add(new RunKey(RunStore.RUN_PREFIX, runId -> RunStore.runScopedKey(RunStore.RUN_PREFIX, runId),
 				List.of(Renewal.HEARTBEAT), "轮快照（含挂起中的 assistant(tool_calls)）"));
+		keys.add(new RunKey(RunStore.RUN_STATE_PREFIX,
+				runId -> RunStore.runScopedKey(RunStore.RUN_STATE_PREFIX, runId), List.of(Renewal.HEARTBEAT),
+				"轻量状态键（判活/取消优先守卫；与快照同槽同寿）"));
 		keys.add(new RunKey(RunStore.PENDING_PREFIX, runId -> RunStore.runScopedKey(RunStore.PENDING_PREFIX, runId),
 				List.of(Renewal.HEARTBEAT), "待决条目（人的决策落点）"));
 		keys.add(new RunKey(RunStore.SEQ_PREFIX, runId -> RunStore.runScopedKey(RunStore.SEQ_PREFIX, runId),
@@ -196,13 +202,13 @@ public final class SessionKeyRegistry {
 		return Collections.unmodifiableList(all);
 	}
 
-	/** 全部登记（run 级 13 条 + session 级 6 条）。 */
+	/** 全部登记（run 级 14 条 + session 级 6 条）。 */
 	public static List<Entry> entries() {
 		return ENTRIES;
 	}
 
 	/**
-	 * 某一续期面的 run 级键装配器（顺序稳定 = 心跳 4 类先、读侧追加在后）。
+	 * 某一续期面的 run 级键装配器（顺序稳定 = 心跳 5 类先、读侧追加在后）。
 	 *
 	 * <p>只返回 run 级：session 级键（`*:<sessionId>`）在续期点由调用方单独处理
 	 * （{@code RunStore#renewSessionCurrent}），因为它的入参是 sessionId 而不是 runId。

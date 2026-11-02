@@ -20,11 +20,15 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 启动自动续跑（S4.2 规格 §3 第 6 步的自动化形态；N3/N8 的落地点）。
@@ -32,8 +36,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <h2>为什么必须有它（M3 的完整闭环）</h2>
  * 挂起态外置之后，"进程死亡"不再是数据丢失，而是"这一轮的进度留在 Redis 里等下一棒"。
  * 但外置只是<b>可恢复</b>；要让"用户以为还在跑"的轮次真的跑完，得有人在启动时把它捡起来 ——
- * 本类就是那个人：应用就绪 → 延迟 {@code app.ai.resume.startup-delay} → 扫
- * {@code ai:runs} 索引 → 对每一轮按 {@code ResumeService.listRuns()} 的口径判定是否可续跑 →
+ * 本类就是那个人：应用就绪 → 延迟 {@code app.ai.resume.startup-delay} + 有界抖动 → 扫
+ * {@code ai:runs} 索引 → 对每一轮按 {@link ResumeService#listRunsForRecovery()} 的口径判定是否可续跑 →
  * 调 {@link ResumeService#resume(String, boolean)}。
  *
  * <h2>三条安全边界（不绕开人审）</h2>
@@ -56,7 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  * <li><b>系统面</b>（应用启动的自动扫描、运行期扫描）：跑在无身份线程上，候选来自
  * {@code ai:runs} 的复合成员，逐轮按<b>该轮记录身份</b>推进 —— 不扫描租户列表、也不沿用线程身份。
- * 发现面只产出带身份的复合成员（{@code ResumeService.listRuns()}），但入口仍对
+ * 发现面只产出带身份的复合成员（{@code ResumeService.listRunsForRecovery()}），但入口仍对
  * {@code 0/0} 记录做硬校验：身份不可用一律记 {@link #LEGACY_NO_IDENTITY}、不驱动模型/工具。</li>
  * <li><b>请求面</b>（{@code POST /api/ai/startup-resume/scan}，线程有身份）：<b>只处理当前身份</b>的轮次。
  * 若候选里混入别的身份（列表实现变化、桩数据等），一律<b>既不续跑、也不进报告</b> —— runId 本身
@@ -68,10 +72,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@link #runPipeline}：身份门、0/0 硬校验、预算与发现态分类只实现一次；运行期只是多出
  * 取消收尾/到期收敛两条旁路和租约判死，报告字段仍按各自契约组装。
  *
+ * <h2>扫描成本：轻量投影 + 单飞 + 轮转（审计 S4 / F-03 的落地点）</h2>
+ * <ul>
+ * <li><b>发现面只读恢复所需字段</b>：{@link ResumeService#listRunsForRecovery()} 不读
+ * {@code ledgerCounts}（整份台账）、{@code messageCount}、心跳键与逐条 {@code pending} 载荷，
+ * 但 {@code pending/取消/状态/活动锚点} 这些安全判据一个不少；API 详情仍走
+ * {@link ResumeService#listRuns()}；</li>
+ * <li><b>单飞</b>：启动/运行期/手工共用一套（{@link #tryStartScan}）—— 进程内门 +
+ * 跨实例租约（{@code ai:lock:resume-scan}，续租 TTL 与抢锁 TTL 同取 {@code scan-lease-ttl}，
+ * owner 每次扫描唯一，收尾先停续租再归还）。系统面全局一把，手工扫描按调用身份分；
+ * 抢不到就在有界等待后让位（报告字段契约不变，标 {@code deferred=true}）；</li>
+ * <li><b>轮转 + 尝试预算</b>：固定排序 + 有界预算下，每拍从"上一拍最后尝试过的候选之后"开始
+ * （{@link #scanCursors}，条数有界，见 {@link #MAX_SCAN_CURSORS}），尝试次数（含失败）另有上界
+ * （{@code app.ai.resume.scan-max-attempts}）。
+ * 于是"排在前面的候选每拍失败"不会让后面的轮次永久饿死，"每轮都试一次但都不成"也不会让单拍无界。</li>
+ * </ul>
+ *
  * <h2>运行期低频死轮扫描（批次8B / Task 12 Step 3）</h2>
  * 启动扫描每个实例只跑一拍，之后"死在调用中间 / 决策已落库却没人执行 / 重挂自愈那一下抖了"的轮次
  * 会一直挂着。{@link #sweep()} 按 {@code app.ai.resume.runtime-sweep-interval} 补一拍兜底：
- * 候选仍是 {@link ResumeService#listRuns()}，活/死仍是 {@link RunLiveness#isDead}（租约 + 本进程活订阅 +
+ * 候选仍是 {@link ResumeService#listRunsForRecovery()}，活/死仍是 {@link RunLiveness#isDead}（租约 + 本进程活订阅 +
  * 业务活动锚点），判死窗口仍是 {@code zombie-age}（180s，<b>不放宽</b>）；终态不复活、仍 {@code PENDING}
  * 的外部项不碰。定时器由 {@code app.ai.resume.runtime-sweep-enabled} 控制，应用停机经
  * {@code @PreDestroy} 关闭（同一入口 {@link #stopRuntimeSweep()}）。
@@ -89,11 +109,60 @@ public class StartupResumeRunner {
 	 * 系统扫描对<b>没有可用身份</b>的轮次的明确跳过原因（{@code tenantId<=0} 或
 	 * {@code userId<=0 且 != -1}，即 {@code 0/0} 记录）。
 	 *
-	 * <p>当前发现面（{@code ResumeService.listRuns()}）只产出带身份的复合成员，因此正常数据
+	 * <p>当前发现面（{@code ResumeService.listRunsForRecovery()}）只产出带身份的复合成员，因此正常数据
 	 * 不会落到本分支；但入口仍<b>硬校验</b>：身份不可用一律不驱动模型/工具，不伪造归属、
 	 * 也不沿用扫描线程身份。防线不因"当前不产出"而删除。
 	 */
 	public static final String LEGACY_NO_IDENTITY = "LEGACY_NO_IDENTITY";
+
+	/**
+	 * 系统面扫描单飞键（无 tag 资源锁）：启动扫描与运行期兜底共用一把。
+	 *
+	 * <p>为什么是"被保护的对象只有扫描"而不是每轮：真正的双驱动护栏仍是每轮的续跑权租约
+	 * （{@code ai:lease:run:*}）+ 会话门；本锁只解决"N 个实例同拍把同一批候选各扫一遍、
+	 * 各算一份 {@code max-on-startup}"的启动风暴（审计 F-03）。因此它<b>不参与</b>任何
+	 * 取消/租约/fencing 判定，也不改变单轮准入。
+	 */
+	static final String SCAN_LEASE_KEY = LeaseKeys.LOCK_PREFIX + "resume-scan";
+
+	/**
+	 * 请求面（手工扫描）的单飞键前缀：按<b>调用身份</b>记。
+	 *
+	 * <p>手工扫描只处理当前身份（见 {@link #runPipeline}），因此它的单飞也按身份分：既不会被
+	 * 别人的手工扫描挡住，也不会因为一次用户点按把全租户的系统扫描挡住。
+	 */
+	static final String SCAN_LEASE_IDENTITY_PREFIX = LeaseKeys.LOCK_PREFIX + "resume-scan:";
+
+	/** 抢扫描单飞时最多等多久（有界：启动/手工都不该被另一实例的长扫描拖住）。 */
+	private static final long SCAN_LEASE_WAIT_MS = 1_500L;
+
+	/** 重试抢单飞的间隔（下界；实际再加同等量级的抖动，避免两实例同拍再撞）。 */
+	private static final long SCAN_LEASE_RETRY_MS = 100L;
+
+	/** 启动抖动上界的硬顶（配置写多大都不会把启动扫描无限期推迟）。 */
+	private static final long MAX_STARTUP_JITTER_MS = 60_000L;
+
+	/**
+	 * 启动拍最多尝试几次单飞（含第一次）：命中"手工扫描正占着进程内门"的短窗口时，
+	 * 让位重试比永久放弃这一拍更合适；总等待仍是有界的（每次重试之间 {@link #STARTUP_SCAN_RETRY_MS} 起）。
+	 */
+	private static final int STARTUP_SCAN_ATTEMPTS = 3;
+
+	/** 启动拍让位重试的基准间隔（实际再加同等量级的抖动）。 */
+	private static final long STARTUP_SCAN_RETRY_MS = 500L;
+
+	/** 单飞没抢到时报告的 {@code reason}（字段契约不变，只额外标注这一事实）。 */
+	static final String SCAN_IN_FLIGHT = "SCAN_IN_FLIGHT";
+
+	/** 尝试预算用尽时的跳过原因（与产出预算的 {@code MAX_*} 分开，让"没轮到"可解释）。 */
+	static final String ATTEMPT_BUDGET_REACHED = "SCAN_ATTEMPT_BUDGET_REACHED";
+
+	/**
+	 * 轮转游标的上限（有界）：{@link #scanCursors} 的键 = 模式 × 触发面，系统面固定 2 条，
+	 * 请求面随"在本实例点过手工扫描的身份数"增长。达到上限时<b>只淘汰请求面</b>游标（见
+	 * {@link #rememberCursor}）：系统面的轮转起点不能被清掉，否则排队尾的轮次又会饿死。
+	 */
+	private static final int MAX_SCAN_CURSORS = 64;
 
 	private final ResumeService resumeService;
 
@@ -122,6 +191,41 @@ public class StartupResumeRunner {
 	private ConfirmGate confirmGate;
 
 	private final AtomicBoolean scanned = new AtomicBoolean();
+
+	/**
+	 * 进程内扫描互斥：同一实例的启动拍、运行期兜底、手工扫描不会并发跑（跨实例那一层是
+	 * {@link #SCAN_LEASE_KEY} 上的租约）。有界 `tryLock` —— 宁可这一拍让位，也不让 HTTP 线程或
+	 * 定时线程无限等。
+	 */
+	private final ReentrantLock scanGate = new ReentrantLock();
+
+	/** 本进程是否正持有一次扫描（续租判据：转假 ⇒ 下一拍归还单飞租约）。 */
+	private final AtomicBoolean scanInFlight = new AtomicBoolean();
+
+	/**
+	 * 扫描 owner 的序号：每次扫描的 owner 取 {@code <instanceId>:scan:<序号>}，<b>一次扫描一个</b>。
+	 *
+	 * <p>为什么不复用 {@code owner = instanceId}：{@code LeaseService} 的进程内视图按
+	 * {@code (key, owner)} 记账，且 <b>release 失败时视图会留下</b>。固定 owner 下，下一拍
+	 * {@code acquire} 命中该视图 ⇒ {@code created=false} ⇒ 调用方既不再续租（租约可能在扫描中途
+	 * 到期、被别的实例接走）也不再释放（席位卡到 TTL 才自然过期）。每次扫描唯一 owner 使每一拍都是
+	 * 一个全新的 {@code (key, owner)}：{@code created=true}、续租必登记、释放必再尝试。
+	 * 失败者留下的旧视图只占一条无 TTL 的内存记录，不影响新 owner 抢租（TTL 到期即可接手）。
+	 */
+	private final AtomicLong scanSeq = new AtomicLong();
+
+	/**
+	 * 轮转起点（按触发面分记：{@code MODE/system} 或 {@code MODE/tenant:user}）：
+	 * 上一拍<b>最后一个真正尝试过</b>的候选键。
+	 *
+	 * <p>为什么需要它：候选顺序是固定排序（runId），产出/尝试预算又有界。若每拍都从第一个开始，
+	 * 排在前面的候选每拍都能把预算用光（哪怕每次都只是失败/被占），后面的轮次永久饿死。
+	 * 下一拍从"上次停下的位置之后"开始，N 拍内每个候选都有机会被尝试；预算用尽只影响"这一拍"。
+	 *
+	 * <p><b>有界</b>：键含身份，不能随"来过本实例的用户数"无限增长 —— 上限与淘汰规则见
+	 * {@link #MAX_SCAN_CURSORS} / {@link #rememberCursor}（系统面两条永不淘汰）。
+	 */
+	private final Map<String, String> scanCursors = new ConcurrentHashMap<>();
 
 	private volatile Map<String, Object> lastScan = Map.of("scanned", false);
 
@@ -167,12 +271,15 @@ public class StartupResumeRunner {
 			return;
 		}
 		Duration delay = this.properties.getResume().getStartupDelay();
+		long jitterMs = startupJitterMs();
+		log.info("启动自动续跑已排期：delay={} jitter={}ms（有界错峰，避免多实例同拍抢扫描单飞）", delay, jitterMs);
 		Thread starter = new Thread(() -> {
 			try {
-				if (!delay.isZero() && !delay.isNegative()) {
-					Thread.sleep(delay.toMillis());
+				long waitMs = (delay == null || delay.isZero() || delay.isNegative() ? 0L : delay.toMillis()) + jitterMs;
+				if (waitMs > 0L) {
+					Thread.sleep(waitMs);
 				}
-				scan(false);
+				startupScan();
 			}
 			catch (InterruptedException ex) {
 				Thread.currentThread().interrupt();
@@ -197,38 +304,78 @@ public class StartupResumeRunner {
 			log.info("启动自动续跑扫描跳过：AI 不可用（{}）", this.availability.code());
 			return this.lastScan;
 		}
-		List<Map<String, Object>> candidates;
+		ScanFlight flight = tryStartScan("startup/manual", SCAN_LEASE_WAIT_MS);
+		if (flight == null) {
+			// 单飞没抢到：另一个执行体（本进程另一线程/另一实例）正在扫同一批候选 ——
+			// 系统面扫描本身就是全租户口径，手工扫描按身份单飞，因此"让位"不会漏掉哪一轮。
+			// 不覆盖 lastScan：GET 面仍展示最近一次真实扫描的事实。
+			Map<String, Object> deferred = deferredScanReport();
+			log.info("启动口径扫描让位：单飞席位在用（trigger=startup/manual）");
+			return deferred;
+		}
 		try {
-			candidates = this.resumeService.listRuns();
+			List<Map<String, Object>> candidates;
+			try {
+				// 恢复扫描只取轻量投影：不读 ledgerCounts/心跳/逐条 pending 详情（安全判据一个不少）。
+				candidates = this.resumeService.listRunsForRecovery();
+			}
+			catch (Exception ex) {
+				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
+				// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
+				log.warn("启动自动续跑扫描失败（Redis 不可用？）：{}", ex.getMessage());
+				Map<String, Object> failed = new LinkedHashMap<>();
+				failed.put("scanned", true);
+				failed.put("at", Instant.now().toString());
+				failed.put("instanceId", this.store.instanceId());
+				failed.put("error", String.valueOf(ex.getMessage()));
+				failed.put("resumed", List.of());
+				failed.put("skipped", List.of());
+				this.lastScan = failed;
+				return failed;
+			}
+			PipelineResult result = runPipeline(candidates, Mode.STARTUP);
+			Map<String, Object> report = new LinkedHashMap<>();
+			report.put("scanned", true);
+			report.put("at", Instant.now().toString());
+			report.put("instanceId", this.store.instanceId());
+			report.put("candidates", candidates.size());
+			report.put("resumed", result.resumed());
+			report.put("skipped", result.skipped());
+			report.put("onStartup", this.properties.getResume().isOnStartup());
+			report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
+			report.put("scanLease", flight.outcome());
+			this.lastScan = report;
+			log.info("启动自动续跑完成：候选 {} 轮，受理 {} 轮，跳过 {} 轮（单飞 {}，详情见 GET /api/ai/startup-resume）",
+					candidates.size(), result.resumed().size(), result.skipped().size(), flight.outcome());
+			return report;
 		}
-		catch (Exception ex) {
-			// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
-			// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
-			log.warn("启动自动续跑扫描失败（Redis 不可用？）：{}", ex.getMessage());
-			Map<String, Object> failed = new LinkedHashMap<>();
-			failed.put("scanned", true);
-			failed.put("at", Instant.now().toString());
-			failed.put("instanceId", this.store.instanceId());
-			failed.put("error", String.valueOf(ex.getMessage()));
-			failed.put("resumed", List.of());
-			failed.put("skipped", List.of());
-			this.lastScan = failed;
-			return failed;
+		finally {
+			flight.close();
 		}
-		PipelineResult result = runPipeline(candidates, Mode.STARTUP);
-		Map<String, Object> report = new LinkedHashMap<>();
-		report.put("scanned", true);
-		report.put("at", Instant.now().toString());
-		report.put("instanceId", this.store.instanceId());
-		report.put("candidates", candidates.size());
-		report.put("resumed", result.resumed());
-		report.put("skipped", result.skipped());
-		report.put("onStartup", this.properties.getResume().isOnStartup());
-		report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
-		this.lastScan = report;
-		log.info("启动自动续跑完成：候选 {} 轮，受理 {} 轮，跳过 {} 轮（详情见 GET /api/ai/startup-resume）",
-				candidates.size(), result.resumed().size(), result.skipped().size());
-		return report;
+	}
+
+	/**
+	 * 启动拍：单飞没抢到时<b>有界重试</b>（至多 {@link #STARTUP_SCAN_ATTEMPTS} 次）。
+	 *
+	 * <p>让位不覆盖 {@code lastScan}（GET 面仍展示最近一次真实扫描），也不把"没扫"伪装成"扫了 0 轮"；
+	 * 每次重试重置 {@code scanned}，否则 {@link #scan(boolean)} 会直接回上一次的 {@code lastScan}。
+	 * 总等待 = 每拍有界等待 × 次数 + 间隔抖动，仍在"启动时效"范围内。
+	 */
+	private void startupScan() {
+		for (int attempt = 1; attempt <= STARTUP_SCAN_ATTEMPTS; attempt++) {
+			Map<String, Object> report = scan(false);
+			if (!Boolean.TRUE.equals(report.get("deferred"))) {
+				return;
+			}
+			this.scanned.set(false);
+			if (attempt == STARTUP_SCAN_ATTEMPTS) {
+				log.info("启动自动续跑让位：{} 拍内未拿到单飞席位（另一实例/本进程正在扫，覆盖不丢失）", attempt);
+				return;
+			}
+			if (!sleepQuietly(STARTUP_SCAN_RETRY_MS + ThreadLocalRandom.current().nextLong(STARTUP_SCAN_RETRY_MS))) {
+				return;
+			}
+		}
 	}
 
 	public Map<String, Object> lastScan() {
@@ -306,7 +453,8 @@ public class StartupResumeRunner {
 	 *
 	 * <h2>判据只有一套（不新增第二套活度逻辑）</h2>
 	 * <ul>
-	 * <li><b>候选</b> = {@link ResumeService#listRuns()}：与启动扫描、运维端点同一份"发现态"，
+	 * <li><b>候选</b> = {@link ResumeService#listRunsForRecovery()}：与启动扫描、运维端点同一份"发现态"
+	 * （恢复侧只取轻量投影，安全字段一致），
 	 * 其中 {@code cancelled} / {@code unresolvedExternal} / {@code zombieRunning} 已按
 	 * {@code app.ai.resume.zombie-age}（180s）与<b>业务</b>活动锚点算好；</li>
 	 * <li><b>活/死</b> = {@link RunLiveness#isDead}：会话门放行（{@code AiController#isDeadRound}）
@@ -343,7 +491,8 @@ public class StartupResumeRunner {
 	 *     {@code expiresAt}（{@code confirmGate.convergeExpiredParkedFrontend}）；本拍收敛过就记入
 	 *     {@code expired} 并跳过（到期收敛内部已派发一次续跑，避免重复驱动）。</li>
 	 * </ul>
-	 * 两条都按<b>记录身份</b>开作用域（不扫描租户列表），预算仍与续跑共用 {@code max-on-startup}。
+	 * 两条都按<b>记录身份</b>开作用域（不扫描租户列表），产出预算仍与续跑共用 {@code max-on-startup}；
+	 * 动作尝试（含失败/无果）另受 {@code scan-max-attempts} 约束，起点按轮转推进（见 {@link #runPipeline}）。
 	 */
 	public Map<String, Object> sweep() {
 		if (!this.availability.isAvailable()) {
@@ -352,40 +501,53 @@ public class StartupResumeRunner {
 			log.info("运行期死轮扫描跳过：AI 不可用（{}）", this.availability.code());
 			return skippedReport;
 		}
-		List<Map<String, Object>> candidates;
+		// 运行期拍不等待单飞：周期扫描本来就是"下一拍再来"，等只会占用调度线程。
+		ScanFlight flight = tryStartScan("runtime-sweep", 0L);
+		if (flight == null) {
+			Map<String, Object> deferred = deferredSweepReport();
+			log.info("运行期死轮扫描让位：单飞席位在用（下一拍照常）");
+			return deferred;
+		}
 		try {
-			candidates = this.resumeService.listRuns();
+			List<Map<String, Object>> candidates;
+			try {
+				candidates = this.resumeService.listRunsForRecovery();
+			}
+			catch (Exception ex) {
+				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
+				log.warn("运行期死轮扫描失败（Redis 不可用？）：{}", ex.getMessage());
+				Map<String, Object> failed = new LinkedHashMap<>();
+				failed.put("swept", true);
+				failed.put("at", Instant.now().toString());
+				failed.put("instanceId", this.store.instanceId());
+				failed.put("error", String.valueOf(ex.getMessage()));
+				failed.put("resumed", List.of());
+				failed.put("skipped", List.of());
+				this.lastSweep = failed;
+				return failed;
+			}
+			long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+			PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
+			Map<String, Object> report = new LinkedHashMap<>();
+			report.put("swept", true);
+			report.put("at", Instant.now().toString());
+			report.put("instanceId", this.store.instanceId());
+			report.put("candidates", candidates.size());
+			report.put("resumed", result.resumed());
+			report.put("finalized", result.finalized());
+			report.put("expired", result.expired());
+			report.put("skipped", result.skipped());
+			report.put("zombieAgeMs", zombieAgeMs);
+			report.put("scanLease", flight.outcome());
+			this.lastSweep = report;
+			log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}，单飞 {}）",
+					candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
+					result.skipped().size(), this.properties.getResume().getZombieAge(), flight.outcome());
+			return report;
 		}
-		catch (Exception ex) {
-			// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
-			log.warn("运行期死轮扫描失败（Redis 不可用？）：{}", ex.getMessage());
-			Map<String, Object> failed = new LinkedHashMap<>();
-			failed.put("swept", true);
-			failed.put("at", Instant.now().toString());
-			failed.put("instanceId", this.store.instanceId());
-			failed.put("error", String.valueOf(ex.getMessage()));
-			failed.put("resumed", List.of());
-			failed.put("skipped", List.of());
-			this.lastSweep = failed;
-			return failed;
+		finally {
+			flight.close();
 		}
-		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-		PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
-		Map<String, Object> report = new LinkedHashMap<>();
-		report.put("swept", true);
-		report.put("at", Instant.now().toString());
-		report.put("instanceId", this.store.instanceId());
-		report.put("candidates", candidates.size());
-		report.put("resumed", result.resumed());
-		report.put("finalized", result.finalized());
-		report.put("expired", result.expired());
-		report.put("skipped", result.skipped());
-		report.put("zombieAgeMs", zombieAgeMs);
-		this.lastSweep = report;
-		log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}）",
-				candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
-				result.skipped().size(), this.properties.getResume().getZombieAge());
-		return report;
 	}
 
 	/** 扫描触发面：启动/手工（{@link #scan(boolean)}）与运行期兜底（{@link #sweep()}）。 */
@@ -417,6 +579,9 @@ public class StartupResumeRunner {
 	 */
 	private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode) {
 		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
+		// 尝试预算 = 本拍"真正做动作"的次数上界（取消收尾/到期收敛/续跑各算一次，失败也算）。
+		// 产出预算仍是 limit：报告口径（resumed/finalized/expired 的条数）不变。
+		int attemptLimit = Math.max(limit, this.properties.getResume().getScanMaxAttempts());
 		long nowMs = System.currentTimeMillis();
 		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
 		List<Map<String, Object>> resumed = new ArrayList<>();
@@ -425,7 +590,15 @@ public class StartupResumeRunner {
 		List<Map<String, Object>> expired = new ArrayList<>();
 		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
 		TenantUser caller = RequestContextUtils.currentOrNull();
-		for (Map<String, Object> run : candidates) {
+		// 轮转起点（公平性）：固定排序 + 有界预算下，若每拍都从第一个开始，排在前面却永远失败/被占的
+		// 候选会把预算每拍用光，后面的轮次永久饿死。这里从"上一拍最后一个尝试过的候选之后"开始。
+		String cursorScope = cursorScope(mode, caller);
+		int attempts = 0;
+		// F2（到期收敛）单独计数：它的"无果尝试"不能吃掉续跑/取消收尾的尝试预算，
+		// 否则一堆活跃非终态轮次的 F2 探测会把真正该接管的轮次挤到下一拍。两本账各自有界 ⇒ 单拍仍有界。
+		int expireAttempts = 0;
+		String lastAttempted = null;
+		for (Map<String, Object> run : rotateFrom(candidates, this.scanCursors.get(cursorScope))) {
 			String runId = String.valueOf(run.get("runId"));
 			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
 			long recordTenantId = identityField(run, "tenantId");
@@ -451,10 +624,18 @@ public class StartupResumeRunner {
 				// 取消是已确认的事实：驱动进程死了也必须有人落终态/终帧，交给既有 cancelConfirmed
 				// （抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。
 				if (Boolean.TRUE.equals(run.get("cancelled")) && !RunSnapshot.isTerminal(status)) {
-					if (resumed.size() + finalized.size() + expired.size() >= limit) {
+					if (productive(resumed, finalized, expired) >= limit) {
 						skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
 						continue;
 					}
+					if (attempts >= attemptLimit) {
+						// 尝试预算用尽：本拍不做动作（失败也算预算 —— 否则"每轮都试一次但都不成"会让
+						// 单拍动作数随候选数无界增长）。下一拍轮转起点会往前走，这些轮次不会被永久跳过。
+						skipped.add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
+						continue;
+					}
+					attempts++;
+					lastAttempted = cursorKeyOf(run);
 					ResumeService.CancelFinalize outcome;
 					try {
 						outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
@@ -485,7 +666,9 @@ public class StartupResumeRunner {
 				// park 后的到期收敛只有原实例进程内定时器；实例被杀后没有任何读侧看 expiresAt。
 				// 任一实例的扫描都可以做这件事（真前端工具才有时限；确认门/表单无上限，不消费）。
 				if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
-						&& resumed.size() + finalized.size() + expired.size() < limit) {
+						&& productive(resumed, finalized, expired) < limit && expireAttempts < attemptLimit) {
+					expireAttempts++;
+					lastAttempted = cursorKeyOf(run);
 					int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
 					if (converged > 0) {
 						Map<String, Object> item = new LinkedHashMap<>();
@@ -518,6 +701,12 @@ public class StartupResumeRunner {
 					skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
 					continue;
 				}
+				if (attempts >= attemptLimit) {
+					skipped.add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
+					continue;
+				}
+				attempts++;
+				lastAttempted = cursorKeyOf(run);
 				boolean takeover = RunSnapshot.RUNNING.equals(status);
 				AiTrace.bind(runId, null);
 				try {
@@ -544,7 +733,7 @@ public class StartupResumeRunner {
 				}
 				continue;
 			}
-			// 启动/手工：接管时效仍由 listRuns 的 zombieRunning（zombie-age 判据）给出。
+			// 启动/手工：接管时效仍由发现面的 zombieRunning（zombie-age 判据）给出。
 			if (resumed.size() >= limit) {
 				Map<String, Object> skippedItem = new LinkedHashMap<>();
 				skippedItem.put("runId", runId);
@@ -554,6 +743,17 @@ public class StartupResumeRunner {
 				skipped.add(skippedItem);
 				continue;
 			}
+			if (attempts >= attemptLimit) {
+				Map<String, Object> skippedItem = new LinkedHashMap<>();
+				skippedItem.put("runId", runId);
+				skippedItem.put("tenantId", recordTenantId);
+				skippedItem.put("userId", recordUserId);
+				skippedItem.put("reason", ATTEMPT_BUDGET_REACHED);
+				skipped.add(skippedItem);
+				continue;
+			}
+			attempts++;
+			lastAttempted = cursorKeyOf(run);
 			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
 			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装。
 			AiTrace.bind(runId, null);
@@ -583,7 +783,81 @@ public class StartupResumeRunner {
 				AiTrace.clear();
 			}
 		}
+		if (lastAttempted != null) {
+			// 只把"真正尝试过"的位置记成下一拍起点：纯安全跳过（终态/未决外部项/无身份）不推进游标，
+			// 它们本来就不占预算。
+			rememberCursor(cursorScope, lastAttempted);
+		}
 		return new PipelineResult(resumed, skipped, finalized, expired);
+	}
+
+	/**
+	 * 记一条轮转起点（<b>有界</b>）。键 = 模式 × 触发面：系统面固定两条（{@code STARTUP/RUNTIME + /system}），
+	 * 请求面每个在本实例触发过手工扫描的身份一条。
+	 *
+	 * <p>身份数在进程内不设上界（任何用户都可能点一次），因此到达 {@link #MAX_SCAN_CURSORS} 时
+	 * <b>只淘汰请求面的游标</b>，系统面两条保留：系统面每拍的轮转起点若被清掉，就会退回"每拍从头部
+	 * 开始"，排队尾的轮次重新饿死 —— 那正是轮转要解决的问题。被淘汰的身份下一次扫描从固定顺序起点
+	 * 开始、之后照常轮转，只损失一次连续性，不产生永久饿死。
+	 */
+	private void rememberCursor(String scope, String cursor) {
+		if (this.scanCursors.size() >= MAX_SCAN_CURSORS && !this.scanCursors.containsKey(scope)
+				&& !evictIdentityCursor()) {
+			// 理论上不可达（系统面至多 2 条 < 上限 ⇒ 达上限时必有请求面游标可淘汰）。
+			// 真到这里就宁可不记（该身份下一次从头部开始），也守住"游标表有界"这条硬约束。
+			return;
+		}
+		this.scanCursors.put(scope, cursor);
+	}
+
+	/** 淘汰一条请求面游标；系统面（{@code MODE/system}）永不淘汰。 */
+	private boolean evictIdentityCursor() {
+		for (String scope : this.scanCursors.keySet()) {
+			if (!scope.endsWith("/system") && this.scanCursors.remove(scope) != null) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** 产出预算口径（受理 + 取消收尾 + 到期收敛）。 */
+	private static int productive(List<Map<String, Object>> resumed, List<Map<String, Object>> finalized,
+			List<Map<String, Object>> expired) {
+		return resumed.size() + finalized.size() + expired.size();
+	}
+
+	/** 轮转游标的作用域：模式 + 触发面身份（系统面 / 某一身份）。 */
+	private static String cursorScope(Mode mode, TenantUser caller) {
+		return mode.name() + (caller == null ? "/system" : "/" + caller.tenantId() + ":" + caller.userId());
+	}
+
+	/** 候选的身份复合键（同一 runId 可属于不同身份，游标必须按复合键对位）。 */
+	private static String cursorKeyOf(Map<String, Object> run) {
+		return identityField(run, "tenantId") + "/" + identityField(run, "userId") + "/" + run.get("runId");
+	}
+
+	/**
+	 * 从 {@code afterKey} 的<b>下一条</b>开始轮转（环形）；找不到该键（候选变了）或只有一个候选时
+	 * 原样返回 —— 起点失效时回到固定排序的第一条，不会漏扫。
+	 */
+	private static List<Map<String, Object>> rotateFrom(List<Map<String, Object>> candidates, String afterKey) {
+		if (afterKey == null || candidates.size() < 2) {
+			return candidates;
+		}
+		int start = 0;
+		for (int i = 0; i < candidates.size(); i++) {
+			if (afterKey.equals(cursorKeyOf(candidates.get(i)))) {
+				start = i + 1;
+				break;
+			}
+		}
+		if (start == 0 || start >= candidates.size()) {
+			return candidates;
+		}
+		List<Map<String, Object>> rotated = new ArrayList<>(candidates.size());
+		rotated.addAll(candidates.subList(start, candidates.size()));
+		rotated.addAll(candidates.subList(0, start));
+		return rotated;
 	}
 
 	/** 启动/手工扫描的"发现态跳过"报告项（带记录身份，GET 面据此切片）。 */
@@ -602,6 +876,265 @@ public class StartupResumeRunner {
 	/** 最近一次运行期扫描的结果（观测面；未开开关时保持 {@code swept=false} 的初值）。 */
 	public Map<String, Object> lastSweep() {
 		return this.lastSweep;
+	}
+
+	// ── 扫描单飞（进程内门 + 跨实例带续租租约） ─────────────────────────────
+
+	/**
+	 * 抢一次扫描的<b>单飞席位</b>：进程内门 → 跨实例租约（带续租）。
+	 *
+	 * <h2>为什么三层都要，缺一层会怎样</h2>
+	 * <ul>
+	 * <li><b>进程内门</b>：启动拍、运行期拍、手工请求可能同时到达；只靠 Redis 租约时三者会
+	 *     互相"可重入"（同 owner），于是并发跑同一批候选；</li>
+	 * <li><b>跨实例租约</b>：N 个实例同拍启动会把同一批候选各扫一遍、各算一份
+	 *     {@code max-on-startup}（审计 F-03）；</li>
+	 * <li><b>续租</b>：扫描可能比租约 TTL 长（候选多、F2/F3 各要一次往返）；不续租就会被第二个实例
+	 *     在扫描中途抢走席位 ⇒ 两实例并发扫。续租判据是 {@code scanInFlight}，续租 TTL 与抢锁同取
+	 *     {@link #scanLeaseTtl()}（不能让默认 30s 把 60s 配置缩掉），扫描收尾先停续租再归还。</li>
+	 * </ul>
+	 *
+	 * <p><b>owner 每次扫描唯一</b>（{@code <instanceId>:scan:<序号>}，见 {@link #scanSeq}）：
+	 * 固定 owner 时，一次 release 失败会在 {@code LeaseService} 的进程内视图里留下
+	 * {@code (key, owner)} 条目；下一拍 acquire 命中它即 {@code created=false}，调用方既不续租
+	 * 也不再释放 ⇒ 席位卡到 TTL、扫描中途还可能被别的实例接走。唯一 owner 让每一拍都是全新
+	 * {@code (key, owner)}：必然 {@code created=true}，续租与释放都必须执行。
+	 *
+	 * <h2>拿不到时的两种结论（都不是"报错"）</h2>
+	 * <ul>
+	 * <li><b>别人持有</b>（{@code HELD_ELSEWHERE}）：等有界预算（{@link #SCAN_LEASE_WAIT_MS}），
+	 *     仍拿不到 ⇒ 返回 {@code null}（本拍让位）。系统面扫描本来就是全租户口径、手工扫描按身份单飞，
+	 *     所以让位不会漏掉哪一轮；</li>
+	 * <li><b>设施不可确认</b>（{@code UNAVAILABLE} / 无租约设施）：按
+	 *     {@link LeaseService} 的契约退到<b>进程内单飞</b>继续扫 —— 一次 Redis 抖动不能把启动续跑
+	 *     整体停摆（单实例仍然正确）。</li>
+	 * </ul>
+	 *
+	 * @param trigger 日志口径（{@code startup/manual} / {@code runtime-sweep}）
+	 * @param waitMs  抢不到时的有界等待（运行期拍传 0：下一次周期再来）
+	 * @return 席位（必须 {@code close()}）；{@code null} = 本拍让位
+	 */
+	private ScanFlight tryStartScan(String trigger, long waitMs) {
+		if (!lockScanGate(waitMs)) {
+			log.info("扫描跳过：本进程已有扫描在跑（trigger={}），不并发扫同一批候选", trigger);
+			return null;
+		}
+		TenantUser scanIdentity = RequestContextUtils.currentOrNull();
+		String key = scanLeaseKey(scanIdentity);
+		LeaseService leases = this.store.leaseService();
+		if (leases == null) {
+			this.scanInFlight.set(true);
+			return new ScanFlight(null, null, "LOCAL_ONLY");
+		}
+		// 每次扫描唯一的 owner（见 scanSeq 的类注）：release 失败也不会让下一拍拿到 created=false 的
+		// 旧视图，因此"续租 / 释放"在每一拍都是必须做的两件事，而不是可能被重入短路掉。
+		String owner = leases.instanceId() + ":scan:" + this.scanSeq.incrementAndGet();
+		long deadlineMs = System.currentTimeMillis() + Math.max(0L, waitMs);
+		while (true) {
+			LeaseService.AcquireResult result;
+			try {
+				result = leases.acquire(key, scanLeaseTtl(), owner);
+			}
+			catch (RuntimeException ex) {
+				// 租约设施异常：按进程内单飞继续（LeaseService 的降级契约），别把扫描整体停摆。
+				log.warn("扫描单飞租约不可用（按进程内单飞继续）trigger={}：{}", trigger, ex.getMessage());
+				this.scanInFlight.set(true);
+				return new ScanFlight(null, null, "UNAVAILABLE");
+			}
+			if (result == null) {
+				// 设施返回了"没有结论"（非生产形态：真实现恒返回三态之一；替身/桩可能给 null）：
+				// 同样按"不可确认"降级，绝不让一次 null 把整拍扫描打崩。
+				log.warn("扫描单飞租约无结论（按进程内单飞继续）trigger={}", trigger);
+				this.scanInFlight.set(true);
+				return new ScanFlight(null, null, "UNAVAILABLE");
+			}
+			if (result.acquired()) {
+				this.scanInFlight.set(true);
+				LeaseService.Lease lease = result.lease();
+				if (lease != null) {
+					try {
+						// 带续租：扫描期间保持席位；收尾先停续租再释放（见 ScanFlight#close）。
+						// 续租 TTL 必须与抢锁 TTL 同值：默认口径是 app.ai.lease.ttl（30s），
+						// 用它续期会把 60s 的 scan-lease-ttl 直接在下一拍缩成 30s。
+						leases.markDriving(lease, this.scanInFlight::get, scanIdentity, scanLeaseTtl());
+					}
+					catch (RuntimeException ex) {
+						// 续租登记失败（调度器已停机等）：仍按"已拿到席位"继续 —— TTL 到期后自然可被接手，
+						// 绝不能让一次登记异常把闸门留在锁住状态。
+						log.warn("扫描单飞续租登记失败（按 TTL 兜底）trigger={}：{}", trigger, ex.getMessage());
+					}
+				}
+				// owner 唯一 ⇒ created 恒为真；仍把它写进报告口径（日志/观测可区分异常形态）。
+				return new ScanFlight(leases, lease, result.created() ? "ACQUIRED" : "REENTRANT");
+			}
+			if (result.outcome() != LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+				log.warn("扫描单飞租约设施不可确认（按进程内单飞继续）trigger={} outcome={}", trigger,
+						result.outcome());
+				this.scanInFlight.set(true);
+				return new ScanFlight(null, null, "UNAVAILABLE");
+			}
+			if (System.currentTimeMillis() >= deadlineMs) {
+				unlockScanGate();
+				log.info("扫描让位：另一实例持有扫描单飞（trigger={}，等待预算 {}ms 用尽）", trigger, waitMs);
+				return null;
+			}
+			if (!sleepQuietly(SCAN_LEASE_RETRY_MS + ThreadLocalRandom.current().nextLong(SCAN_LEASE_RETRY_MS))) {
+				unlockScanGate();
+				log.info("扫描放弃：抢单飞等待被中断（trigger={}）", trigger);
+				return null;
+			}
+		}
+	}
+
+	/** 单飞键：系统面一把全局锁；请求面按调用身份分（手工扫描只处理当前身份）。 */
+	private static String scanLeaseKey(TenantUser scanIdentity) {
+		return scanIdentity == null ? SCAN_LEASE_KEY
+				: SCAN_LEASE_IDENTITY_PREFIX + scanIdentity.tenantId() + ":" + scanIdentity.userId();
+	}
+
+	/** 单飞 TTL（配错/未配时给一个有界缺省，避免 0 TTL 变成"永不持有"）。 */
+	private Duration scanLeaseTtl() {
+		Duration ttl = this.properties.getResume().getScanLeaseTtl();
+		return ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofSeconds(60) : ttl;
+	}
+
+	private boolean lockScanGate(long waitMs) {
+		try {
+			return waitMs <= 0L ? this.scanGate.tryLock() : this.scanGate.tryLock(waitMs, TimeUnit.MILLISECONDS);
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+	}
+
+	private void unlockScanGate() {
+		if (this.scanGate.isHeldByCurrentThread()) {
+			this.scanGate.unlock();
+		}
+	}
+
+	/** 睡一小段；被中断时返回 false（调用方负责归还门）。 */
+	private static boolean sleepQuietly(long ms) {
+		if (ms <= 0L) {
+			return true;
+		}
+		try {
+			Thread.sleep(ms);
+			return true;
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+	}
+
+	/** 启动抖动：{@code [0, min(startup-jitter, 60s)]} 的均匀随机（有界，绝不无限推迟）。 */
+	private long startupJitterMs() {
+		Duration jitter = this.properties.getResume().getStartupJitter();
+		if (jitter == null || jitter.isZero() || jitter.isNegative()) {
+			return 0L;
+		}
+		long bound = Math.min(jitter.toMillis(), MAX_STARTUP_JITTER_MS);
+		return bound <= 0L ? 0L : ThreadLocalRandom.current().nextLong(bound + 1L);
+	}
+
+	/**
+	 * 一次扫描的单飞席位（{@code tryStartScan} 的返回值）。
+	 *
+	 * <p><b>owner 每次扫描唯一</b>（{@code <instanceId>:scan:<序号>}，见 {@link #scanSeq}）：
+	 * 因此"这个席位归本次扫描"无需再看 {@code created} —— 同一 (key, owner) 不可能被第二次 acquire
+	 * 复用（进程内门也保证同一实例不并发扫）。这也正是"release 失败后下一拍仍会释放/续租"的前提：
+	 * 固定 owner 时失败留下的视图会让下一拍 {@code created=false}，既不续租也不释放。
+	 *
+	 * <p>关闭顺序：
+	 * <ol>
+	 * <li>{@code scanInFlight} 置假：任何正在跑的续租拍下一拍判据即转假；</li>
+	 * <li>{@link LeaseService#stopDriving(String, String) stopDriving(key, owner)}：<b>先停掉</b>本任的续租任务，
+	 *     再删租约键。反过来的顺序里，一拍已经排上/正在执行的"迟到续租"可能落在 {@code release} 之后：
+	 *     那时键已删（PEXPIRE 无事发生）或已被别人以新 epoch 抢走（RENEW 返回 0 ⇒ 给本任落 LOST 墓碑并
+	 *     摘进程内视图）—— 都会把「已经交还的席位」再动一次。先停再放，本任的续租不可能晚于归还；</li>
+	 * <li>{@code release(lease)}：条件删除（token 含唯一 owner ⇒ 错 epoch/错 owner 不会删别人的键），
+	 *     并顺手清墓碑；</li>
+	 * <li>放进程内门。任何一步失败都只留痕，不让扫描主流程抛异常。</li>
+	 * </ol>
+	 */
+	private final class ScanFlight implements AutoCloseable {
+
+		private final LeaseService leases;
+
+		private final LeaseService.Lease lease;
+
+		private final String outcome;
+
+		ScanFlight(LeaseService leases, LeaseService.Lease lease, String outcome) {
+			this.leases = leases;
+			this.lease = lease;
+			this.outcome = outcome;
+		}
+
+		/** 报告/日志口径：{@code ACQUIRED} / {@code REENTRANT} / {@code LOCAL_ONLY} / {@code UNAVAILABLE}。 */
+		String outcome() {
+			return this.outcome;
+		}
+
+		@Override
+		public void close() {
+			StartupResumeRunner.this.scanInFlight.set(false);
+			if (this.leases != null && this.lease != null) {
+				try {
+					// 先停续租：本任的续租拍不会再晚于 release 落到"已交还/已被别人接管"的键上。
+					this.leases.stopDriving(this.lease.key(), this.lease.owner());
+				}
+				catch (RuntimeException ex) {
+					log.debug("扫描单飞停续租失败（TTL 兜底）：{}", ex.getMessage());
+				}
+				try {
+					this.leases.release(this.lease);
+				}
+				catch (RuntimeException ex) {
+					log.debug("扫描单飞租约释放失败（等 TTL 自然过期）：{}", ex.getMessage());
+				}
+			}
+			unlockScanGate();
+		}
+
+	}
+
+	/**
+	 * 让位时的启动口径报告：<b>字段契约与正常报告一致</b>（{@code scanned/at/instanceId/candidates/
+	 * resumed/skipped/onStartup/zombieAge}），只额外标 {@code deferred=true} 与原因，绝不伪装成"扫了 0 轮"。
+	 */
+	private Map<String, Object> deferredScanReport() {
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("scanned", true);
+		report.put("at", Instant.now().toString());
+		report.put("instanceId", this.store.instanceId());
+		report.put("candidates", 0);
+		report.put("resumed", List.of());
+		report.put("skipped", List.of());
+		report.put("onStartup", this.properties.getResume().isOnStartup());
+		report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
+		report.put("deferred", true);
+		report.put("reason", SCAN_IN_FLIGHT);
+		return report;
+	}
+
+	/** 让位时的运行期报告（契约同上：{@code swept/.../finalized/expired/skipped/zombieAgeMs}）。 */
+	private Map<String, Object> deferredSweepReport() {
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("swept", true);
+		report.put("at", Instant.now().toString());
+		report.put("instanceId", this.store.instanceId());
+		report.put("candidates", 0);
+		report.put("resumed", List.of());
+		report.put("finalized", List.of());
+		report.put("expired", List.of());
+		report.put("skipped", List.of());
+		report.put("zombieAgeMs", this.properties.getResume().getZombieAge().toMillis());
+		report.put("deferred", true);
+		report.put("reason", SCAN_IN_FLIGHT);
+		return report;
 	}
 
 	/**
@@ -670,7 +1203,7 @@ public class StartupResumeRunner {
 	 *
 	 * <p>扫描跑在定时线程上，那里没有请求身份；身份也不能从"当前线程"或默认租户补。
 	 * 身份的<b>来源是 {@code ai:runs} 的复合索引成员</b>（{@code tenantId/userId/runId}，
-	 * 由 {@code ResumeService.listRuns()} 随条目交下来）—— 不是"先读快照再猜身份"：
+	 * 由 {@code ResumeService.listRunsForRecovery()} 随条目交下来）—— 不是"先读快照再猜身份"：
 	 * 快照键本身由身份拼出，在无身份线程上先读只能读到 {@code null}（那条链会静默退化成空作用域）。
 	 *
 	 * <p>候选只来自 {@code ai:runs} 的复合成员，记录身份随成员一起交下来；无归属成员在发现面
@@ -751,21 +1284,26 @@ public class StartupResumeRunner {
 		}
 		boolean liveInProcess;
 		try {
-			liveInProcess = this.registry != null && this.registry.hasLiveSubscriber(runId);
+			// 精确重载：把<b>记录身份</b>一并交下去 —— 扫描线程没有身份，`hasLiveSubscriber(runId)`
+			// 只能把"任一身份桶里有这一轮的真实连接"当成判活证据；同 runId 属于两个身份时，
+			// 那一证据可能来自另一身份（误判活只晚一拍，但也没必要把身份维度丢掉）。
+			liveInProcess = this.registry != null
+					&& this.registry.hasLiveSubscriber(runId, identityField(run, "tenantId"),
+							identityField(run, "userId"));
 		}
 		catch (Exception ex) {
 			log.debug("运行期扫描读取本进程订阅失败 runId={}（按活跃处理，不接管）：{}", runId, ex.getMessage());
 			liveInProcess = true;
 		}
 		long updatedAtMs = asLong(run.get("updatedAtMs"));
-		// listRuns 的 activeAtMs = max(快照写入, 最后一条非心跳业务帧) —— 与 RunLiveness 的第 2/3 参同义
+		// 发现面的 activeAtMs = max(快照写入, 最后一条非心跳业务帧) —— 与 RunLiveness 的第 2/3 参同义
 		long lastActivityAtMs = asLong(run.get("activeAtMs"));
 		return RunLiveness.isDead(status, updatedAtMs, lastActivityAtMs, leaseHeld, liveInProcess, zombieAgeMs,
 				nowMs);
 	}
 
 	/**
-	 * 发现态条目的接管结论（<b>启动扫描与运行期扫描共用</b>）：{@link ResumeService#listRuns()}
+	 * 发现态条目的接管结论（<b>启动扫描与运行期扫描共用</b>）：{@link ResumeService#listRunsForRecovery()}
 	 * 已经把"取消 / 终态 / 未决外部输入 / 僵尸 RUNNING"算成字段，这里只做一次归类，
 	 * 避免两条入口各写一套 if 链而慢慢走偏。
 	 */

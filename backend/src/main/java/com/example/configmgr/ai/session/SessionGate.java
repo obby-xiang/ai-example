@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -233,6 +234,22 @@ public class SessionGate {
 			thread.setDaemon(true);
 			return thread;
 		});
+	}
+
+	/**
+	 * <b>应用停机</b>：停掉全部续期看门狗与看门狗线程（幂等）。
+	 *
+	 * <p>为什么必须显式关：{@code ai-session-lock-watchdog} 是每实例一条守护线程，且每个 holder 上
+	 * 还挂着周期任务。守护线程不阻止 JVM 退出，但多 Spring Context / 嵌入式部署下旧上下文的任务会
+	 * 继续对 Redis 续期（引用旧锁键/旧 holder）——停机后它没有任何归属者可取消。这里只停调度，
+	 * <b>不主动释放 Redis 锁</b>：锁按 TTL 自然到期，进程死亡/停机都不改变跨实例互斥语义。
+	 */
+	@PreDestroy
+	void shutdown() {
+		for (Holder holder : List.copyOf(this.inProcess.values())) {
+			cancelWatchdog(holder);
+		}
+		this.watchdog.shutdownNow();
 	}
 
 	/**

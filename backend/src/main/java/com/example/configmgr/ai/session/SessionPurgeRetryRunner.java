@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 会话销毁的<b>有界自动重试闭环</b>（{@code complete=false} 的服务端推进）。
@@ -46,6 +47,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <h2>跨 JVM 单飞</h2>
  * 复用 {@link LeaseService} 的 Redis 租约（{@value #LOCK_KEY}，TTL {@value #LOCK_TTL_SECONDS}s）；
  * 抢不到就跳过本轮，不猜、不抢。租约只包住一轮有界清理，不包业务事务。
+ * <b>每轮 owner 唯一</b>（{@code <instanceId>:purge:<序号>}，见 {@link #runSeq}）：
+ * {@link LeaseService} 的进程内视图按 {@code (key, owner)} 记账，且 <b>release 失败时视图会留下</b> ——
+ * 固定 owner 下，下一轮 acquire 命中旧视图即 {@code created=false}，调用方既不续租也不再释放
+ * （锁卡到 TTL、期间可能被别的实例接走）。唯一 owner 让每一轮都是全新的 {@code (key, owner)}：
+ * 续租必登记、释放必再尝试。
+ * <b>一轮执行期间按抢锁时的同一 TTL 续租</b>（{@code markDriving(..., LOCK_TTL_SECONDS)}）：
+ * 单轮可能因 DB/文件清理超过 300s，只靠 TTL 到期会让锁在半途消失、另一实例并发跑同一批台账。
+ * 结束时先 {@code stopDriving} 再 {@code release}（顺序反了会让续租任务把刚释放的锁写回去）。
+ * 是否续租/释放只看“本轮是否真的拿到 lease”，<b>不再看 {@code created}</b>。
  *
  * <h2>失败姿态</h2>
  * 任何 Redis 状态不可知/清理失败都<b>不 disarm</b>、不删 pending；保留给下一轮或显式
@@ -89,6 +99,18 @@ public class SessionPurgeRetryRunner {
 	private final AiProperties properties;
 
 	private final AtomicBoolean started = new AtomicBoolean();
+
+	/**
+	 * 本轮单飞 owner 的序号：每轮 {@code runOnce} 取 {@code <instanceId>:purge:<序号>}，<b>一轮一个</b>。
+	 *
+	 * <p>为什么不复用 {@code owner = instanceId}：{@code LeaseService} 的进程内视图按
+	 * {@code (key, owner)} 记账，<b>release 失败时视图会留下</b>。固定 owner 下，下一轮 acquire 命中
+	 * 旧视图 ⇒ {@code created=false} ⇒ 调用方既不续租（锁可能在清理中途到期被接管）也不再释放
+	 * （锁卡到 300s TTL 才自然过期）。唯一 owner 使每一轮都是新的 {@code (key, owner)}：续租必登记、
+	 * 释放必再尝试；失败者留下的旧视图只占一条无 TTL 的内存记录，不影响新 owner 抢锁
+	 * （TTL 到期即可接手）。
+	 */
+	private final AtomicLong runSeq = new AtomicLong();
 
 	private volatile ScheduledExecutorService scheduler;
 
@@ -164,10 +186,27 @@ public class SessionPurgeRetryRunner {
 
 	/** 可注入时钟的一轮清理（测试确定性；生产走 {@link #runOnce()}）。 */
 	public RetryReport runOnce(long nowMs) {
-		LeaseService.AcquireResult lock = this.leases == null ? null
-				: this.leases.acquire(LOCK_KEY, Duration.ofSeconds(LOCK_TTL_SECONDS));
-		if (this.leases != null && (lock == null || !lock.acquired())) {
-			return new RetryReport(false, 0, 0, 0, 0, 0);
+		LeaseService.Lease lease = null;
+		if (this.leases != null) {
+			// 每轮唯一 owner（见 runSeq 的注）：release 失败留下的旧 (key, owner) 视图不会让下一轮
+			// 命中 created=false，因此"续租 / 释放"在每一轮都是必须做的两件事。
+			String owner = this.leases.instanceId() + ":purge:" + this.runSeq.incrementAndGet();
+			LeaseService.AcquireResult lock = this.leases.acquire(LOCK_KEY, Duration.ofSeconds(LOCK_TTL_SECONDS),
+					owner);
+			if (lock == null || !lock.acquired()) {
+				return new RetryReport(false, 0, 0, 0, 0, 0);
+			}
+			lease = lock.lease();
+			if (lease != null) {
+				try {
+					// 与抢锁相同的 TTL：默认 lease-ttl（30s）会把 300s 的锁在下一拍缩短。
+					this.leases.markDriving(lease, () -> true, null, Duration.ofSeconds(LOCK_TTL_SECONDS));
+				}
+				catch (RuntimeException ex) {
+					// 续租登记失败不阻断本轮（锁仍是刚抢到的 300s）；finally 仍会 stop/release。
+					log.warn("会话销毁重试锁续租登记失败（本轮仍按已抢到的 TTL 执行）：{}", ex.getMessage());
+				}
+			}
 		}
 		try {
 			List<SessionPurgePendingStore.Pending> due;
@@ -250,14 +289,23 @@ public class SessionPurgeRetryRunner {
 			return new RetryReport(true, due.size(), attempted, completed, failed, skipped);
 		}
 		finally {
-			if (this.leases != null && lock != null && lock.created() && lock.lease() != null) {
+			if (lease != null) {
+				// 先停续租再释放：顺序反过来会出现"release 成功、续租任务下一拍又把键 SET 回去"的幽灵锁
+				// （release 的脚本只删值匹配的那一任，但续租任务持有同一个 Lease 对象）。
 				try {
-					this.leases.release(lock.lease());
+					this.leases.stopDriving(LOCK_KEY, lease.owner());
+				}
+				catch (RuntimeException ex) {
+					log.debug("停止会话销毁重试锁续租失败（TTL 会自清）：{}", ex.getMessage());
+				}
+				try {
+					this.leases.release(lease);
 				}
 				catch (RuntimeException ex) {
 					log.warn("释放会话销毁重试锁失败（TTL 会自清）：{}", ex.getMessage());
 				}
 			}
+			// 是否释放只看"本轮是否拿到 lease"：owner 每轮唯一 ⇒ 不存在"重入拿到的别人的那一任"。
 		}
 	}
 

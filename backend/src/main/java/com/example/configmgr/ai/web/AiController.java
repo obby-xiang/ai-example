@@ -103,9 +103,9 @@ import java.util.concurrent.RejectedExecutionException;
  * <tr><td>{@code POST /api/ai/runs/{runId}/resume}</td><td>续跑（重建完整历史 → 官方循环）</td></tr>
  * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
  * <tr><td>{@code DELETE /api/ai/session/{sessionId}}</td>
- * <td><b>完整会话销毁</b>：删除该会话全部 AI 数据（记忆/run 12 键/
+ * <td><b>完整会话销毁</b>：删除该会话全部 AI 数据（记忆/run 13 键/
  * 上下文/附件/反馈/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
- * 有活跃 run 时先取消、其 12 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
+ * 有活跃 run 时先取消、其 13 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
  * <tr><td>{@code GET /api/ai/health}</td><td>AI 可用性/模型名/记忆后端（供前端降级提示）</td></tr>
  * </table>
  *

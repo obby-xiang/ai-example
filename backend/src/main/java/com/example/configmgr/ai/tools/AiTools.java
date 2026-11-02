@@ -637,14 +637,14 @@ public class AiTools {
      * {@code normalizeActionArgs} 会把<b>缺失</b>的 {@code conditions} 补成 {@code {}}，所以缺失/null
      * 一律拒绝；有键但无有效条件（{@code fields:[]}、{@code scopeKeys:[]}）压平后等于导出全部，同样拒绝；
      * <b>恰好</b>空对象 {@code {}} 是<b>明确不设筛选</b>（前端 {@code condition-payload} 落成 {@code "{}"}、
-     * {@code ConditionAssessment} 判 {@code EXPLICIT_UNSET}）—— 用户答"无/不筛选/全部"时，对表单覆盖的
-     * 每个 {@code defCode} 各调用一次 {@code set_condition(defCode, {})}，不要重发 {@code SET_CONDITIONS}。
+     * {@code ConditionAssessment} 判 {@code EXPLICIT_UNSET}）—— 表单留空时直接 {@code confirm_step}；
+     * 只有非空文本明确"不筛选"或需要清空已有条件时，才由模型调用 {@code set_condition(defCode, {})}。
      * 未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
     @Tool(name = AiToolNames.SET_CONDITION, description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件的草案（只写前端草案，不写业务库条件；业务库由前端在下一步或启动作业前提交。"
             + "conditions 传真实条件（至少给 scopeKeys 或 fields 之一）；"
-            + "用户明确不设筛选（如回答“无”“不筛选”“全部”）时，对表单覆盖的每个 defCode 各调用一次 set_condition(defCode, {})"
-            + "（恰好空对象 = 明确不设，前端提交 {}），不要重发 SET_CONDITIONS；"
+            + "表单留空时直接 confirm_step，不调用本工具；只有非空文本明确不筛选或需要清空已有条件时"
+            + "才由模型调用 set_condition(defCode, {})；"
             + "conditions 缺失、null、fields:[]、scopeKeys:[] 仍会被拒绝；"
             + "只能对任务已勾选的配置项调用（未勾选/未绑定会被零副作用拒绝：先 select_definitions 或让用户勾选）；"
             + "同一 defCode + 完全相同入参的重复调用幂等复用（不再下发前端；不同值 = 修改，照常执行）；"
@@ -801,8 +801,8 @@ public class AiTools {
             + "SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，"
             + "模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；"
             + "宿主条件表回灌了非空文本时，必须先按文本调用 set_condition 形成草案再 confirm_step（业务库由前端在下一步提交）；"
-            + "回灌明确表示不筛选（如“无”“不筛选”“全部”）时，对表单覆盖的每个 defCode 各调用一次 set_condition(defCode, {})"
-            + "（恰好空对象 = 明确不设），不要重发 SET_CONDITIONS；"
+            + "留空或空对象时直接 confirm_step，不逐项调用 set_condition；只有非空文本明确不筛选或"
+            + "需要清空已有条件时才使用 set_condition(defCode, {})，不要重发 SET_CONDITIONS；"
             + "还没有草案时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
             + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
             + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"

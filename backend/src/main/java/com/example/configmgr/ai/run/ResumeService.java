@@ -451,7 +451,8 @@ public class ResumeService {
 	}
 
 	/**
-	 * 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口）。
+	 * 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口，也是
+	 * {@code GET /api/ai/runs} 的载荷）。
 	 *
 	 * <h2>两条口径（按调用线程有没有身份分）</h2>
 	 * <ul>
@@ -465,51 +466,66 @@ public class ResumeService {
 	 * <li>无归属裸成员不是当前写入形态：{@link RunStore#allRunIds()} 不再返回它们，
 	 *     {@link RunStore#pruneRunIndex()} 会顺手剔除。</li>
 	 * </ul>
+	 *
+	 * <p><b>一次发现只走一条路</b>：两个来源在任一调用线程上互斥（无身份 ⇒ 只走复合成员；有身份 ⇒
+	 * 只走 {@code allRunIds()}）。旧实现无条件先把 {@code allRunRecords()} 跑一遍、再对
+	 * {@code allRunIds()} 跑一遍 —— 在无身份的系统线程上后者恒为空，却仍要做一次
+	 * {@code SMEMBERS} + 逐成员 {@code EXISTS} 的全索引扫（白跑）；在请求线程上前者恒为空。
+	 * 这里按身份二分，发现结果只取一次。{@link #listRunsForRecovery()} 是同一发现的轻量投影。
 	 */
 	public List<Map<String, Object>> listRuns() {
+		return discoverRuns(false);
+	}
+
+	/**
+	 * <b>恢复扫描的发现面</b>：与 {@link #listRuns()} 同一份发现、同一身份隔离，但只取
+	 * {@link #recoveryRun} 的轻量投影。
+	 *
+	 * <p>为什么另开一个口而不是给 {@code listRuns()} 加参数：HTTP 列表要展示明细（台账计数、消息条数、
+	 * 心跳、逐条待决），扫描方却只问"该不该接管"。把两者分开后，恢复路径不读展示字段，
+	 * 也不会因为将来给列表加字段而悄悄把代价带进启动扫描。
+	 */
+	public List<Map<String, Object>> listRunsForRecovery() {
+		return discoverRuns(true);
+	}
+
+	/**
+	 * 发现本体（{@code recovery=true} ⇒ 轻量投影）。两个来源按调用线程身份二选一，见
+	 * {@link #listRuns()} 的"一次发现只走一条路"。
+	 */
+	private List<Map<String, Object>> discoverRuns(boolean recovery) {
 		List<Map<String, Object>> out = new ArrayList<>();
-		java.util.Set<String> seen = new java.util.LinkedHashSet<>();
-		for (RunKeyScope.IndexRef ref : systemRunRecords()) {
-			String key = ref.tenantId() + "/" + ref.userId() + "/" + ref.runId();
-			if (!seen.add(key)) {
-				continue;
-			}
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(ref.tenantId(), ref.userId())) {
-				Map<String, Object> item = listRun(ref.runId(), ref.tenantId(), ref.userId());
-				if (item != null) {
-					out.add(item);
-				}
-			}
-		}
-		// 当前身份（请求面）：键由线程身份决定，交给 store 的既有过滤
+		Set<String> seen = new LinkedHashSet<>();
 		TenantUser current = RequestContextUtils.currentOrNull();
+		if (current == null) {
+			for (RunKeyScope.IndexRef ref : this.store.allRunRecords()) {
+				appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), recovery);
+			}
+			return out;
+		}
+		// 请求面：键由线程身份决定，交给 store 的既有过滤（别人的成员既不返回也不判定死活）
 		for (String runId : this.store.allRunIds()) {
-			String key = (current == null ? "" : current.tenantId() + "/" + current.userId()) + "/" + runId;
-			if (!seen.add(key)) {
-				continue;
-			}
-			Map<String, Object> item = listRun(runId, current == null ? 0L : current.tenantId(),
-					current == null ? 0L : current.userId());
-			if (item != null) {
-				out.add(item);
-			}
+			appendDiscovered(out, seen, runId, current.tenantId(), current.userId(), recovery);
 		}
 		return out;
 	}
 
-	/**
-	 * 系统恢复面的候选（复合成员）：<b>无身份线程</b>上返回全部带身份成员；有身份（请求面）时返回空 ——
-	 * 列表端点只走 {@link RunStore#allRunIds()}（只看自己身份），<b>不</b>对别人的成员做活/死判定
-	 * （那会读别人的键，既是隔离问题也是 O(全索引) 的额外往返）。
-	 */
-	private List<RunKeyScope.IndexRef> systemRunRecords() {
-		if (RequestContextUtils.currentOrNull() != null) {
-			return List.of();
+	/** 单条发现在<b>该条记录身份</b>的作用域内构造；同一复合键只出现一次。 */
+	private void appendDiscovered(List<Map<String, Object>> out, Set<String> seen, String runId, long tenantId,
+			long userId, boolean recovery) {
+		if (!seen.add(tenantId + "/" + userId + "/" + runId)) {
+			return;
 		}
-		return this.store.allRunRecords();
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+			Map<String, Object> item = recovery ? recoveryRun(runId, tenantId, userId)
+					: listRun(runId, tenantId, userId);
+			if (item != null) {
+				out.add(item);
+			}
+		}
 	}
 
-	/** 单条列表项（在<b>该条记录身份</b>的作用域内构造）。 */
+	/** 单条列表项（在<b>该条记录身份</b>的作用域内构造；API 详情投影）。 */
 	private Map<String, Object> listRun(String runId, long tenantId, long userId) {
 		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
 				: this.store.get(runId);
@@ -531,10 +547,7 @@ public class ResumeService {
 		item.put("resumedBy", snapshot.getResumedBy());
 		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
 		item.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
-		item.put("pendingUnresolved", pendings.stream()
-			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-			.map(PendingToolCall::getToolCallId)
-			.toList());
+		item.put("pendingUnresolved", pendingIds(pendings, false));
 		item.put("ledgerCounts", this.store.ledgerCounts(runId));
 		// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
 		// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
@@ -545,8 +558,6 @@ public class ResumeService {
 			log.debug("发现态取消状态未知，按未取消继续展示 runId={}", runId);
 		}
 		long activeAtMs = activeAtMs(snapshot);
-		boolean zombie = RunSnapshot.RUNNING.equals(snapshot.getStatus())
-				&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge().toMillis();
 		// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
 		// 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
 		// SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
@@ -557,15 +568,74 @@ public class ResumeService {
 		item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
 		item.put("lastHeartbeatAtMs", heartbeatAtMs);
 		item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
-		List<String> unresolvedExternal = pendings.stream()
+		item.put("cancelled", cancelled);
+		item.put("zombieRunning", zombieRunning(snapshot, activeAtMs));
+		item.put("unresolvedExternal", pendingIds(pendings, true));
+		return item;
+	}
+
+	/**
+	 * <b>恢复扫描的轻量投影</b>：只保留"该不该接管"的判据字段。
+	 *
+	 * <h2>省掉的是什么、为什么能省</h2>
+	 * API 列表面（{@link #listRun}）要展示明细，因此带 {@code ledgerCounts}（整份台账
+	 * {@code LRANGE 0 -1}）、{@code messageCount}、心跳时刻与逐条 {@code pending} 载荷；
+	 * 恢复扫描只问"取消 / 终态 / 未决外部输入 / 僵尸 / 活动锚点"，这些字段一个也不读：
+	 * <ul>
+	 * <li>{@code ledgerCounts}：每轮一次台账全表读 + 解析，候选越多启动越慢（审计 S4）；</li>
+	 * <li>{@code lastBeatAtMs}：多一次键读，且只服务 {@code SUSPENDED} 的展示年龄 ——
+	 *     僵尸判据用的是<b>业务</b>活动锚点，心跳本来就不参与（R1-09），恢复侧不读它；</li>
+	 * <li>{@code messageCount}/{@code pending}：只看条数与详情，恢复判据只用 {@code pendingUnresolved}/
+	 *     {@code unresolvedExternal}（同一份 {@code pendings} 派生，不多读一次）。</li>
+	 * </ul>
+	 *
+	 * <p><b>安全判据一个不少</b>：{@code cancelled}（Redis 为准的取消旗标）、{@code status}（终态）、
+	 * {@code pendingUnresolved}/{@code unresolvedExternal}（未决外部项）、
+	 * {@code activeAtMs}（业务活动锚点）与 {@code zombieRunning}（超龄 RUNNING）都在。
+	 */
+	private Map<String, Object> recoveryRun(String runId, long tenantId, long userId) {
+		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
+				: this.store.get(runId);
+		if (snapshot == null) {
+			return null;
+		}
+		List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
+		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+			// 与列表面同一口径：UNKNOWN 按"未取消"继续，但绝不当成"已确认未取消"写回任何状态。
+			log.debug("发现态取消状态未知，按未取消继续扫描 runId={}", runId);
+		}
+		long activeAtMs = activeAtMs(snapshot);
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("tenantId", snapshot.getTenantId());
+		item.put("userId", snapshot.getUserId());
+		item.put("status", snapshot.getStatus());
+		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
+		item.put("activeAtMs", activeAtMs);
+		item.put("cancelled", cancelState == CancellationRegistry.CancelState.CANCELLED);
+		item.put("zombieRunning", zombieRunning(snapshot, activeAtMs));
+		item.put("pendingUnresolved", pendingIds(pendings, false));
+		item.put("unresolvedExternal", pendingIds(pendings, true));
+		return item;
+	}
+
+	/**
+	 * 未决条目 id（{@code externalOnly=true} ⇒ 只留外部项：确认门/前端工具）。
+	 * 两条投影共用，避免"列表面与恢复面各写一套过滤"慢慢走偏。
+	 */
+	private static List<String> pendingIds(List<PendingToolCall> pendings, boolean externalOnly) {
+		return pendings.stream()
 			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-			.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+			.filter(pending -> !externalOnly || !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
 			.map(PendingToolCall::getToolCallId)
 			.toList();
-		item.put("cancelled", cancelled);
-		item.put("zombieRunning", zombie);
-		item.put("unresolvedExternal", unresolvedExternal);
-		return item;
+	}
+
+	/** RUNNING 且业务活动已超龄 ⇒ 僵尸轮（两条投影同一判据、同一窗口）。 */
+	private boolean zombieRunning(RunSnapshot snapshot, long activeAtMs) {
+		return RunSnapshot.RUNNING.equals(snapshot.getStatus())
+				&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge().toMillis();
 	}
 
 	/**
@@ -3032,15 +3102,18 @@ public class ResumeService {
 	 * <p>与 {@code resuming} 表合用 = "本进程还有续跑任务在跑，且这一轮还没收尾"。读快照失败
 	 * （Redis 抖动）按"仍活着"处理：误判为假会提前放掉一个正在跑的轮的续跑权。
 	 *
-	 * <p><b>身份</b>：本判据在<b>续租线程</b>上执行（那里没有请求身份），因此必须按记录身份走
-	 * {@link RunStore#get(String, long, long)}；用线程身份读只会命中 legacy 键 ⇒ 恒 {@code null}
-	 * ⇒ 首拍即"驱动者已不在" ⇒ 主动还租、fence 不再推进（双驱动窗口）。
+	 * <p><b>轻量状态口（本批）</b>：判据跑在续租线程上（默认每 {@code lease.renew-interval} 一拍），
+	 * 以前每次 {@code get} 都把整份快照（含整窗 {@code messageJson}）反序列化成对象图，只为取一个
+	 * 状态串。现在统一走 {@link RunStore#snapshotNotTerminal(String, TenantUser)} —— 只读轻量状态键
+	 * （缺失才回退快照原文的顶层 {@code status}），口径不变：不存在/终态 ⇒ false；读失败 ⇒ true。
+	 *
+	 * <p><b>身份</b>：本判据在<b>续租线程</b>上执行（那里没有请求身份），因此必须把<b>记录身份</b>
+	 * 显式带进来；用线程身份读只会命中 legacy 键 ⇒ 恒 {@code null} ⇒ 首拍即"驱动者已不在" ⇒
+	 * 主动还租、fence 不再推进（双驱动窗口）。
 	 */
 	private boolean snapshotNotTerminal(String runId, TenantUser identity) {
 		try {
-			RunSnapshot snapshot = identity == null ? this.store.get(runId)
-					: this.store.get(runId, identity.tenantId(), identity.userId());
-			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
+			return this.store.snapshotNotTerminal(runId, identity);
 		}
 		catch (Exception ex) {
 			return true;

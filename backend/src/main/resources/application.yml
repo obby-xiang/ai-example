@@ -249,10 +249,21 @@ app:
       zombie-age: 180s
       zombie-margin: 60s
       max-on-startup: 10
+      # 扫描单飞（启动/运行期/手工共用一套，带续租）：
+      #   系统面（启动扫描 + 运行期兜底）共用 ai:lock:resume-scan；手工扫描按调用身份记
+      #   （ai:lock:resume-scan:<tenantId>:<userId>）—— 只处理当前身份，也不被别人的手工扫描挡住。
+      #   扫描期间由续租调度保持；本 TTL 只约束"持锁实例死掉后多久别人能接手"。
+      scan-lease-ttl: 60s
+      # 启动错峰：startup-delay 之后再加 [0, 本值] 的有界随机抖动（实现侧封顶 60s），
+      #   避免多实例滚动发布时同拍抢扫描单飞。只影响"什么时候扫"，不影响 zombie-age。
+      startup-jitter: 5s
+      # 单拍扫描的尝试上界（含失败；取消收尾/到期收敛/续跑每次动作算一次，且不小于 max-on-startup）。
+      #   产出预算仍是 max-on-startup；公平性靠轮转起点（下一拍从上一拍停下的位置之后开始）。
+      scan-max-attempts: 20
       # 批次8B（Task 12 Step 3）：运行期低频死轮扫描。
       #   启动扫描每实例只跑一拍；此后"进程死在模型调用中间 / 决策已落库却没人执行 / 重挂自愈那一下抖动"
       #   都会留下无人推进的 RUNNING/SUSPENDED 轮到下次重启。打开后按间隔扫一拍，判据与启动扫描同一份：
-      #   候选 = ResumeService#listRuns()，活/死 = RunLiveness.isDead（租约 + 本进程活订阅 + 业务活动锚点），
+      #   候选 = ResumeService#listRunsForRecovery()，活/死 = RunLiveness.isDead（租约 + 本进程活订阅 + 业务活动锚点），
       #   窗口 = 上面 zombie-age（180s，**不因本键缩短**）。终态（DONE/FAILED/CANCELLED）不复活，
       #   仍 PENDING 的外部项不碰（不绕开人审）。间隔只决定"多久看一眼"，不影响判死。
       #   关掉 = 只保留启动扫描与重挂自愈；同步入口 sweep() 仍可直接驱动。
@@ -295,8 +306,8 @@ app:
     # app.ai.lease.resource-ttl            60s     Lease#resourceTtl（:588）    L1 资源互斥锁有效期（不续租）
     # app.ai.lock.enabled                  true    Lock#enabled（:603）         资源互斥总开关（关掉只该用于单实例对照）
     # app.ai.session.purge-retry.periodic-enabled  true  Session#purgeRetry / PurgeRetry#periodicEnabled（:983 / :1000）
-    #   ↑ 只控"会话销毁 pending 的 30s 自动重试**是否注册**"；启动 SCAN 恢复（recoverOrphans）与
-    #     runOnce() 同步入口都不受它影响。单测在 test classpath 置 false（src/test/resources/application.properties）。
+    #   ↑ 只控"会话销毁 pending 的 30s 自动重试**是否注册**"（台账 = 到期 ZSET，不设 LIST 队列、无 SCAN
+    #     兜底）；runOnce() 同步入口不受它影响。单测在 test classpath 置 false（src/test/resources/application.properties）。
     # app.ai.sse.delivery-pool-size        8       Sse#deliveryPoolSize（:479） 共享投递池线程数（T3-5 压测定值）
     # app.ai.sse.delivery-queue-capacity   256     Sse#deliveryQueueCapacity（:506）  每订阅者实时队列容量
     # 说明：这 8 个键此前只活在代码里（配置面 grep 不到），运维无从发现"租约 30s / 续租 10s"这类

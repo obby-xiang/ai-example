@@ -64,11 +64,14 @@ import java.util.Set;
  * 因此写路径是<b>单键脚本/单键命令</b>，不做跨键 Lua：
  * <ul>
  * <li><b>登记</b>先 {@code ZADD} 候选到期项，再 SET pending，最后按 effective.nextAt 对齐；
- * SET 失败只留下幽灵成员（listDue 清理），不会留下"有台账、无到期项"的永久 410；</li>
- * <li>改期/失败/完成先维护 pending 事实（purgeId 条件 CAS），再 {@code ZADD}/{@code ZREM}；
+ * SET 失败只留下幽灵成员（listDue 清理），不会留下"有台账、无到期项"的永久 410；
+ * 既有台账坏 JSON 时，手工 DELETE 用单键 compare-by-raw 覆盖恢复；</li>
+ * <li>改期/失败先维护 pending 事实（purgeId 条件 CAS），再 {@code ZADD}；
  * 台账换主时只按新台账的 nextAt 对齐到期分，不改新台账；</li>
- * <li>{@code listDue} 对单个坏 JSON 成员只隔离该到期项并 WARN，pending 键保留；
- * pending 键读取失败仍整轮 fail-closed。</li>
+ * <li><b>完成</b>CAS_DEL 成功后 {@code ZREM}；由于 pending/ZSET 跨槽，ZREM 后必须按原键重读，
+ * 并发新台账已存在则按它的 nextAt 立即补回；</li>
+ * <li>{@code listDue} 对坏 JSON 成员<b>不摘除</b>，只隔离到 1h + 抖动未来并 WARN，
+ * 保留手工 DELETE 恢复入口；pending 键读取失败仍整轮 fail-closed。</li>
  * </ul>
  */
 @Slf4j
@@ -89,6 +92,15 @@ public class SessionPurgePendingStore {
 
 	/** 单条台账的自动尝试上限（与 {@code SessionPurgeRetryRunner#MAX_ATTEMPTS} 同源）。 */
 	public static final int MAX_AUTO_ATTEMPTS = 10;
+
+	/** 坏 JSON 台账的隔离退避基准（有界：1h，不永久摘除）。 */
+	static final long BAD_JSON_QUARANTINE_BASE_MS = 3_600_000L;
+
+	/** 坏 JSON 隔离抖动步长（1 分钟）。 */
+	static final long BAD_JSON_QUARANTINE_JITTER_STEP_MS = 60_000L;
+
+	/** 坏 JSON 隔离抖动步数：0..14 步（最多约 14 分钟），按成员键确定性散开。 */
+	static final int BAD_JSON_QUARANTINE_JITTER_STEPS = 15;
 
 	/** purgeId 条件更新（值包含 token 才 SET 新 JSON）。 */
 	private static final RedisScript<Long> CAS_SET = new DefaultRedisScript<>("""
@@ -126,6 +138,22 @@ public class SessionPurgePendingStore {
 			  return 0
 			end
 			return redis.call('DEL', KEYS[1])
+			""", Long.class);
+
+	/**
+	 * 坏 JSON 的手工恢复入口：<b>只有当前值仍是我们读到的那份坏值</b>才覆盖成新台账。
+	 *
+	 * <p>单键 compare-by-raw，避免并发已写入的合法新台账被这次手动 DELETE 覆盖。
+	 * 覆盖成功后仍按正常登记流程写到期项。
+	 */
+	private static final RedisScript<Long> REPLACE_IF_UNCHANGED = new DefaultRedisScript<>("""
+			-- PURGE_PENDING_REPLACE_IF_UNCHANGED
+			local v = redis.call('GET', KEYS[1])
+			if v ~= ARGV[1] then
+			  return 0
+			end
+			redis.call('SET', KEYS[1], ARGV[2])
+			return 1
 			""", Long.class);
 
 	private final StringRedisTemplate redis;
@@ -191,8 +219,9 @@ public class SessionPurgePendingStore {
 	/**
 	 * 登记结果。
 	 *
-	 * @param pending 最终生效的台账（可能是既有那条 —— 复用时 attempts/nextAt 原样保留）
-	 * @param created 本次是否由我新建（{@code false} = 复用既有台账，<b>回滚时不得删除它</b>）
+	 * @param pending 最终生效的台账（可能是既有那条 —— 手工 DELETE 会把 nextAt 重置为 now、
+	 *                耗尽的 attempts 归零；未耗尽的 attempts 保留）
+	 * @param created 本次是否由我新建/恢复（{@code false} = 复用既有台账，<b>回滚时不得删除它</b>）
 	 */
 	public record Registration(Pending pending, boolean created) {
 	}
@@ -241,8 +270,30 @@ public class SessionPurgePendingStore {
 			String raw = this.redis.execute(REGISTER_IF_ABSENT, List.of(key), json(candidate));
 			// REGISTER_IF_ABSENT 在"新建"时返回 candidate JSON、已存在时返回既有 JSON，raw 不为 null；
 			// created 必须按原语义由 purgeId 判定（同一 purgeId = 本次调用拥有该台账，可回滚）。
-			Pending effective = raw == null ? candidate : parse(sessionId, raw);
-			boolean created = purgeId.equals(effective.purgeId());
+			Pending effective;
+			boolean created;
+			if (raw == null) {
+				effective = candidate;
+				created = purgeId.equals(effective.purgeId());
+			}
+			else {
+				try {
+					effective = parse(sessionId, raw);
+					created = purgeId.equals(effective.purgeId());
+				}
+				catch (RuntimeException parseEx) {
+					// 坏 JSON 的手工恢复入口：只有当前值仍是刚读到的坏值才覆盖，避免覆盖并发合法台账。
+					log.warn("会话销毁 pending JSON 损坏 sessionId={}（手动 DELETE 覆盖恢复，保留可恢复入口）：{}",
+							sessionId, parseEx.getMessage());
+					Long replaced = this.redis.execute(REPLACE_IF_UNCHANGED, List.of(key), raw, json(candidate));
+					if (replaced == null || replaced <= 0L) {
+						throw new AiStateUnavailableException(
+								"无法恢复损坏的会话销毁 pending（并发变更）sessionId=" + sessionId);
+					}
+					effective = candidate;
+					created = true;
+				}
+			}
 			if (!created) {
 				// 3a) 手动 DELETE 覆盖自动退避/耗尽/复核：nextAt 重置为 now，立即可推进。
 				//     未耗尽的 attempts 原样保留（重复 DELETE 不白送自动重试预算）；
@@ -318,8 +369,9 @@ public class SessionPurgePendingStore {
 	 * 记录里的 {@code nextAtMs} 比分数更晚（改期 CAS 成功但 ZADD 失败）时按记录纠正分数，
 	 * 不提前执行 —— 退避语义以台账事实为准。
 	 *
-	 * <p><b>单成员坏 JSON 隔离</b>（I6）：一个成员反序列化失败只摘掉该到期成员并 WARN，
-	 * <b>不中断整轮</b>，也<b>不删 pending 键</b>（台账事实保留，守卫继续 fail-closed）。
+	 * <p><b>单成员坏 JSON 隔离</b>：不摘除到期成员、不改 pending 键，只把它推到
+	 * <b>1h + 确定性抖动</b>的未来并 WARN。这样既不阻断其他租户，也保留可恢复入口
+	 * （手工 DELETE 可覆盖坏 JSON，见 {@link #register}）。
 	 * pending 键读取失败（Redis 不可用）仍然整轮抛出 —— "读不出来"不能当成"没有台账"。
 	 */
 	public List<Pending> listDue(long nowMs, int limit) {
@@ -350,10 +402,11 @@ public class SessionPurgePendingStore {
 				throw ex;
 			}
 			catch (RuntimeException ex) {
-				// 单成员 JSON 损坏：隔离该到期成员（不删 pending 键），其余到期项继续处理。
-				log.warn("会话销毁 pending JSON 损坏 member={}（隔离到期项、保留台账 fail-closed）：{}",
+				// 单成员 JSON 损坏：不摘除、不改 pending；只把到期分推到有界未来并 WARN，
+				// 保留手工 DELETE 的覆盖恢复入口，其余到期项继续处理。
+				log.warn("会话销毁 pending JSON 损坏 member={}（隔离到未来、保留台账与恢复入口）：{}",
 						member, ex.getMessage());
-				removeDueMember(member);
+				quarantineDueMember(member, nowMs);
 				continue;
 			}
 			if (pending == null) {
@@ -490,8 +543,12 @@ public class SessionPurgePendingStore {
 	/**
 	 * 完成：仅当 pending 仍属于该 purgeId 时删除 pending 与到期项。
 	 *
-	 * <p>到期项删除失败只 WARN：台账已经删除，残留成员会被下一次 {@link #listDue} 当作
-	 * "读不到记录"清掉，不能因此把一次已完成的销毁报成失败。
+	 * <p>pending 键与 ZSET 不同槽，无法把 DEL+ZREM 做成同一脚本：CAS_DEL 成功后、ZREM 前可能有
+	 * 并发 {@link #register} 刚写了一条新台账并放了到期项，ZREM 会误删它。因此 ZREM 之后必须
+	 * <b>按同一把键（记录身份）重读</b>：新台账已存在就立即按它的 {@code nextAtMs} 补回到期分；
+	 * 重读失败则把到期项隔离到未来，避免新台账永久 410。
+	 *
+	 * <p>到期项清理/补回失败只 WARN：台账已经按本 purgeId 删除，不能因此把一次已完成的销毁报成失败。
 	 *
 	 * @return true = 已删除（或已不存在）；false = pending 已换主，旧重试不得动它
 	 */
@@ -512,10 +569,38 @@ public class SessionPurgePendingStore {
 				return false;
 			}
 			removeDueMember(key);
+			restoreDueAfterComplete(key, sessionId);
 			return true;
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException("删除会话销毁 pending 失败 sessionId=" + sessionId, ex);
+		}
+	}
+
+	/**
+	 * CAS_DEL+ZREM 之后的竞态收口：按<b>原键</b>重读（key 已带记录身份），
+	 * 若并发新台账已存在，立即按它的 nextAt 把到期项补回。
+	 */
+	private void restoreDueAfterComplete(String key, String sessionId) {
+		Pending latest;
+		try {
+			latest = readAt(key, sessionId);
+		}
+		catch (RuntimeException ex) {
+			// 重读失败/坏 JSON：无法确认新台账，把该成员的到期分隔离到未来，保留恢复入口。
+			log.warn("完成删除后复核台账失败 key={}（到期项隔离到未来，保留恢复入口）：{}", key, ex.getMessage());
+			quarantineDueMember(key, System.currentTimeMillis());
+			return;
+		}
+		if (latest == null) {
+			return;
+		}
+		try {
+			schedule(key, latest.nextAtMs(), "完成竞态补回");
+		}
+		catch (RuntimeException ex) {
+			log.warn("完成删除后补回新台账到期分失败 key={}（台账保留，等待下次登记/操作自愈）：{}", key,
+					ex.getMessage());
 		}
 	}
 
@@ -537,6 +622,27 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			log.debug("纠正会话销毁重试到期分失败 key={}：{}", key, ex.getMessage());
+		}
+	}
+
+	/**
+	 * 坏 JSON / 无法确认的到期成员：推到 <b>1h + 确定性抖动</b>的未来。
+	 *
+	 * <p>不摘除成员、不改 pending：既不阻断其他租户，也保留手工 DELETE 覆盖恢复的入口。
+	 * 同一键每次散列到同一刻度，测试/排障可复现。
+	 */
+	private void quarantineDueMember(String key, long nowMs) {
+		if (key == null || key.isBlank()) {
+			return;
+		}
+		int step = Math.floorMod(key.hashCode(), BAD_JSON_QUARANTINE_JITTER_STEPS);
+		try {
+			this.redis.opsForZSet().add(DUE_KEY, key, nowMs + BAD_JSON_QUARANTINE_BASE_MS
+					+ step * BAD_JSON_QUARANTINE_JITTER_STEP_MS);
+		}
+		catch (RuntimeException ex) {
+			// 隔离写失败也不摘除：下轮仍会取到并重试，绝不静默变成永久 410。
+			log.warn("隔离坏 JSON 到期项失败 key={}（下轮仍会重试，不永久摘除）：{}", key, ex.getMessage());
 		}
 	}
 

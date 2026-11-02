@@ -19,7 +19,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -49,8 +48,9 @@ import java.util.function.BooleanSupplier;
  * {@link AcquireOutcome#UNAVAILABLE} 并让 {@code leaseOk=false} —— <b>显式降级</b>而非让 NPE 落进
  * 某个 catch；调用方的契约是"拿不到租约 ⇒ 走进程内互斥"（单实例仍然正确）。
  * 不抛异常，是因为租约设施不可用不该把业务动作一起拖垮；</li>
- * <li><b>续租调度</b>（{@link #markDriving}）：内置单线程 {@link ScheduledExecutorService}
- * 按 {@code app.ai.lease.renew-interval}（默认 10s）续租，直到 {@link #release}；
+ * <li><b>续租调度</b>（{@link #markDriving}）：内置<b>小型有界调度池</b>（固定 2~4 条线程，
+ * {@link java.util.concurrent.ScheduledThreadPoolExecutor} + 守护线程）按 {@code app.ai.lease.renew-interval}（默认 10s）续租，
+ * 直到 {@link #release}；单条慢命令只占一条线程，不会让其它轮次的续租跟着过期；
  * 续租失败即放弃进程内视图（下一拍抢租的实例可以接管）。</li>
  * </ul>
  *
@@ -320,6 +320,17 @@ public class LeaseService {
 	/** 恒真存活判据（{@link #markDriving(Lease)} 的默认口径：调用方自己负责在合适的时候 release）。 */
 	private static final BooleanSupplier ALWAYS_ALIVE = () -> true;
 
+	/**
+	 * 存活判据的降频间隔（按续租拍数计）：每 N 拍才真的执行一次调用方判据。
+	 *
+	 * <p>为什么可以降频：判据通常是"读一次快照/状态"（{@code snapshotNotTerminal}），而续租本身
+	 * 每 {@code renew-interval}（10s）就发生一次 —— 每拍都判是多付一份读。轮次收尾后最迟
+	 * {@code N × renew-interval}（默认 30s）就会停续租并归还租约：这里<b>只影响"主动归还"的时点</b>，
+	 * 与租约 TTL（默认 30s）同量级；即便判据延后一拍，租约自然到期同样能让接管发生，
+	 * 不会把已收尾的轮永远续着。<b>续租本身不降频</b>：判据只决定"还要不要续"，绝不替代续租。
+	 */
+	private static final int ALIVE_CHECK_EVERY_TICKS = 3;
+
 	/** 一份已到手的租约：{@code key} + 号 + 主人。 */
 	public record Lease(String key, long epoch, String owner) {
 
@@ -331,7 +342,7 @@ public class LeaseService {
 	}
 
 	/**
-	 * 续租调度缝（默认实现 = 单线程 {@link ScheduledExecutorService}）。
+	 * 续租调度缝（默认实现 = 小型有界 {@link java.util.concurrent.ScheduledThreadPoolExecutor}）。
 	 *
 	 * <p>之所以是接口而不是直接捏一个 executor：续租是"到点才发生"的行为，用例要断言
 	 * "按 10s 的间隔续一次、release 之后不再续"，只能靠可控 tick（真线程要 sleep 真实时间，
@@ -954,17 +965,67 @@ public class LeaseService {
 	 * @param identity 该轮记录身份（{@code null} = 记录没有身份：判据按 legacy 口径执行）
 	 */
 	public void markDriving(Lease lease, BooleanSupplier alive, TenantUser identity) {
+		markDriving(lease, alive, identity, null);
+	}
+
+	/**
+	 * 开始续租，并<b>显式指定续租时使用的 TTL</b>（性能/可靠性专项：会话销毁重试的全局锁）。
+	 *
+	 * <p>为什么需要它：{@link #markDriving(Lease, BooleanSupplier, TenantUser)} 用
+	 * {@code app.ai.lease.ttl}（默认 30s）续期。有的调用方<b>抢锁时用的是更长的 TTL</b>
+	 * （如 {@code SessionPurgeRetryRunner} 的 300s 全局锁）—— 用默认 TTL 续期等于把锁的寿命
+	 * <b>直接缩短</b>（下一次续租就 {@code PEXPIRE} 到 30s），与"加续租是为了不丢锁"的目的相反。
+	 * 本重载要求续租 TTL 与抢锁 TTL 一致；{@code renewTtl == null} 保持默认口径。
+	 *
+	 * @param renewTtl 续租时写回的 TTL（{@code null}/0/负 = 用 {@code app.ai.lease.ttl}）
+	 */
+	public void markDriving(Lease lease, BooleanSupplier alive, TenantUser identity, Duration renewTtl) {
 		if (lease == null) {
 			return;
 		}
 		BooleanSupplier check = alive == null ? ALWAYS_ALIVE : alive;
+		BooleanSupplier throttled = throttled(check);
 		Duration interval = this.properties.getLease().getRenewInterval();
 		// R9：登记用 computeIfAbsent（原子）—— 旧实现是"containsKey 判空 → schedule → put"，
 		// 两个线程同时来到会各自排一个续租任务，后 put 的那个把先前的 handle 覆盖成<b>孤儿任务</b>
 		// （永远取消不掉，release 之后还在续租）。
 		// 批③a：登记键 = (key, owner) —— 同键不同 owner 各有一个续租任务，互不覆盖。
 		this.driving.computeIfAbsent(viewKey(lease.key(), lease.owner()),
-				key -> this.scheduler.schedule(() -> renewTick(lease, check, identity), interval));
+				key -> this.scheduler.schedule(() -> renewTick(lease, throttled, identity, renewTtl), interval));
+	}
+
+	/**
+	 * 存活判据的<b>降频包装</b>（{@link #ALIVE_CHECK_EVERY_TICKS}）。
+	 *
+	 * <p>语义：
+	 * <ul>
+	 * <li>首拍必判（不缓存任何"活"的假设）；</li>
+	 * <li>判过一次"真"之后，接下来 N-1 拍直接复用"真"，不再执行调用方判据；</li>
+	 * <li>判过一次"假"之后<b>不再问</b>（续租任务下一拍就会停并归还租约，没有"复活"语义）；</li>
+	 * <li>判据抛异常不在这里吞：由 {@link #renewTickInScope} 折成"仍活着并照常续租"
+	 *     —— 判据读失败不得让租约停止续期。</li>
+	 * </ul>
+	 */
+	private static BooleanSupplier throttled(BooleanSupplier alive) {
+		if (alive == null) {
+			return ALWAYS_ALIVE;
+		}
+		java.util.concurrent.atomic.AtomicInteger ticks = new java.util.concurrent.atomic.AtomicInteger();
+		java.util.concurrent.atomic.AtomicReference<Boolean> lastVerdict = new java.util.concurrent.atomic.AtomicReference<>();
+		return () -> {
+			Boolean cached = lastVerdict.get();
+			if (Boolean.FALSE.equals(cached)) {
+				return false;
+			}
+			if (Boolean.TRUE.equals(cached)
+					&& ticks.incrementAndGet() % ALIVE_CHECK_EVERY_TICKS != 0) {
+				return true;
+			}
+			boolean verdict = alive.getAsBoolean();
+			ticks.set(0);
+			lastVerdict.set(verdict);
+			return verdict;
+		};
 	}
 
 	/**
@@ -1016,23 +1077,35 @@ public class LeaseService {
 		}
 	}
 
-	private void renewTick(Lease lease, BooleanSupplier alive, TenantUser identity) {
+	private void renewTick(Lease lease, BooleanSupplier alive, TenantUser identity, Duration renewTtl) {
 		// 判据 + 续租整拍都在<b>记录身份</b>里执行：续租线程没有请求身份，而判据读的是身份定键的数据。
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			renewTickInScope(lease, alive);
+			renewTickInScope(lease, alive, renewTtl);
 		}
 	}
 
-	private void renewTickInScope(Lease lease, BooleanSupplier alive) {
+	private void renewTickInScope(Lease lease, BooleanSupplier alive, Duration renewTtl) {
 		try {
-			if (!alive.getAsBoolean()) {
+			// 判据异常 = "这一拍问不出来"，不是"驱动者已不在"：按仍活着处理并照常续租。
+			// （旧实现让异常直接落到外层 catch ⇒ 跳过整拍续租 —— 一次判据读失败就可能丢租。）
+			boolean driving;
+			try {
+				driving = alive.getAsBoolean();
+			}
+			catch (RuntimeException ex) {
+				log.debug("续租存活判据异常 key={}（按仍活着处理并照常续租）：{}", lease.key(), ex.getMessage());
+				driving = true;
+			}
+			if (!driving) {
 				log.info("续租判据转假，停续租并归还租约 key={} owner={} epoch={}（驱动者已不在：轮终态/线程收尾）",
 						lease.key(), lease.owner(), lease.epoch());
 				release(lease);
 				stopDriving(lease.key(), lease.owner());
 				return;
 			}
-			RenewOutcome outcome = renewState(lease, this.properties.getLease().getTtl());
+			Duration ttl = renewTtl == null || renewTtl.isZero() || renewTtl.isNegative()
+					? this.properties.getLease().getTtl() : renewTtl;
+			RenewOutcome outcome = renewState(lease, ttl);
 			if (outcome == RenewOutcome.RENEWED) {
 				return;
 			}
@@ -1260,15 +1333,44 @@ public class LeaseService {
 	}
 
 	/**
-	 * 默认续租调度：单线程 + 守护线程（不阻止 JVM 退出），首次续租在 {@code interval} 之后。
+	 * 默认续租调度：<b>小型有界线程池</b>（固定线程数，守护线程，不阻止 JVM 退出），首次续租在
+	 * {@code interval} 之后。
+	 *
+	 * <h2>为什么不是单线程</h2>
+	 * 旧实现是 {@code newSingleThreadScheduledExecutor}：所有租约的续租任务共用一条线程。
+	 * 一个 Redis 命令卡到 {@code spring.data.redis.timeout}（2s）时，<b>其它所有轮次</b>的续租都被
+	 * 排在它后面 —— 一轮的网络抖动会波及其它轮的租约到期（丢租、被接管，双驱动/双跑）。
+	 * 改成固定 2~4 条线程后，单条慢命令只占一条线程，其它租约照常续期。
+	 *
+	 * <h2>为什么仍然是"有界"</h2>
+	 * 线程数固定（不随租约数增长）；租约任务本身由 {@code ScheduledThreadPoolExecutor} 的延迟队列承载
+	 * —— 任务数 = 本进程持有的租约数（业务上界），且同一任务不会与自己并发（fixed-rate 的下一次在
+	 * 上一次结束后才排）。{@code setRemoveOnCancelPolicy} 让 {@code release} 后的任务立刻出队，
+	 * 避免短命租约在队列里留垃圾。
 	 */
 	static final class DefaultRenewScheduler implements RenewScheduler {
 
-		private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-			Thread thread = new Thread(runnable, "ai-lease-renew");
-			thread.setDaemon(true);
-			return thread;
-		});
+		/** 线程数上限：续租是 I/O 等待型，2~4 条足够覆盖"个别命令卡住"的场景。 */
+		private static final int MAX_THREADS = 4;
+
+		private static final java.util.concurrent.atomic.AtomicInteger THREAD_SEQ = new java.util.concurrent.atomic.AtomicInteger();
+
+		private final ScheduledExecutorService executor;
+
+		DefaultRenewScheduler() {
+			int threads = Math.max(2, Math.min(MAX_THREADS, Runtime.getRuntime().availableProcessors()));
+			java.util.concurrent.ScheduledThreadPoolExecutor pool = new java.util.concurrent.ScheduledThreadPoolExecutor(
+					threads, runnable -> {
+						Thread thread = new Thread(runnable, "ai-lease-renew-" + THREAD_SEQ.incrementAndGet());
+						thread.setDaemon(true);
+						return thread;
+					});
+			// 取消即出队（否则每次 release 都留下一个空转的已取消任务直到原定触发时刻）。
+			pool.setRemoveOnCancelPolicy(true);
+			// 停机后不再执行剩余延迟任务（与旧实现的 shutdownNow 语义一致）。
+			pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+			this.executor = pool;
+		}
 
 		@Override
 		public AutoCloseable schedule(Runnable task, Duration interval) {

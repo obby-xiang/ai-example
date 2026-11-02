@@ -1,9 +1,10 @@
 package com.example.configmgr.ai.memory;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import org.slf4j.Logger;
@@ -12,14 +13,18 @@ import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.data.redis.connection.RedisClusterConnection;
+import org.springframework.data.redis.connection.RedisClusterNode;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import com.example.configmgr.ai.session.SessionPurgeGuard;
-import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
-import com.example.configmgr.ai.tenant.TenantUser;
 
 /**
  * 基于 Spring Data Redis 普通数据结构实现的官方 {@link ChatMemoryRepository} SPI 扩展（SP-01c）。
@@ -58,12 +63,12 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * <li>{@code chat:mem:<tenantId>:<userId>:{<escapedId>}:gen} — <b>清空代次键</b>（STRING，tombstone）。
  * 同样共用该 hash tag；清空/销毁时 {@code INCR} 它（<b>不删</b>），使"清空前读到代次"的在飞写回
  * 在之后的每一次 CAS（含重试）都被判作废。</li>
- * <li>{@code chat:mem:__ids__} — Redis SET，会话 id 索引，成员是<b>复合成员</b>
- * {@code tenantId/userId/<conversationId>}（无身份过渡期写旧形 id）：枚举按成员归属过滤，
- * 不遍历租户列表。<b>刻意不加 hash tag</b>：给全局索引
- * 打 tag 会把所有会话压进同一个 slot（自造热点）。索引与数据键天然分属不同槽，因此不做跨键 Lua，
- * 只用单键命令序列。</li>
  * </ul>
+ * <p><b>已退役：{@code chat:mem:__ids__} 全局会话索引</b>。它曾是 {@code SADD/RENAME} 之后的一笔
+ * 每次保存都写的额外往返，但<b>生产代码没有任何读者</b>（只有单测/实验在看它）；热路径上的
+ * 唯一效果是"每写一次记忆就多一次跨槽写"。现在不再写入它（{@link #CONVERSATION_IDS_KEY} 仅保留
+ * 常量与运维清账口径），{@link #findConversationIds()} 改为按<b>当前身份的数据键命名空间</b>有界扫描
+ * —— SPI 契约仍然成立（返回真实 id，不返回"假空"、不抛"未实现"），但没有索引后它只是诊断面。</p>
  *
  * <h2>语义与失败安全</h2>
  * <ul>
@@ -81,29 +86,31 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * （含别的 run 的块），以调用方读到的 {@link MemoryWindowSnapshot}（版本 + 代次）为 CAS 基线<b>一次</b>
  * 落盘；基线已变 ⇒ <b>放弃</b>（返回 {@code false}，不重试、不重算）。绝不"整窗覆盖 + CAS 重试" ——
  * 重试仍是旧内容，会把并发写者这期间写入的新消息覆盖掉。</li>
- * <li><b>索引后置</b>：RENAME 成功后才 {@code SADD chat:mem:__ids__}。索引更新失败只 WARN
- * （带 conversationId / 数据键，便于对账），<b>不回退已提交的新历史</b>；下一次成功保存会自愈。</li>
+ * <li><b>不再维护全局索引</b>（见上）：落盘成功即完成，热路径不再多一次 {@code SADD}/跨槽写
+ * —— 已提交的新历史不依赖任何索引面。</li>
  * <li><b>清空 = 一条同槽脚本</b>（{@code DEL} 数据键 + {@code INCR :gen} + {@code INCR :ver} + 续 TTL，
- * 三个键同 hash tag ⇒ 不跨槽）+ 索引单键 SREM。两个计数器<b>不删</b>（删掉就把代次/
+ * 三个键同 hash tag ⇒ 不跨槽）。两个计数器<b>不删</b>（删掉就把代次/
  * 版本退回 0，清空前的在飞写又能对上）—— 只续会话 TTL。脚本是刻意的：分开执行会留下"代次已推进、
- * 数据未删"的中间态，那期间启动的写者能把旧历史原样写回来。SREM 失败只 WARN，数据删除结果不受影响。</li>
+ * 数据未删"的中间态，那期间启动的写者能把旧历史原样写回来。</li>
  * <li><b>销毁与写回的交错</b>：{@code saveAll} 入口问一次销毁守卫，RENAME 之后<b>再复检一次</b>
  * （复检放在 {@code finally}：RENAME 可能<b>服务端已生效、回包丢失</b>，那时异常虽已抛出，落地仍要撤销）
- * —— 入口通过之后销毁才装守卫的窗口里，复检命中即删掉该会话的记忆键并<b>不写索引</b>；异常照旧上抛。
+ * —— 入口通过之后销毁才装守卫的窗口里，复检命中即删掉该会话的记忆键；异常照旧上抛。
  * 复检读失败按"已装守卫"处理（fail-closed），否则销毁后仍可能复活一整窗历史。</li>
  * <li><b>空 / null 列表</b>等价于"清空该会话记忆"，委托 {@link #deleteByConversationId}。</li>
  * <li><b>空白 conversationId 拒绝</b>：空串 / 纯空白 / null 在触碰 Redis 前抛
  * {@link IllegalArgumentException}（空 id 会产生空 hash tag，Cluster 下 staging/final 不同槽）。</li>
  * </ul>
  *
- * <h2>全局索引的最终一致性</h2>
+ * <h2>会话枚举（SPI 的 {@link #findConversationIds()}）</h2>
  * <ul>
- * <li><b>stale 成员</b>（SREM 失败、或数据 TTL 先到期）：{@link #findConversationIds()} 会把
- * 数据键不存在的成员移除，因此删除后立即判为"不在索引"。</li>
- * <li><b>缺失成员</b>（RENAME 成功但 SADD 失败）：索引不会自动发现它；历史按 id 仍可读，
- * 下一次成功 {@link #saveAll}/{@link #upsertRun} 会重新 SADD。日志中的 conversationId / 数据键即为对账线索。</li>
- * <li>调用方<strong>不需要额外 {@code clear()}</strong>：删除语义已含数据键清理与索引 SREM；索引
- * 异常由上述惰性路径/下次保存收敛。</li>
+ * <li>没有全局索引之后的唯一真实来源是<b>数据键本身</b>：按<b>当前身份</b>的命名空间
+ * {@code chat:mem:<tenantId>:<userId>:{<escapedId>}} 做<b>有界 SCAN</b>（Cluster 下逐 master 节点扫描），
+ * 只接受"以右花括号结尾"的数据键（排除 staging / :ver / :gen），反转义 id 后去重排序。</li>
+ * <li><b>为什么不返回空表/抛错</b>：那是 SPI 的调用方（会话列举、诊断）会当成"没有会话"的假事实，
+ * 抛 {@code UnsupportedOperationException} 更会让整条调用链失败；而数据键确实携带着 id，
+ * 扫描是唯一诚实的答案。</li>
+ * <li><b>扫描失败只降级</b>：SCAN 在超大库上是 O(keyspace) 的重操作，本方法因此只作诊断/低频面
+ * （生产主链路不调用它）；失败时返回本次已扫描到的结果并 WARN，不伪装成"空库"。</li>
  * </ul>
  *
  * <h2>无身份命名空间</h2>
@@ -119,10 +126,10 @@ import com.example.configmgr.ai.tenant.TenantUser;
  * 仍是最后写入者胜。</li>
  * <li>整窗替换（压缩写回）被并发写顶掉时<b>这一轮的压缩结果不落窗口</b>（只进台账/快照）：
  * 下一轮重新压缩；窗口内容因此在两轮之间保持"未压"的旧形态，属预期（不允许覆盖新消息换压缩）。</li>
- * <li>客户端超时但服务端 RENAME 已成功：调用方看到失败且跳过 SADD，数据已提交、索引缺失，
- * 由下次保存自愈。</li>
- * <li>删除的 SREM 与并发保存的 SADD 仍有窄窗口：SREM 可能抹掉刚 SADD 的活成员，由下次保存自愈；
- * 不引入跨槽 Lua 换取索引的强一致。</li>
+ * <li>客户端超时但服务端 RENAME 已成功：调用方看到失败，但数据已提交（下一次读取即可见）；
+ * 不再有"索引缺失"这一层需要自愈的面。</li>
+ * <li>会话枚举（{@link #findConversationIds()}）是 O(keyspace) 的 SCAN（见类注释）：只作诊断/低频面，
+ * 不适合放进请求热路径；没有全局索引意味着"新增会话立即出现在枚举里"依赖数据键本身（落盘即存在）。</li>
  * <li>销毁与写回的交错只能"事后撤销"：复检命中后那次撤销 DEL 本身失败时仍会留一份带 TTL 的键
  * （WARN 里带键名，由销毁重试对账补删）——不为此引入跨键事务。</li>
  * </ul>
@@ -133,6 +140,16 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 
 	public static final String KEY_PREFIX = "chat:mem:";
 
+	/**
+	 * 历史全局会话索引键（{@code chat:mem:__ids__}）—— <b>已退役</b>。
+	 *
+	 * <p>本类<b>不再写它</b>：生产代码没有任何读者（只有单测/实验在读），而每次记忆落盘都多一次
+	 * {@code SADD}/跨槽写是纯热路径开销。常量保留：① 运维/清账时仍要认识这个键；② 既有用例的
+	 * 编译面不受影响。会话枚举改由 {@link #findConversationIds()} 扫描数据键命名空间完成。
+	 *
+	 * @deprecated 无读者、无写入；不要在新代码中引用
+	 */
+	@Deprecated
 	static final String CONVERSATION_IDS_KEY = "chat:mem:__ids__";
 
 	/** staging 键前缀；与 final 键共享 {@code {<escapedId>}} hash tag。 */
@@ -225,6 +242,9 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** 合并写的最多重试次数（每次重试都重读窗口再合并）。 */
 	static final int MERGE_ATTEMPTS = 5;
 
+	/** {@link #findConversationIds()} 的 SCAN 批量（每次往返探测的键数；诊断面不需要更激进）。 */
+	static final int SCAN_COUNT = 256;
+
 	private final StringRedisTemplate redis;
 
 	private final MessageJsonCodec codec;
@@ -295,47 +315,6 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	/**
-	 * 全局会话索引成员：有身份 = {@code tenantId/userId/<conversationId>}；无身份 = 旧形 {@code <conversationId>}。
-	 *
-	 * <p>索引本身是全局键（刻意不打 tag，避免把所有会话压进一个槽），身份因此只能记在成员上 ——
-	 * 枚举侧按成员里的归属过滤，<b>不通过遍历租户列表</b>发现会话。
-	 */
-	static String indexMember(String conversationId) {
-		String segment = TenantKeyScope.currentSegment();
-		if (segment.isEmpty()) {
-			return requireId(conversationId);
-		}
-		// 身份段 "1:101:" → 复合成员 "1/101/<id>"（设计稿的 tenantId/userId/recordId 口径）
-		return segment.replace(':', '/') + requireId(conversationId);
-	}
-
-	/** 索引成员的身份（不是复合成员 / 无归属老成员 ⇒ {@code null}）。 */
-	private static TenantUser memberIdentity(String member) {
-		int first = member.indexOf('/');
-		int second = first < 0 ? -1 : member.indexOf('/', first + 1);
-		if (first <= 0 || second <= first + 1) {
-			return null;
-		}
-		try {
-			long tenantId = Long.parseLong(member.substring(0, first));
-			long userId = Long.parseLong(member.substring(first + 1, second));
-			if (tenantId <= 0L || (userId <= 0L && userId != TenantUser.SYSTEM_USER_ID)) {
-				return null;
-			}
-			return new TenantUser(tenantId, userId);
-		}
-		catch (NumberFormatException ex) {
-			return null;
-		}
-	}
-
-	/** 复合索引成员里的 conversationId；不是复合成员返回 {@code null}。 */
-	private static String memberConversationId(String member) {
-		int second = member.indexOf('/', member.indexOf('/') + 1);
-		return second < 0 ? null : member.substring(second + 1);
-	}
-
-	/**
 	 * staging 键：{@code chat:mem:staging:{<escapedId>}:<uuid>}。
 	 *
 	 * <p>hash tag 必须放在 staging 前缀之后、uuid 之前 —— 这样它与 final 键
@@ -375,66 +354,108 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	/**
-	 * 列出<b>当前归属</b>仍存活的会话 id。
+	 * 列出<b>当前归属</b>仍存活的会话 id（SPI 契约面，见类注释"会话枚举"）。
 	 *
-	 * <p>索引成员是复合成员 {@code tenantId/userId/<conversationId>}：枚举侧按成员里的身份过滤
-	 * （不是"先枚举租户再逐租户问"）。无身份上下文只认无身份内部成员（{@code <conversationId>}），
-	 * 带身份的路径因此<b>永远看不到</b>无归属的老成员。
+	 * <p><b>不再读全局索引</b>（{@code chat:mem:__ids__} 已退役：无生产读者、写入是热路径负担）。
+	 * 改为按<b>当前身份</b>的数据键命名空间做有界 SCAN：
+	 * <ul>
+	 * <li>pattern = 数据键前缀（{@code chat:mem:<tenantId>:<userId>:}，无身份上下文为 {@code chat:mem:}）
+	 *     加一个通配的 hash tag（以左花括号开头）；</li>
+	 * <li>只接受以右花括号结尾的键 —— 数据键的 tag 就是这个 id；{@code :ver} / {@code :gen} /
+	 *     {@code staging:} 三类键因此不会混进来；</li>
+	 * <li>反转义 hash tag 内的 id，去重、排序后返回（真实 id，不是"假空"）；</li>
+	 * <li>Cluster 下逐 <b>master 节点</b>扫描（{@link RedisClusterConnection#scan}）—— 单节点
+	 *     {@code SCAN} 看不到别的槽，直接调 {@code template.scan} 在集群上会抛不支持；</li>
+	 * <li>扫描失败只 WARN 并返回本次已扫描到的结果：这是诊断/低频面，不能因一次 MOVED/超时
+	 *     伪装成"没有会话"，也不该把调用链打断。</li>
+	 * </ul>
+	 *
+	 * <p><b>成本与口径</b>：SCAN 是 O(keyspace) 的遍历，本方法因此<b>只服务 SPI/诊断</b>（生产主链路
+	 * 不调用）。返回的是<b>数据键仍在</b>的会话（租户/用户命名空间由键形保证隔离，不跨身份探测）。
 	 */
 	@Override
 	public List<String> findConversationIds() {
-		Set<String> stored = this.redis.opsForSet().members(CONVERSATION_IDS_KEY);
-		if (stored == null || stored.isEmpty()) {
-			return List.of();
-		}
-		TenantUser current = RequestContextUtils.currentOrNull();
-		List<String> live = new ArrayList<>(stored.size());
-		List<String> expired = new ArrayList<>();
-		for (String member : stored) {
-			// 旧版本可能写入过空白索引成员（新写入已拒绝空白 id）；不能让一个毒成员阻断整次枚举。
-			if (member == null || member.isBlank()) {
-				expired.add(member);
-				continue;
-			}
-			TenantUser owner = memberIdentity(member);
-			if (owner == null) {
-				// 无身份内部成员：只有无身份上下文（内部异步路径）可见
-				if (current != null) {
-					continue;
+		String prefix = KEY_PREFIX + TenantKeyScope.currentSegment();
+		ScanOptions options = ScanOptions.scanOptions().match(prefix + "{*").count(SCAN_COUNT).build();
+		Set<String> ids = new TreeSet<>();
+		try {
+			RedisConnectionFactory factory = this.redis.getConnectionFactory();
+			boolean clustered = false;
+			if (factory != null) {
+				try (RedisConnection connection = factory.getConnection()) {
+					if (connection instanceof RedisClusterConnection cluster) {
+						clustered = true;
+						for (RedisClusterNode node : cluster.clusterGetNodes()) {
+							if (!node.isMaster()) {
+								continue;
+							}
+							try (Cursor<byte[]> cursor = cluster.scan(node, options)) {
+								collectConversationIds(cursor, prefix, ids);
+							}
+						}
+					}
 				}
-				if (hasLiveMemory(member)) {
-					live.add(member);
+			}
+			if (!clustered) {
+				try (Cursor<String> cursor = this.redis.scan(options)) {
+					if (cursor != null) {
+						while (cursor.hasNext()) {
+							String id = conversationIdOfKey(cursor.next(), prefix);
+							if (id != null) {
+								ids.add(id);
+							}
+						}
+					}
 				}
-				else {
-					expired.add(member);
-				}
-				continue;
-			}
-			if (current == null || !current.equals(owner)) {
-				// 别人的成员：既不返回，也不判定死活（判定会读别人的键）
-				continue;
-			}
-			String conversationId = memberConversationId(member);
-			if (conversationId == null || conversationId.isBlank()) {
-				continue;
-			}
-			if (hasLiveMemory(conversationId)) {
-				live.add(conversationId);
-			}
-			else {
-				expired.add(member);
 			}
 		}
-		if (!expired.isEmpty()) {
-			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, expired.toArray());
+		catch (RuntimeException ex) {
+			log.warn("会话记忆枚举（SCAN）失败 pattern={}（返回已扫描到的 {} 个 id，不伪装成空库）：{}", prefix + "{*",
+					ids.size(), ex.getMessage());
 		}
-		return live;
+		return List.copyOf(ids);
+	}
+
+	/** 把集群节点游标里的键翻成会话 id（见 {@link #conversationIdOfKey(String, String)}）。 */
+	private static void collectConversationIds(Cursor<byte[]> cursor, String prefix, Set<String> out) {
+		if (cursor == null) {
+			return;
+		}
+		while (cursor.hasNext()) {
+			byte[] raw = cursor.next();
+			String id = raw == null ? null : conversationIdOfKey(new String(raw, StandardCharsets.UTF_8), prefix);
+			if (id != null) {
+				out.add(id);
+			}
+		}
+	}
+
+	/**
+	 * 数据键 → 会话 id：只认 {@code <prefix>{<escapedId>}} 形态（以右花括号结尾、tag 内无花括号）。
+	 *
+	 * @return 反转义后的 id；不是数据键返回 {@code null}
+	 */
+	private static String conversationIdOfKey(String key, String prefix) {
+		if (key == null || !key.startsWith(prefix) || !key.endsWith("}")) {
+			return null;
+		}
+		String inner = key.substring(prefix.length());
+		if (inner.length() < 3 || inner.charAt(0) != '{' || inner.indexOf('{', 1) >= 0
+				|| inner.indexOf('}', 1) != inner.length() - 1) {
+			return null;
+		}
+		return unescapeId(inner.substring(1, inner.length() - 1));
+	}
+
+	/** {@link #escapedId(String)} 的逆操作（顺序相反：先还原花括号，最后还原 {@code %}）。 */
+	private static String unescapeId(String escaped) {
+		return escaped.replace("%7D", "}").replace("%7B", "{").replace("%25", "%");
 	}
 
 	/**
 	 * 该会话是否仍有<b>存活</b>的记忆数据键。
 	 *
-	 * <p>对外公开是给会话销毁用的"删净判据"：销毁不能只凭索引（stale/缺成员都见过），
+	 * <p>对外公开是给会话销毁用的"删净判据"：销毁不能只凭枚举/目录（stale、缺成员都见过），
 	 * 必须看数据键本身是否真的不在了。
 	 */
 	public boolean hasLiveMemory(String conversationId) {
@@ -456,10 +477,10 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 *
 	 * <p>非空路径先在<b>单键脚本</b>里把新窗口写入与 final 同槽的 staging 并设置 TTL，再
 	 * {@code RENAME} 原子覆盖 final —— 任一步失败都只清理 staging，旧历史保持可读。
-	 * RENAME 成功后才更新全局索引；索引失败只 WARN，不回退已提交的新历史。
+	 * 落盘即完成（全局索引已退役，不再有"索引后置"这一步）。
 	 *
 	 * <p>空（或 null，防御）列表等价于"清空该会话记忆"：委托 {@link #deleteByConversationId}
-	 * （同槽脚本删数据，再单键 SREM）。
+	 * （同槽脚本删数据）。
 	 */
 	@Override
 	public void saveAll(String conversationId, List<Message> messages) {
@@ -504,7 +525,6 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return;
 		}
 		slideCasCounters(finalKey);
-		addToIndex(conversationId, finalKey);
 	}
 
 	/**
@@ -562,9 +582,6 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				// 窗口没变：不写、不推进版本（避免无谓 CAS 与把并发写者的版本顶掉）。
 				// 计数器仍要跟着续：否则它们会先于数据键过期，:gen 归 0 会让在飞写回被误判成"被清空"。
 				slideCasCounters(finalKey);
-				if (!merged.isEmpty()) {
-					addToIndex(conversationId, finalKey);
-				}
 				return true;
 			}
 			String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, UUID.randomUUID().toString());
@@ -594,7 +611,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				return false;
 			}
 			if (applied != null && applied > 0L) {
-				afterMergeLanded(conversationId, finalKey, payload.isEmpty());
+				afterMergeLanded(conversationId, finalKey);
 				return true;
 			}
 			// CAS 落空：另一写者在我们读之后动了窗口 ⇒ 清 staging、重读、重算。
@@ -608,17 +625,11 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				"记忆窗口合并写 CAS 连续 " + MERGE_ATTEMPTS + " 次落空（并发写过于密集）conversationId=" + conversationId);
 	}
 
-	/** 合并结果已落盘：销毁复检 → 索引收尾。 */
-	private void afterMergeLanded(String conversationId, String finalKey, boolean empty) {
+	/** 合并结果已落盘：只剩销毁复检（全局索引已退役，不再有索引收尾）。 */
+	private void afterMergeLanded(String conversationId, String finalKey) {
 		if (purgeArmedAfterWrite(conversationId, finalKey)) {
 			discardWrittenMemory(conversationId, finalKey);
-			return;
 		}
-		if (empty) {
-			removeFromIndexQuietly(conversationId);
-			return;
-		}
-		addToIndex(conversationId, finalKey);
 	}
 
 	private Set<String> pinnedRunIds(String conversationId) {
@@ -704,7 +715,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return false;
 		}
 		if (applied != null && applied > 0L) {
-			afterMergeLanded(conversationId, finalKey, payload.isEmpty());
+			afterMergeLanded(conversationId, finalKey);
 			return true;
 		}
 		if (stagingKey != null) {
@@ -835,7 +846,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 *
 	 * <p>为什么入口检查不够：{@code saveAll} 的入口检查与 RENAME 之间隔着 staging 写入，
 	 * 销毁流程完全可以在这个窗口里装守卫并删完记忆 —— 那一笔 RENAME 就把刚销毁的历史写了回来。
-	 * 复检是这类残留的唯一确定拦点（销毁侧只能事后对账，索引也看不见它：SREM 早已执行）。
+	 * 复检是这类残留的唯一确定拦点（销毁侧只能事后对账；全局索引已退役，本来就看不见它）。
 	 *
 	 * <p>读失败按"已装守卫"处理（fail-closed）：与入口检查同一口径 —— 守卫状态不可知时
 	 * 宁可让本次写回作废，也不能把已销毁会话的历史悄悄写回来。
@@ -875,8 +886,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	/**
-	 * 清空会话历史：<b>一条同槽脚本</b>完成"删数据 + 推进清空代次（tombstone）+ 推进合并版本 + 续 TTL"，
-	 * 再清单键索引。
+	 * 清空会话历史：<b>一条同槽脚本</b>完成"删数据 + 推进清空代次（tombstone）+ 推进合并版本 + 续 TTL"。
 	 *
 	 * <h2>为什么不能只删版本键</h2>
 	 * 在飞写回的顺序是"读代次/版本 → 读窗口 → 算合并 → CAS"。若清空把版本键<b>删掉</b>（缺失当 0），
@@ -892,41 +902,13 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 * 数据未删"的中间态，那期间启动的写者读到"新代次 + 旧窗口"，CAS 与清空同时成立 ⇒ 旧历史照样复活。
 	 *
 	 * <p><b>计数器不删</b>（删了就把代次退回 0，旧写者又能对上）：只续会话 TTL，随会话自然过期；
-	 * 清空之后的新写者读到新代次，照常可写。全局索引不同槽，仍在脚本之后单键 SREM。
+	 * 清空之后的新写者读到新代次，照常可写。全局会话索引已退役（见类注释），无需再 SREM。
 	 */
 	@Override
 	public void deleteByConversationId(String conversationId) {
 		String finalKey = key(conversationId);
 		this.redis.execute(MEMORY_CLEAR, List.of(finalKey, versionKey(finalKey), generationKey(finalKey)),
 				Long.toString(stagingTtlMillis()));
-		removeFromIndexQuietly(conversationId);
-	}
-
-	/**
-	 * 索引更新：辅助面，失败不影响已提交的历史。
-	 *
-	 * <p>失败时打一条带 conversationId 与数据键的 WARN（可观测 / 可对账）；下一次成功
-	 * {@link #saveAll} 会重新 {@code SADD}。不抛异常，避免调用方误以为历史写失败而重试/回滚。
-	 */
-	private void addToIndex(String conversationId, String finalKey) {
-		try {
-			this.redis.opsForSet().add(CONVERSATION_IDS_KEY, indexMember(conversationId));
-		}
-		catch (RuntimeException ex) {
-			log.warn("会话记忆已写入但全局索引更新失败（历史按 id 仍可读；findConversationIds 暂不可见，"
-					+ "下次成功保存自愈）conversationId={} key={}", conversationId, finalKey, ex);
-		}
-	}
-
-	/** SREM 失败不改变"数据已删除"的事实，只留下可由惰性路径/人工对账的 stale 成员。 */
-	private void removeFromIndexQuietly(String conversationId) {
-		try {
-			this.redis.opsForSet().remove(CONVERSATION_IDS_KEY, indexMember(conversationId));
-		}
-		catch (RuntimeException ex) {
-			log.warn("会话历史已删除但索引 SREM 失败（stale 成员待惰性清理/对账）conversationId={} index={}",
-					conversationId, CONVERSATION_IDS_KEY, ex);
-		}
 	}
 
 	private void deleteStagingQuietly(String stagingKey) {

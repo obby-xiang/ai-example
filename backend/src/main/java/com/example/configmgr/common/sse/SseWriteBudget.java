@@ -4,13 +4,19 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * SSE 写侧的<b>写超时预算</b>（包②核心机制；AI 通道 {@code ai/run/SseChatEmitter} 与
@@ -43,8 +49,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code AsyncContext#setTimeout}），语义是"这条 SSE 流最多活多久"，不是"单帧最多写多久"——
  * 一条健康的长时间流会被它整条掐断，而一帧写阻塞却不会被它按帧约束。两者的正确分工是：
  * <ul>
- * <li><b>本类（每帧写预算）</b>：约束"单帧写出"的时长 ⇒ 调用线程最多等 {@code timeoutMillis}
- * 就能脱身，慢订阅者被摘除（主动断连）；</li>
+ * <li><b>本类（每帧写预算）</b>：约束"单帧写出"的时长。阻塞式 {@link #write} 让调用线程最多等
+ * {@code timeoutMillis} 就能脱身；AI 通道走 {@link #writeAsync}，<b>调用线程立即交还</b>，
+ * 由完成/超时回调续跑或摘除（主动断连）；</li>
  * <li><b>emitter 生命周期超时</b>：约束"整条流"的寿命（任务通道 = {@code app.task.sse.emitter-timeout}；
  * AI 通道<b>不设</b>传输层死线 —— {@code new SseEmitter(-1L)}，因为确认门/表单等人工输入没有上限），
  * 它<b>不是</b>写侧的释放手段 —— 任务通道的 5m 生命周期<b>晚于</b>上面那条 120s
@@ -167,6 +174,41 @@ public final class SseWriteBudget {
      */
     private static volatile ThreadPoolExecutor sharedWriterPool;
 
+    /**
+     * 写超时的<b>定时器</b>（异步写路径用；懒建、可重建）。
+     *
+     * <p>为什么需要：{@link #writeAsync} 不再用 {@code future.get(timeout)} 占住投递线程等待；
+     * 15s 预算改由本调度器到点触发（取消写任务 + 回调 {@code TIMED_OUT}）。线程是守护线程。
+     */
+    private static final AtomicReference<ScheduledExecutorService> WRITE_TIMEOUT_SCHEDULER =
+            new AtomicReference<>();
+
+    private static ScheduledExecutorService timeoutScheduler() {
+        ScheduledExecutorService current = WRITE_TIMEOUT_SCHEDULER.get();
+        if (current != null) {
+            return current;
+        }
+        synchronized (WRITE_TIMEOUT_SCHEDULER) {
+            current = WRITE_TIMEOUT_SCHEDULER.get();
+            if (current == null) {
+                current = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    Thread thread = new Thread(runnable, "sse-write-timeout");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+                WRITE_TIMEOUT_SCHEDULER.set(current);
+            }
+            return current;
+        }
+    }
+
+    private static void shutdownTimeoutScheduler() {
+        ScheduledExecutorService current = WRITE_TIMEOUT_SCHEDULER.getAndSet(null);
+        if (current != null) {
+            current.shutdownNow();
+        }
+    }
+
     /** 写出执行器；{@code null} = 直执（调用线程内写出，无预算 —— 单测/非 Spring 路径）。 */
     private final ExecutorService executor;
 
@@ -222,6 +264,35 @@ public final class SseWriteBudget {
     public static int sharedWriterPoolMaxThreads() {
         ThreadPoolExecutor pool = sharedWriterPool;
         return pool == null ? DEFAULT_MAX_WRITER_THREADS : pool.getMaximumPoolSize();
+    }
+
+    /**
+     * <b>优雅停机</b>：关闭进程级共享写出池（幂等；关闭后下一次 {@link #sharedElasticWriterPool()}
+     * 会重新创建）。
+     *
+     * <p>静态池没有 Spring 生命周期归属者：多上下文/嵌入式部署下旧上下文的池会继续存活。这里先
+     * {@code shutdown()} 让在途写出收尾，有界等待后再 {@code shutdownNow()}；已在飞的写仍由
+     * 客户端断开 / 容器写超时 / 单帧预算三条路径释放（本类不改这条边界）。
+     */
+    public static synchronized void shutdownSharedWriterPool() {
+        ThreadPoolExecutor pool = sharedWriterPool;
+        sharedWriterPool = null;
+        if (pool == null) {
+            shutdownTimeoutScheduler();
+            return;
+        }
+        pool.shutdown();
+        try {
+            if (!pool.awaitTermination(2L, TimeUnit.SECONDS)) {
+                pool.shutdownNow();
+            }
+        }
+        catch (InterruptedException ex) {
+            pool.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        // 超时定时器与写池同代：池关闭后不再有新的异步写需要计时。
+        shutdownTimeoutScheduler();
     }
 
     /** 累计写超时次数（进程级）。 */
@@ -315,6 +386,96 @@ public final class SseWriteBudget {
             Thread.currentThread().interrupt();
             future.cancel(true);
             return Result.interrupted();
+        }
+    }
+
+    /**
+     * <b>异步写</b>（I3）：提交后立即返回，结果通过 {@code onDone} 回调（恰一次）。
+     *
+     * <p>调用线程（AI 通道的 drain）不再 {@code future.get(timeout)} 占住最长 15s，而是由
+     * "写出完成"或"超时定时器"回调继续下一帧；15s 预算、饱和拒绝与线程硬上限语义全部保留。
+     * 超时后仍会 {@code cancel(true)}（尽力而为；阻塞 socket 写对中断无效的边界已在类注写明），
+     * 写出线程返回时不再重复回调（{@code settled} 的 CAS 去重）。
+     */
+    public void writeAsync(SendTask task, Consumer<Result> onDone) {
+        if (onDone == null) {
+            return;
+        }
+        if (this.executor == null) {
+            Result result;
+            try {
+                task.send();
+                result = Result.sent();
+            }
+            catch (Exception ex) {
+                result = Result.failed(ex);
+            }
+            notifyDone(onDone, result);
+            return;
+        }
+        AtomicBoolean settled = new AtomicBoolean();
+        AtomicReference<ScheduledFuture<?>> timeout = new AtomicReference<>();
+        Future<?> future;
+        try {
+            future = this.executor.submit(() -> {
+                Exception failure = null;
+                try {
+                    task.send();
+                }
+                catch (Exception ex) {
+                    failure = ex;
+                }
+                catch (Throwable error) {
+                    // Error 也必须回调（否则 drain 链永不继续）：折成可上报的异常。
+                    failure = new IllegalStateException("SSE 写出失败", error);
+                }
+                ScheduledFuture<?> timer = timeout.get();
+                if (timer != null) {
+                    timer.cancel(false);
+                }
+                if (settled.compareAndSet(false, true)) {
+                    notifyDone(onDone, failure == null ? Result.sent() : Result.failed(failure));
+                }
+            });
+        }
+        catch (RejectedExecutionException ex) {
+            WRITE_SATURATIONS.incrementAndGet();
+            log.warn("SSE 写出池饱和（线程已达上限 {}，无法再接纳一条写出）：由调用方摘除本次订阅者"
+                    + "（被摘者可能是健康连接或另一通道，代价是重挂而非丢帧）", sharedWriterPoolMaxThreads());
+            if (settled.compareAndSet(false, true)) {
+                notifyDone(onDone, Result.saturated());
+            }
+            return;
+        }
+        ScheduledFuture<?> timer = null;
+        try {
+            timer = timeoutScheduler().schedule(() -> {
+                if (settled.compareAndSet(false, true)) {
+                    boolean cancelled = future.cancel(true);
+                    WRITE_TIMEOUTS.incrementAndGet();
+                    log.warn("SSE 写超时（>{}ms，取消任务={}）：写出线程仍卡在该帧，投递线程已按回调脱身",
+                            this.timeoutMillis, cancelled);
+                    notifyDone(onDone, Result.timedOut());
+                }
+            }, this.timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+        catch (RejectedExecutionException ex) {
+            // 定时器已关闭（停机）：不再施加写预算，写出线程返回时仍会回调（恰一次）。
+            log.debug("SSE 写超时定时器已关闭，本次写出不设预算：{}", ex.getMessage());
+        }
+        timeout.set(timer);
+        if (settled.get() && timer != null) {
+            timer.cancel(false);
+        }
+    }
+
+    /** 完成回调的隔离层：回调异常不得杀死写出池/定时器线程（否则 drain 链会悬挂）。 */
+    private static void notifyDone(Consumer<Result> onDone, Result result) {
+        try {
+            onDone.accept(result);
+        }
+        catch (RuntimeException ex) {
+            log.error("SSE 写出完成回调异常（本条连接的后续投递可能悬挂）", ex);
         }
     }
 

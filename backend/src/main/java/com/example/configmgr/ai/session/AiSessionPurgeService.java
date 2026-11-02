@@ -56,10 +56,10 @@ import java.util.regex.Pattern;
  *
  * <h2>删除面（只删 AI 数据）</h2>
  * <ol>
- * <li>{@code chat:mem:*}（当前身份键 + <b>本会话的 staging 中间态</b>）+ 会话 id 索引成员
- * （SREM，<b>不删索引键</b>）；删完复核数据键与 staging 是否真的都不在了，残留一律
- * {@code complete=false}（索引成员已被 SREM，不能拿"不在索引"当"已删净"）；</li>
- * <li>该会话每一轮的<b>12 个 run 级键</b>（委托 {@link RunStore#deleteRun(String)}，按 run 逐个删，
+ * <li>{@code chat:mem:*}（当前身份键 + <b>本会话的 staging 中间态</b>）；staging 集合复用枚举阶段
+ * 的扫描结果，删完只对本轮实际删掉的 staging 键做有界复核（不再全集群重扫），数据键与 staging 的
+ * 残留一律 {@code complete=false}（全局会话索引已退役，不能再拿"不在索引"当作"已删净"）；</li>
+ * <li>该会话每一轮的<b>13 个 run 级键</b>（委托 {@link RunStore#deleteRun(String)}，按 run 逐个删，
  * 不使用 KEYS/通配删除）；外加 {@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
  * {@code ai:observed:} 四个观测/取消键（<b>不靠 TTL 自清</b>，逐 run 单键 DEL；四族都带身份段
  * {@code <t>:<u>:}，与写入方同一个键形）；</li>
@@ -104,7 +104,7 @@ import java.util.regex.Pattern;
  *
  * <h2>活跃 run</h2>
  * 非终态快照（或会话门仍指向它）= 活跃：先 {@link CancellationRegistry#cancel}（已取消则跳过，
- * 不重复副作用），再在短窗口内等它落终态。落不了终态的 run <b>不删 12 键</b>（会被正在收尾的
+ * 不重复副作用），再在短窗口内等它落终态。落不了终态的 run <b>不删 13 键</b>（会被正在收尾的
  * 写回/重启续跑复活），列入 {@code deferred}；结果 {@code complete=false}，pending 保留由调度
  * 在终态后补删。记忆写回由 {@link SessionPurgeGuard} 单独拦截（终局 {@code saveAll} 不再复活历史）。
  *
@@ -165,7 +165,7 @@ public class AiSessionPurgeService {
 
 	/**
 	 * 取消收尾的窄入口（F3）：取消旗标写完之后，驱动进程已死的轮次没有任何人写终态 ——
-	 * 只等 {@code awaitTerminal} 必然超时，12 键被无限延后（{@code ai:purge:pending} 无 TTL
+	 * 只等 {@code awaitTerminal} 必然超时，13 键被无限延后（{@code ai:purge:pending} 无 TTL
 	 * ⇒ 会话永久 410 且删不掉）。**字段注入 + ObjectProvider** 保持构造器签名（多份既有用例
 	 * 直接 {@code new}），也不把销毁流程与 AI 运行面的创建顺序耦合；未装配（轻装配/单测）时
 	 * 保持旧行为：只写旗标 + 等一个短窗口。
@@ -224,7 +224,7 @@ public class AiSessionPurgeService {
 	public record RunView(String runId, String status, boolean active, boolean deleted, boolean deferred) {
 	}
 
-	/** 延后删除的活跃 run（终态后重试同一端点即可补删 12 键）。 */
+	/** 延后删除的活跃 run（终态后重试同一端点即可补删 13 键）。 */
 	public record DeferredView(String runId, String status, String reason) {
 	}
 
@@ -461,13 +461,15 @@ public class AiSessionPurgeService {
 		awaitTerminal(enumeration.runs(), warnings);
 		Enumeration current = reloadRunStatuses(enumeration, warnings);
 
-		// Redis 面：记忆 → 按 run 删 12 键 → 上下文 → 会话记录/草稿 → 附件文件
+		// Redis 面：记忆 → 按 run 删 13 键 → 上下文 → 会话记录/草稿 → 附件文件
 		// → 最后才删 sessionRuns/sessionActive/sessionCurrent 三把发现键（仅当主体无错误且无 defer）。
+		// 状态刷新阶段读到的终态快照随枚举结果带下来：删除阶段对同一把键不再整份重读
+		// （活跃轮不受影响 —— 它们仍要重新读一次判活，见 deleteOrDefer）。
 		MemoryView memory = deleteMemory(sessionId, current, errors);
 		List<RunView> runViews = new ArrayList<>();
 		List<DeferredView> deferred = new ArrayList<>();
 		for (RunTarget target : current.runs()) {
-			deleteOrDefer(target, runViews, deferred, errors, warnings);
+			deleteOrDefer(target, current.settledSnapshots(), runViews, deferred, errors, warnings);
 		}
 		ContextView context = deleteContext(sessionId, current.context(), errors, warnings);
 		SessionView session = deleteSessionRecordKeys(sessionId, errors, warnings);
@@ -599,7 +601,7 @@ public class AiSessionPurgeService {
 				}
 				if (!belongsToCurrentIdentity(snapshot)) {
 					// 快照带的是别的身份 / 无归属 legacy：sessionId 相同但不是"我的这一轮"，
-					// 绝不删它的 12 键。
+					// 绝不删它的 13 键。
 					warnings.add("run[" + runId + "]: 跳过非本身份的快照（snapshotIdentity="
 							+ snapshot.getTenantId() + ":" + snapshot.getUserId() + "，不删）");
 					log.warn("会话销毁跳过非本身份的 run runId={} sessionId={} snapshotIdentity={}:{}（不删）",
@@ -621,7 +623,9 @@ public class AiSessionPurgeService {
 		// 在飞写回（saveAll / 按轮合并 upsert）的中间态也是本会话的 AI 数据
 		// （正常路径 RENAME 后消失，清理失败/进程中断时按 TTL 自清）。
 		// 只带 staging 的会话今天会被误报 found=false + complete=true 后残留，故这里一并枚举。
-		boolean memoryStaged = !stagingKeys(sessionId).isEmpty();
+		// 扫描结果随枚举结果带到删除阶段复用：删除时不再为一组"刚才已经扫出来的键"重扫全集群。
+		List<String> staging = stagingKeys(sessionId);
+		boolean memoryStaged = !staging.isEmpty();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
 			memoryExisted = redisRepository.hasLiveMemory(sessionId) || memoryStaged;
 		}
@@ -651,8 +655,9 @@ public class AiSessionPurgeService {
 				|| db.feedbackRows() > 0 || sessionCurrentExisted || sessionRecordExisted || draftExisted;
 
 		ClientCleanup cleanup = clientCleanup(sessionId, toolCallIds, RequestContextUtils.currentOrNull());
-		return new Enumeration(runs, attachmentList, context, memoryExisted, memoryMessages, db,
-				sessionCurrentExisted, sessionRecordExisted, found, cleanup, List.copyOf(warnings));
+		return new Enumeration(runs, Map.of(), attachmentList, context, memoryExisted, memoryMessages,
+				List.copyOf(staging), db, sessionCurrentExisted, sessionRecordExisted, found, cleanup,
+				List.copyOf(warnings));
 	}
 
 	/**
@@ -773,7 +778,7 @@ public class AiSessionPurgeService {
 	 * 正常路径 RENAME 后消失，
 	 * 清理失败/进程中断时靠 TTL 自清。销毁只删正式数据键时，这类键既让"只带 staging 的会话"被
 	 * 误报 {@code found=false}，也会在 {@code complete=true} 之后因 RENAME 落地而变成残留
-	 * （此时索引成员已被 SREM，按索引判活根本看不见它）。
+	 * （全局会话索引已退役，按索引判活根本看不见它）。
 	 *
 	 * <p>两道防误删与归档扫描同口径：① sessionId 用 {@code escapedId} 转成 tag 内容（无花括号 ⇒ 无碰撞），
 	 * ② <b>pattern 与判定前缀都过 {@link #escapeGlob}</b> —— {@code escapedId} 只转义 {@code %{} }，
@@ -781,6 +786,9 @@ public class AiSessionPurgeService {
 	 * 改变（{@code [} 开字符类、{@code \} 转义下一字符）会<b>连自己的键都匹配不到</b>（漏删 + 误报
 	 * complete）。转义后仍逐字前缀过滤，也不会命中别的会话。扫描失败上抛（枚举阶段不得用部分结果
 	 * 冒充完整）。
+	 *
+	 * <p>调用面只有两处：枚举阶段（结果随 {@code Enumeration} 复用给删除阶段，<b>一次销毁只扫这一趟</b>）
+	 * 与 fix4 到点记忆复核（没有前置枚举，那一趟自己扫）。因此删除阶段不再重扫全集群。
 	 */
 	private List<String> stagingKeys(String sessionId) {
 		String prefix = RedisChatMemoryRepository.stagingKeyPrefix(sessionId);
@@ -869,22 +877,32 @@ public class AiSessionPurgeService {
 		}
 	}
 
-	/** 在短窗口内等活跃 run 落终态；等不到就留给 {@code deferred}，由下次重试补删。 */
+	/**
+	 * 在短窗口内等活跃 run 落终态；等不到就留给 {@code deferred}，由下次重试补删。
+	 *
+	 * <p><b>仍有界，且不改等待语义</b>：窗口与轮询间隔都保持原值（{@value #ACTIVE_POLL_MILLIS}ms），
+	 * 只让"已经读到终态"的轮次退出后续轮询 —— 终态单调，重读同一把键不会有新结论。
+	 * 于是这段等待的快照读次数从"活跃轮数 × 轮询次数"收敛为"每轮读到自己落终态为止"。
+	 */
 	private void awaitTerminal(List<RunTarget> runs, List<String> warnings) {
 		if (this.activeWait.isZero() || runs.stream().noneMatch(RunTarget::active)) {
 			return;
 		}
 		long deadline = System.nanoTime() + this.activeWait.toNanos();
+		Set<String> settled = new LinkedHashSet<>();
 		while (System.nanoTime() < deadline) {
 			boolean anyActive = false;
 			for (RunTarget run : runs) {
-				if (!run.active()) {
+				if (!run.active() || settled.contains(run.runId())) {
 					continue;
 				}
 				try {
 					RunSnapshot snapshot = this.runStore.get(run.runId());
 					if (snapshot != null && !isTerminal(snapshot.getStatus())) {
 						anyActive = true;
+					}
+					else {
+						settled.add(run.runId());
 					}
 				}
 				catch (RuntimeException ex) {
@@ -905,9 +923,17 @@ public class AiSessionPurgeService {
 		}
 	}
 
-	/** 等待窗口结束后按最新快照重算 active（取消可能在窗口内生效）。 */
+	/**
+	 * 等待窗口结束后按最新快照重算 active（取消可能在窗口内生效）。
+	 *
+	 * <p>刷新阶段这一读是<b>必需的</b>（取消/收尾后果只有重读才能看到），但读到的<b>终态</b>
+	 * 快照不必在下一步再读一遍：随枚举结果带回删除阶段（{@code settledSnapshots}）直接复用。
+	 * 活跃/读失败/已消失的轮次不入表，{@link #deleteOrDefer} 仍会自己重读判活 ——
+	 * 这里的复用只省"同一次调用里对同一把键的第二次完整读取"，不绕过任何复核。
+	 */
 	private Enumeration reloadRunStatuses(Enumeration enumeration, List<String> warnings) {
 		List<RunTarget> refreshed = new ArrayList<>(enumeration.runs().size());
+		Map<String, RunSnapshot> settled = new LinkedHashMap<>();
 		for (RunTarget run : enumeration.runs()) {
 			try {
 				RunSnapshot snapshot = this.runStore.get(run.runId());
@@ -917,6 +943,9 @@ public class AiSessionPurgeService {
 				else {
 					boolean active = !isTerminal(snapshot.getStatus());
 					refreshed.add(new RunTarget(run.runId(), snapshot.getStatus(), active));
+					if (!active) {
+						settled.put(run.runId(), snapshot);
+					}
 				}
 			}
 			catch (RuntimeException ex) {
@@ -924,7 +953,7 @@ public class AiSessionPurgeService {
 				refreshed.add(run);
 			}
 		}
-		return enumeration.withRuns(refreshed);
+		return enumeration.withRuns(refreshed, Map.copyOf(settled));
 	}
 
 	// ── 删除：记忆 / run / 上下文 / 会话 / 附件 ─────────────────────────────
@@ -933,11 +962,14 @@ public class AiSessionPurgeService {
 	 * 记忆面删除：当前身份键（仓储的同槽脚本）+ 本会话 staging 键（在飞写回的中间态）。
 	 *
 	 * <p><b>删完必须复核</b>：销毁与写回交错时，删完之后仍可能有 staging 落地/最终的 RENAME 落地；
-	 * 索引成员此时已被 SREM，所以"不在索引"不能当"已删净"的证明。残留一律记成可重试错误
+	 * 全局会话索引已退役（不再有 SREM 这一步），所以"不在索引"根本不能当"已删净"的证明。残留一律记成可重试错误
 	 * （{@code complete=false}，pending 保留），由调度/再次 DELETE 补删 —— 绝不带着残留报成功。
+	 *
+	 * <p>staging 键集合来自枚举阶段（已经扫过一次，见 {@code Enumeration#stagingKeys()}）：
+	 * 这里直接复用，不再为一组刚扫出来的键重扫全集群。
 	 */
 	private MemoryView deleteMemory(String sessionId, Enumeration enumeration, List<String> errors) {
-		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, errors);
+		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, enumeration.stagingKeys(), errors);
 		return new MemoryView(enumeration.memoryExisted(), enumeration.memoryMessages(), cleanup.deleted());
 	}
 
@@ -947,9 +979,11 @@ public class AiSessionPurgeService {
 	 * <p>范围严格限定 {@code chat:mem:*}（当前身份键）+ 本会话 staging 键；不碰 DB、附件、上下文、
 	 * 会话键、run 级键与任何业务数据 —— 到点复核绝不能"顺手再删一遍"其它面。
 	 *
+	 * @param knownStaging 枚举阶段已扫出的 staging 键（销毁主体复用，避免再扫一次全集群）；
+	 *                     {@code null} = 本次没有前置枚举（fix4 到点复核），由本方法扫一次
 	 * @return {@code deleted=true} 仅当"确认删净"（复核不可知/有残留都为 false）
 	 */
-	private MemoryCleanup deleteMemoryKeys(String sessionId, List<String> errors) {
+	private MemoryCleanup deleteMemoryKeys(String sessionId, List<String> knownStaging, List<String> errors) {
 		boolean deleted = true;
 		try {
 			this.chatMemoryRepository.deleteByConversationId(sessionId);
@@ -958,7 +992,7 @@ public class AiSessionPurgeService {
 			errors.add("memory: " + rootMessage(ex));
 			deleted = false;
 		}
-		StagingClear staging = clearStagingKeys(sessionId, errors);
+		StagingClear staging = clearStagingKeys(sessionId, knownStaging, errors);
 		List<String> residue = new ArrayList<>(staging.remaining());
 		boolean known = staging.known();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
@@ -1031,7 +1065,8 @@ public class AiSessionPurgeService {
 			return new MemoryVerify(false, List.of("guard: 未装（未确认已销毁，不删）"));
 		}
 		List<String> errors = new ArrayList<>();
-		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, errors);
+		// 复核态没有前置枚举：staging 集合在这里扫一次（本轮唯一一次扫描）。
+		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, null, errors);
 		if (!cleanup.deleted() || !errors.isEmpty()) {
 			return new MemoryVerify(false, List.copyOf(errors));
 		}
@@ -1050,8 +1085,8 @@ public class AiSessionPurgeService {
 	/**
 	 * staging 清理结论。
 	 *
-	 * @param known {@code false} = 复核扫描失败，"有没有残留"<b>不可知</b>（不得当成"没有残留"）
-	 * @param remaining 确认仍存在的 staging 键（含清理期间新落地的中间态）
+	 * @param known {@code false} = 复核读不出来，"有没有残留"<b>不可知</b>（不得当成"没有残留"）
+	 * @param remaining 确认仍存在的 staging 键（删除失败或删后复核仍在）
 	 */
 	private record StagingClear(boolean known, List<String> remaining) {
 	}
@@ -1063,39 +1098,90 @@ public class AiSessionPurgeService {
 	 * 扫描/删除失败都收敛成可重试错误，不抛出去 —— 记忆面失败不能把已经删掉的 run/上下文面变成
 	 * "半路异常"（{@code complete=false} 已如实表达"没删净"）。
 	 *
-	 * <p><b>复核扫描失败不得被当成"空"</b>（I3）：返回 {@code known=false}，由调用方把
+	 * <p><b>删后复核只覆盖"本轮实际删掉的键"</b>：集合来自枚举阶段已经扫出的完整结果
+	 * （{@code knownStaging}），这里不再重扫全集群。逐键 {@code EXISTS} 仍能逮住
+	 * "DEL 报成功但键还在"（与在飞 RENAME/重建交错）；窗口内新落地的中间态由写回守卫
+	 * （销毁期间 {@code saveAll} 直接拒绝）与 fix4 到点记忆复核（那时重新扫一次）兜底，
+	 * 销毁主体不为此再付一次全集群扫描。
+	 *
+	 * <p><b>复核失败不得被当成"空"</b>（I3）：返回 {@code known=false}，由调用方把
 	 * {@code memory.deleted} 置假 —— "查不出来"与"确认没有"必须可区分。
+	 *
+	 * @param knownStaging {@code null} = 没有前置枚举，由本方法扫一次得到待删集合
 	 */
-	private StagingClear clearStagingKeys(String sessionId, List<String> errors) {
-		try {
-			for (String key : stagingKeys(sessionId)) {
-				try {
-					this.redis.delete(key);
-				}
-				catch (RuntimeException ex) {
-					errors.add("memory: staging 键删除失败 " + key + "（可重试）：" + rootMessage(ex));
+	private StagingClear clearStagingKeys(String sessionId, List<String> knownStaging, List<String> errors) {
+		List<String> targets;
+		if (knownStaging == null) {
+			try {
+				targets = stagingKeys(sessionId);
+			}
+			catch (RuntimeException ex) {
+				errors.add("memory: staging 键扫描失败（未删净，可重试）：" + rootMessage(ex));
+				return new StagingClear(false, List.of());
+			}
+		}
+		else {
+			targets = knownStaging;
+		}
+		List<String> deleted = new ArrayList<>();
+		List<String> remaining = new ArrayList<>();
+		for (String key : targets) {
+			try {
+				if (Boolean.TRUE.equals(this.redis.delete(key))) {
+					deleted.add(key);
 				}
 			}
-			return new StagingClear(true, stagingKeys(sessionId));
+			catch (RuntimeException ex) {
+				errors.add("memory: staging 键删除失败 " + key + "（可重试）：" + rootMessage(ex));
+				remaining.add(key);
+			}
 		}
-		catch (RuntimeException ex) {
-			errors.add("memory: staging 键扫描失败（未删净，可重试）：" + rootMessage(ex));
-			return new StagingClear(false, List.of());
+		boolean known = true;
+		for (String key : deleted) {
+			try {
+				if (Boolean.TRUE.equals(this.redis.hasKey(key))) {
+					remaining.add(key);
+				}
+			}
+			catch (RuntimeException ex) {
+				// 复核读不出来 ≠ 已删净（I3）：记可重试错误，deleted 由调用方置假。
+				errors.add("memory: staging 键删后复核失败 " + key + "（无法确认已删净，可重试）：" + rootMessage(ex));
+				known = false;
+			}
 		}
+		return new StagingClear(known, List.copyOf(remaining));
 	}
 
-	private void deleteOrDefer(RunTarget target, List<RunView> runViews, List<DeferredView> deferred,
-			List<String> errors, List<String> warnings) {
-		RunSnapshot latest = null;
-		try {
-			latest = this.runStore.get(target.runId());
+	/**
+	 * 删除或延后一轮。删除前的状态/归属复核<b>不可省</b>，但可以复用"刚读过且仍然有效"的快照：
+	 * <ul>
+	 * <li>活跃轮：<b>总是重读</b>快照 —— 取消/收尾的后果只有重读才看得到，不能拿旧读判"已经停了"；</li>
+	 * <li>刷新阶段已读到终态的轮：直接复用那份快照（终态单调，身份字段也在其中），
+	 *     不再对同一把键做第二次完整读取；</li>
+	 * <li>其余（刷新读失败/刷新时快照已消失）：按旧口径重读，读不出来一律延后。</li>
+	 * </ul>
+	 * 归属复核（{@link #belongsToCurrentIdentity}）对"复用的快照"同样执行 —— 省读不等于跳过复核。
+	 * {@link RunStore#deleteRun(String)} 内部仍按身份读一次快照（"错身份拒绝删除"的语义由
+	 * RunStore 拥有，本类不能替它决定）；这里省掉的是本类在调用前那次重复读取。
+	 */
+	private void deleteOrDefer(RunTarget target, Map<String, RunSnapshot> settledSnapshots,
+			List<RunView> runViews, List<DeferredView> deferred, List<String> errors, List<String> warnings) {
+		RunSnapshot latest;
+		RunSnapshot reused = target.active() ? null : settledSnapshots.get(target.runId());
+		if (reused != null) {
+			latest = reused;
 		}
-		catch (RuntimeException ex) {
-			// 读不出来就保守地不删（12 键删一半比延后更糟）；重试时再判。
-			deferred.add(new DeferredView(target.runId(), target.status(), "STATUS_UNREADABLE"));
-			runViews.add(new RunView(target.runId(), target.status(), true, false, true));
-			errors.add("run[" + target.runId() + "]: 读状态失败（" + rootMessage(ex) + "）");
-			return;
+		else {
+			try {
+				latest = this.runStore.get(target.runId());
+			}
+			catch (RuntimeException ex) {
+				// 读不出来就保守地不删（13 键删一半比延后更糟）；重试时再判。
+				deferred.add(new DeferredView(target.runId(), target.status(), "STATUS_UNREADABLE"));
+				runViews.add(new RunView(target.runId(), target.status(), true, false, true));
+				errors.add("run[" + target.runId() + "]: 读状态失败（" + rootMessage(ex) + "）");
+				return;
+			}
 		}
 		String status = latest == null ? null : latest.getStatus();
 		if (latest != null && !belongsToCurrentIdentity(latest)) {
@@ -1118,13 +1204,13 @@ public class AiSessionPurgeService {
 			runViews.add(new RunView(target.runId(), status, false, true, false));
 		}
 		catch (RuntimeException ex) {
-			errors.add("run[" + target.runId() + "]: 12 键删除失败（可重试）：" + rootMessage(ex));
+			errors.add("run[" + target.runId() + "]: 13 键删除失败（可重试）：" + rootMessage(ex));
 			runViews.add(new RunView(target.runId(), status, false, false, false));
 		}
 	}
 
 	/**
-	 * 12 键之外的四个"每人可见"的 run 级键（不进 {@code deleteRun}，本来按 TTL 自清；销毁要一并清掉）。
+	 * 13 键之外的四个"每人可见"的 run 级键（不进 {@code deleteRun}，本来按 TTL 自清；销毁要一并清掉）。
 	 *
 	 * <p>{@code ai:observed:<tenantId>:<userId>:<runId>} 是 Task 2 的<b>结算观测位</b>（HASH，首写即置
 	 * session-ttl，自清即可）。用户裁定"所有 AI 数据在会话销毁时删除，不只靠 TTL"，而
@@ -1377,8 +1463,8 @@ public class AiSessionPurgeService {
 
 	/** 枚举失败时的占位结果（不读取任何依赖，保证"失败不半删"可判定）。 */
 	private static Enumeration enumerationForFailure(String sessionId, TenantUser identity) {
-		return new Enumeration(List.of(), List.of(), new ContextTargets(false, false, List.of(), false), false, 0,
-				new SessionPurgeDatabase.Snapshot(0), false, false, false,
+		return new Enumeration(List.of(), Map.of(), List.of(), new ContextTargets(false, false, List.of(), false), false,
+				0, List.of(), new SessionPurgeDatabase.Snapshot(0), false, false, false,
 				clientCleanup(sessionId, List.of(), identity), List.of());
 	}
 
@@ -1407,14 +1493,22 @@ public class AiSessionPurgeService {
 
 	}
 
-	private record Enumeration(List<RunTarget> runs, List<FormAttachmentStore.Attachment> attachments,
-			ContextTargets context, boolean memoryExisted, int memoryMessages,
-			SessionPurgeDatabase.Snapshot database, boolean sessionCurrentExisted, boolean sessionRecordExisted,
-			boolean found, ClientCleanup clientCleanup, List<String> warnings) {
+	/**
+	 * 枚举结果（一次销毁过程中"已经读到的东西"的唯一载体）。
+	 *
+	 * @param settledSnapshots 状态刷新阶段读到的<b>终态</b>快照（runId → 快照）：删除阶段直接复用，
+	 *                         不再对同一把键重复完整读取；为空 = 没有可复用的读，删除前照旧重读
+	 * @param stagingKeys 枚举阶段扫出的本会话 staging 键：记忆删除阶段直接复用，避免二次全集群 SCAN
+	 */
+	private record Enumeration(List<RunTarget> runs, Map<String, RunSnapshot> settledSnapshots,
+			List<FormAttachmentStore.Attachment> attachments, ContextTargets context, boolean memoryExisted,
+			int memoryMessages, List<String> stagingKeys, SessionPurgeDatabase.Snapshot database,
+			boolean sessionCurrentExisted, boolean sessionRecordExisted, boolean found, ClientCleanup clientCleanup,
+			List<String> warnings) {
 
-		Enumeration withRuns(List<RunTarget> refreshed) {
-			return new Enumeration(refreshed, this.attachments, this.context, this.memoryExisted,
-					this.memoryMessages, this.database, this.sessionCurrentExisted,
+		Enumeration withRuns(List<RunTarget> refreshed, Map<String, RunSnapshot> settled) {
+			return new Enumeration(refreshed, settled, this.attachments, this.context, this.memoryExisted,
+					this.memoryMessages, this.stagingKeys, this.database, this.sessionCurrentExisted,
 					this.sessionRecordExisted, this.found, this.clientCleanup, this.warnings);
 		}
 

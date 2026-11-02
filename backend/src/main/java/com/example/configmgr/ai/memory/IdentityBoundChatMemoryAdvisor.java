@@ -35,8 +35,8 @@ import reactor.core.scheduler.Scheduler;
  * {@code after}（上游发元素的线程）。这两条线程都<b>没有请求身份</b>，而 {@link RedisChatMemoryRepository}
  * 的键由<b>线程</b>身份（{@link com.example.configmgr.ai.tenant.TenantKeyScope}）拼出：
  * <ul>
- * <li>无身份 ⇒ 键退化为无身份内部键形 {@code chat:mem:{<sessionId>}}，索引成员退化为裸
- * {@code <sessionId>}；</li>
+ * <li>无身份 ⇒ 键退化为无身份内部键形 {@code chat:mem:{<sessionId>}}（历史事实：当时全局索引
+ * {@code chat:mem:__ids__} 的成员还会退化为裸 {@code <sessionId>}；该索引现已退役、不再读写）；</li>
  * <li>同一 sessionId 在别的租户/用户下会读到这段正文（跨身份泄露）；</li>
  * <li>会话销毁按身份拼键 ⇒ 删不到无身份键，{@code complete=true} 之后正文仍留在 Redis；</li>
  * <li>下一轮在正常线程（有身份）上读到身份键（空窗）⇒ 用户看到"上下文丢了"。</li>

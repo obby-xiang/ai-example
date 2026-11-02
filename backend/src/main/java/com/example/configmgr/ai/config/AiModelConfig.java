@@ -95,8 +95,9 @@ public class AiModelConfig {
 	 * （{@link IdentityBoundChatMemoryAdvisor}）。
 	 *
 	 * <p>为什么不能直接挂官方实例：它的读在 {@code boundedElastic}、写在上游发元素的线程 —— 两条线程
-	 * 都没有请求身份，仓储会按无身份上下文的旧键形 {@code chat:mem:{<sessionId>}}（legacy 命名空间）
-	 * 与裸索引成员写入，造成跨身份可读、销毁删不掉的正文。装饰器在请求入口按本轮记录身份显式绑定
+	 * 都没有请求身份，仓储会按无身份上下文的键形 {@code chat:mem:{<sessionId>}}（非默认身份的独立
+	 * 命名空间）写入，造成跨身份可读、销毁删不掉的正文（历史事实：旧实现还会写裸全局索引成员
+	 * {@code chat:mem:__ids__}；该索引现已退役、不再读写）。装饰器在请求入口按本轮记录身份显式绑定
 	 * （见该类文档），读写时机/窗口裁剪仍是官方语义。bean 类型仍是官方 advisor 接口，注入方
 	 * （{@code AiProviderRegistry}）照旧把它挂成 {@code ChatClient} 的默认 advisor。
 	 */

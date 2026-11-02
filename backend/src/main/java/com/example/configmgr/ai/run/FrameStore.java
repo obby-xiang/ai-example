@@ -215,6 +215,18 @@ public interface FrameStore {
 		return new ReadResult(readFrom(runId, afterSeq, limit), false);
 	}
 
+	/**
+	 * <b>回放元数据的廉价探测</b>（I1）：只回 {@code degraded/truncated/缺口区间}，<b>不读取也不解析</b>
+	 * 正文帧。分页回放的第一页因此可以用 {@link #readRawFrom} 做真实 COUNT 读取，而不必为了
+	 * {@code archive-trimmed} 头先整窗 {@code readFrom} 再裁剪。
+	 *
+	 * <p>默认实现返回"未降级、未截断"（兼容实现/替身）；生产实现
+	 * {@link RedisFrameStore} 覆盖为末号 + 裁剪低水位的单次探测。
+	 */
+	default ReadResult replayMeta(String runId, long afterSeq) {
+		return new ReadResult(List.of(), false, false, 0L, 0L);
+	}
+
 	/** 事件日志里<b>已落档</b>的最大序号；读失败返回 {@link OptionalLong#empty()}，不得折成 0。 */
 	default OptionalLong lastSeqIfKnown(String runId) {
 		return OptionalLong.of(lastSeq(runId));

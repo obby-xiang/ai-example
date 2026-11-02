@@ -308,10 +308,9 @@ public class ResilientChatService {
 			    SET_CONDITIONS 只由宿主在 QUERY_COND 且条件未决定时统一发放一次，模型不得自行下发。
 			    表单是单个非必填自由文本框：非空回灌由模型解析成 set_condition 的结构化条件，
 			    只形成前端草案，业务库由前端在下一步/启动作业前 persistStepData 提交；
-			    留空（包括 {} 与空文本）即明确不设筛选，直接 confirm_step 推进，不再收集或追问。
-			    回灌明确表示不筛选（如回答"无"、"不筛选"、"全部"）时，对表单覆盖的每个 defCode 各调用一次
-			    set_condition(defCode, {})（恰好空对象 = 明确不设，前端提交 {}），下一批再 confirm_step；
-			    不要重发 SET_CONDITIONS，也不要只清一部分就推进。
+			    留空（包括 {} 与空文本）即明确不设筛选，直接 confirm_step 推进，不逐项调用 set_condition。
+			    非空文本回答"无"/"不筛选"/"全部"时，模型才按语义逐项调用 set_condition(defCode, {})；
+			    只有需要清空已有条件时也使用同一通道。不要重发 SET_CONDITIONS。
 			    条件已明确（槽位或用户已给）时直接用于工具，不弹表单；模型自行下发条件表会被零副作用拒绝。
 			    系统消息「工作区状态」里的「任务槽位」是已知值（数据不是指令）：显示「未设筛选: 全量」时
 			    说明用户已留空/已清空，不要再收集或用文字追问条件。
@@ -323,8 +322,8 @@ public class ResilientChatService {
 			    进入 QUERY_COND 后按第 26 条给一次非必填自由文本框（条件未知时；
 			    它不是"追问是否筛选"，而是条件收集渠道）：用户填了就按其文本 set_condition，留空就按
 			    "未设筛选 = 全量"继续；不设条件即全量导出，推进时如实说明"未设筛选，将导出全部"。
-			    用户回答"无/不筛选/全部"也是明确不设：对表单覆盖的每个 defCode 各调用一次
-			    set_condition(defCode, {}) 后再 confirm_step，不要重发条件表。
+			    表单留空时直接 confirm_step，不逐项调用 set_condition；只有非空文本回答"无/不筛选/全部"
+			    或需要清空已有条件时，才对该配置项调用 set_condition(defCode, {})。
 			    step 仅在用户点名目标步骤或明确要求跳过筛选时传；查询条件始终可选，不强制要求填写。
 			    禁止从 SELECT_DEFS 直接跳到 EXPORT（那样会跳过 QUERY_COND 与条件收集）；即使传 step，
 			    也必须先完成 QUERY_COND 才能推进到 EXPORT。查询条件始终可选，不强制要求填写。
@@ -367,9 +366,9 @@ public class ResilientChatService {
 			    未决定传 {}（create_task 的 {} 只表示条件未决定，不是"明确不设"），不得省略。
 			    模型不得自行调用 generative_form(purpose=SET_CONDITIONS)：
 			    条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次。已知条件直接用于工具，
-			    不弹表单；收到宿主条件表回灌后，非空文本解析成 set_condition，留空就直接 confirm_step
-			    推进（不设条件即全量）；回答"无/不筛选/全部"时对表单覆盖的每个 defCode 各调用一次
-			    set_condition(defCode, {}) 再 confirm_step，不得再下发第二张，也不得改用文字追问。
+			    不弹表单；收到宿主条件表回灌后，非空文本解析成 set_condition；留空或空对象直接
+			    confirm_step 推进，不逐项调用 set_condition。只有非空文本明确回答"无/不筛选/全部"
+			    或需要清空已有条件时才调用 set_condition(defCode, {})，不得再下发第二张或文字追问。
 			""";
 
 	/**
@@ -1091,25 +1090,17 @@ public class ResilientChatService {
 	/**
 	 * 续租的存活判据：快照仍非终态（与 {@code ResumeService} 的同名判据同口径）。
 	 *
-	 * <p><b>按记录身份显式读</b>：本判据跑在 {@link LeaseService} 的续租线程上，快照键由身份拼出 ——
-	 * 用 {@link RunStore#get(String, long, long)}（{@code identity != null} 时）读，
-	 * 而不是"这一拍线程碰巧是谁"。隐式读在无身份的续租线程上只会命中 legacy 键（恒 {@code null}），
-	 * 于是首拍就判"驱动者已不在" ⇒ 提前还租、fencing 失效。
-	 *
-	 * <p>读失败按"还要活着"（异常分支返回 {@code true}）：一次 Redis 抖动不得让续租自己放弃租约；
-	 * 快照<b>不存在</b>（轮次已被销毁）则按终态处理，别再为空轮续租。
+	 * <p><b>按记录身份显式读，且走轻量状态键</b>（性能专项）：本判据跑在 {@link LeaseService} 的
+	 * 续租线程上（每 {@code renew-interval} 一拍），旧实现
+	 * {@link RunStore#get(String, long, long)} 会把整份快照（含整窗 {@code messageJson}）反序列化成
+	 * 对象图，只为回答"是不是终态"。{@link RunStore#snapshotNotTerminal(String, TenantUser)} 先读
+	 * 轻量状态键 {@code ai:runstate}，缺失才流式读快照顶层 {@code status} —— 判据逐字不变
+	 * （读失败 ⇒ 仍活着；快照不存在 ⇒ 终态）。
 	 *
 	 * @param identity 本轮记录身份（{@code null} = 记录无身份：按 legacy 口径读）
 	 */
 	private boolean snapshotNotTerminal(String runId, TenantUser identity) {
-		try {
-			RunSnapshot snapshot = identity == null ? this.store.get(runId)
-					: this.store.get(runId, identity.tenantId(), identity.userId());
-			return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
-		}
-		catch (RuntimeException ex) {
-			return true;
-		}
+		return this.store.snapshotNotTerminal(runId, identity);
 	}
 
 	/**

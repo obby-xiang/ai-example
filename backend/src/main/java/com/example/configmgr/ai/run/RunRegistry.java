@@ -3,9 +3,13 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -111,6 +115,9 @@ public class RunRegistry {
 
 	/** B23L1 批①：唤醒订阅面（按连接 subscribe/unsubscribe）。 */
 	private final FrameWakeListener wakeListener;
+
+	/** 本实例是否登记了进程级共享资源 owner（I5：只有登记过的实例才在停机时释放）。 */
+	private volatile boolean ownsSharedSseResources;
 
 	/**
 	 * 生产装配（B23L1 批①）：写出器一律拿到 Redis Stream 事件日志 + wake 扇出。
@@ -218,6 +225,9 @@ public class RunRegistry {
 	 * <p><b>身份口径</b>：有当前身份时只看<b>这一身份</b>的条目（A 的连接不得让 B 被判活）；
 	 * 无身份（启动/运行期扫描线程，见 {@code StartupResumeRunner}）时回答"本进程有没有这一轮的真实
 	 * 连接"—— 任一身份桶命中即为真。判活方向的误报只让我们晚一拍接管；误报"无人"会双驱动。
+	 *
+	 * <p><b>扫描请用精确身份重载</b> {@link #hasLiveSubscriber(String, long, long)}：本方法在无身份
+	 * 线程上会退化为遍历全部条目（P2-11）。
 	 */
 	public boolean hasLiveSubscriber(String runId) {
 		if (runId == null || runId.isBlank()) {
@@ -236,6 +246,31 @@ public class RunRegistry {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * <b>精确身份</b>的活订阅者判定（P2-11）：只查 {@code (tenantId, userId, runId)} 那一个条目，
+	 * <b>不做</b>全表遍历，也不依赖调用线程的当前身份。
+	 *
+	 * <p>供启动/运行期扫描这类<b>没有请求身份</b>的线程使用：它已经知道候选 run 的记录身份
+	 * （扫描侧从快照/索引取），直接问"这个身份的这一轮在本进程有没有活连接"即可，避免旧口径在
+	 * 无身份线程上退化为 O(全部 emitter)。
+	 *
+	 * <p><b>legacy 记录（0/0 或不可用身份）</b>：查的是无身份桶 {@code {run:<runId>}}（与 {@link #of}
+	 * 在无身份调用线程上建出的条目同键），<b>不是</b> {@code 0:0} 命名空间，也不是"默认租户"。
+	 * 调用方传的就是记录里的权威身份。
+	 *
+	 * @return {@code true} = 该精确身份条目存在且有订阅者；其余（含非法 runId）一律 {@code false}
+	 */
+	public boolean hasLiveSubscriber(String runId, long tenantId, long userId) {
+		if (runId == null || runId.isBlank() || runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0) {
+			return false;
+		}
+		String key = RunIdentityScope.usable(tenantId, userId)
+				? LocalRunKey.of(tenantId, userId, runId)
+				: LocalRunKey.of((TenantUser) null, runId);
+		EmitterEntry entry = this.emitters.get(key);
+		return entry != null && entry.emitter().subscriberCount() > 0;
 	}
 
 	/**
@@ -352,6 +387,39 @@ public class RunRegistry {
 				log.warn("释放轮次事件日志簿记失败 runId={}（不影响终态；到期清理会兜底）：{}", runId, ex.getMessage());
 			}
 		}
+	}
+
+	/**
+	 * <b>装配完成后登记共享资源 owner</b>（I5）。
+	 *
+	 * <p>放在 {@code @PostConstruct} 而不是构造器：直接 {@code new RunRegistry(...)} 的窄路径（单测/
+	 * 局部装配）不会登记，也就不会在"没有 Spring 生命周期回调"的情况下泄漏 owner 计数；
+	 * 构造失败（Spring 不会回调 {@code @PostConstruct}）同样不会留下计数。
+	 */
+	@PostConstruct
+	void registerSharedSseResources() {
+		if (this.properties == null) {
+			return;
+		}
+		SseChatEmitter.registerSharedResourceOwner();
+		this.ownsSharedSseResources = true;
+	}
+
+	/**
+	 * <b>应用停机</b>：释放本装配登记的进程级共享资源 owner（I5）。
+	 *
+	 * <p>静态池是进程级资源：多 Spring Context 并存时，先关闭的上下文只释放自己那一个 owner，
+	 * <b>最后一个</b> owner 离开才真正 shutdown 投递池/attach 调度器/共享写出池（见
+	 * {@link SseChatEmitter#releaseSharedResourceOwner()}）。运行期语义不受影响。
+	 */
+	@PreDestroy
+	void shutdownSharedSseResources() {
+		if (!this.ownsSharedSseResources) {
+			return;
+		}
+		this.ownsSharedSseResources = false;
+		SseChatEmitter.releaseSharedResourceOwner();
+		log.info("SSE 共享资源 owner 已释放（最后一个 owner 关闭时才真正停止 delivery pool / attach keepalive / write pool）");
 	}
 
 	/**

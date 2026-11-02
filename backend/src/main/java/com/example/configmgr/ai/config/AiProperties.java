@@ -874,6 +874,26 @@ public class AiProperties {
 		private Duration startupDelay = Duration.ofSeconds(8);
 
 		/**
+		 * 启动扫描的<b>有界随机抖动</b>上界（缺省 5s；{@code 0} = 不抖动）。
+		 *
+		 * <p>滚动发布/多实例同时起来时，各实例的 {@code startup-delay} 几乎同拍，扫描单飞锁只能让
+		 * 一个赢、其余在等待预算里空转。在 delay 之后再加 {@code [0, 本值]} 的均匀随机
+		 * （实现侧再封顶 {@code 60s}，见 {@code StartupResumeRunner}）把启动扫描摊开：
+		 * 抖动<b>只影响"什么时候扫"</b>，不影响判死窗口 {@link #zombieAge}，也不改变
+		 * "一次启动只扫一拍"的语义。
+		 */
+		private Duration startupJitter = Duration.ofSeconds(5);
+
+		/**
+		 * 扫描单飞的租约 TTL（缺省 60s；扫描期间由续租调度保持，见
+		 * {@link com.example.configmgr.ai.run.LeaseService#markDriving}）。
+		 *
+		 * <p>它只约束"持锁实例死掉后，别的实例多久能接手扫描"，<b>不是</b>单拍扫描的预算上限；
+		 * 预算由 {@link #maxOnStartup} 与 {@link #scanMaxAttempts} 给出。
+		 */
+		private Duration scanLeaseTtl = Duration.ofSeconds(60);
+
+		/**
 		 * 僵尸判定：状态 {@code RUNNING} 且<b>最后一条非心跳业务帧</b>超过本值 ⇒ 判为僵尸轮并接管（N3）。
 		 *
 		 * <p>
@@ -907,13 +927,29 @@ public class AiProperties {
 		private int maxOnStartup = 10;
 
 		/**
+		 * <b>单拍扫描的尝试上界</b>（缺省 20；含失败，且不小于 {@link #maxOnStartup}）。
+		 *
+		 * <p>与 {@code max-on-startup} 的分工：
+		 * <ul>
+		 * <li>{@code max-on-startup} 是<b>产出预算</b>（真正受理/收尾/收敛的轮数）—— 报告口径不变；</li>
+		 * <li>本值是<b>动作尝试预算</b>：取消收尾（F3）、park 到期收敛（F2）、续跑每次都算一次，
+		 *     <b>失败/无果也算</b>。没有它时"F2 每轮试一次但 converged=0"这类路径不计预算，
+		 *     单拍的动作数会随候选数无界增长（审计：单拍无界）。</li>
+		 * </ul>
+		 *
+		 * <p>公平性不靠预算，靠轮转起点（{@code StartupResumeRunner} 记住上一拍最后一个尝试过的候选，
+		 * 下一拍从它之后开始）：即使前几轮每次都失败把尝试预算用光，后面的轮次也会在下一拍轮到。
+		 */
+		private int scanMaxAttempts = 20;
+
+		/**
 		 * <b>运行期低频死轮扫描</b>（批次8B / Task 12 Step 3）的开关。
 		 *
 		 * <p>
 		 * 启动扫描每实例只跑一拍；此后"进程死在模型调用中间"、"决策已落库但派发窗口整段错过"、
 		 * "重挂自愈那一下 Redis 抖了"都会留下无人推进的 {@code RUNNING}/{@code SUSPENDED} 轮到下一次重启。
 		 * 打开后按 {@link #runtimeSweepInterval} 周期把<b>无驾驶方</b>的那些轮次交给与启动扫描同一条
-		 * 续跑路径（判据见 {@code StartupResumeRunner#sweep()}：候选 = {@code listRuns()}，
+		 * 续跑路径（判据见 {@code StartupResumeRunner#sweep()}：候选 = {@code listRunsForRecovery()}，
 		 * 活/死 = {@code RunLiveness.isDead}，窗口 = {@link #zombieAge}）。
 		 *
 		 * <p>

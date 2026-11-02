@@ -9,14 +9,20 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -76,14 +82,34 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	static final String SESSION_INDEX_PREFIX = "ai:form:att:sess:";
 
-	/**
-	 * 表单 → 附件登记 id 索引（{@code ai:form:att:form:<runId>:<toolCallId>}，SET，TTL 与登记同量级）。
+	/** 表单 → 附件登记 id 索引（{@code ai:form:att:form:<runId>:<toolCallId>}，SET，TTL 与登记同量级）。
 	 *
 	 * <p>两个用途：<b>①上传限额</b>（在册件数 ≤ 表单的 attachment 字段数，每个字段只装一个 fileId）；
 	 * <b>②表单收口回收</b>（决策接受 / 用户放弃后，把"传了但没提交"的登记与落盘文件一并删掉 ——
 	 * 否则它们只能等 TTL，文件成孤儿）。
 	 */
 	static final String FORM_INDEX_PREFIX = "ai:form:att:form:";
+
+	/** 索引登记脚本标记（测试替身据此分派；不要改动与脚本正文不一致）。 */
+	static final String INDEX_ADD_MARK = "ATTACHMENT_INDEX_ADD";
+
+	/**
+	 * 索引的<b>单键原子登记</b>：{@code SADD} 与 {@code PEXPIRE} 同一个脚本步。
+	 *
+	 * <p>为什么必须原子：两个索引都是"删文件"的枚举面。拆成 {@code SADD → EXPIRE} 时，进程死在
+	 * 两步之间会留下<b>无 TTL 的索引</b> —— 成员永远指向一条早已过期的登记（stale 成员随会话数
+	 * 无界增长，且键永不消失）。脚本只碰一个键（索引键不带 hash tag ⇒ 同槽），Cluster 下不引入
+	 * {@code CROSSSLOT}。
+	 *
+	 * @param KEYS[1] 索引键
+	 * @param ARGV[1] fileId / {@code ARGV[2]} TTL（毫秒）
+	 */
+	private static final RedisScript<Long> INDEX_ADD_SCRIPT = new DefaultRedisScript<>("""
+			-- ATTACHMENT_INDEX_ADD
+			redis.call('SADD', KEYS[1], ARGV[1])
+			redis.call('PEXPIRE', KEYS[1], ARGV[2])
+			return 1
+			""", Long.class);
 
 	private final ObjectProvider<StringRedisTemplate> redisProvider;
 
@@ -284,8 +310,21 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	/**
 	 * 续期该表单名下的登记、表单索引与会话索引（挂起续期链的一次 touch）。
 	 *
-	 * <p>逐件隔离：单个键失败只告警（{@link RedisDegradation#B3_ATTACHMENT_READ} 计数），
-	 * 不让确认门心跳因一个键失败而中断。索引读不出来同样只告警 —— 下一次心跳还会再试。
+	 * <p><b>RTT 收口（3N+2 → 3）</b>：旧实现对每件做 {@code EXPIRE + GET + EXPIRE} ——
+	 * 一次挂起心跳在 N 件附件上要发 {@code 3N+2} 条命令。现在固定三次往返：
+	 * <ol>
+	 * <li>{@code SMEMBERS} 取表单索引（一次）；</li>
+	 * <li>一条 pipeline 批量 {@code GET} 登记（一次；不再逐件 {@code GET}，也<b>不用</b> 跨键
+	 * {@code MGET} —— 登记键不同槽，{@code MGET} 在 Cluster 下是 {@code CROSSSLOT}）；</li>
+	 * <li>一条 pipeline 续期「在册登记 + <b>去重后</b>的会话索引（distinct sessionId）+ 表单索引」（一次）。</li>
+	 * </ol>
+	 *
+	 * <p><b>逐件隔离不变</b>：pipeline 里每条命令独立下发，单件失败（键类型错/已删）不影响其余件；
+	 * 连接类失败只告警（{@link RedisDegradation#B3_ATTACHMENT_READ} 计数），不让确认门心跳因一个键
+	 * 失败而中断 —— 下一次心跳还会再试。陈旧成员（登记已过期/被消费）不再被"续"出一个空登记。
+	 *
+	 * <p><b>替身/包装层兜底</b>：批量读或 pipeline 没有被真正执行（单测替身返回空/形状不符）时，
+	 * 退回原来的逐件 {@code EXPIRE + GET + EXPIRE} 路径 —— 语义完全一致，只多 RTT。
 	 */
 	@Override
 	public void touch(String runId, String toolCallId) {
@@ -315,6 +354,137 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (ids == null || ids.isEmpty()) {
 			return;
 		}
+		if (!touchBatched(redis, identity, indexKey, ids, runId, toolCallId)) {
+			touchPerItem(redis, identity, indexKey, ids, runId, toolCallId);
+		}
+	}
+
+	/**
+	 * 批量续期（正常生产路径）：一次 pipeline 读 + 一次 pipeline 写，共三次往返（含 SMEMBERS）。
+	 *
+	 * @return {@code false} = 批量面没有被真的执行（替身/包装层），调用方退回逐件路径；
+	 *         {@code true} = 已处理（含"批量读失败只告警"的降级）
+	 */
+	private boolean touchBatched(StringRedisTemplate redis, TenantUser identity, String indexKey, Set<String> ids,
+			String runId, String toolCallId) {
+		List<String> fileIds = new ArrayList<>(ids);
+		List<String> registrationKeys = new ArrayList<>(fileIds.size());
+		for (String fileId : fileIds) {
+			registrationKeys.add(registrationKey(identity, fileId));
+		}
+		List<Object> raw;
+		try {
+			raw = pipelineGet(redis, registrationKeys);
+		}
+		catch (Exception ex) {
+			// 读失败 ≠ 不存在：只告警（续期是养活性维护，下一拍再试），不把附件当成已过期。
+			// 表单索引本身仍尽力续一次 —— 索引先过期会让整张表单的附件一起从回收面消失。
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			log.warn("附件续期批量读登记失败 runId={} toolCallId={} count={}（下一拍重试）：{}", runId, toolCallId,
+					registrationKeys.size(), ex.getMessage());
+			expireIndexQuietly(redis, indexKey, runId, toolCallId);
+			return true;
+		}
+		if (raw == null) {
+			return false;
+		}
+		List<String> liveRegistrationKeys = new ArrayList<>(fileIds.size());
+		// distinct sessionId：同一会话的多件附件只续一次会话索引（旧实现逐件续，重复往返）
+		Set<String> sessionIndexKeys = new LinkedHashSet<>();
+		for (int i = 0; i < fileIds.size(); i++) {
+			Attachment attachment = parseRegistration(asString(raw.get(i)), fileIds.get(i));
+			if (attachment == null) {
+				// 陈旧成员（登记已过期/被并发消费）：不续一条不存在的登记，枚举时的 find 会过滤掉它
+				continue;
+			}
+			liveRegistrationKeys.add(registrationKeys.get(i));
+			String sessionKey = sessionIndexKey(identity, attachment.sessionId());
+			if (sessionKey != null) {
+				sessionIndexKeys.add(sessionKey);
+			}
+		}
+		List<String> keys = new ArrayList<>(liveRegistrationKeys.size() + sessionIndexKeys.size() + 1);
+		keys.addAll(liveRegistrationKeys);
+		keys.addAll(sessionIndexKeys);
+		keys.add(indexKey);
+		return expireInPipeline(redis, keys, runId, toolCallId);
+	}
+
+	/**
+	 * 一次 pipeline 批量读登记（{@code GET} × N，<b>一次往返</b>）。
+	 *
+	 * <p>为什么不是 {@code MGET}：登记键<b>不带 hash tag</b>（每件一个槽），而 {@code MGET} 是多键命令
+	 * —— Cluster 下会整条回 {@code CROSSSLOT}，一件都读不到。pipeline 里的<b>单键</b> {@code GET}
+	 * 各自路由到自己的槽，合法且同样只需一次往返。
+	 *
+	 * @return 与 {@code keys} 同序的结果（缺失成员为 {@code null}）；{@code null} = 管道未被执行
+	 *         （替身/包装层），调用方退回逐件路径
+	 */
+	private static List<Object> pipelineGet(StringRedisTemplate redis, List<String> keys) {
+		if (keys.isEmpty()) {
+			return List.of();
+		}
+		List<Object> raw = redis.executePipelined((RedisCallback<Object>) connection -> {
+			for (String key : keys) {
+				connection.get(key.getBytes(StandardCharsets.UTF_8));
+			}
+			return null;
+		});
+		return raw == null || raw.size() < keys.size() ? null : raw;
+	}
+
+	/** pipeline 结果的字符串化（{@code String} / {@code byte[]} 都接受：模板/连接实现可能各给一种）。 */
+	private static String asString(Object raw) {
+		if (raw == null) {
+			return null;
+		}
+		if (raw instanceof String text) {
+			return text;
+		}
+		if (raw instanceof byte[] bytes) {
+			return new String(bytes, StandardCharsets.UTF_8);
+		}
+		return String.valueOf(raw);
+	}
+
+	/**
+	 * 一条 pipeline 续期全部键（{@code PEXPIRE}，<b>TTL 与登记同源</b>）。
+	 *
+	 * <p>为什么不是 Lua：这些键<b>跨槽</b>（登记/索引不带 hash tag）—— 多键脚本会被 Cluster 以
+	 * {@code CROSSSLOT} 整条拒绝；pipeline 里每条命令独立路由，合法且天然逐件隔离。
+	 *
+	 * @return {@code false} = 流水线没有真的执行（替身返回空表），调用方退回逐件路径
+	 */
+	private boolean expireInPipeline(StringRedisTemplate redis, List<String> keys, String runId, String toolCallId) {
+		StringRedisSerializer serializer = new StringRedisSerializer();
+		long ttlMillis = this.ttl.toMillis();
+		List<Object> results;
+		try {
+			results = redis.executePipelined((RedisCallback<Object>) connection -> {
+				for (String key : keys) {
+					connection.pExpire(serializer.serialize(key), ttlMillis);
+				}
+				return null;
+			});
+		}
+		catch (Exception ex) {
+			// 命令已逐条下发：单条失败不阻断其余（逐件隔离保留），这里只留痕；下一拍会再试
+			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
+			log.warn("附件续期流水线失败 runId={} toolCallId={} keys={}（下一拍重试）：{}", runId, toolCallId,
+					keys.size(), ex.getMessage());
+			return true;
+		}
+		return results != null && !results.isEmpty();
+	}
+
+	/**
+	 * 逐件续期（替身/包装层兜底 + 历史语义）：单件失败只告警，不影响其余件。
+	 *
+	 * <p>每件三步：续登记、读登记（拿 sessionId）、续会话索引。读失败只告警（下一拍再试），
+	 * 不让确认门心跳因一个键失败而中断 —— 与批量路径的降级口径一致。
+	 */
+	private void touchPerItem(StringRedisTemplate redis, TenantUser identity, String indexKey, Set<String> ids,
+			String runId, String toolCallId) {
 		for (String fileId : ids) {
 			try {
 				redis.expire(registrationKey(identity, fileId), this.ttl);
@@ -328,6 +498,11 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 						toolCallId, ex.getMessage());
 			}
 		}
+		expireIndexQuietly(redis, indexKey, runId, toolCallId);
+	}
+
+	/** 表单索引单独续期（降级路径用：索引是"删文件"的枚举面，不能因为别的键读失败就跟着过期）。 */
+	private void expireIndexQuietly(StringRedisTemplate redis, String indexKey, String runId, String toolCallId) {
 		try {
 			redis.expire(indexKey, this.ttl);
 		}
@@ -423,17 +598,71 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		return attachment;
 	}
 
-	/** 索引登记（失败抛出；调用方回滚登记）。key 为空 = 无法归属，跳过（不阻断上传）。 */
+	/**
+	 * 索引登记（失败抛出；调用方回滚登记）。key 为空 = 无法归属，跳过（不阻断上传）。
+	 *
+	 * <p>{@code SADD + PEXPIRE} 走<b>单键 Lua</b>（见 {@link #INDEX_ADD_SCRIPT}）：成员的写入与
+	 * 索引 TTL 同生同死，不会留下"有成员、无 TTL"的永久索引。
+	 *
+	 * <p><b>脚本不可用 ≠ 写失败</b>，两者必须分开处置：
+	 * <ul>
+	 * <li>只有"脚本面不支持"（{@link UnsupportedOperationException}、{@code unknown command} /
+	 *     {@code not supported} 这类明确信号）或"脚本没被执行"（返回 null，替身/包装层）才退回
+	 *     {@code SADD + EXPIRE}；</li>
+	 * <li><b>连接类/未知 {@link RuntimeException} 一律上抛</b>：EVAL 可能已在服务端执行（只是回包丢了），
+	 *     盲目改走两步式等于在故障中重复写、放大问题；让调用方回滚登记并重试整条上传更安全。</li>
+	 * </ul>
+	 */
 	private void addToIndex(StringRedisTemplate redis, String indexKey, String fileId) {
 		if (indexKey == null) {
 			return;
 		}
-		SetOperations<String, String> setOps = redis.opsForSet();
-		if (setOps == null) {
-			return;
+		Long applied;
+		try {
+			applied = redis.execute(INDEX_ADD_SCRIPT, List.of(indexKey), fileId,
+					String.valueOf(this.ttl.toMillis()));
 		}
-		setOps.add(indexKey, fileId);
-		redis.expire(indexKey, this.ttl);
+		catch (RuntimeException ex) {
+			if (!isScriptUnsupported(ex)) {
+				throw ex;
+			}
+			log.warn("附件索引脚本不可用（本次按 SADD+EXPIRE 两步式降级）key={}：{}", indexKey, ex.getMessage());
+			applied = null;
+		}
+		if (applied == null) {
+			SetOperations<String, String> setOps = redis.opsForSet();
+			if (setOps == null) {
+				return;
+			}
+			setOps.add(indexKey, fileId);
+			redis.expire(indexKey, this.ttl);
+		}
+	}
+
+	/**
+	 * 该异常是否属于"脚本面不可用"（而不是连接/服务端执行失败）。
+	 *
+	 * <p>判据刻意收窄：只认 {@link UnsupportedOperationException}（包装层/替身不支持 EVAL）与
+	 * 命令被明确拒绝的文案（{@code unknown command} / {@code not supported}）。连接超时、断连、
+	 * {@code READONLY} 等一律不算 —— 它们必须上抛，不能触发第二步写。
+	 */
+	private static boolean isScriptUnsupported(Throwable error) {
+		for (Throwable current = error; current != null; current = current.getCause()) {
+			if (current instanceof UnsupportedOperationException) {
+				return true;
+			}
+			String message = current.getMessage();
+			if (message != null) {
+				String lower = message.toLowerCase(java.util.Locale.ROOT);
+				if (lower.contains("unknown command") || lower.contains("not supported")) {
+					return true;
+				}
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+		}
+		return false;
 	}
 
 	private static String sessionIndexKey(TenantUser identity, String sessionId) {
@@ -496,6 +725,19 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
 			throw new AiStateUnavailableException("附件读取失败（Redis 不可用；不得按无登记处理）", ex);
 		}
+		if (json == null) {
+			return null;
+		}
+		return parseRegistration(json, fileId);
+	}
+
+	/**
+	 * 登记 JSON → {@link Attachment}；不存在/坏数据返回 {@code null}（等同"已过期"）。
+	 *
+	 * <p><b>只有"坏数据"才折成 null</b>：解析不了 ⇒ 按无登记处理。基础设施故障不在这里吞
+	 * （调用方各自按"读失败 ≠ 不存在"处理，见 {@link #readRegistrationOrNull} 与 {@link #touch}）。
+	 */
+	private Attachment parseRegistration(String json, String fileId) {
 		if (json == null) {
 			return null;
 		}

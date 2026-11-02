@@ -49,6 +49,8 @@ import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -233,6 +235,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 	private static final Map<Integer, ExecutorService> TOOL_TIMEOUT_EXECUTORS = new ConcurrentHashMap<>();
 
 	/**
+	 * 共享执行器的 owner 计数（I5）：多 Spring Context 并存时，先关闭的上下文不得停掉兄弟上下文
+	 * 共用的工具超时池；只有最后一个 owner 离开才 shutdown。
+	 */
+	private static final java.util.concurrent.atomic.AtomicInteger TOOL_TIMEOUT_OWNERS =
+			new java.util.concurrent.atomic.AtomicInteger();
+
+	/**
 	 * 没有可依的记录身份时<b>不建立</b>作用域：沿用调用线程身份（正常请求路径就是这样，行为不变）。
 	 *
 	 * <p>刻意不用 {@link RunIdentityScope#denied()}：那是"这条记录没有身份"的显式语义（会清空线程
@@ -248,7 +257,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	private static ExecutorService toolTimeoutExecutor(int threads) {
-		return TOOL_TIMEOUT_EXECUTORS.computeIfAbsent(threads, SpToolCallingManager::newExecutor);
+		synchronized (TOOL_TIMEOUT_EXECUTORS) {
+			return TOOL_TIMEOUT_EXECUTORS.computeIfAbsent(threads, SpToolCallingManager::newExecutor);
+		}
 	}
 
 	private static ExecutorService newExecutor(int threads) {
@@ -262,8 +273,68 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return executor;
 	}
 
+	/**
+	 * <b>优雅停机</b>：关闭全部按容量共享的工具超时执行器（幂等；关闭后下一次取用会重建）。
+	 *
+	 * <p>为什么必须显式关：{@link #TOOL_TIMEOUT_EXECUTORS} 是<b>静态</b>表，池线程是守护线程 ——
+	 * 进程退出不会遗留，但多 Spring Context / 嵌入式部署下旧上下文的池会跨上下文存活并继续接收
+	 * 新上下文提交的工具任务（引用旧类加载器/旧的工具实例）。
+	 *
+	 * <p>先 {@code shutdown()} 让在飞工具跑完（有界等待），再 {@code shutdownNow()}；这只是在停机拍
+	 * 收口，运行期的饱和语义（AbortPolicy ⇒ 未执行）不变。
+	 */
+	static void shutdownToolTimeoutExecutors() {
+		ExecutorService[] executors;
+		synchronized (TOOL_TIMEOUT_EXECUTORS) {
+			executors = TOOL_TIMEOUT_EXECUTORS.values().toArray(new ExecutorService[0]);
+			TOOL_TIMEOUT_EXECUTORS.clear();
+		}
+		for (ExecutorService executor : executors) {
+			executor.shutdown();
+		}
+		for (ExecutorService executor : executors) {
+			try {
+				if (!executor.awaitTermination(2L, TimeUnit.SECONDS)) {
+					executor.shutdownNow();
+				}
+			}
+			catch (InterruptedException ex) {
+				executor.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/**
+	 * 应用停机：释放本实例的 owner；<b>只有最后一个 owner</b> 离开时回收共享执行器（I5）。
+	 *
+	 * <p>owner 在 {@code @PostConstruct} 登记（不是构造器）：直接 {@code new} 的窄路径/构造失败
+	 * 不会留下永不释放的计数。
+	 */
+	@PreDestroy
+	void shutdown() {
+		if (!this.ownsToolTimeout) {
+			return;
+		}
+		this.ownsToolTimeout = false;
+		if (TOOL_TIMEOUT_OWNERS.decrementAndGet() <= 0) {
+			TOOL_TIMEOUT_OWNERS.set(0);
+			shutdownToolTimeoutExecutors();
+		}
+	}
+
+	/** 装配完成后登记共享执行器 owner（只有 Spring 生命周期路径会调用）。 */
+	@PostConstruct
+	void registerToolTimeoutOwner() {
+		TOOL_TIMEOUT_OWNERS.incrementAndGet();
+		this.ownsToolTimeout = true;
+	}
+
 	/** 本实例的超时执行器（同容量共享；见 {@link #TOOL_TIMEOUT_EXECUTORS}）。 */
 	private final ExecutorService toolTimeoutExecutor;
+
+	/** 本实例是否登记了工具超时池 owner（直接 new 的窄路径不登记）。 */
+	private volatile boolean ownsToolTimeout;
 
 	/** 本实例的执行器容量（日志与饱和结算文案用）。 */
 	private final int toolTimeoutThreads;
