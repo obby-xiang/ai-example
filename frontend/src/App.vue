@@ -41,11 +41,6 @@
           <AiPanel />
         </el-aside>
       </main>
-
-      <footer class="px-4 py-1 text-xs text-gray-400 bg-white border-t border-gray-200">
-        {{ t('app.footer.contract', { version: workspace.contractVersion }) }} ｜ {{ t('app.footer.context', { key: workspace.contextKey }) }} ｜ {{ t('app.footer.dataVersion', { version: workspace.dataVersion }) }}
-        <span v-if="!ai.expanded" class="ml-2">{{ t('app.footer.collapsedHint') }}</span>
-      </footer>
     </div>
   </el-config-provider>
 </template>

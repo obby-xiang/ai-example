@@ -12,8 +12,6 @@
  * - 百分比由**服务端**算（一位小数），前端不重复折算 —— 前后端各 round 一次会出现同源分歧。
  */
 
-import type { ContextBreakdownItem, ContextUsage } from '@/types/ai'
-
 /**
  * 三档换色的阈值：70 / 85 / 95（设计稿 §3.4(c) 逐字）。
  *
@@ -76,91 +74,6 @@ export function tierClass(tier: ContextTier): string {
   }
 }
 
-/**
- * 文案出口（批 E · E3）：默认实现是内置中文；`ContextPill` 注入 vue-i18n 的 `t` 后即为双语。
- * 纯函数测试不传第二参 ⇒ 与改造前逐字同源（既有断言零改）。
- */
-export type ContextTextKey = 'used' | 'usedLimit' | 'usedLimitNoPercent' | 'estimate' | 'warn' | 'high' | 'danger'
-
-export type ContextTextFn = (key: ContextTextKey, params: Record<string, string>) => string
-
-/** 内置中文文案（缺省实现；同时也是 i18n 键缺失时的兜底）。 */
-export function defaultContextText(key: ContextTextKey, params: Record<string, string>): string {
-  switch (key) {
-    case 'used':
-      return `上下文已用 ${params.used} tokens`
-    case 'usedLimit':
-      return `上下文已用 ${params.used} / ${params.limit} tokens（占比 ${params.percent}%）`
-    case 'usedLimitNoPercent':
-      return `上下文已用 ${params.used} / ${params.limit} tokens`
-    case 'estimate':
-      return '（估算值：上游未返回用量）'
-    case 'warn':
-      return '已超过轻量清理线'
-    case 'high':
-      return '已进入压缩区（工具结果优先清理）'
-    case 'danger':
-    default:
-      return '接近上限，下一次请求前会先清理历史工具结果'
-  }
-}
-
-/**
- * 档位 → 措辞（纯文本，禁 emoji；`title` 用完整句，视觉上仍是一行小字）。
- *
- * <h2>批 E · E3 口径</h2>
- * 这里的数是**整体上下文占用**（本轮请求的 prompt 侧真值 = 整个窗口的占用），不是"本轮新增"。
- * 因此措辞用「上下文已用」而不是「本轮上下文已用」；有上限时同时给出<b>占比</b>——
- * 用户扫一眼 tooltip 就能拿到 已用 / 上限 / 占比 三件，不必自己做除法。
- */
-export function tierTitle(usage: ContextUsage, text: ContextTextFn = defaultContextText): string {
-  const tier = contextTier(usage.percent)
-  const used = formatTokens(usage.usedTokens)
-  const estimated = usage.est ? text('estimate', {}) : ''
-  if (usage.limitTokens === null) {
-    return `${text('used', { used })}${estimated}`
-  }
-  const limit = formatTokens(usage.limitTokens)
-  const head = usage.percent === null
-    ? text('usedLimitNoPercent', { used, limit })
-    : text('usedLimit', { used, limit, percent: formatPercent(usage.percent) })
-  switch (tier) {
-    case 'danger':
-      // 批① 只做 L1（清工具结果）；摘要属批③ —— 文案不得承诺尚未落地的手段
-      return `${head}${estimated}；${text('danger', {})}`
-    case 'high':
-      return `${head}${estimated}；${text('high', {})}`
-    case 'warn':
-      return `${head}${estimated}；${text('warn', {})}`
-    default:
-      return `${head}${estimated}`
-  }
-}
-
-/**
- * pill 文本（C-31/C-33 的判据本体）。
- *
- * 三形态：
- * - 有上限：`66% · 84k/128k`（估算时前缀 `≈`）；
- * - 上限未知（`limitTokens: null`）：`已用 84k`（有百分比才算百分比 —— 没有分母就没有百分比）；
- * - 未测（`usedTokens === 0` 且 `percent === null`）：空串（调用方据此不渲染 pill）。
- */
-export function contextPillText(usage: ContextUsage | null): string {
-  if (!usage) {
-    return ''
-  }
-  const used = formatTokens(usage.usedTokens)
-  const prefix = usage.est ? '≈' : ''
-  if (usage.limitTokens === null || usage.percent === null) {
-    if (usage.usedTokens === 0) {
-      return ''
-    }
-    return `${prefix}已用 ${used}`
-  }
-  const percent = formatPercent(usage.percent)
-  return `${prefix}${percent}% · ${used}/${formatTokens(usage.limitTokens)}`
-}
-
 /** 百分比展示：整数不带小数（66%），非整数保留一位（65.8%）。 */
 export function formatPercent(percent: number): string {
   if (!Number.isFinite(percent)) {
@@ -168,33 +81,4 @@ export function formatPercent(percent: number): string {
   }
   const rounded = Math.round(percent * 10) / 10
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
-}
-
-/** 七项的显示名（顺序由服务端返回决定，这里只做"键 → 人话"）。 */
-export const CONTEXT_PART_LABELS: Record<string, string> = {
-  history: '历史对话',
-  toolResults: '工具结果',
-  summary: '压缩摘要',
-  system: '系统提示',
-  tools: '工具定义',
-  input: '本轮输入',
-  free: '剩余可用'
-}
-
-/** 分项名（未知键原样显示，绝不吞项 —— 后端加类目时界面自动多一行）。 */
-export function partLabel(key: string): string {
-  return CONTEXT_PART_LABELS[key] ?? key
-}
-
-/** `free` 的显示：负值 = 已超（界面上必须与"剩余"完全不同的措辞）。 */
-export function formatPartTokens(key: string, tokens: number): string {
-  if (key === 'free' && tokens < 0) {
-    return `已超 ${formatTokens(-tokens)}`
-  }
-  return `${formatTokens(tokens)} tokens`
-}
-
-/** 分项按服务端顺序原样保留（不排序、不按对象键序 —— C-34 的判据）。 */
-export function orderedParts(parts: ContextBreakdownItem[] | null): ContextBreakdownItem[] {
-  return parts ? [...parts] : []
 }

@@ -35,12 +35,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <b>不</b>重跑整轮 {@code retry}；复核是独立阶段、自带 {@code attempts} 预算
  * （{@link SessionPurgePendingStore#scheduleVerify} 重开为 0），失败沿用同一退避/上限、耗尽后同样只重排；</li>
  * <li>每会话最多 {@value #MAX_ATTEMPTS} 次自动尝试；退避由 {@link SessionPurgePendingStore} 指数封顶；
- * <b>耗尽后只重排</b>（owner-CAS 把 nextAt 推到有界未来 + 移到队尾，不再自动执行第 11 次）——
- * 否则"永远 due、永远不执行"的条目会永久占满队头窗口，把其它会话饿死在候选预算之外；</li>
- * <li>启动/队列为空时 SCAN 兜底最多 {@value #MAX_RECOVERY_KEYS} 键；</li>
+ * <b>耗尽且不再自动执行</b> ⇒ owner-CAS 把 nextAt 直接推到 24h + 确定性抖动未来，
+ * 不再每 5 分钟回到到期队头挤占其它租户的候选窗口；手动 DELETE 经
+ * {@link SessionPurgePendingStore#register} 重置为 now（耗尽的 attempts 归零），仍可推进；</li>
  * <li>调度周期 {@code 30s}，不做实时轮询；<b>周期注册本身可关</b>
  * （{@code app.ai.session.purge-retry.periodic-enabled}，缺省 {@code true} = 生产原样）——
- * 关掉只停"按周期自动推进"，启动期 SCAN 恢复与 {@link #runOnce()} 同步入口不受影响。</li>
+ * 关掉只停"按周期自动推进"，{@link #runOnce()} 同步入口不受影响。</li>
  * </ul>
  *
  * <h2>跨 JVM 单飞</h2>
@@ -52,8 +52,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code DELETE /api/ai/session/{sid}}。只有删除主体 complete 且守卫收尾 + pending 移除都成功，
  * service 才会返回 complete=true。
  *
- * <p>发现面：启动时 SCAN 回填 + 队列表（{@code ai:purge:retry:queue}）；队列为空时再做一次
- * 有界 SCAN 兜底，避免“只靠一个易丢失的索引”。
+ * <p>发现面只有待重试到期 ZSET（{@code ai:purge:retry:due}，member = pending 键、score = nextAtMs）：
+ * 台账登记/改期/失败/完成都在同一次调用里维护自己的到期分，不再有 LIST 队列或 SCAN 兜底。
  */
 @Slf4j
 @Component
@@ -69,12 +69,16 @@ public class SessionPurgeRetryRunner {
 
 	static final int MAX_CANDIDATES = 10;
 
-	static final int MAX_ATTEMPTS = 10;
+	static final int MAX_ATTEMPTS = SessionPurgePendingStore.MAX_AUTO_ATTEMPTS;
 
-	/** 耗尽项的重排最多两轮：第一轮把队头窗口里的耗尽项推到队尾，第二轮取到真正的候选。 */
-	static final int MAX_DEFER_PASSES = 2;
+	/** 耗尽且不再自动执行的台账：排到 24h 之后，不再按 5 分钟退避回到到期队头。 */
+	static final long EXHAUSTED_RETIRE_BASE_MS = Duration.ofHours(24).toMillis();
 
-	static final int MAX_RECOVERY_KEYS = 200;
+	/** 长未来抖动的步长（15 分钟）。 */
+	static final long EXHAUSTED_RETIRE_JITTER_STEP_MS = Duration.ofMinutes(15).toMillis();
+
+	/** 抖动步数：按台账键确定性地散开 0..23 步（最多约 5h45m），避免同一时刻集体回队头。 */
+	static final int EXHAUSTED_RETIRE_JITTER_STEPS = 24;
 
 	private final SessionPurgePendingStore pendingStore;
 
@@ -107,7 +111,7 @@ public class SessionPurgeRetryRunner {
 
 	/** 一轮有界清理的结果（测试/观测；不改变业务语义）。 */
 	public record RetryReport(boolean lockAcquired, int candidates, int attempted, int completed, int failed,
-			int skipped, int recovered) {
+			int skipped) {
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -115,16 +119,10 @@ public class SessionPurgeRetryRunner {
 		if (!this.started.compareAndSet(false, true)) {
 			return;
 		}
-		try {
-			this.pendingStore.recoverOrphans(MAX_RECOVERY_KEYS);
-		}
-		catch (RuntimeException ex) {
-			log.warn("会话销毁 pending 启动恢复失败（不阻塞启动；定时扫描继续）：{}", ex.getMessage());
-		}
 		if (!this.properties.getSession().getPurgeRetry().isPeriodicEnabled()) {
-			// 只停周期注册：启动 SCAN 恢复已在上方完成，runOnce() 仍可由调用方同步驱动。
+			// 只停周期注册：到期项都在 durable ZSET 里，runOnce() 仍可由调用方同步驱动。
 			log.info("会话销毁重试周期注册已关闭（app.ai.session.purge-retry.periodic-enabled=false）："
-					+ "启动恢复已执行、runOnce 保持可调用");
+					+ "runOnce 保持可调用");
 			return;
 		}
 		ScheduledExecutorService svc = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -169,7 +167,7 @@ public class SessionPurgeRetryRunner {
 		LeaseService.AcquireResult lock = this.leases == null ? null
 				: this.leases.acquire(LOCK_KEY, Duration.ofSeconds(LOCK_TTL_SECONDS));
 		if (this.leases != null && (lock == null || !lock.acquired())) {
-			return new RetryReport(false, 0, 0, 0, 0, 0, 0);
+			return new RetryReport(false, 0, 0, 0, 0, 0);
 		}
 		try {
 			List<SessionPurgePendingStore.Pending> due;
@@ -178,35 +176,18 @@ public class SessionPurgeRetryRunner {
 			}
 			catch (RuntimeException ex) {
 				log.warn("会话销毁重试读取 pending 失败（本轮跳过，不猜状态）：{}", ex.getMessage());
-				return new RetryReport(true, 0, 0, 0, 0, 0, 0);
+				return new RetryReport(true, 0, 0, 0, 0, 0);
 			}
-			int recovered = 0;
-			if (due.isEmpty() && this.pendingStore.queueSize() == 0L) {
-				recovered = Math.max(0, this.pendingStore.recoverOrphans(MAX_RECOVERY_KEYS));
-				if (recovered > 0) {
-					due = this.pendingStore.listDue(nowMs, MAX_CANDIDATES);
-				}
-			}
-			// 已耗尽自动尝试的条目：owner-CAS 把 nextAt 推到有界未来并移到队尾，不再占本轮候选预算
-			// （它们永远 due 又永远不执行，原地保留会永久占满队头窗口、饿死其它会话）。
 			int skipped = 0;
-			for (int pass = 0; pass < MAX_DEFER_PASSES && hasExhausted(due); pass++) {
-				skipped += deferExhausted(due, nowMs);
-				try {
-					due = this.pendingStore.listDue(nowMs, MAX_CANDIDATES);
-				}
-				catch (RuntimeException ex) {
-					log.warn("会话销毁重试重排后重取候选失败（本轮按已取到的处理）：{}", ex.getMessage());
-					break;
-				}
-			}
 			int attempted = 0;
 			int completed = 0;
 			int failed = 0;
 			for (SessionPurgePendingStore.Pending pending : due) {
 				if (pending.attempts() >= MAX_ATTEMPTS) {
-					// 兜底：defer 写不进去（Redis 抖动）时仍不强行第 11 次，也不删台账。
+					// I4：耗尽且不再自动执行 ⇒ 直接排到 24h + 抖动未来，不再每 5 分钟回到队头
+					// 挤占其它租户的候选窗口。手动 DELETE 经 register 会重置为 now/attempts=0。
 					skipped++;
+					deferExhausted(pending, exhaustedRetireAt(nowMs, pending));
 					continue;
 				}
 				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
@@ -266,7 +247,7 @@ public class SessionPurgeRetryRunner {
 					}
 				}
 			}
-			return new RetryReport(true, due.size(), attempted, completed, failed, skipped, recovered);
+			return new RetryReport(true, due.size(), attempted, completed, failed, skipped);
 		}
 		finally {
 			if (this.leases != null && lock != null && lock.created() && lock.lease() != null) {
@@ -302,30 +283,27 @@ public class SessionPurgeRetryRunner {
 		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
 	}
 
-	private static boolean hasExhausted(List<SessionPurgePendingStore.Pending> due) {
-		return due.stream().anyMatch(pending -> pending.attempts() >= MAX_ATTEMPTS);
+	/**
+	 * 耗尽台账的"长未来"时刻：24h + 按台账键确定性的 0..23 步抖动。
+	 *
+	 * <p>确定性抖动（而不是随机数）让同一租户/会话每次都散开到同一刻度，测试与排障可复现；
+	 * 不同台账的键不同，天然错开回队头的时刻。
+	 */
+	private static long exhaustedRetireAt(long nowMs, SessionPurgePendingStore.Pending pending) {
+		int step = Math.floorMod(pending.key().hashCode(), EXHAUSTED_RETIRE_JITTER_STEPS);
+		return nowMs + EXHAUSTED_RETIRE_BASE_MS + step * EXHAUSTED_RETIRE_JITTER_STEP_MS;
 	}
 
-	/** @return 成功重排（= 本轮跳过）的条数 */
-	private int deferExhausted(List<SessionPurgePendingStore.Pending> due, long nowMs) {
-		long nextAt = nowMs + SessionPurgePendingStore.MAX_BACKOFF_MS;
-		int deferred = 0;
-		for (SessionPurgePendingStore.Pending pending : due) {
-			if (pending.attempts() < MAX_ATTEMPTS) {
-				continue;
-			}
-			// 重排写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份，否则会去改 legacy 键。
-			try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-				if (this.pendingStore.defer(pending.sessionId(), pending.purgeId(), nextAt)) {
-					deferred++;
-				}
-			}
-			catch (RuntimeException ex) {
-				log.warn("重排已耗尽的会话销毁重试项失败 sessionId={}（保持 pending 原状）：{}", pending.sessionId(),
-						ex.getMessage());
-			}
+	/** 把一条已耗尽的台账推到长未来（owner-CAS；失败只 WARN，台账保持原状）。 */
+	private void deferExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
+		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份，否则会去改 legacy 键。
+		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
+			this.pendingStore.defer(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}
-		return deferred;
+		catch (RuntimeException ex) {
+			log.warn("重排已耗尽的会话销毁重试项失败 sessionId={}（保持 pending 原状）：{}", pending.sessionId(),
+					ex.getMessage());
+		}
 	}
 
 }

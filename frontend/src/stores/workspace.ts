@@ -39,8 +39,7 @@ import {
   type UiEvent,
   type WorkspaceActionRecord,
   type WorkspaceActionSource,
-  type WorkspacePageId,
-  type WorkspaceTopic
+  type WorkspacePageId
 } from '@/types/tools'
 import type { AiChatContext } from '@/types/ai'
 import type { ImportMode, QueryCondition, TaskStatus, TaskType } from '@/types/task'
@@ -133,7 +132,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     inWizard(state): boolean {
       return state.taskType !== null && state.step !== null
     },
-    /** 上下文摘要（AI 面板的上下文 chip 文案；i18n L-69：页面名/deco 走 locale，随 UI 语言）。 */
+    /** 上下文摘要（AI 面板上下文条文案；i18n L-69：页面名/deco 走 locale，随 UI 语言）。 */
     contextSummary(state): string {
       const pageText = translate(PAGE_LABEL_KEYS[state.pageId])
       const parts = [pageText]
@@ -209,21 +208,15 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.importMode = init.importMode
         }
       }
-      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI', {
-        code: 'ai.workspace.enterPage',
-        args: { page: translate(PAGE_LABEL_KEYS[this.pageId]) }
-      })
+      this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI')
     },
 
     setStep(step: string | null): void {
       this.step = step
       if (step) {
-        this.touch(`切换到步骤「${stepLabel(step)}」`, 'UI', {
-          code: 'ai.workspace.switchStep',
-          args: { step: stepLabel(step) }
-        })
+        this.touch(`切换到步骤「${stepLabel(step)}」`, 'UI')
       } else {
-        this.touch('退出当前步骤', 'UI', { code: 'ai.workspace.exitStep' })
+        this.touch('退出当前步骤', 'UI')
       }
     },
 
@@ -236,8 +229,7 @@ export const useWorkspaceStore = defineStore('workspace', {
      * 工作区，否则下一轮请求仍带着旧状态 ⇒ 收窄不生效（模型看到"还能导出"的假入口）。
      *
      * <p>不记 `recentActions`：这是**服务端事实的同步**，不是用户/AI 的动作（记进去会让
-     * `extra.recentActions` 被状态刷新刷爆，模型误以为有人在操作）。同理不 `touch`、不广播
-     * `workspace_changed` —— 面板 chip 不因一次状态轮询抖动。
+     * `extra.recentActions` 被状态刷新刷爆，模型误以为有人在操作）。
      */
     setTaskStatus(status: TaskStatus | null): void {
       this.taskStatus = status
@@ -248,12 +240,9 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.taskType = taskType === undefined ? this.taskType : taskType
       this.taskStatus = status === undefined ? this.taskStatus : status
       if (taskId === null) {
-        this.touch('解除任务绑定', 'UI', { code: 'ai.workspace.unbindTask' })
+        this.touch('解除任务绑定', 'UI')
       } else {
-        this.touch(`绑定任务 #${taskId}`, 'UI', {
-          code: 'ai.workspace.bindTask',
-          args: { taskId }
-        })
+        this.touch(`绑定任务 #${taskId}`, 'UI')
       }
     },
 
@@ -261,8 +250,8 @@ export const useWorkspaceStore = defineStore('workspace', {
      * 选中集写入（唯一写入口）。
      *
      * @param source 动作来源：页面把用户手点记为「界面」（默认，与改动前一致），
-     *   AI 经页面 handler 驱动的写入记「AI」—— 面板 chip 与 `recentActions` 展示该来源，
-     *   标错会让模型以为"用户自己点的"。可选参数，既有 3 个调用点无需改动。
+     *   AI 经页面 handler 驱动的写入记「AI」—— `recentActions` 展示该来源，
+     *   标错会让模型以为"用户自己点的"。可选参数，既有调用点无需改动。
      */
     setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = 'UI'): void {
       if (mode === 'ADD') {
@@ -271,18 +260,12 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.selectedDefs = [...codes]
       }
       const joined = this.selectedDefs.join('、')
-      this.touch(`已选择配置项：${joined || '（空）'}`, source, {
-        code: 'ai.workspace.selectDefs',
-        args: { defs: joined || translate('ai.workspace.empty') }
-      })
+      this.touch(`已选择配置项：${joined || '（空）'}`, source)
     },
 
     setQueryConditions(defCode: string, conditions: QueryCondition | unknown): void {
       this.queryConditions = { ...this.queryConditions, [defCode]: conditions }
-      this.touch(`设置 ${defCode} 的查询条件`, 'UI', {
-        code: 'ai.workspace.queryConditions',
-        args: { code: defCode }
-      })
+      this.touch(`设置 ${defCode} 的查询条件`, 'UI')
     },
 
     /**
@@ -299,23 +282,12 @@ export const useWorkspaceStore = defineStore('workspace', {
       const next = { ...this.queryConditions }
       delete next[defCode]
       this.queryConditions = next
-      this.touch(`清空 ${defCode} 的查询条件`, 'UI', {
-        code: 'ai.workspace.queryConditions',
-        args: { code: defCode }
-      })
+      this.touch(`清空 ${defCode} 的查询条件`, 'UI')
     },
 
     setImportMode(mode: ImportMode | null): void {
       this.importMode = mode
-      const label = mode === null
-        ? translate('ai.workspace.importModeNone')
-        : mode === 'MERGE'
-          ? translate('ai.workspace.importModeMerge')
-          : translate('ai.workspace.importModeReplace')
-      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, 'UI', {
-        code: 'ai.workspace.importMode',
-        args: { mode: label }
-      })
+      this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, 'UI')
     },
 
     /** 纯版本号自增（消息密集的变更用，例如表格连续编辑，避免动作记录被刷爆）。 */
@@ -326,42 +298,33 @@ export const useWorkspaceStore = defineStore('workspace', {
     /**
      * 记录一次工作区动作（契约联动的心脏）：
      * 1. 数据版本自增；
-     * 2. 记入 recentActions（随下一轮 AI 请求注入 `context.extra.recentActions`）；
-     * 3. 广播 `workspace_changed` 契约事件给 AI 面板（deepseek 蓝本事件形态 + 版本号）。
+     * 2. 记入 recentActions（随下一轮 AI 请求注入 `context.extra.recentActions`）。
      *
      * @param summary 中文动作摘要（同时是给模型看的一句话；C5：**不随 UI 语言变**）
-     * @param source  数据码：`UI`（用户手点）/ `API` / `AI`（经契约层下发）。旧码 `'界面'`
-     *   仍被 {@link normalizeWorkspaceActionSource} 归一为 `UI`（兼容旧调用点/旧记录）
-     * @param display 可选的**界面**结构化形态（i18n L-69）：面板 chip 按当前语言重译，
-     *   与 `summary` 是同一动作的两份受众面
+     * @param source  数据码：`UI`（用户手点）/ `API` / `AI`（经契约层下发）
      */
-    touch(summary: string, source: WorkspaceActionSource = 'UI', display?: WorkspaceActionRecord['display']): number {
-      const record = this.recordAction(summary, source, display)
-      emitWorkspaceEvent('workspace_changed', record)
+    touch(summary: string, source: WorkspaceActionSource = 'UI'): number {
+      const record = this.recordAction(summary, source)
       return record.version
     },
 
     /**
-     * 只落时间线、**不**广播 `workspace_changed`（批次5A：失败/被拒回执的落点）。
+     * 只落时间线（失败/被拒回执与普通动作共用）。
      *
      * <p>为什么仍要记：模型下一轮必须看到「这一手被拒了」（`extra.recentActions`），否则会把
      * 被拒当成已改动继续推进 —— 只读壳里的写事件尤其如此（既有用例锁住这条）。
-     * 为什么不广播：面板的「工作区已同步」chip 只认**真落地**的动作；失败挂在那里就是谎报同步，
      * 失败回执另走 `ui_event_result` 到面板回执位（见 {@link dispatchUiEvent}）。
      */
     recordAction(
       summary: string,
-      source: WorkspaceActionSource = 'AI',
-      display?: WorkspaceActionRecord['display']
+      source: WorkspaceActionSource = 'AI'
     ): WorkspaceActionRecord {
       this.dataVersion += 1
       const record: WorkspaceActionRecord = {
         version: this.dataVersion,
         summary,
         at: Date.now(),
-        // 兼容面：旧调用点/旧记录可能仍传 `'界面'`，落库前统一归一到数据码（UI/API/AI）
-        source: normalizeWorkspaceActionSource(source),
-        ...(display === undefined ? {} : { display })
+        source: normalizeWorkspaceActionSource(source)
       }
       this.recentActions = [...this.recentActions, record].slice(-WORKSPACE_ACTION_LIMIT)
       return record
@@ -476,12 +439,12 @@ export function getPageHandler(name: PageHandlerName | string): PageHandler | nu
   return pageHandlers.get(name) ?? null
 }
 
-// ── 工作区事件总线（业务 → AI 的通知；AI 面板订阅，工作区不反向依赖） ──────────
+// ── 工作区事件总线（ui_event_result；面板订阅，工作区不反向依赖） ─────────────
 
 type Subscriber = (payload: unknown) => void
-const subscribers = new Map<WorkspaceTopic, Subscriber[]>()
+const subscribers = new Map<string, Subscriber[]>()
 
-export function onWorkspaceEvent(topic: WorkspaceTopic, subscriber: Subscriber): () => void {
+export function onWorkspaceEvent(topic: 'ui_event_result', subscriber: Subscriber): () => void {
   const list = subscribers.get(topic) ?? []
   list.push(subscriber)
   subscribers.set(topic, list)
@@ -497,7 +460,7 @@ export function onWorkspaceEvent(topic: WorkspaceTopic, subscriber: Subscriber):
   }
 }
 
-export function emitWorkspaceEvent(topic: WorkspaceTopic, payload?: unknown): void {
+export function emitWorkspaceEvent(topic: 'ui_event_result', payload?: unknown): void {
   for (const subscriber of (subscribers.get(topic) ?? []).slice()) {
     try {
       subscriber(payload)
@@ -507,8 +470,8 @@ export function emitWorkspaceEvent(topic: WorkspaceTopic, payload?: unknown): vo
   }
 }
 
-/** 业务动作完成后通知 AI（AI 面板据此刷新上下文 chip）。 */
-export function notifyWorkspaceChanged(summary: string): void {
+/** 把一个 AI 侧的工作区意图写入时间线（随下一轮请求回到模型）。 */
+export function recordWorkspaceIntent(summary: string): void {
   const workspace = useWorkspaceStore()
   workspace.touch(summary, 'AI')
 }
@@ -644,90 +607,11 @@ function fail(message: string): UiEventResult {
  *
  * 为什么不在 run_job 的同步返回里等明细：发布作业分钟级才出终态，而 dispatch 链上有界等待
  * 是既有红线（R-11 / download 分支同族），故冲突检出时（终态后）经本出口异步回灌。
- *
- * @param display 面板 chip 的结构化展示面（i18n code + args）。**现役写点必须给**：
- *   不给就只能落到本地化兜底词条（"工作区状态已更新"），具体信息（作业号/冲突条数）会丢。
- *   兜底只服务于**旧记录**（历史事件没有 display）。
  */
-export function reportUiEventResult(
-  event: string,
-  message: string,
-  display?: WorkspaceActionRecord['display']
-): void {
+export function reportUiEventResult(event: string, message: string): void {
   const workspace = useWorkspaceStore()
-  workspace.touch(message, 'AI', display)
+  workspace.touch(message, 'AI')
   emitWorkspaceEvent('ui_event_result', { event, handled: true, message })
-}
-
-/**
- * `ui_event` → 面板 chip 的**结构化展示面**（i18n code + args）。
- *
- * <p>为什么必须逐个映射：`dispatchUiEvent` 把页面 handler 的**回执文案**（中文、带具体任务/作业号）
- * 记成工作区动作；chip 以前直接渲染那份字符串 —— en 界面就出中文。现役事件在这里给
- * `code + args`（语义与 `runUiEvent` 的回执同源，但不依赖文案），只有**旧记录**才落到
- * `ai.workspace.actionFallback`。
- *
- * <p>args 只取事件本身能确定的值，不臆造；缺失值一律空串/省略（词条不渲染空括号）。
- */
-function uiEventDisplayOf(event: UiEvent): WorkspaceActionRecord['display'] {
-  /** 可选后缀位：有值才带分隔空格，避免词条尾部悬空空格。 */
-  const suffixOf = (value: string | number | undefined | null): string => (
-    value === undefined || value === null || `${value}` === '' ? '' : ` ${value}`
-  )
-  switch (event.type) {
-    case 'open_page':
-      return { code: 'ai.workspace.enterPage', args: { page: translate(PAGE_LABEL_KEYS[event.page]) } }
-    case 'restore_task':
-      return { code: 'ai.workspace.bindTask', args: { taskId: event.taskId } }
-    case 'goto_step':
-      return { code: 'ai.workspace.switchStep', args: { step: stepLabel(event.step) } }
-    case 'select_defs':
-      return {
-        code: 'ai.workspace.selectDefs',
-        // 多值连接符按当前语言（与条件摘要是同一套约定）
-        args: { defs: event.defCodes.join(translate('conditions.valueJoin')) || translate('ai.workspace.empty') }
-      }
-    case 'set_conditions':
-      return { code: 'ai.workspace.queryConditions', args: { code: event.defCode } }
-    case 'set_import_mode':
-      return {
-        code: 'ai.workspace.importMode',
-        args: {
-          mode: translate(event.mode === 'MERGE' ? 'ai.workspace.importModeMerge' : 'ai.workspace.importModeReplace')
-        }
-      }
-    case 'run_job':
-      return { code: 'ai.workspace.jobStarted', args: { jobType: event.jobType, taskId: event.taskId } }
-    case 'cancel_job':
-      return { code: 'ai.workspace.jobCancelled', args: { jobId: event.jobId } }
-    case 'export_started':
-      return { code: 'ai.workspace.exportStarted', args: { taskId: event.taskId } }
-    case 'import_batch':
-      return { code: 'ai.workspace.importBatch', args: { batchId: event.batchId } }
-    case 'import_action':
-      return {
-        code: 'ai.workspace.importAction',
-        args: {
-          action: event.action,
-          // 词条用 `{batch}` 后缀位：有批次号才带括号，缺失时不留悬空括号/空格（括号形态随语言）
-          batch: event.batchId === undefined
-            ? ''
-            : translate('ai.workspace.importActionBatch', { batchId: event.batchId })
-        }
-      }
-    case 'download':
-      // `{filename}` 是后缀位（有文件名才带空格），避免词条尾部悬空空格
-      return { code: 'ai.workspace.download', args: { filename: suffixOf(event.filename) } }
-    case 'refresh_defs':
-      return { code: 'ai.workspace.refreshDefs' }
-    case 'refresh_data':
-      return { code: 'ai.workspace.refreshData', args: { code: event.defCode ? ` ${event.defCode}` : '' } }
-    case 'refresh_tasks':
-      return { code: 'ai.workspace.refreshTasks' }
-    default:
-      // 事件类型闭集已穷尽；运行期出现未知 type（旧客户端/新后端）时退回兜底词条
-      return { code: 'ai.workspace.actionFallback' }
-  }
 }
 
 /**
@@ -778,15 +662,12 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
  * 见 {@link DRAFT_WRITE_HANDLERS}）。导航类（`open_page` / `restore_task` / `export_started` …）
  * 与刷新类不受影响。
  *
- * 契约联动（批次5A 语义收口）：
- * - **成功**（`handled=true`）：记入工作区动作并广播 `workspace_changed`（面板出「工作区已同步」chip，
- *   `source=AI` 的动作随下一轮请求回到模型）；
- * - **失败**（`handled=false`）：**不广播** `workspace_changed` —— 「已同步」不能拿来描述一次没落地的
- *   动作（审查 §5-4 的「失败仍已同步」）。但时间线仍留一条（模型下一轮要知道这一手被拒），
- *   失败回执经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。
+ * 契约联动：
+ * - **成功/失败都记入工作区时间线**（`source=AI`，随下一轮请求回到模型）；
+ * - 失败回执另经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。
  *
  * @param lifetime 前端工具执行的存活标记（见 {@link UiEventLifetime}）。到点作废 ⇒ **不记动作、
- *   不广播**（时间线与 chip 都不得替一次已经回灌"超时"的动作背书）；缺省不传 = 行为不变。
+ *   不回执**（时间线不得替一次已经回灌"超时"的动作背书）；缺省不传 = 行为不变。
  */
 export async function dispatchUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<UiEventResult> {
   const result = await runUiEvent(event, lifetime)
@@ -794,11 +675,10 @@ export async function dispatchUiEvent(event: UiEvent, lifetime?: UiEventLifetime
     return result
   }
   const workspace = useWorkspaceStore()
-  const display = uiEventDisplayOf(event)
   if (result.handled) {
-    workspace.touch(result.message, 'AI', display)
+    workspace.touch(result.message, 'AI')
   } else {
-    workspace.recordAction(result.message, 'AI', display)
+    workspace.recordAction(result.message, 'AI')
   }
   emitWorkspaceEvent('ui_event_result', { event: event.type, ...result })
   return result
@@ -973,10 +853,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
                   useAiStore().attachPublishConflict(job.id ?? 0, summary, issues)
                 })
               }
-              reportUiEventResult('run_job', summary, {
-                code: 'ai.workspace.publishConflict',
-                args: { jobId: job.id ?? 0, count: issues?.length ?? 0 }
-              })
+              reportUiEventResult('run_job', summary)
             }
           })
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)
@@ -1026,16 +903,15 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         }
       }
       case 'refresh_defs': {
-        // W-09（文案改实）：本动作只发工作区事件，而 `workspace_changed` 的**唯一订阅者**是
-        // AI 面板的上下文 chip（`stores/ai.ts`），**没有任何页面订阅它去重新拉取数据**
-        // —— 故"已通知配置定义页刷新"是空回执（数据不会变）。这里改为如实陈述。
-        notifyWorkspaceChanged('AI 请求刷新配置定义')
+        // W-09（文案改实）：本动作只记工作区时间线，没有任何页面订阅它去重新拉取数据 ——
+        // "已通知配置定义页刷新"是空回执。这里改为如实陈述。
+        recordWorkspaceIntent('AI 请求刷新配置定义')
         return ok('已记录刷新意图（AI 请求刷新配置定义）：当前没有任何页面订阅该事件并重新拉取数据，配置定义页的数据不会因此变化；'
           + '如需最新定义，请让用户在界面上重新打开该页，或稍后重新查询。')
       }
       case 'refresh_data': {
         // W-09（文案改实）：同 `refresh_defs` —— 空回执改为如实陈述（无页面订阅者）。
-        notifyWorkspaceChanged('AI 请求刷新数据浏览')
+        recordWorkspaceIntent('AI 请求刷新数据浏览')
         return ok(`已记录刷新意图（AI 请求刷新数据浏览${event.defCode ? `：${event.defCode}` : ''}）：`
           + '当前没有任何页面订阅该事件并重新拉取数据，数据浏览页的数据不会因此变化；'
           + '如需最新数据，请让用户在界面上重新打开该页，或稍后重新查询。')

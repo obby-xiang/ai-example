@@ -356,7 +356,14 @@ public class CancelledRunFinalizer {
 		return counter.incrementAndGet();
 	}
 
-	/** 与续跑派发同一套指数退避（{@code app.ai.park.dispatch-retry-delay/max-delay}）。 */
+	/**
+	 * 与续跑派发同一套指数退避（{@code app.ai.park.dispatch-retry-delay/max-delay}，算式见
+	 * {@link DispatchRetryBackoff}）。
+	 *
+	 * <p>0/负值不归默认：沿用引入工具类之前的 1ms 下限（{@code DispatchRetryBackoff} 对
+	 * {@code base}/{@code cap} 都只做 {@code Math.max(1, …)}，首档仍取 base 本身）；
+	 * 只有 null 才取缺省 2s/30s。
+	 */
 	private Duration delayFor(int attempt) {
 		Duration base = this.properties.getPark().getDispatchRetryDelay();
 		Duration cap = this.properties.getPark().getDispatchRetryMaxDelay();
@@ -366,12 +373,7 @@ public class CancelledRunFinalizer {
 		if (cap == null) {
 			cap = Duration.ofSeconds(30);
 		}
-		long capMs = Math.max(1L, cap.toMillis());
-		long delayMs = Math.max(1L, base.toMillis());
-		for (int i = 1; i < attempt && delayMs < capMs; i++) {
-			delayMs = Math.min(capMs, delayMs * 2);
-		}
-		return Duration.ofMillis(delayMs);
+		return DispatchRetryBackoff.delay(attempt, base, cap);
 	}
 
 	/** 租约在别处时的重试间隔 = 租约 TTL + 余量（与 {@code ConfirmGate#scheduleLeaseRetry} 同口径）。 */

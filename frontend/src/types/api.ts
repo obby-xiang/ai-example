@@ -342,7 +342,6 @@ export interface OperationLogEntry {
   beforeSummary?: string
   /**
    * 来源数据码：`UI`（界面）/ `API` / `AI`。
-   * 旧记录里的 `'界面'` 由读入侧按 `normalizeWorkspaceActionSource` 归一（见 types/tools）。
    */
   source: 'UI' | 'API' | 'AI'
   /** 时刻（ISO 字符串） */

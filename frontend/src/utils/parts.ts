@@ -378,8 +378,6 @@ function toPendingCallProjection(part: ToolPart): PendingToolCall {
     kind: part.kind2 === 'FRONTEND' ? 'FRONTEND' : 'CONFIRM',
     args: parseToolArgs(part.args),
     rawArgs: part.args,
-    timeoutSeconds: part.timeoutSeconds,
-    expiresAt: part.expiresAt,
     atMs: part.atMs,
     status: pendingStatusOf(part.status)
   }
@@ -583,7 +581,7 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
  * - `cancelled → cancelled`（沿用既有取消口径）；
  * - `unknown → failed`（旧卡面只有"执行失败"可承载"未确认成功"；unknown 段态二期再议）；
  * - `skipped → skipped`（上游确定性失败导致本工具未执行；一等状态，不得折成 failed）；
- * - 缺失 / 域外值 ⇒ null，由调用方回落到既有 `ok` 三元或 status 旧表（旧帧一字不动）。
+ * - 缺失 / 域外值 ⇒ null，调用方按当前协议兜底（不再读旧 `ok` 三元）。
  *
  * 返回 null 不等于失败 —— 只表示"本字段未给出可翻译结局"。
  */
@@ -610,14 +608,12 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
 }
 
 /**
- * `confirm_decision` 帧的门结局（2A 挂账①）：**帧 status/decision 优先，`approved` 布尔兜底**。
+ * `confirm_decision` 帧的门结局（2A 挂账①）：**帧 status/decision 是唯一来源**。
  *
- * 后端实发（`SseChatEmitter#confirmDecision`）：`decision` ∈ {approve, reject, timeout, cancel}
- * （ConfirmGate 三处发口），`status` ∈ {APPROVED, REJECTED, TIMEOUT, CANCELLED}，`approved` 只对
- * APPROVED 为 true。旧实现只看 `approved` ⇒ 超时帧被写成 rejected，实时卡面谎报「✗ 已拒绝」，
- * 刷新后历史表（TIMEOUT→expired）才显示「! 已超时」。
+ * 后端实发（`SseChatEmitter#confirmDecision`）：`decision` ∈ {approve, reject, cancel}
+ * （ConfirmGate 的三处发口；确认门去超时后不再发 `timeout`），`status` ∈ {APPROVED, REJECTED, CANCELLED}。
  *
- * 返回 null = 帧未给可翻译结局/布尔（旧帧两字段皆缺），调用方退回既有 approved 分支。
+ * 返回 null = 帧未给可翻译结局，调用方不动段（旧 `approved` 布尔回退已退场）。
  * `cancelled` 批G · S13 起落 **decision='cancel'**：用户停止是一次决策（门卡第五态「已取消」），
  * 不写决策元数据就会被 `readOnlyStateOf` 的 status 兜底读成「已超时」。
  */
@@ -729,22 +725,21 @@ export function writeSubmittedValuesToMessage(
 /**
  * 帧 → 段序列的写入（只写 `message.parts` 与消息身份/流式标志，**不碰旧投影**）。
  *
- * 覆盖帧集：delta（`kind` 缺省 = 正文 / `'reasoning'` = 思考段，L-91）/ reasoning（旧形态）/
+ * 覆盖帧集：delta（`kind` 缺省 = 正文 / `'reasoning'` = 思考段，L-91）/
  * message_start / message_end / tool_start / tool_result /
  * confirm_request / confirm_decision / frontend_tool_request / frontend_tool_result / suspended。
  * 其它帧（start / heartbeat / retry / done / error）的语义留在 store 的 case 分支
  * （它们还带轮次级副作用），此处一律 no-op。
  *
  * 裁决口径逐条照抄翻转前的 case 分支：
- * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> **outcome 八态（治理 P0-1，有则用）**
- *   > ok 三元（旧帧回落，无 outcome 时一字不动）；阻断文案按 `code` 选择（`TOOL_ALREADY_CLAIMED`
+ * - `tool_result`：BLOCKED（防线③未执行）> 已被拒（REJECTED）> **outcome 八态（治理 P0-1）**；
+ *   阻断文案按 `code` 选择（`TOOL_ALREADY_CLAIMED`
  *   与披露范围拦截不是同一件事）；SKIPPED 单独早分支（只落「输出」、不写 reason，见 case 内注）；
  * - `frontend_tool_result`：本地已终态（failed/rejected/blocked/succeeded/expired/cancelled/unknown/skipped）first-wins，
- *   否则 **outcome 八态（I1：帧带则有则用）** > 帧 `status`（后端 PendingToolCall 大写实发值）
- *   > ok 三元（`status` 缺失/未知才退回 ok；F1 收口修：原先不读 `status`，四类非失败终态全被落成 failed）；
- * - `confirm_decision`：**帧 status/decision 优先**（TIMEOUT → expired + decision='timeout'、
- *   REJECTED → rejected、CANCELLED → cancelled、APPROVED → running + decision='approved'），
- *   二者皆缺才回落 `approved` 布尔；超时帧对已落定段 first-wins（2A 挂账①）。
+ *   否则 **outcome 八态（I1）** > 帧 `status`（后端 PendingToolCall 大写实发值）> failed；
+ * - `confirm_decision`：**帧 status/decision 优先**（REJECTED → rejected、CANCELLED → cancelled、
+ *   APPROVED/EXECUTED → running + decision='approved'）；二者皆缺则不动段，
+ *   超时帧对已落定段 first-wins（2A 挂账①）。
  */
 export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
   switch (frame.type) {
@@ -796,16 +791,9 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       if (frame.originalChars !== undefined) part.originalChars = frame.originalChars
       if (frame.returnedChars !== undefined) part.returnedChars = frame.returnedChars
       if (frame.strategy !== undefined) part.strategy = frame.strategy
-      if (frame.truncatedReason !== undefined) part.truncatedReason = frame.truncatedReason
       if (frame.kind !== 'reasoning') {
         message.streaming = true
       }
-      break
-    }
-    case 'reasoning': {
-      const part = openStreamPart(message, 'reasoning', frame.atMs)
-      part.text += frame.text
-      part.streaming = true
       break
     }
     case 'tool_start': {
@@ -845,13 +833,12 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           kind2: frame.kind,
           status: 'skipped',
           messageId: frame.messageId,
-          // 信封文案（后端 skippedMessage 同文放帧 result）；message 仅作旧帧缺 result 时的回落。
-          result: frame.result ?? frame.message ?? null,
+          // 信封文案（后端 skippedMessage 同文放帧 result）；result 是唯一来源。
+          result: frame.result ?? null,
           ...(frame.userTextCode !== undefined ? { userTextCode: frame.userTextCode } : {}),
           ...(frame.userTextArgs !== undefined ? { userTextArgs: frame.userTextArgs } : {}),
           ...(frame.target != null ? { target: frame.target } : {}),
           truncated: frame.truncated ?? false,
-          truncatedReason: frame.truncatedReason ?? null,
           ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
           ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
           ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
@@ -867,13 +854,13 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       const rejected = existing?.status === 'rejected'
       // 治理 P0-1：outcome='blocked' 与 status='BLOCKED' 同义（防线③未执行），一并落阻断口径
       const blocked = frame.status === 'BLOCKED' || frame.outcome === 'blocked' || existing?.status === 'blocked'
-      // 治理 P0-1：**outcome 优先、缺省回落既有 ok 三元** —— 旧帧（无 outcome）走原逻辑一字不动；
+      // 治理 P0-1：**outcome 是当前协议的唯一结局来源**（旧 ok 三元回退已退场）。
       // 业务失败被异常处理器吞成文本时 ok 仍为 true，只有 outcome='failed' 能纠正卡头谎报。
       // BLOCKED 仍为最高优先级（status/段侧/outcome 三来源同义），已拒绝次之（补丁③口径）。
       const fromOutcome = outcomeStatus(frame.outcome)
       const status: ToolRunStatus = blocked
         ? 'blocked'
-        : rejected ? 'rejected' : fromOutcome ?? (frame.ok ? 'succeeded' : 'failed')
+        : rejected ? 'rejected' : (fromOutcome ?? 'failed')
       // 治理 P0-1 M2：阻断文案按 `code` 区分 —— 互斥抢占（TOOL_ALREADY_CLAIMED）不是"未披露"。
       // B23L1 批③b 增两支（只增不改）：资源锁冲突（RESOURCE_LOCKED）与目标资源不成立（TARGET_INVALID）——
       // 两者都是"本次未执行"，但原因完全不同（一个等对方收尾、一个参数就是错的）。
@@ -901,18 +888,16 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         ...(frame.userTextArgs !== undefined ? { userTextArgs: frame.userTextArgs } : {}),
         // 结构化目标随段落库：`userTextArgs` 缺省时卡面用它取 taskId 一类插值（不落段就是死分支）
         ...(frame.target != null ? { target: frame.target } : {}),
-        // R-154 #2 / A10 R-15：消费帧侧截断标记（noticeCode + 结构化数字优先；
-        // truncatedReason 仅作旧帧/旧客户端兼容），随段持久化供卡面「已截断」角标渲染。
+        // R-154 #2 / A10 R-15：消费帧侧截断标记（noticeCode + 结构化数字），
+        // 随段持久化供卡面「已截断」角标渲染。
         truncated: frame.truncated ?? false,
-        truncatedReason: frame.truncatedReason ?? null,
         ...(frame.noticeCode !== undefined ? { noticeCode: frame.noticeCode } : {}),
         ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
         ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
         ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
-        // 治理 P0-1：仅在帧带 outcome 时落段（旧帧不产生 undefined 键，镜像/段口径不变）；
-        // 一期卡面不展示，仅供后续阶段读段
+        // 治理 P0-1：结局随段落库（当前帧恒带 outcome）
         ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
-        // S6 批 2：视图通道（additive 可选键）—— 仅在帧带视图时落段（旧帧不产生 undefined 键）
+        // S6 批 2：视图通道（additive 可选键）—— 仅在帧带视图时落段
         ...(frame.resultView ? { resultView: frame.resultView } : {}),
         reason,
         requiresAction: false
@@ -926,9 +911,6 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         kind2: 'CONFIRM',
         status: 'pending',
         args: frame.args,
-        // T4/T4-3：原始等待口径随段持久化（去超时后仅作对账 / 回滚，不驱动倒计时）
-        timeoutSeconds: frame.timeoutSeconds,
-        expiresAt: frame.expiresAt,
         atMs: frame.atMs,
         // H1 预检摘要（可选增量）：仅帧带该字段时落段 —— 旧帧不产生 undefined 键，
         // 已落段的预检摘要也不会被后续无该字段的帧抹掉。
@@ -942,9 +924,11 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       break
     case 'confirm_decision': {
       // 2A 挂账①：结局以帧 status/decision 为准（TIMEOUT→expired / REJECTED→rejected /
-      // CANCELLED→cancelled / APPROVED→running），二者皆缺才回落 approved 布尔（旧帧）。
-      const resolved: ConfirmOutcome = confirmDecisionOutcome(frame)
-        ?? (frame.approved ? { state: 'approved' } : { state: 'rejected' })
+      // CANCELLED→cancelled / APPROVED→running）。二者皆缺 ⇒ 无可翻译结局，不动段。
+      const resolved = confirmDecisionOutcome(frame)
+      if (resolved === null) {
+        break
+      }
       if (resolved.state === 'timeout') {
         // ①b first-wins：超时通知不携带新的决策信息 —— 段已落定（含其它页签先落的历史
         // expired 段）时不得把结局改写成另一种终态。
@@ -1031,13 +1015,13 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         || existing?.status === 'expired' || existing?.status === 'cancelled'
         || existing?.status === 'unknown' || existing?.status === 'skipped'
       // 治理 P0-1 I1（收口修）：回执帧补齐 outcome 四字段后，结局以 outcome 为准（复用单表）——
-      // 后端回帧 status 仍是 FRONTEND_RESULT，若让旧表先行，ok=false 会被盖成成功。旧帧
-      // （无 outcome）仍走原表，行为一字不动。契约增量：status='SKIPPED' 与 outcome='skipped' 同义。
+      // 后端回帧 status 仍是 FRONTEND_RESULT，若让旧表先行，ok=false 会被盖成成功。
+      // 契约增量：status='SKIPPED' 与 outcome='skipped' 同义；旧 ok 三元回退已退场。
       const frameStatus: ToolRunStatus = frame.outcome === 'skipped' || frame.status === 'SKIPPED'
         ? 'skipped'
         : outcomeStatus(frame.outcome)
           ?? frontendResultStatus(frame.status)
-          ?? (frame.ok ? 'succeeded' : 'failed')
+          ?? 'failed'
       const status: ToolRunStatus = localTerminal
         ? (existing?.status ?? 'failed')
         : frameStatus
@@ -1065,7 +1049,6 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         ...(frame.originalChars !== undefined ? { originalChars: frame.originalChars } : {}),
         ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
         ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
-        ...(frame.truncatedReason !== undefined ? { truncatedReason: frame.truncatedReason } : {}),
         // 契约增量：skipped 的卡面 reason 取信封 message（缺省回落结果文本；均无则不覆盖原值）
         ...(status === 'skipped' && (frame.message !== undefined || frame.result !== undefined)
           ? { reason: frame.message ?? frame.result ?? null }

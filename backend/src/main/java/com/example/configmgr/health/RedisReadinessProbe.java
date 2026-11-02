@@ -10,8 +10,8 @@ import org.springframework.stereotype.Component;
  * Redis 故障时本维度如实报 DOWN（含 {@code lastError} 摘要），并让 AI capability 标降级，
  * 但<b>不把整站 ready 拉成 503</b>。理由：
  * <ul>
- * <li>Redis 承载 AI 会话/帧/租约/限流与作业取消标志，AI 端点本来就有 503 快速失败与降级路径
- * （{@code RedisAvailability} 前置探活、限流降级放行）；</li>
+ * <li>Redis 承载 AI 会话/帧/租约与作业取消标志，AI 端点本来就有 503 快速失败与降级路径
+ * （{@code RedisAvailability} 前置探活）；</li>
  * <li>业务面（配置目录/数据读写/任务与导出作业的非 AI 路径）不依赖 Redis。若把 Redis 算进 ready，
  * 一次 Redis 抖动会让统一代理把**所有实例**一起摘流 —— 可用性故障被放大成全站不可达，
  * 恰是多实例部署最不该出现的效果；</li>

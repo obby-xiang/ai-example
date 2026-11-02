@@ -22,9 +22,8 @@ import java.util.Objects;
  * ② 超限时对 {@code text} / {@code result} 的<b>值</b>按预算做降采样，并挂统一截断字段。
  *
  * <h2>截断字段（G5 统一契约，{@link TruncationContract}）</h2>
- * {@code truncated / strategy / originalChars / returnedChars / noticeCode / notice}；
- * {@code truncatedReason} 保留为 {@code notice} 的兼容别名（旧客户端仍读它）；
- * 新客户端按 {@code noticeCode} + 数字本地化，{@code notice} 只作旧客户端英文降级。
+ * {@code truncated / strategy / originalChars / returnedChars / noticeCode}；
+ * 展示侧按 {@code noticeCode} + 数字本地化，不再写旧 {@code notice / truncatedReason} 别名。
  * <b>语义边界</b>：本键是"单帧字节上限"，超限时产出的仍是一份<b>完整合法的帧</b>
  * （字段级降采样 + 标记）。它表达"这一帧没给全"，因此只用于<b>无法跨帧续接</b>的字段
  * （{@code tool_result.result} 等）。
@@ -63,9 +62,6 @@ public final class FrameSizeLimiter {
 
 	/** 截断字段名（统一契约的单一事实源在 {@link TruncationContract}）。 */
 	public static final String TRUNCATED_FIELD = TruncationContract.TRUNCATED_FIELD;
-
-	/** 兼容别名（= {@link TruncationContract#NOTICE_FIELD}）。 */
-	public static final String TRUNCATED_REASON_FIELD = TruncationContract.LEGACY_REASON_FIELD;
 
 	/**
 	 * 单帧上限的<b>运行期下限</b>（字节）。
@@ -111,10 +107,7 @@ public final class FrameSizeLimiter {
 				originalChars.put(field, value.length());
 			}
 		}
-		// 仅用于估算 notice 的 JSON 开销，不写进帧；真实用户文案由 markTruncated 产出。
-		String noticeProbe = legacyNotice(TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
-
-		int budget = maxBytes - overhead(frame, mapper, fields, noticeProbe) - STRUCTURE_MARGIN_BYTES;
+		int budget = maxBytes - overhead(frame, mapper, fields) - STRUCTURE_MARGIN_BYTES;
 		if (budget < 0) {
 			budget = 0;
 		}
@@ -266,7 +259,7 @@ public final class FrameSizeLimiter {
 	}
 
 	/**
-	 * 挂统一截断字段（notice 只写语言中立的旧客户端短句；数字/字段名进结构化字段与 warn 日志）。
+	 * 挂统一截断字段（只写 {@code noticeCode} 与数字字段；展示文案由前端本地化）。
 	 *
 	 * @return {@code [原始字符数, 返回字符数]}，供调用方写诊断日志
 	 */
@@ -279,7 +272,6 @@ public final class FrameSizeLimiter {
 			String value = frame.get(field) instanceof String text ? text : "";
 			returned += value.length();
 		}
-		String notice = legacyNotice(noticeCode);
 		frame.put(TruncationContract.TRUNCATED_FIELD, true);
 		frame.put(TruncationContract.NOTICE_CODE_FIELD, noticeCode);
 		if (fields.isEmpty()) {
@@ -290,27 +282,11 @@ public final class FrameSizeLimiter {
 		}
 		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, original);
 		frame.put(TruncationContract.RETURNED_CHARS_FIELD, returned);
-		frame.put(TruncationContract.NOTICE_FIELD, notice);
-		frame.put(TruncationContract.LEGACY_REASON_FIELD, notice);
 		return new int[] { original, returned };
 	}
 
-	/**
-	 * 旧客户端兼容的 {@code notice/truncatedReason}：语言中立（英文）、不含数字/字段名/机器前缀。
-	 * 新客户端一律按 {@code noticeCode} + 本地模板展示。
-	 */
-	static String legacyNotice(String noticeCode) {
-		return switch (noticeCode) {
-			case TruncationContract.NOTICE_CODE_FRAME_LIMIT_UNREACHED ->
-					"Result exceeds the frame size limit and could not be compressed further.";
-			case TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED ->
-					"Result truncated for the model; this frame shows the full result.";
-			default -> "Result truncated because it exceeded the frame size limit.";
-		};
-	}
-
 	/** 其余字段（去掉可截字段 + 统一截断字段）的 JSON 开销。 */
-	private static int overhead(Map<String, Object> frame, ObjectMapper mapper, List<String> fields, String reason) {
+	private static int overhead(Map<String, Object> frame, ObjectMapper mapper, List<String> fields) {
 		Map<String, Object> probe = new LinkedHashMap<>(frame);
 		for (String field : fields) {
 			probe.remove(field);
@@ -320,8 +296,6 @@ public final class FrameSizeLimiter {
 		probe.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
 		probe.put(TruncationContract.ORIGINAL_CHARS_FIELD, 0);
 		probe.put(TruncationContract.RETURNED_CHARS_FIELD, 0);
-		probe.put(TruncationContract.NOTICE_FIELD, reason);
-		probe.put(TruncationContract.LEGACY_REASON_FIELD, reason);
 		byte[] bytes = serialize(probe, mapper);
 		return bytes == null ? 0 : bytes.length;
 	}

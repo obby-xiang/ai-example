@@ -8,8 +8,8 @@
  * - 409 SESSION_BUSY 不当作普通失败：回收乐观气泡（不出现幻影双份），提示里不暴露 runId；
  *   在途轮由刷新恢复**静默续收**（批G，用户看不到「重挂」概念）；
  * - 断流（缺 done/error 终帧）按 ADR-6 置 `streamInterrupted` 提示"结果可能不完整"；
- * - 契约联动（S4.4c）：订阅工作区 `workspace_changed` 事件，把用户手点的动作同步进
- *   下一轮请求上下文（`buildContext().extra.recentActions`）。
+ * - 契约联动：工作区动作由 workspace store 记入 `recentActions`（随下一轮请求进入
+ *   `buildContext().extra.recentActions`）；AI store 只订阅 `ui_event_result` 维护面板回执位。
  */
 
 import { defineStore, getActivePinia } from 'pinia'
@@ -46,7 +46,7 @@ import { TaskSteps } from '@/types/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
-import { UI_HANDOFF_TOOLS, findFrontendTool, normalizeWorkspaceActionSource } from '@/types/tools'
+import { UI_HANDOFF_TOOLS, findFrontendTool } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
@@ -105,13 +105,12 @@ import {
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextBreakdownItem, type ContextCompaction, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextCompaction, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, loadFormDraft, pruneFormDrafts, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { SseFrame } from '@/types/sse'
 import type { ValidationIssue } from '@/types/job'
-import type { WorkspaceActionRecord } from '@/types/tools'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
 import { buildErrorCard } from '@/utils/error-card'
 import { buildPublishConflictView } from '@/utils/resultview'
@@ -441,26 +440,6 @@ function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
   }
 }
 
-/** 重连 / 续收的"正在第 N 次重试"进度通知码 —— 它们只描述过程，过程一结束就该消失。 */
-const RECONNECT_PROGRESS_NOTICES: ReadonlySet<string> = new Set([
-  'ai.notice.reconnect',
-  'ai.notice.resumeRetry'
-])
-
-/**
- * 清掉重连 / 续收进度通知（只清这一族，不误清别的提示）。
- *
- * <p>为什么必须清：`onReconnect` 写的是"连接中断，正在第 N 次重连"这类**过程**事实。
- * 连接一旦打开（onOpen）/ 首业务帧到达 / 终帧到达，过程就结束了 —— 留着它等于在一条
- * 正常工作的连接上一直说"正在重连"。
- */
-function clearReconnectProgressNotice(sink: NoticeSink): void {
-  const code = sink.noticeCode
-  if (code !== null && RECONNECT_PROGRESS_NOTICES.has(code)) {
-    clearNotice(sink)
-  }
-}
-
 /**
  * O02：同 tick「停止 + 发送」时，发送在**停止落地**（cancel 送达）前最多等这么久。
  *
@@ -593,13 +572,10 @@ function preparingRunOf(current: AiRunCurrent): AiPreparingRun | null {
   return { runId: current.runId, startedAtMs, elapsedMs }
 }
 
-/** 批次3：阶段心跳里的真实已用毫秒（`elapsedMs` 优先，其次整秒兼容字段，缺省 = null）。 */
-function heartbeatElapsedMs(frame: { elapsedMs?: unknown; elapsedSeconds?: unknown }): number | null {
+/** 批次3：阶段心跳里的真实已用毫秒（只认 `elapsedMs`；缺省 = null）。 */
+function heartbeatElapsedMs(frame: { elapsedMs?: unknown }): number | null {
   if (typeof frame.elapsedMs === 'number' && Number.isFinite(frame.elapsedMs)) {
     return Math.max(0, frame.elapsedMs)
-  }
-  if (typeof frame.elapsedSeconds === 'number' && Number.isFinite(frame.elapsedSeconds)) {
-    return Math.max(0, Math.round(frame.elapsedSeconds * 1000))
   }
   return null
 }
@@ -724,23 +700,32 @@ let workspaceSyncStarted = false
 let workspaceSyncStops: Array<() => void> = []
 
 /**
- * 成功即**不回执位**的 ui_event（"无噪声成功"）。
+ * 成功即**不回执位**的 ui_event（"结果已在工具卡/业务页体现"）。
  *
- * 这六类动作都是"把界面摆到该在的位置"：导航 / 恢复向导 / 切步骤 / 三类刷新。用户能直接看见
- * 结果（页面已经换过去了），回执位再报一条"已打开导出向导"就是噪声；模型侧要的证明也已经由
- * 工具结果（回灌文本）给出，不靠这条 Alert。
+ * 这些写类动作的成功都能在页面上直接看见（导航换页、向导切步、选配置/设条件/改模式落表、
+ * 取消作业后的状态、导入批次/动作后的页面状态）；模型侧要的证明也已由工具结果回灌文本给出。
  *
- * **不在此列的一律保留**（失败永远保留）：`run_job` / `cancel_job` / `download` / `select_defs` /
- * `set_conditions` / `set_import_mode` / `export_started` / `import_batch` / `import_action` ——
- * 它们的成功意味着后端已落副作用（建作业、取文件、改数据），必须有一条可见回执。
+ * **保留回执的成功结果**（"视口外/异步，页面此刻看不全"）：
+ * - `download`：文件落在下载目录，不在视口内；
+ * - `run_job`：建作业后的进度虽可见，但发布冲突等**终态明细**是异步回灌的（`reportUiEventResult`
+ *   也复用本事件名），回执位不能提前静默。
  *
- * 底层不动：`workspace.touch` / `recentActions` / `workspace_changed` chip / `dispatchUiEvent` 的广播
- * 全部照旧 —— 本表只决定 **AI 面板回执位**（`lastUiEventResult`）写不写。
+ * **失败/被拒永远保留**；未知事件（新后端）也保留 —— 不凭名字猜"用户看得见"。
+ *
+ * 底层不动：`workspace.touch` / `recentActions` / `dispatchUiEvent` 的记录与广播全部照旧 ——
+ * 本表只决定 **AI 面板回执位**（`lastUiEventResult`）写不写。
  */
 const SILENT_SUCCESS_UI_EVENTS: ReadonlySet<string> = new Set([
   'open_page',
   'restore_task',
   'goto_step',
+  'select_defs',
+  'set_conditions',
+  'set_import_mode',
+  'cancel_job',
+  'export_started',
+  'import_batch',
+  'import_action',
   'refresh_defs',
   'refresh_data',
   'refresh_tasks'
@@ -1429,57 +1414,15 @@ function readMirror(sessionId: string): AiSessionMirror | null {
 }
 
 /**
- * 旧镜像迁移（对话时序包 批1 §6.4）：v1 镜像没有 `parts` 段序列，就地补出来。
+ * 当前镜像协议的形状闸（C 端精简：v1 迁移已退场）。
  *
- * 口径：
- * - 每条消息 `parts = [text(content)] + toolRuns.map(toToolPart)`（seg 按数组序 0..n 递增）；
- * - `pendingCall` 存在且能与某个 tool part 对上 toolCallId 时并入（kind→kind2、
- *   `requiresAction = status === 'pending'`）；段 status 只由 `run.status` 派生，不被待决口径覆盖；
- * - 迁移幂等：只对 `v < MIRROR_VERSION`（或缺 `v` / 损坏缺 `parts`）的镜像动手，迁移后置 `v`；
- * - 返回值 `migrated` 供调用方**立即回写**（不回写则下次刷新又迁一遍，且防抖写盘口径混乱）。
+ * 只接受**当前协议**（`v === MIRROR_VERSION` 且每条消息都有 `parts` 段序列）；旧版本或损坏
+ * （缺 `parts` / 非对象）的镜像一律丢弃 —— 可由服务端 `history` 重建，不在前端做历史迁移。
  */
-function migrateMirror(mirror: AiSessionMirror): { messages: AiSessionMirror['messages']; migrated: boolean } {
-  const version = typeof mirror.v === 'number' ? mirror.v : 0
-  const intact = version >= MIRROR_VERSION
-    && mirror.messages.every((message) => Array.isArray(message.parts))
-  if (intact) {
-    return { messages: mirror.messages, migrated: false }
-  }
-  const messages = mirror.messages.map((message) => {
-    const toolRuns = Array.isArray(message.toolRuns) ? message.toolRuns : []
-    const parts: MessagePart[] = [
-      { kind: 'text', seg: 0, text: message.content ?? '', streaming: false },
-      ...toolRuns.map((run, index): MessagePart => ({
-        kind: 'tool',
-        seg: index + 1,
-        toolCallId: run.toolCallId,
-        name: run.name,
-        kind2: run.kind,
-        status: run.status,
-        args: run.args,
-        result: run.result ?? null,
-        reason: run.reason ?? null,
-        messageId: run.messageId,
-        requiresAction: false
-      }))
-    ]
-    const pending = message.pendingCall
-    if (pending) {
-      const index = parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === pending.toolCallId)
-      const existing = index >= 0 ? parts[index] : undefined
-      if (existing && existing.kind === 'tool') {
-        parts.splice(index, 1, {
-          ...existing,
-          // 待决条目只供 kind2 与 requiresAction 两维；status 一律以 run.status 派生为权威
-          // （存量 v1 镜像 toolRun 已终态、pendingCall 仍 pending/approved 时不得被覆盖）
-          kind2: pending.kind,
-          requiresAction: pending.status === 'pending'
-        })
-      }
-    }
-    return { ...message, parts }
-  })
-  return { messages, migrated: true }
+function isCurrentMirror(mirror: AiSessionMirror): boolean {
+  return mirror.v === MIRROR_VERSION
+    && Array.isArray(mirror.messages)
+    && mirror.messages.every((message) => Array.isArray(message?.parts))
 }
 
 /**
@@ -2199,13 +2142,13 @@ function roleOf(type: string): ChatMessage['role'] {
  * 历史载荷的截断元数据（A10 R-15）：只按<b>实际存在的键</b>透传到段上。
  *
  * <p>两条来源：① `toolResponses[]` —— 后端从持久化信封里取回
- * `truncated/noticeCode/originalChars/returnedChars/strategy/truncatedReason`；② 历史条目自身
- * （additive，文本段可携带同名字段；当前后端仅对 `toolResponses` 产出）。缺键一律不写，保证旧历史
- * 重建后的段形状与既有实现逐字一致（不回退出 `undefined` 键）。
+ * `truncated/noticeCode/originalChars/returnedChars/strategy`；② 历史条目自身
+ * （additive，文本段可携带同名字段；当前后端仅对 `toolResponses` 产出）。缺键一律不写，保证
+ * 重建后的段形状稳定（不制造 `undefined` 键）。
  *
  * <p><b>消息级 vs 段级同名键（截断专项）</b>：只有裸 `truncated` 时按消息级长度截断处理，
- * 走 {@link ChatMessage.truncated} + 面板徽标；若同时有 noticeCode/字符数/策略/旧原因等段级
- * 元数据，则是旧帧的段级截断，必须保留 truncated 及其余字段，刷新后角标不能丢。
+ * 走 {@link ChatMessage.truncated} + 面板徽标；若同时有 noticeCode/字符数/策略等段级
+ * 元数据，则是段级截断，必须保留 truncated 及其余字段，刷新后角标不能丢。
  */
 function historyTruncationFields(
   source: unknown,
@@ -2220,7 +2163,6 @@ function historyTruncationFields(
     originalChars?: unknown
     returnedChars?: unknown
     strategy?: unknown
-    truncatedReason?: unknown
   }
   const fields: Partial<MessageTruncationFields> = {}
   if (options.includeTruncated !== false && typeof value.truncated === 'boolean') {
@@ -2239,61 +2181,7 @@ function historyTruncationFields(
   if (typeof value.strategy === 'string' || value.strategy === null) {
     fields.strategy = value.strategy as string | null
   }
-  if (typeof value.truncatedReason === 'string' || value.truncatedReason === null) {
-    fields.truncatedReason = value.truncatedReason as string | null
-  }
   return fields
-}
-
-/**
- * 契约事件载荷 → 工作区动作记录（形态不符则忽略，不抛错）。导出仅为单测锁形状。
- *
- * <p>2026-10-29 收口：`display`（结构化展示面：locale code + 命名插值）必须**随记录保留** ——
- * 面板 chip 用它按当前语言重译，丢了它就只能回落到兜底文案（不再回落到 `summary`，见
- * AiPanel 的 `contextSyncText`）。
- * <p>2026-10-30 结构化批：`source` 统一为数据码 `UI` / `API` / `AI`；旧码 `'界面'` 与缺失值
- * 经 {@link normalizeWorkspaceActionSource} 归一为 `UI`（不丢已知值、不臆造第三值）。
- */
-export function readActionRecord(payload: unknown): WorkspaceActionRecord | null {
-  if (!payload || typeof payload !== 'object') {
-    return null
-  }
-  const record = payload as Partial<WorkspaceActionRecord>
-  if (typeof record.summary !== 'string' || typeof record.version !== 'number') {
-    return null
-  }
-  const display = readActionDisplay(record.display)
-  return {
-    version: record.version,
-    summary: record.summary,
-    at: typeof record.at === 'number' ? record.at : Date.now(),
-    source: normalizeWorkspaceActionSource(record.source),
-    ...(display === null ? {} : { display })
-  }
-}
-
-/**
- * 展示面形状闸：`code` 必须是非空字符串（面板直接 `t(code)`），`args` 只收标量值
- * （字符串 / 数字）—— 对象/数组塞进插值只会渲染成 `[object Object]`，宁可不给。
- * 形状不符 ⇒ null（记录仍可用，只是 chip 回落到 `summary`）。
- */
-function readActionDisplay(raw: unknown): WorkspaceActionRecord['display'] | null {
-  if (!raw || typeof raw !== 'object') {
-    return null
-  }
-  const value = raw as { code?: unknown; args?: unknown }
-  if (typeof value.code !== 'string' || value.code === '') {
-    return null
-  }
-  const args: Record<string, string | number> = {}
-  if (value.args && typeof value.args === 'object' && !Array.isArray(value.args)) {
-    for (const [key, item] of Object.entries(value.args as Record<string, unknown>)) {
-      if (typeof item === 'string' || typeof item === 'number') {
-        args[key] = item
-      }
-    }
-  }
-  return Object.keys(args).length > 0 ? { code: value.code, args } : { code: value.code }
 }
 
 /**
@@ -2486,8 +2374,6 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.interruptedKeepShort': 'warning',
   'ai.notice.healthProbeFailed': 'warning',
   'ai.notice.sessionPurged': 'warning',
-  'ai.notice.sessionPurgeIncomplete': 'warning',
-  'ai.notice.memoryDeleteFailed': 'warning',
   'ai.notice.decisionPending': 'warning',
   'ai.notice.runExpired': 'warning',
   'ai.notice.decisionSubmitting': 'warning',
@@ -2507,8 +2393,6 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.toolTerminal': 'warning',
   'ai.notice.toolAlreadySubmitted': 'warning',
   'ai.notice.noUiUndo': 'warning',
-  // 复制页签告知是**中性事实**（不是错误/降级）：级别必须自带，不能继承上一轮 error。
-  'ai.notice.copiedNewTab': 'info',
   // 批次7B：镜像写盘失败（配额已满 / 隐私模式）是刷新恢复的降级事实，按 warning 提示一次。
   [MIRROR_STORAGE_NOTICE]: 'warning'
 }
@@ -2571,15 +2455,16 @@ function clearNotice(sink: NoticeSink): void {
 /**
  * 精确清理旧会话的浏览器残留（服务端 `clientCleanup` 的唯一消费点）。
  *
- * <p>只删两处：<b>该会话</b>的镜像键 `ai-mirror:<sid>`（响应值必须与期望键一致，否则回落期望键，
+ * <p>只删两处：<b>该会话**当前身份**的镜像键</b>（响应值必须与期望键一致，否则回落期望键，
  * 防止服务端字段异常删到别的键）与<b>枚举到的</b> `draftToolCallIds` 对应草稿键（由
  * `clearFormDraft` 固定拼 `cm.ai.form.draft.<id>`）。本函数**不做**前缀扫描、更不
  * `sessionStorage.clear()`：同一页签可能已换到新会话，业务状态也在同一 sessionStorage 里。
  * 整份清空只有复制页签确认那一条路径（{@link clearDuplicatedTabStorage}）；换会话留下的孤儿
  * 草稿键由 {@link useAiStore.pruneOrphanFormDrafts} 按前缀 + 在场白名单清（同样不是 clear）。
  *
- * <p>响应缺字段（旧后端/旧版本）时仍清该会话镜像；草稿只在有 id 时清（当前活动表单已由
+ * <p>响应缺字段时仍清该会话镜像；草稿只在有 id 时清（当前活动表单已由
  * `adoptFreshSession` 的 `dropActiveForm` 清掉，孤儿键也已由同处的 prune 收口）。
+ * 旧形 `ai-mirror:<sid>` 键不再参与双删：当前契约只写身份键。
  */
 function cleanupSessionLocalArtifacts(
   sessionId: string,
@@ -2588,16 +2473,9 @@ function cleanupSessionLocalArtifacts(
 ): void {
   const expectedMirror = mirrorStorageKey(sessionId, identity)
   const cleanup = payload?.clientCleanup
-  const ownMirrorKey = (key: string | undefined): key is string =>
-    key === expectedMirror || key === `${MIRROR_PREFIX}${sessionId}`
-  const mirrorKey = ownMirrorKey(cleanup?.mirrorKey) ? cleanup.mirrorKey : expectedMirror
+  const mirrorKey = cleanup?.mirrorKey === expectedMirror ? cleanup.mirrorKey : expectedMirror
   try {
-    // 两个口径都清：本前端的身份键 + 后端 clientCleanup 给出的键（旧后端仍是 `ai-mirror:<sid>`，
-    // 新契约应是 `ai-mirror:<t>:<u>:<sid>`）—— 都是"本会话自己的镜像"，不会误删别的身份。
-    sessionStorage.removeItem(expectedMirror)
-    if (mirrorKey !== expectedMirror) {
-      sessionStorage.removeItem(mirrorKey)
-    }
+    sessionStorage.removeItem(mirrorKey)
   } catch {
     // 隐私模式/存储被禁用：清不掉不影响主流程（新会话已换 id）
   }
@@ -2624,16 +2502,6 @@ function cleanupSessionLocalArtifacts(
       }
     }
   }
-}
-
-/** `complete=false` 的三种形态（含字段缺失兼容：旧后端没有 complete 时按完成处理）。 */
-function purgeWasIncomplete(payload: SessionPurgeResponse | null): boolean {
-  if (!payload) {
-    return false
-  }
-  const deferred = Array.isArray(payload.deferred) ? payload.deferred : []
-  const errors = Array.isArray(payload.errors) ? payload.errors : []
-  return payload.complete === false || payload.aborted === true || deferred.length > 0 || errors.length > 0
 }
 
 export const useAiStore = defineStore('ai', {
@@ -2736,8 +2604,6 @@ export const useAiStore = defineStore('ai', {
      * 挂起、待确认卡、表单、出错等其余闸门由面板按实时状态再判（这里只管"这一轮是不是正常完成"）。
      */
     followupReady: false,
-    /** 最近一次工作区契约事件（面板"工作区已同步"chip 的数据源） */
-    contextSync: null as WorkspaceActionRecord | null,
     /** 最近一次 ui_event 分发结果（AI 驱动工作区的回执展示） */
     lastUiEventResult: null as { event: string; handled: boolean; message: string } | null,
     /**
@@ -2825,14 +2691,13 @@ export const useAiStore = defineStore('ai', {
      */
     gateAcks: {} as Record<string, boolean>,
     /**
-     * 上下文占用（上下文专项批①）：`done.context` 的逐轮快照 + 端点重建的七项拆分。
+     * 上下文占用（上下文专项批①）：`done.context` 的逐轮快照 + 端点重建的摘要。
      *
-     * 更新口径（C-36）：**只在 `done` 帧到达时**写 —— 流式中不跳动（半轮的真值是半轮的，
-     * 拿它刷新进度条会让读者把"正在变大"误读成"要爆了"）。`breakdown` 独立于 `contextUsage`：
-     * 它只在端点返回时才有（popover 打开时按需拉，不必每轮都发）。
+     * 更新口径（C-36）：**只在 `done` 帧与历史恢复的端点重建时**写 —— 流式中不跳动
+     * （半轮的真值是半轮的，拿它刷新进度条会让读者把"正在变大"误读成"要爆了"）。
+     * 七项明细随 ContextPopover 一并退场；ContextPill 只消费本摘要。
      */
     contextUsage: null as ContextUsage | null,
-    contextBreakdown: null as ContextBreakdownItem[] | null,
     /** 端点返回的压缩态（"压了什么"的数据；面板另有"正在做什么"的阶段态，见下） */
     contextCompaction: null as ContextCompaction | null,
     /**
@@ -2867,13 +2732,6 @@ export const useAiStore = defineStore('ai', {
     historyError: null as AiLoadErrorView | null,
     /** 批次2：`GET /api/ai/runs/current`（恢复快照）失败现场。 */
     currentError: null as AiLoadErrorView | null,
-    /**
-     * 批次2：上下文明细端点失败现场。**不覆盖**已有数据（"读不到"不等于"用了 0"），
-     * popover 据此出"失败 + 重试"，有旧数据时数据与失败提示并存。
-     */
-    contextError: null as AiLoadErrorView | null,
-    /** 批次2：上下文明细的加载态（idle/loading/ready/error）—— popover 三态判据。 */
-    contextStatus: 'idle' as 'idle' | 'loading' | 'ready' | 'error',
     /**
      * 批次2：恢复完整性缺口（不可完整恢复）。中性事实：不是轮失败。
      * 值只在"能说清为什么/缺哪段"时才有；无缺口 = null。
@@ -3032,20 +2890,6 @@ export const useAiStore = defineStore('ai', {
       }
       return state.notice
     },
-    /**
-     * 运行状态文案（N6 裁决：按帧口径区分；i18n L-69：走 locale，切语言即重算）。
-     * - 生成中：本轮进行中且没有挂起等待；
-     * - 挂起等待：收到 suspended / confirm_request / frontend_tool_request 后；
-     * - 空闲：没有进行中的轮次。
-     */
-    runStateLabel(state): string {
-      if (!state.loading) {
-        return translate('ai.panel.runState.idle')
-      }
-      return state.suspended
-        ? translate('ai.panel.runState.suspended')
-        : translate('ai.panel.runState.generating')
-    },
     /** 输入区是否可用（执行中/挂起等待中一律禁发）。 */
     canSend(state): boolean {
       return !state.loading
@@ -3115,7 +2959,7 @@ export const useAiStore = defineStore('ai', {
      * <p>起点锚定：服务端给了 `elapsedMs` 就按"此刻 − elapsedMs"回推（首帧心跳即可显示真实
      * 已用时长）；后续心跳只校正锚点，不重新从 0 计时。服务端没给数字时退回本地首帧时刻。
      */
-    noteCompactionHeartbeat(frame: { elapsedMs?: unknown; elapsedSeconds?: unknown }): void {
+    noteCompactionHeartbeat(frame: { elapsedMs?: unknown }): void {
       const elapsed = heartbeatElapsedMs(frame)
       if (this.compactionPhase !== 'compacting') {
         this.compactionStartedAtMs = elapsed !== null ? Date.now() - elapsed : Date.now()
@@ -3432,13 +3276,11 @@ export const useAiStore = defineStore('ai', {
     /**
      * 启动工作区契约订阅（S4.4c 契约联动）。
      *
-     * 订阅两个主题：
-     * - `workspace_changed`：用户在业务页面上的动作（选配置/切步骤/改条件/编辑表格…）
-     *   → 面板显示"工作区已同步"chip；动作本身已由 workspace store 记入 recentActions，
-     *   随下一轮 `buildContext()` 注入给模型（AI 面板不自己拼上下文，仍走窄接口）；
-     * - `ui_event_result`：AI 驱动工作区动作的回执（AI→业务方向）。**成功且属于"无噪声"类**
-     *   （导航 / 恢复向导 / 切步骤 / 三类刷新，见 `SILENT_SUCCESS_UI_EVENTS`）不写回执位；
-     *   失败与有副作用类（建作业 / 下载 / 选配置 / 设条件 / 改模式 …）照旧写。
+     * 只订阅 `ui_event_result`：AI 驱动工作区动作的回执（AI→业务方向）。**成功且结果已在
+     * 工具卡/业务页可见**的动作（见 `SILENT_SUCCESS_UI_EVENTS`）不写回执位；失败/被拒与
+     * 视口外结果（下载）照旧写。
+     *
+     * <p>工作区动作由 workspace store 的 `recentActions` 同步；本订阅只维护面板回执位。
      */
     startWorkspaceSync(): void {
       if (workspaceSyncStarted) {
@@ -3446,9 +3288,6 @@ export const useAiStore = defineStore('ai', {
       }
       workspaceSyncStarted = true
       workspaceSyncStops.push(
-        onWorkspaceEvent('workspace_changed', (payload) => {
-          this.contextSync = readActionRecord(payload)
-        }),
         onWorkspaceEvent('ui_event_result', (payload) => {
           const record = payload as { event?: unknown; handled?: unknown; message?: unknown } | null
           if (!record || typeof record.event !== 'string') {
@@ -3486,8 +3325,8 @@ export const useAiStore = defineStore('ai', {
       } catch (error) {
         this.health = null
         this.healthError = error instanceof Error ? error.message : translate('ai.notice.healthProbeFailed')
-        // N-1（R3）：原文**只进日志/诊断**（`healthError` 字段本身也是诊断用途）—— 用户可见的
-        // 胶囊/告警一律用固定友好文案（`ai.panel.probeFailedHint`），机制词不上屏。
+        // N-1（R3）：原文只进 DEV 日志（`healthError` 也是诊断字段）—— 探针失败本身不再上屏，
+        // 真实不可用由降级条与后端请求错误表达，机制词不上屏。
         if (import.meta.env.DEV) {
           console.warn('[ai] health probe failed:', this.healthError)
         }
@@ -3508,17 +3347,16 @@ export const useAiStore = defineStore('ai', {
      * 丢弃，不让旧会话的历史/挂起卡写进新会话（写后写竞态）。守卫口径同本文件 isCurrentRound 同族。
      */
     /**
-     * 拉取会话上下文占用（上下文统计与压缩专项批①；`GET /api/ai/context/{sessionId}`）。
+     * 拉取会话上下文占用摘要（`GET /api/ai/context/{sessionId}`）。
      *
-     * <p>
-     * 三个调用点：① {@link #loadHistory}（刷新恢复：本地 store 是内存态，刷新即丢，占用量必须由
-     * 服务端重建）；② popover 打开（七项拆分按需拉，不必每轮都发）；③ 挂起态（没有新帧，占用仍要可读）。
+     * <p>调用点：刷新恢复（本地 store 是内存态，刷新即丢，占用量必须由服务端重建）。
+     * 七项明细随 ContextPopover 退场，本动作只更新 ContextPill 需要的摘要。
      *
-     * <p>
-     * 两条降级口径：
+     * <p>两条降级口径：
      * <ul>
      * <li>端点失败（503/网络）⇒ **保持现状**、不覆盖 —— 把"读不到"写成"用了 0"是最糟的谎；</li>
-     * <li>`source === 'none'`（会话从未记账）⇒ `contextUsage = null`（pill 不出现：没有可说的数）。</li>
+     * <li>`source === 'none'`（会话从未记账）⇒ `contextUsage = null`（ContextPill 仍常驻，
+     *     显示中性空轨与「暂无上下文占用」，不谎报 0%）。</li>
      * </ul>
      */
     async loadContext(): Promise<void> {
@@ -3528,17 +3366,13 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const sid = this.sessionId
-      this.contextStatus = 'loading'
-      this.contextError = null
       try {
         const snapshot = await aiApi.getContext(sid)
         // 会话身份守卫（同 loadHistory 的红队 MAJOR-1 口径）：跨 await 期间换了会话即整体丢弃
         if (this.sessionId !== sid) {
           return
         }
-        this.contextBreakdown = snapshot.breakdown ?? null
         this.contextCompaction = snapshot.compaction ?? null
-        this.contextStatus = 'ready'
         if (snapshot.source === 'none') {
           this.contextUsage = null
           return
@@ -3551,19 +3385,9 @@ export const useAiStore = defineStore('ai', {
           est: snapshot.estimated,
           circuit: snapshot.compaction?.circuit ?? 'closed'
         }
-      } catch (error) {
-        // 读不到就不动数据（历史渲染与既有状态不受影响），但要**可见**：失败 + 可重试。
-        if (this.sessionId !== sid) {
-          return
-        }
-        this.contextStatus = 'error'
-        this.contextError = toLoadErrorView('context', error)
+      } catch {
+        // 读不到就不动数据：ContextPill 继续显示最近一次已知摘要（没有则保持空轨）。
       }
-    },
-
-    /** 批次2：上下文明细失败后的重试（一次性；popover 的重试钮入口）。 */
-    async retryLoadContext(): Promise<void> {
-      await this.loadContext()
     },
 
     /**
@@ -3619,12 +3443,9 @@ export const useAiStore = defineStore('ai', {
       const mirrorRunSeq = mirror?.runSeq ?? {}
       /** 归一后的镜像消息快照（G3 合并要用 —— this.messages 随后会被历史整体替换） */
       let mirrorMessages: ChatMessage[] = []
-      if (!inFlightAtEntry && mirror && Array.isArray(mirror.messages) && mirror.messages.length > 0) {
-        // 对话时序包 批1 §6.4：旧镜像（无 parts / v<2）先同步迁移出 parts 再落展示态，
-        // 迁移后**立即回写**新镜像 —— 早于 startMirror 的防抖写盘（300ms），顺序与
-        // "先行置位再触发重建"同族：先把镜像定成新版形态，之后的写盘一律是新口径
-        const migrated = migrateMirror(mirror)
-        this.messages = migrated.messages.map((message) => ({
+      // 当前协议且结构完整才用镜像；旧版本 / 损坏镜像直接丢弃（服务端 history 会重建）。
+      if (!inFlightAtEntry && mirror && isCurrentMirror(mirror) && mirror.messages.length > 0) {
+        this.messages = mirror.messages.map((message) => ({
           ...message,
           streaming: false,
           done: true,
@@ -3650,16 +3471,14 @@ export const useAiStore = defineStore('ai', {
             host.streaming = true
           }
         }
-        // 批2 前置（GLM o1）：存量镜像残留的 requiresAction=true 在读取侧收口（v1 迁移结果与
-        // v2 intact 都生效），须在 writeMirror 回写之前完成 —— 否则刷新复活挂起语义。
-        // 批G：在途轮保留原样（它还没收尾，挂起语义可能是真的 —— 不能在读取侧替它收口）
+        // 读取侧收口存量镜像残留的 requiresAction=true，须在 writeMirror 回写之前完成 ——
+        // 否则刷新复活挂起语义。在途轮保留原样（它还没收尾，挂起语义可能是真的）。
         const sanitized = mirrorInFlight ? false : sanitizeMirrorResidues(this.messages)
-        // 批2（权威翻转）：镜像里的旧投影一律按段重算（存量 v2 镜像可能是双写期的产物，
-        // 投影里仍留着"已终态但挂起卡不消失"的旧口径）—— 落展示态前先归一到段口径
+        // 镜像里的投影一律按段重算（历史双写期的镜像可能仍留着旧口径的投影）
         this.messages.forEach((message) => deriveProjections(message))
         mirrorMessages = this.messages
-        if (migrated.migrated || sanitized) {
-          // 只在"迁移过 / 收口过"时回写：无变化时回写会让每次刷新都写盘
+        if (sanitized) {
+          // 只在"收口过"时回写：无变化时回写会让每次刷新都写盘
           // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
           writeMirror(this, this.sessionId, this.messages, this.activeRunId, {
             inFlight: mirrorInFlight,
@@ -3832,7 +3651,7 @@ export const useAiStore = defineStore('ai', {
         const toolSegBase = textSeg + (hasTextPart ? 1 : 0)
         const hasTextFrameTruncation = item.noticeCode !== undefined
           || item.originalChars !== undefined || item.returnedChars !== undefined
-          || item.strategy !== undefined || item.truncatedReason !== undefined
+          || item.strategy !== undefined
         const parts: MessagePart[] = [
           ...(hasReasoningPart
             ? [{ kind: 'reasoning', seg: 0, text: reasoningText, streaming: false } as MessagePart]
@@ -5071,8 +4890,8 @@ export const useAiStore = defineStore('ai', {
       host.done = false
       // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
       // 因为该条目正是"等人工/前端动作"的那一个（派生出唯一 pendingCall，不新增重复工具卡）
-      // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：段字段照原样携带，前端不据其
-      // 折算任何倒计时 / 本地超时。
+      // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：仅前端工具段照原样携带
+      //（其 `frontend_tool_request` 仍可能带等待上限）；确认门不再携带这两字段，也不据此折算倒计时。
       const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
       this.upsertToolPart(host, {
         toolCallId: entry.toolCallId,
@@ -5081,7 +4900,9 @@ export const useAiStore = defineStore('ai', {
         status: 'pending',
         args: entry.arguments ?? undefined,
         requiresAction: true,
-        ...(entry.expiresAt != null ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined } : {}),
+        ...(kind === 'FRONTEND' && entry.expiresAt != null
+          ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined }
+          : {}),
         // H1 预检摘要：快照载荷带则原样落段（与 suspended/confirm_request 帧同口径），
         // 缺省不产生该键 —— 旧载荷重建出的门卡与既有形态一字不差。
         ...(entry.preflight ? { preflight: entry.preflight } : {}),
@@ -5243,19 +5064,6 @@ export const useAiStore = defineStore('ai', {
               }
               this.noteArchiveTrim(signal)
             },
-            onReconnect: (attempt, delayMs) => {
-              if (!isCurrentRound()) {
-                return
-              }
-              setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
-            },
-            onOpen: () => {
-              if (!isCurrentRound()) {
-                return
-              }
-              // 续收连接开了 ⇒ "正在第 N 次重试"的过程结束
-              clearReconnectProgressNotice(this)
-            },
             onClose: (info) => {
               if (!isCurrentRound()) {
                 return
@@ -5317,7 +5125,7 @@ export const useAiStore = defineStore('ai', {
      *
      * <p>
      * 复用 {@link resumeSnapshotStream}：**续写原宿主消息**（不新起助手消息、不引入任何新 UI），
-     * 失败提示沿用该路径既有的 `onClose` / `onReconnect` 口径（不新增元素）。
+     * 失败提示沿用该路径既有的 `onClose` 口径（自动重连尝试本身静默，不新增元素）。
      * 只在 `suspended` 为真时动作：非挂起轮的 POST（如 409 幂等收敛）不需要重连。
      *
      * <p><b>M-d（fix2）：帧先于 POST 时也要续收。</b>结局帧与决策同锁发出，`confirm_decision` /
@@ -5507,19 +5315,6 @@ export const useAiStore = defineStore('ai', {
             this.cancelRunIfStopIntended(frame.runId, assistant.id)
           }
           this.handleFrame(frame, assistant.id)
-        },
-        onReconnect: (attempt, delayMs) => {
-          if (!isCurrentRound()) {
-            return // R6：旧轮的迟到重连公告不写进新轮
-          }
-          setNotice(this, 'ai.notice.reconnect', { seconds: Math.round(delayMs / 1000), attempt })
-        },
-        onOpen: () => {
-          if (!isCurrentRound()) {
-            return
-          }
-          // 连接真的开了 ⇒ "正在第 N 次重连"的过程结束
-          clearReconnectProgressNotice(this)
         },
         onClose: (info) => {
           // M-19（I5）：这条传输收尾仍没等到 start ⇒ 挂在它上面的停止意向再无落地机会（先于
@@ -5973,19 +5768,6 @@ export const useAiStore = defineStore('ai', {
                 return
               }
               this.noteArchiveTrim(signal)
-            },
-            onReconnect: (attempt, delayMs) => {
-              if (!isCurrentRound()) {
-                return
-              }
-              setNotice(this, 'ai.notice.resumeRetry', { seconds: Math.round(delayMs / 1000), attempt })
-            },
-            onOpen: () => {
-              if (!isCurrentRound()) {
-                return
-              }
-              // 连接真的开了 ⇒ "正在第 N 次重试"的过程结束（否则一条正常工作的连接上一直说重连）
-              clearReconnectProgressNotice(this)
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
@@ -8796,11 +8578,9 @@ export const useAiStore = defineStore('ai', {
       this.stopping = false
       this.poolSaturated = null
       this.suspended = false
-      // 批次2：恢复失败现场 / 上下文加载态 / 缺口 / 409 手动入口都属于旧会话 —— 一律不带走
+      // 批次2：恢复失败现场 / 恢复缺口 / 409 手动入口都属于旧会话 —— 一律不带走
       this.historyError = null
       this.currentError = null
-      this.contextError = null
-      this.contextStatus = 'idle'
       this.recoveryGap = null
       this.busyRun = null
       // M08 / O02：连接登记位与"已停止的那一轮"同属旧会话现场，不带走
@@ -8815,9 +8595,8 @@ export const useAiStore = defineStore('ai', {
       cancelAutoRecovery()
       this.autoRecoveryUsed = {}
       this.restoringRecovery = false
-      // 批次6B（N7）：工作区 chip / ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
+      // 批次6B（N7）：ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
       // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
-      this.contextSync = null
       this.lastUiEventResult = null
       this.lastRoundOutcome = 'ok'
       this.dropActiveForm()
@@ -8837,9 +8616,8 @@ export const useAiStore = defineStore('ai', {
       this.streamInterrupted = false
       // 批 E · E2：新会话不继承上一会话的建议条
       this.followupReady = false
-      // 上下文专项批①：占用与拆分随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
+      // 上下文专项批①：占用摘要随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
       this.contextUsage = null
-      this.contextBreakdown = null
       this.contextCompaction = null
       // 批次3：压缩/准备中阶段是内存态，跨会话不带走
       this.resetCompactionProgress()
@@ -9231,8 +9009,7 @@ export const useAiStore = defineStore('ai', {
       markHandoffTakenOver(sessionId, identityAtEntry)
       // Task 3：claim 的身份 = 接手入口捕获的身份（探活期间切走的身份不参与这条会话的广播）。
       postOwnership('claim', sessionId, identityAtEntry)
-      // 批次6B（N7）：接手的是**另一个会话**，上一身份的 chip / ui_event 回执 / 轮结局不带走。
-      this.contextSync = null
+      // 批次6B（N7）：接手的是**另一个会话**，上一身份的 ui_event 回执 / 轮结局不带走。
       this.lastUiEventResult = null
       this.lastRoundOutcome = 'ok'
       await this.loadHistory()
@@ -9247,14 +9024,13 @@ export const useAiStore = defineStore('ai', {
      * 1. 先在跑的轮次 `abort`（R5①）——否则 loading 不复位、后续帧会写进已清空的 messages；
      * 2. 立刻换 id 并清状态（**同步完成**：点击=立即清屏，不等后端）；
      * 3. 再 best-effort `POST /api/ai/cancel/{oldRunId}` 通知后端停旧轮（后端不可达不阻断本地重置）；
-     * 4. **最后**调销毁端点（前端走 `DELETE /api/ai/session/{oldSessionId}`，后端旧
-     *    `DELETE /api/ai/history/{oldSessionId}` 也映射到同一 purge）：删除该会话全部 AI 数据，
+     * 4. **最后**调销毁端点 `DELETE /api/ai/session/{oldSessionId}`：删除该会话全部 AI 数据，
      *    同时用响应 `clientCleanup` 精确清浏览器镜像/草稿。
      *
      * <p>口径更新：旧实现的"只删记忆窗口 + 在飞轮终局可能写回"已被服务端 purge guard 关闭
-     * （记忆 `saveAll` 在守卫命中/不可知时拒绝写回）。前端只在
-     * `complete=false`（deferred/errors/aborted）时用 `sessionPurgeIncomplete` 提示"整会话未删净"，
-     * 仍不阻断新对话；`complete` 字段缺失时按完成兼容。
+     * （记忆 `saveAll` 在守卫命中/不可知时拒绝写回）。`complete=false`（deferred/errors/aborted）
+     * 不再给用户提示：多面销毁是后台语义，新建对话不等它、也不拿技术删净度打扰用户；
+     * 前端只消费 `clientCleanup` 精确清理本地残留。
      */
     async resetSession(): Promise<void> {
       // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于销毁与清本地残留
@@ -9269,7 +9045,7 @@ export const useAiStore = defineStore('ai', {
       // Task 4：先判完所有权（本页签新建）再向后端取号；取号失败则保持未就绪，不得用空 id 发请求。
       // Task 3：所有权认领由 `ensureSession()` 统一完成（新号只可能是本页签的；无锁环境保持
       // unsupported，不冒充 owner），这里不再重复探活/claim。
-      const issued = await this.ensureSession()
+      await this.ensureSession()
       // best-effort 停掉后端仍在跑的旧轮（只断本地连接不停后端，故必须显式 POST）
       if (oldRunId) {
         try {
@@ -9280,12 +9056,6 @@ export const useAiStore = defineStore('ai', {
         }
       }
       // 销毁放最后：服务端先 cancel/守卫再删；前端只消费精确清理指令。
-      // F5（复核收口）：失败提示是**异步落地**的（后端不可达时最坏要等到 HTTP 超时），故必须带
-      // 「仍是本轮」守卫 —— 这只在本次新建对话换出的会话里、且其间没有发生任何轮次时才允许写提示；
-      // 否则这条过期提示会盖掉新会话/新轮的 notice（store 其余异步落盘点都用 isCurrentRound 同族守卫，
-      // 本处"当前轮"的判据 = 会话 id 仍是 nextId（未被再次新建对话换掉）且 messages 仍为空
-      // （send 会同步 record 用户消息，故 messages 非空 ⇔ 新会话里已经起过轮次）。
-      const isCurrentRound = (): boolean => this.sessionId === issued && this.messages.length === 0
       // 空 id 不请求（旧会话本来就没发过号：没有可销毁的服务端会话）
       if (oldSessionId === '') {
         return
@@ -9293,16 +9063,9 @@ export const useAiStore = defineStore('ai', {
       try {
         const purge = await aiApi.deleteHistory(oldSessionId)
         cleanupSessionLocalArtifacts(oldSessionId, purge, purgeIdentity)
-        // complete=false（含 deferred/errors/aborted）不得当成功：只提示，不阻塞新对话
-        if (purgeWasIncomplete(purge) && isCurrentRound()) {
-          setNotice(this, 'ai.notice.sessionPurgeIncomplete')
-        }
       } catch {
         // 请求失败：旧会话可能未删净；镜像仍按精确键清一次（草稿 id 未知，当前活动表单已清）
         cleanupSessionLocalArtifacts(oldSessionId, null, purgeIdentity)
-        if (isCurrentRound()) {
-          setNotice(this, 'ai.notice.sessionPurgeIncomplete')
-        }
       }
     },
 
@@ -9385,14 +9148,6 @@ export const useAiStore = defineStore('ai', {
        * （resetSession 之后、或新轮已起）只收敛它自己那条消息，不能把新轮标记成空闲。
        */
       const ownedByActiveRound = assistantId === undefined || assistantId === activeRoundHostId
-      /**
-       * 复审返修（M-1）：进度通知清理**排在归属判定之后** —— `notice` 是轮次级状态，旧轮迟到帧
-       * 一律不得改写（否则 `stop()` 保留的 pre-start 传输在下一轮建立后迟到的终态帧，会把新轮的
-       * "正在重连"清掉）。清理本身仍覆盖 onOpen / 首业务帧 / done（终态也是业务帧）。
-       */
-      if (ownedByActiveRound && frame.type !== 'heartbeat') {
-        clearReconnectProgressNotice(this)
-      }
       /**
        * P-11 宿主解析（停止轮）：放行的终态帧同样**不得新建空气泡** —— `stop()` 已把本轮宿主
        * 封口（`done=true`），若仍走 `currentAssistantMessage()` 的"找不到 `!done` 就 append"
@@ -9527,13 +9282,6 @@ export const useAiStore = defineStore('ai', {
           } else {
             message.content += frame.text
           }
-          applyFrameToParts(message, frame)
-          break
-        }
-        case 'reasoning': {
-          // 裁决⑦：有 reasoning 帧才渲染思考链（无帧则 reasoning 恒空 → 面板不显示折叠块）
-          // 旧形态兜底（L-91 起后端改发 delta{kind:'reasoning'}；本条只服务旧桩/旧归档回放）
-          message.reasoning += frame.text
           applyFrameToParts(message, frame)
           break
         }
@@ -9794,8 +9542,6 @@ export const useAiStore = defineStore('ai', {
           // 上下文专项批①：轮末占用（唯一刷新点 —— 流式中不跳动，C-36）
           if (frame.context) {
             this.contextUsage = frame.context
-            // 拆分是端点面（popover 打开时按需拉）：轮末先置脏，避免拿上一轮的七项配这一轮的总量
-            this.contextBreakdown = null
           }
           // R-166：轮终态 ⇒ 提交在途态一并收口（挂起卡已由 expireResidueToolParts 收掉）
           this.clearGateSubmissions()
@@ -10013,11 +9759,7 @@ export const useAiStore = defineStore('ai', {
       useTaskStore().watchPublishOutcome(taskId, jobId, {
         onConflict: (summary, issues) => {
           this.attachPublishConflict(jobId, summary, issues)
-          // 面板 chip 的结构化展示面（2026-10-30）：现役写点必须给 display，别落成兜底文案
-          reportUiEventResult('start_publish', summary, {
-            code: 'ai.workspace.publishConflict',
-            args: { jobId, count: issues?.length ?? 0 }
-          })
+          reportUiEventResult('start_publish', summary)
         }
       })
     },

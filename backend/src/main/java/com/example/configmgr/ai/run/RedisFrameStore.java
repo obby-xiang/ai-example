@@ -24,7 +24,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -37,21 +36,19 @@ import java.util.function.LongSupplier;
  * 单实例与多实例同一份代码。
  *
  * <h2>键族</h2>
- * <p>三族键名都带身份化的 {@code {<tenantId>:<userId>:run:<runId>}} hash tag
+ * <p>各族键名都带身份化的 {@code {<tenantId>:<userId>:run:<runId>}} hash tag
  * （{@code <prefix>{[<t>:<u>:]run:<runId>}}，见 {@link RunStore#runScopedKey(String, String)}）：
  * 它们与快照/台账等同属 {@code deleteRun} 的
- * "一轮 13 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
+ * "一轮 12 键"，同 tag 才能让轮次回收是一条原子 {@code DEL}。下列键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:xevents:<runId>} Stream —— 帧事件日志：{@code XADD key MAXLEN ~ <窗口> <seq>-0
  * seq <n> frame <json>}（近似裁剪；<b>窗口 = min(条数窗口 {@link #STREAM_WINDOW}, 字节预算推导的等效窗口)</b>，
  * 见 {@link #windowForPayload(long)}；<b>entry ID = {@code seq}-0</b>），
  * 字段 {@code seq} + {@code frame}（帧 JSON 原文，已含截断结果，与实时投递同一份）；
- * 每次追加后 {@code EXPIRE}= session-ttl（滑动续期，与 {@code ai:run:} / {@code ai:events:} 同寿）；</li>
+ * 每次追加后 {@code EXPIRE}= session-ttl（滑动续期，与 {@code ai:run:} 同寿）；</li>
  * <li>{@code ai:seq:<runId>} STRING —— 业务序号发放口（{@code INCR}，跨实例原子）；
  * 键缺失/过期/降级后恢复时按"已落档末号"自修复抬回（{@code repairRollback}），
- * 既保证从 LIST 兼容期迁移不断档，也保证 24h 后键过期不会让号从 1 重来；</li>
- * <li>{@code ai:events:<runId>} LIST —— <b>只读兼容期</b>：新写不再进 LIST，{@link #readFrom}
- * 仍把它串在 Stream 前面（按 {@code seq} 拼接去重），TTL 到期自然消亡，不做搬迁；</li>
+ * 保证 24h 后键过期不会让号从 1 重来；</li>
  * <li>{@code ai:xack:<token>:<runId>} STRING —— <b>一次出帧的幂等标记</b>（{@code token → seq}，
  * 短 TTL {@link #ACK_TTL_SECONDS}，同 tag 同槽）。它让"XADD 成功但回包丢失"的重试能按
  * <b>精确 ID + 本次帧体</b>认出"这一帧已经落档"，而不是靠查表尾猜（表尾已是别人的帧）；</li>
@@ -106,7 +103,7 @@ public class RedisFrameStore implements FrameStore {
 	/** 事件日志数据键前缀（设计稿 §3 新增键族）。 */
 	public static final String STREAM_PREFIX = "ai:xevents:";
 
-	/** 事件日志窗口（近似裁剪；B1 登记的风险从 LIST 的 3000 翻倍缓解，仍非根治）。 */
+	/** 事件日志窗口（近似裁剪；B1 登记的容量风险由 Stream 窗口缓解，仍非根治）。 */
 	public static final int STREAM_WINDOW = 6000;
 
 	/**
@@ -146,10 +143,10 @@ public class RedisFrameStore implements FrameStore {
 	static final String SEQ_NEXT_MARK = "AI_SEQ_NEXT";
 
 	/**
-	 * 取号脚本正文（{@code EVAL}，{@code KEYS} 三键同槽）。
+	 * 取号脚本正文（{@code EVAL}，{@code KEYS} 两键同槽）。
 	 *
-	 * <p>三键：{@code [ai:seq, ai:xevents, ai:events]}（全部带 {@code {run:<runId>}} hash tag ⇒ 同一槽，
-	 * Cluster 下多键脚本因此合法）。{@code ARGV}：{@code [session-ttl 秒, 本进程降级号, 末号探测条数]}。
+	 * <p>两键：{@code [ai:seq, ai:xevents]}（全部带 {@code {run:<runId>}} hash tag ⇒ 同一槽，
+	 * Cluster 下多键脚本因此合法）。{@code ARGV}：{@code [session-ttl 秒, 本进程降级号, 末号探测条数, forceRepair]}。
 	 * 返回 {@code {seq, degraded}}：{@code degraded=1} = 键刚重建/号落后但归档末号读不出
 	 * （脚本不抬号，调用方 WARN 一次）。
 	 *
@@ -180,16 +177,6 @@ public class RedisFrameStore implements FrameStore {
 			      end
 			    end
 			  else
-			    degraded = 1
-			  end
-			  local okLegacy, legacy = pcall(redis.call, 'LRANGE', KEYS[3], -1, -1)
-			  if okLegacy and type(legacy) == 'table' and legacy[1] then
-			    local okJson, decoded = pcall(cjson.decode, legacy[1])
-			    if okJson and type(decoded) == 'table' then
-			      local v = tonumber(decoded['seq'])
-			      if v and v > anchor then anchor = v end
-			    end
-			  elseif not okLegacy then
 			    degraded = 1
 			  end
 			  if anchor >= cur then
@@ -248,11 +235,11 @@ public class RedisFrameStore implements FrameStore {
 	static final long ACK_TTL_SECONDS = 120L;
 
 	/**
-	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>五键</b>同槽 —— seq / xevents / events / ack / xtrim，
+	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>四键</b>同槽 —— seq / xevents / ack / xtrim，
 	 * 全部带同一 {@code {run:<runId>}} hash tag，Cluster 合法）。
 	 *
-	 * <p>{@code KEYS}（<b>五键</b>，全部带同一 {@code {run:<runId>}} hash tag ⇒ 同槽，Cluster 合法）：
-	 * {@code [ai:seq, ai:xevents, ai:events, ai:xack:<token>:, ai:xtrim]}。
+	 * <p>{@code KEYS}（<b>四键</b>，全部带同一 {@code {run:<runId>}} hash tag ⇒ 同槽，Cluster 合法）：
+	 * {@code [ai:seq, ai:xevents, ai:xack:<token>:, ai:xtrim]}。
 	 * {@code ARGV}：{@code [session-ttl, 本进程降级号, 末号探测条数, 窗口, forceRepair, 幂等标记 TTL,
 	 * token, 负载前半段, 负载后半段]}。返回 {@code {seq, degraded, idempotent}}：
 	 * {@code seq == 0} = 拒绝交出低号（刚重建 + 末号不可读），{@code idempotent == 1} = 这一帧<b>已经</b>归档。
@@ -264,7 +251,7 @@ public class RedisFrameStore implements FrameStore {
 	 *     —— 表尾这时可能已经是别的实例的帧，按它判会把"我的帧已成功"误判成"没成功"，
 	 *     于是重复归档同一个逻辑帧（前端按号去重也救不回：两个号两帧）；</li>
 	 * <li><b>定最终号</b>：{@code INCR}（跨实例唯一）+ 单调保险（表尾已被越过 ⇒ {@code INCRBY} 抬到表尾之后）；
-	 *     计数器刚重建/上一拍降级时按归档末号与兼容期 LIST 末帧重锚（只抬不压）；</li>
+	 *     计数器刚重建/上一拍降级时按归档末号重锚（只抬不压）；</li>
 	 * <li><b>归档</b>：把号替换进负载（{@code head .. seq .. tail}）后
 	 *     {@code XADD MAXLEN ~ 窗口 <seq>-0 seq <n> frame <body>}，并落幂等标记、续期两族键；</li>
 	 * <li><b>拒绝不可证的号</b>：末号读不出且计数器刚重建时返回 0（调用方带 forceRepair 重试），
@@ -276,7 +263,7 @@ public class RedisFrameStore implements FrameStore {
 	 * 被所有已越过它的游标永久跳过"。XADD 自身还会兜底拒绝"ID ≤ 表尾"，所以即便降级也不会乱序。
 	 */
 	private static final String APPEND_BODY = """
-			-- AI_FRAME_APPEND v1: 幂等判定 -> 定最终号 -> XADD(<seq>-0) -> 幂等标记 -> 续期，一次脚本一次往返
+			-- AI_FRAME_APPEND v2: 幂等判定 -> 定最终号 -> XADD(<seq>-0) -> 幂等标记 -> 续期，一次脚本一次往返
 			local ttl = tonumber(ARGV[1]) or 1
 			local fallbackLast = tonumber(ARGV[2]) or 0
 			local probe = tonumber(ARGV[3]) or 16
@@ -286,7 +273,7 @@ public class RedisFrameStore implements FrameStore {
 			local token = ARGV[7]
 			local head = ARGV[8]
 			local tail = ARGV[9]
-			-- 归档裁剪低水位（KEYS[5]）：只有"XADD 前后幸存首条被推高"（MAXLEN 真的丢了条目）才写。
+			-- 归档裁剪低水位（KEYS[4]）：只有"XADD 前后幸存首条被推高"（MAXLEN 真的丢了条目）才写。
 			-- 幸存首条的<b>业务 seq</b>（读者按业务号比较；升级期遗留记录也有 seq 字段）。
 			local function headSeq()
 			  local ok, entries = pcall(redis.call, 'XRANGE', KEYS[2], '-', '+', 'COUNT', 1)
@@ -305,9 +292,9 @@ public class RedisFrameStore implements FrameStore {
 			  return nil
 			end
 			local headBefore = headSeq()
-			-- KEYS[4] 已是完整键（含本次出帧的 token）：脚本不得再拼一次（否则键名里 token 出现两次，
+			-- KEYS[3] 已是完整键（含本次出帧的 token）：脚本不得再拼一次（否则键名里 token 出现两次，
 			-- 且 tag 之后多出一段，Cluster 槽与"按 token 复用"的语义都会漂移）。
-			local ackKey = KEYS[4]
+			local ackKey = KEYS[3]
 			local prev = redis.call('GET', ackKey)
 			if prev then
 			  local prevSeq = tonumber(prev)
@@ -364,16 +351,6 @@ public class RedisFrameStore implements FrameStore {
 			    elseif not okProbe then
 			      degraded = 1
 			    end
-			    local okLegacy, legacy = pcall(redis.call, 'LRANGE', KEYS[3], -1, -1)
-			    if okLegacy and type(legacy) == 'table' and legacy[1] then
-			      local okJson, decoded = pcall(cjson.decode, legacy[1])
-			      if okJson and type(decoded) == 'table' then
-			        local v = tonumber(decoded['seq'])
-			        if v and v > anchor then anchor = v end
-			      end
-			    elseif not okLegacy then
-			      degraded = 1
-			    end
 			  end
 			  if anchor >= cur then
 			    -- INCRBY 的增量必须显式格式化成整数：Lua 的 number→string 在 ≥1e14 时是科学计数法
@@ -401,11 +378,11 @@ public class RedisFrameStore implements FrameStore {
 			-- 记下新的首条号作为低水位（只升不降），读侧只按它判截断（不按"号是否连续"猜）。
 			local headAfter = headSeq()
 			if headBefore and headAfter and headAfter > headBefore then
-			  local known = tonumber(redis.call('GET', KEYS[5]) or '0') or 0
+			  local known = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
 			  if headAfter > known then
-			    redis.call('SET', KEYS[5], string.format('%.0f', headAfter), 'EX', ttl)
+			    redis.call('SET', KEYS[4], string.format('%.0f', headAfter), 'EX', ttl)
 			  else
-			    redis.call('EXPIRE', KEYS[5], ttl)
+			    redis.call('EXPIRE', KEYS[4], ttl)
 			  end
 			end
 			return {cur, degraded, 0}
@@ -417,7 +394,7 @@ public class RedisFrameStore implements FrameStore {
 	/**
 	 * <b>只升不降</b>地记录裁剪低水位（{@code GET → SET max → EXPIRE}），一次脚本一次往返。
 	 *
-	 * <p>为什么必须原子：并行的多个写口（原子落档 / 精确号落档 / 遗留写入方）都会各自观察
+	 * <p>为什么必须原子：并行的多个写口（原子落档 / 精确号落档）都会各自观察
 	 * "自己那次 XADD 之后的幸存首条"；用 {@code GET}+{@code SET} 两步会互相覆盖，低水位可能被
 	 * <b>压回</b>更小的号 —— 于是"确实被裁过"的读者反而读不到截断。
 	 */
@@ -603,9 +580,9 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	// ── 键名 ────────────────────────────────────────────────────────────────
-	// B23L1 批①（收口版）：三族键名一律走 {@link RunStore#runScopedKey}（{@code <prefix>{run:<runId>}}），
+	// B23L1 批①（收口版）：两族键名一律走 {@link RunStore#runScopedKey}（{@code <prefix>{run:<runId>}}），
 	// 与 RunStore 的续期/删除口**逐字同键**。这里加 tag 的目的不是本类需要同槽（本类的读都是单键命令），
-	// 而是"一轮 13 键同槽"—— 写方在旧键名、删方在新键名，就等于事件日志永不回收、也永不续期。
+	// 而是"一轮的全部键同槽"—— 写方在旧键名、删方在新键名，就等于事件日志永不回收、也永不续期。
 
 	public String streamKey(String runId) {
 		return RunStore.runScopedKey(STREAM_PREFIX, runId);
@@ -613,11 +590,6 @@ public class RedisFrameStore implements FrameStore {
 
 	public String seqKey(String runId) {
 		return RunStore.runScopedKey(RunStore.SEQ_PREFIX, runId);
-	}
-
-	/** 兼容期 LIST 键（只读）。 */
-	public String legacyListKey(String runId) {
-		return RunStore.runScopedKey(RunStore.EVENTS_PREFIX, runId);
 	}
 
 	/** 裁剪低水位键（{@code ai:xtrim:{run:<runId>}}；不存在 = 从未裁剪过）。 */
@@ -646,7 +618,7 @@ public class RedisFrameStore implements FrameStore {
 	 * <p>
 	 * 脚本只在"键刚重建（{@code INCR} 返回 1）"、"号落后于本进程降级号"或"上一次取号是降级结果
 	 * （{@code forceRepair}）"时才读归档末号（{@code XREVRANGE} 取末尾 {@value #TAIL_PROBE} 条的最大
-	 * {@code seq}，再并上兼容期 LIST 末帧），常规路径就只是一次 {@code INCR} + {@code EXPIRE} ——
+	 * {@code seq}），常规路径就只是一次 {@code INCR} + {@code EXPIRE} ——
 	 * 比"INCR、EXPIRE 两次往返"还少一次。
 	 *
 	 * <h2>锚点读不出时的三条退让（评审 I4）</h2>
@@ -709,7 +681,7 @@ public class RedisFrameStore implements FrameStore {
 		long fallbackLast = Math.max(0L, state.fallbackSeq.get());
 		long ttlSeconds = Math.max(1L, ttl().toSeconds());
 		List<?> result = this.redis.execute(SEQ_NEXT_SCRIPT,
-				List.of(seqKey(runId), streamKey(runId), legacyListKey(runId)),
+				List.of(seqKey(runId), streamKey(runId)),
 				String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE),
 				state.repairDegraded.get() ? "1" : "0");
 		if (result == null || result.isEmpty()) {
@@ -907,8 +879,7 @@ public class RedisFrameStore implements FrameStore {
 	private AppendAllocation allocateAndAppend(String runId, RunState state, String token, SeqSplit split,
 			long ttlSeconds, int window, boolean forceRepair) {
 		List<?> result = this.redis.execute(APPEND_SCRIPT,
-				List.of(seqKey(runId), streamKey(runId), legacyListKey(runId), ackKey(runId, token),
-						trimKey(runId)),
+				List.of(seqKey(runId), streamKey(runId), ackKey(runId, token), trimKey(runId)),
 				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, state.fallbackSeq.get())),
 				String.valueOf(TAIL_PROBE), String.valueOf(window), forceRepair ? "1" : "0",
 				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText());
@@ -1208,7 +1179,7 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	/**
-	 * 按序号回读（兼容期双读）。
+	 * 按序号回读（Stream 单源）。
 	 *
 	 * <p>
 	 * <b>Stream 侧按 entry ID 读差量</b>：落档用的是显式 ID {@code <seq>-0}，所以
@@ -1235,35 +1206,20 @@ public class RedisFrameStore implements FrameStore {
 
 	@Override
 	public FrameStore.ReadResult readFromWithStatus(String runId, long afterSeq, int limit) {
-		List<Map<String, Object>> legacy = legacyFramesAbove(runId, afterSeq);
 		FrameStore.ReadResult stream = streamFramesAbove(runId, afterSeq);
-		boolean degraded = stream.degraded();
-		if (degraded) {
+		if (stream.degraded()) {
 			// 结果可能仍非空（例如末号探测失败但 XRANGE 成功）——但它是"降级读"，不是完整差量。
 			// 计数已在 streamTailSeq / streamFramesAbove 落；这里把信号继续传给调用方（API 层可拒绝）。
 			log.debug("事件日志差量读降级 runId={} afterSeq={}（读失败已计数，结果不保证完整）", runId, afterSeq);
 		}
-		List<Map<String, Object>> result = mergeBySeq(legacy, stream.frames(), afterSeq);
+		List<Map<String, Object>> result = stream.frames();
 		if (limit > 0 && result.size() > limit) {
 			result = new ArrayList<>(result.subList(0, limit));
 		}
 		// truncated = "本次回放确实跳过了不可回放的区间"（来自真实裁剪低水位，不看号是否连续）。
 		// 缺口区间 [trimmedFromSeq, trimmedToSeq] 一并带出：reattach 用 archive-from/archive-to 暴露。
-		return new FrameStore.ReadResult(result, degraded, stream.truncated(), stream.trimmedFromSeq(),
+		return new FrameStore.ReadResult(result, stream.degraded(), stream.truncated(), stream.trimmedFromSeq(),
 				stream.trimmedToSeq());
-	}
-
-	/**
-	 * 兼容期 LIST 读口：<b>键空即跳过</b>（迁移完成后恒为空，这里是 O(1) 空读）；
-	 * 有内容就整窗读 —— 不能只按"末帧号 ≤ afterSeq"短路：LIST 里可能夹着升级期写入的
-	 * 无 {@code seq} 老帧，而这类帧的规则是"无法判定 ⇒ 一律保留"（宁可不发，不可丢帧），
-	 * 按号短路会把它们静默丢掉（用例 {@code legacyFramesWithoutSeqAreKeptAtTheHead} 即此形态）。
-	 */
-	private List<Map<String, Object>> legacyFramesAbove(String runId, long afterSeq) {
-		if (legacyTailRaw(runId) == null) {
-			return List.of();
-		}
-		return readLegacyList(runId);
 	}
 
 	/**
@@ -1550,100 +1506,7 @@ public class RedisFrameStore implements FrameStore {
 			// A4：末号探测失败不得折成 0（前端会把 0 当"全量回放"的锚点）；返回 empty 让端点回 503/degraded。
 			return OptionalLong.empty();
 		}
-		return OptionalLong.of(Math.max(legacyTailSeq(runId), tail.seq()));
-	}
-
-	// ── 兼容读：LIST + Stream 按 seq 拼接去重 ────────────────────────────────
-
-	/**
-	 * 拼接口径（设计稿 §4）：老 LIST 帧与 Stream 帧按 {@code seq} 排序去重，
-	 * <b>同号以 Stream 为准</b>（新写只进 Stream，LIST 同号必是迁移前的旧副本）；
-	 * <b>没有 {@code seq} 的老帧排在前面且一律保留</b>（升级期帧无法判孤儿，宁可不发不可丢帧）。
-	 */
-	private List<Map<String, Object>> mergeBySeq(List<Map<String, Object>> legacy,
-			List<Map<String, Object>> stream, long afterSeq) {
-		List<Map<String, Object>> noSeq = new ArrayList<>();
-		Map<Long, Map<String, Object>> bySeq = new TreeMap<>();
-		collect(legacy, noSeq, bySeq, false);
-		collect(stream, noSeq, bySeq, true);
-		List<Map<String, Object>> out = new ArrayList<>(noSeq.size() + bySeq.size());
-		out.addAll(noSeq);
-		for (Map.Entry<Long, Map<String, Object>> entry : bySeq.entrySet()) {
-			if (entry.getKey() > afterSeq) {
-				out.add(entry.getValue());
-			}
-		}
-		return out;
-	}
-
-	private static void collect(List<Map<String, Object>> frames, List<Map<String, Object>> noSeq,
-			Map<Long, Map<String, Object>> bySeq, boolean override) {
-		for (Map<String, Object> frame : frames) {
-			Object seq = frame.get("seq");
-			if (seq instanceof Number number) {
-				if (override) {
-					bySeq.put(number.longValue(), frame);
-				}
-				else {
-					bySeq.putIfAbsent(number.longValue(), frame);
-				}
-			}
-			else {
-				noSeq.add(frame);
-			}
-		}
-	}
-
-	/** 遗留 LIST（只读）：只取窗口内的尾巴，整表 O(N) 读取不划算（窗口 3000）。 */
-	private List<Map<String, Object>> readLegacyList(String runId) {
-		List<Map<String, Object>> out = new ArrayList<>();
-		try {
-			List<String> raw = this.redis.opsForList().range(legacyListKey(runId), -RunStore.EVENT_WINDOW, -1);
-			if (raw == null) {
-				return out;
-			}
-			for (String item : raw) {
-				try {
-					out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
-					}));
-				}
-				catch (Exception ignored) {
-					// 单帧坏损不阻断回放（与 RunStore#events 同口径）
-				}
-			}
-		}
-		catch (Exception ex) {
-			log.warn("兼容期 LIST 读取失败 runId={}（整段不可读，本批 LIST 帧缺失）：{}", runId, ex.toString());
-		}
-		return out;
-	}
-
-	/** LIST 末帧号（兼容期锚点与回放末号的一半）。 */
-	private long legacyTailSeq(String runId) {
-		String raw = legacyTailRaw(runId);
-		if (raw == null) {
-			return 0L;
-		}
-		try {
-			return seqOf(this.mapper.readValue(raw, new TypeReference<Map<String, Object>>() {
-			}));
-		}
-		catch (Exception ex) {
-			return 0L;
-		}
-	}
-
-	/** LIST 末帧原文（null = 键不存在/空表；只读一个元素，用于"键空即跳过"的短路）。 */
-	private String legacyTailRaw(String runId) {
-		try {
-			List<String> tail = this.redis.opsForList().range(legacyListKey(runId), -1, -1);
-			return tail == null || tail.isEmpty() ? null : tail.get(0);
-		}
-		catch (Exception ex) {
-			// 探测失败若按"键空"处理，整批老帧会被跳过 —— 必须留痕，不能伪装成空表。
-			log.warn("兼容期 LIST 读取失败 runId={}（末帧探测，按空表处理）：{}", runId, ex.toString());
-			return null;
-		}
+		return OptionalLong.of(tail.seq());
 	}
 
 	/**

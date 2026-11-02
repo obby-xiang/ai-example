@@ -31,7 +31,7 @@ import java.util.Set;
  * </ul>
  * <b>降级维度</b>（DOWN 只记 {@code degraded}，不改 ready）：
  * <ul>
- * <li>{@code redis}：AI 会话/帧/租约/限流设施。Redis 故障时 AI 面降级（capability 标 degraded），
+ * <li>{@code redis}：AI 会话/帧/租约设施。Redis 故障时 AI 面降级（capability 标 degraded），
  * 但业务面（配置目录/数据/任务/导出）仍可服务；把 Redis 算进 ready 会在一次 Redis 抖动时
  * 让统一代理把所有实例一起摘掉（见 {@link RedisReadinessProbe} 类注）。</li>
  * </ul>

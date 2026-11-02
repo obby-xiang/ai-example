@@ -34,15 +34,14 @@
       </el-button>
     </div>
 
-    <!-- 会话 / 工作区上下文条（本仓差异：会话恢复与契约联动状态可视化，蓝本无此行）。
-         2026-10-29 ToC 呈现减负批：**首屏只留人话** —— 会话 id / 数据版本是排障用的机读标识，
-         不进这一行，收进下方折叠的「诊断信息」（`panel-diagnostics`），需要时仍可取。 -->
+    <!-- 会话 / 工作区上下文条（本仓差异：租户/用户切换 + 工作区摘要，蓝本无此行）。
+         诊断信息（会话号 / 数据版本 / 探测原文）已从 C 端界面退场：真实阻断错误由上方统一
+         Alert 与业务页自身表达，机读标识不再占据首屏或折叠层。 -->
     <div class="px-3 py-1.5 text-xs text-[#909399] border-0 border-b border-solid border-[#ebeef5] bg-aiPanel" data-testid="panel-context-bar">
       <!-- S6 批1（长内容审计 #13）：`truncate`（nowrap + ellipsis）在 flex 子项上不生效 —— 子项默认
            `min-width:auto` 不会缩到内容宽以下，长 `contextSummary` 会整行溢出后被外层 overflow-hidden
-           硬裁（看不到省略号）。两处补 `min-w-0`，省略号才真落地。 -->
+           硬裁（看不到省略号）。补 `min-w-0`，省略号才真落地。 -->
       <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
-        <span data-testid="health-chip" :class="chipClass(healthTagType)" :title="healthTitle">{{ healthLabel }}</span>
         <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。每次实际切换都即时清屏并由后端
              新建会话（含切回旧身份）；Task 3 起同时清掉输入草稿与那份已不可达的旧会话
              浏览器镜像（后端历史保留，不删），新旧身份不混用。 -->
@@ -71,21 +70,6 @@
           </select>
         </span>
         <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
-        <el-button link size="small" @click="probe">{{ t('ai.panel.recheck') }}</el-button>
-      </div>
-      <details class="min-w-0" data-testid="panel-diagnostics">
-        <summary class="cursor-pointer select-none text-[11px] text-[#8b949e]">{{ t('ai.panel.diagnostics') }}</summary>
-        <div class="mt-0.5 break-words [overflow-wrap:anywhere] text-[11px] leading-[1.6] text-[#8b949e]">
-          <span data-testid="diagnostics-session">{{ t('ai.panel.session', { id: shortSessionId }) }}</span>
-          <span> · </span>
-          <span data-testid="diagnostics-data-version">{{ t('ai.panel.dataVersion', { version: workspace.dataVersion }) }}</span>
-        </div>
-        <div v-if="ai.directoryError" class="text-[11px] text-[#8b949e]" data-testid="directory-error">
-          {{ t('ai.notice.directoryFailed') }}
-        </div>
-      </details>
-      <div v-if="ai.contextSync" class="mt-0.5 min-w-0 truncate" data-testid="context-synced">
-        {{ t('ai.panel.contextSynced', { summary: contextSyncText }) }}
       </div>
     </div>
 
@@ -216,8 +200,8 @@
       </button>
     </div>
 
-    <!-- 工作区动作回执（AI→业务方向）。2026-10-29 ToC 呈现减负批：上方「工作区已同步」已经在报
-         同一件事时（`ai.contextSync` 有值），本回执位不再叠一条同义提示 —— 同一事实只留一个提示面。 -->
+    <!-- 工作区动作回执（AI→业务方向）：成功且结果已在工具卡/业务页可见时由 store 静默
+         （`SILENT_SUCCESS_UI_EVENTS`），本回执位只承接失败/被拒与视口外结果（如下载）。 -->
     <div v-if="uiEventReceiptVisible" :class="alertBox('gray')" data-testid="alert-ui-event">
       <span :class="alertIcon('gray')" aria-hidden="true">i</span>
       <div class="flex-1 min-w-0">
@@ -310,17 +294,10 @@
           {{ t('ai.panel.welcome1') }}<br />
           {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
         </div>
-        <!-- 批次6A / N12 / AR-01（2026-10-30 删表批口径）：空态如实写清存储载体 —— 本页签浏览器
-             镜像（刷新可恢复）+ 服务端 24h 滑动记忆窗口；对话正文不落库（`ai_chat_message` 已由
-             迁移 V10 删除、完整历史端点 /history/{sid}/messages 已移除）⇒ 没有长期归档。
-             旧文案「关闭页签即结束」与实现相反，已删除。
-             三句 locale（`ai.panel.storage.mirror` / `.run` / `.history`）均已按本口径改好，
-             `frontend/tests/ai-panel-parts-render.spec.ts` 的 N12 用例按新文案做正/反断言
-             （须含「没有长期归档」、不得出现「数据库」）—— 勿再按旧文案新增断言。 -->
+        <!-- 空态只留一句存储口径（C 端减负）：本页签镜像可刷新恢复 + 服务端 24h 滑动记忆窗口，
+             没有长期归档。三段技术说明（镜像 / 运行态 / 历史）压成一句。 -->
         <div class="mt-[6px] text-[11.8px] leading-[1.7] text-[#8b949e]" data-testid="storage-notice">
-          <div>{{ t('ai.panel.storage.mirror') }}</div>
-          <div>{{ t('ai.panel.storage.run') }}</div>
-          <div>{{ t('ai.panel.storage.history') }}</div>
+          {{ t('ai.panel.storage.note') }}
         </div>
         <!-- 批 E · E2（用户裁决 2026-10-22）：空态快捷 chips 点击**直接发送**（不再回填输入框）。
              写操作靠既有 HITL 确认卡兜底；文案与"每轮建议"共用一份词表（ai.suggestions.*，双语）。 -->
@@ -518,34 +495,6 @@
                         :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
                       >›</span>
                     </button>
-                    <!-- 批次3 补齐 / AR-10：本轮运行态（Redis 24h 滑动保留期）只可见化。
-                         剩余时间来自后端 PTTL 的权威推导（store.runExpiry），到期转「已失效」
-                         并给可达出口（刷新状态 / 新建会话）—— **不得**让卡静默消失。
-                         计时文本 `aria-live="off"`：读屏不逐秒播报，只在到期这一次状态变化时由
-                         状态词本身被读到（该行不在任何 polite/assertive 容器内）。 -->
-                    <div
-                      v-if="runExpiryView && part.requiresAction"
-                      class="mx-[11px] mt-[9px] flex flex-wrap items-center gap-x-[8px] gap-y-[4px] text-[11.6px] leading-[1.55] text-[#57606a]"
-                      data-testid="run-expiry-hint"
-                    >
-                      <span v-if="!runExpiryView.expired" data-testid="run-expiry-text" aria-live="off">{{ t(runExpiryView.key, runExpiryView.params) }}</span>
-                      <template v-else>
-                        <span data-testid="run-expiry-expired" class="flex-none text-[#b45309]" aria-live="off">{{ t('ai.panel.runExpiry.expired') }}</span>
-                        <span class="min-w-0 flex-1 break-words" data-testid="run-expiry-expired-hint">{{ t('ai.panel.runExpiry.expiredHint') }}</span>
-                        <button
-                          type="button"
-                          class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.6px] text-[#2563eb]"
-                          data-testid="run-expiry-reload"
-                          @click="refreshExpiredRunState"
-                        ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.runExpiry.reload') }}</span></button>
-                        <button
-                          type="button"
-                          class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.6px] text-[#2563eb]"
-                          data-testid="run-expiry-new-chat"
-                          @click="startNewChatAfterExpiry"
-                        ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.runExpiry.newChat') }}</span></button>
-                      </template>
-                    </div>
                     <!-- 只读体判据 = 已决只读态 ∪ GF「已提交、结局未到」（readOnlyLike）：
                          后者让提交后的这段时间**同一张表单原样锁定**，不闪普通工具卡 / 不闪 schema。 -->
                     <div v-if="readOnlyLike(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
@@ -776,7 +725,7 @@
                                   class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
                                   data-testid="gate-ack-box"
                                   :checked="gateAcked(part.toolCallId)"
-                                  :disabled="gateSubmitting(part.toolCallId) || runExpired"
+                                  :disabled="gateSubmitting(part.toolCallId)"
                                   @change="onGateAckChange(part.toolCallId, $event)"
                                 />
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
@@ -784,15 +733,12 @@
                             </div>
                             <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
                                  下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。
-                                 2026-10-29 ToC 呈现减负批：本轮运行态已失效（`runExpired`）⇒ 批准与拒绝
-                                 一并禁用 —— 决策送不到后端，允许点击只会得到一次失败；出口保留在上方
-                                 「已失效」行（刷新状态 / 新建会话）。 -->
+                                 HITL 保留期倒计时已退场：提交时若该轮已过期，由后端陈旧条目兜底落
+                                 「已失效」终态并提示，不在卡面预置计时或禁用入口。 -->
                             <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-testid="gate-actions">
-                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。
-                                   2026-10-29 复审 M-1：失效门卡的勾选框已禁用 ⇒ 提示行一并退场
-                                   （不留"照着做也做不了"的死指令）。 -->
+                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。 -->
                               <span
-                                v-if="gateNeedsAck(part) && !runExpired"
+                                v-if="gateNeedsAck(part)"
                                 class="text-[12.2px] text-[#b45309]"
                                 data-testid="gate-ack-hint"
                               >{{ t('ai.hitl.ackHint') }}</span>
@@ -806,13 +752,13 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="gateSubmitting(part.toolCallId) || runExpired"
+                                  :disabled="gateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
                                 >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part) || runExpired"
+                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part)"
                                   @click="decide(true, part.toolCallId)"
                                 >{{ t('ai.panel.approve') }}</button>
                               </span>
@@ -832,7 +778,6 @@
                             :key="liveForm.toolCallId"
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
-                            :locked="runExpired"
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
@@ -1232,11 +1177,6 @@
          IME 组合期（isComposing / keyCode 229 / compositionend 约 30ms）不误发；失焦复位组合态。 -->
     <div
       class="border-0 border-t border-solid border-[#eef0f3] bg-white px-[14px] py-[10px]"
-      @keydown="onComposerTipEscape"
-      @mouseover="onComposerTipMouseOver"
-      @mouseout="onComposerTipMouseOut"
-      @focusin="onComposerTipFocusIn"
-      @focusout="onComposerTipFocusOut"
     >
       <div class="rounded-[12px] border border-solid border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-[150ms] focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
         <textarea
@@ -1259,41 +1199,39 @@
                发送/停止钮与 ContextPill 的位置不动。 -->
           <span class="flex-1"></span>
           <span
-            v-if="inputText.length > 0"
+            v-if="composerCounterVisible"
             data-testid="composer-count"
             class="mr-[2px] flex-none text-[10.5px] leading-[1.6] tabular-nums"
             :class="composerCounterClass"
           >{{ composerCounterText }}</span>
-          <!-- 上下文占用（只在收到 done.context 或端点重建后出现；流式中不跳动） -->
+          <!-- 上下文占用圆环常驻；摘要只在收到 done.context 或端点重建后更新（流式中不跳动） -->
           <ContextPill />
           <button
             v-if="ai.loading || ai.suspended"
             type="button"
             data-testid="stop-btn"
-            data-composer-tip="stop"
             class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-[150ms] hover:brightness-[1.15] focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-60 disabled:hover:brightness-100"
             :aria-label="ai.stopping ? t('ai.round.stopping') : t('ai.round.stop')"
             :disabled="ai.stopping"
             @click="stop"
           >
             <span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span>
-            <span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('stop') ? 'hidden' : '']" aria-hidden="true">{{ ai.stopping ? t('ai.round.stopping') : t('ai.round.stop') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+            <span class="tip" :class="TIP_CLASS" aria-hidden="true">{{ ai.stopping ? t('ai.round.stopping') : t('ai.round.stop') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
           </button>
           <button
             v-else
             type="button"
             data-testid="send-btn"
-            data-composer-tip="send"
             class="group/tip relative ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-[150ms] hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e] disabled:text-white focus-visible:ring-2 focus-visible:ring-[#2563eb]/40 focus-visible:ring-offset-0"
             :aria-label="t('ai.panel.send')"
             :disabled="!canSubmit"
             @click="send"
-          >↑<span class="tip" :class="[TIP_CLASS, hiddenComposerTips.has('send') ? 'hidden' : '']" aria-hidden="true">{{ t('ai.panel.send') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
+          >↑<span class="tip" :class="TIP_CLASS" aria-hidden="true">{{ t('ai.panel.send') }}<span class="tip-arrow" :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span></button>
         </div>
       </div>
       <!-- M5（复审）：播报节流 —— 计数文本自身**不带** aria-live（否则每敲一个字都播报一次），
            改由这个屏读专用 live region 只在**档位切换**时说话：其文本在一个档位内是常量，
-           DOM 文本因此只在"常规→余量不足/到顶/超限"的跃迁上变化。 -->
+           DOM 文本因此只在"余量不足/到顶/超限"的跃迁上变化。 -->
       <span class="sr-only" data-testid="composer-count-live" aria-live="polite">{{ composerTierAnnouncement }}</span>
     </div>
 
@@ -1412,15 +1350,14 @@
  *   是渲染唯一真值，按真实时序自上而下排列 —— "正文 → 工具卡 → 正文"夹心轮次才显出真实顺序；
  *   挂起卡跟随其工具段位置（③b 把两者并成一卡前的过渡形态）；复制的显示判据同取 parts，
  *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
- * - 上下文条：会话 id / 工作区上下文 / 数据版本 / 可用性 tag / 契约同步 chip —— 蓝本无
- *   `/api/ai/health`、无契约事件，本仓需要可视化"刷新恢复"与"工作区已同步"的状态；
+ * - 上下文条：租户/用户切换 + 工作区摘要（C 端减负后不再显示会话 id / 数据版本 / 健康胶囊）；
  * - 工具卡四态（调用中/成功/失败/待执行·待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
  * - 409/503/断流三类降级提示（批G 起不再有「一键重挂」：在途轮刷新即静默续收）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
- *   （旧会话由 `DELETE /api/ai/session/{sessionId}` 完整销毁；旧 `/history` 路径同语义）—— 蓝本无"重开"入口；
+ *   （旧会话由 `DELETE /api/ai/session/{sessionId}` 完整销毁）—— 蓝本无"重开"入口；
  * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
  *   因 `vite.config.ts` 的 `host: '0.0.0.0'` 存在经内网 http 访问的**非安全上下文**面
  *   （`navigator.clipboard` 为 undefined），保留 `document.execCommand('copy')` 回退；
@@ -1541,7 +1478,6 @@ import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
-import { RUN_EXPIRY_COUNTDOWN_WINDOW_MS, runExpiryLabel, runExpiryRemainingMs, type RunExpiryAnchor, type RunExpiryLabel } from '@/utils/run-expiry'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type TextPart, type ToolPart } from '@/types/ai'
 import type { ToolPreflight } from '@/types/sse'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
@@ -1564,75 +1500,6 @@ const workspace = useWorkspaceStore()
 const logBusy = computed(() => !ai.historyLoaded
   || ai.loading
   || ai.messages.some((message) => message.streaming))
-
-/**
- * 批次3 补齐 / AR-10：本轮运行态寿命的**本地时钟**（只推进显示，不参与"何时到期"的定义）。
- *
- * <p>到期时刻由后端 PTTL 给出（store 的 `runExpiry`）。读秒窗口内按 1s 推进、更长按 30s
- * 粗粒度刷新（24h 量级不逐秒重渲染整个消息列表）；到 0 即停表并转「已失效」。
- */
-const runExpiryNowMs = ref(Date.now())
-let runExpiryTimer: ReturnType<typeof setTimeout> | null = null
-
-const RUN_EXPIRY_TICK_MS = 30_000
-const RUN_EXPIRY_COUNTDOWN_TICK_MS = 1_000
-
-function stopRunExpiryTimer(): void {
-  if (runExpiryTimer !== null) {
-    clearTimeout(runExpiryTimer)
-    runExpiryTimer = null
-  }
-}
-
-function scheduleRunExpiryTick(anchor: RunExpiryAnchor): void {
-  stopRunExpiryTimer()
-  const remaining = runExpiryRemainingMs(anchor, Date.now())
-  if (remaining <= 0) {
-    return
-  }
-  const delay = remaining <= RUN_EXPIRY_COUNTDOWN_WINDOW_MS
-    ? RUN_EXPIRY_COUNTDOWN_TICK_MS
-    : Math.min(RUN_EXPIRY_TICK_MS, remaining)
-  runExpiryTimer = setTimeout(() => {
-    runExpiryNowMs.value = Date.now()
-    scheduleRunExpiryTick(anchor)
-  }, delay)
-}
-
-watch(() => ai.runExpiry, (anchor) => {
-  runExpiryNowMs.value = Date.now()
-  if (anchor === null) {
-    stopRunExpiryTimer()
-    return
-  }
-  scheduleRunExpiryTick(anchor)
-}, { immediate: true })
-
-/**
- * 卡面寿命文案（AR-10 只可见化）：`null` = 没有后端权威锚点（旧后端 / 未知 / 已换轮）。
- *
- * <p>归属必须对得上当前轮（`runExpiry.runId === activeRunId`）—— 旧轮的寿命不得落到新轮的卡上。
- */
-const runExpiryView = computed<RunExpiryLabel | null>(() => {
-  const anchor = ai.runExpiry
-  if (anchor === null || ai.activeRunId === null || anchor.runId !== ai.activeRunId) {
-    return null
-  }
-  return runExpiryLabel(runExpiryRemainingMs(anchor, runExpiryNowMs.value))
-})
-
-/** 到期后的可达出口①：重新拉一次 `runs/current`（不改 TTL，只对账）。 */
-function refreshExpiredRunState(): void {
-  void ai.retryRestoreSnapshot()
-}
-
-/** 到期后的可达出口②：新建会话（旧运行态已按保留期消失，不再假装能续）。 */
-function startNewChatAfterExpiry(): void {
-  newChat()
-}
-
-/** 本轮运行态是否已失效（AR-10 到期态）：失效后批准/拒绝与表单提交都不可达，界面须先锁死入口。 */
-const runExpired = computed(() => runExpiryView.value?.expired === true)
 
 /**
  * 阶段条现场（批次3 CompactionStatus）：只有**进行中**的两态才显示 ——
@@ -2156,8 +2023,6 @@ function isMsgCopied(messageId: string): boolean {
   return copyState.value !== null && copyState.value.id === messageId && copyState.value.ok
 }
 
-const shortSessionId = computed(() => ai.sessionId.slice(0, 8))
-
 /**
  * 批 E · E2：空态快捷 chips（模板 id 与「每轮建议」同一份词表 `ai.suggestions.*`）。
  * 顺序 = 用户最常用的四件事：看定义 / 看工作区 / 估行数 / 启动作业。
@@ -2168,11 +2033,10 @@ const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'preche
  * M-15（2026-10-29）：**探针失败**不等于"服务不可用"。
  *
  * <p>`available` 来自健康探针：一次网络抖动 / 代理 502 / 体形态不符就会把它打成 false，而旧实现
- * 直接拿它当发送闸 —— 发送钮、Enter 与空态 chips 一起被禁用，用户必须手动点"重新探测"，
- * 程序化 `ai.send` 又不被拦（UI 与 store 语义分叉）。现在把两者分开：
+ * 直接拿它当发送闸 —— 发送钮、Enter 与空态 chips 一起被禁用。现在把两者分开：
  * <ul>
  * <li>探针**成功且明确说不可用**（`health !== null && available === false`）⇒ 仍按降级限制；</li>
- * <li>探针**失败 / 尚未探测**（`health === null`，`healthError` 承载失败文案）⇒ 只作提示，
+ * <li>探针**失败 / 尚未探测**（`health === null`）⇒ 不拦发送、也不在首屏挂状态提示；
  *     发送闸只看真实轮次与挂起；真实不可用由后端在 `/chat` 上用具体错误码说话
  *     （AI_KEY_MISSING / NO_MODEL_CONFIGURED 等）。</li>
  * </ul>
@@ -2252,44 +2116,10 @@ const followups = computed<FollowupSuggestion[]>(() => {
 })
 
 /**
- * I8（R1）/ N1（R2）：状态胶囊 / 占位文案 / 降级条**与发送闸同一判据**（`healthBlocksSend`），
- * 且三档各自独立、互不冒充：
- * <ul>
- *   <li>`healthBlocksSend`（探针成功且明确不可用）⇒「已降级」；</li>
- *   <li>`health === null && healthError`（探针**失败**，可用性未确认）⇒「探测失败」+ 灰族，
- *       `title` 给**固定友好文案**（R3：原文不上屏）—— 既不谎报"可用"绿，也不冒充"未检测"；</li>
- *   <li>`health === null` 且无错误（还没测过）⇒「未检测」。</li>
- * </ul>
+ * I8（R1）/ N1（R2）→ C 端减负：常驻健康胶囊与手动「重新检测」已退场。
+ * 降级限制只保留与发送闸同源的 `healthBlocksSend`（探针成功且明确不可用 ⇒ 顶部降级条）；
+ * 探针失败 / 尚未探测只由后台探测与真实请求错误说话，不再在首屏挂状态胶囊。
  */
-const healthProbeFailed = computed(() => ai.health === null && ai.healthError !== null)
-
-const healthLabel = computed(() => {
-  if (healthBlocksSend.value) {
-    return t('ai.panel.degraded')
-  }
-  if (healthProbeFailed.value) {
-    return t('ai.panel.probeFailed')
-  }
-  if (ai.health === null && ai.healthError === null) {
-    return t('ai.panel.untested')
-  }
-  return t('ai.panel.available')
-})
-
-/**
- * N-1（R3）：探针失败的 `title` 只用**固定友好文案** —— 后端/网关原文（可能含 `AI_API_KEY` /
- * provider 名 / KEK / 内部 host 等机制词）不上屏，只留在 `healthError`（诊断字段）与 DEV 日志里。
- * 既有的降级条文案口径同族：用户看到"怎么办"，机制词归诊断。
- */
-const healthTitle = computed(() => (healthProbeFailed.value ? t('ai.panel.probeFailedHint') : undefined))
-
-const healthTagType = computed<'success' | 'warning' | 'info'>(() => {
-  if (healthBlocksSend.value || healthProbeFailed.value) {
-    return 'warning'
-  }
-  return ai.health === null ? 'info' : 'success'
-})
-
 const degradeReason = computed(() => ai.unavailableReason ?? t('ai.panel.degradeUnknown'))
 
 /** 输入始终可编辑；发送闸只拦发送，与建议 chip 共用同一份可执行状态。 */
@@ -2298,20 +2128,22 @@ const canSubmit = computed(
 )
 
 /**
- * 批① 字数提示（composer 底栏、发送钮左侧）：**剩余**字数 + 到顶/超限态。
- * 四档（判据见下方 composerTier）：常态灰 `剩余 N 字` → 余量 ≤ 500 转琥珀 → 到顶（= 2000，仍可发送）
- * `已达 2000 字上限` → 超限（只可能来自程序化回填，如编辑把超长原文塞回输入框）标红并关发送闸。
- * 前端不留"点了必然 400"的按钮，但绝不替用户截断。
+ * 字数提示（composer 底栏、发送钮左侧）：只在**接近上限**时出现 —— 余量 ≤ 500 转琥珀，
+ * 到顶（= 2000，仍可发送）提示已达上限，超限（只可能来自程序化回填）标红并关发送闸。
+ * 常态不再常驻「剩余 N 字」：没有信息量的计数不占底栏。
  */
 const composerRemaining = computed(() => MESSAGE_MAX_CHARS - inputText.value.length)
 
 const composerOverLimit = computed(() => composerRemaining.value < 0)
 
+const composerCounterVisible = computed(() => composerRemaining.value <= 500)
+
 /**
  * 档位（M5 播报节流的判据）：一个档位内计数文本逐字变化，但**播报**只在档位跃迁时发生。
- * `normal` 余量充裕 / `near` 余量 ≤ 500 / `limit` 正好到顶（仍可发送）/ `over` 超限（发送闸关闭）。
+ * `none` 余量充裕（不显示/不播报）/ `near` 余量 ≤ 500 / `limit` 正好到顶（仍可发送）/
+ * `over` 超限（发送闸关闭）。
  */
-type ComposerTier = 'normal' | 'near' | 'limit' | 'over'
+type ComposerTier = 'none' | 'near' | 'limit' | 'over'
 
 const composerTier = computed<ComposerTier>(() => {
   if (composerOverLimit.value) {
@@ -2320,7 +2152,7 @@ const composerTier = computed<ComposerTier>(() => {
   if (composerRemaining.value === 0) {
     return 'limit'
   }
-  return composerRemaining.value <= 500 ? 'near' : 'normal'
+  return composerRemaining.value <= 500 ? 'near' : 'none'
 })
 
 /** 屏读播报文案：**每档一个常量**（不含剩余数字）⇒ DOM 文本只在跃迁时变，不会逐字打断用户。 */
@@ -2347,17 +2179,9 @@ const composerCounterText = computed(() => {
   return t('ai.panel.composer.remaining', { n: composerRemaining.value })
 })
 
-const composerCounterClass = computed(() => {
-  switch (composerTier.value) {
-    case 'over':
-      return 'text-[#c0392b]'
-    case 'near':
-    case 'limit':
-      return 'text-[#b45309]'
-    default:
-      return 'text-[#8b949e]'
-  }
-})
+const composerCounterClass = computed(() => (
+  composerOverLimit.value ? 'text-[#c0392b]' : 'text-[#b45309]'
+))
 
 /** compositionend 后约 30ms 内仍视为 IME 确认窗口（Safari 可能先送 compositionend 再送 Enter）。 */
 const COMPOSITION_END_GUARD_MS = 30
@@ -2377,105 +2201,6 @@ function onComposerCompositionEnd(): void {
 function onComposerBlur(): void {
   composerComposing = false
   composerCompositionEndedAt = null
-}
-
-/**
- * composer tip 共享状态机（demo composer-decisions.html:382-416）：
- * 容器统一处理 Escape / mouseover / focusin / mouseout / focusout，按钮只声明 `data-composer-tip`。
- * `hidden` 只做 display 闸，移除后仍由 TIP_CLASS 的 opacity + group-hover/focus-visible 承接显隐。
- */
-type ComposerTipKey = 'send' | 'stop'
-const hiddenComposerTips = ref<Set<ComposerTipKey>>(new Set())
-const hoveredComposerTip = ref<ComposerTipKey | null>(null)
-const focusedComposerTip = ref<ComposerTipKey | null>(null)
-
-function composerTipOwnerOf(target: EventTarget | null): { key: ComposerTipKey; owner: HTMLElement } | null {
-  if (!(target instanceof Element)) {
-    return null
-  }
-  const owner = target.closest<HTMLElement>('[data-composer-tip]')
-  const key = owner?.dataset.composerTip
-  if (!owner || (key !== 'send' && key !== 'stop')) {
-    return null
-  }
-  return { key, owner }
-}
-
-function hideComposerTip(key: ComposerTipKey): void {
-  if (hiddenComposerTips.value.has(key)) {
-    return
-  }
-  const next = new Set(hiddenComposerTips.value)
-  next.add(key)
-  hiddenComposerTips.value = next
-}
-
-function showComposerTip(key: ComposerTipKey): void {
-  if (!hiddenComposerTips.value.has(key)) {
-    return
-  }
-  const next = new Set(hiddenComposerTips.value)
-  next.delete(key)
-  hiddenComposerTips.value = next
-}
-
-function onComposerTipMouseOver(event: MouseEvent): void {
-  const hit = composerTipOwnerOf(event.target)
-  if (!hit) {
-    return
-  }
-  if (event.relatedTarget instanceof Node && hit.owner.contains(event.relatedTarget)) {
-    return
-  }
-  hoveredComposerTip.value = hit.key
-  showComposerTip(hit.key)
-}
-
-function onComposerTipMouseOut(event: MouseEvent): void {
-  const hit = composerTipOwnerOf(event.target)
-  if (!hit) {
-    return
-  }
-  if (event.relatedTarget instanceof Node && hit.owner.contains(event.relatedTarget)) {
-    return
-  }
-  if (hoveredComposerTip.value === hit.key) {
-    hoveredComposerTip.value = null
-  }
-  hideComposerTip(hit.key)
-}
-
-function onComposerTipFocusIn(event: FocusEvent): void {
-  const hit = composerTipOwnerOf(event.target)
-  if (!hit) {
-    return
-  }
-  focusedComposerTip.value = hit.key
-  showComposerTip(hit.key)
-}
-
-function onComposerTipFocusOut(event: FocusEvent): void {
-  const hit = composerTipOwnerOf(event.target)
-  if (!hit) {
-    return
-  }
-  if (focusedComposerTip.value === hit.key) {
-    focusedComposerTip.value = null
-  }
-  hideComposerTip(hit.key)
-}
-
-/** Escape 只清当前 hover/focus 的 tip，不 preventDefault / stopPropagation（mermaid 仍收得到）。 */
-function onComposerTipEscape(event: KeyboardEvent): void {
-  if (event.key !== 'Escape') {
-    return
-  }
-  if (hoveredComposerTip.value !== null) {
-    hideComposerTip(hoveredComposerTip.value)
-  }
-  if (focusedComposerTip.value !== null) {
-    hideComposerTip(focusedComposerTip.value)
-  }
 }
 
 /**
@@ -3797,13 +3522,12 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
       part.truncated,
       part.noticeCode,
       part.originalChars,
-      part.returnedChars,
-      part.truncatedReason
+      part.returnedChars
     )
     return deps
   }
   if (part.kind === 'text') {
-    deps.push(part.text, part.streaming, part.truncated, part.noticeCode, part.originalChars, part.returnedChars, part.truncatedReason)
+    deps.push(part.text, part.streaming, part.truncated, part.noticeCode, part.originalChars, part.returnedChars)
     // 75ms 防抖的落地信号不在文本里（停吐时文本已是最新值）：流式正文块必须并进 tick，
     // 否则 messageMemo / blockMemo 都会跳过重渲，末帧永远不现身。历史块不带本依赖。
     if (part.streaming) {
@@ -3827,13 +3551,11 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.decision,
     part.decidedAt,
     part.outcome,
-    part.timeoutSeconds,
     part.irreversible,
     part.truncated,
     part.noticeCode,
     part.originalChars,
     part.returnedChars,
-    part.truncatedReason,
     readOnlyLike(part),
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
@@ -3861,9 +3583,6 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
   }
   if (isSheetPreviewPart(part)) {
     deps.push(sheetPreviewFor(part))
-  }
-  if (part.requiresAction) {
-    deps.push(runExpiryView.value, runExpiryNowMs.value)
   }
   if (appliedSummaryFor(part) !== null) {
     deps.push(appliedSummaryFor(part))
@@ -4117,12 +3836,6 @@ function cardHeadClass(part: ToolPart): string {
 }
 
 /**
- * 可观测性（2026-10-29 返修 M-1）：GF 卡的**渲染次数**（按 toolCallId）—— 回归测试用，零 UI 影响。
- * `cardTitle()` 每张卡每次渲染恰好调用一次，是"这张卡这一帧有没有重渲"的最小探针。
- */
-const gfCardRenders = new Map<string, number>()
-
-/**
  * 卡头标题。
  * - form = 表单业务标题（FormRenderer 内头已抑制，标题上提）；
  * - CONFIRM 带 `preflight.target` ⇒ **业务化标题**（demo 场景一/二/三 1:1）：
@@ -4133,9 +3846,6 @@ const gfCardRenders = new Map<string, number>()
  * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
  */
 function cardTitle(part: ToolPart): string {
-  if (part.name === GENERATIVE_FORM_TOOL) {
-    gfCardRenders.set(part.toolCallId, (gfCardRenders.get(part.toolCallId) ?? 0) + 1)
-  }
   return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
     if (cardTypeOf(part) === 'form') {
       return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
@@ -4270,23 +3980,11 @@ interface TruncationCarrier {
   noticeCode?: ToolPart['noticeCode']
   originalChars?: number
   returnedChars?: number
-  truncatedReason?: string | null
-}
-
-function containsCjk(text: string): boolean {
-  return /[\u4e00-\u9fff]/.test(text)
-}
-
-function isEnglishLocale(): boolean {
-  return String(locale.value).toLowerCase().startsWith('en')
 }
 
 /**
- * A10 R-15：截断角标 hover 文案。
- *
- * 新帧按 `noticeCode` + `originalChars/returnedChars` 用当前 locale 拼装；旧帧（无 code）
- * 回退 `truncatedReason`。**en 界面遇到旧帧的中文原因时改用 locale 兜底**，避免中文上屏；
- * zh 仍原样保留旧文案。
+ * A10 R-15：截断角标 hover 文案 —— 只按当前协议的 `noticeCode` + 字符数用 locale 拼装；
+ * 没有可翻译原因时给固定兜底（旧 `truncatedReason` 回退已退场）。
  */
 function truncationTitle(part: TruncationCarrier): string {
   const original = part.originalChars
@@ -4300,10 +3998,6 @@ function truncationTitle(part: TruncationCarrier): string {
   }
   if (part.noticeCode === 'frame_limit_unreached') {
     return t('ai.panel.truncatedLimitUnreached')
-  }
-  const legacy = part.truncatedReason
-  if (legacy) {
-    return isEnglishLocale() && containsCjk(legacy) ? t('ai.panel.truncatedFallback') : legacy
   }
   return t('ai.panel.truncatedFallback')
 }
@@ -4411,26 +4105,6 @@ function toolLabel(name: string): string {
 }
 
 /**
- * R-165 S1：demo v7 胶囊四族（`.stchip` + `chip-idle/run/ok/bad` 工具类配方照搬）——
- * 底座与色族分离（门卡正文胶囊 / 健康胶囊复用）；承载件由 el-tag 换自绘 span。
- * 卡片卡头的状态标签走独立的 CARD_STATUS_BASE / CARD_STATUS_TONE（三类型统一、带描边；
- * 待确认的琥珀族在那边定义）。本族只剩健康胶囊在用，warning/info 收敛中性灰（R-163 C2 口径不变）。
- */
-const CHIP_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap'
-const CHIP_TONE: Record<'info' | 'warning' | 'success' | 'danger' | 'primary', string> = {
-  primary: 'text-[#2563eb] bg-[#eff4ff]',
-  success: 'text-[#1a7f45] bg-[#edf7f0]',
-  danger: 'text-[#c0392b] bg-[#fdf1ef]',
-  // demo 无橙族：warning/info 收敛中性灰族（R-163 C2 状态色裁决口径不变）
-  warning: 'text-[#57606a] bg-[#f6f7f9]',
-  info: 'text-[#57606a] bg-[#f6f7f9]'
-}
-
-function chipClass(type: keyof typeof CHIP_TONE): string {
-  return `${CHIP_BASE} ${CHIP_TONE[type]}`
-}
-
-/**
  * R-165 S2：顶部提示（demo v7 `.alert`）四族 —— 红=故障 / 蓝=并发·降级 / 绿=结果 / 灰=通知。
  * 结构与 v7 逐条对齐：flex 起排 + gap 9px + 圆角 10 + padding 9px 11px + 15×15 描边圆图标
  * + 标题 12.6px/650 + 正文 11.8px #57606a + ghost 动作钮。
@@ -4475,49 +4149,22 @@ const noticeCoveredByAlert = computed(() => {
     && (code === 'ai.notice.interruptedKeep' || code === 'ai.notice.interruptedKeepShort')
 })
 
-/** 通知槽是否渲染（原有两条排除 + 专属 Alert 覆盖）。 */
-const noticeBarVisible = computed(() => ai.notice !== null
-  && ai.noticeCode !== 'ai.notice.copiedNewTab'
-  && !noticeCoveredByAlert.value)
+/** 通知槽是否渲染（专属 Alert 覆盖时不重复叙事）。 */
+const noticeBarVisible = computed(() => ai.notice !== null && !noticeCoveredByAlert.value)
 
 /**
  * 工作区动作回执位是否渲染。
  *
- * <p><b>只有「成功回执」才可能与「工作区已同步」报同一件事</b>：`ui_event_result` 的失败
- * （`handled=false`）从不广播 `workspace_changed`，此时 `contextSync` 若是别的动作（用户手改 /
- * 上一手 AI 成功），压掉失败回执就是把**另一件事**吞了。故让位条件 = 成功 **且** 有同步反馈；
- * 失败回执始终显示（信息不丢）。
+ * <p>成功且结果已在工具卡/业务页可见的 ui_event 由 store 直接静默（不写回执位）；
+ * 失败/被拒与视口外结果（如下载）仍会落到这里 —— 有内容就显示。
  */
-const uiEventReceiptVisible = computed(() => {
-  const receipt = ai.lastUiEventResult
-  if (receipt === null) {
-    return false
-  }
-  return !(receipt.handled && ai.contextSync !== null)
-})
+const uiEventReceiptVisible = computed(() => ai.lastUiEventResult !== null)
 
 /**
  * 通知槽文本（i18n L-69）：store 里 `notice` 是**设定时**的语言快照，`noticeCode/noticeArgs` 才是
- * 结构化形态 —— 渲染走后者，切语言即重译；没有 code 的（测试注入 / 后端 message 原文）回落到 `notice`。
+ * 结构化形态 —— 渲染走后者，切语言即重译；没有 code 的（后端 message 原文）回落到 `notice`。
  */
 const noticeText = computed(() => ai.noticeText)
-
-/**
- * 「工作区已同步」chip 的动作摘要（i18n L-69）：记录带 `display`（结构化 code + args）时按当前语言重译，
- * 否则回落**本地化兜底词条**（`ai.workspace.actionFallback`）。
- *
- * <p>2026-10-30 结构化批：**不再**直接渲染 `record.summary` —— 那是送模型的中文串（C5），
- * 旧记录/无 display 的载荷在 en 界面会冒出中文（"旧 summary 直接当 UI 文案"）。
- */
-const contextSyncText = computed(() => {
-  const record = ai.contextSync
-  if (!record) {
-    return ''
-  }
-  return record.display
-    ? t(record.display.code, record.display.args ?? {})
-    : t('ai.workspace.actionFallback')
-})
 
 function alertBox(tone: keyof typeof ALERT_TONE): string {
   return `${ALERT_BOX_BASE} ${ALERT_TONE[tone].box}`
@@ -4570,10 +4217,6 @@ const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg
  */
 const SKELETON_BAR_BASE = 'bg-[linear-gradient(90deg,#f6f7f9_0,#eef0f3_40%,#f6f7f9_80%)] bg-[length:220%_100%] animate-pulse motion-reduce:animate-none rounded-[6px] h-[11px] mb-[9px]'
 const SKELETON_BARS = ['w-[72%]', 'w-[92%]', 'w-[58%]', 'w-[85%]'].map((w) => `${SKELETON_BAR_BASE} ${w}`)
-
-function probe(): void {
-  void ai.probeHealth()
-}
 
 /**
  * R-161：统一程序化钉底入口 —— 设 scrollTop=scrollHeight + 记落点 pinGuardTop + 置
@@ -5314,7 +4957,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  stopRunExpiryTimer()
   if (copyTimer !== null) {
     clearTimeout(copyTimer)
     copyTimer = null
@@ -5387,9 +5029,6 @@ defineExpose({
     },
     get measurePasses() {
       return measurePasses.map((ids) => [...ids])
-    },
-    get gfCardRenders() {
-      return Object.fromEntries(gfCardRenders)
     }
   }
 })

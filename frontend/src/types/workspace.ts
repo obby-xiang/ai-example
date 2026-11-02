@@ -8,7 +8,7 @@
 
 import type { AiChatContext } from './ai'
 import type { ImportMode, QueryCondition, TaskStatus, TaskStep, TaskType } from './task'
-import type { WorkspacePageId, UiEvent, WorkspaceTopic } from './tools'
+import type { WorkspacePageId, UiEvent } from './tools'
 
 /** 工作区内可注册的页面能力名（AI 经页面向导执行动作时按名取 handler）。 */
 export type PageHandlerName =
@@ -137,20 +137,12 @@ export interface WorkspaceContract {
 /**
  * ui_event 分发结果（AI 侧据此决定回灌文案）。
  *
- * <p>面板侧口径（批次5A）：`handled === true` 才算「工作区已同步」（广播 `workspace_changed`）；
- * `handled === false` 只经 `ui_event_result` 进面板回执位，并作为「被拒」留在工作区时间线里。
+ * <p>面板侧口径（C 端减负）：`handled === true` 且结果已在工具卡/业务页可见时不写回执位；
+ * `handled === false`（以及下载这类视口外结果）经 `ui_event_result` 进面板回执位，
+ * 失败同时作为「被拒」留在工作区时间线里。
  */
 export interface UiEventResult {
   handled: boolean
   /** 说明文本：'已打开导出向导' / '当前页面不支持该动作' 等 */
   message: string
-}
-
-/** 工作区总线订阅者（AI 面板订阅 workspace_changed 用）。 */
-export type WorkspaceSubscriber = (payload: unknown) => void
-
-/** 总线订阅句柄。 */
-export interface WorkspaceSubscription {
-  topic: WorkspaceTopic
-  unsubscribe: () => void
 }

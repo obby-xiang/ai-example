@@ -426,7 +426,7 @@ function consumeFrame(
   if (isSuspendRequestFrame(frame)) {
     // B1：卡面请求帧已送达 ⇒ 服务端随后主动收流（挂起即断）。标记只在本连接内有效。
     state.awaitsInput = true
-  } else if (frame.type === 'delta' || frame.type === 'reasoning' || frame.type === 'message_start'
+  } else if (frame.type === 'delta' || frame.type === 'message_start'
     || frame.type === 'retry' || frame.type === 'tool_start' || frame.type === 'tool_result'
     || frame.type === 'frontend_tool_result') {
     state.awaitsInput = false

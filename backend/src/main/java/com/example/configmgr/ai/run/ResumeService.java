@@ -462,7 +462,8 @@ public class ResumeService {
 	 *     不再出现"定时线程上 {@code store.get} 恒为 {@code null}"的假死链；</li>
 	 * <li><b>请求面</b>（HTTP 列表，线程有身份）：仍走 {@link RunStore#allRunIds()}（只返回<b>当前身份</b>
 	 *     的轮次），绝不把别人的轮次列进来；</li>
-	 * <li>两者都不丢：pre-deploy 的裸成员（无归属）只在<b>无身份</b>线程上按旧键形发现（过渡期口径）。</li>
+	 * <li>无归属裸成员不是当前写入形态：{@link RunStore#allRunIds()} 不再返回它们，
+	 *     {@link RunStore#pruneRunIndex()} 会顺手剔除。</li>
 	 * </ul>
 	 */
 	public List<Map<String, Object>> listRuns() {
@@ -480,7 +481,7 @@ public class ResumeService {
 				}
 			}
 		}
-		// 当前身份（请求面）或过渡期的 legacy 裸成员：键由线程身份决定，交给 store 的既有过滤
+		// 当前身份（请求面）：键由线程身份决定，交给 store 的既有过滤
 		TenantUser current = RequestContextUtils.currentOrNull();
 		for (String runId : this.store.allRunIds()) {
 			String key = (current == null ? "" : current.tenantId() + "/" + current.userId()) + "/" + runId;
@@ -563,10 +564,6 @@ public class ResumeService {
 			.toList();
 		item.put("cancelled", cancelled);
 		item.put("zombieRunning", zombie);
-		// T3-7（A14）：可续跑性组合改用统一终态判定（含 REJECTED 归一），不再散点比对三个字面量
-		item.put("resumeable", !cancelled && unresolvedExternal.isEmpty()
-				&& !RunSnapshot.isTerminal(snapshot.getStatus())
-				&& (zombie || !RunSnapshot.RUNNING.equals(snapshot.getStatus())));
 		item.put("unresolvedExternal", unresolvedExternal);
 		return item;
 	}
@@ -658,7 +655,7 @@ public class ResumeService {
 		keys.put("state", this.store.runKey(runId));
 		keys.put("pending", this.store.pendingKey(runId));
 		keys.put("ledger", this.store.ledgerKey(runId));
-		keys.put("events", this.store.eventsKey(runId));
+		keys.put("xevents", this.store.xeventsKey(runId));
 		keys.put("claim", this.store.claimKey(runId));
 		// B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上
 		keys.put("lease", this.store.runLeaseKey(runId));

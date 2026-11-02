@@ -16,7 +16,7 @@ package com.example.configmgr.ai.tenant;
  * <ul>
  * <li><b>隔离</b>：两个租户各自生成同形 runId 是合法且必然的（runId 不是跨租户唯一性证明）。
  * tag 进键之后，"同 id 不同身份"落到两个键上，读写删不再依赖"每次都记得查归属"；</li>
- * <li><b>同槽</b>：一轮的 13 个键共享同一 tag ⇒ {@code deleteRun} 的多键 {@code DEL} 是一条原子命令；
+ * <li><b>同槽</b>：一轮的 12 个键共享同一 tag ⇒ {@code deleteRun} 的多键 {@code DEL} 是一条原子命令；
  * {@code FENCED_SET}（快照+fence）、{@code IDEM_PUSH}（台账+索引）、{@code ACQUIRE}（租约+取号计数器
  * +fence）三条多键 Lua 不会 {@code CROSSSLOT}。取号计数器必须与租约键同槽（号与占用同序）。</li>
  * </ul>

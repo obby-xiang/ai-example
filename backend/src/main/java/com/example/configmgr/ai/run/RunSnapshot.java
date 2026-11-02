@@ -56,9 +56,9 @@ public class RunSnapshot {
 	 * 统一终态判定（T3-7 / A14）：DONE / FAILED / CANCELLED（+ {@code REJECTED} 归一）为终态。
 	 *
 	 * <h2>为什么必须唯一函数</h2>
-	 * 此前 {@code DONE|FAILED|CANCELLED} 这一组字面量散落在三处
+	 * 此前 {@code DONE|FAILED|CANCELLED} 这一组字面量散落在多处
 	 * （{@code AiController#isTerminal}、{@code RunStore#save} 的 session→current 索引分支、
-	 * {@code ResumeService} 的早退比较与 {@code listRuns} 的 resumeable 组合）——
+	 * {@code ResumeService} 的早退比较）——
 	 * 任何一处漏改都会造成"一边认为终态、一边还在续跑"的分叉（例如终态轮被重新发现并驱动）。
 	 *
 	 * @param status 轮次状态串（可为 null / 未知串 → false）

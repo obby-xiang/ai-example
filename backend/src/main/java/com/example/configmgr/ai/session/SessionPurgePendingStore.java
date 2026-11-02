@@ -8,7 +8,6 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -16,7 +15,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -33,10 +31,10 @@ import java.util.Set;
  * <ul>
  * <li>{@code ai:purge:pending:<tenantId>:<userId>:<sessionId>} STRING（JSON，无 TTL）—— 每个身份的
  * 每个会话一条 pending；跨租户/跨用户即使 sessionId 相同也不共用台账；</li>
- * <li>{@code ai:purge:retry:queue} LIST（成员 = <b>pending 键</b>）—— 有界扫描的发现面。
- * 成员带完整复合身份（键形里就是 {@code <t>:<u>:<sid>}），所以恢复时<b>不需要</b>先知道是谁，
- * 更不需要遍历租户列表；</li>
- * <li>启动/{@code SCAN} 兜底把漏登记的 pending 补进队列（同样按记录读出的身份回填）。</li>
+ * <li>{@code ai:purge:retry:due} ZSET（member = <b>完整 pending 键</b>，score = 下次到期毫秒）——
+ * 唯一的待重试发现面。成员带完整复合身份（键形里就是 {@code <t>:<u>:<sid>}），恢复时
+ * <b>不需要</b>先知道是谁，也不需要遍历租户列表；{@link #listDue} 用有界 {@code ZRANGEBYSCORE}
+ * 取到点项，不再有 LIST 队列 / SCAN 兜底。</li>
  * </ul>
  *
  * <h2>身份来源：按<b>记录</b>恢复，绝不从键名反解</h2>
@@ -44,7 +42,7 @@ import java.util.Set;
  * <ul>
  * <li>写：身份取当前 {@link RequestContextUtils} 上下文（HTTP 边界/编排入口已建立），落进 JSON
  * 的 {@code tenantId/userId} 字段；</li>
- * <li>读：{@code listDue}/{@code recoverOrphans} 先按<b>成员键</b>取值，身份从 JSON <b>记录</b>读出
+ * <li>读：{@code listDue} 先按<b>成员键</b>取值，身份从 JSON <b>记录</b>读出
  * （{@link Pending#hasIdentity()}），调用方据此 {@code useContext} 恢复上下文再继续 ——
  * 这就是"按复合身份恢复，不扫描租户列表"。</li>
  * </ul>
@@ -54,11 +52,24 @@ import java.util.Set;
  * <h2>owner / purgeId</h2>
  * pending 内保存发起时的 {@code purgeId}。所有更新（失败重排、完成删除）都带 purgeId 条件：
  * 旧的自动重试不能改写/删除新一轮销毁的 pending，也不能据此 disarm 新守卫。
- * <b>登记是 upsert-if-absent</b>：已有台账时复用其 purgeId/owner/attempts（重复 DELETE 不重开
- * 新一轮），这样"本次中止回滚"只撤销自己新建的台账，不会把上一轮的 durable 义务一起抹掉。
+ * <b>登记是 upsert-if-absent</b>：已有台账时复用其 purgeId/owner（不重开新一轮），
+ * 但手动 DELETE 会把 nextAt/verifyAt 重置为"现在可推进"，耗尽的 attempts 归零
+ * （见 {@link #register}）。
+ * 这样"本次中止回滚"只撤销自己新建的台账，不会把上一轮的 durable 义务一起抹掉。
  *
- * <h2>有界</h2>
- * 队列扫描、SCAN 回填、候选数都由调用方传入上限；本类不做无界 key 遍历。
+ * <h2>有界与一致性</h2>
+ * <p>{@code listDue} 的候选数由调用方传入上限；本类不做无界 key 遍历。
+ *
+ * <p>pending 键与 due ZSET 不在同一 slot（ZSET 只有一个键，无法与所有 pending 键同槽），
+ * 因此写路径是<b>单键脚本/单键命令</b>，不做跨键 Lua：
+ * <ul>
+ * <li><b>登记</b>先 {@code ZADD} 候选到期项，再 SET pending，最后按 effective.nextAt 对齐；
+ * SET 失败只留下幽灵成员（listDue 清理），不会留下"有台账、无到期项"的永久 410；</li>
+ * <li>改期/失败/完成先维护 pending 事实（purgeId 条件 CAS），再 {@code ZADD}/{@code ZREM}；
+ * 台账换主时只按新台账的 nextAt 对齐到期分，不改新台账；</li>
+ * <li>{@code listDue} 对单个坏 JSON 成员只隔离该到期项并 WARN，pending 键保留；
+ * pending 键读取失败仍整轮 fail-closed。</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -67,14 +78,17 @@ public class SessionPurgePendingStore {
 	/** durable pending 键前缀（守卫也读它）。 */
 	public static final String PENDING_PREFIX = SessionPurgeGuard.PENDING_PREFIX;
 
-	/** 待重试队列（LIST，成员是 pending 键：键本身带完整复合身份，不是裸 sessionId）。 */
-	public static final String QUEUE_KEY = "ai:purge:retry:queue";
+	/** 待重试到期 ZSET（member = pending 键：键本身带完整复合身份，不是裸 sessionId）。 */
+	public static final String DUE_KEY = "ai:purge:retry:due";
 
 	/** 失败重试基础退避。 */
 	static final long BASE_BACKOFF_MS = 10_000L;
 
 	/** 失败重试最大退避（有界）。 */
 	static final long MAX_BACKOFF_MS = 300_000L;
+
+	/** 单条台账的自动尝试上限（与 {@code SessionPurgeRetryRunner#MAX_ATTEMPTS} 同源）。 */
+	public static final int MAX_AUTO_ATTEMPTS = 10;
 
 	/** purgeId 条件更新（值包含 token 才 SET 新 JSON）。 */
 	private static final RedisScript<Long> CAS_SET = new DefaultRedisScript<>("""
@@ -196,7 +210,15 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
-	 * 登记 pending（写入后失败重试队列）；<b>已存在则复用</b>（不覆盖 purgeId/owner/attempts）。
+	 * 登记 pending 并写入到期 ZSET；<b>复用既有 purgeId/owner</b>。
+	 *
+	 * <p><b>顺序（C2）</b>：先 ZADD 候选到期项，再 SET pending 事实，最后按 effective.nextAt 对齐。
+	 * SET 失败时只留下一个 ZSET 幽灵成员（listDue 读不到台账会摘掉），<b>不会</b>留下
+	 * "pending 存在但没有任何到期项"的永久 410；ZADD 失败则直接中止，快照/数据都没动。
+	 *
+	 * <p><b>手动 DELETE = 手动重开推进</b>：既有台账的 nextAt 重置为 <b>now</b>、verifyAt 清空；
+	 * 已耗尽自动尝试的 attempts 重置为 0，未耗尽的保留原值。
+	 * purgeId/owner/createdAt 不变。否则耗尽项被排到 24h 未来后，用户手动 DELETE 也永远推进不了。
 	 *
 	 * @return 最终生效的 pending 与"是否本次新建"
 	 */
@@ -213,17 +235,36 @@ public class SessionPurgePendingStore {
 				userId);
 		String key = candidate.key();
 		try {
+			// 1) 先放候选到期项：SET 失败时它是可被 listDue 清理的幽灵成员，而不是无到期项的台账。
+			schedule(key, nowMs, "登记候选");
+			// 2) 再落 pending 事实（不存在才写）。
 			String raw = this.redis.execute(REGISTER_IF_ABSENT, List.of(key), json(candidate));
+			// REGISTER_IF_ABSENT 在"新建"时返回 candidate JSON、已存在时返回既有 JSON，raw 不为 null；
+			// created 必须按原语义由 purgeId 判定（同一 purgeId = 本次调用拥有该台账，可回滚）。
 			Pending effective = raw == null ? candidate : parse(sessionId, raw);
-			// 队列可能因崩溃窗口缺这一条（pending 已落、push 未执行）：补登记，不改台账内容。
-			// 成员 = pending 键（含完整复合身份），恢复时无需知道"是谁"。
-			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
-			this.redis.opsForList().rightPush(QUEUE_KEY, key);
-			return new Registration(effective, purgeId.equals(effective.purgeId()));
+			boolean created = purgeId.equals(effective.purgeId());
+			if (!created) {
+				// 3a) 手动 DELETE 覆盖自动退避/耗尽/复核：nextAt 重置为 now，立即可推进。
+				//     未耗尽的 attempts 原样保留（重复 DELETE 不白送自动重试预算）；
+				//     已耗尽的台账必须重置为 0，否则 runner 会再次把它排到长未来。
+				//     身份取当前键的身份（台账就落在这把键上），保证后续 complete 定位到同一键。
+				int manualAttempts = effective.attempts() >= MAX_AUTO_ATTEMPTS ? 0 : effective.attempts();
+				Pending manual = new Pending(sessionId, effective.purgeId(), effective.requestedBy(),
+						manualAttempts, nowMs, effective.createdAtMs(), effective.lastError(), null, tenantId,
+						userId);
+				Long reset = this.redis.execute(CAS_SET, List.of(key), token(effective.purgeId()), json(manual));
+				if (reset == null || reset <= 0L) {
+					throw new AiStateUnavailableException(
+							"无法重置会话销毁 pending（owner 已变更）sessionId=" + sessionId);
+				}
+				effective = manual;
+			}
+			// 3b) 对齐到期分：新建/手动重置都是 now，立即进入本轮候选。
+			schedule(key, effective.nextAtMs(), "登记对齐");
+			return new Registration(effective, created);
 		}
 		catch (RuntimeException ex) {
-			// pending 已落就必须保留：它是守卫的一部分，队列异常时启动/空队列 SCAN 会继续发现。
-			// 销毁流程按失败中止；显式 DELETE 也可重建队列，绝不删除保护事实后放行。
+			// 台账已落就必须保留：它是守卫的一部分；调用方按失败中止，绝不删除保护事实后放行。
 			throw new AiStateUnavailableException("无法登记会话销毁 pending sessionId=" + sessionId, ex);
 		}
 	}
@@ -233,7 +274,7 @@ public class SessionPurgePendingStore {
 		return readAt(pendingKey(sessionId), sessionId);
 	}
 
-	/** 按<b>键</b>读台账（listDue/SCAN 恢复用：身份从记录读，不从键名猜）。 */
+	/** 按<b>键</b>读台账（listDue 恢复用：身份从记录读，不从键名猜）。 */
 	private Pending readAt(String key, String sessionIdForLog) {
 		String raw;
 		try {
@@ -270,96 +311,65 @@ public class SessionPurgePendingStore {
 		}
 	}
 
-	/** 到期待重试（候选数有界；队列重复成员去重）。成员是 pending 键，身份从记录读。 */
+	/**
+	 * 到期待重试（候选数有界）：{@code ZRANGEBYSCORE -inf now LIMIT 0 limit}。
+	 *
+	 * <p>成员是 pending 键，身份从记录读。读不到的成员（台账已删除）直接摘掉；
+	 * 记录里的 {@code nextAtMs} 比分数更晚（改期 CAS 成功但 ZADD 失败）时按记录纠正分数，
+	 * 不提前执行 —— 退避语义以台账事实为准。
+	 *
+	 * <p><b>单成员坏 JSON 隔离</b>（I6）：一个成员反序列化失败只摘掉该到期成员并 WARN，
+	 * <b>不中断整轮</b>，也<b>不删 pending 键</b>（台账事实保留，守卫继续 fail-closed）。
+	 * pending 键读取失败（Redis 不可用）仍然整轮抛出 —— "读不出来"不能当成"没有台账"。
+	 */
 	public List<Pending> listDue(long nowMs, int limit) {
 		int bounded = Math.max(1, limit);
-		List<String> raw;
+		Set<String> members;
 		try {
-			raw = this.redis.opsForList().range(QUEUE_KEY, 0, bounded * 4L - 1);
+			members = this.redis.opsForZSet().rangeByScore(DUE_KEY, Double.NEGATIVE_INFINITY, nowMs, 0, bounded);
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("读取会话销毁重试队列失败", ex);
+			throw new AiStateUnavailableException("读取会话销毁重试到期分失败", ex);
 		}
-		if (raw == null || raw.isEmpty()) {
+		if (members == null || members.isEmpty()) {
 			return List.of();
 		}
-		Set<String> seen = new LinkedHashSet<>();
 		List<Pending> out = new ArrayList<>();
-		for (String member : raw) {
-			if (member == null || member.isBlank() || !seen.add(member)) {
+		for (String member : members) {
+			if (member == null || member.isBlank() || !member.startsWith(PENDING_PREFIX)) {
+				// 旧成员形态（裸 sessionId）或污染成员：无法定位带身份的台账，摘掉不猜。
+				removeDueMember(member);
 				continue;
 			}
-			if (!member.startsWith(PENDING_PREFIX)) {
-				// 旧队列形态（裸 sessionId）或污染成员：无法定位带身份的台账，摘掉不猜。
-				removeFromQueueMember(member);
+			Pending pending;
+			try {
+				pending = readAt(member, member);
+			}
+			catch (AiStateUnavailableException ex) {
+				// pending 键读失败 = 状态不可知：整轮 fail-closed，不删台账、不猜"没有"。
+				throw ex;
+			}
+			catch (RuntimeException ex) {
+				// 单成员 JSON 损坏：隔离该到期成员（不删 pending 键），其余到期项继续处理。
+				log.warn("会话销毁 pending JSON 损坏 member={}（隔离到期项、保留台账 fail-closed）：{}",
+						member, ex.getMessage());
+				removeDueMember(member);
 				continue;
 			}
-			Pending pending = readAt(member, member);
 			if (pending == null) {
-				removeFromQueueMember(member);
+				removeDueMember(member);
 				continue;
 			}
-			if (pending.nextAtMs() <= nowMs) {
-				out.add(pending);
-				if (out.size() >= bounded) {
-					break;
-				}
+			if (pending.nextAtMs() > nowMs) {
+				rescheduleQuietly(member, pending.nextAtMs());
+				continue;
+			}
+			out.add(pending);
+			if (out.size() >= bounded) {
+				break;
 			}
 		}
 		return out;
-	}
-
-	/** 队列长度（-1 = 读失败；调用方据此决定是否做 SCAN 兜底）。 */
-	public long queueSize() {
-		try {
-			Long size = this.redis.opsForList().size(QUEUE_KEY);
-			return size == null ? 0L : size;
-		}
-		catch (RuntimeException ex) {
-			log.warn("读取会话销毁重试队列长度失败：{}", ex.getMessage());
-			return -1L;
-		}
-	}
-
-	/**
-	 * 启动/队列为空时的 SCAN 兜底：按前缀发现 pending，把漏登记的会话补回队列。
-	 *
-	 * <p><b>按记录恢复</b>：扫到键后读台账 JSON，身份取自记录（{@code tenantId/userId}），
-	 * 并 {@code useContext} 恢复该身份后再回填队列 —— 不从键名反解身份、不遍历租户列表。
-	 * 队列成员是键本身，因此回填不会把台账"搬到"别的身份下。
-	 *
-	 * @param maxKeys SCAN 回填上限（有界）
-	 */
-	public int recoverOrphans(int maxKeys) {
-		int recovered = 0;
-		// 逐 master 扫描（standalone 走单连接）；任一节点失败上抛，调用方不得报 complete。
-		List<String> keys = RedisClusterScanSupport.scan(this.redis,
-				ScanOptions.scanOptions().match(PENDING_PREFIX + "*").count(256).build(), maxKeys);
-		for (String key : keys) {
-			if (key == null || !key.startsWith(PENDING_PREFIX) || key.length() <= PENDING_PREFIX.length()) {
-				continue;
-			}
-			Pending pending = readAt(key, key);
-			if (pending == null) {
-				continue;
-			}
-			// 即使这里只写队列、不读身份字段，也按记录恢复作用域（统一口径，将来加读字段不会 fail-closed）。
-			try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-				this.redis.opsForList().remove(QUEUE_KEY, 0, key);
-				this.redis.opsForList().rightPush(QUEUE_KEY, key);
-			}
-			recovered++;
-		}
-		if (recovered > 0) {
-			log.info("会话销毁 pending SCAN 兜底：扫描 {} 键，补回 {} 条待重试", keys.size(), recovered);
-		}
-		return recovered;
-	}
-
-	/** 记录身份的作用域（无身份返回 {@code null} = 不改变当前上下文）。 */
-	private static RequestContextUtils.SafeCloseable scopeOf(Pending pending) {
-		TenantUser identity = pending.identityOrNull();
-		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
 	}
 
 	/**
@@ -373,7 +383,7 @@ public class SessionPurgePendingStore {
 	 * <p><b>fix5：{@code attempts} 从 0 重开</b>。删除主体与"记忆复核"是两个阶段：主体可能已经耗光
 	 * 自动尝试（deferred / Redis 抖动）之后，才被一次手动 {@code DELETE} 做成；若沿用旧计数，
 	 * {@code SessionPurgeRetryRunner#runOnce} 的 {@code attempts >= MAX_ATTEMPTS} 短路排在复核分支
-	 * <b>之前</b> —— 复核一次都跑不到，崩溃残留只能等记忆键自身 TTL，pending/守卫/队列项永久驻留。
+	 * <b>之前</b> —— 复核一次都跑不到，崩溃残留只能等记忆键自身 TTL，pending/守卫/到期项永久驻留。
 	 * 重开后复核最多自动跑 {@code MAX_ATTEMPTS} 次（同一退避递增），耗尽后同样只 {@link #defer}
 	 * （<b>有界，不是无限重试</b>）。普通台账永远不带 {@code verifyAtMs}，其 10 次上限/退避/defer
 	 * 语义逐字不变。
@@ -395,8 +405,7 @@ public class SessionPurgePendingStore {
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
-			this.redis.opsForList().rightPush(QUEUE_KEY, key);
+			schedule(key, verifyAtMs, "排程记忆复核");
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -427,8 +436,7 @@ public class SessionPurgePendingStore {
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
-			this.redis.opsForList().rightPush(QUEUE_KEY, key);
+			schedule(key, nextAt, "记录失败退避");
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -437,18 +445,24 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
-	 * 把已耗尽自动尝试（{@code attempts >= MAX_ATTEMPTS}）的条目推到<b>有界未来</b>并移到队尾
-	 * （purgeId 条件，<b>不改 attempts</b>）。
+	 * 把台账推到给定未来时刻（purgeId 条件，<b>不改 attempts</b>）。
 	 *
-	 * <p>为什么必须重排而不是原地跳过：{@link #listDue} 只取队头有界窗口，"永远 due、永远不执行"
-	 * 的条目会永久占满候选预算、饿死其它会话；移到队尾 + nextAt 推后之后它仍在台账里
-	 * （durable，再次 {@code DELETE} 可继续推进），但不再 due、也不再挡在窗口前面。
+	 * <p>耗尽项由 {@code SessionPurgeRetryRunner} 给 24h + 确定性抖动；普通退避由
+	 * {@link #recordFailure} 维护。推到长未来后它仍在台账里（durable），但不再每 5 分钟回到
+	 * 到期队头；用户再次 {@code DELETE} 时 {@link #register} 会重置为 now/耗尽预算归零。
 	 *
 	 * @return true = 仍归该 purgeId 且已重排
 	 */
 	public boolean defer(String sessionId, String purgeId, long nextAtMs) {
 		Pending pending = current(sessionId);
-		if (pending == null || !purgeId.equals(pending.purgeId())) {
+		if (pending == null) {
+			// 台账已不存在：到期成员是幽灵，交给 listDue 清理；这里不按 sessionId 盲删，
+			// 避免并发 register 刚建的新台账被误删发现项。
+			return false;
+		}
+		if (!purgeId.equals(pending.purgeId())) {
+			// 已换主：按新台账的 nextAt 对齐到期分，避免旧分数继续占工作窗口；不改新台账。
+			rescheduleQuietly(pending.key(), pending.nextAtMs());
 			return false;
 		}
 		String key = pending.key();
@@ -458,10 +472,14 @@ public class SessionPurgePendingStore {
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
+				// CAS 输给并发更新：按最新台账的 nextAt 对齐到期分，避免旧分数继续占窗口。
+				Pending latest = current(sessionId);
+				if (latest != null) {
+					rescheduleQuietly(latest.key(), latest.nextAtMs());
+				}
 				return false;
 			}
-			this.redis.opsForList().remove(QUEUE_KEY, 0, key);
-			this.redis.opsForList().rightPush(QUEUE_KEY, key);
+			schedule(key, nextAtMs, "延后重试");
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -470,14 +488,18 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
-	 * 完成：仅当 pending 仍属于该 purgeId 时删除 pending 与一条队列项。
+	 * 完成：仅当 pending 仍属于该 purgeId 时删除 pending 与到期项。
+	 *
+	 * <p>到期项删除失败只 WARN：台账已经删除，残留成员会被下一次 {@link #listDue} 当作
+	 * "读不到记录"清掉，不能因此把一次已完成的销毁报成失败。
 	 *
 	 * @return true = 已删除（或已不存在）；false = pending 已换主，旧重试不得动它
 	 */
 	public boolean complete(String sessionId, String purgeId) {
 		Pending pending = current(sessionId);
 		if (pending == null) {
-			removeFromQueue(sessionId);
+			// 不在这里按 sessionId 删到期项：读与删之间可能有并发 register 刚建的新台账，
+			// 误删它的发现项会让新 pending 永久 410。幽灵成员由 listDue 读不到台账时清理。
 			return true;
 		}
 		if (!purgeId.equals(pending.purgeId())) {
@@ -489,8 +511,7 @@ public class SessionPurgePendingStore {
 			if (deleted == null || deleted <= 0L) {
 				return false;
 			}
-			// 只移除一条：同一 session 可能因重复登记/重排有多条队列成员，不能把新一轮的也删掉。
-			this.redis.opsForList().remove(QUEUE_KEY, 1, key);
+			removeDueMember(key);
 			return true;
 		}
 		catch (RuntimeException ex) {
@@ -498,17 +519,36 @@ public class SessionPurgePendingStore {
 		}
 	}
 
-	/** 移除一条队列项（stale pending 清理；成员 = 当前身份的 pending 键）。 */
-	public void removeFromQueue(String sessionId) {
-		removeFromQueueMember(pendingKey(sessionId));
-	}
-
-	private void removeFromQueueMember(String member) {
+	/** 维护到期分（写路径：失败即抛，由调用方按失败处理）。 */
+	private void schedule(String key, long nextAtMs, String action) {
 		try {
-			this.redis.opsForList().remove(QUEUE_KEY, 1, member);
+			this.redis.opsForZSet().add(DUE_KEY, key, nextAtMs);
 		}
 		catch (RuntimeException ex) {
-			log.warn("清理会话销毁重试队列失败 member={}（stale 项会被下次扫描过滤）：{}", member, ex.getMessage());
+			throw new AiStateUnavailableException(
+					"更新会话销毁重试到期分失败（" + action + "）key=" + key, ex);
+		}
+	}
+
+	/** 自愈式对齐：读路径发现分数过期时纠正，失败只 WARN（下一轮还会再试）。 */
+	private void rescheduleQuietly(String key, long nextAtMs) {
+		try {
+			this.redis.opsForZSet().add(DUE_KEY, key, nextAtMs);
+		}
+		catch (RuntimeException ex) {
+			log.debug("纠正会话销毁重试到期分失败 key={}：{}", key, ex.getMessage());
+		}
+	}
+
+	private void removeDueMember(String member) {
+		if (member == null || member.isBlank()) {
+			return;
+		}
+		try {
+			this.redis.opsForZSet().remove(DUE_KEY, member);
+		}
+		catch (RuntimeException ex) {
+			log.warn("清理会话销毁重试到期分失败 member={}（stale 项会被下次扫描过滤）：{}", member, ex.getMessage());
 		}
 	}
 

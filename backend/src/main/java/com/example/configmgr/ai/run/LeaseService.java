@@ -114,11 +114,8 @@ public class LeaseService {
 	/** 脚本分派标记（测试替身按它分派；见 {@code FakeLeaseRedis}）。 */
 	static final String ACQUIRE_MARK = "LEASE_ACQUIRE";
 
-	/** 无 tag 租约（资源锁）的抢租标记：取号在脚本外（全局计数器），与带 tag 的脚本区分。 */
+	/** 无 tag 资源锁的抢租标记：取号在脚本外（全局计数器），与带 fence 的三键脚本区分。 */
 	static final String ACQUIRE_UNTAGGED_MARK = "LEASE_ACQUIRE_UNTAGGED";
-
-	/** 无 fence 的带 tag 租约（两键）的抢租标记。 */
-	static final String ACQUIRE_NOFENCE_MARK = "LEASE_ACQUIRE_NOFENCE";
 
 	static final String RENEW_MARK = "LEASE_RENEW";
 
@@ -184,38 +181,14 @@ public class LeaseService {
 			""", String.class);
 
 	/**
-	 * 抢：<b>两键</b>（租约 + 计数器，<b>不带 fence</b>）—— 无 fence 的带 tag 租约。
-	 *
-	 * <p>只保留给"没有 fence 概念"的调用方（测试替身/未来其它带 tag 的租约）。它保住了
-	 * "取号与占用同序"，但<b>不能</b>在计数器先死时自愈（没有 fence 可对账）。
-	 * run 租约<b>一律</b>走 {@link #acquireFenced(String, String, Duration, String)}。
-	 */
-	private static final RedisScript<String> ACQUIRE_NOFENCE_SCRIPT = new DefaultRedisScript<>("""
-			-- LEASE_ACQUIRE_NOFENCE
-			local current = redis.call('GET', KEYS[1])
-			if current then
-			  local counter = tonumber(redis.call('GET', KEYS[2])) or 0
-			  local sep = string.find(current, '|', 1, true)
-			  local curEpoch = sep and tonumber(string.sub(current, 1, sep - 1)) or 0
-			  if counter < curEpoch then
-			    redis.call('SET', KEYS[2], tostring(curEpoch))
-			  end
-			  redis.call('PEXPIRE', KEYS[2], ARGV[3])
-			  return current .. '|0'
-			end
-			local epoch = redis.call('INCR', KEYS[2])
-			redis.call('PEXPIRE', KEYS[2], ARGV[3])
-			local value = tostring(epoch) .. '|' .. ARGV[1]
-			redis.call('SET', KEYS[1], value, 'PX', ARGV[2])
-			return value .. '|1'
-			""", String.class);
-
-	/**
-	 * 抢：<b>无 hash tag 的租约</b>（{@code ai:lock:task|job:*}）—— 单键 GET/SET，取号在 Java 侧。
+	 * 抢：<b>无 tag 的资源锁</b>（{@code ai:lock:task|job:*} 等，无 fence）—— 单键 GET/SET，
+	 * 取号在 Java 侧走全局计数器。
 	 *
 	 * <p>这类租约的 epoch <b>只作 token 的一部分</b>（续/放按 {@code <epoch>|<owner>} 整值比对），
 	 * 全仓没有任何地方拿它与 fence 比大小，所以"号与占用不同序"不产生卡死面；它们的键没有 tag
 	 * （按设计不加），与全局计数器天然不同槽 —— 放进同一条 {@code EVAL} 就是 CROSSSLOT。
+	 * 带 tag 的键属于 run 租约，必须带 fence 走
+	 * {@link #acquireFenced(String, String, Duration, String)}；无 fence 会被显式拒绝。
 	 */
 	private static final RedisScript<String> ACQUIRE_UNTAGGED_SCRIPT = new DefaultRedisScript<>("""
 			-- LEASE_ACQUIRE_UNTAGGED
@@ -486,6 +459,10 @@ public class LeaseService {
 	 * <p>可重入走<b>进程内视图短路</b>（不复查 Redis TTL）：TTL 到期被别人接管的那一侧，
 	 * 由"fencing 写被拒"（{@code RunStore#save} 的 STALE_EPOCH）与"续租失败即放弃视图"
 	 * （{@link #markDriving}）兜底 —— 短路的代价至多是一个续租间隔（10s），换来的是热路径零往返。
+	 *
+	 * <p>只接受<b>无 tag 的资源锁键</b>（{@code ai:lock:*} / {@code ai:purge:*} 等）。
+	 * 带 hash tag 的键属于 run 租约，必须走 {@link #acquireFenced(String, String, Duration)}；
+	 * 无 fence 会被显式拒绝（编程错误），不会静默降级成全局资源锁。
 	 */
 	public AcquireResult acquire(String key, Duration ttl) {
 		return acquire(key, ttl, this.instanceId);
@@ -512,10 +489,13 @@ public class LeaseService {
 	 * 抢租，<b>带上该租约的 fence 键</b>（run 租约的唯一生产入口）：三键同槽原子自愈（评审 N-1）。
 	 *
 	 * <p>fence 键必须与租约键<b>同槽</b>（同一 {@code {run:<runId>}} tag），否则脚本本身就是 CROSSSLOT。
-	 * {@code fenceKey == null} 等价于无 fence 口径（两键脚本）；无 tag 的租约（资源锁）忽略 fence 参数
-	 * —— 它们没有同槽的 fence，硬塞进来就是 CROSSSLOT。
+	 * <b>fence 必填</b>：run 租约没有"无 fence"形态；资源锁（无 fence）走
+	 * {@link #acquire(String, Duration, String)} 的全局 token 口径。
 	 */
 	public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+		if (fenceKey == null || fenceKey.isBlank()) {
+			throw new IllegalArgumentException("run 租约必须带 fence：key=" + key);
+		}
 		return acquire(key, fenceKey, ttl, owner);
 	}
 
@@ -530,18 +510,20 @@ public class LeaseService {
 	}
 
 	private AcquireResult acquire(String key, String fenceKey, Duration ttl, String owner) {
-		String epochKey = epochKeyFor(key);
-		if (epochKey == null && fenceKey != null) {
-			// 编程错误（不是运行时降级面）：无 tag 的租约键与 fence 不同槽，同脚本 = CROSSSLOT。
-			// 放在 try 之外，避免被下面的 catch 折成 UNAVAILABLE 静默吞掉。
-			throw new IllegalArgumentException("无 hash tag 的租约不接受 fence 参数（会跨槽）：key=" + key
-					+ " fence=" + fenceKey);
+		String leaseTag = hashTagOf(key);
+		if (fenceKey == null) {
+			// 编程错误（不是运行时降级面）：带 tag 的键是 run 租约，必须带同槽 fence。
+			// 静默改走全局资源锁会让 epoch 与 run 的 fence 脱钩 —— 在 try 之外直接抛。
+			if (leaseTag != null) {
+				throw new IllegalArgumentException("带 hash tag 的租约必须带 fence（run 租约没有无 fence 形态）：key="
+						+ key + " tag=" + leaseTag);
+			}
 		}
-		if (fenceKey != null) {
+		else {
 			// 入口闸（评审 Minor 1）：fence 必须与租约键<b>同 tag ⇒ 同槽</b>。传错 run 的 fence 会让三键脚本
 			// 跨槽 —— 真集群回 CROSSSLOT，而 CROSSSLOT 会被本方法的 catch 折成 UNAVAILABLE
-			// （整轮静默退化为进程内互斥，最难查）。这是编程错误，不是运行时降级面，故在 try 之外直接抛。
-			String leaseTag = hashTagOf(key);
+			// （整轮静默退化为进程内互斥，最难查）。无 tag 的资源锁同理（没有同槽的 fence）。
+			// 这是编程错误，不是运行时降级面，故在 try 之外直接抛。
 			String fenceTag = hashTagOf(fenceKey);
 			if (leaseTag == null || !leaseTag.equals(fenceTag)) {
 				throw new IllegalArgumentException("fenceKey 必须与租约键同槽（同一 hash tag）：key=" + key
@@ -558,18 +540,13 @@ public class LeaseService {
 			return new AcquireResult(AcquireOutcome.ACQUIRED, already, false);
 		}
 		try {
-			if (epochKey == null) {
-				// 无 tag（资源锁）：取号走全局计数器（仅 token 用，不参与 fencing），两步式。
-				return acquireUntagged(key, holder, viewKey, effective);
+			if (fenceKey == null) {
+				// 无 fence（资源锁）：取号走全局计数器（仅 token 用，不参与 fencing），两步式。
+				return acquireWithoutFence(key, holder, viewKey, effective);
 			}
-			if (fenceKey != null) {
-				// 带 tag + 有 fence：三键同槽原子自愈（评审 N-1 的根治）。
-				String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, epochKey, fenceKey), holder,
-						String.valueOf(effective.toMillis()), String.valueOf(epochTtlMillis()));
-				return interpret(key, holder, viewKey, raw);
-			}
-			// 带 tag 但没有 fence（测试替身/未来其它带 tag 的租约）：两键版，不自愈。
-			String raw = this.redis.execute(ACQUIRE_NOFENCE_SCRIPT, List.of(key, epochKey), holder,
+			// 带 fence：三键同槽原子自愈（评审 N-1 的根治）。入口闸已保证 tag 与 fence 同槽。
+			String epochKey = epochKeyFor(key);
+			String raw = this.redis.execute(ACQUIRE_SCRIPT, List.of(key, epochKey, fenceKey), holder,
 					String.valueOf(effective.toMillis()), String.valueOf(epochTtlMillis()));
 			return interpret(key, holder, viewKey, raw);
 		}
@@ -598,8 +575,8 @@ public class LeaseService {
 		}
 	}
 
-	/** 无 tag 租约（资源锁）：脚本外取号 + 单键 GET/SET（其 epoch 不参与 fencing，乱序无害）。 */
-	private AcquireResult acquireUntagged(String key, String holder, String viewKey, Duration effective) {
+	/** 无 tag 的资源锁：脚本外取号 + 单键 GET/SET（其 epoch 不参与 fencing，乱序无害）。 */
+	private AcquireResult acquireWithoutFence(String key, String holder, String viewKey, Duration effective) {
 		String current = this.redis.opsForValue().get(key);
 		this.facilityHealthy = true;
 		if (current != null) {
@@ -1195,7 +1172,7 @@ public class LeaseService {
 	 * 例：{@code ai:lease:run:{run:abc}} ⇒ {@code ai:lease:epoch:{run:abc}}（同槽）；
 	 * {@code ai:lock:task:7} ⇒ null（无 tag ⇒ 走全局计数器）。
 	 *
-	 * <p>共享同一 tag 的一族键共用一台计数器：run 的 13 个键同 tag，于是"这一轮发过哪些号"
+	 * <p>共享同一 tag 的一族键共用一台计数器：run 的 12 个键同 tag，于是"这一轮发过哪些号"
 	 * 是单调的一条线 —— 这正是 fence 比较所需要的语义（比较只发生在同一个 run 内）。
 	 */
 	static String epochKeyFor(String leaseKey) {

@@ -56,13 +56,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  * <li><b>系统面</b>（应用启动的自动扫描、运行期扫描）：跑在无身份线程上，候选来自
  * {@code ai:runs} 的复合成员，逐轮按<b>该轮记录身份</b>推进 —— 不扫描租户列表、也不沿用线程身份。
- * 记录<b>没有可用身份</b>（pre-deploy 的 {@code 0/0} legacy 轮）时两条扫描都<b>不续跑</b>：
- * 续跑只会在无身份下驱动模型/工具，故一律记 {@link #LEGACY_NO_IDENTITY}（不伪造归属）。</li>
+ * 发现面只产出带身份的复合成员（{@code ResumeService.listRuns()}），但入口仍对
+ * {@code 0/0} 记录做硬校验：身份不可用一律记 {@link #LEGACY_NO_IDENTITY}、不驱动模型/工具。</li>
  * <li><b>请求面</b>（{@code POST /api/ai/startup-resume/scan}，线程有身份）：<b>只处理当前身份</b>的轮次。
  * 若候选里混入别的身份（列表实现变化、桩数据等），一律<b>既不续跑、也不进报告</b> —— runId 本身
  * 就是跨身份信息，不能借"跳过原因"回显。报告面（GET）同样按调用身份切片，
  * 见 {@link #lastScanForIdentity(TenantUser)}。</li>
  * </ul>
+ *
+ * <p>启动/手工（{@link #scan(boolean)}）与运行期（{@link #sweep()}）从候选枚举开始共用
+ * {@link #runPipeline}：身份门、0/0 硬校验、预算与发现态分类只实现一次；运行期只是多出
+ * 取消收尾/到期收敛两条旁路和租约判死，报告字段仍按各自契约组装。
  *
  * <h2>运行期低频死轮扫描（批次8B / Task 12 Step 3）</h2>
  * 启动扫描每个实例只跑一拍，之后"死在调用中间 / 决策已落库却没人执行 / 重挂自愈那一下抖了"的轮次
@@ -82,11 +86,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class StartupResumeRunner {
 
 	/**
-	 * 系统扫描对<b>没有可用身份</b>的 legacy 轮次的明确跳过原因（{@code tenantId<=0} 或
-	 * {@code userId<=0 且 != -1}，即 pre-deploy 的 {@code 0/0} 记录）。
+	 * 系统扫描对<b>没有可用身份</b>的轮次的明确跳过原因（{@code tenantId<=0} 或
+	 * {@code userId<=0 且 != -1}，即 {@code 0/0} 记录）。
 	 *
-	 * <p>这类轮次没有身份可恢复：{@link RunIdentityScope#open(long, long)} 只会清空线程身份，
-	 * 续跑就在"谁都不是"的情况下驱动模型与工具。不伪造归属、也不沿用扫描线程身份 —— 只留事实。
+	 * <p>当前发现面（{@code ResumeService.listRuns()}）只产出带身份的复合成员，因此正常数据
+	 * 不会落到本分支；但入口仍<b>硬校验</b>：身份不可用一律不驱动模型/工具，不伪造归属、
+	 * 也不沿用扫描线程身份。防线不因"当前不产出"而删除。
 	 */
 	public static final String LEGACY_NO_IDENTITY = "LEGACY_NO_IDENTITY";
 
@@ -210,99 +215,19 @@ public class StartupResumeRunner {
 			this.lastScan = failed;
 			return failed;
 		}
-		List<Map<String, Object>> resumed = new ArrayList<>();
-		List<Map<String, Object>> skipped = new ArrayList<>();
-		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
-		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
-		TenantUser caller = RequestContextUtils.currentOrNull();
-		for (Map<String, Object> run : candidates) {
-			String runId = String.valueOf(run.get("runId"));
-			long recordTenantId = identityField(run, "tenantId");
-			long recordUserId = identityField(run, "userId");
-			if (caller != null && !sameIdentity(caller, recordTenantId, recordUserId)) {
-				// 别人的轮次：不续跑、也不进报告（runId 与跳过原因都属于跨身份信息）。
-				log.debug("启动扫描跳过非当前身份的轮次 runId={}（记录身份 {}/{}，调用身份 {}）", runId, recordTenantId,
-						recordUserId, caller);
-				continue;
-			}
-			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
-				// pre-deploy 的 0/0 legacy 轮：没有身份可恢复。续跑只会在无身份下驱动模型与工具
-				// （RunIdentityScope.open 会清空线程身份），既跑不出用户那一轮也无归属可解释 ⇒ 不驱动、只留事实。
-				Map<String, Object> skippedItem = new LinkedHashMap<>();
-				skippedItem.put("runId", runId);
-				skippedItem.put("tenantId", recordTenantId);
-				skippedItem.put("userId", recordUserId);
-				skippedItem.put("status", run.get("status"));
-				skippedItem.put("reason", LEGACY_NO_IDENTITY);
-				skippedItem.put("unresolvedExternal", run.get("unresolvedExternal"));
-				skipped.add(skippedItem);
-				log.info("启动扫描跳过无身份的 legacy 轮次 runId={}（reason={}，不驱动模型/工具）", runId,
-						LEGACY_NO_IDENTITY);
-				continue;
-			}
-			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
-			Discovery discovery = discoveryOf(run);
-			if (discovery != Discovery.TAKEABLE) {
-				Map<String, Object> skippedItem = new LinkedHashMap<>();
-				skippedItem.put("runId", runId);
-				// 报告项带记录身份：GET 面据此只回显当前身份的轮次（见 lastScanForIdentity）
-				skippedItem.put("tenantId", recordTenantId);
-				skippedItem.put("userId", recordUserId);
-				skippedItem.put("status", run.get("status"));
-				skippedItem.put("reason", scanSkipReason(discovery));
-				skippedItem.put("unresolvedExternal", run.get("unresolvedExternal"));
-				skipped.add(skippedItem);
-				continue;
-			}
-			if (resumed.size() >= limit) {
-				Map<String, Object> skippedItem = new LinkedHashMap<>();
-				skippedItem.put("runId", runId);
-				skippedItem.put("tenantId", recordTenantId);
-				skippedItem.put("userId", recordUserId);
-				skippedItem.put("reason", "MAX_ON_STARTUP_REACHED");
-				skipped.add(skippedItem);
-				continue;
-			}
-			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装
-			AiTrace.bind(runId, null);
-			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie, recordTenantId,
-						recordUserId);
-				Map<String, Object> item = new LinkedHashMap<>();
-				item.put("runId", runId);
-				item.put("tenantId", recordTenantId);
-				item.put("userId", recordUserId);
-				item.put("zombieTakeover", zombie);
-				item.put("outcome", result.outcome().name());
-				item.put("body", result.body());
-				resumed.add(item);
-			}
-			catch (Exception ex) {
-				Map<String, Object> item = new LinkedHashMap<>();
-				item.put("runId", runId);
-				item.put("tenantId", recordTenantId);
-				item.put("userId", recordUserId);
-				item.put("outcome", "EXCEPTION");
-				item.put("error", String.valueOf(ex.getMessage()));
-				resumed.add(item);
-				log.error("启动自动续跑异常 runId={}", runId, ex);
-			}
-			finally {
-				AiTrace.clear();
-			}
-		}
+		PipelineResult result = runPipeline(candidates, Mode.STARTUP);
 		Map<String, Object> report = new LinkedHashMap<>();
 		report.put("scanned", true);
 		report.put("at", Instant.now().toString());
 		report.put("instanceId", this.store.instanceId());
 		report.put("candidates", candidates.size());
-		report.put("resumed", resumed);
-		report.put("skipped", skipped);
+		report.put("resumed", result.resumed());
+		report.put("skipped", result.skipped());
 		report.put("onStartup", this.properties.getResume().isOnStartup());
 		report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
 		this.lastScan = report;
 		log.info("启动自动续跑完成：候选 {} 轮，受理 {} 轮，跳过 {} 轮（详情见 GET /api/ai/startup-resume）",
-				candidates.size(), resumed.size(), skipped.size());
+				candidates.size(), result.resumed().size(), result.skipped().size());
 		return report;
 	}
 
@@ -361,7 +286,7 @@ public class StartupResumeRunner {
 
 	/**
 	 * 记录身份是否等于给定身份：两侧都必须<b>可用</b>（{@code tenantId>0}、
-	 * {@code userId>0 或 -1}）。{@code 0/0} 的 legacy 记录不属于任何身份 —— 不得被"恰好没有身份"
+	 * {@code userId>0 或 -1}）。{@code 0/0} 记录不属于任何身份 —— 不得被"恰好没有身份"
 	 * 的调用方认领，也不得被请求面扫描拾起。
 	 */
 	private static boolean sameIdentity(TenantUser identity, long tenantId, long userId) {
@@ -393,8 +318,8 @@ public class StartupResumeRunner {
 	 *
 	 * <h2>四条不再扩大语义的边界</h2>
 	 * <ol>
-	 * <li><b>无身份不驱动</b>：{@code tenantId/userId} 不可用的 legacy 轮没有身份可恢复，
-	 * 一律记 {@link #LEGACY_NO_IDENTITY}、不调续跑（否则就是"谁都不是"地驱动模型与工具）；</li>
+	 * <li><b>无身份不驱动</b>：{@code tenantId/userId} 不可用的记录一律记 {@link #LEGACY_NO_IDENTITY}、
+	 * 不调续跑（即使当前发现面不产出，入口硬校验仍保留）；</li>
 	 * <li><b>终态不复活</b>：{@code DONE/FAILED/CANCELLED} 在候选过滤就跳过（失败现场、完成事实不改写）；</li>
 	 * <li><b>不绕开人审</b>：仍有 {@code PENDING} 外部项（确认门/前端工具）一律跳过，与启动扫描同义；</li>
 	 * <li><b>挂起已决、无驱动才接管</b>：{@code SUSPENDED} 且条目全结算、活动超龄 ⇒ 按非僵尸续跑
@@ -444,105 +369,202 @@ public class StartupResumeRunner {
 			this.lastSweep = failed;
 			return failed;
 		}
+		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+		PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("swept", true);
+		report.put("at", Instant.now().toString());
+		report.put("instanceId", this.store.instanceId());
+		report.put("candidates", candidates.size());
+		report.put("resumed", result.resumed());
+		report.put("finalized", result.finalized());
+		report.put("expired", result.expired());
+		report.put("skipped", result.skipped());
+		report.put("zombieAgeMs", zombieAgeMs);
+		this.lastSweep = report;
+		log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}）",
+				candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
+				result.skipped().size(), this.properties.getResume().getZombieAge());
+		return report;
+	}
+
+	/** 扫描触发面：启动/手工（{@link #scan(boolean)}）与运行期兜底（{@link #sweep()}）。 */
+	private enum Mode {
+
+		STARTUP,
+
+		RUNTIME
+
+	}
+
+	/** 公共管线产出；报告面由两个触发入口各自组装（契约字段不变）。 */
+	private record PipelineResult(List<Map<String, Object>> resumed, List<Map<String, Object>> skipped,
+			List<Map<String, Object>> finalized, List<Map<String, Object>> expired) {
+	}
+
+	/**
+	 * <b>扫描/兜底的公共核心管线</b>：候选枚举之后，身份门、0/0 硬校验、预算、发现态分类和
+	 * "取消收尾 / 到期收敛 / 续跑"都只在这里实现一次。
+	 *
+	 * <p>两种触发只差三处：运行期多两条收敛旁路（F3 取消收尾、F2 park 到期）和租约/活订阅判死
+	 * （{@link RunLiveness}），启动/手工则按 {@code zombieRunning}（启动接管时效）给
+	 * {@code forceTakeover}。请求面（线程有身份）在进入循环时先切片，<b>只处理当前身份</b>；
+	 * 系统面按每条记录的记录身份推进。
+	 *
+	 * <p><b>最小安全前置</b>：取消旗标、终态、未决外部输入（{@code discoveryOf}）先跳过；
+	 * 真正的裁决仍由 {@link ResumeService#resume} 的真实 outcome 给出 —— 租约、会话门、取消、
+	 * 终态、待决条目都在那条漏斗里，本类不复制也不绕过。
+	 */
+	private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode) {
+		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
 		long nowMs = System.currentTimeMillis();
 		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-		// 上限与启动扫描共用 max-on-startup：一次扫描最多受理这么多轮，避免"挂起池被一拍占满"
-		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
 		List<Map<String, Object>> resumed = new ArrayList<>();
 		List<Map<String, Object>> skipped = new ArrayList<>();
-		// F3：取消旗标 + 非终态 ⇒ 本拍走取消收尾（不是续跑）。与续跑分开记账，报告里可解释。
 		List<Map<String, Object>> finalized = new ArrayList<>();
-		// F2：本拍消费了持久化 expiresAt 的轮次（到期收敛已派发一次续跑）。
 		List<Map<String, Object>> expired = new ArrayList<>();
+		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
+		TenantUser caller = RequestContextUtils.currentOrNull();
 		for (Map<String, Object> run : candidates) {
 			String runId = String.valueOf(run.get("runId"));
 			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
 			long recordTenantId = identityField(run, "tenantId");
 			long recordUserId = identityField(run, "userId");
+			if (caller != null && !sameIdentity(caller, recordTenantId, recordUserId)) {
+				// 别人的轮次：不续跑、也不进报告（runId 与跳过原因都属于跨身份信息）。
+				log.debug("扫描跳过非当前身份的轮次 runId={}（记录身份 {}/{}，调用身份 {}）", runId,
+						recordTenantId, recordUserId, caller);
+				continue;
+			}
 			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
-				// 与启动扫描同一道门：pre-deploy 的 0/0 legacy 轮没有身份可恢复，
-				// 续跑只会在无身份下驱动模型与工具 ⇒ 这拍不碰，只留事实（不伪造归属）。
-				skipped.add(sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
-				log.info("运行期扫描跳过无身份的 legacy 轮次 runId={}（reason={}，不驱动模型/工具）", runId,
+				// 入口硬校验：0/0 记录没有身份可恢复，续跑只会在无身份下驱动模型与工具。
+				skipped.add(mode == Mode.STARTUP
+						? scanDiscoverySkipItem(runId, status, recordTenantId, recordUserId, run,
+								LEGACY_NO_IDENTITY)
+						: sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
+				log.info("扫描跳过无身份的轮次 runId={}（reason={}，不驱动模型/工具）", runId,
 						LEGACY_NO_IDENTITY);
 				continue;
 			}
-			// ===== F3：取消旗标优先于"跳过" =====
-			// 旧实现把 cancelled=true 直接记 CANCELLED 跳过：驱动进程死了就再没人写终态/终帧，
-			// 连带会话销毁永远 deferred。取消是<b>已确认的事实</b>，不是"别碰"的理由 ——
-			// 交给既有 cancelConfirmed（抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。
-			if (Boolean.TRUE.equals(run.get("cancelled")) && !RunSnapshot.isTerminal(status)) {
-				if (resumed.size() + finalized.size() + expired.size() >= limit) {
-					skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+			if (mode == Mode.RUNTIME) {
+				// ===== F3：取消旗标优先于"跳过" =====
+				// 取消是已确认的事实：驱动进程死了也必须有人落终态/终帧，交给既有 cancelConfirmed
+				// （抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。
+				if (Boolean.TRUE.equals(run.get("cancelled")) && !RunSnapshot.isTerminal(status)) {
+					if (resumed.size() + finalized.size() + expired.size() >= limit) {
+						skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+						continue;
+					}
+					ResumeService.CancelFinalize outcome;
+					try {
+						outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
+					}
+					catch (RuntimeException ex) {
+						skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
+						log.warn("运行期扫描的取消收尾异常 runId={}（下一拍重试）：{}", runId, ex.getMessage());
+						continue;
+					}
+					if (outcome == ResumeService.CancelFinalize.FINALIZED
+							|| outcome == ResumeService.CancelFinalize.ALREADY_TERMINAL
+							|| outcome == ResumeService.CancelFinalize.NO_RUN) {
+						Map<String, Object> item = new LinkedHashMap<>();
+						item.put("runId", runId);
+						item.put("tenantId", recordTenantId);
+						item.put("userId", recordUserId);
+						item.put("statusBeforeSweep", status);
+						item.put("outcome", outcome.name());
+						finalized.add(item);
+					}
+					else {
+						// 租约在别处/会话门被占/这拍不可确认：不是终态，也不得因此驱动 ⇒ 下一拍再收尾。
+						skipped.add(sweepSkipItem(runId, status, "CANCEL_" + outcome));
+					}
 					continue;
 				}
-				ResumeService.CancelFinalize outcome;
-				try {
-					outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
-				}
-				catch (RuntimeException ex) {
-					skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
-					log.warn("运行期扫描的取消收尾异常 runId={}（下一拍重试）：{}", runId, ex.getMessage());
-					continue;
-				}
-				if (outcome == ResumeService.CancelFinalize.FINALIZED
-						|| outcome == ResumeService.CancelFinalize.ALREADY_TERMINAL
-						|| outcome == ResumeService.CancelFinalize.NO_RUN) {
-					Map<String, Object> item = new LinkedHashMap<>();
-					item.put("runId", runId);
-					item.put("tenantId", recordTenantId);
-					item.put("userId", recordUserId);
-					item.put("statusBeforeSweep", status);
-					item.put("outcome", outcome.name());
-					finalized.add(item);
-				}
-				else {
-					// 租约在别处/会话门被占/这拍不可确认：不是终态，也不得因此驱动 ⇒ 下一拍再收尾。
-					skipped.add(sweepSkipItem(runId, status, "CANCEL_" + outcome));
-				}
-				continue;
-			}
-			// ===== F2：消费持久化的 expiresAt =====
-			// park 后的到期收敛只有原实例进程内定时器；实例被杀后没有任何读侧看 expiresAt。
-			// 任一实例的扫描都可以做这件事（真前端工具才有时限；确认门/表单无上限，不消费）。
-			if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
-					&& resumed.size() + finalized.size() + expired.size() < limit) {
-				int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
-				if (converged > 0) {
-					Map<String, Object> item = new LinkedHashMap<>();
-					item.put("runId", runId);
-					item.put("tenantId", recordTenantId);
-					item.put("userId", recordUserId);
-					item.put("statusBeforeSweep", status);
-					item.put("expired", converged);
-					expired.add(item);
-					// 到期收敛已派发一次续跑（系统裁决）：本拍不再重复续跑同一轮。
-					continue;
+				// ===== F2：消费持久化的 expiresAt =====
+				// park 后的到期收敛只有原实例进程内定时器；实例被杀后没有任何读侧看 expiresAt。
+				// 任一实例的扫描都可以做这件事（真前端工具才有时限；确认门/表单无上限，不消费）。
+				if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
+						&& resumed.size() + finalized.size() + expired.size() < limit) {
+					int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
+					if (converged > 0) {
+						Map<String, Object> item = new LinkedHashMap<>();
+						item.put("runId", runId);
+						item.put("tenantId", recordTenantId);
+						item.put("userId", recordUserId);
+						item.put("statusBeforeSweep", status);
+						item.put("expired", converged);
+						expired.add(item);
+						// 到期收敛已派发一次续跑（系统裁决）：本拍不再重复续跑同一轮。
+						continue;
+					}
 				}
 			}
 			Discovery discovery = discoveryOf(run);
 			if (discovery != Discovery.TAKEABLE) {
-				skipped.add(sweepSkipItem(runId, status, sweepSkipReason(discovery)));
+				skipped.add(mode == Mode.STARTUP
+						? scanDiscoverySkipItem(runId, status, recordTenantId, recordUserId, run,
+								scanSkipReason(discovery))
+						: sweepSkipItem(runId, status, sweepSkipReason(discovery)));
 				continue;
 			}
-			if (!deadWithoutDriver(run, status, nowMs, zombieAgeMs)) {
-				// 租约/活订阅/活动窗口三者都说"还有人管" ⇒ 这一拍不碰（下一拍再看）。
-				skipped.add(sweepSkipItem(runId, status, "ACTIVE"));
+			if (mode == Mode.RUNTIME) {
+				if (!deadWithoutDriver(run, status, nowMs, zombieAgeMs)) {
+					// 租约/活订阅/活动窗口三者都说"还有人管" ⇒ 这一拍不碰（下一拍再看）。
+					skipped.add(sweepSkipItem(runId, status, "ACTIVE"));
+					continue;
+				}
+				if (resumed.size() >= limit) {
+					skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+					continue;
+				}
+				boolean takeover = RunSnapshot.RUNNING.equals(status);
+				AiTrace.bind(runId, null);
+				try {
+					ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover, recordTenantId,
+							recordUserId);
+					Map<String, Object> item = new LinkedHashMap<>();
+					item.put("runId", runId);
+					item.put("statusBeforeSweep", status);
+					item.put("zombieTakeover", takeover);
+					item.put("outcome", result.outcome().name());
+					item.put("body", result.body());
+					resumed.add(item);
+				}
+				catch (Exception ex) {
+					Map<String, Object> item = new LinkedHashMap<>();
+					item.put("runId", runId);
+					item.put("outcome", "EXCEPTION");
+					item.put("error", String.valueOf(ex.getMessage()));
+					resumed.add(item);
+					log.error("运行期死轮扫描续跑异常 runId={}", runId, ex);
+				}
+				finally {
+					AiTrace.clear();
+				}
 				continue;
 			}
+			// 启动/手工：接管时效仍由 listRuns 的 zombieRunning（zombie-age 判据）给出。
 			if (resumed.size() >= limit) {
-				skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+				Map<String, Object> skippedItem = new LinkedHashMap<>();
+				skippedItem.put("runId", runId);
+				skippedItem.put("tenantId", recordTenantId);
+				skippedItem.put("userId", recordUserId);
+				skippedItem.put("reason", "MAX_ON_STARTUP_REACHED");
+				skipped.add(skippedItem);
 				continue;
 			}
-			boolean takeover = RunSnapshot.RUNNING.equals(status);
+			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
+			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装。
 			AiTrace.bind(runId, null);
 			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover, recordTenantId,
+				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie, recordTenantId,
 						recordUserId);
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
-				item.put("statusBeforeSweep", status);
-				item.put("zombieTakeover", takeover);
+				item.put("tenantId", recordTenantId);
+				item.put("userId", recordUserId);
+				item.put("zombieTakeover", zombie);
 				item.put("outcome", result.outcome().name());
 				item.put("body", result.body());
 				resumed.add(item);
@@ -550,30 +572,31 @@ public class StartupResumeRunner {
 			catch (Exception ex) {
 				Map<String, Object> item = new LinkedHashMap<>();
 				item.put("runId", runId);
+				item.put("tenantId", recordTenantId);
+				item.put("userId", recordUserId);
 				item.put("outcome", "EXCEPTION");
 				item.put("error", String.valueOf(ex.getMessage()));
 				resumed.add(item);
-				log.error("运行期死轮扫描续跑异常 runId={}", runId, ex);
+				log.error("启动自动续跑异常 runId={}", runId, ex);
 			}
 			finally {
 				AiTrace.clear();
 			}
 		}
-		Map<String, Object> report = new LinkedHashMap<>();
-		report.put("swept", true);
-		report.put("at", Instant.now().toString());
-		report.put("instanceId", this.store.instanceId());
-		report.put("candidates", candidates.size());
-		report.put("resumed", resumed);
-		report.put("finalized", finalized);
-		report.put("expired", expired);
-		report.put("skipped", skipped);
-		report.put("zombieAgeMs", zombieAgeMs);
-		this.lastSweep = report;
-		log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}）",
-				candidates.size(), resumed.size(), finalized.size(), expired.size(), skipped.size(),
-				this.properties.getResume().getZombieAge());
-		return report;
+		return new PipelineResult(resumed, skipped, finalized, expired);
+	}
+
+	/** 启动/手工扫描的"发现态跳过"报告项（带记录身份，GET 面据此切片）。 */
+	private static Map<String, Object> scanDiscoverySkipItem(String runId, String status, long tenantId,
+			long userId, Map<String, Object> run, String reason) {
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("tenantId", tenantId);
+		item.put("userId", userId);
+		item.put("status", status);
+		item.put("reason", reason);
+		item.put("unresolvedExternal", run.get("unresolvedExternal"));
+		return item;
 	}
 
 	/** 最近一次运行期扫描的结果（观测面；未开开关时保持 {@code swept=false} 的初值）。 */
@@ -650,10 +673,8 @@ public class StartupResumeRunner {
 	 * 由 {@code ResumeService.listRuns()} 随条目交下来）—— 不是"先读快照再猜身份"：
 	 * 快照键本身由身份拼出，在无身份线程上先读只能读到 {@code null}（那条链会静默退化成空作用域）。
 	 *
-	 * <p>旧快照 / 无归属成员（{@code 0/0}）没有身份可恢复：调用方（两条扫描）在进本方法<b>之前</b>就按
-	 * {@link #LEGACY_NO_IDENTITY} 跳过 —— 绝不靠 {@link RunIdentityScope#open(long, long)} 清空身份后
-	 * 硬着头皮续跑（那等于在"谁都不是"的情况下驱动模型与工具）。因此本方法只接受
-	 * {@link RunIdentityScope#usable(long, long)} 为真的记录身份。
+	 * <p>候选只来自 {@code ai:runs} 的复合成员，记录身份随成员一起交下来；无归属成员在发现面
+	 * （{@code allRunRecords()}）就被丢弃，不会进入本方法。因此本方法只处理带身份的记录。
 	 *
 	 * <p>作用域只包住这一次续跑调用，扫描循环（下一轮可能是另一个租户）不继承身份。
 	 */
@@ -720,8 +741,8 @@ public class StartupResumeRunner {
 			LeaseService leases = this.store.leaseService();
 			// 判死口径必须用严格读取口：isHeld 吞异常返回 false 会把"读不出来"当成"没人持有"
 			// ⇒ 仍有租约的活轮被判死接管（双驱动）。异常由下面 catch 折成 fail-closed。
-			// 租约键由身份拼出：按<b>索引成员里的记录身份</b>取键（扫描线程没有身份，用线程身份取到的是
-			// legacy 租约 ⇒ 恒"无人持有" ⇒ 活跃轮被判死并接管 = 双驱动）。
+			// 租约键由身份拼出：按<b>索引成员里的记录身份</b>取键（扫描线程没有身份；用线程身份取键
+			// 会落到另一套键面 ⇒ 恒"无人持有" ⇒ 活跃轮被判死并接管 = 双驱动）。
 			leaseHeld = leases != null && leases.isHeldStrict(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
@@ -832,14 +853,10 @@ public class StartupResumeRunner {
 		return asLong(run.get(key));
 	}
 
-	/** 该轮续跑权租约键（按记录身份；旧/无归属条目退回 legacy 键形）。 */
+	/** 该轮续跑权租约键（按记录身份）。 */
 	private static String leaseKeyOf(Map<String, Object> run, String runId) {
-		long tenantId = identityField(run, "tenantId");
-		long userId = identityField(run, "userId");
-		if (RunIdentityScope.usable(tenantId, userId)) {
-			return RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, tenantId, userId, runId);
-		}
-		return RunStore.legacyRunKey(RunStore.LEASE_RUN_PREFIX, runId);
+		return RunStore.runScopedKey(RunStore.LEASE_RUN_PREFIX, identityField(run, "tenantId"),
+				identityField(run, "userId"), runId);
 	}
 
 	/**

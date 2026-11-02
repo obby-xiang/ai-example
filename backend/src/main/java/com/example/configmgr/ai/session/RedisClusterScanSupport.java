@@ -20,7 +20,7 @@ import java.util.Set;
  *
  * <h2>为什么必须逐 master</h2>
  * {@code RedisTemplate#scan} 只作用于当前连接所在节点；Redis Cluster 的键分布在多个 master，
- * 用它扫 {@code ai:ctx:archive:*} / {@code ai:purge:pending:*} 会<b>静默漏键</b>。
+ * 用它扫 {@code ai:ctx:archive:*} / {@code chat:mem:*} 的 staging 键会<b>静默漏键</b>。
  * 本类改用 Spring Data Redis 3.5.11 的实际 API：
  * <ul>
  * <li>standalone：{@link RedisConnection#scan(ScanOptions)}；</li>

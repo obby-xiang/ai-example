@@ -55,12 +55,17 @@ public class ErrorBodyFactory {
         return fallbackCode;
     }
 
-    /** 本地化 message；缺键一律回落调用方原文。 */
+    /**
+     * 本地化 message；缺键一律回落调用方原文。
+     *
+     * <p>{@code args} 保留在签名里兼容既有调用点：码级文案不含 {@code MessageFormat} 占位符，
+     * 格式化参数不会改变输出；结构化参数仍由 {@link #envelope}/{@link #problem} 原样回填。
+     */
     public String message(String code, String fallbackMessage, Map<String, Object> args, Locale locale) {
         if (locale == null || isChinese(locale)) {
             return fallbackMessage == null ? "" : fallbackMessage;
         }
-        String localized = lookup(KEY_PREFIX + code, args, locale);
+        String localized = lookup(KEY_PREFIX + code, locale);
         if (localized != null) {
             return localized;
         }
@@ -77,9 +82,8 @@ public class ErrorBodyFactory {
             Map<String, Object> args, String instance, String traceId, Locale locale) {
         ProblemDetail detail = ProblemDetail.forStatusAndDetail(status, message(code, fallbackMessage, args, locale));
         detail.setType(URI.create("urn:cfg:error:" + code));
-        detail.setTitle(lookup((KEY_PREFIX + code + ".title"), args, locale) != null
-                ? lookup((KEY_PREFIX + code + ".title"), args, locale)
-                : code);
+        // 码级文案没有 .title 键：标题固定用稳定码，不再做必然落空的查找。
+        detail.setTitle(code);
         if (instance != null) {
             detail.setInstance(URI.create(instance));
         }
@@ -93,14 +97,13 @@ public class ErrorBodyFactory {
         return detail;
     }
 
-    private String lookup(String key, Map<String, Object> args, Locale locale) {
+    private String lookup(String key, Locale locale) {
         var source = messageSource.getIfAvailable();
         if (source == null || key == null) {
             return null;
         }
         try {
-            Object[] values = args == null ? null : args.values().toArray();
-            return source.getMessage(key, values, locale);
+            return source.getMessage(key, null, locale);
         } catch (org.springframework.context.NoSuchMessageException e) {
             return null;
         }

@@ -342,13 +342,13 @@ export interface AiHistory {
 }
 
 /**
- * 会话销毁响应的**客户端清理指令**（DELETE /api/ai/session/{sessionId} 或旧 /history）。
+ * 会话销毁响应的**客户端清理指令**（DELETE /api/ai/session/{sessionId}）。
  *
  * <p>服务端删不了浏览器 sessionStorage：只回报精确键，前端按此清理。缺字段兼容旧后端。
  *
  * <p><b>Task 4 键形契约（前端已按此实现，后端 `AiSessionPurgeService` 尚未同步）：</b>
  * <ul>
- * <li>`mirrorKey`：`ai-mirror:&lt;tenantId&gt;:&lt;userId&gt;:&lt;sessionId&gt;`（旧形 `ai-mirror:&lt;sid&gt;` 前端双删兼容）；</li>
+ * <li>`mirrorKey`：`ai-mirror:&lt;tenantId&gt;:&lt;userId&gt;:&lt;sessionId&gt;`（旧形无身份键不再兼容）；</li>
  * <li>`draftPrefix`：`cm.ai.form.draft.&lt;tenantId&gt;:&lt;userId&gt;.`；</li>
  * <li>`draftToolCallIds`：与上面前缀拼成完整键。</li>
  * </ul>
@@ -360,9 +360,8 @@ export interface SessionPurgeClientCleanup {
 }
 
 /**
- * 会话销毁响应（裸对象）。旧字段（deleted/existed/memoryKey/removedFromIndex/runActive/
- * activeRunId/storedBy/note）保留；complete/deferred/errors/aborted/clientCleanup 为新增。
- * `complete=false`（含 deferred/errors/aborted）表示没删净，前端必须提示而不是当成功。
+ * 会话销毁响应（裸对象）。`complete/deferred/errors/aborted` 是后台销毁进度，前端不再据此
+ * 打扰用户；`clientCleanup` 用于精确清理本页签的镜像/草稿。
  */
 export interface SessionPurgeResponse extends Record<string, unknown> {
   complete?: boolean
@@ -371,9 +370,6 @@ export interface SessionPurgeResponse extends Record<string, unknown> {
   errors?: unknown[]
   clientCleanup?: SessionPurgeClientCleanup
 }
-
-/** 待续跑轮次的台账描述（GET /api/ai/runs/{runId} 的 data，字段随实现演进，故为宽松映射）。 */
-export type RunDescription = Record<string, unknown>
 
 // ── 前端展示态（消息模型） ──────────────────────────────────────────────────
 
@@ -512,14 +508,13 @@ interface MessagePartBase {
   seg: number
 }
 
-/** A10 R-15：正文/思考 delta 的帧级截断字段（与 ToolPart 同形；旧帧缺省）。 */
+/** A10 R-15：正文/思考 delta 的帧级截断字段（与 ToolPart 同形；缺键 = 未截断）。 */
 export interface MessageTruncationFields {
   truncated?: boolean
   noticeCode?: TruncationNoticeCode
   originalChars?: number
   returnedChars?: number
   strategy?: string | null
-  truncatedReason?: string | null
 }
 
 /** 正文段（一次连续输出；被工具段/思考段打断即封口，后续正文另起一段）。 */
@@ -608,10 +603,10 @@ export interface ToolPart extends MessagePartBase {
   submittedValues?: Record<string, unknown>
   /**
    * R-154 #2 / A10 R-15：帧侧截断标记（FrameSizeLimiter 64KB 字段级截断）。
-   * true = result 被截断；`noticeCode` 是新展示契约，`truncatedReason` 仅作旧帧/旧客户端兼容。
+   * true = result 被截断；`noticeCode` 是展示契约。
    */
   truncated?: boolean
-  /** 展示码（新帧优先；缺省 = 旧帧，回退 `truncatedReason`）。 */
+  /** 展示码（缺省 = 该帧未给截断原因）。 */
   noticeCode?: TruncationNoticeCode
   /** 截断前字符数（展示层按 locale 拼装）。 */
   originalChars?: number
@@ -619,8 +614,6 @@ export interface ToolPart extends MessagePartBase {
   returnedChars?: number
   /** head / tail / head_tail（结构化字段，不直接展示）。 */
   strategy?: string | null
-  /** 旧帧/旧客户端兼容原因（新帧只在缺 `noticeCode` 时展示）。 */
-  truncatedReason?: string | null
   /**
    * S6 批 2：工具结果的视图通道（`tool_result.resultView` 落段，或发布冲突检出时由前端
    * 确定性构造后写段）。随段持久化 —— 镜像/历史恢复后卡面表格仍在（设计稿 §6.3-1/2）。
@@ -637,13 +630,13 @@ export interface ToolPart extends MessagePartBase {
   /** 该工具段当前是否在等人工/前端动作（确认门待放行、前端工具待执行） */
   requiresAction: boolean
   /**
-   * 确认门 / 前端工具的等待上限与到期口径（T4 / T4-3 原文，仅 CONFIRM / FRONTEND 段有）。
+   * 前端工具 `frontend_tool_request` 的等待上限与到期口径（T4 / T4-3 原文，仅 FRONTEND 段有）。
    *
    * 为什么落在段上（批2 起）：`message.pendingCall` 已改为由段派生，若这几个字段不随段持久化，
    * 派生的挂起卡就丢了原始等待口径。
    *
-   * 2026-10-20 去超时裁决后：前端**不再**据此折算任何倒计时/本地超时（表单一直可填、确认卡
-   * 不设倒计时），本组字段只作**原始帧口径的对账/回滚依据**（镜像与快照重建仍照原样携带）。
+   * 2026-10-20 去超时裁决后：前端**不再**据此折算任何倒计时/本地超时，本组字段只作**原始帧口径的
+   * 对账/回滚依据**（镜像与快照重建仍照原样携带）。确认门（`confirm_request`）不再携带这两字段。
    */
   timeoutSeconds?: number
   expiresAt?: number
@@ -825,12 +818,11 @@ export interface ToolPartPatch {
   originalChars?: number
   returnedChars?: number
   strategy?: string | null
-  truncatedReason?: string | null
   /** 见 {@link ToolPart.resultView}（S6 批 2 视图通道，随段持久化） */
   resultView?: ResultView
   /** 见 {@link ToolPart.outcome}（治理 P0-1 帧侧结局八态） */
   outcome?: ToolOutcome
-  /** 见 {@link ToolPart.timeoutSeconds}（确认门/前端工具的等待口径，随段持久化） */
+  /** 见 {@link ToolPart.timeoutSeconds}（前端工具的等待口径，随段持久化） */
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
@@ -849,13 +841,6 @@ export interface PendingToolCall {
   args: Record<string, unknown> | null
   /** 原始入参字符串 */
   rawArgs?: string
-  /** 挂起等待上限（秒），来自 confirm_request 帧（去超时后仅作对账口径，不驱动任何倒计时） */
-  timeoutSeconds?: number
-  /**
-   * DC-14 T4：挂起等待的绝对到期时刻（epoch 毫秒，服务端钟）。
-   * 去超时裁决后只随段原样透出以对账/回滚。
-   */
-  expiresAt?: number
   /**
    * T4-3：帧的**服务端构造时刻**（epoch 毫秒；实时 / 归档帧均带）。保留以对账。
    */
@@ -897,8 +882,8 @@ export interface GateSubmission {
 /**
  * 页签级会话镜像（sessionStorage）写入形态。
  *
- * 版本（`v`，对话时序包 批1 起）：当前为 {@link MIRROR_VERSION}。旧镜像（缺 `v` 或 `v < 2`）
- * 由读取侧 `migrateMirror` 迁移出 `parts` 后立即回写；写入侧一律带 `v` 与 `parts`。
+ * 版本（`v`）：当前为 {@link MIRROR_VERSION}。读取侧只认**当前协议**（版本匹配且每条消息带
+ * `parts`）；旧版本 / 损坏镜像直接丢弃并交由服务端 history 重建（不在前端做历史迁移）。
  *
  * 批2（权威翻转）起：`parts` 是唯一真值，`content` / `reasoning` / `toolRuns` / `pendingCall`
  * 是同一次写入前由段派生出的投影 —— 镜像里**仍双存**两份，为的是回滚（旧版前端读镜像）与
@@ -908,13 +893,11 @@ export interface GateSubmission {
  * `recoveryGap` / `synthetic` / `runId` —— 刷新后失败现场、中性态、系统级合成提示与 run 归属
  * 仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而重试错轮。
  *
- * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧的新旧组合都自洽
- * （旧前端忽略未知键；新前端把缺键读成"无现场"），段结构/migration 语义一格未变。升版本号会让
- * 存量 v2 镜像在读取侧被重写一次（无变化不写盘的幂等口径随之被打破），收益仅为形式上的版本对齐。
- * 将来若出现**必填**新键或段结构变化，再升 `v` 并在 `migrateMirror` 里给出真实迁移。
+ * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧组合自洽
+ * （新前端把缺键读成"无现场"），段结构未变。将来若出现**必填**新键或段结构变化，再升 `v`。
  */
 export interface AiSessionMirror {
-  /** 镜像结构版本（缺省 = v1 旧镜像，需迁移 parts） */
+  /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
   messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'synthetic' | 'runId'>>
@@ -937,11 +920,9 @@ export interface AiSessionMirror {
 
 /**
  * 当前镜像结构版本（**只描述段结构**，不描述可选的现场键）：
- * - v1（隐式）：只有 `content` / `toolRuns` / `pendingCall`，无 `parts`；
- * - v2（对话时序包 批1，批2 沿用）：新增 `parts` 段序列（批2 起为唯一真值，旧字段为派生投影）。
+ * v2 = `parts` 段序列（唯一真值；`content` / `toolRuns` / `pendingCall` 为派生投影）。
  *
- * 批次2 新增的 message 级 `errorCard` / `code` / `unconfirmed` / `recoveryGap` / `synthetic` /
- * `runId` 是**可选键**（缺省 = 没有现场），不构成结构变化 —— 故版本号不变，也不需要新的迁移分支。
+ * 版本不匹配的镜像不再迁移：读取侧整份丢弃，由服务端 history 重建。
  */
 export const MIRROR_VERSION = 2
 
@@ -980,7 +961,7 @@ export interface ActiveGenerativeForm {
  * <p>store 只落这个结构，不落任何用户可见文案 —— 面板按 `scope` 选重试动作、按 `code` 选 locale
  * 词条。`status` 是 HTTP 状态（`0` = 请求未到达后端），只作日志/分档，不进用户文案。
  */
-export type AiLoadErrorScope = 'history' | 'current' | 'context'
+export type AiLoadErrorScope = 'history' | 'current'
 
 export interface AiLoadErrorView {
   scope: AiLoadErrorScope
@@ -1193,15 +1174,6 @@ export interface AiPreparingRun {
  */
 export type { ContextUsage } from './sse'
 
-/** 分项键（顺序以服务端返回为准；前端只按返回顺序渲染，不重排）。 */
-export type ContextBreakdownKey = 'history' | 'toolResults' | 'summary' | 'system' | 'tools' | 'input' | 'free'
-
-export interface ContextBreakdownItem {
-  key: ContextBreakdownKey | string
-  /** 已用项为归一后的估算（Σ 前六项 == usedTokens）；`free` 为 `limit − used`，可为负 */
-  tokens: number
-}
-
 /** 压缩态（批① 只有 `level=turns=lostTokens=0` 与 `circuit=closed`；字段先定形状，批③ 填值）。 */
 export interface ContextCompaction {
   level: string
@@ -1229,10 +1201,7 @@ export interface ContextSnapshot {
   percent: number | null
   source: 'stream' | 'estimate' | 'none' | string
   estimated: boolean
-  breakdown: ContextBreakdownItem[]
   compaction: ContextCompaction
-  /** `?ledger=1` 时才返回（最近 20 条压缩事件） */
-  ledger?: Record<string, unknown>[]
 }
 
 /* ────────────────────────────────────────────────────────────────────────────

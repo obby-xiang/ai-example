@@ -143,8 +143,6 @@
       }
     },
     "notice": {
-      "resumeRetry": "Resume interrupted, retrying now (attempt {attempt})",
-      "reconnect": "Connection interrupted, reconnecting now (attempt {attempt})",
       "interruptedSuspended": "Connection interrupted, the result may be incomplete ({reason}). The suspended card is kept; refresh to retry.",
       "interruptedKeep": "Connection interrupted, the result may be incomplete ({reason}). Generated content is kept; resend or refresh to keep receiving.",
       "interruptedKeepShort": "Connection interrupted, the result may be incomplete ({reason}). Generated content is kept.",
@@ -173,7 +171,7 @@
       "retryRunUnknown": "Cannot confirm which run this turn belongs to, so retry was stopped. Reload the session and try again.",
       "healthProbeFailed": "AI availability check failed",
       "decisionPending": "Decision submitted, but not yet confirmed by the backend (refresh later to check).",
-      "runExpired": "This run's state has expired under the retention window, so the parked card can no longer be submitted. Refresh the state, or start a new session and ask again.",
+      "runExpired": "This run's state may have expired under the retention window; on submit, the server confirms and marks the card expired.",
       "noPendingDecision": "No pending confirmation request",
       "decisionSubmitting": "This decision was submitted and is syncing…",
       "ackRequired": "This action cannot be undone: tick the confirmation box first",
@@ -187,13 +185,10 @@
       "startJobSyncFailed": "Job #{jobId} started, but the page could not sync it (refresh the job list on the page later)",
       "startJobSyncFailedReason": "Job #{jobId} started, but the page could not sync it: {reason}",
       "sheetLargePlan": "This changes {rows} rows / {cells} cells (more than 200 rows): tick \"I understand the impact\" before applying.",
-      "memoryDeleteFailed": "Failed to delete the old session memory (the new conversation is unaffected)",
-      "sessionPurgeIncomplete": "The old session's AI data has not been fully deleted (the new conversation is unaffected)",
       "sessionIssueFailed": "Session setup failed: no new session could be issued by the server. Please try again later.",
       "directoryFailed": "Failed to load the tenant/user directory (other page actions are unaffected)",
       "directoryEmpty": "The tenant/user directory is empty; sending is paused",
       "staleConfirmCard": "This turn is no longer available. Please ask again.",
-      "copiedNewTab": "A new conversation was started in this tab; the conversation in the original tab is unaffected.",
       "mirrorQuotaExceeded": "The browser mirror could not be written (storage may be full or private mode may be on): this tab's state may not survive a refresh; the server only keeps a 24-hour sliding memory window.",
       "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
@@ -221,37 +216,9 @@
         "definitions": "Definitions",
         "data": "Data browser"
       },
-      "enterPage": "Entered {page}",
-      "exitStep": "Left the current step",
-      "switchStep": "Switched to step \"{step}\"",
-      "unbindTask": "Unbound task",
-      "bindTask": "Bound task #{taskId}",
-      "selectDefs": "Selected definitions: {defs}",
-      "queryConditions": "Set query conditions for {code}",
-      "importMode": "Import mode set to {mode}",
-      "importModeNone": "not set",
-      "importModeMerge": "merge (incremental)",
-      "importModeReplace": "replace (in scope)",
-      "empty": "(none)",
       "task": "Task #{id}",
       "step": "Step {label}",
-      "defsSelected": "{count} definitions selected",
-      "actionFallback": "Workspace state updated",
-      "exportSheetEditAi": "AI wrote changes into the export result sheet (not saved to the server file yet)",
-      "exportSheetEditUser": "Export result sheet modified (not saved to the server file yet)",
-      "importSheetEditAi": "AI wrote changes into the import editor (not written back to the server file yet)",
-      "importSheetEditUser": "Import editor modified (not written back to the server file yet)",
-      "publishConflict": "Publish job #{jobId} has {count} validation conflict(s)",
-      "jobStarted": "Started {jobType} job (task #{taskId})",
-      "jobCancelled": "Cancelled job #{jobId}",
-      "exportStarted": "Export started (task #{taskId})",
-      "importBatch": "Opened import batch #{batchId}",
-      "importAction": "Import batch action {action}{batch}",
-      "importActionBatch": " (batch #{batchId})",
-      "download": "Downloaded file{filename}",
-      "refreshDefs": "Refreshed definitions",
-      "refreshData": "Refreshed data{code}",
-      "refreshTasks": "Refreshed the task list"
+      "defsSelected": "{count} definitions selected"
     },
     "settings": {
       "copy": {
@@ -373,25 +340,7 @@
       "pillAria": "Context usage {percent}%",
       "pillUsageEst": "Context usage ~{percent}%",
       "pillEmpty": "No context usage yet",
-      "pillAriaNoPercent": "Context usage {text}",
-      "used": "Context used {used} tokens",
-      "usedLimit": "Context used {used} / {limit} tokens ({percent}% of limit)",
-      "usedLimitNoPercent": "Context used {used} / {limit} tokens",
-      "estimate": " (estimated: upstream returned no usage)",
-      "warn": "past the light cleanup line",
-      "high": "in the compaction zone (tool results cleared first)",
-      "danger": "near the limit; tool results are cleared before the next request",
-      "detailsAria": "Context usage details",
-      "title": "Context usage",
-      "loading": "Loading usage details…",
-      "loadFailed": "Failed to load usage details",
-      "retry": "Retry",
-      "empty": "No usage data yet",
-      "estimateNote": "This value is an estimate (the upstream returned no usage); it is shown with ≈.",
-      "splitNote": "Items are estimated while the total is billed: items are normalized to the used amount, and the top six add up to the used total.",
-      "close": "Close",
-      "limitUnknown": "limit unknown",
-      "limitOnly": "{limit}: only the used amount is shown; no percentage."
+      "used": "Context used {used} tokens"
     },
     "hitl": {
       "irreversible": "I understand that {action} cannot be undone",
@@ -412,7 +361,6 @@
       "submit": "Submit",
       "submitting": "Submitting…",
       "notRetryable": "This form can no longer be submitted; cancel and ask the assistant to start over",
-      "lockedHint": "This turn is no longer available, so the form cannot be submitted right now. Cancel it, or reload the state / start a new conversation above.",
       "unsupportedType": "Field \"{label}\" has an unsupported type ({type}) and was not rendered",
       "cascadeCleared": "Cleared {fields} — no longer applicable after the change",
       "advancedExpand": "More conditions ({count})",
@@ -468,12 +416,6 @@
       "identityNotReady": "Session not ready: no session has been issued yet, sending is paused",
       "identityRetry": "Retry",
       "collapse": "Collapse",
-      "recheck": "Check again",
-      "available": "Available",
-      "degraded": "Degraded",
-      "untested": "Not checked",
-      "probeFailed": "Health check failed",
-      "probeFailedHint": "AI health check did not succeed. Click “Recheck”; other page features are unaffected.",
       "breathing": "Working…",
       "uploadFallbackLabel": "Upload xlsx / zip",
       "confirmTitle": "Awaiting your confirmation: {business}",
@@ -490,12 +432,7 @@
       "overwriteConfirm": "The input box already has content. Editing will overwrite it. Continue?",
       "modelFallback": "Streaming chat · tool calling",
       "sendNotSentInline": "(this message was not sent: {message})",
-      "runState": {
-        "idle": "Idle",
-        "suspended": "Suspended… (waiting for confirmation or frontend execution)",
-        "generating": "Generating…"
-      },
-      "degradeUnknown": "AI availability has not been detected yet. Click \"Check again\".",
+      "degradeUnknown": "AI availability has not been detected yet. Try again later or contact your administrator.",
       "composer": {
         "near": "Fewer than 500 characters left",
         "limit": "Reached the {max}-character limit",
@@ -513,9 +450,7 @@
       "greeting": "Hello, I am the implementation assistant",
       "logAria": "Conversation messages",
       "storage": {
-        "mirror": "The conversation is kept in this tab's browser mirror and survives a refresh.",
-        "run": "The server keeps this run and its conversation memory for 24 hours (sliding with activity).",
-        "history": "The conversation is only kept in this tab's browser mirror and the server's 24-hour sliding memory window — there is no long-term archive; closing the tab does not stop the run on the server."
+        "note": "Conversations live only in this tab's browser mirror plus the server's 24-hour sliding memory window: refresh restores the tab, and there is no long-term archive."
       },
       "thinking": "Thinking process",
       "thinkingLive": "Thinking",
@@ -570,15 +505,6 @@
       "preparingHint": "The server is setting up this turn; nothing is lost. Wait a moment or retry now.",
       "preparingAria": "Preparing this answer",
       "preparingRetry": "Retry now",
-      "runExpiry": {
-        "countdown": "Run state expires in {time}",
-        "minutes": "Run state expires in about {minutes} min",
-        "hours": "Run state expires in about {hours} h",
-        "expired": "Run state expired (retention window passed)",
-        "expiredHint": "This card can't be submitted right now. The retention window slides with activity, so refresh the state to confirm, or start a new session and ask again.",
-        "reload": "Refresh state",
-        "newChat": "New session"
-      },
       "recoveryGap": "Some content may be incomplete",
       "recoveryGapHint": "This part came from the local cache or incremental replay, so completeness cannot be confirmed. Reload to sync the server state.",
       "reloadTurn": "Reload",
@@ -613,11 +539,7 @@
       "tabSource": "Source",
       "sourceLabel": "Mermaid source",
       "fullscreen": "View fullscreen",
-      "session": "Session {id}",
       "workspace": "Workspace {summary}",
-      "dataVersion": "Data version {version}",
-      "diagnostics": "Diagnostics",
-      "contextSynced": "Workspace synced: {summary}",
       "poolSaturatedDetail": "Handle the conversations that are waiting first (confirm, fill in, or cancel), then try again.",
       "uiEvent": "AI is driving the workspace: {message}",
       "uiOperating": "AI is operating the left workspace: {text}",
@@ -722,14 +644,6 @@
     "dataBrowser": "Data browser",
     "aiSettings": "AI Settings",
     "aiFeedback": "AI Feedback"
-  },
-  "app": {
-    "footer": {
-      "contract": "Workspace contract v{version}",
-      "context": "Context {key}",
-      "dataVersion": "Data version {version}",
-      "collapsedHint": "(The AI panel is collapsed to a 48px rail; all business features remain available.)"
-    }
   },
   "tool": {
     "list_config_defs": {

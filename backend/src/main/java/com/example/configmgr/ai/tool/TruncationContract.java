@@ -12,8 +12,7 @@ import java.util.Map;
  * <h2>为什么要有这一个类</h2>
  * 模型侧（{@link ToolResultLimiter}）与前端/SSE 侧（{@code run/FrameSizeLimiter}）是两条
  * 独立的预算通道（字符 vs 字节），但它们说的是<b>同一件事</b>："这份结果没给你全部"。
- * 此前两侧各用一套字段名（模型侧只有内嵌文本标记、帧侧只有 {@code truncated/truncatedReason}），
- * 前端与排障只能各读各的。本类把字段名钉成<b>单一事实源</b>：
+ * 此前两侧各用一套字段名，前端与排障只能各读各的。本类把字段名钉成<b>单一事实源</b>：
  *
  * <ul>
  * <li>{@code truncated}：是否被截断（bool）；</li>
@@ -23,13 +22,12 @@ import java.util.Map;
  * <li>{@code returnedChars}：截断后实际拿到/返回的字符数；</li>
  * <li>{@code noticeCode}：可选展示码（{@code frame_truncated} / {@code model_view_truncated} /
  * {@code frame_limit_unreached}）—— 新客户端按码 + 数字本地化，不把某种语言烧进历史帧；</li>
- * <li>{@code notice}：旧客户端兼容的人读短句（语言中立的英文降级文案，不含数字/字段名）；
- * 新客户端只在缺 {@code noticeCode}（旧帧）时回落展示。</li>
+ * <li>{@code notice}：<b>仅模型侧标记</b>使用的人读短句（模型可见事实）；
+ * SSE 帧与 HTTP 响应不再下发它，展示侧只读 {@code noticeCode} + 数字字段。</li>
  * </ul>
  *
  * <p>
- * {@link #LEGACY_REASON_FIELD}（{@code truncatedReason}）是 {@code notice} 的<b>兼容别名</b>：
- * 历史段持久化读的是它，本期保留一版、值恒等于 {@code notice}；新代码读
+ * SSE 帧与 HTTP 响应不再写旧别名 {@code truncatedReason}；历史段展示只读
  * {@code noticeCode} + {@code originalChars/returnedChars}。
  *
  * <h2>结构化结果（JSON）不走字符截断</h2>
@@ -53,7 +51,7 @@ public final class TruncationContract {
 	/** 截断后返回的字符数。 */
 	public static final String RETURNED_CHARS_FIELD = "returnedChars";
 
-	/** 人读截断说明（旧客户端兼容；新客户端按 {@link #NOTICE_CODE_FIELD} 本地化）。 */
+	/** 人读截断说明（<b>仅模型侧标记</b>；SSE 帧/HTTP 响应按 {@link #NOTICE_CODE_FIELD} 本地化）。 */
 	public static final String NOTICE_FIELD = "notice";
 
 	/** 可选展示码：新客户端据此选择 locale 模板，不再直接展示 {@link #NOTICE_FIELD}。 */
@@ -67,9 +65,6 @@ public final class TruncationContract {
 
 	/** 模型侧视图被裁，帧内 result 仍为全文。 */
 	public static final String NOTICE_CODE_MODEL_VIEW_TRUNCATED = "model_view_truncated";
-
-	/** {@code notice} 的兼容别名（前端角标/历史段仍读它）。 */
-	public static final String LEGACY_REASON_FIELD = "truncatedReason";
 
 	/** 结构化标记里的头部分片（字符串，非对象本身 —— 保证标记整体是合法 JSON）。 */
 	public static final String PREVIEW_FIELD = "preview";

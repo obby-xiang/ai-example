@@ -78,8 +78,6 @@ public class AiProperties {
 
 	private Input input = new Input();
 
-	private Limit limit = new Limit();
-
 	private Config config = new Config();
 
 	/**
@@ -300,40 +298,6 @@ public class AiProperties {
 					+ ", app.ai.resilience.inter-event-timeout = " + interEvent
 					+ ") + app.ai.resume.zombie-margin（当前 = " + margin + "，即 >= " + required
 					+ "）：否则正在跑长工具/慢吐字的活轮会被判成僵尸并接管（同一轮双执行）");
-		}
-	}
-
-	/**
-	 * 启动期校验 {@code app.ai.limit.*} 必须为正（复审 M1；与上面 {@link #verifySseWriteTimeout()} 同一姿态）。
-	 *
-	 * <p>
-	 * 两个键配错都不是"性能降级"，而是<b>语义被静默改写</b>：
-	 * <ul>
-	 * <li>{@code session-per-minute / ip-per-minute ≤ 0}：Lua 判 {@code count < limit} 恒假 ⇒ <b>每条</b>
-	 * {@code /chat} 都 429 —— 配置面看起来是"限流"，运行面是"关掉对话"；</li>
-	 * <li>{@code window ≤ 0}：{@code PEXPIRE 0} 会立刻删键 ⇒ 计数永远归零、限流<b>静默失效</b>
-	 * （运维以为有闸，实际没有 —— 比报错更危险）。</li>
-	 * </ul>
-	 * 故启动即失败，并点名具体键与当前值。
-	 */
-	@PostConstruct
-	void verifyRateLimit() {
-		Limit limit = this.limit;
-		if (limit == null) {
-			throw new IllegalStateException("app.ai.limit 段缺失（绑定为 null）：限流无法装配，启动失败");
-		}
-		if (limit.getSessionPerMinute() <= 0) {
-			throw new IllegalStateException("app.ai.limit.session-per-minute 必须 > 0（当前 = "
-					+ limit.getSessionPerMinute() + "）：0/负值会让每条 /chat 都 429（等于关掉对话）");
-		}
-		if (limit.getIpPerMinute() <= 0) {
-			throw new IllegalStateException("app.ai.limit.ip-per-minute 必须 > 0（当前 = " + limit.getIpPerMinute()
-					+ "）：0/负值会让每个来源的每条 /chat 都 429（等于关掉对话）");
-		}
-		Duration window = limit.getWindow();
-		if (window == null || window.isZero() || window.isNegative()) {
-			throw new IllegalStateException("app.ai.limit.window 必须 > 0（当前 = " + window
-					+ "）：Lua 的 PEXPIRE 0/负值会立刻删键 ⇒ 计数永远归零、限流静默失效");
 		}
 	}
 
@@ -1023,9 +987,9 @@ public class AiProperties {
 		/**
 		 * 自动重试的<b>周期注册</b>开关（缺省 {@code true} = 生产原样）。
 		 *
-		 * <p>只管"是否按周期（30s）把 pending 收敛到 complete"，<b>不</b>碰启动期 SCAN 恢复
-		 * （{@code ApplicationReadyEvent} 先 {@code recoverOrphans}，再由本键决定是否注册周期），
-		 * 也不碰同步入口 {@code SessionPurgeRetryRunner#runOnce()}。
+		 * <p>只管"是否按周期（30s）把 pending 收敛到 complete"，不碰同步入口
+		 * {@code SessionPurgeRetryRunner#runOnce()}；到期项本身持久在
+		 * {@code ai:purge:retry:due} ZSET 里，关掉周期不会丢台账。
 		 *
 		 * <p>关闭的用途只有一类：单测（{@code src/test/resources/application.properties}）。周期线程在
 		 * Spring 上下文缓存后跨测试类续跑，而倒排录制按"测试类墙钟窗口"归因（线程无关）⇒ 清理触达会被
@@ -1072,7 +1036,7 @@ public class AiProperties {
 		 * <p>
 		 * 写出器与注册表都引用本常量（S3-1 修复批：此前 256 同时写在本类与 {@code SseChatEmitter}
 		 * 两处，改坏一处不必然变红）。R1 不变量：本值 &lt; 归档窗口
-		 * {@code RunStore#EVENT_WINDOW}（只约束实时段，回放初始批豁免）。
+		 * {@code RedisFrameStore#STREAM_WINDOW}（只约束实时段，回放初始批豁免）。
 		 *
 		 * <p>
 		 * <b>T3-5 压测定值（2026-10-09）：维持 256</b>；双向实测依据见
@@ -1085,8 +1049,8 @@ public class AiProperties {
 		 * 每订阅者<b>实时</b>投递队列容量（缺省 {@link #DEFAULT_DELIVERY_QUEUE_CAPACITY}）。
 		 *
 		 * <p>
-		 * R1 不变量：队列容量 &lt; 归档窗口 3000（只约束实时段）；回放初始批豁免本容量，
-		 * 上界 = 归档窗口 {@code EVENT_WINDOW}。溢出即摘除（主动断连）+ complete。
+		 * R1 不变量：队列容量 &lt; Stream 归档窗口（只约束实时段）；回放初始批豁免本容量，
+		 * 上界 = 归档窗口 {@code RedisFrameStore#STREAM_WINDOW}。溢出即摘除（主动断连）+ complete。
 		 * <b>判据口径（修复批第 2 轮）</b>：闸判「该订阅者队列中的<b>实时</b>帧条数」，
 		 * <b>不</b>判队列绝对长度 —— 回放批与实时帧共用同一条队列（单队列 FIFO 混合序），
 		 * 回放帧不计入本容量。
@@ -1343,32 +1307,6 @@ public class AiProperties {
 	}
 
 	/**
-	 * 限流（安全防护专项批① §5.1 #3）：{@code /api/ai/chat} 的双维度滑动窗口。
-	 *
-	 * <p>
-	 * 计数落在 Redis（{@code ai:rate:session:*} / {@code ai:rate:ip:*}），用 B23L1 已有的 Redis
-	 * 原语（单键 Lua 原子），<b>不要</b>另起进程内计数：多实例下进程内计数每实例各算一份，等于把
-	 * 额度放大 N 倍（§6.4）。
-	 *
-	 * <p>
-	 * 取值口径（用户裁决 A5 草值）：会话 20 次/分 —— 本仓单用户、一轮对话动辄数秒，
-	 * 20 次/分已远超正常手速，只拦"脚本连发"；IP 60 次/分 —— 兜住"换 sessionId 绕会话额度"，
-	 * 也是 E2E（21 次 {@code /chat} 全程）不会被误伤的量级。
-	 */
-	@Data
-	public static class Limit {
-
-		/** 同一 sessionId 每窗口允许的对话请求数。 */
-		private int sessionPerMinute = 20;
-
-		/** 同一来源 IP 每窗口允许的对话请求数。 */
-		private int ipPerMinute = 60;
-
-		/** 窗口长度（滑动窗口：计数按时间戳落 ZSET，窗口滑过即回收额度）。 */
-		private Duration window = Duration.ofMinutes(1);
-	}
-
-	/**
 	 * 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7 的 11 个键）。
 	 *
 	 * <p>
@@ -1376,7 +1314,7 @@ public class AiProperties {
 	 * 逐行登记了依据 —— "为什么是 128000 / 13000 / 70-80-95 / 60"这些结论不能只活在代码注释里。
 	 *
 	 * <p>
-	 * <b>启动期校验</b>见 {@link AiProperties#verifyContext()}：与 limit/SSE 两段同一姿态 ——
+	 * <b>启动期校验</b>见 {@link AiProperties#verifyContext()}：与 SSE 段同一姿态 ——
 	 * 0/负值不是"性能降级"而是语义被静默改写（例如 {@code reserve >= limit} 会让分母变成 1，
 	 * 任何一轮都判"已满"、每轮都压缩）。
 	 *

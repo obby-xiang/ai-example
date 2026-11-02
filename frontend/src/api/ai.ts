@@ -26,7 +26,6 @@ import type {
   ConfirmResult,
   FrontendToolResultAck,
   FrontendToolResultRequest,
-  RunDescription,
   StreamCloseInfo
 } from '@/types/ai'
 
@@ -171,11 +170,6 @@ export function cancel(runId: string, config?: AxiosRequestConfig): Promise<AiCa
   return post<AiCancelResult>(`/ai/cancel/${encodeURIComponent(runId)}`, undefined, config)
 }
 
-/** GET /api/ai/cancel/{runId}（取消标志现状，取证用）。 */
-export function cancelStatus(runId: string): Promise<Record<string, unknown>> {
-  return get<Record<string, unknown>>(`/ai/cancel/${encodeURIComponent(runId)}`)
-}
-
 /** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。 */
 export function history(sessionId: string): Promise<AiHistory> {
   return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}`)
@@ -252,26 +246,21 @@ function unwrapApiData(body: unknown): unknown {
 }
 
 /**
- * GET /api/ai/context/{sessionId}（上下文占用：刷新恢复 / 展开分项 / 挂起态）。
+ * GET /api/ai/context/{sessionId}（上下文占用摘要：刷新恢复）。
  *
  * 姿态与 `/history` 同族：只读、不查 AI key；Redis 不可用或计量未装配时后端回 503
- * （调用方按"没有数据"降级，**不得**把它当成"用了 0"）。
- *
- * @param ledger 是否附带最近 20 条压缩台账（运维面；默认不带）
+ * （调用方保持现状，**不得**把它当成"用了 0"）。七项拆分 / 压缩台账已不再消费。
  */
-export function getContext(sessionId: string, ledger = false): Promise<ContextSnapshot> {
-  const query = ledger ? '?ledger=1' : ''
-  return get<ContextSnapshot>(`/ai/context/${encodeURIComponent(sessionId)}${query}`)
+export function getContext(sessionId: string): Promise<ContextSnapshot> {
+  return get<ContextSnapshot>(`/ai/context/${encodeURIComponent(sessionId)}`)
 }
 
 /**
  * DELETE /api/ai/session/{sessionId}（「新建对话」= 完整会话销毁）。
  *
- * 旧 `DELETE /api/ai/history/{sessionId}` 在后端也映射到同一 purge 语义；前端走新路径。
  * 幂等：会话不存在 / 重复删除也返回 200（裸 Map，不套 ApiResponse 信封），故调用方不需要
- * 区分"删过没删过"，也不需要处理 404。旧字段（sessionId/deleted/existed/memoryKey/
- * removedFromIndex/runActive/activeRunId/storedBy/note）保留，新增 complete/deferred/errors/
- * clientCleanup 由调用方消费：`complete=false` 必须提示"未删净"。
+ * 区分"删过没删过"，也不需要处理 404。`complete/deferred/errors/clientCleanup` 由调用方消费：
+ * 本地只按 `clientCleanup` 精确清理，销毁进度本身是后台语义。
  */
 export function deleteHistory(sessionId: string): Promise<SessionPurgeResponse> {
   return del<SessionPurgeResponse>(`/ai/session/${encodeURIComponent(sessionId)}`)
@@ -297,21 +286,6 @@ export async function health(): Promise<AiHealth> {
   }
 }
 
-/** GET /api/ai/runs（发现待续跑轮次）。 */
-export function runs(): Promise<RunDescription[]> {
-  return get<RunDescription[]>('/ai/runs')
-}
-
-/** GET /api/ai/runs/{runId}（单轮明细）。 */
-export function run(runId: string): Promise<RunDescription> {
-  return get<RunDescription>(`/ai/runs/${encodeURIComponent(runId)}`)
-}
-
-/** POST /api/ai/runs/{runId}/resume（续跑；202=已受理，200=已终态，503=池饱和）。 */
-export function resume(runId: string): Promise<Record<string, unknown>> {
-  return post<Record<string, unknown>>(`/ai/runs/${encodeURIComponent(runId)}/resume`)
-}
-
 /**
  * POST /api/ai/runs/{runId}/retry-model-step（批次2 / AR-05：仅模型步重跑）。
  *
@@ -322,14 +296,6 @@ export function resume(runId: string): Promise<Record<string, unknown>> {
 export function retryModelStep(runId: string): Promise<Record<string, unknown>> {
   return post<Record<string, unknown>>(`/ai/runs/${encodeURIComponent(runId)}/retry-model-step`)
 }
-
-/** GET /api/ai/pending/{runId}（挂起项快照，诊断用）。 */
-export function pending(runId: string): Promise<PendingSnapshot[]> {
-  return get<PendingSnapshot[]>(`/ai/pending/${encodeURIComponent(runId)}`)
-}
-
-/** 挂起项快照的宽松形态（后端为 PendingToolCall#asMap）。 */
-export type PendingSnapshot = Record<string, unknown>
 
 /**
  * GET /api/ai/runs/current?sessionId=（T2b-D#3：刷新后挂起快照重建的数据源）。
@@ -347,16 +313,11 @@ export const aiApi = {
   confirm,
   frontendToolResult,
   cancel,
-  cancelStatus,
   history,
   getContext,
   deleteHistory,
   health,
-  runs,
-  run,
-  resume,
   retryModelStep,
-  pending,
   runsCurrent,
   feedbackSubmit,
   feedbackList

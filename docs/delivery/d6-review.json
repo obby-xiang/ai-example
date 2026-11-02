@@ -217,6 +217,13 @@
       "reason": "已合并同步显式空对象不设筛选、条件收集失败拒绝、混批拒绝、空数组非全量、条件幂等与全部记忆压缩并发契约",
       "reviewedAt": "2026-10-31",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:b84742a6b07e9dad69dfd0e815ed9485daca5ef51dd441a676145425fbf4fec8",
+      "status": "synced",
+      "reason": "已同步移除应用内限流及可信代理配套、帧日志Stream单轨、12个run核心键、销毁会话索引与ZSET到期重试、精确唤醒句柄及前端精简契约",
+      "reviewedAt": "2026-11-02",
+      "reviewer": "Kimi主控"
     }
   ]
 }

@@ -183,9 +183,6 @@ export const SseFrameTypes = [
 
 export type SseFrameType = (typeof SseFrameTypes)[number]
 
-/** 前向兼容的思考链帧名（裁决⑦；后端当前不产出，故不在上面的实测白名单里）。 */
-export const REASONING_FRAME_TYPE = 'reasoning'
-
 /**
  * 超时阶段（批次3 / AR-06）：三种收尾失败必须能被调用方区分，不能一律说成"断流"。
  *
@@ -204,7 +201,7 @@ export type SseTimeoutStage = 'connect' | 'first-frame' | 'idle'
 /**
  * 截断展示码（A10 R-15 I-3，additive 可选键，不是新帧型）。
  *
- * 新客户端据此选 locale 模板；`notice`/`truncatedReason` 只作旧客户端兼容字段。
+ * 展示层据此选 locale 模板，并与 `originalChars/returnedChars` 拼装文案。
  */
 export type TruncationNoticeCode = 'frame_truncated' | 'frame_limit_unreached' | 'model_view_truncated'
 
@@ -237,10 +234,6 @@ export interface SseFrameBase {
   returnedChars?: number
   /** head / tail / head_tail（结构化字段；展示层不直接展示）。 */
   strategy?: string | null
-  /** 旧客户端兼容的人读短句（新客户端只在缺 `noticeCode` 时展示）。 */
-  notice?: string | null
-  /** `notice` 的兼容别名（旧帧/历史段仍读它）。 */
-  truncatedReason?: string | null
 }
 
 /** 首包：runId 由服务端生成，前端据此做 reattach。 */
@@ -344,18 +337,6 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   args?: string
   /** 与 args 同值（后端同时放了两份，供展示摘要用） */
   summary?: string
-  /**
-   * 挂起等待上限（秒）。**可选**：去超时裁决（2026-10-20）后确认门不再超时，后端帧已不带本字段；
-   * 仅历史归档帧 / 旧后端可能携带，前端不再据此折算倒计时或本地超时。
-   */
-  timeoutSeconds?: number
-  /**
-   * DC-14 T4：挂起等待的**绝对**到期时刻（epoch 毫秒 = 帧内 `atMs` + timeoutSeconds，服务端单点取钟）。
-   *
-   * 去超时裁决（2026-10-20）：前端不再据此折算倒计时 / 本地超时，本字段随帧照原样透出，
-   * 仅供对账 / 回滚。
-   */
-  expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
   callback?: string
   /** H1 确认门预检摘要（可选增量；缺省 = 旧帧，门卡不渲染预检区） */
@@ -375,9 +356,11 @@ export interface SseConfirmDecisionFrame extends SseFrameBase {
   type: 'confirm_decision'
   toolCallId: string
   name: string
-  /** 决策原文（如 APPROVED/REJECTED/TIMEOUT） */
+  /**
+   * 决策值（后端 `SseChatEmitter#confirmDecision` 实发）：`approve` / `reject` / `cancel`。
+   * （确认门去超时后不再发 `timeout` 帧；旧注释里的 APPROVED/REJECTED 是内部状态名，不是本字段值。）
+   */
   decision: string
-  approved: boolean
   status: PendingStatus | string
   reason?: string | null
   waitedMs?: number
@@ -399,7 +382,7 @@ export interface SseFrontendToolRequestFrame extends SseFrameBase {
    * 帧里不带本字段（去超时裁决 2026-10-20）；有值的即时执行类工具仍成对下发。
    */
   timeoutSeconds?: number
-  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；与 `timeoutSeconds` 成对出现（无上限时缺省），见 `SseConfirmRequestFrame.expiresAt` */
+  /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；与 `timeoutSeconds` 成对出现（无上限时缺省）。 */
   expiresAt?: number
   /** 回调端点说明文本：POST /api/ai/frontend-tool-result {runId, toolCallId, result} */
   callback?: string
@@ -474,37 +457,7 @@ export interface SseHeartbeatFrame extends SseFrameBase {
    * 仅保活的心跳），前端不得编造数字。
    */
   elapsedMs?: number
-  /** 兼容字段：与 `elapsedMs / 1000` 同义的整秒数（有 `elapsedMs` 时以它为准）。 */
-  elapsedSeconds?: number
   [key: string]: unknown
-}
-
-/**
- * 思考链增量的**历史/前向兼容**形态（裁决⑦：**有思考才有块**，无思考不显示空的"思考过程"折叠块）。
- *
- * <p>
- * L-91（2026-10-23）起后端不再需要独立帧型：上游 `reasoning_content` 经
- * `delta{kind:'reasoning'}` + `message_start/message_end{kind:'reasoning'}` 透传，
- * 帧类型集仍是 16。本接口保留是因为**线上仍可能有旧桩/旧归档**发过 `type:'reasoning'`，
- * 且 `toSseFrame` 对它是放行的（未知帧静默丢弃会让旧流少一段思考）——store/parts 对两种形态
- * 都有承接（`case 'reasoning'` 与 `case 'delta'` 的 kind 分流）。
- *
- * 新代码请按 `SseDeltaFrame.kind === 'reasoning'` 解析；不要新增 `type:'reasoning'` 的发射点
- * （后端 `FrameTypeSetFrozenTest` 会红）。
- */
-export interface SseReasoningFrame {
-  type: 'reasoning'
-  runId?: string
-  /** 思考链增量文本 */
-  text: string
-  /**
-   * 帧的**服务端构造时刻**（epoch 毫秒；与 `SseFrameBase.atMs` 同口径、同钟）。
-   *
-   * 本帧不在 `SseFrameTypes` 白名单里（旧流 / 旧归档形态），故没有继承 `SseFrameBase`；
-   * 但思考计时链（`parts.ts` 的 `noteReasoningFrame` / `sealStreamPart`）要按帧取这个时刻
-   * —— 缺键 = 旧帧，思考段按"无起点"处理，绝不拿本地 now 补造。
-   */
-  atMs?: number
 }
 
 /** 断流重试公告（本轮无正文产出时才会重试）。键集不固定。 */
@@ -611,16 +564,13 @@ export interface SseErrorFrame extends SseFrameBase {
 }
 
 /**
- * 一轮对话的 SSE 帧判别联合（后端 **16** 类 + 前向兼容的旧 `reasoning` 帧）。
- *
- * 思考段自 L-91 起走 `delta{kind:'reasoning'}`（帧型不增），`SseReasoningFrame` 只兜旧流。
+ * 一轮对话的 SSE 帧判别联合（后端 16 类；思考段走 `delta{kind:'reasoning'}`，不另设帧型）。
  */
 export type SseFrame =
   | SseStartFrame
   | SseContextFrame
   | SseMessageBoundaryFrame
   | SseDeltaFrame
-  | SseReasoningFrame
   | SseToolStartFrame
   | SseToolResultFrame
   | SseConfirmRequestFrame
@@ -638,7 +588,7 @@ export function isTerminalFrame(frame: SseFrame): frame is SseDoneFrame | SseErr
   return frame.type === 'done' || frame.type === 'error'
 }
 
-/** 运行时校验：把任意 JSON 值收窄为 SseFrame（type 命中后端白名单或前向兼容帧）。 */
+/** 运行时校验：把任意 JSON 值收窄为 SseFrame（只认后端白名单，未知帧丢弃）。 */
 export function toSseFrame(value: unknown): SseFrame | null {
   if (!value || typeof value !== 'object') {
     return null
@@ -646,9 +596,6 @@ export function toSseFrame(value: unknown): SseFrame | null {
   const candidate = value as { type?: unknown }
   if (typeof candidate.type !== 'string') {
     return null
-  }
-  if (candidate.type === REASONING_FRAME_TYPE) {
-    return value as SseReasoningFrame
   }
   return (SseFrameTypes as readonly string[]).includes(candidate.type) ? (value as SseFrame) : null
 }

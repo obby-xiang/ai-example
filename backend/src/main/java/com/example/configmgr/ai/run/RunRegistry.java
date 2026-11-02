@@ -29,9 +29,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * 这正是 M3 与 ADR-5 reattach 的咬合点。
  *
  * <p>
- * <b>B23L1 批①（2026-10-21）</b>：Spring 装配路径（{@code @Autowired} 六参构造）给写出器注入
- * 事件日志 + 唤醒发布 + 唤醒订阅三件套 ⇒ 单/多实例同一套代码；非 Spring/单测的三参构造
- * 退回兼容口径（LIST 写、不跨实例广播），既有帧序用例的确定性不受影响。
+ * <b>B23L1 批①（2026-10-21）</b>：Spring 装配路径（{@code @Autowired} 构造）给写出器注入
+ * 事件日志 + 唤醒发布 + 唤醒订阅三件套 ⇒ 单/多实例同一套代码；写出器的事件日志恒为
+ * {@link RedisFrameStore}。
  *
  * <p>
  * T3-1：持有 AiProperties 的构造（Spring 装配路径）会用 {@code app.ai.sse.*} 配置并启用
@@ -83,7 +83,7 @@ public class RunRegistry {
 	 * 本注册表创建写出器时使用的投递执行器。
 	 *
 	 * <p>
-	 * <b>口径（S2-1 修复批）</b>：Spring 三参装配路径（{@code properties != null}）用进程级共享
+	 * <b>口径（S2-1 修复批）</b>：Spring 生产装配（{@code properties != null}）用进程级共享
 	 * 有界投递池（异步，快慢订阅者隔离）；显式传 {@code null} 的非 Spring/单测路径<b>固定同步直执</b>，
 	 * 不读进程静态池 —— 静态池一旦被 {@code @SpringBootTest} 装配，该路径就会由"同步直执"
 	 * 悄悄变异步投递，同一 JVM 内出现测试顺序相关竞态（帧序用例要求"发完即到"）。
@@ -94,7 +94,7 @@ public class RunRegistry {
 	 * 写出<b>超时预算</b>（包②：SSE 写侧超时预算）。
 	 *
 	 * <p>
-	 * 口径与投递执行器一致（S2-1）：Spring 三参装配路径用<b>进程级弹性写出池</b> +
+	 * 口径与投递执行器一致（S2-1）：Spring 生产装配用<b>进程级弹性写出池</b> +
 	 * {@code app.ai.sse.write-timeout}；显式传 {@code null} 的非 Spring/单测路径固定 {@link SseWriteBudget#direct()}
 	 * —— 不读进程静态池，避免"同一 JVM 内测试顺序相关"（理由同 {@link #deliveryExecutor}）。
 	 */
@@ -113,38 +113,15 @@ public class RunRegistry {
 	private final FrameWakeListener wakeListener;
 
 	/**
-	 * 是否"本轮记录身份是唯一权威"（生产装配 = Spring 注入的那个构造；见 {@link #newEmitter}）。
-	 *
-	 * <p>关闭时（三参/六参的轻装配与单测）写出器在"没有取键提示"时仍按 legacy 键写 ——
-	 * 那里的 legacy 是唯一命名空间；打开时必须 fail-closed（绝不写第二套归档）。
-	 */
-	private final boolean recordIdentityRequired;
-
-	/**
-	 * 非 Spring/单测装配（三参）：事件日志走 {@code ai:events:} LIST 兼容口径、不跨实例唤醒。
-	 *
-	 * <p>
-	 * 保留它是为了让 {@code new RunRegistry(store, mapper, null)} 这类 conformance 装配
-	 * （外置状态面 = {@code InMemoryRunStore}）零改动；Spring 装配<b>不会</b>选这个构造器
-	 * （{@code @Autowired} 在六参构造上）。
-	 */
-	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties) {
-		this(store, objectMapper, properties, null, null, null);
-	}
-
-	/**
 	 * 生产装配（B23L1 批①）：写出器一律拿到 Redis Stream 事件日志 + wake 扇出。
 	 *
 	 * <p>
-	 * {@code frames/wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时写出器
-	 * 退回兼容口径（LIST 写、不跨实例广播），语义与 B1 收官一致。
-	 *
-	 * <p><b>轻装配（三参/六参）不是"记录身份唯一权威"的口径</b>：这里的 legacy 命名空间是唯一命名空间，
-	 * 写出器在"没有取键提示"时继续按 legacy 键写（与改造前逐字一致）。
+	 * {@code wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时只保留单实例行为，
+	 * 事件日志仍恒为 {@link RedisFrameStore}（不存在第二套事件日志写口）。
 	 */
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
-		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null, false);
+		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null);
 	}
 
 	/**
@@ -160,21 +137,13 @@ public class RunRegistry {
 	@Autowired
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
 			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter) {
-		this(store, objectMapper, properties, frames, wakeBus, wakeListener, resultLimiter, true);
-	}
-
-	/** 全部字段的唯一赋值点；{@code recordIdentityRequired} 只由两条装配路径决定（见上面两个构造器）。 */
-	private RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
-			FrameWakeBus wakeBus, FrameWakeListener wakeListener, ToolResultLimiter resultLimiter,
-			boolean recordIdentityRequired) {
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
-		this.frames = frames;
+		this.frames = java.util.Objects.requireNonNull(frames, "事件日志 FrameStore 不得为空");
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
-		this.recordIdentityRequired = recordIdentityRequired;
-		// 非 Spring 装配（三参/六参）也要有模型侧标注：裁剪器是无状态、纯配置驱动的，
+		// 轻装配/单测也要有模型侧标注：裁剪器是无状态、纯配置驱动的，
 		// 这里按同一份 AiProperties 现造一个，判定与 Spring 注入的 bean 完全一致。
 		this.resultLimiter = resultLimiter != null || properties == null ? resultLimiter
 				: new ToolResultLimiter(properties);
@@ -221,21 +190,15 @@ public class RunRegistry {
 	 * 保活调度器由 {@link SseChatEmitter#sharedAttachKeepaliveScheduler()} 提供（进程级单守护线程）。
 	 */
 	private SseChatEmitter newEmitter(String runId, int queueCapacity, int maxFrameBytes) {
-		SseChatEmitter emitter = this.frames == null
-				? new SseChatEmitter(runId, this.store, RunStoreFrameStore.of(this.store), this.objectMapper,
-						this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, null, null,
-						this.resultLimiter)
-				: new SseChatEmitter(runId, this.store, this.frames, this.objectMapper, this.deliveryExecutor,
-						queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus, this.wakeListener,
-						this.resultLimiter);
+		SseChatEmitter emitter = new SseChatEmitter(runId, this.store, this.frames, this.objectMapper,
+				this.deliveryExecutor, queueCapacity, maxFrameBytes, this.writeBudget, this.wakeBus,
+				this.wakeListener, this.resultLimiter);
 		if (this.properties != null) {
 			emitter.enableAttachKeepalive(SseChatEmitter.sharedAttachKeepaliveScheduler());
 		}
-		if (this.recordIdentityRequired) {
-			// 生产装配：本轮身份只认记录。没有取键提示时按"身份不可确认"失败，绝不写 legacy 键族
-			// （见 SseChatEmitter#recordIdentityRequired）。
-			emitter.requireRecordIdentity();
-		}
+		// 本轮身份只认记录。没有取键提示时按"身份不可确认"失败，绝不写 legacy 键族
+		// （见 SseChatEmitter#recordIdentityRequired）。
+		emitter.requireRecordIdentity();
 		return emitter;
 	}
 

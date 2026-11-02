@@ -50,7 +50,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@code GET /api/ai/events/{runId}} 可以挂到同一个写出器上继续收流
  * （ADR-5 补记：409 携 runId + reattach 重挂进行中轮的流）；</li>
  * <li><b>每帧同时外置</b>：帧原文进事件日志（B23L1 批① 起 = {@link FrameStore}，生产实现是
- * Redis Stream {@code ai:xevents:<runId>}；兼容期还会双读旧的 {@code ai:events:<runId>} LIST），
+ * Redis Stream {@code ai:xevents:<runId>}），
  * 于是"进程在挂起期死亡"不再连 SSE 时序一起丢，重挂时先回放外置帧再续接实时帧。</li>
  * </ol>
  *
@@ -161,9 +161,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * （与终态回放路径同一口径），异步 drain 因此不会在队列还留着尾帧（{@code done}/{@code error}/
  * {@code suspended}）时被 {@code emitter.complete()} 抢断；收尾不阻塞调用线程（生产调用点是
  * 轮终态线程的 {@code finally}，同步等排空会拖住轮次收尾）；</li>
- * <li><b>回放批豁免（R1 裁决）</b>：{@code replayAndAttach} 锁内收集回放帧（{@code LRANGE}
- * 只读，不做 IO 写）入队不受实时容量 256 约束，上界 = 归档窗口 {@code EVENT_WINDOW}
- * （3000，{@code RunStore#events} 天然裁剪）——"队列容量 &lt; 归档窗口"不变量只约束实时段；</li>
+ * <li><b>回放批豁免（R1 裁决）</b>：{@code replayAndAttach} 锁内收集回放帧（{@code XRANGE}
+ * 只读，不做 IO 写）入队不受实时容量 256 约束，上界 = Stream 归档窗口
+ * （{@link RedisFrameStore#STREAM_WINDOW}，写侧 {@code MAXLEN ~} 天然裁剪）——
+ * "队列容量 &lt; 归档窗口"不变量只约束实时段；</li>
  * <li><b>重挂收尾口径（L-143）</b>：快照终态的写入早于 {@code done} 落档，故 {@code terminal}
  * 参数不决定是否订阅 —— <b>归档里有没有终帧</b>才决定"回放完收尾"还是"留挂等实时终帧"；
  * 差量空回放但 {@code lastSeq == done.seq} 由尾部探测关闭。保留挂接的边界：进程若死在
@@ -238,8 +239,7 @@ public class SseChatEmitter {
 	/**
 	 * B23L1 批①：事件日志（取号 + 落档 + 按号回读）。
 	 *
-	 * <p>生产装配（{@link RunRegistry} 的 Spring 路径）恒为 {@link RedisFrameStore}；
-	 * 非 Spring/单测路径由兼容构造器注入 {@code ai:events:} LIST 口径的实现（见构造器注释）。
+	 * <p>生产装配恒为 {@link RedisFrameStore}（单/多实例同一实现）；写出器没有第二套事件日志实现。
 	 */
 	private final FrameStore frames;
 
@@ -251,7 +251,7 @@ public class SseChatEmitter {
 
 	private final ObjectMapper objectMapper;
 
-	/** T3-1：本写出器的投递执行器。生产 = 共享有界投递池；三参构造（测试/非 Spring）= 同步直执。 */
+	/** T3-1：本写出器的投递执行器。生产 = 共享有界投递池；轻装配（测试）= 同步直执。 */
 	private final Executor deliveryExecutor;
 
 	/**
@@ -291,7 +291,7 @@ public class SseChatEmitter {
 	private boolean identityResolved;
 
 	/**
-	 * <b>本轮记录身份是唯一权威</b>（生产装配标记；由 {@link RunRegistry} 的生产构造打开）。
+	 * <b>本轮记录身份是唯一权威</b>（生产装配标记；{@link RunRegistry} 创建写出器时打开）。
 	 *
 	 * <p>打开后，"没有取键提示"（{@link #requestIdentityHint} 为 {@code null}）不再被当成
 	 * "确认这一轮没有身份"：拼不出记录键 ⇒ 身份<b>不可确认</b>，调用方按既有失败分支处理
@@ -299,8 +299,8 @@ public class SseChatEmitter {
 	 * {@code ai:xevents:{run:<id>}} 与本轮真实的 {@code ai:xevents:{<t>:<u>:run:<id>}} 是两套归档，
 	 * 写进前者等于"帧发出去了但重挂/唤醒读不到"。
 	 *
-	 * <p>不打开（轻装配/单测的三参、六参 {@link RunRegistry}）：legacy 命名空间是<b>唯一</b>命名空间，
-	 * 不存在两套归档分叉，行为与改造前逐字一致。
+	 * <p>不打开（测试直接构造写出器）：legacy 命名空间是<b>唯一</b>命名空间，
+	 * 不存在两套归档分叉。
 	 */
 	private volatile boolean recordIdentityRequired;
 
@@ -323,8 +323,8 @@ public class SseChatEmitter {
 	 *
 	 * <p>出帧路径在"取号 → 落档 → 入队"之前调用 {@link FrameSizeLimiter#apply}：
 	 * 超限帧按<b>字段级</b>降采样并挂统一截断字段（{@code truncated/noticeCode/strategy/
-	 * originalChars/returnedChars/notice}，{@code truncatedReason} 为兼容别名），
-	 * 归档与投递拿到的是同一份截断后帧（重挂回放与实时流不会分叉）。
+	 * originalChars/returnedChars}），归档与投递拿到的是同一份截断后帧
+	 * （重挂回放与实时流不会分叉）。
 	 *
 	 * <p><b>截断专项（2026-10-25）</b>：流式正文（{@code delta.text}，含 {@code kind=reasoning}）
 	 * <b>不进</b>这条字段级截断 —— 它在 {@link #emitDeltaText} 里先按本上限拆成多条既有
@@ -548,42 +548,7 @@ public class SseChatEmitter {
 	/** 回收钩子只跑一次（终态排空可能被多条路径并发观察到）。 */
 	private final AtomicBoolean recycled = new AtomicBoolean();
 
-	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper) {
-		this(runId, store, objectMapper, Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
-	}
-
-	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
-			int queueCapacity) {
-		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
-	}
-
-	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
-			int queueCapacity, int maxFrameBytes) {
-		this(runId, store, objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes, SseWriteBudget.direct());
-	}
-
-	/**
-	 * 全参构造（包②：显式注入写超时预算）。
-	 *
-	 * <p>
-	 * 与投递执行器同口径（S2-1）：预算必须<b>显式传入</b>，绝不隐式读进程静态池 ——
-	 * 否则同一 JVM 内测试顺序会让"直执"悄悄变异步投递（帧序用例要求"发完即到"）。
-	 *
-	 * <p>
-	 * <b>B23L1 批①：事件日志走兼容口径</b>（{@code ai:events:} LIST，号锚 =
-	 * max(归档末帧, ai:seq)）——它的语义逐字等于 B1 收官行为，既有帧序/conformance 用例
-	 * （外置状态面是 {@code InMemoryRunStore} 之类 LIST 替身）因此零改动。
-	 * 生产装配不经过本构造器：{@link RunRegistry} 的 Spring 路径恒注入
-	 * {@link RedisFrameStore}（单/多实例同一实现），见下一个构造器。
-	 */
-	public SseChatEmitter(String runId, RunStore store, ObjectMapper objectMapper, Executor deliveryExecutor,
-			int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget) {
-		this(runId, store, RunStoreFrameStore.of(store), objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes,
-				writeBudget, null, null);
-	}
-
-	/** 便捷构造（B23L1 测试/非 Spring 装配：显式给事件日志，无跨实例唤醒）。 */
+	/** 便捷构造（显式给事件日志，无跨实例唤醒）。 */
 	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper) {
 		this(runId, store, frames, objectMapper, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
@@ -653,7 +618,7 @@ public class SseChatEmitter {
 
 	/**
 	 * 本写出器每订阅者的实时队列容量（单一事实源 = {@link AiProperties.Sse#DEFAULT_DELIVERY_QUEUE_CAPACITY}，
-	 * 三参构造与注册表两条装配路径都取它）。
+	 * 生产装配取它）。
 	 *
 	 * <p>
 	 * 包内可见：只给"队列容量 &lt; 归档窗口"不变量断言用（S3-1 修复批的测试锚点）——
@@ -1215,8 +1180,7 @@ public class SseChatEmitter {
 					plan = stageReplay(sub, lastSeq);
 				}
 				catch (RuntimeException ex) {
-					// M-2：回放读取抛异常（兼容读口 RunStoreFrameStore 不在 FrameStore#readFrom 的
-					// "不抛"承诺内）时，刚挂上的订阅必须摘掉：它留在订阅表里会挡住唤醒订阅的释放，
+					// M-2：回放读取抛异常时，刚挂上的订阅必须摘掉：它留在订阅表里会挡住唤醒订阅的释放，
 					// 而这条连接根本不会交给客户端（异常让 controller 走错误响应）。
 					// 异常原样上抛，由 API 层决定 5xx。
 					closeSubscription(sub, "回放读取异常：" + ex.getClass().getSimpleName());
@@ -1551,12 +1515,12 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * <b>R1 裁决</b>：本方法入队<b>不受实时容量 256 约束</b>（回放批豁免）——慢重挂者的
-	 * 初始批上界 = 事件日志窗口（{@link FrameStore}，Stream 口径 6000 / 兼容 LIST 口径 3000），
+	 * 初始批上界 = 事件日志窗口（{@link FrameStore}，Stream 口径 {@link RedisFrameStore#STREAM_WINDOW}），
 	 * "队列容量 &lt; 事件日志窗口"不变量只约束实时段。
 	 *
 	 * <p>
-	 * <b>B23L1 批①：回放源从 {@code ai:events:} LIST 切到 {@link FrameStore#readFrom}</b>
-	 * （兼容期内部仍会把旧 LIST 串在 Stream 前面并按 seq 去重）。差量下推口径不变：
+	 * <b>B23L1 批①：回放源是 {@link FrameStore#readFrom}</b>（生产 = Stream）。
+	 * 差量下推口径不变：
 	 * 给了 {@code lastSeq} 就只要 {@code seq > lastSeq}（孤儿过滤仍在本方法兜一层，
 	 * 防"发帧后才落档失败"等错位）。回放同时把<b>本订阅者</b>的已投递游标顶到
 	 * {@code max(读到的最大号, lastSeq)} —— 随后的跨实例唤醒不会把这些帧再推一遍，
@@ -2077,7 +2041,6 @@ public class SseChatEmitter {
 		frame.put("toolCallId", pending.getToolCallId());
 		frame.put("name", pending.getName());
 		frame.put("decision", decision);
-		frame.put("approved", PendingToolCall.APPROVED.equals(pending.getStatus()));
 		frame.put("status", pending.getStatus());
 		frame.put("reason", reason);
 		frame.put("waitedMs", waitedMs);
@@ -2153,15 +2116,11 @@ public class SseChatEmitter {
 		if (!view.truncated()) {
 			return;
 		}
-		// 旧客户端兼容字段：语言中立短句；数字/strategy 只进结构字段与日志（新客户端按 noticeCode 本地化）。
-		String notice = FrameSizeLimiter.legacyNotice(TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
 		frame.put(TruncationContract.TRUNCATED_FIELD, true);
 		frame.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_MODEL_VIEW_TRUNCATED);
 		frame.put(TruncationContract.STRATEGY_FIELD, view.strategy());
 		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, view.originalChars());
 		frame.put(TruncationContract.RETURNED_CHARS_FIELD, view.returnedChars());
-		frame.put(TruncationContract.NOTICE_FIELD, notice);
-		frame.put(TruncationContract.LEGACY_REASON_FIELD, notice);
 		log.debug("模型侧视图截断 runId={} tool={} originalChars={} returnedChars={} strategy={}", this.runId,
 				toolName, view.originalChars(), view.returnedChars(), view.strategy());
 	}
@@ -2345,9 +2304,8 @@ public class SseChatEmitter {
 	 *
 	 * <p>
 	 * {@code atMs} 在<b>帧构造时刻</b>取值 —— 帧一出生就带，故实时投递（{@link #emit} 里的
-	 * 序列化）与归档（{@link RunStore#appendEvent}）拿到的是同一个值；与 {@code expiresAt}
+	 * 序列化）与归档（{@link FrameStore#append}）拿到的是同一个值；与 {@code expiresAt}
 	 * 同一取钟口径（见 {@link #expiresAtEpochMs}），二者之差恒等于 {@code timeoutSeconds}。
-	 * {@code RunStore#appendEvent} 的 {@code putIfAbsent} 自此只是兜底（旧格式帧/直接落档方）。
 	 */
 	private Map<String, Object> frame(String type) {
 		Map<String, Object> frame = new LinkedHashMap<>();

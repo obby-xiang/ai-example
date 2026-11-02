@@ -1309,9 +1309,7 @@ function onGridChanged(defCode: string | undefined, origin: 'user' | 'ai' = 'use
     origin === 'ai'
       ? 'AI 已把改动写入导入编辑区（尚未写回服务端文件）'
       : '导入编辑区内容已修改（尚未写回服务端文件）',
-    origin === 'ai' ? 'AI' : 'UI',
-    // 面板 chip 的结构化展示面（2026-10-30）：现役写点给 display，只有旧记录才落兜底词条
-    { code: origin === 'ai' ? 'ai.workspace.importSheetEditAi' : 'ai.workspace.importSheetEditUser' }
+    origin === 'ai' ? 'AI' : 'UI'
   )
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeEditorCode())

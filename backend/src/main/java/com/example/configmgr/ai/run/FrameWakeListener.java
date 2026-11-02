@@ -20,7 +20,7 @@ import java.util.Set;
  * <h2>三个"按"</h2>
  * <ul>
  * <li><b>按连接</b>而非按实例：订阅只在"本实例确实有这个 run 的订阅者"时存在 ——
- * 第一个订阅者挂上时 {@code subscribe}，最后一个断开时 {@code unsubscribe}。
+ * 第一个订阅者挂上时建订阅（拿句柄），最后一个断开时 close 该句柄。
  * 禁止"每实例订阅全量频道"（那会让每个实例被无关轮的唤醒打扰，且订阅数随 run 数无界增长）；</li>
  * <li><b>按目标</b>而非按频道：同一个 run 可能被本实例的多个写出器同时持有（首轮 + 重挂批），
  * 每个目标（{@link WakeTarget} = 一个写出器）自己记"已推送到哪个 seq"，
@@ -32,19 +32,20 @@ import java.util.Set;
  * 无身份线程（断连回调/投递池）算出来的是 legacy 频道 ⇒ 真条目不被移除（僵尸订阅）。</li>
  * </ul>
  *
- * <p>因此每个目标登记时绑定<b>一个句柄</b>（{@link Registration}：身份 + runId + 分桶键 + <b>订阅代次</b>），
- * subscribe 与 unsubscribe 都用它 —— 退订不依赖"这一拍线程碰巧是谁"。
+ * <p>因此每个目标登记时绑定<b>一个句柄</b>（{@link Registration}：身份 + runId + 分桶键），
+ * subscribe/unsubscribe 都用它 —— 退订不依赖"这一拍线程碰巧是谁"；桶持有的
+ * {@link FrameWakeBus.Subscription} 句柄则让退订精确到"这一条监听器"。
  *
- * <h2>并发口径（非阻塞 + 代次）</h2>
+ * <h2>并发口径（非阻塞 + 句柄退订）</h2>
  * 订阅/退订都是锁外 Redis I/O，期间可能穿插别的登记与注销。两条硬约束：
  * <ul>
  * <li><b>不阻塞调用方</b>：调用方可能是 Redis 订阅连接的分发线程（唤醒回调 → 写出器的
  *     {@code applyWakeSync} → {@link #register}），在那里等待会把所有频道的投递一起拖住。
  *     订阅在途时来的目标<b>照样进桶并保留</b>（订阅成功后与发起方一样收到唤醒），只是拿到
  *     "未确认"（false）—— 调用方下次 attach/出帧再登记时就会拿到 true；</li>
- * <li><b>代次退订</b>：旧桶的补偿退订可能晚于继任桶的订阅落地。退订带代次，只有"当前订阅就是
- *     这一代"才摘得掉（{@link FrameWakeBus#unsubscribe(String, long)}），因此旧退订不会误退
- *     继任订阅，继任者也<b>不必等待</b>旧退订完成。</li>
+ * <li><b>句柄退订</b>：旧桶的补偿退订可能晚于继任桶的订阅落地。退订只摘本桶句柄捕获的
+ *     那一条监听器（{@link FrameWakeBus.Subscription#close()}），因此旧退订不会误退继任订阅，
+ *     继任者也<b>不必等待</b>旧退订完成。</li>
  * </ul>
  *
  * <p>本类只做<b>扇出与生命周期</b>，不含 Redis 细节（{@link FrameWakeBus} 负责）；
@@ -70,7 +71,7 @@ public class FrameWakeListener {
 	/** 目标 → 登记句柄（一个目标只属于一轮；退订按它精确回到同一桶/同一频道）。 */
 	private final Map<WakeTarget, Registration> registrations = new HashMap<>();
 
-	/** 订阅代次发号器（guarded by {@code this}）：每次建桶 = 一代，退订按代次精确匹配。 */
+	/** 订阅代次发号器（guarded by {@code this}）：每次建桶 = 一代，仅用于日志与无句柄实现的先后口径。 */
 	private long generationSeq;
 
 	public FrameWakeListener(FrameWakeBus bus) {
@@ -78,9 +79,10 @@ public class FrameWakeListener {
 	}
 
 	/**
-	 * 一个目标在本实例的唤醒登记（身份 + runId + 分桶键 + 订阅代次）：subscribe/unsubscribe 的<b>同一句柄</b>。
+	 * 一个目标在本实例的唤醒登记（身份 + runId + 分桶键）：subscribe/unsubscribe 的<b>同一句柄</b>。
+	 * 订阅句柄本身在桶上（{@link Bucket}），不随每个目标复制。
 	 */
-	public record Registration(TenantUser identity, String runId, String key, long generation) {
+	public record Registration(TenantUser identity, String runId, String key) {
 
 	}
 
@@ -104,10 +106,10 @@ public class FrameWakeListener {
 	}
 
 	/**
-	 * 一个（身份, runId）桶：目标集 + 订阅状态 + 订阅代次。
+	 * 一个（身份, runId）桶：目标集 + 订阅状态 + 订阅句柄。
 	 *
-	 * <p>代次是"退订不误伤继任"的句柄：旧桶那条晚到的 {@code unsubscribe} 只有当代次仍是当前
-	 * 订阅时才摘监听器（见 {@link FrameWakeBus#unsubscribe(String, long)}）。
+	 * <p>句柄是"退订不误伤继任"的依据：旧桶那条晚到的 close 只摘它自己捕获的监听器，
+	 * 继任桶（另一个句柄）的监听器不受影响。代次只留作诊断/默认实现（测试替身）的先后口径。
 	 */
 	private static final class Bucket {
 
@@ -115,8 +117,16 @@ public class FrameWakeListener {
 
 		private final String runId;
 
-		/** 本次订阅的代次（本实例内单调递增，按 key 比较先后）。 */
+		/** 本次订阅的代次（本实例内单调递增，仅用于日志与无句柄实现的口径）。 */
 		private final long generation;
+
+		/**
+		 * 本次订阅的精确句柄（guarded by 外层监听器的锁）。
+		 *
+		 * <p>{@code SUBSCRIBING} 期间为 null；订阅成功后与 {@link #state} 一起置位。
+		 * 桶被摘掉时由最后一个离开者取出并在锁外 close —— 只摘这一条监听器。
+		 */
+		private FrameWakeBus.Subscription subscription;
 
 		/** 桶内目标（guarded by 外层监听器的锁）。 */
 		private final Set<WakeTarget> targets = new LinkedHashSet<>();
@@ -185,7 +195,7 @@ public class FrameWakeListener {
 			Bucket current = this.buckets.get(key);
 			if (current != null) {
 				if (current.targets.add(target)) {
-					this.registrations.put(target, new Registration(identity, runId, key, current.generation));
+					this.registrations.put(target, new Registration(identity, runId, key));
 				}
 				if (current.state == State.SUBSCRIBED) {
 					current.confirmed.add(target);
@@ -197,17 +207,17 @@ public class FrameWakeListener {
 			bucket = new Bucket(identity, runId, ++this.generationSeq, State.SUBSCRIBING);
 			this.buckets.put(key, bucket);
 			bucket.targets.add(target);
-			this.registrations.put(target, new Registration(identity, runId, key, bucket.generation));
+			this.registrations.put(target, new Registration(identity, runId, key));
 		}
-		boolean subscribed;
+		FrameWakeBus.Subscription subscription;
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			// 订阅在<b>该桶身份</b>下执行：RedisFrameWakeBus 用线程身份拼频道名。
-			// 带代次：晚到的旧代次订阅不得顶掉继任订阅（见 FrameWakeBus#subscribe(String, long, LongConsumer)）。
-			subscribed = this.bus.subscribe(runId, bucket.generation,
+			// 句柄捕获本次安装的监听器：退订按对象摘，迟到的 close 碰不到继任订阅。
+			subscription = this.bus.subscribeHandle(runId, bucket.generation,
 					upper -> dispatch(key, runId, upper));
 		}
 		catch (Exception ex) {
-			subscribed = false;
+			subscription = null;
 		}
 		catch (Throwable error) {
 			// Error（如容器级 OOM/断言）也必须先把桶撤掉再抛出：否则该 key 永远停在"订阅在途"，
@@ -215,7 +225,7 @@ public class FrameWakeListener {
 			rollback(key, bucket, runId, identity);
 			throw error;
 		}
-		if (!subscribed) {
+		if (subscription == null) {
 			// 订阅没建立 ⇒ 整桶回滚（含在途期间加入的目标），下一次 attach/close 会重新走一遍
 			rollback(key, bucket, runId, identity);
 			return false;
@@ -227,6 +237,7 @@ public class FrameWakeListener {
 			keep = bucket.targets.contains(target);
 			if (keep) {
 				bucket.state = State.SUBSCRIBED;
+				bucket.subscription = subscription;
 				bucket.confirmed.add(target);
 			}
 			else {
@@ -234,8 +245,8 @@ public class FrameWakeListener {
 			}
 		}
 		if (!keep) {
-			// 补偿退订带代次：若继任桶已经订阅（新代次），这条退订是 no-op，绝不摘继任的监听器
-			unsubscribe(new Registration(identity, runId, key, bucket.generation));
+			// 补偿退订按句柄：只摘本次安装的监听器，继任桶（另一句柄）不受影响
+			closeSubscription(subscription, runId, identity);
 			return false;
 		}
 		log.debug("帧唤醒订阅建立 runId={} identity={} generation={}", runId, identity, bucket.generation);
@@ -280,7 +291,7 @@ public class FrameWakeListener {
 	public void unregister(String runId, WakeTarget target) {
 		Registration registration;
 		Bucket bucket = null;
-		boolean releaseNow = false;
+		FrameWakeBus.Subscription released = null;
 		synchronized (this) {
 			registration = this.registrations.remove(target);
 			if (registration == null) {
@@ -294,11 +305,10 @@ public class FrameWakeListener {
 			boolean subscribed = bucket.state == State.SUBSCRIBED;
 			if (bucket.targets.isEmpty()) {
 				// 立刻摘桶 ⇒ 继任者可以马上建新桶订阅（不等旧退订完成）；
-				// 旧退订按代次比较，晚到也只会是 no-op，摘不掉继任的监听器。
+				// 旧退订只摘自己的句柄，晚到也碰不到继任的监听器。
+				released = bucket.subscription;
 				dropBucket(registration.key(), bucket);
-				// 订阅还在途时不必在这里退订：发起方返回时会自己走"无可确认持有者 ⇒ 按代次退订"，
-				// 晚到的这条退订同样按代次判定，不会误伤继任。
-				releaseNow = subscribed;
+				// 订阅还在途时句柄为 null（发起方返回时会自己走"无可确认持有者 ⇒ 按句柄补偿退订"）。
 			}
 			else if (subscribed && bucket.confirmed.isEmpty()) {
 				// <b>返修第 3 条（并入 Task 4 复审遗留）</b>：最后一个确认者离开，但桶里还有存活目标
@@ -312,22 +322,25 @@ public class FrameWakeListener {
 						+ "generation={}", registration.runId(), registration.identity(), bucket.generation);
 			}
 		}
-		if (releaseNow) {
-			unsubscribe(new Registration(bucket.identity, registration.runId(), registration.key(),
-					bucket.generation));
+		if (released != null) {
+			closeSubscription(released, runId, registration.identity());
 			log.debug("帧唤醒订阅释放 runId={} identity={} generation={}", runId, registration.identity(),
 					bucket.generation);
 		}
 	}
 
-	/** 退订：与 subscribe <b>同一身份 + 同一代次</b>（频道名逐字相同，且旧代次不会误退新订阅）。 */
-	private void unsubscribe(Registration registration) {
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(registration.identity())) {
-			this.bus.unsubscribe(registration.runId(), registration.generation());
+	/**
+	 * 退订：只 close 本桶的句柄（它摘的就是本次安装的监听器，与"频道当前是谁"无关）。
+	 *
+	 * <p>仍在<b>登记身份</b>作用域里 close：生产句柄自带监听器对象、不读线程身份，但无句柄的
+	 * 兼容实现按线程身份拼频道，断连/投递池线程没有身份，不建作用域会退到 legacy 频道（僵尸订阅）。
+	 */
+	private void closeSubscription(FrameWakeBus.Subscription subscription, String runId, TenantUser identity) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			subscription.close();
 		}
 		catch (Exception ex) {
-			log.warn("帧唤醒退订失败 runId={} identity={}：{}", registration.runId(), registration.identity(),
-					ex.getMessage());
+			log.warn("帧唤醒退订失败 runId={} identity={}：{}", runId, identity, ex.getMessage());
 		}
 	}
 

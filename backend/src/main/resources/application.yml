@@ -393,15 +393,6 @@ app:
       # 超限 **400 MESSAGE_TOO_LONG 拒绝**，不截断（裁决 A1：截断会让模型基于半句话下结论）。
       # 取值 2000 = 一条需求描述的量级（前端同值 MESSAGE_MAX_CHARS）；超过它就不再是"一句话需求"。
       max-chars: 2000
-    limit:
-      # 安全防护专项批① 闸门 3：POST /api/ai/chat 的滑动窗口限流（Redis 单键 Lua 原子）。
-      # 键族 ai:rate:session:<sessionId> / ai:rate:ip:<RemoteAddr>（窗口外成员在同一脚本里回收）。
-      # session-per-minute：sessionId 由客户端自生 ⇒ 只拦"同页签被脚本连发"（20 次/分已远超手速）；
-      # ip-per-minute：兜住"换 sessionId 绕会话额度"；E2E 全程 21 次 /chat，不会被误伤。
-      # Redis 计数不可用 ⇒ 降级放行 + WARN（限流是防滥用，不是准入前提）。
-      session-per-minute: 20
-      ip-per-minute: 60
-      window: 1m
     sse:
       # 包②：SSE 写侧超时预算（ai/run/SseChatEmitter + common/sse/SseWriteBudget）。
       #   delivery-pool-size / delivery-queue-capacity：T3-1 的投递池与每订阅者实时队列
@@ -479,17 +470,6 @@ app:
     storage-path: ./data/files
     # 显式多实例开关（默认 false）：没有多实例 profile 的部署用本键开启同样的绝对路径校验。
     multi-instance: false
-  # ── 入站流量的信任边界（多实例专项）──────────────────────────────────────────
-  # trusted-proxies：可信代理网段（CIDR 或单 IP，IPv4/IPv6）。**空 = 只认 RemoteAddr**（默认，
-  #   直连形态，与改造前逐字一致）。
-  #   为什么需要它：LB/网关之后 RemoteAddr 恒为 LB 地址 ⇒ 全站用户共用同一个
-  #   ai:rate:ip:<LB-IP> 桶（60/分），一个用户刷满即全员 429。填上 LB 网段后，只有
-  #   **RemoteAddr 在该网段内**才解析 X-Forwarded-For（从右往左跳过可信跳，取第一个不可信地址）；
-  #   直连客户端自填的 XFF 一律忽略（否则等于让调用方自选限流桶）。
-  #   非 CIDR/IP 字面量会在启动期 fail-fast（静默忽略 = "以为配了、实际没配"的假绿）。
-  #   例：trusted-proxies: 10.0.0.0/8,192.168.0.0/16
-  web:
-    trusted-proxies: []
   # ── 就绪探测的有界执行（多实例专项 · 启动底座）────────────────────────────────
   # 三个键都是"让 /health/ready 按期给结论"的护栏（非功能开关）：
   #   probe-timeout：一次判定的**共享**总时限（所有维度合计，不是每维度各一份）。缺省 2s ——

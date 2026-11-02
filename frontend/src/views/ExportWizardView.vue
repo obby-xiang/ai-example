@@ -1731,15 +1731,11 @@ function onGridChanged(origin: 'user' | 'ai' = 'user'): void {
       origin === 'ai'
         ? 'AI 已把改动写入导出结果表格（尚未保存到服务端文件）'
         : '导出结果表格内容已修改（尚未保存到服务端文件）',
-      origin === 'ai' ? 'AI' : 'UI',
-      // 面板 chip 的结构化展示面（2026-10-30）：现役写点给 display，只有旧记录才落兜底词条
-      { code: origin === 'ai' ? 'ai.workspace.exportSheetEditAi' : 'ai.workspace.exportSheetEditUser' }
+      origin === 'ai' ? 'AI' : 'UI'
     )
   } else if (origin === 'user' && wasAiOnly) {
     // 之前只有 AI 写过，现在用户也改了：补一条「界面」来源，别让用户改动挂在 AI 名下
-    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）', 'UI', {
-      code: 'ai.workspace.exportSheetEditUser'
-    })
+    workspace.touch('导出结果表格内容已修改（尚未保存到服务端文件）', 'UI')
   }
   // AI 表格工具治理 §5.4：手改之后重算「AI 改动 / 你的改动」的现算部分（只计数，不记坐标）
   void useAiStore().refreshSheetApplied(activeTab.value)

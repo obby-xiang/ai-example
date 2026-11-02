@@ -6,6 +6,7 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CancelledRunFinalizer;
+import com.example.configmgr.ai.run.DispatchRetryBackoff;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
@@ -646,7 +647,7 @@ public class ConfirmGate {
 		}
 		// ===== B1（2026-10-20 裁决 1）：请求帧发出之后、进入阻塞等待之前，主动完成本 run 的全部订阅 =====
 		// 流派 B（挂起即断）：人机等待期不再占用 SSE 连接，连接在"卡已送达"这一刻收尾；
-		// 决策到达后再由前端带 ?lastSeq 重连做差量补帧（delta 已入档，见 RunStore#appendEvent）。
+		// 决策到达后再由前端带 ?lastSeq 重连做差量补帧（delta 已入档，见 SseChatEmitter#emit）。
 		//
 		// 断连点为什么在这里、不在 suspended 帧上：实测帧序是 suspended（SpToolCallingManager）
 		// **早于** confirm_request / frontend_tool_request（本方法）—— 挂在 suspended 上会把
@@ -2612,7 +2613,7 @@ public class ConfirmGate {
 		this.dispatchRetries.remove(LocalRunKey.of(runId));
 	}
 
-	/** 第 {@code attempt} 次重派发的间隔：{@code base × 2^(attempt-1)}，按 {@code max-delay} 封顶。 */
+	/** 第 {@code attempt} 次重派发的间隔（缺省 2s/30s；算式见 {@link DispatchRetryBackoff}）。 */
 	private Duration dispatchRetryDelay(int attempt) {
 		Duration base = this.properties.getPark().getDispatchRetryDelay();
 		if (base == null || base.isNegative() || base.isZero()) {
@@ -2622,12 +2623,7 @@ public class ConfirmGate {
 		if (cap == null || cap.isNegative() || cap.isZero()) {
 			cap = Duration.ofSeconds(30);
 		}
-		long capMs = Math.max(1L, cap.toMillis());
-		long delayMs = Math.max(1L, base.toMillis());
-		for (int i = 1; i < attempt && delayMs < capMs; i++) {
-			delayMs = Math.min(capMs, delayMs * 2);
-		}
-		return Duration.ofMillis(delayMs);
+		return DispatchRetryBackoff.delay(attempt, base, cap);
 	}
 
 	/**

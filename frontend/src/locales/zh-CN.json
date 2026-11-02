@@ -143,8 +143,6 @@
       }
     },
     "notice": {
-      "resumeRetry": "续收中断，正在第 {attempt} 次重试",
-      "reconnect": "连接中断，正在第 {attempt} 次重连",
       "interruptedSuspended": "连接中断，结果可能不完整（{reason}）。挂起卡保留，可刷新重试。",
       "interruptedKeep": "连接中断，结果可能不完整（{reason}）。已生成的内容保留，可重新发送或刷新页面继续接收。",
       "interruptedKeepShort": "连接中断，结果可能不完整（{reason}）。已生成的内容保留。",
@@ -173,7 +171,7 @@
       "retryRunUnknown": "无法确认这一轮属于哪次运行，已停止重试；请重新载入会话后再试。",
       "healthProbeFailed": "AI 可用性探测失败",
       "decisionPending": "确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。",
-      "runExpired": "本轮运行态已按保留期失效，挂起卡无法再提交。请刷新状态确认，或新建会话重新发起。",
+      "runExpired": "本轮运行态可能已按保留期失效；提交时由服务端确认并回落为「已失效」。",
       "noPendingDecision": "没有待处理的确认请求",
       "decisionSubmitting": "该确认已提交，正在同步…",
       "ackRequired": "不可撤销操作：请先勾选确认项",
@@ -187,13 +185,10 @@
       "startJobSyncFailed": "作业 #{jobId} 已启动，但页面未能同步该作业（请稍后在页面上手动刷新作业列表）",
       "startJobSyncFailedReason": "作业 #{jobId} 已启动，但页面未能同步该作业：{reason}",
       "sheetLargePlan": "本次将修改 {rows} 行 / {cells} 格（超过 200 行）：请先勾选「我了解影响范围」再点「应用」。",
-      "memoryDeleteFailed": "旧会话记忆删除失败（不影响新对话）",
-      "sessionPurgeIncomplete": "旧会话的 AI 数据尚未删净（不影响新对话）",
       "sessionIssueFailed": "会话初始化失败：暂时无法从服务端取得新的会话号，请稍后重试。",
       "directoryFailed": "租户/用户目录加载失败（不影响其它页面操作）",
       "directoryEmpty": "租户/用户目录为空，发送已暂停",
       "staleConfirmCard": "这轮对话已失效，请重新提问。",
-      "copiedNewTab": "已在新页签开始新会话；原页签的对话不受影响。",
       "mirrorQuotaExceeded": "浏览器本地镜像写入失败（可能存储已满或处于隐私模式）：刷新后可能无法恢复本轮现场；服务端只保留 24 小时滑动的记忆窗口。",
       "sessionPurged": "这个会话已在服务端销毁，已为你新建对话。刚才那条消息没有发出，内容已留在输入框，请再点一次发送。",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
@@ -221,37 +216,9 @@
         "definitions": "配置定义",
         "data": "数据浏览"
       },
-      "enterPage": "进入{page}",
-      "exitStep": "退出当前步骤",
-      "switchStep": "切换到步骤「{step}」",
-      "unbindTask": "解除任务绑定",
-      "bindTask": "绑定任务 #{taskId}",
-      "selectDefs": "已选择配置项：{defs}",
-      "queryConditions": "设置 {code} 的查询条件",
-      "importMode": "导入模式设为 {mode}",
-      "importModeNone": "未设置",
-      "importModeMerge": "增量合并",
-      "importModeReplace": "整体替换",
-      "empty": "（空）",
       "task": "任务 #{id}",
       "step": "步骤 {label}",
-      "defsSelected": "已选 {count} 个配置项",
-      "actionFallback": "工作区状态已更新",
-      "exportSheetEditAi": "AI 已把改动写入导出结果表格（尚未保存到服务端文件）",
-      "exportSheetEditUser": "导出结果表格内容已修改（尚未保存到服务端文件）",
-      "importSheetEditAi": "AI 已把改动写入导入编辑区（尚未写回服务端文件）",
-      "importSheetEditUser": "导入编辑区内容已修改（尚未写回服务端文件）",
-      "publishConflict": "发布作业 #{jobId} 有 {count} 处校验冲突",
-      "jobStarted": "启动作业 {jobType}（任务 #{taskId}）",
-      "jobCancelled": "取消作业 #{jobId}",
-      "exportStarted": "导出已开始（任务 #{taskId}）",
-      "importBatch": "打开导入批次 #{batchId}",
-      "importAction": "导入批次动作 {action}{batch}",
-      "importActionBatch": "（批次 #{batchId}）",
-      "download": "下载文件{filename}",
-      "refreshDefs": "刷新配置定义",
-      "refreshData": "刷新数据{code}",
-      "refreshTasks": "刷新任务列表"
+      "defsSelected": "已选 {count} 个配置项"
     },
     "settings": {
       "copy": {
@@ -373,25 +340,7 @@
       "pillAria": "上下文占用 {percent}%",
       "pillUsageEst": "上下文占用 约{percent}%",
       "pillEmpty": "暂无上下文占用",
-      "pillAriaNoPercent": "上下文占用 {text}",
-      "used": "上下文已用 {used} tokens",
-      "usedLimit": "上下文已用 {used} / {limit} tokens（占比 {percent}%）",
-      "usedLimitNoPercent": "上下文已用 {used} / {limit} tokens",
-      "estimate": "（估算值：上游未返回用量）",
-      "warn": "已超过轻量清理线",
-      "high": "已进入压缩区（工具结果优先清理）",
-      "danger": "接近上限，下一次请求前会先清理历史工具结果",
-      "detailsAria": "上下文用量明细",
-      "title": "上下文用量",
-      "loading": "正在读取用量明细…",
-      "loadFailed": "用量明细读取失败",
-      "retry": "重试",
-      "empty": "暂无用量数据",
-      "estimateNote": "本数值为估算（上游未返回用量），显示时带 ≈。",
-      "splitNote": "分项为估算、总量为账单：分项按已用量等比归一，前六项之和等于已用。",
-      "close": "关闭",
-      "limitUnknown": "上限未知",
-      "limitOnly": "{limit}：只显示已用，不折算百分比。"
+      "used": "上下文已用 {used} tokens"
     },
     "hitl": {
       "irreversible": "确认{action}，执行后无法恢复",
@@ -412,7 +361,6 @@
       "submit": "提交",
       "submitting": "提交中…",
       "notRetryable": "该表单已无法继续提交，请取消后让 AI 重新发起",
-      "lockedHint": "本轮运行态已失效，暂时无法提交；可先取消，或在上方刷新状态 / 新建会话。",
       "unsupportedType": "字段「{label}」类型不支持（{type}），未渲染",
       "cascadeCleared": "已清空「{fields}」（新条件下不再适用）",
       "advancedExpand": "更多条件（{count}）",
@@ -468,12 +416,6 @@
       "identityNotReady": "会话未就绪：暂未取得会话号，发送已暂停",
       "identityRetry": "重试",
       "collapse": "收起",
-      "recheck": "重新检测",
-      "available": "可用",
-      "degraded": "已降级",
-      "untested": "未检测",
-      "probeFailed": "探测失败",
-      "probeFailedHint": "AI 状态检测未成功，可点「重新检测」；不影响页面其它操作",
       "breathing": "工作中…",
       "uploadFallbackLabel": "上传 xlsx / zip",
       "confirmTitle": "待你确认：{business}",
@@ -490,12 +432,7 @@
       "overwriteConfirm": "输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？",
       "modelFallback": "流式对话 · 工具调用",
       "sendNotSentInline": "（这条消息没有发出去：{message}）",
-      "runState": {
-        "idle": "空闲",
-        "suspended": "挂起等待中…（待人工确认或待前端执行）",
-        "generating": "生成中…"
-      },
-      "degradeUnknown": "未检测到 AI 可用性，请点击「重新检测」。",
+      "degradeUnknown": "未检测到 AI 可用性，请稍后重试或联系管理员。",
       "composer": {
         "near": "剩余字数不足 500 字",
         "limit": "已达 {max} 字上限",
@@ -513,9 +450,7 @@
       "greeting": "您好，我是实施助手",
       "logAria": "对话消息",
       "storage": {
-        "mirror": "对话保存在本页签的浏览器镜像里，刷新后可以恢复。",
-        "run": "服务端保留本轮运行态与对话记忆 24 小时（按活动滑动续期）。",
-        "history": "对话只留本页签镜像与服务端 24 小时滑动的记忆窗口，没有长期归档；关闭页签后本轮仍会在服务端继续。"
+        "note": "对话只留本页签浏览器镜像与服务端 24 小时滑动记忆窗口，刷新可恢复、没有长期归档。"
       },
       "thinking": "思考过程",
       "thinkingLive": "思考中",
@@ -570,15 +505,6 @@
       "preparingHint": "服务端正在建立本轮上下文，不会丢失；可稍候或立即重试。",
       "preparingAria": "正在准备本轮回答",
       "preparingRetry": "立即重试",
-      "runExpiry": {
-        "countdown": "本轮运行态剩余 {time}",
-        "minutes": "本轮运行态剩余约 {minutes} 分钟",
-        "hours": "本轮运行态剩余约 {hours} 小时",
-        "expired": "本轮运行态已失效（保留期已到期）",
-        "expiredHint": "这张卡暂时无法提交。保留期按活动滑动续期，请刷新状态确认，或新建会话重新发起。",
-        "reload": "刷新状态",
-        "newChat": "新建会话"
-      },
       "recoveryGap": "部分内容可能不完整",
       "recoveryGapHint": "这一段来自本地缓存或增量回放，无法确认完整。可重新载入以同步服务端状态。",
       "reloadTurn": "重新载入",
@@ -613,11 +539,7 @@
       "tabSource": "源码",
       "sourceLabel": "mermaid 源码",
       "fullscreen": "全屏查看",
-      "session": "会话 {id}",
       "workspace": "工作区 {summary}",
-      "dataVersion": "数据版本 {version}",
-      "diagnostics": "诊断信息",
-      "contextSynced": "工作区已同步：{summary}",
       "poolSaturatedDetail": "请先处理正在等待确认 / 填写的对话（确认、填写或取消），稍后再试。",
       "uiEvent": "AI 驱动工作区：{message}",
       "uiOperating": "AI 正在操作左侧工作区：{text}",
@@ -722,14 +644,6 @@
     "dataBrowser": "数据浏览",
     "aiSettings": "AI 设置",
     "aiFeedback": "AI 反馈"
-  },
-  "app": {
-    "footer": {
-      "contract": "工作区契约 v{version}",
-      "context": "上下文 {key}",
-      "dataVersion": "数据版本 {version}",
-      "collapsedHint": "（AI 栏已收起为 48px 侧条，全部业务功能仍可用）"
-    }
   },
   "tool": {
     "list_config_defs": {

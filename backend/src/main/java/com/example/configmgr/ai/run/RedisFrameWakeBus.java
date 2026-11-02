@@ -16,7 +16,7 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
 
 /**
@@ -24,7 +24,7 @@ import java.util.function.LongConsumer;
  * 一个按需启动的 {@link RedisMessageListenerContainer}。
  *
  * <p>
- * <b>懒启动</b>：容器在第一次 {@link #subscribe} 时才建并启动 —— 没有挂起/重挂连接的进程
+ * <b>懒启动</b>：容器在第一次 {@link #subscribeHandle} 时才建并启动 —— 没有挂起/重挂连接的进程
  * （含绝大多数单测上下文）不建立任何订阅连接，也就不会因为 Redis 不可用而拖慢启动。
  *
  * <p>
@@ -32,10 +32,9 @@ import java.util.function.LongConsumer;
  * <b>不做"每实例订阅全量频道"</b>——那会让每个实例的每条连接都被无关轮的唤醒打扰。
  *
  * <p>
- * <b>订阅代次</b>：订阅/退订都带代次（{@link FrameWakeBus#subscribe(String, long, LongConsumer)}、
- * {@link FrameWakeBus#unsubscribe(String, long)}）。同一个（身份, run）的第 N 次订阅带代次 N，
- * 退订按<b>代次 + 监听器对象</b>精确匹配 —— 旧桶那条晚到的补偿退订因此不会摘掉继任桶刚建立的
- * 监听器，晚到的旧代次订阅也不会顶掉新订阅。按"频道当前监听器"摘/顶替的旧写法有这个洞。
+ * <b>精确句柄退订</b>：一次订阅返回的句柄捕获本次安装的监听器对象，退订按对象摘 ——
+ * 与"频道当前监听器是谁"无关。旧桶的补偿退订因此不会摘掉继任桶刚建立的监听器，
+ * 晚到的旧订阅也只是短暂多一条监听器（桶已消失 ⇒ 回调 no-op），随后被自己的补偿退订摘掉。
  *
  * <p>
  * 失败口径：publish/subscribe 的 Redis 异常只记日志并降级（唤醒可丢；正确性由客户端
@@ -48,24 +47,16 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	private final StringRedisTemplate redis;
 
 	/**
-	 * 频道 → 当前订阅（代次 + 监听器对象）。
-	 *
-	 * <p>退订按<b>代次 + 监听器对象</b>精确匹配，绝不按"频道当前监听器"摘：旧桶的补偿退订可能
-	 * 晚于继任桶的订阅落地，按频道摘就会把继任者的监听器摘掉（该 run 整段静默失去跨实例唤醒）。
+	 * 无句柄兼容口（{@link #subscribe(String, LongConsumer)}）的当前订阅：该 API 拿不到句柄，
+	 * 只能按频道记住"这一次装的是哪条监听器"以便 {@link #unsubscribe(String)} 摘掉。
+	 * <b>生产路径（{@link FrameWakeListener}）只走 {@link #subscribeHandle}，不经过这里。</b>
 	 */
-	private final Map<String, Subscription> listeners = new ConcurrentHashMap<>();
-
-	/** 无代次调用（既有测试/诊断路径）的代次来源：保证"后调用的更新"，不被旧代次顶掉。 */
-	private final AtomicLong generations = new AtomicLong();
+	private final Map<String, Subscription> noHandleSubscriptions = new ConcurrentHashMap<>();
 
 	private volatile RedisMessageListenerContainer container;
 
 	public RedisFrameWakeBus(StringRedisTemplate redis) {
 		this.redis = redis;
-	}
-
-	/** 一条频道订阅：代次 + 具体监听器对象（两者一起构成退订的精确句柄）。 */
-	private record Subscription(long generation, MessageListener listener) {
 	}
 
 	@Override
@@ -80,13 +71,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	}
 
 	@Override
-	public boolean subscribe(String runId, LongConsumer onWake) {
-		// 无代次调用（既有测试/诊断路径）：代次取单调序号，等价于"这次是最新的"
-		return subscribe(runId, this.generations.incrementAndGet(), onWake);
-	}
-
-	@Override
-	public boolean subscribe(String runId, long generation, LongConsumer onWake) {
+	public Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
 		String channel = channel(runId);
 		// 订阅侧的身份在这一刻固定（调用方是出帧/挂起路径，带着请求或恢复身份）；
 		// 监听回调跑在 Redis 监听线程上，那里没有请求身份 ⇒ 回调内按这份身份 useContext。
@@ -97,76 +82,48 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				onWake.accept(upper);
 			}
 		};
-		Subscription incoming = new Subscription(generation, listener);
-		Subscription previous;
-		synchronized (this.listeners) {
-			Subscription current = this.listeners.get(channel);
-			if (current != null && current.generation() > generation) {
-				// 晚到的旧代次订阅：新订阅已经生效，不得顶掉它（否则继任桶自认已订阅却收不到唤醒）
-				log.debug("帧唤醒订阅代次过旧，忽略 runId={} generation={} current={}", runId, generation,
-						current.generation());
-				return false;
-			}
-			previous = this.listeners.put(channel, incoming);
-		}
 		RedisMessageListenerContainer target = container();
 		if (target == null) {
-			this.listeners.remove(channel, incoming);
-			return false;
+			return null;
 		}
 		try {
-			if (previous != null) {
-				target.removeMessageListener(previous.listener());
-			}
 			target.addMessageListener(listener, new ChannelTopic(channel));
-			return true;
 		}
 		catch (Exception ex) {
-			this.listeners.remove(channel, incoming);
 			log.warn("帧唤醒订阅失败 runId={}（本实例跨实例唤醒缺席，重挂仍可补帧）：{}", runId, ex.getMessage());
+			return null;
+		}
+		AtomicBoolean closed = new AtomicBoolean();
+		return () -> {
+			if (!closed.compareAndSet(false, true)) {
+				return;
+			}
+			RedisMessageListenerContainer current = this.container;
+			if (current == null) {
+				return;
+			}
+			try {
+				current.removeMessageListener(listener);
+			}
+			catch (Exception ex) {
+				log.debug("帧唤醒退订失败 runId={}：{}", runId, ex.getMessage());
+			}
+		};
+	}
+
+	@Override
+	public boolean subscribe(String runId, LongConsumer onWake) {
+		Subscription incoming = subscribeHandle(runId, 0L, onWake);
+		if (incoming == null) {
 			return false;
 		}
+		closeQuietly(this.noHandleSubscriptions.put(channel(runId), incoming), runId);
+		return true;
 	}
 
 	@Override
 	public void unsubscribe(String runId) {
-		// 无代次调用（既有测试/诊断路径）：摘当前订阅
-		String channel = channel(runId);
-		Subscription removed;
-		synchronized (this.listeners) {
-			removed = this.listeners.remove(channel);
-		}
-		removeListener(runId, removed);
-	}
-
-	@Override
-	public void unsubscribe(String runId, long generation) {
-		String channel = channel(runId);
-		Subscription removed;
-		synchronized (this.listeners) {
-			Subscription current = this.listeners.get(channel);
-			if (current == null || current.generation() != generation) {
-				// 新订阅已接管（或本来就没订阅）：旧代次的退订是 no-op —— 绝不摘别人的监听器
-				return;
-			}
-			this.listeners.remove(channel);
-			removed = current;
-		}
-		removeListener(runId, removed);
-	}
-
-	/** 从容器上摘掉<b>这一条</b>监听器（按对象，不按频道）。 */
-	private void removeListener(String runId, Subscription removed) {
-		RedisMessageListenerContainer target = this.container;
-		if (removed == null || target == null) {
-			return;
-		}
-		try {
-			target.removeMessageListener(removed.listener());
-		}
-		catch (Exception ex) {
-			log.debug("帧唤醒退订失败 runId={}：{}", runId, ex.getMessage());
-		}
+		closeQuietly(this.noHandleSubscriptions.remove(channel(runId)), runId);
 	}
 
 	/**
@@ -179,9 +136,21 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 		return CHANNEL_PREFIX + TenantKeyScope.currentSegment() + runId;
 	}
 
-	/** 当前被订阅的 run 数（诊断/断言用）。 */
+	/** 无句柄兼容口当前的订阅数（诊断/断言用）；句柄订阅由 {@link FrameWakeListener} 自己计数。 */
 	public int subscribedRuns() {
-		return this.listeners.size();
+		return this.noHandleSubscriptions.size();
+	}
+
+	private static void closeQuietly(Subscription subscription, String runId) {
+		if (subscription == null) {
+			return;
+		}
+		try {
+			subscription.close();
+		}
+		catch (Exception ex) {
+			log.debug("帧唤醒退订失败 runId={}：{}", runId, ex.getMessage());
+		}
 	}
 
 	private RedisMessageListenerContainer container() {

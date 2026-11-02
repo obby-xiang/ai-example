@@ -7,7 +7,6 @@ import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.feedback.AiFeedback;
@@ -46,7 +45,6 @@ import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.job.service.JobWatchdog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -104,10 +102,10 @@ import java.util.concurrent.RejectedExecutionException;
  * "发现待续跑轮次"与单轮明细（台账/待决/历史角色）</td></tr>
  * <tr><td>{@code POST /api/ai/runs/{runId}/resume}</td><td>续跑（重建完整历史 → 官方循环）</td></tr>
  * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
- * <tr><td>{@code DELETE /api/ai/history/{sessionId}} / {@code DELETE /api/ai/session/{sessionId}}</td>
- * <td><b>完整会话销毁</b>（旧路径保留兼容，统一委托 purge）：删除该会话全部 AI 数据（记忆/run 13 键/
+ * <tr><td>{@code DELETE /api/ai/session/{sessionId}}</td>
+ * <td><b>完整会话销毁</b>：删除该会话全部 AI 数据（记忆/run 12 键/
  * 上下文/附件/反馈/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
- * 有活跃 run 时先取消、其 13 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
+ * 有活跃 run 时先取消、其 12 键延后（{@code complete=false} + {@code deferred}），不 409</td></tr>
  * <tr><td>{@code GET /api/ai/health}</td><td>AI 可用性/模型名/记忆后端（供前端降级提示）</td></tr>
  * </table>
  *
@@ -187,11 +185,12 @@ public class AiController {
 	private AiFeedbackRepository aiFeedbackRepository;
 
 	/**
-	 * B23L1 批①：事件日志（{@code archiveMaxSeq} 的真值源）。同为**字段注入** ——
-	 * 构造器签名不变 ⇒ 既有 {@code new AiController(...)} 测试零触碰；未注入（局部上下文/
-	 * 单测直接 new）时回落 {@link RunStore#lastEventSeq}（兼容期 LIST 口径），语义与 B1 一致。
+	 * B23L1 批①：事件日志（{@code archiveMaxSeq} 的真值源）。字段注入保持构造器签名不变；
+	 * 生产装配恒为 {@link com.example.configmgr.ai.run.RedisFrameStore}。本类所有读取都已按
+	 * "必有"使用（无空判），故这里是<b>必需注入</b>：缺失时启动失败，而不是把轻装配伪装成
+	 * 404 / NPE 的语义漂移。
 	 */
-	@Autowired(required = false)
+	@Autowired
 	private FrameStore frameStore;
 
 	/**
@@ -201,21 +200,6 @@ public class AiController {
 	 */
 	@Autowired
 	private InputSanitizer inputSanitizer;
-
-	/**
-	 * 安全防护专项批①：{@code /chat} 限流（入口闸门 3）。同为字段注入。
-	 */
-	@Autowired
-	private AiRateLimiter aiRateLimiter;
-
-	/**
-	 * 多实例专项：来源 IP 解析（可信代理网段内的 X-Forwarded-For 才认）。
-	 *
-	 * <p>字段注入的理由同本类其余可选组件：构造器签名不变 ⇒ 既有 {@code new AiController(...)}
-	 * 的单测零触碰；未注入（standalone 单测）时回落 {@code RemoteAddr}，与改造前逐字一致。
-	 */
-	@Autowired(required = false)
-	private com.example.configmgr.config.ClientIpResolver clientIpResolver;
 
 	/**
 	 * 防护批③ B2-5：{@code context} 形状闸（白名单化 + 降级不回显）。未注入时退化为"不闸"。
@@ -319,8 +303,7 @@ public class AiController {
 	// ── 一轮对话 ────────────────────────────────────────────────────────────
 
 	@PostMapping(value = "/chat", produces = { MediaType.TEXT_EVENT_STREAM_VALUE, MediaType.APPLICATION_JSON_VALUE })
-	public ResponseEntity<?> chat(@RequestBody(required = false) AiChatRequest request,
-			HttpServletRequest httpRequest) {
+	public ResponseEntity<?> chat(@RequestBody(required = false) AiChatRequest request) {
 		ResilientChatService service = this.chatService.getIfAvailable();
 		if (!this.availability.isAvailable() || service == null) {
 			// AI 日志最小补齐批：这条 return 在 AiTrace.bind 之前 ⇒ 此前日志里一行不留（最大盲区）
@@ -329,9 +312,9 @@ public class AiController {
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
 		// R4：Redis 不可用时在**开流之前**快速失败（≤ 一次 PING 的超时，见 RedisAvailability）。
-		// 顺序：必填校验 → Redis 探活 → 限流 → 归一化 → 空拒 → 长度。
-		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余三道闸依赖 Redis 计数，
-		// 故排在探活之后 —— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
+		// 顺序：必填校验 → Redis 探活 → 归一化 → 空拒 → 长度。
+		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余闸保持在探活之后
+		// （顺序不变）—— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
 		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request == null ? null : request.sessionId(), null,
 					"reason", "missing_session_or_message");
@@ -342,21 +325,8 @@ public class AiController {
 					"reason", "redis_unavailable");
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
-		// 批① 闸门 1：限流（§5.1 #3）。**排在归一化/长度之前**（裁决 I2，2026-10-21）：所有 /chat 请求
-		// 一律计数 —— 超长/纯不可见字符也是请求，同样消耗额度（防洪优先于"额度洁癖"：否则攻击者可用
-		// 超长体绕过限流做免费试探）。同时它在会话门之前：被限流的请求不该占住一个 in-flight 位。
-		AiRateLimiter.Decision rate = this.aiRateLimiter.check(request.sessionId(), clientIp(httpRequest));
-		if (!rate.allowed()) {
-			if (this.securityEvents != null) {
-				this.securityEvents.rateLimited();
-			}
-			deny(HttpStatus.TOO_MANY_REQUESTS, ErrorCodes.RATE_LIMITED, request.sessionId(), null,
-					"scope", rate.scope(), "used", rate.used(), "limit", rate.limit(),
-					"retryAfterS", rate.retryAfterSeconds());
-			return rateLimited(rate);
-		}
-		// 批① 闸门 2：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
-		// 零宽填充不该算进用户的额度；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
+		// 批① 闸门 1：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
+		// 零宽填充不该算进用户的长度上限；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
 		InputSanitizer.Result sanitized = this.inputSanitizer.sanitize(request.message());
 		if (sanitized.changed()) {
 			// 只记长度差与剥离计数：原文可能含敏感数据，日志里不得出现
@@ -372,7 +342,7 @@ public class AiController {
 			return json(HttpStatus.BAD_REQUEST,
 					errorBody(ErrorCodes.BAD_REQUEST, "message 归一化后为空（原文仅含不可见字符），请重新输入"));
 		}
-		// 批① 闸门 3：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
+		// 批① 闸门 2：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
 		if (sanitized.text().length() > maxChars) {
 			if (this.securityEvents != null) {
@@ -384,7 +354,7 @@ public class AiController {
 		}
 
 		String sessionId = request.sessionId();
-		// 批② 新段（追加在既有五道闸之后，既有闸顺序不变）：
+		// 批② 新段（追加在既有拒绝闸之后，既有闸顺序不变）：
 		// context 形状闸 —— 白名单化 + **降级不回显**（用户裁决 2026-10-21 第 1 条：不拒绝请求）。
 		// L-99：输入侧 DLP 已删除 —— 归一层（InputSanitizer）之后的文本原样进模型与记忆。
 		ContextFieldGate.Result gated = this.contextFieldGate == null ? null : this.contextFieldGate.sanitize(request.context());
@@ -398,8 +368,8 @@ public class AiController {
 		// 归一后的文本 / 闸后的 context 才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
 		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
 				request.params());
-		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在限流/长度之后、会话门之前 ——
-		// 与既有闸序一致（所有请求都计数、超长先撞），且拒绝不占 in-flight 位。
+		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在归一化/长度之后、会话门之前 ——
+		// 与既有闸序一致（归一化与长度先过、超长先撞），且拒绝不占 in-flight 位。
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
 		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
 				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
@@ -862,7 +832,7 @@ public class AiController {
 		// 表格摘要本来就可能很长，拒绝回灌会让前端工具永远无法收尾）。
 		// G5：上限来自 app.ai.result-budget.callback.max-chars（不再是类内常量），
 		// 截断标记计入预算，响应体与工具结果帧共用同一套截断字段（truncated/strategy/
-		// originalChars/returnedChars/notice）。
+		// originalChars/returnedChars/noticeCode）。
 		// 结构化回灌超限拒绝批：**结构化结果**（JSON 对象/数组、表格写结果）是这条闸门的例外 ——
 		// substring 截断会切坏 JSON、切掉表格「共 N 格」尾行，落库的会是半截数据。这类超限在
 		// 进入确认门**之前**以 400 FRONTEND_RESULT_TOO_LARGE 拒绝：不调 submit、不写条目、
@@ -966,7 +936,7 @@ public class AiController {
 			body.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
 			body.put(TruncationContract.ORIGINAL_CHARS_FIELD, originalChars);
 			body.put(TruncationContract.RETURNED_CHARS_FIELD, returnedChars);
-			body.put(TruncationContract.NOTICE_FIELD, notice);
+			body.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
 		}
 		return ResponseEntity.ok(body);
 	}
@@ -998,8 +968,7 @@ public class AiController {
 	 * 消掉"回放快照读完、订阅还没挂上"之间丢帧的交接窗口。
 	 *
 	 * <p>
-	 * <b>B23L1 批①</b>：回放源改走 {@link FrameStore}（生产 = Redis Stream {@code ai:xevents:}；
-	 * 兼容期内部把旧的 {@code ai:events:} LIST 串在前面并按 {@code seq} 去重），
+	 * <b>B23L1 批①</b>：回放源是 {@link FrameStore}（生产 = Redis Stream {@code ai:xevents:}），
 	 * 差量/孤儿过滤口径不变；连接层因此无状态 —— 任何实例都能 serve 任意 run 的 reattach。
 	 *
 	 * <p>
@@ -1031,7 +1000,7 @@ public class AiController {
 		}
 		// I-1：回放前先确认事件日志末号可读。末号未知时不得进入"按 0 全量回放"（会拿到最旧窗口、
 		// 拿不到 done）；明确回 503 + degraded，让前端下一拍重试。
-		if (this.frameStore != null && this.frameStore.lastSeqIfKnown(runId).isEmpty()) {
+		if (this.frameStore.lastSeqIfKnown(runId).isEmpty()) {
 			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
 					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
 			body.put("degraded", true);
@@ -1173,7 +1142,7 @@ public class AiController {
 		}
 		// 与正式通道的 503 同口径：末号读不出来时不冒充"就绪"（下一拍再探）
 		FrameStore frames = this.frameStore;
-		if (frames != null && frames.lastSeqIfKnown(runId).isEmpty()) {
+		if (frames.lastSeqIfKnown(runId).isEmpty()) {
 			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
 					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
 			body.put("degraded", true);
@@ -1218,10 +1187,6 @@ public class AiController {
 	 */
 	private ResponseEntity<?> preparingOrUnknown(String runId) {
 		FrameStore frames = this.frameStore;
-		if (frames == null) {
-			// 无归档设施（非 Spring 装配/单测）：没有"已 start"的证据，维持既有 404
-			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
-		}
 		OptionalLong last = frames.lastSeqIfKnown(runId);
 		if (last.isEmpty()) {
 			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
@@ -1472,7 +1437,7 @@ public class AiController {
 	 */
 	private boolean hasOwnArchive(String runId) {
 		FrameStore frames = this.frameStore;
-		if (frames == null || runId == null || runId.isBlank()) {
+		if (runId == null || runId.isBlank()) {
 			return false;
 		}
 		try {
@@ -1642,29 +1607,24 @@ public class AiController {
 		if (!Boolean.TRUE.equals(body.get("exists"))) {
 			return;
 		}
-		if (this.frameStore == null) {
-			readable = false;
-		}
-		else {
-			try {
-				FrameStore.ReadResult read = this.frameStore.readFromWithStatus(runId, 0L, 1);
-				readable = !read.degraded();
-				List<Map<String, Object>> frames = read.frames();
-				if (frames != null && !frames.isEmpty()) {
-					Map<String, Object> first = frames.get(0);
-					if (first.get("seq") instanceof Number number) {
-						firstSeq = number.longValue();
-					}
+		try {
+			FrameStore.ReadResult read = this.frameStore.readFromWithStatus(runId, 0L, 1);
+			readable = !read.degraded();
+			List<Map<String, Object>> frames = read.frames();
+			if (frames != null && !frames.isEmpty()) {
+				Map<String, Object> first = frames.get(0);
+				if (first.get("seq") instanceof Number number) {
+					firstSeq = number.longValue();
 				}
-				// <b>权威位 = 后端读归档时是否真跳过了不可回放的区间</b>（Task 2 / I-3）。
-				// 旧口径用"首帧不是 start"猜测：跳号（降级重试 / 遗留墙钟 ID）会让它误报，
-				// 而窗口按条数裁（不是按号裁）时它又会漏报 —— 猜出来的缺口不能当权威。
-				gap = read.truncated();
 			}
-			catch (RuntimeException ex) {
-				readable = false;
-				log.debug("归档完整性探测失败 runId={}（按不可证明完整处理）：{}", runId, ex.getMessage());
-			}
+			// <b>权威位 = 后端读归档时是否真跳过了不可回放的区间</b>（Task 2 / I-3）。
+			// 旧口径用"首帧不是 start"猜测：跳号（降级重试 / 遗留墙钟 ID）会让它误报，
+			// 而窗口按条数裁（不是按号裁）时它又会漏报 —— 猜出来的缺口不能当权威。
+			gap = read.truncated();
+		}
+		catch (RuntimeException ex) {
+			readable = false;
+			log.debug("归档完整性探测失败 runId={}（按不可证明完整处理）：{}", runId, ex.getMessage());
 		}
 		body.put("archiveFirstSeq", firstSeq);
 		body.put("archiveReadable", readable);
@@ -1830,16 +1790,12 @@ public class AiController {
 	 * 只收增量、禁全量回放）。
 	 *
 	 * <p>
-	 * B23L1 批①：新写只进 Stream（{@code ai:xevents:}），{@code ai:events:} LIST 进只读兼容期 ——
-	 * 因此末号必须问事件日志（{@link FrameStore#lastSeq} 内部会把 LIST 尾巴也算进来），
-	 * 不能再看 LIST 末帧（那会在迁移后恒为 0，前端于是全量重放）。
+	 * B23L1 批①：事件日志真值在 Stream（{@code ai:xevents:}）—— 末号必须问事件日志
+	 * （{@link FrameStore#lastSeqIfKnown}；读失败返回 empty 而不是 0），不能另读第二套归档
+	 * （前端会把 0 当全量回放锚点）。
 	 */
 	private Long archiveMaxSeq(String runId) {
-		FrameStore frames = this.frameStore;
-		if (frames == null) {
-			return this.runStore.lastEventSeq(runId);
-		}
-		OptionalLong known = frames.lastSeqIfKnown(runId);
+		OptionalLong known = this.frameStore.lastSeqIfKnown(runId);
 		return known.isPresent() ? known.getAsLong() : null;
 	}
 
@@ -1985,50 +1941,6 @@ public class AiController {
 		body.put("length", length);
 		body.put("limit", REASON_MAX_CHARS);
 		return body;
-	}
-
-	/**
-	 * 429 {@code RATE_LIMITED}（批① 闸门 3）。带 {@code Retry-After}（秒，向上取整）——
-	 * 客户端据此退避，而不是盲目重试把窗口继续打满。
-	 *
-	 * <p>A3-Y7 / I-1：message 走 {@code localize()}；退避秒数、维度、用量都在结构字段里。
-	 */
-	private ResponseEntity<Map<String, Object>> rateLimited(AiRateLimiter.Decision decision) {
-		String scopeName = AiRateLimiter.SCOPE_SESSION.equals(decision.scope()) ? "该会话" : "当前来源";
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("code", ErrorCodes.RATE_LIMITED);
-		body.put("message", localize(ErrorCodes.RATE_LIMITED,
-				scopeName + "对话请求过于频繁：每 " + decision.limit() + " 次/分钟（"
-						+ decision.scope() + " 维度）已达上限，请约 " + decision.retryAfterSeconds() + " 秒后重试"));
-		body.put("scope", decision.scope());
-		body.put("used", decision.used());
-		body.put("limit", decision.limit());
-		body.put("retryAfterSeconds", decision.retryAfterSeconds());
-		return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-				.header("Retry-After", String.valueOf(decision.retryAfterSeconds()))
-				.contentType(MediaType.APPLICATION_JSON)
-				.body(body);
-	}
-
-	/**
-	 * 限流用的来源 IP：交给 {@link com.example.configmgr.config.ClientIpResolver}（多实例专项）。
-	 *
-	 * <p>口径未变的安全前提：**只有 RemoteAddr 落在 {@code app.web.trusted-proxies} 内才看
-	 * {@code X-Forwarded-For}**（默认网段为空 ⇒ 只回 RemoteAddr，与改造前逐字一致）。
-	 * 无条件读 XFF 等于把"算谁的额度"交给请求方自己声明；而完全读不到 XFF，则 LB 后的
-	 * 全站用户会共用同一个 {@code ai:rate:ip:<LB-IP>} 桶 —— 一个用户刷满 60/分即全员 429。
-	 *
-	 * <p>未装配 resolver（standalone 单测直接 {@code new AiController(...)}）时回落 RemoteAddr。
-	 */
-	private String clientIp(HttpServletRequest httpRequest) {
-		if (httpRequest == null) {
-			return "unknown";
-		}
-		if (this.clientIpResolver != null) {
-			return this.clientIpResolver.resolve(httpRequest);
-		}
-		String remote = httpRequest.getRemoteAddr();
-		return StringUtils.hasText(remote) ? remote : "unknown";
 	}
 
 	/**
@@ -2181,8 +2093,8 @@ public class AiController {
 
 	/**
 	 * 历史通道的截断元数据（A10 R-15）：从持久化的工具结果信封里取回
-	 * {@code truncated/strategy/originalChars/returnedChars/notice}，并映射成前端段字段
-	 * （{@code noticeCode=model_view_truncated}、{@code truncatedReason=notice} 兼容旧客户端）。
+	 * {@code truncated/strategy/originalChars/returnedChars}，并映射成前端段字段
+	 * {@code noticeCode=model_view_truncated}。
 	 *
 	 * <p>为什么读信封而不是另存一份：模型侧裁剪就发生在
 	 * {@code ToolResultEnvelope#toModelJson}，信封是这份事实的唯一持久来源；实时帧的截断字段
@@ -2218,10 +2130,6 @@ public class AiController {
 				if (value != null && value.isNumber()) {
 					fields.put(key, value.asInt());
 				}
-			}
-			JsonNode notice = node.get(TruncationContract.NOTICE_FIELD);
-			if (notice != null && notice.isTextual()) {
-				fields.put(TruncationContract.LEGACY_REASON_FIELD, notice.asText());
 			}
 			return fields;
 		}
@@ -2339,8 +2247,8 @@ public class AiController {
 	 *
 	 * <p>
 	 * 姿态与 {@code GET /history/{sessionId}} 同族：<b>只读</b>、<b>不查 AI key</b>（无 key 时记忆与
-	 * {@code ai:ctx:} 依然可读）、<b>Redis 不可用 → 503</b>。响应体是<b>裸对象</b>（与 {@code /cancel}、
-	 * {@code DELETE /history} 同姿态），字段见设计稿 §3.4(b)。
+	 * {@code ai:ctx:} 依然可读）、<b>Redis 不可用 → 503</b>。响应体是<b>裸对象</b>（与 {@code /cancel}
+	 * 同姿态），字段见设计稿 §3.4(b)。
 	 *
 	 * <p>
 	 * {@code ?ledger=1} 时附带 {@code ai:ctx:ledger:} 最近 20 条压缩事件（运维面）；默认不带，

@@ -527,26 +527,15 @@ export const UI_EVENT_TYPES: readonly UiEvent['type'][] = [
   'refresh_tasks'
 ]
 
-/** 工作区 → AI 的通知主题（AI 面板据此更新上下文 chip）。 */
-export type WorkspaceTopic = 'workspace_changed' | 'ui_event_result'
-
 /**
  * 工作区动作来源的数据码（契约事件与 AI 上下文标注用）。
  *
- * <p>2026-10-30 结构化批：统一为 `UI` / `API` / `AI`（原 `'界面'` 是中文数据码，无法做码表与断言）。
- * 旧码 `'界面'` 仍会被读入侧接受并归一为 `UI`（见 {@link normalizeWorkspaceActionSource}），
- * 但**不得再写出**。
+ * <p>统一为 `UI` / `API` / `AI`；旧中文码 `'界面'` 已退场（读入侧不再识别）。
  */
 export type WorkspaceActionSource = 'UI' | 'API' | 'AI'
 
-/** 旧数据码（历史记录 / 旧调用点）：只在读入侧兼容，禁止再写入。 */
-export const LEGACY_WORKSPACE_ACTION_SOURCE_UI = '界面'
-
-/** 任意来源取值 → 数据码。`'界面'`（旧）/缺失/未知一律归一为 `UI`（与旧默认同义）。 */
+/** 任意来源取值 → 数据码。缺失/未知一律归一为 `UI`（与旧默认同义）。 */
 export function normalizeWorkspaceActionSource(raw: unknown): WorkspaceActionSource {
-  if (raw === 'UI' || raw === LEGACY_WORKSPACE_ACTION_SOURCE_UI) {
-    return 'UI'
-  }
   if (raw === 'API') {
     return 'API'
   }
@@ -559,10 +548,8 @@ export function normalizeWorkspaceActionSource(raw: unknown): WorkspaceActionSou
 /**
  * 一次工作区动作记录（deepseek 蓝本 workspaceContract 的事件形态 + 版本号）。
  *
- * 两个用途：
- * 1. `workspace_changed` 事件的载荷 —— AI 面板据此显示"工作区已同步：<摘要>"；
- * 2. 下一轮 AI 请求的 `context.extra.recentActions` —— 让模型知道用户刚刚手点了什么
- *    （契约联动：工作区动作经契约层同步进 AI 上下文）。
+ * 唯一用途：下一轮 AI 请求的 `context.extra.recentActions` —— 让模型知道用户刚刚手点了什么
+ * （契约联动：工作区动作经契约层同步进 AI 上下文）。
  */
 export interface WorkspaceActionRecord {
   /** 动作发生后的数据版本号（单调自增，与 dataVersion 同源） */
@@ -572,14 +559,6 @@ export interface WorkspaceActionRecord {
   /** 时刻（epoch 毫秒） */
   at: number
   source: WorkspaceActionSource
-  /**
-   * 展示面的结构化形态（i18n L-69）：`code` = locale key、`args` = 命名插值。
-   *
-   * <p>
-   * 只给**界面**用（面板 chip 的「工作区已同步」）。`summary` 仍是**送模型**那一条（C5：切 en 不变），
-   * 两者是同一动作的两份受众面 —— 不互相替代，也不进 `buildContext()`。
-   */
-  display?: { code: string; args?: Record<string, string | number> }
 }
 
 /** 一轮对话最多携带的历史动作条数（只带最近若干条，避免上下文膨胀）。 */

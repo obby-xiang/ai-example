@@ -59,13 +59,13 @@ public interface FrameStore {
 	 * <p><b>本方法的结果不能当交付号</b>（2026-10-30 Task 2）：它只回答"下一个可用号是几"，
 	 * 并不占住归档位次 —— 同一瞬间另一个实例可能已经用更高的号归档，本号便再也落不了档。
 	 * 出帧路径一律走 {@link #appendAndAllocateSeq}（号与归档同一拍，成功才交付）；
-	 * 本方法只服务兼容写口与诊断（{@link RunStoreFrameStore} / 单测 / 非出帧调用方）。
+	 * 本方法只服务诊断与非出帧调用方（出帧路径恒走 {@link #appendAndAllocateSeq}）。
 	 */
 	long nextSeq(String runId);
 
 	/**
 	 * 落档一帧（帧体已带 {@code seq}）。心跳帧 no-op。写失败只记日志，不抛出 ——
-	 * 外置是"更耐久"，不是"更正确"的前提（与 B1 起 {@code RunStore#appendEvent} 同口径）。
+	 * 外置是"更耐久"，不是"更正确"的前提。
 	 *
 	 * <p><b>不会改号</b>（2026-10-30 Task 2）：帧体里的 {@code seq} 就是它被归档的号。若该号已被
 	 * 表尾越过（另一个实例已经用更高的号归档），本帧<b>不落档</b>（WARN + {@code skipped}）——
@@ -187,22 +187,17 @@ public interface FrameStore {
 	/**
 	 * 按序号回读：返回 {@code seq > afterSeq} 的帧（升序）。
 	 *
-	 * <p>兼容期双读：先读 LIST 尾巴（{@code ai:events:<runId>}，只读），再读 Stream，
-	 * 按 {@code seq} 拼接去重（同号以 Stream 为准）；<b>没有 {@code seq} 的老帧一律保留</b>
-	 * （无法判定孤儿，宁可不发不可丢帧，与 {@code isOrphan} 同口径）。
+	 * <p>生产实现按 Stream entry ID {@code <afterSeq+1>-0} 精确取差量。
 	 *
 	 * <p><b>空结果 ≠ 证明"没有帧"</b>：读失败（Redis 抖动、目标 5.0 拒绝非法 stream ID 等）
-	 * <b>不会以异常表达，但结果可能为空、也可能缺失失败侧的那部分帧</b>（双侧读是独立进行的：
-	 * Stream 读失败时已读到的兼容期 LIST 帧仍会照常返回，反之亦然）。因此调用方既不得把"空"
+	 * <b>不会以异常表达，但结果可能为空、也可能缺失失败侧的那部分帧</b>。因此调用方既不得把"空"
 	 * 也不得把"帧少了几条"当成"该 run 确实没有新帧"的证明。实现侧以 WARN 留痕：带
-	 * {@code runId}，其中 Stream 的 {@code XRANGE} 读取失败另带 {@code afterSeq} 与 {@code from}
-	 * （见 {@link RedisFrameStore#readFrom}）；读失败同时计入
+	 * {@code runId}；读失败同时计入
 	 * {@link com.example.configmgr.ai.observe.RedisDegradation} 的 A3/A4 计数
 	 * （{@code /api/ai/health} 的 {@code redis.degradations}），"空流"不计数 —— 两者因此可区分。
 	 *
 	 * <p><b>不抛异常只承诺生产实现</b>：{@link RedisFrameStore} 吞掉读失败不抛（回放与唤醒
-	 * 补帧不能被一次读抖动打断）；接口另有兼容实现 {@code RunStoreFrameStore}（生产装配不可达，
-	 * 仅兼容构造器使用），其读路径未做同款吞异常处理，<b>不在本承诺内</b>。
+	 * 补帧不能被一次读抖动打断）；不覆写本方法的其它实现不在本承诺内。
 	 *
 	 * @param afterSeq 前端已知的最大序号（0 = 全量）
 	 * @param limit    最多返回多少帧；{@code <= 0} = 不限（回放批用）
@@ -213,7 +208,7 @@ public interface FrameStore {
 	 * 带降级标记的回读（I-1）：{@code degraded=true} = 本次读有失败/有窗口被跳过，
 	 * 结果<b>不是</b>"该 run 确实没有新帧"的证明。
 	 *
-	 * <p>默认实现把 {@link #readFrom} 视为未降级（兼容测试替身与兼容期 LIST 实现）；
+	 * <p>默认实现把 {@link #readFrom} 视为未降级（不覆写本方法的替身）；
 	 * 生产实现 {@link RedisFrameStore} 覆盖它，把 A3/A4 的失败信号真正传到调用方。
 	 */
 	default ReadResult readFromWithStatus(String runId, long afterSeq, int limit) {

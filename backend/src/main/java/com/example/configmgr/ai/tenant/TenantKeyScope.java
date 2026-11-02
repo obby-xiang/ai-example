@@ -10,7 +10,6 @@ package com.example.configmgr.ai.tenant;
  * <li>{@code ai:session:lock:1:101:<sessionId>}（会话门）</li>
  * <li>{@code ai:purge:pending:1:101:<sessionId>}（销毁台账）</li>
  * <li>{@code ai:form:att:sess:1:101:<sessionId>}（附件会话索引）</li>
- * <li>{@code ai:rate:session:1:101:<sessionId>}（会话维度限流）</li>
  * </ul>
  * 与前端镜像/草稿键形同一口径：{@code ai-mirror:<t>:<u>:<sid>}、
  * {@code cm.ai.form.draft.<t>:<u>.<toolCallId>}。
@@ -68,7 +67,7 @@ public final class TenantKeyScope {
 	 * <p>判据与 {@link TenantUser} 的构造约束、{@link RunIdentityScope#usable(long, long)} 逐字同源：
 	 * 只有 {@code > 0} 与 {@code -1}（系统账号）可用，其余负值都是<b>坏值</b>。
 	 * {@code -1} 以外的负值若被当成身份，下游 {@code new TenantUser(...)} 会抛异常，
-	 * 恢复循环（如 {@code SessionPurgePendingStore#recoverOrphans}）因此整批中断。
+	 * 恢复循环（如 {@code SessionPurgePendingStore#listDue}）因此整批中断。
 	 *
 	 * <p>旧记录没有身份字段（反序列化为 {@code null}/{@code 0}）：它们是 legacy，不能冒充任何新身份。
 	 */
