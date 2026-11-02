@@ -4289,14 +4289,20 @@ function editMessage(m: ChatMessage): void {
   composerRef.value?.focus({ preventScroll: true })
 }
 
-/** 本轮是否仍可给出消息级恢复入口（最后一条助手消息 + 失败/断流/取消 + 未被停止）。 */
+/**
+ * 本轮是否仍可给出消息级恢复入口（最后一条助手消息 + 真实失败/断流 + 未被停止）。
+ *
+ * <p>取消（`cancelled`）**不是**可恢复的失败轮：停止是用户的终态决定，恢复入口（继续 /
+ * 重试本轮）必须彻底排除。消息级 `stopped` 是首要判据（含零产出轮），`lastRoundOutcome`
+ * 里的取消态不再作为候选 —— 旧会话残留的取消结局不得复活出重试按钮。
+ */
 function isFailedLastAssistant(message: ChatMessage): boolean {
   const last = ai.messages[ai.messages.length - 1]
   return message.role === 'assistant'
     && last === message
     && message.stopped !== true
     && !unconfirmedOf(message)
-    && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted' || ai.lastRoundOutcome === 'cancelled')
+    && (ai.lastRoundOutcome === 'error' || ai.lastRoundOutcome === 'interrupted')
 }
 
 /**

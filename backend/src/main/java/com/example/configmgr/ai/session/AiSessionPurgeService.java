@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.ClientRequestRegistry;
 import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunSnapshot;
@@ -1345,6 +1346,9 @@ public class AiSessionPurgeService {
 		// 索引，只能按"会话一个键"精确 DEL（与写入方同一个键拼接口）。失败进 errors ⇒ complete=false
 		// + pending 保留，由调度/手动重试补删 —— 绝不静默残留到 session-ttl。
 		deleteKeyIfType(CreateTaskDraftStore.sessionKey(sessionId), DataType.HASH, errors, warnings, "ctdraft");
+		// 停止闭环：clientRequestId → run 的会话级映射/取消墓碑（单键 HASH，字段 = clientRequestId）。
+		// 与写入方同一个键拼接口（TenantKeyScope + 会话号），精确 DEL，不扫描。
+		deleteKeyIfType(ClientRequestRegistry.sessionKey(sessionId), DataType.HASH, errors, warnings, "clientreq");
 		return new SessionView(false, recordDeleted);
 	}
 

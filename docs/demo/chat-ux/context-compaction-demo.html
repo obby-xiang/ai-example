@@ -3,22 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>上下文统计与压缩 · 交互场景 Demo</title>
+<title>上下文压缩 · 目标设计交互 Demo</title>
 <link rel="stylesheet" href="context-compaction-demo.css">
 </head>
 <body>
 <div class="demo-page">
   <header class="demo-head">
     <div class="demo-eyebrow">
-      <span class="demo-chip blue">视觉 spike</span>
+      <span class="demo-chip blue">目标设计讨论稿</span>
+      <span class="demo-chip">方向已确认 · 仍非定稿</span>
       <span class="demo-chip">静态 HTML · 无依赖</span>
       <span class="demo-chip">不连接后端</span>
-      <span>依据当前 AiPanel / CompactionStatus / ContextPill / stores/ai.ts / 后端压缩谱系</span>
     </div>
-    <h1>上下文统计与压缩 · 交互场景 Demo</h1>
+    <h1>上下文压缩 · 目标设计交互 Demo</h1>
     <p class="lede">
-      左侧场景切换与变体选择是 <b>Demo 外壳</b>；右侧面板内的阶段条、提示、按钮、状态卡与圆环 tooltip
-      按当前仓库源码复刻。所有“静默”场景都不额外添加 Toast、百分比或成功提示。
+      本页展示刚讨论的目标设计，不是旧现状复刻。压缩状态归属于具体助手消息，不再出现在顶部；
+      压缩完成事实是<b>消息流时序中的流程分隔行</b>，不是页脚标签，也不是可操作卡片。
+      <b>摘要正文绝不展示</b>；用户原始展示历史保留，只有模型工作上下文被压缩。
+      左侧场景切换、变体选择与说明都属于 <b>Demo 外壳</b>，不冒充产品 UI。
     </p>
   </header>
 
@@ -26,23 +28,24 @@
     <aside class="scenario-nav" aria-label="Demo 场景切换">
       <div class="nav-title">场景（Demo 外壳）</div>
       <div class="nav-list" id="scenario-nav">
-        <button class="nav-btn" type="button" data-scene="1"><span class="nav-num">01</span><span class="nav-label">普通生成，无压缩</span></button>
-        <button class="nav-btn" type="button" data-scene="2"><span class="nav-num">02</span><span class="nav-label">记忆窗口 / L1 清除</span></button>
-        <button class="nav-btn" type="button" data-scene="3"><span class="nav-num">03</span><span class="nav-label">L2 真实模型摘要中</span></button>
-        <button class="nav-btn" type="button" data-scene="4"><span class="nav-num">04</span><span class="nav-label">L2 结束 → 工作中</span></button>
-        <button class="nav-btn" type="button" data-scene="5"><span class="nav-num">05</span><span class="nav-label">历史恢复：已压缩</span></button>
-        <button class="nav-btn" type="button" data-scene="6"><span class="nav-num">06</span><span class="nav-label">L3 本地硬截断</span></button>
-        <button class="nav-btn" type="button" data-scene="7"><span class="nav-num">07</span><span class="nav-label">未触发 / no-op</span></button>
-        <button class="nav-btn" type="button" data-scene="8"><span class="nav-num">08</span><span class="nav-label">摘要失败 / 不可用</span></button>
-        <button class="nav-btn" type="button" data-scene="9"><span class="nav-num">09</span><span class="nav-label">熔断开启：只留 L1</span></button>
-        <button class="nav-btn" type="button" data-scene="10"><span class="nav-num">10</span><span class="nav-label">HITL 等待：仅 L1</span></button>
-        <button class="nav-btn" type="button" data-scene="11"><span class="nav-num">11</span><span class="nav-label">准备中阶段</span></button>
-        <button class="nav-btn" type="button" data-scene="12"><span class="nav-num">12</span><span class="nav-label">上下文圆环状态</span></button>
-        <button class="nav-btn" type="button" data-scene="13"><span class="nav-num">13</span><span class="nav-label">轮内工具回环预算</span></button>
+        <button class="nav-btn" type="button" data-scene="1"><span class="nav-num">01</span><span class="nav-label">普通生成（无压缩）</span></button>
+        <button class="nav-btn" type="button" data-scene="2"><span class="nav-num">02</span><span class="nav-label">本地压缩事实</span></button>
+        <button class="nav-btn" type="button" data-scene="3"><span class="nav-num">03</span><span class="nav-label">L2 压缩中 → 完成</span></button>
+        <button class="nav-btn" type="button" data-scene="4"><span class="nav-num">04</span><span class="nav-label">no-op 静默</span></button>
+        <button class="nav-btn" type="button" data-scene="5"><span class="nav-num">05</span><span class="nav-label">摘要失败 / 不可用</span></button>
+        <button class="nav-btn" type="button" data-scene="6"><span class="nav-num">06</span><span class="nav-label">压缩后异常 / 超限</span></button>
+        <button class="nav-btn" type="button" data-scene="7"><span class="nav-num">07</span><span class="nav-label">停止矩阵</span></button>
+        <button class="nav-btn" type="button" data-scene="8"><span class="nav-num">08</span><span class="nav-label">HITL 等待优先</span></button>
+        <button class="nav-btn" type="button" data-scene="9"><span class="nav-num">09</span><span class="nav-label">表单续跑前压缩</span></button>
+        <button class="nav-btn" type="button" data-scene="10"><span class="nav-num">10</span><span class="nav-label">刷新 / 重连 / 接管</span></button>
+        <button class="nav-btn" type="button" data-scene="11"><span class="nav-num">11</span><span class="nav-label">同轮多次压缩（两节点）</span></button>
+        <button class="nav-btn" type="button" data-scene="12"><span class="nav-num">12</span><span class="nav-label">轮内工具回环</span></button>
+        <button class="nav-btn" type="button" data-scene="13"><span class="nav-num">13</span><span class="nav-label">准备中对照</span></button>
+        <button class="nav-btn" type="button" data-scene="14"><span class="nav-num">14</span><span class="nav-label">上下文圆环</span></button>
       </div>
       <div class="nav-note">
-        <b>操作：</b>切换场景立即重播；带时间线的场景可点“重播本场景”。L2 / 准备中的秒表按服务端
-        <code>elapsedMs</code> 的锚定方式模拟，真实递增。圆环在输入框右下角，hover 或 Tab 聚焦看 tooltip。
+        <b>操作：</b>切换场景立即重播；带时间线的场景可点“重播本场景”。压缩中秒表真实递增，但不逐秒进入读屏播报。
+        圆环在输入框右下角，hover 或 Tab 聚焦看 tooltip。
       </div>
     </aside>
 
@@ -51,7 +54,7 @@
         <div class="scene-head">
           <span class="scene-num" id="scene-num">01</span>
           <div class="scene-head-main">
-            <div class="scene-kicker" id="scene-kicker">场景 01 / 13</div>
+            <div class="scene-kicker" id="scene-kicker">场景 01 / 14</div>
             <h2 id="scene-title">普通生成，无压缩</h2>
           </div>
           <span class="scene-tag tag-silent" id="scene-tag">无阶段条</span>
@@ -125,10 +128,16 @@
         </div>
       </div>
 
+      <span class="sr-only" id="phase-announcer" aria-live="polite" aria-atomic="true"></span>
+
       <p class="demo-footnote">
-        <b>说明：</b>面板宽度、页面外框与左侧场景栏是 Demo 展示外壳；面板内视觉按当前轻量浅色样式复刻。
-        未渲染每轮建议（避免出现被明确排除的“预估行数”入口），也未提供普通 regenerate。
-        输入框可自由编辑，Enter / Shift+Enter、流式中静默 Enter、停止钮均为纯前端模拟，不连接后端。
+        <b>目标契约：</b>用户原始展示历史保留，只有模型工作上下文被压缩；摘要正文不展示，也不提供正文入口。
+        紫色 <code>压缩中…</code> 只在助手消息元信息行出现，不再占顶部；压缩提交成功后，在消息流真实发生时序位置
+        留下全宽流程分隔行 <code>已压缩上下文</code>——它是消息流事件节点，不占用回复页脚，也不是 Toast。
+        同一轮多次真实压缩按事件顺序保留多个节点；同一事件重放/刷新按事件 id 去重。
+        <br>
+        <b>Demo 说明：</b>面板宽度、页面外框与左侧场景栏是展示外壳；输入框可自由编辑，Enter / Shift+Enter、
+        流式中静默 Enter、停止整轮均为纯前端模拟，不连接后端。未提供普通 regenerate、额外重试或预估行数入口。
       </p>
     </main>
   </div>
@@ -143,204 +152,203 @@
 
   const SCENES = {
     1: {
-      title: '普通生成，无压缩',
-      tag: '无阶段条',
+      title: '普通生成（无压缩）',
+      tag: '无压缩',
       tone: 'silent',
       brief: [
-        '用户消息发出后直接进入「工作中…」呼吸，顶部没有阶段条。',
-        '完成时呼吸淡出换时间戳；圆环只在 done.context 到达时更新，流式中不跳动。'
+        '没有压缩过程，也没有流程节点；只有蓝色「工作中…」→ 时间戳。',
+        '摘要正文不展示；本场景不涉及摘要。'
       ],
       evidence: [
-        'AiPanel.vue:212-221 阶段条只在 stageBar !== null 时挂载；1508-1521 的 stageBar 只返回 compacting / preparing。',
-        'SseChatEmitter.java:2587-2596：普通请求初始相位 streaming，L1/L3 本地操作不公告 compacting。',
-        'stores/ai.ts:9530-9545：done.context 才写 contextUsage，流式中不跳动。'
+        '目标设计 §4.1：压缩状态只属于具体助手消息；无压缩时不出现。',
+        '目标设计 §4.3：已压缩上下文只在真实提交后作为消息流事件节点出现。',
+        '现有元信息行：AiPanel.vue:913-940（工作中 / 等待中 / 时间戳同一位）。'
       ]
     },
     2: {
-      title: '记忆窗口 / L1 清除（静默）',
-      tag: '静默',
-      tone: 'silent',
+      title: '本地压缩事实（L1 / L3 / MemoryWindow）',
+      tag: '本地 · 即时',
+      tone: 'visible',
       brief: [
-        '当前页面：已渲染的气泡 / 工具卡不会被 L1 即时改写；请求照常发出，面板没有任何压缩提示。',
-        '刷新 / 重新载入后：/history 直接读被改写的 Redis ChatMemory，旧工具结果会显示真实占位符，且包含 toolCallId。',
-        '切「当前页面 / 刷新后」查看差异；L1 只改该窗口里的工具结果，不插入 synthetic 灰条。'
+        '三种本地操作都不显示「压缩中」；只有实际提交后，才在消息流中插入「已压缩上下文」流程行。',
+        '用户原始展示历史保留；刷新后原文仍可见，模型工作上下文才是被压缩的那份。',
+        '不展示摘要正文、技术占位符或级别；流程行不含展开、按钮或复制内容。'
       ],
       evidence: [
-        'ContextCompactor.java:260-269：onSummaryStart 只在真正调用 L2 摘要模型前触发；L1/L3 静默。',
-        'ContextCompactor.java:333-365：L1 只清旧工具结果（不删消息、不动配对骨架）。',
-        'AiController.java:1956-1974：/history/{sessionId} 直接遍历 chatMemory.get(sessionId)，读的是被 L1 改写后的 Redis ChatMemory。',
-        'AiController.java:2048-2066：historyToolResponses 把 responseData 透出到历史卡；ToolResultClearing.java:146-148 的占位符格式含工具名 / token / toolCallId，占位符没有可解信封码，原样进入历史卡。',
-        '当前页不即时改写：L1 改的是服务端记忆窗口，前端已渲染的 messages 只有收到帧或重新载入历史时才更新。'
+        '目标设计 §4.3：结果节点只来自已提交事实；§3.2 展示历史与 working context 分离。',
+        '机制依据：ContextCompactor（L1）、HardTrim（L3）、MemoryWindow（窗口整理）；本 Demo 只展示目标交互，不复刻技术字段。',
+        '节点位置：L1 在本次回答开头（正文/工具卡之前）；复制口径仍只取正文 parts（AiPanel.vue:4530-4538）。'
       ]
     },
     3: {
-      title: 'L2 真实模型摘要中',
-      tag: 'L2 · 可见',
+      title: 'L2 压缩中 → 工作中 → 完成',
+      tag: '消息级过程',
       tone: 'visible',
       brief: [
-        '顶部阶段条显示「正在压缩上下文 · 已用 N 秒」与真实 hint；蓝点 1.5s 呼吸，没有百分比、没有进度条。',
-        '输入框仍可编辑；本轮 loading，发送位换成同尺寸停止钮。秒表由服务端 elapsedMs 锚定后本地递增。'
+        '「压缩中…」出现在该助手消息元信息行：紫色呼吸、真实秒表；顶部没有压缩条。',
+        '提交成功后立即回到「工作中…」，并在消息流开头插入「已压缩上下文」流程行；完成/刷新后仍保留。',
+        '摘要正文不展示，也不提供正文入口；流程行不含秒表、token 或摘要。'
       ],
       evidence: [
-        'CompactionStatus.vue:54-68：seconds 按 startedAtMs / elapsedMs 真实计算；72-98 只有阶段条与呼吸点。',
-        'stores/ai.ts:2957-2974：compactionStartedAtMs = Date.now() - elapsedMs，只记真实已用时间。',
-        'ResilientChatService.java:3991-3998：真实 L2 摘要前 onSummaryStart → keepalive.phase(compacting)。'
+        '目标设计 §4.1-4.3：状态归属助手消息；紫色与工作中同呼吸节奏；结果节点按事件插入 parts 时序。',
+        '目标设计 §4.5：过程态由真实阶段驱动，结果态来自已提交事实。',
+        '现有 parts 渲染与元信息行：AiPanel.vue:412,913-940；复制只取 text 段：AiPanel.vue:4530-4538。'
       ]
     },
     4: {
-      title: 'L2 摘要结束 → 工作中',
-      tag: 'L2 → 工作中',
-      tone: 'visible',
+      title: 'no-op 静默（六变体）',
+      tag: '无节点',
+      tone: 'silent',
       brief: [
-        '摘要结束立即撤掉阶段条，回到「工作中…」，再继续生成本轮回答。',
-        '没有「压缩完成」绿色条：CompactionStatus 的 done 模板在 AiPanel 的 stageBar 映射里不可达。'
+        '未达阈值、无可清理、前缀主导、滞回锁、全新空会话、上限未知：不出现压缩中，也不出现已压缩流程行。',
+        '变体只切换圆环与原因；不新增任何压缩 Toast/提示/事件节点。'
       ],
       evidence: [
-        'ResumeService.java:2080-2087：摘要结束立即 keepalive.phase(streaming)，阶段条退场。',
-        'AiPanel.vue:1508-1521：stageBar 只产出 compacting / preparing，不返回 done。',
-        'CompactionStatus.vue:100-108：绿色 done 模板存在，但本面板不会传入 mode=done。'
+        '目标设计 §4.4：无可清理 / 未达阈值 / 上限未知不出现过程态和结果节点。',
+        '既有 no-op 分支：ContextCompactor noop / TurnBudgetPlan PROCEED；本 Demo 只展示用户面。'
       ]
     },
     5: {
-      title: '历史恢复：较早的对话已压缩',
-      tag: '历史 · synthetic',
-      tone: 'recovery',
+      title: '摘要失败 / 摘要器不可用',
+      tag: '失败不标成功',
+      tone: 'warn',
       brief: [
-        '刷新后：旧原文不再从该记忆窗口恢复；只剩 synthetic=true 的「较早的对话已压缩」灰条 + 保留的近轮。',
-        '灰条只显示固定提示，不显示摘要正文；摘要正文仍藏在模型记忆里，不是用户面内容。',
-        '切「当前页面 / 刷新后」：当前页仍保留旧轮原文，刷新后旧轮已被摘要替换。'
+        '失败但本轮继续：压缩中退出后回到工作中，不插入已压缩流程行，不额外加失败 Toast。',
+        '摘要器不可用：没有压缩过程态，直接工作；不补成功节点。',
+        '摘要正文不出现。'
       ],
       evidence: [
-        'AiPanel.vue:330-339：syntheticOf(m) 时只渲染虚线灰底固定提示，不出消息操作，也不渲染摘要正文。',
-        'RollingSummarizer.java:177-277：按 Turn 滑窗把旧轮替换为一条带 [上下文压缩摘要] 的合成消息，近轮逐字保留。',
-        'ResilientChatService.java:3964-4001 + 4120-4152：压缩结果以整窗 replaceWindow 写回，未保留的旧轮不再留在记忆窗口。',
-        'SyntheticMessages.java:9-23：历史回显命中压缩摘要 / 收尾提示即 synthetic=true。',
-        'AiController.java:1956-1974 + 1980-2003：/history 从写回后的 ChatMemory 生成历史；synthetic 条目 additive 标记，摘要不冒充用户原话。'
+        '目标设计 §4.4：摘要失败退出过程态；只认已提交事实。',
+        '目标设计 §4.5：停止、断流、失败不得把「开始过压缩」误记为成功。'
       ]
     },
     6: {
-      title: 'L3 本地硬截断（静默）',
-      tag: 'L3 · 静默',
-      tone: 'silent',
+      title: '压缩后异常 / 上限',
+      tag: '真实提交事实',
+      tone: 'warn',
       brief: [
-        '当前页仍能看到旧轮；刷新后 L3 被裁轮次直接不再恢复，且没有专属提示（不出现已压缩灰条）。',
-        '界面无阶段条、无 Toast；丢完仍超就照发，交给上游如实报错。',
-        '切「当前页面 / 刷新后」看被裁轮次消失；这是静默的数据消失，不是摘要替换。'
+        '提交后本轮异常：已压缩流程行保留在原时序位置，随后出现既有错误卡。',
+        '摘要失败导致失败：退出过程态，无已压缩节点，走既有错误。',
+        '真实上下文超限：不补压缩成功，走既有蓝色错误卡。'
       ],
       evidence: [
-        'ContextCompactor.java:367-405：L3 HardTrim 是本地操作，不触发 onSummaryStart。',
-        'HardTrim.java:56-85：按 Turn 丢弃最旧的非 pin 段，减少的是历史消息本身。',
-        'ResilientChatService.java:3964-4001 + 4120-4152：压缩/裁剪结果整窗 replaceWindow 写回；刷新后 /history 读到的就是裁后窗口。',
-        'AiController.java:1956-1961：/history 直接遍历 chatMemory.get(sessionId)；被裁轮次不再出现。',
-        'AiPanel.vue:330-339：只有 synthetic 摘要才渲染「较早的对话已压缩」；L3 裁轮没有 synthetic 标记，因此无专属提示。'
+        '目标设计 §4.4 异常矩阵；§4.5 结果节点只来自已提交事实。',
+        '既有错误卡：AiPanel.vue:1049-1092；context 变体为蓝色。'
       ]
     },
     7: {
-      title: '未触发 / no-op（静默）',
-      tag: 'no-op · 静默',
-      tone: 'silent',
+      title: '停止矩阵',
+      tag: '提交前 / 提交后 / 未知',
+      tone: 'warn',
       brief: [
-        '未达阈值、滞回锁、无可清理内容、前缀主导、全新会话且历史为空、模型上限未知，界面都与普通生成完全相同。',
-        '变体只切换圆环与原因；空历史用无数据圆环，上限未知沿用既有未知态 tooltip，不再新增圆环变体。',
-        '不出现压缩阶段条，也不出现「无可压缩」之类的产品提示。'
+        '提交前停止：只有已停止，没有已压缩节点。',
+        '提交后立即停止（无后续正文）：消息流仍保留「已压缩上下文」节点，页脚只多「已停止」。',
+        '结果未知：不补成功节点；沿用既有中性「状态未确认」卡。',
+        '停止轮不出现重试/继续。'
       ],
       evidence: [
-        'ContextCompactor.java:277-280：limit <= 0 时直接 noop（REASON_LIMIT_UNKNOWN），不做比例判定。',
-        'ResilientChatService.java:3970-3976：memory 为空直接返回，不进入压缩；ConversationTurns/ContextCompactor 也没有可压缩历史。',
-        'ContextCompactor.java:290-292,410-413：未触发 / 无可清理返回 noop；prefix_dominated 同样 noop。',
-        'TurnBudgetPlan.java:183-186：轮内上限未知同样直接 PROCEED（degraded=true）。',
-        'stores/ai.ts:9463-9491：只有 heartbeat phase=compacting 才进入压缩阶段条。'
+        '目标设计 §4.4 停止矩阵；§4.3 已提交结果保留在消息流。',
+        '现有停止标记 AiPanel.vue:946-954；unconfirmed 卡 AiPanel.vue:1094-1112。',
+        '节点在提交时插入，停止不清除已提交事件；提交前停止无事件可保留。'
       ]
     },
     8: {
-      title: '摘要失败 / 摘要器不可用',
-      tag: '失败 · 不伪造',
+      title: 'HITL 等待优先',
+      tag: '等待中优先',
       tone: 'warn',
       brief: [
-        '摘要失败时历史保持原样、本轮照常发送，不会出现「压缩成功」。已公告的 compacting 在摘要返回后立刻切回 streaming。',
-        '摘要器不可用时在调用摘要前就返回，因此从未出现阶段条。变体可查看上游真实上下文超限时的既有蓝色错误卡。'
+        '需要用户操作时显示琥珀「等待中…」，不显示压缩中。',
+        '已提交的压缩事实仍保留在消息流中；流程行位于待处理卡之前。',
+        '输入框沿用挂起占位与停止整轮。'
       ],
       evidence: [
-        'ContextCompactor.java:540-558：failSummary 返回 level=none、历史原样、本轮照常发送。',
-        'ContextCompactor.java:341-350：摘要器 null / runtime null 时在调用摘要前返回，onSummaryStart 不触发。',
-        'TurnKeepalive.java:100-124：摘要结束 phase(streaming) 立即公告；没有“压缩成功”状态。'
+        '目标设计 §4.4：HITL 等待优先；已提交事实仍可保留。',
+        '现有等待优先：AiPanel.vue:917-933,2284-2308。',
+        '流程行是消息 parts 中的事件节点，不因 HITL 等待隐藏或挪回页脚。'
       ]
     },
     9: {
-      title: '熔断开启：只留 L1',
-      tag: '熔断 · 只留 L1',
-      tone: 'warn',
+      title: '表单提交后续跑前压缩',
+      tag: '提交后续跑',
+      tone: 'visible',
       brief: [
-        '熔断 open 且未到冷却点时跳过 L2/L3，只允许 L1 清工具结果；界面没有 L2 阶段条。',
-        '产品 UI 不显示熔断状态、冷却时间或恢复 Toast；对话照常工作。'
+        '表单已提交卡保留在消息内；续跑前进入消息级「压缩中…」。',
+        '提交后回到工作中，并在已决表单卡之后、后续正文之前插入「已压缩上下文」流程行；摘要正文不展示。'
       ],
       evidence: [
-        'CompactionFuse.java:51-68：open 且未到冷却点 ⇒ allowsSummary=false。',
-        'ContextCompactor.java:306-315：不允许摘要时 target 降为 L1。',
-        'stores/ai.ts:9463-9491：没有 compacting 心跳就没有阶段条。'
+        '目标设计 §3.1 / §4.4：表单提交后续跑与压缩状态归属同一轮。',
+        '现有表单只读态：AiPanel.vue:498-560（本 Demo 只做轻量提交卡）。',
+        '节点位置由 parts 时序决定：已决卡之后、正文之前。'
       ]
     },
     10: {
-      title: 'HITL 等待：仅 L1',
-      tag: 'HITL · 等待',
-      tone: 'warn',
+      title: '刷新 / 重连 / 接管',
+      tag: '持久事实',
+      tone: 'recovery',
       brief: [
-        '有未决 HITL 条目时只能做到 L1，界面显示既有的「等待中…」琥珀呼吸，而不是压缩条。',
-        '输入框占位切到挂起文案；发送位是停止钮；确认卡仍是真实的待确认卡。'
+        '刷新时仍在压缩：按服务端阶段恢复「压缩中…」与真实秒表。',
+        '刷新时已提交：按持久事件 id 恢复「已压缩上下文」流程行，位置不变（本例在工具卡之后、正文之前）；同一事件重复下发不重复渲染。',
+        '另一实例接管完成：结果节点来自持久化事实，保持原时序位置，不靠本地动画猜测。'
       ],
       evidence: [
-        'AiPanel.vue:917-933：waitingForAction 时显示「等待中…」琥珀呼吸。',
-        'AiPanel.vue:2284-2308：waitingForAction = parked + requiresAction 的确认 / 表单 / 预览 / 交接卡。',
-        'ContextCompactor.java:301-305：protectedToolCallIds 非空时 target 最高 L1。',
-        'AiPanel.vue:2232-2244：挂起占位与发送位语义。'
+        '目标设计 §4.5：过程态可恢复；结果态必须来自已提交事实，事件按 id 幂等。',
+        '目标设计 §3.2：展示历史与 working context 分离，刷新后原文仍可见。',
+        '本场景对同一持久事件下发两次，DOM 仍只有一个节点。'
       ]
     },
     11: {
-      title: '准备中阶段（与压缩区分）',
-      tag: '准备中 · 阶段条',
+      title: '同轮多次压缩',
+      tag: '按事件顺序 · 两节点',
       tone: 'visible',
       brief: [
-        '快照未建时显示「正在准备本轮回答 · 已用 N 秒」+ 真实 hint +「立即重试」，与压缩阶段条区分。',
-        '进入真实压缩心跳时 clearPreparingRun，两种阶段条不会同时存在。'
+        '同一轮发生两次真实压缩：消息流按事件顺序保留两个「已压缩上下文」节点，分别位于各自发生的时序位置。',
+        '每次真实压缩各保留一个节点，不合并、不跨事件去重。',
+        '同一事件若被重放或刷新，按事件 id 去重，不重复渲染。'
       ],
       evidence: [
-        'CompactionStatus.vue:79-95：preparing 标题、hint 与「立即重试」。',
-        'AiPanel.vue:1516-1519：preparingRun 单独映射为 stageBar mode=preparing。',
-        'stores/ai.ts:2986-3005：notePreparingHeartbeat 只存 runId 与真实起点；retryPreparing 走既有恢复路径。',
-        '注：stores/ai.ts 的注释仍称面板没有「立即重试」调用点，但 AiPanel.vue:220 实际已绑定 @retry="ai.retryPreparing()"；本 Demo 以模板为准显示按钮。',
-        'stores/ai.ts:9471-9484：进入 compacting 心跳时 clearPreparingRun。'
+        '目标设计 §4.3：每次真实提交产生一个事件节点；§4.5 持久化与去重。',
+        '本例顺序：压缩 1 → 工具卡 → 压缩 2 → 工具卡 → 正文。',
+        '现有 parts 是渲染与复制同源真值：AiPanel.vue:412,4530-4538。'
       ]
     },
     12: {
-      title: '上下文圆环状态',
-      tag: '圆环 · tooltip',
-      tone: 'silent',
-      brief: [
-        '默认只显示 14px 空心圆环，无文字；hover 或 Tab 聚焦显示单行 tooltip。',
-        '估算带「约」，上限未知只报已用，无记账显示「暂无上下文占用」；档位 70 / 85 / 95 换色。'
-      ],
-      evidence: [
-        'ContextPill.vue:77-91：无记账 / 上限未知 / 有占比三档 label；94-115 圆环与 tooltip。',
-        'context-usage.ts:30-80：formatTokens、contextTier（70/85/95）、formatPercent。',
-        'ContextPill.vue:119-151：conic-gradient + mask 空心圆环；无 value 时只剩轨道。'
-      ]
-    },
-    13: {
-      title: '轮内工具回环预算（TurnBudgetPlan）',
+      title: '轮内工具回环预算',
       tag: '轮内 · 4 分支',
       tone: 'visible',
       brief: [
-        '每批工具结束、下一跳请求前做本地判定：70% 只清旧工具结果；95% 追加收尾指令并 arm；nextEst>=limit 硬越窗；armed 后仍连续请求工具达到 2 批按 TOOL_BUDGET_EXHAUSTED 收尾。',
-        '轮内不做 L2/L3 摘要调用，也不产生压缩阶段条；4 个变体只切换终局与错误卡。',
-        '70% / 95% 分支在面板上都是静默的；只有硬越窗 / 收尾被无视才出现既有错误卡。'
+        '70% L1：实际清旧结果并提交后，在工具卡之后、最终正文之前出现流程行；没有 L2/L3 摘要调用。',
+        '95% WRAP_UP：模型用已有信息收尾，不再执行新工具；没有压缩节点。',
+        '硬越窗：既有蓝色 CONTEXT_OVERFLOW。收尾被无视：既有 TOOL_BUDGET_EXHAUSTED 红卡。'
       ],
       evidence: [
-        'TurnBudgetPlan.java:16-64：四档动作 PROCEED / CLEAR_TOOL_RESULTS / WRAP_UP / OVERFLOW；轮内不做摘要。',
-        'TurnBudgetPlan.java:99,175-198：MAX_ARMED_BATCHES=2；nextEst>=limit 先判 OVERFLOW；armed 后连续 2 批仍请求工具判 REASON_WRAP_UP_IGNORED。',
-        'TurnBudgetPlan.java:164-168：failureCode 按原因分派 CONTEXT_OVERFLOW / TOOL_BUDGET_EXHAUSTED。',
-        'SpToolCallingManager.java:817-830：budgetArmed 后本批工具全部不再执行；1493-1508：结算为 skipped/TOOL_BUDGET_EXHAUSTED 并回填模型。',
-        'SpToolCallingManager.java:1256-1275 + 1522-1665：每批工具结算后调用 applyTurnBudget；本地 L1 / 收尾 / 越窗，不走轮首 ContextCompactor。',
-        'utils/error-card.ts:126-128 + locales zh-CN：TOOL_BUDGET_EXHAUSTED 走通用红卡「本轮工具预算已用完」，无动作钮；CONTEXT_OVERFLOW 走既有蓝色错误卡。'
+        '目标设计 §3.1 / §4.3；TurnBudgetPlan.java:16-64,99,164-198。',
+        'SpToolCallingManager.java:817-830,1493-1508,1522-1665：轮内不做 L2/L3 摘要调用。',
+        '轮内 L1 节点位于工具结果之后、正文之前，证明按 parts 真实时序插入而不是固定页脚。'
+      ]
+    },
+    13: {
+      title: '准备中对照',
+      tag: '仅对照',
+      tone: 'visible',
+      brief: [
+        '准备中是快照未建的阶段，可保留顶部条；它不是压缩。',
+        '本场景不出现压缩中、不出现已压缩流程行；不混入压缩条。'
+      ],
+      evidence: [
+        '目标设计 §4.2：准备中/错误/恢复留给独立专项；顶部不再放压缩。',
+        '现有准备条 CompactionStatus.vue:79-95；AiPanel.vue:1516-1519。'
+      ]
+    },
+    14: {
+      title: '上下文圆环',
+      tag: 'tooltip',
+      tone: 'silent',
+      brief: [
+        '圆环沿用现有语义：无数据、真实百分比、估算约、上限未知、高危。',
+        'tooltip 单行显示；颜色不是唯一状态载体，tooltip 文本同步说明。'
+      ],
+      evidence: [
+        'ContextPill.vue:77-91,94-115；context-usage.ts:30-80。'
       ]
     }
   };
@@ -350,25 +358,30 @@
     messages: [],
     loading: false,
     suspended: false,
-    waiting: false,
-    compaction: null,
     preparing: null,
     ring: null,
     copiedId: null,
     feedback: {},
     stopping: false,
-    variant: 'fail',
-    noopVariant: 'under',
-    ringVariant: 'real42',
-    historyView: 'current',
-    toolVariant: 'l1'
+    variants: {
+      2: 'l1',
+      4: 'under',
+      5: 'fail',
+      6: 'afterError',
+      7: 'before',
+      10: 'compacting',
+      12: 'l1',
+      14: 'real42'
+    }
   };
 
   let uid = 0;
   let cardSeq = 0;
+  let compactionSeq = 0;
   let timers = [];
   let preparingAutoId = null;
   let feedbackTimer = null;
+  let announceTimer = null;
   let pinBottom = true;
   let compEndedAt = null;
   let composing = false;
@@ -382,6 +395,7 @@
   const sendSlot = document.getElementById('send-slot');
   const composerCount = document.getElementById('composer-count');
   const composerLive = document.getElementById('composer-live');
+  const phaseAnnouncer = document.getElementById('phase-announcer');
   const ringWrap = document.getElementById('ring-wrap');
   const ring = document.getElementById('context-ring');
   const ringTip = document.getElementById('ring-tip');
@@ -482,6 +496,59 @@
     return id;
   }
 
+  function announcePhase(text) {
+    if (announceTimer !== null) {
+      clearTimeout(announceTimer);
+      announceTimer = null;
+    }
+    phaseAnnouncer.textContent = '';
+    announceTimer = setTimeout(() => {
+      phaseAnnouncer.textContent = text;
+      announceTimer = null;
+    }, 40);
+  }
+
+  function secondsOf(startedAt) {
+    if (!startedAt) return 0;
+    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  }
+
+  function compactionNode(eventId) {
+    return { type: 'compaction', eventId: eventId || ('evt-' + (++compactionSeq)) };
+  }
+
+  function defaultFlow(m) {
+    const flow = [];
+    if (m.formCard) flow.push({ type: 'form', card: m.formCard });
+    if (m.card) flow.push({ type: 'card', card: m.card });
+    for (const card of m.cards || []) flow.push({ type: 'card', card });
+    flow.push({ type: 'text' });
+    return flow;
+  }
+
+  function addCommittedCompaction(m, eventId) {
+    const id = eventId || ('evt-' + m.id + '-' + (++compactionSeq));
+    if (m.flow.some((item) => item.type === 'compaction' && item.eventId === id)) return false;
+    const node = compactionNode(id);
+    const textIndex = m.flow.findIndex((item) => item.type === 'text');
+    if (textIndex === -1) m.flow.push(node);
+    else m.flow.splice(textIndex, 0, node);
+    return true;
+  }
+
+  function visibleFlow(m) {
+    const seen = new Set();
+    const flow = [];
+    for (const item of m.flow || []) {
+      if (item.type === 'compaction') {
+        if (!item.eventId || seen.has(item.eventId)) continue;
+        seen.add(item.eventId);
+      }
+      flow.push(item);
+    }
+    return flow;
+  }
+
   function addMessage(message) {
     const m = Object.assign({
       id: ++uid,
@@ -493,10 +560,16 @@
       done: false,
       stopped: false,
       waiting: false,
+      unconfirmed: false,
+      compactionPhase: 'idle',
+      compactionStartedAt: null,
+      flow: null,
       card: null,
-      errorCard: null,
-      synthetic: false
+      cards: [],
+      formCard: null,
+      errorCard: null
     }, message);
+    if (!m.flow) m.flow = defaultFlow(m);
     state.messages.push(m);
     return m;
   }
@@ -511,10 +584,6 @@
 
   function assistantMessage(options = {}) {
     return addMessage(Object.assign({ role: 'assistant' }, options));
-  }
-
-  function syntheticMessage() {
-    return addMessage({ role: 'system', synthetic: true });
   }
 
   function pendingCard() {
@@ -538,10 +607,21 @@
       summary: '',
       args: [],
       output: '',
-      humanNote: '',
-      diagnostic: '',
       open: true
     }, options);
+  }
+
+  function makeFormCard() {
+    return {
+      kind: 'form',
+      status: 'submitted',
+      title: '任务参数',
+      fields: [
+        { key: '任务名', value: '配置导出' },
+        { key: '导出范围', value: '全部行' },
+        { key: '文件格式', value: 'xlsx' }
+      ]
+    };
   }
 
   function allCards() {
@@ -570,6 +650,7 @@
   const SVG_COPY = '<svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>';
   const SVG_HITL = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>';
   const SVG_WRENCH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>';
+  const SVG_FORM = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1"></rect><path d="M8 11h8"></path><path d="M8 15h5"></path></svg>';
 
   function iconButton(m, action, label, svg, extraClass = '', pressed = undefined, testid = '') {
     const pressedAttr = pressed === undefined ? '' : ' aria-pressed="' + (pressed ? 'true' : 'false') + '"';
@@ -580,9 +661,28 @@
       + '</button>';
   }
 
+  function compactionStatusHtml(m) {
+    const seconds = secondsOf(m.compactionStartedAt);
+    return '<span class="compacting-status" aria-live="off" data-testid="compacting-status">'
+      + '<span class="compaction-dot" aria-hidden="true"></span>'
+      + '<span class="compaction-text" aria-hidden="true">压缩中… · 已用 <span data-compaction-seconds data-started-at="' + (m.compactionStartedAt || 0) + '">' + seconds + '</span> 秒</span>'
+      + '<span class="sr-only">压缩中</span>'
+      + '</span>';
+  }
+
+  function compactionDividerHtml(item) {
+    return '<div class="compaction-divider" role="separator" aria-orientation="horizontal" aria-label="已压缩上下文"'
+      + ' data-testid="compaction-divider" data-event-id="' + esc(item.eventId) + '">'
+      + '<span class="compaction-divider-label" aria-hidden="true">已压缩上下文</span>'
+      + '</div>';
+  }
+
   function statusHtml(m) {
     if (m.waiting) {
       return '<span class="waiting" data-testid="park-waiting"><span class="waiting-dot" aria-hidden="true"></span><span class="waiting-text">等待中…</span></span>';
+    }
+    if (m.compactionPhase === 'compacting') {
+      return compactionStatusHtml(m);
     }
     if (m.streaming || m.fading) {
       return '<span class="breathing' + (m.fading ? ' fade-out' : '') + '" data-testid="loading-breath"><span class="breathing-dot" aria-hidden="true"></span><span class="breathing-text">工作中…</span></span>';
@@ -613,7 +713,7 @@
 
   function metaRowHtml(m) {
     const hidden = m.role === 'assistant' && m.streaming ? ' is-hidden' : '';
-    return '<div class="meta-row ' + m.role + '" data-testid="msg-ops-' + m.id + '">'
+    return '<div class="meta-row ' + m.role + '" aria-live="off" data-testid="msg-ops-' + m.id + '">'
       + '<span class="meta-status">' + statusHtml(m) + '</span>'
       + '<div class="meta-actions' + hidden + '">' + actionsHtml(m) + '</div>'
       + '</div>';
@@ -628,6 +728,8 @@
       || m.fading
       || m.waiting
       || m.stopped
+      || m.compactionPhase === 'compacting'
+      || m.unconfirmed
       || !!pendingCard;
   }
 
@@ -690,9 +792,6 @@
     const output = card.output && card.status !== 'skipped'
       ? '<div><div class="body-label">输出</div><div class="tool-output-text" data-testid="tool-output-text">' + esc(card.output) + '</div></div>'
       : '';
-    const diagnostic = card.diagnostic
-      ? '<details class="card-diagnostics"><summary>诊断详情</summary><div class="card-diagnostics-text">' + esc(card.diagnostic) + '</div></details>'
-      : '';
     return '<div class="tool-card" data-testid="tool-card-demo" data-state="' + card.status + '">'
       + '<button type="button" class="card-head is-clickable" data-action="toggle-card" data-card-key="' + esc(card.key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + '<span class="card-icon" data-icon-type="tool" aria-hidden="true">' + SVG_WRENCH + '</span>'
@@ -702,12 +801,35 @@
       + '<span class="card-status ' + status.cls + '" data-testid="card-status-demo" data-state="' + card.status + '">' + status.label + '</span>'
       + '<span class="tchev' + (open ? ' is-open' : '') + '" aria-hidden="true">›</span>'
       + '</button>'
-      + (open ? '<div class="tool-body" data-testid="block-body-demo">' + args + human + output + diagnostic + '</div>' : '')
+      + (open ? '<div class="tool-body" data-testid="block-body-demo">' + args + human + output + '</div>' : '')
+      + '</div>';
+  }
+
+  function formCardHtml(card) {
+    const rows = card.fields.map((row) => (
+      '<div class="form-row"><span class="form-key">' + esc(row.key) + '</span><span class="form-val">' + esc(row.value) + '</span></div>'
+    )).join('');
+    return '<div class="tool-card form-card" data-testid="submitted-form-card">'
+      + '<div class="card-head">'
+      + '<span class="card-icon" data-icon-type="form" aria-hidden="true">' + SVG_FORM + '</span>'
+      + '<span class="card-title-wrap"><span class="card-title">' + esc(card.title) + '</span></span>'
+      + '<span class="card-status status-success" data-testid="form-status">✓ 已提交</span>'
+      + '</div>'
+      + '<div class="form-body"><div class="form-rows">' + rows + '</div></div>'
       + '</div>';
   }
 
   function toolCardHtml(card) {
     return card.kind === 'hitl' ? hitlCardHtml(card) : toolRunCardHtml(card);
+  }
+
+  function unconfirmedCardHtml() {
+    return '<div class="unconfirmed-card" data-testid="turn-unconfirmed">'
+      + '<span class="unconfirmed-icon" aria-hidden="true">?</span>'
+      + '<div class="unconfirmed-body"><b>本轮已结束，状态未确认</b>'
+      + '<span>已显示的内容可能不完整。可以重新载入以同步服务端状态，或开始新的一轮。</span></div>'
+      + '<button type="button" class="unconfirmed-action" data-action="reload-turn"><span>重新载入</span></button>'
+      + '</div>';
   }
 
   function errorCardHtml(card) {
@@ -721,7 +843,7 @@
       + '<div class="error-body">'
       + '<b>' + esc(card.title) + '</b>'
       + '<span class="error-summary" data-testid="error-card-summary-demo">' + esc(card.summary) + '</span>'
-      + '<span class="error-guide">' + esc(card.guide) + '</span>'
+      + (card.guide ? '<span class="error-guide">' + esc(card.guide) + '</span>' : '')
       + '<details class="error-details" data-testid="error-card-diagnostic-demo">'
       + '<summary>诊断详情</summary>'
       + '<div class="error-diag"><span>错误码: </span><code>' + esc(card.code) + '</code></div>'
@@ -732,12 +854,17 @@
       + '</div>';
   }
 
-  function messageHtml(m) {
-    if (m.synthetic) {
-      return '<div class="msg-row" data-testid="synthetic-notice-' + m.id + '">'
-        + '<div class="synthetic-note"><b>较早的对话已压缩</b><span>为节省上下文，较早内容已压缩为摘要，仅作为背景保留。</span></div>'
-        + '</div>';
+  function flowItemHtml(m, item) {
+    if (item.type === 'text') {
+      return m.text ? '<div class="assistant-body">' + textHtml(m.text) + '</div>' : '';
     }
+    if (item.type === 'card') return toolCardHtml(item.card);
+    if (item.type === 'form') return formCardHtml(item.card);
+    if (item.type === 'compaction') return compactionDividerHtml(item);
+    return '';
+  }
+
+  function messageHtml(m) {
     if (m.role === 'user') {
       return '<div class="msg-row user">'
         + '<div class="msg-col user">'
@@ -745,11 +872,9 @@
         + (showMeta(m) ? metaRowHtml(m) : '')
         + '</div></div>';
     }
-    let inner = '';
-    if (m.card) inner += toolCardHtml(m.card);
-    for (const card of m.cards || []) inner += toolCardHtml(card);
-    if (m.text) inner += '<div class="assistant-body">' + textHtml(m.text) + '</div>';
+    let inner = visibleFlow(m).map((item) => flowItemHtml(m, item)).join('');
     if (showMeta(m)) inner += metaRowHtml(m);
+    if (m.unconfirmed) inner += unconfirmedCardHtml();
     if (m.errorCard) inner += errorCardHtml(m.errorCard);
     return '<div class="msg-row assistant"><div class="msg-col assistant">' + inner + '</div></div>';
   }
@@ -772,38 +897,21 @@
     scrollMessages();
   }
 
-  function secondsOf(stage) {
-    if (!stage || !stage.startedAt) return 0;
-    return Math.max(0, Math.floor((Date.now() - stage.startedAt) / 1000));
-  }
-
   function renderStage() {
-    if (state.compaction) {
-      const seconds = secondsOf(state.compaction);
-      stageHost.innerHTML = '<div class="stage-bar" data-testid="compaction-status" data-stage="compacting">'
-        + '<span class="stage-dot" aria-hidden="true"></span>'
-        + '<div class="stage-main">'
-        + '<div class="stage-title" data-testid="compaction-status-text">正在压缩上下文 · 已用 <span data-live-seconds data-stage="compacting">' + seconds + '</span> 秒</div>'
-        + '<div class="stage-hint" data-testid="compaction-status-hint">正在整理较早的对话，完成后会自动继续。</div>'
-        + '</div>'
-        + '<span class="sr-only" aria-live="polite" data-testid="compaction-aria">开始压缩上下文</span>'
-        + '</div>';
+    if (!state.preparing) {
+      stageHost.innerHTML = '';
       return;
     }
-    if (state.preparing) {
-      const seconds = secondsOf(state.preparing);
-      stageHost.innerHTML = '<div class="stage-bar" data-testid="compaction-status" data-stage="preparing">'
-        + '<span class="stage-dot" aria-hidden="true"></span>'
-        + '<div class="stage-main">'
-        + '<div class="stage-title" data-testid="compaction-status-text">正在准备本轮回答 · 已用 <span data-live-seconds data-stage="preparing">' + seconds + '</span> 秒</div>'
-        + '<div class="stage-hint" data-testid="compaction-status-hint">服务端正在建立本轮上下文，不会丢失；可稍候或立即重试。</div>'
-        + '</div>'
-        + '<button type="button" class="stage-retry" data-action="retry-preparing" data-testid="compaction-retry">立即重试</button>'
-        + '<span class="sr-only" aria-live="polite" data-testid="compaction-aria">正在准备本轮回答</span>'
-        + '</div>';
-      return;
-    }
-    stageHost.innerHTML = '';
+    const seconds = secondsOf(state.preparing.startedAt);
+    stageHost.innerHTML = '<div class="stage-bar" data-testid="preparing-status" data-stage="preparing">'
+      + '<span class="stage-dot" aria-hidden="true"></span>'
+      + '<div class="stage-main">'
+      + '<div class="stage-title">正在准备本轮回答 · 已用 <span data-live-seconds>' + seconds + '</span> 秒</div>'
+      + '<div class="stage-hint">服务端正在建立本轮上下文，不会丢失；可稍候或立即重试。</div>'
+      + '</div>'
+      + '<button type="button" class="stage-retry" data-action="retry-preparing" data-testid="preparing-retry">立即重试</button>'
+      + '<span class="sr-only" aria-live="polite">正在准备本轮回答</span>'
+      + '</div>';
   }
 
   function updateRing() {
@@ -899,30 +1007,21 @@
   }
 
   function renderSceneExtra() {
-    if (state.scenario === 2 || state.scenario === 5 || state.scenario === 6) {
-      const labels = {
-        2: '历史窗口视图（Demo 外壳）',
-        5: '压缩前后视图（Demo 外壳）',
-        6: '截断前后视图（Demo 外壳）'
-      };
-      const hints = {
-        2: '当前页 = 已渲染 DOM，L1 不会即时改写；刷新后 /history 直接读被改写的 Redis ChatMemory，旧工具结果显示真实 placeholder（含 toolCallId）。',
-        5: '当前页仍保留旧轮原文；刷新后旧原文不再从该窗口恢复，只剩 synthetic 灰条 + 保留的近轮，且不显示摘要正文。',
-        6: '当前页仍保留旧轮原文；刷新后 L3 被裁轮次直接不再恢复，且没有专属提示（不会出现已压缩灰条）。'
-      };
+    if (state.scenario === 2) {
       sceneExtra.innerHTML = '<div class="shell-control">'
-        + '<span class="control-label">' + labels[state.scenario] + '</span>'
+        + '<span class="control-label">本地操作（Demo 外壳）</span>'
         + '<div class="seg-row">'
         + segmentButtons([
-          { value: 'current', label: '当前页面' },
-          { value: 'refresh', label: '刷新后' }
-        ], 'data-view', state.historyView)
+          { value: 'l1', label: 'L1 清旧工具结果' },
+          { value: 'l3', label: 'L3 裁旧轮' },
+          { value: 'memory', label: 'MemoryWindow 整理' }
+        ], 'data-local', state.variants[2])
         + '</div>'
-        + '<p class="control-hint">' + hints[state.scenario] + '</p>'
+        + '<p class="control-hint">三者都不出现「压缩中」；只有实际提交结果才在消息流插入「已压缩上下文」流程行。用户原文保留，刷新后仍可见。</p>'
         + '</div>';
       return;
     }
-    if (state.scenario === 7) {
+    if (state.scenario === 4) {
       sceneExtra.innerHTML = '<div class="shell-control">'
         + '<span class="control-label">no-op 原因（Demo 外壳，面板表现完全相同）</span>'
         + '<div class="seg-row">'
@@ -933,27 +1032,83 @@
           { value: 'hysteresis', label: '滞回锁 · 76%' },
           { value: 'empty', label: '空历史 · 新会话' },
           { value: 'limit', label: '上限未知 · 不判比例' }
-        ], 'data-noop', state.noopVariant)
+        ], 'data-noop', state.variants[4])
         + '</div>'
-        + '<p class="control-hint">六种分支都没有压缩阶段条、没有 Toast；空历史用无数据圆环，上限未知沿用既有未知态 tooltip，不新增圆环变体。</p>'
+        + '<p class="control-hint">六种分支都没有压缩中/已压缩流程行；空历史用无数据圆环，上限未知沿用既有未知 tooltip。</p>'
         + '</div>';
       return;
     }
-    if (state.scenario === 8) {
+    if (state.scenario === 5) {
       sceneExtra.innerHTML = '<div class="shell-control">'
-        + '<span class="control-label">摘要失败后的分支（Demo 外壳）</span>'
+        + '<span class="control-label">摘要失败分支（Demo 外壳）</span>'
         + '<div class="seg-row">'
         + segmentButtons([
-          { value: 'fail', label: '摘要失败 → 本轮继续' },
-          { value: 'unavailable', label: '摘要器不可用（无阶段条）' },
-          { value: 'overflow', label: '上游真实上下文超限' }
-        ], 'data-variant', state.variant)
+          { value: 'fail', label: '失败但本轮继续' },
+          { value: 'unavailable', label: '摘要器不可用' }
+        ], 'data-fail', state.variants[5])
         + '</div>'
-        + '<p class="control-hint">前两种都不会出现「压缩成功」；第三种只在流内出现既有蓝色错误卡。</p>'
+        + '<p class="control-hint">两种都不会出现「已压缩上下文」；也不新增失败 Toast。摘要正文始终不展示。</p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 6) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">异常 / 上限分支（Demo 外壳）</span>'
+        + '<div class="seg-row">'
+        + segmentButtons([
+          { value: 'afterError', label: '提交后本轮异常' },
+          { value: 'summaryFail', label: '摘要失败终止' },
+          { value: 'overflow', label: '真实上下文超限' }
+        ], 'data-error', state.variants[6])
+        + '</div>'
+        + '<p class="control-hint">只有「提交后异常」保留已压缩流程行；摘要失败终止与真实超限都不补成功。</p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 7) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">停止发生的位置（Demo 外壳）</span>'
+        + '<div class="seg-row">'
+        + segmentButtons([
+          { value: 'before', label: '提交前停止' },
+          { value: 'after', label: '提交后停止' },
+          { value: 'unknown', label: '结果未知（停止/断线）' }
+        ], 'data-stop', state.variants[7])
+        + '</div>'
+        + '<p class="control-hint">提交前只有已停止；提交后是已压缩流程行 + 已停止；未知不补成功。停止轮不出现重试/继续。</p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 10) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">恢复来源（Demo 外壳）</span>'
+        + '<div class="seg-row">'
+        + segmentButtons([
+          { value: 'compacting', label: '刷新时仍在压缩' },
+          { value: 'committed', label: '刷新时已提交' },
+          { value: 'takeover', label: '另一实例接管' }
+        ], 'data-refresh', state.variants[10])
+        + '</div>'
+        + '<p class="control-hint">过程态按服务端阶段恢复；结果流程行只从持久提交事实恢复，同一事件按 id 去重。三种视图都保留用户原文。</p>'
         + '</div>';
       return;
     }
     if (state.scenario === 12) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">轮内预算分支（Demo 外壳）</span>'
+        + '<div class="seg-row">'
+        + segmentButtons([
+          { value: 'l1', label: '70% · L1 清旧结果' },
+          { value: 'wrapup', label: '95% · WRAP_UP 收尾' },
+          { value: 'overflow', label: 'nextEst>=limit · 硬越窗' },
+          { value: 'ignored', label: '收尾被无视 · TOOL_BUDGET_EXHAUSTED' }
+        ], 'data-tool', state.variants[12])
+        + '</div>'
+        + '<p class="control-hint">轮内不做 L2/L3 摘要调用；只有 70% L1 实际提交结果可在工具卡之后插入已压缩流程行，其余分支不补成功。</p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 14) {
       sceneExtra.innerHTML = '<div class="shell-control">'
         + '<span class="control-label">圆环数据状态（Demo 外壳）</span>'
         + '<div class="seg-row">'
@@ -964,24 +1119,9 @@
           { value: 'unknown', label: '上限未知 · 8.4k' },
           { value: 'unknownEst', label: '上限未知 · 估算' },
           { value: 'danger96', label: '高危 96%' }
-        ], 'data-ring', state.ringVariant)
+        ], 'data-ring', state.variants[14])
         + '</div>'
         + '<p class="control-hint">当前 tooltip：<code id="ring-current">' + esc(ringLabel(state.ring)) + '</code>　hover 或 Tab 聚焦输入框右下的 14px 圆环。</p>'
-        + '</div>';
-      return;
-    }
-    if (state.scenario === 13) {
-      sceneExtra.innerHTML = '<div class="shell-control">'
-        + '<span class="control-label">轮内预算分支（Demo 外壳，均无压缩阶段条）</span>'
-        + '<div class="seg-row">'
-        + segmentButtons([
-          { value: 'l1', label: '70% · L1 清旧结果' },
-          { value: 'wrapup', label: '95% · WRAP_UP 收尾' },
-          { value: 'overflow', label: 'nextEst>=limit · 硬越窗' },
-          { value: 'ignored', label: '收尾被无视 · TOOL_BUDGET_EXHAUSTED' }
-        ], 'data-tool', state.toolVariant)
-        + '</div>'
-        + '<p class="control-hint">轮内不做 L2/L3 摘要调用；70% / 95% 在面板上静默，只有硬越窗 / 收尾被无视出现既有错误卡。70% 清掉的旧结果若刷新，会按场景 02 的真实 placeholder 形态出现。</p>'
         + '</div>';
       return;
     }
@@ -991,7 +1131,7 @@
   function updateSceneCard() {
     const scene = SCENES[state.scenario];
     sceneNum.textContent = String(state.scenario).padStart(2, '0');
-    sceneKicker.textContent = '场景 ' + String(state.scenario).padStart(2, '0') + ' / 13';
+    sceneKicker.textContent = '场景 ' + String(state.scenario).padStart(2, '0') + ' / 14';
     sceneTitle.textContent = scene.title;
     sceneTag.textContent = scene.tag;
     sceneTag.className = 'scene-tag tag-' + scene.tone;
@@ -1033,16 +1173,40 @@
       unknownEst: { percent: null, used: 8400, est: true },
       danger96: { percent: 96, used: 122880, est: false }
     };
-    const config = map[state.ringVariant] || map.real42;
+    const config = map[state.variants[14]] || map.real42;
     state.ring = config.none ? null : ringData(config.percent, config.used, config.est);
   }
 
   function startStream(text, finalRing, options = {}) {
     state.loading = true;
-    const message = assistantMessage({ streaming: true });
-    if (options.cards) message.cards = options.cards;
+    const flow = [];
+    if (options.formCard) flow.push({ type: 'form', card: options.formCard });
+    if (options.compactionPosition === 'start') flow.push(compactionNode(options.compactionEventId));
+    for (const card of options.cards || []) flow.push({ type: 'card', card });
+    if (options.compactionPosition === 'end') flow.push(compactionNode(options.compactionEventId));
+    flow.push({ type: 'text' });
+    const message = assistantMessage({
+      streaming: true,
+      cards: options.cards || [],
+      formCard: options.formCard || null,
+      flow
+    });
+    if (options.compactionPosition) announcePhase('上下文压缩完成');
+    streamTextInto(message, text, finalRing);
+    return message;
+  }
+
+  function streamTextInto(message, text, finalRing) {
+    if (state.messages.indexOf(message) === -1) return;
+    state.loading = true;
+    message.streaming = true;
     renderMessages();
     updateComposerState();
+
+    if (!text) {
+      later(() => finishMessage(message, finalRing), 500);
+      return;
+    }
 
     let index = 0;
     const step = text.length > 80 ? 3 : 2;
@@ -1068,7 +1232,6 @@
     message.fading = true;
     state.loading = false;
     state.suspended = false;
-    state.waiting = false;
     updateComposerState();
     renderMessages();
     later(() => {
@@ -1081,6 +1244,64 @@
     }, 300);
   }
 
+  function startL2(options = {}) {
+    const {
+      text = '',
+      finalRing = null,
+      initialSeconds = 3,
+      commitAfter = 4500,
+      commit = true,
+      compactionEventId = null,
+      messageOptions = {},
+      onCommit = null,
+      onFail = null
+    } = options;
+
+    state.loading = true;
+    const message = assistantMessage(Object.assign({
+      streaming: true,
+      compactionPhase: 'compacting',
+      compactionStartedAt: Date.now() - initialSeconds * 1000
+    }, messageOptions));
+    renderAll();
+    announcePhase('开始压缩上下文');
+
+    later(() => {
+      if (state.messages.indexOf(message) === -1) return;
+      message.compactionPhase = 'idle';
+      if (commit) {
+        addCommittedCompaction(message, compactionEventId || undefined);
+        announcePhase('上下文压缩完成');
+      }
+      renderAll();
+      if (onCommit) {
+        onCommit(message);
+      } else if (commit) {
+        later(() => streamTextInto(message, text, finalRing), 500);
+      } else if (onFail) {
+        onFail(message);
+      } else {
+        later(() => streamTextInto(message, text, finalRing), 300);
+      }
+    }, commitAfter);
+    return message;
+  }
+
+  function markUnknown(message, stopped = false) {
+    if (state.messages.indexOf(message) === -1) return;
+    message.compactionPhase = 'idle';
+    message.streaming = false;
+    message.fading = false;
+    message.done = true;
+    message.stopped = !!stopped;
+    message.unconfirmed = true;
+    message.ts = fmtTs();
+    if (stopped && message.card && message.card.status === 'pending') message.card.status = 'cancelled';
+    state.loading = false;
+    state.suspended = false;
+    renderAll();
+  }
+
   function schedulePreparingResolve() {
     if (preparingAutoId !== null) {
       clearTimeout(preparingAutoId);
@@ -1088,27 +1309,14 @@
     }
     preparingAutoId = setTimeout(() => {
       preparingAutoId = null;
-      if (state.scenario !== 11 || !state.preparing) return;
+      if (state.scenario !== 13 || !state.preparing) return;
       state.preparing = null;
       renderStage();
       startStream('本轮上下文已建立。任务 #12 已完成，导入任务 #7 正在运行。', ringData(46, 58880));
     }, 9000);
   }
 
-  const TEXT = {
-    1: '我核对了一遍当前工作区：导出任务 #12 已完成，导入任务 #7 正在运行；今天没有失败记录。',
-    4: '我按较早对话的摘要继续核对：任务 #12 已完成，失败原因列表为空。',
-    5: '导出任务 #12 已完成，失败原因为空；导入任务 #7 仍在运行。',
-    6: '已按最近几轮的结论汇总：任务 #12 已完成，任务 #15 的运行结果也已归档。',
-    7: '当前导出任务 #12 的状态是「已完成」，最近 24 小时没有失败记录。',
-    8: '当前工作区没有失败记录，任务 #12 已完成，导入任务 #7 正在运行。',
-    9: '任务 #12 已完成，导入任务 #7 正在运行；本轮没有失败记录。',
-    11: '本轮上下文已建立。任务 #12 已完成，导入任务 #7 正在运行。',
-    12: '输入框右下角的圆环就是最新一轮的上下文占用；本轮结束后才会刷新，流式中不会跳动。'
-  };
-
   const ORIGINAL_CONFIG_RESULT = '共 12 个配置定义：ORDER_STATUS、ORDER_TYPE、EXPORT_FORMAT、IMPORT_MODE、RETRY_LIMIT、AUDIT_LEVEL、TASK_OWNER、NOTIFY_CHANNEL、ROW_LIMIT、BATCH_SIZE、TIMEZONE、FEATURE_FLAG';
-  const L1_PLACEHOLDER = '[工具结果已清除：list_config_defs · ≈1820 tokens · toolCallId=call_cfg_01]';
 
   function addOlderTurns() {
     userMessage('先帮我看一下订单配置的字段。', 14);
@@ -1129,70 +1337,58 @@
     if (id === 1) {
       userMessage('帮我核对一下今天导出任务的执行情况。', 2);
       state.ring = ringData(42, 53760);
-      startStream(TEXT[1], ringData(47, 60160));
+      startStream('我核对了一遍当前工作区：导出任务 #12 已完成，导入任务 #7 正在运行；今天没有失败记录。', ringData(47, 60160));
       return;
     }
+
     if (id === 2) {
-      const refresh = state.historyView === 'refresh';
-      userMessage('把刚才查到的配置定义汇总一下。', 3);
-      const card = makeToolCard({
-        title: '列出配置定义',
-        status: 'succeeded',
-        output: refresh ? L1_PLACEHOLDER : ORIGINAL_CONFIG_RESULT
-      });
-      if (refresh) {
-        assistantMessage({
-          text: '配置定义已核对完，共 12 项；其中订单配置有 8 个字段。',
-          done: true,
-          ts: fmtTs(Date.now() - 2 * 60000),
-          cards: [card]
-        });
-        state.ring = ringData(58, 74240);
-      } else {
+      const variant = state.variants[2];
+      if (variant === 'l1') {
+        userMessage('把刚才查到的配置定义汇总一下。', 3);
         state.ring = ringData(74, 94720);
-        startStream('配置定义已核对完，共 12 项；其中订单配置有 8 个字段。', ringData(58, 74240), { cards: [card] });
+        startStream('配置定义已核对完，共 12 项；其中订单配置有 8 个字段。', ringData(58, 74240), {
+          compactionPosition: 'start',
+          compactionEventId: 'scn2-l1-cmp',
+          cards: [makeToolCard({
+            title: '列出配置定义',
+            status: 'succeeded',
+            output: ORIGINAL_CONFIG_RESULT
+          })]
+        });
+        return;
       }
+      addOlderTurns();
+      if (variant === 'l3') {
+        userMessage('继续刚才的核对：失败那次的原因是什么？', 5);
+        state.ring = ringData(96, 122880);
+        startStream('已按最近几轮的结论汇总：任务 #12 已完成，失败原因列表为空。', ringData(72, 92160), {
+          compactionPosition: 'start',
+          compactionEventId: 'scn2-l3-cmp'
+        });
+        return;
+      }
+      userMessage('只保留最近几轮，继续给我结论。', 5);
+      state.ring = ringData(76, 97280);
+      startStream('已整理最近几轮：任务 #12 已完成，失败原因列表为空。', ringData(62, 79360), {
+        compactionPosition: 'start',
+        compactionEventId: 'scn2-memory-cmp'
+      });
       return;
     }
+
     if (id === 3) {
-      userMessage('把刚才的核对结果整理成一段结论。', 2);
+      userMessage('把目前的工作上下文压缩后继续。', 2);
       state.ring = ringData(78, 99840);
-      state.loading = true;
-      state.compaction = { startedAt: Date.now() - 7000 };
+      startL2({
+        text: '压缩后的工作上下文已经接上：任务 #12 已完成，失败原因列表为空。',
+        finalRing: ringData(51, 65280),
+        initialSeconds: 3,
+        commitAfter: 4200
+      });
       return;
     }
+
     if (id === 4) {
-      userMessage('继续整理刚才的核对结果。', 3);
-      state.ring = ringData(78, 99840);
-      state.loading = true;
-      state.compaction = { startedAt: Date.now() - 3000 };
-      later(() => {
-        if (state.scenario !== 4) return;
-        state.compaction = null;
-        renderStage();
-        startStream(TEXT[4], ringData(51, 65280));
-      }, 5200);
-      return;
-    }
-    if (id === 5) {
-      if (state.historyView === 'refresh') {
-        syntheticMessage();
-      } else {
-        addOlderTurns();
-      }
-      userMessage('继续刚才的核对：失败那次的原因是什么？', 5);
-      assistantMessage({ text: TEXT[5], done: true, ts: fmtTs(Date.now() - 4 * 60000) });
-      state.ring = ringData(36, 46080);
-      return;
-    }
-    if (id === 6) {
-      if (state.historyView === 'current') addOlderTurns();
-      userMessage('用最近几轮的结论回答：导出作业成功了吗？', 4);
-      assistantMessage({ text: TEXT[6], done: true, ts: fmtTs(Date.now() - 3 * 60000) });
-      state.ring = ringData(72, 92160);
-      return;
-    }
-    if (id === 7) {
       const map = {
         under: { start: 68, end: 73 },
         nothing: { start: 72, end: 74 },
@@ -1201,122 +1397,290 @@
         empty: { empty: true },
         limit: { unknown: true }
       };
-      const choice = map[state.noopVariant] || map.under;
+      const choice = map[state.variants[4]] || map.under;
       userMessage('现在导出任务是什么状态？', 2);
       if (choice.empty) {
         state.ring = null;
-        startStream(TEXT[7], null);
+        startStream('当前导出任务 #12 的状态是「已完成」，最近 24 小时没有失败记录。', null);
       } else if (choice.unknown) {
         state.ring = ringData(null, 8400);
-        startStream(TEXT[7], ringData(null, 8400));
+        startStream('当前导出任务 #12 的状态是「已完成」，最近 24 小时没有失败记录。', ringData(null, 8400));
       } else {
         state.ring = ringData(choice.start, Math.round(128000 * choice.start / 100));
-        startStream(TEXT[7], ringData(choice.end, Math.round(128000 * choice.end / 100)));
+        startStream('当前导出任务 #12 的状态是「已完成」，最近 24 小时没有失败记录。', ringData(choice.end, Math.round(128000 * choice.end / 100)));
       }
       return;
     }
-    if (id === 8) {
+
+    if (id === 5) {
       userMessage('继续刚才的核对，给我结论。', 2);
       state.ring = ringData(88, 112640);
-      if (state.variant === 'unavailable') {
-        startStream(TEXT[8], ringData(92, 117760));
+      if (state.variants[5] === 'unavailable') {
+        startStream('当前工作区没有失败记录，任务 #12 已完成，导入任务 #7 正在运行。', ringData(92, 117760));
         return;
       }
-      state.loading = true;
-      state.compaction = { startedAt: Date.now() - 4000 };
-      if (state.variant === 'overflow') {
-        later(() => {
-          if (state.scenario !== 8) return;
-          state.compaction = null;
-          renderStage();
-          const message = assistantMessage({ streaming: true });
-          renderMessages();
-          updateComposerState();
-          later(() => {
-            if (state.messages.indexOf(message) === -1) return;
+      startL2({
+        text: '当前工作区没有失败记录，任务 #12 已完成，导入任务 #7 正在运行。',
+        finalRing: ringData(92, 117760),
+        initialSeconds: 2,
+        commitAfter: 3400,
+        commit: false
+      });
+      return;
+    }
+
+    if (id === 6) {
+      userMessage('继续刚才的核对。', 2);
+      state.ring = ringData(88, 112640);
+      const variant = state.variants[6];
+      if (variant === 'afterError') {
+        startL2({
+          initialSeconds: 2,
+          commitAfter: 2800,
+          onCommit: (message) => {
+            later(() => {
+              if (state.messages.indexOf(message) === -1) return;
+              message.errorCard = {
+                variant: 'generic',
+                title: '本轮出错',
+                summary: '本轮没有正常完成。',
+                guide: '',
+                action: '',
+                code: 'UPSTREAM_STREAM_ERROR',
+                detail: 'upstream stream error'
+              };
+              message.streaming = false;
+              message.done = true;
+              message.ts = fmtTs();
+              state.loading = false;
+              state.ring = ringData(92, 117760);
+              renderAll();
+            }, 1200);
+          }
+        });
+        return;
+      }
+      if (variant === 'summaryFail') {
+        startL2({
+          initialSeconds: 2,
+          commitAfter: 3000,
+          commit: false,
+          onFail: (message) => {
+            message.errorCard = {
+              variant: 'generic',
+              title: '本轮出错',
+              summary: '本轮没有正常完成。',
+              guide: '',
+              action: '',
+              code: 'SUMMARY_FAILED',
+              detail: 'summary_failed'
+            };
             message.streaming = false;
             message.done = true;
             message.ts = fmtTs();
-            message.errorCard = {
-              variant: 'context',
-              title: '上下文长度超限',
-              summary: '本轮对话已超出模型能处理的最大长度。',
-              guide: '引导：开新会话并把关键结论带过去（重试不会变短）。',
-              action: '开新会话',
-              code: 'CONTEXT_OVERFLOW',
-              detail: 'context_length_exceeded'
-            };
             state.loading = false;
-            state.ring = ringData(94, 120320);
             renderAll();
-          }, 1600);
-        }, 4200);
+          }
+        });
         return;
       }
-      later(() => {
-        if (state.scenario !== 8) return;
-        state.compaction = null;
-        renderStage();
-        startStream(TEXT[8], ringData(92, 117760));
-      }, 4200);
+      assistantMessage({
+        done: true,
+        ts: fmtTs(),
+        cards: [makeToolCard({
+          title: '查询作业状态',
+          summary: '（作业 #9031）',
+          status: 'succeeded',
+          args: [{ key: 'jobId', value: '9031' }],
+          output: '运行中 · 已完成 68%'
+        })],
+        errorCard: {
+          variant: 'context',
+          title: '上下文长度超限',
+          summary: '本轮对话已超出模型能处理的最大长度。',
+          guide: '引导：开新会话并把关键结论带过去（重试不会变短）。',
+          action: '开新会话',
+          code: 'CONTEXT_OVERFLOW',
+          detail: 'nextEst >= limit（已落定已执行记录后终止）'
+        }
+      });
+      state.ring = ringData(99, 126720);
       return;
     }
-    if (id === 9) {
+
+    if (id === 7) {
+      const variant = state.variants[7];
       userMessage('继续刚才的核对。', 2);
-      state.ring = ringData(82, 104960);
-      startStream(TEXT[9], ringData(76, 97280));
+      state.ring = ringData(78, 99840);
+      if (variant === 'before') {
+        const message = startL2({
+          initialSeconds: 0,
+          commitAfter: 6000,
+          text: ''
+        });
+        later(() => {
+          if (state.messages.indexOf(message) === -1) return;
+          beginStop();
+        }, 2200);
+        return;
+      }
+      if (variant === 'after') {
+        startL2({
+          initialSeconds: 0,
+          commitAfter: 2000,
+          compactionEventId: 'scn7-after-cmp',
+          onCommit: () => {
+            later(() => beginStop(), 200);
+          }
+        });
+        return;
+      }
+      const message = assistantMessage({
+        streaming: true,
+        compactionPhase: 'compacting',
+        compactionStartedAt: Date.now()
+      });
+      state.loading = true;
+      renderAll();
+      announcePhase('开始压缩上下文');
+      later(() => markUnknown(message, true), 2200);
       return;
     }
-    if (id === 10) {
+
+    if (id === 8) {
       userMessage('帮我启动任务 #12 的导出作业。', 2);
       state.ring = ringData(63, 80640);
-      assistantMessage({ waiting: true, card: pendingCard() });
+      const card = pendingCard();
+      assistantMessage({
+        waiting: true,
+        card,
+        flow: [compactionNode('scn8-cmp'), { type: 'card', card }, { type: 'text' }]
+      });
       state.suspended = true;
       state.loading = false;
-      state.waiting = true;
       return;
     }
+
+    if (id === 9) {
+      userMessage('按刚才提交的表单继续导出。', 2);
+      state.ring = ringData(84, 107520);
+      startL2({
+        text: '表单参数已经接上：任务 #12 已完成，导出文件已生成。',
+        finalRing: ringData(60, 76800),
+        initialSeconds: 2,
+        commitAfter: 3800,
+        compactionEventId: 'scn9-cmp',
+        messageOptions: { formCard: makeFormCard() }
+      });
+      return;
+    }
+
+    if (id === 10) {
+      addOlderTurns();
+      userMessage('继续刚才的核对。', 5);
+      const variant = state.variants[10];
+      state.ring = ringData(78, 99840);
+      if (variant === 'compacting') {
+        assistantMessage({
+          streaming: true,
+          compactionPhase: 'compacting',
+          compactionStartedAt: Date.now() - 12000
+        });
+        state.loading = true;
+        return;
+      }
+      const resumedCard = () => makeToolCard({
+        title: '查询作业状态',
+        summary: '（作业 #9031）',
+        status: 'succeeded',
+        args: [{ key: 'jobId', value: '9031' }],
+        output: '运行中 · 已完成 68%'
+      });
+      if (variant === 'committed') {
+        const card = resumedCard();
+        const message = assistantMessage({
+          text: '刷新后继续：任务 #12 已完成，失败原因列表为空。',
+          done: true,
+          ts: fmtTs(Date.now() - 1 * 60000),
+          cards: [card],
+          flow: [{ type: 'card', card }, { type: 'text' }]
+        });
+        addCommittedCompaction(message, 'scn10-commit');
+        // 同一持久事件在刷新/重连竞态中可能重复下发；第二次按 eventId 去重，不重复渲染。
+        addCommittedCompaction(message, 'scn10-commit');
+        state.ring = ringData(58, 74240);
+        return;
+      }
+      const card = resumedCard();
+      const message = assistantMessage({
+        text: '接管实例接着完成：任务 #12 已完成，失败原因列表为空。',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000),
+        cards: [card],
+        flow: [{ type: 'card', card }, { type: 'text' }]
+      });
+      addCommittedCompaction(message, 'scn10-takeover');
+      state.ring = ringData(60, 76800);
+      return;
+    }
+
     if (id === 11) {
-      userMessage('重新整理一下任务 #12 的失败原因。', 2);
-      state.ring = ringData(12, 15360);
-      state.loading = true;
-      state.preparing = { startedAt: Date.now() - 3000 };
-      schedulePreparingResolve();
+      addOlderTurns();
+      userMessage('继续刚才的核对。', 5);
+      const cardA = makeToolCard({ title: '列出配置定义', status: 'succeeded', output: ORIGINAL_CONFIG_RESULT });
+      const cardB = makeToolCard({
+        title: '查询作业状态',
+        summary: '（作业 #9031）',
+        status: 'succeeded',
+        args: [{ key: 'jobId', value: '9031' }],
+        output: '运行中 · 已完成 68%'
+      });
+      assistantMessage({
+        text: '本轮工作上下文经过两次整理：任务 #12 已完成，失败原因列表为空。',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000),
+        cards: [cardA, cardB],
+        flow: [
+          compactionNode('scn11-cmp-1'),
+          { type: 'card', card: cardA },
+          compactionNode('scn11-cmp-2'),
+          { type: 'card', card: cardB },
+          { type: 'text' }
+        ]
+      });
+      state.ring = ringData(49, 62720);
       return;
     }
+
     if (id === 12) {
-      userMessage('现在上下文占用大概多少？', 3);
-      assistantMessage({ text: TEXT[12], done: true, ts: fmtTs(Date.now() - 2 * 60000) });
-      applyRingVariant();
-      return;
-    }
-    if (id === 13) {
       userMessage('先查一下配置定义和作业状态，再给我结论。', 3);
       const now = Date.now();
-      if (state.toolVariant === 'l1') {
+      const variant = state.variants[12];
+      if (variant === 'l1') {
+        const cardA = makeToolCard({ title: '列出配置定义', status: 'succeeded', output: ORIGINAL_CONFIG_RESULT });
+        const cardB = makeToolCard({
+          title: '查询作业状态',
+          summary: '（作业 #9031）',
+          status: 'succeeded',
+          args: [{ key: 'jobId', value: '9031' }],
+          output: '运行中 · 已完成 68%'
+        });
         assistantMessage({
           text: '配置定义与作业状态已经取到：共 12 项，作业 #9031 运行中，完成 68%。',
           done: true,
           ts: fmtTs(now),
-          cards: [
-            makeToolCard({
-              title: '列出配置定义',
-              status: 'succeeded',
-              output: ORIGINAL_CONFIG_RESULT
-            }),
-            makeToolCard({
-              title: '查询作业状态',
-              summary: '（作业 #9031）',
-              status: 'succeeded',
-              args: [{ key: 'jobId', value: '9031' }],
-              output: '运行中 · 已完成 68%'
-            })
+          cards: [cardA, cardB],
+          flow: [
+            { type: 'card', card: cardA },
+            { type: 'card', card: cardB },
+            compactionNode('scn12-l1-cmp'),
+            { type: 'text' }
           ]
         });
         state.ring = ringData(58, 74240);
         return;
       }
-      if (state.toolVariant === 'wrapup') {
+      if (variant === 'wrapup') {
         assistantMessage({
           text: '根据已取得的结果：作业 #9031 仍在运行，完成 68%；剩余明细尚未返回。',
           done: true,
@@ -1332,7 +1696,7 @@
         state.ring = ringData(96, 122880);
         return;
       }
-      if (state.toolVariant === 'overflow') {
+      if (variant === 'overflow') {
         assistantMessage({
           done: true,
           ts: fmtTs(now),
@@ -1371,8 +1735,7 @@
             title: '启动导出作业',
             summary: '（任务 #12）',
             status: 'skipped',
-            args: [{ key: 'taskId', value: '12' }],
-            diagnostic: 'TOOL_BUDGET_EXHAUSTED · armedBatches=2（MAX_ARMED_BATCHES=2）'
+            args: [{ key: 'taskId', value: '12' }]
           })
         ],
         errorCard: {
@@ -1382,29 +1745,49 @@
           guide: '请先核对已执行的结果，再开启新会话重试。',
           action: '',
           code: 'TOOL_BUDGET_EXHAUSTED',
-          detail: 'turn_wrap_up_ignored · armedBatches=2（MAX_ARMED_BATCHES=2）'
+          detail: 'turn_wrap_up_ignored · armedBatches=2'
         }
       });
       state.ring = ringData(97, 124160);
+      return;
+    }
+
+    if (id === 13) {
+      userMessage('重新整理一下任务 #12 的失败原因。', 2);
+      state.ring = ringData(12, 15360);
+      state.loading = true;
+      state.preparing = { startedAt: Date.now() - 3000 };
+      schedulePreparingResolve();
+      return;
+    }
+
+    if (id === 14) {
+      userMessage('现在上下文占用大概多少？', 3);
+      assistantMessage({
+        text: '输入框右下角的圆环就是最新一轮的上下文占用；本轮结束后才会刷新，流式中不会跳动。',
+        done: true,
+        ts: fmtTs(Date.now() - 2 * 60000)
+      });
+      applyRingVariant();
     }
   }
 
-  function startScenario(id, options = {}) {
+  function startScenario(id) {
     clearTimers();
     if (feedbackTimer !== null) {
       clearTimeout(feedbackTimer);
       feedbackTimer = null;
     }
+    if (announceTimer !== null) {
+      clearTimeout(announceTimer);
+      announceTimer = null;
+    }
+    phaseAnnouncer.textContent = '';
     demoFeedback.textContent = '';
     state.scenario = id;
-    if ((id === 2 || id === 5 || id === 6) && !options.keepView) {
-      state.historyView = id === 5 ? 'refresh' : 'current';
-    }
     state.messages = [];
     state.loading = false;
     state.suspended = false;
-    state.waiting = false;
-    state.compaction = null;
     state.preparing = null;
     state.ring = null;
     state.copiedId = null;
@@ -1429,7 +1812,6 @@
     composer.value = '';
     state.loading = true;
     state.suspended = false;
-    state.waiting = false;
     resizeComposer();
     renderMessages();
     updateComposerState();
@@ -1451,8 +1833,6 @@
     clearTimers();
     state.loading = false;
     state.suspended = false;
-    state.waiting = false;
-    state.compaction = null;
     state.preparing = null;
     const last = [...state.messages].reverse().find((m) => m.role === 'assistant');
     if (last) {
@@ -1461,6 +1841,7 @@
       last.done = true;
       last.stopped = true;
       last.waiting = false;
+      last.compactionPhase = 'idle';
       last.ts = fmtTs();
       if (last.card && last.card.status === 'pending') last.card.status = 'cancelled';
     } else {
@@ -1474,7 +1855,6 @@
     if (!message) return;
     message.card.status = approved ? 'approved' : 'rejected';
     message.waiting = false;
-    state.waiting = false;
     if (approved) {
       state.suspended = false;
       state.loading = true;
@@ -1504,7 +1884,7 @@
     state.preparing = { startedAt: Date.now() };
     renderStage();
     schedulePreparingResolve();
-    showDemoFeedback('Demo：已模拟 ai.retryPreparing()，秒表归零，阶段仍为准备中。');
+    showDemoFeedback('Demo：已模拟准备中重试，秒表归零，阶段仍为准备中。');
   }
 
   async function copyText(text) {
@@ -1587,6 +1967,11 @@
     if (action === 'approve') { decideCard(true); return; }
     if (action === 'reject') { decideCard(false); return; }
     if (action === 'retry-preparing') { retryPreparing(); return; }
+    if (action === 'reload-turn') {
+      startScenario(state.scenario);
+      showDemoFeedback('Demo：已重新载入当前场景。');
+      return;
+    }
     if (action === 'new-chat' || action === 'error-new-chat') { newChat(); return; }
     if (action === 'collapse') {
       panel.classList.add('is-collapsed');
@@ -1648,28 +2033,43 @@
   sceneExtra.addEventListener('click', (event) => {
     const button = event.target.closest('button');
     if (!button) return;
+    if (button.dataset.local) {
+      state.variants[2] = button.dataset.local;
+      startScenario(2);
+      return;
+    }
     if (button.dataset.noop) {
-      state.noopVariant = button.dataset.noop;
+      state.variants[4] = button.dataset.noop;
+      startScenario(4);
+      return;
+    }
+    if (button.dataset.fail) {
+      state.variants[5] = button.dataset.fail;
+      startScenario(5);
+      return;
+    }
+    if (button.dataset.error) {
+      state.variants[6] = button.dataset.error;
+      startScenario(6);
+      return;
+    }
+    if (button.dataset.stop) {
+      state.variants[7] = button.dataset.stop;
       startScenario(7);
       return;
     }
-    if (button.dataset.variant) {
-      state.variant = button.dataset.variant;
-      startScenario(8);
-      return;
-    }
-    if (button.dataset.view) {
-      state.historyView = button.dataset.view;
-      startScenario(state.scenario, { keepView: true });
+    if (button.dataset.refresh) {
+      state.variants[10] = button.dataset.refresh;
+      startScenario(10);
       return;
     }
     if (button.dataset.tool) {
-      state.toolVariant = button.dataset.tool;
-      startScenario(13);
+      state.variants[12] = button.dataset.tool;
+      startScenario(12);
       return;
     }
     if (button.dataset.ring) {
-      state.ringVariant = button.dataset.ring;
+      state.variants[14] = button.dataset.ring;
       applyRingVariant();
       renderSceneExtra();
       updateRing();
@@ -1683,9 +2083,13 @@
 
   setInterval(() => {
     document.querySelectorAll('[data-live-seconds]').forEach((el) => {
-      const key = el.getAttribute('data-stage');
-      const stage = key === 'compacting' ? state.compaction : state.preparing;
-      if (stage) el.textContent = String(secondsOf(stage));
+      if (state.preparing) el.textContent = String(secondsOf(state.preparing.startedAt));
+    });
+    document.querySelectorAll('[data-compaction-seconds]').forEach((el) => {
+      const startedAt = Number(el.getAttribute('data-started-at'));
+      if (Number.isFinite(startedAt) && startedAt > 0) {
+        el.textContent = String(secondsOf(startedAt));
+      }
     });
   }, 250);
 

@@ -673,21 +673,6 @@
   }
   .stopped-square { display: block; width: 6px; height: 6px; border-radius: 1px; background: var(--ink-3); }
 
-  /* 合成 / 已压缩提示（AiPanel.vue:330-339） */
-  .synthetic-note {
-    width: 100%;
-    margin-bottom: 18px;
-    border: 1px dashed var(--line);
-    border-radius: 10px;
-    background: var(--gray-soft);
-    padding: 6px 10px;
-    font-size: 11.6px;
-    line-height: 1.6;
-    color: var(--ink-2);
-  }
-  .synthetic-note b { font-weight: 650; color: var(--ink); }
-  .synthetic-note span { margin-left: 4px; }
-
   /* HITL 待确认卡（AiPanel.vue:446-497 / 686-766） */
   .tool-card {
     margin-top: 6px;
@@ -1220,3 +1205,148 @@
   }
 
   .status-primary { border-color: var(--blue-line); background: var(--blue-soft); color: var(--blue); }
+
+  /* ── 目标设计：消息级压缩状态 ───────────────────────────────────── */
+  :root {
+    --violet: #6d28d9;
+    --violet-strong: #7c3aed;
+  }
+
+  .meta-status { gap: 6px; flex-wrap: wrap; }
+
+  .compacting-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 18px;
+    font-size: 12.2px;
+    line-height: 1.6;
+    letter-spacing: .3px;
+    color: var(--violet);
+    white-space: nowrap;
+  }
+  .compaction-dot {
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--violet-strong);
+    animation: breathe 1.5s ease-in-out infinite;
+  }
+  .compaction-text { white-space: nowrap; }
+
+  /* 已压缩上下文：消息流中的流程事件节点（全宽、轻量、无操作） */
+  .compaction-divider {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    margin: 10px 0 12px;
+    padding: 0 10px;
+    color: var(--ink-2);
+    font-size: 11.5px;
+    line-height: 1.6;
+    letter-spacing: .3px;
+    user-select: none;
+    cursor: default;
+  }
+  .compaction-divider::before,
+  .compaction-divider::after {
+    content: "";
+    flex: 1;
+    min-width: 12px;
+    height: 0;
+    border-top: 1px solid var(--line);
+  }
+  .compaction-divider-label {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  /* 表单已提交卡（目标场景：表单提交后续跑前压缩） */
+  .form-body { padding: 0 11px 11px; }
+  .form-rows {
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: #fff;
+    padding: 2px 10px;
+  }
+  .form-row {
+    display: flex;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line-soft);
+    font-size: 12.8px;
+    line-height: 1.5;
+  }
+  .form-row:last-child { border-bottom: 0; }
+  .form-key {
+    flex: 0 0 88px;
+    min-width: 0;
+    color: var(--ink-3);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .form-val { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+  /* 结果未知：沿用现有中性“状态未确认”卡 */
+  .unconfirmed-card {
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--gray-soft);
+    padding: 8px 10px;
+  }
+  .unconfirmed-icon {
+    flex: 0 0 15px;
+    width: 15px;
+    height: 15px;
+    margin-top: 2px;
+    border: 1.3px solid var(--ink-3);
+    border-radius: 50%;
+    color: var(--ink-2);
+    font-size: 9px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .unconfirmed-body { min-width: 0; flex: 1; }
+  .unconfirmed-body b {
+    display: block;
+    font-size: 12.2px;
+    font-weight: 650;
+    color: var(--ink);
+  }
+  .unconfirmed-body span {
+    display: block;
+    margin-top: 2px;
+    font-size: 11.6px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+  .unconfirmed-action {
+    flex: none;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--blue);
+    white-space: nowrap;
+  }
+  .unconfirmed-action span { border-bottom: 1px solid var(--line); }
+
+  /* Demo 外壳与面板的键盘焦点统一可见 */
+  :where(.demo-page button, .demo-page a, .demo-page textarea, .demo-page select):focus-visible {
+    outline: 2px solid rgba(37, 99, 235, .55);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .compaction-dot { animation: none; }
+  }

@@ -411,6 +411,13 @@ public class ResilientChatService {
 
 	private final CancellationRegistry cancellations;
 
+	/**
+	 * 停止闭环：{@code clientRequestId} 映射（字段注入，构造器签名不变 ⇒ 既有直接 new 的单测零触碰）。
+	 * 未注入时只认取消旗标；生产装配必有该 bean。
+	 */
+	@org.springframework.beans.factory.annotation.Autowired(required = false)
+	private ClientRequestRegistry clientRequests;
+
 	private final ToolActivityBeacon beacon;
 
 	private final ScheduledExecutorService watchdogExecutor;
@@ -703,6 +710,19 @@ public class ResilientChatService {
 		// 取消登记一并前移：压缩期收到的取消同样必须生效（权威态在 Redis，登记只是同进程加速通道）。
 		this.cancellations.register(runId);
 		out.start(sessionId);
+		/**
+		 * 停止闭环：取消可能早于本轮创建（刷新后按 clientRequestId 补取消，或映射里的
+		 * {@code CANCELLED} 墓碑）。必须在<b>压缩/建快照/模型调用/工具副作用之前</b>收敛：
+		 * 只看确定 CANCELLED（旗标或映射），UNKNOWN 按未取消继续（此刻还没有不可逆动作）。
+		 */
+		if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
+			log.info("首轮在建快照/压缩/模型调用之前收到取消 runId={} sessionId={}", runId, sessionId);
+			TurnContext early = new TurnContext(systemTokens, toolsTokens, inputTokens,
+					systemTokens + toolsTokens + inputTokens, 0, runtime.modelId(), "none", turnStartedAtMs,
+					paramsLocked, runtime.providerCode(), queueMs(System.currentTimeMillis()));
+			cancelTerminal(runId, sessionId, null, 0, null, out, early);
+			return;
+		}
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, true);
 		// 驱动所有权（快照建好之后取得；压缩期还没有快照，接管方也无从判死这一轮）
 		DriveOwnership ownership = DriveOwnership.none();
@@ -730,11 +750,11 @@ public class ResilientChatService {
 			// 终态与终帧复用既有取消收尾；快照走既有创建路径，内容只到"请求历史 + 上下文/模型身份"：
 			// 模型一次都没被调用，故不写助手正文、不写工具调用/工具结果（不得伪造轮内产出）。
 			// 为什么必须建这份最小快照：没有它，runId 的取消终态只活在帧归档里，重挂/刷新没有持久面。
-			if (cancellationRequested(runId)) {
+			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
 				log.info("首轮压缩期间收到取消 runId={}（保存最小 CANCELLED 快照、不发起模型调用）", runId);
 				try {
 					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
-							runtime.modelId(), frozenParams(runtime, paramsLocked));
+							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId());
 				}
 				catch (RuntimeException ex) {
 					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
@@ -756,7 +776,8 @@ public class ResilientChatService {
 			// "被策略锁住 ⇒ 没生效"三种情形都已体现），不是请求体原文。
 			// A：请求边界冻结的权威执行信封要用这份刚建好的快照（不是稍后可能被改写的读回值）。
 			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
-					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked));
+					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked),
+					request.clientRequestId());
 
 			// ===== 驱动所有权（2026-10-29）：快照建好之后、模型/预检之前先取得续跑权 =====
 			// 旧实现首轮从不持租：跨实例僵尸扫描看到的证据是"RUNNING + 无租约 + 业务活动超龄" ⇒ 判死接管，
@@ -802,7 +823,7 @@ public class ResilientChatService {
 			// N4（返修）：交棒（runAttempts → 上游调用）前再复查一次 —— 覆盖压缩之后、快照建立/
 			// 用户历史落库期间的取消窗口；命中则就地取消收尾（快照已存在，写 CANCELLED + 唯一终帧），
 			// 不发起任何模型调用。
-			if (cancellationRequested(runId)) {
+			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
 				log.info("首轮交棒前收到取消 runId={}（不发起模型调用）", runId);
 				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
 				return;
@@ -2396,6 +2417,26 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.debug("取消复查不可读 runId={}（按未取消继续）：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * 停止闭环：{@code clientRequestId} 映射是否已取消（取消早于 run 创建时的墓碑）。
+	 *
+	 * <p>与取消旗标<b>双证据</b>：旗标写失败（Redis 抖动）但映射已原子转成 {@code CANCELLED} 时，
+	 * 这里仍能在压缩/建快照/模型调用之前收敛。读失败按未取消继续（此时尚无不可逆动作），
+	 * 由后续 N4 复查/看门狗兜底。
+	 */
+	private boolean clientRequestCancelled(String sessionId, String clientRequestId) {
+		if (this.clientRequests == null || clientRequestId == null || clientRequestId.isBlank()) {
+			return false;
+		}
+		try {
+			return this.clientRequests.isCancelled(sessionId, clientRequestId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("clientRequestId 取消复查不可读 sessionId={}（按未取消继续）：{}", sessionId, ex.getMessage());
 			return false;
 		}
 	}

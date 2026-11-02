@@ -5,6 +5,11 @@ import java.util.Map;
 /**
  * POST /api/ai/chat 请求体。
  *
+ * <h2>停止闭环的<b>可选</b>字段 {@code clientRequestId}</h2>
+ * 前端在发送前生成并写入本页签镜像；后端在创建 run 前把它与本轮绑定（见
+ * {@code ClientRequestRegistry}）。{@code start} 之前停止 + 刷新时，这是唯一可证明的精确取消
+ * 关联键；它<b>不是 runId</b>，不能用来指定/取消别人的轮。缺省 = 旧客户端，行为不变。
+ *
  * <h2>批③ 的两个<b>可选</b>字段（设计稿 §3.6）</h2>
  * <ul>
  * <li>{@code modelId}：本轮使用的模型（前端会话级选择，与 {@code ai_model} 的 allowlist 对账）；</li>
@@ -27,12 +32,20 @@ import java.util.Map;
  * @param context 工作区上下文（可空）：决定本轮披露给模型的工具子集
  * @param modelId 本轮模型名（null/空白 = 用默认解析链）
  * @param params 本轮参数覆盖（null = 全部用全局默认）
+ * @param clientRequestId 客户端请求 id（停止闭环 additive 字段；前端发送前生成并持久化，
+ *     后端据此在 run 创建前绑定/识别取消墓碑。null = 旧客户端，行为与改造前一致）
  */
-public record AiChatRequest(String sessionId, String message, Context context, String modelId, Params params) {
+public record AiChatRequest(String sessionId, String message, Context context, String modelId, Params params,
+		String clientRequestId) {
 
 	/** 兼容构造器：批③ 之前的调用点（含控制器归一化后的换新 record）无需改动。 */
 	public AiChatRequest(String sessionId, String message, Context context) {
-		this(sessionId, message, context, null, null);
+		this(sessionId, message, context, null, null, null);
+	}
+
+	/** 兼容构造器：批③ 的 5 参调用点（不含停止闭环字段）。 */
+	public AiChatRequest(String sessionId, String message, Context context, String modelId, Params params) {
+		this(sessionId, message, context, modelId, params, null);
 	}
 
 	/**

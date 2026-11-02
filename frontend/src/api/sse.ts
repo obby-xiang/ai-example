@@ -479,16 +479,19 @@ function finish(
   handlers: SseFrameHandlers,
   terminal: boolean,
   reason: string | undefined,
-  timeoutStage?: SseTimeoutStage
+  timeoutStage?: SseTimeoutStage,
+  cancelled = false
 ): StreamCloseInfo {
-  const suspended = !terminal && state.awaitsInput
+  // 调用方主动中止 = 停止的收尾，不是"挂起等待"（也不该借 suspended 分支跳过停止逻辑）。
+  const suspended = !terminal && !cancelled && state.awaitsInput
   const info: StreamCloseInfo = {
     terminal,
     lastFrame: state.lastFrame,
     reconnects: state.reconnects,
     ...(reason === undefined ? {} : { reason }),
     ...(suspended ? { suspended: true } : {}),
-    ...(timeoutStage === undefined ? {} : { timeoutStage })
+    ...(timeoutStage === undefined ? {} : { timeoutStage }),
+    ...(cancelled ? { cancelled: true } : {})
   }
   handlers.onClose?.(info)
   return info
@@ -864,6 +867,14 @@ export async function streamChat(
         signal: controller.signal
       })
     } catch (error) {
+      /**
+       * 调用方主动中止（= 用户停止）不是传输失败：`fetch` 被 abort 时抛 AbortError，
+       * 旧实现会把它包成 NETWORK_ERROR 抛给 store —— 停止后反而挂出"本轮出错"的错误卡。
+       * 这里按正常收尾返回 `cancelled`，由调用方按"已停止"口径收口。
+       */
+      if (options.signal?.aborted) {
+        return finish(state, handlers, false, '调用方已取消连接', undefined, true)
+      }
       // 批次3：建连阶段超时与"网络没发出去"必须可区分（两者文案与后续动作不同）。
       if (connectTimedOut && !options.signal?.aborted) {
         const apiError = new ApiError('连接超时', 0, SSE_TIMEOUT_CODES.connect, null)
@@ -909,18 +920,20 @@ export async function streamChat(
     }
     if (result.aborted) {
       const stage = result.timeoutStage ?? timeoutStage
+      const callerCancelled = options.signal?.aborted === true
       const reason = stage === 'first-frame'
         ? '首帧超时（已连接但未收到任何帧），判定断流'
         : stage === 'idle'
           ? '帧间静默超时，判定断流'
-          : '连接已中止'
-      // 只有"已经收到过帧"的静默才能带 runId 重挂；首帧超时说明连 start 都没有，不能重挂。
-      const reattached = stage === 'idle'
+          : callerCancelled ? '调用方已取消连接' : '连接已中止'
+      // 调用方主动中止（停止）既不重挂、也不按断流上报；只有"已经收到过帧"的静默才能带
+      // runId 重挂（首帧超时说明连 start 都没有，不能重挂）。
+      const reattached = stage === 'idle' && !callerCancelled
         ? await tryReattach(state, handlers, options)
         : { terminal: false, reason }
       return reattached.terminal
         ? finish(state, handlers, true, undefined)
-        : finish(state, handlers, false, reattached.reason ?? reason, stage ?? undefined)
+        : finish(state, handlers, false, reattached.reason ?? reason, stage ?? undefined, callerCancelled)
     }
     if (state.awaitsInput) {
       // B1（2026-10-20 挂起即断）：卡面请求帧已送达 ⇒ 服务端主动收流，这是**正常收尾**。
@@ -1038,7 +1051,15 @@ export async function reattach(
       source?.close()
       source = null
       options.signal?.removeEventListener('abort', onAbort)
-      resolve(finish(state, handlers, terminal, reason))
+      // 调用方主动中止 = 停止的正常收尾（不是传输失败）；终帧已到则仍按终态收口。
+      resolve(finish(
+        state,
+        handlers,
+        terminal,
+        reason,
+        undefined,
+        !state.terminal && options.signal?.aborted === true
+      ))
     }
 
     const onAbort = (): void => {

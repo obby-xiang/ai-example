@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 对话顶部提示 · 精简 Demo</title>
+<link rel="stylesheet" href="top-notice-design-demo.css">
+</head>
+<body>
+<div class="demo-page">
+  <header class="demo-head">
+    <div class="demo-eyebrow">
+      <span class="demo-chip blue">静态交互 Demo</span>
+      <span class="demo-chip">原生 JS · 无依赖</span>
+      <span class="demo-chip">6 类场景</span>
+      <span class="demo-chip">不连接后端</span>
+    </div>
+    <h1>AI 对话顶部提示 · 精简 Demo</h1>
+    <p class="lede">
+      顶部只有一个出口，最多一条提示，只保留两类：AI 整体不可用；自动恢复失败且已显示内容可能不完整。
+      自动恢复过程完全静默；多故障同时发生时按整体不可用优先；恢复正常、换会话或开始新轮后提示立即清理。
+      本页是静态交互 Demo，场景切换、顶部动作、发送与停止都由原生 JS 模拟。
+    </p>
+  </header>
+
+  <div class="demo-grid">
+    <aside class="scenario-nav" aria-label="Demo 场景切换">
+      <div class="nav-title">场景（Demo 外壳）</div>
+      <div class="nav-list" id="scenario-nav">
+        <button class="nav-btn" type="button" data-scene="1"><span class="nav-num">01</span><span class="nav-label">正常无顶部提示</span></button>
+        <button class="nav-btn" type="button" data-scene="2"><span class="nav-num">02</span><span class="nav-label">AI 整体不可用</span></button>
+        <button class="nav-btn" type="button" data-scene="3"><span class="nav-num">03</span><span class="nav-label">自动恢复中静默</span></button>
+        <button class="nav-btn" type="button" data-scene="4"><span class="nav-num">04</span><span class="nav-label">自动恢复失败</span></button>
+        <button class="nav-btn" type="button" data-scene="5"><span class="nav-num">05</span><span class="nav-label">多故障最多一条</span></button>
+        <button class="nav-btn" type="button" data-scene="6"><span class="nav-num">06</span><span class="nav-label">提示清理</span></button>
+      </div>
+      <div class="nav-note">
+        <b>操作：</b>切换场景立即重播；顶部动作、发送、停止与「新建对话」均为纯前端模拟。
+        顶部同一时刻只渲染一条。
+      </div>
+    </aside>
+
+    <main class="demo-stage">
+      <section class="scene-card" aria-live="off">
+        <div class="scene-head">
+          <span class="scene-num" id="scene-num">01</span>
+          <div class="scene-head-main">
+            <div class="scene-kicker" id="scene-kicker">场景 01 / 6</div>
+            <h2 id="scene-title">正常无顶部提示</h2>
+          </div>
+          <span class="scene-tag tag-silent" id="scene-tag">无提示</span>
+        </div>
+        <div class="scene-desc" id="scene-desc"></div>
+        <div id="scene-extra"></div>
+        <div class="scene-actions">
+          <button class="replay-btn" type="button" id="replay-btn">重播本场景</button>
+          <span class="demo-feedback" id="demo-feedback" role="status" aria-live="polite"></span>
+        </div>
+        <details class="evidence">
+          <summary>设计依据（目标契约）</summary>
+          <ul id="scene-evidence"></ul>
+        </details>
+      </section>
+
+      <div class="panel-wrap">
+        <div class="ai-panel" id="ai-panel">
+          <div class="ai-collapsed-bar" data-action="expand" role="button" tabindex="0" aria-label="展开 AI 助手">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            <span>AI 助手</span>
+          </div>
+
+          <div class="ai-normal">
+            <div class="ai-header">
+              <div class="ai-avatar">AI</div>
+              <div class="ai-head-main">
+                <div class="ai-name">实施助手</div>
+                <div class="ai-model" data-testid="current-model">流式对话 · 工具调用</div>
+              </div>
+              <button class="header-text-btn" type="button" data-action="new-chat" data-testid="new-chat">新建对话</button>
+              <button class="header-icon-btn" type="button" data-action="collapse" aria-label="收起" title="收起">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg>
+              </button>
+            </div>
+
+            <div class="ai-context-bar" data-testid="panel-context-bar">
+              <span class="context-summary">工作区 · 配置管理 / 任务列表</span>
+            </div>
+
+            <div class="top-host" id="top-host"></div>
+            <div class="ai-messages" id="messages" role="log" aria-label="对话消息" aria-busy="false"></div>
+
+            <div class="ai-composer">
+              <div class="composer-shell">
+                <textarea id="composer" class="composer-input" rows="1" maxlength="2000" data-testid="composer-input" aria-label="输入消息" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+                <div class="composer-bottom">
+                  <span class="composer-spacer"></span>
+                  <span class="composer-count" id="composer-count" data-testid="composer-count" hidden></span>
+                  <span class="ring-wrap tip-host" id="ring-wrap" role="group" tabindex="0" aria-label="上下文占用 42%">
+                    <progress class="context-ring tier-safe" id="context-ring" data-testid="context-pill" max="100" value="42" aria-label="上下文占用 42%"></progress>
+                    <span class="tip" id="ring-tip" data-testid="context-ring-tip" aria-hidden="true">上下文占用 42%<span class="tip-arrow" aria-hidden="true"></span></span>
+                  </span>
+                  <div id="send-slot"></div>
+                </div>
+              </div>
+              <span class="sr-only" aria-live="polite" id="composer-live"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="mapping-section mapping" aria-label="场景与顶部提示总览">
+        <div class="mapping-head">
+          <h2>6 类场景 → 顶部提示</h2>
+          <p>Demo 外壳表格，不进入产品 UI。顶部最多一条；整体不可用优先于恢复失败；其余状态不占顶部。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>场景</th><th>顶部</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr data-map-scene="1"><td>01</td><td>正常无顶部提示</td><td>—</td><td>普通对话，不产生通知。</td></tr>
+              <tr data-map-scene="2"><td>02</td><td>AI 整体不可用</td><td><span class="map-badge map-top">一条强提示</span></td><td>唯一全局出口，提供「重试」；不展示技术原因。</td></tr>
+              <tr data-map-scene="3"><td>03</td><td>自动恢复中静默</td><td>—</td><td>只有消息内「工作中…」与停止钮，不提示正在恢复。</td></tr>
+              <tr data-map-scene="4"><td>04</td><td>自动恢复失败</td><td><span class="map-badge map-top">一条恢复提示</span></td><td>内容可能不完整，提供「重新载入」作为手动恢复。</td></tr>
+              <tr data-map-scene="5"><td>05</td><td>多故障最多一条</td><td><span class="map-badge map-top">整体不可用</span></td><td>两类故障同时存在时只显示整体不可用，不并列、不排队。</td></tr>
+              <tr data-map-scene="6"><td>06</td><td>提示清理</td><td>消失</td><td>恢复正常、换会话或开始新轮后立即清理。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <p class="demo-footnote">
+        <b>目标原则：</b>顶部最多一条，只有「AI 暂时不可用」与「自动恢复失败且内容可能不完整」。
+        自动恢复中、自动重试与技术原因保持静默。
+        <br>
+        <b>Demo 说明：</b>场景、外壳按钮与映射表均为展示用途；输入、顶部动作、发送与停止均为纯前端模拟，不连接后端。
+      </p>
+    </main>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  const MESSAGE_MAX = 2000;
+  const COMPOSER_PLACEHOLDER = '输入消息，Enter 发送，Shift+Enter 换行';
+  const RECOVERY_DONE_TEXT = '我刚核对到一半，连接已自动恢复。总结：今天 3 个导出任务全部完成，没有失败记录。';
+
+  const SCENES = {
+    1: {
+      title: '正常无顶部提示',
+      tag: '无提示',
+      tone: 'silent',
+      brief: [
+        '普通提问、正常生成、正常完成，顶部始终为空。',
+        '消息、时间戳、复制与反馈入口照常保留。'
+      ],
+      evidence: [
+        '目标契约：非阻断状态不占顶部，也不产生额外提示。',
+        '顶部只在 AI 整体不可用或自动恢复失败时出现。'
+      ]
+    },
+    2: {
+      title: 'AI 整体不可用',
+      tag: '顶部 · 唯一强提示',
+      tone: 'warn',
+      brief: [
+        '顶部只显示一条「AI 暂时不可用，请稍后重试。」+「重试」，输入区不可发送。',
+        '不展示 API Key、供应商、模型、身份目录、会话号等技术原因。',
+        '点「重试」模拟恢复：提示消失，输入区恢复可用。'
+      ],
+      evidence: [
+        '目标契约：全局不可用是顶部第一优先级，且同一时刻最多一条。',
+        '所有不可用来源归一为同一条文案与同一个动作。'
+      ]
+    },
+    3: {
+      title: '自动恢复中静默',
+      tag: '静默',
+      tone: 'silent',
+      brief: [
+        '连接中断后自动恢复进行中：顶部始终为空。',
+        '消息继续显示「工作中…」，停止钮保留；不出现“正在重试”“正在恢复”等提示。',
+        '几秒后内容自动接上；也可点外壳按钮立即完成，观察全程无顶部提示。'
+      ],
+      evidence: [
+        '目标契约：自动重试、自动恢复、跨实例接管均静默。',
+        '用户只在结果发生变化时看到消息内容更新。'
+      ]
+    },
+    4: {
+      title: '自动恢复失败',
+      tag: '顶部 · 恢复',
+      tone: 'warn',
+      brief: [
+        '自动恢复最终失败、已显示内容可能不完整：顶部一条「连接中断，已显示的内容可能不完整。」+「重新载入」。',
+        '「重新载入」是唯一的手动恢复入口；消息内不再叠一条同义提示。',
+        '点「重新载入」模拟恢复成功，提示立即消失。'
+      ],
+      evidence: [
+        '目标契约：顶部第二类只承载“自动恢复失败且内容可能不完整”。',
+        '同一事实只一个出口，成功恢复后不留下 Toast。'
+      ]
+    },
+    5: {
+      title: '多故障最多一条',
+      tag: '顶部 · 一条',
+      tone: 'warn',
+      brief: [
+        'AI 整体不可用与自动恢复失败同时存在：顶部只显示 AI 整体不可用。',
+        '解决整体不可用后，同一槽位才显示仍存在的恢复提示；不并列、不排队。',
+        '外壳按钮只用于观察优先级切换，不进入产品面板。'
+      ],
+      evidence: [
+        '目标契约：整体不可用优先于恢复失败；顶部槽位同一时刻只渲染一条。',
+        '低优先级事实在槽位释放后按当前状态重新计算，而不是堆叠。'
+      ]
+    },
+    6: {
+      title: '提示清理',
+      tag: '清理',
+      tone: 'recovery',
+      brief: [
+        '恢复成功后顶部提示立即消失，不留下成功 Toast。',
+        '换会话、开始新轮同样清理旧提示，不把提示排队到下一轮。',
+        '用外壳按钮分别观察三种清理路径。'
+      ],
+      evidence: [
+        '目标契约：提示跟随当前状态与当前会话，不做跨轮残留。',
+        '清理是状态驱动的，不需要用户手动关闭。'
+      ]
+    }
+  };
+
+  const state = {
+    scenario: 1,
+    messages: [],
+    top: { unavailable: false, recovery: false },
+    loading: false,
+    ring: null,
+    copiedId: null,
+    feedback: {},
+    stopping: false
+  };
+
+  let uid = 0;
+  let timers = [];
+  let feedbackTimer = null;
+  let pinBottom = true;
+  let composerComposing = false;
+  let composerEndedAt = null;
+  let lastComposerTier = 'none';
+  const supportsFieldSizing = !!(window.CSS && CSS.supports && CSS.supports('field-sizing', 'content'));
+
+  const panel = document.getElementById('ai-panel');
+  const messagesEl = document.getElementById('messages');
+  const topHost = document.getElementById('top-host');
+  const composer = document.getElementById('composer');
+  const sendSlot = document.getElementById('send-slot');
+  const composerCount = document.getElementById('composer-count');
+  const composerLive = document.getElementById('composer-live');
+  const ringWrap = document.getElementById('ring-wrap');
+  const ring = document.getElementById('context-ring');
+  const ringTip = document.getElementById('ring-tip');
+  const sceneNum = document.getElementById('scene-num');
+  const sceneKicker = document.getElementById('scene-kicker');
+  const sceneTitle = document.getElementById('scene-title');
+  const sceneTag = document.getElementById('scene-tag');
+  const sceneDesc = document.getElementById('scene-desc');
+  const sceneExtra = document.getElementById('scene-extra');
+  const sceneEvidence = document.getElementById('scene-evidence');
+  const demoFeedback = document.getElementById('demo-feedback');
+  const replayBtn = document.getElementById('replay-btn');
+  const navEl = document.getElementById('scenario-nav');
+
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
+  }
+
+  function fmtTs(ms = Date.now()) {
+    const d = new Date(ms);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  function formatTokens(tokens) {
+    const value = Number.isFinite(tokens) ? Math.max(0, Math.trunc(tokens)) : 0;
+    if (value < 1000) return String(value);
+    const scaled = value / 1000;
+    const oneDecimal = Math.round(scaled * 10) / 10;
+    return (Number.isInteger(oneDecimal) ? oneDecimal.toFixed(0) : oneDecimal.toFixed(1)) + 'k';
+  }
+
+  function formatPercent(percent) {
+    if (!Number.isFinite(percent)) return '0';
+    const rounded = Math.round(percent * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  }
+
+  function ringData(percent, usedTokens) {
+    return {
+      usedTokens: usedTokens ?? Math.round(128000 * percent / 100),
+      limitTokens: 128000,
+      percent,
+      level: 'none',
+      est: false,
+      circuit: 'closed'
+    };
+  }
+
+  function ringTier(percent) {
+    if (percent === null || percent === undefined || !Number.isFinite(percent)) return 'none';
+    if (percent >= 95) return 'danger';
+    if (percent >= 85) return 'high';
+    if (percent >= 70) return 'warn';
+    return 'safe';
+  }
+
+  function ringLabel(usage) {
+    if (!usage || (usage.percent === null && usage.usedTokens === 0)) return '暂无上下文占用';
+    if (usage.percent === null || usage.percent === undefined || !Number.isFinite(usage.percent)) {
+      return '上下文已用 ' + formatTokens(usage.usedTokens) + ' tokens';
+    }
+    const percent = formatPercent(usage.percent);
+    if (usage.est) return '上下文占用 约' + percent + '%';
+    return '上下文占用 ' + percent + '%';
+  }
+
+  function clearTimers() {
+    for (const id of timers) {
+      clearTimeout(id);
+      clearInterval(id);
+    }
+    timers = [];
+  }
+
+  function later(fn, ms) {
+    const id = setTimeout(fn, ms);
+    timers.push(id);
+    return id;
+  }
+
+  function addMessage(message) {
+    const m = Object.assign({
+      id: ++uid,
+      role: 'assistant',
+      text: '',
+      ts: '',
+      streaming: false,
+      fading: false,
+      done: false
+    }, message);
+    state.messages.push(m);
+    return m;
+  }
+
+  function userMessage(text, minutesAgo = 2) {
+    return addMessage({
+      role: 'user',
+      text,
+      ts: fmtTs(Date.now() - minutesAgo * 60000)
+    });
+  }
+
+  function assistantMessage(options = {}) {
+    return addMessage(Object.assign({ role: 'assistant' }, options));
+  }
+
+  function textHtml(text) {
+    if (!text) return '';
+    return esc(text).split(/\n{2,}/).map((part) => (
+      '<p>' + part.replace(/\n/g, '<br>') + '</p>'
+    )).join('');
+  }
+
+  const SVG_THUMB_UP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"></path><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>';
+  const SVG_THUMB_DOWN = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"></path><path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"></path></svg>';
+  const SVG_EDIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>';
+  const SVG_COPY = '<svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+  function iconButton(m, action, label, svg, extraClass = '', pressed = undefined, testid = '') {
+    const pressedAttr = pressed === undefined ? '' : ' aria-pressed="' + (pressed ? 'true' : 'false') + '"';
+    const testidAttr = testid ? ' data-testid="' + esc(testid) + '"' : '';
+    return '<button type="button" class="icon-btn tip-host ' + extraClass + '" data-action="' + action + '" data-id="' + m.id + '" aria-label="' + esc(label) + '"' + pressedAttr + testidAttr + '>'
+      + svg
+      + '<span class="tip" aria-hidden="true">' + esc(label) + '<span class="tip-arrow" aria-hidden="true"></span></span>'
+      + '</button>';
+  }
+
+  function statusHtml(m) {
+    if (m.streaming || m.fading) {
+      return '<span class="breathing' + (m.fading ? ' fade-out' : '') + '" data-testid="loading-breath"><span class="breathing-dot" aria-hidden="true"></span><span class="breathing-text">工作中…</span></span>';
+    }
+    if (m.ts) {
+      return '<span class="timestamp" data-testid="msg-timestamp">' + esc(m.ts) + '</span>';
+    }
+    return '';
+  }
+
+  function actionsHtml(m) {
+    let html = '';
+    if (m.role === 'assistant') {
+      const up = state.feedback[m.id] === 1;
+      const down = state.feedback[m.id] === -1;
+      html += iconButton(m, 'feedback-up', up ? '取消赞' : '赞', SVG_THUMB_UP, up ? 'is-on-blue' : '', up, 'feedback-up-' + m.id);
+      html += iconButton(m, 'feedback-down', down ? '取消踩' : '踩', SVG_THUMB_DOWN, down ? 'is-on-red' : '', down, 'feedback-down-' + m.id);
+    } else {
+      html += iconButton(m, 'edit', '编辑该条消息（回填到输入框）', SVG_EDIT, '', undefined, 'edit-msg-' + m.id);
+    }
+    const copied = state.copiedId === m.id;
+    html += iconButton(m, 'copy', '复制该条消息正文', SVG_COPY, copied ? 'is-copied' : '', undefined, 'copy-msg-' + m.id);
+    return html;
+  }
+
+  function metaRowHtml(m) {
+    const hidden = m.role === 'assistant' && m.streaming ? ' is-hidden' : '';
+    return '<div class="meta-row ' + m.role + '" aria-live="off" data-testid="msg-ops-' + m.id + '">'
+      + '<span class="meta-status">' + statusHtml(m) + '</span>'
+      + '<div class="meta-actions' + hidden + '">' + actionsHtml(m) + '</div>'
+      + '</div>';
+  }
+
+  function showMeta(m) {
+    if (m.role === 'user') return !!m.text;
+    return !!m.text || m.streaming || m.fading || m.done;
+  }
+
+  function messageHtml(m) {
+    if (m.role === 'user') {
+      return '<div class="msg-row user">'
+        + '<div class="msg-col user">'
+        + '<div class="user-bubble">' + textHtml(m.text) + '</div>'
+        + (showMeta(m) ? metaRowHtml(m) : '')
+        + '</div></div>';
+    }
+    let inner = '';
+    if (m.text) inner += '<div class="assistant-body">' + textHtml(m.text) + '</div>';
+    if (showMeta(m)) inner += metaRowHtml(m);
+    return '<div class="msg-row assistant"><div class="msg-col assistant">' + inner + '</div></div>';
+  }
+
+  function scrollMessages() {
+    if (!pinBottom) return;
+    requestAnimationFrame(() => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
+
+  function syncBusy() {
+    const busy = state.loading || state.messages.some((m) => m.streaming);
+    messagesEl.setAttribute('aria-busy', busy ? 'true' : 'false');
+  }
+
+  function renderMessages() {
+    messagesEl.innerHTML = state.messages.map(messageHtml).join('');
+    syncBusy();
+    scrollMessages();
+  }
+
+  function renderTop() {
+    if (state.top.unavailable) {
+      topHost.innerHTML = '<div class="top-notice" data-testid="top-notice" data-kind="unavailable" role="region" aria-label="顶部提示">'
+        + '<span class="top-notice-icon" aria-hidden="true">!</span>'
+        + '<div class="top-notice-text" role="status" aria-live="polite" aria-atomic="true">AI 暂时不可用，请稍后重试。</div>'
+        + '<button type="button" class="top-action" data-action="top-retry">重试</button>'
+        + '</div>';
+      return;
+    }
+    if (state.top.recovery) {
+      topHost.innerHTML = '<div class="top-notice is-recovery" data-testid="top-notice" data-kind="recovery" role="region" aria-label="顶部提示">'
+        + '<span class="top-notice-icon" aria-hidden="true">i</span>'
+        + '<div class="top-notice-text" role="status" aria-live="polite" aria-atomic="true">连接中断，已显示的内容可能不完整。</div>'
+        + '<button type="button" class="top-action" data-action="top-reload">重新载入</button>'
+        + '</div>';
+      return;
+    }
+    topHost.innerHTML = '';
+  }
+
+  function updateRing() {
+    const usage = state.ring;
+    const label = ringLabel(usage);
+    const value = usage && usage.percent !== null ? Math.min(100, Math.max(0, usage.percent)) : null;
+    const tier = ringTier(usage ? usage.percent : null);
+    ring.className = 'context-ring tier-' + tier;
+    ring.setAttribute('aria-label', label);
+    ringWrap.setAttribute('aria-label', label);
+    if (value === null) {
+      ring.removeAttribute('value');
+      ring.style.setProperty('--ring-v', '0');
+    } else {
+      ring.value = value;
+      ring.setAttribute('value', String(value));
+      ring.style.setProperty('--ring-v', String(value));
+    }
+    ringTip.innerHTML = esc(label) + '<span class="tip-arrow" aria-hidden="true"></span>';
+  }
+
+  function composerTier() {
+    const remaining = MESSAGE_MAX - composer.value.length;
+    if (remaining < 0) return 'over';
+    if (remaining === 0) return 'limit';
+    if (remaining <= 500) return 'near';
+    return 'none';
+  }
+
+  function updateComposerCounter() {
+    const remaining = MESSAGE_MAX - composer.value.length;
+    if (remaining <= 500) {
+      composerCount.hidden = false;
+      composerCount.classList.toggle('is-over', remaining < 0);
+      if (remaining < 0) composerCount.textContent = '已超 ' + (-remaining) + ' 字上限';
+      else if (remaining === 0) composerCount.textContent = '已达 ' + MESSAGE_MAX + ' 字上限';
+      else composerCount.textContent = '剩余 ' + remaining + ' 字';
+    } else {
+      composerCount.hidden = true;
+    }
+    const tier = composerTier();
+    if (tier !== lastComposerTier) {
+      lastComposerTier = tier;
+      if (tier === 'near') composerLive.textContent = '剩余字数不足 500 字';
+      else if (tier === 'limit') composerLive.textContent = '已达 ' + MESSAGE_MAX + ' 字上限';
+      else if (tier === 'over') composerLive.textContent = '已超出上限，无法发送';
+      else composerLive.textContent = '';
+    }
+  }
+
+  function sendHtml() {
+    const disabled = !composer.value.trim() || composer.value.length > MESSAGE_MAX || state.top.unavailable;
+    return '<button type="button" class="send-btn tip-host" data-action="send" data-testid="send-btn" aria-label="发送"' + (disabled ? ' disabled' : '') + '>↑'
+      + '<span class="tip" aria-hidden="true">发送<span class="tip-arrow" aria-hidden="true"></span></span></button>';
+  }
+
+  function stopHtml() {
+    const label = state.stopping ? '停止中…' : '停止';
+    return '<button type="button" class="stop-btn tip-host" data-action="stop" data-testid="stop-btn" aria-label="' + label + '"' + (state.stopping ? ' disabled' : '') + '>'
+      + '<span class="stop-square" aria-hidden="true"></span>'
+      + '<span class="tip" aria-hidden="true">' + label + '<span class="tip-arrow" aria-hidden="true"></span></span></button>';
+  }
+
+  function resizeComposer() {
+    if (supportsFieldSizing) return;
+    composer.style.height = 'auto';
+    composer.style.height = Math.min(101, Math.max(40, composer.scrollHeight)) + 'px';
+  }
+
+  function updateComposerState() {
+    composer.placeholder = COMPOSER_PLACEHOLDER;
+    sendSlot.innerHTML = state.loading ? stopHtml() : sendHtml();
+    updateComposerCounter();
+    syncBusy();
+  }
+
+  function renderAll() {
+    renderTop();
+    renderMessages();
+    updateComposerState();
+    updateRing();
+    updateReadout();
+    resizeComposer();
+  }
+
+  function renderSceneExtra() {
+    if (state.scenario === 3) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">自动恢复观察（Demo 外壳）</span>'
+        + '<div class="seg-row"><button type="button" class="seg-btn" data-complete-recovery>立即完成自动恢复</button></div>'
+        + '<p class="control-hint">自动恢复在后台进行，顶部始终为空；数秒后消息自动接上，或点击按钮立即完成。</p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 5) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">优先级观察（Demo 外壳）</span>'
+        + '<div class="seg-row"><button type="button" class="seg-btn" data-resolve-unavailable>解决 AI 不可用</button></div>'
+        + '<p class="control-hint">默认同时存在 AI 整体不可用 + 自动恢复失败；顶部只显示不可用。解决后同一槽位才显示恢复提示，不并列。</p>'
+        + '<p class="control-status" id="priority-readout"></p>'
+        + '</div>';
+      return;
+    }
+    if (state.scenario === 6) {
+      sceneExtra.innerHTML = '<div class="shell-control">'
+        + '<span class="control-label">清理路径（Demo 外壳）</span>'
+        + '<div class="seg-row">'
+        + '<button type="button" class="seg-btn" data-restore>模拟恢复正常</button>'
+        + '<button type="button" class="seg-btn" data-switch-session>模拟换会话</button>'
+        + '<button type="button" class="seg-btn" data-new-round>模拟新轮</button>'
+        + '</div>'
+        + '<p class="control-hint">恢复成功、换会话、新轮都会让顶部提示消失；旧提示不排队到下一轮。</p>'
+        + '<p class="control-status" id="priority-readout"></p>'
+        + '</div>';
+      return;
+    }
+    sceneExtra.innerHTML = '';
+  }
+
+  function updateReadout() {
+    const readout = document.getElementById('priority-readout');
+    if (!readout) return;
+    if (state.scenario === 5) {
+      if (state.top.unavailable) {
+        readout.textContent = '当前顶部：AI 整体不可用（1 条）。自动恢复失败被压制，不并列。';
+      } else if (state.top.recovery) {
+        readout.textContent = '当前顶部：自动恢复失败（1 条）。整体不可用已解除，槽位交给恢复提示。';
+      } else {
+        readout.textContent = '当前顶部：空。两类故障都已解除。';
+      }
+      return;
+    }
+    if (state.scenario === 6) {
+      readout.textContent = state.top.recovery
+        ? '当前顶部：1 条恢复提示。点上面任一动作观察清理。'
+        : '当前顶部：空。旧提示没有被排队到下一轮。';
+    }
+  }
+
+  function updateSceneCard() {
+    const scene = SCENES[state.scenario];
+    sceneNum.textContent = String(state.scenario).padStart(2, '0');
+    sceneKicker.textContent = '场景 ' + String(state.scenario).padStart(2, '0') + ' / 6';
+    sceneTitle.textContent = scene.title;
+    sceneTag.textContent = scene.tag;
+    sceneTag.className = 'scene-tag tag-' + scene.tone;
+    sceneDesc.innerHTML = scene.brief.map((item) => '<p>' + esc(item) + '</p>').join('');
+    sceneEvidence.innerHTML = scene.evidence.map((item) => '<li>' + esc(item) + '</li>').join('');
+    renderSceneExtra();
+  }
+
+  function updateNav() {
+    navEl.querySelectorAll('[data-scene]').forEach((button) => {
+      if (Number(button.dataset.scene) === state.scenario) button.setAttribute('aria-current', 'true');
+      else button.removeAttribute('aria-current');
+    });
+  }
+
+  function updateMapping() {
+    document.querySelectorAll('[data-map-scene]').forEach((row) => {
+      row.classList.toggle('is-active', Number(row.dataset.mapScene) === state.scenario);
+    });
+  }
+
+  function showDemoFeedback(text) {
+    if (feedbackTimer !== null) {
+      clearTimeout(feedbackTimer);
+      feedbackTimer = null;
+    }
+    demoFeedback.textContent = text || '';
+    if (text) {
+      feedbackTimer = setTimeout(() => {
+        demoFeedback.textContent = '';
+        feedbackTimer = null;
+      }, 3800);
+    }
+  }
+
+  function startStream(text, finalRing) {
+    state.loading = true;
+    const message = assistantMessage({ streaming: true });
+    streamTextInto(message, text, finalRing);
+    return message;
+  }
+
+  function streamTextInto(message, text, finalRing) {
+    if (state.messages.indexOf(message) === -1) return;
+    state.loading = true;
+    message.streaming = true;
+    renderMessages();
+    updateComposerState();
+    if (!text) {
+      later(() => finishMessage(message, finalRing), 500);
+      return;
+    }
+    let index = 0;
+    const step = text.length > 80 ? 3 : 2;
+    const id = setInterval(() => {
+      if (state.messages.indexOf(message) === -1) {
+        clearInterval(id);
+        return;
+      }
+      index = Math.min(text.length, index + step);
+      message.text = text.slice(0, index);
+      renderMessages();
+      if (index >= text.length) {
+        clearInterval(id);
+        later(() => finishMessage(message, finalRing), 450);
+      }
+    }, 45);
+    timers.push(id);
+  }
+
+  function finishMessage(message, finalRing) {
+    if (state.messages.indexOf(message) === -1) return;
+    message.streaming = false;
+    message.fading = true;
+    state.loading = false;
+    updateComposerState();
+    renderMessages();
+    later(() => {
+      if (state.messages.indexOf(message) === -1) return;
+      message.fading = false;
+      message.done = true;
+      message.ts = fmtTs();
+      if (finalRing) state.ring = finalRing;
+      renderAll();
+    }, 300);
+  }
+
+  function stopNow() {
+    clearTimers();
+    state.loading = false;
+    state.stopping = false;
+    const last = [...state.messages].reverse().find((m) => m.role === 'assistant' && m.streaming);
+    if (last) {
+      last.streaming = false;
+      last.fading = false;
+      last.done = true;
+      last.ts = fmtTs();
+    }
+    renderAll();
+  }
+
+  function beginStop() {
+    if (!state.loading || state.stopping) return;
+    state.stopping = true;
+    updateComposerState();
+    later(() => {
+      stopNow();
+    }, 350);
+  }
+
+  function completeRecovery() {
+    const message = state.messages.find((m) => m.role === 'assistant' && m.streaming);
+    if (!message) return;
+    message.streaming = false;
+    message.text = RECOVERY_DONE_TEXT;
+    message.done = true;
+    message.ts = fmtTs();
+    state.loading = false;
+    renderAll();
+  }
+
+  function sendDemo() {
+    const text = composer.value.trim();
+    if (!text || state.loading || state.stopping || state.top.unavailable) return;
+    userMessage(text, 0);
+    composer.value = '';
+    state.top.recovery = false;
+    state.loading = true;
+    resizeComposer();
+    renderAll();
+    startStream('已收到。当前工作区状态：导出任务 #12 已完成，导入任务 #7 正在运行，暂无失败记录。', ringData(46, 58880));
+  }
+
+  const SCENE_SETUP = {
+    1() {
+      userMessage('帮我核对一下今天导出任务的执行情况。', 2);
+      state.ring = ringData(42, 53760);
+      startStream('今天共有 3 个导出任务：2 个已完成，1 个运行中；没有失败记录。', ringData(47, 60160));
+    },
+    2() {
+      userMessage('帮我继续核对导出任务。', 2);
+      assistantMessage({
+        text: '上一轮已经完成。',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000)
+      });
+      state.top.unavailable = true;
+      state.ring = ringData(42, 53760);
+    },
+    3() {
+      userMessage('继续刚才的核对。', 2);
+      assistantMessage({ text: '我刚核对到一半，', streaming: true });
+      state.loading = true;
+      state.ring = ringData(44, 56320);
+      later(completeRecovery, 4200);
+    },
+    4() {
+      userMessage('继续刚才的核对。', 2);
+      assistantMessage({
+        text: '我刚核对到一半，',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000)
+      });
+      state.top.recovery = true;
+      state.ring = ringData(44, 56320);
+    },
+    5() {
+      userMessage('继续刚才的核对。', 2);
+      assistantMessage({
+        text: '我刚核对到一半，',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000)
+      });
+      state.top.unavailable = true;
+      state.top.recovery = true;
+      state.ring = ringData(44, 56320);
+    },
+    6() {
+      userMessage('继续刚才的核对。', 2);
+      assistantMessage({
+        text: '任务 #12 已完成，失败原因列表为空。',
+        done: true,
+        ts: fmtTs(Date.now() - 1 * 60000)
+      });
+      state.top.recovery = true;
+      state.ring = ringData(47, 60160);
+    }
+  };
+
+  function resetDemoState() {
+    clearTimers();
+    if (feedbackTimer !== null) {
+      clearTimeout(feedbackTimer);
+      feedbackTimer = null;
+    }
+    state.messages = [];
+    state.top = { unavailable: false, recovery: false };
+    state.loading = false;
+    state.ring = null;
+    state.copiedId = null;
+    state.feedback = {};
+    state.stopping = false;
+    pinBottom = true;
+    composer.value = '';
+    resizeComposer();
+  }
+
+  function startScenario(id) {
+    resetDemoState();
+    state.scenario = id;
+    const setup = SCENE_SETUP[id];
+    if (setup) setup();
+    updateSceneCard();
+    updateNav();
+    updateMapping();
+    renderAll();
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (error) {
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        document.body.removeChild(area);
+        return true;
+      } catch (fallbackError) {
+        return false;
+      }
+    }
+  }
+
+  function copyMessage(id) {
+    const message = state.messages.find((m) => m.id === id);
+    if (!message) return;
+    copyText(message.text || '').then(() => {
+      state.copiedId = id;
+      renderMessages();
+      later(() => {
+        if (state.copiedId !== id) return;
+        state.copiedId = null;
+        renderMessages();
+      }, 1200);
+    });
+  }
+
+  function editMessage(id) {
+    const message = state.messages.find((m) => m.id === id);
+    if (!message) return;
+    composer.value = message.text || '';
+    composer.focus();
+    resizeComposer();
+    updateComposerState();
+  }
+
+  function toggleFeedback(id, value) {
+    state.feedback[id] = state.feedback[id] === value ? 0 : value;
+    renderMessages();
+  }
+
+  function newChat() {
+    startScenario(1);
+    showDemoFeedback('Demo：已新建对话，旧顶部提示清理。');
+  }
+
+  function simulateSessionSwitch() {
+    resetDemoState();
+    state.ring = ringData(18, 23040);
+    userMessage('帮我看看导入任务的进度。', 0);
+    assistantMessage({
+      text: '导入任务 #7 正在运行，暂无失败记录。',
+      done: true,
+      ts: fmtTs()
+    });
+    updateSceneCard();
+    updateMapping();
+    renderAll();
+    showDemoFeedback('Demo：已换会话，旧提示清理，新会话不再出现。');
+  }
+
+  function simulateNewRound() {
+    clearTimers();
+    state.top = { unavailable: false, recovery: false };
+    state.stopping = false;
+    userMessage('换个话题：帮我看下导入任务的进度。', 0);
+    state.loading = true;
+    resizeComposer();
+    renderAll();
+    startStream('导入任务 #7 正在运行，暂无失败记录。', ringData(49, 62720));
+    showDemoFeedback('Demo：新轮开始，旧顶部提示已清理。');
+  }
+
+  panel.addEventListener('click', (event) => {
+    const actionEl = event.target.closest('[data-action]');
+    if (!actionEl || !panel.contains(actionEl)) return;
+    const action = actionEl.dataset.action;
+    const id = Number(actionEl.dataset.id);
+
+    if (action === 'send') { sendDemo(); return; }
+    if (action === 'stop') { beginStop(); return; }
+    if (action === 'copy') { copyMessage(id); return; }
+    if (action === 'edit') { editMessage(id); return; }
+    if (action === 'feedback-up') { toggleFeedback(id, 1); return; }
+    if (action === 'feedback-down') { toggleFeedback(id, -1); return; }
+    if (action === 'top-retry') {
+      state.top.unavailable = false;
+      renderAll();
+      showDemoFeedback('Demo：已重试，AI 恢复可用，顶部提示消失。');
+      return;
+    }
+    if (action === 'top-reload') {
+      state.top.recovery = false;
+      renderAll();
+      showDemoFeedback('Demo：已重新载入，恢复成功，顶部提示消失。');
+      return;
+    }
+    if (action === 'new-chat') { newChat(); return; }
+    if (action === 'collapse') { panel.classList.add('is-collapsed'); return; }
+    if (action === 'expand') { panel.classList.remove('is-collapsed'); }
+  });
+
+  composer.addEventListener('input', () => {
+    resizeComposer();
+    updateComposerState();
+  });
+
+  composer.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    if (event.isComposing || event.keyCode === 229 || composerComposing) return;
+    if (composerEndedAt !== null && Date.now() - composerEndedAt < 30) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    if (event.repeat || state.loading || state.stopping) return;
+    if (!composer.value.trim()) return;
+    sendDemo();
+  });
+
+  composer.addEventListener('compositionstart', () => { composerComposing = true; });
+  composer.addEventListener('compositionend', () => {
+    composerComposing = false;
+    composerEndedAt = Date.now();
+  });
+  composer.addEventListener('blur', () => {
+    composerComposing = false;
+    composerEndedAt = null;
+  });
+
+  messagesEl.addEventListener('scroll', () => {
+    pinBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 24;
+  }, { passive: true });
+
+  navEl.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-scene]');
+    if (!button) return;
+    startScenario(Number(button.dataset.scene));
+  });
+
+  sceneExtra.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.hasAttribute('data-complete-recovery')) {
+      completeRecovery();
+      showDemoFeedback('Demo：自动恢复在后台完成，全程没有顶部提示。');
+      return;
+    }
+    if (button.hasAttribute('data-resolve-unavailable')) {
+      state.top.unavailable = false;
+      renderAll();
+      showDemoFeedback('Demo：AI 已恢复；同一槽位改为显示自动恢复失败。');
+      return;
+    }
+    if (button.hasAttribute('data-restore')) {
+      state.top = { unavailable: false, recovery: false };
+      renderAll();
+      showDemoFeedback('Demo：恢复正常，顶部提示立即消失。');
+      return;
+    }
+    if (button.hasAttribute('data-switch-session')) {
+      simulateSessionSwitch();
+      return;
+    }
+    if (button.hasAttribute('data-new-round')) {
+      simulateNewRound();
+    }
+  });
+
+  replayBtn.addEventListener('click', () => {
+    startScenario(state.scenario);
+    showDemoFeedback('已重播当前场景。');
+  });
+
+  startScenario(1);
+})();
+</script>
+</body>
+</html>

@@ -73,6 +73,14 @@ public class RunSnapshot {
 	private String sessionId;
 
 	/**
+	 * 客户端请求 id（additive，停止闭环）：前端在 {@code /chat} 发送前生成并由镜像持久化，
+	 * 后端用它把 {@code clientRequestId} 与本轮绑定（见 {@link ClientRequestRegistry}）。
+	 *
+	 * <p>{@code null} = 旧客户端 / 旧快照。它只是关联键，<b>不是 runId</b>，也不能用来指定 run。
+	 */
+	private String clientRequestId;
+
+	/**
 	 * 本轮归属的租户（首轮创建时从 {@code RequestContextUtils} 固定；{@code 0} = 本字段引入前的旧快照）。
 	 *
 	 * <p><b>只读不重算</b>：续跑/恢复/跨实例接管都发生在原请求结束之后，身份只能从这条记录读回，

@@ -1076,6 +1076,20 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
+		return create(runId, sessionId, context, history, codec, providerId, modelId, frozen, null);
+	}
+
+	/**
+	 * 同上，并把**客户端请求 id** 一并写进首笔快照（停止闭环，additive）。
+	 *
+	 * <p>旧签名委托到本方法（{@code clientRequestId=null}），既有调用点与测试零改动；
+	 * 旧快照反序列化为 {@code null}，与"旧客户端没带"同义。
+	 *
+	 * @param clientRequestId 前端在 /chat 发送前生成、并存于本页签镜像的请求 id（可空）
+	 */
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+			String clientRequestId) {
 		// 身份：首轮创建时<b>必须</b>有上下文。缺身份不落库、不登记索引 ——
 		// 没有默认租户，也没有默认用户：轮级键的 hash tag 由身份组成，凭空补一个身份
 		// 就是"把这一轮写进别人的命名空间"或"写进谁都读不到的 legacy 命名空间"。
@@ -1083,6 +1097,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
+		snapshot.setClientRequestId(clientRequestId);
 		snapshot.setTenantId(identity.tenantId());
 		snapshot.setUserId(identity.userId());
 		snapshot.setStatus(RunSnapshot.RUNNING);
@@ -4465,6 +4480,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 无请求身份的恢复/续租线程上被调用）。
 		renewSessionRunsIndex(snapshot.getSessionId(), runId, snapshot.getTenantId(), snapshot.getUserId());
 		Duration ttl = ttlFor(runId);
+		// 停止闭环：clientRequestId 映射与取消墓碑与会话同寿（单键 EXPIRE；身份取记录身份，
+		// 本方法也会在无请求身份的恢复/续租线程上被调用）。
+		if (snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
+			try {
+				this.redis.expire(TenantKeyScope.scoped(ClientRequestRegistry.KEY_PREFIX, snapshot.getTenantId(),
+						snapshot.getUserId(), snapshot.getSessionId()), ttl);
+			}
+			catch (RuntimeException ex) {
+				log.debug("停止闭环映射续期失败 runId={}（不影响读侧续期）：{}", runId, ex.getMessage());
+			}
+		}
 		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
 		// I-3 起单键失败已在 renew 内隔离，这里不再需要整面 try/catch。
 		renew(runId, ttl, SessionKeyRegistry.Renewal.READ);

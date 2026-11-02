@@ -77,6 +77,11 @@ export interface AiChatRequest {
   sessionId: string
   message: string
   context?: AiChatContext
+  /**
+   * 客户端请求 id（additive，停止闭环）：发送前生成并写入本页签镜像，后端用它把本轮与
+   * "未拿到 runId 的停止"精确关联（取消/取消墓碑）。**不是 runId**，不能用来指定别人的轮。
+   */
+  clientRequestId?: string
 }
 
 /** HITL 确认/拒绝请求体（POST /api/ai/confirm）。 */
@@ -482,6 +487,9 @@ export interface ChatMessage {
    * 与 {@link errorCard} / 断流提示互斥：一条被停的回答不是"出错"，也不是"完整答案"。
    * 实时路（`done{cancelled}` 帧 / `stop()` 本地收口）与刷新路（后端 history 的 `stopped`）
    * 都写这个字段；**入镜像**（刷新后标记仍在），不入历史载荷之外的任何持久化。
+   *
+   * <p>停止是**消息级事实**：即使本轮零产出（无正文、无工具段），主动停止也必须写它 ——
+   * 恢复入口（继续 / 重试本轮）一律据此排除，不能因为"没内容可续"退回成可重试的失败轮。
    */
   stopped?: boolean
   /**
@@ -916,6 +924,25 @@ export interface AiSessionMirror {
    * 缺省 = 序号未知（走全量重放）。
    */
   runSeq?: Record<string, number>
+  /**
+   * 本端已发出停止的那一轮（run 级停止墓碑）。取消请求可能因后端不可达而失败；
+   * 刷新后靠它识别"这条 run 是本端停掉的"：权威状态已取消 ⇒ 正常收口；仍在运行 ⇒
+   * **不自动接回**，只在既有取消通道上有界静默补一次取消。
+   *
+   * <p>additive 可选键（缺省 = 没有墓碑），不升镜像版本。
+   */
+  stoppedRunId?: string | null
+  /**
+   * 当前在途/刚停止轮次的客户端请求 id（停止闭环 additive）。与 {@link stoppedRunId} 互补：
+   * runId 尚未取得（start 之前）或 start 帧丢失时，刷新后仍可用它精确取消后端这一轮。
+   * 终态/换轮/换会话后由 store 清理；缺省 = 旧镜像/旧客户端。
+   */
+  clientRequestId?: string | null
+  /**
+   * 该 {@link clientRequestId} 是否已被本端停止。刷新恢复只在它为真时补取消并拒绝自动重挂；
+   * 正常运行的轮次为缺省（false），行为与改造前一致。
+   */
+  clientRequestStopped?: boolean
 }
 
 /**
@@ -1035,6 +1062,11 @@ export interface StreamCloseInfo {
    * 建连超时走 `ApiError.code`（`CHAT_CONNECT_TIMEOUT`），不落本字段。
    */
   timeoutStage?: SseTimeoutStage
+  /**
+   * 调用方主动中止（`SseStreamOptions.signal` 被 abort）：这是**停止**的正常收尾，
+   * 不是网络/传输失败。调用方据此不写 NETWORK_ERROR、不出错误卡、不改轮次结局。
+   */
+  cancelled?: boolean
 }
 
 /** 前端开发期读取 Spring AI 历史时使用的宽松消息快照（供对账比较）。 */

@@ -104,15 +104,23 @@ import {
   writeSubmittedValuesToMessage
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
-import { frameSeq, isTerminalFrame, type ToolOutcome, type TruncationNoticeCode } from '@/types/sse'
+import {
+  frameSeq,
+  isTerminalFrame,
+  type SseConfirmDecisionFrame,
+  type SseFrame,
+  type SseFrontendToolResultFrame,
+  type SseToolResultFrame,
+  type ToolOutcome,
+  type TruncationNoticeCode
+} from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRetryModelStepOutcome, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type CompactionPhase, type ContextCompaction, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, loadFormDraft, pruneFormDrafts, saveFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
-import type { SseFrame } from '@/types/sse'
 import type { ValidationIssue } from '@/types/job'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
-import { buildErrorCard } from '@/utils/error-card'
+import { baseErrorCode, buildErrorCard } from '@/utils/error-card'
 import { buildPublishConflictView } from '@/utils/resultview'
 import {
   runExpiryAnchorOf,
@@ -155,6 +163,15 @@ export type NoticeSeverity = 'info' | 'success' | 'warning' | 'error'
 
 /** 当前轮的 AbortController（模块级：不进响应式状态）。 */
 let currentAbort: AbortController | null = null
+/**
+ * 已在**同步入口**发起、但尚未完成建连登记的接管 runId（模块级，问题2）。
+ *
+ * <p>`reattachActive` / `resumeSnapshotStream` 的首个 await（`ensureSession`）之前，
+ * `activeStreamRunId` 还没登记。若用户在这一刻点停止，旧判据看不到"正在接管的这一轮"，
+ * 会误判为"没有可停的轮"。本值只在两个入口的最前面同步置位，建连/早退/停止/新轮/换会话时清除
+ * —— 它不参与连接判活（那仍由 `activeStreamRunId` + `currentAbort` 决定）。
+ */
+let pendingAttachRunId: string | null = null
 /**
  * Task 4：会话发号引导门（模块级）。
  *
@@ -381,6 +398,11 @@ function writeMirrorWhenIdle(run: () => void): void {
  * 瞬时类型（网络不可达 / 502/503/504 的传输层失败）时才重试；`SESSION_BUSY` / `SESSION_PURGED`
  * 与配置类 503（无 key / 无模型 / Redis 不可用）都**不**重试。重试复用同一条用户气泡与同一条
  * 助手消息（零副作用：不追加消息、不重跑工具、不换会话），次数 = 1（共 2 次尝试）。
+ *
+ * <p>重试复用**同一个 clientRequestId**：若第一次请求其实已到达后端（映射已绑定既有 run），
+ * 后端回 409 SESSION_BUSY + `duplicateRequest=true`；这里识别为本条请求的重复到达，同步接管本轮
+ * 现场后由后台 probe 走既有 events/reattach（或 preparing 有界恢复）自动收帧 —— 既不新建第二条
+ * 驱动，也不显示"消息没发出"，且不 await 整条 SSE 才返回。
  */
 export const PRE_STREAM_RETRY_MAX = 1
 /** 重试前等待（毫秒）：给瞬时抖动一个恢复窗口，但不让用户感知为"卡住"。 */
@@ -457,6 +479,189 @@ export const STOP_SETTLE_MAX_WAIT_MS = 2_000
  * 超时即作废 —— 绝不拿一个很久以前的停止意向去取消后来的新轮。
  */
 export const STOP_INTENT_TTL_MS = 60_000
+
+/**
+ * run 级停止墓碑**补取消**的去重集合（模块级，有界）。
+ *
+ * <p>刷新后墓碑仍指向一条在服务端还在跑的 run（cancel 当时没送达）：允许在既有取消通道上
+ * **静默补一次**。同一 runId 只补一次、集合只留最近若干个 —— 不轮询、不无限重试，也绝不对
+ * 别的 runId 发取消（旧 run 的墓碑不得误杀新轮）。
+ */
+const STOP_TOMBSTONE_RECANCEL_MAX = 16
+const stopTombstoneRecancelled = new Set<string>()
+
+/**
+ * start 帧之前停止的**意向登记**（按 /chat 传输句柄记账，模块级）。
+ *
+ * <p>为什么不能只放 store 的一个槽：停止后可能马上切身份 / 新建对话（`adoptFreshSession`
+ * 清空 store 现场），而被停的那一轮的 start 仍会从**旧传输**回来。意向必须跟着传输走，
+ * 才能在被停轮自己的 start 到达时按**旧身份**精确补 cancel，且不把旧 run 的任何状态写进
+ * 新身份会话。不同宿主的 start（新轮）只会让"这条传输"的意向继续等待，绝不误取消新轮。
+ *
+ * <p>生命周期：自身 start 命中 ⇒ 消耗；自身传输收尾仍无 start ⇒ 删除；超过
+ * {@link STOP_INTENT_TTL_MS} ⇒ 删除；条数有界（最旧的先丢，不重试、不轮询）。
+ */
+interface PendingStopIntentEntry {
+  hostMessageId: string | null
+  at: number
+  transport: AbortController
+  /** 发出停止时的会话号（换会话时按它精确判定哪些意向要转成"只取消"）。 */
+  sessionId: string | null
+  /** 发出停止时的会话身份（跨身份切换后仍按旧身份取消）。 */
+  identity: AiIdentity | null
+  /**
+   * true = 会话/身份已切换，只取消、不写当前 store 的 `stoppedRunId` / 镜像 / 忙态。
+   */
+  cancelOnly: boolean
+}
+
+const STOP_INTENT_MAX_ENTRIES = 8
+const pendingStopIntents = new Map<AbortController, PendingStopIntentEntry>()
+/**
+ * 已消费（start 命中并补过 cancel）的停止传输：之后从这条连接再派发的任何帧都不得写进
+ * 当前现场（尤其是切身份后旧会话的帧不得落进新会话）。
+ */
+const consumedStopTransports = new WeakSet<AbortController>()
+
+/**
+ * 换会话时把**该会话**所有待 start 的停止意向转成"只取消"：
+ * 旧会话的 run 仍可能在服务端启动，但它的任何状态都不得写进新会话。
+ */
+function markSessionStopIntentsCancelOnly(
+  sessionId: string | null,
+  identity: AiIdentity | null
+): void {
+  for (const [transport, entry] of pendingStopIntents) {
+    if (entry.sessionId !== sessionId) {
+      continue
+    }
+    pendingStopIntents.set(transport, {
+      ...entry,
+      cancelOnly: true,
+      identity: identity ?? entry.identity
+    })
+  }
+}
+
+function rememberPendingStopIntent(entry: PendingStopIntentEntry): void {
+  pendingStopIntents.set(entry.transport, entry)
+  while (pendingStopIntents.size > STOP_INTENT_MAX_ENTRIES) {
+    const oldest = pendingStopIntents.keys().next().value
+    if (oldest === undefined) {
+      break
+    }
+    pendingStopIntents.delete(oldest)
+  }
+}
+
+function forgetPendingStopIntent(transport: AbortController): void {
+  pendingStopIntents.delete(transport)
+}
+
+function pendingStopIntentOf(transport: AbortController): PendingStopIntentEntry | undefined {
+  return pendingStopIntents.get(transport)
+}
+
+/** 该传输是否已被标记为"只取消、不再写入本地现场"（切身份 / 换会话后的旧传输）。 */
+function isCancelOnlyStopTransport(transport: AbortController): boolean {
+  return pendingStopIntents.get(transport)?.cancelOnly === true
+}
+
+/** 该传输是否已被消费（已补过 cancel）—— 之后任何帧都不得写本地现场。 */
+function isConsumedStopTransport(transport: AbortController): boolean {
+  return consumedStopTransports.has(transport)
+}
+
+/**
+ * 新连接顶替旧连接时的统一释放：旧连接若挂着**start 之前停止**的意向，不能直接 abort ——
+ * 它是唯一能等到被停轮 runId 的通道；改成"只取消"让它继续等，其余情况照旧中止。
+ */
+function releaseSupersededTransport(transport: AbortController | null): void {
+  if (transport === null) {
+    return
+  }
+  if (markPendingStopIntentCancelOnly(transport, null)) {
+    return
+  }
+  try {
+    transport.abort()
+  } catch {
+    // 忽略：中止失败不影响新连接
+  }
+}
+
+/**
+ * 切身份 / 换会话时把这条**待 start** 的停止意向改成"只取消"：
+ * 保留传输等旧轮 start，命中后按保存的旧身份取消，且不写当前现场。
+ *
+ * @returns 是否确实有可保留的停止意向（false = 普通在途连接，调用方可按既有口径中止）
+ */
+function markPendingStopIntentCancelOnly(
+  transport: AbortController,
+  identity: AiIdentity | null
+): boolean {
+  const entry = pendingStopIntents.get(transport)
+  if (entry === undefined) {
+    return false
+  }
+  pendingStopIntents.set(transport, {
+    ...entry,
+    cancelOnly: true,
+    identity: identity ?? entry.identity
+  })
+  return true
+}
+
+/**
+ * 每轮发送前的客户端请求 id（停止闭环 additive）。
+ *
+ * <p>为什么需要：新一轮 /chat 已发出但 start 未到就停止、随后刷新时，本端从未拿到 runId。
+ * 只有把这个**发送前生成**的 id 写进本页签镜像，刷新后才能让后端精确关联/取消这一轮
+ * （run 尚未创建时后端留墓碑，随后 /chat 在压缩/建快照/模型调用前收敛）。
+ * 它不是 runId，不能指定别人的轮。
+ */
+function newClientRequestId(): string {
+  const cryptoApi = globalThis.crypto as (Crypto & { randomUUID?: () => string }) | undefined
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  return `creq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * 同一 clientRequestId 的"按 id 取消"只发一次（模块级，有界）：重复刷新/重入不重复请求。
+ * 失败也不重试 —— 墓碑/映射本身是幂等的，下一次刷新仍可再试一次。
+ */
+const CLIENT_REQUEST_CANCEL_MAX = 16
+const clientRequestCancelSent = new Set<string>()
+
+function beginClientRequestCancel(clientRequestId: string): boolean {
+  if (clientRequestCancelSent.has(clientRequestId)) {
+    return false
+  }
+  clientRequestCancelSent.add(clientRequestId)
+  if (clientRequestCancelSent.size > CLIENT_REQUEST_CANCEL_MAX) {
+    const oldest = clientRequestCancelSent.values().next().value
+    if (typeof oldest === 'string') {
+      clientRequestCancelSent.delete(oldest)
+    }
+  }
+  return true
+}
+
+function beginTombstoneRecancel(runId: string): boolean {
+  if (stopTombstoneRecancelled.has(runId)) {
+    return false
+  }
+  stopTombstoneRecancelled.add(runId)
+  if (stopTombstoneRecancelled.size > STOP_TOMBSTONE_RECANCEL_MAX) {
+    const oldest = stopTombstoneRecancelled.values().next().value
+    if (typeof oldest === 'string') {
+      stopTombstoneRecancelled.delete(oldest)
+    }
+  }
+  return true
+}
 
 /**
  * O02：`stop()` 的落地闸门（模块级，与 `currentAbort` 同为"这一轮"的句柄）。
@@ -539,6 +744,27 @@ function isTransientPreStreamError(error: unknown): boolean {
   return error.status === 502 || error.status === 503 || error.status === 504
 }
 
+/**
+ * 同一 {@code clientRequestId} 的重复到达识别（停止闭环兼容批）。
+ *
+ * <p>开流前瞬时失败会复用同一个 id 重发 /chat；后端若发现这个 id 已绑定既有 run，会回既有
+ * 409 SESSION_BUSY 形态 + additive 标记 `duplicateRequest=true` 并回显 `clientRequestId`。
+ * 只有**回显与本次 id 完全一致**才算重复（避免普通 409 的猜测）；命中后走既有 events/reattach
+ * 自动收帧，不显示"没发出去"、不回收气泡、不启动第二条驱动。
+ *
+ * @returns 既有 runId；null = 不是本条请求的重复回执
+ */
+function duplicateClientRequestRunId(error: unknown, clientRequestId: string): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) {
+    return null
+  }
+  const body = error.bodyAs<{ duplicateRequest?: unknown; clientRequestId?: unknown; runId?: unknown }>()
+  if (!body || body.duplicateRequest !== true || body.clientRequestId !== clientRequestId) {
+    return null
+  }
+  return typeof body.runId === 'string' && body.runId !== '' ? body.runId : null
+}
+
 /** 任意异常 → 视图错误现场（机器码，不含文案）。 */
 function toLoadErrorView(scope: AiLoadErrorScope, error: unknown): AiLoadErrorView {
   if (error instanceof ApiError) {
@@ -608,6 +834,19 @@ function readBusyRunRef(error: ApiError): AiBusyRunRef | null {
 function isUnconfirmedTerminal(frame: unknown): boolean {
   const raw = frame as { code?: unknown; turnEnd?: unknown; unconfirmed?: unknown }
   return raw.code === 'TURN_UNCONFIRMED' || raw.turnEnd === 'unconfirmed' || raw.unconfirmed === true
+}
+
+/**
+ * `error` 终帧是否是**用户取消**的中性收口（停止闭环）。
+ *
+ * <p>取消有时由后端以 `error` 帧送达（`AI_RUN_CANCELLED`，可能带 `_AFTER_PARTIAL` /
+ * `_AFTER_TOOL_SIDE_EFFECT` 派生后缀）。它和 `done{cancelled:true}` 是同一事实：不是失败、
+ * 不出错误卡/错误通知、`lastRoundOutcome='cancelled'`、消息打 `stopped`，因此也不会出现继续/重试。
+ * 只认基础码为 `AI_RUN_CANCELLED`；其它错误码一律不受影响。
+ */
+function isCancelledTerminalError(frame: unknown): boolean {
+  const code = (frame as { code?: unknown }).code
+  return typeof code === 'string' && code !== '' && baseErrorCode(code) === ErrorCode.AI_RUN_CANCELLED
 }
 
 /**
@@ -1951,6 +2190,9 @@ interface MirrorWriteMemo {
   lastRunId: string | null
   inFlight: boolean
   runSeq: string
+  stoppedRunId: string | null
+  clientRequestId: string | null
+  clientRequestStopped: boolean
 }
 
 /** 每个 store 实例一份"上次落盘现场"（WeakMap：新 store / 换会话自然失效）。 */
@@ -1959,7 +2201,17 @@ const mirrorWriteMemos = new WeakMap<object, MirrorWriteMemo>()
 function mirrorMemoOf(owner: object): MirrorWriteMemo {
   let memo = mirrorWriteMemos.get(owner)
   if (memo === undefined) {
-    memo = { sessionId: null, messageCount: 0, messages: [], lastRunId: null, inFlight: false, runSeq: 'null' }
+    memo = {
+      sessionId: null,
+      messageCount: 0,
+      messages: [],
+      lastRunId: null,
+      inFlight: false,
+      runSeq: 'null',
+      stoppedRunId: null,
+      clientRequestId: null,
+      clientRequestStopped: false
+    }
     mirrorWriteMemos.set(owner, memo)
   }
   return memo
@@ -1986,9 +2238,20 @@ function writeMirror(
   sessionId: string,
   messages: ChatMessage[],
   lastRunId: string | null,
-  extra: { inFlight?: boolean; runSeq?: Record<string, number> } = {}
+  extra: {
+    inFlight?: boolean
+    runSeq?: Record<string, number>
+    /** run 级停止墓碑（刷新后识别"本端停掉的轮"，见 AiSessionMirror.stoppedRunId）。 */
+    stoppedRunId?: string | null
+    /** 当前轮客户端请求 id + 是否已被本端停止（停止闭环，见 AiSessionMirror）。 */
+    clientRequestId?: string | null
+    clientRequestStopped?: boolean
+  } = {}
 ): MirrorWriteOutcome {
   const inFlight = extra.inFlight === true
+  const stoppedRunId = extra.stoppedRunId ?? null
+  const clientRequestId = extra.clientRequestId ?? null
+  const clientRequestStopped = extra.clientRequestStopped === true
   const memo = mirrorMemoOf(sink)
   let messageJsons: string[] = []
   let runSeqJson = 'null'
@@ -2002,20 +2265,26 @@ function writeMirror(
       && memo.lastRunId === lastRunId
       && memo.inFlight === inFlight
       && memo.runSeq === runSeqJson
+      && memo.stoppedRunId === stoppedRunId
+      && memo.clientRequestId === clientRequestId
+      && memo.clientRequestStopped === clientRequestStopped
       && memo.messages.length === messageJsons.length
       && memo.messages.every((json, index) => json === messageJsons[index])
     ) {
       return 'unchanged'
     }
 
-    // 信封照旧（v/savedAt/lastRunId/inFlight/runSeq），messages 直接拼**已序列化**的单条 JSON，
-    // 不再把整棵镜像对象交给一次全量 stringify。
+    // 信封照旧（v/savedAt/lastRunId/inFlight/runSeq + additive 停止闭环键），messages 直接拼
+    // **已序列化**的单条 JSON，不再把整棵镜像对象交给一次全量 stringify。
     const envelope = JSON.stringify({
       v: MIRROR_VERSION,
       savedAt: Date.now(),
       lastRunId,
       inFlight,
-      ...(extra.runSeq ? { runSeq: { ...extra.runSeq } } : {})
+      ...(extra.runSeq ? { runSeq: { ...extra.runSeq } } : {}),
+      ...(stoppedRunId !== null ? { stoppedRunId } : {}),
+      ...(clientRequestId !== null ? { clientRequestId } : {}),
+      ...(clientRequestStopped ? { clientRequestStopped: true } : {})
     })
     payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
   } catch {
@@ -2031,6 +2300,9 @@ function writeMirror(
     memo.lastRunId = lastRunId
     memo.inFlight = inFlight
     memo.runSeq = runSeqJson
+    memo.stoppedRunId = stoppedRunId
+    memo.clientRequestId = clientRequestId
+    memo.clientRequestStopped = clientRequestStopped
     mirrorFailureNotified.delete(sink)
     // 故障恢复后清掉**自己留下的**降级提示（不误清别的通知）。
     if (sink.noticeCode === MIRROR_STORAGE_NOTICE) {
@@ -2576,8 +2848,10 @@ export const useAiStore = defineStore('ai', {
     historyLoaded: false,
     /**
      * 本轮是否已被用户停止。
-     * 只由 `stop()` 置位；复位点在「新连接建立处」—— `send()` / `reattachActive()` /
+     * 只由 `stop()` 置位；复位点仅限「**新连接**建立处」—— `send()` / `reattachActive()` /
      * `resumeSnapshotStream()`（新连接 ≠ 被停止的那条连接，红队 MINOR-1 收口）—— 与 `resetSession()`。
+     * 自动恢复出口（`restoreInFlightRound` / `notePreparingState` / 两个接管入口的入口守卫）
+     * **不得**对被停止的轮复位它（问题3）：那是"把已停的轮接回来"，不是新连接。
      * 用途**仅限**抑制"主动停止轮"的断流提示 —— abort 会让 `onClose(terminal=false)` 到达，
      * 那是停止的正常收尾而非断流。新增调用方直接改写它会稀释该语义，请勿在其它地方置位。
      */
@@ -2755,8 +3029,28 @@ export const useAiStore = defineStore('ai', {
      * <p>停止与它的传播之间存在窗口：窗口里后端仍可能回 409 指回这一轮。那是对"停止尚未
      * 传播"的残影，不是"上一轮仍在进行中" —— 见 {@link isAuthoritativeBusyRun}。
      * runId 每轮唯一，故置位后无需回收（换会话时随现场清空）。
+     *
+     * <p>同时是**刷新后的 run 级停止墓碑**（随镜像持久化，见 {@link AiSessionMirror.stoppedRunId}）：
+     * cancel 请求可能因后端不可达而失败 —— 刷新后权威快照仍指向这一轮时，恢复面不得自动接回，
+     * 只在既有取消通道上有界静默补一次取消。
      */
     stoppedRunId: null as string | null,
+    /**
+     * 当前轮的客户端请求 id（停止闭环 additive，随镜像持久化）。
+     *
+     * <p>在 /chat 发送**之前**生成并写镜像：新一轮在 start 帧之前停止、随后刷新时，本端从未拿到
+     * runId；刷新后用它与后端映射精确取消这一轮（run 尚未创建则留取消墓碑）。**不是 runId**，
+     * 不能用来指定别人的轮。生命周期：`start` 帧**不清理**（同一轮后续停止/刷新仍要用它）；
+     * `done` / `error` 终态、新发送、换会话清空；旧镜像缺省 null。
+     */
+    pendingClientRequestId: null as string | null,
+    /**
+     * 该 {@link pendingClientRequestId} 是否已被本端停止（随镜像持久化）。
+     *
+     * <p>只由 `stop()` 置 true；新发送/终态/换会话清 false。刷新恢复只在为 true 时按 id 补取消
+     * 并拒绝自动重挂 —— 正常运行的轮次不受影响。
+     */
+    clientRequestStopped: false,
     /**
      * M-19（2026-10-29，R1 返修）：**start 帧之前就停止**的会话停止意向（`stop()` 在 runId 未知时置位）。
      *
@@ -2768,7 +3062,9 @@ export const useAiStore = defineStore('ai', {
      * 随后再关掉本地连接。`transport` 就是这条要等的连接（同时用作"意向失效"的判据）。
      *
      * <p>生命周期（I5）：自身 start 到达并补 cancel ⇒ 消耗；自身传输收尾仍无 start ⇒ 作废；
-     * 新轮的 start 到达（宿主不同）⇒ 作废；超过 {@link STOP_INTENT_TTL_MS} ⇒ 作废；换会话 ⇒ 清空。
+     * 超过 {@link STOP_INTENT_TTL_MS} ⇒ 作废。**不同宿主的 start（新轮）不清除意向** —— 被停轮
+     * 的 start 可能稍后才从自己的传输到达，届时仍要精确补 cancel。真正的等待登记按**传输**
+     * 保存在模块级 Map（切身份 / 换会话后仍有效，改成"只取消"）；本字段只是当前传输的指针。
      * **不再拿 409 猜归属**：会话级 409 的 runId 无法证明是本端被停的那一轮（可能是另一页签的新轮），
      * 猜着取消会误杀别人的轮。
      */
@@ -3036,6 +3332,10 @@ export const useAiStore = defineStore('ai', {
      * 界面会永远停在"准备中"。自动恢复只做零副作用的探活：`runs/current → 恢复` 既有路径。
      */
     notePreparingState(runId: string, elapsedMs: number | null): void {
+      // 问题3/8：已停止的轮不进入"准备中"（否则 loading 重新锁输入、自动恢复再把它接回来）。
+      if (this.stopped || this.stoppedRunId === runId) {
+        return
+      }
       this.restoredPendingQueue = []
       this.notePreparingHeartbeat(runId, elapsedMs)
       this.activeRunId = runId
@@ -3264,8 +3564,14 @@ export const useAiStore = defineStore('ai', {
         // `loading=false && suspended=true`（收流了，但这一轮还在等人决策）。只看 loading 会把
         // "还在等决策的一轮"标成不在途，刷新后 `mergeMirrorInFlightRound` 首行直接返回，
         // 只存在于镜像里的同段正文与已执行卡全丢（真机：5 张卡只剩一张重建的确认卡）。
-        inFlight: this.loading || this.suspended,
-        runSeq: this.runSeq
+        // 已停止的轮**不算在途**：停止是终态决定，镜像不得把宿主标成"还要续收"（问题3/8）。
+        inFlight: (this.loading || this.suspended) && !this.stopped,
+        runSeq: this.runSeq,
+        // run 级停止墓碑：cancel 可能失败（后端不可达），刷新后靠它拒绝自动接回这一轮。
+        stoppedRunId: this.stoppedRunId,
+        // 停止闭环：发送前生成的 clientRequestId 与"本端已停止"事实（即使 runId 未知）。
+        clientRequestId: this.pendingClientRequestId,
+        clientRequestStopped: this.clientRequestStopped
       })
       // 批次7B：去重命中（现场未变）不推进节流锚 —— 下一次真实变化应尽快落盘。
       if (outcome !== 'unchanged') {
@@ -3410,6 +3716,11 @@ export const useAiStore = defineStore('ai', {
         if (this.sessionId !== sid) {
           return // 会话已换：过期异常不落进新会话
         }
+        // 问题3：停止后的历史读取失败不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
+        if (this.stopped) {
+          this.historyLoaded = true
+          return
+        }
         // 兜底：未预期异常同样必须可见 + 封口（按"历史是否已落定"选择归属，不误报历史失败）
         if (!this.historyLoaded) {
           this.sealRecovery('history', error)
@@ -3460,6 +3771,19 @@ export const useAiStore = defineStore('ai', {
         // 与 lastFrameAt 成对，刷新/离线的那段计入真实已用时长。
         seedReasoningLocalAnchors(this.messages, mirror.savedAt)
         this.activeRunId = mirror.lastRunId ?? null
+        // run 级停止墓碑随镜像回来：刷新后要能识别"本端已停掉的那一轮"（取消请求可能没送达）。
+        // 只补空位 —— 不覆盖本次现场里已有的停止事实。
+        if (this.stoppedRunId === null && typeof mirror.stoppedRunId === 'string'
+          && mirror.stoppedRunId !== '') {
+          this.stoppedRunId = mirror.stoppedRunId
+        }
+        // 停止闭环：恢复发送前生成的 clientRequestId（runId 未知的停止唯一可证明的关联键）
+        // 与"本端已停止"事实。只在本次现场没有当前轮 id 时补，不覆盖正在跑的新轮。
+        if (this.pendingClientRequestId === null && typeof mirror.clientRequestId === 'string'
+          && mirror.clientRequestId !== '') {
+          this.pendingClientRequestId = mirror.clientRequestId
+          this.clientRequestStopped = mirror.clientRequestStopped === true
+        }
         // 批G · G4：帧序号随镜像回来（增量续收的锚点）；刷新后本轮之前没有更新的序号，直接接管
         this.runSeq = { ...mirrorRunSeq }
         if (mirrorInFlight) {
@@ -3482,7 +3806,10 @@ export const useAiStore = defineStore('ai', {
           // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
           writeMirror(this, this.sessionId, this.messages, this.activeRunId, {
             inFlight: mirrorInFlight,
-            runSeq: this.runSeq
+            runSeq: this.runSeq,
+            stoppedRunId: this.stoppedRunId,
+            clientRequestId: this.pendingClientRequestId,
+            clientRequestStopped: this.clientRequestStopped
           })
         }
       }
@@ -3495,6 +3822,10 @@ export const useAiStore = defineStore('ai', {
           return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
         }
         this.historyLoaded = true
+        // 问题3：停止后的历史读取失败不写恢复失败现场（已停止轮保持本地事实，不挂恢复缺口）。
+        if (this.stopped) {
+          return
+        }
         // 批次2：失败必须**可见 + 可重试**，且当场统一封口（不留在流式假态 / 不永久 loading）。
         // 镜像内容只是"现场"，不是可确认完整的答案 ⇒ 同步置 recoveryGap（中性，不是轮失败）。
         this.sealRecovery('history', error)
@@ -3894,7 +4225,8 @@ export const useAiStore = defineStore('ai', {
       try {
         await this.restoreSuspendedSnapshot()
       } catch (error) {
-        if (this.currentError === null) {
+        // 问题3：停止后的恢复异常不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
+        if (!this.stopped && this.currentError === null) {
           this.sealRecovery('current', error)
         }
       }
@@ -4039,8 +4371,23 @@ export const useAiStore = defineStore('ai', {
       if (this.stopped) {
         return
       }
+      /**
+       * 停止闭环（刷新后的 pre-start 停止）：镜像里记着"本端已停止 + 当前轮 clientRequestId"，
+       * 但本端从未拿到 runId（没有 run 级墓碑）。此时不得按 runs/current 自动重挂：
+       * 用 clientRequestId 让后端精确取消/落墓碑（幂等、静默），本地只封口已停止内容。
+       * 正常运行的轮次（clientRequestStopped=false）不走这里，恢复行为与改造前一致。
+       */
+      if (this.clientRequestStopped && this.stoppedRunId === null) {
+        void this.cancelStoppedClientRequest()
+        this.sealLeftoverInFlight()
+        return
+      }
       // Task 4 引导门：runs/current 属于对话域，必须带后端发号的会话。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
+        return
+      }
+      // 问题3：发号 await 期间用户可能已停止 —— 任何 await 之后写回前都要重判，旧现场一律不落。
+      if (this.stopped) {
         return
       }
       const sid = this.sessionId
@@ -4086,6 +4433,23 @@ export const useAiStore = defineStore('ai', {
       // 取数窗口内的身份对账（R-130/R-132）：sid 不等 = 会话已换；abort 句柄已换 = 同会话已起
       // 新轮 —— 两种都说明这份快照属于过期的现场，整体丢弃（含续收连接的建立）
       if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
+        return
+      }
+      // 问题3：取数窗口内已停止 ⇒ 不重建挂起卡、不重连、不锁输入（停止是本地已落地的决定）。
+      if (this.stopped) {
+        return
+      }
+      /**
+       * 问题8：run 级停止墓碑。刷新后权威快照仍指向本端停掉的那一轮：
+       * - 已取消 / 已不存在 ⇒ 正常收口（封口镜像里的在途宿主，不重连）；
+       * - 仍在运行（cancel 之前没送达）⇒ **不自动接回**，只在既有取消通道上有界静默补一次。
+       */
+      const tombstoneRunId = this.stoppedRunId
+      if (tombstoneRunId !== null && current.found && current.runId === tombstoneRunId) {
+        this.sealLeftoverInFlight()
+        if (!isTerminalRunStatus(current.snapshotStatus) && beginTombstoneRecancel(tombstoneRunId)) {
+          void this.cancelStoppedRun(tombstoneRunId, this.sessionIdentity)
+        }
         return
       }
       // 批次3 / AR-06：已 start、快照未建 = "准备中"（可恢复），不是空态、不是轮不存在。
@@ -4135,10 +4499,19 @@ export const useAiStore = defineStore('ai', {
           && item.runId !== undefined
           && item.runId !== '')
         const recoveryRunId = inFlightHost?.runId ?? this.activeRunId
+        // 问题8：墓碑指向本端已停的轮 ⇒ 不探测、不重挂；权威已找不到它，正常收口即可。
+        if (recoveryRunId && this.stoppedRunId !== null && recoveryRunId === this.stoppedRunId) {
+          this.sealLeftoverInFlight()
+          return
+        }
         if (recoveryRunId && inFlightHost) {
           const probe = await probeReattach(recoveryRunId)
           // 探测窗口内的身份对账（与上面同口径；任何 await 之后写回前必须重比）
           if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
+            return
+          }
+          // 问题3：探测窗口内已停止 ⇒ 旧现场整体丢弃（不排准备中、不重挂）。
+          if (this.stopped || this.stoppedRunId === recoveryRunId) {
             return
           }
           if (probe.preparing) {
@@ -4249,6 +4622,14 @@ export const useAiStore = defineStore('ai', {
     async restoreInFlightRound(current: AiRunCurrent): Promise<void> {
       const runId = current.runId
       if (!runId) {
+        return
+      }
+      /**
+       * 问题3/8：停止轮与停止墓碑都不得被这条静默续收路径接回来 —— 本函数会清段重放、
+       * 复位 `stopped` 并重新锁输入。已停的轮只封口，不新建连接。
+       */
+      if (this.stopped || this.stoppedRunId === runId) {
+        this.sealLeftoverInFlight()
         return
       }
       if (isTerminalRunStatus(current.snapshotStatus)) {
@@ -4691,6 +5072,11 @@ export const useAiStore = defineStore('ai', {
       if (!busy) {
         return
       }
+      // 问题1/8：本端已停掉的那一轮不提供"回到进行中"入口（停止是终态决定）。
+      if (this.stoppedRunId === busy.runId) {
+        this.busyRun = null
+        return
+      }
       this.busyRun = null
       this.activeRunId = busy.runId
       // M08-R2：用户显式"回到进行中的回答" ⇒ 重置该 run 的驱动所有权与预算
@@ -4733,6 +5119,13 @@ export const useAiStore = defineStore('ai', {
         return 'in-progress'
       }
       const runId = this.retryRunIdFor(message)
+      /**
+       * 问题1：停止轮（含零产出）的**静默守卫** —— 停止是终态决定，不是可重试的失败轮。
+       * 面板已不渲染入口；这里兜住程序化/键盘/残留 DOM 的点击，绝不发起请求、也不写提示。
+       */
+      if (message.stopped === true || (runId !== null && this.stoppedRunId === runId)) {
+        return 'denied'
+      }
       if (!runId) {
         // 归属不可证明 ⇒ 不猜、不本地重发、不回退 activeRunId（伪造功能比不动作更糟）
         setNotice(this, 'ai.notice.retryRunUnknown', {}, 'error')
@@ -4986,8 +5379,21 @@ export const useAiStore = defineStore('ai', {
      * @param awaitingInput 快照或剩余待决卡证明本轮仍 park；一旦执行继续必须恢复 false
      */
     async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string, awaitingInput = false): Promise<void> {
+      // 问题2：同上 —— 首个 await 之前同步登记，stop 同 tick 才能停到这一轮。
+      pendingAttachRunId = runId
       // Task 4 引导门：续收是对话域 SSE（带身份头），无后端发号会话不建连。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
+        return
+      }
+      // 问题3/8：已停止的轮（内存停止态 / run 级墓碑）不得被续收复活 ——
+      // 不并入、不清 stopped、不重新锁输入。
+      if (this.stopped || this.stoppedRunId === runId) {
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
         return
       }
       // M08（single-flight）：同一 runId 只允许一条活动 SSE。已有连接正在写这一轮时**并入**它 ——
@@ -4995,6 +5401,9 @@ export const useAiStore = defineStore('ai', {
       // 「已收最大序号」。两个恢复入口并发（reattachActive + resumeSnapshotStream）因此
       // 不会再出现"全量回放 + 增量续收"两条并存、重连预算翻倍。
       if (this.canJoinRunStream(runId)) {
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
         this.runSeq = recordRunSeq(this.runSeq, runId, Math.max(lastSeq, this.runSeq[runId] ?? 0))
         this.loading = true
         this.streamInterrupted = false
@@ -5011,6 +5420,9 @@ export const useAiStore = defineStore('ai', {
       if (driveToken === null) {
         // M08-R2：这一轮的驱动权已在别处（连接存活 / 退避 / 重连中），或预算已用尽 ⇒
         // 不再另起一条驱动。旁观入口不改写现场（loading / suspended 归持有者）。
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
         return
       }
       const previous = currentAbort
@@ -5029,6 +5441,10 @@ export const useAiStore = defineStore('ai', {
       // 无宿主（I-1「无卡挂流」）：置 null —— `handleFrame` 收到 `assistantId === undefined` 时
       // 按"本轮"处理并惰性取用当前助手消息，故 null 与 undefined 在此等价。
       activeRoundHostId = hostMessageId ?? null
+      // 建连登记已完成 ⇒ "待登记接管"的临时证明使命结束（此后以 activeStreamRunId 为准）。
+      if (pendingAttachRunId === runId) {
+        pendingAttachRunId = null
+      }
       // 续收证明本轮仍有后续帧：只恢复已属于本轮的宿主活动事实，不触碰无关历史助手。
       const host = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
       if (host && (!host.done || host.runId === runId)) {
@@ -5045,8 +5461,9 @@ export const useAiStore = defineStore('ai', {
       /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
       const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
       // 防双连接：**先换身份再中止旧连接** —— 旧连接的收尾此时判定为"非本轮"，
-      // 其 onClose 的断流提示不会写脏新连接的现场
-      previous?.abort()
+      // 其 onClose 的断流提示不会写脏新连接的现场。但旧连接若挂着 pre-start 停止意向，
+      // 保留它等被停轮 start（见 releaseSupersededTransport），不得掐掉唯一的补 cancel 通道。
+      releaseSupersededTransport(previous)
       try {
         await aiApi.reattachRun(
           runId,
@@ -5095,6 +5512,9 @@ export const useAiStore = defineStore('ai', {
           { signal: controller.signal, lastSeq, awaitingInput }
         )
       } finally {
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
         if (isCurrentRound()) {
           // 不置 suspended = false：挂起卡状态由帧/投影决定，done 帧的 handler 会自己清
           this.loading = false
@@ -5197,6 +5617,8 @@ export const useAiStore = defineStore('ai', {
         return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()
+      // 新消息 = 真正换轮：上一轮"正在接管但未登记"的 run 不再属于当前轮（问题2）。
+      pendingAttachRunId = null
       // B1 收口修（C-1）：新消息 = 真正换轮 —— 上一轮在途的前端工具结局自此一律丢弃
       roundEpoch += 1
       // M-2b：上一轮快照恢复留下的串行队列随换轮作废（不得把旧卡补进新轮）
@@ -5236,6 +5658,11 @@ export const useAiStore = defineStore('ai', {
       activeRoundHostId = assistant.id
       this.activeStreamRunId = null // runId 由 start 帧给出（见 handleFrame 的 start 分支）
       this.activeStreamParked = false
+      /** 停止闭环：发送**之前**生成并落镜像（start 前停止 + 刷新的唯一精确关联键）。 */
+      const clientRequestId = newClientRequestId()
+      this.pendingClientRequestId = clientRequestId
+      this.clientRequestStopped = false
+      this.writeMirrorNow()
       /** R1/R6（issue#5）：本轮是否仍是"当前轮" —— 以 AbortController 身份为准。 */
       const isCurrentRound = (): boolean => currentAbort === controller
 
@@ -5303,6 +5730,19 @@ export const useAiStore = defineStore('ai', {
       )
       const handlers: SseFrameHandlers = {
         onFrame: (frame) => {
+          /**
+           * 问题2/3（返修）：切身份 / 换会话后保留的旧传输只做一件事 —— 等被停轮自己的
+           * start，然后按**旧身份**补 cancel；其它帧（含 start 之后）一律不写新现场。
+           */
+          if (isConsumedStopTransport(controller)) {
+            return
+          }
+          if (isCancelOnlyStopTransport(controller)) {
+            if (frame.type === 'start' && frame.runId !== undefined && frame.runId !== '') {
+              this.cancelRunIfStopIntended(frame.runId, assistant.id, controller)
+            }
+            return
+          }
           sawAnyFrame = true
           if (isCurrentRound() && frame.type === 'error') {
             sawErrorTerminal = true
@@ -5310,9 +5750,13 @@ export const useAiStore = defineStore('ai', {
           // M-19（C2）：start 帧之前就停止过（runId 当时未知）⇒ 这条 start 带来 runId，立刻补真实
           // cancel。**不挂 isCurrentRound 门**：停止后连接仍在（C2 故意不 abort），而轮次身份判据
           // 是"连接句柄"级的，任何被替换过的句柄都会把这一帧挡在补 cancel 之外；归属改由
-          // `cancelRunIfStopIntended` 的"同一宿主"判据保证（另一轮的 start 只会让旧意向作废）。
+          // `cancelRunIfStopIntended` 的"同一传输 + 同一宿主"判据保证（不同宿主的 start 只忽略，
+          // 不清除旧意向、也不误取消新轮）。
           if (frame.type === 'start' && frame.runId !== undefined && frame.runId !== '') {
-            this.cancelRunIfStopIntended(frame.runId, assistant.id)
+            if (this.cancelRunIfStopIntended(frame.runId, assistant.id, controller)) {
+              // 已精确补过 cancel：这一帧及其后的旧帧不再进入本地现场（停止轮已封口）。
+              return
+            }
           }
           this.handleFrame(frame, assistant.id)
         },
@@ -5366,6 +5810,11 @@ export const useAiStore = defineStore('ai', {
       // 请求体**既不带 modelId 也不带 params**（模型与采样参数一律用后端配置；后端能力保留）。
       /** 收尾判定：身份已失效优先，其次用户停止 / 断流，最后才是调用方的正常/异常兜底。 */
       const settleOutcome = (fallback: AiSendOutcome): AiSendOutcome => {
+        // 已按停止意向补过 cancel 的旧传输（切身份 / 换会话后仍在收尾）：这是停止的收尾，
+        // 不是"被别的轮打断"，面板不应回稿或提示断流。
+        if (isConsumedStopTransport(controller)) {
+          return 'cancelled'
+        }
         if (!isCurrentRound()) {
           return 'interrupted'
         }
@@ -5378,6 +5827,11 @@ export const useAiStore = defineStore('ai', {
         return fallback
       }
       let outcome: AiSendOutcome
+      /**
+       * 同一条 /chat 的重复回执：已交给既有 reattach 接管本轮。
+       * 收尾必须让位（不得把刚接上的宿主封口/把 loading 复位），由 reattach 的连接负责收口。
+       */
+      let delegatedToDuplicate = false
       try {
         /**
          * 批次2（F6）：**开流前**瞬时失败的有界重试。
@@ -5390,12 +5844,48 @@ export const useAiStore = defineStore('ai', {
         for (;;) {
           try {
             await aiApi.chat(
-              { sessionId, message: content, context },
+              { sessionId, message: content, context, clientRequestId },
               handlers,
               options
             )
             break
           } catch (error) {
+            /**
+             * 停止闭环兼容批：开流前瞬时失败会用**同一个 clientRequestId** 重发 /chat。
+             * 若第一次请求其实已到达后端（映射已绑定既有 run），后端回 409 SESSION_BUSY +
+             * `duplicateRequest=true`（回显同一个 id）。这里必须识别为"同一请求"，走既有
+             * events/reattach 自动收帧：不重试、不报错、不回收气泡、不新建第二条驱动。
+             */
+            const duplicateRunId = duplicateClientRequestRunId(error, clientRequestId)
+            if (duplicateRunId !== null) {
+              if (this.stopped || this.stoppedRunId === duplicateRunId) {
+                // 停止优先：已停轮/墓碑明确拒绝接管，不得返回 ok。
+                // 只有这条 send 的宿主仍是当前轮时才打「已停止」；新轮已起时不得标到新轮上。
+                if (this.stoppedRunId === duplicateRunId && !this.stopped
+                  && activeRoundHostId === assistant.id) {
+                  this.markStoppedMessage()
+                  this.lastRoundOutcome = 'cancelled'
+                }
+                outcome = 'cancelled'
+                return { outcome, userMessageId }
+              }
+              if (!isCurrentRound()) {
+                // 这条 send 已被新轮/新会话取代：不接管旧现场，也不回稿（重复请求不能变成
+                // "再发一次"）；按取消结局收尾，真正的收口由取代它的轮次负责。
+                outcome = 'cancelled'
+                return { outcome, userMessageId }
+              }
+              if (this.adoptDuplicateClientRequest(duplicateRunId, assistant.id)) {
+                // 同步接管已完成登记（pendingAttachRunId/loading/host）；原 send 的 finally 让位。
+                delegatedToDuplicate = true
+                outcome = 'ok'
+                return { outcome, userMessageId }
+              }
+              // 接管未成立（宿主缺失/现场已换）：同样不回稿（避免用户把同一条消息再发一次）。
+              // finally 正常清场；本轮已由后续 reattach/恢复或新轮负责。
+              outcome = 'cancelled'
+              return { outcome, userMessageId }
+            }
             const retryable = preStreamAttempt < PRE_STREAM_RETRY_MAX
               && !sawAnyFrame
               && !this.stopped
@@ -5471,35 +5961,47 @@ export const useAiStore = defineStore('ai', {
         // 面板据此回稿。其余情形仍按"是否还是本轮"判定。
         outcome = purgedRecovered ? 'error' : settleOutcome('error')
       } finally {
-        if (isCurrentRound() && !firstFrameRecovery) {
-          // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
-          // （界面谎报空闲 + 新轮丢失本地取消句柄）
-          this.loading = false
-          // B1（2026-10-20 裁决 8）：挂起收流不再无条件清 suspended —— 卡还在等人，
-          // 清掉会让停止按钮消失、输入区解禁（"这一轮其实没结束"被谎报成空闲）。
-          if (!suspendedClose) {
-            this.suspended = false
+        // 重复回执已交给既有 reattach：本轮现场（loading / 宿主流式态 / 连接句柄）
+        // 归 reattach 所有，这里不得复位或封口（否则刚接上的帧会写进一条已 done 的气泡）。
+        if (!delegatedToDuplicate) {
+          if (isCurrentRound() && !firstFrameRecovery) {
+            // R1（issue#5）：只有"仍是本轮"时才复位轮次级状态 —— 否则旧轮的收尾会把新轮抹平
+            // （界面谎报空闲 + 新轮丢失本地取消句柄）
+            this.loading = false
+            // B1（2026-10-20 裁决 8）：挂起收流不再无条件清 suspended —— 卡还在等人，
+            // 清掉会让停止按钮消失、输入区解禁（"这一轮其实没结束"被谎报成空闲）。
+            if (!suspendedClose) {
+              this.suspended = false
+            }
+            currentAbort = null
+            activeRoundHostId = null
+            this.activeStreamRunId = null
+            this.activeStreamParked = false
           }
-          currentAbort = null
-          activeRoundHostId = null
-          this.activeStreamRunId = null
-          this.activeStreamParked = false
-        }
-        const target = this.messages.find((message) => message.id === assistant.id)
-        // B1：挂起收流时本轮尚未结束（决策后还要续跑），不封口消息 —— 与流派 A 的观感一致：
-        // 气泡仍是流式态，终帧（done/error）一到由 handleFrame 的既有路径封口。
-        // 2026-10-29 收口：首帧超时且已排上自动恢复时不封口 —— 恢复会把这条宿主接回续收，
-        // 这里先封就等于把刚接上的那一轮判成结束（后续帧只能落到新气泡）。
-        if (target && !target.done && !suspendedClose && !firstFrameRecovery) {
-          target.streaming = false
-          target.done = true
+          const target = this.messages.find((message) => message.id === assistant.id)
+          // B1：挂起收流时本轮尚未结束（决策后还要续跑），不封口消息 —— 与流派 A 的观感一致：
+          // 气泡仍是流式态，终帧（done/error）一到由 handleFrame 的既有路径封口。
+          // 2026-10-29 收口：首帧超时且已排上自动恢复时不封口 —— 恢复会把这条宿主接回续收，
+          // 这里先封就等于把刚接上的那一轮判成结束（后续帧只能落到新气泡）。
+          if (target && !target.done && !suspendedClose && !firstFrameRecovery) {
+            target.streaming = false
+            target.done = true
+          }
         }
       }
       return { outcome, userMessageId }
     },
 
-    /** 处理 409/503 等开流前失败（按错误码给不同文案与动作）。 */
+    /**
+     * 处理 409/503 等开流前失败（按错误码给不同文案与动作）。
+     *
+     * <p>问题4：调用方主动停止（`stopped`）后的失败一落不写 —— 停止的本地收敛已经完成，
+     * 主动 abort 引起的异常不是"本轮出错"，不得挂错误卡/错误正文。
+     */
     handleChatError(error: unknown, assistantId?: string): void {
+      if (this.stopped) {
+        return
+      }
       if (assistantId) {
         const message = this.messages.find((item) => item.id === assistantId)
         if (message) {
@@ -5653,19 +6155,40 @@ export const useAiStore = defineStore('ai', {
       runId?: string,
       options: { hostMessageId?: string; lastSeq?: number } = {}
     ): Promise<void> {
-      // Task 4 引导门：SSE 重挂带身份头与会话身份，没有后端发号的会话就不建连。
-      if (this.sessionId === '' && (await this.ensureSession()) === '') {
-        return
-      }
       const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
       const targetRunId = explicit ?? this.activeRunId
+      // 问题2：在首个 await 之前同步登记"正在接管的 run"—— 同一 tick 的 stop 才停得到它。
+      if (targetRunId) {
+        pendingAttachRunId = targetRunId
+      }
+      // Task 4 引导门：SSE 重挂带身份头与会话身份，没有后端发号的会话就不建连。
+      if (this.sessionId === '' && (await this.ensureSession()) === '') {
+        if (pendingAttachRunId === targetRunId) {
+          pendingAttachRunId = null
+        }
+        return
+      }
       if (!targetRunId) {
         return // 没有可接管的轮：静默（不写任何技术提示）
+      }
+      /**
+       * 问题3/8：接管是"把既有轮接回来"的入口 —— 已停止的轮（内存停止态 / 墓碑）
+       * 一律不接管：下面的 `stopped = false`、段重建与再锁输入都不得发生。
+       */
+      if (this.stopped || this.stoppedRunId === targetRunId) {
+        if (pendingAttachRunId === targetRunId) {
+          pendingAttachRunId = null
+        }
+        return
       }
       // M08（single-flight）：同一 runId 已有活动 SSE 时**并入**，不建第二条连接 ——
       // 也不递增 `roundEpoch`、不作废快照/表单队列：那会让在跑连接的登记与回调一起失效
       // （"接管"只是指回同一个轮，不是换轮次身份）。锚点统一为「已收最大序号」。
       if (this.canJoinRunStream(targetRunId)) {
+        // 已有活动连接在写这一轮：接管并入现连接，不再有"待登记"的接管。
+        if (pendingAttachRunId === targetRunId) {
+          pendingAttachRunId = null
+        }
         const joinedSeq = options.lastSeq ?? this.runSeq[targetRunId] ?? 0
         this.runSeq = recordRunSeq(this.runSeq, targetRunId, Math.max(joinedSeq, this.runSeq[targetRunId] ?? 0))
         this.loading = true
@@ -5685,6 +6208,9 @@ export const useAiStore = defineStore('ai', {
       // 不作废队列、不新建气泡），否则被拒绝的入口会把在跑驱动的现场改坏。
       const driveToken = this.acquireRunStreamDrive(targetRunId)
       if (driveToken === null) {
+        if (pendingAttachRunId === targetRunId) {
+          pendingAttachRunId = null
+        }
         return
       }
       // B1 收口修（C-1）：接管 = 换轮次身份 —— 在途的旧轮前端工具结局丢弃
@@ -5721,6 +6247,10 @@ export const useAiStore = defineStore('ai', {
       // M08：接管连接不是挂起等待语义（续跑帧会经它送达）
       this.activeStreamParked = false
       activeRoundHostId = assistant.id
+      // 建连登记已完成 ⇒ "待登记接管"的临时证明使命结束（此后以 activeStreamRunId 为准）。
+      if (pendingAttachRunId === targetRunId) {
+        pendingAttachRunId = null
+      }
       /**
        * R1/R6（issue#5）：本次接管是否仍是"当前轮"（以 AbortController 身份为准）。
        * M08：再加**建连时的轮次纪元** —— 停止/换轮之后，被中止的旧连接即使还在派发回调
@@ -5734,7 +6264,8 @@ export const useAiStore = defineStore('ai', {
       const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
       // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
-      previous?.abort()
+      // 挂着 pre-start 停止意向的旧连接保留（等被停轮 start 后补 cancel）。
+      releaseSupersededTransport(previous)
       try {
         await aiApi.reattachRun(
           targetRunId,
@@ -5805,6 +6336,9 @@ export const useAiStore = defineStore('ai', {
       } catch {
         // 静默：接管失败的现场由当前画面承担（refresh 后仍可再试），不写技术文案
       } finally {
+        if (pendingAttachRunId === targetRunId) {
+          pendingAttachRunId = null
+        }
         if (isCurrentRound()) {
           // R1 同型（issue#5）：被后一次接管/新轮取代的旧连接，其收尾不得复位新轮状态
           // 批次3：准备中仍在等快照 ⇒ 保持"有在途轮"（输入区禁用），直到重试/终态。
@@ -5849,6 +6383,30 @@ export const useAiStore = defineStore('ai', {
         return
       }
       this.gateSubmissions = {}
+    },
+
+    /**
+     * 停止时的提交态收口（问题5）：**已提交、结果在途**的确认门不得被伪记成未决/取消。
+     *
+     * <p>与 {@link clearGateSubmissions} 的分界：终态帧 / 会话重置 = 这一轮的一切都结束了，
+     * 全清；主动停止 = 只停"还没提交的东西"—— 已点过批准/拒绝、后端仍在执行的那张，其结局
+     * 帧仍可能到达，提交标记必须留着（面板据此保持「已提交」且不复活按钮）。
+     * 已落终态的条目照常清掉（结局已定，提交态不再有意义）。
+     */
+    settleGateSubmissionsOnStop(): void {
+      // 停止后不再发起权威校正请求（不新增任何动作），但已提交的事实保留。
+      disarmAllGateSync()
+      this.clearGateAcks()
+      const next = { ...this.gateSubmissions }
+      for (const toolCallId of Object.keys(next)) {
+        const part = this.messages
+          .map((message) => findToolPart(message, toolCallId))
+          .find((value) => value !== null) ?? null
+        if (!part || isFrameDecidedPendingStatus(part.status)) {
+          delete next[toolCallId]
+        }
+      }
+      this.gateSubmissions = next
     },
 
     // ── 批4-D：不可撤销确认卡的勾选态（toolCallId 粒度） ──────────────────────
@@ -6402,6 +6960,11 @@ export const useAiStore = defineStore('ai', {
       retryable?: boolean
       /** 结构化回灌体超限（FRONTEND_RESULT_TOO_LARGE）：表单回到可编辑态、保留输入 */
       tooLarge?: boolean
+      /**
+       * 回灌请求**已被后端受理**，但本地轮次现场已变（停止 / 换轮）：调用方据此保留
+       * 「已提交」事实，而不是把它当成失败回退成可编辑态（问题1：停止后的异步回包）。
+       */
+      accepted?: boolean
     }> {
       // GF-B 修复（红队问题 1）：表单回灌优先用表单创建时捕获的 runId，
       // 缺省才回退当前轮的 activeRunId（避免旧表单错配到新 run）
@@ -6409,6 +6972,13 @@ export const useAiStore = defineStore('ai', {
       if (!targetRunId) {
         setNotice(this, 'ai.notice.missingRunId')
         return { ok: false, message: '缺少 runId' }
+      }
+      /**
+       * 问题5/7：停止后**不再发起新的回灌**（停止是终态决定，后端已按取消收尾）。
+       * 停止前已发出的提交不受影响（本函数已在执行中）；它们的真实结局由结果帧收敛。
+       */
+      if (this.stopped || this.stoppedRunId === targetRunId) {
+        return { ok: false }
       }
       // M-d（fix2）：提交前的现场快照（结局帧可能先于 POST 响应抵达；inline 执行时不在挂起态）
       const parkedAtDecision = this.suspended
@@ -6440,7 +7010,9 @@ export const useAiStore = defineStore('ai', {
           { headers: identityHeaders(identityAtSubmit) }
         )
         if (!stillLive()) {
-          return { ok: false }
+          // 请求本身已被后端受理；只是本地轮次已不在场（停止 / 换轮）⇒ 不做续跑/补卡，
+          // 但把"受理"这一事实交给调用方（表单据此保持已提交，不回退可编辑）。
+          return { ok: false, accepted: true }
         }
         // B1（2026-10-20 裁决 9）：回灌送达 ⇒ 带 lastSeq 重连收流（GF 提交/取消与即时前端工具共用）。
         // 不 await：重连要活到本轮终帧，await 会把"表单已提交"的本地收尾拖到整轮结束之后。
@@ -7040,6 +7612,11 @@ export const useAiStore = defineStore('ai', {
       if (!handoff) {
         return
       }
+      // 问题7：入队即捕获本轮现场 —— picker / 页面交接都是 await，回来后必须仍是同一轮。
+      const roundAtPick = captureRound(this.sessionId, handoff.runId)
+      const stillOwnHandoff = (): boolean => !this.stopped
+        && this.activeUploadHandoff?.toolCallId === handoff.toolCallId
+        && stillSameRound(roundAtPick, this.sessionId, this.activeRunId ?? null)
       if (this.uploadHandoffAvailability() === 'missing') {
         // 不打开文件对话框：区域都没了，选了也无处可交 —— 直接如实收口（不谎报、不留死卡）。
         // A09：ref 缺省时同样按区域实况回落（缺 ref ≠ 没有落点，区域可能刚刚才注册）。
@@ -7062,6 +7639,10 @@ export const useAiStore = defineStore('ai', {
       try {
         files = await picked
       } catch (error) {
+        // 停止/换轮后不再把旧卡改回 degraded（单例已被收口，写了就是复活一张死卡）。
+        if (!stillOwnHandoff()) {
+          return
+        }
         const aborted = error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))
         this.activeUploadHandoff = {
           ...handoff,
@@ -7072,6 +7653,9 @@ export const useAiStore = defineStore('ai', {
         }
         this.uiAnnouncement = pickUiAnnouncement()
         return
+      }
+      if (!stillOwnHandoff()) {
+        return // 选择窗口内已停止：不再接收文件/写交接卡
       }
       const file = files[0]
       if (!file) {
@@ -7092,6 +7676,9 @@ export const useAiStore = defineStore('ai', {
         try {
           summary = await region.receiveFile(file)
         } catch (error) {
+          if (!stillOwnHandoff()) {
+            return // 交接窗口内已停止：失败也不往旧卡上写
+          }
           this.activeUploadHandoff = {
             ...handoff,
             status: 'degraded',
@@ -7099,6 +7686,10 @@ export const useAiStore = defineStore('ai', {
           }
           return
         }
+      }
+      if (!stillOwnHandoff()) {
+        // 停止发生在文件交接期间：副作用已经发生（不回滚），但不再回灌/标成功到已停止的轮。
+        return
       }
       const tail = summary ? `；${summary}` : ''
       await this.finishUploadHandoff(
@@ -7206,6 +7797,13 @@ export const useAiStore = defineStore('ai', {
       result: string,
       cancelled: boolean
     ): Promise<void> {
+      /**
+       * 问题7/5：停止后到达的交接收口不得把已取消的段翻成成功，也不得回灌到已停止的轮。
+       * 停止前**已经真实完成**的副作用留在页面上（不回滚），但不再写"成功"到已停轮。
+       */
+      if (this.stopped || (handoff.runId !== null && this.stoppedRunId === handoff.runId)) {
+        return
+      }
       // B2：只摘**自己这张卡** —— 迟到的收口（旧卡的 picker 慢一步返回 / 旧卡回灌超时）
       // 不得把单例里已经换成新卡的那张一起摘掉（新卡还在等人选文件，摘掉就再也点不动）。
       if (this.activeUploadHandoff?.toolCallId === handoff.toolCallId) {
@@ -7297,6 +7895,10 @@ export const useAiStore = defineStore('ai', {
         if (level === 'count') {
           // 计数档没有逐格明细 ⇒ 预览色随之撤掉（卡面也没有可核对的单元格）
           const resolved = await resolveSheetContext(plan.defCode)
+          // 问题6：停止/换卡之后不得把已收口的预览计划重新落回单例。
+          if (this.stopped || this.activePreview?.planId !== plan.planId) {
+            return
+          }
           if (resolved.ok) {
             previewSheetCtx = resolved.ctx
             clearPreviewMarks(resolved.ctx)
@@ -7305,6 +7907,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const resolved = await resolveSheetContext(plan.defCode)
+      if (this.stopped || this.activePreview?.planId !== plan.planId) {
+        return
+      }
       if (!resolved.ok) {
         this.activePreview = null
         previewSheetCtx = null
@@ -7328,7 +7933,12 @@ export const useAiStore = defineStore('ai', {
       markPreviewCells(resolved.ctx, replanned.plan)
     },
 
-    /** 写工具结局的统一落点：先写段，再回灌（cancelled 走既有 `FRONTEND_CANCELLED` 语义）。 */
+    /**
+     * 写工具结局的统一落点：先写段，再回灌（cancelled 走既有 `FRONTEND_CANCELLED` 语义）。
+     *
+     * <p>问题6：停止后的迟到收口一律不写 —— 已取消的段不得被翻成成功，也不得把新动作回灌到
+     * 已停止的轮。已经落笔并写好 succeeded 段的调用不受影响（`stop()` 只收 pending/running）。
+     */
     async finishSheetTool(input: {
       toolCallId: string
       name: string
@@ -7339,6 +7949,10 @@ export const useAiStore = defineStore('ai', {
       /** 采样元数据（治理批 §4.2）：写侧只报 planId / 预览档 / 样例对数，不报任何单元格值 */
       sheetMeta?: SheetToolMeta
     }): Promise<void> {
+      const runId = input.runId ?? this.activeRunId
+      if (this.stopped || (runId !== null && this.stoppedRunId === runId)) {
+        return
+      }
       for (const item of this.messages) {
         if (!findToolPart(item, input.toolCallId)) {
           continue
@@ -7381,6 +7995,15 @@ export const useAiStore = defineStore('ai', {
       if (!beginPreviewDecision(plan)) {
         return
       }
+      /**
+       * 问题6：应用是一次真实落笔 —— 入队时捕获本轮现场，**每个 await 之后**都重判。
+       * 停止（`roundEpoch` 递增 / `stopped` / 墓碑）后绝不落笔：尚未写的应用就地失效，
+       * 已由 `stop()` 取消的段不再被迟到成功覆盖；已经落笔的副作用保持原样（不回滚、不谎报）。
+       */
+      const roundAtApply = captureRound(this.sessionId, plan.runId ?? this.activeRunId ?? null)
+      const stillOwnApply = (): boolean => !this.stopped
+        && this.stoppedRunId !== (plan.runId ?? null)
+        && stillSameRound(roundAtApply, this.sessionId, this.activeRunId ?? null)
       // 异步期间可能已有新卡到来：只清自己这张
       const clearOwnPreview = (): void => {
         if (this.activePreview?.planId === plan.planId) {
@@ -7390,6 +8013,9 @@ export const useAiStore = defineStore('ai', {
       }
       try {
         const resolved = await resolveSheetContext(plan.defCode)
+        if (!stillOwnApply()) {
+          return // 停止/换轮：尚未落笔的应用失效（决策令牌在 finally 释放）
+        }
         if (!resolved.ok) {
           clearOwnPreview()
           await this.finishSheetTool({
@@ -7474,6 +8100,10 @@ export const useAiStore = defineStore('ai', {
     async cancelWritePreview(): Promise<void> {
       const plan = this.activePreview
       if (!plan) {
+        return
+      }
+      // 问题6：停止已经就地取消了这条段（后端 cancel 也在途）——停止后不再补发任何回灌。
+      if (this.stopped) {
         return
       }
       // 与「应用」共用同一张卡的决策权：应用在途时取消不再抢跑（一次决策只有一种结局）
@@ -7649,6 +8279,18 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 停止 / 取消终帧到达时，把**已发出提交**的表单段固定在「已提交、结果待确认」。
+     *
+     * <p>只写提交值快照 + 收 `requiresAction`，**不改 status**：结局仍由真实结果帧裁决。
+     * 没有这一步，`cancelRoundParts` / `expireResidueToolParts` 会把这一段伪记成取消/超时，
+     * 用户已经发生过的提交就变成了"从没提交"。
+     */
+    holdSubmittedFormPart(toolCallId: string, values: Record<string, unknown>): void {
+      // 单一写口已同时落 submittedValues + decidedAt + requiresAction=false（见 parts.ts）。
+      this.writeSubmittedValues(toolCallId, values)
+    },
+
+    /**
      * 2A 批（裁决 §3 缺陷①）：表单系取消 / 超时收尾记 `decidedAt`（**数据层记录，卡面不渲染**）。
      * 只写第一次决策时刻（重入 / 帧后到不覆盖）；段不存在时静默跳过（与 cancel 回灌同口径）。
      */
@@ -7673,7 +8315,8 @@ export const useAiStore = defineStore('ai', {
     /** GF-B：提交表单值 —— result 为字段 key→值的 JSON 字符串；客户端复核不过就地提示不发出。 */
     async submitGenerativeForm(values: Record<string, unknown>): Promise<void> {
       const form = this.activeForm
-      if (!form || form.status !== 'filling') {
+      // 问题7：停止后表单已收起（且可能已被标记取消）—— 不再发起提交请求。
+      if (!form || form.status !== 'filling' || this.stopped || this.stoppedRunId === form.runId) {
         return
       }
       const problems = checkFormValues(form.form, values)
@@ -7695,6 +8338,31 @@ export const useAiStore = defineStore('ai', {
       form.error = null
       form.fieldErrors = []
       const outcome = await this.submitFrontendToolResult(form.toolCallId, resultText, 'http-post', false, form.runId)
+      /**
+       * 问题1（返修）：等待回包期间本轮被停止 ⇒ `stillSameRound` 会让结果表现为 `ok=false`。
+       * 停止轮**不得**因此回退到可编辑（`filling`）、不得新增错误提示，也不得抹掉
+       * `holdSubmittedFormPart` 已经固定的「已提交/结果待确认」。
+       *
+       * <p>真成功 / 重复提交（`accepted`）保留提交事实（清草稿、保持只读提交值）；
+       * 真失败保持静默（结局仍由停止轮的已提交语义承载，结果帧放行见
+       * {@link isSubmittedStopOutcomeFrame}）。
+       */
+      const stoppedRound = this.stopped
+        || (this.stoppedRunId !== null && this.stoppedRunId === form.runId)
+      if (stoppedRound) {
+        const accepted = outcome.ok || outcome.duplicate || outcome.accepted === true
+        if (accepted) {
+          clearFormDraft(form.toolCallId)
+          form.values = {}
+          form.status = 'submitted'
+          form.error = null
+          form.fieldErrors = []
+          if (!outcome.duplicate) {
+            this.writeSubmittedValues(form.toolCallId, values)
+          }
+        }
+        return
+      }
       if (outcome.ok || outcome.duplicate) {
         // G-B：提交成功 ⇒ 草稿镜像即清（草稿只是"未提交"的浏览器临时态）
         clearFormDraft(form.toolCallId)
@@ -7753,6 +8421,10 @@ export const useAiStore = defineStore('ai', {
      * 取消是用户已经做完的决定，故本地结算后立即按到达序补下一张，不干等结局帧。
      */
     async cancelGenerativeForm(toolCallId?: string): Promise<void> {
+      // 问题7：停止已经收口了表单卡与回灌，不再补发取消请求。
+      if (this.stopped) {
+        return
+      }
       if (toolCallId !== undefined && this.activeForm?.toolCallId !== toolCallId) {
         await this.cancelQueuedForm(toolCallId)
         return
@@ -7791,6 +8463,10 @@ export const useAiStore = defineStore('ai', {
      * 回灌失败的原因落段（卡面可见），不吞。
      */
     async cancelQueuedForm(toolCallId: string): Promise<void> {
+      // 问题7：停止已整队作废并以本地取消收口，不再补发回灌。
+      if (this.stopped) {
+        return
+      }
       const entry = this.queuedForms.find((item) => item.toolCallId === toolCallId)
       if (!entry) {
         return
@@ -7844,55 +8520,186 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 停止/取消动作的**当前轮 runId 证明链**（问题2）。
+     *
+     * <p>为什么不能直接用 `activeRunId`：`send()` 在开流前就把新轮宿主就位，但 `activeRunId`
+     * 要等 `start` 帧才更新 —— 第二轮 start 之前它仍指向**上一轮**。旧实现据此取消，既停了
+     * 一条已经结束的旧轮，又 abort 掉新轮唯一的 /chat 传输（新轮在服务端继续跑）。
+     *
+     * <p>可证明的判据（按优先级）：
+     * <ol>
+     * <li>`pendingAttachRunId`：接管入口在首个 await 之前同步登记、尚未完成建连的 run；</li>
+     * <li>`activeStreamRunId`：当前活动连接登记的 run（连接身份证明）；</li>
+     * <li>当前宿主消息的 `runId` 与 `activeRunId` 一致：这一轮自己的 start 帧钉在宿主上；</li>
+     * <li>`preparingRun`：权威快照/探测给出的准备中 run；</li>
+     * <li>没有当前宿主、且本端确实在途/挂起（send 收尾后的挂起轮、刷新接管窗口）：`activeRunId`。</li>
+     * </ol>
+     * 其余情形（尤其是 start 之前的第二轮、本轮已被换成新宿主）⇒ `null`：调用方走
+     * `stopIntent`，等这一轮自己的 start 到达后再精确补 cancel。
+     *
+     * <p><b>不修改 `activeRunId`</b>：它在恢复/重试路径仍有用途，这里只回答"能停谁"。
+     */
+    stoppableRunId(): string | null {
+      // 正在接管、尚未完成建连登记的那一轮（stop 与 reattach 同 tick 的窗口）。
+      if (pendingAttachRunId !== null) {
+        return pendingAttachRunId
+      }
+      if (this.activeStreamRunId !== null && this.activeStreamRunId !== '') {
+        return this.activeStreamRunId
+      }
+      if (activeRoundHostId !== null) {
+        const host = this.messages.find((item) => item.id === activeRoundHostId)
+        if (host) {
+          // 本轮宿主仍在：只认它自己 start 帧钉下的 runId（未钉 = start 之前，runId 不可证明）。
+          const hostRunId = host.runId ?? null
+          return hostRunId !== null && hostRunId === this.activeRunId ? hostRunId : null
+        }
+        // 宿主不在本实例的消息里（模块级宿主可能来自另一 store 实例 / 已换会话）——
+        // 不能据此判"无可停的轮"，继续按现场证据判断。
+      }
+      if (this.preparingRun !== null) {
+        return this.preparingRun.runId
+      }
+      if (this.suspended || this.loading) {
+        return this.activeRunId
+      }
+      return null
+    },
+
+    /**
+     * 停止闸下**允许放行的非终态工具结局帧**（问题5）：只认"段已经提交、结果在途"的证据。
+     *
+     * <p>停止矩阵：未提交段由 `stop()` 就地取消；已提交段（确认门已点过、表单已发出）保持
+     * 「已提交/结果待确认」，其真实 `tool_result` / `confirm_decision` / `frontend_tool_result`
+     * 仍要能收敛**这一段**。其余非终态帧（delta / 新工具 / 新请求 / 挂起）一律继续丢弃，
+     * 既不恢复整轮、也不新增正文/工具。
+     */
+    isSubmittedStopOutcomeFrame(
+      frame: SseFrame
+    ): frame is SseToolResultFrame | SseConfirmDecisionFrame | SseFrontendToolResultFrame {
+      if (frame.type !== 'tool_result' && frame.type !== 'confirm_decision'
+        && frame.type !== 'frontend_tool_result') {
+        return false
+      }
+      const toolCallId = frame.toolCallId
+      const hasPart = this.messages.some((message) => findToolPart(message, toolCallId) !== null)
+      // 证据必须落在**已存在的段**上：停止后不得为任何 toolCallId 新建段（新工具）。
+      if (!hasPart) {
+        return false
+      }
+      if (this.gateSubmissions[toolCallId] !== undefined) {
+        return true
+      }
+      for (const message of this.messages) {
+        const part = findToolPart(message, toolCallId)
+        if (!part) {
+          continue
+        }
+        // 表单提交窗口内（POST 已发出）：`stop()` 会把提交值写回段，保持"已提交"只读态。
+        if (part.name === GENERATIVE_FORM_TOOL && part.kind2 === 'FRONTEND'
+          && (part.status === 'pending' || part.status === 'running')
+          && part.submittedValues !== undefined && part.submittedValues !== null) {
+          return true
+        }
+        // 已批准的确认门（决策已送达，后端开始执行）：其结果仍属于这一段的真实结局。
+        if (part.decision === 'approved' && part.status === 'running') {
+          return true
+        }
+      }
+      return false
+    },
+
+    /**
      * M-19（2026-10-29，R1）：记下"本会话停止意向"（`stop()` 时后端还没给出 runId）。
      *
      * <p>记录宿主消息 id 是为了**归属可证明**：只有同一宿主的 start 帧才可能是被停的那一轮。
      * `transport` 是被保留下来等 start 的那条 /chat 连接（C2：不能 abort 它）。
      */
     noteStopIntent(transport: AbortController | null): void {
-      this.stopIntent = { hostMessageId: activeRoundHostId, at: Date.now(), transport }
+      const at = Date.now()
+      this.stopIntent = { hostMessageId: activeRoundHostId, at, transport }
+      if (transport !== null) {
+        // 意向以**传输句柄**为键：切身份 / 换会话后 store 现场被清掉，它仍跟着旧传输走。
+        rememberPendingStopIntent({
+          hostMessageId: activeRoundHostId,
+          at,
+          transport,
+          sessionId: this.sessionId === '' ? null : this.sessionId,
+          identity: this.sessionIdentity,
+          cancelOnly: false
+        })
+      }
     },
 
     /**
      * M-19（2026-10-29，R1）：拿到 runId（start 帧）后补一次真实 cancel。
      *
-     * <p>归属判据只有一条可用且可证明：**同一宿主消息的 start 帧**。会话级 409 里的 runId 无法
-     * 证明是本端被停的那一轮（可能是另一页签的新轮），故本函数只服务 start 帧（I5）。
+     * <p>归属判据只有一条可用且可证明：**同一传输 + 同一宿主消息的 start 帧**。不同宿主
+     * （另一轮 / 新轮）的 start **不清除**旧意向 —— 被停轮的 start 可能稍后才从它自己的
+     * 传输到达，届时仍要补 cancel。会话级 409 里的 runId 依旧不参与猜测（I5）。
      *
      * @param runId 刚拿到的 runId
      * @param hostMessageId 该 start 帧所属的助手宿主
+     * @param transport 送达该 start 帧的 /chat 传输（缺省 = 当前 `stopIntent` 记录的传输）
      * @returns 是否真的发起了 cancel（`false` = 没有意向 / 已过期 / 归属不符）
      */
-    cancelRunIfStopIntended(runId: string, hostMessageId: string): boolean {
-      const intent = this.stopIntent
-      if (intent === null || runId === '') {
+    cancelRunIfStopIntended(
+      runId: string,
+      hostMessageId: string,
+      transport?: AbortController | null
+    ): boolean {
+      if (runId === '') {
+        return false
+      }
+      const boundTransport = transport ?? this.stopIntent?.transport ?? null
+      if (boundTransport === null) {
+        return false
+      }
+      const intent = pendingStopIntentOf(boundTransport)
+      if (intent === undefined) {
         return false
       }
       if (Date.now() - intent.at > STOP_INTENT_TTL_MS) {
         // 过期的意向作废：绝不拿它取消一个后来的新轮
-        this.stopIntent = null
+        forgetPendingStopIntent(boundTransport)
+        if (this.stopIntent?.transport === boundTransport) {
+          this.stopIntent = null
+        }
         return false
       }
       if (intent.hostMessageId === null) {
-        // 停止时没有可归属的宿主（本端没有"这一轮"的证明）：不猜
+        // 停止时没有可归属的宿主（本端没有"这一轮"的证明）：不猜，等 TTL / 传输收尾
         return false
       }
       if (intent.hostMessageId !== hostMessageId) {
-        // 另一轮（新轮）的 start 已经到达 ⇒ 旧意向失去意义，就地清理（I5：新轮后不残留）。
-        // N5（R2）：顺带收掉挂在旧意向上的 /chat 传输 —— 它等的那一轮不可能是"被停的那一轮"了，
-        // 留着只是一条空连接（会一直挂到首帧超时）。归属判断不变：这里**不**取消任何 run。
-        this.stopIntent = null
-        intent.transport?.abort()
+        // 这条 start 不是被停的那一轮（不同宿主）：**不取消、也不清除意向**。
+        // 旧传输自己的 start 仍可能稍后到达，那是唯一能精确补 cancel 的证据。
         return false
       }
-      this.stopIntent = null
+      // 命中：消耗这一条意向；之后该传输再派发的任何帧都不得写本地现场。
+      forgetPendingStopIntent(boundTransport)
+      consumedStopTransports.add(boundTransport)
+      if (this.stopIntent?.transport === boundTransport) {
+        this.stopIntent = null
+      }
+      /**
+       * 切身份 / 换会话后的旧传输（cancelOnly）：只用**旧身份**取消旧 run，
+       * 不写当前 store 的 stoppedRunId / 忙态 / 镜像（不得污染新身份会话）。
+       */
+      if (intent.cancelOnly) {
+        void this.cancelStoppedRun(runId, intent.identity)
+        intent.transport.abort()
+        return true
+      }
       this.stoppedRunId = runId
       if (this.busyRun?.runId === runId) {
         this.busyRun = null
       }
+      // run 级停止墓碑随镜像落盘：refresh 后即使 cancel 没送达，也不把这一轮自动接回来。
+      this.writeMirrorNow()
       // C2：拿到 runId 才关本地连接 —— 先发 cancel，再收掉这条已经没用的 /chat 传输
-      void this.cancelStoppedRun(runId, this.sessionIdentity)
-      intent.transport?.abort()
+      void this.cancelStoppedRun(runId, intent.identity ?? this.sessionIdentity)
+      intent.transport.abort()
       return true
     },
 
@@ -7900,9 +8707,14 @@ export const useAiStore = defineStore('ai', {
      * M-19（R1）：某条 /chat 传输收尾时清理挂在它上面的停止意向。
      *
      * <p>传输结束仍没等到 start ⇒ 服务端没有这一轮（或帧丢了），意向再无落地机会；留着只会在
-     * TTL 内影响后续判断。
+     * TTL 内影响后续判断。只清**这条传输**的意向，不碰其它在等的 pre-start 停止。
      */
     dropStopIntentFor(transport: AbortController): void {
+      // 这条传输确实属于一次 pre-start 停止：收尾按"已停止"结算（不误报断流、不回稿）。
+      if (pendingStopIntents.has(transport)) {
+        consumedStopTransports.add(transport)
+      }
+      forgetPendingStopIntent(transport)
       if (this.stopIntent?.transport === transport) {
         this.stopIntent = null
       }
@@ -7928,6 +8740,230 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 轮次收口：清掉本轮 clientRequestId 关联（done/error/换轮/换会话）。
+     * 之后刷新不会再按旧 id 取消；后端映射按会话 TTL 自然过期（会话销毁时精确删除）。
+     */
+    clearClientRequestRound(): void {
+      this.pendingClientRequestId = null
+      this.clientRequestStopped = false
+    },
+
+    /**
+     * 停止闭环：按**发送前生成的 clientRequestId** 精确取消（runId 未知时的唯一证明）。
+     *
+     * <p>调用点：① start 之前停止（同页签 / 刷新后）；② 刷新恢复发现镜像里"本端已停止"。
+     * 后端映射按会话/身份隔离：run 已创建 ⇒ 写该 run 的取消旗标；尚未创建 ⇒ 留取消墓碑，
+     * 后续 /chat 在压缩/建快照/模型调用之前收敛。幂等、静默（失败不提示、不自动重试；
+     * 同一 id 本页只发一次，下一次刷新仍可再试）。
+     */
+    async cancelStoppedClientRequest(): Promise<void> {
+      const clientRequestId = this.pendingClientRequestId
+      const sessionId = this.sessionId
+      if (clientRequestId === null || sessionId === '') {
+        return
+      }
+      if (!beginClientRequestCancel(clientRequestId)) {
+        return
+      }
+      try {
+        await aiApi.cancelClientRequest(
+          { sessionId, clientRequestId },
+          { headers: identityHeaders(this.sessionIdentity) }
+        )
+      } catch {
+        // 后端不可达不影响本地已落地的停止
+      }
+    },
+
+    /**
+     * 同一 `clientRequestId` 的重复回执接管（停止闭环兼容批）。
+     *
+     * <p>同步登记本轮现场后立即返回 true（**不 await 整条 SSE**）：`pendingAttachRunId` 让
+     * stop/其它判据立刻能认到这一轮；原 send 的 finally 由调用方跳过，不会再封口宿主或清掉
+     * 接管现场。随后的 probe 在后台完成：
+     * <ul>
+     * <li>run 已就绪（200）⇒ 走既有 `reattachActive` 全量/增量接回；</li>
+     * <li>已有 start 但快照未建（202）⇒ 交给既有 `notePreparingState` 的 preparing 有界自动恢复；</li>
+     * <li>连 start/归档都还没有（404/503/0）⇒ 本类的有界 readiness 链继续 probe，等 run 可读后接回；
+     * 耗尽统一走 `notePreparingExhausted`（既有手动恢复出口），不无限等待。</li>
+     * </ul>
+     *
+     * @returns false = 已停/墓碑/宿主缺失/会话已换 —— 调用方必须按取消/中断结局收尾，不能返回 ok
+     */
+    adoptDuplicateClientRequest(runId: string, hostMessageId: string): boolean {
+      if (this.stopped || this.stoppedRunId === runId) {
+        return false
+      }
+      if (this.activeStreamRunId === runId) {
+        return true // 已有同一 run 的活动驱动：直接并入既有收帧
+      }
+      const host = this.messages.find((item) => item.id === hostMessageId && item.role === 'assistant')
+      if (!host) {
+        return false
+      }
+      const sessionId = this.sessionId
+      const epoch = roundEpoch
+      this.activeRunId = runId
+      this.loading = true
+      this.suspended = false
+      this.stopped = false
+      this.streamInterrupted = false
+      this.clearPreparingRun()
+      this.activeStreamRunId = null
+      this.activeStreamParked = false
+      activeRoundHostId = host.id
+      pendingAttachRunId = runId
+      host.runId = runId
+      host.streaming = true
+      host.done = false
+      // 原 send 的 /chat 传输已经失败；先收掉，避免它继续充当 currentAbort 干扰判活/停止目标。
+      // 先置空再 abort：旧 onClose 因此判定"非本轮"，不会再写提示或清场。
+      const stale = currentAbort
+      currentAbort = null
+      try {
+        stale?.abort()
+      } catch {
+        // 忽略：传输已失败，abort 仅清理句柄
+      }
+      void this.probeAndAttachDuplicateRun(runId, host.id, sessionId, epoch)
+      return true
+    },
+
+    /** 重复轮次的现场是否仍属于本次接管（停止/换轮/换会话/节点消失 ⇒ false）。 */
+    duplicateRoundStillCurrent(runId: string, hostMessageId: string, sessionId: string, epoch: number): boolean {
+      return !this.stopped
+        && this.stoppedRunId !== runId
+        && this.sessionId === sessionId
+        && roundEpoch === epoch
+        && this.activeRunId === runId
+        && this.messages.some((item) => item.id === hostMessageId && item.role === 'assistant')
+    },
+
+    /** 释放重复轮次的接管现场（停止/换会话后调用；只清**本 run**，不清后来新起的轮）。 */
+    releaseDuplicateScene(hostMessageId: string, runId: string): void {
+      if (pendingAttachRunId === runId) {
+        pendingAttachRunId = null
+      }
+      if (activeRoundHostId === hostMessageId) {
+        activeRoundHostId = null
+        // 只收本次接管的轮级进行态；新轮的 loading/host 已在别处登记，不会被这里清掉。
+        this.loading = false
+        this.suspended = false
+      }
+      if (this.activeStreamRunId === runId) {
+        this.activeStreamRunId = null
+        this.activeStreamParked = false
+      }
+    },
+
+    /** 首次 probe：就绪接回 / 202 交给 notePreparingState / 尚无帧则进入有界 readiness。 */
+    async probeAndAttachDuplicateRun(
+      runId: string,
+      hostMessageId: string,
+      sessionId: string,
+      epoch: number
+    ): Promise<void> {
+      const probe = await probeReattach(runId)
+      if (this.stopped || this.stoppedRunId === runId) {
+        this.releaseDuplicateScene(hostMessageId, runId)
+        return
+      }
+      if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+        // 现场已被停止/新轮/其它同 run 接管：不在这里清 pendingAttachRunId（它可能已是
+        // 另一条同 run 接管入口的同步登记）；停止路径由 releaseDuplicateScene 精确清理。
+        return
+      }
+      if (probe.status === 200) {
+        void this.reattachActive(runId, { hostMessageId, lastSeq: this.runSeq[runId] ?? 0 })
+        if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
+          this.clearPreparingRun()
+          return
+        }
+      }
+      if (pendingAttachRunId === runId) {
+        pendingAttachRunId = null
+      }
+      if (probe.status === 202) {
+        // 已有 start/归档帧：复用既有 preparing 有界自动恢复（快照建成后走 restoreInFlightRound）。
+        this.notePreparingState(runId, probe.preparing?.elapsedMs ?? 0)
+        return
+      }
+      // 连 start/归档都还没有：保持"同一轮待就绪"，由有界 readiness 链继续 probe。
+      this.beginDuplicateReadiness(runId, hostMessageId, sessionId, epoch, probe.preparing?.elapsedMs ?? 0)
+    },
+
+    /**
+     * 尚无归档帧时的有界 readiness：复用 `startAutoRecovery('preparing')` 的预算/调度，
+     * 每拍 probe 既有 run；就绪即接回，耗尽走 `notePreparingExhausted`（既有手动恢复出口）。
+     */
+    beginDuplicateReadiness(
+      runId: string,
+      hostMessageId: string,
+      sessionId: string,
+      epoch: number,
+      elapsedMs: number
+    ): void {
+      if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+        return
+      }
+      this.notePreparingHeartbeat(runId, elapsedMs)
+      this.activeRunId = runId
+      this.loading = true
+      this.suspended = false
+      this.streamInterrupted = false
+      this.resetAutoRecovery('preparing')
+      this.startAutoRecovery(
+        'preparing',
+        async () => {
+          if (this.stopped || this.stoppedRunId === runId) {
+            this.releaseDuplicateScene(hostMessageId, runId)
+            return true
+          }
+          if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+            return true
+          }
+          const probe = await probeReattach(runId)
+          if (this.stopped || this.stoppedRunId === runId) {
+            this.releaseDuplicateScene(hostMessageId, runId)
+            return true
+          }
+          if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+            return true
+          }
+          if (probe.status === 200) {
+            void this.reattachActive(runId, { hostMessageId, lastSeq: this.runSeq[runId] ?? 0 })
+            if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
+              this.clearPreparingRun()
+              return true
+            }
+            return false // 驱动暂被占用/预算未恢复：继续下一拍
+          }
+          if (probe.status === 202) {
+            // 已有 start/归档帧：本链只负责把"完全不可读"等到"可进入既有 preparing 恢复"。
+            // 让出本链（返回 true）后切换到既有 notePreparingState（快照建成后 restoreInFlightRound
+            // 接回）；用一次性定时器避开同类自动恢复的 in-flight 互斥。
+            this.notePreparingHeartbeat(runId, probe.preparing?.elapsedMs ?? 0)
+            setTimeout(() => {
+              if (this.stopped || this.stoppedRunId === runId) {
+                return
+              }
+              if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+                return
+              }
+              this.notePreparingState(runId, probe.preparing?.elapsedMs ?? 0)
+            }, 0)
+            return true
+          }
+          if (probe.preparing) {
+            this.notePreparingHeartbeat(runId, probe.preparing.elapsedMs)
+          }
+          return false
+        },
+        () => this.notePreparingExhausted()
+      )
+    },
+
+    /**
      * 停止本轮（批G · S1/S2/S3/S4 收敛口径）。
      *
      * <p>
@@ -7938,22 +8974,32 @@ export const useAiStore = defineStore('ai', {
      * <p>
      * 新口径 = **本地就地收敛**（不依赖后端帧，后端不可达也成立）：
      * <ol>
-     * <li>所有 pending/running 工具段 → {@code cancelled}、{@code requiresAction=false}，
+     * <li>**未提交**的 pending/running 工具段 → {@code cancelled}、{@code requiresAction=false}，
      *     清 activeForm / activePreview / 挂起队列 / suspended ⟹ 输入框立刻解禁、卡变只读；
      *     **未提交表单草稿保留**（2026-10-29：停止不是"放弃这张表"，见
-     *     {@link suspendActiveFormDrafts}）；</li>
-     * <li>本轮助手消息打 {@code stopped} 标记（S3「已停止」，与「继续」入口互斥）；</li>
-     * <li>立即写镜像（S4：半截正文 + done，刷新后仍可见）；</li>
+     *     {@link suspendActiveFormDrafts}）；**已提交、结果在途**的段（确认门已点过 / 表单
+     *     POST 已发出）不伪记取消，保留「已提交/结果待确认」语义；</li>
+     * <li>本轮助手消息打 {@code stopped} 标记（S3「已停止」，与「继续」入口互斥）——
+     *     **零产出轮同样要打**（停止是消息级事实，不是"没有可续内容"的失败轮）；</li>
+     * <li>立即写镜像（S4：done + stopped + 半截正文 + run 级停止墓碑，刷新后仍可见且不自动接回）；</li>
      * <li>幂等（S2）：{@code stopping} 在途时重复点击直接返回；{@code alreadyCancelled} 照读。</li>
      * </ol>
+     *
+     * <p><b>停止目标只认可证明的当前轮 runId</b>（见 {@link stoppableRunId}）：第二轮 start
+     * 之前 `activeRunId` 还是上一轮，旧实现会取消旧轮并 abort 新轮的唯一传输；现在 runId 未知
+     * 时只记 {@link stopIntent}，等这一轮 start 到达后精确补 cancel。
      */
     async stop(): Promise<void> {
       if (this.stopping) {
         return // S2：停止在途，重复点击不重复 POST
       }
-      const runId = this.activeRunId
-      // 幂等判据：有在途连接 / 挂起等待 / 有一轮尚未被停过的 runId。已停过的轮不再重复 POST。
-      const hadRound = this.loading || this.suspended || (runId !== null && !this.stopped)
+      // 问题2：只停**当前轮可证明**的 runId。start 之前（第二轮）拿到的 null 才是正确答复 ——
+      // 绝不能回落到 activeRunId（那是上一轮），也不能 abort 掉新轮等 start 的传输。
+      const runId = this.stoppableRunId()
+      // 幂等判据：有在途连接 / 挂起等待 / 准备中 / 有一轮尚未被停过的 runId。已停过的轮不重复 POST。
+      // 轮末（loading/suspended 皆假、无准备中、无可证明 runId）点停止不得把正常完成轮改 canceled。
+      const hadRound = this.loading || this.suspended || this.preparingRun !== null
+        || (runId !== null && !this.stopped)
       if (!hadRound) {
         return // 幂等：没有可停的轮（不写任何提示）
       }
@@ -7971,6 +9017,10 @@ export const useAiStore = defineStore('ai', {
       // O02：本端已对这条 run 作出停止决定 —— 此后指回它的 409 只是"停止尚未传播"的残影，
       // 不是"上一轮仍在进行中"（判据见 isAuthoritativeBusyRun）；同时撤掉指向它的忙提示。
       if (runId !== null) {
+        // 这一轮已经有可证明的 runId ⇒ 本 store 的"等 start"指针不再需要。
+        // 模块 Map 里**其它传输**的意向不在此清除（它们可能属于另一个被停轮，仍要等 start）。
+        // 同一传输上的意向会随下方 abort 的 onClose（dropStopIntentFor）自然作废。
+        this.stopIntent = null
         this.stoppedRunId = runId
         if (this.busyRun?.runId === runId) {
           this.busyRun = null
@@ -7979,8 +9029,18 @@ export const useAiStore = defineStore('ai', {
         // M-19（2026-10-29，R1）：start 帧还没到 ⇒ runId 未知，现在没有 cancel 的对象。
         // 记下"本会话停止意向"，并**保留这条 /chat 传输**（不 abort，见下方 abort 分支）：
         // start 一到即按 runId 精确补一次真实 cancel（C2：abort 掉就等于把唯一的到达路径掐了）。
+        // 归属按**传输 + 宿主**判定（见 cancelRunIfStopIntended）：不同宿主（另一轮 / 新轮）的
+        // start 不取消、也不清除这份意向；被停轮自己的 start 稍后仍会从这条传输到达并补 cancel。
         this.noteStopIntent(currentAbort)
+        // 停止闭环：runId 未知时还有一条**不依赖 start 帧**的精确通道 —— 发送前生成的
+        // clientRequestId（后端已按它绑定/留墓碑）。同页签立即补一次；失败不影响本地停止，
+        // 刷新后还会再试一次。
+        if (this.pendingClientRequestId !== null) {
+          void this.cancelStoppedClientRequest()
+        }
       }
+      // 停止闭环：把"本端已停止"随本轮 id 一起写镜像，刷新恢复据此补取消并拒绝自动重挂。
+      this.clientRequestStopped = this.pendingClientRequestId !== null
       // M08-R2：停止 = 放弃这一轮 ⇒ 释放驱动所有权与预算（停止是终态动作，不是"连接结束"）
       this.forgetRunStreamDrive(runId ?? undefined)
       // 2026-10-29 收口：停止 = 现场作废 ⇒ 所有自动恢复排期与预算一并作废
@@ -8032,6 +9092,15 @@ export const useAiStore = defineStore('ai', {
       // 批次3：停止后压缩/准备中阶段一并收口（否则阶段条会挂在一个已放弃的轮上）
       this.resetCompactionProgress()
       this.clearPreparingRun()
+      // 问题9：停止收敛本轮残留的恢复期与提示（不新增提示；已停止内容照旧保留）。
+      this.restoringRecovery = false
+      clearNotice(this)
+      // 问题5：表单 POST 已发出（status='submitting'）⇒ 把用户提交的值快照到段上，
+      // 让这一段保持既有「✓ 已提交 / 结果待确认」只读态，而不是被下面伪记成取消。
+      const submittingForm = this.activeForm
+      if (submittingForm !== null && submittingForm.status === 'submitting') {
+        this.holdSubmittedFormPart(submittingForm.toolCallId, submittingForm.values)
+      }
       // 2026-10-29 收口：停止只收起表单卡，**保留未提交草稿**（只有明确放弃才清 —— 见
       // `suspendActiveFormDrafts`）。停掉一轮不该顺手删用户手填的内容。
       this.suspendActiveFormDrafts()
@@ -8046,11 +9115,13 @@ export const useAiStore = defineStore('ai', {
       clearUiUndo()
       this.uiUndoEntry = null
       this.uiUndoToolCallId = null
-      // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）
+      // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）——
+      // 已提交/结果在途的段由该方法跳过（问题5）。
       this.cancelRoundParts()
-      // 本轮的确认门提交态 / 勾选态随轮收口（stop 不走 done 帧，不能指望结局帧来清）
-      this.clearGateSubmissions()
-      // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped 与半截正文）
+      // 本轮的勾选态随轮收口；提交态只收**已有结局**的那些（stop 不走 done 帧）：
+      // 结果仍在途的已提交决策保留「已提交」标记，其真实结局帧到达时还能收敛对应段。
+      this.settleGateSubmissionsOnStop()
+      // S3/S4：消息尾标记 + 立即落镜像（含 done、stopped、半截正文与 run 级停止墓碑）
       this.markStoppedMessage()
       this.writeMirrorNow()
       // Task 3：cancel 回包可能很慢（后端不可达时到 HTTP 上限）—— 期间可能已换身份/换会话/起新轮。
@@ -8090,12 +9161,16 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * S1：把本轮所有未收尾的工具段收敛为 {@code cancelled}（`pending` / `running` /
+     * S1：把本轮所有**未提交**的未收尾工具段收敛为 {@code cancelled}（`pending` / `running` /
      * `requiresAction` 三条入口都收），并重算投影 —— `pendingToolCall` 立刻变 null。
      *
      * <p>
      * 批G · S13（真机回归）：停止是**一次决策**，不是"没人管" —— 段上同时落 `decision='cancel'`，
      * 否则只读态按"无决策元数据"回退 status 落到「已超时」（用户主动停掉的一轮被读成系统超时）。
+     *
+     * <p>问题5：**已提交、结果在途**的段不在此列 —— 确认门已点过（`gateSubmissions` 有记录，
+     * 或段已落 approved/running），表单 POST 已发出（`submittedValues` 已回写）。它们保留
+     * 「已提交/结果待确认」，只收 `requiresAction`（不停掉它唯一的结局通道）。
      */
     cancelRoundParts(): void {
       for (const message of this.messages) {
@@ -8105,6 +9180,17 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (!part.requiresAction && part.status !== 'pending' && part.status !== 'running') {
+            return
+          }
+          const submitted = this.gateSubmissions[part.toolCallId] !== undefined
+            || (part.decision === 'approved' && part.status === 'running')
+            || (part.name === GENERATIVE_FORM_TOOL && part.kind2 === 'FRONTEND'
+              && part.submittedValues !== undefined && part.submittedValues !== null)
+          if (submitted) {
+            if (part.requiresAction) {
+              message.parts.splice(index, 1, { ...part, requiresAction: false })
+              touched = true
+            }
             return
           }
           message.parts.splice(index, 1, {
@@ -8122,19 +9208,31 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * S3：给本轮助手消息打「已停止」标记并封口（有正文或工具段才标 —— 空气泡不标）。
+     * S3：给本轮助手消息打「已停止」标记并封口 —— **不论有没有产出**。
      * 同时清掉错误卡：一条被用户停掉的回答不是"出错"。
      *
      * <p>
-     * 批G · S14（真机回归）：标记要落在**本轮宿主**（`activeRoundHostId`）上 —— "最后一条助手消息"
-     * 在 GF/确认卡轮里可能是快照重建出来的空宿主，标错了消息就等于没标。停止是消息级事实：
-     * 一旦打上不再由后续帧推导覆盖（迟到帧只补段状态，不改这个标记）。
+     * 批G · S14（真机回归）：标记要落在**本轮宿主**（`activeRoundHostId`）上 —— 其它助手消息
+     * 可能是快照重建出来的其它轮宿主，标错了消息就等于没标。宿主缺失时只退到"本轮在途宿主"
+     * （最后一条用户消息之后未收尾的那条）或带本 runId 的宿主；**绝不**回落到任意一条已完成回答。
+     * 停止是消息级事实：一旦打上不再由后续帧推导覆盖（迟到帧只补段状态，不改这个标记）。
+     *
+     * <p>问题1：旧实现只在"有正文或工具段"时写 `stopped`，零产出轮因此没有停止事实 ——
+     * 面板把 `lastRoundOutcome='cancelled'` 当恢复候选，停止后仍冒出「重试本轮」。现在
+     * 零产出轮同样落 `stopped`（恢复入口的统一排除依据；不新增任何 UI）。
      */
     markStoppedMessage(): void {
       const roundHost = this.messages.find(
         (message) => message.id === activeRoundHostId && message.role === 'assistant'
       ) ?? null
-      const last = roundHost ?? [...this.messages].reverse().find((message) => message.role === 'assistant')
+      // 宿主判定只认本轮：刷新的准备中阶段可能一条本轮消息都还没有 —— 此时不能回落到
+      // "最后一条助手消息"（那是上一轮已完成的回答，标成已停止会连带排除它的恢复入口）。
+      const stoppedRunHost = this.stoppedRunId !== null
+        ? [...this.messages].reverse().find(
+            (message) => message.role === 'assistant' && message.runId === this.stoppedRunId
+          ) ?? null
+        : null
+      const last = roundHost ?? this.findInFlightHost() ?? stoppedRunHost
       if (!last) {
         return
       }
@@ -8142,10 +9240,7 @@ export const useAiStore = defineStore('ai', {
       last.done = true
       sealTrailingStreamPart(last)
       deriveProjections(last)
-      const hasBody = last.content.trim() !== '' || last.parts.some((part) => part.kind !== 'text')
-      if (hasBody) {
-        last.stopped = true
-      }
+      last.stopped = true
       last.errorCard = null
     },
 
@@ -8296,7 +9391,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 身份在**这里**捕获：旧轮属于旧身份；cancel 的身份头显式随请求发出（不被拦截器换成新身份）。
-      const oldRunId = this.activeRunId
+      // 问题2：取消目标只认可证明的当前轮 runId。start 之前的第二轮 `activeRunId` 仍指上一轮，
+      // 拿它取消会误杀旧轮、放任新轮（新身份接管的是新会话，不给旧会话补取消）。
+      const oldRunId = this.stoppableRunId()
       const oldIdentity = this.sessionIdentity
       if (oldRunId !== null && oldRunId !== '') {
         void this.cancelStoppedRun(oldRunId, oldIdentity)
@@ -8518,6 +9615,8 @@ export const useAiStore = defineStore('ai', {
       // （410 SESSION_PURGED 走的正是 adoptFreshSession：不清就会在这之后去接管原会话）。
       clearHandoffOrigin()
       clearReturnIntentPending()
+      // 换会话 = 真正换轮：旧会话"正在接管但未登记"的 run 不再属于当前轮（问题2）。
+      pendingAttachRunId = null
       // B1 收口修（C-1）：换会话 = 真正换轮 —— 旧会话在途的前端工具结局不得写进新会话
       roundEpoch += 1
       // B2：旧会话排队中的工具随会话作废（判据见 `enqueueFrontendTool`）
@@ -8528,12 +9627,26 @@ export const useAiStore = defineStore('ai', {
       clearReplayToolFacts()
       // M-2b：旧会话的快照串行队列不得落进新会话
       this.restoredPendingQueue = []
-      // R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
-      // 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）
-      try {
-        currentAbort?.abort()
-      } catch {
-        // 忽略：中止失败不影响重置
+      /**
+       * R5①（issue#5）：在跑的轮次先中止 —— 否则 loading 不复位（输入区一直禁用到流结束），
+       * 且后续帧会写进**已清空**的 messages（按 assistantId 找不到宿主 ⇒ 孤儿消息/孤儿帧）。
+       *
+       * <p>问题2（返修）：例外 = 这条传输上挂着**start 之前停止**的意向。它是唯一能等到被停轮
+       * runId 的通道 —— 此时不 abort，改成"只取消"：旧轮 start 到达后按**旧身份**补 cancel，
+       * 且不把旧 run 的 stoppedRunId/镜像/繁忙态写进新身份会话。切换本身仍同步完成，不等待它。
+       */
+      // 本会话所有 pre-start 停止意向转"只取消"（不只是 currentAbort 那条）：
+      // 任意一条旧传输稍后收到 start，都只能按旧身份取消，绝不写新会话的 stoppedRunId/镜像。
+      markSessionStopIntentsCancelOnly(oldSessionId === '' ? null : oldSessionId, oldIdentity)
+      const abortingTransport = currentAbort
+      if (abortingTransport !== null && pendingStopIntents.has(abortingTransport)) {
+        // 保留传输等旧轮 start；consumed/cancelOnly 由 send 的帧入口拦截，不写新现场。
+      } else {
+        try {
+          abortingTransport?.abort()
+        } catch {
+          // 忽略：中止失败不影响重置
+        }
       }
       currentAbort = null
       activeRoundHostId = null
@@ -8587,7 +9700,10 @@ export const useAiStore = defineStore('ai', {
       this.activeStreamRunId = null
       this.activeStreamParked = false
       this.stoppedRunId = null
-      // M-19：停止意向同属旧会话现场（不得跨会话取消任何轮）
+      // 停止闭环：clientRequestId 关联同属旧会话现场（后端映射仍按旧会话 TTL/销毁清理）。
+      this.clearClientRequestRound()
+      // M-19：停止意向指针同属旧会话现场。**但**模块级 Map 里属于旧会话的条目会保留并
+      // 转为"只取消"（问题2）：旧轮 start 到达后仍按旧身份补 cancel，且绝不写新会话现场。
       this.stopIntent = null
       // M08-R2：驱动所有权/预算同样是旧会话现场
       this.forgetRunStreamDrive()
@@ -9033,9 +10149,11 @@ export const useAiStore = defineStore('ai', {
      * 前端只消费 `clientCleanup` 精确清理本地残留。
      */
     async resetSession(): Promise<void> {
-      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于销毁与清本地残留
+      // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于销毁与清本地残留。
+      // 问题2：oldRunId 取**可证明的当前轮**（见 stoppableRunId）；start 之前的新轮不冒充上一轮，
+      // 它的收口由后面的会话销毁兜底（DELETE 会同时 cancel 该会话的在途轮）。
       const oldSessionId = this.sessionId
-      const oldRunId = this.activeRunId
+      const oldRunId = this.stoppableRunId()
       // 销毁回包会用到**旧身份**的镜像键/草稿前缀 —— 必须在清场之前捕获。
       const purgeIdentity = this.identity
       // N09/M07：用户主动新建对话 = 本页签自己的会话意图 ⇒ 复制来源的接手资格作废
@@ -9138,8 +10256,12 @@ export const useAiStore = defineStore('ai', {
        * 终态帧仍放行（abort 竞态下 `done(cancelled)` 可能已经到达，轮次级收口需要它）。
        * `stopped` 在每个新连接建立处（send / reattachActive / resumeSnapshotStream /
        * restoreInFlightRound / resetSession）复位 ⇒ 本闸门只作用于被停止的那一轮，不跨轮生效。
+       *
+       * <p>问题5：停止后仍要放行**已提交段的真实结局帧**（{@link isSubmittedStopOutcomeFrame}：
+       * 已点过的确认门 / 已发出的表单提交），只允许收敛对应段；delta / 新工具 / 新请求帧继续丢弃，
+       * 不恢复整轮、不新增正文或工具。
        */
-      if (this.stopped && !isTerminalFrame(frame)) {
+      if (this.stopped && !isTerminalFrame(frame) && !this.isSubmittedStopOutcomeFrame(frame)) {
         return
       }
       /**
@@ -9172,6 +10294,31 @@ export const useAiStore = defineStore('ai', {
 
       // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
       const seq = frameSeq(frame)
+
+      /**
+       * 问题5：停止轮**已提交段的真实结局帧** —— 只收敛这一段，不进入正常帧分支。
+       *
+       * <p>停止后 `stop()` 已把轮次收口；这里若走正常 switch，`tool_result` 还会触发
+       * 发布/作业同步等新动作，`confirm_decision` 还会改挂起态。允许的只有"把这一段写成
+       * 它的真实结局"，其余轮次级/动作级副作用一律不发生。
+       */
+      if (this.stopped && this.isSubmittedStopOutcomeFrame(frame)) {
+        if (seq !== null && alreadyApplied(message, seq)) {
+          return
+        }
+        applyFrameToParts(message, frame)
+        this.clearGateSubmission(frame.toolCallId)
+        this.clearGateAck(frame.toolCallId)
+        deriveProjections(message)
+        if (seq !== null) {
+          const frameRunId = frame.runId ?? this.activeRunId
+          if (frameRunId !== null) {
+            this.runSeq = recordRunSeq(this.runSeq, frameRunId, seq)
+          }
+          markApplied(message, seq)
+        }
+        return
+      }
 
       if (!ownedByActiveRound) {
         /**
@@ -9506,6 +10653,8 @@ export const useAiStore = defineStore('ai', {
         case 'done': {
           // M-d（fix2）：本轮已收口 —— 决策 POST 在途时据此判定"不得再续收"
           roundTerminalSeq += 1
+          // 停止闭环：终态后本轮 clientRequestId 关联结束（刷新不再按旧 id 取消）。
+          this.clearClientRequestRound()
           // 批次3：轮末清掉阶段态（完成提示不跨轮残留；runId 不随阶段态外溢）
           this.resetCompactionProgress()
           this.clearPreparingRun()
@@ -9516,6 +10665,12 @@ export const useAiStore = defineStore('ai', {
           // 旧口径的 `message.pendingCall = pendingCall?.status === 'pending' ? null : ...` 直写
           // 已删除 —— 挂起卡由段派生（requiresAction=false ⇒ 派生为 null）
           sealTrailingStreamPart(message)
+          // 问题5：取消终帧到达时，表单 POST 可能已发出 —— 先固定「已提交、结果待确认」，
+          // 再做过期/取消收敛，别把用户真实发生的提交伪记成超时或取消。
+          const submittingForm = this.activeForm
+          if (frame.cancelled && submittingForm !== null && submittingForm.status === 'submitting') {
+            this.holdSubmittedFormPart(submittingForm.toolCallId, submittingForm.values)
+          }
           expireResidueToolParts(message)
           // FE-25：轮终态 ⇒ 所有"等人"类单例一并收口（表单 / 上传交接 / 表格预览 + 失效标记）。
           // 旧口径只收 activeForm：已收口的轮仍能被卡片推动（上传交接继续回灌、预览还能"应用"），
@@ -9523,13 +10678,11 @@ export const useAiStore = defineStore('ai', {
           this.cleanupTerminalInteractionState()
           this.suspended = false
           if (frame.cancelled) {
-            // 批G · S1/S3：取消轮把仍 pending/running 的段一并收敛（后端不会再发 tool_result），
-            // 并在消息尾打「已停止」标记（与「继续」入口互斥）。
+            // 批G · S1/S3：取消轮把仍 pending/running 的**未提交**段一并收敛（后端不会再发
+            // tool_result），并在消息尾打「已停止」标记（与「继续」入口互斥）。
+            // 问题1：零产出轮同样要打停止事实 —— 否则面板会把这次取消读成可重试的失败轮。
             this.cancelRoundParts()
-            const hasBody = message.content.trim() !== '' || message.parts.some((part) => part.kind !== 'text')
-            if (hasBody) {
-              message.stopped = true
-            }
+            message.stopped = true
             this.lastRoundOutcome = 'cancelled'
           }
           // 截断专项：`done.extra.truncated` 只在 finish_reason=length 时出现（后端口径）。
@@ -9550,9 +10703,26 @@ export const useAiStore = defineStore('ai', {
         case 'error': {
           // M-d（fix2）：与 done 同口径 —— 收口后不得再续收（不对终态重连）
           roundTerminalSeq += 1
+          // 停止闭环：终态后本轮 clientRequestId 关联结束（刷新不再按旧 id 取消）。
+          this.clearClientRequestRound()
           // 批次3：终态清掉阶段态；批次2 的 unconfirmed / 错误卡语义不受影响（本处不碰）
           this.resetCompactionProgress()
           this.clearPreparingRun()
+          /**
+           * 问题4：已停止轮的后到 error 帧**不写错误卡、不写错误正文、不改轮次结局**。
+           * 主动 abort / cancel 竞态下后端仍可能发出 error（含 NETWORK_ERROR 类），
+           * 但这一轮的结局是"用户停止"，不是"本轮出错"。只做终态封口。
+           */
+          if (this.stopped || (frame.runId !== undefined && this.stoppedRunId === frame.runId)) {
+            message.streaming = false
+            message.done = true
+            message.stopped = true
+            message.errorCard = null
+            sealTrailingStreamPart(message)
+            this.suspended = false
+            this.followupReady = false
+            break
+          }
           message.streaming = false
           message.done = true
           // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级
@@ -9564,6 +10734,24 @@ export const useAiStore = defineStore('ai', {
           // （`pendingToolCall` 变 null）。只有真实待人卡才允许保持等待；自动工具没有卡，
           // 若 `suspended` 仍留真值就会伪造“等待确认”并锁住输入。
           this.suspended = false
+          /**
+           * 停止闭环：`AI_RUN_CANCELLED`（含派生后缀）是**用户取消**的中性终态，不是错误。
+           * 与 `done{cancelled:true}` 同等收口：未提交段就地取消（已提交/结果在途段保留），
+           * 消息打 `stopped`，`lastRoundOutcome='cancelled'`；不写错误卡、错误通知，也不出继续/重试。
+           * 只处理基础码 `AI_RUN_CANCELLED`，其它错误码行为不变。
+           */
+          if (isCancelledTerminalError(frame)) {
+            this.cancelRoundParts()
+            message.stopped = true
+            message.errorCard = null
+            // 取消不是断流、不是错误：本轮残留的重试/断流提示一并收口（不新增提示）。
+            this.streamInterrupted = false
+            clearNotice(this)
+            this.lastRoundOutcome = 'cancelled'
+            this.followupReady = false
+            this.clearGateSubmissions()
+            break
+          }
           // AR-13：关键错误归错误卡（不再进通知条）。卡挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           // 只有专属 Alert 码（buildErrorCard 返回 null）才回落到 error 级通知。
@@ -10129,7 +11317,7 @@ export const useAiStore = defineStore('ai', {
       // cancelled/skipped 各有落点，不再一律折成 failed）。
       const status: ToolRunStatus = toolStatusOfOutcome(execution.outcome)
       // 治理 P0-1 / P03：**先回灌受理，再写最终状态**。回灌是一段真实 await 窗口（最坏 60s）：
-      // 这段里用户仍可点「停止」，而 `cancelRoundParts` 只收 pending/running 段 —— 先把段写成
+      // 这段里用户仍可点「停止」，而 `cancelRoundParts` 只收 pending/running 的**未提交**段 —— 先把段写成
       // succeeded 就等于把这个窗口关掉（本轮已停、卡却仍写「已成功」）。顺序反过来之后：
       // 窗口内段仍是 running（可被停止取消），后端受理后**仍在同轮**才落终态。
       const submitted = await this.submitFrontendToolResult(

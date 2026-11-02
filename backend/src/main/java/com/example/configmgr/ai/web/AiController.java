@@ -17,6 +17,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CancelledRunFinalizer;
+import com.example.configmgr.ai.run.ClientRequestRegistry;
 import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -89,6 +90,9 @@ import java.util.concurrent.RejectedExecutionException;
  * <tr><td>{@code POST /api/ai/chat}</td><td>SSE 一轮对话（首包 {@code start}，终帧
  * {@code done}/{@code error}）；同 sessionId 第二轮 → <b>409 携进行中 runId</b>；
  * 挂起池饱和 → <b>503 SUSPEND_POOL_SATURATED</b>；无 key → 503 AI_UNAVAILABLE</td></tr>
+ * <tr><td>{@code POST /api/ai/cancel/client-request}</td><td>停止闭环 additive：按
+ * {@code sessionId + clientRequestId} 精确取消（run 未创建则写取消墓碑，随后 /chat 在压缩/建快照/
+ * 模型调用前收敛）；不扫描 run、不用 clientRequestId 指定 runId</td></tr>
  * <tr><td>{@code POST /api/ai/confirm}</td><td>确认门决策（放行/拒绝）；重复 toolCallId →
  * 409 DUPLICATE_TOOL_CALL_ID，未知 id → 409 UNKNOWN_TOOL_CALL</td></tr>
  * <tr><td>{@code POST /api/ai/frontend-tool-result}</td><td>前端工具结果回灌（同一套幂等口径）；
@@ -230,6 +234,15 @@ public class AiController {
 	private SheetSwitches sheetSwitches;
 
 	/**
+	 * 停止闭环：{@code clientRequestId} ↔ run 的关联/取消墓碑。
+	 *
+	 * <p>字段注入（构造器签名不变 ⇒ 既有 {@code new AiController(...)} 用例零触碰）；
+	 * 未注入（轻装配单测）时 /chat 不带该字段的旧行为逐字不变，新端点回 503（未装配，如实失败）。
+	 */
+	@Autowired(required = false)
+	private ClientRequestRegistry clientRequests;
+
+	/**
 	 * AI 表格工具治理批：表格采样/改动计数（{@code /health.sheet.counters}）。未注入时少这一段。
 	 */
 	@Autowired(required = false)
@@ -320,10 +333,43 @@ public class AiController {
 					"reason", "missing_session_or_message");
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 message 均为必填"));
 		}
+		// 停止闭环 additive 字段：形状非法在入口 400（不进 Redis、不占会话门）。缺省/空白 = 旧客户端。
+		String clientRequestId = StringUtils.hasText(request.clientRequestId()) ? request.clientRequestId() : null;
+		if (clientRequestId != null && !ClientRequestRegistry.isValid(clientRequestId)) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request.sessionId(), null,
+					"reason", "invalid_client_request_id");
+			return json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 形状非法（1..128 位，字母数字 . _ : -）"));
+		}
 		if (!this.redisAvailability.isAvailable()) {
 			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), request.sessionId(), null,
 					"reason", "redis_unavailable");
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		/**
+		 * 停止闭环 / 重复请求：同一 {@code clientRequestId} 的重试（网络抖动导致前端重发同一条 /chat）
+		 * 必须识别为**同一个既有请求** —— 不新建 run、不占新会话门、不启动第二条驱动。
+		 *
+		 * <p>只要映射已绑定 {@code RUN:<runId>}，直接回既有 409 {@code SESSION_BUSY} 形态 +
+		 * additive 标记 {@code duplicateRequest/clientRequestId}；前端据此走既有 events/reattach
+		 * 自动收帧（活动轮继续、终态轮回放终局），不会显示"消息没发出"。
+		 * 已取消墓碑不在这里拦：仍按既有 claim → 取消优先收敛（不恢复执行）。
+		 */
+		if (clientRequestId != null && this.clientRequests != null) {
+			String boundRunId = null;
+			try {
+				boundRunId = this.clientRequests.boundRunId(request.sessionId(), clientRequestId);
+			}
+			catch (RuntimeException ex) {
+				// 读失败按"未绑定"继续：后面的 claim 仍是权威判定（它也会失败则按 503 如实失败）。
+				log.debug("clientRequestId 绑定预读失败 sessionId={}：{}", request.sessionId(), ex.getMessage());
+			}
+			if (boundRunId != null) {
+				deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, request.sessionId(), boundRunId,
+						"reason", "duplicate_client_request");
+				return json(HttpStatus.CONFLICT,
+						duplicateClientRequestBody(request.sessionId(), clientRequestId, boundRunId));
+			}
 		}
 		// 批① 闸门 1：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
 		// 零宽填充不该算进用户的长度上限；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
@@ -367,7 +413,7 @@ public class AiController {
 		String modelText = sanitized.text();
 		// 归一后的文本 / 闸后的 context 才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
 		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
-				request.params());
+				request.params(), clientRequestId);
 		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在归一化/长度之后、会话门之前 ——
 		// 与既有闸序一致（归一化与长度先过、超长先撞），且拒绝不占 in-flight 位。
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
@@ -437,6 +483,52 @@ public class AiController {
 			return json(HttpStatus.CONFLICT, body);
 		}
 
+		/**
+		 * 停止闭环：在**创建 run / 出首帧之前**把 clientRequestId 与本轮绑定。
+		 *
+		 * <p>取消可能早于本次 /chat（刷新后补取消）：映射在取消端已写成 {@code CANCELLED} 墓碑，
+		 * 这里的 claim 原子地识别它、不覆盖，并给本轮写上取消旗标；服务在压缩/建快照/模型调用之前
+		 * 收敛为 {@code done{cancelled:true}}。同一 clientRequestId 已绑定既有 run ⇒ 视为**同一请求的
+		 * 重复到达**：释放新会话门，回 409 SESSION_BUSY + `duplicateRequest` 标记让前端接回既有轮
+		 * （绝不覆盖映射、绝不新建第二条驱动、绝不取消另一轮）。
+		 */
+		if (this.clientRequests != null && clientRequestId != null) {
+			ClientRequestRegistry.Claim claim;
+			try {
+				claim = this.clientRequests.claim(sessionId, clientRequestId, runId);
+			}
+			catch (RuntimeException ex) {
+				log.warn("clientRequestId 绑定失败（Redis 不可用）sessionId={} runId={}：{}", sessionId, runId,
+						ex.getMessage());
+				this.sessionGate.release(sessionId, runId);
+				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
+						"client_request_registry_unavailable");
+				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+			}
+			if (claim.state() == ClientRequestRegistry.ClaimState.ALREADY_BOUND) {
+				// 预读与 claim 之间的竞态：映射已绑定既有 run ⇒ 同样按重复请求接回既有轮，
+				// **不**占用新会话门、不新建驱动。只有映射值不可解析时才按真正的坏请求 400。
+				this.sessionGate.release(sessionId, runId);
+				String existingRunId = claim.runId();
+				if (existingRunId != null && !existingRunId.isBlank()) {
+					deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, existingRunId,
+							"reason", "duplicate_client_request");
+					return json(HttpStatus.CONFLICT,
+							duplicateClientRequestBody(sessionId, clientRequestId, existingRunId));
+				}
+				deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, sessionId, null, "reason",
+						"client_request_id_reused");
+				return json(HttpStatus.BAD_REQUEST,
+						errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 已被另一轮使用，请使用新的请求 id"));
+			}
+			if (claim.state() == ClientRequestRegistry.ClaimState.CANCELLED) {
+				// 取消早于 run 创建：先写本轮取消旗标（同身份键），服务第一条检查即收敛，不跑模型。
+				this.cancellations.cancel(runId, this.runStore.instanceId());
+				log.info("clientRequestId 已取消（run 尚未创建），本轮将直接按取消收尾 sessionId={} runId={}",
+						sessionId, runId);
+			}
+		}
+
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		out.attach(emitter);
@@ -502,6 +594,17 @@ public class AiController {
 			AiTrace.event("turn_rejected", "code", "SUSPEND_POOL_SATURATED");
 			this.sessionGate.release(sessionId, runId);
 			this.runRegistry.close(runId);
+			// 停止闭环兼容：这一轮**明确没有开始**。释放本次 clientRequestId 绑定，
+			// 让前端同 id 的瞬时重试能重新 claim（否则会被一条从未启动的映射当成重复请求）。
+			if (this.clientRequests != null && clientRequestId != null) {
+				try {
+					this.clientRequests.releaseBinding(sessionId, clientRequestId, runId);
+				}
+				catch (RuntimeException releaseEx) {
+					log.debug("释放未启动的 clientRequestId 绑定失败 sessionId={}：{}", sessionId,
+							releaseEx.getMessage());
+				}
+			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, poolSaturated(runId));
 		}
 		finally {
@@ -1379,6 +1482,101 @@ public class AiController {
 			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId, "cancelled",
 					false));
 		}
+		return ResponseEntity.ok(cancelKnownRun(runId, snapshot));
+	}
+
+	/**
+	 * 停止闭环 additive 端点：{@code POST /api/ai/cancel/client-request}。
+	 *
+	 * <p>只用**会话 + clientRequestId** 精确定位：映射由 /chat 在创建 run 前写入（按身份隔离的
+	 * 会话 HASH），客户端无法用它指定 runId，也不会扫描租户/run 集合。
+	 * <ul>
+	 * <li>映射为 {@code RUN:<runId>} ⇒ 转成取消墓碑并写该 run 的取消旗标（等同按 runId 取消，
+	 *     跨实例生效；挂起轮/运行轮沿用既有收尾交棒）；</li>
+	 * <li>映射不存在 ⇒ 写 {@code CANCELLED} 墓碑并 200：随后到达的 /chat 在 claim 处识别，
+	 *     在压缩/建快照/模型调用/工具副作用之前收敛为已取消 —— <b>不 404、不放任后台继续跑</b>；</li>
+	 * <li>已取消 ⇒ 幂等返回（{@code alreadyCancelled=true}），不重复副作用。</li>
+	 * </ul>
+	 */
+	@PostMapping("/cancel/client-request")
+	public ResponseEntity<?> cancelClientRequest(@RequestBody(required = false) ClientRequestCancelRequest request) {
+		if (request == null || !StringUtils.hasText(request.sessionId())
+				|| !StringUtils.hasText(request.clientRequestId())) {
+			return json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 clientRequestId 均为必填"));
+		}
+		if (!ClientRequestRegistry.isValid(request.clientRequestId())) {
+			return json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 形状非法（1..128 位，字母数字 . _ : -）"));
+		}
+		if (this.clientRequests == null) {
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		ClientRequestRegistry.CancelOutcome outcome;
+		try {
+			outcome = this.clientRequests.cancel(request.sessionId(), request.clientRequestId());
+		}
+		catch (RuntimeException ex) {
+			log.warn("按 clientRequestId 取消失败 sessionId={} clientRequestId={}：{}", request.sessionId(),
+					request.clientRequestId(), ex.getMessage());
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("cancelled", true);
+		body.put("alreadyCancelled", outcome.alreadyCancelled());
+		body.put("clientRequestId", request.clientRequestId());
+		body.put("sessionId", request.sessionId());
+		body.put("runId", outcome.runId());
+		if (outcome.runId() == null) {
+			body.put("pendingRun", true);
+			body.put("note", "取消墓碑已写入；若该请求随后到达，会在压缩/建快照/模型调用前直接按取消收尾");
+			return ResponseEntity.ok(body);
+		}
+		// runId 来自本身份的映射 ⇒ 写本身份取消旗标（键也按身份隔离；不需要扫描/猜归属）。
+		Map<String, Object> cancelBody;
+		try {
+			RunSnapshot snapshot = ownedRun(outcome.runId());
+			cancelBody = cancelKnownRun(outcome.runId(), snapshot);
+		}
+		catch (RuntimeException ex) {
+			log.warn("按 clientRequestId 取消关联 run 失败 runId={}：{}", outcome.runId(), ex.getMessage());
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		body.putAll(cancelBody);
+		body.put("cancelled", true);
+		body.put("alreadyCancelled", outcome.alreadyCancelled()
+				|| Boolean.TRUE.equals(cancelBody.get("alreadyCancelled")));
+		return ResponseEntity.ok(body);
+	}
+
+	/**
+	 * 同一 {@code clientRequestId} 重复到达时的响应体（additive 标记 + 既有 SESSION_BUSY 形态）。
+	 *
+	 * <p>为什么沿用 409 SESSION_BUSY：调用方已经有"带 runId 走 events/reattach"的成熟路径；
+	 * {@code duplicateRequest=true} + 回显 {@code clientRequestId} 让前端只对**自己这一条重试**
+	 * 自动接回，不引入普通 409 的猜测行为。
+	 */
+	private Map<String, Object> duplicateClientRequestBody(String sessionId, String clientRequestId,
+			String runId) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", ErrorCodes.SESSION_BUSY);
+		body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
+		body.put("sessionId", sessionId);
+		body.put("runId", runId);
+		body.put("reattach", "/api/ai/events/" + runId);
+		body.put("duplicateRequest", true);
+		body.put("clientRequestId", clientRequestId);
+		body.put("degraded", false);
+		return body;
+	}
+
+	/**
+	 * 按 runId 写取消事实并组装返回体（既有 /cancel 与 clientRequestId 取消共用）。
+	 *
+	 * <p>调用方负责归属判断；本方法只做"写旗标 + 挂起轮/运行轮收尾交棒"。快照可为 null
+	 * （"已 start、快照未建"窗口）：那也照常写旗标，绝不因没有快照而让取消不可达。
+	 */
+	private Map<String, Object> cancelKnownRun(String runId, RunSnapshot snapshot) {
 		Map<String, Object> before = this.cancellations.status(runId);
 		CancellationRegistry.CancelResult result = this.cancellations.cancel(runId, this.runStore.instanceId());
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -1414,7 +1612,7 @@ public class AiController {
 					? "取消以 Redis 标志为准；本实例已交棒一次取消收尾（重取租约后落 CANCELLED 终态/终帧）"
 					: "取消以 Redis 标志为准；运行中的轮次会在事件边界以 done{cancelled:true} 收尾");
 		}
-		return ResponseEntity.ok(body);
+		return body;
 	}
 
 	/** 取消标志现状（只读，取证用；<b>先核归属</b>：跨身份读是状态探测面）。 */

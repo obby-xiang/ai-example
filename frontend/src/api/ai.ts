@@ -170,6 +170,30 @@ export function cancel(runId: string, config?: AxiosRequestConfig): Promise<AiCa
   return post<AiCancelResult>(`/ai/cancel/${encodeURIComponent(runId)}`, undefined, config)
 }
 
+/**
+ * POST /api/ai/cancel/client-request（停止闭环 additive 端点）。
+ *
+ * 只凭**会话 + clientRequestId** 精确定位：后端映射在 /chat 创建 run 前写入，客户端无法用它
+ * 指定 runId，也不扫描 run；run 尚未创建时写取消墓碑，随后到达的 /chat 在压缩/建快照/模型调用
+ * 前收敛。幂等（重复刷新/重复取消不重复副作用）。
+ */
+export function cancelClientRequest(
+  request: { sessionId: string; clientRequestId: string },
+  config?: AxiosRequestConfig
+): Promise<{
+  cancelled: boolean
+  alreadyCancelled: boolean
+  clientRequestId?: string
+  sessionId?: string
+  runId?: string | null
+  pendingRun?: boolean
+  redisFlagWritten?: boolean
+  degraded?: boolean
+  note?: string
+}> {
+  return post('/ai/cancel/client-request', request, config)
+}
+
 /** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。 */
 export function history(sessionId: string): Promise<AiHistory> {
   return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}`)
@@ -313,6 +337,7 @@ export const aiApi = {
   confirm,
   frontendToolResult,
   cancel,
+  cancelClientRequest,
   history,
   getContext,
   deleteHistory,

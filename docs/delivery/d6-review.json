@@ -238,6 +238,13 @@
       "reason": "本批移除预估行数工具、业务页面入口和计数端点，并新增压缩现状Demo；D6未描述该功能，迁移接口、存储键及多实例契约不变",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:499d2e872d3955b285bc0c655cc5801a26e32ad92cf2b440fa9582382ab31468",
+      "status": "synced",
+      "reason": "已同步停止闭环新增的clientRequestId取消端点、ai:creq会话级身份隔离键、单键Cluster边界及重复请求接回契约",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }
