@@ -3,6 +3,7 @@ package com.example.configmgr.ai.history;
 import com.example.configmgr.ai.context.ToolResultClearing;
 import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -13,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 /**
  * 把"一轮历史"投影成 transcript 条目（B2 的唯一投影口）。
@@ -132,16 +134,35 @@ public final class TranscriptEntries {
 	 * 一轮终态历史 → 本轮条目（只投影<b>本 run</b>的 assistant/tool，避免把快照里携带的旧轮重复写入）。
 	 *
 	 * <p>判据：工具条目的 toolCallId 必须出现在本 run 的 pending 表；assistant 必须含本 run 的
-	 * 工具调用，或它是历史里最后一条 assistant（成功/取消写点追加的终稿/半截）。用户消息不写
-	 * （轮首已写，且快照里的 current user 没有归属标记）。
+	 * 工具调用，或它是历史里最后一条 assistant（成功/取消写点追加的终稿/半截）。用户条目这里不写
+	 * —— 轮首写点负责，轮首失败由终态写点用快照 {@code requestText} 补写。
 	 *
 	 * @param includeLastAssistant 成功/取消 = true（追加了终稿）；空回复/失败 = false（没有新终稿）
 	 */
 	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
 			String runId, long turnStartedAtMs, boolean includeLastAssistant) {
+		// 兼容旧调用：无已解析状态、也不查台账（fallback 只认条目自身的 executed 标志）。
+		return fromRunTerminal(messages, pendings, runId, turnStartedAtMs, includeLastAssistant, Map.of(), null);
+	}
+
+	/**
+	 * 同上，并让 tool 条目使用<b>与 assistant {@code toolCallStates} 同一份</b>已解析状态。
+	 *
+	 * <p>为什么必须传：tool 条目与 assistant 状态各算一遍（一个查台账、一个不查）就会分叉成
+	 * {@code assistant=EXECUTED} 而 {@code tool=APPROVED}。调用方在同一次遍历里解析一次，两边共用。
+	 *
+	 * @param resolvedStatusByToolCallId toolCallId → 已解析 status（生产路径必填，与 assistant 状态同源）
+	 * @param executedInLedger            同一会计口径的台账谓词：<b>仅</b>用于 statuses 缺失时的 fallback，
+	 *                                    保证回落也带台账证据（不会把已执行卡回落成 APPROVED）；
+	 *                                    传 {@code null} 只保留旧 5 参调用的行为，不扩大
+	 */
+	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
+			String runId, long turnStartedAtMs, boolean includeLastAssistant,
+			Map<String, String> resolvedStatusByToolCallId, Predicate<String> executedInLedger) {
 		if (messages == null || messages.isEmpty() || runId == null || runId.isBlank()) {
 			return List.of();
 		}
+		Map<String, String> statuses = resolvedStatusByToolCallId == null ? Map.of() : resolvedStatusByToolCallId;
 		int lastAssistant = -1;
 		for (int i = 0; i < messages.size(); i++) {
 			if (messages.get(i) instanceof AssistantMessage) {
@@ -186,10 +207,15 @@ public final class TranscriptEntries {
 						continue;
 					}
 					EnvelopeFacts facts = factsOf(pending, response.responseData());
+					String status = statuses.get(response.id());
+					if (status == null) {
+						// 缺失 status 的回落也必须带同一份台账证据（否则可能 assistant=EXECUTED、tool=APPROVED）
+						status = settledStatus(pending, executedInLedger);
+					}
 					out.add(new TranscriptEntry(toolEntryId(runId, response.id()), "tool", null, runId,
 							turnStartedAtMs, atMs, null, null, null, null, null, null, response.id(),
 							hasText(pending.getName()) ? pending.getName() : response.name(), pending.getKind(),
-							pending.getStatus(), result, false, facts.code(), facts.truncated(), facts.strategy(),
+							status, result, false, facts.code(), facts.truncated(), facts.strategy(),
 							facts.originalChars(), facts.returnedChars()));
 				}
 			}
@@ -202,40 +228,145 @@ public final class TranscriptEntries {
 		return fromMessages(messages, Map.of(), true, 0L);
 	}
 
-	/** 挂起批次的状态映射（与收敛侧同一组键；pending 不写 outcome）。 */
-	public static Map<String, Object> pendingStates(List<PendingToolCall> pendings) {
-		Map<String, Object> states = new LinkedHashMap<>();
+	/**
+	 * 每张卡<b>只解析一次</b>状态：{@code toolCallId → 已解析 status}（未决且 {@code executed} 或台账命中
+	 * ⇒ {@code EXECUTED}）。{@code executedInLedger} 只在未决状态下被问一次，同一张卡不会重复全表读。
+	 *
+	 * <p>批次结算写点用它：assistant 的 {@code toolCallStates} 与 tool 条目的 status 必须同源，
+	 * 否则会出现 assistant=EXECUTED 而 tool=APPROVED 的分叉。
+	 */
+	public static Map<String, String> settledStatuses(List<PendingToolCall> pendings,
+			Predicate<String> executedInLedger) {
+		Map<String, String> statuses = new LinkedHashMap<>();
+		if (pendings == null) {
+			return statuses;
+		}
 		for (PendingToolCall pending : pendings) {
 			if (pending == null || pending.getToolCallId() == null) {
 				continue;
 			}
-			Map<String, Object> state = new LinkedHashMap<>();
-			state.put("status", pending.getStatus());
-			if (hasText(pending.getKind())) {
-				state.put("kind", pending.getKind());
+			statuses.put(pending.getToolCallId(), settledStatus(pending, executedInLedger));
+		}
+		return statuses;
+	}
+
+	/** 用已解析 status 生成段级状态映射（{@link #settledStatuses} 的产物；缺失 id 不写）。 */
+	public static Map<String, Object> statesFrom(List<PendingToolCall> pendings, Map<String, String> statuses) {
+		Map<String, Object> states = new LinkedHashMap<>();
+		if (pendings == null) {
+			return states;
+		}
+		Map<String, String> resolved = statuses == null ? Map.of() : statuses;
+		for (PendingToolCall pending : pendings) {
+			if (pending == null || pending.getToolCallId() == null) {
+				continue;
 			}
-			if (hasText(pending.getOutcome())) {
-				state.put("outcome", pending.getOutcome());
+			String status = resolved.get(pending.getToolCallId());
+			if (status == null) {
+				continue;
 			}
-			if (hasText(pending.getCode())) {
-				state.put("code", pending.getCode());
-			}
-			if (PendingToolCall.APPROVED.equals(pending.getStatus())) {
-				state.put("decision", "approved");
-			}
-			else if (PendingToolCall.REJECTED.equals(pending.getStatus())
-					|| PendingToolCall.REJECTED_ARGUMENTS.equals(pending.getStatus())) {
-				state.put("decision", "rejected");
-			}
-			else if (PendingToolCall.CANCELLED.equals(pending.getStatus())) {
-				state.put("decision", "cancel");
-			}
-			if (pending.getResolvedAtMs() > 0) {
-				state.put("decidedAt", pending.getResolvedAtMs());
-			}
-			states.put(pending.getToolCallId(), state);
+			states.put(pending.getToolCallId(), toolCallState(pending, status));
 		}
 		return states;
+	}
+
+	/**
+	 * 单条待决条目 → 历史段状态（{@code {status, outcome?, code?, kind?, decision?, decidedAt?,
+	 * submittedValues?}}）。
+	 *
+	 * <p><b>唯一投影</b>：{@code /history}（transcript）与记忆窗口的 {@code toolCallStates}
+	 * 都从这里派生，避免"刷新看到的卡"与"模型回放看到的卡"各说一套。
+	 * {@code status} 由调用方给出（可能是升格后的 {@link PendingToolCall#EXECUTED}）：
+	 * 未决状态不写 {@code outcome}（写 unknown 会让前端把"等待中"兜底成失败）。
+	 */
+	public static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
+		Map<String, Object> state = new LinkedHashMap<>();
+		state.put("status", status);
+		if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
+			ToolOutcome persisted = ToolOutcome.fromWire(pending.getOutcome());
+			state.put("outcome", (persisted == null ? ToolOutcome.fromStatus(status) : persisted).wire());
+		}
+		String code = pending.effectiveCode();
+		if (code != null) {
+			state.put("code", code);
+		}
+		String kind = pending.getKind();
+		if (kind != null && !kind.isBlank()) {
+			state.put("kind", kind);
+		}
+		String decision = decisionOf(pending.getStatus());
+		if (decision != null) {
+			state.put("decision", decision);
+		}
+		if (pending.getResolvedAtMs() > 0) {
+			state.put("decidedAt", pending.getResolvedAtMs());
+		}
+		if (PendingToolCall.KIND_FRONTEND.equals(kind) && pending.getResultText() != null
+				&& !pending.getResultText().isBlank()) {
+			state.put("submittedValues", pending.getResultText());
+		}
+		return state;
+	}
+
+	/**
+	 * 条目实际状态：<b>已执行但条目态仍停在 PENDING/APPROVED</b> 时按 {@link PendingToolCall#EXECUTED}
+	 * 投影（确认门工具执行后条目态永久停留 APPROVED，只认 status 会把已执行卡刷成"待确认"）。
+	 *
+	 * <p>证据只有两个：条目自身的 {@code executed}（执行完成时写入）与台账命中（{@code executedInLedger}）。
+	 * 两者都没有时原样返回条目态 —— 未执行不能靠猜测升格。
+	 *
+	 * <p><b>例外：{@code outcome=blocked} 不升格</b>。认领失败（他实例已认领/已在执行）会把条目写成
+	 * {@code outcome=blocked} + {@code executed=true}，但本次<b>没有执行</b>；按 executed 升格成
+	 * {@code EXECUTED} 会让"未执行"显示成已执行。这里投影成 {@link PendingToolCall#BLOCKED}
+	 * （既有终态，前端映射 blocked）；其余 outcome 不参与本判据（避免扩散）。
+	 */
+	public static String settledStatus(PendingToolCall pending, Predicate<String> executedInLedger) {
+		String status = pending.getStatus();
+		if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
+			return status;
+		}
+		if (ToolOutcome.fromWire(pending.getOutcome()) == ToolOutcome.BLOCKED) {
+			return PendingToolCall.BLOCKED;
+		}
+		if (pending.isExecuted()) {
+			return PendingToolCall.EXECUTED;
+		}
+		String toolCallId = pending.getToolCallId();
+		boolean ledgerHit = executedInLedger != null && toolCallId != null
+				&& Boolean.TRUE.equals(executedInLedger.test(toolCallId));
+		return ledgerHit ? PendingToolCall.EXECUTED : status;
+	}
+
+	/**
+	 * 条目级终态（非 PENDING / APPROVED 的全部状态码）判定：<b>本方法即单一事实源</b>
+	 * （记忆收敛侧与 transcript 都委托到这里；不写数量，增删状态时不必同步改注释）。
+	 */
+	public static boolean isSettledStatus(String status) {
+		return PendingToolCall.EXECUTED.equals(status)
+			|| PendingToolCall.REJECTED.equals(status)
+			|| PendingToolCall.REJECTED_ARGUMENTS.equals(status)
+			|| PendingToolCall.TIMEOUT.equals(status)
+			|| PendingToolCall.FRONTEND_RESULT.equals(status)
+			|| PendingToolCall.FRONTEND_CANCELLED.equals(status)
+			|| PendingToolCall.CANCELLED.equals(status)
+			|| PendingToolCall.BLOCKED.equals(status)
+			|| PendingToolCall.SKIPPED.equals(status)
+			|| PendingToolCall.PRECHECK_FAILED.equals(status)
+			|| PendingToolCall.SHEET_DISABLED.equals(status);
+	}
+
+	/** 条目态 → 决策口径（APPROVED → approved / 拒绝 → rejected / 取消 → cancel；其它 null）。 */
+	private static String decisionOf(String status) {
+		if (PendingToolCall.APPROVED.equals(status)) {
+			return "approved";
+		}
+		if (PendingToolCall.REJECTED.equals(status) || PendingToolCall.REJECTED_ARGUMENTS.equals(status)) {
+			return "rejected";
+		}
+		if (PendingToolCall.CANCELLED.equals(status)) {
+			return "cancel";
+		}
+		return null;
 	}
 
 	/** assistant 条目的稳定 id：有工具调用按首个 toolCallId，无调用按轮。 */

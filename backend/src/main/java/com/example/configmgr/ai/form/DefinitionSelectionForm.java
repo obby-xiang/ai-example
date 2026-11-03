@@ -2,6 +2,7 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -12,6 +13,10 @@ import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
+import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.task.entity.Task;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,14 +45,15 @@ import java.util.Set;
  * <li><b>新任务链</b>：本轮台账里有 {@code create_task} 且回执带真实任务号 —— 这是"用户主动新建"
  * 的<b>唯一</b>证据。用户只是浏览/打开既有页面（没有 create_task）时一律不弹，旧任务配置也不会
  * 成为"新任务的已知配置"（判据只看本轮台账与<b>新任务</b>自己的权威值）；</li>
- * <li><b>判据按任务状态而非导航瞬时成功</b>：{@code page}/{@code taskId}/{@code step} 的判定
- * （见下一条）全部来自权威上下文。<b>不</b>要求本批有一条成功的 {@code navigate_to}：前端导航有
- * 等待上限，超时（现场 8 秒）时页面可能早已被用户/前端带到选择步骤，而"导航成功"这条瞬时边永远
- * 等不到 —— 把它当门槛会让表单在真实现场<b>永不出现</b>。去重不靠这条边，靠"同一任务只挂一次"的
- * 确定性 {@code toolCallId}（最后一条）；</li>
+ * <li><b>页面归属证据</b>：{@code page}/{@code taskId}/{@code step} 的判定（见下一条）来自权威
+ * 上下文；"当前页属于新任务"另需本 run 有过成功导航到该任务的
+ * {@code navigate_to(arguments.taskId)=当前任务}（待决条目回执）。导航失败/超时没有回执 ⇒
+ * 交回模型路径，不猜页面；本批是否刚好结算了这条导航不是必要条件（导航后的续帧/回执形态
+ * 不应让表单消失）；去重仍靠"同一任务只挂一次"的确定性 {@code toolCallId}（最后一条）；</li>
  * <li><b>停在选择步骤</b>：上下文页是导出向导、任务号就是本轮新建的那个、权威步骤 {@code SELECT_DEFS}；</li>
  * <li><b>配置未知</b>：任务槽位里没有 {@code defCodes}（与 {@link GenerativeFormGuard} 的放行判据
- * 同一份 {@link TaskSlots}）—— 已知配置时宿主不弹，让模型直接走 {@code select_definitions}；</li>
+ * 同一份 {@link TaskSlots}）—— 已知配置时宿主不弹表，改由
+ * {@link #parkSelectDefinitionsIfDue} 经既有 {@code select_definitions} 通道直接代选；</li>
  * <li><b>目录可枚举</b>：目录非空、可读，且条数不超过平铺上限
  * （{@link GenerativeFormRules#MAX_OPTIONS}）。空目录/读取失败/超上限一律<b>不生成残缺表单</b> ——
  * 交回既有失败恢复与模型侧路径，绝不下发一张"选了也没用"的空表；</li>
@@ -114,6 +120,20 @@ public class DefinitionSelectionForm extends HostForm {
 	/** 导出向导页（{@link ContextBuilder#SELECTION_PAGE_IDS} 的成员）。 */
 	static final String EXPORT_PAGE = "export";
 
+	/** 导入向导页（{@link ContextBuilder#SELECTION_PAGE_IDS} 的成员）。 */
+	static final String IMPORT_PAGE = "import";
+
+	/** 宿主导航的 {@code toolCallId} 前缀（后接任务号：同一任务只导航一次）。 */
+	public static final String NAVIGATE_TOOL_CALL_ID_PREFIX = "host-nav-";
+
+	/** 首次宿主导航非 OK 终结后的<b>唯一一次</b>重试后缀（{@code host-nav-<taskId>-r2}）。 */
+	public static final String NAVIGATE_RETRY_SUFFIX = "-r2";
+
+	/** 宿主代选的 {@code toolCallId} 前缀（后接任务号：同一任务只代选一次）。 */
+	public static final String SELECT_TOOL_CALL_ID_PREFIX = "host-def-select-";
+
+	private static final ObjectMapper JSON = new ObjectMapper();
+
 	private final DefinitionCatalog catalog;
 
 	@Autowired
@@ -126,6 +146,333 @@ public class DefinitionSelectionForm extends HostForm {
 	/** 宿主为某个任务生成的表单 {@code toolCallId}（确定性 = 天然去重）。 */
 	public static String toolCallId(long taskId) {
 		return TOOL_CALL_ID_PREFIX + taskId;
+	}
+
+	/**
+	 * 由宿主经既有前端 {@code navigate_to} 通道把新建任务送进对应向导页（导出 / 导入）。
+	 *
+	 * <p><b>两个触发点（都只看当前 {@code settledBatch}）</b>：
+	 * <ol>
+	 * <li><b>本批成功结算 {@code create_task}</b>（{@code outcome=OK} 且回执带真实任务号）—— 首发
+	 *     {@code host-nav-<taskId>}。台账里"曾经建过任务"不算，否则无在飞工具的旧 run 恢复时会仅凭
+	 *     历史台账把用户拉回向导页；页面相等也不作为"新任务已打开"的证据（旧任务 A 的 {@code export}
+	 *     页可能正开着），前端对同一任务的导航本身幂等，故创建成功即下发；</li>
+	 * <li><b>本批里第一次宿主导航 {@code host-nav-<taskId>} 刚以非 OK 终态结算</b> —— 只重发一次
+	 *     {@code host-nav-<taskId>-r2}。这是"首次导航失败后没有 OK 证据、确定性 id 又永久去重"
+	 *     的唯一有界恢复：{@code PENDING} 不重发、模型自发导航或其它导航失败不触发、{@code -r2}
+	 *     再失败不再重发（第二次失败交回模型/UI），旧 run 恢复（本批没有这条失败条目）同样不触发。</li>
+	 * </ol>
+	 *
+	 * <p>两个触发点都要求 {@code createdTaskInRun} 与当前 {@code context.taskId} 绑定、任务类型
+	 * 可判定（首发优先取 {@code create_task} 入参 type，重试取上下文权威类型）；首发要求本批没有
+	 * 其它 {@code navigate_to}，重试要求本批除那条失败的首发外没有别的 {@code navigate_to}。
+	 *
+	 * @return {@code true} = 已挂起导航：调用方本拍<b>不得</b>再驱动模型（导航结果会经续跑回来）
+	 */
+	public boolean parkNavigateIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
+			List<Message> history) {
+		if (runId == null || context == null || history == null || settledBatch == null || !parkEnabled()) {
+			return false;
+		}
+		try {
+			Long createdTaskId = createdTaskInRun(runId);
+			if (createdTaskId == null || !createdTaskId.equals(context.getTaskId())) {
+				// 不是本轮新建并已绑定的任务：不改既有页面（旧 run 恢复同口径）
+				return false;
+			}
+			boolean retry = false;
+			String page;
+			PendingToolCall created = settledCreateTask(settledBatch);
+			if (created != null) {
+				Long createdInBatch = RunContextRefresher.taskIdFromText(created.getResultText());
+				if (!createdTaskId.equals(createdInBatch)) {
+					return false;
+				}
+				String type = taskTypeOf(created.getArguments());
+				if (type == null) {
+					// 上下文已绑定该新任务（上面的判据），类型可用其权威值
+					type = context.getTaskType();
+				}
+				page = wizardPage(type);
+				if (page == null) {
+					return false;
+				}
+				if (handledInBatch(settledBatch, AiToolNames.NAVIGATE_TO)) {
+					// 本批已有导航（成功或失败）：不重复下发
+					return false;
+				}
+			}
+			else {
+				PendingToolCall failed = failedFirstHostNavigation(settledBatch, createdTaskId);
+				if (failed == null) {
+					// 本批没有"刚失败的第一次宿主导航"：不因历史台账/旧失败把用户拉回页面
+					return false;
+				}
+				retry = true;
+				page = wizardPage(context.getTaskType());
+				if (page == null) {
+					return false;
+				}
+				if (otherNavigateInBatch(settledBatch, failed.getToolCallId())) {
+					// 本批还有模型自发/其它导航：不抢发第二次
+					return false;
+				}
+			}
+			String toolCallId = NAVIGATE_TOOL_CALL_ID_PREFIX + createdTaskId
+					+ (retry ? NAVIGATE_RETRY_SUFFIX : "");
+			if (alreadyIssued(runId, toolCallId)) {
+				// 首发已发过；重试 id 只允许一次（-r2 再失败不会再发）
+				return false;
+			}
+			Map<String, Object> arguments = new LinkedHashMap<>();
+			arguments.put("page", page);
+			arguments.put("taskId", createdTaskId);
+			Optional<String> json = toJson(arguments);
+			if (json.isEmpty()) {
+				return false;
+			}
+			log.info("{}任务 #{}，宿主下发 navigate_to(page={}, id={}) runId={}",
+					retry ? "首次宿主导航非 OK 终结，重试一次" : "本批新建", createdTaskId, page, toolCallId, runId);
+			return park(runId, history,
+					withToolTimeout(frontendTool(toolCallId, AiToolNames.NAVIGATE_TO, json.get())));
+		}
+		catch (RuntimeException ex) {
+			log.warn("宿主导航未能下发（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * 已到 {@code EXPORT/SELECT_DEFS}、配置已知、且<b>本 run 已成功导航到当前新建任务</b>时，由宿主经
+	 * 既有前端 {@code select_definitions} 通道代为选择（{@code mode=REPLACE}，只形成前端草案，
+	 * 业务库仍由前端下一步提交）。
+	 *
+	 * <p>导航证据：只有本 run 成功结算过 {@code navigate_to(arguments.taskId=当前任务)} 时，才把这份
+	 * {@code SELECT_DEFS} 页面当成新任务的页面（旧任务 A 的页面不得冒充新任务 B）；没有证据就交回
+	 * 模型，不猜。配置未知时<b>不</b>走这里：沿用 {@link #parkIfDue} 的平铺多选表单。
+	 * 本批已有 {@code select_definitions}（成功或失败）不重复；同一任务用确定性 id 去重。
+	 * 选择成功后的推进仍由 {@link #parkAdvanceIfDue} 在下一跳完成。
+	 *
+	 * @return {@code true} = 已挂起代选：调用方本拍<b>不得</b>再驱动模型
+	 */
+	public boolean parkSelectDefinitionsIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
+			List<Message> history) {
+		if (runId == null || context == null || history == null || !parkEnabled()) {
+			return false;
+		}
+		try {
+			Long createdTaskId = createdTaskInRun(runId);
+			if (createdTaskId == null || !createdTaskId.equals(context.getTaskId())) {
+				return false;
+			}
+			if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
+				return false;
+			}
+			if (!navigatedToTaskInRun(runId, createdTaskId)) {
+				// 没有"本 run 已导航到该新任务"的证据（含导航失败/超时）：页面归属不确定，交回模型
+				return false;
+			}
+			List<String> codes = TaskSlots.fromExtra(context.getExtra()).defCodes();
+			if (codes.isEmpty()) {
+				// 配置未知：交给平铺多选表单
+				return false;
+			}
+			if (handledInBatch(settledBatch, AiToolNames.SELECT_DEFINITIONS)) {
+				// 本批已处理（含失败）：不重复下发，让既有路径继续
+				return false;
+			}
+			String toolCallId = SELECT_TOOL_CALL_ID_PREFIX + createdTaskId;
+			if (alreadyIssued(runId, toolCallId)) {
+				return false;
+			}
+			Map<String, Object> arguments = new LinkedHashMap<>();
+			arguments.put("codes", codes);
+			arguments.put("mode", "REPLACE");
+			Optional<String> json = toJson(arguments);
+			if (json.isEmpty()) {
+				return false;
+			}
+			log.info("配置已知，宿主下发 select_definitions 代选 runId={} taskId={} codes={}", runId, createdTaskId,
+					codes);
+			return park(runId, history,
+					withToolTimeout(frontendTool(toolCallId, AiToolNames.SELECT_DEFINITIONS, json.get())));
+		}
+		catch (RuntimeException ex) {
+			log.warn("宿主代选配置项未能下发（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** 任务类型 → 向导页（{@code navigate_to} 的同源取值）；未知类型 = {@code null}。 */
+	private static String wizardPage(String taskType) {
+		if (taskType == null || taskType.isBlank()) {
+			return null;
+		}
+		if (Task.TaskType.EXPORT.name().equalsIgnoreCase(taskType.trim())) {
+			return EXPORT_PAGE;
+		}
+		if (Task.TaskType.IMPORT.name().equalsIgnoreCase(taskType.trim())) {
+			return IMPORT_PAGE;
+		}
+		return null;
+	}
+
+	/** 前端工具入参序列化；失败 = {@code empty}（不下发半截参数）。 */
+	private static Optional<String> toJson(Map<String, Object> arguments) {
+		try {
+			return Optional.of(JSON.writeValueAsString(arguments));
+		}
+		catch (Exception ex) {
+			log.warn("宿主前端工具入参序列化失败，本次不下发：{}", ex.getMessage());
+			return Optional.empty();
+		}
+	}
+
+	/** 本批里成功创建任务的那条 {@code create_task}（回执带真实任务号）；没有 = {@code null}。 */
+	private static PendingToolCall settledCreateTask(List<PendingToolCall> settledBatch) {
+		if (settledBatch == null) {
+			return null;
+		}
+		for (PendingToolCall settled : settledBatch) {
+			if (settled == null || !AiToolNames.CREATE_TASK.equals(settled.getName())
+					|| !settled.resolved() || settled.effectiveOutcome() != ToolOutcome.OK) {
+				continue;
+			}
+			if (RunContextRefresher.taskIdFromText(settled.getResultText()) != null) {
+				return settled;
+			}
+		}
+		return null;
+	}
+
+	/** {@code create_task} 入参里的 {@code type}（缺键/非文本/空白 = {@code null}）。 */
+	private static String taskTypeOf(String argumentsJson) {
+		JsonNode arguments = parseJson(argumentsJson);
+		JsonNode type = arguments == null ? null : arguments.get("type");
+		if (type == null || !type.isTextual()) {
+			return null;
+		}
+		String value = type.asText("").trim();
+		return value.isEmpty() ? null : value;
+	}
+
+	/**
+	 * 本 run 是否有一条<b>成功结算</b>的 {@code navigate_to}，且目标正是该任务：待决条目里
+	 * {@code name=navigate_to}、前端通道、已结算、{@code outcome=OK}、{@code arguments.taskId} 匹配。
+	 *
+	 * <p>这是"当前 {@code SELECT_DEFS} 页面属于新任务"的唯一证据：页面字符串相等可能是旧任务的
+	 * 同一页，不能作为判据。读失败按"没有证据"处理（交回模型，不猜）。
+	 */
+	private boolean navigatedToTaskInRun(String runId, long taskId) {
+		List<PendingToolCall> pendings;
+		try {
+			pendings = this.store.pendingsLenient(runId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("读取导航证据失败，本次不按已导航处理 runId={}：{}", runId, ex.getMessage());
+			return false;
+		}
+		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+			if (pending == null || !AiToolNames.NAVIGATE_TO.equals(pending.getName())
+					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
+					|| !pending.resolved() || pending.effectiveOutcome() != ToolOutcome.OK) {
+				continue;
+			}
+			JsonNode arguments = parseJson(pending.getArguments());
+			JsonNode raw = arguments == null ? null : arguments.get("taskId");
+			Long navigated = longOf(raw);
+			if (navigated != null && navigated == taskId) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * 本批里"第一次宿主导航"（{@code host-nav-<taskId>}）以<b>非 OK 终态</b>结算的那一条；没有 = {@code null}。
+	 *
+	 * <p>只认确定性的首发 id（后缀必须是纯数字）：{@code PENDING} 不算（{@code resolved()} 为假），
+	 * {@code -r2} 重试条目不算，模型自发的 {@code navigate_to}（别的 toolCallId）也不算 ——
+	 * 因此第二次失败不会再触发，模型/其它导航失败也不会被宿主误判为"该重试"。
+	 */
+	private static PendingToolCall failedFirstHostNavigation(List<PendingToolCall> settledBatch, long taskId) {
+		if (settledBatch == null) {
+			return null;
+		}
+		for (PendingToolCall settled : settledBatch) {
+			if (settled == null || !AiToolNames.NAVIGATE_TO.equals(settled.getName())
+					|| !PendingToolCall.KIND_FRONTEND.equals(settled.getKind())
+					|| !settled.resolved() || settled.effectiveOutcome() == ToolOutcome.OK) {
+				continue;
+			}
+			Long idTask = firstHostNavigationTaskId(settled.getToolCallId());
+			if (idTask == null || idTask != taskId) {
+				continue;
+			}
+			JsonNode arguments = parseJson(settled.getArguments());
+			Long argTask = longOf(arguments == null ? null : arguments.get("taskId"));
+			if (argTask == null || argTask != taskId) {
+				continue;
+			}
+			return settled;
+		}
+		return null;
+	}
+
+	/** {@code host-nav-<taskId>}（不含 {@code -r2}）里的任务号；非该形态 = {@code null}。 */
+	private static Long firstHostNavigationTaskId(String toolCallId) {
+		if (toolCallId == null || !toolCallId.startsWith(NAVIGATE_TOOL_CALL_ID_PREFIX)) {
+			return null;
+		}
+		String suffix = toolCallId.substring(NAVIGATE_TOOL_CALL_ID_PREFIX.length());
+		if (suffix.isEmpty()) {
+			return null;
+		}
+		for (int i = 0; i < suffix.length(); i++) {
+			if (!Character.isDigit(suffix.charAt(i))) {
+				// -r2 或任何非纯数字后缀都不是"第一次宿主导航"
+				return null;
+			}
+		}
+		try {
+			return Long.valueOf(suffix);
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	/** 本批除给定条目外是否还有别的 {@code navigate_to}（模型自发或其它导航）；有则不抢发重试。 */
+	private static boolean otherNavigateInBatch(List<PendingToolCall> settledBatch, String excludedToolCallId) {
+		if (settledBatch == null) {
+			return false;
+		}
+		for (PendingToolCall settled : settledBatch) {
+			if (settled != null && AiToolNames.NAVIGATE_TO.equals(settled.getName())
+					&& (excludedToolCallId == null || !excludedToolCallId.equals(settled.getToolCallId()))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** JSON 整数/数字文本 → long；其它形状（小数/布尔/对象/数组/空）= {@code null}。 */
+	private static Long longOf(JsonNode node) {
+		if (node == null || node.isNull() || node.isFloatingPointNumber() || node.isBoolean()) {
+			return null;
+		}
+		if (node.isIntegralNumber()) {
+			return node.asLong();
+		}
+		if (node.isTextual()) {
+			try {
+				return Long.parseLong(node.asText().trim());
+			}
+			catch (NumberFormatException ex) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -165,6 +512,10 @@ public class DefinitionSelectionForm extends HostForm {
 	 * 配置选择成功后，由宿主经既有前端 {@code confirm_step} 通道推进到条件步骤。
 	 * 本批已有推进调用、选择失败或页面已离开选择步骤时不重复下发。
 	 *
+	 * <p>判据是既有的通用推进范围：任何任务停在 {@code EXPORT/SELECT_DEFS}、配置已知、本批有成功的
+	 * {@code select_definitions} 且本批还没推进过 ⇒ 宿主推进；不要求"任务由本 run 新建"，也不要求
+	 * 本 run 有导航回执 —— 后续 run / 旧任务里用户手动改选后的正常推进同样适用。
+	 *
 	 * <p>目标步骤<b>显式</b>写 {@code step=QUERY_COND}（而不是留空交给前端按"页面当前位置 +1"）：
 	 * 空参数时前端的目标来自 {@code stepIndex+1}，页面状态与任务权威步骤不一致就会二次推进
 	 * （QUERY_COND→EXPORT，跳过条件收集）或直接以"缺少 step"失败。确定性目标也让回执可对账。
@@ -183,14 +534,8 @@ public class DefinitionSelectionForm extends HostForm {
 		if (alreadyIssued(runId, toolCallId)) {
 			return false;
 		}
-		PendingToolCall advance = frontendTool(toolCallId, AiToolNames.CONFIRM_STEP,
-				"{\"step\":\"" + QUERY_COND_STEP + "\"}");
-		Integer waitSeconds = this.gate.suspendWaitSeconds(advance);
-		if (waitSeconds != null && waitSeconds > 0) {
-			long now = System.currentTimeMillis();
-			advance.setAtMs(now);
-			advance.setExpiresAt(now + waitSeconds * 1000L);
-		}
+		PendingToolCall advance = withToolTimeout(frontendTool(toolCallId, AiToolNames.CONFIRM_STEP,
+				"{\"step\":\"" + QUERY_COND_STEP + "\"}"));
 		log.info("配置选择成功，宿主下发 confirm_step 推进条件步骤 runId={} taskId={}", runId, context.getTaskId());
 		return park(runId, history, advance);
 	}
@@ -211,9 +556,10 @@ public class DefinitionSelectionForm extends HostForm {
 	/**
 	 * 判据 + 表单正文（不含任何外置写）。
 	 *
-	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、页/步骤是
-	 * 导出向导的 {@code SELECT_DEFS}、槽位尚无 {@code defCodes}、本批未被处理、同一任务未挂过。
-	 * <b>不</b>看本批是否有一条成功的 {@code navigate_to}（前端导航超时不再挡住表单）。
+	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、本 run 有一条
+	 * 成功导航到该任务的 {@code navigate_to}、页/步骤是导出向导的 {@code SELECT_DEFS}、槽位尚无
+	 * {@code defCodes}、本批未被处理、同一任务未挂过。导航证据来自成功回执，而不是"当前页恰好是
+	 * export"（旧任务的页面不得冒充新任务）。
 	 *
 	 * @return {@code empty} = 不该由宿主发这张表单
 	 */
@@ -225,6 +571,10 @@ public class DefinitionSelectionForm extends HostForm {
 		}
 		if (context.getTaskId() == null || !createdTaskId.equals(context.getTaskId())) {
 			// 还在旧任务上（或根本没到向导）：旧任务的配置不能被当成新任务的已知信息
+			return Optional.empty();
+		}
+		if (!navigatedToTaskInRun(runId, createdTaskId)) {
+			// 没有"本 run 已导航到该新任务"的证据（含导航失败/超时）：交回模型
 			return Optional.empty();
 		}
 		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, AiToolNames.SELECT_DEFINITIONS)) {

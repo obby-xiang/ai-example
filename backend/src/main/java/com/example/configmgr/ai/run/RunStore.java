@@ -1111,11 +1111,34 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <p>旧签名委托到本方法（{@code clientRequestId=null}），既有调用点与测试零改动；
 	 * 旧快照反序列化为 {@code null}，与"旧客户端没带"同义。
 	 *
+	 * <p>不带请求原文的调用方走这一条（{@code requestText=null, turnStartedAtMs=0}）：transcript 终态
+	 * 不补写用户条目，其余行为不变。
+	 *
 	 * @param clientRequestId 前端在 /chat 发送前生成、并存于本页签镜像的请求 id（可空）
 	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
 			String clientRequestId) {
+		return create(runId, sessionId, context, history, codec, providerId, modelId, frozen, clientRequestId,
+				null, 0L);
+	}
+
+	/**
+	 * 同上，并把**本轮请求原文 / 请求起点**一并写进首笔快照（B2 transcript 终态补写用，additive）。
+	 *
+	 * <p>为什么必须并进建快照这一笔：终态补写用户条目只认快照里的 {@code requestText}，而快照历史
+	 * 会被 {@code prompt.getInstructions()}（请求侧未标记的 user 副本）多次重写 —— 原文单独存一份才
+	 * 不会被覆盖。字段随首笔 {@code persist} 落库，不需要建快照之后再来一次整对象 save。
+	 *
+	 * <p>旧签名委托到本方法（{@code requestText=null, turnStartedAtMs=0}），既有调用点/测试零改动；
+	 * 旧快照反序列化为 {@code null/0}（终态不补写，不做兼容）。
+	 *
+	 * @param requestText    本轮用户请求原文（可空 = 不记录）
+	 * @param turnStartedAtMs 本轮请求起点（epoch ms；{@code 0} = 不记录）
+	 */
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+			String clientRequestId, String requestText, long turnStartedAtMs) {
 		// 身份：首轮创建时<b>必须</b>有上下文。缺身份不落库、不登记索引 ——
 		// 没有默认租户，也没有默认用户：轮级键的 hash tag 由身份组成，凭空补一个身份
 		// 就是"把这一轮写进别人的命名空间"或"写进谁都读不到的 legacy 命名空间"。
@@ -1124,6 +1147,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
 		snapshot.setClientRequestId(clientRequestId);
+		snapshot.setRequestText(requestText);
+		snapshot.setTurnStartedAtMs(turnStartedAtMs);
 		snapshot.setTenantId(identity.tenantId());
 		snapshot.setUserId(identity.userId());
 		snapshot.setStatus(RunSnapshot.RUNNING);

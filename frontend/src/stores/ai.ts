@@ -2384,6 +2384,433 @@ function normalizeUserText(text: string): string {
   return strip(strip(text).normalize('NFKC')).replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * `start` 帧证明本轮 runId 后，只给"列表中最后一条 USER、且紧邻本轮宿主助手之前"的那条补
+ * `runId`（不改 id、不改任何旧轮消息）。
+ *
+ * <p>中间夹着非 system 消息、该用户已带别的 runId、或最后一条 USER 在宿主之后，一律不动。
+ */
+function stampRoundUserRunId(messages: ChatMessage[], host: ChatMessage, runId: string): void {
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) {
+    return
+  }
+  const hostIndex = messages.findIndex((message) => message.id === host.id && message.role === 'assistant')
+  if (hostIndex <= lastUserIndex) {
+    return
+  }
+  for (let index = lastUserIndex + 1; index < hostIndex; index += 1) {
+    if (messages[index]?.role !== 'system') {
+      return
+    }
+  }
+  const user = messages[lastUserIndex]
+  if (!user || (user.runId && user.runId !== runId)) {
+    return
+  }
+  user.runId = runId
+}
+
+/**
+ * 历史占位状态（R-144：载荷缺 `toolCallStates` 时写的 `succeeded` 不是事实断言）。
+ *
+ * <p>按 toolCallId 记账（不依赖段对象身份：R-150 合并/分页前插都会复制段）。真实状态写入时
+ * 立即删除；占位只影响"终态权威性"与 `hasDecidedToolPart`（后者必须忽略占位，挂起卡才能按
+ * 快照/帧重建）。
+ */
+const historyPlaceholderStatusIds = new Set<string>()
+
+/** 该段当前是否仍是历史占位（只有 `succeeded` 才算，真实状态写入后 Set 已删除）。 */
+function isHistoryPlaceholderStatus(toolCallId: string, status: ToolRunStatus): boolean {
+  return status === 'succeeded' && historyPlaceholderStatusIds.has(toolCallId)
+}
+
+/** 段是否带真实结局/决策证据（result/kind/messageId 不算）。 */
+function hasTerminalEvidence(part: ToolPart): boolean {
+  return part.outcome !== undefined
+    || part.decision !== undefined
+    || part.decidedAt !== undefined
+    || part.submittedValues !== undefined
+}
+
+/**
+ * 镜像侧"继承来的占位"：成功但没有结局/决策证据。
+ *
+ * <p>镜像可能由上一次刷新后的历史占位段落盘而来；这种段不能在合并时被当成真实终态写掉。
+ * result/kind 不参与判定（历史占位也可能配到 TOOL 原文与 kind）。
+ */
+function looksLikeInheritedPlaceholder(part: ToolPart): boolean {
+  return part.status === 'succeeded' && !hasTerminalEvidence(part)
+}
+
+/**
+ * 本地回灌/执行产生的 unknown/failed/cancelled，未带任何结局/决策证据 —— 不是后端权威终态。
+ *
+ * <p>这类段不得覆盖历史真实 pending/running，也不能在没胜出时删占位账。
+ */
+function isUnprovenLocalTerminal(part: ToolPart): boolean {
+  return (part.status === 'unknown' || part.status === 'failed' || part.status === 'cancelled')
+    && !hasTerminalEvidence(part)
+}
+
+/**
+ * 应用工具帧并在**实际写段成功**时清掉该 toolCallId 的历史占位账。
+ *
+ * <p>守卫拦下（不调用本函数）、帧落到别的宿主（不在本分支）都不会走到这里；这里再用
+ * 写前/写后字段对比确认确实产生了**状态变化或结局证据**，避免 no-op 帧、只补 result/messageId
+ * 的 bare succeeded 误删占位。
+ */
+const applyFrameToPartsRaw = applyFrameToParts
+
+function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFrame): void {
+  if (!('toolCallId' in frame) || typeof frame.toolCallId !== 'string') {
+    applyFrameToPartsRaw(message, frame)
+    return
+  }
+  const toolCallId = frame.toolCallId
+  // 写前快照（按值，不持对象引用：段可能被原地修改）。
+  const before = findToolPart(message, toolCallId)
+  const beforeStatus = before?.status
+  const beforeOutcome = before?.outcome
+  const beforeDecision = before?.decision
+  const beforeDecidedAt = before?.decidedAt
+  const beforeSubmittedValues = before?.submittedValues
+  applyFrameToPartsRaw(message, frame)
+  const after = findToolPart(message, toolCallId)
+  if (!after) {
+    return
+  }
+  // 状态确实变化，或写入了结局/决策证据，才算真实状态落段。
+  // 仅更新 result/messageId 的 bare succeeded 不得清占位账。
+  const statusChanged = before !== null && after.status !== beforeStatus
+  const evidenceChanged = after.outcome !== beforeOutcome
+    || after.decision !== beforeDecision
+    || after.decidedAt !== beforeDecidedAt
+    || after.submittedValues !== beforeSubmittedValues
+  if (statusChanged || evidenceChanged) {
+    historyPlaceholderStatusIds.delete(toolCallId)
+  }
+}
+
+/**
+ * 刷新合并：pending(0) < 历史占位(1) < running(2) < 服务端/镜像终态(3)。
+ *
+ * <p>占位档只在 `status === 'succeeded'` 时生效；镜像的 running/真终态可覆盖占位，但镜像的
+ * pending 不能凭占位值复活一张可能已经过期的 HITL 卡（真挂起由 runs/current 快照重建）。
+ */
+function toolStatusRank(status: ToolRunStatus, placeholder = false): number {
+  if (placeholder && status === 'succeeded') {
+    return 1
+  }
+  if (status === 'running') {
+    return 2
+  }
+  if (status === 'pending') {
+    return 0
+  }
+  return 3
+}
+
+function preferMergedValue<T>(
+  historyValue: T | null | undefined,
+  mirrorValue: T | null | undefined,
+  mirrorWins: boolean
+): T | undefined {
+  const primary = mirrorWins ? mirrorValue : historyValue
+  const secondary = mirrorWins ? historyValue : mirrorValue
+  return primary ?? secondary ?? undefined
+}
+
+/**
+ * 刷新合并：按 toolCallId 对账**同一张卡**的历史段与镜像段。
+ *
+ * <p>状态单调：历史/服务端已终态时旧镜像的 pending/running 不得盖回；镜像已终态（例如已执行完
+ * 但历史快照还停在 pending）时保留镜像新态。镜像侧无 outcome/decision/decidedAt/submittedValues
+ * 的 succeeded/unknown/failed/cancelled 视为未受理/未决，不得覆盖历史真实 pending/running，
+ * 未胜出时也不得清理占位账。其余字段（result/decision/decidedAt/submittedValues 等）跟随
+ * **状态胜者**取值，胜者缺值才回落到另一侧；`requiresAction` 只在 pending 段上保留
+ * （running 是执行中，终态一律不挂起）。
+ */
+function mergeToolPartState(target: ToolPart, source: ToolPart): void {
+  const targetPlaceholder = isHistoryPlaceholderStatus(target.toolCallId, target.status)
+  const sourceInherited = looksLikeInheritedPlaceholder(source)
+  // 继承占位成功、或本地未受理的 unknown/failed/cancelled（无结局证据）都不是权威终态：
+  // 不得盖掉历史真实的 pending/running，也不得在没胜出时删占位账。
+  const sourceUnproven = sourceInherited || isUnprovenLocalTerminal(source)
+  const unprovenBlocks = sourceUnproven
+    && (target.status === 'pending' || target.status === 'running')
+  const mirrorWins = !unprovenBlocks && toolStatusRank(source.status)
+    > toolStatusRank(target.status, targetPlaceholder)
+  const status = mirrorWins ? source.status : target.status
+  target.status = status
+  if (sourceUnproven) {
+    // 历史占位目标：继承成功继续登记；被未受理本地终态改写则不再是占位。
+    if (targetPlaceholder) {
+      if (status === 'succeeded') {
+        historyPlaceholderStatusIds.add(target.toolCallId)
+      } else {
+        historyPlaceholderStatusIds.delete(target.toolCallId)
+      }
+    }
+    // 非占位目标：保持 Set 原样，不因未受理终态删账/伪造"已决"。
+  } else if (mirrorWins) {
+    // 真实状态写入 ⇒ 占位作废。
+    historyPlaceholderStatusIds.delete(target.toolCallId)
+  } else if (targetPlaceholder && status === 'succeeded') {
+    // 历史占位胜出：按 toolCallId 继续登记（段对象可能已被复制，Set 不受影响）。
+    historyPlaceholderStatusIds.add(target.toolCallId)
+  } else {
+    historyPlaceholderStatusIds.delete(target.toolCallId)
+  }
+  // 未受理终态且没有胜出（历史 pending/running/真实终态）：不搬它的结果/决策字段。
+  if (sourceUnproven && !mirrorWins) {
+    return
+  }
+  target.args = target.args ?? source.args
+  if (target.kind2 === 'UNKNOWN' && source.kind2 !== 'UNKNOWN') {
+    target.kind2 = source.kind2
+  }
+  target.result = preferMergedValue(target.result, source.result, mirrorWins)
+  target.reason = preferMergedValue(target.reason, source.reason, mirrorWins)
+  target.userTextCode = preferMergedValue(target.userTextCode, source.userTextCode, mirrorWins)
+  target.userTextArgs = preferMergedValue(target.userTextArgs, source.userTextArgs, mirrorWins)
+  target.target = preferMergedValue(target.target, source.target, mirrorWins)
+  target.decision = preferMergedValue(target.decision, source.decision, mirrorWins)
+  target.decidedAt = preferMergedValue(target.decidedAt, source.decidedAt, mirrorWins)
+  target.submittedValues = preferMergedValue(target.submittedValues, source.submittedValues, mirrorWins)
+  target.outcome = preferMergedValue(target.outcome, source.outcome, mirrorWins)
+  target.resultView = preferMergedValue(target.resultView, source.resultView, mirrorWins)
+  target.truncated = preferMergedValue(target.truncated, source.truncated, mirrorWins)
+  target.noticeCode = preferMergedValue(target.noticeCode, source.noticeCode, mirrorWins)
+  target.originalChars = preferMergedValue(target.originalChars, source.originalChars, mirrorWins)
+  target.returnedChars = preferMergedValue(target.returnedChars, source.returnedChars, mirrorWins)
+  target.strategy = preferMergedValue(target.strategy, source.strategy, mirrorWins)
+  target.preflight = preferMergedValue(target.preflight, source.preflight, mirrorWins)
+  target.irreversible = preferMergedValue(target.irreversible, source.irreversible, mirrorWins)
+  target.timeoutSeconds = preferMergedValue(target.timeoutSeconds, source.timeoutSeconds, mirrorWins)
+  target.expiresAt = preferMergedValue(target.expiresAt, source.expiresAt, mirrorWins)
+  target.atMs = preferMergedValue(target.atMs, source.atMs, mirrorWins)
+  target.messageId = target.messageId ?? source.messageId
+  // 只有 pending 段才承载"等人工/前端动作"；running 是执行中，终态一律不挂起
+  //（unknown 的 X1 不变式同口径）。pending 时保留任一侧的待人工事实（历史侧不写 requiresAction，
+  // 该 true 通常来自仍在途的镜像）。
+  target.requiresAction = status === 'pending' && (target.requiresAction || source.requiresAction)
+}
+
+/** 新增工具/正文段插到尾部压缩 event 之前：事件之后的段属于"压缩后新内容"，不能排到它后面。 */
+function insertPartBeforeTrailingEvents(parts: MessagePart[], part: MessagePart): void {
+  let index = parts.length
+  while (index > 0 && parts[index - 1]?.kind === 'event') {
+    index -= 1
+  }
+  parts.splice(index, 0, part)
+}
+
+/**
+ * 刷新合并：把镜像 `tail` 的**工具段与新增正文**并入历史侧同一轮的助手消息。
+ *
+ * <p>只动同 toolCallId 的段；正文只在"镜像正文是历史正文的严格延伸"时追加差额（历史已收正文
+ * 绝不被镜像覆盖，仍在流式的新正文也不会丢）。压缩事件段不进这里：由 `/history.events` 的
+ * `applyHistoryCompactionEvents` 统一落位。写段后立即重排 seg 并重派生投影。
+ */
+function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
+  let changed = false
+  const toolOwners = new Map<string, ToolPart>()
+  for (const part of target.parts) {
+    if (part.kind === 'tool' && !toolOwners.has(part.toolCallId)) {
+      toolOwners.set(part.toolCallId, part)
+    }
+  }
+  for (const sourcePart of source.parts) {
+    if (sourcePart.kind !== 'tool') {
+      continue
+    }
+    const owner = toolOwners.get(sourcePart.toolCallId)
+    if (owner) {
+      mergeToolPartState(owner, sourcePart)
+      changed = true
+      continue
+    }
+    const clone = { ...sourcePart }
+    insertPartBeforeTrailingEvents(target.parts, clone)
+    // 没有历史同 id 段可对照：只有 kind 未知 + 无结局证据才按"继承占位"登记。
+    if (clone.kind2 === 'UNKNOWN' && looksLikeInheritedPlaceholder(clone)) {
+      historyPlaceholderStatusIds.add(clone.toolCallId)
+    } else {
+      historyPlaceholderStatusIds.delete(clone.toolCallId)
+    }
+    toolOwners.set(clone.toolCallId, clone)
+    changed = true
+  }
+  // 新正文：镜像正文以历史正文为前缀且更长 ⇒ 只追加差额（不覆盖、不重排已收内容）。
+  const historyText = messageText(target)
+  const mirrorText = messageText(source)
+  if (mirrorText.length > historyText.length && mirrorText.startsWith(historyText)) {
+    const delta = mirrorText.slice(historyText.length)
+    if (delta !== '') {
+      const lastPart = target.parts[target.parts.length - 1]
+      if (historyText === '') {
+        // 历史只有空正文段（占位）：优先写进**尾部（压缩 event 之前）**的最后一个空文本段；
+        // 尾部不是空文本（例如工具段/思考段）时，新正文插到尾部 event 之前，保持段序。
+        let tailIndex = target.parts.length - 1
+        while (tailIndex >= 0 && target.parts[tailIndex]?.kind === 'event') {
+          tailIndex -= 1
+        }
+        const tailPart = tailIndex >= 0 ? target.parts[tailIndex] : undefined
+        if (tailPart?.kind === 'text' && tailPart.text === '') {
+          tailPart.text = mirrorText
+          tailPart.streaming = source.streaming
+        } else {
+          insertPartBeforeTrailingEvents(target.parts, {
+            kind: 'text',
+            seg: target.parts.length,
+            text: mirrorText,
+            streaming: source.streaming
+          })
+        }
+      } else if (lastPart?.kind === 'text') {
+        // 尾部就是正文段（没有工具段跟在后面）：就地续写，段序/段数不变。
+        lastPart.text += delta
+        lastPart.streaming = source.streaming
+      } else {
+        // 尾部不是正文（可能是压缩 event）：插到尾部 event 之前，保持段序。
+        insertPartBeforeTrailingEvents(target.parts, {
+          kind: 'text',
+          seg: target.parts.length,
+          text: delta,
+          streaming: source.streaming
+        })
+      }
+      changed = true
+    }
+  }
+  if (!changed) {
+    return false
+  }
+  target.parts.forEach((part, seg) => {
+    part.seg = seg
+  })
+  deriveProjections(target)
+  return true
+}
+
+/**
+ * 刷新合并：历史窗口里是否已有**本轮**用户消息。
+ *
+ * <p>先按 runId 扫整个窗口。未命中时只认一条窄情形：历史**末条就是一条未答复的 USER**、
+ * 它不带别的 runId、且归一化正文与镜像提问相同。历史末条是助手时不看正文；两侧 runId
+ * 不同（连续同文的两轮）也不合并。
+ */
+function findHistoryRoundUserIndex(
+  historical: ChatMessage[],
+  mirrorUser: ChatMessage,
+  roundRunId: string | null
+): number {
+  if (roundRunId !== null) {
+    for (let index = historical.length - 1; index >= 0; index -= 1) {
+      const candidate = historical[index]
+      if (candidate?.role === 'user' && candidate.runId === roundRunId) {
+        return index
+      }
+    }
+  }
+  const tailIndex = historical.length - 1
+  const tail = historical[tailIndex]
+  if (!tail || tail.role !== 'user') {
+    return -1
+  }
+  if (roundRunId !== null && tail.runId && tail.runId !== roundRunId) {
+    return -1
+  }
+  if (mirrorUser.runId && tail.runId && mirrorUser.runId !== tail.runId) {
+    return -1
+  }
+  const tailText = normalizeUserText(messageText(tail))
+  return tailText !== '' && tailText === normalizeUserText(messageText(mirrorUser))
+    ? tailIndex
+    : -1
+}
+
+/**
+ * 镜像 tail 是否已经"开流"：正文/思考有非空文本，或存在工具/事件等非文本段。
+ * 只有空正文段（或完全没有段）不算开流 —— 空 tail 仍按旧口径补宿主。
+ */
+function messageShowsProgress(message: ChatMessage): boolean {
+  return message.parts.some((part) => {
+    if (part.kind === 'text' || part.kind === 'reasoning') {
+      return part.text.trim() !== ''
+    }
+    return true
+  })
+}
+
+/** 刷新合并：同一轮的历史助手（按 runId 取最后一条，或按已定位的用户条目取其后最后一条）。 */
+function roundAssistantMessage(
+  historical: ChatMessage[],
+  historyUserIndex: number,
+  roundRunId: string | null
+): ChatMessage | null {
+  if (roundRunId !== null) {
+    for (let index = historical.length - 1; index >= 0; index -= 1) {
+      const message = historical[index]
+      if (message?.role === 'assistant' && message.runId === roundRunId) {
+        return message
+      }
+    }
+  }
+  if (historyUserIndex < 0) {
+    return null
+  }
+  let found: ChatMessage | null = null
+  for (let index = historyUserIndex + 1; index < historical.length; index += 1) {
+    const message = historical[index]
+    if (!message) {
+      continue
+    }
+    if (message.role === 'user') {
+      break
+    }
+    if (message.role === 'assistant') {
+      found = message
+    }
+  }
+  return found
+}
+
+/**
+ * 刷新合并：没有 runId 命中时，用 toolCallId 反查同一轮的历史助手消息。
+ *
+ * <p>toolCallId 由后端生成且跨轮不复用 ⇒ 同 id 工具段是同一轮的强证据，不依赖回答正文。
+ */
+function assistantMessageByToolCallId(
+  historical: ChatMessage[],
+  source: ChatMessage
+): ChatMessage | null {
+  const ids = new Set<string>()
+  for (const part of source.parts) {
+    if (part.kind === 'tool') {
+      ids.add(part.toolCallId)
+    }
+  }
+  if (ids.size === 0) {
+    return null
+  }
+  for (let index = historical.length - 1; index >= 0; index -= 1) {
+    const message = historical[index]
+    if (message?.role === 'assistant'
+      && message.parts.some((part) => part.kind === 'tool' && ids.has(part.toolCallId))) {
+      return message
+    }
+  }
+  return null
+}
+
 /** 批G：轮次快照状态是否已终态（`/runs/current` 的 `snapshotStatus` 口径）。 */
 function isTerminalRunStatus(status: string | null | undefined): boolean {
   const normalized = (status ?? '').toUpperCase()
@@ -4114,13 +4541,14 @@ export const useAiStore = defineStore('ai', {
                 matched = hit
               }
             }
+            const partStatus = mappedStatus ?? 'succeeded'
             const part: ToolPart = {
               kind: 'tool',
               seg: toolSegBase + toolIndex,
               toolCallId: call.id ?? `history-${idBase + index}-${call.name ?? 'tool'}`,
               name,
               kind2: kind === 'CONFIRM' || kind === 'FRONTEND' || kind === 'BACKEND' ? kind : 'UNKNOWN',
-              status: mappedStatus ?? 'succeeded',
+              status: partStatus,
               args: call.arguments,
               result: null,
               // A10 R-15：持久化的模型侧截断元数据随历史响应回到段上（刷新后角标/本地化 hover）。
@@ -4163,6 +4591,20 @@ export const useAiStore = defineStore('ai', {
             } else {
               unmatchedCalls.push({ name, part }) // 序位兜底候选（见下方统一互配）
             }
+            // 只有"缺状态且无决策证据"才是占位；带 decision/decidedAt/submittedValues 的
+            // 条目已有真实结局，不登记占位（否则 hasDecidedToolPart 会误放行挂起卡重建）。
+            const placeholder = mappedStatus === null
+              && part.decision === undefined
+              && part.decidedAt === undefined
+              && part.submittedValues === undefined
+            // 合成的 `history-N-*` 兜底 toolCallId 不是后端身份：不得进占位账（防跨会话撞键）。
+            if (call.id !== null && call.id !== undefined && call.id !== '') {
+              if (placeholder) {
+                historyPlaceholderStatusIds.add(part.toolCallId)
+              } else {
+                historyPlaceholderStatusIds.delete(part.toolCallId)
+              }
+            }
             return part
           })
         ]
@@ -4173,7 +4615,8 @@ export const useAiStore = defineStore('ai', {
           return []
         }
         const message: ChatMessage = {
-          // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）
+          // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）。
+          // 不消费后端 `messageId` 作展示 id（身份只用 runId）。
           id: `history-${idBase + index}`,
           role,
           content: '',
@@ -4470,19 +4913,17 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批G · G3：把镜像里**仍在途**的那条助手消息接回历史尾部。
+     * 批G · G3 / 刷新回归：把镜像里**仍在途**的那一轮对账进历史。
      *
-     * <p>
-     * 判据（宁可少补、不可双份）：
+     * <p>身份只用 `runId`（不看正文推断轮次）：
      * <ol>
-     * <li>镜像写了 `inFlight`（写镜像时本轮还没收尾）；</li>
-     * <li>镜像末条是 assistant；</li>
-     * <li>历史的末条**不是**一条已收下的助手回答（末条是 assistant 且已有正文/工具段 ⇒ 不补，
-     *    说明后端已经把这轮收进记忆，此时历史才是权威）。</li>
+     * <li>先按 runId 在整个历史窗口找本轮 USER；未命中时只认"历史末条是未答复 USER、不带别的
+     *     runId、归一正文相同"的窄情形。历史末条是助手或两侧 runId 不同 ⇒ 不合并提问；</li>
+     * <li>助手：按 runId 找本轮历史助手；没有 runId 命中时用 toolCallId 反查（强证据）；</li>
+     * <li>找到本轮助手就按 toolCallId 对账（状态单调、结果/决策字段跟随胜者），并把该助手
+     *     `streaming/done` 按镜像 tail 交回恢复链 —— 即使没有正文差额，也不让后续帧再开气泡；</li>
+     * <li>历史没有本轮助手才补入镜像 tail。</li>
      * </ol>
-     * 用户消息只在"历史里没有同一句用户消息"时补（否则同一句话出现两遍）。**"同一句"按后端
-     * `InputSanitizer` 的同口径归一化后比较**（批G · R5/R2：历史侧标点已被 NFKC 折成半角，
-     * 逐字比原文必然不等 ⇒ 真机出现两条同样的提问气泡）。
      */
     mergeMirrorInFlightRound(
       historical: ChatMessage[],
@@ -4496,20 +4937,80 @@ export const useAiStore = defineStore('ai', {
       if (!tail || tail.role !== 'assistant') {
         return historical
       }
-      const last = historical[historical.length - 1]
-      const historyHasReply = last !== undefined && last.role === 'assistant'
-        && (last.content.trim() !== '' || last.parts.some((part) => part.kind !== 'text'))
-      if (historyHasReply) {
+      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
+      const roundRunId = typeof tail.runId === 'string' && tail.runId !== ''
+        ? tail.runId
+        : (mirrorUser?.runId ?? null)
+      const historyUserIndex = mirrorUser
+        ? findHistoryRoundUserIndex(historical, mirrorUser, roundRunId)
+        : -1
+      const merged = [...historical]
+      const seenIds = new Set(merged.map((message) => message.id))
+      let target = roundAssistantMessage(merged, historyUserIndex, roundRunId)
+      let targetByToolCallId = false
+      if (!target) {
+        target = assistantMessageByToolCallId(merged, tail)
+        targetByToolCallId = target !== null
+      }
+
+      // 无 runId 的纯文本残留：历史末条已是助手、镜像 tail 已开流（正文/思考/非文本段）⇒
+      // 视为历史已收下这一轮，不补提问/气泡；空 tail（没有可展示内容）仍可补。
+      if (!target && roundRunId === null
+        && merged[merged.length - 1]?.role === 'assistant'
+        && messageShowsProgress(tail)) {
         return historical
       }
-      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
-      const historyUser = [...historical].reverse().find((item) => item.role === 'user') ?? null
-      const merged = [...historical]
-      if (mirrorUser && (!historyUser
-        || normalizeUserText(messageText(mirrorUser)) !== normalizeUserText(messageText(historyUser)))) {
-        merged.push(cloneMessage(mirrorUser))
+
+      // 本轮用户：toolCallId 命中但 target 之前**没有**任何 USER ⇒ 插到 target 之前
+      // （按 id 去重；只看位置，不做文本猜测）。只有历史完全没有同轮助手时才补到尾部。
+      if (mirrorUser && historyUserIndex < 0 && !seenIds.has(mirrorUser.id)) {
+        if (targetByToolCallId && target) {
+          const targetIndex = merged.indexOf(target)
+          let hasPrecedingUser = false
+          for (let index = targetIndex - 1; index >= 0; index -= 1) {
+            const message = merged[index]
+            if (message?.role === 'system') {
+              continue
+            }
+            hasPrecedingUser = message?.role === 'user'
+            break
+          }
+          if (!hasPrecedingUser) {
+            merged.splice(targetIndex < 0 ? merged.length : targetIndex, 0, cloneMessage(mirrorUser))
+            seenIds.add(mirrorUser.id)
+          }
+        } else if (!target) {
+          merged.push(cloneMessage(mirrorUser))
+          seenIds.add(mirrorUser.id)
+        }
       }
-      merged.push(cloneMessage(tail))
+
+      if (target) {
+        if (roundRunId !== null && !target.runId) {
+          target.runId = roundRunId
+        }
+        mergeMirrorRoundParts(target, tail)
+        // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
+        if (merged[merged.length - 1] === target) {
+          target.streaming = typeof tail.streaming === 'boolean' ? tail.streaming : true
+          target.done = typeof tail.done === 'boolean' ? tail.done : false
+        }
+        return merged
+      }
+
+      // 历史没有本轮助手：补入镜像 tail（同 id 已存在则就地合并，不重复建段）。
+      const existing = merged.find((message) => message.id === tail.id)
+      if (existing && existing.role === 'assistant') {
+        mergeMirrorRoundParts(existing, tail)
+        if (merged[merged.length - 1] === existing) {
+          existing.streaming = typeof tail.streaming === 'boolean' ? tail.streaming : true
+          existing.done = typeof tail.done === 'boolean' ? tail.done : false
+        }
+        return merged
+      }
+      if (!seenIds.has(tail.id)) {
+        merged.push(cloneMessage(tail))
+      }
       return merged
     },
 
@@ -4539,6 +5040,10 @@ export const useAiStore = defineStore('ai', {
       if (!tail || tail.role !== 'assistant') {
         return
       }
+      // tail 无 runId ⇒ 无法证明与 target 同轮；宁可少补，不把结局贴到上一轮。
+      if (typeof tail.runId !== 'string' || tail.runId === '') {
+        return
+      }
       // transcript 只在**有终态**时写该轮 assistant 条目 ⇒ 历史末条是 assistant 即证明该轮
       // 不是断流；镜像里的 `interrupted` 只可能属于"没有终态的那一半"，因此**不搬运**
       // （搬过来会让已完成回答凭空多出「继续」）。需要保留半截的场景由
@@ -4553,6 +5058,12 @@ export const useAiStore = defineStore('ai', {
       // 那会把 interrupted/errorCard/runId 贴到上一轮的成功回答上。
       const target = historical[historical.length - 1]
       if (!target || target.role !== 'assistant') {
+        return
+      }
+      // run 守卫比较**助手 tail / target**（用户消息可能没有 runId）：不同 run 的助手绝不搬运。
+      const tailRunId = typeof tail.runId === 'string' && tail.runId !== '' ? tail.runId : null
+      const targetRunId = typeof target.runId === 'string' && target.runId !== '' ? target.runId : null
+      if (tailRunId !== null && targetRunId !== null && tailRunId !== targetRunId) {
         return
       }
       const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
@@ -4913,7 +5424,11 @@ export const useAiStore = defineStore('ai', {
         host.id,
         runId,
         host.parts.flatMap((part) =>
-          part.kind === 'tool' && isFrameDecidedPendingStatus(part.status) ? [part.toolCallId] : []
+          part.kind === 'tool' && isFrameDecidedPendingStatus(part.status)
+            // 清段前不得把历史占位 succeeded 记成"回放已决"（它只表示状态未知，重放要能重建）。
+            && !isHistoryPlaceholderStatus(part.toolCallId, part.status)
+            ? [part.toolCallId]
+            : []
         )
       )
       // F6 残留（2026-11-01）：本地段仍 `running`（执行完但回灌在途 / 结果帧未到）时旁路里没有它，
@@ -7195,7 +7710,8 @@ export const useAiStore = defineStore('ai', {
     hasDecidedPendingResidue(toolCallId: string): boolean {
       // 批2（权威翻转）：判据改读**段** —— 挂起投影不再保留终态（终态段 requiresAction=false，
       // 派生出的 pendingCall 为 null），若继续读投影这个守卫会静默失效（取消竞态重挂复活）。
-      if (this.hasDecidedToolPart(toolCallId)) {
+      // 重建判定：历史占位不算已决（否则挂起卡永远建不出来）。
+      if (this.hasDecidedToolPart(toolCallId, undefined, true)) {
         return true
       }
       // #1：刷新回放清段时按 run 保留的已决 id（段已清空，事实不能跟着丢）。
@@ -7214,13 +7730,23 @@ export const useAiStore = defineStore('ai', {
      * <p>跨宿主终帧守卫（`handleFrame` 的 D6(B)）用它：那一层的语义是"另一条消息上还有一个
      * 已决段，不要在建不出段的新宿主上再造一张矛盾卡"。回放场景恰恰相反 —— 段是被**有意清空**
      * 的（等归档重放重建），此时必须让重放的终帧正常建段。
+     *
+     * <p>历史占位 `succeeded` 默认仍算已决（防重复建段）；`hostMessageId` = 当前宿主时只忽略
+     * 该宿主上的占位；`ignoreAllPlaceholders` 仅供 HITL 重建判定使用。
      */
-    hasDecidedToolPart(toolCallId: string): boolean {
+    hasDecidedToolPart(toolCallId: string, hostMessageId?: string, ignoreAllPlaceholders = false): boolean {
       return this.messages.some(
-        (item) => item.parts.some(
-          (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-            && isFrameDecidedPendingStatus(part.status)
-        )
+        (item) => item.parts.some((part): boolean => {
+          if (part.kind !== 'tool' || part.toolCallId !== toolCallId
+            || !isFrameDecidedPendingStatus(part.status)) {
+            return false
+          }
+          if (!isHistoryPlaceholderStatus(part.toolCallId, part.status)) {
+            return true
+          }
+          // 历史占位只允许在**当前宿主**或**重建判定**里被忽略；别宿主的占位仍要防重复建段。
+          return !(ignoreAllPlaceholders || (hostMessageId !== undefined && item.id === hostMessageId))
+        })
       )
     },
 
@@ -9715,6 +10241,8 @@ export const useAiStore = defineStore('ai', {
       clearReplayedDecidedTools()
       // F6 残留：后端条目事实同样属于旧会话/旧 run
       clearReplayToolFacts()
+      // 历史占位账属于旧会话的段：换会话即清，跨会话不得撞 toolCallId。
+      historyPlaceholderStatusIds.clear()
       // M-2b：旧会话的快照串行队列不得落进新会话
       this.restoredPendingQueue = []
       /**
@@ -10404,7 +10932,7 @@ export const useAiStore = defineStore('ai', {
         if (seq !== null && alreadyApplied(message, seq)) {
           return
         }
-        applyFrameToParts(message, frame)
+        applyFrameToPartsAndClearPlaceholder(message, frame)
         this.clearGateSubmission(frame.toolCallId)
         this.clearGateAck(frame.toolCallId)
         deriveProjections(message)
@@ -10470,7 +10998,8 @@ export const useAiStore = defineStore('ai', {
       // 该终帧正是重建这条段的那一帧，不得跳过（否则卡片整条消失）。
       if ((frame.type === 'tool_start' || frame.type === 'tool_result'
         || frame.type === 'frontend_tool_result' || frame.type === 'confirm_decision')
-        && this.hasDecidedToolPart(frame.toolCallId)
+        // 只对**当前宿主**上的历史占位放行（重建/更新）；别宿主的占位继续按已决防重复。
+        && this.hasDecidedToolPart(frame.toolCallId, message.id)
         && !findToolPart(message, frame.toolCallId)) {
         return
       }
@@ -10492,6 +11021,9 @@ export const useAiStore = defineStore('ai', {
           // 批次2：把 run 归属钉在宿主消息上 —— 断流重挂/恢复只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
+            // 刷新回归：只给"列表最后一条 USER 且紧邻宿主之前"的本轮提问补 runId（不改 id）。
+            // 旧轮用户消息、带别的 runId 的用户消息一律不动。
+            stampRoundUserRunId(this.messages, message, frame.runId)
           }
           // 批次3：start 仍是首帧（压缩已前移到它之后）—— 新轮的阶段态从零开始；
           // 普通轮的 streaming 心跳不改任何过程态；只有真实 L2 的 compacting 心跳才给宿主落紫色「压缩中…」。
@@ -10515,7 +11047,7 @@ export const useAiStore = defineStore('ai', {
           if (typeof frame.runId === 'string' && frame.runId !== '' && !message.runId) {
             message.runId = frame.runId
           }
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           break
         case 'delta': {
           // 高频路径（§6.1 性能注）：段文本与派生投影 **锁步** `+=`，不调 deriveProjections
@@ -10529,17 +11061,17 @@ export const useAiStore = defineStore('ai', {
           } else {
             message.content += frame.text
           }
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           break
         }
         case 'tool_start': {
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           break
         }
         case 'tool_result': {
           // 补丁③ / DC-14 T1 的终态裁决口径（BLOCKED > REJECTED > ok 三元）落在段上，见
           // utils/parts.ts 的 applyFrameToParts —— 本 case 不再有任何投影直写
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           // R-155：start_publish 工具结果取号 jobId → 登记并武装发布冲突跟踪
           this.armPublishConflictWatch(message, frame)
           // 批 D · D3（问题 6）：start_export / start_precheck / start_import 取号 → 同步给向导页
@@ -10559,13 +11091,13 @@ export const useAiStore = defineStore('ai', {
           this.clearGateAck(frame.toolCallId)
           // 工具卡四态之"待确认"：确认门未决期间该工具卡显示为待确认（段 status=pending +
           // requiresAction=true ⇒ 派生出挂起卡）；原始帧口径随段持久化（对账用，见 ToolPart 注）
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           break
         }
         case 'confirm_decision': {
           // approved → running、rejected → rejected 的段裁决在 applyFrameToParts；
           // 挂起卡随 requiresAction=false 派生为 null（结局由工具卡承载）
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           // R-166 口径③：结局帧到达即撤提交在途态（409 瞬态的就地收敛口）
           this.clearGateSubmission(frame.toolCallId)
           // 批4-D：结局落定 ⇒ 勾选态复位（变更即复位：这一版卡的同意不外溢）
@@ -10592,7 +11124,7 @@ export const useAiStore = defineStore('ai', {
             break
           }
           this.suspended = true
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           // 表单武装前先派生：openGenerativeForm 读派生出的 pendingCall.args
           deriveProjections(message)
           if (frame.name === GENERATIVE_FORM_TOOL) {
@@ -10642,7 +11174,7 @@ export const useAiStore = defineStore('ai', {
           // 二次调用却按帧 status 把它翻成另一种终态 —— 同一段两个写点给出不同裁决，正是要收掉的
           // 双写口径分裂面）。挂起卡随 requiresAction=false 由派生抽掉。
           // 非帧路径（409 响应体 / 续收快照）仍用 applyFrontendToolTerminal 就地收敛，见其注释。
-          applyFrameToParts(message, frame)
+          applyFrameToPartsAndClearPlaceholder(message, frame)
           // 2A② 边缘①：frame-only（POST 应答丢失 / 未回）时，提交值不能只落帧宿主 —— 同
           // toolCallId 的其他宿主段也按 first-wins 补齐。当前宿主已由 applyFrameToParts 解析并
           // 写入（或保留更早的值），这里以**帧宿主的落定值**为准对全量消息幂等重放同一写口：
@@ -10682,7 +11214,7 @@ export const useAiStore = defineStore('ai', {
           const waiting = frame.toolCalls.find((call) => (call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
             && call.outcome !== 'skipped' && call.status !== 'SKIPPED')
           if (!waiting && hasSkipped) {
-            applyFrameToParts(message, frame)
+            applyFrameToPartsAndClearPlaceholder(message, frame)
             break
           }
           if (waiting) {
@@ -10693,7 +11225,7 @@ export const useAiStore = defineStore('ai', {
             // 本帧更新已存在的工具段（requiresAction=true）；段尚不存在时由 applyFrameToParts
             // 建占位段（③b D5：createIfMissing=true + status='pending'）——"只发 suspended"路径
             // （取消竞态，SpToolCallingManager）不再整轮无声丢失
-            applyFrameToParts(message, frame)
+            applyFrameToPartsAndClearPlaceholder(message, frame)
           }
           break
         }
@@ -10990,6 +11522,7 @@ export const useAiStore = defineStore('ai', {
     applyFrontendToolTerminal(toolCallId: string, status: PendingToolCall['status'] | null): void {
       // approved 并入 running（同 applyPendingTerminal 映射）
       const mapped: ToolRunStatus | null = status === null ? null : status === 'approved' ? 'running' : status
+      let wroteStatus = false
       for (const item of this.messages) {
         const partIndex = item.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
         const part = partIndex >= 0 ? item.parts[partIndex] : undefined
@@ -11009,6 +11542,7 @@ export const useAiStore = defineStore('ai', {
             || part.status === 'running'
           if (mapped !== null && correctable) {
             item.parts.splice(partIndex, 1, { ...part, requiresAction: false, status: mapped })
+            wroteStatus = true
             deriveProjections(item)
           } else if (part.requiresAction) {
             item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
@@ -11019,9 +11553,16 @@ export const useAiStore = defineStore('ai', {
           item.parts.splice(partIndex, 1, mapped === null
             ? { ...part, requiresAction: false }
             : { ...part, requiresAction: false, status: mapped })
+          if (mapped !== null) {
+            wroteStatus = true
+          }
           deriveProjections(item)
         }
         // GF 已终态段：first-wins 单调，跳过
+      }
+      if (wroteStatus) {
+        // 只有真的写了状态才清占位；占位 succeeded 的空写不得先删账。
+        historyPlaceholderStatusIds.delete(toolCallId)
       }
     },
 
@@ -11046,6 +11587,13 @@ export const useAiStore = defineStore('ai', {
 
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
       writeToolPart(message, patch, createIfMissing)
+      if (patch.status !== undefined) {
+        const written = findToolPart(message, patch.toolCallId)
+        if (written && written.status === patch.status) {
+          // 实际写段成功后才清占位（no-op / 未建段不得先删账）。
+          historyPlaceholderStatusIds.delete(patch.toolCallId)
+        }
+      }
     },
 
     /**

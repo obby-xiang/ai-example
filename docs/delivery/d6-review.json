@@ -259,6 +259,13 @@
       "reason": "已同步压缩plan/commit、transcript展示历史、分页、压缩事件、同槽计数与TTL/purge及统一继续契约",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:0f3aea73412c5a3ef53f936d80698a4070997ca06c88d153c62ae99a3f548f69",
+      "status": "synced",
+      "reason": "已同步每批工具结算的transcript真态写回、快照请求原文、刷新单调对账及创建后确定性导航、配置选择、条件收集与有界恢复契约",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

@@ -232,6 +232,28 @@ abstract class HostForm {
 	}
 
 	/**
+	 * 机器执行类前端工具（{@code navigate_to} / {@code select_definitions} / {@code confirm_step}
+	 * 等，<b>没有可点的人工卡片</b>）的到期时刻：与确认门共用同一份
+	 * {@link ConfirmGate#suspendWaitSeconds(PendingToolCall)}（默认 {@code app.ai.hitl.frontend-tool-timeout}），
+	 * 避免这类条目以永久 PENDING 挡住续跑。
+	 *
+	 * <p>等人填写的表单（{@code generative_form}）不走这里：它们的等待语义是"没有上限"，
+	 * 由 {@code suspendWaitSeconds} 按工具名返回 {@code null} 自然保持。
+	 */
+	protected PendingToolCall withToolTimeout(PendingToolCall pending) {
+		if (pending == null || this.gate == null) {
+			return pending;
+		}
+		Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
+		if (waitSeconds != null && waitSeconds > 0) {
+			long now = System.currentTimeMillis();
+			pending.setAtMs(now);
+			pending.setExpiresAt(now + waitSeconds * 1000L);
+		}
+		return pending;
+	}
+
+	/**
 	 * 任意前端工具的确定性待决条目（宿主代替模型下发时用，例如结构化 {@code set_condition} 草案）。
 	 * 形状与模型自己的调用一致：前端通道、可逆、非确认门。
 	 */

@@ -16,6 +16,16 @@ import java.util.Map;
 @Data
 public class AiContext {
 
+	/**
+	 * 条件结构化交棒标记（<b>已退役</b>）。
+	 *
+	 * <p>进入 {@code QUERY_COND} 后宿主直接按缺口挂条件表，不再"先交模型结构化"，因此生产代码
+	 * 不再写入/读取该键（披露面的收窄与合成指令已随该链移除）。保留常量仅为旧快照与旧用例的
+	 * 源码兼容；新代码不得依赖它。
+	 *
+	 * @deprecated 无生产读写方，待测试适配后删除。
+	 */
+	@Deprecated
 	public static final String EXTRA_CONDITION_STRUCTURE_HANDOFF = "conditionStructureHandoff";
 
 	private String page = "";

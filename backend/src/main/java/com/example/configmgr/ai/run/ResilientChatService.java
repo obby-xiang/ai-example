@@ -89,6 +89,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntFunction;
+import java.util.function.Predicate;
 
 /**
  * 单轮对话编排 + 韧性（S4.2 §2 {@code run/ResilientChatService}，本棒由 {@code AiChatService}
@@ -761,6 +762,9 @@ public class ResilientChatService {
 			// （UNKNOWN 按未取消继续：此刻还没有不可逆动作，与 C2 的退避口径同源）。
 			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
 			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
+			// B2：本轮请求原文与请求起点随首笔快照一起落库（RunStore.create 的 additive 重载），
+			// 终态补写用户条目只读它 —— 不从快照历史里挑"最后一条 USER"（记忆窗口里还有别的轮次），
+			// 也不按消息 metadata 推断归属。历史本身原样，不做任何 metadata 盖章。
 			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
 			full.add(instructions.get(0));
 			full.addAll(memory);
@@ -773,7 +777,8 @@ public class ResilientChatService {
 				log.info("首轮压缩期间收到取消 runId={}（保存最小 CANCELLED 快照、不发起模型调用）", runId);
 				try {
 					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
-							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId());
+							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId(),
+							request.message(), turnStartedAtMs);
 				}
 				catch (RuntimeException ex) {
 					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
@@ -797,7 +802,7 @@ public class ResilientChatService {
 			// A：请求边界冻结的权威执行信封要用这份刚建好的快照（不是稍后可能被改写的读回值）。
 			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
 					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked),
-					request.clientRequestId());
+					request.clientRequestId(), request.message(), turnStartedAtMs);
 
 			// ===== 驱动所有权（2026-10-29）：快照建好之后、模型/预检之前先取得续跑权 =====
 			// 旧实现首轮从不持租：跨实例僵尸扫描看到的证据是"RUNNING + 无租约 + 业务活动超龄" ⇒ 判死接管，
@@ -3325,23 +3330,32 @@ public class ResilientChatService {
 			}
 			Map<String, PendingToolCall> pendings = transcriptPendings(runId);
 			List<Message> withStates = new ArrayList<>(history.size());
+			// B2/B：assistant 的 toolCallStates 与本轮 tool 条目的 status 用<b>同一份</b>已解析状态
+			// （同一次台账查询、同一套升格判据），避免出现 assistant=EXECUTED 而 tool=APPROVED。
+			Map<String, String> resolvedStatuses = new LinkedHashMap<>();
+			Predicate<String> executedInLedger = toolCallId -> ledgerEntry(runId, toolCallId) != null;
 			for (Message message : history) {
 				if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-					withStates.add(attachToolCallStates(runId, assistant, pendings, snapshot.getStatus()));
+					ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
+							executedInLedger);
+					withStates.add(withToolCallStates(assistant, resolved.states()));
+					resolvedStatuses.putAll(resolved.statuses());
 				}
 				else {
 					withStates.add(message);
 				}
 			}
 			List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(withStates, pendings, runId,
-					snapshot.getCreatedAtMs(), includeLastAssistant);
+					snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
 			// P1：轮首用户条目可能因"无请求身份 / 写权判定失败 / append 抖动"缺席；而 transcript 一旦非空，
-			// /history 就不再回落 chat:mem —— 这一轮的用户提问会永久缺失。终态这里用快照历史里的
-			// 最后一条真实 USER + 同一 entryId 补写：last-wins 幂等，已有则只更新、不会重复。
-			String userText = lastUserText(withStates);
-			if (userText != null) {
-				entries.add(0, TranscriptEntries.user(runId, snapshot.getCreatedAtMs(), System.currentTimeMillis(),
-						userText));
+			// /history 就不再回落 chat:mem —— 这一轮的用户提问会永久缺失。终态这里用快照里<b>建轮时写入的
+			// 本轮请求原文</b>（{@code requestText}）+ 同一 entryId 补写：last-wins 幂等，已有则只更新、
+			// 不会重复。不读快照历史、不按 metadata 推断 —— 记忆窗口里还躺着别的轮次的提问。
+			// 排序键取请求起点（与轮首写点同一口径），保证"补写的用户条目"排序在工具卡之前。
+			String userText = snapshot.getRequestText();
+			if (userText != null && !userText.isBlank()) {
+				entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
+						System.currentTimeMillis(), userText));
 			}
 			if (entries.isEmpty()) {
 				return;
@@ -3354,20 +3368,6 @@ public class ResilientChatService {
 			// 展示历史是观测面，不得让本轮终态/记忆收敛因它失败
 			log.warn("transcript 终态写入失败 runId={}：{}（本轮不受影响）", runId, ex.getMessage());
 		}
-	}
-
-	/** 快照历史里最后一条真实用户原文（跳过合成提示/系统消息；没有则 null）。 */
-	private static String lastUserText(List<Message> history) {
-		for (int i = history.size() - 1; i >= 0; i--) {
-			Message message = history.get(i);
-			if (message == null || message.getMessageType() != MessageType.USER
-					|| SyntheticMessages.isSynthetic(message)) {
-				continue;
-			}
-			String text = message.getText();
-			return text == null || text.isBlank() ? null : text;
-		}
-		return null;
 	}
 
 	/** 终态写点需要的快照历史（读不到 ⇒ 不写；不让展示面反噬本轮收尾）。 */
@@ -3567,15 +3567,50 @@ public class ResilientChatService {
 	 */
 	private Message attachToolCallStates(String runId, AssistantMessage assistant,
 			Map<String, PendingToolCall> pendingsById, String snapshotStatus) {
+		return withToolCallStates(assistant,
+				resolveToolStates(runId, assistant, pendingsById, snapshotStatus).states());
+	}
+
+	/** 一条 assistant 上各 toolCall 的已解析状态（{@code states} 写进 metadata，{@code statuses} 供 tool 条目复用）。 */
+	private record ResolvedToolStates(Map<String, Object> states, Map<String, String> statuses) {
+	}
+
+	/**
+	 * <b>每张卡只解析一次</b>：同一次遍历既产出 assistant 的 {@code toolCallStates}，也产出
+	 * toolCallId → 已解析 status 的映射（台账只查一遍、升格判据只跑一遍），供同批 tool 条目使用 ——
+	 * 杜绝 assistant=EXECUTED 而 tool=APPROVED 这种两份状态各算一次的分叉。
+	 */
+	private ResolvedToolStates resolveToolStates(String runId, AssistantMessage assistant,
+			Map<String, PendingToolCall> pendingsById, String snapshotStatus) {
+		return resolveToolStates(runId, assistant, pendingsById, snapshotStatus,
+				id -> ledgerEntry(runId, id) != null);
+	}
+
+	/** 同上，台账证据由调用方给出：与 tool 条目的 fallback 共用**同一谓词**，不会各查一次。 */
+	private ResolvedToolStates resolveToolStates(String runId, AssistantMessage assistant,
+			Map<String, PendingToolCall> pendingsById, String snapshotStatus,
+			Predicate<String> executedInLedger) {
 		Map<String, Object> states = new LinkedHashMap<>();
+		Map<String, String> statuses = new LinkedHashMap<>();
 		for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-			PendingToolCall pending = pendingsById.get(call.id());
-			Map<String, Object> state = resolveToolCallState(runId, pending, snapshotStatus, call.id());
-			if (state != null) {
-				states.put(call.id(), state);
+			PendingToolCall pending = call.id() == null ? null : pendingsById.get(call.id());
+			Map<String, Object> state = resolveToolCallState(pending, snapshotStatus, call.id(), runId,
+					executedInLedger);
+			if (state == null) {
+				continue;
+			}
+			states.put(call.id(), state);
+			Object status = state.get("status");
+			if (status != null) {
+				statuses.put(call.id(), String.valueOf(status));
 			}
 		}
-		if (states.isEmpty()) {
+		return new ResolvedToolStates(states, statuses);
+	}
+
+	/** 用已解析状态重建带 {@code toolCallStates} 的 assistant 消息；空映射 ⇒ 原消息（不产空键）。 */
+	private static Message withToolCallStates(AssistantMessage assistant, Map<String, Object> states) {
+		if (states == null || states.isEmpty()) {
 			return assistant;
 		}
 		Map<String, Object> metadata = new LinkedHashMap<>();
@@ -3596,6 +3631,13 @@ public class ResilientChatService {
 	 */
 	Map<String, Object> resolveToolCallState(String runId, PendingToolCall pending,
 			String snapshotStatus, String toolCallId) {
+		return resolveToolCallState(pending, snapshotStatus, toolCallId, runId,
+				id -> ledgerEntry(runId, id) != null);
+	}
+
+	/** 同上，台账证据由调用方提供（同一次解析里只查一遍，见 {@link #resolveToolStates}）。 */
+	private Map<String, Object> resolveToolCallState(PendingToolCall pending, String snapshotStatus,
+			String toolCallId, String runId, Predicate<String> executedInLedger) {
 		if (pending == null) {
 			return null;
 		}
@@ -3603,11 +3645,12 @@ public class ResilientChatService {
 		if (isTerminalEntryStatus(status)) {
 			return toolCallState(pending, status);
 		}
-		if (PendingToolCall.APPROVED.equals(status)
-				&& (pending.isExecuted() || ledgerEntry(runId, toolCallId) != null)) {
-			// T2 升格判据：KIND_CONFIRM 的 DANGER 工具执行后条目态永久停留 APPROVED（executeOnce 仅对
-			// KIND_BACKEND 置 EXECUTED），但「已批准且已执行」等价于 EXECUTED（executed 标志或台账命中即已执行）。
-			return toolCallState(pending, PendingToolCall.EXECUTED);
+		// T2 升格判据（唯一实现在 TranscriptEntries）：KIND_CONFIRM 的 DANGER 工具执行后条目态永久停留
+		// APPROVED（executeOnce 仅对 KIND_BACKEND 置 EXECUTED），但「已批准且已执行」等价于 EXECUTED
+		// （executed 标志或台账命中即已执行）。非未决状态不会触发台账读。
+		String settled = TranscriptEntries.settledStatus(pending, executedInLedger);
+		if (!status.equals(settled)) {
+			return toolCallState(pending, settled);
 		}
 		if (PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status)) {
 			if (RunSnapshot.isTerminal(snapshotStatus)) {
@@ -3639,18 +3682,9 @@ public class ResilientChatService {
 		return this.store.ledgerFor(runId, toolCallId);
 	}
 
-	/** 条目级终态（非 PENDING / APPROVED 的 10 个状态码）判定。 */
+	/** 条目级终态（非 PENDING / APPROVED 的状态码）判定；清单单一事实源在 {@link TranscriptEntries}。 */
 	private static boolean isTerminalEntryStatus(String status) {
-		return PendingToolCall.EXECUTED.equals(status)
-			|| PendingToolCall.REJECTED.equals(status)
-			|| PendingToolCall.REJECTED_ARGUMENTS.equals(status)
-			|| PendingToolCall.TIMEOUT.equals(status)
-			|| PendingToolCall.FRONTEND_RESULT.equals(status)
-			|| PendingToolCall.FRONTEND_CANCELLED.equals(status)
-			|| PendingToolCall.CANCELLED.equals(status)
-			|| PendingToolCall.BLOCKED.equals(status)
-			|| PendingToolCall.SKIPPED.equals(status)
-			|| PendingToolCall.PRECHECK_FAILED.equals(status);
+		return TranscriptEntries.isSettledStatus(status);
 	}
 
 	/**
@@ -3676,45 +3710,9 @@ public class ResilientChatService {
 	 * resultText 原文（限 kind==FRONTEND；前端 JSON.parse，失败兜底 null）。kind 无数据不写（禁臆造默认值）。
 	 */
 	private static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
-		Map<String, Object> state = new LinkedHashMap<>();
-		state.put("status", status);
-		// P0-1：历史段状态也带统一信封的 outcome/code（新增键，既有 status/kind 等不动）。
-		// M1：未决条目（PENDING/APPROVED）不写 outcome —— 结局尚未产生，写 unknown 会让前端把
-		// "等待中"映射成 failed（unknown→failed 的兜底），盖掉仍是 pending 的卡面。
-		// 缺键 = 前端按 status 展示；只有已决状态才落 outcome。
-		if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
-			ToolOutcome persisted = ToolOutcome.fromWire(pending.getOutcome());
-			state.put("outcome", (persisted == null ? ToolOutcome.fromStatus(status) : persisted).wire());
-		}
-		String code = pending.effectiveCode();
-		if (code != null) {
-			state.put("code", code);
-		}
-		String kind = pending.getKind();
-		if (kind != null && !kind.isBlank()) {
-			state.put("kind", kind);
-		}
-		String entryStatus = pending.getStatus();
-		if (PendingToolCall.APPROVED.equals(entryStatus)) {
-			state.put("decision", "approved");
-		}
-		else if (PendingToolCall.REJECTED.equals(entryStatus)
-				|| PendingToolCall.REJECTED_ARGUMENTS.equals(entryStatus)) {
-			state.put("decision", "rejected");
-		}
-		else if (PendingToolCall.CANCELLED.equals(entryStatus)) {
-			// 批G · S13：取消与 confirm_decision(decision=cancel) 帧同口径 —— 用户决策，不是系统超时
-			state.put("decision", "cancel");
-		}
-		if (pending.getResolvedAtMs() > 0) {
-			state.put("decidedAt", pending.getResolvedAtMs());
-		}
-		if (PendingToolCall.KIND_FRONTEND.equals(kind) && pending.getResultText() != null
-				&& !pending.getResultText().isBlank()) {
-			// 原文透传（非解析后对象）：解析与失败兜底在前端（R-160 M1 口径）
-			state.put("submittedValues", pending.getResultText());
-		}
-		return state;
+		// 唯一投影在 {@link TranscriptEntries}：/history（transcript）与记忆窗口必须同一份口径，
+		// 否则"刷新看到的卡"与"模型回放看到的卡"会各说一套。detail 见该方法注释。
+		return TranscriptEntries.toolCallState(pending, status);
 	}
 
 	/**

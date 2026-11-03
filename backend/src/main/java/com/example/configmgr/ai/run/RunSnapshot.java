@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
 import java.util.ArrayList;
@@ -29,8 +30,12 @@ import java.util.Map;
  *     <b>取消是吸收态</b>：快照写入路径的原子守卫保证任何非取消状态都不得从 CANCELLED 转出
  *     （见 {@code RunStore#saveStatusUnlessCancelled}）。</li>
  * </ul>
+ *
+ * <p><b>滚动升级兼容</b>：{@code @JsonIgnoreProperties(ignoreUnknown = true)} —— 多实例滚动期新版本
+ * 先写入的 additive 字段，旧版本反序列化时直接忽略，不会因为"多了一个键"读不出快照。
  */
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class RunSnapshot {
 
 	public static final String RUNNING = "RUNNING";
@@ -262,6 +267,26 @@ public class RunSnapshot {
 				Boolean.TRUE.equals(this.paramsLocked));
 	}
 
+	/**
+	 * B2：本轮用户的<b>请求原文</b>（建快照时写一次，additive）。
+	 *
+	 * <p>transcript 终态补写用户条目<b>只认它</b> —— 不从快照历史里挑"最后一条 USER"（那会把记忆窗口
+	 * 里别的轮次的提问写成这一轮），也不按消息 metadata 推断归属。{@code null}/空白 = 未记录
+	 * （旧快照或写入失败）：终态不补写，不做旧快照兼容。
+	 */
+	private String requestText;
+
+	/**
+	 * B2：本轮<b>请求起点</b>（建快照时写一次，additive；= transcript 轮首用户条目的排序键）。
+	 *
+	 * <p>{@code 0} = 未记录（旧快照）：用户条目回落 {@code createdAtMs - 1}。实际排序键见
+	 * {@link #transcriptUserTurnStartedAtMs()}（取请求起点与 {@code createdAtMs} 的较早者，时钟回拨
+	 * 时也不会排到工具卡之后）；助手/工具条目<b>始终</b>用 {@link #createdAtMs}、不做任何偏移 ——
+	 * 排序只保证"本 run 的用户条目早于本 run 的工具条目"，不给工具键加 1ms（那会让相邻 run 的条目
+	 * 在跨轮排序里交错）。
+	 */
+	private long turnStartedAtMs;
+
 	/** 取证视图（不含 messageJson 正文）。 */
 	public Map<String, Object> asMap() {
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -297,7 +322,37 @@ public class RunSnapshot {
 		// AR-10 第 3 条（additive）：armed 跨 park 持久化的两个事实；0 = 未武装（旧快照同值）
 		out.put("budgetArmedAtMs", this.budgetArmedAtMs);
 		out.put("budgetSkippedBatches", this.budgetSkippedBatches);
+		// B2（additive）：请求原文只报字符数（取证够用，不回显正文）；0 = 未记录
+		out.put("requestTextChars", this.requestText == null ? 0 : this.requestText.length());
 		return out;
+	}
+
+	/**
+	 * transcript 里本轮<b>用户条目</b>的排序键：请求起点与 {@code createdAtMs} 的<b>较早者</b>。
+	 *
+	 * <p>为什么取较早者：读侧按 {@code turnStartedAtMs} 稳定排序、同值保插入顺序，而终态补写的用户
+	 * 条目是<b>后写</b>的 —— 键一旦不早于工具卡（{@code createdAtMs}）就会排到它们之后。正常时钟下
+	 * 请求起点早于建快照，原值不变；<b>时钟回拨</b>（起点晚于创建）或同毫秒时取 {@code createdAtMs - 1}，
+	 * 保证补写的用户条目仍在工具卡之前。旧快照没有请求起点时同样取 {@code createdAtMs - 1}。
+	 * 只动用户键、工具键保持 {@link #transcriptToolTurnStartedAtMs()}（= {@code createdAtMs}），
+	 * 跨 run 顺序不变。
+	 */
+	public long transcriptUserTurnStartedAtMs() {
+		if (this.createdAtMs <= 0L) {
+			return this.turnStartedAtMs > 0L ? this.turnStartedAtMs : 0L;
+		}
+		long beforeCreation = this.createdAtMs - 1L;
+		return this.turnStartedAtMs > 0L ? Math.min(this.turnStartedAtMs, beforeCreation) : beforeCreation;
+	}
+
+	/**
+	 * transcript 里本轮<b>助手/工具条目</b>的排序键 = {@code createdAtMs}（不做任何偏移）。
+	 *
+	 * <p>用户条目用 {@link #transcriptUserTurnStartedAtMs()}（严格更早），因此"轮首写失败、终态才补写"
+	 * 的用户条目不会排到工具卡之后；工具键保持原值，避免给相邻 run 制造 1ms 的交错。
+	 */
+	public long transcriptToolTurnStartedAtMs() {
+		return this.createdAtMs > 0L ? this.createdAtMs : this.transcriptUserTurnStartedAtMs();
 	}
 
 }

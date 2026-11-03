@@ -1199,6 +1199,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 						AiTrace.eventOn(runId, snapshot.getSessionId(), "tool_call_park",
 								"toolCallId", pending.getToolCallId(), "tool", pending.getName(),
 								"kind", pending.getKind(), "parkKind", parked.kind());
+						// 本批未全部结算，但排在门卡之前的调用可能已经执行：把已知的真态先写进
+						// 展示历史（仍 PENDING 的门卡照实写 PENDING），刷新不必等续跑收尾。
+						recordSettledBatchTranscript(runId, snapshot, assistant, pendings);
 						throw ex;
 					}
 					// 执行段抛错（挂起态外置失败 / 等待被打断 / 执行器异常）：先补 end 行再让异常穿出去
@@ -1258,6 +1261,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 							Math.max(0, pendings.size() - responses.size()));
 				}
 			}
+
+			// B2：本批工具已全部结算 ⇒ 立刻按同一 entryId/toolCallId 重写本批工具卡。
+			// 挂起写点（recordPendingTranscript）记的是"等待那一刻"的状态，终态写点要等整轮收尾；
+			// 中间这段（长批次 / 多跳 / 用户刷新）若只留挂起快照，已执行的卡会一直显示"待确认"。
+			recordSettledBatchTranscript(runId, snapshot, assistant, pendings);
 
 			ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
 			// ===== 落定本轮：与官方 buildConversationHistoryAfterToolExecution 同构 =====
@@ -3442,6 +3450,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 				|| !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
 			return;
 		}
+		// R4：toolCallId 缺失 ⇒ 整批不写（与结算写点同一口径）：不产出无归属卡。
+		if (pendings.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
+			log.debug("transcript 挂起条目跳过 runId={}：批次含 toolCallId 缺失的条目", runId);
+			return;
+		}
+		// 轮次已终态（取消/完成/失败）⇒ 不写：挂起写点若在取消终态之后执行，会把 CANCELLED 覆盖回
+		// PENDING/APPROVED。终态写点负责最终展示历史。
+		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+			log.debug("transcript 挂起条目跳过 runId={}：轮次已终态 status={}（终态写点负责）", runId,
+					snapshot.getStatus());
+			return;
+		}
 		try {
 			if (!this.store.permittedToWrite(runId, "transcript")) {
 				return;
@@ -3452,19 +3472,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return;
 		}
 		try {
-			List<TranscriptEntry.ToolCallView> calls = new ArrayList<>(pendings.size());
-			for (PendingToolCall pending : pendings) {
-				calls.add(new TranscriptEntry.ToolCallView(pending.getToolCallId(),
-						pending.getType() == null ? "function" : pending.getType(), pending.getName(),
-						pending.getArguments()));
-			}
+			List<TranscriptEntry.ToolCallView> calls = toolCallViews(pendings);
+			long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
+			// 与结算写点同一口径：assistant 的 toolCallStates 与 tool 条目的 status 同源（每卡只解析一次）。
+			Map<String, String> statuses = TranscriptEntries.settledStatuses(pendings, null);
 			List<TranscriptEntry> entries = new ArrayList<>(pendings.size() + 1);
-			entries.add(TranscriptEntries.assistant(runId, snapshot.getCreatedAtMs(), System.currentTimeMillis(),
-					assistant.getText(), calls, TranscriptEntries.pendingStates(pendings)));
+			entries.add(TranscriptEntries.assistant(runId, turnStartedAtMs, System.currentTimeMillis(),
+					assistant.getText(), calls, TranscriptEntries.statesFrom(pendings, statuses)));
 			for (PendingToolCall pending : pendings) {
-				entries.add(TranscriptEntries.tool(runId, snapshot.getCreatedAtMs(), System.currentTimeMillis(),
-						pending.getToolCallId(), pending.getName(), pending.getKind(), pending.getStatus(),
-						pending.getResultText()));
+				entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, System.currentTimeMillis(),
+						pending.getToolCallId(), pending.getName(), pending.getKind(),
+						statuses.get(pending.getToolCallId()), pending.getResultText()));
 			}
 			this.transcript.ensureBaseline(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(),
 					prompt == null ? List.of() : prompt.getInstructions());
@@ -3473,6 +3491,144 @@ public class SpToolCallingManager implements ToolCallingManager {
 		catch (RuntimeException ex) {
 			log.warn("transcript 挂起条目写入失败 runId={}：{}（挂起/等待不受影响）", runId, ex.getMessage());
 		}
+	}
+
+	/**
+	 * 续跑侧入口：整批挂起条目结算后重写本批工具卡（与执行循环同一个实现，快照自取）。
+	 *
+	 * <p>续跑由 {@link RunStore} 的在飞条目驱动、不走 {@code executeToolCalls}，因此执行循环尾部的
+	 * 写点覆盖不到它；这里补同一个口径（失败只 WARN，展示面不影响续跑）。
+	 */
+	public void refreshSettledBatchTranscript(String runId, AssistantMessage assistant, List<PendingToolCall> batch) {
+		if (this.transcript == null || runId == null || batch == null || batch.isEmpty()) {
+			return;
+		}
+		RunSnapshot snapshot;
+		try {
+			snapshot = this.store.get(runId);
+		}
+		catch (RuntimeException ex) {
+			log.debug("transcript 批次重写读取快照失败 runId={}（本次不写）：{}", runId, ex.getMessage());
+			return;
+		}
+		recordSettledBatchTranscript(runId, snapshot, assistant, batch);
+	}
+
+	/**
+	 * B2：本批工具<b>结算之后</b>重写本批的 assistant/tool 条目（同一 {@code entryId}/{@code toolCallId}，
+	 * 读取时 last-wins，不会产生第二张卡）。
+	 *
+	 * <p>为什么必须有这个写点：挂起写点记的是"等待那一刻"的状态，终态写点要等整轮收尾。中间这段
+	 * （多跳工具轮、长批次、用户刷新）如果只有挂起快照，用户看到的就是一张永远"待确认"的卡 ——
+	 * 即使工具早已执行完。这里按<b>结算后的条目真值</b>重写：
+	 * <ul>
+	 * <li>状态 = {@link TranscriptEntries#settledStatuses}（每张卡只解析一次：已执行但条目态停在
+	 *     APPROVED/PENDING 的投影成 EXECUTED，台账命中同样算已执行证据）；</li>
+	 * <li>状态映射 = {@link TranscriptEntries#statesFrom}（与记忆收敛同一份投影，保留
+	 *     outcome/code/decision/decidedAt/submittedValues，未决条目不写 outcome）——
+	 *     assistant 的 toolCallStates 与 tool 条目的 status <b>同源</b>；</li>
+	 * <li>待决条目<b>读不全就整批不写</b>：缺失 toolCallId 若只出现在 assistant 的 toolCalls 里，
+	 *     前端会把它占位成 succeeded；等终态写点补比写一张假卡安全；</li>
+	 * <li>只写本批的 toolCallId，不写用户条目 —— 用户原文的唯一权威是轮首写点，这里不参与。</li>
+	 * </ul>
+	 *
+	 * <p>失败只 WARN：展示历史是观测面，不能反噬工具执行/续跑。挂起写点与终态写点保持原样（幂等）。
+	 */
+	private void recordSettledBatchTranscript(String runId, RunSnapshot snapshot, AssistantMessage assistant,
+			List<PendingToolCall> batch) {
+		if (this.transcript == null || snapshot == null || assistant == null || batch == null || batch.isEmpty()
+				|| !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
+			return;
+		}
+		// R1：轮次已终态（取消/完成/失败）⇒ 不写。终态写点（finish/cancel/fail）负责最终展示历史，
+		// 这里若在取消终态之后补写，会把已经写好的 CANCELLED 覆盖回 APPROVED/PENDING。
+		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+			log.debug("transcript 批次重写跳过 runId={}：轮次已终态 status={}（终态写点负责）", runId,
+					snapshot.getStatus());
+			return;
+		}
+		// R4：toolCallId 缺失的条目无法形成有归属的卡（statuses/states 都以 id 为键）⇒ 整批不写，
+		// 不产出无归属卡（否则 assistant 里会留一个没有状态的调用，前端占位成 succeeded）。
+		if (batch.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
+			log.debug("transcript 批次重写跳过 runId={}：批次含 toolCallId 缺失的条目", runId);
+			return;
+		}
+		try {
+			if (!this.store.permittedToWrite(runId, "transcript")) {
+				return;
+			}
+		}
+		catch (RuntimeException ex) {
+			log.debug("transcript 写入权判定失败 runId={}（批次结算不重写工具卡）：{}", runId, ex.getMessage());
+			return;
+		}
+		try {
+			// 只写存储里的真值：确认门/前端通道结算的是外置存储的新副本，循环里那份可能仍是旧的。
+			// 读不到/读不全就<b>不写</b> —— 拿旧副本重写会把已执行的卡写回 PENDING（宁可等终态写点补）。
+			Map<String, PendingToolCall> fresh = new LinkedHashMap<>();
+			try {
+				for (PendingToolCall settled : this.store.pendingsLenient(runId)) {
+					if (settled != null && settled.getToolCallId() != null) {
+						fresh.put(settled.getToolCallId(), settled);
+					}
+				}
+			}
+			catch (RuntimeException ex) {
+				log.debug("transcript 批次重写读取待决条目失败 runId={}（本次不写）：{}", runId, ex.getMessage());
+				return;
+			}
+			List<PendingToolCall> settledBatch = new ArrayList<>(batch.size());
+			for (PendingToolCall pending : batch) {
+				PendingToolCall latest = pending == null || pending.getToolCallId() == null ? null
+						: fresh.get(pending.getToolCallId());
+				if (latest == null) {
+					// 读不全（Redis 降级/条目被清）⇒ <b>整批不写</b>：缺状态的 toolCallId 留在 assistant 的
+					// toolCalls 里会被前端占位成 succeeded，比"暂缺一次更新"更假。等终态写点补。
+					log.debug("transcript 批次重写跳过 runId={}：待决条目读取不完整（batch={} fresh={}）", runId,
+							batch.size(), fresh.size());
+					return;
+				}
+				settledBatch.add(latest);
+			}
+			// 本批一张都还没结算（park 在首张卡就穿出）⇒ 挂起写点那份就是真值，不重复追加同内容。
+			boolean anySettled = settledBatch.stream()
+				.anyMatch(pending -> !PendingToolCall.PENDING.equals(pending.getStatus()));
+			if (!anySettled) {
+				return;
+			}
+			long atMs = System.currentTimeMillis();
+			// 每张卡只解析一次状态（台账只查一遍）：assistant 的 toolCallStates 与 tool 条目的 status 同源，
+			// 不会出现 assistant=EXECUTED 而 tool=APPROVED。
+			Map<String, String> statuses = TranscriptEntries.settledStatuses(settledBatch,
+					toolCallId -> ledgerOf(runId, toolCallId) != null);
+			List<TranscriptEntry> entries = new ArrayList<>(settledBatch.size() + 1);
+			long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
+			entries.add(TranscriptEntries.assistant(runId, turnStartedAtMs, atMs, assistant.getText(),
+					toolCallViews(settledBatch), TranscriptEntries.statesFrom(settledBatch, statuses)));
+			for (PendingToolCall pending : settledBatch) {
+				entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, atMs, pending.getToolCallId(),
+						pending.getName(), pending.getKind(), statuses.get(pending.getToolCallId()),
+						pending.getResultText()));
+			}
+			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries);
+		}
+		catch (RuntimeException ex) {
+			log.warn("transcript 批次结算重写失败 runId={}：{}（工具执行/续跑不受影响）", runId, ex.getMessage());
+		}
+	}
+
+	/** 待决条目 → assistant 条目的工具调用视图（挂起写点与批次结算写点同一份构造）。 */
+	private static List<TranscriptEntry.ToolCallView> toolCallViews(List<PendingToolCall> pendings) {
+		List<TranscriptEntry.ToolCallView> calls = new ArrayList<>(pendings.size());
+		for (PendingToolCall pending : pendings) {
+			if (pending == null) {
+				continue;
+			}
+			calls.add(new TranscriptEntry.ToolCallView(pending.getToolCallId(),
+					pending.getType() == null ? "function" : pending.getType(), pending.getName(),
+					pending.getArguments()));
+		}
+		return calls;
 	}
 
 	/** 落定本轮：历史进快照、in-flight 清空、状态回到 RUNNING（工具已全部结算）。 */

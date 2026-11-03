@@ -24,6 +24,7 @@ import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
@@ -33,7 +34,6 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -1329,72 +1329,81 @@ public class ResumeService {
 				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
 				// P1-10：续跑与首轮同一批策略 —— W/J/P 确定性失败后，剩余未执行项补 SKIPPED。
 				PendingToolCall haltedBy = null;
-				for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
-					// 以 Redis 的待决条目为准（快照里的 in-flight 副本停留在"挂起那一刻"）
-					PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
-					PendingToolCall effective = fresh == null ? item : fresh;
-					if (haltedBy != null && isUnsettled(effective)) {
-						responses.add(this.toolCallingManager.skipAsUpstreamFailed(runId, effective, haltedBy));
-						rebuilt.add(effective.getToolCallId() + ":" + PendingToolCall.SKIPPED + ":not-executed");
-						continue;
-					}
-					// 入口 kind 校验批（续跑假批准）：APPROVED+FRONTEND 是"人没点过、前端也没执行过"的
-					// 历史数据。结算由 resolvePending 显式落成 blocked（不执行后端桩、不写台账）；
-					// 这里先留一条可 grep 的痕 —— 否则"这张卡续跑后为什么是 blocked"只能靠翻半小时日志猜。
-					if (isKindMisapproved(effective)) {
-						log.warn("续跑发现 APPROVED+FRONTEND 历史假批准 runId={} toolCallId={} name={}"
-								+ "（将显式 blocked、不执行后端桩、不写台账）", runId, effective.getToolCallId(),
-								effective.getName());
-					}
-					ResumeResult cancelBeforeTool = cancelStateOutcome(runId, body);
-					if (cancelBeforeTool != null) {
-						return cancelBeforeTool;
-					}
-					// ===== UNKNOWN 的翻译（取消状态在重建/认领窗口抖动）=====
-					// 认领前复核为 fail-closed：读到 UNKNOWN 会抛既有 STATE_UNAVAILABLE（inline 路径的既有语义）。
-					// 它若直接穿出 resume()，HTTP 会把"取消状态不可知"变成 500 —— 违反已批准的 UNKNOWN/503 契约。
-					// 这里的职责只是把**同一个既有异常**翻译成**同一个既有 typed 结局**（与首次 unknown
-					// 逐字同形，见 cancelStateOutcome）；不重新读取消状态、不放行、不落终态。
-					String text;
-					try {
-						text = this.toolCallingManager.resolvePending(runId, prompt, effective);
-					}
-					catch (StreamViolationException ex) {
-						if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) {
-							throw ex;
+				try {
+					for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
+						// 以 Redis 的待决条目为准（快照里的 in-flight 副本停留在"挂起那一刻"）
+						PendingToolCall fresh = this.store.pending(runId, item.getToolCallId());
+						PendingToolCall effective = fresh == null ? item : fresh;
+						if (haltedBy != null && isUnsettled(effective)) {
+							responses.add(this.toolCallingManager.skipAsUpstreamFailed(runId, effective, haltedBy));
+							rebuilt.add(effective.getToolCallId() + ":" + PendingToolCall.SKIPPED + ":not-executed");
+							continue;
 						}
-						log.warn("续跑重建期间取消状态不可知，按既有 UNKNOWN 结局收口 runId={} toolCallId={}：{}",
-								runId, effective.getToolCallId(), ex.getMessage());
-						return cancelUnknownOutcome(body);
+						// 入口 kind 校验批（续跑假批准）：APPROVED+FRONTEND 是"人没点过、前端也没执行过"的
+						// 历史数据。结算由 resolvePending 显式落成 blocked（不执行后端桩、不写台账）；
+						// 这里先留一条可 grep 的痕 —— 否则"这张卡续跑后为什么是 blocked"只能靠翻半小时日志猜。
+						if (isKindMisapproved(effective)) {
+							log.warn("续跑发现 APPROVED+FRONTEND 历史假批准 runId={} toolCallId={} name={}"
+									+ "（将显式 blocked、不执行后端桩、不写台账）", runId, effective.getToolCallId(),
+									effective.getName());
+						}
+						ResumeResult cancelBeforeTool = cancelStateOutcome(runId, body);
+						if (cancelBeforeTool != null) {
+							return cancelBeforeTool;
+						}
+						// ===== UNKNOWN 的翻译（取消状态在重建/认领窗口抖动）=====
+						// 认领前复核为 fail-closed：读到 UNKNOWN 会抛既有 STATE_UNAVAILABLE（inline 路径的既有语义）。
+						// 它若直接穿出 resume()，HTTP 会把"取消状态不可知"变成 500 —— 违反已批准的 UNKNOWN/503 契约。
+						// 这里的职责只是把**同一个既有异常**翻译成**同一个既有 typed 结局**（与首次 unknown
+						// 逐字同形，见 cancelStateOutcome）；不重新读取消状态、不放行、不落终态。
+						String text;
+						try {
+							text = this.toolCallingManager.resolvePending(runId, prompt, effective);
+						}
+						catch (StreamViolationException ex) {
+							if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) {
+								throw ex;
+							}
+							log.warn("续跑重建期间取消状态不可知，按既有 UNKNOWN 结局收口 runId={} toolCallId={}：{}",
+									runId, effective.getToolCallId(), ex.getMessage());
+							return cancelUnknownOutcome(body);
+						}
+						// ===== R1：认领前复核命中取消 ⇒ 这一轮必须走取消终态 =====
+						// resolvePending 内部会在真正认领前复核取消（命中即放弃执行、条目收敛为 CANCELLED），
+						// 但执行方没有"结束这一轮"的能力（它不持有 chat/终态面）。若在这里继续重建历史并
+						// 交棒给模型，用户已经按下的停止会被一条 CANCELLED 工具结果"吞掉"：模型照常作答、
+						// 轮次以 done 收尾。故紧接着复用同一个入口（它会 chatService.cancelParked → 取消终态
+						// + 补裁决帧 + 结算行），"取消优先"因此覆盖到认领窗口。
+						ResumeResult cancelAfterTool = cancelStateOutcome(runId, body);
+						if (cancelAfterTool != null) {
+							return cancelAfterTool;
+						}
+						// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
+						// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
+						// （旧实现因此在"本次刚执行完"时显示 reused(null)）。
+						PendingToolCall settled = this.store.pending(runId, effective.getToolCallId());
+						PendingToolCall source = settled == null ? effective : settled;
+						// T2 + P0-1：续跑重建的 role:tool 与首轮同形 —— 统一信封 JSON，message 先裁剪再组装
+						// P1-10 对账措辞已由 executeOnce 写进 resultText，此处不再二次加工（重放同形）。
+						responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
+								effective.getName(),
+								ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
+										effective.getArguments()).toModelJson(this.limiter, effective.getName())));
+						rebuilt.add(settlementLabel(source));
+						settledInBatch.add(source);
+						if (this.toolCallingManager.haltsBatch(source)) {
+							haltedBy = source;
+							log.warn("续跑批策略首错即停 runId={} 上游工具={} outcome={} code={}，剩余条目将置 SKIPPED",
+									runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode());
+						}
 					}
-					// ===== R1：认领前复核命中取消 ⇒ 这一轮必须走取消终态 =====
-					// resolvePending 内部会在真正认领前复核取消（命中即放弃执行、条目收敛为 CANCELLED），
-					// 但执行方没有"结束这一轮"的能力（它不持有 chat/终态面）。若在这里继续重建历史并
-					// 交棒给模型，用户已经按下的停止会被一条 CANCELLED 工具结果"吞掉"：模型照常作答、
-					// 轮次以 done 收尾。故紧接着复用同一个入口（它会 chatService.cancelParked → 取消终态
-					// + 补裁决帧 + 结算行），"取消优先"因此覆盖到认领窗口。
-					ResumeResult cancelAfterTool = cancelStateOutcome(runId, body);
-					if (cancelAfterTool != null) {
-						return cancelAfterTool;
-					}
-					// R6 裁决：标签必须在**结算之后**回读 Redis 才算准 ——
-					// executeOnce 的认领/完成是写在 Redis 里的新副本上，传入的 effective 可能仍是旧值
-					// （旧实现因此在"本次刚执行完"时显示 reused(null)）。
-					PendingToolCall settled = this.store.pending(runId, effective.getToolCallId());
-					PendingToolCall source = settled == null ? effective : settled;
-					// T2 + P0-1：续跑重建的 role:tool 与首轮同形 —— 统一信封 JSON，message 先裁剪再组装
-					// P1-10 对账措辞已由 executeOnce 写进 resultText，此处不再二次加工（重放同形）。
-					responses.add(new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
-							effective.getName(),
-							ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
-									effective.getArguments()).toModelJson(this.limiter, effective.getName())));
-					rebuilt.add(settlementLabel(source));
-					settledInBatch.add(source);
-					if (this.toolCallingManager.haltsBatch(source)) {
-						haltedBy = source;
-						log.warn("续跑批策略首错即停 runId={} 上游工具={} outcome={} code={}，剩余条目将置 SKIPPED",
-								runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode());
-					}
+				}
+				finally {
+					// E：取消 / STATE_UNKNOWN 等 resolvePending 之后的早退也必须把<b>已结算</b>的卡写回展示
+					// 历史（否则刷新后这批卡停在挂起时的 PENDING/APPROVED）。一张都没结算时写点自身会
+					// 跳过（anySettled=false），不会在尚无 assistant/结算条目时伪造写。
+					this.toolCallingManager.refreshSettledBatchTranscript(runId, assistant,
+							snapshot.getInFlightToolCalls());
 				}
 				// ===== 批间上下文刷新（续跑侧的唯一刷新点）=====
 				// 生产 park=true 时首轮的刷新点（SpToolCallingManager 执行循环尾部）根本走不到：
@@ -1447,6 +1456,20 @@ public class ResumeService {
 			}
 
 			// 工具批已结算、页面事实已同步：确定性步骤动作先于模型交棒，仍复用既有前端工具与挂起面。
+			if (this.definitionSelectionForm != null && this.definitionSelectionForm.parkNavigateIfDue(runId,
+					nextHopContext, settledInBatch, history)) {
+				body.put("resumed", false);
+				body.put("reason", "DEFINITION_NAVIGATE_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
+			if (this.definitionSelectionForm != null && this.definitionSelectionForm.parkSelectDefinitionsIfDue(runId,
+					nextHopContext, settledInBatch, history)) {
+				body.put("resumed", false);
+				body.put("reason", "DEFINITION_SELECT_PARKED");
+				body.put("taskId", nextHopContext.getTaskId());
+				return new ResumeResult(Outcome.ACCEPTED, body);
+			}
 			if (this.definitionSelectionForm != null && this.definitionSelectionForm.parkAdvanceIfDue(runId,
 					nextHopContext, settledInBatch, history)) {
 				body.put("resumed", false);
@@ -1461,46 +1484,15 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
-			boolean enteredQueryCond = settledInBatch != null && settledInBatch.stream()
-					.anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
-							&& com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
 			if (this.conditionsForm != null
-					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history, !enteredQueryCond)) {
+					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history)) {
 				body.put("resumed", false);
-				body.put("reason", "CONDITIONS_FORM_PARKED");
+				// 条件候选草案（set_condition）与条件表（generative_form）是两种不同的挂起物：
+				// 原因码必须如实区分，避免把"草案已下发"误读成"条件表已问过"。
+				body.put("reason", conditionParkReason(runId));
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
-			// ===== 条件结构化交棒的标记：随快照持久化 =====
-			// 披露面（{@code forContext}）用的是本跳这份上下文，而执行面的第三道防线
-			// （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文
-			// （{@code SpToolCallingManager} 里 {@code AiContext.fromMap(snapshot.getContext())}）。
-			// 只改内存对象 ⇒ guard 永远看不到；离开 QUERY_COND 的清理同理，不落库等于没清。
-			// 写入走取消优先 + 租约的同一道写门：被拒 ⇒ 本拍不得驱动模型（与其它交棒写点同口径）。
-			boolean conditionHandoff = nextHopContext.getExtra() != null
-					&& Boolean.TRUE.equals(nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF));
-			if (conditionHandoff && !"QUERY_COND".equals(nextHopContext.getStep())) {
-				Map<String, Object> extra = new LinkedHashMap<>(nextHopContext.getExtra());
-				extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
-				nextHopContext = AiContext.of(nextHopContext.getPage(), nextHopContext.getTaskType(),
-						nextHopContext.getStep(), nextHopContext.getTaskId(), nextHopContext.getTaskStatus(), extra);
-				conditionHandoff = false;
-				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
-					return resumeStatusWriteRefused(runId, body);
-				}
-			}
-			else if (conditionHandoff) {
-				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
-					return resumeStatusWriteRefused(runId, body);
-				}
-			}
-			// 合成内部指令：只属于<b>这一跳</b>的交棒视图，在窗口/压缩之后才追加（见下），
-			// 既不进压缩输入也不随压缩写回快照/记忆（详见 SyntheticMessages#withoutCorrectionInstruction）。
-			Message conditionInstruction = enteredQueryCond && conditionHandoff
-					? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-							+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
-							+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
-					: null;
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
 			// 为什么续跑更需要它：这里是完整 run 历史（挂起期越长越大），没有条数窗口兜着 ——
@@ -1630,14 +1622,6 @@ public class ResumeService {
 					body.put("contextCompaction", "none");
 					body.put("contextCompactionReason", compaction.reason());
 				}
-			}
-
-			// 合成内部指令在窗口/压缩<b>之后</b>才进交棒视图：它既不参与窗口预算、也不进压缩输入，
-			// 更不会随压缩写回快照/记忆（条件结构化交棒的记忆污染面）；模型这一跳仍看得到它，
-			// 且它是历史最后一条（模型紧接着做结构化）。
-			if (conditionInstruction != null) {
-				history = new ArrayList<>(history);
-				history.add(conditionInstruction);
 			}
 
 			body.put("resumed", true);
@@ -1917,23 +1901,25 @@ public class ResumeService {
 	}
 
 	/**
-	 * 把<b>交棒上下文</b>写回快照：条件结构化标记的持久化/清理都走这里。
+	 * 条件交棒挂了什么：候选草案（{@code set_condition} 页面草案）还是条件表
+	 * （{@code generative_form}）。两者语义不同，原因码不得混称。
 	 *
-	 * <p>为什么必须落库：执行面的第三道防线（{@code ToolRegistry#matchesContext}）读的是
-	 * 快照上下文（{@code SpToolCallingManager} 里的 {@code AiContext.fromMap(snapshot.getContext())}），
-	 * 而 {@link AiContext#fromMap} 是拷贝 —— 只改内存对象，guard 与下一次续跑都看不到。
-	 *
-	 * <p>写门与其它交棒写点同源（{@code saveStatusUnlessCancelled}）：取消已先到 / 租约只读 /
-	 * fence 陈旧 ⇒ {@code false}，调用方必须<b>不驱动模型</b>（本方法不驱动任何东西，不引入双驱动）。
+	 * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）：存在 PENDING 的 {@code set_condition}
+	 * 即候选草案；读失败按条件表返回（既有文案，不新增失败路径）。
 	 */
-	private boolean persistHandoffContext(String runId, RunSnapshot snapshot, AiContext context) {
-		snapshot.setContext(context.toMap());
-		if (this.store.saveStatusUnlessCancelled(snapshot)) {
-			return true;
+	private String conditionParkReason(String runId) {
+		try {
+			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+				if (pending != null && PendingToolCall.PENDING.equals(pending.getStatus())
+						&& AiToolNames.SET_CONDITION.equals(pending.getName())) {
+					return "CONDITION_DRAFTS_PARKED";
+				}
+			}
 		}
-		log.info("交棒上下文写回被写门拒绝 runId={} step={}（复核取消态/续跑权后收口，不驱动）", runId,
-				context.getStep());
-		return false;
+		catch (RuntimeException ex) {
+			log.warn("无法区分条件交棒的挂起物，按条件表返回 runId={}：{}", runId, ex.getMessage());
+		}
+		return "CONDITIONS_FORM_PARKED";
 	}
 
 	/**

@@ -244,18 +244,13 @@ public class ConditionsForm extends HostForm {
 	 * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
 	 * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
 	 * <li>表单已明确留空/取消/非空回灌：不自动重问，也不代写 {@code "{}"}；</li>
-	 * <li>仍 {@code UNDECIDED}：{@code allowUnknownForm=false} 时先交模型结构化，否则宿主挂一次非必填
-	 *     {@code SET_CONDITIONS} 表单；</li>
+	 * <li>仍 {@code UNDECIDED}：宿主挂一次非必填 {@code SET_CONDITIONS} 表单（进入 {@code QUERY_COND}
+	 *     即收集，不再先交模型）；</li>
 	 * <li>坏 JSON/残缺结构：不弹表（交给向导修正/模型结构化路径），零副作用。</li>
 	 * </ul>
 	 * 不改变 {@code start_export} 确认门，也不自动执行/下载。
 	 */
 	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history) {
-		return parkIfDueAtQueryCond(runId, context, history, true);
-	}
-
-	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
-			boolean allowUnknownForm) {
 		if (runId == null || context == null || history == null || !parkEnabled()) {
 			return false;
 		}
@@ -309,13 +304,6 @@ public class ConditionsForm extends HostForm {
 				// 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
 				return false;
 			}
-			if (!allowUnknownForm) {
-				// 刚进入条件步骤：只披露查定义、设置条件与推进，先让模型完成结构化。
-				Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
-				extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
-				context.setExtra(extra);
-				return false;
-			}
 			String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
 			if (alreadyIssued(runId, toolCallId)) {
 				return false;
@@ -332,6 +320,17 @@ public class ConditionsForm extends HostForm {
 			log.warn("进入 QUERY_COND 的条件表单未能挂起（按既有路径继续）runId={}：{}", runId, ex.getMessage());
 			return false;
 		}
+	}
+
+	/**
+	 * @param allowUnknownForm 已无行为：进入 {@code QUERY_COND} 后宿主总是允许挂一次条件表。
+	 * @deprecated 生产调用方只走 3 参入口；保留该重载仅为旧调用点/用例的源码兼容，
+	 *             新代码不要再使用这个开关。
+	 */
+	@Deprecated
+	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
+			boolean allowUnknownForm) {
+		return parkIfDueAtQueryCond(runId, context, history);
 	}
 
 	/**
