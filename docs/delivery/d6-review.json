@@ -266,6 +266,13 @@
       "reason": "已同步每批工具结算的transcript真态写回、快照请求原文、刷新单调对账及创建后确定性导航、配置选择、条件收集与有界恢复契约",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:d49ce398e5cab3e688394259dbb16fb9fb145e2c1fb310a295b699fe8f9a5e8a",
+      "status": "synced",
+      "reason": "已同步KB文档索引与下线回收、ai:creq终态保留和游标回收、台账元数据投影、销毁退役、SSE退避及前端草稿和缓存清理契约",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

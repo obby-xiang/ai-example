@@ -513,7 +513,7 @@ public class JobService {
             // 只匹配 PENDING/RUNNING，已 COMPLETED 的条目一律不动（不覆盖成功终态）。
             int convergedItems = this.jobItemRepository.convergeOpenItems(jobId, "CANCELLED");
             if (convergedItems > 0) {
-                log.info("作业 #{} 取消：收敛 {} 条在途条目为 CANCELLED（执行器已不再写条目）",
+                log.info("作业 #{} 取消：收敛 {} 条在途条目为 CANCELLED（执行器迟到的条目写由条件 UPDATE 丢弃）",
                         jobId, convergedItems);
             }
             return job.getTaskId();
@@ -545,7 +545,10 @@ public class JobService {
                     false, false, jobId, cancellationRegistry.keyFor(jobId));
         }
         if (!result.redisWritten()) {
-            log.warn("取消作业 #{} 的共享标志未写入 Redis（降级：仅本进程可见）", jobId);
+            // 精确口径：Redis 写失败时，只有本实例已登记（正在执行该作业）的加速位立即可见；
+            // 非执行实例没有本地条目，跨实例取消在 Redis 恢复前不可见（作业行终态仍是权威）
+            log.warn("取消作业 #{} 的共享标志未写入 Redis（降级：仅本实例已登记的作业立即可见，跨实例不可见）",
+                    jobId);
         }
         try {
             taskSseService.publish(taskId, "JOB_DONE", Map.of(

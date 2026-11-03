@@ -369,6 +369,30 @@ public class SseChatEmitter {
 	 */
 	private boolean identityResolved;
 
+	/** 身份记录读失败的基础退避（有界：1s 起，按连续失败指数增长）。 */
+	static final long IDENTITY_READ_BACKOFF_BASE_MS = 1_000L;
+
+	/** 身份记录读失败的最大退避（30s）：Redis 抖动期每个写出器最多约 2 次/分钟的记录读。 */
+	static final long IDENTITY_READ_BACKOFF_MAX_MS = 30_000L;
+
+	/**
+	 * <b>C-63：身份读异常的有界退避</b>（值 = 下一次允许读记录的时刻，epoch 毫秒；0 = 不退避）。
+	 *
+	 * <p>为什么需要：首次解析在 {@link #identityLock} 内做一次 Redis 读；读异常<b>不落定</b>
+	 * （下一拍重试），于是 Redis 抖动时<b>每一帧</b>都会带着锁再读一次 —— 出帧热路径被一次
+	 * 高延迟读放大成"帧率 × 一个往返"，还把同轮其它出帧串行化在锁上。
+	 *
+	 * <p>退避期间的行为与"这一拍读失败"逐字一致（不缓存、不落定）：有已校验提示就按提示继续
+	 * （见 {@link #fallbackIdentityOutcome()}），没有提示仍返回 {@code readFailure} 让调用方
+	 * 明确失败；退避到期后再试，解析成功即清零（{@link #clearIdentityBackoff()}）。
+	 *
+	 * <p>只在锁内写（与 {@link #identityResolved} 同一拍），锁外读：因此退避判定本身不进锁。
+	 */
+	private final AtomicLong identityRetryAtMs = new AtomicLong(0L);
+
+	/** 连续记录读失败次数（退避指数）；解析成功/落定时清零。只在 {@link #identityLock} 内写。 */
+	private final AtomicInteger identityReadFailures = new AtomicInteger();
+
 	/**
 	 * <b>本轮记录身份是唯一权威</b>（生产装配标记；{@link RunRegistry} 创建写出器时打开）。
 	 *
@@ -4114,6 +4138,12 @@ public class SseChatEmitter {
 	 * 没有可用提示时由调用方<b>明确失败</b>（跳过这一帧）。旧实现在 catch 里把结果折成
 	 * {@code null} 并置"已解析"，一次 Redis 抖动就把整条写出器<b>永久</b>钉在无身份（legacy 键族）上，
 	 * 而重挂回放与跨实例唤醒读的是身份键族 —— 整轮帧看起来"从未存在"。
+	 *
+	 * <p><b>C-63：读异常退避（有界）</b>。上面"不缓存、下一拍重试"如果照搬到出帧热路径，Redis
+	 * 抖动时就是<b>每帧一次带锁 Redis 读</b>。现在捕获失败后按指数退避（1s→30s 封顶）排一个
+	 * 重试时刻：窗口内不进 {@link #identityLock}、不读记录，返回值与"这一拍读失败"逐字一致
+	 * （有已校验提示按提示继续、没有则明确失败）；成功解析即清零。退避只影响"什么时候再试"，
+	 * 不改变任何一帧的身份结论。
 	 */
 	private TenantUser deliveryIdentity() {
 		return deliveryIdentityOutcome().identity();
@@ -4134,9 +4164,19 @@ public class SseChatEmitter {
 		if (known != null) {
 			return new IdentityOutcome(known, false);
 		}
+		// C-63：退避窗口内<b>不进锁、不读记录</b>。返回值与"这一拍读失败"一致：
+		// 有已校验提示按既有语义继续（提示就是请求身份，键形与本轮一致），没有则明确失败。
+		if (System.currentTimeMillis() < this.identityRetryAtMs.get()) {
+			return fallbackIdentityOutcome();
+		}
 		synchronized (this.identityLock) {
 			if (this.identityResolved) {
 				return new IdentityOutcome(this.deliveryIdentity, false);
+			}
+			// 首拍读失败后，已在锁外排队等锁的并发调用方在这里复检退避：
+			// 否则每个排队者都会各做一次高延迟记录读，"每帧一次带锁读"正是这样放大出来的。
+			if (System.currentTimeMillis() < this.identityRetryAtMs.get()) {
+				return fallbackIdentityOutcome();
 			}
 			TenantUser hint = this.requestIdentityHint;
 			if (hint == null) {
@@ -4161,19 +4201,60 @@ public class SseChatEmitter {
 					}
 				}
 				catch (RuntimeException ex) {
-					// 读异常 = 不可知：① 不缓存（identityResolved 保持 false ⇒ 下一拍重试）；
-					// ② 这一拍用已校验提示（hint 就是请求身份，键形与本轮一致，不会串租户）；
-					// ③ 没有可用提示时返回 readFailure ⇒ 调用方明确失败（绝不写 legacy）。
-					TenantUser validated = RunIdentityScope.usable(hint.tenantId(), hint.userId()) ? hint : null;
-					log.warn("SSE 投递身份读取失败 runId={}（不缓存、下一拍重试；本次按{}处理）：{}", this.runId,
-							validated == null ? "明确失败（跳过该帧）" : "已校验提示身份", ex.getMessage());
+					// 读异常 = 不可知：① 不缓存（identityResolved 保持 false），但排一个<b>有界退避</b>
+					// 再重试（C-63：避免每帧带锁再读一次）；② 这一拍用已校验提示（hint 就是请求身份，
+					// 键形与本轮一致，不会串租户）；③ 没有可用提示时返回 readFailure ⇒ 调用方明确失败。
+					long backoffMs = recordIdentityReadFailure();
+					TenantUser validated = fallbackIdentityOutcome().identity();
+					log.warn("SSE 投递身份读取失败 runId={}（不缓存、{}ms 后重试；本次按{}处理）：{}", this.runId,
+							backoffMs, validated == null ? "明确失败（跳过该帧）" : "已校验提示身份", ex.getMessage());
 					return new IdentityOutcome(validated, validated == null);
 				}
 			}
 			this.deliveryIdentity = resolved;
 			this.identityResolved = true;
+			// 身份恢复/落定 ⇒ 清退避：下一次（若有新的读需求）从基础退避重新开始。
+			clearIdentityBackoff();
 			return new IdentityOutcome(resolved, false);
 		}
+	}
+
+	/**
+	 * 退避窗口内（或读失败那一拍）的<b>不变结论</b>：有已校验提示就用它，没有就是"不可确认"。
+	 *
+	 * <p>与读失败分支的历史语义逐字一致：{@code hint} 本身是请求身份、也是拼读记录键的那一份，
+	 * 键形与本轮一致，因此不会串租户；提示不可用（0/0）时返回 {@code null + readFailure}，
+	 * 由调用方明确失败（绝不写 legacy 键族）。生产装配下"没有提示"由调用点先行返回
+	 * {@code recordIdentityRequired}，本方法只在"曾有提示但读失败"的路径上出现。
+	 */
+	private IdentityOutcome fallbackIdentityOutcome() {
+		TenantUser hint = this.requestIdentityHint;
+		TenantUser validated = hint != null && RunIdentityScope.usable(hint.tenantId(), hint.userId()) ? hint : null;
+		return new IdentityOutcome(validated, validated == null);
+	}
+
+	/** 记一次记录读失败并排下次重试时刻（指数封顶）；返回本次退避毫秒数（调用方用于日志）。 */
+	private long recordIdentityReadFailure() {
+		int failures = this.identityReadFailures.incrementAndGet();
+		long backoffMs = identityReadBackoffMs(failures);
+		this.identityRetryAtMs.set(System.currentTimeMillis() + backoffMs);
+		return backoffMs;
+	}
+
+	/** 身份恢复/落定：清退避与连续失败计数（"身份恢复后清退避"）。 */
+	private void clearIdentityBackoff() {
+		if (this.identityReadFailures.get() != 0) {
+			this.identityReadFailures.set(0);
+		}
+		if (this.identityRetryAtMs.get() != 0L) {
+			this.identityRetryAtMs.set(0L);
+		}
+	}
+
+	/** 第 {@code failures} 次连续失败后的退避（1s 起，指数翻倍，30s 封顶）。 */
+	static long identityReadBackoffMs(int failures) {
+		long shift = Math.min(Math.max(0, failures - 1), 5);
+		return Math.min(IDENTITY_READ_BACKOFF_MAX_MS, IDENTITY_READ_BACKOFF_BASE_MS << shift);
 	}
 
 	/**

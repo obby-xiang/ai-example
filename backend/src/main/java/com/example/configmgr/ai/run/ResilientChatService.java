@@ -1031,15 +1031,17 @@ public class ResilientChatService {
 	 * @param lease 本实例持有的租约（{@code null} = 无租约设施 / 设施不可确认 / 未取得）
 	 * @param owned {@code false} = 这一轮的续跑权已在<b>别的实例</b>手里 ⇒ 本线程不得驱动
 	 * @param created 本次是否是<b>我</b>建出的这一任（"谁创建谁释放"：重入命中不还租）
+	 * @param drivingToken 本次写进 {@link #drivingRuns} 的令牌（{@code null} = 本线程没有登记）：
+	 *        收尾只按<b>这个</b>令牌条件摘除，绝不误删后一个驱动方的登记
 	 */
-	private record DriveOwnership(LeaseService.Lease lease, boolean owned, boolean created) {
+	private record DriveOwnership(LeaseService.Lease lease, boolean owned, boolean created, Object drivingToken) {
 
 		static DriveOwnership none() {
-			return new DriveOwnership(null, true, false);
+			return new DriveOwnership(null, true, false, null);
 		}
 
 		static DriveOwnership foreign() {
-			return new DriveOwnership(null, false, false);
+			return new DriveOwnership(null, false, false, null);
 		}
 
 	}
@@ -1066,19 +1068,25 @@ public class ResilientChatService {
 	private DriveOwnership takeDriveOwnership(String runId) {
 		// 先登记：续租的存活判据立刻为真（顺序反了会让第一拍就当"驱动已死"而自行还租）
 		// 键 = 身份 + runId：另一身份的同名轮次不得被本条登记判成"本进程还有驱动方"。
+		// 值 = 本次登记的令牌：摘除必须条件化（同一键可能已被下一个驱动方重新登记）。
 		String drivingKey = LocalRunKey.of(runId);
-		this.drivingRuns.add(drivingKey);
+		Object drivingToken = new Object();
+		this.drivingRuns.put(drivingKey, drivingToken);
 		LeaseService.AcquireResult acquired;
 		try {
 			acquired = this.store.acquireRunLease(runId);
 		}
 		catch (RuntimeException ex) {
+			// M-1：取租失败 ⇒ 这一拍没有"驱动方 + 租约"的合取证据，登记必须撤销 ——
+			// 否则本进程的僵尸接管复核会一直看到"还有驱动方"，而续租心跳根本不存在。
+			// 条件删除：同键若已被下一个驱动方登记，不得把它的登记一起删掉。
+			this.drivingRuns.remove(drivingKey, drivingToken);
 			log.warn("首轮取得续跑权失败 runId={}（按无租约语义继续；无设施 ⇒ 写口 NEVER_HELD 放行，"
 					+ "设施不可确认 ⇒ 写口 UNAVAILABLE 只读）: {}", runId, ex.getMessage());
 			return DriveOwnership.none();
 		}
 		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-			this.drivingRuns.remove(drivingKey);
+			this.drivingRuns.remove(drivingKey, drivingToken);
 			return DriveOwnership.foreign();
 		}
 		LeaseService.Lease lease = acquired.lease();
@@ -1086,11 +1094,36 @@ public class ResilientChatService {
 		if (lease != null && leases != null) {
 			// 捕获请求身份：续租线程没有它（也不能靠池线程 TTL 残留）。
 			TenantUser requestIdentity = RequestContextUtils.currentOrNull();
-			leases.markDriving(lease,
-					() -> this.drivingRuns.contains(drivingKey) && snapshotNotTerminal(runId, requestIdentity),
-					requestIdentity);
+			try {
+				leases.markDriving(lease,
+						() -> this.stillDriving(drivingKey, drivingToken)
+								&& snapshotNotTerminal(runId, requestIdentity),
+						requestIdentity);
+			}
+			catch (RuntimeException ex) {
+				// 续租没起来 ⇒ 登记不能留；且<b>本次创建</b>的租约必须按所有权归还后再抛：
+				// 续租任务不存在时它只会等 TTL，期间别的实例既接不了管、运维也看不出"无人驱动"。
+				// 用 {@link LeaseService#release} 做 {@code <epoch>|<owner>} 条件删除 —— 同主重入
+				// （created=false）不还，那一任属于别的驱动方。
+				this.drivingRuns.remove(drivingKey, drivingToken);
+				if (acquired.created()) {
+					boolean released = leases.release(lease);
+					log.warn("首轮续租登记失败，已按所有权归还本次创建的租约 runId={} epoch={} released={}：{}",
+							runId, lease.epoch(), released, ex.getMessage());
+				}
+				else {
+					log.warn("首轮续租登记失败（同主重入，不还租）runId={} epoch={}：{}", runId, lease.epoch(),
+							ex.getMessage());
+				}
+				throw ex;
+			}
 		}
-		return new DriveOwnership(lease, true, acquired.created());
+		return new DriveOwnership(lease, true, acquired.created(), drivingToken);
+	}
+
+	/** 续租存活判据的"本进程仍有<b>本次</b>驱动方"：只认自己写进去的令牌。 */
+	private boolean stillDriving(String drivingKey, Object drivingToken) {
+		return drivingToken != null && this.drivingRuns.get(drivingKey) == drivingToken;
 	}
 
 	/**
@@ -1099,10 +1132,15 @@ public class ResilientChatService {
 	 * <p>为什么不是无条件 {@code releaseRunLease}：终态写（{@code RunStore#persist}）与 park 交棒
 	 * 都已经还过租，那之后租约可能已被<b>下一任</b>持有 —— 无条件还就会删掉别人的续跑权。
 	 * 同主重入（{@code created=false}）同样不还：那一任属于别的驱动方。
+	 *
+	 * <p>登记摘除同样是<b>条件删除</b>（按本次令牌）：同一 {@code 身份 + runId} 可能已被后一个驱动方
+	 * 重新登记；无条件 {@code remove(key)} 会删掉新登记，令其续租判据变假、租约被提前停掉。
+	 * 令牌不匹配时连租约也不还 —— 本线程已经不是这一轮当前的驱动方。
 	 */
 	private void releaseDriveOwnership(String runId, DriveOwnership ownership) {
-		this.drivingRuns.remove(LocalRunKey.of(runId));
-		if (ownership == null || ownership.lease() == null || !ownership.created()) {
+		boolean stillOwner = ownership != null && ownership.drivingToken() != null
+				&& this.drivingRuns.remove(LocalRunKey.of(runId), ownership.drivingToken());
+		if (!stillOwner || ownership.lease() == null || !ownership.created()) {
 			return;
 		}
 		LeaseService.Lease lease = ownership.lease();
@@ -1130,7 +1168,7 @@ public class ResilientChatService {
 	 * 同实例里"抢到租约"并不能证明原驱动已死（见 {@link #drivingRuns}）。
 	 */
 	public boolean isDriving(String runId) {
-		return runId != null && this.drivingRuns.contains(LocalRunKey.of(runId));
+		return runId != null && this.drivingRuns.containsKey(LocalRunKey.of(runId));
 	}
 
 	/**
@@ -2281,6 +2319,9 @@ public class ResilientChatService {
 			return;
 		}
 		List<Message> history = new ArrayList<>();
+		// 终态出口已有的权威快照：供收尾时写入 clientRequestId 完成态，避免再次按线程身份复读
+		// （复读在无身份/身份不符的收尾线程上会读不到，从而把 RUN 绑定静默留到会话 TTL）。
+		RunSnapshot terminalSnapshot = null;
 		if (snapshot != null) {
 			history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
 			// L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
@@ -2337,6 +2378,7 @@ public class ResilientChatService {
 					return;
 				}
 				// B2：终态确认后再写展示历史（压缩/取消分支各自写自己的终态版本）
+				terminalSnapshot = persisted;
 				recordTranscript(runId, sessionId, history);
 				convergeMemory(runId, sessionId, history);
 			}
@@ -2361,7 +2403,7 @@ public class ResilientChatService {
 		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
 		emitTurnEnd(runId, sessionId, "done", null, attempts, accumulator, turn, watchdog, text.length());
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
-		clearTerminalRunState(runId);
+		clearTerminalRunState(runId, terminalSnapshot);
 	}
 
 	/**
@@ -2369,7 +2411,8 @@ public class ResilientChatService {
 	 *
 	 * <p>清三样：确认门的重派发计数（{@link ConfirmGate#clearRunState(String)}）、取消交棒的去重位/
 	 * 重试计数（{@link CancelledRunFinalizer#forget(String)}）、工具活动锚点
-	 * （{@link ToolActivityBeacon#clearRun(String)}）。
+	 * （{@link ToolActivityBeacon#clearRun(String)}）；最后把本轮的 {@code clientRequestId} 从
+	 * {@code RUN:<runId>} 转成带时刻的完成态（见 {@link #completeClientRequest(String, RunSnapshot)}）。
 	 *
 	 * <p><b>不清</b>：{@code LeaseService} 的 ended 墓碑 / epoch、Redis 帧册与快照 —— 终态的权威事实
 	 * 仍是 Redis 那一份，进程内清理不得改写"这一轮是否已结束"，也不得让"丢租判定/帧回放"失去依据。
@@ -2378,6 +2421,24 @@ public class ResilientChatService {
 	 * （未注入确认门/交棒器）时对应项直接跳过。
 	 */
 	public void clearTerminalRunState(String runId) {
+		clearTerminalRunState(runId, null);
+	}
+
+	/**
+	 * 同上，但由<b>终态出口直接交出手里的快照</b>（推荐）：成功/失败/取消/续跑失败各自已经读过或写过
+	 * 权威快照，收尾写 {@code clientRequestId} 完成态时直接用它，<b>不再按收尾线程的身份复读</b>。
+	 *
+	 * <p>为什么不能依赖复读：{@link RunStore#get(String)} 的键由<b>当前线程身份</b>拼出，而终态收尾可能
+	 * 跑在无身份/另一身份的线程（交棒执行体、定时链、环外异常线程）上 —— 复读会因"归属不符"返回
+	 * {@code null}，完成态写不进去，{@code RUN:<runId>} 绑定留到会话 TTL：同一 {@code clientRequestId}
+	 * 的重发在保留期内被当成"已绑定"而拒绝。{@code terminalSnapshot == null} 时仍走复读兜底
+	 * （兼容没有快照可交的调用方）。
+	 *
+	 * <p>约定：调用方交出的快照必须是<b>本次终态出口已经落库（或内存中已改成终态）</b>的那一份；
+	 * 未落库的本地对象不得交出（否则会把仍在跑的轮标成已完成）。调用方交快照时不再复读、也不按
+	 * 线程身份重新判定；只有 {@code terminalSnapshot == null} 的兜底路径才复读，并复核终态。
+	 */
+	public void clearTerminalRunState(String runId, RunSnapshot terminalSnapshot) {
 		if (runId == null || runId.isBlank()) {
 			return;
 		}
@@ -2402,6 +2463,72 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.debug("终态清理取消交棒去重位失败 runId={}：{}", runId, ex.getMessage());
+		}
+		completeClientRequest(runId, terminalSnapshot);
+	}
+
+	/**
+	 * 停止闭环的终态一步：把本轮 {@code clientRequestId} 从 {@code RUN:<runId>} 转成带时刻的
+	 * {@code DONE:<runId>:<now>}（见 {@link ClientRequestRegistry#complete}）。
+	 *
+	 * <p>为什么挂在这里：{@link #clearTerminalRunState} 是成功/失败/取消（含续跑失败、环外异常）
+	 * 共用的<b>统一终态出口</b>；{@code terminalSnapshot} 由各出口直接交出，只读其中已有的
+	 * {@code clientRequestId / sessionId / 身份} —— 不新增键族、不起后台任务，也不把终态归属改成
+	 * "线程这一拍是谁"。
+	 *
+	 * <p>只写<b>仍绑定本条 run</b> 的字段（registry 侧条件写）：过期回收后同一 {@code clientRequestId}
+	 * 可能已绑到新 run，旧驱动的迟到收尾不得把新轮标成已完成。兜底复读不到快照 / 复读到的快照未到
+	 * 终态时跳过 —— 这是尽力而为的卫生动作，不得影响已发出的终态/终帧。
+	 *
+	 * <p><b>日志口径</b>：跳过不再静默 —— 精确区分"没有 clientRequestId（正常，debug）"、"无快照可读
+	 * （未交快照且复读失败/身份不符，warn：绑定只能等会话 TTL）"与"条件写未命中（绑定已换成别的
+	 * run / 已取消 / 已是完成态，info）"。只有前两种之外的异常才是真的写入失败（warn）。
+	 */
+	private void completeClientRequest(String runId, RunSnapshot terminalSnapshot) {
+		if (this.clientRequests == null) {
+			return;
+		}
+		try {
+			RunSnapshot snapshot = terminalSnapshot;
+			boolean fallbackRead = snapshot == null;
+			if (fallbackRead) {
+				// 兼容兜底：调用方交不出快照时才复读（键按当前线程身份拼，可能需要身份的收尾线程）。
+				snapshot = readSnapshotQuietly(runId);
+				if (snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus())) {
+					log.debug("终态完成态跳过：复读到的快照未到终态 runId={} status={}（不写完成态）", runId,
+							snapshot.getStatus());
+					return;
+				}
+			}
+			if (snapshot == null) {
+				log.warn("终态完成态跳过：快照不可读 runId={}（未交快照且复读失败/身份不符）——"
+						+ "clientRequestId 绑定只能等会话 TTL 兜底", runId);
+				return;
+			}
+			String clientRequestId = snapshot.getClientRequestId();
+			String sessionId = snapshot.getSessionId();
+			if (clientRequestId == null || clientRequestId.isBlank() || sessionId == null || sessionId.isBlank()) {
+				log.debug("终态完成态跳过：本轮没有 clientRequestId/sessionId runId={} status={}", runId,
+						snapshot.getStatus());
+				return;
+			}
+			boolean completed = this.clientRequests.complete(snapshot.getTenantId(), snapshot.getUserId(), sessionId,
+					clientRequestId, runId);
+			if (completed) {
+				log.debug("clientRequestId 已转入完成态 runId={} sessionId={} status={}（快照来源={}）", runId, sessionId,
+						snapshot.getStatus(), fallbackRead ? "复读" : "终态出口");
+			}
+			else {
+				// 条件写未命中：绑定已不是 RUN:<runId>（过期回收后重绑到新 run / 已取消墓碑 / 已是
+				// 完成态），或键与身份不符。前几种是正常让位；最后一种会留下 RUN 字段，用 info 记录
+				// 实际快照身份，便于与完成为空的原因对照（避免对每次取消都打 warn）。
+				log.info("clientRequestId 完成态未写入 runId={} clientRequestId={} 身份={}/{} status={}（绑定已变更、"
+						+ "已取消墓碑或键/身份不符；若仍是 RUN 只能等会话 TTL 兜底）", runId, clientRequestId,
+						snapshot.getTenantId(), snapshot.getUserId(), snapshot.getStatus());
+			}
+		}
+		catch (RuntimeException ex) {
+			log.warn("clientRequestId 完成态写入失败 runId={}（不影响终态/终帧）：{}", runId, ex.getMessage());
 		}
 	}
 
@@ -2809,8 +2936,8 @@ public class ResilientChatService {
 		// 另一驱动方已落 done/error 时，这里不得把一轮翻成两条终帧。
 		emitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, null, text.length());
 		emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
-		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
-		clearTerminalRunState(runId);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照。
+		clearTerminalRunState(runId, snapshot);
 	}
 
 	/**
@@ -3019,6 +3146,8 @@ public class ResilientChatService {
 	private void cancelTerminalLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
+		// 只有真正落库的取消态才交给完成态写入；交棒/被拒写时由接手的执行体收尾。
+		RunSnapshot terminalSnapshot = null;
 		String partial = accumulator != null ? accumulator.text()
 				: snapshot == null ? "" : snapshot.getAssistantContent();
 		int partialChars = partial == null ? 0 : partial.length();
@@ -3074,22 +3203,36 @@ public class ResilientChatService {
 			clearExportCorrectionPrefix(snapshot);
 			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
 			// RT-20：取消态快照/记忆同样是答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
-			boolean persisted = persistAllowed(runId, "取消态快照/记忆");
+			// 判定必须与写入是同一步：persistAllowed 只回答"这一拍有没有写权限"，它与 void save 之间
+			// 还有一次 Redis 往返（可能被推进后的 fence / 取消优先守卫拒掉），而 save 不返回结果 ⇒
+			// 调用方会把"根本没落库的本地快照"当成终态交给 clearTerminalRunState/completeClientRequest，
+			// 把仍在跑的轮标成"已完成"。故改用 saveStatusUnlessCancelled：与 save 同一条写路径
+			// （租约只读 / fence 陈旧 / 拒写判据逐字不变），但把这一笔到底有没有落库如实返回。
+			boolean persisted = false;
+			try {
+				persisted = this.store.saveStatusUnlessCancelled(snapshot);
+			}
+			catch (RuntimeException ex) {
+				// 写入抛异常 = 落库与否不可判定（可能快照已写、也可能只写了轻量状态键）：
+				// 按未落库处理，不交出快照；交棒侧重新取租后幂等补写 CANCELLED + 终帧。
+				log.warn("取消态快照写入不可判定 runId={}：{}（不按已落库收尾）", runId, ex.getMessage());
+			}
 			if (persisted) {
-				this.store.save(snapshot);
+				// 只有这一笔真的落库，快照才是可信的终态事实（completeClientRequest 只读它的身份/绑定）
+				terminalSnapshot = snapshot;
 				// B2：取消轮的半截正文 + 工具卡（含 CANCELLED 结局）写展示历史；
 				// 没有追加停止消息时不得把上一条旧 assistant 当本轮终稿
 				recordTranscript(runId, sessionId, history, appendedStopped);
 				convergeMemory(runId, sessionId, history);
 			}
 			else if (this.cancelFinalizer != null) {
-				// 写权限这一拍不可确认（一次在飞的 Redis 命令被打断 ⇒ 全局健康位 + 1s 节流；
-				// 也覆盖已被接管 / fence 越过本进程）：不能把"取消已确认"留成 SUSPENDED/RUNNING
+				// 这一笔没落库（写权限不可确认：一次在飞的 Redis 命令被打断 ⇒ 全局健康位 + 1s 节流；
+				// 或被接管后推进的 fence / 取消优先守卫拒写）：不能把"取消已确认"留成 SUSPENDED/RUNNING
 				// 且无人管（主 CI run 40211303032 · W-30）。交棒给非驱动执行器：它重新取租
 				// （fencing 不绕过）后只做取消收尾，不发起模型/工具。
 				// 本线程随即退出：不落快照、不出帧（此刻出帧也会被同一判据丢弃），终帧由交棒侧恰发一次。
 				boolean handed = handOffDeniedFinalization(runId);
-				log.warn("取消终态写权限不可确认，已交棒非驱动执行器收尾 runId={} handed={}（本线程不再出帧；"
+				log.warn("取消终态未落库（写权限不可确认或被拒写），已交棒非驱动执行器收尾 runId={} handed={}（本线程不再出帧；"
 						+ "交棒侧重新取租后补写 CANCELLED + 终帧）", runId, handed);
 				return;
 			}
@@ -3120,8 +3263,8 @@ public class ResilientChatService {
 				watchdog == null ? 0 : watchdog.upstreamEvents());
 		emitTurnEnd(runId, sessionId, "cancelled", StreamViolationException.CANCELLED, attempts, accumulator, turn,
 				watchdog);
-		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
-		clearTerminalRunState(runId);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。落库过的取消态直接交出。
+		clearTerminalRunState(runId, terminalSnapshot);
 	}
 
 	/**
@@ -3268,8 +3411,9 @@ public class ResilientChatService {
 		// 本批：出口走 emitFailureTerminal —— 归档里已有终帧（另一驱动方已收尾）时连 textEnd 都不发。
 		emitFailureTerminal(runId, out, code, message, null, partialChars);
 		emitTurnEnd(runId, sessionId, "failed", code, attempts, accumulator, turn, null);
-		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。
-		clearTerminalRunState(runId);
+		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照
+		// （failRunUnlessCancelled 已把它改成 FAILED；复读在无身份线程上会因归属不符读不到）。
+		clearTerminalRunState(runId, snapshot);
 	}
 
 	/** 历史载荷里段级工具状态映射的键名（R-144）：挂在带 {@code toolCalls} 的 ASSISTANT 消息 metadata 上。 */
@@ -4570,8 +4714,13 @@ public class ResilientChatService {
 	 *
 	 * <p><b>键必须带身份</b>：按裸 runId 登记会让另一身份的同名轮次被"本进程还有驱动方"驳回
 	 * （它的僵尸接管永远不成立），续租的存活判据也会读错别人的登记。
+	 *
+	 * <p><b>值 = 每次登记自己的令牌</b>（不是布尔）：摘登记必须是<b>条件删除</b>（{@code remove(key, token)}）。
+	 * 同一 {@code 身份 + runId} 可以先后出现两个驱动方（前一个还没走完 finally，后一个已接管/重入），
+	 * 无条件 {@code remove(key)} 会把<b>后一个</b>的登记删掉 —— 它的续租存活判据随之变假，租约被提前
+	 * 停掉、僵尸接管以为"本进程没有驱动方"。令牌同时让续租判据只认<b>自己</b>的那一笔登记。
 	 */
-	private final Set<String> drivingRuns = ConcurrentHashMap.newKeySet();
+	private final Map<String, Object> drivingRuns = new ConcurrentHashMap<>();
 
 	/**
 	 * 记录续跑轮的压缩级别（由 {@code ResumeService} 在压缩成功后、交棒前调用）。

@@ -6,6 +6,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,11 +56,38 @@ public class RedisKbCacheStore implements KbCacheStore {
     @Override
     public void hashPutAll(String key, Map<String, String> values) {
         try {
-            // 刻意不设 TTL：知识文档/清单键按定稿常驻（版本号兜底刷新）
+            // 刻意不设 TTL：知识文档/清单/文档 id 索引键按定稿常驻（版本号兜底刷新）
             this.redis.opsForHash().putAll(key, values);
         }
         catch (RuntimeException e) {
             throw failure("写缓存 HASH 失败", key, e);
+        }
+    }
+
+    @Override
+    public void hashPutFields(String key, Map<String, String> values) {
+        try {
+            // 单条 HSET：只合并给定字段，不读改写（无丢失更新），不设 TTL
+            this.redis.opsForHash().putAll(key, values);
+        }
+        catch (RuntimeException e) {
+            throw failure("合并写缓存 HASH 字段失败", key, e);
+        }
+    }
+
+    @Override
+    public long hashDeleteFields(String key, Collection<String> fields) {
+        // 空集合守卫：HDEL 至少需要一个字段，Redis 对"零字段"直接报语法错误
+        if (fields == null || fields.isEmpty()) {
+            return 0L;
+        }
+        try {
+            // 单条 HDEL：单键、无跨槽问题；不用 KEYS/SCAN
+            Long removed = this.redis.opsForHash().delete(key, fields.toArray());
+            return removed == null ? 0L : removed;
+        }
+        catch (RuntimeException e) {
+            throw failure("删除缓存 HASH 字段失败", key, e);
         }
     }
 

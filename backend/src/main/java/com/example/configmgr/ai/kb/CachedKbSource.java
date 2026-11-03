@@ -7,22 +7,26 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 
 /**
  * Redis cache-aside 知识源（追加 3）：位于 {@link KbSource} 抽象与 {@link KbService} 之间。
  *
  * <h2>读取链（索引永远从缓存重建）</h2>
  * <ul>
- * <li><b>local</b>：读盘（manifest + 逐篇 sha）→ 变更文档写缓存 → 写清单 → {@code INCR} 版本；
- *     {@link #fetchContent} 再从缓存取正文。多实例因此看到同一份字节（即使各自挂载不同盘）；</li>
+ * <li><b>local</b>：读盘（manifest + 逐篇 sha）→ 先把文档 id 记进索引 → 变更文档写缓存 → 写清单 →
+ *     {@code INCR} 版本 → 按索引差集回收下线文档；{@link #fetchContent} 再从缓存取正文。
+ *     多实例因此看到同一份字节（即使各自挂载不同盘）；</li>
  * <li><b>http</b>：缓存命中即用；版本号与刷新权决定谁去回源（{@code SET NX PX} 单飞）；
  *     回源成功才写缓存并 {@code INCR}；其它实例下一拍轮询到版本变化，直接从缓存增量重建；
- *     远端 5xx/超时 ⇒ <b>stale-if-error</b>：继续供旧料 + WARN，<b>不清空缓存</b>。</li>
+ *     远端 5xx/超时 ⇒ <b>stale-if-error</b>：继续供旧料 + WARN，<b>不清空缓存</b>；
+ *     远端 304 ⇒ 清单不变，但仍按索引补做下线回收（残留不依赖"远端再改一次"才收敛）。</li>
  * </ul>
  *
  * <h2>失败语义</h2>
@@ -109,8 +113,7 @@ public class CachedKbSource implements KbSource {
                 return cached.get().content();
             }
             String content = this.delegate.fetchContent(meta);
-            this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(),
-                    meta.updatedAt()));
+            cacheDoc(meta, content);
             return content;
         }
         catch (KbCacheException e) {
@@ -168,6 +171,8 @@ public class CachedKbSource implements KbSource {
             }
             this.lastRemoteCheck = Instant.now();
             if (remote.notModified()) {
+                // 远端整份未变也要推进下线回收：上一轮删除失败/崩溃的残留不能等"远端再改一次"才收敛
+                reconcileCachedRemoval();
                 return fromCache("缓存清单不可读");
             }
             syncToCache(remote.manifest(), remote.etag());
@@ -226,19 +231,57 @@ public class CachedKbSource implements KbSource {
     // ---------------------------------------------------------------- cache sync
 
     /**
-     * 把一份 manifest 同步进缓存：变更文档写入 → 写清单 → {@code INCR} 版本。
+     * 写单篇正文的<b>唯一入口</b>：先把文档 id 记进全局索引，再写正文键。
+     *
+     * <p>正文键无 TTL，只有索引能把它找回来删除。因此不允许出现"正文已写、索引还没记"的中间态：
+     * 两步之间进程被杀只可能留下"索引有、正文无"，下一轮要么按清单补写正文，要么按差集删空键后
+     * 摘索引 —— 两种都能收敛。读路径（{@link #fetchContent} 的惰性补写）与刷新路径共用本方法，
+     * 不再各自直接 {@code putDoc}。
+     */
+    private void cacheDoc(KbDocMeta meta, String content) {
+        this.cache.putDocId(meta.id());
+        this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(), meta.updatedAt()));
+    }
+
+    /**
+     * 把一份 manifest 同步进缓存：读索引 → 已知 id 全量登记进索引 → 变更文档写入（每篇仍先索引后正文）
+     * → 写清单 → {@code INCR} 版本 → 按索引差集回收下线文档。
+     *
+     * <p><b>顺序不变式</b>：
+     * <ol>
+     * <li>文档 id 在<b>写正文之前</b>进索引 —— "正文有 ⇒ 索引有"：正文键无 TTL，只有索引能把它
+     *     找回来删；反过来"索引有、正文无"无害（下一轮补写正文或删空键后摘索引）；</li>
+     * <li>清单在<b>索引与正文之后</b>落地 —— 读侧不会拿到"清单已指向、正文还没写"的文档；</li>
+     * <li>回收发生在<b>清单落地之后</b> —— 读侧不再引用下线文档，避免"删了正文、旧清单还在供索引"；</li>
+     * <li>回收成功才摘索引 —— 删除失败/进程崩溃都留痕，下一轮按索引与当前 manifest 的差集重试。</li>
+     * </ol>
      *
      * @return true = 缓存内容确有变化（版本已递增）
      */
     private boolean syncToCache(KbManifest manifest, String sourceEtag) throws KbSourceException {
         boolean changed = false;
+        // 上一版清单与全局索引都必须在写新清单前读：前者用于变更判定（也在首次升级时补偿索引），
+        // 后者是"已知文档 id"的主来源。
+        Optional<KbCache.ManifestEntry> previous = this.cache.manifest();
+        Set<String> current = manifest.docs().stream()
+                .map(KbDocMeta::id)
+                .collect(Collectors.toUnmodifiableSet());
+        Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
+        Set<String> known = new LinkedHashSet<>(indexed);
+        // 首次升级补偿：索引出现之前写下的正文只在上一版清单里留痕
+        known.addAll(docIdsOf(previous));
+        known.addAll(current);
+        // 索引先于任何正文落盘：已知 id（上一版清单补偿 + 本次清单）全部登记。
+        // 失败会抛出 ⇒ 正文/清单都不写 ⇒ 下一轮重来，不留下无法回收的正文键。
+        Set<String> toIndex = new LinkedHashSet<>(known);
+        toIndex.removeAll(indexed);
+        this.cache.putDocIds(toIndex);
         for (KbDocMeta meta : manifest.docs()) {
             Optional<KbCache.DocEntry> existing = this.cache.doc(meta.id());
             boolean needFetch = existing.isEmpty() || !shaMatches(existing.get().sha(), meta.sha());
             if (needFetch) {
                 String content = this.delegate.fetchContent(meta);
-                this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(),
-                        meta.updatedAt()));
+                cacheDoc(meta, content);
                 changed = true;
             }
         }
@@ -251,7 +294,6 @@ public class CachedKbSource implements KbSource {
         }
         String etag = sourceEtag != null && !sourceEtag.isBlank()
                 ? sourceEtag : KbHashing.sha256Hex(json);
-        Optional<KbCache.ManifestEntry> previous = this.cache.manifest();
         if (previous.isEmpty() || !json.equals(previous.get().json())
                 || !etag.equals(previous.get().etag())) {
             long next = this.cache.version() + 1;
@@ -263,7 +305,100 @@ public class CachedKbSource implements KbSource {
         else if (this.lastSeenVersion < 0) {
             this.lastSeenVersion = this.cache.version();
         }
+        pruneRemovedDocs(known, current);
         return changed;
+    }
+
+    /** 清单里的文档 id（解析失败 = 空集：宁可不删，也不按坏数据误删）。 */
+    private Set<String> docIdsOf(Optional<KbCache.ManifestEntry> entry) {
+        if (entry.isEmpty()) {
+            return Set.of();
+        }
+        try {
+            return KbManifest.parse(entry.get().json().getBytes(StandardCharsets.UTF_8), this.mapper)
+                    .docs().stream()
+                    .map(KbDocMeta::id)
+                    .collect(Collectors.toUnmodifiableSet());
+        }
+        catch (Exception e) {
+            log.warn("上一版知识清单解析失败，本轮只用全局索引判定下线文档：{}", e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /**
+     * 远端返回 304（清单未变）时的下线回收补做：用缓存里的清单与索引做差集重试。
+     *
+     * <p>没有这一步，"删除失败/崩溃"的残留要等远端下次真的改动才收敛；而 HTTP 源常态就是 304。
+     * 这里只做回收（不写文档、不写清单、不动版本号），失败一律只记 WARN —— 不能把一次成功的
+     * 轮询变成降级，残留留到下一轮继续重试。
+     */
+    private void reconcileCachedRemoval() {
+        try {
+            Optional<KbCache.ManifestEntry> cached = this.cache.manifest();
+            if (cached.isEmpty()) {
+                return;
+            }
+            Set<String> current;
+            try {
+                current = KbManifest.parse(cached.get().json().getBytes(StandardCharsets.UTF_8), this.mapper)
+                        .docs().stream().map(KbDocMeta::id).collect(Collectors.toUnmodifiableSet());
+            }
+            catch (Exception e) {
+                log.warn("缓存清单解析失败，跳过本轮下线回收：{}", e.getMessage());
+                return;
+            }
+            Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
+            Set<String> toIndex = new LinkedHashSet<>(current);
+            toIndex.removeAll(indexed);
+            this.cache.putDocIds(toIndex);
+            Set<String> known = new LinkedHashSet<>(indexed);
+            known.addAll(current);
+            pruneRemovedDocs(known, current);
+        }
+        catch (RuntimeException e) {
+            log.warn("缓存不可用，跳过本轮下线回收（下一轮重试）：{}", e.getMessage());
+        }
+    }
+
+    /**
+     * 回收已从清单下线的文档键（R-2）：差集来自全局索引 {@code kb:cache:docs}，不是"上一版清单"。
+     *
+     * <p><b>为什么要索引</b>：上一版清单只存在于"上一次成功刷新"里；一旦删除失败或进程在
+     * 写清单与删键之间崩溃，那份差集就永久丢失，正文键（无 TTL）无人再删。索引是显式留痕：
+     * 删除成功才摘除条目，失败/崩溃时条目仍在，下一轮 sync 自然重试（DEL 幂等）。
+     *
+     * <p><b>Cluster 安全</b>：逐篇单键 DEL，索引侧是单键 HDEL（{@code KbCache#removeDocId}），
+     * 不使用 {@code KEYS}/{@code SCAN}，也不做跨槽多键 Lua。
+     *
+     * <p>失败只记 WARN、不抛：缓存缺一篇正文时 {@link #fetchContent} 会回源补齐，
+     * 不能让"回收旧键"把整次刷新打成降级。
+     */
+    private void pruneRemovedDocs(Set<String> known, Set<String> current) {
+        if (known.isEmpty()) {
+            return;
+        }
+        for (String docId : known) {
+            if (current.contains(docId)) {
+                continue;
+            }
+            try {
+                this.cache.deleteDoc(docId);
+            }
+            catch (RuntimeException e) {
+                // 索引条目保留 ⇒ 下一轮重试，收敛到删除成功为止
+                log.warn("知识缓存删除下线文档失败（索引保留，下一轮重试）docId={}：{}", docId, e.getMessage());
+                continue;
+            }
+            try {
+                this.cache.removeDocId(docId);
+                log.info("知识缓存已删除下线文档：docId={}", docId);
+            }
+            catch (RuntimeException e) {
+                // 正文已删、索引未摘：下一轮会再 DEL（幂等空操作）并重试摘索引
+                log.warn("下线文档已删除但索引未摘除（下一轮重试）docId={}：{}", docId, e.getMessage());
+            }
+        }
     }
 
     private KbSource.ManifestFetch fromCache(String emptyMessage) throws KbSourceException {

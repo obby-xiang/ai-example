@@ -558,11 +558,15 @@ public class ResumeService {
 	 * <b>恢复扫描的轻量投影</b>：只保留"该不该接管"的判据字段。
 	 *
 	 * <h2>省掉的是什么、为什么能省</h2>
-	 * API 列表面（{@link #listRun}）要展示明细，因此带 {@code ledgerCounts}（整份台账
-	 * {@code LRANGE 0 -1}）、{@code messageCount}、心跳时刻与逐条 {@code pending} 载荷；
+	 * API 列表面（{@link #listRun}）要展示明细，因此带 {@code ledgerCounts}（C65 后只读
+	 * {@code ai:idem} 里的小型元数据投影，不再 {@code LRANGE 0 -1} 整份台账）、{@code messageCount}、
+	 * 心跳时刻与逐条 {@code pending} 载荷；
 	 * 恢复扫描只问"取消 / 终态 / 未决外部输入 / 僵尸 / 活动锚点"，这些字段一个也不读：
 	 * <ul>
-	 * <li>{@code ledgerCounts}：每轮一次台账全表读 + 解析，候选越多启动越慢（审计 S4）；</li>
+	 * <li>{@code ledgerCounts}：每轮一次 {@code LLEN} + 一次 {@code HGETALL}。{@code HGETALL} 的复杂度是
+	 *     O(索引 HASH 的字段数)，字段数与台账长度<b>同阶</b>（每条工具执行一个索引字段 + 一条投影字段），
+	 *     因此读侧代价仍随台账长度线性增长；省掉的是 {@code resultText} 正文的网络传输与整份大 JSON 的
+	 *     重复解析。候选越多越慢的"正文全表读"已从列表面移走（审计 S4）；</li>
 	 * <li>{@code lastBeatAtMs}：多一次键读，且只服务 {@code SUSPENDED} 的展示年龄 ——
 	 *     僵尸判据用的是<b>业务</b>活动锚点，心跳本来就不参与（R1-09），恢复侧不读它；</li>
 	 * <li>{@code messageCount}/{@code pending}：只看条数与详情，恢复判据只用 {@code pendingUnresolved}/
@@ -657,8 +661,10 @@ public class ResumeService {
 		out.put("historyRoles", roles);
 		out.put("inFlight", snapshot.getInFlightToolCalls().stream().map(PendingToolCall::asMap).toList());
 		out.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
-		out.put("ledger", this.store.ledger(runId));
-		out.put("ledgerCounts", this.store.ledgerCounts(runId));
+		List<Map<String, Object>> ledger = this.store.ledger(runId);
+		out.put("ledger", ledger);
+		// C65：同一路径只读一次台账 —— 计数从已读出的记录派生，不再触发第二次全表读 + 解析。
+		out.put("ledgerCounts", RunStore.ledgerCountsOf(ledger));
 		out.put("instanceId", this.store.instanceId());
 		// 批次2（AR-01 / AR-09）：**失败现场**只读判据。
 		// 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写。
@@ -787,12 +793,14 @@ public class ResumeService {
 	 * <li>非 {@code ACCEPTED} 且结局在<b>归还白名单</b>内（{@link Outcome#releasesLease()}，
 	 * {@code IN_PROGRESS} 与 {@code LEASE_HELD_ELSEWHERE} 不在其中 = 有人正在用这一任）
 	 * ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器（终态由 {@code RunStore.save} 释放）。
-	 * <b>两个条件都必要</b>：
+	 * <b>三个条件都必要</b>：
 	 * <ul>
 	 * <li><b>只还自己创建的</b>（{@code AcquireResult#created()}）—— 可重入命中的租约属于等待方
 	 * 或另一个并发调用方；</li>
 	 * <li><b>只在无人接管的结局下还</b>（L-19）—— 创建者也可能输掉 {@code resuming} 互斥
 	 * （{@code IN_PROGRESS}），此时它手里的租约正被胜方使用，"创建者"身份并不等于"可以删"。</li>
+	 * <li><b>重挂给旧驱动时不还</b>（{@code LEASE_REARMED}）—— 这一任已被本进程仍在跑的旧驱动接手，
+	 * 还租等于把它围栏在外且无人驱动；后续续租登记失败的异常分支同样按此判定，不按"创建者"归还。</li>
 	 * </ul>
 	 * 合起来才是完整口径：<b>租约跟"这一轮还有没有人管"走，不跟"是谁建的"走</b>。</li>
 	 * </ol>
@@ -864,33 +872,58 @@ public class ResumeService {
 				throw ex;
 			}
 			if (fresh) {
-				if (result.outcome() == Outcome.ACCEPTED) {
-					// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
-					// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
-					// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
-					// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）；
-					// 互斥键也用<b>本拍登记的那一把</b>（续租线程没有身份，现取会落到 legacy 桶）。
-					leases.markDriving(lease,
-							() -> this.resuming.containsKey(resumeKey) && snapshotNotTerminal(runId, identity),
-							identity);
+				// 本任租约是否已"重挂给仍在跑的旧驱动"（LEASE_REARMED）：重挂后租约由旧驱动继续持有，
+				// 它<b>不是</b>"本次创建失败、可归还"的那一任 —— 归还 = 把旧驱动围栏在外 + 这一轮无人驱动。
+				boolean rearmed = false;
+				try {
+					if (result.outcome() == Outcome.ACCEPTED) {
+						// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
+						// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
+						// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
+						// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）；
+						// 互斥键也用<b>本拍登记的那一把</b>（续租线程没有身份，现取会落到 legacy 桶）。
+						leases.markDriving(lease,
+								() -> this.resuming.containsKey(resumeKey) && snapshotNotTerminal(runId, identity),
+								identity);
+					}
+					else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
+						// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
+						// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
+						// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
+						// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
+						// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
+						// 置位必须早于下面两步：stopDriving 之后的任何异常都不再走"按所有权归还"（见 catch）。
+						rearmed = true;
+						leases.stopDriving(lease.key(), lease.owner());
+						leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
+								&& snapshotNotTerminal(runId, identity), identity);
+						log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
+								lease.epoch());
+					}
+					else if (result.outcome().releasesLease()) {
+						// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
+						// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
+						// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
+						this.store.releaseRunLease(runId);
+					}
 				}
-				else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
-					// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
-					// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
-					// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
-					// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
-					// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
-					leases.stopDriving(lease.key(), lease.owner());
-					leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
-							&& snapshotNotTerminal(runId, identity), identity);
-					log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
-							lease.epoch());
-				}
-				else if (result.outcome().releasesLease()) {
-					// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
-					// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
-					// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
-					this.store.releaseRunLease(runId);
+				catch (RuntimeException ex) {
+					if (!rearmed) {
+						// 本次创建（fresh=true）且未重挂的租约没交成续租任务：按<b>所有权</b>归还后再抛
+						// （releaseIfHeld 只在仍是本实例那一任时才删，不碰别人的租约）。留着等 TTL
+						// 会多出一段"无人续租、也没人知道它已无主"的窗口。
+						this.store.releaseRunLease(runId);
+						log.warn("续跑续租登记失败，已按所有权归还本次创建的租约 runId={} epoch={}：{}", runId,
+								lease == null ? -1L : lease.epoch(), ex.getMessage());
+					}
+					else {
+						// LEASE_REARMED：这一任已经属于仍在跑的旧驱动，归还会把旧驱动围栏在外且无人驱动。
+						// 续租任务没登记上时宁可让租约按 TTL 自然到期（旧驱动的写随即被 fence 拦住），也不删它。
+						log.warn("续跑权重挂的续租登记失败，保留租约不归还 runId={} epoch={}（旧驱动仍在这一轮上，"
+								+ "还租会造成围栏在外且无人驱动；等 TTL 到期或旧驱动自己的收尾）：{}", runId,
+								lease == null ? -1L : lease.epoch(), ex.getMessage());
+					}
+					throw ex;
 				}
 			}
 			return result;
@@ -2049,8 +2082,9 @@ public class ResumeService {
 				return;
 			}
 			// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
+			// 直接交出手里的终态快照：复读会按收尾线程身份拼键，身份不符时读不到 → RUN 绑定静默留存。
 			if (this.chatService != null) {
-				this.chatService.clearTerminalRunState(snapshot.getRunId());
+				this.chatService.clearTerminalRunState(target.getRunId(), target);
 			}
 			if (emitError != null) {
 				emitError.run();
@@ -2567,8 +2601,9 @@ public class ResumeService {
 				return;
 			}
 			// F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
+			// 直接交出刚写成 FAILED 的快照，避免按交棒/续跑线程身份复读时因归属不符而漏写完成态。
 			if (this.chatService != null) {
-				this.chatService.clearTerminalRunState(runId);
+				this.chatService.clearTerminalRunState(runId, target);
 			}
 			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
 			if (out == null) {

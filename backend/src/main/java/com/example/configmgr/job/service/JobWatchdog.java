@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,10 +101,17 @@ public class JobWatchdog {
      * 已判死/判超时的 jobId 集合（R-96 批 B 收口修，红队 m7）：判重键 —— 同一作业不二次判死。
      * 终态写入（{@link JobTerminalWriter}）失败被吞时，下一扫描也不得重复写 issue /
      * 重复累加计数；配合判死动作固定为 FAILED 终态（Q6 不自动重排队），已判作业无再判语义。
+     *
+     * <p><b>回收（M-2）</b>：每拍按 DB 在途快照做精确差集（{@link #retainTracked}）。扫描是这两个
+     * 集合唯一的消费路径，作业一旦离开 PENDING/RUNNING 就再也不会被扫描；jobId 为 IDENTITY 自增、
+     * 不复用 ⇒ "不在快照里"即可证明"永不回场"。不是按时间/容量的清空，判重语义不减弱。
      */
     private final Set<Long> judgedJobIds = ConcurrentHashMap.newKeySet();
 
-    /** 已记过"共享状态不可读 ⇒ fail-closed"WARN 的作业（避免每 10s 刷屏）。 */
+    /**
+     * 已记过"共享状态不可读 ⇒ fail-closed"WARN 的作业（避免每 10s 刷屏）。
+     * 回收口径同 {@link #judgedJobIds}：只对仍在扫描范围内的作业保留"已告警"记忆。
+     */
     private final Set<Long> failClosedLogged = ConcurrentHashMap.newKeySet();
 
     /** 最近一次扫描看到的在途作业数（{@code /health} 观测面）。 */
@@ -156,6 +164,9 @@ public class JobWatchdog {
         if (svc != null) {
             svc.shutdownNow();
         }
+        // 停机后不再有扫描消费者：判重/防刷屏记忆整体失去意义（作业 id 不复用，重启也不会重扫已判作业）。
+        this.judgedJobIds.clear();
+        this.failClosedLogged.clear();
     }
 
     /** {@code /health} 观测面：tracked / judged / skipped（fail-closed、单飞落选）/ lastScanAt。 */
@@ -167,6 +178,8 @@ public class JobWatchdog {
         body.put("skippedUnavailableTotal", this.skippedUnavailableTotal.get());
         body.put("skippedNotLeaderTotal", this.skippedNotLeaderTotal.get());
         body.put("issueSuppressedTotal", this.issueSuppressedTotal.get());
+        body.put("judgedTracked", this.judgedJobIds.size());
+        body.put("failClosedTracked", this.failClosedLogged.size());
         body.put("lastScanAt", this.lastScanAt == null ? null : this.lastScanAt.toString());
         return body;
     }
@@ -186,9 +199,15 @@ public class JobWatchdog {
 
     /** 扫一遍在途作业并判定（包级可见，供单测直接驱动；生产由调度周期调用）。 */
     void scan() {
+        // 【约束】findByStatusIn 必须保持"全量、无上限"的派生查询：retainTracked 用
+        // "不在本拍结果里 ⇒ 永不回场"证明回收安全。一旦改成 Pageable/Page、Top/First、@Query 的
+        // limit 或流式截断，未出现在结果里的在途作业就会被误判为已离场：判重记忆被丢，
+        // 同一作业可能在下一拍被二次判死（重复写 issue、重复累加计数）。
+        // 因此这里不得加排序分页、不得按批拆分调用。
         List<Job> inFlight = this.jobRepository.findByStatusIn(IN_FLIGHT);
         this.trackedLastScan = inFlight.size();
         this.lastScanAt = Instant.now(this.clock);
+        retainTracked(inFlight);
         long nowMs = this.clock.millis();
         long deadAfterMs = heartbeatInterval().multipliedBy(deadMultiplier()).toMillis();
         long maxExecutionMs = maxExecutionTime().toMillis();
@@ -209,6 +228,29 @@ public class JobWatchdog {
                 log.error("作业看门狗判定作业 #{} 失败: {}", job.getId(), e.getMessage(), e);
             }
         }
+    }
+
+    /**
+     * 按本拍在途快照精确回收判重/防刷屏记忆（M-2）。
+     *
+     * <p>只有仍在 PENDING/RUNNING 的作业会被扫描，也只有扫描会读这两个集合；作业离开在途状态
+     * （终态写入成功、或作业被删除）后就永不再进入快照，且 jobId 不复用 ⇒ 对应条目可以安全丢弃。
+     * 终态写入失败、作业仍停在 PENDING/RUNNING 的情形会继续留在快照里，判重记忆因此保留。
+     *
+     * <p>查询失败时不调用本方法（异常在 {@link #scanSafely()} 兜住），绝不因读不到 DB 而清空。
+     * <b>前提</b>：入参必须是<b>全量</b>在途快照（{@link JobRepository#findByStatusIn} 无分页/无上限），
+     * 见 {@link #scan()} 处的约束说明 —— 截断的"快照"会把这批作业误判成已离场。
+     */
+    private void retainTracked(List<Job> inFlight) {
+        if (this.judgedJobIds.isEmpty() && this.failClosedLogged.isEmpty()) {
+            return;
+        }
+        Set<Long> trackedIds = new HashSet<>(Math.max(16, inFlight.size() * 2));
+        for (Job job : inFlight) {
+            trackedIds.add(job.getId());
+        }
+        this.judgedJobIds.retainAll(trackedIds);
+        this.failClosedLogged.retainAll(trackedIds);
     }
 
     /** 已运行时长（ms）：RUNNING 用 startedAt，PENDING 用 createdAt（Q3 口径）。 */
@@ -333,10 +375,17 @@ public class JobWatchdog {
                 Map.of("jobId", job.getId(), "jobType", job.getJobType(),
                         "status", Job.JobStatus.FAILED));
         try {
-            this.cancellationRegistry.cancel(job.getId(), "job-watchdog");
+            JobCancellationRegistry.CancelResult cancelResult =
+                    this.cancellationRegistry.cancel(job.getId(), "job-watchdog");
+            if (!cancelResult.redisWritten()) {
+                // cancel() 把"写 Redis 失败"降级成返回值而不是异常，失败事实必须在这里显式落日志：
+                // 终态已落 FAILED，缺的只是让执行线程在下一分片边界止步的共享标志（跨实例不可见）
+                log.warn("作业 #{} 取消标志未写入 Redis（跨实例不可见，执行线程可能继续到下一分片边界）",
+                        job.getId());
+            }
         } catch (RuntimeException e) {
-            // 取消标志写失败不阻断收尾：终态已落 FAILED，执行线程的迟到写由条件 UPDATE 丢弃
-            log.warn("作业 #{} 写取消标志失败（执行线程可能继续到下一分片边界）：{}",
+            // 兜底：取消标志不是收尾必要条件（终态已落 FAILED，执行线程的迟到写由条件 UPDATE 丢弃）
+            log.warn("作业 #{} 写取消标志异常（终态 FAILED 已落，不阻断收尾）：{}",
                     job.getId(), e.getMessage());
         }
         if (timeout) {

@@ -34,7 +34,8 @@ import java.util.Set;
  * <li>{@code ai:purge:retry:due} ZSET（member = <b>完整 pending 键</b>，score = 下次到期毫秒）——
  * 唯一的待重试发现面。成员带完整复合身份（键形里就是 {@code <t>:<u>:<sid>}），恢复时
  * <b>不需要</b>先知道是谁，也不需要遍历租户列表；{@link #listDue} 用有界 {@code ZRANGEBYSCORE}
- * 取到点项，不再有 LIST 队列 / SCAN 兜底。</li>
+ * 取到点项，不再有 LIST 队列 / SCAN 兜底。<b>耗尽退役的台账不在其中</b>（见
+ * {@link #retireExhausted}）：自动尝试耗尽后只保留 durable 台账，不占全局发现面。</li>
  * </ul>
  *
  * <h2>身份来源：按<b>记录</b>恢复，绝不从键名反解</h2>
@@ -70,8 +71,14 @@ import java.util.Set;
  * 台账换主时只按新台账的 nextAt 对齐到期分，不改新台账；</li>
  * <li><b>完成</b>CAS_DEL 成功后 {@code ZREM}；由于 pending/ZSET 跨槽，ZREM 后必须按原键重读，
  * 并发新台账已存在则按它的 nextAt 立即补回；</li>
+ * <li><b>耗尽退役</b>（{@link #retireExhausted}）：自动尝试耗尽的台账把 nextAt 推到有界未来后
+ * <b>摘掉 due 成员</b> —— durable 台账保留（守卫仍读它、不伪装完成），但不再占全局发现面；
+ * 退役 CAS <b>同时校验 attempts 仍耗尽</b>（不覆盖并发手工 DELETE 的 attempts=0），失败/换主时按
+ * 最新台账恢复：可重试的补回到期项，退役态不重新 ZADD。手工 DELETE 经 {@link #register} 重置为
+ * now 时会重新写回到期项；</li>
  * <li>{@code listDue} 对坏 JSON 成员<b>不摘除</b>，只隔离到 1h + 抖动未来并 WARN，
- * 保留手工 DELETE 恢复入口；pending 键读取失败仍整轮 fail-closed。</li>
+ * 保留手工 DELETE 恢复入口；pending 键读取失败仍整轮 fail-closed。已耗尽的成员在这里
+ * 自愈式摘除（兜住退役时 ZREM 失败的残留）。</li>
  * </ul>
  */
 @Slf4j
@@ -102,12 +109,30 @@ public class SessionPurgePendingStore {
 	/** 坏 JSON 隔离抖动步数：0..14 步（最多约 14 分钟），按成员键确定性散开。 */
 	static final int BAD_JSON_QUARANTINE_JITTER_STEPS = 15;
 
-	/** purgeId 条件更新（值包含 token 才 SET 新 JSON）。 */
+	/**
+	 * purgeId 条件更新（值包含 token 才 SET 新 JSON）。
+	 *
+	 * <p><b>可选的耗尽前置条件</b>（{@code ARGV[3]} = 最小 attempts）：给出时，脚本在<b>同一个原子步</b>
+	 * 里解出记录并拒绝 {@code attempts < ARGV[3]} 的写。退役必须证明"记录仍是耗尽态"——
+	 * 只在 Java 侧先读再按 purgeId CAS 会输给并发手工 DELETE：后者把同一 purgeId 的
+	 * {@code attempts} 归零、{@code nextAt} 重置为 now 之后，退役仍会把它推回长未来并摘掉到期项，
+	 * 手工恢复从此 410。省略该参数时脚本行为与旧版逐字一致（普通改期/失败/完成不受影响）。
+	 */
 	private static final RedisScript<Long> CAS_SET = new DefaultRedisScript<>("""
 			-- PURGE_PENDING_CAS_SET
 			local v = redis.call('GET', KEYS[1])
 			if not v or not string.find(v, ARGV[1], 1, true) then
 			  return 0
+			end
+			if ARGV[3] then
+			  local ok, rec = pcall(cjson.decode, v)
+			  if not ok or type(rec) ~= 'table' then
+			    return 0
+			  end
+			  local attempts = tonumber(rec['attempts'])
+			  if (not attempts) or attempts < tonumber(ARGV[3]) then
+			    return 0
+			  end
 			end
 			redis.call('SET', KEYS[1], ARGV[2])
 			return 1
@@ -414,7 +439,15 @@ public class SessionPurgePendingStore {
 				continue;
 			}
 			if (pending.nextAtMs() > nowMs) {
-				rescheduleQuietly(member, pending.nextAtMs());
+				if (pending.attempts() >= MAX_AUTO_ATTEMPTS) {
+					// 已耗尽的台账：durable 事实保留，但不再占全局发现面（C-37）。
+					// 这条分支兜住"退役时 ZREM 失败 / 并发重新 ZADD"的残留成员；
+					// 手工 DELETE 经 register 会把它重置为 now 并重新写回。
+					removeDueMember(member);
+				}
+				else {
+					rescheduleQuietly(member, pending.nextAtMs());
+				}
 				continue;
 			}
 			out.add(pending);
@@ -498,11 +531,11 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
-	 * 把台账推到给定未来时刻（purgeId 条件，<b>不改 attempts</b>）。
+	 * 把台账推到给定未来时刻（purgeId 条件，<b>不改 attempts</b>，<b>保留</b> due 成员）。
 	 *
-	 * <p>耗尽项由 {@code SessionPurgeRetryRunner} 给 24h + 确定性抖动；普通退避由
-	 * {@link #recordFailure} 维护。推到长未来后它仍在台账里（durable），但不再每 5 分钟回到
-	 * 到期队头；用户再次 {@code DELETE} 时 {@link #register} 会重置为 now/耗尽预算归零。
+	 * <p>普通退避由 {@link #recordFailure} 维护。自动尝试<b>耗尽</b>的台账走
+	 * {@link #retireExhausted}（推未来 <b>且摘掉 due 成员</b>）；本方法保留"只改期、不动
+	 * 发现面"的通用语义，供其它延后场景使用。
 	 *
 	 * @return true = 仍归该 purgeId 且已重排
 	 */
@@ -538,6 +571,141 @@ public class SessionPurgePendingStore {
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException("延后会话销毁 pending 失败 sessionId=" + sessionId, ex);
 		}
+	}
+
+	/**
+	 * <b>耗尽项退役</b>：把 durable 台账推到有界未来，并<b>摘掉全局 due 成员</b>（C-37）。
+	 *
+	 * <p>为什么只摘发现项、<b>不</b>删台账：pending 同时是守卫的一部分（{@code SessionPurgeGuard#isArmed}
+	 * 读它）和"这次销毁到底做没做成"的 durable 事实。删它等于把一次<b>没做成</b>的销毁伪装成完成，
+	 * 并让同一个 sessionId 可以重新写回。因此退役只改变"谁占着全局发现面"：
+	 * <ul>
+	 * <li>自动重试不再取到它，{@code ai:purge:retry:due} 不再随永久失败会话单调增长；</li>
+	 * <li>台账与守卫事实原样保留（attempts 不变，仍是耗尽态）；</li>
+	 * <li>用户再次 {@code DELETE} ⇒ {@link #register} 的"手动重开推进"会重置为 now、耗尽 attempts
+	 *     归零，并在写台账<b>之前</b>重新 {@code ZADD} 候选到期项 ⇒ 手工恢复入口不变。</li>
+	 * </ul>
+	 *
+	 * <p><b>CAS 必须同时证明"仍是耗尽态"</b>（{@link #CAS_SET} 的 {@code ARGV[3]}）：并发手工 DELETE
+	 * 会把同一 purgeId 的台账重置成 {@code attempts=0 / nextAt=now}，只看 purgeId 的 CAS 会成功，
+	 * 于是手工刚排上的到期项被推回长未来并摘掉。带耗尽前置条件的 CAS 在这种情况下失败，随后
+	 * {@link #restoreDueAccordingToLatest} 按最新台账把可重试的记录补回发现面（退役态则不补）。
+	 *
+	 * <p>与 {@link #complete} 同因（pending / ZSET 跨槽）：ZREM 之后按<b>同一把键</b>重读，
+	 * 若并发 {@code register} 已把台账改成"现在可推进"（新建或手动重置），立即把到期项补回 ——
+	 * 退役的 ZREM 不得把手工 DELETE 刚排上的发现项抢掉。仍是<b>本 purgeId 的退役态</b>
+	 * （{@code attempts >= MAX_AUTO_ATTEMPTS}）时保持摘除。
+	 *
+	 * <p>只用于 <b>attempts ≥ {@link #MAX_AUTO_ATTEMPTS}</b> 的台账（自动重试已耗尽）；非耗尽台账
+	 * <b>前置拒绝</b>，普通延后仍用 {@link #defer}（保留发现面）。
+	 *
+	 * @return true = 仍归该 purgeId 且已退役；false = 台账不存在、已换主、已非耗尽或 CAS 输给并发
+	 */
+	public boolean retireExhausted(String sessionId, String purgeId, long nextAtMs) {
+		Pending pending = current(sessionId);
+		if (pending == null) {
+			return false;
+		}
+		if (!purgeId.equals(pending.purgeId())) {
+			// 已换主：按最新台账对齐到期分（可重试才补回），绝不摘掉它的发现项。
+			restoreDueAccordingToLatest(pending.key(), sessionId);
+			return false;
+		}
+		if (pending.attempts() < MAX_AUTO_ATTEMPTS) {
+			// 前置拒绝：非耗尽台账不能被推到长未来并摘掉发现项 —— 那会把一次仍可自动推进的销毁藏起来。
+			// 不改期、不动成员，普通延后由 defer 负责。
+			return false;
+		}
+		String key = pending.key();
+		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), pending.attempts(), nextAtMs,
+				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
+				pending.userId());
+		try {
+			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next),
+					Integer.toString(MAX_AUTO_ATTEMPTS));
+			if (updated == null || updated <= 0L) {
+				// CAS 输给并发更新：可能已换主，也可能是同一 purgeId 被手工 DELETE 重置成 attempts=0。
+				// 按最新台账恢复：可重试的补回到期项，退役态绝不重新 ZADD。
+				restoreDueAccordingToLatest(key, sessionId);
+				return false;
+			}
+			removeDueMember(key);
+			restoreDueIfRescheduled(key, sessionId, purgeId);
+			return true;
+		}
+		catch (RuntimeException ex) {
+			throw new AiStateUnavailableException("退役会话销毁 pending 失败 sessionId=" + sessionId, ex);
+		}
+	}
+
+	/**
+	 * 退役失败/换主后的收口：<b>只有最新台账仍可重试</b>（{@code attempts < MAX_AUTO_ATTEMPTS}）才把
+	 * 到期项补回发现面；已退役（耗尽）的记录保持摘除，<b>不二次 ZREM、也绝不重新 ZADD</b>。
+	 *
+	 * <p>为什么不能无条件按 {@code latest.nextAtMs} 补回：CAS 失败最常见的原因就是"另一个实例刚把同一条
+	 * 台账退役了"，对方的 {@code nextAt} 是长未来，照它补回等于把刚摘掉的成员原样放回去（C-37 复现）。
+	 * 反之，手工 DELETE 把同一 purgeId 重置成 {@code attempts=0 / nextAt=now} 时，必须立刻补回，
+	 * 否则用户的手工恢复会卡到下一次登记。
+	 */
+	private void restoreDueAccordingToLatest(String key, String sessionIdForLog) {
+		Pending latest;
+		try {
+			latest = readAt(key, sessionIdForLog);
+		}
+		catch (RuntimeException ex) {
+			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
+			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
+			log.debug("退役失败后复核台账失败 key={}（不补回，等待下次登记/操作自愈）：{}", key, ex.getMessage());
+			return;
+		}
+		if (latest == null) {
+			// 台账已被并发 complete 删除：到期成员由完成流程/listDue 清理，这里不按旧键盲写。
+			return;
+		}
+		if (latest.attempts() >= MAX_AUTO_ATTEMPTS) {
+			// 退役态（CAS 输给并发退役）：成员已由那次成功的退役摘除，这里不再 ZREM。
+			// 二次摘除会误删并发手工 register 刚补回的到期项（register 先 ZADD、再重置台账，
+			// 重读可能落在两步之间，看到仍是耗尽态）。也绝不按长未来分数重新 ZADD。
+			return;
+		}
+		rescheduleQuietly(key, latest.nextAtMs());
+	}
+
+	/**
+	 * 退役 ZREM 之后的竞态收口：<b>只有</b>台账已不是"刚退役的那份"（换主或手动重置成可推进）
+	 * 才把到期项补回；仍是退役态则保持摘除。
+	 *
+	 * <p>为什么不能无条件补回：退役的 nextAt 是"长未来"，照它补回等于把刚摘掉的成员又放回去
+	 * （C-37 原样复现）。手工 DELETE 的 nextAt 是 now、新台账的 purgeId 不同，两者都会在这里重排。
+	 *
+	 * <p>退役态<b>只返回、不再 ZREM</b>：调用方在进入本方法前已经摘过一次；这里再摘会误删
+	 * 重读之后并发手工 {@link #register} 刚补回的到期项。
+	 */
+	private void restoreDueIfRescheduled(String key, String sessionId, String purgeId) {
+		Pending latest;
+		try {
+			latest = readAt(key, sessionId);
+		}
+		catch (RuntimeException ex) {
+			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
+			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
+			log.debug("退役后复核台账失败 key={}（保持摘除，等待下次登记/操作自愈）：{}", key, ex.getMessage());
+			return;
+		}
+		if (latest == null) {
+			return;
+		}
+		// "仍是退役态"的判据不比较具体 nextAt：并发另一实例退役同一台账时会取不同的 nowMs，
+		// 按值比较会把刚摘掉的成员又按未来分数放回去（C-37 原样复现）。耗尽即退役态。
+		// 也不再要求 nextAt 在未来：并发的失败记录可能把 nextAt 留在过去，耗尽记录同样不该回到发现面。
+		boolean stillRetired = purgeId.equals(latest.purgeId()) && latest.attempts() >= MAX_AUTO_ATTEMPTS;
+		if (stillRetired) {
+			// 退役前已摘过成员；这里只保持摘除，绝不再 ZREM（重读后并发 register 可能刚补回），
+			// 也绝不按长未来分数重新 ZADD。
+			return;
+		}
+		// 换主 / 手动重置为可推进（attempts 归零、nextAt=now）：把发现项补回。
+		rescheduleQuietly(key, latest.nextAtMs());
 	}
 
 	/**

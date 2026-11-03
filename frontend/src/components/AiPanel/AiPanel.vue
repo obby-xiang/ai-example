@@ -2103,6 +2103,54 @@ function toggleUserMsg(id: string): void {
   void nextTick(() => measureUserMsgOverflow([id]))
 }
 
+/** 只保留仍在当前消息集里的 id；有删除才返回新引用（否则返回 null，不触发模板重渲）。 */
+function withoutMissingIds(current: Set<string>, live: Set<string>): Set<string> | null {
+  let next: Set<string> | null = null
+  for (const id of current) {
+    if (live.has(id)) {
+      continue
+    }
+    next ??= new Set(current)
+    next.delete(id)
+  }
+  return next
+}
+
+/**
+ * 消息集差集清理（历史替换 / 消息被移除 / 换会话）：登记表、脏标记与折叠态都按 messageId 记账，
+ * 消息离场后这些键不再可达 —— 不收口会随页签寿命线性增长（闭包 + 字符串，量级小但无上限）。
+ * 只删当前消息集里不存在的 id：仍在屏上的消息保留测量元素、溢出读数与用户展开态。
+ */
+function pruneUserMessageState(): void {
+  const live = new Set<string>()
+  for (const message of ai.messages) {
+    live.add(message.id)
+  }
+  for (const id of userBodyRefSetters.keys()) {
+    if (!live.has(id)) {
+      userBodyRefSetters.delete(id)
+    }
+  }
+  for (const id of userBodyEls.keys()) {
+    if (!live.has(id)) {
+      userBodyEls.delete(id)
+    }
+  }
+  for (const id of dirtyUserMsgIds) {
+    if (!live.has(id)) {
+      dirtyUserMsgIds.delete(id)
+    }
+  }
+  const overflowed = withoutMissingIds(userMsgOverflowed.value, live)
+  if (overflowed !== null) {
+    userMsgOverflowed.value = overflowed
+  }
+  const expanded = withoutMissingIds(userMsgExpanded.value, live)
+  if (expanded !== null) {
+    userMsgExpanded.value = expanded
+  }
+}
+
 /**
  * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
  * 为什么不复用 `ai.notice`：它是单槽位（一次只承载一条提示），"已复制"会把并发的
@@ -2624,7 +2672,24 @@ function clearStreamMdCache(): void {
   pendingDegradeNotices.clear()
 }
 
-watch(() => ai.sessionId, clearStreamMdCache)
+/** 历史块缓存（含渲染期产出的 mermaid 槽引用）同样按消息 id 记账，换会话后不再可达。 */
+function clearHistoryMdCache(): void {
+  historyMdCache.clear()
+  historyMdCacheBytes = 0
+}
+
+/**
+ * 会话/身份切换：两张 Markdown 缓存与降级提示都不跨会话 —— 缓存键含消息 id 与净化后的
+ * HTML，上一身份的内容驻留到组件卸载没有复用价值，只会白占 8MB 预算。
+ * （身份与 sessionId 通常一起变；任一侧先落地都清一次，重复清是幂等的。）
+ */
+watch(
+  () => `${ai.sessionId ?? ''}\u0000${ai.identity?.tenantId ?? ''}\u0000${ai.identity?.userId ?? ''}`,
+  () => {
+    clearStreamMdCache()
+    clearHistoryMdCache()
+  }
+)
 
 /** 可观测性（批次 7A）：命中/未命中不直接暴露 UI，供回归测试与后续 profile 打点。 */
 let markdownHtmlCalls = 0
@@ -3392,6 +3457,28 @@ watch(mmdViewerOpen, (open) => {
 const mermaidPending = new Map<Element, { source: string; bubble: Element }>()
 let mermaidObserver: IntersectionObserver | null = null
 
+/**
+ * 清掉「已脱离当前消息树」的待渲染槽：`v-html` 重建（流式续写 / 缓存失效重渲 / 切会话）会摘掉
+ * 上一帧的 `code` 节点，而 IntersectionObserver 对已脱离节点永不回调 —— 只删 Map 条目不够，还要
+ * `unobserve`，否则条目连同其 `bubble` 子树被观察器强引用常驻。仍在树上的槽原样保留。
+ *
+ * 判据用「当前容器还包含它」而不是 `isConnected`：面板在测试/离屏容器里渲染时节点本就不在
+ * document 内，用 `isConnected` 会把仍在屏上的槽也一并清掉。
+ */
+function pruneDetachedMermaidPending(): void {
+  if (mermaidPending.size === 0) {
+    return
+  }
+  const wrap = msgWrapRef.value
+  for (const [code, pending] of mermaidPending) {
+    if (wrap !== null && pending.bubble.contains(code) && wrap.contains(pending.bubble)) {
+      continue
+    }
+    mermaidPending.delete(code)
+    mermaidObserver?.unobserve(code)
+  }
+}
+
 /** 把一个 mermaid 源码块替换成卡片（`bubble.contains` 判活：v-html 重建后旧槽位不再回填）。 */
 async function renderMermaidSlot(bubble: Element, code: Element, source: string): Promise<void> {
   const svg = await renderMermaidSvg(source)
@@ -3441,6 +3528,8 @@ function scheduleMermaidSlot(bubble: Element, code: Element, source: string): vo
 }
 
 function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: string; source: string }>): void {
+  // 水合 = 重建后的重绑入口：先把上一帧留下的脱离槽摘掉，再为当前 DOM 里的槽登记。
+  pruneDetachedMermaidPending()
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
   if (!bubble) {
     return
@@ -4984,6 +5073,8 @@ function attachMessageViewObservers(): void {
   if (!wrap) {
     return
   }
+  // 展开/重建后按新 DOM 重绑：上一棵树留下的待渲染槽先摘掉（收起路径已整表清空，这里兜底）。
+  pruneDetachedMermaidPending()
   resetStickBaseline()
   if (typeof ResizeObserver !== 'undefined') {
     msgResizeObserver = new ResizeObserver(onContentResized)
@@ -4992,6 +5083,20 @@ function attachMessageViewObservers(): void {
   wrap.addEventListener('scroll', onTableScrollCapture, { capture: true, passive: true })
   msgScrollBound = wrap
 }
+
+/**
+ * 消息集变化（历史替换 / 消息移除 / 换会话）：按当前 id 集合差集清理本地登记 ——
+ * 用户消息的测量表与折叠态、以及已脱离消息气泡的 mermaid 待渲染槽。
+ * 只删"当前不存在"的 id，流式增量（消息仍在）不触发任何清理。
+ */
+watch(
+  () => ai.messages.map((message) => message.id).join('\u0000'),
+  () => {
+    pruneUserMessageState()
+    // 消息树在本帧 patch 之后才摘节点：等 DOM 落地再判"是否还在当前容器里"。
+    void nextTick(() => pruneDetachedMermaidPending())
+  }
+)
 
 watch(() => ai.expanded, async (expanded) => {
   if (!expanded) {
@@ -5145,8 +5250,7 @@ onBeforeUnmount(() => {
   // 问题1 偏差修正批 aj14d ②：注销流式防抖 flush 回调（面板卸载后不再重入渲染）
   setStreamFlushHandler(null)
   // 批次 7A：组件销毁时释放两张 Markdown 缓存（收起/展开不销毁，缓存保留以复用）。
-  historyMdCache.clear()
-  historyMdCacheBytes = 0
+  clearHistoryMdCache()
   clearStreamMdCache()
   ai.stopWorkspaceSync()
 })

@@ -7,11 +7,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,6 +98,23 @@ public class JobHeartbeatRegistry {
      */
     private static final Pattern INSTANCE_ID_PATTERN =
             Pattern.compile("^runner-(.+)-pid(\\d+)-([^-|]+)$");
+
+    /**
+     * 启动清理用的<b>按值删除</b>：当前值仍是读到的旧值才 DEL。
+     *
+     * <p>GET 与 DEL 之间的窗口里，本机新进程可能已用同一 jobId 重新登记（{@code beginRunner} 是无条件
+     * {@code SET}），非条件 DEL 会把活着的 runner-active 键删掉、错误地打开删除闸门。脚本把
+     * 「比对 + 删除」放进同一个原子步；只操作单键，Cluster 下不存在跨槽问题。
+     */
+    private static final RedisScript<Long> DELETE_IF_VALUE_SCRIPT = new DefaultRedisScript<>("""
+            -- JOB_RUNNER_ACTIVE_DELETE_IF_VALUE
+            local current = redis.call('GET', KEYS[1])
+            if (not current) or current ~= ARGV[1] then
+              return 0
+            end
+            redis.call('DEL', KEYS[1])
+            return 1
+            """, Long.class);
 
     private static final String LOCAL_HOST = hostName();
     private static final String INSTANCE_ID = "runner-" + LOCAL_HOST + "-pid"
@@ -562,6 +582,9 @@ public class JobHeartbeatRegistry {
     /**
      * 启动清理（同一主机）：旧进程已死、但 Redis 键尚未过 TTL 时，删除该键。
      * 其他主机/无法解析的键保留到 TTL，避免误删仍在运行的实例。
+     *
+     * <p>删除是<b>按值精确匹配</b>的原子步（{@link #DELETE_IF_VALUE_SCRIPT}）：读完值到删除之间
+     * 若本机新进程已重新登记同一 jobId，值已变，脚本不删 —— 不会误放行删除闸门。
      */
     public void cleanupDeadLocalRunner(Long jobId) {
         if (!redisMode || redis == null) {
@@ -583,8 +606,13 @@ public class JobHeartbeatRegistry {
             if (ProcessHandle.of(pid).isPresent()) {
                 return;
             }
-            redis.delete(key(jobId));
-            log.info("清理同一主机旧进程的 runner 活跃键：jobId={} instance={}", jobId, value);
+            Long deleted = redis.execute(DELETE_IF_VALUE_SCRIPT, List.of(key(jobId)), value);
+            if (deleted != null && deleted > 0) {
+                log.info("清理同一主机旧进程的 runner 活跃键：jobId={} instance={}", jobId, value);
+            }
+            else {
+                log.debug("runner 活跃键已被重新登记（值已变），跳过清理：jobId={} instance={}", jobId, value);
+            }
         } catch (RuntimeException e) {
             log.warn("清理 runner 活跃键失败（保留到 TTL）jobId={}：{}", jobId, e.getMessage());
         }

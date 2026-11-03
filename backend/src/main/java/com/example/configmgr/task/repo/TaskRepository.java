@@ -30,15 +30,17 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     Optional<Task> findByIdForUpdate(@Param("id") Long id);
 
     /**
-     * AI 创建任务的宿主幂等/单轮上限查询（AR-03）：按 {@code settings_json} 里的
-     * {@code aiCreateRun} 取值找同一轮创建过的任务。
+     * AI 创建任务的宿主幂等查询（AR-03）：按可索引镜像列查同一轮（{@code ai_create_run}）
+     * 或同一幂等键（{@code ai_create_key}）已创建的任务。
      *
-     * <p>{@code settings_json} 是既有列（CLOB/TEXT），不新增表/列；AI 创建时写入的键是
-     * {@code {"aiCreateKey":"…","aiCreateRun":"…"}}，其它设置（如 {@code importMode}）原样保留。
-     * LIKE 仅用于低频的创建幂等判定，不在热路径上。
+     * <p>两列是 {@code settings_json} 中 {@code aiCreateRun}/{@code aiCreateKey} 的副本，
+     * 由 V12 迁移建立唯一约束 —— 幂等标记仍写在 {@code settings_json}（原规格不变），
+     * 唯一性由列约束裁决，不依赖 {@code settings_json} 的 LIKE 扫描（CLOB 无法建索引）。
      */
-    @Query("SELECT t FROM Task t WHERE t.settingsJson LIKE CONCAT('%', :needle, '%') ORDER BY t.id ASC")
-    List<Task> findBySettingsJsonContaining(@Param("needle") String needle);
+    Optional<Task> findFirstByAiCreateRunOrderByIdAsc(String aiCreateRun);
+
+    /** 同 {@link #findFirstByAiCreateRunOrderByIdAsc}：无 runId 时的键级幂等。 */
+    Optional<Task> findFirstByAiCreateKeyOrderByIdAsc(String aiCreateKey);
 
     /** createdAt 相同（同秒批量创建）时按 id 兜底，保证跨页顺序稳定（Q16①）。 */
     @Query("SELECT t FROM Task t ORDER BY t.createdAt DESC, t.id DESC")

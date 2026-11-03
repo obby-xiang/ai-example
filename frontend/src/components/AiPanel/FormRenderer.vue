@@ -273,7 +273,7 @@
  *   渐进披露 —— 必填 / 已填值 / 有错误的字段永不折叠；② 父值变化清掉子值时给**一句**聚合提示
  *   （`gf-cascade-notice`），不逐字段弹条。
  */
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   MAX_LONGTEXT_VALUE_CHARS,
@@ -296,6 +296,7 @@ import {
 } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
 import { nextReadonlyFormScope } from '@/utils/form-scope'
+import { flushFormDraft } from '@/utils/form-draft'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
 import { useAiStore } from '@/stores/ai'
 
@@ -354,7 +355,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (event: 'submit', values: Record<string, unknown>): void
   (event: 'cancel'): void
-  /** 草稿镜像（G-B）：每次改动都 emit，由 store 写 sessionStorage（永不进模型上下文）。 */
+  /** 草稿镜像（G-B）：每次改动都 emit，由 store 合并落 sessionStorage（永不进模型上下文）。 */
   (event: 'draft', values: Record<string, unknown>): void
 }>()
 
@@ -371,6 +372,8 @@ const { t, te } = useI18n()
  *   轮次唯一的定位一律走 `data-testid="gf-field-<scope>-<key>"`。
  */
 const scope = props.uploadContext?.toolCallId ?? nextReadonlyFormScope()
+/** 本卡的草稿归属（只读回放卡没有挂起归属 ⇒ 无草稿可 flush）。 */
+const draftToolCallId = props.uploadContext?.toolCallId
 const interactive = props.readonly !== true
 
 /**
@@ -755,6 +758,19 @@ onMounted(() => {
   }
 })
 
+/**
+ * 卸载出口（F-1 草稿）：卡被拆掉之前把合并窗口里的**最终值**写实。
+ *
+ * <p>提交 / 取消由 store 收口（提交先 flush、成功/取消再清待写值）；这里兜的是
+ * "面板关闭 / 路由切换 / 宿主重渲染"这类卸载 —— 不做这一步，用户最后 250ms 内的输入
+ * 会随组件一起消失。只读回放卡没有挂起归属（无待写值），无副作用。
+ */
+onBeforeUnmount(() => {
+  if (draftToolCallId) {
+    flushFormDraft(draftToolCallId)
+  }
+})
+
 // ── 附件（G-E） ────────────────────────────────────────────────────────────
 
 function attachmentOf(field: FormFieldSpec): AttachmentMeta | null {
@@ -934,6 +950,11 @@ function onSubmit(): void {
   if (issues.length > 0) {
     void focusFirstIssue(issues)
     return
+  }
+  // 提交出口（F-1）：先把合并窗口里的最终值写实（请求被拒/失败回到可填态时草稿仍是最新的；
+  // 成功路径由 store 的 clearFormDraft 连待写值一起清掉，不会留下"已提交的草稿"）。
+  if (draftToolCallId) {
+    flushFormDraft(draftToolCallId)
   }
   emit('submit', visibleValues(props.schema, { ...model.value }))
 }

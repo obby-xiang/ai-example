@@ -23,12 +23,16 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -59,6 +63,7 @@ public class TaskService {
     private final ConfigStagingRowRepository stagingRowRepository;
     private final FileStorageService fileStorage;
     private final ObjectMapper objectMapper;
+    private final PlatformTransactionManager transactionManager;
 
     public List<Task> findAll() {
         return taskRepository.findAllOrdered();
@@ -136,66 +141,149 @@ public class TaskService {
      * 同一轮不同键 ⇒ 明确冲突（{@code CREATE_TASK_CONFLICT}，本轮只允许创建一次）。
      *
      * <p>幂等标记落既有的 {@code settings_json}（{@code {"aiCreateKey":…,"aiCreateRun":…}}）：
-     * 不新增表/列，跨进程重启仍可判定；其它设置（如 {@code importMode}）原样保留。
-     * runId 缺失（旧调用/直调测试）时退化为"键级幂等"，行为见 {@link #findByCreateKey}。
+     * 不改变业务规格，跨进程重启仍可判定；其它设置（如 {@code importMode}）原样保留。
+     * 同值的可索引副本写 {@code tasks.ai_create_run} / {@code tasks.ai_create_key}（唯一约束，见 V12）。
+     *
+     * <h2>锁与事务边界（L-1）</h2>
+     * <b>不再</b>用 {@code @Transactional} 包住 {@code synchronized}：那样锁在方法体结束时释放，
+     * 事务却要等代理返回后才提交，第二个调用者进监视器后读不到未提交的插入，仍会重复建任务。
+     * 现在锁<b>在事务之外</b>持有，事务由 {@link TransactionTemplate} 以
+     * {@link TransactionDefinition#PROPAGATION_REQUIRES_NEW}（独立短事务）显式开启并提交 ——
+     * 模板返回（已提交、事务资源已清理）之后才离开同步块。独立事务意味着调用方事务回滚
+     * <b>不会</b>撤销已创建的任务（幂等记忆与任务行必须同生共死，否则会退化成"可重复创建"）。
+     *
+     * <p>跨实例不依赖这把 JVM 锁：唯一约束是权威兜底。并发插入被拒时事务已回滚，随后在新事务里
+     * 回查赢家，按同一幂等口径返回复用或冲突（因此"重复创建"在任何实例组合下都收敛为至多一个）。
+     * 回查不到赢家（冲突来自别处）时<b>原样上抛</b>完整性错误，不包装成"可重试的创建冲突"。
      */
-    @Transactional
     public CreateOutcome createIdempotent(Task.TaskType type, String title, String runId) {
         String normalizedTitle = normalizeCreateName(title);
         String runToken = runId == null || runId.isBlank() ? null : runId.trim();
         String key = createIdempotencyKey(type, normalizedTitle, runToken);
         Object lock = createLock(runToken == null ? "key:" + key : "run:" + runToken);
         synchronized (lock) {
-            if (runToken != null) {
-                Optional<Task> inRun = findByRun(runToken);
-                if (inRun.isPresent()) {
-                    Task existing = inRun.get();
-                    if (key.equals(settingsValue(existing, "aiCreateKey"))) {
-                        log.info("create_task 命中同轮幂等键，复用任务 #{}（未二次创建）runId={}", existing.getId(),
-                                runToken);
-                        return new CreateOutcome(existing, true);
-                    }
-                    throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
-                            "本轮已创建任务 #" + existing.getId() + "，同一轮只允许创建一次；本次未创建。"
-                                    + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
-                }
-            }
-            else {
-                Optional<Task> sameKey = findByCreateKey(key);
-                if (sameKey.isPresent()) {
-                    Task existing = sameKey.get();
-                    log.info("create_task 命中幂等键，复用任务 #{}（未二次创建）", existing.getId());
-                    return new CreateOutcome(existing, true);
-                }
-            }
-
-            Task task = new Task();
-            task.setType(type);
-            task.setTitle(normalizedTitle);
-            task.setCurrentStep(TaskSteps.first(type));
-            Map<String, Object> settings = new LinkedHashMap<>();
-            settings.put("aiCreateKey", key);
-            if (runToken != null) {
-                settings.put("aiCreateRun", runToken);
-            }
+            // 独立短事务（REQUIRES_NEW）：提交与锁释放都在本方法内完成，不并入调用方事务
+            // （并入的话提交会晚于解锁，回到 L-1 的老问题）。
+            TransactionTemplate tx = new TransactionTemplate(this.transactionManager);
+            tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
             try {
-                task.setSettingsJson(objectMapper.writeValueAsString(settings));
+                return tx.execute(status -> createChecked(type, normalizedTitle, runToken, key));
             }
-            catch (Exception ex) {
-                throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                        "任务设置序列化失败: " + ex.getMessage(), ex);
+            catch (DataIntegrityViolationException conflict) {
+                // 另一个实例（或另一线程）先落库：查重快照看不到未提交插入，由唯一约束拒绝。
+                // 冲突事务已回滚，另开事务回查赢家 —— 同键复用、同轮不同键明确冲突。
+                return resolveCreateConflict(runToken, key, conflict);
             }
-            Task saved = taskRepository.save(task);
-            log.info("create_task 落库任务 #{}（key={}，runId={}）", saved.getId(), key, runToken);
-            return new CreateOutcome(saved, false);
         }
+    }
+
+    /** {@link #createIdempotent} 的事务体：查重 → 插入（唯一约束冲突抛 {@link DataIntegrityViolationException}）。 */
+    private CreateOutcome createChecked(Task.TaskType type, String normalizedTitle, String runToken, String key) {
+        if (runToken != null) {
+            Optional<Task> inRun = this.taskRepository.findFirstByAiCreateRunOrderByIdAsc(runToken);
+            if (inRun.isPresent()) {
+                return reuseOrConflict(inRun.get(), key, runToken);
+            }
+        }
+        else {
+            Optional<Task> sameKey = this.taskRepository.findFirstByAiCreateKeyOrderByIdAsc(key);
+            if (sameKey.isPresent()) {
+                Task existing = sameKey.get();
+                log.info("create_task 命中幂等键，复用任务 #{}（未二次创建）", existing.getId());
+                return new CreateOutcome(existing, true);
+            }
+        }
+
+        Task task = new Task();
+        task.setType(type);
+        task.setTitle(normalizedTitle);
+        task.setCurrentStep(TaskSteps.first(type));
+        Map<String, Object> settings = new LinkedHashMap<>();
+        settings.put("aiCreateKey", key);
+        if (runToken != null) {
+            settings.put("aiCreateRun", runToken);
+        }
+        try {
+            task.setSettingsJson(objectMapper.writeValueAsString(settings));
+        }
+        catch (Exception ex) {
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                    "任务设置序列化失败: " + ex.getMessage(), ex);
+        }
+        task.setAiCreateKey(key);
+        task.setAiCreateRun(runToken);
+        // flush 而非 save：让唯一约束在本事务内立即裁决（冲突在锁内收敛，不留到提交时才发现）
+        Task saved = this.taskRepository.saveAndFlush(task);
+        log.info("create_task 落库任务 #{}（key={}，runId={}）", saved.getId(), key, runToken);
+        return new CreateOutcome(saved, false);
+    }
+
+    /** 同轮已有任务：同键复用，不同键 = 本轮已创建过（单轮上限 1）。 */
+    private CreateOutcome reuseOrConflict(Task existing, String key, String runToken) {
+        if (key.equals(existing.getAiCreateKey())) {
+            log.info("create_task 命中同轮幂等键，复用任务 #{}（未二次创建）runId={}", existing.getId(), runToken);
+            return new CreateOutcome(existing, true);
+        }
+        throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
+                "本轮已创建任务 #" + existing.getId() + "，同一轮只允许创建一次；本次未创建。"
+                        + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
+    }
+
+    /**
+     * 唯一约束冲突后的收敛：在<b>新事务</b>里回查赢家（冲突事务已回滚，不能复用其快照）。
+     *
+     * <p><b>回查不到赢家时不改写原因</b>：那说明冲突并非来自这两条幂等约束（或赢家已不可见），
+     * 本轮没有创建任何任务，但把它包装成 {@code CREATE_TASK_CONFLICT}「请稍后重试」会把
+     * "莫名的完整性错误"误导成"可重试的业务冲突"。这里保留原始 {@link DataIntegrityViolationException}
+     * 上抛（由全局异常处理按 500 + 原文记录），fail-closed 且原因可追。
+     */
+    private CreateOutcome resolveCreateConflict(String runToken, String key,
+                                                DataIntegrityViolationException conflict) {
+        log.info("create_task 并发创建命中唯一约束（runId={}），回查已有任务", runToken);
+        TransactionTemplate readTx = new TransactionTemplate(this.transactionManager);
+        readTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        readTx.setReadOnly(true);
+        CreateOutcome resolved;
+        try {
+            resolved = readTx.execute(status -> {
+                if (runToken != null) {
+                    return this.taskRepository.findFirstByAiCreateRunOrderByIdAsc(runToken)
+                            .map(existing -> reuseOrConflict(existing, key, runToken))
+                            .orElse(null);
+                }
+                return this.taskRepository.findFirstByAiCreateKeyOrderByIdAsc(key)
+                        .map(existing -> new CreateOutcome(existing, true))
+                        .orElse(null);
+            });
+        }
+        catch (ConflictException e) {
+            // 回查到了赢家且判定"本轮已创建过"：这是权威业务结论，不是回查失败
+            throw e;
+        }
+        catch (RuntimeException requeryFailure) {
+            // 回查自身失败：不改写成"可重试冲突"，保留原始完整性错误并附带回查失败
+            log.error("create_task 唯一约束冲突后回查失败（key={}，runId={}）：{}",
+                    key, runToken, requeryFailure.getMessage(), requeryFailure);
+            conflict.addSuppressed(requeryFailure);
+            throw conflict;
+        }
+        if (resolved != null) {
+            return resolved;
+        }
+        log.error("create_task 唯一约束冲突后未回查到已有任务（key={}，runId={}），按原始错误上抛：{}",
+                key, runToken, conflict.getMostSpecificCause().getMessage());
+        throw conflict;
     }
 
     /** 幂等创建结果（{@code reused=true} = 命中已有键，未二次创建）。 */
     public record CreateOutcome(Task task, boolean reused) {
     }
 
-    /** 分片锁：按 run/key 串行化同进程内的并发创建（跨实例由 run 租约与"单轮 1"共同约束）。 */
+    /**
+     * 分片锁：按 run/key 串行化同进程内的并发创建。
+     * <b>不是正确性来源</b>：跨实例（以及同进程并发提交）由 {@code tasks.ai_create_run} /
+     * {@code tasks.ai_create_key} 的唯一约束兜底，见 {@link #createIdempotent}。
+     */
     private static final Object[] CREATE_LOCKS = createLocks();
 
     private static Object[] createLocks() {
@@ -230,47 +318,6 @@ public class TaskService {
         }
         catch (NoSuchAlgorithmException ex) {
             throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 不可用，无法生成创建幂等键", ex);
-        }
-    }
-
-    private Optional<Task> findByRun(String runToken) {
-        String needle = "\"aiCreateRun\":\"" + runToken + "\"";
-        try {
-            for (Task task : taskRepository.findBySettingsJsonContaining(needle)) {
-                if (runToken.equals(settingsValue(task, "aiCreateRun"))) {
-                    return Optional.of(task);
-                }
-            }
-        }
-        catch (RuntimeException ex) {
-            // fail-closed：查不了幂等面时宁可拒绝二次创建，也不能重复落库。
-            log.warn("读取同轮创建幂等键失败 runId={}：{}", runToken, ex.getMessage());
-            throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
-                    "无法确认本轮是否已创建任务（幂等查询失败），为避免重复创建已拒绝本次创建，请稍后重试");
-        }
-        return Optional.empty();
-    }
-
-    private Optional<Task> findByCreateKey(String key) {
-        String needle = "\"aiCreateKey\":\"" + key + "\"";
-        for (Task task : taskRepository.findBySettingsJsonContaining(needle)) {
-            if (key.equals(settingsValue(task, "aiCreateKey"))) {
-                return Optional.of(task);
-            }
-        }
-        return Optional.empty();
-    }
-
-    /** 从 {@code settings_json} 取一个字符串键（缺失/坏 JSON 返回 null）。 */
-    private String settingsValue(Task task, String key) {
-        if (task == null || task.getSettingsJson() == null || task.getSettingsJson().isBlank()) {
-            return null;
-        }
-        try {
-            return objectMapper.readTree(task.getSettingsJson()).path(key).asText(null);
-        }
-        catch (Exception ex) {
-            return null;
         }
     }
 

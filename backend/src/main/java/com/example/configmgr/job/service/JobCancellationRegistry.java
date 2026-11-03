@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *     持有作业的执行器在<b>分片/事件边界</b>轮询该键，延迟 ≤1 分片；</li>
  * <li><b>加速态</b>：进程内的 {@link AtomicBoolean} + {@code onCancel} 监听者。
  *     取消方与运行方同进程时监听者当场被唤起，不必等下一个分片边界；
- *     跨进程时监听者为空，靠轮询发现。</li>
+ *     跨进程时监听者为空，靠轮询发现。<b>加速态只为本实例已登记的作业建立</b>
+ *     （{@link #register}）：非执行实例收到取消只写 Redis，不为任意 jobId 留永久本地条目。</li>
  * </ul>
  *
  * <h2>降级（不静默）</h2>
@@ -57,7 +58,10 @@ public class JobCancellationRegistry {
 
     /** 作业开始：登记进程内标志与监听者容器（不写 Redis —— 未取消的作业不该有键）。 */
     public void register(Long jobId) {
-        this.flags.put(jobId, new AtomicBoolean(false));
+        // 用 putIfAbsent 而不是 put：同一 jobId 若被重复登记（重试/回放），已置位的"已取消"
+        // 不能被洗回"未取消"。注意本地标志只在本方法创建 —— "取消先于登记"时 markLocal 不建条目，
+        // 那一刻的取消只存在 Redis 里，登记后第一次 isCancelled 会据此置位（Redis 仍是权威）。
+        this.flags.putIfAbsent(jobId, new AtomicBoolean(false));
         this.listeners.putIfAbsent(jobId, ConcurrentHashMap.newKeySet());
     }
 
@@ -71,8 +75,9 @@ public class JobCancellationRegistry {
     }
 
     /**
-     * 是否已取消。<b>Redis 为准</b>：进程内为假时读一次 Redis，命中即把加速态一并置位。
-     * 未登记的作业同样问 Redis（可能由另一实例发起取消）。
+     * 是否已取消。<b>Redis 为准</b>：进程内已置位（只增不减，不会与 Redis 相反）时直接返回，
+     * 否则读一次 Redis，命中即把加速态一并置位（仅限本实例已登记的作业；未登记的作业同样问
+     * Redis —— 可能由另一实例发起取消 —— 但不为它留本地条目）。
      */
     public boolean isCancelled(Long jobId) {
         AtomicBoolean flag = this.flags.get(jobId);
@@ -87,9 +92,12 @@ public class JobCancellationRegistry {
     }
 
     /**
-     * 发起取消：先写 Redis（权威），再唤起本进程监听者（加速）。
+     * 发起取消：先写 Redis（权威），再置位本进程加速态并唤起本进程监听者。
      *
-     * @return 落地形态（供端点/验证取证）：权威标志是否写入成功、是否当场唤起本进程监听者
+     * <p>本实例没有该作业的本地登记时（非执行实例），只在 Redis 落权威标志：不建加速位，
+     * 只有该实例恰好登记过 onCancel 监听者时才会被唤起。
+     *
+     * @return 落地形态（供端点/验证取证）：权威标志是否写入成功、本进程加速态是否"本次刚置位"
      */
     public CancelResult cancel(Long jobId, String requestedBy) {
         boolean redisWritten = writeRedisFlag(jobId, requestedBy);
@@ -120,10 +128,19 @@ public class JobCancellationRegistry {
 
     // ── 内部 ────────────────────────────────────────────────────────────────
 
-    /** 置位加速态并唤起监听者；返回是否"此前未置位、本次置位"。 */
+    /**
+     * 置位加速态并唤起监听者；返回是否"此前未置位、本次置位"（未登记时为 false —— 没有加速位可置）。
+     *
+     * <p><b>只为已登记的本地作业置位</b>：{@link #unregister} 只由本实例的执行器在终态调用，
+     * 非执行实例若为每次跨实例取消 {@code computeIfAbsent} 建 {@link AtomicBoolean}，那些条目
+     * 永远没有删除路径（按取消次数单调增长）。Redis 仍是权威态，这里只影响本进程的加速通道。
+     *
+     * <p>监听者如果登记在案（{@link #onCancel} 会自建容器，不依赖加速位），无论有没有置位成功都照常
+     * 唤起 —— 唤醒是"通知"，不该被"没有加速位"挡住。
+     */
     private boolean markLocal(Long jobId) {
-        AtomicBoolean flag = this.flags.computeIfAbsent(jobId, key -> new AtomicBoolean(false));
-        boolean newly = flag.compareAndSet(false, true);
+        AtomicBoolean flag = this.flags.get(jobId);
+        boolean newly = flag != null && flag.compareAndSet(false, true);
         Set<Runnable> set = this.listeners.get(jobId);
         if (set != null) {
             for (Runnable listener : set) {
@@ -141,7 +158,9 @@ public class JobCancellationRegistry {
         try {
             return this.redis.opsForValue().get(keyFor(jobId)) != null;
         } catch (Exception ex) {
-            log.warn("取消标志读取失败，降级为进程内取消（单实例等价，跨实例失效）jobId={}：{}",
+            // 返回 false = 本次按"未取消"处理：进程内标志已在前面读过，Redis 不可用期间
+            // 看不到跨实例发起的取消（单实例仍可用；作业自身终态仍是最终判据）。
+            log.warn("取消标志读取失败，本次按未取消处理（Redis 不可用期间跨实例取消不可见）jobId={}：{}",
                     jobId, ex.getMessage());
             return false;
         }
@@ -153,7 +172,10 @@ public class JobCancellationRegistry {
                     requestedBy == null ? "unknown" : requestedBy, CANCEL_TTL);
             return true;
         } catch (Exception ex) {
-            log.warn("取消标志写入 Redis 失败（仅进程内生效，不视为错误）jobId={}：{}", jobId, ex.getMessage());
+            // 本实例只有已登记（即本实例正在执行）的作业能靠加速位立即看到这次取消；
+            // 非执行实例没有本地条目，跨实例取消在 Redis 恢复前不可见（作业自身终态仍是最终判据）
+            log.warn("取消标志写入 Redis 失败（降级：仅本实例已登记的作业立即可见，跨实例不可见；不视为错误）"
+                    + "jobId={}：{}", jobId, ex.getMessage());
             return false;
         }
     }
@@ -161,8 +183,10 @@ public class JobCancellationRegistry {
     /**
      * 一次取消的落地形态。
      *
-     * @param redisWritten 权威标志是否写进 Redis（false = 降级，仅进程内可见）
-     * @param wokeInProcess 是否当场唤起了本进程监听者（false = 运行方在别的进程或已死，由分片轮询兜住）
+     * @param redisWritten 权威标志是否写进 Redis（false = 降级：仅本实例已登记的作业立即可见，跨实例不可见）
+     * @param wokeInProcess 本进程加速态是否"本次刚置位"（并已唤起当时存在的监听者）。
+     *                      false = 本实例没有该作业的本地登记 / 该作业在本实例已置位过；
+     *                      作业线程仍在别的进程或已死时，靠分片轮询 Redis 兜住。
      * @param key Redis 键名（取证）
      */
     public record CancelResult(boolean redisWritten, boolean wokeInProcess, Long jobId, String key) {

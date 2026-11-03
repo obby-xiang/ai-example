@@ -174,9 +174,9 @@ public final class SessionKeyRegistry {
 				runId -> TenantKeyScope.scoped(RunStore.ACTIVITY_PREFIX, runId), List.of(Renewal.WRITE),
 				"业务活动锚点（非心跳；裸前缀 + 身份段，与 RunStore#activityKey 同键）"));
 		keys.add(new RunKey(RunStore.LEDGER_PREFIX, runId -> RunStore.runScopedKey(RunStore.LEDGER_PREFIX, runId),
-				List.of(Renewal.WRITE), "工具执行台账（与幂等索引同槽）"));
+				List.of(Renewal.WRITE), "工具执行台账（与幂等索引同槽；只追加、永不 LTRIM）"));
 		keys.add(new RunKey(RunStore.IDEM_PREFIX, runId -> RunStore.runScopedKey(RunStore.IDEM_PREFIX, runId),
-				List.of(Renewal.WRITE), "幂等索引（与台账同槽）"));
+				List.of(Renewal.WRITE), "幂等索引（与台账同槽；同一 HASH 内承载计数用元数据投影 ~meta:）"));
 		return List.copyOf(keys);
 	}
 

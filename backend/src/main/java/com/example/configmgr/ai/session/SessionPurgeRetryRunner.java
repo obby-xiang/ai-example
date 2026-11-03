@@ -34,11 +34,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * <li><b>fix4 复核态</b>：台账带 {@code verifyAtMs}（删除主体完成后的一次性记忆复核）时，
  * 到点只调 {@link AiSessionPurgeService#verifyMemoryOnly}（只碰 {@code chat:mem:*}），
  * <b>不</b>重跑整轮 {@code retry}；复核是独立阶段、自带 {@code attempts} 预算
- * （{@link SessionPurgePendingStore#scheduleVerify} 重开为 0），失败沿用同一退避/上限、耗尽后同样只重排；</li>
+ * （{@link SessionPurgePendingStore#scheduleVerify} 重开为 0），失败沿用同一退避/上限、耗尽后同样退役
+ * （摘掉发现项、台账保留）；</li>
  * <li>每会话最多 {@value #MAX_ATTEMPTS} 次自动尝试；退避由 {@link SessionPurgePendingStore} 指数封顶；
- * <b>耗尽且不再自动执行</b> ⇒ owner-CAS 把 nextAt 直接推到 24h + 确定性抖动未来，
- * 不再每 5 分钟回到到期队头挤占其它租户的候选窗口；手动 DELETE 经
- * {@link SessionPurgePendingStore#register} 重置为 now（耗尽的 attempts 归零），仍可推进；</li>
+ * <b>耗尽且不再自动执行</b> ⇒ owner-CAS 把 nextAt 推到 24h + 确定性抖动未来并<b>摘掉全局 due 成员</b>
+ * （{@link SessionPurgePendingStore#retireExhausted}）—— durable 台账保留（守卫仍有效、绝不伪装完成），
+ * 但不再每 5 分钟回到到期队头，也不再随永久失败会话撑大全局 ZSET；手动 DELETE 经
+ * {@link SessionPurgePendingStore#register} 重置为 now（耗尽的 attempts 归零）并重新写入到期项，仍可推进；</li>
  * <li>调度周期 {@code 30s}，不做实时轮询；<b>周期注册本身可关</b>
  * （{@code app.ai.session.purge-retry.periodic-enabled}，缺省 {@code true} = 生产原样）——
  * 关掉只停"按周期自动推进"，{@link #runOnce()} 同步入口不受影响。</li>
@@ -54,6 +56,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * 续租必登记、释放必再尝试。
  * <b>一轮执行期间按抢锁时的同一 TTL 续租</b>（{@code markDriving(..., LOCK_TTL_SECONDS)}）：
  * 单轮可能因 DB/文件清理超过 300s，只靠 TTL 到期会让锁在半途消失、另一实例并发跑同一批台账。
+ * <b>续租带存活判据（C-62）</b>：本轮仍在跑、且当前候选没有超过
+ * {@link #CANDIDATE_STALL_TIMEOUT_MS} 的推进窗口；判据转假 ⇒ 置 {@code stalled}、归还租约并停续租 ——
+ * 清理线程卡死时不会把锁无限续下去，另一实例能在锁失效后接手同一批 durable 台账。
+ * 判死之后<b>主循环不再处理剩余候选</b>（它们保持 due，交给下一轮/接管实例）：只有判死时正在执行的
+ * 那一条会与新 owner 并发，不会把"卡死一次"扩散成整批候选的双跑窗口。
  * 结束时先 {@code stopDriving} 再 {@code release}（顺序反了会让续租任务把刚释放的锁写回去）。
  * 是否续租/释放只看“本轮是否真的拿到 lease”，<b>不再看 {@code created}</b>。
  *
@@ -63,7 +70,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * service 才会返回 complete=true。
  *
  * <p>发现面只有待重试到期 ZSET（{@code ai:purge:retry:due}，member = pending 键、score = nextAtMs）：
- * 台账登记/改期/失败/完成都在同一次调用里维护自己的到期分，不再有 LIST 队列或 SCAN 兜底。
+ * 台账登记/改期/失败/完成都在同一次调用里维护自己的到期分，不再有 LIST 队列或 SCAN 兜底；
+ * 自动尝试耗尽的台账会在这里被<b>摘掉</b>（{@link #retireExhausted}），因此发现面不随永久失败会话增长。
  */
 @Slf4j
 @Component
@@ -89,6 +97,18 @@ public class SessionPurgeRetryRunner {
 
 	/** 抖动步数：按台账键确定性地散开 0..23 步（最多约 5h45m），避免同一时刻集体回队头。 */
 	static final int EXHAUSTED_RETIRE_JITTER_STEPS = 24;
+
+	/**
+	 * <b>单条候选的最长执行预算</b>（C-62 的存活判据）。
+	 *
+	 * <p>续租不能只看"我还拿着 Lease 对象"：清理线程卡在 DB/文件/网络里时，定时续租会把 300s 的锁
+	 * <b>无限</b>续下去，别的实例永远接不了手。这里给每条候选一个真实推进窗口：开跑前重置，
+	 * 超过窗口没有任何推进 ⇒ 续租判据转假 ⇒ {@link LeaseService} 归还租约并停续租。
+	 *
+	 * <p>取值与锁 TTL 同量级（5 分钟）：正常一轮单条候选远小于它；真卡死时最多再等一个续租周期
+	 * （{@code app.ai.lease.renew-interval}，判据每 3 拍才复算一次）就会放锁。
+	 */
+	static final long CANDIDATE_STALL_TIMEOUT_MS = Duration.ofMinutes(5).toMillis();
 
 	private final SessionPurgePendingStore pendingStore;
 
@@ -187,6 +207,14 @@ public class SessionPurgeRetryRunner {
 	/** 可注入时钟的一轮清理（测试确定性；生产走 {@link #runOnce()}）。 */
 	public RetryReport runOnce(long nowMs) {
 		LeaseService.Lease lease = null;
+		// C-62：续租的<b>存活判据</b>（在续租线程上执行）：
+		// 本轮仍在跑（finally 会置假）且当前候选没有超过"推进窗口"。
+		// 单条候选卡死 ⇒ 判据转假 ⇒ LeaseService 归还租约，另一实例可接手同一批 durable 台账。
+		AtomicBoolean roundLive = new AtomicBoolean(true);
+		AtomicLong progressDeadlineMs = new AtomicLong(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
+		// C-62 判死标记：一旦某条候选超过推进窗口，本轮不再续租，也<b>不再处理剩余候选</b>。
+		// 只置一次（CAS）：续租线程与主循环线程可能同时判到。
+		AtomicBoolean stalled = new AtomicBoolean(false);
 		if (this.leases != null) {
 			// 每轮唯一 owner（见 runSeq 的注）：release 失败留下的旧 (key, owner) 视图不会让下一轮
 			// 命中 created=false，因此"续租 / 释放"在每一轮都是必须做的两件事。
@@ -200,7 +228,10 @@ public class SessionPurgeRetryRunner {
 			if (lease != null) {
 				try {
 					// 与抢锁相同的 TTL：默认 lease-ttl（30s）会把 300s 的锁在下一拍缩短。
-					this.leases.markDriving(lease, () -> true, null, Duration.ofSeconds(LOCK_TTL_SECONDS));
+					// 存活判据见上方 roundLive/progressDeadlineMs：卡死的一轮不再无限续租（C-62），
+					// 并在判死时置 stalled —— 主循环随后停止处理剩余候选。
+					this.leases.markDriving(lease, () -> roundLive.get() && !stallReached(stalled, progressDeadlineMs),
+							null, Duration.ofSeconds(LOCK_TTL_SECONDS));
 				}
 				catch (RuntimeException ex) {
 					// 续租登记失败不阻断本轮（锁仍是刚抢到的 300s）；finally 仍会 stop/release。
@@ -217,16 +248,30 @@ public class SessionPurgeRetryRunner {
 				log.warn("会话销毁重试读取 pending 失败（本轮跳过，不猜状态）：{}", ex.getMessage());
 				return new RetryReport(true, 0, 0, 0, 0, 0);
 			}
+			// 取到候选 = 本轮有真实推进：重开推进窗口（否则"慢但仍在推进"的轮次会被判卡死）。
+			progressDeadlineMs.set(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
 			int skipped = 0;
 			int attempted = 0;
 			int completed = 0;
 			int failed = 0;
+			int retired = 0;
 			for (SessionPurgePendingStore.Pending pending : due) {
+				// C-62 判死后的止血：剩余候选一条都不再碰（它们仍在 due ZSET，交给下一轮/接管实例）。
+				// 判死时正在执行的那条留在上面的调用栈里自行收尾 —— 只有它承担"租约已放、对方可能也在跑"
+				// 的并发窗口，不会把窗口扩散到整批候选。
+				if (stallReached(stalled, progressDeadlineMs)) {
+					log.warn("会话销毁重试本轮已判死（C-62）：停止处理剩余候选（保持 due，交由下一轮/接管实例）");
+					break;
+				}
+				// 每处理一条（含退役）都重开推进窗口（C-62）：慢但仍在推进的轮次继续持锁；
+				// 单条卡死超过窗口 ⇒ 续租判据转假 ⇒ 置 stalled、放锁，另一实例可接手。
+				progressDeadlineMs.set(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
 				if (pending.attempts() >= MAX_ATTEMPTS) {
-					// I4：耗尽且不再自动执行 ⇒ 直接排到 24h + 抖动未来，不再每 5 分钟回到队头
-					// 挤占其它租户的候选窗口。手动 DELETE 经 register 会重置为 now/attempts=0。
+					// I4/C37：耗尽且不再自动执行 ⇒ 推到 24h + 抖动未来并<b>摘掉全局 due 成员</b>。
+					// durable 台账保留（守卫/人工入口都靠它），绝不在这里 complete 伪装成功。
 					skipped++;
-					deferExhausted(pending, exhaustedRetireAt(nowMs, pending));
+					retired++;
+					retireExhausted(pending, exhaustedRetireAt(nowMs, pending));
 					continue;
 				}
 				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
@@ -286,9 +331,17 @@ public class SessionPurgeRetryRunner {
 					}
 				}
 			}
+			if (retired > 0) {
+				// C-38 容量告警：耗尽台账只有人工 DELETE 才回到自动推进；这里只留痕，不删事实。
+				log.warn("会话销毁重试本轮退役 {} 条耗尽台账（durable 台账保留、全局 due 成员已摘除；"
+						+ "需人工 DELETE 才会重新进入自动推进）", retired);
+			}
 			return new RetryReport(true, due.size(), attempted, completed, failed, skipped);
 		}
 		finally {
+			// 先让存活判据转假（续租线程读它）：本轮已经结束，不再续租；无论下面 release 是否成功，
+			// 都不会出现"线程已退出、续租任务还在续"的幽灵锁。
+			roundLive.set(false);
 			if (lease != null) {
 				// 先停续租再释放：顺序反过来会出现"release 成功、续租任务下一拍又把键 SET 回去"的幽灵锁
 				// （release 的脚本只删值匹配的那一任，但续租任务持有同一个 Lease 对象）。
@@ -307,6 +360,27 @@ public class SessionPurgeRetryRunner {
 			}
 			// 是否释放只看"本轮是否拿到 lease"：owner 每轮唯一 ⇒ 不存在"重入拿到的别人的那一任"。
 		}
+	}
+
+	/**
+	 * C-62 判死：超过推进窗口仍无推进 ⇒ 置 {@code stalled}（CAS 只置一次）并返回 true。
+	 *
+	 * <p>两个调用点是<b>同一判据</b>：续租线程（判据转假 ⇒ {@link LeaseService} 归还租约）与主循环
+	 * （判死 ⇒ 不再处理剩余候选）。没有租约（同步入口/降级）时续租线程不存在，主循环仍会在每条候选
+	 * 之后用同一助手补判，判死语义不依赖续租调度是否在场。
+	 */
+	private static boolean stallReached(AtomicBoolean stalled, AtomicLong progressDeadlineMs) {
+		if (stalled.get()) {
+			return true;
+		}
+		if (System.currentTimeMillis() < progressDeadlineMs.get()) {
+			return false;
+		}
+		if (stalled.compareAndSet(false, true)) {
+			log.warn("会话销毁重试单条候选超过推进窗口（{} ms）仍无推进：本轮判死，停止续租与剩余候选处理"
+					+ "（判死时正在执行的候选自行收尾）", CANDIDATE_STALL_TIMEOUT_MS);
+		}
+		return true;
 	}
 
 	/** 复核失败记一次退避（不删台账、不 disarm）；记录本身失败只 WARN，台账保持原状。 */
@@ -342,15 +416,18 @@ public class SessionPurgeRetryRunner {
 		return nowMs + EXHAUSTED_RETIRE_BASE_MS + step * EXHAUSTED_RETIRE_JITTER_STEP_MS;
 	}
 
-	/** 把一条已耗尽的台账推到长未来（owner-CAS；失败只 WARN，台账保持原状）。 */
-	private void deferExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
+	/**
+	 * 把一条已耗尽的台账退役：推到长未来并摘掉全局 due 成员（owner-CAS；失败只 WARN，台账与
+	 * 到期项都保持原状 —— 下一轮还会取到并重试，绝不静默删除事实）。
+	 */
+	private void retireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
 		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份，否则会去改 legacy 键。
 		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-			this.pendingStore.defer(pending.sessionId(), pending.purgeId(), nextAtMs);
+			this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}
 		catch (RuntimeException ex) {
-			log.warn("重排已耗尽的会话销毁重试项失败 sessionId={}（保持 pending 原状）：{}", pending.sessionId(),
-					ex.getMessage());
+			log.warn("退役已耗尽的会话销毁重试项失败 sessionId={}（保持 pending/due 原状）：{}",
+					pending.sessionId(), ex.getMessage());
 		}
 	}
 

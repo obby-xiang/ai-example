@@ -359,7 +359,8 @@ public class AiController {
 		 * 停止闭环 / 重复请求：同一 {@code clientRequestId} 的重试（网络抖动导致前端重发同一条 /chat）
 		 * 必须识别为**同一个既有请求** —— 不新建 run、不占新会话门、不启动第二条驱动。
 		 *
-		 * <p>只要映射已绑定 {@code RUN:<runId>}，直接回既有 409 {@code SESSION_BUSY} 形态 +
+		 * <p>只要映射已绑定 {@code RUN:<runId>}（或仍在短保留期内的终态 {@code DONE:<runId>:<ts>}），
+		 * 直接回既有 409 {@code SESSION_BUSY} 形态 +
 		 * additive 标记 {@code duplicateRequest/clientRequestId}；前端据此走既有 events/reattach
 		 * 自动收帧（活动轮继续、终态轮回放终局），不会显示"消息没发出"。
 		 * 已取消墓碑不在这里拦：仍按既有 claim → 取消优先收敛（不恢复执行）。

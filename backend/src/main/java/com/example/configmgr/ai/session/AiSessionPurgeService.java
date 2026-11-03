@@ -1245,6 +1245,9 @@ public class AiSessionPurgeService {
 	 * <p><b>四把键逐把单键 DEL</b>（不做多键 {@code DEL} 合并）：这四族都<b>没有 hash tag</b>，
 	 * 真集群下彼此不同槽 —— 合并成一条多键删除会在 Redis 侧 {@code CROSSSLOT}，反而整批删不掉。
 	 * 单键命令天然安全，失败仍逐把进 {@code errors}（可重试语义不变）。
+	 *
+	 * <p>台账计数用的元数据投影在 {@code ai:idem:<runId>} 这个 HASH 内（{@code ~meta:<index>} 字段），
+	 * 已随 {@link RunStore#deleteRun(String)} 的 13 键 {@code DEL} 一并删除，无需在这里补第 5 把键。
 	 */
 	private void deleteObservabilityKeys(String runId, List<String> errors) {
 		deleteSingleRunAnchor(runId, this.runStore.beatKey(runId), "观测/取消", errors);

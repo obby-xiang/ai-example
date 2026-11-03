@@ -211,6 +211,44 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI')
     },
 
+    /**
+     * 身份切换（租户/用户）时的**旧工作区上下文收口**（前端身份专项 F-5）。
+     *
+     * <p>为什么清：`taskId` / `selectedDefs` / `queryConditions` / `importMode` / `recentActions`
+     * 会随下一轮请求注入模型上下文（`buildContext().extra.recentActions` 等）并出现在
+     * `get_workspace_state` 快照里 —— 换了租户/用户还带着上一个身份的这些字段，等于把旧身份
+     * 的任务选择、筛选条件与动作时间线交给新身份的模型。身份只作用于 AI 对话域，但这几个字段
+     * 恰好是"喂给对话域"的那部分，必须随切换作废。
+     *
+     * <p>清什么：任务绑定（`taskId` / `taskStatus`）与任务相关的向导作用域（`taskType` / `step`）、
+     * 勾选集、查询条件、导入模式、最近动作。**保留**页面身份（`page` / `pageId`）—— 用户仍站
+     * 在同一个页面上，这是**位置标签**（模型据此知道用户在哪一页），不是旧身份的业务现场；
+     * `contractVersion` 不动，`dataVersion` 自增一格（保持单调，模型据此知道工作区变过）。
+     *
+     * <p>什么时候清：**只在身份真的变化时** —— 唯一调用点是 `useAiStore().enterIdentity`，
+     * 它在写入新身份前捕获旧身份，`prev !== null && !isSameIdentity(prev, next)` 才清。
+     * 因此目录兜底换身份（存档身份已不在目录）与用户显式切换走同一口径；本页签第一次落身份
+     * （`prev === null`）不清；同一身份重复进入不清；普通「新建对话」不清工作区 ——
+     * 换会话不等于换人，用户眼前的页面事实照常有效。
+     *
+     * <p><b>隔离优先（裁决）</b>：复位是单向作废，**不得**把旧任务 / 旧页面的工作区重新绑定给
+     * 新身份 —— 这里只做清空，不做"按旧 `taskId` 重新绑定"或"按旧路由重新 `enterPage` 回填"。
+     * 新身份的上下文只能来自新身份下页面自己的重新声明。
+     *
+     * <p>静默：不弹提示、不记 `recentActions`（记一条就等于刚清掉的东西又回来了），C 端无感。
+     */
+    resetIdentityScopedContext(): void {
+      this.taskId = null
+      this.taskStatus = null
+      this.taskType = null
+      this.step = null
+      this.selectedDefs = []
+      this.queryConditions = {}
+      this.importMode = null
+      this.recentActions = []
+      this.dataVersion += 1
+    },
+
     setStep(step: string | null): void {
       this.step = step
       if (step) {

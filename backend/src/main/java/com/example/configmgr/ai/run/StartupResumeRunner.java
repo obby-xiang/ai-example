@@ -75,7 +75,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * <h2>扫描成本：轻量投影 + 单飞 + 轮转（审计 S4 / F-03 的落地点）</h2>
  * <ul>
  * <li><b>发现面只读恢复所需字段</b>：{@link ResumeService#listRunsForRecovery()} 不读
- * {@code ledgerCounts}（整份台账）、{@code messageCount}、心跳键与逐条 {@code pending} 载荷，
+ * {@code ledgerCounts}（旧数据回落整份台账，正常只读小型元数据投影）、{@code messageCount}、
+ * 心跳键与逐条 {@code pending} 载荷，
  * 但 {@code pending/取消/状态/活动锚点} 这些安全判据一个不少；API 详情仍走
  * {@link ResumeService#listRuns()}；</li>
  * <li><b>单飞</b>：启动/运行期/手工共用一套（{@link #tryStartScan}）—— 进程内门 +

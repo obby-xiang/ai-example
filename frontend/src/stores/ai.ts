@@ -119,7 +119,7 @@ import {
 } from '@/types/sse'
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
-import { FORM_DRAFT_PREFIX, clearFormDraft, loadFormDraft, pruneFormDrafts, saveFormDraft } from '@/utils/form-draft'
+import { FORM_DRAFT_PREFIX, clearFormDraft, flushFormDraft, loadFormDraft, pruneFormDrafts, scheduleFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { ValidationIssue } from '@/types/job'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
@@ -7897,6 +7897,11 @@ export const useAiStore = defineStore('ai', {
     /**
      * GF 优化批（G-B）：写草稿 —— **只写 sessionStorage 镜像**，不触发任何网络请求、
      * 不进模型上下文。提交 / 取消 / 终态由 {@link clearActiveFormDraft} 清理。
+     *
+     * <p>F-1：内存态每次都更新（提交、恢复、只读回填都读它），**落盘**走
+     * {@link scheduleFormDraft} 的合并窗口（约 250ms 一次）—— 逐键完整 `JSON.stringify`
+     * + 同步写 sessionStorage 会随长文本/大表单拖慢输入；最终值由提交 / 卸载 / pagehide
+     * 出口 flush，草稿本身不截断。
      */
     updateFormDraft(values: Record<string, unknown>): void {
       const form = this.activeForm
@@ -7904,7 +7909,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       form.values = { ...values }
-      saveFormDraft(form.toolCallId, form.values)
+      scheduleFormDraft(form.toolCallId, form.values)
     },
 
     /**
@@ -7938,6 +7943,15 @@ export const useAiStore = defineStore('ai', {
      * 换会话（孤儿键由 {@link pruneOrphanFormDrafts} 清）。
      */
     suspendActiveFormDrafts(): void {
+      // F-1：停止是"保留草稿"的出口 —— 合并窗口里的最终值必须先写实，否则停手到停止之间
+      // 那几个字会随卡一起消失（恢复出来是 250ms 前的样子）。
+      const form = this.activeForm
+      if (form) {
+        flushFormDraft(form.toolCallId)
+      }
+      for (const entry of this.queuedForms) {
+        flushFormDraft(entry.toolCallId)
+      }
       this.activeForm = null
       this.queuedForms = []
     },
@@ -8933,6 +8947,9 @@ export const useAiStore = defineStore('ai', {
       if (!form || form.status !== 'filling' || this.stopped || this.stoppedRunId === form.runId) {
         return
       }
+      // F-1 提交出口：先把合并窗口里的最终值写实再发请求 —— 请求失败/超时回到可填态时，
+      // 刷新恢复读到的仍是用户最后填的那份（成功后由下方 clearFormDraft 连同待写值一并清掉）。
+      flushFormDraft(form.toolCallId)
       const problems = checkFormValues(form.form, values)
       if (problems.length > 0) {
         form.error = problems.join('；')
@@ -10000,6 +10017,11 @@ export const useAiStore = defineStore('ai', {
      * 现读身份 —— 那时身份已被写成新的；拦截器只补缺省头，不覆盖显式值）；请求在写新身份之前发出，
      * 且**不等待回包**（后端不可达/慢响应不得拖住本地切换）。这里只发 cancel，不重发对话、
      * 不重试模型步、不重跑任何工具。
+     *
+     * <p>F-5：旧身份的工作区上下文（任务绑定 / 勾选集 / 查询条件 / 导入模式 / 最近动作）
+     * 由 {@link enterIdentity} 在**身份真的变化**时统一收口 —— 本方法不重复清：
+     * 目录兜底换身份（存档身份已不在目录，见 `loadTenantDirectoryOnce`）同样走 `enterIdentity`，
+     * 复位点只留一处才不会漏入口、也不会在真实切换上清两遍（`dataVersion` 连跳、时间线被重复抹）。
      */
     async switchIdentity(tenantId: number, userId: number): Promise<void> {
       const next = normalizeIdentity({ tenantId, userId })
@@ -10027,11 +10049,30 @@ export const useAiStore = defineStore('ai', {
      * ② 落身份之后才取号 —— 会话号必须属于新身份；
      * ③ 恢复分支：新身份已有会话指针 ⇒ 先按所有权判定，拿得到就恢复原会话（镜像/历史）；
      *   指针不存在（首次进入）或该会话已被另一页签持有 ⇒ 由后端发新号（返修 I8/C1）。
+     *
+     * <p>F-5：**身份真的变化**时在这里收掉旧身份的工作区上下文（任务绑定 / 向导作用域 /
+     * 勾选集 / 查询条件 / 导入模式 / 最近动作）。本方法是所有落身份路径的唯一入口 ——
+     * 用户显式切换（`switchIdentity` → `forceNewSession`）与目录兜底换身份
+     * （存档身份已不在目录，`loadTenantDirectoryOnce` 缺省分支）都经过这里，复位点只留一处。
+     * 旧身份在入口捕获；`prev === null`（本页签第一次落身份）不复位：此前没有"上个身份"，
+     * 工作区不是身份上下文。同一身份重复进入也不复位。
+     *
+     * <p><b>裁决（隔离优先）</b>：复位是**单向作废**，不把旧任务 / 旧页面的工作区重新绑定给
+     * 新身份 —— 不复用旧 `taskId` 去换身份后重新 `setTaskId`，不按旧路由重新 `enterPage` 回填
+     * 旧页面的事实，也不保留旧选择集给"新身份继续做同一件事"。残留只会把上一个租户/用户的任务、
+     * 筛选条件与动作时间线注入新身份的每轮请求与 `get_workspace_state`。用户要接着做，由页面在
+     * 新身份下重新声明上下文（那是新身份自己的事实），不是把旧现场搬过去。
      */
     async enterIdentity(
       identity: AiIdentity,
       options: { forceNewSession?: boolean } = {}
     ): Promise<void> {
+      // 旧身份必须在任何写入之前捕获（下面两个分支都会把 this.identity 覆盖成目标身份）。
+      const previousIdentity = this.identity
+      if (previousIdentity !== null && !isSameIdentity(previousIdentity, identity)) {
+        // 静默收口：不弹提示、不记动作（记一条等于刚清掉的时间线又回来了）。
+        useWorkspaceStore().resetIdentityScopedContext()
+      }
       if (options.forceNewSession) {
         // 强制新建：清当前页签指针/锁/草稿展示，发号前不读旧指针。
         // Task 3（不用 keepMirror）：旧会话切走后**本页签已不可达**（切回同一身份也由后端发新号，

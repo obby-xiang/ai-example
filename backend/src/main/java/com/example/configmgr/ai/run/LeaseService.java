@@ -50,8 +50,9 @@ import java.util.function.BooleanSupplier;
  * 不抛异常，是因为租约设施不可用不该把业务动作一起拖垮；</li>
  * <li><b>续租调度</b>（{@link #markDriving}）：内置<b>小型有界调度池</b>（固定 2~4 条线程，
  * {@link java.util.concurrent.ScheduledThreadPoolExecutor} + 守护线程）按 {@code app.ai.lease.renew-interval}（默认 10s）续租，
- * 直到 {@link #release}；单条慢命令只占一条线程，不会让其它轮次的续租跟着过期；
- * 续租失败即放弃进程内视图（下一拍抢租的实例可以接管）。</li>
+ * 直到 {@link #release}；单条慢命令只占一条线程，不会让其它轮次的续租跟着过期。
+ * 续租<b>确定丢租</b>（脚本判 {@code <epoch>|<owner>} 不匹配）才放弃进程内视图；设施不可确认
+ * （{@link RenewOutcome#UNAVAILABLE}）保留视图并转只读，下一拍重试。</li>
  * </ul>
  *
  * <h2>所有权口径：谁创建谁释放，重入不释放</h2>
@@ -942,7 +943,14 @@ public class LeaseService {
 
 	// ── 续租调度 ────────────────────────────────────────────────────────────
 
-	/** 开始按 {@code renew-interval} 续租（同一个 key 只登记一个任务，重复调用无副作用）。 */
+	/**
+	 * 开始按 {@code renew-interval} 续租（登记键是 {@code (key, owner)}：同一个 key 上不同 owner
+	 * 各有一个任务，同一 owner 重复调用无副作用）。
+	 *
+	 * <p>登记失败（调度器已停机等）会<b>抛给调用方</b>：本方法不替调用方还租 —— 只有创建者
+	 * （{@code AcquireResult#created()}）才有释放权，创建者须在自己的 catch 里按所有权
+	 * {@link #release(Lease)} 后再重抛，避免留下一段无人续租的租约。
+	 */
 	public void markDriving(Lease lease) {
 		markDriving(lease, ALWAYS_ALIVE);
 	}
@@ -952,7 +960,8 @@ public class LeaseService {
 	 *
 	 * <p>为什么需要存活判据：续租任务是不看业务的定时器。驱动线程死掉/轮次已收尾却没走到
 	 * {@code RunStore.save}（终态释放）时，定时器会把租约<b>永远</b>续下去 —— 别的实例既接不了管，
-	 * 运维也看不出"这个租约其实已经没有主人"。判据为假 ⇒ 停续租 + 释放（epoch scoped）。
+	 * 运维也看不出"这个租约其实已经没有主人"。判据为假 ⇒ 停续租 + 按 {@code <epoch>|<owner>}
+	 * 条件释放（owner scoped，不会删掉接手者的租约）。
 	 *
 	 * <p><b>身份随租约携带</b>：续租线程是自建的裸单线程（没有请求身份），而判据里的读（快照是否
 	 * 非终态、本进程是否仍登记驱动）全部按<b>身份定键</b>。若在续租线程上用"线程身份"执行判据，

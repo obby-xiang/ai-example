@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -100,11 +101,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link #save} 在持租时走 Lua fence 写（{@code fence ≤ epoch} 才写，并把 fence 推到该 epoch）；
  * TTL 随快照。无租约（降级/单实例）时保持 plain {@code SET}（不拒写）；</li>
  * <li>{@code ai:ledger:<runId>} LIST（JSON）—— 工具执行台账：每次<b>真实执行完成</b>一条，
- * 含 {@code executedBy} 实例标识，是跨进程"不重放"的判据；</li>
+ * 含 {@code executedBy} 实例标识，是跨进程"不重放"的判据。<b>只追加、永不 {@code LTRIM}</b>：
+ * 台账下标是 {@code ai:idem} 索引的指针，裁掉旧条目会让索引指向错记录；</li>
  * <li>{@code ai:idem:<runId>} HASH（B23L1 批③a）—— 工具执行的<b>幂等索引</b>：
  * field={@code <runId>:<toolCallId>}，value={@code <listIndex>|<outcome>|<code>|<executedBy>|<atMs>}，
  * 与台账记录在<b>同一条 Lua</b> 里写入（{@code RPUSH} + {@code HSETNX}）；读口 {@link #idemFor}
- * 命中即 {@code LINDEX} 取回原记录（O(1)），未命中回落 {@link #ledgerFor} 扫描（旧数据兼容）；</li>
+ * 命中即 {@code LINDEX} 取回原记录（O(1)），未命中回落 {@link #ledgerFor} 扫描（旧数据兼容）。
+ * 同一个 HASH 里还以保留字段 {@code ~meta:<listIndex>} 存<b>元数据投影</b>
+ * （{@code name/atMs/toolCallId}，不含 {@code resultText}），供 {@link #ledgerCounts}/{@link #ledgerCountSince}
+ * 免读正文；它与索引同槽、同 TTL、同一次 {@code DEL}，不改变索引 field/value 任何一位；</li>
  * <li>{@code ai:lock:task:<taskId>} / {@code ai:lock:job:<taskId>:<JOBTYPE>} STRING
  * （B23L1 批③a；{@code com.example.configmgr.ai.run.LeaseKeys}）—— <b>L1 资源互斥</b>：
  * 按 taskId 记（不是 runId），值 = {@code <epoch>|<owner>}，TTL = {@code app.ai.lease.resource-ttl}；
@@ -209,8 +214,22 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <p>field = {@code <runId>:<toolCallId>}，value = {@code <listIndex>|<outcome>|<code>|<executedBy>|<atMs>}。
 	 * <b>不复制 {@code resultText}</b>：结果正文可以很大（帧上限 64KB），索引只是"哪条台账记录"的
 	 * 指针；正文留在 LIST 里（{@code LINDEX} 取回原记录，O(1)），两份正文会出现"索引与台账不一致"。
+	 *
+	 * <p>同一个 HASH 还承载<b>元数据投影</b>（{@link #IDEM_META_FIELD_PREFIX}）：每个台账下标一个
+	 * {@code ~meta:<index>} 字段，只含 {@code name/atMs/toolCallId}。放在这里（而不是另起一个键）是刻意的：
+	 * 同槽（同一 HASH）、同一条 {@code IDEM_PUSH} 原子写、同 TTL、{@link #deleteRun} 同一把键删净，
+	 * 且不参与索引的 field 命名空间（UUID runId 不会以 {@code ~} 开头）。
 	 */
 	public static final String IDEM_PREFIX = "ai:idem:";
+
+	/**
+	 * 幂等索引 HASH 里元数据投影字段的保留前缀（{@code ~meta:<listIndex>}）。
+	 *
+	 * <p>值 = 小型 JSON {@code {"name":...,"atMs":...,"toolCallId":...}}，<b>不含 resultText</b>。
+	 * field 的下标与台账位置一一对应，因此投影完整时可按下标顺序还原台账的计数口径；
+	 * 旧数据/投影不完整时读侧回落到台账全表扫描（见 {@link #ledgerCounts}）。
+	 */
+	public static final String IDEM_META_FIELD_PREFIX = "~meta:";
 
 	/** 心跳活动戳键前缀（T7：心跳不入归档，但活动证据必须留痕）。 */
 	public static final String BEAT_PREFIX = "ai:beat:";
@@ -519,18 +538,26 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <p>{@code HSETNX} 而非 {@code HSET}：同一条 {@code (runId, toolCallId)} 首次执行即建索引，
 	 * 之后的重放/重试不得改写"第一次是哪条记录"。
 	 *
+	 * <p><b>元数据投影</b>（C65）：同一条脚本再 {@code HSET} 一个保留字段
+	 * {@code ~meta:<index>}（{@code name/atMs/toolCallId}，无 {@code resultText}）—— 计数类读取只需
+	 * 这一份小投影，不必把整份台账（含大正文）拉过网络再逐条解析。投影与索引同键同寿，<b>不写索引
+	 * 的 field/value</b>，因此"台账有、索引没有"的旧数据回落口径不受影响。
+	 *
 	 * @param KEYS[1] 台账 LIST 键 {@code ai:ledger:<runId>}
 	 * @param KEYS[2] 幂等索引 HASH 键 {@code ai:idem:<runId>}
 	 * @param ARGV[1] 台账记录 JSON
 	 * @param ARGV[2] 索引 field（{@code <runId>:<toolCallId>}）
 	 * @param ARGV[3] 索引 value 的后半段（{@code <outcome>|<code>|<executedBy>|<atMs>}；下标由脚本前插）
 	 * @param ARGV[4] TTL（毫秒，两个键同寿 = {@code app.ai.session-ttl}）
+	 * @param ARGV[5] 元数据投影 field 前缀（{@link #IDEM_META_FIELD_PREFIX}）
+	 * @param ARGV[6] 元数据投影 JSON（{@code {"name":...,"atMs":...,"toolCallId":...}}）
 	 */
 	private static final RedisScript<Long> IDEM_PUSH_SCRIPT = new DefaultRedisScript<>("""
 			-- IDEM_PUSH
 			local index = redis.call('LLEN', KEYS[1])
 			redis.call('RPUSH', KEYS[1], ARGV[1])
 			redis.call('HSETNX', KEYS[2], ARGV[2], tostring(index) .. '|' .. ARGV[3])
+			redis.call('HSET', KEYS[2], ARGV[5] .. tostring(index), ARGV[6])
 			redis.call('PEXPIRE', KEYS[1], ARGV[4])
 			redis.call('PEXPIRE', KEYS[2], ARGV[4])
 			return index
@@ -2866,6 +2893,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// B23L1 批②a：租约 / fence / req 位 / decided guard 同属"本轮的全部键"——
 		// 留着它们会让下一轮同 id 的运行继承前任的 fence 与决策（且 fence 只增不减 ⇒ 新租约写不进去）。
 		// 批③a：幂等索引随台账一起删（索引是台账的指针，台账没了它只会指向空气）。
+		// C65：台账的计数用元数据投影（~meta:<index>）就在这个索引 HASH 里 —— 随同一把键删净，
+		// 不需要第 14 个键，也不会破坏 deleteRun 的"一条 DEL、同槽、原子"契约。
 		// 注意：ai:lock:*（LeaseKeys，按 taskId 记）**不在这里** —— 资源锁的寿命与 run 的生死无关，
 		// 由 app.ai.lease.resource-ttl 自清；在轮次回收里删锁会把别人的业务互斥一起放掉。
 		// B23L1 批①（R1-05 + 评审 I-1）：13 键全部带 {run:<runId>} tag ⇒ 同槽 ⇒ 这一条 DEL 在 Cluster 下
@@ -3866,6 +3895,11 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <h2>旧数据兼容</h2>
 	 * 本批之前写入的台账没有索引；{@link #idemFor} 未命中索引时回落 {@link #ledgerFor} 的全表扫描，
 	 * 因此索引<b>缺失</b>只影响快慢，不影响"是否已执行"的判定。
+	 *
+	 * <h2>台账不可裁剪</h2>
+	 * 本方法只 {@code RPUSH}，全类<b>没有</b>对 {@code ai:ledger} 的 {@code LTRIM}/{@code LPOP}：
+	 * 台账下标是 {@code ai:idem} 索引的指针，裁掉旧条目会让索引指向错记录（重放别人的结果）。
+	 * 容量只由 {@code app.ai.session-ttl} 的整键过期收敛。
 	 */
 	public void appendLedger(String runId, PendingToolCall pending, String resultText) {
 		// 续租 fencing 收口批：台账是"已执行"的跨进程判据 —— 丢租后不得追加（B 的台账才是真值），
@@ -3899,8 +3933,14 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
 		String json;
+		String metaJson;
 		try {
 			json = this.mapper.writeValueAsString(record);
+			Map<String, Object> meta = new LinkedHashMap<>();
+			meta.put("name", pending.getName());
+			meta.put("atMs", atMs);
+			meta.put("toolCallId", toolCallId);
+			metaJson = this.mapper.writeValueAsString(meta);
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法序列化执行台账 " + toolCallId, ex);
@@ -3909,7 +3949,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		Duration ttl = ttlFor(runId);
 		try {
 			this.redis.execute(IDEM_PUSH_SCRIPT, List.of(ledgerKey(runId), idemKey(runId)), json, idemField,
-					indexTail, String.valueOf(ttl.toMillis()));
+					indexTail, String.valueOf(ttl.toMillis()), IDEM_META_FIELD_PREFIX, metaJson);
 			// 台账键的"整额续期"仍是可观测的一次 EXPIRE（批②的滑动 TTL 契约；脚本内已有 PEXPIRE，
 			// 这里只是把同一事实再落到模板面上，幂等、不在判据路径上）。
 			this.redis.expire(ledgerKey(runId), ttl);
@@ -4036,10 +4076,29 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
-	/** 工具名 → 执行次数（"恰好一次"的对账口径）。 */
+	/**
+	 * 工具名 → 执行次数（"恰好一次"的对账口径）。
+	 *
+	 * <p><b>读投影而不是读正文</b>（C65）：正常路径只读 {@code ai:idem} 里的
+	 * {@link #IDEM_META_FIELD_PREFIX 元数据投影}（{@code name/atMs/toolCallId}）与台账长度，
+	 * <b>不把整份 {@code ai:ledger}（含 resultText 正文）拉过网络、也不重复解析</b>。
+	 *
+	 * <p><b>回落</b>：旧数据（本投影上线前写入）或投影不完整（下标不连续 / 条数与 {@code LLEN} 对不上 /
+	 * 值解析失败）时，按旧口径扫描 {@link #ledger(String)}。回落判据是"投影必须逐下标覆盖整份台账"，
+	 * 因此<b>旧条目与新条目混排也不会少计</b>；项目未上线，不做数据迁移。
+	 *
+	 * <p><b>故障分级</b>：连接/超时等数据访问资源故障<b>直接抛出</b>，不回落 —— 回落只会把同一次故障
+	 * 再等一遍（见 {@link #ledgerMetadata}）。
+	 */
 	public Map<String, Integer> ledgerCounts(String runId) {
+		List<Map<String, Object>> metadata = ledgerMetadata(runId);
+		return ledgerCountsOf(metadata != null ? metadata : ledger(runId));
+	}
+
+	/** 已读出的台账/投影记录按 {@code name} 计数（同一份记录只解析一次，例如 {@code describe}）。 */
+	public static Map<String, Integer> ledgerCountsOf(List<Map<String, Object>> records) {
 		Map<String, Integer> out = new LinkedHashMap<>();
-		for (Map<String, Object> record : ledger(runId)) {
+		for (Map<String, Object> record : records) {
 			out.merge(String.valueOf(record.get("name")), 1, Integer::sum);
 		}
 		return out;
@@ -4050,16 +4109,141 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 真实执行完成）。用"执行完成时刻"（{@code atMs}）而非认领时刻，是因为"执行已完成"才是
 	 * 不可撤销的副作用；仍在执行中的窗口由 {@link #claimedBy} 与
 	 * {@code ToolActivityBeacon} 覆盖。
+	 *
+	 * <p>与 {@link #ledgerCounts(String)} 同一投影/回落口径：正常路径只读小型元数据投影，
+	 * 不传输 {@code resultText}；旧数据或不完整投影回落台账全表扫描，连接/超时等资源故障直接抛出。
 	 */
 	public int ledgerCountSince(String runId, long sinceMs) {
+		List<Map<String, Object>> metadata = ledgerMetadata(runId);
+		return countLedgerSince(metadata != null ? metadata : ledger(runId), sinceMs);
+	}
+
+	private static int countLedgerSince(List<Map<String, Object>> records, long sinceMs) {
 		int count = 0;
-		for (Map<String, Object> record : ledger(runId)) {
+		for (Map<String, Object> record : records) {
 			Object atMs = record.get("atMs");
 			if (atMs instanceof Number number && number.longValue() >= sinceMs) {
 				count++;
 			}
 		}
 		return count;
+	}
+
+	/**
+	 * 读取台账的<b>小型元数据投影</b>（{@code ai:idem} 里的 {@code ~meta:<index>} 字段）。
+	 *
+	 * <p><b>故障分级（C65 返修）</b>：只有<b>数据形态异常</b>（旧数据没有投影 / 投影混排 / 值坏 /
+	 * 下标错位 / 键类型不对）才返回 {@code null} 让调用方回落台账扫描；<b>数据访问资源故障</b>
+	 * （连接不可用、命令超时，可能被 {@code RedisSystemException} 等包装）<b>直接抛出</b>。
+	 * 理由：回落 {@code LRANGE 0 -1} 并不能修复"Redis 读不到"，只会把同一次连接/超时故障
+	 * 再等一遍（{@code LLEN} 等一个 {@code spring.data.redis.timeout}，{@code LRANGE} 再等一个），
+	 * 把请求线程或启动扫描线程的等待时长翻倍。
+	 *
+	 * <p><b>投影不完整的留痕</b>：每个回落点只打一条 {@code DEBUG}（含原因），
+	 * <b>不新增按 runId 的指标</b> —— "这批记录本来就旧/被外部改坏"是一次性事实，
+	 * 按 run 记账会变成无界表。
+	 *
+	 * @return 逐下标覆盖整份台账的投影（下标 0..{@code LLEN-1} 连续）；<b>null = 投影不可用，调用方回落台账扫描</b>
+	 *         （旧数据没有投影 / 投影混排 / 值坏 / 下标错位）。空台账返回空列表，不算"不可用"。
+	 * @throws RuntimeException 连接/超时等数据访问资源故障（原样上抛，不回落）
+	 */
+	private List<Map<String, Object>> ledgerMetadata(String runId) {
+		long size;
+		try {
+			Long rawSize = this.redis.opsForList().size(ledgerKey(runId));
+			if (rawSize == null) {
+				return incompleteProjection(runId, "LLEN 未返回长度");
+			}
+			size = rawSize;
+		}
+		catch (RuntimeException ex) {
+			rethrowIfResourceFailure(ex);
+			return incompleteProjection(runId, "读取台账长度失败：" + ex.getMessage());
+		}
+		if (size == 0L) {
+			return List.of();
+		}
+		if (size > Integer.MAX_VALUE) {
+			return incompleteProjection(runId, "台账条数超出投影可表达范围：" + size);
+		}
+		Map<Object, Object> entries;
+		try {
+			entries = this.redis.opsForHash().entries(idemKey(runId));
+		}
+		catch (RuntimeException ex) {
+			rethrowIfResourceFailure(ex);
+			return incompleteProjection(runId, "读取投影 HASH 失败：" + ex.getMessage());
+		}
+		if (entries == null || entries.isEmpty()) {
+			return incompleteProjection(runId, "投影字段不存在（旧数据）");
+		}
+		Map<Long, Map<String, Object>> byIndex = new TreeMap<>();
+		for (Map.Entry<Object, Object> entry : entries.entrySet()) {
+			String field = entry.getKey() == null ? "" : String.valueOf(entry.getKey());
+			// 索引自身的 field（<runId>:<toolCallId>）不参与投影；UUID runId 不会以 '~' 开头。
+			if (!field.startsWith(IDEM_META_FIELD_PREFIX)) {
+				continue;
+			}
+			long index;
+			try {
+				index = Long.parseLong(field.substring(IDEM_META_FIELD_PREFIX.length()));
+			}
+			catch (NumberFormatException ex) {
+				return incompleteProjection(runId, "投影字段下标不是整数：" + field);
+			}
+			Object raw = entry.getValue();
+			if (raw == null) {
+				return incompleteProjection(runId, "投影字段值为空：" + field);
+			}
+			Map<String, Object> meta;
+			try {
+				meta = this.mapper.readValue(String.valueOf(raw), new TypeReference<Map<String, Object>>() {
+				});
+			}
+			catch (Exception ex) {
+				return incompleteProjection(runId, "投影值不是合法 JSON：" + field);
+			}
+			if (meta.get("atMs") == null || meta.get("toolCallId") == null) {
+				return incompleteProjection(runId, "投影缺少 atMs/toolCallId：" + field);
+			}
+			byIndex.put(index, meta);
+		}
+		if (byIndex.size() != (int) size) {
+			return incompleteProjection(runId, "投影字段数 " + byIndex.size() + " ≠ 台账长度 " + size);
+		}
+		long expected = 0L;
+		List<Map<String, Object>> out = new ArrayList<>((int) size);
+		for (Map.Entry<Long, Map<String, Object>> entry : byIndex.entrySet()) {
+			if (entry.getKey().longValue() != expected) {
+				return incompleteProjection(runId, "投影下标不连续（缺 " + expected + "）");
+			}
+			out.add(entry.getValue());
+			expected++;
+		}
+		return out;
+	}
+
+	/**
+	 * 台账投影读取的故障分级：数据访问资源故障（连接不可用 / 命令超时）<b>原样上抛</b>；
+	 * 其余（数据形态异常）由调用方回落全表扫描。
+	 *
+	 * <p>判据复用 {@link #isConnectionFailure}（沿 cause 链识别，兼容 {@code RedisSystemException}
+	 * 包装）—— 与同槽续期"连接类失败立即收手"同一口径。
+	 */
+	private static void rethrowIfResourceFailure(RuntimeException ex) {
+		if (isConnectionFailure(ex)) {
+			throw ex;
+		}
+	}
+
+	/**
+	 * 投影不可用（数据形态异常）⇒ {@code null} 触发回落，并留一条 {@code DEBUG} 原因。
+	 *
+	 * <p>只打日志、不记账：这条路径的事实是"该 run 的投影不完整"，按 run 记指标会无界增长。
+	 */
+	private static List<Map<String, Object>> incompleteProjection(String runId, String reason) {
+		log.debug("台账元数据投影不完整 runId={}（{}，回落全表扫描）", runId, reason);
+		return null;
 	}
 
 	/**
