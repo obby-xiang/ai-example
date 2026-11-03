@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 对话面板 · 交互 Demo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M12 4.5l1.6 4.4 4.4 1.6-4.4 1.6L12 16.5l-1.6-4.4L6 10.5l4.4-1.6L12 4.5Z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="panel-shell-demo.css">
+<script src="panel-shell-demo.js" defer></script>
+</head>
+<body>
+<div class="demo-page">
+  <header class="demo-head">
+    <div class="demo-eyebrow">
+      <span class="demo-chip blue">可点击原型</span>
+      <span class="demo-chip">原生 dialog 确认</span>
+      <span class="demo-chip">静态 HTML / CSS / JS</span>
+      <span class="demo-chip">无后端 · 无依赖</span>
+    </div>
+    <h1>AI 对话面板 · 交互 Demo</h1>
+    <p class="lede">
+      本页演示「配置助手」对话面板：右侧停靠可调宽；空间不足时业务区内部横向滚动，面板不覆盖业务。
+      新建对话确认、工作中 / 等待中状态与空会话均可点。左侧任务列表是静态占位，不连接后端，
+      也不调用真实模型；对话回复均为预置内容。
+    </p>
+  </header>
+
+  <section class="demo-controls" aria-label="Demo 控制区">
+    <div class="scene-switch" role="group" aria-label="切换演示场景">
+      <button type="button" class="scene-btn" data-scene="done" aria-pressed="true">
+        <span class="scene-num">01</span>
+        <span class="scene-copy">
+          <span class="scene-label">普通完成</span>
+          <span class="scene-desc">完整问答 · 新建会确认</span>
+        </span>
+      </button>
+      <button type="button" class="scene-btn" data-scene="running" aria-pressed="false">
+        <span class="scene-num">02</span>
+        <span class="scene-copy">
+          <span class="scene-label">运行中</span>
+          <span class="scene-desc">回答生成中 · 可停止</span>
+        </span>
+      </button>
+      <button type="button" class="scene-btn" data-scene="waiting" aria-pressed="false">
+        <span class="scene-num">03</span>
+        <span class="scene-copy">
+          <span class="scene-label">等待确认</span>
+          <span class="scene-desc">待确认卡 · 批准后继续</span>
+        </span>
+      </button>
+      <button type="button" class="scene-btn" data-scene="empty" aria-pressed="false">
+        <span class="scene-num">04</span>
+        <span class="scene-copy">
+          <span class="scene-label">空会话</span>
+          <span class="scene-desc">无消息 · 新建不弹确认</span>
+        </span>
+      </button>
+    </div>
+    <div class="control-tools">
+      <div class="width-meter" aria-live="off">
+        <span class="width-label">面板宽度</span>
+        <strong class="width-value" data-width-value>—</strong>
+        <span class="width-max" data-width-max>按视口计算</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="stage-bar">
+    <div class="stage-main">
+      <span class="stage-title">配置助手 · 对话面板</span>
+      <span class="stage-scene" id="stage-scene">普通完成</span>
+    </div>
+    <span class="stage-hint" id="stage-hint">拖拽面板左缘调宽 · ← → 每次 16px</span>
+  </div>
+
+  <div class="workbench" id="workbench">
+    <section class="workspace" aria-hidden="true" inert>
+      <div class="ws-top">
+        <span class="ws-brand"><span class="ws-logo">配</span><span>配置管理台</span></span>
+        <span class="ws-nav"><span class="is-active">任务中心</span><span>配置定义</span><span>数据浏览</span></span>
+        <span class="ws-avatar"></span>
+      </div>
+      <div class="ws-body">
+        <div class="ws-crumb">任务中心 / 全部任务</div>
+        <div class="ws-title-row">
+          <div class="ws-title-copy">
+            <div class="ws-title">任务中心</div>
+            <div class="ws-sub">查看导入、导出与发布任务的执行状态</div>
+          </div>
+          <span class="ws-primary">新建任务</span>
+        </div>
+        <div class="ws-toolbar">
+          <span class="ws-search">搜索任务名称或编号</span>
+          <span class="ws-filter">全部状态</span>
+        </div>
+        <div class="ws-table">
+          <div class="ws-row ws-thead">
+            <span>任务</span><span>类型</span><span>状态</span><span>更新</span>
+          </div>
+          <div class="ws-row">
+            <span class="ws-name">#411 订单配置 · 全量导出<span>配置定义 / DOC_TYPE</span></span>
+            <span>导出</span>
+            <span class="ws-state run">排队中</span>
+            <span>14:04</span>
+          </div>
+          <div class="ws-row">
+            <span class="ws-name">#410 订单类型 · 增量导入<span>配置定义 / ORDER_TYPE</span></span>
+            <span>导入</span>
+            <span class="ws-state done">已完成</span>
+            <span>13:52</span>
+          </div>
+          <div class="ws-row">
+            <span class="ws-name">#409 枚举值 · 发布<span>配置定义 / 枚举值</span></span>
+            <span>发布</span>
+            <span class="ws-state wait">待确认</span>
+            <span>13:40</span>
+          </div>
+          <div class="ws-row">
+            <span class="ws-name">#408 数据字典 · 全量导出<span>配置定义 / DICT</span></span>
+            <span>导出</span>
+            <span class="ws-state done">已完成</span>
+            <span>11:18</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="ai-panel" id="ai-panel" aria-label="配置助手">
+      <div
+        class="resize-handle"
+        id="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整对话面板宽度"
+        aria-valuemin="360"
+        aria-valuemax="640"
+        aria-valuenow="400"
+        aria-valuetext="400 像素"
+        tabindex="0"
+        title="拖拽调整宽度"
+      ></div>
+
+      <div class="panel-body">
+        <header class="panel-header">
+          <span class="panel-icon" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+          </span>
+          <h2 class="panel-title">配置助手</h2>
+          <button type="button" class="header-new" id="new-chat">新建对话</button>
+          <button type="button" class="header-icon" id="collapse-btn" aria-label="收起配置助手" title="收起">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M6 17l5-5-5-5"></path><path d="M13 17l5-5-5-5"></path></svg>
+          </button>
+        </header>
+
+        <div class="messages" id="messages" role="log" aria-label="对话消息" aria-busy="false"></div>
+
+        <div class="composer">
+          <div class="composer-shell">
+            <textarea
+              id="composer-input"
+              class="composer-input"
+              rows="1"
+              maxlength="2000"
+              aria-label="输入消息"
+              placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+            ></textarea>
+            <div class="composer-bottom">
+              <button type="button" class="send-btn" id="send-btn" aria-label="发送消息" title="发送" disabled>
+                <svg class="icon" viewBox="0 0 24 24"><path d="M12 19V5"></path><path d="M6 11l6-6 6 6"></path></svg>
+              </button>
+              <button type="button" class="send-btn stop-btn" id="stop-btn" aria-label="停止生成" title="停止生成" hidden>
+                <span class="stop-square" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button type="button" class="panel-collapsed" id="expand-btn" aria-label="展开配置助手">
+        <span class="panel-icon" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+        </span>
+        <span class="vertical-label">配置助手</span>
+      </button>
+    </aside>
+  </div>
+
+  <div class="demo-notes">
+    <div class="note-card">
+      <div class="note-title">调宽</div>
+      <p>右侧停靠时拖拽面板左缘，或聚焦分隔条后按 ← →，每次 16px。默认宽度 clamp(360px, 30vw, 420px)；最小 360px；常规最大 640px；实际最大 max(360px, min(640px, 100vw - 720px))；视口足够时给左侧业务区留出至少 720px。宽度存在本机。</p>
+      <p>空间不足时业务区内部内容/表格横向滚动，面板保持右侧停靠，不覆盖业务；当前视口没有额外可调空间时，拖拽手柄自动隐藏。</p>
+    </div>
+    <div class="note-card">
+      <div class="note-title">新建对话</div>
+      <p>有消息或正在运行时先弹原生确认，文案明确“清空且不可恢复”，默认焦点在“取消”；空会话直接新建，不弹窗。</p>
+    </div>
+    <div class="note-card">
+      <div class="note-title">状态</div>
+      <p>工作中为蓝色呼吸点，等待确认为琥珀色呼吸点。运行中可停止；等待卡批准或拒绝后会继续本轮回答。</p>
+    </div>
+  </div>
+
+  <p class="stage-foot">静态原型：刷新页面会重置会话；面板宽度保存在本机。空间不足时业务区内部横向滚动，面板保持右侧停靠。</p>
+</div>
+
+<dialog
+  id="new-chat-dialog"
+  class="confirm-dialog"
+  aria-labelledby="new-chat-title"
+  aria-describedby="new-chat-desc new-chat-note"
+>
+  <form method="dialog" class="dialog-form">
+    <span class="dialog-icon" aria-hidden="true">!</span>
+    <h2 id="new-chat-title">开始新对话？</h2>
+    <p class="dialog-desc" id="new-chat-desc">当前对话将被清空，且无法恢复。</p>
+    <p class="dialog-note" id="new-chat-note" hidden></p>
+    <div class="dialog-actions">
+      <button type="submit" class="btn btn-ghost" value="cancel" autofocus>取消</button>
+      <button type="submit" class="btn btn-danger" value="confirm">清空并新建</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="sr-only" id="demo-status" role="status" aria-live="polite"></div>
+<div class="sr-only" id="resize-status" aria-live="polite"></div>
+</body>
+</html>

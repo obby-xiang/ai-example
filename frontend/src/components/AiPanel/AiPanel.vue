@@ -5,7 +5,9 @@
     class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#57606a]"
     @click="ai.toggleExpand()"
   >
-    <el-icon><ChatDotRound /></el-icon>
+    <span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]" aria-hidden="true">
+      <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+    </span>
     <span class="writing-vertical text-[13px]">{{ t('ai.panel.assistant') }}</span>
   </div>
 
@@ -14,17 +16,15 @@
   <div v-else class="ai-chat h-full flex flex-col [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
     <!-- 头部（蓝本 AiPanel.vue:10-19） -->
     <div class="flex items-center gap-2.5 px-3 py-2.5 border-0 border-b border-solid border-[#ebeef5]">
-      <div class="w-[34px] h-[34px] rounded-lg bg-gradient-to-br from-[#409eff] to-[#7b61ff] text-white flex items-center justify-center font-bold">AI</div>
-      <div class="flex-1 min-w-0">
-        <div class="text-sm font-semibold text-[#303133]">{{ t('ai.panel.implementer') }}</div>
-        <div class="text-xs text-[#909399]" data-testid="current-model">{{ currentModelLabel }}</div>
-      </div>
+      <span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]" aria-hidden="true">
+        <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+      </span>
+      <div class="flex-1 min-w-0 text-sm font-semibold text-[#303133]">{{ t('ai.panel.implementer') }}</div>
       <el-button
         size="small"
         text
         data-testid="new-chat"
         :title="t('ai.panel.newChat')"
-        :disabled="!ai.messages.length"
         @click="newChat"
       >
         {{ t('ai.panel.newChat') }}
@@ -32,45 +32,6 @@
       <el-button size="small" text :title="t('ai.panel.collapse')" @click="ai.toggleExpand()">
         <el-icon><ArrowRight /></el-icon>
       </el-button>
-    </div>
-
-    <!-- 会话 / 工作区上下文条（本仓差异：租户/用户切换 + 工作区摘要，蓝本无此行）。
-         诊断信息（会话号 / 数据版本 / 探测原文）已从 C 端界面退场：真实阻断错误由上方统一
-         Alert 与业务页自身表达，机读标识不再占据首屏或折叠层。 -->
-    <div class="px-3 py-1.5 text-xs text-[#909399] border-0 border-b border-solid border-[#ebeef5] bg-aiPanel" data-testid="panel-context-bar">
-      <!-- S6 批1（长内容审计 #13）：`truncate`（nowrap + ellipsis）在 flex 子项上不生效 —— 子项默认
-           `min-width:auto` 不会缩到内容宽以下，长 `contextSummary` 会整行溢出后被外层 overflow-hidden
-           硬裁（看不到省略号）。补 `min-w-0`，省略号才真落地。 -->
-      <div class="flex items-center gap-1.5 flex-wrap" data-testid="panel-context-line">
-        <!-- Task 4：租户/用户切换（少量预置项，默认目录第一项）。每次实际切换都即时清屏并由后端
-             新建会话（含切回旧身份）；Task 3 起同时清掉输入草稿与那份已不可达的旧会话
-             浏览器镜像（后端历史保留，不删），新旧身份不混用。 -->
-        <span v-if="ai.tenantDirectory.length" class="flex items-center gap-1" data-testid="identity-switcher">
-          <select
-            data-testid="tenant-select"
-            :aria-label="t('ai.panel.tenantAria')"
-            :value="ai.identity?.tenantId ?? ''"
-            class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
-            @change="onTenantChange"
-          >
-            <option v-for="entry in ai.tenantDirectory" :key="entry.tenantId" :value="entry.tenantId">
-              {{ entry.tenantName ?? t('ai.panel.tenant', { id: entry.tenantId }) }}
-            </option>
-          </select>
-          <select
-            data-testid="user-select"
-            :aria-label="t('ai.panel.userAria')"
-            :value="ai.identity?.userId ?? ''"
-            class="h-[22px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[4px] text-[11.5px] text-[#57606a]"
-            @change="onUserChange"
-          >
-            <option v-for="user in currentTenantUsers" :key="user.userId" :value="user.userId">
-              {{ user.displayName }}
-            </option>
-          </select>
-        </span>
-        <span class="min-w-0 truncate">{{ t('ai.panel.workspace', { summary: workspace.contextSummary }) }}</span>
-      </div>
     </div>
 
     <!-- 降级与冲突提示（R-165 S2：EP Alert 全退场 → 自绘 demo v7 `.alert` 结构 = 描边圆图标 + 标题 + 说明 + ghost 动作钮；
@@ -1363,6 +1324,26 @@
         </div>
       </div>
     </div>
+
+    <dialog
+      ref="newChatDialogRef"
+      class="m-auto max-h-[calc(100dvh-32px)] w-[min(360px,calc(100vw-32px))] overflow-auto overscroll-contain rounded-[14px] border border-solid border-[#e3e6ea] bg-white p-0 text-[#1f2328] shadow-[0_24px_64px_rgba(16,24,40,0.24)] backdrop:bg-[rgba(15,23,42,0.4)]"
+      aria-labelledby="new-chat-title"
+      aria-describedby="new-chat-desc new-chat-note"
+      data-testid="new-chat-dialog"
+      @close="onNewChatDialogClose"
+    >
+      <form method="dialog" class="px-[18px] pb-[16px] pt-[18px]">
+        <span class="grid h-[30px] w-[30px] place-items-center rounded-full border border-solid border-[#f0d5d0] bg-[#fdf1ef] text-[15px] font-bold leading-none text-[#c0392b]" aria-hidden="true">!</span>
+        <h2 id="new-chat-title" class="m-0 mt-[10px] text-[15.5px] leading-[1.45] [font-weight:650]">{{ t('ai.panel.newChatConfirm.title') }}</h2>
+        <p id="new-chat-desc" class="m-0 mt-[6px] text-[12.8px] leading-[1.7] text-[#57606a]">{{ t('ai.panel.newChatConfirm.description') }}</p>
+        <p v-show="newChatNote !== null" id="new-chat-note" class="m-0 mt-[8px] rounded-[8px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[9px] py-[7px] text-[12.2px] leading-[1.65] text-[#b45309]">{{ newChatNote }}</p>
+        <div class="mt-[16px] flex justify-end gap-[8px]">
+          <button type="submit" value="cancel" autofocus class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[14px] py-[6px] text-[12.8px] leading-[1.5] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]">{{ t('ai.panel.newChatConfirm.cancel') }}</button>
+          <button type="submit" value="confirm" class="rounded-[8px] border border-solid border-transparent bg-[#c0392b] px-[14px] py-[6px] text-[12.8px] font-semibold leading-[1.5] text-white transition-all duration-[150ms] hover:brightness-[1.06]">{{ t('ai.panel.newChatConfirm.confirm') }}</button>
+        </div>
+      </form>
+    </dialog>
   </div>
 </template>
 
@@ -1379,13 +1360,12 @@
  *   是渲染唯一真值，按真实时序自上而下排列 —— "正文 → 工具卡 → 正文"夹心轮次才显出真实顺序；
  *   挂起卡跟随其工具段位置（③b 把两者并成一卡前的过渡形态）；复制的显示判据同取 parts，
  *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
- * - 上下文条：租户/用户切换 + 工作区摘要（C 端减负后不再显示会话 id / 数据版本 / 健康胶囊）；
  * - 工具卡四态（调用中/成功/失败/待执行·待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
  * - 409/503/断流三类降级提示（批G 起不再有「一键重挂」：在途轮刷新即静默续收）；
- * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：清空当前会话并换新 sessionId
+ * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：确认后清空当前会话并换新 sessionId
  *   （旧会话由 `DELETE /api/ai/session/{sessionId}` 完整销毁）—— 蓝本无"重开"入口；
  * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
  *   因 `vite.config.ts` 的 `host: '0.0.0.0'` 存在经内网 http 访问的**非安全上下文**面
@@ -1459,7 +1439,7 @@
  *    mermaid 预览 `min(320px,45vh)` / 源码盒 `min(280px,35vh)`；纯限高内滚、无展开钮不变。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowRight, ChatDotRound } from '@element-plus/icons-vue'
+import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useI18n } from 'vue-i18n'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -4864,12 +4844,40 @@ async function copyMessage(m: ChatMessage): Promise<void> {
 }
 
 /**
- * 新建对话（苞 A 项 1 + 2026-10-25 会话销毁口径）：立即清屏 + 换新 sessionId +
+ * 新建对话（苞 A 项 1 + 2026-10-25 会话销毁口径）：确认后清屏 + 换新 sessionId +
  * 完整销毁旧会话（服务端 purge；前端按响应 clientCleanup 精确清镜像/草稿）。
- * 无二次确认（裁决）：点了就干净；进行中的轮次由 store 内先 abort + POST cancel 收口。
  */
+const newChatDialogRef = ref<HTMLDialogElement | null>(null)
+const newChatWaiting = computed(() => ai.suspended
+  || ai.pendingConfirm !== null
+  || ai.activeForm !== null
+  || ai.queuedForms.length > 0)
+const newChatNeedsConfirmation = computed(() => ai.messages.length > 0 || ai.loading || newChatWaiting.value)
+const newChatNote = computed(() => {
+  if (newChatWaiting.value) {
+    return t('ai.panel.newChatConfirm.pendingNote')
+  }
+  return ai.loading ? t('ai.panel.newChatConfirm.runningNote') : null
+})
+
 function newChat(): void {
-  void ai.resetSession()
+  if (!newChatNeedsConfirmation.value) {
+    void ai.resetSession()
+    return
+  }
+  newChatDialogRef.value?.showModal()
+}
+
+function onNewChatDialogClose(): void {
+  const dialog = newChatDialogRef.value
+  if (!dialog) {
+    return
+  }
+  const choice = dialog.returnValue
+  dialog.returnValue = ''
+  if (choice === 'confirm') {
+    void ai.resetSession()
+  }
 }
 
 /**
@@ -5186,58 +5194,6 @@ watch(() => ai.expanded, async (expanded) => {
 function onContentResized(): void {
   contentResized = true
   scheduleStickToBottom()
-}
-
-
-// ── 副标题 ────────────────────────────────────────────────────────────────────
-/**
- * 副标题（P5）：展示**后端当前生效的模型**（`/health.model`）——纯展示，不承担切换。
- * 批 E · E1 起不能读前端选择态（那里已没有选择）：健康探针是"当前到底用哪个模型"的唯一真值。
- */
-const currentModelLabel = computed(() => ai.health?.model || t('ai.panel.modelFallback'))
-
-/** Task 4：当前租户的用户列表（少量预置；切租户后用户下拉随之换组）。 */
-const currentTenantUsers = computed(() => {
-  const tenantId = ai.identity?.tenantId
-  if (tenantId === undefined) {
-    return []
-  }
-  return ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)?.users ?? []
-})
-
-/**
- * Task 3：**只有实际切换**才清输入草稿（重选当前身份不是切换，草稿必须留着）。
- *
- * 草稿属于面板本地态（用户为旧身份的上下文打的字）；切走时同步清掉，
- * 不等后端（切换本身也不等）。旧会话那份已不可达的浏览器镜像由 store 的切换路径清掉，
- * **后端历史保留**（不调 purge）。
- */
-function switchIdentityFromPanel(tenantId: number, userId: number): void {
-  const current = ai.identity
-  if (current !== null && current.tenantId === tenantId && current.userId === userId) {
-    return
-  }
-  inputText.value = ''
-  void ai.switchIdentity(tenantId, userId)
-}
-
-/** 切租户：落到该租户第一项用户（目录第一项口径不跨租户沿用旧用户）。 */
-function onTenantChange(event: Event): void {
-  const tenantId = Number((event.target as HTMLSelectElement).value)
-  const tenant = ai.tenantDirectory.find((entry) => entry.tenantId === tenantId)
-  const user = tenant?.users[0]
-  if (tenant && user) {
-    switchIdentityFromPanel(tenant.tenantId, user.userId)
-  }
-}
-
-/** 切用户：同租户内换人；跨身份一律换新会话（store 侧负责清屏与后端取号）。 */
-function onUserChange(event: Event): void {
-  const tenantId = ai.identity?.tenantId
-  const userId = Number((event.target as HTMLSelectElement).value)
-  if (tenantId !== undefined && Number.isInteger(userId)) {
-    switchIdentityFromPanel(tenantId, userId)
-  }
 }
 
 /** 身份不可用/会话未就绪时的统一重试（横幅按钮）：先重试目录，再发号（返修 I-2）。 */

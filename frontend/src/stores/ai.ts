@@ -1678,12 +1678,12 @@ function storedSessionPointer(identity: AiIdentity): string {
   }
 }
 
-/** AI 栏展开态（页签级记忆：用户收起后刷新仍保持收起，裁剪性不被刷新打回）。 */
-const EXPANDED_KEY = 'ai-panel-expanded'
+/** AI 栏展开态（同源布局偏好：用户收起后刷新及其他页签仍保持收起）。 */
+export const EXPANDED_KEY = 'ai-panel-expanded'
 
 function initExpanded(): boolean {
   try {
-    return sessionStorage.getItem(EXPANDED_KEY) !== '0'
+    return localStorage.getItem(EXPANDED_KEY) !== '0'
   } catch {
     return true
   }
@@ -1691,7 +1691,7 @@ function initExpanded(): boolean {
 
 function persistExpanded(expanded: boolean): void {
   try {
-    sessionStorage.setItem(EXPANDED_KEY, expanded ? '1' : '0')
+    localStorage.setItem(EXPANDED_KEY, expanded ? '1' : '0')
   } catch {
     // 隐私模式忽略：展开态只是展示偏好
   }
@@ -3401,7 +3401,7 @@ export const useAiStore = defineStore('ai', {
      * 'unsupported' = 环境无 Web Locks，按恢复处理（终态）。
      */
     tabOwnership: 'unknown' as TabOwnership,
-    /** AI 面板是否展开（裁剪性：收起后业务照常；页签级记忆，刷新后保持用户的选择） */
+    /** AI 面板是否展开（裁剪性：收起后业务照常；同源布局偏好，刷新及其他页签保持用户选择） */
     expanded: initExpanded(),
     messages: [] as ChatMessage[],
     /** 是否有轮次在进行 */

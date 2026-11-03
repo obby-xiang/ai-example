@@ -396,13 +396,18 @@
       }
     },
     "panel": {
-      "assistant": "AI 助手",
-      "implementer": "实施助手",
+      "assistant": "配置助手",
+      "implementer": "配置助手",
       "newChat": "新建对话",
+      "newChatConfirm": {
+        "title": "开始新对话？",
+        "description": "当前对话将被清空，且无法恢复。",
+        "runningNote": "当前回答仍在生成，清空后本轮内容将不会保留。",
+        "pendingNote": "当前对话还有待确认或填写的操作，清空后这些内容将不会保留。",
+        "cancel": "取消",
+        "confirm": "清空并新建"
+      },
       "identity": "身份",
-      "tenant": "租户 {id}",
-      "tenantAria": "选择租户",
-      "userAria": "选择用户",
       "identityUnavailable": "身份不可用：无法加载租户/用户目录，发送已暂停",
       "identityNotReady": "会话未就绪：暂未取得会话号，发送已暂停",
       "identityRetry": "重试",
@@ -421,7 +426,6 @@
       "createTaskBusinessUntitled": "创建{type}任务",
       "actionField": "操作",
       "overwriteConfirm": "输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？",
-      "modelFallback": "流式对话 · 工具调用",
       "sendNotSentInline": "（这条消息没有发出去：{message}）",
       "degradeUnknown": "未检测到 AI 可用性，请稍后重试或联系管理员。",
       "composer": {
@@ -438,7 +442,7 @@
       "unavailableDegraded": "AI 能力暂不可用（已降级，业务功能不受影响）",
       "interrupted": "连接中断，结果可能不完整",
       "noDoneFrame": "已生成的内容保留在上方，可重新发送或刷新页面继续接收。",
-      "greeting": "您好，我是实施助手",
+      "greeting": "您好，我是配置助手",
       "logAria": "对话消息",
       "storage": {
         "note": "对话只留本页签浏览器镜像与服务端 24 小时滑动记忆窗口，刷新可恢复、没有长期归档。"
@@ -530,7 +534,6 @@
       "tabSource": "源码",
       "sourceLabel": "mermaid 源码",
       "fullscreen": "全屏查看",
-      "workspace": "工作区 {summary}",
       "poolSaturatedDetail": "请先处理正在等待确认 / 填写的对话（确认、填写或取消），稍后再试。",
       "uiEvent": "AI 驱动工作区：{message}",
       "uiOperating": "AI 正在操作左侧工作区：{text}",

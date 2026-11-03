@@ -287,6 +287,13 @@
       "reason": "已同步 D6：本轮 transcript 与失败错误字段、原文 displayText、稳定历史快照、工具跨页签执行与停止墓碑、复制页签启动隔离、create_task 续用与 independent、草案 run/task/def 三元组绑定、KB generation 写入删除与 no-op 抬代次、SSE 30 秒锁外对账、purge 失败静默后台重试及 AI get_row_count 下线",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:71511f0e287cf98905108ca8dd055faff37342160dd667457482af1f71427175",
+      "status": "synced",
+      "reason": "已同步面板头部精简、右侧停靠调宽、新建确认，以及宽度和展开状态跨页签同步但会话数据继续按页签隔离的迁移边界",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "Kimi主控"
     }
   ]
 }

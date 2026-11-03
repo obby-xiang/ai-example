@@ -396,13 +396,18 @@
       }
     },
     "panel": {
-      "assistant": "AI assistant",
-      "implementer": "Implementation assistant",
+      "assistant": "Configuration Assistant",
+      "implementer": "Configuration Assistant",
       "newChat": "New chat",
+      "newChatConfirm": {
+        "title": "Start a new conversation?",
+        "description": "The current conversation will be cleared and cannot be recovered.",
+        "runningNote": "The current response is still being generated. Its contents will not be kept if you clear the conversation.",
+        "pendingNote": "There are actions awaiting confirmation or forms awaiting input. These will not be kept if you clear the conversation.",
+        "cancel": "Cancel",
+        "confirm": "Clear and start new"
+      },
       "identity": "Identity",
-      "tenant": "Tenant {id}",
-      "tenantAria": "Select tenant",
-      "userAria": "Select user",
       "identityUnavailable": "Identity unavailable: the tenant/user directory could not be loaded, sending is paused",
       "identityNotReady": "Session not ready: no session has been issued yet, sending is paused",
       "identityRetry": "Retry",
@@ -421,7 +426,6 @@
       "createTaskBusinessUntitled": "Create an {type} task",
       "actionField": "Action",
       "overwriteConfirm": "The input box already has content. Editing will overwrite it. Continue?",
-      "modelFallback": "Streaming chat · tool calling",
       "sendNotSentInline": "(this message was not sent: {message})",
       "degradeUnknown": "AI availability has not been detected yet. Try again later or contact your administrator.",
       "composer": {
@@ -438,7 +442,7 @@
       "unavailableDegraded": "AI features are temporarily unavailable (degraded; business features are unaffected)",
       "interrupted": "Connection interrupted; the result may be incomplete",
       "noDoneFrame": "Generated content is kept above; resend or refresh the page to keep receiving.",
-      "greeting": "Hello, I am the implementation assistant",
+      "greeting": "Hello, I am the Configuration Assistant",
       "logAria": "Conversation messages",
       "storage": {
         "note": "Conversations live only in this tab's browser mirror plus the server's 24-hour sliding memory window: refresh restores the tab, and there is no long-term archive."
@@ -530,7 +534,6 @@
       "tabSource": "Source",
       "sourceLabel": "Mermaid source",
       "fullscreen": "View fullscreen",
-      "workspace": "Workspace {summary}",
       "poolSaturatedDetail": "Handle the conversations that are waiting first (confirm, fill in, or cancel), then try again.",
       "uiEvent": "AI is driving the workspace: {message}",
       "uiOperating": "AI is operating the left workspace: {text}",
