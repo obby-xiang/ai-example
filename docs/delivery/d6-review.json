@@ -280,6 +280,13 @@
       "reason": "本批收敛线程池与定时器生命周期并规范日志语言、级别和频率；D6迁移接口、业务数据结构与跨实例会话契约均未改变",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:93cb0dd3bd14b8d984e7f2e99e30cd08e21391222d68bdd05e10afdc551d9c2e",
+      "status": "synced",
+      "reason": "已同步 D6：本轮 transcript 与失败错误字段、原文 displayText、稳定历史快照、工具跨页签执行与停止墓碑、复制页签启动隔离、create_task 续用与 independent、草案 run/task/def 三元组绑定、KB generation 写入删除与 no-op 抬代次、SSE 30 秒锁外对账、purge 失败静默后台重试及 AI get_row_count 下线",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

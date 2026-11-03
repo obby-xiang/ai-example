@@ -9,6 +9,16 @@ export function listData(defCode: string, params: DataQuery = {}): Promise<PageR
   return get<PageResult<ConfigDataRow>>(`/data/${encodeURIComponent(defCode)}`, { params })
 }
 
+export interface DataCountResult {
+  count: number
+}
+
+/** 当前范围与条件下的真实已发布行数。 */
+export function countData(defCode: string, params: DataQuery = {}): Promise<DataCountResult> {
+  return get<DataCountResult>(`/data/${encodeURIComponent(defCode)}/count`, { params })
+}
+
 export const dataApi = {
-  listData
+  listData,
+  countData
 }

@@ -113,6 +113,20 @@ public class TaskTypeForm extends HostForm {
 	 */
 	public boolean parkIfCreateTaskMissingType(String runId, AiContext context, String argumentsJson,
 			List<Message> history) {
+		return parkIfCreateTaskMissingType(runId, context, argumentsJson, history, null, null);
+	}
+
+	/**
+	 * 同 {@link #parkIfCreateTaskMissingType(String, AiContext, String, List)}，并显式带上
+	 * <b>当前模型 assistant 正文/元数据</b>。
+	 *
+	 * <p>工具跳提前 park 时，本段正文还没进 {@code messageJson}；若不显式传给
+	 * {@code HostForm}，挂起快照只会带上上一轮/空 {@code assistantContent}。调用方应把
+	 * {@code history} 里的 assistant 正文置空（避免挂起历史与 {@code assistantContent} 各存一份），
+	 * 正文由这里随挂起快照保存。
+	 */
+	public boolean parkIfCreateTaskMissingType(String runId, AiContext context, String argumentsJson,
+			List<Message> history, String assistantContent, Map<String, Object> assistantMetadata) {
 		if (runId == null || context == null || history == null || !parkEnabled()) {
 			return false;
 		}
@@ -127,7 +141,8 @@ public class TaskTypeForm extends HostForm {
 			return false;
 		}
 		log.info("create_task has no valid type; host parks a TASK_TYPE form runId={}", runId);
-		return park(runId, history, frontendForm(toolCallId(runId), arguments.get()));
+		return park(runId, history, frontendForm(toolCallId(runId), arguments.get()), assistantContent,
+				assistantMetadata);
 	}
 
 	/** type 缺失/空白/不在 EXPORT|IMPORT 闭集。 */

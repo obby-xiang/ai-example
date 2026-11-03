@@ -55,6 +55,20 @@
           :error="condErrors[code] ?? ''"
           @update:model-value="(value) => onConditionChange(code, value)"
         />
+        <div class="mt-2.5 flex items-center gap-2">
+          <el-button
+            size="small"
+            :loading="countingRows[code] === true"
+            :disabled="isReadOnly"
+            :data-ai-ref="`export.cond.${code}.count`"
+            @click="countExactRows(code)"
+          >
+            {{ t('views.export.countRows') }}
+          </el-button>
+          <span v-if="exactRowCounts[code] !== undefined" class="text-[12.5px] text-[#57606a]">
+            {{ t('views.export.exactRowCount', { count: exactRowCounts[code] }) }}
+          </span>
+        </div>
       </el-card>
     </div>
 
@@ -154,6 +168,7 @@ import JobProgress from '@/components/JobProgress.vue'
 import SpreadGrid from '@/components/SpreadGrid.vue'
 import TaskWizard from '@/components/TaskWizard.vue'
 import { definitionsApi } from '@/api/definitions'
+import { dataApi } from '@/api/data'
 import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
 import { useTaskStore } from '@/stores/task'
@@ -174,6 +189,7 @@ import {
   type ConditionInputIssue,
   type FieldQueryCondition
 } from '@/types/condition'
+import type { DataQuery } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
 import { TaskSteps, type Task, type TaskFile } from '@/types/task'
@@ -351,6 +367,10 @@ const retryingLists = ref(false)
  * 草案只在解析出**非空**条件时才写（与 `condition.ts` 的既有接口保持一致，不改该文件）。
  */
 const touchedConditions = new Set<string>()
+
+const exactRowCounts = reactive<Record<string, number>>({})
+const countingRows = reactive<Record<string, boolean>>({})
+const rowCountRequests = new Map<string, object>()
 
 const gridRefs: Record<string, GridApi> = {}
 /**
@@ -697,6 +717,7 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     await router.replace({ name: 'import-wizard', query: { taskId: String(taskId.value) } })
     return { taskOk: false, filesOk: false }
   }
+  clearExactRowCounts()
   task.value = loaded
   selectedDefs.value = (loaded.items ?? []).map((item) => item.defCode)
   // 批次5A：条件必须随进页声明一起回填。`enterPage` 是「声明即全集」—— 未声明的
@@ -899,6 +920,7 @@ function resetTaskScopedState(): void {
     delete condErrors[code]
   }
   touchedConditions.clear()
+  clearExactRowCounts()
   exportResults.value = []
   checkedDefs.value = []
   activeTab.value = ''
@@ -1246,7 +1268,62 @@ async function persistStepData(
  * - 编辑/删除字段：只按新草案处理；scopeKeys 变化不影响字段级原条件。
  * 内容确实没变（只是显示回写）时不记 `touchedConditions`。
  */
+function invalidateExactRowCount(code: string): void {
+  rowCountRequests.delete(code)
+  countingRows[code] = false
+  delete exactRowCounts[code]
+}
+
+function clearExactRowCounts(): void {
+  rowCountRequests.clear()
+  for (const code of Object.keys(exactRowCounts)) {
+    delete exactRowCounts[code]
+  }
+  for (const code of Object.keys(countingRows)) {
+    delete countingRows[code]
+  }
+}
+
+async function countExactRows(code: string): Promise<void> {
+  invalidateExactRowCount(code)
+  const generation = taskGeneration
+  const request = {}
+  let condition: FieldQueryCondition | null
+  try {
+    condition = assertConditionBuildable(draftModels[code] ?? emptyDraftModel())
+  } catch (error) {
+    condErrors[code] = error instanceof InvalidConditionInputError
+      ? describeConditionInputError(error)
+      : error instanceof Error ? error.message : String(error)
+    return
+  }
+  rowCountRequests.set(code, request)
+  countingRows[code] = true
+  delete condErrors[code]
+  try {
+    const params: DataQuery = {}
+    if (!isConditionEmpty(condition)) {
+      params.conditions = stringifyCondition(condition)
+    }
+    const result = await dataApi.countData(code, params)
+    if (generation !== taskGeneration || rowCountRequests.get(code) !== request) {
+      return
+    }
+    exactRowCounts[code] = result.count
+  } catch (error) {
+    if (generation === taskGeneration && rowCountRequests.get(code) === request) {
+      condErrors[code] = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    if (rowCountRequests.get(code) === request) {
+      rowCountRequests.delete(code)
+      countingRows[code] = false
+    }
+  }
+}
+
 function onConditionChange(code: string, value: ConditionDraftModel): void {
+  invalidateExactRowCount(code)
   const previous = draftModels[code]
   if (previous === undefined) {
     draftModels[code] = value
@@ -2520,6 +2597,7 @@ function registerHandlers(): void {
     // 2026-10-30 提交点收口：这里**不**写业务后台。任务条目的 `conditionJson` 只在
     // `goStep → persistStepData`（`confirm_step`）与 `startExport` 两个提交点统一落库 ——
     // 设置条件就 PUT 会让"仅仅表达查询意图"变成一次业务写，并在 confirm_step 时重复写一遍。
+    invalidateExactRowCount(defCode)
     draftModels[defCode] = draftModelFromCondition(condition)
     // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此提交（含故意清空为无条件）
     touchedConditions.add(defCode)

@@ -42,8 +42,8 @@ import java.util.function.LongConsumer;
  * 晚到的旧订阅也只是短暂多一条监听器（桶已消失 ⇒ 回调 no-op），随后被自己的补偿退订摘掉。
  *
  * <p>
- * 失败口径：publish/subscribe 的 Redis 异常只记日志并降级（唤醒可丢；正确性由客户端
- * {@code ?lastSeq} 重连兜底）。容器自身带重连，Redis 恢复后订阅自动重建。
+ * 失败口径：publish/subscribe 的 Redis 异常只记日志并降级（唤醒可丢；非驱动方按 lastSeq 游标
+ * 低频对账，客户端 {@code ?lastSeq} 重连仍是最终兜底）。容器自身带重连，Redis 恢复后订阅自动重建。
  */
 @Slf4j
 @Component

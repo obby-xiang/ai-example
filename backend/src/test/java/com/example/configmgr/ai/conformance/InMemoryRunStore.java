@@ -183,8 +183,8 @@ public class InMemoryRunStore extends RunStore {
 	}
 
 	@Override
-	public String eventsKey(String runId) {
-		return EVENTS_PREFIX + runId;
+	public String xeventsKey(String runId) {
+		return XEVENTS_PREFIX + runId;
 	}
 
 	@Override
@@ -936,7 +936,6 @@ public class InMemoryRunStore extends RunStore {
 		return this.beats.getOrDefault(runId, 0L);
 	}
 
-	@Override
 	public long lastEventSeq(String runId) {
 		List<Map<String, Object>> archived = eventList(runId);
 		if (archived.isEmpty()) {
@@ -956,7 +955,6 @@ public class InMemoryRunStore extends RunStore {
 		return this.issuedSeqs.getOrDefault(runId, 0L);
 	}
 
-	@Override
 	public void recordIssuedSeq(String runId, long seq) {
 		if (runLeaseAuthority(runId).readOnly()) {
 			return;

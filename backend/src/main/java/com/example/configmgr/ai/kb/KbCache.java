@@ -15,10 +15,11 @@ import java.util.Set;
  * <h2>键族（会话无关的全局知识域）</h2>
  * <ul>
  * <li>{@code kb:cache:doc:<id>}（HASH：{@code content/etag/sha/updatedAt}）—— 单篇正文；</li>
- * <li>{@code kb:cache:docs}（HASH：field = 文档 id，value = {@code 1}）—— <b>全局文档 id 索引</b>：
+ * <li>{@code kb:cache:docs}（HASH：field = 文档 id，value = 写入代次）—— <b>全局文档 id 索引</b>：
  *     "本缓存家族应当有哪些正文键"的事实源，下线回收按它与当前 manifest 的差集重试；</li>
  * <li>{@code kb:cache:manifest}（HASH：{@code etag/version/json}）—— 清单原文与版本；</li>
  * <li>{@code kb:cache:manifest:version}（INCR）—— 跨实例传播"知识已更新"；</li>
+ * <li>{@code kb:cache:manifest:generation}（INCR）—— 写入/回收 fencing 代次，不提前暴露半份清单；</li>
  * <li>{@code kb:cache:refresh:lock}（{@code SET NX PX 30000}）—— 刷新权（单飞）。</li>
  * </ul>
  *
@@ -27,9 +28,9 @@ import java.util.Set;
  *
  * <p><b>下线回收（收敛，不靠一次性成功）</b>：不设 TTL 意味着文档下线后必须显式删键。
  * {@code CachedKbSource#syncToCache} 每轮按 {@code kb:cache:docs} 与当前 manifest 的差集逐篇删除，
- * <b>删除成功后才从索引摘除</b>：删除失败或进程在两者之间崩溃时条目仍留在索引里，下一轮自动重试
- * （DEL 幂等），因此"崩溃/抖动导致的残留"最多活到下一次成功刷新。
- * 全部是单键命令（{@code HGETALL/HSET/HDEL/DEL}），不使用 {@code KEYS}/{@code SCAN}/跨槽多键 Lua；
+ * <b>条件删除成功后才按同一上限从索引摘除</b>：正文与索引均带代次，旧实例不能回收新实例重写的正文。
+ * 删除失败或进程在两者之间崩溃时条目仍留在索引里，下一轮自动重试。
+ * 全部是单键命令（{@code HGETALL/HSET/HDEL/DEL} 或等义单键 Lua），不使用 {@code KEYS}/{@code SCAN}/跨槽多键 Lua；
  * 索引键与文档键同属<b>全局公共知识域</b>（无租户段），一次刷新覆盖全部实例。
  *
  * <p><b>写入顺序</b>：先记文档 id 索引 → 写文档 → 写清单 → {@code INCR} 版本（最后回收下线文档）。
@@ -41,12 +42,15 @@ public class KbCache {
 
     public static final String DOC_PREFIX = "kb:cache:doc:";
 
-    /** 全局文档 id 索引（HASH 当 SET 用：field = 文档 id，value = {@code "1"}；<b>无 TTL</b>）。 */
+    /** 全局文档 id 索引（HASH 当 SET 用：field = 文档 id，value = 写入代次；<b>无 TTL</b>）。 */
     public static final String DOC_IDS_KEY = "kb:cache:docs";
 
     public static final String MANIFEST_KEY = "kb:cache:manifest";
 
     public static final String VERSION_KEY = "kb:cache:manifest:version";
+
+    /** 写入/回收的 fencing 代次；与读侧刷新通知版本分离，避免提前暴露半份清单。 */
+    public static final String GENERATION_KEY = "kb:cache:manifest:generation";
 
     public static final String LOCK_KEY = "kb:cache:refresh:lock";
 
@@ -57,6 +61,8 @@ public class KbCache {
     static final String F_SHA = "sha";
 
     static final String F_UPDATED = "updatedAt";
+
+    static final String F_GENERATION = "generation";
 
     static final String F_VERSION = "version";
 
@@ -90,12 +96,24 @@ public class KbCache {
     }
 
     public void putDoc(String docId, DocEntry entry) {
+        putDoc(docId, entry, 0L);
+    }
+
+    public void putDoc(String docId, DocEntry entry, long generation) {
+        long fencedGeneration = Math.max(0L, generation);
         Map<String, String> hash = new LinkedHashMap<>();
         hash.put(F_CONTENT, entry.content());
         hash.put(F_ETAG, nullSafe(entry.etag()));
         hash.put(F_SHA, nullSafe(entry.sha()));
         hash.put(F_UPDATED, nullSafe(entry.updatedAt()));
-        this.store.hashPutAll(docKey(docId), hash);
+        hash.put(F_GENERATION, String.valueOf(fencedGeneration));
+        this.store.hashPutAllIfGenerationAtMost(docKey(docId), F_GENERATION, fencedGeneration, hash);
+    }
+
+    /** 内容未变但清单仍引用该文档时，只提升 fencing 代次；false = 正文已回收或属于更高代次。 */
+    public boolean markDocGeneration(String docId, long generation) {
+        return this.store.hashPutFieldIfPresentAndValueAtMost(docKey(docId), F_GENERATION,
+                Math.max(0L, generation));
     }
 
     /**
@@ -105,6 +123,11 @@ public class KbCache {
      */
     public void deleteDoc(String docId) {
         this.store.delete(docKey(docId));
+    }
+
+    /** 旧刷新不能删除更高代次重新写入的正文；false = 本键由新刷新所有，保留索引待其对账。 */
+    public boolean deleteDoc(String docId, long generation) {
+        return this.store.deleteDocIfGenerationAtMost(docKey(docId), F_GENERATION, Math.max(0L, generation));
     }
 
     /**
@@ -123,23 +146,27 @@ public class KbCache {
     }
 
     /**
-     * 把文档 id 记入全局索引（幂等；已存在只覆盖同值字段）。
+     * 把文档 id 记入全局索引（幂等；代次只允许单调提升）。
      *
      * <p>必须在写正文与写新清单<b>之前</b>成功：这样"正文有 ⇒ 索引有""清单里有 ⇒ 索引里有"，
      * 否则将来它下线时就没有可回收的线索（正文键无 TTL，会永久残留）。
      */
     public void putDocIds(Collection<String> docIds) {
+        putDocIds(docIds, 0L);
+    }
+
+    public void putDocIds(Collection<String> docIds, long generation) {
         if (docIds == null || docIds.isEmpty()) {
             return;
         }
         Map<String, String> fields = new LinkedHashMap<>();
         for (String id : docIds) {
             if (id != null && !id.isBlank()) {
-                fields.put(id, "1");
+                fields.put(id, String.valueOf(Math.max(0L, generation)));
             }
         }
         if (!fields.isEmpty()) {
-            this.store.hashPutFields(DOC_IDS_KEY, fields);
+            this.store.hashPutFieldsIfValueAtMost(DOC_IDS_KEY, fields);
         }
     }
 
@@ -150,10 +177,14 @@ public class KbCache {
      * 否则正文可能没有任何回收线索（正文键无 TTL，只能靠索引找回）。
      */
     public void putDocId(String docId) {
+        putDocId(docId, 0L);
+    }
+
+    public void putDocId(String docId, long generation) {
         if (docId == null || docId.isBlank()) {
             return;
         }
-        putDocIds(List.of(docId));
+        putDocIds(List.of(docId), generation);
     }
 
     /** 从全局索引摘除文档 id（正文键回收成功后调用；失败由调用方留待下一轮重试）。 */
@@ -162,6 +193,14 @@ public class KbCache {
             return;
         }
         this.store.hashDeleteFields(DOC_IDS_KEY, List.of(docId));
+    }
+
+    /** 与正文同一道代次闸：旧回收不能摘掉新刷新刚重建的回收线索。 */
+    public boolean removeDocId(String docId, long generation) {
+        if (docId == null || docId.isBlank()) {
+            return true;
+        }
+        return this.store.hashDeleteFieldIfValueAtMost(DOC_IDS_KEY, docId, Math.max(0L, generation));
     }
 
     public Optional<ManifestEntry> manifest() {
@@ -178,6 +217,23 @@ public class KbCache {
         hash.put(F_VERSION, nullSafe(entry.version()));
         hash.put(F_JSON, entry.json());
         this.store.hashPutAll(MANIFEST_KEY, hash);
+    }
+
+    /** 清单与文档共用代次 fencing；旧刷新不得覆盖新清单，也不得再推进通知版本。 */
+    public boolean putManifest(ManifestEntry entry, long generation) {
+        long fencedGeneration = Math.max(0L, generation);
+        Map<String, String> hash = new LinkedHashMap<>();
+        hash.put(F_ETAG, nullSafe(entry.etag()));
+        hash.put(F_VERSION, nullSafe(entry.version()));
+        hash.put(F_JSON, entry.json());
+        hash.put(F_GENERATION, String.valueOf(fencedGeneration));
+        return this.store.hashPutAllIfGenerationAtMost(MANIFEST_KEY, F_GENERATION, fencedGeneration, hash);
+    }
+
+    /** 清单内容未变时只提升 fencing 代次，拒绝仍在飞的旧清单写回。 */
+    public boolean markManifestGeneration(long generation) {
+        return this.store.hashPutFieldIfPresentAndValueAtMost(MANIFEST_KEY, F_GENERATION,
+                Math.max(0L, generation));
     }
 
     /** 当前版本号（键不存在 = 0）。 */
@@ -197,6 +253,24 @@ public class KbCache {
     /** {@code INCR kb:cache:manifest:version}，返回新版本。 */
     public long bumpVersion() {
         return this.store.incr(VERSION_KEY);
+    }
+
+    public long generation() {
+        String raw = this.store.get(GENERATION_KEY);
+        if (raw == null || raw.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(raw.strip());
+        }
+        catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    /** 在读取本轮回收差集之前取号；迟到的旧刷新因此只能回收自己这一代。 */
+    public long nextGeneration() {
+        return this.store.incr(GENERATION_KEY);
     }
 
     /** 抢刷新权（{@code SET NX PX}）。 */

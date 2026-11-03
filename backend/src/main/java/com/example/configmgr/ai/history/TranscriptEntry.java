@@ -27,11 +27,47 @@ public record TranscriptEntry(String entryId, String kind, String role, String r
 		String text, String reasoning, Boolean stopped, Boolean truncated, List<ToolCallView> toolCalls,
 		Map<String, Object> toolCallStates, String toolCallId, String name, String kind2, String status, String result,
 		Boolean baseline, String code, Boolean toolTruncated, String toolStrategy, Integer toolOriginalChars,
-		Integer toolReturnedChars) {
+		Integer toolReturnedChars, String errorCode, String errorMessage) {
+
+	/** 兼容没有轮次失败事实的旧写入形态。 */
+	public TranscriptEntry(String entryId, String kind, String role, String runId, long turnStartedAtMs, long atMs,
+			String text, String reasoning, Boolean stopped, Boolean truncated, List<ToolCallView> toolCalls,
+			Map<String, Object> toolCallStates, String toolCallId, String name, String kind2, String status,
+			String result, Boolean baseline, String code, Boolean toolTruncated, String toolStrategy,
+			Integer toolOriginalChars, Integer toolReturnedChars) {
+		this(entryId, kind, role, runId, turnStartedAtMs, atMs, text, reasoning, stopped, truncated, toolCalls,
+				toolCallStates, toolCallId, name, kind2, status, result, baseline, code, toolTruncated, toolStrategy,
+				toolOriginalChars, toolReturnedChars, null, null);
+	}
 
 	/** 一条 assistant 工具调用（与 Spring AI 的线形一致；展示面按 id/type/name/arguments 读）。 */
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	public record ToolCallView(String id, String type, String name, String arguments) {
+	}
+
+	/**
+	 * 只换段级状态映射、其它字段原样保留（同 entryId 的读取合并用：见
+	 * {@code TranscriptEntries#carryPreflight(TranscriptEntry, TranscriptEntry)}）。
+	 */
+	public TranscriptEntry withToolCallStates(Map<String, Object> toolCallStates) {
+		return new TranscriptEntry(this.entryId, this.kind, this.role, this.runId, this.turnStartedAtMs, this.atMs,
+				this.text, this.reasoning, this.stopped, this.truncated, this.toolCalls, toolCallStates,
+				this.toolCallId, this.name, this.kind2, this.status, this.result, this.baseline, this.code,
+				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
+				this.errorCode, this.errorMessage);
+	}
+
+	/** 记忆补偿只补终态事实；正文、工具原文、排序与条目身份仍保留展示历史里的版本。 */
+	public TranscriptEntry withTerminalFacts(TranscriptEntry terminal) {
+		Map<String, Object> states = terminal.toolCallStates == null ? this.toolCallStates : terminal.toolCallStates;
+		return new TranscriptEntry(this.entryId, this.kind, this.role, this.runId, this.turnStartedAtMs, this.atMs,
+				this.text, terminal.reasoning == null ? this.reasoning : terminal.reasoning,
+				terminal.stopped == null ? this.stopped : terminal.stopped,
+				terminal.truncated == null ? this.truncated : terminal.truncated, this.toolCalls, states,
+				this.toolCallId, this.name, this.kind2, this.status, this.result, this.baseline, this.code,
+				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
+				terminal.errorCode == null ? this.errorCode : terminal.errorCode,
+				terminal.errorMessage == null ? this.errorMessage : terminal.errorMessage);
 	}
 
 }

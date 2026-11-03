@@ -36,7 +36,13 @@ import java.util.Map;
  *     后端据此在 run 创建前绑定/识别取消墓碑。null = 旧客户端，行为与改造前一致）
  */
 public record AiChatRequest(String sessionId, String message, Context context, String modelId, Params params,
-		String clientRequestId) {
+		String clientRequestId, String displayText) {
+
+	/** 旧调用方没有独立展示文本时，展示历史与模型输入共用 message。 */
+	public AiChatRequest(String sessionId, String message, Context context, String modelId, Params params,
+			String clientRequestId) {
+		this(sessionId, message, context, modelId, params, clientRequestId, null);
+	}
 
 	/** 兼容构造器：批③ 之前的调用点（含控制器归一化后的换新 record）无需改动。 */
 	public AiChatRequest(String sessionId, String message, Context context) {

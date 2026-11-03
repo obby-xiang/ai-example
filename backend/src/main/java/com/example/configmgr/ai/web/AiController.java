@@ -8,9 +8,11 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.TranscriptEntries;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
+import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
@@ -421,9 +423,9 @@ public class AiController {
 			}
 		}
 		String modelText = sanitized.text();
-		// 归一后的文本 / 闸后的 context 才是进模型/进记忆的那份（原始 request 不可变，故换一个新 record）
+		// 模型与记忆使用归一文本；用户展示历史单独携带原始输入，终态重写也不能把它换成归一文本。
 		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
-				request.params(), clientRequestId);
+				request.params(), clientRequestId, request.message());
 		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在归一化/长度之后、会话门之前 ——
 		// 与既有闸序一致（归一化与长度先过、超长先撞），且拒绝不占 in-flight 位。
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
@@ -633,11 +635,11 @@ public class AiController {
 	 *     ⇒ 这一笔不写、返回 {@code false}，调用方不得再发 {@code error} 终帧（取消侧发
 	 *     {@code done{cancelled:true}}）；否则一轮会有两条终帧、且"已取消"会被改写成"失败"；</li>
 	 * <li><b>已是终态不覆盖</b>：DONE/FAILED/CANCELLED 一律不动（终态先到者赢）；</li>
-	 * <li><b>不新增 DB 写入</b>：失败现场只落在 Redis 快照（{@code ai:run:<runId>}，24h 滑动 TTL）
-	 *     与帧归档里 —— AR-01 明确禁止为失败现场新增 DB 写入 / 列 / TTL。</li>
+	 * <li><b>不新增 DB 写入</b>：失败现场落在 Redis 快照、记忆、展示历史与帧归档里 ——
+	 *     AR-01 明确禁止为失败现场新增 DB 写入 / 列 / TTL。</li>
 	 * </ol>
 	 *
-	 * @param emitError 失败终帧的发送动作（在<b>同一把</b> per-run 监视器内执行；{@code null} = 只写状态）
+	 * @param emitError 失败终帧的发送动作（在<b>同一把</b> per-run 监视器内执行；{@code null} = 不发帧）
 	 */
 	private void writeOutsideTurnFailure(String runId, String code, Runnable emitError) {
 		// N2（返修）：与取消收尾共用同一把 per-run 监视器（经
@@ -661,7 +663,7 @@ public class AiController {
 		}
 	}
 
-	/** 只做状态写（返回"调用方可否发失败终帧"），调用方必须已持有 per-run 监视器。 */
+	/** 写失败状态并收敛失败历史（返回"调用方可否发失败终帧"），调用方必须已持有 per-run 监视器。 */
 	private boolean writeOutsideTurnFailureState(String runId, String code) {
 		try {
 			RunSnapshot snapshot = this.runStore.get(runId);
@@ -687,13 +689,23 @@ public class AiController {
 				log.info("outside-turn exception leaves failure state unwritten: snapshot cancel flag set (cancel first) runId={}", runId);
 				return false;
 			}
+			String failureMessage = localize(code, "AI 服务暂时不可用，请稍后重试。");
+			ResilientChatService service = this.chatService.getIfAvailable();
+			List<Message> failureHistory = service == null ? null
+					: service.failureHistory(snapshot, snapshot.getAssistantContent(), "", code, failureMessage);
+			if (failureHistory != null) {
+				snapshot.setMessageJson(new MessageJsonCodec(this.objectMapper).serializeAll(failureHistory));
+			}
 			snapshot.setStatus(RunSnapshot.FAILED);
 			snapshot.setInFlightToolCalls(new java.util.ArrayList<>());
-			snapshot.setError(code + "：" + localize(code, "AI 服务暂时不可用，请稍后重试。"));
+			snapshot.setError(code + "：" + failureMessage);
 			boolean written = this.runStore.saveTerminalUnlessCancelled(snapshot);
 			if (!written) {
 				log.info("outside-turn failure state rejected by cancel-first guard runId={} code={} (CANCELLED preserved, no error frame)", runId,
 						code);
+			}
+			else if (service != null && failureHistory != null) {
+				service.recordFailureTerminal(snapshot, failureHistory);
 			}
 			return written;
 		}
@@ -746,17 +758,13 @@ public class AiController {
 	 * 决策落地前唯一还能拿到"用户此刻看到的页面"的地方。写回发生在
 	 * {@link ConfirmGate#submitDecision} 之前，因此同一请求触发的续跑一定读到新值。
 	 *
-	 * <h2>写入口径（终审 I-1 / I-2）</h2>
+	 * <h2>写入口径</h2>
 	 * <ul>
-	 * <li><b>只写页面事实</b>：{@code page/step} 与 {@code extra} 里的页面键（{@code pageId /
-	 *     selectedDefs / selectionSynced / recentActions / dataVersion / contractVersion}）。
-	 *     {@code taskId/taskType/taskStatus} 在快照已有绑定时<b>一律保留服务端原值</b> ——
-	 *     它们是预检 {@code reportHash}（targetConsistency）与披露的输入，页面切换不得改写；
-	 *     只有快照原本没有 {@code taskId} 时才采纳客户端绑定。</li>
-	 * <li><b>{@code importMode} 同样保留服务端已有值</b>（{@code reportHash} 的 publishMode 输入）；
-	 *     快照没有时才采纳客户端。</li>
-	 * <li><b>保留服务端 {@code extra.taskSlots}</b>：重算只是增强，不能让这次写把槽位抹掉
-	 *     （抹掉会退化成表单 fail-open）。</li>
+	 * <li><b>页面当前事实优先</b>：{@code page/step/taskId} 与 {@code extra} 里的页面键
+	 *     （{@code pageId / selectedDefs / selectionSynced / recentActions / dataVersion / contractVersion}）
+	 *     取本次回灌值；换任务或解除绑定必须覆盖旧 run 快照，不能继续操作旧任务。</li>
+	 * <li><b>同一任务</b>的 {@code taskType/taskStatus/importMode} 保留服务端已有值，避免重复回灌翻转预检输入；
+	 *     换任务时旧任务槽位、创建候选与发布模式作废，再由续跑按新任务权威值重算。</li>
 	 * <li><b>可选字段</b>：旧客户端不带 {@code context} ⇒ 不读不写，行为与改造前逐字一致；</li>
 	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），客户端无法
 	 *     伪造服务端槽位或越过终态收窄；</li>
@@ -795,17 +803,26 @@ public class AiController {
 		}
 	}
 
-	/** 客户端可覆盖的页面事实键（其余 extra 取自快照，服务端键如 {@code taskSlots} 永不丢）。 */
+	/** 客户端可覆盖的页面事实键（换任务时先清掉旧任务作用域，再叠加这些当前页面值）。 */
 	private static final List<String> PAGE_FACT_EXTRA_KEYS = List.of("pageId", "selectedDefs", "selectionSynced",
 			"recentActions", "dataVersion", "contractVersion");
 
 	/**
-	 * 页面事实合并：页面/步骤取客户端，任务绑定与发布模式保留服务端已有值（预检 hash 稳定），
-	 * 服务端 extra（含 {@code taskSlots}）叠加页面事实后原样保留。
+	 * 页面事实合并：页面/步骤与任务绑定取客户端当前值；换任务时旧任务槽位、候选和发布模式一并作废。
+	 * 同一任务的重复回灌仍保留服务端任务事实与已有发布模式，避免无意翻转预检输入。
 	 */
 	private static AiContext mergeWorkspaceFacts(AiContext server, AiChatRequest.Context client) {
 		Map<String, Object> clientExtra = client.extra() == null ? Map.of() : client.extra();
-		Map<String, Object> extra = new LinkedHashMap<>(server.getExtra());
+		boolean taskChanged = server.getTaskId() == null ? client.taskId() != null
+				: !server.getTaskId().equals(client.taskId());
+		AiContext merged = AiContext.of(client.page(),
+				taskChanged ? client.taskType() : server.getTaskType(), client.step(), client.taskId(),
+				taskChanged ? client.taskStatus() : server.getTaskStatus(), new LinkedHashMap<>(server.getExtra()));
+		if (taskChanged) {
+			RunContextRefresher.clearTaskScopedExtra(merged);
+			merged.getExtra().remove("importMode");
+		}
+		Map<String, Object> extra = merged.getExtra();
 		for (String key : PAGE_FACT_EXTRA_KEYS) {
 			if (clientExtra.containsKey(key)) {
 				extra.put(key, clientExtra.get(key));
@@ -816,13 +833,7 @@ public class AiController {
 				&& clientExtra.get("importMode") != null) {
 			extra.put("importMode", clientExtra.get("importMode"));
 		}
-		boolean bound = server.getTaskId() != null;
-		return AiContext.of(client.page(),
-				bound ? server.getTaskType() : client.taskType(),
-				client.step(),
-				bound ? server.getTaskId() : client.taskId(),
-				bound ? server.getTaskStatus() : client.taskStatus(),
-				extra);
+		return merged;
 	}
 
 	/** {@code context} 形状闸（与 {@code /chat} 同源；未注入闸门 = 不闸，与改造前同形）。 */
@@ -1905,6 +1916,13 @@ public class AiController {
 			Map<String, Object> entry = new LinkedHashMap<>();
 			entry.put("toolCallId", pending.getToolCallId());
 			entry.put("entryStatus", pending.getStatus());
+			entry.put("outcome", pending.effectiveOutcome().wire());
+			entry.put("executed", pending.isExecuted());
+			if (pending.getExecutedBy() != null) {
+				entry.put("executedBy", pending.getExecutedBy());
+			}
+			entry.put("claimedAtMs", pending.getClaimedAtMs() > 0L ? pending.getClaimedAtMs() : null);
+			entry.put("claimedEpoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : null);
 			entry.put("kind", pending.getKind());
 			entry.put("name", pending.getName());
 			entry.put("arguments", pending.getArguments());
@@ -2279,6 +2297,12 @@ public class AiController {
 			item.put("timestamp", entry.atMs());
 		}
 		if ("ASSISTANT".equals(type)) {
+			if (entry.errorCode() != null && !entry.errorCode().isBlank()) {
+				item.put(TranscriptEntries.ERROR_CODE_KEY, entry.errorCode());
+			}
+			if (entry.errorMessage() != null && !entry.errorMessage().isBlank()) {
+				item.put(TranscriptEntries.ERROR_MESSAGE_KEY, entry.errorMessage());
+			}
 			if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
 				List<Map<String, Object>> calls = new ArrayList<>(entry.toolCalls().size());
 				for (com.example.configmgr.ai.history.TranscriptEntry.ToolCallView call : entry.toolCalls()) {
@@ -2381,6 +2405,14 @@ public class AiController {
 			Object reasoning = reasoningAssistant.getMetadata().get(ResilientChatService.REASONING_METADATA_KEY);
 			if (reasoning instanceof String reasoningText && !reasoningText.isBlank()) {
 				item.put(ResilientChatService.REASONING_METADATA_KEY, reasoningText);
+			}
+		}
+		if (!synthetic && message instanceof AssistantMessage assistant) {
+			for (String key : List.of(TranscriptEntries.ERROR_CODE_KEY, TranscriptEntries.ERROR_MESSAGE_KEY)) {
+				Object value = assistant.getMetadata().get(key);
+				if (value != null && !String.valueOf(value).isBlank()) {
+					item.put(key, String.valueOf(value));
+				}
 			}
 		}
 		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {

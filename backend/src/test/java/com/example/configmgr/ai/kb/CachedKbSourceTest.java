@@ -159,6 +159,94 @@ class CachedKbSourceTest {
     }
 
     @Test
+    void noOpManifestSyncFencesOffOlderManifestWrite() throws Exception {
+        FakeKbSource current = new FakeKbSource().put("doc-a", "文档A", "# 文档A\n## 定义\n当前正文。\n");
+        CountDownLatch staleManifestWrite = new CountDownLatch(1);
+        CountDownLatch releaseStaleManifestWrite = new CountDownLatch(1);
+        KbCache interleavingCache = new KbCache(this.store) {
+            @Override
+            public boolean putManifest(ManifestEntry entry, long generation) {
+                if (generation == 2L) {
+                    staleManifestWrite.countDown();
+                    try {
+                        if (!releaseStaleManifestWrite.await(5, TimeUnit.SECONDS)) {
+                            throw new AssertionError("旧刷新等待放行超时");
+                        }
+                    }
+                    catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(e);
+                    }
+                }
+                return super.putManifest(entry, generation);
+            }
+        };
+        CachedKbSource warm = new CachedKbSource(local(current), interleavingCache, KbTestSupport.mapper(),
+                new AiProperties().getKb());
+        warm.fetchManifest(null, true);
+
+        FakeKbSource stale = new FakeKbSource().put("doc-a", "文档A", "# 文档A\n## 定义\n旧刷新正文。\n");
+        stale.etag = "etag-v2";
+        stale.version = "v2";
+        CachedKbSource staleSource = new CachedKbSource(local(stale), interleavingCache, KbTestSupport.mapper(),
+                new AiProperties().getKb());
+        Throwable[] staleError = new Throwable[1];
+        Thread staleRefresh = new Thread(() -> {
+            try {
+                staleSource.fetchManifest(null, true);
+            }
+            catch (Throwable e) {
+                staleError[0] = e;
+            }
+        });
+        staleRefresh.start();
+        assertThat(staleManifestWrite.await(5, TimeUnit.SECONDS)).isTrue();
+
+        try {
+            CachedKbSource noOp = new CachedKbSource(local(current), interleavingCache, KbTestSupport.mapper(),
+                    new AiProperties().getKb());
+            noOp.fetchManifest(null, true);
+            long noOpGeneration = interleavingCache.generation();
+            assertThat(noOpGeneration).isGreaterThan(2L);
+        }
+        finally {
+            releaseStaleManifestWrite.countDown();
+        }
+        staleRefresh.join(5000);
+
+        assertThat(staleRefresh.isAlive()).isFalse();
+        assertThat(staleError).containsOnlyNulls();
+        KbCache.ManifestEntry manifest = interleavingCache.manifest().orElseThrow();
+        assertThat(manifest.etag()).isEqualTo("etag-v1");
+        assertThat(manifest.json()).contains("\"version\":\"v1\"");
+        assertThat(interleavingCache.version()).isEqualTo(1L);
+        assertThat(interleavingCache.doc("doc-a").orElseThrow().content()).contains("当前正文");
+        String generation = String.valueOf(interleavingCache.generation());
+        assertThat(this.store.hashGetAll(KbCache.MANIFEST_KEY).get(KbCache.F_GENERATION)).isEqualTo(generation);
+        assertThat(this.store.hashGetAll(KbCache.docKey("doc-a")).get(KbCache.F_GENERATION)).isEqualTo(generation);
+        assertThat(this.store.hashGetAll(KbCache.DOC_IDS_KEY).get("doc-a")).isEqualTo(generation);
+    }
+
+    private static KbSource local(FakeKbSource delegate) {
+        return new KbSource() {
+            @Override
+            public String kind() {
+                return "local";
+            }
+
+            @Override
+            public ManifestFetch fetchManifest(String previousEtag) throws KbSourceException {
+                return delegate.fetchManifest(previousEtag, true);
+            }
+
+            @Override
+            public String fetchContent(KbDocMeta meta) throws KbSourceException {
+                return delegate.fetchContent(meta);
+            }
+        };
+    }
+
+    @Test
     void redisUnavailableFallsBackToDelegate() throws Exception {
         KbCacheStore broken = new KbCacheStore() {
             @Override

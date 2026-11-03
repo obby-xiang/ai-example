@@ -13,6 +13,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { installIdentityFixture } from './ai-identity-fixture'
 import type { ChatMessage } from '@/types/ai'
+import { FakeLockManager } from './tab-ownership-fixtures'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -64,6 +65,7 @@ function emitSuspendThenClose(): { terminal: boolean; suspended?: boolean; recon
 
 beforeEach(() => {
   sessionStorage.clear()
+  Object.defineProperty(navigator, 'locks', { value: new FakeLockManager(), configurable: true })
   setActivePinia(createPinia())
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   for (const fn of Object.values(api)) {
@@ -92,6 +94,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
 })
 
 describe('B1 裁决 8：挂起收流 = 正常收尾（不判断流）', () => {

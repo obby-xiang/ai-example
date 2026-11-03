@@ -407,6 +407,48 @@ class ToolPreflightServiceTest {
 		assertThat(bad.pass()).isFalse();
 	}
 
+	@Test
+	void createTaskPreflightAndExecutionUseTheSameContinuationEligibility() {
+		Task current = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		current.setAiCreateKey("ai-created");
+		stubTask(current);
+		AiContext context = AiContext.of("export", "EXPORT", "SELECT_DEFS", 5L, "ACTIVE", Map.of());
+		String arguments = "{\"type\":\"EXPORT\",\"title\":\"  订单配置导入  \",\"conditions\":{}}";
+
+		ToolPreflightService.PreflightReport eligible = this.service.inspect("create_task", arguments, context);
+		assertThat(eligible.target()).containsEntry("taskId", 5L);
+		assertThat(eligible.impact()).contains("复用");
+
+		current.setTitle("另一个创建意图");
+		assertThat(this.service.inspect("create_task", arguments, context).target()).doesNotContainKey("taskId");
+		current.setTitle("订单配置导入");
+		current.setType(Task.TaskType.IMPORT);
+		assertThat(this.service.inspect("create_task", arguments, context).target()).doesNotContainKey("taskId");
+		current.setType(Task.TaskType.EXPORT);
+		current.setStatus(Task.TaskStatus.COMPLETED);
+		assertThat(this.service.inspect("create_task", arguments, context).target()).doesNotContainKey("taskId");
+		current.setStatus(Task.TaskStatus.ACTIVE);
+		current.setAiCreateKey(null);
+		assertThat(this.service.inspect("create_task", arguments, context).target()).doesNotContainKey("taskId");
+	}
+
+	@Test
+	void createTaskContinuationEligibilityChangeChangesReportHash() {
+		Task current = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		current.setAiCreateKey("ai-created");
+		stubTask(current);
+		AiContext context = AiContext.of("export", "EXPORT", "SELECT_DEFS", 5L, "ACTIVE", Map.of());
+		String arguments = "{\"type\":\"EXPORT\",\"title\":\"订单配置导入\",\"conditions\":{}}";
+
+		ToolPreflightService.PreflightReport before = this.service.inspect("create_task", arguments, context);
+		current.setStatus(Task.TaskStatus.CANCELLED);
+		ToolPreflightService.PreflightReport after = this.service.inspect("create_task", arguments, context);
+
+		assertThat(after.target()).doesNotContainKey("taskId");
+		assertThat(after.impact()).contains("创建").doesNotContain("复用");
+		assertThat(after.reportHash()).as("资格变化必须让执行前复核判旧报告过期").isNotEqualTo(before.reportHash());
+	}
+
 	// ── helpers ────────────────────────────────────────────────────────────
 
 	private void stubTask(Task task) {

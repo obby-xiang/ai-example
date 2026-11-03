@@ -15,8 +15,10 @@ import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.memory.MemoryTurn;
 import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -34,6 +36,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -1517,8 +1520,11 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
+			boolean enteredQueryCond = settledInBatch != null && settledInBatch.stream()
+					.anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
+							&& com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
 			if (this.conditionsForm != null
-					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history)) {
+					&& this.conditionsForm.parkIfDueAtQueryCond(runId, nextHopContext, history, !enteredQueryCond)) {
 				body.put("resumed", false);
 				// 条件候选草案（set_condition）与条件表（generative_form）是两种不同的挂起物：
 				// 原因码必须如实区分，避免把"草案已下发"误读成"条件表已问过"。
@@ -1526,6 +1532,36 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
+			// ===== 条件结构化交棒的标记：随快照持久化 =====
+			// 披露面（{@code forContext}）用的是本跳这份上下文，而执行面的第三道防线
+			// （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文
+			// （{@code SpToolCallingManager} 里 {@code AiContext.fromMap(snapshot.getContext())}）。
+			// 只改内存对象 ⇒ guard 永远看不到；离开 QUERY_COND 的清理同理，不落库等于没清。
+			// 写入走取消优先 + 租约的同一道写门：被拒 ⇒ 本拍不得驱动模型（与其它交棒写点同口径）。
+			boolean conditionHandoff = nextHopContext.getExtra() != null
+					&& Boolean.TRUE.equals(nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF));
+			if (conditionHandoff && !"QUERY_COND".equals(nextHopContext.getStep())) {
+				Map<String, Object> extra = new LinkedHashMap<>(nextHopContext.getExtra());
+				extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+				nextHopContext = AiContext.of(nextHopContext.getPage(), nextHopContext.getTaskType(),
+						nextHopContext.getStep(), nextHopContext.getTaskId(), nextHopContext.getTaskStatus(), extra);
+				conditionHandoff = false;
+				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
+					return resumeStatusWriteRefused(runId, body);
+				}
+			}
+			else if (conditionHandoff) {
+				if (!persistHandoffContext(runId, snapshot, nextHopContext)) {
+					return resumeStatusWriteRefused(runId, body);
+				}
+			}
+			// 合成内部指令：只属于<b>这一跳</b>的交棒视图，在窗口/压缩之后才追加（见下），
+			// 既不进压缩输入也不随压缩写回快照/记忆（详见 SyntheticMessages#withoutCorrectionInstruction）。
+			Message conditionInstruction = enteredQueryCond && conditionHandoff
+					? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+							+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
+							+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
+					: null;
 
 			// ── 记忆窗口批：续跑重建出来的历史也按同一个 token 预算收口（与首轮同源：同一个 MemoryWindow） ──
 			// 为什么续跑更需要它：这里是完整 run 历史（挂起期越长越大），没有条数窗口兜着 ——
@@ -1541,21 +1577,39 @@ public class ResumeService {
 			}
 			Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(sessionId));
 			activeRunIds.add(runId);
-			// B2：续跑入口（含"运行中升级到本版本"）先用快照历史补 baseline；
-			// 放在窗口/压缩之前，保证复制的是完整重建历史而不是已整理视图。
+			// 续跑 baseline 也按 runId 排除当前轮；不再从请求原文猜测当前 USER 的位置。
 			if (this.transcript != null && snapshot != null) {
 				try {
 					if (this.store.permittedToWrite(runId, "transcript")) {
-						this.transcript.ensureBaseline(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
-								history);
+						this.transcript.ensureBaselineFromMemory(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
+								runId);
 					}
 				}
 				catch (RuntimeException ex) {
 					log.debug("transcript baseline write authority check failed runId={} (not copied this time): {}", runId, ex.getMessage());
 				}
 			}
+			// 压缩输入与 CAS 使用同一次 readWindow：先把本轮重建历史并入该窗口副本，
+			// 再对这份副本做窗口/压缩；其它 run 以基线里的版本保留，写回不会覆盖并发新块。
+			MemoryWindowSnapshot windowSnapshot = this.chatService == null ? null
+					: this.chatService.memoryWindowSnapshot(sessionId);
+			List<Message> windowInput = history;
+			if (windowSnapshot != null) {
+				List<Message> ownRun = history.stream()
+					.filter(message -> message.getMessageType() != MessageType.SYSTEM)
+					.toList();
+				List<Message> merged = RunMemoryMerge.merge(windowSnapshot.messages(), ownRun,
+						MemoryTurn.of(runId, snapshot.getCreatedAtMs()), true, 0, activeRunIds);
+				windowInput = new ArrayList<>();
+				for (Message message : history) {
+					if (message.getMessageType() == MessageType.SYSTEM) {
+						windowInput.add(message);
+					}
+				}
+				windowInput.addAll(merged);
+			}
 			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
-			MemoryWindow.Plan window = MemoryWindow.plan(history, windowBudget, protectedIds, activeRunIds);
+			MemoryWindow.Plan window = MemoryWindow.plan(windowInput, windowBudget, protectedIds, activeRunIds);
 			MemoryWindow.emit(runId, sessionId, window, windowBudget);
 			history = window.messages();
 			// B5：不再返回 memoryWindow/memoryWindowTrimmed（无前端/脚本消费者；窗口事实仍进
@@ -1565,8 +1619,6 @@ public class ResumeService {
 			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
 			ContextCompactor.Outcome compaction = null;
-			MemoryWindowSnapshot windowSnapshot = this.chatService == null ? null
-					: this.chatService.memoryWindowSnapshot(sessionId);
 			if (this.contextCompactor != null && !history.isEmpty()) {
 				// ===== AR-06 / Task 5 Step 3 + 2026-10-29 压缩阶段信号批 =====
 				// 与首轮同构：初始相位是 streaming（普通续跑不出现任何压缩/准备阶段条）；压缩调用自身
@@ -1656,6 +1708,14 @@ public class ResumeService {
 					body.put("contextCompaction", "none");
 					body.put("contextCompactionReason", compaction.reason());
 				}
+			}
+
+			// 合成内部指令在窗口/压缩<b>之后</b>才进交棒视图：它既不参与窗口预算、也不进压缩输入，
+			// 更不会随压缩写回快照/记忆（条件结构化交棒的记忆污染面）；模型这一跳仍看得到它，
+			// 且它是历史最后一条（模型紧接着做结构化）。
+			if (conditionInstruction != null) {
+				history = new ArrayList<>(history);
+				history.add(conditionInstruction);
 			}
 
 			body.put("resumed", true);
@@ -1957,6 +2017,26 @@ public class ResumeService {
 	}
 
 	/**
+	 * 条件结构化交棒标记的写回口（置位/清理都走这里）。
+	 *
+	 * <p>为什么必须落库：披露面用的是<b>本跳</b>这份内存上下文，而执行面的第三道防线
+	 * （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文，{@link AiContext#fromMap}
+	 * 又是拷贝 —— 只改内存对象时 guard 与下一次续跑都看不到。
+	 *
+	 * <p>写门与其它交棒写点同源（{@code saveStatusUnlessCancelled}）：取消已先到 / 租约只读 /
+	 * fence 陈旧 ⇒ {@code false}，调用方必须<b>不驱动模型</b>（本方法不驱动任何东西，不引入双驱动）。
+	 */
+	private boolean persistHandoffContext(String runId, RunSnapshot snapshot, AiContext context) {
+		snapshot.setContext(context.toMap());
+		if (this.store.saveStatusUnlessCancelled(snapshot)) {
+			return true;
+		}
+		log.info("condition handoff context write refused by write gate runId={} step={} (recheck cancel/authority, no drive)",
+				runId, context.getStep());
+		return false;
+	}
+
+	/**
 	 * 把<b>刷新后的权威工作区状态</b>换进交棒历史的系统段（工作区段的唯一重写口）。
 	 *
 	 * <h2>为什么换段，而不是新增一条消息</h2>
@@ -2072,6 +2152,13 @@ public class ResumeService {
 				return;
 			}
 			boolean providerGone = ex instanceof ProviderGoneException;
+			String failureCode = providerGone ? ErrorCodes.AI_PROVIDER_GONE : ErrorCodes.AI_RESUME_FAILED;
+			String failureMessage = providerGone ? PROVIDER_GONE_MESSAGE : resumeFailedMessage();
+			List<Message> failureHistory = this.chatService == null ? null
+					: this.chatService.failureHistory(target, target.getAssistantContent(), "", failureCode, failureMessage);
+			if (failureHistory != null) {
+				target.setMessageJson(this.codec.serializeAll(failureHistory));
+			}
 			target.setStatus(RunSnapshot.FAILED);
 			target.setError((providerGone ? "PROVIDER_GONE：该轮使用的模型端点此刻不可用，无法按原模型续跑"
 					: com.example.configmgr.common.ErrorCodes.AI_RESUME_FAILED + "：续跑执行失败")
@@ -2086,6 +2173,7 @@ public class ResumeService {
 			// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
 			// 直接交出手里的终态快照：复读会按收尾线程身份拼键，身份不符时读不到 → RUN 绑定静默留存。
 			if (this.chatService != null) {
+				this.chatService.recordFailureTerminal(target, failureHistory);
 				this.chatService.clearTerminalRunState(target.getRunId(), target);
 			}
 			if (emitError != null) {
@@ -2597,9 +2685,16 @@ public class ResumeService {
 			if (target == null || RunSnapshot.isTerminal(target.getStatus())) {
 				return;
 			}
+			settleProviderGoneTools(runId);
+			String failureMessage = providerGoneMessage();
+			List<Message> failureHistory = providerGoneFailureHistory(target, failureMessage);
+			if (failureHistory != null) {
+				target.setMessageJson(this.codec.serializeAll(failureHistory));
+			}
 			target.setStatus(RunSnapshot.FAILED);
 			target.setError("PROVIDER_GONE：" + PROVIDER_GONE_MESSAGE);
 			target.setInFlightToolCalls(new ArrayList<>());
+			target.setAssistantContent(null);
 			// 取消优先：取消已先到 ⇒ 不写 FAILED、不发 error（取消侧发 done{cancelled:true}）。
 			if (!this.store.saveTerminalUnlessCancelled(target)) {
 				log.info("resume hard negative yields to cancel runId={} (no FAILED, no error frame)", runId);
@@ -2608,6 +2703,7 @@ public class ResumeService {
 			// F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
 			// 直接交出刚写成 FAILED 的快照，避免按交棒/续跑线程身份复读时因归属不符而漏写完成态。
 			if (this.chatService != null) {
+				this.chatService.recordFailureTerminal(target, failureHistory);
 				this.chatService.clearTerminalRunState(runId, target);
 			}
 			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
@@ -2625,6 +2721,47 @@ public class ResumeService {
 					+ "not persisted; reattach or startup scan reconverges): {}", runId,
 					ex.getMessage());
 		}
+	}
+
+	private void settleProviderGoneTools(String runId) {
+		PendingToolCall upstream = new PendingToolCall();
+		upstream.setName("模型端点");
+		upstream.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.FAILED.wire());
+		upstream.setCode(ErrorCodes.AI_PROVIDER_GONE);
+		for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+			if (!isUnsettled(pending)) {
+				continue;
+			}
+			try {
+				// 与批次确定性失败同一条规则：未执行项落 SKIPPED、补 tool_result，不抹掉已有终态。
+				this.toolCallingManager.skipAsUpstreamFailed(runId, pending, upstream);
+			}
+			catch (RuntimeException ex) {
+				log.warn("provider-gone tool settlement failed runId={} toolCallId={}: {}", runId,
+						pending.getToolCallId(), ex.getMessage());
+			}
+		}
+	}
+
+	private List<Message> providerGoneFailureHistory(RunSnapshot target, String failureMessage) {
+		List<Message> history = new ArrayList<>(this.codec.deserializeAll(target.getMessageJson()));
+		if (!target.getInFlightToolCalls().isEmpty()) {
+			history.add(rebuildAssistant(target));
+			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+			for (PendingToolCall item : target.getInFlightToolCalls()) {
+				PendingToolCall persisted = this.store.pending(target.getRunId(), item.getToolCallId());
+				PendingToolCall source = persisted == null ? item : persisted;
+				responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
+						ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(),
+								source.getResultText(), item.getArguments())
+							.toModelJson(this.limiter, item.getName())));
+			}
+			history.add(ToolResponseMessage.builder().responses(responses).build());
+		}
+		target.setMessageJson(this.codec.serializeAll(history));
+		return this.chatService == null ? history
+				: this.chatService.failureHistory(target, target.getAssistantContent(), "",
+						ErrorCodes.AI_PROVIDER_GONE, failureMessage);
 	}
 
 	/** 用户面文案：与 409 同一句；en 走 {@code messages_en}，绝不回落到内部信息。 */

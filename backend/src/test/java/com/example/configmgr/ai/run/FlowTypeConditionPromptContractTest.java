@@ -152,7 +152,7 @@ class FlowTypeConditionPromptContractTest {
 
 		assertThat(shipped.version())
 			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.20");
+			.isEqualTo("2026-10-27.23");
 	}
 
 	/**

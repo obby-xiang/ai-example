@@ -398,6 +398,7 @@ public class ToolRegistry {
         Set<String> tags = buildTags(ctx);
         return callbackMap.entrySet().stream()
                 .filter(e -> {
+                    if (!conditionStructuringAllows(e.getKey(), ctx)) return false;
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
                     return scopeAllows(meta, tags) && stateAllows(e.getKey(), ctx)
@@ -405,6 +406,24 @@ public class ToolRegistry {
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * 条件结构化交棒（{@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}）只留四个工具：
+     * 查定义、设置条件、推进，以及定义列表。首次进入 {@code QUERY_COND} 时用户已给出的筛选值
+     * 由模型用既有 {@code set_condition} 结构化；不让它再创建任务/下发表单/启动作业。
+     */
+    private static final Set<String> CONDITION_STRUCTURING_TOOLS = Set.of(
+            AiToolNames.GET_CONFIG_DEF, AiToolNames.LIST_CONFIG_DEFS,
+            AiToolNames.SET_CONDITION, AiToolNames.CONFIRM_STEP);
+
+    /** 交棒标记只在 {@code QUERY_COND} 生效（离开步骤 = 完整工具面恢复，判据与披露面同源）。 */
+    private static boolean conditionStructuringAllows(String name, AiContext ctx) {
+        if (ctx == null || !"QUERY_COND".equals(ctx.getStep()) || ctx.getExtra() == null
+                || !Boolean.TRUE.equals(ctx.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF))) {
+            return true;
+        }
+        return CONDITION_STRUCTURING_TOOLS.contains(name);
     }
 
     public ToolCallback getCallback(String name) {
@@ -453,7 +472,8 @@ public class ToolRegistry {
         AiContext effective = ctx == null ? AiContext.empty() : ctx;
         ToolMeta meta = metaMap.get(name);
         boolean scopeOk = meta == null || scopeAllows(meta, buildTags(effective));
-        return scopeOk && stateAllows(name, effective) && !sheetDisabled(name);
+        return scopeOk && stateAllows(name, effective) && !sheetDisabled(name)
+                && conditionStructuringAllows(name, effective);
     }
 
     /**

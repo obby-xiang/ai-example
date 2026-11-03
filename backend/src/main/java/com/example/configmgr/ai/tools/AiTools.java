@@ -3,6 +3,7 @@ package com.example.configmgr.ai.tools;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
+import com.example.configmgr.ai.gate.ToolExecutionEnvelope;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.PlainTextToolResultConverter;
 import com.example.configmgr.ai.tool.ToolCategory;
@@ -45,7 +46,7 @@ import java.util.stream.Collectors;
  *
  * <h2>本棒接回的工具（P1 遗留 N7 的收口）</h2>
  * <ul>
- * <li><b>只读</b>：查询定义/任务/作业状态 —— 无副作用，直接执行；</li>
+ * <li><b>只读</b>：查询定义、任务与作业状态 —— 无副作用，直接执行；</li>
  * <li><b>任务创建</b>：{@code create_task}（AR-03 起 {@code @ToolRisk(DANGER)}，进确认门；
  * 宿主幂等 + 单轮上限 1）—— 批准后才落库，返回任务 id（S4.4e 裁决② + AR-03，见 {@link #createTask}）；</li>
  * <li><b>作业发起（确认门）</b>：{@code start_export} / {@code start_precheck} / {@code start_import} /
@@ -292,7 +293,18 @@ public class AiTools {
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String getWorkspaceState(
-            @ToolParam(description = "任务ID", required = false) Long taskId) {
+            @ToolParam(description = "任务ID", required = false) Long taskId, ToolContext toolContext) {
+        ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(
+                toolContext == null ? null : toolContext.getContext());
+        Long currentTaskId = envelope == null ? taskId : longOf(envelope.context().get("taskId"));
+        return workspaceState(currentTaskId);
+    }
+
+    public String getWorkspaceState(Long taskId) {
+        return workspaceState(taskId);
+    }
+
+    private String workspaceState(Long taskId) {
         if (taskId == null) return "当前未打开任何任务，请先创建或选择一个任务";
         Task task = taskService.findById(taskId);
         StringBuilder sb = new StringBuilder();
@@ -365,6 +377,7 @@ public class AiTools {
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
             @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CURRENCY\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
             @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}（表示条件未决定，不是“明确不设”）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
+            @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             ToolContext toolContext) {
         Task.TaskType taskType;
         try {
@@ -375,20 +388,32 @@ public class AiTools {
                     "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）");
         }
         boolean export = taskType == Task.TaskType.EXPORT;
-        String effectiveTitle = title == null || title.isBlank() ? (export ? "导出任务" : "导入任务") : title.trim();
-        String runId = toolContext == null || toolContext.getContext() == null ? null
-                : stringOf(toolContext.getContext().get("runId"));
+        String effectiveTitle = TaskService.effectiveCreateTitle(taskType, title);
+        Map<String, Object> context = toolContext == null ? null : toolContext.getContext();
+        String runId = context == null ? null : stringOf(context.get("runId"));
+        ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(context);
+        Long continuationTaskId = Boolean.TRUE.equals(independent) || envelope == null ? null
+                : longOf(envelope.context().get("taskId"));
         try {
-            TaskService.CreateOutcome outcome = taskService.createIdempotent(taskType, effectiveTitle, runId);
+            TaskService.CreateOutcome outcome = continuationTaskId == null
+                    ? taskService.createIdempotent(taskType, effectiveTitle, runId)
+                    : taskService.createIdempotent(taskType, effectiveTitle, runId, continuationTaskId);
             Task task = outcome.task();
-            String prefix = outcome.reused() ? "该任务已在同一轮创建过，本次复用任务" : "已创建" + (export ? "导出" : "导入") + "任务";
+            if (outcome.reused()) {
+                return String.format(
+                        "该任务已创建，本次复用任务 #%d（标题：%s，当前步骤：%s）。%s"
+                                + "本次调用只复用任务，未启动作业。下一步：navigate_to(page=\"%s\", taskId=%d) "
+                                + "打开向导，按上述真实步骤、条目与条件继续。",
+                        task.getId(), task.getTitle(), task.getCurrentStep(), reusedTaskFacts(task),
+                        export ? "export" : "import", task.getId());
+            }
             return String.format(
-                    "%s #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
+                    "已创建%s任务 #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
                             + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。下一步："
                             + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项；"
                             + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
                             + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
-                    prefix, task.getId(), task.getTitle(), task.getCurrentStep(),
+                    export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep(),
                     export ? "export" : "import", task.getId());
         }
         // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
@@ -401,8 +426,38 @@ public class AiTools {
         }
     }
 
+    private static String reusedTaskFacts(Task task) {
+        if (task.getItems() == null || task.getItems().isEmpty()) {
+            return "当前没有任务条目，也没有已提交业务库的条目条件。";
+        }
+        return task.getItems().stream()
+                .map(item -> item.getDefCode() + (item.getConditionJson() == null || item.getConditionJson().isBlank()
+                        ? "（条件未提交业务库）" : "（条件已提交业务库：" + item.getConditionJson() + "）"))
+                .collect(Collectors.joining("、", "当前任务条目：", "。"));
+    }
+
+    public String createTask(String type, String title, String[] defCodes, FieldQueryCondition conditions,
+            ToolContext toolContext) {
+        return createTask(type, title, defCodes, conditions, null, toolContext);
+    }
+
     private static String stringOf(Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    private static Long longOf(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value == null || String.valueOf(value).isBlank()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(value).trim());
+        }
+        catch (NumberFormatException ex) {
+            return null;
+        }
     }
 
     // ==================== 作业发起：导出 / 预检查 / 导入 / 发布（确认门） ====================

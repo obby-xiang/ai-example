@@ -28,6 +28,7 @@ import type { AiRunCurrent, ChatMessage, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { installIdentityFixture } from './ai-identity-fixture'
+import { FakeLockManager } from './tab-ownership-fixtures'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -132,6 +133,7 @@ function seedHost(store: ReturnType<typeof useAiStore>, runId: string): ChatMess
 
 beforeEach(() => {
   sessionStorage.clear()
+  Object.defineProperty(navigator, 'locks', { value: new FakeLockManager(), configurable: true })
   setActivePinia(createPinia())
   for (const fn of Object.values(api)) {
     fn.mockReset()
@@ -149,6 +151,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useAiStore().adoptFreshSession()
+  Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
 })
 
 describe('① 回放按 toolCallId 与快照对账：已非 PENDING 只补展示', () => {
@@ -334,7 +337,7 @@ describe('③ 快照条目不可用：有副作用工具保守不执行 + 可恢
       pendingEntries: undefined as unknown as AiRunCurrent['pendingEntries']
     }))
     await flushPromises()
-    await vi.waitFor(() => expect(api.frontendToolResult).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(api.frontendToolResult).toHaveBeenCalledTimes(2))
 
     // 写工具零执行、段收敛（不留 running），并给出可恢复提示
     expect(frontendTools.executeFrontendTool).toHaveBeenCalledTimes(1)

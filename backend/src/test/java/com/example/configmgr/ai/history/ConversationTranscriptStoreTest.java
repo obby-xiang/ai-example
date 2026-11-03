@@ -421,4 +421,17 @@ class ConversationTranscriptStoreTest {
 		assertThat(entries).filteredOn(entry -> "TOOL".equals(entry.role())).isEmpty();
 	}
 
+	@Test
+	void readConvergesLegacyBaselineAndRunDoubleWrites() {
+		List<TranscriptEntry> duplicated = new ArrayList<>(
+				TranscriptEntries.baseline(List.of(new UserMessage("旧问"), new AssistantMessage("旧答"))));
+		duplicated.add(TranscriptEntries.user("run-a", 100L, 100L, "旧问"));
+		duplicated.add(TranscriptEntries.assistant("run-a", 100L, 101L, "旧答", null, null));
+		this.store.append("s-1", TENANT, USER, duplicated);
+
+		assertThat(this.store.read("s-1", TENANT, USER).entries())
+			.extracting(TranscriptEntry::entryId)
+			.containsExactly("run-a:user", "run-a:assistant");
+	}
+
 }

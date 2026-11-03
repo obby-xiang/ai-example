@@ -159,4 +159,49 @@ class TranscriptEntriesTest {
 			.contains("run-a:user", "run-a:assistant:c-1", "run-a:tool:c-1");
 	}
 
+	@Test
+	void legacyBaselineAndRunEntriesConvergeByStructureWithoutMemoryIndexes() {
+		List<TranscriptEntry> legacy = TranscriptEntries.baseline(List.of(new UserMessage("问"), new AssistantMessage("答")));
+		List<Message> attributed = List.of(
+				UserMessage.builder().text("问").metadata(Map.of("runId", "run-a")).build(),
+				AssistantMessage.builder().content("答").properties(Map.of("runId", "run-a")).build());
+		List<TranscriptEntry> current = TranscriptEntries.fromMessages(attributed, Map.of(), false, 100L);
+		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(legacy);
+		duplicated.addAll(current);
+
+		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
+
+		assertThat(reconciled).extracting(TranscriptEntry::entryId)
+			.containsExactly("run-a:user", "run-a:assistant");
+	}
+
+	@Test
+	void identicalTextInDifferentRunsSurvivesLegacyBaselineConvergence() {
+		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(
+				TranscriptEntries.baseline(List.of(new UserMessage("同文"), new AssistantMessage("同答"))));
+		for (String runId : List.of("run-a", "run-b")) {
+			List<Message> attributed = List.of(
+					UserMessage.builder().text("同文").metadata(Map.of("runId", runId)).build(),
+					AssistantMessage.builder().content("同答").properties(Map.of("runId", runId)).build());
+			duplicated.addAll(TranscriptEntries.fromMessages(attributed, Map.of(), false, 100L));
+		}
+
+		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
+
+		assertThat(reconciled).extracting(TranscriptEntry::entryId)
+			.containsExactly("run-a:user", "run-a:assistant", "run-b:user", "run-b:assistant");
+	}
+
+	@Test
+	void legacySameTextEntriesAreConsumedOneForOne() {
+		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(
+				TranscriptEntries.baseline(List.of(new UserMessage("同文"), new UserMessage("同文"))));
+		duplicated.add(TranscriptEntries.user("run-a", 100L, 100L, "同文"));
+
+		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
+
+		assertThat(reconciled).extracting(TranscriptEntry::entryId)
+			.containsExactly("baseline:2", "run-a:user");
+	}
+
 }

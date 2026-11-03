@@ -1,6 +1,5 @@
 package com.example.configmgr.ai.tools;
 
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
@@ -34,8 +33,7 @@ class AiToolsListTasksTruncationTest {
 
     private final TaskService taskService = mock(TaskService.class);
 
-    private final AiTools aiTools = new AiTools(mock(DefinitionService.class), taskService,
-            mock(ConfigDataService.class), mock(JobService.class));
+    private final AiTools aiTools = new AiTools(mock(DefinitionService.class), taskService, mock(JobService.class));
 
     @Test
     void truncatesToMaxRowsAndAppendsTotalCountNotice() {

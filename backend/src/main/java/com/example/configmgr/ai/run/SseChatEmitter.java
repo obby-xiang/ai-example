@@ -4,6 +4,7 @@ import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.history.TranscriptEntries;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -502,7 +503,8 @@ public class SseChatEmitter {
 	 *
 	 * <p>为什么是共享而不是每写出器/每连接一个线程：非驱动方的 attach 连接在长跑实例上可以很多，
 	 * "每条连接一个定时器/线程"就是确定性泄漏。这里只有<b>一个</b>线程，每个写出器最多<b>一个</b>
-	 * 定时任务（{@link #attachKeepaliveFuture}），节拍体只做"序列化 + 入队"（网络写出仍走既有投递池）。
+	 * 定时任务（{@link #attachKeepaliveFuture}），节拍体只做序列化、入队与对账排程；网络写出和归档读取
+	 * 都走既有有界投递池，同一写出器的对账单飞且每 30s 至多一次。
 	 */
 	private static volatile ScheduledExecutorService sharedAttachKeepaliveScheduler;
 
@@ -514,6 +516,14 @@ public class SseChatEmitter {
 
 	/** 本写出器当前唯一的保活定时任务（{@code null} = 未运行）。 */
 	private final AtomicReference<ScheduledFuture<?>> attachKeepaliveFuture = new AtomicReference<>();
+
+	/** 丢失 wake 的归档对账间隔；复用保活节拍，不新增定时器。 */
+	static final long ARCHIVE_RECONCILE_INTERVAL_MILLIS = 30_000L;
+
+	private final AtomicLong nextArchiveReconcileAtMs = new AtomicLong(0L);
+
+	/** 对账在既有有界投递池中单飞，避免慢 Redis 读叠加。 */
+	private final AtomicBoolean archiveReconcileInFlight = new AtomicBoolean(false);
 
 	/**
 	 * F1：<b>本实例驱动过这一轮</b>（{@link #beginDrive()} 在驱动入口置位）。
@@ -997,9 +1007,9 @@ public class SseChatEmitter {
 	 * 上游静默时，B 的 attach 连接<b>一个帧都收不到</b>：回放是空的（A 还没产出新帧），实时帧在 A 上。
 	 * 前端 40s 首帧 / 45s 帧间看门狗因此把正常的一轮判死，重连 4 次后报错。
 	 *
-	 * <h2>本实现的边界（只做保活，不改变任何既有语义）</h2>
+	 * <h2>本实现的边界（心跳保活 + 低频归档对账）</h2>
 	 * <ul>
-	 * <li><b>本地</b>：只投给本写出器当前的订阅者；不落档、不取业务号、不写 {@code ai:beat}/
+	 * <li><b>心跳本地</b>：只投给本写出器当前的订阅者；不落档、不取业务号、不写 {@code ai:beat}/
 	 * {@code ai:activity}、不发唤醒 —— 归档、序号、有序交付、真实驱动路径全部不变；</li>
 	 * <li><b>无 seq</b>：走既有 {@code heartbeat} 帧形态（独立 {@code heartbeatSeq}，帧类型集不变 16）；
 	 * 入队与业务帧共用 {@code emitLock}，因此"到达顺序 = 入队顺序"不变；</li>
@@ -1108,7 +1118,111 @@ public class SseChatEmitter {
 		finally {
 			flushWakeSyncIfUnlocked();
 		}
+		reconcileArchiveIfDue();
 		if (!attachKeepaliveNeeded()) {
+			stopAttachKeepalive();
+		}
+	}
+
+	/**
+	 * 非驱动方按各订阅者的 {@code wakeFloor}（重挂时即客户端 lastSeq）低频读归档。
+	 * pub/sub 只负责加速，丢失最后一条业务/终帧 wake 也能在这里确定恢复；心跳本身不推进业务游标。
+	 */
+	private void reconcileArchiveIfDue() {
+		if (!attachKeepaliveNeeded()) {
+			return;
+		}
+		long now = System.currentTimeMillis();
+		long next = this.nextArchiveReconcileAtMs.get();
+		if (now < next || !this.nextArchiveReconcileAtMs.compareAndSet(next,
+				now + ARCHIVE_RECONCILE_INTERVAL_MILLIS)) {
+			return;
+		}
+		if (!this.archiveReconcileInFlight.compareAndSet(false, true)) {
+			return;
+		}
+		try {
+			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
+				try {
+					if (attachKeepaliveNeeded()) {
+						reconcileArchive();
+					}
+				}
+				finally {
+					this.archiveReconcileInFlight.set(false);
+				}
+			}));
+		}
+		catch (RejectedExecutionException ex) {
+			this.archiveReconcileInFlight.set(false);
+			log.debug("archive reconcile not scheduled runId={} (next reconcile window retries): {}", this.runId, ex.getMessage());
+		}
+	}
+
+	/** 对账只在锁内取游标与入队；归档 Redis 读在两次临界区之间完成。 */
+	private void reconcileArchive() {
+		IdentityOutcome identity = deliveryIdentityOutcome();
+		if (identity.readFailure() && identity.identity() == null) {
+			log.warn("archive reconcile skipped runId={} (identity unconfirmed, retry next window)", this.runId);
+			return;
+		}
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+			reconcileArchiveScoped();
+		}
+	}
+
+	private void reconcileArchiveScoped() {
+		final long from;
+		synchronized (this.emitLock) {
+			if (!attachKeepaliveNeeded()) {
+				return;
+			}
+			from = minDeliveredSeq();
+			if (from < 0L) {
+				return;
+			}
+		}
+		WakePage page = loadWakeFrames(from);
+		try {
+			synchronized (this.emitLock) {
+				// 读取期间最小游标若已前进，直接投旧页可能把低号排到高号之后；下个对账窗口重读。
+				if (!attachKeepaliveNeeded() || minDeliveredSeq() != from) {
+					return;
+				}
+				for (WakeFrame next : page.frames()) {
+					long seq = next.seq();
+					if (seq <= from) {
+						continue;
+					}
+					if ("done".equals(next.type()) || "error".equals(next.type())) {
+						this.terminalFrameSeen.set(true);
+					}
+					for (Subscription sub : this.subscribers) {
+						if (sub.closed || sub.terminating) {
+							continue;
+						}
+						if (sub.replayActive) {
+							kickDrain(sub);
+							continue;
+						}
+						if (seq <= sub.wakeFloor) {
+							continue;
+						}
+						if (!enqueueLive(sub, next.payload())) {
+							evict(sub, "archive reconcile exceeds live queue capacity (capacity " + this.queueCapacity + ")");
+							continue;
+						}
+						sub.wakeFloor = seq;
+						kickDrain(sub);
+					}
+					this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
+				}
+			}
+		}
+		finally {
+			flushWakeSyncIfUnlocked();
+		}
+		if (this.terminalFrameSeen.get()) {
 			stopAttachKeepalive();
 		}
 	}
@@ -2778,6 +2892,13 @@ public class SseChatEmitter {
 		if (resultView != null) {
 			frame.put("resultView", resultView.toMap());
 		}
+		// 预检展示摘要（additive 可选键，白名单 target/impact/conditionSummary/publishMode）：
+		// 刷新恢复走全量帧重放时，已决确认工具的 suspended/confirm_request 帧会被"已决"闸跳过，
+		// 只有结局帧能把卡头业务标题与条件/影响面重建回来。无预检的工具不产该键 —— 帧形状不变。
+		Map<String, Object> preflight = TranscriptEntries.displayPreflight(pending.getPreflight());
+		if (preflight != null) {
+			frame.put("preflight", preflight);
+		}
 		markModelView(frame, pending.getName(), result);
 		emit(frame);
 	}
@@ -3868,8 +3989,8 @@ public class SseChatEmitter {
 	 * 游标跳过已见帧，互不影响。
 	 *
 	 * <p>
-	 * 唤醒载荷只带上界，中间帧由 {@link FrameStore#readFrom} 给齐，因此"唤醒丢一条"不会造成永久缺口
-	 * （下一次唤醒或客户端 {@code ?lastSeq} 重连都能补齐）；同一订阅者的投递顺序仍是归档顺序，
+	 * 唤醒载荷只带上界，中间帧由 {@link FrameStore#readFrom} 给齐；丢失的 wake 由下一次唤醒、
+	 * 非驱动方 30s 对账或客户端 {@code ?lastSeq} 重连补齐，包括最后一条业务帧/终帧。投递顺序仍是归档顺序，
 	 * 与本地实时帧共用同一把 {@link #emitLock} 串行入队（FIFO、seq 单调）。
 	 */
 	void onWake(String runId, long upperBoundSeq) {

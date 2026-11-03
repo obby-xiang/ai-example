@@ -13,6 +13,7 @@
  */
 import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
+import { conditionSummaryText, conditionSummaryView, isConditionEmpty, type FieldQueryCondition } from '@/types/condition'
 import { translate } from '@/composables/useCopy'
 
 export type ActivityPart = ToolPart | ReasoningPart
@@ -187,6 +188,38 @@ function fileBasename(value: string): string {
   return parts[parts.length - 1] ?? value
 }
 
+/**
+ * 查询条件对象形态（`fields` / `scopeKeys` 任一为数组）—— 只判形状，不判是否为空。
+ * 用于把「条件参数」与普通对象参数分开：后者继续走通用可读化（（复杂值）），不冒充条件。
+ */
+export function isConditionShape(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const condition = value as FieldQueryCondition
+  return Array.isArray(condition.fields) || Array.isArray(condition.scopeKeys)
+}
+
+/**
+ * `conditions` 参数是否带真实筛选：必须是查询条件对象，且至少一项非空。
+ * 空对象 / 非条件对象 / 空 filters 一律 false。
+ */
+export function hasConditionContent(value: unknown): boolean {
+  return isConditionShape(value) && !isConditionEmpty(value as FieldQueryCondition)
+}
+
+/**
+ * `conditions` 参数的可读摘要（与数据浏览页同一份条件契约，不渲 raw JSON）。
+ * 无真实筛选 ⇒ null —— 空对象的语义随工具而异（`create_task` 的 `{}` = 条件未决定，
+ * `set_condition` 的 `{}` = 明确不设），兜底文案必须由调用方按自己的语义给，不能在这里编。
+ */
+export function conditionArgText(value: unknown): string | null {
+  if (!hasConditionContent(value)) {
+    return null
+  }
+  return conditionSummaryText(conditionSummaryView(value as FieldQueryCondition), translate)
+}
+
 /** 解析 args JSON：仅接受对象形态；空对象 / 非 JSON / 历史脏数据 ⇒ null（不渲 raw 文本）。 */
 function parseArgObject(args: string | null | undefined): Record<string, unknown> | null {
   if (isBlankText(args)) {
@@ -301,8 +334,25 @@ const argRowsCache = new WeakMap<ToolPart, ArgRowsEntry>()
 function buildArgRows(parsed: Record<string, unknown>, maskSensitive: boolean): FieldRow[] {
   return Object.entries(parsed).map(([key, value]) => ({
     key,
-    value: maskSensitive && SENSITIVE_KEY_RE.test(key) ? MASKED_VALUE : readableValue(value)
+    value: maskSensitive && SENSITIVE_KEY_RE.test(key) ? MASKED_VALUE : argValueText(key, value)
   }))
+}
+
+/**
+ * 参数值可读化：`conditions` 键走条件契约摘要（筛选条件逐项成文，不再一律报「（复杂值）」）；
+ * 空对象 = 没有筛选（该键的"未决定 / 明确不设"分工由卡面调用方按工具语义补齐），其余走通用规则。
+ */
+function argValueText(key: string, value: unknown): string {
+  if (key === 'conditions') {
+    const conditionText = conditionArgText(value)
+    if (conditionText !== null) {
+      return conditionText
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) {
+      return translate('conditions.none')
+    }
+  }
+  return readableValue(value)
 }
 
 /**

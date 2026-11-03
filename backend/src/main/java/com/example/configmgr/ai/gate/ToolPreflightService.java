@@ -19,6 +19,7 @@ import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.repo.TaskFileRepository;
+import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -239,7 +240,7 @@ public class ToolPreflightService {
 	 */
 	public PreflightReport inspect(String toolName, String argumentsJson, AiContext context) {
 		if (TOOL_CREATE_TASK.equals(toolName)) {
-			return inspectCreate(argumentsJson);
+			return inspectCreate(argumentsJson, context);
 		}
 		boolean english = english();
 		AiToolNames.ConfirmTool confirmTool = AiToolNames.ConfirmTool.of(toolName)
@@ -362,7 +363,8 @@ public class ToolPreflightService {
 	/**
 	 * {@code create_task} 的专用预检：判"创建参数可用"。
 	 *
-	 * <p>它没有 {@code taskId}，四项作业判据都不适用；单轮上限与宿主幂等由
+	 * <p>新建入参没有 {@code taskId}，四项作业判据不适用；continuation 则只读当前任务，
+	 * 条件摘要与影响面认任务条目事实，不用新入参覆盖。单轮上限与宿主幂等由
 	 * {@code TaskService#createIdempotent} 负责（模型重试/并发/重复确认都收敛到同一结果）。
 	 * 预检本身仍只读：不建任务、不写库。
 	 *
@@ -381,14 +383,22 @@ public class ToolPreflightService {
 	 * 执行前复核（{@code verifyApprovedReport}）会重跑本方法：批准与执行之间定义被删 ⇒ 指纹变化 ⇒
 	 * 要求重新确认，不会带着过期候选创建。
 	 */
-	private PreflightReport inspectCreate(String argumentsJson) {
+	private PreflightReport inspectCreate(String argumentsJson, AiContext context) {
 		boolean english = english();
 		Map<String, Object> target = new LinkedHashMap<>();
 		String type = argumentText(argumentsJson, "type");
 		String title = argumentText(argumentsJson, "title");
 		boolean typeValid = "EXPORT".equalsIgnoreCase(type) || "IMPORT".equalsIgnoreCase(type);
+		Task.TaskType requestedType = typeValid ? Task.TaskType.valueOf(type.trim().toUpperCase(Locale.ROOT)) : null;
+		String effectiveTitle = TaskService.effectiveCreateTitle(requestedType, title);
 		target.put("type", typeValid ? type.trim().toUpperCase(Locale.ROOT) : null);
 		target.put("title", title);
+		Task continuationTask = continuationTask(argumentsJson, context, requestedType, effectiveTitle);
+		if (continuationTask != null) {
+			target.put("taskId", continuationTask.getId());
+			target.put("type", continuationTask.getType().name());
+			target.put("title", continuationTask.getTitle());
+		}
 		List<PreflightReport.Check> checks = new ArrayList<>(2);
 		checks.add(PreflightReport.check(CheckCode.CREATE_TYPE, typeValid, argsOf("type", type),
 				typeValid ? "" : english
@@ -519,27 +529,63 @@ public class ToolPreflightService {
 		String codesText = defCodes.isEmpty() ? ""
 				: english ? " · definitions: " + String.join(", ", defCodes)
 						: " · 配置项：" + String.join("、", defCodes);
-		String impactText = english
-				? "Will create a " + label + " task"
-						+ (title == null || title.isBlank() ? "" : " \"" + title.trim() + "\"") + codesText
-						+ " (create is not execute; no job is started)"
-				: "将创建 " + label + " 任务"
-						+ (title == null || title.isBlank() ? "" : "「" + title.trim() + "」") + codesText
-						+ "（创建≠执行，不启动作业）";
-		String conditionText = requestedConditions.present()
-				? (conditionsNode != null && conditionsNode.isEmpty()
-						? (english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次")
-						: (english
-								? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
-								: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）"))
-				: (english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建");
+		ConditionView continuedConditions = continuationTask == null ? null
+				: continuationConditionViewOf(continuationTask);
+		String conditionText = continuedConditions != null ? continuedConditions.text()
+				: requestedConditions.present()
+						? (conditionsNode != null && conditionsNode.isEmpty()
+								? (english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次")
+								: (english
+										? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
+										: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）"))
+						: (english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建");
+		String impactText;
+		String impactFact;
+		String conditionFact;
+		if (continuationTask != null) {
+			String continuedTitle = continuationTask.getTitle();
+			impactText = english
+					? "Will reuse " + continuationTask.getType() + " task #" + continuationTask.getId()
+							+ (continuedTitle == null || continuedTitle.isBlank() ? "" : " \"" + continuedTitle.trim() + "\"")
+							+ " · conditions: " + conditionText + " (reuse is not execute; no job is started)"
+					: "将复用 " + continuationTask.getType() + " 任务 #" + continuationTask.getId()
+							+ (continuedTitle == null || continuedTitle.isBlank() ? "" : "「" + continuedTitle.trim() + "」")
+							+ " · 条件：" + conditionText + "（复用≠执行，不启动作业）";
+			impactFact = "continue:" + continuationTask.getType() + ":" + continuationTask.getId() + ":"
+					+ (continuedTitle == null ? "" : continuedTitle);
+			conditionFact = continuedConditions.fact();
+		}
+		else {
+			impactText = english
+					? "Will create a " + label + " task"
+							+ (title == null || title.isBlank() ? "" : " \"" + title.trim() + "\"") + codesText
+							+ " (create is not execute; no job is started)"
+					: "将创建 " + label + " 任务"
+							+ (title == null || title.isBlank() ? "" : "「" + title.trim() + "」") + codesText
+							+ "（创建≠执行，不启动作业）";
+			impactFact = "create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"
+					+ (title == null ? "" : title) + ":" + String.join(",", defCodes)
+					+ (requestedConditions.present() ? ":" + conditionsNode : "");
+			conditionFact = "create:none";
+		}
 		boolean pass = checks.stream().allMatch(PreflightReport.Check::pass);
-		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks,
-				"create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"
-						+ (title == null ? "" : title) + ":" + String.join(",", defCodes)
-						+ (requestedConditions.present() ? ":" + conditionsNode : ""),
-				"create:none", null);
+		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks, impactFact, conditionFact, null);
 		return new PreflightReport(pass, target, checks, impactText, conditionText, null, reportHash);
+	}
+
+	private Task continuationTask(String argumentsJson, AiContext context, Task.TaskType requestedType,
+			String effectiveTitle) {
+		JsonNode arguments = parseObject(argumentsJson);
+		if (arguments != null && arguments.path("independent").asBoolean(false)) {
+			return null;
+		}
+		Long taskId = context == null ? null : context.getTaskId();
+		if (taskId == null || taskId <= 0L) {
+			return null;
+		}
+		return this.jobService.findTask(taskId)
+			.filter(task -> TaskService.isContinuationEligible(task, requestedType, effectiveTitle))
+			.orElse(null);
 	}
 
 	/** {@code conditions} 的解析结果：{@code present=false} 表示入参没给（或显式 null）。 */
@@ -810,14 +856,26 @@ public class ToolPreflightService {
 	private record ConditionView(String text, String fact) {
 	}
 
+	private static ConditionView continuationConditionViewOf(Task task) {
+		if (task.getType() == Task.TaskType.EXPORT && (task.getItems() == null || task.getItems().isEmpty())) {
+			return new ConditionView(english() ? "Filter conditions undecided" : "筛选条件未决定", "undecided");
+		}
+		return conditionViewOf(task, false);
+	}
+
 	private static ConditionView conditionViewOf(Task task) {
+		return conditionViewOf(task, true);
+	}
+
+	private static ConditionView conditionViewOf(Task task, boolean manualExportBlankAsExplicit) {
 		boolean english = english();
 		if (task == null || task.getItems() == null) {
 			return new ConditionView(english ? "All data (no condition)" : CONDITION_ALL, "none");
 		}
 		ConditionAssessment.Assessment assessment = ConditionAssessment.of(task);
 		boolean export = task.getType() == Task.TaskType.EXPORT;
-		boolean manualExport = export && TaskSteps.isExportExecutionStep(task.getCurrentStep());
+		boolean manualExport = manualExportBlankAsExplicit && export
+				&& TaskSteps.isExportExecutionStep(task.getCurrentStep());
 		List<String> parts = new ArrayList<>();
 		StringBuilder fact = new StringBuilder();
 		for (ConditionAssessment.ItemCondition item : assessment.items()) {

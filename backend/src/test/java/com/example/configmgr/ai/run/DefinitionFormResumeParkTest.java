@@ -288,15 +288,14 @@ class DefinitionFormResumeParkTest {
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
+		assertThat(result.body()).containsEntry("reason", "DEFINITION_SELECT_PARKED");
+		verify(this.chatService, never()).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
 				eq(this.emitter));
 		assertThat(this.store.pendingsLenient(RUN_ID))
-			.as("配置已知 ⇒ 宿主不弹表（仍由模型调 select_definitions 完成选择）")
+			.as("配置已知 ⇒ 不弹选择表，宿主经既有通道代选")
 			.noneMatch(pending -> CALL_FORM.equals(pending.getToolCallId()));
-		// 槽位是模型与闸门共用的"已知配置"判据：两名编码都在（不是靠猜）
-		AiContext handoff = contextOfDriveResumed();
-		assertThat(TaskSlots.fromExtra(handoff.getExtra()).defCodes())
-			.containsExactly("CURRENCY", "ROLE_DICT");
+		PendingToolCall selected = this.store.pending(RUN_ID, "host-def-select-" + NEW_TASK_ID);
+		assertThat(selected.getArguments()).contains("CURRENCY", "ROLE_DICT");
 	}
 
 	// ── ③ 旧任务配置不带入新任务 ────────────────────────────────────────────
@@ -601,6 +600,48 @@ class DefinitionFormResumeParkTest {
 		String text = message == null ? null : message.getText();
 		return text != null
 				&& text.startsWith(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX);
+	}
+
+	@Test
+	void manualTaskSwitchUsesPersistedPageFactsWithoutNavigateEvidence() {
+		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(), "帮我新建一个导出任务",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE",
+						Map.of("pageId", "export", "selectionSynced", true)));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.body()).containsEntry("reason", "DEFINITION_FORM_PARKED");
+		assertThat(this.store.pending(RUN_ID, CALL_FORM)).isNotNull();
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(), any());
+	}
+
+	@Test
+	void createTaskAloneDoesNotProveThatItsWizardPageIsOpen() {
+		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedCreatedTask(NEW_TASK_ID);
+		seedSuspendedRun(List.of(), "帮我新建一个导出任务",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE", Map.of()));
+
+		this.service.resume(RUN_ID);
+
+		assertThat(this.store.pending(RUN_ID, CALL_FORM)).isNull();
+		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(), eq(this.emitter));
+	}
+
+	@Test
+	void taskAEvidenceNeverParksAFormForTaskB() {
+		this.taskState.set(task(NEW_TASK_ID, Task.TaskType.EXPORT, "SELECT_DEFS", Task.TaskStatus.ACTIVE));
+		seedCreatedTask(OLD_TASK_ID);
+		seedSuspendedRun(List.of(), "继续",
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", NEW_TASK_ID, "ACTIVE",
+						Map.of("pageId", "export", "selectionSynced", true)));
+
+		this.service.resume(RUN_ID);
+
+		assertThat(this.store.pending(RUN_ID, CALL_FORM)).isNull();
+		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(), eq(this.emitter));
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

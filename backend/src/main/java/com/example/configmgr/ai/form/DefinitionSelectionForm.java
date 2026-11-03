@@ -46,10 +46,10 @@ import java.util.Set;
  * 的<b>唯一</b>证据。用户只是浏览/打开既有页面（没有 create_task）时一律不弹，旧任务配置也不会
  * 成为"新任务的已知配置"（判据只看本轮台账与<b>新任务</b>自己的权威值）；</li>
  * <li><b>页面归属证据</b>：{@code page}/{@code taskId}/{@code step} 的判定（见下一条）来自权威
- * 上下文；"当前页属于新任务"另需本 run 有过成功导航到该任务的
- * {@code navigate_to(arguments.taskId)=当前任务}（待决条目回执）。导航失败/超时没有回执 ⇒
- * 交回模型路径，不猜页面；本批是否刚好结算了这条导航不是必要条件（导航后的续帧/回执形态
- * 不应让表单消失）；去重仍靠"同一任务只挂一次"的确定性 {@code toolCallId}（最后一条）；</li>
+ * 上下文；"当前页属于新任务"可由本 run 成功导航到该任务的 {@code navigate_to} 回执证明，
+ * 也可由回灌时持久化的 {@code pageId + selectionSynced} 当前页面事实证明（手工切任务没有导航条目）。
+ * 两者都没有 ⇒ 交回模型路径，不猜页面；去重仍靠"同一任务只挂一次"的确定性
+ * {@code toolCallId}（最后一条）；</li>
  * <li><b>停在选择步骤</b>：上下文页是导出向导、任务号就是本轮新建的那个、权威步骤 {@code SELECT_DEFS}；</li>
  * <li><b>配置未知</b>：任务槽位里没有 {@code defCodes}（与 {@link GenerativeFormGuard} 的放行判据
  * 同一份 {@link TaskSlots}）—— 已知配置时宿主不弹表，改由
@@ -242,13 +242,12 @@ public class DefinitionSelectionForm extends HostForm {
 	}
 
 	/**
-	 * 已到 {@code EXPORT/SELECT_DEFS}、配置已知、且<b>本 run 已成功导航到当前新建任务</b>时，由宿主经
-	 * 既有前端 {@code select_definitions} 通道代为选择（{@code mode=REPLACE}，只形成前端草案，
+	 * 已到 {@code EXPORT/SELECT_DEFS}、配置已知、且页面归属已由本 run 导航回执或持久化页面事实证明时，
+	 * 由宿主经既有前端 {@code select_definitions} 通道代为选择（{@code mode=REPLACE}，只形成前端草案，
 	 * 业务库仍由前端下一步提交）。
 	 *
-	 * <p>导航证据：只有本 run 成功结算过 {@code navigate_to(arguments.taskId=当前任务)} 时，才把这份
-	 * {@code SELECT_DEFS} 页面当成新任务的页面（旧任务 A 的页面不得冒充新任务 B）；没有证据就交回
-	 * 模型，不猜。配置未知时<b>不</b>走这里：沿用 {@link #parkIfDue} 的平铺多选表单。
+	 * <p>页面证据必须属于当前新建任务（旧任务 A 的页面不得冒充新任务 B）；没有证据就交回模型，不猜。
+	 * 配置未知时<b>不</b>走这里：沿用 {@link #parkIfDue} 的平铺多选表单。
 	 * 本批已有 {@code select_definitions}（成功或失败）不重复；同一任务用确定性 id 去重。
 	 * 选择成功后的推进仍由 {@link #parkAdvanceIfDue} 在下一跳完成。
 	 *
@@ -267,8 +266,8 @@ public class DefinitionSelectionForm extends HostForm {
 			if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
 				return false;
 			}
-			if (!navigatedToTaskInRun(runId, createdTaskId)) {
-				// 没有"本 run 已导航到该新任务"的证据（含导航失败/超时）：页面归属不确定，交回模型
+			if (!navigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
+				// 没有导航回执或已同步页面事实：页面归属不确定，交回模型
 				return false;
 			}
 			List<String> codes = TaskSlots.fromExtra(context.getExtra()).defCodes();
@@ -359,8 +358,8 @@ public class DefinitionSelectionForm extends HostForm {
 	 * 本 run 是否有一条<b>成功结算</b>的 {@code navigate_to}，且目标正是该任务：待决条目里
 	 * {@code name=navigate_to}、前端通道、已结算、{@code outcome=OK}、{@code arguments.taskId} 匹配。
 	 *
-	 * <p>这是"当前 {@code SELECT_DEFS} 页面属于新任务"的唯一证据：页面字符串相等可能是旧任务的
-	 * 同一页，不能作为判据。读失败按"没有证据"处理（交回模型，不猜）。
+	 * <p>这是页面归属的一种结构证据；手工切换则由 {@link #hasPersistedPageFact} 补充证明。
+	 * 读失败按"没有导航证据"处理（交回模型，不猜）。
 	 */
 	private boolean navigatedToTaskInRun(String runId, long taskId) {
 		List<PendingToolCall> pendings;
@@ -385,6 +384,20 @@ public class DefinitionSelectionForm extends HostForm {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * 回灌时持久化的当前页面事实：pageId 与任务页一致，且任务详情已应用。
+	 * 手工切任务没有 navigate_to 条目；这个标记与当前 run 创建回执、当前 taskId 一起证明页面归属。
+	 * 仅 create_task 推算出的上下文没有 selectionSynced，不得冒充页面已打开。
+	 */
+	private static boolean hasPersistedPageFact(AiContext context) {
+		if (context == null || context.getExtra() == null || context.getPage() == null) {
+			return false;
+		}
+		Object pageId = context.getExtra().get("pageId");
+		return context.getPage().equals(String.valueOf(pageId))
+				&& Boolean.TRUE.equals(context.getExtra().get(ContextBuilder.SELECTION_SYNCED_KEY));
 	}
 
 	/**
@@ -555,10 +568,9 @@ public class DefinitionSelectionForm extends HostForm {
 	/**
 	 * 判据 + 表单正文（不含任何外置写）。
 	 *
-	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、本 run 有一条
-	 * 成功导航到该任务的 {@code navigate_to}、页/步骤是导出向导的 {@code SELECT_DEFS}、槽位尚无
-	 * {@code defCodes}、本批未被处理、同一任务未挂过。导航证据来自成功回执，而不是"当前页恰好是
-	 * export"（旧任务的页面不得冒充新任务）。
+	 * <p>判据<b>按任务状态驱动</b>：本轮 {@code create_task} 成功、上下文任务号就是它、
+	 * 页面归属有本 run 导航回执或已同步页面事实、页/步骤是导出向导的 {@code SELECT_DEFS}、槽位尚无
+	 * {@code defCodes}、本批未被处理、同一任务未挂过。旧任务的页面不得冒充新任务。
 	 *
 	 * @return {@code empty} = 不该由宿主发这张表单
 	 */
@@ -572,8 +584,8 @@ public class DefinitionSelectionForm extends HostForm {
 			// 还在旧任务上（或根本没到向导）：旧任务的配置不能被当成新任务的已知信息
 			return Optional.empty();
 		}
-		if (!navigatedToTaskInRun(runId, createdTaskId)) {
-			// 没有"本 run 已导航到该新任务"的证据（含导航失败/超时）：交回模型
+		if (!navigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
+			// 没有导航回执或已同步页面事实：交回模型
 			return Optional.empty();
 		}
 		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, AiToolNames.SELECT_DEFINITIONS)) {

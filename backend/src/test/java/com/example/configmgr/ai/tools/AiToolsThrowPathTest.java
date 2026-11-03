@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 由 {@code SpToolCallingManager.executeOnce} 的 catch 置 ok=false 呈给模型
  * （统一信封 {@code outcome=failed}，message="工具执行失败：&lt;message&gt;"）。
  *
- * <p><b>P0-1：读路径不再吞错</b>：getConfigDef / getWorkspaceState / checkJobStatus / getRowCount
+ * <p><b>P0-1：读路径不再吞错</b>：getConfigDef / getWorkspaceState / checkJobStatus
  * 的"未找到"抛 {@link ResourceNotFoundException}（带 RESOURCE_NOT_FOUND 码），
  * createTask 的参数非法抛 {@code ConflictException(ILLEGAL_ARGUMENT)} —— 这些路径以前返回
  * "未找到…"/"任务类型不合法…"的字符串，模型与帧都读成 success。
@@ -100,9 +100,6 @@ class AiToolsThrowPathTest {
                     assertThat(ex.getMessage()).contains("任务 不存在: 999999");
                 });
         assertThatThrownBy(() -> aiTools.checkJobStatus(999999L))
-                .isInstanceOf(ResourceNotFoundException.class)
-                .hasMessageContaining("不存在");
-        assertThatThrownBy(() -> aiTools.getRowCount("NO_SUCH_DEF", null, null))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("不存在");
     }

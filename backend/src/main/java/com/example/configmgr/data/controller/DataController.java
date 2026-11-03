@@ -11,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
+
 @RestController
 @RequestMapping("/api/data")
 @RequiredArgsConstructor
@@ -80,5 +82,18 @@ public class DataController {
         return ApiResponse.ok(dataRowRepository.findRowsInScopePaged(
                 defCode, effectiveScopeType(defCode, scopeType), scopeKey,
                 org.springframework.data.domain.PageRequest.of(page, size)));
+    }
+
+    /** 与导出作业一致的真实行数：定义的全部已发布行，再应用同一查询条件。 */
+    @GetMapping("/{defCode}/count")
+    public ApiResponse<Map<String, Long>> count(@PathVariable String defCode,
+                                                @RequestParam(required = false) String scopeType,
+                                                @RequestParam(required = false) String scopeKey,
+                                                @RequestParam(required = false) String conditions) {
+        QueryCondition cond = configDataService.parseCondition(conditions);
+        long count = cond == null
+                ? configDataService.count(defCode, effectiveScopeType(defCode, scopeType), null)
+                : configDataService.countFiltered(defCode, null, cond);
+        return ApiResponse.ok(Map.of("count", count));
     }
 }

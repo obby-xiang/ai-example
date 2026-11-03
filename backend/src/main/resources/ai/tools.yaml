@@ -70,7 +70,8 @@
 # YAML 与 AiTools 注解、系统提示词同批改，改描述必升 version（破 prompt 缓存）。
 # 2026-10-27.20 → 2026-10-27.21（2026-11-03 移除预估行数）：预估数据行数工具整体下线（AiTools 注解、
 # AiToolNames 注册表、本文件对应 toolKey 三处同批删除）；模型不再有"预估数据行数"这一读取能力。
-version: 2026-10-27.21
+# 2026-10-27.22 → 2026-10-27.23：AI 精确行数工具下线；REST/UI 的独立计数能力不变。
+version: 2026-10-27.23
 lang: zh
 tools:
   - toolKey: list_config_defs

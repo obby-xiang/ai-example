@@ -732,6 +732,55 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
 
+	/**
+	 * 本轮<b>当前 attempt 已聚合正文</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
+	 * 正文分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
+	 * {@code ChatResponse} 里缺失的正文。
+	 *
+	 * <p>不用 ThreadLocal：工具执行跑在 Reactor 的工具线程上，而正文分片由消费线程写入；
+	 * {@code toolContext} 本来就是跨线程携带本轮事实的既有通道（runId/sessionId/信封同路）。
+	 */
+	public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
+
+	/**
+	 * 本轮正文的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
+	 *
+	 * <p>每个工具跳只取走当前这一段，并在该跳聚合消息持久化后清空。终态、取消与失败也只写
+	 * 当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
+	 *
+	 * <p>本类方法均同步：写方在消费线程，读/清在工具执行线程（{@link StringBuilder} 自身不保证并发）。
+	 */
+	public static final class TurnTextCapture {
+
+		private final StringBuilder segment = new StringBuilder();
+
+		/** 每次 attempt 重置，并种入尚未落库的纠正前缀段。 */
+		public synchronized void reset(String segment) {
+			this.segment.setLength(0);
+			if (segment != null && !segment.isEmpty()) {
+				this.segment.append(segment);
+			}
+		}
+
+		/** 消费一个正文分片（与 Accumulator 同源同序）。 */
+		public synchronized void append(String text) {
+			if (text != null && !text.isEmpty()) {
+				this.segment.append(text);
+			}
+		}
+
+		/** 当前事件段：上一次已持久化工具跳之后的全部正文。 */
+		public synchronized String segmentText() {
+			return this.segment.toString();
+		}
+
+		/** 当前段已随本跳聚合消息持久化；重复提交只是幂等清空。 */
+		public synchronized void commitSegment() {
+			this.segment.setLength(0);
+		}
+
+	}
+
 	@Override
 	public ToolExecutionResult executeToolCalls(Prompt prompt, ChatResponse chatResponse) {
 		Locale replyLocale = replyLocaleOf(prompt);
@@ -765,6 +814,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (assistant == null || !assistant.hasToolCalls()) {
 			return this.delegate.executeToolCalls(prompt, chatResponse);
 		}
+		// 流式工具调用跳：正文分片早已作为 SSE delta 发出，这个 ChatResponse 只带 tool_calls。
+		// 用本轮累加器经 toolContext 同步过来的正文补全 assistant，后续 saveSuspended / transcript /
+		// 落定历史拿到的就是用户真正看到的正文（不解析帧、不另建第二份聚合）。
+		TurnTextCapture turnText = turnTextOf(prompt);
+		assistant = assistantWithTurnText(assistant, turnText == null ? "" : turnText.segmentText());
 
 		String runId = runIdOf(prompt);
 		// 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
@@ -818,6 +872,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 防线③（T1）的判据来源：本轮<b>冻结</b>的工作区上下文（与请求侧披露用的同一份，
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
+		for (PendingToolCall pending : pendings) {
+			com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
+		}
 		// ===== C13：本批模型侧写入的剩余窗口 =====
 		// 配置档（20000 字符/份）是静态上限，不知道这一轮还剩多少窗口：小窗口上四份结果就能吃掉整窗，
 		// 而 keep-tool-pairs 把最近几对钉住（轮内 L1 清不掉）⇒ 下一跳必然越窗。故这里先算一份"剩余窗口"，
@@ -864,14 +921,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 					&& PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
 					&& com.example.configmgr.ai.form.TaskTypeForm
 						.typeMissingOrInvalid(pending.getArguments())) {
+				// 挂起历史里的 assistant 只保留 tool_calls（正文置空），正文统一进 assistantContent：
+				// 否则挂起历史与 assistantContent 各存一份，续跑后模型/展示面会重复正文。
 				List<Message> typeHistory = new ArrayList<>(prompt.getInstructions());
-				typeHistory.add(assistant);
+				typeHistory.add(assistantWithoutText(assistant));
 				typeHistory.add(ToolResponseMessage.builder()
 					.responses(List.of(new ToolResponseMessage.ToolResponse(pending.getToolCallId(),
 							pending.getName(), "create_task 缺少合法 type（EXPORT/IMPORT），已改为类型表单收集")))
 					.build());
+				String typeAssistantBody = assistant.getText() == null ? "" : assistant.getText();
 				if (this.taskTypeForm.parkIfCreateTaskMissingType(runId, context, pending.getArguments(),
-						typeHistory)) {
+						typeHistory, typeAssistantBody, assistant.getMetadata())) {
+					commitTurnText(prompt);
+					recordParkedHostFormTranscript(runId, prompt, assistant);
 					throw new RunParkedException(runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
 				}
 			}
@@ -883,9 +945,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 					&& AiToolNames.CONFIRM_STEP.equals(pending.getName())
 					&& this.toolRegistry.matchesContext(pending.getName(), context)) {
 				checkCancelled(runId);
+				// 显式传本段 assistant 正文：confirm_step 的提前 park 发生在工具跳之后、正文尚未进
+				// messageJson 的时刻，HostForm 若按快照读会拿到上一轮/空值。
+				String assistantBody = assistant.getText() == null ? "" : assistant.getText();
 				ConditionsForm.ConfirmStepDecision conditionDecision = this.conditionsForm.inspectConfirmStep(runId,
-						context, pending, prompt.getInstructions(), pendings.size() == 1);
+						context, pending, prompt.getInstructions(), assistantBody, assistant.getMetadata(),
+						pendings.size() == 1);
 				if (conditionDecision.parked()) {
+					commitTurnText(prompt);
+					recordParkedHostFormTranscript(runId, prompt, assistant);
 					throw new RunParkedException(runId, pending.getToolCallId(),
 							PendingToolCall.KIND_FRONTEND);
 				}
@@ -1015,9 +1083,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 			if (!budgetArmed && !suspended.isEmpty()) {
 				// 步数先落快照再挂起：跨进程续跑读的就是这份累计值（saveSuspended 会重新 get 快照）
 				persistToolSteps(runId, stepsUsed);
-				this.store.saveSuspended(runId, assistant.getText(), pendings,
-					SyntheticMessages.withoutCorrectionInstruction(prompt.getInstructions()), this.codec,
+				List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(prompt.getInstructions());
+				this.store.saveSuspended(runId, assistant.getText(), pendings, suspendedHistory, this.codec,
 						assistant.getMetadata());
+				// 只按本跳 toolCallId 顺序确认外置身份，不读回正文或整份 messageJson。
+				if (suspendedHopPersisted(runId, assistant)) {
+					commitTurnText(prompt);
+				}
 				// B2：挂起即写 pending 工具卡（刷新停在挂起态时 /history 已有这张卡）；
 				// 终态由 finish/cancel/fail 的同一 entryId 覆盖（last-wins），不伪造在途终稿。
 				recordPendingTranscript(runId, snapshot, prompt, assistant, pendings);
@@ -1282,11 +1354,19 @@ public class SpToolCallingManager implements ToolCallingManager {
 					budgetArmed, stepWrapped);
 			history = budget.history();
 			persistToolSteps(runId, stepsUsed);
-			// 已执行记录全部落定后，才允许越窗失败穿出去。
-			settle(runId, history);
+			// 已执行记录全部落定后，才允许越窗失败穿出去；本跳序号确认后才提交当前正文段。
+			boolean settled = settle(runId, history);
+			if (settled) {
+				commitTurnText(prompt);
+			}
 			// 取消优先：settle 之后、把历史交回 Spring AI 之前再查一次权威标志 —— 命中即终止本轮，
 			// 不再返回可驱动下一跳的历史（工具结果与历史已先落定，已发生的副作用不撤回）。
 			checkCancelled(runId);
+			if (!settled) {
+				// 本跳序号/运行态未能确认 = 权威状态未知；交回下一跳会重复工具段，必须 fail-closed。
+				throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+						"工具结果已执行，但落定快照的跳序号/运行态未确认；停止驱动下一跳（runId=" + runId + "）");
+			}
 			if (budget.overflow()) {
 				// C13 第 5 项：码按原因分（收尾被无视 = 工具预算耗尽，不是真越窗）。
 				// 换码不改语义：调用方已 settle，失败照样是确定性的、可解释的。
@@ -3432,6 +3512,31 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
+	 * 宿主表单提前 park 的展示历史写点：挂起快照成功后，把"本段正文 + 实际挂起的表单调用"
+	 * 写进 transcript，刷新时仍能看到这段正文与卡（不是只等续跑/取消）。
+	 *
+	 * <p>失败只 DEBUG：展示面不得反噬已成功的 park；正文已在快照 {@code assistantContent} 里。
+	 */
+	private void recordParkedHostFormTranscript(String runId, Prompt prompt, AssistantMessage assistant) {
+		if (this.transcript == null) {
+			return;
+		}
+		try {
+			// 用快照里的 inFlightToolCalls 顺序（saveSuspended 原样保存的列表），不要读 Redis hash：
+			// hash 迭代顺序不保证，会让 assistant entryId（取首个 toolCallId）在续跑/终态写点分叉。
+			RunSnapshot latest = this.store.get(runId);
+			if (latest == null) {
+				return;
+			}
+			recordPendingTranscript(runId, latest, prompt, assistant, latest.getInFlightToolCalls());
+		}
+		catch (RuntimeException ex) {
+			log.debug("parked host form transcript write failed runId={} error={} (park unaffected)", runId,
+					ex.getMessage());
+		}
+	}
+
+	/**
 	 * B2：挂起时把本批工具卡写进 transcript（status=pending 的进展示历史）。
 	 *
 	 * <p>只写用户面原文：assistant 的工具调用（id/name/arguments）+ 每条 pending 的
@@ -3478,8 +3583,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 						pending.getToolCallId(), pending.getName(), pending.getKind(),
 						statuses.get(pending.getToolCallId()), pending.getResultText()));
 			}
-			this.transcript.ensureBaseline(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(),
-					prompt == null ? List.of() : prompt.getInstructions());
+			// 从带 run 归属的记忆窗口回填旧轮；当前 run 按 runId 排除，不按请求文本定位。
+			this.transcript.ensureBaselineFromMemory(snapshot.getSessionId(), snapshot.getTenantId(),
+					snapshot.getUserId(), runId);
 			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries);
 		}
 		catch (RuntimeException ex) {
@@ -3625,12 +3731,15 @@ public class SpToolCallingManager implements ToolCallingManager {
 		return calls;
 	}
 
-	/** 落定本轮：历史进快照、in-flight 清空、状态回到 RUNNING（工具已全部结算）。 */
-	private void settle(String runId, List<Message> history) {
+	/**
+	 * 落定本跳聚合消息。写口抛错时不提交正文段；不做 messageJson 读回对账，
+	 * 持久化身份由本跳 assistant(tool_calls) 自身承担。
+	 */
+	private boolean settle(String runId, List<Message> history) {
 		history = SyntheticMessages.withoutCorrectionInstruction(history);
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot == null) {
-			return;
+			return false;
 		}
 		snapshot.setMessageJson(this.codec.serializeAll(history));
 		snapshot.setInFlightToolCalls(new ArrayList<>());
@@ -3638,6 +3747,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setRound(snapshot.getRound() + 1);
 		this.store.save(snapshot);
+		try {
+			RunSnapshot latest = this.store.get(runId);
+			// 只核对本跳序号与运行态，不比较整份 messageJson。
+			return latest != null && latest.getRound() == snapshot.getRound()
+					&& RunSnapshot.RUNNING.equals(latest.getStatus())
+					&& (latest.getInFlightToolCalls() == null || latest.getInFlightToolCalls().isEmpty());
+		}
+		catch (RuntimeException ex) {
+			return false;
+		}
 	}
 
 	/**
@@ -3747,6 +3866,78 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return options.getToolContext();
 		}
 		return null;
+	}
+
+	/** 本轮当前 attempt 的正文捕获器（无捕获链 ⇒ null）。 */
+	private TurnTextCapture turnTextOf(Prompt prompt) {
+		Map<String, Object> context = toolContextOf(prompt);
+		if (context == null) {
+			return null;
+		}
+		Object raw = context.get(TOOL_CONTEXT_TURN_TEXT);
+		return raw instanceof TurnTextCapture capture ? capture : null;
+	}
+
+	/** 当前正文段已随本跳聚合消息落库，清空后开始下一段。 */
+	private void commitTurnText(Prompt prompt) {
+		TurnTextCapture capture = turnTextOf(prompt);
+		if (capture != null) {
+			capture.commitSegment();
+		}
+	}
+
+	private boolean suspendedHopPersisted(String runId, AssistantMessage assistant) {
+		try {
+			RunSnapshot latest = this.store.get(runId);
+			if (latest == null || !RunSnapshot.SUSPENDED.equals(latest.getStatus())
+					|| latest.getInFlightToolCalls() == null) {
+				return false;
+			}
+			List<String> expected = assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::id).toList();
+			List<String> persisted = latest.getInFlightToolCalls().stream().map(PendingToolCall::getToolCallId).toList();
+			return !expected.isEmpty() && expected.equals(persisted);
+		}
+		catch (RuntimeException ex) {
+			return false;
+		}
+	}
+
+	/** 只保留 tool_calls/metadata/media、正文置空的 assistant（宿主表单挂起历史用）。 */
+	private static AssistantMessage assistantWithoutText(AssistantMessage assistant) {
+		AssistantMessage.Builder builder = AssistantMessage.builder()
+			.content("")
+			.properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata());
+		if (assistant.hasToolCalls()) {
+			builder.toolCalls(assistant.getToolCalls());
+		}
+		if (assistant.getMedia() != null && !assistant.getMedia().isEmpty()) {
+			builder.media(assistant.getMedia());
+		}
+		return builder.build();
+	}
+
+	/**
+	 * 用已聚合正文补全流式工具调用的 assistant。
+	 *
+	 * <p><b>单一来源</b>：当前事件段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
+	 * （两种来源拼接会让同一跳的正文越过明确段边界）；
+	 * 聚合正文为空时保持 assistant 原样（direct 就是它的正文）。
+	 * tool_calls / metadata / media 原样保留。
+	 */
+	private static AssistantMessage assistantWithTurnText(AssistantMessage assistant, String turnText) {
+		if (turnText == null || turnText.isEmpty() || turnText.equals(assistant.getText())) {
+			return assistant;
+		}
+		AssistantMessage.Builder builder = AssistantMessage.builder()
+			.content(turnText)
+			.properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata());
+		if (assistant.hasToolCalls()) {
+			builder.toolCalls(assistant.getToolCalls());
+		}
+		if (assistant.getMedia() != null && !assistant.getMedia().isEmpty()) {
+			builder.media(assistant.getMedia());
+		}
+		return builder.build();
 	}
 
 	/**
@@ -3895,7 +4086,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		if (refused.isEmpty()) {
 			log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope; batch is all READ+BACKEND, falling back to default execution: {}", runId, calls.stream().map(AssistantMessage.ToolCall::name).toList());
-			return this.delegate.executeToolCalls(prompt, chatResponse);
+			// 传补全正文后的 assistant：原 chatResponse 是流式工具调用跳（正文为空）。
+			ToolExecutionResult result = this.delegate.executeToolCalls(prompt,
+					new ChatResponse(List.of(new Generation(assistant))));
+			// 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
+			return result;
 		}
 		log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope: refusing dangerous/frontend tools {}, allowing READ+BACKEND {} (no card, no claim, no ledger row)", runId,
 				refused.stream().map(AssistantMessage.ToolCall::name).toList(),
@@ -3935,6 +4130,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		List<Message> history = new ArrayList<>(prompt.getInstructions());
 		history.add(assistant);
 		history.add(ToolResponseMessage.builder().responses(responses).build());
+		// 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
 		return ToolExecutionResult.builder().conversationHistory(history).build();
 	}
 

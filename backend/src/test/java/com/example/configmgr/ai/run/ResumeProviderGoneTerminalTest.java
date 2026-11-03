@@ -73,7 +73,9 @@ class ResumeProviderGoneTerminalTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final InMemoryFrameStore frameStore = new InMemoryFrameStore();
+
+	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null, this.frameStore, null, null);
 
 	private final ResilientChatService chatService = mock(ResilientChatService.class);
 
@@ -90,9 +92,13 @@ class ResumeProviderGoneTerminalTest {
 			((Runnable) invocation.getArgument(0)).run();
 			return null;
 		}).when(executor).execute(any(Runnable.class));
+		SpToolCallingManager toolCallingManager = new SpToolCallingManager(this.store, this.registry,
+				mock(com.example.configmgr.ai.gate.ConfirmGate.class), mock(com.example.configmgr.ai.tool.ToolRegistry.class),
+				this.codec, mock(ToolActivityBeacon.class), mock(CancellationRegistry.class),
+				new ToolResultLimiter(this.properties), List.of());
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
-				mock(SpToolCallingManager.class), executor, mock(StringRedisTemplate.class), this.properties,
-				mock(CancellationRegistry.class), mock(ToolResultLimiter.class));
+				toolCallingManager, executor, mock(StringRedisTemplate.class), this.properties,
+				mock(CancellationRegistry.class), new ToolResultLimiter(this.properties));
 		ReflectionTestUtils.setField(this.service, "aiConfigService", this.configService);
 		// 硬否定：库里真的没有这一行（强制重载<b>成功</b>之后仍为空，且行级声明也没有）
 		when(this.configService.resolveChatTarget(any(Long.class), anyString())).thenReturn(Optional.empty());
@@ -124,6 +130,61 @@ class ResumeProviderGoneTerminalTest {
 		assertThat(last.get("type")).as("终帧类型").isEqualTo("error");
 		assertThat(last.get("code")).as("机器可读终态码").isEqualTo(ErrorCodes.AI_PROVIDER_GONE);
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void providerGoneSettlesEveryUnexecutedToolWithoutRewritingTerminalEntries() {
+		seedSuspendedSnapshot();
+		PendingToolCall pending = tool("c-pending", PendingToolCall.PENDING);
+		PendingToolCall approved = tool("c-approved", PendingToolCall.APPROVED);
+		PendingToolCall settled = tool("c-settled", PendingToolCall.FRONTEND_RESULT);
+		settled.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		settled.setResultText("已有真实回执");
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setAssistantContent("先处理工具，再回答");
+		snapshot.setInFlightToolCalls(new java.util.ArrayList<>(List.of(pending, approved, settled)));
+		this.store.save(snapshot);
+		when(this.chatService.failureHistory(any(RunSnapshot.class), any(), any(), anyString(), anyString()))
+			.thenAnswer(invocation -> this.codec.deserializeAll(
+					invocation.getArgument(0, RunSnapshot.class).getMessageJson()));
+		this.store.putPending(RUN_ID, pending);
+		this.store.putPending(RUN_ID, approved);
+		this.store.putPending(RUN_ID, settled);
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.PROVIDER_GONE);
+		assertThat(this.store.pending(RUN_ID, "c-pending").getStatus()).isEqualTo(PendingToolCall.SKIPPED);
+		assertThat(this.store.pending(RUN_ID, "c-approved").getStatus()).isEqualTo(PendingToolCall.SKIPPED);
+		assertThat(this.store.pending(RUN_ID, "c-pending").getResultText()).contains(ErrorCodes.AI_PROVIDER_GONE);
+		assertThat(this.store.pending(RUN_ID, "c-approved").getResultText()).contains(ErrorCodes.AI_PROVIDER_GONE);
+		assertThat(this.store.pending(RUN_ID, "c-settled").getResultText()).isEqualTo("已有真实回执");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+		assertThat(lastArchivedFrame().get("code")).isEqualTo(ErrorCodes.AI_PROVIDER_GONE);
+
+		org.mockito.ArgumentCaptor<RunSnapshot> historySnapshot = org.mockito.ArgumentCaptor.forClass(RunSnapshot.class);
+		verify(this.chatService).failureHistory(historySnapshot.capture(),
+				org.mockito.ArgumentMatchers.eq("先处理工具，再回答"), org.mockito.ArgumentMatchers.eq(""),
+				org.mockito.ArgumentMatchers.eq(ErrorCodes.AI_PROVIDER_GONE),
+				org.mockito.ArgumentMatchers.eq(ResumeService.PROVIDER_GONE_MESSAGE));
+		List<org.springframework.ai.chat.messages.Message> history = this.codec.deserializeAll(
+				this.store.get(RUN_ID).getMessageJson());
+		assertThat(history).anySatisfy(message -> assertThat(message.getText()).isEqualTo("先处理工具，再回答"));
+		assertThat(history).filteredOn(org.springframework.ai.chat.messages.ToolResponseMessage.class::isInstance)
+			.singleElement()
+			.satisfies(message -> assertThat(((org.springframework.ai.chat.messages.ToolResponseMessage) message)
+					.getResponses()).hasSize(3)
+					.allSatisfy(response -> assertThat(response.responseData()).isNotBlank()));
+	}
+
+	private static PendingToolCall tool(String toolCallId, String status) {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId(toolCallId);
+		pending.setName("navigate_to");
+		pending.setArguments("{}");
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setStatus(status);
+		return pending;
 	}
 
 	// ── 复核 Critical-1：刷新失败 / key 不可用 = 不可知，不得判死 ────────────────
@@ -211,13 +272,15 @@ class ResumeProviderGoneTerminalTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setProviderId(PROVIDER_ID);
 		snapshot.setModelId(MODEL_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("你好"))));
 		this.store.save(snapshot);
 	}
 
 	private List<Map<String, Object>> frames() {
-		return this.store.events(RUN_ID);
+		return this.frameStore.readFrom(RUN_ID, 0L, 0);
 	}
 
 	private Map<String, Object> lastArchivedFrame() {

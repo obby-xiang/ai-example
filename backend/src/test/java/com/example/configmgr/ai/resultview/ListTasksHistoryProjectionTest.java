@@ -124,8 +124,7 @@ class ListTasksHistoryProjectionTest {
 				currentTask(8L, "进口报关导入"));
 		when(this.taskService.findAll()).thenReturn(tasks);
 		AiTools aiTools = new AiTools(mock(com.example.configmgr.definition.service.DefinitionService.class),
-				this.taskService, mock(com.example.configmgr.data.service.ConfigDataService.class),
-				mock(com.example.configmgr.job.service.JobService.class));
+				this.taskService, mock(com.example.configmgr.job.service.JobService.class));
 
 		String produced = aiTools.listTasks();
 		ResultView archived = provider().build("call-7", "list_tasks", produced, true);
@@ -172,8 +171,7 @@ class ListTasksHistoryProjectionTest {
 
 	private AiTools aiTools() {
 		return new AiTools(mock(com.example.configmgr.definition.service.DefinitionService.class),
-				this.taskService, mock(com.example.configmgr.data.service.ConfigDataService.class),
-				mock(com.example.configmgr.job.service.JobService.class));
+				this.taskService, mock(com.example.configmgr.job.service.JobService.class));
 	}
 
 	private static Task currentTask(Long id, String title) {

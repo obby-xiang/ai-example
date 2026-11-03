@@ -220,11 +220,8 @@ class AiToolsInvocationTest {
 
     @Test
     void unknownConfigCodeIsReportedAsNotFound() {
-        // P0-1：get_config_def / get_row_count 对不存在的编码抛带码异常（不再返回"未找到"/"0 行"）
+        // P0-1：get_config_def 对不存在的编码抛带码异常（不再返回"未找到"）
         assertThatThrownBy(() -> aiTools.getConfigDef("NO_SUCH_DEF"))
-                .isInstanceOf(ResourceNotFoundException.class)
-                .hasMessageContaining("不存在: NO_SUCH_DEF");
-        assertThatThrownBy(() -> aiTools.getRowCount("NO_SUCH_DEF", null, null))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("不存在: NO_SUCH_DEF");
         assertThatThrownBy(() -> aiTools.checkJobStatus(999_999L))

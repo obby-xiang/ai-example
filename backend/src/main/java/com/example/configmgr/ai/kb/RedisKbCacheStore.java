@@ -34,6 +34,83 @@ public class RedisKbCacheStore implements KbCacheStore {
             return 1
             """, Long.class);
 
+    private static final RedisScript<Long> PUT_HASH_IF_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_PUT_HASH_IF_GENERATION_AT_MOST
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            if current then
+              local generation = tonumber(current)
+              if (not generation) or generation > tonumber(ARGV[2]) then
+                return 0
+              end
+            end
+            for i = 3, #ARGV, 2 do
+              redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+            end
+            return 1
+            """, Long.class);
+
+    private static final RedisScript<Long> PUT_INDEX_FIELDS_IF_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_PUT_INDEX_FIELDS_IF_GENERATION_AT_MOST
+            for i = 1, #ARGV, 2 do
+              local current = redis.call('HGET', KEYS[1], ARGV[i])
+              local generation = tonumber(current)
+              if (not current) or (generation and generation <= tonumber(ARGV[i + 1])) then
+                redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+              end
+            end
+            return 1
+            """, Long.class);
+
+    private static final RedisScript<Long> PUT_FIELD_IF_PRESENT_AND_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_PUT_FIELD_IF_PRESENT_AND_GENERATION_AT_MOST
+            if redis.call('EXISTS', KEYS[1]) == 0 then
+              return 0
+            end
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            local generation = tonumber(current)
+            if current and ((not generation) or generation > tonumber(ARGV[2])) then
+              return 0
+            end
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            return 1
+            """, Long.class);
+
+    private static final RedisScript<Long> DELETE_DOC_IF_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_DELETE_DOC_IF_GENERATION_AT_MOST
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            if current then
+              local generation = tonumber(current)
+              if (not generation) or generation > tonumber(ARGV[2]) then
+                return 0
+              end
+            end
+            redis.call('DEL', KEYS[1])
+            return 1
+            """, Long.class);
+
+    private static final RedisScript<Long> DELETE_INDEX_IF_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_DELETE_INDEX_IF_GENERATION_AT_MOST
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            if not current then
+              return 1
+            end
+            local generation = tonumber(current)
+            if (not generation) or generation > tonumber(ARGV[2]) then
+              return 0
+            end
+            redis.call('HDEL', KEYS[1], ARGV[1])
+            return 1
+            """, Long.class);
+
+    private static final RedisScript<Long> PUT_FIELD_IF_PRESENT = new DefaultRedisScript<>("""
+            -- KB_CACHE_PUT_FIELD_IF_PRESENT
+            if redis.call('EXISTS', KEYS[1]) == 0 then
+              return 0
+            end
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            return 1
+            """, Long.class);
+
     private final StringRedisTemplate redis;
 
     public RedisKbCacheStore(StringRedisTemplate redis) {
@@ -72,6 +149,66 @@ public class RedisKbCacheStore implements KbCacheStore {
         }
         catch (RuntimeException e) {
             throw failure("合并写缓存 HASH 字段失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean hashPutFieldIfPresent(String key, String field, String value) {
+        try {
+            Long updated = this.redis.execute(PUT_FIELD_IF_PRESENT, List.of(key), field, value);
+            return updated != null && updated > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按存在性更新缓存代次失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean hashPutAllIfGenerationAtMost(String key, String generationField, long generation,
+            Map<String, String> values) {
+        List<String> args = new java.util.ArrayList<>(2 + values.size() * 2);
+        args.add(generationField);
+        args.add(String.valueOf(generation));
+        values.forEach((field, value) -> {
+            args.add(field);
+            args.add(value);
+        });
+        try {
+            Long written = this.redis.execute(PUT_HASH_IF_GENERATION_AT_MOST, List.of(key), args.toArray());
+            return written != null && written > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按代次写缓存 HASH 失败", key, e);
+        }
+    }
+
+    @Override
+    public void hashPutFieldsIfValueAtMost(String key, Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        List<String> args = new java.util.ArrayList<>(values.size() * 2);
+        values.forEach((field, value) -> {
+            args.add(field);
+            args.add(value);
+        });
+        try {
+            this.redis.execute(PUT_INDEX_FIELDS_IF_GENERATION_AT_MOST, List.of(key), args.toArray());
+        }
+        catch (RuntimeException e) {
+            throw failure("按代次写缓存索引失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean hashPutFieldIfPresentAndValueAtMost(String key, String field, long generation) {
+        try {
+            Long updated = this.redis.execute(PUT_FIELD_IF_PRESENT_AND_GENERATION_AT_MOST, List.of(key), field,
+                    String.valueOf(generation));
+            return updated != null && updated > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按代次提升缓存正文代次失败", key, e);
         }
     }
 
@@ -141,6 +278,30 @@ public class RedisKbCacheStore implements KbCacheStore {
         }
         catch (RuntimeException e) {
             throw failure("删除缓存键失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean deleteDocIfGenerationAtMost(String key, String generationField, long generation) {
+        try {
+            Long deleted = this.redis.execute(DELETE_DOC_IF_GENERATION_AT_MOST, List.of(key), generationField,
+                    String.valueOf(generation));
+            return deleted != null && deleted > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按代次回收缓存正文失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean hashDeleteFieldIfValueAtMost(String key, String field, long generation) {
+        try {
+            Long deleted = this.redis.execute(DELETE_INDEX_IF_GENERATION_AT_MOST, List.of(key), field,
+                    String.valueOf(generation));
+            return deleted != null && deleted > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按代次回收缓存索引失败", key, e);
         }
     }
 

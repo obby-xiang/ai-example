@@ -59,7 +59,8 @@ export type PendingStatus =
 /**
  * H1 确认门**预检摘要**（可选契约增量，与后端已锁定；缺省 = null/undefined，旧帧零影响）。
  *
- * 预检数据随帧与恢复载荷保留，用于既有业务标题等展示；普通确认卡不展示固定三字段摘要。
+ * 预检数据随帧与恢复载荷保留，用于既有业务标题等展示；`create_task` 卡把其中后端已算好的
+ * `conditionSummary` / `impact` 补成「条件 / 影响面」行（其余确认卡不扩展示摘要）。
  * 预检不通过 → 后端**不弹卡**（不进确认门，无卡形态），故前端不存在「未通过」的门卡分支。
  * 高危操作的后果说明与复选框由 `irreversible` 独立控制，不依赖预检摘要。
  *
@@ -102,17 +103,27 @@ export interface ToolPreflightCheck {
   args?: Record<string, unknown>
 }
 
-/** 预检摘要载荷（suspended 帧 toolCalls[] / confirm_request 帧可选字段）。 */
-export interface ToolPreflight {
+/**
+ * 预检的**展示摘要**（历史恢复形态）：`/history` 的 `toolCallStates[toolCallId].preflight` 只带这一层。
+ *
+ * <p>为什么不是完整报告：`checks`（含文件指纹等内部结论）与 `reportHash` 属内部预检明细，
+ * 后端不写进展示历史。展示面只需要业务标题（`target`）与条件/影响面行，因此历史恢复用它；
+ * 实时帧仍是完整 {@link ToolPreflight}（本接口的超集）。
+ */
+export interface ToolPreflightSummary {
+  /**
+   * 任务目标（卡头业务标题的唯一来源）。形状两族见 {@link ToolPreflightTarget}；
+   * 历史摘要只在有 target 时才存在（后端不写空预检）。
+   */
   target: ToolPreflightTarget
-  checks: ToolPreflightCheck[]
-  /** 影响面人读文本（demo：「将发布 3 个配置定义 · 影响 12,480 行数据」） */
-  impact: string
-  /** 预检报告指纹（demo：「批准绑定」行的依据；卡面只展示说明行，不直接显示本值） */
-  reportHash: string
+  /**
+   * 影响面人读文本（demo：「将发布 3 个配置定义 · 影响 12,480 行数据」）。
+   * 历史摘要里可能缺省（后端只落非空展示值）。
+   */
+  impact?: string | null
   /**
    * AR-02：结构化条件的**后端可读摘要**（预检阶段算好，additive 可选键）。
-   * 缺省 = 旧帧 / 无此信息 ⇒ 不渲染条件行；前端不得用 args/模型文本自行反解。
+   * 缺省 = 旧载荷 / 无此信息 ⇒ 不渲染条件行；前端不得用 args/模型文本自行反解。
    */
   conditionSummary?: string | null
   /**
@@ -121,6 +132,15 @@ export interface ToolPreflight {
    * 成 MERGE，也不得从模型回复猜模式。
    */
   publishMode?: string | null
+}
+
+/** 预检摘要载荷（suspended 帧 toolCalls[] / confirm_request 帧可选字段）。 */
+export interface ToolPreflight extends ToolPreflightSummary {
+  /** 影响面人读文本（demo：「将发布 3 个配置定义 · 影响 12,480 行数据」） */
+  impact: string
+  checks: ToolPreflightCheck[]
+  /** 预检报告指纹（demo：「批准绑定」行的依据；卡面只展示说明行，不直接显示本值） */
+  reportHash: string
 }
 
 /** 外置挂起条目（PendingToolCall#asMap 的字段集）。 */
@@ -327,6 +347,15 @@ export interface SseToolResultFrame extends SseFrameBase {
    * `resultView` 是给卡面渲染器的结构化投影，两者同源。缺省 = 旧帧 → 卡面走旧形态。
    */
   resultView?: ResultView | null
+  /**
+   * H1 预检**展示摘要**（additive 可选键；仅确认门工具、且后端有预检时出现）。
+   *
+   * <p>为什么结局帧也要带：刷新恢复的全量帧重放对"已决"确认工具会跳过
+   * `suspended` / `confirm_request`（挂起语义不重放），结局帧是唯一还会被应用的帧；
+   * 它若不带摘要，重建出的卡就退回工具名、丢掉条件/影响面行。
+   * 只含 target / impact / conditionSummary / publishMode（内部 checks / reportHash 不下发）。
+   */
+  preflight?: ToolPreflightSummary | null
 }
 
 /** HITL 确认请求（挂起等待口径）。 */

@@ -13,6 +13,7 @@ import type {
   ToolKind,
   ToolOutcome,
   ToolPreflight,
+  ToolPreflightSummary,
   TruncationNoticeCode
 } from './sse'
 import type { FormSpec, FormValueIssue } from './form-schema'
@@ -266,6 +267,9 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   /** Spring AI MessageType 名称：USER / ASSISTANT / SYSTEM / TOOL */
   type: string
   text: string
+  /** 失败终帧的机器码与诊断原文；空白正文的失败条目也据此保留并重建错误卡。 */
+  errorCode?: string
+  errorMessage?: string
   /** assistant 的 toolCalls（Spring AI AssistantMessage.ToolCall 列表，字段结构由上游协议决定） */
   toolCalls?: Array<{ id?: string; type?: string; name?: string; arguments?: string }>
   /** tool 消息的响应（ToolResponseMessage.ToolResponse 列表） */
@@ -302,6 +306,14 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     outcome?: string
     /** 治理 P0-1：错误码（可选，null = 无码）；一期不展示 */
     code?: string | null
+    /**
+     * 已结算工具仍保留的预检**展示摘要**（后端在挂起写点与终态写点同源落进 toolCallStates，
+     * `/history` 原样透出）。只含 target / impact / conditionSummary / publishMode；
+     * `checks` / `reportHash` 属内部预检明细，不从历史新暴露。
+     *
+     * 缺省 = 旧载荷 / 无预检的工具 ⇒ 卡头回落工具名；同 entryId 重写时后端保证只增不减。
+     */
+    preflight?: ToolPreflightSummary | null
   }>
   timestamp?: unknown
   /**
@@ -499,8 +511,8 @@ export interface ChatMessage {
    * 挂在本消息上（= 错误发生的那一轮），面板在元信息行之后渲染；分类口径见 `utils/error-card.ts`。
    *
    * <p>批2 起**入镜像**（`AiSessionMirror` 的可选键，additive）：刷新后这一轮仍是"失败现场"，
-   * 不得被历史/镜像归一成一条完整回答。历史通道没有该字段 ⇒ 历史覆盖后由镜像侧 outcome
-   * 标记回填（见 store `carryMirrorOutcomeMarkers`）。
+   * 不得被历史/镜像归一成一条完整回答。历史条目带 errorCode/errorMessage 时直接重建；
+   * 其它 outcome 标记仍可由镜像侧回填（见 store `carryMirrorOutcomeMarkers`）。
    */
   errorCard?: ErrorCard | null
   /**
@@ -686,8 +698,11 @@ export interface ToolPart extends MessagePartBase {
    * H1 确认门预检摘要（可选契约增量；来自 confirm_request / suspended 帧，随段持久化）。
    * 缺省 = 旧帧 / 无预检的工具。预检只用于既有业务标题等展示，不渲染固定三字段摘要；
    * 不可逆操作的后果说明与勾选批准门由 `irreversible` 独立控制。
+   *
+   * 历史恢复（`/history` 的 toolCallStates）只带展示摘要 {@link ToolPreflightSummary}
+   * （无 `checks` / `reportHash`）；卡面只读 `target` / `impact` / `conditionSummary`，两形兼容。
    */
-  preflight?: ToolPreflight | null
+  preflight?: ToolPreflight | ToolPreflightSummary | null
   /**
    * 批4-D（用户 2026-10-23 裁决）：该确认**不可撤销**（后端 `ToolMeta.Category.P`，当前唯一 =
    * `start_publish`）。true ⇒ 门卡在字段区与按钮行之间叠加复选框，未勾选只禁用「批准」。
@@ -881,8 +896,8 @@ export interface ToolPartPatch {
   timeoutSeconds?: number
   expiresAt?: number
   atMs?: number
-  /** 见 {@link ToolPart.preflight}（H1 确认门预检摘要，可选增量） */
-  preflight?: ToolPreflight | null
+  /** 见 {@link ToolPart.preflight}（H1 确认门预检摘要，可选增量；历史恢复可只带展示摘要） */
+  preflight?: ToolPreflight | ToolPreflightSummary | null
   /** 见 {@link ToolPart.irreversible}（批4-D 不可撤销位：confirm_request / suspended 帧落段） */
   irreversible?: boolean
 }

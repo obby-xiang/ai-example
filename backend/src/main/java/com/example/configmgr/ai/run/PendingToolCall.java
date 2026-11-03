@@ -116,6 +116,12 @@ public class PendingToolCall {
 
 	private String arguments;
 
+	private String draftRunId;
+
+	private Long draftTaskId;
+
+	private String draftDefCode;
+
 	private String status = PENDING;
 
 	/** 结果信封的结局（{@code PendingToolCall} 的历史字段；null = 旧数据，按 status 推导）。 */

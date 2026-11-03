@@ -54,6 +54,8 @@
 
 | **当前会话与子 agent 脱敏证据（2026-10-28）** | 本会话的**交付总账 + 子 agent 调用台账**：台账 4 笔提交（`4613eee` / `2d12b30` / `79fafa7` / `38fc8c9`，基线 `3f5bd6b`）、主要任务与执行口径、**单点回执分四类**（A 精确单点 / B 类级 / C 只读 diff / D 工程门禁）、**未验边界 9 条**与**禁止主张清单**；子 agent **实算 110 个**（169 次 `Agent` 调用 / 167 次 spawn；完成 106 · 取消 4 · 运行中 0）。日志本体留在仓外、只提取安全元数据；入口 = 本目录 `README.md` 与 `subagents.md`（原名 `agents.md`，已更名以免被当 `AGENTS.md` 加载）；**性质 = 证据台账，不是验收报告** | `docs/evidence/ai-session-2026-10-28/README.md`、`docs/evidence/ai-session-2026-10-28/subagents.md` |
 
+| **AI 对话历史 / 恢复 / 表单 / 资源整改与验证（2026-11-03）** | 本轮整改的**正式报告归档**：多真源历史与原始输入/时间、失败恢复、上下文压缩 CAS、SSE 重连/归档对账、工具跨页签互斥与复制页签隔离、停止/新会话、`create_task` 复用与 `independent` 独立新建、条件草案任务绑定与 ABA、KB 代次、精确计数、AI 行数工具下线、C 端提示简化；含**浏览器实测通过的核心场景 10 项**（复制页签一项由用户人工验证）与**遗留挂账 L-153~L-160**（真实多实例/Cluster/KB、purge 故障注入、最终 `start_export` 与实际下载、长历史分页性能、工具台账/停止墓碑/`recoveryEntriesByRun` 长期清理、计数 API scope 契约、补偿条目排序边界、全量测试/CI 验证本轮不做〔用户明确〕）；**性质 = 整改与验证记录，不是验收报告** | `docs/evidence/ai-remediation-2026-11-03/README.md` |
+
 > 附件约定：证据文档的原始材料（`.log` / `.json` / `.txt`）与被引文档同目录、同前缀（如 `V3-附件-e2e-run1-原始输出.txt`）。按 DC-08，入库产物一律用 `<REPO_ROOT>` / `<MAVEN_HOME>` 等占位符；个别为保存原始命令行/日志而保留了本机路径的附件，按 `scripts/githooks/README.md` 第 5.1 节的既定处理（占位符改写，或留痕放行并登记待清理）对待，**不要以它们为写作范例**。
 > 附件约定（探针）：`probes/` 子目录放随证探针 `.java` 源码——**仓库外编译运行、不参与构建与测试计数**；`backend/pom.xml` 未声明任何指向 `docs/` 的 `sourceDirectory`/`testSourceDirectory`/`includes`，该形状由文档门禁 `scripts/ci/check-docs.mjs` 断言。
 

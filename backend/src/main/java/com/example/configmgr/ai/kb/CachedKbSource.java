@@ -113,7 +113,7 @@ public class CachedKbSource implements KbSource {
                 return cached.get().content();
             }
             String content = this.delegate.fetchContent(meta);
-            cacheDoc(meta, content);
+            cacheDoc(meta, content, this.cache.nextGeneration());
             return content;
         }
         catch (KbCacheException e) {
@@ -238,9 +238,9 @@ public class CachedKbSource implements KbSource {
      * 摘索引 —— 两种都能收敛。读路径（{@link #fetchContent} 的惰性补写）与刷新路径共用本方法，
      * 不再各自直接 {@code putDoc}。
      */
-    private void cacheDoc(KbDocMeta meta, String content) {
-        this.cache.putDocId(meta.id());
-        this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(), meta.updatedAt()));
+    private void cacheDoc(KbDocMeta meta, String content, long generation) {
+        this.cache.putDocId(meta.id(), generation);
+        this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(), meta.updatedAt()), generation);
     }
 
     /**
@@ -260,6 +260,8 @@ public class CachedKbSource implements KbSource {
      */
     private boolean syncToCache(KbManifest manifest, String sourceEtag) throws KbSourceException {
         boolean changed = false;
+        // 代次必须先于本轮快照读取取得：旧刷新即使在回收前才醒来，也不能拿到比新正文更晚的删除权。
+        long generation = this.cache.nextGeneration();
         // 上一版清单与全局索引都必须在写新清单前读：前者用于变更判定（也在首次升级时补偿索引），
         // 后者是"已知文档 id"的主来源。
         Optional<KbCache.ManifestEntry> previous = this.cache.manifest();
@@ -271,17 +273,21 @@ public class CachedKbSource implements KbSource {
         // 首次升级补偿：索引出现之前写下的正文只在上一版清单里留痕
         known.addAll(docIdsOf(previous));
         known.addAll(current);
-        // 索引先于任何正文落盘：已知 id（上一版清单补偿 + 本次清单）全部登记。
+        // 索引先于任何正文落盘，并与正文使用同一代次；旧回收因此两边都越不过这道闸。
         // 失败会抛出 ⇒ 正文/清单都不写 ⇒ 下一轮重来，不留下无法回收的正文键。
-        Set<String> toIndex = new LinkedHashSet<>(known);
-        toIndex.removeAll(indexed);
-        this.cache.putDocIds(toIndex);
+        this.cache.putDocIds(known, generation);
         for (KbDocMeta meta : manifest.docs()) {
             Optional<KbCache.DocEntry> existing = this.cache.doc(meta.id());
             boolean needFetch = existing.isEmpty() || !shaMatches(existing.get().sha(), meta.sha());
             if (needFetch) {
                 String content = this.delegate.fetchContent(meta);
-                cacheDoc(meta, content);
+                cacheDoc(meta, content, generation);
+                changed = true;
+            }
+            else if (!this.cache.markDocGeneration(meta.id(), generation)) {
+                // 读取后被旧回收删除：不能在空键上只写代次，必须回源并恢复完整正文。
+                String content = this.delegate.fetchContent(meta);
+                cacheDoc(meta, content, generation);
                 changed = true;
             }
         }
@@ -297,15 +303,19 @@ public class CachedKbSource implements KbSource {
         if (previous.isEmpty() || !json.equals(previous.get().json())
                 || !etag.equals(previous.get().etag())) {
             long next = this.cache.version() + 1;
-            this.cache.putManifest(new KbCache.ManifestEntry(etag, String.valueOf(next), json));
-            long bumped = this.cache.bumpVersion();
-            this.lastSeenVersion = bumped;
-            changed = true;
+            if (this.cache.putManifest(new KbCache.ManifestEntry(etag, String.valueOf(next), json), generation)) {
+                long bumped = this.cache.bumpVersion();
+                this.lastSeenVersion = bumped;
+                changed = true;
+            }
         }
-        else if (this.lastSeenVersion < 0) {
-            this.lastSeenVersion = this.cache.version();
+        else {
+            this.cache.markManifestGeneration(generation);
+            if (this.lastSeenVersion < 0) {
+                this.lastSeenVersion = this.cache.version();
+            }
         }
-        pruneRemovedDocs(known, current);
+        pruneRemovedDocs(known, current, generation);
         return changed;
     }
 
@@ -335,6 +345,7 @@ public class CachedKbSource implements KbSource {
      */
     private void reconcileCachedRemoval() {
         try {
+            long generation = this.cache.generation();
             Optional<KbCache.ManifestEntry> cached = this.cache.manifest();
             if (cached.isEmpty()) {
                 return;
@@ -351,10 +362,10 @@ public class CachedKbSource implements KbSource {
             Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
             Set<String> toIndex = new LinkedHashSet<>(current);
             toIndex.removeAll(indexed);
-            this.cache.putDocIds(toIndex);
+            this.cache.putDocIds(toIndex, generation);
             Set<String> known = new LinkedHashSet<>(indexed);
             known.addAll(current);
-            pruneRemovedDocs(known, current);
+            pruneRemovedDocs(known, current, generation);
         }
         catch (RuntimeException e) {
             log.debug("KB cache unavailable; skipping retirement reconcile this round (retried next round): {}", e.getMessage());
@@ -368,13 +379,13 @@ public class CachedKbSource implements KbSource {
      * 写清单与删键之间崩溃，那份差集就永久丢失，正文键（无 TTL）无人再删。索引是显式留痕：
      * 删除成功才摘除条目，失败/崩溃时条目仍在，下一轮 sync 自然重试（DEL 幂等）。
      *
-     * <p><b>Cluster 安全</b>：逐篇单键 DEL，索引侧是单键 HDEL（{@code KbCache#removeDocId}），
-     * 不使用 {@code KEYS}/{@code SCAN}，也不做跨槽多键 Lua。
+     * <p><b>Cluster 安全</b>：正文与索引各用一条单键 Lua 做代次条件删除，不使用
+     * {@code KEYS}/{@code SCAN}，也不做跨槽多键 Lua。更高代次说明新实例已重新写入，旧回收直接让位。
      *
      * <p>失败只记 WARN、不抛：缓存缺一篇正文时 {@link #fetchContent} 会回源补齐，
      * 不能让"回收旧键"把整次刷新打成降级。
      */
-    private void pruneRemovedDocs(Set<String> known, Set<String> current) {
+    private void pruneRemovedDocs(Set<String> known, Set<String> current, long generation) {
         if (known.isEmpty()) {
             return;
         }
@@ -382,20 +393,29 @@ public class CachedKbSource implements KbSource {
             if (current.contains(docId)) {
                 continue;
             }
+            final boolean deleted;
             try {
-                this.cache.deleteDoc(docId);
+                deleted = this.cache.deleteDoc(docId, generation);
             }
             catch (RuntimeException e) {
                 // 索引条目保留 ⇒ 下一轮重试，收敛到删除成功为止
                 log.warn("KB cache failed to delete retired doc (index entry kept; retried next round) docId={}: {}", docId, e.getMessage());
                 continue;
             }
+            if (!deleted) {
+                log.debug("KB cache retirement yielded to a newer doc generation: docId={}", docId);
+                continue;
+            }
             try {
-                this.cache.removeDocId(docId);
-                log.debug("KB cache deleted retired doc: docId={}", docId);
+                if (this.cache.removeDocId(docId, generation)) {
+                    log.debug("KB cache deleted retired doc: docId={}", docId);
+                }
+                else {
+                    log.debug("KB cache index retirement yielded to a newer generation: docId={}", docId);
+                }
             }
             catch (RuntimeException e) {
-                // 正文已删、索引未摘：下一轮会再 DEL（幂等空操作）并重试摘索引
+                // 正文已删、索引未摘：下一轮会再做条件删除并重试摘索引
                 log.warn("Retired doc deleted but its index entry remains (retried next round) docId={}: {}", docId, e.getMessage());
             }
         }

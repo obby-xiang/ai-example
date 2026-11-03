@@ -46,7 +46,7 @@ class GenerativeFormContractTest {
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	/** 服务依赖传 null：本类只读方法签名（生成 Schema），不调用任何工具方法体。 */
-	private final AiTools aiTools = new AiTools(null, null, null, null);
+	private final AiTools aiTools = new AiTools(null, null, null);
 
 	private final GenerativeFormGuard guard = new GenerativeFormGuard(this.mapper);
 

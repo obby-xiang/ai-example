@@ -50,10 +50,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * 复用 {@link LeaseService} 的 Redis 租约（{@value #LOCK_KEY}，TTL {@value #LOCK_TTL_SECONDS}s）；
  * 抢不到就跳过本轮，不猜、不抢。租约只包住一轮有界清理，不包业务事务。
  * <b>每轮 owner 唯一</b>（{@code <instanceId>:purge:<序号>}，见 {@link #runSeq}）：
- * {@link LeaseService} 的进程内视图按 {@code (key, owner)} 记账，且 <b>release 失败时视图会留下</b> ——
- * 固定 owner 下，下一轮 acquire 命中旧视图即 {@code created=false}，调用方既不续租也不再释放
- * （锁卡到 TTL、期间可能被别的实例接走）。唯一 owner 让每一轮都是全新的 {@code (key, owner)}：
- * 续租必登记、释放必再尝试。
+ * {@link LeaseService} 的进程内视图按 {@code (key, owner)} 记账；唯一 owner 让每一轮独立续租、释放。
+ * 资源锁 release 异常时该任本地视图由 LeaseService 条件清除，Redis 键按 TTL 收敛，
+ * held/ended 不随周期执行次数增长。
  * <b>一轮执行期间按抢锁时的同一 TTL 续租</b>（{@code markDriving(..., LOCK_TTL_SECONDS)}）：
  * 单轮可能因 DB/文件清理超过 300s，只靠 TTL 到期会让锁在半途消失、另一实例并发跑同一批台账。
  * <b>续租带存活判据（C-62）</b>：本轮仍在跑、且当前候选没有超过
@@ -123,12 +122,8 @@ public class SessionPurgeRetryRunner {
 	/**
 	 * 本轮单飞 owner 的序号：每轮 {@code runOnce} 取 {@code <instanceId>:purge:<序号>}，<b>一轮一个</b>。
 	 *
-	 * <p>为什么不复用 {@code owner = instanceId}：{@code LeaseService} 的进程内视图按
-	 * {@code (key, owner)} 记账，<b>release 失败时视图会留下</b>。固定 owner 下，下一轮 acquire 命中
-	 * 旧视图 ⇒ {@code created=false} ⇒ 调用方既不续租（锁可能在清理中途到期被接管）也不再释放
-	 * （锁卡到 300s TTL 才自然过期）。唯一 owner 使每一轮都是新的 {@code (key, owner)}：续租必登记、
-	 * 释放必再尝试；失败者留下的旧视图只占一条无 TTL 的内存记录，不影响新 owner 抢锁
-	 * （TTL 到期即可接手）。
+	 * <p>每轮独立 owner 使续租与释放严格对应当前任。资源锁 release 异常时 LeaseService 会清掉
+	 * 该任本地视图，Redis 键按 TTL 过期；不会留下随轮次累积的无 TTL 内存记录。
 	 */
 	private final AtomicLong runSeq = new AtomicLong();
 

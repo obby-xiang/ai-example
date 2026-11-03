@@ -478,7 +478,7 @@ class ToolRegistryDisclosureTest {
                 AiContext.of("import", "IMPORT", "IMPORT", 1L, Map.of()),
                 AiContext.of("import", "IMPORT", "PUBLISH", 1L, Map.of()));
         List<String> allTools = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
-                "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
+                "check_job_status", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step",
                 com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME,

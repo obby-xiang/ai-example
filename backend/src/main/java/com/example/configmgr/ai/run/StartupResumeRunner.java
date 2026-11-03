@@ -206,12 +206,9 @@ public class StartupResumeRunner {
 	/**
 	 * 扫描 owner 的序号：每次扫描的 owner 取 {@code <instanceId>:scan:<序号>}，<b>一次扫描一个</b>。
 	 *
-	 * <p>为什么不复用 {@code owner = instanceId}：{@code LeaseService} 的进程内视图按
-	 * {@code (key, owner)} 记账，且 <b>release 失败时视图会留下</b>。固定 owner 下，下一拍
-	 * {@code acquire} 命中该视图 ⇒ {@code created=false} ⇒ 调用方既不再续租（租约可能在扫描中途
-	 * 到期、被别的实例接走）也不再释放（席位卡到 TTL 才自然过期）。每次扫描唯一 owner 使每一拍都是
-	 * 一个全新的 {@code (key, owner)}：{@code created=true}、续租必登记、释放必再尝试。
-	 * 失败者留下的旧视图只占一条无 TTL 的内存记录，不影响新 owner 抢租（TTL 到期即可接手）。
+	 * <p>为什么不复用 {@code owner = instanceId}：每次扫描独立标识本次席位，续租与释放都按这一任执行。
+	 * 资源锁不参与 run fencing；{@code LeaseService} 在 release 异常时会条件清除该任本地视图，
+	 * Redis 键按 TTL 收敛，因此唯一 owner 不会令 held/ended 随扫描次数增长。
 	 */
 	private final AtomicLong scanSeq = new AtomicLong();
 
@@ -898,10 +895,8 @@ public class StartupResumeRunner {
 	 * </ul>
 	 *
 	 * <p><b>owner 每次扫描唯一</b>（{@code <instanceId>:scan:<序号>}，见 {@link #scanSeq}）：
-	 * 固定 owner 时，一次 release 失败会在 {@code LeaseService} 的进程内视图里留下
-	 * {@code (key, owner)} 条目；下一拍 acquire 命中它即 {@code created=false}，调用方既不续租
-	 * 也不再释放 ⇒ 席位卡到 TTL、扫描中途还可能被别的实例接走。唯一 owner 让每一拍都是全新
-	 * {@code (key, owner)}：必然 {@code created=true}，续租与释放都必须执行。
+	 * 每一拍都是全新 {@code (key, owner)}，续租与释放都对应这一任；资源锁 release 异常时
+	 * 本地视图立即清理，Redis 键仍按 TTL 收敛。
 	 *
 	 * <h2>拿不到时的两种结论（都不是"报错"）</h2>
 	 * <ul>
@@ -1048,8 +1043,8 @@ public class StartupResumeRunner {
 	 *
 	 * <p><b>owner 每次扫描唯一</b>（{@code <instanceId>:scan:<序号>}，见 {@link #scanSeq}）：
 	 * 因此"这个席位归本次扫描"无需再看 {@code created} —— 同一 (key, owner) 不可能被第二次 acquire
-	 * 复用（进程内门也保证同一实例不并发扫）。这也正是"release 失败后下一拍仍会释放/续租"的前提：
-	 * 固定 owner 时失败留下的视图会让下一拍 {@code created=false}，既不续租也不释放。
+	 * 复用（进程内门也保证同一实例不并发扫）。资源锁 release 异常会清掉该任本地视图，
+	 * 不让唯一 owner 的历史条目在进程内累积。
 	 *
 	 * <p>关闭顺序：
 	 * <ol>

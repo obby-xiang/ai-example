@@ -17,15 +17,15 @@ import java.util.Map;
 public class AiContext {
 
 	/**
-	 * 条件结构化交棒标记（<b>已退役</b>）。
+	 * 条件结构化交棒标记：刚成功推进到 {@code QUERY_COND}、条件仍未决定时由
+	 * {@code ConditionsForm#parkIfDueAtQueryCond(..., allowUnknownForm=false)} 置位。
 	 *
-	 * <p>进入 {@code QUERY_COND} 后宿主直接按缺口挂条件表，不再"先交模型结构化"，因此生产代码
-	 * 不再写入/读取该键（披露面的收窄与合成指令已随该链移除）。保留常量仅为旧快照与旧用例的
-	 * 源码兼容；新代码不得依赖它。
-	 *
-	 * @deprecated 无生产读写方，待测试适配后删除。
+	 * <p>标记在场时，宿主只披露/放行条件结构化需要的四个工具
+	 * （{@code get_config_def/list_config_defs/set_condition/confirm_step}），并随交棒注入一条
+	 * 合成内部指令，让模型把用户已给出的筛选值经既有 {@code set_condition} 通道形成草案，
+	 * 而不是立刻弹条件表。标记必须随快照持久化（执行面的第三道防线读快照上下文）；
+	 * 离开 {@code QUERY_COND} 时清除并恢复完整工具面。
 	 */
-	@Deprecated
 	public static final String EXTRA_CONDITION_STRUCTURE_HANDOFF = "conditionStructureHandoff";
 
 	private String page = "";

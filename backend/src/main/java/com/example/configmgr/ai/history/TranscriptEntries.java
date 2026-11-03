@@ -9,8 +9,10 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +41,20 @@ public final class TranscriptEntries {
 	private static final String TRUNCATED_KEY = "truncated";
 
 	private static final String TOOL_CALL_STATES_KEY = "toolCallStates";
+
+	public static final String ERROR_CODE_KEY = "errorCode";
+
+	public static final String ERROR_MESSAGE_KEY = "errorMessage";
+
+	/**
+	 * 预检报告里属于<b>展示面</b>的键：target（卡头业务标题）、impact（影响面）、
+	 * conditionSummary（条件摘要）、publishMode（权威发布模式）。
+	 *
+	 * <p>{@code checks}（含文件指纹等内部结论）与 {@code reportHash} 是内部预检明细，
+	 * <b>不落展示历史</b> —— 实时帧里的完整报告口径不变。
+	 */
+	private static final List<String> PREFLIGHT_DISPLAY_KEYS = List.of("target", "impact", "conditionSummary",
+			"publishMode");
 
 	private TranscriptEntries() {
 	}
@@ -95,7 +111,7 @@ public final class TranscriptEntries {
 						baseline ? "ASSISTANT" : null, runId, turnStarted, atMs, text, reasoning,
 						stopped ? Boolean.TRUE : null, truncated ? Boolean.TRUE : null,
 						calls.isEmpty() ? null : calls, states, null, null, null, null, null, baseline, null, null,
-						null, null, null));
+						null, null, null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY)));
 				continue;
 			}
 			if (message instanceof ToolResponseMessage toolResponse) {
@@ -134,10 +150,10 @@ public final class TranscriptEntries {
 	 * 一轮终态历史 → 本轮条目（只投影<b>本 run</b>的 assistant/tool，避免把快照里携带的旧轮重复写入）。
 	 *
 	 * <p>判据：工具条目的 toolCallId 必须出现在本 run 的 pending 表；assistant 必须含本 run 的
-	 * 工具调用，或它是历史里最后一条 assistant（成功/取消写点追加的终稿/半截）。用户条目这里不写
-	 * —— 轮首写点负责，轮首失败由终态写点用快照 {@code requestText} 补写。
+	 * 工具调用，或它是历史里最后一条 assistant（成功/取消/失败写点追加的终稿/半截/错误事实）。
+	 * 用户条目由轮首或终态补写点负责。
 	 *
-	 * @param includeLastAssistant 成功/取消 = true（追加了终稿）；空回复/失败 = false（没有新终稿）
+	 * @param includeLastAssistant 是否允许追加最后一条 assistant；失败只有形成本轮失败消息时才传 true
 	 */
 	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
 			String runId, long turnStartedAtMs, boolean includeLastAssistant) {
@@ -190,7 +206,7 @@ public final class TranscriptEntries {
 						metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
 						metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,
 						calls.isEmpty() ? null : calls, states, null, null, null, null, null, false, null, null, null,
-						null, null));
+						null, null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY)));
 				continue;
 			}
 			if (message instanceof ToolResponseMessage toolResponse) {
@@ -226,6 +242,93 @@ public final class TranscriptEntries {
 	/** 既有 {@code chat:mem} → baseline 条目（一次性；之后不再从 memory 复制）。 */
 	public static List<TranscriptEntry> baseline(List<Message> messages) {
 		return fromMessages(messages, Map.of(), true, 0L);
+	}
+
+	/** baseline 只接管其它 run 的消息；{@code null} 表示窗口未知，不是空历史。 */
+	public static List<Message> outsideRun(List<Message> memory, String runId) {
+		if (memory == null || runId == null || runId.isBlank()) {
+			return null;
+		}
+		List<Message> out = new ArrayList<>(memory.size());
+		for (Message message : memory) {
+			if (message != null && !runId.equals(RunMemoryMerge.runIdOf(message))) {
+				out.add(message);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * 用带轮次归属的记忆窗口补偿 transcript 的缺失条目。正文与工具原文保留展示历史版本，
+	 * 记忆只补缺条及停止/截断/失败/工具终态等事实；预检摘要按既有规则保留。
+	 */
+	public static List<TranscriptEntry> reconcileWithMemory(List<TranscriptEntry> entries, List<Message> memory) {
+		Map<String, TranscriptEntry> byId = new LinkedHashMap<>();
+		for (TranscriptEntry entry : entries == null ? List.<TranscriptEntry>of() : entries) {
+			if (entry != null && entry.entryId() != null) {
+				byId.put(entry.entryId(), entry);
+			}
+		}
+		if (memory != null) {
+			for (TranscriptEntry entry : fromMessages(memory, Map.of(), false, 0L)) {
+				TranscriptEntry existing = byId.get(entry.entryId());
+				if (existing == null) {
+					byId.put(entry.entryId(), entry);
+				}
+				else if ("assistant".equals(entry.kind())) {
+					TranscriptEntry merged = carryPreflight(existing, existing.withTerminalFacts(entry));
+					byId.put(entry.entryId(), merged);
+				}
+			}
+		}
+		// 旧 baseline:<序号> 不回查当前 memory；只与已经存在的 run 条目按结构一对一收敛。
+		return convergeLegacyBaseline(byId.values());
+	}
+
+	private static List<TranscriptEntry> convergeLegacyBaseline(Collection<TranscriptEntry> entries) {
+		Map<LegacyContentKey, Integer> runScoped = new LinkedHashMap<>();
+		for (TranscriptEntry entry : entries) {
+			if (entry != null && entry.runId() != null && !entry.runId().isBlank()
+					&& !Boolean.TRUE.equals(entry.baseline())) {
+				runScoped.merge(LegacyContentKey.of(entry), 1, Integer::sum);
+			}
+		}
+		List<TranscriptEntry> out = new ArrayList<>();
+		for (TranscriptEntry entry : entries) {
+			if (entry == null || !Boolean.TRUE.equals(entry.baseline()) || entry.runId() != null) {
+				out.add(entry);
+				continue;
+			}
+			LegacyContentKey key = LegacyContentKey.of(entry);
+			Integer available = runScoped.get(key);
+			if (available == null || available == 0) {
+				out.add(entry);
+				continue;
+			}
+			// 一个 run 条目只能证明一份旧副本；不同轮合法同文不会因全局文本去重而消失。
+			if (available == 1) {
+				runScoped.remove(key);
+			}
+			else {
+				runScoped.put(key, available - 1);
+			}
+		}
+		return out;
+	}
+
+	private record LegacyContentKey(String role, String text, String toolCallId, String name,
+			List<TranscriptEntry.ToolCallView> toolCalls) {
+
+		static LegacyContentKey of(TranscriptEntry entry) {
+			String role = Boolean.TRUE.equals(entry.baseline()) ? entry.role()
+					: switch (entry.kind()) {
+						case "user" -> "USER";
+						case "assistant" -> "ASSISTANT";
+						case "tool" -> "TOOL";
+						default -> entry.kind();
+					};
+			return new LegacyContentKey(role, entry.text(), entry.toolCallId(), entry.name(), entry.toolCalls());
+		}
 	}
 
 	/**
@@ -272,12 +375,15 @@ public final class TranscriptEntries {
 
 	/**
 	 * 单条待决条目 → 历史段状态（{@code {status, outcome?, code?, kind?, decision?, decidedAt?,
-	 * submittedValues?}}）。
+	 * submittedValues?, preflight?}}）。
 	 *
 	 * <p><b>唯一投影</b>：{@code /history}（transcript）与记忆窗口的 {@code toolCallStates}
 	 * 都从这里派生，避免"刷新看到的卡"与"模型回放看到的卡"各说一套。
 	 * {@code status} 由调用方给出（可能是升格后的 {@link PendingToolCall#EXECUTED}）：
 	 * 未决状态不写 {@code outcome}（写 unknown 会让前端把"等待中"兜底成失败）。
+	 *
+	 * <p>{@code preflight} 只带展示摘要（{@link #displayPreflight}）：终态刷新后卡头仍能按业务
+	 * 标题渲染，而不是退回工具名；内部明细不随历史新暴露。
 	 */
 	public static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
 		Map<String, Object> state = new LinkedHashMap<>();
@@ -305,7 +411,128 @@ public final class TranscriptEntries {
 				&& !pending.getResultText().isBlank()) {
 			state.put("submittedValues", pending.getResultText());
 		}
+		Map<String, Object> preflight = displayPreflight(pending.getPreflight());
+		if (preflight != null) {
+			state.put("preflight", preflight);
+		}
 		return state;
+	}
+
+	/**
+	 * 预检报告 → 展示摘要（白名单 {@link #PREFLIGHT_DISPLAY_KEYS}）。
+	 *
+	 * <p>没有 target（渲染不出业务标题）或白名单全空 ⇒ {@code null}：不写空键，旧载荷语义不变
+	 * （前端"没有就不显示预检区"，卡头回落工具名）。
+	 *
+	 * <p>同一份摘要有两个出口：展示历史（{@code toolCallStates.preflight}）与
+	 * {@code tool_result} 帧（刷新恢复的全量帧重放会跳过已决工具的 {@code suspended}/
+	 * {@code confirm_request} 帧，结局帧若不带摘要，重建出的卡就丢了业务标题/条件/影响面）。
+	 * 两处必须同源，避免"刷新看到的卡"与"历史看到的卡"各说一套。
+	 */
+	public static Map<String, Object> displayPreflight(Map<String, Object> preflight) {
+		if (preflight == null || preflight.isEmpty() || !hasDisplayValue(preflight.get("target"))) {
+			return null;
+		}
+		Map<String, Object> out = new LinkedHashMap<>();
+		for (String key : PREFLIGHT_DISPLAY_KEYS) {
+			Object value = preflight.get(key);
+			if (hasDisplayValue(value)) {
+				out.put(key, value);
+			}
+		}
+		return out.isEmpty() ? null : out;
+	}
+
+	/**
+	 * 同 entryId 两版条目的读取合并：新条目为准，只在<b>已有同 toolCallId 状态</b>上把旧条目
+	 * 已有的 {@code preflight} 展示摘要补回，其它字段一字不动。
+	 *
+	 * <p>为什么必须合并：挂起写点（pending）与终态写点共用同一 entryId，读取 last-wins；
+	 * 后写的一份若没带预检（条目读不全/旧条目），卡头会从「<类型> 任务 #N『标题』」退回工具名。
+	 * 预检事实对同一 toolCallId 只增不减，不能被一次后写覆盖成空。
+	 *
+	 * <p>新条目整份状态缺失（条目读不全）⇒ 保持缺失：不插入只有 preflight、没有 status/kind
+	 * 的半形态状态 —— 卡面无法据它判终态，宁可按旧载荷语义回落占位。
+	 */
+	public static TranscriptEntry carryPreflight(TranscriptEntry previous, TranscriptEntry newer) {
+		if (previous == null || newer == null) {
+			return newer;
+		}
+		Map<String, Object> previousStates = previous.toolCallStates();
+		Map<String, Object> newerStates = newer.toolCallStates();
+		if (previousStates == null || previousStates.isEmpty() || newerStates == null || newerStates.isEmpty()) {
+			return newer;
+		}
+		Map<String, Object> states = new LinkedHashMap<>(newerStates);
+		boolean changed = false;
+		for (Map.Entry<String, Object> previousState : previousStates.entrySet()) {
+			Map<String, Object> older = asMap(previousState.getValue());
+			if (older == null || asMap(older.get("preflight")) == null) {
+				continue;
+			}
+			Map<String, Object> currentState = asMap(states.get(previousState.getKey()));
+			if (currentState == null) {
+				continue;
+			}
+			Map<String, Object> merged = new LinkedHashMap<>(currentState);
+			carryPreflightState(merged, older);
+			if (!merged.equals(currentState)) {
+				states.put(previousState.getKey(), merged);
+				changed = true;
+			}
+		}
+		return changed ? newer.withToolCallStates(states) : newer;
+	}
+
+	/**
+	 * 把旧状态里已有的 preflight 展示摘要补进新状态（同 toolCallId）：新状态缺该键、或只带了
+	 * 部分展示键时沿用旧值。状态/结局/决策一律以新状态为准，本方法只补 {@code preflight}。
+	 */
+	static Map<String, Object> carryPreflightState(Map<String, Object> newerState, Object previousState) {
+		Map<String, Object> previous = asMap(previousState);
+		Map<String, Object> older = previous == null ? null : asMap(previous.get("preflight"));
+		if (newerState == null || older == null || older.isEmpty()) {
+			return newerState;
+		}
+		Map<String, Object> current = asMap(newerState.get("preflight"));
+		if (current == null) {
+			Map<String, Object> carried = displayPreflight(older);
+			if (carried != null) {
+				newerState.put("preflight", carried);
+			}
+			return newerState;
+		}
+		Map<String, Object> merged = new LinkedHashMap<>(current);
+		boolean changed = false;
+		for (String key : PREFLIGHT_DISPLAY_KEYS) {
+			if (hasDisplayValue(merged.get(key)) || !hasDisplayValue(older.get(key))) {
+				continue;
+			}
+			merged.put(key, older.get(key));
+			changed = true;
+		}
+		if (changed) {
+			newerState.put("preflight", merged);
+		}
+		return newerState;
+	}
+
+	private static boolean hasDisplayValue(Object value) {
+		if (value == null) {
+			return false;
+		}
+		if (value instanceof String text) {
+			return !text.isBlank();
+		}
+		if (value instanceof Map<?, ?> map) {
+			return !map.isEmpty();
+		}
+		return true;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> asMap(Object value) {
+		return value instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
 	}
 
 	/**

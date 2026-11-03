@@ -1482,15 +1482,19 @@ import {
   argRows,
   cardStatusOf,
   cardTypeOf,
+  conditionArgText,
   formSpecOf,
   hasBodyRows,
+  hasConditionContent,
   isBlankText,
+  isConditionShape,
   isFormAwaitingOutcome,
   isReadOnlyCard,
   parsePublishConflicts,
   readOnlyStateOf,
   reasonHeadline,
   submitRows,
+  toolArgsOf,
   type CardTone,
   type ConflictRow,
   type FieldRow,
@@ -4356,7 +4360,9 @@ const noticeCoveredByAlert = computed(() => {
 })
 
 /** 通知槽是否渲染（专属 Alert 覆盖时不重复叙事）。 */
-const noticeBarVisible = computed(() => ai.notice !== null && !noticeCoveredByAlert.value)
+const noticeBarVisible = computed(() => ai.notice !== null
+  && ai.noticeCode !== 'ai.notice.upstreamRetry'
+  && !noticeCoveredByAlert.value)
 
 /**
  * 工作区动作回执位是否渲染。
@@ -4381,18 +4387,72 @@ function alertIcon(tone: keyof typeof ALERT_TONE): string {
 }
 
 /**
+ * create_task 确认卡的筛选条件行（2026-11-03 缺陷修）：
+ * - 真实结构化条件按条件契约逐项成文（不再显示「（复杂值）」）；
+ * - `conditions={}` 是「条件未决定」而不是「全量」：使用面板固定词条，不把后端面向宿主的
+ *   收集指引带上 C 端卡面；实时、已决与刷新恢复共用同一语义。
+ * 没有 conditions 参数 ⇒ null（字段表原样，不凭空补行）。
+ */
+function createTaskConditionsText(part: ToolPart): string | null {
+  if (part.name !== 'create_task') {
+    return null
+  }
+  const args = toolArgsOf(part)
+  if (args === null || !Object.prototype.hasOwnProperty.call(args, 'conditions')) {
+    return null
+  }
+  const raw = args.conditions
+  if (hasConditionContent(raw)) {
+    return conditionArgText(raw)
+  }
+  // `{}` / 空 fields 是「未决定」而不是「全量」；非条件结构的对象不冒充预检结论，
+  // 仍由字段表按通用规则显示（（复杂值））。
+  const isPlainObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+  if (!isConditionShape(raw) && !(isPlainObject && Object.keys(raw).length === 0)) {
+    return null
+  }
+  return t('ai.hitl.conditionsUndecided')
+}
+
+/** create_task 的影响面行（后端预检下发的人读文本；缺省 = 不渲染，不自行拼）。 */
+function createTaskImpactText(part: ToolPart): string | null {
+  if (part.name !== 'create_task') {
+    return null
+  }
+  const impact = part.preflight?.impact?.trim()
+  return impact !== undefined && impact !== '' ? impact : null
+}
+
+/**
  * S6 批1（v7.9 场景 19-b/19-f + v7.10 规则 7）→ 2A 批：确认门字段表（v7 `.grows` 行）。
  * - 首行恒为「操作」（工具中文名）；
  * - 其后渲染 **args 全键**（原上限 5 行 = 1 + 4 防压垮门卡的旧口径退役 —— 门卡字段区已限高
  *   `min(280px,35vh)` 双约束内滚，参数表压不垮卡，「看不到的参数」才是缺陷；裁决 2026-10-16 第 3 条）；
  * - 待决门卡与已决只读卡**同源**（K1「参数区字段表原样」：只读体直接复用本函数）；
  * - **敏感值掩码**：键名命中 /pass(word)?|secret|token|api_?key/i 的值显示定长圆点（不泄值、不泄长度）；
- * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON。
+ * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON；
+ * - create_task（2026-11-03）：conditions 行按真实条件成文 / `{}` 用 C 端「未决定」词条，
+ *   并把后端已下发的 `preflight.impact` 补成「影响面」行（批准前可读懂实际条件与后果）。
  */
 function gateRows(part: ToolPart): FieldRow[] {
-  return cachedForLocale(gateRowsCache, part, 'gateRows', [part.args, part.name], () => (
-    [{ key: t('ai.panel.actionField'), value: toolLabel(part.name) }, ...argRows(part, true)]
-  ))
+  return cachedForLocale(
+    gateRowsCache,
+    part,
+    'gateRows',
+    [part.args, part.name, part.preflight?.impact],
+    () => {
+      const conditionsText = createTaskConditionsText(part)
+      const rows = argRows(part, true).map((row) => (
+        row.key === 'conditions' && conditionsText !== null ? { ...row, value: conditionsText } : row
+      ))
+      const impact = createTaskImpactText(part)
+      return [
+        { key: t('ai.panel.actionField'), value: toolLabel(part.name) },
+        ...rows,
+        ...(impact === null ? [] : [{ key: t('ai.hitl.impact'), value: impact }])
+      ]
+    }
+  )
 }
 
 /**
@@ -5186,26 +5246,16 @@ function retryIdentity(): void {
 }
 
 onMounted(async () => {
-  // 批G · R2：订阅必须在读历史**之前**装（刷新后首帧要落盘），但启动期 `messages=[]` 不是
-  // "确实为空"而是"还没读" —— 下面 `ensureTabOwnership()` 的 state 变更会触发一次即时写盘，
-  // 早先把上一页签留下的持久化镜像清空（真机打点 `SET n=0 → GET n=0 → SET n=3`），
-  // 令 `loadHistory` 的 readMirror 读到空镜像、G3 合并在途轮空转。竞态由 store 侧闸住
-  // （`writeMirrorNow` 在 historyLoaded 之前不写空态），此处挂载次序保持不动。
-  ai.startMirror()
-  ai.startWorkspaceSync()
-  void ai.probeHealth()
-  // Task 4（返修 I6）：身份目录**不阻塞**所有权判定与历史恢复 —— 目录在后台加载；
-  // 首次没有会话号时所有权判定先跳过（发号成功后 `ensureSession()` 会补判），
-  // `loadHistory()`/发送经引导门按需等待目录结果。
-  void ai.loadTenantDirectory()
-  // RC-4：先判本页签是不是**复制页签**（Web Locks 探活）再读历史 —— 复制页签会发现场换新会话，
-  // 不能把原页签的历史/挂起卡读进复制页签里。
-  // 返回 null = 环境无 Web Locks（判定按恢复同步收口）⇒ **不额外 await**，onMounted 既有
-  // 时序（RO 观测 + nextTick 后的长消息测量）一格不动。
+  // 所有权是所有会话读写的启动闸：复制页签先清继承现场，再装镜像/工作区订阅、发探测、
+  // 读目录、重挂或恢复工具。无 Web Locks 时同步按恢复处理，不增加额外等待。
   const ownership = ai.ensureTabOwnership()
   if (ownership !== null) {
     await ownership
   }
+  await ai.loadTenantDirectory()
+  ai.startMirror()
+  ai.startWorkspaceSync()
+  void ai.probeHealth()
   if (!ai.messages.length) {
     await ai.loadHistory()
   }

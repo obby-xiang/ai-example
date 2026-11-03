@@ -755,6 +755,9 @@ class ConfirmStepConditionFallbackTest {
 		set.setStatus(PendingToolCall.FRONTEND_RESULT);
 		set.setOutcome(outcome);
 		set.setArguments("{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}");
+		set.setDraftRunId(RUN_ID);
+		set.setDraftTaskId(TASK_ID);
+		set.setDraftDefCode(defCode);
 		set.setResolvedAtMs(System.currentTimeMillis());
 		set.setResultText(ToolOutcome.OK.wire().equals(outcome) ? "已设置 " + defCode + " 的条件" : "设置条件失败");
 		this.store.putPending(RUN_ID, set);

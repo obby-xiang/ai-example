@@ -89,11 +89,13 @@ public class RunContextRefresher {
 	/** create_task 候选（defCodes/conditions）所属的任务号：候选只对创建它的任务有效。 */
 	public static final String EXTRA_CREATE_TASK_TASK_ID = TaskSlotResolver.CREATE_TASK_TASK_ID_KEY;
 
+	/** create_task 候选来源的运行号；跨轮草案回读仍按当前会话与任务号归属。 */
+	public static final String EXTRA_CREATE_TASK_RUN_ID = "createTaskRunId";
+
 	/**
-	 * 本次 {@code create_task} 的<b>结算时刻</b>（epoch 毫秒）：只接受这个时刻之后产生/回灌的
-	 * {@code SET_CONDITIONS} 表单。之前的历史表单（例如上一个任务 A 的回灌/取消）一律不算，
-	 * 防止新任务 B 继承 A 的条件收集状态。
+	 * @deprecated 仅为既有调用方编译兼容保留；时间边界方案已移除，生产代码不得使用。
 	 */
+	@Deprecated(forRemoval = false)
 	public static final String EXTRA_CREATE_TASK_REQUESTED_AT = "createTaskRequestedAtMs";
 
 	private final TaskService taskService;
@@ -217,14 +219,15 @@ public class RunContextRefresher {
 					settled.getToolCallId());
 			return;
 		}
+		Long previousTaskId = base.getTaskId();
 		Task task = requireTask(taskId);
+		boolean sameTask = taskId.equals(previousTaskId);
 		applyTask(base, task);
-		// 创建/复用新任务 = 全新任务作用域：无论任务号是否变化，先完整重置旧任务槽位与创建候选
-		//（含页面勾选事实），再绑定本次 create_task 的候选。新任务无条件从 UNDECIDED 开始，
-		// 旧任务（A）的条件/配置永不继承；页面与目标任务事实由 TaskSlotResolver 重算。
-		clearTaskScopedExtra(base);
-		bindCreateTaskCandidates(base, taskId);
-		applyCreateTaskDefCodes(base, settled);
+		// applyTask 已在切换任务时清空旧任务槽位与页面事实；同一任务的幂等重放/跨 run 继续
+		// 必须保留这些事实，只替换本次 create_task 的候选，不重复触发收集。
+		clearCreateTaskCandidates(base);
+		bindCreateTaskCandidates(runId, base, taskId);
+		applyCreateTaskDefCodes(base, settled, sameTask);
 		applyCreateTaskConditions(base, settled);
 		persistCreateTaskDraft(runId, taskId, settled);
 		if (base.getPage() == null || base.getPage().isBlank()) {
@@ -232,12 +235,13 @@ public class RunContextRefresher {
 		}
 	}
 
-	/** 候选（defCodes/conditions）只对创建它的任务有效：写入绑定任务号与本次创建结算时刻。 */
-	private static void bindCreateTaskCandidates(AiContext base, Long taskId) {
+	/** 候选记录来源 run 并绑定 task；同任务重放不越过已有草案与表单的历史边界。 */
+	private static void bindCreateTaskCandidates(String runId, AiContext base, Long taskId) {
 		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
 		extra.put(EXTRA_CREATE_TASK_TASK_ID, taskId);
-		// 只把"此刻之后"的 SET_CONDITIONS 表单算作本任务的收集事实（历史任务 A 的表单不算）
-		extra.put(EXTRA_CREATE_TASK_REQUESTED_AT, System.currentTimeMillis());
+		if (runId != null && !runId.isBlank()) {
+			extra.put(EXTRA_CREATE_TASK_RUN_ID, runId.trim());
+		}
 		base.setExtra(extra);
 	}
 
@@ -250,16 +254,19 @@ public class RunContextRefresher {
 	 * {@code FORM_SLOTS_ALREADY_KNOWN} 零副作用拒绝，模型直接 {@code select_definitions}；
 	 * 未传 {@code defCodes} 时这里什么都不写，宿主仍只弹一次配置表。
 	 */
-	private static void applyCreateTaskDefCodes(AiContext base, PendingToolCall settled) {
+	private static void applyCreateTaskDefCodes(AiContext base, PendingToolCall settled, boolean sameTask) {
 		List<String> defCodes = defCodesOf(parse(settled.getArguments()));
 		if (defCodes.isEmpty()) {
 			return;
 		}
 		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
 		extra.put(EXTRA_CREATE_TASK_DEF_CODES, defCodes);
-		// undecidedDefCodes = 候选本身：条件仍需在 QUERY_COND 收集，配置项已无需再问
-		extra.put(TaskSlots.EXTRA_KEY, new TaskSlots(base.getTaskType(), defCodes, List.of(), List.of(), defCodes,
-				List.of(), List.of()).toMap());
+		TaskSlots existing = TaskSlots.fromExtra(extra);
+		if (!sameTask || !defCodes.equals(existing.defCodes())) {
+			// undecidedDefCodes = 候选本身：条件仍需在 QUERY_COND 收集，配置项已无需再问
+			extra.put(TaskSlots.EXTRA_KEY, new TaskSlots(base.getTaskType(), defCodes, List.of(), List.of(), defCodes,
+					List.of(), List.of()).toMap());
+		}
 		base.setExtra(extra);
 	}
 
@@ -380,18 +387,26 @@ public class RunContextRefresher {
 	 * 向导页面，留着会让 {@link TaskSlotResolver} 把旧任务的勾选当成新任务的"页面权威值"。
 	 * 清掉后 resolver 按目标任务条目/本次 create_task 候选重算，等客户端上报新页勾选再覆盖。
 	 */
-	private static void clearTaskScopedExtra(AiContext base) {
+	public static void clearTaskScopedExtra(AiContext base) {
 		Map<String, Object> extra = base.getExtra();
 		if (extra == null) {
 			return;
 		}
 		extra.remove(TaskSlots.EXTRA_KEY);
+		clearCreateTaskCandidates(base);
+		extra.remove("selectedDefs");
+		extra.remove(ContextBuilder.SELECTION_SYNCED_KEY);
+	}
+
+	private static void clearCreateTaskCandidates(AiContext base) {
+		Map<String, Object> extra = base.getExtra();
+		if (extra == null) {
+			return;
+		}
 		extra.remove(EXTRA_CREATE_TASK_DEF_CODES);
 		extra.remove(EXTRA_CREATE_TASK_CONDITIONS);
 		extra.remove(EXTRA_CREATE_TASK_TASK_ID);
-		extra.remove(EXTRA_CREATE_TASK_REQUESTED_AT);
-		extra.remove("selectedDefs");
-		extra.remove(ContextBuilder.SELECTION_SYNCED_KEY);
+		extra.remove(EXTRA_CREATE_TASK_RUN_ID);
 	}
 
 	/**

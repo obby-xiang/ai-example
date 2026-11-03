@@ -3,6 +3,7 @@ package com.example.configmgr.ai.form;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.RunContextRefresher;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -136,7 +137,19 @@ abstract class HostForm {
 	 * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型（这一轮在等人填表）
 	 */
 	protected boolean park(String runId, List<Message> history, PendingToolCall pending) {
-		return parkAll(runId, history, List.of(pending));
+		return park(runId, history, pending, null, null);
+	}
+
+	/**
+	 * 显式带上<b>当前模型 assistant 正文/元数据</b>的挂起（工具跳提前 park 用）。
+	 *
+	 * <p>既有签名（{@code assistantContent == null}）继续沿用快照里的正文，保持所有老调用零变化。
+	 * 工具执行点在 {@code confirm_step} 等提前 park 场景必须显式传本段正文：此刻快照里的
+	 * {@code assistantContent} 还是上一轮/空值，不传就会把模型刚产出的正文丢掉。
+	 */
+	protected boolean park(String runId, List<Message> history, PendingToolCall pending, String assistantContent,
+			Map<String, Object> assistantMetadata) {
+		return parkAll(runId, history, List.of(pending), assistantContent, assistantMetadata);
 	}
 
 	/**
@@ -148,13 +161,30 @@ abstract class HostForm {
 	 * 逐条 {@code saveSuspended} 会互相覆盖 {@code inFlightToolCalls}，只留最后一条。
 	 */
 	protected boolean parkAll(String runId, List<Message> history, List<PendingToolCall> pendings) {
+		return parkAll(runId, history, pendings, null, null);
+	}
+
+	/**
+	 * @param assistantContent {@code null} = 沿用快照正文（既有调用方）；非 {@code null} = 本段模型正文
+	 *                        （工具跳提前 park），原样写进 {@code saveSuspended} 的 {@code assistantContent}，
+	 *                        使取消/刷新/续跑都能从挂起快照恢复这段正文。
+	 * @param assistantMetadata 显式正文对应的元数据（推理/来源等）；与 {@code assistantContent} 同进同退。
+	 */
+	protected boolean parkAll(String runId, List<Message> history, List<PendingToolCall> pendings,
+			String assistantContent, Map<String, Object> assistantMetadata) {
 		if (pendings == null || pendings.isEmpty()) {
 			return false;
 		}
 		try {
 			RunSnapshot current = this.store.get(runId);
-			this.store.saveSuspended(runId, current == null ? null : current.getAssistantContent(), pendings, history,
-					this.codec, current == null ? null : current.getAssistantMetadata());
+			boolean explicit = assistantContent != null;
+			String content = explicit ? assistantContent : current == null ? null : current.getAssistantContent();
+			Map<String, Object> metadata = explicit ? assistantMetadata
+					: current == null ? null : current.getAssistantMetadata();
+			// 合成内部指令（尤其 condition handoff 的一次性 USER）只属于当前请求视图，
+			// 不得随宿主表单挂起进入 messageJson/chat memory。
+			List<Message> persistedHistory = SyntheticMessages.withoutCorrectionInstruction(history);
+			this.store.saveSuspended(runId, content, pendings, persistedHistory, this.codec, metadata);
 		}
 		catch (RuntimeException ex) {
 			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，

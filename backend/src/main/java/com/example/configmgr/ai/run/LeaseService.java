@@ -379,9 +379,12 @@ public class LeaseService {
 	 * 若只看 {@code heldEpoch == 0} 就会把"持过但已丢"误判成"从未持租"，写权限随之放大。
 	 * 墓碑只由成功 {@code acquire}（同 owner 重新持有）或成功 {@code release}（自愿归还）清除。
 	 *
+	 * <p>只有带 hash tag / fence 的 run 租约会写入本表；无 tag 周期资源锁不参与写权限判定，
+	 * 不为唯一 owner 留墓碑，其释放异常视图在 {@link #release(Lease)} 中确定性清理。</p>
+	 *
 	 * <h2>生命周期边界（如实登记）</h2>
 	 * <ul>
-	 * <li>清除通道只有两条：成功 acquire / 成功 release（见上）；进程退出由 {@code shutdown()} 清空；</li>
+	 * <li>run 墓碑清除通道只有两条：成功 acquire / 成功 release（见上）；进程退出由 {@code shutdown()} 清空；</li>
 	 * <li><b>没有</b> TTL 到期或容量淘汰：任何"自动放行"都会把 LOST 重新变成可写（plain SET），
 	 * 正是 fencing 要消灭的形态；有界性由"每个 (run, owner) 至多一条 + 只对本进程丢过的租约记账"
 	 * 保证 —— 量级 = 本进程参与过且丢租的轮次数，不是会话/轮次总数；</li>
@@ -662,9 +665,10 @@ public class LeaseService {
 				this.ended.remove(viewKey);
 				return Hold.HELD;
 			}
-			// 续租 fencing 收口批：校验失败 = <b>确定</b>丢租 —— 留下墓碑，后续写权限一律只读，
-			// 否则进程内视图被清后 epoch=0 又会把"持过但已丢"当成"从未持租"。
-			markEnded(viewKey, LeaseAuthority.LOST);
+			// 只有带 fence 的 run 租约需要墓碑；周期资源锁的唯一 owner 不进无界 ended 表。
+			if (hashTagOf(key) != null) {
+				markEnded(viewKey, LeaseAuthority.LOST);
+			}
 			// 现值已不是自己那一任：只摘<b>匹配的那一任</b>（R3）—— 若视图已经换成更新的 epoch，
 			// 这次校验说明的是"被校验的那一任没了"，不能顺手把当前那一任也作废。
 			Lease local = this.held.get(viewKey);
@@ -674,9 +678,11 @@ public class LeaseService {
 			return Hold.LOST;
 		}
 		catch (Exception ex) {
-			// 局部中断只让"这一任"降级（墓碑已经钉住只读），不动设施健康位。
+			// 局部中断只让"这一任"降级（run 墓碑钉住只读），不动设施健康位。
 			markFacilityUnhealthy(ex);
-			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+			if (hashTagOf(key) != null) {
+				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+			}
 			log.warn("lease ownership check degraded key={} owner={} epoch={} (Redis unavailable; read-only, no progress): {}", key, holder,
 					epoch, ex.getMessage());
 			return Hold.UNAVAILABLE;
@@ -719,13 +725,17 @@ public class LeaseService {
 				this.ended.remove(viewKey);
 				return RenewOutcome.RENEWED;
 			}
-			markEnded(viewKey, LeaseAuthority.LOST);
+			if (hashTagOf(lease.key()) != null) {
+				markEnded(viewKey, LeaseAuthority.LOST);
+			}
 			return RenewOutcome.LOST;
 		}
 		catch (Exception ex) {
-			// 局部中断只影响这一拍（UNAVAILABLE 墓碑已经钉住只读），不动设施健康位。
+			// 局部中断只影响这一拍（run 的 UNAVAILABLE 墓碑钉住只读），不动设施健康位。
 			markFacilityUnhealthy(ex);
-			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+			if (hashTagOf(lease.key()) != null) {
+				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
+			}
 			log.debug("lease renew failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 			return RenewOutcome.UNAVAILABLE;
 		}
@@ -757,9 +767,16 @@ public class LeaseService {
 			return released != null && released > 0L;
 		}
 		catch (Exception ex) {
-			// 局部中断不宣布"设施坏了"：release 失败时进程内视图仍在（authority 仍按 HELD 回答），
-			// 唯一会受影响的是"同实例别的未持租轮次"，那正是本判据要保护的对象。
+			// run 租约保留进程内视图与 fencing 墓碑；资源锁不参与 authority，失败后立即忘掉这一任，
+			// 周期任务的唯一 owner 因此不会随扫描次数在 held/ended 中累积。Redis 键仍由原 TTL 收敛。
 			markFacilityUnhealthy(ex);
+			if (hashTagOf(lease.key()) == null) {
+				String viewKey = viewKey(lease.key(), lease.owner());
+				if (this.held.remove(viewKey, lease)) {
+					stopDrivingExact(viewKey);
+				}
+				this.ended.remove(viewKey);
+			}
 			log.debug("lease release failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;
 		}

@@ -47,7 +47,7 @@ import { TaskSteps } from '@/types/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
-import { UI_HANDOFF_TOOLS, findFrontendTool } from '@/types/tools'
+import { FRONTEND_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
@@ -184,10 +184,13 @@ let pendingAttachRunId: string | null = null
 let sessionGate: Promise<string> | null = null
 let sessionGateFingerprint: string | null = null
 let sessionGateToken = 0
-/** 所有权探活的单飞句柄（面板挂载 + 发号成功补判可能同时触发）。 */
-let ownershipProbe: Promise<void> | null = null
+/** 会话现场代次：复制清理/主动换会话后，旧代次的异步回包与回调一律失效。 */
+let sessionEpoch = 0
+/** 所有权探活只在同一会话、同一现场代次内单飞。 */
+let ownershipProbe: { sessionId: string; epoch: number; task: Promise<void> } | null = null
 /** 目录加载单飞句柄（`ensureSession` 在需要身份时等待它，而不是让面板阻塞启动）。 */
 let directoryGate: Promise<void> | null = null
+let directoryGateEpoch = -1
 /**
  * 当前预览计划对应的表格上下文（模块级：不进响应式状态）。
  *
@@ -267,10 +270,12 @@ interface RoundGuard {
   sessionId: string | null
   epoch: number
   runId: string | null
+  /** 帧来自接管/续收通道；有副作用工具的恢复只认持久台账或后端明确事实。 */
+  recovery?: boolean
 }
 
-function captureRound(sessionId: string | null, runId: string | null): RoundGuard {
-  return { sessionId, epoch: roundEpoch, runId }
+function captureRound(sessionId: string | null, runId: string | null, recovery = false): RoundGuard {
+  return { sessionId, epoch: roundEpoch, runId, recovery }
 }
 
 /**
@@ -303,6 +308,32 @@ function recordRunSeq(runSeqs: Record<string, number>, runId: string, seq: numbe
   return Object.fromEntries(
     ids.slice(-RUN_SEQ_MAX_RUNS).map((id) => [id, runSeqs[id] as number] as const)
   )
+}
+
+/**
+ * 本页签该 run **实际已应用**的最大帧序号（回放锚点）。
+ *
+ * <p>为什么不能用服务端 `runs/current.archiveMaxSeq`：那是"归档里最大的号"，不是"本页签收到的号"。
+ * 刷新/重挂时以它当 `lastSeq`，服务端会跳过本端从未收到的 `suspended` / `confirm_request` /
+ * `frontend_tool_request` —— 挂起卡恢复不出来、无卡的自动前端工具永远不执行（后端只能等超时）。
+ * 本函数只回答"本页签确实处理过哪些帧"：`runSeq`（按 run 记录的应用台账，随镜像落盘）+ 各消息的
+ * `appliedSeqs`（同一份事实的按消息视图，取最大值即可 —— 帧去重仍按单帧序号判定）。
+ *
+ * @returns 0 = 本端锚点未知；调用方不得因此清空既有段或把旧请求帧当成首次执行
+ */
+function appliedSeqOfRun(runSeq: Record<string, number>, messages: ChatMessage[], runId: string): number {
+  let applied = runSeq[runId] ?? 0
+  for (const message of messages) {
+    if (message.runId !== runId || !Array.isArray(message.appliedSeqs)) {
+      continue
+    }
+    for (const seq of message.appliedSeqs) {
+      if (seq > applied) {
+        applied = seq
+      }
+    }
+  }
+  return applied
 }
 
 /**
@@ -640,6 +671,7 @@ function newClientRequestId(): string {
  */
 const CLIENT_REQUEST_CANCEL_MAX = 16
 const clientRequestCancelSent = new Set<string>()
+const clientRequestCancelInFlight = new Map<string, Promise<void>>()
 
 function beginClientRequestCancel(clientRequestId: string): boolean {
   if (clientRequestCancelSent.has(clientRequestId)) {
@@ -667,6 +699,63 @@ function beginTombstoneRecancel(runId: string): boolean {
     }
   }
   return true
+}
+
+const STOP_RUN_PREFIX = 'ai-stopped-run:'
+const STOP_RUN_TTL_MS = 24 * 60 * 60 * 1000
+
+function stoppedRunKey(sessionId: string, runId: string, identity: AiIdentity | null): string {
+  const fingerprint = identity === null ? '' : identityFingerprint(identity)
+  return `${STOP_RUN_PREFIX}${[fingerprint, sessionId, runId].map((part) => encodeURIComponent(part)).join(':')}`
+}
+
+function rememberStoppedRun(sessionId: string, runId: string, identity: AiIdentity | null): void {
+  if (sessionId === '') {
+    return
+  }
+  try {
+    localStorage.setItem(stoppedRunKey(sessionId, runId, identity), JSON.stringify({ at: Date.now() }))
+  } catch {
+    // 当前页签的镜像仍是停止事实的兜底持久面。
+  }
+}
+
+function hasStoppedRun(sessionId: string, runId: string, identity: AiIdentity | null): boolean {
+  if (sessionId === '') {
+    return false
+  }
+  const key = stoppedRunKey(sessionId, runId, identity)
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === null) {
+      return false
+    }
+    const value = JSON.parse(raw) as { at?: unknown }
+    if (typeof value.at !== 'number' || Date.now() - value.at > STOP_RUN_TTL_MS) {
+      localStorage.removeItem(key)
+      return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function clearStoppedRuns(sessionId: string, identity: AiIdentity | null): void {
+  const fingerprint = identity === null ? '' : identityFingerprint(identity)
+  const prefix = `${STOP_RUN_PREFIX}${encodeURIComponent(fingerprint)}:${encodeURIComponent(sessionId)}:`
+  try {
+    const keys: string[] = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(prefix)) {
+        keys.push(key)
+      }
+    }
+    keys.forEach((key) => localStorage.removeItem(key))
+  } catch {
+    // 被销毁会话的 id 不复用；失败不影响新会话。
+  }
 }
 
 /**
@@ -1770,12 +1859,18 @@ const frontendToolChains = new Map<string, Promise<void>>()
 function enqueueFrontendTool(
   messageId: string,
   stillCurrent: () => boolean,
-  run: () => Promise<void>,
+  // 执行体可带返回值（`runFrontendToolAttempt` 回"回灌是否受理"）：队列本身只关心"排到即执行"，
+  // 返回值由执行体自己的收尾（`onSettled` / `.then`）消费。
+  run: () => Promise<unknown>,
   onSettled?: () => void
 ): void {
   const previous = frontendToolChains.get(messageId) ?? Promise.resolve()
   const settled = previous
-    .then(() => (stillCurrent() ? run() : undefined))
+    .then(async () => {
+      if (stillCurrent()) {
+        await run()
+      }
+    })
     .catch(() => undefined)
     .finally(() => {
       // #2（2026-10-31）：入队占位（执行中 toolCallId 去重）必须在**结算**时释放 ——
@@ -1802,143 +1897,205 @@ function clearFrontendToolChains(): void {
   frontendToolChains.clear()
 }
 
-/**
- * 回放保留的"本轮已决 toolCallId"（刷新恢复 #1，2026-10-31 阻断）。
- *
- * <p>`restoreInFlightRound` 必须**清段 + lastSeq=0 全量重放**（镜像正文滞后，增量续收必缺口）。
- * 但段一清，重放回来的 `frontend_tool_request` 就读不到"这条工具已经成功过"——
- * `hasDecidedPendingResidue` 读段读不到 ⇒ **二次真实执行**：第二次页面往往未就绪 ⇒ 本地 failed
- * 覆盖 succeeded（用户实测 `select_definitions` / `set_condition` 刷新后显示失败，实际第一次成功），
- * `confirm_step` 这类写工具甚至会真的再推进一次。
- *
- * <p>口径：清段**前**把已决 id 记到旁路（**只记 id、不保留段** —— 保留段会让正文/卡片重复拼接、
- * 顺序错乱），重放期间由 `hasDecidedPendingResidue` 并入判定。作用域 = 该 run（记录带 runId，
- * 只在 `activeRunId` 仍是它时生效）⇒ 不跨 run 生效；换会话 / 停止即清理。
- */
-const replayedDecidedToolCalls = new Map<string, { runId: string; toolCallIds: Set<string> }>()
-
-function rememberReplayedDecidedTools(messageId: string, runId: string, toolCallIds: string[]): void {
-  const unique = [...new Set(toolCallIds)]
-  if (unique.length === 0) {
-    replayedDecidedToolCalls.delete(messageId)
-    return
-  }
-  replayedDecidedToolCalls.set(messageId, { runId, toolCallIds: new Set(unique) })
-}
-
-function clearReplayedDecidedTools(): void {
-  replayedDecidedToolCalls.clear()
-}
-
-/**
- * 执行中的前端工具 toolCallId（回灌窗口去重 #2）。
- *
- * <p>P03 起回灌 POST 受理前段仍是 `running`（这样"停止"能取消它），于是重复投递 / 重连重放的
- * `frontend_tool_request` **不再被段状态挡住** —— 同 id 会再跑一遍（二次浏览器副作用，
- * `confirm_step` 会二次推进）。占位范围 = 执行 → 回灌受理；结束（含异常）即释放。
- */
+/** 同一页签内同一 toolCallId 的执行/回灌单飞占位。 */
 const frontendToolsInFlight = new Set<string>()
 
-/**
- * 执行器**未预期异常**时的回灌/落卡文案（F4）。
- *
- * <p>与"超时"分开说：这是确定性失败（执行器抛错，本次未完成），文案要可行动（提示模型让用户手动重试），
- * 且不含任何内部栈/技术措辞。
- */
 const EXECUTOR_CRASH_TEXT = '前端工具执行异常，本次未完成。请提示用户手动重试'
+const UNCERTAIN_RECOVERY_TEXT = '恢复时无法确认此前是否已执行；本页签没有再次执行，请人工核对后再继续。'
 
-/**
- * 刷新回放期间的后端条目事实（F6 残留，2026-11-01）。
- *
- * <h2>为什么还需要它</h2>
- * 上一轮的两道防线都只覆盖"本地知道这条已决"的情形：
- * <ul>
- * <li>旁路保留的已决 id（{@link replayedDecidedToolCalls}）—— 段在本地是 `running` 时不是已决，
- *   进不去；</li>
- * <li>执行中占位（{@link frontendToolsInFlight}）—— 内存态，刷新即空。</li>
- * </ul>
- * 于是"工具已经真的执行完、但回灌 POST 还在途 / 结果帧还没到"的刷新现场，重放会**再执行一遍**
- * （`confirm_step` 二次推进、`set_condition` 二次落库），而 409 只能拒绝回灌、撤不回副作用。
- * 唯一能证明"这条已经执行过"的外部事实是后端快照：`runs/current.pendingEntries` 里该条目
- * **已非 PENDING**。故重放前把这份事实记下来，逐条（按 toolCallId）对账 —— 已决的只补展示。
- *
- * <p>`trusted === false`（拿不到条目清单 / 形状不可信）：本页签无法证明任何写工具是否已经执行过
- * ⇒ 重放期间**保守不执行有副作用的工具**，并给一条可恢复提示（宁可少做、绝不多做）。
- */
-interface ReplayToolFacts {
+interface FrontendToolJournalEntry {
+  token: string
+  sessionId: string
   runId: string
-  /** 后端快照里**已非 PENDING** 的 toolCallId（权威已决） */
-  decided: Set<string>
-  /** 条目清单是否可用（false = 读不到 ⇒ 写工具一律不执行） */
-  trusted: boolean
+  toolCallId: string
+  state: 'claimed' | 'completed'
+  updatedAt: number
+  result?: string
+  outcome?: ToolOutcome
+  sheetMeta?: SheetToolMeta
+  code?: string
 }
 
-let replayToolFacts: ReplayToolFacts | null = null
+const FRONTEND_TOOL_JOURNAL_PREFIX = 'ai-frontend-tool:'
+const FRONTEND_TOOL_JOURNAL_TTL_MS = 24 * 60 * 60 * 1000
 
-function replayFactsOf(runId: string, entries: AiRunCurrentEntry[] | undefined): ReplayToolFacts {
-  if (!Array.isArray(entries)) {
-    return { runId, decided: new Set(), trusted: false }
+function frontendToolJournalKey(
+  identity: AiIdentity | null,
+  sessionId: string,
+  runId: string,
+  toolCallId: string
+): string {
+  const fingerprint = identity === null ? '' : identityFingerprint(identity)
+  return `${FRONTEND_TOOL_JOURNAL_PREFIX}${[fingerprint, sessionId, runId, toolCallId]
+    .map((part) => encodeURIComponent(part)).join(':')}`
+}
+
+function readFrontendToolJournal(
+  identity: AiIdentity | null,
+  sessionId: string,
+  runId: string,
+  toolCallId: string
+): FrontendToolJournalEntry | null {
+  if (sessionId === '') {
+    return null
   }
-  return {
-    runId,
-    decided: new Set(
-      entries
-        .filter((item) => item !== null && item !== undefined
-          && typeof item.toolCallId === 'string' && item.toolCallId !== '')
-        .filter((item) => item.entryStatus !== 'PENDING')
-        .map((item) => item.toolCallId)
-    ),
-    trusted: true
+  const key = frontendToolJournalKey(identity, sessionId, runId, toolCallId)
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw === null) {
+      return null
+    }
+    const value = JSON.parse(raw) as Partial<FrontendToolJournalEntry>
+    if (value.sessionId !== sessionId || value.runId !== runId || value.toolCallId !== toolCallId
+      || (value.state !== 'claimed' && value.state !== 'completed') || typeof value.token !== 'string'
+      || typeof value.updatedAt !== 'number') {
+      return null
+    }
+    if (value.state === 'completed' && (typeof value.result !== 'string'
+      || !['ok', 'failed', 'rejected', 'blocked', 'timeout', 'cancelled', 'unknown', 'skipped']
+        .includes(value.outcome ?? ''))) {
+      return null
+    }
+    if (Date.now() - value.updatedAt > FRONTEND_TOOL_JOURNAL_TTL_MS) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return value as FrontendToolJournalEntry
+  } catch {
+    return null
   }
 }
 
-function clearReplayToolFacts(): void {
-  replayToolFacts = null
-}
-
-/**
- * 有副作用的工具名（重放期间"无法证明已执行"时一律不执行）。
- *
- * <p>两份来源：工作区动作表里的写动作（`select_definitions` / `set_condition` / `confirm_step`
- * 及其蓝本别名 —— 它们不在 `FRONTEND_TOOLS` 里），以及 `FRONTEND_TOOLS` 中 `riskLevel !== 'READ'`
- * 的登记工具。只读工具不在此列：保守策略不该把"读一读"也停掉。
- */
-const SIDE_EFFECT_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'select_definitions',
-  'select_config_defs',
-  'set_condition',
-  'set_query_conditions',
-  'confirm_step',
-  'goto_step',
-  'advance_step'
-])
-
-function isSideEffectFrontendTool(name: string): boolean {
-  if (SIDE_EFFECT_TOOL_NAMES.has(name)) {
+function writeFrontendToolJournal(entry: FrontendToolJournalEntry, identity: AiIdentity | null): boolean {
+  if (entry.sessionId === '') {
+    return false
+  }
+  try {
+    localStorage.setItem(
+      frontendToolJournalKey(identity, entry.sessionId, entry.runId, entry.toolCallId),
+      JSON.stringify(entry)
+    )
     return true
+  } catch {
+    // 存储不可用时仍由 Web Locks 与页签内占位防重；不得因此伪造执行事实。
+    return false
   }
-  const descriptor = findFrontendTool(name)
-  return descriptor !== null && descriptor.riskLevel !== 'READ'
 }
 
-/** 无快照事实时跳过的写工具回执（落段 + 回灌给模型）。 */
-const REPLAY_UNVERIFIED_RECEIPT = '刷新恢复时未能确认本轮工具的执行状态，已跳过本步以避免重复执行。'
-  + '请提示用户刷新页面后重试，或由用户手动完成这一步。'
+function clearFrontendToolJournals(sessionId: string, identity: AiIdentity | null): void {
+  const prefix = `${FRONTEND_TOOL_JOURNAL_PREFIX}${encodeURIComponent(identity === null ? '' : identityFingerprint(identity))}:${encodeURIComponent(sessionId)}:`
+  try {
+    const keys: string[] = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(prefix)) {
+        keys.push(key)
+      }
+    }
+    keys.forEach((key) => localStorage.removeItem(key))
+  } catch {
+    // 会话 id 不复用；清理失败不会污染新会话。
+  }
+}
 
-/** 同上的用户可见提示（可恢复：刷新后重试）。 */
-const REPLAY_UNVERIFIED_NOTICE = '刷新恢复时未取到本轮的执行快照，已跳过可能有副作用的操作；'
-  + '请刷新页面后重试。'
+interface RecoveryEntries {
+  trusted: boolean
+  byToolCallId: Map<string, AiRunCurrentEntry>
+}
 
-/** `confirm_step` 的三种到达名（工具名与两个蓝本别名，见 WORKSPACE_ACTION_ALIASES）。 */
+const recoveryEntriesByRun = new Map<string, RecoveryEntries>()
+
+function rememberRecoveryEntries(runId: string, entries: AiRunCurrentEntry[] | undefined): void {
+  recoveryEntriesByRun.set(runId, {
+    trusted: Array.isArray(entries),
+    byToolCallId: new Map((entries ?? []).map((entry) => [entry.toolCallId, entry]))
+  })
+}
+
+function clearRecoveryEntries(runId?: string): void {
+  if (runId === undefined) {
+    recoveryEntriesByRun.clear()
+  } else {
+    recoveryEntriesByRun.delete(runId)
+  }
+}
+
+type SnapshotExecutionFact = 'settled' | 'not-executed' | 'claimed' | 'unknown'
+
+function snapshotExecutionFact(entry: AiRunCurrentEntry | undefined): SnapshotExecutionFact {
+  if (!entry) {
+    return 'unknown'
+  }
+  if (entry.entryStatus !== 'PENDING') {
+    return 'settled'
+  }
+  const raw = entry as AiRunCurrentEntry & {
+    executed?: unknown
+    executedBy?: unknown
+    claimedAtMs?: unknown
+    claimedEpoch?: unknown
+  }
+  if (raw.executed === true || (typeof raw.executedBy === 'string' && raw.executedBy !== '')
+    || (typeof raw.claimedAtMs === 'number' && raw.claimedAtMs > 0)
+    || (typeof raw.claimedEpoch === 'number' && raw.claimedEpoch > 0)) {
+    return 'claimed'
+  }
+  // PENDING 且没有任何认领痕迹 = 仍在等首次执行。旧后端不透出 executed 时也必须保持这条路径，
+  // 不能把“字段缺失”误读成“此前可能执行过”。
+  return 'not-executed'
+}
+
+function replaySafeWithoutSnapshotFact(name: string): boolean {
+  if (name === 'download_export_files' || name === 'open_export_file_editor') {
+    return false
+  }
+  return FRONTEND_TOOLS.some((tool) => tool.name === name && tool.riskLevel === 'READ')
+}
+
+function snapshotTerminalStatus(entry: AiRunCurrentEntry): ToolRunStatus | 'approved' | null {
+  if (entry.entryStatus === 'PENDING' || entry.entryStatus === 'APPROVED') {
+    return frameStatusToPendingStatus(entry.entryStatus)
+  }
+  const outcome = (entry as AiRunCurrentEntry & { outcome?: unknown }).outcome
+  if (outcome === 'unknown') {
+    return 'unknown'
+  }
+  const mapped = outcomeStatus(outcome)
+  if (mapped !== null) {
+    return mapped
+  }
+  return frameStatusToPendingStatus(entry.entryStatus)
+}
+
+async function withFrontendToolFence<T>(
+  identity: AiIdentity | null,
+  sessionId: string,
+  runId: string,
+  toolCallId: string,
+  task: () => Promise<T>
+): Promise<{ acquired: boolean; value?: T; failed?: boolean }> {
+  const locks = lockManager()
+  if (!locks) {
+    // 没有硬互斥时不得自动执行；台账只记录结果，不能冒充 CAS。
+    return { acquired: false, failed: true }
+  }
+  const fingerprint = identity === null ? '' : identityFingerprint(identity)
+  const name = `ai-frontend-tool:${[fingerprint, sessionId, runId, toolCallId]
+    .map((part) => encodeURIComponent(part)).join(':')}`
+  try {
+    return await locks.request(name, { ifAvailable: true }, async (lock) => {
+      if (!lock) {
+        return { acquired: false }
+      }
+      return { acquired: true, value: await task() }
+    })
+  } catch {
+    return { acquired: false, failed: true }
+  }
+}
+
 const CONFIRM_STEP_TOOL_NAMES: ReadonlySet<string> = new Set(['confirm_step', 'goto_step', 'advance_step'])
 
-/**
- * 目标步骤是否**已经到达**（`confirm_step` 幂等判据，F6 残留 2026-11-01）。
- *
- * <p>步骤顺序取 {@link TaskSteps}：当前步骤 = 目标 ⇒ 已达；当前步骤在目标**之后**（或已是终态
- * `DONE`）⇒ 也已达（再推进只会后退或二次落库）；仍在前序步骤 ⇒ 未达。任一步骤不在本任务类型
- * 的顺序表里（含步骤未知）⇒ 未达 —— 判据不猜。
- */
 function stepAlreadyReached(
   current: string | null,
   target: string,
@@ -2481,6 +2638,14 @@ function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFr
   const beforeDecision = before?.decision
   const beforeDecidedAt = before?.decidedAt
   const beforeSubmittedValues = before?.submittedValues
+  // 本地未受理的 failed/unknown 不是后端终态；权威结局帧可以纠正它。
+  if (before && (before.status === 'failed' || before.status === 'unknown') && !hasTerminalEvidence(before)
+    && (frame.type === 'tool_result' || frame.type === 'frontend_tool_result' || frame.type === 'confirm_decision')) {
+    const index = message.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === toolCallId)
+    if (index >= 0) {
+      message.parts.splice(index, 1, { ...before, status: 'running', requiresAction: false })
+    }
+  }
   applyFrameToPartsRaw(message, frame)
   const after = findToolPart(message, toolCallId)
   if (!after) {
@@ -2983,6 +3148,21 @@ function isRestorablePendingEntry(entry: AiRunCurrentEntry): boolean {
 }
 
 /**
+ * 快照条目是否证明「本轮仍在等**本页签**的动作」（= 服务端会按 park 收流）。
+ *
+ * <p>与 {@link isRestorablePendingEntry} 的分界：后者回答"能不能重建出一张可点的卡"，本函数回答
+ * **连接语义**。自动前端工具（`navigate_to` / `select_definitions` 等）没有可重建的卡，但请求帧
+ * 已发、后端正等这一条的回灌 —— 不算它，`resumeSnapshotStream` 就会按"无人在等"建连：服务端
+ * park 收流后这条正常收尾被判成断流（误报"结果可能不完整"），且挂起态被判成空闲。
+ *
+ * <p>`req !== true` 不计入：请求帧还没发（或旧载荷缺键）时后端可能仍在跑工具，此时的断流要保留
+ * 自动重连（sse 的 `awaitingInput` 会关掉重连）。BACKEND 条目后端直接执行，同样不计入。
+ */
+function isAwaitingClientEntry(entry: AiRunCurrentEntry): boolean {
+  return entry.entryStatus === 'PENDING' && entry.req === true && entry.kind !== 'BACKEND'
+}
+
+/**
  * AI 可视可操作专项：上传入口的定位（显式 ref 优先，否则取区域声明的 `uploadEntry`）。
  *
  * 只在**已注册区域**里找：区域未注册 = 该页没有上传入口（不可见即不可操作）。
@@ -3290,6 +3470,8 @@ export const useAiStore = defineStore('ai', {
      * 而不是按名字猜（见 {@link buildHistoryMessages} 的 `pairingEntries`）。
      */
     historyWindowEntries: markRaw([]) as AiHistoryMessage[],
+    /** 本次历史读取的不可变快照；更早页只从它切片，不再使用可变服务端 offset。 */
+    historySnapshotEntries: markRaw([]) as AiHistoryMessage[],
     /**
      * B4：最近一次**已提交**压缩事实的 eventId（`context{committed:true,eventId}`）。
      * 供面板把「压缩完成」播报绑定到真实提交事实，而不是紫色退场（未提交/失败/停止也会退场）。
@@ -3737,7 +3919,8 @@ export const useAiStore = defineStore('ai', {
      */
     notePreparingState(runId: string, elapsedMs: number | null): void {
       // 问题3/8：已停止的轮不进入"准备中"（否则 loading 重新锁输入、自动恢复再把它接回来）。
-      if (this.stopped || this.stoppedRunId === runId) {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
         return
       }
       this.restoredPendingQueue = []
@@ -4001,8 +4184,12 @@ export const useAiStore = defineStore('ai', {
         return
       }
       workspaceSyncStarted = true
+      const subscribedEpoch = sessionEpoch
       workspaceSyncStops.push(
         onWorkspaceEvent('ui_event_result', (payload) => {
+          if (subscribedEpoch !== sessionEpoch) {
+            return
+          }
           const record = payload as { event?: unknown; handled?: unknown; message?: unknown } | null
           if (!record || typeof record.event !== 'string') {
             return
@@ -4030,13 +4217,21 @@ export const useAiStore = defineStore('ai', {
 
     /** 探测 AI 可用性（不可用时后端 503 + 同一个体，属正常语义）。 */
     async probeHealth(): Promise<void> {
+      const entryEpoch = sessionEpoch
       try {
-        this.health = await aiApi.health()
+        const health = await aiApi.health()
+        if (entryEpoch !== sessionEpoch) {
+          return
+        }
+        this.health = health
         this.healthError = null
         // AI 表格工具治理批（§2.5）：把管理员的有效上界下发到前端采样的"下笔之前"。
         // 取不到 / 旧后端 ⇒ 传 undefined 回到硬顶兜底（20/5），与治理批之前逐字等价。
         setSheetPolicy(this.health?.sheet ?? null)
       } catch (error) {
+        if (entryEpoch !== sessionEpoch) {
+          return
+        }
         this.health = null
         this.healthError = error instanceof Error ? error.message : translate('ai.notice.healthProbeFailed')
         // N-1（R3）：原文只进 DEV 日志（`healthError` 也是诊断字段）—— 探针失败本身不再上屏，
@@ -4074,6 +4269,10 @@ export const useAiStore = defineStore('ai', {
      * </ul>
      */
     async loadContext(): Promise<void> {
+      const ownership = this.ensureTabOwnership()
+      if (ownership !== null) {
+        await ownership
+      }
       // Task 4 引导门：没有后端发号的会话就**不发请求**（空 id 一律不落网）。
       // 已就绪时**不**多切一个 microtask（既有调用时序/同步断言不变）。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
@@ -4110,6 +4309,10 @@ export const useAiStore = defineStore('ai', {
      * 分支，逐个补复位必然会漏一个（漏掉就是"永久恢复中"）。`loadHistoryInner` 只管取数与落盘。
      */
     async loadHistory(): Promise<void> {
+      const ownership = this.ensureTabOwnership()
+      if (ownership !== null) {
+        await ownership
+      }
       // Task 4 引导门：history 必须先有后端发号的会话（空 id 不发请求）。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
         this.historyLoaded = true
@@ -4159,6 +4362,15 @@ export const useAiStore = defineStore('ai', {
       // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
       const mirrorInFlight = !inFlightAtEntry && mirror?.inFlight === true
       const mirrorRunSeq = mirror?.runSeq ?? {}
+      /**
+       * ⑦ 快捷动作的"镜像证据"：本页签镜像**被本次恢复采用**，且写它时**没有在途轮**
+       * （`inFlight` 为真 = 正在流式 / 挂起 / 断流）。镜像的读取侧会把消息一律归一成 `done`，
+       * 所以"done"本身不是完成证据 —— 只有"镜像口径非在途"才说明最后一轮是正常收尾。
+       * 镜像缺失/不采用（旧版本、隐私模式、读失败）⇒ 不出证据：宁可不出建议，也不误报
+       * （错误轮在无镜像时与正常轮在载荷上无法区分）。
+       */
+      const mirrorProvesCompleted = !inFlightAtEntry && mirror !== null
+        && isCurrentMirror(mirror) && mirror.messages.length > 0 && mirror.inFlight === false
       /** 归一后的镜像消息快照（G3 合并要用 —— this.messages 随后会被历史整体替换） */
       let mirrorMessages: ChatMessage[] = []
       // 当前协议且结构完整才用镜像；旧版本 / 损坏镜像直接丢弃（服务端 history 会重建）。
@@ -4226,33 +4438,9 @@ export const useAiStore = defineStore('ai', {
       }
 
       let history: AiHistory
-      /** 本次历史窗口在服务端条目列表中的起始下标（0 = 从头取，即已到最早）。 */
-      let pageOffset = 0
-      /** 后端是否真的支持 offset/limit（旧后端忽略 limit 时按"本次即全量"处理）。 */
-      let paginationSupported = true
       try {
-        // 首屏探测只取 1 条（仅为拿 total，避免先拖一整页再丢弃）；随后取最近一页。
-        const probe = await aiApi.history(this.sessionId, { offset: 0, limit: 1 })
-        const probeCount = probe.messages?.length ?? 0
-        const total = typeof probe.total === 'number' ? probe.total : probeCount
-        if (probeCount > 1) {
-          // 旧后端忽略 limit，直接把全量塞回来 ⇒ 不支持分页：本次即全量，不再二次请求。
-          history = probe
-          paginationSupported = false
-        } else if (total <= 1) {
-          history = probe
-        } else if (total > HISTORY_PAGE_SIZE) {
-          const start = total - HISTORY_PAGE_SIZE
-          history = await aiApi.history(this.sessionId, { offset: start, limit: HISTORY_PAGE_SIZE })
-          pageOffset = start
-        } else {
-          history = await aiApi.history(this.sessionId, { offset: 0, limit: HISTORY_PAGE_SIZE })
-        }
-        if (paginationSupported && (history.messages?.length ?? 0) > HISTORY_PAGE_SIZE) {
-          // 第二道闸：分页请求仍返回超页（服务端忽略 limit）⇒ 按全量处理，绝不二次全量取。
-          pageOffset = 0
-          paginationSupported = false
-        }
+        // 一次读取即本次恢复的固定快照；分页只在快照内切片，避免追加写让 offset 漏重。
+        history = await aiApi.history(this.sessionId)
       } catch (error) {
         if (this.sessionId !== sid) {
           return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
@@ -4308,17 +4496,18 @@ export const useAiStore = defineStore('ai', {
       // 批次2：历史拿到了 ⇒ 历史错误与"历史不可用"类缺口一并作废（归档缺口可能在续收时另行检出）
       this.historyError = null
       this.recoveryGap = null
+      const snapshotEntries = [...(history.messages ?? [])]
+      const pageOffset = Math.max(0, snapshotEntries.length - HISTORY_PAGE_SIZE)
+      const pageEntries = snapshotEntries.slice(pageOffset, pageOffset + HISTORY_PAGE_SIZE)
       // B5：容量裁剪标记来自服务端；只在消息流顶部渲染中性提示，不伪造压缩事件
       this.historyTruncated = history.truncated === true
-      // 分页：首屏窗口 = 最近一页；旧后端无分页（或忽略 limit）时按"本次即全量"处理。
-      this.historyTotal = typeof history.total === 'number'
-        ? history.total
-        : pageOffset + (history.messages?.length ?? 0)
+      this.historyTotal = snapshotEntries.length
       this.historyOffset = pageOffset
-      this.historyHasMore = paginationSupported && (history.hasMore === true || pageOffset > 0)
+      this.historyHasMore = pageOffset > 0
       this.historyEvents = history.events ?? []
-      // 跨页配对用原始条目窗口（含 TOOL）；「加载更早」把它当附加配对窗口。
-      this.historyWindowEntries = markRaw(history.messages ?? [])
+      this.historySnapshotEntries = markRaw(snapshotEntries)
+      // 跨页配对只使用本次固定快照里的原始条目。
+      this.historyWindowEntries = markRaw(pageEntries)
 
       // 上下文专项批①：占用条在刷新后必须由服务端重建（本地 store 是内存态，刷新即丢）。
       // 与历史并行拉，不阻塞历史渲染（pill 慢一拍可接受，历史渲染慢一拍不可接受）。
@@ -4338,17 +4527,21 @@ export const useAiStore = defineStore('ai', {
         // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
         // 消除镜像/历史写入与挂起重建之间的写后写竞态）；后端不可达的 catch 分支不重建
         await this.restoreSnapshotGuarded()
+        // ④⑦ 快捷动作必须在快照恢复**之后**判定：此时 `loading` / `suspended` /
+        // `pendingAttachRunId` 才反映"当前轮是否仍在跑 / 挂起"。且必须有镜像的"正常收尾"证据
+        // （`mirrorProvesCompleted`）—— 镜像/历史里的 `done` 本身不构成完成证据。
+        this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
         return
       }
 
       // 分页：本页条目 → 展示消息（工具对账 / 幻影卡过滤 / 同轮 ASSISTANT 合并）。
-      const mergedMessages = this.buildHistoryMessages(history.messages, pageOffset)
+      const mergedMessages = this.buildHistoryMessages(pageEntries, pageOffset)
       // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
       // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
       // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
       this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
-      // 批次2：历史通道不带失败现场（errorCard/code/unconfirmed）—— 由镜像侧把它补回**同一轮**，
-      // 否则刷新后一次失败会被"历史整体替换"归一成一条完整回答（看起来像成功）。
+      // errorCard/code 可由历史 errorCode/errorMessage 直接重建；镜像再补回同一轮的其它结局标记，
+      // 避免刷新后一次失败被"历史整体替换"归一成一条完整回答（看起来像成功）。
       this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
       // B3：已提交压缩事实按 runId/anchor 恢复到 parts 时序（与实时帧同一 eventId 幂等）。
       // **必须在 runId 补写之后**：历史通道通常不带 runId，旧 `chat:mem` 数据更没有归属；
@@ -4359,6 +4552,72 @@ export const useAiStore = defineStore('ai', {
       // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
       // 消除历史整体替换与挂起重建之间的写后写竞态）
       await this.restoreSnapshotGuarded()
+      // ④⑦ 快捷动作（followupReady）是纯内存轮次态，刷新即丢：**在快照恢复之后**按最后一轮的
+      // 真实终态 + 镜像的"正常收尾"证据恢复 —— 挂起/运行中的当前轮此时已由 `suspended` /
+      // `loading` / `pendingAttachRunId` 表达，不会被"历史末条 done"误判成可出建议。
+      this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
+    },
+
+    /**
+     * ④⑦ 刷新后恢复"快捷动作可用"（{@link followupReady}）—— 该标记只活在内存，不落镜像。
+     *
+     * <p>判据（宁可不出，也不误导）：
+     * <ol>
+     * <li><b>证据</b>：`mirrorProvesCompleted` —— 本页签镜像被本次恢复采用且写盘时没有在途轮。
+     *   镜像读取侧会把消息一律归一成 `done`，所以"末条 done"不能当证据：`sealLeftoverInFlight`
+     *   封口的半截回答同样是 done。无镜像（隐私模式 / 旧版本 / 读失败 / 错误轮）一律不出建议。</li>
+     * <li><b>终态</b>：末条非 system 消息是 assistant 且 `done`，并排除停止（`stopped`）、
+     *   断流（`interrupted`）、状态未确认（`unconfirmed`）、缺口（`recoveryGap`）、错误
+     *   （`errorCard` / `code`）—— `sealLeftoverInFlight` 封的半截会带 `interrupted`，第二次刷新
+     *   也不会被当成正常完成。</li>
+     * <li><b>轮次现场干净</b>：不在运行（`loading`）、不在挂起等人（`suspended`）、没有接管/续收
+     *   在途（`pendingAttachRunId`）、未停止（`stopped`）、没有恢复失败现场（`currentError` /
+     *   `recoveryGap`）。</li>
+     * </ol>
+     *
+     * <p>调用点固定在 `restoreSnapshotGuarded()` **之后**：快照恢复会把挂起/在途事实写回这些位。
+     * 快捷动作的**内容**不在这里决定（面板的静态表），本方法只恢复"能不能出"。
+     */
+    restoreFollowupFromHistory(
+      mirrorProvesCompleted: boolean,
+      mirrorLastRunId: string | null = null,
+      mirrorMessages: ChatMessage[] = []
+    ): void {
+      if (!mirrorProvesCompleted) {
+        this.followupReady = false
+        return
+      }
+      const tail = [...this.messages].reverse().find((item) => item.role !== 'system')
+      if (!tail || tail.role !== 'assistant') {
+        // 末条不是助手（本轮还没答复 / 只有提问）⇒ 没有可承接的完成轮
+        this.followupReady = false
+        return
+      }
+      const mirrorTail = [...mirrorMessages].reverse().find((item) => item.role === 'assistant') ?? null
+      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
+      const historyUser = [...this.messages].reverse().find((item) => item.role === 'user') ?? null
+      const sameRoundWithoutRunId = tail.runId === undefined && mirrorTail?.runId === mirrorLastRunId
+        && mirrorUser !== null && historyUser !== null
+        && normalizeUserText(messageText(mirrorUser)) === normalizeUserText(messageText(historyUser))
+        && messageText(mirrorTail) === messageText(tail)
+      const completedNormally = tail.done === true
+        && typeof mirrorLastRunId === 'string'
+        && (tail.runId === mirrorLastRunId || sameRoundWithoutRunId)
+        && tail.stopped !== true
+        && tail.interrupted !== true
+        && tail.unconfirmed !== true
+        && tail.recoveryGap !== true
+        && tail.errorCard == null
+        && tail.code == null
+      this.followupReady = completedNormally
+        && !this.stopped
+        && !this.loading
+        && !this.suspended
+        // 接管/续收已在建连路上（`resumeSnapshotStream` 同步登记）：这一轮还没收口，不出建议
+        && pendingAttachRunId === null
+        // 恢复失败现场（快照/历史不可用）不是"正常结束"，不出建议
+        && this.currentError === null
+        && this.recoveryGap === null
     },
 
     /**
@@ -4492,6 +4751,9 @@ export const useAiStore = defineStore('ai', {
         // responsePool 摘除，因此这里过滤掉之后不会把"无主响应"错配给它后面的卡。
         const calls = (item.toolCalls ?? []).filter((call) => !(call.id && silentSystemRejectIds.has(call.id)))
         const blankText = (item.text ?? '').trim() === ''
+        const historyErrorCode = typeof item.errorCode === 'string' ? item.errorCode : ''
+        const historyErrorMessage = typeof item.errorMessage === 'string' ? item.errorMessage : ''
+        const hasHistoryError = historyErrorCode.trim() !== '' || historyErrorMessage.trim() !== ''
         // 全部调用都被隐藏（本条只剩幻影卡）⇒ 不补空 text 段：那会留下一个空气泡。
         const allCallsSilenced = (item.toolCalls ?? []).length > 0 && calls.length === 0
         const hasTextPart = !blankText || (calls.length === 0 && !allCallsSilenced)
@@ -4551,6 +4813,11 @@ export const useAiStore = defineStore('ai', {
               status: partStatus,
               args: call.arguments,
               result: null,
+              // ① 历史摘要：`/history.toolCallStates.preflight` 是后端在挂起写点与终态写点**同源**
+              // 落下的展示摘要（target / impact / conditionSummary / publishMode）—— 卡头、条件与
+              // 影响面据此渲染，与实时帧（confirm_request / suspended）同形。缺省（旧载荷 / 无预检的
+              // 工具）**不产生该键**，卡面回落原有形态（一字不动）。
+              ...(state?.preflight ? { preflight: state.preflight } : {}),
               // A10 R-15：持久化的模型侧截断元数据随历史响应回到段上（刷新后角标/本地化 hover）。
               ...historyTruncationFields(matched),
               requiresAction: false
@@ -4628,6 +4895,10 @@ export const useAiStore = defineStore('ai', {
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
+          ...(hasHistoryError ? {
+            code: historyErrorCode.trim() !== '' ? historyErrorCode : null,
+            errorCard: buildErrorCard(historyErrorCode, historyErrorMessage)
+          } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
           // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
@@ -4671,8 +4942,8 @@ export const useAiStore = defineStore('ai', {
       // 回填 result，遍历内联判定必误判）。闸（结构性判据）：被并条目的每个 toolCall 在原始历史窗口内
       // 存在可配对 TOOL 条目（id 相等；call.id 缺失时 name 相等；responseData=null 也算有回应）——
       // 与前端配对启发成败无关。悬空 A(T)（无任何可配对 TOOL）不并不吞、也不开窗（纵深防御，
-      // S0 实证该形态后端不可达，闸保留防旧镜像/未来形态）。drop：无 toolCalls 且 text 空的
-      // ASSISTANT 直接丢弃（防旧镜像空白块复活），丢弃同时断窗。
+      // S0 实证该形态后端不可达，闸保留防旧镜像/未来形态）。drop：无 toolCalls、text/思考为空
+      // 且无失败事实的 ASSISTANT 直接丢弃（防旧镜像空白块复活），丢弃同时断窗。
       const toolWindowEntries = pairingWindow.filter((item) => (item.type || '').toUpperCase() === 'TOOL')
       const hasPairableResponse = (call: { id?: string | null; name?: string }): boolean => {
         const callId = call.id ?? null
@@ -4701,6 +4972,20 @@ export const useAiStore = defineStore('ai', {
           const head = group[0] as ChatMessage
           head.parts = group.flatMap((member) => (member as ChatMessage).parts)
             .map((part, seg) => ({ ...part, seg })) as MessagePart[]
+          // ③ 真实终态不得随合并丢失：`stopped` / `truncated` 可能落在**后续**成员上（历史把一轮拆成
+          // 多条 ASSISTANT 条目）。只做单向 OR（缺键 → true），绝不用成员的"未终止"覆盖已终止事实。
+          if (group.some((member) => member.stopped === true)) {
+            head.stopped = true
+          }
+          if (group.some((member) => member.truncated === true)) {
+            head.truncated = true
+          }
+          for (const member of group) {
+            if (member.errorCard !== undefined || member.code !== undefined) {
+              head.errorCard = member.errorCard
+              head.code = member.code
+            }
+          }
           deriveProjections(head) // 拼接 + 重 seg 后重派生投影（content/toolRuns 随 parts）
           mergedMessages.push(head)
         }
@@ -4728,11 +5013,12 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         const calls = item.toolCalls ?? []
-        // 批次6A 返修：只带思考正文的 assistant 不是"空白条目"（历史思考要能展示），不得被丢弃。
+        // 只带思考正文或失败事实的 assistant 都不是可丢弃的"空白条目"。
         const blankReasoning = typeof item.reasoningContent !== 'string'
           || item.reasoningContent.trim().length === 0
-        if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning) {
-          flushGroup() // drop 规则：空白 ASSISTANT 丢弃且断窗
+        if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning
+          && message.errorCard == null && message.code == null) {
+          flushGroup() // drop 规则：无正文、无思考、无失败的 ASSISTANT 丢弃且断窗
           continue
         }
         // 闸：被并条目的每个 toolCall 须存在可配对 TOOL 条目（无 toolCalls 时恒真）
@@ -4829,42 +5115,33 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const sid = this.sessionId
+      const snapshot = this.historySnapshotEntries
       const start = Math.max(0, this.historyOffset - HISTORY_PAGE_SIZE)
       const limit = this.historyOffset - start
       this.historyPageLoading = true
       try {
-        const page = await aiApi.history(sid, { offset: start, limit })
-        // 会话已换 / 首屏窗口已被重载替换 ⇒ 这一页作废
-        if (this.sessionId !== sid || this.historyOffset !== start + limit) {
-          return
-        }
-        const pageMessages = page.messages ?? []
-        // 旧后端忽略 limit（返回超页）⇒ 不分页：停止入口，丢弃本页，避免 id 撞车/重复渲染。
-        if (pageMessages.length > limit) {
-          this.historyHasMore = false
+        const pageMessages = snapshot.slice(start, start + limit)
+        await Promise.resolve()
+        // 会话或固定快照已更换时，这次前插整体作废。
+        if (this.sessionId !== sid || this.historyOffset !== start + limit
+          || this.historySnapshotEntries !== snapshot) {
           return
         }
         const older = pageMessages.length > 0
           ? this.buildHistoryMessages(pageMessages, start, this.historyWindowEntries)
           : []
         this.prependHistoryMessages(older)
-        // 有返回就推进窗口（即便整页都是不产消息的系统条目，也算已消费）；空片不推进。
         if (pageMessages.length > 0) {
           this.historyOffset = start
           this.historyWindowEntries = markRaw([...pageMessages, ...this.historyWindowEntries])
         }
-        this.historyTotal = typeof page.total === 'number' ? page.total : this.historyTotal
-        // 空片（例如 transcript 已按容量裁过、旧 offset 越界）⇒ 停止再向前取，避免入口空转。
-        this.historyHasMore = pageMessages.length > 0
-          && (page.hasMore === true || start > 0)
-        // 事件恢复按新窗口再补一轮（eventId 全局幂等，不会重复落节点）
+        this.historyTotal = snapshot.length
+        this.historyHasMore = start > 0
         this.applyHistoryCompactionEvents(this.historyEvents)
       } catch (error) {
-        if (this.sessionId !== sid) {
-          return
+        if (this.sessionId === sid) {
+          setNotice(this, 'ai.notice.historyEarlierFailed', { message: errorText(error) }, 'error')
         }
-        // 失败可见且可重试：入口保留，用户再点一次即可。
-        setNotice(this, 'ai.notice.historyEarlierFailed', { message: errorText(error) }, 'error')
       } finally {
         this.historyPageLoading = false
       }
@@ -5119,6 +5396,11 @@ export const useAiStore = defineStore('ai', {
      * 串行呈现与实时路径一致：本函数**只重建第一张**，同批其余待决条目排进
      * `restoredPendingQueue`；当前卡决完后由 {@link revealNextRestoredPendingCard} 就地补下一张。
      * 未发卡条目不渲染、不新增占位 UI；`suspended` 只按可重建的待人卡置位。
+     *
+     * **续收锚点 = 本页签在该 run 上实际已应用的 seq**（{@link appliedSeqOfRun}），不是快照的
+     * `archiveMaxSeq`（服务端归档末号）：本端没收到的 `suspended` / 请求帧必须能补发回来。
+     * 连接语义的 `awaitingInput` 另算：无卡的自动前端工具（`navigate_to` 等）同样是 park
+     * （见 {@link isAwaitingClientEntry}），但**不**据此锁输入（`suspended` 仍只认待人卡）。
      */
     async restoreSuspendedSnapshot(): Promise<void> {
       // R4（2026-10-29）：**停止态不接受后端快照的挂起重建**。用户在 start 帧之前/之后停止后，
@@ -5202,6 +5484,11 @@ export const useAiStore = defineStore('ai', {
        * - 已取消 / 已不存在 ⇒ 正常收口（封口镜像里的在途宿主，不重连）；
        * - 仍在运行（cancel 之前没送达）⇒ **不自动接回**，只在既有取消通道上有界静默补一次。
        */
+      const sharedStop = current.found && current.runId !== null
+        && hasStoppedRun(sid, current.runId, this.sessionIdentity)
+      if (sharedStop && current.runId) {
+        this.stoppedRunId = current.runId
+      }
       const tombstoneRunId = this.stoppedRunId
       if (tombstoneRunId !== null && current.found && current.runId === tombstoneRunId) {
         this.sealLeftoverInFlight()
@@ -5258,7 +5545,9 @@ export const useAiStore = defineStore('ai', {
           && item.runId !== '')
         const recoveryRunId = inFlightHost?.runId ?? this.activeRunId
         // 问题8：墓碑指向本端已停的轮 ⇒ 不探测、不重挂；权威已找不到它，正常收口即可。
-        if (recoveryRunId && this.stoppedRunId !== null && recoveryRunId === this.stoppedRunId) {
+        if (recoveryRunId && ((this.stoppedRunId !== null && recoveryRunId === this.stoppedRunId)
+          || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity))) {
+          this.stoppedRunId = recoveryRunId
           this.sealLeftoverInFlight()
           return
         }
@@ -5269,7 +5558,8 @@ export const useAiStore = defineStore('ai', {
             return
           }
           // 问题3：探测窗口内已停止 ⇒ 旧现场整体丢弃（不排准备中、不重挂）。
-          if (this.stopped || this.stoppedRunId === recoveryRunId) {
+          if (this.stopped || this.stoppedRunId === recoveryRunId
+            || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity)) {
             return
           }
           if (probe.preparing) {
@@ -5282,10 +5572,14 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (probe.status === 200) {
-            // 探测期间快照已建立：交给正式重挂（全量回放最稳；镜像正文本就滞后）
+            // 探测期间快照已建立：交给正式重挂（全量回放最稳；镜像正文本就滞后）。
+            // probe 的 200 体带快照状态，但它**不**带待决条目：按 park 建连必须再加屏上证据
+            // （宿主确实挂着待人卡），否则无卡轮会被永久 park、静默收流（⑤）。
             void this.reattachActive(recoveryRunId, {
               hostMessageId: inFlightHost.id,
-              lastSeq: this.runSeq[recoveryRunId] ?? 0
+              lastSeq: this.runSeq[recoveryRunId] ?? 0,
+              awaitingInput: probe.snapshotStatus === 'SUSPENDED'
+                && this.hostHasPendingCard(inFlightHost.id)
             })
             return
           }
@@ -5300,25 +5594,27 @@ export const useAiStore = defineStore('ai', {
         this.sealLeftoverInFlight()
         return
       }
+      // 已决条目先对账，再决定是否续收：轮次已不等待外部输入时，本地 unknown/running 仍需要
+      // 被这份权威结局纠正；否则“重新载入”只刷新正文，卡片永远保持旧状态。
+      for (const entry of current.pendingEntries) {
+        if (entry.entryStatus === 'PENDING') {
+          continue
+        }
+        const mapped = snapshotTerminalStatus(entry)
+        const correctable = this.messages.some((item) => item.parts.some((part) => part.kind === 'tool'
+          && part.toolCallId === entry.toolCallId
+          && (part.status === 'running' || isFrameDecidedPendingStatus(part.status))))
+        if (mapped && correctable) {
+          this.applyFrontendToolTerminal(entry.toolCallId, mapped)
+        }
+      }
+
       if (!current.awaitingExternal) {
         // 批G · G2：**在途轮静默续收**。covers RUNNING（纯文本/工具执行中）与 SUSPENDED 但条目
         // 全决的中间态。用户看不到任何"重挂"概念：不弹横幅、不写占位文案、不出现 runId。
         // 不 await：续收是长连接，loadHistory 不能被它拖住（loading 已在分支内同步置位）。
         void this.restoreInFlightRound(current)
         return
-      }
-
-      // 已决条目收敛（不留 pending 残留）：快照里非 PENDING 的条目若本地仍有 pending/乐观
-      // cancelled 残留，按 frameStatusToPendingStatus 同口径就地收敛。applyFrontendToolTerminal
-      // 内部已做 kind/name 判定与 first-wins 单调，直接调即可
-      for (const entry of current.pendingEntries) {
-        if (entry.entryStatus === 'PENDING') {
-          continue
-        }
-        const mapped = frameStatusToPendingStatus(entry.entryStatus)
-        if (mapped && this.hasDecidedPendingResidue(entry.toolCallId)) {
-          this.applyFrontendToolTerminal(entry.toolCallId, mapped)
-        }
       }
 
       // 重建（M-2b）：PENDING + 真实待人卡 + req !== false（缺键 = 孤儿轮，可建）。
@@ -5329,69 +5625,128 @@ export const useAiStore = defineStore('ai', {
       const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
       const restorable = pendingEntries.filter(isRestorablePendingEntry)
       const first = restorable.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
+      // 连接语义与"能不能建卡"分开：自动前端工具（`navigate_to` 等）没有可重建的卡，但请求帧已发、
+      // 后端正等这一条的回灌 —— 仍属 park。少算它，服务端的正常收流会被判成断流并误报"结果可能不完整"。
+      // 已在本页签落定（本地已决残留）的条目不构成"有人在等"：awaitingInput 必须与**有效**条目一致，
+      // 否则会按永久 park 静默收流（⑤）。
       const awaitingInput = first !== null
+        || pendingEntries.some((entry) => isAwaitingClientEntry(entry)
+          && !this.hasDecidedPendingResidue(entry.toolCallId))
       if (pendingEntries.length > 0) {
         this.activeRunId = current.runId
       }
       // 只有真实可重建的待人卡才锁输入；自动工具/BACKEND/req=false 不制造假挂起。
-      this.suspended = awaitingInput
-      const host = first ? this.rebuildPendingCard(first, current.runId) : null
-      this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
-
-      if (host) {
-        // 增量续收：lastSeq = archiveMaxSeq 只收新帧（见 resumeSnapshotStream）
-        void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, host.id, awaitingInput)
-        return
-      }
-      // I-1（2026-10-21 收口修）：**无卡也要挂流** —— 没有可重建的卡不等于没有后续帧。
-      // 真实窗口：卡 1 已决 → 后端先执行卡 1 的工具（时长可达数秒～数分钟，期间快照仍 SUSPENDED、
-      // 卡 2 一直 `req=false`）→ 才轮到卡 2 发请求帧。刷新落在这段里时本函数此前直接返回 ⇒
-      // 卡 2 的请求帧无人接收（只入归档），页面停在没有入口的死胡同（只能停止或再刷新）。
-      // 现在照常以 `archiveMaxSeq` 挂上差量续收：请求帧到达即按实时路径建卡（`confirm_request`
-      // handler），不新增任何占位 UI。宿主消息在**首个帧到达时**由 `handleFrame` 惰性取当前助手消息
-      // （有则续写、无则创建），故不传 `hostMessageId` —— 空转期间不留空气泡。
-      // req=false 说明还有请求帧可期，不能当成已完成的 park 收流；这类恢复保留断流重连。
-      if (pendingEntries.length === 0) {
-        return
-      }
-      // 宿主只认**本轮**：优先 `findInFlightHost()`（最后一条用户消息之后的未收尾助手消息）；
-      // 其次是"**同一 runId** 的已封口宿主"（镜像里的本轮宿主被上一条终帧封口，续流要把它
-      // 重新置为活动态 —— 它自证归属，不是上一轮）。绝不回落到任意"最后一条助手消息"：
-      // 那可能是上一轮已收尾的回答，本轮帧会把它的正文续写/覆盖（污染上一轮，实证见 R2）。
+      this.suspended = first !== null
+      rememberRecoveryEntries(current.runId, current.pendingEntries)
+      const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, current.runId)
+      // 宿主只认本轮；绝不把新一轮帧写进上一轮已经完成的回答。
       const sameRunHost = [...this.messages].reverse().find(
         (item) => item.role === 'assistant' && item.runId === current.runId
       ) ?? null
       const inFlightHost = this.findInFlightHost() ?? sameRunHost
-      void this.resumeSnapshotStream(current.runId, current.archiveMaxSeq, inFlightHost?.id, awaitingInput)
+      // 老镜像没有帧锚点时，不能清段后全量重放。保留现有正文，从服务端已确认的位置继续，
+      // 并明确标出展示缺口；快照负责恢复待决卡，不把请求帧重放成副作用。
+      const resumeAnchor = appliedSeq > 0 ? appliedSeq : current.archiveMaxSeq
+      if (appliedSeq === 0 && inFlightHost !== null && current.archiveMaxSeq > 0) {
+        inFlightHost.recoveryGap = true
+
+      }
+      const host = first ? this.rebuildPendingCard(first, current.runId) : null
+      this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
+      if (pendingEntries.length > 0) {
+        this.drivePendingFrontendTools(current.runId, pendingEntries, host?.id ?? inFlightHost?.id)
+      }
+      if (host) {
+        void this.resumeSnapshotStream(current.runId, resumeAnchor, host.id, awaitingInput)
+        return
+      }
+      if (pendingEntries.length === 0) {
+        return
+      }
+      void this.resumeSnapshotStream(current.runId, resumeAnchor, inFlightHost?.id, awaitingInput)
     },
 
-    /**
-     * 批G · G2：**在途轮静默续收**（刷新恢复的核心）。
-     *
-     * <p>
-     * 判据来自 {@code /runs/current}（G1 起 RUNNING 也写索引）：`found && !awaitingExternal`。
-     * 行为：找宿主助手消息 → **清空其段** → `lastSeq=0` 全量重放 → 接着收实时帧。为什么全量而
-     * 不是增量：镜像正文/卡片受节流窗口影响本就滞后（实证 A2：镜像 0 字、DOM 154 字），
-     * 拿本地位点续收会缺口；归档回放的完整性已由实证 B2/E 验过。
-     *
-     * <p>
-     * **全程无横幅、无占位文案、无 runId**：用户看到的只是"那条回答继续写下去"。
-     */
+    /** 快照中的自动前端工具只按可证明事实恢复；没有“按名称补跑”的通道。 */
+    drivePendingFrontendTools(
+      runId: string,
+      entries: readonly AiRunCurrentEntry[],
+      fallbackHostId?: string
+    ): number {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
+        return 0
+      }
+      let driven = 0
+      for (const entry of entries) {
+        if (entry.entryStatus !== 'PENDING' || entry.kind !== 'FRONTEND'
+          || entry.req !== true || isRestorablePendingEntry(entry)) {
+          continue
+        }
+        const toolCallId = entry.toolCallId
+        if (this.hasDecidedPendingResidue(toolCallId) || frontendToolsInFlight.has(toolCallId)) {
+          continue
+        }
+        const journal = readFrontendToolJournal(this.sessionIdentity, this.sessionId, runId, toolCallId)
+        const fact = snapshotExecutionFact(entry)
+        const frame = {
+          type: 'frontend_tool_request',
+          runId,
+          toolCallId,
+          name: entry.name,
+          ...(typeof entry.arguments === 'string' ? { args: entry.arguments } : {})
+        } as Extract<SseFrame, { type: 'frontend_tool_request' }>
+        // 已有认领说明执行权在别处；没有真实结果可供本页签结算时不得抢跑。
+        if (journal?.state !== 'completed' && fact === 'claimed') {
+          continue
+        }
+        const host = this.messages.find((item) => item.parts.some(
+          (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
+        ))
+          ?? (fallbackHostId
+            ? this.messages.find((item) => item.id === fallbackHostId && item.role === 'assistant')
+            : undefined)
+          ?? this.findInFlightHost()
+          ?? this.messages.find((item) => item.role === 'assistant' && item.runId === runId)
+          ?? this.appendAssistantMessage('')
+        host.runId = runId
+        const existing = findToolPart(host, toolCallId)
+        if (existing !== null) {
+          this.upsertToolPart(host, {
+            toolCallId,
+            name: entry.name,
+            kind2: 'FRONTEND',
+            args: entry.arguments ?? existing.args,
+            requiresAction: false
+          }, false)
+          deriveProjections(host)
+        }
+        const round = captureRound(this.sessionId, runId, true)
+        frontendToolsInFlight.add(toolCallId)
+        enqueueFrontendTool(
+          host.id,
+          () => stillSameRound(round, this.sessionId, this.activeRunId ?? null),
+          () => this.runFrontendToolAttempt(host, frame, round),
+          () => frontendToolsInFlight.delete(toolCallId)
+        )
+        // 自动前端工具只让后端等待回灌，不在面板伪造一张“待人确认”的挂起态。
+        driven += 1
+      }
+      return driven
+    },
+
+    /** 在途轮续收只补有序差量；既有历史/镜像段永不清空后重放。 */
     async restoreInFlightRound(current: AiRunCurrent): Promise<void> {
       const runId = current.runId
       if (!runId) {
         return
       }
-      /**
-       * 问题3/8：停止轮与停止墓碑都不得被这条静默续收路径接回来 —— 本函数会清段重放、
-       * 复位 `stopped` 并重新锁输入。已停的轮只封口，不新建连接。
-       */
-      if (this.stopped || this.stoppedRunId === runId) {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
+        this.stoppedRunId = runId
         this.sealLeftoverInFlight()
         return
       }
       if (isTerminalRunStatus(current.snapshotStatus)) {
-        // 索引尚未被终态清掉（竞态窗口）：不是在途轮，封口即走
         this.sealLeftoverInFlight()
         return
       }
@@ -5400,53 +5755,23 @@ export const useAiStore = defineStore('ai', {
       this.streamInterrupted = false
       this.suspended = false
       this.loading = true
-      // M08（single-flight）：这一轮已经有活动续收连接在写（另一恢复入口先到）——
-      // 不重复建连接，也不清段重放：清掉之后新连接不会补发已收过的帧，正文会停在空白。
-      // M08-R2：驱动权在别处或预算已用尽时同样不动（本函数下面会先清段再全量重放，
-      // 清完却被挡下等于把正文留在空白）。
       if (this.canJoinRunStream(runId) || !this.canDriveRunStream(runId)) {
         return
       }
       let host = this.findInFlightHost()
       if (!host) {
-        // 本轮在消息里没有宿主（如第 2 轮刚开、历史只到本轮的提问、镜像未落盘）：**新建**空宿主
-        // 继续收 —— 绝不回落到已收尾的上一轮（R2 修 2，见 findInFlightHost）
         host = this.appendAssistantMessage('')
       }
-      // 批次2：在途恢复的宿主归属该 run（重试入口只认 message.runId）
       host.runId = runId
-      // 接管/续收 = 这一轮又有活的驱动：上一段断流事实作废（续跑成功不得留着「继续」）
       delete host.interrupted
-      // #1（2026-10-31 阻断）：清段前把本轮**已决**的 toolCallId 记到旁路（只记 id、不留段）。
-      // 重放回来的 `frontend_tool_request` 据此零执行/零回灌；段仍必须清空 —— 保留段会让正文与
-      // 卡片重复拼接、段序错乱。资格按 run 记账（换 run / 换会话即不生效）。
-      rememberReplayedDecidedTools(
-        host.id,
-        runId,
-        host.parts.flatMap((part) =>
-          part.kind === 'tool' && isFrameDecidedPendingStatus(part.status)
-            // 清段前不得把历史占位 succeeded 记成"回放已决"（它只表示状态未知，重放要能重建）。
-            && !isHistoryPlaceholderStatus(part.toolCallId, part.status)
-            ? [part.toolCallId]
-            : []
-        )
-      )
-      // F6 残留（2026-11-01）：本地段仍 `running`（执行完但回灌在途 / 结果帧未到）时旁路里没有它，
-      // 唯一能证明"已经执行过"的是后端快照。按 toolCallId 逐条记下**已非 PENDING** 的条目 ——
-      // 重放时它们只补展示、不再执行；条目清单不可用则记 untrusted（写工具一律不执行）。
-      replayToolFacts = replayFactsOf(runId, current.pendingEntries)
-      // 镜像正文滞后于真实：清空段后全量重放（不保留镜像里的半截，否则回放会重复拼接）
-      host.parts = [{ kind: 'text', seg: 0, text: '', streaming: true }]
-      host.content = ''
-      host.reasoning = ''
-      host.toolRuns = []
-      host.pendingCall = null
-      host.streaming = true
-      host.done = false
-      host.stopped = false
-      host.appliedSeqs = []
-      deriveProjections(host)
-      await this.reattachActive(runId, { hostMessageId: host.id, lastSeq: 0 })
+      rememberRecoveryEntries(runId, current.pendingEntries)
+      const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, runId)
+      const lastSeq = appliedSeq > 0 ? appliedSeq : current.archiveMaxSeq
+      if (appliedSeq === 0 && current.archiveMaxSeq > 0 && messageShowsProgress(host)) {
+        host.recoveryGap = true
+
+      }
+      await this.reattachActive(runId, { hostMessageId: host.id, lastSeq })
     },
 
     /**
@@ -5483,11 +5808,32 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
+     * 该宿主消息（省略 = 本轮在途宿主）上是否还挂着**待人卡**（`requiresAction` 工具段）。
+     *
+     * <p>用途：probe 的 200 体只给快照状态（`SUSPENDED`），不足以证明屏上还有待人卡 —— 没有卡时
+     * 按 park 建连就会变成"永久 park + 静默收流"（⑤）。这里只读既有段，不新建任何状态；判据与
+     * 面板的挂起投影同源（`requiresAction=true` 的工具段）。
+     */
+    hostHasPendingCard(hostMessageId?: string): boolean {
+      const host = hostMessageId
+        ? this.messages.find((item) => item.id === hostMessageId) ?? null
+        : this.findInFlightHost()
+      return host !== null && host.parts.some(
+        (part) => part.kind === 'tool' && part.requiresAction === true
+      )
+    },
+
+    /**
      * 批G：把镜像留下的"未收尾"助手消息就地封口（后端已无在途轮时）。
      *
      * <p>
      * 不封口的代价：刷新后光标一直"在流"、且镜像被下一次写入继续标成 inFlight，
      * 于是每次刷新都去续收一个不存在的轮（空转）。
+     *
+     * <p><b>这是"未确认完整"的封口</b>（⑥）：被封的那一条没有收到终帧，只是权威侧证明不了它还在跑。
+     * 因此必须落消息级 `interrupted`（入镜像：`mirrorMessageOf` 白名单含它），否则刷新后它会被当成
+     * 一条正常完成的回答 —— 快捷动作、「继续」入口、缺口提示全部失真，而且第二次刷新依旧如此。
+     * 已标记停止（`stopped`）的轮不写：停止是用户决定，不是断流。
      */
     sealLeftoverInFlight(): void {
       let sealed = false
@@ -5497,6 +5843,9 @@ export const useAiStore = defineStore('ai', {
         }
         message.streaming = false
         message.done = true
+        if (message.stopped !== true) {
+          message.interrupted = true
+        }
         sealTrailingStreamPart(message)
         deriveProjections(message)
         sealed = true
@@ -5751,8 +6100,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * M08-R2：该 run 现在能否新起一次驱动（当前没有在途驱动，且还有预算）。
      *
-     * <p>调用方据此在**破坏性准备之前**判断（如 `restoreInFlightRound` 会先清段再重放：
-     * 清完却被预算挡下会让正文停在空白）。
+     * <p>恢复入口在改轮次现场或新建连接之前判断；预算耗尽时保留既有内容并交回手动出口。
      */
     canDriveRunStream(runId: string): boolean {
       const drive = this.streamDrives[runId]
@@ -5882,13 +6230,17 @@ export const useAiStore = defineStore('ai', {
       // 去超时裁决后快照里的 expiresAt/atMs 只作对账口径：仅前端工具段照原样携带
       //（其 `frontend_tool_request` 仍可能带等待上限）；确认门不再携带这两字段，也不据此折算倒计时。
       const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
+      const existing = findToolPart(host, entry.toolCallId)
+      const restoredStatus = existing && isHistoryPlaceholderStatus(entry.toolCallId, existing.status)
+        ? 'pending'
+        : existing?.status ?? 'pending'
       this.upsertToolPart(host, {
         toolCallId: entry.toolCallId,
         name: entry.name,
         kind2: kind,
-        status: 'pending',
-        args: entry.arguments ?? undefined,
-        requiresAction: true,
+        status: restoredStatus,
+        args: entry.arguments ?? existing?.args,
+        requiresAction: existing?.status === 'running' ? false : true,
         ...(kind === 'FRONTEND' && entry.expiresAt != null
           ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined }
           : {}),
@@ -5966,15 +6318,14 @@ export const useAiStore = defineStore('ai', {
       this.rebuildPendingCard(next, runId)
     },
 
-    /**
-     * T2b-D#3 增量续收（仿 reattachActive，但不新起消息 —— 挂起卡宿主已由快照重建就地就位）。
-     * lastSeq = archiveMaxSeq：服务端只补发增量帧，禁全量回放（红队 A1/A3/B3）。
-     *
-     * @param hostMessageId 宿主消息 id；**省略** = 首帧到达时由 `handleFrame` 取当前助手消息
-     *   （有则续写、无则创建）—— 供 I-1 的"无卡但挂起"路径使用（不预建空气泡）
-     * @param awaitingInput 快照或剩余待决卡证明本轮仍 park；一旦执行继续必须恢复 false
-     */
-    async resumeSnapshotStream(runId: string, lastSeq: number, hostMessageId?: string, awaitingInput = false): Promise<void> {
+    /** 同轮续收：保留持久历史/镜像，只应用连接交付的有序帧。 */
+    async resumeSnapshotStream(
+      runId: string,
+      lastSeq: number,
+      hostMessageId?: string,
+      awaitingInput = false,
+      _onReplaySettled?: () => void
+    ): Promise<void> {
       // 问题2：同上 —— 首个 await 之前同步登记，stop 同 tick 才能停到这一轮。
       pendingAttachRunId = runId
       // Task 4 引导门：续收是对话域 SSE（带身份头），无后端发号会话不建连。
@@ -5986,7 +6337,9 @@ export const useAiStore = defineStore('ai', {
       }
       // 问题3/8：已停止的轮（内存停止态 / run 级墓碑）不得被续收复活 ——
       // 不并入、不清 stopped、不重新锁输入。
-      if (this.stopped || this.stoppedRunId === runId) {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
+        this.stoppedRunId = runId
         if (pendingAttachRunId === runId) {
           pendingAttachRunId = null
         }
@@ -6004,7 +6357,7 @@ export const useAiStore = defineStore('ai', {
         this.loading = true
         this.streamInterrupted = false
         const joined = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
-        if (joined && (!joined.done || joined.runId === runId)) {
+        if (joined && !joined.done) {
           joined.streaming = true
           joined.done = false
         }
@@ -6043,7 +6396,7 @@ export const useAiStore = defineStore('ai', {
       }
       // 续收证明本轮仍有后续帧：只恢复已属于本轮的宿主活动事实，不触碰无关历史助手。
       const host = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
-      if (host && (!host.done || host.runId === runId)) {
+      if (host && !host.done) {
         host.streaming = true
         host.done = false
         // 续收 = 这一轮又有活的驱动：上一段断流事实作废
@@ -6070,7 +6423,12 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.handleFrame(frame, hostMessageId)
+              this.handleFrame(frame, hostMessageId, true)
+            },
+            onReconnect: () => {
+              if (isCurrentRound()) {
+                this.streamInterrupted = false
+              }
             },
             // Task 3：归档缺口只认**后端响应头**的明确标记（正常跳号/心跳一律不推断）。
             onArchiveTrim: (signal) => {
@@ -6164,14 +6522,25 @@ export const useAiStore = defineStore('ai', {
       parkedAtDecision: boolean,
       terminalSeqAtDecision: number
     ): void {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
+        return
+      }
       const host = this.messages.find((item) => item.parts.some(
         (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-      ))
+      )) ?? (recoveryEntriesByRun.get(runId)?.byToolCallId.has(toolCallId)
+        ? [...this.messages].reverse().find((item) => item.role === 'assistant' && item.runId === runId)
+        : undefined)
       if (!host) {
         return
       }
       if (!this.suspended) {
-        if (!parkedAtDecision || this.stopped || this.loading
+        // `loading` 只代表"有一条连接在跑"，不代表它能送达续跑帧：按 park 语义建立的连接
+        // （`activeStreamParked`，服务端送达请求帧后即收流）在回灌/结局帧之后就不再属于这一轮 ——
+        // 此时不重连就会漏掉随后的 `done`（刷新恢复 + 自动工具补驱动的现场）。非 park 连接仍按
+        // 既有口径并入，不重复建连。
+        const streamCanContinue = this.loading && !this.activeStreamParked
+        if (!parkedAtDecision || this.stopped || streamCanContinue
           || this.activeRunId !== runId || roundTerminalSeq !== terminalSeqAtDecision) {
           return
         }
@@ -6738,7 +7107,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 静默接管一个既有轮（批G · G2/G5）：复用宿主消息、全量/增量回放、**不出现任何 UI 文案**。
+     * 静默接管一个既有轮：复用宿主消息，只续收差量，不清空后全量回放。
      *
      * <p>
      * 旧形态是「一键重挂」：新建一条助手消息 + 永久占位文案「（正在重挂进行中的轮次…）」+
@@ -6749,12 +7118,16 @@ export const useAiStore = defineStore('ai', {
      * `runId` 参数做**类型防御**：UI 侧若把点击事件当参数传进来（形如 `[object PointerEvent]`），
      * 会把 reattach 打到 404 上（S4.4c E6 实测发现的缺陷），故非字符串一律忽略。
      *
-     * DC-14 T6：带上该 runId 已收到的最大帧序号（`options.lastSeq` 优先）—— 服务端只补发
-     * `seq > lastSeq` 的增量；刷新恢复走 `lastSeq = 0`（全量重放最稳：镜像正文本就滞后）。
+     * DC-14 T6：带上该 runId 已收到的最大帧序号（`options.lastSeq` 优先），服务端只补发
+     * `seq > lastSeq` 的增量；缺锚点的旧镜像保留现状并显式标记完整性未知。
+     *
+     * `options.awaitingInput`：调用方**已由 probe / 快照证明本轮仍 park**（SUSPENDED）时置真 ——
+     * 连接按 park 语义建立：服务端的主动收流是正常收尾（不误报断流、不做无意义自动重连）。
+     * 未证明时保持既有"接管 = 在跑"口径，绝不靠猜把 RUNNING 轮当成 park。
      */
     async reattachActive(
       runId?: string,
-      options: { hostMessageId?: string; lastSeq?: number } = {}
+      options: { hostMessageId?: string; lastSeq?: number; awaitingInput?: boolean } = {}
     ): Promise<void> {
       const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
       const targetRunId = explicit ?? this.activeRunId
@@ -6776,7 +7149,9 @@ export const useAiStore = defineStore('ai', {
        * 问题3/8：接管是"把既有轮接回来"的入口 —— 已停止的轮（内存停止态 / 墓碑）
        * 一律不接管：下面的 `stopped = false`、段重建与再锁输入都不得发生。
        */
-      if (this.stopped || this.stoppedRunId === targetRunId) {
+      if (this.stopped || this.stoppedRunId === targetRunId
+        || hasStoppedRun(this.sessionId, targetRunId, this.sessionIdentity)) {
+        this.stoppedRunId = targetRunId
         if (pendingAttachRunId === targetRunId) {
           pendingAttachRunId = null
         }
@@ -6797,10 +7172,9 @@ export const useAiStore = defineStore('ai', {
         const joinedHost = options.hostMessageId
           ? this.messages.find((item) => item.id === options.hostMessageId)
           : null
-        if (joinedHost) {
+        if (joinedHost && !joinedHost.done) {
           joinedHost.runId = targetRunId
           joinedHost.streaming = true
-          joinedHost.done = false
         }
         return
       }
@@ -6822,17 +7196,15 @@ export const useAiStore = defineStore('ai', {
       this.clearQueuedForms()
       const previous = currentAbort
       const lastSeq = options.lastSeq ?? this.runSeq[targetRunId]
-      // F6 残留（2026-11-01）：**全量重放**（lastSeq 为 0 / 缺省）而调用方没有给出后端条目事实
-      // ⇒ 本页签无法证明哪些有副作用的工具已经执行过：记 untrusted，重放期间写工具一律不执行
-      // （restoreInFlightRound 会先以可信事实置位，故这里不会覆盖它）。
-      if ((lastSeq ?? 0) === 0
-        && (replayToolFacts === null || replayToolFacts.runId !== targetRunId)) {
-        replayToolFacts = { runId: targetRunId, decided: new Set(), trusted: false }
+      if (lastSeq !== undefined) {
+        this.runSeq = recordRunSeq(this.runSeq, targetRunId, lastSeq)
       }
       const host = options.hostMessageId
         ? this.messages.find((item) => item.id === options.hostMessageId)
-        : [...this.messages].reverse().find((item) => item.role === 'assistant' && !item.done)
-          ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
+        : [...this.messages].reverse().find(
+          (item) => item.role === 'assistant' && !item.done
+            && (item.runId === undefined || item.runId === targetRunId)
+        )
       const assistant = host ?? this.appendAssistantMessage('')
       // 批次2：重挂的宿主就是这一 run 的消息 —— 归属必须钉住（后续重挂/恢复按 message.runId 定位）
       assistant.runId = targetRunId
@@ -6847,8 +7219,16 @@ export const useAiStore = defineStore('ai', {
       const controller = new AbortController()
       currentAbort = controller
       this.activeStreamRunId = targetRunId
-      // M08：接管连接不是挂起等待语义（续跑帧会经它送达）
-      this.activeStreamParked = false
+      // M08：接管连接默认不是挂起等待语义（续跑帧会经它送达）；调用方已由 probe/快照**证明**
+      // 本轮仍 park（快照 SUSPENDED + 屏上确有待决卡）时才按 park 建连：服务端的收流属正常收尾，
+      // 不误报断流，也不做无意义重连。
+      this.activeStreamParked = options.awaitingInput === true
+      // ④ 仅设 activeStreamParked 不够：`suspended` 才是"这一轮在等人"的对外语义（面板的等待
+      // 提示、输入区、后续决策 POST 的 `parkedAtDecision` 都读它）。probe 已证明 park 时同步恢复；
+      // 结局帧 / 决策帧 / 停止 / 终态会由既有路径收口，这里不新增任何计时或重试。
+      if (options.awaitingInput === true) {
+        this.suspended = true
+      }
       activeRoundHostId = assistant.id
       // 建连登记已完成 ⇒ "待登记接管"的临时证明使命结束（此后以 activeStreamRunId 为准）。
       if (pendingAttachRunId === targetRunId) {
@@ -6865,6 +7245,15 @@ export const useAiStore = defineStore('ai', {
       let unavailableNotified = false
       /** M08-R2：本次生命周期的收尾事实（判"是否消耗预算"只认它）。 */
       const closeTrace: { info: { terminal: boolean; suspended?: boolean } | null } = { info: null }
+      /**
+       * B1：本次收尾是否为"挂起导致的服务端收流"（正常收尾）—— finally 据此**保留**挂起态。
+       *
+       * <p>旧实现无条件 `suspended = false`：刷新期间重放到 `suspended` / `confirm_request` 帧后
+       * 服务端 park 收流，屏上卡还在等人、`suspended` 却被清掉 ⇒ 用户批准时 `parkedAtDecision`
+       * 也已是 false，`reconnectSuspendedRun` 静默早退 ⇒ 决策后的续跑帧（如 `navigate_to` 请求帧
+       * 与终帧）永远到不了。
+       */
+      let suspendedClose = false
       // R5②（issue#5）：连点/重复接管先中止既有连接（与 resumeSnapshotStream#防双连接同款）。
       // **先换身份再中止**：旧连接的收尾据此判定"非本轮"，不会把断流/取消提示写脏新连接现场。
       // 挂着 pre-start 停止意向的旧连接保留（等被停轮 start 后补 cancel）。
@@ -6894,7 +7283,12 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.handleFrame(frame, assistant.id)
+              this.handleFrame(frame, assistant.id, true)
+            },
+            onReconnect: () => {
+              if (isCurrentRound()) {
+                this.streamInterrupted = false
+              }
             },
             // Task 3：归档缺口只认**后端响应头**的明确标记（正常跳号/心跳一律不推断）。
             onArchiveTrim: (signal) => {
@@ -6911,6 +7305,7 @@ export const useAiStore = defineStore('ai', {
               // 苞 B 项 3：用户主动停止不报断流（同 send 的守卫；接管/续收路径同样适用）
               // B1（裁决 8）：挂起即断导致的收流是正常收尾 —— 不报断流（决策后另有显式重连）。
               if (info.suspended) {
+                suspendedClose = true
                 return
               }
               // 批次3：准备中是可恢复阶段，不按断流提示（准备中的自动恢复由 notePreparingState 排）
@@ -6934,7 +7329,7 @@ export const useAiStore = defineStore('ai', {
               }
             }
           },
-          { signal: controller.signal, lastSeq }
+          { signal: controller.signal, lastSeq, awaitingInput: options.awaitingInput === true }
         )
       } catch {
         // 静默：接管失败的现场由当前画面承担（refresh 后仍可再试），不写技术文案
@@ -6946,7 +7341,11 @@ export const useAiStore = defineStore('ai', {
           // R1 同型（issue#5）：被后一次接管/新轮取代的旧连接，其收尾不得复位新轮状态
           // 批次3：准备中仍在等快照 ⇒ 保持"有在途轮"（输入区禁用），直到重试/终态。
           this.loading = this.preparingRun !== null
-          this.suspended = false
+          // B1（裁决 8）：park 收流是正常收尾 —— 卡还在等人，挂起态由帧/投影决定，
+          // 这里不得清（清掉后决策 POST 的 `parkedAtDecision` / `reconnectSuspendedRun` 全失据）。
+          if (!suspendedClose) {
+            this.suspended = false
+          }
           currentAbort = null
           activeRoundHostId = null
           this.activeStreamRunId = null
@@ -7210,7 +7609,7 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 把权威裁决落成段终态 + 回执元数据，并撤提交态。
-     * 段侧 first-wins：已终态段（含乐观写后已非 `pending`）不覆盖。
+     * 本地 pending/running/failed/unknown 都可被权威纠正；其它已终态段保持 first-wins。
      *
      * @param authorities 触发本次校正的**同一份** `runs/current.pendingEntries`（可选）——
      *   用于在补下一张之前先校正恢复队列（M-a，见 {@link reconcileRestoredQueueWithAuthority}）
@@ -7225,7 +7624,9 @@ export const useAiStore = defineStore('ai', {
         if (!part || part.kind !== 'tool') {
           continue
         }
-        if (part.status !== 'pending' && !part.requiresAction) {
+        const correctable = part.status === 'pending' || part.status === 'running'
+          || part.status === 'failed' || part.status === 'unknown'
+        if (!correctable && !part.requiresAction) {
           continue
         }
         this.upsertToolPart(message, {
@@ -7580,11 +7981,15 @@ export const useAiStore = defineStore('ai', {
        * 问题5/7：停止后**不再发起新的回灌**（停止是终态决定，后端已按取消收尾）。
        * 停止前已发出的提交不受影响（本函数已在执行中）；它们的真实结局由结果帧收敛。
        */
-      if (this.stopped || this.stoppedRunId === targetRunId) {
+      if (this.stopped || this.stoppedRunId === targetRunId
+        || hasStoppedRun(this.sessionId, targetRunId, this.sessionIdentity)) {
         return { ok: false }
       }
-      // M-d（fix2）：提交前的现场快照（结局帧可能先于 POST 响应抵达；inline 执行时不在挂起态）
+      // 自动工具-only 恢复不置 suspended，但快照与 parked 连接同样证明本轮在等这次回灌。
+      const recoveryEntry = recoveryEntriesByRun.get(targetRunId)?.byToolCallId.get(toolCallId)
       const parkedAtDecision = this.suspended
+        || (this.activeStreamRunId === targetRunId && this.activeStreamParked)
+        || (recoveryEntry !== undefined && isAwaitingClientEntry(recoveryEntry))
       const terminalSeqAtDecision = roundTerminalSeq
       // Task 3：回灌的**成功/失败出口共用**现场判据 —— 轮次（会话 + 纪元 + run）与会话身份。
       // 换身份 = 换会话：旧身份那次回灌的回包一律作废（不重连、不补卡、不写通知）。
@@ -7593,6 +7998,7 @@ export const useAiStore = defineStore('ai', {
       const stillLive = (): boolean =>
         stillSameRound(roundAtSubmit, this.sessionId, targetRunId)
         && isSameIdentity(identityAtSubmit, this.sessionIdentity)
+        && !hasStoppedRun(this.sessionId, targetRunId, identityAtSubmit)
       try {
         await aiApi.frontendToolResult(
           cancelled
@@ -7707,36 +8113,21 @@ export const useAiStore = defineStore('ai', {
      *
      * 批2（权威翻转）：判据从 `pendingCall` 投影改读**段**（见下方实现注释）。
      */
-    hasDecidedPendingResidue(toolCallId: string): boolean {
-      // 批2（权威翻转）：判据改读**段** —— 挂起投影不再保留终态（终态段 requiresAction=false，
-      // 派生出的 pendingCall 为 null），若继续读投影这个守卫会静默失效（取消竞态重挂复活）。
-      // 重建判定：历史占位不算已决（否则挂起卡永远建不出来）。
-      if (this.hasDecidedToolPart(toolCallId, undefined, true)) {
-        return true
-      }
-      // #1：刷新回放清段时按 run 保留的已决 id（段已清空，事实不能跟着丢）。
-      // 只在该 run 仍是当前活动 run 时生效 —— 换 run/换会话后一律不认，避免挡住新轮的同名调用。
-      for (const entry of replayedDecidedToolCalls.values()) {
-        if (entry.runId === this.activeRunId && entry.toolCallIds.has(toolCallId)) {
-          return true
-        }
-      }
-      return false
+    hasDecidedPendingResidue(toolCallId: string, runId?: string): boolean {
+      // 已决事实按 run 隔离；历史占位不构成恢复卡的终态证据。
+      return this.hasDecidedToolPart(toolCallId, undefined, true, runId)
     },
 
-    /**
-     * 只看**段**的已决判定（不含"回放保留的 id"）。
-     *
-     * <p>跨宿主终帧守卫（`handleFrame` 的 D6(B)）用它：那一层的语义是"另一条消息上还有一个
-     * 已决段，不要在建不出段的新宿主上再造一张矛盾卡"。回放场景恰恰相反 —— 段是被**有意清空**
-     * 的（等归档重放重建），此时必须让重放的终帧正常建段。
-     *
-     * <p>历史占位 `succeeded` 默认仍算已决（防重复建段）；`hostMessageId` = 当前宿主时只忽略
-     * 该宿主上的占位；`ignoreAllPlaceholders` 仅供 HITL 重建判定使用。
-     */
-    hasDecidedToolPart(toolCallId: string, hostMessageId?: string, ignoreAllPlaceholders = false): boolean {
+    /** 只读既有段的已决事实；runId 给出时不跨轮拦截同 id 的异常载荷。 */
+    hasDecidedToolPart(
+      toolCallId: string,
+      hostMessageId?: string,
+      ignoreAllPlaceholders = false,
+      runId?: string
+    ): boolean {
       return this.messages.some(
-        (item) => item.parts.some((part): boolean => {
+        (item) => (runId === undefined || item.runId === undefined || item.runId === runId)
+          && item.parts.some((part): boolean => {
           if (part.kind !== 'tool' || part.toolCallId !== toolCallId
             || !isFrameDecidedPendingStatus(part.status)) {
             return false
@@ -9313,6 +9704,10 @@ export const useAiStore = defineStore('ai', {
       if (this.stopIntent?.transport === boundTransport) {
         this.stopIntent = null
       }
+      const stopSessionId = intent.sessionId ?? (this.sessionId === '' ? null : this.sessionId)
+      if (stopSessionId !== null) {
+        rememberStoppedRun(stopSessionId, runId, intent.identity ?? this.sessionIdentity)
+      }
       /**
        * 切身份 / 换会话后的旧传输（cancelOnly）：只用**旧身份**取消旧 run，
        * 不写当前 store 的 stoppedRunId / 忙态 / 镜像（不得污染新身份会话）。
@@ -9393,16 +9788,32 @@ export const useAiStore = defineStore('ai', {
       if (clientRequestId === null || sessionId === '') {
         return
       }
+      const pending = clientRequestCancelInFlight.get(clientRequestId)
+      if (pending) {
+        await pending
+        return
+      }
       if (!beginClientRequestCancel(clientRequestId)) {
         return
       }
+      const identityAtCancel = this.sessionIdentity
+      const request = (async (): Promise<void> => {
+        try {
+          await aiApi.cancelClientRequest(
+            { sessionId, clientRequestId },
+            { headers: identityHeaders(identityAtCancel) }
+          )
+        } catch {
+          // 后端不可达不影响本地已落地的停止
+        }
+      })()
+      clientRequestCancelInFlight.set(clientRequestId, request)
       try {
-        await aiApi.cancelClientRequest(
-          { sessionId, clientRequestId },
-          { headers: identityHeaders(this.sessionIdentity) }
-        )
-      } catch {
-        // 后端不可达不影响本地已落地的停止
+        await request
+      } finally {
+        if (clientRequestCancelInFlight.get(clientRequestId) === request) {
+          clientRequestCancelInFlight.delete(clientRequestId)
+        }
       }
     },
 
@@ -9422,7 +9833,8 @@ export const useAiStore = defineStore('ai', {
      * @returns false = 已停/墓碑/宿主缺失/会话已换 —— 调用方必须按取消/中断结局收尾，不能返回 ok
      */
     adoptDuplicateClientRequest(runId: string, hostMessageId: string): boolean {
-      if (this.stopped || this.stoppedRunId === runId) {
+      if (this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
         return false
       }
       if (this.activeStreamRunId === runId) {
@@ -9464,6 +9876,7 @@ export const useAiStore = defineStore('ai', {
     duplicateRoundStillCurrent(runId: string, hostMessageId: string, sessionId: string, epoch: number): boolean {
       return !this.stopped
         && this.stoppedRunId !== runId
+        && !hasStoppedRun(sessionId, runId, this.sessionIdentity)
         && this.sessionId === sessionId
         && roundEpoch === epoch
         && this.activeRunId === runId
@@ -9505,7 +9918,14 @@ export const useAiStore = defineStore('ai', {
         return
       }
       if (probe.status === 200) {
-        void this.reattachActive(runId, { hostMessageId, lastSeq: this.runSeq[runId] ?? 0 })
+        // 探测体带快照状态，但不带待决条目：只有"宿主上确实挂着待人卡"才按 park 建连
+        // （否则无卡轮会被永久 park、静默收流）；非 park 连接保持既有"在跑"口径。
+        void this.reattachActive(runId, {
+          hostMessageId,
+          lastSeq: this.runSeq[runId] ?? 0,
+          awaitingInput: probe.snapshotStatus === 'SUSPENDED'
+            && this.hostHasPendingCard(hostMessageId)
+        })
         if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
           this.clearPreparingRun()
           return
@@ -9562,7 +9982,13 @@ export const useAiStore = defineStore('ai', {
             return true
           }
           if (probe.status === 200) {
-            void this.reattachActive(runId, { hostMessageId, lastSeq: this.runSeq[runId] ?? 0 })
+            // 与首次 probe 同口径：SUSPENDED + 屏上确有待决卡才按 park 建连
+            void this.reattachActive(runId, {
+              hostMessageId,
+              lastSeq: this.runSeq[runId] ?? 0,
+              awaitingInput: probe.snapshotStatus === 'SUSPENDED'
+                && this.hostHasPendingCard(hostMessageId)
+            })
             if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
               this.clearPreparingRun()
               return true
@@ -9645,6 +10071,7 @@ export const useAiStore = defineStore('ai', {
         releaseStopGate = resolve
       })
       stopSettleGate = stopGate
+      let preStartCancel: Promise<void> | null = null
       // O02：本端已对这条 run 作出停止决定 —— 此后指回它的 409 只是"停止尚未传播"的残影，
       // 不是"上一轮仍在进行中"（判据见 isAuthoritativeBusyRun）；同时撤掉指向它的忙提示。
       if (runId !== null) {
@@ -9653,6 +10080,7 @@ export const useAiStore = defineStore('ai', {
         // 同一传输上的意向会随下方 abort 的 onClose（dropStopIntentFor）自然作废。
         this.stopIntent = null
         this.stoppedRunId = runId
+        rememberStoppedRun(this.sessionId, runId, this.sessionIdentity)
         if (this.busyRun?.runId === runId) {
           this.busyRun = null
         }
@@ -9667,7 +10095,7 @@ export const useAiStore = defineStore('ai', {
         // clientRequestId（后端已按它绑定/留墓碑）。同页签立即补一次；失败不影响本地停止，
         // 刷新后还会再试一次。
         if (this.pendingClientRequestId !== null) {
-          void this.cancelStoppedClientRequest()
+          preStartCancel = this.cancelStoppedClientRequest()
         }
       }
       // 停止闭环：把"本端已停止"随本轮 id 一起写镜像，刷新恢复据此补取消并拒绝自动重挂。
@@ -9683,10 +10111,7 @@ export const useAiStore = defineStore('ai', {
       // B2：停止也对**排队中**的工具生效 —— 队列项自带轮次现场判据（代次已变），
       // 轮到它们时零执行；这里只丢掉链表，不把新会话的新动作排到旧链尾。
       clearFrontendToolChains()
-      // #1：停止 = 放弃这一轮 ⇒ 回放保留的"已决 id"也随轮作废（不带到后续任何一轮）
-      clearReplayedDecidedTools()
-      // F6 残留：回放期后端条目事实同属这一轮，随停止作废
-      clearReplayToolFacts()
+      clearRecoveryEntries(runId ?? undefined)
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
@@ -9774,6 +10199,8 @@ export const useAiStore = defineStore('ai', {
           if (response?.alreadyCancelled === true && stillOwnStop()) {
             this.lastRoundOutcome = 'cancelled'
           }
+        } else if (preStartCancel !== null) {
+          await preStartCancel
         }
       } catch {
         // 后端不可达不影响本地停止（上面已收敛）；不写技术文案，用户看到的仍是「已停止」
@@ -9920,24 +10347,29 @@ export const useAiStore = defineStore('ai', {
      * </ul>
      */
     /**
-     * 目录加载的**单飞包装**（返修 I6）：面板不再 await 它来阻塞所有权判定/历史恢复 ——
-     * 首次进入没有会话号时所有权判定会先跳过（I2：发号成功后补判），历史/发送由
-     * `ensureSession()` 在需要时等待这份目录结果。
+     * 目录加载的单飞包装。面板只在所有权启动闸之后等待它；目录恢复指针时由
+     * `ensureSession()` 再补所有权判定，旧代次的目录回包不得落进清理后的现场。
      */
     loadTenantDirectory(): Promise<void> {
-      if (directoryGate !== null) {
+      if (directoryGate !== null && directoryGateEpoch === sessionEpoch) {
         return directoryGate
       }
-      const task = this.loadTenantDirectoryOnce().finally(() => {
+      const entryEpoch = sessionEpoch
+      const task = this.loadTenantDirectoryOnce(entryEpoch).finally(() => {
         if (directoryGate === task) {
           directoryGate = null
+          directoryGateEpoch = -1
         }
       })
       directoryGate = task
+      directoryGateEpoch = entryEpoch
       return task
     },
 
-    async loadTenantDirectoryOnce(): Promise<void> {
+    async loadTenantDirectoryOnce(entryEpoch: number = sessionEpoch): Promise<void> {
+      if (entryEpoch !== sessionEpoch) {
+        return
+      }
       const load = aiApi.tenantUsers
       if (typeof load !== 'function') {
         this.directoryStatus = 'unavailable'
@@ -9949,8 +10381,14 @@ export const useAiStore = defineStore('ai', {
       let directory: TenantUsersEntry[] = []
       try {
         const raw = await load()
+        if (entryEpoch !== sessionEpoch) {
+          return
+        }
         directory = Array.isArray(raw) ? raw.map(normalizeTenantEntry).filter((entry): entry is TenantUsersEntry => entry !== null) : []
       } catch (error) {
+        if (entryEpoch !== sessionEpoch) {
+          return
+        }
         this.directoryStatus = 'unavailable'
         // 返修 round3：非 ApiError（裸 Error/网络异常原文）不得直接上屏 —— 本地化兜底。
         this.directoryError = error instanceof ApiError ? error.message : translate('ai.notice.directoryFailed')
@@ -10157,12 +10595,13 @@ export const useAiStore = defineStore('ai', {
      * </ul>
      */
     async ensureSession(): Promise<string> {
+      const entryEpoch = sessionEpoch
       if (this.sessionId !== '') {
         const ownership = this.ensureTabOwnership()
         if (ownership !== null) {
           await ownership
         }
-        if (this.sessionId === '') {
+        if (this.sessionId === '' || entryEpoch !== sessionEpoch) {
           return ''
         }
         // 已有号即视为恢复：清掉上一次失败态/失败通知（如切回有指针的身份后）。
@@ -10178,6 +10617,9 @@ export const useAiStore = defineStore('ai', {
       // 只在"无身份"时等；`enterIdentity` 内部调用本方法时身份已落定，不会自等。
       if (this.identity === null && this.directoryStatus === 'loading' && directoryGate !== null) {
         await directoryGate
+        if (entryEpoch !== sessionEpoch) {
+          return ''
+        }
         // 等待期间目录落定可能已经完成发号（`enterIdentity` 的发号在目录门内）—— 直接复用。
         if (this.sessionId !== '') {
           return this.sessionId
@@ -10233,7 +10675,7 @@ export const useAiStore = defineStore('ai', {
         if (this.tabOwnership === 'unknown') {
           const pending = this.ensureTabOwnership()
           if (pending !== null) {
-            void pending
+            await pending
           }
         } else {
           await this.claimSessionOwnership(issued)
@@ -10262,6 +10704,12 @@ export const useAiStore = defineStore('ai', {
     adoptFreshSession(options: { keepMirror?: boolean; keepSessionPointer?: boolean } = {}): string {
       const oldSessionId = this.sessionId
       const oldIdentity = this.sessionIdentity
+      sessionEpoch += 1
+      ownershipProbe = null
+      const restartWorkspaceSync = workspaceSyncStarted
+      if (restartWorkspaceSync) {
+        this.stopWorkspaceSync()
+      }
       // 收口（③）：换 id 前只释放**本页签文档持有、且属于旧会话**的锁 —— 否则新会话的锁随后
       // 覆盖 `heldLock`，旧锁的释放句柄丢失，会一直占着到文档销毁（别的页签探活被误判"原页签还在"）。
       // 不广播 `released`：旧会话可能已被本页签销毁（新建对话），邀请别人接手只会接到一个空壳。
@@ -10278,10 +10726,7 @@ export const useAiStore = defineStore('ai', {
       roundEpoch += 1
       // B2：旧会话排队中的工具随会话作废（判据见 `enqueueFrontendTool`）
       clearFrontendToolChains()
-      // #1：回放保留的"已决 id"属于旧会话/旧 run —— 换会话即清（不跨会话、不跨 run 生效）
-      clearReplayedDecidedTools()
-      // F6 残留：后端条目事实同样属于旧会话/旧 run
-      clearReplayToolFacts()
+      clearRecoveryEntries()
       // 历史占位账属于旧会话的段：换会话即清，跨会话不得撞 toolCallId。
       historyPlaceholderStatusIds.clear()
       // M-2b：旧会话的快照串行队列不得落进新会话
@@ -10401,6 +10846,7 @@ export const useAiStore = defineStore('ai', {
       this.historyPageLoading = false
       this.historyEvents = []
       this.historyWindowEntries = markRaw([])
+      this.historySnapshotEntries = markRaw([])
       this.lastCommittedCompactionEventId = null
       // B4：压缩过程态是消息级内存态，跨会话不带走
       this.clearCompactingMessages()
@@ -10413,6 +10859,9 @@ export const useAiStore = defineStore('ai', {
         this.pruneOrphanFormDrafts()
       }
       this.historyLoaded = true
+      if (restartWorkspaceSync) {
+        this.startWorkspaceSync()
+      }
       return nextId
     },
 
@@ -10440,9 +10889,9 @@ export const useAiStore = defineStore('ai', {
       if (this.tabOwnership !== 'unknown') {
         return null
       }
-      // 同一页签可能被多处触发（面板挂载 + 发号成功后的补判）：只跑一次探活。
-      if (ownershipProbe !== null) {
-        return ownershipProbe
+      // 只有同会话、同代次可并入；旧探活不得替新会话作决定。
+      if (ownershipProbe?.sessionId === this.sessionId && ownershipProbe.epoch === sessionEpoch) {
+        return ownershipProbe.task
       }
       // Task 4：没有后端发号的会话时没有可判/可认领的锁（空 id 不参与所有权判定）。
       // 发号成功后 `ensureSession()` 会再调一次本方法补判（返修 I2）。
@@ -10461,13 +10910,14 @@ export const useAiStore = defineStore('ai', {
         return null
       }
       const sid = this.sessionId
+      const epochAtEntry = sessionEpoch
       // Task 3：判定/认领/广播都按**入口捕获**的会话身份（探活是异步的，期间身份可能被切走）。
       const identityAtEntry = this.sessionIdentity
       // 返回意向一次性消费：无论这次判成 owner 还是 duplicate，都不能留到下一次刷新
       const returning = takeReturnIntent(sid)
       const task = (async (): Promise<void> => {
         const role = await resolveTabOwnership(sid, identityAtEntry)
-        if (this.sessionId !== sid) {
+        if (this.sessionId !== sid || epochAtEntry !== sessionEpoch) {
           // 探活在途期间会话已被换掉（新建对话 / 让渡）：不为旧会话落任何角色
           return
         }
@@ -10511,11 +10961,11 @@ export const useAiStore = defineStore('ai', {
         }
       })()
       const tracked = task.finally(() => {
-        if (ownershipProbe === tracked) {
+        if (ownershipProbe?.task === tracked) {
           ownershipProbe = null
         }
       })
-      ownershipProbe = tracked
+      ownershipProbe = { sessionId: sid, epoch: epochAtEntry, task: tracked }
       return tracked
     },
 
@@ -10810,10 +11260,8 @@ export const useAiStore = defineStore('ai', {
      * 4. **最后**调销毁端点 `DELETE /api/ai/session/{oldSessionId}`：删除该会话全部 AI 数据，
      *    同时用响应 `clientCleanup` 精确清浏览器镜像/草稿。
      *
-     * <p>口径更新：旧实现的"只删记忆窗口 + 在飞轮终局可能写回"已被服务端 purge guard 关闭
-     * （记忆 `saveAll` 在守卫命中/不可知时拒绝写回）。`complete=false`（deferred/errors/aborted）
-     * 不再给用户提示：多面销毁是后台语义，新建对话不等它、也不拿技术删净度打扰用户；
-     * 前端只消费 `clientCleanup` 精确清理本地残留。
+     * <p>本地新会话不等待后台销毁；失败与延后收口由后端既有守卫、重试和日志承担，
+     * 前端保持静默，同时仍按响应或失败兜底精确清理本地残留。
      */
     async resetSession(): Promise<void> {
       // 两个旧值必须在清状态之前取：oldRunId 用于取消旧轮，oldSessionId 用于销毁与清本地残留。
@@ -10848,9 +11296,12 @@ export const useAiStore = defineStore('ai', {
       try {
         const purge = await aiApi.deleteHistory(oldSessionId)
         cleanupSessionLocalArtifacts(oldSessionId, purge, purgeIdentity)
+        clearFrontendToolJournals(oldSessionId, purgeIdentity)
+        clearStoppedRuns(oldSessionId, purgeIdentity)
       } catch {
-        // 请求失败：旧会话可能未删净；镜像仍按精确键清一次（草稿 id 未知，当前活动表单已清）
         cleanupSessionLocalArtifacts(oldSessionId, null, purgeIdentity)
+        clearFrontendToolJournals(oldSessionId, purgeIdentity)
+        clearStoppedRuns(oldSessionId, purgeIdentity)
       }
     },
 
@@ -10908,8 +11359,8 @@ export const useAiStore = defineStore('ai', {
       return this.appendAssistantMessage()
     },
 
-    /** SSE 帧 → store（判别联合 switch，覆盖后端全部帧类型）。 */
-    handleFrame(frame: SseFrame, assistantId?: string): void {
+    /** SSE 帧 → store；`recovery` 只描述传输来源，不参与帧号推断。 */
+    handleFrame(frame: SseFrame, assistantId?: string, recovery = false): void {
       /**
        * P-11 终态闸门（2026-10-22 修复）：用户停止（或本轮已终态收尾）之后到达的**非终态帧**
        * 一律丢弃 —— 与 `api/sse.ts` 读循环的终帧闸门同口径。
@@ -11014,9 +11465,12 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
-      // N4（R2）：本轮帧的 seq 记账放在归属判定**之后**（旧帧已在上面 return）。
+      // 续收锚点之前的帧只可能是重复投递；序号仍只用于展示去重，不用于授权工具执行。
       if (seq !== null) {
         const runId = frame.runId ?? this.activeRunId
+        if (runId && seq <= (this.runSeq[runId] ?? 0)) {
+          return
+        }
         if (runId) {
           this.runSeq = recordRunSeq(this.runSeq, runId, seq)
         }
@@ -11148,20 +11602,9 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'frontend_tool_request': {
-          // 批3③b D8（R-141③）：守卫**去 GF 前缀** —— 通用 FRONTEND 工具的重投帧同样被拦：
-          // 不再触发第二次 runFrontendTool（二次浏览器副作用）、不把已终态段改回
-          // pending+requiresAction（挂起卡复活）。已决判据统一 8 态（含 unknown/failed/skipped）。
-          // 原 GF 前缀守卫的行为对 GF 用例不变（回归锁见 frontend-tool-result-terminal.spec.ts）。
-          if (this.hasDecidedPendingResidue(frame.toolCallId)
-            || frontendToolsInFlight.has(frame.toolCallId)
-            || this.replaySaysDecided(frame.toolCallId)) {
-            // T2a 返修（S3）：守卫前移到**写段之前** —— 已决 toolCallId 不产生任何新挂起语义
-            //（不落 requiresAction 段、不置 suspended、不武装 activeForm），
-            // 防 reattach 回放先渲染一张瞬时挂起卡、再等后续结局帧收敛。
-            // #2（2026-10-31）：**执行中的同 id** 同口径拦下 —— P03 起回灌受理前段是 running，
-            // 重复投递/重放若照常 apply，会把 running 翻回 pending 并再排一次执行。
-            // F6 残留（2026-11-01）：**后端快照说已非 PENDING** 的同口径拦下 —— 段在本地还是
-            // running（执行完但回灌在途）时只有快照能证明"已经执行过"，展示交给重放的结果帧。
+          // 已决/在途段不被重投帧翻回 pending；恢复执行的事实判定在执行器围栏内完成。
+          if (this.hasDecidedPendingResidue(frame.toolCallId, frame.runId ?? this.activeRunId ?? undefined)
+            || frontendToolsInFlight.has(frame.toolCallId)) {
             break
           }
           this.suspended = true
@@ -11191,7 +11634,7 @@ export const useAiStore = defineStore('ai', {
           // 批次 5B（Task 8）：**同一助手消息内串行** —— 每条排到该消息队尾，前一条的回灌
           // 发出后才启动下一条（并发会让紧随导航的动作打在"页面还没挂载 / 任务还没绑定"的窗口上）
           // B2：**入队即捕获轮次现场** —— 排队期间被停止/换会话后，这条不执行任何动作
-          const round = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
+          const round = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null, recovery)
           // #2（2026-10-31 阻断）：执行中 toolCallId 去重 —— 占位在**入队**就取（同一批复放
           // 可能在首条开跑前就把两条同 id 请求都送达），释放交给队列结算（含"轮到它时已被
           // stillCurrent 判掉"的分支）。不占位 ⇒ P03 的回灌窗口里会真的再跑一遍。
@@ -11387,7 +11830,7 @@ export const useAiStore = defineStore('ai', {
             message.truncated = true
           }
           // 批 E · E2：取消的轮次不算"正常完成"—— 建议条只在非取消的 done 后出现
-          this.followupReady = !frame.cancelled
+          this.followupReady = !frame.cancelled && message.unconfirmed !== true && message.recoveryGap !== true
           // 上下文专项批①：轮末占用（唯一刷新点 —— 流式中不跳动，C-36）
           if (frame.context) {
             this.contextUsage = frame.context
@@ -11504,9 +11947,8 @@ export const useAiStore = defineStore('ai', {
         if (terminalRunId !== null) {
           this.forgetRunStreamDrive(terminalRunId)
         }
-        // F6 残留：本轮结束 ⇒ 为它记录的后端条目事实作废（不再参与任何执行判定）
-        if (replayToolFacts !== null && replayToolFacts.runId === terminalRunId) {
-          clearReplayToolFacts()
+        if (terminalRunId !== null) {
+          clearRecoveryEntries(terminalRunId)
         }
       }
     },
@@ -11542,11 +11984,10 @@ export const useAiStore = defineStore('ai', {
      * 叠成一张冗余"已执行"卡）。判定依据取段自身的既有字段（kind2 + name），不依赖帧字段。
      * `status === null` = 未给可翻译终态（旧后端口径）：只收 requiresAction。
      *
-     * <p>#3（2026-10-31）：通用 FRONTEND 的**本地单次结论**（failed / unknown）与**在跑段**
-     * （running）允许被 mapped 纠正 —— 409 DUPLICATE / 续收快照给的是后端权威终态，
-     * 本地那次失败可能只是"重复执行的副产物"（刷新回放把已成功的工具又跑了一遍）。
-     * 已定终态（succeeded / cancelled / rejected / blocked / skipped / expired）与待决的
-     * `pending`（等结果帧）仍不动。
+     * <p>#3（2026-10-31）：通用 FRONTEND 的 pending/running 与**本地单次结论**（failed/unknown）
+     * 允许被 mapped 纠正 —— 409 DUPLICATE / 续收快照给的是后端权威终态，本地那次失败可能只是
+     * "重复执行的副产物"（刷新回放把已成功的工具又跑了一遍）。已定终态（succeeded/cancelled/
+     * rejected/blocked/skipped/expired）仍不动。
      *
      * 调用点（F2 收口修后**只剩非帧路径**）：
      * - 409 DUPLICATE 响应体的条目 status（{@link submitFrontendToolResult}）；
@@ -11555,12 +11996,12 @@ export const useAiStore = defineStore('ai', {
      * `applyFrameToParts`（F1 起它同时承载 status 与 requiresAction；原先这里被二次调用，
      * 在帧序下恒为空写，构成双写口径分裂面）。
      *
-     * 因此下面 GF 分支的"仍处 pending/cancelled 才写 status"守卫**不是死分支**：它服务的正是
-     * 上述两条没有结果帧的收敛路径（有帧时段早已终态，条件自然为假 —— 两种情形同一条守卫覆盖）。
+     * GF 分支服务上述两条没有结果帧的收敛路径：pending/cancelled 与本地 failed/unknown
+     * 都可由后端权威结局纠正；其它已终态段仍保持 first-wins。
      *
      * 批2（权威翻转）：原先直接改 `item.pendingCall` 的那一半已删除 —— 挂起卡是段的派生结果。
      */
-    applyFrontendToolTerminal(toolCallId: string, status: PendingToolCall['status'] | null): void {
+    applyFrontendToolTerminal(toolCallId: string, status: ToolRunStatus | 'approved' | null): void {
       // approved 并入 running（同 applyPendingTerminal 映射）
       const mapped: ToolRunStatus | null = status === null ? null : status === 'approved' ? 'running' : status
       let wroteStatus = false
@@ -11572,15 +12013,10 @@ export const useAiStore = defineStore('ai', {
         }
         const generative = part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL
         if (!generative) {
-          // 通用 FRONTEND：默认只收 requiresAction；终态段状态由结果帧 / 本地结局的写点承载。
-          // #3（权威纠偏，2026-10-31 阻断，最小口径）：`failed` / `unknown` 是**本地这一次执行**的
-          // 结论，`running` 是"我们这边正在/刚刚执行、还没有后端裁决"—— 三者都不是后端裁决。
-          // 409 DUPLICATE 的响应体 / 续收快照给出的 mapped 才是**后端权威终态**（例如第一次执行
-          // 已 FRONTEND_RESULT），此时必须能纠正它们；反向绝不：本地已定 succeeded / cancelled /
-          // rejected / blocked / skipped / expired 一律不动（first-wins 单调不变）。
-          // `pending` 不在此列：那时的终态由随后到达的结果帧承载（既有契约，旧测试锁定）。
-          const correctable = part.status === 'failed' || part.status === 'unknown'
-            || part.status === 'running'
+          // 409 响应体 / 续收快照的 mapped 是后端权威终态；pending/running 与本地
+          // failed/unknown 都不是权威裁决，必须允许纠正。其它已定终态保持 first-wins。
+          const correctable = part.status === 'pending' || part.status === 'failed'
+            || part.status === 'unknown' || part.status === 'running'
           if (mapped !== null && correctable) {
             item.parts.splice(partIndex, 1, { ...part, requiresAction: false, status: mapped })
             wroteStatus = true
@@ -11589,8 +12025,9 @@ export const useAiStore = defineStore('ai', {
             item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
             deriveProjections(item)
           }
-        } else if (part.status === 'pending' || part.status === 'cancelled') {
-          // GF 仍处待决：status===null 只收 requiresAction（status 不动），否则落映射终态
+        } else if (part.status === 'pending' || part.status === 'cancelled'
+          || part.status === 'failed' || part.status === 'unknown') {
+          // GF 待决/乐观取消/本地未定结论都可由 409 的后端权威结局纠正。
           item.parts.splice(partIndex, 1, mapped === null
             ? { ...part, requiresAction: false }
             : { ...part, requiresAction: false, status: mapped })
@@ -11791,20 +12228,6 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * F6 残留（2026-11-01）：**回放快照**说该 toolCallId 已非 PENDING ⇒ 只补展示、不再执行。
-     *
-     * <p>与 {@link hasDecidedPendingResidue} 的分工：后者是本地已决（段/回放保留的 id）；
-     * 本方法读的是后端 `runs/current.pendingEntries` 的权威条目状态 —— 覆盖"本地段还是 running
-     * （执行完但回灌在途）、旁路与内存占位都没有它"的刷新现场。按 toolCallId 逐条判定，
-     * 不因某一条缺失牵连其它条目。
-     */
-    replaySaysDecided(toolCallId: string): boolean {
-      return replayToolFacts !== null
-        && replayToolFacts.runId === this.activeRunId
-        && replayToolFacts.decided.has(toolCallId)
-    },
-
-    /**
      * F6 残留（2026-11-01）：`confirm_step` 的目标步骤是否**已经到达**（⇒ 不再重复推进）。
      *
      * <p>判据只看**可观测的工作区步骤**（`workspace.step`）与任务类型里的步骤顺序：
@@ -11868,6 +12291,47 @@ export const useAiStore = defineStore('ai', {
       this.settleUnfinishedToolPart(message, toolCallId)
     },
 
+    /** 恢复事实不足时不执行；unknown 只描述这份真实的不确定性，并释放后端等待。 */
+    async settleUncertainRecoveryTool(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
+      round: RoundGuard
+    ): Promise<boolean> {
+      const submitted = await this.submitFrontendToolResult(
+        frame.toolCallId,
+        UNCERTAIN_RECOVERY_TEXT,
+        'frontend-executor',
+        false,
+        frame.runId ?? this.activeRunId ?? undefined,
+        'unknown'
+      )
+      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+        return false
+      }
+      if (submitted.duplicate) {
+        // 409 已由 submitFrontendToolResult 按响应体落后端权威结局，本地未知不得反向覆盖。
+        return false
+      }
+      this.upsertToolPart(message, {
+        toolCallId: frame.toolCallId,
+        name: frame.name,
+        kind2: 'FRONTEND',
+        status: 'unknown',
+        result: UNCERTAIN_RECOVERY_TEXT,
+        requiresAction: false
+      })
+      // 这里只能证明“这一条工具的执行事实未知”，不能提前宣称整轮已结束；其它待决卡仍可继续。
+      message.recoveryGap = true
+      this.markRecoveryGap('snapshot-unavailable')
+      deriveProjections(message)
+      this.followupReady = false
+      this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
+      if (!submitted.ok) {
+        setRawNotice(this, UNCERTAIN_RECOVERY_TEXT, 'warning')
+      }
+      return submitted.ok
+    },
+
     /**
      * 执行前端工具并把结果回灌（三级可用性兜底 + **统一超时预算**在 utils/frontend-tools.ts）。
      *
@@ -11913,47 +12377,110 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /**
-     * `runFrontendTool` 的执行体（去重占位在调用方，`finally` 保证释放）。
-     *
-     * <p>顺序（P03 + #3 + #4）：快照闸 → 落 running → 执行 → 回灌受理 → **仍在同轮**才落终态；
-     * 409 DUPLICATE 时后端权威终态已由 {@link applyFrontendToolTerminal} 纠正，本地这次
-     * （重复执行）的 outcome 不得覆盖；轮次已不在场则中性收敛，不留永久 running。
-     *
-     * <p>快照闸放在**执行体**的最前面（而不是只放在 `runFrontendTool`）：帧路是直接调本函数
-     * （占位在入队时就取），只挡入口等于没挡。
-     */
+    /** 锁被占用时等待持锁方权威结局；仅锁能力不可用时由本端走未知活性出口。 */
     async runFrontendToolAttempt(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard
-    ): Promise<void> {
-      // F6 残留（2026-11-01）：回放期间的两道快照闸 —— 都在**执行之前**，直接决定"跑不跑"。
-      if (this.replaySaysDecided(frame.toolCallId)) {
-        // 后端快照说该条目已非 PENDING ⇒ 只补展示（重放的结果帧负责落段），绝不执行
-        return
+    ): Promise<boolean> {
+      const runId = frame.runId ?? this.activeRunId
+      if (!runId || !stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+        || this.stopped || this.stoppedRunId === runId
+        || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
+        return false
       }
-      if (replayToolFacts !== null && replayToolFacts.runId === this.activeRunId
-        && !replayToolFacts.trusted && isSideEffectFrontendTool(frame.name)) {
-        // 条目清单不可用 ⇒ 无法证明写工具是否已执行：保守不执行 + 可恢复提示（只读工具不在此列）。
-        this.upsertToolPart(message, {
+      const fenced = await withFrontendToolFence(
+        this.sessionIdentity,
+        this.sessionId,
+        runId,
+        frame.toolCallId,
+        () => this.executeFencedFrontendTool(message, frame, round, runId)
+      )
+      if (!fenced.acquired && stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+        if (fenced.failed !== true) {
+          // 锁已由他端持有：他端负责执行与回灌，本端只等既有结果帧/恢复通道的权威结局。
+          return false
+        }
+        // 只有锁能力不可用、确实无法保证有人执行时，才走既定未知活性出口。
+        return await this.settleUncertainRecoveryTool(message, frame, round)
+      }
+      return fenced.value ?? false
+    },
+
+    async executeFencedFrontendTool(
+      message: ChatMessage,
+      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
+      round: RoundGuard,
+      runId: string
+    ): Promise<boolean> {
+      const identity = this.sessionIdentity
+      const sessionId = this.sessionId
+      const journal = readFrontendToolJournal(identity, sessionId, runId, frame.toolCallId)
+      const completed = journal?.state === 'completed' ? journal : null
+      if (round.recovery === true && completed === null) {
+        let recovery = recoveryEntriesByRun.get(runId)
+        let entry = recovery?.byToolCallId.get(frame.toolCallId)
+        if (recovery?.trusted !== true || entry === undefined) {
+          try {
+            const current = await aiApi.runsCurrent(sessionId)
+            if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+              || hasStoppedRun(sessionId, runId, identity)) {
+              return false
+            }
+            if (current.runId !== null && current.runId !== runId) {
+              return false
+            }
+            if (current.runId === runId) {
+              rememberRecoveryEntries(runId, current.pendingEntries)
+              recovery = recoveryEntriesByRun.get(runId)
+              entry = recovery?.byToolCallId.get(frame.toolCallId)
+            } else if (entry !== undefined) {
+              // 旧快照里的 PENDING 已被新的空态取代，不能再拿它证明“仍未执行”。
+              recovery = undefined
+              entry = undefined
+            }
+          } catch {
+            if (entry !== undefined) {
+              recovery = undefined
+              entry = undefined
+            }
+            if (!replaySafeWithoutSnapshotFact(frame.name) && recovery?.trusted !== true) {
+              return await this.settleUncertainRecoveryTool(message, frame, round)
+            }
+          }
+        }
+        const fact = snapshotExecutionFact(entry)
+        if (fact === 'settled' || fact === 'claimed') {
+          return false
+        }
+        const newSinceTrustedSnapshot = recovery?.trusted === true && entry === undefined
+        if (fact !== 'not-executed' && !newSinceTrustedSnapshot
+          && !replaySafeWithoutSnapshotFact(frame.name) && this.confirmStepAlreadyReached(frame) === null) {
+          return await this.settleUncertainRecoveryTool(message, frame, round)
+        }
+      }
+      if (journal?.state === 'claimed') {
+        return await this.settleUncertainRecoveryTool(message, frame, round)
+      }
+      const executionToken = createPageIdToken()
+      if (completed === null) {
+        writeFrontendToolJournal({
+          token: executionToken,
+          sessionId,
+          runId,
           toolCallId: frame.toolCallId,
-          name: frame.name,
-          kind2: 'FRONTEND',
-          status: 'unknown',
-          result: REPLAY_UNVERIFIED_RECEIPT,
-          requiresAction: false
-        }, false)
-        deriveProjections(message)
-        setRawNotice(this, REPLAY_UNVERIFIED_NOTICE, 'warning')
-        return
+          state: 'claimed',
+          updatedAt: Date.now()
+        }, identity)
       }
-      // AI 可视可操作专项：单轮配额与"停止后零执行"按轮次 token 归零（同 runId 不重置）
-      beginUiTurn(frame.runId ?? this.activeRunId ?? 'local')
+      beginUiTurn(runId)
       // 批2：本地执行开跑即落 running（只更新语义 —— 段由 frontend_tool_request 帧建好；
       // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
       // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
       await Promise.resolve()
+      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+        return false
+      }
       this.upsertToolPart(message, {
         toolCallId: frame.toolCallId,
         name: frame.name,
@@ -11967,15 +12494,23 @@ export const useAiStore = defineStore('ai', {
       // 回灌 409 后的重放）就不再 goStep / persistStepData：那会真的把向导再推进一次（导入向导
       // 离开第 1 步还会整表写回服务端文件）。仍停在原步骤时才真正执行。
       const stepAlreadyReached = this.confirmStepAlreadyReached(frame)
-      // P03：执行器的未预期异常同样必须收敛（契约上它不抛，但抛出来绝不能把卡留在永久
-      // 「调用中」）。`null` = 异常哨兵；正常路径照旧拿到完整执行信封。
-      let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = stepAlreadyReached
-      if (execution === null) {
+      // 已完成台账只允许重放真实结局；没有台账且获准执行时才调用执行器。
+      let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = completed !== null
+        ? {
+            ok: completed.outcome === 'ok',
+            outcome: completed.outcome ?? 'unknown',
+            availability: 'available',
+            result: completed.result ?? '',
+            ...(completed.sheetMeta !== undefined ? { sheetMeta: completed.sheetMeta } : {}),
+            ...(completed.code !== undefined ? { code: completed.code } : {})
+          }
+        : stepAlreadyReached
+      if (execution === null && completed === null) {
         try {
           execution = await executeFrontendTool({
             name: frame.name,
             toolCallId: frame.toolCallId,
-            runId: frame.runId ?? this.activeRunId ?? undefined,
+            runId,
             args: parseToolArgs(frame.args),
             budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
           })
@@ -11983,21 +12518,39 @@ export const useAiStore = defineStore('ai', {
           execution = null
         }
       }
+      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+        return false
+      }
+      writeFrontendToolJournal({
+        token: executionToken,
+        sessionId,
+        runId,
+        toolCallId: frame.toolCallId,
+        state: 'completed',
+        updatedAt: Date.now(),
+        result: execution?.result ?? EXECUTOR_CRASH_TEXT,
+        outcome: execution?.outcome ?? 'failed',
+        ...(execution?.sheetMeta !== undefined ? { sheetMeta: execution.sheetMeta } : {}),
+        ...(execution?.code !== undefined ? { code: execution.code } : {})
+      }, identity)
       const stillHere = (): boolean => stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+        && !this.stopped && this.stoppedRunId !== runId && !hasStoppedRun(sessionId, runId, identity)
       if (execution === null) {
         // P03/F4：异常同样要**回灌失败事实** —— 只落本地 failed 的话，后端的挂起条目只能等满
         // 120s 前端工具上限（`FRONTEND_TIMEOUT`），这一轮也挂在那不动。回灌用 cancelled=false +
         // outcome='failed'（这是"确定性失败"，不是用户取消，故不写 cancelled）。
         // 停止/换轮后**不覆盖** —— 停止已把段收成 cancelled，晚到的异常结论不该把它翻成失败。
+        let accepted = false
         if (stillHere()) {
-          await this.submitFrontendToolResult(
+          const crashSubmit = await this.submitFrontendToolResult(
             frame.toolCallId,
             EXECUTOR_CRASH_TEXT,
             'frontend-executor',
             false,
-            undefined,
+            runId,
             'failed'
           )
+          accepted = crashSubmit.ok
         }
         if (stillHere()) {
           this.upsertToolPart(message, {
@@ -12012,7 +12565,7 @@ export const useAiStore = defineStore('ai', {
         } else {
           this.settleAbandonedToolPart(message, frame.toolCallId)
         }
-        return
+        return accepted
       }
       // B1 收口修（C-1）：await 返回后比对**轮次现场** —— 只有"真正换轮"（`send()` 起新轮 /
       // `reattachActive()` 重挂 / `adoptFreshSession()` 换会话 / `stop()` 取消本轮）才丢弃晚到
@@ -12024,7 +12577,7 @@ export const useAiStore = defineStore('ai', {
       if (!stillHere()) {
         // #4：轮次已不在场 ⇒ 中性收敛（不留永久 running；不误判 failed）
         this.settleAbandonedToolPart(message, frame.toolCallId)
-        return
+        return false
       }
       // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/
       // cancelled/skipped 各有落点，不再一律折成 failed）。
@@ -12038,7 +12591,7 @@ export const useAiStore = defineStore('ai', {
         execution.result,
         'frontend-executor',
         false,
-        undefined,
+        runId,
         execution.outcome,
         execution.sheetMeta,
         execution.code
@@ -12046,7 +12599,7 @@ export const useAiStore = defineStore('ai', {
       // 回灌窗口内可能已停止/换轮：本地已收口的 cancelled（或新轮现场）不得被旧结局覆盖。
       if (!stillHere()) {
         this.settleAbandonedToolPart(message, frame.toolCallId)
-        return
+        return false
       }
       if (submitted.duplicate) {
         // #3：409 DUPLICATE = 该 toolCallId 已有裁决（第一次执行真的成功了 / 他端先提交）。
@@ -12054,7 +12607,8 @@ export const useAiStore = defineStore('ai', {
         // → mapped）—— 本地这次重复执行的 outcome **不得覆盖它**（否则"已成功"被写成"失败"）。
         // mapped 缺失（旧后端不带 status）时退到中性收敛，绝不把 running 留成永久卡。
         this.settleUnfinishedToolPart(message, frame.toolCallId)
-        return
+        // 本页签这次回灌没有被受理（他人已决）：调用方的临时挂起态按"无人卡"口径收口。
+        return false
       }
       if (!submitted.ok) {
         // F6：回灌没被受理（非 duplicate：网络/服务端错误、缺 runId、格式化被拒…）⇒ 本地这次执行
@@ -12073,7 +12627,7 @@ export const useAiStore = defineStore('ai', {
           }, false)
           deriveProjections(message)
         }
-        return
+        return false
       }
       // 批2：浏览器侧执行结局落段（工具段在此之前由 frontend_tool_request 建好），投影随段派生
       this.upsertToolPart(message, {
@@ -12093,6 +12647,7 @@ export const useAiStore = defineStore('ai', {
       this.uiUndoToolCallId = this.uiUndoEntry !== null && this.uiUndoEntry !== undoBefore
         ? frame.toolCallId
         : null
+      return true
     }
   }
 })

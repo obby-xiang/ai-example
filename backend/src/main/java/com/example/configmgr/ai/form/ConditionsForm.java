@@ -48,8 +48,10 @@ import java.util.Set;
  * <b>候选来源</b>：{@code extra} 优先，缺失或绑定信息丢失时回落本轮已结算 {@code create_task}
  * 原始入参/会话级 Redis 草案（{@link CreateTaskDraftStore}：runId 解析会话号、字段 = taskId，
  * 跨轮存活）；读取异常按内部失败处理；</li>
- * <li>真正的未知条件：宿主只挂<b>一次</b>非必填自由文本框（{@code purpose=SET_CONDITIONS}）；
- * 已知候选、已有草案、已明确留空都不弹；</li>
+ * <li>真正的未知条件：刚进入 {@code QUERY_COND} 的首次交棒先置
+ * {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，交给模型用既有 {@code set_condition} 通道
+ * 结构化用户已给出的筛选值（本轮不弹表）；仍未知时宿主只挂<b>一次</b>非必填自由文本框
+ * （{@code purpose=SET_CONDITIONS}）；已知候选、已有草案、已明确留空都不弹；</li>
  * <li>{@code confirm_step} 推进到 {@code EXPORT} 前复核：任务条目已落库条件、本轮已成功结算的
  * {@code set_condition} 草案（按 {@code defCode} 与任务绑定核对）、表单明确留空，三者都认可；
  * 非空表单回灌必须先由模型解析成草案才能确认；后端不代写 {@code "{}"}。</li>
@@ -156,12 +158,23 @@ public class ConditionsForm extends HostForm {
 		return DRAFT_TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId + "-" + defCode;
 	}
 
-	/** 该 id 是否是本 run、本任务下发的草案（任务号边界匹配，避免 42 与 420 混淆）。 */
-	private static boolean isDraftForTask(String toolCallId, String runId, long taskId) {
-		if (toolCallId == null || !toolCallId.startsWith(DRAFT_TOOL_CALL_ID_PREFIX)) {
-			return false;
+	public static void bindDraft(PendingToolCall pending, String runId, AiContext context) {
+		if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName()) || context == null) {
+			return;
 		}
-		return toolCallId.startsWith(DRAFT_TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId + "-");
+		bindDraft(pending, runId, context.getTaskId(), defCodeOf(pending.getArguments()));
+	}
+
+	private static void bindDraft(PendingToolCall pending, String runId, Long taskId, String defCode) {
+		pending.setDraftRunId(runId);
+		pending.setDraftTaskId(taskId);
+		pending.setDraftDefCode(defCode);
+	}
+
+	private static boolean isBoundDraft(PendingToolCall pending, String runId, long taskId, String defCode) {
+		return pending != null && runId != null && runId.equals(pending.getDraftRunId())
+				&& Long.valueOf(taskId).equals(pending.getDraftTaskId())
+				&& defCode != null && defCode.equals(pending.getDraftDefCode());
 	}
 
 	/**
@@ -244,13 +257,26 @@ public class ConditionsForm extends HostForm {
 	 * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
 	 * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
 	 * <li>表单已明确留空/取消/非空回灌：不自动重问，也不代写 {@code "{}"}；</li>
-	 * <li>仍 {@code UNDECIDED}：宿主挂一次非必填 {@code SET_CONDITIONS} 表单（进入 {@code QUERY_COND}
-	 *     即收集，不再先交模型）；</li>
+	 * <li>仍 {@code UNDECIDED}：{@code allowUnknownForm=false}（刚成功推进到 {@code QUERY_COND}
+	 *     的首次交棒）时只置 {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，把"用户已给出的
+	 *     筛选值"交给既有 {@code set_condition} 结构化通道，不抢着弹表；其余交棒挂一次非必填
+	 *     {@code SET_CONDITIONS} 表单；</li>
 	 * <li>坏 JSON/残缺结构：不弹表（交给向导修正/模型结构化路径），零副作用。</li>
 	 * </ul>
 	 * 不改变 {@code start_export} 确认门，也不自动执行/下载。
 	 */
 	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history) {
+		return parkIfDueAtQueryCond(runId, context, history, true);
+	}
+
+	/**
+	 * @param allowUnknownForm {@code false} = 刚进入 {@code QUERY_COND} 的首次交棒：条件仍未知时
+	 *                         不弹表，只置条件结构化交棒标记（模型下一跳用既有 {@code set_condition}
+	 *                         通道结构化用户已给出的值）；{@code true} = 条件仍未知时挂一次条件表。
+	 *                         已知候选/已落库条件在两种口径下都不受影响。
+	 */
+	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
+			boolean allowUnknownForm) {
 		if (runId == null || context == null || history == null || !parkEnabled()) {
 			return false;
 		}
@@ -267,14 +293,13 @@ public class ConditionsForm extends HostForm {
 			if (task.getItems() == null || task.getItems().isEmpty()) {
 				return false;
 			}
-			long boundary = createTaskBoundary(context);
-			DraftFacts drafts = draftFacts(runId, task, boundary);
+			DraftFacts drafts = draftFacts(runId, task);
 			ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
 			if (plan.malformed()) {
 				// 坏结构不弹表：由向导修正或模型走 set_condition 结构化路径
 				return false;
 			}
-			ConditionFeedback feedback = feedbackOf(runId, taskId, boundary, plan.undecided());
+			ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
 			if (feedback.blank() || feedback.nonEmpty()) {
 				// 用户已经给出答案（留空 = 全量；非空 = 待模型解析）：不得用 create_task 候选覆盖，
 				// 也不自动重问。留空/非空都交给 confirm_step 与前端 persistStepData，后端零写。
@@ -304,6 +329,14 @@ public class ConditionsForm extends HostForm {
 				// 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
 				return false;
 			}
+			if (!allowUnknownForm) {
+				// 刚进入条件步骤：先把"用户原话里已给出的筛选值"交给模型用既有 set_condition 通道结构化
+				// （披露面与执行面据此只留查定义/设置条件/推进）。未知条件仍由后续交棒或正文收尾收集一次。
+				Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
+				extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+				context.setExtra(extra);
+				return false;
+			}
 			String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
 			if (alreadyIssued(runId, toolCallId)) {
 				return false;
@@ -320,17 +353,6 @@ public class ConditionsForm extends HostForm {
 			log.warn("condition form for QUERY_COND was not parked (continue on existing path) runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
-	}
-
-	/**
-	 * @param allowUnknownForm 已无行为：进入 {@code QUERY_COND} 后宿主总是允许挂一次条件表。
-	 * @deprecated 生产调用方只走 3 参入口；保留该重载仅为旧调用点/用例的源码兼容，
-	 *             新代码不要再使用这个开关。
-	 */
-	@Deprecated
-	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
-			boolean allowUnknownForm) {
-		return parkIfDueAtQueryCond(runId, context, history);
 	}
 
 	/**
@@ -353,7 +375,7 @@ public class ConditionsForm extends HostForm {
 	 */
 	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
 			List<Message> history) {
-		return inspectConfirmStep(runId, context, pending, history, true);
+		return inspectConfirmStep(runId, context, pending, history, null, true);
 	}
 
 	/**
@@ -365,6 +387,30 @@ public class ConditionsForm extends HostForm {
 	 */
 	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
 			List<Message> history, boolean allowPark) {
+		return inspectConfirmStep(runId, context, pending, history, null, allowPark);
+	}
+
+	/**
+	 * 同 {@link #inspectConfirmStep(String, AiContext, PendingToolCall, List, boolean)}，并显式带上
+	 * <b>当前模型 assistant 正文</b>。
+	 *
+	 * <p>为什么需要：{@code confirm_step} 的提前 park 发生在模型工具跳之后、本段 assistant 还没进
+	 * {@code messageJson} 的时刻；{@code HostForm#parkAll} 默认读快照的 {@code assistantContent}，
+	 * 那是上一轮/空值。这里把本段正文一路传到 {@code saveSuspended}，取消/刷新/续跑才能恢复它。
+	 * {@code assistantContent == null} 的既有调用保持原语义（沿用快照）。
+	 */
+	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
+			List<Message> history, String assistantContent, boolean allowPark) {
+		return inspectConfirmStep(runId, context, pending, history, assistantContent, null, allowPark);
+	}
+
+	/**
+	 * 同 {@link #inspectConfirmStep(String, AiContext, PendingToolCall, List, String, boolean)}，
+	 * 并同时带上本段 assistant 的元数据（思考/来源等），与正文同进同退。
+	 */
+	public ConfirmStepDecision inspectConfirmStep(String runId, AiContext context, PendingToolCall pending,
+			List<Message> history, String assistantContent, Map<String, Object> assistantMetadata,
+			boolean allowPark) {
 		if (runId == null || context == null || pending == null || history == null) {
 			return ConfirmStepDecision.allow();
 		}
@@ -416,7 +462,8 @@ public class ConditionsForm extends HostForm {
 				// 没有已选配置项就没有"条件"可收集（这类任务本就推进不下去）
 				return ConfirmStepDecision.allow();
 			}
-			return conditionGate(runId, taskId, task, context, pending, history, allowPark);
+			return conditionGate(runId, taskId, task, context, pending, history, assistantContent, assistantMetadata,
+					allowPark);
 		}
 		catch (RuntimeException ex) {
 			if (!conditionGateExpected(context)) {
@@ -560,6 +607,7 @@ public class ConditionsForm extends HostForm {
 				continue;
 			}
 			PendingToolCall draft = frontendTool(draftId, AiToolNames.SET_CONDITION, probe);
+			bindDraft(draft, runId, taskId, defCode);
 			applyToolTimeout(draft);
 			draftsToPark.add(draft);
 			issued.add(defCode);
@@ -760,13 +808,7 @@ public class ConditionsForm extends HostForm {
 		}
 	}
 
-	/**
-	 * 本轮 {@code set_condition} 草案事实（待决条目是唯一事实源，业务库只读）。
-	 *
-	 * <p>任务绑定：宿主草案的 {@code toolCallId} 编码了 run/task；模型自己下发的 {@code set_condition}
-	 * 没有任务号，因此只认 {@code defCode} 属于当前任务、且在任务创建边界之后请求的条目。
-	 */
-	private DraftFacts draftFacts(String runId, Task task, long boundaryMs) {
+	private DraftFacts draftFacts(String runId, Task task) {
 		Set<String> taskDefCodes = new LinkedHashSet<>(taskDefCodesFor(task));
 		Set<String> settled = new LinkedHashSet<>();
 		Set<String> attempted = new LinkedHashSet<>();
@@ -789,17 +831,8 @@ public class ConditionsForm extends HostForm {
 				continue;
 			}
 			String defCode = defCodeOf(pending.getArguments());
-			if (defCode == null || !taskDefCodes.contains(defCode)) {
-				continue;
-			}
-			boolean hostDraft = pending.getToolCallId() != null
-					&& pending.getToolCallId().startsWith(DRAFT_TOOL_CALL_ID_PREFIX);
-			if (hostDraft && !isDraftForTask(pending.getToolCallId(), runId, taskId)) {
-				// 别的任务/别的 run 的草案：不得当成当前任务的事实
-				continue;
-			}
-			if (!hostDraft && boundaryMs > 0 && requestedAtOf(pending) < boundaryMs) {
-				// 本任务创建之前的历史 set_condition：不算本轮草案
+			if (defCode == null || !taskDefCodes.contains(defCode)
+					|| !isBoundDraft(pending, runId, taskId, defCode)) {
 				continue;
 			}
 			issued.add(defCode);
@@ -857,7 +890,6 @@ public class ConditionsForm extends HostForm {
 		if (task == null || !taskDefCodesFor(task).contains(defCode)) {
 			return null;
 		}
-		long boundaryMs = createTaskBoundary(context);
 		long taskId = task.getId() == null ? 0L : task.getId();
 		List<PendingToolCall> pendings;
 		try {
@@ -874,17 +906,8 @@ public class ConditionsForm extends HostForm {
 				continue;
 			}
 			if (!defCode.equals(defCodeOf(pending.getArguments()))
-					|| !sameConditions(pending.getArguments(), conditions)) {
-				continue;
-			}
-			boolean hostDraft = pending.getToolCallId() != null
-					&& pending.getToolCallId().startsWith(DRAFT_TOOL_CALL_ID_PREFIX);
-			if (hostDraft && !isDraftForTask(pending.getToolCallId(), runId, taskId)) {
-				// 别的任务的宿主草案：不得当作当前任务的幂等事实
-				continue;
-			}
-			if (!hostDraft && boundaryMs > 0 && requestedAtOf(pending) < boundaryMs) {
-				// 本任务创建之前的历史成功调用：不复用
+					|| !sameConditions(pending.getArguments(), conditions)
+					|| !isBoundDraft(pending, runId, taskId, defCode)) {
 				continue;
 			}
 			return pending.getResultText() == null ? "" : pending.getResultText();
@@ -968,11 +991,11 @@ public class ConditionsForm extends HostForm {
 	}
 
 	private ConfirmStepDecision conditionGate(String runId, long taskId, Task task, AiContext context,
-			PendingToolCall pending, List<Message> history, boolean allowPark) {
+			PendingToolCall pending, List<Message> history, String assistantContent,
+			Map<String, Object> assistantMetadata, boolean allowPark) {
 		// ① 草案事实只来自 Redis 待决条目：任务 conditionJson 已落库条件 + 本轮成功的 set_condition 草案，
 		// 以及表单明确留空。坏 JSON/残缺结构明确拒绝，不按全量放行。
-		long boundaryMs = createTaskBoundary(context);
-		DraftFacts drafts = draftFacts(runId, task, boundaryMs);
+		DraftFacts drafts = draftFacts(runId, task);
 		ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
 		if (plan.malformed()) {
 			log.info("confirm_step saw an incomplete condition structure; rejected with no side effects runId={} taskId={}", runId, taskId);
@@ -985,7 +1008,7 @@ public class ConditionsForm extends HostForm {
 			// 任务条目已有条件事实（已设置/明确不设）：历史回灌不再挡路
 			return ConfirmStepDecision.allow();
 		}
-		ConditionFeedback feedback = feedbackOf(runId, taskId, boundaryMs, plan.undecided());
+		ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
 		List<String> remaining = subtract(plan.undecided(), drafts.settled());
 		// ② 表单明确留空：允许推进；后端<b>不写</b> "{}"，由前端在离开 QUERY_COND 时经 persistStepData 提交。
 		// 留空也压过 create_task 候选：用户的最新明确回答优先。
@@ -1009,7 +1032,7 @@ public class ConditionsForm extends HostForm {
 						runId, taskId);
 				return mixedBatchDecision();
 			}
-			boolean parked = parkAll(runId, history, candidates.drafts());
+			boolean parked = parkAll(runId, history, candidates.drafts(), assistantContent, assistantMetadata);
 			if (parked) {
 				log.info("issuing condition drafts before confirm_step runId={} taskId={} drafts={}", runId, taskId,
 						candidates.drafts().size());
@@ -1088,7 +1111,8 @@ public class ConditionsForm extends HostForm {
 		}
 		log.info("conditions undecided before confirm_step; collecting optional conditions once instead runId={} taskId={} defs={}", runId, taskId,
 				remaining);
-		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()));
+		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()), assistantContent,
+				assistantMetadata);
 		if (!parked) {
 			// F3：挂起写失败（saveSuspended/converge 失败）同样不能 allow
 			log.warn("condition form parking failed and conditions remain undecided; rejected with no side effects runId={} taskId={}", runId, taskId);
@@ -1132,17 +1156,6 @@ public class ConditionsForm extends HostForm {
 						"不得改用第二张条件表单重复收集"));
 	}
 
-	/**
-	 * 本轮 {@code SET_CONDITIONS} 表单的回灌事实（宿主表单持久化在同一个 run 的待决条目里，
-	 * 跨实例、跨续跑都读得到；旧模型表单仅作历史兼容）。
-	 *
-	 * <p><b>任务时间边界</b>：{@code boundaryMs > 0} 时只认该时刻<b>之后产生</b>的表单
-	 * （{@code requestedAtMs}，旧条目回落 {@code resolvedAtMs}）—— 上一个任务（A）的回灌/取消
-	 * 不会被新任务（B）复用；{@code boundaryMs == 0}（非本 run 新建任务）行为不变。
-	 *
-	 * <p>{@code handled} 按表单<b>实际覆盖的 defCode</b> 核对：非空回灌后必须为这些配置项各产生一条
-	 * 成功的 {@code set_condition} 草案（按 defCode 与任务绑定），否则不得 confirm。
-	 */
 	record ConditionFeedback(boolean cancelled, boolean blank, boolean nonEmpty, boolean handled) {
 
 		static ConditionFeedback none() {
@@ -1150,7 +1163,7 @@ public class ConditionsForm extends HostForm {
 		}
 	}
 
-	ConditionFeedback feedbackOf(String runId, long taskId, long boundaryMs, List<String> undecidedDefCodes) {
+	ConditionFeedback feedbackOf(String runId, long taskId, List<String> undecidedDefCodes) {
 		List<PendingToolCall> pendings;
 		try {
 			pendings = this.store.pendingsLenient(runId);
@@ -1165,10 +1178,6 @@ public class ConditionsForm extends HostForm {
 					|| !isConditionForm(form.getArguments()) || !belongsToTask(form.getToolCallId(), runId, taskId)) {
 				continue;
 			}
-			if (boundaryMs > 0 && requestedAtOf(form) < boundaryMs) {
-				// 本任务创建之前的历史表单（A 的回灌/取消）一律不算
-				continue;
-			}
 			if (latest == null || form.getResolvedAtMs() >= latest.getResolvedAtMs()) {
 				latest = form;
 			}
@@ -1177,11 +1186,9 @@ public class ConditionsForm extends HostForm {
 			return ConditionFeedback.none();
 		}
 		if (PendingToolCall.FRONTEND_CANCELLED.equals(latest.getStatus())) {
-			// 取消也是"问过了"：不换卡重问，但也不得放行（见 conditionGate ③）
 			return new ConditionFeedback(true, false, false, false);
 		}
 		if (!PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus())) {
-			// 还没回灌（PENDING）或旧状态：不据此重问
 			return ConditionFeedback.none();
 		}
 		String text = conditionTextOf(latest.getArguments(), latest.getResultText());
@@ -1192,12 +1199,11 @@ public class ConditionsForm extends HostForm {
 			return new ConditionFeedback(false, true, false, false);
 		}
 		Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
-		long sinceMs = Math.max(boundaryMs, latest.getResolvedAtMs());
 		return new ConditionFeedback(false, false, true,
-				setConditionDraftsSettledSince(runId, taskId, sinceMs, asked, boundaryMs));
+				setConditionDraftsSettled(runId, taskId, asked, latest.getResolvedAtMs()));
 	}
 
-	/** 表单实际覆盖的 defCode：宿主缺口卡 id 后缀优先；整卡/模型卡 = 当前全部未决定项。 */
+	/** 表单实际覆盖的 defCode：宿主缺口卡 id 后缀优先；整卡 = 当前全部未决定项。 */
 	private static Set<String> askedDefCodesOf(PendingToolCall form, String runId, long taskId,
 			List<String> undecidedDefCodes) {
 		Set<String> fallback = new LinkedHashSet<>(undecidedDefCodes == null ? List.of() : undecidedDefCodes);
@@ -1218,26 +1224,7 @@ public class ConditionsForm extends HostForm {
 		return fallback;
 	}
 
-	/** 表单产生时刻（{@code requestedAtMs}；旧条目没有该值时回落 {@code resolvedAtMs}）。 */
-	private static long requestedAtOf(PendingToolCall form) {
-		return form.getRequestedAtMs() > 0 ? form.getRequestedAtMs() : form.getResolvedAtMs();
-	}
-
-	/** 本 run 新建任务（B）的创建结算时刻；没有绑定（既有任务/旧快照）= 0（不做时间过滤）。 */
-	private static long createTaskBoundary(AiContext context) {
-		if (context == null || context.getExtra() == null) {
-			return 0L;
-		}
-		Long value = longOf(context.getExtra().get(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT));
-		return value == null || value <= 0 ? 0L : value;
-	}
-
-	/**
-	 * 表单回灌后，表单覆盖的每个 defCode 是否都已有<b>成功的 set_condition 草案</b>
-	 * （待决条目是事实源；不读 ai:ledger）。读失败 = 未处理（fail-closed）。
-	 */
-	private boolean setConditionDraftsSettledSince(String runId, long taskId, long sinceMs, Set<String> defCodes,
-			long boundaryMs) {
+	private boolean setConditionDraftsSettled(String runId, long taskId, Set<String> defCodes, long submittedAtMs) {
 		if (defCodes == null || defCodes.isEmpty()) {
 			return false;
 		}
@@ -1254,33 +1241,20 @@ public class ConditionsForm extends HostForm {
 			if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
 					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
 					|| !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
-					|| pending.effectiveOutcome() != ToolOutcome.OK || pending.getResolvedAtMs() < sinceMs) {
+					|| pending.effectiveOutcome() != ToolOutcome.OK || pending.getResolvedAtMs() < submittedAtMs) {
 				continue;
 			}
 			String defCode = defCodeOf(pending.getArguments());
-			if (defCode == null || !defCodes.contains(defCode)) {
-				continue;
+			if (defCode != null && defCodes.contains(defCode) && isBoundDraft(pending, runId, taskId, defCode)) {
+				settled.add(defCode);
 			}
-			boolean hostDraft = pending.getToolCallId() != null
-					&& pending.getToolCallId().startsWith(DRAFT_TOOL_CALL_ID_PREFIX);
-			if (hostDraft && !isDraftForTask(pending.getToolCallId(), runId, taskId)) {
-				continue;
-			}
-			if (!hostDraft && boundaryMs > 0 && requestedAtOf(pending) < boundaryMs) {
-				continue;
-			}
-			settled.add(defCode);
 		}
 		return settled.containsAll(defCodes);
 	}
 
-	/** 宿主条件表单的 toolCallId 带任务号；模型表单没有任务号（同一 run 只有一个任务）⇒ 按 run 认。 */
 	private static boolean belongsToTask(String toolCallId, String runId, long taskId) {
-		if (toolCallId == null) {
+		if (toolCallId == null || !toolCallId.startsWith(TOOL_CALL_ID_PREFIX)) {
 			return false;
-		}
-		if (!toolCallId.startsWith(TOOL_CALL_ID_PREFIX)) {
-			return true;
 		}
 		// 宿主条件表有两种形态：host-cond-form-<run>-<task> 与带缺口集合的 <...-<def1>-<def2>>。
 		// 必须按"base + 边界"匹配：直接 equals 会把部分缺口卡误认成别的 task，直接 startsWith(base)

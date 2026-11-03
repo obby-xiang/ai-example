@@ -242,7 +242,11 @@ class DefinitionSelectionFormSettlementTest {
 	}
 
 	private static AiContext wizardContext(Map<String, Object> extra) {
-		return AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", extra);
+		Map<String, Object> pageFacts = new LinkedHashMap<>();
+		pageFacts.put("pageId", "export");
+		pageFacts.put("selectionSynced", true);
+		pageFacts.putAll(extra);
+		return AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, "ACTIVE", pageFacts);
 	}
 
 	private static PendingToolCall navigateTo(long taskId) {

@@ -7,7 +7,6 @@ import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -37,23 +36,23 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * R3-01：11 个 BACKEND 业务工具的文本结果曾走官方 {@code DefaultToolCallResultConverter}，
+ * R3-01：10 个 BACKEND 业务工具的文本结果曾走官方 {@code DefaultToolCallResultConverter}，
  * 被二次 JSON 编码（模型看到 {@code "\"- CURRENCY…\\n…"}）。KB 三工具已按 L-88 修好，本类把
  * {@code AiTools} 的同一面钉住。
  *
  * <p>证据面与真机一致：走官方 {@link MethodToolCallbackProvider}（生产注册路径），再看
  * {@code role:tool} 消息里的 {@code message} 首字符 —— 它必须是正文，不是引号。
  *
- * <p>边界（本任务口径）：只给 11 个 BACKEND 业务工具挂 {@link PlainTextToolResultConverter}；
+ * <p>边界（本任务口径）：只给 10 个 BACKEND 业务工具挂 {@link PlainTextToolResultConverter}；
  * 23 个 FRONTEND 哨兵工具（{@code @ToolChannel(FRONTEND)}）<b>不机械全挂</b> —— 它们的方法体
  * 根本不面向模型，结果由前端回灌，维持官方默认转换器。
  */
 class AiToolsToolResultPlainTextTest {
 
-    /** 11 个 BACKEND 业务工具（34 个 {@code @Tool} − 23 个 FRONTEND 哨兵）。 */
+    /** 10 个 BACKEND 业务工具（33 个 {@code @Tool} − 23 个 FRONTEND 哨兵）。 */
     private static final Set<String> BACKEND_BUSINESS_TOOLS = Set.of(
             "list_config_defs", "get_config_def", "list_tasks", "get_workspace_state", "check_job_status",
-            "get_row_count", "create_task", "start_export", "start_precheck", "start_import", "start_publish");
+            "create_task", "start_export", "start_precheck", "start_import", "start_publish");
 
     private static ToolCallback callback(AiTools tools, String name) {
         return java.util.Arrays.stream(MethodToolCallbackProvider.builder().toolObjects(tools).build()
@@ -118,14 +117,11 @@ class AiToolsToolResultPlainTextTest {
         when(taskService.createIdempotent(any(), any(), any()))
                 .thenReturn(new TaskService.CreateOutcome(task(), false));
 
-        ConfigDataService dataService = mock(ConfigDataService.class);
-        when(dataService.count(any(), any(), any())).thenReturn(4L);
-
         JobService jobService = mock(JobService.class);
         when(jobService.findById(9L)).thenReturn(job());
         when(jobService.createAndStart(any(), any())).thenReturn(job());
 
-        return new AiTools(definitionService, taskService, dataService, jobService);
+        return new AiTools(definitionService, taskService, jobService);
     }
 
     @Test
@@ -138,14 +134,13 @@ class AiToolsToolResultPlainTextTest {
         calls.put("list_tasks", "{}");
         calls.put("get_workspace_state", "{\"taskId\":1}");
         calls.put("check_job_status", "{\"jobId\":9}");
-        calls.put("get_row_count", "{\"defCode\":\"CURRENCY\"}");
         calls.put("create_task", "{\"type\":\"EXPORT\",\"title\":\"导出任务\"}");
         calls.put("start_export", "{\"taskId\":1}");
         calls.put("start_precheck", "{\"taskId\":1}");
         calls.put("start_import", "{\"taskId\":1}");
         calls.put("start_publish", "{\"taskId\":1}");
 
-        assertThat(calls.keySet()).as("11 个 BACKEND 业务工具名单必须与审计口径一致")
+        assertThat(calls.keySet()).as("10 个 BACKEND 业务工具名单必须与审计口径一致")
                 .containsExactlyInAnyOrderElementsOf(BACKEND_BUSINESS_TOOLS);
 
         for (Map.Entry<String, String> call : calls.entrySet()) {
@@ -162,7 +157,7 @@ class AiToolsToolResultPlainTextTest {
     }
 
     @Test
-    void onlyTheElevenBackendBusinessToolsDeclareThePlainTextConverter() {
+    void onlyTheTenBackendBusinessToolsDeclareThePlainTextConverter() {
         Set<String> backend = new LinkedHashSet<>();
         Set<String> frontend = new LinkedHashSet<>();
         Map<String, Class<?>> converters = new TreeMap<>();
@@ -180,15 +175,15 @@ class AiToolsToolResultPlainTextTest {
             }
         }
 
-        assertThat(converters).as("工具总数（11 BACKEND + 23 FRONTEND）").hasSize(34);
+        assertThat(converters).as("工具总数（10 BACKEND + 23 FRONTEND）").hasSize(33);
         assertThat(frontend).as("FRONTEND 哨兵工具数").hasSize(23);
-        assertThat(backend).as("BACKEND 业务工具数").hasSize(11);
+        assertThat(backend).as("BACKEND 业务工具数").hasSize(10);
 
         Set<String> withPlainText = new LinkedHashSet<>(converters.entrySet().stream()
                 .filter(entry -> entry.getValue() == PlainTextToolResultConverter.class)
                 .map(Map.Entry::getKey)
                 .toList());
-        assertThat(withPlainText).as("只有 11 个 BACKEND 业务工具挂 PlainTextToolResultConverter，FRONTEND 不机械全挂")
+        assertThat(withPlainText).as("只有 10 个 BACKEND 业务工具挂 PlainTextToolResultConverter，FRONTEND 不机械全挂")
                 .containsExactlyInAnyOrderElementsOf(BACKEND_BUSINESS_TOOLS);
 
         converters.forEach((name, converter) -> {

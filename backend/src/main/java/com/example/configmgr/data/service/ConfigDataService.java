@@ -50,6 +50,16 @@ public class ConfigDataService {
                 PageRequest.of(page, size));
     }
 
+    /** 与无条件导出一致：统计该定义的全部已发布行，不按独立范围参数收窄。 */
+    public long count(String defCode, String scopeType, String scopeKey) {
+        return dataRowRepository.countByDefCode(defCode);
+    }
+
+    /** 条件命中的真实行数；与条件列表、导出作业共用 {@link ConditionEvaluator}。 */
+    public long countFiltered(String defCode, String scopeKey, QueryCondition condition) {
+        return filterRows(defCode, scopeKey, condition).size();
+    }
+
     /**
      * 带查询条件的分页列表（S4.4b 遗留 3：列表端点补 {@code conditions} 入参）。
      *

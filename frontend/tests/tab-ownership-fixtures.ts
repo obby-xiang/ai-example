@@ -51,8 +51,14 @@ export class FakeLockManager {
     this.mine.add(name)
     const held = Promise.resolve(callback({ name }))
     return held.then(
-      () => this.mine.delete(name),
-      () => this.mine.delete(name)
+      (value) => {
+        this.mine.delete(name)
+        return value
+      },
+      (error) => {
+        this.mine.delete(name)
+        throw error
+      }
     )
   }
 }

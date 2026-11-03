@@ -136,6 +136,14 @@ export interface ReattachProbe {
   status: number
   /** 202 且 `preparing=true` 时非 null */
   preparing: PreparingProbe | null
+  /**
+   * 200 探测体里的服务端快照状态（{@code RUNNING} / {@code SUSPENDED} / 终态…）。
+   *
+   * <p>只用于让调用方判断"本轮是否仍在 park"：`SUSPENDED` ⇒ 正式重挂应按 park 语义建连
+   * （服务端收流属正常收尾，不误报断流）。缺省/null = 未知（非 JSON 应答 / 旧端点），
+   * 调用方不得据此猜测。
+   */
+  snapshotStatus?: string | null
 }
 
 /**
@@ -674,13 +682,27 @@ export async function probeReattach(runId: string): Promise<ReattachProbe> {
       }
       return { status: response.status, preparing: null }
     }
-    // 200 = 就绪（`ready=true` 的轻量 JSON）：不留任何挂起的响应体
+    // 200 = 就绪（`ready=true` 的轻量 JSON）：读 `status` 判 park（SUSPENDED ⇒ 服务端会 park 收流），
+    // 读完即收流，不留挂起的响应体。非 JSON 应答（中间层 / 旧端点 / 无 content-type）一律按
+    // "未证明 park" 处理 —— 绝不为了一个可选判据去读一条可能是事件流的响应体。
+    let snapshotStatus: string | null = null
+    const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('application/json')) {
+      try {
+        const body = await response.json() as { status?: unknown } | null
+        if (body && typeof body.status === 'string' && body.status !== '') {
+          snapshotStatus = body.status
+        }
+      } catch {
+        snapshotStatus = null
+      }
+    }
     try {
       await response.body?.cancel()
     } catch {
       // 已关闭 / 不可取消：忽略
     }
-    return { status: response.status, preparing: null }
+    return { status: response.status, preparing: null, snapshotStatus }
   } catch {
     return { status: 0, preparing: null }
   } finally {

@@ -21,6 +21,7 @@ import { ApiError } from '@/api/http'
 import { ErrorCode } from '@/types/api'
 import { registerPageHandler, unregisterPageHandler } from '@/stores/workspace'
 import type { AiRunCurrent } from '@/types/ai'
+import { FakeLockManager } from './tab-ownership-fixtures'
 
 const api = vi.hoisted(() => ({
   history: vi.fn(),
@@ -35,6 +36,7 @@ vi.mock('@/api/ai', () => ({ aiApi: api }))
 
 beforeEach(() => {
   sessionStorage.clear()
+  Object.defineProperty(navigator, 'locks', { value: new FakeLockManager(), configurable: true })
   setActivePinia(createPinia())
   api.history.mockReset()
   api.runsCurrent.mockReset()
@@ -53,6 +55,7 @@ beforeEach(() => {
  */
 afterEach(() => {
   useAiStore().adoptFreshSession()
+  Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
 })
 
 /** 消息上的工具段序列。 */
@@ -307,7 +310,7 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
     expect(soleToolPart(second).status).toBe('succeeded')
   })
 
-  it('applyFrontendToolTerminal：非 GF FRONTEND 段只收 requiresAction（status 不动，终态由结果帧承载）', async () => {
+  it('applyFrontendToolTerminal：非 GF FRONTEND 的 pending 段消费后端权威终态', async () => {
     const store = useAiStore()
     store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
     const assistant = store.appendAssistantMessage()
@@ -325,8 +328,8 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
 
     store.applyFrontendToolTerminal('f1', 'succeeded')
 
-    // 非 GF：收 requiresAction，status 不动（终态由 frontend_tool_result 帧的写点落定）
-    expect(soleToolPart(assistant)).toMatchObject({ status: 'pending', requiresAction: false })
+    // 后端已给明确终态：非 GF 的 pending 同样落 succeeded，并收掉挂起投影
+    expect(soleToolPart(assistant)).toMatchObject({ status: 'succeeded', requiresAction: false })
     // 投影基线：通用 FRONTEND 收掉挂起卡
     expect(assistant.pendingCall).toBeNull()
     // 等异步本地执行收尾，避免跨用例泄漏

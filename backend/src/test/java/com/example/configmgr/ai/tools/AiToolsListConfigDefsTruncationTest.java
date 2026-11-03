@@ -1,6 +1,5 @@
 package com.example.configmgr.ai.tools;
 
-import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -38,8 +37,7 @@ class AiToolsListConfigDefsTruncationTest {
 
     private final DefinitionService definitionService = mock(DefinitionService.class);
 
-    private final AiTools aiTools = new AiTools(definitionService, mock(TaskService.class),
-            mock(ConfigDataService.class), mock(JobService.class));
+    private final AiTools aiTools = new AiTools(definitionService, mock(TaskService.class), mock(JobService.class));
 
     @Test
     void truncatesToMaxRowsAndAppendsTotalCountNotice() {

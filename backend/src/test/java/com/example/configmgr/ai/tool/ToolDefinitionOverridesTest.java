@@ -261,7 +261,7 @@ class ToolDefinitionOverridesTest {
     void shippedYamlCoversEveryDeclaredTool() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
         List<String> declared = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
-                "check_job_status", "get_row_count", "create_task", "start_export", "start_precheck", "start_import",
+                "check_job_status", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
                 "select_definitions", "set_condition", "confirm_step", "generative_form", "read_sheet_summary",
                 "aggregate_sheet", "inspect_columns", "review_cells", "find_rows", "normalize_column", "replace_values",
@@ -289,7 +289,7 @@ class ToolDefinitionOverridesTest {
                 "旧口径（推进只对下一轮生效）必须删除：" + override.description());
         assertTrue(override.description().contains("下一批按最新披露"), override.description());
         assertTrue(override.description().contains("失败即停"), override.description());
-        assertEquals("2026-10-27.20", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.23", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -359,7 +359,7 @@ class ToolDefinitionOverridesTest {
         assertTrue(confirmStep.description().contains("未设筛选"), confirmStep.description());
         assertTrue(confirmStep.description().contains("全量"), confirmStep.description());
 
-        assertEquals("2026-10-27.20", shipped.version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.23", shipped.version(), "改描述必须发新 version");
     }
 
     /**
@@ -384,12 +384,12 @@ class ToolDefinitionOverridesTest {
             // 2026-10-27.16（条件收集单通道）引入，本条断言随当前 pin 同步：导出创建必须显式给 conditions，未决定传 {}
             assertTrue(description.contains("必须显式传 conditions"), description);
             assertTrue(description.contains("未决定传 {}"), description);
-            // 2026-10-27.20：create_task 的 {} 仍只表示条件未决定，不得与 set_condition 的"明确不设"混用
+            // 2026-10-27.23：create_task 的 {} 仍只表示条件未决定，不得与 set_condition 的"明确不设"混用
             assertTrue(description.contains("只表示条件未决定"), description);
             assertTrue(description.contains("navigate_to"), description);
         }
 
-        assertEquals("2026-10-27.20", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
+        assertEquals("2026-10-27.23", new YamlToolDefinitionSource().version(), "改描述必须发新 version");
     }
 
     private static String createTaskDescriptionFromYaml() {
@@ -403,13 +403,13 @@ class ToolDefinitionOverridesTest {
         try {
             java.lang.reflect.Method method = com.example.configmgr.ai.tools.AiTools.class
                 .getMethod("createTask", String.class, String.class, String[].class,
-                        com.example.configmgr.ai.tools.AiTools.FieldQueryCondition.class, ToolContext.class);
+                        com.example.configmgr.ai.tools.AiTools.FieldQueryCondition.class, Boolean.class, ToolContext.class);
             Tool tool = method.getAnnotation(Tool.class);
             assertNotNull(tool, "AiTools#createTask 必须带 @Tool");
             return tool.description();
         }
         catch (NoSuchMethodException ex) {
-            throw new AssertionError("AiTools#createTask(String,String,String[],FieldQueryCondition,ToolContext) 不存在", ex);
+            throw new AssertionError("AiTools#createTask(String,String,String[],FieldQueryCondition,Boolean,ToolContext) 不存在", ex);
         }
     }
 

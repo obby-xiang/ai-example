@@ -939,6 +939,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
           ...(frame.returnedChars !== undefined ? { returnedChars: frame.returnedChars } : {}),
           ...(frame.strategy !== undefined ? { strategy: frame.strategy } : {}),
           ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
+          ...(frame.preflight ? { preflight: frame.preflight } : {}),
           requiresAction: false
         })
         break
@@ -994,6 +995,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         ...(frame.outcome !== undefined ? { outcome: frame.outcome } : {}),
         // S6 批 2：视图通道（additive 可选键）—— 仅在帧带视图时落段
         ...(frame.resultView ? { resultView: frame.resultView } : {}),
+        // H1 预检展示摘要（additive 可选键）：刷新恢复的全量帧重放对"已决"确认工具会跳过
+        // suspended/confirm_request，结局帧是唯一还会被应用的帧 —— 卡头业务标题与条件/影响面
+        // 靠它重建（后端只发白名单 target/impact/conditionSummary/publishMode）。
+        ...(frame.preflight ? { preflight: frame.preflight } : {}),
         reason,
         requiresAction: false
       })

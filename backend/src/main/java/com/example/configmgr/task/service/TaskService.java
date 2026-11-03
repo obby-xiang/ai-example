@@ -18,6 +18,7 @@ import com.example.configmgr.task.entity.TaskFile;
 import com.example.configmgr.task.repo.TaskRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskFileRepository;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
@@ -38,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -140,9 +142,10 @@ public class TaskService {
      * <b>不以标题为唯一依据</b>。同一轮同一键 ⇒ 复用已有任务（{@code reused=true}，绝不二次创建）；
      * 同一轮不同键 ⇒ 明确冲突（{@code CREATE_TASK_CONFLICT}，本轮只允许创建一次）。
      *
-     * <p>幂等标记落既有的 {@code settings_json}（{@code {"aiCreateKey":…,"aiCreateRun":…}}）：
-     * 不改变业务规格，跨进程重启仍可判定；其它设置（如 {@code importMode}）原样保留。
-     * 同值的可索引副本写 {@code tasks.ai_create_run} / {@code tasks.ai_create_key}（唯一约束，见 V12）。
+     * <p>幂等标记落既有的 {@code settings_json}（{@code aiCreateKey}/{@code aiCreateRun}；
+     * 跨 run 继续另记 {@code aiCreateRuns}）：不改变业务规格，跨进程重启仍可判定；
+     * 其它设置（如 {@code importMode}）原样保留。首轮创建的同值可索引副本写
+     * {@code tasks.ai_create_run} / {@code tasks.ai_create_key}（唯一约束，见 V12）。
      *
      * <h2>锁与事务边界（L-1）</h2>
      * <b>不再</b>用 {@code @Transactional} 包住 {@code synchronized}：那样锁在方法体结束时释放，
@@ -157,6 +160,19 @@ public class TaskService {
      * 回查不到赢家（冲突来自别处）时<b>原样上抛</b>完整性错误，不包装成"可重试的创建冲突"。
      */
     public CreateOutcome createIdempotent(Task.TaskType type, String title, String runId) {
+        return createIdempotent(type, title, runId, null);
+    }
+
+    /**
+     * 带当前任务槽位的创建：跨 run 继续同一意图时复用槽位任务，不重复创建。
+     * 只有任务仍是 ACTIVE、类型与规范化标题一致、且本身带 AI 创建幂等事实时才可复用；
+     * 手工任务、不同意图与明确的新建仍走原创建路径。
+     *
+     * <p>续跑 run 记录在原任务 {@code settings_json.aiCreateRuns}，不改写原始
+     * {@code ai_create_run}/{@code ai_create_key}。任务行锁让跨实例的同槽位续跑串行，
+     * 因而同一续跑 run 的第二个不同意图仍由单轮上限拒绝。
+     */
+    public CreateOutcome createIdempotent(Task.TaskType type, String title, String runId, Long continuationTaskId) {
         String normalizedTitle = normalizeCreateName(title);
         String runToken = runId == null || runId.isBlank() ? null : runId.trim();
         String key = createIdempotencyKey(type, normalizedTitle, runToken);
@@ -167,7 +183,7 @@ public class TaskService {
             TransactionTemplate tx = new TransactionTemplate(this.transactionManager);
             tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
             try {
-                return tx.execute(status -> createChecked(type, normalizedTitle, runToken, key));
+                return tx.execute(status -> createChecked(type, normalizedTitle, runToken, key, continuationTaskId));
             }
             catch (DataIntegrityViolationException conflict) {
                 // 另一个实例（或另一线程）先落库：查重快照看不到未提交插入，由唯一约束拒绝。
@@ -177,12 +193,20 @@ public class TaskService {
         }
     }
 
-    /** {@link #createIdempotent} 的事务体：查重 → 插入（唯一约束冲突抛 {@link DataIntegrityViolationException}）。 */
-    private CreateOutcome createChecked(Task.TaskType type, String normalizedTitle, String runToken, String key) {
+    /** {@link #createIdempotent} 的事务体：查重 → 续跑复用/插入。 */
+    private CreateOutcome createChecked(Task.TaskType type, String normalizedTitle, String runToken, String key,
+                                        Long continuationTaskId) {
         if (runToken != null) {
             Optional<Task> inRun = this.taskRepository.findFirstByAiCreateRunOrderByIdAsc(runToken);
             if (inRun.isPresent()) {
                 return reuseOrConflict(inRun.get(), key, runToken);
+            }
+            if (continuationTaskId != null && continuationTaskId > 0L) {
+                Optional<CreateOutcome> continued = continueCurrentTask(type, normalizedTitle, runToken,
+                        continuationTaskId);
+                if (continued.isPresent()) {
+                    return continued.get();
+                }
             }
         }
         else {
@@ -216,6 +240,101 @@ public class TaskService {
         Task saved = this.taskRepository.saveAndFlush(task);
         log.info("create_task task persisted taskId={} idemKey={} runId={}", saved.getId(), key, runToken);
         return new CreateOutcome(saved, false);
+    }
+
+    private Optional<CreateOutcome> continueCurrentTask(Task.TaskType type, String normalizedTitle, String runToken,
+                                                        Long continuationTaskId) {
+        Optional<Task> found = this.taskRepository.findByIdForUpdate(continuationTaskId);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        Task existing = found.get();
+        Map<String, Object> settings = readCreateSettings(existing);
+        List<String> continuationRuns = continuationRuns(settings, existing.getId());
+        boolean eligible = isContinuationEligible(existing, type, normalizedTitle);
+        if (continuationRuns.contains(runToken)) {
+            if (eligible) {
+                return Optional.of(new CreateOutcome(existing, true));
+            }
+            throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
+                    "本轮已继续任务 #" + existing.getId() + "，同一轮只允许创建或继续一次；本次未创建。"
+                            + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
+        }
+        if (!eligible) {
+            return Optional.empty();
+        }
+        continuationRuns.add(runToken);
+        settings.put("aiCreateRuns", continuationRuns);
+        try {
+            existing.setSettingsJson(objectMapper.writeValueAsString(settings));
+        }
+        catch (Exception ex) {
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                    "任务创建续跑标记序列化失败: " + ex.getMessage(), ex);
+        }
+        Task saved = this.taskRepository.saveAndFlush(existing);
+        log.info("create_task continuation slot reused taskId={} runId={}", saved.getId(), runToken);
+        return Optional.of(new CreateOutcome(saved, true));
+    }
+
+    public static String effectiveCreateTitle(Task.TaskType type, String title) {
+        if (title != null && !title.isBlank()) {
+            return title.trim();
+        }
+        if (type == Task.TaskType.EXPORT) {
+            return "导出任务";
+        }
+        if (type == Task.TaskType.IMPORT) {
+            return "导入任务";
+        }
+        return "未命名任务";
+    }
+
+    /** 预检与执行共用的续用资格：只有同意图且仍活跃的 AI 创建任务才可续用。 */
+    public static boolean isContinuationEligible(Task task, Task.TaskType type, String title) {
+        return task != null && task.getStatus() == Task.TaskStatus.ACTIVE
+                && task.getAiCreateKey() != null && !task.getAiCreateKey().isBlank()
+                && sameCreateIntent(task, type, normalizeCreateName(title));
+    }
+
+    private static boolean sameCreateIntent(Task task, Task.TaskType type, String normalizedTitle) {
+        return task.getType() == type && normalizeCreateName(task.getTitle()).equals(normalizedTitle);
+    }
+
+    private Map<String, Object> readCreateSettings(Task task) {
+        if (task.getSettingsJson() == null || task.getSettingsJson().isBlank()) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            return objectMapper.readValue(task.getSettingsJson(), new TypeReference<LinkedHashMap<String, Object>>() {
+            });
+        }
+        catch (Exception ex) {
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                    "任务设置不可读，不能安全复用创建槽位: " + ex.getMessage(), ex);
+        }
+    }
+
+    private static List<String> continuationRuns(Map<String, Object> settings, Long taskId) {
+        Object raw = settings.get("aiCreateRuns");
+        if (raw == null) {
+            return new ArrayList<>();
+        }
+        if (!(raw instanceof List<?> values)) {
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                    "任务 #" + taskId + " 的 aiCreateRuns 必须是数组，不能安全复用创建槽位");
+        }
+        List<String> runs = new ArrayList<>();
+        for (Object value : values) {
+            if (!(value instanceof String run) || run.isBlank()) {
+                throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                        "任务 #" + taskId + " 的 aiCreateRuns 含非法项，不能安全复用创建槽位");
+            }
+            if (!runs.contains(run)) {
+                runs.add(run);
+            }
+        }
+        return runs;
     }
 
     /** 同轮已有任务：同键复用，不同键 = 本轮已创建过（单轮上限 1）。 */

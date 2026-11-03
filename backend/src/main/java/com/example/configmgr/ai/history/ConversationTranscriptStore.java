@@ -6,6 +6,8 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -46,7 +48,8 @@ import java.util.Map;
  * <h2>幂等 / last-wins / 排序</h2>
  * 写入永远 append（无更新 API）；读取按 {@code entryId} 去重取<b>最后一条</b>（工具卡状态更新、
  * 挂起 pending → 终态），再按 {@code turnStartedAtMs} 稳定排序（挂起轮晚收尾仍排在它该在的位置，
- * 同轮按追加顺序）。
+ * 同轮按追加顺序）。唯一例外 = 预检展示摘要（{@code toolCallStates[*].preflight}）：后写的一份缺它时
+ * 沿用先写的一份（同 {@link TranscriptEntries#carryPreflight}），卡头业务标题不因重写退化。
  *
  * <h2>容量</h2>
  * 单会话最多 {@value #MAX_ENTRIES} 条、约 {@value #MAX_BYTES} 字节；超出从最旧裁剪并置
@@ -159,6 +162,10 @@ public class ConversationTranscriptStore {
 
 	private final ObjectMapper mapper;
 
+	/** 生产读侧补偿源；直接构造的轻装配不注入，保持原有读取行为。 */
+	@Autowired(required = false)
+	private ChatMemory chatMemory;
+
 	private final Duration ttl;
 
 	private final int maxEntries;
@@ -245,19 +252,53 @@ public class ConversationTranscriptStore {
 		for (String payload : raw) {
 			TranscriptEntry entry = parse(payload, sessionId);
 			if (entry != null && entry.entryId() != null && !entry.entryId().isBlank()) {
-				// LinkedHashMap 替换保留首次插入位置：last-wins 的值 + 原始时序位置
-				byId.put(entry.entryId(), entry);
+				// LinkedHashMap 替换保留首次插入位置：last-wins 的值 + 原始时序位置。
+				// 唯一例外 = preflight 展示摘要：挂起写点与终态写点同 entryId，后写的一份若没带
+				// 预检（条目读不全/旧条目），沿用先写的一份，卡头不会退回工具名。
+				TranscriptEntry previous = byId.get(entry.entryId());
+				byId.put(entry.entryId(), previous == null ? entry : TranscriptEntries.carryPreflight(previous, entry));
 			}
 		}
-		List<TranscriptEntry> sorted = new ArrayList<>(byId.values());
+		// 非空 transcript 不再是排他条件：写点漏写时按稳定 entryId 从可靠记忆补偿，
+		// 同时修正旧版“baseline + runId”双写的当前轮，已有展示原文始终优先。
+		List<TranscriptEntry> sorted = TranscriptEntries.reconcileWithMemory(new ArrayList<>(byId.values()),
+				readMemory(sessionId));
 		sorted.sort(Comparator.comparingLong(TranscriptEntry::turnStartedAtMs));
 		touch(key, readyKey(sessionId, tenantId, userId), truncatedKey(sessionId, tenantId, userId));
 		boolean truncated = Boolean.TRUE.equals(this.redis.hasKey(truncatedKey(sessionId, tenantId, userId)));
 		return new ReadResult(List.copyOf(sorted), truncated);
 	}
 
+	private List<Message> readMemory(String sessionId) {
+		if (this.chatMemory == null) {
+			return null;
+		}
+		try {
+			return this.chatMemory.get(sessionId);
+		}
+		catch (RuntimeException ex) {
+			// transcript 本体仍可读；补偿源不可用时保留已有条目，不伪装成已完成对账。
+			log.warn("transcript memory reconciliation unavailable sessionId={} error={}", sessionId, ex.getMessage());
+			return null;
+		}
+	}
+
+	/** 从当前可靠记忆回填旧轮；当前 run 按消息 runId 排除，不按用户原文猜测边界。 */
+	public void ensureBaselineFromMemory(String sessionId, long tenantId, long userId, String currentRunId) {
+		if (this.chatMemory == null) {
+			return;
+		}
+		ensureBaseline(sessionId, tenantId, userId,
+				TranscriptEntries.outsideRun(readMemory(sessionId), currentRunId));
+	}
+
 	/**
 	 * 首次写入前把既有 {@code chat:mem} 复制一份 baseline（仅当还没有 {@code :ready} 标记）。
+	 *
+	 * <p><b>空记忆同样是基线决策</b>：新会话首轮没有旧历史可复制，但同样置 ready —— 否则后续
+	 * 写点把含本轮 USER 的 prompt 当旧历史复制，同一提问会出现两次。
+	 *
+	 * <p>{@code memory == null} 表示"读不到"（降级），不是"空"：保持未初始化，等真实读再复制。
 	 *
 	 * <p>幂等：多实例同时初始化时可能各复制一份，但 entryId 相同 ⇒ 读取 last-wins 不产生重复气泡。
 	 */
@@ -269,7 +310,8 @@ public class ConversationTranscriptStore {
 	}
 
 	public void ensureBaseline(String sessionId, long tenantId, long userId, List<Message> memory) {
-		if (!TenantKeyScope.hasIdentity(tenantId, userId) || memory == null || memory.isEmpty()) {
+		// memory == null = 读不到（降级），不是"没有旧历史"：保持未初始化，等下一次真实读再复制。
+		if (!TenantKeyScope.hasIdentity(tenantId, userId) || memory == null) {
 			return;
 		}
 		String key = dataKey(sessionId, tenantId, userId);
@@ -279,13 +321,23 @@ public class ConversationTranscriptStore {
 				touch(key, ready, truncatedKey(sessionId, tenantId, userId));
 				return;
 			}
+			if (memory.isEmpty()) {
+				// 新会话首轮：没有旧历史可回填，但 baseline 决策已经成立，必须置 ready。
+				// 否则后续写点一旦把含本轮 USER 的 prompt 当成"旧历史"复制，就会再写一份 baseline
+				// ⇒ 刷新后同一提问出现两次。
+				this.redis.opsForValue().setIfAbsent(ready, "1", this.ttl);
+				touch(key, ready, truncatedKey(sessionId, tenantId, userId));
+				return;
+			}
 			List<TranscriptEntry> baseline = TranscriptEntries.baseline(memory);
 			if (!baseline.isEmpty()) {
 				List<String> payloads = new ArrayList<>(baseline.size());
 				for (TranscriptEntry entry : baseline) {
 					payloads.add(json(entry));
 				}
-				appendWithBounds(sessionId, tenantId, userId, payloads);
+				if (!appendWithBounds(sessionId, tenantId, userId, payloads)) {
+					return;
+				}
 			}
 			this.redis.opsForValue().setIfAbsent(ready, "1", this.ttl);
 			touch(key, ready, truncatedKey(sessionId, tenantId, userId));
