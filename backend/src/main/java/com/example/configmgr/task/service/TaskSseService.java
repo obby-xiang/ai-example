@@ -1,5 +1,6 @@
 package com.example.configmgr.task.service;
 
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.example.configmgr.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -66,16 +67,43 @@ import java.util.function.LongSupplier;
  *     权威状态仍在数据库（前端 3s 快照轮询兜底），所以 Redis 抖动丢一帧<b>不丢状态</b>。</li>
  * </ol>
  * 订阅生命周期：<b>首订阅注册</b>（{@link TaskEventBus#subscribe}）、<b>末订阅退订</b>
- * （{@link TaskEventBus#unsubscribe}）；订阅失败时本机投递照常（明确降级），并由
- * <b>一次性延迟重试</b>（10s 退避，复用仓内受控调度器）与 publish 路径双向兜底，Redis 恢复后
- * 自动补上 —— 只对仍有本机 emitter 的任务重试，末订阅即取消，不残留任务。
+ * （{@link TaskEventBus#unsubscribe}）；订阅失败时本机投递照常（明确降级）。
+ *
+ * <h2>跨实例订阅的补偿重试：<b>有界</b>，用尽/退订即停（线程修复-后端）</h2>
+ * 旧实现是"失败就 10s 后再排，失败再排下一次"：没有次数/总时长上限，只要本机还有 emitter
+ * 就一直续期，且全部压在 AI 侧的 {@code aiStreamWatchdog}（只有 2 条线程）上 —— Redis 长时间
+ * 不可用时，N 个打开的任务页 = N 条永续链，直接拖慢 AI 流式看门狗。现形态：
+ * <ul>
+ * <li><b>专用调度器</b>：改用 {@code taskEventScheduler}（{@code TaskSseSchedulerConfig}：
+ *     2 条守护线程、独立于 AI 看门狗的时间线），不再与 AI 看门狗抢线程；</li>
+ * <li><b>次数上限为主、时长上限兜底</b>：每轮补偿最多记录
+ *     {@link #REMOTE_SUBSCRIBE_MAX_ATTEMPTS} 次失败、总时长不超过
+ *     {@link #REMOTE_SUBSCRIBE_RETRY_WINDOW_NANOS}，退避 10s → 20s → 40s → 60s 封顶。
+ *     按这条退避链，次数通常在 3 分钟内先用尽；时长上限只在调度被长时间延迟/时钟异常时兜底，
+ *     不是"两次都会在 5 分钟附近生效"的双阈值；</li>
+ * <li><b>用尽即停</b>：次数/时长用尽即标记本轮补偿终结、撤销待触发句柄，不再自我续期；
+ *     <b>退订即停</b>：末订阅断开时取消句柄并清空本轮记账，任务零残留；</li>
+ * <li><b>不再永久失效</b>：终结后 <b>publish 路径</b>每帧只做一次门控检查，实际订阅尝试
+ *     ≤1 次/60s（只有帧还在流时才会发生；没有帧就不探测），Redis 恢复后自动补上；
+ *     任务收尾/页面关闭则彻底停止。</li>
+ * </ul>
+ * 重试体显式 {@link RunIdentityScope#denied()}：调度线程不得携带"排期那一刻的调用者身份"。
  */
 @Slf4j
 @Service
 public class TaskSseService {
 
-    /** 跨实例订阅失败后的重试退避（publish 路径轻量重试，避免每帧都打 Redis）。 */
-    private static final long REMOTE_SUBSCRIBE_RETRY_NANOS = TimeUnit.SECONDS.toNanos(10);
+    /** 第 1 次失败后的重试退避（同时是 publish 路径的轻量重试门距，避免每帧都打 Redis）。 */
+    private static final long REMOTE_SUBSCRIBE_RETRY_BASE_NANOS = TimeUnit.SECONDS.toNanos(10);
+
+    /** 单次退避上限（指数退避到此封顶）。 */
+    private static final long REMOTE_SUBSCRIBE_RETRY_MAX_NANOS = TimeUnit.SECONDS.toNanos(60);
+
+    /** 单轮补偿的最多尝试次数（用尽即终态，不再自我续期）。 */
+    private static final int REMOTE_SUBSCRIBE_MAX_ATTEMPTS = 5;
+
+    /** 单轮补偿的总时长兜底（调度被长时间延迟/时钟异常时生效；正常由次数上限先到）。 */
+    private static final long REMOTE_SUBSCRIBE_RETRY_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(5);
 
     private final ObjectMapper objectMapper;
     private final Map<Long, List<SseEmitter>> emitters = new ConcurrentHashMap<>();
@@ -98,7 +126,16 @@ public class TaskSseService {
     /** 任务 → 下次允许重试跨实例订阅的时刻（可注入的纳秒时钟，生产 = {@code System.nanoTime}）。 */
     private final ConcurrentMap<Long, Long> remoteRetryAtNanos = new ConcurrentHashMap<>();
 
-    /** 已挂起一次性延迟重试的任务（防重复排期；末订阅/成功即撤销）。 */
+    /** 任务 → 本轮补偿已失败次数（成功/退订/新一轮订阅即清零；有界：封顶在最大次数）。 */
+    private final ConcurrentMap<Long, Integer> remoteRetryAttempts = new ConcurrentHashMap<>();
+
+    /** 任务 → 本轮补偿的截止时刻（首次失败时设定；到点即终态）。 */
+    private final ConcurrentMap<Long, Long> remoteRetryDeadlineNanos = new ConcurrentHashMap<>();
+
+    /** 本轮补偿已终结的任务（用尽次数/时长；成功或退订时清除）。 */
+    private final Set<Long> remoteRetryExhausted = ConcurrentHashMap.newKeySet();
+
+    /** 已挂起延迟重试的任务（同一任务同时只挂一个，防重复排期；末订阅/成功即撤销）。 */
     private final Set<Long> retryPending = ConcurrentHashMap.newKeySet();
 
     /** 任务 → 已排期的重试句柄（末订阅时可取消，不残留任务）。 */
@@ -111,13 +148,14 @@ public class TaskSseService {
     private final LongSupplier retryNanoClock;
 
     /**
-     * 延迟重试的调度器（<b>复用仓内已有受控调度器</b>：{@code aiStreamWatchdog} 的 2 条守护线程，
-     * 不新增线程、不新造无限线程池）。
+     * 延迟重试的调度器：生产 = 任务事件专用 {@code taskEventScheduler}
+     * （{@code TaskSseSchedulerConfig}，2 条守护线程，与 AI 看门狗完全独立）。
      *
      * <p>为什么需要它：作业在 A、浏览器只订阅 B 时，<b>B 从不 publish</b>，原先"失败只在
      * publish 时重试"的路径永不发生，跨实例进度只剩快照轮询兜底。这里每个失败的注册挂<b>一次</b>
-     * 一次性重试（10s 退避，失败再排下一次），只对仍有 emitter 的任务执行；末订阅即取消。
-     * 直接 {@code new TaskSseService(...)} 的单测/非 Spring 装配传 {@code null}（保持 publish 重试口径）。
+     * 延迟重试（有界退避，失败再排下一次，直到次数/时长用尽），只对仍有 emitter 的任务执行；
+     * 末订阅即取消。直接 {@code new TaskSseService(...)} 的单测/非 Spring 装配传 {@code null}
+     * （保持 publish 重试口径）。
      */
     private final ScheduledExecutorService retryScheduler;
 
@@ -131,10 +169,15 @@ public class TaskSseService {
         this(objectMapper, appProperties, eventBus, System::nanoTime, null);
     }
 
-    /** Spring 生产装配：注入仓内既有受控调度器（一次性轻量重试，不新增线程）。 */
+    /**
+     * Spring 生产装配：任务事件专用调度器 {@code taskEventScheduler}
+     * （{@code TaskSseSchedulerConfig}：2 条守护线程、独立于 AI 看门狗的时间线）。
+     *
+     * <p>这是本类唯一的 Spring 构造器；单测/非 Spring 装配走上面几个直接构造器（可传 {@code null}）。
+     */
     @Autowired
     public TaskSseService(ObjectMapper objectMapper, AppProperties appProperties, TaskEventBus eventBus,
-                          @Qualifier("aiStreamWatchdog") ScheduledExecutorService retryScheduler) {
+                          @Qualifier("taskEventScheduler") ScheduledExecutorService retryScheduler) {
         this(objectMapper, appProperties, eventBus, System::nanoTime, retryScheduler);
     }
 
@@ -194,7 +237,8 @@ public class TaskSseService {
         try {
             json = objectMapper.writeValueAsString(Map.of("type", type, "data", data));
         } catch (Exception e) {
-            log.warn("SSE 帧序列化失败 taskId={} type={}（本帧未推送）: {}", taskId, type, e.getMessage());
+            log.warn("SSE frame serialization failed, frame not sent taskId={} type={} error={}",
+                    taskId, type, e.getMessage());
             return;
         }
 
@@ -231,11 +275,11 @@ public class TaskSseService {
     void sendEvent(Long taskId, SseEmitter emitter, String type, Object data) {
         try {
             String json = objectMapper.writeValueAsString(Map.of("type", type, "data", data));
-            if (!sendFrame(emitter, json, "订阅首帧 HEARTBEAT taskId=" + taskId)) {
+            if (!sendFrame(emitter, json, "initial HEARTBEAT frame taskId=" + taskId)) {
                 remove(taskId, emitter);
             }
         } catch (Exception e) {
-            log.debug("Failed to send SSE: {}", e.getMessage());
+            log.debug("Failed to send SSE heartbeat frame taskId={} error={}", taskId, e.getMessage());
         }
     }
 
@@ -297,8 +341,8 @@ public class TaskSseService {
      *
      * <p>以"本地是否还有订阅者"为唯一意图来源，每次挂载/摘除后对齐一次 —— 挂/摘与回调并发时
      * 只会得到"已订阅"或"已退订"两种稳态，不会出现"退订把刚挂上的订阅者踢掉"。
-     * 注册失败时记 {@code remoteRetryAtNanos} 退避，并挂一次<b>一次性延迟重试</b>
-     * （{@link #scheduleRemoteRetry}，复用受控调度器；publish 路径仍可提前成功）。
+     * 注册失败时记 {@code remoteRetryAtNanos} 退避，并在任务事件专用调度器
+     * {@code taskEventScheduler} 上挂一次延迟重试（{@link #scheduleRemoteRetry}；publish 路径仍可提前成功）。
      *
      * <h2>锁的回收（复审必修项 2 的竞态修正）</h2>
      * 旧实现在 {@code synchronized(lock)} <b>内部</b>就 {@code subscriptionLocks.remove(taskId, lock)}：
@@ -345,37 +389,86 @@ public class TaskSseService {
                 return;
             }
             boolean subscribed = this.eventBus.subscribe(taskId,
-                    frame -> deliverJson(taskId, frame, "跨实例 taskId=" + taskId));
+                    frame -> deliverJson(taskId, frame, "cross-instance taskId=" + taskId));
             if (subscribed) {
                 this.remoteSubscribed.add(taskId);
                 this.remoteRetryAtNanos.remove(taskId);
+                resetRemoteRetryBudget(taskId);
                 cancelRemoteRetry(taskId);
             } else {
-                this.remoteRetryAtNanos.put(taskId,
-                        this.retryNanoClock.getAsLong() + REMOTE_SUBSCRIBE_RETRY_NANOS);
-                // 有界延迟重试：作业在 A、浏览器只订阅 B 时 B 不会 publish，必须由调度器兜底重试。
-                scheduleRemoteRetry(taskId, REMOTE_SUBSCRIBE_RETRY_NANOS);
+                registerRemoteRetryFailure(taskId);
             }
         } else if (!want && have) {
             this.eventBus.unsubscribe(taskId);
             this.remoteSubscribed.remove(taskId);
             this.remoteRetryAtNanos.remove(taskId);
+            // 退订即停：本轮补偿记账与待触发句柄一并清掉，任务零残留。
+            resetRemoteRetryBudget(taskId);
             cancelRemoteRetry(taskId);
         } else if (!want) {
             this.remoteRetryAtNanos.remove(taskId);
+            resetRemoteRetryBudget(taskId);
             cancelRemoteRetry(taskId);
         }
     }
 
     /**
-     * 挂一次<b>一次性</b>延迟重试（已有待触发则不重复排期）。
+     * 一次订阅失败：累计次数、算退避，再决定"排下一次"还是"本轮终结"。
+     *
+     * <p>上界 = 次数（{@link #REMOTE_SUBSCRIBE_MAX_ATTEMPTS}）与总时长
+     * （{@link #REMOTE_SUBSCRIBE_RETRY_WINDOW_NANOS}）<b>任一先到</b>；按 10/20/40/60s 的退避链
+     * 次数先到，时长是调度异常时的兜底。用尽后不再排期
+     * （旧实现每 10s 无限自我续期，只要本机还有 emitter 就一直续）；{@code remoteRetryAtNanos}
+     * 仍按 60s 封顶前推，使 publish 路径最多每 60s 探测一次 —— 帧停了（任务收尾、
+     * 页面关闭）就彻底不再尝试，Redis 恢复后仍能自动补上。
+     */
+    private void registerRemoteRetryFailure(Long taskId) {
+        long now = this.retryNanoClock.getAsLong();
+        int attempts = this.remoteRetryAttempts.compute(taskId,
+                (key, previous) -> previous == null ? 1
+                        : Math.min(previous + 1, REMOTE_SUBSCRIBE_MAX_ATTEMPTS));
+        long deadline = this.remoteRetryDeadlineNanos.computeIfAbsent(taskId,
+                key -> now + REMOTE_SUBSCRIBE_RETRY_WINDOW_NANOS);
+        long backoff = backoffNanos(attempts);
+        this.remoteRetryAtNanos.put(taskId, now + backoff);
+        if (attempts >= REMOTE_SUBSCRIBE_MAX_ATTEMPTS || now >= deadline) {
+            cancelRemoteRetry(taskId);
+            if (this.remoteRetryExhausted.add(taskId)) {
+                log.warn("Task SSE cross-instance registration retries exhausted, "
+                        + "local-only until next subscribe taskId={} attempts={}", taskId, attempts);
+            }
+            return;
+        }
+        // 有界延迟重试：作业在 A、浏览器只订阅 B 时 B 不会 publish，必须由调度器兜底重试。
+        scheduleRemoteRetry(taskId, backoff);
+    }
+
+    /** 指数退避：10s → 20s → 40s → 60s 封顶。 */
+    private static long backoffNanos(int attempts) {
+        int shift = Math.min(Math.max(attempts - 1, 0), 3);
+        return Math.min(REMOTE_SUBSCRIBE_RETRY_BASE_NANOS << shift, REMOTE_SUBSCRIBE_RETRY_MAX_NANOS);
+    }
+
+    /** 本轮补偿记账清零（订阅成功 / 末订阅退订 / 新一轮订阅）。 */
+    private void resetRemoteRetryBudget(Long taskId) {
+        this.remoteRetryAttempts.remove(taskId);
+        this.remoteRetryDeadlineNanos.remove(taskId);
+        this.remoteRetryExhausted.remove(taskId);
+    }
+
+    /**
+     * 挂一次延迟重试（同一任务已有待触发则不重复排期）。
      *
      * <p>只由注册失败触发；到期后只对"仍本机有 emitter"的任务执行一次
-     * {@link #reconcileRemoteSubscription}（失败会再排下一次，节奏 ≥ 退避窗）。
-     * 无调度器（直接构造）时退化为原有的 publish 路径重试。
+     * {@link #reconcileRemoteSubscription}（失败会再排下一次，直到次数/时长用尽）。
+     * 本轮已终结（{@link #remoteRetryExhausted}）则不再排期；无调度器（直接构造）时
+     * 退化为 publish 路径重试。
      */
     private void scheduleRemoteRetry(Long taskId, long delayNanos) {
         if (this.retryScheduler == null) {
+            return;
+        }
+        if (this.remoteRetryExhausted.contains(taskId)) {
             return;
         }
         if (!this.retryPending.add(taskId)) {
@@ -388,11 +481,17 @@ public class TaskSseService {
         } catch (RuntimeException e) {
             // 调度器拒绝（关停中）：撤销排期标记，后续 publish 仍能重试
             this.retryPending.remove(taskId);
-            log.debug("任务 SSE 跨实例注册重试排期失败 taskId={}：{}", taskId, e.getMessage());
+            log.debug("Task SSE cross-instance registration retry not scheduled taskId={} error={}",
+                    taskId, e.getMessage());
         }
     }
 
-    /** 延迟重试到期：只对仍有本机 emitter 的任务走一次既有状态机（末订阅后不残留）。 */
+    /**
+     * 延迟重试到期：只对仍有本机 emitter 的任务走一次既有状态机（末订阅后不残留）。
+     *
+     * <p>重试体显式 {@link RunIdentityScope#denied()}：调度线程不承载请求身份，
+     * 不得沿用"排期那一刻的调用者"（同一线程池会被所有任务复用）。
+     */
     private void runRemoteRetry(Long taskId) {
         this.retryPending.remove(taskId);
         this.retryFutures.remove(taskId);
@@ -402,6 +501,9 @@ public class TaskSseService {
         if (this.remoteSubscribed.contains(taskId)) {
             return;
         }
+        if (this.remoteRetryExhausted.contains(taskId)) {
+            return; // 本轮已终结：不再自我续期
+        }
         Long retryAt = this.remoteRetryAtNanos.get(taskId);
         long now = this.retryNanoClock.getAsLong();
         if (retryAt != null && now < retryAt) {
@@ -409,10 +511,12 @@ public class TaskSseService {
             scheduleRemoteRetry(taskId, retryAt - now);
             return;
         }
-        reconcileRemoteSubscription(taskId);
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+            reconcileRemoteSubscription(taskId);
+        }
     }
 
-    /** 撤销待触发的重试（订阅成功 / 末订阅断开）。 */
+    /** 撤销待触发的重试（订阅成功 / 末订阅断开 / 本轮补偿用尽）。 */
     private void cancelRemoteRetry(Long taskId) {
         this.retryPending.remove(taskId);
         ScheduledFuture<?> future = this.retryFutures.remove(taskId);
@@ -448,12 +552,12 @@ public class TaskSseService {
         return switch (result.outcome()) {
             case SENT -> true;
             case FAILED -> {
-                log.debug("Failed to send SSE（{}）: {}", context,
-                        result.failure() == null ? "写出失败" : result.failure().getMessage());
+                log.debug("Failed to send SSE context={} reason={}", context,
+                        result.failure() == null ? "write failed" : result.failure().getMessage());
                 yield false;
             }
             case TIMED_OUT -> {
-                log.warn("任务 SSE 写超时（>{}ms）摘除该订阅者（{}；前端 EventSource 重连 + 快照轮询自愈）",
+                log.warn("Task SSE write timed out (>{}ms), subscriber removed context={}",
                         this.writeBudget.timeoutMillis(), context);
                 yield false;
             }
@@ -462,7 +566,7 @@ public class TaskSseService {
             // "这条连接自己卡住"与"写线程已被别的连接占满"。
             // 被摘者可能是健康连接、也可能来自 AI 通道（写池两通道共用，见 SseWriteBudget 类注"跨通道"段）。
             case SATURATED -> {
-                log.warn("任务 SSE 写出池饱和，摘除该订阅者（{}；并发写出已达硬上限，被摘者未必是慢连接）", context);
+                log.warn("Task SSE writer pool saturated, subscriber removed context={}", context);
                 yield false;
             }
             case INTERRUPTED -> true;

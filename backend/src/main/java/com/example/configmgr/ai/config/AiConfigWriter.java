@@ -725,7 +725,7 @@ public class AiConfigWriter {
         }
         catch (Exception ex) {
             // 审计不能因为序列化失败而阻断写路径；但也不能静默：落一个可辨认的空壳
-            log.warn("审计 diff 序列化失败（动作仍已执行）：{}", ex.getMessage());
+            log.warn("audit diff serialization failed (action already applied) error={}", ex.getMessage());
             return "{}";
         }
     }

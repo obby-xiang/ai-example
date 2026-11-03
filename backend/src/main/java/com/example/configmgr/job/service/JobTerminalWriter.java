@@ -122,7 +122,7 @@ public class JobTerminalWriter {
                     // R1-13/I-3：job 终态已独立提交，此刻没有 job 行锁；锁 task 后再写任务态。
                     // 任务已被删除时不再写（避免对已删 task 做联动），避免与删除的 task 锁互相等待。
                     if (taskService.tryLockForUpdate(job.getTaskId()).isEmpty()) {
-                        log.info("作业 #{} 的终态已落，但任务 #{} 已被删除，跳过任务态联动",
+                        log.info("Job terminal state written but task gone, task state sync skipped jobId={} taskId={}",
                                 job.getId(), job.getTaskId());
                         return wrote;
                     }
@@ -136,12 +136,12 @@ public class JobTerminalWriter {
             if (wroteTerminal) {
                 taskSseService.publish(job.getTaskId(), "JOB_DONE", doneEvent);
             } else {
-                log.info("作业 #{} 终态写入被丢弃（已收终态，先到者胜），不联动任务态、不发 JOB_DONE：taskId={}，预期结局={}",
+                log.info("Job terminal write dropped (already terminal, first writer wins), no task sync and no JOB_DONE jobId={} taskId={} expected={}",
                         job.getId(), job.getTaskId(), jobStatus);
             }
         } catch (Exception e) {
             // 终态补记失败不能让作业线程崩掉：日志留痕，快照下一次读取仍能修正
-            log.error("作业 {} 终态写入失败: {}", job.getId(), e.getMessage(), e);
+            log.error("Job terminal write failed jobId={} error={}", job.getId(), e.getMessage(), e);
         }
     }
 }

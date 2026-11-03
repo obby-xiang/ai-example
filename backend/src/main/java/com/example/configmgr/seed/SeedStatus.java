@@ -74,7 +74,8 @@ public class SeedStatus {
 		this.states.put(seed, state);
 		if (state == State.FAILED) {
 			this.failures.put(seed, detail == null ? "unknown" : detail);
-			log.warn("种子 {} 失败（ready 仍为可用，失败事实进 /health/ready）：{}", seed.key(), detail);
+			log.warn("Seed failed, readiness stays up and failure is exposed via /health/ready seed={} detail={}",
+			        seed.key(), detail);
 		}
 		else {
 			this.failures.remove(seed);

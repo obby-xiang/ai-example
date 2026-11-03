@@ -181,7 +181,7 @@ public class AiProviderRegistry {
             long afterBuild = this.configService.current().version();
             if (afterBuild != lockedVersion) {
                 evictIfVersionChangedLocked(afterBuild);
-                log.info("构建期间配置版本变化（{} → {}）：本次实例不入缓存 provider={} model={}",
+                log.info("config version changed during build ({} -> {}): instance not cached provider={} model={}",
                         lockedVersion, afterBuild, resolved.providerCode(), resolved.modelId());
                 return rebuilt;
             }
@@ -190,9 +190,9 @@ public class AiProviderRegistry {
             this.apis.keySet().removeIf(existing -> !existing.equals(key));
             this.apis.put(key, api);
             this.lastEvictedConfigVersion.set(lockedVersion);
-            log.info("AI provider 运行态已{} provider={} model={} runtimeKey={} configVersion={}",
-                    cached == null ? "装配" : "重绑", resolved.providerCode(), resolved.modelId(), key,
-                    lockedVersion);
+            log.info("AI provider runtime {} provider={} model={} providerId={} configVersion={}",
+                    cached == null ? "assembled" : "rebound", resolved.providerCode(), resolved.modelId(),
+                    resolved.providerId(), lockedVersion);
             return rebuilt;
         }
     }
@@ -235,7 +235,7 @@ public class AiProviderRegistry {
         this.runtimes.clear();
         this.lastEvictedConfigVersion.set(version);
         if (evicted > 0) {
-            log.info("配置版本 {} → {}：淘汰 {} 个 provider 运行态（下一轮/续跑按新默认参数重建）", last,
+            log.info("config version {} -> {}: evicted {} provider runtime(s) (next turn/resume rebuilds with new defaults)", last,
                     version, evicted);
         }
     }
@@ -371,7 +371,7 @@ public class AiProviderRegistry {
         catch (RuntimeException ex) {
             // 读不到版本时对齐到 MIN_VALUE：下一次取用会再清一次（空表清空是幂等的），不会漏淘汰。
             version = Long.MIN_VALUE;
-            log.warn("清空 provider 运行态时读不到配置版本（下一次取用会再对齐）：{}", ex.getMessage());
+            log.warn("cannot read config version while clearing provider runtimes (next use realigns) error={}", ex.getMessage());
         }
         synchronized (this.buildLock) {
             int evicted = this.runtimes.size();
@@ -380,7 +380,7 @@ public class AiProviderRegistry {
             this.apis.clear();
             this.lastEvictedConfigVersion.set(version);
             if (evicted > 0) {
-                log.info("provider 运行态缓存已清空（{} 个，configVersion={}）：下一轮按最新配置重建", evicted,
+                log.info("provider runtime cache cleared ({} entries, configVersion={}); next turn rebuilds from latest config", evicted,
                         version);
             }
         }
@@ -496,7 +496,7 @@ public class AiProviderRegistry {
     private void applyRange(String label, double value, double min, double max,
             java.util.function.Consumer<Double> setter) {
         if (!Double.isFinite(value) || value < min || value > max) {
-            log.warn("{} 的值 {} 越界（[{},{}]）：忽略该项，沿用全局默认", label, value, min, max);
+            log.warn("value {} for {} out of range [{},{}]: ignoring it and keeping the global default", label, value, min, max);
             return;
         }
         setter.accept(value);
@@ -504,7 +504,7 @@ public class AiProviderRegistry {
 
     private void applyPositiveInt(String label, int value, java.util.function.Consumer<Integer> setter) {
         if (value <= 0) {
-            log.warn("{} 的值 {} 必须为正整数：忽略该项，沿用全局默认", label, value);
+            log.warn("value {} for {} must be a positive integer: ignoring it and keeping the global default", label, value);
             return;
         }
         setter.accept(value);
@@ -515,12 +515,12 @@ public class AiProviderRegistry {
         try {
             double value = Double.parseDouble(raw.trim());
             if (!Double.isFinite(value)) {
-                throw new NumberFormatException("非有限值");
+                throw new NumberFormatException("non-finite value");
             }
             setter.accept(value);
         }
         catch (RuntimeException ex) {
-            log.warn("ai_setting[{}] 的值 \"{}\" 不可用（{}）：忽略该项，沿用 spring.ai.openai.* 的缺省",
+            log.warn("ai_setting[{}] value \"{}\" is unusable ({}): ignoring it and keeping the spring.ai.openai.* default",
                     settingKey, abbreviate(raw), ex.getMessage());
         }
     }
@@ -529,12 +529,12 @@ public class AiProviderRegistry {
         try {
             int value = Integer.parseInt(raw.trim());
             if (value <= 0) {
-                throw new NumberFormatException("必须为正整数");
+                throw new NumberFormatException("must be a positive integer");
             }
             setter.accept(value);
         }
         catch (RuntimeException ex) {
-            log.warn("ai_setting[{}] 的值 \"{}\" 不可用（{}）：忽略该项，沿用 spring.ai.openai.* 的缺省",
+            log.warn("ai_setting[{}] value \"{}\" is unusable ({}): ignoring it and keeping the spring.ai.openai.* default",
                     settingKey, abbreviate(raw), ex.getMessage());
         }
     }

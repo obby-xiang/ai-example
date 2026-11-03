@@ -231,13 +231,12 @@ public class DefinitionSelectionForm extends HostForm {
 			if (json.isEmpty()) {
 				return false;
 			}
-			log.info("{}任务 #{}，宿主下发 navigate_to(page={}, id={}) runId={}",
-					retry ? "首次宿主导航非 OK 终结，重试一次" : "本批新建", createdTaskId, page, toolCallId, runId);
+			log.info("{} task #{}, host sends navigate_to(page={}, id={}) runId={}", retry ? "retry after non-OK navigation" : "created in this batch", createdTaskId, page, toolCallId, runId);
 			return park(runId, history,
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.NAVIGATE_TO, json.get())));
 		}
 		catch (RuntimeException ex) {
-			log.warn("宿主导航未能下发（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			log.warn("host navigate_to was not sent (continue on existing path) runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -292,13 +291,13 @@ public class DefinitionSelectionForm extends HostForm {
 			if (json.isEmpty()) {
 				return false;
 			}
-			log.info("配置已知，宿主下发 select_definitions 代选 runId={} taskId={} codes={}", runId, createdTaskId,
+			log.info("definitions already known; host sends select_definitions runId={} taskId={} codes={}", runId, createdTaskId,
 					codes);
 			return park(runId, history,
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.SELECT_DEFINITIONS, json.get())));
 		}
 		catch (RuntimeException ex) {
-			log.warn("宿主代选配置项未能下发（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			log.warn("host select_definitions was not sent (continue on existing path) runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -323,7 +322,7 @@ public class DefinitionSelectionForm extends HostForm {
 			return Optional.of(JSON.writeValueAsString(arguments));
 		}
 		catch (Exception ex) {
-			log.warn("宿主前端工具入参序列化失败，本次不下发：{}", ex.getMessage());
+			log.warn("could not serialize host frontend tool arguments; not sent this time error={}", ex.getMessage());
 			return Optional.empty();
 		}
 	}
@@ -369,7 +368,7 @@ public class DefinitionSelectionForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取导航证据失败，本次不按已导航处理 runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read navigation evidence; not treated as navigated runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -503,7 +502,7 @@ public class DefinitionSelectionForm extends HostForm {
 		catch (RuntimeException ex) {
 			// fail-safe：这是"让交互确定"的增强，不是这一轮的判定面 —— 任何读库/写库/发帧异常
 			// 都只 WARN，交回既有路径（模型照常决定），绝不把一轮正常续跑变成失败。
-			log.warn("宿主定义选择表单未能挂起（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			log.warn("host definition selection form was not parked (continue on existing path) runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -536,7 +535,7 @@ public class DefinitionSelectionForm extends HostForm {
 		}
 		PendingToolCall advance = withToolTimeout(frontendTool(toolCallId, AiToolNames.CONFIRM_STEP,
 				"{\"step\":\"" + QUERY_COND_STEP + "\"}"));
-		log.info("配置选择成功，宿主下发 confirm_step 推进条件步骤 runId={} taskId={}", runId, context.getTaskId());
+		log.info("definitions selected; host sends confirm_step to advance to the condition step runId={} taskId={}", runId, context.getTaskId());
 		return park(runId, history, advance);
 	}
 
@@ -607,15 +606,15 @@ public class DefinitionSelectionForm extends HostForm {
 			definitions = this.catalog == null ? List.of() : this.catalog.list();
 		}
 		catch (RuntimeException ex) {
-			log.warn("配置定义目录读取失败，宿主不生成定义选择表单 taskId={}：{}", createdTaskId, ex.getMessage());
+			log.warn("could not read definition catalog; host skips the definition selection form taskId={} error={}", createdTaskId, ex.getMessage());
 			return Optional.empty();
 		}
 		if (definitions == null || definitions.isEmpty()) {
-			log.warn("配置定义目录为空，宿主不生成空表单 taskId={}（交回既有失败恢复与模型侧路径）", createdTaskId);
+			log.info("definition catalog is empty; host skips the empty form taskId={} (fall back to failure recovery and the model path)", createdTaskId);
 			return Optional.empty();
 		}
 		if (definitions.size() > GenerativeFormRules.MAX_OPTIONS) {
-			log.warn("配置定义数量 {} 超出平铺上限 {}，宿主不生成残缺表单 taskId={}（交回模型侧路径）",
+			log.warn("definition count {} exceeds flat limit {}; host skips the truncated form taskId={} (fall back to model path)",
 					definitions.size(), GenerativeFormRules.MAX_OPTIONS, createdTaskId);
 			return Optional.empty();
 		}
@@ -626,7 +625,7 @@ public class DefinitionSelectionForm extends HostForm {
 			if (value == null || value.isBlank() || value.length() > GenerativeFormRules.MAX_OPTION_TEXT_CHARS
 					|| !seen.add(value)) {
 				// 编码缺失/过长/重复：这不是"少一项"，而是"这张表选不全" —— 交给模型侧路径
-				log.warn("配置定义编码不可平铺（缺失/过长/重复），宿主不生成残缺表单 taskId={} code={}",
+				log.warn("definition code cannot be flattened (missing/too long/duplicate); host skips the truncated form taskId={} code={}",
 						createdTaskId, value);
 				return Optional.empty();
 			}

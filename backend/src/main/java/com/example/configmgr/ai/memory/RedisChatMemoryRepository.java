@@ -407,7 +407,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("会话记忆枚举（SCAN）失败 pattern={}（返回已扫描到的 {} 个 id，不伪装成空库）：{}", prefix + "{*",
+			log.warn("conversation memory enumeration (SCAN) failed pattern={} (returning {} ids scanned so far, not pretending empty) error={}", prefix + "{*",
 					ids.size(), ex.getMessage());
 		}
 		return List.copyOf(ids);
@@ -486,7 +486,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		// 守卫读失败会抛出（fail-closed，见 SessionPurgeGuard）：宁可本次记忆写失败并 WARN，
 		// 也不能在"守卫状态不可知"时把已销毁会话的历史悄悄写回来。
 		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
-			log.warn("会话已销毁（purge guard 生效），拒绝写回记忆 conversationId={} key={}（销毁后不可复活）",
+			log.warn("session purged (purge guard active), refusing memory write-back conversationId={} key={} (purged session must not revive)",
 					conversationId, finalKey);
 			return;
 		}
@@ -556,7 +556,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			boolean replaceRunBlock) {
 		String finalKey = key(conversationId); // 先校验 id：空白 id 在序列化/Redis 之前失败
 		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
-			log.warn("会话已销毁（purge guard 生效），拒绝按轮写回记忆 conversationId={} key={} runId={}",
+			log.warn("session purged (purge guard active), refusing per-run memory write-back conversationId={} key={} runId={}",
 					conversationId, finalKey, turn == null ? null : turn.runId());
 			return false;
 		}
@@ -603,8 +603,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 					deleteStagingQuietly(stagingKey);
 				}
 				// 写回期间历史被清空：放弃这一笔。重试等于把手里那份清空前的历史再写一遍。
-				log.warn("记忆在本次写回期间被清空（清空代次已变），放弃写回 conversationId={} runId={}"
-						+ "（清空之后的旧轮不得把历史写回来）", conversationId, turn == null ? null : turn.runId());
+				log.warn("memory cleared during this write-back (generation changed), abandoning write conversationId={} runId={}"
+						+ " (pre-clear turns must not resurrect history)", conversationId, turn == null ? null : turn.runId());
 				return false;
 			}
 			if (applied != null && applied > 0L) {
@@ -615,11 +615,11 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			if (stagingKey != null) {
 				deleteStagingQuietly(stagingKey);
 			}
-			log.debug("记忆窗口合并 CAS 落空（重试 {}/{}）conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
+			log.debug("memory window merge CAS missed (retry {}/{}) conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
 					conversationId, turn == null ? null : turn.runId());
 		}
-		throw new IllegalStateException(
-				"记忆窗口合并写 CAS 连续 " + MERGE_ATTEMPTS + " 次落空（并发写过于密集）conversationId=" + conversationId);
+		throw new IllegalStateException("memory window merge CAS missed " + MERGE_ATTEMPTS
+				+ " times in a row (concurrent writes too dense) conversationId=" + conversationId);
 	}
 
 	/** 合并结果已落盘：只剩销毁复检（全局索引已退役，不再有索引收尾）。 */
@@ -639,7 +639,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return active == null ? Set.of() : active;
 		}
 		catch (RuntimeException ex) {
-			log.warn("活跃 run 读取失败，本次记忆合并暂停条数裁剪 conversationId={}：{}", conversationId, ex.getMessage());
+			log.warn("active run lookup failed, skipping message trim in this merge conversationId={} error={}", conversationId, ex.getMessage());
 			return null;
 		}
 	}
@@ -678,11 +678,12 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	@Override
 	public boolean replaceWindow(String conversationId, MemoryWindowSnapshot baseline, List<Message> messages) {
 		if (baseline == null) {
-			throw new IllegalArgumentException("整窗写回必须带压缩计算时的窗口快照（否则无法判断是否被并发改写）");
+			throw new IllegalArgumentException("whole-window write-back requires the window snapshot taken during compaction"
+					+ " (otherwise concurrent rewrites cannot be detected)");
 		}
 		String finalKey = key(conversationId); // 先校验 id
 		if (this.purgeGuard != null && this.purgeGuard.isArmed(conversationId)) {
-			log.warn("会话已销毁（purge guard 生效），拒绝整窗写回记忆 conversationId={} key={}", conversationId, finalKey);
+			log.warn("session purged (purge guard active), refusing whole-window memory write-back conversationId={} key={}", conversationId, finalKey);
 			return false;
 		}
 		List<String> payload = this.codec.serializeAll(messages == null ? List.of() : messages);
@@ -708,7 +709,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			if (stagingKey != null) {
 				deleteStagingQuietly(stagingKey);
 			}
-			log.warn("整窗写回放弃：压缩期间会话被清空 conversationId={}（不写回、不重试）", conversationId);
+			log.warn("whole-window write-back abandoned: session cleared during compaction conversationId={} (no write, no retry)", conversationId);
 			return false;
 		}
 		if (applied != null && applied > 0L) {
@@ -718,8 +719,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		if (stagingKey != null) {
 			deleteStagingQuietly(stagingKey);
 		}
-		log.warn("整窗写回放弃：窗口在压缩计算后被其它写者改写（期望 version={}）conversationId={}"
-				+ "（不重试、不用旧内容覆盖）", baseline.version(), conversationId);
+		log.warn("whole-window write-back abandoned: window rewritten by another writer after compaction (expected version={}) conversationId={}"
+				+ " (no retry, no overwrite with stale content)", baseline.version(), conversationId);
 		return false;
 	}
 
@@ -762,7 +763,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			this.redis.expire(counterKey, ttl);
 		}
 		catch (RuntimeException ex) {
-			log.warn("会话记忆计数器续 TTL 失败（下一次成功写入会再续）key={}：{}", counterKey, ex.getMessage());
+			log.warn("conversation memory counter TTL refresh failed (next successful write refreshes again) key={} error={}", counterKey, ex.getMessage());
 		}
 	}
 
@@ -856,7 +857,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return this.purgeGuard.isArmed(conversationId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("会话销毁守卫复检失败（fail-closed：撤销本次写回）conversationId={} key={}：{}", conversationId,
+			log.warn("post-write purge guard recheck failed (fail-closed: undoing this write-back) conversationId={} key={} error={}", conversationId,
 					finalKey, ex.getMessage());
 			return true;
 		}
@@ -873,11 +874,11 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	private void discardWrittenMemory(String conversationId, String finalKey) {
 		try {
 			this.redis.delete(finalKey);
-			log.warn("会话已销毁（purge guard 生效）：删除该会话记忆键 conversationId={} key={}"
-					+ "（本笔写回未确认落地或已落地，均不得保留）", conversationId, finalKey);
+			log.warn("session purged (purge guard active): deleting conversation memory key conversationId={} key={}"
+					+ " (write-back must not survive, landed or not)", conversationId, finalKey);
 		}
 		catch (RuntimeException ex) {
-			log.warn("撤销记忆写回失败（键带 TTL，可按此键对账/删除）conversationId={} key={}：{}", conversationId,
+			log.warn("undoing memory write-back failed (key has TTL; reconcile/delete by this key) conversationId={} key={} error={}", conversationId,
 					finalKey, ex.getMessage());
 		}
 	}
@@ -914,7 +915,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		}
 		catch (RuntimeException ex) {
 			// TTL 已在单键脚本里与数据同时设置；这里再兜一层，避免失败路径留下无主 staging
-			log.warn("清理 staging 键失败（staging 仍带 TTL，可按此键对账/删除）stagingKey={}", stagingKey, ex);
+			log.warn("staging key cleanup failed (staging still has TTL; reconcile/delete by this key) stagingKey={}", stagingKey, ex);
 		}
 	}
 

@@ -137,7 +137,7 @@ public class SettlementObservationStore {
 			// fail-open：观测面在依赖抖动时宁可双记，也不能整片缺行（缺行比重行更难发现）
 			// 但必须留可观测信号：静默 fail-open 会让"跨实例恰好一次"整体失效而无从发现（R-I-4）。
 			RedisDegradation.record(RedisDegradation.O1_OBSERVATION_CLAIM, ex);
-			log.debug("结算观测位不可用（按未观测处理，本行照发）runId={} toolCallId={}：{}", runId, toolCallId,
+			log.debug("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={} error={}", runId, toolCallId,
 					ex.getMessage());
 			return true;
 		}
@@ -165,7 +165,7 @@ public class SettlementObservationStore {
 			this.redis.opsForHash().delete(key, toolCallId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("释放结算观测位失败（该条结算可能仍被挡）runId={} toolCallId={}：{}", runId, toolCallId,
+			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={} error={}", runId, toolCallId,
 					ex.getMessage());
 		}
 	}
@@ -192,7 +192,7 @@ public class SettlementObservationStore {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			log.warn("结算观测位销毁失败 runId={} key={}：{}", runId, key, ex.getMessage());
+			log.warn("settlement observation slot purge failed runId={} key={} error={}", runId, key, ex.getMessage());
 			return false;
 		}
 	}
@@ -203,7 +203,7 @@ public class SettlementObservationStore {
 		}
 		catch (RuntimeException ex) {
 			// 自愈失败只降级：脚本本身已（原子地）置过 TTL，这里只是兜底修复旧墓碑
-			log.debug("结算观测位 TTL 自愈失败 key={}：{}", key, ex.getMessage());
+			log.debug("settlement observation slot TTL self-heal failed key={} error={}", key, ex.getMessage());
 		}
 	}
 

@@ -133,7 +133,8 @@ public class HttpKbSource implements KbSource {
             return this.authSupplier == null ? null : this.authSupplier.get();
         }
         catch (RuntimeException e) {
-            log.debug("读取鉴权环境变量失败（{}），本次不带鉴权头", this.authEnv);
+            log.debug("Failed to read auth env variable ({}); sending request without Authorization header",
+                    this.authEnv);
             return null;
         }
     }

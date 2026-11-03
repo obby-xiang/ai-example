@@ -74,7 +74,7 @@ public class ContextFieldGate {
 		Map<String, Object> extra = extra(raw.extra(), reasons);
 		AiChatRequest.Context context = new AiChatRequest.Context(page, taskType, step, taskId, taskStatus, extra);
 		if (!reasons.isEmpty()) {
-			log.warn("context 字段降级（未回显原值）降级项={} 项数={}", reasons, reasons.size());
+			log.warn("context field degraded (original value not echoed) fields={} count={}", reasons, reasons.size());
 		}
 		return new Result(context, reasons.size(), List.copyOf(reasons));
 	}

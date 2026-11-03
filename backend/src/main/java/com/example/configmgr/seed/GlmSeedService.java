@@ -57,10 +57,10 @@ public class GlmSeedService {
                 .filter(s -> !definitionRepository.existsByCode(s.code()))
                 .toList();
         if (pending.isEmpty()) {
-            log.info("GLM 种子定义已存在，跳过（{}/{}）", specs.size(), specs.size());
+            log.info("GLM seed definitions already exist, skipped definitions={}", specs.size());
             return false;
         }
-        log.info("GLM 种子并集移植：待播种 {}/{} 个定义", pending.size(), specs.size());
+        log.info("GLM seed migration: definitions to seed {}/{}", pending.size(), specs.size());
 
         for (DefSpec spec : pending) {
             definitionService.save(toDefinition(spec));
@@ -69,13 +69,13 @@ public class GlmSeedService {
         // glm 的 dependsOn（定义级 JSON）在基座以 REFERENCE 字段表达，
         // 故用基座 DependencyResolver 求依赖先序，作为数据播种顺序。
         List<String> ordered = dependencyResolver.sort(pending.stream().map(DefSpec::code).toList());
-        log.info("GLM 种子数据播种顺序（依赖拓扑序）：{}", ordered);
+        log.info("GLM seed data order (dependency topological): {}", ordered);
 
         for (String code : ordered) {
             DefSpec spec = pending.stream().filter(s -> s.code().equals(code)).findFirst().orElseThrow();
             seedData(spec);
         }
-        log.info("GLM 种子并集移植完成：新增 {} 个定义", pending.size());
+        log.info("GLM seed migration completed, definitions added={}", pending.size());
         return true;
     }
 
@@ -92,7 +92,7 @@ public class GlmSeedService {
                         rowsOf(spec, scopeCode, s), keyFields);
             }
         }
-        log.info("GLM 种子：{} 落库 {} 行（每范围 {} 行，范围 {}）",
+        log.info("GLM seed data written code={} rows={} rowsPerScope={} scopes={}",
                 spec.code(), written, spec.rowsPerScope(), scopeCodes);
     }
 

@@ -41,6 +41,9 @@ const HIGH_FANOUT = [
 
 const CODE = /\.(ts|tsx|js|mjs|vue)$/
 
+// 变更文件清单只用于人读；改成整屏刷几百行既淹掉真正的结果，也让日志难以 grep。
+const MAX_LISTED_FILES = 20
+
 const argv = process.argv.slice(2)
 const baseIdx = argv.indexOf('--base')
 const base = baseIdx >= 0 ? argv[baseIdx + 1] : null
@@ -93,13 +96,13 @@ function runVitest(args, capture = false) {
 }
 
 function full(reason) {
-  console.log(`[related] 转全量：${reason}`)
+  console.log(`[related] falling back to the full suite: ${reason}`)
   return runVitest(['run']).code
 }
 
 function main() {
   if (!existsSync(VITEST)) {
-    console.error(`[related] 找不到 vitest：${VITEST}（先在 frontend/ 下 yarn install）`)
+    console.error(`[related] vitest not found under frontend/ (run "yarn install" there first)`)
     return 3
   }
 
@@ -107,17 +110,18 @@ function main() {
   if (files.length === 0) {
     files = changedFrontendFiles()
   }
-  if (files.length === 0) return full('变更集为空')
+  if (files.length === 0) return full('no changed frontend files')
 
   const fanout = files.filter((f) => HIGH_FANOUT.some((re) => re.test(f)))
-  if (fanout.length > 0) return full(`命中高扇出模块：${fanout.join(', ')}`)
+  if (fanout.length > 0) return full(`high-fanout module changed: ${fanout.join(', ')}`)
 
-  console.log(`[related] ${files.length} 个变更文件 → vitest related`)
-  for (const f of files) console.log(`  ${f}`)
+  console.log(`[related] ${files.length} changed files -> vitest related`)
+  for (const f of files.slice(0, MAX_LISTED_FILES)) console.log(`  ${f}`)
+  if (files.length > MAX_LISTED_FILES) console.log(`  ... ${files.length - MAX_LISTED_FILES} more`)
 
   const r = runVitest(['related', ...files, '--run'], true)
   // 无任何测试文件被选中（改的是没人 import 的模块）⇒ 按 §4.2 口径退回全量，不静默跑 0 个。
-  if (/No test files found/i.test(`${r.out}\n${r.err}`)) return full('related 零命中')
+  if (/No test files found/i.test(`${r.out}\n${r.err}`)) return full('vitest related selected 0 test files')
   return r.code
 }
 

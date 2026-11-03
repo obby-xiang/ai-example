@@ -327,7 +327,7 @@ public class ClientRequestRegistry {
 		}
 		String existing = result.startsWith("EXISTS:") ? result.substring("EXISTS:".length()) : result;
 		String boundRunId = boundRunIdOf(existing, now, COMPLETED_RETENTION.toMillis());
-		log.warn("clientRequestId 已被另一轮占用，拒绝复用 clientRequestId={} existing={}", clientRequestId, existing);
+		log.warn("clientRequestId already bound to another run, reuse rejected clientRequestId={} existing={}", clientRequestId, existing);
 		return new Claim(ClaimState.ALREADY_BOUND, boundRunId);
 	}
 

@@ -1,11 +1,13 @@
 package com.example.configmgr.task.service;
 
 import com.example.configmgr.ai.config.RedisAvailability;
+import com.example.configmgr.task.config.TaskEventDispatchConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
@@ -20,6 +22,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -39,9 +46,9 @@ import java.util.function.Consumer;
  * <h2>失败口径（明确降级，不丢状态）</h2>
  * publish 失败 ⇒ 本机投递已完成，远端订阅者少一帧：帧是状态投影，前端靠 EventSource 重连 +
  * 3s 快照轮询自愈；失败计数进 {@link #metrics()}，日志 WARN 一次一条，可观测但不抛。
- * subscribe 失败 ⇒ 本实例降级为"仅本机订阅"，{@link TaskSseService} 会挂<b>一次性延迟重试</b>
- * （10s 退避，只对仍有本机 emitter 的任务；publish 路径同样可提前成功），不再只依赖 publish。
- * 容器自身带重连，Redis 恢复后订阅自动重建。
+ * subscribe 失败 ⇒ 本实例降级为"仅本机订阅"，{@link TaskSseService} 会挂<b>有界延迟重试</b>
+ * （10/20/40/60s 退避，最多 5 次；只对仍有本机 emitter 的任务；publish 路径同样可提前成功），
+ * 不再只依赖 publish。容器自身带重连，Redis 恢复后订阅自动重建。
  *
  * <h2>已知不可用：零命令快速降级（复审边界 3）</h2>
  * 复用 {@link RedisAvailability} 的缓存可用性结论：已知 DOWN 时 {@code publish}/{@code subscribe}
@@ -61,6 +68,9 @@ public class RedisTaskEventBus implements TaskEventBus {
     private static final String ORIGIN_FIELD = "origin";
     private static final String FRAME_FIELD = "frame";
 
+    /** 执行器拒绝日志的 WARN 间隔（首次必打，其余按此节流；计数另见 {@link #metrics()}）。 */
+    private static final long REJECTION_WARN_EVERY = 100L;
+
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final boolean redisMode;
@@ -79,6 +89,10 @@ public class RedisTaskEventBus implements TaskEventBus {
     private final AtomicLong receivedFrames = new AtomicLong();
     private final AtomicLong subscribeFailures = new AtomicLong();
     private final AtomicLong dispatchFailures = new AtomicLong();
+    /** 分发池拒绝（丢帧）累计；与 {@code dispatchFailures} 分开，便于区分"投递失败"与"池饱和"。 */
+    private final AtomicLong dispatchRejections = new AtomicLong();
+    /** 订阅池拒绝（已改为调用线程内联执行，不丢订阅）累计。 */
+    private final AtomicLong subscriptionRejections = new AtomicLong();
 
     private volatile RedisMessageListenerContainer container;
 
@@ -94,19 +108,61 @@ public class RedisTaskEventBus implements TaskEventBus {
     /** 最近一次真探活的时刻（已知 DOWN 期间每 {@link RedisAvailability#NEGATIVE_TTL_MS} 才探一次）。 */
     private volatile long lastAvailabilityProbeAtMs;
 
+    /**
+     * 跨实例帧的分发执行器（<b>必须是有界池</b>）。
+     *
+     * <p>容器缺省的 {@code SimpleAsyncTaskExecutor} 是"每条消息一条非守护平台线程、无上限"，
+     * 而分发体里是一次带 15s 预算的 SSE 写出 —— 慢连接一多就是无界线程创建。这里注入
+     * {@code taskEventDispatchExecutor}（{@code TaskEventDispatchConfig}）。
+     *
+     * <p>手工装配（单测/非 Spring）传 {@code null}：此时容器启动前会自建一个<b>同样有界</b>的
+     * 守护池（{@link #ownedDispatchExecutor}），不让任何路径落回无界缺省。
+     */
+    private final Executor dispatchExecutor;
+
+    /**
+     * 订阅/退订执行器（<b>必须与分发池分开，且自身有界</b>）。
+     *
+     * <p>容器缺省同样给 {@code subscriptionExecutor} 配 {@code SimpleAsyncTaskExecutor}
+     * （每任务一条新线程）；而<strong>与分发池共用</strong>会把 subscribe/unsubscribe 排在
+     * 15s 的慢写出后面，重连风暴下越重连越订阅不上。这里注入
+     * {@code taskEventSubscriptionExecutor}（{@code TaskEventDispatchConfig}）。
+     *
+     * <p>手工装配传 {@code null}：容器启动前自建等价的有界守护池
+     * （{@link #ownedSubscriptionExecutor}），不落回无界缺省、也不与派发池共用。
+     */
+    private final Executor subscriptionExecutor;
+
+    /** 未注入 bean 时自有的有界池（容器首次启动时创建，{@link #stop()} 关闭）。 */
+    private ThreadPoolExecutor ownedDispatchExecutor;
+
+    /** 未注入 bean 时自有的有界订阅池（与派发池分开，{@link #stop()} 关闭）。 */
+    private ThreadPoolExecutor ownedSubscriptionExecutor;
+
     /** 老的单测/手工装配（无可用性判定）。 */
     public RedisTaskEventBus(StringRedisTemplate redis, ObjectMapper objectMapper, String storeMode) {
-        this(redis, objectMapper, storeMode, null);
+        this(redis, objectMapper, storeMode, null, null, null);
+    }
+
+    /** 单测/手工装配（无 Spring 注入的执行器：启动时自建等价的有界守护池）。 */
+    public RedisTaskEventBus(StringRedisTemplate redis, ObjectMapper objectMapper,
+                             String storeMode, RedisAvailability redisAvailability) {
+        this(redis, objectMapper, storeMode, redisAvailability, null, null);
     }
 
     @Autowired
     public RedisTaskEventBus(StringRedisTemplate redis, ObjectMapper objectMapper,
                              @Value("${app.task.sse.cross-instance-store:redis}") String storeMode,
-                             RedisAvailability redisAvailability) {
+                             RedisAvailability redisAvailability,
+                             @Qualifier(TaskEventDispatchConfig.DISPATCH_EXECUTOR_BEAN) Executor dispatchExecutor,
+                             @Qualifier(TaskEventDispatchConfig.SUBSCRIPTION_EXECUTOR_BEAN)
+                             Executor subscriptionExecutor) {
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.redisMode = !"memory".equalsIgnoreCase(storeMode);
         this.redisAvailability = redisAvailability;
+        this.dispatchExecutor = dispatchExecutor;
+        this.subscriptionExecutor = subscriptionExecutor;
         this.instanceId = "taskbus-" + hostName() + "-pid" + ProcessHandle.current().pid()
                 + "-" + UUID.randomUUID().toString().substring(0, 6);
     }
@@ -118,13 +174,13 @@ public class RedisTaskEventBus implements TaskEventBus {
         }
         if (this.redis == null) {
             this.publishFailures.incrementAndGet();
-            log.warn("任务 SSE 跨实例发布失败 taskId={}（Redis 模板未装配；本机投递不受影响）", taskId);
+            log.warn("Task SSE cross-instance publish failed, local delivery unaffected taskId={} reason=redis-template-missing", taskId);
             return false;
         }
         if (redisKnownDown()) {
             // 已知不可用：不碰 Redis 命令，作业事务线程不再按帧等命令超时
             this.publishFailures.incrementAndGet();
-            log.debug("任务 SSE 跨实例发布跳过 taskId={}（已知 Redis 不可用，快速降级）", taskId);
+            log.debug("Task SSE cross-instance publish skipped, Redis known down taskId={}", taskId);
             return false;
         }
         try {
@@ -136,7 +192,7 @@ public class RedisTaskEventBus implements TaskEventBus {
         } catch (Exception e) {
             this.publishFailures.incrementAndGet();
             markKnownDown();
-            log.warn("任务 SSE 跨实例发布失败 taskId={}（本机投递不受影响；远端靠快照轮询兜底）：{}",
+            log.warn("Task SSE cross-instance publish failed, local delivery unaffected and remote falls back to snapshot polling taskId={} error={}",
                     taskId, e.getMessage());
             return false;
         }
@@ -152,7 +208,8 @@ public class RedisTaskEventBus implements TaskEventBus {
             // 已知不可用：不建/不启订阅容器（容器启动同样会等连接超时）
             this.subscribers.remove(taskId, onFrame);
             this.subscribeFailures.incrementAndGet();
-            log.warn("任务 SSE 跨实例订阅跳过 taskId={}（已知 Redis 不可用；本实例降级为仅本机订阅）", taskId);
+            log.warn("Task SSE cross-instance subscribe skipped, Redis known down and local-only subscribe kept taskId={}",
+                    taskId);
             return false;
         }
         RedisMessageListenerContainer target = container();
@@ -160,8 +217,8 @@ public class RedisTaskEventBus implements TaskEventBus {
             this.subscribers.remove(taskId, onFrame);
             this.subscribeFailures.incrementAndGet();
             markKnownDown();
-            log.warn("任务 SSE 跨实例订阅失败 taskId={}（无 Redis 连接或容器起不来；"
-                    + "本实例降级为仅本机订阅，前端快照轮询兜底）", taskId);
+            log.warn("Task SSE cross-instance subscribe failed (no Redis connection or container start failure), degraded to local-only taskId={}",
+                    taskId);
             return false;
         }
         MessageListener listener = (Message message, byte[] pattern) ->
@@ -178,7 +235,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             this.subscribers.remove(taskId, onFrame);
             this.subscribeFailures.incrementAndGet();
             markKnownDown();
-            log.warn("任务 SSE 跨实例订阅失败 taskId={}（Redis 抖动；本实例降级为仅本机订阅）：{}",
+            log.warn("Task SSE cross-instance subscribe failed, degraded to local-only taskId={} error={}",
                     taskId, e.getMessage());
             return false;
         }
@@ -195,7 +252,7 @@ public class RedisTaskEventBus implements TaskEventBus {
         try {
             target.removeMessageListener(listener);
         } catch (RuntimeException e) {
-            log.debug("任务 SSE 跨实例退订失败 taskId={}：{}", taskId, e.getMessage());
+            log.debug("Task SSE cross-instance unsubscribe failed taskId={} error={}", taskId, e.getMessage());
         }
     }
 
@@ -216,12 +273,12 @@ public class RedisTaskEventBus implements TaskEventBus {
             }
             JsonNode frameNode = node.get(FRAME_FIELD);
             if (frameNode == null || frameNode.isNull()) {
-                log.warn("任务 SSE 跨实例信封缺少 frame 字段 taskId={}（丢弃该帧，快照轮询兜底）", taskId);
+                log.warn("Task SSE cross-instance envelope missing frame field, frame dropped taskId={}", taskId);
                 return;
             }
             frame = frameNode.asText();
         } catch (Exception e) {
-            log.warn("任务 SSE 跨实例帧解析失败 taskId={}（丢弃该帧，快照轮询兜底）：{}",
+            log.warn("Task SSE cross-instance frame unparseable, frame dropped taskId={} error={}",
                     taskId, e.getMessage());
             return;
         }
@@ -234,7 +291,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             this.receivedFrames.incrementAndGet();
         } catch (RuntimeException e) {
             this.dispatchFailures.incrementAndGet();
-            log.warn("任务 SSE 跨实例帧投递给本机订阅者失败 taskId={}：{}", taskId, e.getMessage());
+            log.warn("Task SSE cross-instance frame dispatch failed taskId={} error={}", taskId, e.getMessage());
         }
     }
 
@@ -257,11 +314,13 @@ public class RedisTaskEventBus implements TaskEventBus {
         body.put("receivedFrames", this.receivedFrames.get());
         body.put("subscribeFailures", this.subscribeFailures.get());
         body.put("dispatchFailures", this.dispatchFailures.get());
+        body.put("dispatchRejections", this.dispatchRejections.get());
+        body.put("subscriptionRejections", this.subscriptionRejections.get());
         body.put("subscribedTasks", this.subscribers.size());
         return body;
     }
 
-    /** 应用关闭时停掉按需启动的订阅容器（守护线程不拖住 JVM 退出）。 */
+    /** 应用关闭时停掉按需启动的订阅容器与自有的两个执行器（守护线程不拖住 JVM 退出）。 */
     @PreDestroy
     void stop() {
         RedisMessageListenerContainer current = this.container;
@@ -270,8 +329,22 @@ public class RedisTaskEventBus implements TaskEventBus {
             try {
                 current.destroy();
             } catch (Exception e) {
-                log.debug("任务 SSE 跨实例容器关闭失败：{}", e.getMessage());
+                log.debug("Task SSE cross-instance container shutdown failed error={}", e.getMessage());
             }
+        }
+        ThreadPoolExecutor ownedDispatch;
+        ThreadPoolExecutor ownedSubscription;
+        synchronized (this) {
+            ownedDispatch = this.ownedDispatchExecutor;
+            this.ownedDispatchExecutor = null;
+            ownedSubscription = this.ownedSubscriptionExecutor;
+            this.ownedSubscriptionExecutor = null;
+        }
+        if (ownedDispatch != null) {
+            ownedDispatch.shutdownNow();
+        }
+        if (ownedSubscription != null) {
+            ownedSubscription.shutdownNow();
         }
     }
 
@@ -330,18 +403,148 @@ public class RedisTaskEventBus implements TaskEventBus {
     private RedisMessageListenerContainer startContainer() {
         RedisConnectionFactory factory = this.redis == null ? null : this.redis.getConnectionFactory();
         if (factory == null) {
-            log.debug("无 Redis 连接工厂：任务 SSE 跨实例订阅退化为不订阅（单实例语义不受影响）");
+            log.debug("No Redis connection factory, cross-instance task SSE subscribe disabled");
             return null;
         }
         try {
             RedisMessageListenerContainer target = new RedisMessageListenerContainer();
             target.setConnectionFactory(factory);
+            // 两个执行器各管一段、都显式有界（缺省两者都是 SimpleAsyncTaskExecutor：每任务一条
+            // 无上限的平台线程）：
+            //   taskExecutor         → 只跑消息分发（分发体会阻塞在 15s 的 SSE 写预算上）；
+            //   subscriptionExecutor → 只跑 subscribe/unsubscribe（毫秒级），不能被慢写出饿死。
+            target.setTaskExecutor(dispatchExecutor());
+            target.setSubscriptionExecutor(subscriptionExecutor());
             target.afterPropertiesSet();
             target.start();
             return target;
         } catch (Exception e) {
-            log.warn("任务 SSE 跨实例容器启动失败（本实例仅本机订阅，前端快照轮询兜底）：{}", e.getMessage());
+            log.warn("Task SSE cross-instance container start failed, local-only subscribe error={}", e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 分发执行器：优先用 Spring 注入的有界池；手工装配时自建等价的守护池。
+     *
+     * <p>套一层"拒绝即丢帧"的壳：队列满时不能把拒绝异常抛回 Redis 订阅线程（那会打断同连接上
+     * 其它任务的投递）。丢帧计数 + 首次/每 100 次 WARN，不静默。
+     */
+    private Executor dispatchExecutor() {
+        Executor injected = this.dispatchExecutor;
+        if (injected != null) {
+            return new DropFrameExecutor(injected, this.dispatchRejections, this.dispatchFailures);
+        }
+        synchronized (this) {
+            if (this.ownedDispatchExecutor == null) {
+                this.ownedDispatchExecutor = new ThreadPoolExecutor(2, 2, 60L, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(256),
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "task-event-dispatch-own");
+                            thread.setDaemon(true);
+                            return thread;
+                        },
+                        new ThreadPoolExecutor.AbortPolicy());
+            }
+            return new DropFrameExecutor(this.ownedDispatchExecutor, this.dispatchRejections,
+                    this.dispatchFailures);
+        }
+    }
+
+    /**
+     * 订阅/退订执行器：与分发池分开，注入的 bean 或自建守护池都保持有界。
+     *
+     * <p>拒绝时改为<b>调用线程内联执行</b>并计数/告警，不静默丢弃 subscribe/unsubscribe ——
+     * 订阅任务被丢会让容器内部的等待悬挂，重连后也补不回来。
+     */
+    private Executor subscriptionExecutor() {
+        Executor injected = this.subscriptionExecutor;
+        if (injected != null) {
+            return new InlineOnRejectExecutor(injected, this.subscriptionRejections);
+        }
+        synchronized (this) {
+            if (this.ownedSubscriptionExecutor == null) {
+                this.ownedSubscriptionExecutor = new ThreadPoolExecutor(1, 2, 60L, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(64),
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "task-event-subscribe-own");
+                            thread.setDaemon(true);
+                            return thread;
+                        },
+                        new ThreadPoolExecutor.AbortPolicy());
+            }
+            return new InlineOnRejectExecutor(this.ownedSubscriptionExecutor, this.subscriptionRejections);
+        }
+    }
+
+    /**
+     * 有界分发池的壳：队列满 ⇒ 记一次拒绝（并计入 {@code dispatchFailures}）后丢帧。
+     *
+     * <p>丢帧不丢状态：帧是 at-most-once 的状态投影，前端 EventSource 重连 + 3s 快照轮询兜底。
+     * 抛异常则会沿着容器回调打回 Redis 订阅线程，影响同连接上其它任务的帧。拒绝不静默：
+     * 首次与每 {@value #REJECTION_WARN_EVERY} 次打 WARN，其余 DEBUG（计数始终可从 metrics 读到）。
+     */
+    private static final class DropFrameExecutor implements Executor {
+
+        private final Executor delegate;
+        private final AtomicLong rejections;
+        private final AtomicLong failures;
+
+        private DropFrameExecutor(Executor delegate, AtomicLong rejections, AtomicLong failures) {
+            this.delegate = delegate;
+            this.rejections = rejections;
+            this.failures = failures;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            try {
+                this.delegate.execute(task);
+            } catch (RejectedExecutionException e) {
+                // TaskRejectedException（ThreadPoolTaskExecutor）也继承自 RejectedExecutionException。
+                long total = this.rejections.incrementAndGet();
+                this.failures.incrementAndGet();
+                if (total == 1 || total % REJECTION_WARN_EVERY == 0) {
+                    log.warn("Task SSE dispatch pool saturated, frame dropped and remote replays by snapshot polling "
+                            + "dispatchRejections={} cause={}", total, e.getClass().getSimpleName());
+                } else {
+                    log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total);
+                }
+            }
+        }
+    }
+
+    /**
+     * 有界订阅池的壳：队列满 ⇒ 计数/告警后在<b>调用线程内联执行</b>，不丢订阅操作。
+     *
+     * <p>不用 {@code CallerRunsPolicy}：它在执行器已关闭时会静默丢弃任务，订阅/退订被丢会让
+     * 调用方（可能已持有容器内部锁或等待 future）悬挂；内联执行至少保证这次操作真的做完。
+     */
+    private static final class InlineOnRejectExecutor implements Executor {
+
+        private final Executor delegate;
+        private final AtomicLong rejections;
+
+        private InlineOnRejectExecutor(Executor delegate, AtomicLong rejections) {
+            this.delegate = delegate;
+            this.rejections = rejections;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            try {
+                this.delegate.execute(task);
+            } catch (RejectedExecutionException e) {
+                // TaskRejectedException（ThreadPoolTaskExecutor）也继承自 RejectedExecutionException。
+                long total = this.rejections.incrementAndGet();
+                if (total == 1 || total % REJECTION_WARN_EVERY == 0) {
+                    log.warn("Task SSE subscription pool saturated, running subscribe/unsubscribe inline on caller "
+                            + "subscriptionRejections={} cause={}", total, e.getClass().getSimpleName());
+                } else {
+                    log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total);
+                }
+                task.run();
+            }
         }
     }
 

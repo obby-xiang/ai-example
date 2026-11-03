@@ -205,7 +205,7 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 	@Override
 	public void close() {
 		this.executor.shutdownNow();
-		log.debug("就绪探测执行器已关闭（threads={}, queue={}）", this.threads, this.queueCapacity);
+		log.debug("Readiness probe runner closed threads={} queue={}", this.threads, this.queueCapacity);
 	}
 
 	/**

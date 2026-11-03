@@ -273,6 +273,13 @@
       "reason": "已同步KB文档索引与下线回收、ai:creq终态保留和游标回收、台账元数据投影、销毁退役、SSE退避及前端草稿和缓存清理契约",
       "reviewedAt": "2026-11-03",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:93a30167d0de3157578caa59aa61289a48b5bd0812a9fa1c3126d5770e206df2",
+      "status": "not-affected",
+      "reason": "本批收敛线程池与定时器生命周期并规范日志语言、级别和频率；D6迁移接口、业务数据结构与跨实例会话契约均未改变",
+      "reviewedAt": "2026-11-03",
+      "reviewer": "Kimi主控"
     }
   ]
 }

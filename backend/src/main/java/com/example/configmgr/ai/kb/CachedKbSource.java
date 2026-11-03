@@ -166,7 +166,7 @@ public class CachedKbSource implements KbSource {
             }
             catch (KbSourceException e) {
                 // stale-if-error：远端失败不清空缓存，继续供旧料
-                log.warn("知识源刷新失败（stale-if-error，继续供旧料）：{}", e.getMessage());
+                log.warn("KB source refresh failed (stale-if-error; serving stale cache): {}", e.getMessage());
                 return fromCache("缓存清单不可读");
             }
             this.lastRemoteCheck = Instant.now();
@@ -184,7 +184,7 @@ public class CachedKbSource implements KbSource {
             }
             catch (RuntimeException e) {
                 // 锁按 TTL 自行过期；这里只记一笔，不影响返回
-                log.debug("释放知识刷新权失败：{}", e.getClass().getSimpleName());
+                log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
             }
         }
     }
@@ -212,7 +212,7 @@ public class CachedKbSource implements KbSource {
                     this.cache.unlock(token);
                 }
                 catch (RuntimeException e) {
-                    log.debug("释放知识刷新权失败：{}", e.getClass().getSimpleName());
+                    log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
                 }
             }
         }
@@ -321,7 +321,7 @@ public class CachedKbSource implements KbSource {
                     .collect(Collectors.toUnmodifiableSet());
         }
         catch (Exception e) {
-            log.warn("上一版知识清单解析失败，本轮只用全局索引判定下线文档：{}", e.getMessage());
+            log.warn("Failed to parse previous KB manifest; this round relies on the global doc index only for retirements: {}", e.getMessage());
             return Set.of();
         }
     }
@@ -345,7 +345,7 @@ public class CachedKbSource implements KbSource {
                         .docs().stream().map(KbDocMeta::id).collect(Collectors.toUnmodifiableSet());
             }
             catch (Exception e) {
-                log.warn("缓存清单解析失败，跳过本轮下线回收：{}", e.getMessage());
+                log.warn("Failed to parse cached KB manifest; skipping retirement reconcile this round: {}", e.getMessage());
                 return;
             }
             Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
@@ -357,7 +357,7 @@ public class CachedKbSource implements KbSource {
             pruneRemovedDocs(known, current);
         }
         catch (RuntimeException e) {
-            log.warn("缓存不可用，跳过本轮下线回收（下一轮重试）：{}", e.getMessage());
+            log.debug("KB cache unavailable; skipping retirement reconcile this round (retried next round): {}", e.getMessage());
         }
     }
 
@@ -387,16 +387,16 @@ public class CachedKbSource implements KbSource {
             }
             catch (RuntimeException e) {
                 // 索引条目保留 ⇒ 下一轮重试，收敛到删除成功为止
-                log.warn("知识缓存删除下线文档失败（索引保留，下一轮重试）docId={}：{}", docId, e.getMessage());
+                log.warn("KB cache failed to delete retired doc (index entry kept; retried next round) docId={}: {}", docId, e.getMessage());
                 continue;
             }
             try {
                 this.cache.removeDocId(docId);
-                log.info("知识缓存已删除下线文档：docId={}", docId);
+                log.debug("KB cache deleted retired doc: docId={}", docId);
             }
             catch (RuntimeException e) {
                 // 正文已删、索引未摘：下一轮会再 DEL（幂等空操作）并重试摘索引
-                log.warn("下线文档已删除但索引未摘除（下一轮重试）docId={}：{}", docId, e.getMessage());
+                log.warn("Retired doc deleted but its index entry remains (retried next round) docId={}: {}", docId, e.getMessage());
             }
         }
     }
@@ -456,7 +456,7 @@ public class CachedKbSource implements KbSource {
     private void noteCacheDown(RuntimeException e) {
         if (!this.cacheDownLogged) {
             this.cacheDownLogged = true;
-            log.warn("知识缓存不可用，降级直连知识源（单实例仍可用）：{}", e.getMessage());
+            log.warn("KB cache unavailable; degrading to direct source access (single instance still works): {}", e.getMessage());
         }
     }
 

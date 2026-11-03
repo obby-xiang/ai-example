@@ -576,12 +576,13 @@ public class LeaseService {
 				if (fenceKey != null) {
 					markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 				}
-				log.warn("租约抢用被本线程中断 key={} owner={}（局部取消，非设施故障 ⇒ 本轮只读，不推进）：{}", key,
+				log.warn("lease acquire interrupted on this thread key={} owner={} (local "
+						+ "cancellation, not facility fault; read-only this turn): {}", key,
 						holder, ex.getMessage());
 				return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 			}
 			markFacilityUnhealthy(ex);
-			log.warn("租约抢用降级 key={} owner={}（Redis 不可用 ⇒ 调用方走进程内互斥）：{}", key, holder,
+			log.warn("lease acquire degraded key={} owner={} (Redis unavailable; caller falls back to in-process mutex): {}", key, holder,
 					ex.getMessage());
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 		}
@@ -594,7 +595,7 @@ public class LeaseService {
 		if (current != null) {
 			Lease present = parse(key, current);
 			if (present == null) {
-				log.warn("租约现值形态不合法 key={} value={}（按占用处理，不吞并别人的租约）", key, current);
+				log.warn("lease current value malformed key={} value={} (treating as held; not stealing another owner's lease)", key, current);
 				return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
 			}
 			if (!holder.equals(present.owner())) {
@@ -621,7 +622,7 @@ public class LeaseService {
 	private AcquireResult interpret(String key, String holder, String viewKey, String raw) {
 		Lease current = parse(key, raw);
 		if (current == null) {
-			log.warn("租约脚本返回空值 key={} owner={}（按占用处理，不吞并别人的租约）", key, holder);
+			log.warn("lease script returned empty key={} owner={} (treating as held; not stealing another owner's lease)", key, holder);
 			return new AcquireResult(AcquireOutcome.HELD_ELSEWHERE, null);
 		}
 		if (!holder.equals(current.owner())) {
@@ -676,7 +677,7 @@ public class LeaseService {
 			// 局部中断只让"这一任"降级（墓碑已经钉住只读），不动设施健康位。
 			markFacilityUnhealthy(ex);
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
-			log.warn("租约归属校验降级 key={} owner={} epoch={}（Redis 不可用 ⇒ 只读，不推进）：{}", key, holder,
+			log.warn("lease ownership check degraded key={} owner={} epoch={} (Redis unavailable; read-only, no progress): {}", key, holder,
 					epoch, ex.getMessage());
 			return Hold.UNAVAILABLE;
 		}
@@ -725,7 +726,7 @@ public class LeaseService {
 			// 局部中断只影响这一拍（UNAVAILABLE 墓碑已经钉住只读），不动设施健康位。
 			markFacilityUnhealthy(ex);
 			markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
-			log.debug("租约续期失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("lease renew failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 			return RenewOutcome.UNAVAILABLE;
 		}
 	}
@@ -759,7 +760,7 @@ public class LeaseService {
 			// 局部中断不宣布"设施坏了"：release 失败时进程内视图仍在（authority 仍按 HELD 回答），
 			// 唯一会受影响的是"同实例别的未持租轮次"，那正是本判据要保护的对象。
 			markFacilityUnhealthy(ex);
-			log.debug("租约释放失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("lease release failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;
 		}
 	}
@@ -875,7 +876,7 @@ public class LeaseService {
 		this.lastProbeOk = ok;
 		if (ok) {
 			this.facilityHealthy = true;
-			log.info("租约设施自证恢复（PING 成功）：写权限回到「从未持租 ⇒ 普通写」口径");
+			log.info("lease facility self-check recovered (PING ok): write authority back to never-held, normal writes");
 		}
 		return ok;
 	}
@@ -892,7 +893,8 @@ public class LeaseService {
 	 */
 	private void markFacilityUnhealthy(Throwable cause) {
 		if (isLocalThreadInterrupt(cause)) {
-			log.debug("设施健康位不动：本次失败由线程中断引起（局部信号，不是设施故障）：{}", cause.getMessage());
+			log.debug("facility health flag unchanged: failure caused by "
+					+ "thread interrupt (local signal, not facility fault): {}", cause.getMessage());
 			return;
 		}
 		this.facilityHealthy = false;
@@ -1082,7 +1084,7 @@ public class LeaseService {
 			handle.close();
 		}
 		catch (Exception ex) {
-			log.debug("停止续租任务失败 key={}：{}", viewKey, ex.getMessage());
+			log.debug("stop renew task failed key={}: {}", viewKey, ex.getMessage());
 		}
 	}
 
@@ -1102,11 +1104,12 @@ public class LeaseService {
 				driving = alive.getAsBoolean();
 			}
 			catch (RuntimeException ex) {
-				log.debug("续租存活判据异常 key={}（按仍活着处理并照常续租）：{}", lease.key(), ex.getMessage());
+				log.debug("renew liveness probe failed key={} (assuming alive, renewing as usual): {}", lease.key(), ex.getMessage());
 				driving = true;
 			}
 			if (!driving) {
-				log.info("续租判据转假，停续租并归还租约 key={} owner={} epoch={}（驱动者已不在：轮终态/线程收尾）",
+				log.info("renew liveness false, stopping renew and releasing lease key={} "
+						+ "owner={} epoch={} (driver gone: terminal/thread cleanup)",
 						lease.key(), lease.owner(), lease.epoch());
 				release(lease);
 				stopDriving(lease.key(), lease.owner());
@@ -1119,7 +1122,7 @@ public class LeaseService {
 				return;
 			}
 			if (outcome == RenewOutcome.LOST) {
-				log.warn("续租失败，放弃本进程的租约视图 key={} owner={} epoch={}（另一实例已接管：本进程转只读）",
+				log.warn("renew failed, dropping local lease view key={} owner={} epoch={} (another instance took over; read-only)",
 						lease.key(), lease.owner(), lease.epoch());
 				this.held.remove(viewKey(lease.key(), lease.owner()), lease);
 				stopDriving(lease.key(), lease.owner());
@@ -1127,12 +1130,12 @@ public class LeaseService {
 			}
 			// UNAVAILABLE：不知道租约还在不在 —— 视图与续租任务都保留（下一拍续上即可复工），
 			// 但 authority() 已是 UNAVAILABLE ⇒ 这一拍只读不推进。
-			log.warn("续租不可用 key={} owner={} epoch={}（设施异常 ⇒ 本拍只读，下一拍重试）", lease.key(),
+			log.warn("renew unavailable key={} owner={} epoch={} (facility error; read-only this tick, retry next)", lease.key(),
 					lease.owner(), lease.epoch());
 		}
 		catch (Exception ex) {
 			// 续租是后台动作：单拍失败不杀任务，下一拍再试（TTL 三倍于间隔，容忍两拍失败）
-			log.debug("续租任务异常 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("renew task failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 		}
 	}
 
@@ -1154,7 +1157,7 @@ public class LeaseService {
 			return Boolean.TRUE.equals(this.redis.hasKey(key));
 		}
 		catch (Exception ex) {
-			log.debug("租约只读探针失败 key={}：{}", key, ex.getMessage());
+			log.debug("lease read-only probe failed key={}: {}", key, ex.getMessage());
 			return false;
 		}
 	}
@@ -1210,7 +1213,7 @@ public class LeaseService {
 		}
 		catch (Exception ex) {
 			markFacilityUnhealthy(ex);
-			log.debug("租约探针失败：{}", ex.getMessage());
+			log.debug("lease probe failed: {}", ex.getMessage());
 			return isLocalThreadInterrupt(ex) ? null : Boolean.FALSE;
 		}
 	}

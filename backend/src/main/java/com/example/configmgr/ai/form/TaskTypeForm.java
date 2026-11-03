@@ -126,7 +126,7 @@ public class TaskTypeForm extends HostForm {
 		if (arguments.isEmpty()) {
 			return false;
 		}
-		log.info("create_task 缺少合法 type，宿主挂一次 TASK_TYPE 表单 runId={}", runId);
+		log.info("create_task has no valid type; host parks a TASK_TYPE form runId={}", runId);
 		return park(runId, history, frontendForm(toolCallId(runId), arguments.get()));
 	}
 

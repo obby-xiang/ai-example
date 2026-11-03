@@ -109,34 +109,34 @@ export function staticFallbacks(changed, sourceOf = () => '') {
     const p = item.path;
     if (p === 'backend/pom.xml' || /(^|\/)pom\.xml$/.test(p) || p.startsWith('.mvn/')
         || p === 'backend/maven-settings.xml' || p === 'maven-settings.xml') {
-      hits.push({ rule: 'F1', reason: `依赖/插件面变更：${p}` });
+      hits.push({ rule: 'F1', reason: `dependency/plugin surface changed: ${p}` });
     }
     if (p.startsWith('backend/src/main/resources/')) {
-      hits.push({ rule: 'F2', reason: `配置/i18n/迁移面变更：${p}` });
+      hits.push({ rule: 'F2', reason: `config/i18n/migration surface changed: ${p}` });
     }
     if (p.startsWith('backend/src/test/resources/')) {
-      hits.push({ rule: 'F3', reason: `测试公共输入变更：${p}` });
+      hits.push({ rule: 'F3', reason: `shared test input changed: ${p}` });
     }
     if (p.startsWith('docs/kb-samples/')) {
-      hits.push({ rule: 'F4', reason: `首启播种源变更：${p}` });
+      hits.push({ rule: 'F4', reason: `first-boot seed source changed: ${p}` });
     }
     if (p.startsWith(TEST_PREFIX) && !isTestJava(p)
         && !p.startsWith(`${TEST_PREFIX}com/example/configmgr/testmap/`)) {
-      hits.push({ rule: 'F6', reason: `测试夹具/基类变更（非 *Test.java）：${p}` });
+      hits.push({ rule: 'F6', reason: `test fixture/base class changed (not *Test.java): ${p}` });
     }
     if (p.startsWith('scripts/ci/select-tests') || p === 'scripts/ci/gate.mjs'
         || p.startsWith('scripts/ci/testmap/') || p.startsWith('backend/src/test/java/com/example/configmgr/testmap/')
         || p.startsWith('backend/src/test/resources/META-INF/') || p.startsWith('.github/workflows/')) {
-      hits.push({ rule: 'F11', reason: `选择器/门禁/录制器自身变更：${p}` });
+      hits.push({ rule: 'F11', reason: `selector/gate/recorder changed itself: ${p}` });
     }
     if (/(^|\/)messages_[^/]*\.properties$/.test(p) || p.startsWith('frontend/src/locales/')
         || /(^|\/)(TimeZone|Locale)[^/]*$/.test(p) || /(^|\/)application[^/]*\.ya?ml$/.test(p)) {
-      hits.push({ rule: 'F13', reason: `locale/时区敏感面变更：${p}` });
+      hits.push({ rule: 'F13', reason: `locale/timezone sensitive surface changed: ${p}` });
     }
     if (isMainJava(p) && item.status !== 'D') {
       const fqn = toFqn(p);
       if (isAssemblyClass(fqn, sourceOf(p))) {
-        hits.push({ rule: 'F10', reason: `装配语义类变更（Spring 上下文缓存归属不可靠）：${fqn}` });
+        hits.push({ rule: 'F10', reason: `assembly-semantics class changed (Spring context cache ownership is unreliable): ${fqn}` });
       }
     }
   }
@@ -279,7 +279,8 @@ export function selectTests({
       ...base,
       selected: smokeOnly,
       smoke: smokeOnly,
-      warnings: ['变更集为空：只跑固定冒烟集，未跑全量'],
+      // 注意：「变更集为空」被 scripts/ci/select-tests.test.mjs 按子串断言，改动前先改测试。
+      warnings: ['变更集为空 / empty change set: only the fixed smoke set ran, not the full suite'],
       cost: { selected: costEstimate(map, smokeOnly), smoke: costEstimate(map, smokeOnly), unstable: costEstimate(map, unstable) },
     };
   }
@@ -291,11 +292,11 @@ export function selectTests({
 
   const stale = isTableStale(map, now);
   if (stale.stale) {
-    return full(base, [stale.reason], `倒排表不可用（${stale.reason}）：须 mvn -o -Ptestmap test 重建`);
+    return full(base, [stale.reason], `inverted index unusable (${stale.reason}): rebuild with mvn -o -Ptestmap test`);
   }
   const meta = map.meta || {};
   if (headDistance > MAX_TABLE_COMMITS) {
-    return full(base, ['map-stale-commits'], `倒排表过旧（距 HEAD ${headDistance} 个提交）`);
+    return full(base, ['map-stale-commits'], `inverted index too old (${headDistance} commits behind HEAD)`);
   }
 
   // F5：新增/删除生产类、无键、blob 变更
@@ -303,19 +304,20 @@ export function selectTests({
   const f5 = [];
   for (const c of mainClasses) {
     if (c.status === 'A' || c.status === 'D') {
-      f5.push(`F5 新增/删除生产类：${c.path}`);
+      f5.push(`F5 production class added/removed: ${c.path}`);
       continue;
     }
     const fqn = toFqn(c.path);
     const entry = (map.index || {})[fqn];
     if (!entry || !Array.isArray(entry.tests) || entry.tests.length === 0) {
-      f5.push(`F5 无键：${fqn}`);
+      // 注意：「无键」被 scripts/ci/select-tests.test.mjs 按子串断言，改动前先改测试。
+      f5.push(`F5 无键 (no index entry): ${fqn}`);
       continue;
     }
     if (entry.blobSha) {
       const current = blobOf(c.path);
       if (current && current !== entry.blobSha) {
-        f5.push(`F5 blob 变更（表记录的边对应旧版本）：${fqn}`);
+        f5.push(`F5 blob changed (the recorded edge belongs to the old revision): ${fqn}`);
       }
     }
   }
@@ -328,7 +330,7 @@ export function selectTests({
   for (const c of mainClasses) {
     const entry = (map.index || {})[toFqn(c.path)];
     const n = entry ? entry.tests.length : 0;
-    if (n > FANOUT_LIMIT) fanoutHits.push({ rule: 'F7', reason: `${toFqn(c.path)} 扇出 ${n} > ${FANOUT_LIMIT}` });
+    if (n > FANOUT_LIMIT) fanoutHits.push({ rule: 'F7', reason: `${toFqn(c.path)} fanout ${n} > ${FANOUT_LIMIT}` });
   }
   if (fanoutHits.length > 0) {
     return full(base, ['F7'], fanoutHits.map((h) => h.reason).join('；'));
@@ -353,11 +355,12 @@ export function selectTests({
   let selected = merged.filter((t) => !excludedStale.includes(t));
 
   if (selected.length === 0) {
-    return full(base, ['F8'], '兜底与冒烟集合并后仍为空');
+    return full(base, ['F8'], 'fallback and smoke sets are both empty after the merge');
   }
   const testClassCount = meta.testClassCount || trackedTests.length || selected.length;
   if (selected.length > SIZE_CAP_RATIO * testClassCount) {
-    return full(base, ['规模封顶'], `选中 ${selected.length}/${testClassCount} > ${Math.round(SIZE_CAP_RATIO * 100)}%`);
+    // 「规模封顶」是 fallback 协议 token（scripts/ci/select-tests.test.mjs 逐字断言），只英文化 reason 文案。
+    return full(base, ['规模封顶'], `selected ${selected.length}/${testClassCount} > ${Math.round(SIZE_CAP_RATIO * 100)}%`);
   }
 
   return {
@@ -368,7 +371,7 @@ export function selectTests({
     selected: selected.sort(),
     smoke: unique(smokeSet).sort(),
     excludedStale,
-    warnings: excludedStale.length > 0 ? [`已剔除表内陈旧条目：${excludedStale.join(', ')}`] : [],
+    warnings: excludedStale.length > 0 ? [`stale entries removed from the table: ${excludedStale.join(', ')}`] : [],
     cost: {
       selected: costEstimate(map, selected),
       smoke: costEstimate(map, smokeSet),
@@ -422,7 +425,7 @@ function main(argv) {
     else if (a === '--verify-map') args.verifyMap = true;
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') { console.log(readFileSync(new URL(import.meta.url)).toString().split('*/')[0]); return 0; }
-    else throw new Error(`未知参数：${a}`);
+    else throw new Error(`unknown argument: ${a}`);
   }
 
   const root = resolve(git(['rev-parse', '--show-toplevel'], process.cwd()).trim());
@@ -432,7 +435,7 @@ function main(argv) {
   try {
     map = JSON.parse(readFileSync(resolve(root, args.map), 'utf8'));
   } catch (e) {
-    log(`[select] 倒排表不可读（${args.map}）：${e.message}`);
+    log(`[select] inverted index unreadable (${args.map}): ${e.message}`);
   }
 
   const trackedTests = git(['ls-files', '--', TEST_PREFIX], root)
@@ -449,21 +452,21 @@ function main(argv) {
     }));
     const c = verifyMapCoverage(mainClasses, map);
     const pct = (x) => `${(x * 100).toFixed(2)}%`;
-    console.log(`[verify-map] 键集 ${c.keyCount}；全量口径 ${c.coveredCount}/${c.sourceCount} = ${pct(c.keyOverlapRatio)}` +
-      `（含接口/注解，JaCoCo 结构性不可记录）；可记录类口径 ${c.recordableCoveredCount}/${c.recordableCount} = ${pct(c.keyOverlapRatioConcrete)}`);
+    console.log(`[verify-map] keys ${c.keyCount}; all-classes scope ${c.coveredCount}/${c.sourceCount} = ${pct(c.keyOverlapRatio)}` +
+      ` (includes interfaces/annotations, which JaCoCo cannot record); recordable-class scope ${c.recordableCoveredCount}/${c.recordableCount} = ${pct(c.keyOverlapRatioConcrete)}`);
     if (c.nonRecordable.length) {
-      console.log(`[verify-map] 计入全量口径但不计入硬闸（接口/注解 ${c.nonRecordable.length} 个，前 10）：${c.nonRecordable.slice(0, 10).join(', ')}`);
+      console.log(`[verify-map] counted in the all-classes scope but not in the hard gate (interfaces/annotations: ${c.nonRecordable.length}, first 10): ${c.nonRecordable.slice(0, 10).join(', ')}`);
     }
     if (c.missingRecordable.length) {
-      console.log(`[verify-map] 未覆盖的可记录类（前 10）：${c.missingRecordable.slice(0, 10).join(', ')}`);
+      console.log(`[verify-map] recordable classes not covered (first 10): ${c.missingRecordable.slice(0, 10).join(', ')}`);
     }
-    console.log(`[verify-map] 硬闸：可记录类口径 ≥ ${pct(MIN_KEY_OVERLAP)} ⇒ ${c.pass ? '通过' : '未通过'}`);
+    console.log(`[verify-map] hard gate: recordable-class scope >= ${pct(MIN_KEY_OVERLAP)} => ${c.pass ? 'pass' : 'fail'}`);
     return c.pass ? 0 : 2;
   }
 
   if (args.all) {
     writeIncludes(resolve(root, args.out), [], true);
-    log('[select] --all：全量');
+    log('[select] --all: full suite');
     return 0;
   }
 
@@ -482,7 +485,7 @@ function main(argv) {
 
   if (untracked.length > 0 || unstagedCount > 0) {
     const touched = [...untracked, ...worktree].some((c) => isSourceRelevant(c.path) && /\.(java|xml|yml|yaml|properties)$/.test(c.path));
-    if (touched) log('[select] 警告：有未暂存/未跟踪改动，已计入变更集（单调放大）');
+    if (touched) log('[select] WARN: unstaged/untracked changes present, they are included in the change set (monotonic widening)');
   }
 
   const conformance = trackedTests.filter((t) => t.includes('.ai.conformance.'));
@@ -519,13 +522,13 @@ function main(argv) {
   if (args.audit) writeAudit(resolve(root, args.audit), { root, base, args, changed, result, map });
 
   if (result.fallback) {
-    log(`[select] 全量：${result.reason}（规则 ${result.rulesHit.join(', ') || '-'}）`);
+    log(`[select] full suite: ${result.reason} (rules ${result.rulesHit.join(', ') || '-'})`);
   } else {
-    log(`[select] 选中 ${result.selected.length} 个测试类 / 共 ${map?.meta?.testClassCount ?? '?'}` +
-        `${result.smoke.length ? `（其中冒烟 ${result.smoke.length}）` : ''}`);
-    log(`[select] 命中规则：${result.rulesHit.join(', ') || '无（按倒排查表）'}`);
+    log(`[select] selected ${result.selected.length} test classes / ${map?.meta?.testClassCount ?? '?'} total` +
+        `${result.smoke.length ? ` (smoke ${result.smoke.length})` : ''}`);
+    log(`[select] rules hit: ${result.rulesHit.join(', ') || 'none (table lookup)'}`);
     logCost(result, log);
-    log(`[select] 清单：${args.out}${args.audit ? `，审计：${args.audit}` : ''}`);
+    log(`[select] includes: ${args.out}${args.audit ? `, audit: ${args.audit}` : ''}`);
   }
   result.warnings.forEach((w) => log(`[select] ${w}`));
   return 0;
@@ -543,24 +546,24 @@ function logCost(result, log) {
   const sel = c.selected || {};
   const smoke = c.smoke || {};
   const unstable = c.unstable || {};
-  log(`[select] 成本估算（录制期上界）：选中 ${sel.classCount} 类 ≈ ${secs(sel.estimatedSeconds)}` +
-      `${smoke.classCount ? `，其中冒烟 ${smoke.classCount} 类 ≈ ${secs(smoke.estimatedSeconds)}` : ''}` +
-      `${sel.fullSeconds ? `；全量墙钟 ≈ ${secs(sel.fullSeconds)}` : '；无计时数据（先跑一次 -Ptestmap 录制）'}`);
+  log(`[select] cost estimate (recording-time upper bound): ${sel.classCount} classes ~ ${secs(sel.estimatedSeconds)}` +
+      `${smoke.classCount ? `, smoke ${smoke.classCount} classes ~ ${secs(smoke.estimatedSeconds)}` : ''}` +
+      `${sel.fullSeconds ? `; full wall clock ~ ${secs(sel.fullSeconds)}` : '; no timing data (run a -Ptestmap recording first)'}`);
   const n = (result.unstable || []).length;
   if (n > 0) {
     const share = smoke.share
-      ? `，占冒烟成本 ${Math.min(100, Math.round(((unstable.share || 0) / Math.max(smoke.share, unstable.share || 0)) * 100))}%`
+      ? `, ${Math.min(100, Math.round(((unstable.share || 0) / Math.max(smoke.share, unstable.share || 0)) * 100))}% of smoke cost`
       : '';
     const policy = unstablePolicyNote(result);
-    log(`[select] ⚠ unstable 拖慢（L-101）：${n} 类 ≈ ${secs(unstable.estimatedSeconds)}${share}` +
-        `${policy}；夜间录制连续干净即自动移出（见运行时参数 testmap.unstable.*）`);
+    log(`[select] WARN unstable slowdown (L-101): ${n} classes ~ ${secs(unstable.estimatedSeconds)}${share}` +
+        `${policy}; dropped automatically after consecutive clean nightly recordings (see runtime option testmap.unstable.*)`);
   }
 }
 
 /** 只回显策略，不参与判定（策略在录制器侧执行）。 */
 function unstablePolicyNote(result) {
   const p = result.unstablePolicy;
-  return p ? `（策略：连续 ${p.cleanRuns} 次干净 / ${p.maxAgeDays} 天窗）` : '';
+  return p ? ` (policy: ${p.cleanRuns} consecutive clean runs / ${p.maxAgeDays}-day window)` : '';
 }
 
 function readStickyFailures(root) {
@@ -611,7 +614,7 @@ if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}` || proc
   try {
     process.exitCode = main(process.argv.slice(2));
   } catch (e) {
-    console.error(`[select] 失败：${e.message}`);
+    console.error(`[select] failed: ${e.message}`);
     process.exitCode = 3;
   }
 }

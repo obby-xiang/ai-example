@@ -100,7 +100,7 @@ scan_init() {
   SCAN_USER_NAME=$(git config --get user.name 2>/dev/null || true)
 
   if [ -z "$SCAN_USER_NAME" ]; then
-    SCAN_USER_NOTE="USER 规则已跳过：git config user.name 未设置"
+    SCAN_USER_NOTE="USER rule skipped: git config user.name is not set"
     export SCAN_RE_SECRET SCAN_RE_PATH SCAN_RE_USER
     return 0
   fi
@@ -108,7 +108,7 @@ scan_init() {
   _low=$(printf '%s' "$SCAN_USER_NAME" | tr 'A-Z' 'a-z')
   for _g in $SCAN_GENERIC_NAMES; do
     if [ "$_low" = "$_g" ]; then
-      SCAN_USER_NOTE="USER 规则已跳过：user.name 为通用值（$_low）"
+      SCAN_USER_NOTE="USER rule skipped: git config user.name is a generic value"
       export SCAN_RE_SECRET SCAN_RE_PATH SCAN_RE_USER
       return 0
     fi
@@ -131,7 +131,7 @@ EOF
 
   SCAN_RE_USER="$_alt"
   if [ -z "$SCAN_RE_USER" ]; then
-    SCAN_USER_NOTE="USER 规则已跳过：user.name 拆解后无长度 >=4 的有效片段"
+    SCAN_USER_NOTE="USER rule skipped: user.name has no usable fragment of length >= 4"
   fi
   export SCAN_RE_SECRET SCAN_RE_PATH SCAN_RE_USER
   return 0
@@ -203,9 +203,9 @@ scan_format() {
   while IFS="$SCAN_TAB" read -r _f _l _r _t; do
     [ -z "$_r" ] && continue
     case "$_r" in
-      SECRET) _label="SECRET 疑似密钥/令牌" ;;
-      PATH)   _label="PATH   本机绝对路径" ;;
-      USER)   _label="USER   个人用户名" ;;
+      SECRET) _label="SECRET suspected key/token" ;;
+      PATH)   _label="PATH   local absolute path" ;;
+      USER)   _label="USER   personal user name" ;;
       *)      _label="$_r" ;;
     esac
     printf '  %s:%s  [%s]  %s\n' "$_f" "$_l" "$_label" "$_t"
@@ -213,10 +213,10 @@ scan_format() {
 }
 
 scan_legend() {
-  echo "  规则: [SECRET 疑似密钥/令牌] [PATH 本机绝对路径] [USER 个人用户名]"
+  echo "  rules: [SECRET suspected key/token] [PATH local absolute path] [USER personal user name]"
 }
 
 scan_user_note() {
-  [ -n "${SCAN_USER_NOTE:-}" ] && echo "  注: $SCAN_USER_NOTE" >&2
+  [ -n "${SCAN_USER_NOTE:-}" ] && echo "  note: $SCAN_USER_NOTE" >&2
   return 0
 }

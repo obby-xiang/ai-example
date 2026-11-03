@@ -51,6 +51,9 @@ const REDIS_RECEIVER_NAMES = [
 const REDIS_RECEIVER = String.raw`(?:${REDIS_RECEIVER_NAMES.join('|')})`
 const REDIS_RECEIVER_SET = new Set(REDIS_RECEIVER_NAMES)
 
+// 单次运行的 GitHub 注解上限：命中上千条时只保留首屏，其余走计数。
+const MAX_ANNOTATIONS = 20
+
 // ── 规则表（唯一取数点）────────────────────────────────────────────────────
 // kind: config = 只扫 *.yml / *.yaml / *.properties；java = 只扫 Java 源码。
 const RULES = [
@@ -59,44 +62,44 @@ const RULES = [
     kind: 'config',
     regex: /^\s*(?:spring\.(?:data\.)?redis\.database|database)\s*:/,
     // 进一步要求"同文件有 Redis 上下文"（见 scanText 的 config 分支），避免命中 JPA 的 database。
-    why: 'Redis Cluster 只有 DB0；database 多库语义不可用',
+    why: 'Redis Cluster only has DB0; multi-database semantics are unavailable',
   },
   {
     id: 'redis-url-database',
     kind: 'config',
     regex: /rediss?:\/\/[^\s"']+\/\d+/,
-    why: 'URL 里的库号（redis://host/1）等价于 SELECT，Cluster 下不可用',
+    why: 'a database index in the URL (redis://host/1) is equivalent to SELECT and is unavailable on Cluster',
   },
   {
     id: 'redis-set-database',
     kind: 'java',
     regex: /\bsetDatabase\s*\(/,
-    why: '禁止切库（Cluster 只有 DB0）',
+    why: 'switching databases is forbidden (Cluster only has DB0)',
   },
   {
     id: 'redis-keys-command',
     kind: 'java',
     regex: new RegExp(String.raw`\b${REDIS_RECEIVER}\.keys\s*\(`),
-    why: 'KEYS 在 Cluster 下逐节点全量扫描，生产禁用',
+    why: 'KEYS scans every node in full on Cluster; forbidden in production',
   },
   {
     id: 'redis-scan-command',
     kind: 'java',
     regex: new RegExp(String.raw`\b${REDIS_RECEIVER}\.scan\s*\(`),
-    why: 'SCAN 必须逐节点执行；跨节点扫描在 Cluster 下语义不完整',
+    why: 'SCAN must run per node; a cross-node scan is semantically incomplete on Cluster',
   },
   {
     id: 'redis-flush-command',
     kind: 'java',
     regex: /\.(?:flushDb|flushAll)\s*\(/,
-    why: 'FLUSHDB/FLUSHALL 在 Cluster 下需逐节点执行，生产禁用',
+    why: 'FLUSHDB/FLUSHALL must run per node on Cluster; forbidden in production',
   },
   {
     id: 'redis-typed-command',
     kind: 'java',
     // execute(RedisCommand.SELECT) / connection.execute(CommandType.KEYS)
     regex: /\.execute\s*\(\s*(?:RedisCommand|CommandType)\.(?:SELECT|KEYS|FLUSHDB|FLUSHALL|SCAN)\b/,
-    why: '类型化命令枚举绕过字面量规则，同样属于禁止项',
+    why: 'typed command enums bypass the literal rules and are equally forbidden',
   },
   {
     id: 'redis-raw-command',
@@ -105,21 +108,21 @@ const RULES = [
     // 接收者落进第 1 个捕获组，供 analyzeDeclarations 判定 JDBC（见该函数注释）。
     regex: /(\b[A-Za-z_$][\w$]*)?\.execute\s*\(\s*["'](?:SELECT|KEYS|FLUSHDB|FLUSHALL|SCAN)\b/i,
     receiverGroup: 1,
-    why: '原生命令字面量绕过类型化 API，同样属于禁止项',
+    why: 'raw command literals bypass the typed API and are equally forbidden',
   },
   {
     id: 'redis-exclusive-range',
     kind: 'java',
     // Range.Bound.exclusive(...)（5.0 不支持的 `(id` 语法）
     regex: /\bRange\.Bound\.exclusive\s*\(/,
-    why: '排他区间 `(id` 需 Redis 6.2+；5.0.14 会报错并被吞成空结果',
+    why: 'exclusive range `(id` needs Redis 6.2+; 5.0.14 errors out and the error is swallowed as an empty result',
   },
   {
     id: 'redis-exclusive-stream-id-literal',
     kind: 'java',
     // 字符串拼出的排他流 ID：`"(" + seq + "-0"` / `"(123-0"`
     regex: /["']\(\s*(?:\d+-\d+|["']\s*\+[^\n]*?-\d+)/,
-    why: '排他流 ID 字面量（`(id`）在 5.0.14 非法；必须用闭区间 (from+1)-0',
+    why: 'exclusive stream-ID literal (`(id`) is invalid on 5.0.14; use the closed range (from+1)-0',
   },
 ]
 
@@ -323,19 +326,19 @@ function selfCheck() {
       hits: 1,
     },
     {
-      name: 'spring.redis.database（无 .data）',
+      name: 'spring.redis.database (no .data prefix)',
       file: 'backend/src/main/resources/application.yml',
       text: 'spring:\n  redis:\n    database: 1\n',
       hits: 1,
     },
     {
-      name: 'Redis URL 库号',
+      name: 'Redis URL database index',
       file: 'backend/src/main/resources/application.yml',
       text: 'spring:\n  data:\n    redis:\n      url: redis://127.0.0.1:6379/1\n',
       hits: 1,
     },
     {
-      name: 'JPA database-platform 不是 Redis 切库',
+      name: 'JPA database-platform is not a Redis database switch',
       file: 'backend/src/main/resources/application.yml',
       text: 'spring:\n  jpa:\n    database-platform: org.hibernate.dialect.H2Dialect\n',
       hits: 0,
@@ -347,25 +350,25 @@ function selfCheck() {
       hits: 1,
     },
     {
-      name: 'lambda 别名 c.keys',
+      name: 'lambda alias c.keys',
       file: 'backend/src/main/java/x/Y.java',
       text: 'connection.execute((RedisCallback) c -> c.keys("ai:*"));',
       hits: 1,
     },
     {
-      name: 'lambda 别名 rt.scan',
+      name: 'lambda alias rt.scan',
       file: 'backend/src/main/java/x/Y.java',
       text: 'rt.scan(ScanOptions.scanOptions().match("ai:*").build());',
       hits: 1,
     },
     {
-      name: '原生 FLUSHDB 命令字面量',
+      name: 'raw FLUSHDB command literal',
       file: 'backend/src/main/java/x/Y.java',
       text: 'connection.execute("FLUSHDB");',
       hits: 1,
     },
     {
-      name: '类型化 RedisCommand.SELECT',
+      name: 'typed RedisCommand.SELECT',
       file: 'backend/src/main/java/x/Y.java',
       text: 'connection.execute(RedisCommand.SELECT);',
       hits: 1,
@@ -383,56 +386,56 @@ function selfCheck() {
       hits: 1,
     },
     {
-      name: '排他流 ID 字面量',
+      name: 'exclusive stream-ID literal',
       file: 'backend/src/main/java/x/Y.java',
       text: 'String from = "(" + seq + "-0";',
       hits: 1,
     },
     {
-      name: '业务 runner.scan(true)（反例：不得误报）',
+      name: 'business runner.scan(true) (counter-example: must not report)',
       file: 'backend/src/main/java/com/example/configmgr/ai/web/AiController.java',
       text: 'return ApiResponse.ok(runner.scan(true));',
       hits: 0,
     },
     {
-      name: 'JPA 原生 SQL SELECT（反例：不得误报）',
+      name: 'JPA native SQL SELECT (counter-example: must not report)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'String sql = "SELECT * FROM config_def";',
       hits: 0,
     },
     {
-      name: '纯业务 "SELECT" 字面量（反例：不得误报）',
+      name: 'pure business "SELECT" literal (counter-example: must not report)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'String op = "SELECT";',
       hits: 0,
     },
     {
-      name: 'Map 的 "keys" 文案（反例：不得误报）',
+      name: 'Map "keys" label text (counter-example: must not report)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'out.put("keys", describeKeys(runId, snapshot));',
       hits: 0,
     },
     {
-      name: 'redisKeys.keys 业务变量（反例：不得误报）',
+      name: 'redisKeys.keys business variable (counter-example: must not report)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'redisKeys.keys().forEach(System.out::println);',
       hits: 0,
     },
     {
-      name: '小写 select 控件类型（反例：不得误报）',
+      name: 'lowercase select control type (counter-example: must not report)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'Set.of("button", "input", "select", "toggle");',
       hits: 0,
     },
     {
-      name: '同一行两个禁用命令（数量断言）',
+      name: 'two forbidden commands on one line (count assertion)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'c.keys("a"); c.scan(ScanOptions.scanOptions().build());',
       hits: 2,
     },
     {
       // 真实行取自 config/FlywayStartupLock.java:159（PostgreSQL 会话级 advisory lock）。
-      name: 'JDBC pg_advisory_lock（反例：PostgreSQL SQL 不是 Redis SELECT）',
+      name: 'JDBC pg_advisory_lock (counter-example: PostgreSQL SQL is not Redis SELECT)',
       file: 'backend/src/main/java/com/example/configmgr/config/FlywayStartupLock.java',
       text: 'class X {\n'
         + '    void acquirePostgres(Connection connection) throws SQLException {\n'
@@ -445,7 +448,7 @@ function selfCheck() {
     },
     {
       // 真实行取自 config/FlywayStartupLock.java:165。
-      name: 'JDBC pg_advisory_unlock（反例：PostgreSQL SQL 不是 Redis SELECT）',
+      name: 'JDBC pg_advisory_unlock (counter-example: PostgreSQL SQL is not Redis SELECT)',
       file: 'backend/src/main/java/com/example/configmgr/config/FlywayStartupLock.java',
       text: 'class X {\n'
         + '    void releasePostgres(Connection connection) throws SQLException {\n'
@@ -457,7 +460,7 @@ function selfCheck() {
       hits: 0,
     },
     {
-      name: 'JDBC Statement 上任意 SQL SELECT（反例：不是 Redis 命令）',
+      name: 'any SQL SELECT on a JDBC Statement (counter-example: not a Redis command)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'class X {\n'
         + '    void load(Connection connection) throws SQLException {\n'
@@ -468,7 +471,7 @@ function selfCheck() {
       hits: 0,
     },
     {
-      name: 'JDBC CallableStatement 仍豁免（反例：SQL 存储过程调用不是 Redis 命令）',
+      name: 'JDBC CallableStatement stays exempt (counter-example: SQL stored-procedure call is not a Redis command)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'class X {\n'
         + '    void run(Connection connection) throws SQLException {\n'
@@ -479,7 +482,7 @@ function selfCheck() {
       hits: 0,
     },
     {
-      name: 'JDBC 语句字段在方法内使用仍豁免（反例：字段作用域不丢）',
+      name: 'JDBC statement field used inside a method stays exempt (counter-example: field scope is kept)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'class X {\n'
         + '    private final Statement statement;\n'
@@ -488,7 +491,7 @@ function selfCheck() {
       hits: 0,
     },
     {
-      name: 'JDBC 豁免不外溢：同行 Redis 原生命令仍命中（数量断言）',
+      name: 'JDBC exemption does not leak: a raw Redis command on the same line still hits (count assertion)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'class X {\n'
         + '    void run(Connection connection) throws SQLException {\n'
@@ -499,37 +502,37 @@ function selfCheck() {
       hits: 1,
     },
     {
-      name: 'Redis 原生 SELECT 字面量（RedisConnection）',
+      name: 'raw Redis SELECT literal (RedisConnection)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'connection.execute("SELECT 1");',
       hits: 1,
     },
     {
-      name: 'Redis 原生 KEYS 字面量（redisTemplate）',
+      name: 'raw Redis KEYS literal (redisTemplate)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'redisTemplate.execute("KEYS ai:*");',
       hits: 1,
     },
     {
-      name: 'Redis 原生 SCAN 字面量（lambda 别名 rt）',
+      name: 'raw Redis SCAN literal (lambda alias rt)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'rt.execute("SCAN 0");',
       hits: 1,
     },
     {
-      name: 'Redis 原生 FLUSHALL 字面量（客户端别名 client）',
+      name: 'raw Redis FLUSHALL literal (client alias client)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'client.execute("FLUSHALL");',
       hits: 1,
     },
     {
-      name: '类型化 CommandType.SCAN',
+      name: 'typed CommandType.SCAN',
       file: 'backend/src/main/java/x/Y.java',
       text: 'statement.execute(CommandType.SCAN);',
       hits: 1,
     },
     {
-      name: '变量名叫 statement 但类型是 RedisConnection（反例：不得按名豁免）',
+      name: 'variable named statement but typed RedisConnection (counter-example: no exemption by name)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'class X {\n'
         + '    private final Statement statement;\n'
@@ -542,7 +545,7 @@ function selfCheck() {
     },
     {
       // 评审 I-1 探针 2：注释里的 "Statement conn" 不得把 Redis 连接别名 conn 变成 JDBC。
-      name: '注释污染：// Statement conn 不得豁免 conn.execute（反例）',
+      name: 'comment pollution: // Statement conn must not exempt conn.execute (counter-example)',
       file: 'backend/src/main/java/x/Y.java',
       text: '// The JDBC Statement conn above is unrelated to this Redis connection.\n'
         + 'conn.execute("FLUSHDB");',
@@ -550,7 +553,7 @@ function selfCheck() {
     },
     {
       // 评审 I-1 探针 3：字符串字面量里的 "PreparedStatement client" 同理。
-      name: '字符串污染："PreparedStatement client" 不得豁免 client.execute（反例）',
+      name: 'string pollution: "PreparedStatement client" must not exempt client.execute (counter-example)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'String doc = "legacy PreparedStatement client";\n'
         + 'client.execute("SCAN 0");',
@@ -558,7 +561,7 @@ function selfCheck() {
     },
     {
       // 评审 I-1 探针 1：方法 A 的 JDBC 声明不得豁免方法 B 里同名的 RedisConnection。
-      name: '跨作用域同名不同型：A 方法 JDBC statement 不豁免 B 方法 Redis statement（反例）',
+      name: 'cross-scope same name, different type: A JDBC statement does not exempt B Redis statement (counter-example)',
       file: 'backend/src/main/java/x/Y.java',
       text: 'void sql(Connection connection) {\n'
         + '    Statement statement = connection.createStatement();\n'
@@ -576,30 +579,30 @@ function selfCheck() {
     const hits = scanText(c.file, c.text)
     if (hits.length !== c.hits) {
       failed++
-      console.error(`[self-check] FAIL ${c.name}：期望命中 ${c.hits}，实际 ${hits.length}`)
+      console.error(`[self-check] FAIL ${c.name}: expected ${c.hits} hit(s), got ${hits.length}`)
     }
     else {
-      console.log(`[self-check] ok   ${c.name}（命中 ${hits.length}）`)
+      console.log(`[self-check] ok   ${c.name} (hits ${hits.length})`)
     }
   }
   if (failed > 0) return false
   // 数量断言：正向样例至少 12 条，防止规则表被整段删空后仍"全绿"。
   const positive = cases.filter((c) => c.hits > 0).length
   if (positive < 12) {
-    console.error(`[self-check] FAIL 正向样例只有 ${positive} 条（应 ≥ 12）`)
+    console.error(`[self-check] FAIL only ${positive} positive sample(s) (expected >= 12)`)
     return false
   }
-  console.log(`[self-check] 正向样例 ${positive} 条，数量断言通过。`)
+  console.log(`[self-check] ${positive} positive samples, count assertion passed.`)
   return true
 }
 
 function main() {
   if (argv.includes('--self-check')) {
     if (!selfCheck()) {
-      console.error('规则自证失败：守卫规则与反例漂移，先修脚本再谈扫描。')
+      console.error('rule self-check FAILED: the guard rules drifted from the counter-examples; fix the script before trusting any scan.')
       process.exit(1)
     }
-    console.log('规则自证通过。')
+    console.log('rule self-check passed.')
     return
   }
 
@@ -619,14 +622,18 @@ function main() {
   }
 
   if (hits.length === 0) {
-    console.log(`Redis Cluster 安全守卫：扫描 ${files.length} 个文件，0 命中。`)
+    console.log(`Redis Cluster safety guard: scanned ${files.length} files, 0 hits.`)
     return
   }
-  for (const hit of hits) {
+  // 命中数可能很大（整块新代码）：GitHub 注解逐条打会刷屏并把真正的首条冲走。
+  for (const hit of hits.slice(0, MAX_ANNOTATIONS)) {
     const rel = path.relative(REPO, hit.file).split(path.sep).join('/')
-    console.error(`::error file=${rel},line=${hit.line}::[${hit.rule}] ${hit.why} —— ${hit.text}`)
+    console.error(`::error file=${rel},line=${hit.line}::[${hit.rule}] ${hit.why} -- ${hit.text}`)
   }
-  console.error(`Redis Cluster 安全守卫：${hits.length} 处命中（禁止 database/SELECT/KEYS/FLUSHDB/FLUSHALL/SCAN/排他区间进入生产代码）。`)
+  if (hits.length > MAX_ANNOTATIONS) {
+    console.error(`::error::${hits.length - MAX_ANNOTATIONS} more hit(s) not shown above; run the guard locally for the full list.`)
+  }
+  console.error(`Redis Cluster safety guard: ${hits.length} hit(s) (database/SELECT/KEYS/FLUSHDB/FLUSHALL/SCAN/exclusive ranges must not reach production code).`)
   process.exit(1)
 }
 

@@ -6,14 +6,21 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.connection.RedisClusterConnection;
+import org.springframework.data.redis.connection.RedisClusterNode;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -22,6 +29,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -249,7 +257,7 @@ public class JobHeartbeatRegistry {
     public void beat(Long jobId) {
         if (revokedJobIds.contains(jobId)) {
             // 判死后迟到的分片边界节拍：runner 已被判死，重新写回共享键会把删除闸门再挡一个 TTL。
-            log.debug("作业 #{} 已判死并撤销 runner 登记，忽略迟到的 beat", jobId);
+            log.debug("Late beat ignored, runner already judged dead and revoked jobId={}", jobId);
             return;
         }
         this.lastBeatAtMs.put(jobId, this.clock.millis());
@@ -287,7 +295,7 @@ public class JobHeartbeatRegistry {
             return true;
         }
         if (redis == null) {
-            log.error("runner 活跃键登记失败（Redis 模板未装配），作业不得执行：jobId={}", jobId);
+            log.error("Runner active key registration failed (Redis template not wired), job must not run jobId={}", jobId);
             return false;
         }
         long now = this.clock.millis();
@@ -296,7 +304,7 @@ public class JobHeartbeatRegistry {
             redis.opsForValue().set(beatKey(jobId), beatValue(now), beatTtl);
         } catch (RuntimeException e) {
             // 不能 WARN 后继续跑：B 实例看不到共享键会在 runner 活着时放行删除。
-            log.error("runner 活跃键登记失败（共享键可能从未写入），作业不得执行：jobId={}", jobId, e);
+            log.error("Runner active key registration failed, job must not run jobId={}", jobId, e);
             deleteSafely(key(jobId));
             deleteSafely(beatKey(jobId));
             return false;
@@ -326,7 +334,7 @@ public class JobHeartbeatRegistry {
      */
     public void revokeRunner(Long jobId) {
         if (!this.activeRunners.remove(jobId) && !this.revokedJobIds.contains(jobId)) {
-            log.debug("作业 #{} 本地无 runner 登记，仍按判死撤销共享 runner 状态", jobId);
+            log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
         }
         this.lastBeatAtMs.remove(jobId);
         this.heldJobIds.remove(jobId);
@@ -423,7 +431,7 @@ public class JobHeartbeatRegistry {
             });
             svc.scheduleWithFixedDelay(this::tickSafely, periodMs, periodMs, TimeUnit.MILLISECONDS);
             this.ticker = svc;
-            log.debug("共享心跳 ticker 已启动：period={}ms beat-ttl={}", periodMs, this.beatTtl);
+            log.debug("Shared heartbeat ticker started periodMs={} beatTtl={}", periodMs, this.beatTtl);
         }
     }
 
@@ -434,7 +442,7 @@ public class JobHeartbeatRegistry {
             tickOnce();
         } catch (Throwable t) {
             // 单个周期失败不终止 ticker（下个周期重试）；共享键失联由 TTL 兜底
-            log.warn("共享心跳续期失败（下个周期重试）：{}", t.getMessage());
+            log.warn("Shared heartbeat renewal tick failed, retrying next period error={}", t.getMessage());
         }
     }
 
@@ -500,7 +508,7 @@ public class JobHeartbeatRegistry {
             // 锚点在、心跳键不在：runner 的 ticker 没续期 ⇒ 真失联，判死候选。
             return new SharedBeat(SharedBeatState.STALE, instanceOf(anchor));
         } catch (RuntimeException e) {
-            log.warn("共享心跳读取失败（判死 fail-closed，本轮不判死）jobId={}：{}", jobId, e.getMessage());
+            log.debug("Shared heartbeat read failed, fail-closed this round jobId={} error={}", jobId, e.getMessage());
             return SharedBeat.unavailable();
         }
     }
@@ -529,19 +537,19 @@ public class JobHeartbeatRegistry {
             return JudgeLease.ACQUIRED;
         }
         if (redis == null) {
-            log.warn("判死单飞键获取失败（Redis 模板未装配）jobId={}", jobId);
+            log.warn("Dead-judgement lease unavailable (Redis template not wired) jobId={}", jobId);
             return JudgeLease.UNAVAILABLE;
         }
         try {
             Boolean acquired = redis.opsForValue()
                     .setIfAbsent(deadJudgeKey(jobId), INSTANCE_ID, deadJudgeLease());
             if (acquired == null) {
-                log.warn("判死单飞键获取失败（SET NX 返回值 null，按不可用处理）jobId={}", jobId);
+                log.warn("Dead-judgement lease unavailable (SET NX returned null) jobId={}", jobId);
                 return JudgeLease.UNAVAILABLE;
             }
             return acquired ? JudgeLease.ACQUIRED : JudgeLease.HELD;
         } catch (RuntimeException e) {
-            log.warn("判死单飞键获取失败（Redis 不可用）jobId={}：{}", jobId, e.getMessage());
+            log.warn("Dead-judgement lease unavailable (Redis error) jobId={} error={}", jobId, e.getMessage());
             return JudgeLease.UNAVAILABLE;
         }
     }
@@ -577,44 +585,155 @@ public class JobHeartbeatRegistry {
         return this.heldJobIds.contains(jobId);
     }
 
-    // ── 兼容既有启动清理 ──────────────────────────────────────────────────────
+    // ── 启动清理（扫描现存键，不按全库作业 id 逐条 GET）─────────────────────────
+
+    /** SCAN 的单次 COUNT 提示（只是提示；迭代次数由游标决定，上限由调用方给）。 */
+    private static final int CLEANUP_SCAN_COUNT = 256;
 
     /**
-     * 启动清理（同一主机）：旧进程已死、但 Redis 键尚未过 TTL 时，删除该键。
+     * 启动清理：扫描 Redis 中<b>现存的</b> runner-active 键，只处理"同一主机且 PID 已死"的键。
+     *
+     * <p>旧实现遍历 {@code jobRepository.findAllIds()} 逐个 GET + 条件 DEL：命令数 = 全库作业数，
+     * 而绝大多数历史作业的键早已过 TTL（{@code max-execution-time × 2 + 5m}），扫它们没有收益
+     * （1 万作业 × 1ms RTT ≈ 10s 启动阻塞，且每个实例各做一遍）。候选集应该是<b>键空间</b>：
+     * 没有键就没有可清的东西。
+     *
+     * <p>实现约束：
+     * <ul>
+     * <li><b>SCAN，不 KEYS</b>：KEYS 在大键空间上阻塞 Redis 单线程；</li>
+     * <li><b>Cluster 逐主节点</b>：SCAN 只作用于执行它的那一个节点，单连接扫不到其它主节点；
+     *     副本上的删除不会落到主，扫它只产生重复候选，故跳过；</li>
+     * <li><b>有界</b>：跨节点合计最多<b>检视</b> {@code maxKeys} 个键（含名字不合法、解析失败的键；
+     *     上限是扫描视野，不是"成功解析的 id 数"），异常大的键空间不会拖长启动；</li>
+     * <li><b>按值安全清理</b>：候选键仍交给 {@link #cleanupDeadLocalRunner(Long)}，走
+     *     "读值 → 解析主机/PID → 值未被改写才 DEL"的既有单键原子脚本。</li>
+     * </ul>
+     *
+     * @return 实际删除的键数（0 = 没有本机死 PID 的键，或 Redis 不可用）
+     */
+    public int cleanupDeadLocalRunners(int maxKeys) {
+        if (!redisMode || redis == null || maxKeys <= 0) {
+            return 0;
+        }
+        List<Long> candidates;
+        try {
+            candidates = scanRunnerActiveJobIds(maxKeys);
+        } catch (RuntimeException e) {
+            // 启动清理是尽力而为：扫不动就把键留给 TTL，不阻断启动
+            log.warn("Startup scan of runner-active keys failed, left to TTL error={}", e.getMessage());
+            return 0;
+        }
+        if (candidates == null || candidates.isEmpty()) {
+            return 0;
+        }
+        int cleaned = 0;
+        for (Long jobId : candidates) {
+            if (cleanupDeadLocalRunner(jobId)) {
+                cleaned++;
+            }
+        }
+        return cleaned;
+    }
+
+    /** 扫描现存 runner-active 键并解析出 jobId（只读不删；单节点失败不影响其它节点）。 */
+    private List<Long> scanRunnerActiveJobIds(int maxKeys) {
+        ScanOptions options = ScanOptions.scanOptions()
+                .match(RUNNER_ACTIVE_PREFIX + "*")
+                .count(CLEANUP_SCAN_COUNT)
+                .build();
+        return redis.execute((RedisCallback<List<Long>>) connection -> {
+            if (connection == null) {
+                return List.of();
+            }
+            List<Long> ids = new ArrayList<>();
+            // 上限按"所有看到的键"计（不是 ids.size()）：键名解析失败/前缀不符时 ids 不增长，
+            // 若只看 ids 就会一直扫完整个键空间，上限形同虚设。
+            AtomicInteger scannedKeys = new AtomicInteger();
+            if (connection instanceof RedisClusterConnection cluster) {
+                for (RedisClusterNode node : cluster.clusterGetNodes()) {
+                    if (scannedKeys.get() >= maxKeys) {
+                        break;
+                    }
+                    if (!node.isMaster()) {
+                        continue; // 副本上的 DEL 不会落到主，扫它只是重复候选
+                    }
+                    try (Cursor<byte[]> cursor = cluster.scan(node, options)) {
+                        collectRunnerActiveIds(cursor, ids, maxKeys, scannedKeys);
+                    } catch (RuntimeException e) {
+                        log.warn("Runner-active key scan failed on cluster node, other nodes continue node={} error={}",
+                                node.getId(), e.getMessage());
+                    }
+                }
+            } else {
+                try (Cursor<byte[]> cursor = connection.keyCommands().scan(options)) {
+                    collectRunnerActiveIds(cursor, ids, maxKeys, scannedKeys);
+                }
+            }
+            return ids;
+        });
+    }
+
+    /**
+     * 取出游标里的 {@code job:runner-active:<jobId>} 键名并解析 id。
+     *
+     * <p>每从游标取出一个键就把 {@code scannedKeys} 加一并计入上限（无论是否解析成功），
+     * 保证单轮扫描的工作量有界。
+     */
+    private static void collectRunnerActiveIds(Cursor<byte[]> cursor, List<Long> ids, int maxKeys,
+                                               AtomicInteger scannedKeys) {
+        while (cursor.hasNext() && scannedKeys.get() < maxKeys) {
+            scannedKeys.incrementAndGet();
+            String key = new String(cursor.next(), StandardCharsets.UTF_8);
+            if (!key.startsWith(RUNNER_ACTIVE_PREFIX)) {
+                continue;
+            }
+            try {
+                ids.add(Long.parseLong(key.substring(RUNNER_ACTIVE_PREFIX.length())));
+            } catch (NumberFormatException e) {
+                log.debug("Runner-active key with unexpected name skipped key={}", key);
+            }
+        }
+    }
+
+    /**
+     * 单键启动清理（同一主机）：旧进程已死、但 Redis 键尚未过 TTL 时，删除该键。
      * 其他主机/无法解析的键保留到 TTL，避免误删仍在运行的实例。
      *
      * <p>删除是<b>按值精确匹配</b>的原子步（{@link #DELETE_IF_VALUE_SCRIPT}）：读完值到删除之间
      * 若本机新进程已重新登记同一 jobId，值已变，脚本不删 —— 不会误放行删除闸门。
+     *
+     * @return true = 本次真的删掉了一个死进程的键
      */
-    public void cleanupDeadLocalRunner(Long jobId) {
+    public boolean cleanupDeadLocalRunner(Long jobId) {
         if (!redisMode || redis == null) {
-            return;
+            return false;
         }
         try {
             String value = redis.opsForValue().get(key(jobId));
             if (value == null) {
-                return;
+                return false;
             }
             Matcher matcher = INSTANCE_ID_PATTERN.matcher(value);
             if (!matcher.matches()) {
-                return;
+                return false;
             }
             if (!LOCAL_HOST.equals(matcher.group(1))) {
-                return;
+                return false;
             }
             long pid = Long.parseLong(matcher.group(2));
             if (ProcessHandle.of(pid).isPresent()) {
-                return;
+                return false;
             }
             Long deleted = redis.execute(DELETE_IF_VALUE_SCRIPT, List.of(key(jobId)), value);
             if (deleted != null && deleted > 0) {
-                log.info("清理同一主机旧进程的 runner 活跃键：jobId={} instance={}", jobId, value);
+                log.info("Cleaned runner active key of dead local process jobId={} instance={}", jobId, value);
+                return true;
             }
-            else {
-                log.debug("runner 活跃键已被重新登记（值已变），跳过清理：jobId={} instance={}", jobId, value);
-            }
+            log.debug("Runner active key re-registered, cleanup skipped jobId={} instance={}", jobId, value);
+            return false;
         } catch (RuntimeException e) {
-            log.warn("清理 runner 活跃键失败（保留到 TTL）jobId={}：{}", jobId, e.getMessage());
+            log.warn("Runner active key cleanup failed, left to TTL jobId={} error={}", jobId, e.getMessage());
+            return false;
         }
     }
 
@@ -655,7 +774,7 @@ public class JobHeartbeatRegistry {
         try {
             redis.opsForValue().set(key(jobId), anchorValue(), runnerActiveTtl);
         } catch (RuntimeException e) {
-            log.warn("runner 活跃键续期失败（删除侧将 fail-closed）jobId={}：{}", jobId, e.getMessage());
+            log.debug("Runner active key renewal failed, deletes will fail-closed jobId={} error={}", jobId, e.getMessage());
         }
     }
 
@@ -676,7 +795,8 @@ public class JobHeartbeatRegistry {
         try {
             redis.opsForValue().set(beatKey(jobId), beatValue(this.clock.millis()), beatTtl);
         } catch (RuntimeException e) {
-            log.warn("共享心跳续期失败（跨实例判死将 fail-closed）jobId={}：{}", jobId, e.getMessage());
+            log.debug("Shared heartbeat renewal failed, cross-instance judgement will fail-closed jobId={} error={}",
+                    jobId, e.getMessage());
         }
     }
 
@@ -709,7 +829,7 @@ public class JobHeartbeatRegistry {
             return;
         }
         if (!deleteKeySafely(beatKey(jobId))) {
-            log.warn("共享心跳删除失败：保留 runner-active 锚点（避免 anchor-only 被对端误判 STALE）jobId={}",
+            log.warn("Shared heartbeat delete failed, runner-active anchor kept jobId={}",
                     jobId);
             return;
         }
@@ -730,7 +850,7 @@ public class JobHeartbeatRegistry {
             return true;
         } catch (RuntimeException e) {
             // 删除失败时键保留到 TTL；删除任务会被 fail-closed 挡住，不产生孤儿。
-            log.warn("共享状态键删除失败（等 TTL 过期）key={}：{}", key, e.getMessage());
+            log.warn("Shared state key delete failed, waiting for TTL key={} error={}", key, e.getMessage());
             return false;
         }
     }
@@ -739,10 +859,10 @@ public class JobHeartbeatRegistry {
     private void rearmSharedBeatForGrace(Long jobId) {
         try {
             redis.opsForValue().set(beatKey(jobId), beatValue(this.clock.millis()), beatTtl);
-            log.warn("runner-active 锚点删除失败：已补写短 TTL 心跳（{}）避免对端立即判死 jobId={}",
+            log.warn("runner-active anchor delete failed, short-TTL heartbeat rewritten beatTtl={} jobId={}",
                     beatTtl, jobId);
         } catch (RuntimeException e) {
-            log.warn("runner-active 锚点删除失败且心跳补写失败（最坏：一个判死窗内仍按 STALE）jobId={}：{}",
+            log.warn("runner-active anchor delete failed and heartbeat rewrite failed, may judge STALE for one window jobId={} error={}",
                     jobId, e.getMessage());
         }
     }

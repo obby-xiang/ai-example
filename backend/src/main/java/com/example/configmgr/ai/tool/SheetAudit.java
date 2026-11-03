@@ -221,7 +221,7 @@ public class SheetAudit {
 		}
 		if (sessionId == null || sessionId.isBlank()) {
 			// 没有会话锚点 = 无法落到随会话共亡的键上：宁可不记，也不写一个没有归属的台账
-			log.warn("表格采样台账跳过：缺少 sessionId tool={}", pending.getName());
+			log.warn("sheet sampling ledger skipped: no sessionId tool={}", pending.getName());
 			return;
 		}
 		try {
@@ -229,7 +229,7 @@ public class SheetAudit {
 		}
 		catch (RuntimeException error) {
 			// appendSafetyEvent 自身已吞异常；这里只防"store 是桩/未装配"的实现差异
-			log.warn("表格采样台账写入失败 tool={}：{}（不影响本轮）", pending.getName(), error.getMessage());
+			log.warn("failed to write sheet sampling ledger (turn unaffected) tool={} error={}", pending.getName(), error.getMessage());
 		}
 	}
 

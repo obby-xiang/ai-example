@@ -28,19 +28,19 @@ while [ $# -gt 0 ]; do
       exit 0 ;;
     --max-size)
       shift
-      [ $# -gt 0 ] || { echo "✖ --max-size 需要参数（单位 KB）" >&2; exit 2; }
+      [ $# -gt 0 ] || { echo "FAIL --max-size needs a value (KB)" >&2; exit 2; }
       max_size_kb="$1" ;;
     --files-only)
       files_only=1 ;;
     *)
-      echo "✖ 未知参数: $1（--help 查看用法）" >&2
+      echo "FAIL unknown argument: $1 (see --help)" >&2
       exit 2 ;;
   esac
   shift
 done
 
 case "$max_size_kb" in
-  ''|*[!0-9]*) echo "✖ --max-size 必须是非负整数（单位 KB）" >&2; exit 2 ;;
+  ''|*[!0-9]*) echo "FAIL --max-size must be a non-negative integer (KB)" >&2; exit 2 ;;
 esac
 
 hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || hook_dir=""
@@ -51,7 +51,7 @@ if [ -z "$hook_dir" ] || [ ! -f "$hook_dir/scan-lib.sh" ]; then
   fi
 fi
 if [ ! -f "$hook_dir/scan-lib.sh" ]; then
-  echo "✖ 未找到扫描引擎 scan-lib.sh（$hook_dir）" >&2
+  echo "FAIL scan engine scan-lib.sh not found ($hook_dir)" >&2
   exit 2
 fi
 . "$hook_dir/scan-lib.sh"
@@ -95,7 +95,7 @@ git rev-list --objects --all \
         if (!(sha in path)) path[sha] = substr($0, 42)
       }
       END { for (s in path) printf "%s\t%s\n", s, path[s] }
-    ' > "$TMP_MAP" || { echo "✖ git rev-list --objects --all 失败" >&2; exit 2; }
+    ' > "$TMP_MAP" || { echo "FAIL git rev-list --objects --all failed" >&2; exit 2; }
 
 # 2) 只保留 blob 类型、且体积不超过阈值的对象
 #    TMP_TYPES 为空格分隔（sha type size），TMP_MAP 为 TAB 分隔，故此处按行显式切分
@@ -110,7 +110,7 @@ LC_ALL=C awk -v max="$max_size_kb" '
 
 total=$(LC_ALL=C wc -l < "$TMP_LIST" | tr -d ' ')
 if [ "$total" = "0" ]; then
-  echo "✖ 未取到任何 blob（仓库为空或 rev-list 异常）" >&2
+  echo "FAIL no blob found (empty repository or rev-list failure)" >&2
   exit 2
 fi
 # 3) 先按旧规则过滤二进制/图片 blob（只有未知扩展名才读 2KB 探测 NUL），
@@ -150,8 +150,8 @@ esac
 [ "$jobs" -ge 1 ] || jobs=1
 [ "$jobs" -gt 8 ] && jobs=8
 
-echo "扫描范围: $total 个唯一 blob（文本 $text_total 个；并行 jobs=$jobs）" >&2
-[ "$max_size_kb" != "0" ] && echo "  体积上限: ${max_size_kb}KB（超过则跳过）" >&2
+echo "scan scope: $total unique blob(s) (text $text_total; parallel jobs=$jobs)" >&2
+[ "$max_size_kb" != "0" ] && echo "  size limit: ${max_size_kb}KB (larger blobs skipped)" >&2
 
 # 3b) 每个 worker 仍是 git cat-file | scan_engine_blob | sort -u，只是并行执行。
 if [ "$text_total" -gt 0 ]; then
@@ -162,16 +162,16 @@ if [ "$text_total" -gt 0 ]; then
       printf '%s\0%s\0' "$sha" "$path"
     done < "$TMP_SCAN" \
       | xargs -0 -n 2 -P "$jobs" sh "$TMP_WORKER" \
-      || { echo "✖ 并行扫描失败（xargs 退出码非 0）" >&2; exit 2; }
+      || { echo "FAIL parallel scan failed (xargs returned non-zero)" >&2; exit 2; }
   else
-    echo "  注: xargs -P 不可用，退回串行 worker" >&2
+    echo "  note: xargs -P unavailable, falling back to a serial worker" >&2
     while IFS="$TAB" read -r sha path; do
-      sh "$TMP_WORKER" "$sha" "$path" || { echo "✖ 串行扫描失败" >&2; exit 2; }
+      sh "$TMP_WORKER" "$sha" "$path" || { echo "FAIL serial scan failed" >&2; exit 2; }
     done < "$TMP_SCAN"
   fi
 fi
 if ! find "$TMP_HITS_DIR" -type f -exec cat {} + > "$TMP_HITS"; then
-  echo "✖ 汇总扫描结果失败（无法读取 worker 输出）" >&2
+  echo "FAIL could not aggregate scan results (cannot read worker output)" >&2
   exit 2
 fi
 
@@ -179,23 +179,23 @@ echo "" >&2
 hit_count=$(LC_ALL=C wc -l < "$TMP_HITS" | tr -d ' ')
 file_count=$(LC_ALL=C awk -F"$TAB" '{ print $1 }' "$TMP_HITS" | LC_ALL=C sort -u | LC_ALL=C wc -l | tr -d ' ')
 
-echo "================ 全历史敏感信息扫描结果 ================"
-echo "命中 $hit_count 处，涉及 $file_count 个历史路径（blob 粒度，按内容去重）"
-[ "$skip_binary" != "0" ] && echo "已跳过 $skip_binary 个二进制/图片 blob（不参与匹配）"
+echo "================ full-history secret scan result ================"
+echo "$hit_count hit(s) across $file_count historical path(s) (blob granularity, deduplicated by content)"
+[ "$skip_binary" != "0" ] && echo "skipped $skip_binary binary/image blob(s) (not matched)"
 echo ""
-echo "-- 命中路径清单（仅路径与条数，不含内容） --"
+echo "-- 命中路径清单 / hits by path (paths and counts only, no content) --"
 LC_ALL=C awk -F"$TAB" '{ print $1 }' "$TMP_HITS" | LC_ALL=C sort | LC_ALL=C uniq -c | LC_ALL=C sort -rn
 if [ "$files_only" = 0 ]; then
   echo ""
-  echo "-- 命中明细（SECRET 片段已掩码；行号对应历史版本内容） --"
+  echo "-- hit details (SECRET fragments masked; line numbers refer to the historical blob content) --"
   LC_ALL=C awk -F"$TAB" '{ printf "%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $5 }' "$TMP_HITS" \
     | LC_ALL=C sort -u > "$TMP_HITS.sorted"
   while IFS="$TAB" read -r f l r t b; do
     [ -z "$r" ] && continue
     case "$r" in
-      SECRET) label="SECRET 疑似密钥/令牌" ;;
-      PATH)   label="PATH   本机绝对路径" ;;
-      USER)   label="USER   个人用户名" ;;
+      SECRET) label="SECRET suspected key/token" ;;
+      PATH)   label="PATH   local absolute path" ;;
+      USER)   label="USER   personal user name" ;;
       *)      label="$r" ;;
     esac
     printf '  %s:%s  [%s]  %s  (blob %s)\n' "$f" "$l" "$label" "$t" "$b"
@@ -205,10 +205,10 @@ fi
 
 if [ "$hit_count" != "0" ]; then
   echo ""
-  echo "⚠ 存在历史命中：这些内容已进入 git 历史，删除工作树文件不会消除，"
-  echo "  需按 DC-08 决定是否改写历史（filter-repo/BFG）并轮换已泄漏的凭据。"
+  echo "WARN historical hits exist: this content is already in git history; deleting the working-tree file does not remove it."
+  echo "  Decide per DC-08 whether to rewrite history (filter-repo/BFG) and rotate any leaked credentials."
   exit 1
 fi
 
-echo "✓ 全历史扫描通过：无命中"
+echo "OK full-history scan passed: no hits"
 exit 0

@@ -100,7 +100,7 @@ public class AiModelCatalog {
             });
         }
         catch (Exception ex) {
-            log.debug("读模型缓存失败（当作未命中）：{}", ex.getMessage());
+            log.debug("model cache read failed (treated as miss) error={}", ex.getMessage());
             return null;
         }
     }
@@ -119,7 +119,7 @@ public class AiModelCatalog {
             }
         }
         catch (Exception ex) {
-            log.debug("写模型缓存失败（不影响返回）：{}", ex.getMessage());
+            log.debug("model cache write failed (response unaffected) error={}", ex.getMessage());
         }
     }
 

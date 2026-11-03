@@ -430,6 +430,12 @@ public class ResilientChatService {
 	private final ScheduledExecutorService watchdogExecutor;
 
 	/**
+	 * 取消轮询专用调度器（{@code aiCancelPoll}，T-01）：每轮 1Hz 的 Redis 取消读跑在这里，
+	 * 判定节拍只读内存快照。非 Spring 装配时与 {@link #watchdogExecutor} 同一个实例（内联读）。
+	 */
+	private final ScheduledExecutorService cancelPollExecutor;
+
+	/**
 	 * 上下文压缩统一入口（上下文统计与压缩专项批①）。
 	 *
 	 * <p>
@@ -588,7 +594,7 @@ public class ResilientChatService {
 			return this.cancelFinalizer.handOff(runId, CancelledRunFinalizer.CAUSE_PERSIST_DENIED);
 		}
 		catch (RuntimeException ex) {
-			log.warn("取消收尾交棒失败 runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff failed runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -619,17 +625,39 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 生产装配构造器：多一个 {@link ChatMemoryRepository}，写回走按轮合并（{@code upsertRun}）。
+	 * 兼容构造器：多一个 {@link ChatMemoryRepository}，写回走按轮合并（{@code upsertRun}）。
 	 *
-	 * <p>保留 12 参重载只为不动既有直接 {@code new} 的单测（它们用 {@link ChatMemory} 桩观察写入）；
-	 * 生产路径永远走本构造器，因此"先 clear 再 add"与"整窗覆盖别的 run"都不会出现在真实链路上。</p>
+	 * <p>保留 13 参重载只为不动既有直接 {@code new} 的单测（部分用 {@link ChatMemoryRepository} 观察写入；
+	 * 12 参重载转投到这里并传 {@code null}）。<b>生产路径走下面的 14 参构造器</b>。
+	 *
+	 * <p>非 Spring 装配（直接 {@code new}）：取消轮询与判定节拍共用 {@code aiStreamWatchdog}
+	 * （等价于旧行为，取消读内联在节拍里）；生产走下面带 {@code aiCancelPoll} 的构造器。
+	 */
+	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
+			ChatMemoryRepository chatMemoryRepository, MessageJsonCodec codec, RunStore store, RunRegistry registry,
+			ToolRegistry toolRegistry, ContextBuilder contextBuilder, AiSessionService sessionService,
+			AiProperties properties, CancellationRegistry cancellations, ToolActivityBeacon beacon,
+			@Qualifier("aiStreamWatchdog") ScheduledExecutorService watchdogExecutor) {
+		this(providerRegistry, chatMemory, chatMemoryRepository, codec, store, registry, toolRegistry, contextBuilder,
+				sessionService, properties, cancellations, beacon, watchdogExecutor, watchdogExecutor);
+	}
+
+	/**
+	 * Spring 生产装配构造器（线程治理·T-01）：取消轮询独立到 {@code aiCancelPoll}。
+	 *
+	 * <p>为什么要拆成两个调度器：{@link StreamWatchdog} 的 1Hz 取消判定是一次<b>同步 Redis GET</b>
+	 * （{@code CancellationRegistry#cancelState}，超时 {@code spring.data.redis.timeout}=2s）。
+	 * 它与纯内存的首包/静默/段预算判定共用 {@code aiStreamWatchdog} 的 2 条线程时，
+	 * 一次"慢而不失败"的读会把判定与 5s 心跳一起拖住（降级退避只在读失败后生效）。
+	 * 拆分后取消读跑在专用有界调度器上，判定节拍只读内存快照；取消时效仍是一个节拍。
 	 */
 	@Autowired
 	public ResilientChatService(AiProviderRegistry providerRegistry, ChatMemory chatMemory,
 			ChatMemoryRepository chatMemoryRepository, MessageJsonCodec codec, RunStore store, RunRegistry registry,
 			ToolRegistry toolRegistry, ContextBuilder contextBuilder, AiSessionService sessionService,
 			AiProperties properties, CancellationRegistry cancellations, ToolActivityBeacon beacon,
-			@Qualifier("aiStreamWatchdog") ScheduledExecutorService watchdogExecutor) {
+			@Qualifier("aiStreamWatchdog") ScheduledExecutorService watchdogExecutor,
+			@Qualifier("aiCancelPoll") ScheduledExecutorService cancelPollExecutor) {
 		this.providerRegistry = providerRegistry;
 		this.chatMemory = chatMemory;
 		this.chatMemoryRepository = chatMemoryRepository;
@@ -643,6 +671,7 @@ public class ResilientChatService {
 		this.cancellations = cancellations;
 		this.beacon = beacon;
 		this.watchdogExecutor = watchdogExecutor;
+		this.cancelPollExecutor = cancelPollExecutor;
 	}
 
 	// ── 首轮：ChatClient + 记忆 Advisor 路径 ────────────────────────────────
@@ -688,7 +717,8 @@ public class ResilientChatService {
 		if (target == null && StringUtils.hasText(request.modelId())) {
 			// 控制器已按 400 MODEL_NOT_FOUND 拦过；走到这里只可能是"读库后配置又被改了"的窄窗口。
 			// 不静默换模型：让这一轮按默认目标跑并在日志里留痕（用户会在 done.model 里看到真实模型）。
-			log.warn("请求的模型已不可用（并发改配置？）runId={} requested={}：本轮回落默认目标", runId,
+			log.warn("requested model unavailable (concurrent config change?) runId={} "
+					+ "requested={}: falling back to default target for this turn", runId,
 					request.modelId());
 		}
 		boolean paramsAllowed = this.providerRegistry.allowUserParams();
@@ -707,7 +737,7 @@ public class ResilientChatService {
 		// 端点重建时无从再算，故在本轮起点就随真值一起落进 ai:ctx:。
 		List<ToolCallback> tools = toolsAllowed ? this.toolRegistry.forContext(context) : List.of();
 		if (!toolsAllowed) {
-			log.info("本轮模型不支持工具调用 runId={} provider={} model={}：退化为纯问答（不下发 tools）", runId,
+			log.info("model does not support tool calls runId={} provider={} model={}: degrading to plain QA (no tools)", runId,
 					runtime.providerCode(), runtime.modelId());
 		}
 		int systemTokens = ContextEstimator.estimate(systemText);
@@ -726,8 +756,6 @@ public class ResilientChatService {
 		//   （见 compactBeforeRequest），L1/L3 本地操作静默；
 		// · 保活侧：压缩期的节拍由 TurnKeepalive 的独立定时器承担（不依赖上游事件）；
 		// · 异常侧：该窗口里抛错仍走控制器的"取消优先"终态守卫（无快照时禁止裸 save / 新建快照）。
-		// 取消登记一并前移：压缩期收到的取消同样必须生效（权威态在 Redis，登记只是同进程加速通道）。
-		this.cancellations.register(runId);
 		out.start(sessionId);
 		/**
 		 * 停止闭环：取消可能早于本轮创建（刷新后按 clientRequestId 补取消，或映射里的
@@ -735,7 +763,7 @@ public class ResilientChatService {
 		 * 只看确定 CANCELLED（旗标或映射），UNKNOWN 按未取消继续（此刻还没有不可逆动作）。
 		 */
 		if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-			log.info("首轮在建快照/压缩/模型调用之前收到取消 runId={} sessionId={}", runId, sessionId);
+			log.info("cancel received before first-turn snapshot/compaction/model call runId={} sessionId={}", runId, sessionId);
 			TurnContext early = new TurnContext(systemTokens, toolsTokens, inputTokens,
 					systemTokens + toolsTokens + inputTokens, 0, runtime.modelId(), "none", turnStartedAtMs,
 					paramsLocked, runtime.providerCode(), queueMs(System.currentTimeMillis()), runtime.providerId(),
@@ -747,6 +775,11 @@ public class ResilientChatService {
 		// 驱动所有权（快照建好之后取得；压缩期还没有快照，接管方也无从判死这一轮）
 		DriveOwnership ownership = DriveOwnership.none();
 		try {
+			// 取消登记放在 <b>try 内第一笔</b>（线程治理·T-06）：登记与 {@code unregister} 必须在同一作用域
+			// —— 旧实现在 try 之前登记，于是"建快照前取消"早退与 out.start/保活抛错都会在
+			// flags/listeners 里留下一条永久条目。压缩期收到的取消同样生效（权威态在 Redis，登记只是
+			// 同进程加速通道），因此登记仍前移到压缩之前。
+			this.cancellations.register(runId);
 			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
 					toolsTokens, 0, keepalive, windowSnapshot);
 			memory = compaction.memory();
@@ -774,7 +807,7 @@ public class ResilientChatService {
 			// 模型一次都没被调用，故不写助手正文、不写工具调用/工具结果（不得伪造轮内产出）。
 			// 为什么必须建这份最小快照：没有它，runId 的取消终态只活在帧归档里，重挂/刷新没有持久面。
 			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-				log.info("首轮压缩期间收到取消 runId={}（保存最小 CANCELLED 快照、不发起模型调用）", runId);
+				log.info("cancel during first-turn compaction runId={} (minimal CANCELLED snapshot saved, no model call)", runId);
 				try {
 					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
 							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId(),
@@ -783,7 +816,8 @@ public class ResilientChatService {
 				catch (RuntimeException ex) {
 					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
 					// 取消收尾对"无快照"仍按既有口径发唯一 done{cancelled:true}。
-					log.warn("压缩期取消的最小快照创建失败 runId={}（沿用无快照取消收尾，终帧不变）：{}", runId,
+					log.warn("minimal snapshot for compaction-time cancel failed runId={} "
+							+ "(cancel finalize without snapshot; terminal frame unchanged): {}", runId,
 							ex.getMessage());
 				}
 				cancelTerminal(runId, sessionId, null, 0, null, out,
@@ -812,7 +846,8 @@ public class ResilientChatService {
 			if (!ownership.owned()) {
 				// 另一实例已持有这一轮的续跑权：本线程不得驱动（否则就是双驱动）。终态与终帧由持有方负责，
 				// 本连接留在同一个写出器上照常收流（归档是共享的）。
-				log.warn("首轮拒绝驱动 runId={}：这一轮的续跑权已在别的实例手里（避免双驱动；终态与终帧归持有方）",
+				log.warn("first-turn drive rejected runId={}: resume authority already held by "
+						+ "another instance (avoid double drive; terminal state/frame owned by holder)",
 						runId);
 				return;
 			}
@@ -823,15 +858,16 @@ public class ResilientChatService {
 			compaction.emitIfChanged(out);
 
 			// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
-			// 因此 provider/model 只能另起一行，不得插进本行字段之间。
-			log.debug("AI 轮次开始 runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} 首包超时={} 包间超时={} 最大尝试={} 总预算={}",
+			// 因此 provider/model 只能另起一行，不得插进本行字段之间；三个取证字段名保持原样。
+			log.info("AI turn start runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} "
+					+ "firstPacketTimeout={} interPacketTimeout={} maxAttempts={} totalBudget={}",
 					runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
 					this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
 					this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
-			log.debug("AI 轮次模型身份 runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
+			log.debug("AI turn model identity runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
 			// 排队耗时（turn_accepted → turn_start）：在本行<b>发射时</b>取值，窗口与手册字段定义逐字一致
 			long queueMs = queueMs(System.currentTimeMillis());
-			// 日志链路批：成功路径的首条 INFO（此前一轮正常开始/结束在 INFO 级无痕）
+			// 日志链路批：结构化 trace（轮次起止另由 INFO 日志行留痕）
 			// AI 日志最小补齐批：resumeReason 一律出现（首轮 = none），续跑四值见手册
 			AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
 					"resumed", false, "resumeReason", "none", "context", context.getContextKey(), "tools", tools.size(),
@@ -849,7 +885,7 @@ public class ResilientChatService {
 			// 用户历史落库期间的取消窗口；命中则就地取消收尾（快照已存在，写 CANCELLED + 唯一终帧），
 			// 不发起任何模型调用。
 			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-				log.info("首轮交棒前收到取消 runId={}（不发起模型调用）", runId);
+				log.info("cancel received before first-turn handoff runId={} (no model call)", runId);
 				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
 				return;
 			}
@@ -862,13 +898,13 @@ public class ResilientChatService {
 			// 模型不支持工具调用时不下发（它连 create_task 都发不出来，问了也走不下去）。
 			if (toolsAllowed && this.taskTypeForm != null
 					&& this.taskTypeForm.parkIfDue(runId, context, request.message(), full)) {
-				log.info("首轮改为等人填任务类型（本拍不驱动模型）runId={}", runId);
+				log.info("first turn parked awaiting task type (no model drive this tick) runId={}", runId);
 				return;
 			}
 			AiContext correctionContext = context;
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, correctionContext, request.message(),
 					"", attempt -> {
-				log.debug("本轮第 {} 次尝试组装请求 runId={} sessionId={}（每轮重建请求）", attempt, runId, sessionId);
+				log.debug("assembling request for attempt {} runId={} sessionId={} (request rebuilt each turn)", attempt, runId, sessionId);
 				return Flux.defer(() -> {
 					var spec = runtime.chatClient().prompt()
 						.system(systemText)
@@ -955,7 +991,6 @@ public class ResilientChatService {
 		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
 		// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
 		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId, snapshot);
-		this.cancellations.register(runId);
 		// AR-10 第 3 条（批次2）：**armed 跨 park 持久化** —— 快照里带着"本轮已进入收尾"的事实，
 		// 恢复时必须重新点亮信标（挂起不清零、继续累计），否则模型可以再要一批工具、再清一次结果、
 		// 再追加一条收尾 user 消息，与"本轮预算"（不是会话预算、不是重置式）的口径相反。
@@ -975,11 +1010,14 @@ public class ResilientChatService {
 		// 调用方 ResumeService 在同一个保活句柄上切相位完成。
 		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 		try {
+			// 取消登记在 try 内第一笔（线程治理·T-06）：续跑准备期（restoreTurnBudget / resumedTurn /
+			// 保活）抛错时不会留下 flags/listeners —— 旧实现在 try 之前登记，早退或抛错就永久残留。
+			this.cancellations.register(runId);
 			// 意图不再由中文/原话关键词判断：只认模型结构化工具调用（run 内回灌/台账事实）。
 			String lastUserText = null;
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
 					correctionPrefix(runId), attempt -> {
-						log.debug("续跑第 {} 次尝试重建完整历史 runId={} sessionId={} 历史条数={}", attempt, runId,
+						log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
 								sessionId, history.size());
 						Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
 								out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
@@ -1081,8 +1119,8 @@ public class ResilientChatService {
 			// 否则本进程的僵尸接管复核会一直看到"还有驱动方"，而续租心跳根本不存在。
 			// 条件删除：同键若已被下一个驱动方登记，不得把它的登记一起删掉。
 			this.drivingRuns.remove(drivingKey, drivingToken);
-			log.warn("首轮取得续跑权失败 runId={}（按无租约语义继续；无设施 ⇒ 写口 NEVER_HELD 放行，"
-					+ "设施不可确认 ⇒ 写口 UNAVAILABLE 只读）: {}", runId, ex.getMessage());
+			log.warn("first-turn resume authority acquire failed runId={} (continuing lease-less; without facility "
+					+ "the write port NEVER_HELD passes; unconfirmed facility => write port UNAVAILABLE read-only): {}", runId, ex.getMessage());
 			return DriveOwnership.none();
 		}
 		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
@@ -1108,11 +1146,11 @@ public class ResilientChatService {
 				this.drivingRuns.remove(drivingKey, drivingToken);
 				if (acquired.created()) {
 					boolean released = leases.release(lease);
-					log.warn("首轮续租登记失败，已按所有权归还本次创建的租约 runId={} epoch={} released={}：{}",
+					log.warn("first-turn renew registration failed, returning the lease created here runId={} epoch={} released={}: {}",
 							runId, lease.epoch(), released, ex.getMessage());
 				}
 				else {
-					log.warn("首轮续租登记失败（同主重入，不还租）runId={} epoch={}：{}", runId, lease.epoch(),
+					log.warn("first-turn renew registration failed (same-owner reentry, lease kept) runId={} epoch={}: {}", runId, lease.epoch(),
 							ex.getMessage());
 				}
 				throw ex;
@@ -1156,7 +1194,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("首轮归还续跑权失败 runId={} epoch={}（等 TTL 自清；不影响终态）: {}", runId, lease.epoch(),
+			log.debug("first-turn lease return failed runId={} epoch={} (wait TTL; terminal state unaffected): {}", runId, lease.epoch(),
 					ex.getMessage());
 		}
 	}
@@ -1236,7 +1274,7 @@ public class ResilientChatService {
 		}
 		this.beacon.restoreBudgetArmed(runId, snapshot.getBudgetArmedAtMs());
 		this.beacon.restoreBudgetSkippedBatches(runId, snapshot.getBudgetSkippedBatches());
-		log.debug("恢复本轮预算 armed runId={} armedAtMs={} skippedBatches={}", runId,
+		log.debug("turn budget re-armed runId={} armedAtMs={} skippedBatches={}", runId,
 				snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches());
 	}
 
@@ -1251,7 +1289,8 @@ public class ResilientChatService {
 			return runtimeForSnapshot(runId, providerId, modelId, resumeSnapshot(runId));
 		}
 		catch (RuntimeException ex) {
-			log.debug("续跑压缩取本轮运行态失败 runId={}：{}（摘要按不可用处理，历史不改）", runId, ex.getMessage());
+			log.debug("resume compaction failed to read turn state runId={} "
+					+ "(summary unavailable, history unchanged): {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -1265,7 +1304,7 @@ public class ResilientChatService {
 			modelId = snapshot.getModelId();
 		}
 		if (providerId == null && !StringUtils.hasText(modelId)) {
-			log.warn("续跑遇到批① 之前的旧快照（无 providerId/modelId）runId={}：按当前默认目标续跑", runId);
+			log.warn("resume hit old snapshot before batch 1 (no providerId/modelId) runId={}: resuming with current default target", runId);
 			return this.providerRegistry.current();
 		}
 		// I3：快照有 providerId 时必须落在<b>这一家</b>（同名模型在别家不算数）。
@@ -1278,7 +1317,8 @@ public class ResilientChatService {
 				// FAILED 终态（错误码带 PROVIDER_GONE 前缀）—— 只发一帧会让快照停在 RUNNING。
 				throw new ProviderGoneException(runId, providerId, modelId);
 			}
-			log.warn("续跑时快照模型已不可解析 runId={} providerId={} model={}：回落当前默认目标", runId, providerId,
+			log.warn("resume snapshot model unresolvable runId={} providerId={} "
+					+ "model={}: falling back to current default target", runId, providerId,
 					modelId);
 			return this.providerRegistry.current();
 		}
@@ -1292,8 +1332,8 @@ public class ResilientChatService {
 					new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
 							snapshot.getMaxTokens()));
 		}
-		log.warn("续跑快照未冻结生效参数（L-26 之前写入）runId={} model={}：按当前默认参数续跑"
-				+ "（温度/top_p/max_tokens 若已改过，本轮前后半段的参数可能不一致）", runId, modelId);
+		log.warn("resume snapshot has no frozen effective params (written before L-26) runId={} model={}: "
+				+ "resuming with current defaults (temperature/top_p/max_tokens may differ across turn halves)", runId, modelId);
 		return this.providerRegistry.forRequest(target.provider(), modelId, AiProviderRegistry.Overrides.NONE);
 	}
 
@@ -1303,7 +1343,7 @@ public class ResilientChatService {
 			return this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("续跑读取快照失败 runId={}（按旧行为续跑）：{}", runId, ex.getMessage());
+			log.debug("resume snapshot read failed runId={} (resuming with old behavior): {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -1439,8 +1479,8 @@ public class ResilientChatService {
 				accumulator.seedPrefix(prefixText, prefixReasoning);
 			}
 			CompletableFuture<Void> settled = new CompletableFuture<>();
-			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, config, this.beacon,
-					this.cancellations, turnStartedAtMs, settled::completeExceptionally);
+			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, this.cancelPollExecutor, config,
+					this.beacon, this.cancellations, turnStartedAtMs, settled::completeExceptionally);
 			Disposable subscription = null;
 			try {
 				Flux<ChatResponse> stream = correcting
@@ -1465,8 +1505,8 @@ public class ResilientChatService {
 				// 硬规范②：正常结束必须有终帧（带 finishReason 的响应）；"安静地"结束 = 断流
 				if (!accumulator.sawTerminal()) {
 					throw new StreamViolationException(StreamViolationException.INCOMPLETE,
-							"上游流已结束但缺少 finishReason 终帧——按断流处理，已收上游事件 "
-									+ watchdog.upstreamEvents() + " 个");
+							"upstream stream ended without finishReason terminal frame; treating as broken; upstream events "
+									+ watchdog.upstreamEvents());
 				}
 				// 进入 QUERY_COND 后先给模型一次结构化 set_condition 机会；只有模型即将以正文收尾、
 				// 条件仍未决定时，才由宿主直接挂一次条件表单（不经过模型询问/文字追问）。
@@ -1475,7 +1515,7 @@ public class ResilientChatService {
 						&& (wrapUpFinish == UpstreamErrorClassifier.Finish.STOP
 								|| wrapUpFinish == UpstreamErrorClassifier.Finish.UNKNOWN)
 						&& parkConditionsAtWrapUp(runId, accumulator)) {
-					log.info("模型正文收尾时条件仍未决定，宿主已挂一次条件表单 runId={}", runId);
+					log.info("conditional still undecided at reply close, host parked one condition form runId={}", runId);
 					stopKeepalive(keepalive);
 					return;
 				}
@@ -1495,7 +1535,7 @@ public class ResilientChatService {
 					correcting = true;
 					prefixText = accumulator.text();
 					prefixReasoning = accumulator.reasoningText();
-					log.info("创建任务动作缺失，补一次通用工具纠正 runId={} chars={}", runId, prefixText.length());
+					log.info("create-task action missing, sending one generic tool correction runId={} chars={}", runId, prefixText.length());
 					if (keepalive != null) {
 						keepalive.rearm();
 					}
@@ -1508,7 +1548,8 @@ public class ResilientChatService {
 					correcting = true;
 					prefixText = accumulator.text();
 					prefixReasoning = accumulator.reasoningText();
-					log.info("导出收尾前补一次内部纠正：要求发起 start_export 确认卡（不自动执行）runId={} chars={}",
+					log.info("before export close, sending one internal correction: require "
+							+ "start_export confirmation card (not auto-executed) runId={} chars={}",
 							runId, prefixText.length());
 					if (keepalive != null) {
 						keepalive.rearm();
@@ -1569,7 +1610,7 @@ public class ResilientChatService {
 					// 若已 saveSuspended/SUSPENDED/in-flight（parkedToolRound），不得在这里 DONE —— 交给
 					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。仅 SUSPENDED（suspendedRound）同样不 DONE，
 					// 但按普通失败路径收口（无 error 终帧才是真正的缺口）。
-					log.warn("收尾纠正失败，改按已上屏正文正常收尾 runId={} code={}：{}", runId,
+					log.warn("close correction failed, closing with on-screen text runId={} code={}: {}", runId,
 							violation.getCode(), violation.getMessage());
 					stopKeepalive(keepalive);
 					finishSuccessGuarded(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
@@ -1608,7 +1649,7 @@ public class ResilientChatService {
 				if (retryable && outcome.retryAfterMillis() != null) {
 					long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 					if (outcome.retryAfterMillis() + RetryBackoff.BUDGET_MARGIN_MS > remaining) {
-						log.warn("略过重试 runId={} attempt={}/{} code={} Retry-After={}ms 超出剩余预算 {}ms",
+						log.warn("retry skipped runId={} attempt={}/{} code={} Retry-After={}ms exceeds remaining budget {}ms",
 								runId, budgetedAttempts, maxAttempts, violation.getCode(), outcome.retryAfterMillis(),
 								Math.max(0L, remaining));
 						retryable = false;
@@ -1618,7 +1659,8 @@ public class ResilientChatService {
 				// B：失败日志补"最后一条上游事件到失败"的静默时长与可得的工具活动间隔（都不含正文）。
 				long silenceMs = Math.max(0L, failedAtMs - watchdog.lastUpstreamAtMs());
 				long toolIdleMs = toolActivityIdleMs(runId, failedAtMs);
-				log.warn("本轮尝试失败 runId={} attempt={}/{} code={} 已产出={} 副作用={} 超预算={} 可重试={} 上游事件={} 静默={}ms 工具空闲={} 原因={} 末帧序列=[{}]",
+				log.warn("attempt failed runId={} attempt={}/{} code={} emitted={} sideEffect={} overBudget={} "
+						+ "retryable={} upstreamEvents={} silence={}ms toolIdle={} reason={} lastFrames=[{}]",
 						runId, budgetedAttempts, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
 						watchdog.upstreamEvents(), silenceMs, toolIdleMs, violation.getMessage(),
 						accumulator.tailSummary());
@@ -1712,7 +1754,7 @@ public class ResilientChatService {
 			return definitionsRead;
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取创建工具收尾事实失败，本次不纠正 runId={}：{}", runId, ex.getMessage());
+			log.warn("read create-tool close facts failed, skipping correction runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1786,7 +1828,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取披露面失败，收尾纠正按不触发处理：{}", ex.getMessage());
+			log.warn("read disclosure surface failed, treating close correction as not triggered: {}", ex.getMessage());
 		}
 		return false;
 	}
@@ -1857,7 +1899,7 @@ public class ResilientChatService {
 			return extra != null && Boolean.TRUE.equals(extra.get(marker));
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取收尾纠正标记失败 runId={}（按未纠正处理）：{}", runId, ex.getMessage());
+			log.debug("read close correction marker failed runId={} (treating as not corrected): {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1880,7 +1922,7 @@ public class ResilientChatService {
 			return value == null ? "" : String.valueOf(value);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取纠正前缀失败（按无前缀处理）：{}", ex.getMessage());
+			log.debug("read correction prefix failed (treating as none): {}", ex.getMessage());
 			return "";
 		}
 	}
@@ -1896,7 +1938,7 @@ public class ResilientChatService {
 
 	private boolean markCorrectionUsed(String runId, String prefixText, String marker, String prefixKey) {
 		try {
-			if (!persistAllowed(runId, "收尾纠正标记")) {
+			if (!persistAllowed(runId, "close correction marker")) {
 				return false;
 			}
 			RunSnapshot snapshot = this.store.get(runId);
@@ -1921,7 +1963,7 @@ public class ResilientChatService {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			log.warn("写入收尾纠正标记失败，本次不纠正 runId={}：{}", runId, ex.getMessage());
+			log.warn("write close correction marker failed, skipping correction runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1936,7 +1978,7 @@ public class ResilientChatService {
 			return AiContext.fromMap(snapshot.getContext());
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取最新上下文失败 runId={}（回落到驱动上下文）：{}", runId, ex.getMessage());
+			log.debug("read latest context failed runId={} (falling back to drive context): {}", runId, ex.getMessage());
 			return fallback;
 		}
 	}
@@ -1978,7 +2020,7 @@ public class ResilientChatService {
 				: exportWrapUpCorrection(latest.getTaskId())));
 		Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
 				out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq());
-		log.info("收尾纠正请求：历史 {} 条（含工具消息），类型={} runId={}", history.size(),
+		log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}", history.size(),
 				createTaskCorrection ? "create_task" : "start_export", runId);
 		return runtime.chatModel().stream(prompt);
 	}
@@ -2016,7 +2058,7 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取本轮待决条目失败，收尾纠正跳过 runId={}：{}", runId, ex.getMessage());
+			log.debug("read pending entries failed, skipping close correction runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 		AiContext latest = latestContext(runId, context);
@@ -2037,7 +2079,7 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取待决条目失败，收尾纠正按无新建导出证据处理 runId={}：{}", runId, ex.getMessage());
+			log.debug("read pending entries failed, treating as no new export evidence runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -2072,11 +2114,11 @@ public class ResilientChatService {
 		long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 		long delay = RetryBackoff.delayMsWithRetryAfter(retryNo, remaining, retryAfterMillis);
 		if (delay <= 0) {
-			log.debug("重试退避跳过 runId={} retry={} 剩余预算={}ms Retry-After={}（不再等待）", runId, retryNo,
+			log.debug("retry backoff skipped runId={} retry={} remaining={}ms Retry-After={} (no wait)", runId, retryNo,
 					remaining, retryAfterMillis);
 			return false;
 		}
-		log.debug("重试退避 runId={} retry={} 等待={}ms 剩余预算={}ms Retry-After={}", runId, retryNo, delay, remaining,
+		log.debug("retry backoff runId={} retry={} wait={}ms remaining={}ms Retry-After={}", runId, retryNo, delay, remaining,
 				retryAfterMillis);
 		long deadline = System.currentTimeMillis() + delay;
 		while (true) {
@@ -2087,7 +2129,7 @@ public class ResilientChatService {
 			// C2：退避期 UNKNOWN 按"未取消 + 计数继续"（这里没有不可逆动作，不能被一次读抖动改判硬失败）。
 			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
 			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
-				log.info("退避期间收到取消 runId={} retry={}（剩余 {}ms 不再等待）", runId, retryNo,
+				log.info("cancel received during backoff runId={} retry={} (remaining {}ms not waited)", runId, retryNo,
 						Math.max(0L, deadline - System.currentTimeMillis()));
 				return true;
 			}
@@ -2152,7 +2194,7 @@ public class ResilientChatService {
 					: budgetMs + 1000L - segmentElapsedMs(runId, turnStartedAtMs);
 			if (remain <= 0) {
 				throw new StreamViolationException(StreamViolationException.TOTAL_BUDGET,
-						"本段预算 " + config.getTotalBudget() + " 已耗尽（墙钟兜底，段级；人工等待不计入）");
+						"segment budget " + config.getTotalBudget() + " exhausted (wall-clock fallback, segment-level; manual wait not counted)");
 			}
 			try {
 				settled.get(Math.max(1000L, remain), TimeUnit.MILLISECONDS);
@@ -2163,7 +2205,7 @@ public class ResilientChatService {
 			}
 			catch (InterruptedException ex) {
 				Thread.currentThread().interrupt();
-				throw new StreamViolationException(StreamViolationException.CANCELLED, "运行线程被中断，本轮按取消收尾");
+				throw new StreamViolationException(StreamViolationException.CANCELLED, "run thread interrupted; closing this turn as cancelled");
 			}
 			catch (ExecutionException ex) {
 				throw asRuntime(ex.getCause() == null ? ex : ex.getCause());
@@ -2313,7 +2355,7 @@ public class ResilientChatService {
 		// 口径与 cancelTerminalLocked 的"取消收尾绝不改写 DONE/FAILED"对称：终态先到者赢；
 		// 重复收尾交给 cancelTerminal 自己的归档幂等（已有终帧就什么都不做）。
 		if (cancelledBeforeSuccess(runId, snapshot)) {
-			log.info("成功终局前发现取消，交给取消收尾 runId={}（不写 DONE、不补 done{cancelled:false}）", runId);
+			log.info("cancel detected before success terminal, handing to cancel finalize runId={} (no DONE, no done{cancelled:false})", runId);
 			cancelTerminal(runId, sessionId, isCancelledSnapshot(snapshot) ? null : accumulator, attempts, watchdog, out,
 					turn);
 			return;
@@ -2345,7 +2387,7 @@ public class ResilientChatService {
 			clearExportCorrectionPrefix(snapshot);
 			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
 			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
-			if (persistAllowed(runId, "终态快照/记忆")) {
+			if (persistAllowed(runId, "terminal snapshot/memory")) {
 				this.store.save(snapshot);
 				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
 				// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路），
@@ -2368,7 +2410,7 @@ public class ResilientChatService {
 					// （chat memory 是整窗覆盖，没有保护）。
 					// null ⇒ cancelTerminal 取权威快照的 assistantContent（另一实例已写入的半截）。
 					// 正常用户取消（attempt 内取消）仍传真实 accumulator，保留半截正文。
-					log.info("DONE 落库后复读发现取消，交给取消收尾 runId={}（不再发 done{cancelled:false}）",
+					log.info("cancel found on post-DONE reread, handing to cancel finalize runId={} (no done{cancelled:false})",
 							runId);
 					cancelTerminal(runId, sessionId, null, attempts, watchdog, out, turn);
 					return;
@@ -2382,7 +2424,7 @@ public class ResilientChatService {
 				recordTranscript(runId, sessionId, history);
 				convergeMemory(runId, sessionId, history);
 			}
-			log.debug("AI 轮次结束 runId={} sessionId={} 历史条数={} 尝试次数={} 终帧=done 末帧序列=[{}]", runId, sessionId,
+			log.info("AI turn end runId={} sessionId={} historyEntries={} attempts={} terminal=done lastFrames=[{}]", runId, sessionId,
 					history.size(), attempts, accumulator.tailSummary());
 		}
 		Map<String, Object> extra = new LinkedHashMap<>();
@@ -2446,7 +2488,7 @@ public class ResilientChatService {
 			this.beacon.clearRun(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("终态清理工具活动锚点失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("terminal cleanup of tool activity anchor failed runId={}: {}", runId, ex.getMessage());
 		}
 		try {
 			if (this.parkSettlement != null) {
@@ -2454,7 +2496,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("终态清理确认门重派发计数失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("terminal cleanup of confirmation-gate redispatch counter failed runId={}: {}", runId, ex.getMessage());
 		}
 		try {
 			if (this.cancelFinalizer != null) {
@@ -2462,7 +2504,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("终态清理取消交棒去重位失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("terminal cleanup of cancel handoff dedup flag failed runId={}: {}", runId, ex.getMessage());
 		}
 		completeClientRequest(runId, terminalSnapshot);
 	}
@@ -2495,40 +2537,39 @@ public class ResilientChatService {
 				// 兼容兜底：调用方交不出快照时才复读（键按当前线程身份拼，可能需要身份的收尾线程）。
 				snapshot = readSnapshotQuietly(runId);
 				if (snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus())) {
-					log.debug("终态完成态跳过：复读到的快照未到终态 runId={} status={}（不写完成态）", runId,
+					log.debug("terminal completion skipped: reread snapshot not terminal runId={} status={} (completion not written)", runId,
 							snapshot.getStatus());
 					return;
 				}
 			}
 			if (snapshot == null) {
-				log.warn("终态完成态跳过：快照不可读 runId={}（未交快照且复读失败/身份不符）——"
-						+ "clientRequestId 绑定只能等会话 TTL 兜底", runId);
+				log.warn("terminal completion skipped: snapshot unreadable runId={} (no snapshot handed over and "
+						+ "reread failed/identity mismatch); clientRequestId binding can only wait for session TTL", runId);
 				return;
 			}
 			String clientRequestId = snapshot.getClientRequestId();
 			String sessionId = snapshot.getSessionId();
 			if (clientRequestId == null || clientRequestId.isBlank() || sessionId == null || sessionId.isBlank()) {
-				log.debug("终态完成态跳过：本轮没有 clientRequestId/sessionId runId={} status={}", runId,
+				log.debug("terminal completion skipped: no clientRequestId/sessionId this turn runId={} status={}", runId,
 						snapshot.getStatus());
 				return;
 			}
 			boolean completed = this.clientRequests.complete(snapshot.getTenantId(), snapshot.getUserId(), sessionId,
 					clientRequestId, runId);
 			if (completed) {
-				log.debug("clientRequestId 已转入完成态 runId={} sessionId={} status={}（快照来源={}）", runId, sessionId,
-						snapshot.getStatus(), fallbackRead ? "复读" : "终态出口");
+				log.debug("clientRequestId moved to completed runId={} sessionId={} status={} (snapshot source={})", runId, sessionId,
+						snapshot.getStatus(), fallbackRead ? "reread" : "terminal exit");
 			}
 			else {
 				// 条件写未命中：绑定已不是 RUN:<runId>（过期回收后重绑到新 run / 已取消墓碑 / 已是
 				// 完成态），或键与身份不符。前几种是正常让位；最后一种会留下 RUN 字段，用 info 记录
 				// 实际快照身份，便于与完成为空的原因对照（避免对每次取消都打 warn）。
-				log.info("clientRequestId 完成态未写入 runId={} clientRequestId={} 身份={}/{} status={}（绑定已变更、"
-						+ "已取消墓碑或键/身份不符；若仍是 RUN 只能等会话 TTL 兜底）", runId, clientRequestId,
-						snapshot.getTenantId(), snapshot.getUserId(), snapshot.getStatus());
+				log.info("clientRequestId completion state not written runId={} status={} (binding changed, cancelled "
+						+ "tombstone, or key/identity mismatch; a still-RUN binding can only wait for session TTL)", runId, snapshot.getStatus());
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("clientRequestId 完成态写入失败 runId={}（不影响终态/终帧）：{}", runId, ex.getMessage());
+			log.warn("clientRequestId completion state write failed runId={} (terminal state/frame unaffected): {}", runId, ex.getMessage());
 		}
 	}
 
@@ -2553,7 +2594,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("成功终局前的取消判定不可读 runId={}（按未取消继续）：{}", runId, ex.getMessage());
+			log.debug("cancel check before success terminal unreadable runId={} (continuing as not cancelled): {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -2574,7 +2615,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("取消复查不可读 runId={}（按未取消继续）：{}", runId, ex.getMessage());
+			log.debug("cancel recheck unreadable runId={} (continuing as not cancelled): {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -2594,7 +2635,7 @@ public class ResilientChatService {
 			return this.clientRequests.isCancelled(sessionId, clientRequestId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("clientRequestId 取消复查不可读 sessionId={}（按未取消继续）：{}", sessionId, ex.getMessage());
+			log.debug("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled): {}", sessionId, ex.getMessage());
 			return false;
 		}
 	}
@@ -2608,7 +2649,7 @@ public class ResilientChatService {
 			return this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("落库后复读快照失败 runId={}（按不可知继续）：{}", runId, ex.getMessage());
+			log.debug("post-write snapshot reread failed runId={} (continuing as unknown): {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -2634,8 +2675,9 @@ public class ResilientChatService {
 	private void emitUnconfirmedTerminal(String runId, String sessionId, RunSnapshot persisted,
 			Accumulator accumulator, int attempts, SseChatEmitter out, TurnContext turn) {
 		String code = ErrorCodes.AI_REDIS_UNAVAILABLE;
-		log.warn("成功终局落库后无法确认权威状态：按不可知收尾 runId={} 复读={}（不改写快照、不发 done）", runId,
-				persisted == null ? "(读失败或轮不存在)" : persisted.getStatus());
+		log.warn("cannot confirm authoritative state after success terminal write: closing "
+				+ "as unknown runId={} reread={} (no snapshot rewrite, no done frame)", runId,
+				persisted == null ? "(read failed or run absent)" : persisted.getStatus());
 		int partialChars = accumulator == null ? 0 : accumulator.text().length();
 		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
 		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
@@ -2672,11 +2714,12 @@ public class ResilientChatService {
 			Map<String, Object> extra, int closeTextLength) {
 		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
 		if (Boolean.TRUE.equals(archived)) {
-			log.info("本次驱动的失败终帧已落档，跳过重复 error runId={} code={}（每次驱动至多一条终帧）", runId, code);
+			log.debug("failure terminal frame already archived for this drive, skipping "
+					+ "duplicate error runId={} code={} (at most one per drive)", runId, code);
 			return false;
 		}
 		if (archived == null) {
-			log.warn("本次驱动的终帧归档状态不可读 runId={}（下界不可知 ⇒ 按未归档继续收尾）", runId);
+			log.warn("terminal frame archive state unreadable runId={} (lower bound unknown => continuing close as not archived)", runId);
 		}
 		out.textEnd(closeTextLength);
 		// 无 additive 键时走两参重载（与改造前逐字节同形：既有调用方/用例观察的是同一个方法）
@@ -2799,7 +2842,7 @@ public class ResilientChatService {
 		out.retry(retryFrame);
 		AiTrace.event("turn_empty_retry", "attempt", attempts, "nextAttempt", attempts + 1, "code", EMPTY_REPLY_CODE,
 				"elapsedMs", Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs()));
-		log.warn("空回复按仅模型步重试一次 runId={} sessionId={} attempt={}/{}", runId, sessionId, attempts,
+		log.warn("empty reply retried once as model-only step runId={} sessionId={} attempt={}/{}", runId, sessionId, attempts,
 				this.properties.getResilience().getMaxAttempts());
 	}
 
@@ -2847,14 +2890,16 @@ public class ResilientChatService {
 		// 只返回取消登记表那一侧，正是"没有快照可写时唯一还读得到的取消信号"。
 		if (snapshot == null) {
 			if (cancelledBeforeSuccess(runId, null)) {
-				log.info("失败终局前发现取消 runId={}（快照尚未建立：不补 error 终帧，取消收尾负责终态与终帧）",
+				log.info("cancel detected before failure terminal runId={} (snapshot not "
+						+ "built: no error frame; cancel finalize owns terminal state/frame)",
 						runId);
 				return false;
 			}
 			return true;
 		}
 		if (cancelledBeforeSuccess(runId, snapshot)) {
-			log.info("失败终局前发现取消 runId={}（不写 FAILED、不发 error 终帧；取消收尾负责终态与终帧）", runId);
+			log.info("cancel detected before failure terminal runId={} (no FAILED, "
+					+ "no error frame; cancel finalize owns terminal state/frame)", runId);
 			return false;
 		}
 		if (prepare != null) {
@@ -2864,7 +2909,8 @@ public class ResilientChatService {
 		snapshot.setAttempts(attempts);
 		snapshot.setError(code + "：" + message);
 		if (!this.store.saveTerminalUnlessCancelled(snapshot)) {
-			log.info("失败终态被取消优先守卫拒写 runId={} code={}（不覆盖 CANCELLED、不发 error 终帧）", runId, code);
+			log.info("failure terminal write refused by cancel-priority guard "
+					+ "runId={} code={} (no CANCELLED overwrite, no error frame)", runId, code);
 			return false;
 		}
 		return true;
@@ -2901,13 +2947,14 @@ public class ResilientChatService {
 		String detail = "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
 				+ "常见成因：上游静默截断产出 0 字符的\"成功\"响应，或模型返回空回复；请重试或换一种问法。";
 		String message = messageFor(ErrorCodes.EMPTY_REPLY, detail);
-		log.error("AI 轮次空回复 runId={} sessionId={} attempts={} rawChars={} 末帧序列=[{}]", runId, sessionId, attempts,
+		log.error("AI turn empty reply runId={} sessionId={} attempts={} rawChars={} lastFrames=[{}]", runId, sessionId, attempts,
 				text.length(), accumulator.tailSummary());
 		RunSnapshot snapshot = this.store.get(runId);
 		if (snapshot == null) {
 			// 快照尚未建立（请求前压缩窗口）也先查取消：取消已成立 ⇒ 终态与终帧归取消收尾，不发 error。
 			if (cancelledBeforeSuccess(runId, null)) {
-				log.info("空回复终局前发现取消 runId={}（快照尚未建立：不补 error 终帧，取消收尾负责终态与终帧）",
+				log.info("cancel detected before empty-reply terminal runId={} (snapshot not "
+						+ "built: no error frame; cancel finalize owns terminal state/frame)",
 						runId);
 				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
 				return;
@@ -2955,10 +3002,10 @@ public class ResilientChatService {
 			SseChatEmitter out, TurnContext turn) {
 		String text = accumulator.text();
 		StreamViolationException violation = new StreamViolationException(ErrorCodes.CONTENT_FILTERED,
-				"上游以 finishReason=content_filter 结束（已产出 " + text.length() + " 字符），按失败收尾");
+				"upstream ended with finishReason=content_filter (" + text.length() + " chars emitted); closing as failure");
 		boolean emitted = accumulator.emittedVisible();
 		boolean sideEffect = this.beacon.startedCount(runId) > 0;
-		log.error("AI 轮次被内容过滤 runId={} sessionId={} attempts={} rawChars={} 末帧序列=[{}]", runId, sessionId,
+		log.error("AI turn blocked by content filter runId={} sessionId={} attempts={} rawChars={} lastFrames=[{}]", runId, sessionId,
 				attempts, text.length(), accumulator.tailSummary());
 		fail(runId, sessionId, violation, attempts, emitted, sideEffect, accumulator, out, turn);
 	}
@@ -3114,7 +3161,7 @@ public class ResilientChatService {
 			return this.registry.of(runId).terminalFrameArchived();
 		}
 		catch (RuntimeException ex) {
-			log.debug("取消终帧归档探测失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("cancel terminal archive probe failed runId={}: {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -3158,11 +3205,13 @@ public class ResilientChatService {
 		// 必须保持"快照已 CANCELLED 但 done 缺失时能被补上"，不能把不可恢复性做大。
 		Boolean archived = out.terminalFrameArchived();
 		if (Boolean.TRUE.equals(archived)) {
-			log.info("取消终帧已归档，跳过重复收尾 runId={}（不重写快照、不重发终帧）", runId);
+			log.info("cancel terminal already archived, skipping duplicate finalize "
+					+ "runId={} (no snapshot rewrite, no duplicate terminal frame)", runId);
 			return;
 		}
 		if (archived == null) {
-			log.warn("取消终帧归档状态不可读，按未归档继续收尾 runId={}（写门会再拦一次；交棒侧重试）", runId);
+			log.warn("cancel terminal archive state unreadable, continuing as not "
+					+ "archived runId={} (write gate re-checks; handoff retries)", runId);
 		}
 		// ===== 终态保护（I-1）：取消收尾绝不改写 DONE/FAILED =====
 		// RunStore#save 的取消态 CAS 只拦"DONE 覆盖取消"（单向）；反方向（取消覆盖 DONE/FAILED）只能
@@ -3171,7 +3220,7 @@ public class ResilientChatService {
 		// 抢到租约并通过 verifyHeld，若这里不判终态就会把 DONE 改写成 CANCELLED 并补第二个 done。
 		if (snapshot != null && RunSnapshot.isTerminal(snapshot.getStatus())
 				&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
-			log.warn("取消收尾拒绝改写终态 runId={} status={}（DONE/FAILED 不是取消：不重写、不出帧）", runId,
+			log.warn("cancel finalize refused terminal rewrite runId={} status={} (DONE/FAILED is not cancelled: no rewrite, no frame)", runId,
 					snapshot.getStatus());
 			return;
 		}
@@ -3215,7 +3264,7 @@ public class ResilientChatService {
 			catch (RuntimeException ex) {
 				// 写入抛异常 = 落库与否不可判定（可能快照已写、也可能只写了轻量状态键）：
 				// 按未落库处理，不交出快照；交棒侧重新取租后幂等补写 CANCELLED + 终帧。
-				log.warn("取消态快照写入不可判定 runId={}：{}（不按已落库收尾）", runId, ex.getMessage());
+				log.warn("cancel snapshot write inconclusive runId={}: {} (not treating as persisted)", runId, ex.getMessage());
 			}
 			if (persisted) {
 				// 只有这一笔真的落库，快照才是可信的终态事实（completeClientRequest 只读它的身份/绑定）
@@ -3232,8 +3281,8 @@ public class ResilientChatService {
 				// （fencing 不绕过）后只做取消收尾，不发起模型/工具。
 				// 本线程随即退出：不落快照、不出帧（此刻出帧也会被同一判据丢弃），终帧由交棒侧恰发一次。
 				boolean handed = handOffDeniedFinalization(runId);
-				log.warn("取消终态未落库（写权限不可确认或被拒写），已交棒非驱动执行器收尾 runId={} handed={}（本线程不再出帧；"
-						+ "交棒侧重新取租后补写 CANCELLED + 终帧）", runId, handed);
+				log.warn("cancel terminal state not persisted (write authority unconfirmed or refused), handed to a non-driver executor "
+						+ "runId={} handed={} (no frames from this thread; handoff re-acquires the lease and writes CANCELLED + terminal frame)", runId, handed);
 				return;
 			}
 			// 未装配交棒器（轻装配/直接 new 的单测）：保持旧口径继续走 —— 出帧仍会被写门丢弃，
@@ -3245,7 +3294,7 @@ public class ResilientChatService {
 		// （落库 → 帧 → 结算行 → 续跑/终帧）；只 park-on 的 CANCELLED CONFIRM/FRONTEND 会被结算，
 		// 判定与幂等都在闸门侧（见 ConfirmGate#settleCancelledToolCalls），本类只决定时机。
 		settleCancelledFromPark(runId, cancelledPendings);
-		log.info("AI 轮次取消 runId={} sessionId={} 尝试次数={} 已收上游事件={} 末帧序列=[{}]", runId, sessionId, attempts,
+		log.info("AI turn cancelled runId={} sessionId={} attempts={} upstreamEvents={} lastFrames=[{}]", runId, sessionId, attempts,
 				watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put("cancelled", true);
@@ -3331,7 +3380,7 @@ public class ResilientChatService {
 			this.parkSettlement.settleCancelledToolCalls(runId, cancelledBefore);
 		}
 		catch (RuntimeException ex) {
-			log.warn("取消收尾的 park 结算失败（不影响取消）runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel finalize park settlement failed (cancel unaffected) runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -3388,7 +3437,7 @@ public class ResilientChatService {
 		String code = failureCode(violation.getCode(), sideEffect, emitted);
 		String message = messageFor(code);
 		// 原始上游 body / 异常只进日志台账：用户面（error 帧）与快照只拿白名单短句
-		log.error("AI 轮次失败 runId={} sessionId={} attempt={} code={}：{}", runId, sessionId, attempts, code,
+		log.error("AI turn failed runId={} sessionId={} attempt={} code={}: {}", runId, sessionId, attempts, code,
 				describeForLog(violation));
 		RunSnapshot snapshot = this.store.get(runId);
 		boolean failurePersisted = false;
@@ -3439,7 +3488,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript 写入权判定失败 runId={}（本轮不写用户条目）：{}", runId, ex.getMessage());
+			log.debug("transcript write authority check failed runId={} (user entry not written this turn): {}", runId, ex.getMessage());
 			return;
 		}
 		try {
@@ -3448,7 +3497,7 @@ public class ResilientChatService {
 					List.of(TranscriptEntries.user(runId, turnStartedAtMs, System.currentTimeMillis(), text)));
 		}
 		catch (RuntimeException ex) {
-			log.warn("transcript 用户条目写入失败 runId={}：{}（本轮不受影响）", runId, ex.getMessage());
+			log.warn("transcript user entry write failed runId={}: {} (turn unaffected)", runId, ex.getMessage());
 		}
 	}
 
@@ -3510,7 +3559,7 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			// 展示历史是观测面，不得让本轮终态/记忆收敛因它失败
-			log.warn("transcript 终态写入失败 runId={}：{}（本轮不受影响）", runId, ex.getMessage());
+			log.warn("transcript terminal write failed runId={}: {} (turn unaffected)", runId, ex.getMessage());
 		}
 	}
 
@@ -3528,7 +3577,7 @@ public class ResilientChatService {
 			recordTranscript(runId, sessionId, this.codec.deserializeAll(snapshot.getMessageJson()), false);
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript 终态历史读取失败 runId={}：{}（本轮收尾不受影响）", runId, ex.getMessage());
+			log.debug("transcript terminal history read failed runId={}: {} (close unaffected)", runId, ex.getMessage());
 		}
 	}
 
@@ -3538,7 +3587,7 @@ public class ResilientChatService {
 			return this.chatMemory.get(sessionId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript baseline 读取记忆失败 sessionId={}：{}（跳过 baseline）", sessionId, ex.getMessage());
+			log.debug("transcript baseline memory read failed sessionId={}: {} (skipping baseline)", sessionId, ex.getMessage());
 			return List.of();
 		}
 	}
@@ -3553,7 +3602,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript 读取工具条目失败 runId={}：{}（工具原文回落历史）", runId, ex.getMessage());
+			log.debug("transcript tool entries read failed runId={}: {} (falling back to raw history)", runId, ex.getMessage());
 		}
 		return pendings;
 	}
@@ -3571,7 +3620,7 @@ public class ResilientChatService {
 		// RT-20：旧驱动（丢租/不可确认/续跑权已被接管）不得写回记忆。
 		// 这一条与出帧/台账/认领的拦截同源 —— 否则"新主人答完、旧驱动收尾"会把旧答案写进
 		// chat:mem（刷新后看到作废回答），而快照写早已被 fence 拒绝。
-		if (!persistAllowed(runId, "记忆收敛")) {
+		if (!persistAllowed(runId, "memory convergence")) {
 			return;
 		}
 		List<Message> memoryPortion = history.stream()
@@ -3584,7 +3633,7 @@ public class ResilientChatService {
 		if (memoryPortion.isEmpty()) {
 			// 空窗 = 只清<b>本 run 的块</b>（仓储按轮合并；同会话其它 run 的成功轮不得被删）。
 			// 不再"空窗直接 return"：本 run 旧历史若在（例如只剩 system 提示的异常轮），必须被清掉。
-			persistMemory(runId, sessionId, List.of(), "记忆收敛", turnStartedAtMs);
+			persistMemory(runId, sessionId, List.of(), "memory convergence", turnStartedAtMs);
 			return;
 		}
 		String snapshotStatus = snapshot == null ? null : snapshot.getStatus();
@@ -3605,7 +3654,7 @@ public class ResilientChatService {
 		}
 		List<Message> windowed = trimKeepingToolPairs(withStates,
 				this.properties.getMemory().getMaxMessages(), protectedActiveRunIds(runId, sessionId));
-		persistMemory(runId, sessionId, windowed, "记忆收敛", turnStartedAtMs);
+		persistMemory(runId, sessionId, windowed, "memory convergence", turnStartedAtMs);
 	}
 
 	/**
@@ -3638,7 +3687,7 @@ public class ResilientChatService {
 		// null = "调用方没算出窗口"（异常/误传），不等于"窗口确知为空"。
 		// 后者才是删除语义（upsert/saveAll(empty)）；把 null 当空列表会静默清掉真实旧记忆。
 		if (messages == null) {
-			log.warn("{}收到 null 消息窗口（不当作空窗删除）sessionId={}", stage, sessionId);
+			log.warn("{} got null message window (not treated as empty-window delete) sessionId={}", stage, sessionId);
 			return;
 		}
 		if (!persistAllowed(runId, stage)) {
@@ -3665,7 +3714,7 @@ public class ResilientChatService {
 			// redis.degradations），否则这类失败只活在会被轮询节拍刷掉的日志里。
 			// 一次失败的写只计一次（不重试、不改写协议）；计数在唯一 catch 里 ⇒ 不会重复。
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
-			log.warn("{}失败 sessionId={}：{}", stage, sessionId, ex.getMessage());
+			log.warn("{} failed sessionId={}: {}", stage, sessionId, ex.getMessage());
 		}
 	}
 
@@ -3698,7 +3747,8 @@ public class ResilientChatService {
 			return this.store.permittedToWrite(runId, stage);
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑权判定不可读：跳过{} runId={}（不写快照/记忆，避免旧驱动覆盖新答案）：{}", stage, runId,
+			log.warn("resume authority unreadable: skipping {} runId={} (no snapshot/memory "
+					+ "write, avoid stale driver overwriting the new answer): {}", stage, runId,
 					ex.getMessage());
 			return false;
 		}
@@ -3800,11 +3850,11 @@ public class ResilientChatService {
 			if (RunSnapshot.isTerminal(snapshotStatus)) {
 				String snapshotCode = snapshotTerminalCode(snapshotStatus);
 				if (snapshotCode != null) {
-					log.warn("历史段状态以轮次终态为准 runId={} toolCallId={} 条目态={} 轮次态={}",
+					log.warn("history segment state follows turn terminal runId={} toolCallId={} entryState={} turnState={}",
 							runId, toolCallId, status, snapshotStatus);
 					return toolCallState(pending, snapshotCode);
 				}
-				log.warn("轮次终态不参与段态推导，回落条目态 runId={} toolCallId={} 条目态={} 轮次态={}",
+				log.warn("turn terminal not used for segment state, falling back to entry state runId={} toolCallId={} entryState={} turnState={}",
 						runId, toolCallId, status, snapshotStatus);
 				return toolCallState(pending, status);
 			}
@@ -3924,7 +3974,8 @@ public class ResilientChatService {
 		for (int at = first; at >= 0; at = text.indexOf('\uFFFD', at + 1)) {
 			count++;
 		}
-		log.warn("上游正文含替换字符 runId={} replacementCount={} textLength={} firstReplacementOffset={}", runId, count,
+		log.warn("upstream text contains replacement chars runId={} "
+				+ "replacementCount={} textLength={} firstReplacementOffset={}", runId, count,
 				text.length(), first);
 	}
 
@@ -4138,7 +4189,7 @@ public class ResilientChatService {
 					|| !this.terminalOverwriteWarned.compareAndSet(false, true)) {
 				return;
 			}
-			log.warn("终态后又收到 finishReason terminal={} incoming={} hasToolCalls={} i={} dMs={} runId={}",
+			log.warn("finishReason received after terminal terminal={} incoming={} hasToolCalls={} i={} dMs={} runId={}",
 					this.lastFinish, finishReason, hasToolCalls, shardIndex, sinceFirstShardMs, this.runId);
 		}
 
@@ -4378,7 +4429,7 @@ public class ResilientChatService {
 				finalMessages = plan.changed() ? plan.messages() : windowed;
 			}
 			boolean changed = window.changed() || plan != null && plan.changed();
-			String stage = this.contextCompactor == null ? "记忆窗口" : "记忆窗口/压缩";
+			String stage = this.contextCompactor == null ? "memory window" : "memory window/compaction";
 			if (writeBackMemory(runId, sessionId, finalMessages, changed, stage, baseline)) {
 				// B1 / I5：只有整窗 CAS 成功之后才提交压缩状态/台账（失败不留下"状态说压了、模型看原文"）。
 				if (plan != null) {
@@ -4445,7 +4496,7 @@ public class ResilientChatService {
 					&& snapshot.getInFlightToolCalls() != null && !snapshot.getInFlightToolCalls().isEmpty();
 		}
 		catch (RuntimeException ex) {
-			log.debug("挂起轮判据读快照失败 runId={}（按非挂起继续）：{}", runId, ex.getMessage());
+			log.debug("parked-run predicate snapshot read failed runId={} (continuing as not parked): {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -4458,8 +4509,8 @@ public class ResilientChatService {
 			StreamViolationException violation) {
 		AiTrace.event("turn_parked", "kind", "PERSISTED_TOOL_ROUND", "attempt", attempt, "code",
 				violation.getCode());
-		log.warn("挂起工具轮已持久化：不重试、不发终帧、不写失败态 runId={} sessionId={} attempt={} code={}"
-				+ "（快照保持 SUSPENDED，in-flight/pending/req 原样保留，等 resume 物化）", runId, sessionId, attempt,
+		log.warn("tool turn parked and persisted: no retry, no terminal frame, no failure state runId={} "
+				+ "sessionId={} attempt={} code={} (snapshot stays SUSPENDED; in-flight/pending/req kept for resume)", runId, sessionId, attempt,
 				violation.getCode());
 	}
 
@@ -4481,8 +4532,8 @@ public class ResilientChatService {
 	 */
 	private void parkTurn(String runId, String sessionId, RunParkedException parked) {
 		AiTrace.event("turn_parked", "toolCallId", parked.toolCallId(), "kind", parked.kind());
-		log.info("AI 轮次进入人工等待挂起态 runId={} sessionId={} toolCallId={} kind={}"
-				+ "（线程已交还；快照/pending/req 已由 saveSuspended 落库，决策/回灌后由续跑重建执行）",
+		log.info("AI turn parked waiting for human runId={} sessionId={} toolCallId={} kind={} (thread "
+				+ "returned; snapshot/pending/req saved by saveSuspended; resume rebuilds after decision)",
 				runId, sessionId, parked.toolCallId(), parked.kind());
 	}
 
@@ -4504,9 +4555,9 @@ public class ResilientChatService {
 	boolean replaceMemoryWindow(String runId, String sessionId, List<Message> messages,
 			MemoryWindowSnapshot windowSnapshot) {
 		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
-			return persistWindowReplace(runId, sessionId, messages, "续跑压缩后记忆写回", windowSnapshot, upsert);
+			return persistWindowReplace(runId, sessionId, messages, "post-resume-compaction memory write-back", windowSnapshot, upsert);
 		}
-		persistMemory(runId, sessionId, messages, "续跑压缩后记忆写回");
+		persistMemory(runId, sessionId, messages, "post-resume-compaction memory write-back");
 		return true;
 	}
 
@@ -4516,10 +4567,10 @@ public class ResilientChatService {
 			return true;
 		}
 		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
-			return persistWindowReplace(runId, sessionId, messages, stage + "后记忆写回", windowSnapshot, upsert);
+			return persistWindowReplace(runId, sessionId, messages, stage + " write-back", windowSnapshot, upsert);
 		}
 		// 非按轮仓储（测试替身/自定义实现）：保持旧的整窗写语义。
-		persistMemory(runId, sessionId, messages, stage + "后记忆写回");
+		persistMemory(runId, sessionId, messages, stage + " write-back");
 		return true;
 	}
 
@@ -4537,7 +4588,8 @@ public class ResilientChatService {
 		if (windowSnapshot == null) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
 					new IllegalStateException("记忆窗口写回缺少快照基线"));
-			log.warn("{}跳过：本轮没有窗口快照基线（整窗写回需要 CAS 基线，不能盲目覆盖）sessionId={} runId={}", stage,
+			log.warn("{} skipped: no window snapshot baseline (whole-window write-back "
+					+ "needs a CAS baseline; no blind overwrite) sessionId={} runId={}", stage,
 					sessionId, runId);
 			return false;
 		}
@@ -4547,13 +4599,14 @@ public class ResilientChatService {
 			}
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
 					new IllegalStateException("记忆窗口在压缩计算后被改写，整窗写回放弃"));
-			log.warn("{}放弃：窗口在压缩计算后已被其它写者改写/清空（不覆盖新消息；本轮重读重算）sessionId={} runId={}",
+			log.warn("{} abandoned: window modified/cleared by another writer after compaction compute "
+					+ "(not overwriting new messages; reread and recompute this turn) sessionId={} runId={}",
 					stage, sessionId, runId);
 			return false;
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
-			log.warn("{}失败 sessionId={}：{}", stage, sessionId, ex.getMessage());
+			log.warn("{} failed sessionId={}: {}", stage, sessionId, ex.getMessage());
 			return false;
 		}
 	}
@@ -4572,7 +4625,8 @@ public class ResilientChatService {
 			return upsert.readWindow(sessionId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读记忆窗口快照失败（本轮压缩写回将跳过：没有基线的整窗覆盖不安全）sessionId={}：{}", sessionId,
+			log.warn("memory window snapshot read failed (compaction write-back skipped: "
+					+ "whole-window overwrite without baseline is unsafe) sessionId={}: {}", sessionId,
 					ex.getMessage());
 			return null;
 		}
@@ -4594,7 +4648,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("读会话当前轮失败 sessionId={}：{}", sessionId, ex.getMessage());
+			log.debug("current turn read failed sessionId={}: {}", sessionId, ex.getMessage());
 		}
 		// B1 / I6：同会话其他活跃 run 的未决条目同样不得清除（用户可能正在那张卡上复核）
 		for (String active : protectedActiveRunIds(runId, sessionId)) {
@@ -4611,7 +4665,7 @@ public class ResilientChatService {
 			ids.addAll(this.store.activeRunIds(sessionId));
 		}
 		catch (RuntimeException ex) {
-			log.debug("读会话活跃 run 失败 sessionId={}：{}", sessionId, ex.getMessage());
+			log.debug("session active run read failed sessionId={}: {}", sessionId, ex.getMessage());
 		}
 		if (runId != null && !runId.isBlank()) {
 			ids.add(runId);
@@ -4630,7 +4684,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("读未决条目失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("pending entries read failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -4830,7 +4884,7 @@ public class ResilientChatService {
 		String model = meter.model() != null ? meter.model() : turn.model();
 		if (meter.dirty() > 0) {
 			// 脏 usage 要留痕：frames/dirty 是"这个数可信到什么程度"的唯一证据
-			log.warn("usage 存在回退帧 runId 轮次计量 sessionId={} frames={} dirty={} 已采纳 prompt={}", sessionId,
+			log.warn("usage has fallback frames sessionId={} frames={} dirty={} adoptedPrompt={}", sessionId,
 					meter.frames(), meter.dirty(), used);
 		}
 		// B1：provider 与 model 成对记账（端点/触发按同一身份解析分母）
@@ -4978,13 +5032,13 @@ public class ResilientChatService {
 			cause = cause.getCause();
 		}
 		if (cause instanceof WebClientResponseException upstream) {
-			return "上游返回 HTTP " + upstream.getStatusCode().value() + "："
+			return "upstream returned HTTP " + upstream.getStatusCode().value() + ": "
 					+ loggableBody(upstream.getResponseBodyAsString());
 		}
 		if (error instanceof IllegalStateException && error.getMessage() != null
 				&& error.getMessage().startsWith("Timeout on blocking read")) {
-			return "AI 调用超过本段预算 " + this.properties.getResilience().getTotalBudget()
-					+ " 未完成（段级预算；双超时阈值待压测裁决）";
+			return "AI call exceeded segment budget " + this.properties.getResilience().getTotalBudget()
+					+ " (segment-level; dual-timeout thresholds pending load test)";
 		}
 		return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
 	}
@@ -5000,14 +5054,14 @@ public class ResilientChatService {
 			return "";
 		}
 		if (ExcerptGuard.sensitive(body)) {
-			return "[敏感正文已隐去，原长 " + body.length() + " 字符]";
+			return "[sensitive body redacted, original length " + body.length() + " chars]";
 		}
 		String singleLine = body.replaceAll("\\R", " ");
 		if (singleLine.length() <= LOG_BODY_MAX_CHARS) {
 			return singleLine;
 		}
 		return singleLine.substring(0, LOG_BODY_MAX_CHARS)
-				+ "…(截断，原正文 " + body.length() + " 字符)";
+				+ "…(truncated, original body " + body.length() + " chars)";
 	}
 
 	/** 供诊断/日志：本类的韧性参数快照。 */

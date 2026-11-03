@@ -82,7 +82,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(AiStateUnavailableException.class)
     public ResponseEntity<?> handleAiStateUnavailable(AiStateUnavailableException e, HttpServletRequest request) {
-        log.warn("AI 运行时依赖不可用 uri={}：{}", request == null ? null : request.getRequestURI(), e.getMessage());
+        log.warn("AI runtime dependency unavailable uri={} reason={}", request == null ? null : request.getRequestURI(), e.getMessage());
         return respond(HttpStatus.SERVICE_UNAVAILABLE, ErrorCodes.AI_REDIS_UNAVAILABLE,
                 "AI 服务暂不可用，请稍后重试。", null, request);
     }
@@ -115,7 +115,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<?> handleUnreadableBody(HttpMessageNotReadableException e, HttpServletRequest request) {
-        log.debug("请求体不可读（畸形 JSON / 类型不匹配 / 空体）uri={}：{}",
+        log.debug("Unreadable request body (malformed JSON, type mismatch, or empty) uri={} reason={}",
                 request == null ? null : request.getRequestURI(), e.getMessage());
         return respond(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, "请求体格式不合法", null, request);
     }
@@ -209,7 +209,7 @@ public class GlobalExceptionHandler {
     })
     public ResponseEntity<?> handleWebFamily(Exception e, HttpServletRequest request, HttpServletResponse response) {
         if (isStreamingResponse(response)) {
-            log.warn("SSE 响应上的 Web 异常（内容类型 text/event-stream 或响应已提交，跳过 JSON 写回）uri={}：{}",
+            log.warn("Web exception on SSE response, JSON body skipped uri={} error={}",
                     request == null ? null : request.getRequestURI(), e.toString());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
@@ -231,7 +231,7 @@ public class GlobalExceptionHandler {
             }
         }
         HttpHeaders headers = headersOf(e);
-        log.debug("Web 异常族收口 uri={} {} → {} {}：{}",
+        log.debug("Web exception mapped uri={} type={} status={} code={} reason={}",
                 request == null ? null : request.getRequestURI(), e.getClass().getSimpleName(),
                 status.value(), code, e.getMessage());
         if (status == HttpStatus.NOT_ACCEPTABLE) {
@@ -292,12 +292,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<?> handleDataIntegrity(DataIntegrityViolationException e, HttpServletRequest request) {
         if (isForeignKeyViolation(e)) {
-            log.warn("数据完整性冲突（外键）按 409 返回 uri={}：{}",
+            log.warn("Foreign-key integrity violation mapped to 409 uri={} reason={}",
                     request == null ? null : request.getRequestURI(), e.getMostSpecificCause().getMessage());
             return respond(HttpStatus.CONFLICT, ErrorCodes.ILLEGAL_STATE,
                     "关联的任务或作业已被删除/正在变更，请刷新后重试", null, request);
         }
-        log.error("未归类的数据完整性异常", e);
+        log.error("Unclassified data integrity violation", e);
         return respond(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR,
                 "服务器内部错误", null, request);
     }
@@ -326,9 +326,9 @@ public class GlobalExceptionHandler {
         // Content-Type 'text/event-stream' —— 除了把日志刷成噪音，什么也送达不了客户端
         // （连接已断）。故识别出来只记日志、不写体。
         if (isStreamingResponse(response)) {
-            log.warn("SSE 响应上的未处理异常（内容类型 text/event-stream 或响应已提交，跳过 JSON 写回）uri={}：{}",
+            log.warn("Unhandled exception on SSE response, JSON body skipped uri={} error={}",
                     request.getRequestURI(), e.toString());
-            log.debug("SSE 响应上的未处理异常（栈）uri={}", request.getRequestURI(), e);
+            log.debug("Unhandled exception on SSE response uri={}", request.getRequestURI(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
         // A10 R-13：用户 message 固定短句；异常原文只进日志（traceId 由 respond 回填到响应体）。

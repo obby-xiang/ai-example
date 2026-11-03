@@ -144,7 +144,7 @@ public class ToolActivityBeacon {
 		finished.put("outcome", outcome);
 		finished.put("exitedAtMs", now);
 		this.lastFinished.put(key, finished);
-		log.debug("工具执行退出 runId={} tool={} outcome={}", runId, finished.get("tool"), outcome);
+		log.debug("tool execution finished runId={} tool={} outcome={}", runId, finished.get("tool"), outcome);
 	}
 
 	/**

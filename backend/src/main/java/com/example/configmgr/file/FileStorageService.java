@@ -95,7 +95,7 @@ public class FileStorageService {
             deleteQuietly(stored.path());
             throw e;
         }
-        log.debug("Stored file {} -> key={} path={}", filename, stored.key(), stored.path());
+        log.debug("Stored file key={} path={}", stored.key(), stored.path());
         return stored;
     }
 
@@ -184,7 +184,7 @@ public class FileStorageService {
             Files.deleteIfExists(resolve(key));
         }
         catch (IOException e) {
-            log.warn("Failed to delete file {}: {}", key, e.getMessage());
+            log.warn("Failed to delete file key={} error={}", key, e.getMessage());
         }
     }
 
@@ -240,7 +240,7 @@ public class FileStorageService {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            log.debug("无活动事务同步，跳过回滚清理登记: {}", key);
+            log.debug("No active transaction sync, rollback cleanup registration skipped: {}", key);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -266,7 +266,7 @@ public class FileStorageService {
             delete(key);
         }
         catch (RuntimeException e) {
-            log.warn("事务回调删除文件失败（已忽略，不阻断后续同步器） key={}: {}", key, e.toString());
+            log.warn("Transaction callback file delete failed (ignored, does not block later synchronizers) key={} error={}", key, e.toString());
         }
     }
 
@@ -296,7 +296,7 @@ public class FileStorageService {
             Files.deleteIfExists(path);
         }
         catch (IOException | RuntimeException e) {
-            log.warn("落盘失败后清理半截文件失败 path={}: {}", path, e.toString());
+            log.warn("Failed to clean up partial file after write failure path={} error={}", path, e.toString());
         }
     }
 

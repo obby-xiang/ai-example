@@ -503,7 +503,7 @@ export function emitWorkspaceEvent(topic: 'ui_event_result', payload?: unknown):
     try {
       subscriber(payload)
     } catch (error) {
-      console.warn('[workspace] 订阅者处理失败', topic, error)
+      console.warn('[workspace] subscriber failed', topic, error)
     }
   }
 }

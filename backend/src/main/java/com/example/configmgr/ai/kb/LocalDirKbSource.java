@@ -82,7 +82,7 @@ public class LocalDirKbSource implements KbSource {
             }
             String actualSha = KbHashing.sha256Hex(body);
             if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                log.warn("知识库 manifest 的 sha 与文件不一致，以实算为准：doc={} declared={} actual={}",
+                log.warn("KB manifest sha does not match file content; using the computed value: doc={} declared={} actual={}",
                         meta.id(), abbreviate(meta.sha()), abbreviate(actualSha));
             }
             String updatedAt = meta.updatedAt() == null || meta.updatedAt().isBlank()

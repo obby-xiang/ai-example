@@ -531,9 +531,9 @@ public class AiProperties {
 			// A4：默认 min = max = 40 不是坏配置（条数钉死是明确口径），但必须诚实告知它的实际语义：
 			// token 预算只能推动工具结果清理（ContextCompactor 的 L1），按 turn 整轮淘汰不可达。
 			// 不在这里擅自降低下限（那会改变用户可见工作上下文的轮数，属另一批的展示历史分离）。
-			log.warn("app.ai.memory.min-messages == max-messages（{}）：条数被钉死，token 预算只能触达工具结果清理"
-					+ "（ContextCompactor L1），按 turn 整轮淘汰不可达；要开放裁轮请把 min-messages 调到小于 max-messages",
-					memory.getMinMessages());
+			log.warn("app.ai.memory.min-messages == max-messages ({}): message count is pinned, so the token budget can only reach"
+					+ " tool-result cleanup (ContextCompactor L1) and whole-turn eviction is unreachable; set min-messages below"
+					+ " max-messages to enable turn trimming", memory.getMinMessages());
 		}
 	}
 

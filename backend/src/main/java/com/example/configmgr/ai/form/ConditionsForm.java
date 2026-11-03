@@ -286,7 +286,7 @@ public class ConditionsForm extends HostForm {
 			}
 			if (candidates.failure()) {
 				// 内部失败口径：不交代表单、不弹表、不写库；confirm_step 会按同一口径拒绝
-				log.warn("create_task 条件候选无法生成页面草案（内部失败，不弹条件表）runId={} taskId={}", runId,
+				log.warn("create_task condition candidate could not build a page draft (internal failure; no condition form) runId={} taskId={}", runId,
 						taskId);
 				return false;
 			}
@@ -297,7 +297,7 @@ public class ConditionsForm extends HostForm {
 			}
 			if (attemptedAny(remaining, drafts)) {
 				// 草案已下发但执行失败：内部失败，不再询问用户
-				log.warn("条件草案执行失败，宿主不再弹条件表 runId={} taskId={} defs={}", runId, taskId, remaining);
+				log.warn("condition draft failed; host will not show the condition form runId={} taskId={} defs={}", runId, taskId, remaining);
 				return false;
 			}
 			if (feedback.cancelled()) {
@@ -312,12 +312,12 @@ public class ConditionsForm extends HostForm {
 			if (arguments.isEmpty()) {
 				return false;
 			}
-			log.info("进入 QUERY_COND 条件未决定，宿主直接挂一次条件表单 runId={} taskId={} defs={}", runId, taskId,
+			log.info("QUERY_COND with undecided conditions; host parks one condition form runId={} taskId={} defs={}", runId, taskId,
 					remaining);
 			return park(runId, history, frontendForm(toolCallId, arguments.get()));
 		}
 		catch (RuntimeException ex) {
-			log.warn("进入 QUERY_COND 的条件表单未能挂起（按既有路径继续）runId={}：{}", runId, ex.getMessage());
+			log.warn("condition form for QUERY_COND was not parked (continue on existing path) runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -382,12 +382,12 @@ public class ConditionsForm extends HostForm {
 			}
 			catch (RuntimeException ex) {
 				if (!conditionGateExpected(context)) {
-					log.warn("读取任务失败，confirm_step 按既有推进路径继续 runId={} taskId={}：{}", runId, taskId,
+					log.warn("could not read task; confirm_step continues on the existing path runId={} taskId={} error={}", runId, taskId,
 							ex.getMessage());
 					return ConfirmStepDecision.allow();
 				}
 				// F3：读异常时无法确认条件状态 —— 条件链上必须 fail-closed，不能按全量放行
-				log.warn("confirm_step 条件复核读取任务失败，零副作用拒绝 runId={} taskId={}：{}", runId, taskId,
+				log.warn("confirm_step condition recheck could not read task; rejected with no side effects runId={} taskId={} error={}", runId, taskId,
 						ex.getMessage());
 				return readFailureDecision(taskId);
 			}
@@ -401,7 +401,7 @@ public class ConditionsForm extends HostForm {
 			}
 			String target = targetStep(pending);
 			if (TaskSteps.SELECT_DEFS.equals(step) && TaskSteps.EXPORT.equals(target)) {
-				log.info("confirm_step 试图从 SELECT_DEFS 直接跳到 EXPORT，零副作用拒绝 runId={} taskId={}", runId,
+				log.info("confirm_step tried to jump from SELECT_DEFS to EXPORT; rejected with no side effects runId={} taskId={}", runId,
 						taskId);
 				return ConfirmStepDecision.reject(ErrorCodes.STEP_NOT_IN_SEQUENCE,
 						"不能从 SELECT_DEFS 直接跳到 EXPORT（工具未执行）",
@@ -420,11 +420,11 @@ public class ConditionsForm extends HostForm {
 		}
 		catch (RuntimeException ex) {
 			if (!conditionGateExpected(context)) {
-				log.warn("confirm_step 的条件复核未能完成（按既有推进路径继续）runId={}：{}", runId, ex.getMessage());
+				log.warn("confirm_step condition recheck did not complete (continue on existing path) runId={} error={}", runId, ex.getMessage());
 				return ConfirmStepDecision.allow();
 			}
 			// F3：条件链上的意外异常同样 fail-closed（不能因为复核炸了就按全量推进）
-			log.warn("confirm_step 条件复核异常，零副作用拒绝 runId={}：{}", runId, ex.getMessage());
+			log.warn("confirm_step condition recheck threw; rejected with no side effects runId={} error={}", runId, ex.getMessage());
 			return internalConditionFailure("条件复核未能完成（内部执行失败），confirm_step 未执行（未向前端推进）",
 					List.of("条件状态无法确认，不能按全量推进",
 							"请稍后重试 confirm_step；若持续失败请检查任务服务/存储健康"));
@@ -503,14 +503,14 @@ public class ConditionsForm extends HostForm {
 			return CandidateDispatch.none();
 		}
 		if (this.wizardActionGuard == null) {
-			log.warn("create_task 的结构化条件缺少 set_condition 复核器，不生成草案 runId={} taskId={}", runId,
+			log.warn("create_task structured conditions lack a set_condition inspector; no draft created runId={} taskId={}", runId,
 					taskId);
 			return new CandidateDispatch(true, List.of());
 		}
 		// 只认 create_task 明确给出的配置项：后续新增的条目不在候选范围
 		List<String> candidateDefCodes = source.defCodes();
 		if (candidateDefCodes.isEmpty()) {
-			log.warn("create_task 的结构化条件缺少 defCodes 候选，不生成草案 runId={} taskId={}", runId, taskId);
+			log.warn("create_task structured conditions lack defCodes candidates; no draft created runId={} taskId={}", runId, taskId);
 			return new CandidateDispatch(true, List.of());
 		}
 		Map<String, TaskItem> itemsByDefCode = new LinkedHashMap<>();
@@ -527,7 +527,7 @@ public class ConditionsForm extends HostForm {
 		for (String defCode : candidateDefCodes) {
 			TaskItem item = itemsByDefCode.get(defCode);
 			if (item == null) {
-				log.warn("create_task 条件候选的 defCode={} 不在当前任务条目里（绑定错误，不生成草案）runId={} taskId={}",
+				log.warn("create_task condition candidate defCode={} is not in the current task entries (binding error; no draft) runId={} taskId={}",
 						defCode, runId, taskId);
 				failure = true;
 				continue;
@@ -547,7 +547,7 @@ public class ConditionsForm extends HostForm {
 			}
 			String probe = conditionArguments(defCode, conditions);
 			if (probe == null) {
-				log.warn("create_task 的结构化条件无法序列化，不生成草案 runId={} taskId={} defCode={}", runId,
+				log.warn("create_task structured conditions are not serializable; no draft created runId={} taskId={} defCode={}", runId,
 						taskId, defCode);
 				failure = true;
 				continue;
@@ -555,8 +555,7 @@ public class ConditionsForm extends HostForm {
 			FrontendToolGuard.Verdict verdict = this.wizardActionGuard
 				.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
 			if (!verdict.accepted()) {
-				log.warn("create_task 的结构化条件未通过 set_condition 同一校验，不生成草案 runId={} taskId={} defCode={} reasons={}",
-						runId, taskId, defCode, verdict.reasons());
+				log.warn("create_task structured conditions failed the same set_condition validation; no draft created runId={} taskId={} defCode={} codes={}", runId, taskId, defCode, verdict.issues().stream().map(i -> i.code()).toList());
 				failure = true;
 				continue;
 			}
@@ -588,7 +587,7 @@ public class ConditionsForm extends HostForm {
 		Long boundTaskId = extra == null ? null : longOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID));
 		if (boundTaskId != null && !boundTaskId.equals(taskId)) {
 			// 只认创建它的任务：切任务后旧候选不得写到新任务
-			log.warn("create_task 的结构化条件绑定任务 #{} 与当前任务 #{} 不一致，不生成草案 runId={}", boundTaskId,
+			log.warn("create_task structured conditions are bound to task #{} but the current task is #{}; no draft created runId={}", boundTaskId,
 					taskId, runId);
 			return CandidateSource.internalFailure();
 		}
@@ -613,7 +612,7 @@ public class ConditionsForm extends HostForm {
 		}
 		if (!extraConditions.isEmpty()) {
 			// 有候选但归属无法确认（绑定信息丢失且没有任务级事实）：不得把无主候选写到当前任务
-			log.warn("create_task 的结构化条件缺少任务绑定且没有任务级草案，不生成草案 runId={} taskId={}", runId,
+			log.warn("create_task structured conditions have no task binding and no task-level draft; no draft created runId={} taskId={}", runId,
 					taskId);
 			return CandidateSource.internalFailure();
 		}
@@ -645,7 +644,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendings(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取本轮 create_task 原始入参失败（内部失败，不弹条件表）runId={} taskId={}：{}", runId, taskId,
+			log.warn("could not read this turn's raw create_task arguments (internal failure; no condition form) runId={} taskId={} error={}", runId, taskId,
 					ex.getMessage());
 			return CandidateSource.internalFailure();
 		}
@@ -679,7 +678,7 @@ public class ConditionsForm extends HostForm {
 			draft = draftStore.read(runId, taskId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取会话任务草案失败（内部失败，不弹条件表）runId={} taskId={}：{}", runId, taskId,
+			log.warn("could not read the session task draft (internal failure; no condition form) runId={} taskId={} error={}", runId, taskId,
 					ex.getMessage());
 			return CandidateSource.internalFailure();
 		}
@@ -780,7 +779,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取条件草案事实失败（按无草案处理）runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read condition draft facts (treated as no draft) runId={} error={}", runId, ex.getMessage());
 			return DraftFacts.none();
 		}
 		long taskId = task.getId() == null ? 0L : task.getId();
@@ -976,7 +975,7 @@ public class ConditionsForm extends HostForm {
 		DraftFacts drafts = draftFacts(runId, task, boundaryMs);
 		ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
 		if (plan.malformed()) {
-			log.info("confirm_step 时条件结构残缺，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			log.info("confirm_step saw an incomplete condition structure; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return ConfirmStepDecision.reject(ErrorCodes.CONDITION_JSON_INVALID,
 					"条件结构无法解析，confirm_step 未执行（未向前端推进）",
 					List.of("任务条目里存在坏 JSON/未知键/残缺结构，不能按全量放行",
@@ -996,7 +995,7 @@ public class ConditionsForm extends HostForm {
 		// ③ 非空回灌必须先由模型解析成 set_condition 草案；在此之前不得下发候选或换卡重问。
 		// 拒绝清单只点名**还没有草案**的剩余项：已按 set_condition(defCode, {}) 结算的配置项不算缺口。
 		if (feedback.nonEmpty() && !feedback.handled()) {
-			log.info("confirm_step 时条件表已收到非空文本但尚无对应草案，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			log.info("confirm_step saw non-empty condition text without a matching draft; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return unparsedFeedbackDecision(remaining);
 		}
 		// ④ 合法 create_task 候选：复用前端 set_condition 通道生成页面草案（不弹条件表、不写库）
@@ -1006,13 +1005,13 @@ public class ConditionsForm extends HostForm {
 		if (!candidates.drafts().isEmpty()) {
 			if (!allowPark) {
 				// F4：混批不能在这里 park（同样会先外置整批历史、吞掉同批调用）
-				log.info("混批中 confirm_step 需要下发条件草案，零副作用拒绝（要求单独调用）runId={} taskId={}",
+				log.info("confirm_step in a mixed batch would need to issue condition drafts; rejected with no side effects (call it alone) runId={} taskId={}",
 						runId, taskId);
 				return mixedBatchDecision();
 			}
 			boolean parked = parkAll(runId, history, candidates.drafts());
 			if (parked) {
-				log.info("confirm_step 前下发条件草案 runId={} taskId={} drafts={}", runId, taskId,
+				log.info("issuing condition drafts before confirm_step runId={} taskId={} drafts={}", runId, taskId,
 						candidates.drafts().size());
 				return ConfirmStepDecision.parkedDecision();
 			}
@@ -1032,7 +1031,7 @@ public class ConditionsForm extends HostForm {
 		}
 		// ⑤ 已下发但执行失败的草案：内部失败，不再把问题转回用户
 		if (attemptedAny(remaining, drafts)) {
-			log.warn("confirm_step 时条件草案执行失败，零副作用拒绝（不再询问用户）runId={} taskId={} defs={}", runId,
+			log.warn("condition draft execution failed; rejected with no side effects (no further user prompt) runId={} taskId={} defs={}", runId,
 					taskId, remaining);
 			return internalConditionFailure("条件草案执行失败，confirm_step 未执行（未向前端推进）",
 					List.of("本轮已下发的 set_condition 草案没有成功结算（内部执行失败）",
@@ -1040,7 +1039,7 @@ public class ConditionsForm extends HostForm {
 		}
 		// ⑥ 取消不自动重问，但也不能放行：条件仍未决定，confirm_step 零副作用拒绝并给出两条明确出口
 		if (feedback.cancelled()) {
-			log.info("confirm_step 时条件表已被取消且条件仍未决定，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			log.info("condition form was cancelled and conditions are still undecided; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return ConfirmStepDecision.reject(ErrorCodes.FORM_RESULT_REJECTED,
 					"条件仍未决定（条件表已取消），confirm_step 未执行（未向前端推进）",
 					List.of("取消不自动重问；但条件仍未决定，不能按全量误推进",
@@ -1054,7 +1053,7 @@ public class ConditionsForm extends HostForm {
 		// 已结算草案 / 明确留空才走上面的放行分支。
 		String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
 		if (!parkEnabled()) {
-			log.warn("条件未决定但宿主表单挂起未启用，零副作用拒绝 runId={} taskId={} defs={}", runId, taskId,
+			log.warn("conditions undecided but host form parking is disabled; rejected with no side effects runId={} taskId={} defs={}", runId, taskId,
 					remaining);
 			return internalConditionFailure("条件未决定且宿主表单挂起未启用（app.ai.park.enabled=false），"
 					+ "confirm_step 未执行（未向前端推进）",
@@ -1065,12 +1064,12 @@ public class ConditionsForm extends HostForm {
 		}
 		if (!allowPark) {
 			// F4：混批 park 会先外置整批历史，吞掉同批其它调用的卡/回执 —— 改成让模型分批
-			log.info("混批中 confirm_step 需要收集条件，零副作用拒绝（要求单独调用）runId={} taskId={}", runId,
+			log.info("confirm_step in a mixed batch would need to collect conditions; rejected with no side effects (call it alone) runId={} taskId={}", runId,
 					taskId);
 			return mixedBatchDecision();
 		}
 		if (alreadyIssued(runId, toolCallId)) {
-			log.warn("同一缺口的条件表已存在且未结算，零副作用拒绝（不换第二张）runId={} taskId={} toolCallId={}",
+			log.warn("a condition form for the same gap exists and is unsettled; rejected with no side effects (no second form) runId={} taskId={} toolCallId={}",
 					runId, taskId, toolCallId);
 			return internalConditionFailure("同一缺口的条件表已下发但未结算（或已作废），条件仍未决定，"
 					+ "confirm_step 未执行（未向前端推进）",
@@ -1080,19 +1079,19 @@ public class ConditionsForm extends HostForm {
 		}
 		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
 		if (arguments.isEmpty()) {
-			log.warn("条件表未通过白名单/长度校验，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			log.warn("condition form failed whitelist/length validation; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return internalConditionFailure("条件表无法生成（未通过表单白名单或超长），条件仍未决定，"
 					+ "confirm_step 未执行（未向前端推进）",
 					List.of("宿主无法下发一张自己都过不了闸门的表",
 							"下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
 									+ "或让用户明确按全量导出后再 confirm_step"));
 		}
-		log.info("confirm_step 推进前条件未决定，改为收集一次可选条件 runId={} taskId={} defs={}", runId, taskId,
+		log.info("conditions undecided before confirm_step; collecting optional conditions once instead runId={} taskId={} defs={}", runId, taskId,
 				remaining);
 		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()));
 		if (!parked) {
 			// F3：挂起写失败（saveSuspended/converge 失败）同样不能 allow
-			log.warn("条件表挂起失败，条件仍未决定，零副作用拒绝 runId={} taskId={}", runId, taskId);
+			log.warn("condition form parking failed and conditions remain undecided; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return internalConditionFailure("条件表挂起失败（内部执行失败），条件仍未决定，"
 					+ "confirm_step 未执行（未向前端推进）",
 					List.of("宿主没有把条件表挂起成功（本拍未下发、未推进）",
@@ -1157,7 +1156,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取条件表单回灌失败（按未收集处理）runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read condition form submission (treated as not collected) runId={} error={}", runId, ex.getMessage());
 			return ConditionFeedback.none();
 		}
 		PendingToolCall latest = null;
@@ -1247,7 +1246,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取待决条目失败，非空条件回灌按未处理处理 runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read pending entry; non-empty condition submission treated as unhandled runId={} error={}", runId, ex.getMessage());
 			return false;
 		}
 		Set<String> settled = new LinkedHashSet<>();

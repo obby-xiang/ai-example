@@ -198,7 +198,7 @@ public class JobService {
                         heartbeatRegistry.endRunner(savedJob.getId());
                         heartbeatRegistry.clear(savedJob.getId());
                         cancellationRegistry.unregister(savedJob.getId());
-                        log.error("作业 #{} 启动异步执行失败，收敛 FAILED", savedJob.getId(), e);
+                        log.error("Failed to start async job execution, converged to FAILED jobId={}", savedJob.getId(), e);
                         markRunnerStartFailed(savedJob);
                     }
                 }
@@ -224,7 +224,7 @@ public class JobService {
                 heartbeatRegistry.endRunner(savedJob.getId());
                 heartbeatRegistry.clear(savedJob.getId());
                 cancellationRegistry.unregister(savedJob.getId());
-                log.error("作业 #{} 启动异步执行失败，收敛 FAILED", savedJob.getId(), e);
+                log.error("Failed to start async job execution, converged to FAILED jobId={}", savedJob.getId(), e);
                 markRunnerStartFailed(savedJob);
             }
         }
@@ -238,8 +238,8 @@ public class JobService {
     private void markRunnerStartFailed(Job job) {
         Job current = jobRepository.findById(job.getId()).orElse(null);
         if (current == null || !IN_FLIGHT.contains(current.getStatus())) {
-            log.info("作业 #{} 已离开在途态（{}），跳过 runner 启动失败收敛",
-                    job.getId(), current == null ? "已删除" : current.getStatus());
+            log.info("Job left in-flight state, runner-start failure convergence skipped jobId={} state={}",
+                    job.getId(), current == null ? "DELETED" : current.getStatus());
             return;
         }
         try {
@@ -253,7 +253,7 @@ public class JobService {
             issueTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
             issueTx.executeWithoutResult(status -> issueRepository.save(issue));
         } catch (Exception e) {
-            log.error("写 runner 启动失败 issue 失败 jobId={}：{}", job.getId(), e.getMessage(), e);
+            log.error("Runner-start failure issue write failed jobId={} error={}", job.getId(), e.getMessage(), e);
         }
         terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                 Map.of("jobId", job.getId(), "jobType", job.getJobType(),
@@ -443,7 +443,7 @@ public class JobService {
                     : com.fasterxml.jackson.databind.node.MissingNode.getInstance();
         }
         catch (Exception e) {
-            log.debug("解析预检查指纹摘要失败（按缺失处理）：{}", e.getMessage());
+            log.debug("Precheck fingerprint summary unparseable, treated as missing error={}", e.getMessage());
             return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
         }
     }
@@ -513,7 +513,7 @@ public class JobService {
             // 只匹配 PENDING/RUNNING，已 COMPLETED 的条目一律不动（不覆盖成功终态）。
             int convergedItems = this.jobItemRepository.convergeOpenItems(jobId, "CANCELLED");
             if (convergedItems > 0) {
-                log.info("作业 #{} 取消：收敛 {} 条在途条目为 CANCELLED（执行器迟到的条目写由条件 UPDATE 丢弃）",
+                log.info("Job cancelled, open items converged to CANCELLED jobId={} items={}",
                         jobId, convergedItems);
             }
             return job.getTaskId();
@@ -539,7 +539,7 @@ public class JobService {
         try {
             result = cancellationRegistry.cancel(jobId, requestedBy);
         } catch (Exception e) {
-            log.error("取消已提交，但共享取消标志写入失败（提交后归因，不回滚）jobId={}：{}",
+            log.error("Cancel committed but shared cancel flag write failed jobId={} error={}",
                     jobId, e.getMessage(), e);
             result = new JobCancellationRegistry.CancelResult(
                     false, false, jobId, cancellationRegistry.keyFor(jobId));
@@ -547,14 +547,14 @@ public class JobService {
         if (!result.redisWritten()) {
             // 精确口径：Redis 写失败时，只有本实例已登记（正在执行该作业）的加速位立即可见；
             // 非执行实例没有本地条目，跨实例取消在 Redis 恢复前不可见（作业行终态仍是权威）
-            log.warn("取消作业 #{} 的共享标志未写入 Redis（降级：仅本实例已登记的作业立即可见，跨实例不可见）",
+            log.warn("Shared cancel flag not written to Redis, cancel visible only on this instance jobId={}",
                     jobId);
         }
         try {
             taskSseService.publish(taskId, "JOB_DONE", Map.of(
                     "jobId", jobId, "status", "CANCELLED"));
         } catch (Exception e) {
-            log.error("取消已提交，但 JOB_DONE 推送失败（提交后归因，不回滚）jobId={}：{}",
+            log.error("Cancel committed but JOB_DONE publish failed jobId={} error={}",
                     jobId, e.getMessage(), e);
         }
         return result;

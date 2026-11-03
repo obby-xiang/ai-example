@@ -162,7 +162,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			// B3：多实例下登记失败必须 fail-closed —— 回落进程内 Map 会让"上传在 A、回灌在 B"时
 			// B 看不到登记（判定失真），且日志会把数据面丢失伪装成性能降级。
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
-			log.error("附件登记写 Redis 失败 fileId={}（多实例下 fail-closed，不回落进程内）：{}", fileId,
+			log.error("failed to write attachment registration to Redis (fail-closed across instances; no in-process fallback) fileId={} error={}", fileId,
 					ex.getMessage());
 			throw new AiStateUnavailableException("附件登记失败（Redis 不可用；不得回退进程内）", ex);
 		}
@@ -175,8 +175,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_REGISTER, ex);
-			log.error("附件登记已写入但索引失败 fileId={} sessionId={} runId={} toolCallId={}"
-					+ "（回滚登记，避免销毁/收口时漏删文件）：{}", fileId, sessionId, runId, toolCallId,
+			log.error("attachment registration written but index failed (registration rolled back so destroy/closeout cannot miss files) fileId={} sessionId={} runId={} toolCallId={} error={}", fileId, sessionId, runId, toolCallId,
 					ex.getMessage());
 			try {
 				redis.delete(registration);
@@ -184,7 +183,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 				removeFromIndexQuietly(redis, formIndexKey(identity, runId, toolCallId), fileId);
 			}
 			catch (Exception cleanup) {
-				log.warn("回滚附件登记失败 fileId={}（登记会在 TTL 后自清）：{}", fileId, cleanup.getMessage());
+				log.warn("failed to roll back attachment registration (will expire via TTL) fileId={} error={}", fileId, cleanup.getMessage());
 			}
 			throw new AiStateUnavailableException("附件登记失败（索引不可写；不得留下不可枚举的登记）", ex);
 		}
@@ -209,7 +208,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		catch (Exception ex) {
 			// 读不出来 ≠ 不存在：多实例下必须让调用方知道无法校验，而不是回落本地 Map 误判。
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.error("附件读取 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			log.error("failed to read attachment from Redis (fail-closed; no in-process fallback) fileId={} error={}", fileId, ex.getMessage());
 			throw new AiStateUnavailableException("附件读取失败（Redis 不可用；不得回退进程内）", ex);
 		}
 	}
@@ -255,7 +254,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_CONSUME, ex);
-			log.error("附件消费写 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			log.error("failed to write attachment consume to Redis (fail-closed; no in-process fallback) fileId={} error={}", fileId, ex.getMessage());
 			throw new AiStateUnavailableException("附件消费失败（Redis 不可用；不得回退进程内）", ex);
 		}
 	}
@@ -347,8 +346,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.warn("附件续期读表单索引失败 runId={} toolCallId={}（下一拍重试）：{}", runId, toolCallId,
-					ex.getMessage());
+			log.debug("attachment renewal could not read form index (retry next tick) runId={} toolCallId={} error={}", runId, toolCallId, ex.getMessage());
 			return;
 		}
 		if (ids == null || ids.isEmpty()) {
@@ -380,8 +378,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			// 读失败 ≠ 不存在：只告警（续期是养活性维护，下一拍再试），不把附件当成已过期。
 			// 表单索引本身仍尽力续一次 —— 索引先过期会让整张表单的附件一起从回收面消失。
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.warn("附件续期批量读登记失败 runId={} toolCallId={} count={}（下一拍重试）：{}", runId, toolCallId,
-					registrationKeys.size(), ex.getMessage());
+			log.debug("attachment renewal bulk read failed (retry next tick) runId={} toolCallId={} count={} error={}", runId, toolCallId, registrationKeys.size(), ex.getMessage());
 			expireIndexQuietly(redis, indexKey, runId, toolCallId);
 			return true;
 		}
@@ -470,7 +467,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		catch (Exception ex) {
 			// 命令已逐条下发：单条失败不阻断其余（逐件隔离保留），这里只留痕；下一拍会再试
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.warn("附件续期流水线失败 runId={} toolCallId={} keys={}（下一拍重试）：{}", runId, toolCallId,
+			log.warn("attachment renewal pipeline failed (retry next tick) runId={} toolCallId={} keys={} error={}", runId, toolCallId,
 					keys.size(), ex.getMessage());
 			return true;
 		}
@@ -494,8 +491,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 				}
 			}
 			catch (Exception ex) {
-				log.warn("附件续期失败 fileId={} runId={} toolCallId={}（下一拍重试）：{}", fileId, runId,
-						toolCallId, ex.getMessage());
+				log.debug("attachment renewal failed (retry next tick) fileId={} runId={} toolCallId={} error={}", fileId, runId, toolCallId, ex.getMessage());
 			}
 		}
 		expireIndexQuietly(redis, indexKey, runId, toolCallId);
@@ -507,8 +503,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			redis.expire(indexKey, this.ttl);
 		}
 		catch (Exception ex) {
-			log.warn("附件续期写表单索引失败 runId={} toolCallId={}（下一拍重试）：{}", runId, toolCallId,
-					ex.getMessage());
+			log.debug("attachment renewal could not write form index (retry next tick) runId={} toolCallId={} error={}", runId, toolCallId, ex.getMessage());
 		}
 	}
 
@@ -589,7 +584,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			redis.delete(consumedKey(identity, fileId));
 		}
 		catch (Exception ex) {
-			log.warn("清理附件消费墓碑失败 fileId={}（墓碑会在 TTL 后自清）：{}", fileId, ex.getMessage());
+			log.warn("failed to clean attachment consume tombstone (tombstone expires via TTL) fileId={} error={}", fileId, ex.getMessage());
 		}
 		removeFromIndexQuietly(redis, sessionIndexKey(identity,
 				attachment == null ? null : attachment.sessionId()), fileId);
@@ -626,7 +621,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			if (!isScriptUnsupported(ex)) {
 				throw ex;
 			}
-			log.warn("附件索引脚本不可用（本次按 SADD+EXPIRE 两步式降级）key={}：{}", indexKey, ex.getMessage());
+			log.warn("attachment index script unavailable (degrading to SADD+EXPIRE) key={} error={}", indexKey, ex.getMessage());
 			applied = null;
 		}
 		if (applied == null) {
@@ -699,7 +694,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("附件索引清理失败 key={} fileId={}（stale 成员会被枚举过滤）：{}", indexKey, fileId,
+			log.warn("failed to clean attachment index key={} fileId={} (stale members are filtered on enumeration) error={}", indexKey, fileId,
 					ex.getMessage());
 		}
 	}
@@ -745,7 +740,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			return this.objectMapper.readValue(json, Attachment.class);
 		}
 		catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
-			log.warn("附件登记数据无法解析（按无登记处理）fileId={}：{}", fileId, ex.getMessage());
+			log.warn("attachment registration payload is unparseable (treated as unregistered) fileId={} errorType={}", fileId, ex.getClass().getSimpleName());
 			return null;
 		}
 	}
@@ -766,7 +761,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_TOMBSTONE, ex);
-			log.error("附件墓碑读取 Redis 失败 fileId={}（fail-closed，不回落进程内）：{}", fileId, ex.getMessage());
+			log.error("failed to read attachment tombstone from Redis (fail-closed; no in-process fallback) fileId={} error={}", fileId, ex.getMessage());
 			throw new AiStateUnavailableException("附件墓碑读取失败（Redis 不可用；不得回退进程内）", ex);
 		}
 	}

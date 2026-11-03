@@ -267,7 +267,7 @@ public class PrecheckJobRunner {
                             rowErrors > 0 ? "FAILED" : "CHECKED");
 
                 } catch (Exception e) {
-                    log.error("Precheck failed for {}: {}", defCode, e.getMessage(), e);
+                    log.error("Precheck item failed defCode={} error={}", defCode, e.getMessage(), e);
                     ValidationIssue issue = new ValidationIssue();
                     issue.setJobId(jobId);
                     issue.setDefCode(defCode);
@@ -284,7 +284,7 @@ public class PrecheckJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Precheck job failed: {}", e.getMessage(), e);
+            log.error("Precheck job failed error={}", e.getMessage(), e);
             totalErrors++;
             terminalWriter.complete(job, Job.JobStatus.FAILED, totalErrors, totalWarnings,
                     processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, totalErrors));
@@ -312,7 +312,7 @@ public class PrecheckJobRunner {
             return entry;
         }
         catch (Exception e) {
-            log.warn("计算预检查文件指纹失败 path={}: {}", storagePath, e.getMessage());
+            log.warn("Failed to compute precheck file digest path={} error={}", storagePath, e.getMessage());
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("sha256", null);
             entry.put("size", null);
@@ -337,12 +337,12 @@ public class PrecheckJobRunner {
         }
         catch (Exception e) {
             // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
-            log.warn("序列化预检查指纹摘要失败 jobId={}: {}", jobId, e.getMessage());
+            log.warn("Failed to serialize precheck fingerprint summary jobId={} error={}", jobId, e.getMessage());
             return;
         }
         int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
         if (updated == 0) {
-            log.debug("作业 #{} 已终态，指纹摘要不写入（条件 UPDATE 影响 0 行）", jobId);
+            log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
         }
     }
 
@@ -379,7 +379,7 @@ public class PrecheckJobRunner {
                 if (status == TransactionSynchronization.STATUS_COMMITTED) {
                     return;
                 }
-                log.warn("预检查作业 #{} 的数据面事务回滚/提交失败，补写 FAILED 终态（避免停在 RUNNING 挡重跑）",
+                log.warn("Precheck job data transaction rolled back or commit failed, terminal FAILED written jobId={}",
                         job.getId());
                 terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                         doneEvent(job, Job.JobStatus.FAILED, 1));
@@ -418,7 +418,7 @@ public class PrecheckJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.warn("加载引用值集合失败 refDef={}: {}", refDefCode, e.getMessage());
+            log.warn("Failed to load reference value set refDef={} error={}", refDefCode, e.getMessage());
         }
         return values;
     }

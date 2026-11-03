@@ -104,7 +104,7 @@ public class PublishJobRunner {
             outcome = transactionTemplate.execute(status -> doPublish(job));
         } catch (RuntimeException e) {
             String defCode = e instanceof PublishAbort abort ? abort.getDefCode() : null;
-            log.error("Publish job {} aborted, whole batch rolled back (defCode={}): {}",
+            log.error("Publish job aborted, whole batch rolled back jobId={} defCode={} error={}",
                     job.getId(), defCode, e.getMessage(), e);
             recordFailure(job, defCode, e);
             return;
@@ -329,7 +329,7 @@ public class PublishJobRunner {
                 taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
             }
         } catch (Exception e) {
-            log.error("Publish job {} failure bookkeeping failed: {}", job.getId(), e.getMessage(), e);
+            log.error("Publish job failure bookkeeping failed jobId={} error={}", job.getId(), e.getMessage(), e);
         }
         terminalWriter.complete(job, Job.JobStatus.FAILED, errors, 0, 0,
                 stagingRowRepository.findByTaskId(job.getTaskId()).size(),

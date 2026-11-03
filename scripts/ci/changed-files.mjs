@@ -125,12 +125,12 @@ export function classify(files) {
   const n = files.length
   let note
   if (n === 0) {
-    note = '变更集为空（0 文件）'
+    note = 'empty change set (0 files)'
   } else if (!surfaces.backend && !surfaces.frontend && !surfaces.e2e) {
-    note = `纯文档面：${n} 个文件全部落在 docs/**（不含 docs/kb-samples）或根级 *.md`
+    note = `docs-only surface: all ${n} files fall under docs/** (excluding docs/kb-samples) or are root-level *.md`
   } else {
-    note = `命中规则：${[...hits].join(',')}（${n} 文件）`
-    if (hits.has('unknown')) note += ' · 含未知路径 ⇒ 兜底全跑'
+    note = `rules hit: ${[...hits].join(',')} (${n} files)`
+    if (hits.has('unknown')) note += '; unknown path present => run everything'
   }
 
   return { ...surfaces, files: perFile, hits: [...hits], note, count: n }
@@ -177,26 +177,26 @@ function writeOutputs(file, pairs) {
 }
 
 function summaryMarkdown(result, meta) {
-  const mark = (b) => (b ? '执行' : '跳过')
+  const mark = (b) => (b ? 'run' : 'skip')
   const lines = [
-    '## 变更集（A 期：CI 按变更集跳 job）',
+    '## Change set (phase A: CI skips jobs by change set)',
     '',
-    `- 基准：\`${meta.basis}\`${meta.base ? ` = \`${meta.base}\`` : ''}（事件：${meta.event || '未传'}）`,
-    `- 变更文件：${result.count}；命中规则：${result.hits.join(',') || '（无）'}`,
-    `- 判定：${result.note}`,
+    `- Basis: \`${meta.basis}\`${meta.base ? ` = \`${meta.base}\`` : ''} (event: ${meta.event || 'not passed'})`,
+    `- Changed files: ${result.count}; matched rules: ${result.hits.join(',') || '(none)'}`,
+    `- Decision: ${result.note}`,
     '',
-    '| 面 | 本次是否执行 | 依据 |',
+    '| Surface | Runs this time | Reason |',
     '|---|---|---|',
-    `| backend | ${mark(result.backend)} | ${result.backend ? '命中后端面' : '未命中后端面'} |`,
-    `| frontend | ${mark(result.frontend)} | ${result.frontend ? '命中前端面' : '未命中前端面'} |`,
-    `| e2e | ${mark(result.e2e)} | ${result.e2e ? '命中 e2e 面（与后端面同源）' : '未命中 e2e 面'} |`,
+    `| backend | ${mark(result.backend)} | ${result.backend ? 'backend surface matched' : 'backend surface not matched'} |`,
+    `| frontend | ${mark(result.frontend)} | ${result.frontend ? 'frontend surface matched' : 'frontend surface not matched'} |`,
+    `| e2e | ${mark(result.e2e)} | ${result.e2e ? 'e2e surface matched (same source as backend)' : 'e2e surface not matched'} |`,
     '',
   ]
   if (result.count > 0) {
     const shown = result.files.slice(0, 50)
-    lines.push('<details><summary>变更文件清单（最多 50 条）</summary>', '')
+    lines.push('<details><summary>Changed files (up to 50)</summary>', '')
     for (const f of shown) lines.push(`- \`${f.path}\` — ${f.rule}`)
-    if (result.count > shown.length) lines.push(`- …（其余 ${result.count - shown.length} 条省略）`)
+    if (result.count > shown.length) lines.push(`- ... ${result.count - shown.length} more omitted`)
     lines.push('', '</details>', '')
   }
   return lines.join('\n') + '\n'
@@ -210,84 +210,84 @@ function selfCheck() {
     const g = JSON.stringify(got)
     const w = JSON.stringify(want)
     if (g !== w) {
-      console.error(`✗ 自检失败：${label}\n  实际 ${g}\n  期望 ${w}`)
+      console.error(`[self-check] FAIL ${label}\n  actual ${g}\n  expected ${w}`)
       process.exit(1)
     }
   }
 
   // ① 纯文档 PR：三面全跳（验收①的判定依据）
-  eq('纯 docs/** 不开任何代码面', (() => {
+  eq('docs/** only: no code surface opens', (() => {
     const r = classify(['docs/research/x.md', 'docs/README.md', 'docs/evidence/a.png'])
     return [r.backend, r.frontend, r.e2e, r.hits]
   })(), [false, false, false, ['docs']])
 
   // ② 根级 *.md（README 等）同为文档面
-  eq('根级 README.md 不开代码面', (() => {
+  eq('root README.md: no code surface opens', (() => {
     const r = classify(['README.md'])
     return [r.backend, r.frontend, r.e2e]
   })(), [false, false, false])
 
   // ③ 耦合项：docs/kb-samples 必须开后端（否则被"纯文档"吃掉 —— 本文件最容易犯的错）
-  eq('docs/kb-samples/** 开后端与 e2e', (() => {
+  eq('docs/kb-samples/** opens backend and e2e', (() => {
     const r = classify(['docs/kb-samples/01-region-tariff.md'])
     return [r.backend, r.frontend, r.e2e, r.hits]
   })(), [true, false, true, ['kb-samples']])
 
   // ④ 任意 backend/src/** 改动：backend + e2e（验收②）
-  eq('backend/src/** 开 backend 与 e2e', (() => {
+  eq('backend/src/** opens backend and e2e', (() => {
     const r = classify(['backend/src/main/java/com/example/configmgr/A.java'])
     return [r.backend, r.frontend, r.e2e]
   })(), [true, false, true])
 
   // ⑤ 后端依赖/构建配置同属后端面
-  eq('backend/pom.xml 开 backend 与 e2e', (() => {
+  eq('backend/pom.xml opens backend and e2e', (() => {
     const r = classify(['backend/pom.xml'])
     return [r.backend, r.e2e]
   })(), [true, true])
 
   // ⑥ 前端改动只开前端（E2E 只打后端 HTTP，不被前端影响）
-  eq('frontend/** 只开 frontend', (() => {
+  eq('frontend/** opens frontend only', (() => {
     const r = classify(['frontend/src/App.vue', 'frontend/src/locales/zh-CN.ts', 'frontend/yarn.lock',
       'frontend/vite.config.ts', 'frontend/tsconfig.app.json'])
     return [r.backend, r.frontend, r.e2e]
   })(), [false, true, false])
 
   // ⑦ scripts/** 与 workflow 自身：三面全跑（门禁被改必须自证）
-  eq('scripts/** 三面全跑', (() => {
+  eq('scripts/** runs all three surfaces', (() => {
     const r = classify(['scripts/ci/stub-upstream.mjs'])
     return [r.backend, r.frontend, r.e2e]
   })(), [true, true, true])
-  eq('.github/workflows/** 三面全跑', (() => {
+  eq('.github/workflows/** runs all three surfaces', (() => {
     const r = classify(['.github/workflows/ci.yml'])
     return [r.backend, r.frontend, r.e2e]
   })(), [true, true, true])
 
   // ⑧ 认不出的路径兜底全跑（fail-open：宁可多跑，不可假绿）
-  eq('未知路径兜底全跑', (() => {
+  eq('unknown path => run everything', (() => {
     const r = classify(['.gitignore', 'some/new/dir/file.bin'])
-    return [r.backend, r.frontend, r.e2e, r.hits.includes('unknown'), r.note.includes('兜底全跑')]
+    return [r.backend, r.frontend, r.e2e, r.hits.includes('unknown'), r.note.includes('run everything')]
   })(), [true, true, true, true, true])
 
   // ⑨ 混合变更：文档 + 后端 ⇒ 后端面开、前端面不开（文档不放大前端）
-  eq('docs + backend 混合', (() => {
+  eq('docs + backend mixed', (() => {
     const r = classify(['docs/a.md', 'backend/src/test/java/B.java'])
     return [r.backend, r.frontend, r.e2e, r.hits]
   })(), [true, false, true, ['docs', 'backend']])  // hits 按首次出现顺序，不排序
 
   // ⑩ 空变更集：三面全跳，且不是"输出丢失"（输出仍是 'false' 字符串）
-  eq('空变更集三面全跳', (() => {
+  eq('empty change set opens no surface', (() => {
     const r = classify([])
     return [r.backend, r.frontend, r.e2e, r.count, r.note]
-  })(), [false, false, false, 0, '变更集为空（0 文件）'])
+  })(), [false, false, false, 0, 'empty change set (0 files)'])
 
   // ⑪ 优先级：docs/kb-samples 不被 docs/** 规则先吃掉（规则表顺序契约）
-  eq('规则表顺序：kb-samples 先于 docs', RULES.findIndex((r) => r.id === 'kb-samples') <
+  eq('rule table order: kb-samples before docs', RULES.findIndex((r) => r.id === 'kb-samples') <
     RULES.findIndex((r) => r.id === 'docs'), true)
 
   // ⑫ 基准形态（验收③）：空/全零 ⇒ 全跑；正常 sha ⇒ diff
-  eq('基准=空 ⇒ 全跑', baseMode(''), { mode: 'full', basis: 'full-no-base' })
-  eq('基准=40 个 0 ⇒ 全跑', baseMode('0'.repeat(40)), { mode: 'full', basis: 'full-zero-sha' })
-  eq('基准=正常 sha ⇒ diff', baseMode('dd88c58f'.padEnd(40, '0')), { mode: 'diff', basis: 'sha' })
+  eq('empty base => full run', baseMode(''), { mode: 'full', basis: 'full-no-base' })
+  eq('40 zeroes => full run', baseMode('0'.repeat(40)), { mode: 'full', basis: 'full-zero-sha' })
+  eq('normal sha => diff', baseMode('dd88c58f'.padEnd(40, '0')), { mode: 'diff', basis: 'sha' })
 
   // ⑬ GITHUB_OUTPUT 形状：三面必须是字面量 'true'/'false'（workflow 用 == 'true' 比较），
   //    且值里不得出现换行（GITHUB_OUTPUT 的行协议）。
@@ -295,33 +295,33 @@ function selfCheck() {
   writeOutputs(path.join(tmp, 'out.txt'), [
     ['backend', 'true'],
     ['frontend', 'false'],
-    ['note', '命中规则：docs\n（不应换行）'],
+    ['note', 'rules hit: docs\n(no newline allowed)'],
   ])
   const parsed = Object.fromEntries(
     fs.readFileSync(path.join(tmp, 'out.txt'), 'utf8').split('\n').filter(Boolean)
       .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
   )
-  eq('输出协议三面为 true/false 字面量', [parsed.backend, parsed.frontend], ['true', 'false'])
-  eq('输出协议值内无换行', parsed.note.includes('\n'), false)
+  eq('output protocol: surfaces are literal true/false', [parsed.backend, parsed.frontend], ['true', 'false'])
+  eq('output protocol: no newline inside a value', parsed.note.includes('\n'), false)
   fs.rmSync(tmp, { recursive: true, force: true })
 
   // ⑭ 仓内真实路径抽查：本仓确有此文件（防规则表按想象写）
-  eq('仓内存在 backend/pom.xml', fs.existsSync(path.join(REPO, 'backend', 'pom.xml')), true)
-  eq('仓内存在 backend/src/main/resources/application.yml',
+  eq('repo contains backend/pom.xml', fs.existsSync(path.join(REPO, 'backend', 'pom.xml')), true)
+  eq('repo contains backend/src/main/resources/application.yml',
     fs.existsSync(path.join(REPO, 'backend', 'src', 'main', 'resources', 'application.yml')), true)
 
-  console.log(`自检通过（${n} 条）：规则表 / 基准解析 / 输出协议 / 仓内真实路径`)
+  console.log(`changed-files self-check passed (${n} cases): rule table / basis parsing / output protocol / real repo paths`)
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 function main() {
   if (flag('help')) {
-    console.log(`用法：
+    console.log(`usage:
   node scripts/ci/changed-files.mjs --base <sha|""> [--head <sha>] [--event <push|pull_request>]
                                     [--github-output <file>] [--summary-out <file>] [--json-out <file>] [--verbose]
-  node scripts/ci/changed-files.mjs --diff-file <changed-paths.txt> [...]   # 离线/单测：直接喂路径清单
-  node scripts/ci/changed-files.mjs --self-check                            # 规则表自检（CI 的 changes job 先跑）
-规则唯一取数点 = 本文件的 RULES 表；认不出的路径与不可用的基准一律"全跑"。`)
+  node scripts/ci/changed-files.mjs --diff-file <changed-paths.txt> [...]   # offline: feed a path list directly
+  node scripts/ci/changed-files.mjs --self-check                            # rule-table self-check (runs first in the CI changes job)
+single source of truth for rules = the RULES table in this file; unknown paths and unusable bases always mean "run everything".`)
     return
   }
   if (flag('self-check')) {
@@ -349,7 +349,7 @@ function main() {
     } else if (!commitExists(base, REPO)) {
       files = null
       basis = 'full-unreachable-base'
-      console.error(`::warning::基准提交 ${base} 在本地不可解析（浅克隆/强推）⇒ 全跑`)
+      console.error(`::warning::base commit ${base} is not resolvable locally (shallow clone / force push) => full run`)
     } else {
       try {
         files = diffPaths(base, head, REPO)
@@ -359,14 +359,14 @@ function main() {
       } catch (e) {
         files = null
         basis = 'full-diff-error'
-        console.error(`::warning::git diff ${base}..${head} 失败（${e.message}）⇒ 全跑`)
+        console.error(`::warning::git diff ${base}..${head} failed (${e.message}) => full run`)
       }
     }
   }
 
   const result = files === null
     ? { backend: true, frontend: true, e2e: true, hits: ['full-run'], count: 0, files: [],
-        note: `基准不可用（${basis}）⇒ 三面全跑，不做任何跳过` }
+        note: `base unavailable (${basis}) => all three surfaces run, no skipping` }
     : classify(files)
 
   const pairs = [
@@ -390,10 +390,10 @@ function main() {
   if (jsonOut) fs.writeFileSync(jsonOut, JSON.stringify({ ...result, basis, base: baseShown, event }, null, 2))
 
   // 人读输出：CI 日志首屏就能看出为什么某个 job 没跑。
-  console.log(`变更集：基准=${basis}${baseShown ? `(${baseShown})` : ''} 文件数=${result.count}`)
-  console.log(`命中规则：${result.hits.join(',') || '（无）'}`)
+  console.log(`change set: basis=${basis}${baseShown ? `(${baseShown})` : ''} files=${result.count}`)
+  console.log(`rules hit: ${result.hits.join(',') || '(none)'}`)
   console.log(`backend=${result.backend} frontend=${result.frontend} e2e=${result.e2e}`)
-  console.log(`判定：${result.note}`)
+  console.log(`decision: ${result.note}`)
   if (flag('verbose')) for (const f of result.files) console.log(`  ${f.rule}\t${f.path}`)
 }
 

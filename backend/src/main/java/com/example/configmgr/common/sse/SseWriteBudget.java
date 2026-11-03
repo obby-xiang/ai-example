@@ -91,14 +91,14 @@ import java.util.function.Consumer;
  * <ul>
  * <li><b>被摘者可能健康</b>：池满时无法判断谁慢 —— 占满线程的可能是别人的慢连接，而本次写出的
  * 调用方只是"来晚了"；它的连接因此被主动断开（前端重挂，帧从归档/台账补回）；</li>
- * <li><b>被摘者可能跨通道</b>：任务通道的慢连接把 256 条写线程占满时，AI 通道的健康订阅者
+ * <li><b>被摘者可能跨通道</b>：任务通道的慢连接把 64 条写线程占满时，AI 通道的健康订阅者
  * 也会被摘（反之亦然）。</li>
  * </ul>
  * <b>为什么本批不做隔离</b>（三个选项的成本/前提）：
  * <ol>
- * <li><b>按通道各建一池</b>：代码只需几行（各通道各取一个池实例），但必须先把 256 的预算在两条
+ * <li><b>按通道各建一池</b>：代码只需几行（各通道各取一个池实例），但必须先把 64 的预算在两条
  * 通道间切分 —— 切分比例需要真实并发/慢连接分布的数据（本仓无），拍一个比例等于把"资源上限"
- * 变成未经测量的猜测；且两池合计线程数若仍是 256，只是把误伤限制在同通道内（同通道内仍会误伤健康者）。</li>
+ * 变成未经测量的猜测；且两池合计线程数若仍是 64，只是把误伤限制在同通道内（同通道内仍会误伤健康者）。</li>
  * <li><b>按通道预留额度</b>：需要池级配额/信号量，改动比"硬上限"大一个量级，且饱和判定变成
  * "通道配额 vs 全局配额"两维，观测面与排障成本同步上升。</li>
  * <li><b>饱和时短等/重试</b>：只是把概率挪小（且要在投递池线程上睡眠，反而伤其它 drain），
@@ -135,15 +135,18 @@ public final class SseWriteBudget {
     private static final AtomicLong WRITE_SATURATIONS = new AtomicLong();
 
     /**
-     * 写出线程的<b>硬上限</b>（资源修复批）。
+     * 写出线程的<b>硬上限</b>（资源修复批；线程治理批由 256 收敛到 64）。
      *
      * <p>旧池的最大线程数是 {@link Integer#MAX_VALUE}：一条"不读也不断开"的连接会让写出线程卡到
      * 客户端断开 / 容器 120s 写超时 / 15s 预算先到，而并发订阅者数没有硬界 ⇒ 线程数可被外部拉高
      * （每个线程默认 1MB 栈，几百条慢连接就是几百 MB 常驻）。本值把"弹性"收成"有界弹性"：
      *
      * <ul>
-     * <li>取值 256 = 投递池缺省（{@code app.ai.sse.delivery-pool-size} = 8）的 32 倍：
-     * 正常负载下"同时在写的订阅者"远小于它（写是毫秒级，15s 预算只用来筛停读客户端）；</li>
+     * <li>取值 64 = 投递池缺省（{@code app.ai.sse.delivery-pool-size} = 8）的 8 倍：
+     * 正常负载下"同时在写的订阅者"远小于它（写是毫秒级，15s 预算只用来筛停读客户端）。
+     * 按 T3-5 实测的单帧 p99 写出成本 1.15ms 估算，1,000 帧/s 也只需约 2 条线程；
+     * 真正占住线程的是"停读客户端"，其数量由并发订阅者上界兜底 —— 256 的栈/本地内存
+     * 在多实例下是纯浪费（100 实例即多出 19.2k 条潜在线程），故收敛到 64；</li>
      * <li>饱和时<b>不扩容</b>：本次写出直接判 {@link Outcome#SATURATED}，由调用方摘除
      * <b>触发本次写出的</b>订阅者。策略是「<b>最后无法获得写线程者</b>」——<b>不是</b>"只摘慢订阅者"：
      * 池满时谁也分不清哪条连接慢（占满线程的可能是别人的慢连接），被摘者可能是健康连接。
@@ -155,7 +158,7 @@ public final class SseWriteBudget {
      * （见类注"跨通道"段的评估）；本批<b>不做</b>，如实登记为已知代价。</li>
      * </ul>
      */
-    public static final int DEFAULT_MAX_WRITER_THREADS = 256;
+    public static final int DEFAULT_MAX_WRITER_THREADS = 64;
 
     /** 写出线程编号（{@code sse-write-N}）。 */
     private static final AtomicLong WRITER_NO = new AtomicLong();
@@ -325,7 +328,7 @@ public final class SseWriteBudget {
      * <li>{@link Outcome#SENT}：写出成功；</li>
      * <li>{@link Outcome#FAILED}：写出抛异常（客户端断开 / 已完成的 emitter），异常交回调用方判处置；</li>
      * <li>{@link Outcome#TIMED_OUT}：超出预算 —— <b>本类不碰 emitter</b>（写线程仍持有其监视器），
-     * 计数 + WARN，由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
+     * 计数 + DEBUG（调用方按上下文记 WARN），由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
      * <li>{@link Outcome#SATURATED}：写出池已达硬上限（{@link #DEFAULT_MAX_WRITER_THREADS}）且无处排队 ——
      * 本次写出<b>没有发生、也不会发生</b>，调用方据此摘除触发本次写出的订阅者（慢订阅者摘除）；</li>
      * <li>{@link Outcome#INTERRUPTED}：调用线程被中断（已复位中断位并 {@code cancel(true)}）。</li>
@@ -355,12 +358,12 @@ public final class SseWriteBudget {
         catch (RejectedExecutionException ex) {
             // 硬上限 + SynchronousQueue + AbortPolicy ⇒ 池满即拒。这**不是**"客户端断开"
             // （旧实现把它折成 FAILED，语义与日志都会指向错误方向），而是"这条写挤不进来"：
-            // 计数 + WARN，交回调用方摘除触发本次写出的那个订阅者。
+            // 计数 + DEBUG，交回调用方摘除触发本次写出的那个订阅者。
             // 被摘者可能是<b>健康</b>连接、也可能来自<b>另一条通道</b>（池两通道共用）——
             // 策略是"最后无法获得写线程者"，不是"只摘慢订阅者"（见类注"跨通道"段）。
             WRITE_SATURATIONS.incrementAndGet();
-            log.warn("SSE 写出池饱和（线程已达上限 {}，无法再接纳一条写出）：由调用方摘除本次订阅者"
-                    + "（被摘者可能是健康连接或另一通道，代价是重挂而非丢帧）", sharedWriterPoolMaxThreads());
+            log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
+                    sharedWriterPoolMaxThreads());
             return Result.saturated();
         }
         try {
@@ -370,7 +373,7 @@ public final class SseWriteBudget {
         catch (TimeoutException ex) {
             boolean cancelled = future.cancel(true);
             WRITE_TIMEOUTS.incrementAndGet();
-            log.warn("SSE 写超时（>{}ms，取消任务={}）：写出线程仍卡在该帧，调用线程按预算脱身",
+            log.debug("SSE write timed out (>{}ms) cancelled={}, caller released by budget",
                     this.timeoutMillis, cancelled);
             return Result.timedOut();
         }
@@ -380,7 +383,7 @@ public final class SseWriteBudget {
                 return Result.failed(failure.failure);
             }
             return Result.failed(cause instanceof Exception exception ? exception
-                    : new IllegalStateException("SSE 写出失败", cause));
+                    : new IllegalStateException("SSE write failed", cause));
         }
         catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
@@ -427,7 +430,7 @@ public final class SseWriteBudget {
                 }
                 catch (Throwable error) {
                     // Error 也必须回调（否则 drain 链永不继续）：折成可上报的异常。
-                    failure = new IllegalStateException("SSE 写出失败", error);
+                    failure = new IllegalStateException("SSE write failed", error);
                 }
                 ScheduledFuture<?> timer = timeout.get();
                 if (timer != null) {
@@ -440,8 +443,8 @@ public final class SseWriteBudget {
         }
         catch (RejectedExecutionException ex) {
             WRITE_SATURATIONS.incrementAndGet();
-            log.warn("SSE 写出池饱和（线程已达上限 {}，无法再接纳一条写出）：由调用方摘除本次订阅者"
-                    + "（被摘者可能是健康连接或另一通道，代价是重挂而非丢帧）", sharedWriterPoolMaxThreads());
+            log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
+                    sharedWriterPoolMaxThreads());
             if (settled.compareAndSet(false, true)) {
                 notifyDone(onDone, Result.saturated());
             }
@@ -453,7 +456,7 @@ public final class SseWriteBudget {
                 if (settled.compareAndSet(false, true)) {
                     boolean cancelled = future.cancel(true);
                     WRITE_TIMEOUTS.incrementAndGet();
-                    log.warn("SSE 写超时（>{}ms，取消任务={}）：写出线程仍卡在该帧，投递线程已按回调脱身",
+                    log.debug("SSE write timed out (>{}ms) cancelled={}, delivery thread released by callback",
                             this.timeoutMillis, cancelled);
                     notifyDone(onDone, Result.timedOut());
                 }
@@ -461,7 +464,7 @@ public final class SseWriteBudget {
         }
         catch (RejectedExecutionException ex) {
             // 定时器已关闭（停机）：不再施加写预算，写出线程返回时仍会回调（恰一次）。
-            log.debug("SSE 写超时定时器已关闭，本次写出不设预算：{}", ex.getMessage());
+            log.debug("SSE write timeout scheduler closed, write runs without budget: {}", ex.getMessage());
         }
         timeout.set(timer);
         if (settled.get() && timer != null) {
@@ -475,7 +478,7 @@ public final class SseWriteBudget {
             onDone.accept(result);
         }
         catch (RuntimeException ex) {
-            log.error("SSE 写出完成回调异常（本条连接的后续投递可能悬挂）", ex);
+            log.error("SSE write completion callback failed, further delivery on this connection may stall", ex);
         }
     }
 

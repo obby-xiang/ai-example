@@ -308,7 +308,7 @@ public class SessionPurgePendingStore {
 				}
 				catch (RuntimeException parseEx) {
 					// 坏 JSON 的手工恢复入口：只有当前值仍是刚读到的坏值才覆盖，避免覆盖并发合法台账。
-					log.warn("会话销毁 pending JSON 损坏 sessionId={}（手动 DELETE 覆盖恢复，保留可恢复入口）：{}",
+					log.warn("Corrupt session purge pending JSON sessionId={} (manual DELETE overwrite recovers; recovery entry kept): {}",
 							sessionId, parseEx.getMessage());
 					Long replaced = this.redis.execute(REPLACE_IF_UNCHANGED, List.of(key), raw, json(candidate));
 					if (replaced == null || replaced <= 0L) {
@@ -429,7 +429,7 @@ public class SessionPurgePendingStore {
 			catch (RuntimeException ex) {
 				// 单成员 JSON 损坏：不摘除、不改 pending；只把到期分推到有界未来并 WARN，
 				// 保留手工 DELETE 的覆盖恢复入口，其余到期项继续处理。
-				log.warn("会话销毁 pending JSON 损坏 member={}（隔离到未来、保留台账与恢复入口）：{}",
+				log.warn("Corrupt session purge pending JSON member={} (quarantined to the future; ledger and recovery entry kept): {}",
 						member, ex.getMessage());
 				quarantineDueMember(member, nowMs);
 				continue;
@@ -655,7 +655,7 @@ public class SessionPurgePendingStore {
 		catch (RuntimeException ex) {
 			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
 			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
-			log.debug("退役失败后复核台账失败 key={}（不补回，等待下次登记/操作自愈）：{}", key, ex.getMessage());
+			log.debug("Ledger re-check after failed retirement failed key={} (not restored; next registration/operation self-heals): {}", key, ex.getMessage());
 			return;
 		}
 		if (latest == null) {
@@ -689,7 +689,7 @@ public class SessionPurgePendingStore {
 		catch (RuntimeException ex) {
 			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
 			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
-			log.debug("退役后复核台账失败 key={}（保持摘除，等待下次登记/操作自愈）：{}", key, ex.getMessage());
+			log.debug("Ledger re-check after retirement failed key={} (stays removed; next registration/operation self-heals): {}", key, ex.getMessage());
 			return;
 		}
 		if (latest == null) {
@@ -756,7 +756,7 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			// 重读失败/坏 JSON：无法确认新台账，把该成员的到期分隔离到未来，保留恢复入口。
-			log.warn("完成删除后复核台账失败 key={}（到期项隔离到未来，保留恢复入口）：{}", key, ex.getMessage());
+			log.warn("Ledger re-check after completion delete failed key={} (due entry quarantined to the future; recovery entry kept): {}", key, ex.getMessage());
 			quarantineDueMember(key, System.currentTimeMillis());
 			return;
 		}
@@ -767,7 +767,8 @@ public class SessionPurgePendingStore {
 			schedule(key, latest.nextAtMs(), "完成竞态补回");
 		}
 		catch (RuntimeException ex) {
-			log.warn("完成删除后补回新台账到期分失败 key={}（台账保留，等待下次登记/操作自愈）：{}", key,
+			log.warn("Failed to re-add due score to the new ledger after completion delete key={} "
+					+ "(ledger kept; next registration/operation self-heals): {}", key,
 					ex.getMessage());
 		}
 	}
@@ -789,7 +790,7 @@ public class SessionPurgePendingStore {
 			this.redis.opsForZSet().add(DUE_KEY, key, nextAtMs);
 		}
 		catch (RuntimeException ex) {
-			log.debug("纠正会话销毁重试到期分失败 key={}：{}", key, ex.getMessage());
+			log.debug("Failed to correct session purge retry due score key={}: {}", key, ex.getMessage());
 		}
 	}
 
@@ -810,7 +811,7 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			// 隔离写失败也不摘除：下轮仍会取到并重试，绝不静默变成永久 410。
-			log.warn("隔离坏 JSON 到期项失败 key={}（下轮仍会重试，不永久摘除）：{}", key, ex.getMessage());
+			log.warn("Failed to quarantine corrupt-JSON due entry key={} (retried next round; never removed permanently): {}", key, ex.getMessage());
 		}
 	}
 
@@ -822,7 +823,7 @@ public class SessionPurgePendingStore {
 			this.redis.opsForZSet().remove(DUE_KEY, member);
 		}
 		catch (RuntimeException ex) {
-			log.warn("清理会话销毁重试到期分失败 member={}（stale 项会被下次扫描过滤）：{}", member, ex.getMessage());
+			log.warn("Failed to clean session purge retry due member={} (stale entries are filtered by the next scan): {}", member, ex.getMessage());
 		}
 	}
 

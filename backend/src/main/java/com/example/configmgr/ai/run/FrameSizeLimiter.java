@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * SSE 单帧上限的<b>字段级</b>降采样器（T3-10 裁定；G5 起上限来自
@@ -59,6 +60,11 @@ public final class FrameSizeLimiter {
 
 	/** 预算里的安全余量：键名/冒号/逗号等 JSON 结构字节（非值部分）。 */
 	private static final int STRUCTURE_MARGIN_BYTES = 64;
+
+	/** 降采样成功是"可恢复的截断异常"，需要 WARN 留痕；逐帧路径下按每分钟一条节流，避免刷屏。 */
+	private static final long DOWNSAMPLE_WARN_INTERVAL_MS = 60_000L;
+
+	private static final AtomicLong DOWNSAMPLE_WARN_AT_MS = new AtomicLong();
 
 	/** 截断字段名（统一契约的单一事实源在 {@link TruncationContract}）。 */
 	public static final String TRUNCATED_FIELD = TruncationContract.TRUNCATED_FIELD;
@@ -120,8 +126,7 @@ public final class FrameSizeLimiter {
 				return null;
 			}
 			if (retry.length <= maxBytes) {
-				log.warn("SSE 单帧超限已按字段级降采样 type={} original={} actual={} limit={} fields={} originalChars={} returnedChars={}",
-						frame.get("type"), full.length, retry.length, maxBytes, String.join(",", fields), chars[0], chars[1]);
+				logDownsampled(frame, full.length, retry.length, maxBytes, String.join(",", fields), chars[0], chars[1]);
 				return retry;
 			}
 			// 复测仍超：按超出量收缩预算再算一轮
@@ -129,9 +134,29 @@ public final class FrameSizeLimiter {
 		}
 		// 迭代到上限仍不满足（超限来自不可截字段）：只挂标记，保持 JSON 合法（绝不字节截断）
 		markTruncated(frame, fields, originalChars, TruncationContract.NOTICE_CODE_FRAME_LIMIT_UNREACHED);
-		log.warn("SSE 单帧超限且不可截字段占主导 type={} original={} limit={} fields={} —— 已挂标记但未达上限",
+		log.warn("SSE frame over limit with non-truncatable fields dominant type={} "
+				+ "original={} limit={} fields={} (marked but still above limit)",
 				frame.get("type"), full.length, maxBytes, String.join(",", fields));
 		return serialize(frame, mapper);
+	}
+
+	/**
+	 * 降采样成功 = 可恢复的截断异常，需要 WARN 留痕；但这是逐帧路径，不能每帧刷屏：
+	 * 每 JVM 每分钟最多一条 WARN，其余同文案降到 debug（排障时开 debug 仍可看全量）。
+	 */
+	private static void logDownsampled(Map<String, Object> frame, int originalBytes, int actualBytes, int maxBytes,
+			String fields, int originalChars, int returnedChars) {
+		String message = "SSE frame over limit, field-level downsampling applied type={} original={} actual={} "
+				+ "limit={} fields={} originalChars={} returnedChars={}";
+		long now = System.currentTimeMillis();
+		long last = DOWNSAMPLE_WARN_AT_MS.get();
+		if (now - last >= DOWNSAMPLE_WARN_INTERVAL_MS && DOWNSAMPLE_WARN_AT_MS.compareAndSet(last, now)) {
+			log.warn(message, frame.get("type"), originalBytes, actualBytes, maxBytes, fields, originalChars,
+					returnedChars);
+			return;
+		}
+		log.debug(message, frame.get("type"), originalBytes, actualBytes, maxBytes, fields, originalChars,
+				returnedChars);
 	}
 
 	/**

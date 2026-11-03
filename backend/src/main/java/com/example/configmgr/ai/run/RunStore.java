@@ -1301,7 +1301,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		String runId = snapshot.getRunId();
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
 		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "轮次快照（条件创建）");
+			warnReadOnly(runId, authority, "run snapshot (conditional create)");
 			return false;
 		}
 		long epoch = heldRunEpoch(runId);
@@ -1335,7 +1335,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		if (created == null) {
 			// 生产脚本恒回 0/1；null 只可能来自"脚本没被执行"（替身未建模）。条件语义此时不可判定 ⇒
 			// 按未创建处理：调用方改读并发那一份，读不到就失败关闭（绝不退回无条件写）。
-			log.warn("条件创建轮次快照未得到脚本结果 runId={}（按未创建处理，调用方改读现有快照）", runId);
+			log.warn("conditional snapshot create returned no script result runId={} "
+					+ "(treating as not created; caller reads existing snapshot)", runId);
 			return false;
 		}
 		if (created <= 0L) {
@@ -1435,7 +1436,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// LOST（确定丢租）/ UNAVAILABLE（设施异常，无法确认）⇒ 只读：这一笔不落库。
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
 		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "轮次快照");
+			warnReadOnly(runId, authority, "run snapshot");
 			return false;
 		}
 		long epoch = heldRunEpoch(runId);
@@ -1460,18 +1461,18 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				if (guardedStatus) {
 					Long fence = fenceAheadOf(runId, epoch);
 					if (fence != null) {
-						log.warn("STALE_EPOCH 拒写轮次快照 runId={} status={} epoch={} fence={}（fence 已推进到更高 "
-								+ "epoch：另一实例已接管本轮的续跑权，本实例的写回作废）", runId, snapshot.getStatus(),
+						log.warn("STALE_EPOCH refused snapshot write runId={} status={} epoch={} fence={} "
+								+ "(fence advanced to a higher epoch: another instance took over this run)", runId, snapshot.getStatus(),
 								epoch, fence);
 					}
 					else {
-						log.warn("{} 拒写轮次快照 runId={} epoch={}（fence 陈旧或当前快照已是取消态："
-								+ "不覆盖 CANCELLED，也不改会话索引/租约）", snapshot.getStatus(), runId, epoch);
+						log.warn("{} refused snapshot write runId={} epoch={} (stale fence or snapshot "
+								+ "already cancelled: not overwriting CANCELLED, no index/lease change)", snapshot.getStatus(), runId, epoch);
 					}
 				}
 				else {
-					log.warn("STALE_EPOCH 拒写轮次快照 runId={} epoch={}（fence 已推进到更高 epoch："
-							+ "另一实例已接管本轮的续跑权，本实例的写回作废）", runId, epoch);
+					log.warn("STALE_EPOCH refused snapshot write runId={} epoch={} (fence "
+							+ "advanced to a higher epoch: another instance took over this run)", runId, epoch);
 				}
 				return false;
 			}
@@ -1481,8 +1482,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			try {
 				if (guardedStatus) {
 					if (!terminalSetIfNotCancelled(runId, json, state)) {
-						log.warn("{} 拒写轮次快照 runId={}（当前快照已是取消态：不覆盖 CANCELLED，"
-								+ "也不改会话索引/租约）", snapshot.getStatus(), runId);
+						log.warn("{} refused snapshot write runId={} (snapshot already "
+								+ "cancelled: not overwriting CANCELLED, no index/lease change)", snapshot.getStatus(), runId);
 						return false;
 					}
 				}
@@ -1654,7 +1655,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.execute(RUN_STATE_CAS_DELETE_SCRIPT, List.of(runStateKey(runId)), expectedState);
 		}
 		catch (RuntimeException rollbackEx) {
-			log.warn("回滚轻量状态键失败 runId={}（残留 CANCELLED 只会更严格地拒绝非取消写）：{}", runId,
+			log.warn("lightweight state key rollback failed runId={} (leftover "
+					+ "CANCELLED only rejects non-cancel writes more strictly): {}", runId,
 					rollbackEx.getMessage());
 		}
 	}
@@ -1670,7 +1672,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.opsForValue().set(runStateKey(runId), state, ttlFor(runId));
 		}
 		catch (RuntimeException ex) {
-			log.warn("写入轻量状态键失败 runId={} state={}（判活/守卫将回退解析快照）：{}", runId, state,
+			log.warn("lightweight state key write failed runId={} state={} (liveness/guards fall back to snapshot): {}", runId, state,
 					ex.getMessage());
 		}
 	}
@@ -1683,7 +1685,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					runId, String.valueOf(ttl.toMillis()));
 		}
 		catch (Exception ex) {
-			log.warn("补登记会话→run 索引失败 sessionId={} runId={}（快照已落库，等待后续写入自愈）：{}",
+			log.warn("session->run index backfill failed sessionId={} runId={} (snapshot stored; later writes self-heal): {}",
 					sessionId, runId, ex.getMessage());
 		}
 	}
@@ -1704,7 +1706,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.opsForSet().add(RUN_INDEX, RunKeyScope.indexMember(tenantId, userId, runId));
 		}
 		catch (Exception ex) {
-			log.warn("补登记全局 run 索引失败 runId={}（恢复发现面缺一条，等待后续写入自愈）：{}", runId,
+			log.warn("global run index backfill failed runId={} (discovery misses one entry; later writes self-heal): {}", runId,
 					ex.getMessage());
 		}
 	}
@@ -1769,16 +1771,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				fenceAheadWarned.clear();
 			}
 			if (fenceAheadWarned.add(runId)) {
-				log.warn("无租约写回 runId={}：fence 已推进到 epoch={}（本实例未持租，写回按 E3 放行，"
-						+ "但它不具备续跑权语义；若属换主后的陈旧写，请排查租约视图）", runId, fence);
+				log.warn("lease-less write runId={}: fence advanced to epoch={} (write allowed without lease; no "
+						+ "resume-authority semantics; check lease view if this is a stale write after owner change)", runId, fence);
 			}
 			else {
-				log.debug("无租约写回 runId={}：fence 仍为 epoch={}（本 run 已告警过，降为 debug）", runId, fence);
+				log.debug("lease-less write runId={}: fence still epoch={} (already warned for this run; demoted to debug)", runId, fence);
 			}
 		}
 		catch (Exception ex) {
 			// 旁路观测失败不影响写回（E3 的可用性优先）
-			log.debug("读取 fence 失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("fence read failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -1860,7 +1862,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			markActiveRun(sessionId, runId, System.currentTimeMillis());
 		}
 		catch (Exception ex) {
-			log.warn("写入 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.warn("session->current index write failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -1903,7 +1905,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.debug("维护会话活跃轮索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.debug("active run index maintenance failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -1919,7 +1921,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.debug("清理会话活跃轮索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.debug("active run index cleanup failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -1939,7 +1941,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return ordered == null || ordered.isEmpty() ? null : ordered;
 		}
 		catch (Exception ex) {
-			log.debug("读取会话活跃轮索引失败 sessionId={}（回退旧口径）：{}", sessionId, ex.getMessage());
+			log.debug("active run index read failed sessionId={} (falling back to legacy semantics): {}", sessionId, ex.getMessage());
 			return null;
 		}
 	}
@@ -1982,7 +1984,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				candidates.addAll(sessionRunIds(sessionId));
 			}
 			catch (RuntimeException ex) {
-				log.debug("读取会话→run 索引失败 sessionId={}（活跃候选按空处理）：{}", sessionId, ex.getMessage());
+				log.debug("session->run index read failed sessionId={} (treating active candidates as empty): {}", sessionId, ex.getMessage());
 			}
 		}
 		if (candidates.isEmpty()) {
@@ -2026,7 +2028,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.debug("清理失效活跃轮成员失败 sessionId={}（下一拍再清）：{}", sessionId, ex.getMessage());
+			log.debug("stale active run member cleanup failed sessionId={} (next tick): {}", sessionId, ex.getMessage());
 		}
 	}
 
@@ -2139,7 +2141,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return raw == null || raw.size() < keys.size() ? null : raw;
 		}
 		catch (RuntimeException ex) {
-			log.debug("批量读取轮次状态失败（回退逐条读）：{}", ex.getMessage());
+			log.debug("batch run status read failed (falling back to per-run reads): {}", ex.getMessage());
 			return null;
 		}
 	}
@@ -2222,7 +2224,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					String.valueOf(sessionCurrentTtl().toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("续期 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.debug("session->current index renew failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -2261,7 +2263,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.expire(sessionRunsKey(sessionId, tenantId, userId), sessionCurrentTtl());
 		}
 		catch (Exception ex) {
-			log.debug("续期会话→run 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.debug("session->run index renew failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -2308,7 +2310,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				index = sessionRunIds(sessionId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("终态后复核 session→current 失败 sessionId={} runId={}（保留原索引，不猜活跃轮）：{}",
+				log.warn("post-terminal session->current recheck failed sessionId={} runId={} (keeping index; not guessing active run): {}",
 						sessionId, runId, ex.getMessage());
 				return;
 			}
@@ -2340,7 +2342,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.debug("清除 session→current 索引失败 sessionId={} runId={}：{}", sessionId, runId, ex.getMessage());
+			log.debug("session->current index clear failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
 		}
 	}
 
@@ -2430,7 +2432,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return this.redis.opsForValue().get(sessionCurrentKey(sessionId));
 		}
 		catch (Exception ex) {
-			log.debug("读取 session→current 索引失败 sessionId={}：{}", sessionId, ex.getMessage());
+			log.debug("session->current index read failed sessionId={}: {}", sessionId, ex.getMessage());
 			return null;
 		}
 	}
@@ -2523,9 +2525,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 归属复核（纵深防御）：键面已经按身份分开，这里再核一次记录里的身份，
 		// 拒绝"键对了但记录不是我的"与"无归属旧快照进入新身份读路径"。
 		if (expected != null && !expected.equals(recordIdentityOf(snapshot))) {
-			log.warn("轮次快照归属不符 runId={}（记录 tenantId/userId={}，期望身份={}）：按不存在处理，"
-					+ "无归属/他人快照不得进入新身份读路径", runId, snapshot.getTenantId() + "/" + snapshot.getUserId(),
-					expected.tenantId() + "/" + expected.userId());
+			log.warn("snapshot owner mismatch runId={} (recorded identity differs from expected): treating "
+					+ "as absent; unowned/foreign snapshots must not enter the new-identity read path", runId);
 			return null;
 		}
 		return snapshot;
@@ -2574,7 +2575,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return raw == null ? null : topLevelStatus(raw);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取轮次轻量状态失败 runId={}（按不可知处理）：{}", runId, ex.getMessage());
+			log.debug("run lite state read failed runId={} (treating as unknown): {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -2701,7 +2702,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			raw = this.redis.opsForValue().get(runKey(runId));
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取轮次快照归属失败 runId={}（按不可读处理，调用方须 fail-closed）：{}", runId, ex.getMessage());
+			log.warn("snapshot owner read failed runId={} (treating as unreadable; caller must fail closed): {}", runId, ex.getMessage());
 			return SnapshotOwner.unreadable();
 		}
 		if (raw == null) {
@@ -2712,7 +2713,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 坏值 = 数据问题：不得猜成"他会话"，交给调用方中止/记可重试错误。
-			log.warn("轮次快照坏值 runId={}（归属不可读，调用方须 fail-closed）：{}", runId, ex.getMessage());
+			log.warn("snapshot bad value runId={} (owner unreadable; caller must fail closed): {}", runId, ex.getMessage());
 			return SnapshotOwner.unreadable();
 		}
 	}
@@ -2853,7 +2854,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 			return;
 		}
-		log.warn("删除轮次时没有身份上下文 runId={}：只清理 legacy 命名空间的键（带身份的轮次不会被删到）", runId);
+		log.warn("delete run without identity context runId={}: only legacy-namespace keys cleaned (identity-scoped runs untouched)", runId);
 		deleteRunKeys(runId, snapshot, null);
 	}
 
@@ -2868,7 +2869,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				snapshot = get(runId);
 			}
 			catch (RuntimeException ex) {
-				log.debug("删除轮次前读快照失败 runId={}（会话索引成员留待 TTL/对账清理）：{}", runId, ex.getMessage());
+				log.debug("pre-delete snapshot read failed runId={} (session index members left to TTL/reconcile): {}", runId, ex.getMessage());
 			}
 		}
 		if (snapshot == null && identity != null) {
@@ -2876,7 +2877,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				snapshot = get(runId, identity.tenantId(), identity.userId());
 			}
 			catch (RuntimeException ex) {
-				log.debug("删除轮次前按记录身份读快照失败 runId={}（按已不存在处理）：{}", runId, ex.getMessage());
+				log.debug("pre-delete snapshot read by recorded identity failed runId={} (treating as absent): {}", runId, ex.getMessage());
 			}
 		}
 		return snapshot;
@@ -2914,7 +2915,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					identity == null ? RunKeyScope.indexMember(runId) : RunKeyScope.indexMember(identity, runId));
 		}
 		catch (Exception ex) {
-			log.warn("清理全局 run 索引成员失败 runId={}（stale 成员待 prune/恢复面跳过）：{}", runId,
+			log.warn("global run index member cleanup failed runId={} (stale member left to prune/recovery skip): {}", runId,
 					ex.getMessage());
 		}
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
@@ -2927,7 +2928,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 			catch (Exception ex) {
 				// 只留 stale 成员：会话销毁枚举时会按快照归属过滤，不会误删他会话。
-				log.warn("清理会话→run 索引成员失败 sessionId={} runId={}（stale 成员待 TTL/对账）：{}",
+				log.warn("session->run index member cleanup failed sessionId={} runId={} (stale member left to TTL/reconcile): {}",
 						snapshot.getSessionId(), runId, ex.getMessage());
 			}
 		}
@@ -2971,7 +2972,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.leaseService.releaseIfHeld(runLeaseKey(runId));
 		}
 		catch (Exception ex) {
-			log.debug("释放续跑租约失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("resume lease release failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -3005,14 +3006,15 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.readOnlyWarned.clear();
 		}
 		String detail = authority == LeaseService.LeaseAuthority.LOST
-				? "确定丢租（续租返回 0 / 归属校验失败：另一实例已接管）"
-				: "租约设施不可用（无法确认是否仍持有）";
+				? "lease definitely lost (renew returned 0 / ownership check failed: another instance took over)"
+				: "lease facility unavailable (cannot confirm ownership)";
 		if (this.readOnlyWarned.add(runId)) {
-			log.warn("续跑权只读：拒绝{} runId={}（{}）。本实例不再推进这一轮，恢复/接管由新主人负责", action,
+			log.warn("resume authority read-only: refusing {} runId={} ({}). This instance no "
+					+ "longer advances this run; recovery/takeover belongs to the new owner", action,
 					runId, detail);
 		}
 		else {
-			log.debug("续跑权只读：拒绝{} runId={}（{}，本 run 已告警过）", action, runId, detail);
+			log.debug("resume authority read-only: refusing {} runId={} ({}; already warned for this run)", action, runId, detail);
 		}
 	}
 
@@ -3066,11 +3068,11 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.fenceStaleWarned.clear();
 		}
 		if (this.fenceStaleWarned.add(runId)) {
-			log.warn("续跑权已失效：拒绝{} runId={}（fence={} 已推进到本实例 epoch={} 之上：另一实例已接管本轮的"
-					+ "续跑权，本实例只读恢复，不再落帧/写台账/取号）", action, runId, fence, epoch);
+			log.warn("resume authority stale: refusing {} runId={} (fence={} above local epoch={}: "
+					+ "another instance took over; read-only recovery, no frames/ledger/seq)", action, runId, fence, epoch);
 		}
 		else {
-			log.debug("续跑权已失效：拒绝{} runId={}（fence={} > epoch={}，本 run 已告警过）", action, runId,
+			log.debug("resume authority stale: refusing {} runId={} (fence={} > epoch={}; already warned for this run)", action, runId,
 					fence, epoch);
 		}
 	}
@@ -3081,11 +3083,11 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.fenceStaleWarned.clear();
 		}
 		if (this.fenceStaleWarned.add(runId)) {
-			log.warn("无法确认续跑权：拒绝{} runId={}（fence 读取失败，按不可确认处理）：{}", action, runId,
+			log.warn("resume authority unconfirmed: refusing {} runId={} (fence read failed; treating as unconfirmed): {}", action, runId,
 					ex.getMessage());
 		}
 		else {
-			log.debug("无法确认续跑权：拒绝{} runId={}（已告警过）：{}", action, runId, ex.getMessage());
+			log.debug("resume authority unconfirmed: refusing {} runId={} (already warned): {}", action, runId, ex.getMessage());
 		}
 	}
 
@@ -3245,7 +3247,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
-			log.warn("ai:runs 索引惰性清理失败（本轮跳过，残留项留待下一拍；不影响轮次本身）：{}", ex.toString());
+			log.warn("ai:runs index lazy cleanup failed (skipped this turn; residue left to next tick; run unaffected): {}", ex.toString());
 			return 0;
 		}
 	}
@@ -3256,7 +3258,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 0;
 		}
 		this.redis.opsForSet().remove(RUN_INDEX, dead.toArray());
-		log.info("ai:runs 索引惰性清理：剔除 {} 条已无快照的 runId（索引项随快照 TTL 到期收敛）", dead.size());
+		log.info("ai:runs index lazy cleanup: removed {} runIds without snapshots (index converges with snapshot TTL)", dead.size());
 		return dead.size();
 	}
 
@@ -3311,7 +3313,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
-		if (!permittedToWrite(runId, "挂起快照")) {
+		if (!permittedToWrite(runId, "suspended snapshot")) {
 			throw new AiStateUnavailableException("无法确认续跑权，拒绝写入挂起状态 " + runId);
 		}
 		for (PendingToolCall pending : pendings) {
@@ -3372,7 +3374,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 				throw new AiStateUnavailableException("无法读取待决条目批次：" + runId, ex);
 			}
 			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
-			log.warn("读取待决条目失败 runId={}（非抛读口降级为空表，取消收尾/展示继续）：{}", runId,
+			log.warn("pending entries read failed runId={} (lenient reader degrades to empty; cancel finalize/display continue): {}", runId,
 					ex.getMessage());
 			return List.of();
 		}
@@ -3417,7 +3419,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
-			log.warn("读取待决条目失败 runId={} toolCallId={}（非抛读口降级为 null）：{}", runId, toolCallId,
+			log.warn("pending entry read failed runId={} toolCallId={} (lenient reader degrades to null): {}", runId, toolCallId,
 					ex.getMessage());
 			return null;
 		}
@@ -3471,7 +3473,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("读取决策 guard 失败 runId={} toolCallId={}（读侧 fail-closed：拒绝按未决策重建卡）：{}",
+			log.warn("decision guard read failed runId={} toolCallId={} (read side fail-closed: refusing to rebuild the card as undecided): {}",
 					runId, toolCallId, ex.getMessage());
 			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
 		}
@@ -3484,7 +3486,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("读取决策 guard 失败 runId={} toolCallId={}（非抛读口按未合并 guard 继续）：{}",
+			log.debug("decision guard read failed runId={} toolCallId={} (lenient reader continues with unmerged guard): {}",
 					runId, toolCallId, ex.getMessage());
 			return null;
 		}
@@ -3498,7 +3500,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("读取决策 guard 失败 runId={}（整批读侧 fail-closed：拒绝按未决策重建卡）：{}", runId,
+			log.warn("decision guard read failed runId={} (batch read side fail-closed: refusing to rebuild the card as undecided): {}", runId,
 					ex.getMessage());
 			throw new AiStateUnavailableException("无法读取决策 guard 批次 " + runId, ex);
 		}
@@ -3512,7 +3514,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("读取决策 guard 失败 runId={}（非抛读口按未合并 guard 继续）：{}", runId, ex.getMessage());
+			log.debug("decision guard read failed runId={} (lenient reader continues with unmerged guard): {}", runId, ex.getMessage());
 			return Map.of();
 		}
 	}
@@ -3590,7 +3592,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 位读不出来不影响条目本身（宁可按"未发射"处理：少一张卡，不让用户点到未生效的卡）
-			log.debug("读取请求帧标记失败 runId={} toolCallId={}：{}", runId, toolCallId, ex.getMessage());
+			log.debug("request frame marker read failed runId={} toolCallId={}: {}", runId, toolCallId, ex.getMessage());
 			return null;
 		}
 	}
@@ -3602,7 +3604,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return markers == null ? Map.of() : markers;
 		}
 		catch (Exception ex) {
-			log.debug("读取请求帧标记失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("request frame marker read failed runId={}: {}", runId, ex.getMessage());
 			return Map.of();
 		}
 	}
@@ -3660,7 +3662,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			pending = pending(runId, toolCallId);
 		}
 		catch (AiStateUnavailableException ex) {
-			log.warn("读取请求帧条目失败 runId={} toolCallId={}（按未知降级，不阻断本轮）：{}", runId, toolCallId,
+			log.warn("request frame entry read failed runId={} toolCallId={} "
+					+ "(degrading to unknown, not blocking this turn): {}", runId, toolCallId,
 					ex.getMessage());
 			pending = pendingLenient(runId, toolCallId);
 		}
@@ -3673,7 +3676,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 位没落不影响本次请求帧发射（刷新恢复会少一张卡，但不阻断本轮）
-			log.warn("写入请求帧标记失败 runId={} toolCallId={}（本次请求帧仍会发出）：{}", runId, toolCallId,
+			log.warn("request frame marker write failed runId={} toolCallId={} (frame still emitted): {}", runId, toolCallId,
 					ex.getMessage());
 		}
 		try {
@@ -3681,7 +3684,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return fresh == null ? pending : fresh;
 		}
 		catch (AiStateUnavailableException ex) {
-			log.warn("请求帧置位后复核失败 runId={} toolCallId={}（保留已知条目，不阻断本轮）：{}", runId, toolCallId,
+			log.warn("post-set request frame recheck failed runId={} toolCallId={} "
+					+ "(keeping known entry, not blocking this turn): {}", runId, toolCallId,
 					ex.getMessage());
 			return pending;
 		}
@@ -3728,7 +3732,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 续租 fencing 收口批：新工具执行是"不可撤销副作用"的入口 —— 丢租/设施不可确认时一律拒。
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
 		if (authority.readOnly()) {
-			warnReadOnly(runId, authority, "新工具认领");
+			warnReadOnly(runId, authority, "new tool claim");
 			return new ClaimResult(ClaimOutcome.STALE_FENCE, heldRunEpoch(runId), 0L);
 		}
 		long epoch = heldRunEpoch(runId);
@@ -3739,8 +3743,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			// 执行权已失效，拒绝认领（不得执行）。
 			fence = fenceEpoch(runId);
 			if (fence > epoch) {
-				log.warn("STALE_EPOCH 拒绝认领 runId={} toolCallId={} epoch={}（fence 已推进到 {}："
-						+ "本实例的续跑权已被接管，不得执行该工具）", runId, toolCallId, epoch, fence);
+				log.warn("STALE_EPOCH refused claim runId={} toolCallId={} epoch={} "
+						+ "(fence advanced to {}: authority taken over, tool must not run)", runId, toolCallId, epoch, fence);
 				return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
 			}
 		}
@@ -3788,7 +3792,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					putPending(runId, marked);
 				}
 				catch (RuntimeException restoreEx) {
-					log.warn("回滚认领后恢复 executed=false 失败 runId={} toolCallId={}：{}", runId, toolCallId,
+					log.warn("claim rollback restore executed=false failed runId={} toolCallId={}: {}", runId, toolCallId,
 							restoreEx.getMessage());
 				}
 			}
@@ -3806,15 +3810,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			Long deleted = this.redis.execute(CLAIM_ROLLBACK_SCRIPT, List.of(claimKey(runId)), toolCallId,
 					expectedValue);
 			if (deleted != null && deleted > 0L) {
-				log.warn("已回滚认领记录 runId={} toolCallId={}（认领后的读/写失败，不得留假认领）", runId,
+				log.warn("claim record rolled back runId={} toolCallId={} (read/write after claim failed; no fake claim left)", runId,
 						toolCallId);
 			}
 			else {
-				log.warn("认领记录值已变化，跳过回滚 runId={} toolCallId={}（避免误删他人认领）", runId, toolCallId);
+				log.warn("claim record changed, rollback skipped runId={} "
+						+ "toolCallId={} (avoid deleting another owner's claim)", runId, toolCallId);
 			}
 		}
 		catch (Exception ex) {
-			log.warn("回滚认领记录失败 runId={} toolCallId={}（仍需人工核对 claim）：{}", runId, toolCallId,
+			log.warn("claim record rollback failed runId={} toolCallId={} (manual claim check needed): {}", runId, toolCallId,
 					ex.getMessage());
 		}
 	}
@@ -3849,7 +3854,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A1_FENCE_READ, ex);
-			log.warn("读取 fence 失败 runId={}（认领侧 fail-closed：拒绝认领，不按 fence=0 放行）：{}", runId,
+			log.warn("fence read failed runId={} (claim side fail-closed: refusing claim, no fence=0 pass): {}", runId,
 					ex.getMessage());
 			throw new AiStateUnavailableException("无法读取 fence " + runId + "：认领侧 fail-closed", ex);
 		}
@@ -3905,7 +3910,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 续租 fencing 收口批：台账是"已执行"的跨进程判据 —— 丢租后不得追加（B 的台账才是真值），
 		// 否则 A 的迟到执行会让续跑回放出一个新主人没有执行过的结果。
 		// RT-21：持租但 fence 已被推进（HELD-but-fence-ahead）同样是"没有续跑权"，一并拒写。
-		if (!permittedToWrite(runId, "工具执行台账落档")) {
+		if (!permittedToWrite(runId, "tool execution ledger append")) {
 			return;
 		}
 		long atMs = System.currentTimeMillis();
@@ -4016,7 +4021,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			indexed = raw == null ? null : String.valueOf(raw);
 		}
 		catch (Exception ex) {
-			log.debug("读取幂等索引失败 runId={} toolCallId={}（回落台账扫描）：{}", runId, toolCallId, ex.getMessage());
+			log.debug("idempotency index read failed runId={} "
+					+ "toolCallId={} (falling back to ledger scan): {}", runId, toolCallId, ex.getMessage());
 			indexed = null;
 		}
 		if (indexed != null) {
@@ -4028,11 +4034,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if (record != null) {
 				// M-1（复审裁决）：索引指向<b>别人的</b>记录（下标错位/索引被污染）时绝不能把它当成本调用的结果 ——
 				// 那会把 A 的产物交给 B（重放错了副作用结论比"没查到"更危险）。回落扫描由记录自身定身份。
-				log.warn("幂等索引错位 runId={} toolCallId={} index={}（该下标属于 toolCallId={}，回落台账扫描）", runId,
+				log.warn("idempotency index misaligned runId={} toolCallId={} index={} "
+						+ "(index belongs to toolCallId={}; falling back to ledger scan)", runId,
 						toolCallId, indexed, record.get("toolCallId"));
 			}
 			else {
-				log.debug("幂等索引命中但取不回原记录 runId={} toolCallId={} index={}（回落台账扫描）", runId, toolCallId,
+				log.debug("idempotency index hit but record not retrievable runId={} "
+						+ "toolCallId={} index={} (falling back to ledger scan)", runId, toolCallId,
 						indexed);
 			}
 		}
@@ -4071,7 +4079,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			});
 		}
 		catch (Exception ex) {
-			log.debug("按索引读取台账失败 runId={} index={}：{}", runId, index, ex.getMessage());
+			log.debug("ledger read by index failed runId={} index={}: {}", runId, index, ex.getMessage());
 			return null;
 		}
 	}
@@ -4242,7 +4250,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <p>只打日志、不记账：这条路径的事实是"该 run 的投影不完整"，按 run 记指标会无界增长。
 	 */
 	private static List<Map<String, Object>> incompleteProjection(String runId, String reason) {
-		log.debug("台账元数据投影不完整 runId={}（{}，回落全表扫描）", runId, reason);
+		log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason);
 		return null;
 	}
 
@@ -4304,7 +4312,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return claimedBy(runId, pending.getToolCallId()) != null;
 		}
 		catch (RuntimeException ex) {
-			log.warn("读认领表失败，按\"已有执行证据\"处理 runId={} toolCallId={}：{}", runId,
+			log.warn("claim table read failed, treating as existing execution evidence runId={} toolCallId={}: {}", runId,
 					pending.getToolCallId(), ex.getMessage());
 			return true;
 		}
@@ -4349,7 +4357,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return raw == null ? 0L : Long.parseLong(raw);
 		}
 		catch (Exception ex) {
-			log.debug("读取已发放序号失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("issued seq read failed runId={}: {}", runId, ex.getMessage());
 			return 0L;
 		}
 	}
@@ -4373,7 +4381,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		if (runId == null || floor <= 0L) {
 			return;
 		}
-		if (!permittedToWrite(runId, "业务序号下界恢复")) {
+		if (!permittedToWrite(runId, "business seq floor restore")) {
 			return;
 		}
 		try {
@@ -4381,7 +4389,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					String.valueOf(ttlFor(runId).toMillis()));
 		}
 		catch (Exception ex) {
-			log.warn("恢复业务序号下界失败 runId={} floor={}：{}", runId, floor, ex.getMessage());
+			log.warn("business seq floor restore failed runId={} floor={}: {}", runId, floor, ex.getMessage());
 		}
 	}
 
@@ -4402,7 +4410,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			log.debug("心跳活动戳写入失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("heartbeat activity stamp write failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -4435,7 +4443,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					String.valueOf(ttlFor(runId).toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("业务活动锚点写入失败 runId={} atMs={}：{}", runId, atMs, ex.getMessage());
+			log.debug("business activity anchor write failed runId={} atMs={}: {}", runId, atMs, ex.getMessage());
 		}
 	}
 
@@ -4483,7 +4491,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			persist(snapshot);
 		}
 		catch (RuntimeException ex) {
-			log.warn("轮内预算 armed 落快照失败 runId={} armedAtMs={} skippedBatches={}（不打断工具循环）：{}", runId,
+			log.warn("in-turn budget armed snapshot write failed runId={} "
+					+ "armedAtMs={} skippedBatches={} (tool loop not interrupted): {}", runId,
 					armedAtMs, skippedBatches, ex.getMessage());
 		}
 	}
@@ -4513,7 +4522,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 只剩取键/计数等非 Redis 异常（单键 Redis 失败已在下层吞掉并计数）
-			log.debug("挂起期续期轮键的取键/计数失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("suspended renew key build/count failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -4566,7 +4575,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
 					int notAttempted = total - attempted;
 					recordNotAttempted(notAttempted);
-					log.debug("同槽续期遇到连接类异常 runId={} keys={}（剩余 {} 键不再等待超时）：{}", runId,
+					log.debug("same-slot renew hit a connection error runId={} keys={} (skipping timeout waits for the remaining {} keys): {}", runId,
 							group.size(), notAttempted, ex.getMessage());
 					return;
 				}
@@ -4581,11 +4590,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 					RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
 					if (isConnectionFailure(ex)) {
 						recordNotAttempted(total - attempted - 1);
-						log.debug("续期遇到连接类异常 runId={} key={}（剩余 {} 键不再逐个等待超时）：{}", runId, key,
+						log.debug("renew hit a connection error runId={} key={} (skipping "
+								+ "individual timeout waits for the remaining {} keys): {}", runId, key,
 								total - attempted - 1, ex.getMessage());
 						return;
 					}
-					log.debug("续期键失败 runId={} key={}（其余键继续续期）：{}", runId, key, ex.getMessage());
+					log.debug("renew key failed runId={} key={} (continuing with other keys): {}", runId, key, ex.getMessage());
 				}
 				attempted++;
 			}
@@ -4633,7 +4643,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if (isConnectionFailure(ex)) {
 				throw ex;
 			}
-			log.debug("同槽续期脚本不可用（退回逐键 EXPIRE）keys={}：{}", keys.size(), ex.getMessage());
+			log.debug("same-slot renew script unavailable (falling back to per-key EXPIRE) keys={}: {}", keys.size(), ex.getMessage());
 			return false;
 		}
 		if (statuses == null) {
@@ -4648,7 +4658,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			if ("-1".equals(parts[i].trim())) {
 				// 单键失败已在脚本内隔离（pcall）：只计数，其余键的续期不受影响
 				RedisDegradation.record(RedisDegradation.L139_RENEW_KEY);
-				log.debug("续期键失败（同槽批内隔离）key={}", keys.get(i));
+				log.debug("renew key failed (isolated within same-slot batch) key={}", keys.get(i));
 			}
 		}
 		return true;
@@ -4685,7 +4695,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			snapshot = get(runId);
 		}
 		catch (Exception ex) {
-			log.debug("读侧续期读不到快照 runId={}：{}", runId, ex.getMessage());
+			log.debug("read-side renew snapshot missing runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 		return touchActiveRun(snapshot);
@@ -4723,7 +4733,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 						snapshot.getUserId(), snapshot.getSessionId()), ttl);
 			}
 			catch (RuntimeException ex) {
-				log.debug("停止闭环映射续期失败 runId={}（不影响读侧续期）：{}", runId, ex.getMessage());
+				log.debug("stop-closure mapping renew failed runId={} (read-side renew unaffected): {}", runId, ex.getMessage());
 			}
 		}
 		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
@@ -4789,7 +4799,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("读取决策 guard 失败 runId={} toolCallId={}（fail-closed：不得当作未决策）：{}", runId,
+			log.warn("decision guard read failed runId={} toolCallId={} (fail-closed: must not treat as undecided): {}", runId,
 					toolCallId, ex.getMessage());
 			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
 		}
@@ -4859,7 +4869,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return raw == null ? 0L : Long.parseLong(raw);
 		}
 		catch (Exception ex) {
-			log.debug("读取业务活动锚点失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("business activity anchor read failed runId={}: {}", runId, ex.getMessage());
 			return 0L;
 		}
 	}
@@ -4884,7 +4894,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 读失败 ≠ 没有活动：调用方还会看业务活动锚点键，这里按 0 容错。
-			log.debug("读取事件日志尾部活动时刻失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("event log tail activity time read failed runId={}: {}", runId, ex.getMessage());
 			return 0L;
 		}
 	}
@@ -4959,7 +4969,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			// 可见性失败不该把整页打成 500：返回未知，由前端按"不显示时间"处理
-			log.debug("读取轮次快照剩余 TTL 失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("snapshot remaining TTL read failed runId={}: {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -5016,7 +5026,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return com.example.configmgr.ai.context.ContextState.fromFields(fields);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读上下文真值失败 sessionId={}：{}（按空态处理）", sessionId, ex.getMessage());
+			log.warn("context truth read failed sessionId={}: {} (treating as empty)", sessionId, ex.getMessage());
 			return com.example.configmgr.ai.context.ContextState.EMPTY;
 		}
 	}
@@ -5070,7 +5080,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.warn("读上下文台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
+			log.warn("context ledger read failed sessionId={}: {} (treating as empty ledger)", sessionId, ex.getMessage());
 		}
 		return out;
 	}
@@ -5094,7 +5104,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			touchContextTtl(key);
 		}
 		catch (Exception ex) {
-			log.warn("写安全台账失败 sessionId={}：{}（不影响本轮）", sessionId, ex.getMessage());
+			log.warn("safety ledger write failed sessionId={}: {} (turn unaffected)", sessionId, ex.getMessage());
 		}
 	}
 
@@ -5116,7 +5126,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		catch (Exception ex) {
-			log.warn("读安全台账失败 sessionId={}：{}（按空台账处理）", sessionId, ex.getMessage());
+			log.warn("safety ledger read failed sessionId={}: {} (treating as empty)", sessionId, ex.getMessage());
 		}
 		return out;
 	}
@@ -5172,7 +5182,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			touchContextTtl(contextEventsKey(sessionId));
 		}
 		catch (Exception ex) {
-			log.warn("读压缩事实失败 sessionId={}：{}（按空事件处理）", sessionId, ex.getMessage());
+			log.warn("compaction fact read failed sessionId={}: {} (treating as no events)", sessionId, ex.getMessage());
 		}
 		return out;
 	}
@@ -5194,7 +5204,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			this.redis.expire(key, this.properties.getSessionTtl());
 		}
 		catch (RuntimeException ex) {
-			log.debug("上下文键续期失败 key={}：{}", key, ex.getMessage());
+			log.debug("context key renew failed key={}: {}", key, ex.getMessage());
 		}
 	}
 

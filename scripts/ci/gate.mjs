@@ -60,14 +60,30 @@ function parseArgs(argv) {
     else if (a === '--shadow') opts.shadow = true
     else if (a === '--mvn') opts.mvn = argv[++i]
     else if (a === '--help' || a === '-h') opts.help = true
-    else throw new Error(`未知参数：${a}`)
+    else throw new Error(`unknown argument: ${a}`)
   }
   return opts
 }
 
 function usage() {
-  const src = readFileSync(fileURLToPath(import.meta.url), 'utf8')
-  console.log(src.slice(src.indexOf('/**'), src.indexOf('*/') + 2))
+  console.log(`gate.mjs - local two-tier gate (tier commit | tier merge)
+
+usage:
+  node scripts/ci/gate.mjs --tier commit [--shadow] [--base <sha>] [--mvn <path>]
+  node scripts/ci/gate.mjs --tier merge  [--base <sha>] [--mvn <path>]
+
+  commit  backend selection set (select-tests.mjs) + full frontend vitest + vue-tsc --noEmit
+          + check-docs + i18n residue (--strict)
+  merge   full backend suite in the default locale and in en-US + full frontend vitest
+          + vue-tsc + vite build + check-docs + i18n residue (--strict)
+
+  --shadow  run the selection set and the full backend suite side by side; only the full
+            suite blocks (the selection set is reported into the shadow ledger)
+  --base    diff base (defaults to merge-base origin/main HEAD)
+  --mvn     maven executable to use (also honours MVN and PATH)
+
+exit code: 0 green, 1 red, 3 usage/environment error. Per-step logs go to backend/target/gate/<timestamp>/.
+Ports: this script only runs tests/builds/static checks; it never starts or stops the 8081/5202 ports.`)
 }
 
 // ------------------------------------------------------------------ 基础工具
@@ -167,7 +183,7 @@ function tail(logFile, n = 30) {
 
 /** 一步 = 一条命令 + 一行结果。note 供汇总表使用。 */
 function step(name, command, { cwd = REPO, note = '' } = {}) {
-  process.stdout.write(`[gate] ${name} … `)
+  process.stdout.write(`[gate] ${name} ... `)
   const r = shell(name, command, cwd)
   const ok = r.code === 0
   console.log(`${ok ? 'ok' : 'RED'} ${fmt(r.seconds)}${note ? `  ${note}` : ''}`)
@@ -217,7 +233,7 @@ function readSurefire() {
   return out
 }
 
-const surefireLine = (r) => `${r.tests} 例 / ${r.classes} 类 · ${r.failures}F/${r.errors}E/${r.skipped}S`
+const surefireLine = (r) => `${r.tests} tests / ${r.classes} classes; ${r.failures}F/${r.errors}E/${r.skipped}S`
 
 // ------------------------------------------------------------------ 选择集
 
@@ -270,15 +286,15 @@ function saveLedger(ledger) {
 }
 
 function shadowVerdict(ledger) {
-  if (ledger.runs === 0) return '尚未有影子样本'
+  if (ledger.runs === 0) return 'no shadow samples yet'
   const limit = Math.max(SHADOW_MAX_MISSED, Math.floor(ledger.runs / SHADOW_WINDOW))
-  return ledger.missed <= limit ? `通过（漏检 ${ledger.missed}/${ledger.runs}）` : `未达（漏检 ${ledger.missed}/${ledger.runs}）`
+  return ledger.missed <= limit ? `pass (missed ${ledger.missed}/${ledger.runs})` : `not met (missed ${ledger.missed}/${ledger.runs})`
 }
 
 // ------------------------------------------------------------------ 各层
 
 function selectStep() {
-  process.stdout.write('[gate] 选择集（select-tests.mjs）… ')
+  process.stdout.write('[gate] selection set (select-tests.mjs) ... ')
   const cmd = ['node scripts/ci/select-tests.mjs',
     `--base ${quote(BASE)}`, `--map ${MAP}`, `--out ${INCLUDES}`, `--audit ${AUDIT}`, '--quiet'].join(' ')
   const r = shell('select', cmd)
@@ -286,18 +302,18 @@ function selectStep() {
   const audit = readAudit()
   const selected = inc ? inc.tests.length : 0
   const all = !inc || inc.all
-  console.log(`ok ${fmt(r.seconds)}  ${all ? 'ALL（退化全量）' : `${selected} 类`}`)
-  steps.push({ name: 'select', ...r, ok: r.code === 0, note: all ? 'ALL' : `${selected} 类` })
+  console.log(`ok ${fmt(r.seconds)}  ${all ? 'ALL (degraded to full)' : `${selected} classes`}`)
+  steps.push({ name: 'select', ...r, ok: r.code === 0, note: all ? 'ALL' : `${selected} classes` })
   if (r.code !== 0) tail(r.logFile)
 
   if (all) {
-    const reason = audit?.reason || '选择器不可用/清单缺失'
+    const reason = audit?.reason || 'selector unavailable / map missing'
     const rules = (audit?.rulesHit || []).join(', ') || '-'
-    console.log(`[gate] ⚠ O8 自动降级：后端本次走**全量**（原因：${reason}；规则：${rules}）`)
-    console.log('[gate]   处置：不阻断提交；夜间 job 重建倒排表（§2.3），人工只在夜间处理。')
+    console.warn(`[gate] WARN O8 auto-degradation: backend runs the FULL suite this time (reason: ${reason}; rules: ${rules})`)
+    console.warn('[gate]   action: this does not block the commit; the nightly job rebuilds the inverted index (section 2.3) and only the nightly run needs human attention.')
   } else {
     const hit = (audit?.rulesHit || []).join(', ')
-    console.log(`[gate]   选中 ${selected} 类，冒烟 ${audit?.smoke?.length ?? '?'} 类，命中规则：${hit || '无（按倒排查表）'}`)
+    console.log(`[gate]   selected ${selected} classes, smoke ${audit?.smoke?.length ?? '?'} classes, rules hit: ${hit || 'none (table lookup)'}`)
     printUnstableCost(audit)
   }
   return { all, selected, selectedClasses: inc?.tests ?? [], audit, code: r.code }
@@ -315,13 +331,13 @@ function printUnstableCost(audit) {
   const s = cost.smoke || {}
   const sec = (x) => (x === null || x === undefined ? '?' : `${x}s`)
   const share = s.share
-    ? `，占冒烟成本 ${Math.min(100, Math.round(((u.share || 0) / Math.max(s.share, u.share || 0)) * 100))}%`
+    ? `, ${Math.min(100, Math.round(((u.share || 0) / Math.max(s.share, u.share || 0)) * 100))}% of smoke cost`
     : ''
   const policy = audit?.unstablePolicy
-  console.log(`[gate]   ⚠ unstable 拖慢（L-101）：${unstable.length} 类 ≈ ${sec(u.estimatedSeconds)}${share}` +
-    `；冒烟合计 ${s.classCount ?? '?'} 类 ≈ ${sec(s.estimatedSeconds)}`)
+  console.warn(`[gate]   WARN unstable slowdown (L-101): ${unstable.length} classes ~ ${sec(u.estimatedSeconds)}${share}` +
+    `; smoke total ${s.classCount ?? '?'} classes ~ ${sec(s.estimatedSeconds)}`)
   if (policy) {
-    console.log(`[gate]     策略：连续 ${policy.cleanRuns} 次夜间录制无差异即移出冒烟集，或距最后复现超 ${policy.maxAgeDays} 天过期（录制器侧执行）`)
+    console.warn(`[gate]     policy: dropped from the smoke set after ${policy.cleanRuns} clean nightly recordings, or after ${policy.maxAgeDays} days without a recurrence (enforced by the recorder)`)
   }
 }
 
@@ -332,16 +348,16 @@ function commitTier() {
   if (opts.shadow && !sel.all) {
     // ---- 影子期：选择集先跑（只报告），全量后跑（阻断口径 = 今天）
     clearSurefire()
-    const s = step('后端选择集（影子·只报告）', mvnInBackend({ includes: `target/selection/includes.txt` }), { cwd: path.join(REPO, 'backend') })
+    const s = step('backend selection set (shadow, report only)', mvnInBackend({ includes: `target/selection/includes.txt` }), { cwd: path.join(REPO, 'backend') })
     const selRes = readSurefire()
     // 影子期内选择集结果**不计入结论**：汇总表里标出来，避免"步骤 RED 但 tier 绿"被误读。
-    steps[steps.length - 1].note = `${surefireLine(selRes)}（影子·不计入结论）`
-    if (!s.ok) console.log(`[gate] 选择集跑红 ${surefireLine(selRes)}（影子期内**不阻断**，以全量为准）`)
+    steps[steps.length - 1].note = `${surefireLine(selRes)} (shadow, not part of the verdict)`
+    if (!s.ok) console.log(`[gate] selection set went red ${surefireLine(selRes)} (shadow period: NOT blocking, the full suite decides)`)
 
     clearSurefire()
-    const f = step('后端全量（影子对照·阻断）', mvnInBackend({}), { cwd: path.join(REPO, 'backend') })
+    const f = step('backend full suite (shadow diff, blocking)', mvnInBackend({}), { cwd: path.join(REPO, 'backend') })
     const fullRes = readSurefire()
-    steps[steps.length - 1].note = `${surefireLine(fullRes)}（全量·阻断口径）`
+    steps[steps.length - 1].note = `${surefireLine(fullRes)} (full suite, blocking verdict)`
     compareShadow(sel, selRes, fullRes)
 
     // 全量红 ⇒ 门禁红（今天的口径不变）
@@ -349,17 +365,17 @@ function commitTier() {
   } else if (!red) {
     clearSurefire()
     const includes = sel.all ? null : 'target/selection/includes.txt'
-    const note = sel.all ? '（O8 降级 · 全量）' : `（选择集 ${sel.selected} 类）`
-    const r = step('后端（选择集或全量）', mvnInBackend({ includes }), { cwd: path.join(REPO, 'backend'), note })
+    const note = sel.all ? '(O8 degradation, full suite)' : `(selection set, ${sel.selected} classes)`
+    const r = step('backend (selection set or full suite)', mvnInBackend({ includes }), { cwd: path.join(REPO, 'backend'), note })
     const res = readSurefire()
     console.log(`[gate]   ${surefireLine(res)}`)
     steps[steps.length - 1].note = `${surefireLine(res)}${note}`
     if (!r.ok || res.failures + res.errors > 0) {
-      if (!sel.all) console.log('[gate]   提示：后端红在**选择集**内。若疑漏测，跑 --shadow 同跑全量取证（§7.3-③）。')
+      if (!sel.all) console.log('[gate]   hint: the backend red is inside the SELECTION SET. If you suspect a missed test, run --shadow to compare against the full suite (section 7.3-3).')
       red = true
     }
     if (!opts.shadow) printShadowStatus()
-    else console.log('[gate] [影子] 选择集=全量（O8 降级），本笔无对照样本 ⇒ 不计入影子窗口。')
+    else console.log('[gate] [shadow] selection set = full suite (O8 degradation), no comparison sample this run => not counted in the shadow window.')
   }
 
   const restRed = staticAndFrontend({ withBuild: false })
@@ -374,15 +390,15 @@ function compareShadow(sel, selRes, fullRes) {
   const notSelected = missed.filter((t) => !sel.selectedClasses.includes(t.split('#')[0]))
   const extra = [...selFailed].filter((t) => !fullFailed.includes(t))
 
-  console.log(`[gate] [影子] 选择集：${sel.selected} 类 · ${surefireLine(selRes)}`)
-  console.log(`[gate] [影子] 全量　：${surefireLine(fullRes)}`)
-  console.log(`[gate] [影子] 漏检 missed=${missed.length}（其中未选中 ${notSelected.length} / 选中但绿 ${missed.length - notSelected.length}）`)
+  console.log(`[gate] [shadow] selection: ${sel.selected} classes; ${surefireLine(selRes)}`)
+  console.log(`[gate] [shadow] full     : ${surefireLine(fullRes)}`)
+  console.log(`[gate] [shadow] missed=${missed.length} (not selected ${notSelected.length} / selected but green ${missed.length - notSelected.length})`)
   if (missed.length) {
-    console.log('[gate] [影子] 漏检清单（须逐笔根因归类：反射/夹具/状态/时区/超限/其他，并回填兜底规则或冒烟集）：')
-    for (const t of missed.slice(0, 40)) console.log(`[gate]   - ${t}${sel.selectedClasses.includes(t.split('#')[0]) ? '' : '（未选中）'}`)
+    console.log('[gate] [shadow] missed list (classify each root cause: reflection/fixture/state/timezone/limit/other, then backfill a fallback rule or the smoke set):')
+    for (const t of missed.slice(0, 40)) console.log(`[gate]   - ${t}${sel.selectedClasses.includes(t.split('#')[0]) ? '' : ' (not selected)'}`)
   }
   if (extra.length) {
-    console.log(`[gate] [影子] 选择集多红 ${extra.length} 条（全量绿）⇒ 疑似 flake 或选择集噪声：${extra.slice(0, 10).join(', ')}`)
+    console.log(`[gate] [shadow] selection went red on ${extra.length} extra test(s) that are green in the full suite => likely flake or selection noise: ${extra.slice(0, 10).join(', ')}`)
   }
   recordShadow(sel, selRes, { ...fullRes, missed })
   return []
@@ -406,14 +422,14 @@ function recordShadow(sel, selRes, fullInfo) {
     rootCauses: [],
   })
   saveLedger(ledger)
-  console.log(`[gate] [影子] 窗口累计：${ledger.runs} 笔 · 漏检 ${ledger.missed} 笔 ⇒ 判据（≤${SHADOW_MAX_MISSED}/${SHADOW_WINDOW}）${shadowVerdict(ledger)}`)
-  console.log(`[gate] [影子] 台账：${LEDGER}`)
+  console.log(`[gate] [shadow] window total: ${ledger.runs} run(s); missed ${ledger.missed} => criterion (<=${SHADOW_MAX_MISSED}/${SHADOW_WINDOW}) ${shadowVerdict(ledger)}`)
+  console.log(`[gate] [shadow] ledger: ${rel(path.join(REPO, LEDGER))}`)
 }
 
 function printShadowStatus() {
   const ledger = loadLedger()
-  console.log(`[gate] [影子] 本笔未同跑全量（未传 --shadow）；窗口累计 ${ledger.runs} 笔 · 漏检 ${ledger.missed} 笔 ⇒ ${shadowVerdict(ledger)}`)
-  console.log('[gate] [影子] 判据（§7.3-③ / O4）：漏检 ≤ 1 笔 / 300 笔；每笔漏必须根因归类并回填兜底规则或冒烟集。')
+  console.log(`[gate] [shadow] full suite was not run this time (--shadow not passed); window total ${ledger.runs} run(s); missed ${ledger.missed} => ${shadowVerdict(ledger)}`)
+  console.log('[gate] [shadow] criterion (section 7.3-3 / O4): at most 1 missed per 300 runs; every miss must be root-caused and backfilled into a fallback rule or the smoke set.')
 }
 
 function mergeTier() {
@@ -421,20 +437,20 @@ function mergeTier() {
   const hits = staticFallbacks(changedPaths())
   const f13 = hits.filter((h) => h.rule === 'F13')
   if (f13.length) {
-    console.log(`[gate] F13 命中（locale/时区面）：${f13[0].reason}`)
-    console.log('[gate]   合流级恒跑 en-US 全量 ⇒ 「F13 强制 en-US」自动成立（不额外加步骤）。')
+    console.warn(`[gate] F13 matched (locale/timezone surface): ${f13[0].reason}`)
+    console.warn('[gate]   the merge tier always runs the en-US full suite, so "F13 forces en-US" holds without an extra step.')
   }
 
   let red = false
   clearSurefire()
-  const a = step('后端全量（默认 locale）', mvnInBackend({}), { cwd: path.join(REPO, 'backend') })
+  const a = step('backend full suite (default locale)', mvnInBackend({}), { cwd: path.join(REPO, 'backend') })
   const ra = readSurefire()
   console.log(`[gate]   ${surefireLine(ra)}`)
   steps[steps.length - 1].note = surefireLine(ra)
   if (!a.ok || ra.failures + ra.errors > 0) red = true
 
   clearSurefire()
-  const b = step('后端全量（JVM en-US）', mvnInBackend({ enUS: true }), { cwd: path.join(REPO, 'backend') })
+  const b = step('backend full suite (JVM en-US)', mvnInBackend({ enUS: true }), { cwd: path.join(REPO, 'backend') })
   const rb = readSurefire()
   console.log(`[gate]   ${surefireLine(rb)}`)
   steps[steps.length - 1].note = surefireLine(rb)
@@ -449,23 +465,23 @@ function staticAndFrontend({ withBuild }) {
   let red = false
   const frontend = path.join(REPO, 'frontend')
 
-  const t = step('前端单测（全量 vitest）', 'yarn test', { cwd: frontend })
+  const t = step('frontend unit tests (full vitest)', 'yarn test', { cwd: frontend })
   const vitestCount = countVitest(t.logFile)
   if (vitestCount) steps[steps.length - 1].note = vitestCount
   if (!t.ok) red = true
 
-  const tc = step('前端类型检查（vue-tsc --noEmit）', 'yarn typecheck', { cwd: frontend })
+  const tc = step('frontend type check (vue-tsc --noEmit)', 'yarn typecheck', { cwd: frontend })
   if (!tc.ok) red = true
 
   if (withBuild) {
-    const bd = step('前端构建（vite build）', 'yarn build', { cwd: frontend })
+    const bd = step('frontend build (vite build)', 'yarn build', { cwd: frontend })
     if (!bd.ok) red = true
   }
 
-  const docs = step('文档一致性门禁（check-docs）', 'node scripts/ci/check-docs.mjs')
+  const docs = step('doc consistency gate (check-docs)', 'node scripts/ci/check-docs.mjs')
   if (!docs.ok) red = true
 
-  const i18n = step('i18n 残留（--strict 棘轮）', 'node scripts/ci/check-i18n-residue.mjs --strict')
+  const i18n = step('i18n residue (--strict ratchet)', 'node scripts/ci/check-i18n-residue.mjs --strict')
   if (!i18n.ok) red = true
 
   return red
@@ -477,7 +493,7 @@ function countVitest(logFile) {
     const m = /Test Files\s+(\d+) passed[^\n]*\n[\s\S]{0,200}?Tests\s+(\d+) passed[^\n]*/.exec(text)
       || /Tests\s+(\d+) passed[^\n]*/.exec(text)
     if (!m) return ''
-    return m.length > 2 ? `${m[1]} 文件 · ${m[2]} 例通过` : `${m[1]} 例通过`
+    return m.length > 2 ? `${m[1]} files; ${m[2]} tests passed` : `${m[1]} tests passed`
   } catch {
     return ''
   }
@@ -491,36 +507,41 @@ let MVN
 
 function summary(tier, code, totalSeconds) {
   console.log('')
-  console.log(`[gate] ===== tier=${tier} 结果=${code === 0 ? '绿' : '红'} 总耗时=${fmt(totalSeconds)} =====`)
+  console.log(`[gate] ===== tier=${tier} result=${code === 0 ? 'GREEN' : 'RED'} total=${fmt(totalSeconds)} =====`)
   for (const s of steps) {
     console.log(`[gate]   ${s.name.padEnd(34)} ${fmt(s.seconds).padStart(7)}  ${s.ok ? 'ok' : 'RED'}  ${s.note || ''}`)
   }
-  console.log(`[gate]   日志：${rel(LOG_ROOT)}/`)
+  console.log(`[gate]   logs: ${rel(LOG_ROOT)}/`)
   if (tier === 'commit') {
-    console.log('[gate]   合流前仍须跑 --tier merge（全量双 locale + build）；E2E 按今天做法手动/CI 跑。')
+    console.log('[gate]   before merging you still need --tier merge (full suite in both locales + build); E2E stays manual/CI as today.')
   } else {
-    console.log('[gate]   E2E 未自动跑（沿用今天：合流前手动 scripts/verify-e2e.ps1，或由 CI e2e job 承担）。')
+    console.log('[gate]   E2E not run automatically (unchanged: run scripts/verify-e2e.ps1 manually before merging, or let the CI e2e job do it).')
   }
+}
+
+/** 只回显可定位到仓库/名字的部分：完整 mvn 路径常带本机用户名，日志不外泄家目录。 */
+function displayExe(p) {
+  return p.startsWith(REPO) ? rel(p) : path.basename(p)
 }
 
 function main() {
   opts = parseArgs(process.argv.slice(2))
   if (opts.help) { usage(); return 0 }
   if (!['commit', 'merge'].includes(opts.tier)) {
-    console.error('[gate] 必须给 --tier commit|merge（--help 看用法）')
+    console.error('[gate] --tier commit|merge is required (see --help)')
     return 3
   }
   MVN = resolveMvn(opts.mvn)
   if (!MVN) {
-    console.error('[gate] 找不到 mvn：请把路径传给 --mvn <path> 或设环境变量 MVN=<path to mvn|mvn.cmd>')
+    console.error('[gate] mvn not found: pass --mvn <path> or set MVN=<path to mvn|mvn.cmd>')
     return 3
   }
-  console.log(`[gate] tier=${opts.tier}${opts.shadow ? '（影子模式）' : ''}`)
-  console.log(`[gate] mvn=${MVN}`)
+  console.log(`[gate] tier=${opts.tier}${opts.shadow ? ' (shadow mode)' : ''}`)
+  console.log(`[gate] mvn=${displayExe(MVN)}`)
   try {
     BASE = opts.base || git(['merge-base', 'origin/main', 'HEAD']).trim()
   } catch {
-    console.error('[gate] 取不到 diff 基准（仓库没有 origin/main：浅克隆/新仓）。请显式给 --base <sha>')
+    console.error('[gate] cannot resolve a diff base (no origin/main: shallow clone or fresh repo). Pass --base <sha> explicitly')
     return 3
   }
   console.log(`[gate] base=${BASE}`)
@@ -535,6 +556,6 @@ function main() {
 try {
   process.exitCode = main()
 } catch (e) {
-  console.error(`[gate] 失败：${e.message}`)
+  console.error(`[gate] failed: ${e.message}`)
   process.exitCode = 3
 }

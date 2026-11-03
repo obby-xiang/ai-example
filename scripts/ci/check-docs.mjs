@@ -68,10 +68,10 @@ const assertion = (title, fn) => {
   try {
     fn()
   } catch (ex) {
-    fail('scripts/ci/check-docs.mjs', `断言执行异常：${ex.message}`)
+    fail('scripts/ci/check-docs.mjs', `assertion threw: ${ex.message}`)
   }
   const hits = problems.length - before
-  console.log(`  ${hits === 0 ? '[PASS]' : '[FAIL]'} ${title}${hits === 0 ? '' : `（${hits} 处）`}`)
+  console.log(`  ${hits === 0 ? '[PASS]' : '[FAIL]'} ${title}${hits === 0 ? '' : ` (${hits} hit(s))`}`)
 }
 
 const abs = (relPath) => path.join(REPO, relPath)
@@ -99,11 +99,11 @@ const PATH_EXEMPT = /(xxx|placeholder|redacted|[<>])/i
 function assertNoAbsolutePathInDocs() {
   const scanLib = read('scripts/githooks/scan-lib.sh')
   if (!/scan_rule_path\s*\(\)/.test(scanLib)) {
-    fail('scripts/githooks/scan-lib.sh', '未找到 scan_rule_path()：① 的"复用 scan-lib PATH 正则"前提失效')
+    fail('scripts/githooks/scan-lib.sh', 'scan_rule_path() not found: assertion 1 relies on reusing the scan-lib PATH regex')
   }
   for (const doc of NAV_DOCS) {
     if (!exists(doc)) {
-      fail(doc, '导航/口径文档清单中的文件不存在')
+      fail(doc, 'a file listed as nav/policy doc does not exist')
       continue
     }
     for (const { no, text } of docLines(doc)) {
@@ -113,7 +113,7 @@ function assertNoAbsolutePathInDocs() {
         let m
         while ((m = re.exec(stripped)) !== null) {
           const token = m[0]
-          if (!PATH_EXEMPT.test(token)) fail(`${doc}:${no}`, `盘符/本机绝对路径：${token.trim()}`)
+          if (!PATH_EXEMPT.test(token)) fail(`${doc}:${no}`, `drive-letter / local absolute path: ${token.trim()}`)
           if (m.index === re.lastIndex) re.lastIndex++
         }
       }
@@ -124,7 +124,7 @@ function assertNoAbsolutePathInDocs() {
 // ── ② 技术栈版本与 pom.xml / package.json 一致 ───────────────────────────────
 function firstMatch(text, re, where) {
   const m = re.exec(text)
-  if (!m) fail(where, `未能从事实源取到版本（正则不匹配）：${re}`)
+  if (!m) fail(where, `could not read version from source of truth (regex did not match): ${re}`)
   return m ? m[1] : null
 }
 
@@ -146,16 +146,16 @@ function assertVersionsMatch() {
   const readme = docLines('README.md')
   for (const [label, expected, source] of checks) {
     if (!expected) {
-      fail(source, `${label}：事实源中无该依赖版本`)
+      fail(source, `${label}: dependency version not found in source of truth`)
       continue
     }
     const row = readme.find((l) => new RegExp(`\\|\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\|`).test(l.text))
     if (!row) {
-      fail('README.md', `技术栈表缺「${label}」行（事实源：${source}）`)
+      fail('README.md', `tech-stack table has no row for "${label}" (source: ${source})`)
       continue
     }
     if (!row.text.replace(/`/g, '').includes(expected)) {
-      fail(`README.md:${row.no}`, `版本漂移：README 行内未出现事实源值 ${expected}（${source}）`)
+      fail(`README.md:${row.no}`, `version drift: README row does not contain the source-of-truth value ${expected} (${source})`)
     }
   }
 }
@@ -180,7 +180,7 @@ function assertReferencedFilesExist() {
         const key = `${doc}|${token}`
         if (seen.has(key)) continue
         seen.add(key)
-        if (!exists(token)) fail(`${doc}:${no}`, `引用的文件不存在：${token}`)
+        if (!exists(token)) fail(`${doc}:${no}`, `referenced file does not exist: ${token}`)
       }
     }
   }
@@ -196,7 +196,7 @@ function readPortTable() {
   const lines = docLines('README.md')
   const start = lines.findIndex((l) => /^##\s+端口一览\s*$/.test(l.text))
   if (start < 0) {
-    fail('README.md', '缺「## 端口一览」小节（断言 ④ 的事实源）')
+    fail('README.md', 'section "## 端口一览" is missing (source of truth for assertion 4)')
     return new Map()
   }
   const rows = new Map()
@@ -234,37 +234,37 @@ function assertPortsMatch() {
   for (const [label, expected, source] of expectRows) {
     const row = table.get(label)
     if (!row) {
-      fail('README.md', `端口一览缺「${label}」行（事实源：${source}）`)
+      fail('README.md', `port table has no row for "${label}" (source: ${source})`)
       continue
     }
     if (row.port !== expected) {
-      fail(`README.md:${row.line}`, `${label} 端口表值 ${row.port} != ${source} 的 ${expected}`)
+      fail(`README.md:${row.line}`, `port-table value for "${label}" is ${row.port} but ${source} says ${expected}`)
     }
   }
 
   // 端口唯一事实源：application.yml 不得残留 app.server.* / frontend-port / backend-port 死键
   for (const { no, text } of docLines('backend/src/main/resources/application.yml')) {
     if (/app\.server|frontend-port|backend-port|^\s{2}server:\s*$/.test(text)) {
-      fail(`backend/src/main/resources/application.yml:${no}`, `残留无绑定死键：${text.trim()}`)
+      fail(`backend/src/main/resources/application.yml:${no}`, `stale unbound key left behind: ${text.trim()}`)
     }
   }
 
   // 默认值三方对齐：vite DEFAULT_API_BASE / .env.example VITE_API_BASE 都必须指向后端真实端口
   const apiBasePort = Number(firstMatch(vite, /DEFAULT_API_BASE\s*=\s*'http:\/\/localhost:(\d+)'/, 'frontend/vite.config.ts'))
   if (apiBasePort !== serverPort) {
-    fail('frontend/vite.config.ts', `DEFAULT_API_BASE 端口 ${apiBasePort} != 后端 server.port ${serverPort}（开箱对齐被破坏）`)
+    fail('frontend/vite.config.ts', `DEFAULT_API_BASE port ${apiBasePort} != backend server.port ${serverPort} (out-of-the-box alignment broken)`)
   }
   const envExample = read('frontend/.env.example')
   const envPort = Number(firstMatch(envExample, /^VITE_API_BASE=http:\/\/localhost:(\d+)/m, 'frontend/.env.example'))
   if (envPort !== serverPort) {
-    fail('frontend/.env.example', `VITE_API_BASE 端口 ${envPort} != 后端 server.port ${serverPort}`)
+    fail('frontend/.env.example', `VITE_API_BASE port ${envPort} != backend server.port ${serverPort}`)
   }
 
   // 导航/口径文档不得残留旧默认端口 8080（历史证据文档已按裁决 7 排除在扫描范围外）
   for (const doc of NAV_DOCS) {
     if (!exists(doc)) continue
     for (const { no, text } of docLines(doc)) {
-      if (/:8080\b/.test(text)) fail(`${doc}:${no}`, '残留旧默认端口 8080（应为后端 8081 或去掉）')
+      if (/:8080\b/.test(text)) fail(`${doc}:${no}`, 'stale legacy default port 8080 (should be 8081 or removed)')
     }
   }
 }
@@ -391,11 +391,11 @@ function selfCheckNamingRule() {
   let seedsConcat = 0
   for (const [label, sample] of NAMING_SEEDS_CONCAT) {
     if (!hitsName(sample)) {
-      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：连写组种子未被捕获（第三态连写规则失效或量词被改窄？）（${label}）`)
+      fail('scripts/ci/check-docs.mjs', `naming-rule self-check: concat seed not caught (third-state concat rule broken or quantifier narrowed?) (${label})`)
       continue
     }
     if (NAME_RE.test(normalizeName(sample)) || NAME_RE.test(separateName(sample))) {
-      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：连写组种子被前两态命中（第三态严格性失效：命中不再唯一来自连写规则）（${label}）`)
+      fail('scripts/ci/check-docs.mjs', `naming-rule self-check: concat seed caught by the first two states (third state no longer strict: hit is not unique to the concat rule) (${label})`)
       continue
     }
     seedsConcat++
@@ -403,14 +403,14 @@ function selfCheckNamingRule() {
   if (seedsConcat < NAMING_SEEDS_CONCAT_MIN) {
     fail(
       'scripts/ci/check-docs.mjs',
-      `命名纪律规则自检：连写组"仅第三态可捕获"的种子不足（${seedsConcat} < 下限 ${NAMING_SEEDS_CONCAT_MIN}；种子行被删或被改宽）`
+      `naming-rule self-check: too few concat seeds that only the third state can catch (${seedsConcat} < minimum ${NAMING_SEEDS_CONCAT_MIN}; seed rows deleted or rule widened)`
     )
   }
   // 分隔组：命中必须来自前两态之一（隐形字符面被改窄时，本组会退化为"仅第三态可捕获"而报红）
   let seedsSeparated = 0
   for (const [label, sample] of NAMING_SEEDS_SEPARATED) {
     if (!NAME_RE.test(normalizeName(sample)) && !NAME_RE.test(separateName(sample))) {
-      fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：分隔组种子未经前两态捕获（NFKC 折叠 / 隐形字符分隔面被改窄？）（${label}）`)
+      fail('scripts/ci/check-docs.mjs', `naming-rule self-check: separated seed not caught by the first two states (NFKC fold / invisible-char separator narrowed?) (${label})`)
       continue
     }
     seedsSeparated++
@@ -418,11 +418,11 @@ function selfCheckNamingRule() {
   if (seedsSeparated < NAMING_SEEDS_SEPARATED_MIN) {
     fail(
       'scripts/ci/check-docs.mjs',
-      `命名纪律规则自检：分隔组正向种子不足（${seedsSeparated} < 下限 ${NAMING_SEEDS_SEPARATED_MIN}；种子行被删）`
+      `naming-rule self-check: too few separated positive seeds (${seedsSeparated} < minimum ${NAMING_SEEDS_SEPARATED_MIN}; seed rows deleted)`
     )
   }
   for (const [label, sample] of NAMING_CONTROLS) {
-    if (hitsName(sample)) fail('scripts/ci/check-docs.mjs', `命名纪律规则自检：负对照被误伤（${label}）`)
+    if (hitsName(sample)) fail('scripts/ci/check-docs.mjs', `naming-rule self-check: negative control falsely matched (${label})`)
   }
   return {
     concat: NAMING_SEEDS_CONCAT.length,
@@ -437,12 +437,12 @@ function assertNamingDiscipline() {
   const selfCheck = selfCheckNamingRule()
   for (const exempt of NAMING_EXEMPT) {
     if (!exists(exempt)) {
-      fail(exempt, '命名纪律豁免清单中的文件不存在（豁免面与 docs/README.md §命名纪律不一致）')
+      fail(exempt, 'a file in the naming-discipline exemption list does not exist (exemption surface out of sync with docs/README.md §命名纪律)')
       continue
     }
     const head = read(exempt).split(/\r?\n/).slice(0, 12).join('\n')
     if (!/命名纪律豁免/.test(head) || !/DOC#5/.test(head)) {
-      fail(exempt, '豁免文件头部缺「命名纪律豁免 / DOC#5」依据注释（防借豁免之名夹带）')
+      fail(exempt, 'exempted file header lacks the "命名纪律豁免 / DOC#5" justification comment (prevents borrowing the exemption)')
     }
   }
   const exemptSet = new Set(NAMING_EXEMPT)
@@ -454,7 +454,7 @@ function assertNamingDiscipline() {
     try {
       buf = fs.readFileSync(file)
     } catch {
-      fail(relPath, '按 git ls-files 清单读取失败（文件缺失或被删除）')
+      fail(relPath, 'could not read a path listed by git ls-files (file missing or deleted)')
       continue
     }
     if (buf.includes(0)) continue // 二进制跳过
@@ -462,11 +462,13 @@ function assertNamingDiscipline() {
     const text = buf.toString('utf8')
     if (!hitsName(text)) continue
     for (const { no, text: line } of text.split(/\r?\n/).map((t, i) => ({ no: i + 1, text: t }))) {
-      if (hitsName(line)) fail(`${relPath}:${no}`, '命中命名纪律禁则（旧主仓目录名/同名分支名，含零分隔连写形态；指代一律用占位符）')
+      if (hitsName(line)) fail(`${relPath}:${no}`, 'naming-discipline forbidden term hit (legacy repo dir name / same-name branch, including zero-separator concat form; always use placeholders)')
     }
   }
-  console.log(`         （命名纪律扫描：git ls-files ${gitLsFiles().length} 个路径，实扫文本 ${scanned} 个；豁免 ${exemptSet.size} 个）`)
-  console.log(`         （规则自检：连写组 ${selfCheck.seedsConcat}/${selfCheck.concat} 例「仅第三态可捕获」（下限 ${NAMING_SEEDS_CONCAT_MIN}）；分隔组 ${selfCheck.seedsSeparated}/${selfCheck.separated} 例经前两态捕获（下限 ${NAMING_SEEDS_SEPARATED_MIN}）；负对照 ${selfCheck.controls} 全不误伤）`)
+  console.log(`         (naming scan: ${gitLsFiles().length} tracked paths, ${scanned} text files scanned, ${exemptSet.size} exempt;` +
+    ` rule self-check: concat ${selfCheck.seedsConcat}/${selfCheck.concat} seeds catchable only by third state (min ${NAMING_SEEDS_CONCAT_MIN}),` +
+    ` separated ${selfCheck.seedsSeparated}/${selfCheck.separated} caught by first two states (min ${NAMING_SEEDS_SEPARATED_MIN}),` +
+    ` ${selfCheck.controls} negative controls untouched)`)
 }
 
 // ── ⑥ .java 探针不参与构建 ──────────────────────────────────────────────────
@@ -475,12 +477,12 @@ function assertProbesNotBuilt() {
   const basenames = tracked.map((f) => path.basename(f)).sort()
   const expected = [...EXPECTED_PROBES].sort()
   if (basenames.join(',') !== expected.join(',')) {
-    fail(PROBE_DIR, `探针清单与期望集合不一致（新增探针须显式登记进 check-docs.mjs）：实见 [${basenames.join(', ')}]，期望 [${expected.join(', ')}]`)
+    fail(PROBE_DIR, `probe list differs from the expected set (new probes must be registered in check-docs.mjs): found [${basenames.join(', ')}], expected [${expected.join(', ')}]`)
   }
   for (const relPath of tracked) {
     const head = read(relPath).split(/\r?\n/).slice(0, 20).join('\n')
     if (!/不参与.*构建.*测试计数/.test(head)) {
-      fail(relPath, '探针头部缺「仓库外编译运行、不参与构建与测试计数」声明')
+      fail(relPath, 'probe header lacks the "compiled outside the repo, not part of build or test counts" declaration')
     }
   }
   const pom = read('backend/pom.xml')
@@ -492,48 +494,50 @@ function assertProbesNotBuilt() {
   for (const [re, name] of patterns) {
     const m = re.exec(pom)
     if (m && /docs/.test(m[1])) {
-      fail('backend/pom.xml', `pom 声明了指向 docs/ 的 ${name}：${m[1].trim()}`)
+      fail('backend/pom.xml', `pom declares ${name} pointing into docs/: ${m[1].trim()}`)
     }
   }
 }
 
 // ── 入口 ───────────────────────────────────────────────────────────────────
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  console.log(`文档一致性门禁（DOC#5）
+  console.log(`doc consistency gate (DOC#5)
 
-用法：node scripts/ci/check-docs.mjs
-      node scripts/ci/check-docs.mjs --help
+usage: node scripts/ci/check-docs.mjs
+       node scripts/ci/check-docs.mjs --help
 
-六条断言（任何一条红即 exit 1）：
-  ① 导航/口径文档无盘符绝对路径（正则取法与 scripts/githooks/scan-lib.sh 一致）
-  ② 技术栈版本与 backend/pom.xml、frontend/package.json 一致
-  ③ 导航/口径文档引用的仓库内文件存在
-  ④ 端口表与 application.yml / vite.config.ts 一致（含默认值三方对齐与端口唯一事实源）
-  ⑤ 命名纪律禁则（git ls-files 全量；匹配三态 = NFKC + 隐形/零宽字符双态 + 去分隔符连写，带词首守卫，
-     断言内自带正向种子/负对照自检，种子拆「连写组 / 分隔组」两组并各设数量下限；唯一豁免 = 3 个
-     spike 脱敏脚本的匹配源正则。**已知缺口**：NFKC 不折叠的同形字母（西里尔/希腊等）可穿过，详见
-     scripts/ci/check-docs.mjs 断言 ⑤ 段注释末尾的缺口登记）
-  ⑥ docs/evidence/probes/ 的 .java 探针不参与构建
+six assertions (any red => exit 1):
+  1) nav/policy docs contain no drive-letter absolute paths (same regex source as scripts/githooks/scan-lib.sh)
+  2) tech-stack versions match backend/pom.xml and frontend/package.json
+  3) files referenced by nav/policy docs exist in the repo
+  4) port table matches application.yml / vite.config.ts (three-way default alignment + single port source)
+  5) naming-discipline forbidden terms (full git ls-files set; three match states = NFKC + invisible/zero-width
+     dual state + separator-stripped concat form, with a word-start guard; the assertion carries its own
+     positive seeds / negative controls, split into concat and separated groups with minimum counts;
+     the only exemptions are the match-source regexes of 3 spike masking scripts. **Known gap**: homoglyphs
+     that NFKC does not fold (Cyrillic/Greek etc.) can still pass; see the gap registry at the end of the
+     assertion 5 comment block in scripts/ci/check-docs.mjs)
+  6) .java probes under docs/evidence/probes/ are not part of the build
 
-扫描范围：①②③④ 只扫导航/口径文档（${NAV_DOCS.join(' / ')}），
-明确排除 docs/evidence/ 历史证据文档（裁决 7）；⑤ 按 git ls-files 全量。
-详细口径见 docs/M2-排期计划.md 条目 18、docs/README.md §命名纪律。`)
+scan scope: 1-4 only cover nav/policy docs (${NAV_DOCS.join(' / ')});
+docs/evidence/ historical evidence docs are explicitly excluded (ruling 7); assertion 5 covers all of git ls-files.
+Details: docs/M2-排期计划.md item 18, docs/README.md §命名纪律.`)
   process.exit(0)
 }
 
-console.log('文档一致性门禁（check-docs）')
-assertion('① 导航/口径文档无盘符绝对路径', assertNoAbsolutePathInDocs)
-assertion('② 技术栈版本与 pom.xml / package.json 一致', assertVersionsMatch)
-assertion('③ 导航/口径文档引用的文件存在', assertReferencedFilesExist)
-assertion('④ 端口表与 application.yml / vite.config.ts 一致', assertPortsMatch)
-assertion('⑤ 命名纪律禁则（git ls-files 全量）', assertNamingDiscipline)
-assertion('⑥ .java 探针不参与构建', assertProbesNotBuilt)
+console.log('doc consistency gate (check-docs)')
+assertion('1) nav/policy docs contain no drive-letter absolute paths', assertNoAbsolutePathInDocs)
+assertion('2) tech-stack versions match pom.xml / package.json', assertVersionsMatch)
+assertion('3) files referenced by nav/policy docs exist', assertReferencedFilesExist)
+assertion('4) port table matches application.yml / vite.config.ts', assertPortsMatch)
+assertion('5) naming-discipline forbidden terms (full git ls-files set)', assertNamingDiscipline)
+assertion('6) .java probes under docs/ are not part of the build', assertProbesNotBuilt)
 
 console.log('')
 if (problems.length === 0) {
-  console.log('全部通过：6/6 断言绿。')
+  console.log('all green: 6/6 assertions passed.')
   process.exit(0)
 }
-console.log(`发现 ${problems.length} 处文档漂移：`)
-for (const p of problems) console.log(`  [${p.assertion}] ${p.where}  =>  ${p.detail}`)
+console.error(`${problems.length} doc drift(s) found:`)
+for (const p of problems) console.error(`  [${p.assertion}] ${p.where}  =>  ${p.detail}`)
 process.exit(1)

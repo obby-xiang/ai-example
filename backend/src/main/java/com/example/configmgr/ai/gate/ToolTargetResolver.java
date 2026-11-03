@@ -138,7 +138,7 @@ public class ToolTargetResolver {
 		}
 		catch (RuntimeException ex) {
 			// 失败开放：查不了 ≠ 不存在（见类注"失败开放"）
-			log.warn("目标资源校验读仓储失败，按放行处理 taskId={} tool={}：{}", taskId, toolName, ex.getMessage());
+			log.warn("target resource validation could not read repository; allowing taskId={} tool={} error={}", taskId, toolName, ex.getMessage());
 			return Verdict.ok();
 		}
 		if (found == null || found.isEmpty()) {

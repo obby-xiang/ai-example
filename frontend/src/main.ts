@@ -38,7 +38,7 @@ for (const [name, component] of Object.entries(ElementPlusIconsVue)) {
 }
 
 app.config.errorHandler = (error) => {
-  console.error('[vue] 未捕获错误', error)
+  console.error('[vue] uncaught error', error)
 }
 
 app.mount('#app')

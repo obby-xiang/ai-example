@@ -71,7 +71,7 @@ public class ToolUnknownReconciler {
 			return null;
 		}
 		if (PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			log.debug("UNKNOWN 对账跳过前端通道 runId={} toolCallId={}", runId, pending.getToolCallId());
+			log.debug("UNKNOWN reconciliation skips frontend channel runId={} toolCallId={}", runId, pending.getToolCallId());
 			return null;
 		}
 		String toolCallId = pending.getToolCallId();
@@ -87,7 +87,7 @@ public class ToolUnknownReconciler {
 			ToolOutcome outcome = ToolOutcome.fromWire(textOf(ledger.get("outcome")));
 			String resultText = textOf(ledger.get("resultText"));
 			if (outcome != null && outcome != ToolOutcome.UNKNOWN) {
-				log.info("UNKNOWN 对账命中台账 runId={} toolCallId={} outcome={}", runId, toolCallId,
+				log.info("UNKNOWN reconciliation hit the ledger runId={} toolCallId={} outcome={}", runId, toolCallId,
 						outcome.wire());
 				return new Reconciliation(true, outcome, textOf(ledger.get("code")),
 						resultText == null ? "" : resultText, executedBy);
@@ -96,7 +96,7 @@ public class ToolUnknownReconciler {
 			String text = resultText == null || resultText.isBlank()
 					? "台账记录存在但结局为 UNKNOWN：无法判定该调用是否已执行，需人工对账。"
 					: resultText;
-			log.warn("UNKNOWN 对账命中台账但结局仍为 unknown runId={} toolCallId={}（保持 UNKNOWN）", runId,
+			log.warn("UNKNOWN reconciliation hit the ledger but the outcome is still unknown (stays UNKNOWN) runId={} toolCallId={}", runId,
 					toolCallId);
 			return new Reconciliation(true, ToolOutcome.UNKNOWN, null, text, executedBy);
 		}
@@ -104,7 +104,7 @@ public class ToolUnknownReconciler {
 		// ② 认领：有人拿了执行权、尚未交付
 		String claimedBy = this.store.claimedBy(runId, toolCallId);
 		if (claimedBy != null) {
-			log.warn("UNKNOWN 对账命中在途认领 runId={} toolCallId={} claimedBy={}（保持 UNKNOWN）", runId,
+			log.warn("UNKNOWN reconciliation hit an in-flight claim (stays UNKNOWN) runId={} toolCallId={} claimedBy={}", runId,
 					toolCallId, claimedBy);
 			return unknown("该调用已由实例 " + claimedBy + " 认领，已在执行中；结果尚未落台账，"
 					+ "本次保持 UNKNOWN，需人工对账。");
@@ -115,13 +115,13 @@ public class ToolUnknownReconciler {
 		String jobType = ToolTargetResolver.jobTypeOf(pending.getName()) == null ? null
 				: ToolTargetResolver.jobTypeOf(pending.getName()).name();
 		if (taskId != null && this.resourceLocks != null && this.resourceLocks.isHeld(taskId, jobType)) {
-			log.warn("UNKNOWN 对账：目标任务仍被资源锁占用 runId={} toolCallId={} taskId={}（保持 UNKNOWN）", runId,
+			log.warn("UNKNOWN reconciliation: target task still held by a resource lock (stays UNKNOWN) runId={} toolCallId={} taskId={}", runId,
 					toolCallId, taskId);
 			return unknown("目标任务上仍有作业在执行（资源锁被占用），无法判定，需人工对账；"
 					+ "本次保持 UNKNOWN。");
 		}
 
-		log.warn("UNKNOWN 对账无任何执行痕迹 runId={} toolCallId={}（保持 UNKNOWN，需人工对账）", runId, toolCallId);
+		log.warn("UNKNOWN reconciliation found no execution trace (stays UNKNOWN; manual reconciliation required) runId={} toolCallId={}", runId, toolCallId);
 		return unknown("台账与认领记录里都没有该调用的执行痕迹，无法判定，需人工对账。");
 	}
 

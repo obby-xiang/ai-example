@@ -520,7 +520,7 @@ public final class ContextCompactor {
 				return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
 			}
 			// L1/L3 本地动作抛错：没有摘要尝试 ⇒ 不碰熔断
-			log.warn("上下文压缩规划失败 sessionId={} runId={}：{}（历史保持原样）", request.sessionId(),
+			log.warn("context compaction planning failed sessionId={} runId={} error={} (history unchanged)", request.sessionId(),
 					request.runId(), ex.getMessage());
 			return noopPlan(request, state, before, decision, REASON_FAILED);
 		}
@@ -589,7 +589,7 @@ public final class ContextCompactor {
 							plan.summaryChars(), plan.reason(), plan.clear(), request, now, compacted.circuit()));
 			boolean wasOpen = state.circuit() != null && !CompactionFuse.CLOSED.equals(state.circuit());
 			if (wasOpen && plan.summarised()) {
-				log.info("上下文摘要熔断恢复 sessionId={} level={} fails=0", request.sessionId(),
+				log.info("context summary circuit recovered sessionId={} level={} fails=0", request.sessionId(),
 						plan.action().wire());
 				this.store.appendLedger(request.sessionId(),
 						fuseEvent("circuit_closed", compacted, request, now, plan.before()));
@@ -597,7 +597,7 @@ public final class ContextCompactor {
 			// B3：只有状态/台账都写成功之后才分配 eventId 并写事实；失败会让外层 catch 返回
 			// committed=false（不发帧、不返回 eventId），因此 no-op/失败/未提交永远没有事件。
 			String eventId = appendCompactionEvent(request, plan, now);
-			log.info("上下文压缩 sessionId={} runId={} level={} eventId={} cause={} anchor={} before={} after={} "
+			log.info("context compacted sessionId={} runId={} level={} eventId={} cause={} anchor={} before={} after={} "
 					+ "turns={} lostTokens={} clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(),
 					request.runId(), plan.action().wire(), eventId, request.cause(), request.anchorToolCallId(),
 					plan.before(), plan.after(), plan.turns(), plan.lostTokens(), plan.clear().cleared().size(),
@@ -613,7 +613,7 @@ public final class ContextCompactor {
 		catch (RuntimeException ex) {
 			// 任一步失败 ⇒ 记 ERROR；<b>不发帧</b>（committed=false）。记忆已按 CAS 改写，
 			// 故仍返回规划后的消息（模型看到的与记忆里的保持一致），只是账没记上。
-			log.error("上下文压缩提交失败 sessionId={} runId={} level={}：{}（状态/台账/事实可能不完整，本次不发 context 帧）",
+			log.error("context compaction commit failed sessionId={} runId={} level={} error={} (state/ledger/facts may be incomplete; no context frame this turn)",
 					request.sessionId(), request.runId(), plan.action().wire(), ex.getMessage());
 			return outcome(plan, request, state, false);
 		}
@@ -682,7 +682,7 @@ public final class ContextCompactor {
 							systemTokens, toolsTokens, inputTokens));
 		}
 		catch (RuntimeException ex) {
-			log.warn("上下文记账写入失败 sessionId={}：{}", sessionId, ex.getMessage());
+			log.warn("context usage record write failed sessionId={} error={}", sessionId, ex.getMessage());
 		}
 	}
 
@@ -693,7 +693,7 @@ public final class ContextCompactor {
 			return state == null ? ContextState.EMPTY : state;
 		}
 		catch (RuntimeException ex) {
-			log.warn("上下文状态读取失败 sessionId={}：{}（按空态处理）", sessionId, ex.getMessage());
+			log.warn("context state read failed sessionId={} error={} (treating as empty)", sessionId, ex.getMessage());
 			return ContextState.EMPTY;
 		}
 	}
@@ -713,7 +713,7 @@ public final class ContextCompactor {
 
 	private Plan noopPlan(Request request, ContextState state, int before, ContextTrigger.Decision decision,
 			String reason) {
-		log.debug("上下文压缩跳过 sessionId={} runId={} reason={} limit={} ratio={}", request.sessionId(),
+		log.debug("context compaction skipped sessionId={} runId={} reason={} limit={} ratio={}", request.sessionId(),
 				request.runId(), reason, decision.limitTokens(), String.format(Locale.ROOT, "%.3f",
 						decision.ratio()));
 		return new Plan(state, ContextTrigger.Level.NONE, request.messages(), before, before, 0,
@@ -724,7 +724,7 @@ public final class ContextCompactor {
 	/** 摘要失败：不提交任何历史变更，只标记"提交时推进熔断"。 */
 	private Plan failurePlan(Request request, ContextState state, int before, ContextTrigger.Decision decision,
 			String reason) {
-		log.error("上下文摘要失败 sessionId={} runId={} reason={}（历史保持原样，本轮照常发送）", request.sessionId(),
+		log.error("context summary failed sessionId={} runId={} reason={} (history unchanged, turn continues)", request.sessionId(),
 				request.runId(), reason);
 		return new Plan(state, ContextTrigger.Level.NONE, request.messages(), before, before, 0,
 				new ToolResultClearing.Plan(List.of(), List.of(), 0), 0, 0, 0, reason, System.currentTimeMillis(),
@@ -748,10 +748,10 @@ public final class ContextCompactor {
 		}
 		catch (RuntimeException ex) {
 			committed = false;
-			log.warn("熔断计数写入失败 sessionId={}：{}（按未计数继续）", request.sessionId(), ex.getMessage());
+			log.warn("circuit-breaker counter write failed sessionId={} error={} (continuing uncounted)", request.sessionId(), ex.getMessage());
 		}
 		if (CompactionFuse.OPEN.equals(failed.circuit())) {
-			log.warn("上下文摘要熔断打开 sessionId={} fails={} openUntil={}（此后只做 L1）", request.sessionId(),
+			log.warn("context summary circuit opened sessionId={} fails={} openUntil={} (L1 only from now on)", request.sessionId(),
 					failed.fuseFails(), failed.openUntilMs());
 		}
 		return outcome(plan, request, failed, committed);
@@ -844,7 +844,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("摘要开始回调失败（忽略，不影响压缩）：{}", ex.getMessage());
+					log.debug("summary start callback failed (ignored, compaction unaffected) error={}", ex.getMessage());
 				}
 			}
 			return delegate.summarize(systemPrompt, userPrompt, runtime);
@@ -870,7 +870,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("摘要进度回调失败（忽略，不影响压缩）：{}", ex.getMessage());
+					log.debug("summary progress callback failed (ignored, compaction unaffected) error={}", ex.getMessage());
 				}
 			}
 		};

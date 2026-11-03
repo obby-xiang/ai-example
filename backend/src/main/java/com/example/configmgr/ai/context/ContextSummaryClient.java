@@ -109,13 +109,13 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	public static ContextSummaryClient production(AiProperties properties) {
 		return new ContextSummaryClient(properties, (systemPrompt, userPrompt, runtime) -> {
 			if (runtime == null) {
-				throw unavailable("本轮 provider 运行态不可用：摘要只使用本轮模型");
+				throw unavailable("turn provider runtime unavailable: summary uses only the current turn's model");
 			}
 			if (runtime.chatModel() == null) {
-				throw unavailable("本轮 provider 运行态缺少 ChatModel：摘要只使用本轮模型");
+				throw unavailable("turn provider runtime has no ChatModel: summary uses only the current turn's model");
 			}
 			if (runtime.modelId() == null || runtime.modelId().isBlank()) {
-				throw unavailable("本轮 provider 运行态缺少模型名：摘要只使用本轮模型");
+				throw unavailable("turn provider runtime has no model id: summary uses only the current turn's model");
 			}
 			OpenAiChatOptions options = runtime.options() != null
 					? OpenAiChatOptions.fromOptions(runtime.options()) : OpenAiChatOptions.builder().build();
@@ -128,14 +128,14 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 			ChatResponse response = runtime.chatModel()
 				.call(new Prompt(List.of(new SystemMessage(systemPrompt), new UserMessage(userPrompt)), options));
 			if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
-				throw unavailable("摘要模型返回空响应");
+				throw unavailable("summary model returned an empty response");
 			}
 			if (response.hasFinishReasons(Set.of("length"))) {
-				throw unavailable("摘要被截断（finishReason=length），不采用不完整的摘要");
+				throw unavailable("summary truncated (finishReason=length): incomplete summary is not used");
 			}
 			String text = response.getResult().getOutput().getText();
 			if (text == null || text.isBlank()) {
-				throw unavailable("摘要模型返回空正文");
+				throw unavailable("summary model returned blank text");
 			}
 			return text;
 		});
@@ -157,7 +157,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		catch (RejectedExecutionException ex) {
 			// 池饱和/已关闭：不排队等（一个挂住的摘要请求会把队列堵满），按"摘要不可用"收口
 			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE,
-					"摘要执行池已满或已关闭（池=" + POOL_THREADS + " 队列=" + QUEUE_CAPACITY + "）", ex);
+					"summary executor pool is saturated or closed (pool=" + POOL_THREADS + " queue=" + QUEUE_CAPACITY + ")", ex);
 		}
 		try {
 			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -165,19 +165,19 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		catch (TimeoutException ex) {
 			future.cancel(true);
 			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE,
-					"摘要请求超时（summary-timeout=" + timeout + "）", ex);
+					"summary request timed out (summary-timeout=" + timeout + ")", ex);
 		}
 		catch (ExecutionException ex) {
 			Throwable cause = ex.getCause();
 			if (cause instanceof Exception failure) {
 				throw failure;
 			}
-			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要请求失败：" + cause, cause);
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "summary request failed: " + cause, cause);
 		}
 		catch (InterruptedException ex) {
 			future.cancel(true);
 			Thread.currentThread().interrupt();
-			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "摘要请求被中断", ex);
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "summary request interrupted", ex);
 		}
 	}
 
@@ -190,20 +190,21 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	static String requireClosedSummary(String raw) {
 		String text = raw == null ? "" : raw.trim();
 		if (text.isEmpty()) {
-			throw unavailable("摘要产物为空");
+			throw unavailable("summary output is empty");
 		}
 		int open = text.indexOf(SUMMARY_OPEN);
 		int close = text.lastIndexOf(SUMMARY_CLOSE);
 		if (open != 0 || close < 0 || close + SUMMARY_CLOSE.length() != text.length()) {
-			throw unavailable("摘要产物必须且只能闭合在 " + SUMMARY_OPEN + "…" + SUMMARY_CLOSE + " 定界内");
+			throw unavailable("summary output must be closed exactly once inside " + SUMMARY_OPEN + "..." + SUMMARY_CLOSE
+					+ " delimiters");
 		}
 		String inner = text.substring(SUMMARY_OPEN.length(), close);
 		if (inner.contains(SUMMARY_OPEN) || inner.contains(SUMMARY_CLOSE)) {
-			throw unavailable("摘要产物在定界内再次出现定界符（注入闭合失败）");
+			throw unavailable("summary output contains a nested delimiter (injected close rejected)");
 		}
 		inner = inner.trim();
 		if (inner.isEmpty()) {
-			throw unavailable("摘要产物为空");
+			throw unavailable("summary output is empty");
 		}
 		return inner;
 	}

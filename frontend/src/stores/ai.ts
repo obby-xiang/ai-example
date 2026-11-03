@@ -4042,7 +4042,7 @@ export const useAiStore = defineStore('ai', {
         // N-1（R3）：原文只进 DEV 日志（`healthError` 也是诊断字段）—— 探针失败本身不再上屏，
         // 真实不可用由降级条与后端请求错误表达，机制词不上屏。
         if (import.meta.env.DEV) {
-          console.warn('[ai] health probe failed:', this.healthError)
+          console.warn('[ai] health probe failed:', error instanceof Error ? error.message : String(error))
         }
         // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
       }
@@ -9146,7 +9146,7 @@ export const useAiStore = defineStore('ai', {
         // （parts.ts:199 投影含 reason）滞留旧值，违背「parts 唯一真值、投影由 deriveProjections 派生」契约。
         deriveProjections(host)
       } else if (import.meta.env.DEV) {
-        console.warn(`[批4④ A4'] 取消回灌失败：未找到 toolCallId=${toolCallId} 的工具段，reason 未落段（不新建段）`)
+        console.warn(`[B4-4 A4'] cancel backfill failed: no tool part found for toolCallId=${toolCallId}; reason not persisted (no new part created)`)
       }
     },
 

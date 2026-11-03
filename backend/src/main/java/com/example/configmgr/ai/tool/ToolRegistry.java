@@ -76,10 +76,10 @@ public class ToolRegistry {
                 if (isDeclaredToolBean(beanName)) {
                     failedToolBeans.add(beanName);
                     failures.add(e);
-                    log.error("工具 bean 创建失败：{}（扫描结束后将中止启动）", beanName, e);
+                    log.error("tool bean creation failed (startup aborts after scanning) bean={}", beanName, e);
                 }
                 else {
-                    log.debug("扫描期跳过创建失败的 bean（非工具 bean）：{}：{}", beanName, e.toString());
+                    log.debug("skipped bean that failed to create during scan (not a tool bean) bean={} error={}", beanName, e.toString());
                 }
                 continue;
             }
@@ -115,7 +115,7 @@ public class ToolRegistry {
                 meta.setCategory(categoryAnn != null ? categoryAnn.value() : null);
 
                 metaMap.put(name, meta);
-                log.debug("Registered tool: {} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
+                log.debug("registered tool name={} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
             }
 
             // Build ToolCallbacks from all @Tool methods on this bean
@@ -144,7 +144,7 @@ public class ToolRegistry {
         }
         applyOverrides();
         assertDisclosureConsistency();
-        log.info("ToolRegistry: registered {} tools（定义来源={}）", callbackMap.size(), snapshotVersion);
+        log.info("ToolRegistry: registered {} tools (definitions={})", callbackMap.size(), snapshotVersion);
     }
 
     /**
@@ -237,7 +237,7 @@ public class ToolRegistry {
         }
         catch (RuntimeException e) {
             // 手工注册的单例没有 BeanDefinition 等：无法判定 ⇒ 按非工具 bean 处理
-            log.debug("无法解析 bean 的声明类型：{}：{}", beanName, e.toString());
+            log.debug("could not resolve bean declared type bean={} error={}", beanName, e.toString());
             return false;
         }
     }
@@ -320,7 +320,7 @@ public class ToolRegistry {
                 .description(definition.description())
                 .inputSchema(normalized)
                 .build();
-        log.info("工具 schema 归一化：{}（参数级 $defs 提升到文档根）", definition.name());
+        log.debug("tool schema normalized (parameter-level $defs hoisted to document root) tool={}", definition.name());
         return new OverriddenToolCallback(callback, rebuilt);
     }
 
@@ -347,7 +347,7 @@ public class ToolRegistry {
                         + "（modelName=" + modelName + "）");
             }
             if (!override.published()) {
-                log.info("工具定义覆盖：{} status={}，不进快照", override.toolKey(), override.status());
+                log.debug("tool definition override skipped: {} status={} (not in snapshot)", override.toolKey(), override.status());
                 continue;
             }
             ToolMeta meta = metaMap.get(modelName);
@@ -375,7 +375,7 @@ public class ToolRegistry {
                     .inputSchema(schema)
                     .build();
             callbackMap.put(modelName, new OverriddenToolCallback(original, overridden));
-            log.info("工具定义覆盖生效：{}（description={}，schema={}）", modelName,
+            log.info("tool definition override applied: {} description={} schema={}", modelName,
                     override.hasDescription() ? "overridden" : "annotation",
                     override.hasSchema() ? "overridden" : "reflection");
         }

@@ -24,6 +24,18 @@
  *
  * 触发源收敛为三类：SSE 帧 / onopen 一发 / 3s 兜底表（realtime 30s 保底已删）。
  *
+ * ## realtime 的"停表"= 真停表（F2）
+ * 兜底表用控制器的 `suspendTimers/resumeTimers` 停用/恢复，**不持有任何定时器句柄**
+ * （旧口径的"无穷大节奏"是实打实 2^31−1 ms 的 interval，且每帧 `refreshNow` 都重排一次）。
+ *
+ * ## 通道构造同步失败（F1）
+ * `openTaskEvents` 内部 `new EventSource(...)` 可**同步**抛出（环境无 `EventSource` 全局 / URL 非法）。
+ * 此时**只关闭失败通道、不终止跟踪**：起表在前的 3s 兜底轮询与 `visibilitychange` 监听保留，
+ * `disposed` 保持 false，作业进度继续由轮询推进；函数照常返回 dispose（调用方仍可整单收摊）。
+ * 收摊不放在构造失败路径上 —— 那会把"SSE 不可用"误判成"跟踪结束"，页面停在最后一次快照。
+ * 错误经 `onError` 上报，且**延到微任务**：调用方是在 watchJob 返回后才登记句柄/注册表项，
+ * 同步回调会撞上"尚未登记"的窗口（TDZ / 清不到表项；onError 里调 dispose 也会落空）。
+ *
  * 终态判定一律以 `GET /api/jobs/{jobId}` 的快照为准（isJobFinal），
  * 不拿 JOB_DONE 的载荷当终态依据。
  */
@@ -83,29 +95,26 @@ export function watchJob(options: JobWatchOptions): () => void {
    * - `polling`：通道判死/断线 —— 3s 兜底表接管自愈。
    *
    * 实现注：realtime 期间不 stop 控制器（stop 会把 refreshNow 一并关死，帧/onopen 的
-   * 即时权威快照就丢了）——把节奏推到无穷大（等价停表、refreshNow/可见性纪律照常工作），
-   * 降级时 setIntervals 回 3s 即恢复兜底表。
+   * 即时权威快照就丢了）——改为 **suspendTimers 真停表**（清表、不持有任何定时器句柄），
+   * refreshNow/可见性纪律照常工作；降级时 resumeTimers 回 3s 即恢复兜底表。
+   * 不再用 2^31−1 级的长延时"模拟停表"：那会让每个 realtime 跟踪实打实持有一个 24.8 天的
+   * interval 句柄，并把"停表"的正确性押在引擎对 32 位延时上界的处理上（越界折返即 3s 热循环）。
    *
    * 同态短路（F3）：`onerror` 是事件级触发（EventSource 每次断线都回调），
    * 若每次都对 `emitChannel('polling')` 无条件重排兜底表起点，error 节拍 ≲3s 时
    * 3s 兜底表会被反复"重新武装"而永远一发不出（断线自愈饿死）。已处于该态时只通知、不重排。
    */
-  let armedChannel: JobChannelState = 'polling' // 兜底表开局即 3s 武装 ⇒ 初始通道态 = polling
-  /** realtime 期间的"停表"节奏：约 24.8 天的间隔 = 不起周期 tick（refreshNow 不受影响）。
-   *  取 2^31-1 是定时器延时的 32 位安全上界：更大的值现代规范（HTML Timers）为**钳制**到可表示
-   *  上界而非回绕（早期 fake-timers/旧实现才有溢出回绕表现，注释原表述有误，C2 修正）；反正
-   *  帧空闲看门狗（120s）远早于此触发降级，本节奏永不抵达。 */
-  const REALTIME_IDLE_MS = 2_147_483_647
+  let channelState: JobChannelState = 'polling' // 兜底表开局即 3s 武装 ⇒ 初始通道态 = polling
   const emitChannel = (state: JobChannelState): void => {
     if (disposed) {
       return
     }
-    if (state !== armedChannel) {
-      armedChannel = state
+    if (state !== channelState) {
+      channelState = state
       if (state === 'realtime') {
-        poller.setIntervals({ intervalMs: REALTIME_IDLE_MS })
+        poller.suspendTimers() // 事件驱动：真停表（不建 24.8 天 interval）
       } else if (state === 'polling') {
-        poller.setIntervals({ intervalMs: pollIntervalMs })
+        poller.resumeTimers() // 降级：按兜底节奏（3s）重新武装
       }
     }
     options.onChannel?.(state)
@@ -134,7 +143,8 @@ export function watchJob(options: JobWatchOptions): () => void {
    * 兜底轮询交给可见性纪律控制器（步2 形态，S2 起单节奏）：
    * `hidden` 停表（后台不再空转打后端）、`visible` 错峰补刷一次，
    * 撞在途守卫的刷新由 dirty flag 收尾补发（不丢弃）。
-   * realtime 期间本表处于 stop 态；降级 polling 时由 emitChannel 重新 start。
+   * realtime 期间本表**停用但不 stop**（`suspendTimers`：不持任何定时器句柄，刷新面照常）；
+   * 降级 polling 时由 emitChannel 的 `resumeTimers` 重新武装。
    */
   const poller = createPollingController({
     intervalMs: pollIntervalMs,
@@ -142,55 +152,74 @@ export function watchJob(options: JobWatchOptions): () => void {
   })
   poller.start()
 
-  const source = tasksApi.openTaskEvents(
-    options.taskId,
-    (frame: TaskEventFrame) => {
-      if (disposed) {
-        return
-      }
-      resetWatchdog() // 帧 = 通道活着的直接证据（唯一复位源之一）
-      const wasPolling = armedChannel === 'polling'
-      if (!firstFrameSeen) {
-        // 首帧（不限类型）= "通道确实通了"：与 onopen 各拉一次权威快照（D6）。
-        // 走 refreshNow 而非裸拉：撞在途守卫时由 controller 记 dirty flag 收尾补发（口径②，不丢弃）。
-        firstFrameSeen = true
-        poller.refreshNow()
-      } else if (wasPolling) {
-        // 死通道复活的第一帧：回事件驱动时拉一次权威快照（之后的帧不再拉，直到下一次 onopen/首帧）
-        poller.refreshNow()
-      }
-      if (wasPolling) {
-        emitChannel('realtime') // 新帧到达 ⇒ 回事件驱动（看门狗已在上面重新武装）
-      }
-      if (frame.type === 'JOB_PROGRESS') {
-        const payload = frame.data as JobProgressPayload
-        if (payload.jobId === options.jobId) {
-          options.onProgress?.(payload)
+  /** 事件流句柄：构造可同步抛错，故不按"必有值"处理（见下方 F1 降级路径）。 */
+  let source: EventSource | null = null
+
+  try {
+    source = tasksApi.openTaskEvents(
+      options.taskId,
+      (frame: TaskEventFrame) => {
+        if (disposed) {
+          return
         }
-        return
-      }
-      if (frame.type === 'JOB_DONE') {
-        const payload = frame.data as JobDonePayload
-        if (payload.jobId === options.jobId) {
-          // JOB_DONE 触发的即时刷新与兜底 tick 走同一条路（口径②：撞在途守卫则收尾补发恰好 1 次）
+        resetWatchdog() // 帧 = 通道活着的直接证据（唯一复位源之一）
+        const wasPolling = channelState === 'polling'
+        if (!firstFrameSeen) {
+          // 首帧（不限类型）= "通道确实通了"：与 onopen 各拉一次权威快照（D6）。
+          // 走 refreshNow 而非裸拉：撞在途守卫时由 controller 记 dirty flag 收尾补发（口径②，不丢弃）。
+          firstFrameSeen = true
+          poller.refreshNow()
+        } else if (wasPolling) {
+          // 死通道复活的第一帧：回事件驱动时拉一次权威快照（之后的帧不再拉，直到下一次 onopen/首帧）
           poller.refreshNow()
         }
-      }
-    },
-    {
-      onerror: () => {
-        // EventSource 自身会按 retry 间隔重连；这里只把状态标为降级，业务继续靠轮询推进
-        if (source.readyState !== EventSource.OPEN) {
-          emitChannel('polling')
+        if (wasPolling) {
+          emitChannel('realtime') // 新帧到达 ⇒ 回事件驱动（看门狗已在上面重新武装）
+        }
+        if (frame.type === 'JOB_PROGRESS') {
+          const payload = frame.data as JobProgressPayload
+          if (payload.jobId === options.jobId) {
+            options.onProgress?.(payload)
+          }
+          return
+        }
+        if (frame.type === 'JOB_DONE') {
+          const payload = frame.data as JobDonePayload
+          if (payload.jobId === options.jobId) {
+            // JOB_DONE 触发的即时刷新与兜底 tick 走同一条路（口径②：撞在途守卫则收尾补发恰好 1 次）
+            poller.refreshNow()
+          }
+        }
+      },
+      {
+        onerror: () => {
+          // EventSource 自身会按 retry 间隔重连；这里只把状态标为降级，业务继续靠轮询推进
+          if (source && source.readyState !== EventSource.OPEN) {
+            emitChannel('polling')
+          }
         }
       }
-    }
-  )
+    )
 
-  source.onopen = () => {
-    resetWatchdog() // onopen = 复位源之二：重连后看门狗计时归零
-    emitChannel('realtime') // 通道建立 ⇒ 兜底表停表（含 onChannel 通知）
-    poller.refreshNow() // onopen 后的权威快照（D6）
+    source.onopen = () => {
+      resetWatchdog() // onopen = 复位源之二：重连后看门狗计时归零
+      emitChannel('realtime') // 通道建立 ⇒ 兜底表停表（含 onChannel 通知）
+      poller.refreshNow() // onopen 后的权威快照（D6）
+    }
+  } catch (error) {
+    // F1：通道构造同步抛错（环境无 EventSource / URL 非法）⇒ **SSE 不可用，但跟踪继续**。
+    // 起表在前的 3s 兜底轮询 + visibilitychange 监听就是此刻可用的进度面，就地收摊会把它
+    // 变成"死跟踪"（页面停在最后一次快照）；故 disposed 保持 false，poller 不 stop。
+    // 只关闭失败通道：openTaskEvents 若在 new 之后才抛，句柄可能已生成，留下它就是泄漏。
+    source?.close()
+    source = null // 断开句柄引用（close 后不再需要，避免跟踪期一直持有失败对象）
+    // onError 延到微任务：调用方在 watchJob **返回后**才登记句柄/注册表项，同步回调会撞上
+    // 尚未登记的窗口（onError 里调 dispose 会落空/TDZ）。disposed 复检保证收摊后不再上报。
+    queueMicrotask(() => {
+      if (!disposed) {
+        options.onError?.(error)
+      }
+    })
   }
 
   /**
@@ -235,14 +264,19 @@ export function watchJob(options: JobWatchOptions): () => void {
     return inflight
   }
 
+  /** 资源收摊（幂等，不触发 `onDisposed`）：仅正常 dispose 路径进入。 */
+  function teardown(): void {
+    clearWatchdog() // 看门狗随跟踪一起收摊（F10 口径：终态自收同样要清）
+    poller.stop() // 同时清 interval 与卸载 visibilitychange 监听
+    source?.close() // 构造期抛错时无句柄；句柄非空但已 close 时重复 close 无副作用
+  }
+
   function dispose(): void {
     if (disposed) {
       return
     }
     disposed = true
-    clearWatchdog() // 看门狗随跟踪一起收摊（F10 口径：终态自收同样要清）
-    poller.stop() // 同时清 interval 与卸载 visibilitychange 监听
-    source.close()
+    teardown()
     // F10：通知注册表同步注销（终态自收时 dispose 不经注册表入口，靠本回调同步清理；
     // onDisposed 接线方 = 页面轮次收尾处，见 ImportWizardView）
     options.onDisposed?.()

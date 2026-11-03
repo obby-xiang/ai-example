@@ -82,7 +82,7 @@ public class DefinitionService {
             }
         }
         ConfigDefinition saved = definitionRepository.save(definition);
-        log.info("操作流水: 动作=CREATE_DEFINITION 对象=def#{} 摘要=name={},level={},fields={} 来源=界面/API 时间={}",
+        log.info("audit action=CREATE_DEFINITION object=def#{} summary=name={} level={} fields={} source=ui/api at={}",
                 saved.getCode(), saved.getName(), saved.getLevel(), saved.getFields().size(), LocalDateTime.now());
         return saved;
     }
@@ -148,7 +148,7 @@ public class DefinitionService {
 
         // FR-1.4「变更记录流水」本期落地形态：结构化流水行（动作/对象/前值摘要/来源/时间，无主体维度，
         // ADR-11b）。落库的 AuditLog 表属 DC-10 的 P2，与 FR-4.4 同口径，见证据文档【待裁决】。
-        log.info("操作流水: 动作=DELETE_DEFINITION 对象=def#{} 前值摘要={} 来源=界面/API 时间={}",
+        log.info("audit action=DELETE_DEFINITION object=def#{} before={} source=ui/api at={}",
                 code, before, LocalDateTime.now());
 
         return new DeleteResult(code, cascadedFields, cascadedStagingRows);
@@ -184,7 +184,7 @@ public class DefinitionService {
 
         mergeFields(existing, update.getFields());
         ConfigDefinition saved = definitionRepository.save(existing);
-        log.info("操作流水: 动作=UPDATE_DEFINITION 对象=def#{} 摘要=name={},level={},fields={}({}) 来源=界面/API 时间={}",
+        log.info("audit action=UPDATE_DEFINITION object=def#{} summary=name={} level={} fields={}({}) source=ui/api at={}",
                 code, existing.getName(), existing.getLevel(), existing.getFields().size(),
                 existing.getFields().stream().map(ConfigField::getCode).toList(), LocalDateTime.now());
         return saved;

@@ -69,7 +69,7 @@ function stripComments(text) {
 function scan() {
   const src = path.join(ROOT, 'src')
   if (!fs.existsSync(src)) {
-    throw new Error(`找不到前端源码目录：${src}`)
+    throw new Error(`frontend source directory not found: ${src}`)
   }
   const files = {}
   let total = 0
@@ -89,7 +89,7 @@ const current = scan()
 
 if (UPDATE) {
   fs.writeFileSync(BASELINE, `${JSON.stringify(current, null, 2)}\n`, 'utf8')
-  console.log(`[i18n-residue] 基线已更新：${current.total} 行 / ${Object.keys(current.files).length} 文件`)
+  console.log(`[i18n-residue] baseline updated: ${current.total} lines / ${Object.keys(current.files).length} files`)
   process.exit(0)
 }
 
@@ -104,17 +104,17 @@ if (JSON_OUT) {
   const top = Object.entries(current.files)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 15)
-  console.log('[i18n-residue] 残留中文（非注释行 / 不含 locales）：')
+  console.log('[i18n-residue] residual CJK text (non-comment lines, locales/ excluded):')
   for (const [file, count] of top) {
     console.log(`  ${String(count).padStart(5)}  ${file}`)
   }
   if (Object.keys(current.files).length > top.length) {
-    console.log(`  … 其余 ${Object.keys(current.files).length - top.length} 个文件`)
+    console.log(`  ... ${Object.keys(current.files).length - top.length} more files (top ${top.length} shown)`)
   }
-  console.log(`[i18n-residue] 合计 ${current.total} 行 / ${Object.keys(current.files).length} 文件`)
+  console.log(`[i18n-residue] total ${current.total} lines / ${Object.keys(current.files).length} files`)
   if (baseline) {
     const delta = current.total - baseline.total
-    console.log(`[i18n-residue] 基线 ${baseline.total} 行 ⇒ ${delta === 0 ? '持平' : delta > 0 ? `+${delta}` : `${delta}`}`)
+    console.log(`[i18n-residue] baseline ${baseline.total} lines => ${delta === 0 ? 'unchanged' : delta > 0 ? `+${delta}` : `${delta}`}`)
   }
 }
 
@@ -124,21 +124,21 @@ if (!STRICT) {
 
 const problems = []
 if (!baseline) {
-  problems.push('缺少基线文件 scripts/ci/i18n-residue-baseline.json（先跑 --update-baseline 固化）')
+  problems.push('baseline file scripts/ci/i18n-residue-baseline.json is missing (run --update-baseline to pin it)')
 } else {
   if (current.total > baseline.total) {
-    problems.push(`总量 ${current.total} > 基线 ${baseline.total}（只许下调）`)
+    problems.push(`total ${current.total} > baseline ${baseline.total} (ratchet only allows decreases)`)
   }
   for (const [file, count] of Object.entries(current.files)) {
     const allowed = baseline.files[file] ?? 0
     if (count > allowed) {
-      problems.push(`${file}: ${count} > 基线 ${allowed}`)
+      problems.push(`${file}: ${count} > baseline ${allowed}`)
     }
   }
 }
 if (problems.length > 0) {
-  console.error('[i18n-residue] 闸门红：')
+  console.error('[i18n-residue] gate RED:')
   for (const problem of problems) console.error(`  - ${problem}`)
   process.exit(1)
 }
-console.log('[i18n-residue] 闸门绿（未超基线）')
+console.log('[i18n-residue] gate GREEN (within baseline)')

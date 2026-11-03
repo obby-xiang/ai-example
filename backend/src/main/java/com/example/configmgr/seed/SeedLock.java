@@ -65,7 +65,7 @@ public class SeedLock {
 		this.jdbcTemplate.update(
 				"UPDATE app_lock SET holder = ?, acquired_at = CURRENT_TIMESTAMP WHERE lock_name = ?",
 				HOLDER, lockName);
-		log.info("已获得种子单飞锁 '{}'（holder={}）；等待方会在本事务结束后重新判重", lockName, HOLDER);
+		log.info("Seed single-flight lock acquired lockName={} holder={}", lockName, HOLDER);
 	}
 
 	/** 持有者标识（pid@host）：只进 app_lock.holder 与日志，用于回答"这轮种子是哪台播的"。 */

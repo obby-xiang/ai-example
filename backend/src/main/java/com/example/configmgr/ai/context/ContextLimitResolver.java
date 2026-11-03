@@ -143,7 +143,7 @@ public final class ContextLimitResolver {
 		}
 		catch (RuntimeException ex) {
 			// 配置快照读失败不该让一轮对话失败：上限是观测/压缩的输入，降级到过渡键即可
-			log.warn("读取 ai_model.max_context 失败 model={}：{}（回落 app.ai.context.limit-tokens）", modelId,
+			log.warn("reading ai_model.max_context failed model={} error={} (falling back to app.ai.context.limit-tokens)", modelId,
 					ex.getMessage());
 			return fromConfigured(Source.FALLBACK, modelId);
 		}
@@ -160,9 +160,9 @@ public final class ContextLimitResolver {
 		}
 		if (sourceWhenKnown == Source.FALLBACK && modelId != null && !modelId.isBlank()
 				&& this.fallbackWarned.compareAndSet(false, true)) {
-			log.warn("模型 {} 未声明 ai_model.max_context：上限回落到 app.ai.context.limit-tokens={}（limitSource=fallback）。"
-					+ "回退保留（未直接判未知，避免存量模型停掉压缩），但请补齐模型行的 max_context；本提示只记一次",
-					modelId, fallback);
+			log.warn("model {} has no ai_model.max_context: limit falls back to app.ai.context.limit-tokens={} (limitSource=fallback)."
+					+ " Fallback is kept (existing models keep compacting), but please fill max_context on the model row;"
+					+ " logged once", modelId, fallback);
 		}
 		return new ResolveResult(fallback, sourceWhenKnown);
 	}
@@ -178,13 +178,13 @@ public final class ContextLimitResolver {
 	public void logStartupDeprecation() {
 		int fallback = configured();
 		if (fallback > 0) {
-			log.warn("配置键 app.ai.context.limit-tokens={} 已弃用（deprecated）：上下文上限的唯一真源是 "
-					+ "ai_model.max_context；本键只在模型行未声明 max_context（或调用方无模型身份）时作为启动期回退，"
-					+ "不再参与触发判定 / 展示口径的选择", fallback);
+			log.warn("config key app.ai.context.limit-tokens={} is deprecated: the single source of truth for the context limit is "
+					+ "ai_model.max_context; this key is only a startup fallback for model rows without max_context (or callers"
+					+ " without model identity) and no longer drives trigger decisions or display", fallback);
 		}
 		else {
-			log.warn("配置键 app.ai.context.limit-tokens 已弃用（deprecated）且未设回退（当前 = 0）："
-					+ "未声明 max_context 的模型按未知上限降级（不做比例判定）");
+			log.warn("config key app.ai.context.limit-tokens is deprecated and has no fallback value (current = 0):"
+					+ " models without max_context degrade to an unknown limit (no ratio checks)");
 		}
 	}
 

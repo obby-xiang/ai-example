@@ -45,7 +45,7 @@ git config --unset core.hooksPath      # 停用
 
 ## 4. 输出与放行
 
-命中输出形如 `路径:行号 [规则名] 命中片段`，`SECRET` 片段做掩码（保留前 4 字符与总长度），路径与用户名原样输出以便定位。
+命中输出形如 `路径:行号 [规则标签] 命中片段`，规则标签为 `SECRET suspected key/token` / `PATH local absolute path` / `USER personal user name`；`SECRET` 片段做掩码（保留前 4 字符与总长度），其余命中片段原样输出以便定位。
 
 ```sh
 # 默认：命中即阻断，退出码 1
@@ -127,7 +127,7 @@ node --test --test-name-pattern="d6-review.json 非法 JSON 返回 rc2" scripts/
 
 ### 4.1.4 跳过与局限（必须知道）
 
-- **没装 Node.js**：pre-commit **明确告警并跳过**第二道（输出 `敏感信息扫描=通过，D6 同步复核=跳过`），提交不会被拦——此时靠人工复核 / CI；
+- **没装 Node.js**：pre-commit **明确告警并跳过**第二道（输出 `WARN [pre-commit] done: secret scan=passed, D6 sync review=skipped (...)`），提交不会被拦——此时靠人工复核 / CI；
 - **`git commit --no-verify`**：两道检查一起失效，且不留任何留痕。不要把它当作常规手段；
 - **没有 CI 兜底门禁**：本批只落了 pre-commit（CI 侧未新增 job），因此在未启用 `core.hooksPath` 的克隆或图形客户端里，第二道不会执行；
 - **不判断正确性**：门禁无法验证 `reason` 真实、也无法验证 D6 写对了。它是"提醒 + 留痕"，不是语义证明。
@@ -174,7 +174,7 @@ IDX=/tmp/scan-test-index
 GIT_INDEX_FILE=$IDX git read-tree HEAD
 printf 'api_key: %s%s\n' 's' 'k-AbCdEf0123456789ghijkl' > /tmp/t1.txt
 GIT_INDEX_FILE=$IDX git add -f /tmp/t1.txt
-GIT_INDEX_FILE=$IDX sh scripts/githooks/pre-commit   # 期望：✖ 阻断，退出码 1
+GIT_INDEX_FILE=$IDX sh scripts/githooks/pre-commit   # expected: FAIL, blocked, exit code 1
 ```
 
 - D6 门禁自测（同样不动工作树）：用临时索引改一个 block 文件的 blob，再直接跑检查器：
@@ -184,7 +184,7 @@ IDX=/tmp/d6-test-index
 GIT_INDEX_FILE=$IDX git read-tree HEAD
 b=$(printf 'class Probe {}\n' | git hash-object -w --stdin)
 GIT_INDEX_FILE=$IDX git update-index --cacheinfo 100644,$b,backend/src/main/java/com/example/configmgr/ai/web/AiController.java
-GIT_INDEX_FILE=$IDX node scripts/ci/check-d6-sync.mjs   # 期望：✖ 未随本次提交更新确认，rc 1；输出里有新指纹
+GIT_INDEX_FILE=$IDX node scripts/ci/check-d6-sync.mjs   # expected: FAIL (record not updated in this commit), rc 1; the new fingerprint is printed
 ```
 
   按输出模板把记录写进 `docs/delivery/d6-review.json` 并用 `git update-index --add --cacheinfo` 放进同一临时索引，再跑一次期望 rc 0；把该 JSON 破坏成非法 JSON 期望 rc 2；

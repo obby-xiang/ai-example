@@ -197,7 +197,7 @@ public class TaskSlotResolver {
 		}
 		catch (RuntimeException ex) {
 			// 目录读失败 = 没有可识别项：槽位保持缺失（表单照常可用），不影响本轮
-			log.warn("配置定义目录读取失败，本轮槽位按缺失处理：{}", ex.getMessage());
+			log.warn("could not read definition catalog; slots treated as missing this turn error={}", ex.getMessage());
 			return List.of();
 		}
 	}
@@ -319,7 +319,7 @@ public class TaskSlotResolver {
 			return this.taskService.findById(context.getTaskId());
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取任务 #{} 失败，权威槽位按缺失处理：{}", context.getTaskId(), ex.getMessage());
+			log.debug("could not read task #{}; authoritative slots treated as missing error={}", context.getTaskId(), ex.getMessage());
 			return null;
 		}
 	}

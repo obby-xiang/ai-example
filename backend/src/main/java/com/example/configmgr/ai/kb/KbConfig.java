@@ -40,10 +40,11 @@ public class KbConfig {
         }
         StringRedisTemplate redis = redisProvider.getIfAvailable();
         if (redis == null) {
-            log.info("知识库缓存层未装配（容器无 StringRedisTemplate），直连知识源：{}", base.kind());
+            log.info("KB cache layer not wired (no StringRedisTemplate in context); using source directly: {}",
+                    base.kind());
             return base;
         }
-        log.info("知识库缓存层已装配：source={} lock-ttl={} version-poll={}", base.kind(),
+        log.info("KB cache layer wired: source={} lock-ttl={} version-poll={}", base.kind(),
                 kb.getCache().getLockTtl(), kb.getCache().getVersionPollInterval());
         return new CachedKbSource(base, new KbCache(new RedisKbCacheStore(redis)), objectMapper, kb);
     }

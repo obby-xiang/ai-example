@@ -56,7 +56,7 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
     @SuppressWarnings("unchecked")
     private ToolSnapshot parse() {
         if (resource == null || !resource.exists()) {
-            log.info("工具定义覆盖：未发现 {}，全部使用注解缺省", DEFAULT_LOCATION);
+            log.info("tool definition overrides: {} not found; using annotation defaults", DEFAULT_LOCATION);
             return ToolSnapshot.empty();
         }
         try (InputStream in = resource.getInputStream()) {
@@ -79,7 +79,7 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
                     }
                 }
             }
-            log.info("工具定义覆盖：{} 条，version={}，lang={}", byKey.size(), version, lang);
+            log.info("tool definition overrides: {} entries version={} lang={}", byKey.size(), version, lang);
             return new ToolSnapshot(byKey, version, lang);
         } catch (IllegalStateException e) {
             throw e;

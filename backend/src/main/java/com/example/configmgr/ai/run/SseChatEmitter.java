@@ -626,8 +626,14 @@ public class SseChatEmitter {
 	 */
 	private final AtomicInteger emitting = new AtomicInteger();
 
-	/** "续跑权只读 ⇒ 已丢弃业务帧"的告警节流（每轮一条，避免逐帧刷屏）。 */
-	private final AtomicBoolean readOnlyWarned = new AtomicBoolean();
+	/**
+	 * "续跑权读取失败（真实失败）"的告警节流（每轮一条）。与只读丢帧分开计数：
+	 * 丢帧先发生时会先占住自己的节流位，绝不能再吞掉后续真实读取失败的 WARN。
+	 */
+	private final AtomicBoolean authorityReadFailureWarned = new AtomicBoolean();
+
+	/** "续跑权只读 ⇒ 已丢弃业务帧"的告警节流（每轮一条，首次 WARN、其后 debug，避免逐帧刷屏）。 */
+	private final AtomicBoolean readOnlyDropWarned = new AtomicBoolean();
 
 	/**
 	 * "本帧没有归档 ⇒ 不交付"的告警节流（每轮一条）：Redis 抖动期可能连丢多帧，
@@ -640,6 +646,13 @@ public class SseChatEmitter {
 	 * 但"这一轮的身份当时读不出来"必须留一条痕。
 	 */
 	private final AtomicBoolean identityFailureWarned = new AtomicBoolean();
+
+	/**
+	 * 回放帧序列化/解析失败 ⇒ 逐帧丢弃的告警节流（每写出器一条）：坏帧可能连续出现，
+	 * 逐帧 WARN 会刷屏；但每一条丢弃都会在回放序列上留下 seq 洞，所以<b>首次必须 WARN</b>
+	 * （带 type/seq，明确"frame dropped, seq hole possible"），之后才降到 debug。
+	 */
+	private final AtomicBoolean replayFrameDropWarned = new AtomicBoolean();
 
 	/**
 	 * P3-04：业务活动锚点 / 心跳活动戳的<b>写侧节流</b>时钟（每写出器 = 每 run 一份）。
@@ -966,9 +979,9 @@ public class SseChatEmitter {
 	 */
 	private void attachSubscription(Subscription sub) {
 		this.subscribers.add(sub);
-		sub.emitter.onCompletion(() -> closeSubscription(sub, "生命周期 onCompletion"));
-		sub.emitter.onTimeout(() -> closeSubscription(sub, "生命周期 onTimeout"));
-		sub.emitter.onError(ex -> closeSubscription(sub, "生命周期 onError"));
+		sub.emitter.onCompletion(() -> closeSubscription(sub, "lifecycle onCompletion"));
+		sub.emitter.onTimeout(() -> closeSubscription(sub, "lifecycle onTimeout"));
+		sub.emitter.onError(ex -> closeSubscription(sub, "lifecycle onError"));
 		// B23L1：本实例的第一个订阅者出现 ⇒ 建立该 run 的唤醒订阅（按连接，不是按实例全量）。
 		syncWakeSubscription();
 		// F1：本实例不是驱动方时，这条 attach 连接在驱动侧静默阶段收不到任何帧 —— 起本地保活。
@@ -1016,7 +1029,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			// 调度器已关闭（停机/单测提前 shutdown）：保活缺席不影响轮次正确性
-			log.debug("attach 保活定时器未排上 runId={}（调度器已关闭）：{}", this.runId, ex.getMessage());
+			log.debug("attach keepalive timer not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
 			return;
 		}
 		if (!this.attachKeepaliveFuture.compareAndSet(null, scheduled)) {
@@ -1085,7 +1098,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsBytes(frame);
 				}
 				catch (Exception ex) {
-					log.debug("attach 保活帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
+					log.debug("attach keepalive frame serialization failed runId={}: {}", this.runId, ex.getMessage());
 					return;
 				}
 				// liveSeq = 0 ⇒ 既有心跳扇出分支：不补齐、不推进游标、不发布唤醒。
@@ -1139,7 +1152,7 @@ public class SseChatEmitter {
 		}
 		// 资源修复批：轮已终态且订阅者排空 ⇒ 通知注册表摘掉本条目（"最后一个离开的人关灯"）。
 		fireRecycleIfTerminal();
-		log.debug("订阅者投递上下文已关闭 runId={} reason={}", this.runId, reason);
+		log.debug("subscriber delivery context closed runId={} reason={}", this.runId, reason);
 	}
 
 	/**
@@ -1177,7 +1190,7 @@ public class SseChatEmitter {
 			hook.run();
 		}
 		catch (RuntimeException ex) {
-			log.debug("写出器回收钩子失败 runId={}：{}", this.runId, ex.getMessage());
+			log.debug("emitter reclaim hook failed runId={}: {}", this.runId, ex.getMessage());
 		}
 	}
 
@@ -1228,7 +1241,7 @@ public class SseChatEmitter {
 			}
 			catch (Exception ex) {
 				// 退订失败不改变语义（唤醒只是"补帧优化"，读侧仍按 ?lastSeq 重挂兜底），只留痕。
-				log.warn("帧唤醒退订异常 runId={}：{}", this.runId, ex.getMessage());
+				log.warn("frame wake unsubscribe failed runId={}: {}", this.runId, ex.getMessage());
 			}
 		}
 	}
@@ -1261,7 +1274,8 @@ public class SseChatEmitter {
 			// 身份不可确认 ⇒ 不登记（否则会登记到 legacy 频道，发布侧在身份频道上，跨实例唤醒静默缺席）。
 			// 回退登记位，等下一次订阅触达或身份可读时再试。
 			this.wakeRegistered.set(false);
-			log.warn("帧唤醒订阅跳过 runId={}（身份不可确认，下一拍重试；不以 legacy 频道代替）", this.runId);
+			log.warn("frame wake subscribe skipped runId={} (identity unconfirmed, "
+					+ "retry next tick; never fall back to legacy channel)", this.runId);
 			return;
 		}
 		boolean registered;
@@ -1269,7 +1283,7 @@ public class SseChatEmitter {
 			registered = listener.register(this.runId, this.wakeTarget);
 		}
 		catch (Exception ex) {
-			log.warn("帧唤醒订阅异常 runId={}：{}", this.runId, ex.getMessage());
+			log.warn("frame wake subscribe failed runId={}: {}", this.runId, ex.getMessage());
 			registered = false;
 		}
 		if (!registered) {
@@ -1377,14 +1391,14 @@ public class SseChatEmitter {
 				catch (RuntimeException ex) {
 					// M-2：回放入队抛异常时，刚挂上的订阅必须摘掉：它留在订阅表里会挡住唤醒订阅的释放，
 					// 而这条连接根本不会交给客户端（异常让 controller 走错误响应）。
-					closeSubscription(sub, "回放入队异常：" + ex.getClass().getSimpleName());
+					closeSubscription(sub, "replay enqueue failed: " + ex.getClass().getSimpleName());
 					throw ex;
 				}
 				// 日志口径（minor）：staged 是<b>首批</b>入队帧数，不是整轮回放总数（分页续读在 drain 里）。
-				log.debug("重挂回放首批入队 runId={} lastSeq={} staged={} morePages={}", this.runId, lastSeq,
+				log.debug("reattach replay first page enqueued runId={} lastSeq={} staged={} morePages={}", this.runId, lastSeq,
 						plan.staged(), sub.replayActive());
 				if (plan.degraded()) {
-					log.warn("回放降级 runId={} terminal={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）",
+					log.warn("replay degraded runId={} terminal={} lastSeq={} staged={} (typed error then close, not normal empty replay)",
 							this.runId, terminal, lastSeq, plan.staged());
 					finishDegradedReplay(sub, plan);
 				}
@@ -1468,7 +1482,7 @@ public class SseChatEmitter {
 			tail = this.frames.readRawFrom(this.runId, lastSeq - 1L, 1);
 		}
 		catch (Exception ex) {
-			log.debug("回放终帧探测失败 runId={} lastSeq={}：{}", this.runId, lastSeq, ex.getMessage());
+			log.debug("replay terminal probe failed runId={} lastSeq={}: {}", this.runId, lastSeq, ex.getMessage());
 			return false;
 		}
 		if (tail == null || tail.isEmpty()) {
@@ -1559,12 +1573,12 @@ public class SseChatEmitter {
 				}
 			}
 			catch (RuntimeException ex) {
-				log.debug("驱动下界读取失败 runId={}（按不可知处理，失败出口照发）：{}", this.runId, ex.getMessage());
+				log.debug("driver floor read failed runId={} (unknown; failure exit still emits): {}", this.runId, ex.getMessage());
 				floor = -1L;
 			}
 		}
 		this.driveFloorSeq = floor;
-		log.debug("驱动开始 runId={} 归档下界={}", this.runId, floor);
+		log.debug("driver start runId={} archive floor={}", this.runId, floor);
 	}
 
 	/**
@@ -1639,7 +1653,7 @@ public class SseChatEmitter {
 			synchronized (this.emitLock) {
 				plan = applyReplayStartLocked(sub, start, startCursor);
 				if (plan.degraded()) {
-					log.warn("回放降级 runId={} lastSeq={} staged={}（发 typed error 后收尾，不按正常空回放）", this.runId,
+					log.warn("replay degraded runId={} lastSeq={} staged={} (typed error then close, not normal empty replay)", this.runId,
 							lastSeq, plan.staged());
 					finishDegradedReplay(sub, plan);
 					return plan;
@@ -1728,7 +1742,7 @@ public class SseChatEmitter {
 				sub.queue.add(new QueuedFrame(this.objectMapper.writeValueAsString(error), false));
 			}
 			catch (Exception ex) {
-				log.error("降级回放错误帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
+				log.error("degraded replay error frame serialization failed runId={}: {}", this.runId, ex.getMessage());
 			}
 		}
 		// terminating 让回放订阅在队列排空后收尾（无论快照终态与否；L-143 起回放订阅一律挂在
@@ -1758,7 +1772,7 @@ public class SseChatEmitter {
 			meta = this.frames.replayMeta(this.runId, afterSeq);
 		}
 		catch (RuntimeException ex) {
-			log.warn("回放元数据探测失败 runId={} afterSeq={}（按降级处理）：{}", this.runId, afterSeq, ex.getMessage());
+			log.warn("replay metadata probe failed runId={} afterSeq={} (treating as degraded): {}", this.runId, afterSeq, ex.getMessage());
 			meta = new FrameStore.ReadResult(List.of(), true, false, 0L, 0L);
 		}
 		if (meta == null) {
@@ -1769,7 +1783,7 @@ public class SseChatEmitter {
 			raw = this.frames.readRawFrom(this.runId, afterSeq, REPLAY_PAGE_FRAMES);
 		}
 		catch (RuntimeException ex) {
-			log.warn("回放原文页读取失败 runId={} afterSeq={}（回退类型化读口）：{}", this.runId, afterSeq,
+			log.warn("replay raw page read failed runId={} afterSeq={} (falling back to typed reader): {}", this.runId, afterSeq,
 					ex.getMessage());
 			raw = List.of();
 		}
@@ -1794,7 +1808,7 @@ public class SseChatEmitter {
 			typed = this.frames.readFromWithStatus(this.runId, afterSeq, REPLAY_PAGE_FRAMES);
 		}
 		catch (RuntimeException ex) {
-			log.warn("回放兼容读口失败 runId={} afterSeq={}（按降级收流）：{}", this.runId, afterSeq, ex.getMessage());
+			log.warn("replay compat reader failed runId={} afterSeq={} (closing stream degraded): {}", this.runId, afterSeq, ex.getMessage());
 			return new ReplayStart(List.of(), null, true, meta);
 		}
 		if (typed == null) {
@@ -1954,8 +1968,7 @@ public class SseChatEmitter {
 			}
 			catch (Exception ex) {
 				sub.replayPending.removeFirst();
-				log.error("回放帧序列化失败 runId={} type={}: {}", this.runId, next.frame().get("type"),
-						ex.getMessage());
+				logReplayFrameDropped("serialization", next.frame().get("type"), next.frame().get("seq"), ex);
 				continue;
 			}
 			int payloadBytes = payload.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
@@ -1987,11 +2000,28 @@ public class SseChatEmitter {
 				}
 			}
 			catch (Exception ex) {
-				log.error("回放帧序列化失败 runId={} type={}: {}", this.runId, next.frame().get("type"),
-						ex.getMessage());
+				logReplayFrameDropped("serialization", next.frame().get("type"), next.frame().get("seq"), ex);
 			}
 		}
 		refreshReplayActive(sub);
+	}
+
+	/**
+	 * 回放帧被丢弃时的级别选择：<b>每写出器首次 WARN、其后 debug</b>。
+	 *
+	 * <p>为什么不静默/不一律 debug：被丢掉的回放帧会在 seq 序列上留下洞，客户端会看到
+	 * "跳号"；首次必须留一条 WARN（带 type/seq 与"seq hole possible"），后续同类丢弃降到
+	 * debug，既不丢证据也不逐帧刷屏。
+	 */
+	private void logReplayFrameDropped(String stage, Object type, Object seq, Exception ex) {
+		if (this.replayFrameDropWarned.compareAndSet(false, true)) {
+			log.warn("replay frame {} failed, frame dropped (seq hole possible; warning once per emitter) "
+					+ "runId={} type={} seq={}: {}", stage, this.runId, type, seq, ex.getMessage());
+		}
+		else {
+			log.debug("replay frame {} failed again, frame dropped runId={} type={} seq={}: {}", stage, this.runId, type, seq,
+					ex.getMessage());
+		}
 	}
 
 	/**
@@ -2081,7 +2111,7 @@ public class SseChatEmitter {
 		}
 		catch (RuntimeException ex) {
 			// I-minor：续读异常不得逃出 drain（那会静默停在半途）；按读降级收流。
-			log.warn("回放续读异常 runId={} from={}（按降级收流）：{}", this.runId, from, ex.getMessage());
+			log.warn("replay continuation failed runId={} from={} (closing stream degraded): {}", this.runId, from, ex.getMessage());
 			degraded = true;
 		}
 		synchronized (this.emitLock) {
@@ -2091,7 +2121,7 @@ public class SseChatEmitter {
 			}
 			if (trimmedDuringReplay) {
 				// 回放期间水位推进（MAXLEN 裁剪越过了游标）：不能静默跳过，按既有 N-2 口径降级收流。
-				log.warn("回放期间归档被裁剪 runId={} from={} 缺口={}..{}（按降级收流，不静默跳过）",
+				log.warn("archive trimmed during replay runId={} from={} gap={}..{} (closing degraded, not silently skipping)",
 						this.runId, from, trimFrom, trimTo);
 				finishDegradedReplay(sub, new ReplayResult(0, true, sub.replayTerminalSeen, true, trimFrom, trimTo));
 				return !sub.queue.isEmpty();
@@ -2154,7 +2184,7 @@ public class SseChatEmitter {
 			return this.frames.lastSeqIfKnown(this.runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("回放续读末号探测失败 runId={}：{}", this.runId, ex.getMessage());
+			log.debug("replay continuation tail probe failed runId={}: {}", this.runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -2188,7 +2218,7 @@ public class SseChatEmitter {
 					raw = this.frames.readRawFrom(this.runId, cursor, pageLimit);
 				}
 				catch (RuntimeException ex) {
-					log.debug("归档探测原文读取失败 runId={} cursor={}：{}", this.runId, cursor, ex.getMessage());
+					log.debug("archive probe raw read failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
 					return ArchiveScan.UNKNOWN;
 				}
 				if (raw != null && !raw.isEmpty()) {
@@ -2217,7 +2247,7 @@ public class SseChatEmitter {
 				typed = this.frames.readFromWithStatus(this.runId, cursor, pageLimit);
 			}
 			catch (RuntimeException ex) {
-				log.debug("归档探测兼容读口失败 runId={} cursor={}：{}", this.runId, cursor, ex.getMessage());
+				log.debug("archive probe compat reader failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
 				return ArchiveScan.UNKNOWN;
 			}
 			if (typed == null || typed.degraded()) {
@@ -2298,7 +2328,7 @@ public class SseChatEmitter {
 				frame = parsed;
 			}
 			catch (Exception ex) {
-				log.error("回放帧解析失败 runId={} seq={}：{}", this.runId, seq, ex.getMessage());
+				logReplayFrameDropped("parse", null, seq, ex);
 				continue;
 			}
 			String type = String.valueOf(frame.get("type"));
@@ -2667,7 +2697,8 @@ public class SseChatEmitter {
 			return false;
 		}
 		if (scan == ArchiveScan.UNKNOWN) {
-			log.warn("续跑补发 tool_start 跳过：事件日志分页探测未完成/降级 runId={} toolCallId={}（读不全 ≠ 没有，不补）",
+			log.warn("resume tool_start replay skipped: event log paging probe incomplete/degraded "
+					+ "runId={} toolCallId={} (incomplete read != absent, not replaying)",
 					this.runId, toolCallId);
 			return false;
 		}
@@ -2857,7 +2888,7 @@ public class SseChatEmitter {
 		frame.put(TruncationContract.STRATEGY_FIELD, view.strategy());
 		frame.put(TruncationContract.ORIGINAL_CHARS_FIELD, view.originalChars());
 		frame.put(TruncationContract.RETURNED_CHARS_FIELD, view.returnedChars());
-		log.debug("模型侧视图截断 runId={} tool={} originalChars={} returnedChars={} strategy={}", this.runId,
+		log.debug("model-side view truncated runId={} tool={} originalChars={} returnedChars={} strategy={}", this.runId,
 				toolName, view.originalChars(), view.returnedChars(), view.strategy());
 	}
 
@@ -3015,7 +3046,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsString(frame);
 				}
 				catch (Exception ex) {
-					log.error("续跑降级结局帧序列化失败 runId={}（本帧跳过）：{}", this.runId, ex.getMessage());
+					log.error("resume degraded outcome frame serialization failed runId={} (frame skipped): {}", this.runId, ex.getMessage());
 					return 0;
 				}
 				for (Subscription sub : this.subscribers) {
@@ -3051,7 +3082,7 @@ public class SseChatEmitter {
 			// F1：合成终帧已投出 ⇒ 停本地保活。
 			stopAttachKeepalive();
 		}
-		log.info("续跑降级结局已投递 runId={} subscribers={} code={}", this.runId, targets.size(), code);
+		log.info("resume degraded outcome delivered runId={} subscribers={} code={}", this.runId, targets.size(), code);
 		return targets.size();
 	}
 
@@ -3133,18 +3164,18 @@ public class SseChatEmitter {
 				String frameType = String.valueOf(frame.get("type"));
 				boolean terminal = "done".equals(frameType) || "error".equals(frameType);
 				if (this.identityFailureWarned.compareAndSet(false, true)) {
-					log.warn("SSE 投递身份不可确认，本帧不落档/不投递（帧无法归档，绝不以 legacy 键代替）runId={} type={} {}",
-							this.runId, frameType, terminal ? "（终帧走既有恢复链收流）" : "");
+					log.warn("SSE delivery identity unconfirmed, frame not "
+							+ "archived/delivered runId={} type={} terminal={}", this.runId, frameType, terminal);
 				}
 				else {
-					log.debug("SSE 投递身份不可确认，本帧跳过 runId={} type={} terminal={}", this.runId, frameType,
+					log.debug("SSE delivery identity unconfirmed, frame skipped runId={} type={} terminal={}", this.runId, frameType,
 							terminal);
 				}
 				if (terminal) {
 					Map<String, Object> extra = new LinkedHashMap<>();
 					extra.put("unarchivedTerminal", true);
 					extra.put("identityUnconfirmed", true);
-					closeSubscribersAfterUnarchivedTerminal(extra, "终帧因投递身份不可确认未能归档");
+					closeSubscribersAfterUnarchivedTerminal(extra, "terminal frame not archived: delivery identity unconfirmed");
 				}
 				return;
 			}
@@ -3229,15 +3260,22 @@ public class SseChatEmitter {
 				// 放行的代价是旧主人在事件日志里继续写业务帧、唤醒其它实例、给本地订阅者发终帧 ——
 				// 正是 fencing 要拦的那一类写；宁可这一拍不发，也不能吞成 NEVER_HELD / null 放行。
 				authority = LeaseService.LeaseAuthority.UNAVAILABLE;
-				if (this.readOnlyWarned.compareAndSet(false, true)) {
-					log.warn("续跑权判定不可读 runId={}（按 UNAVAILABLE 只读恢复，业务帧不落档）：{}", this.runId,
+				if (this.authorityReadFailureWarned.compareAndSet(false, true)) {
+					log.warn("resume authority read failed runId={} (UNAVAILABLE, read-only recovery; business frames not archived): {}", this.runId,
 							ex.getMessage());
 				}
+				else {
+					log.debug("resume authority read failed again runId={} (already warned): {}", this.runId, ex.getMessage());
+				}
 			}
-			if (authority != null && (authority.readOnly() || !this.store.permittedToWrite(this.runId, "事件帧"))) {
-				if (this.readOnlyWarned.compareAndSet(false, true)) {
-					log.warn("续跑权 {}：丢弃本轮业务帧（含终帧）runId={} type={} —— 本轮已由新主人接管，"
-							+ "本实例只读恢复", authority, this.runId, frameType);
+			if (authority != null && (authority.readOnly() || !this.store.permittedToWrite(this.runId, "event frame"))) {
+				if (this.readOnlyDropWarned.compareAndSet(false, true)) {
+					log.warn("run authority {}: dropping business frame (incl. terminal) "
+							+ "runId={} type={} (run taken over by new owner, read-only here)", authority, this.runId, frameType);
+				}
+				else {
+					log.debug("run authority {}: dropping business frame (incl. terminal) runId={} type={}", authority,
+							this.runId, frameType);
 				}
 				return;
 			}
@@ -3276,7 +3314,7 @@ public class SseChatEmitter {
 						payloadBytes = this.objectMapper.writeValueAsBytes(frame);
 					}
 					catch (Exception ex) {
-						log.error("SSE 帧序列化失败 runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
+						log.error("SSE frame serialization failed runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
 						return;
 					}
 				}
@@ -3300,11 +3338,11 @@ public class SseChatEmitter {
 						// 重挂/唤醒的差量读再也不会把它补回来（帧永久缺）。宁可不发（前端看门狗/重挂会收敛），
 						// 也不发一个"顺序上不存在"的帧。
 						if (this.archiveFailureWarned.compareAndSet(false, true)) {
-							log.warn("事件帧未归档，本帧不交付 runId={} type={}（多实例顺序只在归档成功后成立；"
-									+ "后续同类丢弃不再重复告警）", this.runId, frame.get("type"));
+							log.warn("event frame not archived, not delivered runId={} type={} "
+									+ "(multi-instance ordering requires archive; further drops not re-warned)", this.runId, frame.get("type"));
 						}
 						else {
-							log.debug("事件帧未归档，本帧不交付 runId={} type={}", this.runId, frame.get("type"));
+							log.debug("event frame not archived, not delivered runId={} type={}", this.runId, frame.get("type"));
 						}
 						// 终帧（done/error）没进归档时，在线端不能"什么都不发生"：连接会一直挂着一个
 						// 永远不会再发的终帧，直到前端看门狗超时。解锁后走既有恢复失败链收流。
@@ -3388,7 +3426,7 @@ public class SseChatEmitter {
 		extra.put("degraded", true);
 		extra.put("retryable", true);
 		extra.put("unarchivedTerminal", true);
-		closeSubscribersAfterUnarchivedTerminal(extra, "终帧未归档");
+		closeSubscribersAfterUnarchivedTerminal(extra, "terminal frame not archived");
 	}
 
 	/**
@@ -3412,7 +3450,8 @@ public class SseChatEmitter {
 		// 而那条路径刚刚已经跑过（当时 terminating 还没置）—— 不在这里补，这条"已终态 + 无订阅者"
 		// 的写出器会一直留在注册表里（持有订阅表/队列/唤醒目标）。recycled 的 CAS 保证只跑一次。
 		fireRecycleIfTerminal();
-		log.warn("{}：已按恢复失败链收流 runId={} subscribers={}（客户端拿到 typed error，不再等一个不会来的终帧）",
+		log.warn("{}: closed via recovery failure chain runId={} subscribers={} "
+				+ "(client got typed error instead of waiting for a terminal frame)",
 				reason, this.runId, delivered);
 	}
 
@@ -3476,7 +3515,8 @@ public class SseChatEmitter {
 				// 除本实例代次外再读一次快照：已被跨实例重驱动（快照回到 RUNNING）或已非终态时，
 				// 绝不能把连接判死；读不到快照同样放弃（不可确认 ≠ 未结束）。
 				if (!snapshotStillTerminal()) {
-					log.debug("离线重挂终帧宽限放弃 runId={}（快照已非终态/不可读，可能被跨实例重驱动）",
+					log.debug("offline reattach terminal grace abandoned runId={} (snapshot "
+							+ "non-terminal/unreadable; may be redriven by another instance)",
 							this.runId);
 					return;
 				}
@@ -3485,7 +3525,7 @@ public class SseChatEmitter {
 					extra.put("unarchivedTerminal", true);
 					extra.put("terminalUnconfirmed", true);
 					extra.put("replayReattach", true);
-					closeCurrentSubscriptionsWithUnarchivedTerminal(extra, "离线重挂宽限内未等到终帧");
+					closeCurrentSubscriptionsWithUnarchivedTerminal(extra, "terminal frame not seen within offline reattach grace");
 					return;
 				}
 				if (busy && sub.unarchivedTerminalGraceAttempts.incrementAndGet()
@@ -3498,7 +3538,7 @@ public class SseChatEmitter {
 		catch (RejectedExecutionException ex) {
 			// 调度器已关闭（停机）：不合成终帧；前端看门狗是既有兜底。
 			sub.unarchivedTerminalGrace.set(false);
-			log.debug("离线重挂终帧宽限未排上 runId={}（调度器已关闭）：{}", this.runId, ex.getMessage());
+			log.debug("offline reattach terminal grace not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
 		}
 	}
 
@@ -3523,7 +3563,7 @@ public class SseChatEmitter {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("离线重挂终帧宽限读快照失败 runId={}（放弃合成）：{}", this.runId, ex.getMessage());
+			log.debug("offline reattach terminal grace snapshot read failed runId={} (synthesis abandoned): {}", this.runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -3556,7 +3596,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsString(frame);
 				}
 				catch (Exception ex) {
-					log.error("离线重挂结局帧序列化失败 runId={}：{}", this.runId, ex.getMessage());
+					log.error("offline reattach outcome frame serialization failed runId={}: {}", this.runId, ex.getMessage());
 					return;
 				}
 				for (Subscription sub : this.subscribers) {
@@ -3577,7 +3617,8 @@ public class SseChatEmitter {
 		for (Subscription sub : targets) {
 			completeWhenDrained(sub);
 		}
-		log.warn("{}：已只收当前订阅（emitter 不置终态，后续重挂可继续）runId={} subscribers={}", reason, this.runId,
+		log.warn("{}: delivering to current subscribers only (emitter state "
+				+ "unchanged, reattach can continue) runId={} subscribers={}", reason, this.runId,
 				targets.size());
 	}
 
@@ -3610,7 +3651,7 @@ public class SseChatEmitter {
 					kickDrain(sub);
 				}
 				else {
-					evict(sub, "实时队列溢出（容量 " + this.queueCapacity + "）");
+					evict(sub, "live queue overflow (capacity " + this.queueCapacity + ")");
 				}
 				continue;
 			}
@@ -3639,7 +3680,7 @@ public class SseChatEmitter {
 			if (!enqueueLive(sub, payload)) {
 				// S2-1：溢出摘除 = 主动断连 —— 显式 complete 触发前端 onerror/onclose，
 				// 前端带 lastSeq 重挂走差量补发（seq 无洞），胜过静默丢帧。
-				evict(sub, "实时队列溢出（容量 " + this.queueCapacity + "）");
+				evict(sub, "live queue overflow (capacity " + this.queueCapacity + ")");
 				continue;
 			}
 			// 本地已投递 ⇒ 本订阅者的游标推进（唤醒补帧的读下界取各订阅者最小值）。
@@ -3702,7 +3743,7 @@ public class SseChatEmitter {
 				converted.add(new FrameStore.RawFrame(number.longValue(), this.objectMapper.writeValueAsString(frame)));
 			}
 			catch (Exception ex) {
-				log.error("补齐帧序列化失败 runId={} seq={}：{}", this.runId, number.longValue(), ex.getMessage());
+				log.error("padding frame serialization failed runId={} seq={}: {}", this.runId, number.longValue(), ex.getMessage());
 			}
 		}
 		return converted;
@@ -3741,7 +3782,7 @@ public class SseChatEmitter {
 			}
 			if (!enqueueLive(sub, frame.json())) {
 				// S2-1 同口径：溢出 = 主动断连（重挂补帧），绝不绕开容量闸硬塞。
-				evict(sub, "补齐帧超出实时队列容量（容量 " + this.queueCapacity + "）");
+				evict(sub, "padding frame exceeds live queue capacity (capacity " + this.queueCapacity + ")");
 				return false;
 			}
 			sub.wakeFloor = seq;
@@ -3804,14 +3845,14 @@ public class SseChatEmitter {
 		if (identity.readFailure() && identity.identity() == null) {
 			// 身份不可确认 ⇒ 不发布（绝不发到 legacy 频道：订阅侧在身份频道上，发了也没人收，
 			// 却会让人误以为"唤醒已广播"）。帧已归档，别的实例下次收到唤醒或重挂时仍能补上。
-			log.warn("帧唤醒发布跳过 runId={} seq={}（身份不可确认，不以 legacy 频道代替）", this.runId, seq);
+			log.warn("frame wake publish skipped runId={} seq={} (identity unconfirmed, never fall back to legacy channel)", this.runId, seq);
 			return;
 		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
 			bus.publish(this.runId, seq);
 		}
 		catch (Exception ex) {
-			log.debug("帧唤醒发布失败 runId={} seq={}：{}", this.runId, seq, ex.getMessage());
+			log.debug("frame wake publish failed runId={} seq={}: {}", this.runId, seq, ex.getMessage());
 		}
 	}
 
@@ -3841,7 +3882,7 @@ public class SseChatEmitter {
 		// 却把"读不到"伪装成"没有差量"。下一次唤醒或客户端重挂会补上。
 		IdentityOutcome identity = deliveryIdentityOutcome();
 		if (identity.readFailure() && identity.identity() == null) {
-			log.warn("帧唤醒补帧跳过 runId={}（身份不可确认，下一拍重试）", this.runId);
+			log.warn("frame wake padding skipped runId={} (identity unconfirmed, retry next tick)", this.runId);
 			return;
 		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
@@ -3909,7 +3950,7 @@ public class SseChatEmitter {
 							continue;
 						}
 						if (!enqueueLive(sub, next.payload())) {
-							evict(sub, "唤醒补帧超出实时队列容量（容量 " + this.queueCapacity + "）");
+							evict(sub, "wake padding exceeds live queue capacity (capacity " + this.queueCapacity + ")");
 							continue;
 						}
 						sub.wakeFloor = seq;
@@ -3970,7 +4011,7 @@ public class SseChatEmitter {
 			raw = this.frames.readRawFrom(this.runId, from, limit);
 		}
 		catch (RuntimeException ex) {
-			log.warn("唤醒补帧原文读取失败 runId={} from={}（本拍不补，下一次唤醒/重挂兜底）：{}", this.runId, from,
+			log.warn("wake padding raw read failed runId={} from={} (not padded this tick; next wake/reattach covers): {}", this.runId, from,
 					ex.getMessage());
 			raw = List.of();
 		}
@@ -3995,7 +4036,7 @@ public class SseChatEmitter {
 			typed = this.frames.readFrom(this.runId, from, limit);
 		}
 		catch (RuntimeException ex) {
-			log.warn("唤醒补帧差量读取失败 runId={} from={}（本拍不补）：{}", this.runId, from, ex.getMessage());
+			log.warn("wake padding delta read failed runId={} from={} (not padded this tick): {}", this.runId, from, ex.getMessage());
 			return new WakePage(List.of(), 0);
 		}
 		List<WakeFrame> out = new ArrayList<>(typed.size());
@@ -4012,7 +4053,7 @@ public class SseChatEmitter {
 				out.add(new WakeFrame(number.longValue(), type, this.objectMapper.writeValueAsString(frame)));
 			}
 			catch (Exception ex) {
-				log.error("唤醒补帧序列化失败 runId={} seq={}: {}", this.runId, number.longValue(), ex.getMessage());
+				log.error("wake padding serialization failed runId={} seq={}: {}", this.runId, number.longValue(), ex.getMessage());
 			}
 		}
 		return new WakePage(out, typed.size());
@@ -4024,7 +4065,7 @@ public class SseChatEmitter {
 			return this.objectMapper.readValue(raw.json(), Map.class);
 		}
 		catch (Exception ex) {
-			log.error("唤醒补帧解析失败 runId={} seq={}：{}", this.runId, raw.seq(), ex.getMessage());
+			log.error("wake padding parse failed runId={} seq={}: {}", this.runId, raw.seq(), ex.getMessage());
 			return null;
 		}
 	}
@@ -4050,7 +4091,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			// 池拒绝：本拍不续（帧仍在归档，下一次唤醒/重挂兜底），不丢已入队帧。
-			log.debug("唤醒本地续读未排上 runId={} cursor={}：{}", this.runId, cursor, ex.getMessage());
+			log.debug("wake local continuation not scheduled runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
 		}
 	}
 
@@ -4206,8 +4247,8 @@ public class SseChatEmitter {
 					// 键形与本轮一致，不会串租户）；③ 没有可用提示时返回 readFailure ⇒ 调用方明确失败。
 					long backoffMs = recordIdentityReadFailure();
 					TenantUser validated = fallbackIdentityOutcome().identity();
-					log.warn("SSE 投递身份读取失败 runId={}（不缓存、{}ms 后重试；本次按{}处理）：{}", this.runId,
-							backoffMs, validated == null ? "明确失败（跳过该帧）" : "已校验提示身份", ex.getMessage());
+					log.warn("SSE delivery identity read failed runId={} (no "
+							+ "cache, retry in {}ms; treating as {} this time): {}", this.runId, backoffMs, validated == null ? "explicit failure (frame skipped)" : "validated hint identity", ex.getMessage());
 					return new IdentityOutcome(validated, validated == null);
 				}
 			}
@@ -4299,8 +4340,8 @@ public class SseChatEmitter {
 					// 主动摘除 ⇒ 前端带 lastSeq 重挂，重挂会重新解析身份并回放归档（既有恢复链）。
 					// P1-09：队列里若还有"无法归档的终结局"（帧级 identityDegraded），身份本就不可确认，
 					// 此时放行写出链，让客户端至少拿到 typed error 而不是无说明的断连。
-					log.warn("投递前身份不可确认 runId={}（主动断连，前端重挂补帧）", this.runId);
-					evict(sub, "投递前身份不可确认");
+					log.warn("identity unconfirmed before delivery runId={} (disconnect; client reattach replays)", this.runId);
+					evict(sub, "identity unconfirmed before delivery");
 					return;
 				}
 				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
@@ -4310,7 +4351,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			sub.draining.set(false);
-			evict(sub, "投递池拒绝（池队列满）");
+			evict(sub, "delivery pool rejected (queue full)");
 		}
 	}
 
@@ -4419,8 +4460,8 @@ public class SseChatEmitter {
 		}
 		IdentityOutcome writeIdentity = deliveryIdentityOutcome();
 		if (identityUnconfirmable(writeIdentity) && !frame.identityDegraded && !sub.hasIdentityDegradedFrame()) {
-			log.warn("写投递前身份不可确认 runId={}（主动断连，前端重挂补帧）", this.runId);
-			evict(sub, "写投递前身份不可确认");
+			log.warn("identity unconfirmed before write runId={} (disconnect; client reattach replays)", this.runId);
+			evict(sub, "identity unconfirmed before write");
 			finishDrain(sub);
 			return;
 		}
@@ -4445,7 +4486,7 @@ public class SseChatEmitter {
 					case SENT -> resumeDrainAfterWrite(sub);
 					case FAILED -> {
 						logWriteFailure(result.failure());
-						evict(sub, "写出失败（客户端断开）");
+						evict(sub, "write failed (client disconnected)");
 						finishDrain(sub);
 					}
 					case TIMED_OUT -> {
@@ -4455,7 +4496,7 @@ public class SseChatEmitter {
 					}
 					case SATURATED -> {
 						releaseWriteSlotIfNeverStarted(sub, started);
-						evict(sub, "写出池饱和（并发写出已达硬上限 " + SseWriteBudget.sharedWriterPoolMaxThreads() + "）");
+						evict(sub, "write pool saturated (concurrent writes at hard limit " + SseWriteBudget.sharedWriterPoolMaxThreads() + ")");
 						finishDrain(sub);
 					}
 					// 异步写路径不产出 INTERRUPTED（没有阻塞 get）；真实线程中断由
@@ -4466,8 +4507,8 @@ public class SseChatEmitter {
 		catch (RuntimeException ex) {
 			// 提交阶段异常（非池拒绝）：本次写不会发生，必须复位写在飞标志并摘除，避免"永不 complete"。
 			releaseWriteSlotIfNeverStarted(sub, started);
-			log.warn("异步写出提交失败 runId={}（摘除订阅者）：{}", this.runId, ex.getMessage());
-			evict(sub, "异步写出提交失败");
+			log.warn("async write submit failed runId={} (subscriber evicted): {}", this.runId, ex.getMessage());
+			evict(sub, "async write submit failed");
 			finishDrain(sub);
 		}
 	}
@@ -4495,8 +4536,8 @@ public class SseChatEmitter {
 		if (!Thread.interrupted()) {
 			return false;
 		}
-		log.warn("写出被中断（调用线程中断）runId={}（摘除订阅者，前端重挂差量补发）", this.runId);
-		evict(sub, "写出被中断（调用线程中断）");
+		log.warn("write interrupted (caller thread) runId={} (subscriber evicted; client reattach replays delta)", this.runId);
+		evict(sub, "write interrupted (caller thread interrupted)");
 		finishDrain(sub);
 		return true;
 	}
@@ -4577,7 +4618,7 @@ public class SseChatEmitter {
 		}
 		catch (Exception ex) {
 			logWriteFailure(ex);
-			evict(sub, "写出失败（客户端断开）");
+			evict(sub, "write failed (client disconnected)");
 			return false;
 		}
 	}
@@ -4606,9 +4647,9 @@ public class SseChatEmitter {
 		}
 	}
 
-	/** 写出失败的统一日志口径（修复前与修复后同文本；Q8②：它是"这一个订阅者没了"，不是本轮失败）。 */
+	/** 写出失败的统一日志口径（Q8②：它是"这一个订阅者没了"，不是本轮失败）。 */
 	private void logWriteFailure(Exception ex) {
-		log.debug("SSE 写出失败（客户端断开？）runId={}: {}", this.runId, ex == null ? "写超时" : ex.getMessage());
+		log.debug("SSE write failed (client disconnected?) runId={}: {}", this.runId, ex == null ? "write timeout" : ex.getMessage());
 	}
 
 	/**
@@ -4628,12 +4669,13 @@ public class SseChatEmitter {
 	 */
 	private void evictOnWriteTimeout(Subscription sub) {
 		boolean first = sub.writeTimedOut.compareAndSet(false, true);
-		closeSubscription(sub, "写超时（>" + this.writeBudget.timeoutMillis() + "ms）");
+		closeSubscription(sub, "write timeout (>" + this.writeBudget.timeoutMillis() + "ms)");
 		if (first) {
 			EVICTED_TOTAL.incrementAndGet();
-			log.warn("写超时摘除订阅者 runId={} budget={}ms writeTimeouts={}（前端按 onerror/onclose 重挂差量补发）",
+			log.warn("write timeout, subscriber evicted runId={} budget={}ms writeTimeouts={} "
+					+ "(client reconnects via onerror/onclose and replays delta)",
 					this.runId, this.writeBudget.timeoutMillis(), SseWriteBudget.writeTimeouts());
-			// 结构化出口（AI 日志最小补齐批）：把"谁被摘了、为什么"从一行中文 WARN 升成可聚合事件
+			// 结构化出口（AI 日志最小补齐批）：把"谁被摘了、为什么"从一行 WARN 升成可聚合事件
 			AiTrace.eventOn(this.runId, null, "sse_detach", "kind", "write_timeout",
 					"reason", "write_timeout", "budgetMs", this.writeBudget.timeoutMillis(),
 					"writeTimeouts", SseWriteBudget.writeTimeouts(), "subscribers", this.subscribers.size());
@@ -4667,10 +4709,10 @@ public class SseChatEmitter {
 			return;
 		}
 		EVICTED_TOTAL.incrementAndGet();
-		log.warn("摘除订阅者 runId={} reason={}", this.runId, reason);
+		log.warn("subscriber evicted runId={} reason={}", this.runId, reason);
 		AiTrace.eventOn(this.runId, null, "sse_detach", "kind", "evicted", "reason", reason,
 				"subscribers", this.subscribers.size());
-		closeSubscription(sub, "摘除：" + reason);
+		closeSubscription(sub, "evicted: " + reason);
 		completeOne(sub);
 	}
 
@@ -4706,12 +4748,12 @@ public class SseChatEmitter {
 		if (!sub.completed.compareAndSet(false, true)) {
 			return;
 		}
-		closeSubscription(sub, "完成订阅者");
+		closeSubscription(sub, "completing subscriber");
 		try {
 			sub.emitter.complete();
 		}
 		catch (Exception ex) {
-			log.debug("SSE complete 失败 runId={}: {}", this.runId, ex.getMessage());
+			log.debug("SSE complete failed runId={}: {}", this.runId, ex.getMessage());
 		}
 	}
 

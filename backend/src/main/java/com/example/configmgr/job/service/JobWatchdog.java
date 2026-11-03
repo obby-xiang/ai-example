@@ -152,8 +152,8 @@ public class JobWatchdog {
         });
         this.scheduler = svc;
         svc.scheduleWithFixedDelay(this::scanSafely, scanPeriodMs, scanPeriodMs, TimeUnit.MILLISECONDS);
-        log.info("作业看门狗已启动：scan-period={} heartbeat-interval={} dead-multiplier={} max-execution-time={}"
-                        + " beat-ttl={} runner-active-store={}",
+        log.info("Job watchdog started scanPeriod={} heartbeatInterval={} deadMultiplier={} maxExecutionTime={}"
+                + " beatTtl={} runnerActiveStore={}",
                 scanPeriod(), heartbeatInterval(), deadMultiplier(), maxExecutionTime(),
                 this.heartbeatRegistry.beatTtl(), this.heartbeatRegistry.isRedisMode() ? "redis" : "memory");
     }
@@ -193,7 +193,7 @@ public class JobWatchdog {
         } catch (Throwable t) {
             // 看门狗绝不能让扫描异常逃出调度线程（否则后续周期静默停摆）；
             // Throwable 而非 Exception：Error（StackOverflowError / OOM 等）同样兜住并留根因，不吞（红队 m4）
-            log.error("作业看门狗扫描失败: {}", t.getMessage(), t);
+            log.error("Job watchdog scan failed error={}", t.getMessage(), t);
         }
     }
 
@@ -225,7 +225,7 @@ public class JobWatchdog {
                 }
             } catch (Exception e) {
                 // 单个作业判定失败不阻断本轮其余作业
-                log.error("作业看门狗判定作业 #{} 失败: {}", job.getId(), e.getMessage(), e);
+                log.error("Job watchdog judgement failed jobId={} error={}", job.getId(), e.getMessage(), e);
             }
         }
     }
@@ -314,7 +314,7 @@ public class JobWatchdog {
     private void noteFailClosed(Long jobId) {
         this.skippedUnavailableTotal.incrementAndGet();
         if (this.failClosedLogged.add(jobId)) {
-            log.warn("作业 #{} 的共享心跳不可读，本轮判死 fail-closed（不误杀；Redis 恢复后自动继续）", jobId);
+            log.warn("Shared heartbeat unreadable, fail-closed this round jobId={}", jobId);
         }
     }
 
@@ -330,7 +330,7 @@ public class JobWatchdog {
         if (lease == JobHeartbeatRegistry.JudgeLease.HELD) {
             // 别的实例正在/已经判过：本轮不落任何动作（重复 issue / 重复终态都不增加）
             this.skippedNotLeaderTotal.incrementAndGet();
-            log.debug("作业 #{} 判死单飞键已被持有，本实例跳过本轮判定", job.getId());
+            log.debug("Dead-judgement lease held by another instance, judgement skipped jobId={}", job.getId());
             return;
         }
         final boolean writeIssue = lease == JobHeartbeatRegistry.JudgeLease.ACQUIRED;
@@ -343,8 +343,8 @@ public class JobWatchdog {
             // 超时判据只依赖本实例时钟与 jobs 行，不依赖共享态：安全网继续生效，
             // 但 issue 必须单飞 —— 拿不到租约就不写（终态由条件 UPDATE 先到者胜）。
             this.issueSuppressedTotal.incrementAndGet();
-            log.warn("作业 #{} 判超时但单飞键不可用（Redis）：仅收敛终态，跳过 issue 写入"
-                    + "（避免多实例重复 issue）", job.getId());
+            log.warn("Timeout judgement without lease (Redis), terminal state only and issue skipped jobId={}",
+                    job.getId());
         }
         this.judgedJobIds.add(job.getId());
         if (timeout) {
@@ -367,7 +367,7 @@ public class JobWatchdog {
                 issue.setMessage(reason);
                 this.issueRepository.save(issue);
             } catch (Exception e) {
-                log.error("作业看门狗写 issue 失败 jobId={}: {}", job.getId(), e.getMessage(), e);
+                log.error("Job watchdog issue write failed jobId={} error={}", job.getId(), e.getMessage(), e);
             }
         }
         this.terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0,
@@ -380,12 +380,12 @@ public class JobWatchdog {
             if (!cancelResult.redisWritten()) {
                 // cancel() 把"写 Redis 失败"降级成返回值而不是异常，失败事实必须在这里显式落日志：
                 // 终态已落 FAILED，缺的只是让执行线程在下一分片边界止步的共享标志（跨实例不可见）
-                log.warn("作业 #{} 取消标志未写入 Redis（跨实例不可见，执行线程可能继续到下一分片边界）",
+                log.warn("Cancel flag not written to Redis, runner may continue to next shard boundary jobId={}",
                         job.getId());
             }
         } catch (RuntimeException e) {
             // 兜底：取消标志不是收尾必要条件（终态已落 FAILED，执行线程的迟到写由条件 UPDATE 丢弃）
-            log.warn("作业 #{} 写取消标志异常（终态 FAILED 已落，不阻断收尾）：{}",
+            log.warn("Cancel flag write failed, terminal FAILED already written jobId={} error={}",
                     job.getId(), e.getMessage());
         }
         if (timeout) {
@@ -397,8 +397,8 @@ public class JobWatchdog {
             // 不再白等 runner-active 的 30m/65m TTL（本批硬要求）。
             this.heartbeatRegistry.revokeRunner(job.getId());
         }
-        log.warn("作业 #{} [{}] 被看门狗判{}：{}", job.getId(), job.getJobType(),
-                timeout ? "超时" : "死", reason);
+        log.warn("Job judged by watchdog jobId={} jobType={} verdict={}", job.getId(), job.getJobType(),
+                timeout ? "TIMEOUT" : "DEAD");
     }
 
     private Duration heartbeatInterval() {

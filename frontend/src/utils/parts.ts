@@ -359,8 +359,8 @@ function assertUnknownTerminalInvariant(part: ToolPart): void {
     return
   }
   console.error(
-    `[批3③a X1] unknown 工具段不允许 requiresAction=true（toolCallId=${part.toolCallId}），`
-    + '挂起投影已忽略该段'
+    `[B3-3a X1] unknown tool part must not have requiresAction=true (toolCallId=${part.toolCallId}); `
+    + 'suspended projection skipped this part'
   )
 }
 

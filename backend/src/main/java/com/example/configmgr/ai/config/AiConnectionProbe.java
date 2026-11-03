@@ -163,7 +163,7 @@ public class AiConnectionProbe {
             return interpret(response.statusCode(), body, latencyMs);
         }
         catch (TimeoutException ex) {
-            log.debug("探活超时 uri={}（超时即 UNREACHABLE，不再重试）", uri);
+            log.debug("probe timed out uri={} (timeout means UNREACHABLE, no retry)", redacted(uri));
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
@@ -174,13 +174,13 @@ public class AiConnectionProbe {
         }
         catch (ExecutionException ex) {
             Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-            log.debug("探活失败 uri={}：{}", uri, cause.getClass().getSimpleName());
+            log.debug("probe failed uri={} cause={}", redacted(uri), cause.getClass().getSimpleName());
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
         catch (RuntimeException ex) {
             // URI/客户端装配期的 IllegalArgument 等：仍然只回稳定 code（绝不把上游异常文本漏给前端）
-            log.debug("探活请求装配失败 uri={}：{}", uri, ex.getClass().getSimpleName());
+            log.debug("probe request assembly failed uri={} cause={}", redacted(uri), ex.getClass().getSimpleName());
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
@@ -188,6 +188,18 @@ public class AiConnectionProbe {
 
     private static long elapsedMs(long startedAt) {
         return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
+
+    /**
+     * 日志用的 URI 形态：只留 {@code scheme://host[:port]path}，丢掉 userinfo / query / fragment ——
+     * baseUrl 由管理员填写，可能夹带 {@code user:pass@} 或 access_token 查询串，日志不得成为第二份凭证副本。
+     */
+    private static String redacted(URI uri) {
+        if (uri == null || uri.getScheme() == null || uri.getHost() == null) {
+            return "-";
+        }
+        String authority = uri.getPort() > 0 ? uri.getHost() + ":" + uri.getPort() : uri.getHost();
+        return uri.getScheme() + "://" + authority + (uri.getPath() == null ? "" : uri.getPath());
     }
 
     /**
@@ -206,7 +218,7 @@ public class AiConnectionProbe {
         }
         int length = Math.min(body.length, MAX_BODY_BYTES);
         if (length < body.length) {
-            log.debug("探活响应体 {} 字节，按 {} 字节截断后再解析（MODELS_INVALID 是可接受结局）", body.length,
+            log.debug("probe response body {} bytes, truncating to {} bytes before parsing (MODELS_INVALID is an acceptable outcome)", body.length,
                     MAX_BODY_BYTES);
         }
         return new String(body, 0, length, java.nio.charset.StandardCharsets.UTF_8);

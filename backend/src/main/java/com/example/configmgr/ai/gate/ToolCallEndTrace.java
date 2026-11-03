@@ -64,7 +64,7 @@ final class ToolCallEndTrace {
 		// 载荷<b>先于抢位</b>构造：构造失败时"一行都没写、位也没抢" ⇒ 不需要消费/释放占位
 		Object[] payload = pairs(settled, toolCallId, tool, kind, ms, execMs, text);
 		if (!observations.claim(runId, toolCallId)) {
-			log.debug("结算行已由另一执行体发过，本次不再发 runId={} toolCallId={} tool={} kind={}", runId, toolCallId,
+			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} tool={} kind={}", runId, toolCallId,
 					tool, kind);
 			return;
 		}
@@ -108,7 +108,7 @@ final class ToolCallEndTrace {
 			return;
 		}
 		if (!observations.claim(runId, toolCallId)) {
-			log.debug("结算行已由另一执行体发过，本次不再发 runId={} toolCallId={} kind={}", runId, toolCallId, kind);
+			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} kind={}", runId, toolCallId, kind);
 			return;
 		}
 		try {

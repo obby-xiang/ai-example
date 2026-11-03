@@ -191,7 +191,7 @@ public class ImportJobRunner {
                     taskService.updateItemStatus(taskId, defCode, "IMPORTED");
 
                 } catch (Exception e) {
-                    log.error("Import failed for {}: {}", defCode, e.getMessage(), e);
+                    log.error("Import item failed defCode={} error={}", defCode, e.getMessage(), e);
                     ValidationIssue issue = new ValidationIssue();
                     issue.setJobId(jobId);
                     issue.setDefCode(defCode);
@@ -205,7 +205,7 @@ public class ImportJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Import job failed: {}", e.getMessage(), e);
+            log.error("Import job failed error={}", e.getMessage(), e);
             errorCount++;
             terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
                     processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, errorCount));
@@ -255,7 +255,7 @@ public class ImportJobRunner {
                 if (status == TransactionSynchronization.STATUS_COMMITTED) {
                     return;
                 }
-                log.warn("导入作业 #{} 的数据面事务回滚/提交失败，补写 FAILED 终态（避免停在 RUNNING 挡重跑）",
+                log.warn("Import job data transaction rolled back or commit failed, terminal FAILED written jobId={}",
                         job.getId());
                 terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                         doneEvent(job, Job.JobStatus.FAILED, 1));

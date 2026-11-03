@@ -26,8 +26,7 @@ public class FormOptionSourceRegistry {
 			for (FormOptionSource source : registered) {
 				this.sources.put(source.id(), source);
 				if (!GenerativeFormRules.OPTION_SOURCE_IDS.contains(source.id())) {
-					log.warn("选项数据源 {} 未登记在 GenerativeFormRules.OPTION_SOURCE_IDS，"
-							+ "schema 闸门不会放行引用它的表单", source.id());
+					log.warn("option source {} is not registered in GenerativeFormRules.OPTION_SOURCE_IDS; the schema gate will reject forms that reference it", source.id());
 				}
 			}
 		}

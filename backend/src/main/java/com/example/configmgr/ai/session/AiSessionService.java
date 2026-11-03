@@ -160,7 +160,7 @@ public class AiSessionService {
 		catch (Exception ex) {
 			// 会话登记失败不应阻断本轮对话：记忆与挂起态各自有键，AI 能力不因此降级。
 			// 但"没登记"是事实，必须能传给发号入口（不得当创建成功）。
-			log.warn("会话登记失败 sessionId={}：{}", sessionId, ex.getMessage());
+			log.warn("Session registration failed sessionId={}: {}", sessionId, ex.getMessage());
 			return Registration.UNAVAILABLE;
 		}
 	}

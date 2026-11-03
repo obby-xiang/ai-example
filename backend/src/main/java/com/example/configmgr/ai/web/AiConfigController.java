@@ -235,7 +235,8 @@ public class AiConfigController {
     }
 
     private static <T> ResponseEntity<ApiResponse<T>> fail(HttpStatus status, String code, String message) {
-        log.debug("配置写路径拒绝：{} {}", code, message);
+        // 只记稳定 code + 状态码：message 是给用户看的中文文案（可能回显 provider/model 标识），日志不复述用户面文本
+        log.debug("config write rejected code={} status={}", code, status.value());
         return ResponseEntity.status(status).body(ApiResponse.error(code, message));
     }
 

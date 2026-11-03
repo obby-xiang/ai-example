@@ -168,7 +168,7 @@ public class AiEndpointGuard {
         }
         catch (UnknownHostException ex) {
             // 解析不出来 ⇒ 连接不上 ⇒ 交给探活报 UNREACHABLE（见类注"已知限制"）
-            log.debug("URL 闸：主机名当前无法解析（不判脏值）host={}", host);
+            log.debug("URL guard: host cannot be resolved now (not treated as dirty) host={}", host);
             return new InetAddress[0];
         }
     }

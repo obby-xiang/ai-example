@@ -147,7 +147,7 @@ public class JobCancellationRegistry {
                 try {
                     listener.run();
                 } catch (Exception ex) {
-                    log.debug("取消监听者执行失败 jobId={}：{}", jobId, ex.getMessage());
+                    log.debug("Cancel listener failed jobId={} error={}", jobId, ex.getMessage());
                 }
             }
         }
@@ -160,7 +160,7 @@ public class JobCancellationRegistry {
         } catch (Exception ex) {
             // 返回 false = 本次按"未取消"处理：进程内标志已在前面读过，Redis 不可用期间
             // 看不到跨实例发起的取消（单实例仍可用；作业自身终态仍是最终判据）。
-            log.warn("取消标志读取失败，本次按未取消处理（Redis 不可用期间跨实例取消不可见）jobId={}：{}",
+            log.debug("Cancel flag read failed, treated as not cancelled jobId={} error={}",
                     jobId, ex.getMessage());
             return false;
         }
@@ -174,8 +174,8 @@ public class JobCancellationRegistry {
         } catch (Exception ex) {
             // 本实例只有已登记（即本实例正在执行）的作业能靠加速位立即看到这次取消；
             // 非执行实例没有本地条目，跨实例取消在 Redis 恢复前不可见（作业自身终态仍是最终判据）
-            log.warn("取消标志写入 Redis 失败（降级：仅本实例已登记的作业立即可见，跨实例不可见；不视为错误）"
-                    + "jobId={}：{}", jobId, ex.getMessage());
+            log.warn("Cancel flag write to Redis failed, cancel visible only on this instance jobId={} error={}",
+                    jobId, ex.getMessage());
             return false;
         }
     }

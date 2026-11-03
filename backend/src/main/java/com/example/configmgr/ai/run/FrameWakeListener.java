@@ -249,7 +249,7 @@ public class FrameWakeListener {
 			closeSubscription(subscription, runId, identity);
 			return false;
 		}
-		log.debug("帧唤醒订阅建立 runId={} identity={} generation={}", runId, identity, bucket.generation);
+		log.debug("frame wake subscription established runId={} identity={} generation={}", runId, identity, bucket.generation);
 		return true;
 	}
 
@@ -263,7 +263,7 @@ public class FrameWakeListener {
 		synchronized (this) {
 			dropBucket(key, bucket);
 		}
-		log.warn("帧唤醒订阅建立失败 runId={} identity={}（按桶整桶回滚登记；下一次 attach 重试）", runId, identity);
+		log.warn("frame wake subscription setup failed runId={} identity={} (bucket rolled back; next attach retries)", runId, identity);
 	}
 
 	/** 摘掉整桶及其全部登记句柄（含"未确认"的客人）；guarded by {@code this}。 */
@@ -318,13 +318,13 @@ public class FrameWakeListener {
 				// （同代次、零次 unsubscribe），自愈；客人之后再登记只会拿到 true（幂等）。
 				WakeTarget promoted = bucket.targets.iterator().next();
 				bucket.confirmed.add(promoted);
-				log.debug("帧唤醒最后一个确认者离开但有存活目标 ⇒ 提升为确认者并保留订阅 runId={} identity={} "
-						+ "generation={}", registration.runId(), registration.identity(), bucket.generation);
+				log.debug("frame wake last confirmed subscriber left but live targets "
+						+ "remain, promoting to confirmed runId={} identity={} generation={}", registration.runId(), registration.identity(), bucket.generation);
 			}
 		}
 		if (released != null) {
 			closeSubscription(released, runId, registration.identity());
-			log.debug("帧唤醒订阅释放 runId={} identity={} generation={}", runId, registration.identity(),
+			log.debug("frame wake subscription released runId={} identity={} generation={}", runId, registration.identity(),
 					bucket.generation);
 		}
 	}
@@ -340,7 +340,7 @@ public class FrameWakeListener {
 			subscription.close();
 		}
 		catch (Exception ex) {
-			log.warn("帧唤醒退订失败 runId={} identity={}：{}", runId, identity, ex.getMessage());
+			log.warn("frame wake unsubscribe failed runId={} identity={}: {}", runId, identity, ex.getMessage());
 		}
 	}
 
@@ -401,7 +401,7 @@ public class FrameWakeListener {
 				target.onWake(runId, upperBoundSeq);
 			}
 			catch (Exception ex) {
-				log.warn("唤醒处理失败 runId={} seq={}（该目标跳过本拍，下拍/重挂补帧）：{}", runId,
+				log.warn("wake handling failed runId={} seq={} (target skipped this tick; next tick/reattach replays): {}", runId,
 						upperBoundSeq, ex.getMessage());
 			}
 		}

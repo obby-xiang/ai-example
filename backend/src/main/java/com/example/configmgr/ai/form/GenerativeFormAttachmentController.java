@@ -191,7 +191,7 @@ public class GenerativeFormAttachmentController {
 		catch (RuntimeException ex) {
 			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
 			deleteQuietly(storedFile.key());
-			log.warn("附件登记失败，已清理落盘文件 runId={} toolCallId={} key={}：{}", runId, toolCallId,
+			log.warn("attachment registration failed; stored file cleaned up runId={} toolCallId={} key={} error={}", runId, toolCallId,
 					storedFile.key(), ex.getMessage());
 			throw ex;
 		}
@@ -202,12 +202,12 @@ public class GenerativeFormAttachmentController {
 				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(old.fileId());
 				if (removed != null) {
 					deleteQuietly(removed.storagePath());
-					log.info("单附件表单重传，已顶掉旧件 runId={} toolCallId={} fileId={}", runId, toolCallId,
+					log.info("single-attachment form re-uploaded; old file superseded runId={} toolCallId={} fileId={}", runId, toolCallId,
 							removed.fileId());
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("顶掉旧附件失败（新件已登记，旧件保留到 TTL）runId={} toolCallId={} fileId={}：{}", runId,
+				log.warn("could not supersede old attachment (new file registered; old file kept until TTL) runId={} toolCallId={} fileId={} error={}", runId,
 						toolCallId, old.fileId(), ex.getMessage());
 			}
 		}
@@ -216,7 +216,7 @@ public class GenerativeFormAttachmentController {
 		data.put("fileName", stored.fileName());
 		data.put("size", stored.size());
 		data.put("contentType", stored.contentType());
-		log.info("表单附件已登记 runId={} toolCallId={} fileId={} size={}", runId, toolCallId,
+		log.info("form attachment registered runId={} toolCallId={} fileId={} size={}", runId, toolCallId,
 				stored.fileId(), stored.size());
 		return ApiResponse.ok(data);
 	}
@@ -254,12 +254,12 @@ public class GenerativeFormAttachmentController {
 			snapshot = this.runStore.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取轮快照 sessionId 失败 runId={}（fail-closed，不采信请求参数）：{}", runId, ex.getMessage());
+			log.warn("could not read sessionId from run snapshot (fail-closed; request parameter not trusted) runId={} error={}", runId, ex.getMessage());
 			throw new AiStateUnavailableException("附件上传暂不可用：读不到本轮会话归属，请稍后重试", ex);
 		}
 		String sessionId = snapshot == null ? null : snapshot.getSessionId();
 		if (sessionId == null || sessionId.isBlank()) {
-			log.warn("轮快照缺少 sessionId runId={}（fail-closed：无归属的登记无法在会话销毁时回收）", runId);
+			log.warn("run snapshot has no sessionId (fail-closed: unowned registrations cannot be reclaimed on session destroy) runId={}", runId);
 			throw new AiStateUnavailableException("附件上传暂不可用：本轮缺少会话归属，请稍后重试");
 		}
 		return sessionId;
@@ -274,7 +274,7 @@ public class GenerativeFormAttachmentController {
 			this.fileStorage.delete(storageKey);
 		}
 		catch (RuntimeException ex) {
-			log.warn("删除落盘文件失败 key={}（由登记 TTL / 会话销毁兜底）：{}", storageKey, ex.getMessage());
+			log.warn("could not delete stored file key={} (registration TTL / session destroy will clean up) error={}", storageKey, ex.getMessage());
 		}
 	}
 
@@ -307,8 +307,7 @@ public class GenerativeFormAttachmentController {
 		}
 		catch (Exception ex) {
 			// 不打印入参原文（schema 可能带用户填的默认值/长文本）：只记形状与异常摘要
-			log.warn("表单入参无法解析，按【没有附件字段】拒绝上传 runId={} toolCallId={} chars={}：{}",
-					runId, pending.getToolCallId(), arguments.length(), ex.getMessage());
+			log.warn("form arguments are not parseable; upload rejected as having no attachment field runId={} toolCallId={} chars={} errorType={}", runId, pending.getToolCallId(), arguments.length(), ex.getClass().getSimpleName());
 		}
 		return keys;
 	}

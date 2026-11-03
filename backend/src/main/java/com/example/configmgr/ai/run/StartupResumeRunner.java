@@ -259,7 +259,7 @@ public class StartupResumeRunner {
 		// 运行期低频扫描与启动扫描各自独立开关：先注册定时器，再走启动那一拍。
 		startRuntimeSweep();
 		if (!this.properties.getResume().isOnStartup()) {
-			log.info("启动自动续跑未开启（app.ai.resume.on-startup=false），只做发现：GET /api/ai/runs");
+			log.info("startup auto-resume disabled (app.ai.resume.on-startup=false), discovery only: GET /api/ai/runs");
 			this.lastScan = Map.of("scanned", false, "reason", "app.ai.resume.on-startup=false",
 					"instanceId", this.store.instanceId());
 			return;
@@ -268,12 +268,13 @@ public class StartupResumeRunner {
 			// 模型配置专项批①（设计稿 §3.4）：本类改为无条件装配，所以"没有可用 provider"必须
 			// 在这里自检并跳过 —— 绝不能因"无 key"在启动扫描里报错（旧行为 = bean 压根不存在）。
 			this.lastScan = unavailableScan();
-			log.info("启动自动续跑跳过：AI 不可用（{}）", this.availability.code());
+			log.info("startup auto-resume skipped: AI unavailable ({})", this.availability.code());
 			return;
 		}
 		Duration delay = this.properties.getResume().getStartupDelay();
 		long jitterMs = startupJitterMs();
-		log.info("启动自动续跑已排期：delay={} jitter={}ms（有界错峰，避免多实例同拍抢扫描单飞）", delay, jitterMs);
+		log.info("startup auto-resume scheduled: delay={} jitter={}ms "
+				+ "(bounded stagger, avoids multi-instance scan collision)", delay, jitterMs);
 		Thread starter = new Thread(() -> {
 			try {
 				long waitMs = (delay == null || delay.isZero() || delay.isNegative() ? 0L : delay.toMillis()) + jitterMs;
@@ -286,7 +287,7 @@ public class StartupResumeRunner {
 				Thread.currentThread().interrupt();
 			}
 			catch (Throwable ex) {
-				log.error("启动自动续跑未捕获异常（已降级为不自动续跑）：{}", ex.getMessage(), ex);
+				log.error("startup auto-resume uncaught exception (degraded to no auto-resume): {}", ex.getMessage(), ex);
 			}
 		}, "ai-startup-resume");
 		starter.setDaemon(true);
@@ -302,7 +303,7 @@ public class StartupResumeRunner {
 		if (!this.availability.isAvailable()) {
 			// 强制重扫（运维端点）同样自检：不可用时不扫、不报错，只留事实
 			this.lastScan = unavailableScan();
-			log.info("启动自动续跑扫描跳过：AI 不可用（{}）", this.availability.code());
+			log.info("startup auto-resume scan skipped: AI unavailable ({})", this.availability.code());
 			return this.lastScan;
 		}
 		ScanFlight flight = tryStartScan("startup/manual", SCAN_LEASE_WAIT_MS);
@@ -311,7 +312,7 @@ public class StartupResumeRunner {
 			// 系统面扫描本身就是全租户口径，手工扫描按身份单飞，因此"让位"不会漏掉哪一轮。
 			// 不覆盖 lastScan：GET 面仍展示最近一次真实扫描的事实。
 			Map<String, Object> deferred = deferredScanReport();
-			log.info("启动口径扫描让位：单飞席位在用（trigger=startup/manual）");
+			log.info("startup scan deferred: single-flight seat busy (trigger=startup/manual)");
 			return deferred;
 		}
 		try {
@@ -323,7 +324,7 @@ public class StartupResumeRunner {
 			catch (Exception ex) {
 				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
 				// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
-				log.warn("启动自动续跑扫描失败（Redis 不可用？）：{}", ex.getMessage());
+				log.warn("startup auto-resume scan failed (Redis unavailable?): {}", ex.getMessage());
 				Map<String, Object> failed = new LinkedHashMap<>();
 				failed.put("scanned", true);
 				failed.put("at", Instant.now().toString());
@@ -346,7 +347,7 @@ public class StartupResumeRunner {
 			report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
 			report.put("scanLease", flight.outcome());
 			this.lastScan = report;
-			log.info("启动自动续跑完成：候选 {} 轮，受理 {} 轮，跳过 {} 轮（单飞 {}，详情见 GET /api/ai/startup-resume）",
+			log.info("startup auto-resume done: candidates={} resumed={} skipped={} (single-flight={}, see GET /api/ai/startup-resume)",
 					candidates.size(), result.resumed().size(), result.skipped().size(), flight.outcome());
 			return report;
 		}
@@ -370,7 +371,8 @@ public class StartupResumeRunner {
 			}
 			this.scanned.set(false);
 			if (attempt == STARTUP_SCAN_ATTEMPTS) {
-				log.info("启动自动续跑让位：{} 拍内未拿到单飞席位（另一实例/本进程正在扫，覆盖不丢失）", attempt);
+				log.info("startup auto-resume deferred: single-flight seat not acquired within "
+						+ "{} ticks (another instance/this process scanning; coverage not lost)", attempt);
 				return;
 			}
 			if (!sleepQuietly(STARTUP_SCAN_RETRY_MS + ThreadLocalRandom.current().nextLong(STARTUP_SCAN_RETRY_MS))) {
@@ -499,14 +501,14 @@ public class StartupResumeRunner {
 		if (!this.availability.isAvailable()) {
 			Map<String, Object> skippedReport = unavailableSweep();
 			this.lastSweep = skippedReport;
-			log.info("运行期死轮扫描跳过：AI 不可用（{}）", this.availability.code());
+			log.info("runtime dead-run sweep skipped: AI unavailable ({})", this.availability.code());
 			return skippedReport;
 		}
 		// 运行期拍不等待单飞：周期扫描本来就是"下一拍再来"，等只会占用调度线程。
 		ScanFlight flight = tryStartScan("runtime-sweep", 0L);
 		if (flight == null) {
 			Map<String, Object> deferred = deferredSweepReport();
-			log.info("运行期死轮扫描让位：单飞席位在用（下一拍照常）");
+			log.info("runtime dead-run sweep deferred: single-flight seat busy (next tick as usual)");
 			return deferred;
 		}
 		try {
@@ -516,7 +518,7 @@ public class StartupResumeRunner {
 			}
 			catch (Exception ex) {
 				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
-				log.warn("运行期死轮扫描失败（Redis 不可用？）：{}", ex.getMessage());
+				log.warn("runtime dead-run sweep failed (Redis unavailable?): {}", ex.getMessage());
 				Map<String, Object> failed = new LinkedHashMap<>();
 				failed.put("swept", true);
 				failed.put("at", Instant.now().toString());
@@ -541,7 +543,8 @@ public class StartupResumeRunner {
 			report.put("zombieAgeMs", zombieAgeMs);
 			report.put("scanLease", flight.outcome());
 			this.lastSweep = report;
-			log.info("运行期死轮扫描完成：候选 {} 轮，受理 {} 轮，取消收尾 {} 轮，到期收敛 {} 轮，跳过 {} 轮（判死窗口 {}，单飞 {}）",
+			log.info("runtime dead-run sweep done: candidates={} resumed={} finalized={} "
+					+ "expired={} skipped={} (zombieAge={}, single-flight={})",
 					candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
 					result.skipped().size(), this.properties.getResume().getZombieAge(), flight.outcome());
 			return report;
@@ -606,8 +609,7 @@ public class StartupResumeRunner {
 			long recordUserId = identityField(run, "userId");
 			if (caller != null && !sameIdentity(caller, recordTenantId, recordUserId)) {
 				// 别人的轮次：不续跑、也不进报告（runId 与跳过原因都属于跨身份信息）。
-				log.debug("扫描跳过非当前身份的轮次 runId={}（记录身份 {}/{}，调用身份 {}）", runId,
-						recordTenantId, recordUserId, caller);
+				log.debug("scan skipped run of another identity runId={} (identity mismatch)", runId);
 				continue;
 			}
 			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
@@ -616,7 +618,7 @@ public class StartupResumeRunner {
 						? scanDiscoverySkipItem(runId, status, recordTenantId, recordUserId, run,
 								LEGACY_NO_IDENTITY)
 						: sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
-				log.info("扫描跳过无身份的轮次 runId={}（reason={}，不驱动模型/工具）", runId,
+				log.info("scan skipped run without identity runId={} (reason={}; no model/tool drive)", runId,
 						LEGACY_NO_IDENTITY);
 				continue;
 			}
@@ -643,7 +645,7 @@ public class StartupResumeRunner {
 					}
 					catch (RuntimeException ex) {
 						skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
-						log.warn("运行期扫描的取消收尾异常 runId={}（下一拍重试）：{}", runId, ex.getMessage());
+						log.warn("runtime scan cancel finalize failed runId={} (retry next tick): {}", runId, ex.getMessage());
 						continue;
 					}
 					if (outcome == ResumeService.CancelFinalize.FINALIZED
@@ -727,7 +729,7 @@ public class StartupResumeRunner {
 					item.put("outcome", "EXCEPTION");
 					item.put("error", String.valueOf(ex.getMessage()));
 					resumed.add(item);
-					log.error("运行期死轮扫描续跑异常 runId={}", runId, ex);
+					log.error("runtime dead-run sweep resume failed runId={}", runId, ex);
 				}
 				finally {
 					AiTrace.clear();
@@ -778,7 +780,7 @@ public class StartupResumeRunner {
 				item.put("outcome", "EXCEPTION");
 				item.put("error", String.valueOf(ex.getMessage()));
 				resumed.add(item);
-				log.error("启动自动续跑异常 runId={}", runId, ex);
+				log.error("startup auto-resume failed runId={}", runId, ex);
 			}
 			finally {
 				AiTrace.clear();
@@ -917,7 +919,7 @@ public class StartupResumeRunner {
 	 */
 	private ScanFlight tryStartScan(String trigger, long waitMs) {
 		if (!lockScanGate(waitMs)) {
-			log.info("扫描跳过：本进程已有扫描在跑（trigger={}），不并发扫同一批候选", trigger);
+			log.info("scan skipped: scan already running in this process (trigger={}), not scanning the same candidates concurrently", trigger);
 			return null;
 		}
 		TenantUser scanIdentity = RequestContextUtils.currentOrNull();
@@ -938,14 +940,15 @@ public class StartupResumeRunner {
 			}
 			catch (RuntimeException ex) {
 				// 租约设施异常：按进程内单飞继续（LeaseService 的降级契约），别把扫描整体停摆。
-				log.warn("扫描单飞租约不可用（按进程内单飞继续）trigger={}：{}", trigger, ex.getMessage());
+				log.warn("scan single-flight lease unavailable (falling "
+						+ "back to in-process single-flight) trigger={}: {}", trigger, ex.getMessage());
 				this.scanInFlight.set(true);
 				return new ScanFlight(null, null, "UNAVAILABLE");
 			}
 			if (result == null) {
 				// 设施返回了"没有结论"（非生产形态：真实现恒返回三态之一；替身/桩可能给 null）：
 				// 同样按"不可确认"降级，绝不让一次 null 把整拍扫描打崩。
-				log.warn("扫描单飞租约无结论（按进程内单飞继续）trigger={}", trigger);
+				log.warn("scan single-flight lease inconclusive (falling back to in-process single-flight) trigger={}", trigger);
 				this.scanInFlight.set(true);
 				return new ScanFlight(null, null, "UNAVAILABLE");
 			}
@@ -962,26 +965,26 @@ public class StartupResumeRunner {
 					catch (RuntimeException ex) {
 						// 续租登记失败（调度器已停机等）：仍按"已拿到席位"继续 —— TTL 到期后自然可被接手，
 						// 绝不能让一次登记异常把闸门留在锁住状态。
-						log.warn("扫描单飞续租登记失败（按 TTL 兜底）trigger={}：{}", trigger, ex.getMessage());
+						log.warn("scan single-flight renew registration failed (TTL fallback) trigger={}: {}", trigger, ex.getMessage());
 					}
 				}
 				// owner 唯一 ⇒ created 恒为真；仍把它写进报告口径（日志/观测可区分异常形态）。
 				return new ScanFlight(leases, lease, result.created() ? "ACQUIRED" : "REENTRANT");
 			}
 			if (result.outcome() != LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-				log.warn("扫描单飞租约设施不可确认（按进程内单飞继续）trigger={} outcome={}", trigger,
+				log.warn("scan single-flight lease facility unconfirmed (falling back to in-process single-flight) trigger={} outcome={}", trigger,
 						result.outcome());
 				this.scanInFlight.set(true);
 				return new ScanFlight(null, null, "UNAVAILABLE");
 			}
 			if (System.currentTimeMillis() >= deadlineMs) {
 				unlockScanGate();
-				log.info("扫描让位：另一实例持有扫描单飞（trigger={}，等待预算 {}ms 用尽）", trigger, waitMs);
+				log.info("scan deferred: another instance holds scan single-flight (trigger={}, wait budget {}ms exhausted)", trigger, waitMs);
 				return null;
 			}
 			if (!sleepQuietly(SCAN_LEASE_RETRY_MS + ThreadLocalRandom.current().nextLong(SCAN_LEASE_RETRY_MS))) {
 				unlockScanGate();
-				log.info("扫描放弃：抢单飞等待被中断（trigger={}）", trigger);
+				log.info("scan abandoned: single-flight wait interrupted (trigger={})", trigger);
 				return null;
 			}
 		}
@@ -1088,13 +1091,13 @@ public class StartupResumeRunner {
 					this.leases.stopDriving(this.lease.key(), this.lease.owner());
 				}
 				catch (RuntimeException ex) {
-					log.debug("扫描单飞停续租失败（TTL 兜底）：{}", ex.getMessage());
+					log.debug("scan single-flight renew stop failed (TTL fallback): {}", ex.getMessage());
 				}
 				try {
 					this.leases.release(this.lease);
 				}
 				catch (RuntimeException ex) {
-					log.debug("扫描单飞租约释放失败（等 TTL 自然过期）：{}", ex.getMessage());
+					log.debug("scan single-flight lease release failed (waiting TTL expiry): {}", ex.getMessage());
 				}
 			}
 			unlockScanGate();
@@ -1148,13 +1151,13 @@ public class StartupResumeRunner {
 	 */
 	public void startRuntimeSweep() {
 		if (!this.properties.getResume().isRuntimeSweepEnabled()) {
-			log.info("运行期死轮扫描未注册（app.ai.resume.runtime-sweep-enabled=false）："
-					+ "启动扫描与重挂自愈照常");
+			log.info("runtime dead-run sweep not registered (app.ai.resume.runtime-sweep-enabled=false): "
+					+ "startup scan and reattach self-heal still active");
 			return;
 		}
 		Duration interval = this.properties.getResume().getRuntimeSweepInterval();
 		if (interval == null || interval.isZero() || interval.isNegative()) {
-			log.error("运行期死轮扫描未注册：app.ai.resume.runtime-sweep-interval 必须 > 0（当前 = {}）", interval);
+			log.error("runtime dead-run sweep not registered: app.ai.resume.runtime-sweep-interval must be > 0 (current = {})", interval);
 			return;
 		}
 		synchronized (this.sweepLock) {
@@ -1170,7 +1173,7 @@ public class StartupResumeRunner {
 			this.sweepFuture = executor.scheduleWithFixedDelay(this::sweepQuietly, interval.toMillis(),
 					interval.toMillis(), TimeUnit.MILLISECONDS);
 		}
-		log.info("运行期死轮扫描已注册：interval={} zombie-age={}（阈值不放宽）", interval,
+		log.info("runtime dead-run sweep registered: interval={} zombie-age={} (threshold not relaxed)", interval,
 				this.properties.getResume().getZombieAge());
 	}
 
@@ -1243,7 +1246,7 @@ public class StartupResumeRunner {
 			return this.confirmGate == null ? 0 : this.confirmGate.convergeExpiredParkedFrontend(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("运行期扫描的 park 到期收敛失败 runId={}（不改任何状态，下一拍重试）：{}", runId, ex.getMessage());
+			log.warn("runtime scan park expiry convergence failed runId={} (no state change; retry next tick): {}", runId, ex.getMessage());
 			return 0;
 		}
 	}
@@ -1254,7 +1257,7 @@ public class StartupResumeRunner {
 			sweep();
 		}
 		catch (Throwable ex) {
-			log.warn("运行期死轮扫描本轮异常（不猜状态，下一拍重试）：{}", ex.toString());
+			log.warn("runtime dead-run sweep tick failed (no state guess; retry next tick): {}", ex.toString());
 		}
 	}
 
@@ -1280,7 +1283,7 @@ public class StartupResumeRunner {
 			leaseHeld = leases != null && leases.isHeldStrict(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
-			log.debug("运行期扫描读取续跑租约失败 runId={}（按活跃处理，不接管）：{}", runId, ex.getMessage());
+			log.debug("runtime scan read resume lease failed runId={} (treating as active, no takeover): {}", runId, ex.getMessage());
 			leaseHeld = true;
 		}
 		boolean liveInProcess;
@@ -1293,7 +1296,7 @@ public class StartupResumeRunner {
 							identityField(run, "userId"));
 		}
 		catch (Exception ex) {
-			log.debug("运行期扫描读取本进程订阅失败 runId={}（按活跃处理，不接管）：{}", runId, ex.getMessage());
+			log.debug("runtime scan read local subscription failed runId={} (treating as active, no takeover): {}", runId, ex.getMessage());
 			liveInProcess = true;
 		}
 		long updatedAtMs = asLong(run.get("updatedAtMs"));

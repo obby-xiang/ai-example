@@ -361,7 +361,8 @@ public class AiSessionPurgeService {
 					System.currentTimeMillis());
 		}
 		catch (RuntimeException ex) {
-			log.warn("会话销毁 pending 登记失败，未删除任何数据 sessionId={}：{}", sessionId, rootMessage(ex));
+			log.warn("Session purge: pending registration failed, nothing deleted sessionId={}: {}", sessionId,
+					rootMessage(ex));
 			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId, identity), ex);
 		}
 		String purgeId = registration.pending().purgeId();
@@ -380,8 +381,8 @@ public class AiSessionPurgeService {
 			if (ownedByThisCall) {
 				completePendingQuietly(sessionId, purgeId, "enumerate failed");
 			}
-			log.warn("会话销毁枚举失败，未删除任何数据 sessionId={} purgeId={}（复用既有 pending 时保留台账）"
-					+ "：{}", sessionId, purgeId, rootMessage(ex));
+			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={} "
+					+ "(existing pending ledger kept on reuse): {}", sessionId, purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex);
 		}
 
@@ -393,8 +394,8 @@ public class AiSessionPurgeService {
 			if (ownedByThisCall) {
 				completePendingQuietly(sessionId, purgeId, "guard arm failed");
 			}
-			log.warn("会话销毁守卫写入失败，未删除任何数据 sessionId={} purgeId={}：{}", sessionId, purgeId,
-					rootMessage(ex));
+			log.warn("Session purge: guard arm failed, nothing deleted sessionId={} purgeId={}: {}", sessionId,
+					purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "guard", enumeration, ex);
 		}
 
@@ -408,8 +409,8 @@ public class AiSessionPurgeService {
 				completePendingQuietly(sessionId, purgeId, "database failed");
 				this.guard.disarmQuietly(sessionId, purgeId);
 			}
-			log.warn("会话销毁 H2 删除失败，Redis 面未动 sessionId={} purgeId={}（复用既有 pending 时保留台账/守卫）"
-					+ "：{}", sessionId, purgeId, rootMessage(ex));
+			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={} "
+					+ "(existing pending ledger/guard kept on reuse): {}", sessionId, purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
@@ -531,7 +532,7 @@ public class AiSessionPurgeService {
 		PurgeResult result = new PurgeResult(sessionId, purgeId, complete, current.found(), null,
 				current.database(), dbDeleted, memory, transcriptView, runViews, deferred, context,
 				attachmentView, session, current.clientCleanup(), errors, warnings);
-		log.info("会话销毁完成 sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
+		log.info("Session purge completed sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
 				+ "memoryExisted={} feedbackDeleted={} attachments={}/{}",
 				sessionId, purgeId, complete, runViews.size(), deferred.size(), errors.size(),
 				memory.existed(), dbDeleted.feedbackRows(),
@@ -544,7 +545,7 @@ public class AiSessionPurgeService {
 			return this.pendingStore.recordFailure(sessionId, purgeId, reason);
 		}
 		catch (RuntimeException ex) {
-			log.warn("记录会话销毁 pending 失败 sessionId={} purgeId={}（保留 pending，不 disarm）：{}", sessionId,
+			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed): {}", sessionId,
 					purgeId, rootMessage(ex));
 			return false;
 		}
@@ -555,7 +556,7 @@ public class AiSessionPurgeService {
 			this.pendingStore.complete(sessionId, purgeId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("撤销会话销毁 pending 失败 sessionId={} purgeId={}（{}）：{}", sessionId, purgeId, reason,
+			log.warn("Session purge: failed to clear pending sessionId={} purgeId={} ({}): {}", sessionId, purgeId, reason,
 					rootMessage(ex));
 		}
 	}
@@ -613,7 +614,7 @@ public class AiSessionPurgeService {
 					// 绝不删它的 13 键。
 					warnings.add("run[" + runId + "]: 跳过非本身份的快照（snapshotIdentity="
 							+ snapshot.getTenantId() + ":" + snapshot.getUserId() + "，不删）");
-					log.warn("会话销毁跳过非本身份的 run runId={} sessionId={} snapshotIdentity={}:{}（不删）",
+					log.warn("Session purge: skip run of another identity runId={} sessionId={} snapshotIdentity={}:{} (not deleted)",
 							runId, sessionId, snapshot.getTenantId(), snapshot.getUserId());
 					continue;
 				}
@@ -760,7 +761,7 @@ public class AiSessionPurgeService {
 		}
 		catch (RuntimeException ex) {
 			// 值坏/类型不符（前缀碰撞时 ai:ctx:<sid> 可能是他会话的台账 LIST）：不推导，扫描面仍然生效。
-			log.debug("推导归档 turnNo 失败 sessionId={}（按无推导处理）：{}", sessionId, ex.getMessage());
+			log.debug("Failed to derive archived turnNo sessionId={} (treated as none): {}", sessionId, ex.getMessage());
 			return List.of();
 		}
 	}
@@ -891,7 +892,7 @@ public class AiSessionPurgeService {
 			if (outcome != ResumeService.CancelFinalize.FINALIZED
 					&& outcome != ResumeService.CancelFinalize.ALREADY_TERMINAL
 					&& outcome != ResumeService.CancelFinalize.NO_RUN) {
-				log.info("会话销毁：取消收尾本次未落定 runId={} outcome={}（交给 awaitTerminal/deferred 重试）",
+				log.info("Session purge: cancel finalize not settled this time runId={} outcome={} (left to awaitTerminal/deferred retry)",
 						run.runId(), outcome);
 			}
 		}
@@ -1101,7 +1102,7 @@ public class AiSessionPurgeService {
 		catch (RuntimeException ex) {
 			return new MemoryVerify(false, List.of("pending: 移除失败（保留 pending 以便重试）：" + rootMessage(ex)));
 		}
-		log.info("会话销毁记忆复核完成（crash 残留补偿）sessionId={} purgeId={}", sessionId, purgeId);
+		log.info("Session purge: memory re-verify completed (crash residue compensation) sessionId={} purgeId={}", sessionId, purgeId);
 		return new MemoryVerify(true, List.of());
 	}
 
@@ -1211,7 +1212,7 @@ public class AiSessionPurgeService {
 			// 归属复核（快照带身份才可信）：别的身份/无归属 legacy 的 run 一律不动；warning 进结果可取证。
 			warnings.add("run[" + target.runId() + "]: 跳过非本身份（复核，snapshotIdentity="
 					+ latest.getTenantId() + ":" + latest.getUserId() + "）");
-			log.warn("会话销毁跳过非本身份的 run（复核）runId={} snapshotIdentity={}:{}", target.runId(),
+			log.warn("Session purge: skip run of another identity (re-verify) runId={} snapshotIdentity={}:{}", target.runId(),
 					latest.getTenantId(), latest.getUserId());
 			return;
 		}

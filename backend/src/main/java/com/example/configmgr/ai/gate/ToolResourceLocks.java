@@ -129,7 +129,7 @@ public class ToolResourceLocks {
 			return LockHandle.none(LockOutcome.DISABLED);
 		}
 		if (this.leaseService == null) {
-			log.warn("资源锁设施未装配，按不可用放行 taskId={} job={} owner={}", taskId, jobType, owner);
+			log.debug("resource lock facility not wired; allowing as unavailable taskId={} job={} owner={}", taskId, jobType, owner);
 			return LockHandle.none(LockOutcome.UNAVAILABLE);
 		}
 		Duration ttl = this.properties.getLease().getResourceTtl();
@@ -163,7 +163,7 @@ public class ToolResourceLocks {
 		}
 		if (degraded) {
 			// 显式 WARN：把"锁设施坏了"与"锁没生效"在日志里分开（关掉开关走的是 DISABLED，不打这条）
-			log.warn("资源锁设施不可用，按放行处理 taskId={} job={} owner={}（Redis 抖动不阻断业务动作）", taskId,
+			log.warn("resource lock facility unavailable; allowing (Redis jitter must not block business actions) taskId={} job={} owner={}", taskId,
 					jobType, owner);
 			return new LockHandle(LockOutcome.UNAVAILABLE, List.copyOf(created), this);
 		}
@@ -186,7 +186,7 @@ public class ToolResourceLocks {
 			return jobType != null && !jobType.isBlank() && this.leaseService.isHeld(LeaseKeys.job(taskId, jobType));
 		}
 		catch (RuntimeException ex) {
-			log.debug("资源锁只读探针失败 taskId={} job={}：{}", taskId, jobType, ex.getMessage());
+			log.debug("resource lock read-only probe failed taskId={} job={} error={}", taskId, jobType, ex.getMessage());
 			return false;
 		}
 	}
@@ -200,11 +200,11 @@ public class ToolResourceLocks {
 			Lease lease = created.get(i);
 			try {
 				if (!this.leaseService.release(lease)) {
-					log.debug("资源锁释放未命中（已过期/已换主）key={} epoch={}", lease.key(), lease.epoch());
+					log.debug("resource lock release missed (expired or owner changed) key={} epoch={}", lease.key(), lease.epoch());
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("资源锁释放失败 key={}（TTL 到期后自清）：{}", lease.key(), ex.getMessage());
+				log.warn("failed to release resource lock (clears itself at TTL) key={} error={}", lease.key(), ex.getMessage());
 			}
 		}
 	}
@@ -215,7 +215,7 @@ public class ToolResourceLocks {
 			return this.leaseService.acquire(key, ttl, owner);
 		}
 		catch (RuntimeException ex) {
-			log.warn("资源锁抢用降级 key={} owner={}（Redis 不可用 ⇒ 放行）：{}", key, owner, ex.getMessage());
+			log.warn("resource lock acquisition degraded (Redis unavailable => allow) key={} owner={} error={}", key, owner, ex.getMessage());
 			return null;
 		}
 	}

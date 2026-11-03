@@ -182,7 +182,7 @@ public final class TurnKeepalive implements AutoCloseable {
 		}
 		catch (RejectedExecutionException ex) {
 			// 调度器已关闭（应用停机 / 单测提前 shutdown）：保活缺席不影响本轮正确性，只记 DEBUG
-			log.debug("保活定时器未排上 runId={}（调度器已关闭）：{}", this.runId, ex.getMessage());
+			log.debug("keepalive timer not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
 		}
 	}
 
@@ -205,7 +205,7 @@ public final class TurnKeepalive implements AutoCloseable {
 		}
 		catch (RuntimeException ex) {
 			// 观测面不得反噬轮次：客户端已断/写出器已关闭/序列化异常都只降级为 DEBUG
-			log.debug("保活帧发送失败（已忽略）runId={} phase={}：{}", this.runId, phase, ex.getMessage());
+			log.debug("keepalive frame send failed (ignored) runId={} phase={}: {}", this.runId, phase, ex.getMessage());
 		}
 	}
 

@@ -109,8 +109,8 @@ public class ReadinessService {
 			}
 			this.drainingSince = Instant.now();
 		}
-		log.info("实例进入 draining：/health/ready 将返回 503，等待 LB 摘流（drainingSince={}）",
-				this.drainingSince);
+		log.info("Instance entering draining, /health/ready returns 503 while LB drains drainingSince={}",
+		        this.drainingSince);
 	}
 
 	/**

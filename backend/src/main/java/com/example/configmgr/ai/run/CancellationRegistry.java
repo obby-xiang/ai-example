@@ -30,7 +30,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 监听者立即被唤起（{@link StreamWatchdog} 据此当场断开上游、{@code ConfirmGate} 据此立刻解开
  * 挂起闸门），不必等下一个轮询节拍；跨进程时监听者为空，靠<b>轮询</b>发现 ——
  * 轮询点只有两处且都在"分片/事件边界"：流式看门狗每 {@value StreamWatchdog#TICK_MILLIS}ms 一次
- * （等价于"事件边界"），确认门/前端工具的等待循环每 {@value com.example.configmgr.ai.gate.ConfirmGate#HEARTBEAT_SECONDS}s 一次
+ * （等价于"事件边界"；生产装配里这次 Redis 读跑在专用有界调度器 {@code aiCancelPoll} 上，
+ * 不占判定节拍的线程），确认门/前端工具的等待循环每 {@value com.example.configmgr.ai.gate.ConfirmGate#HEARTBEAT_SECONDS}s 一次
  * （等价于"分片边界"）。</li>
  * </ul>
  *
@@ -329,7 +330,7 @@ public class CancellationRegistry {
 					listener.run();
 				}
 				catch (Exception ex) {
-					log.debug("取消监听者执行失败 runId={}：{}", runId, ex.getMessage());
+					log.debug("cancel listener failed runId={}: {}", runId, ex.getMessage());
 				}
 			}
 		}
@@ -346,7 +347,7 @@ public class CancellationRegistry {
 		long now = System.currentTimeMillis();
 		purgeExpiredDegradedCancels(now);
 		if (this.degradedCancels.size() >= DEGRADED_CANCEL_CAP && !this.degradedCancels.containsKey(slot)) {
-			log.warn("降级取消记录已达上限 {}，本条不新增（该轮仍按 UNKNOWN 处理，不伪造未取消）slot={}",
+			log.warn("degraded cancel records at cap {}, not adding this one (run stays UNKNOWN, not faked as not cancelled) slot={}",
 					DEGRADED_CANCEL_CAP, slot);
 			return;
 		}
@@ -385,7 +386,7 @@ public class CancellationRegistry {
 		if (this.degraded
 				&& System.currentTimeMillis() - this.lastDegradedPollAtMs.get() < DEGRADED_POLL_BACKOFF_MS) {
 			// 退避期不访问 Redis，但仍是 UNKNOWN；调用方（cancelState）会计数，这里留 debug 供排障。
-			log.debug("取消标志读取处于 5s 退避期，本拍返回 UNKNOWN runId={}", runId);
+			log.debug("cancel flag read in 5s backoff, returning UNKNOWN this tick runId={}", runId);
 			return RedisRead.unknown(this.lastReadFailure);
 		}
 		this.lastDegradedPollAtMs.set(System.currentTimeMillis());
@@ -411,12 +412,13 @@ public class CancellationRegistry {
 			// <b>已知窄残留（m1，本批只改注释）</b>：若此前已因真实故障处于退避（degraded 已为 true），
 			// 本次读在 try 之前已经刷新了节流锚点，这一拍会顺延既有退避 —— 它不解除已有退避，只是不再新增一次。
 			if (LeaseService.isLocalThreadInterrupt(ex)) {
-				log.debug("取消标志读取被本线程中断打断，只影响这一拍（不新开全实例退避）：{}", ex.getMessage());
+				log.debug("cancel flag read interrupted on this thread (this tick only; no instance-wide backoff): {}", ex.getMessage());
 				return RedisRead.unknown(ex);
 			}
 			if (!this.degraded) {
 				this.degraded = true;
-				log.warn("取消标志读取失败，降级为进程内取消（单实例等价，跨实例失效）：{}", ex.getMessage());
+				log.warn("cancel flag read failed, degraded to in-process cancel "
+						+ "(single-instance only, cross-instance ineffective): {}", ex.getMessage());
 			}
 			return RedisRead.unknown(ex);
 		}
@@ -443,7 +445,7 @@ public class CancellationRegistry {
 		}
 		catch (Exception ex) {
 			this.degraded = true;
-			log.warn("取消标志写入 Redis 失败（仅进程内生效）runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel flag write to Redis failed (in-process only) runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -499,7 +501,7 @@ public class CancellationRegistry {
 		private final String runId;
 
 		public CancellationUnknownException(String runId, Throwable cause) {
-			super("取消状态未知（Redis 读失败）runId=" + runId, cause);
+			super("cancel state unknown (Redis read failed) runId=" + runId, cause);
 			this.runId = runId;
 		}
 

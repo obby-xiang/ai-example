@@ -216,7 +216,7 @@ public class CreateTaskDraftStore {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取已有会话任务草案失败（按无旧值合并）key={} field={}：{}", key, field, ex.getMessage());
+			log.warn("read existing task draft failed (merging without prior value) key={} field={}: {}", key, field, ex.getMessage());
 		}
 		List<String> mergedDefCodes = defCodes != null && !defCodes.isEmpty() ? defCodes
 				: existing == null ? List.of() : existing.defCodes();
@@ -250,7 +250,7 @@ public class CreateTaskDraftStore {
 			runs = this.runStoreProvider == null ? null : this.runStoreProvider.getIfAvailable();
 		}
 		catch (RuntimeException ex) {
-			log.debug("RunStore 不可用，会话任务草案跳过 runId={}：{}", runId, ex.getMessage());
+			log.debug("RunStore unavailable, task draft skipped runId={}: {}", runId, ex.getMessage());
 			return null;
 		}
 		if (runs == null) {
@@ -297,7 +297,7 @@ public class CreateTaskDraftStore {
 		}
 		catch (RuntimeException ex) {
 			// 轻装配/单测没有 Redis 模板：草案缺席，不影响调用方既有路径
-			log.debug("StringRedisTemplate 不可用，会话任务草案跳过：{}", ex.getMessage());
+			log.debug("StringRedisTemplate unavailable, task draft skipped: {}", ex.getMessage());
 			return null;
 		}
 	}

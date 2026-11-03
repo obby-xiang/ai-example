@@ -374,7 +374,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
       issues.push({
         code: 'root-detached',
         regionId: region.id,
-        detail: `区域 ${region.id} 的 root 已不在文档中（ref 会指向已卸载节点）`
+        detail: `region ${region.id} root is no longer in the document (refs would point to unmounted nodes)`
       })
       continue
     }
@@ -382,7 +382,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
       issues.push({
         code: 'region-empty',
         regionId: region.id,
-        detail: `区域 ${region.id} 没有任何 data-ai-ref 元素（注册了却对模型不可见）`
+        detail: `region ${region.id} has no data-ai-ref elements (registered but invisible to the model)`
       })
     }
     for (const el of elements) {
@@ -397,7 +397,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
           code: 'ref-duplicate',
           regionId: region.id,
           ref,
-          detail: `ref ${ref} 同时出现在区域 ${owner} 与 ${region.id}（点击会落到哪个由遍历顺序决定）`
+          detail: `ref ${ref} appears in both region ${owner} and ${region.id} (click target depends on traversal order)`
         })
       } else if (owner === undefined) {
         refOwners.set(ref, region.id)
@@ -407,7 +407,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
           code: 'missing-name',
           regionId: region.id,
           ref,
-          detail: `ref ${ref} 缺可访问名（data-ai-label / aria-label / title / 文案全空）`
+          detail: `ref ${ref} has no accessible name (data-ai-label / aria-label / title / text all empty)`
         })
       }
       const declared = el.getAttribute('data-ai-risk')
@@ -417,7 +417,7 @@ export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegi
             code: 'risk-below-region',
             regionId: region.id,
             ref,
-            detail: `ref ${ref} 的风险 ${declared} 低于区域 ${region.id} 的 ${region.risk}（降级必须是有意为之）`
+            detail: `ref ${ref} risk ${declared} is lower than region ${region.id} risk ${region.risk} (downgrade must be intentional)`
           })
         }
       }
@@ -440,7 +440,7 @@ export function warnAiRegionAudit(targets?: readonly AiRegionAuditTarget[]): AiR
         continue
       }
       warnedAuditKeys.add(key)
-      console.warn(`[ai-region-audit] ${issue.code}：${issue.detail}`)
+      console.warn(`[ai-region-audit] ${issue.code}: ${issue.detail}`)
     }
   }
   return issues

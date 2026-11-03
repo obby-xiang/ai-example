@@ -56,22 +56,22 @@ const GENERIC_REASONS = new Set([
 const WARN_RULES = [
   {
     id: 'backend-ai-tests',
-    label: '后端 AI / 发号 / SSE 测试（不属搬迁资产）',
+    label: 'backend AI / ID / SSE tests (not part of the migration asset)',
     match: (p) => /^backend\/src\/test\/java\/com\/example\/configmgr\/(ai|common\/id|common\/sse)\//.test(p),
   },
   {
     id: 'frontend-tests',
-    label: '前端单测（含 __tests__ / *.test / *.spec）',
+    label: 'frontend unit tests (__tests__ / *.test / *.spec)',
     match: (p) => p.startsWith('frontend/') && (/(^|\/)__tests__\//.test(p) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(p)),
   },
   {
     id: 'frontend-e2e',
-    label: '前端 E2E / harness / 域专用桩（不迁移）',
+    label: 'frontend E2E / harness / domain-specific stub (not migrated)',
     match: (p) => p.startsWith('frontend/e2e/'),
   },
   {
     id: 'ci-sim',
-    label: 'CI 上游桩与 E2E 设施（不迁移）',
+    label: 'CI upstream stub and E2E facilities (not migrated)',
     match: (p) =>
       p.startsWith('scripts/ci/stub-') ||
       p === 'scripts/verify-e2e.ps1' ||
@@ -80,12 +80,12 @@ const WARN_RULES = [
   },
   {
     id: 'backend-i18n-props',
-    label: '后端错误码多语言（键集与 common/ErrorCodes 绑定，见 D6 §6.8）',
+    label: 'backend error-code messages (key set bound to common/ErrorCodes, see D6 §6.8)',
     match: (p) => /^backend\/src\/main\/resources\/messages[^/]*\.properties$/.test(p),
   },
   {
     id: 'frontend-locale-store',
-    label: '前端语言切换联动（见 D6 §6.8「切语言三件事同批」）',
+    label: 'frontend locale switching wiring (see D6 §6.8, three things in one commit)',
     match: (p) => p === 'frontend/src/stores/locale.ts',
   },
 ]
@@ -93,37 +93,37 @@ const WARN_RULES = [
 const BLOCK_RULES = [
   {
     id: 'backend-ai-runtime',
-    label: '后端 AI 运行时（ai/**）',
+    label: 'backend AI runtime (ai/**)',
     match: (p) => p.startsWith('backend/src/main/java/com/example/configmgr/ai/'),
   },
   {
     id: 'backend-ai-tools',
-    label: '工具披露清单（resources/ai/**，改 description 会影响提示词缓存）',
+    label: 'tool disclosure list (resources/ai/**; changing a description affects the prompt cache)',
     match: (p) => p.startsWith('backend/src/main/resources/ai/'),
   },
   {
     id: 'backend-id',
-    label: '会话发号（common/id/**）',
+    label: 'session ID issuance (common/id/**)',
     match: (p) => p.startsWith('backend/src/main/java/com/example/configmgr/common/id/'),
   },
   {
     id: 'backend-sse',
-    label: 'SSE 写预算（common/sse/**）',
+    label: 'SSE write budget (common/sse/**)',
     match: (p) => p.startsWith('backend/src/main/java/com/example/configmgr/common/sse/'),
   },
   {
     id: 'frontend-ai-panel',
-    label: 'AI 面板（components/AiPanel/**）',
+    label: 'AI panel (components/AiPanel/**)',
     match: (p) => p.startsWith('frontend/src/components/AiPanel/'),
   },
   {
     id: 'frontend-ai-store',
-    label: 'AI 会话 store（stores/ai.ts）',
+    label: 'AI conversation store (stores/ai.ts)',
     match: (p) => p === 'frontend/src/stores/ai.ts',
   },
   {
     id: 'frontend-ai-api',
-    label: 'AI 接口 / SSE 客户端 / 身份头（api）',
+    label: 'AI API / SSE client / identity headers (api)',
     match: (p) =>
       p === 'frontend/src/api/ai.ts' ||
       p === 'frontend/src/api/aiConfig.ts' ||
@@ -132,13 +132,13 @@ const BLOCK_RULES = [
   },
   {
     id: 'frontend-ai-types',
-    label: 'AI / SSE 帧 / 工具类型',
+    label: 'AI / SSE frame / tool types',
     match: (p) =>
       p === 'frontend/src/types/ai.ts' || p === 'frontend/src/types/sse.ts' || p === 'frontend/src/types/tools.ts',
   },
   {
     id: 'frontend-ai-utils',
-    label: 'AI 身份 / 工具回灌 / 上下文计量工具函数',
+    label: 'AI identity / tool feed-back / context accounting helpers',
     match: (p) =>
       p.startsWith('frontend/src/utils/ai-') ||
       p === 'frontend/src/utils/frontend-tools.ts' ||
@@ -147,7 +147,7 @@ const BLOCK_RULES = [
   },
   {
     id: 'frontend-locales',
-    label: '前端多语言（locales/**，AI 键集与业务段同批）',
+    label: 'frontend i18n (locales/**; AI key set ships with the business section)',
     match: (p) => p.startsWith('frontend/src/locales/'),
   },
 ]
@@ -196,9 +196,9 @@ export function classify(filePath) {
   for (const rule of BLOCK_RULES) {
     if (rule.match(p)) return { category: 'block', ruleId: rule.id, label: rule.label }
   }
-  if (p.startsWith('docs/') || p.endsWith('.md')) return { category: 'doc', ruleId: 'docs', label: '文档' }
-  if (isInfra(p)) return { category: 'infra', ruleId: 'infra', label: 'CI / 脚本 / 构建配置' }
-  return { category: 'other', ruleId: 'other', label: '非 AI 面文件（不阻断）' }
+  if (p.startsWith('docs/') || p.endsWith('.md')) return { category: 'doc', ruleId: 'docs', label: 'documentation' }
+  if (isInfra(p)) return { category: 'infra', ruleId: 'infra', label: 'CI / scripts / build config' }
+  return { category: 'other', ruleId: 'other', label: 'non-AI file (never blocks)' }
 }
 
 export function classifyChanges(changes = []) {
@@ -238,16 +238,16 @@ export function parseReview(text) {
   try {
     data = JSON.parse(text)
   } catch (e) {
-    throw new GateInputError(`docs/delivery/d6-review.json 不是合法 JSON（${e.message}）`)
+    throw new GateInputError(`docs/delivery/d6-review.json is not valid JSON (${e.message})`)
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    throw new GateInputError('docs/delivery/d6-review.json 顶层必须是对象')
+    throw new GateInputError('docs/delivery/d6-review.json must be a JSON object at the top level')
   }
   if (data.version !== REVIEW_VERSION) {
-    throw new GateInputError(`version 必须是 ${REVIEW_VERSION}（当前：${JSON.stringify(data.version)}）`)
+    throw new GateInputError(`version must be ${REVIEW_VERSION} (current: ${JSON.stringify(data.version)})`)
   }
   if (data.reviews === undefined) return { reviews: [] }
-  if (!Array.isArray(data.reviews)) throw new GateInputError('reviews 必须是数组')
+  if (!Array.isArray(data.reviews)) throw new GateInputError('reviews must be an array')
   return { reviews: data.reviews }
 }
 
@@ -271,16 +271,17 @@ function stableEntry(entry) {
 function validateEntry(entry, { d6Updated }) {
   const problems = []
   if (entry.status !== 'synced' && entry.status !== 'not-affected') {
-    problems.push(`status 必须是 synced 或 not-affected（当前：${JSON.stringify(entry.status)}）`)
+    problems.push(`status must be synced or not-affected (current: ${JSON.stringify(entry.status)})`)
   }
   if (typeof entry.reason !== 'string' || entry.reason.trim() === '') {
-    problems.push('reason 不能为空：需写明本次改动与 D6 的关系')
+    problems.push('reason must not be empty: explain how this change relates to D6')
   }
   if (entry.status === 'synced' && !d6Updated) {
+    // 注意：文案里的「同批暂存」被 scripts/ci/check-d6-sync.test.mjs 按子串断言，改动前先改测试。
     problems.push(`status=synced 要求同批暂存 ${D6_DOC_PATH}`)
   }
   if (entry.status === 'not-affected' && !isConcreteReason(entry.reason)) {
-    problems.push(`status=not-affected 的 reason 必须是具体理由（去空白后 ≥${MIN_REASON_CHARS} 字，且不是 n/a / 无 / 待补 这类占位）`)
+    problems.push(`status=not-affected needs a concrete reason (>=${MIN_REASON_CHARS} chars after trimming, and not a placeholder such as n/a / 无 / 待补)`)
   }
   return problems
 }
@@ -315,7 +316,7 @@ export function evaluate({ changes = [], reviewText = '', headReviewText = '' } 
   if (!result.reviewStaged) {
     result.exitCode = 1
     result.kind = 'review-not-staged'
-    result.problems.push(`暂存区有 ${result.block.length} 个 block 文件，但 ${REVIEW_PATH} 未随本次提交更新`)
+    result.problems.push(`${result.block.length} block file(s) are staged but ${REVIEW_PATH} was not updated in this commit`)
     return result
   }
 
@@ -350,8 +351,8 @@ export function evaluate({ changes = [], reviewText = '', headReviewText = '' } 
     result.kind = 'no-confirmation'
     result.problems.push(
       review.reviews.length === 0
-        ? 'reviews 为空：block 变更必须本次新增一条确认'
-        : '现有记录的指纹与当前暂存内容不一致（文件内容或 block 文件集合变化后旧确认即失效）'
+        ? 'reviews is empty: a block change requires a confirmation added in this commit'
+        : 'no existing record matches the current fingerprint (file content or the block file set changed, so old confirmations are invalid)'
     )
     return result
   }
@@ -360,7 +361,7 @@ export function evaluate({ changes = [], reviewText = '', headReviewText = '' } 
   if (fresh.length === 0) {
     result.exitCode = 1
     result.kind = 'reused-confirmation'
-    result.problems.push('匹配到的确认记录已存在于上一次提交（HEAD）中：确认必须本次新增，不能复用历史记录')
+    result.problems.push('the matching confirmation already exists in the previous commit (HEAD): a confirmation must be added in this commit and must not reuse history')
     return result
   }
 
@@ -454,106 +455,108 @@ function confirmationTemplate(fingerprint) {
   return {
     fingerprint,
     status: 'synced',
-    reason: '<写清本次改了什么、D6 是否需更新及原因>',
+    reason: '<describe what this commit changes and whether D6 needs an update, and why>',
     reviewedAt: new Date().toISOString().slice(0, 10),
-    reviewer: '<姓名或工号>',
+    reviewer: '<name or employee id>',
   }
 }
 
 export function describe(result) {
-  const lines = [`D6 同步复核门禁（check-d6-sync，规则版本 ${RULE_VERSION}）`, '']
+  const lines = [`D6 sync review gate (check-d6-sync, rule version ${RULE_VERSION})`, '']
 
   if (result.block.length === 0) {
     if (result.warn.length > 0) {
-      lines.push(`⚠ 以下 ${result.warn.length} 个暂存文件属测试 / 模拟设施或多语言共享面，只告警不阻断：`)
-      for (const file of sorted(result.warn)) lines.push(`    ${file.status} ${file.path}   ← ${file.label}`)
+      lines.push(`WARN ${result.warn.length} staged file(s) are test/simulation infrastructure or shared i18n surface; warn only, not blocking:`)
+      for (const file of sorted(result.warn)) lines.push(`    ${file.status} ${file.path}   <- ${file.label}`)
       lines.push('')
     }
-    lines.push('✓ 暂存区没有 AI 对话核心文件（block 面），无需 D6 复核确认')
+    lines.push('OK no AI-conversation core file (block surface) is staged; no D6 review confirmation needed')
     return lines
   }
 
-  lines.push(`暂存区 block 文件（${result.block.length} 个，必须本次新增有效确认）：`)
-  for (const file of sorted(result.block)) lines.push(`    ${file.status} ${file.path}   ← ${file.label}`)
+  lines.push(`Staged block files (${result.block.length}; each needs a valid confirmation added in this commit):`)
+  for (const file of sorted(result.block)) lines.push(`    ${file.status} ${file.path}   <- ${file.label}`)
 
   if (result.warn.length > 0) {
     lines.push('')
-    lines.push(`⚠ 另有 ${result.warn.length} 个暂存文件属测试 / 模拟设施或多语言共享面，只告警不阻断：`)
-    for (const file of sorted(result.warn)) lines.push(`    ${file.status} ${file.path}   ← ${file.label}`)
+    lines.push(`WARN ${result.warn.length} more staged file(s) are test/simulation infrastructure or shared i18n surface; warn only, not blocking:`)
+    for (const file of sorted(result.warn)) lines.push(`    ${file.status} ${file.path}   <- ${file.label}`)
   }
 
   lines.push('')
-  lines.push(`指纹：${result.fingerprint}`)
-  lines.push('      = 规则版本 + 本次暂存 block 文件的「状态 blob 路径」（d6-review.json 自身不计）')
+  lines.push(`fingerprint: ${result.fingerprint}`)
+  lines.push('      = rule version + "status blob path" of the staged block files (d6-review.json itself is excluded)')
   lines.push('')
 
   if (result.kind === 'ok') {
-    lines.push(`✓ 本次新增确认有效：status=${result.entry.status}`)
+    lines.push(`OK new confirmation is valid: status=${result.entry.status}`)
     lines.push(`    reason: ${String(result.entry.reason).trim()}`)
-    lines.push(`✓ D6 同步复核通过（${REVIEW_PATH} + ${result.block.length} 个 block 文件同批提交）`)
+    lines.push(`OK D6 review passed (${REVIEW_PATH} + ${result.block.length} block file(s) in the same commit)`)
     lines.push('')
-    lines.push('提醒：本门禁只证明"当次确实有人留下确认"，不证明 D6 内容与代码语义一致。')
+    lines.push('Note: this gate only proves that a confirmation was recorded for this change, not that the D6 content matches the code.')
     return lines
   }
 
   if (result.kind === 'bad-json') {
-    lines.push('✖ docs/delivery/d6-review.json 结构不可用（按环境/输入错误处理，rc=2）：')
+    lines.push('FAIL docs/delivery/d6-review.json is structurally unusable (treated as an environment/input error, rc=2):')
     for (const problem of result.problems) lines.push(`    - ${problem}`)
     lines.push('')
-    lines.push('坏 JSON 不会被当成"无确认"放行：先修成合法 JSON（version: 1、reviews 数组）再提交。')
+    lines.push('A broken JSON file is never treated as "no confirmation": fix it into valid JSON (version: 1, reviews array) and commit again.')
     return lines
   }
 
   const headlines = {
-    'review-not-staged': `✖ ${REVIEW_PATH} 未随本次提交更新：block 变更必须本次新增确认`,
-    'no-confirmation': '✖ 没有与当前指纹匹配的确认记录',
-    'reused-confirmation': '✖ 匹配到的确认记录不是本次新增',
-    'invalid-confirmation': '✖ 确认记录不满足要求',
+    'review-not-staged': `FAIL ${REVIEW_PATH} was not updated in this commit: block changes need a confirmation added in the same commit`,
+    'no-confirmation': 'FAIL no confirmation record matches the current fingerprint',
+    'reused-confirmation': 'FAIL the matching confirmation was not added in this commit',
+    'invalid-confirmation': 'FAIL the confirmation record does not meet the requirements',
   }
-  lines.push(headlines[result.kind] || '✖ D6 同步复核未通过')
+  lines.push(headlines[result.kind] || 'FAIL D6 sync review did not pass')
   for (const problem of result.problems) lines.push(`    - ${problem}`)
 
   if (result.kind === 'invalid-confirmation' && result.entry) {
     lines.push('')
-    lines.push(`当前记录：${JSON.stringify(result.entry)}`)
+    lines.push(`current record: ${JSON.stringify(result.entry)}`)
   }
 
   lines.push('')
-  lines.push(`处理方式：把下面这条记录**新增**到 ${REVIEW_PATH} 的 reviews 数组，并把该文件一起暂存：`)
+  lines.push(`How to fix: ADD the record below to the reviews array of ${REVIEW_PATH} and stage that file too:`)
   lines.push('')
   for (const line of JSON.stringify(confirmationTemplate(result.fingerprint), null, 2).split('\n')) {
     lines.push(`  ${line}`)
   }
   lines.push('')
-  lines.push('  status 二选一：')
-  lines.push(`    synced       = 本批同时更新了 ${D6_DOC_PATH}（门禁会核对它在暂存区里）`)
-  lines.push('    not-affected = 本次改动不影响 D6 描述的迁移面，reason 写清具体原因（不能是 n/a、无、待补）')
+  lines.push('  status, pick one:')
+  lines.push(`    synced       = this commit also updates ${D6_DOC_PATH} (the gate checks it is staged)`)
+  lines.push('    not-affected = this change does not touch the migration surface described by D6; explain why in reason (not n/a or a placeholder)')
   lines.push('')
-  lines.push('  指纹变即失效：后续再改这些文件（或增减 block 文件）需要重新确认。')
-  lines.push('  本门禁不判断 reason 是否真实，也不判断 D6 内容是否正确；CI / 人工复核仍是必要补充。')
+  lines.push('  Changing the fingerprint invalidates it: later edits to these files (or adding/removing block files) need a new confirmation.')
+  lines.push('  This gate does not judge whether reason is true, nor whether the D6 content is correct; CI / human review remain necessary.')
   return lines
 }
 
 function printHelp() {
-  console.log(`D6 同步复核门禁（check-d6-sync，规则版本 ${RULE_VERSION}）
+  console.log(`D6 sync review gate (check-d6-sync, rule version ${RULE_VERSION})
 
-用法：
-  node scripts/ci/check-d6-sync.mjs [--root <仓库根>] [--staged]
+usage:
+  node scripts/ci/check-d6-sync.mjs [--root <repo root>] [--staged]
   node scripts/ci/check-d6-sync.mjs --help
 
-判定（只看暂存区）：
-  block  backend ai/**、common/id、common/sse、resources/ai/**、
+verdict (staged index only):
+  block  backend ai/**, common/id, common/sse, resources/ai/**,
          frontend AiPanel / stores/ai.ts / api(ai|aiConfig|sse|http) / types(ai|sse|tools) /
          utils(ai-*|frontend-tools|context-usage|parts) / locales
-         —— 必须本次新增一条指纹匹配的确认：synced（同批更新 D6）或 not-affected（具体理由）
-  warn   测试 / E2E / 桩 / harness / 后端 messages_*.properties / stores/locale.ts —— 只告警
-  doc    docs/** 与 *.md；infra  scripts/**、.github/**、构建配置；其余业务文件一律忽略
+         -- needs a confirmation with the matching fingerprint added in this commit:
+            synced (D6 updated in the same commit) or not-affected (concrete reason)
+  warn   tests / E2E / stubs / harness / backend messages_*.properties / stores/locale.ts -- warn only
+  doc    docs/** and *.md; infra scripts/**, .github/**, build config; all other files are ignored
 
-指纹：sha256(规则版本 + 排序后的「状态 blob 路径」)，只含本次暂存 block 文件；d6-review.json 自身不计。
-退出码：0 通过（含"无需确认"）/ 1 需要确认而未满足 / 2 输入或环境错误（坏 JSON、version 缺失或不为 1、非 git 仓库等）。
+fingerprint: sha256(rule version + sorted "status blob path"), staged block files only; d6-review.json itself excluded.
+exit code: 0 pass (including "no confirmation needed") / 1 confirmation needed but missing / 2 input or environment error
+           (bad JSON, missing version or version != 1, not a git repo, ...).
 
-局限：确认记录是人工书面承诺，门禁不校验其真实性，也不校验 D6 内容正确性；
-      git commit --no-verify 与未安装 Node 的环境都会跳过本检查（跳过时输出告警）。`)
+limits: a confirmation is a written human commitment; the gate does not verify its truth, nor that the D6 content is correct;
+        git commit --no-verify and machines without Node skip this check (a warning is printed when skipped).`)
 }
 
 // ── 入口 ────────────────────────────────────────────────────────────────────
@@ -581,7 +584,7 @@ function main(argv) {
     }
   }
   if (unknown.length > 0 || (argv.includes('--root') && !root)) {
-    console.error(`✖ [d6-sync] 参数无法识别：${unknown.join(' ') || '--root 缺少值'}（--help 查看用法）`)
+    console.error(`[d6-sync] FAIL unrecognised argument: ${unknown.join(' ') || '--root is missing its value'} (see --help)`)
     return 2
   }
 
@@ -595,8 +598,8 @@ function main(argv) {
     for (const line of describe(result)) console.log(line)
     return result.exitCode
   } catch (e) {
-    console.error(`✖ [d6-sync] 检查未能完成（按错误处理，rc=2）：${e.message}`)
-    console.error('    请确认当前目录（或 --root）是 git 仓库、git 可用，且暂存区可读。')
+    console.error(`[d6-sync] FAIL check could not complete (treated as an error, rc=2): ${e.message}`)
+    console.error('    Make sure the current directory (or --root) is a git repository, git is available, and the index is readable.')
     return 2
   }
 }

@@ -64,8 +64,8 @@ class ShutdownDrainGate {
 		if (this.drainWindow == null || this.drainWindow.isZero() || this.drainWindow.isNegative()) {
 			return;
 		}
-		log.info("draining 窗口开始：{}（/health/ready=503，web 连接器仍接受连接，等 LB 摘流）",
-				this.drainWindow);
+		log.info("Draining window started: {} (/health/ready=503, connector still accepting while LB drains)",
+		        this.drainWindow);
 		long deadline = System.nanoTime() + this.drainWindow.toNanos();
 		while (true) {
 			long remainingNanos = deadline - System.nanoTime();
@@ -78,11 +78,11 @@ class ShutdownDrainGate {
 			catch (InterruptedException interrupted) {
 				// 停机被外部打断（例如第二次信号）：立即交给后续的 graceful shutdown，不吞中断标记
 				Thread.currentThread().interrupt();
-				log.warn("draining 窗口被中断，立即进入停机（已经可见的 503 不会被撤销）");
+				log.warn("Draining window interrupted, shutting down now (visible 503s are not reverted)");
 				return;
 			}
 		}
-		log.info("draining 窗口结束：交给优雅停机（停止接受新请求，等在途请求收尾）");
+		log.info("Draining window elapsed, handing over to graceful shutdown");
 	}
 
 }

@@ -351,7 +351,7 @@ public class SessionGate {
 	 * {@code null} = Redis 异常或结果不可知（<b>不得</b>当成功）
 	 */
 	private Boolean takeLock(String gateKey, String runId, String token) {
-		return runLockScript(gateKey, ACQUIRE_SCRIPT, "取门/接管", encode(runId, token), ttlMs(), runId);
+		return runLockScript(gateKey, ACQUIRE_SCRIPT, "acquire/takeover", encode(runId, token), ttlMs(), runId);
 	}
 
 	/** 轮终态主动释放（token = runId：首轮/旧调用点）。 */
@@ -400,13 +400,13 @@ public class SessionGate {
 				expected = holder.lockValue;
 			}
 		}
-		Boolean deleted = runLockScript(gateKey, RELEASE_SCRIPT, "释放", expected);
+		Boolean deleted = runLockScript(gateKey, RELEASE_SCRIPT, "release", expected);
 		if (Boolean.TRUE.equals(deleted)) {
 			released = true;
 		}
 		else if (deleted == null) {
-			log.warn("会话锁释放结果不可知 sessionId={} runId={}（未做裸 DEL；锁按 TTL 自行过期）", sessionId,
-					runId);
+			log.warn("Session lock release outcome unknown sessionId={} runId={} (no bare DEL; lock expires by TTL)",
+					sessionId, runId);
 		}
 		return released;
 	}
@@ -437,8 +437,8 @@ public class SessionGate {
 				continue;
 			}
 			if (found != null) {
-				log.warn("会话门释放命中多个身份的持有记录，拒绝猜测 sessionId={} runId={}（各自按身份释放）",
-						sessionId, runId);
+				log.warn("Session gate release matched holders under multiple identities; refusing to guess "
+						+ "sessionId={} runId={} (each identity releases its own)", sessionId, runId);
 				return null;
 			}
 			found = holder;
@@ -469,7 +469,8 @@ public class SessionGate {
 		if (runId == null || runId.isBlank()) {
 			// 持有者不可知（RT-35 的 busy.unknown）：没有任何 runId 可以匹配，强释放必须放弃 ——
 			// 猜一个 id 去删锁，删到别人那一任就是"静默抢门"。
-			log.warn("会话门强释放缺少 runId sessionId={}（持有者不可知：不猜、不删任何锁）", sessionId);
+			log.warn("Session gate force release missing runId sessionId={} (holder unknown: no guessing, no lock deleted)",
+					sessionId);
 			return;
 		}
 		String gateKey = gateKey(sessionId);
@@ -483,10 +484,10 @@ public class SessionGate {
 			cancelWatchdog(holder);
 			gateKey = holder.gateKey;
 		}
-		Boolean deleted = runLockScript(gateKey, RELEASE_DEAD_SCRIPT, "强释放", runId);
+		Boolean deleted = runLockScript(gateKey, RELEASE_DEAD_SCRIPT, "force-release", runId);
 		if (deleted == null) {
-			log.warn("会话锁强释放结果不可知 sessionId={} runId={}（未做裸 DEL；锁按 TTL 自行过期）", sessionId,
-					runId);
+			log.warn("Session lock force release outcome unknown sessionId={} runId={} (no bare DEL; lock expires by TTL)",
+					sessionId, runId);
 		}
 	}
 
@@ -615,8 +616,9 @@ public class SessionGate {
 			if (this.inProcess.remove(holder.gateKey, holder)) {
 				cancelWatchdog(holder);
 				removed++;
-				log.warn("会话门进程内残留已过期，清扫 sessionId={} runId={} key={}（watchdog 已停且已不再持锁；"
-						+ "活跃持有不会被清）", holder.sessionId, holder.runId, holder.gateKey);
+				log.warn("Session gate: sweeping expired in-process residue sessionId={} runId={} key={} "
+						+ "(watchdog stopped and lock no longer held; active holders are never swept)",
+						holder.sessionId, holder.runId, holder.gateKey);
 			}
 		}
 		return removed;
@@ -651,7 +653,7 @@ public class SessionGate {
 			return holder.lockValue.equals(this.redis.opsForValue().get(holder.gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("会话门过期清扫无法核对锁 key={}（按仍持有处理）：{}", holder.gateKey, ex.getMessage());
+			log.debug("Session gate sweep could not verify lock key={} (treated as still held): {}", holder.gateKey, ex.getMessage());
 			return true;
 		}
 	}
@@ -669,13 +671,13 @@ public class SessionGate {
 		try {
 			Long result = this.redis.execute(script, List.of(gateKey), args);
 			if (result == null) {
-				log.warn("会话锁{}结果不可知（脚本未返回）key={}（未做任何写入兜底）", action, gateKey);
+				log.debug("Session lock {} outcome unknown (script returned null) key={} (no fallback write)", action, gateKey);
 				return null;
 			}
 			return result == 1L;
 		}
 		catch (Exception ex) {
-			log.warn("会话锁{}失败 key={}（Redis 异常，未做任何写入兜底）：{}", action, gateKey, ex.getMessage());
+			log.debug("Session lock {} failed key={} (Redis error, no fallback write): {}", action, gateKey, ex.getMessage());
 			return null;
 		}
 	}
@@ -690,8 +692,8 @@ public class SessionGate {
 	private Busy busyHeldByAnother(String gateKey, String sessionId) {
 		String observed = observedRunId(gateKey);
 		if (observed == null) {
-			log.warn("会话门被占用但持有者不可知 sessionId={}（诊断读失败/锁已消失：按 unknown 拒绝，"
-					+ "不回退成调用方 runId）", sessionId);
+			log.debug("Session gate busy but holder unknown sessionId={} (diagnostic read failed / lock gone: "
+					+ "reject as unknown, never fall back to the caller runId)", sessionId);
 			return new Busy(null, true, true);
 		}
 		return new Busy(observed, false);
@@ -707,7 +709,7 @@ public class SessionGate {
 			return runIdOfValue(this.redis.opsForValue().get(gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("读取会话门持有者失败 key={}（按不可知处理）：{}", gateKey, ex.getMessage());
+			log.debug("Failed to read session gate holder key={} (treated as unknown): {}", gateKey, ex.getMessage());
 			return null;
 		}
 	}
@@ -739,17 +741,26 @@ public class SessionGate {
 					// 否则只在日志里说一句就没了，调用方看到的仍是"一切正常"。
 					holder.degraded = true;
 					this.lockLost.incrementAndGet();
-					log.warn("会话锁已失效或换主：停止续期并标记降级 sessionId={} runId={} key={}"
-							+ "（进程内门仍持有；跨实例互斥已失效，后续 409 的 degraded 会如实上报）", sessionId,
+					log.warn("Session lock expired or taken over: stop renewing and mark degraded sessionId={} runId={} key={} "
+							+ "(in-process gate still held; cross-instance exclusion lost, later 409s report degraded)", sessionId,
 							runId, gateKey);
 					cancelWatchdog(holder);
 				}
 			}
 			catch (Exception ex) {
+				// 续期异常会按 watchdog 周期（默认 30s）反复触发：只在"进入降级"时留一条 WARN，
+				// 之后降为 DEBUG —— 降级事实本身仍由 degraded/lockLost 与 409 的 degraded 如实上报。
+				boolean enteringDegraded = !holder.degraded;
 				holder.degraded = true;
 				this.lockLost.incrementAndGet();
-				log.warn("会话锁续期异常，降级为进程内单值门 sessionId={} key={}：{}", sessionId, gateKey,
-						ex.getMessage());
+				if (enteringDegraded) {
+					log.warn("Session lock renew failed, degrading to in-process gate sessionId={} key={}: {}",
+							sessionId, gateKey, ex.getMessage());
+				}
+				else {
+					log.debug("Session lock renew still failing (degraded already reported) sessionId={} key={}: {}",
+							sessionId, gateKey, ex.getMessage());
+				}
 			}
 		}, period, period, TimeUnit.MILLISECONDS);
 	}

@@ -535,7 +535,7 @@ public class ResumeService {
 		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
 		boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
 		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-			log.debug("发现态取消状态未知，按未取消继续展示 runId={}", runId);
+			log.debug("discovery: cancel state unknown, continuing as not cancelled runId={}", runId);
 		}
 		long activeAtMs = activeAtMs(snapshot);
 		// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
@@ -587,7 +587,7 @@ public class ResumeService {
 		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
 		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
 			// 与列表面同一口径：UNKNOWN 按"未取消"继续，但绝不当成"已确认未取消"写回任何状态。
-			log.debug("发现态取消状态未知，按未取消继续扫描 runId={}", runId);
+			log.debug("discovery: cancel state unknown, continuing scan as not cancelled runId={}", runId);
 		}
 		long activeAtMs = activeAtMs(snapshot);
 		Map<String, Object> item = new LinkedHashMap<>();
@@ -897,7 +897,8 @@ public class ResumeService {
 						leases.stopDriving(lease.key(), lease.owner());
 						leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
 								&& snapshotNotTerminal(runId, identity), identity);
-						log.info("续跑权已重挂给本进程仍在运行的驱动 runId={} epoch={}（不新起驱动、不还租）", runId,
+						log.info("resume authority reattached to live driver in this process "
+								+ "runId={} epoch={} (no new driver, lease not released)", runId,
 								lease.epoch());
 					}
 					else if (result.outcome().releasesLease()) {
@@ -913,14 +914,14 @@ public class ResumeService {
 						// （releaseIfHeld 只在仍是本实例那一任时才删，不碰别人的租约）。留着等 TTL
 						// 会多出一段"无人续租、也没人知道它已无主"的窗口。
 						this.store.releaseRunLease(runId);
-						log.warn("续跑续租登记失败，已按所有权归还本次创建的租约 runId={} epoch={}：{}", runId,
+						log.warn("resume renew registration failed, returning created lease runId={} epoch={}: {}", runId,
 								lease == null ? -1L : lease.epoch(), ex.getMessage());
 					}
 					else {
 						// LEASE_REARMED：这一任已经属于仍在跑的旧驱动，归还会把旧驱动围栏在外且无人驱动。
 						// 续租任务没登记上时宁可让租约按 TTL 自然到期（旧驱动的写随即被 fence 拦住），也不删它。
-						log.warn("续跑权重挂的续租登记失败，保留租约不归还 runId={} epoch={}（旧驱动仍在这一轮上，"
-								+ "还租会造成围栏在外且无人驱动；等 TTL 到期或旧驱动自己的收尾）：{}", runId,
+						log.warn("resume reattach renew registration failed, keeping lease runId={} epoch={} (old driver still on this "
+								+ "run; releasing would leave the fence out with no driver; waiting TTL or old driver cleanup): {}", runId,
 								lease == null ? -1L : lease.epoch(), ex.getMessage());
 					}
 					throw ex;
@@ -959,7 +960,7 @@ public class ResumeService {
 			}
 			catch (RuntimeException ex) {
 				// 探针读不出来 ≠ 没人持有：按"有人持有"处理，把结论交给抢租脚本（它会给出权威答案）
-				log.debug("接管前初检读租约失败 runId={}（交给抢租判定）：{}", runId, ex.getMessage());
+				log.debug("pre-takeover lease read failed runId={} (left to acquire decision): {}", runId, ex.getMessage());
 				leaseHeld = true;
 			}
 			if (leaseHeld) {
@@ -972,7 +973,7 @@ public class ResumeService {
 		}
 		catch (RuntimeException ex) {
 			// 读不出来不是"可以接管"：交给常规入口的 STATE_UNKNOWN 等既有分支处理（这里不改变方向）
-			log.debug("接管前初检读快照失败 runId={}（交给常规入口）：{}", runId, ex.getMessage());
+			log.debug("pre-takeover snapshot read failed runId={} (falling back to normal entry): {}", runId, ex.getMessage());
 			return null;
 		}
 		if (snapshot == null || !RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
@@ -995,13 +996,14 @@ public class ResumeService {
 		body.put("reason", reason);
 		if ("DRIVER_ALIVE_IN_PROCESS".equals(reason)) {
 			body.put("driverAlive", true);
-			log.warn("僵尸接管否决 runId={}：本进程的驱动方仍持有这一轮的租约（不抢租、不还租，驱动不受影响）",
+			log.warn("zombie takeover denied runId={}: driver in this process still holds the lease (no steal, no release, driver unaffected)",
 					runId);
 		}
 		else {
 			body.put("activeAtMs", activeAtMs);
 			body.put("activeAgeMs", activeAgeMs);
-			log.warn("僵尸接管否决 runId={}：业务活动仍在僵尸窗口内（{}ms ≤ 阈值 {}ms）—— 不抢租，让给原驱动",
+			log.warn("zombie takeover denied runId={}: business activity within zombie "
+					+ "window ({}ms <= threshold {}ms) - no steal, leave to original driver",
 					runId, activeAgeMs, this.properties.getResume().getZombieAge().toMillis());
 		}
 		body.put("instanceId", this.store.instanceId());
@@ -1088,7 +1090,7 @@ public class ResumeService {
 				return this.messageSource.getMessage("error." + ErrorCodes.AI_RESUME_FAILED, null, Locale.ENGLISH);
 			}
 			catch (NoSuchMessageException ex) {
-				log.debug("messages_en 缺 error.{}，回落 en 白名单短句", ErrorCodes.AI_RESUME_FAILED);
+				log.debug("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_RESUME_FAILED);
 			}
 		}
 		return AI_RESUME_FAILED_MESSAGE_EN;
@@ -1150,7 +1152,7 @@ public class ResumeService {
 				pendings = this.store.pendings(runId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("续跑入口读取待决条目失败 runId={}（按未知拒绝，不驱动）", runId, ex);
+				log.warn("resume entry: pending entries read failed runId={} (rejecting as unknown, no drive)", runId, ex);
 				Map<String, Object> body = new LinkedHashMap<>();
 				body.put("runId", runId);
 				body.put("resumed", false);
@@ -1209,9 +1211,8 @@ public class ResumeService {
 					body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
 					body.put("driverAlive", true);
 					body.put(LEASE_REARMED_KEY, true);
-					log.warn("僵尸接管改判『重挂租约』runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
-							+ "（同实例共享租约视图 ⇒ 新起驱动会双驱动）—— 不新起驱动，把租约重挂给旧驱动"
-							+ "（fresh={}）", runId, sessionId, freshLease);
+					log.warn("zombie takeover reclassified as lease reattach runId={} sessionId={}: this process still registers "
+							+ "the driver (shared lease view; a new driver would double-drive) - reattaching to old driver (fresh={})", runId, sessionId, freshLease);
 					return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 				}
 				if (driverAlive || activityAlive) {
@@ -1220,28 +1221,27 @@ public class ResumeService {
 							body.put("resumed", false);
 							body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
 							body.put("driverAlive", true);
-							log.warn("僵尸接管复核拒绝 runId={} sessionId={}：本进程仍登记着这一轮的驱动方"
-									+ "（无租约可重挂：lease=null；拒绝不改任何状态）—— 不接管", runId, sessionId);
+							log.warn("zombie takeover recheck denied runId={} sessionId={}: this process still registers "
+									+ "the driver (no lease to reattach: lease=null; no state change) - not taking over", runId, sessionId);
 							return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 						}
 						body.put("resumed", false);
 						body.put("reason", "ACTIVITY_ADVANCED");
 						body.put("activeAtMs", activeAtMs);
 						body.put("activeAgeMs", activeAgeMs);
-						log.warn("僵尸接管复核拒绝 runId={} sessionId={}：业务活动在接管判定之后又前进"
-								+ "（{}ms ≤ 阈值 {}ms：原驱动还活着）—— 不接管", runId, sessionId, activeAgeMs,
+						log.warn("zombie takeover recheck denied runId={} sessionId={}: business activity advanced "
+								+ "after the decision ({}ms <= threshold {}ms: original driver alive) - not taking over", runId, sessionId, activeAgeMs,
 								zombieAgeMs);
 						return new ResumeResult(Outcome.ALREADY_RUNNING, body);
 					}
-					log.warn("僵尸接管复核：仍见活驱动迹象（driverAlive={} activeAgeMs={}），但本次是 fresh 抢租"
-							+ "（已推进 fence）且本进程没有该轮驱动登记（跨实例）—— 继续接管 runId={} sessionId={}"
-							+ "（旧驱动的写将被 fence 挡住）", driverAlive, activeAgeMs, runId, sessionId);
+					log.warn("zombie takeover recheck: live driver signs remain (driverAlive={} activeAgeMs={}), but this is a fresh acquire (fence "
+							+ "advanced) with no local driver registration (cross-instance) - taking over runId={} sessionId={} (old writes fenced)", driverAlive, activeAgeMs, runId, sessionId);
 				}
 				// 僵尸接管（N3/R3）：上一进程死在模型调用中间，状态永远停在 RUNNING。
 				// 判据由调用方（启动扫描/运维扫描）给出：本实例刚启动 + 业务活动已超龄；
 				// 活跃时刻 = max(快照 updatedAtMs, 最后一条非心跳业务帧 atMs)，因此"还在跑长工具/
 				// 流式吐字"的活轮不会被接管，心跳也不会把卡死的轮养年轻（R1-09）。
-				log.warn("僵尸轮接管 runId={} sessionId={} 活跃时刻距今 {}ms（快照 {}ms / 末条业务帧 {}ms，阈值 {}）",
+				log.warn("zombie run takeover runId={} sessionId={} inactive {}ms (snapshot {}ms / last business frame {}ms, threshold {})",
 						runId, sessionId, System.currentTimeMillis() - activeAtMs,
 						System.currentTimeMillis() - snapshot.getUpdatedAtMs(),
 						System.currentTimeMillis() - this.store.lastActivityAtMs(runId),
@@ -1307,7 +1307,7 @@ public class ResumeService {
 					body.put("heldBy", busy.runId());
 					body.put("message", "该会话当前有另一轮在跑（park 期间用户又发起了一轮）；"
 							+ "本轮决策已落库，稍后自动重试续跑。");
-					log.info("续跑暂缓：会话门被另一轮占着 runId={} heldBy={}（决策已落库，由派发方有界重试）",
+					log.info("resume deferred: session gate held by another run runId={} heldBy={} (decision stored; dispatcher retries bounded)",
 							runId, busy.runId());
 					return new ResumeResult(Outcome.SESSION_BUSY, body);
 				}
@@ -1326,7 +1326,7 @@ public class ResumeService {
 				body.put("reason", authority == LeaseService.LeaseAuthority.LOST ? "LEASE_HELD_ELSEWHERE"
 						: "LEASE_UNAVAILABLE");
 				body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-				log.warn("续跑拒绝：写权限为 {} runId={}（只读恢复，不推进这一轮）", authority, runId);
+				log.warn("resume rejected: write authority {} runId={} (read-only recovery, no progress)", authority, runId);
 				return new ResumeResult(authority == LeaseService.LeaseAuthority.LOST
 						? Outcome.LEASE_HELD_ELSEWHERE : Outcome.STATE_UNKNOWN, body);
 			}
@@ -1376,8 +1376,8 @@ public class ResumeService {
 						// 历史数据。结算由 resolvePending 显式落成 blocked（不执行后端桩、不写台账）；
 						// 这里先留一条可 grep 的痕 —— 否则"这张卡续跑后为什么是 blocked"只能靠翻半小时日志猜。
 						if (isKindMisapproved(effective)) {
-							log.warn("续跑发现 APPROVED+FRONTEND 历史假批准 runId={} toolCallId={} name={}"
-									+ "（将显式 blocked、不执行后端桩、不写台账）", runId, effective.getToolCallId(),
+							log.warn("resume found APPROVED+FRONTEND fake approval runId={} toolCallId={} "
+									+ "name={} (blocked explicitly; no backend stub, no ledger)", runId, effective.getToolCallId(),
 									effective.getName());
 						}
 						ResumeResult cancelBeforeTool = cancelStateOutcome(runId, body);
@@ -1397,7 +1397,7 @@ public class ResumeService {
 							if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) {
 								throw ex;
 							}
-							log.warn("续跑重建期间取消状态不可知，按既有 UNKNOWN 结局收口 runId={} toolCallId={}：{}",
+							log.warn("cancel state unknown during resume rebuild, closing with UNKNOWN outcome runId={} toolCallId={}: {}",
 									runId, effective.getToolCallId(), ex.getMessage());
 							return cancelUnknownOutcome(body);
 						}
@@ -1426,7 +1426,7 @@ public class ResumeService {
 						settledInBatch.add(source);
 						if (this.toolCallingManager.haltsBatch(source)) {
 							haltedBy = source;
-							log.warn("续跑批策略首错即停 runId={} 上游工具={} outcome={} code={}，剩余条目将置 SKIPPED",
+							log.warn("resume batch stops on first error runId={} upstream tool={} outcome={} code={}; remaining entries become SKIPPED",
 									runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode());
 						}
 					}
@@ -1465,7 +1465,7 @@ public class ResumeService {
 				// N4：状态转换走取消优先的原子守卫（不是普通 save）。本笔被拒 ⇒ 取消已先到/续跑权已丢，
 				// 复核后给 typed 结局，**不得**继续压缩、认领或交棒驱动这一轮。
 				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
-					log.info("续跑重建后的 RUNNING 状态转换被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）",
+					log.info("post-rebuild RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)",
 							runId);
 					return resumeStatusWriteRefused(runId, body);
 				}
@@ -1483,7 +1483,7 @@ public class ResumeService {
 				snapshot.getResumedBy().add(this.store.instanceId());
 				snapshot.setStatus(RunSnapshot.RUNNING);
 				if (!this.store.saveStatusUnlessCancelled(snapshot)) {
-					log.info("续跑 RUNNING 状态转换被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
+					log.info("resume RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)", runId);
 					return resumeStatusWriteRefused(runId, body);
 				}
 			}
@@ -1551,7 +1551,7 @@ public class ResumeService {
 					}
 				}
 				catch (RuntimeException ex) {
-					log.debug("transcript baseline 写入权判定失败 runId={}（本次不复制）：{}", runId, ex.getMessage());
+					log.debug("transcript baseline write authority check failed runId={} (not copied this time): {}", runId, ex.getMessage());
 				}
 			}
 			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
@@ -1631,14 +1631,15 @@ public class ResumeService {
 						.filter(message -> message.getMessageType() != MessageType.SYSTEM)
 						.toList();
 					if (!this.chatService.replaceMemoryWindow(runId, sessionId, memoryWindow, windowSnapshot)) {
-						log.warn("续跑压缩整窗写回失败 runId={} sessionId={}（不写压缩快照、不交棒驱动）", runId, sessionId);
+						log.warn("resume compaction whole-window write-back failed runId={} "
+								+ "sessionId={} (no compaction snapshot, no driver handoff)", runId, sessionId);
 						return resumeStatusWriteRefused(runId, body);
 					}
 					snapshot.setMessageJson(this.codec.serializeAll(history));
 					// N4：压缩是长窗口（L2 = N 次串行摘要），结束时取消可能已经先到 —— 这一笔同样
 					// 不得把 CANCELLED 翻回 RUNNING；被拒 ⇒ 不写 context 交接位、不交棒驱动。
 					if (!this.store.saveStatusUnlessCancelled(snapshot)) {
-						log.info("续跑压缩后的快照写被写门拒绝 runId={}（复核取消态/续跑权后收口，不驱动）", runId);
+						log.info("compacted snapshot write refused by write gate runId={} (cancel/authority recheck then close, no drive)", runId);
 						return resumeStatusWriteRefused(runId, body);
 					}
 					// B1 / I5：记忆 CAS 与快照写都成功之后才提交压缩状态/台账
@@ -1680,7 +1681,7 @@ public class ResumeService {
 					out.context(ContextCompactor.framePayload(compaction));
 				}
 				catch (RuntimeException ex) {
-					log.warn("续跑 context 帧发送失败（已忽略，不影响本轮续跑）runId={}：{}", runId, ex.getMessage());
+					log.warn("resume context frame send failed (ignored, resume unaffected) runId={}: {}", runId, ex.getMessage());
 				}
 				// 级别显式交接给驱动侧：续跑轮的 done.context.level 不能靠时刻反推（压完才交棒）
 				this.chatService.noteCompaction(runId, compaction.levelWire());
@@ -1712,7 +1713,7 @@ public class ResumeService {
 					}
 					catch (Exception ex) {
 						// R-08：用户面只给白名单短句；原始异常（上游 body / 内部提示）只进日志。
-						log.error("续跑未捕获异常 runId={}：{}", runId, String.valueOf(ex.getMessage()), ex);
+						log.error("resume uncaught exception runId={}: {}", runId, String.valueOf(ex.getMessage()), ex);
 						// 交棒后的失败必须落终态，不能只留下错误帧和无人推进的 RUNNING 快照。
 						// N2：失败终态与失败终帧在同一个监视器内完成（取消已先到 ⇒ 两者都不发）。
 						// 本批（返修后按<b>每次驱动</b>判）：只跳过"本次驱动已落的终帧"，上一次驱动的 error
@@ -1818,8 +1819,8 @@ public class ResumeService {
 		if (refresher == null) {
 			// 可观测性（不回退、不猜根因）：本批确有"能推进上下文"的结果，但装配里没有刷新器
 			if (settled.stream().anyMatch(entry -> RunContextRefresher.supports(entry.getName()))) {
-				log.warn("续跑批无法刷新运行上下文：未注入 RunContextRefresher runId={}"
-						+ "（下一跳沿用请求边界的旧上下文，步骤工具可能不披露）", runId);
+				log.warn("resume batch cannot refresh run context: RunContextRefresher not injected "
+						+ "runId={} (next hop keeps request-boundary context; step tools may be undisclosed)", runId);
 			}
 			return before;
 		}
@@ -1836,7 +1837,7 @@ public class ResumeService {
 			}
 			catch (RuntimeException ex) {
 				// 保留旧上下文继续折下一条：一条读库失败不代表整批结果不可用
-				log.warn("续跑批后刷新运行上下文失败，保留旧上下文（不阻断续跑）runId={} tool={}：{}", runId,
+				log.warn("post-batch context refresh failed, keeping old context (resume unaffected) runId={} tool={}: {}", runId,
 						entry.getName(), ex.getMessage());
 			}
 		}
@@ -1855,7 +1856,7 @@ public class ResumeService {
 		}
 		catch (RuntimeException ex) {
 			snapshot.setContext(beforeMap);
-			log.warn("续跑批刷新运行上下文写回失败，保留旧上下文（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			log.warn("post-batch context write-back failed, keeping old context (resume unaffected) runId={}: {}", runId, ex.getMessage());
 			return before;
 		}
 		RunSnapshot fresh;
@@ -1865,19 +1866,19 @@ public class ResumeService {
 		catch (RuntimeException ex) {
 			// 写可能成了、也可能没有（例如写门静默拒写）：读不到真值就不认这笔刷新
 			snapshot.setContext(beforeMap);
-			log.warn("续跑批刷新运行上下文重读失败，按批首上下文交棒（不阻断续跑）runId={}：{}", runId,
+			log.warn("post-batch context reread failed, handing off with batch-start context (resume unaffected) runId={}: {}", runId,
 					ex.getMessage());
 			return before;
 		}
 		if (fresh == null) {
 			snapshot.setContext(beforeMap);
-			log.warn("续跑批刷新运行上下文重读为空，按批首上下文交棒（不阻断续跑）runId={}", runId);
+			log.warn("post-batch context reread empty, handing off with batch-start context (resume unaffected) runId={}", runId);
 			return before;
 		}
 		AiContext reread = AiContext.fromMap(fresh.getContext());
 		// 以重读真值为准回写内存：写门静默拒写时它等于 before（不扩披露面），内存也随之与持久态一致。
 		snapshot.setContext(reread.toMap());
-		log.info("续跑批结算后已刷新运行上下文 runId={} page={} taskId={} taskType={} step={} status={}", runId,
+		log.info("run context refreshed after batch settlement runId={} page={} taskId={} taskType={} step={} status={}", runId,
 				reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
 		return reread;
 	}
@@ -1908,7 +1909,7 @@ public class ResumeService {
 			return this.contextRefresher.syncTask(context).orElse(context);
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑交棒前任务权威同步失败，保留旧上下文（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			log.warn("pre-handoff task authority sync failed, keeping old context (resume unaffected) runId={}: {}", runId, ex.getMessage());
 			return context;
 		}
 	}
@@ -1928,7 +1929,7 @@ public class ResumeService {
 			return enriched == null ? context : enriched;
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑交棒前任务槽位重算失败，保留旧槽位（不阻断续跑）runId={}：{}", runId, ex.getMessage());
+			log.warn("pre-handoff task slot recompute failed, keeping old slots (resume unaffected) runId={}: {}", runId, ex.getMessage());
 			return context;
 		}
 	}
@@ -1950,7 +1951,7 @@ public class ResumeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("无法区分条件交棒的挂起物，按条件表返回 runId={}：{}", runId, ex.getMessage());
+			log.warn("cannot distinguish conditional handoff payload, returning conditional parked runId={}: {}", runId, ex.getMessage());
 		}
 		return "CONDITIONS_FORM_PARKED";
 	}
@@ -1983,7 +1984,7 @@ public class ResumeService {
 			fresh = this.chatService.workspaceStateText(context);
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑刷新工作区状态文本失败（沿用历史里的那份）runId={}：{}", runId, ex.getMessage());
+			log.warn("resume workspace state text refresh failed (using historical copy) runId={}: {}", runId, ex.getMessage());
 			return history;
 		}
 		if (!StringUtils.hasText(fresh)) {
@@ -2000,7 +2001,7 @@ public class ResumeService {
 			}
 		}
 		if (changed) {
-			log.info("续跑交棒前已把工作区状态换成刷新后的权威值 runId={} page={} taskId={} step={}", runId,
+			log.info("workspace state replaced with refreshed authority value before handoff runId={} page={} taskId={} step={}", runId,
 					context.getPage(), context.getTaskId(), context.getStep());
 		}
 		return changed ? out : history;
@@ -2077,7 +2078,8 @@ public class ResumeService {
 					+ "（" + ex.getClass().getSimpleName() + "）");
 			target.setInFlightToolCalls(new ArrayList<>());
 			if (!this.store.saveTerminalUnlessCancelled(target)) {
-				log.info("续跑失败终态被取消优先守卫拒写 runId={}（不发 error 终帧；取消收尾负责终态与终帧）",
+				log.info("resume failure terminal state refused by cancel-priority guard "
+						+ "runId={} (no error frame; cancel finalize owns terminal state/frame)",
 						snapshot.getRunId());
 				return;
 			}
@@ -2091,7 +2093,7 @@ public class ResumeService {
 			}
 		}
 		catch (RuntimeException writeEx) {
-			log.warn("续跑失败落终态写回失败 runId={}（终帧照发，恢复侧按快照/租约兜底）：{}",
+			log.warn("resume failure terminal write failed runId={} (error frame still emitted; recovery relies on snapshot/lease): {}",
 					snapshot.getRunId(), writeEx.getMessage());
 			if (emitError != null) {
 				emitError.run();
@@ -2115,7 +2117,7 @@ public class ResumeService {
 	private void emitFailureErrorUnlessArchived(SseChatEmitter out, String code, String message) {
 		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
 		if (Boolean.TRUE.equals(archived)) {
-			log.info("本次驱动的失败终帧已落档，跳过重复 error code={}（每次驱动至多一条终帧）", code);
+			log.debug("failure terminal frame already archived for this drive, skipping duplicate error code={} (at most one per drive)", code);
 			return;
 		}
 		out.error(code, message);
@@ -2169,7 +2171,8 @@ public class ResumeService {
 				rebuiltText = this.chatService == null ? null : this.chatService.systemPromptText(context);
 			}
 			catch (RuntimeException ex) {
-				log.warn("续跑重建 SYSTEM 失败 runId={} sessionId={}（按原历史续跑，不伪装已恢复）：{}", runId,
+				log.warn("resume SYSTEM rebuild failed runId={} sessionId={} (continuing "
+						+ "with original history, not pretending recovered): {}", runId,
 						sessionId, ex.getMessage());
 			}
 			finally {
@@ -2183,13 +2186,14 @@ public class ResumeService {
 				}
 			}
 			if (rebuiltText == null || rebuiltText.isBlank()) {
-				log.warn("续跑快照缺少 SYSTEM 且无法重建 runId={} sessionId={}（续跑将没有人设/工作区约束，"
-						+ "请排查快照写入路径）", runId, sessionId);
+				log.warn("resume snapshot missing SYSTEM and rebuild impossible runId={} "
+						+ "sessionId={} (no persona/workspace constraints; check snapshot write path)", runId, sessionId);
 				return loaded;
 			}
 			systems.add(new SystemMessage(rebuiltText));
 			rebuilt = true;
-			log.warn("续跑快照缺少 SYSTEM，已按当前配置重建 runId={} sessionId={}（旧窗口/压缩可能丢过系统段）",
+			log.warn("resume snapshot missing SYSTEM, rebuilt from current config runId={} "
+					+ "sessionId={} (old window/compaction may have dropped the system part)",
 					runId, sessionId);
 		}
 		if (wasLeading && !rebuilt) {
@@ -2233,7 +2237,7 @@ public class ResumeService {
 		// 报成 IN_PROGRESS（那会让 B 的交棒链一直重试到预算耗尽）。
 		String resumeKey = LocalRunKey.of(runId);
 		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
-			log.info("取消收尾暂缓：本进程已有执行体在推进这一轮 runId={}（交棒侧有界重试）", runId);
+			log.info("cancel finalize deferred: an executor in this process is driving this run runId={} (handoff retries bounded)", runId);
 			return CancelFinalize.IN_PROGRESS;
 		}
 		boolean gateHeld = false;
@@ -2274,7 +2278,7 @@ public class ResumeService {
 			if (this.sessionGate != null) {
 				SessionGate.Busy busy = this.sessionGate.acquire(snapshot.getSessionId(), runId, gateToken);
 				if (busy != null && !runId.equals(busy.runId())) {
-					log.info("取消收尾暂缓：会话门被另一轮占着 runId={} heldBy={}（交棒侧有界重试）", runId,
+					log.info("cancel finalize deferred: session gate held by another run runId={} heldBy={} (handoff retries bounded)", runId,
 							busy.runId());
 					return CancelFinalize.SESSION_BUSY;
 				}
@@ -2314,7 +2318,7 @@ public class ResumeService {
 			return CancelFinalize.PERSIST_DENIED;
 		}
 		catch (RuntimeException ex) {
-			log.warn("取消收尾执行异常 runId={}（按未落定处理，交给有界重试）：{}", runId, ex.getMessage());
+			log.warn("cancel finalize execution failed runId={} (unsettled, left to bounded retry): {}", runId, ex.getMessage());
 			return CancelFinalize.PERSIST_DENIED;
 		}
 		finally {
@@ -2323,7 +2327,7 @@ public class ResumeService {
 					this.sessionGate.release(gateSessionId, runId, gateToken);
 				}
 				catch (RuntimeException ex) {
-					log.debug("取消收尾释放会话门失败 sessionId={} runId={}：{}", gateSessionId, runId,
+					log.debug("cancel finalize session gate release failed sessionId={} runId={}: {}", gateSessionId, runId,
 							ex.getMessage());
 				}
 			}
@@ -2356,7 +2360,7 @@ public class ResumeService {
 			leases.release(lease);
 		}
 		catch (RuntimeException ex) {
-			log.debug("取消收尾还租失败 key={} epoch={}：{}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("cancel finalize lease release failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 		}
 	}
 
@@ -2449,12 +2453,13 @@ public class ResumeService {
 			reload = this.aiConfigService.reloadWithOutcome();
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑身份判据重载配置抛错 runId={}（按不可知处理，不判死不写终态）：{}", runId, ex.getMessage());
+			log.warn("resume identity config reload threw runId={} (treating "
+					+ "as unknown; no death verdict, no terminal write): {}", runId, ex.getMessage());
 			return ResolvedIdentity.unknown("配置重载抛错");
 		}
 		if (reload == null || !reload.ok()) {
 			// reload == null = 替身没打桩/实现缺失：同样按"不可知"处理（宁可不判死）。
-			log.warn("续跑身份判据重载未成功 runId={}（读库不可用；按不可知处理，不判死不写终态）", runId);
+			log.warn("resume identity config reload unsuccessful runId={} (DB unavailable; treating as unknown; no death verdict)", runId);
 			return ResolvedIdentity.unknown("配置快照刷新未成功");
 		}
 		java.util.Optional<AiConfigService.ChatTarget> refreshed = lookup.get();
@@ -2466,7 +2471,7 @@ public class ResumeService {
 			state = binding.get();
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑身份判据读取行级状态失败 runId={}（按不可知处理）：{}", runId, ex.getMessage());
+			log.warn("resume identity row-state read failed runId={} (treating as unknown): {}", runId, ex.getMessage());
 			return ResolvedIdentity.unknown("行级判据不可读");
 		}
 		if (state == AiConfigService.BindingState.KEY_UNREADABLE) {
@@ -2474,7 +2479,7 @@ public class ResumeService {
 		}
 		if (state == AiConfigService.BindingState.RESOLVED) {
 			// 不应发生（行/模型/key 都就绪时解析不会为空）。宁可当"不可知"也不判死。
-			log.warn("续跑身份判据自相矛盾 runId={}（行级状态=RESOLVED 但解析为空）—— 按不可知处理", runId);
+			log.warn("resume identity contradictory runId={} (row state=RESOLVED but resolution empty) - treating as unknown", runId);
 			return ResolvedIdentity.unknown("行级判据与解析结果不一致");
 		}
 		return ResolvedIdentity.absent();
@@ -2490,8 +2495,8 @@ public class ResumeService {
 	 * 连接（服务端 emitter 无传输超时），客户端只能等自己的超时。
 	 */
 	private ResumeResult stateUnknown(String runId, RunSnapshot snapshot, String detail) {
-		log.warn("续跑暂缓：配置状态不可确认 runId={} providerId={} model={}（{}）—— 不判死、不写终态、不出业务帧，"
-				+ "快照保持 {}，由派发方/重挂稍后重试", runId, snapshot.getProviderId(), snapshot.getModelId(),
+		log.warn("resume deferred: config state unconfirmed runId={} providerId={} model={} ({}): no death "
+				+ "verdict, no terminal state/frame, snapshot stays {}; dispatcher/reattach retries later", runId, snapshot.getProviderId(), snapshot.getModelId(),
 				detail, snapshot.getStatus());
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("runId", runId);
@@ -2516,7 +2521,7 @@ public class ResumeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("续跑暂缓收流失败 runId={}：{}", runId, ex.getMessage());
+			log.debug("resume deferred stream close failed runId={}: {}", runId, ex.getMessage());
 		}
 	}
 
@@ -2535,7 +2540,7 @@ public class ResumeService {
 	 * 终帧，而不是把这一轮留在 {@code SUSPENDED} 且"无人驱动、无帧可等"（客户端只能等到超时）。
 	 */
 	private ResumeResult providerGone(String runId, RunSnapshot snapshot, String detail) {
-		log.warn("续跑拒绝：快照的 provider/模型已不可用 runId={} providerId={} model={}（{}）", runId,
+		log.warn("resume rejected: snapshot provider/model unavailable runId={} providerId={} model={} ({})", runId,
 				snapshot.getProviderId(), snapshot.getModelId(), detail);
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("resumed", false);
@@ -2583,8 +2588,8 @@ public class ResumeService {
 		try {
 			LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
 			if (authority != null && authority.readOnly()) {
-				log.warn("续跑硬否定未收敛 runId={}：写权限 {}（丢租/不可确认）—— 不写终态、不出终帧，"
-						+ "由新主人按同一判据收尾", runId, authority);
+				log.warn("resume hard negative not converged runId={}: write authority {} (lease "
+						+ "lost/unconfirmed) - no terminal state/frame; new owner closes by the same rule", runId, authority);
 				return;
 			}
 			RunSnapshot latest = this.store.get(runId);
@@ -2597,7 +2602,7 @@ public class ResumeService {
 			target.setInFlightToolCalls(new ArrayList<>());
 			// 取消优先：取消已先到 ⇒ 不写 FAILED、不发 error（取消侧发 done{cancelled:true}）。
 			if (!this.store.saveTerminalUnlessCancelled(target)) {
-				log.info("续跑硬否定让位取消 runId={}（不写 FAILED、不发 error 终帧）", runId);
+				log.info("resume hard negative yields to cancel runId={} (no FAILED, no error frame)", runId);
 				return;
 			}
 			// F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
@@ -2612,11 +2617,12 @@ public class ResumeService {
 			// 本批：终帧幂等（与 fail/emptyReply/环外异常同一判据）—— 归档里已有终帧时不再补一条。
 			emitFailureErrorUnlessArchived(out, ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
 			this.registry.close(runId);
-			log.info("续跑硬否定已收敛 runId={} status=FAILED code={}（重挂会回放该终帧后收流）", runId,
+			log.info("resume hard negative converged runId={} status=FAILED code={} (reattach replays the terminal frame then closes)", runId,
 					ErrorCodes.AI_PROVIDER_GONE);
 		}
 		catch (RuntimeException ex) {
-			log.warn("续跑硬否定收敛失败 runId={}（快照/终帧未落地，由后续重挂或启动扫描再收敛）：{}", runId,
+			log.warn("resume hard negative convergence failed runId={} (snapshot/frame "
+					+ "not persisted; reattach or startup scan reconverges): {}", runId,
 					ex.getMessage());
 		}
 	}
@@ -2631,7 +2637,7 @@ public class ResumeService {
 				return this.messageSource.getMessage("error." + ErrorCodes.AI_PROVIDER_GONE, null, Locale.ENGLISH);
 			}
 			catch (NoSuchMessageException ex) {
-				log.debug("messages_en 缺 error.{}，回落 en 白名单短句", ErrorCodes.AI_PROVIDER_GONE);
+				log.debug("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_PROVIDER_GONE);
 			}
 		}
 		return PROVIDER_GONE_MESSAGE_EN;

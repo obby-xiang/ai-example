@@ -674,7 +674,7 @@ public class ToolPreflightService {
 							: "任务 #" + taskId + " 尚未上传数据文件；先在导入向导上传文件并重跑预检查");
 		}
 		catch (RuntimeException ex) {
-			log.debug("预检读任务文件失败 taskId={}：{}", taskId, ex.getMessage());
+			log.debug("preflight could not read task file taskId={} error={}", taskId, ex.getMessage());
 			// 失败开放：查不了 ≠ 没有（与 ToolTargetResolver 同一口径）
 			return PreflightReport.check(CheckCode.HAS_UPLOAD, true, args,
 					english ? "Upload state is temporarily unavailable (rechecked before execution)"
@@ -946,7 +946,7 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("发布影响面取暂存行数失败（按不可估处理）：{}", ex.getMessage());
+			log.debug("publish impact could not read staged row count (treated as inestimable) error={}", ex.getMessage());
 			return new Impact(
 					english ? "Will publish " + defs + " definitions · impact cannot be estimated"
 							: "将发布 " + defs + " 个配置定义 · " + IMPACT_UNKNOWN,
@@ -1004,7 +1004,7 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("影响面取文件行数失败（按不可估处理）：{}", ex.getMessage());
+			log.debug("impact could not read file row count (treated as inestimable) error={}", ex.getMessage());
 			return null;
 		}
 		return known ? rows : null;

@@ -43,8 +43,9 @@ import java.util.List;
  *
  * <p><b>不再宣称"唯一写入者"</b>：{@link JobService#cancel} 用条件 UPDATE 写作业终态，
  * {@link PrecheckJobRunner#writeFingerprintSummary} 定向写 {@code result_json}；
- * {@link StaleJobRecoveryRunner} <b>仍</b>按 {@code findAll → setStatus → save} 整行写
- * （{@code Job} 无 {@code @DynamicUpdate}），该风险归 R1-10，不在本批收口范围。
+ * {@link StaleJobRecoveryRunner} 按 {@code finishInterruptedIfInFlight} 条件 UPDATE 写作业终态
+ * （只迁移 status/finished_at，<b>不回写扫描时刻的旧 progress/total</b>，也不做整行 {@code save}），
+ * 并同事务收敛在途条目 —— 与 {@link #finish} 同口径，但走调用方事务（启动期需要加入调用方事务的语义）。
  */
 @Slf4j
 @Service
@@ -156,7 +157,7 @@ public class JobProgressService {
             heartbeatRegistry.clear(jobId);
         }
         if (!wroteTerminal) {
-            log.debug("作业 #{} 已收终态，忽略本次 finish({}) 调用（先到者胜，后到者不覆盖）",
+            log.debug("Job already terminal, finish ignored (first writer wins) jobId={} status={}",
                     jobId, jobStatus);
         }
         // R-152：返回「本次是否实际落写终态」，供 JobTerminalWriter 据此决定是否联动任务态——
@@ -184,7 +185,7 @@ public class JobProgressService {
         }
         int converged = jobItemRepository.convergeOpenItems(jobId, "FAILED");
         if (converged > 0) {
-            log.warn("作业 #{} 终态 FAILED：收敛 {} 条在途条目为 FAILED（执行器已不再写条目）",
+            log.warn("Job terminal FAILED, open items converged jobId={} items={}",
                     jobId, converged);
         }
     }
@@ -220,8 +221,8 @@ public class JobProgressService {
             // 与 finish/cancel 的 jobs 条件 UPDATE 串行化（同一把行锁）；markItemFinal 的插入分支同法。
             Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
             if (parent == null || !IN_FLIGHT.contains(parent.getStatus())) {
-                log.info("作业 #{} 已离开在途态（{}），拒绝迟到开工的配置项 {}（终态作业不得新增在途条目）",
-                        jobId, parent == null ? "已删除" : parent.getStatus(), defCode);
+                log.info("Job left in-flight state, late item start refused jobId={} state={} defCode={}",
+                        jobId, parent == null ? "DELETED" : parent.getStatus(), defCode);
                 return null;
             }
             JobItem item = new JobItem();
@@ -256,7 +257,7 @@ public class JobProgressService {
      */
     public boolean finishItem(Long itemId, String itemStatus, int processed, int total) {
         if (itemStatus == null) {
-            log.warn("作业条目 #{} 的终态写缺少目标状态，已丢弃", itemId);
+            log.warn("Item terminal write dropped, missing target status itemId={}", itemId);
             return false;
         }
         List<Job.JobStatus> allowed = allowedJobStatuses(itemStatus);
@@ -264,7 +265,7 @@ public class JobProgressService {
                 jobItemRepository.finishIfJobStatusAllowed(
                         itemId, itemStatus, processed, total, ITEM_OPEN, allowed) > 0));
         if (!wrote) {
-            log.debug("作业条目 #{} 的终态写被丢弃（父作业终态冲突、条目已终态或条目不存在）：{}",
+            log.debug("Item terminal write dropped (parent terminal, item terminal, or item missing) itemId={} status={}",
                     itemId, itemStatus);
         }
         return wrote;
@@ -306,7 +307,7 @@ public class JobProgressService {
                 jobItemRepository.compensateFailureIfInFlight(
                         itemId, processed, total, COMPENSABLE_ITEM, IN_FLIGHT) > 0));
         if (!wrote) {
-            log.debug("作业条目 #{} 的失败补偿被丢弃（父作业已终态或条目已 CANCELLED/FAILED）", itemId);
+            log.debug("Item failure compensation dropped (parent terminal or item already CANCELLED/FAILED) itemId={}", itemId);
         }
         return wrote;
     }
@@ -326,7 +327,7 @@ public class JobProgressService {
             }
             Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
             if (parent == null || !IN_FLIGHT.contains(parent.getStatus())) {
-                log.debug("作业条目失败补偿未插入（父作业不存在或已终态）：jobId={} defCode={}",
+                log.debug("Item failure compensation not inserted (parent missing or terminal) jobId={} defCode={}",
                         jobId, defCode);
                 return false;
             }
@@ -352,7 +353,7 @@ public class JobProgressService {
      */
     public boolean markItemFinal(Long jobId, String defCode, String itemStatus, int processed, int total) {
         if (itemStatus == null) {
-            log.warn("作业条目补记缺少目标状态 jobId={} defCode={}，已丢弃", jobId, defCode);
+            log.warn("Item mark-final dropped, missing target status jobId={} defCode={}", jobId, defCode);
             return false;
         }
         return Boolean.TRUE.equals(requiresNew.execute(status -> {
@@ -361,14 +362,14 @@ public class JobProgressService {
                 boolean wrote = jobItemRepository.finishIfJobStatusAllowed(existing.getId(), itemStatus,
                         processed, total, ITEM_OPEN, allowedJobStatuses(itemStatus)) > 0;
                 if (!wrote) {
-                    log.debug("作业条目 #{} 的补记被丢弃（父作业/条目已终态）：jobId={} defCode={} status={}",
+                    log.debug("Item mark-final dropped (parent or item terminal) itemId={} jobId={} defCode={} status={}",
                             existing.getId(), jobId, defCode, itemStatus);
                 }
                 return wrote;
             }
             Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
             if (parent == null || !allowedJobStatuses(itemStatus).contains(parent.getStatus())) {
-                log.debug("作业条目补记未插入（父作业不存在或已终态）：jobId={} defCode={} status={}",
+                log.debug("Item mark-final not inserted (parent missing or terminal) jobId={} defCode={} status={}",
                         jobId, defCode, itemStatus);
                 return false;
             }

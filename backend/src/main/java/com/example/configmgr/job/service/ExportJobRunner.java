@@ -93,7 +93,7 @@ public class ExportJobRunner {
                     if (status == TransactionSynchronization.STATUS_COMMITTED) {
                         return;
                     }
-                    log.warn("导出作业 #{} 的数据面事务回滚，补写 FAILED 终态（避免停在 RUNNING）", jobId);
+                    log.warn("Export job data transaction rolled back, terminal FAILED written to avoid stuck RUNNING jobId={}", jobId);
                     terminalWriter.completeNow(job, Job.JobStatus.FAILED, snapshot.errors, 0,
                             snapshot.processed, snapshot.total, doneEvent(job, Job.JobStatus.FAILED));
                 }
@@ -264,12 +264,12 @@ public class ExportJobRunner {
                         }
                         catch (RuntimeException compensationFailure) {
                             e.addSuppressed(compensationFailure);
-                            log.warn("导出项 {} 回滚前的条目补偿失败（保留原异常）：{}", defCode,
+                            log.warn("Export item compensation failed before rollback (original error kept) defCode={} error={}", defCode,
                                     compensationFailure.toString());
                         }
                         throw e;
                     }
-                    log.error("Export failed for def {}: {}", defCode, e.getMessage(), e);
+                    log.error("Export item failed defCode={} error={}", defCode, e.getMessage(), e);
                     saveIssue(jobId, defCode, issueMessage(e));
                     errorCount++;
                     finishedDefRows += defTotal;
@@ -282,7 +282,7 @@ public class ExportJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Export job failed: {}", e.getMessage(), e);
+            log.error("Export job failed error={}", e.getMessage(), e);
             errorCount++;
             snapshot.processed = processedRows;
             snapshot.total = totalRows;

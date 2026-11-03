@@ -98,7 +98,7 @@ public class AiSessionPurgeController {
 		TenantUser identity = RequestContextUtils.currentOrNull();
 		body.put("identity", identity == null ? null
 				: Map.of("tenantId", identity.tenantId(), "userId", identity.userId()));
-		log.info("会话销毁端点 sessionId={} complete={} deferred={} errors={}", sessionId,
+		log.info("session purge endpoint sessionId={} complete={} deferred={} errors={}", sessionId,
 				result.complete(), result.deferred().size(), result.errors().size());
 		return ResponseEntity.ok(body);
 	}

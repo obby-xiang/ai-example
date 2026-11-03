@@ -2,6 +2,7 @@ package com.example.configmgr.job.repo;
 
 import com.example.configmgr.job.entity.Job;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
@@ -28,9 +29,30 @@ public interface JobRepository extends JpaRepository<Job, Long> {
 
     List<Job> findByTaskId(Long taskId);
 
-    /** 启动清理 runner-active 键用：只取 id，不水合 EAGER 的 job_items。 */
-    @Query("SELECT j.id FROM Job j")
-    List<Long> findAllIds();
+    /**
+     * 启动僵尸恢复的候选分页（keyset，按 id 升序，{@code LIMIT} 由 {@link Pageable} 施加）。
+     *
+     * <p>只投影恢复真正要用的标量列：{@code findAll()} 会把<b>全库</b>作业连同 EAGER 的
+     * {@code job_items} 与 {@code result_json}（CLOB）一并水合进一级缓存，堆占用与启动时长
+     * 随历史作业数线性放大；恢复实际只关心在途作业。
+     *
+     * <p>keyset（{@code id > afterId}）而非 offset：恢复会把命中行改为 FAILED（移出
+     * {@code status IN} 集合），offset 分页会因此跳行；按 id 前进则与集合变化无关。
+     */
+    @Query("SELECT j.id AS id, j.taskId AS taskId, j.jobType AS jobType "
+            + "FROM Job j WHERE j.status IN :statuses AND j.id > :afterId ORDER BY j.id ASC")
+    List<InFlightJobRef> findInFlightRefsAfter(@Param("afterId") long afterId,
+                                               @Param("statuses") Collection<Job.JobStatus> statuses,
+                                               Pageable pageable);
+
+    /** {@link #findInFlightRefsAfter} 的标量投影（恢复只需要这些列；进度等列不读，避免旧快照回写）。 */
+    interface InFlightJobRef {
+        Long getId();
+
+        Long getTaskId();
+
+        Job.JobType getJobType();
+    }
 
     /** 在途作业（看门狗扫描面，R-96 批 B）：只取指定状态，不 findAll() 全表。 */
     List<Job> findByStatusIn(Collection<Job.JobStatus> statuses);
@@ -100,6 +122,24 @@ public interface JobRepository extends JpaRepository<Job, Long> {
                          @Param("total") int total,
                          @Param("finishedAt") LocalDateTime finishedAt,
                          @Param("inFlight") Collection<Job.JobStatus> inFlight);
+
+    /**
+     * 启动恢复专用的终态条件写入：只写 status + finishedAt，<b>不回写扫描时刻的进度/计数</b>。
+     *
+     * <p>恢复的候选是 keyset 分页读出的<b>旧快照</b>：从"读到这一行"到"UPDATE 执行"之间，别的
+     * runner 可能已推进了 {@code progress/total}（甚至已自然收终态）。终态条件 UPDATE 若把
+     * 旧快照一并写回，会把进度回退成低值；这里只做状态迁移，其余列保持数据库当前值。
+     *
+     * <p>与 {@link #finishIfInFlight} 的分工：后者由正在执行的 runner 在终态时写入它<b>当下</b>
+     * 的计数与进度，是合法的最新值；恢复没有"当下进度"，因此不能用同一语句。
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE Job j SET j.status = :status, j.finishedAt = :finishedAt "
+            + "WHERE j.id = :jobId AND j.status IN :inFlight")
+    int finishInterruptedIfInFlight(@Param("jobId") Long jobId,
+                                    @Param("status") Job.JobStatus status,
+                                    @Param("finishedAt") LocalDateTime finishedAt,
+                                    @Param("inFlight") Collection<Job.JobStatus> inFlight);
 
     /** 取消条件写入（R1-12）：仅 PENDING/RUNNING 可取消，影响行数为 0 即「已被别人收终态」。 */
     @Modifying(clearAutomatically = true)

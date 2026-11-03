@@ -213,7 +213,7 @@ public class RunContextRefresher {
 		Long taskId = taskIdFromText(settled.getResultText());
 		if (taskId == null) {
 			// 回执里没有任务号：不编造 ID，也不动上下文
-			log.warn("create_task 回执里没有任务号，运行上下文保持不变 toolCallId={}",
+			log.warn("create_task receipt has no task id; run context unchanged toolCallId={}",
 					settled.getToolCallId());
 			return;
 		}
@@ -314,7 +314,7 @@ public class RunContextRefresher {
 			store.save(runId, taskId, defCodes, conditions);
 		}
 		catch (RuntimeException ex) {
-			log.warn("结构化 create_task 候选未能写入会话任务草案（extra 仍在，跨轮回落不可用）taskId={}：{}", taskId,
+			log.warn("structured create_task candidate could not be written to the session task draft (extra retained; cross-turn fallback unavailable) taskId={} error={}", taskId,
 					ex.getMessage());
 		}
 	}
@@ -346,7 +346,7 @@ public class RunContextRefresher {
 			taskId = base.getTaskId();
 		}
 		if (taskId == null || taskId <= 0L) {
-			log.warn("confirm_step 缺少可用的 taskId（入参与上下文都没有），运行上下文保持不变 toolCallId={}",
+			log.warn("confirm_step has no usable taskId (neither in arguments nor context); run context unchanged toolCallId={}",
 					settled.getToolCallId());
 			return;
 		}

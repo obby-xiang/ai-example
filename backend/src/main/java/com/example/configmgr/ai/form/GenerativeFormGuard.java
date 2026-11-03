@@ -138,8 +138,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		}
 		List<FormIssue> issues = GenerativeFormRules.argumentIssues(arguments);
 		if (!issues.isEmpty()) {
-			log.warn("generative_form schema 未通过白名单校验（未挂起、未下发前端）：{}",
-					GenerativeFormRules.messages(issues));
+			log.warn("generative_form schema failed whitelist validation (not parked, not sent to frontend) codes={}", issues.stream().map(i -> i.code()).toList());
 			return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
 					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
@@ -180,7 +179,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			List<String> reasons = List.of(
 					"已确定配置项：" + known + "（系统解析，不是猜测）",
 					"下一步：直接调用 select_definitions（codes=[" + quoted(known) + "]），不要再用表单重复收集");
-			log.warn("generative_form 选择表单被槽位放行拒绝（槽位已确定，未挂起、未下发前端）：{}", known);
+			log.warn("generative_form selection form rejected by slot gate (slot already decided; not parked, not sent) known={}", known);
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"配置项已确定，选择表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
@@ -191,7 +190,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					"创建任务时已给出结构化筛选条件（随 create_task 参数进入运行上下文，不是猜测）",
 					"下一步：直接 confirm_step；到 QUERY_COND 时宿主会按同一份校验落库。若用户本轮要求改条件，"
 							+ "直接调用 set_condition，不要再用表单重复收集");
-			log.warn("generative_form 条件表单被 create_task 的结构化条件拒绝（未挂起、未下发前端）");
+			log.warn("generative_form condition form rejected by create_task structured conditions (not parked, not sent)");
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已给出，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
@@ -203,7 +202,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					"已确定条件：" + known + "（系统逐项核对：已设置或已明确不设，不是猜测）",
 					"下一步：按既有步骤链调用 set_condition；若当前是 SELECT_DEFS，先 confirm_step（不传 step）"
 							+ "推进到 QUERY_COND，下一批再 set_condition");
-			log.warn("generative_form 条件表单被槽位放行拒绝（条件已确定，未挂起、未下发前端）：{}", known);
+			log.warn("generative_form condition form rejected by slot gate (conditions already decided; not parked, not sent) known={}", known);
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已确定，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
@@ -214,7 +213,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			List<String> reasons = List.of(
 					"已确定任务类型：" + known + "（系统解析，不是猜测）",
 					"下一步：直接调用 create_task（type=" + known + "，title 可选），不要再用表单重复收集类型");
-			log.warn("generative_form 类型表单被槽位放行拒绝（任务类型已确定，未挂起、未下发前端）：{}", known);
+			log.warn("generative_form task type form rejected by slot gate (task type already decided; not parked, not sent) known={}", known);
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"任务类型已确定，类型表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
@@ -233,8 +232,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 							"当前步骤 " + current + " 已过 QUERY_COND 或不属于条件收集步：条件只在 QUERY_COND 收集，"
 									+ "此时要么已设置、要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
 							"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
-			log.warn("generative_form 条件表单被步骤放行拒绝（当前步骤 {}，不是 QUERY_COND；未挂起、未下发前端）：{}",
-					current, before ? "前置步，指引先 confirm_step 推进" : "后置步/非条件步，指引按既有步骤链继续");
+			log.warn("generative_form condition form rejected by step gate (current step {} is not QUERY_COND; not parked, not sent) hint={}", current, before ? "prior step; call confirm_step first" : "later/non-condition step; continue the existing step chain");
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					(before ? "条件表单只能在 QUERY_COND 下发" : "查询条件步已关闭")
 							+ "，条件表单未下发（工具未执行、未向前端下发表单）",
@@ -338,7 +336,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		JsonNode form = arguments != null && arguments.isObject() ? arguments.get("form") : null;
 		JsonNode values = parse(resultJson);
 		if (values == null) {
-			log.warn("generative_form 回灌结果不是合法 JSON，本次回灌被拒：{}", abbreviate(resultJson));
+			log.warn("generative_form submission is not valid JSON; submission rejected chars={}", resultJson == null ? 0 : resultJson.length());
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.RESULT_NOT_OBJECT,
 					"回灌内容无法解析为 JSON：" + abbreviate(resultJson)
 							+ "（应回灌字段 key→值的 JSON 对象；用户放弃请带 cancelled=true）"));
@@ -348,8 +346,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		List<FormIssue> issues = new ArrayList<>(GenerativeFormRules.resultIssues(form, values));
 		issues.addAll(attachmentIssues(form, values, runId, toolCallId));
 		if (!issues.isEmpty()) {
-			log.warn("generative_form 回灌结果未通过复核（回灌被拒、挂起保持未决）：{}",
-					GenerativeFormRules.messages(issues));
+			log.warn("generative_form submission failed validation (rejected; park stays pending) codes={}", issues.stream().map(i -> i.code()).toList());
 			return Verdict.rejectIssues(GenerativeFormRules.RESULT_REJECTED,
 					"回灌的表单结果未通过类型复核，本次回灌被拒（挂起仍在等待，可修正后重试）", issues);
 		}
@@ -380,8 +377,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			// NEW-2（返修二轮）：refs 为空既可能是"确实没传附件"，也可能是"入参/回灌解析失败"。
 			// 收口回收若照删，后者会把用户已上传的附件当"未提交"删光 —— 这里 fail-safe：不消费、不回收。
 			// 代价只是这些件留到登记 TTL（或会话销毁），安全方向是多留不漏删。
-			log.info("回灌里没有可解析的附件引用，跳过附件消费与收口回收 runId={} toolCallId={}", runId,
-					toolCallId);
+			log.debug("no parseable attachment refs in submission; skipping attachment consume and closeout reclaim runId={} toolCallId={}", runId, toolCallId);
 			return;
 		}
 		// keep = 本次回灌里被提交的全部附件（无论它们最终是否消费成功）：收口回收只清理
@@ -398,12 +394,11 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					resolved.put(ref.fileId(), stored);
 				}
 				else {
-					log.info("附件消费时登记已不在（过期或已消费）fileId={} runId={} toolCallId={}", ref.fileId(),
-							runId, toolCallId);
+					log.debug("attachment registration is gone at consume time (expired or consumed) fileId={} runId={} toolCallId={}", ref.fileId(), runId, toolCallId);
 				}
 			}
 			catch (AiStateUnavailableException ex) {
-				log.warn("附件消费前读取登记失败（该件保留到 TTL）fileId={} runId={} toolCallId={}：{}", ref.fileId(),
+				log.warn("could not read attachment registration before consuming (file kept until TTL) fileId={} runId={} toolCallId={} error={}", ref.fileId(),
 						runId, toolCallId, ex.getMessage());
 			}
 		}
@@ -414,12 +409,12 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 				}
 				else {
 					// 决策已定：不判失败、不改结论；该件至多留到 TTL（安全方向是多留不漏删）
-					log.warn("附件消费未成功（已被消费或登记过期；决策已落库，不回滚）fileId={} runId={} toolCallId={}",
+					log.warn("attachment was not consumed (already consumed or expired; decision persisted, no rollback) fileId={} runId={} toolCallId={}",
 							entry.getKey(), runId, toolCallId);
 				}
 			}
 			catch (AiStateUnavailableException ex) {
-				log.warn("附件消费失败（决策已落库，不回滚）fileId={} runId={} toolCallId={}：{}", entry.getKey(),
+				log.warn("could not consume attachment (decision persisted, no rollback) fileId={} runId={} toolCallId={} error={}", entry.getKey(),
 						runId, toolCallId, ex.getMessage());
 			}
 		}
@@ -471,7 +466,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		}
 		catch (RuntimeException ex) {
 			// 回收失败不影响结论；残留件仍受登记 TTL 覆盖（与登记同寿）
-			log.warn("表单收口回收未提交附件失败 runId={} toolCallId={}：{}", runId, toolCallId, ex.getMessage());
+			log.warn("could not reclaim unsubmitted attachments on form closeout runId={} toolCallId={} error={}", runId, toolCallId, ex.getMessage());
 		}
 	}
 
@@ -494,7 +489,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			}
 			catch (AiStateUnavailableException ex) {
 				// 元数据只是模型可见的补充信息；登记簿暂时不可用时不阻断已通过校验的回灌。
-				log.debug("附件元数据读取暂不可用 fileId={}：{}", ref.fileId(), ex.getMessage());
+				log.debug("attachment metadata temporarily unavailable fileId={} error={}", ref.fileId(), ex.getMessage());
 			}
 		}
 		if (parts.isEmpty()) {
@@ -564,7 +559,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			this.fileStorage.delete(stored.storagePath());
 		}
 		catch (RuntimeException ex) {
-			log.warn("附件消费后删除落盘文件失败 fileId={} storageKey={}：{}", stored.fileId(),
+			log.warn("could not delete stored file after consuming attachment fileId={} storageKey={} error={}", stored.fileId(),
 					stored.storagePath(), ex.getMessage());
 		}
 	}

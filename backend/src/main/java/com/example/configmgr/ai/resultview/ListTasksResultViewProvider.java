@@ -91,7 +91,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 					"i18n:resultview.listTasks.fallback", "list_tasks", viewBudget(), tasks.size(), EMPTY_TEXT);
 		}
 		catch (RuntimeException ex) {
-			log.warn("list_tasks 视图构造失败（本次不出 resultView，卡面走旧形态）：toolCallId={}", toolCallId, ex);
+			log.warn("list_tasks view build failed (no resultView this time; card falls back to legacy shape) toolCallId={}", toolCallId, ex);
 			return null;
 		}
 	}
@@ -133,7 +133,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 			}
 			Map<String, Object> row = parseRow(trimmed);
 			if (row == null) {
-				log.debug("list_tasks 历史结果的行格式无法解析（本轮不出视图，卡面走原文）：toolCallId={}",
+				log.debug("list_tasks history result row format is unparseable (no view this turn; card shows raw text) toolCallId={}",
 						toolCallId);
 				return null;
 			}

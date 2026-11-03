@@ -87,7 +87,7 @@ public final class KbSampleSeeder {
     public boolean seedIfAbsent() {
         if (this.loader.getResource(CLASSPATH_ROOT + "/" + MANIFEST) == null) {
             // 非打包构建（IDE 直接跑测试等）：没有随包样例可播，静默跳过
-            log.debug("classpath 缺少 {}/{}，跳过样例播种", CLASSPATH_ROOT, MANIFEST);
+            log.debug("Classpath resource {}/{} missing; skip sample seeding", CLASSPATH_ROOT, MANIFEST);
             return false;
         }
         if (!needsSeed()) {
@@ -95,21 +95,21 @@ public final class KbSampleSeeder {
         }
         Path parent = this.targetDir.getParent();
         if (parent == null) {
-            log.warn("知识库目录没有父目录，无法安全播种：{}", this.targetDir);
+            log.warn("KB dir has no parent directory; refusing to seed: {}", this.targetDir);
             return false;
         }
         try {
             Files.createDirectories(parent);
         }
         catch (IOException e) {
-            log.warn("知识库目录创建失败（不影响启动，按目录现状加载）：{}：{}", parent, safeMessage(e));
+            log.warn("Failed to create KB dir (startup unaffected; loading as-is): {}: {}", parent, safeMessage(e));
             return false;
         }
         try (FileChannel channel = FileChannel.open(parent.resolve(LOCK_FILE),
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE);
              FileLock lock = tryLock(channel)) {
             if (lock == null) {
-                log.info("另一实例正在播种知识库样例，本实例跳过：dir={}", this.targetDir);
+                log.info("Another instance is seeding KB samples; skipping here: dir={}", this.targetDir);
                 return false;
             }
             // 抢锁后重判：持锁方可能刚播完并释放
@@ -119,7 +119,7 @@ public final class KbSampleSeeder {
             return doSeed(parent);
         }
         catch (IOException e) {
-            log.warn("知识库样例播种锁不可用（不影响启动，按目录现状加载）：{}", safeMessage(e));
+            log.warn("KB sample seed lock unavailable (startup unaffected; loading as-is): {}", safeMessage(e));
             return false;
         }
     }
@@ -157,7 +157,7 @@ public final class KbSampleSeeder {
             }
             Files.write(staging.resolve(MANIFEST), manifestText.getBytes(StandardCharsets.UTF_8));
             moveIntoPlace(staging);
-            log.info("知识库样例已随包播种：dir={} docs={}（来源 classpath:{}/）", this.targetDir,
+            log.info("KB samples seeded from classpath: dir={} docs={} (source classpath:{}/)", this.targetDir,
                     manifest.docs().size(), CLASSPATH_ROOT);
             return true;
         }
@@ -165,7 +165,7 @@ public final class KbSampleSeeder {
             if (staging != null) {
                 deleteQuietly(staging);
             }
-            log.warn("知识库样例自动播种失败（不影响启动，按目录现状加载）：{}", safeMessage(e));
+            log.warn("KB sample auto-seeding failed (startup unaffected; loading as-is): {}", safeMessage(e));
             return false;
         }
     }
@@ -175,7 +175,7 @@ public final class KbSampleSeeder {
             return true;
         }
         if (!Files.isDirectory(this.targetDir)) {
-            log.warn("app.ai.kb.dir 不是目录，跳过样例播种：{}", this.targetDir);
+            log.warn("app.ai.kb.dir is not a directory; skip sample seeding: {}", this.targetDir);
             return false;
         }
         if (Files.isRegularFile(this.targetDir.resolve(MANIFEST))) {
@@ -184,13 +184,13 @@ public final class KbSampleSeeder {
         try (Stream<Path> children = Files.list(this.targetDir)) {
             if (children.findAny().isPresent()) {
                 // 有内容但缺 manifest：视为用户/生产的既有语料，播种会混料
-                log.warn("知识库目录非空但缺少 manifest.json，跳过样例播种（避免与既有内容混用）：{}",
-                        this.targetDir);
+                log.warn("KB dir is non-empty but has no manifest.json; skip sample seeding "
+                        + "(avoids mixing with existing content): {}", this.targetDir);
                 return false;
             }
         }
         catch (IOException e) {
-            log.warn("检查知识库目录失败，跳过样例播种：{}：{}", this.targetDir, safeMessage(e));
+            log.warn("Failed to inspect KB dir; skip sample seeding: {}: {}", this.targetDir, safeMessage(e));
             return false;
         }
         return true;

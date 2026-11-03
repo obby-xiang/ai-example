@@ -49,7 +49,7 @@ done
 # ── ① 敏感信息扫描 ─────────────────────────────────────────────────────────
 secret_scan() {
   if [ ! -f "$hook_dir/scan-lib.sh" ]; then
-    echo "⚠ [pre-commit] 未找到扫描引擎 scan-lib.sh（$hook_dir），本次跳过敏感信息扫描"
+    echo "WARN [pre-commit] scan engine scan-lib.sh not found ($hook_dir); skipping the secret scan this time"
     secret_skipped=1
     return 0
   fi
@@ -61,7 +61,7 @@ secret_scan() {
          | LC_ALL=C sort -u)
 
   if [ -z "$hits" ]; then
-    echo "✓ [pre-commit] 敏感信息扫描通过（暂存区无命中）"
+    echo "OK [pre-commit] secret scan passed (no hits in the staged index)"
     return 0
   fi
 
@@ -69,24 +69,24 @@ secret_scan() {
 
   if [ "$allow" = 1 ]; then
     echo ""
-    echo "⚠ [pre-commit] 逃生口已启用（AI_SECRETS_ALLOW=1）：以下 $count 处命中仅告警，本次提交被放行"
+    echo "WARN [pre-commit] escape hatch enabled (AI_SECRETS_ALLOW=1): the $count hit(s) below are warnings only, commit allowed"
     printf '%s\n' "$hits" | scan_format
     scan_legend
-    echo "⚠ 放行即人为豁免：请在提交说明中留痕，并按 DC-08 在后续提交清理。"
+    echo "WARN allowing them is a manual waiver: record it in the commit message and clean up in a follow-up commit (DC-08)."
     return 0
   fi
 
   echo "" >&2
-  echo "✖ [pre-commit] 暂存区命中 $count 处敏感信息，提交已阻止：" >&2
+  echo "FAIL [pre-commit] $count secret hit(s) in the staged index, commit blocked:" >&2
   printf '%s\n' "$hits" | scan_format >&2
   scan_legend >&2
   echo "" >&2
-  echo "处理方式：" >&2
-  echo "  1) 密钥/令牌改为环境变量或未追踪的本地配置引用，不要写进仓库；" >&2
-  echo "  2) 文档/证据中的本机绝对路径按 DC-08 换成占位符（尖括号占位符不会被误报）；" >&2
-  echo "  3) 个人用户名不要出现在入库正文中；" >&2
-  echo "  4) 确认误报可临时放行：AI_SECRETS_ALLOW=1 git commit ...（输出中会明示放行）；" >&2
-  echo "  5) 完全跳过：git commit --no-verify（慎用）。" >&2
+  echo "How to fix:" >&2
+  echo "  1) reference keys/tokens through environment variables or untracked local config; never commit them;" >&2
+  echo "  2) replace local absolute paths in docs/evidence with placeholders (DC-08; angle-bracket placeholders are never flagged);" >&2
+  echo "  3) keep personal user names out of committed content;" >&2
+  echo "  4) for a confirmed false positive, allow this commit temporarily: AI_SECRETS_ALLOW=1 git commit ... (the waiver is printed);" >&2
+  echo "  5) to skip entirely: git commit --no-verify (use with care)." >&2
   return 1
 }
 
@@ -101,18 +101,18 @@ d6_sync_check() {
 
   if ! command -v node >/dev/null 2>&1; then
     echo ""
-    echo "⚠ [pre-commit] 未找到 node，本次**跳过 D6 同步复核检查**（不静默，也不算通过）"
-    echo "   若本次改动了 AI 对话核心文件（backend ai/**、common/id、common/sse、frontend AiPanel/…），"
-    echo "   这笔提交不会被本钩子拦截：请人工复核 docs/delivery/06-新项目复用与落地指南.md 是否需要更新，"
-    echo "   并在 docs/delivery/d6-review.json 留下本次确认；或改用装有 Node.js 的环境提交。"
-    echo "   门禁只证明人工确认存在，不证明 D6 内容正确；CI / 人工复核仍是必要补充。"
+    echo "WARN [pre-commit] node not found, SKIPPING the D6 sync review check (not silent, and not a pass)"
+    echo "   If this commit touches AI-conversation core files (backend ai/**, common/id, common/sse, frontend AiPanel/...),"
+    echo "   this hook will not block it: review by hand whether docs/delivery/06-新项目复用与落地指南.md needs an update,"
+    echo "   and leave this confirmation in docs/delivery/d6-review.json; or commit from a machine with Node.js installed."
+    echo "   The gate only proves a human confirmation exists, not that the D6 content is correct; CI / human review remain necessary."
     d6_skipped=1
     return 0
   fi
 
   if [ -z "$ci_script" ]; then
     echo ""
-    echo "⚠ [pre-commit] 未找到 scripts/ci/check-d6-sync.mjs，本次跳过 D6 同步复核检查（需人工/CI 复核 D6）"
+    echo "WARN [pre-commit] scripts/ci/check-d6-sync.mjs not found, skipping the D6 sync review check (human/CI review needed)"
     d6_skipped=1
     return 0
   fi
@@ -130,15 +130,15 @@ d6_sync_check() {
       ;;
     1)
       echo "" >&2
-      echo "✖ [pre-commit] D6 同步复核未通过，提交已阻止（上方有逐条原因与可直接粘贴的确认模板）" >&2
-      echo "   synced = 本批同时更新 D6 正文；not-affected = 写清为什么 D6 不需要改。" >&2
+      echo "FAIL [pre-commit] D6 sync review did not pass, commit blocked (reasons and a copy-paste confirmation template are above)" >&2
+      echo "   synced = D6 updated in this commit; not-affected = explain why D6 needs no change." >&2
       return 1
       ;;
     *)
       echo "" >&2
-      echo "✖ [pre-commit] D6 同步复核脚本异常退出（rc=$rc），按失败处理" >&2
-      echo "   先确认 docs/delivery/d6-review.json 是合法 JSON（version: 1、reviews 数组），再重试。" >&2
-      echo "   不要用 --no-verify 绕过：那会同时跳过敏感信息扫描。" >&2
+      echo "FAIL [pre-commit] D6 sync review script exited abnormally (rc=$rc), treated as a failure" >&2
+      echo "   First make sure docs/delivery/d6-review.json is valid JSON (version: 1, reviews array), then retry." >&2
+      echo "   Do not bypass with --no-verify: that also skips the secret scan." >&2
       return 1
       ;;
   esac
@@ -158,11 +158,11 @@ fi
 
 echo ""
 if [ "$secret_skipped" -eq 1 ] || [ "$d6_skipped" -eq 1 ]; then
-  if [ "$secret_skipped" -eq 1 ]; then secret_text="跳过"; else secret_text="通过"; fi
-  if [ "$d6_skipped" -eq 1 ]; then d6_text="跳过"; else d6_text="通过"; fi
-  echo "⚠ [pre-commit] 检查结束：敏感信息扫描=$secret_text，D6 同步复核=$d6_text（跳过项不算通过，需人工/CI 补齐）"
+  if [ "$secret_skipped" -eq 1 ]; then secret_text="skipped"; else secret_text="passed"; fi
+  if [ "$d6_skipped" -eq 1 ]; then d6_text="skipped"; else d6_text="passed"; fi
+  echo "WARN [pre-commit] done: secret scan=$secret_text, D6 sync review=$d6_text (skipped checks are not passes; cover them by hand or in CI)"
 else
-  echo "✓ [pre-commit] 两道检查均通过（敏感信息扫描 + D6 同步复核）"
+  echo "OK [pre-commit] both checks passed (secret scan + D6 sync review)"
 fi
 
 if [ -f "$hook_dir/scan-lib.sh" ]; then

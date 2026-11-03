@@ -87,17 +87,17 @@ abstract class HostForm {
 			json = JSON.writeValueAsString(arguments);
 		}
 		catch (Exception ex) {
-			log.warn("宿主表单序列化失败，本次不下发：{}", ex.getMessage());
+			log.warn("host form serialization failed; not sent this time error={}", ex.getMessage());
 			return Optional.empty();
 		}
 		if (json.length() > GenerativeFormRules.MAX_FORM_CHARS) {
-			log.warn("宿主表单长度 {} 超出上限 {}，本次不下发", json.length(), GenerativeFormRules.MAX_FORM_CHARS);
+			log.warn("host form length {} exceeds limit {}; not sent", json.length(), GenerativeFormRules.MAX_FORM_CHARS);
 			return Optional.empty();
 		}
 		List<FormIssue> issues = GenerativeFormRules.argumentIssues(parseJson(json));
 		if (!issues.isEmpty()) {
 			// 宿主自己写坏的表单：宁可不下发，也不能让用户看到一张"点了也没用"的卡
-			log.warn("宿主表单未通过白名单校验（本次不下发）：{}", GenerativeFormRules.messages(issues));
+			log.warn("host form failed whitelist validation; not sent codes={}", issues.stream().map(i -> i.code()).toList());
 			return Optional.empty();
 		}
 		return Optional.of(json);
@@ -114,7 +114,7 @@ abstract class HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取待决条目失败，宿主不生成表单 runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read pending entry; host skips the form runId={} error={}", runId, ex.getMessage());
 			return true;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -174,7 +174,7 @@ abstract class HostForm {
 		catch (RuntimeException ex) {
 			// 快照已成功挂起 ⇒ 这一拍<b>绝不能</b>交回模型（否则 SUSPENDED + 待决条目 + 模型在跑 =
 			// 双驱动：同一轮的帧与历史会分叉）。发帧是观测面，失败只告警，等恢复。
-			log.warn("宿主表单已挂起，但 suspended 帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallIds={}：{}",
+			log.warn("host form parked but suspended frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={} error={}",
 					runId, toolCallIds(pendings), ex.getMessage());
 			return true;
 		}
@@ -182,7 +182,7 @@ abstract class HostForm {
 			this.gate.publishRequestsForParkedBatch(runId, pendings);
 		}
 		catch (RuntimeException ex) {
-			log.warn("宿主表单已挂起，但请求帧发布失败（等待恢复，本拍不驱动模型）runId={} toolCallIds={}：{}",
+			log.warn("host form parked but request frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={} error={}",
 					runId, toolCallIds(pendings), ex.getMessage());
 			return true;
 		}
@@ -192,10 +192,10 @@ abstract class HostForm {
 		}
 		catch (RuntimeException ex) {
 			// 收流失败不回退：条目与快照已就位，重挂/刷新仍能取到这张卡
-			log.warn("宿主表单已挂起，但本轮收流失败（不影响挂起态）runId={} toolCallIds={}：{}", runId,
+			log.warn("host form parked but turn stream close failed (park state unaffected) runId={} toolCallIds={} error={}", runId,
 					toolCallIds(pendings), ex.getMessage());
 		}
-		log.info("宿主已挂起表单 runId={} toolCallIds={}（等用户填写）", runId, toolCallIds(pendings));
+		log.info("host parked the form (waiting for user input) runId={} toolCallIds={}", runId, toolCallIds(pendings));
 		return true;
 	}
 
@@ -209,7 +209,7 @@ abstract class HostForm {
 
 	/** 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。 */
 	private void convergeAfterParkFailure(String runId, PendingToolCall pending, RuntimeException cause) {
-		log.warn("宿主表单挂起写失败（本拍不挂起，按既有路径继续）runId={} toolCallId={}：{}", runId,
+		log.warn("could not persist host form park (not parked this tick; continue on existing path) runId={} toolCallId={} error={}", runId,
 				pending.getToolCallId(), cause.getMessage());
 		try {
 			pending.setStatus(PendingToolCall.BLOCKED);
@@ -221,7 +221,7 @@ abstract class HostForm {
 			this.store.putPending(runId, pending);
 		}
 		catch (RuntimeException nested) {
-			log.warn("宿主表单挂起失败后的条目收敛也失败（该条目留在 PENDING）runId={} toolCallId={}：{}", runId,
+			log.warn("entry convergence after park failure also failed (entry stays PENDING) runId={} toolCallId={} error={}", runId,
 					pending.getToolCallId(), nested.getMessage());
 		}
 	}
@@ -280,7 +280,7 @@ abstract class HostForm {
 			ledger = this.store.ledger(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取本轮台账失败，宿主不生成表单 runId={}：{}", runId, ex.getMessage());
+			log.warn("could not read this turn's ledger; host skips the form runId={} error={}", runId, ex.getMessage());
 			return null;
 		}
 		if (ledger == null || ledger.isEmpty()) {

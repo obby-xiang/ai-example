@@ -131,7 +131,7 @@ public class SessionPurgeGuard {
 			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId)));
 		}
 		catch (RuntimeException ex) {
-			log.warn("读取会话销毁守卫失败 sessionId={}（fail-closed：拒绝任何可能复活的写回）：{}", sessionId,
+			log.warn("Failed to read session purge guard sessionId={} (fail-closed: reject any write-back that could resurrect): {}", sessionId,
 					ex.getMessage());
 			throw new com.example.configmgr.common.AiStateUnavailableException(
 					"无法确认会话销毁守卫状态（fail-closed）sessionId=" + sessionId, ex);
@@ -179,7 +179,7 @@ public class SessionPurgeGuard {
 			return deleted != null && deleted > 0L;
 		}
 		catch (RuntimeException ex) {
-			log.warn("撤销会话销毁守卫失败 sessionId={} purgeId={}（守卫会在 TTL 后自清）：{}", sessionId, purgeId,
+			log.warn("Failed to disarm session purge guard sessionId={} purgeId={} (guard self-clears after TTL): {}", sessionId, purgeId,
 					ex.getMessage());
 			return false;
 		}

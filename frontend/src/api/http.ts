@@ -60,6 +60,14 @@ function logDiagnostic(stage: string, detail: Record<string, unknown>): void {
   console.warn(`[http] ${stage}`, detail)
 }
 
+/** 诊断日志只保留 origin + path：query/hash 可能携带会话标识等敏感参数。 */
+function sanitizeUrl(raw: string): string {
+  const queryIndex = raw.indexOf('?')
+  const hashIndex = raw.indexOf('#')
+  const cutIndexes = [queryIndex, hashIndex].filter((index) => index >= 0)
+  return cutIndexes.length > 0 ? raw.slice(0, Math.min(...cutIndexes)) : raw
+}
+
 /** 从任意响应体/异常中抽出可读错误文案与码。 */
 function normalizeError(error: unknown): ApiError {
   if (error instanceof ApiError) {
@@ -70,7 +78,7 @@ function normalizeError(error: unknown): ApiError {
     const body: unknown = error.response?.data
     const url = error.config?.url ?? ''
     if (status === 0) {
-      logDiagnostic('network error', { url, message: error.message })
+      logDiagnostic('network error', { url: sanitizeUrl(url), message: error.message })
       return new ApiError(
         translate('api.error.network'),
         0,
@@ -87,7 +95,7 @@ function normalizeError(error: unknown): ApiError {
     // HTTP 状态码属于诊断信息，只进 console。
     logDiagnostic(status >= 500 ? 'server error' : 'request failed', {
       status,
-      url,
+      url: sanitizeUrl(url),
       code,
       message: error.message
     })
@@ -101,7 +109,7 @@ function normalizeError(error: unknown): ApiError {
   if (error instanceof Error) {
     return new ApiError(error.message, 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, null)
   }
-  logDiagnostic('unexpected error', { error })
+  logDiagnostic('unexpected error', { type: error === null ? 'null' : typeof error })
   return new ApiError(translate('api.error.unknown'), 0, FRONTEND_ERROR_CODES.UNKNOWN_ERROR, error)
 }
 

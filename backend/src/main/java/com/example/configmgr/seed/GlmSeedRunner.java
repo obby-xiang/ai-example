@@ -37,12 +37,12 @@ public class GlmSeedRunner {
             boolean seeded = this.glmSeedService.seedIfAbsent();
             this.seedStatus.mark(SeedStatus.Seed.GLM,
                     seeded ? SeedStatus.State.DONE : SeedStatus.State.SKIPPED,
-                    seeded ? "本次写入" : "定义已存在（他实例已播种）");
+                    seeded ? "written by this instance" : "definitions already exist (seeded by another instance)");
         } catch (Exception e) {
             // 失败不阻断启动（基座既有 7 个定义不受影响），但 ready 面必须如实可见（SeedStatus 的
             // failures 段），不能只留一行日志。
             this.seedStatus.markFailed(SeedStatus.Seed.GLM, e);
-            log.error("GLM 种子并集移植失败，基座既有 7 个定义不受影响：{}", e.getMessage(), e);
+            log.error("GLM seed union migration failed, existing base definitions unaffected error={}", e.getMessage(), e);
         }
     }
 }

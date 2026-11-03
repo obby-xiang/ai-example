@@ -76,6 +76,13 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setTaskDecorator(new RequestContextTaskDecorator());
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
+        // 必须手工 initialize()：本类的既有契约是可直接 new AsyncConfig().getAsyncExecutor()
+        // （单测在无 Spring 容器时直接取池并 prestartAllCoreThreads）。ThreadPoolTaskExecutor 只有
+        // initialize() 后才创建底层 ThreadPoolExecutor，不调则 getThreadPoolExecutor() 直接抛
+        // "not initialized"，直接 new 的调用方拿不到可用的池。
+        // 作为 @Bean 时容器还会在 afterPropertiesSet() 里再 initialize() 一次：本类不预启动核心线程，
+        // 第一次初始化不产生存活线程，旧池仅随引用替换被 GC，不构成线程泄漏。B8 复核结论：
+        // 保留 initialize()，不采用"删除以规避二次初始化"的修法（那会破坏直接 new 的契约）。
         executor.initialize();
         return executor;
     }

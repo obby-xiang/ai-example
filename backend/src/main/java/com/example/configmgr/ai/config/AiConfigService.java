@@ -263,7 +263,7 @@ public class AiConfigService {
             return this.redis.opsForValue().get(REDIS_VERSION_KEY);
         }
         catch (Exception ex) {
-            log.debug("读取 {} 失败（Redis 不可用？退化本地版本比对）：{}", REDIS_VERSION_KEY, ex.getMessage());
+            log.debug("reading {} failed (Redis unavailable? falling back to local version compare) error={}", REDIS_VERSION_KEY, ex.getMessage());
             return null;
         }
     }
@@ -276,7 +276,7 @@ public class AiConfigService {
                 .orElse(fallback);
         }
         catch (Exception ex) {
-            log.debug("读取 config.version 失败：{}", ex.getMessage());
+            log.debug("reading config.version failed error={}", ex.getMessage());
             return fallback;
         }
     }
@@ -296,7 +296,14 @@ public class AiConfigService {
         catch (Exception ex) {
             // 读库失败不能让 /health 或 /chat 抛 500：保留上一份好快照，没有就回空快照（= 不可用）。
             // ok=false 会被 applyLoad 记进 lastLoadFailed ⇒ 下一个 tick 无条件重试（M2）。
-            log.warn("配置快照加载失败（保留上一份好快照 / 退化为空快照，下次版本比对时重试）：{}", ex.getMessage());
+            if (this.lastLoadFailed) {
+                log.debug("config snapshot reload failed again (keeping last good snapshot / empty snapshot) error={}",
+                        ex.getMessage());
+            }
+            else {
+                log.warn("config snapshot load failed (keeping last good snapshot / degrading to empty snapshot;"
+                        + " retried on next version check) error={}", ex.getMessage());
+            }
             ConfigSnapshot previous = this.snapshot;
             return new LoadOutcome(previous != null ? previous : ConfigSnapshot.empty(), false);
         }
@@ -382,7 +389,7 @@ public class AiConfigService {
             return Long.parseLong(raw.trim());
         }
         catch (NumberFormatException ex) {
-            log.debug("ai_setting 里的整数脏值（忽略该项）：{}", raw);
+            log.debug("ignoring invalid ai_setting integer value={}", raw);
             return null;
         }
     }
@@ -398,13 +405,13 @@ public class AiConfigService {
         try {
             double value = Double.parseDouble(raw.trim());
             if (Double.isNaN(value) || Double.isInfinite(value)) {
-                log.debug("ai_setting 里的浮点脏值（忽略该项）：{}", raw);
+                log.debug("ignoring invalid ai_setting decimal value={}", raw);
                 return null;
             }
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ai_setting 里的浮点脏值（忽略该项）：{}", raw);
+            log.debug("ignoring invalid ai_setting decimal value={}", raw);
             return null;
         }
     }
@@ -416,13 +423,13 @@ public class AiConfigService {
         try {
             int value = Integer.parseInt(raw.trim());
             if (value < 1) {
-                log.debug("ai_setting 里的整数脏值（忽略该项）：{}", raw);
+                log.debug("ignoring invalid ai_setting integer value={}", raw);
                 return null;
             }
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ai_setting 里的整数脏值（忽略该项）：{}", raw);
+            log.debug("ignoring invalid ai_setting integer value={}", raw);
             return null;
         }
     }
@@ -438,7 +445,7 @@ public class AiConfigService {
         if ("false".equalsIgnoreCase(trimmed)) {
             return Boolean.FALSE;
         }
-        log.debug("ai_setting 里的布尔脏值（忽略该项）：{}", raw);
+        log.debug("ignoring invalid ai_setting boolean value={}", raw);
         return null;
     }
 
@@ -1007,7 +1014,7 @@ public class AiConfigService {
                 return this.cipher.fingerprint(apiKey);
             }
             catch (AiKeyCipher.KeyCipherException ex) {
-                log.debug("计算 key 指纹失败 provider={}：{}", provider.getCode(), ex.getMessage());
+                log.debug("key fingerprint computation failed provider={} error={}", provider.getCode(), ex.getMessage());
             }
         }
         // 无 KEK 时，env key 只能重启才变 ⇒ 用固定标记作缓存键成分（不含任何 key 片段）
@@ -1017,8 +1024,8 @@ public class AiConfigService {
     private void warnOnceUnreadable(AiProvider provider, AiKeyCipher.KeyCipherException ex) {
         String key = String.valueOf(provider.getCode());
         if (this.unreadableWarned.putIfAbsent(key, Boolean.TRUE) == null) {
-            log.warn("provider={} 的 key 无法解密（{}）：判 {}，不回落 env key。恢复路径 = 恢复 AI_SECRET_KEK"
-                    + " 或重新录入 key", key, ex.getCode(), CODE_KEY_UNREADABLE);
+            log.warn("provider={} key cannot be decrypted ({}): reporting {}, not falling back to env key; fix = restore AI_SECRET_KEK"
+                    + " or re-enter the key", key, ex.getCode(), CODE_KEY_UNREADABLE);
         }
     }
 

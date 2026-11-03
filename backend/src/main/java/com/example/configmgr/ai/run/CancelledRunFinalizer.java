@@ -287,7 +287,7 @@ public class CancelledRunFinalizer {
 		TenantUser identity = recordIdentityNow(runId);
 		String key = LocalRunKey.of(identity, runId);
 		if (!this.inFlight.add(key)) {
-			log.debug("取消收尾已在交棒中，本次不重复派发 runId={} cause={}", runId, cause);
+			log.debug("cancel finalize already in handoff, not dispatched again runId={} cause={}", runId, cause);
 			return false;
 		}
 		this.attempts.put(key, new AtomicInteger());
@@ -318,7 +318,8 @@ public class CancelledRunFinalizer {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("抓取取消收尾身份时读快照失败 runId={}（退回提交线程身份）：{}", runId, ex.getMessage());
+			log.debug("snapshot read failed while resolving cancel finalize "
+					+ "identity runId={} (falling back to submitter identity): {}", runId, ex.getMessage());
 		}
 		return current;
 	}
@@ -327,7 +328,7 @@ public class CancelledRunFinalizer {
 		if (this.closed) {
 			// 停机中：不再向（可能已关闭的）触发池派发；交棒位立刻释放，取消事实仍留在 Redis。
 			finish(key);
-			log.debug("取消收尾交棒跳过（应用停机中）runId={} cause={}", runId, cause);
+			log.debug("cancel finalize handoff skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
 		try {
@@ -336,11 +337,11 @@ public class CancelledRunFinalizer {
 		catch (RejectedExecutionException ex) {
 			// 触发池饱和：交棒动作本身很短，排一次重试即可 —— 但同样受 maxDispatchRetries 约束
 			// （M-3：旧实现这条路径绕过上限，池满时会无界重排）。
-			log.warn("取消收尾交棒未派发（触发池饱和）runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff not dispatched (trigger pool saturated) runId={}: {}", runId, ex.getMessage());
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (RuntimeException ex) {
-			log.warn("取消收尾交棒派发失败 runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff dispatch failed runId={}: {}", runId, ex.getMessage());
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (Error ex) {
@@ -387,7 +388,7 @@ public class CancelledRunFinalizer {
 		ResumeService service = this.resumeServiceProvider == null ? null
 				: this.resumeServiceProvider.getIfAvailable();
 		if (service == null) {
-			log.info("取消收尾交棒放弃 runId={}（本实例无续跑服务：无 AI key 的降级装配）", runId);
+			log.info("cancel finalize handoff abandoned runId={} (no resume service: degraded wiring without AI keys)", runId);
 			finish(key);
 			return;
 		}
@@ -399,7 +400,7 @@ public class CancelledRunFinalizer {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("取消收尾交棒执行异常 runId={} cause={}：{}", runId, cause, ex.getMessage());
+			log.warn("cancel finalize handoff execution failed runId={} cause={}: {}", runId, cause, ex.getMessage());
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 			return;
 		}
@@ -409,7 +410,7 @@ public class CancelledRunFinalizer {
 		}
 		switch (outcome) {
 			case FINALIZED, ALREADY_TERMINAL, NO_RUN -> {
-				log.info("取消收尾交棒完成 runId={} outcome={} cause={}", runId, outcome, cause);
+				log.info("cancel finalize handoff completed runId={} outcome={} cause={}", runId, outcome, cause);
 				finish(key);
 			}
 			// 租约在别的实例手里：不抢、不覆盖；按租约 TTL 之后再确认一次（holder 死了也能接管）。
@@ -427,8 +428,8 @@ public class CancelledRunFinalizer {
 		if (max <= 0 || attempt > max) {
 			this.inFlight.remove(key);
 			this.attempts.remove(key);
-			log.error("取消收尾在 {} 次交棒后仍未落定 runId={} cause={}（取消事实仍在 ai:cancel:<tenantId>:<userId>:<runId>；"
-					+ "下一次取消/续跑/启动扫描会重新触发）", max, runId, cause);
+			log.error("cancel finalize not settled after {} handoffs runId={} cause={} (cancel "
+					+ "fact still in ai:cancel key; next cancel/resume/startup scan retriggers)", max, runId, cause);
 			return;
 		}
 		reschedule(runId, key, cause, leaseHeldElsewhere ? leaseRetryDelay() : delayFor(attempt), identity);
@@ -438,7 +439,7 @@ public class CancelledRunFinalizer {
 		if (this.closed) {
 			// 停机中：重试链在这里收敛（不重排、不留去重位；取消事实仍在 Redis，下次入口重新触发）。
 			finish(key);
-			log.debug("取消收尾重试跳过（应用停机中）runId={} cause={}", runId, cause);
+			log.debug("cancel finalize retry skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
 		try {
@@ -447,7 +448,7 @@ public class CancelledRunFinalizer {
 		catch (RuntimeException ex) {
 			this.inFlight.remove(key);
 			this.attempts.remove(key);
-			log.warn("取消收尾重试未排上 runId={}：{}", runId, ex.getMessage());
+			log.warn("cancel finalize retry not scheduled runId={}: {}", runId, ex.getMessage());
 		}
 		catch (Error ex) {
 			finish(key);

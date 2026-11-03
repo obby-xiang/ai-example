@@ -189,7 +189,7 @@ public class TaskService {
             Optional<Task> sameKey = this.taskRepository.findFirstByAiCreateKeyOrderByIdAsc(key);
             if (sameKey.isPresent()) {
                 Task existing = sameKey.get();
-                log.info("create_task 命中幂等键，复用任务 #{}（未二次创建）", existing.getId());
+                log.info("create_task idempotency key hit, task reused taskId={}", existing.getId());
                 return new CreateOutcome(existing, true);
             }
         }
@@ -214,14 +214,15 @@ public class TaskService {
         task.setAiCreateRun(runToken);
         // flush 而非 save：让唯一约束在本事务内立即裁决（冲突在锁内收敛，不留到提交时才发现）
         Task saved = this.taskRepository.saveAndFlush(task);
-        log.info("create_task 落库任务 #{}（key={}，runId={}）", saved.getId(), key, runToken);
+        log.info("create_task task persisted taskId={} idemKey={} runId={}", saved.getId(), key, runToken);
         return new CreateOutcome(saved, false);
     }
 
     /** 同轮已有任务：同键复用，不同键 = 本轮已创建过（单轮上限 1）。 */
     private CreateOutcome reuseOrConflict(Task existing, String key, String runToken) {
         if (key.equals(existing.getAiCreateKey())) {
-            log.info("create_task 命中同轮幂等键，复用任务 #{}（未二次创建）runId={}", existing.getId(), runToken);
+            log.info("create_task same-run idempotency key hit, task reused taskId={} runId={}",
+                    existing.getId(), runToken);
             return new CreateOutcome(existing, true);
         }
         throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
@@ -239,7 +240,7 @@ public class TaskService {
      */
     private CreateOutcome resolveCreateConflict(String runToken, String key,
                                                 DataIntegrityViolationException conflict) {
-        log.info("create_task 并发创建命中唯一约束（runId={}），回查已有任务", runToken);
+        log.info("create_task unique constraint hit on concurrent create, re-querying runId={}", runToken);
         TransactionTemplate readTx = new TransactionTemplate(this.transactionManager);
         readTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         readTx.setReadOnly(true);
@@ -262,7 +263,7 @@ public class TaskService {
         }
         catch (RuntimeException requeryFailure) {
             // 回查自身失败：不改写成"可重试冲突"，保留原始完整性错误并附带回查失败
-            log.error("create_task 唯一约束冲突后回查失败（key={}，runId={}）：{}",
+            log.error("create_task re-query failed after unique conflict idemKey={} runId={} error={}",
                     key, runToken, requeryFailure.getMessage(), requeryFailure);
             conflict.addSuppressed(requeryFailure);
             throw conflict;
@@ -270,7 +271,7 @@ public class TaskService {
         if (resolved != null) {
             return resolved;
         }
-        log.error("create_task 唯一约束冲突后未回查到已有任务（key={}，runId={}），按原始错误上抛：{}",
+        log.error("create_task no existing task found after unique conflict, rethrowing original error idemKey={} runId={} error={}",
                 key, runToken, conflict.getMostSpecificCause().getMessage());
         throw conflict;
     }
@@ -426,7 +427,8 @@ public class TaskService {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
-            log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝完成步骤 {} 写入", taskId, step);
+            log.info("Task already CANCELLED (absorbing-state monotonic gate), completion step write refused taskId={} step={}",
+                    taskId, step);
             return;
         }
         task.setCurrentStep(step);
@@ -477,7 +479,7 @@ public class TaskService {
                 Map<String, Object> parsed = objectMapper.readValue(task.getSettingsJson(), Map.class);
                 settings.putAll(parsed);
             } catch (Exception e) {
-                log.warn("任务 {} 设置解析失败，将重建: {}", taskId, e.getMessage());
+                log.warn("Task settings unparseable, rebuilding taskId={} error={}", taskId, e.getMessage());
             }
         }
         settings.put("importMode", mode);
@@ -503,7 +505,8 @@ public class TaskService {
                 .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
         if (task.getStatus() == Task.TaskStatus.CANCELLED
                 && (status == Task.TaskStatus.COMPLETED || status == Task.TaskStatus.FAILED)) {
-            log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝 {} 覆写", taskId, status);
+            log.info("Task already CANCELLED (absorbing-state monotonic gate), status write refused taskId={} status={}",
+                    taskId, status);
             return;
         }
         task.setStatus(status);
@@ -538,7 +541,8 @@ public class TaskService {
             //（覆盖 StaleJobRecoveryRunner:68 等残余无守卫联动写点）；CANCELLED→CANCELLED 已被上方幂等短路放行。
             if (task.getStatus() == Task.TaskStatus.CANCELLED
                     && (target == Task.TaskStatus.COMPLETED || target == Task.TaskStatus.FAILED)) {
-                log.info("任务 #{} 已 CANCELLED（吸收态单调闸），拒绝联动目标 {} 覆写", taskId, target);
+                log.info("Task already CANCELLED (absorbing-state monotonic gate), outcome sync refused taskId={} target={}",
+                        taskId, target);
                 return;
             }
             task.setStatus(target);
@@ -635,7 +639,7 @@ public class TaskService {
 
         // FR-4.4「删除动作入操作流水」本期落地形态：结构化流水行（动作/对象/前值摘要/来源/时间，
         // 无主体维度，ADR-11b）；落库的 AuditLog 表属 DC-10 的 P2，见证据文档【待裁决】。
-        log.info("操作流水: 动作=DELETE_TASK 对象=task#{} 前值摘要=type={},status={},jobs={},stagingRows={},files={} 来源=界面/API 时间={}",
+        log.info("audit action=DELETE_TASK object=task#{} before=type={} status={} jobs={} stagingRows={} files={} source=ui/api at={}",
                 taskId, task.getType(), task.getStatus(), jobIds.size(), stagingRows, files.size(), LocalDateTime.now());
 
         if (!jobIds.isEmpty()) {
@@ -666,7 +670,8 @@ public class TaskService {
             try {
                 fileStorage.delete(file.getStoragePath());
             } catch (RuntimeException e) {
-                log.warn("删除任务物理文件失败（继续清理其余文件）path={}：{}", file.getStoragePath(), e.getMessage());
+                log.warn("Failed to delete task physical file, continuing with remaining files path={} error={}",
+                        file.getStoragePath(), e.getMessage());
             }
         }
     }

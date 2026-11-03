@@ -350,12 +350,12 @@ public class RunRegistry {
 			}
 			if (this.emitters.remove(candidate.getKey(), entry)) {
 				removed++;
-				log.debug("空闲写出器条目已回收 key={} runId={}（无订阅/不在写/非终态）", candidate.getKey(),
+				log.debug("idle emitter entry reclaimed key={} runId={} (no subscribers/not writing/non-terminal)", candidate.getKey(),
 						entry.runId());
 			}
 		}
 		if (removed > 0) {
-			log.info("空闲写出器条目回收 {} 条（剩余 {} 条）", removed, this.emitters.size());
+			log.info("reclaimed {} idle emitter entries (remaining {})", removed, this.emitters.size());
 		}
 		return removed;
 	}
@@ -384,7 +384,8 @@ public class RunRegistry {
 			}
 			catch (RuntimeException ex) {
 				// 释放是"更好"，不是"更正确"的前提：簿记清不掉不能让终态出口失败。
-				log.warn("释放轮次事件日志簿记失败 runId={}（不影响终态；到期清理会兜底）：{}", runId, ex.getMessage());
+				log.warn("run archive bookkeeping release failed runId={} (terminal "
+						+ "state unaffected; expiry cleanup catches up): {}", runId, ex.getMessage());
 			}
 		}
 	}
@@ -419,7 +420,7 @@ public class RunRegistry {
 		}
 		this.ownsSharedSseResources = false;
 		SseChatEmitter.releaseSharedResourceOwner();
-		log.info("SSE 共享资源 owner 已释放（最后一个 owner 关闭时才真正停止 delivery pool / attach keepalive / write pool）");
+		log.info("SSE shared resource owners released (pools stop when the last owner closes)");
 	}
 
 	/**

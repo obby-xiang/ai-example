@@ -163,8 +163,8 @@ public class SessionPurgeRetryRunner {
 		}
 		if (!this.properties.getSession().getPurgeRetry().isPeriodicEnabled()) {
 			// 只停周期注册：到期项都在 durable ZSET 里，runOnce() 仍可由调用方同步驱动。
-			log.info("会话销毁重试周期注册已关闭（app.ai.session.purge-retry.periodic-enabled=false）："
-					+ "runOnce 保持可调用");
+			log.info("Session purge retry periodic registration disabled "
+					+ "(app.ai.session.purge-retry.periodic-enabled=false); runOnce stays callable");
 			return;
 		}
 		ScheduledExecutorService svc = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -175,7 +175,7 @@ public class SessionPurgeRetryRunner {
 		this.scheduler = svc;
 		svc.scheduleWithFixedDelay(this::runOnceSafely, INITIAL_DELAY.toMillis(), PERIOD.toMillis(),
 				TimeUnit.MILLISECONDS);
-		log.info("会话销毁重试调度已启动：period={} maxCandidates={} maxAttempts={}", PERIOD, MAX_CANDIDATES,
+		log.info("Session purge retry scheduler started: period={} maxCandidates={} maxAttempts={}", PERIOD, MAX_CANDIDATES,
 				MAX_ATTEMPTS);
 	}
 
@@ -193,7 +193,7 @@ public class SessionPurgeRetryRunner {
 		}
 		catch (Throwable ex) {
 			// 调度线程绝不能被单轮异常杀死；状态保持在 Redis（pending/guard 不 disarm）。
-			log.warn("会话销毁自动重试本轮异常（不猜状态、不 disarm）：{}", ex.toString());
+			log.warn("Session purge auto-retry round threw (state not guessed, not disarmed): {}", ex.toString());
 		}
 	}
 
@@ -235,7 +235,7 @@ public class SessionPurgeRetryRunner {
 				}
 				catch (RuntimeException ex) {
 					// 续租登记失败不阻断本轮（锁仍是刚抢到的 300s）；finally 仍会 stop/release。
-					log.warn("会话销毁重试锁续租登记失败（本轮仍按已抢到的 TTL 执行）：{}", ex.getMessage());
+					log.warn("Session purge retry lock renew registration failed (round continues on the TTL already acquired): {}", ex.getMessage());
 				}
 			}
 		}
@@ -245,7 +245,7 @@ public class SessionPurgeRetryRunner {
 				due = this.pendingStore.listDue(nowMs, MAX_CANDIDATES);
 			}
 			catch (RuntimeException ex) {
-				log.warn("会话销毁重试读取 pending 失败（本轮跳过，不猜状态）：{}", ex.getMessage());
+				log.warn("Session purge retry failed to read pending ledger (round skipped, state not guessed): {}", ex.getMessage());
 				return new RetryReport(true, 0, 0, 0, 0, 0);
 			}
 			// 取到候选 = 本轮有真实推进：重开推进窗口（否则"慢但仍在推进"的轮次会被判卡死）。
@@ -260,7 +260,7 @@ public class SessionPurgeRetryRunner {
 				// 判死时正在执行的那条留在上面的调用栈里自行收尾 —— 只有它承担"租约已放、对方可能也在跑"
 				// 的并发窗口，不会把窗口扩散到整批候选。
 				if (stallReached(stalled, progressDeadlineMs)) {
-					log.warn("会话销毁重试本轮已判死（C-62）：停止处理剩余候选（保持 due，交由下一轮/接管实例）");
+					log.warn("Session purge retry round declared stalled (C-62): stop processing remaining candidates (kept due for the next round/takeover instance)");
 					break;
 				}
 				// 每处理一条（含退役）都重开推进窗口（C-62）：慢但仍在推进的轮次继续持锁；
@@ -325,7 +325,7 @@ public class SessionPurgeRetryRunner {
 									"retry exception: " + ex.getMessage());
 						}
 						catch (RuntimeException recordEx) {
-							log.warn("记录会话销毁重试失败失败 sessionId={}（pending/guard 保持）：{}",
+							log.warn("Failed to record session purge retry failure sessionId={} (pending/guard kept): {}",
 									pending.sessionId(), recordEx.getMessage());
 						}
 					}
@@ -333,8 +333,8 @@ public class SessionPurgeRetryRunner {
 			}
 			if (retired > 0) {
 				// C-38 容量告警：耗尽台账只有人工 DELETE 才回到自动推进；这里只留痕，不删事实。
-				log.warn("会话销毁重试本轮退役 {} 条耗尽台账（durable 台账保留、全局 due 成员已摘除；"
-						+ "需人工 DELETE 才会重新进入自动推进）", retired);
+				log.warn("Session purge retry retired {} exhausted ledger entries this round (durable ledger kept, "
+						+ "global due member removed; a manual DELETE is required to re-enter auto-advance)", retired);
 			}
 			return new RetryReport(true, due.size(), attempted, completed, failed, skipped);
 		}
@@ -349,13 +349,13 @@ public class SessionPurgeRetryRunner {
 					this.leases.stopDriving(LOCK_KEY, lease.owner());
 				}
 				catch (RuntimeException ex) {
-					log.debug("停止会话销毁重试锁续租失败（TTL 会自清）：{}", ex.getMessage());
+					log.debug("Failed to stop session purge retry lock renewal (TTL self-clears): {}", ex.getMessage());
 				}
 				try {
 					this.leases.release(lease);
 				}
 				catch (RuntimeException ex) {
-					log.warn("释放会话销毁重试锁失败（TTL 会自清）：{}", ex.getMessage());
+					log.warn("Failed to release session purge retry lock (TTL self-clears): {}", ex.getMessage());
 				}
 			}
 			// 是否释放只看"本轮是否拿到 lease"：owner 每轮唯一 ⇒ 不存在"重入拿到的别人的那一任"。
@@ -377,8 +377,8 @@ public class SessionPurgeRetryRunner {
 			return false;
 		}
 		if (stalled.compareAndSet(false, true)) {
-			log.warn("会话销毁重试单条候选超过推进窗口（{} ms）仍无推进：本轮判死，停止续租与剩余候选处理"
-					+ "（判死时正在执行的候选自行收尾）", CANDIDATE_STALL_TIMEOUT_MS);
+			log.warn("Session purge retry candidate exceeded the progress window ({} ms) without progress: round declared "
+					+ "stalled, renewal and remaining candidates stopped (in-flight candidate finishes on its own)", CANDIDATE_STALL_TIMEOUT_MS);
 		}
 		return true;
 	}
@@ -389,7 +389,7 @@ public class SessionPurgeRetryRunner {
 			this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(), error);
 		}
 		catch (RuntimeException ex) {
-			log.warn("记录会话销毁记忆复核失败 sessionId={}（pending/guard 保持）：{}", pending.sessionId(),
+			log.warn("Failed to record session purge memory re-verify failure sessionId={} (pending/guard kept): {}", pending.sessionId(),
 					ex.getMessage());
 		}
 	}
@@ -426,7 +426,7 @@ public class SessionPurgeRetryRunner {
 			this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}
 		catch (RuntimeException ex) {
-			log.warn("退役已耗尽的会话销毁重试项失败 sessionId={}（保持 pending/due 原状）：{}",
+			log.warn("Failed to retire exhausted session purge retry entry sessionId={} (pending/due left as-is): {}",
 					pending.sessionId(), ex.getMessage());
 		}
 	}

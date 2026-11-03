@@ -372,7 +372,7 @@ public class AiController {
 			}
 			catch (RuntimeException ex) {
 				// 读失败按"未绑定"继续：后面的 claim 仍是权威判定（它也会失败则按 503 如实失败）。
-				log.debug("clientRequestId 绑定预读失败 sessionId={}：{}", request.sessionId(), ex.getMessage());
+				log.debug("clientRequestId binding pre-read failed sessionId={} error={}", request.sessionId(), ex.getMessage());
 			}
 			if (boundRunId != null) {
 				deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, request.sessionId(), boundRunId,
@@ -386,9 +386,9 @@ public class AiController {
 		InputSanitizer.Result sanitized = this.inputSanitizer.sanitize(request.message());
 		if (sanitized.changed()) {
 			// 只记长度差与剥离计数：原文可能含敏感数据，日志里不得出现
-			log.info("输入归一化生效 sessionId={} 长度 {}→{}（剥离格式字符 {} / 控制字符 {}）",
-					request.sessionId(), sanitized.originalLength(), sanitized.text().length(),
-					sanitized.removedFormat(), sanitized.removedControl());
+			log.info("input normalized sessionId={} chars {}->{} (formatRemoved={} controlRemoved={})",
+					request.sessionId(), sanitized.originalLength(), sanitized.text().length(), sanitized.removedFormat(),
+					sanitized.removedControl());
 		}
 		// 归一后为空 = 原文只由不可见字符构成（"零宽填充"式空转）：与"message 必填"同一口径拒掉，
 		// 否则会带着一条空 user 消息进模型与记忆窗口。
@@ -464,7 +464,7 @@ public class AiController {
 		// RT-35：持有者不可知（{@code busy.unknown()}、runId=null）时没有可判的轮 —— 不拿 null 去读
 		// 快照/租约（Redis 抖动时那会把"如实 409"变成异常），也不做任何强释放。
 		if (busy != null && !busy.unknown() && isDeadRound(busy.runId())) {
-			log.warn("会话门被死轮占着，放行新发送 sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
+			log.warn("session gate held by dead run, allowing new turn sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
 			// 死轮已判定不再推进：按 runId 强释放，仅当会话门仍属于这个死轮才生效。
 			this.sessionGate.releaseDeadHeld(sessionId, busy.runId());
 			busy = this.sessionGate.acquire(sessionId, runId);
@@ -508,7 +508,7 @@ public class AiController {
 				claim = this.clientRequests.claim(sessionId, clientRequestId, runId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("clientRequestId 绑定失败（Redis 不可用）sessionId={} runId={}：{}", sessionId, runId,
+				log.warn("clientRequestId binding failed (Redis unavailable) sessionId={} runId={} error={}", sessionId, runId,
 						ex.getMessage());
 				this.sessionGate.release(sessionId, runId);
 				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
@@ -534,7 +534,7 @@ public class AiController {
 			if (claim.state() == ClientRequestRegistry.ClaimState.CANCELLED) {
 				// 取消早于 run 创建：先写本轮取消旗标（同身份键），服务第一条检查即收敛，不跑模型。
 				this.cancellations.cancel(runId, this.runStore.instanceId());
-				log.info("clientRequestId 已取消（run 尚未创建），本轮将直接按取消收尾 sessionId={} runId={}",
+				log.info("clientRequestId already cancelled before run creation; turn finishes as cancelled sessionId={} runId={}",
 						sessionId, runId);
 			}
 		}
@@ -562,7 +562,7 @@ public class AiController {
 					service.chat(runId, effective, out);
 				}
 				catch (Exception ex) {
-					log.error("AI 轮次未捕获异常 sessionId={} runId={}", sessionId, runId, ex);
+					log.error("uncaught exception in AI turn sessionId={} runId={}", sessionId, runId, ex);
 					// 每轮必有终态行：压缩/记忆写/快照建/取模型这些"环外"抛错此前只有一行 ERROR，
 					// 没有任何结构化终态 ⇒ 按 runId grep 会看不到收尾。这里补一条终态事件。
 					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
@@ -583,7 +583,7 @@ public class AiController {
 						// （同一 runId 会被多次驱动，上一次的 error 会吞掉本次的环外失败）。
 						// 判据不可知（null）⇒ 照发：宁可多一条，也不吞掉本次失败。
 						if (Boolean.TRUE.equals(out.terminalFrameArchivedSinceDriveStart())) {
-							log.info("本次驱动的失败终帧已落档，跳过环外异常的 error runId={}（每次驱动至多一条终帧）",
+							log.info("failure terminal frame already archived for this drive; skipping outside-turn error runId={}",
 									runId);
 							return;
 						}
@@ -600,7 +600,7 @@ public class AiController {
 			});
 		}
 		catch (RejectedExecutionException ex) {
-			log.warn("挂起专用线程池饱和，拒绝 sessionId={} runId={}", sessionId, runId);
+			log.warn("suspension executor pool saturated, rejecting turn sessionId={} runId={}", sessionId, runId);
 			AiTrace.event("turn_rejected", "code", "SUSPEND_POOL_SATURATED");
 			this.sessionGate.release(sessionId, runId);
 			this.runRegistry.close(runId);
@@ -611,7 +611,7 @@ public class AiController {
 					this.clientRequests.releaseBinding(sessionId, clientRequestId, runId);
 				}
 				catch (RuntimeException releaseEx) {
-					log.debug("释放未启动的 clientRequestId 绑定失败 sessionId={}：{}", sessionId,
+					log.debug("releasing clientRequestId binding of unstarted turn failed sessionId={} error={}", sessionId,
 							releaseEx.getMessage());
 				}
 			}
@@ -673,10 +673,10 @@ public class AiController {
 				// 于是只做两件事：①取消优先（权威取消态已置位 ⇒ 不发 error，取消侧才是终帧）；
 				// ②否则补一条 error 终帧（不写任何快照）。
 				if (isCancelledFlag(runId)) {
-					log.info("环外异常不补终帧 runId={}：取消旗标已置位且快照尚未建立（取消优先）", runId);
+					log.info("outside-turn exception emits no terminal frame: cancel flag set and snapshot absent (cancel first) runId={}", runId);
 					return false;
 				}
-				log.warn("环外异常发生在快照建立之前 runId={} code={}：不新建快照（禁止裸 save），只补 error 终帧", runId,
+				log.warn("outside-turn exception before snapshot creation runId={} code={}; not creating snapshot (no naked save), error frame only", runId,
 						code);
 				return true;
 			}
@@ -684,7 +684,7 @@ public class AiController {
 				return false;
 			}
 			if (snapshot.isCancelled()) {
-				log.info("环外异常不写失败态 runId={}：快照取消位已置位（取消优先）", runId);
+				log.info("outside-turn exception leaves failure state unwritten: snapshot cancel flag set (cancel first) runId={}", runId);
 				return false;
 			}
 			snapshot.setStatus(RunSnapshot.FAILED);
@@ -692,13 +692,13 @@ public class AiController {
 			snapshot.setError(code + "：" + localize(code, "AI 服务暂时不可用，请稍后重试。"));
 			boolean written = this.runStore.saveTerminalUnlessCancelled(snapshot);
 			if (!written) {
-				log.info("环外异常失败态被取消优先守卫拒写 runId={} code={}（不覆盖 CANCELLED、不发 error 终帧）", runId,
+				log.info("outside-turn failure state rejected by cancel-first guard runId={} code={} (CANCELLED preserved, no error frame)", runId,
 						code);
 			}
 			return written;
 		}
 		catch (RuntimeException writeEx) {
-			log.warn("环外异常失败态写回失败 runId={}（终帧照发；恢复侧按快照/租约兜底）：{}", runId,
+			log.warn("outside-turn failure state write failed runId={} (error frame still sent; recovery falls back to snapshot/lease) error={}", runId,
 					writeEx.getMessage());
 			return true;
 		}
@@ -787,11 +787,11 @@ public class AiController {
 			AiContext merged = mergeWorkspaceFacts(AiContext.fromMap(snapshot.getContext()), effective);
 			snapshot.setContext(merged.toMap());
 			this.runStore.save(snapshot);
-			log.info("挂起期工作区上下文已写回快照 runId={} page={} taskId={} step={}", runId,
+			log.info("workspace context written back to snapshot during suspension runId={} page={} taskId={} step={}", runId,
 					merged.getPage(), merged.getTaskId(), merged.getStep());
 		}
 		catch (RuntimeException ex) {
-			log.warn("挂起期工作区上下文写回失败（已忽略，续跑退回旧上下文）runId={}：{}", runId, ex.getMessage());
+			log.warn("workspace context write-back during suspension failed (ignored; resume falls back to previous context) runId={} error={}", runId, ex.getMessage());
 		}
 	}
 
@@ -850,7 +850,7 @@ public class AiController {
 		InputSanitizer.Result sanitizedReason = this.inputSanitizer.sanitize(request.reason());
 		if (sanitizedReason.changed()) {
 			// 只记长度差与剥离计数：原因原文可能含敏感数据，日志里不得出现
-			log.info("确认原因归一化生效 runId={} 长度 {}→{}（剥离格式字符 {} / 控制字符 {}）", request.runId(),
+			log.info("confirmation reason normalized runId={} chars {}->{} (formatRemoved={} controlRemoved={})", request.runId(),
 					sanitizedReason.originalLength(), sanitizedReason.text().length(),
 					sanitizedReason.removedFormat(), sanitizedReason.removedControl());
 		}
@@ -959,7 +959,7 @@ public class AiController {
 				deny(HttpStatus.BAD_REQUEST, ErrorCodes.FRONTEND_RESULT_TOO_LARGE, null, request.runId(),
 						"chars", originalChars, "limit", callbackMaxChars, "name", pending.getName(),
 						"kind", pending.getKind());
-				log.info("结构化回灌结果超限，拒绝且不落库 runId={} toolCallId={} name={} 原长度={} 上限={}",
+				log.info("structured frontend result oversized; rejected without persisting runId={} toolCallId={} tool={} chars={} limit={}",
 						request.runId(), request.toolCallId(), pending.getName(), originalChars, callbackMaxChars);
 				return json(HttpStatus.BAD_REQUEST,
 						frontendResultTooLarge(request.runId(), request.toolCallId(), pending, originalChars,
@@ -984,7 +984,7 @@ public class AiController {
 			if (this.securityEvents != null) {
 				this.securityEvents.payloadTruncated();
 			}
-			log.info("前端工具结果超限已截断 runId={} toolCallId={} 原长度={} 上限={}", request.runId(),
+			log.info("frontend tool result truncated runId={} toolCallId={} originalChars={} limit={}", request.runId(),
 					request.toolCallId(), originalChars, callbackMaxChars);
 		}
 		// 挂起期工作区事实（可选字段）：与 /confirm 同一口径 —— 条目存在 + PENDING + kind 正确 +
@@ -1126,8 +1126,8 @@ public class AiController {
 		SseChatEmitter.ReplayResult replay = out.replayAndAttachWithStatus(emitter, lastSeq,
 				snapshot == null || isTerminal(snapshot.getStatus()));
 		int replayed = replay.staged();
-		log.debug("reattach runId={} status={} lastSeq={} 回放帧数={} 截断={} 缺口={}..{}", runId,
-				snapshot == null ? "(无快照)" : snapshot.getStatus(), lastSeq, replayed, replay.truncated(),
+		log.debug("reattach runId={} status={} lastSeq={} replayedFrames={} truncated={} gap={}..{}", runId,
+				snapshot == null ? "none" : snapshot.getStatus(), lastSeq, replayed, replay.truncated(),
 				replay.trimmedFromSeq(), replay.trimmedToSeq());
 		// park 的挂起轮：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
 		// 只在<b>确实还在等人</b>（仍有 PENDING 条目）时收流：条目已全部结算 ⇒ 决策/回灌已落库、
@@ -1145,12 +1145,12 @@ public class AiController {
 				expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("reattach 消费 park 到期条目失败 runId={}（按仍在等人处理，不泄漏订阅）：{}", runId,
+				log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept) error={}", runId,
 						ex.getMessage());
 			}
 			if (expired > 0 && !stillWaitingForInput(runId)) {
 				// 到期收敛已派发一次续跑：保留订阅，让随后产出的 done/error 能从这条连接到达。
-				log.info("reattach 消费了 {} 个到期前端条目 runId={}（续跑已派发，保留连接等终帧）", expired,
+				log.info("reattach consumed {} expired frontend entries runId={} (resume dispatched, keeping connection for terminal frame)", expired,
 						runId);
 			}
 			else if (stillWaitingForInput(runId)) {
@@ -1170,11 +1170,11 @@ public class AiController {
 				// 当成"已终止"而漏掉真正的 done。
 				try {
 					ConfirmGate.ResumeTrigger healed = this.confirmGate.triggerResumeForParked(runId);
-					log.debug("reattach 已决无驱动方的自愈对账 runId={} outcome={}", runId,
+					log.debug("reattach self-heal reconcile for decided run without driver runId={} outcome={}", runId,
 							healed == null ? null : healed.outcome());
 				}
 				catch (RuntimeException ex) {
-					log.warn("reattach 自愈对账失败 runId={}（收流，不泄漏订阅）：{}", runId, ex.getMessage());
+					log.warn("reattach self-heal reconcile failed runId={} (closing subscription, no leak) error={}", runId, ex.getMessage());
 					out.completeSubscriptions();
 				}
 			}
@@ -1337,7 +1337,7 @@ public class AiController {
 		if (isCancelledFlag(runId)) {
 			body.put("cancelled", true);
 		}
-		log.debug("reattach 命中\"已 start、快照未建\"阶段 runId={} elapsedMs={}", runId, elapsedMs);
+		log.debug("reattach hit started-without-snapshot phase runId={} elapsedMs={}", runId, elapsedMs);
 		return json(HttpStatus.ACCEPTED, body);
 	}
 
@@ -1354,7 +1354,7 @@ public class AiController {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取取消旗标失败 runId={}（按未取消继续返回准备中）：{}", runId, ex.getMessage());
+			log.debug("reading cancel flag failed runId={} (continuing as not cancelled, returning preparing) error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1370,7 +1370,7 @@ public class AiController {
 			return atMs instanceof Number number ? number.longValue() : 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取归档首帧失败 runId={}（已用时间按 0 上报）：{}", runId, ex.getMessage());
+			log.debug("reading first archived frame failed runId={} (reporting elapsedMs=0) error={}", runId, ex.getMessage());
 			return 0L;
 		}
 	}
@@ -1391,7 +1391,7 @@ public class AiController {
 			return "done".equals(type) || "error".equals(type);
 		}
 		catch (RuntimeException ex) {
-			log.debug("读取归档末帧失败 runId={}（按非终态继续判定「准备中」）：{}", runId, ex.getMessage());
+			log.debug("reading last archived frame failed runId={} (treating as non-terminal, still preparing) error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1413,7 +1413,7 @@ public class AiController {
 			return false;
 		}
 		catch (RuntimeException ex) {
-			log.warn("reattach 读取待决条目失败 runId={}（按 park 收流，不悬挂连接）：{}", runId, ex.getMessage());
+			log.warn("reattach failed to read pending entries runId={} (closing as park, no hanging connection) error={}", runId, ex.getMessage());
 			return true;
 		}
 	}
@@ -1447,7 +1447,7 @@ public class AiController {
 		catch (Exception ex) {
 			// 租约设施不可读 ⇒ 按"可能有人持有"处理（不放行），与 E3 的保守方向相反是因为
 			// 这里的错误方向是并发双跑，不能靠乐观兜底
-			log.debug("读取续跑租约失败 runId={}：{}", heldRunId, ex.getMessage());
+			log.debug("reading resume lease failed runId={} (treating lease as held) error={}", heldRunId, ex.getMessage());
 			leaseHeld = true;
 		}
 		// 空写出器不算活跃：只有真实订阅才保留会话门。
@@ -1488,7 +1488,7 @@ public class AiController {
 			// 归属不明 ⇒ 不写任何取消事实（取消会中断那一轮的执行：跨身份写全局旗标 = DoS / 误杀他人轮次）。
 			// 快照未建但归档里有本命名空间的帧（"已 start、快照未建"的准备窗口）仍允许取消：
 			// 归档键同样按身份分开，能读到就证明是本身份的这一轮。
-			log.warn("拒绝取消：runId 无归属或不存在 runId={}（取消旗标未写，无任何副作用）", runId);
+			log.warn("cancel rejected: runId has no owner or does not exist runId={} (cancel flag not written, no side effects)", runId);
 			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId, "cancelled",
 					false));
 		}
@@ -1527,7 +1527,7 @@ public class AiController {
 			outcome = this.clientRequests.cancel(request.sessionId(), request.clientRequestId());
 		}
 		catch (RuntimeException ex) {
-			log.warn("按 clientRequestId 取消失败 sessionId={} clientRequestId={}：{}", request.sessionId(),
+			log.warn("cancel by clientRequestId failed sessionId={} clientRequestId={} error={}", request.sessionId(),
 					request.clientRequestId(), ex.getMessage());
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
@@ -1549,7 +1549,7 @@ public class AiController {
 			cancelBody = cancelKnownRun(outcome.runId(), snapshot);
 		}
 		catch (RuntimeException ex) {
-			log.warn("按 clientRequestId 取消关联 run 失败 runId={}：{}", outcome.runId(), ex.getMessage());
+			log.warn("cancel of run bound to clientRequestId failed runId={} error={}", outcome.runId(), ex.getMessage());
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		body.putAll(cancelBody);
@@ -1653,7 +1653,7 @@ public class AiController {
 			return last.isPresent() && last.getAsLong() > 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("取消归属核对读归档失败 runId={}（按无归属处理，不写取消旗标）：{}", runId, ex.getMessage());
+			log.debug("reading archive for cancel ownership check failed runId={} (treating as unowned, cancel flag not written) error={}", runId, ex.getMessage());
 			return false;
 		}
 	}
@@ -1680,7 +1680,7 @@ public class AiController {
 		}
 		TenantUser current = RequestContextUtils.currentOrNull();
 		if (current == null) {
-			log.warn("拒绝归属复核：当前线程没有身份上下文 runId={}（fail-closed，按不存在处理）",
+			log.warn("ownership recheck rejected: no identity context on this thread runId={} (fail-closed, treated as nonexistent)",
 					snapshot.getRunId());
 			return false;
 		}
@@ -1704,7 +1704,7 @@ public class AiController {
 		RunSnapshot snapshot = this.runStore.get(runId);
 		if (snapshot != null && !ownedByCurrentIdentity(snapshot)) {
 			TenantUser current = RequestContextUtils.currentOrNull();
-			log.warn("拒绝跨身份访问 runId={}（快照归属 {}/{}，当前身份 {}）：按不存在处理", runId,
+			log.warn("cross-identity access rejected runId={} (snapshotOwner={}/{} currentIdentity={}); treated as nonexistent", runId,
 					snapshot.getTenantId(), snapshot.getUserId(), current);
 			return null;
 		}
@@ -1832,7 +1832,7 @@ public class AiController {
 		}
 		catch (RuntimeException ex) {
 			readable = false;
-			log.debug("归档完整性探测失败 runId={}（按不可证明完整处理）：{}", runId, ex.getMessage());
+			log.debug("archive integrity probe failed runId={} (treated as not provably complete) error={}", runId, ex.getMessage());
 		}
 		body.put("archiveFirstSeq", firstSeq);
 		body.put("archiveReadable", readable);
@@ -2138,7 +2138,7 @@ public class AiController {
 			}
 			catch (RuntimeException ex) {
 				// 读失败必须可见/可重试：与 /context 同口径回 503，绝不伪装成"空历史"
-				log.warn("history transcript 读取失败 sessionId={}：{}", sessionId, ex.getMessage());
+				log.warn("history transcript read failed sessionId={} error={}", sessionId, ex.getMessage());
 				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 			}
 		}
@@ -2149,7 +2149,7 @@ public class AiController {
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("history 记忆读取失败 sessionId={}：{}", sessionId, ex.getMessage());
+				log.warn("history memory read failed sessionId={} error={}", sessionId, ex.getMessage());
 				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 			}
 		}
@@ -2183,7 +2183,7 @@ public class AiController {
 			raw = this.runStore.events(sessionId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("history 压缩事实读取失败 sessionId={}：{}（按空事件返回）", sessionId, ex.getMessage());
+			log.warn("history compaction facts read failed sessionId={} error={} (returning empty events)", sessionId, ex.getMessage());
 			return List.of();
 		}
 		if (raw == null || raw.isEmpty()) {
@@ -2469,7 +2469,7 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无码"处理，原文照旧
-			log.debug("历史工具结果信封码解析失败，按无码透传：{}", ex.getMessage());
+			log.debug("history tool result envelope code parse failed; passing through without code error={}", ex.getMessage());
 			return null;
 		}
 	}
@@ -2518,7 +2518,7 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理（旧载荷语义）
-			log.debug("历史工具结果截断元数据解析失败，按无字段透传：{}", ex.getMessage());
+			log.debug("history tool result truncation metadata parse failed; passing through without fields error={}", ex.getMessage());
 			return null;
 		}
 	}
@@ -2556,7 +2556,7 @@ public class AiController {
 				return view == null ? null : view.toMap();
 			}
 			catch (RuntimeException ex) {
-				log.warn("历史 resultView 构造失败（本次不出视图，卡面走旧形态）：tool={} toolCallId={}",
+				log.warn("history resultView build failed (no view this time, legacy card shape) tool={} toolCallId={}",
 						response.name(), response.id(), ex);
 				return null;
 			}
@@ -2607,7 +2607,7 @@ public class AiController {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("历史工具结果不是可解析的信封 JSON，按原文透传：{}", ex.getMessage());
+			log.debug("history tool result is not parseable envelope JSON; passing through raw text error={}", ex.getMessage());
 		}
 		return responseData;
 	}
@@ -2649,7 +2649,7 @@ public class AiController {
 		if (this.contextBreakdownService == null) {
 			// R-16：用户面文案不得出现 Java 类名（"ContextBreakdownService 缺失"这类内部实现细节
 			// 只留在日志里）；message 与其它 503 同一本地化出口。
-			log.warn("/context 计量未装配 sessionId={}：ContextBreakdownService 缺失", sessionId);
+			log.warn("/context metering not wired sessionId={} reason=context_breakdown_service_missing", sessionId);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, errorBody(ErrorCodes.AI_CONTEXT_UNAVAILABLE,
 					"上下文计量暂不可用，请稍后重试"));
 		}

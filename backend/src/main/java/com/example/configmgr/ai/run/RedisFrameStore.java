@@ -656,7 +656,8 @@ public class RedisFrameStore implements FrameStore {
 					// 记下降级位：下一次取号据此强制重读末号（自我修复），而不是"只承诺不重试"。
 					state.repairDegraded.set(true);
 					if (state.repairDegradedWarned.compareAndSet(false, true)) {
-						log.warn("号回退修复降级 runId={}（归档末号读不出，本次按自增号返回；后续取号会持续重试抬号）",
+						log.warn("seq fallback repair degraded runId={} (archive tail unreadable; "
+								+ "returning auto-increment seq; later allocations keep retrying)",
 								runId);
 					}
 				}
@@ -672,7 +673,8 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			long fallback = nextFallbackSeq(runId);
-			log.warn("序号发放降级为进程内计数 runId={} seq={}（Redis 取号失败，跨实例不重承诺暂不可用）：{}",
+			log.warn("seq allocation degraded to in-process counter runId={} seq={} "
+					+ "(Redis unavailable; cross-instance ordering not guaranteed): {}",
 					runId, fallback, ex.getMessage());
 			return fallback;
 		}
@@ -768,7 +770,7 @@ public class RedisFrameStore implements FrameStore {
 		long seq = seqOf(frame);
 		if (seq <= 0L) {
 			// N-4：无 seq 的帧不进 Stream（否则会写入一条 seq=0 记录，被 streamTailSeq 当成末号）。
-			log.debug("事件日志跳过无 seq 帧 runId={} type={}", runId, type);
+			log.debug("event log skipping frame without seq runId={} type={}", runId, type);
 			return AppendResult.skipped();
 		}
 		byte[] payload = producePayload(runId, type, frame, payloadFactory);
@@ -825,7 +827,7 @@ public class RedisFrameStore implements FrameStore {
 			// 绝不退化成"先取号、再按精确号落档"的两步式 —— 那条路会重新打开"取到低号却被表尾越过"
 			// 的窗口，正是本批要消灭的形态。
 			frame.remove(FIELD_SEQ);
-			log.error("事件日志无法唯一定位号占位 runId={} type={}（本帧不落档：保持「定号与归档同一拍」，绝不降级）",
+			log.error("event log cannot locate seq placeholder uniquely runId={} type={} (frame not archived; never degrade)",
 					runId, type);
 			return AppendResult.skipped();
 		}
@@ -850,11 +852,11 @@ public class RedisFrameStore implements FrameStore {
 				// 脚本据此按精确 ID + 本次帧体判幂等 —— 不会写出第二条。
 				unknownReplyRetries++;
 				if (unknownReplyRetries > 1) {
-					log.warn("事件日志原子落档回包持续未知 runId={} type={}（已重试一次，不再持锁重试）：{}",
+					log.warn("event log archive result unknown after retry runId={} type={} (retried once, no further lock retry): {}",
 							runId, type, ex.getMessage());
 					break;
 				}
-				log.warn("事件日志原子落档回包未知 runId={} type={} attempt={}（同 token 重试一次，按精确 ID 判幂等）：{}",
+				log.warn("event log archive result unknown runId={} type={} attempt={} (retrying once with same token, exact-ID idempotency): {}",
 						runId, type, attempt, ex.getMessage());
 				forceRepair = true;
 				continue;
@@ -871,11 +873,11 @@ public class RedisFrameStore implements FrameStore {
 		// I-4：一帧没进事件日志 = 谁也不会再看到它（重挂回放也补不回来）⇒ 必须可聚合观测。
 		RedisDegradation.record(RedisDegradation.A7_FRAME_APPEND);
 		if (state.appendFailureWarned.compareAndSet(false, true)) {
-			log.warn("事件日志原子落档失败 runId={} type={}（该帧不落档、不交付、不推进游标：没有归档号就没有可交付的顺序；"
-					+ "后续同类失败只计数不再重复告警）", runId, type);
+			log.warn("event log archive failed runId={} type={} (frame not archived/delivered, "
+					+ "cursor not advanced; further same failures only counted)", runId, type);
 		}
 		else {
-			log.debug("事件日志原子落档失败 runId={} type={}（已计数，本轮不再重复告警）", runId, type);
+			log.debug("event log archive failed runId={} type={} (already counted, no duplicate warning this turn)", runId, type);
 		}
 		return AppendResult.skipped();
 	}
@@ -900,7 +902,7 @@ public class RedisFrameStore implements FrameStore {
 			// 归档末号，与 A4 的语义一致；日志每轮一次。
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ);
 			if (state.repairDegradedWarned.compareAndSet(false, true)) {
-				log.warn("原子落档降级 runId={}（归档末号读不出，本次按计数器号落档；下一拍带 forceRepair 重锚）", runId);
+				log.warn("archive degraded runId={} (archive tail unreadable; using counter seq; next append re-anchors with forceRepair)", runId);
 			}
 		}
 		else if (seq > 0L) {
@@ -927,7 +929,7 @@ public class RedisFrameStore implements FrameStore {
 		if (payloadFactory != null) {
 			byte[] payload = payloadFactory.payload(frame);
 			if (payload == null) {
-				log.warn("事件日志负载生成失败 runId={} type={}（该帧未落档，跨实例不可见）", runId, type);
+				log.warn("event log payload build failed runId={} type={} (frame not archived; invisible cross-instance)", runId, type);
 			}
 			return payload;
 		}
@@ -935,7 +937,8 @@ public class RedisFrameStore implements FrameStore {
 			return this.mapper.writeValueAsBytes(frame);
 		}
 		catch (Exception ex) {
-			log.warn("事件日志序列化失败 runId={} type={}（该帧未落档，跨实例不可见）：{}", runId, type, ex.getMessage());
+			log.warn("event log serialization failed runId={} type={} "
+					+ "(frame not archived; invisible cross-instance): {}", runId, type, ex.getMessage());
 			return null;
 		}
 	}
@@ -976,11 +979,11 @@ public class RedisFrameStore implements FrameStore {
 				return new AppendResult(seq, payload);
 			}
 			if (exact.exists()) {
-				log.warn("事件日志显式号已被另一份帧占用 runId={} type={} seq={}（不覆盖、不改号：该帧不落档）", runId,
+				log.warn("event log explicit seq already taken runId={} type={} seq={} (no overwrite, no renumber; frame not archived)", runId,
 						type, seq);
 			}
 			else {
-				log.warn("事件日志显式号落档被表尾越过 runId={} type={} seq={}（不重分配、不用自动 ID：该帧不落档）",
+				log.warn("event log explicit seq behind tail runId={} type={} seq={} (no reassign, no auto ID; frame not archived)",
 						runId, type, seq);
 			}
 			return AppendResult.skipped();
@@ -1005,7 +1008,7 @@ public class RedisFrameStore implements FrameStore {
 					String.valueOf(ttlSeconds));
 		}
 		catch (Exception ex) {
-			log.debug("归档裁剪低水位记录失败 runId={} head={}（读侧本次不报截断）：{}", runId, headAfter,
+			log.debug("archive trim low-watermark record failed runId={} head={} (no truncation reported this read): {}", runId, headAfter,
 					ex.getMessage());
 		}
 	}
@@ -1025,7 +1028,7 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("事件日志幸存首条读取失败 runId={}（本次不记录裁剪低水位）：{}", runId, ex.toString());
+			log.debug("event log surviving first entry read failed runId={} (low watermark not recorded this time): {}", runId, ex.toString());
 			return null;
 		}
 	}
@@ -1060,7 +1063,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
-			log.warn("事件日志精确 ID 读取失败 runId={} seq={}（无法判定幂等，按未落档处理）：{}", runId, seq,
+			log.warn("event log exact-ID read failed runId={} seq={} (idempotency unknown, treating as not archived): {}", runId, seq,
 					ex.toString());
 			return new ArchivedEntry(false, null);
 		}
@@ -1138,7 +1141,7 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("事件日志续期失败（幂等命中，按已有记录继续）：{}", ex.getMessage());
+			log.debug("event log renew failed (idempotent hit, proceeding with existing record): {}", ex.getMessage());
 		}
 	}
 
@@ -1225,7 +1228,7 @@ public class RedisFrameStore implements FrameStore {
 		if (stream.degraded()) {
 			// 结果可能仍非空（例如末号探测失败但 XRANGE 成功）——但它是"降级读"，不是完整差量。
 			// 计数已在 streamTailSeq / streamFramesAbove 落；这里把信号继续传给调用方（API 层可拒绝）。
-			log.debug("事件日志差量读降级 runId={} afterSeq={}（读失败已计数，结果不保证完整）", runId, afterSeq);
+			log.debug("event log delta read degraded runId={} afterSeq={} (read failure counted; result may be incomplete)", runId, afterSeq);
 		}
 		List<Map<String, Object>> result = stream.frames();
 		if (limit > 0 && result.size() > limit) {
@@ -1295,7 +1298,8 @@ public class RedisFrameStore implements FrameStore {
 		if (!tail.ok()) {
 			if (afterSeq <= 0L) {
 				// I-1：全量回放时末号未知且没有可读帧 —— 不能用"最旧窗口"冒充最新帧，宁可这一拍不回放。
-				log.warn("事件日志末号未知且要求全量回放 runId={}（拒绝退回最旧窗口，返回降级空结果）", runId);
+				log.warn("event log tail unknown but full replay required runId={} "
+						+ "(refusing to fall back to oldest window; returning degraded empty)", runId);
 				return new FrameStore.ReadResult(List.of(), true, truncated, gapFrom, gapTo);
 			}
 			return new FrameStore.ReadResult(readRange(runId, afterSeq, window, true), true, truncated, gapFrom, gapTo);
@@ -1331,7 +1335,7 @@ public class RedisFrameStore implements FrameStore {
 		if (truncated) {
 			// 可聚合观测：本次回放确实跳过了不可回放的区间（每次读只计一次；含义 = 有缺口，不是"读失败"）。
 			RedisDegradation.record(RedisDegradation.C1_STREAM_REPLAY_GAP);
-			log.debug("事件日志回放跳过不可回放区间 runId={} afterSeq={} 缺口={}..{} 有效窗口={}", runId, afterSeq,
+			log.debug("event log replay skipping non-replayable range runId={} afterSeq={} gap={}..{} effective window={}", runId, afterSeq,
 					gapFrom, gapTo, window);
 		}
 		return new FrameStore.ReadResult(frames, false, truncated, gapFrom, gapTo);
@@ -1369,7 +1373,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("事件日志原文读取失败 runId={} afterSeq={}（本次按无差量处理，不重试）：{}", runId, afterSeq,
+			log.warn("event log raw read failed runId={} afterSeq={} (treating as no delta, no retry): {}", runId, afterSeq,
 					ex.toString());
 		}
 		return out;
@@ -1391,7 +1395,8 @@ public class RedisFrameStore implements FrameStore {
 			return value > 0L ? value : null;
 		}
 		catch (Exception ex) {
-			log.debug("归档裁剪低水位读取失败 runId={}（按'从未裁剪'处理，不臆测截断）：{}", runId, ex.getMessage());
+			log.debug("archive trim low-watermark read failed runId={} "
+					+ "(treating as never trimmed, no truncation guess): {}", runId, ex.getMessage());
 			return null;
 		}
 	}
@@ -1433,7 +1438,7 @@ public class RedisFrameStore implements FrameStore {
 			// 读失败 ≠ 空流：返回值对调用链仍是"暂无差量"（抛异常会让整条订阅路径失败），
 			// 但必须 WARN + 计数 —— 静默折成空会把"日志读不出来"伪装成"没有新帧"。
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("事件日志读取失败 runId={} afterSeq={}（本次按无差量处理，不重试）：{}", runId, afterSeq,
+			log.warn("event log read failed runId={} afterSeq={} (treating as no delta, no retry): {}", runId, afterSeq,
 					ex.toString());
 			return out;
 		}
@@ -1481,7 +1486,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("事件日志最新窗口读取失败 runId={}（本次按无差量处理，不重试）：{}", runId, ex.toString());
+			log.warn("event log newest window read failed runId={} (treating as no delta, no retry): {}", runId, ex.toString());
 		}
 		return new NewestWindow(out, headId, recordCount[0]);
 	}
@@ -1525,7 +1530,7 @@ public class RedisFrameStore implements FrameStore {
 			return new long[] { oldest, Math.max(oldest, to) };
 		}
 		catch (Exception ex) {
-			log.debug("事件日志全量回放缺口探测失败 runId={}（本次不报截断）：{}", runId, ex.toString());
+			log.debug("event log full replay gap probe failed runId={} (no truncation reported): {}", runId, ex.toString());
 			return null;
 		}
 	}
@@ -1575,7 +1580,7 @@ public class RedisFrameStore implements FrameStore {
 			// A4：末号探测失败按"未知"表达（ok=false），不再伪装成"末号 0"。
 			// 调用方据此区分"空流"与"读失败"；readFrom 会退化为不夹窗口的 XRANGE，而不是直接空。
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
-			log.warn("事件日志末号探测失败 runId={}（末号未知，本次回读退化为不夹窗口）：{}", runId, ex.toString());
+			log.warn("event log tail probe failed runId={} (tail unknown; read falls back to unclamped window): {}", runId, ex.toString());
 			return new StreamTail(0L, false);
 		}
 	}
@@ -1624,7 +1629,7 @@ public class RedisFrameStore implements FrameStore {
 			return frame;
 		}
 		catch (Exception ex) {
-			log.debug("事件日志单条坏损（跳过）：{}", ex.getMessage());
+			log.debug("event log single entry corrupt (skipped): {}", ex.getMessage());
 			return null;
 		}
 	}
@@ -1682,16 +1687,16 @@ public class RedisFrameStore implements FrameStore {
 		if (byBudget < minWindow()) {
 			RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_FLOOR);
 			if (state.byteFloorWarned.compareAndSet(false, true)) {
-				log.warn("事件日志容量预算不足以下限窗口 runId={} 预算={}B 本轮最大帧={}B 下限窗口={}（仍保留 {} 条，"
-						+ "单轮字节会超出预算；请调大 app.ai.stream.byte-budget 或核查单帧上限）", runId, byteBudget(),
+				log.warn("event log byte budget below minimum window runId={} budget={}B maxFrame={}B minWindow={} "
+						+ "(keeping {} entries; bytes exceed budget; raise app.ai.stream.byte-budget or check frame limit)", runId, byteBudget(),
 						observedMax, minWindow(), window);
 			}
 			return;
 		}
 		RedisDegradation.record(RedisDegradation.C1_STREAM_BYTE_CAP);
 		if (state.byteCapWarned.compareAndSet(false, true)) {
-			log.warn("事件日志按字节预算裁剪 runId={} 预算={}MiB 本轮最大帧={}B 有效窗口={}（条数窗口 {}）："
-					+ "更早的帧不再可回放（增量读取不受影响）", runId, byteBudget() / (1024 * 1024), observedMax, window,
+			log.warn("event log trimmed by byte budget runId={} budget={}MiB maxFrame={}B window={} "
+					+ "(count window {}): earlier frames no longer replayable (delta reads unaffected)", runId, byteBudget() / (1024 * 1024), observedMax, window,
 					this.streamWindow);
 		}
 	}

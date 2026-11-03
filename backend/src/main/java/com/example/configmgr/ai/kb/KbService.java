@@ -165,7 +165,7 @@ public class KbService {
     @PostConstruct
     public void start() {
         if (!enabled()) {
-            log.info("业务知识库未启用（app.ai.kb.enabled=false）");
+            log.info("Business knowledge base disabled (app.ai.kb.enabled=false)");
             return;
         }
         // 首启自播种（local 源且目录为空时复制随包样例；http 源无操作）必须在第一次回源前完成
@@ -183,7 +183,7 @@ public class KbService {
             long poll = Math.max(1, this.properties.getKb().getCache().getVersionPollInterval().toMillis());
             this.scheduler.scheduleWithFixedDelay(this::pollVersionQuietly, poll, poll, TimeUnit.MILLISECONDS);
         }
-        log.info("业务知识库已启动：source={} dir={} index={} refresh={}", source.kind(),
+        log.info("Business KB started: source={} dir={} index={} refresh={}", source.kind(),
                 this.properties.getKb().getDir(), this.properties.getKb().getIndexDir(),
                 this.properties.getKb().getRefreshInterval());
     }
@@ -205,7 +205,7 @@ public class KbService {
             this.analyzer.close();
         }
         catch (Exception e) {
-            log.debug("关闭分析器失败：{}", e.getMessage());
+            log.debug("Failed to close KB analyzer: {}", e.getMessage());
         }
     }
 
@@ -215,7 +215,7 @@ public class KbService {
         }
         catch (Throwable e) {
             // doRefresh 已兜住业务失败；这里只兜"兜底逻辑自身"（绝不让定时线程死亡）
-            log.warn("知识库定时刷新异常（保留旧索引）：{}", safeMessage(e));
+            log.warn("KB scheduled refresh threw unexpectedly (old index kept): {}", safeMessage(e));
         }
     }
 
@@ -263,7 +263,8 @@ public class KbService {
         this.retryAttempts++;
         this.retryNotBeforeNanos = System.nanoTime() + backoffMillis(this.retryAttempts) * 1_000_000L;
         if (this.retryAttempts >= MAX_VERSION_REBUILD_ATTEMPTS) {
-            log.warn("知识库版本 {} 连续 {} 次重建失败，暂停自动重试（保留旧索引；改由 {} 定时刷新或新版本触发）：{}",
+            log.warn("KB version {} failed to rebuild {} times in a row; auto-retry paused "
+                    + "(old index kept, next attempt via scheduled refresh every {} or a new version): {}",
                     version, this.retryAttempts, this.properties.getKb().getRefreshInterval(),
                     this.lastError);
         }
@@ -327,8 +328,8 @@ public class KbService {
                 String content = MarkdownChunker.normalize(this.source.fetchContent(meta));
                 String actualSha = KbHashing.sha256Hex(content);
                 if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                    log.warn("知识文档内容 sha 与 manifest 声明不一致（以 manifest 声明做增量判据）：doc={}",
-                            meta.id());
+                    log.warn("KB document content sha differs from manifest declaration "
+                            + "(manifest declaration is the delta baseline): doc={}", meta.id());
                 }
                 List<KbSection> sections = MarkdownChunker.sections(content, meta.title());
                 List<KbChunk> chunks = MarkdownChunker.chunk(meta.id(), meta.title(), content,
@@ -361,7 +362,7 @@ public class KbService {
             if (previous != null) {
                 previous.retire();
             }
-            log.info("业务知识库索引已重建：docs={} chunks={} source={} dir={}", nextDocs.size(),
+            log.info("Business KB index rebuilt: docs={} chunks={} source={} dir={}", nextDocs.size(),
                     built.chunkCount, source.kind(), buildDir.getFileName());
             return true;
         }
@@ -371,11 +372,11 @@ public class KbService {
             // WARN 节流：第一条（1）与之后每 FAILURE_WARN_EVERY 条（5/9…）留 WARN，其余降 DEBUG ——
             // 排障看得到，日志也不会被 30s 的重试节奏刷屏；lastError/status 始终是最新原因。
             if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
-                log.warn("知识库刷新失败（保留旧索引，不变更检索面，连续第 {} 次）：{}",
+                log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{}): {}",
                         this.consecutiveFailures, this.lastError);
             }
             else {
-                log.debug("知识库刷新仍失败（保留旧索引，连续第 {} 次）：{}", this.consecutiveFailures,
+                log.debug("KB refresh still failing (old index kept; consecutive failure #{}): {}", this.consecutiveFailures,
                         this.lastError);
             }
             if (buildDir != null) {
@@ -401,7 +402,7 @@ public class KbService {
                     .forEach(KbService::deleteRecursively);
         }
         catch (IOException e) {
-            log.debug("清理知识库旧构建目录失败：{}", e.getMessage());
+            log.debug("Failed to clean stale KB build dir: {}", e.getMessage());
         }
     }
 

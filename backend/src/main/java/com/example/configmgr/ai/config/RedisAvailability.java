@@ -85,21 +85,38 @@ public class RedisAvailability {
 			this.probes.incrementAndGet();
 			try {
 				String pong = this.redis.execute((RedisCallback<String>) (RedisConnection connection) -> connection.ping());
-				boolean ok = pong != null;
-				if (!ok) {
-					this.failures.incrementAndGet();
-					this.lastError = "PING 返回空";
+				if (pong != null) {
+					this.available = true;
+					this.lastError = null;
 				}
-				this.available = ok;
-				this.lastError = ok ? null : this.lastError;
+				else {
+					recordFailure("PING returned null (no PONG)");
+				}
 			}
 			catch (Exception ex) {
-				this.available = false;
-				this.failures.incrementAndGet();
-				this.lastError = ex.getClass().getSimpleName() + ": " + ex.getMessage();
-				log.warn("Redis 前置探活失败，AI 端点将快速失败（503 AI_REDIS_UNAVAILABLE）：{}", this.lastError);
+				recordFailure(ex.getClass().getSimpleName() + ": " + ex.getMessage());
 			}
 			return this.available;
+		}
+	}
+
+	/**
+	 * 记一次探活失败：翻转（可用 → 不可用）时 WARN、持续失败只 DEBUG。
+	 *
+	 * <p>两条失败路径（抛异常 / {@code PONG == null}）共用这一处，避免再次出现"某条路径不告警"
+	 * 的漂移 —— 那会让"可用 → 不可用"的唯一 WARN 被吞掉。调用方持 {@code synchronized(this)}。
+	 */
+	private void recordFailure(String error) {
+		boolean wasAvailable = this.available;
+		this.available = false;
+		this.failures.incrementAndGet();
+		this.lastError = error;
+		if (wasAvailable) {
+			log.warn("Redis preflight probe failed, AI endpoints fail fast from now on"
+					+ " (503 AI_REDIS_UNAVAILABLE) error={}", error);
+		}
+		else {
+			log.debug("Redis preflight probe still failing error={}", error);
 		}
 	}
 

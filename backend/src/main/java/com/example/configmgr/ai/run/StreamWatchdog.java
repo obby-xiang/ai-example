@@ -47,14 +47,18 @@ import java.util.function.Consumer;
  * </ol>
  *
  * <h2>取消</h2>
- * 取消同样在事件边界被这里发现（每 {@value #TICK_MILLIS}ms 轮询一次 Redis 权威标志），
- * 同进程时 {@link CancellationRegistry#onCancel} 的监听者还会当场触发
- * {@link #fire(String, String)}，属于"加速"，不改变以 Redis 为准的语义。
+ * 取消同样在事件边界被这里发现：每 {@value #TICK_MILLIS}ms 一次取消轮询。
+ * <b>这次 Redis 权威读在专用调度器上跑</b>（{@code aiCancelPoll}，线程治理·T-01）——
+ * 生产装配里判定节拍<b>只读内存快照</b>，不再在自己的线程上做同步 GET；
+ * 于是"Redis 慢而不挂"（每次 GET 最长 {@code spring.data.redis.timeout}）不会再拖住
+ * 首包/静默/段预算判定与其他轮的 5s 心跳。取消时效不变：同进程时
+ * {@link CancellationRegistry#onCancel} 的监听者当场触发 {@link #fire(String, String)}（"加速"），
+ * 跨进程上限仍是一个轮询节拍。测试/轻装配只给一个调度器时，取消读内联在节拍里（与旧实现一致）。
  */
 @Slf4j
 public class StreamWatchdog implements AutoCloseable {
 
-	/** 判定节拍（毫秒）：既是"事件边界轮询"的周期，也是静默判定的分辨率。 */
+	/** 判定节拍（毫秒）：静默/段预算判定的分辨率，也是取消轮询的周期（两者共用同一常量）。 */
 	public static final long TICK_MILLIS = 1000L;
 
 	private final String runId;
@@ -94,7 +98,27 @@ public class StreamWatchdog implements AutoCloseable {
 	private final ScheduledFuture<?> future;
 
 	/**
-	 * 建立时的本轮身份（看门狗节拍跑在 {@code aiStreamWatchdog} 调度线程上，那里没有请求身份）。
+	 * 取消轮询的<b>专用</b>调度器；{@code null} = 与判定节拍共用（测试/轻装配）。
+	 *
+	 * <p>生产装配（{@code aiCancelPoll}）下 1Hz 的 Redis 取消读跑在这里，判定节拍只读
+	 * {@link #lastCancelState}（T-01）；两者共用时没有第二条时间线，取消读内联在节拍里。
+	 */
+	private final ScheduledExecutorService cancelPollScheduler;
+
+	/** 取消轮询的周期任务（仅独立调度器时存在；{@link #close()} 一并取消）。 */
+	private final ScheduledFuture<?> cancelPollFuture;
+
+	/**
+	 * 最近一次取消轮询看到的权威态（只由取消轮询线程写）。
+	 *
+	 * <p>初值 {@code UNKNOWN}：首拍之前判定节拍按"未取消 + 计数继续"处理（C2），
+	 * 不把"还没读"伪装成"未取消"以外的任何结论。
+	 */
+	private final AtomicReference<CancellationRegistry.CancelState> lastCancelState =
+			new AtomicReference<>(CancellationRegistry.CancelState.UNKNOWN);
+
+	/**
+	 * 建立时的本轮身份（看门狗节拍与取消轮询都跑在调度线程上，那里没有请求身份）。
 	 *
 	 * <p>{@code null} = 建立时就没有身份（旧轮次/轻装配面）—— 节拍照常工作，只是不建立作用域；
 	 * 任何需要身份的下游读取仍按 fail-closed 处理。
@@ -104,19 +128,35 @@ public class StreamWatchdog implements AutoCloseable {
 	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, AiProperties.Resilience config,
 			ToolActivityBeacon beacon, CancellationRegistry cancellations, long segmentStartedAtMs,
 			Consumer<StreamViolationException> onViolation) {
+		this(runId, scheduler, null, config, beacon, cancellations, segmentStartedAtMs, onViolation);
+	}
+
+	/**
+	 * @param cancelPollScheduler 取消轮询的专用调度器；{@code null} 或与 {@code scheduler} 相同 ⇒
+	 *        取消读内联在判定节拍里（测试/轻装配，行为与旧实现一致）
+	 */
+	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, ScheduledExecutorService cancelPollScheduler,
+			AiProperties.Resilience config, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			long segmentStartedAtMs, Consumer<StreamViolationException> onViolation) {
 		this.runId = runId;
 		this.config = config;
 		this.beacon = beacon;
 		this.cancellations = cancellations;
 		this.segmentSeedAtMs = segmentStartedAtMs;
 		this.onViolation = onViolation;
+		// 同一调度器时不另排 1Hz 任务：否则测试/轻装配会多一条时间线，且与"内联读"等价
+		this.cancelPollScheduler = (cancelPollScheduler == null || cancelPollScheduler == scheduler)
+				? null : cancelPollScheduler;
 		// 身份在建立看门狗时（驱动线程）抓取，节拍线程回放 —— 调度器本身不做传播
 		this.identity = RequestContextUtils.currentOrNull();
 		this.lastUpstreamAtMs.set(segmentStartedAtMs);
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
 		this.cancelListener = cancellations.onCancel(runId, () -> fire(StreamViolationException.CANCELLED,
-				"本轮对话已被取消（取消标志已置位），上游连接随即断开）"));
+				"turn cancelled (cancel flag set); upstream connection closed immediately"));
 		this.future = scheduler.scheduleAtFixedRate(this::tick, TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
+		this.cancelPollFuture = this.cancelPollScheduler == null ? null
+				: this.cancelPollScheduler.scheduleAtFixedRate(this::cancelTick, TICK_MILLIS, TICK_MILLIS,
+						TimeUnit.MILLISECONDS);
 	}
 
 	/** 绑定本次尝试的订阅，便于判定成立时立刻断开上游。 */
@@ -154,7 +194,7 @@ public class StreamWatchdog implements AutoCloseable {
 			tickOnce();
 		}
 		catch (Exception ex) {
-			log.debug("看门狗节拍异常 runId={}：{}", this.runId, ex.getMessage());
+			log.debug("watchdog identity scope failed runId={}: {}", this.runId, ex.getMessage());
 		}
 	}
 
@@ -166,11 +206,14 @@ public class StreamWatchdog implements AutoCloseable {
 				return;
 			}
 			// ① 取消（Redis 为准；同进程时监听者可能已提前触发，CAS 保证只生效一次）
+			// 独立取消调度器（生产，T-01）：节拍只读内存快照，不在判定线程上做同步 Redis GET；
+			// 同一调度器（测试/轻装配）：没有第二条时间线，内联读。
 			// C2：UNKNOWN（Redis 读失败/退避）在看门狗里按"未取消 + 计数继续" —— 看门狗没有不可逆动作，
 			// 不能让一次读抖动静默停摆段预算/首包/静默判据；A5 计数已由 CancellationRegistry 落。
-			CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(this.runId);
+			CancellationRegistry.CancelState cancelState = this.cancelPollScheduler != null
+					? this.lastCancelState.get() : this.cancellations.cancelState(this.runId);
 			if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
-				fire(StreamViolationException.CANCELLED, "本轮对话已被取消（取消标志已置位）");
+				fire(StreamViolationException.CANCELLED, "turn cancelled (cancel flag set)");
 				return;
 			}
 			// ② 段预算（决策看板 :14「段级预算重置式」）：判据 = 当前段起点，不跨段累计。
@@ -185,9 +228,9 @@ public class StreamWatchdog implements AutoCloseable {
 				}
 				long segmentElapsedMs = now - segmentStart;
 				if (segmentElapsedMs >= this.config.getTotalBudget().toMillis()) {
-					fire(StreamViolationException.TOTAL_BUDGET, "本段预算 " + this.config.getTotalBudget()
-							+ " 已耗尽（app.ai.resilience.total-budget，段级；本段已用 " + segmentElapsedMs
-							+ "ms，本轮累计人工等待 " + this.beacon.gateWaitMs(this.runId) + "ms 不计入）");
+					fire(StreamViolationException.TOTAL_BUDGET, "segment budget " + this.config.getTotalBudget()
+							+ " exhausted (app.ai.resilience.total-budget, segment-level; used " + segmentElapsedMs
+							+ "ms, manual in-turn wait " + this.beacon.gateWaitMs(this.runId) + "ms not counted)");
 					return;
 				}
 			}
@@ -199,18 +242,18 @@ public class StreamWatchdog implements AutoCloseable {
 			long silenceMs = now - anchor;
 			if (this.upstreamEvents.get() == 0) {
 				if (silenceMs > this.config.getFirstByteTimeout().toMillis()) {
-					fire(StreamViolationException.FIRST_BYTE_TIMEOUT, "上游 " + silenceMs + "ms 内未给出首包（阈值 "
-							+ this.config.getFirstByteTimeout() + "）");
+					fire(StreamViolationException.FIRST_BYTE_TIMEOUT, "upstream silent " + silenceMs + "ms before first packet (threshold "
+							+ this.config.getFirstByteTimeout() + ")");
 				}
 				return;
 			}
 			if (silenceMs > this.config.getInterEventTimeout().toMillis()) {
-				fire(StreamViolationException.SILENT_TIMEOUT, "上游事件间静默 " + silenceMs + "ms（阈值 "
-						+ this.config.getInterEventTimeout() + "）");
+				fire(StreamViolationException.SILENT_TIMEOUT, "upstream inter-event silence " + silenceMs + "ms (threshold "
+						+ this.config.getInterEventTimeout() + ")");
 			}
 		}
 		catch (Exception ex) {
-			log.debug("看门狗节拍异常 runId={}：{}", this.runId, ex.getMessage());
+			log.debug("watchdog tick failed runId={}: {}", this.runId, ex.getMessage());
 		}
 	}
 
@@ -225,12 +268,37 @@ public class StreamWatchdog implements AutoCloseable {
 		return nowMs - (start <= 0L ? this.segmentSeedAtMs : start);
 	}
 
+	/**
+	 * 取消轮询（独立调度器上的 1Hz 任务，线程治理·T-01）。
+	 *
+	 * <p>这条任务存在的唯一理由：把一次<b>同步 Redis GET</b> 从判定线程挪走。读到
+	 * {@code CANCELLED} 当拍就 {@link #fire(String, String)}（不必再等下一拍判定）——
+	 * 跨进程取消的时效与旧实现同为 ≤1 个 {@link #TICK_MILLIS}。
+	 * {@code UNKNOWN} 只更新快照：读抖动不触发任何不可逆动作（C2），段预算/静默判据照常推进。
+	 */
+	private void cancelTick() {
+		// 与判定节拍同一份身份：调度线程没有请求身份，按建立时的本轮身份重建作用域
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
+			if (this.fired.get()) {
+				return;
+			}
+			CancellationRegistry.CancelState state = this.cancellations.cancelState(this.runId);
+			this.lastCancelState.set(state);
+			if (state == CancellationRegistry.CancelState.CANCELLED) {
+				fire(StreamViolationException.CANCELLED, "turn cancelled (cancel flag set)");
+			}
+		}
+		catch (Exception ex) {
+			log.debug("watchdog cancel poll failed runId={}: {}", this.runId, ex.getMessage());
+		}
+	}
+
 	private void fire(String code, String message) {
 		if (!this.fired.compareAndSet(false, true)) {
 			return;
 		}
 		this.firedCode.set(code);
-		log.warn("本轮流判定为终止 runId={} code={} 已收上游事件={} 节拍={}：{}", this.runId, code,
+		log.warn("turn judged terminal runId={} code={} upstreamEvents={} ticks={}: {}", this.runId, code,
 				this.upstreamEvents.get(), this.ticks.get(), message);
 		Disposable current = this.subscription.get();
 		if (current != null && !current.isDisposed()) {
@@ -238,7 +306,7 @@ public class StreamWatchdog implements AutoCloseable {
 				current.dispose();
 			}
 			catch (Exception ex) {
-				log.debug("断开上游订阅失败 runId={}：{}", this.runId, ex.getMessage());
+				log.debug("upstream subscription dispose failed runId={}: {}", this.runId, ex.getMessage());
 			}
 		}
 		this.onViolation.accept(new StreamViolationException(code, message));
@@ -247,11 +315,14 @@ public class StreamWatchdog implements AutoCloseable {
 	@Override
 	public void close() {
 		this.future.cancel(false);
+		if (this.cancelPollFuture != null) {
+			this.cancelPollFuture.cancel(false);
+		}
 		try {
 			this.cancelListener.close();
 		}
 		catch (Exception ex) {
-			log.debug("注销取消监听者失败 runId={}：{}", this.runId, ex.getMessage());
+			log.debug("cancel listener deregistration failed runId={}: {}", this.runId, ex.getMessage());
 		}
 	}
 

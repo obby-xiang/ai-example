@@ -82,7 +82,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         }
         catch (Exception ex) {
             // 种子失败绝不能让应用起不来：表空 + 无种子 = /health 503（与今天无 key 等价）
-            log.warn("AI 配置种子未完成（不影响启动，AI 端点按可用性判定降级）：{}", ex.getMessage(), ex);
+            log.warn("AI config seeding incomplete (startup unaffected, AI endpoints degrade by availability) error={}", ex.getMessage(), ex);
         }
     }
 
@@ -96,16 +96,16 @@ public class AiConfigSeeder implements ApplicationRunner {
         boolean force = this.properties.getConfig().isSeedForce();
         long existing = this.providerRepository.count();
         if (existing > 0 && !force) {
-            log.debug("AI 配置种子跳过：ai_provider 已有 {} 行（strict seed：env 不参与）", existing);
+            log.debug("AI config seeding skipped: ai_provider already has {} rows (strict seed: env not applied)", existing);
             return false;
         }
         if (!StringUtils.hasText(envKey)) {
             if (existing == 0) {
-                log.info("AI 配置种子跳过：ai_provider 为空且未配置 AI_API_KEY/DEEPSEEK_API_KEY"
-                        + "（/health 将按 503 AI_UNAVAILABLE 降级）");
+                log.info("AI config seeding skipped: ai_provider empty and no AI_API_KEY/DEEPSEEK_API_KEY configured"
+                        + " (/health degrades to 503 AI_UNAVAILABLE)");
             }
             else {
-                log.info("AI 配置种子跳过：未配置 env key（seed-force 也只重灌已有 ENV_SEED 行）");
+                log.info("AI config seeding skipped: no env key configured (seed-force only re-seeds existing ENV_SEED rows)");
             }
             return false;
         }
@@ -120,13 +120,13 @@ public class AiConfigSeeder implements ApplicationRunner {
             // 数据行与 config.version 已在同一事务里落库；提交之后才发布跨实例信号 + 本实例重载
             // （与写路径 AiConfigWriter 同一口径：种子/人工保存必须让别的实例看得见）。
             this.versions.publishAfterCommit();
-            log.info("AI 配置种子已写入：provider={} key_ref=ENV（env key 不落库）", AiConfigService.ENV_PROVIDER_CODE);
+            log.info("AI config seeded: provider={} key_ref=ENV (env key not persisted)", AiConfigService.ENV_PROVIDER_CODE);
             return true;
         }
         catch (DataIntegrityViolationException | org.hibernate.exception.ConstraintViolationException ex) {
             // 唯一约束兜底：另一实例在同一瞬间种好了。重载快照让对方写的那行生效
             // （对方的版本发布（DB +1 / INCR ai:cfg:ver）在它提交之后才发生，本实例的 1s 版本比对会补上）。
-            log.info("AI 配置种子并发冲突（另一实例已写入，本次不写）：{}", ex.getClass().getSimpleName());
+            log.info("AI config seeding raced with another instance (already written, nothing to do) error={}", ex.getClass().getSimpleName());
             this.configService.reload();
             return false;
         }
@@ -154,13 +154,13 @@ public class AiConfigSeeder implements ApplicationRunner {
             provider = existing.get();
             if (!AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {
                 // 用户在 UI 改过这一行 ⇒ 不碰（seed-force 也只重灌"来源=ENV_SEED"的行）
-                log.info("AI 配置种子跳过重灌：provider={} 的来源是 {}（非 ENV_SEED）",
+                log.info("AI config re-seed skipped: provider={} source={} (not ENV_SEED)",
                         provider.getCode(), provider.getSource());
                 return false;
             }
             if (!force && seedAlreadyLanded(provider)) {
                 // 并发交错："count 检查之后别人才种好"。值完全一致 ⇒ 真 no-op，不制造版本抖动。
-                log.debug("AI 配置种子跳过：provider={} 与 env 一致且模型行齐备（另一实例已种好）",
+                log.debug("AI config seeding skipped: provider={} matches env and model rows complete (seeded by another instance)",
                         provider.getCode());
                 return false;
             }
@@ -169,7 +169,7 @@ public class AiConfigSeeder implements ApplicationRunner {
             provider.setCompletionsPath(this.configService.resolveEnvCompletionsPath());
             provider.setKeyLast4(AiKeyCipher.last4(this.configService.envApiKey()));
             provider = this.providerRepository.saveAndFlush(provider);
-            log.info("AI 配置种子重灌 provider={}（force={}：env 与库不一致时才需要这一步）",
+            log.info("AI config re-seeded provider={} (force={}; needed only when env and DB diverge)",
                     provider.getCode(), force);
         }
         else {

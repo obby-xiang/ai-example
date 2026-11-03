@@ -50,16 +50,16 @@ public class DataSeedRunner implements ApplicationRunner {
         this.seedStatus.markRunning(SeedStatus.Seed.BASE);
         this.seedLock.lock(SeedLock.SEED_LOCK);
         if (regionRepository.count() > 0) {
-            log.info("Seed data already exists, skipping");
-            markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.SKIPPED, "regions 已有数据（他实例已播种）");
+            log.info("Base seed skipped, regions already populated");
+            markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.SKIPPED, "regions already populated (seeded by another instance)");
             return;
         }
-        log.info("Seeding initial data...");
+        log.info("Base seed started");
         seedRegions();
         seedProjects();
         seedDefinitions();
-        markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.DONE, "首次播种完成");
-        log.info("Seed data complete");
+        markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.DONE, "initial seed completed");
+        log.info("Base seed completed");
     }
 
     /** 把种子终态挂到当前事务的提交点（无事务时立即落）。 */
@@ -77,7 +77,7 @@ public class DataSeedRunner implements ApplicationRunner {
             @Override
             public void afterCompletion(int status) {
                 if (status != STATUS_COMMITTED) {
-                    seedStatus.markFailed(seed, new IllegalStateException("播种事务回滚（status=" + status + "）"));
+                    seedStatus.markFailed(seed, new IllegalStateException("Seed transaction rolled back (status=" + status + ")"));
                 }
             }
         });
@@ -248,8 +248,6 @@ public class DataSeedRunner implements ApplicationRunner {
             }
             dataService.batchSave("PROJ_PRICE","PROJECT",projCode,priceRows,List.of("skuCode","projectCode"));
         }
-
-        log.info("Definitions and seed data created successfully");
     }
 
     // Helper builders

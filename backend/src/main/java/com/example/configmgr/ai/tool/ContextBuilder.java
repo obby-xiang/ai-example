@@ -462,7 +462,7 @@ public class ContextBuilder {
             return this.objectMapper.writeValueAsString(value);
         }
         catch (Exception ex) {
-            log.debug("extra 值序列化失败，退化为文本：{}", ex.getMessage());
+            log.debug("could not serialize extra value; falling back to text error={}", ex.getMessage());
             return String.valueOf(value);
         }
     }

@@ -226,7 +226,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public void add(String conversationId, List<Message> messages) {
-			if (denied("写", conversationId)) {
+			if (denied("write", conversationId)) {
 				return;
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
@@ -240,7 +240,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public List<Message> get(String conversationId) {
-			if (denied("读", conversationId)) {
+			if (denied("read", conversationId)) {
 				return List.of();
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
@@ -250,7 +250,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public void clear(String conversationId) {
-			if (denied("清空", conversationId)) {
+			if (denied("clear", conversationId)) {
 				return;
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
@@ -262,7 +262,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 			if (this.identity != null) {
 				return false;
 			}
-			log.warn("本轮没有可绑定的租户/用户身份，拒绝{}记忆 conversationId={}（失败关闭：不写不读无归属 legacy 命名空间）",
+			log.warn("no tenant/user identity bound for this turn, denying {} memory conversationId={} (fail-closed: no read/write on unowned legacy namespace)",
 					action, conversationId);
 			return true;
 		}

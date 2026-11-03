@@ -4,20 +4,27 @@
  * 瘦身（本批口径）：任务中心的条件自刷（hasActiveJob 4s / 30s 双速）随 M1 整体摘除后，
  * 控制器的**双速语义全部失去消费者** ⇒ 删除 `shouldRun` 谓词 / `desiredIntervalMs` 变节奏 /
  * `resync`（F2 冷进入升级）/ `isPaused`（hidden 停表状态无读取方）；`CATCHUP_JITTER_MS` 改为
- * 内部常量、不再导出（**不可删**：仍是回可见错峰补刷的唯一取值来源，见 `:26` 定义 / 使用点）。
+ * 内部常量、不再导出（**不可删**：仍是回可见错峰补刷的唯一取值来源，见 `:33` 定义 / `:178` 使用点）。
  *
  * 保留（现存两个消费方依赖）：
  * - **单节奏**：`intervalMs` + `run`，每次到点即跑；
  * - **可见性纪律**：内部挂 `document` 的 `visibilitychange`——
  *   `hidden` → **停表**（清 interval；**不取消在途 run 的 promise**，在途请求照常落地）；
  *   `visible` → 先按 0~250ms 随机错峰延时补刷一次（**错峰作用于补刷本身**：多轮询点同时苏醒
- *   时请求被 250ms 窗口打散，不出现同一毫秒齐射），补刷落地后再重置 interval；
+ *   时请求被 250ms 窗口打散，不出现同一毫秒齐射），补刷落地后再重置 interval
+ *   （**停用态除外**：只补这一次，不起表）；
  *   **不补偿 hidden 期间错过的 tick**：后台错过的那些不发，回可见只补 1 次（避免"补账雪崩"）；
+ * - **补刷作废（catchup invalidation）**：待办的可见补刷（`catchupTimer`）在再次 `hidden`
+ *   （`pause`）、`suspendTimers`、`stop`、以及新的 `resume` 重排时一律 `clearTimeout` **作废**
+ *   —— 状态切换后不会迟到触发，也不补账（作废掉的那 1 次不追加到后续任何节奏）；
  * - `stop/dispose`：幂等，卸载 visibilitychange 监听与作废待办；
  * - `refreshNow`（job-watch 的 SSE 帧 / onopen / JOB_DONE 即时刷新用）：立即跑一次 +
- *   **重置 interval 起点**（防"补刷 + 原 tick"同刻双发）；撞在途守卫记 dirty flag，在途结束后
- *   **补发恰好 1 次**（多次合并 1 次）——被挡掉的刷新没有静默丢弃路径；
- * - `setIntervals`（job-watch 通道降级 3s ⇄ 慢档用）：运行时换节奏，切换即重排表、起点重置。
+ *   **有表在武装时**重置 interval 起点（防"补刷 + 原 tick"同刻双发）；撞在途守卫记 dirty flag，
+ *   在途结束后**补发恰好 1 次**（多次合并 1 次）——被挡掉的刷新没有静默丢弃路径；
+ * - `setIntervals`（运行时换节奏）：切换即重排表、起点重置；
+ * - `suspendTimers/resumeTimers`（job-watch 的 realtime ⇄ polling 用）：真停表 —— 停用期
+ *   **不持有任何 interval**（不是拿 2^31−1 级的长延时"模拟停表"），`refreshNow` 仍即时落地，
+ *   恢复期按当前节奏重新武装。
  *
  * 现存消费方：作业跟踪兜底轮询（`utils/job-watch.ts`）。
  */
@@ -37,10 +44,14 @@ export interface PollingController {
   start(): void
   /** 停表（幂等：重复调用不抛错），同时卸载 visibilitychange 监听与作废待办。 */
   stop(): void
-  /** 立即跑一次 + 重置 interval 起点；撞在途守卫则记 dirty flag 收尾补发。 */
+  /** 立即跑一次 + 重置 interval 起点（仅在有表武装时）；撞在途守卫则记 dirty flag 收尾补发。 */
   refreshNow(): void
-  /** 运行时切换节奏（job-watch 通道降级）；切换即重排表、起点重置。 */
+  /** 运行时切换节奏；切换即重排表、起点重置。 */
   setIntervals(next: { intervalMs: number }): void
+  /** 停用周期表（事件驱动态）：清表、不装任何长延时"假停表" interval；待办的可见补刷作废（不跨停用态存活）；`refreshNow` 仍即时落地。 */
+  suspendTimers(): void
+  /** 恢复周期表（降级回轮询）：按当前节奏重新武装；清掉旧补刷待办（作废不补账），停用期不推进 tick。 */
+  resumeTimers(): void
 }
 
 export function createPollingController(options: PollingControllerOptions): PollingController {
@@ -52,6 +63,8 @@ export function createPollingController(options: PollingControllerOptions): Poll
   let catchupTimer: ReturnType<typeof setTimeout> | null = null
   let started = false
   let paused = false
+  /** 停用周期表（事件驱动态，job-watch realtime）：true = 不持有任何 interval（非"长延时假停表"）。 */
+  let suspended = false
   /** run 在途（`run` 返回 promise 时以它为准；同步 `run` 视为立即结束）。 */
   let running = false
   /** dirty flag：被在途守卫挡掉的刷新（不丢弃、收尾补发恰好 1 次、多次合并 1 次）。 */
@@ -139,7 +152,7 @@ export function createPollingController(options: PollingControllerOptions): Poll
   }
 
   function onTick(): void {
-    if (!started || paused) {
+    if (!started || paused || suspended) {
       return
     }
     if (intervalMs !== armedMs) {
@@ -169,7 +182,10 @@ export function createPollingController(options: PollingControllerOptions): Poll
         return
       }
       invoke()
-      arm(intervalMs)
+      // 停用期（事件驱动）只做这一次可见补刷，不起表 —— 不留下任何周期定时器。
+      if (!suspended) {
+        arm(intervalMs)
+      }
     }, jitterMs)
   }
 
@@ -211,6 +227,7 @@ export function createPollingController(options: PollingControllerOptions): Poll
       }
       started = true
       paused = false
+      suspended = false
       bindVisibility()
       if (isHidden()) {
         paused = true // 开局就不可见：直接停表，回可见时按错峰补刷一次
@@ -223,6 +240,7 @@ export function createPollingController(options: PollingControllerOptions): Poll
       // 幂等：表/监听器已清则空操作，重复 stop 不抛错
       started = false
       paused = false
+      suspended = false
       dirty = false // 停表即作废待办：控制器已收摊，补发没有意义
       clearTimer()
       clearCatchup()
@@ -230,8 +248,9 @@ export function createPollingController(options: PollingControllerOptions): Poll
     },
 
     refreshNow(): void {
-      // 刷新时刻重新起表（起点重置），防"补刷 + 原 tick"同刻双发。
-      if (started && !paused) {
+      // 只在"有表在武装"时重建（起点重置），防"补刷 + 原 tick"同刻双发；
+      // 停用/未起表/停表期一律不重建 —— 事件高频时 clearInterval + setInterval 是无意义抖动。
+      if (started && !paused && !suspended) {
         arm(intervalMs)
       }
       // 立即跑一次；撞在途守卫则由 dirty flag 收尾补发。
@@ -240,8 +259,25 @@ export function createPollingController(options: PollingControllerOptions): Poll
 
     setIntervals(next): void {
       intervalMs = next.intervalMs
-      if (started && !paused) {
+      if (started && !paused && !suspended) {
         arm(intervalMs) // 切换即重排表（起点重置，不同 tick 双发）
+      }
+    },
+
+    suspendTimers(): void {
+      suspended = true
+      clearTimer() // 真停表：不装 2^31−1 级长延时 interval
+      clearCatchup() // 待办的可见补刷作废：停用期没有"补刷落地后再起表"的收尾
+    },
+
+    resumeTimers(): void {
+      if (!suspended) {
+        return // 幂等：已处于周期态时不重建表（起点不被无意义重置）
+      }
+      suspended = false
+      clearCatchup()
+      if (started && !paused) {
+        arm(intervalMs)
       }
     }
   }

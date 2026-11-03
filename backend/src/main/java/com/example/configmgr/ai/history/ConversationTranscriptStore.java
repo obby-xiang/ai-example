@@ -199,7 +199,7 @@ public class ConversationTranscriptStore {
 	/** 追加条目（显式身份；run 快照的 tenantId/userId）。 */
 	public boolean append(String sessionId, long tenantId, long userId, List<TranscriptEntry> entries) {
 		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
-			log.debug("transcript 写入跳过：缺少可用身份 sessionId={}（不落 legacy 命名空间）", sessionId);
+			log.debug("transcript append skipped: no usable identity sessionId={} (legacy namespace not used)", sessionId);
 			return false;
 		}
 		List<TranscriptEntry> filtered = filter(entries);
@@ -215,7 +215,7 @@ public class ConversationTranscriptStore {
 			return appendWithBounds(sessionId, tenantId, userId, payloads);
 		}
 		catch (RuntimeException ex) {
-			log.warn("transcript 写入失败 sessionId={}：{}（展示历史不影响本轮对话）", sessionId, ex.getMessage());
+			log.warn("transcript append failed sessionId={} error={} (display history does not affect this turn)", sessionId, ex.getMessage());
 			return false;
 		}
 	}
@@ -291,7 +291,7 @@ public class ConversationTranscriptStore {
 			touch(key, ready, truncatedKey(sessionId, tenantId, userId));
 		}
 		catch (RuntimeException ex) {
-			log.warn("transcript baseline 复制失败 sessionId={}：{}（不回写、不阻断本轮）", sessionId, ex.getMessage());
+			log.warn("transcript baseline copy failed sessionId={} error={} (no write-back, turn not blocked)", sessionId, ex.getMessage());
 		}
 	}
 
@@ -348,7 +348,7 @@ public class ConversationTranscriptStore {
 		if (this.ttl == null || this.ttl.isZero() || this.ttl.isNegative()) {
 			// 无 TTL 的展示历史正是本批要消除的永久键：配置缺失时拒写（展示面降级，不制造永久键）。
 			// 返回值必须如实为 false —— 否则调用方会把"没写"当成"已落盘"。
-			log.warn("transcript 写入跳过：app.ai.session-ttl 未配置 sessionId={}", sessionId);
+			log.warn("transcript append skipped: app.ai.session-ttl not configured sessionId={}", sessionId);
 			return false;
 		}
 		long added = 0L;
@@ -382,7 +382,7 @@ public class ConversationTranscriptStore {
 			this.redis.expire(truncated, this.ttl);
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript TTL 续期失败 key={}：{}", dataKey, ex.getMessage());
+			log.debug("transcript TTL refresh failed key={} error={}", dataKey, ex.getMessage());
 		}
 	}
 
@@ -400,7 +400,7 @@ public class ConversationTranscriptStore {
 			return this.mapper.readValue(payload, TranscriptEntry.class);
 		}
 		catch (Exception ex) {
-			log.warn("transcript 条目解析失败（跳过） sessionId={}：{}", sessionId, ex.getMessage());
+			log.warn("transcript entry parse failed (skipped) sessionId={} error={}", sessionId, ex.getMessage());
 			return null;
 		}
 	}

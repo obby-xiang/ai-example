@@ -257,7 +257,7 @@ export function applyColumnsToSheet(gs: SpreadSheets, sheet: SpreadWorksheet, fi
           columnCell.validator(validator)
         }
       } catch (error) {
-        console.warn('[excel] 校验器创建失败，字段：' + field.code, error)
+        console.warn('[excel] validator creation failed for field: ' + field.code, error)
       }
     })
 
@@ -275,12 +275,12 @@ export function applyColumnsToSheet(gs: SpreadSheets, sheet: SpreadWorksheet, fi
     try {
       sheet.frozenRowCount(1)
     } catch (error) {
-      console.warn('[excel] 冻结首行失败', error)
+      console.warn('[excel] freeze first row failed', error)
     }
     try {
       sheet.options.selectionBackColor = 'rgba(64,158,255,0.2)'
     } catch (error) {
-      console.warn('[excel] 选区颜色设置失败', error)
+      console.warn('[excel] selection color setup failed', error)
     }
   } finally {
     sheet.resumePaint()

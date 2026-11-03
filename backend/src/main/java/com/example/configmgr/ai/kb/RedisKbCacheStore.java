@@ -157,7 +157,7 @@ public class RedisKbCacheStore implements KbCacheStore {
 
     private static KbCacheException failure(String action, String key, RuntimeException cause) {
         // 只报动作与键族（键名不含凭据/内容）；不含异常堆栈给模型可见面
-        log.debug("{}：key={} err={}", action, key, cause.getClass().getSimpleName());
+        log.debug("KB cache operation failed: key={} cause={}", key, cause.getClass().getSimpleName());
         return new KbCacheException(action + "（key=" + key + "）：" + cause.getClass().getSimpleName(), cause);
     }
 }

@@ -92,7 +92,7 @@ public class AiConfigVersionPublisher {
                 this.redis.opsForValue().increment(AiConfigService.REDIS_VERSION_KEY);
             }
             catch (Exception ex) {
-                log.warn("INCR {} 失败（Redis 不可用）：本实例已 reload，其他实例要等 DB 版本比对兜底 —— {}",
+                log.warn("INCR {} failed (Redis unavailable): this instance reloaded, other instances fall back to DB version compare error={}",
                         AiConfigService.REDIS_VERSION_KEY, ex.getMessage());
             }
         }
