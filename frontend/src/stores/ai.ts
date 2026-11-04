@@ -3206,7 +3206,8 @@ function orderedHistoryParts(item: AiHistoryMessage, fallback: MessagePart[]): M
   const parts: MessagePart[] = []
   let previousSeq = -Infinity
   for (const segment of item.segments) {
-    if (!segment || !Number.isSafeInteger(segment.seq) || segment.seq <= previousSeq) {
+    // 同一条 suspended 帧可携带多个工具段，因此 seq 允许相等，只拒绝倒序。
+    if (!segment || !Number.isSafeInteger(segment.seq) || segment.seq < previousSeq) {
       return null
     }
     previousSeq = segment.seq

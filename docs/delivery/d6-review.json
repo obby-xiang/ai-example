@@ -427,6 +427,13 @@
       "reason": "本批仅消费当前history协议已有的CANCELLED结局并恢复停止标记，不改变D6迁移接口、存储结构或跨实例契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:17d72582dce780f3ea6d65f3f0df47ca04ba51deb5f8945fecb06152aad9f38b",
+      "status": "not-affected",
+      "reason": "本批仅允许同一历史帧内多个工具段共享seq并继续拒绝倒序和重复工具ID，不改变D6段序协议或迁移接口",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
