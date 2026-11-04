@@ -57,6 +57,7 @@ def request_rows(result: Dict[str, object]) -> List[Dict[str, object]]:
             "ok": row.get("ok"),
             "accepted": row.get("accepted"),
             "failure_kind": row.get("failure_kind"),
+            "budget_error": row.get("budget_error"),
             "duration_ms": row.get("duration_ms"),
             "complete": business.get("complete"),
             "found": business.get("found"),
@@ -208,7 +209,7 @@ def write_all(cfg: Config, workspace: Dict[str, Path], measure_result: Optional[
         _write_csv(
             workspace["requests_csv"],
             ["scenario", "copy", "round", "warmup", "operation", "status", "ok", "accepted",
-             "failure_kind", "duration_ms",
+             "failure_kind", "budget_error", "duration_ms",
              "complete", "found", "aborted", "phase", "deferred_count", "error_count",
              "warning_count", "transport_error", "server_timing"],
             combined["requests"],

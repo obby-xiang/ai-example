@@ -129,9 +129,11 @@ class Config:
     user_id: int = 101
     tenant_header: str = "X-Tenant-Id"
     user_header: str = "X-User-Id"
-    http_timeout: float = 300.0
+    http_timeout: float = 30.0
     http_verify_tls: bool = True
     user_agent: str = "ai-redis-perf/1.0"
+    measure_scenario_timeout: float = 60.0
+    measure_total_timeout: float = 300.0
 
     namespace: str = ""
     profile: str = "smoke"
@@ -223,6 +225,8 @@ class Config:
                 "headers": [self.tenant_header, self.user_header],
                 "http_timeout": self.http_timeout,
                 "http_verify_tls": self.http_verify_tls,
+                "measure_scenario_timeout": self.measure_scenario_timeout,
+                "measure_total_timeout": self.measure_total_timeout,
             },
             "perf": {
                 "namespace": self.namespace,
@@ -302,9 +306,13 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     cfg.user_id = _int(source, "APP_USER_ID", 101, errors, 1)
     cfg.tenant_header = _get(source, "APP_TENANT_HEADER", "X-Tenant-Id")
     cfg.user_header = _get(source, "APP_USER_HEADER", "X-User-Id")
-    cfg.http_timeout = _float(source, "APP_HTTP_TIMEOUT_SECONDS", 300.0, errors, 1.0)
+    cfg.http_timeout = _float(source, "APP_HTTP_TIMEOUT_SECONDS", 30.0, errors, 1.0)
     cfg.http_verify_tls = _bool(source, "APP_HTTP_VERIFY_TLS", True, errors)
     cfg.user_agent = _get(source, "PERF_USER_AGENT", "ai-redis-perf/1.0")
+    cfg.measure_scenario_timeout = _float(
+        source, "PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS", 60.0, errors, 0.0)
+    cfg.measure_total_timeout = _float(
+        source, "PERF_MEASURE_TOTAL_TIMEOUT_SECONDS", 300.0, errors, 0.0)
 
     cfg.namespace = _get(source, "PERF_NAMESPACE", "")
     if cfg.namespace and not NAMESPACE_PATTERN.match(cfg.namespace):

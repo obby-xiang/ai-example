@@ -245,11 +245,11 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
     else:
         ops.rpush_values(run_keys["ledger"], [json.dumps({"name": "list_tasks", "outcome": "ok", "atMs": now_ms})], ttl)
 
-    entries = _frame_entries(frame_count, terminal, gap, terminal_type)
-    if entries:
-        written = ops.xadd_frames(run_keys["xevents"], entries, ttl)
-        if written < len(entries):
-            raise RuntimeError("Stream 归档不完整 runId=%s written=%d/%d" % (run_id, written, len(entries)))
+    if frame_entries:
+        written = ops.xadd_frames(run_keys["xevents"], frame_entries, ttl)
+        if written < len(frame_entries):
+            raise RuntimeError("Stream 归档不完整 runId=%s written=%d/%d"
+                               % (run_id, written, len(frame_entries)))
 
     ops.set_values([
         (K.beat_key(run_id, t, u), str(now_ms), ttl),
@@ -258,14 +258,24 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
     if status == "CANCELLED":
         ops.set_values([(K.cancel_key(run_id, t, u), "CANCELLED", ttl)])
 
+    generated = {"run", "runstate", "seq", "fence", "lease_epoch", "ledger"}
+    if bool(spec.get("lease_held")):
+        generated.add("lease")
+    if pendings:
+        generated.update(("pending", "claim", "idem", "req", "decided"))
+    if frame_entries:
+        generated.add("xevents")
+
     ok, slots = K.slot_check(list(run_keys.values()))
     return {
         "run_id": run_id,
         "status": status,
         "pending": pending_count,
+        "lease_held": bool(spec.get("lease_held")),
         "frames": {"count": frame_count, "terminal": terminal, "gap": gap, "terminalType": terminal_type},
         "slot_check": {"single_slot": ok, "slots": sorted(set(slots.values()))},
         "keys": run_keys,
+        "generated_keys": [name for name in K.RUN_KEYS_13 if name in generated],
     }
 
 

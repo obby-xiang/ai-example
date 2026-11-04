@@ -2,7 +2,8 @@
 
 The manifest is the tool's only durable description of generated data. It stores
 recipes and ids, never every key, so a 1,000,000-key background pool does not
-produce a giant file. Keys are always re-derived from ids + profiles.
+produce a giant file. Key strings are always re-derived from ids + profiles;
+each run also records the names (not the strings) of the keys it actually wrote.
 """
 
 from __future__ import annotations

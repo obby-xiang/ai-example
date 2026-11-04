@@ -12,6 +12,61 @@ from . import keys as K
 from . import manifest as M
 from .envcfg import Config
 
+ALWAYS_GENERATED_RUN_KEYS = ("run", "runstate", "seq", "fence", "lease_epoch", "ledger")
+PENDING_GENERATED_RUN_KEYS = ("pending", "claim", "idem", "req", "decided")
+
+
+def _int_or_none(value: object):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def run_generated_key_names(run: Dict[str, object]) -> Dict[str, object]:
+    """Key names a run copy actually wrote, plus names that cannot be decided.
+
+    New manifests list them in ``generated_keys``. Old manifests are derived
+    from the recorded shape (pending/frames/lease_held); a field that was never
+    recorded stays in ``unknown`` instead of being assumed absent or present.
+    """
+    raw = run.get("generated_keys")
+    if isinstance(raw, list):
+        wanted = {str(name) for name in raw}
+        return {
+            "names": [name for name in K.RUN_KEYS_13 if name in wanted],
+            "unknown": [],
+            "source": "manifest",
+        }
+
+    names = set(ALWAYS_GENERATED_RUN_KEYS)
+    unknown: List[str] = []
+    frames = run.get("frames")
+    frame_count = _int_or_none(frames.get("count")) if isinstance(frames, dict) else None
+    if frame_count is None:
+        unknown.append("xevents")
+    elif frame_count > 0:
+        names.add("xevents")
+
+    pending = _int_or_none(run.get("pending"))
+    if pending is None:
+        unknown.extend(PENDING_GENERATED_RUN_KEYS)
+    elif pending > 0:
+        names.update(PENDING_GENERATED_RUN_KEYS)
+
+    lease_held = run.get("lease_held")
+    if isinstance(lease_held, bool):
+        if lease_held:
+            names.add("lease")
+    else:
+        unknown.append("lease")
+
+    return {
+        "names": [name for name in K.RUN_KEYS_13 if name in names],
+        "unknown": unknown,
+        "source": "derived",
+    }
+
 
 def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[str, object]) -> Dict[str, object]:
     t = cfg.tenant_id
@@ -25,8 +80,19 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
             continue
         run_id = str(run.get("run_id"))
         keys13 = run.get("keys") if isinstance(run.get("keys"), dict) else K.run_keys_13(run_id, t, u)
+        generated = run_generated_key_names(run)
+        generated_keys: Dict[str, str] = {}
+        generated_unknown = list(generated["unknown"])
+        for name in generated["names"]:
+            if name in keys13:
+                generated_keys[name] = str(keys13[name])
+            else:
+                generated_unknown.append(name)
         runs[run_id] = {
             "keys13": dict(keys13),
+            "generated_keys": generated_keys,
+            "generated_unknown": generated_unknown,
+            "generated_source": generated["source"],
             "anchors": K.run_anchor_keys(run_id, t, u),
             "member": K.run_index_member(run_id, t, u),
             "status": str(run.get("status") or ""),

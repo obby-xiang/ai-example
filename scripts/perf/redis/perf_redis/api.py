@@ -51,23 +51,37 @@ class ApiClient:
     def _request(self, operation: str, method: str, path: str, *, with_identity: bool = True,
                  json_body: Optional[object] = None, params: Optional[Dict[str, object]] = None,
                  files: Optional[Dict[str, object]] = None, data: Optional[Dict[str, object]] = None,
-                 headers: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+                 headers: Optional[Dict[str, str]] = None,
+                 timeout: Optional[float] = None) -> Dict[str, object]:
         request_headers: Dict[str, str] = {}
         if with_identity:
             request_headers.update(self._identity_headers())
         if headers:
             request_headers.update(headers)
+        timeout_seconds: Optional[float] = None
+        if timeout is not None:
+            timeout_seconds = max(0.001, float(timeout))
         start = time.perf_counter()
         status: Optional[int] = None
         text = ""
         body: Optional[object] = None
         error = ""
+        timed_out = False
         response_headers: Dict[str, str] = {}
         try:
-            response = self._client.request(
-                method, path, headers=request_headers, json=json_body, params=params,
-                files=files, data=data,
-            )
+            kwargs: Dict[str, object] = {
+                "headers": request_headers,
+                "json": json_body,
+                "params": params,
+                "files": files,
+                "data": data,
+            }
+            if timeout_seconds is not None:
+                import httpx
+
+                kwargs["timeout"] = httpx.Timeout(
+                    timeout_seconds, connect=min(10.0, timeout_seconds))
+            response = self._client.request(method, path, **kwargs)
             status = int(response.status_code)
             text = response.text
             response_headers = {k.lower(): v for k, v in response.headers.items()}
@@ -81,6 +95,13 @@ class ApiClient:
                 body = None
         except Exception as exc:  # transport errors are measurement facts
             error = str(exc)
+            try:
+                import httpx
+
+                timed_out = isinstance(exc, httpx.TimeoutException)
+            except Exception:
+                lowered = error.lower()
+                timed_out = "timed out" in lowered or "timeout" in lowered
         duration_ms = (time.perf_counter() - start) * 1000.0
         ok = status is not None and 200 <= status < 300 and not error
         result: Dict[str, object] = {
@@ -91,6 +112,8 @@ class ApiClient:
             "ok": ok,
             "duration_ms": round(duration_ms, 3),
             "transport_error": error,
+            "timed_out": timed_out,
+            "request_timeout_s": timeout_seconds,
             "server_timing": response_headers.get("server-timing", ""),
             "content_type": response_headers.get("content-type", ""),
             "business": self._business(operation, body),
@@ -239,50 +262,60 @@ class ApiClient:
         return out
 
     # ------------------------------------------------------------------ APIs
+    # Measurement passes an explicit timeout so a single request can never
+    # outlive the scenario/total budget. Other callers keep the client default.
     def tenants(self) -> Dict[str, object]:
         return self._request("tenants", "GET", "/api/ai/tenants", with_identity=False)
 
-    def health(self) -> Dict[str, object]:
-        return self._request("health", "GET", "/api/ai/health", with_identity=False)
+    def health(self, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("health", "GET", "/api/ai/health", with_identity=False, timeout=timeout)
 
-    def delete_session(self, session_id: str, operation: str = "delete") -> Dict[str, object]:
-        return self._request(operation, "DELETE", "/api/ai/session/" + _quote(session_id))
+    def delete_session(self, session_id: str, operation: str = "delete",
+                       timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request(operation, "DELETE", "/api/ai/session/" + _quote(session_id),
+                             timeout=timeout)
 
-    def history(self, session_id: str, limit: int = 20) -> Dict[str, object]:
+    def history(self, session_id: str, limit: int = 20,
+                timeout: Optional[float] = None) -> Dict[str, object]:
         return self._request("history", "GET", "/api/ai/history/" + _quote(session_id),
-                             params={"offset": 0, "limit": limit})
+                             params={"offset": 0, "limit": limit}, timeout=timeout)
 
-    def context(self, session_id: str) -> Dict[str, object]:
-        return self._request("context", "GET", "/api/ai/context/" + _quote(session_id))
+    def context(self, session_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("context", "GET", "/api/ai/context/" + _quote(session_id),
+                             timeout=timeout)
 
-    def runs_current(self, session_id: str) -> Dict[str, object]:
+    def runs_current(self, session_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
         return self._request("runs_current", "GET", "/api/ai/runs/current",
-                             params={"sessionId": session_id})
+                             params={"sessionId": session_id}, timeout=timeout)
 
-    def runs_list(self) -> Dict[str, object]:
-        return self._request("runs_list", "GET", "/api/ai/runs")
+    def runs_list(self, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("runs_list", "GET", "/api/ai/runs", timeout=timeout)
 
-    def startup_resume(self) -> Dict[str, object]:
-        return self._request("startup_resume", "GET", "/api/ai/startup-resume")
+    def startup_resume(self, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("startup_resume", "GET", "/api/ai/startup-resume", timeout=timeout)
 
-    def run_detail(self, run_id: str) -> Dict[str, object]:
-        return self._request("run_detail", "GET", "/api/ai/runs/" + _quote(run_id))
+    def run_detail(self, run_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("run_detail", "GET", "/api/ai/runs/" + _quote(run_id),
+                             timeout=timeout)
 
-    def events_probe(self, run_id: str) -> Dict[str, object]:
+    def events_probe(self, run_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
         return self._request("events_probe", "GET", "/api/ai/events/" + _quote(run_id),
-                             params={"probe": 1}, headers={"Accept": "application/json"})
+                             params={"probe": 1}, headers={"Accept": "application/json"},
+                             timeout=timeout)
 
-    def cancel_status(self, run_id: str) -> Dict[str, object]:
-        return self._request("cancel_status", "GET", "/api/ai/cancel/" + _quote(run_id))
+    def cancel_status(self, run_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("cancel_status", "GET", "/api/ai/cancel/" + _quote(run_id),
+                             timeout=timeout)
 
-    def pending(self, run_id: str) -> Dict[str, object]:
-        return self._request("pending", "GET", "/api/ai/pending/" + _quote(run_id))
+    def pending(self, run_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("pending", "GET", "/api/ai/pending/" + _quote(run_id),
+                             timeout=timeout)
 
-    def kb_status(self) -> Dict[str, object]:
-        return self._request("kb_status", "GET", "/api/ai/kb/status")
+    def kb_status(self, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("kb_status", "GET", "/api/ai/kb/status", timeout=timeout)
 
-    def kb_reload(self) -> Dict[str, object]:
-        return self._request("kb_reload", "POST", "/api/ai/kb/reload")
+    def kb_reload(self, timeout: Optional[float] = None) -> Dict[str, object]:
+        return self._request("kb_reload", "POST", "/api/ai/kb/reload", timeout=timeout)
 
     def upload_attachment(self, run_id: str, tool_call_id: str, session_id: str,
                           field_key: str, filename: str, content: bytes,

@@ -3,8 +3,10 @@
 Hard rules (from AiSessionPurgeService / RunStore / SessionPurgeGuard):
   * complete=true  => every owned session key is gone; guard/pending/ver/gen are
     intentional tombstones and must NOT be reported as residue;
-  * complete=false => a deferred/active run keeps ALL 13 run keys; pending+guard
-    and the discovery keys stay so a retry can enumerate them;
+  * complete=false => a deferred/active run keeps every run key generation
+    actually wrote (pending/claim/idem/req/decided exist only for runs with
+    pending entries; lease only when lease_held); pending+guard and the
+    discovery keys stay so a retry can enumerate them;
   * aborted=true   => nothing in Redis was deleted;
   * xack (120s) / xtrim / session lock are deliberate leftovers, never failures.
 
@@ -373,6 +375,67 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
     _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
+def _check_measure_budget(checks: List[Dict[str, object]], scenario: str,
+                          scenario_measure: Dict[str, object]) -> bool:
+    """Record that a budget-exhausted scenario is not a performance pass.
+
+    Returns True when the scenario was never measured at all (caller can skip
+    its postcondition checks); a partially measured scenario still gets checked.
+    """
+    status = str((scenario_measure or {}).get("status") or "")
+    if status not in ("skipped", "budget_exhausted"):
+        return False
+    detail = (scenario_measure or {}).get("detail") or (scenario_measure or {}).get("reason") or ""
+    _check(checks, scenario, "-", "measure_budget", "unknown",
+           "measure 预算耗尽（status=%s）%s；该场景不能作为性能通过依据"
+           % (status, ("：" + str(detail)) if detail else ""))
+    return status == "skipped"
+
+
+def _check_deferred_runs(ops: RedisOps, checks: List[Dict[str, object]], scenario: str,
+                         copy_name: str, keys: Dict[str, object],
+                         deferred: List[str]) -> None:
+    """A deferred run keeps exactly the keys generation actually wrote.
+
+    Checking all 13 keys invents pending/claim/req/idem/lease for runs generated
+    with pending=0. Checking only what the manifest says keeps real deletions
+    visible; unknown generation facts are reported as unknown, never pass.
+    """
+    for run_id in deferred:
+        info = keys["runs"].get(run_id)
+        if not info:
+            _check(checks, scenario, copy_name, "deferred_run_%s" % run_id, "unknown",
+                   "deferred run 不在生成清单中")
+            continue
+        generated = info.get("generated_keys") or {}
+        unresolved = [str(name) for name in (info.get("generated_unknown") or [])]
+        if not generated and not unresolved:
+            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "unknown",
+                   "manifest 未记录该 run 实际生成的键，无法判定保留是否完整")
+            continue
+        expected = list(generated.values())
+        existence = ops.exists_many(expected) if expected else {}
+        missing = [key for key in expected if existence.get(key) is False]
+        unreadable = [key for key in expected if existence.get(key) is None]
+        if missing:
+            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "fail",
+                   "deferred run 的已生成键被删了 %d/%d 个（源码不得删活跃 run）：%s"
+                   % (len(missing), len(expected), _sample(missing)))
+        elif unreadable or unresolved:
+            parts = []
+            if unreadable:
+                parts.append("已生成键读取失败 %d 个：%s" % (len(unreadable), _sample(unreadable)))
+            if unresolved:
+                parts.append("旧 manifest 未记录 %s，是否生成不可判" % _sample(unresolved))
+            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "unknown",
+                   "已生成键 %d 个中已确认 %d 个仍存在；%s"
+                   % (len(expected), len(expected) - len(missing) - len(unreadable), "；".join(parts)))
+        else:
+            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "pass",
+                   "deferred run 的 %d 个已生成键全部保留（按 manifest 清单，非 13 键全量）"
+                   % len(expected))
+
+
 def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[str, object]], scenario: str,
                     copy_name: str, plan: Dict[str, object], copy: Dict[str, object],
                     merged: Dict[str, object], background_counts: Dict[str, int]) -> None:
@@ -386,26 +449,7 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
         _check(checks, scenario, copy_name, "incomplete_has_reason", "pass",
                "deferred=%d errors=%d" % (len(deferred), len(errors)))
 
-    for run_id in deferred:
-        info = keys["runs"].get(run_id)
-        if not info:
-            _check(checks, scenario, copy_name, "deferred_run_%s" % run_id, "unknown",
-                   "deferred run 不在生成清单中")
-            continue
-        thirteen = list(info["keys13"].values())
-        existence = ops.exists_many(thirteen)
-        missing = [key for key in thirteen if existence.get(key) is False]
-        unknown = [key for key in thirteen if existence.get(key) is None]
-        if missing:
-            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "fail",
-                   "活跃/延后 run 的 13 键被删了 %d 个（源码不得删活跃 run）：%s"
-                   % (len(missing), _sample(missing)))
-        elif unknown:
-            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "unknown",
-                   "13 键存在性不可判：%s" % _sample(unknown))
-        else:
-            _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "pass",
-                   "deferred run 的 13 键全部保留")
+    _check_deferred_runs(ops, checks, scenario, copy_name, keys, deferred)
 
     for run_id, info in (merged.get("runs") or {}).items():
         if not isinstance(info, dict) or not info.get("deleted"):
@@ -519,10 +563,18 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
     for row in rows:
         operation = str(row.get("operation"))
         status = row.get("status")
+        if row.get("budget_error"):
+            _check(checks, scenario, copy_name, "read_%s_http" % operation, "unknown",
+                   "预算耗尽，请求未完成：%s" % row.get("transport_error"))
+            continue
         if operation == "health":
             ok = status in (200, 503)
         else:
-            ok = status is not None and 200 <= int(status) < 300
+            try:
+                code = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                code = None
+            ok = code is not None and 200 <= code < 300
         if ok:
             _check(checks, scenario, copy_name, "read_%s_http" % operation, "pass",
                    "status=%s duration=%.1fms" % (status, float(row.get("duration_ms") or 0.0)))
@@ -613,11 +665,18 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                 "counts": {"pass": 0, "fail": 0, "unknown": 1, "info": 0, "skip": 0},
                 "error": str(exc),
             }
+        measure_scenarios: Dict[str, Dict[str, object]] = {}
+        for item in results.get("scenarios", []) or []:
+            if isinstance(item, dict):
+                measure_scenarios[str(item.get("scenario"))] = item
+
         for scenario in selected:
             entry = (manifest.get("scenarios") or {}).get(scenario)
             if not isinstance(entry, dict) or entry.get("status") != "generated":
                 _check(checks, scenario, "-", "scenario_generated", "skip",
                        (entry or {}).get("reason", "未生成"))
+                continue
+            if _check_measure_budget(checks, scenario, measure_scenarios.get(scenario) or {}):
                 continue
             plan = entry.get("plan") or {}
             mode = plan.get("verify_mode")

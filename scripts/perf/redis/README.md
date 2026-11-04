@@ -53,7 +53,7 @@
 因此：
 
 - **枚举/guard/DB 中止**：Redis 一个键都没删（`aborted=true` + `phase`）。
-- **活跃 run 未在窗口内终态**：`deferred`，该 run 的 **13 键全部保留**，发现键/pending/guard 保留。
+- **活跃 run 未在窗口内终态**：`deferred`，该 run **实际生成的键全部保留**（有 pending 的 run 为 13 键；`pending=0` 的活跃 run 只有 7 个基础键），发现键/pending/guard 保留。
 - **主体有 errors**：`complete=false`，pending/guard 保留，发现键不删。
 - **complete=true**：本会话业务键已删；guard/pending/gen/ver 仍会有意存在。
 
@@ -138,7 +138,9 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `REDIS_TLS` `REDIS_TLS_INSECURE` | `false` | TLS；自签集群才用 insecure |
 | `APP_BASE_URL` | `http://127.0.0.1:8081` | 应用地址 |
 | `APP_TENANT_ID` `APP_USER_ID` | `1` `101` | 必须在 `/api/ai/tenants` 目录内 |
-| `APP_HTTP_TIMEOUT_SECONDS` | `300` | DELETE 可能远超浏览器 60s |
+| `APP_HTTP_TIMEOUT_SECONDS` | `30` | 单请求上限；用于快速暴露慢链。耐久测试可显式调大；measure 会再被剩余预算压低 |
+| `PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS` | `60` | 每场景测量预算；`0` 关闭。含预热+所有轮次 |
+| `PERF_MEASURE_TOTAL_TIMEOUT_SECONDS` | `300` | 整个 measure 总预算；`0` 关闭；耗尽后后续场景 `skipped` |
 | `PERF_ISOLATED_ENV` | `false` | **写操作必须 true** |
 | `PERF_CONFIRM_REMOTE` | `false` | 远程 Redis 必须 true |
 | `PERF_CONFIRM_NON_DEFAULT_DB` | `false` | standalone 非 0 库必须 true |
@@ -197,6 +199,7 @@ python -m perf_redis preflight
 python -m perf_redis generate
 
 # 4) 预热 + 多轮 + 并发测量真实 HTTP API
+#    默认每场景 60s / 整次 300s；耗尽会保留部分结果并返回 1
 python -m perf_redis measure
 
 # 5) 按源码语义核对最终键面/DB/文件/有意保留
@@ -315,7 +318,7 @@ python -m perf_redis all
 
 | 文件 | 内容 |
 | --- | --- |
-| `manifest.json` | 命名空间、配置摘要、尺寸、每个场景/copy 的 id、run 列表、附件/反馈、槽位检查、生成错误 |
+| `manifest.json` | 命名空间、配置摘要、尺寸、每个场景/copy 的 id、run 列表（含实际生成的 `generated_keys`）、附件/反馈、槽位检查、生成错误 |
 | `results.json` | 环境（Redis 版本/模式/拓扑、应用 health）、git 只读摘要、脱敏配置、全部请求、统计、verify、cleanup、验收字段 |
 | `requests.csv` | 每次请求：场景/copy/轮次/是否预热/操作/HTTP 状态/`accepted`/`failure_kind`/耗时/complete/found/aborted/phase/deferred/error/传输错误 |
 | `summary.csv` | 每场景×操作：count、mean、P50、P95、P99、min、max、HTTP 状态分布 |
@@ -328,7 +331,7 @@ python -m perf_redis all
 ### 7.2 响应字段
 
 - `complete=true`：本次删除主体完成；**不**表示 guard/pending/gen/ver 立刻消失，也不表示 60s 记忆复核已执行。
-- `complete=false + deferred=[...]`：活跃 run 未终态；13 键与发现面保留，可重试。
+- `complete=false + deferred=[...]`：活跃 run 未终态；该 run 实际生成的键与发现面保留，可重试。
 - `complete=false + errors=[...]`：有键/DB/文件失败；pending/guard 保留。
 - `aborted=true + phase`：`pending`/`enumerate`/`guard`/`database` 阶段中止；Redis 未删或只删了 H2（`database` 阶段 H2 删除失败时 Redis 未动）。
 - `503`：Redis 不可用；不等于删除完成。唯一例外是 `GET /api/ai/health` 的 503：它是“AI 不可用”的正常表达，记为 `allowed_http`/`accepted`，不计入失败。
@@ -339,7 +342,7 @@ python -m perf_redis all
 - `http`：拿到状态但不在 2xx，且不是 `health` 的 503；`http_failures`。
 - `allowed_http`：仅 `GET /api/ai/health` 的 503；`allowed_http_responses`。
 - `failed_requests = transport_failures + http_failures`；`measure` / `all` 在 `failed_requests > 0` 时失败。
-- `requests.csv` 保留每行 `accepted` / `failure_kind`；`summary.csv` 保留逐场景 HTTP 分布（含 `status_503` 列）。
+- `requests.csv` 保留每行 `accepted` / `failure_kind` / `budget_error`；`summary.csv` 保留逐场景 HTTP 分布（含 `status_503` 列）。
 
 ### 7.4 耗时
 
@@ -351,6 +354,18 @@ python -m perf_redis all
   3. `staging_*`、`archive_*`、`transcript_*` → 各自枚举/逐键成本；
   4. `frames_terminal_* / frames_gap_large` → 活跃 run 的取消收尾/终帧探测；
   5. standalone vs cluster 同场景 → 逐 master 串行 SCAN 与 RTT 差异。
+
+### 7.5 测量预算与部分结果
+
+- 两个预算：`PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS`（默认 `60`，每场景含预热/所有轮次）和 `PERF_MEASURE_TOTAL_TIMEOUT_SECONDS`（默认 `300`，整次 measure）。`0` 表示关闭该限制。
+- 每个请求的 `timeout = min(剩余预算, APP_HTTP_TIMEOUT_SECONDS)`，单请求默认上限 `30s`；预算已用尽时不再发送新请求。因此在预算只剩几秒时，一次 DELETE 不会继续按 30s 卡住。
+- 预算内已完成的请求照常写入 `rows` / `stats` / CSV，**不会异常退出**；`results.json` 正常落盘。
+- 请求因预算超时：该行 `failure_kind=transport`、`timed_out=true`、`budget_error=total|scenario`，`transport_error` 以 `budget_exhausted(...)` 开头；计入 `transport_failures` / `failed_requests`，**不算性能通过**。
+- 场景内未执行的轮次/操作：记入该场景 `scenarios[].skipped`（含 copy/round/operation/预算种类），场景 `status=budget_exhausted`，`partial=true`（已有部分结果）。
+- 尚未开始的后续场景：`scenarios[].status=skipped`、`reason=budget_exhausted`、`budget_kind=total`。
+- `results.json` 的 `budget` 汇总总/场景时限、实际耗时、是否耗尽及两类场景名单；顶层 `budget_exhausted_scenarios` / `skipped_scenarios` 是计数。
+- `verify` 对 `budget_exhausted` / 预算 `skipped` 的场景记一条 `measure_budget=unknown`；完全未测量的场景不再做后置核对，避免把未测量当成通过。
+- `measure` / `all` 在任一预算类场景存在时返回退出码 `1`，避免把不完整测量当成通过。
 
 ---
 
@@ -368,8 +383,9 @@ python -m perf_redis all
    - 附件登记/索引/文件按响应 `attachments.registrationsDeleted` 与磁盘核对；
    - 反馈行通过 `GET /api/ai/feedback` 按 messageId 核对（列表上限 100；达到上限记 `info`，不伪报 pass）。
 2. `complete=false`
-   - 每个 `deferred` run 的 **13 键必须全部保留**（部分缺失 = fail）；
-   - 响应 `deleted=true` 的 run 的 13 键必须不存在；
+   - 每个 `deferred` run 只核对 **manifest 记录的 `generated_keys`**：`pending=0` 的 run 只生成 7 个基础键（run/runstate/seq/fence/lease_epoch/ledger，有帧时加 `xevents`），不存在 pending/claim/idem/req/decided/lease；缺失其中任何一个已生成键仍为 fail；
+   - 旧 manifest 没有 `generated_keys` 时按记录的形状推导（`pending` / `frames.count` / `lease_held`）；`lease_held` 缺失等不可知项记 `unknown`，不伪报 pass；
+   - 响应 `deleted=true` 的 run 的 13 键必须不存在（未生成的键本来就不存在）；
    - pending 必须存在且无 TTL；guard 必须存在且 TTL>0；
    - 仍有 deferred run 时，current/runs/active 至少一个存在；无 deferred 时仅提示（空集合会被 Redis 自动删除）。
 3. `aborted=true`
@@ -378,8 +394,9 @@ python -m perf_redis all
    - 每个读接口 HTTP 2xx（health 允许 503）；
    - 读后数据仍完整（不会被读接口删除）；
    - `runs/current found=true`（有 SUSPENDED 时）、`runs/{id} exists=true`、history 非空。
+   - 因 measure 预算超时未完成的读请求记 `unknown`，不当作该接口通过或失败。
 
-状态含义：`pass` 通过；`fail` 明确违反；`unknown` 读/接口不可达，不能当通过；`info` 有意保留或不可判定；`skip` 场景未生成。
+状态含义：`pass` 通过；`fail` 明确违反；`unknown` 读/接口不可达、生成键清单不可知、预算超时，不能当通过；`info` 有意保留或不可判定；`skip` 场景未生成或未测量。
 
 ### 8.1 已知源码边界（工具如实记录，不伪造通过）
 
@@ -441,6 +458,8 @@ python -m perf_redis all
 | Cluster 节点发现 | 依赖 `CLUSTER NODES` 通告地址 | NAT/容器/证书主机名不匹配时需 `REDIS_TLS_INSECURE` 或修正通告 |
 | 终帧探测漏帧 | 记录不判定 | 源码 6256 预算 + seq 跳号；删除后 Stream 已不在，无法事后复查 |
 | 多实例并发 DELETE 单飞 | 无 | 源码没有记录级单飞；`concurrent_delete` 正是测量这一点 |
+| 预算超时 | 只能缩短请求超时，不能硬杀进程 | 请求 timeout 取剩余预算，httpx 按 connect/read/write 阶段执行；服务端若持续慢速滴流，仍可能略超预算。预算检查在每次请求前执行，超时行明确记 `budget_error` |
+| 旧 manifest 的生成键 | 推导或 unknown | 旧版本未记录 `generated_keys`/`lease_held`；可推导的仍核对，不可知项（如 lease）记 `unknown`；要得到精确清单需换新命名空间重新 generate |
 | 运行环境 | Python 3.9+ | 无第三方 CLI/数据库驱动依赖 |
 
 ---
@@ -449,7 +468,7 @@ python -m perf_redis all
 
 1. `doctor` / `preflight` 无 fail、无 unknown。
 2. `generate` 无 `failed`；HTTP 依赖场景不是 `unsupported`。
-3. `measure` 的 `failed_requests=0`（传输失败与 health 之外的非 2xx 都为 0；health 503 计 `allowed_http`）。
-4. `verify` 无 fail、无 unknown；`complete=true` 的场景键面无残留；`complete=false` 的场景 13 键完整保留。
+3. `measure` 的 `failed_requests=0`（传输失败与 health 之外的非 2xx 都为 0；health 503 计 `allowed_http`），且 `budget_exhausted_scenarios=0`、`skipped_scenarios=0`。
+4. `verify` 无 fail、无 unknown；`complete=true` 的场景键面无残留；`complete=false` 的场景按 manifest `generated_keys` 完整保留（旧 manifest 的不可知项会是 unknown）。
 5. `cleanup --execute` 后 `complete=true`；没有本命名空间残留。
 6. 同一矩阵在 standalone 与 cluster 各跑一次，输出目录分开，比较 `summary.csv` 与 `verify.csv`。

@@ -58,6 +58,17 @@ def _print_stats(result: Dict[str, object]) -> None:
     print("measured requests=%s transport failures=%s http failures=%s allowed_http=%s"
           % (result.get("measured_requests"), result.get("transport_failures"),
              result.get("http_failures"), result.get("allowed_http_responses")))
+    budget = result.get("budget") or {}
+    if budget:
+        print("budget: total=%ss scenario=%ss elapsed=%.1fs exhausted=%s"
+              % (budget.get("total_seconds"), budget.get("scenario_seconds"),
+                 float(budget.get("elapsed_seconds") or 0.0), budget.get("exhausted")))
+    for item in result.get("scenarios", []):
+        if item.get("status") == "budget_exhausted" or (
+                item.get("status") == "skipped" and item.get("reason") == "budget_exhausted"):
+            print("budget %-26s status=%-17s skipped=%s"
+                  % (item.get("scenario"), item.get("status"),
+                     len(item.get("skipped") or [])))
 
 
 def _print_verify(result: Dict[str, object]) -> None:
@@ -231,6 +242,10 @@ def cmd_measure(cfg: Config, args) -> int:
     report.write_all(cfg, paths, result, None, None, compare_git(preflight_mod._repo_root()))
     _print_stats(result)
     print("results=%s" % paths["results"])
+    if result.get("budget_exhausted_scenarios", 0) > 0 or result.get("skipped_scenarios", 0) > 0:
+        print("measure 预算耗尽：部分场景未跑完或未开始，结果不构成性能通过"
+              "（见 results.json 的 budget / scenarios[].skipped）", file=sys.stderr)
+        return EXIT_FAIL
     if result.get("measured_requests", 0) == 0:
         return EXIT_UNSUPPORTED
     return EXIT_FAIL if result.get("failed_requests", 0) > 0 else EXIT_OK
@@ -358,6 +373,9 @@ def cmd_all(cfg: Config, args) -> int:
 
     verify_counts = verify_result.get("counts", {})
     if verify_counts.get("fail", 0) > 0:
+        return EXIT_FAIL
+    if measure_result.get("budget_exhausted_scenarios", 0) > 0 or measure_result.get("skipped_scenarios", 0) > 0:
+        print("measure 预算耗尽：部分场景未跑完或未开始，结果不构成性能通过", file=sys.stderr)
         return EXIT_FAIL
     if measure_result.get("failed_requests", 0) > 0:
         return EXIT_FAIL
