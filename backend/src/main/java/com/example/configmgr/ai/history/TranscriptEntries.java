@@ -59,7 +59,7 @@ public final class TranscriptEntries {
 	public static TranscriptEntry user(String runId, long turnStartedAtMs, long atMs, String text) {
 		return new TranscriptEntry(entryId(runId, "user", null), "user", runId, turnStartedAtMs, atMs, text,
 				null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-				null, null, null);
+				null, null, null, null, null, null);
 	}
 
 	/** 挂起批次的早期条目（status=pending）；终态写点会用同一 entryId 覆盖。 */
@@ -67,7 +67,7 @@ public final class TranscriptEntries {
 			List<TranscriptEntry.ToolCallView> toolCalls, Map<String, Object> toolCallStates) {
 		return new TranscriptEntry(assistantEntryId(runId, toolCalls), "assistant", runId, turnStartedAtMs,
 				atMs, text, null, null, null, toolCalls, toolCallStates, null, null, null, null, null, null,
-				null, null, null, null, null, null, null);
+				null, null, null, null, null, null, null, null, null, null);
 	}
 
 	/** 单条工具结果（早期 pending / 终态同键覆盖）。 */
@@ -75,7 +75,7 @@ public final class TranscriptEntries {
 			String kind2, String status, String result) {
 		return new TranscriptEntry(toolEntryId(runId, toolCallId), "tool", runId, turnStartedAtMs, atMs, null,
 				null, null, null, null, null, toolCallId, name, kind2, status, result, null, null, null, null,
-				null, null, null, null);
+				null, null, null, null, null, null, null);
 	}
 
 	/**
@@ -131,7 +131,8 @@ public final class TranscriptEntries {
 						metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
 						metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,
 						calls.isEmpty() ? null : calls, states, null, null, null, null, null, null, null, null, null,
-						null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY), null));
+						null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY), null, null,
+						null, null));
 				continue;
 			}
 			if (message instanceof ToolResponseMessage toolResponse) {
@@ -157,7 +158,7 @@ public final class TranscriptEntries {
 							turnStartedAtMs, atMs, null, null, null, null, null, null, response.id(),
 							hasText(pending.getName()) ? pending.getName() : response.name(), pending.getKind(),
 							status, result, facts.code(), facts.truncated(), facts.strategy(),
-							facts.originalChars(), facts.returnedChars(), null, null, null));
+							facts.originalChars(), facts.returnedChars(), null, null, null, null, null, null));
 				}
 			}
 		}

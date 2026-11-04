@@ -111,6 +111,9 @@ public class ConversationTranscriptStore {
 			  if previous.stopped == true and newer.stopped ~= true then newer.stopped = true end
 			  if newer.errorCode == nil then newer.errorCode = previous.errorCode end
 			  if newer.errorMessage == nil then newer.errorMessage = previous.errorMessage end
+			  if newer.outcome == nil then newer.outcome = previous.outcome end
+			  if newer.errorCardKey == nil then newer.errorCardKey = previous.errorCardKey end
+			  if newer.unconfirmed == nil then newer.unconfirmed = previous.unconfirmed end
 			  if newer.segments == nil then newer.segments = previous.segments end
 			  newer.toolCalls = mergeToolCalls(previous.toolCalls, newer.toolCalls)
 			  if type(previous.toolCallStates) == 'table' then

@@ -378,6 +378,13 @@
       "reason": "本批仅修正恢复期间镜像写回、同轮USER判定与终态重挂，保留last-good正文；D6现有恢复和段序契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:b530925231225315b62547502ed7f5406d691baa61ea74c65ff97c66e09137a1",
+      "status": "not-affected",
+      "reason": "本批为transcript补充outcome/errorCardKey/unconfirmed并保留合并与历史投影；D6现有展示历史和恢复契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

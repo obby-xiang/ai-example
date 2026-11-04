@@ -2278,6 +2278,15 @@ public class AiController {
 			if (entry.errorMessage() != null && !entry.errorMessage().isBlank()) {
 				item.put(TranscriptEntries.ERROR_MESSAGE_KEY, entry.errorMessage());
 			}
+			if (entry.outcome() != null && !entry.outcome().isBlank()) {
+				item.put("outcome", entry.outcome());
+			}
+			if (entry.errorCardKey() != null && !entry.errorCardKey().isBlank()) {
+				item.put("errorCardKey", entry.errorCardKey());
+			}
+			if (Boolean.TRUE.equals(entry.unconfirmed())) {
+				item.put("unconfirmed", true);
+			}
 			if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
 				List<Map<String, Object>> calls = new ArrayList<>(entry.toolCalls().size());
 				for (com.example.configmgr.ai.history.TranscriptEntry.ToolCallView call : entry.toolCalls()) {

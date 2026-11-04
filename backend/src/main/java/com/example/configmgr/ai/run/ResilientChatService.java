@@ -2808,6 +2808,10 @@ public class ResilientChatService {
 		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
 		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
 		// 进入中性视图，不得自行拿故障码猜"可能成功"。
+		if (persisted != null && persisted.getMessageJson() != null) {
+			recordTranscript(runId, sessionId, this.codec.deserializeAll(persisted.getMessageJson()), true,
+					"UNCONFIRMED", true);
+		}
 		// 本批：出口统一走 emitFailureTerminal（发帧前判归档终帧），"恰好一条终帧"由归档而不是本地标记保证。
 		emitFailureTerminal(runId, out, code, messageFor(code), Map.of("unconfirmed", true), partialChars);
 		emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
@@ -3750,11 +3754,16 @@ public class ResilientChatService {
 	 * L1 清成占位符的 history；合成消息（压缩摘要/收尾指令）不写。写失败只 WARN，不影响本轮。
 	 */
 	private boolean recordTranscript(String runId, String sessionId, List<Message> history) {
-		return recordTranscript(runId, sessionId, history, true);
+		return recordTranscript(runId, sessionId, history, true, null, false);
 	}
 
 	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant) {
+		return recordTranscript(runId, sessionId, history, includeLastAssistant, null, false);
+	}
+
+	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed) {
 		if (this.transcript == null || history == null || history.isEmpty()) {
 			return false;
 		}
@@ -3824,6 +3833,17 @@ public class ResilientChatService {
 					entries.set(i, entry.withSegments(List.of(new TranscriptEntry.SegmentView("tool", entry.result(),
 							entry.toolCallId(), anchor.seq()))));
 				}
+			}
+			String outcome = outcomeOverride == null ? snapshot.getStatus() : outcomeOverride;
+			for (int i = 0; i < entries.size(); i++) {
+				TranscriptEntry entry = entries.get(i);
+				if (!"assistant".equals(entry.kind())) {
+					continue;
+				}
+				String errorCode = unconfirmed ? ErrorCodes.AI_REDIS_UNAVAILABLE : entry.errorCode();
+				String errorMessage = unconfirmed ? messageFor(errorCode) : entry.errorMessage();
+				String errorCardKey = unconfirmed || errorCode != null ? runId : null;
+				entries.set(i, entry.withOutcome(outcome, errorCardKey, unconfirmed, errorCode, errorMessage));
 			}
 			String userText = snapshot.getRequestText();
 			if (userText != null && !userText.isBlank()) {
