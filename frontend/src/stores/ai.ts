@@ -13,7 +13,7 @@
  */
 
 import { defineStore, getActivePinia } from 'pinia'
-import { markRaw } from 'vue'
+import { markRaw, watch } from 'vue'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi, type AiHistoryPage } from '@/api/ai'
 import {
@@ -4357,6 +4357,11 @@ export const useAiStore = defineStore('ai', {
           writeMirrorWhenIdle(() => this.writeMirrorNow())
         }, MIRROR_THROTTLE_MS - elapsed)
       }, { detached: true, deep: true })
+      watch(() => this.restoringRecovery, (recovering) => {
+        if (!recovering) {
+          this.writeMirrorNow()
+        }
+      })
       // 页面隐藏/卸载 = 最后一次机会：立即落盘（退订由浏览器负责，页签生命周期内不重复装）
       if (!mirrorFlushInstalled) {
         mirrorFlushInstalled = true
@@ -4385,6 +4390,9 @@ export const useAiStore = defineStore('ai', {
      * 那时镜像里若有内容，只能来自另一次更完整的现场，任何本地空态都无权覆盖它。
      */
     writeMirrorNow(): void {
+      if (this.restoringRecovery) {
+        return
+      }
       if (!this.historyLoaded && this.messages.length === 0) {
         return
       }
@@ -5476,9 +5484,9 @@ export const useAiStore = defineStore('ai', {
         targetByToolCallId = target !== null
       }
 
-      // 无 runId 的纯文本残留：历史末条已是助手、镜像 tail 已开流（正文/思考/非文本段）⇒
-      // 视为历史已收下这一轮，不补提问/气泡；空 tail（没有可展示内容）仍可补。
-      if (!target && roundRunId === null
+      // 只有同轮 USER 也在历史里，才可用末条 assistant 证明该轮已被历史覆盖；
+      // 否则末条可能是上一轮，不能据此丢弃镜像里的在途正文。
+      if (!target && roundRunId === null && historyUserIndex >= 0
         && merged[merged.length - 1]?.role === 'assistant'
         && messageShowsProgress(tail)) {
         return historical
@@ -5984,8 +5992,9 @@ export const useAiStore = defineStore('ai', {
         this.sealLeftoverInFlight()
         return
       }
-      if (isTerminalRunStatus(current.snapshotStatus)) {
-        this.sealLeftoverInFlight()
+      if (isTerminalRunStatus(current.snapshotStatus) && !this.findInFlightHost()) {
+        this.loading = false
+        this.suspended = false
         return
       }
       this.activeRunId = runId

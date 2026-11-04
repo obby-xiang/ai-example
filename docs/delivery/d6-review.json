@@ -371,6 +371,13 @@
       "reason": "本批仅区分无工具assistant的聚合格式与工具条目的严格段锚点，修复成功轮误判未确认；D6现有物化与恢复契约不变",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:ae01c800c0d51d558512387049bf7ca47c9b5ae57f4d72b3d863002c47dd4d74",
+      "status": "not-affected",
+      "reason": "本批仅修正恢复期间镜像写回、同轮USER判定与终态重挂，保留last-good正文；D6现有恢复和段序契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
