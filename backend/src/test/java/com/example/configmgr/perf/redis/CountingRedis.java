@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -17,11 +18,13 @@ import org.springframework.data.domain.Range;
 import org.springframework.data.domain.Range.Bound;
 import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.types.Expiration;
 
 /**
  * 带精确命令计数的 Redis 门面。命令数按实际发出的 Redis 命令计；pipeline 批次单独计数。
@@ -436,16 +439,20 @@ public final class CountingRedis {
 		return results == null ? List.of() : results;
 	}
 
-	/** 有界原生命令 pipeline（批次内命令数由调用方限制）。 */
+	/**
+	 * 有界原生命令 pipeline（批次内命令数由调用方限制）。
+	 *
+	 * <p>只走类型化 {@link RedisConnection} API，命令在 Lettuce async pipeline 内排队、批次结束一次性发送；
+	 * standalone 与 Cluster 是同一条路径。不要回落到通用 {@code connection.execute}：它在 Cluster 下逐条
+	 * 等待回复，pipeline 退化成串行。不支持的命令在发出任何命令前失败，而不是同步执行。
+	 */
 	public List<Object> pipelineRaw(List<String[]> commands) {
-		Snapshot before = snapshot();
+		for (String[] command : commands) {
+			requirePipelineCommand(command);
+		}
 		List<Object> results = this.template.executePipelined((RedisCallback<Object>) connection -> {
 			for (String[] command : commands) {
-				byte[][] bytes = new byte[command.length][];
-				for (int i = 0; i < command.length; i++) {
-					bytes[i] = command[i].getBytes(StandardCharsets.UTF_8);
-				}
-				connection.execute(command[0], java.util.Arrays.copyOfRange(bytes, 1, bytes.length));
+				queuePipelined(connection, command);
 			}
 			return null;
 		});
@@ -456,6 +463,85 @@ public final class CountingRedis {
 		}
 		this.responseBytes += results == null ? 0L : results.toString().length();
 		return results == null ? List.of() : results;
+	}
+
+	/** pipelineRaw 实际用到的命令：KEY/STRING/SET/ZSET 的单键类型化调用。 */
+	static String pipelineCommandName(String[] command) {
+		if (command == null || command.length == 0 || command[0] == null) {
+			throw new IllegalArgumentException("pipelineRaw 命令不能为空");
+		}
+		return command[0].toUpperCase(Locale.ROOT);
+	}
+
+	static void requirePipelineCommand(String[] command) {
+		String name = pipelineCommandName(command);
+		switch (name) {
+			case "EXISTS", "GET", "SMEMBERS" -> requireArity(command, name, 2);
+			case "DEL" -> {
+				if (command.length < 2) {
+					throw new IllegalArgumentException("pipelineRaw DEL 需要至少 1 个 key");
+				}
+			}
+			case "SREM", "ZREM" -> {
+				if (command.length < 3) {
+					throw new IllegalArgumentException("pipelineRaw " + name + " 需要 key 和至少 1 个 member");
+				}
+			}
+			case "SET" -> setTtlSeconds(command);
+			default -> throw new IllegalArgumentException("pipelineRaw 不支持命令：" + name);
+		}
+	}
+
+	private static void requireArity(String[] command, String name, int length) {
+		if (command.length != length) {
+			throw new IllegalArgumentException("pipelineRaw " + name + " 只支持单键：" + command.length + " 个参数");
+		}
+	}
+
+	/** 只接受调用方实际使用的 {@code SET key value EX seconds}。 */
+	private static long setTtlSeconds(String[] command) {
+		if (command.length != 5 || !"EX".equalsIgnoreCase(command[3])) {
+			throw new IllegalArgumentException("pipelineRaw SET 只支持 SET key value EX seconds");
+		}
+		try {
+			long seconds = Long.parseLong(command[4]);
+			if (seconds <= 0L) {
+				throw new IllegalArgumentException("pipelineRaw SET EX 需要正数秒：" + command[4]);
+			}
+			return seconds;
+		}
+		catch (NumberFormatException ex) {
+			throw new IllegalArgumentException("pipelineRaw SET EX 秒数非法：" + command[4], ex);
+		}
+	}
+
+	private static void queuePipelined(RedisConnection connection, String[] command) {
+		String name = pipelineCommandName(command);
+		byte[] key = utf8(command[1]);
+		switch (name) {
+			// 单键 varargs 形式保持 COUNT 语义（Long）；exists(byte[]) 会转成 Boolean，调用方按计数读取。
+			case "EXISTS" -> connection.keyCommands().exists(new byte[][] { key });
+			case "GET" -> connection.stringCommands().get(key);
+			case "SMEMBERS" -> connection.setCommands().sMembers(key);
+			case "DEL" -> connection.keyCommands().del(arguments(command, 1));
+			case "SREM" -> connection.setCommands().sRem(key, arguments(command, 2));
+			case "ZREM" -> connection.zSetCommands().zRem(key, arguments(command, 2));
+			case "SET" -> connection.stringCommands().set(key, utf8(command[2]),
+					Expiration.seconds(setTtlSeconds(command)), RedisStringCommands.SetOption.UPSERT);
+			default -> throw new IllegalArgumentException("pipelineRaw 不支持命令：" + name);
+		}
+	}
+
+	private static byte[] utf8(String value) {
+		return value.getBytes(StandardCharsets.UTF_8);
+	}
+
+	private static byte[][] arguments(String[] command, int from) {
+		byte[][] args = new byte[command.length - from][];
+		for (int i = from; i < command.length; i++) {
+			args[i - from] = utf8(command[i]);
+		}
+		return args;
 	}
 
 	/** 每个多键/同槽组检查一次；不同槽立即失败（不把 CROSSSLOT 留到运行期）。 */
