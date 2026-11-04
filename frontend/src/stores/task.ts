@@ -151,6 +151,7 @@ function isDocumentVisible(): boolean {
  * 的 publish watcher 同键不得双开 —— 第二次调用直接返回在册 dispose。
  */
 const publishWatchers = new Map<string, () => void>()
+const taskDeleteFlights = new Map<number, Promise<boolean>>()
 
 /**
  * 作业跟踪的提示出口。
@@ -416,7 +417,7 @@ export const useTaskStore = defineStore('task', {
           // 创建响应就是权威事实：钉进类型缓存，后续 restore_task / 导航不必再拉一次
           this.knownTaskTypes[task.id] = task.type
         }
-        await this.load()
+        void this.refreshNow()
         return task
       } catch (error) {
         this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.createFailed')
@@ -425,14 +426,28 @@ export const useTaskStore = defineStore('task', {
     },
 
     async removeTask(taskId: number): Promise<boolean> {
+      const existing = taskDeleteFlights.get(taskId)
+      if (existing) {
+        return await existing
+      }
       this.actionError = null
+      const run = (async (): Promise<boolean> => {
+        try {
+          await tasksApi.deleteTask(taskId)
+          void this.refreshNow()
+          return true
+        } catch (error) {
+          this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
+          return false
+        }
+      })()
+      taskDeleteFlights.set(taskId, run)
       try {
-        await tasksApi.deleteTask(taskId)
-        await this.load()
-        return true
-      } catch (error) {
-        this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
-        return false
+        return await run
+      } finally {
+        if (taskDeleteFlights.get(taskId) === run) {
+          taskDeleteFlights.delete(taskId)
+        }
       }
     },
 
@@ -490,6 +505,7 @@ export const useTaskStore = defineStore('task', {
         }
       }
       let disposeWatched: (() => void) | null = null
+      let watchErrorNotified = false
       const dispose = (): void => {
         clearWallClock()
         publishWatchers.delete(key)
@@ -500,13 +516,19 @@ export const useTaskStore = defineStore('task', {
       disposeWatched = watchJob({
         taskId,
         jobId,
+        onSnapshot: () => {
+          watchErrorNotified = false
+        },
         onFinal: (job) => {
           clearWallClock() // 终态到达即清墙钟（360s 出口只在"没等到终态"时发生）
           dispose()
           void this.applyPublishOutcome(jobId, job, handlers)
         },
         onError: (error) => {
-          dispose()
+          if (watchErrorNotified) {
+            return
+          }
+          watchErrorNotified = true
           notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
             jobId,
             message: error instanceof Error ? error.message : translate('views.tasks.msg.unknownError')

@@ -108,10 +108,9 @@ function currentWorkspaceContext(): AiChatContext | undefined {
  *
  * <p>前端不再自己造 sessionId：切换身份、复制页签、410 恢复、刷新后无会话时统一走这里。
  *
- * <p><b>权威值 = `sessionIdText`</b>（十进制字符串，与后端 `AiSessionController` 契约同名）：
+ * <p><b>唯一值 = `sessionIdText`</b>（十进制字符串，与后端 `AiSessionController` 契约同名）：
  * 会话号是 long，JSON number 在消费端不可安全往返，故一律按字符串存储/发送；后端 Jackson 把
- * 十进制字符串反序列化为 long 是标准行为。响应里的数值 `sessionId` 只作旧后端/旧夹具的
- * **兼容回读**（同样按原始文本读，不经过 `JSON.parse`），绝不作为权威值。
+ * 十进制字符串反序列化为 long 是标准行为。数值 `sessionId` 字段不再回读。
  */
 export async function createSession(): Promise<string> {
   const response = await http.post('/ai/session', undefined, {
@@ -132,24 +131,16 @@ function extractSessionId(body: unknown): string {
     // 没有 `data` 包装时退回整串（裸对象契约）。从 `"data"` 起点往后找，避免被 data 内的嵌套对象截断。
     const dataIndex = body.search(/"data"\s*:\s*\{/)
     const scope = dataIndex >= 0 ? body.slice(dataIndex) : body
-    // 权威值：`sessionIdText` 十进制字符串。旧后端只有数值 `sessionId` 时按原始文本回读（兼容）。
     const authoritative = /"sessionIdText"\s*:\s*"([1-9]\d*)"/.exec(scope)
-    if (authoritative) {
-      return authoritative[1]
-    }
-    const legacy = /"sessionId"\s*:\s*"?([1-9]\d*)"?/.exec(scope)
-    return legacy ? legacy[1] : ''
+    return authoritative ? authoritative[1] : ''
   }
   if (body && typeof body === 'object') {
     const envelope = body as {
       sessionIdText?: unknown
-      sessionId?: unknown
-      data?: { sessionIdText?: unknown; sessionId?: unknown }
+      data?: { sessionIdText?: unknown }
     }
     return normalizeSessionId(envelope.sessionIdText)
       || normalizeSessionId(envelope.data?.sessionIdText)
-      || normalizeSessionId(envelope.sessionId)
-      || normalizeSessionId(envelope.data?.sessionId)
   }
   return ''
 }
@@ -194,24 +185,25 @@ export function cancelClientRequest(
   return post('/ai/cancel/client-request', request, config)
 }
 
-/** GET /api/ai/history/{sessionId}（刷新恢复用的会话记忆原文）。
- *
- * <p>R-154 #16 分页（additive）：`offset`/`limit` 切记忆窗口内的条目；不传 = 全量语义。
- * 长会话首屏只取最近一页，更早条目由「加载更早」按需向前取。
- */
+export interface AiHistoryPage extends AiHistory {
+  nextCursor?: string
+  revision?: number
+}
+
+/** 无参数读取最近一页；latest 限定页大小，before 稳定向前翻页。 */
 export function history(
   sessionId: string,
-  page: { offset?: number; limit?: number } = {}
-): Promise<AiHistory> {
+  page: { latest?: number; before?: string } = {}
+): Promise<AiHistoryPage> {
   const query = new URLSearchParams()
-  if (typeof page.offset === 'number') {
-    query.set('offset', String(page.offset))
+  if (typeof page.latest === 'number') {
+    query.set('latest', String(page.latest))
   }
-  if (typeof page.limit === 'number') {
-    query.set('limit', String(page.limit))
+  if (typeof page.before === 'string' && page.before !== '') {
+    query.set('before', page.before)
   }
   const suffix = query.toString() === '' ? '' : `?${query.toString()}`
-  return get<AiHistory>(`/ai/history/${encodeURIComponent(sessionId)}${suffix}`)
+  return get<AiHistoryPage>(`/ai/history/${encodeURIComponent(sessionId)}${suffix}`)
 }
 
 /**
@@ -300,9 +292,10 @@ export function getContext(sessionId: string): Promise<ContextSnapshot> {
  * 幂等：会话不存在 / 重复删除也返回 200（裸 Map，不套 ApiResponse 信封），故调用方不需要
  * 区分"删过没删过"，也不需要处理 404。`complete/deferred/errors/clientCleanup` 由调用方消费：
  * 本地只按 `clientCleanup` 精确清理，销毁进度本身是后台语义。
+ * `config` 同 {@link cancel}：调用方可显式携带操作入口捕获的旧身份头。
  */
-export function deleteHistory(sessionId: string): Promise<SessionPurgeResponse> {
-  return del<SessionPurgeResponse>(`/ai/session/${encodeURIComponent(sessionId)}`)
+export function deleteHistory(sessionId: string, config?: AxiosRequestConfig): Promise<SessionPurgeResponse> {
+  return del<SessionPurgeResponse>(`/ai/session/${encodeURIComponent(sessionId)}`, config)
 }
 
 /**

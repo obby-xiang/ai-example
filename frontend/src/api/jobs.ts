@@ -16,8 +16,8 @@ export function listJobs(taskId: number): Promise<Job[]> {
 }
 
 /** 单作业快照（行级 progress/total）。 */
-export function getJob(jobId: number): Promise<Job> {
-  return get<Job>(`/jobs/${jobId}`)
+export function getJob(jobId: number, config: { signal?: AbortSignal } = {}): Promise<Job> {
+  return get<Job>(`/jobs/${jobId}`, config)
 }
 
 /** 取消作业；已终态 → 409 JOB_ALREADY_FINAL（响应体带 code）。 */

@@ -267,7 +267,7 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   /** Spring AI MessageType 名称：USER / ASSISTANT / SYSTEM / TOOL */
   type: string
   text: string
-  /** assistant 的真实展示段序；缺省 = 旧后端/旧条目，使用聚合字段兼容投影。 */
+  /** assistant 的真实展示段序；工具与正文的顺序只认它，缺失时不重建工具顺序。 */
   segments?: Array<{
     kind: 'text' | 'reasoning' | 'tool'
     text?: string | null
@@ -294,9 +294,9 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   }>
   /**
    * R-144（后端历史携带状态）：按 toolCallId 映射的段级真态（挂在带 toolCalls 的 ASSISTANT 消息
-   * metadata 上随载荷透出）。旧载荷缺该字段 ⇒ 前端占位兜底（status 'succeeded' / kind2 'UNKNOWN'）；
-   * `kind` 缺数据 ⇒ 保持 'UNKNOWN'（不臆造默认值）；resume 重建轮（T4）同样无状态，共用该兜底。
-   * R-160 M1：已决条目增透决策元数据 —— decision（approved/rejected/timeout，条目态派生）/
+   * metadata 上随载荷透出）。缺该字段或条目无 status/outcome ⇒ 段落当前 `unknown` 占位
+   * （不伪造成功；kind2 保持 'UNKNOWN'）；resume 重建轮（T4）同样无状态，共用该口径。
+   * R-160 M1：已决条目增透决策元数据 —— decision（approved/rejected/cancel，条目态派生）/
    * decidedAt（epoch 毫秒）/ submittedValues（FRONTEND 的 resultText 原文，前端 JSON.parse、
    * 失败兜底 null）。
    */
@@ -307,8 +307,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     decidedAt?: number
     submittedValues?: string
     /**
-     * 治理 P0-1：条目结局八态（后端新载荷才有；含契约增量的 skipped）。**有则优先**于 status 经词表映射；
-     * 缺（旧载荷 / resume 重建轮）⇒ 回落 status 旧表。
+     * 治理 P0-1：条目结局八态（含契约增量的 skipped）。**有则优先**于 status 经词表映射；
+     * 两者都缺 ⇒ 段落 `unknown`，不推断成功或确定失败。
      */
     outcome?: string
     /** 治理 P0-1：错误码（可选，null = 无码）；一期不展示 */
@@ -388,7 +388,7 @@ export interface AiHistory {
    * 缺省 = 旧后端不支持分页（等价于本次返回即全量）。
    */
   total?: number
-  /** R-154 #16 additive：本次切片之前还有更早条目（`offset > 0` 时为真）。 */
+  /** 本次切片之前还有更早条目；有则通过 nextCursor 继续向前读取。 */
   hasMore?: boolean
 }
 
@@ -429,7 +429,8 @@ export interface SessionPurgeResponse extends Record<string, unknown> {
  * pending=待人确认或待前端执行，running=执行中，succeeded/failed=已结束，
  * rejected=人工拒绝，expired=会话已失效（后端历史为空，挂起态无法续跑），
  * blocked=被渐进披露防线③拦下（DC-14 T1：越 scope 的调用未执行 —— 与"执行失败"不是一回事），
- * unknown=结局未知（未确认成功/失败；前端执行器超时等"无法判定成败"的收尾），
+ * unknown=结局未知（未确认成功/失败；执行器超时、历史缺状态/缺 outcome 等"无法判定成败"的
+ * 收尾都落此态，**不得**用 succeeded 冒充），
  * cancelled=已取消（用户放弃 / 渲染器不可用 / 整轮取消），
  * skipped=已跳过（上游确定性失败导致本工具未执行；**一等状态**，不是 failed、不是空）。
  */
@@ -653,12 +654,11 @@ export interface ToolPart extends MessagePartBase {
    * R-158 #10：HITL 只读回执元数据（confirm()/submitGenerativeForm 写回，随段持久化，
    * 历史/镜像/过期降级的 spread 重建语义下保留；旧数据缺省 ⇒ 徽标从 status 派生）。
    *
-   * 2A 挂账①：`timeout` 是**第三种门结局**（闸门未开、本次未执行）—— 后端 confirm_decision
-   * 帧的 decision/status（TIMEOUT）由此落段；缺省（旧数据 / 历史载荷）仍从 status 派生。
-   * 批G · S13：`cancel` 是**用户决策**的第四种门结局（停止/取消收尾，闸门未开、本次未执行）——
+   * 2A 挂账①：`timeout` 已随确认门去超时退场，当前决策只有 approved / rejected / cancel。
+   * 批G · S13：`cancel` 是**用户决策**的第三种门结局（停止/取消收尾，闸门未开、本次未执行）——
    * 卡面「✗ 已取消」；缺省时 `cancelled` 段仍按 K2 归未批准收尾（已超时）。
    */
-  decision?: 'approved' | 'rejected' | 'timeout' | 'cancel'
+  decision?: 'approved' | 'rejected' | 'cancel'
   decidedAt?: number
   /** R-158 #10：generative_form 提交值回执（提交成功时写入，刷新后可回溯已填值） */
   submittedValues?: Record<string, unknown>
@@ -853,6 +853,7 @@ export interface CompactionEventPart extends MessagePartBase {
   eventId: string
   /** 服务端提交时刻（仅用于同轮多事件的稳定排序，不上屏）。 */
   atMs?: number
+  anchorToolCallId?: string
 }
 
 /** 消息段判别联合（按 `kind` 判别）。 */
@@ -887,7 +888,7 @@ export interface ToolPartPatch {
   reason?: string | null
   messageId?: string
   /** 见 {@link ToolPart.decision} / {@link ToolPart.submittedValues}（R-158 #10 回执元数据） */
-  decision?: 'approved' | 'rejected' | 'timeout' | 'cancel'
+  decision?: 'approved' | 'rejected' | 'cancel'
   decidedAt?: number
   submittedValues?: Record<string, unknown>
   /** 见 {@link ToolPart.truncated}（R-154 #2 / A10 R-15 帧侧截断标记，随段持久化） */
@@ -1223,17 +1224,13 @@ export interface AiRunCurrent {
    *
    * 语义不是"轮不存在"，也不是"失败"：这是可重试的**准备中**。前端据此显示"准备中 · 已用 N 秒"
    * 并提供手动重试，**不得**封口镜像里的在途轮、**不得**落 `currentError`。
-   * 后端也可用 `snapshotStatus='PREPARING'` 表达同一事实（两键任一命中即按准备中处理）。
+   * 判定只认显式 `preparing=true`；`snapshotStatus` 是快照状态（RUNNING/SUSPENDED/终态）。
    */
   preparing?: boolean
-  /** 准备开始时刻（epoch 毫秒，服务端钟）；缺省 = 用 `elapsedMs` 反推或本地收到时刻。 */
+  /** 准备开始时刻（epoch 毫秒，服务端钟）；缺省 = 用 `preparingElapsedMs` 反推或本地收到时刻。 */
   preparingSinceMs?: number | null
   /** 已准备毫秒数（服务端钟；存在时优先于 `preparingSinceMs` 用于显示）。 */
   preparingElapsedMs?: number | null
-  /** 兼容别名：与 `preparingSinceMs` 同义（后端若用通用名 `startedAtMs` 也可直接消费）。 */
-  startedAtMs?: number | null
-  /** 兼容别名：与 `preparingElapsedMs` 同义。 */
-  elapsedMs?: number | null
   /**
    * AR-10（批次3 补齐）：本轮运行态键的**权威**剩余毫秒 —— 后端对 `ai:run:<runId>` 做
    * `PTTL` 的只读推导。只用于卡面可见化（剩余时间 / 已到期），**不改 TTL、不续期**。
@@ -1315,6 +1312,7 @@ export interface AiChatParams {
  * `POST /api/ai/chat` 的批③ 增量（可选）。
  *
  * - `modelId` 缺省 ⇒ 后端按默认解析链（`is_default` → 首个 enabled → 全局默认 → env）；
+ * - 显式 `modelId` 必须同时携带所属 `providerId`，缺省模型不补造 provider 身份；
  * - `params` 缺省 ⇒ 全部用全局默认。
  *
  * <p><b>批 F · F1</b>：两个键都只是<b>后端能力</b>的镜像 —— 界面已无模型选择与参数弹层，
@@ -1322,6 +1320,7 @@ export interface AiChatParams {
  */
 export interface AiChatRequest {
   modelId?: string
+  providerId?: number
   params?: AiChatParams
 }
 

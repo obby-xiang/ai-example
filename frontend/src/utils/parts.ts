@@ -632,8 +632,8 @@ export function isSystemRejectPhantom(name: unknown, code?: string | null): bool
  * 与 `frontendResultStatus` 同映射，非分叉。
  * 契约增量：`SKIPPED → skipped`（上游失败导致未执行；历史载荷通道的 status 实发值）。
  * 契约增量：`PRECHECK_FAILED → failed`（F5 预检未通过就地结算的终态；后端该条目
- * outcome=failed，但旧载荷/缺 outcome 时若无本映射会落 `null` ⇒ 历史构造占位 `succeeded`
- * 误显示成功 —— 本条把缺 outcome 的回落也钉在 failed）。
+ * outcome=failed，缺 outcome 时若无本映射会落 `null` ⇒ 历史构造占位 `unknown`
+ * （不伪造成功，见 {@link outcomeStatus} 与 store 的历史段构造））。
  */
 export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
   switch (status) {
@@ -655,7 +655,7 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
       return 'skipped'
     case 'PRECHECK_FAILED':
     case 'SHEET_DISABLED':
-      // 表格开关关掉的终态（治理批）：缺这条映射会让刷新后的段回落成"成功"占位
+      // 表格开关关掉的终态（治理批）：缺这条映射会让刷新后的段落成 unknown 占位
       return 'failed'
     case 'APPROVED':
     case 'PENDING':
@@ -668,13 +668,13 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
 /**
  * 治理 P0-1（统一结果信封）单表：`outcome` 八态 → 段状态。唯一消费方 =
  * `applyFrameToParts` 的 `tool_result` / `frontend_tool_result`（I1 收口）与 `loadHistory`
- * 的历史段构造（有 outcome 则用、无则旧表）。
+ * 的历史段构造（有 outcome 则用；无则 status 词表；两者都缺落 `unknown`）。
  *
  * 口径：
  * - `ok → succeeded`；`failed → failed`；`rejected → rejected`；`blocked → blocked`；
  * - `timeout → expired`（沿用既有超时口径，与 `TIMEOUT`/`FRONTEND_CANCELLED` 词表同族）；
  * - `cancelled → cancelled`（沿用既有取消口径）；
- * - `unknown → failed`（旧卡面只有"执行失败"可承载"未确认成功"；unknown 段态二期再议）；
+ * - `unknown → unknown`（结局未知是一等状态，不得伪造成成功或确定失败）；
  * - `skipped → skipped`（上游确定性失败导致本工具未执行；一等状态，不得折成 failed）；
  * - 缺失 / 域外值 ⇒ null，调用方按当前协议兜底（不再读旧 `ok` 三元）。
  *
@@ -685,8 +685,10 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
     case 'ok':
       return 'succeeded'
     case 'failed':
-    case 'unknown':
       return 'failed'
+    case 'unknown':
+    case 'UNKNOWN':
+      return 'unknown'
     case 'rejected':
       return 'rejected'
     case 'blocked':
@@ -706,16 +708,15 @@ export function outcomeStatus(outcome: unknown): ToolRunStatus | null {
  * `confirm_decision` 帧的门结局（2A 挂账①）：**帧 status/decision 是唯一来源**。
  *
  * 后端实发（`SseChatEmitter#confirmDecision`）：`decision` ∈ {approve, reject, cancel}
- * （ConfirmGate 的三处发口；确认门去超时后不再发 `timeout`），`status` ∈ {APPROVED, REJECTED, CANCELLED}。
+ * （ConfirmGate 的三处发口），`status` ∈ {APPROVED, REJECTED, CANCELLED}。
  *
- * 返回 null = 帧未给可翻译结局，调用方不动段（旧 `approved` 布尔回退已退场）。
+ * 返回 null = 帧未给可翻译结局，调用方不动段。
  * `cancelled` 批G · S13 起落 **decision='cancel'**：用户停止是一次决策（门卡第五态「已取消」），
  * 不写决策元数据就会被 `readOnlyStateOf` 的 status 兜底读成「已超时」。
  */
 type ConfirmOutcome =
   | { state: 'approved' }
   | { state: 'rejected' }
-  | { state: 'timeout' }
   | { state: 'cancelled' }
 
 function confirmDecisionOutcome(frame: { decision?: unknown; status?: unknown }): ConfirmOutcome | null {
@@ -730,23 +731,17 @@ function confirmDecisionOutcome(frame: { decision?: unknown; status?: unknown })
   if (status === 'REJECTED' || status === 'REJECTED_ARGUMENTS') {
     return { state: 'rejected' }
   }
-  if (status === 'TIMEOUT') {
-    return { state: 'timeout' }
-  }
   if (status === 'CANCELLED') {
     return { state: 'cancelled' }
   }
-  // status 不具终态（PENDING/缺失）时才走 decision 词表（正常确认帧 / 旧帧兜底口径）。
-  if (decision === 'timeout') {
-    return { state: 'timeout' }
-  }
-  if (decision === 'cancel' || decision === 'cancelled') {
+  // status 不具终态（PENDING/缺失）时才走 decision 词表。
+  if (decision === 'cancel') {
     return { state: 'cancelled' }
   }
-  if (decision === 'reject' || decision === 'rejected') {
+  if (decision === 'reject') {
     return { state: 'rejected' }
   }
-  if (decision === 'approve' || decision === 'approved') {
+  if (decision === 'approve') {
     return { state: 'approved' }
   }
   return null
@@ -1023,34 +1018,13 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       })
       break
     case 'confirm_decision': {
-      // 2A 挂账①：结局以帧 status/decision 为准（TIMEOUT→expired / REJECTED→rejected /
-      // CANCELLED→cancelled / APPROVED→running）。二者皆缺 ⇒ 无可翻译结局，不动段。
+      // 2A 挂账①：结局以帧 status/decision 为准（REJECTED→rejected / CANCELLED→cancelled /
+      // APPROVED→running）。二者皆缺 ⇒ 无可翻译结局，不动段。
       const resolved = confirmDecisionOutcome(frame)
       if (resolved === null) {
         break
       }
-      if (resolved.state === 'timeout') {
-        // ①b first-wins：超时通知不携带新的决策信息 —— 段已落定（含其它页签先落的历史
-        // expired 段）时不得把结局改写成另一种终态。
-        // 取舍（收口修 NIT-3）：不同页签的持久化形状可能不同 —— 先到者可能是 expired+无
-        // decision（旧版本地判超时），也可能是 expired+decision='timeout'（本帧）。
-        // 两者在卡面等价（readOnlyStateOf 均归「已超时」），故先到者形状保留即可，不为统一形状
-        // 覆盖已落定段。与权威回执 gateReceiptOfStatus 的「无 decision」不对称是有意的：那条路
-        // 只归一终态、不投影决策元数据，本路才承载帧带来的 decision。
-        const existing = findToolPart(message, frame.toolCallId)
-        if (existing !== null && existing.status !== 'pending' && existing.status !== 'running') {
-          break
-        }
-        upsertToolPart(message, {
-          toolCallId: frame.toolCallId,
-          name: frame.name,
-          kind2: 'CONFIRM',
-          status: 'expired',
-          decision: 'timeout',
-          reason: frame.reason ?? '确认等待超时',
-          requiresAction: false
-        })
-      } else if (resolved.state === 'rejected') {
+      if (resolved.state === 'rejected') {
         upsertToolPart(message, {
           toolCallId: frame.toolCallId,
           name: frame.name,

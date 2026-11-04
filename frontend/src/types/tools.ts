@@ -451,15 +451,9 @@ export type FrontendToolOutcome = ToolOutcome
 /**
  * 前端工具的执行结果（回灌给后端的文本 + 本地痕迹）。
  *
- * 批3③a：`outcome` 是结局的权威维度；`ok` 语义收窄为 `ok === (outcome === 'ok')`
- * （预算到期等"结局未知"恒为 false），由 `makeExecution`（utils/frontend-tools.ts）单点推导。
+ * `outcome` 是结局的唯一权威维度（8 态；未知不等于失败），不另存布尔 ok 镜像。
  */
 export interface FrontendToolExecution {
-  /**
-   * @deprecated 批3③a 起读 `outcome`；本字段仅兼容保留，由 makeExecution 依据 outcome 推导，
-   * 不得再作为结局判据（`unknown ⇒ ok:false`）。
-   */
-  ok: boolean
   availability: ToolAvailability
   /** 执行结局（8 态，批 A 加宽；未知不等于失败）。 */
   outcome: FrontendToolOutcome

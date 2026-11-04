@@ -329,6 +329,13 @@
       "reason": "已同步staging精确索引、purge执行owner/epoch与可接续台账、固定run xack HASH，以及帧fence和决策/认领/取消/执行回写的同槽条件Lua迁移契约",
       "reviewedAt": "2026-11-04",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:c04b9e3ad411d46de15a9eaa5ec66fdb55070615b7d654ba112720f0853eb3a9",
+      "status": "synced",
+      "reason": "已同步前端latest/before分页、显式preparing、UNKNOWN与稳定工具身份、共享SSE恢复、表格异步写入及设置/附件生命周期契约",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

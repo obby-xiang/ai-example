@@ -66,14 +66,14 @@ export interface JobWatchOptions {
   /** 每次取到的作业快照 */
   onSnapshot?: (job: Job) => void
   /** 作业进入终态（快照为准） */
-  onFinal?: (job: Job) => void
+  onFinal?: (job: Job) => void | Promise<void>
   /** 通道状态变化（realtime=SSE 事件驱动；polling=降级为轮询） */
   onChannel?: (state: JobChannelState) => void
   /** 兜底轮询间隔（降级后的自愈节奏；缺省 JOB_FALLBACK_POLL_MS = 3s） */
   pollIntervalMs?: number
   /** 帧空闲看门狗阈值（缺省 FRAME_IDLE_WATCHDOG_MS = 120s；测试/E2E 注入小值） */
   frameIdleWatchdogMs?: number
-  /** 拉取快照失败时的回调（网络抖动不该打断跟踪） */
+  /** 快照或事件通道构造失败时的回调（网络抖动不该打断跟踪） */
   onError?: (error: unknown) => void
   /** 跟踪结束回调（终态自收/外部 dispose 谁先触发都只调一次；供注册表同步注销，F10） */
   onDisposed?: () => void
@@ -86,8 +86,7 @@ export function watchJob(options: JobWatchOptions): () => void {
   const pollIntervalMs = options.pollIntervalMs ?? JOB_FALLBACK_POLL_MS
   const frameIdleWatchdogMs = options.frameIdleWatchdogMs ?? FRAME_IDLE_WATCHDOG_MS
   let disposed = false
-  /** 首帧是否已到（"通道确实通了"的判据：首帧后补一次权威快照） */
-  let firstFrameSeen = false
+  const snapshotAbort = new AbortController()
 
   /**
    * 通道状态（M3 新口径）：
@@ -153,7 +152,7 @@ export function watchJob(options: JobWatchOptions): () => void {
   poller.start()
 
   /** 事件流句柄：构造可同步抛错，故不按"必有值"处理（见下方 F1 降级路径）。 */
-  let source: EventSource | null = null
+  let source: ReturnType<typeof tasksApi.openTaskEvents> | null = null
 
   try {
     source = tasksApi.openTaskEvents(
@@ -164,13 +163,8 @@ export function watchJob(options: JobWatchOptions): () => void {
         }
         resetWatchdog() // 帧 = 通道活着的直接证据（唯一复位源之一）
         const wasPolling = channelState === 'polling'
-        if (!firstFrameSeen) {
-          // 首帧（不限类型）= "通道确实通了"：与 onopen 各拉一次权威快照（D6）。
-          // 走 refreshNow 而非裸拉：撞在途守卫时由 controller 记 dirty flag 收尾补发（口径②，不丢弃）。
-          firstFrameSeen = true
-          poller.refreshNow()
-        } else if (wasPolling) {
-          // 死通道复活的第一帧：回事件驱动时拉一次权威快照（之后的帧不再拉，直到下一次 onopen/首帧）
+        if (wasPolling) {
+          // 死通道复活的第一帧：回事件驱动时拉一次权威快照
           poller.refreshNow()
         }
         if (wasPolling) {
@@ -239,7 +233,7 @@ export function watchJob(options: JobWatchOptions): () => void {
     }
     inflight = (async () => {
       try {
-        const job = await jobsApi.getJob(options.jobId)
+        const job = await jobsApi.getJob(options.jobId, { signal: snapshotAbort.signal })
         // 在途期间可能已被回收（同 kind 重跑/卸载/终态自制）：此时快照作废 ——
         // 写回会把**上一个作业**的状态盖到新作业的展示位上，甚至按旧终态弹提示。
         if (disposed) {
@@ -249,7 +243,7 @@ export function watchJob(options: JobWatchOptions): () => void {
         if (isJobFinal(job.status)) {
           const finalJob = job
           dispose()
-          options.onFinal?.(finalJob)
+          void Promise.resolve(options.onFinal?.(finalJob)).catch(() => {})
         }
       } catch (error) {
         // F8：与 resolve 面的 disposed 复检对称 —— dispose 后迟到失败不许再透传 onError
@@ -268,6 +262,7 @@ export function watchJob(options: JobWatchOptions): () => void {
   function teardown(): void {
     clearWatchdog() // 看门狗随跟踪一起收摊（F10 口径：终态自收同样要清）
     poller.stop() // 同时清 interval 与卸载 visibilitychange 监听
+    snapshotAbort.abort()
     source?.close() // 构造期抛错时无句柄；句柄非空但已 close 时重复 close 无副作用
   }
 

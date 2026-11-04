@@ -46,7 +46,7 @@ export const SHEET_FINGERPRINT_COLUMNS = 2
  */
 export const SHEET_UNDO_DEPTH = 3
 export const SHEET_WRITE_CHUNK_ROWS = 500
-/** 计数档分布显示的组数（超出折叠为「其余 N 组」；内部统计上限 = SHEET_AGGREGATE_MAX_GROUPS）。 */
+/** 计数档分布显示的组数；最多保留 20 组，容量外的新组只标记 truncated，不虚构精确余数。 */
 export const SHEET_DISTRIBUTION_SHOW_GROUPS = 5
 /** 批量读的批次行数：一段一次 `getArray`（对齐业界 batchGet，避免逐格读卡主线程）。 */
 export const SHEET_READ_BATCH_ROWS = 500
@@ -587,6 +587,329 @@ function scanRows(
   }
 }
 
+interface SheetScanRequest {
+  kind: 'scan'
+  ctx: SheetContext
+  rows: readonly number[]
+  columns: readonly number[]
+  visit: (row: number, values: readonly unknown[]) => void | boolean
+}
+
+interface SheetWriteRequest {
+  kind: 'write'
+  ctx: SheetContext
+  updates: readonly SheetCellUpdate[]
+}
+
+type SheetRequest = SheetScanRequest | SheetWriteRequest
+type SheetProgram<T> = Generator<SheetRequest, T, SheetWriteBatchResult | void>
+
+export interface SheetToolLifetime {
+  abandoned: boolean
+}
+
+function* scanRowsProgram(
+  ctx: SheetContext,
+  rows: readonly number[],
+  columns: readonly number[],
+  visit: (row: number, values: readonly unknown[]) => void | boolean
+): SheetProgram<void> {
+  yield { kind: 'scan', ctx, rows, columns, visit }
+}
+
+function* checkpointProgram(ctx: SheetContext): SheetProgram<void> {
+  yield { kind: 'scan', ctx, rows: [], columns: [], visit: () => undefined }
+}
+
+function* writeCellsProgram(ctx: SheetContext, updates: readonly SheetCellUpdate[]): SheetProgram<SheetWriteBatchResult> {
+  const result = yield { kind: 'write', ctx, updates }
+  return result ?? { applied: [...updates] }
+}
+
+function writeCellsSync(ctx: SheetContext, updates: readonly SheetCellUpdate[]): SheetWriteBatchResult {
+  try {
+    return ctx.adapter.writeCells(updates) ?? { applied: [...updates] }
+  } catch (error) {
+    return { applied: [], error }
+  }
+}
+
+function runSheetProgram<T>(program: SheetProgram<T>): T {
+  let step = program.next()
+  while (!step.done) {
+    const request = step.value
+    step = request.kind === 'scan'
+      ? (scanRows(request.ctx, request.rows, request.columns, request.visit), program.next())
+      : program.next(writeCellsSync(request.ctx, request.updates))
+  }
+  return step.value
+}
+
+const SHEET_MAIN_THREAD_SLICE_MS = 12
+const SHEET_UNDO_CHECKPOINT_CELLS = 500
+
+class SheetToolCancelled extends Error {
+  constructor() {
+    super('操作已取消')
+  }
+}
+
+class SheetContentChanged extends Error {
+  constructor() {
+    super('表格内容在协作计算期间已变化，请重试')
+  }
+}
+
+interface SheetVersionClock {
+  assert(): void
+  afterWrite(): void
+}
+
+function readSnapshotGrid(ctx: SheetContext): unknown[][] {
+  const rows = totalRows(ctx)
+  const columns = ctx.adapter.colCount()
+  return rows > 0 && columns > 0 ? ctx.adapter.getArray(0, 0, rows, columns) : []
+}
+
+function sameSnapshotGrid(left: readonly unknown[][], right: readonly unknown[][]): boolean {
+  if (left.length !== right.length) return false
+  for (let row = 0; row < left.length; row += 1) {
+    const leftLine = left[row] ?? []
+    const rightLine = right[row] ?? []
+    if (leftLine.length !== rightLine.length) return false
+    for (let col = 0; col < leftLine.length; col += 1) {
+      if (!Object.is(leftLine[col], rightLine[col])) return false
+    }
+  }
+  return true
+}
+
+function sheetVersionClock(ctx: SheetContext, snapshotFallback = false): SheetVersionClock | null {
+  if (typeof ctx.adapter.contentVersion !== 'function') {
+    if (!snapshotFallback) return null
+    let expected = readSnapshotGrid(ctx)
+    return {
+      assert: () => {
+        if (!sameSnapshotGrid(expected, readSnapshotGrid(ctx))) throw new SheetContentChanged()
+      },
+      afterWrite: () => {
+        expected = readSnapshotGrid(ctx)
+      }
+    }
+  }
+  let expected = sheetContentVersionOf(ctx.adapter)
+  const read = (): number => sheetContentVersionOf(ctx.adapter)
+  return {
+    assert: () => {
+      if (read() !== expected) throw new SheetContentChanged()
+    },
+    afterWrite: () => {
+      expected = read()
+    }
+  }
+}
+
+function yieldToMainThread(): Promise<void> {
+  const scheduler = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler
+  if (typeof scheduler?.yield === 'function') {
+    return scheduler.yield()
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+function snapshotContext(ctx: SheetContext): SheetContext {
+  const rows = totalRows(ctx)
+  const columns = ctx.adapter.colCount()
+  const grid = rows > 0 && columns > 0 ? ctx.adapter.getArray(0, 0, rows, columns) : []
+  const headers = Array.from({ length: columns }, (_, col) => ctx.adapter.header(col))
+  const selection = ctx.adapter.selection()
+  const sheetInstanceId = sheetInstanceIdOf(ctx)
+  const loadGeneration = sheetLoadGenerationOf(ctx)
+  return {
+    ...ctx,
+    sheetInstanceId,
+    loadGeneration,
+    adapter: {
+      rowCount: () => rows,
+      colCount: () => columns,
+      header: (col) => headers[col] ?? '',
+      getCell: (row, col) => grid[row]?.[col],
+      getArray: (row, col, rowSpan, colSpan) => Array.from({ length: rowSpan }, (_, rowOffset) =>
+        Array.from({ length: colSpan }, (_, colOffset) => grid[row + rowOffset]?.[col + colOffset])),
+      writeCells: () => ({ applied: [], error: new Error('固定快照只读，不能写入') }),
+      selection: () => selection
+    }
+  }
+}
+
+async function scanRowsCooperative(
+  request: SheetScanRequest,
+  lifetime: SheetToolLifetime | undefined,
+  clock: SheetVersionClock | null,
+  allowYield: boolean
+): Promise<void> {
+  const { ctx, rows, columns, visit } = request
+  if (rows.length === 0 || columns.length === 0) {
+    if (lifetime?.abandoned) throw new SheetToolCancelled()
+    clock?.assert()
+    if (allowYield) await yieldToMainThread()
+    if (lifetime?.abandoned) throw new SheetToolCancelled()
+    clock?.assert()
+    return
+  }
+  const colIndex = new Map<number, number>()
+  columns.forEach((col, index) => colIndex.set(col, index))
+  const runs = columnRuns(columns)
+  let sliceStartedAt = Date.now()
+  outer: for (const run of rowRuns(rows)) {
+    for (let offset = 0; offset < run.length; offset += SHEET_READ_BATCH_ROWS) {
+      if (lifetime?.abandoned) throw new SheetToolCancelled()
+      clock?.assert()
+      const span = Math.min(SHEET_READ_BATCH_ROWS, run.length - offset)
+      const buffer: unknown[][] = Array.from({ length: span }, () => new Array<unknown>(columns.length).fill(undefined))
+      for (const colRun of runs) {
+        const grid = ctx.adapter.getArray(run.start + offset, colRun.start, span, colRun.cols.length)
+        for (let r = 0; r < span; r += 1) {
+          const line = grid[r]
+          if (!Array.isArray(line)) continue
+          for (let c = 0; c < colRun.cols.length; c += 1) {
+            const col = colRun.cols[c]
+            if (col === undefined) continue
+            const index = colIndex.get(col)
+            if (index !== undefined) {
+              const target = buffer[r]
+              if (target) target[index] = line[c]
+            }
+          }
+        }
+      }
+      for (let r = 0; r < span; r += 1) {
+        if (visit(run.start + offset + r, buffer[r] ?? []) === false) break outer
+      }
+      if (lifetime?.abandoned) throw new SheetToolCancelled()
+      clock?.assert()
+      if (allowYield && Date.now() - sliceStartedAt >= SHEET_MAIN_THREAD_SLICE_MS) {
+        await yieldToMainThread()
+        if (lifetime?.abandoned) throw new SheetToolCancelled()
+        clock?.assert()
+        sliceStartedAt = Date.now()
+      }
+    }
+  }
+}
+
+async function runSheetProgramCooperative<T>(
+  program: SheetProgram<T>,
+  lifetime: SheetToolLifetime | undefined,
+  clock: SheetVersionClock | null,
+  writeMode: boolean
+): Promise<T> {
+  let step = program.next()
+  let sliceStartedAt = Date.now()
+  while (!step.done) {
+    const request = step.value
+    if (request.kind === 'scan') {
+      await scanRowsCooperative(request, lifetime, clock, !writeMode || clock !== null)
+      step = program.next()
+      continue
+    }
+    let result: SheetWriteBatchResult
+    if (lifetime?.abandoned) {
+      result = { applied: [], error: new SheetToolCancelled() }
+    } else {
+      try {
+        clock?.assert()
+        result = writeCellsSync(request.ctx, request.updates)
+      } catch (error) {
+        result = { applied: [], error }
+      }
+    }
+    if (result.applied.length > 0) {
+      try {
+        clock?.afterWrite()
+      } catch (error) {
+        result.error ??= error
+      }
+    }
+    if (result.error === undefined && clock !== null && Date.now() - sliceStartedAt >= SHEET_MAIN_THREAD_SLICE_MS) {
+      await yieldToMainThread()
+      if (lifetime?.abandoned) result.error = new SheetToolCancelled()
+      try {
+        clock.assert()
+      } catch (error) {
+        result.error = error
+      }
+      sliceStartedAt = Date.now()
+    }
+    step = program.next(result)
+  }
+  return step.value
+}
+
+async function runReadonlySheetProgram<T>(
+  ctx: SheetContext,
+  lifetime: SheetToolLifetime | undefined,
+  programOf: (effectiveCtx: SheetContext) => SheetProgram<T>
+): Promise<T> {
+  const clock = sheetVersionClock(ctx)
+  if (clock === null) {
+    return await runSheetProgramCooperative(programOf(snapshotContext(ctx)), lifetime, null, false)
+  }
+  clock.assert()
+  const result = await runSheetProgramCooperative(programOf(ctx), lifetime, clock, false)
+  clock.assert()
+  return result
+}
+
+function runWriteSheetProgram<T>(
+  ctx: SheetContext,
+  lifetime: SheetToolLifetime | undefined,
+  programOf: (effectiveCtx: SheetContext) => SheetProgram<T>
+): Promise<T> {
+  const clock = sheetVersionClock(ctx, true)
+  return runSheetProgramCooperative(programOf(ctx), lifetime, clock, true)
+}
+
+function cooperativeErrorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function runPlanReadonlySheetProgram(
+  ctx: SheetContext,
+  lifetime: SheetToolLifetime | undefined,
+  programOf: (effectiveCtx: SheetContext) => SheetProgram<SheetPlanOutcome>
+): Promise<SheetPlanOutcome> {
+  try {
+    return await runReadonlySheetProgram(ctx, lifetime, programOf)
+  } catch (error) {
+    return { ok: false, reason: cooperativeErrorReason(error) }
+  }
+}
+
+async function runPlanWriteSheetProgram(
+  ctx: SheetContext,
+  lifetime: SheetToolLifetime | undefined,
+  programOf: (effectiveCtx: SheetContext) => SheetProgram<SheetPlanOutcome>
+): Promise<SheetPlanOutcome> {
+  try {
+    return await runWriteSheetProgram(ctx, lifetime, programOf)
+  } catch (error) {
+    return { ok: false, reason: cooperativeErrorReason(error) }
+  }
+}
+
+async function runApplyWriteSheetProgram(
+  ctx: SheetContext,
+  lifetime: SheetToolLifetime | undefined,
+  programOf: (effectiveCtx: SheetContext) => SheetProgram<ApplySheetPlanOutcome>
+): Promise<ApplySheetPlanOutcome> {
+  try {
+    return await runWriteSheetProgram(ctx, lifetime, programOf)
+  } catch (error) {
+    return { ok: false, reason: cooperativeErrorReason(error), appliedCells: 0, undoable: false }
+  }
+}
+
 function allColumnsOf(ctx: SheetContext): number[] {
   const count = ctx.fields.length > 0 ? ctx.fields.length : ctx.adapter.colCount()
   return Array.from({ length: count }, (_, index) => index)
@@ -664,24 +987,25 @@ function parseRowRange(value: unknown, maxRows: number): number[] | null {
   return rows
 }
 
-function resolveScope(
+type ResolveScopeOutcome = { ok: true; resolved: ResolvedScope } | { ok: false; reason: string }
+
+function* resolveScopeProgram(
   ctx: SheetContext,
   args: SheetArgs,
   options: { defaultScope: string; columns?: readonly number[]; requirePredicateForPredicate?: boolean }
-): { ok: true; resolved: ResolvedScope } | { ok: false; reason: string } {
+): SheetProgram<ResolveScopeOutcome> {
   const rawScope = typeof args.scope === 'string' && args.scope !== '' ? args.scope : options.defaultScope
   const predicate = (args.predicate ?? null) as FieldQueryCondition | null
   const predicateSummary = predicate && Array.isArray(predicate.fields) && predicate.fields.length > 0
     ? `条件「${conditionSummary(predicate)}」`
     : ''
-  const allRows = allRowIndexes(ctx)
-  const filterByPredicate = (rows: number[]): number[] => {
+  const filterByPredicate = function* (rows: number[]): SheetProgram<number[]> {
     if (!predicate || !Array.isArray(predicate.fields) || predicate.fields.length === 0) {
       return rows
     }
     const columns = allColumnsOf(ctx)
     const kept: number[] = []
-    scanRows(ctx, rows, columns, (row, values) => {
+    yield* scanRowsProgram(ctx, rows, columns, (row, values) => {
       if (matchesCondition(rowRecord(ctx, columns, values), predicate)) kept.push(row)
     })
     return kept
@@ -689,12 +1013,12 @@ function resolveScope(
 
   switch (rawScope) {
     case 'sheet': {
-      const rows = filterByPredicate(allRows)
+      const rows = yield* filterByPredicate(allRowIndexes(ctx))
       return { ok: true, resolved: { scope: 'sheet', rows, summary: `${ctx.defCode} 全表`, predicateSummary } }
     }
     case 'columns': {
       const columns = options.columns ?? []
-      const rows = filterByPredicate(allRows)
+      const rows = yield* filterByPredicate(allRowIndexes(ctx))
       const labels = columns.map((col) => columnCode(ctx, col)).join('、')
       return { ok: true, resolved: { scope: 'columns', rows, summary: `${ctx.defCode} 列 ${labels}`, predicateSummary } }
     }
@@ -703,7 +1027,7 @@ function resolveScope(
       if (rows === null) {
         return { ok: false, reason: 'rowRange 需要 Excel 行号区间（如 2-41，表头为第 1 行），且起始行不小于 2。' }
       }
-      const filtered = filterByPredicate(rows)
+      const filtered = yield* filterByPredicate(rows)
       return {
         ok: true,
         resolved: {
@@ -718,7 +1042,7 @@ function resolveScope(
       if (!predicate || !Array.isArray(predicate.fields) || predicate.fields.length === 0) {
         return { ok: false, reason: 'scope=predicate 需要同时给出 predicate（字段条件），不猜条件。' }
       }
-      const rows = filterByPredicate(allRows)
+      const rows = yield* filterByPredicate(allRowIndexes(ctx))
       return { ok: true, resolved: { scope: 'predicate', rows, summary: `${ctx.defCode} 条件命中`, predicateSummary } }
     }
     case 'selection':
@@ -730,7 +1054,7 @@ function resolveScope(
       if (rows.length === 0) {
         return { ok: false, reason: '当前表格没有选区。请先选中要操作的行（或用条件描述哪些行），本次未做任何修改。' }
       }
-      const filtered = filterByPredicate(rows)
+      const filtered = yield* filterByPredicate(rows)
       return { ok: true, resolved: { scope: 'selection', rows: filtered, summary: `${ctx.defCode} 选区`, predicateSummary } }
     }
   }
@@ -871,7 +1195,7 @@ function readMeta(ctx: SheetContext, dataClass: 'D1' | 'D2'): SheetToolMeta {
  * **离开浏览器的业务数据 = 这 ≤20 行采样**（R3 允许的唯一 D2 面，授权见 `docs/evidence` 的
  * D2 授权件）；整表不出域。尺寸闸（{@link capSheetResult}）覆盖整条结果（表头/摘要/采样/尾行）。
  */
-export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+function* readSheetSummaryProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const policy = effectiveSheetPolicy()
@@ -902,7 +1226,7 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
       }
     }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'selection' })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'selection' })
   if (!scope.ok) return scope
   const { resolved } = scope
   const columns = projectedColumns(ctx, args, resolved)
@@ -920,7 +1244,7 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
   const blankColumns = columns.slice(0, 8)
   if (blankColumns.length > 0) {
     const blanks = new Array<number>(blankColumns.length).fill(0)
-    scanRows(ctx, allRowIndexes(ctx), blankColumns, (_row, values) => {
+    yield* scanRowsProgram(ctx, allRowIndexes(ctx), blankColumns, (_row, values) => {
       values.forEach((value, index) => {
         if (isBlank(value)) blanks[index] = (blanks[index] ?? 0) + 1
       })
@@ -936,7 +1260,7 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
       .filter((col): col is number => col !== null)
     const seen = new Set<string>()
     let duplicated = 0
-    scanRows(ctx, allRowIndexes(ctx), keyColumns, (_row, values) => {
+    yield* scanRowsProgram(ctx, allRowIndexes(ctx), keyColumns, (_row, values) => {
       const text = values.map((value) => cellDisplay(value).trim()).join('|')
       if (text.replace(/\|/g, '').trim() === '') return
       if (seen.has(text)) duplicated += 1
@@ -948,7 +1272,7 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
   const sampleRows = resolved.rows.slice(0, effectiveLimit)
   lines.push(`采样（前 ${sampleRows.length} 行，投影 ${columns.length} 列）：`)
   const sampleLines: string[] = []
-  scanRows(ctx, sampleRows, columns, (row, values) => {
+  yield* scanRowsProgram(ctx, sampleRows, columns, (row, values) => {
     const cells = columns.map((col, index) => `${cellAddress(col, row)} ${columnCode(ctx, col)}=${cellDisplay(values[index])}`)
     sampleLines.push(`  第 ${excelDisplay(row)} 行 | ${cells.join(' | ')}`)
   })
@@ -974,6 +1298,14 @@ export function readSheetSummary(ctx: SheetContext, args: SheetArgs): SheetToolO
   }
 }
 
+export function readSheetSummaryAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => readSheetSummaryProgram(effectiveCtx, args))
+}
+
 // ── 读侧：聚合（兼作计数级预览引擎） ──────────────────────────────────────────
 
 interface MetricValue {
@@ -982,36 +1314,59 @@ interface MetricValue {
   order: number | null
 }
 
-function metricFromValues(values: readonly unknown[], metric: string): MetricValue {
+interface MetricState {
+  count: number
+  blanks: number
+  sum: number
+  min: string | null
+  max: string | null
+  distinct?: Set<string>
+}
+
+function newMetricState(metrics: readonly string[]): MetricState {
+  return {
+    count: 0,
+    blanks: 0,
+    sum: 0,
+    min: null,
+    max: null,
+    ...(metrics.includes('distinct') ? { distinct: new Set<string>() } : {})
+  }
+}
+
+function addMetricValue(state: MetricState, value: unknown, metrics: readonly string[]): void {
+  state.count += 1
+  const text = cellDisplay(value)
+  if (isBlank(value)) state.blanks += 1
+  if (metrics.includes('sum')) {
+    const num = Number(text)
+    if (Number.isFinite(num)) state.sum += num
+  }
+  if (text.trim() !== '') {
+    if (state.min === null || compareValues(text, state.min) < 0) state.min = text
+    if (state.max === null || compareValues(text, state.max) > 0) state.max = text
+  }
+  state.distinct?.add(text)
+}
+
+function metricFromState(state: MetricState, metric: string): MetricValue {
   switch (metric) {
     case 'count':
-      return { text: `${values.length}`, order: values.length }
+      return { text: `${state.count}`, order: state.count }
     case 'distinct': {
-      const size = new Set(values.map((value) => cellDisplay(value))).size
+      const size = state.distinct?.size ?? 0
       return { text: `${size}`, order: size }
     }
     case 'blankRate': {
-      const blanks = values.filter((value) => isBlank(value)).length
-      const rate = values.length === 0 ? 0 : blanks / values.length
+      const rate = state.count === 0 ? 0 : state.blanks / state.count
       return { text: `${Math.round(rate * 100)}%`, order: rate }
     }
-    case 'sum': {
-      const sum = values.reduce((acc: number, value) => {
-        const num = Number(cellDisplay(value))
-        return Number.isFinite(num) ? acc + num : acc
-      }, 0)
-      return { text: `${sum}`, order: sum }
-    }
+    case 'sum':
+      return { text: `${state.sum}`, order: state.sum }
     case 'min':
-    case 'max': {
-      const texts = values.map((value) => cellDisplay(value)).filter((text) => text.trim() !== '')
-      if (texts.length === 0) return { text: '—', order: null }
-      const best = texts.reduce((acc, text) => {
-        const cmp = compareValues(text, acc)
-        return (metric === 'min' ? cmp < 0 : cmp > 0) ? text : acc
-      })
-      return { text: best, order: null }
-    }
+      return state.min === null ? { text: '—', order: null } : { text: state.min, order: null }
+    case 'max':
+      return state.max === null ? { text: '—', order: null } : { text: state.max, order: null }
     default:
       return { text: '', order: null }
   }
@@ -1073,8 +1428,8 @@ function aggregateSortLine(sort: AggregateSort, limit: number): string {
 
 interface GroupEntry {
   label: string
-  rows: number[]
-  values: unknown[]
+  rows: number
+  state: MetricState
   metrics: Map<string, MetricValue>
 }
 
@@ -1096,7 +1451,7 @@ function compareGroupEntries(left: GroupEntry, right: GroupEntry, sort: Aggregat
   return 0
 }
 
-export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+function* aggregateSheetProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const limit = parseLimit(args.limit, SHEET_AGGREGATE_MAX_GROUPS, SHEET_AGGREGATE_MAX_GROUPS)
@@ -1125,7 +1480,7 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   if (typeof args.columnCode === 'string' && args.columnCode !== '' && metricCol === null) {
     return { ok: false, reason: `度量列 ${args.columnCode} 不在当前表格中。` }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'sheet' })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'sheet' })
   if (!scope.ok) return scope
   const { resolved } = scope
 
@@ -1133,8 +1488,13 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   lines.push(`范围：${resolved.predicateSummary || '全部数据'}（命中 ${resolved.rows.length} 行 / 共 ${totalRows(ctx)} 行）`)
 
   if (groupBy === null) {
-    const values = readSingleColumn(ctx, resolved.rows, metricCol ?? 0)
-    const parts = metrics.map((metric) => `${metric}=${metricFromValues(values, metric).text}`)
+    const state = newMetricState(metrics)
+    if (metricCol !== null) {
+      yield* scanRowsProgram(ctx, resolved.rows, [metricCol], (_row, values) => {
+        addMetricValue(state, values[0], metrics)
+      })
+    }
+    const parts = metrics.map((metric) => `${metric}=${metricFromState(state, metric).text}`)
     lines.push(`总计：${resolved.rows.length} 行${metricCol === null ? '' : ` · ${parts.join(' · ')}`}`)
     const capped = capSheetResult({ lines, total: 1, returned: 1, unit: '组' }, { whole: true })
     // 聚合只回聚合值（0 行原文）⇒ D1；totalRows 报"范围总行数"，让"聚合了多大一张表"可追
@@ -1146,18 +1506,18 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   const groupIdx = scanColumns.indexOf(groupBy)
   const valueIdx = scanColumns.indexOf(valueCol)
   const groups = new Map<string, GroupEntry>()
-  scanRows(ctx, resolved.rows, scanColumns, (row, values) => {
+  yield* scanRowsProgram(ctx, resolved.rows, scanColumns, (_row, values) => {
     // 与写侧分布共用同一归一化（groupKeyOf）：换一处 key 规则就会让两边组数对不上
     const label = groupKeyOf(values[groupIdx])
-    const entry = groups.get(label) ?? { label, rows: [], values: [], metrics: new Map<string, MetricValue>() }
-    entry.rows.push(row)
-    entry.values.push(values[valueIdx])
+    const entry = groups.get(label) ?? { label, rows: 0, state: newMetricState(metrics), metrics: new Map<string, MetricValue>() }
+    entry.rows += 1
+    addMetricValue(entry.state, values[valueIdx], metrics)
     groups.set(label, entry)
   })
   const entries = [...groups.values()]
   for (const entry of entries) {
     for (const metric of metrics) {
-      entry.metrics.set(metric, metricFromValues(entry.values, metric))
+      entry.metrics.set(metric, metricFromState(entry.state, metric))
     }
   }
   if (sort.kind !== 'none') {
@@ -1167,23 +1527,22 @@ export function aggregateSheet(ctx: SheetContext, args: SheetArgs): SheetToolOut
   lines.push(aggregateSortLine(sort, limit))
   const groupLines = shown.map((entry) => {
     if (metricCol === null) {
-      return `  ${entry.label}：${entry.rows.length} 行`
+      return `  ${entry.label}：${entry.rows} 行`
     }
     const parts = metrics.map((metric) => `${metric}=${entry.metrics.get(metric)?.text ?? ''}`)
-    return `  ${entry.label}：${entry.rows.length} 行 · ${parts.join(' · ')}`
+    return `  ${entry.label}：${entry.rows} 行 · ${parts.join(' · ')}`
   })
   lines.push(`分组：${columnCode(ctx, groupBy)}`)
   const capped = capSheetResult({ lines: [...lines, ...groupLines], total: entries.length, returned: shown.length, unit: '组', prefixLines: lines.length }, { whole: true })
   return { ok: true, text: capped.text, meta: readMeta(ctx, 'D1') }
 }
 
-/** 单列批读（一次 `getArray` 扫完给定行），供总计/条件计数复用。 */
-function readSingleColumn(ctx: SheetContext, rows: readonly number[], col: number): unknown[] {
-  const values: unknown[] = []
-  scanRows(ctx, rows, [col], (_row, cells) => {
-    values.push(cells[0])
-  })
-  return values
+export function aggregateSheetAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => aggregateSheetProgram(effectiveCtx, args))
 }
 
 /**
@@ -1297,7 +1656,7 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
 
 // ── 读侧：本地校验摘要 ───────────────────────────────────────────────────────
 
-export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const limit = parseLimit(args.limit, SHEET_TOOL_DEFAULT_SAMPLE_ROWS, SHEET_TOOL_MAX_SAMPLE_ROWS)
@@ -1307,17 +1666,52 @@ export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcom
   if (args.scope !== undefined && args.scope !== 'sheet' && args.scope !== 'selection') {
     return { ok: false, reason: 'review_cells 的 scope 只能是 sheet 或 selection。' }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'sheet' })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'sheet' })
   if (!scope.ok) return scope
   const { resolved } = scope
   const allColumns = allColumnsOf(ctx)
-  const rows: Array<Record<string, unknown>> = []
-  scanRows(ctx, allRowIndexes(ctx), allColumns, (_row, values) => {
-    rows.push(rowRecord(ctx, allColumns, values))
+  const keyFields = ctx.fields.filter((field) => field.key)
+  const firstKeyRows = new Map<string, number>()
+  if (keyFields.length > 0) {
+    const keyIndexes = keyFields.map((field) => ctx.fields.indexOf(field))
+    yield* scanRowsProgram(ctx, allRowIndexes(ctx), keyIndexes, (row, values) => {
+      const keyText = values.map((value) => String(value ?? '').trim()).join('|')
+      const rowIndex = excelRowNumber(row)
+      if (keyText.replace(/\|/g, '').trim() !== '' && !firstKeyRows.has(keyText)) {
+        firstKeyRows.set(keyText, rowIndex)
+      }
+    })
+  }
+  const filtered: ReturnType<typeof validateRows> = []
+  yield* scanRowsProgram(ctx, resolved.rows, allColumns, (row, values) => {
+    const record = rowRecord(ctx, allColumns, values)
+    const rowIndex = excelRowNumber(row)
+    for (const field of ctx.fields) {
+      const reason = validateCell(field, record[field.code])
+      if (reason) {
+        filtered.push({
+          rowIndex,
+          fieldCode: field.code,
+          fieldLabel: field.label,
+          value: record[field.code] === null || record[field.code] === undefined ? '' : String(record[field.code]),
+          reason
+        })
+      }
+    }
+    if (keyFields.length > 0) {
+      const keyText = keyFields.map((field) => String(record[field.code] ?? '').trim()).join('|')
+      const first = firstKeyRows.get(keyText)
+      if (keyText.replace(/\|/g, '').trim() !== '' && first !== undefined && first !== rowIndex) {
+        filtered.push({
+          rowIndex,
+          fieldCode: keyFields.map((field) => field.code).join('+'),
+          fieldLabel: keyFields.map((field) => field.label).join('+'),
+          value: keyText,
+          reason: `主键重复: ${keyText}（第 ${first} 行已存在）`
+        })
+      }
+    }
   })
-  const issues = validateRows(ctx.fields, rows)
-  const wanted = new Set(resolved.rows.map((row) => excelRowNumber(row)))
-  const filtered = issues.filter((issue) => wanted.has(issue.rowIndex))
   const fieldColumns = new Map(ctx.fields.map((field, col) => [field.code, col]))
 
   const byField = new Map<string, number>()
@@ -1352,6 +1746,14 @@ export function reviewCells(ctx: SheetContext, args: SheetArgs): SheetToolOutcom
   }
 }
 
+export function reviewCellsAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => reviewCellsProgram(effectiveCtx, args))
+}
+
 // ── 读侧：全文检索（find_rows） ───────────────────────────────────────────────
 
 const FIND_MATCH_MODES = new Set(['contains', 'equals', 'prefix'])
@@ -1362,7 +1764,7 @@ const FIND_MATCH_MODES = new Set(['contains', 'equals', 'prefix'])
  * 与业界「查找」同口径：默认 `contains` + 忽略大小写，`equals` 按整格相等、`prefix` 按前缀；
  * 采样恒走 {@link capSheetResult} 整条闸（≤20 行 / 2000 字符），命中总数不受采样影响。
  */
-export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+function* findRowsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const search = typeof args.search === 'string' ? args.search : ''
@@ -1398,15 +1800,15 @@ export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
     columns = allColumnsOf(ctx)
     columnLabel = `全部 ${columns.length} 列`
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'sheet' })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'sheet' })
   if (!scope.ok) return scope
   const { resolved } = scope
 
   const needle = ignoreCase ? search.toLowerCase() : search
-  const hits: number[] = []
+  let hitCount = 0
   const perColumn = new Map<number, number>()
   const sampleLines: string[] = []
-  scanRows(ctx, resolved.rows, columns, (row, values) => {
+  yield* scanRowsProgram(ctx, resolved.rows, columns, (row, values) => {
     const matchedCells: string[] = []
     columns.forEach((col, index) => {
       const text = cellDisplay(values[index])
@@ -1424,7 +1826,7 @@ export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
       }
     })
     if (matchedCells.length === 0) return
-    hits.push(row)
+    hitCount += 1
     if (sampleLines.length < limit) {
       sampleLines.push(`  第 ${excelDisplay(row)} 行 | ${matchedCells.join(' | ')}`)
     }
@@ -1432,21 +1834,21 @@ export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
 
   const lines: string[] = []
   lines.push(`检索：${match}「${search}」（${columnLabel}，区分大小写=${!ignoreCase}）`)
-  lines.push(`范围：${resolved.summary}${resolved.predicateSummary ? ` · ${resolved.predicateSummary}` : ''}（命中 ${hits.length} 行 / 共 ${resolved.rows.length} 行）`)
+  lines.push(`范围：${resolved.summary}${resolved.predicateSummary ? ` · ${resolved.predicateSummary}` : ''}（命中 ${hitCount} 行 / 共 ${resolved.rows.length} 行）`)
   const hitColumns = [...perColumn.entries()]
     .sort((left, right) => left[0] - right[0])
     .map(([col, count]) => `${columnCode(ctx, col)} ${count} 行`)
   if (hitColumns.length > 0) {
     lines.push(`命中列：${hitColumns.join('、')}`)
   }
-  if (hits.length === 0) {
+  if (hitCount === 0) {
     lines.push('没有命中的行（可换关键字，或去掉 match/columnCodes 收窄条件）。')
   } else {
     lines.push(`采样（前 ${sampleLines.length} 行，命中单元格带地址）：`)
   }
   const capped = capSheetResult({
     lines: [...lines, ...sampleLines],
-    total: hits.length,
+    total: hitCount,
     returned: sampleLines.length,
     unit: '行',
     prefixLines: lines.length
@@ -1465,6 +1867,14 @@ export function findRows(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
       sheetVer: ctx.version
     }
   }
+}
+
+export function findRowsAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => findRowsProgram(effectiveCtx, args))
 }
 
 // ── 写侧：计划与预览文本 ─────────────────────────────────────────────────────
@@ -1601,25 +2011,6 @@ function previewIdentityMismatch(plan: SheetWritePlan, ctx: SheetContext): boole
   return plan.previewId !== previewIdentityOf(plan.toolCallId, ctx, plan.scope)
 }
 
-/**
- * 目标行指纹是否与预览时一致（预览硬闸的第二道，与 `applySheetPlan` 同口径）。
- *
- * <p>只比"这张卡要改的那几行"的主键值：同一文件内的其它手改不使预览失效
- * （用户 2026-10-25「同文件后写可覆盖」口径），无主键则比首列。
- */
-function sameTargetFingerprint(plan: SheetWritePlan, ctx: SheetContext): boolean {
-  if (plan.targetRows.length === 0) {
-    return true
-  }
-  const current = fingerprintRows(ctx, plan.targetRows, keyColumns(ctx))
-  for (let index = 0; index < plan.targetRows.length; index += 1) {
-    if (current[index] !== plan.fingerprint[index]) {
-      return false
-    }
-  }
-  return true
-}
-
 const PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未应用任何改动。请重新发起。'
 const UNDO_PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未执行撤销。请重新发起。'
 const STALE_PREVIEW_REASON = '预览已失效（表格在此期间被修改），未产出新的明细。请让 AI 重新发起。'
@@ -1646,6 +2037,8 @@ function makePlan(input: {
   args?: SheetArgs
   /** 重算时沿用的 planId（同一份计划只换粒度，id 不变 —— 撤销补丁按它绑定） */
   planId?: string
+  /** 协作驱动已按同一版本/快照算出的指纹；缺省保持原同步现算。 */
+  fingerprint?: string[]
 }): SheetWritePlan {
   const detail = input.detail ?? 'full'
   const rows = new Set(input.changes.map((change) => change.row))
@@ -1675,9 +2068,9 @@ function makePlan(input: {
     targetRows: input.targetRows,
     // 指纹按 targetRows 现算（计数档也必须有）：否则"预览后手改一格再应用"就检测不到 ——
     // 应用前要物化明细，物化会按**当时**的表状态重算，等于把改动后的状态当成预览时的状态（T-25 的洞）。
-    fingerprint: input.targetRows.length > 0
+    fingerprint: input.fingerprint ?? (input.targetRows.length > 0
       ? fingerprintRows(input.ctx, input.targetRows, keyColumns(input.ctx))
-      : [],
+      : []),
     warnings: input.warnings,
     rulesText: input.rulesText,
     detail,
@@ -1686,6 +2079,16 @@ function makePlan(input: {
     sheetVer: input.ctx.version,
     status: 'pending'
   }
+}
+
+function* makePlanProgram(input: Parameters<typeof makePlan>[0]): SheetProgram<SheetWritePlan> {
+  const fingerprint: string[] = []
+  if (input.targetRows.length > 0) {
+    yield* scanRowsProgram(input.ctx, input.targetRows, keyColumns(input.ctx), (_row, values) => {
+      fingerprint.push(values.map((value) => cellDisplay(value).trim()).join('\u0001'))
+    })
+  }
+  return makePlan({ ...input, fingerprint })
 }
 
 function ruleSampleText(plan: SheetWritePlan, ctx: SheetContext): string {
@@ -1732,8 +2135,10 @@ export function planPreviewText(plan: SheetWritePlan | null): string {
   if (distribution !== '') {
     lines.push(distribution)
   }
-  if (plan.detail === 'none') {
+  if (plan.detail === 'none' && plan.preview === 'count') {
     lines.push('明细未加载（计数级预览）：点「看样例」或「全量 diff」才会逐格计算。')
+  } else if (plan.detail === 'none' && plan.preview === 'sample-diff') {
+    lines.push('仅加载前 3 处样例；切到「全量 diff」或应用前会重算完整明细。')
   }
   if (plan.skippedCount > 0) {
     lines.push(`跳过：${plan.skippedCount} 格（校验器拒绝，未写入）`)
@@ -1800,7 +2205,7 @@ interface SheetCounts {
   cells: number
   skipped: number
   groups: Map<string, GroupCount>
-  /** 组数是否超过内部上限（20）：超过即只统计前 20 组，其余折叠计"其他 N 组" */
+  /** 是否遇到了保留容量之外的新组；此时 otherGroups 只报告已保留且未展示的组数。 */
   truncated: boolean
   /** 已越过硬上限（扫描应立即停止） */
   overflow: boolean
@@ -1821,11 +2226,15 @@ function countRow(counts: SheetCounts, hitCells: number, key: string | null): bo
     counts.rows += 1
     counts.cells += hitCells
     if (key !== null) {
-      const entry = counts.groups.get(key) ?? { key, rows: 0, cells: 0 }
-      entry.rows += 1
-      entry.cells += hitCells
-      counts.groups.set(key, entry)
-      if (counts.groups.size > SHEET_AGGREGATE_MAX_GROUPS) {
+      let entry = counts.groups.get(key)
+      if (!entry && counts.groups.size < SHEET_AGGREGATE_MAX_GROUPS) {
+        entry = { key, rows: 0, cells: 0 }
+        counts.groups.set(key, entry)
+      }
+      if (entry) {
+        entry.rows += 1
+        entry.cells += hitCells
+      } else {
         counts.truncated = true
       }
     }
@@ -1964,7 +2373,7 @@ function buildMatcher(args: SheetArgs): { ok: true; match: (text: string) => { h
   }
 }
 
-export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+function* planReplaceProgram(ctx: SheetContext, args: SheetArgs, toolCallId: string): SheetProgram<SheetPlanOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   if (!Array.isArray(args.columnCodes) || args.columnCodes.length === 0) {
@@ -1988,18 +2397,18 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
   if (preview === null) {
     return { ok: false, reason: 'preview 只能是 count/sample-diff/full-diff。' }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'selection', columns })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'selection', columns })
   if (!scope.ok) return scope
 
-  // P0 快路径（§6.2）：count 档只数不物化；明细档（sample-diff/full-diff）才建 change 对象。
-  const countMode = preview === 'count'
-  const byCol = countMode ? resolveDistributionColumn(ctx, args, columns) : null
-  const scanColumns = countMode && byCol !== null && !columns.includes(byCol) ? [...columns, byCol] : columns
+  // count/sample 只留计数与前 3 处样例；full-diff 才物化逐格明细。
+  const lightMode = preview !== 'full-diff'
+  const byCol = preview === 'count' ? resolveDistributionColumn(ctx, args, columns) : null
+  const scanColumns = byCol !== null && !columns.includes(byCol) ? [...columns, byCol] : columns
   const byIndex = byCol === null ? -1 : scanColumns.indexOf(byCol)
   const counts = newCounts()
   const changes: SheetChange[] = []
   const matchedRows: number[] = []
-  scanRows(ctx, scope.resolved.rows, scanColumns, (row, values) => {
+  yield* scanRowsProgram(ctx, scope.resolved.rows, scanColumns, (row, values) => {
     let hitCells = 0
     columns.forEach((col, colIndex) => {
       const oldValue = values[colIndex]
@@ -2012,31 +2421,29 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
         return
       }
       hitCells += 1
-      if (!countMode || changes.length < SHEET_PREVIEW_SAMPLE_PAIRS) {
-        // 计数档只留前 3 处样例（卡面"看样例前 3 条"的承诺），全量明细一个都不建
+      if (!lightMode || changes.length < SHEET_PREVIEW_SAMPLE_PAIRS) {
         changes.push({ row, col, oldValue, newValue: matched.next })
       }
     })
-    if (countMode) {
+    if (lightMode) {
       if (hitCells > 0) matchedRows.push(row)
-      // 返回 true ⇒ scanRows 立即停扫（越界后不必再读下一批）
       return !countRow(counts, hitCells, byIndex >= 0 ? groupKeyOf(values[byIndex]) : null)
     }
-    return undefined
+    return changes.length <= SHEET_WRITE_HARD_MAX_CELLS
   })
-  if (countMode && counts.overflow) {
+  if (lightMode && counts.overflow) {
     return {
       ok: false,
       reason: `本次改动超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格（已扫描到第 ${counts.rows} 行时中止），已拒绝。请缩小条件或列范围。`
     }
   }
-  if (!countMode && changes.length > SHEET_WRITE_HARD_MAX_CELLS) {
+  if (!lightMode && changes.length > SHEET_WRITE_HARD_MAX_CELLS) {
     return {
       ok: false,
       reason: `本次改动 ${changes.length} 格，超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格，已拒绝。请缩小条件或列范围。`
     }
   }
-  const plan = makePlan({
+  const plan = yield* makePlanProgram({
     ctx,
     tool: 'replace_values',
     toolCallId,
@@ -2044,14 +2451,13 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
     scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
-    // 计数档只保留命中行（应用/指纹要用），不保留逐格明细
-    targetRows: countMode ? matchedRows : scope.resolved.rows,
+    targetRows: preview === 'count' ? matchedRows : scope.resolved.rows,
     changes,
     skippedCount: counts.skipped,
     rulesText: matcher.rulesText,
     warnings: [],
-    detail: countMode ? 'none' : 'full',
-    ...(countMode
+    detail: lightMode ? 'none' : 'full',
+    ...(lightMode
       ? {
           counts: { rowsCount: counts.rows, cellsCount: counts.cells },
           ...distributionOf(ctx, byCol, counts)
@@ -2060,6 +2466,19 @@ export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = '')
     args
   })
   return { ok: true, plan }
+}
+
+export function planReplace(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+  return runSheetProgram(planReplaceProgram(ctx, args, toolCallId))
+}
+
+export function planReplaceAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  toolCallId = '',
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome> {
+  return runPlanReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => planReplaceProgram(effectiveCtx, args, toolCallId))
 }
 
 /** 分布字段的可选展开（无命中/无分组列 ⇒ 空对象，不写键）。 */
@@ -2117,7 +2536,7 @@ function parseSetItems(args: SheetArgs): { ok: true; items: SetItem[] } | { ok: 
   return { ok: true, items }
 }
 
-export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: string): SheetProgram<SheetPlanOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const parsed = parseSetItems(args)
@@ -2126,14 +2545,12 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
   if (preview === null) {
     return { ok: false, reason: 'preview 只能是 count/sample-diff/full-diff。' }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'predicate' })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'predicate' })
   if (!scope.ok) return scope
   const rows = scope.resolved.rows
   const rowSet = new Set(rows)
 
-  // P0 快路径（§6.2）：count 档只数不物化。命中先按行记数（一行的命中格数），
-  // 全部 set 项跑完后再一次性折算 rows/cells/分布 —— 这样"10 万格"不会变成 10 万个对象。
-  const countMode = preview === 'count'
+  const lightMode = preview !== 'full-diff'
   const counts = newCounts()
   const changes: SheetChange[] = []
   const perRowHits = new Map<number, number>()
@@ -2144,15 +2561,15 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
   const ruleParts: string[] = []
   const recordHit = (row: number, col: number, oldValue: unknown, newValue: unknown): void => {
     hitTotal += 1
-    if (countMode) {
+    if (lightMode) {
       perRowHits.set(row, (perRowHits.get(row) ?? 0) + 1)
-      // 计数档只留前 3 处样例（卡面承诺），其余一个对象都不建
       if (changes.length < SHEET_PREVIEW_SAMPLE_PAIRS) {
         changes.push({ row, col, oldValue, newValue })
       }
-      return
+    } else {
+      changes.push({ row, col, oldValue, newValue })
     }
-    changes.push({ row, col, oldValue, newValue })
+    if (hitTotal > SHEET_WRITE_HARD_MAX_CELLS) counts.overflow = true
   }
 
   for (const item of parsed.items) {
@@ -2164,15 +2581,13 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
     if (item.mode === 'literal') {
       const value = item.value === undefined ? '' : item.value
       ruleParts.push(`${item.columnCode} ← 「${cellDisplay(value)}」`)
-      const current = readSingleColumn(ctx, rows, col)
-      rows.forEach((row, index) => {
-        const oldValue = current[index]
-        if (cellDisplay(oldValue) === cellDisplay(value)) return
-        if (field && validateCell(field, value) !== null) {
-          counts.skipped += 1
-          return
+      yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
+        const oldValue = values[0]
+        if (cellDisplay(oldValue) !== cellDisplay(value)) {
+          if (field && validateCell(field, value) !== null) counts.skipped += 1
+          else recordHit(row, col, oldValue, value)
         }
-        recordHit(row, col, oldValue, value)
+        return !counts.overflow
       })
     } else if (item.mode === 'template') {
       const template = typeof item.template === 'string' ? item.template : ''
@@ -2190,45 +2605,33 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
       for (const [code, refCol] of resolvedRefs) {
         refIndexByCode.set(code, refCol === null ? -1 : scanColumns.indexOf(refCol))
       }
-      const values: unknown[][] = []
-      scanRows(ctx, rows, scanColumns, (_row, cells) => {
-        values.push([...cells])
-      })
       const startIndex = scanColumns.indexOf(col)
-      rows.forEach((row, index) => {
-        const cells = values[index] ?? []
+      yield* scanRowsProgram(ctx, rows, scanColumns, (row, cells) => {
         const oldValue = cells[startIndex]
         const next = template.replace(/\$\{([^}]+)\}/g, (_all, code: string) => {
           const refIndex = refIndexByCode.get(code) ?? -1
           return refIndex < 0 ? '' : cellDisplay(cells[refIndex])
         })
-        if (next === cellDisplay(oldValue)) return
-        if (field && validateCell(field, next) !== null) {
-          counts.skipped += 1
-          return
+        if (next !== cellDisplay(oldValue)) {
+          if (field && validateCell(field, next) !== null) counts.skipped += 1
+          else recordHit(row, col, oldValue, next)
         }
-        recordHit(row, col, oldValue, next)
+        return !counts.overflow
       })
     } else if (item.mode === 'fillDown') {
       ruleParts.push(`${item.columnCode} ← 用上方最近的非空值补齐空单元格`)
-      const allRows = allRowIndexes(ctx)
-      const current = readSingleColumn(ctx, allRows, col)
       let last: unknown = ''
-      for (let row = 0; row < current.length; row += 1) {
-        const value = current[row]
+      yield* scanRowsProgram(ctx, allRowIndexes(ctx), [col], (row, values) => {
+        const value = values[0]
         if (!isBlank(value)) {
           last = value
-          continue
+        } else if (rowSet.has(row) && !isBlank(last)) {
+          fillCells += 1
+          if (field && validateCell(field, last) !== null) counts.skipped += 1
+          else recordHit(row, col, value, last)
         }
-        if (!rowSet.has(row)) continue
-        if (isBlank(last)) continue
-        fillCells += 1
-        if (field && validateCell(field, last) !== null) {
-          counts.skipped += 1
-          continue
-        }
-        recordHit(row, col, value, last)
-      }
+        return !counts.overflow
+      })
     } else {
       const start = Number(item.start ?? 1)
       const step = Number(item.step ?? 1)
@@ -2236,31 +2639,25 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
         return { ok: false, reason: 'mode=fillSeries 需要数值型 start / step。' }
       }
       ruleParts.push(`${item.columnCode} ← 等差数列（start=${start}，step=${step}）`)
-      const current = readSingleColumn(ctx, rows, col)
       let index = 0
-      rows.forEach((row, rowIndex) => {
-        const value = current[rowIndex]
-        if (!isBlank(value)) return
-        const next = String(start + step * index)
-        index += 1
-        fillCells += 1
-        if (field && validateCell(field, next) !== null) {
-          counts.skipped += 1
-          return
+      yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
+        const value = values[0]
+        if (isBlank(value)) {
+          const next = String(start + step * index)
+          index += 1
+          fillCells += 1
+          if (field && validateCell(field, next) !== null) counts.skipped += 1
+          else recordHit(row, col, value, next)
         }
-        recordHit(row, col, value, next)
+        return !counts.overflow
       })
     }
-    // 越界即停：后续 set 项不再跑（它们只会让超限数字更大，报错文案不需要精确值）
-    if (countMode && hitTotal > SHEET_WRITE_HARD_MAX_CELLS) {
-      counts.overflow = true
-      break
-    }
+    if (counts.overflow) break
   }
 
   let byCol: number | null = null
-  if (countMode) {
-    if (counts.overflow || hitTotal > SHEET_WRITE_HARD_MAX_CELLS) {
+  if (lightMode) {
+    if (counts.overflow) {
       return {
         ok: false,
         reason: `本次改动超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格（扫描中途已中止），已拒绝。请缩小条件或列范围。`
@@ -2270,18 +2667,18 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
     const itemColumns = parsed.items
       .map((item) => resolveColumn(ctx, item.columnCode))
       .filter((col): col is number => col !== null)
-    byCol = resolveDistributionColumn(ctx, args, itemColumns)
-    const groupValues = byCol === null ? null : readSingleColumn(ctx, rows, byCol)
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index]
-      if (row === undefined) continue
+    byCol = preview === 'count' ? resolveDistributionColumn(ctx, args, itemColumns) : null
+    const countHits = (row: number, key: string | null): boolean => {
       const hits = perRowHits.get(row) ?? 0
-      const key = groupValues === null ? null : groupKeyOf(groupValues[index])
       if (hits > 0) matchedRows.push(row)
-      if (countRow(counts, hits, key)) {
-        counts.overflow = true
-        break
+      return countRow(counts, hits, key)
+    }
+    if (byCol === null) {
+      for (const row of rows) {
+        if (countHits(row, null)) break
       }
+    } else {
+      yield* scanRowsProgram(ctx, rows, [byCol], (row, values) => !countHits(row, groupKeyOf(values[0])))
     }
     if (counts.overflow) {
       return {
@@ -2298,7 +2695,7 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
   if (parsed.items.some((item) => item.mode === 'fillDown' || item.mode === 'fillSeries')) {
     warnings.push(`注意：本次会用其他行的值补齐空单元格（共 ${fillCells} 格），请确认这些空缺确实应当补值。`)
   }
-  const plan = makePlan({
+  const plan = yield* makePlanProgram({
     ctx,
     tool: 'update_rows',
     toolCallId,
@@ -2306,18 +2703,31 @@ export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''):
     scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
-    targetRows: countMode ? matchedRows : rows,
+    targetRows: preview === 'count' ? matchedRows : rows,
     changes,
     skippedCount: counts.skipped,
     rulesText: ruleParts.join('；'),
     warnings,
-    detail: countMode ? 'none' : 'full',
-    ...(countMode
+    detail: lightMode ? 'none' : 'full',
+    ...(lightMode
       ? { counts: { rowsCount: counts.rows, cellsCount: counts.cells }, ...distributionOf(ctx, byCol, counts) }
       : {}),
     args
   })
   return { ok: true, plan }
+}
+
+export function planUpdate(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+  return runSheetProgram(planUpdateProgram(ctx, args, toolCallId))
+}
+
+export function planUpdateAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  toolCallId = '',
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome> {
+  return runPlanReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => planUpdateProgram(effectiveCtx, args, toolCallId))
 }
 
 // ── 写侧：normalize_column（一工具双档） ─────────────────────────────────────
@@ -2399,24 +2809,30 @@ interface NormalizeDiff {
   changes: SheetChange[]
   ruleCounts: Map<string, number>
   skipped: number
+  cells: number
+  overflow: boolean
   /** 计数档用：命中行（应用前物化与指纹都靠它） */
   matchedRows?: number[]
 }
 
-function computeNormalize(
+type NormalizeResult = NormalizeDiff & { perRowHits: Map<number, number> }
+
+function* computeNormalizeProgram(
   ctx: SheetContext,
   rows: number[],
   setup: NormalizeSetup,
-  options: { materialize?: boolean } = {}
-): NormalizeDiff & { perRowHits: Map<number, number> } {
+  options: { materialize?: boolean; enforceHardLimit?: boolean; sampleLimit?: number; trackRows?: boolean } = {}
+): SheetProgram<NormalizeResult> {
   const materialize = options.materialize !== false
   const changes: SheetChange[] = []
   const ruleCounts = new Map<string, number>()
   const perRowHits = new Map<number, number>()
   let skipped = 0
+  let cells = 0
+  let overflow = false
   for (const col of setup.columns) {
     const field = fieldOfColumn(ctx, col)
-    scanRows(ctx, rows, [col], (row, values) => {
+    yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
       const oldValue = values[0]
       let next = cellDisplay(oldValue)
       const before = next
@@ -2424,28 +2840,32 @@ function computeNormalize(
         if (!EXECUTABLE_RULES.has(rule)) continue
         next = normalizeText(next, rule, setup.upper)
       }
-      if (next === before) return
-      // 每条规则的影响计数（对原值单独应用该规则）
-      for (const rule of setup.rules) {
-        if (!EXECUTABLE_RULES.has(rule)) continue
-        if (normalizeText(before, rule, setup.upper) !== before) {
-          ruleCounts.set(rule, (ruleCounts.get(rule) ?? 0) + 1)
+      if (next !== before) {
+        // 每条规则的影响计数（对原值单独应用该规则）
+        for (const rule of setup.rules) {
+          if (!EXECUTABLE_RULES.has(rule)) continue
+          if (normalizeText(before, rule, setup.upper) !== before) {
+            ruleCounts.set(rule, (ruleCounts.get(rule) ?? 0) + 1)
+          }
+        }
+        if (field && validateCell(field, next) !== null) {
+          skipped += 1
+        } else {
+          cells += 1
+          if (materialize || changes.length < (options.sampleLimit ?? SHEET_PREVIEW_SAMPLE_PAIRS)) {
+            changes.push({ row, col, oldValue, newValue: next })
+          }
+          if (!materialize && options.trackRows !== false) {
+            perRowHits.set(row, (perRowHits.get(row) ?? 0) + 1)
+          }
+          if (options.enforceHardLimit === true && cells > SHEET_WRITE_HARD_MAX_CELLS) overflow = true
         }
       }
-      if (field && validateCell(field, next) !== null) {
-        skipped += 1
-        return
-      }
-      if (materialize || changes.length < SHEET_PREVIEW_SAMPLE_PAIRS) {
-        // 计数档只留前 3 处样例（卡面"看样例前 3 条"的承诺），全量明细一个都不建
-        changes.push({ row, col, oldValue, newValue: next })
-      }
-      if (!materialize) {
-        perRowHits.set(row, (perRowHits.get(row) ?? 0) + 1)
-      }
+      return !overflow
     })
+    if (overflow) break
   }
-  return { changes, ruleCounts, skipped, perRowHits }
+  return { changes, ruleCounts, skipped, cells, overflow, perRowHits }
 }
 
 function ruleLabel(rule: string, setup: NormalizeSetup): string {
@@ -2453,26 +2873,56 @@ function ruleLabel(rule: string, setup: NormalizeSetup): string {
   return rule
 }
 
+function* countCellsProgram(
+  ctx: SheetContext,
+  rows: number[],
+  columns: number[],
+  matches: (value: unknown) => boolean
+): SheetProgram<number> {
+  let count = 0
+  yield* scanRowsProgram(ctx, rows, columns, (_row, values) => {
+    values.forEach((value) => {
+      if (matches(value)) count += 1
+    })
+  })
+  return count
+}
+
 /** `normalize_column(commit=false)`：只出建议，零写入。 */
-export function normalizeSuggest(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+function* normalizeSuggestProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const parsed = parseNormalizeArgs(ctx, args)
   if (!parsed.ok) return parsed
-  const scope = resolveScope(ctx, args, { defaultScope: 'selection', columns: parsed.setup.columns })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'selection', columns: parsed.setup.columns })
   if (!scope.ok) return scope
-  const diff = computeNormalize(ctx, scope.resolved.rows, parsed.setup)
+  const diff = yield* computeNormalizeProgram(ctx, scope.resolved.rows, parsed.setup, {
+    materialize: false,
+    sampleLimit: 5,
+    trackRows: false
+  })
 
   const lines: string[] = []
   lines.push(`归一化建议（未做任何修改）：${ctx.defCode}.${parsed.setup.columns.map((col) => columnCode(ctx, col)).join('、')}`)
   for (const rule of parsed.setup.rules) {
-    const count = rule === 'space'
-      ? countInternalSpaces(ctx, scope.resolved.rows, parsed.setup.columns)
-      : rule === 'number'
-        ? countNonCanonicalNumbers(ctx, scope.resolved.rows, parsed.setup.columns)
-        : rule === 'date'
-          ? countAmbiguousDates(ctx, scope.resolved.rows, parsed.setup.columns)
-          : diff.ruleCounts.get(rule) ?? 0
+    let count: number
+    if (rule === 'space') {
+      count = yield* countCellsProgram(ctx, scope.resolved.rows, parsed.setup.columns, (value) => /\S\s+\S/.test(cellDisplay(value)))
+    } else if (rule === 'number') {
+      count = yield* countCellsProgram(ctx, scope.resolved.rows, parsed.setup.columns, (value) => {
+        const text = cellDisplay(value).trim()
+        if (text === '') return false
+        const num = Number(text)
+        return Number.isFinite(num) && String(num) !== text
+      })
+    } else if (rule === 'date') {
+      count = yield* countCellsProgram(ctx, scope.resolved.rows, parsed.setup.columns, (value) => {
+        const text = cellDisplay(value).trim()
+        return text !== '' && (/^\d{8}$/.test(text) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text))
+      })
+    } else {
+      count = diff.ruleCounts.get(rule) ?? 0
+    }
     lines.push(`- ${ruleLabel(rule, parsed.setup)}：${count} 格`)
   }
   const samples = diff.changes.slice(0, 5).map((change) =>
@@ -2481,82 +2931,64 @@ export function normalizeSuggest(ctx: SheetContext, args: SheetArgs): SheetToolO
     lines.push(`样例（前 ${samples.length} 处）：${samples.join('；')}`)
   }
   lines.push('提示：这些值会影响主键判重与必填判空。执行请让 AI 用 commit=true 并确认。')
-  lines.push(`共 ${diff.changes.length} 格`)
+  lines.push(`共 ${diff.cells} 格`)
   return { ok: true, text: lines.join('\n') }
 }
 
-function countNonCanonicalNumbers(ctx: SheetContext, rows: number[], columns: number[]): number {
-  let count = 0
-  scanRows(ctx, rows, columns, (_row, values) => {
-    values.forEach((value) => {
-      const text = cellDisplay(value).trim()
-      if (text === '') return
-      const num = Number(text)
-      if (Number.isFinite(num) && String(num) !== text) count += 1
-    })
-  })
-  return count
-}
-
-function countAmbiguousDates(ctx: SheetContext, rows: number[], columns: number[]): number {
-  let count = 0
-  scanRows(ctx, rows, columns, (_row, values) => {
-    values.forEach((value) => {
-      const text = cellDisplay(value).trim()
-      if (text === '') return
-      if (/^\d{8}$/.test(text) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) count += 1
-    })
-  })
-  return count
-}
-
-function countInternalSpaces(ctx: SheetContext, rows: number[], columns: number[]): number {
-  let count = 0
-  scanRows(ctx, rows, columns, (_row, values) => {
-    values.forEach((value) => {
-      if (/\S\s+\S/.test(cellDisplay(value))) count += 1
-    })
-  })
-  return count
+export function normalizeSuggestAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => normalizeSuggestProgram(effectiveCtx, args))
 }
 
 /** `normalize_column(commit=true)`：只允许 trim/case/width。 */
-export function planNormalize(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+function* planNormalizeProgram(ctx: SheetContext, args: SheetArgs, toolCallId: string): SheetProgram<SheetPlanOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
   const parsed = parseNormalizeArgs(ctx, args)
   if (!parsed.ok) return parsed
   if (!parsed.setup.commit) {
-    return { ok: false, reason: 'commit=false 属于只读建议档，请用 normalizeSuggest（读路径）执行。' }
+    return { ok: false, reason: 'commit=false 属于只读建议档，请用 normalize_column(commit=false)（读路径）执行。' }
   }
   const preview = normalizePreview(args.preview)
   if (preview === null) {
     return { ok: false, reason: 'preview 只能是 count/sample-diff/full-diff。' }
   }
-  const scope = resolveScope(ctx, args, { defaultScope: 'selection', columns: parsed.setup.columns })
+  const scope = yield* resolveScopeProgram(ctx, args, { defaultScope: 'selection', columns: parsed.setup.columns })
   if (!scope.ok) return scope
-  // P0 快路径（§6.2）：count 档不物化逐格 change（10 万+ 的对象是内存杀手），只累计每行命中格数
-  const countMode = preview === 'count'
-  const diff = computeNormalize(ctx, scope.resolved.rows, parsed.setup, { materialize: !countMode })
+  const lightMode = preview !== 'full-diff'
+  const diff = yield* computeNormalizeProgram(ctx, scope.resolved.rows, parsed.setup, {
+    materialize: !lightMode,
+    enforceHardLimit: true
+  })
   const counts = newCounts()
   counts.skipped = diff.skipped
   let byCol: number | null = null
-  if (countMode) {
-    byCol = resolveDistributionColumn(ctx, args, parsed.setup.columns)
-    const groupValues = byCol === null ? null : readSingleColumn(ctx, scope.resolved.rows, byCol)
-    const matchedRows: number[] = []
-    for (let index = 0; index < scope.resolved.rows.length; index += 1) {
-      const row = scope.resolved.rows[index]
-      if (row === undefined) continue
-      const hits = diff.perRowHits.get(row) ?? 0
-      const key = groupValues === null ? null : groupKeyOf(groupValues[index])
-      if (hits > 0) matchedRows.push(row)
-      if (countRow(counts, hits, key)) {
-        counts.overflow = true
-        break
-      }
+  if (diff.overflow) {
+    return {
+      ok: false,
+      reason: lightMode
+        ? `本次改动超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格（扫描中途已中止），已拒绝。请缩小条件或列范围。`
+        : `本次改动 ${diff.changes.length} 格，超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格，已拒绝。请缩小条件或列范围。`
     }
-    // 指纹要用命中行：塞回 diff 的可见面（避免再声明一个变量穿到 makePlan）
+  }
+  if (lightMode) {
+    byCol = preview === 'count' ? resolveDistributionColumn(ctx, args, parsed.setup.columns) : null
+    const matchedRows: number[] = []
+    const countHits = (row: number, key: string | null): boolean => {
+      const hits = diff.perRowHits.get(row) ?? 0
+      if (hits > 0) matchedRows.push(row)
+      return countRow(counts, hits, key)
+    }
+    if (byCol === null) {
+      for (const row of scope.resolved.rows) {
+        if (countHits(row, null)) break
+      }
+    } else {
+      yield* scanRowsProgram(ctx, scope.resolved.rows, [byCol], (row, values) => !countHits(row, groupKeyOf(values[0])))
+    }
     diff.matchedRows = matchedRows
     if (counts.overflow) {
       return {
@@ -2564,13 +2996,8 @@ export function planNormalize(ctx: SheetContext, args: SheetArgs, toolCallId = '
         reason: `本次改动超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格（已统计到第 ${counts.rows} 行时中止），已拒绝。请缩小条件或列范围。`
       }
     }
-  } else if (diff.changes.length > SHEET_WRITE_HARD_MAX_CELLS) {
-    return {
-      ok: false,
-      reason: `本次改动 ${diff.changes.length} 格，超过硬上限 ${SHEET_WRITE_HARD_MAX_CELLS} 格，已拒绝。请缩小条件或列范围。`
-    }
   }
-  const plan = makePlan({
+  const plan = yield* makePlanProgram({
     ctx,
     tool: 'normalize_column',
     toolCallId,
@@ -2578,18 +3005,31 @@ export function planNormalize(ctx: SheetContext, args: SheetArgs, toolCallId = '
     scope: scope.resolved.scope as SheetWritePlan['scope'],
     scopeSummary: scope.resolved.summary,
     predicateSummary: scope.resolved.predicateSummary,
-    targetRows: countMode ? (diff.matchedRows ?? []) : scope.resolved.rows,
+    targetRows: preview === 'count' ? (diff.matchedRows ?? []) : scope.resolved.rows,
     changes: diff.changes,
     skippedCount: diff.skipped,
     rulesText: parsed.setup.rules.map((rule) => ruleLabel(rule, parsed.setup)).join(' + '),
     warnings: [],
-    detail: countMode ? 'none' : 'full',
-    ...(countMode
+    detail: lightMode ? 'none' : 'full',
+    ...(lightMode
       ? { counts: { rowsCount: counts.rows, cellsCount: counts.cells }, ...distributionOf(ctx, byCol, counts) }
       : {}),
     args
   })
   return { ok: true, plan }
+}
+
+export function planNormalize(ctx: SheetContext, args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+  return runSheetProgram(planNormalizeProgram(ctx, args, toolCallId))
+}
+
+export function planNormalizeAsync(
+  ctx: SheetContext,
+  args: SheetArgs,
+  toolCallId = '',
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome> {
+  return runPlanReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => planNormalizeProgram(effectiveCtx, args, toolCallId))
 }
 
 // ── 写侧：应用与撤销 ─────────────────────────────────────────────────────────
@@ -2705,16 +3145,16 @@ export type ApplySheetPlanOutcome =
  * 应用计划：先逐行复核指纹（任一不符 ⇒ 整批拒绝），再分块 `writeCells`，最后登记反向补丁。
  *
  * <p>
- * 计数档（`detail === 'none'`）**不可直接应用**：它没有物化明细，也就没有逐格的新值可写。
- * 这条不是限制而是诚实 —— 让它"应用 0 格"才是真正的谎（用户会以为改了）。
- * 卡面在计数档下会先请求重算（`replanSheet`）再允许应用。
+ * 不完整明细（`detail === 'none'`）**不可直接落笔**：count 没有逐格新值，sample 只有前 3 处。
+ * 卡面在计数档下会先请求重算（`replanSheet`）；sample 到这里也先物化 full 计划，
+ * 沿用同一身份/指纹闸与最终计划状态，绝不把未物化格报成适配器忽略。
  *
  * <p><b>中途异常（2026-10-29）</b>：分块写入可能只落了前面几块就抛错（引擎错 / 表被重建）。
  * 旧实现让异常直接冒泡 ⇒ 卡面无回执、已写部分没有撤销登记。现在：已写部分**登记撤销**、
  * 回执如实 `failed` 并报**实际写入格数**，计划置 `failed`（重放不再写一格）。
  * 这是"部分成功"的诚实形态，不是整批成功。
  */
-export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
+function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetProgram<ApplySheetPlanOutcome> {
   const readOnly = requireReadable(ctx)
   if (readOnly) return { ok: false, reason: readOnly }
   if (plan.defCode !== ctx.defCode) {
@@ -2727,11 +3167,21 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   if (plan.status !== 'pending') {
     return { ok: false, reason: PREVIEW_INVALID_REASON }
   }
+  if (plan.preview === 'sample-diff' && plan.args) {
+    const materialized = yield* replanSheetProgram(ctx, plan, 'full-diff')
+    if (!materialized.ok) return materialized
+    const outcome = yield* applySheetPlanProgram(ctx, materialized.plan)
+    plan.status = materialized.plan.status
+    return outcome
+  }
   if (plan.detail === 'none') {
     return { ok: false, reason: '计数级预览没有逐格明细，无法应用。请先切到「看样例」或「全量 diff」把明细算出来再点应用。' }
   }
   const columns = keyColumns(ctx)
-  const current = fingerprintRows(ctx, plan.targetRows, columns)
+  const current: string[] = []
+  yield* scanRowsProgram(ctx, plan.targetRows, columns, (_row, values) => {
+    current.push(values.map((value) => cellDisplay(value).trim()).join('\u0001'))
+  })
   for (let index = 0; index < plan.targetRows.length; index += 1) {
     const row = plan.targetRows[index]
     if (row === undefined) continue
@@ -2747,15 +3197,7 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
   const appliedUpdates: SheetCellUpdate[] = []
   let failure: { error: unknown } | null = null
   for (const chunk of chunks) {
-    // 兼容旧适配器（返回 void = 按旧契约"要么全成要么抛"）：无回报时视为整块已落。
-    // 调用侧兜底（复审 I-B）：即便适配器违约 throw，也只转成真实失败，绝不冒泡成"无回执"。
-    let result: SheetWriteBatchResult
-    try {
-      result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
-    } catch (error) {
-      failure = { error }
-      break
-    }
+    const result = yield* writeCellsProgram(ctx, chunk)
     appliedUpdates.push(...result.applied)
     if (result.error !== undefined) {
       failure = { error: result.error }
@@ -2805,6 +3247,18 @@ export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySh
     text: planAppliedText(plan, ctx, { cells: appliedCells, rows: writtenRows }),
     cells: appliedCells
   }
+}
+
+export function applySheetPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
+  return runSheetProgram(applySheetPlanProgram(ctx, plan))
+}
+
+export function applySheetPlanAsync(
+  ctx: SheetContext,
+  plan: SheetWritePlan,
+  lifetime?: SheetToolLifetime
+): Promise<ApplySheetPlanOutcome> {
+  return runApplyWriteSheetProgram(ctx, lifetime, (effectiveCtx) => applySheetPlanProgram(effectiveCtx, plan))
 }
 
 /**
@@ -2891,13 +3345,13 @@ function markAppliedCellsSafe(ctx: SheetContext, changes: readonly SheetChange[]
  * {@link SheetAdapter#markCells} 这一条绘制入口（治理方案 §5.4「一次做两次用」）。
  *
  * <p>
- * 计数档没有逐格明细（`changes` 为空）⇒ 清掉预览色而不是留一张过期高亮：卡面此时也没有
- * 逐格信息可核对，留着只会让人以为"这些格要改"。只走屏幕绘制，预览期写入调用恒为 0（T-31 口径）。
+ * 计数档没有逐格明细（`changes` 为空）⇒ 清掉预览色；sample 档只画已加载的 3 处样例。
+ * 只走屏幕绘制，预览期写入调用恒为 0（T-31 口径）。
  *
  * @return 本次上色的格数（0 = 没有逐格明细 / 适配器无该能力）
  */
 export function markPreviewCells(ctx: SheetContext, plan: SheetWritePlan | null): number {
-  if (!plan || plan.detail === 'none' || plan.changes.length === 0) {
+  if (!plan || (plan.detail === 'none' && plan.preview === 'count') || plan.changes.length === 0) {
     clearPreviewMarks(ctx)
     return 0
   }
@@ -2918,7 +3372,7 @@ type UndoTop =
   | { ok: true; stack: SheetUndoEntry[]; entry: SheetUndoEntry; conflicts: number }
   | { ok: false; reason: string }
 
-function undoTop(ctx: SheetContext): UndoTop {
+function* undoTopProgram(ctx: SheetContext): SheetProgram<UndoTop> {
   const stack = undoStack.get(ctx.adapter)
   const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
   if (!stack || !entry || entry.defCode !== ctx.defCode || entry.changes.length === 0) {
@@ -2927,6 +3381,9 @@ function undoTop(ctx: SheetContext): UndoTop {
   // 冲突判定：逐格比对"应用时的新值"与当前值
   let conflicts = 0
   for (let index = 0; index < entry.changes.length; index += 1) {
+    if (index > 0 && index % SHEET_UNDO_CHECKPOINT_CELLS === 0) {
+      yield* checkpointProgram(ctx)
+    }
     const change = entry.changes[index]
     if (!change) continue
     if (cellDisplay(ctx.adapter.getCell(change.row, change.col)) !== cellDisplay(entry.appliedValues[index])) {
@@ -2955,7 +3412,7 @@ function undoReverseChanges(entry: SheetUndoEntry): SheetChange[] {
  * <li><b>冲突整批拒撤</b>：任一格被人改过 ⇒ 整批拒撤、栈不弹出（不做逐格跳过 —— 那会产出
  * "半撤销"，与"半批执行毒化历史"同族）；</li>
  * <li><b>部分回写可续</b>：适配器静默少写 / 中途失败 ⇒ 栈顶收缩为"尚未回写"的格，
- * 重试只针对剩余格（见 {@link applyUndoEntry}）；只有全量回写才弹栈。</li>
+ * 重试只针对剩余格（见 {@link applyUndoEntryProgram}）；只有全量回写才弹栈。</li>
  * <li><b>回执必报层数</b>：成功说"剩余可撤销 N 层"，无补丁说"只在本次页面有效"，
  * 让用户不必猜；</li>
  * <li><b>不承诺 Ctrl+Z</b>：本栈与用户撤销栈完全独立（共用就回答不了"哪一笔记的是 AI"）。</li>
@@ -2965,20 +3422,32 @@ function undoReverseChanges(entry: SheetUndoEntry): SheetChange[] {
  * 撤销会覆盖当前表格数据，必须经用户在预览卡上确认（{@link planUndo} → {@link applyUndoPlan}）。
  * 前端工具执行器（{@code frontend-tools.ts}）因此不再直接调用本函数。
  */
-export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
+function* undoLastSheetEditProgram(ctx: SheetContext): SheetProgram<ApplySheetPlanOutcome> {
   const readOnly = requireReadable(ctx)
   if (readOnly) return { ok: false, reason: readOnly }
-  const top = undoTop(ctx)
+  const top = yield* undoTopProgram(ctx)
   if (!top.ok) {
-    return { ok: true, text: `${top.reason}\n共 0 格` }
+    return { ok: true, text: `${top.reason}\n共 0 格`, cells: 0 }
   }
   if (top.conflicts > 0) {
     return {
       ok: true,
-      text: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`
+      text: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`,
+      cells: 0
     }
   }
-  return applyUndoEntry(ctx, top.stack, top.entry)
+  return yield* applyUndoEntryProgram(ctx, top.stack, top.entry)
+}
+
+export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
+  return runSheetProgram(undoLastSheetEditProgram(ctx))
+}
+
+export function undoLastSheetEditAsync(
+  ctx: SheetContext,
+  lifetime?: SheetToolLifetime
+): Promise<SheetToolOutcome> {
+  return runApplyWriteSheetProgram(ctx, lifetime, (effectiveCtx) => undoLastSheetEditProgram(effectiveCtx))
 }
 
 /**
@@ -2990,7 +3459,11 @@ export function undoLastSheetEdit(ctx: SheetContext): SheetToolOutcome {
  * 使重试只针对剩余格、且不被冲突闸误拦（剩余格的现值仍等于其 `appliedValues`）。
  * 只有**全量回写**才 pop。
  */
-function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: SheetUndoEntry): ApplySheetPlanOutcome {
+function* applyUndoEntryProgram(
+  ctx: SheetContext,
+  stack: SheetUndoEntry[],
+  entry: SheetUndoEntry
+): SheetProgram<ApplySheetPlanOutcome> {
   const reverse: SheetCellUpdate[] = entry.changes.map((change) => ({
     row: change.row,
     col: change.col,
@@ -3000,14 +3473,7 @@ function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: Sheet
   const appliedUpdates: SheetCellUpdate[] = []
   let failure: unknown = null
   for (const chunk of chunkUpdates(reverse)) {
-    // 新契约（复审 I-1）：写入如实回报；调用侧兜底（复审 I-B）任何 throw 只转真实失败
-    let result: SheetWriteBatchResult
-    try {
-      result = ctx.adapter.writeCells(chunk) ?? { applied: chunk }
-    } catch (error) {
-      failure = error
-      break
-    }
+    const result = yield* writeCellsProgram(ctx, chunk)
     appliedUpdates.push(...result.applied)
     if (result.error !== undefined) {
       failure = result.error
@@ -3065,10 +3531,10 @@ function applyUndoEntry(ctx: SheetContext, stack: SheetUndoEntry[], entry: Sheet
  * 卡片把"哪几格、从什么回到什么"摆出来，用户的一次点击就是本仓既有的<b>人围栏</b>
  * （与三个写工具同一条链，无新帧型）。没有可撤销层 / 有人工改动时<b>不建卡</b>，直接如实回执。
  */
-export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+function* planUndoProgram(ctx: SheetContext, toolCallId: string): SheetProgram<SheetPlanOutcome> {
   const readOnly = requireReadable(ctx)
   if (readOnly) return { ok: false, reason: readOnly }
-  const top = undoTop(ctx)
+  const top = yield* undoTopProgram(ctx)
   if (!top.ok) return { ok: false, reason: top.reason }
   if (top.conflicts > 0) {
     return {
@@ -3078,30 +3544,40 @@ export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): 
   }
   const { entry, stack } = top
   const reverse = undoReverseChanges(entry)
-  return {
-    ok: true,
-    plan: makePlan({
-      ctx,
-      tool: 'undo_last_sheet_edit',
-      toolCallId,
-      // 撤销要求用户核对**全部**反向变更（不是样例）⇒ 直接全量 diff（卡面分页；不产 0 行进模型）
-      preview: 'full-diff',
-      scope: 'sheet',
-      // i18n（本批范围）：撤销卡的两句用户可见文案走 locale，不再新增中文残留。
-      scopeSummary: translate('sheet.undoScopeSummary', { planId: entry.planId }),
-      predicateSummary: '',
-      targetRows: [...new Set(reverse.map((change) => change.row))],
-      changes: reverse,
-      skippedCount: 0,
-      rulesText: translate('sheet.undoRulesText', {
-        cells: entry.cellsCount,
-        layers: stack.length
-      }),
-      warnings: [],
-      // 计划身份绑定"要撤销的那一层"：栈顶变了 ⇒ 计划自动失效（不会撤到别的一层，也不会撤两次）
-      planId: `${UNDO_PLAN_PREFIX}${entry.planId}`
-    })
-  }
+  const plan = yield* makePlanProgram({
+    ctx,
+    tool: 'undo_last_sheet_edit',
+    toolCallId,
+    // 撤销要求用户核对**全部**反向变更（不是样例）⇒ 直接全量 diff（卡面分页；不产 0 行进模型）
+    preview: 'full-diff',
+    scope: 'sheet',
+    scopeSummary: translate('sheet.undoScopeSummary', { planId: entry.planId }),
+    predicateSummary: '',
+    targetRows: [...new Set(reverse.map((change) => change.row))],
+    changes: reverse,
+    skippedCount: 0,
+    rulesText: translate('sheet.undoRulesText', {
+      cells: entry.cellsCount,
+      layers: stack.length
+    }),
+    warnings: [],
+    // 计划身份绑定"要撤销的那一层"：栈顶变了 ⇒ 计划自动失效（不会撤到别的一层，也不会撤两次）
+    planId: `${UNDO_PLAN_PREFIX}${entry.planId}`
+  })
+  return { ok: true, plan }
+}
+
+export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): SheetPlanOutcome {
+  return runSheetProgram(planUndoProgram(ctx, toolCallId))
+}
+
+export function planUndoAsync(
+  ctx: SheetContext,
+  _args: SheetArgs,
+  toolCallId = '',
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome> {
+  return runPlanWriteSheetProgram(ctx, lifetime, (effectiveCtx) => planUndoProgram(effectiveCtx, toolCallId))
 }
 
 /**
@@ -3110,7 +3586,7 @@ export function planUndo(ctx: SheetContext, _args: SheetArgs, toolCallId = ''): 
  * <p><b>恰好一次</b>：判据是"栈顶仍是本计划要撤的那一层"（{@link UNDO_PLAN_PREFIX} + planId）。
  * 第一次成功后栈顶被弹出，第二次（双击/重放/重复回灌）必然对不上 ⇒ 如实拒绝，不会再写一格。
  */
-export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
+function* applyUndoPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetProgram<ApplySheetPlanOutcome> {
   const readOnly = requireReadable(ctx)
   if (readOnly) return { ok: false, reason: readOnly }
   if (plan.tool !== 'undo_last_sheet_edit' || !plan.planId.startsWith(UNDO_PLAN_PREFIX)) {
@@ -3135,7 +3611,7 @@ export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplyShe
   if (entry.defCode !== ctx.defCode || entry.changes.length === 0) {
     return { ok: false, reason: '这次撤销的目标已不可用（表格或撤销栈已变化），本次未做任何修改。请重新发起。' }
   }
-  const top = undoTop(ctx)
+  const top = yield* undoTopProgram(ctx)
   if (!top.ok) {
     return { ok: false, reason: top.reason }
   }
@@ -3145,7 +3621,7 @@ export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplyShe
       reason: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。本次未做任何修改。`
     }
   }
-  const outcome = applyUndoEntry(ctx, top.stack, top.entry)
+  const outcome = yield* applyUndoEntryProgram(ctx, top.stack, top.entry)
   if (outcome.ok) {
     // 消费撤销计划（栈已弹出；计划状态同步落定，重放同一对象也不会再进写路径）
     plan.status = 'applied'
@@ -3153,21 +3629,58 @@ export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplyShe
   return outcome
 }
 
+export function applyUndoPlan(ctx: SheetContext, plan: SheetWritePlan): ApplySheetPlanOutcome {
+  return runSheetProgram(applyUndoPlanProgram(ctx, plan))
+}
+
+export function applyUndoPlanAsync(
+  ctx: SheetContext,
+  plan: SheetWritePlan,
+  lifetime?: SheetToolLifetime
+): Promise<ApplySheetPlanOutcome> {
+  return runApplyWriteSheetProgram(ctx, lifetime, (effectiveCtx) => applyUndoPlanProgram(effectiveCtx, plan))
+}
+
 /**
  * 写工具 + 撤销的统一分发（预览入口与切档重算共用：同一个工具名只能落到同一个确定性函数）。
  */
+function* planSheetWithLevelProgram(
+  ctx: SheetContext,
+  tool: string,
+  args: SheetArgs,
+  toolCallId: string
+): SheetProgram<SheetPlanOutcome | null> {
+  if (tool === 'replace_values') return yield* planReplaceProgram(ctx, args, toolCallId)
+  if (tool === 'update_rows') return yield* planUpdateProgram(ctx, args, toolCallId)
+  if (tool === 'normalize_column') return yield* planNormalizeProgram(ctx, args, toolCallId)
+  if (tool === 'undo_last_sheet_edit') return yield* planUndoProgram(ctx, toolCallId)
+  return null
+}
+
 export function planSheetWithLevel(
   ctx: SheetContext,
   tool: string,
   args: SheetArgs,
   toolCallId = ''
 ): SheetPlanOutcome | null {
-  if (tool === 'replace_values') return planReplace(ctx, args, toolCallId)
-  if (tool === 'update_rows') return planUpdate(ctx, args, toolCallId)
-  if (tool === 'normalize_column') return planNormalize(ctx, args, toolCallId)
-  // 撤销也要预览（工具安全边界批）：会覆盖当前表格数据 ⇒ 必须由用户在卡上确认
-  if (tool === 'undo_last_sheet_edit') return planUndo(ctx, args, toolCallId)
-  return null
+  return runSheetProgram(planSheetWithLevelProgram(ctx, tool, args, toolCallId))
+}
+
+export async function planSheetWithLevelAsync(
+  ctx: SheetContext,
+  tool: string,
+  args: SheetArgs,
+  toolCallId = '',
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome | null> {
+  if (tool === 'undo_last_sheet_edit') return await planUndoAsync(ctx, args, toolCallId, lifetime)
+  if (tool !== 'replace_values' && tool !== 'update_rows' && tool !== 'normalize_column') return null
+  try {
+    return await runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) =>
+      planSheetWithLevelProgram(effectiveCtx, tool, args, toolCallId))
+  } catch (error) {
+    return { ok: false, reason: cooperativeErrorReason(error) }
+  }
 }
 
 /**
@@ -3179,11 +3692,11 @@ export function planSheetWithLevel(
  * 拿全局 `dataVersion` 当版本会让无关 touch 误伤预览）。任一不符 ⇒ "预览已失效"，不静默套用旧结果。
  * 物化后仍超 `HARD_MAX` ⇒ 回 `null` 的 detail 说明（调用方保持计数档并提示"明细不可用"）。
  */
-export function replanSheet(
+function* replanSheetProgram(
   ctx: SheetContext,
   plan: SheetWritePlan,
   level: SheetPreviewLevel
-): SheetPlanOutcome {
+): SheetProgram<SheetPlanOutcome> {
   if (plan.tool === 'undo_last_sheet_edit') {
     // 撤销没有"明细档"：反向补丁本身就是全量明细 ⇒ 切档不重算、计划身份不变
     return { ok: true, plan }
@@ -3193,17 +3706,20 @@ export function replanSheet(
   }
   // 硬闸只有两道：表格身份（previewId：toolCallId + instanceId + loadGeneration + scope）
   // 与**目标行指纹**（表真的变了才算失效）。
-  // 这里刻意**不比对** `plan.sheetVer !== ctx.version`：`sheetVer` 是表内内容版本/元数据，
-  // 旧实现拿工作区全局 `dataVersion` 当它，任何无关 touch 都会把预览误判成失效。
   if (previewIdentityMismatch(plan, ctx)) {
-    // 程序化重载（loadGeneration 变）不一定改行值 ⇒ 必须单独比对身份
     return { ok: false, reason: STALE_PREVIEW_REASON }
   }
-  if (!sameTargetFingerprint(plan, ctx)) {
-    return { ok: false, reason: STALE_PREVIEW_REASON }
+  const current: string[] = []
+  yield* scanRowsProgram(ctx, plan.targetRows, keyColumns(ctx), (_row, values) => {
+    current.push(values.map((value) => cellDisplay(value).trim()).join('\u0001'))
+  })
+  for (let index = 0; index < plan.targetRows.length; index += 1) {
+    if (current[index] !== plan.fingerprint[index]) {
+      return { ok: false, reason: STALE_PREVIEW_REASON }
+    }
   }
   const args: SheetArgs = { ...plan.args, preview: level }
-  const replanned = planSheetWithLevel(ctx, plan.tool, args, plan.toolCallId)
+  const replanned = yield* planSheetWithLevelProgram(ctx, plan.tool, args, plan.toolCallId)
   if (!replanned) {
     return { ok: false, reason: `未识别的表格写工具 ${plan.tool}：无法重算明细。` }
   }
@@ -3221,6 +3737,24 @@ export function replanSheet(
       status: 'pending'
     }
   }
+}
+
+export function replanSheet(
+  ctx: SheetContext,
+  plan: SheetWritePlan,
+  level: SheetPreviewLevel
+): SheetPlanOutcome {
+  return runSheetProgram(replanSheetProgram(ctx, plan, level))
+}
+
+export async function replanSheetAsync(
+  ctx: SheetContext,
+  plan: SheetWritePlan,
+  level: SheetPreviewLevel,
+  lifetime?: SheetToolLifetime
+): Promise<SheetPlanOutcome> {
+  if (plan.tool === 'undo_last_sheet_edit') return { ok: true, plan }
+  return await runPlanReadonlySheetProgram(ctx, lifetime, (effectiveCtx) => replanSheetProgram(effectiveCtx, plan, level))
 }
 
 /** 写工具名 → 是否需要人围栏预览（normalize 只有 commit=true；撤销恒需要 —— 工具安全边界批）。 */

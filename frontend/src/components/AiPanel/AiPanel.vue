@@ -200,7 +200,7 @@
         type="button"
         class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
         data-testid="ai-operating-stop"
-        @click="ai.stop()"
+        @click="stop"
       >
         {{ t('ai.panel.stop') }}
       </button>
@@ -774,7 +774,7 @@
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
-                            :upload-context="{ runId: liveForm.runId, toolCallId: liveForm.toolCallId, sessionId: ai.sessionId }"
+                            :upload-context="{ runId: liveForm.runId, toolCallId: liveForm.toolCallId, sessionId: ai.sessionId, signal: formAttachmentAbort.signal }"
                             :show-header="false"
                             flat
                             @submit="onFormSubmit"
@@ -1502,6 +1502,12 @@ import type { ErrorCardVariant } from '@/utils/error-card'
 const { t, locale } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
+const formAttachmentAbort = ref(new AbortController())
+
+function resetFormAttachmentAbort(): void {
+  formAttachmentAbort.value.abort()
+  formAttachmentAbort.value = new AbortController()
+}
 
 /**
  * 批次6A：消息流（`role="log"`）的 `aria-busy` —— 加载与流式两种"还在变"的状态。
@@ -1610,6 +1616,7 @@ watch(
 watch(
   () => ai.sessionId,
   () => {
+    resetFormAttachmentAbort()
     compactionAnnounceSeq += 1
     compactionAnnouncement.value = ''
   }
@@ -4791,6 +4798,7 @@ async function send(): Promise<void> {
 }
 
 function stop(): void {
+  resetFormAttachmentAbort()
   clearStreamMdCache()
   void ai.stop()
 }
@@ -5334,6 +5342,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  formAttachmentAbort.value.abort()
   if (copyTimer !== null) {
     clearTimeout(copyTimer)
     copyTimer = null

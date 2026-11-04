@@ -287,6 +287,7 @@ const condErrors = reactive<Record<string, string>>({})
 
 const persisting = ref(false)
 const startingExport = ref(false)
+let exportStartOwner: object | null = null
 const savingFiles = ref(false)
 
 /**
@@ -937,6 +938,7 @@ function resetTaskScopedState(): void {
   // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
   // 不复位就是新任务页面上的按钮永久转圈（下一步/保存编辑/开始导出，直到刷新页面）。
   persisting.value = false
+  exportStartOwner = null
   startingExport.value = false
   savingFiles.value = false
 }
@@ -1364,88 +1366,112 @@ interface StartExportOutcome {
  * **读闸（fail-closed）**：作业/文件清单读不到时无法确认"现有结果与在途作业"，此时建作业可能
  * 重复导出、也可能把旧结果当成新结果 —— 一律不建，先让用户走「重试读取」。
  *
- * **脏闸**：重导出会替换服务端导出文件，表格里未保存的编辑随之丢失。界面入口先确认再带
- * `discardUnsaved`；AI 入口拿不到确认，故直接失败并给出可行动文案（不静默丢弃）。
+ * **脏闸**：重导出会替换服务端导出文件，表格里未保存的编辑随之丢失。界面入口通过
+ * `confirmDiscardUnsaved` 在同一入口锁内确认；AI 入口拿不到确认，故直接失败并给出可行动文案。
  *
  * **真实性**：`createJob` 一旦成功，后续失败（挂接抛错、建作业期间换任务）都不得退化成"未启动"——
  * 作业已在后端跑，回执必须是"已建在任务 #N、本页未跟踪、请勿重复发起"（`detached`/`attachError`）。
  */
 async function startExport(
-  options: { discardUnsaved?: boolean; guard?: () => boolean } = {}
+  options: { discardUnsaved?: boolean; confirmDiscardUnsaved?: boolean; guard?: () => boolean } = {}
 ): Promise<StartExportOutcome> {
-  if (taskId.value === null) {
-    const reason = t('views.export.msg.noTaskBound')
-    ElMessage.warning(reason)
-    return { ok: false, reason, notified: true }
+  if (exportStartOwner !== null) {
+    return { ok: false, reason: '导出作业正在启动，请勿重复发起' }
   }
-  if (selectedDefs.value.length === 0) {
-    const reason = t('views.export.msg.pickDefs')
-    ElMessage.warning(reason)
-    return { ok: false, reason, notified: true }
-  }
-  if (listsLoadError.value) {
-    return {
-      ok: false,
-      reason: t('views.export.msg.exportBlockedByLists', { reason: listsLoadError.value })
-    }
-  }
-  if (gridDirty && exportResults.value.length > 0 && options.discardUnsaved !== true) {
-    return {
-      ok: false,
-      // 来源分流：AI 应用后的改动仍是"未保存"（拦下，避免静默丢弃），但回执不得说成
-      // "用户未保存" —— 那会让模型把 start_export 当成用户未决事项（2026-10-29 修复）。
-      reason: gridDirtyBy === 'ai'
-        ? t('views.export.msg.exportBlockedByAiDirty')
-        : t('views.export.msg.exportBlockedByDirty')
-    }
-  }
-  // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
-  // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
-  const generation = taskGeneration
-  const forTask = taskId.value
-  const persisted = await persistStepData(generation, forTask, options.guard)
-  if (!persisted.ok) {
-    if (options.guard?.() === true) {
-      // 已作废（预算到点 / 停止）而落库其实可能已完成：直说 persisted 的真实原因，
-      // 不得再包成"未能落库（会按旧条件导出）"—— 那是与事实相反的归因（复审 I-3）。
-      return { ok: false, reason: persisted.reason ?? '前端工具预算已到点或本轮已停止：本次未启动导出作业' }
-    }
-    const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
-      + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
-    return { ok: false, reason }
-  }
-  if (generation !== taskGeneration || forTask !== taskId.value) {
-    return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
-  }
+  const owner = {}
+  exportStartOwner = owner
   startingExport.value = true
-  let created: Job | null = null
   try {
-    const job = await jobsApi.createJob(forTask, 'EXPORT')
-    created = job
-    // 建作业在途时换了任务：作业属于 forTask，但不得显示/跟踪在新任务的页面上
+    if (taskId.value === null) {
+      const reason = t('views.export.msg.noTaskBound')
+      ElMessage.warning(reason)
+      return { ok: false, reason, notified: true }
+    }
+    const generation = taskGeneration
+    const forTask = taskId.value
+    if (selectedDefs.value.length === 0) {
+      const reason = t('views.export.msg.pickDefs')
+      ElMessage.warning(reason)
+      return { ok: false, reason, notified: true }
+    }
+    if (listsLoadError.value) {
+      return {
+        ok: false,
+        reason: t('views.export.msg.exportBlockedByLists', { reason: listsLoadError.value })
+      }
+    }
+    if (gridDirty && exportResults.value.length > 0 && options.discardUnsaved !== true) {
+      if (options.confirmDiscardUnsaved === true) {
+        const confirmed = await confirmIrreversible({
+          title: t('views.export.dialog.dirtyTitle'),
+          message: t('views.export.dialog.dirtyMessage'),
+          ack: t('views.export.dialog.dirtyAck')
+        })
+        if (!confirmed) {
+          const reason = t('views.export.msg.dirtyCanceled')
+          ElMessage.info(reason)
+          return { ok: false, reason, notified: true }
+        }
+      } else {
+        return {
+          ok: false,
+          // 来源分流：AI 应用后的改动仍是"未保存"（拦下，避免静默丢弃），但回执不得说成
+          // "用户未保存" —— 那会让模型把 start_export 当成用户未决事项（2026-10-29 修复）。
+          reason: gridDirtyBy === 'ai'
+            ? t('views.export.msg.exportBlockedByAiDirty')
+            : t('views.export.msg.exportBlockedByDirty')
+        }
+      }
+    }
+    // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
+    // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
     if (generation !== taskGeneration || forTask !== taskId.value) {
-      return { ok: true, job, taskId: forTask, detached: true }
+      return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
     }
-    exportJob.value = job
-    // 新作业成功前**保留旧结果**，只推进批次号：模板据此把下面这批文件标成"第 N 次（旧结果）"，
-    // 作业完成并 `refreshResults` 铺开新文件后自然追平。此前在这里清空结果面 ⇒ 作业跑完前
-    // 页面既无结果也无从判断"下载到的是哪一批"。
-    jobBatch.value += 1
-    ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
-    beginWatchJob(job.id ?? 0, generation)
-    return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : t('views.export.msg.jobStartFailed')
-    if (created !== null) {
-      // 作业已建：不能说"未启动"
-      return { ok: true, job: created, taskId: forTask, detached: generation !== taskGeneration, attachError: reason }
+    const persisted = await persistStepData(generation, forTask, options.guard)
+    if (!persisted.ok) {
+      if (options.guard?.() === true) {
+        // 已作废（预算到点 / 停止）而落库其实可能已完成：直说 persisted 的真实原因，
+        // 不得再包成"未能落库（会按旧条件导出）"—— 那是与事实相反的归因（复审 I-3）。
+        return { ok: false, reason: persisted.reason ?? '前端工具预算已到点或本轮已停止：本次未启动导出作业' }
+      }
+      const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
+        + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
+      return { ok: false, reason }
     }
-    if (generation === taskGeneration) {
-      ElMessage.error(reason)
+    if (generation !== taskGeneration || forTask !== taskId.value) {
+      return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
     }
-    return { ok: false, reason, notified: true }
+    let created: Job | null = null
+    try {
+      const job = await jobsApi.createJob(forTask, 'EXPORT')
+      created = job
+      // 建作业在途时换了任务：作业属于 forTask，但不得显示/跟踪在新任务的页面上
+      if (generation !== taskGeneration || forTask !== taskId.value) {
+        return { ok: true, job, taskId: forTask, detached: true }
+      }
+      exportJob.value = job
+      // 新作业成功前**保留旧结果**，只推进批次号：模板据此把下面这批文件标成"第 N 次（旧结果）"，
+      // 作业完成并 `refreshResults` 铺开新文件后自然追平。此前在这里清空结果面 ⇒ 作业跑完前
+      // 页面既无结果也无从判断"下载到的是哪一批"。
+      jobBatch.value += 1
+      ElMessage.success(t('views.export.msg.jobStarted', { id: job.id ?? '' }))
+      beginWatchJob(job.id ?? 0, generation)
+      return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : t('views.export.msg.jobStartFailed')
+      if (created !== null) {
+        // 作业已建：不能说"未启动"
+        return { ok: true, job: created, taskId: forTask, detached: generation !== taskGeneration, attachError: reason }
+      }
+      if (generation === taskGeneration) {
+        ElMessage.error(reason)
+      }
+      return { ok: false, reason, notified: true }
+    }
   } finally {
-    if (generation === taskGeneration) {
+    if (exportStartOwner === owner) {
+      exportStartOwner = null
       startingExport.value = false
     }
   }
@@ -1458,23 +1484,7 @@ async function startExport(
  * 用户点击侧多这一步复选框确认（不可撤销：重导出会替换服务端文件）。
  */
 async function onStartExportClick(): Promise<void> {
-  if (gridDirty && exportResults.value.length > 0) {
-    const confirmed = await confirmIrreversible({
-      title: t('views.export.dialog.dirtyTitle'),
-      message: t('views.export.dialog.dirtyMessage'),
-      ack: t('views.export.dialog.dirtyAck')
-    })
-    if (!confirmed) {
-      ElMessage.info(t('views.export.msg.dirtyCanceled'))
-      return
-    }
-    const outcome = await startExport({ discardUnsaved: true })
-    if (!outcome.ok && outcome.reason && outcome.notified !== true) {
-      ElMessage.warning(outcome.reason)
-    }
-    return
-  }
-  const outcome = await startExport()
+  const outcome = await startExport({ confirmDiscardUnsaved: true })
   if (!outcome.ok && outcome.reason && outcome.notified !== true) {
     ElMessage.warning(outcome.reason)
   }
@@ -1515,11 +1525,17 @@ function beginWatchJob(jobId: number, generation: number = taskGeneration): void
         return
       }
       exportJob.value = job
-      const issues = (await jobsApi.getIssues(jobId)).content ?? []
+      try {
+        const issues = (await jobsApi.getIssues(jobId)).content ?? []
+        if (generation === taskGeneration) {
+          currentIssues.value = issues
+        }
+      } catch {
+        // 问题清单失败不阻断结果文件与任务状态刷新
+      }
       if (generation !== taskGeneration) {
         return
       }
-      currentIssues.value = issues
       if (job.status === 'COMPLETED') {
         ElMessage.success(t('views.export.msg.exportDone'))
         await refreshResults()

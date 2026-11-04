@@ -319,6 +319,7 @@ interface UploadContext {
   runId: string
   toolCallId: string
   sessionId?: string
+  signal?: AbortSignal
 }
 
 interface AttachmentMeta {
@@ -454,6 +455,9 @@ const touched = reactive(new Set<string>())
 const attachments = ref<Record<string, AttachmentMeta>>({})
 const uploading = reactive<Record<string, boolean>>({})
 const uploadErrors = reactive<Record<string, string>>({})
+const attachmentOperationSeq = new Map<string, number>()
+const attachmentControllers = new Map<string, AbortController>()
+let attachmentsDisposed = false
 /** 浏览器侧超限/类型拒绝（与后端同口径；不发请求，只点亮字段错误）。 */
 const attachmentRejections = reactive<Record<string, AttachmentRejection>>({})
 /** 数据源级联的结果（optionsFrom.sourceId）：按字段 key 缓存，父值一变就重取。 */
@@ -766,6 +770,8 @@ onMounted(() => {
  * 会随组件一起消失。只读回放卡没有挂起归属（无待写值），无副作用。
  */
 onBeforeUnmount(() => {
+  attachmentsDisposed = true
+  invalidateAllAttachments()
   if (draftToolCallId) {
     flushFormDraft(draftToolCallId)
   }
@@ -799,10 +805,42 @@ async function ensuredUploadSessionId(): Promise<string> {
   }
 }
 
+function nextAttachmentOperation(key: string): number {
+  const seq = (attachmentOperationSeq.get(key) ?? 0) + 1
+  attachmentOperationSeq.set(key, seq)
+  return seq
+}
+
+function invalidateAttachment(key: string): number {
+  const seq = nextAttachmentOperation(key)
+  attachmentControllers.get(key)?.abort()
+  attachmentControllers.delete(key)
+  uploading[key] = false
+  return seq
+}
+
+function invalidateAllAttachments(): void {
+  const keys = new Set([...attachmentOperationSeq.keys(), ...attachmentControllers.keys()])
+  for (const key of keys) {
+    invalidateAttachment(key)
+  }
+}
+
+watch(
+  () => [props.uploadContext?.sessionId, props.uploadContext?.signal] as const,
+  (current, previous) => {
+    if (current[0] !== previous[0] || current[1] !== previous[1]) {
+      invalidateAllAttachments()
+    }
+  }
+)
+
 async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<void> {
+  const seq = invalidateAttachment(field.key)
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
-  if (!file || !props.uploadContext) {
+  const uploadContext = props.uploadContext
+  if (!file || !uploadContext || attachmentsDisposed) {
     return
   }
   delete attachmentRejections[field.key]
@@ -813,30 +851,64 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
     input.value = ''
     return
   }
-  // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸；并把**最新**会话号随上下文传给
-  // 上传口（附件 API 契约不变，sessionId 仍是可选字段；这里只保证不拿空号/旧号去传）。
-  const sessionId = await ensuredUploadSessionId()
-  if (sessionId === '') {
-    uploadErrors[field.key] = t('ai.gf.attachment.failed')
-    input.value = ''
+  if (uploadContext.signal?.aborted) {
     return
   }
+  const controller = new AbortController()
+  attachmentControllers.set(field.key, controller)
+  const externalSignal = uploadContext.signal
+  const isCurrent = (): boolean => !attachmentsDisposed
+    && attachmentOperationSeq.get(field.key) === seq
+    && attachmentControllers.get(field.key) === controller
+  const onExternalAbort = (): void => {
+    if (isCurrent()) {
+      invalidateAttachment(field.key)
+    }
+  }
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
   uploading[field.key] = true
   try {
-    const uploaded = await uploadFormAttachment(file, { ...props.uploadContext, sessionId })
+    // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸；并把**最新**会话号随上下文传给
+    // 上传口（附件 API 契约不变，sessionId 仍是可选字段；这里只保证不拿空号/旧号去传）。
+    const sessionId = await ensuredUploadSessionId()
+    if (!isCurrent() || externalSignal?.aborted) {
+      return
+    }
+    if (sessionId === '') {
+      uploadErrors[field.key] = t('ai.gf.attachment.failed')
+      return
+    }
+    const uploaded = await uploadFormAttachment(file, {
+      ...uploadContext,
+      sessionId,
+      signal: controller.signal
+    })
+    if (!isCurrent()) {
+      return
+    }
     attachments.value = { ...attachments.value, [field.key]: uploaded }
     setValue(field.key, uploaded.fileId)
     localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)
   } catch (error) {
-    uploadErrors[field.key] =
-      error instanceof Error ? error.message : t('ai.gf.attachment.failed')
+    if (isCurrent()) {
+      uploadErrors[field.key] =
+        error instanceof Error ? error.message : t('ai.gf.attachment.failed')
+    }
   } finally {
-    uploading[field.key] = false
-    input.value = ''
+    externalSignal?.removeEventListener('abort', onExternalAbort)
+    if (isCurrent()) {
+      attachmentControllers.delete(field.key)
+      uploading[field.key] = false
+      input.value = ''
+    }
   }
 }
 
 function removeAttachment(key: string): void {
+  invalidateAttachment(key)
+  if (attachmentsDisposed) {
+    return
+  }
   const next = { ...attachments.value }
   delete next[key]
   attachments.value = next

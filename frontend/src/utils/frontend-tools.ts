@@ -91,12 +91,12 @@ import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
 import type { ConfigField } from '@/types/definition'
 import type { TaskType } from '@/types/task'
 import {
-  aggregateSheet,
-  findRows,
+  aggregateSheetAsync,
+  findRowsAsync,
   inspectColumns,
-  normalizeSuggest,
-  readSheetSummary,
-  reviewCells,
+  normalizeSuggestAsync,
+  readSheetSummaryAsync,
+  reviewCellsAsync,
   sheetReadOnlyWriteBlocked,
   sheetContentVersionOf,
   type SheetAdapter,
@@ -151,11 +151,10 @@ export function unregisterFrontendToolExecutor(name: FrontendToolName | string):
 }
 
 /**
- * `FrontendToolExecution` 的**唯一生产工厂**（批3③a D1 终裁）：`ok` 由 `outcome` 单点推导
- * （`ok === (outcome === 'ok')`，故 "结局未知" 恒 `ok:false`），一致性断言随工厂单点化 ——
- * 不得在任何路由里手写 `{ ok, availability, result }` 字面量（T8 锁工厂行为）。
+ * `FrontendToolExecution` 的**唯一生产工厂**：结局只由 `outcome` 单点承载，
+ * 不得在任何路由里手写 `{ availability, outcome, result }` 字面量。
  *
- * 为什么必须收口而不是逐点手写：21 处生产点若各自维护 ok/outcome 两份真源，任一点漂移都会
+ * 为什么必须收口而不是逐点手写：21 处生产点若各自维护结局维度，任一点漂移都会
  * 让卡面与回灌文本自相矛盾（本包要根治的正是这类谎报）。
  */
 export function makeExecution(input: {
@@ -167,7 +166,6 @@ export function makeExecution(input: {
   sheetMeta?: FrontendToolExecution['sheetMeta']
 }): FrontendToolExecution {
   const execution: FrontendToolExecution = {
-    ok: input.outcome === 'ok',
     availability: input.availability,
     outcome: input.outcome,
     result: input.result
@@ -1569,42 +1567,47 @@ export async function resolveSheetContext(
 }
 
 /** 表格工具 → 纯函数（读侧 5 档 + 撤销；写侧预览由 store 特判，不走本执行器）。 */
-function runSheetTool(name: string, args: Record<string, unknown>): Promise<FrontendToolExecution> {
-  return resolveSheetContext(args.defCode).then((resolved) => {
-    if (!resolved.ok) {
-      return makeExecution({ outcome: 'failed', availability: 'degraded', result: resolved.reason })
-    }
-    const ctx = resolved.ctx
-    // 只读壳只拦**写**路径：读工具（摘要/聚合/诊断/校验）与 normalize 建议档照常可用。
-    const writeCall = SHEET_WRITE_TOOLS.has(name) && (name !== 'normalize_column' || args.commit === true)
-    if (ctx.readOnly && writeCall) {
-      return makeExecution({
-        outcome: 'failed',
-        availability: 'degraded',
-        result: sheetReadOnlyWriteBlocked()
-      })
-    }
-    let outcome: SheetToolOutcome
+async function runSheetTool(
+  name: string,
+  args: Record<string, unknown>,
+  lifetime?: UiEventLifetime
+): Promise<FrontendToolExecution> {
+  const resolved = await resolveSheetContext(args.defCode)
+  if (!resolved.ok) {
+    return makeExecution({ outcome: 'failed', availability: 'degraded', result: resolved.reason })
+  }
+  const ctx = resolved.ctx
+  // 只读壳只拦**写**路径：读工具（摘要/聚合/诊断/校验）与 normalize 建议档照常可用。
+  const writeCall = SHEET_WRITE_TOOLS.has(name) && (name !== 'normalize_column' || args.commit === true)
+  if (ctx.readOnly && writeCall) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: sheetReadOnlyWriteBlocked()
+    })
+  }
+  let outcome: SheetToolOutcome
+  try {
     switch (name) {
       case 'read_sheet_summary':
-        outcome = readSheetSummary(ctx, args)
+        outcome = await readSheetSummaryAsync(ctx, args, lifetime)
         break
       case 'aggregate_sheet':
-        outcome = aggregateSheet(ctx, args)
+        outcome = await aggregateSheetAsync(ctx, args, lifetime)
         break
       case 'inspect_columns':
         outcome = inspectColumns(ctx, args)
         break
       case 'review_cells':
-        outcome = reviewCells(ctx, args)
+        outcome = await reviewCellsAsync(ctx, args, lifetime)
         break
       case 'find_rows':
-        outcome = findRows(ctx, args)
+        outcome = await findRowsAsync(ctx, args, lifetime)
         break
       case 'normalize_column':
         outcome = args.commit === true
           ? { ok: false, reason: '写操作（commit=true）必须经用户确认后由预览卡应用，本次未做任何修改。' }
-          : normalizeSuggest(ctx, args)
+          : await normalizeSuggestAsync(ctx, args, lifetime)
         break
       case 'undo_last_sheet_edit':
         // 工具安全边界批（2026-10-25 裁决）：撤销会覆盖当前表格数据 ⇒ 必须经用户在预览卡上确认。
@@ -1619,24 +1622,33 @@ function runSheetTool(name: string, args: Record<string, unknown>): Promise<Fron
       default:
         outcome = { ok: false, reason: `未知的表格工具 ${name}。` }
     }
-    // 表格采样元数据（治理批 §4.2）：只有成功读数才有"出域体积"可言 —— 失败路径不带，
-    // 免得把"没读到"记成"读了 0 行"（那是另一种失真）。
-    return outcome.ok
-      ? makeExecution({
-          outcome: 'ok',
-          availability: 'available',
-          result: outcome.text,
-          sheetMeta: outcome.meta
-            ? {
-                ...outcome.meta,
-                defCode: typeof args.defCode === 'string' ? args.defCode : undefined,
-                // 台账定位用的页面 id（只进台账，不进日志面）
-                page: useWorkspaceStore().snapshot().page
-              }
-            : undefined
-        })
-      : makeExecution({ outcome: 'failed', availability: 'degraded', result: outcome.reason })
-  })
+  } catch (error) {
+    if (lifetime?.abandoned) {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'degraded',
+        result: '表格操作已停止或已超时，本次未返回部分计算结果。'
+      })
+    }
+    throw error
+  }
+  // 表格采样元数据（治理批 §4.2）：只有成功读数才有"出域体积"可言 —— 失败路径不带，
+  // 免得把"没读到"记成"读了 0 行"（那是另一种失真）。
+  return outcome.ok
+    ? makeExecution({
+        outcome: 'ok',
+        availability: 'available',
+        result: outcome.text,
+        sheetMeta: outcome.meta
+          ? {
+              ...outcome.meta,
+              defCode: typeof args.defCode === 'string' ? args.defCode : undefined,
+              // 台账定位用的页面 id（只进台账，不进日志面）
+              page: useWorkspaceStore().snapshot().page
+            }
+          : undefined
+      })
+    : makeExecution({ outcome: 'failed', availability: 'degraded', result: outcome.reason })
 }
 
 /** 路由 1：登记在册的前端工具（参数校验 + scope 校验 + 执行器）。 */
@@ -1692,16 +1704,15 @@ async function runRegisteredTool(
 }
 
 /**
- * 执行器返回值解读（批3③a A4）：字符串 = 成功 + 该文本（兼容旧执行器）；
- * 结构化 {@link FrontendToolExecution} = 按其 outcome 语义原样落（经工厂重推导 ok，
- * 一致性仍单点化）；历史遗留的"只带 ok 不带 outcome"对象按 ok 三元推导。
+ * 执行器返回值解读：字符串 = 成功 + 该文本；结构化 {@link FrontendToolExecution} =
+ * 按其 outcome 语义原样落（经工厂重新包装，结局仍单点）。
  */
 function normalizeExecutorReturn(value: string | FrontendToolExecution): FrontendToolExecution {
   if (typeof value === 'string') {
     return makeExecution({ outcome: 'ok', availability: 'available', result: value })
   }
   return makeExecution({
-    outcome: value.outcome ?? (value.ok ? 'ok' : 'failed'),
+    outcome: value.outcome,
     availability: value.availability,
     result: value.result,
     reason: value.reason,
@@ -2040,7 +2051,7 @@ function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
     return (call) => runUiPrimitive(name, call.args)
   }
   if ((SHEET_TOOL_NAMES as readonly string[]).includes(name)) {
-    return (call) => runSheetTool(name, call.args)
+    return (call, lifetime) => runSheetTool(name, call.args, lifetime)
   }
   if (name === 'open_export_file_editor') {
     return async (call, lifetime) => {

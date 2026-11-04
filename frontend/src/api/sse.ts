@@ -171,7 +171,7 @@ export interface ArchiveTrimSignal {
   toSeq: number | null
 }
 
-/** 归档截断响应头（Task 2 契约；`X-` 前缀别名一并认，大小写不敏感）。 */
+/** 归档截断响应头（Task 2 契约；大小写不敏感）。 */
 export const ARCHIVE_TRIM_HEADERS = {
   trimmed: 'archive-trimmed',
   from: 'archive-from',
@@ -183,13 +183,7 @@ export function archiveTrimSignalOfHeaders(headers: Headers | null | undefined):
   if (!headers) {
     return null
   }
-  const pick = (name: string): string | null => {
-    const direct = headers.get(name)
-    if (direct !== null) {
-      return direct
-    }
-    return headers.get(`x-${name}`)
-  }
+  const pick = (name: string): string | null => headers.get(name)
   const trimmed = (pick(ARCHIVE_TRIM_HEADERS.trimmed) ?? '').trim().toLowerCase()
   if (trimmed !== 'true' && trimmed !== '1') {
     return null
@@ -234,6 +228,38 @@ export interface SseFrameHandlers {
    * 每条连接最多回调一次；没有头 ⇒ 不回调（正常跳号不报缺口）。
    */
   onArchiveTrim?: (signal: ArchiveTrimSignal) => void
+}
+
+export function pageHidden(): boolean {
+  return typeof document !== 'undefined'
+    && (document.hidden || document.visibilityState === 'hidden')
+}
+
+export function waitForPageVisible(signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) {
+    return Promise.resolve(false)
+  }
+  if (!pageHidden()) {
+    return Promise.resolve(true)
+  }
+  return new Promise((resolve) => {
+    const cleanup = (): void => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const settle = (visible: boolean): void => {
+      cleanup()
+      resolve(visible)
+    }
+    const onVisibility = (): void => {
+      if (!pageHidden()) {
+        settle(true)
+      }
+    }
+    const onAbort = (): void => settle(false)
+    document.addEventListener('visibilitychange', onVisibility)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 /** 流选项。 */
@@ -567,6 +593,7 @@ async function readStream(
     reason,
     ...(timeoutStage === null ? {} : { timeoutStage })
   })
+  let reachedEof = false
 
   try {
     for (;;) {
@@ -577,6 +604,7 @@ async function readStream(
       }
       const { done, value } = await reader.read()
       if (done) {
+        reachedEof = true
         break
       }
       if (controller.signal.aborted) {
@@ -620,6 +648,13 @@ async function readStream(
       clearTimeout(idleTimer)
     }
     clearFirstFrame()
+    if (state.terminal && !reachedEof && !controller.signal.aborted) {
+      try {
+        await reader.cancel()
+      } catch {
+        // 已关闭 / 不可取消：不影响终帧的正常清理
+      }
+    }
     try {
       reader.releaseLock()
     } catch {
@@ -648,8 +683,12 @@ async function readStream(
  * </ul>
  * 本函数**不**消费流，也不重试；调用方**不得**在退避之前 await 它（探测慢不能推迟重连）。
  */
-export async function probeReattach(runId: string): Promise<ReattachProbe> {
+export async function probeReattach(runId: string, signal?: AbortSignal): Promise<ReattachProbe> {
+  if (!await waitForPageVisible(signal)) {
+    return { status: 0, preparing: null }
+  }
   const controller = new AbortController()
+  const unlink = linkAbort(signal, controller)
   const timer = setTimeout(() => controller.abort(), DEFAULT_CONNECT_TIMEOUT_MS)
   try {
     const response = await fetch(SSE_PATHS.eventsProbe(runId), {
@@ -706,6 +745,7 @@ export async function probeReattach(runId: string): Promise<ReattachProbe> {
   } catch {
     return { status: 0, preparing: null }
   } finally {
+    unlink()
     clearTimeout(timer)
   }
 }
@@ -1032,6 +1072,32 @@ export async function reattach(
      * 上一代的慢 202 不得替下一代（或退役后的空窗）做决定。
      */
     let generation = 0
+    let pendingReconnect: { attempt: number; delay: number } | null = null
+    let openWhenVisible = false
+
+    const onVisibility = (): void => {
+      if (pageHidden()) {
+        if (retryTimer !== null) {
+          clearRetry()
+        }
+        return
+      }
+      if (settled || options.signal?.aborted || source !== null) {
+        return
+      }
+      const pending = pendingReconnect
+      if (pending !== null) {
+        pendingReconnect = null
+        openWhenVisible = false
+        handlers.onReconnect?.(pending.attempt, pending.delay)
+        open()
+        return
+      }
+      if (openWhenVisible) {
+        openWhenVisible = false
+        open()
+      }
+    }
 
     const clearIdle = (): void => {
       if (idleTimer !== null) {
@@ -1070,9 +1136,14 @@ export async function reattach(
       clearIdle()
       clearConnect()
       clearRetry()
+      pendingReconnect = null
+      openWhenVisible = false
       source?.close()
       source = null
       options.signal?.removeEventListener('abort', onAbort)
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility)
+      }
       // 调用方主动中止 = 停止的正常收尾（不是传输失败）；终帧已到则仍按终态收口。
       resolve(finish(
         state,
@@ -1159,12 +1230,20 @@ export async function reattach(
       state.reconnects = attempts
       const attempt = attempts
       const delay = reconnectDelayMs(attempt, random)
+      pendingReconnect = { attempt, delay }
       clearRetry()
+      if (pageHidden()) {
+        return
+      }
       retryTimer = setTimeout(() => {
         retryTimer = null
         if (settled || options.signal?.aborted) {
           return
         }
+        if (pageHidden()) {
+          return
+        }
+        pendingReconnect = null
         // C1：`onReconnect` 是**用户通告**，只随"确实要开新连接"发出 ——
         // 排期在断流当刻就已开始，但探测命中 202/404 会把排期连同这句通告一起撤销，
         // 用户因此不会看到一条不会发生的重试（旧行为在 arm 时就通告，notice 会残留）。
@@ -1174,6 +1253,15 @@ export async function reattach(
     }
 
     const open = (): void => {
+      if (settled || options.signal?.aborted || source !== null) {
+        return
+      }
+      if (pageHidden()) {
+        openWhenVisible = true
+        return
+      }
+      openWhenVisible = false
+      pendingReconnect = null
       // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
       const since = state.lastSeq ?? options.lastSeq
       generation += 1
@@ -1241,15 +1329,15 @@ export async function reattach(
       if (!connectionEstablished && !probedThisConnection) {
         probedThisConnection = true
         scheduleReconnect(reason)
-        if (settled) {
-          // 重挂额度已耗尽（或已收尾）：不再发探测 —— 一个已收尾的连接不该留下在途请求与计时器
+        if (settled || pageHidden()) {
+          // 已收尾 / 后台暂停：不再发探测；visible 只恢复已排期的重连
           return
         }
         const probeGeneration = generation
         const probeAttempt = attempts
-        void probeReattach(runId).then((probe) => {
-          if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
-            // 已收尾 / 世代已换代 / 尝试已推进：本探测结果过期（不得据它收尾或改判）
+        void probeReattach(runId, options.signal).then((probe) => {
+          if (settled || pageHidden() || generation !== probeGeneration || attempts !== probeAttempt) {
+            // 已收尾 / 后台暂停 / 世代已换代 / 尝试已推进：本探测结果不得改写当前现场
             return
           }
           if (probe.preparing) {
@@ -1274,6 +1362,9 @@ export async function reattach(
       return
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility)
+    }
     open()
   })
 }

@@ -109,37 +109,118 @@ export interface TaskEventsOptions {
   onerror?: (ev: Event) => void
 }
 
+export interface TaskEventSubscription {
+  readonly readyState: number
+  onopen: ((ev: Event) => void) | null
+  close(): void
+}
+
+interface TaskEventSubscriber {
+  onFrame: (frame: TaskEventFrame) => void
+  onerror?: (ev: Event) => void
+  opened: boolean
+  handle: TaskEventSubscription
+}
+
+interface SharedTaskEvents {
+  source: EventSource
+  subscribers: Set<TaskEventSubscriber>
+}
+
+const taskEventStreams = new Map<number, SharedTaskEvents>()
+
 /**
- * 任务级事件流（GET /api/tasks/{id}/events）。
- *
- * 该通道帧形态与 AI 帧不同（大写 type + 包一层 data）。当前唯一消费方是作业跟踪
- * `utils/job-watch.ts`（SSE 主通道 + 3s 兜底轮询）；任务中心不自刷、不订阅本通道
- * （手动刷新批 M1 已摘除订阅池，列表更新只走 store 的 refreshNow 手动通道）。
- *
- * 步3 的挂具（`options`，可选、向后兼容）：`onerror`
- * —— 通道**无周期心跳**，"长时间无帧"本身不判死（帧空闲看门狗的口径见 job-watch.ts），
- * 通道降级的直接驱动是 onerror/readyState。
+ * 任务级事件流（GET /api/tasks/{id}/events）：每文档、每 taskId 一条连接，多 job 订阅分发。
+ * 最后一个订阅关闭时才关闭底层 EventSource；各订阅保留独立 onopen/onerror/dispose 语义。
  */
 export function openTaskEvents(
   taskId: number,
   onFrame: (frame: TaskEventFrame) => void,
   options: TaskEventsOptions = {}
-): EventSource {
-  const source = new EventSource(`/api/tasks/${taskId}/events`)
-  source.onmessage = (event: MessageEvent<string>) => {
-    try {
-      onFrame(JSON.parse(event.data) as TaskEventFrame)
-    } catch {
-      // 非 JSON 帧（心跳注释等）忽略
+): TaskEventSubscription {
+  let stream = taskEventStreams.get(taskId)
+  if (!stream) {
+    const source = new EventSource(`/api/tasks/${taskId}/events`)
+    const shared: SharedTaskEvents = { source, subscribers: new Set<TaskEventSubscriber>() }
+    stream = shared
+    taskEventStreams.set(taskId, shared)
+    const dispatch = (callback: () => void): void => {
+      try {
+        callback()
+      } catch {
+        // 单个订阅者的回调异常不阻断其他订阅者，也不冒充 JSON 解析失败
+      }
     }
-  }
-  const { onerror } = options
-  if (onerror) {
+    source.onmessage = (event: MessageEvent<string>) => {
+      let frame: TaskEventFrame
+      try {
+        frame = JSON.parse(event.data) as TaskEventFrame
+      } catch {
+        // 非 JSON 帧（心跳注释等）忽略
+        return
+      }
+      for (const subscriber of [...shared.subscribers]) {
+        dispatch(() => subscriber.onFrame(frame))
+      }
+    }
+    source.onopen = (ev: Event) => {
+      for (const subscriber of [...shared.subscribers]) {
+        subscriber.opened = true
+        dispatch(() => subscriber.handle.onopen?.(ev))
+      }
+    }
     source.onerror = (ev: Event) => {
-      onerror(ev)
+      for (const subscriber of [...shared.subscribers]) {
+        dispatch(() => subscriber.onerror?.(ev))
+      }
     }
   }
-  return source
+  const activeStream = stream
+  const subscriber: TaskEventSubscriber = {
+    onFrame,
+    onerror: options.onerror,
+    opened: false,
+    handle: null as unknown as TaskEventSubscription
+  }
+  let closed = false
+  const handle: TaskEventSubscription = {
+    get readyState(): number {
+      return activeStream.source.readyState
+    },
+    onopen: null,
+    close(): void {
+      if (closed) {
+        return
+      }
+      closed = true
+      activeStream.subscribers.delete(subscriber)
+      if (activeStream.subscribers.size === 0) {
+        if (taskEventStreams.get(taskId) === activeStream) {
+          taskEventStreams.delete(taskId)
+        }
+        activeStream.source.onmessage = null
+        activeStream.source.onopen = null
+        activeStream.source.onerror = null
+        activeStream.source.close()
+      }
+    }
+  }
+  subscriber.handle = handle
+  activeStream.subscribers.add(subscriber)
+  if (activeStream.source.readyState === EventSource.OPEN) {
+    queueMicrotask(() => {
+      if (closed || subscriber.opened || activeStream.source.readyState !== EventSource.OPEN) {
+        return
+      }
+      subscriber.opened = true
+      try {
+        handle.onopen?.(new Event('open'))
+      } catch {
+        // 单个订阅者的 OPEN 回调异常不影响共享通道
+      }
+    })
+  }
+  return handle
 }
 
 export const tasksApi = {

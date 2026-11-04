@@ -35,6 +35,8 @@ const loading = ref(true)
 const loadError = ref<unknown>(null)
 const providers = ref<AiProviderView[]>([])
 const defaults = ref<AiDefaults | null>(null)
+const defaultsLoading = ref(true)
+const defaultsError = ref<unknown>(null)
 const health = ref<AiHealth | null>(null)
 
 /** 每个 provider 的编辑态（key 单独放：留空 = 不改）。 */
@@ -48,6 +50,7 @@ interface CardForm {
 const cardForms = reactive<Record<number, CardForm>>({})
 const probeResults = reactive<Record<number, AiProbeResult | null | undefined>>({})
 const busy = reactive<Record<string, boolean>>({})
+const busyTokens = new Map<string, symbol>()
 
 const selectedProviderId = ref<number | null>(null)
 const fetchedModels = ref<string[]>([])
@@ -85,11 +88,19 @@ function isBusy(key: string): boolean {
 }
 
 async function withBusy(key: string, action: () => Promise<void>): Promise<void> {
+  if (isBusy(key)) {
+    return
+  }
+  const token = Symbol(key)
+  busyTokens.set(key, token)
   busy[key] = true
   try {
     await action()
   } finally {
-    busy[key] = false
+    if (busyTokens.get(key) === token) {
+      busyTokens.delete(key)
+      busy[key] = false
+    }
   }
 }
 
@@ -272,28 +283,81 @@ function fillDefaults(): void {
   defaultsBaseline = server
 }
 
-async function load(): Promise<void> {
+let providersLoadSeq = 0
+let defaultsLoadSeq = 0
+let healthLoadSeq = 0
+
+function applyProviders(nextProviders: AiProviderView[]): void {
+  providers.value = nextProviders
+  fillForms()
+  fillDefaults()
+  if (selectedProviderId.value == null && providers.value.length > 0) {
+    selectedProviderId.value = providers.value[0].id
+  }
+}
+
+async function refreshProviders(): Promise<void> {
+  const seq = ++providersLoadSeq
   loading.value = true
   loadError.value = null
   try {
-    providers.value = await aiConfigApi.listProviders()
-    defaults.value = await aiConfigApi.getDefaults()
-    fillForms()
-    fillDefaults()
-    if (selectedProviderId.value == null && providers.value.length > 0) {
-      selectedProviderId.value = providers.value[0].id
-    }
-    // /health 只用于"env 兜底未落库"的提示（M5）：它 503 也是正常语义，失败不影响本页
-    try {
-      health.value = await aiApi.health()
-    } catch {
-      health.value = null
+    const nextProviders = await aiConfigApi.listProviders()
+    if (seq === providersLoadSeq) {
+      applyProviders(nextProviders)
     }
   } catch (error) {
+    if (seq !== providersLoadSeq) {
+      return
+    }
     loadError.value = error
+    throw error
   } finally {
-    loading.value = false
+    if (seq === providersLoadSeq) {
+      loading.value = false
+    }
   }
+}
+
+async function refreshDefaults(): Promise<void> {
+  const seq = ++defaultsLoadSeq
+  defaultsLoading.value = true
+  defaultsError.value = null
+  try {
+    const nextDefaults = await aiConfigApi.getDefaults()
+    if (seq !== defaultsLoadSeq) {
+      return
+    }
+    defaults.value = nextDefaults
+    fillDefaults()
+  } catch (error) {
+    if (seq === defaultsLoadSeq) {
+      defaultsError.value = error
+    }
+  } finally {
+    if (seq === defaultsLoadSeq) {
+      defaultsLoading.value = false
+    }
+  }
+}
+
+async function refreshHealth(): Promise<void> {
+  const seq = ++healthLoadSeq
+  try {
+    const nextHealth = await aiApi.health()
+    if (seq === healthLoadSeq) {
+      health.value = nextHealth
+    }
+  } catch {
+    if (seq === healthLoadSeq) {
+      health.value = null
+    }
+  }
+}
+
+async function load(): Promise<void> {
+  void refreshProviders().catch(() => {})
+  void refreshDefaults()
+  void refreshHealth()
 }
 
 /**
@@ -398,14 +462,14 @@ async function saveProvider(provider: AiProviderView): Promise<void> {
   await withBusy(`save-${provider.id}`, async () => {
     try {
       await aiConfigApi.updateProvider(provider.id, providerBody(provider))
-      // I1（R1 返修）：密钥已随本次保存提交 ⇒ 立刻清空输入框（**在 load() 之前**）：
+      // I1（R1 返修）：密钥已随本次保存提交 ⇒ 立刻清空输入框（**在刷新之前**）：
       // ① 明文不常驻表单；② 否则下一次重载会把这段"已保存的脏值"继续当成脏值保留，
       // 再点保存就会把同一把密钥重复提交，而"清除密钥"之后也会被它悄悄回滚。
       // N2（R2）：安全判空 —— PUT 已经成功了，卡片这一刻可能已被并发删除（列表与表单一起重建/消失）；
       // 用非空断言会在**成功之后**抛 TypeError，被 catch 说成"保存失败"（把成功误报成失败）。
       clearCardKey(provider.id)
       ElMessage.success(T.saved)
-      await load()
+      await refreshProviders().catch(() => {})
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -425,7 +489,7 @@ async function clearKey(provider: AiProviderView): Promise<void> {
       // N2（R2）：同 saveProvider —— 卡片已被并发删除时安全跳过，不把成功误报成失败。
       clearCardKey(provider.id)
       ElMessage.success(T.saved)
-      await load()
+      await refreshProviders().catch(() => {})
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -436,7 +500,7 @@ async function clearKey(provider: AiProviderView): Promise<void> {
  * N2（R2）：清空某张卡的密钥输入框（卡片已不在 = 无操作）。
  *
  * <p>为什么不用 `cardForms[id]!`：服务端已成功之后，这一拍里他端可能刚把 provider 删掉
- * （`load()` 会同步清 `cardForms`），非空断言会抛错并被外层 catch 当成"保存失败"提示用户。
+ * （`refreshProviders()` 会同步清 `cardForms`），非空断言会抛错并被外层 catch 当成"保存失败"提示用户。
  */
 function clearCardKey(providerId: number): void {
   const form = cardForms[providerId]
@@ -455,7 +519,7 @@ async function toggleEnabled(provider: AiProviderView): Promise<void> {
   await withBusy(`toggle-${provider.id}`, async () => {
     try {
       await aiConfigApi.updateProvider(provider.id, { enabled: !provider.enabled })
-      await load()
+      await refreshProviders()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -478,7 +542,7 @@ async function removeProvider(provider: AiProviderView): Promise<void> {
   await withBusy(`remove-${provider.id}`, async () => {
     try {
       await aiConfigApi.deleteProvider(provider.id, true)
-      await load()
+      await refreshProviders()
     } catch (error) {
       if (errorCodeOf(error) !== 'PROVIDER_IN_USE') {
         ElMessage.error(describeAiConfigError(error))
@@ -487,7 +551,7 @@ async function removeProvider(provider: AiProviderView): Promise<void> {
       try {
         await aiConfigApi.deleteProvider(provider.id, false)
         ElMessage.warning(softDeleteHint(provider.models.length))
-        await load()
+        await refreshProviders()
       } catch (fallbackError) {
         ElMessage.error(describeAiConfigError(fallbackError))
       }
@@ -536,7 +600,7 @@ async function createProvider(): Promise<void> {
       createForm.displayName = ''
       createForm.baseUrl = ''
       createForm.apiKey = ''
-      await load()
+      await refreshProviders()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -609,7 +673,7 @@ async function addFetched(modelId: string): Promise<void> {
   await withBusy(`add-${modelId}`, async () => {
     try {
       await aiConfigApi.addModel(provider.id, { modelId })
-      await load()
+      await refreshProviders()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -634,7 +698,7 @@ async function addManualModel(): Promise<void> {
       manualForm.modelId = ''
       manualForm.maxContext = ''
       manualForm.maxOutput = ''
-      await load()
+      await refreshProviders()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -658,7 +722,7 @@ async function saveModelRow(model: AiModelRow): Promise<void> {
         isDefault: model.isDefault
       })
       ElMessage.success(T.saved)
-      await load()
+      await refreshProviders().catch(() => {})
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -677,7 +741,7 @@ async function removeModelRow(model: AiModelRow): Promise<void> {
   await withBusy(`model-${model.id}`, async () => {
     try {
       await aiConfigApi.deleteModel(provider.id, model.modelId)
-      await load()
+      await refreshProviders()
     } catch (error) {
       ElMessage.error(describeAiConfigError(error))
     }
@@ -730,9 +794,9 @@ async function confirm(message: string): Promise<boolean> {
     <h3 class="text-base font-semibold mb-1">{{ T.title }}</h3>
     <p class="text-xs text-[#909399] mb-3">{{ T.subtitle }}</p>
 
-    <div v-if="loading" class="text-sm text-[#909399]" data-testid="ai-settings-loading">{{ T.loading }}</div>
+    <div v-if="loading && providers.length === 0" class="text-sm text-[#909399]" data-testid="ai-settings-loading">{{ T.loading }}</div>
     <div
-      v-else-if="loadError"
+      v-if="loadError"
       class="text-sm text-[#f56c6c] px-3 py-2 rounded bg-[#fef0f0]"
       data-testid="ai-settings-error"
     >
@@ -740,7 +804,7 @@ async function confirm(message: string): Promise<boolean> {
       <el-button size="small" class="ml-2" data-testid="ai-settings-retry" @click="load">{{ T.retry }}</el-button>
     </div>
 
-    <template v-else>
+    <template v-if="providers.length > 0 || (!loading && !loadError)">
       <!-- M5：env 兜底未落库 -->
       <div
         v-if="syntheticProviders.length > 0"
@@ -824,16 +888,16 @@ async function confirm(message: string): Promise<boolean> {
             >
               {{ isBusy(`save-${provider.id}`) ? T.saving : T.save }}
             </button>
-            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" data-testid="clear-key" @click="clearKey(provider)">
+            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" :disabled="isBusy(`clear-${provider.id}`)" data-testid="clear-key" @click="clearKey(provider)">
               {{ T.clearKey }}
             </button>
-            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" data-testid="test-provider" @click="testConnection(provider)">
+            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" :disabled="isBusy(`test-${provider.id}`)" data-testid="test-provider" @click="testConnection(provider)">
               {{ isBusy(`test-${provider.id}`) ? T.testing : T.testConnection }}
             </button>
-            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" data-testid="toggle-provider" @click="toggleEnabled(provider)">
+            <button class="px-2 py-1 rounded border border-solid border-[#dcdfe6]" :disabled="isBusy(`toggle-${provider.id}`)" data-testid="toggle-provider" @click="toggleEnabled(provider)">
               {{ provider.enabled ? T.disable : T.enable }}
             </button>
-            <button class="px-2 py-1 rounded border border-solid border-[#fbc4c4] text-[#f56c6c]" data-testid="remove-provider" @click="removeProvider(provider)">
+            <button class="px-2 py-1 rounded border border-solid border-[#fbc4c4] text-[#f56c6c]" :disabled="isBusy(`remove-${provider.id}`)" data-testid="remove-provider" @click="removeProvider(provider)">
               {{ T.remove }}
             </button>
             <span
@@ -897,7 +961,7 @@ async function confirm(message: string): Promise<boolean> {
         <div v-if="fetchedModels.length > 0" class="mb-2 flex flex-wrap gap-2" data-testid="fetched-models">
           <span v-for="modelId in fetchedModels" :key="modelId" class="text-[12px] px-2 py-1 rounded bg-[#f4f4f5]">
             {{ modelId }}
-            <button class="ml-1 text-[#409eff]" data-testid="add-fetched-model" @click="addFetched(modelId)">{{ T.addModel }}</button>
+            <button class="ml-1 text-[#409eff]" :disabled="isBusy(`add-${modelId}`)" data-testid="add-fetched-model" @click="addFetched(modelId)">{{ T.addModel }}</button>
           </span>
         </div>
 
@@ -929,8 +993,8 @@ async function confirm(message: string): Promise<boolean> {
               <td class="py-1 pr-2"><input v-model="model.enabled" type="checkbox" /></td>
               <td class="py-1 pr-2"><input v-model="model.isDefault" type="checkbox" /></td>
               <td class="py-1">
-                <button class="text-[#409eff] mr-2" data-testid="save-model-row" @click="saveModelRow(model)">{{ T.save }}</button>
-                <button class="text-[#f56c6c]" data-testid="remove-model-row" @click="removeModelRow(model)">{{ T.remove }}</button>
+                <button class="text-[#409eff] mr-2" :disabled="isBusy(`model-${model.id}`)" data-testid="save-model-row" @click="saveModelRow(model)">{{ T.save }}</button>
+                <button class="text-[#f56c6c]" :disabled="isBusy(`model-${model.id}`)" data-testid="remove-model-row" @click="removeModelRow(model)">{{ T.remove }}</button>
               </td>
             </tr>
           </tbody>
@@ -941,16 +1005,27 @@ async function confirm(message: string): Promise<boolean> {
           <input v-model="manualForm.modelId" :placeholder="T.modelId" class="border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-id" />
           <input v-model="manualForm.maxContext" :placeholder="T.maxContext" class="w-28 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-context" />
           <input v-model="manualForm.maxOutput" :placeholder="T.maxOutput" class="w-28 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-output" />
-          <button class="px-2 py-1 rounded bg-[#409eff] text-white" :disabled="!selectedProvider" data-testid="manual-model-submit" @click="addManualModel">
+          <button class="px-2 py-1 rounded bg-[#409eff] text-white" :disabled="!selectedProvider || isBusy('manual')" data-testid="manual-model-submit" @click="addManualModel">
             {{ T.addModel }}
           </button>
         </div>
       </section>
+    </template>
 
-      <!-- ③ 默认参数 -->
-      <section data-testid="defaults-section">
-        <h4 class="text-sm font-medium mb-2">{{ T.defaultsTitle }}</h4>
-        <p class="text-[11px] text-[#909399] mb-2">{{ T.defaultsHint }}</p>
+    <!-- ③ 默认参数 -->
+    <section data-testid="defaults-section">
+      <h4 class="text-sm font-medium mb-2">{{ T.defaultsTitle }}</h4>
+      <p class="text-[11px] text-[#909399] mb-2">{{ T.defaultsHint }}</p>
+      <div v-if="defaultsLoading && defaults === null" class="text-sm text-[#909399]" data-testid="ai-settings-defaults-loading">{{ T.loading }}</div>
+      <div
+        v-if="defaultsError"
+        class="text-sm text-[#f56c6c] px-3 py-2 rounded bg-[#fef0f0]"
+        data-testid="ai-settings-defaults-error"
+      >
+        {{ T.loadFailed }}：{{ describeAiConfigError(defaultsError) }}
+        <el-button size="small" class="ml-2" data-testid="ai-settings-defaults-retry" @click="refreshDefaults">{{ T.retry }}</el-button>
+      </div>
+      <template v-if="defaults !== null">
         <div class="grid grid-cols-2 gap-2 text-[12px]">
           <label class="flex items-center gap-2">
             <span class="text-[#909399] w-24 shrink-0">{{ T.defaultValueModel }}</span>
@@ -996,7 +1071,7 @@ async function confirm(message: string): Promise<boolean> {
         >
           {{ isBusy('defaults') ? T.saving : T.save }}
         </button>
-      </section>
-    </template>
+      </template>
+    </section>
   </div>
 </template>

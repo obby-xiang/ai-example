@@ -328,6 +328,7 @@ const defs = ref<ConfigDefinition[]>([])
 const defsLoading = ref(false)
 const creatingTask = ref(false)
 const busy = ref<BusyKind>(null)
+const jobStartOwners = new Map<'check' | 'import' | 'publish', object>()
 
 const stepIndex = ref(0)
 const selectedDefs = ref<string[]>([])
@@ -906,6 +907,7 @@ function resetTaskScopedState(): void {
   stagingOpen.value = []
   // 任务级 loading 标志（N1）：在途操作的 finally 有"仅同代次复位"的守卫，换任务后不会自己清；
   // 不在这里复位，新任务的页面上就是永久转圈的按钮（保存草稿/刷新暂存/发布…直到刷新页面）。
+  jobStartOwners.clear()
   busy.value = null
   stagingLoading.value = false
   publishPending.value = false
@@ -1793,51 +1795,66 @@ interface JobStartOutcome {
  * 而作业其实已经在后端跑（同一类"说没发生、其实发生了"的失真）。
  */
 async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartOutcome> {
-  if (taskId.value === null) {
-    ElMessage.warning(t('views.import.msg.noTaskBound'))
-    return { job: null, detached: false, taskId: null }
+  if (jobStartOwners.has(kind)) {
+    return {
+      job: null,
+      detached: false,
+      taskId: taskId.value,
+      error: `${t(`views.import.kinds.${kind}`)}作业正在启动，请勿重复发起`
+    }
   }
-  const generation = taskGeneration
-  const forTask = taskId.value
-  const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
-  let created: Job | null = null
-  let attachError: string | undefined
+  const owner = {}
+  jobStartOwners.set(kind, owner)
   busy.value = kind
   try {
-    const job = await jobsApi.createJob(forTask, jobType)
-    created = job
-    if (generation !== taskGeneration) {
-      return { job, detached: true, taskId: forTask }
+    if (taskId.value === null) {
+      ElMessage.warning(t('views.import.msg.noTaskBound'))
+      return { job: null, detached: false, taskId: null }
     }
-    ElMessage.success(t('views.import.msg.jobStarted', { kind: t(`views.import.kinds.${kind}`), id: job.id ?? '' }))
+    const generation = taskGeneration
+    const forTask = taskId.value
+    const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
+    let created: Job | null = null
+    let attachError: string | undefined
     try {
-      await attachJob(kind, job, generation)
-      if (job.id !== undefined) {
-        beginWatchJob(kind, job.id, generation)
+      const job = await jobsApi.createJob(forTask, jobType)
+      created = job
+      if (generation !== taskGeneration) {
+        return { job, detached: true, taskId: forTask }
       }
+      ElMessage.success(t('views.import.msg.jobStarted', { kind: t(`views.import.kinds.${kind}`), id: job.id ?? '' }))
+      try {
+        await attachJob(kind, job, generation)
+        if (job.id !== undefined) {
+          beginWatchJob(kind, job.id, generation)
+        }
+      } catch (error) {
+        // 作业已建、只是本页没挂上：带着错误回去，让回执说"已启动但本页未跟踪"
+        attachError = error instanceof Error ? error.message : String(error)
+      }
+      // 挂接期间也可能换了任务：返回值必须与真实归属一致（否则回执会说"在本页已启动"）
+      return { job, detached: generation !== taskGeneration, taskId: forTask, attachError }
     } catch (error) {
-      // 作业已建、只是本页没挂上：带着错误回去，让回执说"已启动但本页未跟踪"
-      attachError = error instanceof Error ? error.message : String(error)
-    }
-    // 挂接期间也可能换了任务：返回值必须与真实归属一致（否则回执会说"在本页已启动"）
-    return { job, detached: generation !== taskGeneration, taskId: forTask, attachError }
-  } catch (error) {
-    if (created === null) {
-      const reason = error instanceof Error ? error.message : String(error)
-      if (generation === taskGeneration) {
-        ElMessage.error(reason || t('views.import.msg.jobStartFailed'))
+      if (created === null) {
+        const reason = error instanceof Error ? error.message : String(error)
+        if (generation === taskGeneration) {
+          ElMessage.error(reason || t('views.import.msg.jobStartFailed'))
+        }
+        return { job: null, detached: generation !== taskGeneration, taskId: forTask, error: reason }
       }
-      return { job: null, detached: generation !== taskGeneration, taskId: forTask, error: reason }
-    }
-    return {
-      job: created,
-      detached: generation !== taskGeneration,
-      taskId: forTask,
-      attachError: error instanceof Error ? error.message : String(error)
+      return {
+        job: created,
+        detached: generation !== taskGeneration,
+        taskId: forTask,
+        attachError: error instanceof Error ? error.message : String(error)
+      }
     }
   } finally {
-    if (generation === taskGeneration) {
-      busy.value = null
+    if (jobStartOwners.get(kind) === owner) {
+      jobStartOwners.delete(kind)
+      if (busy.value === kind) {
+        busy.value = null
+      }
     }
   }
 }

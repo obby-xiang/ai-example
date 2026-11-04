@@ -591,7 +591,6 @@ export function isFormAwaitingOutcome(part: ToolPart): boolean {
  *   按段的**真实结局**分列（2026-10-29 批：只有真实用户取消才是「已取消」，见下方 GF 分支）。
  *
  * 判定序 = 决策元数据优先、段状态兜底（与 R-160 M2「decision 缺省回退 status」同源）：
- * - decision=timeout ⇒ 已超时（2A 挂账①：超时是**第三种门结局** —— 闸门未开、本次未执行）；
  * - decision=approved：status=failed ⇒ 执行失败（K3：失败是执行结果，不是决策结果）；
  *   status=blocked / skipped ⇒ **已批准·未执行**（批4：批准后执行前被 target 校验/上游挡下）；
  * - decision=rejected ⇒ 已拒绝；
@@ -632,9 +631,6 @@ export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
         // pending/running 已被 isReadOnlyCard 挡住；unknown 等"还没结论"的残留沿用旧兜底
         return 'expired'
     }
-  }
-  if (part.decision === 'timeout') {
-    return 'expired'
   }
   if (part.decision === 'approved') {
     if (part.status === 'failed') {
