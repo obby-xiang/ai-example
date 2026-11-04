@@ -4,7 +4,7 @@
  * R-154 改判后口径（裁决依据 = 用户直裁，非调研建议）：
  * - **组壳彻底拆除**：每个 reasoning / tool 段独立成一个 Block（恒 1 段，不再相邻合并成组）；
  *   原「相邻连续 activity 合成组」「requiresAction 独立成组」特判随之退役（每段天然独立）；
- * - `text` 段一律独立成块（正文永不进组，A5' 规则③）；空正文段不渲染、不成块；
+ * - 相邻 `text` 段合并为同一份 Markdown 源（跨段围栏完整解析）；空正文段不渲染、不成块；
  * - `blockId` 取成员业务稳定 id（toolCallId / `reasoning-${seg}`），禁数组下标（D5），
  *   并加消息命名空间前缀 `${messageId}:`（F1：seg 逐消息自 0 起，跨消息会撞 id 致 expandedBlocks 串味）。
  *
@@ -93,13 +93,23 @@ export function resolveBlockExpanded(block: Block, manual: boolean | undefined):
 export function groupParts(parts: MessagePart[], messageId: string): Block[] {
   const blocks: Block[] = []
 
-  for (const part of parts) {
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]
     if (part.kind === 'text') {
       if (!part.text) {
         // 空正文段不渲染（模板 v-if="part.text"），不成块
         continue
       }
-      blocks.push({ id: stablePartId(part, messageId), messageId, kind: 'text', parts: [part], defaultExpanded: true })
+      let text = part.text
+      while (parts[index + 1]?.kind === 'text') {
+        const next = parts[index + 1]
+        if (next.kind === 'text') {
+          text += next.text
+        }
+        index += 1
+      }
+      const merged = text === part.text ? part : { ...part, text }
+      blocks.push({ id: stablePartId(part, messageId), messageId, kind: 'text', parts: [merged], defaultExpanded: true })
       continue
     }
     if (part.kind === 'event') {
