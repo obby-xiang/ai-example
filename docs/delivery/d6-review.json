@@ -406,6 +406,13 @@
       "reason": "本批仅按权威归档恢复连续HITL段序并严格核对工具顺序、按帧代次复用读取结果，D6现有恢复和终局契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:ba76d2b964a75a42823d62898fca15a83da6ee3b05a4b21eb9646f45c9fe9847",
+      "status": "not-affected",
+      "reason": "本批仅在同一消息内按围栏键和源码一致性重定位异步Mermaid结果，防止旧图覆盖新内容，D6恢复与迁移契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

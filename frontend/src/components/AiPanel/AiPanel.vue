@@ -3505,9 +3505,27 @@ function pruneDetachedMermaidPending(): void {
 /** 把一个 mermaid 源码块替换成卡片（`bubble.contains` 判活：v-html 重建后旧槽位不再回填）。 */
 async function renderMermaidSlot(bubble: Element, code: Element, source: string): Promise<void> {
   const svg = await renderMermaidSvg(source)
-  if (!bubble.contains(code)) {
-    // 期间又渲了一帧（v-html 重建）：旧槽位作废，避免把卡塞进已脱离的节点
-    return
+  let target = code
+  if (!bubble.contains(target)) {
+    const key = target.parentElement?.getAttribute('data-fence-key') ?? ''
+    const current = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
+    if (key !== '') {
+      const keyed = current.find((slot) => slot.parentElement?.getAttribute('data-fence-key') === key
+        && slot.textContent === source)
+      if (!keyed) {
+        return
+      }
+      target = keyed
+    } else {
+      const candidates = current.filter((slot) => slot.textContent === source)
+      if (candidates.length !== 1) {
+        return
+      }
+      target = candidates[0]
+    }
+    if (!bubble.contains(target)) {
+      return
+    }
   }
   const card = document.createElement('div')
   card.className = MMD_CARD_CLASS
@@ -3519,7 +3537,7 @@ async function renderMermaidSlot(bubble: Element, code: Element, source: string)
     // textContent 赋值 = 纯文本，零 HTML 注入面
     codeBox.textContent = source
   }
-  const pre = code.parentElement
+  const pre = target.parentElement
   if (!pre) {
     return
   }
