@@ -1,0 +1,6 @@
+# Local output and secrets for the perf tool. Never commit .env or results.
+.env
+__pycache__/
+*.pyc
+/perf-redis-out/
+/out/
