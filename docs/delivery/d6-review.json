@@ -315,6 +315,13 @@
       "reason": "本批仅修正面板折叠展开时的溢出测量、滚动位置和查看器收口，并沉淀复制调研；D6迁移接口、会话协议、存储键及多实例契约均未变化",
       "reviewedAt": "2026-11-04",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:37df0532c75921bbc3792c89ed1779eb328b39df77e6f90d5b39324f27325a88",
+      "status": "not-affected",
+      "reason": "本批仅修复流式Markdown恢复、Mermaid水合与视图适配及对应文案；D6迁移接口、会话协议、存储键及多实例契约均未变化",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "Kimi主控"
     }
   ]
 }

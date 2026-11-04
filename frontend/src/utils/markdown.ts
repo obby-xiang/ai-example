@@ -17,9 +17,9 @@
  *   未闭合围栏（流式尾块）渲染为纯文本规避闪烁，闭合后二次渲染才高亮/进 mermaid；
  *   长文 >10k 字符**按条**降级（关高亮与 mermaid，结构照渲；不粘滞、不影响下一条）。
  * - **流式块级「净化后 HTML」前缀缓存（2026-10-24 性能专项）**：markdown-it 顶层 token 流定出
- *   「最后一个顶层块之前」的冻结前缀，前缀产物（sanitize 之后）按源文本前缀复用 ⇒ 每帧只
- *   重新净化新增块（DOMPurify 是瓶颈，md.parse ≈ 1.2ms/4k）；前缀 / 新增块各自独立过同一套白名单；
- *   `data-fence-key` 按前缀围栏数续号保证全局唯一；原生 HTML 跨块 / 引用式链接定义退回全文渲染；
+ *   「最后一个顶层块之前」的冻结前缀，前缀产物（sanitize 之后）按源文本前缀与 token 结构复用 ⇒
+ *   每帧只重新净化新增块（DOMPurify 是瓶颈，md.parse ≈ 1.2ms/4k）；前缀 / 新增块各自独立过同一套白名单；
+ *   `data-fence-key` 按前缀围栏数续号保证全局唯一；原生 HTML 跨块 / 引用式链接定义 / 结构变化退回全文渲染；
  *   流式结束整篇重渲一次。
  * - **流式代码块防抖口径（问题1 偏差修正批 aj14d 落地：立即渲染 + 75ms 防抖 + 块级稳定 key）**：
  *   ① **未闭合 fence 立即渲染**（纯文本、不高亮、不折叠）—— 防抖目标是「高亮闪烁」而非「结构出现」，
@@ -520,7 +520,7 @@ export function sanitizeSvg(html: string): string {
 /** 渲染结果：净化后 HTML + 待渲染 mermaid 源码块（闭合围栏才出现）。 */
 export interface MarkdownRender {
   html: string
-  /** 闭合 mermaid 围栏（降流/降级期为空数组，保持源码块）；`key` = 稳定身份（批次 7C 回填）。 */
+  /** 闭合 mermaid 围栏（未闭合尾围栏与降级期不登记）；`key` = 稳定身份（批次 7C 回填）。 */
   mermaid: Array<{ index: number; key: string; source: string }>
   /** 本条是否命中 >10k 按条降级（关高亮与 mermaid，结构照渲）。 */
   degraded: boolean
@@ -825,10 +825,9 @@ export function renderMarkdown(text: string, streaming: boolean, blockKey?: stri
  *
  * 瓶颈不在解析（md.parse ≈ 1.2ms/4k）而在 DOMPurify，且流式每帧都从字符 0 全量重净化 ⇒ O(n²)。
  * 做法（Streamdown / LobeChat 同构）：用 markdown-it 顶层 token 流定出「已定型前缀」，
- * 前缀的**净化后 HTML** 按源文本前缀（`startsWith`）复用，只对新增块重新 render + sanitize。
+ * 前缀的**净化后 HTML** 按源文本前缀（`startsWith`）与 token 结构复用，只对新增块重新 render + sanitize。
  * 净化口径一字不改：每块仍独立过同一套白名单与 hook；缓存里只存 sanitizeHtml 之后的字符串。
- * 流式结束（streaming=false）必须整篇重渲一次（分块边界可能带来细微结构差异，如表格补齐、
- * 尾围栏闭合后的图容器/高亮恢复）。
+ * 同源前缀的 token 结构变化时整篇重渲；流式结束（streaming=false）也整篇重渲一次，校正分块边界。
  * ------------------------------------------------------------------------- */
 
 interface PrefixEntry {
@@ -838,6 +837,10 @@ interface PrefixEntry {
   html: string
   /** 前缀内的围栏数（`data-fence-key` 续号用 —— 错号会让 mermaid 卡绑错槽位）。 */
   fences: number
+  /** 前缀内已闭合的 mermaid 登记（流式水合不能等整轮完成）。 */
+  mermaid: MarkdownRender['mermaid']
+  /** 同一份源文本在整篇解析中的 token 结构（结构改变时旧 HTML 不得复用）。 */
+  structure: string
   /** 构建时的降级态（跨越 >10k 阈值会换渲染实例，高亮口径不同 ⇒ 必须重切）。 */
   degraded: boolean
 }
@@ -881,8 +884,17 @@ interface ParsedSource {
 interface PrefixProbe {
   /** 可冻结前缀的字符长度（0 = 无可用前缀；-1 = 本帧必须整篇渲染）。 */
   length: number
-  /** 整篇解析结果（仅在 `length <= 0` 时由调用方直接拿去渲染，省掉第二次 parse）。 */
+  /** 整篇解析结果（不可切分或结构失效时直接渲染，省掉第二次 parse）。 */
   parsed: ParsedSource | null
+  /** 冻结前缀在本次整篇解析中的 token 结构。 */
+  structure: string
+}
+
+function prefixStructure(tokens: ParsedSource['tokens'], boundaryToken: number): string {
+  return tokens.slice(0, boundaryToken).map((token) => {
+    const children = token.children?.map((child) => `${child.type}:${child.tag}:${child.level}`).join(',') ?? ''
+    return `${token.type}:${token.tag}:${token.level}[${children}]`
+  }).join('|')
 }
 
 /**
@@ -901,19 +913,19 @@ interface PrefixProbe {
 function probePrefix(text: string): PrefixProbe {
   if (text.includes('\r')) {
     // 行号→字符偏移按 LF 计（CRLF 由 markdown-it 归一，原串偏移不可直接复用）
-    return { length: -1, parsed: null }
+    return { length: -1, parsed: null, structure: '' }
   }
   const env: Record<string, unknown> = {}
   let tokens
   try {
     tokens = md.parse(text, env)
   } catch {
-    return { length: -1, parsed: null }
+    return { length: -1, parsed: null, structure: '' }
   }
   const parsed: ParsedSource = { tokens, env }
   const references = env.references
   if (references !== null && typeof references === 'object' && Object.keys(references).length > 0) {
-    return { length: -1, parsed }
+    return { length: -1, parsed, structure: '' }
   }
   let lastStart = -1
   let boundaryToken = -1
@@ -926,19 +938,23 @@ function probePrefix(text: string): PrefixProbe {
     boundaryToken = i
   }
   if (lastStart <= 0 || boundaryToken <= 0) {
-    return { length: 0, parsed }
+    return { length: 0, parsed, structure: '' }
   }
   for (let i = 0; i < boundaryToken; i += 1) {
     const token = tokens[i]
     if (token.type === 'html_block') {
-      return { length: -1, parsed }
+      return { length: -1, parsed, structure: '' }
     }
     // 行内原生 HTML 挂在 inline token 的 children 上（顶层 token 流里看不到 html_inline 类型）
     if (token.children?.some((child) => child.type === 'html_inline') === true) {
-      return { length: -1, parsed }
+      return { length: -1, parsed, structure: '' }
     }
   }
-  return { length: lineOffset(text, lastStart), parsed }
+  return {
+    length: lineOffset(text, lastStart),
+    parsed,
+    structure: prefixStructure(tokens, boundaryToken)
+  }
 }
 
 /** 第 `line` 行（0 起）的行首字符偏移（LF 口径；CR 已在调用方拦下）。 */
@@ -990,16 +1006,16 @@ function renderChunk(
   }
   const fences = fenceRenderSeq - startSeq
   html = wrapTables(html)
-  if (options.collectMermaid) {
-    // G4：非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
-    html = wrapFenceFigures(html)
-  }
   if (options.stripTailLanguage) {
-    // 未闭合尾围栏：剥掉尾块 language-* class（纯文本口径，闭合后二次渲染才恢复高亮）
+    // 未闭合尾围栏先剥语言标记：保持纯文本，且不包装图容器、不登记 mermaid。
     const at = html.lastIndexOf('class="language-')
     if (at >= 0) {
       html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
     }
+  }
+  if (options.collectMermaid) {
+    // G4：闭合的非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
+    html = wrapFenceFigures(html)
   }
   // 批次 7C：净化期 key 被白名单剥掉，这里只给「渲染器 token 认领的 pre」按出现序回填
   const safe = backfillFenceKeys(sanitizeHtml(html), keys, nonce)
@@ -1054,7 +1070,7 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
       fenceRenderSeq = 0
       tailFenceFingerprint = tailSource
       const chunk = renderChunk(text, instance, {
-        collectMermaid: !useDegraded && !streaming,
+        collectMermaid: !useDegraded,
         mermaidBase: 0,
         stripTailLanguage: fenceOpen
       })
@@ -1070,13 +1086,28 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
       const chunk = renderChunk(
         text,
         instance,
-        { collectMermaid: false, mermaidBase: 0, stripTailLanguage: fenceOpen },
+        { collectMermaid: !useDegraded, mermaidBase: 0, stripTailLanguage: fenceOpen },
+        probe.parsed
+      )
+      return { html: chunk.html, mermaid: chunk.mermaid, degraded: useDegraded, degradeNotice }
+    }
+    const cached = prefixCache.get(cacheKey)
+    if (cached !== undefined && cached.structure !== probe.structure
+      && !probe.structure.startsWith(`${cached.structure}|`)) {
+      // 同一文本前缀在整篇解析中改变了块结构（如段落变表格）：旧 HTML 全部作废。
+      prefixCache.delete(cacheKey)
+      renderStats.fullRenders += 1
+      fenceRenderSeq = 0
+      tailFenceFingerprint = tailSource
+      const chunk = renderChunk(
+        text,
+        instance,
+        { collectMermaid: !useDegraded, mermaidBase: 0, stripTailLanguage: fenceOpen },
         probe.parsed
       )
       return { html: chunk.html, mermaid: chunk.mermaid, degraded: useDegraded, degradeNotice }
     }
     let prefix: PrefixEntry
-    const cached = prefixCache.get(cacheKey)
     if (
       cached === undefined ||
       cached.degraded !== useDegraded ||
@@ -1088,25 +1119,34 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
       // 前缀里的围栏恒为闭合块，不得被尾围栏指纹抑制高亮
       tailFenceFingerprint = null
       const built = renderChunk(text.slice(0, boundary), instance, {
-        collectMermaid: false,
+        collectMermaid: !useDegraded,
         mermaidBase: 0,
         stripTailLanguage: false
       })
-      prefix = { src: text.slice(0, boundary), html: built.html, fences: built.fences, degraded: useDegraded }
+      prefix = {
+        src: text.slice(0, boundary),
+        html: built.html,
+        fences: built.fences,
+        mermaid: built.mermaid,
+        structure: probe.structure,
+        degraded: useDegraded
+      }
     } else if (cached.src.length < boundary) {
       // 边界前移（新块已定型）：只渲染「新完成的块」，按序追加到已冻结的净化产物后面
       renderStats.prefixHits += 1
       fenceRenderSeq = cached.fences
       tailFenceFingerprint = null
       const gap = renderChunk(text.slice(cached.src.length, boundary), instance, {
-        collectMermaid: false,
-        mermaidBase: 0,
+        collectMermaid: !useDegraded,
+        mermaidBase: cached.mermaid.length,
         stripTailLanguage: false
       })
       prefix = {
         src: text.slice(0, boundary),
         html: cached.html + gap.html,
         fences: cached.fences + gap.fences,
+        mermaid: [...cached.mermaid, ...gap.mermaid],
+        structure: probe.structure,
         degraded: useDegraded
       }
     } else {
@@ -1127,11 +1167,16 @@ function renderNow(text: string, streaming: boolean, blockKey?: string): Markdow
     fenceRenderSeq = prefix.fences
     tailFenceFingerprint = tailSource
     const rest = renderChunk(text.slice(prefix.src.length), instance, {
-      collectMermaid: false,
-      mermaidBase: 0,
+      collectMermaid: !useDegraded,
+      mermaidBase: prefix.mermaid.length,
       stripTailLanguage: fenceOpen
     })
-    return { html: prefix.html + rest.html, mermaid: rest.mermaid, degraded: useDegraded, degradeNotice }
+    return {
+      html: prefix.html + rest.html,
+      mermaid: [...prefix.mermaid, ...rest.mermaid],
+      degraded: useDegraded,
+      degradeNotice
+    }
   } finally {
     tailFenceFingerprint = null
   }
@@ -1177,6 +1222,9 @@ function loadMermaid(): Promise<typeof import('mermaid')> {
 
 /** mermaid 渲染缓存（源码指纹 → 净化后 SVG），失败不缓存。 */
 const mermaidCache = new Map<string, string>()
+/** 同源码的进行中渲染单飞：流式 v-html 重建会重复水合，不能并发启动同 id 渲染。 */
+const mermaidInFlight = new Map<string, Promise<string | null>>()
+let mermaidRenderSeq = 0
 
 /** mermaid 水合的 idle 等待上限（ms）：浏览器迟迟不空闲时到点也必须开工，避免图永远不现身。 */
 export const MERMAID_IDLE_TIMEOUT_MS = 1_000
@@ -1196,7 +1244,7 @@ function whenIdle(): Promise<void> {
 }
 
 /**
- * 渲染单个 mermaid 图源（围栏闭合后一次性调用；render error / 等待超时 ⇒ 返回 null，
+ * 渲染单个 mermaid 图源（同源码的进行中调用共享结果；render error / 等待超时 ⇒ 返回 null，
  * 调用方保留源码块——§三.7 失败兜底）。返回净化后 SVG 字符串。
  *
  * <p>批次 7C 两条硬口径：
@@ -1209,15 +1257,32 @@ function whenIdle(): Promise<void> {
  * </ul>
  */
 export async function renderMermaidSvg(source: string): Promise<string | null> {
-  const key = source
-  const hit = mermaidCache.get(key)
+  const hit = mermaidCache.get(source)
   if (hit !== undefined) {
     return hit
   }
+  const pending = mermaidInFlight.get(source)
+  if (pending !== undefined) {
+    return pending
+  }
+  const rendering = renderMermaidSvgUncached(source)
+  mermaidInFlight.set(source, rendering)
+  try {
+    return await rendering
+  } finally {
+    if (mermaidInFlight.get(source) === rendering) {
+      mermaidInFlight.delete(source)
+    }
+  }
+}
+
+async function renderMermaidSvgUncached(source: string): Promise<string | null> {
   try {
     await whenIdle()
     const mod = await loadMermaid()
-    const id = `mmd-${Math.abs(hashCode(key)).toString(36)}`
+    mermaidRenderSeq += 1
+    // 超时不会中断旧渲染；重试必须用新 id，避免迟到的旧调用与新调用争用同一 DOM 身份。
+    const id = `mmd-${Math.abs(hashCode(source)).toString(36)}-${mermaidRenderSeq.toString(36)}`
     let timer: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error('mermaid timeout')), MERMAID_TIMEOUT_MS)
@@ -1231,7 +1296,7 @@ export async function renderMermaidSvg(source: string): Promise<string | null> {
           mermaidCache.delete(first)
         }
       }
-      mermaidCache.set(key, svg)
+      mermaidCache.set(source, svg)
       return svg
     } finally {
       // 超时/成功都清掉等待计时器（迟到结果已被 race 丢弃，不会走到这里）

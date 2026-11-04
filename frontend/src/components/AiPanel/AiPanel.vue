@@ -1227,7 +1227,7 @@
 
     <!-- R-165 S5b：mermaid 全屏查看器（demo v7.7 :1948-1964 重做口径）——
          深色 scrim（bg-black/50）+ 居中白色圆角容器（圆角 10 · 边框 #e3e6ea · 工具条 #f6f7f9）；
-         滚轮以指针为锚点缩放 0.5×–4×、拖拽走 transform 平移（不用 overflow 滚动）；
+         打开/复位按 stage 完整适配居中；滚轮以指针为锚点缩放、拖拽走 transform 平移；
          工具条 −/+/百分比/复位/复制源码/下载 SVG/关闭 全为图标钮（aria-label + tip）；
          Esc / 点 scrim 关闭；role=dialog + aria-modal；SVG 容器 select-text（图中文字可直接框选）。 -->
     <div
@@ -1243,7 +1243,7 @@
         <div class="flex flex-none items-center gap-[8px] rounded-t-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] px-[12px] py-[8px] text-[12.4px]">
           <span class="text-[#9370DB] text-[11px]">◈</span>
           <b class="[font-weight:650]" data-testid="mmd-viewer-title">{{ mmdViewerTitle }}</b>
-          <span class="font-mono text-[10.5px] text-[#8b949e]">0.5×–4×</span>
+          <span class="font-mono text-[10.5px] text-[#8b949e]">适配 · 缩放</span>
           <span class="ml-auto flex items-center gap-[6px]">
             <button
               type="button"
@@ -1319,7 +1319,7 @@
           @mousedown="onMmdViewerDragStart"
         >
           <div ref="mmdViewerPanRef" data-testid="mmd-viewer-pan" class="absolute inset-0 flex items-center justify-center [transform:translateX(var(--px,0px))_translateY(var(--py,0px))]">
-            <div ref="mmdViewerZoomRef" data-testid="mmd-viewer-zoom" v-html="mmdViewerSvg" class="origin-center select-text [transform:scale(var(--z,1))]"></div>
+            <div ref="mmdViewerZoomRef" data-testid="mmd-viewer-zoom" v-html="mmdViewerSvg" class="flex-none select-text"></div>
           </div>
         </div>
       </div>
@@ -1402,8 +1402,8 @@
  * + 遮罩绝对值写法；⑦ 复制全图标化 + 绿勾 2s 反馈（代码块 / mermaid 源码 / 消息复制）；
  * ⑧ 6px 圆角半透明滚动条（任意变体类）；⑨ focus-visible 聚焦环；⑩ GF 取消钮聚拢右对齐。
  * R-165 S5b（demo v7.7 裁决区 12 + 07 双态重做）：mermaid 卡改「卡头分段 tab 预览 | 源码」双态
- * （底部「查看源码」钮退役）+ 卡头右端图标钮组（缩放读数 / 复位 / 全屏）；预览态限高内联
- * 滚轮缩放（指针锚定 0.5×–4×）+ transform 拖拽平移 + 复位，超宽仍可内联横滚，两态各自记住滚动；
+ * （底部「查看源码」钮退役）+ 卡头右端图标钮组（缩放读数 / 复位 / 全屏）；预览态固定可用高度
+ * + overflow-hidden，首次/复位完整适配居中，滚轮缩放 + transform 拖拽平移，放大后局部裁切；
  * 源码态限高内滚 mono 盒 + 复制源码图标钮（绿勾反馈沿用 S5a 统一机制）；全屏查看器重做
  * （scrim + 白容器 · 指针锚定缩放 · transform 平移 · 6 钮工具条 · Esc/点 scrim 关闭 · role=dialog）。
  * 结构类名换 `mmdc` 前缀（旧 `.mmd*` CSS 规则零引用但本批禁删禁改，S5c 统一拆）。
@@ -2974,9 +2974,8 @@ const copyFlashTimers = new Map<Element, number>()
    Esc/点 scrim 关闭）。两道缩放/平移数学同源（07 与 12 在 demo 里也是同一套）。
    类名纪律：S5b 期 ai-chat.css 的 `.mmd*` 族 12 条规则是零引用存量、结构已整体换 `mmdc` 前缀；
    R-165 S5c 后该文件已删除 ⇒ `mmdc-*` 是 mermaid 卡唯一类词条（`mmd` 前缀不再出现在任何样式源）。
-   缩放/平移的 CSS 只存在于 Tailwind 任意值类（`[transform:scale(var(--z,1))]` /
-   `[transform:translateX(var(--px,0px))_translateY(var(--py,0px))]`），JS 只写这三个变量值
-   （demo 同机制：样式声明在工具类里，运行期只喂变量）。 */
+   fit/缩放直接按 viewBox 基准写 stage 实际宽高，SVG 填满 stage；transform 只承担 pan 平移，
+   避免 foreignObject 在 CSS scale 下沿用错误的内部布局。 */
 
 /** 缩放范围（demo 07 / 12 同口径）。 */
 const MMD_Z_MIN = 0.5
@@ -2994,11 +2993,10 @@ const MMD_TAB_CLASS = 'mmdc-tab border-0 bg-transparent rounded-[5px] px-[11px] 
 const MMD_ICON_BTN_CLASS = 'group/tip relative inline-flex w-[26px] h-[26px] items-center justify-center rounded-[7px] border border-solid border-[#e3e6ea] bg-white p-0 text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] [&_svg]:w-[14px] [&_svg]:h-[14px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:[stroke-width:1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]'
 const MMD_COPY_ICON_BTN_CLASS = `${MMD_ICON_BTN_CLASS} ${COPY_STATE_CLASS}`
 
-/** 预览态容器（demo：内联横滚保留 + 拖拽手型；缩放/平移走 transform 层，不用 overflow 平移）。
- *  2A 批（裁决 §14.4 表单 / 组合族）：限高改双约束 `min(320px,45vh)`（可视图给高一档）。 */
-const MMD_PREVIEW_PANE_CLASS = `mmdc-pane mmdc-pv max-h-[min(320px,45vh)] overflow-auto bg-white cursor-grab select-none ${SCROLLBAR_CLASS}`
+/** 预览态容器：固定可用高度 + overflow-hidden；fit 完整显示，放大后的局部裁切由 transform 承载。 */
+const MMD_PREVIEW_PANE_CLASS = 'mmdc-pane mmdc-pv h-[min(320px,45vh)] overflow-hidden bg-white cursor-grab select-none'
 const MMD_PAN_CLASS = 'mmdc-pan [transform:translateX(var(--px,0px))_translateY(var(--py,0px))]'
-const MMD_STAGE_CLASS = 'mmdc-stage w-max origin-top-left [transform:scale(var(--z,1))]'
+const MMD_STAGE_CLASS = 'mmdc-stage'
 const MMD_SOURCE_PANE_CLASS = 'mmdc-pane hidden'
 /** 源码态：小标题行 + 复制源码图标钮（24px 档）+ mono 盒双约束 `min(280px,35vh)` 内滚
  *  （2A 批裁决 §14.4 代码族，与代码块限高同口径）。 */
@@ -3023,20 +3021,33 @@ function mmdTipSpan(label: string, below = false): string {
     `<span class="tip-arrow ${below ? MMD_TIP_ARROW_BELOW_CLASS : TIP_ARROW_CLASS}" aria-hidden="true"></span></span>`
 }
 
-/** mermaid 产物归一：剥掉 mermaid 自带的 `width="100%"` / `max-width`（会与缩放层、横滚层打架），
- *  按 viewBox 宽高比取定宽（demo v7.7 `openOv` 口径：宽图 980px / 方图 560px）—— 超宽图因此在
- *  260px 预览容器里恒可内联横滚，在查看器里也有一致的基准尺寸。 */
+/** SVG 填满由 fit/zoom 直接设置尺寸的 stage；viewBox 负责等比缩放。 */
 function prepareMermaidSvg(svg: string, extra = ''): string {
-  const box = (/viewBox="([^"]*)"/.exec(svg)?.[1] ?? '0 0 10 10').split(/[\s,]+/)
-  const ratio = (parseFloat(box[2]) || 1) / (parseFloat(box[3]) || 1)
-  const cls = `block ${ratio >= 2 ? 'w-[980px]' : 'w-[560px]'} max-w-none h-auto${extra === '' ? '' : ` ${extra}`}`
+  const cls = `block h-full w-full max-w-none${extra === '' ? '' : ` ${extra}`}`
   return svg.replace(/<svg\b([^>]*)>/, (_match: string, attrs: string) =>
     `<svg${attrs.replace(/\s(?:class|style|width|height)="[^"]*"/g, '')} class="${cls}">`
   )
 }
 
+function mermaidNaturalSize(svg: SVGElement | null): { width: number; height: number } {
+  const box = (svg?.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/)
+  const width = Number(box[2])
+  const height = Number(box[3])
+  return {
+    width: Number.isFinite(width) && width > 0 ? width : 0,
+    height: Number.isFinite(height) && height > 0 ? height : 0
+  }
+}
+
+function mermaidFitScale(naturalW: number, naturalH: number, availableW: number, availableH: number): number {
+  if (naturalW <= 0 || naturalH <= 0 || availableW <= 0 || availableH <= 0) {
+    return 1
+  }
+  return Math.min(1, availableW / naturalW, availableH / naturalH)
+}
+
 /** 卡结构（demo v7.7 裁决区 12 右栏逐条）：卡头 = ◈ + 名称 + 分段 tab + 右端图标钮组；
- *  预览态 = 260px 限高横滚容器（pan/scale 两层 transform）；源码态 = 200px 内滚 mono 盒 + 复制源码钮。
+ *  预览态 = 固定可用高度 + overflow-hidden（实际尺寸 stage + transform pan）；源码态 = 200px 内滚 mono 盒 + 复制源码钮。
  *  `svg === null`（render error / 3s 等待预算用尽，只停止等待、不中断同步渲染）⇒ 降级为「源码态卡」：
  *  无 tab、无缩放钮（源码直显、复制可用），
  *  不留任何无 handler 的钮。 */
@@ -3071,42 +3082,44 @@ function buildMermaidCardHtml(svg: string | null): string {
   return head + preview + source
 }
 
-/** 预览态内联交互 API（按卡记：复位钮在委托里取用；卡随 v-html 重建，用 WeakMap 免泄漏）。 */
-const mermaidInlineReset = new WeakMap<HTMLElement, () => void>()
-/** 两态各自记住的滚动位置（demo 口径：切回目标态时恢复该态自己的 scroll）。 */
-const mermaidPaneScroll = new WeakMap<HTMLElement, { left: number; top: number }>()
+/** 每张卡唯一的定位来源：当前可用区域内的 fit + transform。 */
+const mermaidInlineFit = new Map<HTMLElement, () => void>()
+
+function pruneDetachedMermaidInlineFit(): void {
+  const wrap = msgWrapRef.value
+  for (const card of mermaidInlineFit.keys()) {
+    if (wrap === null || !wrap.contains(card)) {
+      mermaidInlineFit.delete(card)
+    }
+  }
+}
+
+function refitMermaidInline(): void {
+  pruneDetachedMermaidInlineFit()
+  for (const fit of mermaidInlineFit.values()) {
+    fit()
+  }
+}
 
 /**
- * 预览态内联交互（把 demo 07 那套搬到内联容器上）：
- * - 滚轮缩放：锚定指针位置，0.5×–4×；
- * - 拖拽平移：transform translate（mousedown 记起点 + 位移），不用 overflow 滚动；
- * - 越界钳制：内容不得被推出左上角（px/py 合法区间 = [client − z×自然尺寸, 0]）；
- * - 容器自身滚动折进 transform（视觉不变）⇒ 拖拽/缩放只有一个位置来源；
- * - 每个 pane 的 scroll 实时记账，切 tab 时恢复目标态自己的位置。
+ * 预览态内联交互：固定可用高度 + overflow-hidden；fit 保持宽高比并居中。
+ * 放大后仍用指针锚定缩放和 transform 拖拽，局部裁切不产生滚动条。
  */
 function initMermaidInline(card: HTMLElement): void {
-  for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
-    pane.addEventListener('scroll', () => {
-      mermaidPaneScroll.set(pane, { left: pane.scrollLeft, top: pane.scrollTop })
-    })
-  }
   const box = card.querySelector<HTMLElement>('.mmdc-pv')
   const pan = card.querySelector<HTMLElement>('.mmdc-pan')
   const stage = card.querySelector<HTMLElement>('.mmdc-stage')
   if (!box || !pan || !stage) {
     return
   }
-  let naturalW = 0
-  let naturalH = 0
+  const { width: naturalW, height: naturalH } = mermaidNaturalSize(stage.querySelector<SVGElement>('svg'))
   let z = 1
   let px = 0
   let py = 0
-  const measure = (): void => {
-    naturalW = stage.offsetWidth
-    naturalH = stage.offsetHeight
-  }
+  let minZ = MMD_Z_MIN
   const apply = (): void => {
-    stage.style.setProperty('--z', String(z))
+    stage.style.width = `${naturalW * z}px`
+    stage.style.height = `${naturalH * z}px`
     pan.style.setProperty('--px', `${px}px`)
     pan.style.setProperty('--py', `${py}px`)
     const readout = card.querySelector('.mmdc-ipct')
@@ -3115,28 +3128,23 @@ function initMermaidInline(card: HTMLElement): void {
     }
   }
   const clamp = (): void => {
-    let maxX = box.clientWidth - naturalW * z
-    let maxY = box.clientHeight - naturalH * z
-    if (maxX > 0) {
-      maxX = 0
-    }
-    if (maxY > 0) {
-      maxY = 0
-    }
-    px = px > 0 ? 0 : px < maxX ? maxX : px
-    py = py > 0 ? 0 : py < maxY ? maxY : py
+    const maxX = box.clientWidth - naturalW * z
+    const maxY = box.clientHeight - naturalH * z
+    px = maxX >= 0 ? maxX / 2 : Math.min(0, Math.max(maxX, px))
+    py = maxY >= 0 ? maxY / 2 : Math.min(0, Math.max(maxY, py))
   }
-  const absorb = (): void => {
-    if (box.scrollLeft !== 0 || box.scrollTop !== 0) {
-      px -= box.scrollLeft
-      py -= box.scrollTop
-      box.scrollLeft = 0
-      box.scrollTop = 0
+  const fit = (): void => {
+    if (naturalW <= 0 || naturalH <= 0 || box.clientWidth <= 0 || box.clientHeight <= 0) {
+      return
     }
+    z = mermaidFitScale(naturalW, naturalH, box.clientWidth, box.clientHeight)
+    minZ = Math.min(MMD_Z_MIN, z)
+    px = (box.clientWidth - naturalW * z) / 2
+    py = (box.clientHeight - naturalH * z) / 2
+    apply()
   }
   const setZoom = (next: number, vx: number, vy: number): void => {
-    absorb()
-    const target = Math.min(MMD_Z_MAX, Math.max(MMD_Z_MIN, next))
+    const target = Math.min(MMD_Z_MAX, Math.max(minZ, next))
     const sx = (vx - px) / z
     const sy = (vy - py) / z
     px = vx - target * sx
@@ -3145,21 +3153,12 @@ function initMermaidInline(card: HTMLElement): void {
     clamp()
     apply()
   }
-  measure()
-  apply()
-  mermaidInlineReset.set(card, () => {
-    z = 1
-    px = 0
-    py = 0
-    box.scrollLeft = 0
-    box.scrollTop = 0
-    apply()
-  })
+  mermaidInlineFit.set(card, fit)
+  fit()
   box.addEventListener(
     'wheel',
     (event) => {
       event.preventDefault()
-      measure()
       const rect = box.getBoundingClientRect()
       setZoom(z * Math.pow(1.0015, -event.deltaY), event.clientX - rect.left, event.clientY - rect.top)
     },
@@ -3195,8 +3194,6 @@ function initMermaidInline(card: HTMLElement): void {
       return
     }
     event.preventDefault()
-    measure()
-    absorb()
     clamp()
     apply()
     dragging = true
@@ -3211,7 +3208,7 @@ function initMermaidInline(card: HTMLElement): void {
   })
 }
 
-/** tab 切换（两态互斥 + aria-selected 同步）→ 目标态恢复**自己**记住的滚动位置（demo 二选一登记的「各自记住」）。 */
+/** tab 切换只切显隐；预览重新可见后按当前可用区域重新 fit。 */
 function switchMermaidTab(tab: Element): void {
   const card = tab.closest<HTMLElement>('.mmdc')
   const mode = tab.getAttribute('data-tab')
@@ -3226,27 +3223,19 @@ function switchMermaidTab(tab: Element): void {
   for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
     pane.classList.toggle('hidden', pane.getAttribute('data-pane') !== mode)
   }
-  const pane = card.querySelector<HTMLElement>(`.mmdc-pane[data-pane="${mode}"]`)
-  if (!pane) {
-    return
+  if (mode === 'preview') {
+    requestAnimationFrame(() => {
+      if (msgWrapRef.value?.contains(card)) {
+        mermaidInlineFit.get(card)?.()
+      }
+    })
   }
-  const saved = mermaidPaneScroll.get(pane) ?? { left: 0, top: 0 }
-  requestAnimationFrame(() => {
-    pane.scrollLeft = saved.left
-    pane.scrollTop = saved.top
-  })
 }
 
-/** 复位（预览态卡头钮）：缩放 1× + 位移归零 + 两态滚动归零。 */
+/** 复位 = 按当前可用区域完整适配并居中，不再回到 100%。 */
 function resetMermaidInline(card: Element | null): void {
-  if (!(card instanceof HTMLElement)) {
-    return
-  }
-  mermaidInlineReset.get(card)?.()
-  for (const pane of card.querySelectorAll<HTMLElement>('.mmdc-pane')) {
-    pane.scrollLeft = 0
-    pane.scrollTop = 0
-    mermaidPaneScroll.set(pane, { left: 0, top: 0 })
+  if (card instanceof HTMLElement) {
+    mermaidInlineFit.get(card)?.()
   }
 }
 
@@ -3264,10 +3253,17 @@ const mmdViewerZoomRef = ref<HTMLElement | null>(null)
 let mmdViewerZ = 1
 let mmdViewerX = 0
 let mmdViewerY = 0
+let mmdViewerMinZ = MMD_Z_MIN
+let mmdViewerNaturalW = 0
+let mmdViewerNaturalH = 0
 let mmdViewerCopyTimer: number | null = null
 
 function applyMmdViewer(): void {
-  mmdViewerZoomRef.value?.style.setProperty('--z', String(mmdViewerZ))
+  const zoom = mmdViewerZoomRef.value
+  if (zoom) {
+    zoom.style.width = `${mmdViewerNaturalW * mmdViewerZ}px`
+    zoom.style.height = `${mmdViewerNaturalH * mmdViewerZ}px`
+  }
   const pan = mmdViewerPanRef.value
   if (pan) {
     pan.style.setProperty('--px', `${mmdViewerX}px`)
@@ -3278,7 +3274,7 @@ function applyMmdViewer(): void {
 
 /** 指针锚定缩放（demo 07）：pan 层已居中 ⇒ 锚点坐标 = 指针相对 stage 中心的偏移。 */
 function setMmdViewerZoom(next: number, anchorX = 0, anchorY = 0): void {
-  const z = Math.min(MMD_Z_MAX, Math.max(MMD_Z_MIN, next))
+  const z = Math.min(MMD_Z_MAX, Math.max(mmdViewerMinZ, next))
   const k = z / mmdViewerZ
   mmdViewerX = anchorX - (anchorX - mmdViewerX) * k
   mmdViewerY = anchorY - (anchorY - mmdViewerY) * k
@@ -3291,7 +3287,19 @@ function zoomMmdViewer(factor: number): void {
 }
 
 function resetMmdViewer(): void {
-  mmdViewerZ = 1
+  const stage = mmdViewerStageRef.value
+  const zoom = mmdViewerZoomRef.value
+  if (!stage || !zoom || stage.clientWidth <= 0 || stage.clientHeight <= 0) {
+    return
+  }
+  const natural = mermaidNaturalSize(zoom.querySelector<SVGElement>('svg'))
+  if (natural.width <= 0 || natural.height <= 0) {
+    return
+  }
+  mmdViewerNaturalW = natural.width
+  mmdViewerNaturalH = natural.height
+  mmdViewerZ = mermaidFitScale(natural.width, natural.height, stage.clientWidth, stage.clientHeight)
+  mmdViewerMinZ = Math.min(MMD_Z_MIN, mmdViewerZ)
   mmdViewerX = 0
   mmdViewerY = 0
   applyMmdViewer()
@@ -3349,13 +3357,9 @@ function openMmdViewer(card: Element | null): void {
   mmdViewerTitle.value = card.querySelector('.mmdc-name')?.textContent?.trim() ?? 'mermaid'
   mmdViewerSource.value = card.querySelector('.mmdc-src')?.textContent ?? ''
   mmdViewerCopied.value = false
-  mmdViewerZ = 1
-  mmdViewerX = 0
-  mmdViewerY = 0
-  mmdViewerPct.value = 100
   mmdViewerOpen.value = true
   void nextTick(() => {
-    applyMmdViewer()
+    resetMmdViewer()
     mmdViewerStageRef.value?.focus()
   })
 }
@@ -3427,10 +3431,12 @@ function onMmdViewerKeydown(event: KeyboardEvent): void {
 watch(mmdViewerOpen, (open) => {
   if (open) {
     window.addEventListener('keydown', onMmdViewerKeydown)
+    window.addEventListener('resize', resetMmdViewer)
     document.body.classList.add('overflow-hidden')
     return
   }
   window.removeEventListener('keydown', onMmdViewerKeydown)
+  window.removeEventListener('resize', resetMmdViewer)
   document.body.classList.remove('overflow-hidden')
 })
 
@@ -3485,8 +3491,12 @@ async function renderMermaidSlot(bubble: Element, code: Element, source: string)
     // textContent 赋值 = 纯文本，零 HTML 注入面
     codeBox.textContent = source
   }
+  const pre = code.parentElement
+  if (!pre) {
+    return
+  }
+  pre.replaceWith(card)
   initMermaidInline(card)
-  code.parentElement?.replaceWith(card)
 }
 
 /** 视口门控：可见才渲染。root = 消息滚动容器（无 IO / 无容器 ⇒ 立即渲染）。 */
@@ -3519,6 +3529,7 @@ function scheduleMermaidSlot(bubble: Element, code: Element, source: string): vo
 function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: string; source: string }>): void {
   // 水合 = 重建后的重绑入口：先把上一帧留下的脱离槽摘掉，再为当前 DOM 里的槽登记。
   pruneDetachedMermaidPending()
+  pruneDetachedMermaidInlineFit()
   const bubble = msgWrapRef.value?.querySelector(`[data-testid="msg-bubble-${messageId}"]`)
   if (!bubble) {
     return
@@ -5197,6 +5208,7 @@ function detachMessageViewObservers(): void {
   mermaidObserver?.disconnect()
   mermaidObserver = null
   mermaidPending.clear()
+  mermaidInlineFit.clear()
   lastMeasuredScrollHeight = null
   contentChanged = false
   contentResized = false
@@ -5257,7 +5269,7 @@ watch(() => ai.expanded, async (expanded) => {
  * 观测它对"内容增长"零触发。
  *
  * 回调本身不钉底：尺寸证据交给统一调度，与 DOM 补丁后的复测合并成一次写入；
- * 仅内容宽度变化另标脏用户消息并重测，高度变化不扫全表。
+ * 仅内容宽度变化另重适配 Mermaid、标脏用户消息并重测，高度变化不扫全表。
  */
 function scheduleUserMsgWidthMeasure(): void {
   if (userMsgWidthMeasureScheduled) {
@@ -5277,6 +5289,7 @@ function onContentResized(entries: ResizeObserverEntry[] = []): void {
     ?? (msgContentRef.value ?? msgWrapRef.value)?.getBoundingClientRect().width
     ?? 0
   if (lastMessageContentWidth !== null && width !== lastMessageContentWidth) {
+    refitMermaidInline()
     for (const id of userBodyEls.keys()) {
       markUserMsgDirty(id)
     }
@@ -5339,8 +5352,9 @@ onBeforeUnmount(() => {
     clearTimeout(smoothBackTimer)
     smoothBackTimer = null
   }
-  // R-165 S5b：查看器若在打开态卸载 —— 摘掉 Esc 监听 + 解 body 滚动锁 + 收复制绿勾计时器
+  // R-165 S5b：查看器若在打开态卸载 —— 摘掉 Esc/resize 监听 + 解 body 滚动锁 + 收复制绿勾计时器
   window.removeEventListener('keydown', onMmdViewerKeydown)
+  window.removeEventListener('resize', resetMmdViewer)
   document.body.classList.remove('overflow-hidden')
   if (mmdViewerCopyTimer !== null) {
     clearTimeout(mmdViewerCopyTimer)

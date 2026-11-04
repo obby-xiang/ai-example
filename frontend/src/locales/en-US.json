@@ -518,7 +518,7 @@
       "mermaidViewer": "Mermaid fullscreen viewer",
       "zoomOut": "Zoom out",
       "zoomIn": "Zoom in",
-      "resetZoom": "Reset to 100%",
+      "resetZoom": "Fit view",
       "copySource": "Copy source",
       "downloadSvg": "Download SVG",
       "closeFullscreen": "Close fullscreen",

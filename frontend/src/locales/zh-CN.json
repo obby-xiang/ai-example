@@ -518,7 +518,7 @@
       "mermaidViewer": "mermaid 全屏查看器",
       "zoomOut": "缩小",
       "zoomIn": "放大",
-      "resetZoom": "复位到 100%",
+      "resetZoom": "适配视图",
       "copySource": "复制源码",
       "downloadSvg": "下载 SVG",
       "closeFullscreen": "关闭全屏",

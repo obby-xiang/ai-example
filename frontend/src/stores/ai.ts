@@ -3009,6 +3009,17 @@ function messageShowsProgress(message: ChatMessage): boolean {
   })
 }
 
+/** 历史终态覆盖镜像最新内容时，才不采用镜像遗留的在途标记。 */
+function historyCoversMirrorRound(target: ChatMessage, mirror: ChatMessage): boolean {
+  if (target.done !== true || target.streaming
+    || !messageText(target).startsWith(messageText(mirror))
+    || !target.reasoning.startsWith(mirror.reasoning)) {
+    return false
+  }
+  const toolIds = new Set(target.parts.flatMap((part) => part.kind === 'tool' ? [part.toolCallId] : []))
+  return mirror.parts.every((part) => part.kind !== 'tool' || toolIds.has(part.toolCallId))
+}
+
 /** 刷新合并：同一轮的历史助手（按 runId 取最后一条，或按已定位的用户条目取其后最后一条）。 */
 function roundAssistantMessage(
   historical: ChatMessage[],
@@ -5361,8 +5372,8 @@ export const useAiStore = defineStore('ai', {
      * <li>先按 runId 在整个历史窗口找本轮 USER；未命中时只认"历史末条是未答复 USER、不带别的
      *     runId、归一正文相同"的窄情形。历史末条是助手或两侧 runId 不同 ⇒ 不合并提问；</li>
      * <li>助手：按 runId 找本轮历史助手；没有 runId 命中时用 toolCallId 反查（强证据）；</li>
-     * <li>找到本轮助手就按 toolCallId 对账（状态单调、结果/决策字段跟随胜者），并把该助手
-     *     `streaming/done` 按镜像 tail 交回恢复链 —— 即使没有正文差额，也不让后续帧再开气泡；</li>
+     * <li>找到本轮助手就按 toolCallId 对账（状态单调、结果/决策字段跟随胜者）；历史终态已覆盖
+     *     镜像最新内容时保持完成，否则交回镜像在途态，权威 run 续收只重开同 runId 宿主；</li>
      * <li>历史没有本轮助手才补入镜像 tail。</li>
      * </ol>
      */
@@ -5439,11 +5450,16 @@ export const useAiStore = defineStore('ai', {
         if (target.timestamp === undefined && tail.timestamp !== undefined) {
           target.timestamp = tail.timestamp
         }
+        const completedByHistory = historyCoversMirrorRound(target, tail)
         mergeMirrorRoundParts(target, tail)
         // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
         if (merged[merged.length - 1] === target) {
-          target.streaming = typeof tail.streaming === 'boolean' ? tail.streaming : true
-          target.done = typeof tail.done === 'boolean' ? tail.done : false
+          target.streaming = completedByHistory
+            ? false
+            : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
+          target.done = completedByHistory
+            ? true
+            : (typeof tail.done === 'boolean' ? tail.done : false)
         }
         return merged
       }
@@ -5454,10 +5470,15 @@ export const useAiStore = defineStore('ai', {
         if (existing.timestamp === undefined && tail.timestamp !== undefined) {
           existing.timestamp = tail.timestamp
         }
+        const completedByHistory = historyCoversMirrorRound(existing, tail)
         mergeMirrorRoundParts(existing, tail)
         if (merged[merged.length - 1] === existing) {
-          existing.streaming = typeof tail.streaming === 'boolean' ? tail.streaming : true
-          existing.done = typeof tail.done === 'boolean' ? tail.done : false
+          existing.streaming = completedByHistory
+            ? false
+            : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
+          existing.done = completedByHistory
+            ? true
+            : (typeof tail.done === 'boolean' ? tail.done : false)
         }
         return merged
       }
@@ -5943,11 +5964,15 @@ export const useAiStore = defineStore('ai', {
       if (this.canJoinRunStream(runId) || !this.canDriveRunStream(runId)) {
         return
       }
-      let host = this.findInFlightHost()
+      let host = this.findInFlightHost() ?? [...this.messages].reverse().find(
+        (item) => item.role === 'assistant' && item.runId === runId
+      ) ?? null
       if (!host) {
         host = this.appendAssistantMessage('')
       }
       host.runId = runId
+      host.streaming = true
+      host.done = false
       delete host.interrupted
       rememberRecoveryEntries(runId, current.pendingEntries)
       const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, runId)
@@ -6587,7 +6612,7 @@ export const useAiStore = defineStore('ai', {
         this.loading = true
         this.streamInterrupted = false
         const joined = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
-        if (joined && !joined.done) {
+        if (joined && (!joined.done || joined.runId === runId)) {
           joined.streaming = true
           joined.done = false
         }
@@ -6626,7 +6651,7 @@ export const useAiStore = defineStore('ai', {
       }
       // 续收证明本轮仍有后续帧：只恢复已属于本轮的宿主活动事实，不触碰无关历史助手。
       const host = hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : null
-      if (host && !host.done) {
+      if (host && (!host.done || host.runId === runId)) {
         host.streaming = true
         host.done = false
         // 续收 = 这一轮又有活的驱动：上一段断流事实作废
