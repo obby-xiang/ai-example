@@ -301,6 +301,13 @@
       "reason": "已同步 transcript additive segments 真实段序、旧历史降级，以及 pendingEntries.batchIndex 使用持久化协议顺序而非 Redis Hash 遍历的迁移契约",
       "reviewedAt": "2026-11-04",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:97aad0c96ffb4c2824aedb5a1c0e957027e099fed7379658e6f74d07e8e81bc9",
+      "status": "not-affected",
+      "reason": "本批仅修复消息展示时间的镜像记录、历史合并与终帧时刻一致性；D6迁移接口、会话协议、存储键及多实例契约均未变化",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "Kimi主控"
     }
   ]
 }

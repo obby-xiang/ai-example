@@ -2169,7 +2169,8 @@ const MIRROR_MESSAGE_SCALAR_KEYS = [
   'unconfirmed',
   'recoveryGap',
   'interrupted',
-  'runId'
+  'runId',
+  'timestamp'
 ] as const
 
 /** 消息 → 上次序列化时的快照与 JSON（WeakMap：消息被替换/回收即释放）。 */
@@ -2252,7 +2253,8 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
     // 断流是消息级事实：刷新后仍要能出「继续」（轮次级 lastRoundOutcome 不落盘）
     ...(message.interrupted ? { interrupted: true } : {}),
     // 批次2：run 归属必须活过刷新 —— 断流重挂/恢复链路按它定位后端 run（不得猜 activeRunId）
-    ...(message.runId ? { runId: message.runId } : {})
+    ...(message.runId ? { runId: message.runId } : {}),
+    ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {})
   }
 }
 
@@ -5123,6 +5125,14 @@ export const useAiStore = defineStore('ai', {
           const head = group[0] as ChatMessage
           head.parts = group.flatMap((member) => (member as ChatMessage).parts)
             .map((part, seg) => ({ ...part, seg })) as MessagePart[]
+          // 同一轮拆成多条时，最后一个已记录时间才对应整轮结局；空值不覆盖。
+          for (let index = group.length - 1; index >= 0; index -= 1) {
+            const timestamp = group[index]?.timestamp
+            if (timestamp !== undefined && timestamp !== null && timestamp !== '') {
+              head.timestamp = timestamp
+              break
+            }
+          }
           // ③ 真实终态不得随合并丢失：`stopped` / `truncated` 可能落在**后续**成员上（历史把一轮拆成
           // 多条 ASSISTANT 条目）。只做单向 OR（缺键 → true），绝不用成员的"未终止"覆盖已终止事实。
           if (group.some((member) => member.stopped === true)) {
@@ -5316,6 +5326,9 @@ export const useAiStore = defineStore('ai', {
         if (!head.runId && tail.runId) {
           head.runId = tail.runId
         }
+        if (head.timestamp === undefined && tail.timestamp !== undefined) {
+          head.timestamp = tail.timestamp
+        }
         deriveProjections(head)
         older = older.slice(0, -1)
       }
@@ -5373,6 +5386,12 @@ export const useAiStore = defineStore('ai', {
         ? findHistoryRoundUserIndex(historical, mirrorUser, roundRunId)
         : -1
       const merged = [...historical]
+      if (mirrorUser && historyUserIndex >= 0) {
+        const historyUser = merged[historyUserIndex]
+        if (historyUser && historyUser.timestamp === undefined && mirrorUser.timestamp !== undefined) {
+          historyUser.timestamp = mirrorUser.timestamp
+        }
+      }
       const seenIds = new Set(merged.map((message) => message.id))
       let target = roundAssistantMessage(merged, historyUserIndex, roundRunId)
       let targetByToolCallId = false
@@ -5417,6 +5436,9 @@ export const useAiStore = defineStore('ai', {
         if (roundRunId !== null && !target.runId) {
           target.runId = roundRunId
         }
+        if (target.timestamp === undefined && tail.timestamp !== undefined) {
+          target.timestamp = tail.timestamp
+        }
         mergeMirrorRoundParts(target, tail)
         // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
         if (merged[merged.length - 1] === target) {
@@ -5429,6 +5451,9 @@ export const useAiStore = defineStore('ai', {
       // 历史没有本轮助手：补入镜像 tail（同 id 已存在则就地合并，不重复建段）。
       const existing = merged.find((message) => message.id === tail.id)
       if (existing && existing.role === 'assistant') {
+        if (existing.timestamp === undefined && tail.timestamp !== undefined) {
+          existing.timestamp = tail.timestamp
+        }
         mergeMirrorRoundParts(existing, tail)
         if (merged[merged.length - 1] === existing) {
           existing.streaming = typeof tail.streaming === 'boolean' ? tail.streaming : true
@@ -11656,6 +11681,9 @@ export const useAiStore = defineStore('ai', {
           this.runSeq = recordRunSeq(this.runSeq, frame.runId, seq)
         }
         if (isTerminalFrame(frame)) {
+          if (frame.atMs !== undefined) {
+            message.timestamp = frame.atMs
+          }
           message.streaming = false
           message.done = true
           // O02：即便这帧属于旧轮的宿主，只要它就是忙提示所指的那一轮，入口也必须作废
@@ -11718,6 +11746,9 @@ export const useAiStore = defineStore('ai', {
           // M08：本轮 runId 一到就登记活动连接（single-flight 判据的一部分：send 开的流同样
           // 占有这个 runId，恢复入口据此并入而不是另开一条）。
           this.activeStreamRunId = frame.runId
+          if (message.timestamp === undefined && frame.atMs !== undefined) {
+            message.timestamp = frame.atMs
+          }
           // 批次2：把 run 归属钉在宿主消息上 —— 断流重挂/恢复只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
@@ -12142,6 +12173,10 @@ export const useAiStore = defineStore('ai', {
       }
 
       if (isTerminalFrame(frame)) {
+        // start/message_start 只作在途兜底；整轮结束后统一以终帧时刻为最终显示值。
+        if (frame.atMs !== undefined) {
+          message.timestamp = frame.atMs
+        }
         this.loading = false
         // O02：DONE / CANCELLED / FAILED / error 一到，忙提示立即作废 —— "回到进行中的回答"
         // 指的那一轮已经结束，入口指过去只会落到一条收尾的回答上。

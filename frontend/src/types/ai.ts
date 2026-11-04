@@ -502,8 +502,9 @@ export interface ChatMessage {
   interrupted?: boolean
   /**
    * R-154 #17：消息时间戳（epoch 毫秒或 ISO 字符串，载荷原样透传）。历史路 = 后端历史条目
-   * metadata 的 timestamp（AiHistoryMessage.timestamp，后端已回传）；实时路 = message_start 帧的
-   * 服务端构造时刻 atMs。仅展示用途，可选、不参与任何判定；不入镜像（历史重载即恢复）。
+   * metadata 的 timestamp（AiHistoryMessage.timestamp，后端已回传）；实时 AI 路先以
+   * message_start（缺省时 start）帧的 atMs 记录在途兜底，整轮 done/error 终帧的 atMs 确定
+   * 最终显示值。仅展示用途，可选、不参与任何判定；入镜像，刷新时恢复原记录，不用当前时间伪造。
    */
   timestamp?: unknown
   /**
@@ -967,8 +968,8 @@ export interface GateSubmission {
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  *
  * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
- * `recoveryGap` / `interrupted` / `runId` —— 刷新后失败现场、中性态、断流事实与 run 归属
- * 仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
+ * `recoveryGap` / `interrupted` / `runId` / `timestamp` —— 刷新后失败现场、中性态、断流事实、
+ * run 归属与已记录时间仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
  * （`synthetic` 自 B5 起不再入镜像；旧镜像读取侧按同一口径过滤。）
  *
  * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧组合自洽
@@ -978,7 +979,7 @@ export interface AiSessionMirror {
   /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId' | 'timestamp'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**

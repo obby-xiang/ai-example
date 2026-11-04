@@ -4546,8 +4546,9 @@ async function loadEarlierHistory(): Promise<void> {
 
 /**
  * R-154 #17 → R-162 M2：消息时间戳渲染（仅展示、可选）改走 `formatProgressiveTs`
- * （utils/format.ts 集中来源；历史路 = 后端条目 metadata.timestamp，实时路 = message_start 帧
- * atMs；无法解析 / 缺失 ⇒ 空串不渲染时间位）。R-158 #10 回执决策时刻同口径。
+ * （utils/format.ts 集中来源；历史路 = 后端条目 metadata.timestamp，实时 AI 路以 start /
+ * message_start 记录在途兜底、done/error 终帧 atMs 确定最终值；无法解析 / 缺失 ⇒ 空串不渲染
+ * 时间位）。R-158 #10 回执决策时刻同口径。
  */
 
 /**
