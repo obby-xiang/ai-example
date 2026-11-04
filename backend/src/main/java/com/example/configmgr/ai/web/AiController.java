@@ -1910,11 +1910,23 @@ public class AiController {
 		body.put("snapshotExpiresAt", snapshotExpiresAt);
 		// C2：展示/恢复面用非抛读口（guard 读失败不能把整页打成 500）。
 		List<PendingToolCall> pendings = this.runStore.pendingsLenient(runId);
+		Map<String, Integer> batchIndexes = new LinkedHashMap<>();
+		List<PendingToolCall> batchOrder = snapshot.getInFlightToolCalls();
+		for (int i = 0; batchOrder != null && i < batchOrder.size(); i++) {
+			PendingToolCall pending = batchOrder.get(i);
+			if (pending != null && pending.getToolCallId() != null) {
+				batchIndexes.putIfAbsent(pending.getToolCallId(), i);
+			}
+		}
 		List<Map<String, Object>> pendingEntries = new ArrayList<>();
 		List<String> unresolvedExternal = new ArrayList<>();
 		for (PendingToolCall pending : pendings) {
 			Map<String, Object> entry = new LinkedHashMap<>();
 			entry.put("toolCallId", pending.getToolCallId());
+			Integer batchIndex = batchIndexes.get(pending.getToolCallId());
+			if (batchIndex != null) {
+				entry.put("batchIndex", batchIndex);
+			}
 			entry.put("entryStatus", pending.getStatus());
 			entry.put("outcome", pending.effectiveOutcome().wire());
 			entry.put("executed", pending.isExecuted());
@@ -2317,6 +2329,21 @@ public class AiController {
 			}
 			if (entry.toolCallStates() != null && !entry.toolCallStates().isEmpty()) {
 				item.put("toolCallStates", entry.toolCallStates());
+			}
+			if (entry.segments() != null) {
+				List<Map<String, Object>> segments = new ArrayList<>(entry.segments().size());
+				for (com.example.configmgr.ai.history.TranscriptEntry.SegmentView segment : entry.segments()) {
+					if (!this.properties.getReasoning().isDisplayEnabled() && "reasoning".equals(segment.kind())) {
+						continue;
+					}
+					Map<String, Object> view = new LinkedHashMap<>();
+					view.put("kind", segment.kind());
+					view.put("text", segment.text());
+					view.put("toolCallId", segment.toolCallId());
+					view.put("seq", segment.seq());
+					segments.add(view);
+				}
+				item.put("segments", segments);
 			}
 			if (this.properties.getReasoning().isDisplayEnabled() && entry.reasoning() != null
 					&& !entry.reasoning().isBlank()) {

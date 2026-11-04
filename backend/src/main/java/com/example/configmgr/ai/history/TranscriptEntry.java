@@ -27,7 +27,18 @@ public record TranscriptEntry(String entryId, String kind, String role, String r
 		String text, String reasoning, Boolean stopped, Boolean truncated, List<ToolCallView> toolCalls,
 		Map<String, Object> toolCallStates, String toolCallId, String name, String kind2, String status, String result,
 		Boolean baseline, String code, Boolean toolTruncated, String toolStrategy, Integer toolOriginalChars,
-		Integer toolReturnedChars, String errorCode, String errorMessage) {
+		Integer toolReturnedChars, String errorCode, String errorMessage, List<SegmentView> segments) {
+
+	/** 兼容没有有序段时间线的旧写入形态。 */
+	public TranscriptEntry(String entryId, String kind, String role, String runId, long turnStartedAtMs, long atMs,
+			String text, String reasoning, Boolean stopped, Boolean truncated, List<ToolCallView> toolCalls,
+			Map<String, Object> toolCallStates, String toolCallId, String name, String kind2, String status, String result,
+			Boolean baseline, String code, Boolean toolTruncated, String toolStrategy, Integer toolOriginalChars,
+			Integer toolReturnedChars, String errorCode, String errorMessage) {
+		this(entryId, kind, role, runId, turnStartedAtMs, atMs, text, reasoning, stopped, truncated, toolCalls,
+				toolCallStates, toolCallId, name, kind2, status, result, baseline, code, toolTruncated, toolStrategy,
+				toolOriginalChars, toolReturnedChars, errorCode, errorMessage, null);
+	}
 
 	/** 兼容没有轮次失败事实的旧写入形态。 */
 	public TranscriptEntry(String entryId, String kind, String role, String runId, long turnStartedAtMs, long atMs,
@@ -37,12 +48,17 @@ public record TranscriptEntry(String entryId, String kind, String role, String r
 			Integer toolOriginalChars, Integer toolReturnedChars) {
 		this(entryId, kind, role, runId, turnStartedAtMs, atMs, text, reasoning, stopped, truncated, toolCalls,
 				toolCallStates, toolCallId, name, kind2, status, result, baseline, code, toolTruncated, toolStrategy,
-				toolOriginalChars, toolReturnedChars, null, null);
+				toolOriginalChars, toolReturnedChars, null, null, null);
 	}
 
 	/** 一条 assistant 工具调用（与 Spring AI 的线形一致；展示面按 id/type/name/arguments 读）。 */
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	public record ToolCallView(String id, String type, String name, String arguments) {
+	}
+
+	/** 按成功归档帧顺序记录的可展示段；seq 是该段首帧的归档序号。 */
+	@JsonInclude(JsonInclude.Include.NON_NULL)
+	public record SegmentView(String kind, String text, String toolCallId, long seq) {
 	}
 
 	/**
@@ -54,7 +70,15 @@ public record TranscriptEntry(String entryId, String kind, String role, String r
 				this.text, this.reasoning, this.stopped, this.truncated, this.toolCalls, toolCallStates,
 				this.toolCallId, this.name, this.kind2, this.status, this.result, this.baseline, this.code,
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
-				this.errorCode, this.errorMessage);
+				this.errorCode, this.errorMessage, this.segments);
+	}
+
+	public TranscriptEntry withSegments(List<SegmentView> segments) {
+		return new TranscriptEntry(this.entryId, this.kind, this.role, this.runId, this.turnStartedAtMs, this.atMs,
+				this.text, this.reasoning, this.stopped, this.truncated, this.toolCalls, this.toolCallStates,
+				this.toolCallId, this.name, this.kind2, this.status, this.result, this.baseline, this.code,
+				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
+				this.errorCode, this.errorMessage, segments);
 	}
 
 	/** 记忆补偿只补终态事实；正文、工具原文、排序与条目身份仍保留展示历史里的版本。 */
@@ -67,7 +91,7 @@ public record TranscriptEntry(String entryId, String kind, String role, String r
 				this.toolCallId, this.name, this.kind2, this.status, this.result, this.baseline, this.code,
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
 				terminal.errorCode == null ? this.errorCode : terminal.errorCode,
-				terminal.errorMessage == null ? this.errorMessage : terminal.errorMessage);
+				terminal.errorMessage == null ? this.errorMessage : terminal.errorMessage, this.segments);
 	}
 
 }

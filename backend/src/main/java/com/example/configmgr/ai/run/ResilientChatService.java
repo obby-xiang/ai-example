@@ -3810,6 +3810,19 @@ public class ResilientChatService {
 			}
 			List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(withStates, pendings, runId,
 					snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
+			SseChatEmitter out;
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+				out = this.registry.find(runId);
+			}
+			if (out != null) {
+				for (int i = 0; i < entries.size(); i++) {
+					TranscriptEntry entry = entries.get(i);
+					if ("assistant".equals(entry.kind())) {
+						entries.set(i, entry.withSegments(out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+								entry.text(), entry.reasoning())));
+					}
+				}
+			}
 			// 轮首用户写失败时按同一 entryId 补写；读取侧还会用可靠记忆补偿其它缺失条目，
 			// 因此 transcript 非空不再意味着它必须独自覆盖整个会话。
 			// 排序键取请求起点（与轮首写点同一口径），保证"补写的用户条目"排序在工具卡之前。

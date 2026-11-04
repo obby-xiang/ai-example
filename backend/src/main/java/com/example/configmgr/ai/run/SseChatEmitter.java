@@ -5,6 +5,7 @@ import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.history.TranscriptEntries;
+import com.example.configmgr.ai.history.TranscriptEntry;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -563,6 +564,9 @@ public class SseChatEmitter {
 	 * 但回放帧的<b>入队</b>仍在锁内先于挂订阅完成，交接原子性不变。
 	 */
 	private final Object emitLock = new Object();
+
+	/** 本写出器实际归档的展示段；只在 emitLock 内读写，不从聚合 AssistantMessage 反推。 */
+	private final List<TranscriptSegment> transcriptTimeline = new ArrayList<>();
 
 	/**
 	 * <b>锁内被让位</b>的唤醒同步（资源修复批）：{@code emitLock} 内只置位，
@@ -3209,6 +3213,173 @@ public class SseChatEmitter {
 
 	// ── 内部 ────────────────────────────────────────────────────────────────
 
+	/** 返回该 transcript 条目的完整帧段序；缺帧或内容对不上时返回 null，让读取端走旧载荷降级。 */
+	public List<TranscriptEntry.SegmentView> transcriptSegments(String entryId,
+			List<TranscriptEntry.ToolCallView> calls, String text, String reasoning) {
+		synchronized (this.emitLock) {
+			List<TranscriptEntry.ToolCallView> expectedCalls = calls == null ? List.of() : calls;
+			List<TranscriptSegment> existing = this.transcriptTimeline.stream()
+				.filter(segment -> entryId.equals(segment.entryId)).toList();
+			if (!existing.isEmpty()) {
+				return completeTranscriptSegments(existing, expectedCalls, text, reasoning, entryId)
+						? transcriptSegmentViews(existing) : null;
+			}
+			List<TranscriptSegment> candidate = new ArrayList<>();
+			if (expectedCalls.isEmpty()) {
+				int start = 0;
+				for (int i = 0; i < this.transcriptTimeline.size(); i++) {
+					if (this.transcriptTimeline.get(i).entryId != null) {
+						start = i + 1;
+					}
+				}
+				candidate.addAll(this.transcriptTimeline.subList(start, this.transcriptTimeline.size()));
+			}
+			else {
+				int first = -1;
+				int last = -1;
+				for (TranscriptEntry.ToolCallView call : expectedCalls) {
+					int found = transcriptToolSegment(call == null ? null : call.id());
+					if (found < 0) {
+						return null;
+					}
+					first = first < 0 ? found : Math.min(first, found);
+					last = Math.max(last, found);
+				}
+				int start = 0;
+				for (int i = 0; i < first; i++) {
+					if (this.transcriptTimeline.get(i).entryId != null) {
+						start = i + 1;
+					}
+				}
+				candidate.addAll(this.transcriptTimeline.subList(start, last + 1));
+			}
+			if (!completeTranscriptSegments(candidate, expectedCalls, text, reasoning, null)) {
+				return null;
+			}
+			for (TranscriptSegment segment : candidate) {
+				segment.entryId = entryId;
+			}
+			return transcriptSegmentViews(candidate);
+		}
+	}
+
+	private boolean completeTranscriptSegments(List<TranscriptSegment> candidate,
+			List<TranscriptEntry.ToolCallView> calls, String text, String reasoning, String entryId) {
+		StringBuilder actualText = new StringBuilder();
+		StringBuilder actualReasoning = new StringBuilder();
+		List<String> actualCalls = new ArrayList<>();
+		for (TranscriptSegment segment : candidate) {
+			if (segment.entryId != null && !segment.entryId.equals(entryId)) {
+				return false;
+			}
+			switch (segment.kind) {
+				case "text" -> actualText.append(segment.text);
+				case "reasoning" -> actualReasoning.append(segment.text);
+				case "tool" -> actualCalls.add(segment.toolCallId);
+				default -> {
+					return false;
+				}
+			}
+		}
+		if (!actualText.toString().equals(text == null ? "" : text)
+				|| (actualReasoning.length() == 0 && reasoning != null && !reasoning.isBlank())) {
+			return false;
+		}
+		if (actualCalls.size() != calls.size()) {
+			return false;
+		}
+		for (TranscriptEntry.ToolCallView call : calls) {
+			if (call == null || call.id() == null || !actualCalls.contains(call.id())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static List<TranscriptEntry.SegmentView> transcriptSegmentViews(List<TranscriptSegment> segments) {
+		return segments.stream()
+			.map(segment -> new TranscriptEntry.SegmentView(segment.kind,
+					segment.text == null ? null : segment.text.toString(), segment.toolCallId, segment.seq))
+			.toList();
+	}
+
+	private int transcriptToolSegment(String toolCallId) {
+		if (toolCallId == null || toolCallId.isBlank()) {
+			return -1;
+		}
+		for (int i = 0; i < this.transcriptTimeline.size(); i++) {
+			TranscriptSegment segment = this.transcriptTimeline.get(i);
+			if ("tool".equals(segment.kind) && toolCallId.equals(segment.toolCallId)) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private void recordTranscriptFrame(Map<String, Object> frame, long seq) {
+		String type = String.valueOf(frame.get("type"));
+		if ("delta".equals(type)) {
+			if (!(frame.get("text") instanceof String text) || text.isEmpty()) {
+				return;
+			}
+			String kind = "reasoning".equals(frame.get("kind")) ? "reasoning" : "text";
+			TranscriptSegment last = this.transcriptTimeline.isEmpty() ? null
+					: this.transcriptTimeline.get(this.transcriptTimeline.size() - 1);
+			if (last != null && kind.equals(last.kind)) {
+				last.text.append(text);
+			}
+			else {
+				this.transcriptTimeline.add(new TranscriptSegment(kind, text, null, seq, null));
+			}
+			return;
+		}
+		if ("suspended".equals(type) && frame.get("toolCalls") instanceof List<?> calls) {
+			for (Object raw : calls) {
+				if (raw instanceof Map<?, ?> call) {
+					addTranscriptToolSegment(call.get("toolCallId"), seq);
+				}
+			}
+			return;
+		}
+		if (switch (type) {
+			case "tool_start", "tool_result", "confirm_request", "confirm_decision",
+					"frontend_tool_request", "frontend_tool_result" -> true;
+			default -> false;
+		}) {
+			addTranscriptToolSegment(frame.get("toolCallId"), seq);
+		}
+	}
+
+	private void addTranscriptToolSegment(Object rawToolCallId, long seq) {
+		if (!(rawToolCallId instanceof String toolCallId) || toolCallId.isBlank()
+				|| transcriptToolSegment(toolCallId) >= 0) {
+			return;
+		}
+		this.transcriptTimeline.add(new TranscriptSegment("tool", null, toolCallId, seq, null));
+	}
+
+	private static final class TranscriptSegment {
+
+		private final String kind;
+
+		private final StringBuilder text;
+
+		private final String toolCallId;
+
+		private final long seq;
+
+		private String entryId;
+
+		private TranscriptSegment(String kind, String text, String toolCallId, long seq, String entryId) {
+			this.kind = kind;
+			this.text = text == null ? null : new StringBuilder(text);
+			this.toolCallId = toolCallId;
+			this.seq = seq;
+			this.entryId = entryId;
+		}
+
+	}
+
 	/**
 	 * 帧骨架：{@code type} + {@code atMs}（T4-3 后半）。
 	 *
@@ -3473,6 +3644,7 @@ public class SseChatEmitter {
 					else {
 						long frameSeq = archived.seq();
 						frame.put("seq", frameSeq);
+						recordTranscriptFrame(frame, frameSeq);
 						payloadBytes = archived.payload();
 						// R1-09：任何业务帧（非纯心跳）都推进真实业务活动锚点。判定留在出帧点，
 						// Redis 写（单键 Lua）移到锁外 —— 只靠心跳会掩盖卡死，只靠归档尾部则会漏掉

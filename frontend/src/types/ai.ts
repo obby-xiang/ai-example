@@ -267,6 +267,13 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   /** Spring AI MessageType 名称：USER / ASSISTANT / SYSTEM / TOOL */
   type: string
   text: string
+  /** assistant 的真实展示段序；缺省 = 旧后端/旧条目，使用聚合字段兼容投影。 */
+  segments?: Array<{
+    kind: 'text' | 'reasoning' | 'tool'
+    text?: string | null
+    toolCallId?: string | null
+    seq: number
+  }>
   /** 失败终帧的机器码与诊断原文；空白正文的失败条目也据此保留并重建错误卡。 */
   errorCode?: string
   errorMessage?: string
@@ -1166,6 +1173,8 @@ export interface AiRunCurrentEntry {
   name: string
   /** 入参 JSON 字符串（原样，展示/解析由前端做） */
   arguments?: string | null
+  /** 在快照 inFlightToolCalls 中的协议序号；缺省 = 旧快照无可用批次顺序。 */
+  batchIndex?: number
   /**
    * L0（2026-10-21）：该条目的请求帧（`confirm_request` / `frontend_tool_request`）**真的发过**。
    *

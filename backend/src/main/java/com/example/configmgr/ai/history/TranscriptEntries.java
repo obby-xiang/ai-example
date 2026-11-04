@@ -444,8 +444,8 @@ public final class TranscriptEntries {
 	}
 
 	/**
-	 * 同 entryId 两版条目的读取合并：新条目为准，只在<b>已有同 toolCallId 状态</b>上把旧条目
-	 * 已有的 {@code preflight} 展示摘要补回，其它字段一字不动。
+	 * 同 entryId 两版条目的读取合并：新条目为准，补回旧条目已有的 preflight 展示摘要；
+	 * 新条目没有帧段序时也保留旧段序，避免跨实例收尾把已持久化的顺序覆盖成未知。
 	 *
 	 * <p>为什么必须合并：挂起写点（pending）与终态写点共用同一 entryId，读取 last-wins；
 	 * 后写的一份若没带预检（条目读不全/旧条目），卡头会从「<类型> 任务 #N『标题』」退回工具名。
@@ -458,10 +458,11 @@ public final class TranscriptEntries {
 		if (previous == null || newer == null) {
 			return newer;
 		}
+		TranscriptEntry current = newer.segments() == null ? newer.withSegments(previous.segments()) : newer;
 		Map<String, Object> previousStates = previous.toolCallStates();
-		Map<String, Object> newerStates = newer.toolCallStates();
+		Map<String, Object> newerStates = current.toolCallStates();
 		if (previousStates == null || previousStates.isEmpty() || newerStates == null || newerStates.isEmpty()) {
-			return newer;
+			return current;
 		}
 		Map<String, Object> states = new LinkedHashMap<>(newerStates);
 		boolean changed = false;
@@ -481,7 +482,7 @@ public final class TranscriptEntries {
 				changed = true;
 			}
 		}
-		return changed ? newer.withToolCallStates(states) : newer;
+		return changed ? current.withToolCallStates(states) : current;
 	}
 
 	/**

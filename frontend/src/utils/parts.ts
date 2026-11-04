@@ -1169,39 +1169,42 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
       // 已决 toolCallId 的建段拦截在 store 侧 handleFrame 的 D8 守卫（建段前过闸，防跨消息双段）。
       // 契约增量：suspended 载荷的条目也可能声明 skipped（上游失败导致未执行）—— 逐条落终态段，
       // 不建待决占位；已有终态的段 first-wins（延迟帧不得改写已落定结局）。
+      let waitingCreated = false
       for (const call of frame.toolCalls) {
-        if (call.outcome !== 'skipped' && call.status !== 'SKIPPED') {
+        const skipped = call.outcome === 'skipped' || call.status === 'SKIPPED'
+        if (skipped) {
+          const existing = findToolPart(message, call.toolCallId)
+          if (existing && existing.status !== 'pending' && existing.status !== 'running') {
+            continue
+          }
+          upsertToolPart(message, {
+            toolCallId: call.toolCallId,
+            name: call.name,
+            kind2: call.kind,
+            status: 'skipped',
+            // resultText 是信封人读文案（后端 skippedMessage）；reason 仅为错误码，作末位兜底。
+            reason: call.resultText ?? call.reason ?? null,
+            requiresAction: false
+          })
           continue
         }
-        const existing = findToolPart(message, call.toolCallId)
-        if (existing && existing.status !== 'pending' && existing.status !== 'running') {
+        const waiting = call.kind === 'CONFIRM' || call.kind === 'FRONTEND'
+        if (!waiting || waitingCreated) {
           continue
         }
         upsertToolPart(message, {
           toolCallId: call.toolCallId,
           name: call.name,
           kind2: call.kind,
-          status: 'skipped',
-          // resultText 是信封人读文案（后端 skippedMessage）；reason 仅为错误码，作末位兜底。
-          reason: call.resultText ?? call.reason ?? null,
-          requiresAction: false
-        })
-      }
-      const waiting = frame.toolCalls.find((call) => (call.kind === 'CONFIRM' || call.kind === 'FRONTEND')
-        && call.outcome !== 'skipped' && call.status !== 'SKIPPED')
-      if (waiting) {
-        upsertToolPart(message, {
-          toolCallId: waiting.toolCallId,
-          name: waiting.name,
-          kind2: waiting.kind,
           status: 'pending',
           // H1 预检摘要（可选增量）：同 confirm_request 口径 —— 帧带才落段，缺省不产生键。
-          ...(waiting.preflight ? { preflight: waiting.preflight } : {}),
+          ...(call.preflight ? { preflight: call.preflight } : {}),
           // 批4-D：不可撤销位同口径落段（suspended 先于 confirm_request 到达时，
           // 复选框不该等到请求帧才出现）。
-          ...(waiting.irreversible === true ? { irreversible: true } : {}),
+          ...(call.irreversible === true ? { irreversible: true } : {}),
           requiresAction: true
         })
+        waitingCreated = true
       }
       break
     }

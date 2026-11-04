@@ -294,6 +294,13 @@
       "reason": "已同步面板头部精简、右侧停靠调宽、新建确认，以及宽度和展开状态跨页签同步但会话数据继续按页签隔离的迁移边界",
       "reviewedAt": "2026-11-04",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:9f4787b4810f87a8204af9e3eb72cd1362130c0992e3118e6da6b49f15e21032",
+      "status": "synced",
+      "reason": "已同步 transcript additive segments 真实段序、旧历史降级，以及 pendingEntries.batchIndex 使用持久化协议顺序而非 Redis Hash 遍历的迁移契约",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "Kimi主控"
     }
   ]
 }

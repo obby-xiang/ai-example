@@ -2768,99 +2768,191 @@ function mergeToolPartState(target: ToolPart, source: ToolPart): void {
   target.requiresAction = status === 'pending' && (target.requiresAction || source.requiresAction)
 }
 
-/** 新增工具/正文段插到尾部压缩 event 之前：事件之后的段属于"压缩后新内容"，不能排到它后面。 */
-function insertPartBeforeTrailingEvents(parts: MessagePart[], part: MessagePart): void {
-  let index = parts.length
-  while (index > 0 && parts[index - 1]?.kind === 'event') {
-    index -= 1
-  }
-  parts.splice(index, 0, part)
+type MirrorTextPart = Extract<MessagePart, { kind: 'text' } | { kind: 'reasoning' }>
+
+function mirrorText(parts: MirrorTextPart[]): string {
+  return parts.map((part) => part.text).join('')
 }
 
-/**
- * 刷新合并：把镜像 `tail` 的**工具段与新增正文**并入历史侧同一轮的助手消息。
- *
- * <p>只动同 toolCallId 的段；正文只在"镜像正文是历史正文的严格延伸"时追加差额（历史已收正文
- * 绝不被镜像覆盖，仍在流式的新正文也不会丢）。压缩事件段不进这里：由 `/history.events` 的
- * `applyHistoryCompactionEvents` 统一落位。写段后立即重排 seg 并重派生投影。
- */
-function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
-  let changed = false
-  const toolOwners = new Map<string, ToolPart>()
-  for (const part of target.parts) {
-    if (part.kind === 'tool' && !toolOwners.has(part.toolCallId)) {
-      toolOwners.set(part.toolCallId, part)
-    }
-  }
-  for (const sourcePart of source.parts) {
-    if (sourcePart.kind !== 'tool') {
-      continue
-    }
-    const owner = toolOwners.get(sourcePart.toolCallId)
-    if (owner) {
-      mergeToolPartState(owner, sourcePart)
-      changed = true
-      continue
-    }
-    const clone = { ...sourcePart }
-    insertPartBeforeTrailingEvents(target.parts, clone)
-    // 没有历史同 id 段可对照：只有 kind 未知 + 无结局证据才按"继承占位"登记。
-    if (clone.kind2 === 'UNKNOWN' && looksLikeInheritedPlaceholder(clone)) {
-      historyPlaceholderStatusIds.add(clone.toolCallId)
-    } else {
-      historyPlaceholderStatusIds.delete(clone.toolCallId)
-    }
-    toolOwners.set(clone.toolCallId, clone)
-    changed = true
-  }
-  // 新正文：镜像正文以历史正文为前缀且更长 ⇒ 只追加差额（不覆盖、不重排已收内容）。
-  const historyText = messageText(target)
-  const mirrorText = messageText(source)
-  if (mirrorText.length > historyText.length && mirrorText.startsWith(historyText)) {
-    const delta = mirrorText.slice(historyText.length)
-    if (delta !== '') {
-      const lastPart = target.parts[target.parts.length - 1]
-      if (historyText === '') {
-        // 历史只有空正文段（占位）：优先写进**尾部（压缩 event 之前）**的最后一个空文本段；
-        // 尾部不是空文本（例如工具段/思考段）时，新正文插到尾部 event 之前，保持段序。
-        let tailIndex = target.parts.length - 1
-        while (tailIndex >= 0 && target.parts[tailIndex]?.kind === 'event') {
-          tailIndex -= 1
-        }
-        const tailPart = tailIndex >= 0 ? target.parts[tailIndex] : undefined
-        if (tailPart?.kind === 'text' && tailPart.text === '') {
-          tailPart.text = mirrorText
-          tailPart.streaming = source.streaming
-        } else {
-          insertPartBeforeTrailingEvents(target.parts, {
-            kind: 'text',
-            seg: target.parts.length,
-            text: mirrorText,
-            streaming: source.streaming
-          })
-        }
-      } else if (lastPart?.kind === 'text') {
-        // 尾部就是正文段（没有工具段跟在后面）：就地续写，段序/段数不变。
-        lastPart.text += delta
-        lastPart.streaming = source.streaming
-      } else {
-        // 尾部不是正文（可能是压缩 event）：插到尾部 event 之前，保持段序。
-        insertPartBeforeTrailingEvents(target.parts, {
-          kind: 'text',
-          seg: target.parts.length,
-          text: delta,
-          streaming: source.streaming
-        })
+/** 文本只沿可证明的前缀关系合并；目标多出的独立段留给调用方按原锚点插回。 */
+function mergeMirrorTextSequence(
+  targetParts: MirrorTextPart[],
+  sourceParts: MirrorTextPart[],
+  merged: MessagePart[],
+  sourceToMerged: Map<MessagePart, MessagePart>,
+  targetToMerged: Map<MessagePart, MessagePart>,
+  represented: Set<MessagePart>
+): void {
+  const targetText = mirrorText(targetParts)
+  const sourceText = mirrorText(sourceParts)
+  if (!targetText.startsWith(sourceText) && !sourceText.startsWith(targetText)) {
+    for (const sourcePart of sourceParts) {
+      const copy = sourceToMerged.get(sourcePart)
+      const index = copy ? merged.indexOf(copy) : -1
+      if (index >= 0) {
+        merged.splice(index, 1)
       }
-      changed = true
+      sourceToMerged.delete(sourcePart)
     }
+    return
   }
-  if (!changed) {
+  if (sourceParts.length === 0) {
+    return
+  }
+  if (targetParts.length <= sourceParts.length || sourceText.startsWith(targetText)) {
+    if (targetText.length > sourceText.length) {
+      const delta = targetText.slice(sourceText.length)
+      const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? sourceParts[sourceParts.length - 1]
+      const copy = anchor ? sourceToMerged.get(anchor) : null
+      if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
+        copy.text += delta
+      }
+    }
+    targetParts.forEach((part, index) => {
+      represented.add(part)
+      const sourcePart = sourceParts[Math.min(index, sourceParts.length - 1)]
+      const copy = sourcePart ? sourceToMerged.get(sourcePart) : null
+      if (copy) {
+        targetToMerged.set(part, copy)
+      }
+    })
+    return
+  }
+  let aligned = true
+  const pairs: Array<{ target: MirrorTextPart; source: MirrorTextPart }> = []
+  for (let index = 0; index < sourceParts.length; index += 1) {
+    const sourcePart = sourceParts[index]
+    const targetPart = targetParts[index]
+    if (!sourcePart || !targetPart || (sourcePart.text === '' && targetPart.text !== '')
+      || (!sourcePart.text.startsWith(targetPart.text) && !targetPart.text.startsWith(sourcePart.text))) {
+      aligned = false
+      break
+    }
+    pairs.push({ target: targetPart, source: sourcePart })
+  }
+  if (!aligned) {
+    const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? sourceParts[sourceParts.length - 1]
+    const copy = anchor ? sourceToMerged.get(anchor) : null
+    if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
+      copy.text += targetText.slice(sourceText.length)
+    }
+    targetParts.forEach((part, index) => {
+      represented.add(part)
+      const sourcePart = sourceParts[Math.min(index, sourceParts.length - 1)]
+      const mapped = sourcePart ? sourceToMerged.get(sourcePart) : null
+      if (mapped) {
+        targetToMerged.set(part, mapped)
+      }
+    })
+    return
+  }
+  for (const pair of pairs) {
+    const copy = sourceToMerged.get(pair.source)
+    if (copy?.kind !== 'text' && copy?.kind !== 'reasoning') {
+      continue
+    }
+    copy.text = pair.target.text.startsWith(pair.source.text) ? pair.target.text : pair.source.text
+    represented.add(pair.target)
+    targetToMerged.set(pair.target, copy)
+  }
+}
+
+/** 镜像实时段序是骨架；历史状态与历史独有内容按 toolCallId/原段锚点并入。 */
+function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
+  if (target.parts.length === 0 && source.parts.length === 0) {
     return false
   }
-  target.parts.forEach((part, seg) => {
-    part.seg = seg
-  })
+  const targetTools = new Map<string, ToolPart>()
+  for (const part of target.parts) {
+    if (part.kind === 'tool' && !targetTools.has(part.toolCallId)) {
+      targetTools.set(part.toolCallId, part)
+    }
+  }
+  const merged: MessagePart[] = []
+  const mergedTools = new Map<string, ToolPart>()
+  const sourceToMerged = new Map<MessagePart, MessagePart>()
+  const targetToMerged = new Map<MessagePart, MessagePart>()
+  for (const sourcePart of source.parts) {
+    if (sourcePart.kind === 'event') {
+      continue
+    }
+    if (sourcePart.kind !== 'tool') {
+      const clone = { ...sourcePart }
+      merged.push(clone)
+      sourceToMerged.set(sourcePart, clone)
+      continue
+    }
+    const alreadyMerged = mergedTools.get(sourcePart.toolCallId)
+    if (alreadyMerged) {
+      mergeToolPartState(alreadyMerged, sourcePart)
+      sourceToMerged.set(sourcePart, alreadyMerged)
+      continue
+    }
+    const owner = targetTools.get(sourcePart.toolCallId)
+    const tool = owner ?? { ...sourcePart }
+    if (owner) {
+      mergeToolPartState(owner, sourcePart)
+      targetToMerged.set(owner, owner)
+    } else if (tool.kind2 === 'UNKNOWN' && looksLikeInheritedPlaceholder(tool)) {
+      historyPlaceholderStatusIds.add(tool.toolCallId)
+    } else {
+      historyPlaceholderStatusIds.delete(tool.toolCallId)
+    }
+    merged.push(tool)
+    mergedTools.set(tool.toolCallId, tool)
+    sourceToMerged.set(sourcePart, tool)
+  }
+  const represented = new Set<MessagePart>()
+  for (const kind of ['text', 'reasoning'] as const) {
+    mergeMirrorTextSequence(
+      target.parts.filter((part): part is MirrorTextPart => part.kind === kind),
+      source.parts.filter((part): part is MirrorTextPart => part.kind === kind),
+      merged,
+      sourceToMerged,
+      targetToMerged,
+      represented
+    )
+  }
+  for (let index = 0; index < target.parts.length; index += 1) {
+    const part = target.parts[index]
+    if (!part || represented.has(part) || (part.kind === 'tool' && mergedTools.has(part.toolCallId))) {
+      continue
+    }
+    let insertAt = merged.length
+    if (part.kind === 'event' && part.anchorToolCallId) {
+      const anchor = mergedTools.get(part.anchorToolCallId)
+      const anchorIndex = anchor ? merged.indexOf(anchor) : -1
+      if (anchorIndex >= 0) {
+        insertAt = anchorIndex + 1
+      }
+    } else {
+      let anchored = false
+      for (let next = index + 1; next < target.parts.length; next += 1) {
+        const nextPart = target.parts[next]
+        const copy = nextPart ? targetToMerged.get(nextPart) : null
+        const copyIndex = copy ? merged.indexOf(copy) : -1
+        if (copyIndex >= 0) {
+          insertAt = copyIndex
+          anchored = true
+          break
+        }
+      }
+      if (!anchored) {
+        for (let previous = index - 1; previous >= 0; previous -= 1) {
+          const previousPart = target.parts[previous]
+          const copy = previousPart ? targetToMerged.get(previousPart) : null
+          const copyIndex = copy ? merged.indexOf(copy) : -1
+          if (copyIndex >= 0) {
+            insertAt = copyIndex + 1
+            break
+          }
+        }
+      }
+    }
+    merged.splice(insertAt, 0, part)
+    targetToMerged.set(part, part)
+  }
+  target.parts = merged.map((part, seg) => ({ ...part, seg })) as MessagePart[]
   deriveProjections(target)
   return true
 }
@@ -3038,6 +3130,66 @@ function historyTruncationFields(
     fields.strategy = value.strategy as string | null
   }
   return fields
+}
+
+/** 仅接受内容与工具覆盖均完整的段序列；否则整条回退旧的聚合字段投影。 */
+function orderedHistoryParts(item: AiHistoryMessage, fallback: MessagePart[]): MessagePart[] | null {
+  if (!Array.isArray(item.segments)) {
+    return null
+  }
+  const tools = new Map<string, ToolPart>()
+  for (const part of fallback) {
+    if (part.kind === 'tool') {
+      tools.set(part.toolCallId, part)
+    }
+  }
+  const usedTools = new Set<string>()
+  const parts: MessagePart[] = []
+  let text = ''
+  let reasoning = ''
+  for (const segment of item.segments) {
+    if (!segment) {
+      return null
+    }
+    if (segment.kind === 'tool') {
+      const id = segment.toolCallId
+      const tool = typeof id === 'string' ? tools.get(id) : undefined
+      if (!tool || usedTools.has(tool.toolCallId)) {
+        return null
+      }
+      usedTools.add(tool.toolCallId)
+      parts.push(tool)
+      continue
+    }
+    if ((segment.kind !== 'text' && segment.kind !== 'reasoning') || typeof segment.text !== 'string') {
+      return null
+    }
+    const template = fallback.find((part) => part.kind === segment.kind)
+    parts.push({
+      ...(template ?? { kind: segment.kind, text: '', streaming: false }),
+      kind: segment.kind,
+      text: segment.text,
+      streaming: false
+    } as MessagePart)
+    if (segment.kind === 'text') {
+      text += segment.text
+    } else {
+      reasoning += segment.text
+    }
+  }
+  const expectedReasoning = typeof item.reasoningContent === 'string' ? item.reasoningContent : ''
+  // reasoningContent 可能是整轮聚合值；segments 则只携带本条目的真实帧段。
+  if (usedTools.size !== tools.size || text !== (item.text ?? '')
+    || (reasoning === '' && expectedReasoning !== '')) {
+    return null
+  }
+  if (parts.length === 0 && fallback.length > 0) {
+    return fallback
+  }
+  parts.forEach((part, seg) => {
+    part.seg = seg
+  })
+  return parts
 }
 
 /**
@@ -4737,15 +4889,13 @@ export const useAiStore = defineStore('ai', {
           return []
         }
         const role: ChatMessage['role'] = roleOf(item.type)
-        // 批2：历史整体替换的分支同样**只建段**（正文段 + 按 toolCalls 顺序的工具段，
+        // 新条目优先按 segments 的真实帧序建段；旧条目/校验失败才使用 reasoning→text→tools 兼容投影。
         // result 由 TOOL 条目的 toolResponses 回填（id 优先、序位兜底）；历史条目没有待决语义，
-        // 故 requiresAction=false），旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns。
+        // 故 requiresAction=false；旧投影由 deriveProjections 一次产出，不手工拼 content / toolRuns。
         // R-144（C-3）：status/kind2 双口径——载荷 `toolCallStates[call.id]` 有 status ⇒ 经词表单表
         // `historyToolCallStatus` 读真态；缺（旧载荷 / resume 重建轮 T4）⇒ 占位 'succeeded'。kind 有
         // 数据 ⇒ 还原（CONFIRM/FRONTEND/BACKEND），缺 ⇒ 'UNKNOWN'（不臆造默认值）。
-        // R-144（C-6）保序：text 空白且 toolCalls ≥ 1 ⇒ **不产空前导 text 段**（载荷无段序字段，
-        // 同条目 text↔toolCalls 相对序不可知，消「空 text 段打头」渲染面）；工具段 seg = 构造后
-        // 数组下标（有 text 段时 = toolIndex+1，无 = toolIndex；R-150 合并 pass 仍全局重排）。
+        // 兼容投影不产工具前的空 text 段；有序 segments 由 orderedHistoryParts 统一重排 seg。
         // 系统拒绝的幻影卡（FORM_SLOTS_ALREADY_KNOWN / FORM_SCHEMA_REJECTED）不进段：后端已不为它发
         // 任何用户可见的工具帧，历史面必须同口径（否则刷新后又冒出一张已拒绝卡）。它的响应也已从
         // responsePool 摘除，因此这里过滤掉之后不会把"无主响应"错配给它后面的卡。
@@ -4767,7 +4917,7 @@ export const useAiStore = defineStore('ai', {
         const hasTextFrameTruncation = item.noticeCode !== undefined
           || item.originalChars !== undefined || item.returnedChars !== undefined
           || item.strategy !== undefined
-        const parts: MessagePart[] = [
+        const legacyParts: MessagePart[] = [
           ...(hasReasoningPart
             ? [{ kind: 'reasoning', seg: 0, text: reasoningText, streaming: false } as MessagePart]
             : []),
@@ -4875,6 +5025,7 @@ export const useAiStore = defineStore('ai', {
             return part
           })
         ]
+        const parts = orderedHistoryParts(item, legacyParts) ?? legacyParts
         if (parts.length === 0) {
           // 本条的段全被隐藏（例如整条只带一张槽位放行的幻影表单卡）⇒ 不产空消息；
           // 下标登记给 R-150 合并 pass，保证"按位游标"与 `entries` 不错位。
@@ -5622,7 +5773,16 @@ export const useAiStore = defineStore('ai', {
       // - kind：BACKEND 与自动 FRONTEND 工具不弹卡；表单、表格预览、上传交接与 CONFIRM 才等人；
       // - req：显式 false 的同批条目等实时帧，不进队列（活轮行为不变）。
       // 串行呈现：只建第一张，其余进 `restoredPendingQueue`，决完一张补一张。
-      const pendingEntries = current.pendingEntries.filter((entry) => entry.entryStatus === 'PENDING')
+      const pendingEntries = current.pendingEntries
+        .filter((entry) => entry.entryStatus === 'PENDING')
+        .sort((left, right) => {
+          const leftKnown = typeof left.batchIndex === 'number' && Number.isInteger(left.batchIndex)
+          const rightKnown = typeof right.batchIndex === 'number' && Number.isInteger(right.batchIndex)
+          if (leftKnown && rightKnown) {
+            return (left.batchIndex as number) - (right.batchIndex as number)
+          }
+          return leftKnown ? -1 : rightKnown ? 1 : 0
+        })
       const restorable = pendingEntries.filter(isRestorablePendingEntry)
       const first = restorable.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
       // 连接语义与"能不能建卡"分开：自动前端工具（`navigate_to` 等）没有可重建的卡，但请求帧已发、
@@ -6251,6 +6411,51 @@ export const useAiStore = defineStore('ai', {
         // 恢复动作本身不得代替用户勾选，否则"刷新"就等于"已同意"）。
         ...(entry.irreversible === true ? { irreversible: true } : {})
       })
+      if (existing === null) {
+        const created = findToolPart(host, entry.toolCallId)
+        if (created) {
+          host.parts.splice(host.parts.indexOf(created), 1)
+          let insertAt = host.parts.length
+          while (insertAt > 0 && host.parts[insertAt - 1]?.kind === 'event') {
+            insertAt -= 1
+          }
+          if (typeof entry.batchIndex === 'number' && Number.isInteger(entry.batchIndex)) {
+            const authorities = recoveryEntriesByRun.get(runId)?.byToolCallId
+            let previous: ToolPart | null = null
+            let next: ToolPart | null = null
+            for (const part of host.parts) {
+              if (part.kind !== 'tool') {
+                continue
+              }
+              const batchIndex = authorities?.get(part.toolCallId)?.batchIndex
+              if (typeof batchIndex !== 'number' || !Number.isInteger(batchIndex)) {
+                continue
+              }
+              if (batchIndex < entry.batchIndex
+                && (!previous || (authorities?.get(previous.toolCallId)?.batchIndex ?? -1) < batchIndex)) {
+                previous = part
+              }
+              if (batchIndex > entry.batchIndex
+                && (!next || batchIndex < (authorities?.get(next.toolCallId)?.batchIndex ?? Number.MAX_SAFE_INTEGER))) {
+                next = part
+              }
+            }
+            if (next) {
+              insertAt = host.parts.indexOf(next)
+            } else if (previous) {
+              insertAt = host.parts.indexOf(previous) + 1
+            }
+          } else {
+            // 旧快照没有协议序号：保守落在尾部事件之前，并留下可观测的恢复缺口。
+            host.recoveryGap = true
+            console.warn(`[ai] pending snapshot order unavailable: runId=${runId}, toolCallId=${entry.toolCallId}`)
+          }
+          host.parts.splice(insertAt, 0, created)
+          host.parts.forEach((part, seg) => {
+            part.seg = seg
+          })
+        }
+      }
       deriveProjections(host)
       // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
       // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。

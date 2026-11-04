@@ -3576,8 +3576,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 			// 与结算写点同一口径：assistant 的 toolCallStates 与 tool 条目的 status 同源（每卡只解析一次）。
 			Map<String, String> statuses = TranscriptEntries.settledStatuses(pendings, null);
 			List<TranscriptEntry> entries = new ArrayList<>(pendings.size() + 1);
-			entries.add(TranscriptEntries.assistant(runId, turnStartedAtMs, System.currentTimeMillis(),
-					assistant.getText(), calls, TranscriptEntries.statesFrom(pendings, statuses)));
+			entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, System.currentTimeMillis(), assistant, calls,
+					TranscriptEntries.statesFrom(pendings, statuses)));
 			for (PendingToolCall pending : pendings) {
 				entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, System.currentTimeMillis(),
 						pending.getToolCallId(), pending.getName(), pending.getKind(),
@@ -3703,8 +3703,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 					toolCallId -> ledgerOf(runId, toolCallId) != null);
 			List<TranscriptEntry> entries = new ArrayList<>(settledBatch.size() + 1);
 			long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
-			entries.add(TranscriptEntries.assistant(runId, turnStartedAtMs, atMs, assistant.getText(),
-					toolCallViews(settledBatch), TranscriptEntries.statesFrom(settledBatch, statuses)));
+			entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, atMs, assistant, toolCallViews(settledBatch),
+					TranscriptEntries.statesFrom(settledBatch, statuses)));
 			for (PendingToolCall pending : settledBatch) {
 				entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, atMs, pending.getToolCallId(),
 						pending.getName(), pending.getKind(), statuses.get(pending.getToolCallId()),
@@ -3714,6 +3714,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		catch (RuntimeException ex) {
 			log.warn("transcript batch settlement rewrite failed (tool execution/resume unaffected) runId={} error={}", runId, ex.getMessage());
+		}
+	}
+
+	private TranscriptEntry assistantTranscript(String runId, RunSnapshot snapshot, long turnStartedAtMs, long atMs,
+			AssistantMessage assistant, List<TranscriptEntry.ToolCallView> calls, Map<String, Object> states) {
+		TranscriptEntry entry = TranscriptEntries.assistant(runId, turnStartedAtMs, atMs, assistant.getText(), calls,
+				states);
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+			SseChatEmitter out = this.registry.find(runId);
+			return out == null ? entry : entry.withSegments(out.transcriptSegments(entry.entryId(), calls, entry.text(),
+					entry.reasoning()));
 		}
 	}
 
