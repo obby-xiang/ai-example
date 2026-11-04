@@ -27,12 +27,10 @@ import com.example.configmgr.ai.config.AiProperties;
  * 就是那个数 —— 预留取两者较大值再按窗口一半收口。轮首触发、滞回解锁、轮内预算三处同一公式
  * （{@link #effectiveReserve(int, int, int)}）。</p>
  *
- * <h2>分母由调用方注入（L-89）</h2>
- * 本类<b>不读</b> {@code app.ai.context.limit-tokens}：分母以参数传入，调用方
- * （{@link ContextCompactor}）从 {@link ContextLimitResolver} 取 —— 与 {@code /context}、
- * {@code /health}、压缩日志同一个取数点。本类只保留阈值百分比、预留缓冲这两个"比例参数"。
- * 早前本类自行读过渡键，DB {@code ai_model.max_context} 与过渡键漂移时会出现
- * 「日志里 limit=128000、ratio 按 1500 算」的双源（挂账 L-89）。
+ * <h2>分母由调用方注入</h2>
+ * 本类<b>不读</b>任何配置：分母以参数传入，调用方（{@link ContextCompactor}）从
+ * {@link ContextLimitResolver} 取 —— 与 {@code /context}、{@code /health}、压缩日志同一个取数点。
+ * 本类只保留阈值百分比、预留缓冲这两个"比例参数"；分母唯一来源是 {@code ai_model.max_context}。
  *
  * <p>
  * <b>每次最多升一级</b>由调用方（{@link ContextCompactor}）执行：本类只回答"按占比该到哪一级"，

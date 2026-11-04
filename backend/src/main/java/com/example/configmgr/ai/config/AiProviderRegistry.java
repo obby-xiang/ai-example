@@ -61,7 +61,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>I3：带 providerId 的精确解析</h2>
  * {@link #target(Long, String)} 把"这一轮属于哪家 provider"作为硬约束（启用/key/模型 allowlist），
- * 失败即空：续跑不跨 provider、不换模型。首轮/旧客户端仍走 {@link #target(String)} 的模型名兼容。
+ * 失败即空：续跑不跨 provider、不换模型。无模型名的首轮走 {@link #target(String)} 的默认目标。
  */
 @Slf4j
 @Component
@@ -100,7 +100,7 @@ public class AiProviderRegistry {
      * <p>为什么需要它：默认参数（temperature/topP/maxTokens）烙在已缓存实例的
      * {@link ProviderRuntime#options()} 上；写路径的 {@code evictAll()} 只清<b>写那个实例</b>的缓存，
      * 其他实例会一直用旧 options，直到重启。读侧不新增轮询：任何取用入口比一次
-     * {@code configService.current().version()}（它自己按 Redis 版本号/DB 版本决定是否重载），
+     * {@code configService.current().version()}（它每个检查周期以 DB 版本决定是否重载），
      * 与 {@code lastEvictedConfigVersion} 不等即清缓存。
      *
      * <p><b>初值 = {@link Long#MIN_VALUE}</b>：进程启动后第一次取用会"清一次空表"并把版本记为当时的值；
@@ -252,14 +252,14 @@ public class AiProviderRegistry {
         }
     }
 
-    /** 请求级解析（{@code modelId} 为空 ⇒ 默认链）；解析失败返回空（控制器已按 400 拦住，这里是窄窗口兜底）。 */
+    /** 无模型名走默认目标；只有模型名时无唯一归属并返回空。 */
     public Optional<AiConfigService.ChatTarget> target(String requestedModelId) {
         return this.configService.resolveChatTarget(requestedModelId);
     }
 
     /**
-     * <b>I3 精确绑定</b>：{@code providerId} 非空时只在这一家 provider 上解析（启用/key/模型 allowlist），
-     * 失败即空 —— 不跨 provider、不换模型；{@code providerId == null} 时走旧的模型名兼容路径。
+     * <b>I3 精确绑定</b>：只按显式 {@code (providerId, modelId)} 解析；模型名为空时使用该 provider
+     * 自己的默认模型，失败即空，不跨 provider、不换模型。
      *
      * <p>续跑（{@code ResumeService} 的身份校验与 {@code ResilientChatService#runtimeForSnapshot} 的
      * 运行态派生）必须用本重载：只按模型名解析在"同名模型挂两家"时会静默错配。

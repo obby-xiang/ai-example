@@ -30,8 +30,8 @@ import java.util.List;
  * H2 由连接串 {@code LOCK_TIMEOUT} 决定（application-h2tcp.yml 设 60s）—— 覆盖一整轮播种即可。
  *
  * <h2>前提</h2>
- * {@code app_lock} 表与行由迁移 {@code V7__app_lock} 预置（H2/PG 两份同字节）。行缺失说明迁移没跑，
- * 这里直接失败并点名迁移 —— 静默降级成"无锁播种"会重新引入唯一冲突。
+ * {@code app_lock} 表与行由当前空库基线 {@code V1__schema} 预置（H2/PG 两份同结构）。行缺失说明基线
+ * 未应用，这里直接失败并点名基线 —— 静默降级成"无锁播种"会重新引入唯一冲突。
  */
 @Slf4j
 @Component
@@ -49,7 +49,7 @@ public class SeedLock {
 	 * 在调用方事务内抢 {@code app_lock.lock_name} 的行锁；抢到后清点持有者，返回即代表进入临界区。
 	 *
 	 * @param lockName 锁名（当前只有 {@link #SEED_LOCK}）
-	 * @throws IllegalStateException 不在事务内，或锁行不存在（迁移未应用）
+	 * @throws IllegalStateException 不在事务内，或锁行不存在（当前空库基线未应用）
 	 */
 	public void lock(String lockName) {
 		if (!TransactionSynchronizationManager.isActualTransactionActive()) {
@@ -59,7 +59,7 @@ public class SeedLock {
 		List<String> rows = this.jdbcTemplate.queryForList(
 				"SELECT lock_name FROM app_lock WHERE lock_name = ? FOR UPDATE", String.class, lockName);
 		if (rows.isEmpty()) {
-			throw new IllegalStateException("app_lock 缺少行 '" + lockName + "'：迁移 V7__app_lock 未应用"
+			throw new IllegalStateException("app_lock 缺少行 '" + lockName + "'：当前空库基线 V1__schema 未应用"
 					+ "（H2 用 classpath:db/migration，PG 用 classpath:db/postgresql），种子无法单飞");
 		}
 		this.jdbcTemplate.update(

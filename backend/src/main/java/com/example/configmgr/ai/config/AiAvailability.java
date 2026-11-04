@@ -11,14 +11,14 @@ package com.example.configmgr.ai.config;
  * {@code NO_MODEL_CONFIGURED}（provider 与 key 都在，但没有该 provider 自己的可用模型）。
  *
  * <p>硬绑定（{@code default.providerId} 存在）时不看其他 provider：绑定行不可用即整条 AI 不可用，
- * 不静默换家。未绑定的旧配置才保留"任一 enabled+key 的 provider"的兼容判定。
+ * 不静默换家。未设置默认目标时（首次种子尚未写默认值）按库序取第一个能给出自己默认模型的
+ * provider —— 仍然只在该 provider 自己的 allowlist 里取模型，不按名字跨 provider 猜。
  *
  * <h2>为什么对外行为不变</h2>
  * 端点（{@code AiController}）仍按本类判空后<b>在进入流式管道之前</b>返回 503：不建 SSE 连接、
  * 不触发任何上游调用。{@code isAvailable()/code()/reason()} 三个签名一个字都没动，四处调用点零改动。
  *
- * <p>R-12：无 key / key 解不开的文案都指向「设置 → AI」，不再回落到"未配置环境变量"的旧兼容句
- * （旧 {@code LEGACY_UNAVAILABLE_REASON} 已删除；码 {@code AI_UNAVAILABLE} 保持兼容）。
+ * <p>无 key / key 解不开的文案都指向「设置 → AI」，错误码为 {@code AI_UNAVAILABLE}。
  */
 public class AiAvailability {
 

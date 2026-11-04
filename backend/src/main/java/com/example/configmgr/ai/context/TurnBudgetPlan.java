@@ -120,14 +120,6 @@ public final class TurnBudgetPlan {
 			boolean usageMeasured, int usedPromptTokens, int lastCompletionTokens, int estimateTokens,
 			int deltaSinceUsageTokens, boolean armed, int armedBatches, int maxOutputTokens) {
 
-		/** 旧签名（不带真实输出预留；单测/轻装配面行为不变）。 */
-		public Request(int limitTokens, int reserveTokens, int l1Percent, int wrapUpPercent, boolean usageMeasured,
-				int usedPromptTokens, int lastCompletionTokens, int estimateTokens, int deltaSinceUsageTokens,
-				boolean armed, int armedBatches) {
-			this(limitTokens, reserveTokens, l1Percent, wrapUpPercent, usageMeasured, usedPromptTokens,
-					lastCompletionTokens, estimateTokens, deltaSinceUsageTokens, armed, armedBatches, 0);
-		}
-
 		/**
 		 * 下一跳请求的 prompt 估算（判据值）。
 		 *

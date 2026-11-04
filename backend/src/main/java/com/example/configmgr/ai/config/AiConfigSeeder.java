@@ -30,13 +30,8 @@ import java.util.Optional;
  * <b>env key 不落库</b>：运维手里的 env 不进 DB（泄露面最小），运行时按 {@code key_ref=ENV} 现读。
  *
  * <h2>写种子 = 写数据行 + 推进配置版本（与人工保存同一口径）</h2>
- * 数据行与 {@code ai_setting['config.version']}+1 在<b>同一事务</b>里提交，提交之后才发布跨实例
- * 失效信号（{@code INCR ai:cfg:ver}）并重载本实例快照（{@link AiConfigVersionPublisher}）。
- *
- * <p>
- * 这不是可选步骤：读侧（{@link AiConfigService#current()}）只按版本比对决定要不要重载，种子若不推进
- * 版本，<b>其它实例</b>的 provider 列表就永远是空的（对外表现为 env 合成行），续跑的精确绑定判据随即
- * 误判 {@code PROVIDER_GONE} —— run 40182796512 的三实例失败正是这一条。
+ * 数据行与 {@code ai_setting['config.version']}+1 在<b>同一事务</b>里提交，提交后重载本实例快照
+ * （{@link AiConfigVersionPublisher}）；其它实例按 DB 版本复核。
  * 只有<b>真的写了数据</b>才推进版本（no-op / 并发冲突里输掉的那一方不制造版本抖动）。
  *
  * <h2>strict seed</h2>
@@ -125,7 +120,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         }
         catch (DataIntegrityViolationException | org.hibernate.exception.ConstraintViolationException ex) {
             // 唯一约束兜底：另一实例在同一瞬间种好了。重载快照让对方写的那行生效
-            // （对方的版本发布（DB +1 / INCR ai:cfg:ver）在它提交之后才发生，本实例的 1s 版本比对会补上）。
+            // （对方的 DB 版本递增在提交后可见，本实例的周期版本比对也会补上）。
             log.info("AI config seeding raced with another instance (already written, nothing to do) error={}", ex.getClass().getSimpleName());
             this.configService.reload();
             return false;
@@ -137,17 +132,17 @@ public class AiConfigSeeder implements ApplicationRunner {
      *
      * <h2>并发交错下也必须"恰好一次"</h2>
      * {@link #seed()} 的 {@code count()==0} 判据在事务<b>外</b>：实例 C 可能读到 0，随后实例 A 完整种好并提交，
-     * 然后 C 才进事务并<b>看得见</b> A 写的行（READ_COMMITTED）。旧实现这时会把这行原样"重灌"一遍并再
-     * bump 一次版本 ⇒ 同一份种子数据、同一次冷启动，版本与失效信号各推进两次（三个实例白 reload 一轮）。
+     * 然后 C 才进事务并<b>看得见</b> A 写的行（READ_COMMITTED）。此时不得重灌数据并重复推进版本。
      *
-     * <p>现在的口径：行已存在且<b>本次不是 seed-force</b> ⇒ 先判"这一版种子是否已经完整落地"
+     * <p>行已存在且<b>本次不是 seed-force</b> ⇒ 先判"这一版种子是否已经完整落地"
      * （provider 的四个 env 派生字段 + 目标模型行 enabled/is_default + 没有第二个默认行）。
-     * 完全一致 = 真 no-op：不写、不 bump、不 INCR；只要有一项不一致（env 变了 / 模型行缺失或停用 /
-     * 存在第二个默认行）就照常修好并 bump <b>一次</b>。
+     * 完全一致 = 真 no-op：不写、不递增版本；只要有一项不一致就修好并递增 <b>一次</b>。
      *
      * @return true = 本次真的写了数据行（调用方据此决定要不要发布版本）
      */
     private boolean writeSeed(boolean force) {
+        // 与人工写路径同一锁顺序；no-op 种子只锁定、不递增版本。
+        this.versions.lockInTransaction();
         Optional<AiProvider> existing = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE);
         AiProvider provider;
         if (existing.isPresent()) {
@@ -194,7 +189,6 @@ public class AiConfigSeeder implements ApplicationRunner {
                 this.modelRepository.save(other);
             }
         }
-        // 版本 +1 必须在<b>本事务内</b>：改了数据却没动版本，别的实例的快照永远看不到这行。
         this.versions.bumpInTransaction();
         return true;
     }

@@ -19,7 +19,7 @@ import java.time.LocalDateTime;
  * <p>
  * {@link #maxContext} 是上下文统计专项"占用条分母"的落点；{@link #supportsToolCalling} 是
  * <b>硬约束</b>的落点（false ⇒ 本轮不下发 tools，见设计稿 §3.4）。唯一约束
- * {@code (provider_id, model_id)} 由 V4 迁移建立，与 {@link Table#uniqueConstraints} 同口径。
+ * {@code (provider_id, model_id)} 与 V1 空库基线同口径。
  */
 @Data
 @Entity

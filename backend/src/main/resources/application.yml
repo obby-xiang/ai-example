@@ -64,7 +64,9 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
-    baseline-on-migrate: true
+    # 库结构只有一个最新空库基线（V1）：生产库一律由空 schema 建起。
+    # 关掉 baseline-on-migrate，避免"库里有别人的对象"时被静默 baseline（迁移未真正执行却记成成功）。
+    baseline-on-migrate: false
 
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
@@ -138,7 +140,7 @@ app:
       # 强制重灌 env 种子（默认 false = strict seed：表非空时 env 完全不参与）。
       # 打开后只刷新"来源=ENV_SEED"的行（用户改过的行不动）。改本键需重启。
       seed-force: false
-      # 读路径版本比对的最小间隔：稳态至多 1 次/秒/实例（Redis ai:cfg:ver，不可用时退化为本地版本）。
+      # 读路径 DB 主键版本比对的最小间隔：稳态至多 1 次/秒/实例。
       reload-interval: 1s
       # URL 闸（SSRF，模型配置专项批②）：写路径只接受 http/https 绝对地址、禁内嵌凭据；
       # 默认**禁**私网/回环/云元数据（169.254.169.254）。打开本键 = 允许应用去打内网，
@@ -159,7 +161,7 @@ app:
       # 历史 token 预算（默认 48k；0 = 关闭预算、只按条数 —— 回到记忆窗口批之前的语义）。
       # 只算记忆窗口里的历史：system 人设/工作区快照与工具 schema 不在内（请求侧单列，见 ContextEstimator）。
       # 依据 = 调研 §① 历史预算 32k–48k 取上限（本仓工具结果偏大、单轮回环多）。
-      # 与本文件 app.ai.context.limit-tokens 不是一个东西：后者是整请求上限、压缩谱系的分母。
+      # 与模型行的 ai_model.max_context 不是一个东西：后者是整请求上限、压缩谱系的分母。
       token-budget: 48000
       # 条数下限（默认 40，与 max-messages 同值；2026-10-22 用户裁「业界主流的来吧，40」）。
       # 口径：条数 40 条不动、超预算靠清旧工具结果（keep-tool-pairs 之外的最旧结果换占位符）；
@@ -168,11 +170,10 @@ app:
       min-messages: 40
     # ── 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7）────────────────
     # 每个数字的依据逐行登记在 docs/evidence/补档-NUMSPEC-清单总账.md（禁裸数字）。
-    # 启动期校验见 AiProperties#verifyContext（reserve >= limit、阈值倒挂、冷却为 0 等一律 fail-fast）。
+    # 启动期校验见 AiProperties#verifyContext（预留非正、阈值倒挂、冷却为 0 等一律 fail-fast）。
     context:
-      # 分母的过渡键。模型配置专项的 ai_model.max_context 落地后由它覆盖
-      #（唯一消费点 = context/ContextLimitResolver）；0 = 主动声明未知（降级态：不显示百分比、不做比例压缩）。
-      limit-tokens: 128000
+      # 分母唯一来源 = ai_model.max_context（按显式 providerId + modelId 精确取行）；
+      # 未声明/无身份 = 未知（降级态：不显示百分比、不做比例压缩），本段没有分母配置键。
       # 预留缓冲（调研 §① Claude Code 的 13K）：覆盖 max-tokens 4096 的输出空间 + 一轮工具回环余量。
       # 比例阈值对 (limit - reserve) 取比 ⇒ 128K 下 L3@95% 仍剩 5.75K > 4096。
       reserve-tokens: 13000

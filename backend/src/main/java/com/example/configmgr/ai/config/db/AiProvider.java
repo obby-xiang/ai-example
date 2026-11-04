@@ -19,7 +19,8 @@ import java.time.LocalDateTime;
  *
  * <p>
  * 范式照 {@code ai.feedback.AiFeedback}（{@code @Data @Entity @Table} + IDENTITY + 时间戳）；
- * 本表对应的 DDL 在 {@code V4__ai_provider_config.sql}（{@code ddl-auto=validate} ⇒ 实体不许建表）。
+ * 本表随其余业务表一起建在 {@code db/migration/V1__schema.sql}（当前唯一的空库基线；
+ * {@code ddl-auto=validate} ⇒ 实体不许建表），PostgreSQL 方言见 {@code db/postgresql/V1__schema.sql}。
  *
  * <h2>密钥纪律（设计稿 §3.2 三条硬约束之一）</h2>
  * {@link #keyCipher} 是<b>密文</b>，不进 {@code toString()}、不进 JSON —— 实体{@code @Data} 默认生成的

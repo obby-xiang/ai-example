@@ -1,33 +1,27 @@
 package com.example.configmgr.ai.context;
 
-import com.example.configmgr.ai.config.AiProperties;
 import lombok.extern.slf4j.Slf4j;
 
 /**
  * 上下文上限（分母）的<b>单一取数点</b>（上下文统计与压缩专项批①；设计稿 §3.2）。
  *
  * <p>
- * 优先级（C-08 锁死的三条）：
+ * 唯一来源 = 模型行的 {@code ai_model.max_context}，且必须按显式的
+ * {@code (providerId, modelId)} 精确命中：
  * <ol>
- * <li>模型配置的 DB 值 {@code ai_model.max_context}（模型配置专项批① 已建表建列）；</li>
- * <li>过渡键 {@code app.ai.context.limit-tokens}（波次 1 分母 = 128000）——<b>自 L-89 起已弃用</b>，
- * 只作为启动期回退：模型行没声明 {@code max_context}（或调用方没有模型身份）时才用它；</li>
- * <li>都没有 ⇒ <b>0 = 未知</b>：端点 {@code limitTokens:null}、界面只显示已用不显示百分比、
- * 压缩不做比例判定（降级态）。</li>
+ * <li>命中且 {@code > 0} ⇒ 用它（来源 {@link Source#SCHEMA}）；</li>
+ * <li>没有 provider 身份 / 模型名空白 / 行未声明 {@code max_context} / 读库失败 ⇒
+ * <b>0 = 未知</b>（来源 {@link Source#UNKNOWN}）：端点 {@code limitTokens:null}、界面只显示已用
+ * 不显示百分比、压缩不做比例判定（降级态）。</li>
  * </ol>
  *
  * <p>
- * <b>为什么收敛成一处</b>：模型配置专项落地后 DB 列才是真源，而"上限"会被计量、触发、展示、
- * 端点、健康检查五处消费。分散读会让"某个面还在用过渡键"这种漂移无人发现 —— 这一条是两专项的
- * 接口契约，切换时只改 {@link #resolve}。L-89 的实测反例：{@code ContextTrigger} 曾自行读过渡键，
- * 过渡键 1500 / DB 128000 时同一轮日志出现 {@code limit=128000} 与 {@code ratio=1.258}。
- * 现在触发判定也走 {@link #resolve}（经 {@code ContextCompactor#limitTokens} 注入），
- * 过渡键只剩本类的回退分支一处读取点，并在启动日志里显式标注 deprecation
- * （{@link #logStartupDeprecation()}，由 {@link ContextConfig} 装配时调用）。
+ * 同名模型可以挂在多个 provider 下、窗口各不相同，因此<b>没有</b>"按模型名全局匹配"的第二条路；
+ * 也没有配置键回退：上限漂移会让"显示的百分比"与"触发百分比"各用一套分母。
  *
  * <p>
  * DB 值的<b>脏值容错</b>与 {@code AiProviderRegistry#buildOptions} 同一姿态：非正数视为"没有"、
- * 回落下一级（{@code max_context=0} 若被当真值，任何轮次都会立刻判"已满"）。
+ * 归到未知（{@code max_context=0} 若被当真值，任何轮次都会立刻判"已满"）。
  */
 @Slf4j
 public final class ContextLimitResolver {
@@ -42,7 +36,7 @@ public final class ContextLimitResolver {
 	public interface ModelContextSource {
 
 		/**
-		 * @param providerId 库内 provider id（{@code null} = 未指定，按 modelId 全局匹配）
+		 * @param providerId 库内 provider id（必填；{@code null}/非正数 = 无身份，返回 {@code null}）
 		 * @param modelId    模型名（可为 null）
 		 * @return 该模型声明的上下文上限；拿不到返回 {@code null}
 		 */
@@ -50,35 +44,23 @@ public final class ContextLimitResolver {
 
 	}
 
-	private final AiProperties properties;
-
 	private final ModelContextSource source;
 
-	public ContextLimitResolver(AiProperties properties, ModelContextSource source) {
-		this.properties = properties;
+	public ContextLimitResolver(ModelContextSource source) {
 		this.source = source;
 	}
 
-	/** 无 DB 源（局部上下文/单测）：只用过渡键。 */
-	public ContextLimitResolver(AiProperties properties) {
-		this(properties, null);
-	}
-
 	/**
-	 * 上限的来源（A6：回退不再静默）。
+	 * 上限的来源（只读诊断面：{@code /context}、{@code /health}）。
 	 *
-	 * <p>只用于现有只读诊断面（{@code /context}、{@code /health}），不新增用户强提示：
-	 * 界面仍按 {@code limitTokens} 的正常/未知两态显示。
+	 * <p>只保留"模型行声明了"与"未知"两态：没有配置键回退，因此不存在 {@code fallback} 来源。
 	 */
 	public enum Source {
 
 		/** 模型行明确声明了 {@code max_context}。 */
 		SCHEMA("schema"),
 
-		/** 模型行缺 {@code max_context}（或没有模型身份）⇒ 回落到过渡键。 */
-		FALLBACK("fallback"),
-
-		/** 两级都没有 ⇒ 未知（降级态，不做比例判定）。 */
+		/** 无 provider 身份 / 模型行缺失或未声明 {@code max_context} ⇒ 未知（不做比例判定）。 */
 		UNKNOWN("unknown");
 
 		private final String wire;
@@ -107,8 +89,6 @@ public final class ContextLimitResolver {
 
 	}
 
-	private final java.util.concurrent.atomic.AtomicBoolean fallbackWarned = new java.util.concurrent.atomic.AtomicBoolean();
-
 	/**
 	 * 解析上限（只要数值；保留给既有调用点）。
 	 *
@@ -121,77 +101,27 @@ public final class ContextLimitResolver {
 	/**
 	 * 解析上限与来源（A6）。
 	 *
-	 * <p>已知模型缺 {@code max_context} 时<b>保留</b>过渡键回退（直接改成"未知"会让存量模型
-	 * 全部停掉压缩，断崖式回归），但不再静默：来源如实标 {@link Source#FALLBACK}，
-	 * 且首次命中只 WARN 一次（不每轮刷屏）。
+	 * <p>没有 provider 身份就没有可判定的归属：返回未知，不按模型名跨 provider 猜。
 	 */
 	public ResolveResult resolveDetailed(Long providerId, String modelId) {
-		if (modelId == null || modelId.isBlank()) {
-			// 没有模型身份就无从查 DB —— 过渡键仍可用（"未指定模型"是合法调用：端点重建时快照里没模型）
-			return fromConfigured(Source.FALLBACK, null);
-		}
-		return fromDatabase(providerId, modelId);
-	}
-
-	private ResolveResult fromDatabase(Long providerId, String modelId) {
-		if (this.source == null) {
-			return fromConfigured(Source.FALLBACK, modelId);
+		if (providerId == null || providerId <= 0L || modelId == null || modelId.isBlank()
+				|| this.source == null) {
+			return new ResolveResult(0, Source.UNKNOWN);
 		}
 		Integer maxContext;
 		try {
 			maxContext = this.source.maxContext(providerId, modelId);
 		}
 		catch (RuntimeException ex) {
-			// 配置快照读失败不该让一轮对话失败：上限是观测/压缩的输入，降级到过渡键即可
-			log.warn("reading ai_model.max_context failed model={} error={} (falling back to app.ai.context.limit-tokens)", modelId,
-					ex.getMessage());
-			return fromConfigured(Source.FALLBACK, modelId);
-		}
-		if (maxContext == null || maxContext <= 0) {
-			return fromConfigured(Source.FALLBACK, modelId);
-		}
-		return new ResolveResult(maxContext, Source.SCHEMA);
-	}
-
-	private ResolveResult fromConfigured(Source sourceWhenKnown, String modelId) {
-		int fallback = configured();
-		if (fallback <= 0) {
+			// 配置快照读失败不该让一轮对话失败：上限是观测/压缩的输入，降级为未知即可
+			log.warn("reading ai_model.max_context failed providerId={} model={} error={} (limit unknown)",
+					providerId, modelId, ex.getMessage());
 			return new ResolveResult(0, Source.UNKNOWN);
 		}
-		if (sourceWhenKnown == Source.FALLBACK && modelId != null && !modelId.isBlank()
-				&& this.fallbackWarned.compareAndSet(false, true)) {
-			log.warn("model {} has no ai_model.max_context: limit falls back to app.ai.context.limit-tokens={} (limitSource=fallback)."
-					+ " Fallback is kept (existing models keep compacting), but please fill max_context on the model row;"
-					+ " logged once", modelId, fallback);
+		if (maxContext == null || maxContext <= 0) {
+			return new ResolveResult(0, Source.UNKNOWN);
 		}
-		return new ResolveResult(fallback, sourceWhenKnown);
-	}
-
-	/**
-	 * 启动期一次性提示：过渡键的现状与弃用（L-89）。
-	 *
-	 * <p>
-	 * 由 {@link ContextConfig} 在装配本 bean 时调用 —— 那时配置已绑定、DB 快照尚未必要，
-	 * 正是"声明本键只作回退"的时机。措辞固定包含键名、当前值、真源与回退语义，便于日志检索
-	 * 与用例逐条断言。
-	 */
-	public void logStartupDeprecation() {
-		int fallback = configured();
-		if (fallback > 0) {
-			log.warn("config key app.ai.context.limit-tokens={} is deprecated: the single source of truth for the context limit is "
-					+ "ai_model.max_context; this key is only a startup fallback for model rows without max_context (or callers"
-					+ " without model identity) and no longer drives trigger decisions or display", fallback);
-		}
-		else {
-			log.warn("config key app.ai.context.limit-tokens is deprecated and has no fallback value (current = 0):"
-					+ " models without max_context degrade to an unknown limit (no ratio checks)");
-		}
-	}
-
-	private int configured() {
-		int tokens = this.properties == null || this.properties.getContext() == null ? 0
-				: this.properties.getContext().getLimitTokens();
-		return Math.max(0, tokens);
+		return new ResolveResult(maxContext, Source.SCHEMA);
 	}
 
 }

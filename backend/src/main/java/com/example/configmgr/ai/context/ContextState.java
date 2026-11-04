@@ -38,11 +38,11 @@ import java.util.Map;
  */
 public record ContextState(int usedTokens, int completionTokens, int turnNo, boolean est, long atMs, String model,
 		String level, int compactedTurns, int lostTokens, String reason, String circuit, int fuseFails,
-		int systemTokens, int toolsTokens, int inputTokens, long openUntilMs, Long providerId) {
+		int systemTokens, int toolsTokens, int inputTokens, long openUntilMs, Long providerId, long version) {
 
 	/** 空态（会话从未记账）。 */
 	public static final ContextState EMPTY = new ContextState(0, 0, 0, false, 0L, null, "none", 0, 0, null, "closed", 0,
-			0, 0, 0, 0L, null);
+			0, 0, 0, 0L, null, 0L);
 
 	/** 是否已有真值/估算可展示（否则端点回"未测"而不是"用了 0"）。 */
 	public boolean measured() {
@@ -71,21 +71,29 @@ public record ContextState(int usedTokens, int completionTokens, int turnNo, boo
 		return new ContextState(Math.max(0, used), Math.max(0, completion), Math.max(0, turnNo), estimated, atMs, model,
 				this.level, this.compactedTurns, this.lostTokens, this.reason, this.circuit, this.fuseFails,
 				Math.max(0, system), Math.max(0, tools), Math.max(0, input), this.openUntilMs,
-				providerId == null || providerId <= 0L ? null : providerId);
+				providerId == null || providerId <= 0L ? null : providerId, this.version);
 	}
 
 	/** 记一次压缩（级别/折叠轮数/丢失量/原因）。 */
 	public ContextState withCompaction(ContextTrigger.Level level, int turns, int lost, String reason, long atMs) {
 		return new ContextState(this.usedTokens, this.completionTokens, this.turnNo, this.est, atMs, this.model,
 				level.wire(), Math.max(0, turns), Math.max(0, lost), reason, this.circuit, this.fuseFails,
-				this.systemTokens, this.toolsTokens, this.inputTokens, this.openUntilMs, this.providerId);
+				this.systemTokens, this.toolsTokens, this.inputTokens, this.openUntilMs, this.providerId, this.version);
 	}
 
 	/** 记熔断态（{@code circuit} / 连续失败数 / 冷却截止时刻）。 */
 	public ContextState withFuse(String circuit, int fails, long openUntilMs) {
 		return new ContextState(this.usedTokens, this.completionTokens, this.turnNo, this.est, this.atMs, this.model,
 				this.level, this.compactedTurns, this.lostTokens, this.reason, circuit, Math.max(0, fails),
-				this.systemTokens, this.toolsTokens, this.inputTokens, Math.max(0L, openUntilMs), this.providerId);
+				this.systemTokens, this.toolsTokens, this.inputTokens, Math.max(0L, openUntilMs), this.providerId,
+				this.version);
+	}
+
+	public ContextState withVersion(long newVersion) {
+		return new ContextState(this.usedTokens, this.completionTokens, this.turnNo, this.est, this.atMs, this.model,
+				this.level, this.compactedTurns, this.lostTokens, this.reason, this.circuit, this.fuseFails,
+				this.systemTokens, this.toolsTokens, this.inputTokens, this.openUntilMs, this.providerId,
+				Math.max(0L, newVersion));
 	}
 
 	/** Redis HASH 字段（值一律字符串：HASH 里不做类型推断，读侧按需解析）。 */
@@ -127,7 +135,7 @@ public record ContextState(int usedTokens, int completionTokens, int turnNo, boo
 				raw.getOrDefault("level", "none"), intOf(raw, "turns", 0), intOf(raw, "lost", 0), raw.get("reason"),
 				raw.getOrDefault("circuit", "closed"), intOf(raw, "fails", 0), intOf(raw, "systemTokens", 0),
 				intOf(raw, "toolsTokens", 0), intOf(raw, "inputTokens", 0), longOf(raw, "openUntil", 0L),
-				longOrNull(raw, "providerId"));
+				longOrNull(raw, "providerId"), 0L).withVersion(longOf(raw, "version", 0L));
 	}
 
 	private static int intOf(Map<String, String> raw, String key, int fallback) {

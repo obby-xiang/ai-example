@@ -48,7 +48,7 @@ public final class ContextBreakdownService {
 	 */
 	public Map<String, Object> snapshot(String sessionId, List<Message> memory, boolean ledger) {
 		ContextState state = this.compactor.readState(sessionId);
-		// B1：provider 与 model 成对解析（同名模型在不同 provider 下窗口不同）；旧状态无 provider ⇒ 仍按全局匹配
+		// B1：provider 与 model 成对解析（同名模型在不同 provider 下窗口不同）；无 provider 身份 ⇒ 上限未知
 		ContextLimitResolver.ResolveResult resolved = this.compactor.resolveLimit(
 				state.providerId() == null || state.providerId() <= 0L ? null : state.providerId(), state.model());
 		int limit = resolved.limitTokens();
@@ -65,7 +65,7 @@ public final class ContextBreakdownService {
 		body.put("turnNo", state.turnNo());
 		body.put("measuredAtMs", state.atMs() > 0L ? state.atMs() : null);
 		body.put("limitTokens", limit > 0 ? limit : null);
-		// A6：来源进只读诊断（schema / fallback / unknown），不新增用户强提示
+		// A6：来源进只读诊断（schema / unknown），不新增用户强提示
 		body.put("limitSource", resolved.source().wire());
 		body.put("usedTokens", used);
 		// 未测过（会话刚开始/记账失败）时不发百分比：0% 会被读成"很空"，而事实是"不知道"

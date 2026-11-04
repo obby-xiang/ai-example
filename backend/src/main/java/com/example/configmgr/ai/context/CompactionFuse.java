@@ -18,11 +18,8 @@ import com.example.configmgr.ai.config.AiProperties;
  * 不升指数退避：长尾失败场景下指数会把 L3 锁死数小时，而 L1 仍然是可用的兜底。</li>
  * </ul>
  *
- * <p>
- * <b>多实例边界（DC-11 登记）</b>：状态在 {@code ai:ctx:<sessionId>} 里，读写非原子（读 → 判 → 写回），
- * 两个实例可能同时看到"冷却到点"并各放一次半开尝试。这是<b>双实例可达</b>的偏差，后果是多重试一次
- * 摘要（不会丢历史、不会越窗）；单实例路径上不存在该竞态。与设计稿 §8"首轮无租约"同一族边界，
- * 本棒不新增锁。
+ * <p>生产存储以 version CAS 抢占 half-open 名额，并用单键 Lua 原子累加失败计数；
+ * 多实例不会再用陈旧快照覆盖熔断状态。
  */
 public final class CompactionFuse {
 

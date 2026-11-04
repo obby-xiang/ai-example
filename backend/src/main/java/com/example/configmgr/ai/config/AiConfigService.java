@@ -12,7 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiChatProperties;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiConnectionProperties;
 import org.springframework.core.env.Environment;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -21,7 +20,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 配置读路径（模型配置专项 §3.4）：<b>只读快照</b> + 版本号。
@@ -31,12 +33,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * （{@link ConfigSnapshot}），不得退化成"每轮查两张表"（设计稿 §9 的最后一条风险）。
  * 版本号的取法：
  * <ul>
- * <li>DB 真源 = {@code ai_setting['config.version']}（V4 预置 1）；</li>
- * <li>跨实例失效信号 = Redis {@code ai:cfg:ver}（键族与 B23L1 的 {@code ai:lease:}/
- * {@code ai:lock:} 对齐）；写路径（批②）改完 DB 版本号再 {@code INCR} 本键；</li>
- * <li>比较频率 = 每实例 {@code app.ai.config.reload-interval}（缺省 1s）至多一次；Redis 不可用
- * 时退化为本地版本比对（单实例正确；多实例"改配置只有本实例生效"登记为知悉风险，由 B23L1 批③
- * 的 Redis 设施收口）。</li>
+ * <li>唯一真源 = {@code ai_setting['config.version']}，每个检查周期都必须核对；</li>
+ * <li>检查频率 = 每实例 {@code app.ai.config.reload-interval}（缺省 1s）至多一次；刷新 single-flight，
+ * 已有读者在在途刷新期间使用 last-good 快照，不在实例锁内等待 DB I/O。</li>
  * </ul>
  *
  * <h2>env 兜底与"种子等价"</h2>
@@ -57,8 +56,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class AiConfigService {
 
-    /** 跨实例失效信号键（设计稿 §3.4 / §4 Redis 键族）。 */
-    public static final String REDIS_VERSION_KEY = "ai:cfg:ver";
+    private static final long REFRESH_WAIT_SECONDS = 5L;
 
     /** 种子/合成行的稳定机读名。 */
     public static final String ENV_PROVIDER_CODE = "deepseek";
@@ -117,10 +115,7 @@ public class AiConfigService {
 
     private final OpenAiChatProperties chatProperties;
 
-    /** 可为 null（单测/无 Redis 装配）：此时版本比对退化为 DB 版本。 */
-    private final StringRedisTemplate redis;
-
-    private final Object refreshLock = new Object();
+    private final AtomicReference<CompletableFuture<RefreshOutcome>> refreshInFlight = new AtomicReference<>();
 
     /** 按 provider code 记"已告警过解不开"，避免可用性探活逐秒刷 WARN。 */
     private final Map<String, Boolean> unreadableWarned = new ConcurrentHashMap<>();
@@ -129,15 +124,13 @@ public class AiConfigService {
 
     private volatile long lastCheckAtMs;
 
-    private volatile String lastRedisVersion;
-
     /** 上一次加载是否失败（M2）：失败 ⇒ 下一个 tick 无条件重试，不依赖版本号变化。 */
     private volatile boolean lastLoadFailed;
 
     public AiConfigService(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiSettingRepository settingRepository, Environment environment, AiKeyCipher cipher,
             AiProperties properties, OpenAiConnectionProperties connectionProperties,
-            OpenAiChatProperties chatProperties, StringRedisTemplate redis) {
+            OpenAiChatProperties chatProperties) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.settingRepository = settingRepository;
@@ -146,88 +139,114 @@ public class AiConfigService {
         this.properties = properties;
         this.connectionProperties = connectionProperties;
         this.chatProperties = chatProperties;
-        this.redis = redis;
     }
 
     // ── 快照 ────────────────────────────────────────────────────────────────
 
-    /** 当前快照（必要时按版本号重载）。读路径的唯一入口。 */
+    /** 当前快照（必要时按版本号重载）。已有读者在刷新期间始终使用 last-good。 */
     public ConfigSnapshot current() {
-        long now = System.currentTimeMillis();
         ConfigSnapshot snap = this.snapshot;
+        long now = System.currentTimeMillis();
         if (snap == null || now - this.lastCheckAtMs >= reloadIntervalMs()) {
-            synchronized (this.refreshLock) {
-                now = System.currentTimeMillis();
-                snap = this.snapshot;
-                if (snap == null || now - this.lastCheckAtMs >= reloadIntervalMs()) {
-                    this.lastCheckAtMs = now;
-                    ReloadCheck check = checkReload(snap);
-                    if (check.reload()) {
-                        applyLoad(load(), check.observedRedisVersion());
-                    }
-                }
+            CompletableFuture<RefreshOutcome> flight = startRefresh(false);
+            if (snap == null) {
+                awaitRefresh(flight, false);
             }
         }
-        return this.snapshot;
+        ConfigSnapshot current = this.snapshot;
+        if (current == null) {
+            throw new IllegalStateException("initial AI config snapshot is unavailable");
+        }
+        return current;
     }
 
-    /** 强制重载（种子写完、批② 写路径、测试用）。 */
+    /** 强制重载（种子或配置写提交后）。 */
     public ConfigSnapshot reload() {
         return reloadWithOutcome().snapshot();
     }
 
     /**
-     * 一次强制重载的结局（B2 三态判据的输入）。
+     * 一次强制重载的结局。
      *
-     * @param snapshot 重载后的快照（{@code ok=false} 时是"上一份好快照或空快照"）
-     * @param ok <b>本次</b>读库是否真的成功（{@link #load()} 没有吞掉异常）
+     * @param snapshot 成功快照或 last-good；从未加载成功时为 {@code null}
+     * @param ok 本次是否取得一致且完整的新快照
      */
     public record ReloadResult(ConfigSnapshot snapshot, boolean ok) {
     }
 
-    /**
-     * 强制重载，并把"到底刷新成功没有"如实回报。
-     *
-     * <h2>为什么必须新增一个入口，而不是改 {@link #reload()} 的返回</h2>
-     * {@link #load()} 会吞掉读库异常（这是对的：{@code /health} 与 {@code /chat} 不该因此 500），
-     * 于是 {@code reload()} 在 Hikari 超时 / 迁移锁 / 只读切换时<b>既不抛也不报</b> —— 调用方只看到
-     * "快照还是那份旧的"（或空快照），无法区分"刷新过，库里确实没有"与"压根没刷新成功"。
-     * 后者若被当成"确定不可用"，一次瞬时抖动就会变成不可恢复的判死。
-     *
-     * <p>
-     * 改 {@code reload()} 的返回类型会打破既有契约（写路径 afterCommit、种子、单测都以"返回快照"
-     * 编写），故并列一个带结局的入口；{@code reload()} 改为委托它，<b>行为逐字不变</b>。
-     */
+    /** 强制重载并如实报告结局；等待超时不取消在途加载。 */
     public ReloadResult reloadWithOutcome() {
-        synchronized (this.refreshLock) {
-            LoadOutcome outcome = load();
-            applyLoad(outcome, readRedisVersion());
-            this.lastCheckAtMs = System.currentTimeMillis();
-            return new ReloadResult(this.snapshot, outcome.ok());
+        while (true) {
+            RefreshOutcome outcome = awaitRefresh(startRefresh(true), true);
+            if (outcome.forced()) {
+                return outcome.result();
+            }
         }
     }
 
-    /**
-     * 应用一次加载结果：<b>只在加载成功之后</b>推进 {@link #lastRedisVersion}（M2）。
-     *
-     * <h2>为什么"先推进版本、后加载"是个洞</h2>
-     * Redis 的 {@code ai:cfg:ver} 是"本轮看到的版本"。旧实现一看到新版本就把它记进
-     * {@code lastRedisVersion}，然后才去读库；若这一次读库失败（Hikari 抖动 / 迁移中 / 表锁），
-     * 快照仍是旧的那份，而下一个 tick 会看到"版本没再变"直接跳过 —— <b>坏配置会被永久冻住</b>，
-     * 直到下一个版本号（下一次人工改配置）才恢复。
-     *
-     * <p>现在的口径：版本只在 {@code load} 成功后成为 {@code lastRedisVersion}；
-     * 失败的加载置 {@link #lastLoadFailed}，下一个 tick 无条件重试（与版本号是否变化无关）。
-     */
-    private void applyLoad(LoadOutcome outcome, String observedRedisVersion) {
+    private RefreshOutcome awaitRefresh(CompletableFuture<RefreshOutcome> flight, boolean forced) {
+        try {
+            return flight.get(REFRESH_WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+        catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
+        catch (Exception ex) {
+            log.debug("config refresh wait ended without a completed result error={}", ex.getMessage());
+        }
+        return new RefreshOutcome(new ReloadResult(this.snapshot, false), forced);
+    }
+
+    private record RefreshOutcome(ReloadResult result, boolean forced) {
+    }
+
+    private CompletableFuture<RefreshOutcome> startRefresh(boolean force) {
+        while (true) {
+            CompletableFuture<RefreshOutcome> existing = this.refreshInFlight.get();
+            if (existing != null) {
+                return existing;
+            }
+            CompletableFuture<RefreshOutcome> candidate = new CompletableFuture<>();
+            if (!this.refreshInFlight.compareAndSet(null, candidate)) {
+                continue;
+            }
+            try {
+                candidate.complete(performRefresh(force));
+            }
+            catch (RuntimeException ex) {
+                applyLoad(new LoadOutcome(this.snapshot, false));
+                this.lastCheckAtMs = System.currentTimeMillis();
+                log.warn("config refresh failed (keeping last good snapshot) error={}", ex.getMessage());
+                candidate.complete(new RefreshOutcome(new ReloadResult(this.snapshot, false), force));
+            }
+            finally {
+                this.refreshInFlight.compareAndSet(candidate, null);
+            }
+            return candidate;
+        }
+    }
+
+    private RefreshOutcome performRefresh(boolean force) {
+        ConfigSnapshot snap = this.snapshot;
+        if (!force) {
+            if (!checkReload(snap)) {
+                this.lastCheckAtMs = System.currentTimeMillis();
+                return new RefreshOutcome(new ReloadResult(snap, true), false);
+            }
+            LoadOutcome outcome = load();
+            applyLoad(outcome);
+            this.lastCheckAtMs = System.currentTimeMillis();
+            return new RefreshOutcome(new ReloadResult(this.snapshot, outcome.ok()), false);
+        }
+        LoadOutcome outcome = load();
+        applyLoad(outcome);
+        this.lastCheckAtMs = System.currentTimeMillis();
+        return new RefreshOutcome(new ReloadResult(this.snapshot, outcome.ok()), true);
+    }
+
+    private void applyLoad(LoadOutcome outcome) {
         this.snapshot = outcome.snapshot();
         this.lastLoadFailed = !outcome.ok();
-        if (outcome.ok() && observedRedisVersion != null) {
-            this.lastRedisVersion = observedRedisVersion;
-        }
-        else if (outcome.ok()) {
-            this.lastRedisVersion = null;
-        }
     }
 
     private long reloadIntervalMs() {
@@ -235,78 +254,67 @@ public class AiConfigService {
         return interval == null ? 0L : Math.max(0L, interval.toMillis());
     }
 
-    /** 一次版本比对的结果；{@code observedRedisVersion} 只用于"加载成功后"推进，不在比对时落地。 */
-    private record ReloadCheck(boolean reload, String observedRedisVersion) {
-    }
-
     private record LoadOutcome(ConfigSnapshot snapshot, boolean ok) {
     }
 
-    private ReloadCheck checkReload(ConfigSnapshot snap) {
+    private boolean checkReload(ConfigSnapshot snap) {
         if (snap == null || this.lastLoadFailed) {
-            // 从未加载成功 / 上次加载失败 ⇒ 必须重试（重试与版本号是否变化无关）
-            return new ReloadCheck(true, readRedisVersion());
+            return true;
         }
-        String redisVersion = readRedisVersion();
-        if (redisVersion != null) {
-            return new ReloadCheck(!redisVersion.equals(this.lastRedisVersion), redisVersion);
-        }
-        // Redis 不可用 / 没有失效信号键 ⇒ 退化为本地版本比对（一次主键查询）
-        return new ReloadCheck(readDbVersion(snap.version()) != snap.version(), null);
+        Long dbVersion = readDbVersion();
+        return dbVersion != null && dbVersion != snap.version();
     }
 
-    private String readRedisVersion() {
-        if (this.redis == null) {
-            return null;
-        }
-        try {
-            return this.redis.opsForValue().get(REDIS_VERSION_KEY);
-        }
-        catch (Exception ex) {
-            log.debug("reading {} failed (Redis unavailable? falling back to local version compare) error={}", REDIS_VERSION_KEY, ex.getMessage());
-            return null;
-        }
-    }
-
-    private long readDbVersion(long fallback) {
+    private Long readDbVersion() {
         try {
             return this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION)
                 .map(AiSetting::getValueJson)
                 .map(AiConfigService::parseVersion)
-                .orElse(fallback);
+                .orElse(0L);
         }
         catch (Exception ex) {
-            log.debug("reading config.version failed error={}", ex.getMessage());
-            return fallback;
+            log.debug("reading config.version failed (keeping last good snapshot) error={}", ex.getMessage());
+            return null;
         }
     }
 
     private LoadOutcome load() {
         try {
-            List<AiProvider> providers = this.providerRepository.findAllByOrderBySortOrderAscIdAsc();
-            List<Long> ids = providers.stream().map(AiProvider::getId).filter(java.util.Objects::nonNull).toList();
-            List<AiProviderModel> models = ids.isEmpty() ? List.of()
-                    : this.modelRepository.findByProviderIdInOrderBySortOrderAscIdAsc(ids);
-            Map<String, String> settings = new LinkedHashMap<>();
-            this.settingRepository.findAll().forEach(setting -> settings.put(setting.getSettingKey(),
-                    setting.getValueJson()));
-            long version = parseVersion(settings.get(AiSetting.CONFIG_VERSION));
-            return new LoadOutcome(new ConfigSnapshot(version, providers, models, settings), true);
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                Long before = readDbVersion();
+                if (before == null) {
+                    throw new IllegalStateException("config.version is unreadable before snapshot load");
+                }
+                ConfigSnapshot loaded = loadOnce();
+                Long after = readDbVersion();
+                if (after != null && before.equals(after) && loaded.version() == after) {
+                    return new LoadOutcome(loaded, true);
+                }
+                log.debug("config snapshot changed during load, retrying attempt={} before={} after={}", attempt, before, after);
+            }
+            throw new IllegalStateException("config snapshot did not stabilize after 3 loads");
         }
         catch (Exception ex) {
-            // 读库失败不能让 /health 或 /chat 抛 500：保留上一份好快照，没有就回空快照（= 不可用）。
-            // ok=false 会被 applyLoad 记进 lastLoadFailed ⇒ 下一个 tick 无条件重试（M2）。
+            // 读库失败或版本持续变化时保留 last-good，绝不发布分批读取拼出的混合快照。
             if (this.lastLoadFailed) {
-                log.debug("config snapshot reload failed again (keeping last good snapshot / empty snapshot) error={}",
-                        ex.getMessage());
+                log.debug("config snapshot reload failed again (keeping last good snapshot) error={}", ex.getMessage());
             }
             else {
-                log.warn("config snapshot load failed (keeping last good snapshot / degrading to empty snapshot;"
-                        + " retried on next version check) error={}", ex.getMessage());
+                log.warn("config snapshot load failed (keeping last good snapshot; retried on next version check) error={}",
+                        ex.getMessage());
             }
-            ConfigSnapshot previous = this.snapshot;
-            return new LoadOutcome(previous != null ? previous : ConfigSnapshot.empty(), false);
+            return new LoadOutcome(this.snapshot, false);
         }
+    }
+
+    private ConfigSnapshot loadOnce() {
+        List<AiProvider> providers = this.providerRepository.findAllByOrderBySortOrderAscIdAsc();
+        List<Long> ids = providers.stream().map(AiProvider::getId).filter(java.util.Objects::nonNull).toList();
+        List<AiProviderModel> models = ids.isEmpty() ? List.of()
+                : this.modelRepository.findByProviderIdInOrderBySortOrderAscIdAsc(ids);
+        Map<String, String> settings = new LinkedHashMap<>();
+        this.settingRepository.findAll().forEach(setting -> settings.put(setting.getSettingKey(), setting.getValueJson()));
+        return new ConfigSnapshot(parseVersion(settings.get(AiSetting.CONFIG_VERSION)), providers, models, settings);
     }
 
     private static long parseVersion(String raw) {
@@ -358,16 +366,10 @@ public class AiConfigService {
      * 返回（{@code null}）—— 一个手填的设置项不能关掉整页；写路径（批②）负责让脏值进不来。
      *
      * @param version {@code config.version}（诊断用：改完能确认版本真的动了）
-     * @param providerId {@code default.providerId}（与 {@code modelId} 成对；{@code null} = 旧配置未绑定）
+     * @param providerId {@code default.providerId}（与 {@code modelId} 成对；两者同为 {@code null} = 未设置默认目标）
      */
     public record Defaults(String modelId, Double temperature, Double topP, Integer maxTokens,
             Boolean allowUserParams, long version, Long providerId) {
-
-        /** 兼容旧构造（单测/无 provider 绑定的调用方）。 */
-        public Defaults(String modelId, Double temperature, Double topP, Integer maxTokens,
-                Boolean allowUserParams, long version) {
-            this(modelId, temperature, topP, maxTokens, allowUserParams, version, null);
-        }
     }
 
     /** 当前全局默认参数。 */
@@ -513,24 +515,23 @@ public class AiConfigService {
     // ── 解析：默认 provider / 模型 ────────────────────────────────────────────
 
     /**
-     * 默认运行目标：<b>默认参数里绑定的 (providerId, modelId)</b> 优先，未绑定（旧配置）才按
-     * 模型归属/库序回退。
+     * 默认运行目标：只认 {@code ai_setting} 里<b>显式绑定</b>的 {@code (providerId, modelId)}。
      *
      * <h2>为什么必须成对解析</h2>
-     * 旧实现只读 {@code default.modelId} 并把它交给"排序第一的 enabled+key provider" —— 设置页里
-     * 明明是 B 的模型，运行时却发给 A（同名模型时静默错配；不同名时上游 404）。现在的口径：
-     * 模型名只在<b>它自己的 provider</b> 的 allowlist 里才生效，任何 provider 都不会借用别家的
-     * 模型名；解析不出 ⇒ 空（{@link #availability()} 据此报 {@code NO_MODEL_CONFIGURED}）。
+     * 只读 {@code default.modelId} 并把它交给"排序第一的 enabled+key provider"会让设置页里选的
+     * B 模型在运行时发给 A（同名模型时静默错配；不同名时上游 404）。现在的口径：模型名只在
+     * <b>它自己的 provider</b> 的 allowlist 里才生效，任何 provider 都不会借用别家的模型名；
+     * 解析不出 ⇒ 空（{@link #availability()} 据此报 {@code NO_MODEL_CONFIGURED}）。
      *
-     * <h2>硬绑定（{@code default.providerId} 存在）</h2>
+     * <h2>显式绑定（{@code default.providerId} 存在）</h2>
      * 绑定的 provider 停用 / key 缺失 / key 解不开 / provider 行已不存在 / 绑定的模型停用或删除
      * ⇒ <b>直接空</b>，绝不静默换到其他 provider，也不在同一 provider 内换默认模型。
      * 只有 {@code default.modelId} 为空时，才允许使用该 provider 自己的默认模型
      * （{@code ai_model.is_default} → 首个 enabled）。
      *
-     * <h2>未绑定（旧配置兼容）</h2>
-     * {@code default.modelId} 只有一个所有者 ⇒ 用那个 provider；否则按库序取第一个能给出自己
-     * 模型的 provider。这条回退只属于"没有 provider 绑定"的旧配置。
+     * <h2>未设置默认目标（两个键都为空）</h2>
+     * 按 provider 库序取第一个能给出<b>自己</b>默认模型的 provider。这里不按模型名跨 provider
+     * 猜归属：写路径要求两者成对提交，因此"有 modelId 没有 providerId"的库内状态不可达。
      */
     public Optional<ResolvedProvider> resolveDefault() {
         return resolveDefault(current());
@@ -538,9 +539,9 @@ public class AiConfigService {
 
     private Optional<ResolvedProvider> resolveDefault(ConfigSnapshot snap) {
         List<AiProvider> providers = effectiveProviders(snap);
-        String configuredModel = text(snap.settings().get(AiSetting.DEFAULT_MODEL_ID));
         Long configuredProviderId = parseLong(snap.settings().get(AiSetting.DEFAULT_PROVIDER_ID));
         if (configuredProviderId != null) {
+            String configuredModel = text(snap.settings().get(AiSetting.DEFAULT_MODEL_ID));
             AiProvider bound = providers.stream()
                 .filter(provider -> configuredProviderId.equals(provider.getId()))
                 .findFirst()
@@ -548,20 +549,11 @@ public class AiConfigService {
             // 硬绑定：不用 firstOwnTarget，任何不可用都明确为空（availability 给出对应档）
             return bound == null ? Optional.empty() : targetFor(snap, bound, configuredModel);
         }
-        return firstOwnTarget(snap, providers, configuredModel);
+        return firstOwnTarget(snap, providers);
     }
 
-    /** 库序里第一个"key 可解析且能给出自己模型"的目标；{@code preferredModel} 只在其所有者身上生效。 */
-    private Optional<ResolvedProvider> firstOwnTarget(ConfigSnapshot snap, List<AiProvider> providers,
-            String preferredModel) {
-        if (StringUtils.hasText(preferredModel)) {
-            String wanted = preferredModel.trim();
-            for (AiProvider provider : providers) {
-                if (isUsable(provider) && selectableModel(snap, provider, wanted) != null) {
-                    return targetFor(snap, provider, wanted);
-                }
-            }
-        }
+    /** 库序里第一个"key 可解析且能给出自己默认模型"的目标。 */
+    private Optional<ResolvedProvider> firstOwnTarget(ConfigSnapshot snap, List<AiProvider> providers) {
         for (AiProvider provider : providers) {
             Optional<ResolvedProvider> target = targetFor(snap, provider, null);
             if (target.isPresent()) {
@@ -624,47 +616,13 @@ public class AiConfigService {
     }
 
     /**
-     * 请求级解析（批③ 的唯一入口）：显式 {@code modelId} 优先，未指定则退化成 {@link #resolveDefault()}。
-     *
-     * <h2>显式模型的可用性判据（三条同时成立）</h2>
-     * <ol>
-     * <li>provider {@code enabled}；</li>
-     * <li>key 可解析（{@link KeyStatus#OK}）；</li>
-     * <li>该模型在<b>这个</b> provider 的 allowlist 里且 {@code enabled}（env 合成行的种子模型等价于
-     * 一行 enabled 的 allowlist）。</li>
-     * </ol>
-     *
-     * <p>
-     * 三条缺一 ⇒ 空 ⇒ 控制器 400 {@code MODEL_NOT_FOUND}。<b>刻意不回落默认模型</b>：用户点了 A
-     * 却静默跑了 B，比报错更糟（历史与 {@code done.model} 都会说谎）。
-     *
-     * <p>
-     * 显式模型<b>优先于</b> {@code is_default} 与全局 {@code default.modelId} —— 前端的选择是会话级的
-     * 意图，优先级高于"没指定时用什么"。
+     * 无显式模型的请求走当前默认目标。只有模型名而没有 providerId 时不具备唯一归属，
+     * 必须返回空；调用方应改用 {@link #resolveChatTarget(Long, String)} 传递显式二元组。
      */
     public Optional<ChatTarget> resolveChatTarget(String requestedModelId) {
         if (!StringUtils.hasText(requestedModelId)) {
             return resolveDefault().map(resolved -> new ChatTarget(resolved, resolved.modelId(),
                     supportsToolCalling(resolved.providerId(), resolved.modelId())));
-        }
-        String wanted = requestedModelId.trim();
-        ConfigSnapshot snap = current();
-        for (AiProvider provider : effectiveProviders(snap)) {
-            if (!provider.isEnabled()) {
-                continue;
-            }
-            KeyResolution key = resolveKey(provider);
-            if (key.status() != KeyStatus.OK) {
-                continue;
-            }
-            AiProviderModel row = selectableModel(snap, provider, wanted);
-            if (row == null) {
-                continue;
-            }
-            ResolvedProvider resolved = new ResolvedProvider(provider.getId(), provider.getCode(),
-                    provider.getBaseUrl(), provider.getCompletionsPath(), wanted, key.apiKey(), key.fingerprint(),
-                    provider.getId() == null);
-            return Optional.of(new ChatTarget(resolved, wanted, row.isSupportsToolCalling()));
         }
         return Optional.empty();
     }
@@ -685,16 +643,16 @@ public class AiConfigService {
      * 显式模型不满足 ⇒ <b>空</b>，不回落该 provider 的默认模型，也不去别家找同名模型。</li>
      * </ol>
      *
-     * <p><b>{@code providerId = null}</b>（首轮未绑定 / 旧快照 / 旧客户端）：退回
-     * {@link #resolveChatTarget(String)} 的模型名兼容路径 —— 旧行为不变。</p>
+     * <p>带 provider 身份的解析<b>不做</b>模型名回退：{@code providerId} 缺失时没有可判定的归属
+     * （快照/客户端协议都必须带这一维），直接返回空，不按同名模型猜别家。</p>
      *
-     * @param providerId provider 主键（{@code null} = 未绑定，走旧路径）
+     * @param providerId provider 主键（必填；{@code null} = 身份缺失 ⇒ 空）
      * @param requestedModelId 本轮模型名；<b>空白</b> = 该 provider 自己的默认模型
      *        （不借用全局 {@code default.modelId}：那个名字属于另一家时会把"绑定"变成"按名字猜"）
      */
     public Optional<ChatTarget> resolveChatTarget(Long providerId, String requestedModelId) {
         if (providerId == null) {
-            return resolveChatTarget(requestedModelId);
+            return Optional.empty();
         }
         ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
@@ -745,20 +703,14 @@ public class AiConfigService {
      * 只看<b>快照</b>，不查库 —— 快照此刻可不可信由调用方用 {@link #reloadWithOutcome()} 的结局判定
      * （读库失败时"没有这一行"不代表库里没有）。
      *
-     * @param providerId provider 主键；{@code null} = 旧/冻结快照，退化为按模型名判
+     * @param providerId provider 主键；{@code null} = 身份缺失（无可判定归属 ⇒ 确定不可用）
      * @param modelId 快照里的模型名；空白 = 该 provider 自己的默认模型
      */
     public BindingState bindingState(Long providerId, String modelId) {
-        ConfigSnapshot snap = current();
         if (providerId == null) {
-            // 无 providerId 的旧/冻结快照没有稳定身份：按"声明了这个模型名的 provider"逐个看 key，
-            // 与下面 providerId 分支<b>同一口径</b>（复核 I-1）：
-            //   没有任何 enabled provider 声明它              ⇒ ABSENT（确定不在）
-            //   有声明，且其中至少一个 key 解不开、也没有可用的 ⇒ KEY_UNREADABLE（不可知）
-            //   全部只是"没声明 key"（key_ref=NONE / env key 为空）⇒ ABSENT（确定的配置状态）
-            // 旧实现把"有声明"一律当不可知，会让"从未声明 key"的旧快照永不收敛 —— 与本类自己的口径相反。
-            return bindingStateByName(snap, modelId);
+            return BindingState.ABSENT;
         }
+        ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
             .stream()
             .filter(provider -> providerId.equals(provider.getId()))
@@ -778,39 +730,6 @@ public class AiConfigService {
         // 只有"声明了密文却解不开"才是不可知；"从来没声明 key"是确定的配置状态（与既有口径一致：
         // ResumeService.Outcome#PROVIDER_GONE 的注释把"密钥不可用"列为确定不可用）。
         return key.status() == KeyStatus.UNREADABLE ? BindingState.KEY_UNREADABLE : BindingState.ABSENT;
-    }
-
-    /**
-     * 模型名维度（旧/冻结快照）的行级判据：见 {@link #bindingState(Long, String)} 的分支说明。
-     *
-     * <p>
-     * {@code OK} 出现在这里说明"按名字解析本该成功"（解析为空只可能来自别的分支），按<b>保守</b>处理成
-     * 不可知 —— 宁可多等一次，也不把说不清的状态判死。
-     */
-    private BindingState bindingStateByName(ConfigSnapshot snap, String modelId) {
-        if (!StringUtils.hasText(modelId)) {
-            return BindingState.ABSENT;
-        }
-        String wanted = modelId.trim();
-        boolean sawDeclared = false;
-        boolean sawUnreadable = false;
-        for (AiProvider provider : effectiveProviders(snap)) {
-            if (!provider.isEnabled() || selectableModel(snap, provider, wanted) == null) {
-                continue;
-            }
-            sawDeclared = true;
-            KeyResolution key = resolveKey(provider);
-            if (key.status() == KeyStatus.OK) {
-                return BindingState.KEY_UNREADABLE;
-            }
-            if (key.status() == KeyStatus.UNREADABLE) {
-                sawUnreadable = true;
-            }
-        }
-        if (!sawDeclared) {
-            return BindingState.ABSENT;
-        }
-        return sawUnreadable ? BindingState.KEY_UNREADABLE : BindingState.ABSENT;
     }
 
     /**
@@ -1058,7 +977,7 @@ public class AiConfigService {
         }
         List<AiProvider> enabled = providers.stream().filter(AiProvider::isEnabled).toList();
         if (enabled.isEmpty()) {
-            // 空表 + 无 env：码仍是兼容基线 AI_UNAVAILABLE；文案（R-12）改为指向设置页
+            // 空表 + 无 env：AI_UNAVAILABLE，并指向设置页
             return new Availability(false, CODE_UNAVAILABLE, UNAVAILABLE_REASON);
         }
         boolean keyOk = false;
@@ -1148,10 +1067,6 @@ public class AiConfigService {
 
     public record ConfigSnapshot(long version, List<AiProvider> providers, List<AiProviderModel> models,
             Map<String, String> settings) {
-
-        public static ConfigSnapshot empty() {
-            return new ConfigSnapshot(0L, List.of(), List.of(), Map.of());
-        }
 
         public ConfigSnapshot {
             providers = List.copyOf(providers);

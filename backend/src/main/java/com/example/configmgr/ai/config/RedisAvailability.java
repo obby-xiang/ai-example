@@ -9,7 +9,10 @@ import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Redis 可用性前置探活（R4 裁决：AI 端点要"快速失败"，不能在 Redis 不可用时挂十几秒）。
@@ -52,11 +55,15 @@ public class RedisAvailability {
 	 */
 	public static final long NEGATIVE_TTL_MS = 5000L;
 
+	private static final long PROBE_WAIT_SECONDS = 5L;
+
 	private final StringRedisTemplate redis;
 
 	private final AtomicLong probes = new AtomicLong();
 
 	private final AtomicLong failures = new AtomicLong();
+
+	private final AtomicReference<CompletableFuture<Boolean>> probeInFlight = new AtomicReference<>();
 
 	private volatile long checkedAtMs;
 
@@ -68,43 +75,62 @@ public class RedisAvailability {
 		this.redis = redis;
 	}
 
-	/** 探活（带缓存）。不可用时返回 false，调用方据此在开流之前 503。 */
+	/** 同一批并发调用共享一次 PING；不设置正向结果缓存。 */
 	public boolean isAvailable() {
 		long now = System.currentTimeMillis();
 		long ttl = this.available ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
 		if (now - this.checkedAtMs < ttl) {
 			return this.available;
 		}
-		synchronized (this) {
-			now = System.currentTimeMillis();
-			ttl = this.available ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
-			if (now - this.checkedAtMs < ttl) {
-				return this.available;
-			}
-			this.checkedAtMs = now;
-			this.probes.incrementAndGet();
-			try {
-				String pong = this.redis.execute((RedisCallback<String>) (RedisConnection connection) -> connection.ping());
-				if (pong != null) {
-					this.available = true;
-					this.lastError = null;
-				}
-				else {
-					recordFailure("PING returned null (no PONG)");
-				}
-			}
-			catch (Exception ex) {
-				recordFailure(ex.getClass().getSimpleName() + ": " + ex.getMessage());
-			}
-			return this.available;
+		CompletableFuture<Boolean> existing = this.probeInFlight.get();
+		if (existing != null) {
+			return awaitProbe(existing);
 		}
+		CompletableFuture<Boolean> candidate = new CompletableFuture<>();
+		if (!this.probeInFlight.compareAndSet(null, candidate)) {
+			CompletableFuture<Boolean> winner = this.probeInFlight.get();
+			return winner == null ? isAvailable() : awaitProbe(winner);
+		}
+		this.checkedAtMs = now;
+		this.probes.incrementAndGet();
+		try {
+			String pong = this.redis.execute((RedisCallback<String>) (RedisConnection connection) -> connection.ping());
+			if (pong != null) {
+				this.available = true;
+				this.lastError = null;
+			}
+			else {
+				recordFailure("PING returned null (no PONG)");
+			}
+		}
+		catch (Exception ex) {
+			recordFailure(ex.getClass().getSimpleName() + ": " + ex.getMessage());
+		}
+		finally {
+			candidate.complete(this.available);
+			this.probeInFlight.compareAndSet(candidate, null);
+		}
+		return this.available;
+	}
+
+	private boolean awaitProbe(CompletableFuture<Boolean> flight) {
+		try {
+			return Boolean.TRUE.equals(flight.get(PROBE_WAIT_SECONDS, TimeUnit.SECONDS));
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+		}
+		catch (Exception ex) {
+			log.debug("Redis probe wait ended without a completed result error={}", ex.getMessage());
+		}
+		return this.available;
 	}
 
 	/**
 	 * 记一次探活失败：翻转（可用 → 不可用）时 WARN、持续失败只 DEBUG。
 	 *
 	 * <p>两条失败路径（抛异常 / {@code PONG == null}）共用这一处，避免再次出现"某条路径不告警"
-	 * 的漂移 —— 那会让"可用 → 不可用"的唯一 WARN 被吞掉。调用方持 {@code synchronized(this)}。
+	 * 的漂移 —— 那会让"可用 → 不可用"的唯一 WARN 被吞掉。仅 single-flight 的探活执行者调用。
 	 */
 	private void recordFailure(String error) {
 		boolean wasAvailable = this.available;

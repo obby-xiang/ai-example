@@ -6,6 +6,11 @@ import com.example.configmgr.ai.observe.AiTrace;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -23,14 +28,13 @@ import java.util.Set;
  *
  * <h2>B1：规划与提交分开（提交只发生在记忆 CAS 成功之后）</h2>
  * <ul>
- * <li>{@link #plan} 是<b>纯计算</b>：判定、L1/L2/L3 的内容变换、摘要调用都在这里完成，
- * <b>不写任何存储</b>（不写 {@code ai:ctx:}、不写台账、不写事件、不发帧）；</li>
- * <li>{@link #commit} 只做<b>事实落库</b>：状态/熔断 → 台账 → 事件 → 日志/trace。</li>
+ * <li>{@link #plan} 完成判定、L1/L2/L3 内容变换与摘要调用；除冷却到点时用 version CAS
+ * 抢占一次 half-open 名额外，不写台账、事件或压缩结果；</li>
+ * <li>{@link #commit} 以 version CAS 落状态，再按稳定 compactionId 幂等补写台账和事件。</li>
  * </ul>
- * 调用方必须先 {@code writeBackMemory}（整窗 CAS）成功，再调用 {@code commit}。这样
- * "CAS 失败"只会丢掉一次计算结果，不会留下"状态说压了、模型看原文"的分叉。
- * 兼容入口 {@link #compact(Request, Runnable, Runnable)} 仍保留（= plan + commit），
- * 供单测与轻装配面使用；生产两个调用点显式分两步。
+ * 调用方必须先 {@code writeBackMemory}（整窗 CAS）成功，再调用 {@link #commit}。这样
+ * "CAS 失败"只会丢掉一次计算结果，不会留下"状态说压了、模型看原文"的分叉；两个生产调用点
+ * （首轮 / 续跑）都显式分两步，没有"plan + commit 一步到位"的旁路。
  *
  * <h2>谱系（每次最多升一级）</h2>
  * <ul>
@@ -52,12 +56,10 @@ import java.util.Set;
  * L3（本地硬截断）与 L1 都不碰熔断；摘要设施不可用（未装配摘要器 / 无本轮 runtime）不算一次
  * 失败尝试（不计数）。有未决 HITL 条目（挂起期）时按 P7 也只允许 L1。
  *
- * <h2>原子性（失败即回滚）</h2>
- * {@code plan} 内部任一步抛错 ⇒ 返回<b>原消息列表</b>、不写任何存储（L2 摘要失败只由
- * {@code commit} 推进熔断计数）。{@code commit} 写失败 ⇒ 日志 ERROR、结果标
- * {@code committed=false}，调用方<b>不再发 {@code context} 帧</b>；此时记忆已按 CAS 改写，
- * 故返回的仍是压缩后列表（"模型看到的"与"记忆里的"保持同一份，只是账没记上）。
- * 对齐调研 Q3"绝不静默截断"：宁可这一轮账缺一条，也不让两套历史分叉。
+ * <h2>原子性与补写</h2>
+ * 规划失败返回原消息列表；摘要失败只由 {@code commit} 原子推进熔断计数。压缩提交先 CAS 状态，
+ * 再以稳定 compactionId 补写台账和事件；失败时不发 {@code context} 帧，记忆仍保持已 CAS 的压缩结果，
+ * 同一 Plan 的重试可收敛缺失事实而不覆盖其它写者。
  */
 @Slf4j
 public final class ContextCompactor {
@@ -117,9 +119,8 @@ public final class ContextCompactor {
 	 * @param sessionId               会话 id（真值/台账/事件键的一维）
 	 * @param runId                   本轮 runId（台账回取路径）
 	 * @param model                   本轮模型名（解析分母）
-	 * @param providerId              本轮 provider id（解析分母；null = 未指定）
+	 * @param providerId              本轮 provider id（解析分母；null = 无身份 ⇒ 上限未知）
 	 * @param messages                当前历史（原对象不被修改）
-	 * @param messageJsonBefore       压缩前原文（B5 起不再写 archive；字段保留仅为调用点兼容）
 	 * @param usedTokens              上次成功请求的真值（无则 0）
 	 * @param completionTokens        上次成功请求的输出（nextEst 的一项）
 	 * @param inputTokens             本轮输入估算
@@ -136,40 +137,10 @@ public final class ContextCompactor {
 	 *                                即使未到模型 L1 线也执行一次 L1（不因此升级到 L2）
 	 */
 	public record Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
-			List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
+			int usedTokens, int completionTokens, int inputTokens,
 			int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
 			ProviderRuntime runtime, Set<String> protectedRunIds, int maxOutputTokens, boolean l1Due,
 			String cause, String anchorToolCallId) {
-
-		/** B1 签名：无事件语义（cause/anchor 缺省）。 */
-		public Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
-				List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
-				int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
-				ProviderRuntime runtime, Set<String> protectedRunIds, int maxOutputTokens, boolean l1Due) {
-			this(sessionId, runId, model, providerId, messages, messageJsonBefore, usedTokens, completionTokens,
-					inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens, protectedToolCallIds, runtime,
-					protectedRunIds, maxOutputTokens, l1Due, null, null);
-		}
-
-		/** 旧签名（B1 之前）：无真实输出预留、无窗口 l1Due。 */
-		public Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
-				List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
-				int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
-				ProviderRuntime runtime, Set<String> protectedRunIds) {
-			this(sessionId, runId, model, providerId, messages, messageJsonBefore, usedTokens, completionTokens,
-					inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens, protectedToolCallIds, runtime,
-					protectedRunIds, 0, false, null, null);
-		}
-
-		/** 旧签名（更早）：无 protectedRunIds。 */
-		public Request(String sessionId, String runId, String model, Long providerId, List<Message> messages,
-				List<String> messageJsonBefore, int usedTokens, int completionTokens, int inputTokens,
-				int toolResultsSinceMeasure, int systemTokens, int toolsTokens, Set<String> protectedToolCallIds,
-				ProviderRuntime runtime) {
-			this(sessionId, runId, model, providerId, messages, messageJsonBefore, usedTokens, completionTokens,
-					inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens, protectedToolCallIds, runtime,
-					Set.of(), 0, false, null, null);
-		}
 	}
 
 	/**
@@ -225,6 +196,12 @@ public final class ContextCompactor {
 			return this.action != ContextTrigger.Level.NONE;
 		}
 
+		private Plan withState(ContextState newState) {
+			return new Plan(newState, this.action, this.messages, this.before, this.after, this.savedTokens, this.clear,
+					this.turns, this.summaryChars, this.lostTokens, this.reason, this.atMs, this.summaryAttempted,
+					this.summarised, this.countFuseFailure, this.prefixDominated, this.decision);
+		}
+
 	}
 
 	private final AiProperties properties;
@@ -234,10 +211,6 @@ public final class ContextCompactor {
 	private final ContextStateStore store;
 
 	private final RollingSummarizer.Summarizer summarizer;
-
-	public ContextCompactor(AiProperties properties, ContextLimitResolver resolver, ContextStateStore store) {
-		this(properties, resolver, store, null);
-	}
 
 	/**
 	 * @param summarizer L2/L3 的摘要模型（null = 摘要设施未装配 ⇒ L2 走"不可用"路径、不计数熔断）
@@ -253,9 +226,8 @@ public final class ContextCompactor {
 	/**
 	 * 解析本轮分母（触发判定、端点、健康检查、压缩日志都走这里，保证"分母只有一个取数点"）。
 	 *
-	 * <p>L-89：{@link ContextTrigger#decide} 的分母也由 {@link #plan} 从这里取后<b>注入</b> ——
-	 * 触发判定不得再自行读 {@code app.ai.context.limit-tokens}，否则 DB {@code ai_model.max_context}
-	 * 与过渡键漂移时，"显示的百分比"与"触发百分比"会是两套口径。
+	 * <p>{@link ContextTrigger#decide} 的分母也由 {@link #plan} 从这里取后<b>注入</b>：显示、触发、
+	 * 端点与健康检查共用同一份 {@code ai_model.max_context}。
 	 */
 	public int limitTokens(Long providerId, String model) {
 		return resolveLimit(providerId, model).limitTokens();
@@ -294,36 +266,8 @@ public final class ContextCompactor {
 	}
 
 	/**
-	 * 兼容入口：规划 + 提交（<b>生产两个调用点不要用它</b> —— 它们必须在记忆 CAS 之后再
-	 * {@link #commit}，否则 CAS 失败会留下已提交的压缩状态）。
-	 *
-	 * <p>写失败时按旧口径返回<b>原消息列表</b>（{@code compaction_failed}），供既有单测与轻装配面
-	 * 维持"失败即原样"的语义。
-	 */
-	public Outcome compact(Request request) {
-		return compact(request, null, null);
-	}
-
-	/** 兼容入口（带摘要进度回调）。 */
-	public Outcome compact(Request request, Runnable onSummaryProgress) {
-		return compact(request, onSummaryProgress, null);
-	}
-
-	/** 兼容入口（带摘要进度 + 摘要开始回调）。 */
-	public Outcome compact(Request request, Runnable onSummaryProgress, Runnable onSummaryStart) {
-		Plan plan = plan(request, onSummaryProgress, onSummaryStart);
-		Outcome outcome = commit(request, plan);
-		if (plan.changed() && !outcome.committed()) {
-			return noopOutcome(request, plan, REASON_FAILED);
-		}
-		return outcome;
-	}
-
-	/**
-	 * 规划一次压缩（<b>不写任何存储</b>）。
-	 *
-	 * <p>唯一的外部副作用是 L2 摘要模型调用（内容生成，不可省略）；{@code ai:ctx}、台账、
-	 * 熔断与日志全部留到 {@link #commit}。调用方必须先用返回的 {@link Plan#messages()} 做整窗
+	 * 规划一次压缩。外部副作用只有 L2 摘要调用，以及冷却到点时对 half-open 名额的 version CAS 占位；
+	 * 压缩状态、台账和事件全部留到 {@link #commit}。调用方必须先用返回的 {@link Plan#messages()} 做整窗
 	 * 记忆 CAS，成功后再 {@code commit}。
 	 *
 	 * <p><b>摘要开始回调</b>只在真正调用 L2 摘要模型之前触发一次（多分块也只一次），L1/L3、
@@ -334,13 +278,24 @@ public final class ContextCompactor {
 	 */
 	public Plan plan(Request request, Runnable onSummaryProgress, Runnable onSummaryStart) {
 		List<Message> original = request.messages() == null ? List.of() : request.messages();
-		ContextState state = readState(request.sessionId());
 		AiProperties.Context config = this.properties.getContext();
 		ContextTrigger trigger = new ContextTrigger(config);
 		int limit = limitTokens(request.providerId(), request.model());
 		int before = ContextEstimator.estimateMessages(original);
 		int maxOutput = Math.max(0, request.maxOutputTokens());
 		int reserve = ContextTrigger.effectiveReserve(limit, config.getReserveTokens(), maxOutput);
+		ContextState state;
+		try {
+			// 轮首/续跑是既有的低频恢复入口：每次最多补一笔持久化 pending，不新增后台轮询。
+			this.store.reconcileCompaction(request.sessionId());
+			state = readStateForUpdate(request.sessionId());
+		}
+		catch (RuntimeException ex) {
+			log.warn("context state strict read failed sessionId={} runId={} error={} (skip compaction; never reset state from an unknown baseline)",
+					request.sessionId(), request.runId(), ex.getMessage());
+			return noopPlan(request, ContextState.EMPTY, before,
+					new ContextTrigger.Decision(ContextTrigger.Level.NONE, 0d, 0, 0, reserve), REASON_FAILED);
+		}
 		if (limit <= 0) {
 			// 降级态保持"不做任何压缩"（含 l1Due）：没有分母就没有比例判定，也不该借窗口预算
 			// 在未知上限的模型上改写历史。
@@ -394,15 +349,9 @@ public final class ContextCompactor {
 					target = ContextTrigger.Level.L1;
 				}
 				CompactionFuse fuse = new CompactionFuse(config);
-				if (target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
-					if (!fuse.allowsSummary(state, now)) {
-						// 熔断打开且未到冷却点：只留 L1（可用性优先）
-						target = ContextTrigger.Level.L1;
-					}
-					else if (CompactionFuse.OPEN.equals(state.circuit())) {
-						// 冷却到点：半开，只放这一次摘要尝试（成功/失败都会立刻改写熔断态）
-						state = fuse.halfOpen(state, now);
-					}
+				if (target.ordinal() >= ContextTrigger.Level.L2.ordinal() && !fuse.allowsSummary(state, now)) {
+					// 熔断打开且未到冷却点：只留 L1（可用性优先）
+					target = ContextTrigger.Level.L1;
 				}
 				// N3：前缀主导守卫 —— system + tools 本身就过 L2 线时，L2/L3 压不动它（只能丢历史），
 				// 而触发线看整条请求 ⇒ 会每轮判 L3、每轮空截一次。此时只留 L1。
@@ -434,12 +383,16 @@ public final class ContextCompactor {
 				: (target == ContextTrigger.Level.L3 ? HardTrim.REASON_HARD_TRIM : REASON_L1);
 		boolean summaryAttempted = false;
 		boolean summarised = false;
+		ContextState[] summaryState = { state };
 		try {
 			if (target == ContextTrigger.Level.L2) {
 				// 2026-10-29 压缩阶段信号批：摘要是唯一"真在压缩上下文"的动作 —— 只在第一次真正调用
 				// 摘要模型之前公告阶段。L1/L3（本地操作）、摘要器缺席、没有可摘要旧轮都静默。
 				RollingSummarizer.Summarizer summarizer = withStart(
 						withProgress(this.summarizer, onSummaryProgress), onSummaryStart);
+				if (CompactionFuse.OPEN.equals(state.circuit())) {
+					summarizer = withHalfOpenReservation(summarizer, request, summaryState, now);
+				}
 				if (summarizer == null || request.runtime() == null) {
 					// 摘要只使用本轮 provider/model/options：没有本轮 runtime 就不压，绝不回落全局默认。
 					// B1：这不是一次"摘要尝试"（没有调用模型）⇒ 不推进熔断计数。
@@ -449,6 +402,7 @@ public final class ContextCompactor {
 				// B1 / I2：摘要输入 = 未清除的工具结果（L1 不能先污染摘要的输入）
 				RollingSummarizer.Plan summary = RollingSummarizer.plan(original, config.getKeepRecentTurns(),
 						config.getChunkTokens(), request.protectedToolCallIds(), request.runtime(), summarizer, now);
+				state = summaryState[0];
 				if (!summary.changed()) {
 					if (!RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE.equals(summary.reason())) {
 						return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
@@ -515,7 +469,11 @@ public final class ContextCompactor {
 				reason = REASON_L1;
 			}
 		}
+		catch (HalfOpenReservationException ex) {
+			return noopPlan(request, summaryState[0], before, decision, REASON_CIRCUIT_OPEN);
+		}
 		catch (RuntimeException ex) {
+			state = summaryState[0];
 			if (summaryAttempted) {
 				return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
 			}
@@ -534,21 +492,19 @@ public final class ContextCompactor {
 				summaryAttempted, summarised, false, prefixDominated, decision);
 	}
 
-	/** 便捷重载（不带回调）。 */
-	public Plan plan(Request request) {
-		return plan(request, null, null);
-	}
-
 	/**
 	 * 提交一次已规划的压缩（<b>必须在记忆 CAS 成功之后调用</b>）。
 	 *
-	 * <p>写顺序：真值/熔断 → 台账 → 事件 → 日志/trace。B5 起不再写 {@code ai:ctx:archive}。任一步失败：
-	 * 记 ERROR、返回 {@code committed=false}，<b>不发帧</b>（调用方判断）；返回的消息仍是规划结果
-	 * （记忆已经按 CAS 改写，不能假装还是原文）。
+	 * <p>状态以规划时的 version 做 CAS，随后以稳定 compactionId 幂等补写台账与事件。任一步失败返回
+	 * {@code committed=false} 且不发帧；持同一 Plan 重试不会重复分配事件身份或覆盖并发状态。
 	 *
 	 * <p>摘要失败（{@link Plan#countFuseFailure()}）只写熔断计数与一行台账，历史不变。
 	 */
 	public Outcome commit(Request request, Plan plan) {
+		return commit(request, plan, 3);
+	}
+
+	private Outcome commit(Request request, Plan plan, int attemptsLeft) {
 		if (plan == null) {
 			return noopOutcome(request, null, REASON_FAILED);
 		}
@@ -561,10 +517,9 @@ public final class ContextCompactor {
 		ContextState state = plan.state();
 		// B3：事件 atMs = 提交时刻（不是规划时刻；L2 摘要可能耗时很久）
 		long now = System.currentTimeMillis();
+		String compactionId = compactionId(request, plan);
 		try {
-			// B5：不再写 {@code ai:ctx:archive}（只写不读、turnNo 会与下一轮复用）。
-			// 原文由 transcript（用户面）与台账/事件承担；purge 仍按旧键清理历史残留。
-			// ① 写真值：压缩成功后基线置为"压缩后规模估算"，等下一次真值回填。
+			// 压缩成功后基线置为"压缩后规模估算"，等下一次真值回填。
 			// C13：这条基线必须<b>含 system + tools</b> —— 上游真值（promptTokens）本就包含这两项，
 			// 基线只写历史估算会让下一轮 nextEst 永远少算前缀，小窗口上"看着没满、一发就 400"。
 			// 台账/帧的 before/after 仍是消息口径（与轮首同账），只有基线补齐前缀。
@@ -582,21 +537,34 @@ public final class ContextCompactor {
 			if (plan.summarised()) {
 				compacted = new CompactionFuse(this.properties.getContext()).onSuccess(compacted, now);
 			}
-			this.store.write(request.sessionId(), compacted);
-			// ③ 台账事件（与日志、context 帧三处同一组 (level, before, after, turns, lostTokens)）
-			this.store.appendLedger(request.sessionId(),
-					ledgerEvent(plan.action(), plan.before(), plan.after(), plan.turns(), plan.lostTokens(),
-							plan.summaryChars(), plan.reason(), plan.clear(), request, now, compacted.circuit()));
+			List<Map<String, Object>> ledgerEvents = new ArrayList<>(2);
+			Map<String, Object> mainLedger = ledgerEvent(plan.action(), plan.before(), plan.after(), plan.turns(),
+					plan.lostTokens(), plan.summaryChars(), plan.reason(), plan.clear(), request, now, compacted.circuit());
+			mainLedger.put("commitEntryId", compactionId + ":main");
+			ledgerEvents.add(mainLedger);
 			boolean wasOpen = state.circuit() != null && !CompactionFuse.CLOSED.equals(state.circuit());
 			if (wasOpen && plan.summarised()) {
 				log.info("context summary circuit recovered sessionId={} level={} fails=0", request.sessionId(),
 						plan.action().wire());
-				this.store.appendLedger(request.sessionId(),
-						fuseEvent("circuit_closed", compacted, request, now, plan.before()));
+				Map<String, Object> circuitLedger = fuseEvent("circuit_closed", compacted, request, now, plan.before());
+				circuitLedger.put("commitEntryId", compactionId + ":circuit-closed");
+				ledgerEvents.add(circuitLedger);
 			}
-			// B3：只有状态/台账都写成功之后才分配 eventId 并写事实；失败会让外层 catch 返回
-			// committed=false（不发帧、不返回 eventId），因此 no-op/失败/未提交永远没有事件。
-			String eventId = appendCompactionEvent(request, plan, now);
+			ContextStateStore.CompactionCommitStatus commitStatus = this.store.commitCompaction(request.sessionId(),
+					compactionId, compacted, ledgerEvents, compactionEvent(request, plan, compactionId, now));
+			if (commitStatus == ContextStateStore.CompactionCommitStatus.CONFLICT) {
+				if (attemptsLeft > 1) {
+					ContextState latest = readStateForUpdate(request.sessionId());
+					log.debug("context compaction state CAS conflict; merging onto latest version sessionId={} runId={} "
+							+ "compactionId={} attemptsLeft={}", request.sessionId(), request.runId(), compactionId,
+							attemptsLeft - 1);
+					return commit(request, plan.withState(latest), attemptsLeft - 1);
+				}
+				log.warn("context compaction state CAS conflict sessionId={} runId={} compactionId={} "
+						+ "(ledger/event not written; committed=false)", request.sessionId(), request.runId(), compactionId);
+				return outcome(plan, request, state, false);
+			}
+			String eventId = compactionId;
 			log.info("context compacted sessionId={} runId={} level={} eventId={} cause={} anchor={} before={} after={} "
 					+ "turns={} lostTokens={} clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(),
 					request.runId(), plan.action().wire(), eventId, request.cause(), request.anchorToolCallId(),
@@ -611,26 +579,18 @@ public final class ContextCompactor {
 			return outcome(plan, request, compacted, true, eventId, now);
 		}
 		catch (RuntimeException ex) {
-			// 任一步失败 ⇒ 记 ERROR；<b>不发帧</b>（committed=false）。记忆已按 CAS 改写，
-			// 故仍返回规划后的消息（模型看到的与记忆里的保持一致），只是账没记上。
-			log.error("context compaction commit failed sessionId={} runId={} level={} error={} (state/ledger/facts may be incomplete; no context frame this turn)",
-					request.sessionId(), request.runId(), plan.action().wire(), ex.getMessage());
+			log.error("context compaction commit failed sessionId={} runId={} level={} compactionId={} error={} "
+					+ "(retry the same Plan to complete state/ledger/facts idempotently; no context frame this turn)",
+					request.sessionId(), request.runId(), plan.action().wire(), compactionId, ex.getMessage());
 			return outcome(plan, request, state, false);
 		}
 	}
 
-	/**
-	 * B3：分配稳定 eventId 并写一条已提交压缩事实。
-	 *
-	 * <p>{@code <runId>:c<compSeq>}：compSeq 是会话内 HINCRBY 的单键原子序号 ⇒ 跨实例唯一；
-	 * 同一条事实被重放/刷新时按 eventId 幂等。只有 {@link #commit} 的真实成功路径会调用。
-	 */
-	private String appendCompactionEvent(Request request, Plan plan, long now) {
+	private static Map<String, Object> compactionEvent(Request request, Plan plan, String compactionId, long now) {
 		String runId = request.runId() == null || request.runId().isBlank() ? "run-unknown" : request.runId();
-		long seq = this.store.nextCompactionSeq(request.sessionId());
-		String eventId = runId + ":c" + seq;
 		Map<String, Object> event = new LinkedHashMap<>();
-		event.put("eventId", eventId);
+		event.put("eventId", compactionId);
+		event.put("compactionId", compactionId);
 		event.put("runId", runId);
 		event.put("atMs", now);
 		event.put("cause", request.cause() == null ? "unknown" : request.cause());
@@ -638,8 +598,21 @@ public final class ContextCompactor {
 		event.put("anchorToolCallId", request.anchorToolCallId());
 		event.put("turns", plan.turns());
 		event.put("lostTokens", plan.lostTokens());
-		this.store.appendEvent(request.sessionId(), event);
-		return eventId;
+		return event;
+	}
+
+	private static String compactionId(Request request, Plan plan) {
+		String runId = request.runId() == null || request.runId().isBlank() ? "run-unknown" : request.runId();
+		String material = runId + '\n' + plan.atMs() + '\n' + plan.action().wire() + '\n' + plan.before() + '\n'
+				+ plan.after() + '\n' + plan.turns() + '\n' + plan.lostTokens() + '\n' + plan.reason() + '\n'
+				+ plan.clear().clearedIds();
+		try {
+			byte[] digest = MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
+			return runId + ":c:" + plan.atMs() + ":" + HexFormat.of().formatHex(digest, 0, 8);
+		}
+		catch (NoSuchAlgorithmException ex) {
+			throw new IllegalStateException("SHA-256 unavailable", ex);
+		}
 	}
 
 	/** 输入历史里最后一条工具结果的 toolCallId（无工具 ⇒ null；B3 锚点）。 */
@@ -663,27 +636,24 @@ public final class ContextCompactor {
 	/**
 	 * 轮末记账（真值回填）：{@code used/completion/turnNo/est/model/providerId} + 三个分项锚点。
 	 *
+	 * <p>provider 与 model 必须与本轮实际调用一致（解析分母按这一对精确取行）。
+	 *
 	 * <p>写失败只 WARN：记账是观测面，不能让一轮已成功的对话因 Redis 抖动变成失败。
 	 */
-	public void recordTurn(String sessionId, String model, int usedTokens, int completionTokens, int turnNo,
-			boolean estimated, int systemTokens, int toolsTokens, int inputTokens) {
-		recordTurn(sessionId, null, model, usedTokens, completionTokens, turnNo, estimated, systemTokens, toolsTokens,
-				inputTokens);
-	}
-
-	/** 轮末记账（带 provider 身份；B1：provider 与 model 必须与本轮实际调用一致）。 */
 	public void recordTurn(String sessionId, Long providerId, String model, int usedTokens, int completionTokens,
 			int turnNo, boolean estimated, int systemTokens, int toolsTokens, int inputTokens) {
 		try {
-			ContextState state = readState(sessionId);
-			long now = System.currentTimeMillis();
-			this.store.write(sessionId,
-					state.withUsage(usedTokens, completionTokens, turnNo, estimated, now, model, providerId,
-							systemTokens, toolsTokens, inputTokens));
+			this.store.recordTurn(sessionId, providerId, model, usedTokens, completionTokens, turnNo, estimated,
+					System.currentTimeMillis(), systemTokens, toolsTokens, inputTokens);
 		}
 		catch (RuntimeException ex) {
 			log.warn("context usage record write failed sessionId={} error={}", sessionId, ex.getMessage());
 		}
+	}
+
+	private ContextState readStateForUpdate(String sessionId) {
+		ContextState state = this.store.readStrict(sessionId);
+		return state == null ? ContextState.EMPTY : state;
 	}
 
 	/** 当前会话状态（端点读；异常降级为空态）。 */
@@ -743,7 +713,9 @@ public final class ContextCompactor {
 		ContextState failed = fuse.onFailure(plan.state(), now);
 		boolean committed = true;
 		try {
-			this.store.write(request.sessionId(), failed);
+			failed = this.store.recordFuseFailure(request.sessionId(), failed,
+					this.properties.getContext().getFuseThreshold(), this.properties.getContext().getFuseCooldown().toMillis(),
+					now);
 			this.store.appendLedger(request.sessionId(), fuseEvent(plan.reason(), failed, request, now, plan.before()));
 		}
 		catch (RuntimeException ex) {
@@ -824,6 +796,28 @@ public final class ContextCompactor {
 		event.put("circuit", state.circuit() == null ? CompactionFuse.CLOSED : state.circuit());
 		event.put("fails", state.fuseFails());
 		return event;
+	}
+
+	private RollingSummarizer.Summarizer withHalfOpenReservation(RollingSummarizer.Summarizer delegate, Request request,
+			ContextState[] summaryState, long now) {
+		if (delegate == null) {
+			return null;
+		}
+		java.util.concurrent.atomic.AtomicBoolean reservedOnce = new java.util.concurrent.atomic.AtomicBoolean();
+		return (systemPrompt, userPrompt, runtime) -> {
+			if (reservedOnce.compareAndSet(false, true)) {
+				ContextState reserved = this.store.compareAndSet(request.sessionId(),
+						new CompactionFuse(this.properties.getContext()).halfOpen(summaryState[0], now));
+				if (reserved == null) {
+					throw new HalfOpenReservationException();
+				}
+				summaryState[0] = reserved;
+			}
+			return delegate.summarize(systemPrompt, userPrompt, runtime);
+		};
+	}
+
+	private static final class HalfOpenReservationException extends RuntimeException {
 	}
 
 	/**

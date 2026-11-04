@@ -38,17 +38,12 @@ import java.util.Set;
 public final class ToolResultClearing {
 
 	/**
-	 * 占位符正文（模型面/用户面同一份中性文案；B5 起不含工具名、token 估算或 toolCallId）。
-	 *
-	 * <p>旧前缀 {@link #LEGACY_PLACEHOLDER_PREFIX} 仍被识别（幂等与迁移期历史），但新写入只用这一份。
+	 * 占位符正文（模型面/用户面同一份中性文案；不含工具名、token 估算或 toolCallId）。
 	 */
 	public static final String PLACEHOLDER_TEXT = "[较早的工具结果已清理]";
 
 	/** 占位符前缀（= 中性正文；幂等判据：已清除的一条不再重复清除/重复计费）。 */
 	public static final String PLACEHOLDER_PREFIX = PLACEHOLDER_TEXT;
-
-	/** 旧占位符前缀（B5 前写入的历史仍须识别，避免重复清除/重复记账）。 */
-	public static final String LEGACY_PLACEHOLDER_PREFIX = "[工具结果已清除：";
 
 	/**
 	 * 一对被清除的工具结果。
@@ -176,16 +171,15 @@ public final class ToolResultClearing {
 		return runId != null && protectedRuns.contains(String.valueOf(runId));
 	}
 
-	/** 是否已是占位符（幂等判据；新旧前缀都认）。 */
+	/** 是否已是占位符（幂等判据：只认当前唯一占位符）。 */
 	public static boolean isAlreadyCleared(String data) {
-		return data != null
-				&& (data.startsWith(PLACEHOLDER_PREFIX) || data.startsWith(LEGACY_PLACEHOLDER_PREFIX));
+		return data != null && data.startsWith(PLACEHOLDER_PREFIX);
 	}
 
 	/**
-	 * 占位符正文（B5 起为固定中性串：不含工具名、token 估算、toolCallId 等技术标识）。
+	 * 占位符正文（固定中性串：不含工具名、token 估算、toolCallId 等技术标识）。
 	 *
-	 * <p>参数保留仅为既有调用点兼容；正文不再使用它们。
+	 * <p>参数保留仅为既有调用点签名；正文不使用它们。
 	 */
 	public static String placeholder(String name, int tokens, String toolCallId) {
 		return PLACEHOLDER_TEXT;

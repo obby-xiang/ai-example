@@ -12,14 +12,12 @@ import com.example.configmgr.ai.config.db.AiSetting;
 import com.example.configmgr.ai.config.db.AiSettingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -28,13 +26,12 @@ import java.util.regex.Pattern;
  * 配置<b>写路径</b>（模型配置专项 §3.4 / §3.5 的批②）：新建/更新/删除 provider、模型 allowlist、
  * 全局默认参数。
  *
- * <h2>一次写 = 五件事，顺序固定</h2>
+ * <h2>一次写 = 四件事，顺序固定</h2>
  * <ol>
  * <li><b>先校验、先加密</b>（都在事务外）：baseUrl 过 {@link AiEndpointGuard}、数值过范围、key 用
  * {@link AiKeyCipher} 加密。KEK 缺失时<b>表里不留半行</b>（B5）；</li>
  * <li><b>一个事务</b>：数据行 + {@code ai_setting['config.version']}+1 + 审计行（同一提交点，
  * 不存在"改了数据但版本没动"或"有审计没改动"的中间态）；</li>
- * <li><b>提交后</b> {@code INCR ai:cfg:ver}（跨实例失效信号；Redis 不可用只 WARN，DB 版本号仍是真源）；</li>
  * <li><b>提交后</b> {@link AiConfigService#reload()}：本实例立刻用新配置（写的那个人不该等 1s 节流窗）；</li>
  * <li><b>提交后</b> {@link AiProviderRegistry#evictAll()}：默认参数（temperature/topP/maxTokens）烙在
  * 已缓存的运行态 options 上，不淘汰缓存就等于"保存了但下一轮还用旧值"。</li>
@@ -158,15 +155,12 @@ public class AiConfigWriter {
 
     private final ObjectMapper objectMapper;
 
-    /**
-     * 版本发布（与 env 种子共用的唯一实现）：数据行 + {@code config.version} 同一事务，
-     * 提交后 {@code INCR ai:cfg:ver} + reload + 淘汰运行态缓存。
-     */
+    /** 数据行与 {@code config.version} 同一事务，提交后 reload 并淘汰运行态缓存。 */
     private final AiConfigVersionPublisher versions;
 
     public AiConfigWriter(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
-            AiEndpointGuard guard, StringRedisTemplate redis, PlatformTransactionManager transactionManager,
+            AiEndpointGuard guard, PlatformTransactionManager transactionManager,
             AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
@@ -180,7 +174,7 @@ public class AiConfigWriter {
                         + "写路径的“数据行 + 版本号 + 审计行”必须同一提交点"));
         this.configService = configService;
         this.objectMapper = objectMapper;
-        this.versions = new AiConfigVersionPublisher(settingRepository, redis, configService, runtimeRegistry);
+        this.versions = new AiConfigVersionPublisher(settingRepository, configService, runtimeRegistry);
     }
 
     // ── 请求命令（controller 的 @RequestBody 直接反序列化成这三条 record） ──────────
@@ -219,18 +213,11 @@ public class AiConfigWriter {
      * null = 清掉该项（回到"未设置"，读侧再按该 provider 自己的模型缺省回落）。范围：temperature [0,2]、
      * top_p [0,1]、max_tokens [1,200000] 且不超过所选模型的 {@code maxOutput}。
      *
-     * @param providerId 默认目标所属 provider（与 {@code modelId} 成对；显式给出时该 provider 必须
-     * 已启用且模型在其 enabled allowlist 中。省略时按模型唯一归属推断，<b>推断只认已启用的供应方</b>，
-     * 旧客户端只提交 {@code modelId} 仍可写；同名歧义只允许"原样回写旧配置"）
+     * @param providerId 默认目标所属 provider（与 {@code modelId} 成对；给出 {@code modelId} 时必填，
+     * 该 provider 必须已启用且模型在其 enabled allowlist 中；两者同为 {@code null} = 清空默认目标）
      */
     public record DefaultsCommand(String modelId, Double temperature, Double topP, Integer maxTokens,
             Boolean allowUserParams, Long providerId) {
-
-        /** 兼容旧调用（不带 provider 绑定）。 */
-        public DefaultsCommand(String modelId, Double temperature, Double topP, Integer maxTokens,
-                Boolean allowUserParams) {
-            this(modelId, temperature, topP, maxTokens, allowUserParams, null);
-        }
     }
 
     // ── provider ────────────────────────────────────────────────────────────
@@ -240,19 +227,18 @@ public class AiConfigWriter {
             throw invalidParam("请求体不能为空");
         }
         String code = requireCode(command.code());
-        if (this.providerRepository.findByCode(code).isPresent()) {
-            throw new AiConfigException(CODE_PROVIDER_EXISTS, "provider code 已存在：" + code);
-        }
         String baseUrl = checkBaseUrl(command.baseUrl());
         String displayName = requireText(command.displayName(), "displayName", 128);
         String protocol = requireProtocol(command.protocol());
         String completionsPath = requirePath(command.completionsPath(), "/chat/completions", "completionsPath");
         String modelsPath = requirePath(command.modelsPath(), "/models", "modelsPath");
-
         String apiKey = trimToNull(command.apiKey());
         KeyMaterial key = apiKey == null ? KeyMaterial.none() : sealKey(apiKey, code);
 
         AiProvider created = executeInTransaction(() -> {
+            if (this.providerRepository.findByCode(code).isPresent()) {
+                throw new AiConfigException(CODE_PROVIDER_EXISTS, "provider code 已存在：" + code);
+            }
             AiProvider provider = new AiProvider();
             provider.setCode(code);
             provider.setDisplayName(displayName);
@@ -268,7 +254,6 @@ public class AiConfigWriter {
             provider.setEnabled(command.enabled() == null || command.enabled());
             provider.setSortOrder(command.sortOrder() == null ? 0 : command.sortOrder());
             this.providerRepository.saveAndFlush(provider);
-            bumpVersion();
             audit(ACTION_PROVIDER_CREATE, "provider", String.valueOf(provider.getId()),
                     diffOf("code", code, "baseUrl", baseUrl, "key", key.action(), "last4", key.last4()));
             return provider;
@@ -281,58 +266,43 @@ public class AiConfigWriter {
         if (command == null) {
             throw invalidParam("请求体不能为空");
         }
-        AiProvider existing = requireProvider(providerId);
-        if (StringUtils.hasText(command.code()) && !command.code().trim().equals(existing.getCode())) {
-            throw new AiConfigException(CODE_CODE_IMMUTABLE,
-                    "provider code 不可修改（它是 key 密文 AAD 的一段，改了旧密文将无法解密）");
-        }
-        // I-3（批③ 首项修复）：baseUrl <b>没变</b>就不重跑 URL 闸。
-        //
-        // 为什么必须这样：env 种子的 baseUrl 是 CI/E2E 的本地桩（127.0.0.1），而 URL 闸默认禁私网/回环
-        // ⇒ 旧实现下"改个显示名/换把 key"都会被 BLOCKED_PRIVATE_ENDPOINT 打回，种子行在设置页上
-        // 表现为"改不动"。闸的本意是拦住<b>新引入的</b>地址，不是复审一个用户没动过的既有地址
-        // （初始地址由受信来源 env 提供，见设计稿 §3.5"种子路径不受闸限制"）。
-        // 反例仍被拦住：改了 baseUrl ⇒ 走闸（哪怕改成另一个私网地址）。
-        String requestedBaseUrl = trimToNull(command.baseUrl());
-        String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
-                ? existing.getBaseUrl() : checkBaseUrl(requestedBaseUrl);
-        String displayName = StringUtils.hasText(command.displayName())
-                ? requireText(command.displayName(), "displayName", 128) : existing.getDisplayName();
-        String protocol = StringUtils.hasText(command.protocol()) ? requireProtocol(command.protocol())
-                : existing.getProtocol();
-        String completionsPath = StringUtils.hasText(command.completionsPath())
-                ? requirePath(command.completionsPath(), "/chat/completions", "completionsPath")
-                : existing.getCompletionsPath();
-        String modelsPath = StringUtils.hasText(command.modelsPath())
-                ? requirePath(command.modelsPath(), "/models", "modelsPath") : existing.getModelsPath();
-
-        KeyMaterial key;
-        if (Boolean.TRUE.equals(command.clearKey())) {
-            key = KeyMaterial.cleared();
-        }
-        else if (trimToNull(command.apiKey()) != null) {
-            key = sealKey(trimToNull(command.apiKey()), existing.getCode());
-            key = new KeyMaterial(key.cipher(), key.last4(), key.fingerprint(), key.keyRef(), "updated");
-        }
-        else {
-            key = null;
-        }
-
-        // ── key 的主机边界（复核 ID-03 / S1）────────────────────────────────────────
-        // key 属于"某一台主机"：{@code /test} 与 {@code /models/fetch} 直接把库里的 (baseUrl, key) 对
-        // 发出去。若允许"换主机 + 保留旧 key"，攻击者只要 改 baseUrl → 点一次「测试连接」就能把库里的
-        // key 外带到自己的主机（ID-03 实测路径：4 个请求即外带，默认任意外部主机都放行）。
-        // 因此边界放在<b>配对产生处</b>：换 origin（scheme+host+port）就必须重新录入 key 或显式清空。
-        // 私网判定是另一条独立判据（上一行 checkBaseUrl 先跑），两者互不掩盖。
-        if (key == null && existing.isKeyDeclared()
-                && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
-            throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
-                    "改主机名（origin）后必须重新录入 key 或先清空 key：已有 key 只会发往它被录入时的那台主机（旧 "
-                            + originOf(existing.getBaseUrl()) + " → 新 " + originOf(baseUrl) + "）");
-        }
-
-        KeyMaterial finalKey = key;
         AiProvider updated = executeInTransaction(() -> {
+            AiProvider existing = requireProvider(providerId);
+            if (StringUtils.hasText(command.code()) && !command.code().trim().equals(existing.getCode())) {
+                throw new AiConfigException(CODE_CODE_IMMUTABLE,
+                        "provider code 不可修改（它是 key 密文 AAD 的一段，改了旧密文将无法解密）");
+            }
+            String requestedBaseUrl = trimToNull(command.baseUrl());
+            String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
+                    ? existing.getBaseUrl() : checkBaseUrl(requestedBaseUrl);
+            String displayName = StringUtils.hasText(command.displayName())
+                    ? requireText(command.displayName(), "displayName", 128) : existing.getDisplayName();
+            String protocol = StringUtils.hasText(command.protocol()) ? requireProtocol(command.protocol())
+                    : existing.getProtocol();
+            String completionsPath = StringUtils.hasText(command.completionsPath())
+                    ? requirePath(command.completionsPath(), "/chat/completions", "completionsPath")
+                    : existing.getCompletionsPath();
+            String modelsPath = StringUtils.hasText(command.modelsPath())
+                    ? requirePath(command.modelsPath(), "/models", "modelsPath") : existing.getModelsPath();
+
+            KeyMaterial key;
+            if (Boolean.TRUE.equals(command.clearKey())) {
+                key = KeyMaterial.cleared();
+            }
+            else if (trimToNull(command.apiKey()) != null) {
+                KeyMaterial sealed = sealKey(trimToNull(command.apiKey()), existing.getCode());
+                key = new KeyMaterial(sealed.cipher(), sealed.last4(), sealed.fingerprint(), sealed.keyRef(), "updated");
+            }
+            else {
+                key = null;
+            }
+            if (key == null && existing.isKeyDeclared()
+                    && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
+                throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
+                        "改主机名（origin）后必须重新录入 key 或先清空 key：已有 key 只会发往它被录入时的那台主机（旧 "
+                                + originOf(existing.getBaseUrl()) + " → 新 " + originOf(baseUrl) + "）");
+            }
+
             existing.setDisplayName(displayName);
             existing.setProtocol(protocol);
             existing.setBaseUrl(baseUrl);
@@ -340,25 +310,21 @@ public class AiConfigWriter {
             existing.setModelsPath(modelsPath);
             existing.setEnabled(command.enabled() == null ? existing.isEnabled() : command.enabled());
             existing.setSortOrder(command.sortOrder() == null ? existing.getSortOrder() : command.sortOrder());
-            // I-1（复审必修）：用户一改即脱离种子 —— 否则 seed-force 重启会把用户改过的 base-url/key_last4
-            // 又按 env 覆盖回去（AiConfigSeeder#writeSeed 只重灌 source=ENV_SEED 的行）。
-            // 连锁面：keyLast4 的 seed-force 赋值同样在 ENV_SEED 分支里 ⇒ source 翻转后自然跳过。
             if (!AiProvider.SOURCE_DB.equals(existing.getSource())) {
                 existing.setSource(AiProvider.SOURCE_DB);
             }
-            if (finalKey != null) {
-                existing.setKeyCipher(finalKey.cipher());
-                existing.setKeyLast4(finalKey.last4());
-                existing.setKeyFingerprint(finalKey.fingerprint());
-                existing.setKeyRef(finalKey.keyRef());
+            if (key != null) {
+                existing.setKeyCipher(key.cipher());
+                existing.setKeyLast4(key.last4());
+                existing.setKeyFingerprint(key.fingerprint());
+                existing.setKeyRef(key.keyRef());
             }
             this.providerRepository.saveAndFlush(existing);
-            bumpVersion();
             Map<String, Object> diff = diffOf("code", existing.getCode(), "baseUrl", baseUrl);
-            if (finalKey != null) {
-                diff.put("key", finalKey.action());
-                if (finalKey.last4() != null) {
-                    diff.put("last4", finalKey.last4());
+            if (key != null) {
+                diff.put("key", key.action());
+                if (key.last4() != null) {
+                    diff.put("last4", key.last4());
                 }
             }
             audit(ACTION_PROVIDER_UPDATE, "provider", String.valueOf(existing.getId()), diff);
@@ -374,8 +340,8 @@ public class AiConfigWriter {
      * @param hard true = 真删；仅当无模型引用时允许（{@code PROVIDER_IN_USE} 409）
      */
     public AiProvider deleteProvider(Long providerId, boolean hard) {
-        AiProvider existing = requireProvider(providerId);
         AiProvider result = executeInTransaction(() -> {
+            AiProvider existing = requireProvider(providerId);
             long modelCount = this.modelRepository.findByProviderId(providerId).size();
             if (hard) {
                 if (modelCount > 0) {
@@ -388,7 +354,6 @@ public class AiConfigWriter {
                 existing.setEnabled(false);
                 this.providerRepository.saveAndFlush(existing);
             }
-            bumpVersion();
             audit(ACTION_PROVIDER_DELETE, "provider", String.valueOf(providerId),
                     diffOf("code", existing.getCode(), "hard", hard));
             return existing;
@@ -400,18 +365,18 @@ public class AiConfigWriter {
     // ── 模型 allowlist ──────────────────────────────────────────────────────
 
     public AiProviderModel addModel(Long providerId, ModelCommand command) {
-        AiProvider provider = requireProvider(providerId);
         if (command == null) {
             throw invalidParam("请求体不能为空");
         }
         String modelId = requireModelId(command.modelId());
-        if (this.modelRepository.findByProviderIdAndModelId(providerId, modelId).isPresent()) {
-            throw new AiConfigException(CODE_MODEL_EXISTS, "该模型已在 allowlist 中：" + modelId);
-        }
         int maxContext = validateMaxContext(command.maxContext());
         int maxOutput = validateMaxOutput(command.maxOutput(), command.maxContext());
 
         AiProviderModel created = executeInTransaction(() -> {
+            AiProvider provider = requireProvider(providerId);
+            if (this.modelRepository.findByProviderIdAndModelId(providerId, modelId).isPresent()) {
+                throw new AiConfigException(CODE_MODEL_EXISTS, "该模型已在 allowlist 中：" + modelId);
+            }
             AiProviderModel model = new AiProviderModel();
             model.setProviderId(provider.getId());
             model.setModelId(modelId);
@@ -428,7 +393,6 @@ public class AiConfigWriter {
                 clearDefaultFlag(providerId, null);
             }
             this.modelRepository.saveAndFlush(model);
-            bumpVersion();
             audit(ACTION_MODEL_ADD, "model", providerId + ":" + modelId,
                     diffOf("providerId", providerId, "modelId", modelId));
             return model;
@@ -438,23 +402,23 @@ public class AiConfigWriter {
     }
 
     public AiProviderModel updateModel(Long providerId, String modelId, ModelCommand command) {
-        requireProvider(providerId);
         if (command == null) {
             throw invalidParam("请求体不能为空");
         }
-        AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-            .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                    "模型不存在：" + providerId + "/" + modelId));
-        if (StringUtils.hasText(command.modelId()) && !command.modelId().trim().equals(modelId)) {
-            throw new AiConfigException(CODE_INVALID_MODEL,
-                    "modelId 不可原地修改（唯一键是 provider_id + model_id）：请删除后另建一行");
-        }
-        Integer nextMaxContext = command.maxContext() == null ? existing.getMaxContext() : command.maxContext();
-        Integer nextMaxOutput = command.maxOutput() == null ? existing.getMaxOutput() : command.maxOutput();
-        validateMaxContext(nextMaxContext);
-        validateMaxOutput(nextMaxOutput, nextMaxContext);
-
         AiProviderModel updated = executeInTransaction(() -> {
+            requireProvider(providerId);
+            AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
+                .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
+                        "模型不存在：" + providerId + "/" + modelId));
+            if (StringUtils.hasText(command.modelId()) && !command.modelId().trim().equals(modelId)) {
+                throw new AiConfigException(CODE_INVALID_MODEL,
+                        "modelId 不可原地修改（唯一键是 provider_id + model_id）：请删除后另建一行");
+            }
+            Integer nextMaxContext = command.maxContext() == null ? existing.getMaxContext() : command.maxContext();
+            Integer nextMaxOutput = command.maxOutput() == null ? existing.getMaxOutput() : command.maxOutput();
+            validateMaxContext(nextMaxContext);
+            validateMaxOutput(nextMaxOutput, nextMaxContext);
+
             if (command.displayName() != null) {
                 existing.setDisplayName(StringUtils.hasText(command.displayName()) ? command.displayName().trim()
                         : existing.getModelId());
@@ -487,7 +451,6 @@ public class AiConfigWriter {
                 }
             }
             this.modelRepository.saveAndFlush(existing);
-            bumpVersion();
             audit(ACTION_MODEL_UPDATE, "model", providerId + ":" + modelId,
                     diffOf("providerId", providerId, "modelId", modelId, "enabled", existing.isEnabled(),
                             "supportsToolCalling", existing.isSupportsToolCalling()));
@@ -498,19 +461,18 @@ public class AiConfigWriter {
     }
 
     public AiProviderModel deleteModel(Long providerId, String modelId) {
-        requireProvider(providerId);
-        AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-            .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                    "模型不存在：" + providerId + "/" + modelId));
-        executeInTransaction(() -> {
+        AiProviderModel result = executeInTransaction(() -> {
+            requireProvider(providerId);
+            AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
+                .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
+                        "模型不存在：" + providerId + "/" + modelId));
             this.modelRepository.delete(existing);
-            bumpVersion();
             audit(ACTION_MODEL_DELETE, "model", providerId + ":" + modelId,
                     diffOf("providerId", providerId, "modelId", modelId));
-            return null;
+            return existing;
         });
         afterCommit();
-        return existing;
+        return result;
     }
 
     // ── 全局默认参数 ────────────────────────────────────────────────────────
@@ -533,16 +495,14 @@ public class AiConfigWriter {
                     + command.maxTokens() + "）");
         }
         String modelId = trimToNull(command.modelId());
-        Long providerId = resolveDefaultProvider(command.providerId(), modelId);
-        if (modelId != null) {
-            Integer ceiling = maxOutputOf(providerId, modelId);
-            if (ceiling != null && command.maxTokens() != null && command.maxTokens() > ceiling) {
-                throw invalidParam("max_tokens 不能超过所选模型的 max_output（" + ceiling + "）");
-            }
-        }
-
-        Long boundProviderId = providerId;
         executeInTransaction(() -> {
+            Long boundProviderId = resolveDefaultProvider(command.providerId(), modelId);
+            if (modelId != null) {
+                Integer ceiling = maxOutputOf(boundProviderId, modelId);
+                if (ceiling != null && command.maxTokens() != null && command.maxTokens() > ceiling) {
+                    throw invalidParam("max_tokens 不能超过所选模型的 max_output（" + ceiling + "）");
+                }
+            }
             putSetting(AiSetting.DEFAULT_PROVIDER_ID,
                     boundProviderId == null ? null : String.valueOf(boundProviderId));
             putSetting(AiSetting.DEFAULT_MODEL_ID, modelId);
@@ -553,7 +513,6 @@ public class AiConfigWriter {
                     command.maxTokens() == null ? null : String.valueOf(command.maxTokens()));
             putSetting(AiSetting.ALLOW_USER_PARAMS,
                     command.allowUserParams() == null ? null : String.valueOf(command.allowUserParams()));
-            bumpVersion();
             audit(ACTION_DEFAULTS_UPDATE, "setting", "defaults",
                     diffOf("providerId", boundProviderId, "modelId", modelId, "temperature", command.temperature(),
                             "topP", command.topP(), "maxTokens", command.maxTokens(), "allowUserParams",
@@ -569,129 +528,65 @@ public class AiConfigWriter {
      *
      * <h2>为什么写路径也要绑 provider</h2>
      * 只存 {@code modelId} 时，读路径只能猜"排序第一的可用 provider"——设置页里选的是 B 的模型，
-     * 运行时却发给 A（同名模型时静默错配）。所以这里落库时就把归属定下来：
+     * 运行时却发给 A（同名模型时静默错配）。因此当前协议要求默认目标<b>成对提交</b>：
      * <ul>
-     * <li>显式 {@code providerId} ⇒ provider 必须<b>已启用</b>，且给的模型必须在它的 enabled
-     * allowlist 里（fail-closed：停用端点/停用模型不许成为默认目标）；</li>
-     * <li>旧客户端只提交 {@code modelId} ⇒ 唯一所有者才自动绑定（同名模型跨 provider ⇒
-     * {@code INVALID_PARAM}，文案给出可操作路径，不替用户选边）；<b>自动归属只认已启用的供应方</b>
-     * —— 模型行的 {@code enabled} 与供应方的 {@code enabled} 是两个维度，只按模型判断会把默认目标
-     * 硬绑到已停用的供应方（此后整条 AI 变 503）；</li>
-     * <li>两者都为空 ⇒ 清空绑定（读侧回到"该 provider 自己的默认模型"）。</li>
+     * <li>给出 {@code modelId} ⇒ {@code providerId} 必填，provider 必须<b>已启用</b>，且该模型必须在
+     * 它的 enabled allowlist 里（fail-closed：停用端点/停用模型不许成为默认目标）；</li>
+     * <li>只给 {@code providerId} ⇒ 绑定该 provider，模型取它自己的默认模型；</li>
+     * <li>两者都为空 ⇒ 清空绑定（读侧回到"库序里第一个能给出自己默认模型的 provider"）。</li>
      * </ul>
      *
-     * <p>停用供应方的模型<b>不参与</b>所有者推断。因此"旧配置原样回写"（见
-     * {@link #isUnchangedLegacyDefault}）落在"无启用所有者"分支时仍保持未绑定 —— 读侧按既有回退
-     * 用可用供应方自己的模型，既不改写用户的默认模型名，也不替用户改选供应方；非原样回写则按
-     * {@code MODEL_NOT_FOUND} 拒绝（不静默落到别家模型）。
+     * <p>没有"按模型名推断 provider"的分支：同名模型跨 provider 时推断只会静默选边，读写同一份
+     * 显式二元组才是唯一协议。</p>
      */
     private Long resolveDefaultProvider(Long requestedProviderId, String modelId) {
-        if (requestedProviderId != null) {
-            AiProvider provider = requireProvider(requestedProviderId);
-            if (!provider.isEnabled()) {
-                throw invalidParam("默认供应商已停用：请先在「设置 → AI」启用它，或改选其他默认模型");
+        if (requestedProviderId == null) {
+            if (modelId != null) {
+                throw invalidParam("modelId 必须与 providerId 成对提交（设置页：在「默认模型」下拉中"
+                        + "选择该模型所属的供应商后保存）");
             }
-            if (modelId != null && !hasEnabledModel(requestedProviderId, modelId)) {
-                throw new AiConfigException(CODE_MODEL_NOT_FOUND,
-                        "模型不在该供应商的 allowlist 中或已停用：" + requestedProviderId + "/" + modelId);
-            }
-            return requestedProviderId;
-        }
-        if (modelId == null) {
             return null;
         }
-        AiConfigService.ConfigSnapshot snapshot = this.configService.current();
-        // 自动归属的供应方启用闸：与显式 providerId 分支同一把尺（停用供应方不许成为默认目标）。
-        List<Long> enabledProviders = snapshot.providers()
-            .stream()
-            .filter(AiProvider::isEnabled)
-            .map(AiProvider::getId)
-            .filter(Objects::nonNull)
-            .toList();
-        List<Long> owners = snapshot.models()
-            .stream()
-            .filter(model -> modelId.equals(model.getModelId()))
-            .filter(AiProviderModel::isEnabled)
-            .map(AiProviderModel::getProviderId)
-            .filter(Objects::nonNull)
-            .filter(enabledProviders::contains)
-            .distinct()
-            .toList();
-        if (owners.isEmpty()) {
-            if (isUnchangedLegacyDefault(modelId)) {
-                // 旧配置指向一个已删除/未登记的模型，或该模型的供应方已全部停用：只改温度等参数时
-                // 保留原值（仍不绑定），读侧按既有回退用可用供应方自己的模型；不阻断保存、不改绑
-                return null;
-            }
+        AiProvider provider = requireProvider(requestedProviderId);
+        if (!provider.isEnabled()) {
+            throw invalidParam("默认供应商已停用：请先在「设置 → AI」启用它，或改选其他默认模型");
+        }
+        if (modelId != null && !hasEnabledModel(requestedProviderId, modelId)) {
             throw new AiConfigException(CODE_MODEL_NOT_FOUND,
-                    "默认模型不在任何供应商的 allowlist 中：" + modelId + "（先把模型加进来）");
+                    "模型不在该供应商的 allowlist 中或已停用：" + requestedProviderId + "/" + modelId);
         }
-        if (owners.size() > 1) {
-            if (isUnchangedLegacyDefault(modelId)) {
-                // 旧配置本身就是"同名模型未绑定"：原样保留（读侧按所有者顺序解析），
-                // 用户只改温度时不该被迫先做一次 provider 选择。
-                return null;
-            }
-            throw invalidParam("模型 " + modelId + " 属于多个供应商，请指定 providerId（设置页：在"
-                    + "「默认模型」下拉中重新选择该模型所属的供应商后保存）");
-        }
-        return owners.get(0);
-    }
-
-    /** 提交的 (null, modelId) 是否就是库里已有的旧配置（未绑定 provider）——原样回写不算歧义。 */
-    private boolean isUnchangedLegacyDefault(String modelId) {
-        java.util.Map<String, String> settings = this.configService.current().settings();
-        return modelId.equals(trimToNull(settings.get(AiSetting.DEFAULT_MODEL_ID)))
-                && trimToNull(settings.get(AiSetting.DEFAULT_PROVIDER_ID)) == null;
+        return requestedProviderId;
     }
 
     private boolean hasEnabledModel(Long providerId, String modelId) {
-        return this.configService.current()
-            .models()
-            .stream()
-            .filter(model -> providerId.equals(model.getProviderId()))
+        return this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
             .filter(AiProviderModel::isEnabled)
-            .anyMatch(model -> modelId.equals(model.getModelId()));
+            .isPresent();
     }
 
     /**
      * 所选模型的 max_output 上限；没有设置/找不到时返回 null（不设上限）。
      *
-     * <p>{@code providerId} 为空 = 旧配置未绑定（同名模型可能属于多家）⇒ 取所有同名模型
-     * {@code max_output} 的<b>最小值</b>：宁可保守拒绝，也不因为"没绑定"放宽校验。
+     * <p>只按显式 {@code (providerId, modelId)} 精确取行：同名模型在别家的 {@code max_output} 不属于
+     * 这个默认目标，不能参与取值。</p>
      */
     private Integer maxOutputOf(Long providerId, String modelId) {
-        if (modelId == null) {
+        if (providerId == null || modelId == null) {
             return null;
         }
-        return this.configService.current()
-            .models()
-            .stream()
-            .filter(model -> providerId == null || providerId.equals(model.getProviderId()))
-            .filter(model -> modelId.equals(model.getModelId()))
+        return this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
             .map(AiProviderModel::getMaxOutput)
-            .filter(Objects::nonNull)
-            .min(Integer::compare)
             .orElse(null);
     }
 
     // ── 内部：事务/版本/审计 ──────────────────────────────────────────────────
 
     private <T> T executeInTransaction(java.util.function.Supplier<T> action) {
-        T result = this.transactionTemplate.execute(status -> action.get());
-        return result;
-    }
-
-    /**
-     * {@code ai_setting['config.version']} +1（DB 真源），在<b>当前事务</b>内。
-     *
-     * <p>
-     * 实现只有一份 —— {@link AiConfigVersionPublisher#bumpInTransaction()}：读侧靠比较本值决定要不要
-     * 重载，所以它必须与数据行同一提交点；env 种子（{@link AiConfigSeeder}）走同一实现，
-     * 于是"某条写路径改了数据却没动版本"在结构上不可能再出现。
-     */
-    private void bumpVersion() {
-        this.versions.bumpInTransaction();
+        return this.transactionTemplate.execute(status -> {
+            // 先锁主键版本行并递增，再写数据与审计；并发事务不会提交同号配置快照。
+            this.versions.bumpInTransaction();
+            return action.get();
+        });
     }
 
     /** 提交之后：跨实例失效信号 + 本实例快照重载 + 运行态缓存淘汰（{@link AiConfigVersionPublisher}）。 */

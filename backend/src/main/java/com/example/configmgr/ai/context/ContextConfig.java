@@ -3,7 +3,6 @@ package com.example.configmgr.ai.context;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.db.AiProviderModel;
-import com.example.configmgr.ai.run.RunStore;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -18,8 +17,8 @@ import org.springframework.context.annotation.Configuration;
  * 因此本批的 bean 全部落在这里，{@code AiModelConfig} 一行不改。
  *
  * <p>
- * <b>状态面复用 {@link RunStore}</b>：{@code ai:ctx:*} 三个键族与既有 run 级外置键共用同一份
- * TTL/实例 id/Redis 模板（设计稿 §6.1 的落点），不另起一个 Redis 访问类。
+ * 状态面使用同键形的 {@link RedisContextStateStore}，将写路径 strict read、version CAS 与字段级原子更新
+ * 集中在一处；TTL 与身份键段保持既有语义。
  */
 @Configuration
 public class ContextConfig {
@@ -28,24 +27,20 @@ public class ContextConfig {
 	 * 分母取数点。DB 源的唯一消费点就是这里 —— 模型配置专项改列/加表时只影响这一处。
 	 */
 	@Bean
-	public ContextLimitResolver contextLimitResolver(AiProperties properties,
-			ObjectProvider<AiConfigService> configService) {
-		ContextLimitResolver resolver = new ContextLimitResolver(properties, (providerId, modelId) -> {
+	public ContextLimitResolver contextLimitResolver(ObjectProvider<AiConfigService> configService) {
+		return new ContextLimitResolver((providerId, modelId) -> {
 			AiConfigService service = configService.getIfAvailable();
-			if (service == null || modelId == null) {
+			if (service == null || providerId == null || modelId == null) {
 				return null;
 			}
 			return maxContextOf(service, providerId, modelId);
 		});
-		// L-89：过渡键只作启动期回退，启动日志显式标 deprecation（口径 = 分母唯一真源是 DB）
-		resolver.logStartupDeprecation();
-		return resolver;
 	}
 
 	@Bean
 	public ContextCompactor contextCompactor(AiProperties properties, ContextLimitResolver contextLimitResolver,
-			RunStore runStore, ObjectProvider<ContextSummaryClient> summaryClient) {
-		return new ContextCompactor(properties, contextLimitResolver, runStore, summaryClient.getIfAvailable());
+			ContextStateStore store, ObjectProvider<ContextSummaryClient> summaryClient) {
+		return new ContextCompactor(properties, contextLimitResolver, store, summaryClient.getIfAvailable());
 	}
 
 	/**
@@ -62,23 +57,20 @@ public class ContextConfig {
 	}
 
 	@Bean
-	public ContextBreakdownService contextBreakdownService(ContextCompactor contextCompactor, RunStore runStore) {
-		return new ContextBreakdownService(contextCompactor, runStore);
+	public ContextBreakdownService contextBreakdownService(ContextCompactor contextCompactor, ContextStateStore store) {
+		return new ContextBreakdownService(contextCompactor, store);
 	}
 
 	/**
-	 * {@code ai_model.max_context} 的查找：同 provider 优先，{@code providerId == null} 时按 modelId
-	 * 全局匹配（端点在"只有模型名"的上下文里重建分母）。
+	 * {@code ai_model.max_context} 的查找：只认显式 {@code (providerId, modelId)} 这一行。
 	 *
-	 * <p>同名模型在多个 provider 下各有一行、窗口不同是合法情形，故带 providerId 时只认本 provider 的行。
+	 * <p>同名模型在多个 provider 下各有一行、窗口不同是合法情形，按名字全局匹配会把别家的窗口
+	 * 当成自己的分母，故没有第二条路。
 	 */
 	private static Integer maxContextOf(AiConfigService service, Long providerId, String modelId) {
 		AiConfigService.ConfigSnapshot snapshot = service.current();
 		for (AiProviderModel model : snapshot.models()) {
-			if (!model.isEnabled() || !modelId.equals(model.getModelId())) {
-				continue;
-			}
-			if (providerId != null && !providerId.equals(model.getProviderId())) {
+			if (!providerId.equals(model.getProviderId()) || !modelId.equals(model.getModelId())) {
 				continue;
 			}
 			Integer maxContext = model.getMaxContext();

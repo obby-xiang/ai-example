@@ -343,6 +343,13 @@
       "reason": "D6已在前序提交同步cv2内容寻址与KB协议；本批实现正文SHA归一、缓存原子发布、直连降级对账及正文复用，不再改变迁移接口",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:5efd354e9816e7b402f4fa746778db39e667a77191019b46435b0b136cb2f11e",
+      "status": "not-affected",
+      "reason": "D6已同步显式模型归属、max_context唯一分母、压缩CAS及V1空库基线；本批仅落实对应生产实现并删除旧配置信号和迁移链",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

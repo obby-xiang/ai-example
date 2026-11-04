@@ -15,14 +15,14 @@ import java.time.LocalDateTime;
  * <p>
  * 首期键：{@code default.providerId} / {@code default.modelId} / {@code default.temperature} /
  * {@code default.topP} / {@code default.maxTokens} / {@code allow.userParams} / {@code config.version}。
- * 批① 只读：迁移里预置 {@code config.version=1}（快照版本号的 DB 真源）。
+ * V1 空库基线预置 {@code config.version=1}。
  */
 @Data
 @Entity
 @Table(name = "ai_setting")
 public class AiSetting {
 
-    /** 快照版本号键（设计稿 §3.4：DB 真源；跨实例失效信号走 Redis {@code ai:cfg:ver}）。 */
+    /** 快照版本号键（唯一权威来源）。 */
     public static final String CONFIG_VERSION = "config.version";
 
     public static final String DEFAULT_MODEL_ID = "default.modelId";
@@ -36,7 +36,8 @@ public class AiSetting {
      * <p><b>硬绑定</b>：该键存在时只认它指向的 provider —— 停用 / key 缺失 / key 解不开 / provider
      * 行不存在 / 绑定模型停用或删除，都明确不可用（{@code AI_UNAVAILABLE}、{@code AI_KEY_*} 或
      * {@code NO_MODEL_CONFIGURED}），不会静默换别家 provider、也不会在同一 provider 内换默认模型。
-     * 缺该键 = 未绑定，此时才按旧配置的模型归属回退（见 {@code AiConfigService}）。
+     * 缺该键 = 未设置默认目标：读侧按库序取第一个能给出自己默认模型的 provider；
+     * 写侧不允许只提交 {@code modelId}（见 {@code AiConfigWriter}）。
      */
     public static final String DEFAULT_PROVIDER_ID = "default.providerId";
 

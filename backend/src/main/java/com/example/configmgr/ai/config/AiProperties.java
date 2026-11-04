@@ -118,9 +118,8 @@ public class AiProperties {
 		 * 读路径版本比对的最小间隔（缺省 1s）。
 		 *
 		 * <p>
-		 * 稳态 = 至多 1 次版本比对/秒/实例（Redis 有 {@code ai:cfg:ver} 时只 GET 一次；Redis 不可用
-		 * 时退化为一次 DB 主键查询），<b>不</b>在 chat 热路径上逐轮打表。单测把它设 0 让版本比对
-		 * 每次都做（确定性，不靠 sleep）。
+		 * 稳态 = 至多 1 次 DB 主键版本比对/秒/实例，<b>不</b>在 chat 热路径上逐轮打表。
+		 * 设为 0 时每次取用都核对版本。
 		 */
 		private Duration reloadInterval = Duration.ofSeconds(1);
 
@@ -418,8 +417,7 @@ public class AiProperties {
 	 * <p>
 	 * 这里的每个坏值都不是"性能降级"，而是<b>判定被静默改写</b>：
 	 * <ul>
-	 * <li>{@code reserve >= limit}（且 limit &gt; 0）⇒ 分母 {@code limit − reserve <= 0} 被钳到 1，
-	 * 任何一轮都判"已满"、每轮都触发压缩（前缀每轮重写、缓存全灭）；</li>
+	 * <li>{@code reserve <= 0} ⇒ 触发线与上下文上限重合，输出空间被压缩判定吃掉；</li>
 	 * <li>{@code l1/l2/l3} 非单调 ⇒ 谱系倒挂（L2 比 L1 先到 = 最轻的一级永远不触发）；</li>
 	 * <li>{@code chunk-tokens >= reserve} ⇒ 摘要请求自身就可能越窗（批③ 的失败路径）；</li>
 	 * <li>{@code fuse-threshold <= 0} ⇒ 第一次失败即永久熔断（L2/L3 再也不会尝试）。</li>
@@ -432,19 +430,10 @@ public class AiProperties {
 		if (context == null) {
 			throw new IllegalStateException("app.ai.context 段缺失（绑定为 null）：上下文计量无法装配，启动失败");
 		}
-		if (context.getLimitTokens() < 0) {
-			throw new IllegalStateException("app.ai.context.limit-tokens 不得为负（当前 = " + context.getLimitTokens()
-					+ "）：0 = 主动声明未知（降级态），负值没有任何解释空间");
-		}
 		if (context.getReserveTokens() <= 0) {
 			throw new IllegalStateException("app.ai.context.reserve-tokens 必须 > 0（当前 = "
 					+ context.getReserveTokens() + "）：预留缓冲为 0 会让触发线与上下文上限重合，"
 					+ "输出空间被压缩判定吃掉");
-		}
-		if (context.getLimitTokens() > 0 && context.getReserveTokens() >= context.getLimitTokens()) {
-			throw new IllegalStateException("app.ai.context.reserve-tokens（" + context.getReserveTokens()
-					+ "）必须小于 limit-tokens（" + context.getLimitTokens()
-					+ "）：分母 limit − reserve 会被钳到 1 ⇒ 每轮都判已满、每轮都压缩");
 		}
 		checkPercent("l1-percent", context.getL1Percent());
 		checkPercent("l2-percent", context.getL2Percent());
@@ -669,7 +658,7 @@ public class AiProperties {
 		 * <p>只算<b>记忆窗口里的历史</b>（system 人设/工作区快照与工具 schema 不在内 —— 它们在请求侧
 		 * 单列，见 {@code ContextEstimator#estimateMessages} 跳过 SYSTEM 的口径）。取值依据 =
 		 * 调研《调研-上下文统计与压缩业界惯例-2026-10-21》：历史预算区间 32k–48k，取上限（本仓工具结果
-		 * 偏大、单轮回环多，取下沿会频繁淘汰）；与 {@code app.ai.context.limit-tokens} 不是一个东西：
+		 * 偏大、单轮回环多，取下沿会频繁淘汰）；与模型行的 {@code ai_model.max_context} 不是一个东西：
 		 * 后者是整请求上限、压缩谱系的分母，本键是"读进来的历史该有多长"。
 		 */
 		private int tokenBudget = 48000;
@@ -1374,16 +1363,19 @@ public class AiProperties {
 	}
 
 	/**
-	 * 上下文计量与压缩（上下文统计与压缩专项批①；设计稿 §3.7 的 11 个键）。
+	 * 上下文计量与压缩（上下文统计与压缩专项批①）。
 	 *
 	 * <p>
 	 * <b>键名纪律（NUMSPEC）</b>：本段每个数字都在 {@code docs/evidence/补档-NUMSPEC-清单总账.md}
-	 * 逐行登记了依据 —— "为什么是 128000 / 13000 / 70-80-95 / 60"这些结论不能只活在代码注释里。
+	 * 逐行登记了依据 —— "为什么是 13000 / 70-80-95 / 60"这些结论不能只活在代码注释里。
+	 *
+	 * <p>
+	 * <b>分母不是本段配置</b>：上下文上限只有一个来源 {@code ai_model.max_context}；模型行未声明
+	 * （或调用方没有 provider 身份）时上限为"未知"，不做比例判定。本段只调预留缓冲与谱系阈值。
 	 *
 	 * <p>
 	 * <b>启动期校验</b>见 {@link AiProperties#verifyContext()}：与 SSE 段同一姿态 ——
-	 * 0/负值不是"性能降级"而是语义被静默改写（例如 {@code reserve >= limit} 会让分母变成 1，
-	 * 任何一轮都判"已满"、每轮都压缩）。
+	 * 0/负值不是"性能降级"而是语义被静默改写。
 	 *
 	 * <p>
 	 * <b>已删键（AR-11）</b>：{@code app.ai.context.summary-model} 的<b>绑定与出厂 yml 空值行都已删除</b>
@@ -1392,22 +1384,6 @@ public class AiProperties {
 	 */
 	@Data
 	public static class Context {
-
-		/**
-		 * 上下文上限（token）的<b>过渡键</b>（默认 128000；<b>自 L-89 起已弃用</b>）。
-		 *
-		 * <p>取值依据：本仓当前默认模型（deepseek 系）的 128K 窗口；模型配置专项的
-		 * {@code ai_model.max_context} 落地后由它覆盖（唯一消费点 = {@code ContextLimitResolver}）。
-		 * {@code 0} = 主动声明"未知"（降级态：界面只显示已用、不显示百分比；压缩不做比例判定）。
-		 *
-		 * <p><b>现状（L-89 收口）</b>：唯一真源 = {@code ai_model.max_context}；本键<b>只保留为启动期回退</b>
-		 * —— 模型行未声明 {@code max_context}（或调用方没有模型身份）时，由
-		 * {@code ContextLimitResolver#resolve} 回落到本值。<b>压缩触发判定不得再直接读本键</b>
-		 * （{@code ContextTrigger#decide} 的分母由调用方从 resolver 注入）：否则本键与 DB 值漂移时，
-		 * "显示的百分比"与"触发百分比"会各用一套分母。启动日志由
-		 * {@code ContextLimitResolver#logStartupDeprecation()} 显式标注 deprecation。
-		 */
-		private int limitTokens = 128000;
 
 		/**
 		 * 预留缓冲（默认 13000 token）。
