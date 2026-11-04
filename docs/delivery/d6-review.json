@@ -399,6 +399,13 @@
       "reason": "本批仅在完成且围栏闭合的恢复现场补登记Mermaid渲染，不改变D6迁移接口、会话协议、存储键及跨实例契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:4b0fc83f87535d5e2304552bccd8f1370381af4b627a92ed827b984e824a2559",
+      "status": "not-affected",
+      "reason": "本批仅按权威归档恢复连续HITL段序并严格核对工具顺序、按帧代次复用读取结果，D6现有恢复和终局契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
