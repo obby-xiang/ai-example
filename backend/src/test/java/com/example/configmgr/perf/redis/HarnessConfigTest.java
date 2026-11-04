@@ -36,6 +36,20 @@ class HarnessConfigTest {
 	}
 
 	@Test
+	void candidateDefaultsUseFiveHundredBoundedBatchAndThirdOfLeaseHeartbeat() {
+		HarnessConfig config = new HarnessConfig(env());
+		assertTrue(config.batchSize == 500, "candidate bounded pipeline batch defaults to 500");
+		assertTrue(config.leaseTtlMs == 3_000L, "lease TTL stays 3s; heartbeat must not be masked by a larger TTL");
+		assertTrue(config.leaseRenewIntervalMs() == 1_000L, "heartbeat interval is one third of the lease TTL");
+	}
+
+	@Test
+	void explicitBatchSizeStillOverridesTheCandidateDefault() {
+		HarnessConfig config = new HarnessConfig(env("PERF_BATCH_SIZE", "100"));
+		assertTrue(config.batchSize == 100, "explicit env must win over the default");
+	}
+
+	@Test
 	void redactedSummaryNeverContainsPassword() {
 		HarnessConfig config = new HarnessConfig(env("REDIS_PASSWORD", "super-secret"));
 		Map<String, Object> summary = config.redactedSummary();

@@ -12,9 +12,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * 候选删除协议：精确索引枚举（SCAN=0）→ 会话级 lease/epoch 单飞 → 终态收敛/收尾 →
- * 同槽 run 删除 Lua + staging 同槽批量 Lua + archive 单键 TYPE+DEL pipeline →
- * durable pending / guard / tombstone。
+ * 候选删除协议：精确索引枚举（SCAN=0）→ 会话级 lease/epoch 单飞（批量处理按 TTL/3 心跳续租）→
+ * 终态收敛/收尾 → 同槽 run 删除 Lua + staging 同槽批量 Lua + archive 单键 TYPE+DEL pipeline →
+ * 合并的 DELETE_SESSION 同槽脚本（删除 + guard 探测）→ durable pending / complete / tombstone。
  */
 public final class PurgeProtocol {
 
@@ -29,6 +29,8 @@ public final class PurgeProtocol {
 	private final Manifest manifest;
 
 	private final String owner;
+
+	private long leaseRenewAtMs;
 
 	public PurgeProtocol(HarnessConfig cfg, CountingRedis redis, HarnessMetrics metrics, Manifest manifest,
 			String owner) {
@@ -72,10 +74,8 @@ public final class PurgeProtocol {
 			}
 
 			deadline.check("stage");
-			this.metrics.stage(this.redis, scenario.id(), copy, "lease-check", () -> {
-				requireAllowed(lease, "BEGIN", 0L);
-				return Boolean.TRUE;
-			});
+			// PURGE_ACQUIRE 已把 pending 推进到 BEGIN；不再单独发一次 lease-check。
+			armLease();
 
 			deadline.check("finalize");
 			this.metrics.stage(this.redis, scenario.id(), copy, "finalize", () -> {
@@ -105,11 +105,10 @@ public final class PurgeProtocol {
 			deleted[0] += this.metrics.stage(this.redis, scenario.id(), copy, "delete-archives",
 					() -> deleteArchives(lease, enumeration, errors));
 			deadline.check("delete-session");
-			deleted[0] += this.metrics.stage(this.redis, scenario.id(), copy, "delete-session",
-					() -> deleteSessionKeys(lease, dataset));
-
-			boolean guardBlocked = this.metrics.stage(this.redis, scenario.id(), copy, "guarded-write",
-					() -> guardBlocksWrite(dataset));
+			SessionDelete sessionDelete = this.metrics.stage(this.redis, scenario.id(), copy,
+					"delete-session", () -> deleteSessionAndGuard(lease, dataset));
+			deleted[0] += sessionDelete.deleted();
+			boolean guardBlocked = sessionDelete.guardBlocked();
 			if (!guardBlocked) {
 				errors.add("guard did not block write-back");
 			}
@@ -431,6 +430,35 @@ public final class PurgeProtocol {
 		if (number(result, 0) != 1L) {
 			throw new IllegalStateException("lease check failed stage=" + stage + " reason=" + text(result, 1));
 		}
+		armLease();
+	}
+
+	/** acquire 或阶段脚本刚续期；重新武装心跳窗口，避免紧跟着多付一次续期 RTT。 */
+	private void armLease() {
+		this.leaseRenewAtMs = System.currentTimeMillis() + this.cfg.leaseRenewIntervalMs();
+	}
+
+	/**
+	 * 批量处理前按 TTL/3 续租；owner/epoch/purgeId 任一不匹配立即中止，不继续删除。
+	 * 续租脚本会重写 lease 值内的到期时间，后续阶段复核不会按旧 exp 误判过期。
+	 */
+	private void renewLeaseIfDue(Lease lease, String stage) {
+		long now = System.currentTimeMillis();
+		if (now < this.leaseRenewAtMs) {
+			return;
+		}
+		List<String> keys = List.of(
+				KeyShapes.purgeLeaseKey(this.cfg.tenantId, this.cfg.userId, sessionId(lease)),
+				KeyShapes.purgePendingKey(this.cfg.tenantId, this.cfg.userId, sessionId(lease)));
+		this.redis.checkSameSlot(keys);
+		List<?> result = this.redis.eval(Scripts.PURGE_RENEW, keys, this.owner,
+				String.valueOf(lease.epoch()), lease.purgeId(), String.valueOf(this.cfg.leaseTtlMs),
+				String.valueOf(now));
+		if (number(result, 0) != 1L) {
+			throw new IllegalStateException("lease heartbeat failed stage=" + stage + " reason="
+					+ text(result, 1));
+		}
+		this.leaseRenewAtMs = now + this.cfg.leaseRenewIntervalMs();
 	}
 
 	private String sessionId(Lease lease) {
@@ -462,6 +490,7 @@ public final class PurgeProtocol {
 		}
 		long deleted = 0L;
 		for (List<List<String>> batch : CountingRedis.batch(keysPerCall, this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_RUNS");
 			List<List<String>> args = new ArrayList<>();
 			for (int i = 0; i < batch.size(); i++) {
 				args.add(List.of());
@@ -471,7 +500,7 @@ public final class PurgeProtocol {
 				deleted += asLong(value);
 			}
 		}
-		removeSessionIndexMembers(dataset, enumeration.runs());
+		removeSessionIndexMembers(lease, dataset, enumeration.runs());
 		return deleted;
 	}
 
@@ -479,10 +508,11 @@ public final class PurgeProtocol {
 	 * runs 索引是 SET（SADD 写入）用 SREM，active 索引是 ZSET（ZADD 写入）用 ZREM。
 	 * 两键不同槽，按 batchSize 分批放进同一条有界 pipeline，避免逐 run 串行往返。
 	 */
-	private void removeSessionIndexMembers(Manifest.Dataset dataset, List<String> runIds) {
+	private void removeSessionIndexMembers(Lease lease, Manifest.Dataset dataset, List<String> runIds) {
 		String runsKey = KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
 		String activeKey = KeyShapes.sessionActiveKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
 		for (List<String> batch : CountingRedis.batch(runIds, this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_RUNS_INDEX");
 			this.redis.pipelineRaw(List.of(
 					SessionIndexPolicy.remove(SessionIndexPolicy.Index.RUNS, runsKey, batch),
 					SessionIndexPolicy.remove(SessionIndexPolicy.Index.ACTIVE, activeKey, batch)));
@@ -497,6 +527,7 @@ public final class PurgeProtocol {
 		String index = KeyShapes.stagingIndexKey(this.cfg.tenantId, this.cfg.userId, sessionIdOf(enumeration));
 		long deleted = 0L;
 		for (List<String> tokens : CountingRedis.batch(enumeration.staging(), this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_STAGING");
 			List<String> keys = new ArrayList<>();
 			keys.add(index);
 			List<String> flatTokens = new ArrayList<>();
@@ -523,6 +554,7 @@ public final class PurgeProtocol {
 		long typeMismatch = 0L;
 		List<String> removableMembers = new ArrayList<>();
 		for (List<String> turnBatch : CountingRedis.batch(enumeration.archives(), this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_ARCHIVES");
 			List<List<String>> keys = new ArrayList<>();
 			for (String turn : turnBatch) {
 				keys.add(List.of(KeyShapes.archiveKey(this.cfg.tenantId, this.cfg.userId, sessionId,
@@ -544,8 +576,10 @@ public final class PurgeProtocol {
 			removableMembers.addAll(batchResult.removableMembers());
 		}
 		for (List<String> members : CountingRedis.batch(removableMembers, this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_ARCHIVES_INDEX");
 			this.redis.srem(index, members.toArray(String[]::new));
 		}
+		renewLeaseIfDue(lease, "DELETE_ARCHIVES_INDEX");
 		long remaining = this.redis.scard(index);
 		if (typeMismatch > 0L) {
 			errors.add("archive type mismatch (expected string), retained=" + typeMismatch);
@@ -560,27 +594,48 @@ public final class PurgeProtocol {
 		return deleted;
 	}
 
-	private long deleteSessionKeys(Lease lease, Manifest.Dataset dataset) {
-		requireAllowed(lease, "DELETE_SESSION", 0L);
+	/**
+	 * DELETE_SESSION 复核、续租、同槽会话键删除与 guard 写回探测合并为一次脚本；
+	 * 其余会话键没有 hash tag，在 Cluster 下只能另走有界单键 DEL pipeline。
+	 */
+	private SessionDelete deleteSessionAndGuard(Lease lease, Manifest.Dataset dataset) {
 		String sessionId = dataset.sessionId;
-		List<String> keys = new ArrayList<>(List.of(
-				KeyShapes.sessionKey(this.cfg.tenantId, this.cfg.userId, sessionId),
-				KeyShapes.contextKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+		String leaseKey = KeyShapes.purgeLeaseKey(this.cfg.tenantId, this.cfg.userId, sessionId);
+		String pendingKey = KeyShapes.purgePendingKey(this.cfg.tenantId, this.cfg.userId, sessionId);
+		String guardKey = KeyShapes.purgeGuardKey(this.cfg.tenantId, this.cfg.userId, sessionId);
+		String memoryKey = KeyShapes.memoryKey(this.cfg.tenantId, this.cfg.userId, sessionId);
+		List<String> sameSlot = List.of(leaseKey, pendingKey, guardKey, memoryKey,
 				KeyShapes.transcriptKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.transcriptBytesKey(this.cfg.tenantId, this.cfg.userId, sessionId),
-				KeyShapes.transcriptReadyKey(this.cfg.tenantId, this.cfg.userId, sessionId),
-				KeyShapes.memoryKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.transcriptReadyKey(this.cfg.tenantId, this.cfg.userId, sessionId));
+		this.redis.checkSameSlot(sameSlot);
+		List<?> result = this.redis.eval(Scripts.PURGE_SESSION_GUARD, sameSlot,
+				this.owner, String.valueOf(lease.epoch()), lease.purgeId(),
+				pendingJson(lease, "DELETE_SESSION", 1, 0L, "delete_session", List.of()),
+				"should-not-write", String.valueOf(this.cfg.keyTtlSeconds * 1_000L),
+				String.valueOf(System.currentTimeMillis()));
+		if (number(result, 0) != 1L) {
+			throw new IllegalStateException("lease check failed stage=DELETE_SESSION reason=" + text(result, 1));
+		}
+		long deleted = number(result, 1);
+		boolean guardBlocked = number(result, 2) == 1L;
+		// 脚本已重写 lease 到期时间；后续无标签键 pipeline 不必立刻再发心跳。
+		armLease();
+
+		List<String> crossSlot = new ArrayList<>(List.of(
+				KeyShapes.sessionKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.contextKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.attachmentSessionIndexKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.attachmentKey(this.cfg.tenantId, this.cfg.userId, "file-" + sessionId),
 				KeyShapes.sessionCurrentKey(this.cfg.tenantId, this.cfg.userId, sessionId)));
 		if (dataset.runIds != null) {
 			for (String runId : dataset.runIds) {
-				keys.add(KeyShapes.attachmentFormIndexKey(this.cfg.tenantId, this.cfg.userId, runId,
+				crossSlot.add(KeyShapes.attachmentFormIndexKey(this.cfg.tenantId, this.cfg.userId, runId,
 						"call-" + runId));
 			}
 		}
-		long deleted = 0L;
-		for (List<String> batch : CountingRedis.batch(keys, this.cfg.batchSize)) {
+		for (List<String> batch : CountingRedis.batch(crossSlot, this.cfg.batchSize)) {
+			renewLeaseIfDue(lease, "DELETE_SESSION");
 			List<String[]> commands = new ArrayList<>();
 			for (String key : batch) {
 				commands.add(new String[] { "DEL", key });
@@ -590,18 +645,7 @@ public final class PurgeProtocol {
 				deleted += asLong(value);
 			}
 		}
-		return deleted;
-	}
-
-	private boolean guardBlocksWrite(Manifest.Dataset dataset) {
-		List<String> keys = List.of(
-				KeyShapes.purgeGuardKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId),
-				KeyShapes.purgePendingKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId),
-				KeyShapes.memoryKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId));
-		this.redis.checkSameSlot(keys);
-		Long written = this.redis.eval(Scripts.PURGE_GUARDED_WRITE, keys, "should-not-write",
-				String.valueOf(this.cfg.keyTtlSeconds * 1_000L));
-		return written != null && written == 0L;
+		return new SessionDelete(deleted, guardBlocked);
 	}
 
 	private Boolean defer(Lease lease, String pendingJson) {
@@ -688,6 +732,7 @@ public final class PurgeProtocol {
 	public PurgeOutcome purgeWithLease(ScenarioCatalog.Scenario scenario, int copy, Lease lease,
 			boolean allowFinalize, Deadline deadline) {
 		Manifest.Dataset dataset = this.manifest.require(scenario.id(), copy);
+		armLease();
 		deadline.check("takeover-enumerate");
 		Enumeration enumeration = enumerate(dataset);
 		List<String> errors = new ArrayList<>();
@@ -711,9 +756,9 @@ public final class PurgeProtocol {
 		deadline.check("takeover-delete-archives");
 		deleted += deleteArchives(lease, enumeration, errors);
 		deadline.check("takeover-delete-session");
-		deleted += deleteSessionKeys(lease, dataset);
-		deadline.check("takeover-guarded-write");
-		boolean guardBlocked = guardBlocksWrite(dataset);
+		SessionDelete sessionDelete = deleteSessionAndGuard(lease, dataset);
+		deleted += sessionDelete.deleted();
+		boolean guardBlocked = sessionDelete.guardBlocked();
 		if (!guardBlocked) {
 			errors.add("guard did not block write-back");
 		}
@@ -792,6 +837,9 @@ public final class PurgeProtocol {
 
 	private String sessionIdOf(Enumeration enumeration) {
 		return enumeration.sessionId();
+	}
+
+	private record SessionDelete(long deleted, boolean guardBlocked) {
 	}
 
 	private record Enumeration(boolean found, List<String> runs, List<String> staging,

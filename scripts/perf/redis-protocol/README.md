@@ -141,6 +141,11 @@ export PERF_OUTPUT_DIR=./out-cl
 ```
 
 Cluster 只支持 db 0。standalone 与 cluster 使用**同一套命令、Lua、场景和键形**；唯一差别是连接配置。
+真实 Cluster 的 RED 报告必须回到 Cluster 上复测，不能用 standalone 结果替代。
+
+拓扑兼容基线是 **Redis 5.0+**：Stream 只用 5.0 已有的 `XRANGE` 语法（见 §5 `b_stream_gap`），
+内部排他游标在发包前换算成物理 ID 后继的闭区间，线上不出现 Redis 6.2 才引入的 `(lastId`。
+standalone 与 cluster 必须跑同一份 HEAD，不得为某个拓扑单独改 Lua、场景或阈值。
 
 ### 3.3 关键变量
 
@@ -164,8 +169,8 @@ Cluster 只支持 db 0。standalone 与 cluster 使用**同一套命令、Lua、
 | `PERF_PROFILE` | `smoke` | `smoke` / `full` / `stress` |
 | `PERF_SCENARIOS` | 空 | 逗号分隔，显式点名优先 |
 | `PERF_REPEAT` `PERF_WARMUP` | `2` `1` | 每场景独立 copy |
-| `PERF_BATCH_SIZE` | `100` | 有界 pipeline 批次 |
-| `PERF_STREAM_PAGE_SIZE` `PERF_STREAM_MAX_ENTRIES` | `256` `10000` | Stream 物理 ID 分页 |
+| `PERF_BATCH_SIZE` | `500` | 有界 pipeline 批次（1..1000）；候选默认 500（原 100），减少 Cluster 串行往返，不改变断言与门禁 |
+| `PERF_STREAM_PAGE_SIZE` `PERF_STREAM_MAX_ENTRIES` | `256` `10000` | Stream 物理 ID 分页；排他游标换算为后继闭区间，兼容 Redis 5.0 的 XRANGE |
 | `PERF_SCENARIO_TIMEOUT_SECONDS` `PERF_TOTAL_TIMEOUT_SECONDS` | `60` `600` | 单调预算；`0` 关闭 |
 | `PERF_KEY_TTL_SECONDS` | `43200` | 所有生成键兜底 TTL |
 | `PERF_LEASE_TTL_MS` | `3000` | purge/run 租约 TTL |
@@ -238,6 +243,8 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
 - `duplicate_delete`：同会话重复删除幂等。
 - `dual_executor`：两个执行体并发 acquire，只有一个 lease winner。
 - `lease_takeover`：租约过期后新 owner epoch +1；旧 owner 的阶段写被 `STALE_EPOCH` 拒绝。
+  批量删除按 `PERF_LEASE_TTL_MS/3` 续租（重写 lease 值里的到期时间并复核 pending 的
+  owner/epoch/purgeId），大批次不会把活着的 owner 误判为过期；旧 owner 也不能靠续租推进。
 - `active_unfinalizable`：场景级 `allowFinalize=false`（不是改全局默认），无终帧 ⇒ `deferred`，
   **删除前中止**，所有已生成键保留；只有 `defer` 写成功且计划键完整才算合法的 deferred。
 - `bg_0_runs_1` / `bg_10k_runs_1` / `bg_100k_runs_1` / `bg_existing_runs_1`：
@@ -281,7 +288,10 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
   另有“旧实现先写 decided、崩溃在 pending 之前”的半状态对照。
 - `b_claim_cancel`：两个执行体并发 claim 只有一个 WON；cancel 对已认领/已决策条目返回冲突；
   前端回执只能由认领者写，已认领副作用不被写回未执行。
-- `b_stream_gap`：Stream 按物理 entry ID（`XRANGE ... (lastId)`）分页，预算按真实条目数；
+- `b_stream_gap`：Stream 按物理 entry ID 分页。内部游标是排他语义 `(lastId`，发包前换算成
+  **物理 ID 后继**的闭区间（sequence+1；sequence 到 2^64-1 时进位到“下一毫秒-0”），线上只发
+  Redis 5.0 支持的 `XRANGE key <start> + COUNT n`，**不出现** 6.2+ 的 `(lastId`（5.0 会报
+  `ERR invalid stream ID`）。最大 ID 没有后继时直接收尾，不重复最后一页；预算按真实条目数；
   大跳号下终帧/tool_start 不漏；预算耗尽标 `truncated`，未扫到的 tool_start 是 unknown。
 - `b_slot_consistency`：所有多键同槽组本地 CRC16 一致；cluster 下再用 `CLUSTER KEYSLOT` 复核。
 
@@ -293,12 +303,12 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
 
 | 文件 | 内容 |
 | --- | --- |
-| `doctor.json` | 只读体检 |
+| `doctor.json` | 只读体检：`redisVersion`/`redisMode`/`modeMatch`/`dbSize`/slot |
 | `manifest.json` | 命名空间、每场景/copy 的精确键面、背景规模、状态 |
 | `results.json` | 配置脱敏摘要、逐阶段指标、汇总、协议断言、gate |
 | `requests.csv` | 每阶段：时长、命令数、pipeline 批次、SCAN 页数、slot 检查、字节（估算） |
 | `summary.csv` | 每场景：P50/P95/P99/max、命令数、批次数、SCAN 页数、slot 检查、字节（估算） |
-| `protocols.json` | B 场景断言逐条 pass/fail |
+| `protocols.json` | 协议断言逐条 pass/fail（`b_*`、`dual_executor`、`lease_takeover`）；`b_*` 失败 `detail` 含异常全名、`rootCause` 和完整堆栈 |
 | `verify.json` / `verify.csv` | 最终键面/状态核对 |
 | `cleanup.json` | 清理清单与执行结果 |
 | `verify-<scenario>.json` / `cleanup-<scenario>.json` | `all` 每场景证据（后续场景不会覆盖） |
@@ -310,6 +320,18 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
 - `archives_2000`：P95 ≤ 3s；
 - 在线删除 SCAN 页数 = 0；
 - 背景规模放大后，相同目标的命令数/SCAN 页数不得增长（默认增长上限 0）。
+
+批次大小只影响命令组织，不是放宽门禁的理由：`PERF_BATCH_SIZE` 从 100 调到 500 后，
+`PERF_GATE_*`、场景集合和协议断言必须保持原值，看到结果后不得调高。
+
+**协议失败诊断**：`protocols.json` 每条断言记录 `scenario`、`name`、`pass`、`detail`、
+`durationNanos`。`b_*` 场景失败时 `detail` 不是一句 `Error in execution`，而是 **异常全名 +
+message + `rootCause=` 根因 + 完整堆栈（含全部 `Caused by`）**，外层异常和根因（如
+`ERR invalid stream ID`、超时、槽重定向）都能直接看到；不得吞异常或截断。`lease_takeover` 等由
+`HarnessMain` 直接记录的断言至少给出 `complete`/`epoch`/`errors` 原文。`results.json.protocols`、
+`summary.csv` 的场景状态、`state=protocol` 的 verify 结论与退出码必须一致反映该失败。
+远端报告失败时原样附上 `scenario` / `name` / `detail` 以及所在阶段和轮次，只说“协议失败”
+按未复测处理。
 
 `P50/P95/P99` 使用 nearest-rank；只统计非 warmup 轮次。字节数是 RESP 帧 + **Lua 脚本正文 +
 KEYS + ARGV** 长度的估算，输出统一 `bytesEstimated=true`；不是网卡计数。
@@ -350,39 +372,90 @@ guard/pending/lease、`ai:purge:retry:due` 成员、背景键公式与 marker。
 
 ---
 
-## 8. 另一台设备的 AI 执行提示词（可直接复制）
+## 8. 本轮远端复测（定向优先，可直接复制）
+
+本轮真实 Cluster 报告是 **RED 证据**：修复是否有效必须在同一 Cluster 拓扑复测，standalone 通过
+不能替代 Cluster。standalone 与 Cluster 必须使用同一 HEAD、同一命令、同一 Lua、同一场景和键形。
+
+### 8.1 本轮要验的四点
+
+| 修复 | 通过证据 |
+| --- | --- |
+| 候选默认 `PERF_BATCH_SIZE=500` | 未显式覆盖时 `results.json.config.batch_size=500`；`summary.csv` 的 pipeline 批次数下降，场景集合、断言和门禁不变 |
+| Redis 5.0 兼容 XRANGE | Redis 5.0 上 `b_stream_gap` 通过，无 `ERR invalid stream ID` / 语法错误；终帧与 tool_start 不漏 |
+| 协议异常完整诊断 | `b_*` 失败时 `protocols.json` 的 `detail` 含异常全名、message、`rootCause=` 和完整堆栈；`lease_takeover` 含 `complete`/`epoch`/`errors`；`scenario` / `name` 可直接定位 |
+| doctor INFO 修复 | 原生 `INFO` bulk 解析 + 结构化回退（合并 cluster 的 `host:port.` 前缀键）；`doctor.json` 的 `redisVersion` / `redisMode` / `modeMatch` 与真实拓扑一致；Redis 5.0 Cluster 必须 `status=ok`、`modeMatch=true`。Cluster 下原生与结构化 INFO 都不可用会得到 `redisVersion/redisMode=unknown`、`modeMatch=false` 并以退出码 2 失败，不能静默误判为 standalone |
+
+### 8.2 定向提示词（可直接复制）
 
 ```text
-你在另一台隔离设备上执行 Redis 候选协议验证。先读：
+你在另一台隔离设备上复测 Redis 候选协议 harness。先读：
   docs/research/审查-运行时Redis与接口性能-2026-11-04/21-redis-change-preflight-plan.md
   scripts/perf/redis-protocol/README.md
 
 硬性边界：
-- 先 git pull 到本轮提交：git pull --ff-only && git rev-parse --short HEAD，并记录提交号；
-  确认 scripts/perf/redis-protocol/ 下 git status 干净。不要再手工改源码、不要再手工
-  增删 Maven 的 -o 参数——在线/离线已由 PERF_MVN_MODE 配置（默认 online）。
-- 不启动项目服务，不调用任何 HTTP API，不驱动真实模型。
-- 不改 backend/src/main、frontend、backend/pom.xml、scripts/perf/redis-protocol 之外的脚本。
+- 先拉本轮新 HEAD，不要沿用旧工作副本：
+  git fetch --prune origin && git pull --ff-only
+  git rev-parse HEAD && git rev-parse --short HEAD && git log -1 --stat
+  记录完整/短提交号；确认 scripts/perf/redis-protocol 和
+  backend/src/test/java/com/example/configmgr/perf/redis 下 git status --porcelain 为空。
+  只读抽查本 HEAD 已包含（不要改）：
+  H=backend/src/test/java/com/example/configmgr/perf/redis
+  git show HEAD:$H/HarnessConfig.java | grep PERF_BATCH_SIZE   → 默认 500；
+  git show HEAD:$H/CountingRedis.java | grep -n xrangeStart    → 5.0 后继闭区间换算；
+  git show HEAD:$H/RedisHarness.java | grep -n parseInfo       → INFO bulk 解析；
+  git show HEAD:$H/RunProtocol.java | grep -n diagnostic       → 完整异常链。
+  四项缺一不可；缺任何一项说明没拉到新 HEAD，停止并报告提交号。
+- 不启动项目服务，不调用任何 HTTP API，不驱动真实模型；不跑全仓测试。
+- 不改 backend/src/main、frontend、backend/pom.xml；不手工增删 Maven 的 -o 参数，
+  在线/离线只由 PERF_MVN_MODE 控制（默认 online）。
 - 只用专用隔离 Redis；任何连接（含 doctor/verify）必须 PERF_ISOLATED_ENV=true；远程/集群必须
-  PERF_CONFIRM_REMOTE=true；cluster 只允许 db 0。
-- 不跑全仓测试；不跑旧协议全量 Cluster SCAN；不执行 FLUSHDB/FLUSHALL/KEYS。
+  PERF_CONFIRM_REMOTE=true；cluster 只允许 db 0；不执行 FLUSHDB/FLUSHALL/KEYS/DEBUG/CONFIG。
 - 失败或预算耗尽时保留输出目录，不删证据，不伪报通过。
+- 禁止为了让结果变绿而调大 PERF_GATE_*、删场景、放宽断言，或用 standalone 结果替代 Cluster。
 
-执行顺序（每个拓扑分开输出目录）：
-0) 依赖解析：默认 PERF_MVN_MODE=online，新设备首次运行即可下载依赖；依赖就绪后如要沿用
-   离线习惯，再显式 export PERF_MVN_MODE=offline。离线构建失败会提示切回 online，不要改脚本。
+执行顺序（standalone、cluster 分开命名空间和输出目录）：
+0) 依赖解析：默认 PERF_MVN_MODE=online；依赖就绪后如要离线，再显式 export PERF_MVN_MODE=offline。
 1) ./run.sh scenarios        (Windows CMD: run.cmd scenarios)
 2) ./run.sh doctor
-3) 先 smoke：PERF_PROFILE=smoke ./run.sh all --execute
-4) smoke 通过后再 full：PERF_PROFILE=full PERF_ALLOW_LARGE_SCALE=true ./run.sh all --execute
-5) 如需 10 万背景：单独 PERF_SCENARIOS=bg_100k_runs_1 逐场景 generate/measure/cleanup，
+   检查 doctor.json：redisVersion、redisMode、modeMatch 与目标拓扑一致；
+   Redis 5.0 Cluster 必须 status=ok、modeMatch=true。doctor 失败先报告，不要继续。
+3) 只跑定向五场景，不要加其他场景：
+   export PERF_PROFILE=full
+   export PERF_SCENARIOS=b_stream_gap,empty,minimal,archives_2000,lease_takeover
+   export PERF_ALLOW_LARGE_SCALE=true
+   export PERF_NAMESPACE=rp-target-sa-$(date +%Y%m%d%H%M)
+   export PERF_OUTPUT_DIR=./out-target-sa
+   ./run.sh all --execute
+   Cluster 用同一场景和参数，只把 REDIS_MODE、REDIS_CLUSTER_NODES、PERF_NAMESPACE、
+   PERF_OUTPUT_DIR 换成 cluster 的值，输出到 ./out-target-cl。
+4) 定向验收（必须全部满足；任一失败立即停止并保留输出）：
+   - 退出码 0；五个场景均有结果，无 skipped/partial/failed/deferred；
+   - protocols.json 全 pass，尤其 b_stream_gap 的终帧/tool_start 断言与 lease_takeover 的旧 owner 拒绝；
+   - Redis 5.0 下无 XRANGE 语法错误；未显式覆盖时 results.json 的 config.batch_size=500；
+   - summary.csv：empty/minimal P95 ≤ 250ms，archives_2000 P95 ≤ 3000ms；
+   - verify.csv 无 fail/unknown；cleanup.json complete=true。
+   失败报告必须给出：提交号、拓扑、场景、断言 name、detail 全文（b_* 含异常全名+message+cause
+   与堆栈；lease_takeover 含 complete/epoch/errors）、阶段/轮次、requests.csv 对应行、
+   doctor.json。不要放宽门禁后重跑。
+5) 定向在 standalone 与 cluster 都通过后，才允许 smoke：
+   新命名空间 + 新输出目录，PERF_PROFILE=smoke ./run.sh all --execute
+6) smoke 通过后再 full：
+   新命名空间 + 新输出目录，PERF_PROFILE=full PERF_ALLOW_LARGE_SCALE=true ./run.sh all --execute
+7) 如需 10 万背景：单独 PERF_SCENARIOS=bg_100k_runs_1 逐场景 generate/measure/cleanup，
    不要和 bg_10k 同时生成；大键空间 Cluster 用 bg_existing_runs_1 + PERF_EXISTING_BG_SCALE。
-6) standalone 与 cluster 各跑一次，输出目录分开；比较 summary.csv、protocols.json、verify.csv。
-7) 最后对每个输出目录执行 cleanup --execute，确认 cleanup.json complete=true。
+8) 每个输出目录最后 cleanup --execute，确认 cleanup.json complete=true。
 
-报告：git 提交号、命令、PERF_MVN_MODE、退出码、summary.csv 的 P50/P95/P99、命令数、SCAN 页数、
-slot 检查、protocols.json 的失败项、verify 的 fail/unknown、cleanup 残留。任何 unknown 都要说明原因。
+报告：新 HEAD 完整提交号、拓扑、Redis 版本/mode、PERF_MVN_MODE、命令、退出码、batch_size、
+summary.csv 的 P50/P95/P99、命令数、pipeline 批次数、SCAN 页数、slot 检查、protocols.json 失败项
+（scenario/name/detail 原文）、verify 的 fail/unknown、cleanup 残留。任何 unknown 说明原因。
 ```
+
+### 8.3 定向通过后的 smoke / full
+
+定向五场景是回归闸门：**先 standalone、再 cluster 各跑一遍**，两边都 `0` 且证据齐全，才进入
+§8.2 第 5、6 步。smoke/full 必须使用新命名空间和新输出目录，不能复用定向运行的命名空间；
+不得因为 full 里某个场景慢就回头调高 `PERF_GATE_*` 或从 `PERF_SCENARIOS` 里删场景。
 
 ---
 
@@ -395,6 +468,17 @@ slot 检查、protocols.json 的失败项、verify 的 fail/unknown、cleanup �
   `mvn -Dtest=...+ test` 需要基线测试源集可编译。
 - **未连接本机 Redis**（按任务约束）。本交付只验证了编译、纯逻辑单测与 CLI dry-run；
   真实 standalone/cluster 的 SQL/Lua/拓扑行为需在另一台设备按 README 执行。
+- **Redis 5.0 的 XRANGE**：不能用 6.2+ 的 `XRANGE ... (lastId` 排他区间；候选实现把
+  `(lastId` 换算成后继 ID（sequence+1，溢出进位到下一毫秒）的闭区间起点，线上不出现 `(`。
+  Redis 5.0 报 `ERR invalid stream ID` 说明仍在跑旧 HEAD。
+- `PERF_BATCH_SIZE=500` 只改变 pipeline 的命令组织，不改变单命令延迟、断言或门禁；p95 变化必须
+  结合命令数/批次数解释，不能用更大的 batch 掩盖 RED。大批次下租约按 `PERF_LEASE_TTL_MS/3`
+  续租，避免长 pipeline 被误判为过期。
+- doctor 先用原生命令读完整 `INFO` bulk 并解析 `redis_version`/`redis_mode`/`cluster_enabled`，
+  失败才回退结构化 `info()`（cluster 会带 `host:port.` 前缀，按后缀合并）；两者都不可用时字段为
+  `unknown`，不会伪造版本或拓扑；Cluster 下 `modeMatch` 为 false 并以退出码 2 失败，
+  standalone 下只保留 unknown 并在报告里标明。复测报告必须附 `doctor.json`。
+- 真实 Cluster 的 RED 证据只能由 Cluster 复测关闭；standalone 全绿不算关闭。
 - 字节数是估算，不是网卡计数；pipeline 的“1 个批次”不等于 1 条命令。
 - `bg_100k` 与 `archives_2000` 的生成/清理耗时随键数线性；预算耗尽会保留 partial。
 - `bg_existing_runs_1` 不生成也不删除既有背景键，只记录 `declaredBackground`；`background=0` 且

@@ -2,7 +2,9 @@ package com.example.configmgr.perf.redis;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import io.lettuce.core.ClientOptions;
@@ -11,7 +13,9 @@ import io.lettuce.core.resource.DefaultClientResources;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.connection.RedisClusterConfiguration;
+import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisPassword;
+import org.springframework.data.redis.connection.RedisServerCommands;
 import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceClientConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
@@ -98,17 +102,96 @@ public final class RedisHarness implements AutoCloseable {
 	}
 
 	public ServerInfo serverInfo() {
-		return this.template.execute((RedisCallback<ServerInfo>) connection -> {
-			Properties server = connection.serverCommands().info("server");
-			String version = server == null ? "unknown" : server.getProperty("redis_version", "unknown");
-			String mode = server == null ? "unknown" : server.getProperty("redis_mode", "unknown");
-			Properties cluster = connection.serverCommands().info("cluster");
-			String clusterEnabled = cluster == null ? null : cluster.getProperty("cluster_enabled");
-			boolean clustered = clusterEnabled != null ? "1".equals(clusterEnabled.trim())
-					: "cluster".equalsIgnoreCase(mode);
-			Long dbsize = connection.serverCommands().dbSize();
-			return new ServerInfo(version, mode, dbsize == null ? -1L : dbsize, clustered);
-		});
+		return this.template.execute((RedisCallback<ServerInfo>) connection -> fromInfo(readInfo(connection),
+				dbSize(connection)));
+	}
+
+	/**
+	 * 读真实服务端 INFO。standalone 与 cluster 走同一条路径：先发原生命令再解析 bulk 字符串，
+	 * 因为 cluster 的结构化 {@code info(section)} 会把各节点结果合并成 {@code host:port.key} 前缀键。
+	 * 原生命令不可用或返回空时才回退到结构化结果。
+	 */
+	private static Map<String, String> readInfo(RedisConnection connection) {
+		Map<String, String> parsed = parseInfo(rawInfo(connection));
+		return parsed.isEmpty() ? propertiesInfo(connection) : parsed;
+	}
+
+	private static String rawInfo(RedisConnection connection) {
+		try {
+			Object raw = connection.execute("INFO");
+			if (raw instanceof byte[] bytes) {
+				return new String(bytes, StandardCharsets.UTF_8);
+			}
+			return raw == null ? null : raw.toString();
+		}
+		catch (RuntimeException ex) {
+			return null;
+		}
+	}
+
+	private static Map<String, String> propertiesInfo(RedisConnection connection) {
+		try {
+			RedisServerCommands commands = connection.serverCommands();
+			return commands == null ? Map.of() : flattenProperties(commands.info());
+		}
+		catch (RuntimeException ex) {
+			return Map.of();
+		}
+	}
+
+	private static Long dbSize(RedisConnection connection) {
+		try {
+			RedisServerCommands commands = connection.serverCommands();
+			return commands == null ? null : commands.dbSize();
+		}
+		catch (RuntimeException ex) {
+			return null;
+		}
+	}
+
+	static ServerInfo fromInfo(Map<String, String> info, Long dbSize) {
+		String version = textOrUnknown(info.get("redis_version"));
+		String mode = textOrUnknown(info.get("redis_mode"));
+		String clusterEnabled = info.get("cluster_enabled");
+		boolean clustered = clusterEnabled != null ? "1".equals(clusterEnabled.trim())
+				: "cluster".equalsIgnoreCase(mode);
+		return new ServerInfo(version, mode, dbSize == null ? -1L : dbSize, clustered);
+	}
+
+	private static String textOrUnknown(String value) {
+		return value == null || value.isBlank() ? "unknown" : value.trim();
+	}
+
+	static Map<String, String> parseInfo(String bulk) {
+		if (bulk == null || bulk.isBlank()) {
+			return Map.of();
+		}
+		Map<String, String> out = new LinkedHashMap<>();
+		for (String line : bulk.split("\\R")) {
+			String trimmed = line.trim();
+			if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+				continue;
+			}
+			int colon = trimmed.indexOf(':');
+			if (colon <= 0) {
+				continue;
+			}
+			out.putIfAbsent(trimmed.substring(0, colon).trim(), trimmed.substring(colon + 1).trim());
+		}
+		return out;
+	}
+
+	static Map<String, String> flattenProperties(Properties properties) {
+		if (properties == null || properties.isEmpty()) {
+			return Map.of();
+		}
+		Map<String, String> out = new LinkedHashMap<>();
+		for (String name : properties.stringPropertyNames()) {
+			int dot = name.lastIndexOf('.');
+			String key = dot >= 0 ? name.substring(dot + 1) : name;
+			out.putIfAbsent(key, properties.getProperty(name, "").trim());
+		}
+		return out;
 	}
 
 	/** 用 Redis 自己的槽算法校验本地 CRC16（每条键 1 条命令）。 */

@@ -96,9 +96,10 @@ public final class Scripts {
 			local leaseValue = tostring(nextEpoch) .. '|' .. ARGV[1] .. '|' .. ARGV[2] .. '|'
 			    .. tostring(now + tonumber(ARGV[3]))
 			redis.call('SET', KEYS[1], leaseValue, 'PX', ARGV[3])
+			-- lease/pending 刚由本脚本原子创建，直接进入 BEGIN；调用方无需再做一次 BEGIN 复核。
 			local pending = {
 			  sessionId = ARGV[6], purgeId = ARGV[2], owner = ARGV[1], epoch = nextEpoch,
-			  stage = 'ACQUIRED', attempts = tonumber(ARGV[7]), verifyAtMs = 0
+			  stage = 'BEGIN', attempts = tonumber(ARGV[7]), verifyAtMs = 0
 			}
 			redis.call('SET', KEYS[2], cjson.encode(pending))
 			redis.call('SET', KEYS[3], ARGV[2] .. '|' .. ARGV[1] .. '|' .. tostring(nextEpoch), 'PX', ARGV[4])
@@ -124,8 +125,72 @@ public final class Scripts {
 			  return {0, 'STALE_EPOCH'}
 			end
 			redis.call('SET', KEYS[2], ARGV[4])
-			redis.call('PEXPIRE', KEYS[1], ARGV[5])
+			-- 续期必须重写 lease 值内的到期时间；只 PEXPIRE 会让后续脚本仍按旧 exp 判过期。
+			local renewed = now + tonumber(ARGV[5])
+			redis.call('SET', KEYS[1], tostring(e) .. '|' .. o .. '|' .. p .. '|' .. tostring(renewed),
+			    'PX', ARGV[5])
 			return {1, 'ALLOWED'}
+			""", java.util.List.class);
+
+	public static final DefaultRedisScript<java.util.List> PURGE_RENEW = script("""
+			-- PERF_PURGE_RENEW: 批量处理心跳；owner/epoch/purgeId 全部匹配才续租
+			-- KEYS: lease, pending
+			-- ARGV: owner, epoch, purgeId, leaseTtlMs, nowMs
+			local now = tonumber(ARGV[5])
+			local lease = redis.call('GET', KEYS[1])
+			if not lease then return {0, 'MISSING'} end
+			local e, o, p, exp = string.match(lease, '^([^|]+)|([^|]+)|([^|]+)|([^|]+)$')
+			if not e or not exp then return {0, 'BAD_LEASE'} end
+			if now >= tonumber(exp) then return {0, 'LEASE_EXPIRED'} end
+			if tonumber(e) ~= tonumber(ARGV[2]) then return {0, 'STALE_EPOCH'} end
+			if o ~= ARGV[1] then return {0, 'WRONG_OWNER'} end
+			local raw = redis.call('GET', KEYS[2])
+			if not raw then return {0, 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING'} end
+			if obj['owner'] ~= ARGV[1] then return {0, 'WRONG_OWNER'} end
+			if obj['purgeId'] ~= ARGV[3] or tonumber(obj['epoch']) ~= tonumber(ARGV[2]) then
+			  return {0, 'STALE_EPOCH'}
+			end
+			local renewed = now + tonumber(ARGV[4])
+			redis.call('SET', KEYS[1], tostring(e) .. '|' .. o .. '|' .. p .. '|' .. tostring(renewed),
+			    'PX', ARGV[4])
+			return {1, 'RENEWED'}
+			""", java.util.List.class);
+
+	public static final DefaultRedisScript<java.util.List> PURGE_SESSION_GUARD = script("""
+			-- PERF_PURGE_SESSION_GUARD: DELETE_SESSION 阶段合并——推进 pending + 续租 + 删同槽会话键 + guard 探测
+			-- KEYS: lease, pending, guard, memory（同时是删除目标）, 其余同槽会话键
+			-- ARGV: owner, epoch, purgeId, pendingJson, guardValue, guardTtlMs, nowMs
+			local now = tonumber(ARGV[7])
+			local lease = redis.call('GET', KEYS[1])
+			if not lease then return {0, 'MISSING'} end
+			local e, o, p, exp = string.match(lease, '^([^|]+)|([^|]+)|([^|]+)|([^|]+)$')
+			if not e or not exp then return {0, 'BAD_LEASE'} end
+			if now >= tonumber(exp) then return {0, 'LEASE_EXPIRED'} end
+			if tonumber(e) ~= tonumber(ARGV[2]) then return {0, 'STALE_EPOCH'} end
+			if o ~= ARGV[1] then return {0, 'WRONG_OWNER'} end
+			local raw = redis.call('GET', KEYS[2])
+			if not raw then return {0, 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING'} end
+			if obj['owner'] ~= ARGV[1] then return {0, 'WRONG_OWNER'} end
+			if obj['purgeId'] ~= ARGV[3] or tonumber(obj['epoch']) ~= tonumber(ARGV[2]) then
+			  return {0, 'STALE_EPOCH'}
+			end
+			redis.call('SET', KEYS[2], ARGV[4])
+			local renewed = now + tonumber(ARGV[6])
+			redis.call('SET', KEYS[1], tostring(e) .. '|' .. o .. '|' .. p .. '|' .. tostring(renewed),
+			    'PX', ARGV[6])
+			local deleted = 0
+			for i = 4, #KEYS do
+			  deleted = deleted + redis.call('DEL', KEYS[i])
+			end
+			if redis.call('EXISTS', KEYS[3]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
+			  return {1, deleted, 1}
+			end
+			redis.call('SET', KEYS[4], ARGV[5], 'PX', ARGV[6])
+			return {1, deleted, 0}
 			""", java.util.List.class);
 
 	public static final DefaultRedisScript<java.util.List> PURGE_FAIL = script("""

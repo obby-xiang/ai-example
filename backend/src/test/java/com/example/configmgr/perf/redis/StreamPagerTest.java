@@ -13,6 +13,8 @@ import org.springframework.data.redis.connection.stream.StreamRecords;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StreamPagerTest {
@@ -76,19 +78,53 @@ class StreamPagerTest {
 	}
 
 	@Test
-	void xrangeCursorMapsToExclusiveLowerBound() {
-		var exclusive = CountingRedis.xrangeRange("(500000-0");
-		assertEquals("500000-0", exclusive.getLowerBound().getValue().orElseThrow());
-		assertFalse(exclusive.getLowerBound().isInclusive());
-		assertFalse(exclusive.getUpperBound().isBounded());
+	void terminalOnBudgetBoundaryIsFoundAndNotMarkedUnknown() {
+		List<StreamPager.Entry> all = List.of(
+				entry("1-0", "delta", "1"),
+				entry("2-0", "done", "2"));
+		FakeSource source = new FakeSource(all);
+		StreamPager.Result result = StreamPager.scan(source, 2, 2);
+		assertTrue(result.truncated(), "预算刚好用尽时无法证明后面没有条目");
+		assertTrue(result.terminalFound(), "预算内的终帧必须被读到");
+		assertFalse(result.terminalUnknown(), "已读到的终帧不得判成 unknown");
+	}
+
+	@Test
+	void exclusiveCursorBecomesInclusiveLowerBoundForRedis5() {
+		assertEquals("500000-1", CountingRedis.xrangeStart("(500000-0"));
+		var inclusive = CountingRedis.xrangeRange("500000-1");
+		assertEquals("500000-1", inclusive.getLowerBound().getValue().orElseThrow());
+		assertTrue(inclusive.getLowerBound().isInclusive());
+		assertFalse(inclusive.getUpperBound().isBounded());
 
 		var unbounded = CountingRedis.xrangeRange("-");
 		assertFalse(unbounded.getLowerBound().isBounded());
 		assertFalse(unbounded.getUpperBound().isBounded());
+	}
 
-		var inclusive = CountingRedis.xrangeRange("900000-0");
-		assertEquals("900000-0", inclusive.getLowerBound().getValue().orElseThrow());
-		assertTrue(inclusive.getLowerBound().isInclusive());
+	@Test
+	void generatedXrangeStartNeverUsesExclusiveSyntax() {
+		for (String cursor : List.of("(1-0", "(500000-0", "(9-18446744073709551615", "-", "900000-0")) {
+			String start = CountingRedis.xrangeStart(cursor);
+			assertNotNull(start, "只有越过最大 ID 才允许没有起点");
+			assertFalse(start.startsWith("("), "5.0.14 不认 (id 语法，实际起点=" + start);
+		}
+		assertNull(CountingRedis.xrangeStart("(18446744073709551615-18446744073709551615"),
+				"最大 ID 之后不可能再有条目");
+	}
+
+	@Test
+	void successorCarriesSequenceOverflowIntoNextMillis() {
+		assertEquals("5-1", CountingRedis.successorId("5-0"));
+		assertEquals("6-0", CountingRedis.successorId("5-18446744073709551615"));
+		assertEquals("18446744073709551615-1", CountingRedis.successorId("18446744073709551615-0"));
+		assertNull(CountingRedis.successorId("18446744073709551615-18446744073709551615"),
+				"最大 ID 没有后继，扫描必须收尾而不是重复最后一页");
+	}
+
+	@Test
+	void successorKeepsShorthandMillisIdsOrdered() {
+		assertEquals("5-1", CountingRedis.successorId("5"));
 	}
 
 	@Test

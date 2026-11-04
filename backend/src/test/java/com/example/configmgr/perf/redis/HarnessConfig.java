@@ -104,7 +104,7 @@ public final class HarnessConfig {
 		this.scenarios = split(env.getOrDefault("PERF_SCENARIOS", ""));
 		this.repeat = intEnv(env, "PERF_REPEAT", 2);
 		this.warmup = intEnv(env, "PERF_WARMUP", 1);
-		this.batchSize = intEnv(env, "PERF_BATCH_SIZE", 100);
+		this.batchSize = intEnv(env, "PERF_BATCH_SIZE", 500);
 		this.streamPageSize = intEnv(env, "PERF_STREAM_PAGE_SIZE", 256);
 		this.streamMaxEntries = intEnv(env, "PERF_STREAM_MAX_ENTRIES", 10_000);
 		this.scenarioBudget = Duration.ofSeconds(longEnv(env, "PERF_SCENARIO_TIMEOUT_SECONDS", 60L));
@@ -221,6 +221,14 @@ public final class HarnessConfig {
 		if (!errors.isEmpty()) {
 			throw new IllegalArgumentException(String.join("; ", errors));
 		}
+	}
+
+	/**
+	 * 批量处理租约心跳周期：取 TTL 的 1/3，让每次续期在到期前仍留有 2/3 TTL 的网络余量。
+	 * 心跳脚本会重写 lease 值里的到期时间，不依赖放大 TTL。
+	 */
+	public long leaseRenewIntervalMs() {
+		return Math.max(1L, this.leaseTtlMs / 3L);
 	}
 
 	public boolean needsLargeScaleGate(List<ScenarioCatalog.Scenario> selected) {

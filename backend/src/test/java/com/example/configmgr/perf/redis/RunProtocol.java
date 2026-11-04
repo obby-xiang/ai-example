@@ -1,5 +1,7 @@
 package com.example.configmgr.perf.redis;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -440,9 +442,44 @@ public final class RunProtocol {
 			metrics.protocol(scenario, name, true, "pass", System.nanoTime() - start);
 		}
 		catch (Throwable ex) {
-			metrics.protocol(scenario, name, false, ex.getClass().getSimpleName() + ": " + ex.getMessage(),
-					System.nanoTime() - start);
+			metrics.protocol(scenario, name, false, diagnostic(ex), System.nanoTime() - start);
 		}
+	}
+
+	/**
+	 * 失败诊断：外层异常常常只是 Spring 的 {@code Error in execution}，根因在 caused-by 链里。
+	 * 这里把浅层摘要 + 完整堆栈（含全部 {@code Caused by}）一起落到 protocols.json，
+	 * 远端不必再猜是语法、超时还是槽重定向。
+	 */
+	static String diagnostic(Throwable failure) {
+		StringBuilder out = new StringBuilder();
+		out.append(failure.getClass().getName());
+		if (failure.getMessage() != null) {
+			out.append(": ").append(failure.getMessage());
+		}
+		Throwable root = rootCause(failure);
+		if (root != failure) {
+			out.append(" | rootCause=").append(root.getClass().getName());
+			if (root.getMessage() != null) {
+				out.append(": ").append(root.getMessage());
+			}
+		}
+		StringWriter stack = new StringWriter();
+		failure.printStackTrace(new PrintWriter(stack));
+		out.append(System.lineSeparator()).append(stack);
+		return out.toString();
+	}
+
+	private static Throwable rootCause(Throwable failure) {
+		Throwable current = failure;
+		for (int depth = 0; depth < 64; depth++) {
+			Throwable cause = current.getCause();
+			if (cause == null || cause == current) {
+				return current;
+			}
+			current = cause;
+		}
+		return current;
 	}
 
 	private interface ThrowingRunnable {

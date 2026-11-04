@@ -1,5 +1,6 @@
 package com.example.configmgr.perf.redis;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -27,6 +28,11 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  * 字节数只能估算（RESP 帧 + 键/参数长度），输出统一标记 {@code bytesEstimated=true}。
  */
 public final class CountingRedis {
+
+	private static final String FIRST_STREAM_ID = "-";
+
+	/** Redis stream ID 的两段都是无符号 64 位（sequence 到 2^64-1 后进位到下一毫秒）。 */
+	private static final BigInteger MAX_STREAM_ID_PART = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
 
 	private final StringRedisTemplate template;
 
@@ -227,25 +233,86 @@ public final class CountingRedis {
 	 * <p>不能用通用 {@code connection.execute}：它对该命令回退到 Lettuce {@code ByteArrayOutput}，
 	 * 会把嵌套数组整体解成一个 {@code byte[]}，条目字段全部丢失。
 	 *
-	 * @param cursor {@code -} 或 {@code (lastId} 排他游标，语义与 XRANGE 起点一致
+	 * <p>排他区间 {@code (id} 是 Redis 6.2 才有的语法，生产 5.0.14 会回
+	 * {@code Error in execution}（{@code redis-cli} 发普通 XRANGE 才正常）。因此这里把
+	 * {@code (lastId} 换成语义等价的物理 ID 后继（闭区间），standalone 与 Cluster 走同一条路径。
+	 *
+	 * @param cursor {@code -}、闭区间起点 ID，或 {@code (lastId} 排他游标
 	 */
 	public List<ByteRecord> xrange(String key, String cursor, int count) {
-		request("XRANGE", key, cursor, "+", "COUNT", String.valueOf(count));
+		String start = xrangeStart(cursor);
+		if (start == null) {
+			return List.of();
+		}
+		request("XRANGE", key, start, "+", "COUNT", String.valueOf(count));
 		List<ByteRecord> records = this.template.execute((RedisCallback<List<ByteRecord>>) connection ->
-				connection.streamCommands().xRange(key.getBytes(StandardCharsets.UTF_8), xrangeRange(cursor),
+				connection.streamCommands().xRange(key.getBytes(StandardCharsets.UTF_8), xrangeRange(start),
 						Limit.limit().count(count)));
 		response(records);
 		return records == null ? List.of() : records;
 	}
 
-	static Range<String> xrangeRange(String cursor) {
-		if (cursor == null || cursor.isEmpty() || "-".equals(cursor)) {
+	/**
+	 * 把分页游标统一成 XRANGE 的闭区间起点：{@code (lastId} → {@code lastId} 的后继。
+	 *
+	 * @return {@code -}、可直接发给旧版 Redis 的起点 ID；{@code null} 表示已越过可表示的最大 ID
+	 * （不存在后继 ⇒ 不可能再有条目）
+	 */
+	static String xrangeStart(String cursor) {
+		if (cursor == null || cursor.isEmpty() || FIRST_STREAM_ID.equals(cursor)) {
+			return FIRST_STREAM_ID;
+		}
+		if (cursor.startsWith("(")) {
+			return successorId(cursor.substring(1));
+		}
+		return cursor;
+	}
+
+	/**
+	 * 物理 entry ID 的后继：sequence + 1；sequence 到 2^64-1 时进位到「下一毫秒-0」。
+	 * 最大 ID（两段都到 2^64-1）没有可表示的后继，返回 {@code null}。
+	 */
+	static String successorId(String id) {
+		if (id == null) {
+			throw new IllegalArgumentException("stream id 不能为空");
+		}
+		String value = id.trim();
+		int dash = value.indexOf('-');
+		String millisPart = dash < 0 ? value : value.substring(0, dash);
+		String sequencePart = dash < 0 ? "0" : value.substring(dash + 1);
+		if (millisPart.isEmpty() || sequencePart.isEmpty() || sequencePart.indexOf('-') >= 0) {
+			throw new IllegalArgumentException("非法 stream id：" + id);
+		}
+		BigInteger millis = streamIdPart(millisPart, id);
+		BigInteger sequence = streamIdPart(sequencePart, id);
+		if (sequence.compareTo(MAX_STREAM_ID_PART) < 0) {
+			return millis + "-" + sequence.add(BigInteger.ONE);
+		}
+		if (millis.compareTo(MAX_STREAM_ID_PART) < 0) {
+			return millis.add(BigInteger.ONE) + "-0";
+		}
+		return null;
+	}
+
+	private static BigInteger streamIdPart(String text, String id) {
+		for (int i = 0; i < text.length(); i++) {
+			char ch = text.charAt(i);
+			if (ch < '0' || ch > '9') {
+				throw new IllegalArgumentException("非法 stream id：" + id);
+			}
+		}
+		BigInteger value = new BigInteger(text);
+		if (value.compareTo(MAX_STREAM_ID_PART) > 0) {
+			throw new IllegalArgumentException("stream id 超出无符号 64 位：" + id);
+		}
+		return value;
+	}
+
+	static Range<String> xrangeRange(String start) {
+		if (start == null || start.isEmpty() || FIRST_STREAM_ID.equals(start)) {
 			return Range.unbounded();
 		}
-		Bound<String> lower = cursor.startsWith("(")
-				? Bound.exclusive(cursor.substring(1))
-				: Bound.inclusive(cursor);
-		return Range.rightUnbounded(lower);
+		return Range.rightUnbounded(Bound.inclusive(start));
 	}
 
 	/**
