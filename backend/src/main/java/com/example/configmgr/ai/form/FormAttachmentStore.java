@@ -97,6 +97,13 @@ public interface FormAttachmentStore {
 		return null;
 	}
 
+	default Attachment deleteRegistration(Attachment attachment) {
+		return attachment == null ? null : deleteRegistration(attachment.fileId());
+	}
+
+	default void deleteSessionIndex(String sessionId) {
+	}
+
 	/**
 	 * 一次上传的登记信息（只有元数据，<b>没有文件内容</b>）。
 	 *

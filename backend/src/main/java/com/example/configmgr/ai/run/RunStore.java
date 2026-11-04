@@ -85,15 +85,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * （确认门/前端工具的输入落点，重启后仍可读）；</li>
  * <li>{@code ai:claim:<runId>} HASH（field=toolCallId，value=<b>{@code <epoch>|<instanceId>}</b>）——
  * <b>执行认领</b>：SP-02 §6 遗留的"executed 标记在执行返回后才写 ⇒ 最坏情况重复执行"窗口，
- * 本实现把标记<b>前置</b>为一次原子认领（{@code HSETNX} 语义），执行动作只能由认领成功的实例发起；
+ * 本实现把 fence、状态、标记和完整条目收敛到一条同槽 Lua，执行动作只能由认领成功的实例发起；
  * B23L1 批②a 起值前置了租约 epoch（认领能与续跑权对账），读口 {@link #claimedBy} 剥前缀，
  * 对外返回值形态不变；</li>
  * <li>{@code ai:req:<runId>} HASH（field=toolCallId，value=置位时刻毫秒）—— <b>请求帧已发</b>位
  * （L0 的 {@code req}）：{@code HSETNX} 首写者胜，<b>不再回写条目本身</b>（回写会把并发落库的
  * 决策覆盖回 PENDING，见 M-2）；读侧 {@link #pending}/{@link #pendings} 读出后合并该位；</li>
  * <li>{@code ai:decided:<runId>} HASH（field=toolCallId，value={@code <status>|<atMs>|<instanceId>}）——
- * <b>决策 guard / WAL</b>（B23L1 批②a 建设施，ConfirmGate 接入归批②b）：{@code HSETNX} 保证
- * 同一条目全集群只有一次决策能落库；条目未写而 guard 已写时，读侧可据它收敛出结论；</li>
+ * <b>决策 guard / WAL</b>：新决策与完整 pending 由 {@code DECIDE_PENDING} 同槽原子写入；
+ * 旧版遗留的半状态仍可由读侧和同值条件修补收敛；</li>
  * <li>{@code ai:lease:run:<runId>} STRING（value={@code <epoch>|<instanceId>}，TTL 30s；带 {@code {run:<runId>}} tag）——
  * <b>续跑权租约</b>（B23L1 批②a；{@link LeaseService}）：持租者才是本轮的续跑主人，
  * 续租失败即被别的实例接管；</li>
@@ -515,14 +515,121 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			return 1
 			""", Long.class);
 
-	/** C1 / Minor3：值匹配才删认领字段（避免误删他人重新认领的值）。 */
-	private static final RedisScript<Long> CLAIM_ROLLBACK_SCRIPT = new DefaultRedisScript<>("""
-			-- CLAIM_ROLLBACK
-			if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
-			  return redis.call('HDEL', KEYS[1], ARGV[1])
+	private static final RedisScript<List> DECIDE_PENDING_SCRIPT = new DefaultRedisScript<>("""
+			-- DECIDE_PENDING: decided guard 与完整 pending 同槽原子写
+			-- KEYS: pending, decided, claim
+			-- ARGV: field, fullPendingJson, decidedValue, ttlMs, expectedGuard
+			local field = ARGV[1]
+			local raw = redis.call('HGET', KEYS[1], field)
+			if not raw then return {0, '', 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, '', 'BAD_PENDING'} end
+			if obj['status'] ~= 'PENDING' then return {0, '', 'CONFLICT_STATUS'} end
+			local requested = ARGV[3]:match('^([^|]+)') or ''
+			local prev = redis.call('HGET', KEYS[2], field)
+			local repair = ARGV[5] ~= '' and prev == ARGV[5] and requested == (prev:match('^([^|]+)') or '')
+			if prev and not repair then return {0, prev, 'CONFLICT_DECIDED'} end
+			if not prev and ARGV[5] ~= '' then return {0, '', 'CONFLICT_DECIDED'} end
+			local evidence = obj['executed'] == true or (tonumber(obj['claimedAtMs']) or 0) > 0
+			    or (tonumber(obj['claimedEpoch']) or 0) > 0 or (tonumber(obj['executedAtMs']) or 0) > 0
+			if obj['executedBy'] and obj['executedBy'] ~= cjson.null then evidence = true end
+			if redis.call('HEXISTS', KEYS[3], field) == 1 or evidence then
+			  return {0, prev or '', 'CONFLICT_CLAIMED'}
 			end
-			return 0
-			""", Long.class);
+			redis.call('HSET', KEYS[1], field, ARGV[2])
+			if not repair then redis.call('HSET', KEYS[2], field, ARGV[3]) end
+			redis.call('PEXPIRE', KEYS[1], ARGV[4])
+			redis.call('PEXPIRE', KEYS[2], ARGV[4])
+			redis.call('PEXPIRE', KEYS[3], ARGV[4])
+			return {1, repair and prev or ARGV[3], repair and 'REPAIRED' or 'APPLIED'}
+			""", List.class);
+
+	private static final RedisScript<List> CLAIM_EXECUTION_SCRIPT = new DefaultRedisScript<>("""
+			-- CLAIM_EXECUTION: fence、状态、claim 与完整 pending 原子推进
+			-- KEYS: claim, pending, fence
+			-- ARGV: field, epoch, instance, claimedAtMs, ttlMs
+			local field = ARGV[1]
+			local epoch = tonumber(ARGV[2]) or 0
+			local fence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
+			if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH', fence} end
+			local raw = redis.call('HGET', KEYS[2], field)
+			if not raw then return {0, 'MISSING', fence} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING', fence} end
+			local status = obj['status']
+			if status ~= 'APPROVED' and status ~= 'PENDING' and status ~= 'EXECUTED' then
+			  return {0, 'CONFLICT_STATUS', fence}
+			end
+			local evidence = obj['executed'] == true or (tonumber(obj['claimedAtMs']) or 0) > 0
+			    or (tonumber(obj['claimedEpoch']) or 0) > 0 or (tonumber(obj['executedAtMs']) or 0) > 0
+			if obj['executedBy'] and obj['executedBy'] ~= cjson.null then evidence = true end
+			if evidence or redis.call('HEXISTS', KEYS[1], field) == 1 then
+			  return {0, 'ALREADY_CLAIMED', fence}
+			end
+			obj['claimedAtMs'] = tonumber(ARGV[4])
+			obj['claimedEpoch'] = epoch
+			obj['executed'] = true
+			obj['executedBy'] = ARGV[3]
+			redis.call('HSET', KEYS[1], field, tostring(epoch) .. '|' .. ARGV[3])
+			redis.call('HSET', KEYS[2], field, cjson.encode(obj))
+			redis.call('PEXPIRE', KEYS[1], ARGV[5])
+			redis.call('PEXPIRE', KEYS[2], ARGV[5])
+			return {1, 'WON', fence}
+			""", List.class);
+
+	private static final RedisScript<List> CANCEL_PENDING_SCRIPT = new DefaultRedisScript<>("""
+			-- CANCEL_PENDING: 只允许原 epoch 内未认领未执行的 PENDING/APPROVED 收敛为取消
+			-- KEYS: pending, decided, claim, fence
+			-- ARGV: field, fullPendingJson, decidedValue, ttlMs, expectedEpoch
+			local field = ARGV[1]
+			local epoch = tonumber(ARGV[5]) or 0
+			local fence = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
+			if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH'} end
+			local raw = redis.call('HGET', KEYS[1], field)
+			if not raw then return {0, 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING'} end
+			local status = obj['status']
+			if status ~= 'PENDING' and status ~= 'APPROVED' then return {0, 'CONFLICT_STATUS'} end
+			if redis.call('HEXISTS', KEYS[3], field) == 1 then return {0, 'CONFLICT_CLAIMED'} end
+			local evidence = obj['executed'] == true or (tonumber(obj['claimedAtMs']) or 0) > 0
+			    or (tonumber(obj['claimedEpoch']) or 0) > 0 or (tonumber(obj['executedAtMs']) or 0) > 0
+			if obj['executedBy'] and obj['executedBy'] ~= cjson.null then evidence = true end
+			if evidence then return {0, 'CONFLICT_CLAIMED'} end
+			local prev = redis.call('HGET', KEYS[2], field)
+			if prev and (status == 'PENDING' or prev:match('^([^|]+)') ~= 'APPROVED') then
+			  return {0, 'CONFLICT_DECIDED'}
+			end
+			redis.call('HSET', KEYS[1], field, ARGV[2])
+			redis.call('HSET', KEYS[2], field, ARGV[3])
+			redis.call('PEXPIRE', KEYS[1], ARGV[4])
+			redis.call('PEXPIRE', KEYS[2], ARGV[4])
+			redis.call('PEXPIRE', KEYS[3], ARGV[4])
+			return {1, 'CANCELLED'}
+			""", List.class);
+
+	private static final RedisScript<List> COMPLETE_EXECUTION_SCRIPT = new DefaultRedisScript<>("""
+			-- COMPLETE_EXECUTION: 执行回写必须匹配 claim 与 epoch
+			-- KEYS: pending, claim, fence
+			-- ARGV: field, expectedClaim, fullPendingJson, ttlMs, expectedEpoch
+			local field = ARGV[1]
+			local epoch = tonumber(ARGV[5]) or 0
+			local fence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
+			if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH'} end
+			if redis.call('HGET', KEYS[2], field) ~= ARGV[2] then return {0, 'CONFLICT_CLAIMED'} end
+			local raw = redis.call('HGET', KEYS[1], field)
+			if not raw then return {0, 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING'} end
+			local status = obj['status']
+			if status ~= 'APPROVED' and status ~= 'PENDING' and status ~= 'EXECUTED' then
+			  return {0, 'CONFLICT_STATUS'}
+			end
+			redis.call('HSET', KEYS[1], field, ARGV[3])
+			redis.call('PEXPIRE', KEYS[1], ARGV[4])
+			redis.call('PEXPIRE', KEYS[2], ARGV[4])
+			return {1, 'APPLIED'}
+			""", List.class);
 
 	/**
 	 * 台账落库 + 幂等索引<b>同一个原子步</b>（B23L1 批③a / 裁决 6）。
@@ -3348,6 +3455,27 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
+	/** 执行结果只允许由原 claim owner 在原 epoch 内回写。 */
+	public void completeExecution(String runId, PendingToolCall pending, long claimedEpoch, String claimedBy) {
+		String expectedClaim = claimedEpoch + "|" + claimedBy;
+		try {
+			List<?> result = this.redis.execute(COMPLETE_EXECUTION_SCRIPT,
+					List.of(pendingKey(runId), claimKey(runId), fenceKey(runId)), pending.getToolCallId(),
+					expectedClaim, this.mapper.writeValueAsString(pending), String.valueOf(ttlFor(runId).toMillis()),
+					String.valueOf(claimedEpoch));
+			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
+				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
+				throw new AiStateUnavailableException("执行回写条件不匹配 " + pending.getToolCallId() + "：" + outcome);
+			}
+		}
+		catch (AiStateUnavailableException ex) {
+			throw ex;
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法条件回写执行结果 " + pending.getToolCallId(), ex);
+		}
+	}
+
 	public List<PendingToolCall> pendings(String runId) {
 		return readPendings(runId, false);
 	}
@@ -3697,7 +3825,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 原子认领一次真实执行（SP-02 E2 语义的补强）。
 	 *
 	 * <p>
-	 * {@code HSETNX} 语义：同一个 {@code toolCallId} 全集群只可能有一个实例认领成功，
+	 * 同槽 Lua 保证同一个 {@code toolCallId} 全集群只可能有一个实例认领成功，
 	 * 且认领发生在<b>执行之前</b>。认领成功即把 {@code claimedAtMs / executed=true / executedBy}
 	 * 写进待决条目 —— 于是"放行后进程死亡 → 新实例续跑"这一窗口里，新实例只会看到
 	 * {@code APPROVED + executed=false}（此时可安全补执行），而"已在执行中"的状态
@@ -3709,7 +3837,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 *
 	 * <p>
 	 * <b>B23L1 批②a</b>：值升级为 {@code <epoch>|<instanceId>}（认领能与续跑权对账），
-	 * {@code HSETNX} 的原子性不变；读口 {@link #claimedBy} 剥前缀，对调用方返回的仍是实例标识。
+	 * 原子排他语义不变；读口 {@link #claimedBy} 剥前缀，对调用方返回的仍是实例标识。
 	 * 认领所用 epoch 同时写进条目的 {@link PendingToolCall#getClaimedEpoch()}（additive）。
 	 *
 	 * @return true = 本次由当前实例认领（可以执行）；false = 已被他实例认领或本实例已失去续跑权
@@ -3725,103 +3853,31 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/**
 	 * 原子认领并给出<b>三态</b>结论（B23L1 批③a / 裁决 9）。
 	 *
-	 * <p>与 {@link #claimExecution} 是同一段逻辑：先过 fence（持租时），再 {@code HSETNX} 认领。
+	 * <p>与 {@link #claimExecution} 共用同一段 Lua：fence、原状态、claim 和完整 pending 一次推进。
 	 * 两个失败分支语义不同 —— 见 {@link ClaimOutcome}。
 	 */
 	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
-		// 续租 fencing 收口批：新工具执行是"不可撤销副作用"的入口 —— 丢租/设施不可确认时一律拒。
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
 		if (authority.readOnly()) {
 			warnReadOnly(runId, authority, "new tool claim");
 			return new ClaimResult(ClaimOutcome.STALE_FENCE, heldRunEpoch(runId), 0L);
 		}
 		long epoch = heldRunEpoch(runId);
-		long fence = 0L;
-		if (epoch > 0L) {
-			// I5：持租不等于"仍是主人" —— TTL 到期被别人接管后，本进程的视图要等续租失败才会清。
-			// 认领是"执行一个副作用"的入口，必须对着 fence 复核：fence 已推进到更高 epoch ⇒ 本实例的
-			// 执行权已失效，拒绝认领（不得执行）。
-			fence = fenceEpoch(runId);
-			if (fence > epoch) {
-				log.warn("STALE_EPOCH refused claim runId={} toolCallId={} epoch={} "
-						+ "(fence advanced to {}: authority taken over, tool must not run)", runId, toolCallId, epoch, fence);
-				return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
-			}
+		List<?> result = this.redis.execute(CLAIM_EXECUTION_SCRIPT,
+				List.of(claimKey(runId), pendingKey(runId), fenceKey(runId)), toolCallId, String.valueOf(epoch),
+				executedBy, String.valueOf(System.currentTimeMillis()), String.valueOf(ttlFor(runId).toMillis()));
+		if (result == null || result.size() < 3) {
+			throw new AiStateUnavailableException("认领脚本返回空 " + toolCallId);
 		}
-		String claimValue = epoch + "|" + executedBy;
-		Boolean claimed = null;
-		try {
-			claimed = this.redis.opsForHash().putIfAbsent(claimKey(runId), toolCallId, claimValue);
-			this.redis.expire(claimKey(runId), ttlFor(runId));
+		long fence = ((Number) result.get(2)).longValue();
+		String outcome = String.valueOf(result.get(1));
+		if ("STALE_EPOCH".equals(outcome)) {
+			log.warn("STALE_EPOCH refused claim runId={} toolCallId={} epoch={} fence={}", runId, toolCallId,
+					epoch, fence);
+			return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
 		}
-		catch (RuntimeException ex) {
-			// 认领记录可能已落（putIfAbsent 成功、expire 失败）：回滚，避免"写后异常"变成
-			// 24h 假认领（后续重试看到 LOST，用户被告知"可能已执行"）。
-			if (Boolean.TRUE.equals(claimed)) {
-				rollbackClaim(runId, toolCallId, claimValue);
-			}
-			throw ex;
-		}
-		boolean won = Boolean.TRUE.equals(claimed);
-		if (!won) {
-			return new ClaimResult(ClaimOutcome.LOST, epoch, fence);
-		}
-		PendingToolCall marked = null;
-		try {
-			// C1：认领路径只读**原始条目**（pendingRaw），不走 guard 收敛读 —— 否则 A6 读失败会发生在
-			// "claim 已写、执行未做"之间，留下 24h 假认领。任何读/写失败都回滚 claim 后上抛，
-			// 让调用方看到可重试的基础设施故障，而不是 ALREADY_CLAIMED。
-			marked = pendingRaw(runId, toolCallId);
-			if (marked != null) {
-				marked.setClaimedAtMs(System.currentTimeMillis());
-				marked.setClaimedEpoch(epoch);
-				marked.setExecuted(true);
-				marked.setExecutedBy(executedBy);
-				putPending(runId, marked);
-			}
-		}
-		catch (RuntimeException ex) {
-			// Minor3：put 已成功、expire 失败时条目会带 executed=true；回滚 claim 的同时
-			// best-effort 恢复 executed=false，避免续跑把它误判成"已执行"。
-			if (marked != null && marked.isExecuted()) {
-				marked.setExecuted(false);
-				marked.setExecutedBy(null);
-				marked.setClaimedAtMs(0L);
-				marked.setClaimedEpoch(0L);
-				try {
-					putPending(runId, marked);
-				}
-				catch (RuntimeException restoreEx) {
-					log.warn("claim rollback restore executed=false failed runId={} toolCallId={}: {}", runId, toolCallId,
-							restoreEx.getMessage());
-				}
-			}
-			rollbackClaim(runId, toolCallId, claimValue);
-			throw ex;
-		}
-		return new ClaimResult(ClaimOutcome.WON, epoch, fence);
-	}
-
-	/**
-	 * 回滚本次认领字段：<b>值匹配 CAS</b>（Lua）才删，避免误删他人重新认领的值（Minor3）。
-	 */
-	private void rollbackClaim(String runId, String toolCallId, String expectedValue) {
-		try {
-			Long deleted = this.redis.execute(CLAIM_ROLLBACK_SCRIPT, List.of(claimKey(runId)), toolCallId,
-					expectedValue);
-			if (deleted != null && deleted > 0L) {
-				log.warn("claim record rolled back runId={} toolCallId={} (read/write after claim failed; no fake claim left)", runId,
-						toolCallId);
-			}
-			else {
-				log.warn("claim record changed, rollback skipped runId={} "
-						+ "toolCallId={} (avoid deleting another owner's claim)", runId, toolCallId);
-			}
-		}
-		catch (Exception ex) {
-			log.warn("claim record rollback failed runId={} toolCallId={} (manual claim check needed): {}", runId, toolCallId,
-					ex.getMessage());
-		}
+		boolean won = ((Number) result.get(0)).longValue() == 1L && "WON".equals(outcome);
+		return new ClaimResult(won ? ClaimOutcome.WON : ClaimOutcome.LOST, epoch, fence);
 	}
 
 	/** I-3 / Minor4：连接类失败可能被包装（RedisSystemException 等）——沿 cause 链判断。 */
@@ -4273,20 +4329,38 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 */
 	public int cancelPendings(String runId) {
 		int changed = 0;
-		// C2：取消收尾用非抛读口 —— guard 读失败不能让条目停在 PENDING（用户可见"卡在取消中"）。
 		for (PendingToolCall pending : pendingsLenient(runId)) {
-			if (!cancellableBeforeExecution(runId, pending)) {
+			if (pending == null || (!PendingToolCall.PENDING.equals(pending.getStatus())
+					&& !PendingToolCall.APPROVED.equals(pending.getStatus()))) {
 				continue;
 			}
 			pending.setStatus(PendingToolCall.CANCELLED);
+			pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.CANCELLED.wire());
+			pending.setCode(com.example.configmgr.ai.tool.ToolOutcome.CODE_RUN_CANCELLED);
 			pending.setReason("RUN_CANCELLED");
 			pending.setExecuted(false);
 			pending.setResolvedAtMs(System.currentTimeMillis());
 			pending.setResultText("本轮对话已被用户取消，该工具未执行。");
-			putPending(runId, pending);
-			changed++;
+			if (cancelPending(runId, pending)) {
+				changed++;
+			}
 		}
 		return changed;
+	}
+
+	/** 条件取消一条 pending；当前状态、guard、claim、epoch 与执行证据在 Lua 内复核。 */
+	public boolean cancelPending(String runId, PendingToolCall pending) {
+		String decided = PendingToolCall.CANCELLED + "|" + System.currentTimeMillis() + "|" + this.instanceId;
+		try {
+			List<?> result = this.redis.execute(CANCEL_PENDING_SCRIPT,
+					List.of(pendingKey(runId), decidedKey(runId), claimKey(runId), fenceKey(runId)),
+					pending.getToolCallId(), this.mapper.writeValueAsString(pending), decided,
+					String.valueOf(ttlFor(runId).toMillis()), String.valueOf(heldRunEpoch(runId)));
+			return result != null && !result.isEmpty() && ((Number) result.get(0)).longValue() == 1L;
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法条件取消待决条目 " + pending.getToolCallId(), ex);
+		}
 	}
 
 	/**
@@ -4332,10 +4406,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		if (pending == null) {
 			return false;
 		}
-		if (PendingToolCall.PENDING.equals(pending.getStatus())) {
-			return true;
-		}
-		if (!PendingToolCall.APPROVED.equals(pending.getStatus())) {
+		if (!PendingToolCall.PENDING.equals(pending.getStatus())
+				&& !PendingToolCall.APPROVED.equals(pending.getStatus())) {
 			return false;
 		}
 		return !hasExecutionEvidence(runId, pending);
@@ -4783,6 +4855,41 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("无法写入决策 guard " + toolCallId, ex);
+		}
+	}
+
+	/** 原子写入决策 guard 与完整条目；原条目必须仍为 PENDING 且没有执行证据。 */
+	public DecisionClaim tryApplyDecision(String runId, PendingToolCall pending) {
+		return applyDecision(runId, pending, "");
+	}
+
+	/** 仅修补旧版遗留的同值 guard 半状态；正常新决策不走此口。 */
+	public DecisionClaim tryRepairDecision(String runId, PendingToolCall pending, String expectedGuard) {
+		if (expectedGuard == null || expectedGuard.isBlank()) {
+			return new DecisionClaim(false, null);
+		}
+		return applyDecision(runId, pending, expectedGuard);
+	}
+
+	private DecisionClaim applyDecision(String runId, PendingToolCall pending, String expectedGuard) {
+		String value = pending.getStatus() + "|" + System.currentTimeMillis() + "|" + this.instanceId;
+		try {
+			List<?> result = this.redis.execute(DECIDE_PENDING_SCRIPT,
+					List.of(pendingKey(runId), decidedKey(runId), claimKey(runId)), pending.getToolCallId(),
+					this.mapper.writeValueAsString(pending), value, String.valueOf(ttlFor(runId).toMillis()),
+					expectedGuard);
+			if (result == null || result.size() < 2) {
+				throw new AiStateUnavailableException("决策脚本返回空 " + pending.getToolCallId());
+			}
+			String recorded = String.valueOf(result.get(1));
+			return new DecisionClaim(((Number) result.get(0)).longValue() == 1L,
+					recorded.isEmpty() ? null : recorded);
+		}
+		catch (AiStateUnavailableException ex) {
+			throw ex;
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法原子写入决策 " + pending.getToolCallId(), ex);
 		}
 	}
 

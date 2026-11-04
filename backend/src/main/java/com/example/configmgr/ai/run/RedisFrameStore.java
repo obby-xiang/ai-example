@@ -49,8 +49,8 @@ import java.util.function.LongSupplier;
  * <li>{@code ai:seq:<runId>} STRING —— 业务序号发放口（{@code INCR}，跨实例原子）；
  * 键缺失/过期/降级后恢复时按"已落档末号"自修复抬回（{@code repairRollback}），
  * 保证 24h 后键过期不会让号从 1 重来；</li>
- * <li>{@code ai:xack:<token>:<runId>} STRING —— <b>一次出帧的幂等标记</b>（{@code token → seq}，
- * 短 TTL {@link #ACK_TTL_SECONDS}，同 tag 同槽）。它让"XADD 成功但回包丢失"的重试能按
+ * <li>{@code ai:xack:<runId>} HASH —— <b>每 run 固定的出帧幂等表</b>（field={@code token}，value={@code seq}，
+ * 整表短 TTL {@link #ACK_TTL_SECONDS}，同 tag 同槽；旧动态 token 键仅按原短 TTL 退出，不 SCAN）。它让"XADD 成功但回包丢失"的重试能按
  * <b>精确 ID + 本次帧体</b>认出"这一帧已经落档"，而不是靠查表尾猜（表尾已是别人的帧）；</li>
  * <li>{@code ai:xtrim:<runId>} STRING —— <b>真实裁剪低水位</b>（值 = 最近一次 MAXLEN 裁剪后
  * 幸存首条的业务 {@code seq}，<b>只升不降</b>，随会话 TTL；见 {@link #XTRIM_PREFIX}）。
@@ -214,7 +214,7 @@ public class RedisFrameStore implements FrameStore {
 	/** 原子落档脚本的标记（单测替身按它分派语义，正文改动必须同步改替身）。 */
 	static final String APPEND_MARK = "AI_FRAME_APPEND";
 
-	/** 幂等标记键前缀（{@code ai:xack:<token>:<tag>}；同槽，短 TTL）。 */
+	/** 幂等标记键前缀（{@code ai:xack:<tag>}；同槽，短 TTL）。 */
 	static final String ACK_PREFIX = "ai:xack:";
 
 	/**
@@ -229,23 +229,25 @@ public class RedisFrameStore implements FrameStore {
 	static final String XTRIM_PREFIX = "ai:xtrim:";
 
 	/**
-	 * 幂等标记的存活时长（秒）：只需覆盖"这次出帧的重试窗口"（秒级），
-	 * 不随会话 TTL 留存 —— 否则每帧多一个长期键。
+	 * 幂等 HASH 的存活时长（秒）：只需覆盖"最近出帧的重试窗口"（秒级），
+	 * 每 run 固定一把，不随会话 TTL 长期留存。
 	 */
 	static final long ACK_TTL_SECONDS = 120L;
 
 	/**
-	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>四键</b>同槽 —— seq / xevents / ack / xtrim，
+	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>五键</b>同槽 —— seq / xevents / ack / xtrim / fence，
 	 * 全部带同一 {@code {run:<runId>}} hash tag，Cluster 合法）。
 	 *
-	 * <p>{@code KEYS}（<b>四键</b>，全部带同一 {@code {run:<runId>}} hash tag ⇒ 同槽，Cluster 合法）：
-	 * {@code [ai:seq, ai:xevents, ai:xack:<token>:, ai:xtrim]}。
+	 * <p>{@code KEYS}（<b>五键</b>，全部带同一 {@code {run:<runId>}} hash tag ⇒ 同槽，Cluster 合法）：
+	 * {@code [ai:seq, ai:xevents, ai:xack:, ai:xtrim, ai:fence:run]}。
 	 * {@code ARGV}：{@code [session-ttl, 本进程降级号, 末号探测条数, 窗口, forceRepair, 幂等标记 TTL,
-	 * token, 负载前半段, 负载后半段]}。返回 {@code {seq, degraded, idempotent}}：
-	 * {@code seq == 0} = 拒绝交出低号（刚重建 + 末号不可读），{@code idempotent == 1} = 这一帧<b>已经</b>归档。
+	 * token, 负载前半段, 负载后半段, expectedEpoch]}。返回 {@code {seq, degraded, idempotent}}：
+	 * {@code seq < 0} = fence 已越过 expectedEpoch；{@code seq == 0} = 拒绝交出低号，
+	 * {@code idempotent == 1} = 这一帧<b>已经</b>归档。
 	 *
-	 * <p><b>一次脚本里完成四件事</b>（顺序不可拆）：
+	 * <p><b>一次脚本里完成五件事</b>（顺序不可拆）：
 	 * <ol>
+	 * <li><b>fence</b>：在取号、归档与调用方扇出之前拒绝旧 epoch；</li>
 	 * <li><b>幂等判定</b>：同 token 已记过号 ⇒ 按<b>精确 ID</b>（{@code <seq>-0}）读出那条记录，
 	 *     并把它与<b>本次出帧的帧体</b>逐字节比对；一致才算"已归档"。<b>不看表尾</b>
 	 *     —— 表尾这时可能已经是别的实例的帧，按它判会把"我的帧已成功"误判成"没成功"，
@@ -273,6 +275,11 @@ public class RedisFrameStore implements FrameStore {
 			local token = ARGV[7]
 			local head = ARGV[8]
 			local tail = ARGV[9]
+			local expectedEpoch = tonumber(ARGV[10]) or 0
+			local fence = tonumber(redis.call('GET', KEYS[5]) or '0') or 0
+			if expectedEpoch > 0 and fence > expectedEpoch then
+			  return {-1, 0, 0}
+			end
 			-- 归档裁剪低水位（KEYS[4]）：只有"XADD 前后幸存首条被推高"（MAXLEN 真的丢了条目）才写。
 			-- 幸存首条的<b>业务 seq</b>（读者按业务号比较；升级期遗留记录也有 seq 字段）。
 			local function headSeq()
@@ -292,10 +299,9 @@ public class RedisFrameStore implements FrameStore {
 			  return nil
 			end
 			local headBefore = headSeq()
-			-- KEYS[3] 已是完整键（含本次出帧的 token）：脚本不得再拼一次（否则键名里 token 出现两次，
-			-- 且 tag 之后多出一段，Cluster 槽与"按 token 复用"的语义都会漂移）。
+			-- 每 run 固定 HASH，token 为 field；旧动态 token 键不读取、不扫描，按原短 TTL 退出。
 			local ackKey = KEYS[3]
-			local prev = redis.call('GET', ackKey)
+			local prev = redis.call('HGET', ackKey, token)
 			if prev then
 			  local prevSeq = tonumber(prev)
 			  if prevSeq then
@@ -373,7 +379,8 @@ public class RedisFrameStore implements FrameStore {
 			local seqText = string.format('%.0f', cur)
 			local body = head .. seqText .. tail
 			redis.call('XADD', KEYS[2], 'MAXLEN', '~', window, seqText .. '-0', 'seq', seqText, 'frame', body)
-			redis.call('SET', ackKey, seqText, 'EX', ackTtl)
+			redis.call('HSET', ackKey, token, seqText)
+			redis.call('EXPIRE', ackKey, ackTtl)
 			redis.call('EXPIRE', KEYS[1], ttl)
 			redis.call('EXPIRE', KEYS[2], ttl)
 			-- 裁剪低水位与归档同寿：本次没有触发裁剪也续期（避免水位先过期，读侧把"截断过"
@@ -808,6 +815,12 @@ public class RedisFrameStore implements FrameStore {
 	 */
 	@Override
 	public AppendResult appendAndAllocateSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory) {
+		return appendAndAllocateSeq(runId, frame, payloadFactory, 0L);
+	}
+
+	@Override
+	public AppendResult appendAndAllocateSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory,
+			long expectedEpoch) {
 		String type = String.valueOf(frame.get("type"));
 		if (RunStore.HEARTBEAT_TYPE.equals(type)) {
 			return AppendResult.skipped();
@@ -845,7 +858,8 @@ public class RedisFrameStore implements FrameStore {
 		for (int attempt = 1; attempt <= APPEND_ATTEMPTS; attempt++) {
 			AppendAllocation allocation;
 			try {
-				allocation = allocateAndAppend(runId, state, token, split, ttlSeconds, window, forceRepair);
+				allocation = allocateAndAppend(runId, state, token, split, ttlSeconds, window, forceRepair,
+						expectedEpoch);
 			}
 			catch (Exception ex) {
 				// 回包未知：本拍可能已经归档（XADD 成功、回包丢了）。下一拍用<b>同一个 token</b> 重试，
@@ -884,12 +898,14 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 执行一次原子落档脚本，并把回包解码成 {@code {seq, degraded, idempotent}}。 */
 	private AppendAllocation allocateAndAppend(String runId, RunState state, String token, SeqSplit split,
-			long ttlSeconds, int window, boolean forceRepair) {
+			long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
 		List<?> result = this.redis.execute(APPEND_SCRIPT,
-				List.of(seqKey(runId), streamKey(runId), ackKey(runId, token), trimKey(runId)),
+				List.of(seqKey(runId), streamKey(runId), ackKey(runId), trimKey(runId),
+						RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, runId)),
 				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, state.fallbackSeq.get())),
 				String.valueOf(TAIL_PROBE), String.valueOf(window), forceRepair ? "1" : "0",
-				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText());
+				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText(),
+				String.valueOf(expectedEpoch));
 		if (result == null || result.isEmpty()) {
 			throw new IllegalStateException("原子落档脚本返回空");
 		}
@@ -911,9 +927,9 @@ public class RedisFrameStore implements FrameStore {
 		return new AppendAllocation(seq, degraded, idempotent);
 	}
 
-	/** 幂等标记键：{@code ai:xack:<token>:{...run:<runId>}}（与其余 run 级键同槽）。 */
-	private static String ackKey(String runId, String token) {
-		return RunStore.runScopedKey(ACK_PREFIX + token + ":", runId);
+	/** 固定 run 幂等 HASH：{@code ai:xack:{...run:<runId>}}，token 为 field。 */
+	private static String ackKey(String runId) {
+		return RunStore.runScopedKey(ACK_PREFIX, runId);
 	}
 
 	/** 一次原子落档的结果：{@code seq <= 0} = 没有归档；{@code idempotent} = 命中"已归档"（重试）。 */
@@ -1377,6 +1393,75 @@ public class RedisFrameStore implements FrameStore {
 					ex.toString());
 		}
 		return out;
+	}
+
+	@Override
+	public FrameStore.RawEntryPage readRawAfterEntry(String runId, String afterEntryId, int limit) {
+		String start;
+		try {
+			start = afterEntryId == null || afterEntryId.isBlank() || "-".equals(afterEntryId)
+					? "-" : successorStreamId(afterEntryId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("event log invalid physical cursor runId={} afterEntryId={}: {}", runId, afterEntryId,
+					ex.getMessage());
+			return new FrameStore.RawEntryPage(List.of(), true);
+		}
+		if (start == null) {
+			return new FrameStore.RawEntryPage(List.of(), false);
+		}
+		List<FrameStore.RawEntryFrame> out = new ArrayList<>();
+		Range<String> range = "-".equals(start) ? Range.unbounded()
+				: Range.rightUnbounded(Range.Bound.inclusive(start));
+		try {
+			byte[] key = bytes(streamKey(runId));
+			this.redis.execute((RedisCallback<Object>) connection -> {
+				List<ByteRecord> records = connection.xRange(key, range,
+						org.springframework.data.redis.connection.Limit.limit().count(Math.max(1, limit)));
+				if (records == null) {
+					return null;
+				}
+				for (ByteRecord record : records) {
+					if (record == null || record.getId() == null) {
+						continue;
+					}
+					byte[] raw = frameFieldOf(record);
+					out.add(new FrameStore.RawEntryFrame(record.getId().getValue(), seqFieldOf(record),
+							raw == null ? null : new String(raw, StandardCharsets.UTF_8)));
+				}
+				return null;
+			});
+			return new FrameStore.RawEntryPage(out, false);
+		}
+		catch (Exception ex) {
+			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
+			log.warn("event log physical raw read failed runId={} afterEntryId={}: {}", runId, afterEntryId,
+					ex.toString());
+			return new FrameStore.RawEntryPage(List.of(), true);
+		}
+	}
+
+	/** Redis 5 兼容的物理 ID 后继；最大无符号 64 位两段 ID 没有后继。 */
+	static String successorStreamId(String id) {
+		String value = id == null ? "" : id.trim();
+		int dash = value.indexOf('-');
+		String millisText = dash < 0 ? value : value.substring(0, dash);
+		String sequenceText = dash < 0 ? "0" : value.substring(dash + 1);
+		if (millisText.isEmpty() || sequenceText.isEmpty() || sequenceText.indexOf('-') >= 0
+				|| !millisText.chars().allMatch(ch -> ch >= '0' && ch <= '9')
+				|| !sequenceText.chars().allMatch(ch -> ch >= '0' && ch <= '9')) {
+			throw new IllegalArgumentException("非法 stream id " + id);
+		}
+		java.math.BigInteger max = java.math.BigInteger.ONE.shiftLeft(64).subtract(java.math.BigInteger.ONE);
+		java.math.BigInteger millis = new java.math.BigInteger(millisText);
+		java.math.BigInteger sequence = new java.math.BigInteger(sequenceText);
+		if (millis.compareTo(max) > 0 || sequence.compareTo(max) > 0) {
+			throw new IllegalArgumentException("stream id 超出无符号 64 位 " + id);
+		}
+		if (sequence.compareTo(max) < 0) {
+			return millis + "-" + sequence.add(java.math.BigInteger.ONE);
+		}
+		return millis.compareTo(max) < 0 ? millis.add(java.math.BigInteger.ONE) + "-0" : null;
 	}
 
 	/**

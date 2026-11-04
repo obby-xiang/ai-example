@@ -764,18 +764,24 @@ public class LeaseService {
 				// 由 RunStore 的"终态之后不再写"契约兜底；保留墓碑会让正常的下一任被误判只读）。
 				this.ended.remove(viewKey);
 			}
+			else if (hashTagOf(lease.key()) != null) {
+				markEnded(viewKey, released == null ? LeaseAuthority.UNAVAILABLE : LeaseAuthority.LOST);
+			}
 			return released != null && released > 0L;
 		}
 		catch (Exception ex) {
 			// run 租约保留进程内视图与 fencing 墓碑；资源锁不参与 authority，失败后立即忘掉这一任，
 			// 周期任务的唯一 owner 因此不会随扫描次数在 held/ended 中累积。Redis 键仍由原 TTL 收敛。
 			markFacilityUnhealthy(ex);
+			String viewKey = viewKey(lease.key(), lease.owner());
 			if (hashTagOf(lease.key()) == null) {
-				String viewKey = viewKey(lease.key(), lease.owner());
 				if (this.held.remove(viewKey, lease)) {
 					stopDrivingExact(viewKey);
 				}
 				this.ended.remove(viewKey);
+			}
+			else {
+				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
 			log.debug("lease release failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
 			return false;

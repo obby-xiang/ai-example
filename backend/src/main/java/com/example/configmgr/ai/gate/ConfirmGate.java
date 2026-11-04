@@ -1381,7 +1381,10 @@ public class ConfirmGate {
 			fresh.setExecuted(false);
 			fresh.setResolvedAtMs(System.currentTimeMillis());
 			fresh.setResultText("本轮对话已被用户取消，该工具未执行。");
-			this.store.putPending(runId, fresh);
+			if (!this.store.cancelPending(runId, fresh)) {
+				PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
+				return current == null ? pending : current;
+			}
 		}
 		SseChatEmitter out = this.registry.of(runId);
 		if (confirm) {
@@ -1412,15 +1415,15 @@ public class ConfirmGate {
 	}
 
 	/**
-	 * 前端回执超时的<b>单写者</b>版本：先用决策 guard（{@code ai:decided} 的 {@code HSETNX}）
-	 * 抢一次"这张卡的结论"，抢到才落库/发结局帧。
+	 * 前端回执超时的<b>单写者</b>版本：guard 与完整超时条目由同槽 Lua 原子写入，
+	 * 胜者才发结局帧。
 	 *
 	 * <p>为什么需要 guard：到期判定现在有<b>两个</b>入口 —— 原实例进程内的 park 定时器，与任一实例的
 	 * 运行期扫描/重挂（{@code convergeExpiredParkedFrontend}）。两边同时到点会各写一次 {@code TIMEOUT}、
 	 * 各发一条 {@code frontend_tool_result}。guard 与人工决策/回灌共用同一把，于是"同一张卡只有
 	 * 一个结论写者"在跨实例上也成立；败方按幂等返回（不落库、不再发帧）。
 	 *
-	 * <p>降级口径：{@code tryRecordDecision} 返回 {@code null}（轻装配/替身不提供 guard）时保持旧行为 ——
+	 * <p>降级口径：{@code tryApplyDecision} 返回 {@code null}（轻装配/替身不提供 guard）时保持旧行为 ——
 	 * 单写路径本来就没有第二个并发方；<b>抛异常</b>（guard 设施不可用）则失败关闭、原样上抛：
 	 * 本方法不落库、不发帧，由调用方的 catch 记录后下一拍重试。
 	 */
@@ -1432,28 +1435,29 @@ public class ConfirmGate {
 		if (!PendingToolCall.PENDING.equals(fresh.getStatus())) {
 			return new ExpiryResult(fresh, false, false);
 		}
-		RunStore.DecisionClaim claim = claimExpiry(runId, fresh.getToolCallId());
-		if (claim != null && !claim.won()) {
-			// 结论已由别的写者抢到（人工决策/另一实例的到期收敛）：本写者不再落库、不再发帧。
+		PendingToolCall timedOut = applyFrontendTimeout(fresh, timeoutSeconds);
+		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, timedOut);
+		if (claim == null) {
+			return new ExpiryResult(writeFrontendTimeout(runId, timedOut, timeoutSeconds), true, true);
+		}
+		if (!claim.won()) {
 			PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
-			PendingToolCall entry = current == null ? fresh : current;
+			PendingToolCall entry = current == null ? pending : current;
 			if (PendingToolCall.PENDING.equals(entry.getStatus()) && isStaleExpiryClaim(claim.recorded())) {
-				// WAL 修补：guard 的持有者已超龄（死在"抢 guard → 落库"之间）。补齐存储让状态收敛，
-				// 但<b>不发结局帧</b> —— 帧的发送权仍属于 guard 的（已死的）持有者，补发会造出第二条。
 				PendingToolCall raw = rawOr(entry, runId, pending.getToolCallId());
 				if (PendingToolCall.PENDING.equals(raw.getStatus())) {
 					PendingToolCall repaired = applyFrontendTimeout(raw, timeoutSeconds);
-					this.store.putPending(runId, repaired);
-					return new ExpiryResult(repaired, true, false);
+					RunStore.DecisionClaim repair = this.store.tryRepairDecision(runId, repaired, claim.recorded());
+					if (repair != null && repair.won()) {
+						return new ExpiryResult(repaired, true, false);
+					}
 				}
 			}
 			return new ExpiryResult(entry, false, false);
 		}
-		PendingToolCall target = claim == null ? fresh : rawOr(fresh, runId, pending.getToolCallId());
-		if (!PendingToolCall.PENDING.equals(target.getStatus())) {
-			return new ExpiryResult(target, false, false);
-		}
-		return new ExpiryResult(writeFrontendTimeout(runId, target, timeoutSeconds), true, true);
+		this.registry.of(runId).frontendToolResult(timedOut, false, timedOut.getResultText());
+		traceDecision(runId, timedOut.getToolCallId(), "timeout", timedOut, "ACCEPTED", "system");
+		return new ExpiryResult(timedOut, true, true);
 	}
 
 	/**
@@ -1477,18 +1481,6 @@ public class ConfirmGate {
 		catch (NumberFormatException ex) {
 			return false;
 		}
-	}
-
-	/**
-	 * 抢"这张卡已到期"的写权。
-	 *
-	 * <p><b>失败关闭</b>：这里<b>不</b> catch —— 返回 {@code null}（轻装配/替身不支持 guard）才退回旧
-	 * 单写路径；<b>抛异常</b>（guard 设施不可用）必须原样上抛，由各到期入口的外层 catch 记录并
-	 * <b>不落库、不发结局帧、不派发续跑</b>，下一拍再试。把异常吞成 {@code null} 会让两个实例同时
-	 * 认为自己拿到了写权 —— 正是一定要消灭的"双 TIMEOUT/双结局帧"。
-	 */
-	private RunStore.DecisionClaim claimExpiry(String runId, String toolCallId) {
-		return this.store.tryRecordDecision(runId, toolCallId, PendingToolCall.TIMEOUT);
 	}
 
 	/** guard 抢到后必须看<b>原始</b>条目（{@code pendingLenient} 已把刚写的 guard 合进视图）。 */
@@ -1788,16 +1780,10 @@ public class ConfirmGate {
 	 * （详见 {@link #kindMismatch}）；判定在 PENDING 之前，故"错入口 + 已决"报 mismatch，
 	 * "正确 kind + 已决"仍是 DUPLICATE。
 	 *
-	 * <h2>R4（B23L1 批②b）：全集群唯一写者</h2>
-	 * 过去"读 PENDING → 判 → 改写 → 落库"只由 {@code submitLock} 串行化，而那是<b>实例内</b>的锁：
-	 * 两个实例（两个 JVM / 两次请求落在不同实例）会各读一次 PENDING、各改一版、各自落库 ——
-	 * 两次都成功、两帧回执、后写覆盖先写。现在第一件事是抢 {@code ai:decided:<runId>} 的
-	 * {@code HSETNX}（批②a 建设施，单条命令即原子）：抢到的才是唯一写者，抢不到的按已决响应。
-	 *
-	 * <p><b>为什么在 {@code submitLock} 之外抢</b>：那把锁只在<b>本实例</b>内排他，对跨实例的
-	 * 竞争毫无作用；把它包在 guard 外面只会让本实例的提交在锁内多做一次 Redis 往返
-	 * （等待侧 2s 轮询也读这把锁，往返被拉长 = 决策可见性变慢）。guard 的互斥由 Redis 保证，
-	 * 与本地锁正交；本地锁仍然只管"落库 → 发帧 → 唤醒"这三步的帧序。
+	 * <h2>R4：全集群唯一写者</h2>
+	 * {@code decided} guard 与完整 pending 载荷由同槽 Lua 原子写入；脚本复核当前条目仍为
+	 * {@code PENDING} 且没有 claim/执行证据，因此本地 {@code submitLock} 只负责后续帧序，
+	 * 不再承担跨实例决策互斥。
 	 *
 	 * <p><b>失败/已决分支不写 guard</b>：{@code NOT_FOUND} 与"条目已非 PENDING"（旧客户端/取消/
 	 * 超时先到）都不该占用 guard，否则一条本不该被决的卡会被永久判成"已决"。
@@ -1819,26 +1805,9 @@ public class ConfirmGate {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
 		}
 		String decidedStatus = approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED;
-		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, toolCallId, decidedStatus);
-		if (claim != null) {
-			if (!claim.won()) {
-				return convergeOnDecided(runId, toolCallId, claim.recorded());
-			}
-			// guard 到手：读与 guard 之间可能已有"不带 guard 的写者"（取消/前端超时）落库，故复判一次。
-			// 复判必须看<b>原始</b>条目：读侧合并会把我刚写的 guard 回灌进视图，于是"自己把自己判成已决"。
-			// （guard 不存在时没有这件事可判 —— 替身/降级实现，保持批②b 之前的单读路径。）
-			pending = pendingForWrite(runId, toolCallId);
-			if (pending == null) {
-				return new Submission(Outcome.NOT_FOUND, null, false, null);
-			}
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
-				return new Submission(Outcome.DUPLICATE, pending, false, null);
-			}
-		}
 		pending.setStatus(decidedStatus);
 		pending.setReason(reason == null || reason.isBlank()
 				? (approved ? "用户在确认门中批准" : "用户在确认门中拒绝") : reason);
-		// 决策落库时"一定还没执行"：执行由循环内的认领（claimExecution）负责置位
 		pending.setExecuted(false);
 		pending.setExecutedBy(null);
 		pending.setResolvedAtMs(System.currentTimeMillis());
@@ -1848,15 +1817,20 @@ public class ConfirmGate {
 			pending.setResultText("用户拒绝了该操作，工具未执行。拒绝原因：" + pending.getReason());
 		}
 		else {
-			// 放行后的结局由执行决定（executeOnce 写入），此处清掉可能残留的旧结局
 			pending.setOutcome(null);
 			pending.setCode(null);
+		}
+		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
+		if (claim != null && !claim.won()) {
+			return convergeOnDecided(runId, toolCallId, claim.recorded());
 		}
 		boolean woke;
 		// S5c-6：落库 → 发回执帧 → 唤醒，一次不可分割（顺序不可交换：唤醒会让等待方立刻产出
 		// "后果帧"，回执若晚于它就变成"工具结局先到、人的决策后到"，极端时晚于 done）。
 		synchronized (submitLockFor(runId)) {
-			this.store.putPending(runId, pending);
+			if (claim == null) {
+				this.store.putPending(runId, pending);
+			}
 			this.registry.of(runId).confirmDecision(pending, approved ? "approve" : "reject", pending.getReason(), 0L);
 			woke = signal(runId, toolCallId);
 		}
@@ -2014,8 +1988,15 @@ public class ConfirmGate {
 			pending.setOutcome(ToolOutcome.CANCELLED.wire());
 			pending.setCode(ToolOutcome.CODE_RUN_CANCELLED);
 		}
-		synchronized (submitLockFor(runId)) {
-			this.store.putPending(runId, pending);
+		RunStore.DecisionClaim repair = this.store.tryRepairDecision(runId, pending, recorded);
+		if (repair == null) {
+			synchronized (submitLockFor(runId)) {
+				this.store.putPending(runId, pending);
+			}
+		}
+		else if (!repair.won()) {
+			PendingToolCall current = this.store.pendingRaw(runId, toolCallId);
+			return new Submission(current == null ? Outcome.NOT_FOUND : Outcome.DUPLICATE, current, false, null);
 		}
 		log.warn("decision guard already held by another writer (rejected as idempotent; entry reconciled from WAL, no receipt frame re-sent) runId={} toolCallId={} guard={}",
 				runId, toolCallId, recorded);
@@ -2159,25 +2140,6 @@ public class ConfirmGate {
 			log.warn("frontend tool submission rejected by safety gate [contract=前端工具回灌被安全闸拒绝] (state unchanged; park keeps waiting) runId={} toolCallId={} name={} code={} issueCodes={}", runId, toolCallId, pending.getName(), verdict.code(), verdict.issues().stream().map(i -> i.code()).toList());
 			return new Submission(Outcome.REJECTED, pending, false, verdict);
 		}
-		// R4：与 submitDecision 同一套 guard（详见该方法的"全集群唯一写者"）。
-		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, toolCallId,
-				PendingToolCall.FRONTEND_RESULT);
-		if (claim != null) {
-			if (!claim.won()) {
-				return convergeOnDecided(runId, toolCallId, claim.recorded());
-			}
-			pending = pendingForWrite(runId, toolCallId);
-			if (pending == null) {
-				return new Submission(Outcome.NOT_FOUND, null, false, null);
-			}
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
-				return new Submission(Outcome.DUPLICATE, pending, false, null);
-			}
-			// R4 抢到 guard 后重读了条目（真实 Redis = 反序列化出新对象）：白名单副本要在新副本上
-			// 再落一次，否则它随旧对象一起被丢弃 —— 后果是 tool_call_end 八字段与 ai:safety 台账
-			// 双双缺席，而判定语义完全正常（观测面塌陷，最容易被当成"没数据"而不是"丢了"）。
-			applySheetMeta(pending, sheetMeta);
-		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
 		pending.setOutcome(declared == null ? ToolOutcome.OK.wire() : declared.wire());
@@ -2192,15 +2154,21 @@ public class ConfirmGate {
 		}
 		pending.setResultText(resultText);
 		pending.setResolvedAtMs(System.currentTimeMillis());
+		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
+		if (claim != null && !claim.won()) {
+			return convergeOnDecided(runId, toolCallId, claim.recorded());
+		}
 		boolean woke;
 		synchronized (submitLockFor(runId)) {
-			this.store.putPending(runId, pending);
+			if (claim == null) {
+				this.store.putPending(runId, pending);
+			}
 			// ===== 决策侧帧册收口（suspend-kill-a 的 FRONTEND_RESULT 残支）=====
 			// 前端卡的结局帧由本方法发出、<b>早于</b>续跑 —— 续跑侧再补只会排在 result 之后，
 			// 所以补发点必须在这里：同一把 submitLock 内、发结局帧之前。判据是事件日志（跨实例），
 			// 原实例的 tool_start 已在归档则一条不补。写出器取 registry.of(runId) 这同一个身份，
 			// 保证补发帧与结局帧走同一条取号/落档/订阅扇出路径。
-			// 决策幂等不受影响：走到这里之前 tryRecordDecision 已经决出唯一写者，重复回灌在上面就返回。
+			// 决策幂等不受影响：原子决策已决出唯一写者，重复回灌在上面就返回。
 			SseChatEmitter out = this.registry.of(runId);
 			try {
 				if (out.ensureToolStart(pending)) {
@@ -2343,27 +2311,6 @@ public class ConfirmGate {
 	 * （且与"没人响应"的超时语义分开，排障时看得清）。
 	 */
 	private Submission dismiss(String runId, PendingToolCall pending, String source, Map<String, Object> sheetMeta) {
-		// R4：放弃同样是"这张卡的结论"，与决策/回灌争同一把 guard（两个页签同时关表单只落一次）
-		RunStore.DecisionClaim claim = this.store.tryRecordDecision(runId, pending.getToolCallId(),
-				PendingToolCall.FRONTEND_CANCELLED);
-		if (claim != null) {
-			if (!claim.won()) {
-				return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
-			}
-			// 抢到 guard 后<b>复读</b>条目：入参那份是抢 guard 之前读到的副本，中间可能已有"不带 guard
-			// 的写者"落了库（前端超时收敛、整轮取消）。旧实现随后无条件把副本改成 FRONTEND_CANCELLED
-			// 并发帧 ⇒ 覆盖别人写下的结局 + 同一张卡两帧。非 PENDING 一律按幂等收口：不覆盖、不发帧。
-			pending = pendingForWrite(runId, pending.getToolCallId());
-			if (pending == null) {
-				return new Submission(Outcome.NOT_FOUND, null, false, null);
-			}
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
-				return new Submission(Outcome.DUPLICATE, pending, false, null);
-			}
-			// 复读出来的是新副本（真实 Redis = 反序列化）：入口已过白名单的表格元数据要在新副本上
-			// 再落一次，否则审计计数（writePlans/writeCancelled）会随旧对象一起丢掉。
-			applySheetMeta(pending, sheetMeta);
-		}
 		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
 		pending.setOutcome(ToolOutcome.CANCELLED.wire());
 		pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
@@ -2373,9 +2320,15 @@ public class ConfirmGate {
 		String text = "FRONTEND_CANCELLED：用户取消了该前端操作（关闭表单/放弃填写），"
 				+ "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
 		pending.setResultText(text);
+		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
+		if (claim != null && !claim.won()) {
+			return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
+		}
 		boolean woke;
 		synchronized (submitLockFor(runId)) {
-			this.store.putPending(runId, pending);
+			if (claim == null) {
+				this.store.putPending(runId, pending);
+			}
 			this.registry.of(runId).frontendToolResult(pending, false, text);
 			woke = signal(runId, pending.getToolCallId());
 		}

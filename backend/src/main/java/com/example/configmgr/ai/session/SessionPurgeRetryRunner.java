@@ -282,7 +282,8 @@ public class SessionPurgeRetryRunner {
 						}
 						catch (RuntimeException ex) {
 							failed++;
-							recordVerifyFailure(pending, "verify exception: " + ex.getMessage());
+							log.warn("Session purge memory verify threw sessionId={} (durable pending kept): {}",
+									pending.sessionId(), ex.getMessage());
 							continue;
 						}
 						if (verify == null) {
@@ -293,8 +294,6 @@ public class SessionPurgeRetryRunner {
 						}
 						else {
 							failed++;
-							// 失败沿用有限退避/MAX_ATTEMPTS（verifyAtMs 保留 ⇒ 下一次仍是记忆面复核）。
-							recordVerifyFailure(pending, "memory verify: " + String.join("; ", verify.errors()));
 						}
 						continue;
 					}
@@ -314,15 +313,8 @@ public class SessionPurgeRetryRunner {
 					}
 					catch (RuntimeException ex) {
 						failed++;
-						// 失败不 blind disarm；能记则记一次退避，记不了就保持 pending 原状。
-						try {
-							this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(),
-									"retry exception: " + ex.getMessage());
-						}
-						catch (RuntimeException recordEx) {
-							log.warn("Failed to record session purge retry failure sessionId={} (pending/guard kept): {}",
-									pending.sessionId(), recordEx.getMessage());
-						}
+						log.warn("Session purge retry threw sessionId={} (durable pending kept): {}",
+								pending.sessionId(), ex.getMessage());
 					}
 				}
 			}
@@ -376,17 +368,6 @@ public class SessionPurgeRetryRunner {
 					+ "stalled, renewal and remaining candidates stopped (in-flight candidate finishes on its own)", CANDIDATE_STALL_TIMEOUT_MS);
 		}
 		return true;
-	}
-
-	/** 复核失败记一次退避（不删台账、不 disarm）；记录本身失败只 WARN，台账保持原状。 */
-	private void recordVerifyFailure(SessionPurgePendingStore.Pending pending, String error) {
-		try {
-			this.pendingStore.recordFailure(pending.sessionId(), pending.purgeId(), error);
-		}
-		catch (RuntimeException ex) {
-			log.warn("Failed to record session purge memory re-verify failure sessionId={} (pending/guard kept): {}", pending.sessionId(),
-					ex.getMessage());
-		}
 	}
 
 	/**

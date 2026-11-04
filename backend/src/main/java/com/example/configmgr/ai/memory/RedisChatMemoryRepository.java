@@ -2,6 +2,7 @@ package com.example.configmgr.ai.memory;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
@@ -17,7 +18,9 @@ import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -56,7 +59,8 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
  * {@code }} 先转义（{@code %}→{@code %25}、{@code {}→{@code %7B}、{@code }}→{@code %7D}），
  * 保证任意非空 id 的 tag 非空且无碰撞。</li>
  * <li>{@code chat:mem:staging:<tenantId>:<userId>:{<escapedId>}:<uuid>} — 非空 {@link #saveAll} 的临时 LIST，
- * 与 final 共享同一个 hash tag，因此 RENAME 同槽。</li>
+ * 与 final 共享同一个 hash tag，因此 RENAME 同槽；{@code chat:mem:staging:idx:...{<escapedId>}} 是同槽
+ * 会话精确索引，写入、RENAME/CAS 与清理均在同一 Lua 中维护成员和 TTL。</li>
  * <li>{@code chat:mem:<tenantId>:<userId>:{<escapedId>}:ver} — <b>按轮合并 CAS 的版本键</b>（STRING）。
  * 与数据键逐字共用同一个 hash tag（Cluster 同槽），{@code MERGE_CAS} 脚本据此"比对版本 → 落盘 → 推进版本"；
  * 随会话 TTL 滑动。</li>
@@ -78,10 +82,9 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
  * 读-改-写由会话级版本键做 CAS —— 版本不符就重读重算，<b>不</b>用"拒绝旧写"代替合并；
  * <b>清空代次不符则直接作废且不重试</b>（清空之后不许把旧历史写回来）。
  * 落盘仍是 staging + {@code RENAME}：CAS 成功前旧历史一直可读。</li>
- * <li><b>非空 {@link #saveAll} = staging 原子写入（RPUSH + PEXPIRE）+ {@code RENAME}</b>：
- * staging 写入走<b>单键</b> Lua，数据与 TTL 同时生效（finally 的 DEL 再失败也不会留下无 TTL 的孤儿）；
- * 随后 {@code RENAME staging final} 原子覆盖。RENAME 成功前旧历史一直可读；任一步失败只清理
- * staging，<b>绝不先删旧历史</b>。TTL 随 RENAME 继承到 final，仍为滑动过期。</li>
+ * <li><b>非空 {@link #saveAll} = staging 原子写入（RPUSH + 索引 SADD + PEXPIRE）+ {@code RENAME}</b>：
+ * staging 与精确索引同槽，写入和 TTL 同时生效；RENAME 与索引摘成员也由同一 Lua 原子完成。
+ * RENAME 成功前旧历史一直可读；任一步失败只清理 staging，<b>绝不先删旧历史</b>。</li>
  * <li><b>整窗替换（{@link #replaceWindow}）= 压缩/记忆窗口写回的专用面</b>：内容就是压缩算出来的那一份
  * （含别的 run 的块），以调用方读到的 {@link MemoryWindowSnapshot}（版本 + 代次）为 CAS 基线<b>一次</b>
  * 落盘；基线已变 ⇒ <b>放弃</b>（返回 {@code false}，不重试、不重算）。绝不"整窗覆盖 + CAS 重试" ——
@@ -155,40 +158,46 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** staging 键前缀；与 final 键共享 {@code {<escapedId>}} hash tag。 */
 	static final String STAGING_PREFIX = KEY_PREFIX + "staging:";
 
+	private static final String STAGING_INDEX_PREFIX = KEY_PREFIX + "staging:idx:";
+
 	/** staging 脚本标记（测试替身据此分派；不要改动与脚本正文不一致）。 */
 	static final String STAGE_WRITE_MARK = "STAGE_WRITE";
 
-	/**
-	 * staging 原子写入：{@code RPUSH ... + PEXPIRE} 在同一条<b>单键</b>脚本里完成。
-	 *
-	 * <p>为什么不是 {@code RPUSH} 后再发 {@code EXPIRE}：两条命令之间进程崩溃、或 EXPIRE 失败后
-	 * finally 的 DEL 也失败时，会留下一个无 TTL 的孤儿 staging 键。单键脚本不跨槽（Cluster 安全），
-	 * 且数据与 TTL 同生同死。ARGV[1] = TTL 毫秒（0 表示不设 TTL），其余为消息 JSON。
-	 */
-	private static final RedisScript<Long> STAGE_WRITE = new DefaultRedisScript<>(
-			"-- STAGE_WRITE\n" + "local ttl = tonumber(ARGV[1])\n"
-					+ "for i = 2, #ARGV do redis.call('RPUSH', KEYS[1], ARGV[i]) end\n"
-					+ "if ttl and ttl > 0 then redis.call('PEXPIRE', KEYS[1], ttl) end\n" + "return #ARGV - 1",
-			Long.class);
+	private static final RedisScript<Long> STAGE_WRITE = new DefaultRedisScript<>("""
+			-- STAGE_WRITE
+			local ttl = tonumber(ARGV[1])
+			for i = 3, #ARGV do redis.call('RPUSH', KEYS[1], ARGV[i]) end
+			redis.call('SADD', KEYS[2], ARGV[2])
+			if ttl and ttl > 0 then
+			  redis.call('PEXPIRE', KEYS[1], ttl)
+			  redis.call('PEXPIRE', KEYS[2], ttl)
+			end
+			return #ARGV - 2
+			""", Long.class);
+
+	private static final RedisScript<Long> STAGING_COMMIT = new DefaultRedisScript<>("""
+			-- STAGING_COMMIT
+			redis.call('RENAME', KEYS[1], KEYS[2])
+			redis.call('SREM', KEYS[3], ARGV[1])
+			local ttl = tonumber(ARGV[2])
+			if ttl and ttl > 0 then redis.call('PEXPIRE', KEYS[3], ttl) end
+			if redis.call('SCARD', KEYS[3]) == 0 then redis.call('DEL', KEYS[3]) end
+			return 1
+			""", Long.class);
+
+	private static final RedisScript<Long> STAGING_DISCARD = new DefaultRedisScript<>("""
+			-- STAGING_DISCARD
+			local deleted = redis.call('DEL', KEYS[1])
+			redis.call('SREM', KEYS[2], ARGV[1])
+			local ttl = tonumber(ARGV[2])
+			if ttl and ttl > 0 then redis.call('PEXPIRE', KEYS[2], ttl) end
+			if redis.call('SCARD', KEYS[2]) == 0 then redis.call('DEL', KEYS[2]) end
+			return deleted
+			""", Long.class);
 
 	/** 合并 CAS 脚本标记（测试替身据此分派；不要改动与脚本正文不一致）。 */
 	static final String MERGE_CAS_MARK = "MERGE_CAS";
 
-	/**
-	 * 会话级 CAS + 落盘：四个键 {@code [staging, final, version, generation]} 共用一个 hash tag（Cluster 同槽）。
-	 *
-	 * <p>ARGV[1] = 期望版本（{@code "0"} = 尚未写过），ARGV[2] = 期望清空代次，
-	 * ARGV[3] = {@code rename}|{@code delete}，ARGV[4] = TTL 毫秒。
-	 * <ul>
-	 * <li><b>代次不符 ⇒ {@code -2}</b>：本次写回启动之后会话被清空过 ⇒ <b>直接作废</b>；调用方
-	 *     <b>不得</b>重试（重试会拿"新版本 + 空窗"把它手里那份清空前的历史再写一遍）；</li>
-	 * <li><b>版本不符 ⇒ {@code -1}</b>：另一写者先落地 ⇒ 调用方重读再合并（不丢自己这一块）；</li>
-	 * <li>都对上才把 staging {@code RENAME} 成 final（或 {@code DEL} 掉 final），续 TTL 并推进版本。</li>
-	 * </ul>
-	 *
-	 * <p>为什么 CAS 必须在脚本里：读窗口 → 算合并 → 写回 是三步，多实例下必须"比对版本 + 落地"
-	 * 原子完成，否则两个写者的整窗结果会互相覆盖（正是本批要消灭的形态）。
-	 */
 	private static final RedisScript<Long> MERGE_CAS = new DefaultRedisScript<>(
 			"-- MERGE_CAS\n" + "local expected = ARGV[1]\n" + "local expectedGen = ARGV[2]\n"
 					+ "local mode = ARGV[3]\n" + "local ttl = tonumber(ARGV[4])\n"
@@ -197,10 +206,13 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 					+ "local current = redis.call('GET', KEYS[3])\n"
 					+ "if not current then current = '0' end\n" + "if current ~= expected then return -1 end\n"
 					+ "if mode == 'delete' then\n" + "  redis.call('DEL', KEYS[2])\n" + "else\n"
-					+ "  redis.call('RENAME', KEYS[1], KEYS[2])\n" + "end\n" + "if ttl and ttl > 0 then\n"
+					+ "  redis.call('RENAME', KEYS[1], KEYS[2])\n" + "end\n"
+					+ "redis.call('SREM', KEYS[5], ARGV[5])\n" + "if ttl and ttl > 0 then\n"
 					+ "  if mode ~= 'delete' then redis.call('PEXPIRE', KEYS[2], ttl) end\n"
 					+ "  redis.call('PEXPIRE', KEYS[3], ttl)\n" + "  redis.call('PEXPIRE', KEYS[4], ttl)\n"
-					+ "end\n" + "redis.call('INCR', KEYS[3])\n" + "return 1\n",
+					+ "  redis.call('PEXPIRE', KEYS[5], ttl)\n" + "end\n"
+					+ "if redis.call('SCARD', KEYS[5]) == 0 then redis.call('DEL', KEYS[5]) end\n"
+					+ "redis.call('INCR', KEYS[3])\n" + "return 1\n",
 			Long.class);
 
 	/** 合并 CAS 版本键后缀（同 hash tag ⇒ 同槽）。 */
@@ -324,16 +336,53 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		return stagingKeyPrefix(conversationId) + token;
 	}
 
-	/**
-	 * 该会话 staging 键的<b>精确前缀</b>：{@code chat:mem:staging:{<escapedId>}:}。
-	 *
-	 * <p>会话销毁要扫出"在飞 saveAll 的中间态"并逐个删除（它们不在正式数据键的口径里）。
-	 * 扫描用的 glob 依赖 {@code escapedId}（无花括号 ⇒ tag 无碰撞），但 glob 里的
-	 * {@code * ? [ ] \} 仍需调用方过滤：<b>只接受以此前缀逐字开头的键</b>，这样
-	 * sessionId 自带通配符（如 {@code a*b}）时也不会命中别的会话。
-	 */
 	public static String stagingKeyPrefix(String conversationId) {
 		return STAGING_PREFIX + TenantKeyScope.currentSegment() + "{" + escapedId(conversationId) + "}:";
+	}
+
+	public static String stagingIndexKey(String conversationId) {
+		return STAGING_INDEX_PREFIX + TenantKeyScope.currentSegment() + "{" + escapedId(conversationId) + "}";
+	}
+
+	public List<String> stagingKeys(String conversationId) {
+		Set<String> tokens = this.redis.opsForSet().members(stagingIndexKey(conversationId));
+		if (tokens == null || tokens.isEmpty()) {
+			return List.of();
+		}
+		return tokens.stream().filter(token -> token != null && !token.isBlank())
+				.map(token -> stagingKey(conversationId, token)).toList();
+	}
+
+	public List<Long> deleteStagingKeys(String conversationId, List<String> keys) {
+		if (keys.isEmpty()) {
+			return List.of();
+		}
+		String prefix = stagingKeyPrefix(conversationId);
+		byte[] script = STAGING_DISCARD.getScriptAsString().getBytes(StandardCharsets.UTF_8);
+		byte[] index = stagingIndexKey(conversationId).getBytes(StandardCharsets.UTF_8);
+		byte[] ttl = Long.toString(stagingTtlMillis()).getBytes(StandardCharsets.UTF_8);
+		List<Long> out = new ArrayList<>(keys.size());
+		for (int from = 0; from < keys.size(); from += 64) {
+			List<String> batch = keys.subList(from, Math.min(keys.size(), from + 64));
+			List<Object> results = this.redis.executePipelined((RedisCallback<Object>) connection -> {
+				for (String key : batch) {
+					if (key == null || !key.startsWith(prefix)) {
+						throw new IllegalArgumentException("staging key does not belong to conversation");
+					}
+					String token = key.substring(prefix.length());
+					connection.eval(script, ReturnType.INTEGER, 2, key.getBytes(StandardCharsets.UTF_8), index,
+							token.getBytes(StandardCharsets.UTF_8), ttl);
+				}
+				return null;
+			});
+			if (results == null || results.size() < batch.size()) {
+				throw new IllegalStateException("staging delete pipeline result incomplete");
+			}
+			for (Object result : results) {
+				out.add(result instanceof Number number ? number.longValue() : -1L);
+			}
+		}
+		return List.copyOf(out);
 	}
 
 	private static String requireId(String conversationId) {
@@ -496,17 +545,19 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		}
 		// 先序列化：序列化失败没有任何 Redis 副作用
 		List<String> payload = this.codec.serializeAll(messages);
-		String stagingKey = stagingKey(conversationId, UUID.randomUUID().toString());
+		String stagingToken = UUID.randomUUID().toString();
+		String stagingKey = stagingKey(conversationId, stagingToken);
 		boolean renamed = false;
 		boolean aborted = false;
 		try {
-			stagePayload(stagingKey, payload);
-			this.redis.rename(stagingKey, finalKey);
+			stagePayload(conversationId, stagingKey, stagingToken, payload);
+			this.redis.execute(STAGING_COMMIT, List.of(stagingKey, finalKey, stagingIndexKey(conversationId)),
+					stagingToken, Long.toString(stagingTtlMillis()));
 			renamed = true;
 		}
 		finally {
 			if (!renamed) {
-				deleteStagingQuietly(stagingKey);
+				deleteStagingQuietly(conversationId, stagingKey);
 			}
 			// 复检必须放在 finally：RENAME 可能<b>服务端已生效、回包丢失</b>（Lettuce 超时/断连）——
 			// 那时异常从 try 抛出、renamed 仍是 false，但 final 键已经落地。复检放在 try 之后就会
@@ -581,26 +632,28 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				slideCasCounters(finalKey);
 				return true;
 			}
-			String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, UUID.randomUUID().toString());
+			String stagingToken = payload.isEmpty() ? "" : UUID.randomUUID().toString();
+			String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, stagingToken);
 			if (stagingKey != null) {
-				stagePayload(stagingKey, payload);
+				stagePayload(conversationId, stagingKey, stagingToken, payload);
 			}
 			Long applied;
 			try {
 				applied = this.redis.execute(MERGE_CAS,
-						List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey, generationKey),
+						List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey, generationKey,
+								stagingIndexKey(conversationId)),
 						expectedVersion, expectedGeneration, payload.isEmpty() ? "delete" : "rename",
-						Long.toString(stagingTtlMillis()));
+						Long.toString(stagingTtlMillis()), stagingToken);
 			}
 			catch (RuntimeException ex) {
 				if (stagingKey != null) {
-					deleteStagingQuietly(stagingKey);
+					deleteStagingQuietly(conversationId, stagingKey);
 				}
 				throw ex;
 			}
 			if (applied != null && applied == CAS_SUPERSEDED) {
 				if (stagingKey != null) {
-					deleteStagingQuietly(stagingKey);
+					deleteStagingQuietly(conversationId, stagingKey);
 				}
 				// 写回期间历史被清空：放弃这一笔。重试等于把手里那份清空前的历史再写一遍。
 				log.warn("memory cleared during this write-back (generation changed), abandoning write conversationId={} runId={}"
@@ -613,7 +666,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			}
 			// CAS 落空：另一写者在我们读之后动了窗口 ⇒ 清 staging、重读、重算。
 			if (stagingKey != null) {
-				deleteStagingQuietly(stagingKey);
+				deleteStagingQuietly(conversationId, stagingKey);
 			}
 			log.debug("memory window merge CAS missed (retry {}/{}) conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
 					conversationId, turn == null ? null : turn.runId());
@@ -687,27 +740,28 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return false;
 		}
 		List<String> payload = this.codec.serializeAll(messages == null ? List.of() : messages);
-		String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, UUID.randomUUID().toString());
+		String stagingToken = payload.isEmpty() ? "" : UUID.randomUUID().toString();
+		String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, stagingToken);
 		if (stagingKey != null) {
-			stagePayload(stagingKey, payload);
+			stagePayload(conversationId, stagingKey, stagingToken, payload);
 		}
 		Long applied;
 		try {
 			applied = this.redis.execute(MERGE_CAS,
 					List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey(finalKey),
-							generationKey(finalKey)),
+							generationKey(finalKey), stagingIndexKey(conversationId)),
 					Long.toString(baseline.version()), Long.toString(baseline.generation()),
-					payload.isEmpty() ? "delete" : "rename", Long.toString(stagingTtlMillis()));
+					payload.isEmpty() ? "delete" : "rename", Long.toString(stagingTtlMillis()), stagingToken);
 		}
 		catch (RuntimeException ex) {
 			if (stagingKey != null) {
-				deleteStagingQuietly(stagingKey);
+				deleteStagingQuietly(conversationId, stagingKey);
 			}
 			throw ex;
 		}
 		if (applied != null && applied == CAS_SUPERSEDED) {
 			if (stagingKey != null) {
-				deleteStagingQuietly(stagingKey);
+				deleteStagingQuietly(conversationId, stagingKey);
 			}
 			log.warn("whole-window write-back abandoned: session cleared during compaction conversationId={} (no write, no retry)", conversationId);
 			return false;
@@ -717,7 +771,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return true;
 		}
 		if (stagingKey != null) {
-			deleteStagingQuietly(stagingKey);
+			deleteStagingQuietly(conversationId, stagingKey);
 		}
 		log.warn("whole-window write-back abandoned: window rewritten by another writer after compaction (expected version={}) conversationId={}"
 				+ " (no retry, no overwrite with stale content)", baseline.version(), conversationId);
@@ -830,13 +884,14 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		return raw == null ? List.of() : raw;
 	}
 
-	private void stagePayload(String stagingKey, List<String> payload) {
-		Object[] args = new Object[payload.size() + 1];
+	private void stagePayload(String conversationId, String stagingKey, String stagingToken, List<String> payload) {
+		Object[] args = new Object[payload.size() + 2];
 		args[0] = Long.toString(stagingTtlMillis());
+		args[1] = stagingToken;
 		for (int i = 0; i < payload.size(); i++) {
-			args[i + 1] = payload.get(i);
+			args[i + 2] = payload.get(i);
 		}
-		this.redis.execute(STAGE_WRITE, List.of(stagingKey), args);
+		this.redis.execute(STAGE_WRITE, List.of(stagingKey, stagingIndexKey(conversationId)), args);
 	}
 
 	/**
@@ -909,12 +964,13 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				Long.toString(stagingTtlMillis()));
 	}
 
-	private void deleteStagingQuietly(String stagingKey) {
+	private void deleteStagingQuietly(String conversationId, String stagingKey) {
 		try {
-			this.redis.delete(stagingKey);
+			String token = stagingKey.substring(stagingKeyPrefix(conversationId).length());
+			this.redis.execute(STAGING_DISCARD, List.of(stagingKey, stagingIndexKey(conversationId)), token,
+					Long.toString(stagingTtlMillis()));
 		}
 		catch (RuntimeException ex) {
-			// TTL 已在单键脚本里与数据同时设置；这里再兜一层，避免失败路径留下无主 staging
 			log.warn("staging key cleanup failed (staging still has TTL; reconcile/delete by this key) stagingKey={}", stagingKey, ex);
 		}
 	}

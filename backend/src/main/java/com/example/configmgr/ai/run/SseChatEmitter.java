@@ -2313,9 +2313,8 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * <b>COUNT 分页</b>扫描归档（I1-minor）：从 {@code afterSeq} 起每页 {@link #REPLAY_PAGE_FRAMES} 帧，
-	 * 命中即停。<b>遵守 {@link FrameStore#readRawFrom} 的"空 = 不支持原文口"契约</b>：
-	 * 原文口返回空时回退 {@code readFromWithStatus}（不把"不支持"当成"没有帧"）。
+	 * <b>COUNT 分页</b>扫描归档：生产实现优先按真实 entry ID 物理分页，预算只扣实际条目数；
+	 * 兼容实现不支持物理读口时才回退原 seq 原文/类型化读口。
 	 *
 	 * <p>预算耗尽时用<b>末号确认</b>：末号 ≤ 游标 ⇒ 已到尾部，可以返回 {@code NOT_FOUND}；
 	 * 否则返回 {@code UNKNOWN}（保守，不把"没扫完"说成"没有"）。
@@ -2325,6 +2324,10 @@ public class SseChatEmitter {
 	 * @param match 命中判据（入参为解析后的帧体）
 	 */
 	private ArchiveScan scanArchive(long afterSeq, int maxFrames, java.util.function.Predicate<Map<String, Object>> match) {
+		ArchiveScan physical = scanArchiveByEntry(afterSeq, maxFrames, match);
+		if (physical != null) {
+			return physical;
+		}
 		long cursor = Math.max(0L, afterSeq);
 		int scanned = 0;
 		boolean typedFallback = false;
@@ -2412,16 +2415,52 @@ public class SseChatEmitter {
 		return ArchiveScan.UNKNOWN;
 	}
 
-	/**
-	 * 只读探测的扫描起点：幸存归档受 {@code MAXLEN ~} 约束（窗口 + 少量冗余），从
-	 * "末号 − {@link #ARCHIVE_SCAN_BUDGET}" 起扫即可覆盖整个窗口，避免长归档从 0 扫全文。
-	 * 末号不可知时退回 {@code floor}（由 {@link #scanArchive} 的末号判定保守收口）。
-	 */
-	private long terminalScanStart(long floor) {
-		OptionalLong last = lastSeqIfKnownQuietly();
-		if (last != null && last.isPresent()) {
-			return Math.max(Math.max(0L, floor), last.getAsLong() - ARCHIVE_SCAN_BUDGET);
+	/** 生产读口按真实 entry ID 分页；null = 兼容实现不支持，交回原 seq 读口。 */
+	private ArchiveScan scanArchiveByEntry(long afterSeq, int maxFrames,
+			java.util.function.Predicate<Map<String, Object>> match) {
+		String cursor = afterSeq > 0L ? afterSeq + "-0" : null;
+		int scanned = 0;
+		while (scanned < maxFrames) {
+			int pageLimit = Math.min(REPLAY_PAGE_FRAMES, maxFrames - scanned);
+			FrameStore.RawEntryPage page;
+			try {
+				page = this.frames.readRawAfterEntry(this.runId, cursor, pageLimit);
+			}
+			catch (RuntimeException ex) {
+				log.debug("archive physical read failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
+				return ArchiveScan.UNKNOWN;
+			}
+			if (page == null) {
+				return scanned == 0 ? null : ArchiveScan.UNKNOWN;
+			}
+			if (page.degraded()) {
+				return ArchiveScan.UNKNOWN;
+			}
+			List<FrameStore.RawEntryFrame> entries = page.frames() == null ? List.of() : page.frames();
+			if (entries.isEmpty()) {
+				return ArchiveScan.NOT_FOUND;
+			}
+			String previous = cursor;
+			for (FrameStore.RawEntryFrame item : entries) {
+				Map<String, Object> parsed = parseRawFrame(new FrameStore.RawFrame(item.seq(), item.json()));
+				if (parsed != null && match.test(parsed)) {
+					return ArchiveScan.FOUND;
+				}
+			}
+			scanned += entries.size();
+			cursor = entries.get(entries.size() - 1).entryId();
+			if (cursor == null || cursor.equals(previous)) {
+				return ArchiveScan.UNKNOWN;
+			}
+			if (entries.size() < pageLimit) {
+				return ArchiveScan.NOT_FOUND;
+			}
 		}
+		return ArchiveScan.UNKNOWN;
+	}
+
+	/** 物理分页从调用方下界开始；条数预算不再换算成 seq 差值。 */
+	private long terminalScanStart(long floor) {
 		return Math.max(0L, floor);
 	}
 
@@ -3623,7 +3662,7 @@ public class SseChatEmitter {
 					FrameStore.PayloadFactory payloadFactory = f ->
 							FrameSizeLimiter.apply(f, this.objectMapper, this.maxFrameBytes);
 					FrameStore.AppendResult archived = this.frames.appendAndAllocateSeq(this.runId, frame,
-							payloadFactory);
+							payloadFactory, this.store.heldRunEpoch(this.runId));
 					if (archived.seq() <= 0L || archived.payload() == null) {
 						// <b>归档没成功 ⇒ 不交付</b>（Task 2 的核心不变量）：没有归档号就没有可交付的顺序事实。
 						// 旧口径在这里用"取号号"照发，于是订阅者看到一帧永不入档的号：游标被推过它之后，

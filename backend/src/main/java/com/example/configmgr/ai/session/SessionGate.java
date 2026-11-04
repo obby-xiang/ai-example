@@ -505,6 +505,11 @@ public class SessionGate {
 		}
 	}
 
+	public String currentRunIdStrict(String sessionId) {
+		Holder holder = this.inProcess.get(gateKey(sessionId));
+		return holder != null ? holder.runId : runIdOfValue(this.redis.opsForValue().get(gateKey(sessionId)));
+	}
+
 	public int heldSessions() {
 		return this.inProcess.size();
 	}

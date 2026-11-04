@@ -2784,7 +2784,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		fresh.setExecuted(false);
 		fresh.setResolvedAtMs(System.currentTimeMillis());
 		fresh.setResultText(CANCELLED_BEFORE_CLAIM_TEXT);
-		this.store.putPending(runId, fresh);
+		if (!this.store.cancelPending(runId, fresh)) {
+			return null;
+		}
 		log.info("cancel observed on recheck before claim; skipping execution runId={} tool={} toolCallId={}", runId, pending.getName(),
 				pending.getToolCallId());
 		return CANCELLED_BEFORE_CLAIM_TEXT;
@@ -2824,17 +2826,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 					: new RunStore.ClaimResult(RunStore.ClaimOutcome.LOST, 0L, 0L);
 		}
 		if (!claim.won()) {
+			// I4：认领失败后<b>再对一次台账</b> —— 对方可能恰好在这两步之间写完台账
+			Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
+			if (ledger != null) {
+				return replayLedger(runId, pending, ledger);
+			}
 			if (claim.outcome() == RunStore.ClaimOutcome.STALE_FENCE) {
 				long epoch = claim.epoch();
 				long fence = claim.fence();
 				return settleBlocked(runId, pending, ToolOutcome.CODE_ALREADY_CLAIMED,
 						"本轮写回权已转移，本次未执行（本实例持 epoch " + epoch + "，fence 已推进到 " + fence
-								+ "，续跑权已被接管）。如需重做，请让用户在接管方完成后重新发起。");
-			}
-			// I4：认领失败后<b>再对一次台账</b> —— 对方可能恰好在这两步之间写完台账
-			Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
-			if (ledger != null) {
-				return replayLedger(runId, pending, ledger);
+								+ "，续跑权已被接管）。如需重做，请让用户在接管方完成后重新发起。", false);
 			}
 			String claimedBy = this.store.claimedBy(runId, pending.getToolCallId());
 			String text = "该操作已由实例 " + claimedBy + " 认领执行（进程在其完成前退出）。"
@@ -2844,11 +2846,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setExecuted(true);
 			pending.setExecutedBy(claimedBy);
 			pending.setResultText(text);
-			this.store.putPending(runId, pending);
 			this.registry.of(runId).toolResult(pending, false, true, frameText(text));
 			return text;
 		}
 
+		long claimedEpoch = claim.epoch();
+		String claimedBy = this.store.instanceId();
 		String text;
 		boolean ok = true;
 		boolean settleAsUnexecuted = false;
@@ -2901,7 +2904,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			pending.setCode(code);
 		}
 		if (settleAsUnexecuted) {
-			return settleToolTimeout(runId, pending, text, settleObservation);
+			return settleToolTimeout(runId, pending, text, settleObservation, claimedEpoch, claimedBy);
 		}
 		this.store.appendLedger(runId, pending, text);
 
@@ -2928,7 +2931,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 			fresh.setStatus(PendingToolCall.EXECUTED);
 			fresh.setResolvedAtMs(fresh.getExecutedAtMs());
 		}
-		this.store.putPending(runId, fresh);
+		this.store.completeExecution(runId, fresh, claimedEpoch, claimedBy);
 		// 无视图时走**原四参调用**（帧调用面与既有用例逐字不变）；有视图才用 additive 五参重载
 		ResultView resultView = resultViewOf(fresh, text, ok);
 		if (resultView == null) {
@@ -3039,7 +3042,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * <p>它也是认领胜者的结算（只有认领成功才会走到这里），故续跑侧同样由这里发
 	 * {@code tool_call_end}（{@code settleObservation=true}）。
 	 */
-	private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation) {
+	private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation,
+			long claimedEpoch, String claimedBy) {
 		PendingToolCall fresh;
 		try {
 			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -3060,7 +3064,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		fresh.setExecutedBy(null);
 		fresh.setResolvedAtMs(System.currentTimeMillis());
 		fresh.setStatus(PendingToolCall.TIMEOUT);
-		this.store.putPending(runId, fresh);
+		this.store.completeExecution(runId, fresh, claimedEpoch, claimedBy);
 		this.registry.of(runId).toolResult(fresh, false, false, frameText(text));
 		if (settleObservation) {
 			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
@@ -3158,9 +3162,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：落库为终态、回填模型，然后
+	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：常规入口落库为终态、回填模型，然后
 	 * 正常返回 —— <b>不 appendLedger、不占认领、不抛异常、不动 suspended</b>，同批后续调用照常
-	 * （{@code haltsBatch} 只认 FAILED）。
+	 * （{@code haltsBatch} 只认 FAILED）。认领失败入口不回写调用方旧副本，避免覆盖并发认领或执行结果。
 	 *
 	 * <p><b>帧面不保证</b>（RT-21 裁决）：这里只<b>请求</b>一条 {@code ok=false} 的结局帧，是否真的
 	 * 落档/扇出由 {@link com.example.configmgr.ai.run.SseChatEmitter} 的写门判定。写回权已转移的
@@ -3170,6 +3174,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * {@code ToolResponseMessage}（"本次未执行、需由接管方完成"），不得伪装成成功。
 	 */
 	private String settleBlocked(String runId, PendingToolCall pending, String code, String text) {
+		return settleBlocked(runId, pending, code, text, true);
+	}
+
+	private String settleBlocked(String runId, PendingToolCall pending, String code, String text, boolean writePending) {
 		pending.setStatus(PendingToolCall.BLOCKED);
 		pending.setOutcome(ToolOutcome.BLOCKED.wire());
 		pending.setCode(code);
@@ -3177,7 +3185,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 		pending.setExecutedBy(null);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		pending.setResultText(text);
-		this.store.putPending(runId, pending);
+		if (writePending) {
+			this.store.putPending(runId, pending);
+		}
 		this.registry.of(runId).toolResult(pending, false, false, frameText(text));
 		log.warn("tool call blocked (not executed, no claim, no ledger row) runId={} tool={} toolCallId={} code={}", runId,
 				pending.getName(), pending.getToolCallId(), code);

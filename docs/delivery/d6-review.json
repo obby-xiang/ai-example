@@ -322,6 +322,13 @@
       "reason": "本批仅修复流式Markdown恢复、Mermaid水合与视图适配及对应文案；D6迁移接口、会话协议、存储键及多实例契约均未变化",
       "reviewedAt": "2026-11-04",
       "reviewer": "Kimi主控"
+    },
+    {
+      "fingerprint": "sha256:2d07a8b5ba199b43d9fd16ec7a7ac5ae73a6ffb7a9090a4bf6c3db6ee1fca054",
+      "status": "synced",
+      "reason": "已同步staging精确索引、purge执行owner/epoch与可接续台账、固定run xack HASH，以及帧fence和决策/认领/取消/执行回写的同槽条件Lua迁移契约",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "Kimi主控"
     }
   ]
 }

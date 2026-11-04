@@ -185,6 +185,15 @@ public interface FrameStore {
 	}
 
 	/**
+	 * 带本进程租约 epoch 的原子落档。生产实现把 fence 校验与取号、归档放进同一 Lua；
+	 * 默认方法保留兼容实现的既有行为。
+	 */
+	default AppendResult appendAndAllocateSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory,
+			long expectedEpoch) {
+		return appendAndAllocateSeq(runId, frame, payloadFactory);
+	}
+
+	/**
 	 * 按序号回读：返回 {@code seq > afterSeq} 的帧（升序）。
 	 *
 	 * <p>生产实现按 Stream entry ID {@code <afterSeq+1>-0} 精确取差量。
@@ -254,6 +263,21 @@ public interface FrameStore {
 	 */
 	default List<RawFrame> readRawFrom(String runId, long afterSeq, int limit) {
 		return List.of();
+	}
+
+	/** 带真实 Stream entry ID 的归档原文。 */
+	record RawEntryFrame(String entryId, long seq, String json) {
+	}
+
+	/** 物理分页结果；degraded=true 时不得把空页当成归档末尾。 */
+	record RawEntryPage(List<RawEntryFrame> frames, boolean degraded) {
+	}
+
+	/**
+	 * 从指定物理 entry ID 之后读取，预算只按实际条目数计算。null = 实现不支持该读口。
+	 */
+	default RawEntryPage readRawAfterEntry(String runId, String afterEntryId, int limit) {
+		return null;
 	}
 
 	/**

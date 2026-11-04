@@ -6,6 +6,7 @@ import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ClientRequestRegistry;
 import com.example.configmgr.ai.run.CreateTaskDraftStore;
+import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
@@ -14,14 +15,20 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.file.FileStorageService;
+import io.lettuce.core.RedisFuture;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.connection.DataType;
-import org.springframework.data.redis.core.ScanOptions;
+import org.springframework.data.redis.connection.ReturnType;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -32,7 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Pattern;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 会话销毁（{@code DELETE /api/ai/session/{sessionId}} 的本体）。
@@ -57,13 +64,10 @@ import java.util.regex.Pattern;
  *
  * <h2>删除面（只删 AI 数据）</h2>
  * <ol>
- * <li>{@code chat:mem:*}（当前身份键 + <b>本会话的 staging 中间态</b>）；staging 集合复用枚举阶段
- * 的扫描结果，删完只对本轮实际删掉的 staging 键做有界复核（不再全集群重扫），数据键与 staging 的
- * 残留一律 {@code complete=false}（全局会话索引已退役，不能再拿"不在索引"当作"已删净"）；</li>
+ * <li>{@code chat:mem:*}（当前身份键 + <b>本会话的 staging 中间态</b>）；staging 由同槽会话索引精确枚举，
+ * 删除与索引摘成员走同槽 Lua 的有界 pipeline；残留或结果不可知一律 {@code complete=false}；</li>
  * <li>该会话每一轮的<b>13 个 run 级键</b>（委托 {@link RunStore#deleteRun(String)}，按 run 逐个删，
- * 不使用 KEYS/通配删除）；外加 {@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
- * {@code ai:observed:} 四个观测/取消键（<b>不靠 TTL 自清</b>，逐 run 单键 DEL；四族都带身份段
- * {@code <t>:<u>:}，与写入方同一个键形）；</li>
+ * 不使用 KEYS/通配删除）；观测/取消键与 xtrim/固定 xack 以逐 run 单键 DEL pipeline 精确销毁；</li>
  * <li><b>会话→run 索引</b>：{@code ai:session:runs:<sid>} 是轮次候选的唯一发现面（首轮创建时
  * 原子登记、写失败 fail-closed；删除轮次 SREM）。本类只读本会话候选，并对每个候选核对快照的
  * {@code sessionId} 与租户身份；索引读失败 ⇒ 枚举整次中止（一个数据键都还没删）；</li>
@@ -134,9 +138,22 @@ public class AiSessionPurgeService {
 	 */
 	static final String OBSERVED_PREFIX = "ai:observed:";
 
-	private static final Pattern TURN_NO = Pattern.compile("\\d+");
-
 	private static final Duration DEFAULT_ACTIVE_WAIT = Duration.ofMillis(1500);
+
+	private static final Duration EXECUTION_LEASE = Duration.ofSeconds(30);
+
+	private static final Duration EXECUTION_BUDGET = Duration.ofSeconds(10);
+
+	private static final int REDIS_BATCH_SIZE = 64;
+
+	private static final RedisScript<Long> TYPE_DEL = new DefaultRedisScript<>("""
+			-- PURGE_TYPE_DEL
+			if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+			local actual = redis.call('TYPE', KEYS[1])
+			if type(actual) == 'table' then actual = actual['ok'] end
+			if actual ~= ARGV[1] then return -1 end
+			return redis.call('DEL', KEYS[1])
+			""", Long.class);
 
 	/**
 	 * <b>fix4：complete 之后"一次性记忆复核"的延迟</b>（静态常量，刻意不新增配置面）。
@@ -150,10 +167,7 @@ public class AiSessionPurgeService {
 
 	private static final long ACTIVE_POLL_MILLIS = 50L;
 
-	/**
-	 * 由 {@code turnNo} 推导归档键的上限（防坏值造成一次百万次 DEL）。
-	 * 正常会话远小于此值；超出时只依赖扫描面。
-	 */
+	/** 单次执行的 archive 批上限；剩余范围由 durable cursor 接续。 */
 	private static final int MAX_DERIVED_ARCHIVE_TURNS = 2000;
 
 	private final StringRedisTemplate redis;
@@ -173,6 +187,9 @@ public class AiSessionPurgeService {
 	 */
 	@Autowired(required = false)
 	private org.springframework.beans.factory.ObjectProvider<ResumeService> resumeServiceProvider;
+
+	@Autowired(required = false)
+	private org.springframework.beans.factory.ObjectProvider<FrameStore> frameStoreProvider;
 
 	private final ChatMemoryRepository chatMemoryRepository;
 
@@ -317,7 +334,7 @@ public class AiSessionPurgeService {
 	/**
 	 * 销毁一个会话的全部 AI 数据（身份取当前上下文；无上下文 = legacy 命名空间）。
 	 *
-	 * @param sessionId 会话 id（前端页签级；允许特殊字符，键名/扫描均做了精确化处理）
+	 * @param sessionId 会话 id（前端页签级；允许特殊字符，所有目标均按精确键/索引处理）
 	 * @param requestedBy 发起方（写进取消标志与守卫，便于取证；null = unknown）
 	 * @return 幂等结果；{@code complete=false} 表示有延后/部分失败，可重试
 	 */
@@ -350,11 +367,6 @@ public class AiSessionPurgeService {
 	private PurgeResult purgeInternal(String sessionId, String requestedBy, TenantUser identity) {
 		String requestedPurgeId = UUID.randomUUID().toString();
 		String actor = requestedBy == null || requestedBy.isBlank() ? "unknown" : requestedBy;
-
-		// ① durable pending 先登记（无 TTL）：从请求一开始就挡住同 id 的 /chat（guard 会看 pending），
-		// 失败/延后由调度自动续清；未完成期间 guard 不会到期。
-		// <b>已有 pending = 上一轮销毁没做完</b>：复用它的 purgeId/owner/attempts，不重开一轮。
-		// 否则"本次前置失败 → 回滚删除 pending/disarm 守卫"会把上一轮的 deferred 义务一起抹掉。
 		SessionPurgePendingStore.Registration registration;
 		try {
 			registration = this.pendingStore.register(identity, sessionId, requestedPurgeId, actor,
@@ -366,55 +378,51 @@ public class AiSessionPurgeService {
 			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId, identity), ex);
 		}
 		String purgeId = registration.pending().purgeId();
-		// owner 口径与守卫值（purgeId|actor）一致：复用时沿用原 owner，避免无意义的改写。
 		String owner = registration.pending().requestedBy() == null || registration.pending().requestedBy().isBlank()
 				? actor : registration.pending().requestedBy();
-		// 回滚只允许撤销"本次新建"的台账；复用的那条属于上一轮，保留给调度/手动重试。
-		boolean ownedByThisCall = registration.created();
+		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
+				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
+		if (!claim.acquired()) {
+			return inProgress(sessionId, purgeId, claim.pending(), identity);
+		}
+		PurgeExecution execution = new PurgeExecution(claim.execution());
 
-		// ② 再枚举：任何读失败都在这里中止；本次新建的 pending 回滚，保证"一个数据键都不删"。
 		Enumeration enumeration;
 		try {
-			enumeration = enumerate(sessionId);
+			execution.checkpoint("ENUMERATING");
+			enumeration = enumerate(sessionId, registration.pending().archiveCursor());
 		}
 		catch (RuntimeException ex) {
-			if (ownedByThisCall) {
-				completePendingQuietly(sessionId, purgeId, "enumerate failed");
-			}
-			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={} "
-					+ "(existing pending ledger kept on reuse): {}", sessionId, purgeId, rootMessage(ex));
+			recordFailureQuietly(execution, "enumerate: " + rootMessage(ex));
+			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={}: {}", sessionId,
+					purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex);
 		}
 
-		// ③ 装写回守卫（在删除任何数据之前；失败则整体中止并撤销本次新建的 pending）。
 		try {
+			execution.checkpoint("GUARD");
 			this.guard.arm(sessionId, purgeId + "|" + owner, guardTtl());
 		}
 		catch (RuntimeException ex) {
-			if (ownedByThisCall) {
-				completePendingQuietly(sessionId, purgeId, "guard arm failed");
-			}
+			recordFailureQuietly(execution, "guard: " + rootMessage(ex));
 			log.warn("Session purge: guard arm failed, nothing deleted sessionId={} purgeId={}: {}", sessionId,
 					purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "guard", enumeration, ex);
 		}
 
-		// ④ H2 先删（反馈行在独立本地事务里；失败不进入 Redis 删除，并撤销本次新建的 pending/守卫）。
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
+			execution.checkpoint("DATABASE");
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			if (ownedByThisCall) {
-				completePendingQuietly(sessionId, purgeId, "database failed");
-				this.guard.disarmQuietly(sessionId, purgeId);
-			}
-			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={} "
-					+ "(existing pending ledger/guard kept on reuse): {}", sessionId, purgeId, rootMessage(ex));
+			recordFailureQuietly(execution, "database: " + rootMessage(ex));
+			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={}: {}", sessionId,
+					purgeId, rootMessage(ex));
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
-		return executeDeletion(sessionId, purgeId, owner, enumeration, dbDeleted);
+		return executeDeletion(execution, purgeId, owner, enumeration, dbDeleted);
 	}
 
 	/**
@@ -424,7 +432,7 @@ public class AiSessionPurgeService {
 	 * （{@link SessionPurgeRetryRunner}）先读台账、再用台账里的 {@code tenantId/userId}
 	 * {@code useContext}，然后才调这里 —— 不猜身份、不扫租户列表。
 	 *
-	 * @return null = pending 不存在或已换主（旧重试应停止）；否则与 {@link #purge} 同形结果
+	 * @return null = pending 不存在、正在执行或已换主（旧重试应停止）；否则与 {@link #purge} 同形结果
 	 */
 	public PurgeResult retry(String sessionId, String purgeId, String requestedBy) {
 		if (sessionId == null || sessionId.isBlank() || purgeId == null || purgeId.isBlank()) {
@@ -435,32 +443,53 @@ public class AiSessionPurgeService {
 			return null;
 		}
 		String actor = requestedBy == null || requestedBy.isBlank() ? "unknown" : requestedBy;
+		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
+				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
+		if (!claim.acquired()) {
+			return null;
+		}
+		PurgeExecution execution = new PurgeExecution(claim.execution());
 
 		Enumeration enumeration;
 		try {
-			enumeration = enumerate(sessionId);
+			execution.checkpoint("ENUMERATING");
+			enumeration = enumerate(sessionId, pending.archiveCursor());
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(sessionId, purgeId, "enumerate: " + rootMessage(ex));
+			recordFailureQuietly(execution, "enumerate: " + rootMessage(ex));
 			return aborted(sessionId, purgeId, "enumerate",
 					enumerationForFailure(sessionId, pending.identityOrNull()), ex);
 		}
 
 		SessionPurgeDatabase.Deleted dbDeleted;
 		try {
+			execution.checkpoint("DATABASE");
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(sessionId, purgeId, "database: " + rootMessage(ex));
+			recordFailureQuietly(execution, "database: " + rootMessage(ex));
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
-		return executeDeletion(sessionId, purgeId, actor, enumeration, dbDeleted);
+		return executeDeletion(execution, purgeId, actor, enumeration, dbDeleted);
+	}
+
+	private PurgeResult executeDeletion(PurgeExecution execution, String purgeId, String actor,
+			Enumeration enumeration, SessionPurgeDatabase.Deleted dbDeleted) {
+		try {
+			return executeDeletionChecked(execution, purgeId, actor, enumeration, dbDeleted);
+		}
+		catch (RuntimeException ex) {
+			recordFailureQuietly(execution, "delete: " + rootMessage(ex));
+			return aborted(execution.sessionId(), purgeId, "delete", enumeration, ex);
+		}
 	}
 
 	/** 删除主体（首轮与自动重试共用）；complete 仅在全部删除 + 守卫收尾 + pending 移除都成功时为 true。 */
-	private PurgeResult executeDeletion(String sessionId, String purgeId, String actor, Enumeration enumeration,
-			SessionPurgeDatabase.Deleted dbDeleted) {
+	private PurgeResult executeDeletionChecked(PurgeExecution execution, String purgeId, String actor,
+			Enumeration enumeration, SessionPurgeDatabase.Deleted dbDeleted) {
+		String sessionId = execution.sessionId();
+		execution.checkpoint("CANCELLING");
 		// 活跃 run 先取消（已取消不重复取消），并给收尾一个短窗口。
 		List<String> errors = new ArrayList<>();
 		// 枚举阶段已经发现的"跳过非本身份"等结论随结果返回，不能只留在日志里。
@@ -473,34 +502,42 @@ public class AiSessionPurgeService {
 		// → 最后才删 sessionRuns/sessionActive/sessionCurrent 三把发现键（仅当主体无错误且无 defer）。
 		// 状态刷新阶段读到的终态快照随枚举结果带下来：删除阶段对同一把键不再整份重读
 		// （活跃轮不受影响 —— 它们仍要重新读一次判活，见 deleteOrDefer）。
-		MemoryView memory = deleteMemory(sessionId, current, errors);
-		TranscriptView transcriptView = deleteTranscript(sessionId, current.transcriptExisted(),
+		execution.checkpoint("DELETE_MEMORY");
+		MemoryView memory = deleteMemory(execution, current, errors);
+		TranscriptView transcriptView = deleteTranscript(execution, current.transcriptExisted(),
 				current.transcriptEntries(), errors, warnings);
 		List<RunView> runViews = new ArrayList<>();
 		List<DeferredView> deferred = new ArrayList<>();
+		execution.checkpoint("DELETE_RUNS");
 		for (RunTarget target : current.runs()) {
-			deleteOrDefer(target, current.settledSnapshots(), runViews, deferred, errors, warnings);
+			execution.checkDeadline();
+			deleteOrDefer(execution, target, current.settledSnapshots(), runViews, deferred, errors, warnings);
 		}
-		ContextView context = deleteContext(sessionId, current.context(), errors, warnings);
-		SessionView session = deleteSessionRecordKeys(sessionId, errors, warnings);
-		AttachmentView attachmentView = deleteAttachments(sessionId, current.attachments(), errors, warnings);
+		execution.checkpoint("DELETE_CONTEXT");
+		ContextView context = deleteContext(execution, current.context(), errors, warnings);
+		execution.checkpoint("DELETE_SESSION");
+		SessionView session = deleteSessionRecordKeys(execution, errors, warnings);
+		execution.checkpoint("DELETE_ATTACHMENTS");
+		AttachmentView attachmentView = deleteAttachments(execution, current.attachments(), errors, warnings);
 
 		boolean deletionComplete = errors.isEmpty() && deferred.isEmpty();
 		if (deletionComplete) {
+			execution.checkpoint("DELETE_DISCOVERY");
 			// 只有"本次删除主体确实删净"才允许拆掉发现面。提前删会让 deferred/失败的轮次在
 			// 重试时无法再被枚举到，pending/guard 却仍在 —— 会话永久 410 且删不掉。
-			session = deleteDiscoveryKeys(sessionId, session, errors, warnings);
+			session = deleteDiscoveryKeys(execution, session, errors, warnings);
 			deletionComplete = errors.isEmpty() && deferred.isEmpty();
 		}
 		if (!deletionComplete) {
 			// 保留 pending + 守卫，交给调度/手动 DELETE 续清；失败/延后不是 complete。
 			String reason = !errors.isEmpty() ? errors.get(0)
 					: "deferred runs: " + deferred.stream().map(DeferredView::runId).toList();
-			if (!recordFailureQuietly(sessionId, purgeId, reason)) {
+			if (!recordFailureQuietly(execution, reason)) {
 				errors.add("pending: 已被另一轮销毁接管或无法更新（旧重试停止）");
 			}
 		}
 		else {
+			execution.checkpoint("FINALIZE");
 			boolean retained;
 			try {
 				retained = this.guard.retainOrArmIfOwner(sessionId, purgeId, actor, guardTtl());
@@ -510,11 +547,8 @@ public class AiSessionPurgeService {
 				errors.add("guard: 收尾失败（fail-closed，保留 pending）：" + rootMessage(ex));
 			}
 			if (retained) {
-				// fix4：不再立刻移除台账 —— 保留到一次短期记忆复核（崩溃残留补偿）。
-				// API 语义不变：complete=true 仍表示"本次删除主体已完成"；台账只是多背一次到点复核
-				// （fix5：复核阶段在自己的 attempts 预算里跑，与主体阶段是否已耗尽无关）。
 				try {
-					if (!this.pendingStore.scheduleVerify(sessionId, purgeId,
+					if (!this.pendingStore.scheduleVerify(execution.claim(),
 							System.currentTimeMillis() + MEMORY_VERIFY_DELAY_MS)) {
 						errors.add("pending: 已被另一轮销毁接管，未排程记忆复核");
 					}
@@ -540,32 +574,22 @@ public class AiSessionPurgeService {
 		return result;
 	}
 
-	private boolean recordFailureQuietly(String sessionId, String purgeId, String reason) {
+	private boolean recordFailureQuietly(PurgeExecution execution, String reason) {
 		try {
-			return this.pendingStore.recordFailure(sessionId, purgeId, reason);
+			return this.pendingStore.recordFailure(execution.claim(), reason);
 		}
 		catch (RuntimeException ex) {
-			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed): {}", sessionId,
-					purgeId, rootMessage(ex));
+			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed): {}", execution.sessionId(),
+					execution.purgeId(), rootMessage(ex));
 			return false;
-		}
-	}
-
-	private void completePendingQuietly(String sessionId, String purgeId, String reason) {
-		try {
-			this.pendingStore.complete(sessionId, purgeId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("Session purge: failed to clear pending sessionId={} purgeId={} ({}): {}", sessionId, purgeId, reason,
-					rootMessage(ex));
 		}
 	}
 
 	// ── 枚举（只读；失败即中止） ─────────────────────────────────────────────
 
-	private Enumeration enumerate(String sessionId) {
-		String gateRunId = this.sessionGate.currentRunId(sessionId);
-		String currentRunId = this.runStore.sessionCurrentRunId(sessionId);
+	private Enumeration enumerate(String sessionId, Long archiveCursor) {
+		String gateRunId = this.sessionGate.currentRunIdStrict(sessionId);
+		String currentRunId = this.redis.opsForValue().get(this.runStore.sessionCurrentKey(sessionId));
 		List<String> warnings = new ArrayList<>();
 		if (currentRunId != null && currentRunId.trim().startsWith("{")) {
 			// 前缀碰撞：ai:session:current:<sid> 可能是会话 "current:<sid>" 的会话记录（JSON）。
@@ -633,7 +657,7 @@ public class AiSessionPurgeService {
 		// 在飞写回（saveAll / 按轮合并 upsert）的中间态也是本会话的 AI 数据
 		// （正常路径 RENAME 后消失，清理失败/进程中断时按 TTL 自清）。
 		// 只带 staging 的会话今天会被误报 found=false + complete=true 后残留，故这里一并枚举。
-		// 扫描结果随枚举结果带到删除阶段复用：删除时不再为一组"刚才已经扫出来的键"重扫全集群。
+		// 精确索引成员随枚举结果带到删除阶段复用。
 		List<String> staging = stagingKeys(sessionId);
 		boolean memoryStaged = !staging.isEmpty();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
@@ -657,12 +681,13 @@ public class AiSessionPurgeService {
 			transcriptEntries = size == null ? 0L : size;
 		}
 
+		ArchiveBatch archives = archiveKeys(sessionId, archiveCursor);
 		ContextTargets context = new ContextTargets(
 				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
-				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
-				archiveKeys(sessionId),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))), archives.keys(),
 				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
-				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))),
+				archives.nextCursor(), archives.hasMore());
 
 		boolean sessionCurrentExisted = Boolean.TRUE.equals(
 				this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
@@ -728,116 +753,41 @@ public class AiSessionPurgeService {
 		return snapshot.getTenantId() == identity.tenantId() && snapshot.getUserId() == identity.userId();
 	}
 
-	/**
-	 * 归档键集合 = 扫描结果 ∪ 由上下文 {@code turnNo} 推导的 0..turnNo。
-	 *
-	 * <p>为什么还要推导：{@code SCAN} 在 Redis Cluster 下只作用于<b>一条连接所在的节点</b>，
-	 * 跨槽/跨节点的归档键可能扫不全。{@code ai:ctx:<sid>} 的 {@code turnNo} 是"已完成的轮数"，
-	 * 归档键按 {@code turnNo} 命名，0..turnNo 的<b>单键 DEL</b> 是 Cluster 安全的补充面
-	 * （扫描仍保留：它覆盖旧数据/异常重置后留下的更高 turnNo）。
-	 */
-	private List<String> archiveKeys(String sessionId) {
-		Set<String> keys = new LinkedHashSet<>(scanArchives(sessionId));
-		keys.addAll(archivesFromTurnNo(sessionId));
-		return List.copyOf(keys);
-	}
-
-	/** 由 {@code ai:ctx:<sid>} 的 {@code turnNo} 推导归档键（读不到/类型不符时返回空）。 */
-	private List<String> archivesFromTurnNo(String sessionId) {
+	private ArchiveBatch archiveKeys(String sessionId, Long archiveCursor) {
+		Object raw = this.redis.opsForHash().get(this.runStore.contextKey(sessionId), "turnNo");
+		if (raw == null) {
+			return new ArchiveBatch(List.of(), 0L, false);
+		}
+		final int turnNo;
 		try {
-			Object raw = this.redis.opsForHash().get(this.runStore.contextKey(sessionId), "turnNo");
-			if (raw == null) {
-				return List.of();
-			}
-			int turnNo = Integer.parseInt(String.valueOf(raw));
-			if (turnNo < 0 || turnNo > MAX_DERIVED_ARCHIVE_TURNS) {
-				return List.of();
-			}
-			List<String> keys = new ArrayList<>(turnNo + 1);
-			for (int turn = 0; turn <= turnNo; turn++) {
-				keys.add(this.runStore.contextArchiveKey(sessionId, turn));
-			}
-			return keys;
+			turnNo = Integer.parseInt(String.valueOf(raw));
 		}
-		catch (RuntimeException ex) {
-			// 值坏/类型不符（前缀碰撞时 ai:ctx:<sid> 可能是他会话的台账 LIST）：不推导，扫描面仍然生效。
-			log.debug("Failed to derive archived turnNo sessionId={} (treated as none): {}", sessionId, ex.getMessage());
-			return List.of();
+		catch (NumberFormatException ex) {
+			throw new AiStateUnavailableException("会话销毁：turnNo 非数字，无法精确枚举 archive", ex);
 		}
+		if (turnNo < 0) {
+			throw new AiStateUnavailableException("会话销毁：turnNo 为负数，无法精确枚举 archive");
+		}
+		long start = archiveCursor == null ? 0L : archiveCursor;
+		if (start < 0L || start > (long) turnNo + 1L) {
+			throw new AiStateUnavailableException("会话销毁：archive 接续游标越界 cursor=" + start);
+		}
+		if (start > turnNo) {
+			return new ArchiveBatch(List.of(), start, false);
+		}
+		long end = Math.min((long) turnNo, start + MAX_DERIVED_ARCHIVE_TURNS - 1L);
+		List<String> keys = new ArrayList<>((int) (end - start + 1L));
+		for (long turn = start; turn <= end; turn++) {
+			keys.add(this.runStore.contextArchiveKey(sessionId, (int) turn));
+		}
+		return new ArchiveBatch(List.copyOf(keys), end + 1L, end < turnNo);
 	}
 
-	/**
-	 * 归档键 <b>只按需扫描</b>，并做两道防误删：
-	 * <ol>
-	 * <li>sessionId 里的 Redis glob 元字符全部转义；</li>
-	 * <li>键必须逐字以 {@code ai:ctx:archive:<tenantId>:<userId>:<sessionId>:} 开头，且后缀是
-	 * <b>纯数字</b> turnNo。于是 {@code a} 的扫描不会把 {@code a:1:2}（属于会话 {@code a:1}）当成自己的
-	 * {@code turnNo=1:2}；{@code abc} 也不会命中 {@code abcd}；身份段不同则前缀本身就不同。</li>
-	 * </ol>
-	 */
-	private List<String> scanArchives(String sessionId) {
-		String scopedPrefix = TenantKeyScope.scoped(RunStore.CONTEXT_ARCHIVE_PREFIX, sessionId);
-		String prefix = scopedPrefix + ":";
-		String pattern = escapeGlob(scopedPrefix) + ":*";
-		List<String> archives = new ArrayList<>();
-		// 逐 master 扫描（standalone 走单连接）；任一节点失败上抛，枚举阶段整体中止。
-		List<String> scanned = RedisClusterScanSupport.scan(this.redis,
-				ScanOptions.scanOptions().match(pattern).count(256).build(), 0);
-		for (String key : scanned) {
-			if (key == null || !key.startsWith(prefix)) {
-				continue;
-			}
-			String turnNo = key.substring(prefix.length());
-			if (TURN_NO.matcher(turnNo).matches()) {
-				archives.add(key);
-			}
-		}
-		return archives;
-	}
-
-	/**
-	 * 本会话的记忆 staging 键（{@code chat:mem:staging:{<escapedId>}:<uuid>}）。
-	 *
-	 * <p>为什么销毁必须管它们：staging 是<b>在飞写回（{@code saveAll} / 按轮合并 {@code upsertRun}）的中间态</b>，
-	 * 正常路径 RENAME 后消失，
-	 * 清理失败/进程中断时靠 TTL 自清。销毁只删正式数据键时，这类键既让"只带 staging 的会话"被
-	 * 误报 {@code found=false}，也会在 {@code complete=true} 之后因 RENAME 落地而变成残留
-	 * （全局会话索引已退役，按索引判活根本看不见它）。
-	 *
-	 * <p>两道防误删与归档扫描同口径：① sessionId 用 {@code escapedId} 转成 tag 内容（无花括号 ⇒ 无碰撞），
-	 * ② <b>pattern 与判定前缀都过 {@link #escapeGlob}</b> —— {@code escapedId} 只转义 {@code %{} }，
-	 * 不管 glob 元字符，所以 id 自带 {@code * ? [ ] \} 时必须由这里转义：否则 Redis 侧 pattern 语义
-	 * 改变（{@code [} 开字符类、{@code \} 转义下一字符）会<b>连自己的键都匹配不到</b>（漏删 + 误报
-	 * complete）。转义后仍逐字前缀过滤，也不会命中别的会话。扫描失败上抛（枚举阶段不得用部分结果
-	 * 冒充完整）。
-	 *
-	 * <p>调用面只有两处：枚举阶段（结果随 {@code Enumeration} 复用给删除阶段，<b>一次销毁只扫这一趟</b>）
-	 * 与 fix4 到点记忆复核（没有前置枚举，那一趟自己扫）。因此删除阶段不再重扫全集群。
-	 */
 	private List<String> stagingKeys(String sessionId) {
-		String prefix = RedisChatMemoryRepository.stagingKeyPrefix(sessionId);
-		String pattern = escapeGlob(prefix) + "*";
-		List<String> staging = new ArrayList<>();
-		List<String> scanned = RedisClusterScanSupport.scan(this.redis,
-				ScanOptions.scanOptions().match(pattern).count(256).build(), 0);
-		for (String key : scanned) {
-			if (key != null && key.startsWith(prefix)) {
-				staging.add(key);
-			}
+		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
+			return redisRepository.stagingKeys(sessionId);
 		}
-		return staging;
-	}
-
-	private static String escapeGlob(String value) {
-		StringBuilder escaped = new StringBuilder(value.length());
-		for (int i = 0; i < value.length(); i++) {
-			char current = value.charAt(i);
-			if (current == '*' || current == '?' || current == '[' || current == ']' || current == '\\') {
-				escaped.append('\\');
-			}
-			escaped.append(current);
-		}
-		return escaped.toString();
+		return List.of();
 	}
 
 	// ── 活跃 run：取消 + 等终态 ──────────────────────────────────────────────
@@ -845,6 +795,10 @@ public class AiSessionPurgeService {
 	private void cancelActiveRuns(List<RunTarget> runs, String actor, List<String> warnings) {
 		for (RunTarget run : runs) {
 			if (!run.active()) {
+				continue;
+			}
+			TerminalConvergence convergence = convergeTerminalSnapshot(run.runId(), warnings);
+			if (convergence == TerminalConvergence.CONVERGED) {
 				continue;
 			}
 			boolean cancelled = false;
@@ -865,10 +819,58 @@ public class AiSessionPurgeService {
 			catch (RuntimeException ex) {
 				warnings.add("run[" + run.runId() + "]: 取消失败（" + rootMessage(ex) + "）");
 			}
-			// F3：旗标已确认之后，收敛不能再等"驱动线程自己收尾" —— 驱动进程已死时它永远不会来。
-			if (cancelled) {
+			// 终帧读不可知时不能把"没读到"当成"没有终帧"，留给 deferred 重试。
+			if (cancelled && convergence != TerminalConvergence.UNKNOWN) {
 				finalizeCancelledRun(run, warnings);
 			}
+		}
+	}
+
+	private TerminalConvergence convergeTerminalSnapshot(String runId, List<String> warnings) {
+		FrameStore frames = this.frameStoreProvider == null ? null : this.frameStoreProvider.getIfAvailable();
+		if (frames == null) {
+			return TerminalConvergence.ABSENT;
+		}
+		try {
+			FrameStore.ReadResult archived = frames.readFromWithStatus(runId, 0L, FrameStore.WAKE_BATCH_LIMIT);
+			if (archived.degraded()) {
+				warnings.add("run[" + runId + "]: 终帧读取不可知（保守 deferred，不重复收尾探测）");
+				return TerminalConvergence.UNKNOWN;
+			}
+			Map<String, Object> terminal = null;
+			for (int index = archived.frames().size() - 1; index >= 0; index--) {
+				Map<String, Object> frame = archived.frames().get(index);
+				Object type = frame.get("type");
+				if ("done".equals(type) || "error".equals(type)) {
+					terminal = frame;
+					break;
+				}
+			}
+			if (terminal == null) {
+				return TerminalConvergence.ABSENT;
+			}
+			RunSnapshot snapshot = this.runStore.get(runId);
+			if (snapshot == null || isTerminal(snapshot.getStatus())) {
+				return TerminalConvergence.CONVERGED;
+			}
+			if ("error".equals(terminal.get("type"))) {
+				snapshot.setStatus(RunSnapshot.FAILED);
+				snapshot.setCancelled(false);
+			}
+			else {
+				boolean cancelled = Boolean.parseBoolean(String.valueOf(terminal.get("cancelled")));
+				snapshot.setStatus(cancelled ? RunSnapshot.CANCELLED : RunSnapshot.DONE);
+				snapshot.setCancelled(cancelled);
+			}
+			if (!this.runStore.saveTerminalUnlessCancelled(snapshot)) {
+				warnings.add("run[" + runId + "]: 已有权威终帧，但快照条件写被拒绝（deferred）");
+				return TerminalConvergence.UNKNOWN;
+			}
+			return TerminalConvergence.CONVERGED;
+		}
+		catch (RuntimeException ex) {
+			warnings.add("run[" + runId + "]: 终帧/快照收敛不可知（" + rootMessage(ex) + "）");
+			return TerminalConvergence.UNKNOWN;
 		}
 	}
 
@@ -989,11 +991,10 @@ public class AiSessionPurgeService {
 	 * 全局会话索引已退役（不再有 SREM 这一步），所以"不在索引"根本不能当"已删净"的证明。残留一律记成可重试错误
 	 * （{@code complete=false}，pending 保留），由调度/再次 DELETE 补删 —— 绝不带着残留报成功。
 	 *
-	 * <p>staging 键集合来自枚举阶段（已经扫过一次，见 {@code Enumeration#stagingKeys()}）：
-	 * 这里直接复用，不再为一组刚扫出来的键重扫全集群。
+	 * <p>staging 键集合来自枚举阶段读取的会话精确索引（见 {@code Enumeration#stagingKeys()}）。
 	 */
-	private MemoryView deleteMemory(String sessionId, Enumeration enumeration, List<String> errors) {
-		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, enumeration.stagingKeys(), errors);
+	private MemoryView deleteMemory(PurgeExecution execution, Enumeration enumeration, List<String> errors) {
+		MemoryCleanup cleanup = deleteMemoryKeys(execution, enumeration.stagingKeys(), errors);
 		return new MemoryView(enumeration.memoryExisted(), enumeration.memoryMessages(), cleanup.deleted());
 	}
 
@@ -1003,11 +1004,12 @@ public class AiSessionPurgeService {
 	 * <p>范围严格限定 {@code chat:mem:*}（当前身份键）+ 本会话 staging 键；不碰 DB、附件、上下文、
 	 * 会话键、run 级键与任何业务数据 —— 到点复核绝不能"顺手再删一遍"其它面。
 	 *
-	 * @param knownStaging 枚举阶段已扫出的 staging 键（销毁主体复用，避免再扫一次全集群）；
-	 *                     {@code null} = 本次没有前置枚举（fix4 到点复核），由本方法扫一次
+	 * @param knownStaging 枚举阶段按精确索引读出的 staging 键；{@code null} = 复核时重新读索引
 	 * @return {@code deleted=true} 仅当"确认删净"（复核不可知/有残留都为 false）
 	 */
-	private MemoryCleanup deleteMemoryKeys(String sessionId, List<String> knownStaging, List<String> errors) {
+	private MemoryCleanup deleteMemoryKeys(PurgeExecution execution, List<String> knownStaging,
+			List<String> errors) {
+		String sessionId = execution.sessionId();
 		boolean deleted = true;
 		try {
 			this.chatMemoryRepository.deleteByConversationId(sessionId);
@@ -1016,7 +1018,7 @@ public class AiSessionPurgeService {
 			errors.add("memory: " + rootMessage(ex));
 			deleted = false;
 		}
-		StagingClear staging = clearStagingKeys(sessionId, knownStaging, errors);
+		StagingClear staging = clearStagingKeys(execution, knownStaging, errors);
 		List<String> residue = new ArrayList<>(staging.remaining());
 		boolean known = staging.known();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
@@ -1049,7 +1051,7 @@ public class AiSessionPurgeService {
 	 * <b>fix4 到点复核结论</b>（runner 消费）。
 	 *
 	 * @param verified 是否"已确认删净并移除台账"
-	 * @param errors 失败原因（可重试；由 runner 折算成 {@code recordFailure} 的退避）
+	 * @param errors 失败原因（可重试；本类已按当前 owner/epoch 记录退避）
 	 */
 	public record MemoryVerify(boolean verified, List<String> errors) {
 	}
@@ -1077,30 +1079,41 @@ public class AiSessionPurgeService {
 		if (pending == null || !purgeId.equals(pending.purgeId()) || pending.verifyAtMs() == null) {
 			return null;
 		}
+		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
+				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
+		if (!claim.acquired()) {
+			return null;
+		}
+		PurgeExecution execution = new PurgeExecution(claim.execution());
 		boolean armed;
 		try {
+			execution.checkpoint("VERIFY_GUARD");
 			armed = this.guard.isArmed(sessionId);
 		}
 		catch (RuntimeException ex) {
-			// 守卫不可知 ⇒ 不删（否则可能删掉"同名新会话"的活数据），记失败保留台账。
+			recordFailureQuietly(execution, "verify guard: " + rootMessage(ex));
 			return new MemoryVerify(false, List.of("guard: 状态不可知（fail-closed，不删）：" + rootMessage(ex)));
 		}
 		if (!armed) {
+			recordFailureQuietly(execution, "verify guard: not armed");
 			return new MemoryVerify(false, List.of("guard: 未装（未确认已销毁，不删）"));
 		}
 		List<String> errors = new ArrayList<>();
-		// 复核态没有前置枚举：staging 集合在这里扫一次（本轮唯一一次扫描）。
-		MemoryCleanup cleanup = deleteMemoryKeys(sessionId, null, errors);
-		if (!cleanup.deleted() || !errors.isEmpty()) {
-			return new MemoryVerify(false, List.copyOf(errors));
-		}
 		try {
-			if (!this.pendingStore.complete(sessionId, purgeId)) {
+			execution.checkpoint("VERIFY_MEMORY");
+			MemoryCleanup cleanup = deleteMemoryKeys(execution, null, errors);
+			if (!cleanup.deleted() || !errors.isEmpty()) {
+				recordFailureQuietly(execution, "memory verify: " + String.join("; ", errors));
+				return new MemoryVerify(false, List.copyOf(errors));
+			}
+			execution.checkpoint("VERIFY_COMPLETE");
+			if (!this.pendingStore.complete(execution.claim())) {
 				return new MemoryVerify(false, List.of("pending: 已被另一轮销毁接管，未移除旧台账"));
 			}
 		}
 		catch (RuntimeException ex) {
-			return new MemoryVerify(false, List.of("pending: 移除失败（保留 pending 以便重试）：" + rootMessage(ex)));
+			recordFailureQuietly(execution, "memory verify: " + rootMessage(ex));
+			return new MemoryVerify(false, List.of("pending: 复核失败（保留 pending 以便重试）：" + rootMessage(ex)));
 		}
 		log.info("Session purge: memory re-verify completed (crash residue compensation) sessionId={} purgeId={}", sessionId, purgeId);
 		return new MemoryVerify(true, List.of());
@@ -1116,64 +1129,53 @@ public class AiSessionPurgeService {
 	}
 
 	/**
-	 * 清理本会话的 staging 键并复核。
+	 * 按精确索引清理 staging；每条同槽 Lua 同时删数据并摘索引成员，批间有界。
+	 * 索引读取、pipeline 或回包不可知均保留 durable pending，由重试与 60 秒复核接续。
 	 *
-	 * <p>逐个单键 {@code DEL}（staging 键与任何其它键不同槽，多键 DEL 在 Cluster 下会 {@code CROSSSLOT}）。
-	 * 扫描/删除失败都收敛成可重试错误，不抛出去 —— 记忆面失败不能把已经删掉的 run/上下文面变成
-	 * "半路异常"（{@code complete=false} 已如实表达"没删净"）。
-	 *
-	 * <p><b>删后复核只覆盖"本轮实际删掉的键"</b>：集合来自枚举阶段已经扫出的完整结果
-	 * （{@code knownStaging}），这里不再重扫全集群。逐键 {@code EXISTS} 仍能逮住
-	 * "DEL 报成功但键还在"（与在飞 RENAME/重建交错）；窗口内新落地的中间态由写回守卫
-	 * （销毁期间 {@code saveAll} 直接拒绝）与 fix4 到点记忆复核（那时重新扫一次）兜底，
-	 * 销毁主体不为此再付一次全集群扫描。
-	 *
-	 * <p><b>复核失败不得被当成"空"</b>（I3）：返回 {@code known=false}，由调用方把
-	 * {@code memory.deleted} 置假 —— "查不出来"与"确认没有"必须可区分。
-	 *
-	 * @param knownStaging {@code null} = 没有前置枚举，由本方法扫一次得到待删集合
+	 * @param knownStaging {@code null} = 没有前置枚举，重新读取精确索引
 	 */
-	private StagingClear clearStagingKeys(String sessionId, List<String> knownStaging, List<String> errors) {
+	private StagingClear clearStagingKeys(PurgeExecution execution, List<String> knownStaging,
+			List<String> errors) {
+		String sessionId = execution.sessionId();
 		List<String> targets;
-		if (knownStaging == null) {
-			try {
-				targets = stagingKeys(sessionId);
-			}
-			catch (RuntimeException ex) {
-				errors.add("memory: staging 键扫描失败（未删净，可重试）：" + rootMessage(ex));
-				return new StagingClear(false, List.of());
-			}
+		try {
+			targets = knownStaging == null ? stagingKeys(sessionId) : knownStaging;
 		}
-		else {
-			targets = knownStaging;
+		catch (RuntimeException ex) {
+			errors.add("memory: staging 索引读取失败（未删净，可重试）：" + rootMessage(ex));
+			return new StagingClear(false, List.of());
 		}
-		List<String> deleted = new ArrayList<>();
+		if (targets.isEmpty()) {
+			return new StagingClear(true, List.of());
+		}
+		if (!(this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository)) {
+			return new StagingClear(false, targets);
+		}
 		List<String> remaining = new ArrayList<>();
-		for (String key : targets) {
+		for (int from = 0; from < targets.size(); from += REDIS_BATCH_SIZE) {
+			execution.checkpoint("STAGING_DELETE_BATCH");
+			List<String> batch = targets.subList(from, Math.min(targets.size(), from + REDIS_BATCH_SIZE));
 			try {
-				if (Boolean.TRUE.equals(this.redis.delete(key))) {
-					deleted.add(key);
+				List<Long> outcomes = redisRepository.deleteStagingKeys(sessionId, batch);
+				execution.checkDeadline();
+				for (int index = 0; index < batch.size(); index++) {
+					if (outcomes.get(index) < 0L) {
+						remaining.add(batch.get(index));
+					}
 				}
 			}
-			catch (RuntimeException ex) {
-				errors.add("memory: staging 键删除失败 " + key + "（可重试）：" + rootMessage(ex));
-				remaining.add(key);
-			}
-		}
-		boolean known = true;
-		for (String key : deleted) {
-			try {
-				if (Boolean.TRUE.equals(this.redis.hasKey(key))) {
-					remaining.add(key);
-				}
+			catch (PurgeBudgetExceededException | IllegalStateException ex) {
+				throw ex;
 			}
 			catch (RuntimeException ex) {
-				// 复核读不出来 ≠ 已删净（I3）：记可重试错误，deleted 由调用方置假。
-				errors.add("memory: staging 键删后复核失败 " + key + "（无法确认已删净，可重试）：" + rootMessage(ex));
-				known = false;
+				errors.add("memory: staging 批量删除失败（结果不可知，可重试）：" + rootMessage(ex));
+				remaining.addAll(batch);
 			}
 		}
-		return new StagingClear(known, List.copyOf(remaining));
+		if (!remaining.isEmpty()) {
+			errors.add("memory: staging 删除回包不可知 " + remaining + "（可重试）");
+		}
+		return new StagingClear(remaining.isEmpty(), List.copyOf(remaining));
 	}
 
 	/**
@@ -1188,7 +1190,7 @@ public class AiSessionPurgeService {
 	 * {@link RunStore#deleteRun(String)} 内部仍按身份读一次快照（"错身份拒绝删除"的语义由
 	 * RunStore 拥有，本类不能替它决定）；这里省掉的是本类在调用前那次重复读取。
 	 */
-	private void deleteOrDefer(RunTarget target, Map<String, RunSnapshot> settledSnapshots,
+	private void deleteOrDefer(PurgeExecution execution, RunTarget target, Map<String, RunSnapshot> settledSnapshots,
 			List<RunView> runViews, List<DeferredView> deferred, List<String> errors, List<String> warnings) {
 		RunSnapshot latest;
 		RunSnapshot reused = target.active() ? null : settledSnapshots.get(target.runId());
@@ -1222,9 +1224,14 @@ public class AiSessionPurgeService {
 			runViews.add(new RunView(target.runId(), status, true, false, true));
 			return;
 		}
+		int errorCount = errors.size();
+		deleteObservabilityKeys(execution, target.runId(), errors);
+		if (errors.size() != errorCount) {
+			runViews.add(new RunView(target.runId(), status, false, false, false));
+			return;
+		}
 		try {
 			this.runStore.deleteRun(target.runId());
-			deleteObservabilityKeys(target.runId(), errors);
 			runViews.add(new RunView(target.runId(), status, false, true, false));
 		}
 		catch (RuntimeException ex) {
@@ -1234,37 +1241,38 @@ public class AiSessionPurgeService {
 	}
 
 	/**
-	 * 13 键之外的四个"每人可见"的 run 级键（不进 {@code deleteRun}，本来按 TTL 自清；销毁要一并清掉）。
-	 *
-	 * <p>{@code ai:observed:<tenantId>:<userId>:<runId>} 是 Task 2 的<b>结算观测位</b>（HASH，首写即置
-	 * session-ttl，自清即可）。用户裁定"所有 AI 数据在会话销毁时删除，不只靠 TTL"，而
-	 * {@code ai:observed:} 与 {@code ai:beat:}/{@code ai:activity:} 同列 TTL 型 run 锚点 ⇒ 这里按
-	 * runId 单键 DEL 一次，立即收敛。<b>钥匙必须与写入方同一个键</b>：身份段取自当前上下文
-	 * （{@link TenantKeyScope}）—— 销毁主体全程在入口身份的作用域内执行，且 run 归属已按快照复核，
-	 * 因此这里算出的就是"本轮在本身份下"的那把键；跨租户同 runId 的观测位不会被误删。
-	 *
-	 * <p><b>四把键逐把单键 DEL</b>（不做多键 {@code DEL} 合并）：这四族都<b>没有 hash tag</b>，
-	 * 真集群下彼此不同槽 —— 合并成一条多键删除会在 Redis 侧 {@code CROSSSLOT}，反而整批删不掉。
-	 * 单键命令天然安全，失败仍逐把进 {@code errors}（可重试语义不变）。
-	 *
-	 * <p>台账计数用的元数据投影在 {@code ai:idem:<runId>} 这个 HASH 内（{@code ~meta:<index>} 字段），
-	 * 已随 {@link RunStore#deleteRun(String)} 的 13 键 {@code DEL} 一并删除，无需在这里补第 5 把键。
+	 * 13 键之外的观测/取消键与帧附加键。单键 DEL 在受管连接的 Lettuce async 回调内统一等待；
+	 * xack 的固定 run HASH 在此精确删除，旧动态 token 键仍按原短 TTL 退出。
 	 */
-	private void deleteObservabilityKeys(String runId, List<String> errors) {
-		deleteSingleRunAnchor(runId, this.runStore.beatKey(runId), "观测/取消", errors);
-		deleteSingleRunAnchor(runId, this.runStore.activityKey(runId), "观测/取消", errors);
-		deleteSingleRunAnchor(runId, this.cancellations.keyFor(runId), "观测/取消", errors);
-		deleteSingleRunAnchor(runId, TenantKeyScope.scoped(OBSERVED_PREFIX, runId), "结算观测位", errors);
-	}
-
-	/** 单键 DEL 一把 run 锚点；失败只记可重试错误，不影响其余三把。 */
-	private void deleteSingleRunAnchor(String runId, String key, String label, List<String> errors) {
+	private void deleteObservabilityKeys(PurgeExecution execution, String runId, List<String> errors) {
+		execution.checkpoint("DELETE_RUN_ANCHORS");
+		List<String> keys = List.of(this.runStore.beatKey(runId), this.runStore.activityKey(runId),
+				this.cancellations.keyFor(runId), TenantKeyScope.scoped(OBSERVED_PREFIX, runId),
+				RunStore.runScopedKey("ai:xtrim:", runId), RunStore.runScopedKey("ai:xack:", runId));
 		try {
-			this.redis.delete(key);
+			List<Long> results = this.redis.execute((RedisCallback<List<Long>>) connection -> {
+				Object nativeConnection = connection.getNativeConnection();
+				if (!(nativeConnection instanceof RedisClusterAsyncCommands<?, ?>)) {
+					throw new IllegalStateException("Lettuce cluster async commands unavailable");
+				}
+				RedisClusterAsyncCommands<byte[], byte[]> async =
+						(RedisClusterAsyncCommands<byte[], byte[]>) nativeConnection;
+				List<RedisFuture<Long>> futures = new ArrayList<>(keys.size());
+				for (String key : keys) {
+					futures.add(async.del(key.getBytes(StandardCharsets.UTF_8)));
+				}
+				CompletableFuture<?>[] waits = futures.stream().map(RedisFuture::toCompletableFuture)
+						.toArray(CompletableFuture<?>[]::new);
+				CompletableFuture.allOf(waits).join();
+				execution.checkDeadline();
+				return futures.stream().map(future -> future.toCompletableFuture().join()).toList();
+			});
+			if (results == null || results.size() < keys.size()) {
+				errors.add("run[" + runId + "]: 观测/帧附加键删除回包不完整（可重试）");
+			}
 		}
 		catch (RuntimeException ex) {
-			errors.add("run[" + runId + "]: " + label + "键删除失败（可重试，key=" + key + "）："
-					+ rootMessage(ex));
+			errors.add("run[" + runId + "]: 观测/帧附加键删除结果不可知（可重试）：" + rootMessage(ex));
 		}
 	}
 
@@ -1295,61 +1303,134 @@ public class AiSessionPurgeService {
 	 */
 	TranscriptView deleteTranscript(String sessionId, boolean existed, long entries, List<String> errors,
 			List<String> warnings) {
-		String dataKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
-		String bytesKey = com.example.configmgr.ai.history.ConversationTranscriptStore.bytesKey(sessionId);
-		String readyKey = com.example.configmgr.ai.history.ConversationTranscriptStore.readyKey(sessionId);
-		String truncatedKey = com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId);
-		int deleted = deleteKeyIfType(dataKey, DataType.LIST, errors, warnings, "transcript");
-		deleted += deleteKeyIfType(bytesKey, DataType.STRING, errors, warnings, "transcriptBytes");
-		deleted += deleteKeyIfType(readyKey, DataType.STRING, errors, warnings, "transcriptReady");
-		deleted += deleteKeyIfType(truncatedKey, DataType.STRING, errors, warnings, "transcriptTruncated");
-		return new TranscriptView(existed, entries, deleted > 0);
+		return deleteTranscript(null, sessionId, existed, entries, errors, warnings);
 	}
 
-	private ContextView deleteContext(String sessionId, ContextTargets targets, List<String> errors,
+	private TranscriptView deleteTranscript(PurgeExecution execution, boolean existed, long entries,
+			List<String> errors, List<String> warnings) {
+		return deleteTranscript(execution, execution.sessionId(), existed, entries, errors, warnings);
+	}
+
+	private TranscriptView deleteTranscript(PurgeExecution execution, String sessionId, boolean existed, long entries,
+			List<String> errors, List<String> warnings) {
+		List<TypedKey> keys = List.of(
+				new TypedKey(com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId),
+						DataType.LIST, "transcript"),
+				new TypedKey(com.example.configmgr.ai.history.ConversationTranscriptStore.bytesKey(sessionId),
+						DataType.STRING, "transcriptBytes"),
+				new TypedKey(com.example.configmgr.ai.history.ConversationTranscriptStore.readyKey(sessionId),
+						DataType.STRING, "transcriptReady"),
+				new TypedKey(com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId),
+						DataType.STRING, "transcriptTruncated"));
+		return new TranscriptView(existed, entries, deleteTypedKeys(execution, keys, errors, warnings) > 0);
+	}
+
+	private ContextView deleteContext(PurgeExecution execution, ContextTargets targets, List<String> errors,
 			List<String> warnings) {
-		int deleted = 0;
-		deleted += deleteKeyIfType(this.runStore.contextKey(sessionId), DataType.HASH, errors, warnings, "ctx");
-		deleted += deleteKeyIfType(this.runStore.contextLedgerKey(sessionId), DataType.LIST, errors, warnings,
-				"ctxLedger");
+		String sessionId = execution.sessionId();
+		List<TypedKey> archives = new ArrayList<>();
 		for (String archive : targets.archives()) {
-			deleted += deleteKeyIfType(archive, DataType.STRING, errors, warnings, "ctxArchive");
+			archives.add(new TypedKey(archive, DataType.STRING, "ctxArchive"));
 		}
-		deleted += deleteKeyIfType(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), DataType.LIST, errors,
-				warnings, "safety");
-		// B3：已提交压缩事实（精确键 + LIST 类型；不扫描）
-		deleted += deleteKeyIfType(this.runStore.contextEventsKey(sessionId), DataType.LIST, errors, warnings,
-				"ctxEvents");
+		int errorCount = errors.size();
+		int deleted = 0;
+		long archiveCursor = targets.nextArchiveCursor() - archives.size();
+		for (int from = 0; from < archives.size(); from += REDIS_BATCH_SIZE) {
+			List<TypedKey> batch = archives.subList(from, Math.min(archives.size(), from + REDIS_BATCH_SIZE));
+			int batchErrorCount = errors.size();
+			deleted += deleteTypedKeys(execution, batch, errors, warnings);
+			if (errors.size() != batchErrorCount) {
+				break;
+			}
+			archiveCursor += batch.size();
+			if (!this.pendingStore.checkpointArchive(execution.claim(), archiveCursor,
+					System.currentTimeMillis(), EXECUTION_LEASE.toMillis())) {
+				throw new IllegalStateException("archive checkpoint rejected (execution lease lost)");
+			}
+		}
+		if (errors.size() == errorCount && targets.hasMoreArchives()) {
+			throw new PurgeContinuationException("archive batch committed, continuation required cursor="
+					+ archiveCursor);
+		}
+		if (errors.size() == errorCount) {
+			List<TypedKey> sessionKeys = List.of(
+					new TypedKey(this.runStore.contextKey(sessionId), DataType.HASH, "ctx"),
+					new TypedKey(this.runStore.contextLedgerKey(sessionId), DataType.LIST, "ctxLedger"),
+					new TypedKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), DataType.LIST, "safety"),
+					new TypedKey(this.runStore.contextEventsKey(sessionId), DataType.LIST, "ctxEvents"));
+			deleted += deleteTypedKeys(execution, sessionKeys, errors, warnings);
+		}
 		return new ContextView(targets.context(), targets.ledger(), targets.archives().size(), targets.safety(),
 				deleted);
 	}
 
-	/**
-	 * 按<b>类型</b>删除上下文类键。
-	 *
-	 * <p>前缀碰撞的硬防线：会话 {@code x} 的 {@code ai:ctx:ledger:x} 与会话 {@code ledger:x} 的
-	 * {@code ai:ctx:ledger:x} 是同一个字符串，但两者类型不同（LIST vs HASH）。类型不匹配说明
-	 * 这个键属于<b>另一个会话的另一个键族</b>，跳过并留 warning，绝不按"反正名字对上了"删掉。
-	 */
-	private int deleteKeyIfType(String key, DataType expected, List<String> errors, List<String> warnings,
-			String label) {
-		DataType actual;
-		try {
-			actual = this.redis.type(key);
+	private int deleteKeyIfType(PurgeExecution execution, String key, DataType expected, List<String> errors,
+			List<String> warnings, String label) {
+		return deleteTypedKeys(execution, List.of(new TypedKey(key, expected, label)), errors, warnings);
+	}
+
+	private int deleteTypedKeys(PurgeExecution execution, List<TypedKey> keys, List<String> errors,
+			List<String> warnings) {
+		int deleted = 0;
+		byte[] script = TYPE_DEL.getScriptAsString().getBytes(StandardCharsets.UTF_8);
+		for (int from = 0; from < keys.size(); from += REDIS_BATCH_SIZE) {
+			if (execution != null) {
+				execution.checkpoint("TYPE_DEL_BATCH");
+			}
+			List<TypedKey> batch = keys.subList(from, Math.min(keys.size(), from + REDIS_BATCH_SIZE));
+			final List<Object> results;
+			try {
+				results = this.redis.executePipelined((RedisCallback<Object>) connection -> {
+					for (TypedKey target : batch) {
+						connection.eval(script, ReturnType.INTEGER, 1, target.key().getBytes(StandardCharsets.UTF_8),
+								target.expected().code().getBytes(StandardCharsets.UTF_8));
+					}
+					return null;
+				});
+			}
+			catch (RuntimeException ex) {
+				for (TypedKey target : batch) {
+					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 结果不可知（可重试）："
+							+ rootMessage(ex));
+				}
+				continue;
+			}
+			if (execution != null) {
+				execution.checkDeadline();
+			}
+			if (results == null || results.size() < batch.size()) {
+				for (TypedKey target : batch) {
+					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 回包缺失（可重试）");
+				}
+				continue;
+			}
+			for (int index = 0; index < batch.size(); index++) {
+				TypedKey target = batch.get(index);
+				Object raw = results.get(index);
+				if (!(raw instanceof Number number)) {
+					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 回包不可知（可重试）");
+					continue;
+				}
+				long outcome = number.longValue();
+				if (outcome == -1L) {
+					if ("ctxArchive".equals(target.label())) {
+						errors.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
+								+ target.expected() + "），保留 cursor/ctx 并重试");
+					}
+					else {
+						warnings.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
+								+ target.expected() + "），判定为前缀碰撞并跳过");
+					}
+				}
+				else if (outcome > 0L) {
+					deleted += (int) outcome;
+				}
+				else if (outcome < 0L) {
+					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 失败码=" + outcome);
+				}
+			}
 		}
-		catch (RuntimeException ex) {
-			errors.add(label + "[" + key + "]: 类型读取失败（不删，避免误删他会话键）：" + rootMessage(ex));
-			return 0;
-		}
-		if (actual == null || actual == DataType.NONE) {
-			return 0;
-		}
-		if (actual != expected) {
-			warnings.add(label + "[" + key + "]: 键类型为 " + actual + "（期望 " + expected
-					+ "），判定为前缀碰撞的他会话键，跳过");
-			return 0;
-		}
-		return deleteKey(key, errors, label);
+		return deleted;
 	}
 
 	private int deleteKey(String key, List<String> errors, String label) {
@@ -1372,7 +1453,9 @@ public class AiSessionPurgeService {
 	 * <p>{@code sessionCurrent}/{@code sessionRuns}/{@code sessionActive} 三把发现键不在这里删，
 	 * 只在 {@link #deleteDiscoveryKeys} 里、本次删除主体无错误且无 defer 时才删。
 	 */
-	private SessionView deleteSessionRecordKeys(String sessionId, List<String> errors, List<String> warnings) {
+	private SessionView deleteSessionRecordKeys(PurgeExecution execution, List<String> errors,
+			List<String> warnings) {
+		String sessionId = execution.sessionId();
 		boolean recordDeleted = false;
 		// 只删会话记录键；ai:session:lock:<sid> 是协调键（在跑轮次可能还持有），不在这里动。
 		String recordKey = AiSessionService.keyFor(sessionId);
@@ -1391,13 +1474,10 @@ public class AiSessionPurgeService {
 		catch (RuntimeException ex) {
 			errors.add("session: " + rootMessage(ex));
 		}
-		// 会话级 create_task 候选草案（ai:ctdraft，HASH，字段 = taskId）：不按任务号独立建键、也没有
-		// 索引，只能按"会话一个键"精确 DEL（与写入方同一个键拼接口）。失败进 errors ⇒ complete=false
-		// + pending 保留，由调度/手动重试补删 —— 绝不静默残留到 session-ttl。
-		deleteKeyIfType(CreateTaskDraftStore.sessionKey(sessionId), DataType.HASH, errors, warnings, "ctdraft");
-		// 停止闭环：clientRequestId → run 的会话级映射/取消墓碑（单键 HASH，字段 = clientRequestId）。
-		// 与写入方同一个键拼接口（TenantKeyScope + 会话号），精确 DEL，不扫描。
-		deleteKeyIfType(ClientRequestRegistry.sessionKey(sessionId), DataType.HASH, errors, warnings, "clientreq");
+		deleteKeyIfType(execution, CreateTaskDraftStore.sessionKey(sessionId), DataType.HASH, errors, warnings,
+				"ctdraft");
+		deleteKeyIfType(execution, ClientRequestRegistry.sessionKey(sessionId), DataType.HASH, errors, warnings,
+				"clientreq");
 		return new SessionView(false, recordDeleted);
 	}
 
@@ -1408,8 +1488,9 @@ public class AiSessionPurgeService {
 	 * 只要有活跃 run 被 deferred 或任一删除失败，保留它们，重试才能继续枚举剩余轮次；
 	 * 提前删除会让 pending/guard 永久驻留（会话 410 且删不掉）。
 	 */
-	private SessionView deleteDiscoveryKeys(String sessionId, SessionView session, List<String> errors,
+	private SessionView deleteDiscoveryKeys(PurgeExecution execution, SessionView session, List<String> errors,
 			List<String> warnings) {
+		String sessionId = execution.sessionId();
 		boolean currentDeleted = false;
 		String currentKey = this.runStore.sessionCurrentKey(sessionId);
 		try {
@@ -1427,30 +1508,31 @@ public class AiSessionPurgeService {
 		catch (RuntimeException ex) {
 			errors.add("sessionCurrent: " + rootMessage(ex));
 		}
-		// ai:session:runs:<sid> 与 id="runs:<sid>" 的会话记录是同一个键（"ai:session:"+id）。
-		// 只删 SET（本会话的 run 索引）；其它类型判定为前缀碰撞的他会话键，跳过并留 warning。
-		deleteKeyIfType(this.runStore.sessionRunsKey(sessionId), DataType.SET, errors, warnings, "sessionRuns");
-		// 会话→活跃轮有序索引（ZSET，带 TTL）：销毁后成员指向已删的轮，留着只会让"活跃轮"的
-		// 加速面指向空快照；按类型删除，别的身份的键前缀里带自己的身份段，不会命中。
-		deleteKeyIfType(this.runStore.sessionActiveKey(sessionId), DataType.ZSET, errors, warnings, "sessionActive");
+		deleteKeyIfType(execution, this.runStore.sessionRunsKey(sessionId), DataType.SET, errors, warnings,
+				"sessionRuns");
+		deleteKeyIfType(execution, this.runStore.sessionActiveKey(sessionId), DataType.ZSET, errors, warnings,
+				"sessionActive");
 		return new SessionView(currentDeleted, session.recordDeleted());
 	}
 
-	private AttachmentView deleteAttachments(String sessionId, List<FormAttachmentStore.Attachment> list,
+	private AttachmentView deleteAttachments(PurgeExecution execution, List<FormAttachmentStore.Attachment> list,
 			List<String> errors, List<String> warnings) {
+		String sessionId = execution.sessionId();
 		int registrations = 0;
 		int files = 0;
 		List<String> failed = new ArrayList<>();
 		for (FormAttachmentStore.Attachment attachment : list) {
+			execution.checkDeadline();
 			if (!sessionId.equals(attachment.sessionId())) {
 				warnings.add("attachment[" + attachment.fileId() + "]: 登记归属与请求会话不一致，跳过（不删他会话文件）");
+				errors.add("attachment[" + attachment.fileId() + "]: 会话索引归属污染（保留索引，fail-closed）");
+				failed.add(attachment.fileId());
 				continue;
 			}
 			String storagePath = attachment.storagePath();
 			if (storagePath != null && !storagePath.isBlank()) {
 				Path path;
 				try {
-					// 存储键可能是 UUID 相对键（新口径）或历史绝对路径；删前/删后必须同一条真实路径。
 					path = this.fileStorage.resolve(storagePath);
 				}
 				catch (IllegalArgumentException ex) {
@@ -1463,13 +1545,11 @@ public class AiSessionPurgeService {
 					this.fileStorage.delete(storagePath);
 				}
 				catch (RuntimeException ex) {
-					// 删除抛错本身即失败事实：保留登记，重试时按同一路径再删。
 					errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
 							+ storagePath + "（" + ex.getMessage() + "）");
 					failed.add(attachment.fileId());
 					continue;
 				}
-				// FileStorageService.delete 吞 IOException：以"同一个 resolve 后的路径删后是否还在"为唯一事实。
 				if (Files.exists(path)) {
 					errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
 							+ storagePath);
@@ -1481,7 +1561,7 @@ public class AiSessionPurgeService {
 				}
 			}
 			try {
-				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(attachment.fileId());
+				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(attachment);
 				if (removed != null) {
 					registrations++;
 				}
@@ -1491,10 +1571,28 @@ public class AiSessionPurgeService {
 				failed.add(attachment.fileId());
 			}
 		}
+		if (failed.isEmpty() && errors.isEmpty()) {
+			try {
+				this.attachments.deleteSessionIndex(sessionId);
+			}
+			catch (RuntimeException ex) {
+				errors.add("attachments: 会话索引删除失败（可重试）：" + rootMessage(ex));
+			}
+		}
 		return new AttachmentView(list.size(), registrations, files, List.copyOf(failed));
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
+
+	private PurgeResult inProgress(String sessionId, String purgeId, SessionPurgePendingStore.Pending pending,
+			TenantUser identity) {
+		Enumeration enumeration = enumerationForFailure(sessionId, identity);
+		String phase = pending == null || pending.phase() == null ? "inProgress" : "inProgress:" + pending.phase();
+		return new PurgeResult(sessionId, purgeId, false, pending != null, phase, enumeration.database(), null,
+				new MemoryView(false, 0, false), new TranscriptView(false, 0L, false), List.of(), List.of(),
+				new ContextView(false, false, 0, false, 0), new AttachmentView(0, 0, 0, List.of()),
+				new SessionView(false, false), enumeration.clientCleanup(), List.of(), List.of());
+	}
 
 	private Duration guardTtl() {
 		Duration ttl = this.properties.getSessionTtl();
@@ -1536,14 +1634,76 @@ public class AiSessionPurgeService {
 
 	// ── 内部数据结构 ─────────────────────────────────────────────────────────
 
+	private record TypedKey(String key, DataType expected, String label) {
+	}
+
+	private enum TerminalConvergence {
+		CONVERGED, ABSENT, UNKNOWN
+	}
+
+	private static final class PurgeContinuationException extends RuntimeException {
+		private PurgeContinuationException(String message) {
+			super(message);
+		}
+	}
+
+	private static final class PurgeBudgetExceededException extends RuntimeException {
+		private PurgeBudgetExceededException() {
+			super("session purge execution budget exhausted");
+		}
+	}
+
+	private final class PurgeExecution {
+		private final SessionPurgePendingStore.Execution claim;
+		private final long deadlineNanos = System.nanoTime() + EXECUTION_BUDGET.toNanos();
+
+		private PurgeExecution(SessionPurgePendingStore.Execution claim) {
+			this.claim = claim;
+		}
+
+		private SessionPurgePendingStore.Execution claim() {
+			return this.claim;
+		}
+
+		private String sessionId() {
+			return this.claim.sessionId();
+		}
+
+		private String purgeId() {
+			return this.claim.purgeId();
+		}
+
+		private void checkpoint(String phase) {
+			checkDeadline();
+			if (!AiSessionPurgeService.this.pendingStore.renew(this.claim, phase, System.currentTimeMillis(),
+					EXECUTION_LEASE.toMillis())) {
+				throw new IllegalStateException("purge execution lease lost at phase " + phase);
+			}
+		}
+
+		private void checkDeadline() {
+			if (System.nanoTime() >= this.deadlineNanos) {
+				throw new PurgeBudgetExceededException();
+			}
+		}
+	}
+
 	private record RunTarget(String runId, String status, boolean active) {
 	}
 
+	private record ArchiveBatch(List<String> keys, long nextCursor, boolean hasMore) {
+	}
+
 	private record ContextTargets(boolean context, boolean ledger, List<String> archives, boolean safety,
-			boolean events) {
+			boolean events, long nextArchiveCursor, boolean hasMoreArchives) {
+
+		ContextTargets(boolean context, boolean ledger, List<String> archives, boolean safety, boolean events) {
+			this(context, ledger, archives, safety, events, 0L, false);
+		}
 
 		boolean any() {
-			return this.context || this.ledger || !this.archives.isEmpty() || this.safety || this.events;
+			return this.context || this.ledger || !this.archives.isEmpty() || this.safety || this.events
+					|| this.hasMoreArchives;
 		}
 
 	}
@@ -1553,7 +1713,7 @@ public class AiSessionPurgeService {
 	 *
 	 * @param settledSnapshots 状态刷新阶段读到的<b>终态</b>快照（runId → 快照）：删除阶段直接复用，
 	 *                         不再对同一把键重复完整读取；为空 = 没有可复用的读，删除前照旧重读
-	 * @param stagingKeys 枚举阶段扫出的本会话 staging 键：记忆删除阶段直接复用，避免二次全集群 SCAN
+	 * @param stagingKeys 枚举阶段按会话精确索引读出的 staging 键
 	 */
 	private record Enumeration(List<RunTarget> runs, Map<String, RunSnapshot> settledSnapshots,
 			List<FormAttachmentStore.Attachment> attachments, ContextTargets context, boolean memoryExisted,

@@ -262,9 +262,8 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	/**
 	 * 该会话仍在册的附件（销毁枚举面）。
 	 *
-	 * <p>索引成员可能已过期/被并发消费（stale），逐个 {@link #find(String)} 过滤；读失败
-	 * <b>抛出</b>（销毁要求"枚举失败不半删"），不折成空表。索引里混入别的会话 id 时按登记
-	 * 自身的 {@code sessionId} 再判一次，避免索引污染导致跨会话删文件。
+	 * <p>索引成员已过期/被并发消费时跳过；读失败或登记 sessionId 与索引归属不符均直接抛出，
+	 * 不把归属污染折成空表或部分枚举。
 	 */
 	@Override
 	public List<Attachment> findBySessionId(String sessionId) {
@@ -299,9 +298,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		List<Attachment> out = new ArrayList<>();
 		for (String fileId : ids) {
 			Attachment attachment = find(fileId);
-			if (attachment != null && sessionId.equals(attachment.sessionId())) {
-				out.add(attachment);
+			if (attachment == null) {
+				continue;
 			}
+			if (!sessionId.equals(attachment.sessionId())) {
+				throw new AiStateUnavailableException("附件会话索引归属污染（fail-closed）fileId=" + fileId);
+			}
+			out.add(attachment);
 		}
 		return out;
 	}
@@ -510,9 +513,8 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	/**
 	 * 该表单仍在册的附件（上传限额面 + 表单收口回收面）。
 	 *
-	 * <p>索引成员可能是 stale（登记已过期/已被并发消费）：逐个 {@link #find(String)} 过滤，并按登记
-	 * 自身的 {@code runId/toolCallId} 再判一次，避免索引污染导致回收别人的件。
-	 * 读失败<b>抛出</b>（上传限额不得按空表处理成"一件都没有"）。
+	 * <p>索引成员已过期/被并发消费时跳过；读失败或登记 runId/toolCallId 与索引归属不符均直接抛出，
+	 * 上传限额与收口回收不得把污染折成空表或部分枚举。
 	 */
 	@Override
 	public List<Attachment> findByForm(String runId, String toolCallId) {
@@ -546,10 +548,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		List<Attachment> out = new ArrayList<>();
 		for (String fileId : ids) {
 			Attachment attachment = find(fileId);
-			if (attachment != null && runId.equals(attachment.runId())
-					&& toolCallId.equals(attachment.toolCallId())) {
-				out.add(attachment);
+			if (attachment == null) {
+				continue;
 			}
+			if (!runId.equals(attachment.runId()) || !toolCallId.equals(attachment.toolCallId())) {
+				throw new AiStateUnavailableException("附件表单索引归属污染（fail-closed）fileId=" + fileId);
+			}
+			out.add(attachment);
 		}
 		return out;
 	}
@@ -566,13 +571,21 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return null;
 		}
+		return deleteKnownRegistration(find(fileId), fileId);
+	}
+
+	@Override
+	public Attachment deleteRegistration(Attachment attachment) {
+		return attachment == null ? null : deleteKnownRegistration(attachment, attachment.fileId());
+	}
+
+	private Attachment deleteKnownRegistration(Attachment attachment, String fileId) {
 		TenantUser identity = RequestContextUtils.currentOrNull();
 		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
 			return this.memory.remove(registration);
 		}
-		Attachment attachment = find(fileId);
 		try {
 			redis.delete(registration);
 		}
@@ -591,6 +604,20 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		removeFromIndexQuietly(redis, formIndexKey(identity, attachment == null ? null : attachment.runId(),
 				attachment == null ? null : attachment.toolCallId()), fileId);
 		return attachment;
+	}
+
+	@Override
+	public void deleteSessionIndex(String sessionId) {
+		StringRedisTemplate redis = redis();
+		if (redis == null) {
+			return;
+		}
+		try {
+			redis.delete(sessionIndexKey(RequestContextUtils.currentOrNull(), sessionId));
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("附件会话索引删除失败（可重试）", ex);
+		}
 	}
 
 	/**
