@@ -1466,6 +1466,8 @@ import {
   SCROLLBAR_CLASS,
   TIP_ARROW_CLASS,
   TIP_CLASS,
+  DEGRADE_AT_CHARS,
+  hasUnclosedFence,
   renderMarkdown,
   renderMermaidSvg,
   setStreamFlushHandler
@@ -2744,9 +2746,7 @@ function evictHistoryEntries(): void {
 }
 
 function hydrateMermaidIfNeeded(messageId: string, mermaid: MermaidSlotRef[]): void {
-  if (mermaid.length > 0) {
-    void nextTick(() => hydrateMermaid(messageId, mermaid))
-  }
+  void nextTick(() => hydrateMermaid(messageId, mermaid))
 }
 
 /**
@@ -3563,6 +3563,14 @@ function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: s
     return
   }
   const slots = Array.from(bubble.querySelectorAll('pre > code.language-mermaid'))
+  let registered = blocks
+  if (registered.length === 0 && slots.length > 0) {
+    const message = ai.messages.find((item) => item.id === messageId)
+    const text = message?.parts.map((part) => part.kind === 'text' ? part.text : '').join('') ?? ''
+    if (message && !message.streaming && text.length <= DEGRADE_AT_CHARS && !hasUnclosedFence(text)) {
+      registered = slots.map((code, index) => ({ index, key: '', source: code.textContent ?? '' }))
+    }
+  }
   // 问题1 偏差修正批 aj14d ③：按稳定 key（`data-fence-key`）绑槽位 —— 位置下标只作兜底
   // （渲染与 hydrate 之间若又来一帧，位置会漂移，key 不会）。
   const byKey = new Map<string, Element>()
@@ -3572,7 +3580,7 @@ function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: s
       byKey.set(key, slot)
     }
   }
-  for (const item of blocks) {
+  for (const item of registered) {
     const code = byKey.get(item.key) ?? slots[item.index]
     if (!code) {
       continue

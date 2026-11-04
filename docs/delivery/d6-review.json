@@ -392,6 +392,13 @@
       "reason": "本批仅调整上传重试、卡片状态、队列位次、通知关闭和C端文案，D6迁移接口与恢复协议不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:b63689ee2fe755afa91317a9fd7268dfb4ac2f1c5c32112b9a3655c78dca1d02",
+      "status": "not-affected",
+      "reason": "本批仅在完成且围栏闭合的恢复现场补登记Mermaid渲染，不改变D6迁移接口、会话协议、存储键及跨实例契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
