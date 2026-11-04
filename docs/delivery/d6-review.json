@@ -420,6 +420,13 @@
       "reason": "本批仅允许恢复续收中的闭合Mermaid按既有规则补登记，保留长文降级与围栏闭合约束，D6恢复协议不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:1dc4bca008136185edc2a91091d0f905fd87a49e493e8d612b7bc451753cdbe7",
+      "status": "not-affected",
+      "reason": "本批仅消费当前history协议已有的CANCELLED结局并恢复停止标记，不改变D6迁移接口、存储结构或跨实例契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

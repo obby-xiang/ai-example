@@ -277,6 +277,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   /** 失败终帧的机器码与诊断原文；空白正文的失败条目也据此保留并重建错误卡。 */
   errorCode?: string
   errorMessage?: string
+  /** assistant 所属 run 的权威终态；CANCELLED 用于恢复消息级停止事实。 */
+  outcome?: string
   /** assistant 的 toolCalls（Spring AI AssistantMessage.ToolCall 列表，字段结构由上游协议决定） */
   toolCalls?: Array<{ id?: string; type?: string; name?: string; arguments?: string }>
   /** tool 消息的响应（ToolResponseMessage.ToolResponse 列表） */

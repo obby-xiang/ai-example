@@ -5176,8 +5176,8 @@ export const useAiStore = defineStore('ai', {
           } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
-          // 批G · S4：被用户停止的半截正文（后端 stopped 元数据透出）—— 渲染「已停止」
-          ...(item.stopped === true ? { stopped: true } : {}),
+          // 批G · S4：stopped 元数据或规范 CANCELLED 终态都恢复为「已停止」，不归一成普通完成。
+          ...(item.stopped === true || item.outcome === 'CANCELLED' ? { stopped: true } : {}),
           // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
           ...(item.truncated === true ? { truncated: true } : {})
         }
