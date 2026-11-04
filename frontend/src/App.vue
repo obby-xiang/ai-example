@@ -58,11 +58,8 @@
             @keydown="handlePanelResizeKeydown"
           >
             <span
-              class="absolute left-1/2 top-1/2 h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500 opacity-0 pointer-events-none group-focus-visible:opacity-100"
-            />
-            <span
-              v-if="isResizing"
-              class="absolute inset-y-0 left-0 w-0.5 bg-blue-500 pointer-events-none"
+              class="absolute left-1/2 top-1/2 h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500 pointer-events-none group-focus-visible:opacity-100"
+              :class="isResizing ? 'opacity-100' : 'opacity-0'"
             />
           </div>
           <AiPanel />
@@ -182,7 +179,7 @@ function startPanelResize(event: PointerEvent) {
   if (event.button !== 0 || !ai.expanded || maxPanelWidth.value <= MIN_AI_PANEL_WIDTH) return
   event.preventDefault()
   const handle = event.currentTarget as HTMLElement
-  handle.focus()
+  handle.blur()
   resizePointerId = event.pointerId
   resizeStartX = event.clientX
   resizeStartWidth = expandedPanelWidth.value
