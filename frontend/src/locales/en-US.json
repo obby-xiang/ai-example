@@ -14,20 +14,22 @@
           "hitl": "Awaiting confirmation",
           "form": "Awaiting input"
         },
+        "submitting": "Submitting…",
+        "queued": "Queued",
         "running": "Running…",
         "succeeded": "Succeeded",
         "failed": "Failed",
         "rejected": "Rejected",
         "blocked": "Out of presentable scope",
-        "expired": "Session expired",
+        "expired": "Expired",
         "cancelled": "Cancelled",
-        "unknown": "Outcome unknown (not confirmed)",
+        "unknown": "Outcome unknown",
         "skipped": "Skipped"
       },
       "readonly": {
         "approved": "✓ Approved",
         "rejected": "✗ Rejected",
-        "expired": "! Timed out",
+        "expired": "Expired",
         "failed": "! Approved · Execution failed",
         "submitted": "✓ Submitted",
         "cancelled": "✗ Cancelled",
@@ -39,16 +41,17 @@
         "quota": {
           "title": "Request over quota",
           "guide": "Click Continue to start this turn again.",
+          "guideUnavailable": "Check your current quota and request content before making another request.",
           "action": "Continue"
         },
         "filter": {
           "title": "Content blocked by safety policy",
-          "guide": "Tip: describe the goal and constraints, then resend; do not paste raw executable commands.",
+          "guide": "Describe the goal and constraints, then resend; do not paste raw executable commands.",
           "action": "Rewrite and resend"
         },
         "context": {
           "title": "Context length exceeded",
-          "guide": "Tip: start a new conversation and carry the key conclusions over (retrying will not shorten it).",
+          "guide": "Start a new conversation and carry the key conclusions over (retrying will not shorten it).",
           "action": "Start new chat"
         },
         "generic": {
@@ -161,8 +164,8 @@
       "redisUnavailable": "The AI service is temporarily unavailable. Please try again later.",
       "historyEarlierFailed": "Earlier conversation failed to load. Please try again.",
       "healthProbeFailed": "AI availability check failed",
-      "decisionPending": "Decision submitted, but not yet confirmed by the backend (refresh later to check).",
-      "runExpired": "This run's state may have expired under the retention window; on submit, the server confirms and marks the card expired.",
+      "decisionPending": "Decision submitted, but the outcome has not synced yet. Reload later to check.",
+      "runExpired": "This turn may have expired; the server confirms on submission.",
       "noPendingDecision": "No pending confirmation request",
       "decisionSubmitting": "This decision was submitted and is syncing…",
       "ackRequired": "This action cannot be undone: tick the confirmation box first",
@@ -179,13 +182,14 @@
       "sessionIssueFailed": "Session setup failed: no new session could be issued by the server. Please try again later.",
       "directoryFailed": "Failed to load the tenant/user directory (other page actions are unaffected)",
       "directoryEmpty": "The tenant/user directory is empty; sending is paused",
-      "staleConfirmCard": "This turn is no longer available. Please ask again.",
+      "staleConfirmCard": "Expired. This turn has ended and the action was not executed.",
       "mirrorQuotaExceeded": "The browser mirror could not be written (storage may be full or private mode may be on): this tab's state may not survive a refresh; the server only keeps a 24-hour sliding memory window.",
       "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Connection interrupted; restoring",
       "turnError": "Error this turn: {message}",
       "uploadNoRegion": "Open step 1 of the import wizard first",
+      "uploadReadonly": "This task has ended and is view-only; uploading is unavailable and was not executed.",
       "uploadPickerUnsupported": "This browser cannot pick files inside the chat",
       "uploadPickerCancelled": "You cancelled the file selection; you can retry",
       "uploadPickerFailed": "File selection failed: {message}",
@@ -311,7 +315,6 @@
       "stop": "Stop generating",
       "stopping": "Stopping…",
       "stopped": "Stopped",
-      "truncated": "Truncated",
       "truncatedHint": "The answer hit the model's length limit and may be incomplete."
     },
     "suggestions": {
@@ -465,7 +468,8 @@
       },
       "skippedHuman": "This step was not executed; the assistant will continue with what it already has.",
       "internalHuman": "This step did not complete normally.",
-      "gateExpiredHuman": "This turn is no longer available. Please ask again.",
+      "sheetInputHuman": "The spreadsheet parameters are incomplete or outside the allowed range. Adjust them and retry.",
+      "gateExpiredHuman": "Expired. This turn has ended and the action was not executed.",
       "toolKindMismatch": "This step was not executed. Please start the action again.",
       "formUnavailable": "The form definition is unavailable; the original card cannot be restored",
       "args": "Arguments",
@@ -473,7 +477,7 @@
       "truncated": "Truncated",
       "truncatedFrame": "The result is too large and has been truncated ({returned} of {original} characters shown). Narrow the query or paginate for more detail.",
       "truncatedModelView": "The result is long: the model received only {returned} of {original} characters.",
-      "truncatedLimitUnreached": "The result exceeds the frame size limit and could not be compressed further. Narrow the query or paginate for more detail.",
+      "truncatedLimitUnreached": "The result is too large to compress further. Narrow the query or paginate for more detail.",
       "undoHint": "The UI changed; the most recent step can be undone.",
       "definition": "Definition",
       "rowKey": "Row key",
@@ -485,8 +489,9 @@
       "editMessage": "Edit this message (copy it into the input box)",
       "regenerateMessage": "Regenerate this answer",
       "waiting": "Waiting…",
+      "dismiss": "Dismiss",
       "turnUnconfirmed": "This turn has ended, but its status is unconfirmed",
-      "turnUnconfirmedHint": "The content shown may be incomplete. Reload to sync the server state, or start a new turn.",
+      "turnUnconfirmedHint": "The content shown may be incomplete. Reload to sync the server state.",
       "compactionEvent": "Context compacted",
       "compactionEventAria": "Context was compacted here; earlier content is kept as a summary",
       "historyTruncated": "Earlier conversation is not retained on this device",
@@ -501,7 +506,7 @@
       "preparingAria": "Preparing this answer",
       "preparingRetry": "Retry now",
       "recoveryGap": "Some content may be incomplete",
-      "recoveryGapHint": "This part came from the local cache or incremental replay, so completeness cannot be confirmed. Reload to sync the server state.",
+      "recoveryGapHint": "This part may be incomplete. Reload to sync the server state.",
       "reloadTurn": "Reload",
       "historyLoadFailed": "History restore failed",
       "recoveryFailed": "Session restore failed",
@@ -549,6 +554,20 @@
       "copyFailed": "Copy failed; please select and copy the text manually",
       "continue": "Continue"
     },
+    "time": {
+      "yesterday": "Yesterday {time}",
+      "weekday": {
+        "0": "Sunday {time}",
+        "1": "Monday {time}",
+        "2": "Tuesday {time}",
+        "3": "Wednesday {time}",
+        "4": "Thursday {time}",
+        "5": "Friday {time}",
+        "6": "Saturday {time}"
+      },
+      "monthDay": "{month}/{day} {time}",
+      "yearMonthDay": "{year}/{month}/{day} {time}"
+    },
     "sheetCard": {
       "discard": "Discard",
       "levelCount": "Count",
@@ -580,8 +599,7 @@
       "discard": "Discard",
       "fallbackEntry": "upload entry",
       "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the left.",
-      "hintMissing": "Open step 1 of the import wizard first (the upload entry is no longer on this page).",
-      "hintUnavailable": "This task has ended, so it is view-only; the upload entry is unavailable."
+      "hintMissing": "Open step 1 of the import wizard first (the upload entry is no longer on this page)."
     }
   },
   "common": {
@@ -921,7 +939,7 @@
       "highlightLegend": "Pending cells are tinted in the sheet for review (screen only, never written to the file)"
     },
     "applied": {
-      "line": "AI changed {cells} cells (undoable, layer {layer} of 3)"
+      "line": "AI changed {cells} cells (undo step {layer} of {depth})"
     },
     "engineLoading": "Loading the spreadsheet engine… (SpreadJS is loaded on demand)",
     "engineRetry": "Reload spreadsheet",

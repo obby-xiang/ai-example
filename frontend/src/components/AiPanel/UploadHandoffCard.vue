@@ -8,20 +8,20 @@ import { useI18n } from 'vue-i18n'
  * - 「选择文件」= 用户手势（浏览器只认它给的文件句柄）；
  * - 「放弃」= `cancelled=true` 收口（走既有 FRONTEND_CANCELLED，不产生新码）。
  *
- * 三态（waiting / degraded / missing）与 unavailable 共用一套外观，差别只在
- * **主按钮是否可点**与一句可行动说明 —— 禁用态永远伴随"下一步该做什么"。
+ * 三态（waiting / unsupported / missing）共用一套外观，差别只在
+ * **主按钮是否可点**与一句可行动说明 —— 仅 unsupported 永久禁用。
  */
 import { computed } from 'vue'
 
 const { t } = useI18n()
 
 const props = defineProps<{
-  status: 'waiting' | 'degraded' | 'missing' | 'unavailable'
+  status: 'waiting' | 'unsupported' | 'missing'
   /** 页面允许的扩展名（提示文案用；数组或 `".xlsx,.zip"` 形态都接受） */
   accept?: string[] | string | null
   /** 上传入口的标签（"请点左侧的「…」"） */
   label?: string | null
-  /** 状态原因（degraded / missing 时展示） */
+  /** 状态原因（unsupported / missing 时展示） */
   reason?: string | null
 }>()
 
@@ -32,7 +32,7 @@ const emit = defineEmits<{
 
 const entryLabel = computed(() => props.label ?? t('ai.uploadHandoff.fallbackEntry'))
 
-const chooseDisabled = computed(() => props.status !== 'waiting')
+const chooseDisabled = computed(() => props.status === 'unsupported' || props.status === 'missing')
 
 const acceptText = computed(() => {
   const raw = props.accept
@@ -58,14 +58,11 @@ function onChoose(): void {
  * `reason` 是后端给的具体原因（数据不是文案），有就用它，没有才回落本地人话。
  */
 const hint = computed(() => {
-  if (props.status === 'degraded') {
+  if (props.status === 'unsupported') {
     return props.reason ?? t('ai.uploadHandoff.hintDegraded')
   }
   if (props.status === 'missing') {
     return t('ai.uploadHandoff.hintMissing')
-  }
-  if (props.status === 'unavailable') {
-    return props.reason ?? t('ai.uploadHandoff.hintUnavailable')
   }
   return null
 })
@@ -93,7 +90,6 @@ const hint = computed(() => {
     </p>
     <div class="flex items-center gap-[9px] pt-1">
       <button
-        v-if="status !== 'unavailable'"
         type="button"
         class="flex-none whitespace-nowrap min-w-[84px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
         data-testid="upload-handoff-choose"

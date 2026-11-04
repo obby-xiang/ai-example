@@ -23,11 +23,11 @@ export interface ActiveUploadHandoff {
   /** 收窄后的扩展名（缺省 = 页面允许的 .xlsx/.zip） */
   accept: string[] | null
   /**
-   * - waiting：主按钮可点（浏览器支持 picker 且区域仍注册）
-   * - degraded：浏览器不支持 picker（回退为"点左侧高亮按钮/拖到高亮区"），主按钮禁用
+   * - waiting：主按钮可点（含取消或失败后的真实重试）
+   * - unsupported：浏览器不支持 picker（主按钮禁用）
    * - missing：刷新后区域已不在该页（主按钮禁用，只能放弃）
    */
-  status: 'waiting' | 'degraded' | 'missing'
+  status: 'waiting' | 'unsupported' | 'missing'
   /** 状态原因（展示给用户的一句话） */
   reason: string | null
   /** 已选文件名（只回 basename，≤64 字符） */

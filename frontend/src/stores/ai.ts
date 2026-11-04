@@ -102,7 +102,6 @@ import {
   isSystemRejectPhantom,
   jobIdOfToolResult,
   markApplied,
-  openStreamPart,
   outcomeStatus,
   sealTrailingStreamPart,
   upsertToolPart as writeToolPart,
@@ -3386,8 +3385,8 @@ function resolveUploadRegion(refArg: string | null): { region: AiRegion; entry: 
  * 三处共用同一份字面量（建卡闸 / 卡面已 missing 时的 choose / 选文件期间区域消失），
  * 避免同一句话在三处漂移；`check-i18n-residue` 按文件计行，提取成常量不增残留。
  */
-const UPLOAD_NO_REGION_TEXT = '当前页面没有可用的上传入口（请先打开导入向导的第 1 步），本次未执行上传。'
-const UPLOAD_READONLY_TEXT = '任务已结束，仅供查看；上传入口在只读页面不可用，本次未执行上传。'
+const UPLOAD_NO_REGION_TEXT = (): string => translate('ai.notice.uploadNoRegion')
+const UPLOAD_READONLY_TEXT = (): string => translate('ai.notice.uploadReadonly')
 
 /** 高亮上传入口（失败不影响交接主流程：高亮是"引导"，不是前提）。 */
 function highlightUploadEntry(ref: string): void {
@@ -3496,6 +3495,9 @@ function setNotice(
   args: Record<string, string | number> = {},
   severity: NoticeSeverity = noticeSeverityOf(code)
 ): void {
+  if (sink.notice !== null && sink.noticeSeverity === 'error' && severity === 'info') {
+    return
+  }
   sink.noticeCode = code
   sink.noticeArgs = args
   sink.noticeSeverity = severity
@@ -3508,6 +3510,9 @@ function setNotice(
  * 不翻译、不带 code —— 原文是数据不是文案（C5 同口径）。级别默认 info，调用方可按现场覆盖。
  */
 function setRawNotice(sink: NoticeSink, text: string, severity: NoticeSeverity = 'info'): void {
+  if (sink.notice !== null && sink.noticeSeverity === 'error' && severity === 'info') {
+    return
+  }
   sink.noticeCode = null
   sink.noticeArgs = null
   sink.noticeSeverity = severity
@@ -4090,6 +4095,14 @@ export const useAiStore = defineStore('ai', {
      */
     showRawNotice(text: string, severity: NoticeSeverity = 'info'): void {
       setRawNotice(this, text, severity)
+    },
+
+    dismissNotice(): void {
+      clearNotice(this)
+    },
+
+    dismissUiEventReceipt(): void {
+      this.lastUiEventResult = null
     },
 
     /**
@@ -7274,28 +7287,6 @@ export const useAiStore = defineStore('ai', {
         if (message) {
           message.streaming = false
           message.done = true
-          // 本轮压根没开始：给占位助手消息一个可读的收尾，避免留空气泡。
-          // 批2：正文不再直写 `content` —— 文案写进 text 段（同段口径），投影由 derive 产出。
-          // 批G · G5：**不再出现**「本轮未开始」这类技术措辞与 runId（SESSION_BUSY 的气泡整体
-          // 回收，不走这里）；其余错误只在正文为空时补一句人话。
-          const hasText = message.parts.some((part) => part.kind === 'text' && part.text !== '')
-          // R-12：这些码已有本地化通知/错误卡，正文不再回显后端 message（en 下会中英叠加）。
-          const localizedElsewhere = error instanceof ApiError
-            && (error.code === ErrorCode.SESSION_BUSY
-              || error.code === ErrorCode.AI_UNAVAILABLE
-              || error.code === ErrorCode.AI_REDIS_UNAVAILABLE
-              || error.code === ErrorCode.AI_KEY_MISSING
-              || error.code === ErrorCode.AI_KEY_UNREADABLE
-              || error.code === ErrorCode.NO_MODEL_CONFIGURED)
-          const literal = error instanceof Error && !localizedElsewhere
-            ? translate('ai.panel.sendNotSentInline', { message: error.message })
-            : null
-          if (literal !== null && !hasText) {
-            const part = openStreamPart(message, 'text')
-            part.text = literal
-            part.streaming = false
-            deriveProjections(message)
-          }
         }
       }
       // R-165 S5c：错误卡族（demo v7.7 裁决区 08）—— 内联于**出错那一轮的消息**（非顶部固定）。
@@ -7663,6 +7654,23 @@ export const useAiStore = defineStore('ai', {
 
     // ── R-166：确认门提交态与权威校正（口径③/④） ─────────────────────────────
 
+    setGateReason(toolCallId: string, reason: string | null): void {
+      for (const message of this.messages) {
+        const part = findToolPart(message, toolCallId)
+        if (!part) {
+          continue
+        }
+        this.upsertToolPart(message, {
+          toolCallId,
+          name: part.name,
+          kind2: part.kind2,
+          reason,
+          requiresAction: part.requiresAction
+        }, false)
+        deriveProjections(message)
+      }
+    },
+
     /** 撤某挂起条目的提交态（结局落定 / 失败回退）。 */
     clearGateSubmission(toolCallId: string): void {
       disarmGateSync(toolCallId)
@@ -7766,6 +7774,7 @@ export const useAiStore = defineStore('ai', {
         status: 'pending',
         decision: undefined,
         decidedAt: undefined,
+        reason: null,
         requiresAction: true
       })
       deriveProjections(host)
@@ -7848,12 +7857,11 @@ export const useAiStore = defineStore('ai', {
       }
       const attempt = (gateSyncAttempts.get(toolCallId) ?? 0) + 1
       if (attempt < GATE_SYNC_MAX_ATTEMPTS) {
-        setNotice(this, 'ai.notice.decisionPending')
         this.armGateSync(toolCallId, attempt)
         return
       }
       this.clearGateSubmission(toolCallId)
-      setNotice(this, 'ai.notice.decisionPending')
+      this.setGateReason(toolCallId, translate('ai.notice.decisionPending'))
     },
 
     /**
@@ -7936,6 +7944,7 @@ export const useAiStore = defineStore('ai', {
           decision: receipt.decision ?? part.decision,
           // 权威快照不带决策时刻：只有本次真出了裁决才盖本地时刻（沿用旧口径），否则不动原值
           ...(receipt.decision !== undefined && part.decidedAt === undefined ? { decidedAt: Date.now() } : {}),
+          reason: null,
           requiresAction: false
         })
         deriveProjections(message)
@@ -8124,6 +8133,7 @@ export const useAiStore = defineStore('ai', {
           status: approved ? 'running' : 'rejected',
           decision: approved ? 'approved' : 'rejected',
           decidedAt: Date.now(),
+          reason: null,
           requiresAction: false
         })
         deriveProjections(host)
@@ -8192,13 +8202,13 @@ export const useAiStore = defineStore('ai', {
               status: 'expired',
               decision: undefined,
               decidedAt: undefined,
+              reason: translate(staleKey),
               requiresAction: false
             })
             deriveProjections(host)
           }
           // 这张卡不再等人 ⇒ 没有别的待决卡就把挂起态收口（输入区不被一张死卡锁住）
           this.clearSuspendedIfNoOtherConfirms(toolCallId)
-          setNotice(this, staleKey, {}, 'warning')
           return
         }
         // 提交失败回退：段回到待决（requiresAction=true），派生出的挂起卡随之复现；
@@ -8221,12 +8231,8 @@ export const useAiStore = defineStore('ai', {
             requiresAction: true
           })
           deriveProjections(host)
-        }
-        if (error instanceof ApiError) {
-          // 后端 `message` 已按请求语言本地化（与既有口径一致），可原样上屏。
-          setRawNotice(this, error.message)
-        } else {
-          // Task 3：非后端错误（TypeError / 内部异常 / 桩）一律落本地化兜底 —— 原文不上屏。
+          this.setGateReason(toolCallId, translate('ai.notice.decisionFailed'))
+        } else if (!host) {
           setNotice(this, 'ai.notice.decisionFailed')
         }
       }
@@ -8689,6 +8695,7 @@ export const useAiStore = defineStore('ai', {
       // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
       this.dropSheetPreview('stop')
       this.restoredPendingQueue = []
+      this.lastUiEventResult = null
       // 2026-10-29 收口：界面播报按轮收口（模块侧与 state 侧同清，否则下一轮 `syncUiRuntimeState`
       // 又能把上一轮的播报读回来）
       clearUiAnnouncement()
@@ -8831,9 +8838,9 @@ export const useAiStore = defineStore('ai', {
      *
      * 与 `openGenerativeForm` 同族：**先校验再挂起**，任何异常路径都**带结局回灌收敛**
      * （绝不让挂起悬空）。三态分流：
-     * - 只读页 / 无上传入口 ⇒ `unavailable`，直接回灌失败（不建卡）；
-     * - 浏览器无 `showOpenFilePicker` ⇒ `degraded`（卡保留可重试 + 高亮入口）；
-     * - 其余 ⇒ `waiting`（等用户手势）。
+     * - 只读页 / 无上传入口 ⇒ 直接回灌失败（不建卡）；
+     * - 浏览器无 `showOpenFilePicker` ⇒ `unsupported`（仅主按钮禁用，保留高亮入口）；
+     * - 其余 ⇒ `waiting`（等用户手势，失败后可重试）。
      */
     async openUploadHandoff(
       message: ChatMessage,
@@ -8892,11 +8899,11 @@ export const useAiStore = defineStore('ai', {
       }
       const target = resolveUploadRegion(validated.value.ref)
       if (!target) {
-        await fail(UPLOAD_NO_REGION_TEXT)
+        await fail(UPLOAD_NO_REGION_TEXT())
         return
       }
       if (target.region.readOnly?.() === true) {
-        await fail(UPLOAD_READONLY_TEXT)
+        await fail(UPLOAD_READONLY_TEXT())
         return
       }
       // 高亮入口（把用户送到上传按钮；视觉零变化，只加描边 + 徽标 + 播报）
@@ -8907,7 +8914,7 @@ export const useAiStore = defineStore('ai', {
         runId,
         ref: target.entry,
         accept: validated.value.accept,
-        status: pickerOk ? 'waiting' : 'degraded',
+        status: pickerOk ? 'waiting' : 'unsupported',
         reason: pickerOk ? null : translate('ai.notice.uploadPickerUnsupported'),
         filename: null
       }
@@ -8951,14 +8958,14 @@ export const useAiStore = defineStore('ai', {
         // A09：ref 缺省时同样按区域实况回落（缺 ref ≠ 没有落点，区域可能刚刚才注册）。
         const target = resolveUploadRegion(handoff.ref)
         const readOnly = target?.region.readOnly?.() === true
-        await this.finishUploadHandoff(handoff, 'failed', readOnly ? UPLOAD_READONLY_TEXT : UPLOAD_NO_REGION_TEXT, false)
+        await this.finishUploadHandoff(handoff, 'failed', readOnly ? UPLOAD_READONLY_TEXT() : UPLOAD_NO_REGION_TEXT(), false)
         return
       }
       const picked = requestFilePicker(handoff.accept)
       if (!picked) {
         this.activeUploadHandoff = {
           ...handoff,
-          status: 'degraded',
+          status: 'unsupported',
           reason: translate('ai.notice.uploadPickerUnsupported')
         }
         this.uiAnnouncement = pickUiAnnouncement()
@@ -8968,14 +8975,14 @@ export const useAiStore = defineStore('ai', {
       try {
         files = await picked
       } catch (error) {
-        // 停止/换轮后不再把旧卡改回 degraded（单例已被收口，写了就是复活一张死卡）。
+        // 停止/换轮后不再改旧卡（单例已被收口，写了就是复活一张死卡）。
         if (!stillOwnHandoff()) {
           return
         }
         const aborted = error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))
         this.activeUploadHandoff = {
           ...handoff,
-          status: 'degraded',
+          status: 'waiting',
           reason: aborted
             ? translate('ai.notice.uploadPickerCancelled')
             : translate('ai.notice.uploadPickerFailed', { message: errorText(error) })
@@ -8988,7 +8995,7 @@ export const useAiStore = defineStore('ai', {
       }
       const file = files[0]
       if (!file) {
-        this.activeUploadHandoff = { ...handoff, status: 'degraded', reason: translate('ai.notice.uploadNoFile') }
+        this.activeUploadHandoff = { ...handoff, status: 'waiting', reason: translate('ai.notice.uploadNoFile') }
         return
       }
       const name = uploadFileNameOf(file)
@@ -8997,7 +9004,7 @@ export const useAiStore = defineStore('ai', {
       // 用户点下去却在这里被判成"没有入口"（同一缺陷的第二道否决）。
       const region = resolveUploadRegion(handoff.ref)?.region ?? null
       if (region === null || region.root.isConnected !== true) {
-        await this.finishUploadHandoff(handoff, 'failed', UPLOAD_NO_REGION_TEXT, false)
+        await this.finishUploadHandoff(handoff, 'failed', UPLOAD_NO_REGION_TEXT(), false)
         return
       }
       let summary = ''
@@ -9010,7 +9017,7 @@ export const useAiStore = defineStore('ai', {
           }
           this.activeUploadHandoff = {
             ...handoff,
-            status: 'degraded',
+            status: 'waiting',
             reason: translate('ai.notice.uploadReceiveFailed', { message: errorText(error) })
           }
           return
@@ -9061,7 +9068,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * 刷新恢复的判据（**只看区域**）：交接不依赖浏览器里算出的中间态，
      * 区域仍注册 ⇒ 可继续；区域已不在该页 ⇒ `missing`（主按钮禁用、只能放弃）。
-     * 浏览器 picker 能力在点击时再判（`open` 时的 `degraded` 是"当时"的分流）。
+     * 浏览器 picker 能力在点击时再判（`open` 时的 `unsupported` 是"当时"的分流）。
      *
      * <p>
      * **A09**：`ref` 只表示"模型显式指定了入口"，缺省时落点由区域声明的 `uploadEntry`
@@ -9070,13 +9077,13 @@ export const useAiStore = defineStore('ai', {
      * 区域随后注册了卡也永远停在 `missing`（按钮永不启用）。故缺 `ref` 不得否决 ——
      * 判据一律交给"区域现在在不在"：区域不在仍取不到目标 ⇒ 依然 `missing`（没有放宽）。
      */
-    uploadHandoffAvailability(): 'waiting' | 'missing' | 'degraded' | null {
+    uploadHandoffAvailability(): 'waiting' | 'missing' | 'unsupported' | null {
       const handoff = this.activeUploadHandoff
       if (!handoff) {
         return null
       }
-      if (handoff.status === 'degraded') {
-        return 'degraded'
+      if (handoff.status === 'unsupported') {
+        return 'unsupported'
       }
       const target = resolveUploadRegion(handoff.ref)
       if (!target || target.region.root.isConnected !== true) {

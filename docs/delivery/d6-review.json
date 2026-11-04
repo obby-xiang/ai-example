@@ -385,6 +385,13 @@
       "reason": "本批为transcript补充outcome/errorCardKey/unconfirmed并保留合并与历史投影；D6现有展示历史和恢复契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:d96a5197dcda054c263610710faf6eaa120a390024bd1404e0d04b95b327f92d",
+      "status": "not-affected",
+      "reason": "本批仅调整上传重试、卡片状态、队列位次、通知关闭和C端文案，D6迁移接口与恢复协议不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

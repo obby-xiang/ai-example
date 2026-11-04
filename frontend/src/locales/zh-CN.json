@@ -14,20 +14,22 @@
           "hitl": "待确认",
           "form": "待填写"
         },
+        "submitting": "提交中…",
+        "queued": "排队中",
         "running": "调用中…",
         "succeeded": "已成功",
         "failed": "执行失败",
         "rejected": "已拒绝",
         "blocked": "超出当前范围",
-        "expired": "会话已失效",
+        "expired": "已失效",
         "cancelled": "已取消",
-        "unknown": "结局未知（未确认成功/失败）",
+        "unknown": "结局未知",
         "skipped": "已跳过"
       },
       "readonly": {
         "approved": "✓ 已批准",
         "rejected": "✗ 已拒绝",
-        "expired": "! 已超时",
+        "expired": "已失效",
         "failed": "! 已批准 · 执行失败",
         "submitted": "✓ 已提交",
         "cancelled": "✗ 已取消",
@@ -39,16 +41,17 @@
         "quota": {
           "title": "请求超出配额",
           "guide": "可以点击「继续」重新发起本轮。",
+          "guideUnavailable": "请核对当前配额和请求内容后再发起请求。",
           "action": "继续"
         },
         "filter": {
           "title": "内容被安全策略拦截",
-          "guide": "引导：改为描述「目标 + 约束」后重发，不要直接贴可执行命令原文。",
+          "guide": "改为描述「目标 + 约束」后重发，不要直接贴可执行命令原文。",
           "action": "改写后重发"
         },
         "context": {
           "title": "上下文长度超限",
-          "guide": "引导：开新会话并把关键结论带过去（重试不会变短）。",
+          "guide": "开新会话并把关键结论带过去（重试不会变短）。",
           "action": "开新会话"
         },
         "generic": {
@@ -161,8 +164,8 @@
       "redisUnavailable": "AI 服务暂不可用，请稍后重试。",
       "historyEarlierFailed": "更早的对话没有加载成功，请再试一次。",
       "healthProbeFailed": "AI 可用性探测失败",
-      "decisionPending": "确认已提交，但暂未同步到后端真实裁决（可稍后刷新查看）。",
-      "runExpired": "本轮运行态可能已按保留期失效；提交时由服务端确认并回落为「已失效」。",
+      "decisionPending": "确认已提交，暂未同步处理结果，可稍后重新载入查看。",
+      "runExpired": "本轮可能已失效；提交后由服务端确认。",
       "noPendingDecision": "没有待处理的确认请求",
       "decisionSubmitting": "该确认已提交，正在同步…",
       "ackRequired": "不可撤销操作：请先勾选确认项",
@@ -179,13 +182,14 @@
       "sessionIssueFailed": "会话初始化失败：暂时无法从服务端取得新的会话号，请稍后重试。",
       "directoryFailed": "租户/用户目录加载失败（不影响其它页面操作）",
       "directoryEmpty": "租户/用户目录为空，发送已暂停",
-      "staleConfirmCard": "这轮对话已失效，请重新提问。",
+      "staleConfirmCard": "已失效，本轮已结束，未执行。",
       "mirrorQuotaExceeded": "浏览器本地镜像写入失败（可能存储已满或处于隐私模式）：刷新后可能无法恢复本轮现场；服务端只保留 24 小时滑动的记忆窗口。",
       "sessionPurged": "这个会话已在服务端销毁，已为你新建对话。刚才那条消息没有发出，内容已留在输入框，请再点一次发送。",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
       "upstreamRetry": "连接中断，正在恢复",
       "turnError": "本轮出错：{message}",
       "uploadNoRegion": "请先打开导入向导第 1 步",
+      "uploadReadonly": "任务已结束，仅供查看；上传入口不可用，本次未执行上传。",
       "uploadPickerUnsupported": "当前浏览器不支持在对话内直接选择文件",
       "uploadPickerCancelled": "你取消了文件选择，可以重试",
       "uploadPickerFailed": "文件选择失败：{message}",
@@ -311,7 +315,6 @@
       "stop": "停止生成",
       "stopping": "停止中…",
       "stopped": "已停止",
-      "truncated": "已截断",
       "truncatedHint": "回答达到模型长度上限被截断，内容可能不完整。"
     },
     "suggestions": {
@@ -465,7 +468,8 @@
       },
       "skippedHuman": "这一步没有执行，AI 会用已有信息继续回答。",
       "internalHuman": "这一步没有正常完成。",
-      "gateExpiredHuman": "这轮对话已失效，请重新提问。",
+      "sheetInputHuman": "表格参数不完整或超出允许范围，请调整后重试。",
+      "gateExpiredHuman": "已失效，本轮已结束，未执行。",
       "toolKindMismatch": "这一步没有执行，请重新发起这项操作。",
       "formUnavailable": "表单定义不可用，无法还原原卡",
       "args": "参数",
@@ -473,7 +477,7 @@
       "truncated": "已截断",
       "truncatedFrame": "本次结果内容过大，已压缩显示（返回 {returned} 字符，原 {original} 字符）。如需更多细节，请缩小查询范围或分页获取。",
       "truncatedModelView": "结果较长，模型侧仅收到 {returned}/{original} 字符。",
-      "truncatedLimitUnreached": "本次结果超出单帧大小上限，未能进一步压缩；请缩小查询范围或分页获取。",
+      "truncatedLimitUnreached": "本次结果内容过大，未能进一步压缩；请缩小查询范围或分页获取。",
       "undoHint": "界面已改动，可撤销最近 1 步。",
       "definition": "配置",
       "rowKey": "行键",
@@ -485,8 +489,9 @@
       "editMessage": "编辑该条消息（回填到输入框）",
       "regenerateMessage": "重新生成这条回答",
       "waiting": "等待中…",
+      "dismiss": "关闭",
       "turnUnconfirmed": "本轮已结束，状态未确认",
-      "turnUnconfirmedHint": "已显示的内容可能不完整。可以重新载入以同步服务端状态，或开始新的一轮。",
+      "turnUnconfirmedHint": "已显示的内容可能不完整。可以重新载入以同步服务端状态。",
       "compactionEvent": "已压缩上下文",
       "compactionEventAria": "此处上下文已压缩，更早的内容以摘要保留",
       "historyTruncated": "更早的对话未在本机保留",
@@ -501,7 +506,7 @@
       "preparingAria": "正在准备本轮回答",
       "preparingRetry": "立即重试",
       "recoveryGap": "部分内容可能不完整",
-      "recoveryGapHint": "这一段来自本地缓存或增量回放，无法确认完整。可重新载入以同步服务端状态。",
+      "recoveryGapHint": "这一段内容可能不完整。可重新载入以同步服务端状态。",
       "reloadTurn": "重新载入",
       "historyLoadFailed": "历史恢复失败",
       "recoveryFailed": "会话恢复失败",
@@ -549,6 +554,20 @@
       "copyFailed": "复制失败，请手动选中文本复制",
       "continue": "继续"
     },
+    "time": {
+      "yesterday": "昨天 {time}",
+      "weekday": {
+        "0": "周日 {time}",
+        "1": "周一 {time}",
+        "2": "周二 {time}",
+        "3": "周三 {time}",
+        "4": "周四 {time}",
+        "5": "周五 {time}",
+        "6": "周六 {time}"
+      },
+      "monthDay": "{month}月{day}日 {time}",
+      "yearMonthDay": "{year}年{month}月{day}日 {time}"
+    },
     "sheetCard": {
       "discard": "放弃",
       "levelCount": "计数",
@@ -580,8 +599,7 @@
       "discard": "放弃",
       "fallbackEntry": "上传入口",
       "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请用左侧的上传入口。",
-      "hintMissing": "请先打开导入向导第 1 步（上传入口已不在当前页面）。",
-      "hintUnavailable": "任务已结束，仅供查看；上传入口不可用。"
+      "hintMissing": "请先打开导入向导第 1 步（上传入口已不在当前页面）。"
     }
   },
   "common": {
@@ -921,7 +939,7 @@
       "highlightLegend": "表格里已为待改格临时标色（只影响屏幕，不会写入文件）"
     },
     "applied": {
-      "line": "AI 改动 {cells} 格（可撤销，深度 3 中第 {layer} 层）"
+      "line": "AI 改动 {cells} 格（可撤销最近 {depth} 步中的第 {layer} 步）"
     },
     "engineLoading": "表格引擎加载中…（SpreadJS 按需加载）",
     "engineRetry": "重新加载表格",

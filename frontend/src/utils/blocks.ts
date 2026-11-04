@@ -687,9 +687,15 @@ export type CardType = 'tool' | 'hitl' | 'form'
 /** 右状态标签色族（与既有胶囊/徽标色族一一对应；neutral = 原 warning/info 中性灰族）。 */
 export type CardTone = 'primary' | 'success' | 'danger' | 'warning' | 'neutral'
 
+export interface CardStatusOptions {
+  submitting?: boolean
+  queued?: boolean
+  syncing?: boolean
+}
+
 export interface CardStatus {
   /** 段状态 key，或已决只读态 key（approved / rejected / expired / failed / submitted / cancelled） */
-  key: ToolRunStatus | ReadOnlyState
+  key: ToolRunStatus | ReadOnlyState | 'submitting' | 'queued' | 'syncing'
   /** 右标签文案（已决 HITL / GF 带既有 ✓ / ✗ / ! 字形前缀） */
   label: string
   /** 状态色族；只作用于右标签 */
@@ -806,7 +812,16 @@ function toolStatusLabelOf(status: Exclude<ToolRunStatus, 'pending'>): string {
  * - 其余段状态（running / succeeded / failed / rejected / blocked / expired / cancelled / unknown / skipped）
  *   ⇒ 既有九态文案 + 色族（blocked / unknown / skipped 无批准决策时不落只读状态机；pending 已在前一分支处理）。
  */
-export function cardStatusOf(part: ToolPart): CardStatus {
+export function cardStatusOf(part: ToolPart, options: CardStatusOptions = {}): CardStatus {
+  if (options.syncing) {
+    return { key: 'syncing', label: translate('ai.panel.submitting'), tone: 'primary' }
+  }
+  if (options.submitting) {
+    return { key: 'submitting', label: translate('ai.card.status.submitting'), tone: 'primary' }
+  }
+  if (options.queued) {
+    return { key: 'queued', label: translate('ai.card.status.queued'), tone: 'primary' }
+  }
   if (isReadOnlyCard(part)) {
     const state = readOnlyStateOf(part)
     return { key: state, label: translate(readOnlyLabelKeyOf(part, state)), tone: READ_ONLY_TONE[state] }

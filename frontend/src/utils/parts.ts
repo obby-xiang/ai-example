@@ -191,13 +191,15 @@ export function sealTrailingStreamPart(message: ChatMessage): void {
  * 说明），按它是否含配置键把人话整段藏起来反而是倒退 —— 码在 6C 已换成用户摘要，这一层只
  * 兜"未执行"的旧数据。
  */
-export type PartDiagnostic = 'skipped' | 'staleGate' | 'internal'
+export type PartDiagnostic = 'skipped' | 'staleGate' | 'internal' | 'sheetInput'
 
 /** 机器向文本的判据（只收**码/配置键/端点**这类稳定记号；不按中文措辞猜语义）。 */
 const INTERNAL_MARKER_RE = /(?:^|[^A-Za-z0-9_])(?:TOOL_BUDGET_EXHAUSTED|TOOL_STEP_LIMIT|TOOL_KIND_MISMATCH|RESOURCE_LOCKED|SCOPE_NOT_DISCLOSED|UPSTREAM_FAILED|TOOL_ALREADY_CLAIMED|CREATE_TASK_TURN_LIMIT|UNKNOWN_TOOL_CALL|UNKNOWN_RUN)(?:[^A-Za-z0-9_]|$)|app\.ai\.[a-z]|\/api\/ai\/frontend-tool-result|toolCallId=|runId\/toolCallId/
+const SHEET_INPUT_RE = /^(?:rowRange 需要|scope=predicate|columnCodes )/m
 
 function internalMarkerPresent(part: ToolPart): boolean {
   return INTERNAL_MARKER_RE.test(`${part.reason ?? ''}\n${part.result ?? ''}`)
+    || SHEET_INPUT_RE.test(part.result ?? '')
 }
 
 export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
@@ -213,12 +215,15 @@ export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
   if (part.status === 'skipped') {
     return 'skipped'
   }
+  if (part.status === 'failed' && SHEET_INPUT_RE.test(part.result ?? '')) {
+    return 'sheetInput'
+  }
   return part.status === 'blocked' ? 'internal' : null
 }
 
 /** 该段的 `result` 自身是否就是机器向文本（`true` ⇒ 卡面「输出」位让位给诊断详情，不同屏双显）。 */
 export function partResultIsInternal(part: MessagePart): boolean {
-  return part.kind === 'tool' && INTERNAL_MARKER_RE.test(part.result ?? '')
+  return part.kind === 'tool' && (INTERNAL_MARKER_RE.test(part.result ?? '') || SHEET_INPUT_RE.test(part.result ?? ''))
 }
 
 /**
@@ -233,7 +238,7 @@ export function partDiagnosticText(part: MessagePart): string | null {
   const values = [part.reason, part.result]
     .filter((value): value is string => typeof value === 'string'
       && value.trim() !== ''
-      && INTERNAL_MARKER_RE.test(value))
+      && (INTERNAL_MARKER_RE.test(value) || SHEET_INPUT_RE.test(value)))
   const unique = Array.from(new Set(values))
   return unique.length > 0 ? unique.join('\n\n') : null
 }

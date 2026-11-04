@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import type { TaskType } from '@/types/task'
 import type { ProgressView } from '@/types/job'
 import { formatJobProgress } from '@/types/job'
+import { translate } from '@/composables/useCopy'
 
 /**
  * 后端时间字符串的**实际**形态：ISO-8601 带纳秒（如 `2026-10-07T01:12:20.597158`）。
@@ -50,9 +51,6 @@ export function formatFromNow(value: string | null | undefined, fallback = '—'
   return `${Math.floor(diffSeconds / 86400)} 天前`
 }
 
-/** 星期中文标签（渐进时间格式用，dayjs.day()：0=周日 … 6=周六）。 */
-const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-
 /**
  * R-162 M2：AI 面板的渐进时间格式（元信息行时间戳 / HITL 回执 decidedAt；纯展示层）。
  * 判级**先 diff 后年**，切分一律本地自然日 0 点（startOf('day') 差值，不受时分秒影响）：
@@ -76,15 +74,15 @@ export function formatProgressiveTs(ts: unknown, now?: number | Date): string {
     return time
   }
   if (diff === 1) {
-    return `昨天 ${time}`
+    return translate('ai.time.yesterday', { time })
   }
   if (diff <= 6) {
-    return `${WEEKDAY_LABELS[parsed.day()]} ${time}`
+    return translate(`ai.time.weekday.${parsed.day()}`, { time })
   }
   if (parsed.year() === ref.year()) {
-    return `${parsed.month() + 1}月${parsed.date()}日 ${time}`
+    return translate('ai.time.monthDay', { month: parsed.month() + 1, day: parsed.date(), time })
   }
-  return `${parsed.year()}年${parsed.month() + 1}月${parsed.date()}日 ${time}`
+  return translate('ai.time.yearMonthDay', { year: parsed.year(), month: parsed.month() + 1, day: parsed.date(), time })
 }
 
 export const TASK_TYPE_LABELS: Record<TaskType, string> = {

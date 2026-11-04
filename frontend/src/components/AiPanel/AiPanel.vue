@@ -159,6 +159,13 @@
       >
         {{ t('ai.panel.returnToActiveRun') }}
       </button>
+      <button
+        type="button"
+        class="flex-none border-0 bg-transparent px-[3px] text-[14px] leading-none text-[#8b949e] hover:text-[#1f2328]"
+        data-testid="dismiss-notice"
+        :aria-label="t('ai.panel.dismiss')"
+        @click="ai.dismissNotice()"
+      >×</button>
     </div>
 
     <!-- 工作区动作回执（AI→业务方向）：成功且结果已在工具卡/业务页可见时由 store 静默
@@ -168,6 +175,13 @@
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.uiEvent', { message: ai.lastUiEventResult?.message ?? '' }) }}</b>
       </div>
+      <button
+        type="button"
+        class="flex-none border-0 bg-transparent px-[3px] text-[14px] leading-none text-[#8b949e] hover:text-[#1f2328]"
+        data-testid="dismiss-ui-event"
+        :aria-label="t('ai.panel.dismiss')"
+        @click="ai.dismissUiEventReceipt()"
+      >×</button>
     </div>
 
     <!-- B4：顶部阶段条只保留「准备中」（挂载准备期，组件内部自带秒表，runId 不上屏）。
@@ -797,7 +811,7 @@
                             :data-tool-call-id="part.toolCallId"
                           >
                             <div class="flex flex-wrap items-center gap-[8px] text-[12.2px] leading-[1.5] text-[#1f2328]">
-                              <span class="flex-none font-semibold" data-testid="gf-queue-position">{{ t('ai.panel.gfQueue.position', { position: formQueuePosition(part.toolCallId), total: ai.queuedForms.length }) }}</span>
+                              <span class="flex-none font-semibold" data-testid="gf-queue-position">{{ t('ai.panel.gfQueue.position', { position: formQueuePosition(part.toolCallId), total: formQueueTotal() }) }}</span>
                               <span class="min-w-0 flex-1 break-words text-[#57606a]" data-testid="gf-queue-hint">{{ t('ai.panel.gfQueue.hint') }}</span>
                             </div>
                             <div class="mt-[6px] flex justify-end">
@@ -962,7 +976,7 @@
               class="inline-flex items-center gap-[4px] rounded-[6px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#b45309]"
             >
               <span class="block h-[6px] w-[6px] rounded-[1px] bg-[#b45309]" aria-hidden="true"></span>
-              {{ t('ai.round.truncated') }}
+              {{ t('ai.panel.truncated') }}
               <span class="sr-only">{{ t('ai.round.truncatedHint') }}</span>
             </span>
             <!-- 失败/断流的最后一条助手消息统一给「继续」：无论有无正文/思考，都走正常发送并显示一条
@@ -1060,7 +1074,7 @@
               class="block mt-[2px] text-[11.6px] text-[#57606a] leading-[1.55] break-words"
               :data-testid="'error-card-summary-' + m.id"
             >{{ m.errorCard.summary || t('ai.card.error.summary.generic') }}</span>
-            <span v-if="m.errorCard.guide" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ m.errorCard.guide }}</span>
+            <span v-if="errorCardGuide(m)" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ errorCardGuide(m) }}</span>
             <details class="mt-[4px]" :data-testid="'error-card-diagnostic-' + m.id">
               <summary class="cursor-pointer text-[11.2px] text-[#8b949e] select-none">{{ t('ai.card.error.diagnostic.label') }}</summary>
               <div class="mt-[3px] text-[11.2px] text-[#57606a] break-all">
@@ -1948,6 +1962,13 @@ function errorCardContinueVisible(message: ChatMessage): boolean {
   return card != null && card.variant === 'quota'
     && Boolean(card.action)
     && isFailedLastAssistant(message)
+}
+
+function errorCardGuide(message: ChatMessage): string {
+  if (message.errorCard?.variant === 'quota' && !errorCardActionVisible(message)) {
+    return t('ai.card.error.quota.guideUnavailable')
+  }
+  return message.errorCard?.guide ?? ''
 }
 
 /** 错误卡动作文案：quota 卡固定按当前语言取「继续」（旧镜像里定格的旧文案不复活）。 */
@@ -3778,7 +3799,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
   if (part.name === GENERATIVE_FORM_TOOL) {
     // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
     // 会让任意一次入队/出队把全部历史 GF 行一起失效。
-    deps.push(formQueuePosition(part.toolCallId), ai.queuedForms.length)
+    deps.push(formQueuePosition(part.toolCallId), formQueueTotal())
     // 表单现场（`liveForm` 对象与 `values` 身份）只属于**当前宿主**那一张卡：
     // 历史 GF 卡的渲染不读它，无条件入 dep 等于"用户每敲一个字，整列 GF 卡全部重渲"。
     const hostId = formHostMessageId.value
@@ -3919,10 +3940,10 @@ function isUploadHandoffPart(part: ToolPart): boolean {
  * L-85：旧实现活动交接存在时直接回 `handoff.status`，从不看区域是否还在，
  * 于是用户离开导入向导页后卡面仍是 `waiting`、主按钮仍可点（点下去旧实现还谎报成功）。
  * `handoff.status` 只在**建卡 / 刷新重建**那一刻算一次，是"当时"的分流；区域存活是随页面
- * 变化的，必须在渲染时重算。`uploadHandoffAvailability()` 同时覆盖 degraded（浏览器不支持
+ * 变化的，必须在渲染时重算。`uploadHandoffAvailability()` 同时覆盖 unsupported（浏览器不支持
  * picker）与 missing（区域已不在本页 / 只读页），与本卡三态一一对应。
  */
-function uploadHandoffStatus(part: ToolPart): 'waiting' | 'degraded' | 'missing' | 'unavailable' {
+function uploadHandoffStatus(part: ToolPart): 'waiting' | 'unsupported' | 'missing' {
   const handoff = ai.activeUploadHandoff
   if (!handoff || handoff.toolCallId !== part.toolCallId) {
     return 'missing'
@@ -3979,9 +4000,8 @@ function appliedSummaryFor(part: ToolPart): SheetAppliedSummary | null {
   return part.status === 'succeeded' ? summary : null
 }
 
-/** 一行式：`AI 改动 120 格（可撤销，深度 3 中第 1 层）`。 */
 function appliedLine(summary: SheetAppliedSummary): string {
-  return t('sheet.applied.line', { cells: summary.cells, layer: summary.layer })
+  return t('sheet.applied.line', { cells: summary.cells, layer: summary.layer, depth: summary.undoDepth })
 }
 
 /** 该段对应的本地预览计划（无 ⇒ 面板渲染“预览已失效 + 放弃”）。 */
@@ -4141,9 +4161,16 @@ const CARD_STATUS_TONE: Record<CardTone, string> = {
 }
 
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
-  // `submittedValues` 进 guard：GF「提交在途」的状态由它判定（写入即从「待填写」转「✓ 已提交」），
-  // 漏掉这一项会让同一段上的旧缓存把卡头状态钉死。
-  return cachedForLocale(cardStatusCache, part, 'cardStatus', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues], () => cardStatusOf(part))
+  const submitting = liveForm.value?.toolCallId === part.toolCallId && liveForm.value.status === 'submitting'
+  const queued = formQueuePosition(part.toolCallId) > 0
+  const syncing = gateSyncing(part.toolCallId)
+  return cachedForLocale(
+    cardStatusCache,
+    part,
+    'cardStatus',
+    [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues, submitting, queued, syncing],
+    () => cardStatusOf(part, { submitting, queued, syncing })
+  )
 }
 
 function cardStatusClass(part: ToolPart): string {
@@ -4262,7 +4289,8 @@ function reasonText(part: ToolPart): string {
 const DIAGNOSTIC_HUMAN_KEY: Record<PartDiagnostic, string> = {
   skipped: 'ai.panel.skippedHuman',
   staleGate: 'ai.panel.gateExpiredHuman',
-  internal: 'ai.panel.internalHuman'
+  internal: 'ai.panel.internalHuman',
+  sheetInput: 'ai.panel.sheetInputHuman'
 }
 
 function diagnosticOf(part: ToolPart): PartDiagnostic | null {
@@ -4303,6 +4331,9 @@ function faceReasonText(part: ToolPart): string {
   }
   if (kind === 'internal') {
     return t('ai.panel.internalHuman')
+  }
+  if (kind === 'sheetInput') {
+    return t('ai.panel.sheetInputHuman')
   }
   return isBlankText(part.reason) ? '' : reasonText(part)
 }
@@ -4993,7 +5024,11 @@ function onFormCancel(): void {
  */
 function formQueuePosition(toolCallId: string): number {
   const index = ai.queuedForms.findIndex((entry) => entry.toolCallId === toolCallId)
-  return index < 0 ? 0 : index + 1
+  return index < 0 ? 0 : index + (ai.activeForm === null ? 1 : 2)
+}
+
+function formQueueTotal(): number {
+  return ai.queuedForms.length + (ai.activeForm === null ? 0 : 1)
 }
 
 /**
