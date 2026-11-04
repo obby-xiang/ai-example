@@ -434,6 +434,13 @@
       "reason": "本批仅允许同一历史帧内多个工具段共享seq并继续拒绝倒序和重复工具ID，不改变D6段序协议或迁移接口",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:f9b6eb2243ffdd25d4f45419f758477bb56eed6a3aaea79078cd4a0cfa4e8197",
+      "status": "synced",
+      "reason": "已同步取消键与claim/pending/fence共用run hash tag、取消检查与工具认领原子执行，以及只读结果成功落账前的取消围栏",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

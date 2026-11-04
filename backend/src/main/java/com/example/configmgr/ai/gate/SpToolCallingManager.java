@@ -2839,6 +2839,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 					? new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L)
 					: new RunStore.ClaimResult(RunStore.ClaimOutcome.LOST, 0L, 0L);
 		}
+		if (claim.outcome() == RunStore.ClaimOutcome.CANCELLED) {
+			String cancelled = settleIfCancelledBeforeClaim(runId, pending);
+			if (cancelled != null) {
+				return cancelled;
+			}
+			throw new StreamViolationException(StreamViolationException.CANCELLED,
+					"本轮对话已被取消，工具认领在原子检查中被拒绝（runId=" + runId + "）");
+		}
 		if (!claim.won()) {
 			// I4：认领失败后<b>再对一次台账</b> —— 对方可能恰好在这两步之间写完台账
 			Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
@@ -2919,6 +2927,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		if (settleAsUnexecuted) {
 			return settleToolTimeout(runId, pending, text, settleObservation, claimedEpoch, claimedBy);
+		}
+		if (this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ) {
+			// 只读结果可在取消后放弃；副作用仍落账保留物理事实，并由批边界检查截停后续执行。
+			checkCancelled(runId);
 		}
 		this.store.appendLedger(runId, pending, text);
 

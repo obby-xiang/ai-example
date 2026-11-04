@@ -1475,7 +1475,7 @@ public class AiController {
 	 * 取消一轮对话：{@code POST /api/ai/cancel/{runId}}。
 	 *
 	 * <p>
-	 * 权威态写进 Redis（{@code ai:cancel:<tenantId>:<userId>:<runId>}，键形见
+	 * 权威态写进 Redis（{@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}，键形见
 	 * {@link CancellationRegistry#cancelKey(String)}），因此跨实例/跨进程同样生效；
 	 * 同进程时还会当场唤醒挂起闸门与流式看门狗（加速，不改变语义）。
 	 * 该轮随即以 {@code done{cancelled:true}} 收尾，快照转 {@code CANCELLED}，

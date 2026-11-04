@@ -63,12 +63,13 @@ import java.util.function.Function;
  * {@code ACQUIRE}（租约+计数器 —— 号与占用必须同序，评审 I-1）；{@code deleteRun} 的 13 键
  * {@code DEL} 也靠它回到"一条命令、原子生效"。
  * 取键一律走 {@link RunStore#runScopedKey(String, String)}（{@code RedisFrameStore} 的两族键同理）；</li>
- * <li><b>裸前缀 + 身份段</b>（{@code ai:beat:} / {@code ai:activity:} / {@code ai:cancel:} /
+ * <li><b>裸前缀 + 身份段</b>（{@code ai:beat:} / {@code ai:activity:} /
  * {@code ai:observed:}）：只进单键命令、不在 13 键里，无需同槽 —— 给它们加 tag 只牺牲分布，
  * 没有收益（{@code ai:activity} 的写是单键 Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。
  * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag；
  * 本表登记同样用 {@code TenantKeyScope.scoped(prefix, runId)} 装配，与
- * {@code RunStore#beatKey}/{@code activityKey} 逐字同键（无上下文 = 拼键失败）。</li>
+ * {@code RunStore#beatKey}/{@code activityKey} 逐字同键（无上下文 = 拼键失败）。
+ * {@code ai:cancel:} 例外：与工具认领共用 run tag，供认领 Lua 同槽检查。</li>
  * </ul>
  * <p><b>禁止项</b>：单键脚本（RENEW/VERIFY/RELEASE/COMPARE_DELETE）与
  * {@code kb:cache:*} / {@code ai:session:*} <b>一律不加 tag</b>
@@ -205,8 +206,7 @@ public final class SessionKeyRegistry {
 	 * 拼键的真实入口；这里用固定身份占位，只服务文档/断言里的键形展示。
 	 */
 	private static String sampleKey(String prefix) {
-		if (RunStore.BEAT_PREFIX.equals(prefix) || RunStore.ACTIVITY_PREFIX.equals(prefix)
-				|| CancellationRegistry.CANCEL_PREFIX.equals(prefix)) {
+		if (RunStore.BEAT_PREFIX.equals(prefix) || RunStore.ACTIVITY_PREFIX.equals(prefix)) {
 			return TenantKeyScope.scoped(prefix, 1L, 1L, "<runId>");
 		}
 		return RunKeyScope.scoped(prefix, 1L, 1L, "<runId>");

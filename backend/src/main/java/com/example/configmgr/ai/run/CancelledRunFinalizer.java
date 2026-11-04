@@ -326,7 +326,7 @@ public class CancelledRunFinalizer {
 	 *
 	 * <p><b>幂等且不改变取消语义</b>：未交棒过 / 已清理 / {@code runId=null} 都不报错；
 	 * 只清这两个进程内表与 runId 索引，<b>不碰</b>租约（{@code LeaseService} 的 ended/epoch）、帧册、快照与
-	 * {@code ai:cancel:<tenantId>:<userId>:<runId>} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
+	 * {@code ai:cancel:{<tenantId>:<userId>:run:<runId>}} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
 	 *
 	 * <p><b>不要求线程身份</b>：终态可能由无身份的调度线程收尾；本方法只按 runId 查本地索引，
 	 * 不需要重算 {@link LocalRunKey}、不读快照、不伪造默认租户。索引里的每一项都由

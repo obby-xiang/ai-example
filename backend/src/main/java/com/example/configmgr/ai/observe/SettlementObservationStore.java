@@ -34,7 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  * <li><b>键形</b>：{@code ai:observed:<tenantId>:<userId>:<runId>}（HASH；field = {@code toolCallId}，
  * value = {@code <atMs>|<instanceId>}）。身份段来自 {@code TenantKeyScope#scoped}（与
- * {@code ai:cancel:} / {@code ai:beat:} / {@code ai:activity:} 同族）；<b>裸前缀、不带
+ * {@code ai:beat:} / {@code ai:activity:} 同族）；<b>裸前缀、不带
  * {@code {run:<runId>}} tag</b> —— 只进单键命令/单键脚本（{@code EVAL} 只有一把 KEYS，
  * Cluster 下天然同槽）。无身份上下文时退回<b>旧键形</b> {@code ai:observed:<runId>}（独立
  * legacy 命名空间）；<b>跨租户同 runId 不共享观测位</b>（身份段进键，进程内退化表也按整键分槽）；</li>

@@ -38,7 +38,7 @@ import java.util.regex.Pattern;
  * <li><b>不以 runId 为键</b>，也不扫描任何租户/run 集合：只按会话 + 客户端 id 精确读写；
  *     回收用的 {@code HSCAN} 始终落在<b>同一个</b>会话 HASH 上（单键，不是跨键 SCAN）；</li>
  * <li>所有操作都是<b>单键</b> HGET/HSET/HDEL/PEXPIRE/HSCAN 或单键 Lua（KEYS 恰好一个）—— Redis
- *     Cluster 下天然同槽，不存在跨键脚本；取消旗标 {@code ai:cancel:<t>:<u>:<runId>} 由调用方另做
+ *     Cluster 下天然同槽，不存在跨键脚本；取消旗标 {@code ai:cancel:{<t>:<u>:run:<runId>}} 由调用方另做
  *     一次单键写，不放进本脚本（避免 CROSSSLOT）；</li>
  * <li>TTL = {@code app.ai.session-ttl}（缺省 24h），每次 claim/cancel/complete 整键续期；会话销毁时由
  *     {@code AiSessionPurgeService} 按同一键拼接口精确 DEL（见 {@link #sessionKey(String)}）；</li>

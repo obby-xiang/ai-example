@@ -2,7 +2,6 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
-import com.example.configmgr.ai.tenant.TenantKeyScope;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -21,8 +20,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>ADR-8 修正③：Redis 为准，直通知仅加速</h2>
  * <ul>
- * <li><b>权威态</b>：{@code ai:cancel:<tenantId>:<userId>:<runId>}（STRING，值 = 发起取消的实例标识，
- * 带 TTL；键形见 {@link #cancelKey(String)} 与 {@link TenantKeyScope}）。取消端点只写这一个键 ——
+ * <li><b>权威态</b>：{@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}（STRING，值 = 发起取消的实例标识，
+ * 带 TTL；键形见 {@link #cancelKey(String)} 与 {@link RunStore#runScopedKey(String, String)}）。取消端点只写这一个键 ——
  * 于是"取消那一轮的是另一个进程/另一个实例"同样成立，且进程重启后取消意图仍在（续跑会拒绝已取消的
  * 轮次，见 {@link ResumeService}）；<b>两个身份各自生成同一个 runId 是合法的</b> ⇒ 身份段进键后，
  * 跨租户同 runId 的取消旗标互不可见，进程内的 {@code flags}/{@code listeners} 也按同一把键分槽；</li>
@@ -109,14 +108,11 @@ public class CancellationRegistry {
 	}
 
 	/**
-	 * 取消标志的键名（<b>带身份段</b>）：{@code ai:cancel:<tenantId>:<userId>:<runId>}。
-	 *
-	 * <p>键形来自 {@link TenantKeyScope#scoped(String, String)}（与 {@code ai:beat:} /
-	 * {@code ai:activity:} 同族：run 锚点、不带 hash tag、只进单键命令）。没有身份上下文时是
-	 * <b>旧键形</b> {@code ai:cancel:<runId>} —— 独立 legacy 命名空间，带身份的读写永不落到它上面。
+	 * 取消标志的键名（带身份与 run hash tag）：{@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}。
+	 * 与认领脚本的 claim/pending/fence 同槽，取消检查可以在同一原子步完成；不读无 tag 的旧键。
 	 */
 	public static String cancelKey(String runId) {
-		return TenantKeyScope.scoped(CANCEL_PREFIX, runId);
+		return RunStore.runScopedKey(CANCEL_PREFIX, runId);
 	}
 
 	public String keyFor(String runId) {

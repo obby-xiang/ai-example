@@ -57,8 +57,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code {<tenantId>:<userId>:run:<runId>}} tag（如 {@code ai:run:{1:101:run:<runId>}}，
  * 无身份上下文的过渡期路径退回旧形 {@code {run:<runId>}}），见 {@link #runTag(String)} ——
  * 既是 {@code FENCED_SET} / {@code IDEM_PUSH} 两条多键脚本的同槽前提，也让 {@link #deleteRun}
- * 的 13 键 {@code DEL} 回到"一条命令、原子生效"。{@code ai:cancel:} / {@code ai:beat:} 只进单键命令，
- * 不在这一族里（不加 tag）。下文的键形为可读性省去 tag。</p>
+ * 的 13 键 {@code DEL} 回到"一条命令、原子生效"。{@code ai:cancel:} 与认领共用同一 tag，
+ * 供取消检查与 claim 原子推进；{@code ai:beat:} 只进单键命令、不加 tag。下文的键形为可读性省去 tag。</p>
  * <ul>
  * <li>{@code ai:run:<runId>} STRING（JSON）—— {@link RunSnapshot}：完整请求历史 +
  * 挂起中的 {@code assistant(tool_calls)} + 状态 + 上下文；</li>
@@ -550,13 +550,14 @@ public class RunStore {
 			""", List.class);
 
 	private static final RedisScript<List> CLAIM_EXECUTION_SCRIPT = new DefaultRedisScript<>("""
-			-- CLAIM_EXECUTION: fence、状态、claim 与完整 pending 原子推进
-			-- KEYS: claim, pending, fence
+			-- CLAIM_EXECUTION: 取消、fence、状态、claim 与完整 pending 原子推进
+			-- KEYS: claim, pending, fence, cancel
 			-- ARGV: field, epoch, instance, claimedAtMs, ttlMs
 			local field = ARGV[1]
 			local epoch = tonumber(ARGV[2]) or 0
 			local fence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
 			if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH', fence} end
+			if redis.call('EXISTS', KEYS[4]) == 1 then return {0, 'CANCELLED', fence} end
 			local raw = redis.call('HGET', KEYS[2], field)
 			if not raw then return {0, 'MISSING', fence} end
 			local ok, obj = pcall(cjson.decode, raw)
@@ -860,11 +861,9 @@ public class RunStore {
 	/**
 	 * <b>同槽批量续期</b>（RTT 收口）：一条 {@code EVAL} 续完整组键，替代逐键 {@code EXPIRE}。
 	 *
-	 * <p><b>为什么可以合批</b>：run 级续期面的键都带同一个 hash tag
-	 * （{@code {<tenantId>:<userId>:run:<runId>}} ⇒ 同一槽），Cluster 下多键脚本合法。
-	 * 读取面里的取消标志（{@code ai:cancel:<tenantId>:<userId>:<runId>}）<b>不带 tag</b>，
-	 * 因此 {@link #renew(String, Duration, SessionKeyRegistry.Renewal)} 按槽分组后单独发 ——
-	 * 把它混进同一条 {@code EVAL} 就是 {@code CROSSSLOT}（整条命令被拒，一个键都续不上）。
+	 * <p><b>为什么可以合批</b>：run 级续期面的键（含取消标志）都带同一个 hash tag
+	 * （{@code {<tenantId>:<userId>:run:<runId>}} ⇒ 同一槽），Cluster 下多键脚本合法；
+	 * 其它不带 tag 的读取键仍按槽分组单独续期，不与这些键混用。
 	 *
 	 * <p><b>逐键隔离</b>：脚本内每个键用 {@code redis.pcall} 包裹，单键失败（WRONGTYPE 等）只把该位标成
 	 * {@code -1}，其余键照常续期；返回数组与 KEYS 一一对应。连接类失败由 Java 侧沿 cause 链识别后
@@ -896,13 +895,7 @@ public class RunStore {
 			return table.concat(results, ',')
 			""", String.class);
 
-	/**
-	 * 认领结论的三态（B23L1 批③a / 裁决 9）。
-	 *
-	 * <p>为什么要区分后两者：{@code LOST} 的语义是"这个调用已经有主（他实例在执行）"，
-	 * {@code STALE_FENCE} 的语义是"<b>我</b>已经没有续跑权了" —— 处理方式不同（前者等/跳过，
-	 * 后者要放弃本进程的驱动、可能触发接管），混成一个 false 时现场只能看到"认领失败"。
-	 */
+	/** 认领结论；{@code CANCELLED} 与失败/他实例认领分开，供调用方走取消收尾。 */
 	public enum ClaimOutcome {
 
 		/** 本次由当前实例认领成功（可以执行）。 */
@@ -912,14 +905,17 @@ public class RunStore {
 		LOST,
 
 		/** fence 已推进到更高 epoch：本实例的续跑权已被接管（不得执行）。 */
-		STALE_FENCE
+		STALE_FENCE,
+
+		/** 认领脚本已见取消事实：未写入新 claim，不得执行。 */
+		CANCELLED
 
 	}
 
 	/**
 	 * 认领结论。
 	 *
-	 * @param outcome 三态结论
+	 * @param outcome 认领结论
 	 * @param epoch 本次认领试图使用的租约 epoch（0 = 无租约路径）
 	 * @param fence 认领时读到的 fence（0 = 无 fence 键/未持租未读）
 	 */
@@ -2896,7 +2892,7 @@ public class RunStore {
 	 * 池饱和回滚：删掉本轮<b>需要同生同死</b>的 13 个业务状态键（评审 Minor 1）。
 	 *
 	 * <p><b>不是"这一轮的全部键"</b>：{@code ai:beat:<runId>}（心跳戳）、
-	 * {@code ai:activity:<runId>}（业务活动锚点）与 {@code ai:cancel:<tenantId>:<userId>:<runId>}（取消标志）刻意不在其中
+	 * {@code ai:activity:<runId>}（业务活动锚点）与 {@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}（取消标志）刻意不在其中
 	 * —— 前两者是观测/判据面（裸前缀、单键命令）、后者要活到驱动线程看见它，各自按 TTL 走；
 	 * {@code ai:lock:* }（taskId 维度）更不在，资源锁的寿命与 run 的生死无关。
 	 *
@@ -3791,10 +3787,8 @@ public class RunStore {
 	}
 
 	/**
-	 * 原子认领并给出<b>三态</b>结论（B23L1 批③a / 裁决 9）。
-	 *
-	 * <p>与 {@link #claimExecution} 共用同一段 Lua：fence、原状态、claim 和完整 pending 一次推进。
-	 * 两个失败分支语义不同 —— 见 {@link ClaimOutcome}。
+	 * 原子认领并给出结论。与 {@link #claimExecution} 共用同一段 Lua：取消事实、fence、原状态、
+	 * claim 和完整 pending 一次推进；取消命中时不写新 claim，见 {@link ClaimOutcome#CANCELLED}。
 	 */
 	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
@@ -3804,13 +3798,17 @@ public class RunStore {
 		}
 		long epoch = heldRunEpoch(runId);
 		List<?> result = this.redis.execute(CLAIM_EXECUTION_SCRIPT,
-				List.of(claimKey(runId), pendingKey(runId), fenceKey(runId)), toolCallId, String.valueOf(epoch),
-				executedBy, String.valueOf(System.currentTimeMillis()), String.valueOf(ttlFor(runId).toMillis()));
+				List.of(claimKey(runId), pendingKey(runId), fenceKey(runId), CancellationRegistry.cancelKey(runId)),
+				toolCallId, String.valueOf(epoch), executedBy, String.valueOf(System.currentTimeMillis()),
+				String.valueOf(ttlFor(runId).toMillis()));
 		if (result == null || result.size() < 3) {
 			throw new AiStateUnavailableException("认领脚本返回空 " + toolCallId);
 		}
 		long fence = ((Number) result.get(2)).longValue();
 		String outcome = String.valueOf(result.get(1));
+		if ("CANCELLED".equals(outcome)) {
+			return new ClaimResult(ClaimOutcome.CANCELLED, epoch, fence);
+		}
 		if ("STALE_EPOCH".equals(outcome)) {
 			log.warn("STALE_EPOCH refused claim runId={} toolCallId={} epoch={} fence={}", runId, toolCallId,
 					epoch, fence);
@@ -4546,10 +4544,9 @@ public class RunStore {
 	 * <b>L-139：逐键隔离</b> —— 一个键失败（Cluster 下 MOVED/TRYAGAIN、单节点故障）不得让排在
 	 * 后面的键全部不续期；每次失败计入 {@link RedisDegradation#L139_RENEW_KEY}。
 	 *
-	 * <p><b>RTT 收口（Cluster 安全）</b>：同槽的键合成一条 {@link #RENEW_SAME_SLOT_SCRIPT}
-	 * （心跳面 5 键 = 1 次往返；读取面 4 个带 tag 的键 = 1 次，取消标志单独 1 次）。
-	 * 分组键 = hash tag：<b>不带 tag 的键（取消标志）永远自成一槽、单独发</b>，绝不与带 tag 的键
-	 * 混进同一条多键脚本 —— 那正是 Cluster 的 {@code CROSSSLOT}。脚本不可用时退回逐键 {@code EXPIRE}。
+	 * <p><b>RTT 收口（Cluster 安全）</b>：同槽的键合成一条 {@link #RENEW_SAME_SLOT_SCRIPT}。
+	 * 分组键 = hash tag；取消标志与工具认领共用 run tag，可与同轮其它键合批。不带 tag 的键仍各自成组，
+	 * 绝不混进同一条多键脚本 —— 那正是 Cluster 的 {@code CROSSSLOT}。脚本不可用时退回逐键 {@code EXPIRE}。
 	 *
 	 * <p><b>I-3：连接类失败立即收手。</b>连接挂死时每次 Redis 往返都要等到
 	 * {@code spring.data.redis.timeout}（2s）；分组后最坏是「组数 × 超时」（心跳面 1 组、

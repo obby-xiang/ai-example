@@ -60,7 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
  * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
  * 官方循环照常继续（模型如实解释）；</li>
- * <li><b>取消</b>：整轮被取消（{@code ai:cancel:<tenantId>:<userId>:<runId>}）→ {@code status=CANCELLED}，不执行。</li>
+ * <li><b>取消</b>：整轮被取消（{@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}）→ {@code status=CANCELLED}，不执行。</li>
  * </ul>
  *
  * <h2>等待没有时限（用户裁决 2026-10-20 第 1/2 条）</h2>
@@ -857,7 +857,7 @@ public class ConfirmGate {
 		// 使"帧已发出后、进入等待前"到达的唤醒（已 countDown 在旧闸门上）丢失。
 		Latch latch = this.latches.computeIfAbsent(key, ignored -> new Latch());
 		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在
-		// ai:cancel:<tenantId>:<userId>:<runId>。
+		// ai:cancel:{<tenantId>:<userId>:run:<runId>}。
 		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
@@ -1358,7 +1358,7 @@ public class ConfirmGate {
 			log.warn("park cancel: no write access in this process, cancel closeout handed off (receiver re-acquires the lease and writes CANCELLED plus the final frame; this thread emits no more frames) runId={} handed={}", runId, handed);
 		}
 		catch (RuntimeException ex) {
-			log.warn("park cancel hand-off failed (cancel fact remains in ai:cancel:<tenantId>:<userId>:<runId>) runId={} error={}", runId,
+			log.warn("park cancel hand-off failed (cancel fact remains in ai:cancel:{<tenantId>:<userId>:run:<runId>}) runId={} error={}", runId,
 					ex.getMessage());
 		}
 	}
