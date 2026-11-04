@@ -81,12 +81,14 @@ public final class DatasetGenerator {
 		dataset.keys.add(sessionKey);
 
 		if (!runIds.isEmpty()) {
-			String runsKey = KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
+			String runsKey = SessionIndexPolicy.requireKey(SessionIndexPolicy.Index.RUNS,
+					KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId));
 			this.redis.sadd(runsKey, runIds);
 			this.redis.pexpire(runsKey, this.ttl.toMillis());
 			dataset.keys.add(runsKey);
 
-			String activeKey = KeyShapes.sessionActiveKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
+			String activeKey = SessionIndexPolicy.requireKey(SessionIndexPolicy.Index.ACTIVE,
+					KeyShapes.sessionActiveKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId));
 			for (int i = 0; i < runIds.size(); i++) {
 				this.redis.zadd(activeKey, runIds.get(i), System.currentTimeMillis() + i);
 			}

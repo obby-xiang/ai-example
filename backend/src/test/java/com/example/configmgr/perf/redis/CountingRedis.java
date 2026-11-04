@@ -10,8 +10,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import org.springframework.data.redis.core.RedisCallback;
+import io.lettuce.core.LettuceFutures;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
+import org.springframework.data.domain.Range;
+import org.springframework.data.domain.Range.Bound;
+import org.springframework.data.redis.connection.Limit;
+import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.ReturnType;
+import org.springframework.data.redis.connection.stream.ByteRecord;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -22,6 +29,8 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 public final class CountingRedis {
 
 	private final StringRedisTemplate template;
+
+	private final Duration commandTimeout;
 
 	private long commands;
 
@@ -35,8 +44,9 @@ public final class CountingRedis {
 
 	private long responseBytes;
 
-	public CountingRedis(StringRedisTemplate template) {
+	public CountingRedis(StringRedisTemplate template, Duration commandTimeout) {
 		this.template = template;
+		this.commandTimeout = commandTimeout;
 	}
 
 	public StringRedisTemplate template() {
@@ -211,7 +221,66 @@ public final class CountingRedis {
 		return len == null ? 0L : len;
 	}
 
-	/** 原生命令（1 条命令）。返回 Lettuce/Redis 原始结构。 */
+	/**
+	 * XRANGE（1 条命令），返回 Spring Data 结构化 Stream 记录。
+	 *
+	 * <p>不能用通用 {@code connection.execute}：它对该命令回退到 Lettuce {@code ByteArrayOutput}，
+	 * 会把嵌套数组整体解成一个 {@code byte[]}，条目字段全部丢失。
+	 *
+	 * @param cursor {@code -} 或 {@code (lastId} 排他游标，语义与 XRANGE 起点一致
+	 */
+	public List<ByteRecord> xrange(String key, String cursor, int count) {
+		request("XRANGE", key, cursor, "+", "COUNT", String.valueOf(count));
+		List<ByteRecord> records = this.template.execute((RedisCallback<List<ByteRecord>>) connection ->
+				connection.streamCommands().xRange(key.getBytes(StandardCharsets.UTF_8), xrangeRange(cursor),
+						Limit.limit().count(count)));
+		response(records);
+		return records == null ? List.of() : records;
+	}
+
+	static Range<String> xrangeRange(String cursor) {
+		if (cursor == null || cursor.isEmpty() || "-".equals(cursor)) {
+			return Range.unbounded();
+		}
+		Bound<String> lower = cursor.startsWith("(")
+				? Bound.exclusive(cursor.substring(1))
+				: Bound.inclusive(cursor);
+		return Range.rightUnbounded(lower);
+	}
+
+	/**
+	 * CLUSTER KEYSLOT（1 条命令）。走 Lettuce 专用的 {@code clusterKeyslot}，整数回复由
+	 * {@code IntegerOutput} 解码；通用 {@code execute} 的 {@code ByteArrayOutput} 不接受整数，
+	 * 会抛 {@code UnsupportedOperationException}。
+	 */
+	public long clusterKeyslot(String key) {
+		request("CLUSTER", "KEYSLOT", key);
+		Long slot = this.template.execute((RedisCallback<Long>) connection -> LettuceFutures.awaitOrCancel(
+				nativeCommands(connection).clusterKeyslot(key.getBytes(StandardCharsets.UTF_8)),
+				this.commandTimeout.toMillis(), TimeUnit.MILLISECONDS));
+		response(slot);
+		if (slot == null) {
+			throw new IllegalStateException("CLUSTER KEYSLOT 未返回整数: " + key);
+		}
+		return slot;
+	}
+
+	private static RedisClusterAsyncCommands<byte[], byte[]> nativeCommands(RedisConnection connection) {
+		Object nativeConnection = connection.getNativeConnection();
+		if (nativeConnection instanceof RedisClusterAsyncCommands<?, ?> commands) {
+			@SuppressWarnings("unchecked")
+			RedisClusterAsyncCommands<byte[], byte[]> typed = (RedisClusterAsyncCommands<byte[], byte[]>) commands;
+			return typed;
+		}
+		throw new IllegalStateException("数值命令需要 Lettuce 原生连接来选择输出类型，实际为 "
+				+ nativeConnection.getClass().getName());
+	}
+
+	/**
+	 * 原生命令（1 条命令）。返回类型由 Lettuce 默认 {@code ByteArrayOutput} 决定：bulk 与嵌套数组都会被压成
+	 * {@code byte[]}，整数回复会抛 {@code UnsupportedOperationException}。Stream 用 {@link #xrange}，
+	 * 数值命令用带数值输出的专用调用（如 {@link #clusterKeyslot}）。
+	 */
 	public Object raw(String... args) {
 		request(args);
 		Object result = this.template.execute((RedisCallback<Object>) connection -> {

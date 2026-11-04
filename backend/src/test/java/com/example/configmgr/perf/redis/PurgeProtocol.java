@@ -3,6 +3,7 @@ package com.example.configmgr.perf.redis;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -150,8 +151,6 @@ public final class PurgeProtocol {
 				return outcome(scenario.id(), copy, dataset.sessionId, false, enumeration.found(), deferred,
 						failed.errors(), lease, deleted[0], guardBlocked, "FAILED_RETRYABLE");
 			}
-			deadline.check("tombstone");
-			this.metrics.stage(this.redis, scenario.id(), copy, "tombstone", () -> tombstone(dataset));
 			deadline.check("complete");
 			String pending = pendingJson(lease, "COMPLETE", 1,
 					System.currentTimeMillis() + 60_000L, "complete", List.of());
@@ -221,24 +220,53 @@ public final class PurgeProtocol {
 	}
 
 	private Enumeration enumerate(Manifest.Dataset dataset) {
-		boolean found = this.redis.exists(KeyShapes.sessionKey(this.cfg.tenantId, this.cfg.userId,
-				dataset.sessionId));
-		List<String> runs = new ArrayList<>(this.redis.smembers(KeyShapes.sessionRunsKey(this.cfg.tenantId,
-				this.cfg.userId, dataset.sessionId)));
-		List<String> staging = new ArrayList<>(this.redis.smembers(KeyShapes.stagingIndexKey(this.cfg.tenantId,
-				this.cfg.userId, dataset.sessionId)));
-		List<String> archives = new ArrayList<>(this.redis.smembers(KeyShapes.archiveIndexKey(this.cfg.tenantId,
-				this.cfg.userId, dataset.sessionId)));
-		return new Enumeration(found, runs, staging, archives, dataset.sessionId);
+		// 4 个索引键不同槽：同一条有界 pipeline 发出，只付 1 个网络往返（不跨槽 DEL/Lua）。
+		List<String[]> commands = List.of(
+				new String[] { "EXISTS",
+						KeyShapes.sessionKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId) },
+				new String[] { "SMEMBERS",
+						KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId) },
+				new String[] { "SMEMBERS",
+						KeyShapes.stagingIndexKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId) },
+				new String[] { "SMEMBERS",
+						KeyShapes.archiveIndexKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId) });
+		List<Object> results = this.redis.pipelineRaw(commands);
+		boolean found = asLong(value(results, 0)) > 0L;
+		return new Enumeration(found, strings(results, 1), strings(results, 2), strings(results, 3),
+				dataset.sessionId);
 	}
 
 	private void finalizeRuns(Lease lease, Enumeration enumeration, List<String> deferred,
 			boolean allowFinalize) {
-		for (String runId : enumeration.runs()) {
-			String status = this.redis.get(KeyShapes.runKey("ai:runstate:", this.cfg.tenantId, this.cfg.userId,
-					runId));
+		List<String> runs = enumeration.runs();
+		if (runs.isEmpty()) {
+			return;
+		}
+		// runstate 一次有界 pipeline 取齐；只有缺 runstate 的 run 才再批量读快照，避免逐个 run 串行 GET。
+		List<String> stateKeys = new ArrayList<>(runs.size());
+		for (String runId : runs) {
+			stateKeys.add(KeyShapes.runKey("ai:runstate:", this.cfg.tenantId, this.cfg.userId, runId));
+		}
+		List<String> states = batchGet(stateKeys);
+		List<String> snapshotRuns = new ArrayList<>();
+		List<String> snapshotKeys = new ArrayList<>();
+		Map<String, String> snapshotByRun = new LinkedHashMap<>();
+		for (int i = 0; i < runs.size(); i++) {
+			if (states.get(i) == null) {
+				String runId = runs.get(i);
+				snapshotRuns.add(runId);
+				snapshotKeys.add(KeyShapes.runKey("ai:run:", this.cfg.tenantId, this.cfg.userId, runId));
+			}
+		}
+		List<String> snapshots = batchGet(snapshotKeys);
+		for (int i = 0; i < snapshotRuns.size(); i++) {
+			snapshotByRun.put(snapshotRuns.get(i), snapshots.get(i));
+		}
+		for (int i = 0; i < runs.size(); i++) {
+			String runId = runs.get(i);
+			String status = states.get(i);
 			if (status == null) {
-				status = snapshotStatus(runId);
+				status = snapshotStatus(snapshotByRun.get(runId));
 			}
 			if (status == null) {
 				continue;
@@ -273,8 +301,23 @@ public final class PurgeProtocol {
 		}
 	}
 
-	private String snapshotStatus(String runId) {
-		String raw = this.redis.get(KeyShapes.runKey("ai:run:", this.cfg.tenantId, this.cfg.userId, runId));
+	/** 有界 GET pipeline；结果与 keys 一一对应，缺失键为 null。 */
+	private List<String> batchGet(List<String> keys) {
+		List<String> out = new ArrayList<>(keys.size());
+		for (List<String> batch : CountingRedis.batch(keys, this.cfg.batchSize)) {
+			List<String[]> commands = new ArrayList<>(batch.size());
+			for (String key : batch) {
+				commands.add(new String[] { "GET", key });
+			}
+			List<Object> results = this.redis.pipelineRaw(commands);
+			for (int i = 0; i < batch.size(); i++) {
+				out.add(text(value(results, i)));
+			}
+		}
+		return out;
+	}
+
+	private String snapshotStatus(String raw) {
 		if (raw == null) {
 			return null;
 		}
@@ -398,10 +441,10 @@ public final class PurgeProtocol {
 	}
 
 	private long deleteRuns(Lease lease, Manifest.Dataset dataset, Enumeration enumeration) {
-		requireAllowed(lease, "DELETE_RUNS", 0L);
 		if (enumeration.runs().isEmpty()) {
 			return 0L;
 		}
+		requireAllowed(lease, "DELETE_RUNS", 0L);
 		List<List<String>> keysPerCall = new ArrayList<>();
 		for (String runId : enumeration.runs()) {
 			List<String> keys = new ArrayList<>(KeyShapes.runDeleteKeys(this.cfg.tenantId, this.cfg.userId,
@@ -428,13 +471,22 @@ public final class PurgeProtocol {
 				deleted += asLong(value);
 			}
 		}
-		for (String runId : enumeration.runs()) {
-			this.redis.srem(KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId),
-					runId);
-			this.redis.srem(KeyShapes.sessionActiveKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId),
-					runId);
-		}
+		removeSessionIndexMembers(dataset, enumeration.runs());
 		return deleted;
+	}
+
+	/**
+	 * runs 索引是 SET（SADD 写入）用 SREM，active 索引是 ZSET（ZADD 写入）用 ZREM。
+	 * 两键不同槽，按 batchSize 分批放进同一条有界 pipeline，避免逐 run 串行往返。
+	 */
+	private void removeSessionIndexMembers(Manifest.Dataset dataset, List<String> runIds) {
+		String runsKey = KeyShapes.sessionRunsKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
+		String activeKey = KeyShapes.sessionActiveKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId);
+		for (List<String> batch : CountingRedis.batch(runIds, this.cfg.batchSize)) {
+			this.redis.pipelineRaw(List.of(
+					SessionIndexPolicy.remove(SessionIndexPolicy.Index.RUNS, runsKey, batch),
+					SessionIndexPolicy.remove(SessionIndexPolicy.Index.ACTIVE, activeKey, batch)));
+		}
 	}
 
 	private long deleteStaging(Lease lease, Enumeration enumeration) {
@@ -511,7 +563,7 @@ public final class PurgeProtocol {
 	private long deleteSessionKeys(Lease lease, Manifest.Dataset dataset) {
 		requireAllowed(lease, "DELETE_SESSION", 0L);
 		String sessionId = dataset.sessionId;
-		List<String> keys = List.of(
+		List<String> keys = new ArrayList<>(List.of(
 				KeyShapes.sessionKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.contextKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.transcriptKey(this.cfg.tenantId, this.cfg.userId, sessionId),
@@ -520,36 +572,25 @@ public final class PurgeProtocol {
 				KeyShapes.memoryKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.attachmentSessionIndexKey(this.cfg.tenantId, this.cfg.userId, sessionId),
 				KeyShapes.attachmentKey(this.cfg.tenantId, this.cfg.userId, "file-" + sessionId),
-				KeyShapes.sessionCurrentKey(this.cfg.tenantId, this.cfg.userId, sessionId));
+				KeyShapes.sessionCurrentKey(this.cfg.tenantId, this.cfg.userId, sessionId)));
+		if (dataset.runIds != null) {
+			for (String runId : dataset.runIds) {
+				keys.add(KeyShapes.attachmentFormIndexKey(this.cfg.tenantId, this.cfg.userId, runId,
+						"call-" + runId));
+			}
+		}
 		long deleted = 0L;
-		for (List<List<String>> batch : CountingRedis.batch(keys.stream().map(List::of).toList(),
-				this.cfg.batchSize)) {
+		for (List<String> batch : CountingRedis.batch(keys, this.cfg.batchSize)) {
 			List<String[]> commands = new ArrayList<>();
-			for (List<String> single : batch) {
-				commands.add(new String[] { "DEL", single.get(0) });
+			for (String key : batch) {
+				commands.add(new String[] { "DEL", key });
 			}
 			List<Object> results = this.redis.pipelineRaw(commands);
 			for (Object value : results) {
 				deleted += asLong(value);
 			}
 		}
-		if (!dataset.runIds.isEmpty()) {
-			for (String runId : dataset.runIds) {
-				this.redis.del(List.of(KeyShapes.attachmentFormIndexKey(this.cfg.tenantId, this.cfg.userId,
-						runId, "call-" + runId)));
-			}
-		}
 		return deleted;
-	}
-
-	private long tombstone(Manifest.Dataset dataset) {
-		List<String> keys = List.of(
-				KeyShapes.memoryGenKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId),
-				KeyShapes.memoryVerKey(this.cfg.tenantId, this.cfg.userId, dataset.sessionId));
-		this.redis.checkSameSlot(keys);
-		Long gen = this.redis.eval(Scripts.TOMBSTONE, keys, String.valueOf(System.currentTimeMillis()),
-				String.valueOf(this.cfg.keyTtlSeconds * 1_000L));
-		return gen == null ? 0L : gen;
 	}
 
 	private boolean guardBlocksWrite(Manifest.Dataset dataset) {
@@ -584,10 +625,16 @@ public final class PurgeProtocol {
 	}
 
 	private Boolean complete(Lease lease, String pendingJson) {
-		List<?> result = this.redis.eval(Scripts.PURGE_COMPLETE,
-				List.of(KeyShapes.purgeLeaseKey(this.cfg.tenantId, this.cfg.userId, sessionId(lease)),
-						KeyShapes.purgePendingKey(this.cfg.tenantId, this.cfg.userId, sessionId(lease)),
-						KeyShapes.purgeGuardKey(this.cfg.tenantId, this.cfg.userId, sessionId(lease))),
+		String sessionId = sessionId(lease);
+		// lease/pending/guard 与墓碑（chat:mem:...{sid}:gen|ver）同槽：完成态与防复活墓碑原子落库。
+		List<String> keys = List.of(
+				KeyShapes.purgeLeaseKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.purgePendingKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.purgeGuardKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.memoryGenKey(this.cfg.tenantId, this.cfg.userId, sessionId),
+				KeyShapes.memoryVerKey(this.cfg.tenantId, this.cfg.userId, sessionId));
+		this.redis.checkSameSlot(keys);
+		List<?> result = this.redis.eval(Scripts.PURGE_COMPLETE, keys,
 				this.owner, String.valueOf(lease.epoch()), lease.purgeId(), pendingJson,
 				String.valueOf(this.cfg.keyTtlSeconds * 1_000L), String.valueOf(System.currentTimeMillis()),
 				lease.purgeId() + "|" + this.owner + "|" + lease.epoch());
@@ -705,8 +752,6 @@ public final class PurgeProtocol {
 			return outcome(scenario.id(), copy, dataset.sessionId, false, enumeration.found(), deferred,
 					failed.errors(), lease, deleted, guardBlocked, "FAILED_RETRYABLE");
 		}
-		deadline.check("takeover-tombstone");
-		tombstone(dataset);
 		deadline.check("takeover-complete");
 		Boolean completed = complete(lease, pendingJson(lease, "COMPLETE", 2,
 				System.currentTimeMillis() + 60_000L, "takeover", List.of()));
@@ -754,10 +799,10 @@ public final class PurgeProtocol {
 	}
 
 	private static long number(List<?> values, int index) {
-		if (values == null || values.size() <= index || values.get(index) == null) {
+		Object value = value(values, index);
+		if (value == null) {
 			return 0L;
 		}
-		Object value = values.get(index);
 		if (value instanceof Number number) {
 			return number.longValue();
 		}
@@ -769,11 +814,25 @@ public final class PurgeProtocol {
 		}
 	}
 
-	private static String text(List<?> values, int index) {
-		if (values == null || values.size() <= index) {
-			return null;
+	/** pipeline 结果按命令顺序返回；SMEMBERS 是非空 Set<String>（空集可能仍是空 Set<byte[]>）。 */
+	private static List<String> strings(List<?> values, int index) {
+		Object value = value(values, index);
+		if (!(value instanceof Collection<?> collection)) {
+			return List.of();
 		}
-		return text(values.get(index));
+		List<String> out = new ArrayList<>(collection.size());
+		for (Object item : collection) {
+			out.add(text(item));
+		}
+		return out;
+	}
+
+	private static Object value(List<?> values, int index) {
+		return values == null || values.size() <= index ? null : values.get(index);
+	}
+
+	private static String text(List<?> values, int index) {
+		return text(value(values, index));
 	}
 
 	private static String text(Object value) {

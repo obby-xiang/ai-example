@@ -152,7 +152,8 @@ public final class Scripts {
 			""", java.util.List.class);
 
 	public static final DefaultRedisScript<java.util.List> PURGE_COMPLETE = script("""
-			-- PERF_PURGE_COMPLETE: 完成时保留 durable pending + guard，释放 lease
+			-- PERF_PURGE_COMPLETE: 同槽原子完成——校验租约 → 写 COMPLETE pending + guard → 落防复活墓碑
+			-- KEYS: lease, pending, guard, memoryGen, memoryVer（同一会话 hash tag）
 			-- ARGV: owner, epoch, purgeId, pendingJson, guardTtlMs, nowMs, guardValue
 			local now = tonumber(ARGV[6])
 			local lease = redis.call('GET', KEYS[1])
@@ -172,6 +173,9 @@ public final class Scripts {
 			redis.call('SET', KEYS[2], ARGV[4])
 			redis.call('DEL', KEYS[1])
 			redis.call('SET', KEYS[3], ARGV[7], 'PX', ARGV[5])
+			redis.call('INCR', KEYS[4])
+			redis.call('PEXPIRE', KEYS[4], ARGV[5])
+			redis.call('SET', KEYS[5], ARGV[6], 'PX', ARGV[5])
 			return {1, 'COMPLETE'}
 			""", java.util.List.class);
 
@@ -203,14 +207,6 @@ public final class Scripts {
 			end
 			redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
 			return 1
-			""", Long.class);
-
-	public static final DefaultRedisScript<Long> TOMBSTONE = script("""
-			-- PERF_TOMBSTONE: 防复活墓碑只增不减
-			local gen = redis.call('INCR', KEYS[1])
-			redis.call('PEXPIRE', KEYS[1], ARGV[2])
-			redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
-			return gen
 			""", Long.class);
 
 	public static final DefaultRedisScript<java.util.List> FRAME_APPEND = script("""

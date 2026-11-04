@@ -56,8 +56,30 @@ run.cmd doctor
 
 脚本只做四件事：`mvn -DskipTests compile` → `dependency:build-classpath` →
 `javac` 本包 → `java HarnessMain`。它**不会**编译或执行其他测试文件，也不会跑全仓测试。
-脚本默认带 `-o`（离线，符合本仓 `mvn -o` 习惯）；新设备首次拉依赖失败时，把脚本里的
-`-o` 去掉（或在本地先完成一次在线依赖解析），之后仍可离线。
+
+依赖解析模式由 `PERF_MVN_MODE` 控制，**不需要改脚本**：
+
+| 值 | 行为 | 适用 |
+| --- | --- | --- |
+| `online`（默认） | 不带 `-o`；缺失依赖会从远端仓库下载 | 新设备、首次拉依赖 |
+| `offline` | 两次 Maven 调用都带 `-o`；只用本地仓库 | 既有离线习惯、内网/无网、依赖已就绪 |
+
+```bash
+# 新设备首次：默认就是 online，直接跑即可
+./run.sh doctor
+
+# 依赖已就绪、想沿用本仓 mvn -o 习惯：
+PERF_MVN_MODE=offline ./run.sh doctor
+```
+
+```bat
+rem Windows CMD
+set PERF_MVN_MODE=offline
+run.cmd doctor
+```
+
+离线模式下缺依赖会构建失败，并提示改回 `PERF_MVN_MODE=online`；脚本不会自动改写文件，
+也不会静默降级。`PERF_MVN_MODE` 取 `online`/`offline` 以外的值会在运行前以退出码 2 拒绝。
 
 ### 2.2 直接 Maven（基线测试源码可编译时）
 
@@ -124,6 +146,7 @@ Cluster 只支持 db 0。standalone 与 cluster 使用**同一套命令、Lua、
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
+| `PERF_MVN_MODE` | `online` | **构建期**（`run.sh`/`run.cmd`）Maven 依赖解析：`online` / `offline`（`-o`）；不进入 Java 配置 |
 | `REDIS_MODE` | `standalone` | `standalone` / `cluster` |
 | `REDIS_HOST` `REDIS_PORT` `REDIS_DB` | `127.0.0.1` `6379` `0` | standalone |
 | `REDIS_CLUSTER_NODES` | 空 | cluster 种子 |
@@ -335,15 +358,20 @@ guard/pending/lease、`ai:purge:retry:due` 成员、背景键公式与 marker。
   scripts/perf/redis-protocol/README.md
 
 硬性边界：
+- 先 git pull 到本轮提交：git pull --ff-only && git rev-parse --short HEAD，并记录提交号；
+  确认 scripts/perf/redis-protocol/ 下 git status 干净。不要再手工改源码、不要再手工
+  增删 Maven 的 -o 参数——在线/离线已由 PERF_MVN_MODE 配置（默认 online）。
 - 不启动项目服务，不调用任何 HTTP API，不驱动真实模型。
-- 不改 backend/src/main、frontend、backend/pom.xml、现有 scripts/perf/redis。
+- 不改 backend/src/main、frontend、backend/pom.xml、scripts/perf/redis-protocol 之外的脚本。
 - 只用专用隔离 Redis；任何连接（含 doctor/verify）必须 PERF_ISOLATED_ENV=true；远程/集群必须
   PERF_CONFIRM_REMOTE=true；cluster 只允许 db 0。
 - 不跑全仓测试；不跑旧协议全量 Cluster SCAN；不执行 FLUSHDB/FLUSHALL/KEYS。
 - 失败或预算耗尽时保留输出目录，不删证据，不伪报通过。
 
 执行顺序（每个拓扑分开输出目录）：
-1) ./run.sh scenarios
+0) 依赖解析：默认 PERF_MVN_MODE=online，新设备首次运行即可下载依赖；依赖就绪后如要沿用
+   离线习惯，再显式 export PERF_MVN_MODE=offline。离线构建失败会提示切回 online，不要改脚本。
+1) ./run.sh scenarios        (Windows CMD: run.cmd scenarios)
 2) ./run.sh doctor
 3) 先 smoke：PERF_PROFILE=smoke ./run.sh all --execute
 4) smoke 通过后再 full：PERF_PROFILE=full PERF_ALLOW_LARGE_SCALE=true ./run.sh all --execute
@@ -352,14 +380,16 @@ guard/pending/lease、`ai:purge:retry:due` 成员、背景键公式与 marker。
 6) standalone 与 cluster 各跑一次，输出目录分开；比较 summary.csv、protocols.json、verify.csv。
 7) 最后对每个输出目录执行 cleanup --execute，确认 cleanup.json complete=true。
 
-报告：命令、退出码、summary.csv 的 P50/P95/P99、命令数、SCAN 页数、slot 检查、
-protocols.json 的失败项、verify 的 fail/unknown、cleanup 残留。任何 unknown 都要说明原因。
+报告：git 提交号、命令、PERF_MVN_MODE、退出码、summary.csv 的 P50/P95/P99、命令数、SCAN 页数、
+slot 检查、protocols.json 的失败项、verify 的 fail/unknown、cleanup 残留。任何 unknown 都要说明原因。
 ```
 
 ---
 
 ## 9. 已知边界 / 未实测
 
+- 新设备首次运行默认 `PERF_MVN_MODE=online`，需要能访问 Maven 仓库（或已配置镜像）；内网无网设备
+  可先在线预热一次 `~/.m2`，之后用 `PERF_MVN_MODE=offline`。脚本不再要求手工增删 `-o`。
 - **本机基线测试源集**有与本任务无关的编译错误（例如 `AiRateLimiter`、`ClientIpResolver`
   在 test 源集被引用但 main 源集不存在）。因此本机用 `run.sh` 的“只编译本包”路径验证；
   `mvn -Dtest=...+ test` 需要基线测试源集可编译。

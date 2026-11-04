@@ -27,4 +27,15 @@ class ScriptsContractTest {
 		assertTrue(script.contains("return -1"), "type mismatch must not return a delete count");
 	}
 
+	@Test
+	void completionScriptKeepsLeaseChecksAndWritesTombstoneAtomically() {
+		String script = Scripts.PURGE_COMPLETE.getScriptAsString();
+		assertTrue(script.contains("STALE_EPOCH"), "completion must verify epoch");
+		assertTrue(script.contains("WRONG_OWNER"), "completion must verify owner");
+		assertTrue(script.contains("LEASE_EXPIRED"), "completion must reject an expired lease");
+		assertTrue(script.contains("INCR"), "tombstone generation must only grow");
+		assertTrue(script.contains("PEXPIRE"), "tombstone must keep a TTL");
+		assertTrue(script.contains("COMPLETE"), "success must stay distinguishable");
+	}
+
 }

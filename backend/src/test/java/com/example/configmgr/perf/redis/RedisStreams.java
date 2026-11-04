@@ -6,6 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.data.redis.connection.stream.ByteRecord;
+
 /** Stream 物理 ID 分页读取（XRANGE 排他游标），供 purge 终态探测与 B 场景共用。 */
 public final class RedisStreams {
 
@@ -13,29 +15,28 @@ public final class RedisStreams {
 	}
 
 	public static StreamPager.Result scan(CountingRedis redis, String streamKey, int pageSize, int maxEntries) {
-		return StreamPager.scan((cursor, count) -> parseXRange(redis.raw("XRANGE", streamKey, cursor, "+",
-				"COUNT", String.valueOf(count))), pageSize, maxEntries);
+		return StreamPager.scan((cursor, count) -> toEntries(redis.xrange(streamKey, cursor, count)),
+				pageSize, maxEntries);
 	}
 
-	@SuppressWarnings("unchecked")
-	public static List<StreamPager.Entry> parseXRange(Object raw) {
+	/** Spring Data 结构化 {@link ByteRecord} → {@link StreamPager.Entry}。 */
+	public static List<StreamPager.Entry> toEntries(List<ByteRecord> records) {
 		List<StreamPager.Entry> out = new ArrayList<>();
-		if (!(raw instanceof List<?> rows)) {
+		if (records == null) {
 			return out;
 		}
-		for (Object row : rows) {
-			if (!(row instanceof List<?> pair) || pair.size() < 2) {
+		for (ByteRecord record : records) {
+			if (record == null || record.getId() == null) {
 				continue;
 			}
-			String id = text(pair.get(0));
-			Object fieldsRaw = pair.get(1);
 			Map<String, String> fields = new LinkedHashMap<>();
-			if (fieldsRaw instanceof List<?> fieldsList) {
-				for (int i = 0; i + 1 < fieldsList.size(); i += 2) {
-					fields.put(text(fieldsList.get(i)), text(fieldsList.get(i + 1)));
+			Map<byte[], byte[]> rawFields = record.getValue();
+			if (rawFields != null) {
+				for (Map.Entry<byte[], byte[]> field : rawFields.entrySet()) {
+					fields.put(text(field.getKey()), text(field.getValue()));
 				}
 			}
-			out.add(new StreamPager.Entry(id, fields));
+			out.add(new StreamPager.Entry(record.getId().getValue(), fields));
 		}
 		return out;
 	}

@@ -134,7 +134,7 @@ public final class RunProtocol {
 		String field = "call-" + runId;
 		record(scenario, "frontend_requires_claim", () -> {
 			deadline.check("b_claim_cancel");
-			String missing = frontendResult(runId, field, "executor-a", "pre-claim");
+			String missing = frontendResult(runId, field, "0|executor-a", "pre-claim");
 			check("MISSING_CLAIM".equals(missing),
 					"frontend result without a claim must be rejected, got " + missing);
 			Map<String, Object> pending = pendingMap(KeyShapes.runKey("ai:pending:", cfg.tenantId,
@@ -189,12 +189,14 @@ public final class RunProtocol {
 			deadline.check("b_claim_cancel");
 			String cancel = cancel(runId, field);
 			check("CONFLICT_CLAIMED".equals(cancel), "cancel must not overwrite a claim, got " + cancel);
-			String owner = ownerOfClaim(runId, field);
+			String claimValue = claimValue(runId, field);
+			check(claimValue != null, "claim table must keep the winner's full claim value");
+			String owner = claimInstance(claimValue);
 			String wrong = "executor-a".equals(owner) ? "executor-b" : "executor-a";
-			String wrongClaim = frontendResult(runId, field, wrong, "wrong-result");
+			String wrongClaim = frontendResult(runId, field, withClaimInstance(claimValue, wrong), "wrong-result");
 			check("CONFLICT_CLAIMED".equals(wrongClaim),
 					"non-owner frontend result must be rejected, got " + wrongClaim);
-			String applied = frontendResult(runId, field, owner, "ok-result");
+			String applied = frontendResult(runId, field, claimValue, "ok-result");
 			check("APPLIED".equals(applied), "owner frontend result should apply, got " + applied);
 			Map<String, Object> pending = pendingMap(KeyShapes.runKey("ai:pending:", cfg.tenantId,
 					cfg.userId, runId), field);
@@ -260,11 +262,7 @@ public final class RunProtocol {
 	}
 
 	private long clusterKeyslot(String key) {
-		Object raw = redis.raw("CLUSTER", "KEYSLOT", key);
-		if (raw instanceof Number number) {
-			return number.longValue();
-		}
-		return Long.parseLong(String.valueOf(raw));
+		return redis.clusterKeyslot(key);
 	}
 
 	public long[] runLeaseAcquire(String runId, String owner, long ttlMs) {
@@ -357,7 +355,7 @@ public final class RunProtocol {
 		return text(result, 1);
 	}
 
-	public String frontendResult(String runId, String field, String expectedClaim, String resultText) {
+	public String frontendResult(String runId, String field, String expectedClaimValue, String resultText) {
 		String pendingKey = KeyShapes.runKey("ai:pending:", cfg.tenantId, cfg.userId, runId);
 		String decidedKey = KeyShapes.runKey("ai:decided:", cfg.tenantId, cfg.userId, runId);
 		String claimKey = KeyShapes.runKey("ai:claim:", cfg.tenantId, cfg.userId, runId);
@@ -369,18 +367,47 @@ public final class RunProtocol {
 		redis.checkSameSlot(keys);
 		List<?> result = redis.eval(Scripts.FRONTEND_RESULT, keys, field, json(pending),
 				"APPROVED|" + System.currentTimeMillis() + "|harness",
-				String.valueOf(cfg.keyTtlSeconds * 1_000L), expectedClaim);
+				String.valueOf(cfg.keyTtlSeconds * 1_000L), expectedClaimValue);
 		track(runId, keys);
 		return text(result, 1);
 	}
 
-	public String ownerOfClaim(String runId, String field) {
-		String claim = redis.hget(KeyShapes.runKey("ai:claim:", cfg.tenantId, cfg.userId, runId), field);
-		if (claim == null) {
+	/** claim 表的完整值 {@code <epoch>|<instanceId>} —— 回执比较用的就是这个原值。 */
+	public String claimValue(String runId, String field) {
+		return redis.hget(KeyShapes.runKey("ai:claim:", cfg.tenantId, cfg.userId, runId), field);
+	}
+
+	/** 完整 claim 值里的实例标识；旧裸值（无 epoch 前缀）原样返回。 */
+	static String claimInstance(String claimValue) {
+		if (claimValue == null) {
 			return null;
 		}
-		int sep = claim.indexOf('|');
-		return sep < 0 ? claim : claim.substring(sep + 1);
+		int sep = claimValue.indexOf('|');
+		if (sep <= 0 || !digitsPrefix(claimValue, sep)) {
+			return claimValue;
+		}
+		return claimValue.substring(sep + 1);
+	}
+
+	/** 换个实例标识、保留 epoch 前缀，用来构造同 epoch 的非 owner 完整 claim 值。 */
+	static String withClaimInstance(String claimValue, String instance) {
+		if (claimValue == null) {
+			return instance;
+		}
+		int sep = claimValue.indexOf('|');
+		if (sep <= 0 || !digitsPrefix(claimValue, sep)) {
+			return instance;
+		}
+		return claimValue.substring(0, sep + 1) + instance;
+	}
+
+	private static boolean digitsPrefix(String value, int end) {
+		for (int i = 0; i < end; i++) {
+			if (!Character.isDigit(value.charAt(i))) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private Map<String, Object> pendingMap(String pendingKey, String field) {

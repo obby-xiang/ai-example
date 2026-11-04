@@ -1,5 +1,6 @@
 package com.example.configmgr.perf.redis;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Properties;
@@ -30,21 +31,22 @@ public final class RedisHarness implements AutoCloseable {
 	private final DefaultClientResources resources;
 
 	private RedisHarness(LettuceConnectionFactory factory, StringRedisTemplate template,
-			DefaultClientResources resources) {
+			DefaultClientResources resources, Duration commandTimeout) {
 		this.factory = factory;
 		this.template = template;
-		this.redis = new CountingRedis(template);
+		this.redis = new CountingRedis(template, commandTimeout);
 		this.resources = resources;
 	}
 
 	public static RedisHarness open(HarnessConfig cfg) {
+		DefaultClientResources resources = DefaultClientResources.create();
 		LettuceClientConfiguration.LettuceClientConfigurationBuilder client = LettuceClientConfiguration.builder()
+				.clientResources(resources)
 				.commandTimeout(cfg.commandTimeout)
 				.shutdownTimeout(Duration.ofMillis(200));
 		if (cfg.tls) {
 			client.useSsl();
 		}
-		DefaultClientResources resources = DefaultClientResources.create();
 		if (cfg.tlsInsecure) {
 			client.clientOptions(ClientOptions.builder()
 					.sslOptions(SslOptions.builder()
@@ -76,12 +78,11 @@ public final class RedisHarness implements AutoCloseable {
 			}
 			factory = new LettuceConnectionFactory(standalone, client.build());
 		}
-		factory.setClientResources(resources);
 		factory.afterPropertiesSet();
 		factory.start();
 		StringRedisTemplate template = new StringRedisTemplate(factory);
 		template.afterPropertiesSet();
-		return new RedisHarness(factory, template, resources);
+		return new RedisHarness(factory, template, resources, cfg.commandTimeout);
 	}
 
 	public CountingRedis redis() {
@@ -98,42 +99,33 @@ public final class RedisHarness implements AutoCloseable {
 
 	public ServerInfo serverInfo() {
 		return this.template.execute((RedisCallback<ServerInfo>) connection -> {
-			Properties properties = connection.serverCommands().info("server");
-			String version = properties == null ? "unknown" : properties.getProperty("redis_version", "unknown");
-			String mode = properties == null ? "unknown" : properties.getProperty("redis_mode", "unknown");
+			Properties server = connection.serverCommands().info("server");
+			String version = server == null ? "unknown" : server.getProperty("redis_version", "unknown");
+			String mode = server == null ? "unknown" : server.getProperty("redis_mode", "unknown");
+			Properties cluster = connection.serverCommands().info("cluster");
+			String clusterEnabled = cluster == null ? null : cluster.getProperty("cluster_enabled");
+			boolean clustered = clusterEnabled != null ? "1".equals(clusterEnabled.trim())
+					: "cluster".equalsIgnoreCase(mode);
 			Long dbsize = connection.serverCommands().dbSize();
-			Long clusterEnabled = null;
-			try {
-				Object raw = connection.execute("CLUSTER", "INFO".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-				clusterEnabled = raw == null ? 0L : 1L;
-			}
-			catch (RuntimeException ex) {
-				clusterEnabled = 0L;
-			}
-			return new ServerInfo(version, mode, dbsize == null ? -1L : dbsize, clusterEnabled == 1L);
+			return new ServerInfo(version, mode, dbsize == null ? -1L : dbsize, clustered);
 		});
 	}
 
 	/** 用 Redis 自己的槽算法校验本地 CRC16（每条键 1 条命令）。 */
 	public long clusterKeyslot(String key) {
-		Object raw = this.redis.raw("CLUSTER", "KEYSLOT", key);
-		if (raw instanceof Number number) {
-			return number.longValue();
-		}
-		return Long.parseLong(String.valueOf(raw));
+		return this.redis.clusterKeyslot(key);
 	}
 
 	public List<String> clusterNodes() {
-		if (this.template == null) {
-			return List.of();
-		}
 		try {
 			Object raw = this.template.execute((RedisCallback<Object>) connection -> connection
-					.execute("CLUSTER", "NODES".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+					.execute("CLUSTER", "NODES".getBytes(StandardCharsets.UTF_8)));
 			if (raw == null) {
 				return List.of();
 			}
-			return List.of(String.valueOf(raw).split("\\R"));
+			String nodes = raw instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8)
+					: String.valueOf(raw);
+			return nodes.lines().filter(line -> !line.isBlank()).toList();
 		}
 		catch (RuntimeException ex) {
 			return List.of();

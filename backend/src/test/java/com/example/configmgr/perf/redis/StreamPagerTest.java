@@ -1,11 +1,15 @@
 package com.example.configmgr.perf.redis;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.connection.stream.ByteRecord;
+import org.springframework.data.redis.connection.stream.RecordId;
+import org.springframework.data.redis.connection.stream.StreamRecords;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -69,6 +73,46 @@ class StreamPagerTest {
 		assertEquals(2, result.entries().size());
 		assertEquals("-", source.calls.get(0));
 		assertEquals("(2-0", source.calls.get(1));
+	}
+
+	@Test
+	void xrangeCursorMapsToExclusiveLowerBound() {
+		var exclusive = CountingRedis.xrangeRange("(500000-0");
+		assertEquals("500000-0", exclusive.getLowerBound().getValue().orElseThrow());
+		assertFalse(exclusive.getLowerBound().isInclusive());
+		assertFalse(exclusive.getUpperBound().isBounded());
+
+		var unbounded = CountingRedis.xrangeRange("-");
+		assertFalse(unbounded.getLowerBound().isBounded());
+		assertFalse(unbounded.getUpperBound().isBounded());
+
+		var inclusive = CountingRedis.xrangeRange("900000-0");
+		assertEquals("900000-0", inclusive.getLowerBound().getValue().orElseThrow());
+		assertTrue(inclusive.getLowerBound().isInclusive());
+	}
+
+	@Test
+	void structuredStreamRecordsCarryIdAndFrameFields() {
+		ByteRecord done = StreamRecords.rawBytes(bytes("seq", "1", "frame", "{\"type\":\"done\"}"))
+				.withId(RecordId.of("1-0"));
+		ByteRecord toolStart = StreamRecords.rawBytes(bytes("seq", "500000", "frame",
+				"{\"type\":\"tool_start\",\"seq\":500000}")).withId(RecordId.of("500000-0"));
+
+		List<StreamPager.Entry> entries = RedisStreams.toEntries(List.of(done, toolStart));
+
+		assertEquals(2, entries.size());
+		assertEquals("1-0", entries.get(0).id());
+		assertTrue(StreamPager.isTerminal(entries.get(0).fields().get("frame")));
+		assertEquals("500000-0", entries.get(1).id());
+		assertTrue(StreamPager.isToolStart(entries.get(1).fields().get("frame")));
+	}
+
+	private static Map<byte[], byte[]> bytes(String... pairs) {
+		Map<byte[], byte[]> out = new LinkedHashMap<>();
+		for (int i = 0; i + 1 < pairs.length; i += 2) {
+			out.put(pairs[i].getBytes(StandardCharsets.UTF_8), pairs[i + 1].getBytes(StandardCharsets.UTF_8));
+		}
+		return out;
 	}
 
 	private static StreamPager.Entry entry(String id, String type, String seq) {
