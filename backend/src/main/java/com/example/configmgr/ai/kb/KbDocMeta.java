@@ -12,8 +12,8 @@ import java.util.List;
  * {@code sha} / {@code updated_at}。另有两个<b>可选</b>字段用于检索体验：
  * {@code summary}（提示词目录摘要）与 {@code terms}（{@code kb_lookup_term} 的预制答案）。
  *
- * <p>{@code sha} 是<b>增量重建的唯一判据</b>：local 源每次扫描都按文件内容重算并与声明值对账
- * （声明值过期只告警、以实算为准）；HTTP 源以 manifest 声明的 sha 为准（服务端负责算）。
+ * <p>{@code sha} 是<b>增量重建的唯一判据</b>：local/HTTP 都会按实际取得的正文重算并核对声明值；
+ * 已有声明不符时整轮失败，缺失声明时才以实算值补齐。
  *
  * @param id        文档 id（slug，如 {@code region-tariff}）
  * @param title     标题

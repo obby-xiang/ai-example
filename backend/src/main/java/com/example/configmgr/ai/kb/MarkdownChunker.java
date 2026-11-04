@@ -25,16 +25,9 @@ public final class MarkdownChunker {
     private MarkdownChunker() {
     }
 
-    /** 统一换行与 BOM（sha 基于归一化后的文本，跨平台一致）。 */
+    /** 与 manifest sha 共用去 BOM、统一 LF 的文本口径。 */
     public static String normalize(String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String text = raw.replace("\r\n", "\n").replace('\r', '\n');
-        if (!text.isEmpty() && text.charAt(0) == '\uFEFF') {
-            text = text.substring(1);
-        }
-        return text;
+        return KbHashing.normalizeText(raw);
     }
 
     /** 解析章节（仅 2–6 级；1 级视为文档标题，不单独成节）。 */

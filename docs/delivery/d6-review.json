@@ -336,6 +336,13 @@
       "reason": "已同步前端latest/before分页、显式preparing、UNKNOWN与稳定工具身份、共享SSE恢复、表格异步写入及设置/附件生命周期契约",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:a1764ae2ae46835656e46e1774604d2901015fe47fb156298794a238f049cd3c",
+      "status": "not-affected",
+      "reason": "D6已在前序提交同步cv2内容寻址与KB协议；本批实现正文SHA归一、缓存原子发布、直连降级对账及正文复用，不再改变迁移接口",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

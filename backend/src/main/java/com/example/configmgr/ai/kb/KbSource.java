@@ -6,7 +6,7 @@ package com.example.configmgr.ai.kb;
  * <h2>两个实现的契约差异</h2>
  * <ul>
  * <li>{@link LocalDirKbSource}（默认）：目录里 {@code manifest.json} + {@code *.md}；每次刷新按文件
- * 内容<b>实算 sha</b>（manifest 声明值过期只告警）；{@code etag} 恒 null（不需要整份短路）；</li>
+ * 内容<b>实算 sha</b>（已有声明不符则 fail-fast）；{@code etag} 恒 null（不需要整份短路）；</li>
  * <li>{@link HttpKbSource}（生产）：先拉 {@code manifest.json}（带 {@code If-None-Match}），
  * 304 即"整份未变"；按 manifest 的 sha 决定哪些文档要重新拉正文。</li>
  * </ul>
@@ -44,8 +44,53 @@ public interface KbSource {
         return fetchManifest(previousEtag);
     }
 
+    default ManifestFetch fetchManifest(String previousEtag, boolean force, RefreshBudget budget)
+            throws KbSourceException {
+        budget.check();
+        ManifestFetch fetched = fetchManifest(previousEtag, force);
+        budget.check();
+        return fetched;
+    }
+
     /** 拉取单篇正文（UTF-8 文本）。 */
     String fetchContent(KbDocMeta meta) throws KbSourceException;
+
+    default String fetchContent(KbDocMeta meta, RefreshBudget budget) throws KbSourceException {
+        budget.check();
+        String content = fetchContent(meta);
+        budget.check();
+        return content;
+    }
+
+    final class RefreshBudget {
+        private final long deadlineNanos;
+        private final long budgetNanos;
+
+        private RefreshBudget(java.time.Duration budget) {
+            this.budgetNanos = Math.max(1L, budget.toNanos());
+            this.deadlineNanos = System.nanoTime() + this.budgetNanos;
+        }
+
+        public static RefreshBudget within(java.time.Duration budget) {
+            return new RefreshBudget(budget);
+        }
+
+        public void check() throws KbSourceException {
+            remaining();
+        }
+
+        public java.time.Duration remaining() throws KbSourceException {
+            long remaining = this.deadlineNanos - System.nanoTime();
+            if (remaining <= 0L) {
+                throw new KbSourceException("KB 刷新超过总预算 " + (this.budgetNanos / 1_000_000L) + "ms");
+            }
+            return java.time.Duration.ofNanos(remaining);
+        }
+
+        public boolean expired() {
+            return this.deadlineNanos - System.nanoTime() <= 0L;
+        }
+    }
 
     /**
      * manifest 拉取结果。
@@ -53,11 +98,39 @@ public interface KbSource {
      * @param manifest    解析后的 manifest（{@code notModified=true} 时可为 null）
      * @param etag        本次响应的 ETag（可空）
      * @param notModified 304 / 整份未变
+     * @param corpusVersion 缓存内内容寻址的不可变语料版本（直连源可空）
+     * @param contents 本轮已经读取的正文（按文档 id 索引，避免重复 I/O）
      */
-    record ManifestFetch(KbManifest manifest, String etag, boolean notModified) {
+    record ManifestFetch(KbManifest manifest, String etag, boolean notModified, String corpusVersion,
+            java.util.Map<String, String> contents) {
+
+        public ManifestFetch {
+            contents = contents == null ? java.util.Map.of() : java.util.Map.copyOf(contents);
+        }
+
+        public ManifestFetch(KbManifest manifest, String etag, boolean notModified) {
+            this(manifest, etag, notModified, null);
+        }
+
+        public ManifestFetch(KbManifest manifest, String etag, boolean notModified, String corpusVersion) {
+            this(manifest, etag, notModified, corpusVersion, java.util.Map.of());
+        }
 
         public static ManifestFetch modified(KbManifest manifest, String etag) {
             return new ManifestFetch(manifest, etag, false);
+        }
+
+        public static ManifestFetch modified(KbManifest manifest, String etag, String corpusVersion) {
+            return new ManifestFetch(manifest, etag, false, corpusVersion);
+        }
+
+        public static ManifestFetch modified(KbManifest manifest, String etag, String corpusVersion,
+                java.util.Map<String, String> contents) {
+            return new ManifestFetch(manifest, etag, false, corpusVersion, contents);
+        }
+
+        public String contentFor(String docId) {
+            return this.contents.get(docId);
         }
 
         public static ManifestFetch notModified(String etag) {

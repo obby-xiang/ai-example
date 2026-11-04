@@ -16,8 +16,8 @@ import java.util.Map;
  *
  * <ul>
  * <li>{@code GET /api/ai/kb/status}：索引状态（是否就绪/文档数/块数/构建时刻/最近错误）；</li>
- * <li>{@code POST /api/ai/kb/reload}：<b>同步</b>重建 —— 在索引目录的 tmp 子目录建新索引，
- * 成功后原子切换 reader，失败保留旧索引（返回 {@code rebuilt=false} + 原因）；</li>
+ * <li>{@code POST /api/ai/kb/reload}：提交单飞重建并在 30 秒总预算内有界等待，
+ * 成功后原子切换 reader；超时/失败保留旧索引（返回 {@code rebuilt=false} + 原因）；</li>
  * <li>{@code GET /api/ai/kb/docs}：manifest 目录（id/title/tags/updated_at/sha 前缀），
  * 排障时确认"线上到底加载了哪些文档"。</li>
  * </ul>

@@ -17,10 +17,9 @@ import java.util.Set;
  * <li>{@code kb:cache:doc:<id>}（HASH：{@code content/etag/sha/updatedAt}）—— 单篇正文；</li>
  * <li>{@code kb:cache:docs}（HASH：field = 文档 id，value = 写入代次）—— <b>全局文档 id 索引</b>：
  *     "本缓存家族应当有哪些正文键"的事实源，下线回收按它与当前 manifest 的差集重试；</li>
- * <li>{@code kb:cache:manifest}（HASH：{@code etag/version/json}）—— 清单原文与版本；</li>
- * <li>{@code kb:cache:manifest:version}（INCR）—— 跨实例传播"知识已更新"；</li>
+ * <li>{@code kb:cache:manifest}（HASH：{@code etag/version/json}）—— 清单原文与内容寻址版本同键原子发布；</li>
  * <li>{@code kb:cache:manifest:generation}（INCR）—— 写入/回收 fencing 代次，不提前暴露半份清单；</li>
- * <li>{@code kb:cache:refresh:lock}（{@code SET NX PX 30000}）—— 刷新权（单飞）。</li>
+ * <li>{@code kb:cache:{kb:cache:manifest}:refresh:lock}（{@code SET NX PX} + token 续租）—— 与清单同槽的刷新权。</li>
  * </ul>
  *
  * <p><b>TTL</b>：文档、文档 id 索引与清单键<b>不设 TTL</b>（定稿：刷新权属显式刷新，版本号兜底；过期会让
@@ -33,10 +32,9 @@ import java.util.Set;
  * 全部是单键命令（{@code HGETALL/HSET/HDEL/DEL} 或等义单键 Lua），不使用 {@code KEYS}/{@code SCAN}/跨槽多键 Lua；
  * 索引键与文档键同属<b>全局公共知识域</b>（无租户段），一次刷新覆盖全部实例。
  *
- * <p><b>写入顺序</b>：先记文档 id 索引 → 写文档 → 写清单 → {@code INCR} 版本（最后回收下线文档）。
- * 索引先于正文是硬约束：正文键无 TTL，只有索引能把它找回来删；反过来"索引有、正文无"无害，
- * 下一轮补写正文或删空键后摘索引。读侧发现版本变化后若清单里的 {@code version} 仍落后（写窗），
- * {@code CachedKbSource} 会短暂重试，避免"看到新版本却读到旧清单"。
+ * <p><b>写入顺序</b>：先分批记文档 id 索引 → 写文档 → 校验 lease token 并在清单 HASH 内原子发布
+ * JSON/version（最后分批回收下线文档）。索引先于正文是硬约束：正文键无 TTL，只有索引能把它找回来删；
+ * 反过来"索引有、正文无"无害，下一轮补写正文或删空键后摘索引。
  */
 public class KbCache {
 
@@ -47,12 +45,11 @@ public class KbCache {
 
     public static final String MANIFEST_KEY = "kb:cache:manifest";
 
-    public static final String VERSION_KEY = "kb:cache:manifest:version";
-
     /** 写入/回收的 fencing 代次；与读侧刷新通知版本分离，避免提前暴露半份清单。 */
     public static final String GENERATION_KEY = "kb:cache:manifest:generation";
 
-    public static final String LOCK_KEY = "kb:cache:refresh:lock";
+    /** hash tag 与无 tag 的 MANIFEST_KEY 同槽，允许 Cluster 执行 lease+manifest 双键 Lua。 */
+    public static final String LOCK_KEY = "kb:cache:{kb:cache:manifest}:refresh:lock";
 
     static final String F_CONTENT = "content";
 
@@ -211,48 +208,21 @@ public class KbCache {
         return Optional.of(new ManifestEntry(hash.get(F_ETAG), hash.get(F_VERSION), hash.get(F_JSON)));
     }
 
-    public void putManifest(ManifestEntry entry) {
-        Map<String, String> hash = new LinkedHashMap<>();
-        hash.put(F_ETAG, nullSafe(entry.etag()));
-        hash.put(F_VERSION, nullSafe(entry.version()));
-        hash.put(F_JSON, entry.json());
-        this.store.hashPutAll(MANIFEST_KEY, hash);
-    }
-
-    /** 清单与文档共用代次 fencing；旧刷新不得覆盖新清单，也不得再推进通知版本。 */
-    public boolean putManifest(ManifestEntry entry, long generation) {
+    /** manifest JSON 与通知 version 在同一个 HASH、同一条 Lua 中发布，lease token 失效时拒绝。 */
+    public boolean publishManifest(ManifestEntry entry, long generation, String leaseToken) {
         long fencedGeneration = Math.max(0L, generation);
         Map<String, String> hash = new LinkedHashMap<>();
         hash.put(F_ETAG, nullSafe(entry.etag()));
         hash.put(F_VERSION, nullSafe(entry.version()));
         hash.put(F_JSON, entry.json());
         hash.put(F_GENERATION, String.valueOf(fencedGeneration));
-        return this.store.hashPutAllIfGenerationAtMost(MANIFEST_KEY, F_GENERATION, fencedGeneration, hash);
+        return this.store.hashPutAllIfLeaseAndGenerationAtMost(MANIFEST_KEY, LOCK_KEY, leaseToken,
+                F_GENERATION, fencedGeneration, hash);
     }
 
-    /** 清单内容未变时只提升 fencing 代次，拒绝仍在飞的旧清单写回。 */
-    public boolean markManifestGeneration(long generation) {
-        return this.store.hashPutFieldIfPresentAndValueAtMost(MANIFEST_KEY, F_GENERATION,
-                Math.max(0L, generation));
-    }
-
-    /** 当前版本号（键不存在 = 0）。 */
-    public long version() {
-        String raw = this.store.get(VERSION_KEY);
-        if (raw == null || raw.isBlank()) {
-            return 0L;
-        }
-        try {
-            return Long.parseLong(raw.strip());
-        }
-        catch (NumberFormatException e) {
-            return 0L;
-        }
-    }
-
-    /** {@code INCR kb:cache:manifest:version}，返回新版本。 */
-    public long bumpVersion() {
-        return this.store.incr(VERSION_KEY);
+    public String corpusVersion() {
+        String version = this.store.hashGet(MANIFEST_KEY, F_VERSION);
+        return version == null || version.isBlank() ? null : version;
     }
 
     public long generation() {
@@ -276,6 +246,14 @@ public class KbCache {
     /** 抢刷新权（{@code SET NX PX}）。 */
     public boolean tryLock(String token, Duration ttl) {
         return this.store.setIfAbsent(LOCK_KEY, token, ttl);
+    }
+
+    public boolean ownsLock(String token) {
+        return token.equals(this.store.get(LOCK_KEY));
+    }
+
+    public boolean renewLock(String token, Duration ttl) {
+        return this.store.compareAndExpire(LOCK_KEY, token, ttl);
     }
 
     /** 放刷新权（Lua 比对 token 才删；不会删掉别人的锁）。 */

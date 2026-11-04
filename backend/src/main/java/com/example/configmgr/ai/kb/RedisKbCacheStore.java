@@ -34,6 +34,34 @@ public class RedisKbCacheStore implements KbCacheStore {
             return 1
             """, Long.class);
 
+    private static final RedisScript<Long> COMPARE_EXPIRE = new DefaultRedisScript<>("""
+            -- KB_CACHE_COMPARE_EXPIRE
+            local current = redis.call('GET', KEYS[1])
+            if (not current) or current ~= ARGV[1] then
+              return 0
+            end
+            return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            """, Long.class);
+
+    private static final RedisScript<Long> PUT_HASH_IF_LEASE_AND_GENERATION_AT_MOST = new DefaultRedisScript<>("""
+            -- KB_CACHE_PUT_HASH_IF_LEASE_AND_GENERATION_AT_MOST
+            local owner = redis.call('GET', KEYS[2])
+            if (not owner) or owner ~= ARGV[1] then
+              return 0
+            end
+            local current = redis.call('HGET', KEYS[1], ARGV[2])
+            if current then
+              local generation = tonumber(current)
+              if (not generation) or generation > tonumber(ARGV[3]) then
+                return 0
+              end
+            end
+            for i = 4, #ARGV, 2 do
+              redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+            end
+            return 1
+            """, Long.class);
+
     private static final RedisScript<Long> PUT_HASH_IF_GENERATION_AT_MOST = new DefaultRedisScript<>("""
             -- KB_CACHE_PUT_HASH_IF_GENERATION_AT_MOST
             local current = redis.call('HGET', KEYS[1], ARGV[1])
@@ -131,6 +159,17 @@ public class RedisKbCacheStore implements KbCacheStore {
     }
 
     @Override
+    public String hashGet(String key, String field) {
+        try {
+            Object value = this.redis.opsForHash().get(key, field);
+            return value == null ? null : String.valueOf(value);
+        }
+        catch (RuntimeException e) {
+            throw failure("读缓存 HASH 字段失败", key, e);
+        }
+    }
+
+    @Override
     public void hashPutAll(String key, Map<String, String> values) {
         try {
             // 刻意不设 TTL：知识文档/清单/文档 id 索引键按定稿常驻（版本号兜底刷新）
@@ -179,6 +218,27 @@ public class RedisKbCacheStore implements KbCacheStore {
         }
         catch (RuntimeException e) {
             throw failure("按代次写缓存 HASH 失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean hashPutAllIfLeaseAndGenerationAtMost(String key, String lockKey, String token,
+            String generationField, long generation, Map<String, String> values) {
+        List<String> args = new java.util.ArrayList<>(3 + values.size() * 2);
+        args.add(token);
+        args.add(generationField);
+        args.add(String.valueOf(generation));
+        values.forEach((field, value) -> {
+            args.add(field);
+            args.add(value);
+        });
+        try {
+            Long written = this.redis.execute(PUT_HASH_IF_LEASE_AND_GENERATION_AT_MOST,
+                    List.of(key, lockKey), args.toArray());
+            return written != null && written > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("按 lease 与代次发布缓存清单失败", key, e);
         }
     }
 
@@ -268,6 +328,18 @@ public class RedisKbCacheStore implements KbCacheStore {
         }
         catch (RuntimeException e) {
             throw failure("释放缓存锁失败", key, e);
+        }
+    }
+
+    @Override
+    public boolean compareAndExpire(String key, String value, Duration ttl) {
+        try {
+            Long renewed = this.redis.execute(COMPARE_EXPIRE, List.of(key), value,
+                    String.valueOf(Math.max(1L, ttl.toMillis())));
+            return renewed != null && renewed > 0;
+        }
+        catch (RuntimeException e) {
+            throw failure("续租缓存锁失败", key, e);
         }
     }
 

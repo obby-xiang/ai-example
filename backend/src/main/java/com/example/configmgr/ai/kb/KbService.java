@@ -122,8 +122,8 @@ public class KbService {
 
     private volatile Instant lastRefreshAt;
 
-    /** 最近一次观察到的缓存版本（版本轮询用；-1 = 尚未同步）。 */
-    private volatile long lastObservedVersion = -1L;
+    /** 最近一次成功构建的内容寻址语料版本（null = 尚未同步）。 */
+    private volatile String lastObservedVersion;
 
     /**
      * 同一版本最多自动重建几次（版本轮询通道）。用完即停，把该版本交回 10m 定时刷新 ——
@@ -137,8 +137,8 @@ public class KbService {
     // 下面三个字段只在 kb-refresh 单线程（pollVersionQuietly）里读写，故不加同步；
     // 与 refreshNow（管理端点线程也会调）共享的只有 lastError / consecutiveFailures。
 
-    /** 正在退避重试的缓存版本（-1 = 没有在重试）。 */
-    private long retryVersion = -1L;
+    /** 正在退避重试的缓存版本（null = 没有在重试）。 */
+    private String retryVersion;
 
     /** 该版本已被自动重试失败了几次（0 = 尚未失败）。 */
     private int retryAttempts;
@@ -150,6 +150,10 @@ public class KbService {
     private volatile int consecutiveFailures;
 
     private ScheduledExecutorService scheduler;
+
+    private volatile Thread refreshThread;
+
+    private final AtomicBoolean reloadRunning = new AtomicBoolean();
 
     @Getter
     private volatile boolean stopped;
@@ -173,6 +177,7 @@ public class KbService {
         this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "kb-refresh");
             thread.setDaemon(true);
+            this.refreshThread = thread;
             return thread;
         });
         // 首版索引由 refreshNow 的成功路径自己记 lastObservedVersion；失败时**不**记（下一拍重试同一版本）
@@ -193,6 +198,9 @@ public class KbService {
         this.stopped = true;
         if (this.scheduler != null) {
             this.scheduler.shutdownNow();
+        }
+        if (this.source instanceof CachedKbSource cached) {
+            cached.close();
         }
         // 先摘引用再退休：acquire() 的循环读的就是这个字段，留着已退休的快照 ⇒ tryAcquire 恒 false
         // 且快照引用不变 ⇒ 循环永不退出（停机期间的检索/读取请求 100% CPU 自旋）。
@@ -219,29 +227,16 @@ public class KbService {
         }
     }
 
-    /**
-     * 版本号轮询（追加 3）：其它实例 {@code INCR kb:cache:manifest:version} 后，本实例在
-     * 一个轮询周期内发现并触发"从缓存增量重建"，不需要等 10m 的定时刷新。
-     *
-     * <p><b>只把重建成功的版本记为已见</b>：{@code refreshNow} 在成功路径上落
-     * {@code lastObservedVersion}；失败时保持旧值，同一版本还能重试（否则一次磁盘/Lucene
-     * 失败会让这个版本永久沉默，最长要等 10m 定时刷新）。
-     *
-     * <p><b>但重试是有界的</b>：同一版本最多自动重建 {@value #MAX_VERSION_REBUILD_ATTEMPTS} 次，
-     * 且失败后退避（{@code poll × 次数}，封顶定时刷新间隔）。用完即静默交回 10m 定时刷新，
-     * 换新版本（{@code INCR} 之后）又能立刻重试 —— 既不会"一次失败后永久沉默"，也不会
-     * "每 30s 一次全量回源 + 全量重建 + 一条 WARN"。
-     */
+    /** 其它实例发布新 corpus version 后，从同一缓存清单重建；只把成功构建的版本记为已见。 */
     private void pollVersionQuietly() {
         if (!(this.source instanceof CachedKbSource cached)) {
             return;
         }
-        long version = cached.cachedVersion();
-        if (version < 0 || version == this.lastObservedVersion) {
+        String version = cached.cachedCorpusVersion();
+        if (version == null || Objects.equals(version, this.lastObservedVersion)) {
             return;
         }
-        if (version != this.retryVersion) {
-            // 新版本：重置重试预算（旧版本的连续失败不牵连新版本）
+        if (!Objects.equals(version, this.retryVersion)) {
             this.retryVersion = version;
             this.retryAttempts = 0;
             this.retryNotBeforeNanos = 0L;
@@ -253,9 +248,8 @@ public class KbService {
             return;
         }
         refreshQuietly();
-        if (this.lastObservedVersion == version) {
-            // 成功（重建或"整份未变"短路都会记版本）：预算清零，本版本不再因轮询而重建
-            this.retryVersion = -1L;
+        if (Objects.equals(this.lastObservedVersion, version)) {
+            this.retryVersion = null;
             this.retryAttempts = 0;
             this.retryNotBeforeNanos = 0L;
             return;
@@ -280,33 +274,75 @@ public class KbService {
     // ---------------------------------------------------------------- refresh
 
     /**
-     * 同步刷新（管理端点/定时任务共用）。
+     * 单飞刷新；管理端点在既有执行器上提交任务并按总预算有界等待，超时不硬中断执行中的 I/O。
      *
-     * @return true = 本次真的重建了索引；false = 未变化或失败（失败保留旧索引，原因见 {@link #status()})
+     * @return true = 本次真的重建了索引；false = 未变化、已有刷新在飞、超时或失败
      */
-    public synchronized boolean refreshNow() {
+    public boolean refreshNow() {
         return refreshNow(false);
     }
 
-    /**
-     * 同步刷新。
-     *
-     * @param force true = 手动热重载：跳过"距上次回源不足刷新间隔"的节流（HTTP 源仍走 ETag/单飞）
-     */
-    public synchronized boolean refreshNow(boolean force) {
-        this.lastRefreshAt = Instant.now();
-        if (!enabled()) {
+    public boolean refreshNow(boolean force) {
+        if (!enabled() || this.stopped || !this.reloadRunning.compareAndSet(false, true)) {
             return false;
         }
+        KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(java.time.Duration.ofSeconds(30));
+        if (this.scheduler == null || Thread.currentThread() == this.refreshThread) {
+            return performRefresh(force, budget);
+        }
+
+        final java.util.concurrent.Future<Boolean> task;
+        try {
+            task = this.scheduler.submit(() -> performRefresh(force, budget));
+        }
+        catch (java.util.concurrent.RejectedExecutionException e) {
+            this.reloadRunning.set(false);
+            this.lastError = "KB 刷新执行器已停止";
+            return false;
+        }
+        try {
+            return task.get(budget.remaining().toNanos(), TimeUnit.NANOSECONDS);
+        }
+        catch (java.util.concurrent.TimeoutException e) {
+            if (task.cancel(false)) {
+                this.reloadRunning.set(false);
+            }
+            this.lastError = "KB reload 超过 30 秒总预算；未强制中断执行中的 I/O";
+            return false;
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (task.cancel(false)) {
+                this.reloadRunning.set(false);
+            }
+            this.lastError = "KB reload 等待被中断";
+            return false;
+        }
+        catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException e) {
+            this.lastError = safeMessage(e.getCause() == null ? e : e.getCause());
+            return false;
+        }
+        catch (KbSourceException e) {
+            if (task.cancel(false)) {
+                this.reloadRunning.set(false);
+            }
+            this.lastError = safeMessage(e);
+            return false;
+        }
+    }
+
+    private boolean performRefresh(boolean force, KbSource.RefreshBudget budget) {
+        this.lastRefreshAt = Instant.now();
         Path buildDir = null;
         try {
-            KbSource.ManifestFetch fetched = this.source.fetchManifest(this.lastEtag, force);
+            KbSource.ManifestFetch fetched = this.source.fetchManifest(this.lastEtag, force, budget);
             if (fetched.notModified()) {
                 if (fetched.etag() != null) {
                     this.lastEtag = fetched.etag();
                 }
                 this.consecutiveFailures = 0;
                 this.lastError = "";
+                markObservedVersion(fetched);
                 return false;
             }
             KbManifest manifest = fetched.manifest();
@@ -318,47 +354,50 @@ public class KbService {
             Snapshot old = this.snapshot;
             Map<String, KbDoc> nextDocs = new LinkedHashMap<>();
             for (KbDocMeta meta : manifest.docs()) {
+                budget.check();
                 KbDoc previous = old == null ? null : old.docs.get(meta.id());
                 if (previous != null && sameSha(previous.meta().sha(), meta.sha())) {
-                    // 正文未变：元数据也没变就原样复用（实例级复用，切块/章节引用不变）；
-                    // 元数据变了（标题/别名/摘要）才换壳，切块与章节仍复用
                     nextDocs.put(meta.id(), previous.meta().equals(meta) ? previous : previous.withMeta(meta));
                     continue;
                 }
-                String content = MarkdownChunker.normalize(this.source.fetchContent(meta));
-                String actualSha = KbHashing.sha256Hex(content);
-                if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                    log.warn("KB document content sha differs from manifest declaration "
-                            + "(manifest declaration is the delta baseline): doc={}", meta.id());
+                String rawContent = fetched.contentFor(meta.id());
+                if (rawContent == null) {
+                    rawContent = this.source.fetchContent(meta, budget);
                 }
-                List<KbSection> sections = MarkdownChunker.sections(content, meta.title());
-                List<KbChunk> chunks = MarkdownChunker.chunk(meta.id(), meta.title(), content,
+                String content = MarkdownChunker.normalize(rawContent);
+                String actualSha = KbHashing.sha256Text(content);
+                if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
+                    throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
+                }
+                KbDocMeta effectiveMeta = meta.sha() == null || meta.sha().isBlank() ? meta.withSha(actualSha) : meta;
+                List<KbSection> sections = MarkdownChunker.sections(content, effectiveMeta.title());
+                List<KbChunk> chunks = MarkdownChunker.chunk(effectiveMeta.id(), effectiveMeta.title(), content,
                         this.properties.getKb().getChunkMinChars(), this.properties.getKb().getChunkMaxChars());
-                nextDocs.put(meta.id(), new KbDoc(meta, content, sections, chunks));
+                budget.check();
+                nextDocs.put(meta.id(), new KbDoc(effectiveMeta, content, sections, chunks));
             }
 
-            if (old != null && sameDocuments(old, nextDocs)
-                    && Objects.equals(old.manifest.version(), manifest.version())) {
-                // 文档集合/元数据/版本都没变：不重建索引（本地源每次都会重算 sha，这里做整份短路）
+            if (old != null && sameDocuments(old, nextDocs)) {
                 this.lastEtag = fetched.etag();
                 this.consecutiveFailures = 0;
                 this.lastError = "";
-                if (this.source instanceof CachedKbSource cached) {
-                    this.lastObservedVersion = cached.cachedVersion();
-                }
+                markObservedVersion(fetched);
                 return false;
             }
 
+            budget.check();
             buildDir = newBuildDir();
-            Snapshot built = buildSnapshot(manifest, nextDocs, buildDir);
+            Snapshot built = buildSnapshot(manifest, nextDocs, buildDir, budget);
+            if (this.stopped) {
+                built.retire();
+                return false;
+            }
             Snapshot previous = this.snapshot;
             this.snapshot = built;
             this.lastEtag = fetched.etag();
             this.consecutiveFailures = 0;
             this.lastError = "";
-            if (this.source instanceof CachedKbSource cached) {
-                this.lastObservedVersion = cached.cachedVersion();
-            }
+            markObservedVersion(fetched);
             if (previous != null) {
                 previous.retire();
             }
@@ -369,8 +408,6 @@ public class KbService {
         catch (Exception e) {
             this.lastError = safeMessage(e);
             this.consecutiveFailures++;
-            // WARN 节流：第一条（1）与之后每 FAILURE_WARN_EVERY 条（5/9…）留 WARN，其余降 DEBUG ——
-            // 排障看得到，日志也不会被 30s 的重试节奏刷屏；lastError/status 始终是最新原因。
             if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
                 log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{}): {}",
                         this.consecutiveFailures, this.lastError);
@@ -383,6 +420,15 @@ public class KbService {
                 deleteRecursively(buildDir);
             }
             return false;
+        }
+        finally {
+            this.reloadRunning.set(false);
+        }
+    }
+
+    private void markObservedVersion(KbSource.ManifestFetch fetched) {
+        if (fetched.corpusVersion() != null && !fetched.corpusVersion().isBlank()) {
+            this.lastObservedVersion = fetched.corpusVersion();
         }
     }
 
@@ -406,8 +452,8 @@ public class KbService {
         }
     }
 
-    private Snapshot buildSnapshot(KbManifest manifest, Map<String, KbDoc> docs, Path buildDir)
-            throws Exception {
+    private Snapshot buildSnapshot(KbManifest manifest, Map<String, KbDoc> docs, Path buildDir,
+            KbSource.RefreshBudget budget) throws Exception {
         Directory directory = FSDirectory.open(buildDir);
         DirectoryReader reader = null;
         try {
@@ -416,10 +462,12 @@ public class KbService {
             config.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
             try (IndexWriter writer = new IndexWriter(directory, config)) {
                 for (KbDoc doc : docs.values()) {
+                    budget.check();
                     String aliases = String.join(" ", doc.meta().aliases());
                     String aliasesEn = String.join(" ", doc.meta().aliasesEn());
                     String tags = String.join(" ", doc.meta().tags());
                     for (KbChunk chunk : doc.chunks()) {
+                        budget.check();
                         Document document = new Document();
                         document.add(new StringField(F_DOC_ID, doc.meta().id(), Field.Store.YES));
                         document.add(new TextField(F_TITLE, doc.meta().title(), Field.Store.YES));
@@ -433,10 +481,13 @@ public class KbService {
                         writer.addDocument(document);
                     }
                 }
+                budget.check();
                 writer.commit();
             }
+            budget.check();
             reader = DirectoryReader.open(directory);
-            Map<String, KbTermEntry> terms = buildTermIndex(manifest, docs);
+            Map<String, KbTermEntry> terms = buildTermIndex(manifest, docs, budget);
+            budget.check();
             return new Snapshot(manifest, docs, reader, directory, buildDir, terms);
         }
         catch (Exception e) {
@@ -458,9 +509,11 @@ public class KbService {
         }
     }
 
-    private Map<String, KbTermEntry> buildTermIndex(KbManifest manifest, Map<String, KbDoc> docs) {
+    private Map<String, KbTermEntry> buildTermIndex(KbManifest manifest, Map<String, KbDoc> docs,
+            KbSource.RefreshBudget budget) throws KbSourceException {
         Map<String, KbTermEntry> index = new LinkedHashMap<>();
         for (KbDocMeta meta : manifest.docs()) {
+            budget.check();
             KbDoc doc = docs.get(meta.id());
             if (doc == null) {
                 continue;

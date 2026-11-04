@@ -84,11 +84,23 @@ public class HttpKbSource implements KbSource {
 
     @Override
     public KbSource.ManifestFetch fetchManifest(String previousEtag) throws KbSourceException {
-        HttpRequest.Builder builder = request(manifestUri());
+        return fetchManifest(previousEtag, null);
+    }
+
+    @Override
+    public KbSource.ManifestFetch fetchManifest(String previousEtag, boolean force, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        return fetchManifest(previousEtag, budget);
+    }
+
+    private KbSource.ManifestFetch fetchManifest(String previousEtag, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        Duration timeout = effectiveTimeout(budget);
+        HttpRequest.Builder builder = request(manifestUri(), timeout);
         if (previousEtag != null && !previousEtag.isBlank()) {
             builder.header("If-None-Match", previousEtag);
         }
-        HttpResponse<byte[]> response = send(builder.build(), "manifest.json");
+        HttpResponse<byte[]> response = send(builder.build(), "manifest.json", timeout);
         if (response.statusCode() == 304) {
             // 304 的 ETag 可缺省：复用上一次的即可（服务端未变）
             String etag = response.headers().firstValue("ETag").orElse(previousEtag);
@@ -104,17 +116,31 @@ public class HttpKbSource implements KbSource {
 
     @Override
     public String fetchContent(KbDocMeta meta) throws KbSourceException {
-        HttpRequest.Builder builder = request(documentUri(meta));
-        HttpResponse<byte[]> response = send(builder.build(), "文档 " + meta.id());
+        return fetchContent(meta, null);
+    }
+
+    @Override
+    public String fetchContent(KbDocMeta meta, KbSource.RefreshBudget budget) throws KbSourceException {
+        Duration timeout = effectiveTimeout(budget);
+        HttpRequest.Builder builder = request(documentUri(meta), timeout);
+        HttpResponse<byte[]> response = send(builder.build(), "文档 " + meta.id(), timeout);
         requireSuccess(response, "文档 " + meta.id());
         return new String(response.body(), StandardCharsets.UTF_8);
     }
 
     // ---------------------------------------------------------------- internals
 
-    private HttpRequest.Builder request(URI uri) {
+    private Duration effectiveTimeout(KbSource.RefreshBudget budget) throws KbSourceException {
+        if (budget == null) {
+            return this.readTimeout;
+        }
+        Duration remaining = budget.remaining();
+        return remaining.compareTo(this.readTimeout) < 0 ? remaining : this.readTimeout;
+    }
+
+    private HttpRequest.Builder request(URI uri, Duration timeout) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
-                .timeout(this.readTimeout)
+                .timeout(timeout)
                 .GET()
                 .header("Accept", "application/json, text/markdown, text/plain;q=0.9, */*;q=0.5");
         String auth = authHeaderValue();
@@ -139,12 +165,12 @@ public class HttpKbSource implements KbSource {
         }
     }
 
-    private HttpResponse<byte[]> send(HttpRequest request, String target) throws KbSourceException {
+    private HttpResponse<byte[]> send(HttpRequest request, String target, Duration timeout) throws KbSourceException {
         try {
             return this.client.send(request, HttpResponse.BodyHandlers.ofByteArray());
         }
         catch (HttpTimeoutException e) {
-            throw new KbSourceException("请求超时（读超时 " + this.readTimeout.toMillis() + "ms）：" + target, e);
+            throw new KbSourceException("请求超时（本次预算 " + timeout.toMillis() + "ms）：" + target, e);
         }
         catch (IOException e) {
             // 只报"连不上"的类别与目标名：不拼 URL（避免把带查询串/凭据的地址带进日志面）

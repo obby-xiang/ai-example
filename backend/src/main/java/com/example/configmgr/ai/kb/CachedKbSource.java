@@ -7,40 +7,26 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
-/**
- * Redis cache-aside 知识源（追加 3）：位于 {@link KbSource} 抽象与 {@link KbService} 之间。
- *
- * <h2>读取链（索引永远从缓存重建）</h2>
- * <ul>
- * <li><b>local</b>：读盘（manifest + 逐篇 sha）→ 先把文档 id 记进索引 → 变更文档写缓存 → 写清单 →
- *     {@code INCR} 版本 → 按索引差集回收下线文档；{@link #fetchContent} 再从缓存取正文。
- *     多实例因此看到同一份字节（即使各自挂载不同盘）；</li>
- * <li><b>http</b>：缓存命中即用；版本号与刷新权决定谁去回源（{@code SET NX PX} 单飞）；
- *     回源成功才写缓存并 {@code INCR}；其它实例下一拍轮询到版本变化，直接从缓存增量重建；
- *     远端 5xx/超时 ⇒ <b>stale-if-error</b>：继续供旧料 + WARN，<b>不清空缓存</b>；
- *     远端 304 ⇒ 清单不变，但仍按索引补做下线回收（残留不依赖"远端再改一次"才收敛）。</li>
- * </ul>
- *
- * <h2>失败语义</h2>
- * <ul>
- * <li>远端不可用且缓存为空 ⇒ 抛 {@link KbSourceException}（没有可供的旧料，fail-open 无对象）；</li>
- * <li>远端不可用但缓存非空 ⇒ 返回缓存（{@code notModified=false}，由 KbService 比对后 no-op）；</li>
- * <li>Redis 不可用 ⇒ 降级直连 delegate + WARN：单实例知识问答照常，只是失去跨实例共享。</li>
- * </ul>
- *
- * <p><b>安全</b>：缓存只存业务知识原文（非对话数据）；鉴权头由 {@code HttpKbSource} 从环境变量读取，
- * 本层不接触、不落缓存、不进日志。定界与 8000 字符闸仍在工具渲染层（{@code KbText}）。
- */
+/** Redis cache-aside 知识源：共享不可变语料版本，单机与 Cluster 使用同一套单键/同槽协议。 */
 @Slf4j
-public class CachedKbSource implements KbSource {
+public class CachedKbSource implements KbSource, AutoCloseable {
+
+    private static final int CACHE_BATCH_SIZE = 64;
 
     private final KbSource delegate;
 
@@ -50,19 +36,26 @@ public class CachedKbSource implements KbSource {
 
     private final AiProperties.Kb kb;
 
-    /** 本实例已见过的版本号（-1 = 尚未同步）。 */
-    private volatile long lastSeenVersion = -1L;
+    private final ScheduledExecutorService leaseScheduler;
 
-    /** 上次真正回源 HTTP 的时刻（local 源不走这个节拍）。 */
+    private volatile String lastSeenVersion = "";
+
     private volatile Instant lastRemoteCheck = Instant.EPOCH;
 
     private volatile boolean cacheDownLogged;
+
+    private volatile boolean reconcileAfterDirect;
 
     public CachedKbSource(KbSource delegate, KbCache cache, ObjectMapper mapper, AiProperties.Kb kb) {
         this.delegate = delegate;
         this.cache = cache;
         this.mapper = mapper;
         this.kb = kb;
+        this.leaseScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "kb-cache-lease");
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     @Override
@@ -70,20 +63,18 @@ public class CachedKbSource implements KbSource {
         return this.delegate.kind();
     }
 
-    /** 首启自播种属于源准备：有缓存层时同样要在第一次回源前完成。 */
     @Override
     public void prepare() {
         this.delegate.prepare();
     }
 
-    /** 当前缓存版本（诊断/轮询用；缓存不可用返回 -1）。 */
-    public long cachedVersion() {
+    public String cachedCorpusVersion() {
         try {
-            return this.cache.version();
+            return this.cache.corpusVersion();
         }
         catch (RuntimeException e) {
             noteCacheDown(e);
-            return -1L;
+            return null;
         }
     }
 
@@ -94,232 +85,304 @@ public class CachedKbSource implements KbSource {
 
     @Override
     public KbSource.ManifestFetch fetchManifest(String previousEtag, boolean force) throws KbSourceException {
+        return fetchManifest(previousEtag, force,
+                KbSource.RefreshBudget.within(Duration.ofSeconds(30)));
+    }
+
+    @Override
+    public KbSource.ManifestFetch fetchManifest(String previousEtag, boolean force, KbSource.RefreshBudget budget)
+            throws KbSourceException {
         try {
-            return "local".equalsIgnoreCase(this.delegate.kind())
-                    ? syncLocal(previousEtag, force)
-                    : refreshHttp(previousEtag, force);
+            return refresh(previousEtag, force, budget);
         }
         catch (KbCacheException e) {
             noteCacheDown(e);
-            return this.delegate.fetchManifest(previousEtag);
+            KbSource.ManifestFetch direct = fetchDirect(previousEtag, force, budget);
+            this.reconcileAfterDirect = true;
+            return direct;
         }
+    }
+
+    private KbSource.ManifestFetch fetchDirect(String previousEtag, boolean force, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        KbSource.ManifestFetch remote = this.delegate.fetchManifest(previousEtag, force, budget);
+        if (remote.notModified()) {
+            remote = this.delegate.fetchManifest(null, force, budget);
+        }
+        if (remote.notModified()) {
+            throw new KbSourceException("知识源在无缓存清单可核对时仍返回 304");
+        }
+        return remote;
     }
 
     @Override
     public String fetchContent(KbDocMeta meta) throws KbSourceException {
+        return fetchContent(meta, KbSource.RefreshBudget.within(Duration.ofSeconds(30)));
+    }
+
+    @Override
+    public String fetchContent(KbDocMeta meta, KbSource.RefreshBudget budget) throws KbSourceException {
+        Optional<KbCache.DocEntry> cached;
         try {
-            Optional<KbCache.DocEntry> cached = this.cache.doc(meta.id());
-            if (cached.isPresent() && shaMatches(cached.get().sha(), meta.sha())) {
-                return cached.get().content();
-            }
-            String content = this.delegate.fetchContent(meta);
-            cacheDoc(meta, content, this.cache.nextGeneration());
-            return content;
+            cached = this.cache.doc(meta.id());
         }
         catch (KbCacheException e) {
             noteCacheDown(e);
-            return this.delegate.fetchContent(meta);
+            String content = this.delegate.fetchContent(meta, budget);
+            withComputedSha(meta, content);
+            this.reconcileAfterDirect = true;
+            return content;
         }
+        if (cached.isPresent() && shaMatches(cached.get().sha(), meta.sha())) {
+            withComputedSha(meta, cached.get().content());
+            return cached.get().content();
+        }
+
+        String content = this.delegate.fetchContent(meta, budget);
+        KbDocMeta effective = withComputedSha(meta, content);
+        try {
+            cacheDoc(effective, content, this.cache.nextGeneration());
+        }
+        catch (RuntimeException e) {
+            noteCacheDown(e);
+            this.reconcileAfterDirect = true;
+        }
+        return content;
     }
 
-    // ---------------------------------------------------------------- local
-
-    /**
-     * local 源：每次刷新读盘（磁盘是权威），变更写缓存；索引侧再从缓存取正文。
-     * 这样"本地文件改了"能被发现，同时多实例共享同一份缓存字节。
-     */
-    private KbSource.ManifestFetch syncLocal(String previousEtag, boolean force) throws KbSourceException {
-        KbSource.ManifestFetch local = this.delegate.fetchManifest(previousEtag, force);
-        if (local.notModified() || local.manifest() == null) {
-            return local;
-        }
-        syncToCache(local.manifest(), local.etag());
-        return fromCache("local 缓存未写入");
-    }
-
-    // ---------------------------------------------------------------- http
-
-    private KbSource.ManifestFetch refreshHttp(String previousEtag, boolean force) throws KbSourceException {
+    private KbSource.ManifestFetch refresh(String previousEtag, boolean force, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        budget.check();
         Optional<KbCache.ManifestEntry> cached = this.cache.manifest();
         if (cached.isEmpty()) {
-            return coldStartHttp(previousEtag);
+            return coldStart(previousEtag, budget);
         }
-        long version = this.cache.version();
-        if (version != this.lastSeenVersion) {
-            // 别人刷新过：直接从缓存重建（不回源）
-            this.lastSeenVersion = version;
+        String version = this.cache.corpusVersion();
+        if (!this.reconcileAfterDirect && version != null && !version.equals(this.lastSeenVersion)) {
             return fromCache("版本已变化但清单不可读");
         }
-        if (!force && Duration.between(this.lastRemoteCheck, Instant.now())
-                .compareTo(jitteredRefreshInterval()) < 0) {
+        if (!this.reconcileAfterDirect && isHttp() && !force
+                && Duration.between(this.lastRemoteCheck, Instant.now()).compareTo(jitteredRefreshInterval()) < 0) {
             return fromCache("缓存清单不可读");
         }
-        String token = UUID.randomUUID().toString();
-        if (!this.cache.tryLock(token, this.kb.getCache().getLockTtl())) {
-            // 单飞：别的实例正在回源，本实例先用缓存（下一拍版本号会告诉我结果）
+
+        Lease lease = acquireLease();
+        if (lease == null) {
+            if (this.reconcileAfterDirect) {
+                throw new KbSourceException("KB 直连降级后尚未完成对账，刷新 lease 不可用");
+            }
             return fromCache("缓存清单不可读");
         }
-        try {
+        try (lease) {
             KbSource.ManifestFetch remote;
             try {
-                remote = this.delegate.fetchManifest(previousEtag, true);
+                remote = this.delegate.fetchManifest(previousEtag, true, budget);
             }
             catch (KbSourceException e) {
-                // stale-if-error：远端失败不清空缓存，继续供旧料
+                if (!isHttp() || this.reconcileAfterDirect) {
+                    throw e;
+                }
                 log.warn("KB source refresh failed (stale-if-error; serving stale cache): {}", e.getMessage());
                 return fromCache("缓存清单不可读");
             }
-            this.lastRemoteCheck = Instant.now();
+            if (remote.notModified() && cachedManifestMatches(previousEtag)) {
+                this.lastRemoteCheck = Instant.now();
+                reconcileCachedRemoval(lease, budget);
+                KbSource.ManifestFetch cachedResult = fromCache("缓存清单不可读");
+                this.reconcileAfterDirect = false;
+                return cachedResult;
+            }
             if (remote.notModified()) {
-                // 远端整份未变也要推进下线回收：上一轮删除失败/崩溃的残留不能等"远端再改一次"才收敛
-                reconcileCachedRemoval();
-                return fromCache("缓存清单不可读");
+                remote = this.delegate.fetchManifest(null, true, budget);
             }
-            syncToCache(remote.manifest(), remote.etag());
-            return fromCache("缓存清单不可读");
-        }
-        finally {
+            this.lastRemoteCheck = Instant.now();
+            if (remote.notModified() || remote.manifest() == null) {
+                throw new KbSourceException("知识源无条件重拉后仍未返回 manifest");
+            }
             try {
-                this.cache.unlock(token);
+                return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
             }
-            catch (RuntimeException e) {
-                // 锁按 TTL 自行过期；这里只记一笔，不影响返回
-                log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
+            catch (KbCacheException e) {
+                throw new KbSourceException("KB 缓存发布失败，保留旧索引：" + e.getMessage(), e);
             }
         }
     }
 
-    private KbSource.ManifestFetch coldStartHttp(String previousEtag) throws KbSourceException {
-        String token = UUID.randomUUID().toString();
-        if (this.cache.tryLock(token, this.kb.getCache().getLockTtl())) {
-            try {
-                KbSource.ManifestFetch remote;
-                try {
-                    remote = this.delegate.fetchManifest(previousEtag, true);
-                }
-                catch (KbSourceException e) {
-                    throw new KbSourceException("知识缓存为空且远端不可用：" + e.getMessage(), e);
+    private KbSource.ManifestFetch coldStart(String previousEtag, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        Lease lease = acquireLease();
+        if (lease != null) {
+            try (lease) {
+                KbSource.ManifestFetch remote = this.delegate.fetchManifest(previousEtag, true, budget);
+                if (remote.notModified()) {
+                    remote = this.delegate.fetchManifest(null, true, budget);
                 }
                 if (remote.notModified() || remote.manifest() == null) {
-                    throw new KbSourceException("知识缓存为空但远端返回未修改，无法重建");
+                    throw new KbSourceException("知识缓存为空且远端无条件重拉后仍未返回 manifest");
                 }
                 this.lastRemoteCheck = Instant.now();
-                syncToCache(remote.manifest(), remote.etag());
-                return fromCache("缓存清单写入失败");
-            }
-            finally {
                 try {
-                    this.cache.unlock(token);
+                    return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
                 }
-                catch (RuntimeException e) {
-                    log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
+                catch (KbCacheException e) {
+                    throw new KbSourceException("知识缓存为空且缓存发布失败：" + e.getMessage(), e);
                 }
             }
         }
-        // 其它实例正在冷启动刷新：短暂等待缓存出现（锁窗口 30s，本地等待给 3s）
+        if (this.reconcileAfterDirect) {
+            throw new KbSourceException("KB 直连降级后尚未完成对账，空缓存刷新 lease 不可用");
+        }
         for (int i = 0; i < 30; i++) {
-            Optional<KbCache.ManifestEntry> entry = this.cache.manifest();
-            if (entry.isPresent()) {
-                this.lastSeenVersion = this.cache.version();
+            budget.check();
+            if (this.cache.manifest().isPresent()) {
                 return fromCache("缓存清单不可读");
             }
-            sleep(100L);
+            sleep(100L, budget);
         }
         throw new KbSourceException("知识缓存为空且其它实例正在刷新，请稍后重试");
     }
 
-    // ---------------------------------------------------------------- cache sync
+    private boolean cachedManifestMatches(String previousEtag) {
+        if (isBlank(previousEtag)) {
+            return false;
+        }
+        return this.cache.manifest()
+                .map(entry -> previousEtag.equals(entry.etag()))
+                .orElse(false);
+    }
 
-    /**
-     * 写单篇正文的<b>唯一入口</b>：先把文档 id 记进全局索引，再写正文键。
-     *
-     * <p>正文键无 TTL，只有索引能把它找回来删除。因此不允许出现"正文已写、索引还没记"的中间态：
-     * 两步之间进程被杀只可能留下"索引有、正文无"，下一轮要么按清单补写正文，要么按差集删空键后
-     * 摘索引 —— 两种都能收敛。读路径（{@link #fetchContent} 的惰性补写）与刷新路径共用本方法，
-     * 不再各自直接 {@code putDoc}。
-     */
+    private Lease acquireLease() {
+        String token = UUID.randomUUID().toString();
+        Duration ttl = this.kb.getCache().getLockTtl();
+        if (!this.cache.tryLock(token, ttl)) {
+            return null;
+        }
+        try {
+            return new Lease(token, ttl);
+        }
+        catch (RuntimeException e) {
+            try {
+                this.cache.unlock(token);
+            }
+            catch (RuntimeException ignored) {
+                // 锁按 TTL 过期。
+            }
+            throw e;
+        }
+    }
+
     private void cacheDoc(KbDocMeta meta, String content, long generation) {
         this.cache.putDocId(meta.id(), generation);
         this.cache.putDoc(meta.id(), new KbCache.DocEntry(content, meta.sha(), meta.sha(), meta.updatedAt()), generation);
     }
 
-    /**
-     * 把一份 manifest 同步进缓存：读索引 → 已知 id 全量登记进索引 → 变更文档写入（每篇仍先索引后正文）
-     * → 写清单 → {@code INCR} 版本 → 按索引差集回收下线文档。
-     *
-     * <p><b>顺序不变式</b>：
-     * <ol>
-     * <li>文档 id 在<b>写正文之前</b>进索引 —— "正文有 ⇒ 索引有"：正文键无 TTL，只有索引能把它
-     *     找回来删；反过来"索引有、正文无"无害（下一轮补写正文或删空键后摘索引）；</li>
-     * <li>清单在<b>索引与正文之后</b>落地 —— 读侧不会拿到"清单已指向、正文还没写"的文档；</li>
-     * <li>回收发生在<b>清单落地之后</b> —— 读侧不再引用下线文档，避免"删了正文、旧清单还在供索引"；</li>
-     * <li>回收成功才摘索引 —— 删除失败/进程崩溃都留痕，下一轮按索引与当前 manifest 的差集重试。</li>
-     * </ol>
-     *
-     * @return true = 缓存内容确有变化（版本已递增）
-     */
-    private boolean syncToCache(KbManifest manifest, String sourceEtag) throws KbSourceException {
-        boolean changed = false;
-        // 代次必须先于本轮快照读取取得：旧刷新即使在回收前才醒来，也不能拿到比新正文更晚的删除权。
+    private KbSource.ManifestFetch syncToCache(KbManifest sourceManifest, String sourceEtag,
+            Map<String, String> sourceContents, Lease lease, KbSource.RefreshBudget budget) throws KbSourceException {
+        sourceManifest.validate();
+        lease.requireValid(budget);
         long generation = this.cache.nextGeneration();
-        // 上一版清单与全局索引都必须在写新清单前读：前者用于变更判定（也在首次升级时补偿索引），
-        // 后者是"已知文档 id"的主来源。
         Optional<KbCache.ManifestEntry> previous = this.cache.manifest();
-        Set<String> current = manifest.docs().stream()
+        Set<String> current = sourceManifest.docs().stream()
                 .map(KbDocMeta::id)
                 .collect(Collectors.toUnmodifiableSet());
-        Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
-        Set<String> known = new LinkedHashSet<>(indexed);
-        // 首次升级补偿：索引出现之前写下的正文只在上一版清单里留痕
+        Set<String> known = new LinkedHashSet<>(this.cache.docIds());
         known.addAll(docIdsOf(previous));
         known.addAll(current);
-        // 索引先于任何正文落盘，并与正文使用同一代次；旧回收因此两边都越不过这道闸。
-        // 失败会抛出 ⇒ 正文/清单都不写 ⇒ 下一轮重来，不留下无法回收的正文键。
-        this.cache.putDocIds(known, generation);
-        for (KbDocMeta meta : manifest.docs()) {
-            Optional<KbCache.DocEntry> existing = this.cache.doc(meta.id());
-            boolean needFetch = existing.isEmpty() || !shaMatches(existing.get().sha(), meta.sha());
-            if (needFetch) {
-                String content = this.delegate.fetchContent(meta);
-                cacheDoc(meta, content, generation);
-                changed = true;
+        putDocIdsBatched(known, generation, lease, budget);
+
+        List<KbDocMeta> effectiveDocs = new ArrayList<>(sourceManifest.docs().size());
+        List<String> fetchedContents = new ArrayList<>(sourceManifest.docs().size());
+        Map<String, String> roundContents = new java.util.LinkedHashMap<>();
+        int sinceLeaseCheck = 0;
+        for (KbDocMeta declared : sourceManifest.docs()) {
+            budget.check();
+            if (++sinceLeaseCheck >= CACHE_BATCH_SIZE) {
+                lease.requireValid(budget);
+                sinceLeaseCheck = 0;
             }
-            else if (!this.cache.markDocGeneration(meta.id(), generation)) {
-                // 读取后被旧回收删除：不能在空键上只写代次，必须回源并恢复完整正文。
-                String content = this.delegate.fetchContent(meta);
-                cacheDoc(meta, content, generation);
-                changed = true;
+            Optional<KbCache.DocEntry> existing = this.cache.doc(declared.id());
+            if (existing.isPresent() && !isBlank(declared.sha())
+                    && shaMatches(existing.get().sha(), declared.sha())) {
+                String content = existing.get().content();
+                effectiveDocs.add(withComputedSha(declared, content));
+                fetchedContents.add(null);
+                roundContents.put(declared.id(), content);
+            }
+            else {
+                String content = sourceContents.get(declared.id());
+                if (content == null) {
+                    content = this.delegate.fetchContent(declared, budget);
+                }
+                effectiveDocs.add(withComputedSha(declared, content));
+                fetchedContents.add(content);
+                roundContents.put(declared.id(), content);
             }
         }
+
+        sinceLeaseCheck = 0;
+        for (int i = 0; i < effectiveDocs.size(); i++) {
+            budget.check();
+            if (++sinceLeaseCheck >= CACHE_BATCH_SIZE) {
+                lease.requireValid(budget);
+                sinceLeaseCheck = 0;
+            }
+            KbDocMeta effective = effectiveDocs.get(i);
+            String content = fetchedContents.get(i);
+            if (content == null) {
+                if (!this.cache.markDocGeneration(effective.id(), generation)) {
+                    throw new KbSourceException("KB 缓存正文在发布前被回收，保留旧清单并重试：" + effective.id());
+                }
+            }
+            else {
+                cacheDoc(effective, content, generation);
+            }
+        }
+
+        KbManifest effectiveManifest = new KbManifest(sourceManifest.version(), sourceManifest.generatedAt(),
+                effectiveDocs);
         String json;
         try {
-            json = this.mapper.writeValueAsString(manifest);
+            json = this.mapper.writeValueAsString(effectiveManifest);
         }
         catch (Exception e) {
             throw new KbSourceException("知识清单序列化失败：" + e.getMessage(), e);
         }
-        String etag = sourceEtag != null && !sourceEtag.isBlank()
-                ? sourceEtag : KbHashing.sha256Hex(json);
-        if (previous.isEmpty() || !json.equals(previous.get().json())
-                || !etag.equals(previous.get().etag())) {
-            long next = this.cache.version() + 1;
-            if (this.cache.putManifest(new KbCache.ManifestEntry(etag, String.valueOf(next), json), generation)) {
-                long bumped = this.cache.bumpVersion();
-                this.lastSeenVersion = bumped;
-                changed = true;
-            }
+        String etag = isBlank(sourceEtag) ? KbHashing.sha256Hex(json) : sourceEtag;
+        StringBuilder stableContent = new StringBuilder();
+        effectiveDocs.stream()
+                .map(doc -> doc.id() + ":" + doc.sha() + "\n")
+                .sorted()
+                .forEach(stableContent::append);
+        String corpusVersion = "cv2:" + KbHashing.sha256Hex(stableContent.toString());
+        lease.requireValid(budget);
+        if (!this.cache.publishManifest(new KbCache.ManifestEntry(etag, corpusVersion, json), generation,
+                lease.token)) {
+            throw new KbSourceException("KB 刷新 lease 或代次已失效，禁止发布语料");
         }
-        else {
-            this.cache.markManifestGeneration(generation);
-            if (this.lastSeenVersion < 0) {
-                this.lastSeenVersion = this.cache.version();
-            }
-        }
-        pruneRemovedDocs(known, current, generation);
-        return changed;
+        this.lastSeenVersion = corpusVersion;
+        pruneRemovedDocs(known, current, generation, lease, budget);
+        this.reconcileAfterDirect = false;
+        return KbSource.ManifestFetch.modified(effectiveManifest, etag, corpusVersion, roundContents);
     }
 
-    /** 清单里的文档 id（解析失败 = 空集：宁可不删，也不按坏数据误删）。 */
+    private void putDocIdsBatched(Set<String> ids, long generation, Lease lease, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        List<String> batch = new ArrayList<>(CACHE_BATCH_SIZE);
+        for (String id : ids) {
+            budget.check();
+            batch.add(id);
+            if (batch.size() >= CACHE_BATCH_SIZE) {
+                lease.requireValid(budget);
+                this.cache.putDocIds(batch, generation);
+                batch.clear();
+            }
+        }
+        if (!batch.isEmpty()) {
+            lease.requireValid(budget);
+            this.cache.putDocIds(batch, generation);
+        }
+    }
+
     private Set<String> docIdsOf(Optional<KbCache.ManifestEntry> entry) {
         if (entry.isEmpty()) {
             return Set.of();
@@ -331,111 +394,74 @@ public class CachedKbSource implements KbSource {
                     .collect(Collectors.toUnmodifiableSet());
         }
         catch (Exception e) {
-            log.warn("Failed to parse previous KB manifest; this round relies on the global doc index only for retirements: {}", e.getMessage());
+            log.warn("Failed to parse previous KB manifest; retirement uses the global doc index only: {}", e.getMessage());
             return Set.of();
         }
     }
 
-    /**
-     * 远端返回 304（清单未变）时的下线回收补做：用缓存里的清单与索引做差集重试。
-     *
-     * <p>没有这一步，"删除失败/崩溃"的残留要等远端下次真的改动才收敛；而 HTTP 源常态就是 304。
-     * 这里只做回收（不写文档、不写清单、不动版本号），失败一律只记 WARN —— 不能把一次成功的
-     * 轮询变成降级，残留留到下一轮继续重试。
-     */
-    private void reconcileCachedRemoval() {
+    private void reconcileCachedRemoval(Lease lease, KbSource.RefreshBudget budget) {
         try {
             long generation = this.cache.generation();
             Optional<KbCache.ManifestEntry> cached = this.cache.manifest();
             if (cached.isEmpty()) {
                 return;
             }
-            Set<String> current;
-            try {
-                current = KbManifest.parse(cached.get().json().getBytes(StandardCharsets.UTF_8), this.mapper)
-                        .docs().stream().map(KbDocMeta::id).collect(Collectors.toUnmodifiableSet());
-            }
-            catch (Exception e) {
-                log.warn("Failed to parse cached KB manifest; skipping retirement reconcile this round: {}", e.getMessage());
-                return;
-            }
+            Set<String> current = KbManifest.parse(cached.get().json().getBytes(StandardCharsets.UTF_8), this.mapper)
+                    .docs().stream().map(KbDocMeta::id).collect(Collectors.toUnmodifiableSet());
             Set<String> indexed = new LinkedHashSet<>(this.cache.docIds());
             Set<String> toIndex = new LinkedHashSet<>(current);
             toIndex.removeAll(indexed);
-            this.cache.putDocIds(toIndex, generation);
+            putDocIdsBatched(toIndex, generation, lease, budget);
             Set<String> known = new LinkedHashSet<>(indexed);
             known.addAll(current);
-            pruneRemovedDocs(known, current, generation);
+            pruneRemovedDocs(known, current, generation, lease, budget);
         }
-        catch (RuntimeException e) {
-            log.debug("KB cache unavailable; skipping retirement reconcile this round (retried next round): {}", e.getMessage());
+        catch (Exception e) {
+            log.debug("KB retirement reconcile deferred to the next round: {}", e.getMessage());
         }
     }
 
-    /**
-     * 回收已从清单下线的文档键（R-2）：差集来自全局索引 {@code kb:cache:docs}，不是"上一版清单"。
-     *
-     * <p><b>为什么要索引</b>：上一版清单只存在于"上一次成功刷新"里；一旦删除失败或进程在
-     * 写清单与删键之间崩溃，那份差集就永久丢失，正文键（无 TTL）无人再删。索引是显式留痕：
-     * 删除成功才摘除条目，失败/崩溃时条目仍在，下一轮 sync 自然重试（DEL 幂等）。
-     *
-     * <p><b>Cluster 安全</b>：正文与索引各用一条单键 Lua 做代次条件删除，不使用
-     * {@code KEYS}/{@code SCAN}，也不做跨槽多键 Lua。更高代次说明新实例已重新写入，旧回收直接让位。
-     *
-     * <p>失败只记 WARN、不抛：缓存缺一篇正文时 {@link #fetchContent} 会回源补齐，
-     * 不能让"回收旧键"把整次刷新打成降级。
-     */
-    private void pruneRemovedDocs(Set<String> known, Set<String> current, long generation) {
-        if (known.isEmpty()) {
-            return;
-        }
+    private void pruneRemovedDocs(Set<String> known, Set<String> current, long generation, Lease lease,
+            KbSource.RefreshBudget budget) {
+        int visited = 0;
         for (String docId : known) {
             if (current.contains(docId)) {
                 continue;
+            }
+            if (budget.expired() || !lease.valid.get()) {
+                return;
+            }
+            if (++visited % CACHE_BATCH_SIZE == 0) {
+                try {
+                    lease.requireValid(budget);
+                }
+                catch (Exception e) {
+                    return;
+                }
             }
             final boolean deleted;
             try {
                 deleted = this.cache.deleteDoc(docId, generation);
             }
             catch (RuntimeException e) {
-                // 索引条目保留 ⇒ 下一轮重试，收敛到删除成功为止
-                log.warn("KB cache failed to delete retired doc (index entry kept; retried next round) docId={}: {}", docId, e.getMessage());
+                log.warn("KB cache failed to delete retired doc (index entry kept) docId={}: {}", docId, e.getMessage());
                 continue;
             }
             if (!deleted) {
-                log.debug("KB cache retirement yielded to a newer doc generation: docId={}", docId);
                 continue;
             }
             try {
-                if (this.cache.removeDocId(docId, generation)) {
-                    log.debug("KB cache deleted retired doc: docId={}", docId);
-                }
-                else {
-                    log.debug("KB cache index retirement yielded to a newer generation: docId={}", docId);
-                }
+                this.cache.removeDocId(docId, generation);
             }
             catch (RuntimeException e) {
-                // 正文已删、索引未摘：下一轮会再做条件删除并重试摘索引
-                log.warn("Retired doc deleted but its index entry remains (retried next round) docId={}: {}", docId, e.getMessage());
+                log.warn("Retired doc deleted but its index entry remains docId={}: {}", docId, e.getMessage());
             }
         }
     }
 
     private KbSource.ManifestFetch fromCache(String emptyMessage) throws KbSourceException {
-        long version = this.cache.version();
-        KbCache.ManifestEntry entry = null;
-        // 写窗容错：版本已增但清单还是上一版时短暂重试（doc → manifest → INCR 的可见性差）
-        for (int i = 0; i < 6; i++) {
-            entry = this.cache.manifest().orElse(null);
-            if (entry != null && versionOf(entry) >= version) {
-                break;
-            }
-            if (entry == null && i == 0) {
-                break;
-            }
-            sleep(25L);
-        }
-        if (entry == null) {
+        KbCache.ManifestEntry entry = this.cache.manifest().orElse(null);
+        if (entry == null || isBlank(entry.version())) {
             throw new KbSourceException(emptyMessage);
         }
         KbManifest manifest;
@@ -446,25 +472,31 @@ public class CachedKbSource implements KbSource {
             throw new KbSourceException("缓存清单解析失败：" + e.getMessage(), e);
         }
         manifest.validate();
-        return KbSource.ManifestFetch.modified(manifest, entry.etag());
+        this.lastSeenVersion = entry.version();
+        return KbSource.ManifestFetch.modified(manifest, entry.etag(), entry.version());
     }
 
-    private static long versionOf(KbCache.ManifestEntry entry) {
-        try {
-            return entry.version() == null || entry.version().isBlank()
-                    ? 0L : Long.parseLong(entry.version().strip());
+    private static KbDocMeta withComputedSha(KbDocMeta meta, String content) throws KbSourceException {
+        String actualSha = KbHashing.sha256Text(content);
+        if (!isBlank(meta.sha()) && !meta.sha().equalsIgnoreCase(actualSha)) {
+            throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
         }
-        catch (NumberFormatException e) {
-            return 0L;
-        }
+        return isBlank(meta.sha()) ? meta.withSha(actualSha) : meta;
     }
 
     private static boolean shaMatches(String cachedSha, String manifestSha) {
-        if (manifestSha == null || manifestSha.isBlank()) {
-            // 无声明 sha 时只认"缓存有内容"，避免每轮都回源
-            return cachedSha != null && !cachedSha.isBlank();
+        if (isBlank(manifestSha)) {
+            return !isBlank(cachedSha);
         }
         return cachedSha != null && cachedSha.equalsIgnoreCase(manifestSha);
+    }
+
+    private boolean isHttp() {
+        return !"local".equalsIgnoreCase(this.delegate.kind());
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private Duration jitteredRefreshInterval() {
@@ -476,25 +508,26 @@ public class CachedKbSource implements KbSource {
     private void noteCacheDown(RuntimeException e) {
         if (!this.cacheDownLogged) {
             this.cacheDownLogged = true;
-            log.warn("KB cache unavailable; degrading to direct source access (single instance still works): {}", e.getMessage());
+            log.warn("KB cache unavailable; degrading to direct source access: {}", e.getMessage());
         }
     }
 
-    private static void sleep(long millis) {
+    private static void sleep(long millis, KbSource.RefreshBudget budget) throws KbSourceException {
+        long bounded = Math.min(millis, Math.max(1L, budget.remaining().toMillis()));
         try {
-            Thread.sleep(millis);
+            Thread.sleep(bounded);
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new KbSourceException("KB 刷新等待被中断", e);
         }
     }
 
-    /** 诊断：缓存里的文档 id 集合（用例/排障用）。 */
     public Set<String> cachedDocIds() {
         return this.cache.manifest().map(entry -> {
             try {
                 return KbManifest.parse(entry.json().getBytes(StandardCharsets.UTF_8), this.mapper)
-                        .docs().stream().map(KbDocMeta::id).collect(java.util.stream.Collectors.toSet());
+                        .docs().stream().map(KbDocMeta::id).collect(Collectors.toSet());
             }
             catch (Exception e) {
                 return Set.<String>of();
@@ -502,7 +535,6 @@ public class CachedKbSource implements KbSource {
         }).orElse(Set.of());
     }
 
-    /** 单篇缓存条目（队列/排障用）。 */
     public Optional<Map<String, String>> rawDoc(String docId) {
         return this.cache.doc(docId).map(doc -> Map.of(
                 "content", doc.content(), "sha", nullSafe(doc.sha()), "updatedAt", nullSafe(doc.updatedAt())));
@@ -510,5 +542,60 @@ public class CachedKbSource implements KbSource {
 
     private static String nullSafe(String value) {
         return value == null ? "" : value;
+    }
+
+    @Override
+    public void close() {
+        this.leaseScheduler.shutdownNow();
+    }
+
+    private final class Lease implements AutoCloseable {
+        private final String token;
+        private final Duration ttl;
+        private final AtomicBoolean valid = new AtomicBoolean(true);
+        private final ScheduledFuture<?> renewal;
+
+        private Lease(String token, Duration ttl) {
+            this.token = token;
+            this.ttl = ttl;
+            long interval = Math.max(1L, ttl.toMillis() / 3L);
+            this.renewal = CachedKbSource.this.leaseScheduler.scheduleWithFixedDelay(this::renew,
+                    interval, interval, TimeUnit.MILLISECONDS);
+        }
+
+        private void renew() {
+            if (!this.valid.get()) {
+                return;
+            }
+            try {
+                if (!CachedKbSource.this.cache.renewLock(this.token, this.ttl)) {
+                    this.valid.set(false);
+                }
+            }
+            catch (RuntimeException e) {
+                this.valid.set(false);
+                log.debug("KB refresh lease renewal failed; publishing is disabled for this owner");
+            }
+        }
+
+        private void requireValid(KbSource.RefreshBudget budget) throws KbSourceException {
+            budget.check();
+            if (!this.valid.get() || !CachedKbSource.this.cache.ownsLock(this.token)) {
+                this.valid.set(false);
+                throw new KbSourceException("KB 刷新 lease 已失效，禁止继续发布");
+            }
+        }
+
+        @Override
+        public void close() {
+            this.renewal.cancel(false);
+            this.valid.set(false);
+            try {
+                CachedKbSource.this.cache.unlock(this.token);
+            }
+            catch (RuntimeException e) {
+                log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
+            }
+        }
     }
 }

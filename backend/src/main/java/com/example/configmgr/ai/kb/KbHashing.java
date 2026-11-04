@@ -24,6 +24,22 @@ public final class KbHashing {
         return sha256Hex(text.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** manifest 正文 sha 的唯一口径：去首个 BOM，CRLF/CR 统一为 LF，再按 UTF-8 计算。 */
+    public static String sha256Text(String raw) {
+        return sha256Hex(normalizeText(raw));
+    }
+
+    public static String normalizeText(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String text = raw.replace("\r\n", "\n").replace('\r', '\n');
+        if (!text.isEmpty() && text.charAt(0) == '\uFEFF') {
+            text = text.substring(1);
+        }
+        return text;
+    }
+
     private static String toHex(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) {
