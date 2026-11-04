@@ -427,6 +427,19 @@ def background_prefix(namespace: str) -> str:
     return "perf:bg:%s:" % namespace
 
 
+def background_probe_indexes(count: int) -> List[int]:
+    if count <= 0:
+        return []
+    indexes = {0, count // 2, count - 1}
+    if count > 2:
+        indexes.add(1)
+    return sorted(index for index in indexes if 0 <= index < count)
+
+
+def background_probe_keys(namespace: str, bucket: str, count: int) -> List[str]:
+    return [background_key(namespace, bucket, index) for index in background_probe_indexes(count)]
+
+
 def xack_pattern(run_id: str, t: int, u: int) -> str:
     return "ai:xack:*:" + run_tag(run_id, t, u)
 

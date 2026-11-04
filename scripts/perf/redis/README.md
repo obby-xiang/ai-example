@@ -149,6 +149,8 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_OUTPUT_DIR` | `./perf-redis-out` | 相对当前目录；跨设备可任意 |
 | `PERF_KEY_TTL_SECONDS` | `43200` | 所有生成键的兜底 TTL（12h） |
 | `PERF_BATCH_SIZE` `PERF_SCAN_COUNT` | `500` `1000` | pipeline 批量 / SCAN COUNT |
+| `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` | `200` | cleanup 回退 SCAN 的每节点页数上限；超限 `complete=false`/unknown |
+| `PERF_CLEANUP_SCAN_MAX_SECONDS` | `120` | cleanup 回退 SCAN 的共享单调时间预算；超时 `complete=false`/unknown |
 | `PERF_VERIFY_SETTLE_SECONDS` | `0` | verify 前等待（例如等 60s 记忆复核） |
 | `PERF_KEEP_GUARD` | `false` | cleanup 时保留 guard/pending（有真实写者时用） |
 | `PERF_ENABLE_ATTACHMENTS` / `PERF_ENABLE_KB` | `true` | 关闭后对应场景被跳过 |
@@ -188,7 +190,7 @@ python -m perf_redis scenarios
 # 1) 只读体检：配置、Redis 拓扑/版本/模式、命名空间、应用身份、真实读接口
 python -m perf_redis doctor
 
-# 2) 深度预检：写探测（本命名空间一个临时键）、SCAN 权限、输出目录、依赖、集群槽位
+# 2) 深度预检：写探测（本命名空间一个临时键）、精确键探测（无全库 SCAN）、输出目录、依赖、集群槽位
 python -m perf_redis preflight
 
 # 3) 造数据（按当前 profile/场景；可分批，键全部带 TTL）
@@ -213,6 +215,8 @@ python -m perf_redis all --cleanup-dry-run   # 只打印清理清单
 建议顺序与产出：
 
 > `doctor` 对 Redis/应用只读；它会创建 `PERF_OUTPUT_DIR` 并在其中写 `.namespace`（工具状态文件，不是 Redis 数据）。`preflight` 会额外写一个带 TTL 的 `perf:doctor:<ns>:probe` 键并立即删除。
+>
+> 命名空间状态不再用 `scan_sample`：`doctor`/`preflight` 只读本地 `manifest.json` 并用背景首/中/尾与少量会话/run 精确键探测。没有 manifest 或探测缺失时只说明“无法证明为空”，不会写成干净，也不会在 600 万键 Cluster 上触发全 master SCAN。
 
 | 步骤 | 产物 | 失败退出码 |
 | --- | --- | --- |
@@ -291,7 +295,7 @@ python -m perf_redis all
 | `bg_100k` | 10 万背景键 |  | ✓ | ✓ |
 | `bg_1m` | 100 万背景键（显式允许） |  |  | ✓ |
 
-背景键位于 `perf:bg:<namespace>:<bucket>:<n>`，**不属于任何会话**；删除后必须仍存在（verify 会抽查）。
+背景键位于 `perf:bg:<namespace>:<bucket>:<n>`，**不属于任何会话**；删除后必须仍存在。verify 用 manifest 的 planned 与首/中/尾精确键抽查，不做背景 SCAN。
 
 ### 6.1 数据形状
 
@@ -390,11 +394,12 @@ python -m perf_redis all
 - 禁止命令：`FLUSHDB`、`FLUSHALL`、`KEYS`、`DEBUG`、`CONFIG`；扫描只用 `SCAN`，Cluster 逐 primary。
 - 清理范围：
   - manifest 推导的本命名空间会话/run/上下文/记忆/transcript/附件登记；
-  - 本命名空间 `perf:bg:*`（分批 + 多趟 SCAN，直到无残留）；
+  - 本命名空间 `perf:bg:*`：按 manifest 的 bucket/planned 与确定性 key 公式分批删除，**不做背景 SCAN**；每批删除后用精确 EXISTS 复核。manifest 记录 `planned` 与逐批 `written` 进度（旧 manifest 的 `count/written` 兼容）；
   - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:purge:retry:due` 成员、`ai:runs` 成员；
+  - archive/staging/活跃 run tag 的 app 剩余键：优先用已推导精确键；仍需发现的回退 SCAN 有 `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` 与 `PERF_CLEANUP_SCAN_MAX_SECONDS` 双重预算，超预算记 `complete=false`/unknown，不伪报干净；
   - 附件文件仅在 `PERF_ALLOW_FILE_DELETE=true` 且路径**严格位于** `PERF_APP_FILE_STORAGE_PATH` 下的普通文件时删除；存储根目录本身、越界路径、目录/符号链接一律拒绝，不进入删除。
   - 反馈行通过真实 `POST /api/ai/feedback`（rating=0）删除。
-- `cleanup` 默认 dry-run，输出精确键数、样本、背景采样、文件、反馈清单；`--execute` 才删除。
+- `cleanup` 默认 dry-run，输出精确键数、样本、背景 planned/written 清单、文件、反馈清单；`--execute` 才删除。没有 manifest 时无法确认历史背景键，会明确 `complete=false`（不再用通配 SCAN 冒充清理）。
 - 附件场景若未配置 `PERF_APP_FILE_STORAGE_PATH` / `PERF_ALLOW_FILE_DELETE=true`，`verify` 会把文件存在性记为 `unknown`，`cleanup` 会因“文件不可确认/仍存在”报 `complete=false`；这是有意为之，不伪报干净。
 - 不会删除：`ai:runs` / `ai:purge:retry:due` 键本身、其他会话、业务作业/任务/配置、KB 缓存、`ai:lock:task:*`。
 
@@ -415,6 +420,7 @@ python -m perf_redis all
 | `complete=false` | 看 `deferred`/`errors`：活跃 run、Redis/DB/文件失败；修好后再次 DELETE 或等 retry runner |
 | verify `unknown` | Redis/HTTP 读失败；先恢复依赖再重跑 verify，不能当通过 |
 | cleanup 仍有 exact 残留 | 读写竞争（retry runner/真实写者）；加 `PERF_VERIFY_SETTLE_SECONDS` 或停写后重跑；必要时 `PERF_KEEP_GUARD` 先保留 guard |
+| cleanup `scanned` 未完成 / 达预算 | 调大 `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` / `PERF_CLEANUP_SCAN_MAX_SECONDS` 后重跑；预算内不会伪报 complete=true |
 | Windows 终端中文乱码 | 用 UTF-8 终端（`chcp 65001`）或重定向到文件；输出文件本身是 UTF-8 |
 | CROSSSLOT 类错误 | 工具所有多键脚本/DEL 都按同 tag；若出现，检查 runId 是否被改成含 `{`/`}` |
 
@@ -431,7 +437,7 @@ python -m perf_redis all
 | KB 缓存键 | 不在删除面 | 全局共享，不属于会话销毁 |
 | H2 反馈行 | 仅经真实接口 | 不直连数据库；列表上限 100 时无法证明“不存在”，verify 记 info |
 | 附件 | 需要真实上传 | 依赖 SUSPENDED + generative_form；文件路径核对需要 `PERF_APP_FILE_STORAGE_PATH` |
-| 100 万背景键 | 显式开启 | 会显著改变 keyspace，必须专用实例；清理为多趟 SCAN，耗时可观 |
+| 100 万背景键 | 显式开启 | 会显著改变 keyspace，必须专用实例；清理按 manifest planned 精确分批删除（不做背景 SCAN），耗时与键数线性 |
 | Cluster 节点发现 | 依赖 `CLUSTER NODES` 通告地址 | NAT/容器/证书主机名不匹配时需 `REDIS_TLS_INSECURE` 或修正通告 |
 | 终帧探测漏帧 | 记录不判定 | 源码 6256 预算 + seq 跳号；删除后 Stream 已不在，无法事后复查 |
 | 多实例并发 DELETE 单飞 | 无 | 源码没有记录级单飞；`concurrent_delete` 正是测量这一点 |

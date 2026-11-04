@@ -115,6 +115,16 @@ def cleanup_rows(result: Dict[str, object]) -> List[Dict[str, object]]:
             "status": item.get("status"),
             "detail": item.get("detail"),
         })
+    for item in result.get("background", []) or []:
+        rows.append({
+            "kind": "background",
+            "key": item.get("bucket"),
+            "action": "delete_exact",
+            "status": "pass" if item.get("complete") else "fail",
+            "detail": "planned=%s deleted=%s checked=%s remaining=%s unknown=%s"
+                      % (item.get("planned"), item.get("deleted"), item.get("checked"),
+                         item.get("remaining"), item.get("unknown")),
+        })
     for item in result.get("files", []) or []:
         rows.append({
             "kind": "file",

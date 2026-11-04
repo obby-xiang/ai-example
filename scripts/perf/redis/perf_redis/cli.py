@@ -79,6 +79,9 @@ def _print_cleanup(result: Dict[str, object]) -> None:
     plan = result.get("plan") or {}
     print("exact keys=%s present=%s backgrounds=%s"
           % (plan.get("exact_keys"), plan.get("exact_present"), len(plan.get("background") or [])))
+    if plan.get("unknown_background"):
+        print("unknown background buckets（无 planned count，不伪报干净）：%s"
+              % ",".join(plan.get("unknown_background") or []))
     if not result.get("executed"):
         print("dry-run：未删除任何键。确认清单后使用 cleanup --execute。")
     remaining = result.get("remaining") or {}

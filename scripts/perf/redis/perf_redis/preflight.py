@@ -42,6 +42,85 @@ def _identity_exists(tenants: Dict[str, object], tenant_id: int, user_id: int) -
     return False
 
 
+def _namespace_probe_keys(cfg: Config, manifest: Dict[str, object]) -> List[str]:
+    """Exact keys only: background first/middle/last + a few session/run keys.
+
+    Never SCAN: on a multi-million-key Cluster a no-match SCAN would traverse
+    every master and block doctor/preflight.
+    """
+    keys: List[str] = []
+    background = manifest.get("background") or {}
+    if not isinstance(background, dict):
+        background = {}
+    for bucket, state in background.items():
+        if not isinstance(state, dict):
+            continue
+        try:
+            count = int(state.get("planned") or state.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            continue
+        indexes = sorted({0, count // 2, count - 1})
+        for index in indexes:
+            keys.append(K.background_key(cfg.namespace, str(bucket), index))
+
+    scenarios = manifest.get("scenarios") or {}
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+    for scenario, entry in list(scenarios.items())[:3]:
+        if not isinstance(entry, dict):
+            continue
+        plan = entry.get("plan") or {}
+        for copy in (entry.get("copies") or [])[:2]:
+            if not isinstance(copy, dict):
+                continue
+            session_id = str(copy.get("session_id") or "")
+            if not session_id:
+                continue
+            if plan.get("session_record"):
+                keys.append(K.session_record_key(session_id, cfg.tenant_id, cfg.user_id))
+            runs = copy.get("runs") or []
+            if runs and isinstance(runs[0], dict):
+                run_id = str(runs[0].get("run_id") or "")
+                if run_id:
+                    keys.append(K.run_key(run_id, cfg.tenant_id, cfg.user_id))
+    return K.dedupe(keys)
+
+
+def _namespace_state_checks(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]]) -> None:
+    try:
+        manifest = M.load_manifest(cfg)
+    except Exception as exc:
+        _add(checks, "namespace_manifest", "unknown", "读取本地 manifest 失败：%s" % exc)
+        manifest = None
+    if manifest is None:
+        _add(checks, "namespace_manifest", "info", "没有本地 manifest")
+        _add(checks, "namespace_state", "info",
+             "无法证明命名空间为空；未做全库 SCAN（大键空间下会全 master 扫描）")
+        return
+    _add(checks, "namespace_manifest", "pass", "已读取本地 manifest（命名空间=%s）" % manifest.get("namespace"))
+    probes = _namespace_probe_keys(cfg, manifest)
+    if not probes:
+        _add(checks, "namespace_state", "info",
+             "manifest 中没有可探测的精确键；无法证明命名空间为空（未做 SCAN）")
+        return
+    existence = ops.exists_many(probes)
+    present = [key for key in probes if existence.get(key) is True]
+    unknown = [key for key in probes if existence.get(key) is None]
+    if unknown:
+        _add(checks, "namespace_state", "unknown",
+             "精确探测读失败，无法判断是否有残留：%s" % ",".join(unknown[:5]))
+    elif present:
+        _add(checks, "namespace_state", "info",
+             "精确抽样发现 %d 个残留键（首/中/尾/会话样本）：%s；先执行 cleanup"
+             % (len(present), ",".join(present[:5])))
+    else:
+        _add(checks, "namespace_state", "info",
+             "精确抽样（%d 个首/中/尾/会话键）均不存在；这不是全键空间为空的证明（未做 SCAN）"
+             % len(probes))
+
+
 def _redis_checks(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], write_probe: bool) -> None:
     ok, ms, error = ops.ping()
     _add(checks, "redis_ping", "pass" if ok else "fail",
@@ -102,21 +181,7 @@ def _redis_checks(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], w
         _add(checks, "standalone_db", "pass" if cfg.db == 0 or cfg.confirm_non_default_db else "fail",
              "REDIS_DB=%d" % cfg.db)
 
-    pattern = K.background_prefix(cfg.namespace) + "*"
-    scan_failed = False
-    try:
-        sample = ops.scan_sample(pattern, 1)
-    except Exception as exc:
-        _add(checks, "namespace_scan", "unknown", "SCAN 失败：%s" % exc)
-        scan_failed = True
-        sample = []
-    if scan_failed:
-        _add(checks, "namespace_clean", "unknown", "无法确认命名空间是否已有残留")
-    elif sample:
-        _add(checks, "namespace_clean", "info",
-             "命名空间下已有背景键（上次中断残留？）：%s；先执行 cleanup" % sample[0])
-    else:
-        _add(checks, "namespace_clean", "pass", "命名空间下没有背景键")
+    _namespace_state_checks(cfg, ops, checks)
 
     if write_probe:
         probe_key = "perf:doctor:%s:probe" % cfg.namespace

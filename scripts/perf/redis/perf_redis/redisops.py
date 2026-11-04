@@ -23,6 +23,12 @@ class RedisUnavailable(Exception):
     pass
 
 
+class ScanBudgetExceeded(Exception):
+    """Bounded SCAN hit its per-node page cap or monotonic deadline."""
+
+    pass
+
+
 class ScanStats:
     def __init__(self) -> None:
         self.keys = 0
@@ -358,12 +364,22 @@ class RedisOps:
         return {key: str(value) if value is not None else "unknown" for key, value in raw.items()}
 
     # ------------------------------------------------------------------- scans
-    def iter_scan(self, match: str, stats: Optional[ScanStats] = None) -> Iterable[str]:
-        """Yield keys matching ``match`` using SCAN only (per primary on cluster)."""
+    def iter_scan(self, match: str, stats: Optional[ScanStats] = None,
+                  max_pages_per_node: Optional[int] = None,
+                  deadline: Optional[float] = None) -> Iterable[str]:
+        """Yield keys matching ``match`` using SCAN only (per primary on cluster).
+
+        ``max_pages_per_node``/``deadline`` are hard bounds checked inside the
+        cursor loop, including no-match scans that never yield a key.
+        Raises ScanBudgetExceeded when either bound is hit.
+        """
         if not self.cfg.is_cluster():
             try:
-                for key in self._scan_one(self.client, match, "standalone", stats):
+                for key in self._scan_one(self.client, match, "standalone", stats,
+                                          max_pages_per_node, deadline):
                     yield key
+            except ScanBudgetExceeded:
+                raise
             except Exception as exc:
                 raise RedisUnavailable("SCAN 失败（standalone）：%s" % exc)
             return
@@ -378,18 +394,31 @@ class RedisOps:
         for (host, port), node_client in zip(primaries, clients):
             label = "%s:%d" % (host, port)
             try:
-                for key in self._scan_one(node_client, match, label, stats):
+                for key in self._scan_one(node_client, match, label, stats,
+                                          max_pages_per_node, deadline):
                     yield key
+            except ScanBudgetExceeded:
+                raise
             except Exception as exc:
                 raise RedisUnavailable(
                     "SCAN 失败：cluster primary %s:%d 中断（扫描结果不完整）：%s"
                     % (host, port, exc)
                 )
 
-    def _scan_one(self, client, match: str, label: str, stats: Optional[ScanStats]) -> Iterable[str]:
+    def _scan_one(self, client, match: str, label: str, stats: Optional[ScanStats],
+                  max_pages_per_node: Optional[int] = None,
+                  deadline: Optional[float] = None) -> Iterable[str]:
         cursor = 0
+        pages = 0
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ScanBudgetExceeded("达到单调时间预算，停止扫描（%s）" % label)
             cursor, batch = client.scan(cursor=cursor, match=match, count=self.cfg.scan_count)
+            pages += 1
+            if max_pages_per_node is not None and pages > max_pages_per_node:
+                raise ScanBudgetExceeded(
+                    "达到每节点页数预算 %d，停止扫描（%s）" % (max_pages_per_node, label)
+                )
             if stats is not None:
                 stats.pages += 1
                 stats.per_node_pages[label] = stats.per_node_pages.get(label, 0) + 1
@@ -401,20 +430,6 @@ class RedisOps:
                 yield text
             if cursor == 0:
                 break
-
-    def scan_count(self, match: str) -> ScanStats:
-        stats = ScanStats()
-        for _ in self.iter_scan(match, stats):
-            pass
-        return stats
-
-    def scan_sample(self, match: str, limit: int = 50) -> List[str]:
-        out: List[str] = []
-        for key in self.iter_scan(match):
-            out.append(key)
-            if len(out) >= limit:
-                break
-        return out
 
     # ------------------------------------------------------------------ writes
     def set_values(self, items: Sequence[Tuple[str, str, int]]) -> int:

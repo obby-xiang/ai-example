@@ -113,23 +113,34 @@ def _merge(rows: List[Dict[str, object]]) -> Dict[str, object]:
 
 
 def _check_background(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], scenario: str,
-                      copy_name: str, plan: Dict[str, object]) -> None:
+                      copy_name: str, plan: Dict[str, object],
+                      background_counts: Dict[str, int]) -> None:
     bucket = plan.get("background")
     if not bucket:
         return
-    pattern = K.background_pattern(cfg.namespace, str(bucket))
-    try:
-        sample = ops.scan_sample(pattern, 5)
-    except Exception as exc:
+    count = background_counts.get(str(bucket))
+    if count is None:
         _check(checks, scenario, copy_name, "background_preserved", "unknown",
-               "背景键扫描失败：%s" % exc)
+               "manifest 未记录 bucket %s 的 planned/count，无法精确抽查" % bucket)
         return
-    if sample:
-        _check(checks, scenario, copy_name, "background_preserved", "pass",
-               "background bucket %s 仍存在（采样 %d）" % (bucket, len(sample)))
-    else:
+    if count <= 0:
+        _check(checks, scenario, copy_name, "background_preserved", "info",
+               "bucket %s planned=0，无背景键可抽查" % bucket)
+        return
+    probes = K.background_probe_keys(cfg.namespace, str(bucket), count)
+    existence = ops.exists_many(probes)
+    unknown = [key for key in probes if existence.get(key) is None]
+    missing = [key for key in probes if existence.get(key) is False]
+    if missing:
         _check(checks, scenario, copy_name, "background_preserved", "fail",
-               "background bucket %s 的采样为空：全库 SCAN 期间不应删除背景数据" % bucket)
+               "背景键精确抽样缺失 bucket=%s：%s" % (bucket, _sample(missing)))
+    elif unknown:
+        _check(checks, scenario, copy_name, "background_preserved", "unknown",
+               "背景键精确抽样读取失败 bucket=%s：%s" % (bucket, _sample(unknown)))
+    else:
+        _check(checks, scenario, copy_name, "background_preserved", "pass",
+               "背景键首/中/尾抽样仍存在 bucket=%s（%d 个样本，非全键空间证明）"
+               % (bucket, len(probes)))
 
 
 def _check_files(cfg: Config, checks: List[Dict[str, object]], scenario: str, copy_name: str,
@@ -205,7 +216,7 @@ def _check_slots(cfg: Config, checks: List[Dict[str, object]], scenario: str, co
 
 def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[str, object]],
                  scenario: str, copy_name: str, plan: Dict[str, object], copy: Dict[str, object],
-                 merged: Dict[str, object]) -> None:
+                 merged: Dict[str, object], background_counts: Dict[str, int]) -> None:
     keys = D.copy_keys(cfg, scenario, plan, copy)
     expected = list(keys["expected_absent_on_clean"])
     existence = ops.exists_many(expected)
@@ -297,22 +308,10 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
     for run_id in list(keys["runs"])[:3]:
         if keys["runs"][run_id].get("status") not in ("RUNNING", "SUSPENDED"):
             continue
-        ack_pattern = K.xack_pattern(run_id, cfg.tenant_id, cfg.user_id)
-        try:
-            ack_keys = ops.scan_sample(ack_pattern, 20)
-        except Exception as exc:
-            _check(checks, scenario, copy_name, "xack_ttl_%s" % run_id, "unknown",
-                   "xack 扫描失败：%s" % exc)
-            ack_keys = []
-        if ack_keys:
-            ttls = ops.ttl_many(ack_keys)
-            bad = [key for key, ttl in ttls.items() if ttl <= 0 or ttl > 130]
-            if bad:
-                _check(checks, scenario, copy_name, "xack_ttl_%s" % run_id, "info",
-                       "xack 残留 TTL 不在 (0,130]：%s" % _sample(bad))
-            else:
-                _check(checks, scenario, copy_name, "xack_ttl_%s" % run_id, "pass",
-                       "xack 为 120s 有意保留（%d 个，TTL<=130）" % len(ack_keys))
+        # xack keys carry a random token, so enumerating them would require a
+        # keyspace SCAN. They are an intentional 120s TTL tombstone; do not scan.
+        _check(checks, scenario, copy_name, "xack_ttl_%s" % run_id, "info",
+               "xack 为 120s 有意保留；为避免无匹配全库 SCAN 不枚举随机 token，按 TTL 自清")
         trim_key = K.run_scoped(K.XTRIM_PREFIX, run_id, cfg.tenant_id, cfg.user_id)
         if ops.exists(trim_key):
             ttl = ops.ttl(trim_key)
@@ -371,12 +370,12 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
 
     _check_files(cfg, checks, scenario, copy_name, copy)
     _check_feedback(api, checks, scenario, copy_name, copy)
-    _check_background(cfg, ops, checks, scenario, copy_name, plan)
+    _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
 def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[str, object]], scenario: str,
                     copy_name: str, plan: Dict[str, object], copy: Dict[str, object],
-                    merged: Dict[str, object]) -> None:
+                    merged: Dict[str, object], background_counts: Dict[str, int]) -> None:
     keys = D.copy_keys(cfg, scenario, plan, copy)
     deferred = [str(item) for item in merged.get("deferred") or []]
     errors = [str(item) for item in merged.get("errors") or []]
@@ -479,12 +478,12 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
     else:
         _check(checks, scenario, copy_name, "discovery_kept", "info",
                "无 deferred run；发现键可能因成员删空而自动消失（非删除动作）")
-    _check_background(cfg, ops, checks, scenario, copy_name, plan)
+    _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
 def _check_aborted(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], scenario: str,
                    copy_name: str, plan: Dict[str, object], copy: Dict[str, object],
-                   merged: Dict[str, object]) -> None:
+                   merged: Dict[str, object], background_counts: Dict[str, int]) -> None:
     keys = D.copy_keys(cfg, scenario, plan, copy)
     must_exist: List[str] = []
     if keys["session_record"]:
@@ -509,7 +508,7 @@ def _check_aborted(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], 
     else:
         _check(checks, scenario, copy_name, "aborted_nothing_deleted", "pass",
                "枚举/守卫/DB 中止发生在删除之前，数据保持完整")
-    _check_background(cfg, ops, checks, scenario, copy_name, plan)
+    _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
 def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], scenario: str,
@@ -582,6 +581,17 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
     if cfg.verify_settle_seconds > 0:
         time.sleep(cfg.verify_settle_seconds)
     checks: List[Dict[str, object]] = []
+    background_counts: Dict[str, int] = {}
+    background_manifest = manifest.get("background") or {}
+    if not isinstance(background_manifest, dict):
+        background_manifest = {}
+    for bucket, state in background_manifest.items():
+        if not isinstance(state, dict):
+            continue
+        try:
+            background_counts[str(bucket)] = int(state.get("planned") or state.get("count") or 0)
+        except (TypeError, ValueError):
+            background_counts[str(bucket)] = 0
     ops = RedisOps(cfg)
     api = ApiClient(cfg)
     try:
@@ -643,11 +653,11 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                 else:
                     _check(checks, scenario, copy_name, "delete_http", "pass", "全部 DELETE 200")
                 if merged["aborted"]:
-                    _check_aborted(cfg, ops, checks, scenario, copy_name, plan, copy, merged)
+                    _check_aborted(cfg, ops, checks, scenario, copy_name, plan, copy, merged, background_counts)
                 elif merged["complete_any"]:
-                    _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged)
+                    _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged, background_counts)
                 else:
-                    _check_retained(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged)
+                    _check_retained(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged, background_counts)
 
                 if scenario == "repeat_delete":
                     found_values = []

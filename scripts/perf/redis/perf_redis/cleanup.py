@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 from . import derive as D
@@ -16,7 +17,7 @@ from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps, RedisUnavailable
+from .redisops import RedisOps, RedisUnavailable, ScanBudgetExceeded, ScanStats
 
 
 def _synthetic_copy(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[str, object]) -> Dict[str, object]:
@@ -44,9 +45,10 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
     sessions: List[str] = []
     files: List[Tuple[str, str]] = []
     feedback: List[Tuple[str, str]] = []
-    background: List[Tuple[str, str]] = []
+    background_map: Dict[str, Dict[str, object]] = {}
     skipped: List[Dict[str, str]] = []
     unknown_attachment_index: List[str] = []
+    unknown_background: List[str] = []
 
     for scenario, entry in (manifest.get("scenarios") or {}).items():
         if not isinstance(entry, dict):
@@ -132,11 +134,51 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                     feedback.append((str(item.get("message_id")), str(derived["session_id"])))
         bucket = plan.get("background")
         if bucket:
-            pattern = K.background_pattern(cfg.namespace, str(bucket))
-            if pattern not in [item[1] for item in background]:
-                background.append((str(bucket), pattern))
-    if not background:
-        background.append(("all", K.background_prefix(cfg.namespace) + "*"))
+            bucket_name = str(bucket)
+            if bucket_name not in background_map:
+                state = (manifest.get("background") or {}).get(bucket_name) \
+                    if isinstance(manifest.get("background"), dict) else None
+                planned = 0
+                written = 0
+                if isinstance(state, dict):
+                    try:
+                        planned = int(state.get("planned") or state.get("count") or 0)
+                        written = int(state.get("written") or 0)
+                    except (TypeError, ValueError):
+                        planned = 0
+                        written = 0
+                if planned <= 0:
+                    unknown_background.append(bucket_name)
+                else:
+                    background_map[bucket_name] = {
+                        "bucket": bucket_name,
+                        "planned": planned,
+                        "written": written,
+                    }
+    background_manifest = manifest.get("background") or {}
+    if isinstance(background_manifest, dict):
+        for bucket_name, state in background_manifest.items():
+            bucket_name = str(bucket_name)
+            if bucket_name in background_map:
+                continue
+            planned = 0
+            written = 0
+            if isinstance(state, dict):
+                try:
+                    planned = int(state.get("planned") or state.get("count") or 0)
+                    written = int(state.get("written") or 0)
+                except (TypeError, ValueError):
+                    planned = 0
+                    written = 0
+            if planned <= 0:
+                if bucket_name not in unknown_background:
+                    unknown_background.append(bucket_name)
+            else:
+                background_map[bucket_name] = {
+                    "bucket": bucket_name,
+                    "planned": planned,
+                    "written": written,
+                }
     if cfg.keep_guard:
         exact = [key for key in exact
                  if not key.startswith(K.PURGE_GUARD_PREFIX) and not key.startswith(K.PURGE_PENDING_PREFIX)]
@@ -149,9 +191,10 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
         "sessions": K.dedupe(sessions),
         "files": files,
         "feedback": feedback,
-        "background": background,
+        "background": list(background_map.values()),
         "skipped": skipped,
         "unknown_attachment_index": unknown_attachment_index,
+        "unknown_background": unknown_background,
     }
 
 
@@ -206,29 +249,55 @@ def _file_plan(cfg: Config, files: List[Tuple[str, str]]) -> List[Dict[str, obje
 
 
 def _delete_scanned(cfg: Config, ops: RedisOps, label: str, pattern: str,
-                    validator, rows: List[Dict[str, object]]) -> Dict[str, object]:
+                    validator, rows: List[Dict[str, object]],
+                    budget: Dict[str, object]) -> Dict[str, object]:
+    """Bounded fallback SCAN for dynamic app leftovers.
+
+    Budget is per-node page count (RedisOps.ScanStats.per_node_pages) plus one
+    monotonic deadline shared by all cleanup scans. Exhausting either returns
+    complete=false / remaining unknown; it never falls back to an unbounded scan.
+    """
     deleted = 0
     seen = 0
-    for pass_no in range(1, 4):
+    max_pages = int(budget.get("max_pages_per_node") or 0)
+    deadline = float(budget.get("deadline") or 0.0)
+    if max_pages <= 0 or time.monotonic() >= deadline:
+        return {"label": label, "pattern": pattern, "deleted": 0, "scanned": 0,
+                "passes": 0, "remaining": None, "complete": False,
+                "reason": "扫描预算已耗尽（未开始）"}
+
+    for pass_no in range(1, 3):
+        stats = ScanStats()
         batch: List[str] = []
         pass_deleted = 0
-        for key in ops.iter_scan(pattern):
-            seen += 1
-            if not validator(key):
-                rows.append({
-                    "kind": label, "key": key, "action": "skip", "status": "info",
-                    "detail": "未通过本工具命名空间校验",
-                })
-                continue
-            batch.append(key)
-            if len(batch) >= cfg.batch_size:
+        try:
+            for key in ops.iter_scan(pattern, stats, max_pages, deadline):
+                seen += 1
+                if not validator(key):
+                    rows.append({
+                        "kind": label, "key": key, "action": "skip", "status": "info",
+                        "detail": "未通过本工具命名空间校验",
+                    })
+                    continue
+                batch.append(key)
+                if len(batch) >= cfg.batch_size:
+                    result = ops.delete_keys(batch)
+                    pass_deleted += int(result.get("deleted", 0))
+                    deleted += int(result.get("deleted", 0))
+                    for error in result.get("errors", []):
+                        rows.append({"kind": label, "key": "-", "action": "delete",
+                                     "status": "fail", "detail": str(error)})
+                    batch = []
+        except ScanBudgetExceeded as exc:
+            if batch:
                 result = ops.delete_keys(batch)
                 pass_deleted += int(result.get("deleted", 0))
                 deleted += int(result.get("deleted", 0))
-                for error in result.get("errors", []):
-                    rows.append({"kind": label, "key": "-", "action": "delete",
-                                 "status": "fail", "detail": str(error)})
-                batch = []
+            rows.append({"kind": label, "key": "-", "action": "scan", "status": "unknown",
+                         "detail": "%s（剩余不可知，不伪报干净）" % exc})
+            return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
+                    "passes": pass_no, "remaining": None, "complete": False,
+                    "reason": str(exc)}
         if batch:
             result = ops.delete_keys(batch)
             pass_deleted += int(result.get("deleted", 0))
@@ -236,16 +305,12 @@ def _delete_scanned(cfg: Config, ops: RedisOps, label: str, pattern: str,
             for error in result.get("errors", []):
                 rows.append({"kind": label, "key": "-", "action": "delete", "status": "fail",
                              "detail": str(error)})
-        remaining = ops.scan_count(pattern)
-        if remaining.keys == 0:
-            return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-                    "passes": pass_no, "remaining": 0, "complete": True}
         if pass_deleted == 0:
             return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-                    "passes": pass_no, "remaining": remaining.keys, "complete": False}
-    remaining = ops.scan_count(pattern)
+                    "passes": pass_no, "remaining": 0, "complete": True}
     return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-            "passes": 3, "remaining": remaining.keys, "complete": remaining.keys == 0}
+            "passes": 2, "remaining": None, "complete": False,
+            "reason": "两趟有界扫描仍有删除，未收敛（不伪报干净）"}
 
 
 def _validator_for(label: str, cfg: Config, tag: str = "", session_id: str = ""):
@@ -261,13 +326,75 @@ def _validator_for(label: str, cfg: Config, tag: str = "", session_id: str = "")
         def check(key: str) -> bool:
             return K.staging_key_for_prefix(key, session_id, cfg.tenant_id, cfg.user_id)
         return check
-    if label == "background":
-        prefix = K.background_prefix(cfg.namespace)
-
-        def check(key: str) -> bool:
-            return key.startswith(prefix) and key.count(":") >= 4
-        return check
     return lambda key: False
+
+
+def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int,
+                             rows: List[Dict[str, object]]) -> Dict[str, object]:
+    """Delete 0..planned-1 by deterministic key formula, in batches.
+
+    Never SCAN: the whole point is that a 6M-key keyspace must not be traversed
+    for background data. Each batch is deleted and then checked by exact EXISTS.
+    """
+    result: Dict[str, object] = {
+        "bucket": bucket,
+        "planned": count,
+        "deleted": 0,
+        "checked": 0,
+        "remaining": 0,
+        "unknown": 0,
+        "errors": [],
+        "complete": False,
+    }
+    if count <= 0:
+        result["reason"] = "manifest 未记录 planned count，无法精确删除背景键"
+        return result
+    for start in range(0, count, cfg.batch_size):
+        end = min(count, start + cfg.batch_size)
+        keys = [K.background_key(cfg.namespace, bucket, index) for index in range(start, end)]
+        deleted = ops.delete_keys(keys)
+        result["deleted"] = int(result["deleted"]) + int(deleted.get("deleted", 0))
+        errors = list(deleted.get("errors", []))
+        if errors:
+            result["errors"].extend(str(item) for item in errors)
+            for error in errors:
+                rows.append({
+                    "kind": "background",
+                    "key": "%s[%d..%d]" % (bucket, start, end - 1),
+                    "action": "delete",
+                    "status": "fail",
+                    "detail": str(error),
+                })
+        existence = ops.exists_many(keys)
+        unknown = [key for key in keys if existence.get(key) is None]
+        remaining = [key for key in keys if existence.get(key) is True]
+        result["checked"] = int(result["checked"]) + len(keys)
+        result["unknown"] = int(result["unknown"]) + len(unknown)
+        result["remaining"] = int(result["remaining"]) + len(remaining)
+        if remaining:
+            rows.append({
+                "kind": "background",
+                "key": "%s[%d..%d]" % (bucket, start, end - 1),
+                "action": "delete",
+                "status": "fail",
+                "detail": "批次删除后仍存在 %d 个" % len(remaining),
+            })
+        if unknown:
+            rows.append({
+                "kind": "background",
+                "key": "%s[%d..%d]" % (bucket, start, end - 1),
+                "action": "delete",
+                "status": "unknown",
+                "detail": "批次删除后存在性不可判 %d 个" % len(unknown),
+            })
+    result["complete"] = (
+        int(result["remaining"]) == 0
+        and int(result["unknown"]) == 0
+        and not result["errors"]
+    )
+    if not result["complete"]:
+        result["reason"] = "背景键仍有剩余或不可判（未伪报干净）"
+    return result
 
 
 def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str, object]:
@@ -294,6 +421,10 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
                 raise RedisUnavailable("无法读取 cluster 主节点拓扑，拒绝开始清理")
             ops.primary_node_clients(strict=True, targets=authoritative)
         targets = _build_targets(cfg, manifest, ops)
+        if not (manifest.get("scenarios") or manifest.get("background")):
+            targets["unknown_background"].append(
+                "manifest 为空：无法确认是否存在历史背景键（未做全库 SCAN，不伪报干净）"
+            )
         exact = list(targets["exact"])
         background = list(targets["background"])
         files = _file_plan(cfg, list(targets["files"]))
@@ -302,17 +433,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
         presence = ops.exists_many(exact) if exact else {}
         present_exact = [key for key in exact if presence.get(key) is True]
         unknown_exact = [key for key in exact if presence.get(key) is None]
-        background_plan = []
-        for bucket, pattern in background:
-            try:
-                sample = ops.scan_sample(pattern, 20)
-            except Exception as exc:
-                sample = ["<scan failed: %s>" % exc]
-            background_plan.append({
-                "bucket": bucket,
-                "pattern": pattern,
-                "sample": sample,
-            })
+        background_plan = [dict(item) for item in background]
 
         summary["plan"] = {
             "exact_keys": len(exact),
@@ -331,6 +452,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             ],
             "skipped": targets["skipped"],
             "unknown_attachment_index": targets["unknown_attachment_index"],
+            "unknown_background": targets["unknown_background"],
         }
 
         if not execute:
@@ -357,8 +479,22 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             rows.append({"kind": "exact", "key": "-", "action": "delete", "status": "fail",
                          "detail": str(error)})
 
-        # 3) app-created leftovers inside our run tags / session prefixes
+        # 3) background keys: deterministic manifest range, no SCAN
+        background_results: List[Dict[str, object]] = []
+        for item in background:
+            if not isinstance(item, dict):
+                continue
+            bucket = str(item.get("bucket") or "")
+            planned = int(item.get("planned") or 0)
+            background_results.append(_delete_background_exact(cfg, ops, bucket, planned, rows))
+        summary["background"] = background_results
+
+        # 4) app-created leftovers inside our run tags / session prefixes
         scans: List[Dict[str, object]] = []
+        scan_budget = {
+            "max_pages_per_node": cfg.cleanup_scan_max_pages_per_node,
+            "deadline": time.monotonic() + cfg.cleanup_scan_max_seconds,
+        }
         for scenario, entry in (manifest.get("scenarios") or {}).items():
             if not isinstance(entry, dict):
                 continue
@@ -371,11 +507,11 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
                 if int(plan.get("archive_count", 0)) > 0:
                     scans.append(_delete_scanned(
                         cfg, ops, "archive", K.archive_scan_pattern(session_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("archive", cfg, session_id=session_id), rows))
+                        _validator_for("archive", cfg, session_id=session_id), rows, scan_budget))
                 if int(plan.get("staging_count", 0)) > 0:
                     scans.append(_delete_scanned(
                         cfg, ops, "staging", K.staging_scan_pattern(session_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("staging", cfg, session_id=session_id), rows))
+                        _validator_for("staging", cfg, session_id=session_id), rows, scan_budget))
                 for run in filled.get("runs") or []:
                     if not isinstance(run, dict):
                         continue
@@ -385,14 +521,10 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
                     tag = K.run_tag(run_id, cfg.tenant_id, cfg.user_id)
                     scans.append(_delete_scanned(
                         cfg, ops, "run_tag", K.run_tag_scan_pattern(run_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("run_tag", cfg, tag=tag), rows))
-        for bucket, pattern in background:
-            scans.append(_delete_scanned(
-                cfg, ops, "background", pattern,
-                _validator_for("background", cfg), rows))
+                        _validator_for("run_tag", cfg, tag=tag), rows, scan_budget))
         summary["scans"] = scans
 
-        # 4) files (only with an explicit allow + a verified storage root)
+        # 5) files (only with an explicit allow + a verified storage root)
         for entry in files:
             if entry.get("action") != "delete":
                 file_delete_result.append(entry)
@@ -425,7 +557,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             file_delete_result.append(entry)
         summary["files"] = file_delete_result
 
-        # 5) feedback rows through the real API (identity-scoped, rating=0)
+        # 6) feedback rows through the real API (identity-scoped, rating=0)
         feedback_result: List[Dict[str, object]] = []
         for message_id, session_id in targets["feedback"]:
             result = api.feedback_cancel(message_id, session_id)
@@ -438,7 +570,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             })
         summary["feedback"] = feedback_result
 
-        # 6) final residue check
+        # 7) final residue check
         presence = ops.exists_many(exact) if exact else {}
         remaining_exact = [key for key in exact if presence.get(key) is True]
         unknown_exact = [key for key in exact if presence.get(key) is None]
@@ -451,7 +583,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             except Exception:
                 remaining_index.append(member)
         remaining_scans = [item for item in scans if not item.get("complete")]
-        remaining_background = [item for item in scans if item.get("label") == "background" and not item.get("complete")]
+        remaining_background = [item for item in background_results if not item.get("complete")]
         summary["remaining"] = {
             "exact": remaining_exact,
             "exact_unknown": unknown_exact,
@@ -459,6 +591,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             "index_members": remaining_index,
             "scanned": remaining_scans,
             "background": remaining_background,
+            "unknown_background": targets["unknown_background"],
         }
         feedback_failed = [item for item in feedback_result if not item.get("ok")]
         file_failed = [item for item in file_delete_result if item.get("status") == "fail"]
@@ -470,6 +603,8 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             and not remaining_due
             and not remaining_index
             and not remaining_scans
+            and not remaining_background
+            and not targets["unknown_background"]
             and not feedback_failed
             and not file_failed
             and not file_left

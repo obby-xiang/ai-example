@@ -144,6 +144,8 @@ class Config:
     key_ttl_seconds: int = 43200
     batch_size: int = 500
     scan_count: int = 1000
+    cleanup_scan_max_pages_per_node: int = 200
+    cleanup_scan_max_seconds: int = 120
     verify_settle_seconds: int = 0
     keep_guard: bool = False
 
@@ -232,6 +234,8 @@ class Config:
                 "key_ttl_seconds": self.key_ttl_seconds,
                 "batch_size": self.batch_size,
                 "scan_count": self.scan_count,
+                "cleanup_scan_max_pages_per_node": self.cleanup_scan_max_pages_per_node,
+                "cleanup_scan_max_seconds": self.cleanup_scan_max_seconds,
                 "verify_settle_seconds": self.verify_settle_seconds,
                 "keep_guard": self.keep_guard,
                 "enable_attachments": self.enable_attachments,
@@ -326,6 +330,12 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     cfg.scan_count = _int(source, "PERF_SCAN_COUNT", 1000, errors, 10)
     if cfg.scan_count > 100000:
         errors.append("PERF_SCAN_COUNT 上限 100000")
+    cfg.cleanup_scan_max_pages_per_node = _int(source, "PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE", 200, errors, 1)
+    if cfg.cleanup_scan_max_pages_per_node > 100000:
+        errors.append("PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE 上限 100000")
+    cfg.cleanup_scan_max_seconds = _int(source, "PERF_CLEANUP_SCAN_MAX_SECONDS", 120, errors, 1)
+    if cfg.cleanup_scan_max_seconds > 3600:
+        errors.append("PERF_CLEANUP_SCAN_MAX_SECONDS 上限 3600")
     cfg.verify_settle_seconds = _int(source, "PERF_VERIFY_SETTLE_SECONDS", 0, errors, 0)
     cfg.keep_guard = _bool(source, "PERF_KEEP_GUARD", False, errors)
 

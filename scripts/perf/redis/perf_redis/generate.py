@@ -489,22 +489,56 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
             if bucket:
                 matrix_needed.append(str(bucket))
         for bucket in sorted(set(matrix_needed)):
-            existing = manifest.get("background", {}).get(bucket)
-            if isinstance(existing, dict) and existing.get("done"):
-                sample = ops.scan_sample(K.background_pattern(cfg.namespace, bucket), 1)
-                if sample:
-                    summary["background"][bucket] = existing
-                    continue
-                # The manifest says done, but cleanup/TTL removed the keys: regenerate.
-                existing["done"] = False
+            if not isinstance(manifest.get("background"), dict):
+                manifest["background"] = {}
+            background = manifest.setdefault("background", {})
+            existing = background.get(bucket)
             count = cfg.sizes_for(bucket)
-            state = _generate_background(cfg, ops, bucket, count)
-            manifest.setdefault("background", {})[bucket] = state
+            start_index = 0
+            if isinstance(existing, dict):
+                prev_count = int(existing.get("planned") or existing.get("count") or 0)
+                prev_written = int(existing.get("written") or 0)
+                if prev_count == count and prev_written > 0 and prev_written <= count:
+                    last_written = K.background_key(cfg.namespace, bucket, prev_written - 1)
+                    if prev_written == count:
+                        probes = K.background_probe_keys(cfg.namespace, bucket, count)
+                        existence = ops.exists_many(probes)
+                        unknown = [key for key in probes if existence.get(key) is None]
+                        missing = [key for key in probes if existence.get(key) is False]
+                        if unknown:
+                            raise RuntimeError("无法确认背景键是否存在 bucket=%s keys=%s"
+                                               % (bucket, ",".join(unknown[:3])))
+                        if not missing:
+                            existing["planned"] = count
+                            existing["count"] = count
+                            background[bucket] = existing
+                            M.save_manifest(cfg, manifest)
+                            summary["background"][bucket] = existing
+                            continue
+                        # Manifest says complete but exact probes are missing: rewrite.
+                        start_index = 0
+                    elif ops.exists(last_written):
+                        start_index = prev_written
+                    else:
+                        start_index = 0
+                elif prev_count == count and prev_written == 0:
+                    start_index = 0
+            state = _generate_background(cfg, ops, bucket, count, manifest, existing, start_index)
+            background[bucket] = state
             summary["background"][bucket] = state
-            M.save_manifest(cfg, manifest)
             if not state.get("done"):
                 raise RuntimeError("背景键生成不完整 bucket=%s written=%s/%s"
                                    % (bucket, state.get("written"), count))
+            probes = K.background_probe_keys(cfg.namespace, bucket, count)
+            existence = ops.exists_many(probes)
+            unknown = [key for key in probes if existence.get(key) is None]
+            missing = [key for key in probes if existence.get(key) is False]
+            if unknown:
+                raise RuntimeError("无法确认背景键是否存在 bucket=%s keys=%s"
+                                   % (bucket, ",".join(unknown[:3])))
+            if missing:
+                raise RuntimeError("背景键精确抽样缺失 bucket=%s keys=%s"
+                                   % (bucket, ",".join(missing[:3])))
 
         for scenario in selected:
             plan = plan_for(cfg, scenario)
@@ -559,25 +593,49 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
     return summary
 
 
-def _generate_background(cfg: Config, ops: RedisOps, bucket: str, count: int) -> Dict[str, object]:
+def _generate_background(cfg: Config, ops: RedisOps, bucket: str, count: int,
+                         manifest: Dict[str, object], existing: object,
+                         start_index: int) -> Dict[str, object]:
     namespace = cfg.namespace
-    started = M.utc_now_iso()
-    written = 0
-    chunk: List[Tuple[str, str, int]] = []
-    for index in range(count):
-        key = K.background_key(namespace, bucket, index)
-        chunk.append((key, "perf-bg-%s-%d" % (bucket, index), cfg.key_ttl_seconds))
-        if len(chunk) >= cfg.batch_size:
-            written += ops.set_values(chunk)
-            chunk = []
-    if chunk:
-        written += ops.set_values(chunk)
-    return {
+    state: Dict[str, object] = dict(existing) if isinstance(existing, dict) else {}
+    state.update({
         "bucket": bucket,
+        "planned": count,
         "count": count,
-        "written": written,
+        "written": max(0, min(int(start_index), count)),
+        "batch_size": cfg.batch_size,
         "pattern": K.background_pattern(namespace, bucket),
-        "started_at": started,
-        "finished_at": M.utc_now_iso(),
-        "done": written >= count,
-    }
+        "done": count <= 0,
+        "started_at": state.get("started_at") or M.utc_now_iso(),
+    })
+    state.pop("finished_at", None)
+    manifest.setdefault("background", {})[bucket] = state
+    M.save_manifest(cfg, manifest)
+    if count <= 0:
+        state["finished_at"] = M.utc_now_iso()
+        M.save_manifest(cfg, manifest)
+        return state
+
+    written = int(state["written"])
+    for start in range(written, count, cfg.batch_size):
+        end = min(count, start + cfg.batch_size)
+        chunk: List[Tuple[str, str, int]] = []
+        for index in range(start, end):
+            key = K.background_key(namespace, bucket, index)
+            chunk.append((key, "perf-bg-%s-%d" % (bucket, index), cfg.key_ttl_seconds))
+        wrote = ops.set_values(chunk)
+        if wrote != len(chunk):
+            raise RuntimeError("背景键批次写入不完整 bucket=%s batch=%d..%d wrote=%d/%d"
+                               % (bucket, start, end - 1, wrote, len(chunk)))
+        written = end
+        state["written"] = written
+        state["done"] = written >= count
+        state["progress_at"] = M.utc_now_iso()
+        # Progress is persisted per batch so an interrupted run can resume and
+        # cleanup knows the deterministic key range without a SCAN.
+        M.save_manifest(cfg, manifest)
+    state["written"] = written
+    state["done"] = written >= count
+    state["finished_at"] = M.utc_now_iso()
+    M.save_manifest(cfg, manifest)
+    return state
