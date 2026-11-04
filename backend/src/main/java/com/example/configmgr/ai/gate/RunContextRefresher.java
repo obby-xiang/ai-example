@@ -92,12 +92,6 @@ public class RunContextRefresher {
 	/** create_task 候选来源的运行号；跨轮草案回读仍按当前会话与任务号归属。 */
 	public static final String EXTRA_CREATE_TASK_RUN_ID = "createTaskRunId";
 
-	/**
-	 * @deprecated 仅为既有调用方编译兼容保留；时间边界方案已移除，生产代码不得使用。
-	 */
-	@Deprecated(forRemoval = false)
-	public static final String EXTRA_CREATE_TASK_REQUESTED_AT = "createTaskRequestedAtMs";
-
 	private final TaskService taskService;
 
 	/**

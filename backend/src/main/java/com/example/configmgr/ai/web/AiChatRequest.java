@@ -35,23 +35,23 @@ import java.util.Map;
  * @param clientRequestId 客户端请求 id（停止闭环 additive 字段；前端发送前生成并持久化，
  *     后端据此在 run 创建前绑定/识别取消墓碑。null = 旧客户端，行为与改造前一致）
  */
-public record AiChatRequest(String sessionId, String message, Context context, String modelId, Params params,
-		String clientRequestId, String displayText) {
+public record AiChatRequest(String sessionId, String message, Context context, String modelId, Long providerId,
+		Params params, String clientRequestId, String displayText) {
 
 	/** 旧调用方没有独立展示文本时，展示历史与模型输入共用 message。 */
-	public AiChatRequest(String sessionId, String message, Context context, String modelId, Params params,
-			String clientRequestId) {
-		this(sessionId, message, context, modelId, params, clientRequestId, null);
+	public AiChatRequest(String sessionId, String message, Context context, String modelId, Long providerId,
+			Params params, String clientRequestId) {
+		this(sessionId, message, context, modelId, providerId, params, clientRequestId, null);
 	}
 
 	/** 兼容构造器：批③ 之前的调用点（含控制器归一化后的换新 record）无需改动。 */
 	public AiChatRequest(String sessionId, String message, Context context) {
-		this(sessionId, message, context, null, null, null);
+		this(sessionId, message, context, null, null, null, null);
 	}
 
 	/** 兼容构造器：批③ 的 5 参调用点（不含停止闭环字段）。 */
 	public AiChatRequest(String sessionId, String message, Context context, String modelId, Params params) {
-		this(sessionId, message, context, modelId, params, null);
+		this(sessionId, message, context, modelId, null, params, null);
 	}
 
 	/**

@@ -434,76 +434,57 @@ public class ResumeService {
 	}
 
 	/**
-	 * 发现通道：全部仍存活的轮次（重启后"ResumeService 发现 pending"的入口，也是
-	 * {@code GET /api/ai/runs} 的载荷）。
-	 *
-	 * <h2>两条口径（按调用线程有没有身份分）</h2>
-	 * <ul>
-	 * <li><b>系统恢复面</b>（启动扫描 / 运行期扫描，线程无身份）：{@code ai:runs} 的复合成员自带
-	 *     {@code tenantId/userId}，逐条 {@link RunIdentityScope#open(long, long)} 后再读 —— <b>不需要</b>
-	 *     扫描租户列表，也不需要"先读快照再猜身份"（快照键本身由身份决定，先读必然读不到）。
-	 *     条目里带上 {@code tenantId/userId}，续跑侧据此直接进入该轮身份，
-	 *     不再出现"定时线程上 {@code store.get} 恒为 {@code null}"的假死链；</li>
-	 * <li><b>请求面</b>（HTTP 列表，线程有身份）：仍走 {@link RunStore#allRunIds()}（只返回<b>当前身份</b>
-	 *     的轮次），绝不把别人的轮次列进来；</li>
-	 * <li>无归属裸成员不是当前写入形态：{@link RunStore#allRunIds()} 不再返回它们，
-	 *     {@link RunStore#pruneRunIndex()} 会顺手剔除。</li>
-	 * </ul>
-	 *
-	 * <p><b>一次发现只走一条路</b>：两个来源在任一调用线程上互斥（无身份 ⇒ 只走复合成员；有身份 ⇒
-	 * 只走 {@code allRunIds()}）。旧实现无条件先把 {@code allRunRecords()} 跑一遍、再对
-	 * {@code allRunIds()} 跑一遍 —— 在无身份的系统线程上后者恒为空，却仍要做一次
-	 * {@code SMEMBERS} + 逐成员 {@code EXISTS} 的全索引扫（白跑）；在请求线程上前者恒为空。
-	 * 这里按身份二分，发现结果只取一次。{@link #listRunsForRecovery()} 是同一发现的轻量投影。
+	 * 列表只枚举当前身份的窄 ZSET；恢复则另走到期索引的有界页。成员自带记录身份，
+	 * 每条投影都在对应 {@link RunIdentityScope} 内构造，不扫描租户或其它身份的数据。
 	 */
 	public List<Map<String, Object>> listRuns() {
-		return discoverRuns(false);
+		return discoverRuns(false, 0);
 	}
 
-	/**
-	 * <b>恢复扫描的发现面</b>：与 {@link #listRuns()} 同一份发现、同一身份隔离，但只取
-	 * {@link #recoveryRun} 的轻量投影。
-	 *
-	 * <p>为什么另开一个口而不是给 {@code listRuns()} 加参数：HTTP 列表要展示明细（台账计数、消息条数、
-	 * 心跳、逐条待决），扫描方却只问"该不该接管"。把两者分开后，恢复路径不读展示字段，
-	 * 也不会因为将来给列表加字段而悄悄把代价带进启动扫描。
-	 */
+	/** 恢复发现只读到期的轻量候选；默认页也保持有界。 */
 	public List<Map<String, Object>> listRunsForRecovery() {
-		return discoverRuns(true);
+		return listRunsForRecovery(64);
 	}
 
-	/**
-	 * 发现本体（{@code recovery=true} ⇒ 轻量投影）。两个来源按调用线程身份二选一，见
-	 * {@link #listRuns()} 的"一次发现只走一条路"。
-	 */
-	private List<Map<String, Object>> discoverRuns(boolean recovery) {
+	public List<Map<String, Object>> listRunsForRecovery(int limit) {
+		this.store.reconcileRecoveryIndexThrottled();
+		return discoverRuns(true, limit);
+	}
+
+	private List<Map<String, Object>> discoverRuns(boolean recovery, int recoveryLimit) {
 		List<Map<String, Object>> out = new ArrayList<>();
 		Set<String> seen = new LinkedHashSet<>();
 		TenantUser current = RequestContextUtils.currentOrNull();
-		if (current == null) {
-			for (RunKeyScope.IndexRef ref : this.store.allRunRecords()) {
-				appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), recovery);
+		if (recovery) {
+			for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecords(System.currentTimeMillis(),
+					recoveryLimit)) {
+				RunKeyScope.IndexRef ref = candidate.ref();
+				appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
 			}
 			return out;
 		}
-		// 请求面：键由线程身份决定，交给 store 的既有过滤（别人的成员既不返回也不判定死活）
-		for (String runId : this.store.allRunIds()) {
-			appendDiscovered(out, seen, runId, current.tenantId(), current.userId(), recovery);
+		if (current != null) {
+			for (String runId : this.store.allRunIds()) {
+				appendDiscovered(out, seen, runId, current.tenantId(), current.userId(), false, 0L);
+			}
 		}
 		return out;
 	}
 
 	/** 单条发现在<b>该条记录身份</b>的作用域内构造；同一复合键只出现一次。 */
 	private void appendDiscovered(List<Map<String, Object>> out, Set<String> seen, String runId, long tenantId,
-			long userId, boolean recovery) {
+			long userId, boolean recovery, long expectedDueAtMs) {
 		if (!seen.add(tenantId + "/" + userId + "/" + runId)) {
 			return;
 		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
-			Map<String, Object> item = recovery ? recoveryRun(runId, tenantId, userId)
+			Map<String, Object> item = recovery ? recoveryRun(runId, tenantId, userId, expectedDueAtMs)
 					: listRun(runId, tenantId, userId);
 			if (item != null) {
 				out.add(item);
+			}
+			else if (recovery) {
+				this.store.removeRecoveryCandidate(runId, tenantId, userId, expectedDueAtMs);
 			}
 		}
 	}
@@ -580,7 +561,7 @@ public class ResumeService {
 	 * {@code pendingUnresolved}/{@code unresolvedExternal}（未决外部项）、
 	 * {@code activeAtMs}（业务活动锚点）与 {@code zombieRunning}（超龄 RUNNING）都在。
 	 */
-	private Map<String, Object> recoveryRun(String runId, long tenantId, long userId) {
+	private Map<String, Object> recoveryRun(String runId, long tenantId, long userId, long expectedDueAtMs) {
 		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
 				: this.store.get(runId);
 		if (snapshot == null) {
@@ -593,6 +574,13 @@ public class ResumeService {
 			log.debug("discovery: cancel state unknown, continuing scan as not cancelled runId={}", runId);
 		}
 		long activeAtMs = activeAtMs(snapshot);
+		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+			this.store.removeRecoveryCandidate(runId, tenantId, userId, expectedDueAtMs);
+		}
+		else {
+			this.store.deferRecoveryCandidate(runId, tenantId, userId, expectedDueAtMs,
+					System.currentTimeMillis() + this.properties.getResume().getZombieAge().toMillis());
+		}
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("runId", runId);
 		item.put("tenantId", snapshot.getTenantId());
@@ -1253,16 +1241,16 @@ public class ResumeService {
 				body.put("activeAtMs", activeAtMs);
 				body.put("activeAgeMs", activeAgeMs);
 			}
-			// 批③ PROVIDER_GONE：快照的模型身份此刻必须仍可用。判据 = 能解析出<b>同一个</b> provider
+			// PROVIDER_GONE：快照冻结的模型身份此刻必须仍可用。判据 = 能解析出<b>同一个</b> provider
 			// 与该模型（enabled + key 可解 + 模型在 allowlist）。缺一 ⇒ 409，不静默换模型续跑。
 			// I3：<b>有 providerId 时必须按 (providerId, modelId) 精确解析</b> —— 只按模型名解析会
 			// 在"同名模型挂两家"时判到别家（既可能误判 GONE，也可能把 B 的一轮放行到 A）。
-			// 旧快照（providerId=null 且未冻结）不判 —— 它们本来就没有身份可校验，走默认 + WARN（兼容）。
-			// L-26：<b>已冻结</b>的快照即使 providerId=null（env 合成行）也要判"模型此刻还在不在"
-			// —— 冻结的语义就是"按这一轮当时的模型续跑"，模型下架时静默换默认同样是说谎。
+			// providerId=null（env 合成行）仍要判"模型此刻还在不在"—— 冻结的语义就是
+			// "按这一轮当时的模型续跑"，模型下架时静默换默认同样是说谎。
 			// 位置在 PENDING_UNRESOLVED <b>之前</b>：端点没了是比"还有人没决策"更硬的前置条件。
-			boolean frozenIdentity = snapshot.paramsFrozen()
-					&& snapshot.getModelId() != null && !snapshot.getModelId().isBlank();
+			if (snapshot.getModelId() == null || snapshot.getModelId().isBlank()) {
+				return providerGone(runId, snapshot, "快照没有冻结模型名");
+			}
 			if (this.aiConfigService != null && snapshot.getProviderId() != null) {
 				ResolvedIdentity identity = resolveForResume(runId,
 						() -> this.aiConfigService.resolveChatTarget(snapshot.getProviderId(), snapshot.getModelId()),
@@ -1274,18 +1262,8 @@ public class ResumeService {
 					return providerGone(runId, snapshot, "该 provider/模型此刻不可用");
 				}
 			}
-			else if (this.aiConfigService != null && frozenIdentity) {
-				// env 合成行（无 providerId）没有稳定身份可比：退化为"这个模型名此刻是否仍可解析"
-				ResolvedIdentity identity = resolveForResume(runId,
-						() -> this.aiConfigService.resolveChatTarget(snapshot.getModelId()),
-						() -> this.aiConfigService.bindingState(null, snapshot.getModelId()));
-				if (identity.unknown()) {
-					return stateUnknown(runId, snapshot, identity.detail());
-				}
-				if (identity.target() == null
-						|| !snapshot.getModelId().equalsIgnoreCase(identity.target().modelId())) {
-					return providerGone(runId, snapshot, "该模型此刻已不可解析");
-				}
+			else if (this.aiConfigService != null) {
+				return providerGone(runId, snapshot, "快照缺少 providerId，不得按模型名跨 provider 猜测");
 			}
 			List<PendingToolCall> unresolved = pendings.stream()
 				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
@@ -1568,6 +1546,11 @@ public class ResumeService {
 			// 只按模型上限占比判的话，"32K 模型 + 40 条大工具结果"会先撞上游 400 才发现。
 			// 只改"这一轮交棒给模型的视图"：快照保留完整历史（审计/后续续跑的原文），窗口是确定性
 			// 纯函数（同输入同输出），故不落库、不归档（区别于压缩：压缩改写内容且必须归档原文）。
+			List<Message> rebuiltHistory = history;
+			ContextCompactor.Outcome compaction = null;
+			boolean memoryWriteCommitted = false;
+			for (int memoryCasAttempt = 0; memoryCasAttempt < 3; memoryCasAttempt++) {
+				history = rebuiltHistory;
 			Set<String> protectedIds = new LinkedHashSet<>();
 			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
 				if (PendingToolCall.PENDING.equals(pending.getStatus())
@@ -1577,18 +1560,6 @@ public class ResumeService {
 			}
 			Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(sessionId));
 			activeRunIds.add(runId);
-			// 续跑 baseline 也按 runId 排除当前轮；不再从请求原文猜测当前 USER 的位置。
-			if (this.transcript != null && snapshot != null) {
-				try {
-					if (this.store.permittedToWrite(runId, "transcript")) {
-						this.transcript.ensureBaselineFromMemory(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
-								runId);
-					}
-				}
-				catch (RuntimeException ex) {
-					log.debug("transcript baseline write authority check failed runId={} (not copied this time): {}", runId, ex.getMessage());
-				}
-			}
 			// 压缩输入与 CAS 使用同一次 readWindow：先把本轮重建历史并入该窗口副本，
 			// 再对这份副本做窗口/压缩；其它 run 以基线里的版本保留，写回不会覆盖并发新块。
 			MemoryWindowSnapshot windowSnapshot = this.chatService == null ? null
@@ -1618,7 +1589,6 @@ public class ResumeService {
 			// ── 上下文专项批①：续跑前压缩（与首轮同源：同一个 ContextCompactor） ──
 			// 位置刻意在"历史重建之后、交棒之前"：重建出来的工具响应已经进 history，
 			// 于是 L1 能清到它们（挂在挂起期的结果往往正是最大的一块）。
-			ContextCompactor.Outcome compaction = null;
 			if (this.contextCompactor != null && !history.isEmpty()) {
 				// ===== AR-06 / Task 5 Step 3 + 2026-10-29 压缩阶段信号批 =====
 				// 与首轮同构：初始相位是 streaming（普通续跑不出现任何压缩/准备阶段条）；压缩调用自身
@@ -1644,14 +1614,12 @@ public class ResumeService {
 					}
 					// 摘要只使用本轮 runtime（与 driveResumed 同一派生口径）；取不到 ⇒ null，L2 按不可用失败、历史不改
 					ProviderRuntime compactionRuntime = this.chatService == null ? null
-							: this.chatService.runtimeForCompaction(runId, snapshot.getProviderId(),
-									snapshot.getModelId());
+							: this.chatService.runtimeForCompaction(runId);
 					Runnable onSummaryStart = keepalive == null ? null
 							: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
 					int maxOutput = snapshot.getMaxTokens() == null ? 0 : Math.max(0, snapshot.getMaxTokens());
 					compactionRequest = new ContextCompactor.Request(sessionId,
 							runId, snapshot.getModelId(), snapshot.getProviderId(), compactorInput,
-							this.codec.serializeAll(compactorInput),
 							state.usedTokens(), state.completionTokens(), 0, rebuiltToolTokens, systemTokens,
 							// 披露面的额度必须按<b>交棒那一份</b>上下文算：刷新后工具集变了，用旧的会算错
 							this.chatService.disclosedToolTokens(nextHopContext), protectedIds, compactionRuntime,
@@ -1683,9 +1651,9 @@ public class ResumeService {
 						.filter(message -> message.getMessageType() != MessageType.SYSTEM)
 						.toList();
 					if (!this.chatService.replaceMemoryWindow(runId, sessionId, memoryWindow, windowSnapshot)) {
-						log.warn("resume compaction whole-window write-back failed runId={} "
-								+ "sessionId={} (no compaction snapshot, no driver handoff)", runId, sessionId);
-						return resumeStatusWriteRefused(runId, body);
+						log.debug("resume memory CAS conflict, rereading and rebuilding runId={} attempt={}", runId,
+								memoryCasAttempt + 1);
+						continue;
 					}
 					snapshot.setMessageJson(this.codec.serializeAll(history));
 					// N4：压缩是长窗口（L2 = N 次串行摘要），结束时取消可能已经先到 —— 这一笔同样
@@ -1708,6 +1676,14 @@ public class ResumeService {
 					body.put("contextCompaction", "none");
 					body.put("contextCompactionReason", compaction.reason());
 				}
+			}
+				memoryWriteCommitted = true;
+				break;
+			}
+			if (!memoryWriteCommitted) {
+				log.warn("resume memory CAS remained contested runId={} sessionId={} (no driver handoff)", runId,
+						sessionId);
+				return resumeStatusWriteRefused(runId, body);
 			}
 
 			// 合成内部指令在窗口/压缩<b>之后</b>才进交棒视图：它既不参与窗口预算、也不进压缩输入，
@@ -1760,16 +1736,8 @@ public class ResumeService {
 						LocaleContextHolder.setLocale(replyLocale);
 					}
 					try {
-						// 批③：有身份的快照按<b>快照身份</b>续跑（上面的 PROVIDER_GONE 检查已保证它此刻可用）。
-						// 旧快照（无 providerId）仍走五参旧签名 —— 语义等价（按默认目标续跑 + WARN），
-						// 也让既有用例的 verify(driveResumed(...5 参)) 不必跟改（回归零改动）。
-						if (snapshot.getProviderId() == null) {
-							this.chatService.driveResumed(runId, sessionId, handoffContext, resumeHistory, out);
-						}
-						else {
-							this.chatService.driveResumed(runId, sessionId, handoffContext, resumeHistory,
-									snapshot.getProviderId(), snapshot.getModelId(), out);
-						}
+						// 按<b>快照冻结的 provider/model/params</b>续跑（上面的 PROVIDER_GONE 检查已保证它此刻可用）。
+						this.chatService.driveResumed(runId, sessionId, handoffContext, resumeHistory, out);
 					}
 					catch (Exception ex) {
 						// R-08：用户面只给白名单短句；原始异常（上游 body / 内部提示）只进日志。

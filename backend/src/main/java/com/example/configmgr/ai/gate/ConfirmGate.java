@@ -2017,75 +2017,13 @@ public class ConfirmGate {
 		return status.isBlank() ? null : status;
 	}
 
-	/** 前端工具结果回灌（保持既有四参口径：非取消路径）。 */
-	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source) {
-		return submitFrontendResult(runId, toolCallId, result, source, false, null);
-	}
 
 	/**
-	 * 前端工具结果回灌：先写 Redis，再发回灌帧，最后唤醒（同 S5c-6 的口径）。
+	 * 前端工具结果回灌的<b>唯一生产入口</b>：显式 {@code outcome} + 可选表格元数据 + 可选机器码。
 	 *
-	 * <h2>三条分支（DC-15 起）</h2>
-	 * <ol>
-	 * <li><b>取消</b>（{@code cancelled=true}，用户关闭/放弃表单）→ 明确终态
-	 * {@link PendingToolCall#FRONTEND_CANCELLED}，结局帧 {@code frontend_tool_result(ok=false)}，
-	 * 结果文本用机器可读前缀标记"未获得数据"；</li>
-	 * <li><b>结果复核不过</b>（{@link FrontendToolGuard#inspectResult}）→ {@link Outcome#REJECTED}：
-	 * <b>状态不变、不发帧、不唤醒</b>，理由随 HTTP 400 返回给前端（可修正后重试）；</li>
-	 * <li><b>通过</b> → 既有口径：{@link PendingToolCall#FRONTEND_RESULT} + 回灌帧 + 唤醒；
-	 * 之后才调 {@link FrontendToolGuard#settleAcceptedResult}（一次性资源的消费口）。</li>
-	 * </ol>
-	 *
-	 * <p><b>消费只发生在结论落库之后</b>（校验与消费分离批）：复核阶段拒绝时"可修正后重试"必须为真，
-	 * 所以复核器在那里<b>不许</b>动一次性资源；消费/回收走决策后的 settle 钩子，失败只告警。
-	 *
-	 * <p>次序刻意是"取消 &gt; 复核"：放弃是用户的兜底出口，不该因为"值不合规"而被挡住
-	 * （否则用户关掉一张填错一半的表单也被拒，挂起只能等到超时）。
-	 *
-	 * <p><b>入口 kind 永远第一</b>（入口 kind 校验批）：本入口只改写 {@code kind=FRONTEND} 的条目，
-	 * 确认门条目的 toolCallId 发到这里 ⇒ {@link Outcome#TOOL_KIND_MISMATCH}（连
-	 * {@code cancelled=true} 也拦 —— 它同样会改写状态）。{@code kind=null} 同样拒绝 + WARN
-	 * （缺证据不授权：无法证明它属于前端通道）。
-	 *
-	 * @param cancelled 前端是否报告"用户主动放弃"（关闭表单/取消对话框）
-	 */
-	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
-			boolean cancelled) {
-		return submitFrontendResult(runId, toolCallId, result, source, cancelled, null);
-	}
-
-	/**
-	 * 前端工具结果回灌（P0-1：带可选 {@code outcome}）。
-	 *
-	 * <p>
-	 * {@code outcome} 是前端对自己这次执行结局的自报（{@code ok/failed/rejected/...}）；
-	 * 收到后用它推导结局帧的 {@code ok}（缺省/null 保持现行 true 兜底），并随条目持久化，
-	 * 供模型信封与历史 toolCallStates 复用。{@code cancelled=true} 时 outcome 被忽略
-	 * （放弃是更高的语义优先级）。
-	 */
-	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
-			boolean cancelled, String outcome) {
-		return submitFrontendResult(runId, toolCallId, result, source, cancelled, outcome, null);
-	}
-
-	/**
-	 * 前端工具结果回灌（AI 表格工具治理批：带可选的表格采样元数据）。
-	 *
-	 * <p>{@code sheetMeta} 只承载<b>元数据</b>（行数/字符数/列数/版本号/planId），写过白名单过滤后
-	 * 随条目持久化，供 {@code tool_call_end} 的 additive 字段与 {@code ai:safety:} 台账读取。
-	 * 它<b>不参与</b>任何判定：判定面（披露/复核/结算）一个字节都没变。
-	 */
-	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
-			boolean cancelled, String outcome, Map<String, Object> sheetMeta) {
-		return submitFrontendResult(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, null);
-	}
-
-	/**
-	 * 前端工具结果回灌（批 A：带可选 {@code code}）。
-	 *
-	 * <p>{@code code} 由前端自报（{@code UI_* 闭集}），已在入口归一；它随条目持久化，
-	 * 供 {@code tool_result} 帧 / 台账 / 卡面同源取码（{@link PendingToolCall#effectiveCode()}）。
-	 * 未带时保持现状（按状态推导），旧客户端零改动。
+	 * <p>{@code outcome} 是当前协议必填项；缺失或无法识别一律按 {@link ToolOutcome#UNKNOWN}
+	 * 持久化（结局帧 {@code ok=false}、不执行接受侧结算、不推成功）。
+	 * {@code sheetMeta} 只承载白名单元数据，{@code code} 由前端自报（{@code UI_*} 闭集，入口已归一）。
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
 			boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code) {
@@ -2142,10 +2080,15 @@ public class ConfirmGate {
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
-		pending.setOutcome(declared == null ? ToolOutcome.OK.wire() : declared.wire());
-		// 批 A：前端机器码随条目落库（入口已归一；未带 = null，回落状态推导）。
+		// 当前唯一协议要求显式 outcome：缺失/未知按 UNKNOWN 失败关闭，绝不推断成成功。
+		boolean outcomeUnknown = declared == null || declared == ToolOutcome.UNKNOWN;
+		if (declared == null) {
+			declared = ToolOutcome.UNKNOWN;
+		}
+		pending.setOutcome(declared.wire());
+		// 批 A：前端机器码随条目落库（入口已归一；未带 = null）。
 		pending.setCode(code);
-		boolean ok = declared == null || declared.ok();
+		boolean ok = declared.ok();
 		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
 		// G-E：复核器可在放行时补一段**元数据**（附件只暴露 fileName/fileId/size，内容永不进上下文）
 		String resultText = result == null ? "" : result;
@@ -2197,7 +2140,10 @@ public class ConfirmGate {
 		// 一次性资源（表单附件）的消费挪到这里：结论已落库（上面 putPending 成功）、结局帧已发、
 		// 唤醒已完成。放在锁外是因为消费是 Redis + 删盘往返，不得占用提交锁（同一轮的决策可见性）。
 		// 钩子内部只告警不抛：走到这一步"可修正后重试"已经不可能，任何失败都不能改写结论。
-		settleAccepted(runId, pending, result);
+		// 结局未知/缺失时不得执行接受侧结算（不消费一次性资源、不按成功收口）。
+		if (!outcomeUnknown) {
+			settleAccepted(runId, pending, result);
+		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
 	}
 

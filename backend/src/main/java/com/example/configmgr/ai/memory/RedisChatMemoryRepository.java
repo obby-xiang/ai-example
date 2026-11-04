@@ -68,11 +68,9 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
  * 同样共用该 hash tag；清空/销毁时 {@code INCR} 它（<b>不删</b>），使"清空前读到代次"的在飞写回
  * 在之后的每一次 CAS（含重试）都被判作废。</li>
  * </ul>
- * <p><b>已退役：{@code chat:mem:__ids__} 全局会话索引</b>。它曾是 {@code SADD/RENAME} 之后的一笔
- * 每次保存都写的额外往返，但<b>生产代码没有任何读者</b>（只有单测/实验在看它）；热路径上的
- * 唯一效果是"每写一次记忆就多一次跨槽写"。现在不再写入它（{@link #CONVERSATION_IDS_KEY} 仅保留
- * 常量与运维清账口径），{@link #findConversationIds()} 改为按<b>当前身份的数据键命名空间</b>有界扫描
- * —— SPI 契约仍然成立（返回真实 id，不返回"假空"、不抛"未实现"），但没有索引后它只是诊断面。</p>
+ * <p><b>全局会话索引 {@code chat:mem:__ids__} 已退役</b>：本类<b>不写也不读</b>它；
+ * {@link #findConversationIds()} 改为按<b>当前身份的数据键命名空间</b>有界 SCAN
+ * —— SPI 契约仍然成立（返回真实 id，不返回"假空"、不抛"未实现"）。</p>
  *
  * <h2>语义与失败安全</h2>
  * <ul>
@@ -142,18 +140,6 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	private static final Logger log = LoggerFactory.getLogger(RedisChatMemoryRepository.class);
 
 	public static final String KEY_PREFIX = "chat:mem:";
-
-	/**
-	 * 历史全局会话索引键（{@code chat:mem:__ids__}）—— <b>已退役</b>。
-	 *
-	 * <p>本类<b>不再写它</b>：生产代码没有任何读者（只有单测/实验在读），而每次记忆落盘都多一次
-	 * {@code SADD}/跨槽写是纯热路径开销。常量保留：① 运维/清账时仍要认识这个键；② 既有用例的
-	 * 编译面不受影响。会话枚举改由 {@link #findConversationIds()} 扫描数据键命名空间完成。
-	 *
-	 * @deprecated 无读者、无写入；不要在新代码中引用
-	 */
-	@Deprecated
-	static final String CONVERSATION_IDS_KEY = "chat:mem:__ids__";
 
 	/** staging 键前缀；与 final 键共享 {@code {<escapedId>}} hash tag。 */
 	static final String STAGING_PREFIX = KEY_PREFIX + "staging:";

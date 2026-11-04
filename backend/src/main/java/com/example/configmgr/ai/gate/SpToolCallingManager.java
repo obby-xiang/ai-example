@@ -215,7 +215,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * "不要再次调用工具"同时是给模型的软约束；硬约束由 {@code ToolActivityBeacon#budgetArmed}
 	 * 承担（armed 后工具一律不执行）。
 	 */
-	public static final String TURN_BUDGET_WRAP_UP = "本轮上下文已接近模型窗口上限（app.ai.context.limit-tokens）。"
+	public static final String TURN_BUDGET_WRAP_UP = "本轮上下文预算已接近上限。"
 			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
 
 	/**
@@ -408,13 +408,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	/**
-	 * 轮内 L1 的记账面（压缩台账 / 会话状态）。生产 = {@code RunStore}（它实现
-	 * {@link ContextStateStore}，三键族与轮首压缩同住一处）。
-	 *
-	 * <p><b>为什么可选注入</b>：与 {@link #setContextLimitResolver} 同因 —— 本类构造器被多份
-	 * conformance/run 用例直接 {@code new}，改签名等于要求它们跟改。轻装配面（单测直接 new）没有
-	 * 记账面时，轮内 L1 仍按旧口径只清结果（历史不变、只是少了台账）；<b>生产由容器注入唯一
-	 * {@code RunStore}，不存在"漏装配就没有台账"的静默降级</b>。
+	 * 轮内 L1 的记账面（压缩台账 / 会话状态），生产由容器注入唯一
+	 * {@code RedisContextStateStore}。轻装配面未注入时只清结果、不记账。
 	 */
 	private ContextStateStore contextStateStore;
 
@@ -1780,7 +1775,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/**
 	 * B3：轮内 L1/L3 真实提交后的压缩事实 + {@code context} 帧。
 	 *
-	 * <p>只有状态/台账已经写成功才调用；取号（HINCRBY）/写事实失败只 WARN，不出帧 ——
+	 * <p>只有状态/台账已经写成功才调用；写事实失败只 WARN，不出帧 ——
 	 * 宁可少一条可见节点，也不伪造"已压缩"。事件与帧同一份 eventId/atMs/anchor，刷新后由
 	 * {@code /history.events} 恢复同一节点。
 	 *
@@ -1797,8 +1792,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		String sessionId = snapshot.getSessionId();
 		long atMs = System.currentTimeMillis();
 		try {
-			long seq = this.contextStateStore.nextCompactionSeq(sessionId);
-			String eventId = runId + ":c" + seq;
+			String eventId = runId + ":turn:" + atMs + ":" + level.wire();
 			String anchor = ContextCompactor.lastToolCallId(beforeMessages);
 			Map<String, Object> event = new LinkedHashMap<>();
 			event.put("eventId", eventId);
@@ -1882,6 +1876,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private boolean recordTurnClear(String runId, RunSnapshot snapshot, List<Message> beforeClear,
 			ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
+		for (int attempt = 0; attempt < 3; attempt++) {
+			if (recordTurnClearAttempt(runId, snapshot, beforeClear, plan, systemTokens, toolsTokens)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean recordTurnClearAttempt(String runId, RunSnapshot snapshot, List<Message> beforeClear,
+			ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
 		ContextStateStore store = this.contextStateStore;
 		if (store == null || snapshot == null || snapshot.getSessionId() == null) {
 			// 轻装配面（单测直接 new）：保持"只清结果"的旧口径；生产由容器注入 RunStore
@@ -1954,6 +1958,16 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 */
 	private boolean recordTurnTrim(String runId, RunSnapshot snapshot, List<Message> beforeTrim, HardTrim.Plan plan,
 			int systemTokens, int toolsTokens) {
+		for (int attempt = 0; attempt < 3; attempt++) {
+			if (recordTurnTrimAttempt(runId, snapshot, beforeTrim, plan, systemTokens, toolsTokens)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean recordTurnTrimAttempt(String runId, RunSnapshot snapshot, List<Message> beforeTrim,
+			HardTrim.Plan plan, int systemTokens, int toolsTokens) {
 		ContextStateStore store = this.contextStateStore;
 		if (store == null || snapshot == null || snapshot.getSessionId() == null) {
 			// 轻装配面（单测直接 new）：保持"只丢轮"的旧口径；生产由容器注入 RunStore
@@ -3135,20 +3149,20 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 * 台账重放（首轮对账命中 / 认领失败后二次对账命中 / 续跑复跑同一 {@code toolCallId}）：三面同源，
 	 * <b>不执行任何副作用</b>。
 	 *
-	 * <p>结局口径（B23L1 批③b U4）：台账里有 {@code outcome} 就原样重放；只有<b>旧台账缺该键</b>
-	 * 才按成功复用（历史兼容）。{@code outcome=unknown} 是<b>确定的"未判定"</b>—— 把它写成成功
-	 * 会让"执行了但不知道结果"变成"执行成功"，前端的失败/对账提示随之消失。
+	 * <p>结局口径：台账里的 {@code outcome} 原样重放；<b>缺该键 = 未知</b>，不得推断成成功
+	 * （{@code outcome=unknown} 是<b>确定的"未判定"</b> —— 把它写成成功会让"执行了但不知道结果"
+	 * 变成"执行成功"，前端的失败/对账提示随之消失）。
 	 */
 	private String replayLedger(String runId, PendingToolCall pending, Map<String, Object> ledger) {
 		String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
 		Object rawOutcome = ledger.get("outcome");
 		ToolOutcome replayed = ToolOutcome.fromWire(rawOutcome == null ? null : String.valueOf(rawOutcome));
-		boolean legacyLedger = replayed == null; // 旧台账无 outcome 键 ⇒ 保持批②之前的兼容口径
-		if (legacyLedger) {
-			replayed = ToolOutcome.OK;
+		if (replayed == null) {
+			// 缺 outcome = 未判定，绝不推断成成功。
+			replayed = ToolOutcome.UNKNOWN;
 		}
 		pending.setOutcome(replayed.wire());
-		pending.setCode(legacyLedger || ledger.get("code") == null ? null : String.valueOf(ledger.get("code")));
+		pending.setCode(ledger.get("code") == null ? null : String.valueOf(ledger.get("code")));
 		pending.setExecuted(true);
 		Object executedBy = ledger.get("executedBy");
 		pending.setExecutedBy(executedBy == null ? this.store.instanceId() : String.valueOf(executedBy));
@@ -3593,10 +3607,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 						pending.getToolCallId(), pending.getName(), pending.getKind(),
 						statuses.get(pending.getToolCallId()), pending.getResultText()));
 			}
-			// 从带 run 归属的记忆窗口回填旧轮；当前 run 按 runId 排除，不按请求文本定位。
-			this.transcript.ensureBaselineFromMemory(snapshot.getSessionId(), snapshot.getTenantId(),
-					snapshot.getUserId(), runId);
-			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries);
+			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
+					snapshot.getRunEpoch());
 		}
 		catch (RuntimeException ex) {
 			log.warn("failed to write transcript park entry (park/wait unaffected) runId={} error={}", runId, ex.getMessage());
@@ -3720,7 +3732,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 						pending.getName(), pending.getKind(), statuses.get(pending.getToolCallId()),
 						pending.getResultText()));
 			}
-			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries);
+			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
+					snapshot.getRunEpoch());
 		}
 		catch (RuntimeException ex) {
 			log.warn("transcript batch settlement rewrite failed (tool execution/resume unaffected) runId={} error={}", runId, ex.getMessage());

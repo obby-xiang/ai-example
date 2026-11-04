@@ -33,8 +33,7 @@ import java.util.Map;
  * 不读请求体。"会话属于谁"的判定由<b>键形隔离</b>保证：
  * 记录键为 {@code ai:session:<tenantId>:<userId>:<sessionId>}（见 {@link TenantKeyScope}），
  * 跨租户/跨用户即使 sessionId 相同也落在不同键上，互不可见。
- * 没有身份上下文时落到<b>不含身份段的 legacy 键</b>（{@code ai:session:<sessionId>}）——
- * 那是独立的过渡命名空间，带身份的读写永远不会碰它。
+ * 身份缺失时拼键直接失败：不存在不含身份段的会话记录键。
  *
  * <h2>为什么"校验"其实是"创建或续期"</h2>
  * 发号已改为后端接口（{@code POST /api/ai/session}，毫秒时间戳），但历史页签仍可能携带
@@ -71,7 +70,7 @@ public class AiSessionService {
 	/**
 	 * 会话记录键（<b>带当前身份</b>）：{@code ai:session:<t>:<u>:<sessionId>}。
 	 *
-	 * <p>无身份上下文时返回 legacy 键形（{@code ai:session:<sessionId>}，独立的过渡命名空间）。
+	 * <p>无身份上下文 = 失败（不生成无身份键）。
 	 */
 	public static String keyFor(String sessionId) {
 		return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
@@ -82,7 +81,7 @@ public class AiSessionService {
 		return TenantKeyScope.scoped(KEY_PREFIX, tenantId, userId, sessionId);
 	}
 
-	/** 会话记录键（可空身份：{@code null} = legacy 键形）。 */
+	/** 会话记录键（显式身份；{@code null}/非法身份 = 失败）。 */
 	public static String keyFor(String sessionId, TenantUser identity) {
 		return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
 	}
@@ -90,13 +89,12 @@ public class AiSessionService {
 	/**
 	 * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文。
 	 *
-	 * <p>有上下文 ⇒ 记录落在该身份的键上；<b>没有上下文</b> ⇒ 落在 legacy 键
-	 * （{@code ai:session:<sessionId>}，独立过渡命名空间，带身份的读路径永不触及）。
+	 * <p>没有上下文 = 失败：不生成无身份会话记录。
 	 *
 	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
 	 */
 	public boolean ensure(String sessionId) {
-		return ensureInternal(sessionId, RequestContextUtils.currentOrNull());
+		return ensureInternal(sessionId, RequestContextUtils.require());
 	}
 
 	/**
@@ -175,11 +173,9 @@ public class AiSessionService {
 		value.put("sessionId", sessionId);
 		// 首次登记时刻（记录写一次后不再改写，见 registerInternal）。
 		value.put("lastActivity", Instant.now().toString());
-		if (identity != null) {
-			// 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
-			value.put("tenantId", identity.tenantId());
-			value.put("userId", identity.userId());
-		}
+		// 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
+		value.put("tenantId", identity.tenantId());
+		value.put("userId", identity.userId());
 		return this.objectMapper.writeValueAsString(value);
 	}
 

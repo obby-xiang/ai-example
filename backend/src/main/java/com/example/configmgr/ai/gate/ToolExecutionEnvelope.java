@@ -52,7 +52,7 @@ public final class ToolExecutionEnvelope {
 	/** 本轮冻结的披露上下文（{@code AiContext#toMap()} 的副本）。 */
 	private final Map<String, Object> context;
 
-	/** 冻结的生效参数；{@code null} = 该轮未冻结（{@code paramsVersion=0} 的旧轮）。 */
+	/** 冻结的生效参数（首笔快照必填；{@code null} 仅表示没有快照可供构造信封）。 */
 	private final RunSnapshot.FrozenParams frozen;
 
 	private final int round;
@@ -103,8 +103,7 @@ public final class ToolExecutionEnvelope {
 		}
 		return new ToolExecutionEnvelope(snapshot.getRunId(), snapshot.getSessionId(), snapshot.getTenantId(),
 				snapshot.getUserId(), snapshot.getProviderId(), snapshot.getModelId(),
-				copyOf(snapshot.getContext()),
-				snapshot.paramsFrozen() ? snapshot.frozenParams() : null, snapshot.getRound(),
+				copyOf(snapshot.getContext()), snapshot.frozenParams(), snapshot.getRound(),
 				snapshot.getToolSteps(), snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches(),
 				snapshot.getCreatedAtMs(), snapshot.getCreatedBy(), seqFloor == null ? 0L : Math.max(0L, seqFloor));
 	}

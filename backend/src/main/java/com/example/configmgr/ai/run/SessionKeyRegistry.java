@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 
 import java.util.ArrayList;
@@ -34,8 +35,7 @@ import java.util.function.Function;
  *
  * <h2>显式不进本表（分类而不遗漏）</h2>
  * <ul>
- * <li><b>全局键</b>：{@code ai:cfg:ver}（配置版本）、
- * {@code ai:lease:epoch}（旧全局计数，<b>已不参与 fencing</b>，只剩资源锁 token 编号）；</li>
+ * <li><b>全局键</b>：{@code ai:lease:epoch}（旧全局计数，<b>已不参与 fencing</b>，只剩资源锁 token 编号）；</li>
  * <li><b>短命协调键</b>：{@code ai:lock:task|job:* }（60s，临界区上界，<b>不续租</b>）、
  * {@code ai:claim:<runId>}（认领位，写路径自带 TTL，无独立续期口径）。</li>
  * </ul>
@@ -54,7 +54,7 @@ import java.util.function.Function;
  * 判定标准 = <b>"它是不是 {@code deleteRun} 手里那一轮 13 键中的一员"</b>（这一族全部同 tag ⇒ 同槽）：
  * <ul>
  * <li><b>带 {@code {<tenantId>:<userId>:run:<runId>}} tag</b>（13 键，全在 {@link RunStore} 的键方法里；
- * 无身份上下文的过渡期路径退回 legacy 形 {@code {run:<runId>}}）：
+ * 无身份上下文 = 拼键失败，不存在无身份键形）：
  * {@code ai:run:} / {@code ai:runstate:} / {@code ai:pending:} / {@code ai:claim:} /
  * {@code ai:ledger:} / {@code ai:idem:} /
  * {@code ai:seq:} / {@code ai:xevents:} / {@code ai:lease:run:} /
@@ -68,10 +68,10 @@ import java.util.function.Function;
  * 没有收益（{@code ai:activity} 的写是单键 Lua 原子 max，见 {@code RunStore#touchBusinessActivity}）。
  * 身份隔离靠 <b>{@code <tenantId>:<userId>:} 段</b>（{@code TenantKeyScope}），不靠 tag；
  * 本表登记同样用 {@code TenantKeyScope.scoped(prefix, runId)} 装配，与
- * {@code RunStore#beatKey}/{@code activityKey} 逐字同键（无上下文 = legacy 旧键形）。</li>
+ * {@code RunStore#beatKey}/{@code activityKey} 逐字同键（无上下文 = 拼键失败）。</li>
  * </ul>
  * <p><b>禁止项</b>：单键脚本（RENEW/VERIFY/RELEASE/COMPARE_DELETE）与
- * {@code kb:cache:*} / {@code ai:cfg:ver} / {@code ai:session:*} <b>一律不加 tag</b>
+ * {@code kb:cache:*} / {@code ai:session:*} <b>一律不加 tag</b>
  * —— 加了只牺牲分布，且会把热点压进单槽。
  *
  * <p>
@@ -183,7 +183,7 @@ public final class SessionKeyRegistry {
 	private static List<Entry> buildEntries() {
 		List<Entry> all = new ArrayList<>();
 		for (RunKey key : RUN_KEYS) {
-			all.add(new Entry(key.prefix(), key.builder().apply("<runId>"), Scope.RUN, key.renewals(), key.note()));
+			all.add(new Entry(key.prefix(), sampleKey(key.prefix()), Scope.RUN, key.renewals(), key.note()));
 		}
 		// session 级：键名带 sessionId（不是 runId），续期随各自写/读路径
 		all.add(new Entry(RunStore.SESSION_CURRENT_PREFIX, RunStore.SESSION_CURRENT_PREFIX + "<sessionId>",
@@ -192,8 +192,6 @@ public final class SessionKeyRegistry {
 				List.of(Renewal.WRITE), "上下文真值 HASH"));
 		all.add(new Entry(RunStore.CONTEXT_LEDGER_PREFIX, RunStore.CONTEXT_LEDGER_PREFIX + "<sessionId>",
 				Scope.SESSION, List.of(Renewal.WRITE), "压缩事件台账 LIST"));
-		all.add(new Entry(RunStore.CONTEXT_ARCHIVE_PREFIX, RunStore.CONTEXT_ARCHIVE_PREFIX + "<sessionId>:<turnNo>",
-				Scope.SESSION, List.of(Renewal.WRITE), "压缩前原文"));
 		all.add(new Entry(RunStore.SAFETY_PREFIX, RunStore.SAFETY_PREFIX + "<sessionId>", Scope.SESSION,
 				List.of(Renewal.WRITE), "安全事件台账 LIST"));
 		all.add(new Entry(CreateTaskDraftStore.KEY_PREFIX,
@@ -202,7 +200,19 @@ public final class SessionKeyRegistry {
 		return Collections.unmodifiableList(all);
 	}
 
-	/** 全部登记（run 级 14 条 + session 级 6 条）。 */
+	/**
+	 * 登记样例键（<b>静态生成，不读线程身份</b>）：类加载发生在任意线程上，不能调用按当前上下文
+	 * 拼键的真实入口；这里用固定身份占位，只服务文档/断言里的键形展示。
+	 */
+	private static String sampleKey(String prefix) {
+		if (RunStore.BEAT_PREFIX.equals(prefix) || RunStore.ACTIVITY_PREFIX.equals(prefix)
+				|| CancellationRegistry.CANCEL_PREFIX.equals(prefix)) {
+			return TenantKeyScope.scoped(prefix, 1L, 1L, "<runId>");
+		}
+		return RunKeyScope.scoped(prefix, 1L, 1L, "<runId>");
+	}
+
+	/** 全部登记（run 级 14 条 + session 级 5 条）。 */
 	public static List<Entry> entries() {
 		return ENTRIES;
 	}

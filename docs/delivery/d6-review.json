@@ -357,6 +357,13 @@
       "reason": "D6已描述显式身份唤醒、取消终态和有界恢复；本批仅修正active清理、版本单调及forget竞态，不改变迁移接口",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:d337e843c7a45b946fb91ce5bfb081b8f8f283ac65ed7d750e960af2f7f942f3",
+      "status": "not-affected",
+      "reason": "D6已同步轮首与DONE前物化、purge防复活、latest/before、快照冻结、显式身份和段序契约；本批落实运行历史、记忆、恢复与卡片状态实现，不再改变迁移接口",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

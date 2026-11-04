@@ -143,7 +143,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	/**
 	 * 本轮归属：<b>请求里的记录事实优先</b>（{@link ToolExecutionEnvelope} 的 runId + 创建时刻），
 	 * 其次发起调用这一拍的日志锚点 {@link AiTrace#currentRunId()}；都没有 ⇒ {@code null}
-	 * （记忆按"无归属"块追加，不整窗覆盖别的 run）。
+	 * （写侧失败关闭，不生成无归属块）。
 	 *
 	 * <p>起点用信封的 {@code createdAtMs}（= 快照创建时刻）：续跑沿用<b>块里已有的</b>起点，
 	 * 不会因为"续跑是后来才发生的"把这一轮挪到新轮后面。
@@ -205,8 +205,8 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	 * <p>身份为 {@code null} 时失败关闭：读返回空、写丢弃（+ WARN），<b>不</b>回落到无归属 legacy
 	 * 命名空间 —— 那正是本类要消灭的"销毁删不掉、别的身份读得到"的正文。
 	 *
-	 * <p>轮次为 {@code null}（旧快照且没有日志锚点）时回落到官方 {@code add}：那是"没有本轮"的
-	 * 兼容形态，只在无信封的旧请求上出现。
+	 * <p>轮次为 {@code null}（既没有执行信封也没有日志锚点）时<b>拒绝写入</b>：没有本轮归属的
+	 * 增量不得进入任何记忆块。
 	 */
 	static final class IdentityBoundChatMemory implements ChatMemory {
 
@@ -229,12 +229,18 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 			if (denied("write", conversationId)) {
 				return;
 			}
+			if (this.turn == null) {
+				log.warn("no run ownership resolved for this turn, denying memory write conversationId={} "
+						+ "(fail-closed: no unowned memory block)", conversationId);
+				return;
+			}
+			if (!(this.delegate instanceof RunScopedChatMemory scoped)) {
+				log.warn("memory delegate is not run-scoped, denying write conversationId={} "
+						+ "(no unowned fallback)", conversationId);
+				return;
+			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
-				if (this.turn != null && this.delegate instanceof RunScopedChatMemory scoped) {
-					scoped.add(conversationId, this.turn, messages);
-					return;
-				}
-				this.delegate.add(conversationId, messages);
+				scoped.add(conversationId, this.turn, messages);
 			}
 		}
 

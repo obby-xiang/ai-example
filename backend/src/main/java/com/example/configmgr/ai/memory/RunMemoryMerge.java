@@ -3,7 +3,6 @@ package com.example.configmgr.ai.memory;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -29,8 +28,8 @@ import org.springframework.ai.chat.messages.UserMessage;
  *     本轮历史；<b>别的 run 的块原样保留</b>（以当前窗口为准 —— 手里那份旧副本不得截断它）；</li>
  * <li><b>追加到本块</b>（{@code replaceRunBlock=false}，记忆 advisor 的 before/after）：增量接在
  *     本 run 块尾；</li>
- * <li><b>无归属</b>的消息（迁移期旧消息）在追加写里保留；替换写只接管 incoming 里仍有同一条
- *     当前 legacy 副本的消息，其余 legacy 原样保留。已被其他 run 收养的 stale legacy 不得再次盖章；</li>
+ * <li><b>无归属</b>的消息不属于任何一轮：本类<b>不</b>收养、也<b>不</b>合并它们
+ *     （当前协议下每个写者都先盖章；窗口里的无归属非摘要消息直接跳过）；</li>
  * <li><b>压缩摘要（L2 的合成前缀）单独成块、永远排在最前且按 atMs 单调</b>：它不是任何一轮的消息，
  *     替换写或追加写都<b>不许</b>把它收养进某个 run 的块。较新的摘要可以整体替换前缀块；
  *     没带摘要或摘要较旧时保留当前前缀，避免迟到写回滚折叠范围；</li>
@@ -72,13 +71,9 @@ public final class RunMemoryMerge {
 	 */
 	public static final String CLEARED_TOOL_RESULT_PREFIX = "[较早的工具结果已清理]";
 
-	/** 旧占位符前缀（B5 前写入的历史仍须识别为"已清除"）。 */
-	public static final String LEGACY_CLEARED_TOOL_RESULT_PREFIX = "[工具结果已清除：";
-
-	/** 新/旧占位符任一命中即"已清除"（会话级单调事实，不因文案升级而失效）。 */
+	/** 占位符命中即"已清除"（会话级单调事实）。 */
 	private static boolean isClearedPlaceholder(String data) {
-		return data != null && (data.startsWith(CLEARED_TOOL_RESULT_PREFIX)
-				|| data.startsWith(LEGACY_CLEARED_TOOL_RESULT_PREFIX));
+		return data != null && data.startsWith(CLEARED_TOOL_RESULT_PREFIX);
 	}
 
 	private RunMemoryMerge() {
@@ -170,7 +165,10 @@ public final class RunMemoryMerge {
 
 	public static List<Message> merge(List<Message> current, List<Message> incoming, MemoryTurn turn,
 			boolean replaceRunBlock, int maxMessages, Set<String> pinnedRunIds) {
-		MemoryTurn owner = turn == null ? MemoryTurn.UNATTRIBUTED : turn;
+		if (turn == null) {
+			throw new IllegalArgumentException("记忆合并必须带本轮 runId（无归属消息不得被收养）");
+		}
+		MemoryTurn owner = turn;
 		// 压缩摘要（合成前缀）先摘出来：它不属于任何 run，必须留在窗口最前、按前缀块处理。
 		// 若把它当成本轮消息收养，它就会跟着本轮的块排到中间 —— 之后既不会被后续 L2 折叠，
 		// 又会占掉 keep-recent-turns 的一个位置，窗口就再也压不下去（C-13 的"summary 没换来进展"）。
@@ -190,55 +188,27 @@ public final class RunMemoryMerge {
 			}
 		}
 		boolean replacePrefix = !prefix.isEmpty();
-		// 无归属旧消息（迁移期/旧版本写下的，没有 runId）按"本轮历史里有没有同一条"决定去留：
-		// 有 ⇒ 丢弃窗口副本（它会被本轮块重新盖章，留着就重复）；没有 ⇒ <b>必须保留</b>
-		// （替换写只带来本轮历史，整块丢就会把旧会话消息整段删掉）。
-		Set<String> incomingIdentities = new LinkedHashSet<>();
-		if (incoming != null) {
-			for (Message message : incoming) {
-				if (message != null) {
-					incomingIdentities.add(identityOf(message));
+		List<Message> currentDigests = new ArrayList<>();
+		if (current != null) {
+			for (Message message : current) {
+				if (message != null && isCompactionDigest(message)) {
+					currentDigests.add(message);
 				}
 			}
 		}
-		List<Message> currentDigests = new ArrayList<>();
-		List<Message> currentLegacy = new ArrayList<>();
-		Set<String> legacyAdoptedByOtherRuns = new LinkedHashSet<>();
 		Map<String, Block> kept = new LinkedHashMap<>();
 		Block existingOwn = null;
 		for (Block block : blocksOf(current)) {
-			if (block.runId == null) {
-				for (Message message : block.messages) {
-					if (isCompactionDigest(message)) {
-						currentDigests.add(message);
-					}
-					else {
-						currentLegacy.add(message);
-					}
-				}
-				continue;
-			}
 			if (block.runId.equals(owner.runId())) {
 				existingOwn = block;
-				continue;
 			}
-			for (Message message : block.messages) {
-				String legacyIdentity = migrationIdentityOf(message);
-				if (legacyIdentity != null) {
-					legacyAdoptedByOtherRuns.add(legacyIdentity);
-				}
+			else {
+				kept.put(block.runId, block);
 			}
-			kept.put(block.runId, block);
 		}
-		List<Message> unowned = new ArrayList<>();
 		// 摘要：本轮带来新的 ⇒ 用它整体替换；没带 ⇒ 保留窗口里那份（迟到的旧轮历史可能没有摘要，
 		// 丢了等于把已折叠的旧轮凭空抹掉）。
-		unowned.addAll(selectDigests(prefix, currentDigests, replacePrefix));
-		for (Message message : currentLegacy) {
-			if (!replaceRunBlock || !incomingIdentities.contains(identityOf(message))) {
-				unowned.add(message);
-			}
-		}
+		List<Message> unowned = new ArrayList<>(selectDigests(prefix, currentDigests, replacePrefix));
 		if (!unowned.isEmpty()) {
 			kept.put(UNOWNED, new Block(null, 0L, unowned));
 		}
@@ -252,17 +222,12 @@ public final class RunMemoryMerge {
 			if (messageOwner != null && !messageOwner.equals(owner.runId())) {
 				continue;
 			}
-			if (replaceRunBlock && messageOwner == null
-					&& legacyAdoptedByOtherRuns.contains(migrationIdentityOf(message))) {
-				continue;
-			}
 			own.add(stamp(message, owner));
 		}
 		if (!own.isEmpty()) {
-			// 起点：块已存在 ⇒ 沿用（续跑不漂移）；块是新建的 ⇒ 用本轮起点；本轮起点未知（0）
-			// 就只能按"现在"算 —— 未知起点当作"最早的"会把它插到所有已归属块之前，那是错的。
+			// 起点：块已存在 ⇒ 沿用（续跑不漂移）；块是新建的 ⇒ 用本轮起点。
 			long startedAt = existingOwn != null && existingOwn.turnStartedAtMs > 0L ? existingOwn.turnStartedAtMs
-					: owner.turnStartedAtMs() > 0L ? owner.turnStartedAtMs() : System.currentTimeMillis();
+					: owner.turnStartedAtMs();
 			kept.put(owner.runId(), new Block(owner.runId(), startedAt, own));
 		}
 
@@ -305,39 +270,6 @@ public final class RunMemoryMerge {
 			drop++;
 		}
 		return new ArrayList<>(messages.subList(drop, messages.size()));
-	}
-
-	// ── 无归属旧消息的身份（去重键） ──────────────────────────────────────────
-
-	/**
-	 * 消息身份：<b>类型 + 正文 + toolCallId</b>（工具结果按 id 对齐，不按正文 —— 同一条结果可能一侧是
-	 * 原文、另一侧是占位符）。只用于"去重窗口里的无归属副本"，不参与任何内容比较。
-	 */
-	static String identityOf(Message message) {
-		StringBuilder identity = new StringBuilder(message.getMessageType().name()).append(NUL)
-			.append(message.getText());
-		if (message instanceof AssistantMessage assistant) {
-			for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-				identity.append(NUL).append(call.id());
-			}
-		}
-		if (message instanceof ToolResponseMessage toolResponse) {
-			for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
-				identity.append(NUL).append(response.id());
-			}
-		}
-		return identity.toString();
-	}
-
-	private static String migrationIdentityOf(Message message) {
-		if (message.getMetadata() == null) {
-			return null;
-		}
-		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
-		if (!(timestamp instanceof String text) || text.isBlank()) {
-			return null;
-		}
-		return identityOf(message) + NUL + text;
 	}
 
 	// ── 清除单调（L1 占位符单向优先） ──────────────────────────────────────────
@@ -383,7 +315,7 @@ public final class RunMemoryMerge {
 
 	// ── 分块 ────────────────────────────────────────────────────────────────
 
-	/** 无归属消息（迁移期旧数据）的块键。 */
+	/** 压缩摘要前缀（不属于任何 run）的块键。 */
 	private static final String UNOWNED = "";
 
 	private static List<Block> blocksOf(List<Message> current) {
@@ -392,11 +324,15 @@ public final class RunMemoryMerge {
 			return List.of();
 		}
 		for (Message message : current) {
-			if (message == null) {
+			if (message == null || isCompactionDigest(message)) {
 				continue;
 			}
 			String runId = runIdOf(message);
-			String key = runId == null ? UNOWNED : runId;
+			if (runId == null) {
+				// 无归属消息不属于任何一轮：不收养、不合并（摘要前缀由 merge 单独处理）。
+				continue;
+			}
+			String key = runId;
 			Block block = blocks.get(key);
 			if (block == null) {
 				blocks.put(key, new Block(runId, Math.max(0L, turnStartedAtOf(message)), new ArrayList<>(List.of(message))));

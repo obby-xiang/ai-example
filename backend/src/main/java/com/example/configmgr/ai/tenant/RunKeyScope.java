@@ -6,11 +6,9 @@ package com.example.configmgr.ai.tenant;
  * <h2>键形</h2>
  * <ul>
  * <li>{@code <prefix>{<tenantId>:<userId>:run:<runId>}}，例如
- * {@code ai:run:{1:101:run:9f…}}；</li>
- * <li>无身份上下文时退回<b>旧键形</b> {@code <prefix>{run:<runId>}} —— 与
- * {@link TenantKeyScope} 同一口径：没有默认租户/默认用户，只有一个<b>独立的 legacy 命名空间</b>。
- * 带身份的新路径永远不会落到旧键上，旧数据也就不会被新身份读到。</li>
+ * {@code ai:run:{1:101:run:9f…}}。</li>
  * </ul>
+ * 身份缺失时拼键直接失败（与 {@link TenantKeyScope} 同一口径）—— 不存在"无身份 run 键"。
  *
  * <h2>为什么 tag 必须同时含身份与 runId</h2>
  * <ul>
@@ -36,7 +34,7 @@ public final class RunKeyScope {
 	private RunKeyScope() {
 	}
 
-	/** 当前线程身份的 run tag（无上下文 = legacy {@code {run:<runId>}}）。 */
+	/** 当前线程身份的 run tag（无上下文 = 失败，不生成无身份 tag）。 */
 	public static String tag(String runId) {
 		return tagContent(TenantKeyScope.currentSegment(), runId);
 	}
@@ -51,6 +49,9 @@ public final class RunKeyScope {
 	}
 
 	private static String tagContent(String identitySegment, String runId) {
+		if (identitySegment == null || identitySegment.isEmpty()) {
+			throw new IllegalArgumentException("缺少租户/用户身份：不得生成无身份 run 键");
+		}
 		if (runId == null || runId.isBlank()) {
 			throw new IllegalArgumentException("runId 不能为空：run 级键的 hash tag 由身份 + runId 组成");
 		}
@@ -74,7 +75,7 @@ public final class RunKeyScope {
 		return prefix + tag(identity, runId);
 	}
 
-	/** 全局索引成员：有身份 = {@code tenantId/userId/runId}；无身份 = 旧形 {@code runId}。 */
+	/** 全局索引成员：{@code tenantId/userId/runId}（无身份 = 失败）。 */
 	public static String indexMember(String runId) {
 		return indexMember(TenantKeyScope.currentSegment(), runId);
 	}
@@ -91,8 +92,8 @@ public final class RunKeyScope {
 		if (runId == null || runId.isBlank()) {
 			throw new IllegalArgumentException("runId 不能为空：全局索引成员由身份 + runId 组成");
 		}
-		if (identitySegment.isEmpty()) {
-			return runId;
+		if (identitySegment == null || identitySegment.isEmpty()) {
+			throw new IllegalArgumentException("缺少租户/用户身份：不得生成无身份索引成员");
 		}
 		// segment 形如 "<tenantId>:<userId>:" → 成员形如 "<tenantId>/<userId>/<runId>"
 		return identitySegment.replace(':', INDEX_SEPARATOR.charAt(0)) + runId;

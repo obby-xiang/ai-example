@@ -37,7 +37,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * 挂起态外置之后，"进程死亡"不再是数据丢失，而是"这一轮的进度留在 Redis 里等下一棒"。
  * 但外置只是<b>可恢复</b>；要让"用户以为还在跑"的轮次真的跑完，得有人在启动时把它捡起来 ——
  * 本类就是那个人：应用就绪 → 延迟 {@code app.ai.resume.startup-delay} + 有界抖动 → 扫
- * {@code ai:runs} 索引 → 对每一轮按 {@link ResumeService#listRunsForRecovery()} 的口径判定是否可续跑 →
+ * {@code ai:recovery:due} 索引 → 对每一轮按 {@link ResumeService#listRunsForRecovery()} 的口径判定是否可续跑 →
  * 调 {@link ResumeService#resume(String, boolean)}。
  *
  * <h2>三条安全边界（不绕开人审）</h2>
@@ -59,7 +59,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <h2>两个面：系统扫描 vs 请求面手工扫描</h2>
  * <ul>
  * <li><b>系统面</b>（应用启动的自动扫描、运行期扫描）：跑在无身份线程上，候选来自
- * {@code ai:runs} 的复合成员，逐轮按<b>该轮记录身份</b>推进 —— 不扫描租户列表、也不沿用线程身份。
+ * {@code ai:recovery:due} 的复合成员，逐轮按<b>该轮记录身份</b>推进 —— 不扫描租户列表、也不沿用线程身份。
  * 发现面只产出带身份的复合成员（{@code ResumeService.listRunsForRecovery()}），但入口仍对
  * {@code 0/0} 记录做硬校验：身份不可用一律记 {@link #LEGACY_NO_IDENTITY}、不驱动模型/工具。</li>
  * <li><b>请求面</b>（{@code POST /api/ai/startup-resume/scan}，线程有身份）：<b>只处理当前身份</b>的轮次。
@@ -83,7 +83,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * 跨实例租约（{@code ai:lock:resume-scan}，续租 TTL 与抢锁 TTL 同取 {@code scan-lease-ttl}，
  * owner 每次扫描唯一，收尾先停续租再归还）。系统面全局一把，手工扫描按调用身份分；
  * 抢不到就在有界等待后让位（报告字段契约不变，标 {@code deferred=true}）；</li>
- * <li><b>轮转 + 尝试预算</b>：固定排序 + 有界预算下，每拍从"上一拍最后尝试过的候选之后"开始
+ * <li><b>轮转 + 尝试预算</b>：到期顺序 + 有界预算下，每拍从"上一拍最后尝试过的候选之后"开始
  * （{@link #scanCursors}，条数有界，见 {@link #MAX_SCAN_CURSORS}），尝试次数（含失败）另有上界
  * （{@code app.ai.resume.scan-max-attempts}）。
  * 于是"排在前面的候选每拍失败"不会让后面的轮次永久饿死，"每轮都试一次但都不成"也不会让单拍无界。</li>
@@ -216,7 +216,7 @@ public class StartupResumeRunner {
 	 * 轮转起点（按触发面分记：{@code MODE/system} 或 {@code MODE/tenant:user}）：
 	 * 上一拍<b>最后一个真正尝试过</b>的候选键。
 	 *
-	 * <p>为什么需要它：候选顺序是固定排序（runId），产出/尝试预算又有界。若每拍都从第一个开始，
+	 * <p>为什么需要它：候选按到期分数排序，产出/尝试预算又有界。若每拍都从第一个开始，
 	 * 排在前面的候选每拍都能把预算用光（哪怕每次都只是失败/被占），后面的轮次永久饿死。
 	 * 下一拍从"上次停下的位置之后"开始，N 拍内每个候选都有机会被尝试；预算用尽只影响"这一拍"。
 	 *
@@ -316,7 +316,7 @@ public class StartupResumeRunner {
 			List<Map<String, Object>> candidates;
 			try {
 				// 恢复扫描只取轻量投影：不读 ledgerCounts/心跳/逐条 pending 详情（安全判据一个不少）。
-				candidates = this.resumeService.listRunsForRecovery();
+				candidates = this.resumeService.listRunsForRecovery(recoveryCandidateLimit());
 			}
 			catch (Exception ex) {
 				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
@@ -511,7 +511,7 @@ public class StartupResumeRunner {
 		try {
 			List<Map<String, Object>> candidates;
 			try {
-				candidates = this.resumeService.listRunsForRecovery();
+				candidates = this.resumeService.listRunsForRecovery(recoveryCandidateLimit());
 			}
 			catch (Exception ex) {
 				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
@@ -549,6 +549,12 @@ public class StartupResumeRunner {
 		finally {
 			flight.close();
 		}
+	}
+
+	private int recoveryCandidateLimit() {
+		int configured = Math.max(this.properties.getResume().getMaxOnStartup(),
+				this.properties.getResume().getScanMaxAttempts());
+		return Math.min(256, Math.max(1, configured));
 	}
 
 	/** 扫描触发面：启动/手工（{@link #scan(boolean)}）与运行期兜底（{@link #sweep()}）。 */
@@ -591,7 +597,7 @@ public class StartupResumeRunner {
 		List<Map<String, Object>> expired = new ArrayList<>();
 		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
 		TenantUser caller = RequestContextUtils.currentOrNull();
-		// 轮转起点（公平性）：固定排序 + 有界预算下，若每拍都从第一个开始，排在前面却永远失败/被占的
+		// 轮转起点（公平性）：到期顺序 + 有界预算下，若每拍都从第一个开始，排在前面却永远失败/被占的
 		// 候选会把预算每拍用光，后面的轮次永久饿死。这里从"上一拍最后一个尝试过的候选之后"开始。
 		String cursorScope = cursorScope(mode, caller);
 		int attempts = 0;
@@ -838,7 +844,7 @@ public class StartupResumeRunner {
 
 	/**
 	 * 从 {@code afterKey} 的<b>下一条</b>开始轮转（环形）；找不到该键（候选变了）或只有一个候选时
-	 * 原样返回 —— 起点失效时回到固定排序的第一条，不会漏扫。
+	 * 原样返回 —— 起点失效时回到到期顺序的第一条，不会漏扫。
 	 */
 	private static List<Map<String, Object>> rotateFrom(List<Map<String, Object>> candidates, String afterKey) {
 		if (afterKey == null || candidates.size() < 2) {
@@ -1201,11 +1207,11 @@ public class StartupResumeRunner {
 	 * 以<b>该轮记录身份</b>执行一次续跑（启动扫描与运行期扫描的唯一入口）。
 	 *
 	 * <p>扫描跑在定时线程上，那里没有请求身份；身份也不能从"当前线程"或默认租户补。
-	 * 身份的<b>来源是 {@code ai:runs} 的复合索引成员</b>（{@code tenantId/userId/runId}，
+	 * 身份的<b>来源是 {@code ai:recovery:due} 的复合索引成员</b>（{@code tenantId/userId/runId}，
 	 * 由 {@code ResumeService.listRunsForRecovery()} 随条目交下来）—— 不是"先读快照再猜身份"：
 	 * 快照键本身由身份拼出，在无身份线程上先读只能读到 {@code null}（那条链会静默退化成空作用域）。
 	 *
-	 * <p>候选只来自 {@code ai:runs} 的复合成员，记录身份随成员一起交下来；无归属成员在发现面
+	 * <p>候选只来自 {@code ai:recovery:due} 的复合成员，记录身份随成员一起交下来；无归属成员在发现面
 	 * （{@code allRunRecords()}）就被丢弃，不会进入本方法。因此本方法只处理带身份的记录。
 	 *
 	 * <p>作用域只包住这一次续跑调用，扫描循环（下一轮可能是另一个租户）不继承身份。
@@ -1383,7 +1389,7 @@ public class StartupResumeRunner {
 
 	/**
 	 * 发现条目里的<b>记录身份</b>字段（{@code tenantId}/{@code userId}，由 {@code listRuns} 从
-	 * {@code ai:runs} 的复合成员交下来）。缺字段 ⇒ {@code 0}（旧快照/无归属成员：没有身份可恢复，
+	 * {@code ai:recovery:due} 的复合成员交下来）。缺字段 ⇒ {@code 0}（旧快照/无归属成员：没有身份可恢复，
 	 * 不猜、也不沿用扫描线程身份）。
 	 */
 	private static long identityField(Map<String, Object> run, String key) {

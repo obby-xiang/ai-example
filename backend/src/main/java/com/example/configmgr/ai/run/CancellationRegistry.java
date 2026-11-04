@@ -37,8 +37,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>降级</h2>
  * Redis 不可用（异常）时，本地已置位的取消仍然确定（{@link #cancelState(String)} = {@code CANCELLED}）；
- * 本地未置位而 Redis 读不出来时是 {@code UNKNOWN}（A5），布尔口 {@link #isCancelled(String)} 拒绝作答
- * 而不是返回 {@code false}。5s 退避期同样返回 {@code UNKNOWN}，不把"没访问 Redis"伪装成"未取消"。
+ * 本地未置位而 Redis 读不出来时是 {@code UNKNOWN}（A5）—— "读不出来"不等于"未取消"，不折叠成布尔值。
+ * 5s 退避期同样返回 {@code UNKNOWN}，不把"没访问 Redis"伪装成"未取消"。
  * <p><b>"取消早于 register + Redis 写失败"的窄窗</b>：取消端点在运行方登记之前到达、偏偏那时
  * Redis 写不进去 —— 本地没有取消位、Redis 也没有事实，用户点了停止却无处可查。{@code cancel}
  * 因此在写失败时记一条<b>有 TTL（{@value #DEGRADED_CANCEL_TTL_MS}ms）、有上限
@@ -148,28 +148,6 @@ public class CancellationRegistry {
 
 	/** 最近一次取消标志读取失败的原因（退避期返回 UNKNOWN 时用于保留 cause）。 */
 	private volatile Throwable lastReadFailure;
-
-	/**
-	 * 是否已取消。<b>Redis 为准</b>：进程内为假时读一次 Redis，命中即把加速态一并置位。
-	 *
-	 * <p><b>A5</b>：读失败且本地没有确定的取消事实时，<b>拒绝作答</b>（抛 {@link CancellationUnknownException}），
-	 * 不再返回 {@code false} —— "读不出来"不等于"未取消"。需要显式处理未知的调用点用
-	 * {@link #cancelState(String)}。
-	 *
-	 * @throws CancellationUnknownException Redis 读失败且本地没有确定的取消事实
-	 * @deprecated 布尔口无法表达"未知"；新调用点请用 {@link #cancelState(String)}（A5）。
-	 */
-	@Deprecated
-	public boolean isCancelled(String runId) {
-		CancelState state = cancelState(runId);
-		if (state == CancelState.CANCELLED) {
-			return true;
-		}
-		if (state == CancelState.NOT_CANCELLED) {
-			return false;
-		}
-		throw new CancellationUnknownException(runId, this.lastReadFailure);
-	}
 
 	/**
 	 * 取消判定的三态（A5）：读失败是 {@link CancelState#UNKNOWN}，不是"未取消"。
@@ -492,9 +470,9 @@ public class CancellationRegistry {
 	/**
 	 * 取消状态未知（A5）：Redis 读失败，且本地没有"已取消"的确定事实。
 	 *
-	 * <p>为什么抛而不是返回 false：跨实例取消的权威态只在 Redis，读不出来时"未取消"是猜测；
-	 * 把猜测当事实会让另一个实例发出的取消丢失（运行方一直跑到预算/超时）。需要"未知"这个
-	 * 中间态的调用方用 {@link #cancelState(String)}；布尔口保持诚实，拒绝作答。
+	 * <p>跨实例取消的权威态只在 Redis，读不出来时"未取消"是猜测；把猜测当事实会让另一个实例
+	 * 发出的取消丢失（运行方一直跑到预算/超时）。需要"未知"这个中间态的调用方用
+	 * {@link #cancelState(String)}（{@link CancelState#UNKNOWN}），不得把它折叠成"未取消"。
 	 */
 	public static class CancellationUnknownException extends com.example.configmgr.common.AiStateUnavailableException {
 

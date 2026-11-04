@@ -68,19 +68,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * <b>存在的意义</b>：判活（{@code activeRunIds} / {@code snapshotNotTerminal}）只需要一个状态串，
  * 不必把整份快照（含整窗 {@code messageJson}）反序列化成对象图。取消优先守卫也先读它，
  * <b>缺失时回退 cjson 解析现存快照</b>（本键引入前的旧数据），因此不是正确性依赖面；</li>
- * <li>{@code ai:runs} SET —— 轮次索引（重启后"发现待续跑轮次"的入口）。成员恒为<b>复合成员</b>
- * {@code tenantId/userId/runId}：列表/启动发现按成员里的归属过滤，
- * 系统恢复按成员身份 {@code useContext} 再读快照，<b>不扫描租户列表</b>（{@link #allRunRecords()}）。
- * <b>不带 TTL、也不给整键 EXPIRE</b>（Redis 容量专项 A）：SET 无法按成员过期，整键过期会把活跃轮的
- * 发现面一起删掉；改为<b>惰性清理</b> —— 快照键已不在的成员由 {@link #pruneRunIndex()} 剔除
- * （启动扫描 {@link #allRunIds()} 与 {@code create}/{@code createIfAbsent} 的节流机会式清理两处触发）；
- * 空 SET 由 Redis 自己消失，因此不会留空壳键。
- * <b>补写只在低频/节流节点</b>（{@link #create} / {@link #createIfAbsent}、挂起/终态的低频状态写、
- * {@code RUNNING} 的每 run 60s 节流拍）：
- * 恢复发现面在首笔快照之后就该有成员，{@code RUNNING} 的每次 {@code save} 不再重复 {@code SADD}
- * （那是纯热路径开销）；若首轮补写失败，{@code RUNNING} 期间按 run <b>每 60s 至多补一次</b>
- * （{@value #RUN_INDEX_REPAIR_INTERVAL_MS}ms 的有界节流自愈，终态/删除清理进程内节流状态）。
- * 补写失败仍只 WARN —— 下一次低频节点/节流拍会再补，收敛口径不变；</li>
+ * <li>{@code ai:recovery:due} ZSET —— 全局恢复候选，成员为 {@code tenantId/userId/runId}，
+ * score 为下一次恢复检查时刻；按身份另有同形窄 due 索引供手工扫描使用。列表使用按身份
+ * {@code ai:runs:<tenant>:<user>} ZSET，不再读取全局 SET 或预做逐成员 EXISTS。
+ * 快照写后物化这些索引，终态只移出恢复面；创建路径不清理索引，恢复扫描间以最多 64 个
+ * 轻量状态键做低频有界对账。全局与身份索引只分别执行单键命令，不做跨槽多键操作；</li>
  * <li>{@code ai:pending:<runId>} HASH（field=toolCallId）—— {@link PendingToolCall}
  * （确认门/前端工具的输入落点，重启后仍可读）；</li>
  * <li>{@code ai:claim:<runId>} HASH（field=toolCallId，value=<b>{@code <epoch>|<instanceId>}</b>）——
@@ -140,11 +132,36 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 @Component
-public class RunStore implements com.example.configmgr.ai.context.ContextStateStore {
+public class RunStore {
 
 	public static final String RUN_PREFIX = "ai:run:";
 
-	public static final String RUN_INDEX = "ai:runs";
+	/** 全局恢复候选：member=tenant/user/runId，score=下一次允许恢复检查的时刻。 */
+	public static final String RECOVERY_DUE_INDEX = "ai:recovery:due";
+
+	public static final String RECOVERY_DUE_IDENTITY_PREFIX = "ai:recovery:due:";
+
+	/** 请求面列表的按身份窄索引；只进单键 ZSET 命令，不与全局索引做多键操作。 */
+	public static final String RUN_LIST_INDEX_PREFIX = "ai:runs:";
+
+	private static final int RECOVERY_RECONCILE_BATCH = 64;
+
+	private static final RedisScript<Long> RECOVERY_DEFER_SCRIPT = new DefaultRedisScript<>("""
+			local current = redis.call('ZSCORE', KEYS[1], ARGV[3])
+			if not current or tonumber(current) ~= tonumber(ARGV[1]) then return 0 end
+			redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+			if tonumber(ARGV[4]) > 0 then redis.call('PEXPIRE', KEYS[1], ARGV[4]) end
+			return 1
+			""", Long.class);
+
+	private static final RedisScript<Long> RECOVERY_REMOVE_SCRIPT = new DefaultRedisScript<>("""
+			local current = redis.call('ZSCORE', KEYS[1], ARGV[2])
+			if not current or tonumber(current) ~= tonumber(ARGV[1]) then return 0 end
+			redis.call('ZREM', KEYS[1], ARGV[2])
+			return 1
+			""", Long.class);
+
+	private final AtomicLong recoveryReconcileOffset = new AtomicLong();
 
 	/**
 	 * 轻量 run 状态键前缀（{@code ai:runstate:{<tenantId>:<userId>:run:<runId>}}）。
@@ -164,20 +181,8 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** 上下文台账 LIST 前缀（{@code ai:ctx:ledger:<sessionId>}，压缩事件，最近 20 条）。 */
 	public static final String CONTEXT_LEDGER_PREFIX = "ai:ctx:ledger:";
 
-	/** 压缩前原文前缀（{@code ai:ctx:archive:<sessionId>:<turnNo>}）。 */
-	public static final String CONTEXT_ARCHIVE_PREFIX = "ai:ctx:archive:";
-
 	/** 已提交压缩事实（B3）：{@code ai:ctx:events:<tenantId>:<userId>:<sessionId>} LIST，新→旧。 */
 	public static final String CONTEXT_EVENTS_PREFIX = "ai:ctx:events:";
-
-	/** 压缩事实 LIST 上限（B3；超过从最旧裁）。 */
-	public static final int CONTEXT_EVENTS_MAX = 200;
-
-	/** 会话上下文 HASH 里的压缩序号字段（HINCRBY；不进 {@code ContextState#toFields}）。 */
-	public static final String CONTEXT_COMP_SEQ_FIELD = "compSeq";
-
-	/** 上下文台账保留条数（设计稿 §3.6：最近 20 条）。 */
-	public static final int CONTEXT_LEDGER_MAX = 20;
 
 	/**
 	 * 安全事件台账前缀（防护批③ B3-7；{@code ai:safety:<sessionId>}）。
@@ -752,23 +757,6 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			""", Long.class);
 
 	/**
-	 * 压缩事实 LIST 的<b>有界追加 + TTL</b>（同键脚本原子完成）：LPUSH、LTRIM、PEXPIRE 在一步里，
-	 * 进程在 push 与 expire 之间退出不会留下永不过期的键。单键脚本，Cluster 同槽安全。
-	 *
-	 * @param KEYS[1] {@code ai:ctx:events:<tenantId>:<userId>:<sessionId>}
-	 * @param ARGV[1] 事件 JSON
-	 * @param ARGV[2] 上限条数（{@link #CONTEXT_EVENTS_MAX}）
-	 * @param ARGV[3] TTL（毫秒）
-	 */
-	private static final RedisScript<Long> CONTEXT_EVENT_APPEND_SCRIPT = new DefaultRedisScript<>("""
-			-- CONTEXT_EVENT_APPEND
-			redis.call('LPUSH', KEYS[1], ARGV[1])
-			redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
-			redis.call('PEXPIRE', KEYS[1], ARGV[3])
-			return 1
-			""", Long.class);
-
-	/**
 	 * session→current 的<b>单键 compare-and-set</b>（MI1）：只有 current 仍等于本 runId 才回填
 	 * fallback，且 TTL 保持 {@code app.ai.session-ttl}（与会话/快照同寿）。
 	 *
@@ -989,8 +977,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 是合法且必然的。tag 只有 runId 时，后建的一方会读到别人的快照、{@link #deleteRun} 会删掉
 	 * 别人那一轮的 13 键。身份进 tag 之后，同 id 不同身份落在两个键上，读写删天然分开。
 	 *
-	 * <p><b>无身份上下文</b>：退回旧 tag {@code {run:<runId>}}（{@link TenantKeyScope} 的
-	 * legacy 命名空间口径，不是"默认租户"）。带身份的路径永远看不到这些键。
+	 * <p><b>无身份上下文</b>：拼键直接失败（不存在无身份 run 键）。
 	 */
 	public static String runTag(String runId) {
 		return RunKeyScope.tag(runId);
@@ -1178,42 +1165,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	// ── 轮次快照 ────────────────────────────────────────────────────────────
 
 	/**
-	 * 建立一轮的外置快照（不写模型身份；模型身份见
-	 * {@link #create(String, String, AiContext, List, MessageJsonCodec, Long, String)}）。
-	 */
-	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-			MessageJsonCodec codec) {
-		return create(runId, sessionId, context, history, codec, null, null);
-	}
-
-	/**
-	 * 建立一轮的外置快照，并固化<b>模型身份</b>（模型配置专项批①；设计稿 §3.4"续跑一致性"）。
-	 *
-	 * <p>
-	 * {@code providerId}/{@code modelId} 是 additive 字段：旧快照没有它们（反序列化为 null），
-	 * 新快照从第一笔写就带上。批① 只<b>写</b>（取证面 + 为批③ 的"按快照续跑"备好数据），
-	 * 续跑取用口径的切换在批③。
-	 *
-	 * @param providerId 库内 provider id；{@code null} = env 合成行（种子尚未落库/无 DB 行）
-	 * @param modelId 本轮使用的模型名（请求体 {@code model} 的原值）
-	 */
-	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-			MessageJsonCodec codec, Long providerId, String modelId) {
-		return create(runId, sessionId, context, history, codec, providerId, modelId, null);
-	}
-
-	/**
-	 * 建立一轮的外置快照并<b>冻结本轮的生效参数</b>（L-26）。
+	 * 建立一轮的外置快照：<b>身份、模型身份、生效参数与请求原文必须在同一笔里完整冻结</b>。
 	 *
 	 * <p>为什么冻结在"创建"这一笔：同一 run 的续跑可能落在几分钟甚至几天之后，此间用户可能改了
 	 * 全局默认温度/默认模型。续跑重算会让同一轮前后半段跑在不同参数上，而历史与 {@code done.model}
-	 * 都说"同一轮"。因此生效值随第一笔快照固化，续跑只读不改。
+	 * 都说"同一轮"。因此生效值（含 null）随第一笔快照固化，续跑只读不改。
 	 *
-	 * <p><b>{@code frozen = null} = 不冻结</b>（旧签名的行为，写出的快照 {@code paramsVersion=0}）——
-	 * 该旧行为供既有用例与"批③ 之前的调用方"使用；生产路径（{@code ResilientChatService#chat}）
-	 * 永远传非 null（<b>全 null 的 FrozenParams 也是一次冻结</b>：null 本身就是当时的生效值）。
+	 * <p>请求原文同样并进这一笔：终态补写用户条目只认快照里的 {@code requestText}，而快照历史
+	 * 会被 {@code prompt.getInstructions()}（请求侧未标记的 user 副本）多次重写 —— 原文单独存一份
+	 * 才不会被覆盖。字段随首笔 {@code persist} 落库，不需要建快照之后再来一次整对象 save。
 	 *
-	 * <h2>失败语义（2026-10-29）</h2>
+	 * <h2>失败语义</h2>
 	 * 首笔快照是这一轮<b>唯一的持久面</b>：写不进去就没有重挂、没有续跑、没有取消终态可落。
 	 * 因此本方法<b>显式判定</b>那一笔写，失败即失败：
 	 * <ul>
@@ -1227,55 +1189,34 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <li>全局 {@code ai:runs} 是恢复发现面：首笔快照落库后<b>在本方法内</b> best-effort 补写，
 	 *     失败只 WARN，不升级成请求失败（下一次创建/恢复会再补）。</li>
 	 * </ul>
-	 * 调用方（{@code ResilientChatService#chat}）不得把失败当成"建好了但读不到"继续驱动：
-	 * 没有持久面的成功终帧比失败更有害。
 	 *
-	 * @param frozen 生效参数（可为全部 null）
+	 * @param providerId 库内 provider id；{@code null} = env 合成行（种子尚未落库/无 DB 行）
+	 * @param modelId 本轮使用的模型名（请求体 {@code model} 的原值）
+	 * @param frozen 生效参数（必须非 null；字段可为 null = 当时没有值）
+	 * @param clientRequestId 前端在 /chat 发送前生成、并存于本页签镜像的请求 id
+	 * @param requestText 本轮用户请求原文（必须非空白）
+	 * @param turnStartedAtMs 本轮请求起点（epoch ms，&gt; 0）
 	 * @throws AiStateUnavailableException 首笔快照未落库
-	 * @throws IllegalStateException 没有身份上下文（fail-closed：不建"无归属"的轮次）
-	 */
-	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
-		return create(runId, sessionId, context, history, codec, providerId, modelId, frozen, null);
-	}
-
-	/**
-	 * 同上，并把**客户端请求 id** 一并写进首笔快照（停止闭环，additive）。
-	 *
-	 * <p>旧签名委托到本方法（{@code clientRequestId=null}），既有调用点与测试零改动；
-	 * 旧快照反序列化为 {@code null}，与"旧客户端没带"同义。
-	 *
-	 * <p>不带请求原文的调用方走这一条（{@code requestText=null, turnStartedAtMs=0}）：transcript 终态
-	 * 不补写用户条目，其余行为不变。
-	 *
-	 * @param clientRequestId 前端在 /chat 发送前生成、并存于本页签镜像的请求 id（可空）
-	 */
-	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
-			String clientRequestId) {
-		return create(runId, sessionId, context, history, codec, providerId, modelId, frozen, clientRequestId,
-				null, 0L);
-	}
-
-	/**
-	 * 同上，并把**本轮请求原文 / 请求起点**一并写进首笔快照（B2 transcript 终态补写用，additive）。
-	 *
-	 * <p>为什么必须并进建快照这一笔：终态补写用户条目只认快照里的 {@code requestText}，而快照历史
-	 * 会被 {@code prompt.getInstructions()}（请求侧未标记的 user 副本）多次重写 —— 原文单独存一份才
-	 * 不会被覆盖。字段随首笔 {@code persist} 落库，不需要建快照之后再来一次整对象 save。
-	 *
-	 * <p>旧签名委托到本方法（{@code requestText=null, turnStartedAtMs=0}），既有调用点/测试零改动；
-	 * 旧快照反序列化为 {@code null/0}（终态不补写，不做兼容）。
-	 *
-	 * @param requestText    本轮用户请求原文（可空 = 不记录）
-	 * @param turnStartedAtMs 本轮请求起点（epoch ms；{@code 0} = 不记录）
+	 * @throws IllegalArgumentException 缺身份/请求原文/请求起点，或未冻结参数
 	 */
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
 			String clientRequestId, String requestText, long turnStartedAtMs) {
+		if (frozen == null) {
+			throw new IllegalArgumentException("首笔快照必须冻结生效参数 runId=" + runId);
+		}
+		if (modelId == null || modelId.isBlank()) {
+			throw new IllegalArgumentException("首笔快照必须冻结本轮模型名 runId=" + runId);
+		}
+		if (requestText == null || requestText.isBlank()) {
+			throw new IllegalArgumentException("首笔快照必须记录本轮请求原文 runId=" + runId);
+		}
+		if (turnStartedAtMs <= 0L) {
+			throw new IllegalArgumentException("首笔快照必须记录本轮请求起点 runId=" + runId);
+		}
 		// 身份：首轮创建时<b>必须</b>有上下文。缺身份不落库、不登记索引 ——
 		// 没有默认租户，也没有默认用户：轮级键的 hash tag 由身份组成，凭空补一个身份
-		// 就是"把这一轮写进别人的命名空间"或"写进谁都读不到的 legacy 命名空间"。
+		// 就是"把这一轮写进别人的命名空间"。
 		TenantUser identity = RequestContextUtils.require();
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
@@ -1324,7 +1265,6 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 全局 ai:runs 是恢复发现面：创建节点补写一次（best-effort）。失败不抛；之后的 RUNNING
 		// 热路径由 repairRunIndexThrottled 每 60s 至多重试一次（首个节流拍在 t0+60s 到期）。
 		addRunIndexBestEffort(snapshot, runId);
-		maybePruneRunIndex();
 		return snapshot;
 	}
 
@@ -1458,7 +1398,6 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		if (!repairRunIndexStatus(snapshot)) {
 			addRunIndexBestEffort(snapshot, runId);
 		}
-		maybePruneRunIndex();
 		return true;
 	}
 
@@ -1506,22 +1445,17 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * <ul>
 	 * <li>记录有身份 ⇒ 在记录身份下写入；当前上下文是另一个身份 ⇒ <b>直接拒绝</b>
 	 *     （否则一笔记错身份的写会落到别人的同名 runId 上）；</li>
-	 * <li>记录<b>没有</b>身份（旧数据/手工构造）而当前有身份 ⇒ <b>拒绝</b>：写侧不得把 0/0 记录
-	 *     <b>adopt</b> 成当前身份（读侧 {@link #get(String)} 已把 0/0 按"不是我的"处理，写侧补齐会把
-	 *     无归属数据"合法地"复制进某个租户命名空间）；</li>
-	 * <li>两者都没有 ⇒ legacy 命名空间（{@code RunIdentityScope} 的显式无身份作用域，不伪造身份）。</li>
+	 * <li>记录<b>没有</b>身份（0/0/不可用）⇒ <b>拒绝</b>：写侧不得 adopt 成任何身份，
+	 *     也不存在无身份命名空间可写；</li>
+	 * <li>当前上下文是另一个身份 ⇒ <b>拒绝</b>（见上）。</li>
 	 * </ul>
 	 */
 	private RunIdentityScope.Scope openSnapshotWriteScope(RunSnapshot snapshot) {
 		TenantUser owner = recordIdentityOf(snapshot);
 		TenantUser current = RequestContextUtils.currentOrNull();
 		if (owner == null) {
-			if (current != null) {
-				throw new IllegalStateException("拒绝把无归属（0/0）的轮次快照写进当前身份 runId="
-						+ snapshot.getRunId() + "（当前身份=" + current + "）：记录身份缺失即 fail-closed，"
-						+ "不得以调用者身份 adopt");
-			}
-			return RunIdentityScope.denied();
+			throw new IllegalStateException("拒绝写入无归属（0/0）的轮次快照 runId=" + snapshot.getRunId()
+					+ "（当前身份=" + current + "）：记录身份缺失即 fail-closed，不存在无身份命名空间");
 		}
 		if (current != null && !owner.equals(current)) {
 			throw new IllegalStateException("拒绝以他人身份写入轮次快照 runId=" + snapshot.getRunId() + "（记录归属="
@@ -1797,24 +1731,85 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 	}
 
-	/**
-	 * 全局恢复索引的 best-effort 补写（无身份 legacy 快照不进恢复发现面）。
-	 *
-	 * <p>调用点 = 创建类节点、挂起/终态的低频状态写、以及 {@link #repairRunIndexThrottled} 的
-	 * 节流自愈拍；失败只 WARN，不影响快照写的结果。
-	 */
+	/** 快照写后的索引物化：列表走身份窄索引，恢复只保留非终态的 due 候选。 */
 	private void addRunIndexBestEffort(RunSnapshot snapshot, String runId) {
 		long tenantId = snapshot.getTenantId();
 		long userId = snapshot.getUserId();
 		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
 			return;
 		}
+		String member = RunKeyScope.indexMember(tenantId, userId, runId);
 		try {
-			this.redis.opsForSet().add(RUN_INDEX, RunKeyScope.indexMember(tenantId, userId, runId));
+			String listKey = runListIndexKey(tenantId, userId);
+			String identityDueKey = identityRecoveryDueKey(tenantId, userId);
+			Duration ttl = ttlFor(runId);
+			this.redis.opsForZSet().add(listKey, runId, Math.max(0L, snapshot.getUpdatedAtMs()));
+			this.redis.expire(listKey, ttl);
+			this.redis.expire(identityDueKey, ttl);
+			if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+				this.redis.opsForZSet().remove(RECOVERY_DUE_INDEX, member);
+				this.redis.opsForZSet().remove(identityDueKey, runId);
+			}
+			else {
+				long dueAt = recoveryDueAt(snapshot.getUpdatedAtMs());
+				this.redis.opsForZSet().add(RECOVERY_DUE_INDEX, member, dueAt);
+				this.redis.opsForZSet().add(identityDueKey, runId, dueAt);
+			}
 		}
 		catch (Exception ex) {
-			log.warn("global run index backfill failed runId={} (discovery misses one entry; later writes self-heal): {}", runId,
+			log.warn("run recovery/list index backfill failed runId={} (later writes self-heal): {}", runId,
 					ex.getMessage());
+		}
+	}
+
+	private long recoveryDueAt(long activeAtMs) {
+		return Math.max(0L, activeAtMs) + this.properties.getResume().getZombieAge().toMillis();
+	}
+
+	private static String runListIndexKey(long tenantId, long userId) {
+		return RUN_LIST_INDEX_PREFIX + tenantId + ":" + userId;
+	}
+
+	private static String identityRecoveryDueKey(long tenantId, long userId) {
+		return RECOVERY_DUE_IDENTITY_PREFIX + tenantId + ":" + userId;
+	}
+
+	/** 只有成员仍以本次读取的 score 存在才推迟；identity-due 在同一 Lua 内续期。 */
+	public boolean deferRecoveryCandidate(String runId, long tenantId, long userId, long expectedDueAtMs,
+			long nextDueAtMs) {
+		try {
+			String member = RunKeyScope.indexMember(tenantId, userId, runId);
+			Long deferred = this.redis.execute(RECOVERY_DEFER_SCRIPT, List.of(RECOVERY_DUE_INDEX),
+					String.valueOf(expectedDueAtMs), String.valueOf(Math.max(0L, nextDueAtMs)), member, "0");
+			if (deferred == null || deferred <= 0L) {
+				return false;
+			}
+			Long identityDeferred = this.redis.execute(RECOVERY_DEFER_SCRIPT,
+					List.of(identityRecoveryDueKey(tenantId, userId)), String.valueOf(expectedDueAtMs),
+					String.valueOf(Math.max(0L, nextDueAtMs)), runId, String.valueOf(ttlFor(runId).toMillis()));
+			return identityDeferred != null && identityDeferred > 0L;
+		}
+		catch (Exception ex) {
+			log.debug("recovery candidate defer failed runId={}: {}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	/** score 已变化表示有更新写者，旧读者不得删除或复活该成员。 */
+	public boolean removeRecoveryCandidate(String runId, long tenantId, long userId, long expectedDueAtMs) {
+		try {
+			Long removed = this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(RECOVERY_DUE_INDEX),
+					String.valueOf(expectedDueAtMs), RunKeyScope.indexMember(tenantId, userId, runId));
+			if (removed == null || removed <= 0L) {
+				return false;
+			}
+			this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(identityRecoveryDueKey(tenantId, userId)),
+					String.valueOf(expectedDueAtMs), runId);
+			return true;
+		}
+		catch (Exception ex) {
+			log.debug("stale recovery candidate cleanup failed runId={}: {}", runId, ex.getMessage());
+			return false;
 		}
 	}
 
@@ -2279,13 +2274,13 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/**
 	 * 按<b>记录身份</b>拼会话→run 索引键（快照写入/补写用；不依赖当前线程上下文）。
 	 *
-	 * <p>无身份 legacy 记录落到旧裸键形态 {@code ai:session:runs:<sessionId>}，与
-	 * {@link TenantKeyScope#scoped(String, String)} 在无上下文时的口径一致。
+	 * <p>无身份上下文 = 失败（不生成无身份会话索引）。
 	 */
 	private String sessionRunsKey(String sessionId, long tenantId, long userId) {
-		return TenantKeyScope.hasIdentity(tenantId, userId)
-				? TenantKeyScope.scoped(SESSION_RUNS_PREFIX, tenantId, userId, sessionId)
-				: SESSION_RUNS_PREFIX + sessionId;
+		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
+			throw new IllegalArgumentException("会话→run 索引要求显式 tenant/user，不得生成无身份键");
+		}
+		return TenantKeyScope.scoped(SESSION_RUNS_PREFIX, tenantId, userId, sessionId);
 	}
 
 	/**
@@ -2699,17 +2694,20 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 *     误判为假会提前放掉一个正在跑的轮的续跑权）。</li>
 	 * </ul>
 	 *
-	 * @param identity 本轮记录身份（{@code null} = 记录无身份：按 legacy 命名空间读）
+	 * @param identity 本轮记录身份（不可用 = 无法定位这一轮的键，保守视为仍活跃）
 	 */
 	public boolean snapshotNotTerminal(String runId, TenantUser identity) {
 		if (runId == null || runId.isBlank()) {
 			return false;
 		}
+		if (identity == null) {
+			// 身份不可确认：没有可读的键，保守回答"仍活跃"（不主动放掉一个可能还在跑的轮）。
+			return true;
+		}
 		if (this.redis == null) {
 			// 进程内替身（InMemoryRunStore）：没有状态键面，退回被覆写的快照读口（同旧判据）。
 			try {
-				RunSnapshot snapshot = identity == null ? get(runId)
-						: get(runId, identity.tenantId(), identity.userId());
+				RunSnapshot snapshot = get(runId, identity.tenantId(), identity.userId());
 				return snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus());
 			}
 			catch (RuntimeException ex) {
@@ -2717,14 +2715,12 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 			}
 		}
 		try {
-			String stateKey = identity == null ? runStateKey(runId)
-					: runScopedKey(RUN_STATE_PREFIX, identity.tenantId(), identity.userId(), runId);
+			String stateKey = runScopedKey(RUN_STATE_PREFIX, identity.tenantId(), identity.userId(), runId);
 			String state = this.redis.opsForValue().get(stateKey);
 			if (state != null && !state.isBlank()) {
 				return !RunSnapshot.isTerminal(state);
 			}
-			String snapshotKey = identity == null ? runKey(runId)
-					: runScopedKey(RUN_PREFIX, identity.tenantId(), identity.userId(), runId);
+			String snapshotKey = runScopedKey(RUN_PREFIX, identity.tenantId(), identity.userId(), runId);
 			String raw = this.redis.opsForValue().get(snapshotKey);
 			if (raw == null) {
 				return false;
@@ -2916,7 +2912,7 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	 * 同 id 的新一轮被判成旧状态。
 	 */
 	public void deleteRun(String runId) {
-		deleteRun(runId, RequestContextUtils.currentOrNull());
+		deleteRun(runId, RequestContextUtils.require());
 	}
 
 	/**
@@ -2948,21 +2944,19 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	}
 
 	private void deleteRun(String runId, TenantUser identity) {
+		if (identity == null) {
+			throw new IllegalArgumentException("删除轮次必须带身份 runId=" + runId);
+		}
 		RunSnapshot snapshot = readForDelete(runId, identity);
-		if (identity != null && snapshot != null && !identity.equals(recordIdentityOf(snapshot))) {
+		if (snapshot != null && !identity.equals(recordIdentityOf(snapshot))) {
 			// 记录在（且是从调用线程身份那一侧读到的）却与给定删除身份不符 ⇒ 拒绝。
 			// 静默 no-op 会让销毁报告"成功"而这一轮的数据仍在。
 			throw new IllegalStateException("拒绝以身份 " + identity + " 删除不属于它的轮次 runId=" + runId
 					+ "（记录归属=" + recordIdentityOf(snapshot) + "）：键名由身份拼出，错身份删是静默 no-op/误删");
 		}
-		if (identity != null) {
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-				deleteRunKeys(runId, snapshot, identity);
-			}
-			return;
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			deleteRunKeys(runId, snapshot, identity);
 		}
-		log.warn("delete run without identity context runId={}: only legacy-namespace keys cleaned (identity-scoped runs untouched)", runId);
-		deleteRunKeys(runId, snapshot, null);
 	}
 
 	/**
@@ -3017,13 +3011,16 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		// 同 runId 的其它租户/用户成员原样保留。
 		// 13 键已经删成功时，索引清理失败<b>不得</b>把整次删除报成失败（会误报"13 键删除失败"并
 		// 把已删净的轮次重新 deferred）。stale 成员由 prune / 恢复面按快照缺失跳过，best-effort 即可。
-		try {
-			this.redis.opsForSet().remove(RUN_INDEX,
-					identity == null ? RunKeyScope.indexMember(runId) : RunKeyScope.indexMember(identity, runId));
-		}
-		catch (Exception ex) {
-			log.warn("global run index member cleanup failed runId={} (stale member left to prune/recovery skip): {}", runId,
-					ex.getMessage());
+		if (identity != null) {
+			try {
+				this.redis.opsForZSet().remove(RECOVERY_DUE_INDEX, RunKeyScope.indexMember(identity, runId));
+				this.redis.opsForZSet().remove(identityRecoveryDueKey(identity.tenantId(), identity.userId()), runId);
+				this.redis.opsForZSet().remove(runListIndexKey(identity.tenantId(), identity.userId()), runId);
+			}
+			catch (Exception ex) {
+				log.warn("run recovery/list index cleanup failed runId={} (stale member left to bounded reconcile): {}",
+						runId, ex.getMessage());
+			}
 		}
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
 			// N1：活跃有序索引同样摘成员（终态清理失败时它也只会成为下一轮被摘掉的 stale 候选）。
@@ -3214,169 +3211,117 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return runScopedKey(XEVENTS_PREFIX, runId);
 	}
 
-	/**
-	 * <b>当前归属</b>仍存活的 runId（索引里已过期的惰性剔除）。
-	 *
-	 * <p>与 {@link #pruneRunIndex()} 共用"活/死"判据，但<b>只看当前身份</b>：
-	 * {@code ai:runs} 的成员是复合成员 {@code tenantId/userId/runId}，列表/启动发现按成员里的
-	 * 归属过滤（不是"先枚举租户再逐租户问"）。无身份上下文时没有可归属的成员。
-	 *
-	 * <p>系统级恢复（跨身份）不走本方法：用 {@link #allRunRecords()} 取"成员里的身份"，
-	 * 再按记录 {@code useContext} 逐轮处理。
-	 */
+	/** 请求面列表只读当前身份的窄 ZSET，不再先做全局 SMEMBERS 和逐成员 EXISTS。 */
 	public List<String> allRunIds() {
-		Set<String> ids = this.redis.opsForSet().members(RUN_INDEX);
+		TenantUser current = RequestContextUtils.currentOrNull();
+		if (current == null) {
+			return List.of();
+		}
+		Set<String> ids = this.redis.opsForZSet().range(runListIndexKey(current.tenantId(), current.userId()), 0, -1);
 		if (ids == null || ids.isEmpty()) {
+			return List.of();
+		}
+		List<String> out = new ArrayList<>(ids);
+		out.sort(String::compareTo);
+		return out;
+	}
+
+	public record RecoveryCandidate(RunKeyScope.IndexRef ref, long dueAtMs) {
+	}
+
+	/** 兼容旧调用面，但系统恢复只允许取一页到期候选。 */
+	public List<RunKeyScope.IndexRef> allRunRecords() {
+		return recoveryDueRecords(System.currentTimeMillis(), RECOVERY_RECONCILE_BATCH).stream()
+			.map(RecoveryCandidate::ref).toList();
+	}
+
+	/** 候选连同本次 score 返回，后续 defer/remove 必须以它做 CAS。 */
+	public List<RecoveryCandidate> recoveryDueRecords(long nowMs, int limit) {
+		if (this.redis == null || limit <= 0) {
 			return List.of();
 		}
 		TenantUser current = RequestContextUtils.currentOrNull();
-		List<String> live = new ArrayList<>();
-		List<String> dead = new ArrayList<>();
-		for (String member : ids) {
-			RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
-			if (ref == null) {
-				// 无归属成员不是当前写入形态（create 恒写复合成员）：不返回，留给 pruneRunIndex 清掉。
-				continue;
-			}
-			// 归属过滤：别人的成员既不返回也不判定死活（判定会读别人的键）
-			if (current == null || !current.equals(ref.identity())) {
-				continue;
-			}
-			if (Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(),
-					ref.userId(), ref.runId())))) {
-				live.add(ref.runId());
-			}
-			else {
-				dead.add(member);
-			}
-		}
-		dropFromIndex(dead);
-		// 本次已经做过一次全量"活/死"判定：把机会式清理的节流锚点前移，避免启动扫描之后
-		// 紧接着的第一次 create 再全表扫一遍（两处判据同源，没必要重复）。
-		this.indexPrunedAtMs.set(System.currentTimeMillis());
-		live.sort(String::compareTo);
-		return live;
-	}
-
-	/**
-	 * <b>按记录身份</b>枚举全部仍存活的轮次（系统恢复的唯一发现面）。
-	 *
-	 * <p>成员里自带 {@code tenantId/userId}，因此恢复方<b>不需要</b>扫描租户列表，也不需要用
-	 * "当前线程"猜身份：逐条 {@code RunIdentityScope.open(ref.tenantId(), ref.userId())} 后再读快照即可。
-	 * <b>无归属成员不在返回值里</b>（没有身份可恢复），由 {@link #pruneRunIndex()} 惰性剔除。
-	 *
-	 * <p>活/死判据与 {@link #allRunIds()} 同源，死成员顺手剔除。
-	 */
-	public List<RunKeyScope.IndexRef> allRunRecords() {
-		if (this.redis == null) {
+		String key = current == null ? RECOVERY_DUE_INDEX : identityRecoveryDueKey(current.tenantId(), current.userId());
+		Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
+				Double.NEGATIVE_INFINITY, nowMs, 0, limit);
+		if (members == null || members.isEmpty()) {
 			return List.of();
 		}
-		Set<String> ids = this.redis.opsForSet().members(RUN_INDEX);
-		if (ids == null || ids.isEmpty()) {
-			return List.of();
-		}
-		List<RunKeyScope.IndexRef> live = new ArrayList<>();
-		List<String> dead = new ArrayList<>();
-		for (String member : ids) {
-			RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
-			if (ref == null) {
-				// 无归属成员：不删（可能是过渡期数据）、也不返回（不得猜身份）
-				continue;
-			}
-			if (Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(), ref.userId(),
-					ref.runId())))) {
-				live.add(ref);
-			}
-			else {
-				dead.add(member);
+		List<RecoveryCandidate> out = new ArrayList<>(members.size());
+		for (ZSetOperations.TypedTuple<String> tuple : members) {
+			String member = tuple.getValue();
+			Double score = tuple.getScore();
+			RunKeyScope.IndexRef ref = current == null ? RunKeyScope.parseIndexMember(member)
+					: new RunKeyScope.IndexRef(current.tenantId(), current.userId(), member);
+			if (ref != null && score != null) {
+				out.add(new RecoveryCandidate(ref, score.longValue()));
 			}
 		}
-		dropFromIndex(dead);
-		live.sort((left, right) -> left.runId().compareTo(right.runId()));
-		return live;
+		return out;
 	}
 
-	/**
-	 * {@code ai:runs} 索引的<b>惰性清理</b>（Redis 容量专项 A）：剔除快照键已不存在的成员，返回剔除条数。
-	 *
-	 * <h2>为什么不是"给索引一个 TTL"</h2>
-	 * {@code ai:runs} 是 SET，<b>无法按成员过期</b>；对整键 {@code EXPIRE} 会把
-	 * <b>活跃</b>轮次的发现面一起删掉 —— 挂起等人没有上限（确认门/生成式表单），一个挂起数天的
-	 * 活轮在"索引不再被写"的窗口里就会消失，重启后无法自动续跑（比"索引留垃圾"坏得多）。
-	 * 故只做按成员的剔除：判据 = 快照键 {@code ai:run:<runId>} 是否还在（与 {@link #allRunIds()} 同源）。
-	 * 空 SET 由 Redis 自己删除（不存在"空索引键"），因此索引不会永久留一个空壳。
-	 *
-	 * <p><b>不做"终态即删"</b>：终态轮次可能还要被 {@code /events} 回放/诊断（索引是
-	 * {@code ResumeService.listRuns} 的入口，快照 TTL 到期后才是真正的死亡）。清理只认
-	 * "快照已不在"，不猜业务状态。
-	 *
-	 * <p><b>按身份分视界</b>：带身份的请求线程只对<b>自己身份</b>的成员做 {@code EXISTS} 与
-	 * {@code SREM} —— 别人的成员既不探测也不删除（探测就是跨身份读，删除更是替别人决定那一轮
-	 * 的发现面；那一身份可能正要用它续跑）。无归属成员不是当前写入形态，直接剔除。
-	 * 无身份的系统线程仍全表清理（成员自带身份，逐成员按<b>记录里</b>的身份判活），与
-	 * {@link #allRunRecords()} 的发现面同一口径。
-	 *
-	 * <p><b>失败不抛</b>：清理是运维卫生动作，不能让它挡住 {@code create}（调用点在创建路径上）。
-	 * 失败计入 {@link RedisDegradation#C1_RUN_INDEX_PRUNE} 并 WARN，下一拍重试。
-	 *
-	 * <p>成本 = 一次 {@code SMEMBERS} + 逐成员 {@code EXISTS}（O(索引大小)，全部单键命令 ⇒ Cluster 安全）。
-	 * 调用方 {@link #create} 路径上带节流（{@code app.ai.stream.index-prune-interval}）。
-	 */
+	/** 每拍最多 64 项，并以 ZSET 偏移轮转；state 缺失必须回读快照确认。 */
 	public int pruneRunIndex() {
 		if (this.redis == null) {
-			// 进程内替身（InMemoryRunStore）没有索引键面；保持"无索引可清"的语义，不记降级。
 			return 0;
 		}
 		try {
-			Set<String> ids = this.redis.opsForSet().members(RUN_INDEX);
-			if (ids == null || ids.isEmpty()) {
+			Long cardinality = this.redis.opsForZSet().zCard(RECOVERY_DUE_INDEX);
+			long total = cardinality == null ? 0L : cardinality;
+			if (total == 0L) {
+				this.recoveryReconcileOffset.set(0L);
 				return 0;
 			}
-			TenantUser current = RequestContextUtils.currentOrNull();
-			List<String> dead = new ArrayList<>();
-			for (String member : ids) {
+			long offset = this.recoveryReconcileOffset.get();
+			if (offset >= total) {
+				offset = 0L;
+			}
+			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeWithScores(
+					RECOVERY_DUE_INDEX, offset, Math.min(total - 1L, offset + RECOVERY_RECONCILE_BATCH - 1L));
+			if (members == null || members.isEmpty()) {
+				this.recoveryReconcileOffset.set(0L);
+				return 0;
+			}
+			long nextOffset = offset + members.size();
+			this.recoveryReconcileOffset.set(nextOffset >= total ? 0L : nextOffset);
+			int removed = 0;
+			for (ZSetOperations.TypedTuple<String> tuple : members) {
+				String member = tuple.getValue();
+				Double score = tuple.getScore();
+				if (member == null || score == null) {
+					continue;
+				}
+				long expectedScore = score.longValue();
 				RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
 				if (ref == null) {
-					// 无归属成员不是当前写入形态（create 恒写复合成员）：发现面已不用，顺手剔除。
-					dead.add(member);
+					Long result = this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(RECOVERY_DUE_INDEX),
+							String.valueOf(expectedScore), member);
+					if (result != null && result > 0L) {
+						removed++;
+					}
 					continue;
 				}
-				if (current != null && !current.equals(ref.identity())) {
-					// 请求线程的视界 = 自己身份：不探测、不清理别人的成员
-					continue;
-				}
-				if (!Boolean.TRUE.equals(this.redis.hasKey(RunKeyScope.scoped(RUN_PREFIX, ref.tenantId(),
-						ref.userId(), ref.runId())))) {
-					dead.add(member);
+				RunSnapshot snapshot = get(ref.runId(), ref.tenantId(), ref.userId());
+				if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+					if (removeRecoveryCandidate(ref.runId(), ref.tenantId(), ref.userId(), expectedScore)) {
+						if (snapshot == null) {
+							this.redis.opsForZSet().remove(runListIndexKey(ref.tenantId(), ref.userId()), ref.runId());
+						}
+						removed++;
+					}
 				}
 			}
-			return dropFromIndex(dead);
+			return removed;
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
-			log.warn("ai:runs index lazy cleanup failed (skipped this turn; residue left to next tick; run unaffected): {}", ex.toString());
+			log.warn("recovery due index bounded reconcile failed (retry next tick): {}", ex.toString());
 			return 0;
 		}
 	}
 
-	/** 剔除索引里的死成员（{@code SREM}；空 SET 由 Redis 自动消失）。返回剔除条数。 */
-	private int dropFromIndex(List<String> dead) {
-		if (dead == null || dead.isEmpty()) {
-			return 0;
-		}
-		this.redis.opsForSet().remove(RUN_INDEX, dead.toArray());
-		log.info("ai:runs index lazy cleanup: removed {} runIds without snapshots (index converges with snapshot TTL)", dead.size());
-		return dead.size();
-	}
-
-	/**
-	 * 创建路径上的<b>机会式</b>索引清理（节流）：距上次清理不足 {@code index-prune-interval} 时直接返回。
-	 *
-	 * <p>为什么节流而不是每次都扫：{@code create} 在每次 {@code /chat} 的热路径上，而清理是
-	 * O(索引大小) 的 {@code SMEMBERS + EXISTS}。{@code interval = 0} = 关闭机会式清理（只剩
-	 * 启动扫描）；负值由启动期守卫拦下（{@link AiProperties#verifyStream()}）。
-	 */
-	private void maybePruneRunIndex() {
+	/** 对账只由恢复扫描触发；创建路径不执行任何全量或逐成员清理。 */
+	public void reconcileRecoveryIndexThrottled() {
 		Duration interval = this.properties == null || this.properties.getStream() == null ? null
 				: this.properties.getStream().getIndexPruneInterval();
 		if (interval == null || interval.isZero() || interval.isNegative()) {
@@ -3384,14 +3329,9 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		}
 		long now = System.currentTimeMillis();
 		long last = this.indexPrunedAtMs.get();
-		if (now - last < interval.toMillis()) {
-			return;
+		if (now - last >= interval.toMillis() && this.indexPrunedAtMs.compareAndSet(last, now)) {
+			pruneRunIndex();
 		}
-		// CAS 抢占"这一拍由我来清"：多实例/并发 create 不必每人都扫一遍全表。
-		if (!this.indexPrunedAtMs.compareAndSet(last, now)) {
-			return;
-		}
-		pruneRunIndex();
 	}
 
 	// ── 挂起（硬规范①的落点） ──────────────────────────────────────────────
@@ -5106,92 +5046,6 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 		return TenantKeyScope.scoped(CONTEXT_LEDGER_PREFIX, sessionId);
 	}
 
-	/** {@code ai:ctx:archive:<tenantId>:<userId>:<sessionId>:<turnNo>} —— 压缩前原文（STRING，JSON 数组）。 */
-	public String contextArchiveKey(String sessionId, int turnNo) {
-		return TenantKeyScope.scoped(CONTEXT_ARCHIVE_PREFIX, sessionId) + ":" + turnNo;
-	}
-
-	/**
-	 * 读会话上下文真值（HASH → {@code ContextState}；键不存在 ⇒ 空态）。
-	 *
-	 * <p>读也 touch TTL（"与会话同滑动"：只读不写的会话同样按活跃续期）。Redis 抖动<b>不</b>抛错
-	 * —— 计量面挂了不该让端点 500，降级为空态由调用方决定怎么展示。
-	 */
-	@Override
-	public com.example.configmgr.ai.context.ContextState read(String sessionId) {
-		String key = contextKey(sessionId);
-		try {
-			Map<Object, Object> raw = this.redis.opsForHash().entries(key);
-			touchContextTtl(key);
-			if (raw == null || raw.isEmpty()) {
-				return com.example.configmgr.ai.context.ContextState.EMPTY;
-			}
-			Map<String, String> fields = new LinkedHashMap<>();
-			for (Map.Entry<Object, Object> entry : raw.entrySet()) {
-				fields.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
-			}
-			return com.example.configmgr.ai.context.ContextState.fromFields(fields);
-		}
-		catch (RuntimeException ex) {
-			log.warn("context truth read failed sessionId={}: {} (treating as empty)", sessionId, ex.getMessage());
-			return com.example.configmgr.ai.context.ContextState.EMPTY;
-		}
-	}
-
-	/**
-	 * 整份写会话上下文真值（HSET + EXPIRE）。
-	 *
-	 * <p>
-	 * <b>边界（N-3 如实登记）</b>：底层是 {@code HSET} 的<b>字段级合并</b>，不是"先删后写"——
-	 * {@code ContextState#toFields()} 对 null 键<b>不产字段</b>（避免把 null 写成空串），
-	 * 于是"上一份有 {@code reason}、这一份 reason=null"时，<b>旧值会残留</b>在该 HASH 里。
-	 * 影响面仅限 {@code reason}（唯一的可空字符串字段；其余字段恒写）+ {@code model}（同为空则残留旧模型名）。
-	 * 两者都是<b>观测/展示</b>字段：残留表现为"上一次压缩的原因/模型名没被清掉"，
-	 * 不会被任何判定消费（判据只看 {@code used/level/turnNo/circuit}）。不做 DEL+HSET 的理由 =
-	 * 多一次往返且窗口内 HASH 可能为空（读侧会误判"从未记账"）。
-	 */
-	@Override
-	public void write(String sessionId, com.example.configmgr.ai.context.ContextState state) {
-		String key = contextKey(sessionId);
-		Map<String, String> fields = state.toFields();
-		this.redis.opsForHash().putAll(key, fields);
-		touchContextTtl(key);
-	}
-
-	/** 追加上下文台账（LPUSH + LTRIM 20 + EXPIRE；写失败只抛给调用方，由压缩的失败路径兜住）。 */
-	@Override
-	public void appendLedger(String sessionId, Map<String, Object> event) {
-		String key = contextLedgerKey(sessionId);
-		try {
-			this.redis.opsForList().leftPush(key, this.mapper.writeValueAsString(event));
-			this.redis.opsForList().trim(key, 0, CONTEXT_LEDGER_MAX - 1);
-			touchContextTtl(key);
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException("无法写入上下文台账 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
-		}
-	}
-
-	/** 读上下文台账（新→旧，最多 {@value #CONTEXT_LEDGER_MAX} 条）。 */
-	@Override
-	public List<Map<String, Object>> contextLedger(String sessionId) {
-		List<Map<String, Object>> out = new ArrayList<>();
-		try {
-			List<String> raw = this.redis.opsForList().range(contextLedgerKey(sessionId), 0, CONTEXT_LEDGER_MAX - 1);
-			if (raw == null) {
-				return out;
-			}
-			for (String item : raw) {
-				out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
-				}));
-			}
-		}
-		catch (Exception ex) {
-			log.warn("context ledger read failed sessionId={}: {} (treating as empty ledger)", sessionId, ex.getMessage());
-		}
-		return out;
-	}
-
 	/**
 	 * 追加安全事件台账（防护批③ B3-7；{@code ai:safety:<sessionId>}，LPUSH + LTRIM 20 + 同会话 TTL）。
 	 *
@@ -5241,69 +5095,6 @@ public class RunStore implements com.example.configmgr.ai.context.ContextStateSt
 	/** {@code ai:ctx:events:<tenantId>:<userId>:<sessionId>} —— 已提交压缩事实（LIST，新→旧）。 */
 	public String contextEventsKey(String sessionId) {
 		return TenantKeyScope.scoped(CONTEXT_EVENTS_PREFIX, sessionId);
-	}
-
-	/** 会话内单调压缩序号（HINCRBY；与 {@code ai:ctx:<sid>} 同键、同 TTL）。 */
-	@Override
-	public long nextCompactionSeq(String sessionId) {
-		String key = contextKey(sessionId);
-		Long seq;
-		try {
-			seq = this.redis.opsForHash().increment(key, CONTEXT_COMP_SEQ_FIELD, 1L);
-			touchContextTtl(key);
-		}
-		catch (RuntimeException ex) {
-			throw new IllegalStateException("无法分配压缩事件序号 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
-		}
-		return seq == null ? 0L : seq;
-	}
-
-	/** 追加已提交压缩事实（LPUSH + LTRIM 200 + EXPIRE；单键 Cluster 安全）。 */
-	@Override
-	public void appendEvent(String sessionId, Map<String, Object> event) {
-		String key = contextEventsKey(sessionId);
-		try {
-			// P2：push/裁剪/TTL 同脚本原子完成 —— 消除"push 成功、EXPIRE 未到"留下永久键的窗口。
-			this.redis.execute(CONTEXT_EVENT_APPEND_SCRIPT, List.of(key),
-					this.mapper.writeValueAsString(event), String.valueOf(CONTEXT_EVENTS_MAX),
-					String.valueOf(this.properties.getSessionTtl().toMillis()));
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException("无法写入压缩事实 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
-		}
-	}
-
-	/** 读已提交压缩事实（新→旧；最多 {@value #CONTEXT_EVENTS_MAX} 条）。 */
-	@Override
-	public List<Map<String, Object>> events(String sessionId) {
-		List<Map<String, Object>> out = new ArrayList<>();
-		try {
-			List<String> raw = this.redis.opsForList().range(contextEventsKey(sessionId), 0, CONTEXT_EVENTS_MAX - 1);
-			if (raw == null) {
-				return out;
-			}
-			for (String item : raw) {
-				out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
-				}));
-			}
-			touchContextTtl(contextEventsKey(sessionId));
-		}
-		catch (Exception ex) {
-			log.warn("compaction fact read failed sessionId={}: {} (treating as no events)", sessionId, ex.getMessage());
-		}
-		return out;
-	}
-
-	/** 归档压缩前原文（STRING，JSON 数组；TTL 同会话）。 */
-	@Override
-	public void archive(String sessionId, int turnNo, List<String> messageJson) {
-		try {
-			String json = this.mapper.writeValueAsString(messageJson);
-			this.redis.opsForValue().set(contextArchiveKey(sessionId, turnNo), json, this.properties.getSessionTtl());
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException("无法归档压缩前原文 sessionId=" + sessionId + "：", ex);
-		}
 	}
 
 	private void touchContextTtl(String key) {

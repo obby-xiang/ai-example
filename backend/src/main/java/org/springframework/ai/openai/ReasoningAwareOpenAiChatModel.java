@@ -42,7 +42,7 @@ import org.springframework.util.CollectionUtils;
  * 于是"用户在 A 上产生的推理"在换到 B 之后不会进入 B 的请求；而<b>存储面不动</b> ——
  * 历史在快照/记忆里仍是原文（切回 A 或同供应方续跑时照常回放）。
  * 本类只清理<b>本协议层真正会外发的那一个字段</b>（reasoningContent），不碰其它 metadata。
- * 来源缺失（本批之前的旧数据）按 {@link ReasoningOrigin#replayAllowed} 的声明兼容策略处理。
+ * 来源缺失（无法证明由谁产出）按 {@link ReasoningOrigin#replayAllowed} 的 fail-closed 口径<b>不回放</b>。
  */
 public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 
@@ -54,8 +54,8 @@ public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 	 * 当前实例所属供应方的主键（DB 供应方 id；env 合成行为 {@code null}）。
 	 *
 	 * <p>用于对比消息 metadata 里的 {@link ReasoningOrigin}：只有同供应方才回放 reasoning_content。
-	 * {@code null} = 未接线（旧构造器/直接构造的单测）：<b>有标记</b>的消息因此判为"当前未知"
-	 * 而不回放（fail-closed），<b>无标记</b>的旧数据仍按声明兼容策略回放 —— 见
+	 * {@code null} = 未接线（轻装配/直接构造的单测）：<b>有标记</b>的消息因此判为"当前未知"
+	 * 而不回放；<b>无标记</b>的消息同样不回放（来源未知 = fail-closed）—— 见
 	 * {@link ReasoningOrigin#replayAllowed}。
 	 */
 	private final Long currentProviderId;
@@ -105,7 +105,7 @@ public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 					}).toList();
 				}
 				// 补丁要点：回放 metadata 中的 reasoningContent（父类第 9 组件恒为 null）。
-				// 跨供应方隔离：来源标记与当前供应方一致才回放（无标记 = 旧数据，按声明策略回放）。
+				// 跨供应方隔离：来源标记与当前供应方一致才回放（无标记 = 来源未知，不回放）。
 				Object reasoning = assistantMessage.getMetadata().get("reasoningContent");
 				boolean replay = ReasoningOrigin.replayAllowed(assistantMessage.getMetadata(),
 						this.currentProviderId);

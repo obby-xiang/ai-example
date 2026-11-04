@@ -708,9 +708,6 @@ public class ResilientChatService {
 		// —— 否则压缩期间别人写入的新消息会被旧内容覆盖，或反过来把压缩结果丢掉。
 		MemoryWindowSnapshot windowSnapshot = memoryWindowSnapshot(sessionId);
 		List<Message> memory = windowSnapshot != null ? windowSnapshot.messages() : this.chatMemory.get(sessionId);
-		// B2：用户原文在轮首即落 transcript（不依赖本轮是否成功/是否被压缩）。
-		// 没有请求身份时这里跳过；终态写点会用 run 快照身份补写同 entryId 的 user 条目。
-		recordTranscriptUser(runId, sessionId, transcriptText, turnStartedAtMs, memory);
 		// 槽位解析（槽位放行批）：任务/工作区 + 用户已明确值 + 历史未修改值 → extra[taskSlots]。
 		// 必须在 systemPromptText 与 forContext 之前完成：前者要把槽位作为数据展示给模型，
 		// 后者（表单放行）在下一批从同一个上下文读它。空槽位不写键（不引入噪声）。
@@ -730,24 +727,22 @@ public class ResilientChatService {
 		//
 		// 批③：先做请求级解析（显式 modelId 优先，未指定则退化成默认链），再按"本次模型 + 参数覆盖"
 		// 派生一次性运行态 —— 缓存条目（按 RuntimeKey）不动，故交替选模型不会互相踩踏。
-		AiConfigService.ChatTarget target = this.providerRegistry.target(request.modelId()).orElse(null);
-		if (target == null && StringUtils.hasText(request.modelId())) {
-			// 控制器已按 400 MODEL_NOT_FOUND 拦过；走到这里只可能是"读库后配置又被改了"的窄窗口。
-			// 不静默换模型：让这一轮按默认目标跑并在日志里留痕（用户会在 done.model 里看到真实模型）。
-			log.warn("requested model unavailable (concurrent config change?) runId={} "
-					+ "requested={}: falling back to default target for this turn", runId,
-					request.modelId());
+		AiConfigService.ChatTarget target = null;
+		if (StringUtils.hasText(request.modelId())) {
+			if (request.providerId() == null) {
+				throw new ProviderGoneException(runId, null, request.modelId(),
+						"显式 modelId 必须同时提供 providerId，不得跨 provider 猜测");
+			}
+			target = this.providerRegistry.target(request.providerId(), request.modelId())
+				.orElseThrow(() -> new ProviderGoneException(runId, request.providerId(), request.modelId()));
 		}
 		boolean paramsAllowed = this.providerRegistry.allowUserParams();
 		AiProviderRegistry.Overrides overrides = paramsAllowed ? overridesOf(request.params())
 				: AiProviderRegistry.Overrides.NONE;
-		// 参数被策略锁住时"忽略"不是"没说"：done.extra.paramsLocked 要如实告知（设计稿 §3.6）
 		boolean paramsLocked = !paramsAllowed && request.params() != null
 				&& !overridesOf(request.params()).isEmpty();
 		ProviderRuntime runtime = target == null ? this.providerRegistry.current()
 				: this.providerRegistry.forRequest(target.provider(), target.modelId(), overrides);
-		// 能力位降级（设计稿 §3.6）：模型不支持工具调用 ⇒ 本轮下发<b>空</b>工具集（纯问答），
-		// 不报错 —— 模型能力不是用户错误，界面上已有黄条说明。
 		boolean toolsAllowed = target == null || target.supportsToolCalling();
 
 		// 上下文专项批①：装配点同时给出三个分项锚点（system/tools/input）—— 它们不在历史里，
@@ -829,6 +824,7 @@ public class ResilientChatService {
 					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
 							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId(),
 							transcriptText, turnStartedAtMs);
+					recordTranscriptUser(runId, sessionId, transcriptText, turnStartedAtMs);
 				}
 				catch (RuntimeException ex) {
 					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
@@ -854,6 +850,7 @@ public class ResilientChatService {
 			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
 					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked),
 					request.clientRequestId(), transcriptText, turnStartedAtMs);
+			recordTranscriptUser(runId, sessionId, transcriptText, turnStartedAtMs);
 
 			// ===== 驱动所有权（2026-10-29）：快照建好之后、模型/预检之前先取得续跑权 =====
 			// 旧实现首轮从不持租：跨实例僵尸扫描看到的证据是"RUNNING + 无租约 + 业务活动超龄" ⇒ 判死接管，
@@ -963,29 +960,14 @@ public class ResilientChatService {
 	 * {@link ResumeService} 从 RunStore 重建好，再过一遍 advisor 会把记忆窗口重复拼一遍。
 	 * 工具执行仍必须走同一个官方扩展点（options 里带 toolCallbacks + toolContext），
 	 * 这样续跑后模型新发的工具调用照旧经过确认门/前端挂起（SM-06 / TC-AI-03b）。
+	 *
+	 * <p><b>模型身份与参数只认快照冻结值</b>（{@link RunSnapshot#getProviderId()} /
+	 * {@link RunSnapshot#getModelId()}）；不接受调用方传入"当前默认"。provider 已删/停用的
+	 * HTTP 409 由 {@code ResumeService} 前置判定，驱动阶段的窄窗口由
+	 * {@link ProviderGoneException} 落成明确终态。
 	 */
 	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
 			SseChatEmitter out) {
-		driveResumed(runId, sessionId, context, history, null, null, out);
-	}
-
-	/**
-	 * 续跑（批③：<b>按快照身份</b>取模型）。
-	 *
-	 * <p>
-	 * 与五参重载的差别只在一件事：模型身份来自 {@link RunSnapshot#getProviderId()} /
-	 * {@link RunSnapshot#getModelId()}，而不是"此刻的默认目标"。这样"用户改了默认模型"不会让一个
-	 * 挂起中的旧轮换模型续跑（历史与 {@code done.model} 都不许说谎）。
-	 *
-	 * <p>
-	 * provider 已删/停用由 {@code ResumeService} 预先判 409 {@code PROVIDER_GONE}（那是 HTTP 语义的
-	 * 位置）；走到这里仍取不到目标（读库后又被改）时回落默认并 WARN，不静默冒充快照模型。
-	 *
-	 * @param providerId 快照的 provider（{@code null} = 批① 之前的旧快照）
-	 * @param modelId 快照的模型名（{@code null}/空白 = 旧快照）
-	 */
-	public void driveResumed(String runId, String sessionId, AiContext context, List<Message> history,
-			Long providerId, String modelId, SseChatEmitter out) {
 		// 驱动入口（本批返修 I-2）：记一次归档下界。同一 runId 会被续跑/重挂驱动多次，
 		// 上一次驱动留下的 error 不属于本次 —— 失败出口只认 seq 大于下界的终帧。
 		if (out != null) {
@@ -994,23 +976,21 @@ public class ResilientChatService {
 		long turnStartedAtMs = System.currentTimeMillis();
 		// 日志链路：续跑落在挂起池线程上（ResumeService 提交），入口重绑锚点
 		AiTrace.bind(runId, sessionId);
-		// L-26：续跑读取快照的<b>冻结生效参数</b>（只读；旧快照 paramsVersion=0 ⇒ 走旧行为 + WARN）。
-		// 读失败按"没有冻结信息"处理（旧行为），不能因为多一次旁路读让续跑直接失败。
+		// 续跑读取快照的<b>冻结生效参数</b>；缺失即失败（不允许采用当前默认模型/参数）。
 		RunSnapshot snapshot = resumeSnapshot(runId);
 		// 恢复型入口：身份只从本轮记录恢复（交棒线程即使带着上一位调用者的 TTL 身份也以快照为准）。
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(
-				snapshot == null ? 0L : snapshot.getTenantId(), snapshot == null ? 0L : snapshot.getUserId())) {
-			driveResumedScoped(runId, sessionId, context, history, providerId, modelId, out, snapshot,
-					turnStartedAtMs);
+				snapshot.getTenantId(), snapshot.getUserId())) {
+			driveResumedScoped(runId, sessionId, context, history, out, snapshot, turnStartedAtMs);
 		}
 	}
 
 	/** 续跑主体（已在<b>本轮身份作用域</b>内；身份来自 {@code ai:run:<runId>} 快照）。 */
 	private void driveResumedScoped(String runId, String sessionId, AiContext context, List<Message> history,
-			Long providerId, String modelId, SseChatEmitter out, RunSnapshot snapshot, long turnStartedAtMs) {
+			SseChatEmitter out, RunSnapshot snapshot, long turnStartedAtMs) {
 		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
 		// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
-		ProviderRuntime runtime = runtimeForSnapshot(runId, providerId, modelId, snapshot);
+		ProviderRuntime runtime = runtimeForSnapshot(runId, snapshot);
 		// AR-10 第 3 条（批次2）：**armed 跨 park 持久化** —— 快照里带着"本轮已进入收尾"的事实，
 		// 恢复时必须重新点亮信标（挂起不清零、继续累计），否则模型可以再要一批工具、再清一次结果、
 		// 再追加一条收尾 user 消息，与"本轮预算"（不是会话预算、不是重置式）的口径相反。
@@ -1267,28 +1247,12 @@ public class ResilientChatService {
 	}
 
 	/**
-	 * 快照口径的运行态（L-26：冻结参数优先；I3：带 providerId 时精确绑定）。
-	 *
-	 * <h2>判据（顺序即优先级）</h2>
-	 * <ol>
-	 * <li><b>已冻结</b>（{@code paramsVersion>=1}）：身份与三值一律取快照 —— 连 5 参旧签名
-	 * （{@code providerId=null}/{@code modelId=null}，如 env 合成行）也用快照自己的 modelId，
-	 * 再经 {@link AiProviderRegistry#forFrozenRequest} 把 null 也照抄（不被新默认填上）；</li>
-	 * <li><b>providerId 非空</b>（已冻结或批③ 快照）：只在这一家 provider 上解析
-	 * （{@link AiProviderRegistry#target(Long, String)}：启用/key/模型 allowlist）。
-	 * 失败 ⇒ 抛 {@link ProviderGoneException}（I6：驱动任务据此把本轮落成 FAILED 终态），
-	 * <b>不</b>回落当前默认 —— 回落就是静默跨 provider/换模型，与 {@code PROVIDER_GONE} 同一条红线
-	 * （生产侧 409 已由 {@code ResumeService} 前置拦截）；</li>
-	 * <li><b>providerId 为空</b>：旧快照/旧签名 ⇒ 按模型名兼容解析（本批之前的行为）+ WARN。</li>
-	 * </ol>
-	 */
-	/**
 	 * 续跑/重跑入口的 armed 恢复（AR-10 第 3 条）。
 	 *
 	 * <p>快照 {@code budgetArmedAtMs > 0} ⇒ 这一轮此前已经武装过（收尾中）：把信标点亮，并把
 	 * {@code budgetSkippedBatches} 一并带回 —— 到顶仍按既有上界收尾，"本轮预算"因此跨 park 连续。
 	 *
-	 * <p>{@code snapshot == null}（读失败/旧快照）⇒ 什么都不做：按真值/估算重判一次预算，
+	 * <p>{@code snapshot == null} ⇒ 什么都不做：按真值/估算重判一次预算，
 	 * 最坏是<b>多判一次</b>，不是漏判（与信标类注同一姿态）。
 	 */
 	private void restoreTurnBudget(String runId, RunSnapshot snapshot) {
@@ -1307,9 +1271,9 @@ public class ResilientChatService {
 	 * <p>取不到时返回 null 而不是抛错：摘要只是旁路增强，L2 会按「摘要不可用」失败并保持历史原样，
 	 * 不能因为"取不到摘要模型"让整个续跑失败。真正的 PROVIDER_GONE 判定在 {@code ResumeService} 前置完成。
 	 */
-	public ProviderRuntime runtimeForCompaction(String runId, Long providerId, String modelId) {
+	public ProviderRuntime runtimeForCompaction(String runId) {
 		try {
-			return runtimeForSnapshot(runId, providerId, modelId, resumeSnapshot(runId));
+			return runtimeForSnapshot(runId, resumeSnapshot(runId));
 		}
 		catch (RuntimeException ex) {
 			log.debug("resume compaction failed to read turn state runId={} "
@@ -1318,57 +1282,58 @@ public class ResilientChatService {
 		}
 	}
 
-	private ProviderRuntime runtimeForSnapshot(String runId, Long providerId, String modelId,
-			RunSnapshot snapshot) {
-		boolean frozen = snapshot != null && snapshot.paramsFrozen();
-		if (frozen) {
-			// 冻结身份优先：调用方（旧 5 参）可能什么都没传（env 合成行没有 providerId）。
-			providerId = snapshot.getProviderId();
-			modelId = snapshot.getModelId();
+	/**
+	 * 快照口径的运行态：<b>只按首笔快照冻结的 provider/model/params 续跑</b>。
+	 *
+	 * <ul>
+	 * <li>快照缺失/没有冻结模型 ⇒ 失败（不采用当前默认）；</li>
+	 * <li>{@code providerId} 非空：只在这一家 provider 上精确解析（启用/key/模型 allowlist），
+	 *     失败 ⇒ {@link ProviderGoneException}，<b>不</b>回落当前默认；</li>
+	 * <li>{@code providerId} 为空（env 合成行）：按快照的模型名解析，模型不可用同样
+	 *     {@link ProviderGoneException}；解析实现返回别家也算失败；</li>
+	 * <li>生效参数一律取快照冻结值（null 就是当时的值），不再读当前默认。</li>
+	 * </ul>
+	 */
+	private ProviderRuntime runtimeForSnapshot(String runId, RunSnapshot snapshot) {
+		if (snapshot == null) {
+			throw new IllegalStateException("续跑缺少轮次快照 runId=" + runId);
 		}
-		if (providerId == null && !StringUtils.hasText(modelId)) {
-			log.warn("resume hit old snapshot before batch 1 (no providerId/modelId) runId={}: resuming with current default target", runId);
-			return this.providerRegistry.current();
+		Long providerId = snapshot.getProviderId();
+		String modelId = snapshot.getModelId();
+		if (modelId == null || modelId.isBlank()) {
+			throw new ProviderGoneException(runId, providerId, modelId,
+					"快照没有冻结模型名（当前协议要求首笔快照完整冻结 provider/model）");
 		}
-		// I3：快照有 providerId 时必须落在<b>这一家</b>（同名模型在别家不算数）。
-		AiConfigService.ChatTarget target = providerId == null
-				? this.providerRegistry.target(modelId).orElse(null)
-				: this.providerRegistry.target(providerId, modelId).orElse(null);
+		if (providerId == null) {
+			throw new ProviderGoneException(runId, null, modelId, "快照缺少 providerId，不得按模型名跨 provider 猜测");
+		}
+		AiConfigService.ChatTarget target = this.providerRegistry.target(providerId, modelId).orElse(null);
 		if (target == null) {
-			if (providerId != null) {
-				// 不跨 provider、不换模型：本轮以错误收尾。I6：抛专用异常，驱动任务的捕获方据此落
-				// FAILED 终态（错误码带 PROVIDER_GONE 前缀）—— 只发一帧会让快照停在 RUNNING。
-				throw new ProviderGoneException(runId, providerId, modelId);
-			}
-			log.warn("resume snapshot model unresolvable runId={} providerId={} "
-					+ "model={}: falling back to current default target", runId, providerId,
-					modelId);
-			return this.providerRegistry.current();
+			throw new ProviderGoneException(runId, providerId, modelId);
 		}
 		if (providerId != null && !providerId.equals(target.provider().providerId())) {
 			// 防御：精确解析不应返回别家；真出现说明解析实现漂移，宁可失败也不跨家
 			throw new ProviderGoneException(runId, providerId, modelId,
 					"解析结果落在 provider=" + target.provider().providerId() + "，不是快照的 provider");
 		}
-		if (frozen) {
-			return this.providerRegistry.forFrozenRequest(target.provider(), modelId,
-					new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
-							snapshot.getMaxTokens()));
-		}
-		log.warn("resume snapshot has no frozen effective params (written before L-26) runId={} model={}: "
-				+ "resuming with current defaults (temperature/top_p/max_tokens may differ across turn halves)", runId, modelId);
-		return this.providerRegistry.forRequest(target.provider(), modelId, AiProviderRegistry.Overrides.NONE);
+		return this.providerRegistry.forFrozenRequest(target.provider(), modelId,
+				new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
+						snapshot.getMaxTokens()));
 	}
 
-	/** 读取续跑快照（失败按"无冻结信息"降级：多一次旁路读不得让续跑失败）。 */
+	/** 读取续跑快照；缺失即失败（续跑必须按快照冻结的模型/参数，不允许采用当前默认）。 */
 	private RunSnapshot resumeSnapshot(String runId) {
+		RunSnapshot snapshot;
 		try {
-			return this.store.get(runId);
+			snapshot = this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("resume snapshot read failed runId={} (resuming with old behavior): {}", runId, ex.getMessage());
-			return null;
+			throw new IllegalStateException("读取续跑快照失败 runId=" + runId, ex);
 		}
+		if (snapshot == null) {
+			throw new IllegalStateException("续跑快照不存在 runId=" + runId);
+		}
+		return snapshot;
 	}
 
 	/**
@@ -2543,7 +2508,16 @@ public class ResilientChatService {
 			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
 			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
 			if (persistAllowed(runId, "terminal snapshot/memory")) {
+				if (!recordTranscript(runId, sessionId, history)) {
+					emitUnconfirmedTerminal(runId, sessionId, snapshot, accumulator, attempts, out, turn);
+					return;
+				}
 				this.store.save(snapshot);
+			}
+			else {
+				emitUnconfirmedTerminal(runId, sessionId, snapshot, accumulator, attempts, out, turn);
+				return;
+			}
 				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
 				// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路），
 				// 所以这一笔可能根本没落库；也可能刚落库就被另一实例的取消收尾覆盖。出帧/记忆之前
@@ -2574,11 +2548,8 @@ public class ResilientChatService {
 					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn);
 					return;
 				}
-				// B2：终态确认后再写展示历史（压缩/取消分支各自写自己的终态版本）
 				terminalSnapshot = persisted;
-				recordTranscript(runId, sessionId, history);
 				convergeMemory(runId, sessionId, history);
-			}
 			log.info("AI turn end runId={} sessionId={} historyEntries={} attempts={} terminal=done lastFrames=[{}]", runId, sessionId,
 					history.size(), attempts, accumulator.tailSummary());
 		}
@@ -3741,8 +3712,7 @@ public class ResilientChatService {
 	 *
 	 * <p>没有请求身份时跳过 —— 终态写点会用 run 快照身份补写同 entryId 的 user 条目。
 	 */
-	private void recordTranscriptUser(String runId, String sessionId, String text, long turnStartedAtMs,
-			List<Message> memory) {
+	private void recordTranscriptUser(String runId, String sessionId, String text, long turnStartedAtMs) {
 		if (this.transcript == null || text == null) {
 			return;
 		}
@@ -3760,11 +3730,13 @@ public class ResilientChatService {
 			return;
 		}
 		try {
-			// 轮首 memory 是"本轮 USER 写入之前"的窗口：直接作为旧历史复制，不做请求原文裁剪
-			// （旧历史里可能出现与本次相同的提问，按文本裁会误删）。
-			this.transcript.ensureBaseline(sessionId, identity.tenantId(), identity.userId(), memory);
+			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				return;
+			}
 			this.transcript.append(sessionId, identity.tenantId(), identity.userId(),
-					List.of(TranscriptEntries.user(runId, turnStartedAtMs, turnStartedAtMs, text)));
+					List.of(TranscriptEntries.user(runId, turnStartedAtMs, turnStartedAtMs, text)),
+					snapshot.getRunEpoch());
 		}
 		catch (RuntimeException ex) {
 			log.warn("transcript user entry write failed runId={}: {} (turn unaffected)", runId, ex.getMessage());
@@ -3777,24 +3749,22 @@ public class ResilientChatService {
 	 * <p>工具原文优先取 {@code pendingsLenient(runId).getResultText()}（用户面原文），不取可能已被
 	 * L1 清成占位符的 history；合成消息（压缩摘要/收尾指令）不写。写失败只 WARN，不影响本轮。
 	 */
-	private void recordTranscript(String runId, String sessionId, List<Message> history) {
-		recordTranscript(runId, sessionId, history, true);
+	private boolean recordTranscript(String runId, String sessionId, List<Message> history) {
+		return recordTranscript(runId, sessionId, history, true);
 	}
 
-	private void recordTranscript(String runId, String sessionId, List<Message> history,
+	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant) {
 		if (this.transcript == null || history == null || history.isEmpty()) {
-			return;
+			return false;
 		}
 		try {
 			RunSnapshot snapshot = this.store.get(runId);
 			if (snapshot == null || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-				return;
+				return false;
 			}
 			Map<String, PendingToolCall> pendings = transcriptPendings(runId);
 			List<Message> withStates = new ArrayList<>(history.size());
-			// B2/B：assistant 的 toolCallStates 与本轮 tool 条目的 status 用<b>同一份</b>已解析状态
-			// （同一次台账查询、同一套升格判据），避免出现 assistant=EXECUTED 而 tool=APPROVED。
 			Map<String, String> resolvedStatuses = new LinkedHashMap<>();
 			Predicate<String> executedInLedger = toolCallId -> ledgerEntry(runId, toolCallId) != null;
 			for (Message message : history) {
@@ -3814,44 +3784,54 @@ public class ResilientChatService {
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
 				out = this.registry.find(runId);
 			}
+			boolean hasVisibleEntries = entries.stream()
+				.anyMatch(entry -> "assistant".equals(entry.kind()) || "tool".equals(entry.kind()));
+			if (hasVisibleEntries && out == null) {
+				return false;
+			}
 			if (out != null) {
+				Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
 				for (int i = 0; i < entries.size(); i++) {
 					TranscriptEntry entry = entries.get(i);
-					if ("assistant".equals(entry.kind())) {
-						entries.set(i, entry.withSegments(out.transcriptSegments(entry.entryId(), entry.toolCalls(),
-								entry.text(), entry.reasoning())));
+					if (!"assistant".equals(entry.kind())) {
+						continue;
+					}
+					List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+							entry.text(), entry.reasoning());
+					if (segments == null || segments.isEmpty()) {
+						return false;
+					}
+					entries.set(i, entry.withSegments(segments));
+					for (TranscriptEntry.SegmentView segment : segments) {
+						if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
+							toolSegments.put(segment.toolCallId(), segment);
+						}
 					}
 				}
+				for (int i = 0; i < entries.size(); i++) {
+					TranscriptEntry entry = entries.get(i);
+					if (!"tool".equals(entry.kind())) {
+						continue;
+					}
+					TranscriptEntry.SegmentView anchor = toolSegments.get(entry.toolCallId());
+					if (anchor == null) {
+						return false;
+					}
+					entries.set(i, entry.withSegments(List.of(new TranscriptEntry.SegmentView("tool", entry.result(),
+							entry.toolCallId(), anchor.seq()))));
+				}
 			}
-			// 轮首用户写失败时按同一 entryId 补写；读取侧还会用可靠记忆补偿其它缺失条目，
-			// 因此 transcript 非空不再意味着它必须独自覆盖整个会话。
-			// 排序键取请求起点（与轮首写点同一口径），保证"补写的用户条目"排序在工具卡之前。
 			String userText = snapshot.getRequestText();
-			if (userText == null || userText.isBlank()) {
-				// 旧快照没有 additive requestText：只读历史末尾的真实 USER 作兼容；新快照始终用显式原文。
-				for (int i = history.size() - 1; i >= 0; i--) {
-					Message message = history.get(i);
-					if (message instanceof UserMessage && !SyntheticMessages.isSynthetic(message)) {
-						userText = message.getText();
-						break;
-					}
-				}
-			}
 			if (userText != null && !userText.isBlank()) {
-				long userTurnStartedAtMs = snapshot.getTurnStartedAtMs() > 0L
-						? snapshot.transcriptUserTurnStartedAtMs() : snapshot.getCreatedAtMs();
-				long userAtMs = snapshot.getTurnStartedAtMs() > 0L ? snapshot.getTurnStartedAtMs() : userTurnStartedAtMs;
-				entries.add(0, TranscriptEntries.user(runId, userTurnStartedAtMs, userAtMs, userText));
+				entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
+						snapshot.getTurnStartedAtMs(), userText));
 			}
-			if (entries.isEmpty()) {
-				return;
-			}
-			this.transcript.ensureBaselineFromMemory(sessionId, snapshot.getTenantId(), snapshot.getUserId(), runId);
-			this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries);
+			return !entries.isEmpty() && this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
+					entries, snapshot.getRunEpoch());
 		}
 		catch (RuntimeException ex) {
-			// 展示历史是观测面，不得让本轮终态/记忆收敛因它失败
-			log.warn("transcript terminal write failed runId={}: {} (turn unaffected)", runId, ex.getMessage());
+			log.warn("transcript terminal write failed runId={}: {}", runId, ex.getMessage());
+			return false;
 		}
 	}
 
@@ -3977,8 +3957,12 @@ public class ResilientChatService {
 		try {
 			if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
 				MemoryTurn turn = MemoryTurn.of(runId, turnStartedAtMs);
-				upsert.upsertRun(sessionId, turn == null ? MemoryTurn.UNATTRIBUTED : turn, messages,
-						this.properties.getMemory().getMaxMessages(), true);
+				if (turn == null) {
+					log.warn("{} skipped: no run ownership (runId/turnStartedAtMs) for per-run memory write "
+							+ "sessionId={} (no unowned block)", stage, sessionId);
+					return;
+				}
+				upsert.upsertRun(sessionId, turn, messages, this.properties.getMemory().getMaxMessages(), true);
 				return;
 			}
 			if (this.chatMemoryRepository != null) {
@@ -4003,10 +3987,6 @@ public class ResilientChatService {
 	 * 兼容口（无 runId）：装配层/单测直接调用时的旧签名，<b>不做续跑权判定</b>
 	 * （没有 runId 就无从判定，猜一个 runId 去判是更糟的错）。
 	 */
-	void persistMemory(String sessionId, List<Message> messages, String stage) {
-		persistMemory(null, sessionId, messages, stage);
-	}
-
 	/**
 	 * <b>RT-20：持久面（快照 / 记忆窗口）的续跑权闸</b>。
 	 *
@@ -4719,7 +4699,7 @@ public class ResilientChatService {
 				// B1：MemoryWindow 只做整轮淘汰；它在绝对预算下"淘汰到下限仍越线"时把 l1Due 交给压缩器，
 				// 由压缩器唯一地执行并记账一次 L1（不再有"窗口先清、压缩再判"的重复职责）。
 				compactionRequest = new ContextCompactor.Request(sessionId, runId, runtime.modelId(),
-						runtime.providerId(), windowed, this.codec.serializeAll(windowed), state.usedTokens(),
+						runtime.providerId(), windowed, state.usedTokens(),
 						state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
 						protectedIds, runtime, activeRunIds, maxOutput, window.stillOverBudget(), "first_turn",
 						ContextCompactor.lastToolCallId(windowed));
@@ -5124,8 +5104,7 @@ public class ResilientChatService {
 			level = "none";
 		}
 		// L-26：paramsLocked 冻结在快照里（首轮"参数被策略锁住"是这一轮的事实，续跑不许改口）。
-		boolean paramsLocked = snapshot != null && snapshot.paramsFrozen()
-				&& Boolean.TRUE.equals(snapshot.getParamsLocked());
+		boolean paramsLocked = snapshot != null && Boolean.TRUE.equals(snapshot.getParamsLocked());
 		int maxOutput = snapshot == null || snapshot.getMaxTokens() == null ? 0
 				: Math.max(0, snapshot.getMaxTokens());
 		return new TurnContext(systemTokens, toolsTokens, 0, systemTokens + toolsTokens + historyTokens, limit, model,

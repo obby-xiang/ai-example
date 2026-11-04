@@ -7,12 +7,9 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,90 +57,25 @@ public final class TranscriptEntries {
 	}
 
 	public static TranscriptEntry user(String runId, long turnStartedAtMs, long atMs, String text) {
-		return new TranscriptEntry(entryId(runId, "user", null), "user", null, runId, turnStartedAtMs, atMs, text,
-				null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, null);
+		return new TranscriptEntry(entryId(runId, "user", null), "user", runId, turnStartedAtMs, atMs, text,
+				null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+				null, null, null);
 	}
 
 	/** 挂起批次的早期条目（status=pending）；终态写点会用同一 entryId 覆盖。 */
 	public static TranscriptEntry assistant(String runId, long turnStartedAtMs, long atMs, String text,
 			List<TranscriptEntry.ToolCallView> toolCalls, Map<String, Object> toolCallStates) {
-		return new TranscriptEntry(assistantEntryId(runId, toolCalls), "assistant", null, runId, turnStartedAtMs,
-				atMs, text, null, null, null, toolCalls, toolCallStates, null, null, null, null, null, false, null,
-				null, null, null, null);
+		return new TranscriptEntry(assistantEntryId(runId, toolCalls), "assistant", runId, turnStartedAtMs,
+				atMs, text, null, null, null, toolCalls, toolCallStates, null, null, null, null, null, null,
+				null, null, null, null, null, null, null);
 	}
 
 	/** 单条工具结果（早期 pending / 终态同键覆盖）。 */
 	public static TranscriptEntry tool(String runId, long turnStartedAtMs, long atMs, String toolCallId, String name,
 			String kind2, String status, String result) {
-		return new TranscriptEntry(toolEntryId(runId, toolCallId), "tool", null, runId, turnStartedAtMs, atMs, null,
-				null, null, null, null, null, toolCallId, name, kind2, status, result, false, null, null, null, null,
-				null);
-	}
-
-	/** 一轮完整历史 → 条目（终态写点；{@code pendings} 提供工具原文/状态）。 */
-	public static List<TranscriptEntry> fromMessages(List<Message> messages, Map<String, PendingToolCall> pendings,
-			boolean baseline, long fallbackTurnStartedAtMs) {
-		if (messages == null || messages.isEmpty()) {
-			return List.of();
-		}
-		List<TranscriptEntry> out = new ArrayList<>();
-		int index = 0;
-		for (Message message : messages) {
-			index++;
-			if (message == null || message.getMessageType() == MessageType.SYSTEM
-					|| SyntheticMessages.isSynthetic(message)) {
-				continue;
-			}
-			Map<String, Object> metadata = message.getMetadata();
-			String runId = stringOf(metadata, RUN_ID_KEY);
-			long turnStarted = longOf(metadata, TURN_STARTED_KEY, fallbackTurnStartedAtMs);
-			long atMs = System.currentTimeMillis();
-			if (message instanceof AssistantMessage assistant) {
-				List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
-				String text = assistant.getText();
-				String reasoning = stringOf(metadata, REASONING_KEY);
-				boolean stopped = Boolean.TRUE.equals(metadata == null ? null : metadata.get(STOPPED_KEY));
-				boolean truncated = Boolean.TRUE.equals(metadata == null ? null : metadata.get(TRUNCATED_KEY));
-				Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
-				String entryId = runId == null ? "baseline:" + index
-						: assistantEntryId(runId, calls);
-				out.add(new TranscriptEntry(entryId, baseline ? "baseline" : "assistant",
-						baseline ? "ASSISTANT" : null, runId, turnStarted, atMs, text, reasoning,
-						stopped ? Boolean.TRUE : null, truncated ? Boolean.TRUE : null,
-						calls.isEmpty() ? null : calls, states, null, null, null, null, null, baseline, null, null,
-						null, null, null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY)));
-				continue;
-			}
-			if (message instanceof ToolResponseMessage toolResponse) {
-				List<ToolResponseMessage.ToolResponse> responses = toolResponse.getResponses();
-				for (int i = 0; i < responses.size(); i++) {
-					ToolResponseMessage.ToolResponse response = responses.get(i);
-					String toolCallId = response.id();
-					PendingToolCall pending = toolCallId == null ? null : pendings.get(toolCallId);
-					String result = resultOf(pending, response.responseData());
-					if (result == null) {
-						continue;
-					}
-					String entryId = runId == null ? "baseline:" + index + ":" + i
-							: toolEntryId(runId, toolCallId);
-					String name = pending != null && hasText(pending.getName()) ? pending.getName() : response.name();
-					EnvelopeFacts facts = factsOf(pending, response.responseData());
-					out.add(new TranscriptEntry(entryId, baseline ? "baseline" : "tool",
-							baseline ? "TOOL" : null, runId, turnStarted, atMs, null, null, null, null, null, null,
-							toolCallId, name, pending == null ? null : pending.getKind(),
-							pending == null ? null : pending.getStatus(), result, baseline, facts.code(),
-							facts.truncated(), facts.strategy(), facts.originalChars(), facts.returnedChars()));
-				}
-				continue;
-			}
-			if (message.getMessageType() == MessageType.USER) {
-				String entryId = runId == null ? "baseline:" + index : userEntryId(runId);
-				out.add(new TranscriptEntry(entryId, baseline ? "baseline" : "user", baseline ? "USER" : null, runId,
-						turnStarted, atMs, message.getText(), null, null, null, null, null, null, null, null, null,
-						null, baseline, null, null, null, null, null));
-			}
-		}
-		return out;
+		return new TranscriptEntry(toolEntryId(runId, toolCallId), "tool", runId, turnStartedAtMs, atMs, null,
+				null, null, null, null, null, toolCallId, name, kind2, status, result, null, null, null, null,
+				null, null, null, null);
 	}
 
 	/**
@@ -155,12 +87,6 @@ public final class TranscriptEntries {
 	 *
 	 * @param includeLastAssistant 是否允许追加最后一条 assistant；失败只有形成本轮失败消息时才传 true
 	 */
-	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
-			String runId, long turnStartedAtMs, boolean includeLastAssistant) {
-		// 兼容旧调用：无已解析状态、也不查台账（fallback 只认条目自身的 executed 标志）。
-		return fromRunTerminal(messages, pendings, runId, turnStartedAtMs, includeLastAssistant, Map.of(), null);
-	}
-
 	/**
 	 * 同上，并让 tool 条目使用<b>与 assistant {@code toolCallStates} 同一份</b>已解析状态。
 	 *
@@ -169,8 +95,7 @@ public final class TranscriptEntries {
 	 *
 	 * @param resolvedStatusByToolCallId toolCallId → 已解析 status（生产路径必填，与 assistant 状态同源）
 	 * @param executedInLedger            同一会计口径的台账谓词：<b>仅</b>用于 statuses 缺失时的 fallback，
-	 *                                    保证回落也带台账证据（不会把已执行卡回落成 APPROVED）；
-	 *                                    传 {@code null} 只保留旧 5 参调用的行为，不扩大
+	 *                                    保证回落也带台账证据（不会把已执行卡回落成 APPROVED）
 	 */
 	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
 			String runId, long turnStartedAtMs, boolean includeLastAssistant,
@@ -201,12 +126,12 @@ public final class TranscriptEntries {
 				List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
 				Map<String, Object> metadata = message.getMetadata();
 				Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
-				out.add(new TranscriptEntry(assistantEntryId(runId, calls), "assistant", null, runId,
+				out.add(new TranscriptEntry(assistantEntryId(runId, calls), "assistant", runId,
 						turnStartedAtMs, atMs, assistant.getText(), stringOf(metadata, REASONING_KEY),
 						metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
 						metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,
-						calls.isEmpty() ? null : calls, states, null, null, null, null, null, false, null, null, null,
-						null, null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY)));
+						calls.isEmpty() ? null : calls, states, null, null, null, null, null, null, null, null, null,
+						null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY), null));
 				continue;
 			}
 			if (message instanceof ToolResponseMessage toolResponse) {
@@ -228,107 +153,15 @@ public final class TranscriptEntries {
 						// 缺失 status 的回落也必须带同一份台账证据（否则可能 assistant=EXECUTED、tool=APPROVED）
 						status = settledStatus(pending, executedInLedger);
 					}
-					out.add(new TranscriptEntry(toolEntryId(runId, response.id()), "tool", null, runId,
+					out.add(new TranscriptEntry(toolEntryId(runId, response.id()), "tool", runId,
 							turnStartedAtMs, atMs, null, null, null, null, null, null, response.id(),
 							hasText(pending.getName()) ? pending.getName() : response.name(), pending.getKind(),
-							status, result, false, facts.code(), facts.truncated(), facts.strategy(),
-							facts.originalChars(), facts.returnedChars()));
+							status, result, facts.code(), facts.truncated(), facts.strategy(),
+							facts.originalChars(), facts.returnedChars(), null, null, null));
 				}
 			}
 		}
 		return out;
-	}
-
-	/** 既有 {@code chat:mem} → baseline 条目（一次性；之后不再从 memory 复制）。 */
-	public static List<TranscriptEntry> baseline(List<Message> messages) {
-		return fromMessages(messages, Map.of(), true, 0L);
-	}
-
-	/** baseline 只接管其它 run 的消息；{@code null} 表示窗口未知，不是空历史。 */
-	public static List<Message> outsideRun(List<Message> memory, String runId) {
-		if (memory == null || runId == null || runId.isBlank()) {
-			return null;
-		}
-		List<Message> out = new ArrayList<>(memory.size());
-		for (Message message : memory) {
-			if (message != null && !runId.equals(RunMemoryMerge.runIdOf(message))) {
-				out.add(message);
-			}
-		}
-		return out;
-	}
-
-	/**
-	 * 用带轮次归属的记忆窗口补偿 transcript 的缺失条目。正文与工具原文保留展示历史版本，
-	 * 记忆只补缺条及停止/截断/失败/工具终态等事实；预检摘要按既有规则保留。
-	 */
-	public static List<TranscriptEntry> reconcileWithMemory(List<TranscriptEntry> entries, List<Message> memory) {
-		Map<String, TranscriptEntry> byId = new LinkedHashMap<>();
-		for (TranscriptEntry entry : entries == null ? List.<TranscriptEntry>of() : entries) {
-			if (entry != null && entry.entryId() != null) {
-				byId.put(entry.entryId(), entry);
-			}
-		}
-		if (memory != null) {
-			for (TranscriptEntry entry : fromMessages(memory, Map.of(), false, 0L)) {
-				TranscriptEntry existing = byId.get(entry.entryId());
-				if (existing == null) {
-					byId.put(entry.entryId(), entry);
-				}
-				else if ("assistant".equals(entry.kind())) {
-					TranscriptEntry merged = carryPreflight(existing, existing.withTerminalFacts(entry));
-					byId.put(entry.entryId(), merged);
-				}
-			}
-		}
-		// 旧 baseline:<序号> 不回查当前 memory；只与已经存在的 run 条目按结构一对一收敛。
-		return convergeLegacyBaseline(byId.values());
-	}
-
-	private static List<TranscriptEntry> convergeLegacyBaseline(Collection<TranscriptEntry> entries) {
-		Map<LegacyContentKey, Integer> runScoped = new LinkedHashMap<>();
-		for (TranscriptEntry entry : entries) {
-			if (entry != null && entry.runId() != null && !entry.runId().isBlank()
-					&& !Boolean.TRUE.equals(entry.baseline())) {
-				runScoped.merge(LegacyContentKey.of(entry), 1, Integer::sum);
-			}
-		}
-		List<TranscriptEntry> out = new ArrayList<>();
-		for (TranscriptEntry entry : entries) {
-			if (entry == null || !Boolean.TRUE.equals(entry.baseline()) || entry.runId() != null) {
-				out.add(entry);
-				continue;
-			}
-			LegacyContentKey key = LegacyContentKey.of(entry);
-			Integer available = runScoped.get(key);
-			if (available == null || available == 0) {
-				out.add(entry);
-				continue;
-			}
-			// 一个 run 条目只能证明一份旧副本；不同轮合法同文不会因全局文本去重而消失。
-			if (available == 1) {
-				runScoped.remove(key);
-			}
-			else {
-				runScoped.put(key, available - 1);
-			}
-		}
-		return out;
-	}
-
-	private record LegacyContentKey(String role, String text, String toolCallId, String name,
-			List<TranscriptEntry.ToolCallView> toolCalls) {
-
-		static LegacyContentKey of(TranscriptEntry entry) {
-			String role = Boolean.TRUE.equals(entry.baseline()) ? entry.role()
-					: switch (entry.kind()) {
-						case "user" -> "USER";
-						case "assistant" -> "ASSISTANT";
-						case "tool" -> "TOOL";
-						default -> entry.kind();
-					};
-			return new LegacyContentKey(role, entry.text(), entry.toolCallId(), entry.name(), entry.toolCalls());
-		}
 	}
 
 	/**
@@ -390,7 +223,7 @@ public final class TranscriptEntries {
 		state.put("status", status);
 		if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
 			ToolOutcome persisted = ToolOutcome.fromWire(pending.getOutcome());
-			state.put("outcome", (persisted == null ? ToolOutcome.fromStatus(status) : persisted).wire());
+			state.put("outcome", (persisted == null ? ToolOutcome.UNKNOWN : persisted).wire());
 		}
 		String code = pending.effectiveCode();
 		if (code != null) {
@@ -444,10 +277,10 @@ public final class TranscriptEntries {
 	}
 
 	/**
-	 * 同 entryId 两版条目的读取合并：新条目为准，补回旧条目已有的 preflight 展示摘要；
-	 * 新条目没有帧段序时也保留旧段序，避免跨实例收尾把已持久化的顺序覆盖成未知。
+	 * 同 entryId 两版条目的展示事实合并：新条目为准，补回旧条目已有的 preflight 摘要；
+	 * 新条目没有帧段序时也保留旧段序。规范存储在写时执行同一规则，不在分页读取时重放。
 	 *
-	 * <p>为什么必须合并：挂起写点（pending）与终态写点共用同一 entryId，读取 last-wins；
+	 * <p>为什么必须合并：挂起写点（pending）与终态写点共用同一 entryId；
 	 * 后写的一份若没带预检（条目读不全/旧条目），卡头会从「<类型> 任务 #N『标题』」退回工具名。
 	 * 预检事实对同一 toolCallId 只增不减，不能被一次后写覆盖成空。
 	 *
@@ -615,8 +448,10 @@ public final class TranscriptEntries {
 	}
 
 	private static String entryId(String runId, String kind, String suffix) {
-		String base = runId == null || runId.isBlank() ? "baseline" : runId;
-		return suffix == null ? base + ":" + kind : base + ":" + kind + ":" + suffix;
+		if (runId == null || runId.isBlank()) {
+			throw new IllegalArgumentException("transcript 条目必须带 runId");
+		}
+		return suffix == null ? runId + ":" + kind : runId + ":" + kind + ":" + suffix;
 	}
 
 	private static List<TranscriptEntry.ToolCallView> toolCalls(AssistantMessage assistant) {

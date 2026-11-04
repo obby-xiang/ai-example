@@ -16,7 +16,6 @@ import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.feedback.AiFeedback;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
-import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -109,7 +108,7 @@ import java.util.concurrent.RejectedExecutionException;
  * <tr><td>{@code GET /api/ai/runs} / {@code GET /api/ai/runs/{runId}}</td><td>重启后的
  * "发现待续跑轮次"与单轮明细（台账/待决/历史角色）</td></tr>
  * <tr><td>{@code POST /api/ai/runs/{runId}/resume}</td><td>续跑（重建完整历史 → 官方循环）</td></tr>
- * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>记忆窗口原文</td></tr>
+ * <tr><td>{@code GET /api/ai/history/{sessionId}}</td><td>用户展示历史（transcript，唯一读源）</td></tr>
  * <tr><td>{@code DELETE /api/ai/session/{sessionId}}</td>
  * <td><b>完整会话销毁</b>：删除该会话全部 AI 数据（记忆/run 13 键/
  * 上下文/附件/反馈/会话索引），业务数据不碰；幂等 200，Redis 不可用 503，
@@ -160,6 +159,9 @@ public class AiController {
 	private final ConfirmGate confirmGate;
 
 	private final RunStore runStore;
+
+	@Autowired(required = false)
+	private com.example.configmgr.ai.context.ContextStateStore contextStateStore;
 
 	private final RunRegistry runRegistry;
 
@@ -272,8 +274,8 @@ public class AiController {
 	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
 
 	/**
-	 * B2：用户展示历史（transcript）。字段注入（构造器签名不变 ⇒ 既有单测零触碰）；
-	 * 未注入时 {@code /history} 保持旧口径（回落 {@code chat:mem}）。
+	 * 用户展示历史（transcript）。字段注入（构造器签名不变 ⇒ 既有单测零触碰）；
+	 * 未注入时 {@code /history} 返回 503（展示历史只有一个读源）。
 	 */
 	@Autowired(required = false)
 	private com.example.configmgr.ai.history.ConversationTranscriptStore transcript;
@@ -425,12 +427,13 @@ public class AiController {
 		String modelText = sanitized.text();
 		// 模型与记忆使用归一文本；用户展示历史单独携带原始输入，终态重写也不能把它换成归一文本。
 		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
-				request.params(), clientRequestId, request.message());
+				request.providerId(), request.params(), clientRequestId, request.message());
 		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在归一化/长度之后、会话门之前 ——
 		// 与既有闸序一致（归一化与长度先过、超长先撞），且拒绝不占 in-flight 位。
 		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
 		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
-				&& this.aiConfigService.resolveChatTarget(effective.modelId()).isEmpty()) {
+				&& (effective.providerId() == null
+						|| this.aiConfigService.resolveChatTarget(effective.providerId(), effective.modelId()).isEmpty())) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MODEL_NOT_FOUND, sessionId, null,
 					"model", effective.modelId());
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.MODEL_NOT_FOUND,
@@ -769,7 +772,7 @@ public class AiController {
 	 * <li><b>同一套消毒</b>：{@link ContextFieldGate} 白名单化（未知键丢弃并计数），客户端无法
 	 *     伪造服务端槽位或越过终态收窄；</li>
 	 * <li><b>只在"决策会被受理"时写</b>：调用方必须已预读待决条目；本方法要求条目存在、
-	 *     {@code status=PENDING}、kind 匹配（{@code kind=null} 的旧条目按兼容放行）、
+	 *     {@code status=PENDING}、kind 完全匹配（缺失即 409，不放行）、
 	 *     且快照状态为 {@code SUSPENDED}。未知/错 kind/DUPLICATE/RUNNING/终态一律<b>不写</b>
 	 *     —— 入口拒绝必须保持零副作用，也不能给在跑轮换上下文（整对象写、后写者赢）。</li>
 	 * <li><b>失败只 WARN</b>：页面事实是"让续跑更准"的增强，不是决策/授权面 —— 写失败不得让
@@ -1005,22 +1008,12 @@ public class AiController {
 		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
 		AiTrace.bind(request.runId(), null);
 		try {
-			// AI 表格工具治理批：sheetMeta 在<b>入口</b>就过白名单（任何业务值到此为止），
-			// 之后才交给确认门；不带 meta 时保持六参调用 —— 旧调用方与既有桩的实参形状逐字不变。
+			// 当前唯一协议：显式 outcome + 当前结构（sheetMeta/code 均按入口归一后的值传入）。
+			// sheetMeta 在入口就过白名单（任何业务值到此为止）；code 非 UI_* 形态在入口归一为 null。
 			Map<String, Object> sheetMeta = SheetAudit.sanitize(request.sheetMeta());
-			// 批 A（A-14）：机器码在入口归一到白名单形态；非法值丢弃不报 400（additive、可容错）。
 			String uiCode = FrontendToolResultRequest.normalizeCode(request.code());
-			if (uiCode != null) {
-				submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-						request.source(), cancelled, request.outcome(), sheetMeta, uiCode);
-			}
-			else {
-				submission = sheetMeta.isEmpty()
-						? this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-								request.source(), cancelled, request.outcome())
-						: this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
-								request.source(), cancelled, request.outcome(), sheetMeta);
-			}
+			submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+					request.source(), cancelled, request.outcome(), sheetMeta, uiCode);
 		}
 		finally {
 			AiTrace.clear();
@@ -1675,13 +1668,12 @@ public class AiController {
 	 * 核对记录里的 {@code tenantId/userId}，<b>不能只看"键里有这条记录"</b>。
 	 *
 	 * <p>键面本身已按身份分开（同 runId 不同身份落在不同键上），这里是<b>第二层</b>：
-	 * 无归属旧快照（{@code tenantId=0/userId=0}）同样不算"我的"—— 它不得进入新身份读路径。
+	 * 无身份记录（{@code tenantId=0/userId=0}）同样不算"我的"—— 它不得进入新身份读路径。
 	 *
 	 * <p>返回 {@code false} 时调用方一律按<b>不存在</b>处理（不回显"这一轮在别人手里"）。
 	 *
 	 * <h2>无上下文 = fail-closed</h2>
-	 * 没有身份上下文时<b>不能</b>放行：无身份线程读到的正是 legacy 命名空间
-	 * （{@code ai:run:{run:<runId>}}），放行等于让旧快照（{@code tenantId=0/userId=0}）进入新的
+	 * 没有身份上下文时<b>不能</b>放行：无法证明这一轮属于谁，放行等于让无身份记录进入新的
 	 * 读/写路径 —— 归属复核就此形同虚设。归属只能由<b>显式作用域</b>（HTTP 头 /
 	 * {@link RunIdentityScope}）证明，因此这里返回 {@code false}，调用方按"不存在"处理。
 	 */
@@ -1942,16 +1934,16 @@ public class AiController {
 			// req = 该条目的请求帧（confirm_request / frontend_tool_request）<b>真的发过</b>，
 			// 由 ConfirmGate 在发射前经 RunStore#markRequestEmitted 置位；kind 是<b>三值原文</b>
 			// （CONFIRM/FRONTEND/BACKEND），前端只为 CONFIRM/FRONTEND 且 req=true 的 PENDING 条目建卡。
-			// 缺 req 键 = 旧实例/旧数据，前端按 false 处理（宁可少一张卡，不可让用户点到未生效的卡）。
+			// 缺 req 键 = 请求帧尚未发射，前端按 false 处理（宁可少一张卡，不可让用户点到未生效的卡）。
 			entry.put("req", Boolean.TRUE.equals(pending.getReq()));
 			entry.put("reqAtMs", pending.getReqAtMs() > 0L ? pending.getReqAtMs() : null);
 			// R-160 M3：透出到期口径。去超时裁决后前端已退役倒计时/「等待人工确认」静态兜底，
-			// 快照里的 expiresAt/atMs 只作对账口径（null = 无期限：确认门/表单/旧数据）。
+			// 快照里的 expiresAt/atMs 只作对账口径（null = 无期限：确认门/表单）。
 			// 字段保留是兼容与取证需要（前端 utils/parts 仍原样携带，不据此置灰按钮）。
 			entry.put("expiresAt", pending.getExpiresAt());
 			entry.put("atMs", pending.getAtMs());
 			// MAJOR-1（收口）：刷新恢复路径也要带预检报告，否则卡面丢了"批准的是哪一版预检"。
-			// 非确认门工具/旧数据为 null ⇒ 键仍出现但值为 null（前端按"没有就不显示预检区"处理）。
+			// 非确认门工具/未产出预检为 null ⇒ 键仍出现但值为 null（前端按"没有就不显示预检区"处理）。
 			entry.put("preflight", pending.getPreflight());
 			// 批4-D（用户 2026-10-23 裁决）：不可撤销位随条目透出 —— 刷新恢复要据此重建复选框
 			// （否则刷新后"一点即发"，复选框消失 = 安全回退）。恒给布尔值（false = 不加复选框）。
@@ -2136,67 +2128,40 @@ public class AiController {
 	}
 
 	/**
-	 * 记忆窗口原文（R-144 起：带 {@code toolCalls} 的 ASSISTANT 条目增透 {@code toolCallStates}
-	 * 段级状态映射 —— 旧载荷可缺该字段；缺字段 ⇒ 前端占位兜底，后端只保证「缺字段语义」）。
+	 * 用户展示历史（transcript 是唯一读源；<b>不</b>回读模型记忆窗口）。
 	 *
-	 * <p>R-154 #16 分页：新增 {@code offset}/{@code limit} 可选参数，语义 = <b>记忆窗口内切片</b>
-	 * （窗口上限 {@code memory.maxMessages=40}，非无限历史）。默认（不传参）保持全量语义
-	 * （{@code count}=总条数、{@code hasMore}=false），不误伤 mirror/reattach 全量路径；
-	 * {@code messages} 按窗口序（旧→新）切片，{@code total}=窗口总条数、{@code hasMore}=
-	 * 切片之前还有更早条目（offset 越界则空片、hasMore=false）。既有字段 {@code sessionId}/{@code count}/{@code messages} 形状不变。
+	 * <p>默认读取最近一页；{@code before} 以本页最早条目的稳定顺序号向更早翻页。分页只读取本页 HASH 条目，
+	 * 响应带 {@code revision} 与可选 {@code nextCursor}。{@code chat:mem} 只服务模型上下文，
+	 * 压缩/窗口改写不会污染这里的原文。
 	 */
 	@GetMapping("/history/{sessionId}")
 	public ResponseEntity<?> history(@PathVariable String sessionId,
-			@RequestParam(name = "offset", required = false) Integer offset,
-			@RequestParam(name = "limit", required = false) Integer limit) {
-		List<Map<String, Object>> items = new ArrayList<>();
-		List<com.example.configmgr.ai.history.TranscriptEntry> transcriptEntries = List.of();
-		boolean truncated = false;
-		boolean usedTranscript = false;
-		// B2：展示历史优先读独立 transcript（用户可见原文，压缩/窗口不改它）；
-		// transcript 为空（旧会话/升级前）才回落 chat:mem 工作上下文。
-		if (this.transcript != null) {
-			try {
-				ConversationTranscriptStore.ReadResult read = this.transcript.read(sessionId);
-				if (!read.isEmpty()) {
-					// P2-1：先按可投影性过滤 entries 并切片，再只对<b>本页</b>做昂贵投影
-					// （信封解析 / 文案码 / resultView provider）。长会话下每请求从 O(total) 投影降为 O(page)。
-					transcriptEntries = projectableTranscriptEntries(read.entries());
-					truncated = read.truncated();
-					usedTranscript = true;
-				}
-			}
-			catch (RuntimeException ex) {
-				// 读失败必须可见/可重试：与 /context 同口径回 503，绝不伪装成"空历史"
-				log.warn("history transcript read failed sessionId={} error={}", sessionId, ex.getMessage());
-				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-			}
+			@RequestParam(name = "latest", required = false) Integer latest,
+			@RequestParam(name = "before", required = false) Long before) {
+		if (this.transcript == null) {
+			log.warn("history transcript store not wired sessionId={}", sessionId);
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
-		if (!usedTranscript) {
-			try {
-				for (Message message : this.chatMemory.get(sessionId)) {
-					items.add(toHistoryItem(message));
-				}
-			}
-			catch (RuntimeException ex) {
-				log.warn("history memory read failed sessionId={} error={}", sessionId, ex.getMessage());
-				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-			}
+		ConversationTranscriptStore.ReadPage transcriptPage;
+		try {
+			transcriptPage = this.transcript.readPage(sessionId, before, latest);
 		}
-		int total = usedTranscript ? transcriptEntries.size() : items.size();
-		int from = Math.min(total, Math.max(0, offset == null ? 0 : offset));
-		int to = limit == null ? total : (int) Math.min((long) total, (long) from + Math.max(0, limit));
-		List<Map<String, Object>> page = usedTranscript
-				? transcriptItems(transcriptEntries.subList(from, to))
-				: new ArrayList<>(items.subList(from, to));
+		catch (RuntimeException ex) {
+			log.warn("history transcript read failed sessionId={} error={}", sessionId, ex.getMessage());
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		List<Map<String, Object>> page = transcriptItems(projectableTranscriptEntries(transcriptPage.entries()));
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("sessionId", sessionId);
 		body.put("count", page.size());
 		body.put("messages", page);
-		body.put("total", total);
-		body.put("hasMore", from > 0 && from < total);
-		if (truncated) {
-			// 中性标记：更早的展示历史因容量上限不在本机保留；不新增顶部提示
+		body.put("total", transcriptPage.total());
+		body.put("hasMore", transcriptPage.hasMore());
+		body.put("revision", transcriptPage.revision());
+		if (transcriptPage.nextCursor() != null) {
+			body.put("nextCursor", transcriptPage.nextCursor());
+		}
+		if (transcriptPage.truncated()) {
 			body.put("truncated", true);
 		}
 		// B3：已提交压缩事实（按 atMs,eventId 升序）；读失败只降级为空事件，不拖垮历史正文。
@@ -2205,12 +2170,12 @@ public class AiController {
 	}
 
 	private List<Map<String, Object>> historyCompactionEvents(String sessionId) {
-		if (this.runStore == null) {
+		if (this.contextStateStore == null) {
 			return List.of();
 		}
 		List<Map<String, Object>> raw;
 		try {
-			raw = this.runStore.events(sessionId);
+			raw = this.contextStateStore.events(sessionId);
 		}
 		catch (RuntimeException ex) {
 			log.warn("history compaction facts read failed sessionId={} error={} (returning empty events)", sessionId, ex.getMessage());
@@ -2259,7 +2224,7 @@ public class AiController {
 	 *
 	 * <p>只做形状映射，不做排序/去重（存储读取时已完成 last-wins + turnStartedAtMs 排序）。
 	 * 工具结果仍走 {@link #historyToolResponses} 同一份用户面投影（信封解包 / 文案码 / resultView），
-	 * 因此 transcript 与回落路径的卡面语义一致。
+	 * 因此展示历史的卡面语义与实时帧同源。
 	 */
 	private List<Map<String, Object>> transcriptItems(List<com.example.configmgr.ai.history.TranscriptEntry> entries) {
 		List<Map<String, Object>> items = new ArrayList<>(entries.size());
@@ -2285,12 +2250,10 @@ public class AiController {
 	}
 
 	private static String transcriptType(com.example.configmgr.ai.history.TranscriptEntry entry) {
-		String kind = entry.kind() == null ? "" : entry.kind();
-		String role = "baseline".equals(kind) ? entry.role() : kind;
-		if (role == null) {
+		if (entry.kind() == null || entry.kind().isBlank()) {
 			return null;
 		}
-		String type = role.toUpperCase();
+		String type = entry.kind().toUpperCase();
 		return "USER".equals(type) || "ASSISTANT".equals(type) || "TOOL".equals(type) ? type : null;
 	}
 
@@ -2399,84 +2362,6 @@ public class AiController {
 	}
 
 	/**
-	 * R-154：把单条 {@link Message} 拼成 history 载荷条目（R-144 携 toolCallStates，纯附加）。
-	 *
-	 * <p><b>批次2 / AR-01 第 5 条：synthetic 展示过滤（读侧）</b> —— 合成/系统提示（上下文压缩摘要、
-	 * 步数收尾、轮内预算收尾）在记忆里是真实消息，但对人不是"用户原话"也不是"助手答复"。
-	 * 判据复用 {@link SyntheticMessages#isSynthetic}（<b>与槽位解析同一份</b>，不许各写一套），
-	 * 命中即加 additive 键 {@code synthetic=true}：前端将条目整条排除在展示历史之外，
-	 * <b>摘要不冒充用户</b>、不显示内部配置键；真实压缩结果只由已提交事件节点呈现。
-	 *
-	 * <p><b>AR-12（只读展示）</b> —— assistant 条目已有的 {@code metadata.reasoningContent}
-	 * 以 additive 可选键 {@code reasoningContent} 原样透出（记忆窗口通道）；
-	 * <b>不新增表/列/持久化</b>，也不透出 {@code startedAt}/{@code endedAt} 等计时。
-	 * synthetic 条目一律跳过本键：那是系统提示，不能借"思考正文"把内部元数据带上用户面。
-	 */
-	private Map<String, Object> toHistoryItem(Message message) {
-		Map<String, Object> item = new LinkedHashMap<>();
-		item.put("type", message.getMessageType().name());
-		item.put("text", message.getText());
-		SyntheticMessages.Kind syntheticKind = SyntheticMessages.kindOf(message);
-		boolean synthetic = syntheticKind != null;
-		if (synthetic) {
-			item.put(SyntheticMessages.DISPLAY_KEY, true);
-			// B5（additive）：明确类别；非压缩提示不得被前端误标成"已压缩"。
-			item.put("syntheticKind", syntheticKind.wire());
-		}
-		// AR-12（只读展示）：历史 assistant 已有的思考正文只从 metadata.reasoningContent 原样透出，
-		// 不新增表/列/持久化，也不透出 startedAt/endedAt 等计时（历史已完成轮不显示耗时、不回算）。
-		// 展示开关（app.ai.reasoning.display-enabled，默认 false）关掉时历史不透出该键；metadata 仍照旧落库。
-		// synthetic 压缩/收尾条目一律跳过：那是系统提示，不是助手答复，不能借本字段带出内部键。
-		if (!synthetic && this.properties.getReasoning().isDisplayEnabled()
-				&& message instanceof AssistantMessage reasoningAssistant) {
-			Object reasoning = reasoningAssistant.getMetadata().get(ResilientChatService.REASONING_METADATA_KEY);
-			if (reasoning instanceof String reasoningText && !reasoningText.isBlank()) {
-				item.put(ResilientChatService.REASONING_METADATA_KEY, reasoningText);
-			}
-		}
-		if (!synthetic && message instanceof AssistantMessage assistant) {
-			for (String key : List.of(TranscriptEntries.ERROR_CODE_KEY, TranscriptEntries.ERROR_MESSAGE_KEY)) {
-				Object value = assistant.getMetadata().get(key);
-				if (value != null && !String.valueOf(value).isBlank()) {
-					item.put(key, String.valueOf(value));
-				}
-			}
-		}
-		if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-			item.put("toolCalls", assistant.getToolCalls());
-			Object toolCallStates = assistant.getMetadata().get(ResilientChatService.TOOL_CALL_STATES_KEY);
-			if (toolCallStates != null) {
-				item.put("toolCallStates", toolCallStates);
-			}
-		}
-		if (message instanceof ToolResponseMessage toolResponse) {
-			item.put("toolResponses", historyToolResponses(toolResponse));
-		}
-		// 批G · S4：被用户停止的半截 assistant 正文带 stopped 标记 —— 前端据此渲染「已停止」，
-		// 而不是把半句话当完整答案（与取消轮 done{cancelled} 的实时口径同源）。
-		if (message instanceof AssistantMessage assistant
-				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY))) {
-			item.put("stopped", true);
-		}
-		if (message instanceof AssistantMessage assistant
-				&& Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.TRUNCATED_KEY))) {
-			item.put(ResilientChatService.TRUNCATED_KEY, true);
-		}
-		Object timestamp = message.getMetadata().get(MessageJsonCodec.FIELD_TIMESTAMP);
-		if (timestamp != null) {
-			item.put("timestamp", timestamp);
-		}
-		// B2（additive）：回落记忆路径也透出轮次归属，前端可按 runId 对账（缺省 = 旧数据/无归属）。
-		if (message.getMetadata() != null) {
-			Object runId = message.getMetadata().get(com.example.configmgr.ai.memory.RunMemoryMerge.RUN_ID_KEY);
-			if (runId != null && !String.valueOf(runId).isBlank()) {
-				item.put("runId", String.valueOf(runId));
-			}
-		}
-		return item;
-	}
-
-	/**
 	 * 历史通道的工具结果（P0-1 信封解包 + N9 用户面摘要）。
 	 *
 	 * <p>模型记忆里 {@code role:tool} 继续带信封 JSON（续跑与首轮同形），但 {@code /history}
@@ -2484,7 +2369,7 @@ public class AiController {
 	 * 直接透传信封会让卡片里出现一整段 {@code {"ok":...}}。因此先剥壳取 {@code message}，
 	 * 再按 {@code code} 换成用户摘要（预算/步数/上游失败/资源锁/错入口/关闸/越 scope/超时/
 	 * 他实例认领）；{@code outcome}/{@code code} 仍由 {@code toolCallStates} 原样回放。
-	 * 命中摘要时以同名 {@code userTextCode} 透出原码供前端本地化；旧数据（不是信封）原样透传，
+	 * 命中摘要时以同名 {@code userTextCode} 透出原码供前端本地化；非信封结果原样透传，
 	 * 模型侧信封原文不受影响（记忆与台账里仍是可排障的文本）。
 	 */
 	private List<Map<String, Object>> historyToolResponses(ToolResponseMessage message) {
@@ -2512,7 +2397,7 @@ public class AiController {
 		return out;
 	}
 
-	/** 信封里的机器可读码（旧数据/非信封为 null）；只用于选择用户摘要，不改写原文。 */
+	/** 信封里的机器可读码（非信封/无码为 null）；只用于选择用户摘要，不改写原文。 */
 	private String envelopeCode(String responseData) {
 		String json = ToolResultEnvelope.unwrapModelJson(responseData);
 		if (json == null || !json.trim().startsWith("{")) {
@@ -2542,7 +2427,7 @@ public class AiController {
 	 * {@code ToolResultEnvelope#toModelJson}，信封是这份事实的唯一持久来源；实时帧的截断字段
 	 * 也由同一个 limiter 现算（{@code SseChatEmitter#markModelView}），两侧因此同源。
 	 *
-	 * <p>只对 {@code truncated=true} 出键：未截断/旧数据（无信封）保持载荷形状逐字不变。
+	 * <p>只对 {@code truncated=true} 出键：未截断/无信封保持载荷形状逐字不变。
 	 * 信封可能带模型侧定界外壳（{@code <tool_result>}），先剥壳再解析。
 	 */
 	private Map<String, Object> historyTruncation(String responseData) {
@@ -2576,7 +2461,7 @@ public class AiController {
 			return fields;
 		}
 		catch (Exception ex) {
-			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理（旧载荷语义）
+			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理
 			log.debug("history tool result truncation metadata parse failed; passing through without fields error={}", ex.getMessage());
 			return null;
 		}
@@ -2586,9 +2471,9 @@ public class AiController {
 	 * L-78：历史面的结果视图（按工具名从注册表重新派生；未声明投影的工具不产该键）。
 	 *
 	 * <p>三条口径与帧路径（`SpToolCallingManager#resultViewOf`）逐条对齐：
-	 * ① 只对**成功结局**出视图 —— 失败/取消的卡面本来就该走旧形态（"视图是成功结果的投影"）；
+	 * ① 只对**成功结局**出视图 —— 失败/取消的卡面不产视图（"视图是成功结果的投影"）；
 	 * ② 认领按工具名，投影器异常一律吞掉（展示增强不得让 {@code /history} 500）；
-	 * ③ 返回 {@code null} 时不写键 ⇒ 旧载荷形状逐字不变。
+	 * ③ 返回 {@code null} 时不写键。
 	 *
 	 * <p><b>与帧路径唯一的差别</b>（Task 6 / BZ-33）：这里显式标 {@code historical=true}。
 	 * 归档是"重放"，不允许再查一次业务库 —— 否则刷新后卡面显示的是今天的任务/数据，
@@ -2615,7 +2500,7 @@ public class AiController {
 				return view == null ? null : view.toMap();
 			}
 			catch (RuntimeException ex) {
-				log.warn("history resultView build failed (no view this time, legacy card shape) tool={} toolCallId={}",
+				log.warn("history resultView build failed (no view this time, card shape without view) tool={} toolCallId={}",
 						response.name(), response.id(), ex);
 				return null;
 			}
@@ -2624,8 +2509,8 @@ public class AiController {
 	}
 
 	/**
-	 * 历史响应的结局是否成功：信封带 {@code ok=false} ⇒ 否；旧数据（非信封 / 无该键）⇒ 是
-	 * （不是信封就不存在"失败结局"的判据，与帧路径"视图只是展示增强"的取向一致）。
+	 * 历史响应的结局是否成功：信封带 {@code ok=false} ⇒ 否；非信封 / 无该键 ⇒ 仅视为"无失败证据"。
+	 * 本判据只决定是否产出 resultView，<b>不代表</b>工具结局为成功（工具结局只认 outcome）。
 	 */
 	private boolean historyOutcomeOk(String responseData) {
 		String json = ToolResultEnvelope.unwrapModelJson(responseData);
@@ -2652,7 +2537,7 @@ public class AiController {
 		return unwrapEnvelope(ToolResultEnvelope.unwrapModelJson(responseData));
 	}
 
-	/** 信封 JSON → {@code message} 原文；识别不了（旧数据/普通 JSON 结果）一律原样返回。 */
+	/** 信封 JSON → {@code message} 原文；识别不了（非信封/普通 JSON 结果）一律原样返回。 */
 	private String unwrapEnvelope(String responseData) {
 		if (responseData == null || !responseData.trim().startsWith("{")) {
 			return responseData;
@@ -2749,7 +2634,8 @@ public class AiController {
 						resolved != null ? resolved.modelId() : null);
 		int contextLimitTokens = contextLimit.limitTokens();
 		body.put("contextLimitTokens", contextLimitTokens > 0 ? contextLimitTokens : null);
-		// A6（additive）：schema / fallback / unknown —— 回退保留但不再静默；只进只读诊断，不做用户强提示
+		// 取数来源（schema / unknown）：UNKNOWN = 上限不可知（真实降级态，不做比例判定）；
+		// 只进只读诊断，不做用户强提示。
 		body.put("contextLimitSource", contextLimit.source().wire());
 		body.put("compactionOn", this.contextCompactor != null && contextLimitTokens > 0);
 		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
@@ -2947,9 +2833,9 @@ public class AiController {
 		return body;
 	}
 
-	/** 错入口条目；旧 kind=null 数据放行，未知条目交给闸门回 UNKNOWN。 */
+	/** 错入口条目：kind 缺失或与本入口不符都返回该条目（缺证据不授权，交给闸门回 409）。 */
 	private static PendingToolCall wrongKindEntry(PendingToolCall pending, String expectedKind) {
-		if (pending == null || !pending.hasKind() || pending.isKind(expectedKind)) {
+		if (pending == null || pending.isKind(expectedKind)) {
 			return null;
 		}
 		return pending;

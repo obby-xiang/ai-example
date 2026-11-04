@@ -20,8 +20,7 @@ import java.util.Map;
  * <h2>判据只保留一份（读侧标记 + 槽位解析必须同源）</h2>
  * 本判据有两个消费面，二者<b>必须同源</b>，否则会出现"一处当合成、另一处当用户原话"的分叉：
  * <ol>
- * <li><b>读侧标记</b> {@code AiController#toHistoryItem}：给历史回显条目加 {@code synthetic=true}
- *     与 {@code syntheticKind}（additive 诊断）；前端据此把整条合成提示<b>从展示历史中丢弃</b>
+ * <li><b>写侧过滤</b> {@code TranscriptEntries#fromRunTerminal}：合成提示<b>不写进 transcript</b>
  *     （不画用户气泡、也不画摘要/灰条；真实压缩节点只由已提交压缩事件恢复）；</li>
  * <li><b>槽位解析（写侧输入面）</b> {@code TaskIntent#lastRealUserText} 与
  *     {@code TaskSlotResolver#enrich}：以"最后一个<b>真实</b> user"取用户原话，合成提示不得当成
@@ -46,14 +45,6 @@ public final class SyntheticMessages {
 	 * 不得写进快照/记忆/历史气泡，也不得被 {@code TaskIntent.lastRealUserText} 采用。
 	 */
 	public static final String EXPORT_CORRECTION_PREFIX = "（内部纠正，不要向用户复述本段）";
-
-	/**
-	 * 历史回显通道的合成标记键（additive；{@code true} = 该条是合成/系统提示）。
-	 *
-	 * <p>前端契约：<b>带该键的条目一律从展示历史中丢弃</b>（不画成用户气泡、不当成助手答复，
-	 * 也不画"已压缩"灰条）；真实压缩节点只由已提交压缩事件恢复。
-	 */
-	public static final String DISPLAY_KEY = "synthetic";
 
 	/** 合成提示的明确类别（additive 诊断；前端不据类别补造展示节点）。 */
 	public enum Kind {

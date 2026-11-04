@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.tenant.TenantKeyScope;
+import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -34,7 +35,7 @@ import java.util.List;
  * 守卫键 = {@code ai:purge:guard:<tenantId>:<userId>:<sessionId>}，pending 键同口径
  * （{@link TenantKeyScope}）。跨租户/跨用户即使 sessionId 相同，也<b>不是同一个墓碑</b>：
  * 一个身份的销毁不会让另一个身份的写回被拒，也不会被另一个身份的 pending 误判成"已销毁"。
- * 无身份上下文时落到 legacy 键（独立过渡命名空间；带身份的写路径永不读写它）。
+ * 身份缺失即失败：守卫键/台账键都不会退化成不含身份段的键。
  *
  * <h2>失败口径：销毁场景 fail-closed</h2>
  * {@link #isArmed(String)} 读失败<b>不再</b>返回 {@code false}，而是抛出
@@ -92,7 +93,7 @@ public class SessionPurgeGuard {
 		this.redis = redis;
 	}
 
-	/** 守卫键名（<b>带当前身份</b>；无上下文时是 legacy 键形）。 */
+	/** 守卫键名（<b>带当前身份</b>；无上下文 = 失败）。 */
 	public String keyFor(String sessionId) {
 		return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
 	}
@@ -105,6 +106,10 @@ public class SessionPurgeGuard {
 	/** durable pending 键名（与 {@code SessionPurgePendingStore} 同一键形）。 */
 	static String pendingKey(String sessionId) {
 		return TenantKeyScope.scoped(PENDING_PREFIX, sessionId);
+	}
+
+	static String pendingKey(String sessionId, long tenantId, long userId) {
+		return TenantKeyScope.scoped(PENDING_PREFIX, tenantId, userId, sessionId);
 	}
 
 	/** 装守卫（销毁流程在删除任何数据之前调用）。值 = {@code purgeId|requestedBy}，便于取证。 */
@@ -120,19 +125,22 @@ public class SessionPurgeGuard {
 	 *         <b>销毁场景 fail-closed</b> —— 不得当作"未装守卫"继续写回（见类注释）。
 	 */
 	public boolean isArmed(String sessionId) {
+		TenantUser identity = com.example.configmgr.ai.tenant.RequestContextUtils.require();
+		return isArmed(sessionId, identity.tenantId(), identity.userId());
+	}
+
+	public boolean isArmed(String sessionId, long tenantId, long userId) {
 		if (sessionId == null || sessionId.isBlank()) {
 			return false;
 		}
 		try {
-			if (Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId)))) {
+			if (Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId, tenantId, userId)))) {
 				return true;
 			}
-			// 未完成 pending = 守卫有效，即使 guard key 的 TTL 已经到了也不能放行。
-			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId)));
+			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId, tenantId, userId)));
 		}
 		catch (RuntimeException ex) {
-			log.warn("Failed to read session purge guard sessionId={} (fail-closed: reject any write-back that could resurrect): {}", sessionId,
-					ex.getMessage());
+			log.warn("Failed to read session purge guard sessionId={} (fail-closed): {}", sessionId, ex.getMessage());
 			throw new com.example.configmgr.common.AiStateUnavailableException(
 					"无法确认会话销毁守卫状态（fail-closed）sessionId=" + sessionId, ex);
 		}

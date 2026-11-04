@@ -11,11 +11,8 @@ package com.example.configmgr.ai.tenant;
  *
  * <h2>键形</h2>
  * 与 Redis run 级键<b>同一个 tag</b>（{@link RunKeyScope#tag(String)}）：
- * <ul>
- * <li>有身份：{@code {<tenantId>:<userId>:run:<runId>}}；</li>
- * <li><b>无身份</b>：{@code {run:<runId>}} —— 这是 <b>legacy 独立命名空间</b>，不是"默认租户"。
- *     本类不提供默认身份，也绝不把别人的身份借给无记录身份的旧轮次。</li>
- * </ul>
+ * {@code {<tenantId>:<userId>:run:<runId>}}。无身份时拼键直接失败 —— 没有无身份本地桶，
+ * 也不把调用者的身份借给无记录身份的轮次。
  *
  * <h2>键由谁提供</h2>
  * 每个调用点<b>已经</b>在自己的记录身份作用域里（{@link RunIdentityScope}：续跑/交棒/看门狗节拍/
@@ -27,13 +24,16 @@ public final class LocalRunKey {
 	private LocalRunKey() {
 	}
 
-	/** 当前线程身份的本地键（无身份 = legacy {@code {run:<runId>}}）。 */
+	/** 当前线程身份的本地键（无身份 = 失败）。 */
 	public static String of(String runId) {
-		return RunKeyScope.tag(RequestContextUtils.currentOrNull(), runId);
+		return RunKeyScope.tag(RequestContextUtils.require(), runId);
 	}
 
-	/** 显式身份的本地键；{@code identity == null} = legacy 命名空间。 */
+	/** 显式身份的本地键（{@code identity == null} = 失败）。 */
 	public static String of(TenantUser identity, String runId) {
+		if (identity == null) {
+			throw new IllegalArgumentException("本地 run 键必须带身份 runId=" + runId);
+		}
 		return RunKeyScope.tag(identity, runId);
 	}
 

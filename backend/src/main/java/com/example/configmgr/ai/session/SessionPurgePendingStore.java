@@ -44,16 +44,15 @@ import java.util.Set;
  * <li>写：身份取当前 {@link RequestContextUtils} 上下文（HTTP 边界/编排入口已建立），落进 JSON
  * 的 {@code tenantId/userId} 字段；</li>
  * <li>读：{@code listDue} 先按<b>成员键</b>取值，身份从 JSON <b>记录</b>读出
- * （{@link Pending#hasIdentity()}），调用方据此 {@code useContext} 恢复上下文再继续 ——
+ * （{@link Pending#identity()}），调用方据此 {@code useContext} 恢复上下文再继续 ——
  * 这就是"按复合身份恢复，不扫描租户列表"。</li>
  * </ul>
- * 无身份上下文时落到 legacy 键（{@code ai:purge:pending:<sessionId>}，独立过渡命名空间），
- * 其记录没有身份字段；带身份的路径永远不会读写它。
+ * 身份缺失即失败：本类不生成、不读取任何不含身份段的 pending 键。
  *
  * <h2>owner / epoch / purgeId</h2>
  * pending 内保存发起时的 {@code purgeId}，并直接承载会话级执行租约：唯一 executionOwner、
  * 单调 executionEpoch 与 leaseExpiresAtMs。HTTP、runner 和记忆复核先经同一单键 Lua 抢租；
- * 阶段推进、archive checkpoint、失败退避、复核排程和完成删除均同时校验 owner/epoch/purgeId，
+ * 阶段推进、失败退避、复核排程和完成删除均同时校验 owner/epoch/purgeId，
  * 过期接管后旧执行体不能推进台账。登记仍复用原 purgeId，durable 义务在失败时保留。
  *
  * <h2>有界与一致性</h2>
@@ -257,49 +256,28 @@ public class SessionPurgePendingStore {
 	/**
 	 * 一条 pending 台账（JSON 落 Redis；无 TTL）。
 	 *
-	 * <p><b>{@code verifyAtMs}（fix4，additive）</b>：非空 = 这条台账已"删除主体完成"，只剩一次
+	 * <p><b>{@code verifyAtMs}</b>：非空 = 这条台账已"删除主体完成"，只剩一次
 	 * <b>记忆面复核</b>要到点执行（{@code chat:mem:*} 的崩溃残留补偿）。为 {@code null} 时是普通
-	 * 待重试台账，语义与本字段引入前完全一致。
+	 * 待重试台账。
 	 *
-	 * <p>老 JSON 没有该字段 ⇒ 反序列化为 {@code null}（= 普通台账）；{@code null} 值不写出
-	 * （{@link JsonInclude}），因此普通台账的 JSON 形态逐字不变。
-	 *
-	 * <p>为什么复用 {@code nextAtMs} 而不加状态枚举：到点语义本来就由 {@code nextAtMs} 驱动
-	 * （{@code listDue} 只取 due 项），复核排程只需把 {@code nextAtMs} 对齐 {@code verifyAtMs}；
-	 * 复核失败沿用 {@link #recordFailure} 的退避。复核是<b>独立阶段</b>：排程时 attempts 重开为 0
-	 * （见 {@link #scheduleVerify}），普通台账不经过这条路径，其 10 次上限不变。
+	 * <p>{@code null} 值不写出（{@link JsonInclude}）。为什么复用 {@code nextAtMs} 而不加状态枚举：
+	 * 到点语义本来就由 {@code nextAtMs} 驱动（{@code listDue} 只取 due 项），复核排程只需把
+	 * {@code nextAtMs} 对齐 {@code verifyAtMs}；复核失败沿用 {@link #recordFailure} 的退避。
+	 * 复核是<b>独立阶段</b>：排程时 attempts 重开为 0（见 {@link #scheduleVerify}），
+	 * 普通台账不经过这条路径，其 10 次上限不变。
 	 */
 	@JsonInclude(JsonInclude.Include.NON_NULL)
 	public record Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
 			long createdAtMs, String lastError, Long verifyAtMs, Long tenantId, Long userId,
-			String executionOwner, Long executionEpoch, Long leaseExpiresAtMs, String phase, Long archiveCursor) {
+			String executionOwner, Long executionEpoch, Long leaseExpiresAtMs, String phase) {
 
-		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
-				long createdAtMs, String lastError, Long verifyAtMs, Long tenantId, Long userId) {
-			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, verifyAtMs, tenantId,
-					userId, null, null, null, null, null);
-		}
-
-		/** 兼容构造（老 JSON/既有调用点）：{@code verifyAtMs = null} = 普通待重试台账。 */
-		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
-				long createdAtMs, String lastError) {
-			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, null, null, null);
-		}
-
-		/** 兼容构造：无身份（legacy 台账）。 */
-		public Pending(String sessionId, String purgeId, String requestedBy, int attempts, long nextAtMs,
-				long createdAtMs, String lastError, Long verifyAtMs) {
-			this(sessionId, purgeId, requestedBy, attempts, nextAtMs, createdAtMs, lastError, verifyAtMs, null, null);
-		}
-
-		/** 记录里是否带可用身份（两个都非空且合法）。 */
-		public boolean hasIdentity() {
-			return TenantKeyScope.hasIdentity(this.tenantId, this.userId);
-		}
-
-		/** 记录里的身份（缺失返回 {@code null} = legacy，不冒充任何新身份）。 */
-		public TenantUser identityOrNull() {
-			return hasIdentity() ? new TenantUser(this.tenantId, this.userId) : null;
+		/** 记录里的身份（缺失/非法即失败：台账必须带身份）。 */
+		public TenantUser identity() {
+			if (!TenantKeyScope.hasIdentity(this.tenantId, this.userId)) {
+				throw new IllegalStateException("会话销毁 pending 缺少可用身份 sessionId=" + this.sessionId
+						+ "（tenantId=" + this.tenantId + ", userId=" + this.userId + "）");
+			}
+			return new TenantUser(this.tenantId, this.userId);
 		}
 
 		/** 这条台账的键（身份来自<b>记录</b>，不读线程上下文）。 */
@@ -350,20 +328,7 @@ public class SessionPurgePendingStore {
 		}
 		Pending next = new Pending(pending.sessionId(), pending.purgeId(), pending.requestedBy(), pending.attempts(),
 				pending.nextAtMs(), pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
-				pending.userId(), pending.executionOwner(), pending.executionEpoch(), nowMs + leaseTtlMs, phase,
-				pending.archiveCursor());
-		return writeExecution(execution, next, nowMs, true);
-	}
-
-	public boolean checkpointArchive(Execution execution, long archiveCursor, long nowMs, long leaseTtlMs) {
-		Pending pending = ownedPending(execution);
-		if (pending == null) {
-			return false;
-		}
-		Pending next = new Pending(pending.sessionId(), pending.purgeId(), pending.requestedBy(), pending.attempts(),
-				pending.nextAtMs(), pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
-				pending.userId(), pending.executionOwner(), pending.executionEpoch(), nowMs + leaseTtlMs,
-				"DELETE_ARCHIVES", archiveCursor);
+				pending.userId(), pending.executionOwner(), pending.executionEpoch(), nowMs + leaseTtlMs, phase);
 		return writeExecution(execution, next, nowMs, true);
 	}
 
@@ -376,7 +341,7 @@ public class SessionPurgePendingStore {
 		long nextAt = System.currentTimeMillis() + backoffMs(attempts);
 		Pending next = new Pending(pending.sessionId(), pending.purgeId(), pending.requestedBy(), attempts, nextAt,
 				pending.createdAtMs(), error, pending.verifyAtMs(), pending.tenantId(), pending.userId(), null,
-				pending.executionEpoch(), null, "FAILED_RETRYABLE", pending.archiveCursor());
+				pending.executionEpoch(), null, "FAILED_RETRYABLE");
 		long now = System.currentTimeMillis();
 		if (!writeExecution(execution, next, now, true)) {
 			return false;
@@ -392,7 +357,7 @@ public class SessionPurgePendingStore {
 		}
 		Pending next = new Pending(pending.sessionId(), pending.purgeId(), pending.requestedBy(), 0, verifyAtMs,
 				pending.createdAtMs(), pending.lastError(), verifyAtMs, pending.tenantId(), pending.userId(), null,
-				pending.executionEpoch(), null, "VERIFYING", 0L);
+				pending.executionEpoch(), null, "VERIFYING");
 		long now = System.currentTimeMillis();
 		if (!writeExecution(execution, next, now, true)) {
 			return false;
@@ -455,16 +420,18 @@ public class SessionPurgePendingStore {
 		return String.valueOf(value);
 	}
 
-	/** pending 键名（<b>带当前身份</b>；无上下文时是 legacy 键形）。 */
+	/** pending 键名（<b>带当前身份</b>；无上下文 = 失败）。 */
 	public String pendingKey(String sessionId) {
 		return TenantKeyScope.scoped(PENDING_PREFIX, sessionId);
 	}
 
-	/** pending 键名（显式身份；身份来自记录/调用方）。 */
+	/** pending 键名（显式身份；身份来自记录/调用方，不可用 = 失败）。 */
 	public static String pendingKey(String sessionId, Long tenantId, Long userId) {
-		return TenantKeyScope.hasIdentity(tenantId, userId)
-				? TenantKeyScope.scoped(PENDING_PREFIX, tenantId, userId, sessionId)
-				: PENDING_PREFIX + sessionId;
+		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
+			throw new IllegalArgumentException("会话销毁 pending 缺少可用身份 sessionId=" + sessionId
+					+ "（tenantId=" + tenantId + ", userId=" + userId + "）");
+		}
+		return TenantKeyScope.scoped(PENDING_PREFIX, tenantId, userId, sessionId);
 	}
 
 	/**
@@ -480,17 +447,16 @@ public class SessionPurgePendingStore {
 	 *
 	 * @return 最终生效的 pending 与"是否本次新建"
 	 */
-	public Registration register(String sessionId, String purgeId, String requestedBy, long nowMs) {
-		return register(RequestContextUtils.currentOrNull(), sessionId, purgeId, requestedBy, nowMs);
-	}
-
-	/** 显式身份的登记（身份来自调用方/记录，不读线程上下文）。 */
+	/** 显式身份的登记（身份来自调用方/记录，不读线程上下文；缺失即失败）。 */
 	public Registration register(TenantUser identity, String sessionId, String purgeId, String requestedBy,
 			long nowMs) {
-		Long tenantId = identity == null ? null : identity.tenantId();
-		Long userId = identity == null ? null : identity.userId();
+		if (identity == null) {
+			throw new IllegalArgumentException("会话销毁 pending 必须带身份 sessionId=" + sessionId);
+		}
+		Long tenantId = identity.tenantId();
+		Long userId = identity.userId();
 		Pending candidate = new Pending(sessionId, purgeId, requestedBy, 0, nowMs, nowMs, null, null, tenantId,
-				userId);
+				userId, null, null, null, null);
 		String key = candidate.key();
 		try {
 			// 1) 先放候选到期项：SET 失败时它是可被 listDue 清理的幽灵成员，而不是无到期项的台账。
@@ -611,7 +577,7 @@ public class SessionPurgePendingStore {
 		List<Pending> out = new ArrayList<>();
 		for (String member : members) {
 			if (member == null || member.isBlank() || !member.startsWith(PENDING_PREFIX)) {
-				// 旧成员形态（裸 sessionId）或污染成员：无法定位带身份的台账，摘掉不猜。
+				// 污染成员：无法定位带身份的台账，摘掉不猜。
 				removeDueMember(member);
 				continue;
 			}
@@ -683,7 +649,7 @@ public class SessionPurgePendingStore {
 		String key = pending.key();
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), 0, verifyAtMs,
 				pending.createdAtMs(), pending.lastError(), verifyAtMs, pending.tenantId(), pending.userId(), pending.executionOwner(), pending.executionEpoch(), pending.leaseExpiresAtMs(),
-				pending.phase(), pending.archiveCursor());
+				pending.phase());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
@@ -715,7 +681,7 @@ public class SessionPurgePendingStore {
 		String key = pending.key();
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), attempts, nextAt,
 				pending.createdAtMs(), error, pending.verifyAtMs(), pending.tenantId(), pending.userId(), pending.executionOwner(), pending.executionEpoch(), pending.leaseExpiresAtMs(),
-				pending.phase(), pending.archiveCursor());
+				pending.phase());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
@@ -754,7 +720,7 @@ public class SessionPurgePendingStore {
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), pending.attempts(), nextAtMs,
 				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
 				pending.userId(), pending.executionOwner(), pending.executionEpoch(), pending.leaseExpiresAtMs(),
-				pending.phase(), pending.archiveCursor());
+				pending.phase());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next));
 			if (updated == null || updated <= 0L) {
@@ -820,7 +786,7 @@ public class SessionPurgePendingStore {
 		Pending next = new Pending(sessionId, purgeId, pending.requestedBy(), pending.attempts(), nextAtMs,
 				pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
 				pending.userId(), pending.executionOwner(), pending.executionEpoch(), pending.leaseExpiresAtMs(),
-				pending.phase(), pending.archiveCursor());
+				pending.phase());
 		try {
 			Long updated = this.redis.execute(CAS_SET, List.of(key), token(purgeId), json(next),
 					Integer.toString(MAX_AUTO_ATTEMPTS));

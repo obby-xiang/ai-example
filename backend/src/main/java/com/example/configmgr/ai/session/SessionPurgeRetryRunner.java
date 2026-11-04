@@ -270,7 +270,7 @@ public class SessionPurgeRetryRunner {
 					continue;
 				}
 				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
-				// 不恢复就会把"某个身份的销毁"当成 legacy 去删 —— 跨身份或删不干净。
+				// 不恢复就会按无身份键去删 —— 跨身份或删不干净。
 				try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
 					if (pending.verifyAtMs() != null) {
 						// fix4：这条台账的删除主体已完成，只剩一次"记忆面"复核（崩溃残留补偿）。
@@ -371,14 +371,14 @@ public class SessionPurgeRetryRunner {
 	}
 
 	/**
-	 * 台账身份的作用域（{@code null} = legacy 台账，不改变当前上下文）。
+	 * 台账身份的作用域。
 	 *
-	 * <p>重试线程是定时线程，没有请求身份。每次处理一条台账都按<b>记录</b>恢复 {@code tenantId/userId}
-	 * —— 即使当前不读这些字段，也统一口径（将来加读字段不会因为缺上下文 fail-closed 失败）。
+	 * <p>重试线程是定时线程，没有请求身份。每次处理一条台账都按<b>记录</b>恢复 {@code tenantId/userId}；
+	 * 记录没有可用身份即失败（不生成无身份键、不猜默认身份）。
 	 */
 	private static RequestContextUtils.SafeCloseable scopeOf(SessionPurgePendingStore.Pending pending) {
-		TenantUser identity = pending.identityOrNull();
-		return identity == null ? null : RequestContextUtils.useContext(identity.tenantId(), identity.userId());
+		TenantUser identity = pending.identity();
+		return RequestContextUtils.useContext(identity.tenantId(), identity.userId());
 	}
 
 	/**
@@ -397,7 +397,7 @@ public class SessionPurgeRetryRunner {
 	 * 到期项都保持原状 —— 下一轮还会取到并重试，绝不静默删除事实）。
 	 */
 	private void retireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
-		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份，否则会去改 legacy 键。
+		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份。
 		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
 			this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}

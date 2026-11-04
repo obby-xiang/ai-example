@@ -85,12 +85,12 @@ import java.util.function.LongSupplier;
  * 锁键 = {@code ai:session:lock:<tenantId>:<userId>:<sessionId>}（{@link TenantKeyScope}）：
  * 跨租户/跨用户即使 sessionId 相同，也<b>不是同一把锁</b>（不互斥、不互相强释放、不互相诊断）。
  * 进程内单值门按同一把锁键分桶，键形变了桶也就分开了。
- * 无身份上下文时落到 legacy 键（{@code ai:session:lock:<sessionId>}，独立过渡命名空间）。
+ * 身份缺失时拼键直接失败：不存在不含身份段的会话锁。
  *
  * <h2>watchdog 必须按记录恢复身份</h2>
  * 续期跑在 {@code ai-session-lock-watchdog} 单线程上，<b>没有请求身份</b>。看门狗在调度时
  * 记录了这次持有属于哪个身份，每次续期都用 {@link RequestContextUtils#useContext} 恢复它再算锁键 ——
- * 否则续期会算到 legacy 键上（续不上 ⇒ 误判丢锁 / 给别人续命）。
+ * 否则续期会算到别的身份 / 无身份键上（续不上 ⇒ 误判丢锁 / 给别人续命）。
  *
  * <h2>释放与清扫也不得因"当拍身份"漏收（2026-10-30）</h2>
  * <ul>
@@ -112,7 +112,7 @@ public class SessionGate {
 
 	/**
 	 * 锁键（<b>带当前身份</b>）：{@code ai:session:lock:<t>:<u>:<sessionId>}；
-	 * 无身份上下文时是 legacy 键形（{@code ai:session:lock:<sessionId>}）。
+	 * 无身份上下文 = 失败。
 	 */
 	static String gateKey(String sessionId) {
 		return TenantKeyScope.scoped(LOCK_PREFIX, sessionId);
@@ -285,7 +285,7 @@ public class SessionGate {
 	 */
 	public Busy acquire(String sessionId, String runId, String token) {
 		String gateKey = gateKey(sessionId);
-		Holder candidate = new Holder(sessionId, gateKey, RequestContextUtils.currentOrNull(), runId, token);
+		Holder candidate = new Holder(sessionId, gateKey, RequestContextUtils.require(), runId, token);
 		candidate.acquiredAtMs = nowMs();
 		Holder previous = this.inProcess.putIfAbsent(gateKey, candidate);
 		if (previous != null && !previous.runId.equals(runId)) {
@@ -446,11 +446,10 @@ public class SessionGate {
 		return found;
 	}
 
-	/** holder 的锁键必须与它记录的身份一致（{@code identity == null} = legacy 键形）。 */
+	/** holder 的锁键必须与它记录的身份一致。 */
 	private static String gateKeyOf(Holder holder) {
-		return holder.identity == null ? LOCK_PREFIX + holder.sessionId
-				: TenantKeyScope.scoped(LOCK_PREFIX, holder.identity.tenantId(), holder.identity.userId(),
-						holder.sessionId);
+		return TenantKeyScope.scoped(LOCK_PREFIX, holder.identity.tenantId(), holder.identity.userId(),
+				holder.sessionId);
 	}
 
 	/**
@@ -463,7 +462,7 @@ public class SessionGate {
 	 * <p><b>匹配持有者时同时核对身份</b>：进程内门按锁键（含身份段）分桶，但"按记录找持有者"的兜底
 	 * 扫描跨全部桶 —— 只按 {@code sessionId + runId} 匹配会让<b>别的身份</b>的同名轮被误释放
 	 * （摘进程内门、取消 watchdog、并把锁键换成对方那把 ⇒ 删掉对方的会话锁）。
-	 * 无身份（legacy 视图）只匹配 legacy 持有者；不同身份之间永不互相强释放。
+	 * 不同身份之间永不互相强释放。
 	 */
 	public void releaseDeadHeld(String sessionId, String runId) {
 		if (runId == null || runId.isBlank()) {
@@ -474,7 +473,7 @@ public class SessionGate {
 			return;
 		}
 		String gateKey = gateKey(sessionId);
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		Holder holder = this.inProcess.get(gateKey);
 		if (holder == null) {
 			holder = findDeadHolder(sessionId, runId, identity);
@@ -544,8 +543,8 @@ public class SessionGate {
 	/**
 	 * 按记录（sessionId + runId + <b>身份</b>）定位持有者（只用于判死强释放的兜底扫描）。
 	 *
-	 * <p>身份必须相同：{@code null}（legacy 视图）只匹配 legacy 持有者。同 sessionId/runId
-	 * 在不同身份下是<b>两轮互不相干的门</b>，跨身份匹配会误释放别人那一任。
+	 * <p>身份必须相同：同 sessionId/runId 在不同身份下是<b>两轮互不相干的门</b>，
+	 * 跨身份匹配会误释放别人那一任。
 	 */
 	private Holder findDeadHolder(String sessionId, String runId, TenantUser identity) {
 		for (Holder holder : this.inProcess.values()) {
@@ -557,11 +556,8 @@ public class SessionGate {
 		return null;
 	}
 
-	/** 持有者身份与给定身份是否同一（{@code null} 只等于 {@code null}：legacy 不冒充任何身份）。 */
+	/** 持有者身份与给定身份是否同一。 */
 	private static boolean sameIdentity(Holder holder, TenantUser identity) {
-		if (holder.identity == null || identity == null) {
-			return holder.identity == null && identity == null;
-		}
 		return holder.identity.equals(identity);
 	}
 
@@ -580,7 +576,7 @@ public class SessionGate {
 
 	/**
 	 * 按<b>锁键</b>续期（watchdog 用：它在调度时已把锁键与身份记在 holder 里，
-	 * 不能在续期线程上重新按"当前上下文"算键 —— 那算到的是别的身份/legacy 键）。
+	 * 不能在续期线程上重新按"当前上下文"算键 —— 那算到的是别的身份/无身份键）。
 	 *
 	 * <p>续期成功即"这一条持有记录还活着"的证据：刷新 {@code lastConfirmedAtMs}，
 	 * 过期清扫因此不会碰仍在续期的活跃门（见 {@link #sweepExpiredHolders(long)}）。
@@ -824,7 +820,7 @@ public class SessionGate {
 		/** 这次持有落在哪把锁上（含身份段；释放/续期只认它）。 */
 		private final String gateKey;
 
-		/** 持有身份（{@code null} = legacy 命名空间）；watchdog 用它恢复上下文。 */
+		/** 持有身份（不可为空）；watchdog 用它恢复上下文。 */
 		private final TenantUser identity;
 
 		private final String runId;
@@ -861,10 +857,9 @@ public class SessionGate {
 			this.token = token;
 		}
 
-		/** 看门狗线程的身份作用域（无身份时返回 {@code null}，try-with-resources 允许 null）。 */
+		/** 看门狗线程的身份作用域。 */
 		private RequestContextUtils.SafeCloseable useIdentity() {
-			return this.identity == null ? null
-					: RequestContextUtils.useContext(this.identity.tenantId(), this.identity.userId());
+			return RequestContextUtils.useContext(this.identity.tenantId(), this.identity.userId());
 		}
 
 	}

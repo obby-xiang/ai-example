@@ -24,8 +24,8 @@ import java.util.Map;
  * <li>{@link #context}：披露上下文（页面/任务/步骤），续跑据此重建同一份工具子集；</li>
  * <li>{@link #assistantMetadata}：挂起中那条 assistant 的<b>完整 metadata</b>（不透明；
  * 推理相关键与厂商私有未知键一并保真，续跑原样挂回）；</li>
- * <li>{@link #paramsVersion} 与 {@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}：
- * <b>L-26 的生效参数冻结</b>（同一 run 续跑不移志；新 run 才读新全局默认）；</li>
+ * <li>{@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}：
+ * <b>生效参数冻结</b>（首笔快照写死；同一 run 续跑不移志，新 run 才读新全局默认）；</li>
  * <li>{@link #status}：RUNNING / SUSPENDED / DONE / FAILED / CANCELLED —— 供重启后的发现与幂等判定。
  *     <b>取消是吸收态</b>：快照写入路径的原子守卫保证任何非取消状态都不得从 CANCELLED 转出
  *     （见 {@code RunStore#saveStatusUnlessCancelled}）。</li>
@@ -50,15 +50,7 @@ public class RunSnapshot {
 	public static final String CANCELLED = "CANCELLED";
 
 	/**
-	 * 终态串的<b>归一别名</b>（T3-7 / A13）：轮次状态本身没有 {@code REJECTED}
-	 * （条目级的 {@code PendingToolCall.REJECTED} 与前端 {@code rejected} 语义<b>不动</b>），
-	 * 但终端判定函数把该串归入"失败类终态" —— 于是任何来源传进来的 {@code REJECTED}
-	 * 都不会被当成"还能续跑的活轮"。
-	 */
-	private static final String REJECTED_ALIAS = "REJECTED";
-
-	/**
-	 * 统一终态判定（T3-7 / A14）：DONE / FAILED / CANCELLED（+ {@code REJECTED} 归一）为终态。
+	 * 统一终态判定：DONE / FAILED / CANCELLED 为终态。
 	 *
 	 * <h2>为什么必须唯一函数</h2>
 	 * 此前 {@code DONE|FAILED|CANCELLED} 这一组字面量散落在多处
@@ -69,8 +61,7 @@ public class RunSnapshot {
 	 * @param status 轮次状态串（可为 null / 未知串 → false）
 	 */
 	public static boolean isTerminal(String status) {
-		return DONE.equals(status) || FAILED.equals(status) || CANCELLED.equals(status)
-				|| REJECTED_ALIAS.equals(status);
+		return DONE.equals(status) || FAILED.equals(status) || CANCELLED.equals(status);
 	}
 
 	private String runId;
@@ -78,15 +69,15 @@ public class RunSnapshot {
 	private String sessionId;
 
 	/**
-	 * 客户端请求 id（additive，停止闭环）：前端在 {@code /chat} 发送前生成并由镜像持久化，
+	 * 客户端请求 id（停止闭环）：前端在 {@code /chat} 发送前生成并由镜像持久化，
 	 * 后端用它把 {@code clientRequestId} 与本轮绑定（见 {@link ClientRequestRegistry}）。
 	 *
-	 * <p>{@code null} = 旧客户端 / 旧快照。它只是关联键，<b>不是 runId</b>，也不能用来指定 run。
+	 * <p>它只是关联键，<b>不是 runId</b>，也不能用来指定 run。
 	 */
 	private String clientRequestId;
 
 	/**
-	 * 本轮归属的租户（首轮创建时从 {@code RequestContextUtils} 固定；{@code 0} = 本字段引入前的旧快照）。
+	 * 本轮归属的租户（首轮创建时从 {@code RequestContextUtils} 固定）。
 	 *
 	 * <p><b>只读不重算</b>：续跑/恢复/跨实例接管都发生在原请求结束之后，身份只能从这条记录读回，
 	 * 不得按当前线程上下文"重新判定归属"（那会让接管方以自己的身份改写别人的轮次）。
@@ -94,7 +85,7 @@ public class RunSnapshot {
 	private long tenantId;
 
 	/**
-	 * 本轮归属的用户（{@code -1} = 系统账号；{@code 0} = 旧快照）。
+	 * 本轮归属的用户（{@code -1} = 系统账号）。
 	 *
 	 * <p>与 {@link #tenantId} 同源同寿：创建时一起固定，续跑只读。
 	 */
@@ -115,7 +106,7 @@ public class RunSnapshot {
 	 * <p><b>累计、跨挂起不重置</b>（LangGraph 口径）：上限 = {@code app.ai.resilience.max-tool-steps}
 	 * （25），到顶后降级「部分完成收尾」。正因为"不重置"，这个计数必须<b>外置</b>在这里 ——
 	 * 挂起后的续跑可能落在另一个进程上，进程内计数器会被重置成 0（五段挂起就能刷出 5×25 步）。
-	 * 旧快照没有本字段 ⇒ 0（Jackson 缺省），与"还没用过工具"同义。
+	 * {@code 0} = 还没用过工具。
 	 */
 	private int toolSteps;
 
@@ -149,33 +140,17 @@ public class RunSnapshot {
 	private List<String> resumedBy = new ArrayList<>();
 
 	/**
-	 * 本轮使用的 provider（模型配置专项批①；{@code ai_provider.id}）。
+	 * 本轮使用的 provider（{@code ai_provider.id}）。
 	 *
-	 * <p>
-	 * {@code null} = 旧快照（批① 之前写的）或 env 合成行（种子尚未落库）。批③ 的续跑将<b>按快照</b>
-	 * 取模型：provider 已删/停用 ⇒ 409 {@code PROVIDER_GONE}，不静默换模型续跑（历史与
-	 * {@code done.model} 都不许说谎）。
+	 * <p>{@code null} = env 合成行（种子尚未落库）。续跑<b>按快照</b>取模型：provider 已删/停用
+	 * ⇒ 409 {@code PROVIDER_GONE}，不静默换模型续跑（历史与 {@code done.model} 都不许说谎）。
 	 */
 	private Long providerId;
 
-	/** 本轮使用的模型名（请求体 {@code model} 的原值；{@code null} = 旧快照）。 */
+	/** 本轮使用的模型名（请求体 {@code model} 的原值）。 */
 	private String modelId;
 
-	/** 生效参数冻结的<b>版本号</b>（L-26）：0 = 未冻结的旧快照；1 = 已冻结。 */
-	public static final int PARAMS_VERSION_FROZEN = 1;
-
-	/**
-	 * 生效参数冻结版本（L-26 / 业界裁决）。
-	 *
-	 * <p><b>为什么需要版本号而不是"看字段是否为空"</b>：冻结值允<b>为 null</b>（首轮当时就没有
-	 * temperature，或 {@code providerId=null} 的 env 合成行）。全局 Jackson 是 {@code non_null}
-	 * ⇒ 冻结的 null 在 JSON 里根本不存在，与"旧快照从来没有这些字段"逐字节同形。
-	 * 于是"冻结过"只能由本字段表达：{@code 0} = 旧快照（续跑按当前默认 + WARN），
-	 * {@code >=1} = 这些字段（含 null）就是当时的生效值，续跑必须照抄。
-	 */
-	private int paramsVersion;
-
-	/** 冻结的生效 temperature（{@code paramsVersion=1} 时 null 也是冻结值）。 */
+	/** 冻结的生效 temperature（null 也是冻结值：当时没有配置/请求未覆盖）。 */
 	private Double temperature;
 
 	/** 冻结的生效 top_p。 */
@@ -200,15 +175,15 @@ public class RunSnapshot {
 	 * 推理相关元数据（{@code reasoningContent} 之外还可能有 {@code encrypted_content} /
 	 * {@code signature} / {@code thinking} 等厂商私有键）。这里整份 map 原样保存、原样恢复，
 	 * <b>不解析、不截断、不按 provider 分支</b>；未知键也因此不会丢。
-	 * {@code null} = 挂起时上游没有 metadata（旧快照/旧调用方）。
+	 * {@code null} = 挂起时上游没有 metadata。
 	 */
 	private Map<String, Object> assistantMetadata;
 
 	/**
-	 * 写入本条快照的<b>租约 epoch</b>（B23L1 批②a）：0 = 无租约写入（单实例/降级路径/旧数据）。
+	 * 写入本条快照的<b>租约 epoch</b>：0 = 无租约写入（单实例/降级路径）。
 	 *
 	 * <p>它回答"这条状态是哪一任续跑权写的"：与 {@code ai:fence:run:<runId>} 对账即可判定
-	 * 一次写回是否已被后来者超越（陈旧写不得覆盖新主人的状态）。旧 JSON 没有本字段 ⇒ 0。
+	 * 一次写回是否已被后来者超越（陈旧写不得覆盖新主人的状态）。0 = 无租约写入。
 	 */
 	private long runEpoch;
 
@@ -233,30 +208,26 @@ public class RunSnapshot {
 	private int budgetSkippedBatches;
 
 	/**
-	 * 冻结本轮生效参数（L-26）：<b>只在首轮创建快照时调用</b>，续跑不得再写。
+	 * 冻结本轮生效参数：<b>只在首轮创建快照时调用</b>，续跑不得再写。
 	 *
-	 * <p>不变量：{@code paramsVersion = 1} 之后，三值与 {@code paramsLocked} 就是这一轮的
-	 * "当时生效值" —— 包括 null。续跑按它派生运行态（{@link #paramsFrozen()} 的消费方：
-	 * {@code ResilientChatService#runtimeForSnapshot}），因此新 run 改全局默认不会改到旧 run。
+	 * <p>不变量：三值与 {@code paramsLocked} 就是这一轮的"当时生效值" —— 包括 null。
+	 * 续跑按它派生运行态（{@code ResilientChatService#runtimeForSnapshot}），
+	 * 因此新 run 改全局默认不会改到旧 run。
+	 *
+	 * @throws IllegalArgumentException {@code frozen == null}（首笔快照必须冻结参数）
 	 */
 	public void freezeParams(FrozenParams frozen) {
 		if (frozen == null) {
-			return;
+			throw new IllegalArgumentException("首笔快照必须冻结生效参数");
 		}
-		this.paramsVersion = PARAMS_VERSION_FROZEN;
 		this.temperature = frozen.temperature();
 		this.topP = frozen.topP();
 		this.maxTokens = frozen.maxTokens();
 		this.paramsLocked = frozen.paramsLocked();
 	}
 
-	/** 本快照是否冻结过生效参数（{@code false} = L-26 之前的旧快照，续跑走旧行为 + WARN）。 */
-	public boolean paramsFrozen() {
-		return this.paramsVersion >= PARAMS_VERSION_FROZEN;
-	}
-
 	/**
-	 * 冻结值的取证视图（只读；{@link #paramsFrozen()} 为 {@code false} 时调用方不应使用）。
+	 * 冻结值的取证视图（只读）。
 	 *
 	 * <p>存在的理由 = 执行信封（{@code ToolExecutionEnvelope.fromSnapshot}）要把"这一轮当时的生效
 	 * 参数"原样带走，避免再散点抄四个字段；{@code paramsLocked} 的 null 与 false 在快照里本就不分
@@ -268,18 +239,17 @@ public class RunSnapshot {
 	}
 
 	/**
-	 * B2：本轮用户的<b>请求原文</b>（建快照时写一次，additive）。
+	 * B2：本轮用户的<b>请求原文</b>（建快照时写一次）。
 	 *
 	 * <p>transcript 终态补写用户条目<b>只认它</b> —— 不从快照历史里挑"最后一条 USER"（那会把记忆窗口
-	 * 里别的轮次的提问写成这一轮），也不按消息 metadata 推断归属。{@code null}/空白 = 未记录
-	 * （旧快照或写入失败）：终态不补写，不做旧快照兼容。
+	 * 里别的轮次的提问写成这一轮），也不按消息 metadata 推断归属。建快照时必填（非空白）。
 	 */
 	private String requestText;
 
 	/**
-	 * B2：本轮<b>请求起点</b>（建快照时写一次，additive；= transcript 轮首用户条目的排序键）。
+	 * B2：本轮<b>请求起点</b>（建快照时写一次；= transcript 轮首用户条目的排序键）。
 	 *
-	 * <p>{@code 0} = 未记录（旧快照）：用户条目回落 {@code createdAtMs - 1}。实际排序键见
+	 * <p>建快照时必填（&gt; 0）。实际排序键见
 	 * {@link #transcriptUserTurnStartedAtMs()}（取请求起点与 {@code createdAtMs} 的较早者，时钟回拨
 	 * 时也不会排到工具卡之后）；助手/工具条目<b>始终</b>用 {@link #createdAtMs}、不做任何偏移 ——
 	 * 排序只保证"本 run 的用户条目早于本 run 的工具条目"，不给工具键加 1ms（那会让相邻 run 的条目
@@ -292,7 +262,7 @@ public class RunSnapshot {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("runId", this.runId);
 		out.put("sessionId", this.sessionId);
-		// 身份归属（additive）：0 = 本字段引入前的旧快照（不冒充任何真实租户）
+		// 身份归属
 		out.put("tenantId", this.tenantId);
 		out.put("userId", this.userId);
 		out.put("status", this.status);
@@ -310,19 +280,18 @@ public class RunSnapshot {
 		out.put("updatedAtMs", this.updatedAtMs);
 		out.put("resumedBy", this.resumedBy);
 		out.put("runEpoch", this.runEpoch);
-		// 模型身份（模型配置专项批①，additive）：旧快照为 null，取证口径与 runEpoch 一致
+		// 模型身份
 		out.put("providerId", this.providerId);
 		out.put("modelId", this.modelId);
-		// L-26 生效参数（additive）：paramsVersion=0 = 旧快照（未冻结）；>=1 时四值是当时的生效值
-		out.put("paramsVersion", this.paramsVersion);
+		// 生效参数：四值是这一轮当时的生效值（null 也是冻结值）
 		out.put("temperature", this.temperature);
 		out.put("topP", this.topP);
 		out.put("maxTokens", this.maxTokens);
 		out.put("paramsLocked", this.paramsLocked);
-		// AR-10 第 3 条（additive）：armed 跨 park 持久化的两个事实；0 = 未武装（旧快照同值）
+		// AR-10 第 3 条：armed 跨 park 持久化的两个事实；0 = 未武装
 		out.put("budgetArmedAtMs", this.budgetArmedAtMs);
 		out.put("budgetSkippedBatches", this.budgetSkippedBatches);
-		// B2（additive）：请求原文只报字符数（取证够用，不回显正文）；0 = 未记录
+		// B2：请求原文只报字符数（取证够用，不回显正文）
 		out.put("requestTextChars", this.requestText == null ? 0 : this.requestText.length());
 		return out;
 	}
@@ -333,16 +302,15 @@ public class RunSnapshot {
 	 * <p>为什么取较早者：读侧按 {@code turnStartedAtMs} 稳定排序、同值保插入顺序，而终态补写的用户
 	 * 条目是<b>后写</b>的 —— 键一旦不早于工具卡（{@code createdAtMs}）就会排到它们之后。正常时钟下
 	 * 请求起点早于建快照，原值不变；<b>时钟回拨</b>（起点晚于创建）或同毫秒时取 {@code createdAtMs - 1}，
-	 * 保证补写的用户条目仍在工具卡之前。旧快照没有请求起点时同样取 {@code createdAtMs - 1}。
+	 * 保证补写的用户条目仍在工具卡之前。
 	 * 只动用户键、工具键保持 {@link #transcriptToolTurnStartedAtMs()}（= {@code createdAtMs}），
 	 * 跨 run 顺序不变。
 	 */
 	public long transcriptUserTurnStartedAtMs() {
-		if (this.createdAtMs <= 0L) {
-			return this.turnStartedAtMs > 0L ? this.turnStartedAtMs : 0L;
+		if (this.createdAtMs <= 0L || this.turnStartedAtMs <= 0L) {
+			throw new IllegalStateException("轮次快照缺少 createdAtMs/turnStartedAtMs runId=" + this.runId);
 		}
-		long beforeCreation = this.createdAtMs - 1L;
-		return this.turnStartedAtMs > 0L ? Math.min(this.turnStartedAtMs, beforeCreation) : beforeCreation;
+		return Math.min(this.turnStartedAtMs, this.createdAtMs - 1L);
 	}
 
 	/**
@@ -352,7 +320,10 @@ public class RunSnapshot {
 	 * 的用户条目不会排到工具卡之后；工具键保持原值，避免给相邻 run 制造 1ms 的交错。
 	 */
 	public long transcriptToolTurnStartedAtMs() {
-		return this.createdAtMs > 0L ? this.createdAtMs : this.transcriptUserTurnStartedAtMs();
+		if (this.createdAtMs <= 0L) {
+			throw new IllegalStateException("轮次快照缺少 createdAtMs runId=" + this.runId);
+		}
+		return this.createdAtMs;
 	}
 
 }

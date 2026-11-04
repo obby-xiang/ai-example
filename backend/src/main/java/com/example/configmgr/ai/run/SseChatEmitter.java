@@ -343,16 +343,16 @@ public class SseChatEmitter {
 	 * 当前身份只作<b>取键提示</b>（记录键由身份拼出，没有它就无从读起），<b>绝不</b>当成权威 ——
 	 * 记录身份与它不同时以记录为准（"请求身份覆盖记录"会让帧写进另一个租户的键）。
 	 *
-	 * <p>解析不到（记录还没建 / 0/0 旧轮 / Redis 抖动）就保持 {@code null}：帧面照常，
-	 * 但身份相关的键走 legacy 口径 —— 不伪造默认租户，也不回落到调用线程的残留身份。
-	 *
-	 * <p><b>没有提示</b>（{@link #requestIdentityHint} 为 {@code null}，见 {@link #recordIdentityRequired}）
-	 * 时是另一件事：拼不出记录键 ⇒ 身份<b>不可确认</b>。生产装配下<b>不</b>落定、<b>不</b>写 legacy，
-	 * 由调用方按"本拍明确失败"处理；只有轻装配/单测（legacy 是唯一命名空间）才继续走 legacy 口径。
+	 * <p>解析不到（没有取键提示 / 记录 0/0 / 读记录失败且无提示）⇒ {@code null} =
+	 * <b>身份不可确认</b>：本拍不落档、不投递、不发布唤醒，按故障恢复处理（断连/重挂回放），
+	 * 绝不退回无身份键或裸 runId 频道。
 	 */
 	private volatile TenantUser deliveryIdentity;
 
-	/** 构造线程的当前身份（只用于"按身份拼键去读记录"，不作权威身份）。 */
+	/** 记录存在但归属不可用（0/0 旧快照）⇒ 身份永久不可确认：不缓存提示身份、不回退任何键族。 */
+	private volatile boolean identityInvalid;
+
+	/** 构造线程的显式请求身份（只用于"按身份拼键去读记录"，不作权威身份；null = 无法拼键）。 */
 	private final TenantUser requestIdentityHint;
 
 	/**
@@ -360,16 +360,9 @@ public class SseChatEmitter {
 	 *
 	 * <p>"CAS 抢首次、失败方直接读字段"的写法有窄窗竞态：首次解析者还阻塞在记录读取里、
 	 * 尚未把结果写回时，失败方会拿到<b>尚未落定</b>的 {@code null}，首批帧/seq/events 因此
-	 * 按 legacy 键落档，与本轮记录身份分叉。解析整段在锁内完成，落定前其他调用方在锁上等待。
+	 * 无法判定身份。解析整段在锁内完成，落定前其他调用方在锁上等待。
 	 */
 	private final Object identityLock = new Object();
-
-	/**
-	 * 首次解析是否已落定（只表示"解析完成"，落定值可以是 {@code null}）。
-	 *
-	 * <p>只在 {@link #identityLock} 内读写 —— 没有它就无法区分"还没解析"与"解析结果就是无身份"。
-	 */
-	private boolean identityResolved;
 
 	/** 身份记录读失败的基础退避（有界：1s 起，按连续失败指数增长）。 */
 	static final long IDENTITY_READ_BACKOFF_BASE_MS = 1_000L;
@@ -380,34 +373,20 @@ public class SseChatEmitter {
 	/**
 	 * <b>C-63：身份读异常的有界退避</b>（值 = 下一次允许读记录的时刻，epoch 毫秒；0 = 不退避）。
 	 *
-	 * <p>为什么需要：首次解析在 {@link #identityLock} 内做一次 Redis 读；读异常<b>不落定</b>
+	 * <p>为什么需要：首次解析在 {@link #identityLock} 内做一次 Redis 读；读异常<b>不缓存</b>
 	 * （下一拍重试），于是 Redis 抖动时<b>每一帧</b>都会带着锁再读一次 —— 出帧热路径被一次
 	 * 高延迟读放大成"帧率 × 一个往返"，还把同轮其它出帧串行化在锁上。
 	 *
-	 * <p>退避期间的行为与"这一拍读失败"逐字一致（不缓存、不落定）：有已校验提示就按提示继续
-	 * （见 {@link #fallbackIdentityOutcome()}），没有提示仍返回 {@code readFailure} 让调用方
-	 * 明确失败；退避到期后再试，解析成功即清零（{@link #clearIdentityBackoff()}）。
+	 * <p>退避期间的行为与"这一拍读失败"一致：有显式取键提示就用提示（身份键形与本轮一致），
+	 * 没有提示则返回 {@code null} 让调用方明确失败；退避到期后再试，解析成功即清零
+	 * （{@link #clearIdentityBackoff()}）。
 	 *
-	 * <p>只在锁内写（与 {@link #identityResolved} 同一拍），锁外读：因此退避判定本身不进锁。
+	 * <p>只在锁内写，锁外读：因此退避判定本身不进锁。
 	 */
 	private final AtomicLong identityRetryAtMs = new AtomicLong(0L);
 
 	/** 连续记录读失败次数（退避指数）；解析成功/落定时清零。只在 {@link #identityLock} 内写。 */
 	private final AtomicInteger identityReadFailures = new AtomicInteger();
-
-	/**
-	 * <b>本轮记录身份是唯一权威</b>（生产装配标记；{@link RunRegistry} 创建写出器时打开）。
-	 *
-	 * <p>打开后，"没有取键提示"（{@link #requestIdentityHint} 为 {@code null}）不再被当成
-	 * "确认这一轮没有身份"：拼不出记录键 ⇒ 身份<b>不可确认</b>，调用方按既有失败分支处理
-	 * （本拍不落档、不投递、不发布唤醒），<b>绝不</b>回落到 legacy 键族 ——
-	 * {@code ai:xevents:{run:<id>}} 与本轮真实的 {@code ai:xevents:{<t>:<u>:run:<id>}} 是两套归档，
-	 * 写进前者等于"帧发出去了但重挂/唤醒读不到"。
-	 *
-	 * <p>不打开（测试直接构造写出器）：legacy 命名空间是<b>唯一</b>命名空间，
-	 * 不存在两套归档分叉。
-	 */
-	private volatile boolean recordIdentityRequired;
 
 	/**
 	 * 包②：单帧写出的<b>超时预算</b>（{@link SseWriteBudget}）。
@@ -589,6 +568,8 @@ public class SseChatEmitter {
 	 * "上界 seq"，后到的更大上界覆盖前者，丢掉的中间上界不影响正确性（差量由读侧补齐）。
 	 */
 	private final AtomicLong pendingWakeSeq = new AtomicLong();
+	private final Object wakePublishLock = new Object();
+	private boolean pendingWakeTerminal;
 
 	/** T5：本轮 assistant 正文消息的身份（结果铸为消息 / 消息级渲染去重的判据）。 */
 	private final String assistantMessageId;
@@ -671,13 +652,17 @@ public class SseChatEmitter {
 	/**
 	 * P3-04：业务活动锚点 / 心跳活动戳的<b>写侧节流</b>时钟（每写出器 = 每 run 一份）。
 	 *
-	 * <p>值为"最近一次真正写入的活动时刻"（帧的 {@code atMs}/${@code now}；0 = 尚未写过）。
-	 * 用 CAS 抢写窗口：同一秒内并发出帧只有一条真正发 Redis 命令，其余直接跳过 —— 僵尸判据
-	 * （{@code ai:activity}，窗口分钟级）与心跳 TTL 续期都不受影响，只是把重复写合并。
+	 * <p>值为"最近一次登记合流写的活动时刻"（帧的 {@code atMs}/${@code now}；0 = 尚未登记）。
+	 * 同一秒内的重复登记直接跳过，在飞写再由单飞任务取最大业务戳合并 —— 僵尸判据
+	 * （{@code ai:activity}，窗口分钟级）与心跳 TTL 续期都不受影响。
 	 */
 	private final AtomicLong lastBusinessActivityTouchMs = new AtomicLong(0L);
 
 	private final AtomicLong lastHeartbeatActivityTouchMs = new AtomicLong(0L);
+	private final Object activityTouchLock = new Object();
+	private boolean activityTouchInFlight;
+	private boolean pendingHeartbeatActivity;
+	private long pendingBusinessActivityStamp;
 
 	/**
 	 * <b>终态回收钩子</b>（资源修复批）：轮终态且订阅者排空后调用一次，由注册表把它自己从
@@ -694,27 +679,6 @@ public class SseChatEmitter {
 
 	/** 回收钩子只跑一次（终态排空可能被多条路径并发观察到）。 */
 	private final AtomicBoolean recycled = new AtomicBoolean();
-
-	/** 便捷构造（显式给事件日志，无跨实例唤醒）。 */
-	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper) {
-		this(runId, store, frames, objectMapper, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), null, null);
-	}
-
-	/**
-	 * 生产装配构造（B23L1 批①）：事件日志 + 唤醒发布 + 唤醒订阅三件套一次注入。
-	 *
-	 * @param frames       事件日志（生产 = {@link RedisFrameStore}）
-	 * @param wakeBus      唤醒发布面（null = 不跨实例广播）
-	 * @param wakeListener 唤醒订阅面（null = 不订阅）
-	 */
-	public SseChatEmitter(String runId, RunStore store, FrameStore frames, ObjectMapper objectMapper,
-			Executor deliveryExecutor, int queueCapacity, int maxFrameBytes, SseWriteBudget writeBudget,
-			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
-		this(runId, store, frames, objectMapper, deliveryExecutor, queueCapacity, maxFrameBytes, writeBudget,
-				wakeBus, wakeListener, null);
-	}
 
 	/**
 	 * 全参构造（G5）：额外注入模型侧裁剪器，使 {@code tool_result} 帧能挂上"模型看到的是不是全文"。
@@ -952,18 +916,6 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * <b>生产装配标记</b>：本轮记录身份是唯一权威（见 {@link #recordIdentityRequired}）。
-	 *
-	 * <p>由 {@link RunRegistry} 的<b>生产构造</b>（Spring 注入的那个）在新建写出器时调用一次；
-	 * 轻装配/单测路径不调用，于是它们的 legacy 命名空间语义保持不变。
-	 *
-	 * <p>包内可见：这是装配期开关，不是运行期行为面 —— 生产装配之外没有第二个合法调用方。
-	 */
-	void requireRecordIdentity() {
-		this.recordIdentityRequired = true;
-	}
-
-	/**
 	 * 本写出器最近一次<b>已处置</b>的业务序号（未出帧 = 0）。诊断/上下文快照用；
 	 * 不参与去重与差量下界（那是各订阅者的游标，见 {@link Subscription#wakeFloor}）。
 	 */
@@ -1165,12 +1117,12 @@ public class SseChatEmitter {
 
 	/** 对账只在锁内取游标与入队；归档 Redis 读在两次临界区之间完成。 */
 	private void reconcileArchive() {
-		IdentityOutcome identity = deliveryIdentityOutcome();
-		if (identity.readFailure() && identity.identity() == null) {
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
 			log.warn("archive reconcile skipped runId={} (identity unconfirmed, retry next window)", this.runId);
 			return;
 		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			reconcileArchiveScoped();
 		}
 	}
@@ -1375,9 +1327,8 @@ public class SseChatEmitter {
 	 * <p><b>登记身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：调用点既可能是带请求身份的
 	 * 挂起/重挂线程，也可能是<b>没有请求身份</b>的容器回调线程（{@code onCompletion/onTimeout/onError}
 	 * → {@link #closeSubscription} → {@link #applyWakeSync}）。{@code FrameWakeListener#register}
-	 * 按调用线程的当前身份拼频道，回调线程现读会是 {@code null} ⇒ 登记到 legacy 频道
-	 * {@code ai:wake:<runId>}，与发布侧的身份频道分叉、跨实例唤醒静默缺席。因此这里显式按记录身份
-	 * 建立作用域（无身份时清空，不回落到调用线程的残留身份），与投递路径同源。
+	 * 按调用线程的当前身份拼频道，因此这里显式按记录身份建立作用域；身份不可确认就不登记
+	 * （没有可判定的身份频道，不存在裸 runId 旁路），由下一拍/重挂重试。
 	 */
 	private void ensureWakeSubscribed() {
 		FrameWakeListener listener = this.wakeListener;
@@ -1387,17 +1338,15 @@ public class SseChatEmitter {
 		if (!this.wakeRegistered.compareAndSet(false, true)) {
 			return;
 		}
-		IdentityOutcome identity = deliveryIdentityOutcome();
-		if (identity.readFailure() && identity.identity() == null) {
-			// 身份不可确认 ⇒ 不登记（否则会登记到 legacy 频道，发布侧在身份频道上，跨实例唤醒静默缺席）。
-			// 回退登记位，等下一次订阅触达或身份可读时再试。
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
+			// 身份不可确认 ⇒ 不登记（没有可判定的身份频道，调用方下一拍/重挂重试）。
 			this.wakeRegistered.set(false);
-			log.warn("frame wake subscribe skipped runId={} (identity unconfirmed, "
-					+ "retry next tick; never fall back to legacy channel)", this.runId);
+			log.warn("frame wake subscribe skipped runId={} (identity unconfirmed, retry next tick)", this.runId);
 			return;
 		}
 		boolean registered;
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			registered = listener.register(this.runId, this.wakeTarget);
 		}
 		catch (Exception ex) {
@@ -1595,9 +1544,15 @@ public class SseChatEmitter {
 			return false;
 		}
 		List<FrameStore.RawFrame> tail;
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
+			return false;
+		}
 		try {
-			// 真实 COUNT=1（XRANGE + COUNT），不做整窗读后裁剪。
-			tail = this.frames.readRawFrom(this.runId, lastSeq - 1L, 1);
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+				// 真实 COUNT=1（XRANGE + COUNT），不做整窗读后裁剪。
+				tail = this.frames.readRawFrom(this.runId, lastSeq - 1L, 1);
+			}
 		}
 		catch (Exception ex) {
 			log.debug("replay terminal probe failed runId={} lastSeq={}: {}", this.runId, lastSeq, ex.getMessage());
@@ -1683,11 +1638,14 @@ public class SseChatEmitter {
 		}
 		stopAttachKeepalive();
 		long floor = -1L;
-		if (this.frames != null) {
+		TenantUser identity = deliveryIdentity();
+		if (this.frames != null && identity != null) {
 			try {
-				OptionalLong last = this.frames.lastSeqIfKnown(this.runId);
-				if (last != null && last.isPresent()) {
-					floor = Math.max(0L, last.getAsLong());
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					OptionalLong last = this.frames.lastSeqIfKnown(this.runId);
+					if (last != null && last.isPresent()) {
+						floor = Math.max(0L, last.getAsLong());
+					}
 				}
 			}
 			catch (RuntimeException ex) {
@@ -1881,6 +1839,16 @@ public class SseChatEmitter {
 	 * 或唤醒补帧接住，不存在丢帧窗口；回锁后再校验 {@code closed/cursor} 才入队。
 	 */
 	private ReplayStart readReplayStart(Subscription sub, Long lastSeq) {
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
+			return new ReplayStart(List.of(), null, true, new FrameStore.ReadResult(List.of(), true, false, 0L, 0L));
+		}
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return readReplayStartScoped(sub, lastSeq);
+		}
+	}
+
+	private ReplayStart readReplayStartScoped(Subscription sub, Long lastSeq) {
 		long afterSeq = lastSeq == null ? 0L : Math.max(0L, lastSeq);
 		sub.replayOrphanFloor = lastSeq;
 		sub.replayCursor = afterSeq;
@@ -2174,6 +2142,13 @@ public class SseChatEmitter {
 	 * 返回 {@code true} = 队列里已有新帧可写。
 	 */
 	private boolean advanceReplay(Subscription sub) {
+		if (deliveryIdentity() == null) {
+			// 身份不可确认：不读任何帧键；终止本订阅的回放（客户端按失败/重挂恢复）。
+			synchronized (this.emitLock) {
+				abortReplayLocked(sub);
+			}
+			return false;
+		}
 		long from;
 		synchronized (this.emitLock) {
 			if (sub.closed) {
@@ -2324,6 +2299,17 @@ public class SseChatEmitter {
 	 * @param match 命中判据（入参为解析后的帧体）
 	 */
 	private ArchiveScan scanArchive(long afterSeq, int maxFrames, java.util.function.Predicate<Map<String, Object>> match) {
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
+			return ArchiveScan.UNKNOWN;
+		}
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			return scanArchiveScoped(afterSeq, maxFrames, match);
+		}
+	}
+
+	private ArchiveScan scanArchiveScoped(long afterSeq, int maxFrames,
+			java.util.function.Predicate<Map<String, Object>> match) {
 		ArchiveScan physical = scanArchiveByEntry(afterSeq, maxFrames, match);
 		if (physical != null) {
 			return physical;
@@ -3321,7 +3307,7 @@ public class SseChatEmitter {
 			}
 		}
 		if (!actualText.toString().equals(text == null ? "" : text)
-				|| (actualReasoning.length() == 0 && reasoning != null && !reasoning.isBlank())) {
+				|| !actualReasoning.toString().equals(reasoning == null ? "" : reasoning)) {
 			return false;
 		}
 		if (actualCalls.size() != calls.size()) {
@@ -3437,9 +3423,9 @@ public class SseChatEmitter {
 	/**
 	 * 业务活动锚点（{@code ai:activity}）按 run 约 1s 节流（P3-04）。
 	 *
-	 * <p>节流判定本身（CAS）留在出帧路径，<b>Redis 写移到 {@code emitLock} 之外</b>：调用方拿到
-	 * {@code true} 后在锁外执行 {@link RunStore#touchBusinessActivity(String, long)}。
-	 * 锚点因此最多落后 1s；僵尸接管读的是分钟级窗口（缺省 180s），语义不变。
+	 * <p>节流判定留在出帧路径；实际写由 {@link #scheduleActivityTouch} 合流后投递到既有
+	 * delivery 执行器，不在 scheduler 或 {@code emitLock} 内做 Redis I/O。
+	 * 锚点只存在有界调度延迟；僵尸接管读的是分钟级窗口（缺省 180s），语义不变。
 	 */
 	private boolean businessActivityDue(long atMs) {
 		long stamp = atMs > 0L ? atMs : System.currentTimeMillis();
@@ -3460,6 +3446,66 @@ public class SseChatEmitter {
 		return this.lastHeartbeatActivityTouchMs.compareAndSet(last, now);
 	}
 
+	private void scheduleActivityTouch(boolean heartbeat, boolean business, long businessStamp) {
+		if (!heartbeat && !business) {
+			return;
+		}
+		synchronized (this.activityTouchLock) {
+			this.pendingHeartbeatActivity |= heartbeat;
+			if (business) {
+				this.pendingBusinessActivityStamp = Math.max(this.pendingBusinessActivityStamp, businessStamp);
+			}
+			if (this.activityTouchInFlight) {
+				return;
+			}
+			this.activityTouchInFlight = true;
+		}
+		try {
+			this.deliveryExecutor.execute(AiTrace.wrap(this::drainActivityTouch));
+		}
+		catch (RejectedExecutionException ex) {
+			synchronized (this.activityTouchLock) {
+				this.activityTouchInFlight = false;
+				this.pendingHeartbeatActivity = false;
+				this.pendingBusinessActivityStamp = 0L;
+			}
+			log.debug("activity touch not scheduled runId={}: {}", this.runId, ex.getMessage());
+		}
+	}
+
+	private void drainActivityTouch() {
+		while (true) {
+			final boolean heartbeat;
+			final long businessStamp;
+			synchronized (this.activityTouchLock) {
+				heartbeat = this.pendingHeartbeatActivity;
+				businessStamp = this.pendingBusinessActivityStamp;
+				this.pendingHeartbeatActivity = false;
+				this.pendingBusinessActivityStamp = 0L;
+			}
+			TenantUser identity = deliveryIdentity();
+			if (identity != null) {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+					if (heartbeat) {
+						this.store.touchActivity(this.runId);
+					}
+					if (businessStamp > 0L) {
+						this.store.touchBusinessActivity(this.runId, businessStamp);
+					}
+				}
+				catch (RuntimeException ex) {
+					log.debug("activity touch failed runId={}: {}", this.runId, ex.getMessage());
+				}
+			}
+			synchronized (this.activityTouchLock) {
+				if (!this.pendingHeartbeatActivity && this.pendingBusinessActivityStamp <= 0L) {
+					this.activityTouchInFlight = false;
+					return;
+				}
+			}
+		}
+	}
+
 	/**
 	 * <b>8D / L-143：出帧的在飞登记 + 收尾让位。</b>
 	 *
@@ -3473,13 +3519,12 @@ public class SseChatEmitter {
 	 *
 	 * <p><b>出帧身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：{@link #emitInternal} 下游的
 	 * 取号/事件日志/活动锚点（以及锁外发布前的累计）全都按<b>调用线程身份</b>拼键。调用方不一定开过
-	 * 作用域（定时线程、池化线程、未来新增入口都没有请求身份），漏开就会把帧写进 legacy 键形 ——
-	 * 帧看似发出，重挂回放与跨实例唤醒却读不到。这里统一兜底：与投递路径同源、同一份已解析身份，
-	 * 嵌套时由作用域关闭还原调用方原身份（{@link RunIdentityScope}）。
+	 * 作用域（定时线程、池化线程、未来新增入口都没有请求身份），漏开就会把帧写进错误键形。
+	 * 这里统一兜底：与投递路径同源、同一份已解析身份，嵌套时由作用域关闭还原调用方原身份
+	 * （{@link RunIdentityScope}）。
 	 *
-	 * <p><b>身份不可确认 ⇒ 这一拍明确失败</b>（Task 2）：解析因<b>读异常</b>失败且没有已校验提示时，
-	 * 本帧不落档、不投递（跳过）。绝不按 legacy 键写 —— 那条路会让帧落进"无身份"键族，
-	 * 而重挂回放/跨实例唤醒读的是身份键族，等于把帧丢进一个没人读的地方。
+	 * <p><b>身份不可确认 ⇒ 这一拍明确失败</b>：本帧不落档、不投递（跳过），不写任何身份键；
+	 * 终帧改走"终帧未归档"恢复链。
 	 *
 	 * <p><b>P1-09：这里没有"下一拍重试"。</b>帧是即时的，跳过后不会再被同一拍重发；
 	 * 普通帧因此确实会缺席（只能靠前端重挂）—— 但<b>终帧（done/error）不得静默丢</b>：
@@ -3490,8 +3535,8 @@ public class SseChatEmitter {
 	private void emit(Map<String, Object> frame) {
 		this.emitting.incrementAndGet();
 		try {
-			IdentityOutcome identity = deliveryIdentityOutcome();
-			if (identity.readFailure() && identity.identity() == null) {
+			TenantUser identity = deliveryIdentity();
+			if (identity == null) {
 				String frameType = String.valueOf(frame.get("type"));
 				boolean terminal = "done".equals(frameType) || "error".equals(frameType);
 				if (this.identityFailureWarned.compareAndSet(false, true)) {
@@ -3510,7 +3555,7 @@ public class SseChatEmitter {
 				}
 				return;
 			}
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 				emitInternal(frame);
 			}
 		}
@@ -3725,21 +3770,15 @@ public class SseChatEmitter {
 			// 注意：`return` 会跳过下面的 requestWakePublish，但 flushWakeSync 仍必须跑。
 			flushWakeSyncIfUnlocked();
 		}
-		// P3-04（minor）：activity 的 Redis 写在 emitLock 之外执行（节流判定已在锁内完成）。
-		if (touchHeartbeatActivity) {
-			this.store.touchActivity(this.runId);
-		}
-		if (touchBusinessActivity) {
-			this.store.touchBusinessActivity(this.runId, businessActivityStamp);
-		}
+		scheduleActivityTouch(touchHeartbeatActivity, touchBusinessActivity, businessActivityStamp);
 		if (terminalUnarchived) {
 			closeSubscribersAfterUnarchivedTerminal();
 		}
-		if ("done".equals(frameType) || "error".equals(frameType)) {
-			// F1：终帧之后不再有本地保活（终帧未归档时上面的恢复失败链已发合成终帧）。
+		boolean terminal = "done".equals(frameType) || "error".equals(frameType);
+		if (terminal) {
 			stopAttachKeepalive();
 		}
-		requestWakePublish(wakeSeq);
+		requestWakePublish(wakeSeq, terminal);
 	}
 
 	/**
@@ -3828,49 +3867,57 @@ public class SseChatEmitter {
 			return;
 		}
 		try {
-			scheduler.schedule(AiTrace.wrap(() -> {
-				boolean synthesize;
-				boolean busy;
-				boolean stillValid;
-				synchronized (this.emitLock) {
-					stillValid = !this.drivingHere.get()
-							&& this.driveGeneration.get() == scheduledGeneration
-							&& !sub.closed && !sub.terminating && !this.terminating.get()
-							&& !this.terminalFrameSeen.get();
-					synthesize = stillValid && !sub.replayActive && sub.queue.isEmpty()
-							&& this.emitting.get() == 0;
-					busy = stillValid && !synthesize;
-				}
-				if (!stillValid) {
-					return;
-				}
-				// 除本实例代次外再读一次快照：已被跨实例重驱动（快照回到 RUNNING）或已非终态时，
-				// 绝不能把连接判死；读不到快照同样放弃（不可确认 ≠ 未结束）。
-				if (!snapshotStillTerminal()) {
-					log.debug("offline reattach terminal grace abandoned runId={} (snapshot "
-							+ "non-terminal/unreadable; may be redriven by another instance)",
-							this.runId);
-					return;
-				}
-				if (synthesize) {
-					Map<String, Object> extra = new LinkedHashMap<>();
-					extra.put("unarchivedTerminal", true);
-					extra.put("terminalUnconfirmed", true);
-					extra.put("replayReattach", true);
-					closeCurrentSubscriptionsWithUnarchivedTerminal(extra, "terminal frame not seen within offline reattach grace");
-					return;
-				}
-				if (busy && sub.unarchivedTerminalGraceAttempts.incrementAndGet()
-						<= UNARCHIVED_TERMINAL_GRACE_RETRIES) {
-					scheduleUnarchivedTerminalGraceTask(sub, scheduledGeneration);
-				}
-				// busy 重试耗尽：放弃合成，前端看门狗是既有兜底。
-			}), UNARCHIVED_TERMINAL_GRACE_SECONDS, TimeUnit.SECONDS);
+			scheduler.schedule(AiTrace.wrap(() -> submitUnarchivedTerminalGrace(sub, scheduledGeneration)),
+					UNARCHIVED_TERMINAL_GRACE_SECONDS, TimeUnit.SECONDS);
 		}
 		catch (RejectedExecutionException ex) {
-			// 调度器已关闭（停机）：不合成终帧；前端看门狗是既有兜底。
 			sub.unarchivedTerminalGrace.set(false);
 			log.debug("offline reattach terminal grace not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
+		}
+	}
+
+	private void submitUnarchivedTerminalGrace(Subscription sub, long scheduledGeneration) {
+		try {
+			this.deliveryExecutor.execute(AiTrace.wrap(() -> runUnarchivedTerminalGrace(sub, scheduledGeneration)));
+		}
+		catch (RejectedExecutionException ex) {
+			sub.unarchivedTerminalGrace.set(false);
+			log.debug("offline reattach terminal grace not dispatched runId={}: {}", this.runId, ex.getMessage());
+		}
+	}
+
+	private void runUnarchivedTerminalGrace(Subscription sub, long scheduledGeneration) {
+		boolean synthesize;
+		boolean busy;
+		boolean stillValid;
+		synchronized (this.emitLock) {
+			stillValid = !this.drivingHere.get()
+					&& this.driveGeneration.get() == scheduledGeneration
+					&& !sub.closed && !sub.terminating && !this.terminating.get()
+					&& !this.terminalFrameSeen.get();
+			synthesize = stillValid && !sub.replayActive && sub.queue.isEmpty()
+					&& this.emitting.get() == 0;
+			busy = stillValid && !synthesize;
+		}
+		if (!stillValid) {
+			return;
+		}
+		if (!snapshotStillTerminal()) {
+			log.debug("offline reattach terminal grace abandoned runId={} (snapshot "
+					+ "non-terminal/unreadable; may be redriven by another instance)", this.runId);
+			return;
+		}
+		if (synthesize) {
+			Map<String, Object> extra = new LinkedHashMap<>();
+			extra.put("unarchivedTerminal", true);
+			extra.put("terminalUnconfirmed", true);
+			extra.put("replayReattach", true);
+			closeCurrentSubscriptionsWithUnarchivedTerminal(extra, "terminal frame not seen within offline reattach grace");
+			return;
+		}
+		if (busy && sub.unarchivedTerminalGraceAttempts.incrementAndGet()
+				<= UNARCHIVED_TERMINAL_GRACE_RETRIES) {
+			scheduleUnarchivedTerminalGraceTask(sub, scheduledGeneration);
 		}
 	}
 
@@ -3883,14 +3930,12 @@ public class SseChatEmitter {
 	 */
 	private boolean snapshotStillTerminal() {
 		try {
-			IdentityOutcome identity = deliveryIdentityOutcome();
-			if (identity.readFailure() && identity.identity() == null) {
+			TenantUser identity = deliveryIdentity();
+			if (identity == null) {
 				return false;
 			}
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
-				RunSnapshot snapshot = identity.identity() != null
-						? this.store.get(this.runId, identity.identity().tenantId(), identity.identity().userId())
-						: this.store.get(this.runId);
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+				RunSnapshot snapshot = this.store.get(this.runId, identity.tenantId(), identity.userId());
 				return snapshot != null && RunSnapshot.isTerminal(snapshot.getStatus());
 			}
 		}
@@ -4137,51 +4182,49 @@ public class SseChatEmitter {
 	 *
 	 * @param seq 本帧的业务号（{@code <= 0} = 心跳，不发布）
 	 */
-	private void requestWakePublish(long seq) {
+	private void requestWakePublish(long seq, boolean terminal) {
 		if (seq <= 0L) {
 			return;
 		}
-		this.pendingWakeSeq.accumulateAndGet(seq, Math::max);
+		synchronized (this.wakePublishLock) {
+			this.pendingWakeSeq.accumulateAndGet(seq, Math::max);
+			this.pendingWakeTerminal |= terminal;
+		}
 		if (Thread.holdsLock(this.emitLock)) {
 			return;
 		}
 		flushWakePublish();
 	}
 
-	/** 锁外发布被让位的唤醒上界（幂等；取走即清零，失败只记日志）。 */
+	/** 锁外投递到总线合流器；终帧标记随同一批上界一起取走。 */
 	private void flushWakePublish() {
 		if (Thread.holdsLock(this.emitLock)) {
 			return;
 		}
-		long seq = this.pendingWakeSeq.getAndSet(0L);
+		final long seq;
+		final boolean terminal;
+		synchronized (this.wakePublishLock) {
+			seq = this.pendingWakeSeq.getAndSet(0L);
+			terminal = this.pendingWakeTerminal;
+			this.pendingWakeTerminal = false;
+		}
 		if (seq > 0L) {
-			publishWake(seq);
+			publishWake(seq, terminal);
 		}
 	}
 
-	/**
-	 * 唤醒发布（载荷仅上界 seq；失败只记日志 —— 唤醒可丢，正确性由 ?lastSeq 重连兜底）。
-	 *
-	 * <p><b>频道身份 = 本轮记录身份</b>：发布被刻意让位到 {@code emitLock} 之外
-	 * （{@link #requestWakePublish} / {@link #flushWakePublish}），{@code delta} 等外层临界区的
-	 * 发布因此发生在 {@link #emit} 的身份作用域<b>关闭之后</b> —— 只靠 emit 入口兜底不够。
-	 * 发布点再按同一份 {@link #deliveryIdentity()} 建立作用域，保证漏开作用域的调用方也不会把
-	 * 唤醒发到 legacy 频道。
-	 */
-	private void publishWake(long seq) {
+	private void publishWake(long seq, boolean terminal) {
 		FrameWakeBus bus = this.wakeBus;
 		if (bus == null) {
 			return;
 		}
-		IdentityOutcome identity = deliveryIdentityOutcome();
-		if (identity.readFailure() && identity.identity() == null) {
-			// 身份不可确认 ⇒ 不发布（绝不发到 legacy 频道：订阅侧在身份频道上，发了也没人收，
-			// 却会让人误以为"唤醒已广播"）。帧已归档，别的实例下次收到唤醒或重挂时仍能补上。
-			log.warn("frame wake publish skipped runId={} seq={} (identity unconfirmed, never fall back to legacy channel)", this.runId, seq);
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
+			log.warn("frame wake publish skipped runId={} seq={} (identity unconfirmed; no bare-run channel)", this.runId, seq);
 			return;
 		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
-			bus.publish(this.runId, seq);
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+			bus.publish(this.runId, seq, terminal);
 		}
 		catch (Exception ex) {
 			log.debug("frame wake publish failed runId={} seq={}: {}", this.runId, seq, ex.getMessage());
@@ -4210,14 +4253,13 @@ public class SseChatEmitter {
 		}
 		// 唤醒回调跑在 Redis 订阅线程上，没有请求身份：按本写出器的本轮身份建立作用域
 		// （补帧读归档/入队与出帧同一身份口径）。
-		// 身份不可确认（读异常且无已校验提示）⇒ 本拍不读归档：以 legacy 键族去读只会读到空/别人的键，
-		// 却把"读不到"伪装成"没有差量"。下一次唤醒或客户端重挂会补上。
-		IdentityOutcome identity = deliveryIdentityOutcome();
-		if (identity.readFailure() && identity.identity() == null) {
+		// 身份不可确认 ⇒ 本拍不读归档：下一次唤醒或客户端重挂会补上。
+		TenantUser identity = deliveryIdentity();
+		if (identity == null) {
 			log.warn("frame wake padding skipped runId={} (identity unconfirmed, retry next tick)", this.runId);
 			return;
 		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			onWakeScoped(upperBoundSeq);
 		}
 	}
@@ -4406,17 +4448,17 @@ public class SseChatEmitter {
 	 * I2：唤醒批次补不完时的<b>本地续读</b>（不用 PUBLISH 制造 N×B 广播）。
 	 *
 	 * <p>用"已处理上界"作为真实游标，在投递执行器上再跑一拍；每拍仍有 {@link #wakeBatchLimit()} 上界。
-	 * 身份不可确认时直接放弃本拍（下一次唤醒/重挂会补，不以 legacy 键读）。
+	 * 身份不可确认时直接放弃本拍（下一次唤醒/重挂会补，不读任何身份键）。
 	 */
 	private void scheduleWakeContinuation(long upperBoundSeq, long cursor) {
 		try {
 			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
 				AiTrace.bind(this.runId, null);
-				IdentityOutcome identity = deliveryIdentityOutcome();
-				if (identityUnconfirmable(identity)) {
+				TenantUser identity = deliveryIdentity();
+				if (identity == null) {
 					return;
 				}
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 					onWakeScoped(upperBoundSeq, cursor);
 				}
 			}));
@@ -4489,121 +4531,95 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * 本轮的投递身份：<b>只按记录解析</b>（记录身份优先，构造线程身份只用于拼读记录的键）。
+	 * 本轮的投递身份：<b>只按记录解析</b>，构造线程身份仅用于拼读记录的键。
 	 *
 	 * <p>解析顺序：
 	 * <ol>
 	 * <li>已解析过的记录身份 ⇒ 直接用（结果缓存，后续拍不再读）；</li>
-	 * <li>首次解析：用构造线程身份（提示）走<b>显式身份读口</b> {@link RunStore#get(String, long, long)}
-	 *     读这一轮记录；记录有身份 ⇒ 用记录里的 {@code tenantId/userId}（即使与提示不同）；</li>
-	 * <li>记录<b>不存在</b>（首轮快照还没建）⇒ 用提示身份（那就是即将创建这条记录的身份，不是"覆盖"）；</li>
-	 * <li>记录存在但无归属（0/0）或读不出来 ⇒ {@code null}：不 adopt、不回落线程身份。</li>
+	 * <li>首次解析：用显式请求身份走 {@link RunStore#get(String, long, long)} 读本轮记录；
+	 *     记录有可用身份 ⇒ 用记录里的 {@code tenantId/userId}；</li>
+	 * <li>记录<b>不存在</b>（首轮快照还没建）⇒ 用显式请求身份（即即将创建这条记录的身份）；</li>
+	 * <li>记录存在但归属是 0/0 ⇒ {@link #identityInvalid}，永久不可确认：不 adopt 请求身份、
+	 *     不读写任何身份键（重挂/新写出器重新解析）。</li>
 	 * </ol>
-	 * 解析失败不改变投递行为：返回 {@code null} 即"没有身份可恢复"，绝不回落到默认租户。
 	 *
-	 * <p><b>并发契约</b>：首次解析在 {@link #identityLock} 内完成，落定之后才写回
-	 * {@link #deliveryIdentity}；落定前并发的调用方在锁上等待，因此要么直接读到已落定的值，
-	 * 要么等到同一次解析完成 —— <b>不存在</b>"返回尚未落定的 {@code null}"的窗口，也不会重复读记录。
+	 * <p><b>读取异常 ≠ 无身份</b>：读记录抛异常时不缓存，排有界退避后重试；这一拍用显式请求身份
+	 * （键形与本轮一致），没有请求身份则由调用方按 UNKNOWN 跳过本拍。
 	 *
-	 * <p><b>读取异常 ≠ 无身份</b>（2026-10-30 Task 2）：读记录抛异常时<b>不缓存</b>
-	 * （{@link #identityResolved} 保持 false，下一拍重试）、<b>不</b>按 legacy 键继续写 ——
-	 * 这一拍用<b>已校验的提示身份</b>（{@link #requestIdentityHint}，请求身份，也是拼读记录键的那一份），
-	 * 没有可用提示时由调用方<b>明确失败</b>（跳过这一帧）。旧实现在 catch 里把结果折成
-	 * {@code null} 并置"已解析"，一次 Redis 抖动就把整条写出器<b>永久</b>钉在无身份（legacy 键族）上，
-	 * 而重挂回放与跨实例唤醒读的是身份键族 —— 整轮帧看起来"从未存在"。
+	 * <p><b>并发契约</b>：首次解析在 {@link #identityLock} 内完成，落定后才写回
+	 * {@link #deliveryIdentity}；落定前并发的调用方在锁上等待，避免"尚未落定"的 null 被当成身份结论。
 	 *
-	 * <p><b>C-63：读异常退避（有界）</b>。上面"不缓存、下一拍重试"如果照搬到出帧热路径，Redis
-	 * 抖动时就是<b>每帧一次带锁 Redis 读</b>。现在捕获失败后按指数退避（1s→30s 封顶）排一个
-	 * 重试时刻：窗口内不进 {@link #identityLock}、不读记录，返回值与"这一拍读失败"逐字一致
-	 * （有已校验提示按提示继续、没有则明确失败）；成功解析即清零。退避只影响"什么时候再试"，
-	 * 不改变任何一帧的身份结论。
+	 * <p><b>C-63：读异常退避（有界）</b>：失败后按 1s→30s 指数退避排下一次读，窗口内不进锁、
+	 * 不读记录；成功解析即清零。退避只影响"什么时候再试"，不改变身份结论。
 	 */
 	private TenantUser deliveryIdentity() {
-		return deliveryIdentityOutcome().identity();
-	}
-
-	/**
-	 * 身份解析的<b>完整结果</b>：身份 + "本次是因为读异常而未解析出来"。
-	 *
-	 * <p>为什么要把后者单独标出来：{@code null} 有两种含义（"这一轮确实没有身份" vs "读不出来"），
-	 * 二者的处置完全不同 —— 前者按既有口径走 legacy 键族（兼容旧数据），后者<b>不得</b>写 legacy，
-	 * 只能"用已校验提示"或"明确失败并下一拍重试"。
-	 */
-	record IdentityOutcome(TenantUser identity, boolean readFailure) {
-	}
-
-	IdentityOutcome deliveryIdentityOutcome() {
+		if (this.identityInvalid) {
+			return null;
+		}
 		TenantUser known = this.deliveryIdentity;
 		if (known != null) {
-			return new IdentityOutcome(known, false);
+			return known;
 		}
-		// C-63：退避窗口内<b>不进锁、不读记录</b>。返回值与"这一拍读失败"一致：
-		// 有已校验提示按既有语义继续（提示就是请求身份，键形与本轮一致），没有则明确失败。
-		if (System.currentTimeMillis() < this.identityRetryAtMs.get()) {
-			return fallbackIdentityOutcome();
+		long now = System.currentTimeMillis();
+		if (now < this.identityRetryAtMs.get()) {
+			return hintIdentity();
 		}
 		synchronized (this.identityLock) {
-			if (this.identityResolved) {
-				return new IdentityOutcome(this.deliveryIdentity, false);
+			known = this.deliveryIdentity;
+			if (known != null) {
+				return known;
 			}
-			// 首拍读失败后，已在锁外排队等锁的并发调用方在这里复检退避：
-			// 否则每个排队者都会各做一次高延迟记录读，"每帧一次带锁读"正是这样放大出来的。
+			if (this.identityInvalid) {
+				return null;
+			}
 			if (System.currentTimeMillis() < this.identityRetryAtMs.get()) {
-				return fallbackIdentityOutcome();
+				return hintIdentity();
 			}
-			TenantUser hint = this.requestIdentityHint;
+			TenantUser hint = hintIdentity();
 			if (hint == null) {
-				// 没有"取键提示"就拼不出记录键 ⇒ 身份<b>不可确认</b>（不是"确认这一轮没有身份"）。
-				// 刻意<b>不落定</b>：{@link #identityResolved} 保持 false，绝不把 null 写成"已解析结果"
-				// —— 那正是"一次异常/一个身份缺失就永久钉在 legacy 键族"的形态。
-				// 生产装配（{@link #recordIdentityRequired}）下同时要求调用方按失败处理：
-				// 本拍不落档/不投递/不发布唤醒，绝不写 legacy 键族（那是与本轮身份键族平行的第二套归档）。
-				return new IdentityOutcome(null, this.recordIdentityRequired);
+				// 没有显式请求身份 ⇒ 拼不出记录键。生产装配下这不该发生：调用方必须按
+				// 本轮记录/请求身份建立作用域；这里按"身份不可确认"处理，绝不猜身份。
+				return null;
 			}
-			TenantUser resolved = null;
-			if (this.store != null) {
-				try {
-					RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
-					if (snapshot != null) {
-						resolved = RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
-								? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
-					}
-					else {
-						// 记录还没建：首轮的帧写在"即将创建这一轮"的身份下（提示 = 请求身份，不是覆盖记录）
-						resolved = hint;
-					}
-				}
-				catch (RuntimeException ex) {
-					// 读异常 = 不可知：① 不缓存（identityResolved 保持 false），但排一个<b>有界退避</b>
-					// 再重试（C-63：避免每帧带锁再读一次）；② 这一拍用已校验提示（hint 就是请求身份，
-					// 键形与本轮一致，不会串租户）；③ 没有可用提示时返回 readFailure ⇒ 调用方明确失败。
-					long backoffMs = recordIdentityReadFailure();
-					TenantUser validated = fallbackIdentityOutcome().identity();
-					log.warn("SSE delivery identity read failed runId={} (no "
-							+ "cache, retry in {}ms; treating as {} this time): {}", this.runId, backoffMs, validated == null ? "explicit failure (frame skipped)" : "validated hint identity", ex.getMessage());
-					return new IdentityOutcome(validated, validated == null);
-				}
+			if (this.store == null) {
+				log.warn("SSE delivery identity unconfirmed runId={} (no run store; lightweight legacy is disabled)", this.runId);
+				return null;
 			}
-			this.deliveryIdentity = resolved;
-			this.identityResolved = true;
-			// 身份恢复/落定 ⇒ 清退避：下一次（若有新的读需求）从基础退避重新开始。
-			clearIdentityBackoff();
-			return new IdentityOutcome(resolved, false);
+			try {
+				RunSnapshot snapshot = this.store.get(this.runId, hint.tenantId(), hint.userId());
+				if (snapshot != null) {
+					if (!RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())) {
+						// 0/0 旧快照没有可继承的归属：本写出器不做任何身份键读写（不 adopt 提示身份）。
+						this.identityInvalid = true;
+						log.warn("SSE delivery identity invalid runId={} (record has no usable tenant/user; "
+								+ "frames are neither archived nor delivered; client reattach/failure recovery)", this.runId);
+						return null;
+					}
+					TenantUser resolved = new TenantUser(snapshot.getTenantId(), snapshot.getUserId());
+					this.deliveryIdentity = resolved;
+					clearIdentityBackoff();
+					return resolved;
+				}
+				// 记录还没建：首轮的帧写在"即将创建这一轮"的显式请求身份下（不是覆盖记录）。
+				this.deliveryIdentity = hint;
+				clearIdentityBackoff();
+				return hint;
+			}
+			catch (RuntimeException ex) {
+				// 读异常 = 不可知：不缓存、排有界退避；这一拍用显式提示身份（键形与本轮一致），
+				// 没有提示则由调用方按身份不可确认处理（不写任何身份键）。
+				long backoffMs = recordIdentityReadFailure();
+				log.warn("SSE delivery identity read failed runId={} (no cache, retry in {}ms; "
+						+ "using explicit request identity this tick): {}", this.runId, backoffMs, ex.getMessage());
+				return hint;
+			}
 		}
 	}
 
-	/**
-	 * 退避窗口内（或读失败那一拍）的<b>不变结论</b>：有已校验提示就用它，没有就是"不可确认"。
-	 *
-	 * <p>与读失败分支的历史语义逐字一致：{@code hint} 本身是请求身份、也是拼读记录键的那一份，
-	 * 键形与本轮一致，因此不会串租户；提示不可用（0/0）时返回 {@code null + readFailure}，
-	 * 由调用方明确失败（绝不写 legacy 键族）。生产装配下"没有提示"由调用点先行返回
-	 * {@code recordIdentityRequired}，本方法只在"曾有提示但读失败"的路径上出现。
-	 */
-	private IdentityOutcome fallbackIdentityOutcome() {
+	/** 构造线程的显式请求身份（可读记录键的那一份）；不可用返回 {@code null}。 */
+	private TenantUser hintIdentity() {
 		TenantUser hint = this.requestIdentityHint;
-		TenantUser validated = hint != null && RunIdentityScope.usable(hint.tenantId(), hint.userId()) ? hint : null;
-		return new IdentityOutcome(validated, validated == null);
+		return hint != null && RunIdentityScope.usable(hint.tenantId(), hint.userId()) ? hint : null;
 	}
 
 	/** 记一次记录读失败并排下次重试时刻（指数封顶）；返回本次退避毫秒数（调用方用于日志）。 */
@@ -4631,29 +4647,6 @@ public class SseChatEmitter {
 	}
 
 	/**
-	 * <b>身份是否"不可确认"</b>（返修第 4 条）：投递/写投递链<b>不得</b>在身份不可确认时继续。
-	 *
-	 * <p><b>唯一判据</b>：{@code identity == null} 且 {@link IdentityOutcome#readFailure()}
-	 * —— 即"记录读不出来"或（生产装配下）"没有取键提示、拼不出记录键"这两种<b>不可知</b>，
-	 * 都不是"确认这一轮没有身份"。
-	 *
-	 * <p><b>"从头就没有提示"（{@code requestIdentityHint == null}）</b>：<b>生产装配</b>下同样算
-	 * "不可确认"（{@link #recordIdentityRequired}：拼不出记录键 ⇒ 不能猜、更不能按 legacy 键族写，
-	 * 那是与本轮身份键族平行的第二套归档）；<b>轻装配/单测</b>下不算 —— 那里的 legacy 命名空间是
-	 * 唯一命名空间，且这类写出器可能是确认门/恢复等非请求线程先建好的、随后由同一注册表键接管的，
-	 * 一律摘除会让它们永远无法投递。
-	 *
-	 * <p>也不含"<b>确认</b>无身份"：记录存在但归属是 0/0（旧数据）⇒ 有提示、能读、读到的就是 0/0
-	 * ⇒ 这是<b>确认过的</b>无身份，按既有 legacy 语义继续投递（否则老轮永远重连不上）。
-	 */
-	private boolean identityUnconfirmable(IdentityOutcome identity) {
-		if (identity.identity() != null) {
-			return false;
-		}
-		return identity.readFailure();
-	}
-
-	/**
 	 * 提交 drain 任务（R3：池拒绝 = 摘除触发本次提交的订阅者）。
 	 */
 	private void submitDrain(Subscription sub) {
@@ -4663,20 +4656,17 @@ public class SseChatEmitter {
 			this.deliveryExecutor.execute(AiTrace.wrap(() -> {
 				AiTrace.bind(this.runId, null);
 				// 身份链路：投递池线程同样没有请求身份 —— 按本写出器已解析的本轮身份建立作用域。
-				// <b>身份不可确认（读异常且无已校验提示）⇒ 本拍不投</b>：绝不带着"null 身份"
-				// （= legacy 键形）进投递链。帧仍在队列里，下一拍（下一次 kick / 唤醒）重新解析身份后继续。
-				IdentityOutcome identity = deliveryIdentityOutcome();
-				if (identityUnconfirmable(identity) && !sub.hasIdentityDegradedFrame()) {
-					// <b>不得静默停队列</b>（返修第 4 条）：把帧留在队列里"等下一次 kick"会让连接
-					// 挂着一个永远不动的队列（用户看到转圈），而重试又没有退出条件、容易形成忙环。
-					// 主动摘除 ⇒ 前端带 lastSeq 重挂，重挂会重新解析身份并回放归档（既有恢复链）。
-					// P1-09：队列里若还有"无法归档的终结局"（帧级 identityDegraded），身份本就不可确认，
-					// 此时放行写出链，让客户端至少拿到 typed error 而不是无说明的断连。
+				// 身份不可确认 ⇒ 本拍不投（绝不带着无身份进投递链）；主动摘除让前端带 lastSeq 重挂，
+				// 重挂会重新解析身份并回放归档（既有恢复链）。
+				TenantUser identity = deliveryIdentity();
+				if (identity == null && !sub.hasIdentityDegradedFrame()) {
+					// 队列里若还有"无法归档的终结局"（帧级 identityDegraded），放行写出链，
+					// 让客户端至少拿到 typed error 而不是无说明的断连。
 					log.warn("identity unconfirmed before delivery runId={} (disconnect; client reattach replays)", this.runId);
 					evict(sub, "identity unconfirmed before delivery");
 					return;
 				}
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity.identity())) {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 					drain(sub);
 				}
 			}));
@@ -4790,8 +4780,8 @@ public class SseChatEmitter {
 		if (consumeInterruptAndEvict(sub)) {
 			return;
 		}
-		IdentityOutcome writeIdentity = deliveryIdentityOutcome();
-		if (identityUnconfirmable(writeIdentity) && !frame.identityDegraded && !sub.hasIdentityDegradedFrame()) {
+		TenantUser writeIdentity = deliveryIdentity();
+		if (writeIdentity == null && !frame.identityDegraded && !sub.hasIdentityDegradedFrame()) {
 			log.warn("identity unconfirmed before write runId={} (disconnect; client reattach replays)", this.runId);
 			evict(sub, "identity unconfirmed before write");
 			finishDrain(sub);
@@ -4803,7 +4793,7 @@ public class SseChatEmitter {
 		try {
 			this.writeBudget.writeAsync(() -> {
 				started.set(true);
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(writeIdentity.identity())) {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(writeIdentity)) {
 					sub.emitter.send(frame.payload);
 				}
 				finally {

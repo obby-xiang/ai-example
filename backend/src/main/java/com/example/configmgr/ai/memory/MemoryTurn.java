@@ -14,30 +14,23 @@ package com.example.configmgr.ai.memory;
  * 用来决定"谁在前"。同毫秒时按 {@code runId} 定序，保证任意写入顺序得到同一个窗口。
  *
  * <p>起点只在<b>块还不存在</b>时使用（见 {@link RunMemoryMerge}）：一个 run 续跑多次，块的位置
- * 不因续跑而漂移。起点 {@code 0} = 未知（旧信封/无归属写入），新建块时按"现在"定序。
+ * 不因续跑而漂移。起点必须已知且为正数；不存在"无归属写入"这一形态。
  */
 public record MemoryTurn(String runId, long turnStartedAtMs) {
 
-	/**
-	 * 没有 run 归属的旧写入口（兼容重载 / 未解析到 runId 的调用）使用的块键。
-	 *
-	 * <p>它只覆盖"无归属"这一个块，<b>永远</b>不会替换别的 run 的块 —— 即"解析不到本轮"也不会
-	 * 退化成整窗覆盖。
-	 */
-	public static final String UNATTRIBUTED_RUN_ID = "unattributed";
-
-	/** 无归属写入的轮次（起点未知 ⇒ 新建块时按"现在"定序，落在已归属块之后）。 */
-	public static final MemoryTurn UNATTRIBUTED = new MemoryTurn(UNATTRIBUTED_RUN_ID, 0L);
-
 	public MemoryTurn {
 		if (runId == null || runId.isBlank()) {
-			throw new IllegalArgumentException("runId 不得为空白（无归属请用 MemoryTurn.UNATTRIBUTED）");
+			throw new IllegalArgumentException("runId 不得为空白：记忆写回必须带本轮归属");
+		}
+		if (turnStartedAtMs <= 0L) {
+			throw new IllegalArgumentException("turnStartedAtMs 必须为正数：记不到本轮起点即失败");
 		}
 	}
 
-	/** 若 runId 可用则构造，否则返回 {@code null}（调用方决定回落，不伪造 run）。 */
+	/** 若 runId/起点可用则构造，否则返回 {@code null}（调用方按失败处理，不伪造 run）。 */
 	public static MemoryTurn of(String runId, long turnStartedAtMs) {
-		return runId == null || runId.isBlank() ? null : new MemoryTurn(runId, turnStartedAtMs);
+		return runId == null || runId.isBlank() || turnStartedAtMs <= 0L
+				? null : new MemoryTurn(runId, turnStartedAtMs);
 	}
 
 }

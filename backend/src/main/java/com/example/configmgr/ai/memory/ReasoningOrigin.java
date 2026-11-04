@@ -23,8 +23,8 @@ import java.util.Map;
  * {@code modelId} 只作取证，不参与判定 —— 协议层回放的只是<b>纯文本</b> reasoningContent
  * （不是加密/签名字段，那些从不进请求体），它是供应方的约定而非某个模型的密钥；
  * 把 model 纳入判定会把"同供应方换模型"的历史误判成跨供应方，反而触发上游 400；</li>
- * <li><b>不假装知道来源</b>：没有标记的消息就是"未知"，{@link #replayAllowed} 走
- * <b>声明的兼容策略</b>（见该方法注），并且 {@link #stamp} 在身份未知时<b>不写任何键</b>；</li>
+ * <li><b>不假装知道来源</b>：没有标记的消息就是"未知" —— {@link #replayAllowed} 对未知来源
+ * <b>不回放</b>（fail-closed），并且 {@link #stamp} 在身份未知时<b>不写任何键</b>；</li>
  * <li><b>只加不改</b>：已有来源的消息不会被后来者覆盖（provenance 是事实，不是当前值）。</li>
  * </ul>
  *
@@ -47,11 +47,8 @@ public record ReasoningOrigin(Long providerId, String modelId) {
      *
      * <h2>判定规则</h2>
      * <ol>
-     * <li><b>无来源标记</b>（本批之前写入的旧数据）⇒ <b>回放</b>。这是<b>声明的兼容策略</b>
-     * （fail-open）：来源未知时无法判定"是否跨供应方"，而 fail-closed 会让存量 DeepSeek 工具轮
-     * 历史在下一轮直接 400（其协议要求 assistant(tool_calls) 回填 reasoning_content）。
-     * 兼容窗口有界：会话记忆/快照的 TTL 是滑动 24h，且新消息一律带标记，旧数据会自然过期。
-     * 这不等于"假装知道来源"—— 未知就是未知，只是沿用旧行为；</li>
+     * <li><b>无来源标记</b> ⇒ <b>不回放</b>（fail-closed）：来源未知时无法判定"是否跨供应方"，
+     * 不把可能属于别家的推理元数据发出去；</li>
      * <li>有标记 ⇒ {@code Objects.equals(当前供应方, origin.providerId)}：
      * 两侧都是 {@code null}（env 合成行 ↔ env 合成行，部署内唯一）算同源；
      * 一侧 {@code null}（env ↔ DB 供应方）或两侧不等 ⇒ <b>不回放</b>。
@@ -65,12 +62,12 @@ public record ReasoningOrigin(Long providerId, String modelId) {
     public static boolean replayAllowed(Map<String, Object> metadata, Long currentProviderId) {
         ReasoningOrigin origin = fromMetadata(metadata);
         if (origin == null) {
-            return true;
+            return false;
         }
         return java.util.Objects.equals(currentProviderId, origin.providerId());
     }
 
-    /** 从 metadata 读来源；两个键都不存在 = 旧数据（来源未知，返回 {@code null}）。 */
+    /** 从 metadata 读来源；两个键都不存在 = 来源未知（返回 {@code null}，调用方不得回放）。 */
     public static ReasoningOrigin fromMetadata(Map<String, Object> metadata) {
         if (metadata == null) {
             return null;

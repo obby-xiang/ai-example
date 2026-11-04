@@ -208,21 +208,5 @@ public enum ToolOutcome {
 		return UNKNOWN;
 	}
 
-	/** 待决条目状态 → 结局（旧数据没有持久化 outcome 时的推导口径）。 */
-	public static ToolOutcome fromStatus(String status) {
-		if (status == null) {
-			return UNKNOWN;
-		}
-		return switch (status) {
-			case PendingToolCall.EXECUTED, PendingToolCall.FRONTEND_RESULT, "DONE" -> OK;
-			case PendingToolCall.REJECTED, PendingToolCall.REJECTED_ARGUMENTS -> REJECTED;
-			case PendingToolCall.BLOCKED -> BLOCKED;
-			case PendingToolCall.TIMEOUT -> TIMEOUT;
-			case PendingToolCall.CANCELLED, PendingToolCall.FRONTEND_CANCELLED -> CANCELLED;
-			case PendingToolCall.SKIPPED -> SKIPPED;
-			case PendingToolCall.PRECHECK_FAILED, PendingToolCall.SHEET_DISABLED -> FAILED;
-			default -> UNKNOWN;
-		};
-	}
 
 }

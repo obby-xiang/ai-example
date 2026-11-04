@@ -124,7 +124,7 @@ public class PendingToolCall {
 
 	private String status = PENDING;
 
-	/** 结果信封的结局（{@code PendingToolCall} 的历史字段；null = 旧数据，按 status 推导）。 */
+	/** 结果信封的结局（终态写点必填；缺失不得推断成成功）。 */
 	private String outcome;
 
 	/**
@@ -184,7 +184,7 @@ public class PendingToolCall {
 	 * （决策早于帧，后端走到该条目时又补发一次请求帧 ⇒ 卡面瞬时复活再被收敛）。
 	 *
 	 * <p>取值 = {@code ConfirmGate#await} 在<b>发射请求帧之前</b>置位（{@link RunStore#markRequestEmitted}）；
-	 * {@code null} = 旧数据（本字段引入前的条目）/ 从未发射。刷新恢复只认 {@code true}
+	 * {@code null} = 从未发射。刷新恢复只认 {@code true}
 	 * （{@code GET /api/ai/runs/current} 的 {@code req} 字段）。
 	 *
 	 * <p>B23L1 批②a 起<b>存储位置</b>变了：位不再回写进条目 JSON，而是落在独立 HASH
@@ -193,7 +193,7 @@ public class PendingToolCall {
 	 */
 	private Boolean req;
 
-	/** {@link #req} 置位的时刻（服务端钟；0 = 未发射/旧数据）。 */
+	/** {@link #req} 置位的时刻（服务端钟；0 = 未发射）。 */
 	private long reqAtMs;
 
 	/**
@@ -235,12 +235,14 @@ public class PendingToolCall {
 	}
 
 	/**
-	 * 条目当前结局：优先取持久化 outcome（新数据），否则按 {@link #status} 推导（旧数据/挂起中）。
-	 * 未决条目推导为 {@code unknown} —— 未知不等于失败。
+	 * 条目当前结局：只认持久化的 {@code outcome}。
+	 *
+	 * <p>缺失时返回 {@link ToolOutcome#UNKNOWN}（未知不等于成功，也不按 status 反推成功）——
+	 * 终态写点必须显式落 outcome；"缺字段 ⇒ 已执行就是 ok"的旧推断已移除。
 	 */
 	public ToolOutcome effectiveOutcome() {
 		ToolOutcome persisted = ToolOutcome.fromWire(this.outcome);
-		return persisted == null ? ToolOutcome.fromStatus(this.status) : persisted;
+		return persisted == null ? ToolOutcome.UNKNOWN : persisted;
 	}
 
 	/**
@@ -265,17 +267,17 @@ public class PendingToolCall {
 	}
 
 	/**
-	 * 该条目是否带挂起种类（入口 kind 校验批）。
+	 * 该条目是否带挂起种类。
 	 *
-	 * <p>{@code kind} 是后加的字段：旧数据反序列化后为 {@code null}。这类条目<b>不做种类判定</b>
-	 * （放行 + WARN），否则升级瞬间在途的挂起会全部变成"错入口"，人反而提交不了。
+	 * <p>{@code kind} 是服务端写入的通道事实：缺失时无法证明该走确认门还是前端回灌 ⇒
+	 * 调用方必须按错入口/不可执行处理，<b>不得放行</b>。
 	 */
 	public boolean hasKind() {
 		return this.kind != null && !this.kind.isBlank();
 	}
 
 	/**
-	 * 该条目是否属于给定挂起种类（调用前先判 {@link #hasKind()}：旧数据一律 {@code false}）。
+	 * 该条目是否属于给定挂起种类（调用前先判 {@link #hasKind()}：缺失一律 {@code false}）。
 	 *
 	 * <p>入口校验只认这个值 —— 它是<b>服务端写入</b>的事实，客户端传来的任何 kind/字段都不参与。
 	 */

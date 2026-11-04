@@ -50,8 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * </ul>
  * 同一个 fileId 在别的身份下<b>根本不存在</b>：查不到 ⇒ 不能消费/不能删登记/不能删文件
  * （"附件归属与文件删除不能跨身份"由键形本身保证，而不是靠调用方自觉）。
- * 无身份上下文时落到 legacy 键（{@code ai:form:att:<fileId>} 等旧键形，独立过渡命名空间）；
- * 带身份的读路径<b>不</b>回落 legacy —— 旧数据不会被新身份看见。
+ * 身份缺失时拼键直接失败：不存在不含身份段的旧键形，也不回落到任何无身份命名空间。
  */
 @Slf4j
 @Component
@@ -148,7 +147,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		String fileId = "att_" + UUID.randomUUID().toString().replace("-", "");
 		Attachment attachment = new Attachment(fileId, runId, toolCallId, sessionId, fileName, size, contentType,
 				storagePath);
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
@@ -195,7 +194,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return null;
 		}
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
@@ -218,7 +217,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return false;
 		}
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String registration = registrationKey(identity, fileId);
 		String tombstone = consumedKey(identity, fileId);
 		StringRedisTemplate redis = redis();
@@ -270,7 +269,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (sessionId == null || sessionId.isBlank()) {
 			return List.of();
 		}
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
 			// 进程内兜底同样按身份分桶：map 的键是带身份段的登记键，不能只看 sessionId。
@@ -330,7 +329,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	@Override
 	public void touch(String runId, String toolCallId) {
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String indexKey = formIndexKey(identity, runId, toolCallId);
 		if (indexKey == null) {
 			return;
@@ -521,7 +520,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
 			return List.of();
 		}
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
 			return this.memory.values()
@@ -580,7 +579,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	}
 
 	private Attachment deleteKnownRegistration(Attachment attachment, String fileId) {
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String registration = registrationKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
@@ -608,12 +607,14 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	@Override
 	public void deleteSessionIndex(String sessionId) {
+		TenantUser identity = RequestContextUtils.require();
+		String key = sessionIndexKey(identity, sessionId);
 		StringRedisTemplate redis = redis();
-		if (redis == null) {
+		if (redis == null || key == null) {
 			return;
 		}
 		try {
-			redis.delete(sessionIndexKey(RequestContextUtils.currentOrNull(), sessionId));
+			redis.delete(key);
 		}
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("附件会话索引删除失败（可重试）", ex);
@@ -688,23 +689,24 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	}
 
 	private static String sessionIndexKey(TenantUser identity, String sessionId) {
-		return sessionId == null || sessionId.isBlank() ? null
-				: SESSION_INDEX_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
+		String segment = TenantKeyScope.segmentOf(identity);
+		return sessionId == null || sessionId.isBlank() ? null : SESSION_INDEX_PREFIX + segment + sessionId;
 	}
 
 	private static String formIndexKey(TenantUser identity, String runId, String toolCallId) {
+		String segment = TenantKeyScope.segmentOf(identity);
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
 			return null;
 		}
-		return FORM_INDEX_PREFIX + TenantKeyScope.segmentOf(identity) + runId + ":" + toolCallId;
+		return FORM_INDEX_PREFIX + segment + runId + ":" + toolCallId;
 	}
 
-	/** 登记键（带身份段；无身份 = legacy 键形）。 */
+	/** 登记键（带身份段；身份缺失即失败）。 */
 	private static String registrationKey(TenantUser identity, String fileId) {
 		return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + fileId;
 	}
 
-	/** 已消费墓碑键（带身份段；无身份 = legacy 键形）。 */
+	/** 已消费墓碑键（带身份段；身份缺失即失败）。 */
 	private static String consumedKey(TenantUser identity, String fileId) {
 		return CONSUMED_PREFIX + TenantKeyScope.segmentOf(identity) + fileId;
 	}
@@ -777,7 +779,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		if (fileId == null || fileId.isBlank()) {
 			return false;
 		}
-		TenantUser identity = RequestContextUtils.currentOrNull();
+		TenantUser identity = RequestContextUtils.require();
 		String tombstone = consumedKey(identity, fileId);
 		StringRedisTemplate redis = redis();
 		if (redis == null) {
