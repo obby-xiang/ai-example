@@ -3784,9 +3784,10 @@ public class ResilientChatService {
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
 				out = this.registry.find(runId);
 			}
-			boolean hasVisibleEntries = entries.stream()
-				.anyMatch(entry -> "assistant".equals(entry.kind()) || "tool".equals(entry.kind()));
-			if (hasVisibleEntries && out == null) {
+			boolean requiresTimeline = entries.stream()
+				.anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
+						&& entry.toolCalls() != null && !entry.toolCalls().isEmpty()));
+			if (requiresTimeline && out == null) {
 				return false;
 			}
 			if (out != null) {
@@ -3799,7 +3800,10 @@ public class ResilientChatService {
 					List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
 							entry.text(), entry.reasoning());
 					if (segments == null || segments.isEmpty()) {
-						return false;
+						if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
+							return false;
+						}
+						continue;
 					}
 					entries.set(i, entry.withSegments(segments));
 					for (TranscriptEntry.SegmentView segment : segments) {

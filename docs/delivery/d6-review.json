@@ -364,6 +364,13 @@
       "reason": "D6已同步轮首与DONE前物化、purge防复活、latest/before、快照冻结、显式身份和段序契约；本批落实运行历史、记忆、恢复与卡片状态实现，不再改变迁移接口",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:e4ee3fb8f9fdd67c9d0eb05598c7e00c06a69528da35061523c5c046da274ec4",
+      "status": "not-affected",
+      "reason": "本批仅区分无工具assistant的聚合格式与工具条目的严格段锚点，修复成功轮误判未确认；D6现有物化与恢复契约不变",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
