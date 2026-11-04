@@ -1994,7 +1994,7 @@ function runErrorCardAction(message: ChatMessage): void {
 const userBodyEls = new Map<string, HTMLElement>()
 /** 模板函数 ref 的稳定身份（同一 id 复用同一 setter，避免每次 patch 都被当成新 ref 重登）。 */
 const userBodyRefSetters = new Map<string, (el: Element | { $el?: Element } | null) => void>()
-/** 本轮真正需要重量的用户消息（新挂载 / 文本变化 / 展开切换）——不再逐条扫全表。 */
+/** 本轮真正需要重量的用户消息（新挂载 / 文本变化 / 展开切换 / 内容宽度变化）——不再逐条扫全表。 */
 const dirtyUserMsgIds = new Set<string>()
 /** 可观测性：每次 measure 实际读了哪些消息（只保留最近若干轮，避免调试面自身泄漏）。 */
 const measurePasses: string[][] = []
@@ -2033,7 +2033,7 @@ function setUserBodyRef(id: string, el: Element | { $el?: Element } | null): voi
 }
 
 /**
- * 单一 measure：**只量脏消息**（新挂载 / 文本变化 / 展开切换），集合真变化才换引用。
+ * 单一 measure：**只量脏消息**（新挂载 / 文本变化 / 展开切换 / 内容宽度变化），集合真变化才换引用。
  * 无参数 = 消费全部脏标记；传 ids = 只量指定消息（如展开/收起该条本身）。
  */
 function measureUserMsgOverflow(ids?: Iterable<string>): void {
@@ -3362,6 +3362,11 @@ function openMmdViewer(card: Element | null): void {
 
 function closeMmdViewer(): void {
   mmdViewerOpen.value = false
+  mmdViewerCopied.value = false
+  if (mmdViewerCopyTimer !== null) {
+    clearTimeout(mmdViewerCopyTimer)
+    mmdViewerCopyTimer = null
+  }
 }
 
 /** 查看器「复制源码」：绿勾反馈与卡内复制钮同一机制（`is-copied` + COPY_STATE_CLASS），状态走响应式。 */
@@ -5121,10 +5126,70 @@ function stickToBottomIfSized(): void {
  */
 let msgResizeObserver: ResizeObserver | null = null
 let msgScrollBound: HTMLElement | null = null
+let lastMessageContentWidth: number | null = null
+let userMsgWidthMeasureScheduled = false
+let collapsedMessageView: {
+  scrollTop: number
+  followBottom: boolean
+  anchorId: string | null
+  anchorOffset: number
+} | null = null
+
+function captureMessageView(): void {
+  const wrap = msgWrapRef.value
+  if (!wrap) {
+    collapsedMessageView = null
+    return
+  }
+  const wrapTop = wrap.getBoundingClientRect().top
+  let anchorId: string | null = null
+  let anchorOffset = 0
+  for (const row of wrap.querySelectorAll<HTMLElement>('[data-msg-id]')) {
+    const rect = row.getBoundingClientRect()
+    if (rect.bottom <= wrapTop) {
+      continue
+    }
+    anchorId = row.dataset.msgId ?? null
+    anchorOffset = rect.top - wrapTop
+    break
+  }
+  collapsedMessageView = {
+    scrollTop: wrap.scrollTop,
+    followBottom: followBottom.value,
+    anchorId,
+    anchorOffset
+  }
+}
+
+function restoreMessageView(): void {
+  const wrap = msgWrapRef.value
+  const snapshot = collapsedMessageView
+  if (!wrap) {
+    return
+  }
+  collapsedMessageView = null
+  if (snapshot?.followBottom ?? followBottom.value) {
+    pinBottom()
+    return
+  }
+  followBottom.value = false
+  if (snapshot) {
+    const anchor = Array.from(wrap.querySelectorAll<HTMLElement>('[data-msg-id]'))
+      .find((row) => row.dataset.msgId === snapshot.anchorId)
+    if (anchor) {
+      const currentOffset = anchor.getBoundingClientRect().top - wrap.getBoundingClientRect().top
+      wrap.scrollTop += currentOffset - snapshot.anchorOffset
+    } else {
+      wrap.scrollTop = snapshot.scrollTop
+    }
+  }
+  updateBackToBottom(bottomDist(wrap))
+}
 
 function detachMessageViewObservers(): void {
   msgResizeObserver?.disconnect()
   msgResizeObserver = null
+  lastMessageContentWidth = null
   if (msgScrollBound !== null) {
     msgScrollBound.removeEventListener('scroll', onTableScrollCapture, { capture: true })
     msgScrollBound = null
@@ -5145,6 +5210,7 @@ function attachMessageViewObservers(): void {
   // 展开/重建后按新 DOM 重绑：上一棵树留下的待渲染槽先摘掉（收起路径已整表清空，这里兜底）。
   pruneDetachedMermaidPending()
   resetStickBaseline()
+  lastMessageContentWidth = (msgContentRef.value ?? wrap).getBoundingClientRect().width
   if (typeof ResizeObserver !== 'undefined') {
     msgResizeObserver = new ResizeObserver(onContentResized)
     msgResizeObserver.observe(msgContentRef.value ?? wrap)
@@ -5169,6 +5235,8 @@ watch(
 
 watch(() => ai.expanded, async (expanded) => {
   if (!expanded) {
+    captureMessageView()
+    closeMmdViewer()
     detachMessageViewObservers()
     return
   }
@@ -5176,8 +5244,7 @@ watch(() => ai.expanded, async (expanded) => {
   await nextTick()
   attachMessageViewObservers()
   measureUserMsgOverflow()
-  // R-161：容器自身尺寸变化导致的相对底部漂移，统一走 pinBottom()。
-  pinBottom()
+  restoreMessageView()
   resetStickBaseline()
 })
 
@@ -5189,10 +5256,35 @@ watch(() => ai.expanded, async (expanded) => {
  * （{@link msgWrapRef}）的盒子由 flex 布局定死，内容长高只改它的 scrollHeight、不改它的 box，
  * 观测它对"内容增长"零触发。
  *
- * 回调本身不钉底：只置"本帧尺寸变过"并交给统一调度，与 DOM 补丁后的复测合并成一次写入
- * （RO 一次批量可能投递多条 entry，逐条钉底就是重复补偿）。
+ * 回调本身不钉底：尺寸证据交给统一调度，与 DOM 补丁后的复测合并成一次写入；
+ * 仅内容宽度变化另标脏用户消息并重测，高度变化不扫全表。
  */
-function onContentResized(): void {
+function scheduleUserMsgWidthMeasure(): void {
+  if (userMsgWidthMeasureScheduled) {
+    return
+  }
+  userMsgWidthMeasureScheduled = true
+  void nextTick(() => {
+    userMsgWidthMeasureScheduled = false
+    if (ai.expanded) {
+      measureUserMsgOverflow()
+    }
+  })
+}
+
+function onContentResized(entries: ResizeObserverEntry[] = []): void {
+  const width = entries[0]?.contentRect.width
+    ?? (msgContentRef.value ?? msgWrapRef.value)?.getBoundingClientRect().width
+    ?? 0
+  if (lastMessageContentWidth !== null && width !== lastMessageContentWidth) {
+    for (const id of userBodyEls.keys()) {
+      markUserMsgDirty(id)
+    }
+    if (dirtyUserMsgIds.size > 0) {
+      scheduleUserMsgWidthMeasure()
+    }
+  }
+  lastMessageContentWidth = width
   contentResized = true
   scheduleStickToBottom()
 }
