@@ -176,6 +176,10 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
                     jobId, ref.getJobType(), normalized, taskId);
             return true;
         });
-        return Boolean.TRUE.equals(recovered);
+        if (Boolean.TRUE.equals(recovered)) {
+            heartbeatRegistry.revokeRunner(jobId);
+            return true;
+        }
+        return false;
     }
 }

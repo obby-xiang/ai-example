@@ -350,6 +350,13 @@
       "reason": "D6已同步显式模型归属、max_context唯一分母、压缩CAS及V1空库基线；本批仅落实对应生产实现并删除旧配置信号和迁移链",
       "reviewedAt": "2026-11-04",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:10f39d96cb3bc6f21ef3e6e9bc237d98f8dbcdf3db68dae130d13b5dad4b2ff3",
+      "status": "not-affected",
+      "reason": "D6已描述显式身份唤醒、取消终态和有界恢复；本批仅修正active清理、版本单调及forget竞态，不改变迁移接口",
+      "reviewedAt": "2026-11-04",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

@@ -56,6 +56,9 @@ public class Job {
     @Column(name = "finished_at")
     private LocalDateTime finishedAt;
 
+    @Column(name = "cancel_version", nullable = false)
+    private long cancelVersion = 0L;
+
     public enum JobType { EXPORT, PRECHECK, IMPORT, PUBLISH }
     public enum JobStatus { PENDING, RUNNING, COMPLETED, FAILED, CANCELLED }
 }

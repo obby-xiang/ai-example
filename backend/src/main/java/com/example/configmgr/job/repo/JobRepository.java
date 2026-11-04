@@ -57,6 +57,16 @@ public interface JobRepository extends JpaRepository<Job, Long> {
     /** 在途作业（看门狗扫描面，R-96 批 B）：只取指定状态，不 findAll() 全表。 */
     List<Job> findByStatusIn(Collection<Job.JobStatus> statuses);
 
+    /** 取消/终态权威快照：避免为 runner 边界检查水合 EAGER items 与 resultJson。 */
+    @Query("SELECT j.status AS status, j.cancelVersion AS cancelVersion FROM Job j WHERE j.id = :jobId")
+    Optional<CancelState> findCancelStateById(@Param("jobId") Long jobId);
+
+    interface CancelState {
+        Job.JobStatus getStatus();
+
+        long getCancelVersion();
+    }
+
     @Modifying
     @Query("DELETE FROM Job j WHERE j.taskId = :taskId")
     void deleteByTaskId(@Param("taskId") Long taskId);
@@ -105,14 +115,11 @@ public interface JobRepository extends JpaRepository<Job, Long> {
                              @Param("startedAt") LocalDateTime startedAt,
                              @Param("total") int total);
 
-    /**
-     * 终态条件写入（R1-11）：{@code WHERE status IN (PENDING, RUNNING)} 由数据库原子判定，
-     * 返回影响行数 = 本次是否胜出。跨进程两个写者同时到达时，恰好一方拿到 1 行。
-     */
+    /** 终态同时推进持久取消版本，旧 runner 的共享写与本地加速都可被该版本围栏。 */
     @Modifying(clearAutomatically = true)
     @Query("UPDATE Job j SET j.status = :status, j.errorCount = :errorCount, "
             + "j.warningCount = :warningCount, j.progress = :processed, j.total = :total, "
-            + "j.finishedAt = :finishedAt "
+            + "j.finishedAt = :finishedAt, j.cancelVersion = j.cancelVersion + 1 "
             + "WHERE j.id = :jobId AND j.status IN :inFlight")
     int finishIfInFlight(@Param("jobId") Long jobId,
                          @Param("status") Job.JobStatus status,
@@ -123,27 +130,19 @@ public interface JobRepository extends JpaRepository<Job, Long> {
                          @Param("finishedAt") LocalDateTime finishedAt,
                          @Param("inFlight") Collection<Job.JobStatus> inFlight);
 
-    /**
-     * 启动恢复专用的终态条件写入：只写 status + finishedAt，<b>不回写扫描时刻的进度/计数</b>。
-     *
-     * <p>恢复的候选是 keyset 分页读出的<b>旧快照</b>：从"读到这一行"到"UPDATE 执行"之间，别的
-     * runner 可能已推进了 {@code progress/total}（甚至已自然收终态）。终态条件 UPDATE 若把
-     * 旧快照一并写回，会把进度回退成低值；这里只做状态迁移，其余列保持数据库当前值。
-     *
-     * <p>与 {@link #finishIfInFlight} 的分工：后者由正在执行的 runner 在终态时写入它<b>当下</b>
-     * 的计数与进度，是合法的最新值；恢复没有"当下进度"，因此不能用同一语句。
-     */
+    /** 启动恢复只迁移状态、完成时刻与取消版本，不回写扫描时刻的旧进度。 */
     @Modifying(clearAutomatically = true)
-    @Query("UPDATE Job j SET j.status = :status, j.finishedAt = :finishedAt "
+    @Query("UPDATE Job j SET j.status = :status, j.finishedAt = :finishedAt, "
+            + "j.cancelVersion = j.cancelVersion + 1 "
             + "WHERE j.id = :jobId AND j.status IN :inFlight")
     int finishInterruptedIfInFlight(@Param("jobId") Long jobId,
                                     @Param("status") Job.JobStatus status,
                                     @Param("finishedAt") LocalDateTime finishedAt,
                                     @Param("inFlight") Collection<Job.JobStatus> inFlight);
 
-    /** 取消条件写入（R1-12）：仅 PENDING/RUNNING 可取消，影响行数为 0 即「已被别人收终态」。 */
+    /** 取消状态与权威版本在同一条件 UPDATE 中提交。 */
     @Modifying(clearAutomatically = true)
-    @Query("UPDATE Job j SET j.status = :status "
+    @Query("UPDATE Job j SET j.status = :status, j.cancelVersion = j.cancelVersion + 1 "
             + "WHERE j.id = :jobId AND j.status IN :inFlight")
     int updateStatusIfInFlight(@Param("jobId") Long jobId,
                                @Param("status") Job.JobStatus status,

@@ -25,11 +25,10 @@ import java.util.Set;
  * <li><b>按目标</b>而非按频道：同一个 run 可能被本实例的多个写出器同时持有（首轮 + 重挂批），
  * 每个目标（{@link WakeTarget} = 一个写出器）自己记"已推送到哪个 seq"，
  * 因此各目标进度独立、重复唤醒幂等（差量已空即 no-op）。</li>
- * <li><b>按"身份 + runId"</b>（租户任务）：唤醒频道名带身份段
- * （{@code ai:wake:<tenantId>:<userId>:<runId>}，见 {@link RedisFrameWakeBus#channel(String)}）。
- * 登记表若只按裸 runId 分桶，两个租户同 runId 时第二个目标会撞上"首个已订阅"的短路
- * ⇒ 它的频道<b>永不订阅</b>（跨实例唤醒静默缺席）；退订若按"当前线程身份"重算频道，
- * 无身份线程（断连回调/投递池）算出来的是 legacy 频道 ⇒ 真条目不被移除（僵尸订阅）。</li>
+ * <li><b>按"身份 + runId"</b>：唤醒频道名带身份段
+ * （{@code ai:wake:<tenantId>:<userId>:<runId>}，见 {@link RedisFrameWakeBus#channel}）。
+ * 登记表只按身份桶 + runId 分桶，两个租户同 runId 互不影响；没有身份就不登记
+ * （不存在裸 runId 桶，也不靠"当前线程碰巧是谁"重算频道）。</li>
  * </ul>
  *
  * <p>因此每个目标登记时绑定<b>一个句柄</b>（{@link Registration}：身份 + runId + 分桶键），
@@ -71,7 +70,7 @@ public class FrameWakeListener {
 	/** 目标 → 登记句柄（一个目标只属于一轮；退订按它精确回到同一桶/同一频道）。 */
 	private final Map<WakeTarget, Registration> registrations = new HashMap<>();
 
-	/** 订阅代次发号器（guarded by {@code this}）：每次建桶 = 一代，仅用于日志与无句柄实现的先后口径。 */
+	/** 订阅代次发号器（guarded by {@code this}）：每次建桶 = 一代，仅用于日志与诊断。 */
 	private long generationSeq;
 
 	public FrameWakeListener(FrameWakeBus bus) {
@@ -109,7 +108,7 @@ public class FrameWakeListener {
 	 * 一个（身份, runId）桶：目标集 + 订阅状态 + 订阅句柄。
 	 *
 	 * <p>句柄是"退订不误伤继任"的依据：旧桶那条晚到的 close 只摘它自己捕获的监听器，
-	 * 继任桶（另一个句柄）的监听器不受影响。代次只留作诊断/默认实现（测试替身）的先后口径。
+	 * 继任桶（另一个句柄）的监听器不受影响。代次只留作诊断。
 	 */
 	private static final class Bucket {
 
@@ -117,7 +116,7 @@ public class FrameWakeListener {
 
 		private final String runId;
 
-		/** 本次订阅的代次（本实例内单调递增，仅用于日志与无句柄实现的口径）。 */
+		/** 本次订阅的代次（本实例内单调递增，仅用于日志/诊断）。 */
 		private final long generation;
 
 		/**
@@ -146,6 +145,9 @@ public class FrameWakeListener {
 		/** 订阅状态（guarded by 外层监听器的锁）。 */
 		private State state;
 
+		private boolean wakeDispatching;
+		private long pendingWakeUpper;
+
 		Bucket(TenantUser identity, String runId, long generation, State state) {
 			this.identity = identity;
 			this.runId = runId;
@@ -156,11 +158,17 @@ public class FrameWakeListener {
 	}
 
 	/**
-	 * 分桶键：有身份 = {@code <tenantId>:<userId>:<runId>}；无身份 = 旧形 {@code <runId>}
-	 * （legacy 命名空间，与频道名同源）。
+	 * 分桶键：恒为 {@code <tenantId>:<userId>:<runId>}。
+	 *
+	 * <p>身份缺失不是"旧命名空间"而是配置/调用错误：没有身份就拼不出可判定的归属，
+	 * 不得退回裸 {@code runId}（那会与身份桶形成两套唤醒面）。{@link #register} 在调用本方法前
+	 * 已拒绝 null 身份。
 	 */
 	static String keyOf(TenantUser identity, String runId) {
-		return identity == null ? runId : identity.tenantId() + ":" + identity.userId() + ":" + runId;
+		if (identity == null) {
+			throw new IllegalArgumentException("frame wake bucket requires explicit tenant/user identity");
+		}
+		return identity.tenantId() + ":" + identity.userId() + ":" + runId;
 	}
 
 	/**
@@ -181,14 +189,19 @@ public class FrameWakeListener {
 	 *     被当成"已有订阅"。</li>
 	 * </ul>
 	 *
-	 * <p>身份取<b>登记线程</b>的当前身份（出帧/挂起路径带着请求或恢复身份），并随句柄固定下来：
-	 * 频道名与后续退订都用这一份，不受回调线程（Redis 监听线程 / 连接关闭线程）影响。
+	 * <p>身份取<b>登记线程</b>的当前显式身份（出帧/挂起路径按本轮记录身份建立作用域），并随句柄
+	 * 固定下来：频道名与后续退订都用这一份，不受回调线程（Redis 监听线程 / 连接关闭线程）影响。
+	 * 没有身份 ⇒ <b>不登记</b>（没有可判定的桶/频道，调用方下一拍重试），绝不退回裸 runId。
 	 *
 	 * @return true = 订阅已生效且本目标已在桶里（<b>已确认</b>）；false = <b>未确认</b>（目标已保留、
-	 * 订阅尚未建立）或订阅失败（整桶已回滚）。两种情形调用方都可安全重试
+	 * 订阅尚未建立）、订阅失败（整桶已回滚）或身份缺失（未登记）。三种情形调用方都可安全重试
 	 */
 	public boolean register(String runId, WakeTarget target) {
 		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null) {
+			log.warn("frame wake register skipped runId={} (no explicit tenant/user identity)", runId);
+			return false;
+		}
 		String key = keyOf(identity, runId);
 		Bucket bucket;
 		synchronized (this) {
@@ -332,8 +345,8 @@ public class FrameWakeListener {
 	/**
 	 * 退订：只 close 本桶的句柄（它摘的就是本次安装的监听器，与"频道当前是谁"无关）。
 	 *
-	 * <p>仍在<b>登记身份</b>作用域里 close：生产句柄自带监听器对象、不读线程身份，但无句柄的
-	 * 兼容实现按线程身份拼频道，断连/投递池线程没有身份，不建作用域会退到 legacy 频道（僵尸订阅）。
+	 * <p>仍在<b>登记身份</b>作用域里 close：句柄退订本身按监听器对象摘，但保持作用域可与
+	 * 订阅侧的频道口径完全一致（断连/投递池线程没有请求身份）。
 	 */
 	private void closeSubscription(FrameWakeBus.Subscription subscription, String runId, TenantUser identity) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
@@ -342,22 +355,6 @@ public class FrameWakeListener {
 		catch (Exception ex) {
 			log.warn("frame wake unsubscribe failed runId={} identity={}: {}", runId, identity, ex.getMessage());
 		}
-	}
-
-	/**
-	 * 该 run 当前登记的目标数（诊断/断言用）。
-	 *
-	 * <p>按 runId 汇总全部身份桶（跨租户同 runId 时是各桶之和）：调用方问的是"这个 runId 在本实例
-	 * 还有没有目标"，不是"某个身份有几个"。
-	 */
-	public synchronized int targetCount(String runId) {
-		int total = 0;
-		for (Bucket bucket : this.buckets.values()) {
-			if (runId.equals(bucket.runId)) {
-				total += bucket.targets.size();
-			}
-		}
-		return total;
 	}
 
 	/** 当前<b>订阅已建立</b>的（身份, run）桶数（诊断/断言用）。 */
@@ -373,36 +370,55 @@ public class FrameWakeListener {
 
 	/** 指定身份桶的目标数（诊断/断言用）。 */
 	public synchronized int targetCount(TenantUser identity, String runId) {
+		if (identity == null) {
+			return 0;
+		}
 		Bucket bucket = this.buckets.get(keyOf(identity, runId));
 		return bucket == null ? 0 : bucket.targets.size();
 	}
 
-	/**
-	 * 扇出一次唤醒：锁内取快照、锁外逐个回调 —— 回调里会读事件日志并写订阅者队列，
-	 * 持锁做会把"一个慢订阅者"的代价摊到所有 run 上。
-	 */
-	void dispatch(String runId, long upperBoundSeq) {
-		TenantUser identity = RequestContextUtils.currentOrNull();
-		dispatch(keyOf(identity, runId), runId, upperBoundSeq);
-	}
-
-	/** 按分桶键扇出（订阅回调据此只唤醒<b>该桶</b>的目标，不跨租户）。 */
+	/** 每桶单飞；读档期间到达的上界合流成下一轮最大值，不叠加并发差量读。 */
 	void dispatch(String key, String runId, long upperBoundSeq) {
-		List<WakeTarget> snapshot;
+		Bucket bucket;
 		synchronized (this) {
-			Bucket bucket = this.buckets.get(key);
+			bucket = this.buckets.get(key);
 			if (bucket == null || bucket.targets.isEmpty()) {
 				return;
 			}
-			snapshot = new ArrayList<>(bucket.targets);
-		}
-		for (WakeTarget target : snapshot) {
-			try {
-				target.onWake(runId, upperBoundSeq);
+			bucket.pendingWakeUpper = Math.max(bucket.pendingWakeUpper, upperBoundSeq);
+			if (bucket.wakeDispatching) {
+				return;
 			}
-			catch (Exception ex) {
-				log.warn("wake handling failed runId={} seq={} (target skipped this tick; next tick/reattach replays): {}", runId,
-						upperBoundSeq, ex.getMessage());
+			bucket.wakeDispatching = true;
+		}
+		while (true) {
+			List<WakeTarget> snapshot;
+			long upper;
+			synchronized (this) {
+				if (this.buckets.get(key) != bucket || bucket.targets.isEmpty()) {
+					return;
+				}
+				upper = bucket.pendingWakeUpper;
+				bucket.pendingWakeUpper = 0L;
+				snapshot = new ArrayList<>(bucket.targets);
+			}
+			for (WakeTarget target : snapshot) {
+				try {
+					target.onWake(runId, upper);
+				}
+				catch (Exception ex) {
+					log.warn("wake handling failed runId={} seq={} (target skipped this tick; next tick/reattach replays): {}", runId,
+							upper, ex.getMessage());
+				}
+			}
+			synchronized (this) {
+				if (this.buckets.get(key) != bucket) {
+					return;
+				}
+				if (bucket.pendingWakeUpper <= 0L) {
+					bucket.wakeDispatching = false;
+					return;
+				}
 			}
 		}
 	}

@@ -2,7 +2,6 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.LocalRunKey;
-import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
@@ -50,8 +49,8 @@ public class RunRegistry {
 	 *
 	 * <p>为什么键里必须带身份：runId 只在<b>一轮</b>内唯一，两个租户各自生成同形 runId 是合法且必然的。
 	 * 旧实现按裸 runId 定键，于是 A、B 会拿到同一个写出器 —— A 的帧写进 B 的归档、A 的 {@code close}
-	 * 收掉 B 的连接、A 的订阅让 B 也被判成"本进程有活连接"。无身份时键落在 legacy 命名空间
-	 * （{@code {run:<runId>}}），那是<b>旧数据的独立桶</b>，不是"默认身份"。
+	 * 收掉 B 的连接、A 的订阅让 B 也被判成"本进程有活连接"。无身份时不生成键（调用方必须用
+	 * 精确身份重载，或先建立记录身份作用域）。
 	 */
 	private final Map<String, EmitterEntry> emitters = new ConcurrentHashMap<>();
 
@@ -120,26 +119,13 @@ public class RunRegistry {
 	private volatile boolean ownsSharedSseResources;
 
 	/**
-	 * 生产装配（B23L1 批①）：写出器一律拿到 Redis Stream 事件日志 + wake 扇出。
-	 *
-	 * <p>
-	 * {@code wakeBus/wakeListener} 允许为 null（局部上下文/测试）：为 null 时只保留单实例行为，
-	 * 事件日志仍恒为 {@link RedisFrameStore}（不存在第二套事件日志写口）。
-	 */
-	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
-			FrameWakeBus wakeBus, FrameWakeListener wakeListener) {
-		this(store, objectMapper, properties, frames, wakeBus, wakeListener, null);
-	}
-
-	/**
 	 * 生产装配（G5 起多注入模型侧裁剪器）：{@code tool_result} 帧据此挂上"模型视图是否被截断"。
 	 *
 	 * <p>{@code resultLimiter} 允许为 null（局部上下文/测试）：为 null 时写出器不标注模型侧视图，
 	 * 帧面其余语义不变。
 	 *
-	 * <p><b>这条 {@code @Autowired} 构造 = Spring 里唯一的装配入口</b>，因此也是"本轮记录身份是唯一权威"
-	 * 的唯一开关点：新建的写出器会被标记 {@link SseChatEmitter#requireRecordIdentity()} ——
-	 * 没有取键提示时不许"永久缓存无身份"并照旧写 legacy 键族（那是与本轮身份键族平行的第二套归档）。
+	 * <p><b>这条 {@code @Autowired} 构造 = Spring 里唯一的装配入口</b>；当前协议下写侧身份始终必需，
+	 * 没有"装配期打开/关闭身份闸"的开关。
 	 */
 	@Autowired
 	public RunRegistry(RunStore store, ObjectMapper objectMapper, AiProperties properties, FrameStore frames,
@@ -203,9 +189,7 @@ public class RunRegistry {
 		if (this.properties != null) {
 			emitter.enableAttachKeepalive(SseChatEmitter.sharedAttachKeepaliveScheduler());
 		}
-		// 本轮身份只认记录。没有取键提示时按"身份不可确认"失败，绝不写 legacy 键族
-		// （见 SseChatEmitter#recordIdentityRequired）。
-		emitter.requireRecordIdentity();
+		// 本轮身份始终必需：没有身份就不落档/不投递/不发布，由写出器按故障恢复处理。
 		return emitter;
 	}
 
@@ -222,30 +206,15 @@ public class RunRegistry {
 	 * 都会造一个（帧发出后按 B1 收流、订阅归零），把"表里有条目"当活跃会让会话门永久 409、
 	 * 让僵尸判据永远判活。人工等待 park 批起，会话门/存活判定一律用本方法。
 	 *
-	 * <p><b>身份口径</b>：有当前身份时只看<b>这一身份</b>的条目（A 的连接不得让 B 被判活）；
-	 * 无身份（启动/运行期扫描线程，见 {@code StartupResumeRunner}）时回答"本进程有没有这一轮的真实
-	 * 连接"—— 任一身份桶命中即为真。判活方向的误报只让我们晚一拍接管；误报"无人"会双驱动。
-	 *
-	 * <p><b>扫描请用精确身份重载</b> {@link #hasLiveSubscriber(String, long, long)}：本方法在无身份
-	 * 线程上会退化为遍历全部条目（P2-11）。
+	 * <p>只查当前显式身份对应的条目；无身份由 {@link LocalRunKey#of(String)} 直接拒绝，
+	 * 扫描线程必须改用 {@link #hasLiveSubscriber(String, long, long)}。
 	 */
 	public boolean hasLiveSubscriber(String runId) {
 		if (runId == null || runId.isBlank()) {
 			return false;
 		}
 		EmitterEntry exact = this.emitters.get(LocalRunKey.of(runId));
-		if (exact != null && exact.emitter().subscriberCount() > 0) {
-			return true;
-		}
-		if (RequestContextUtils.currentOrNull() != null) {
-			return false;
-		}
-		for (EmitterEntry entry : this.emitters.values()) {
-			if (runId.equals(entry.runId()) && entry.emitter().subscriberCount() > 0) {
-				return true;
-			}
-		}
-		return false;
+		return exact != null && exact.emitter().subscriberCount() > 0;
 	}
 
 	/**
@@ -256,20 +225,16 @@ public class RunRegistry {
 	 * （扫描侧从快照/索引取），直接问"这个身份的这一轮在本进程有没有活连接"即可，避免旧口径在
 	 * 无身份线程上退化为 O(全部 emitter)。
 	 *
-	 * <p><b>legacy 记录（0/0 或不可用身份）</b>：查的是无身份桶 {@code {run:<runId>}}（与 {@link #of}
-	 * 在无身份调用线程上建出的条目同键），<b>不是</b> {@code 0:0} 命名空间，也不是"默认租户"。
-	 * 调用方传的就是记录里的权威身份。
+	 * <p><b>身份不可用（0/0）</b>：没有可查的无身份桶，直接回答"没有活订阅者"（不猜身份）。
 	 *
-	 * @return {@code true} = 该精确身份条目存在且有订阅者；其余（含非法 runId）一律 {@code false}
+	 * @return {@code true} = 该精确身份条目存在且有订阅者；其余（含非法 runId/身份）一律 {@code false}
 	 */
 	public boolean hasLiveSubscriber(String runId, long tenantId, long userId) {
-		if (runId == null || runId.isBlank() || runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0) {
+		if (runId == null || runId.isBlank() || runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0
+				|| !RunIdentityScope.usable(tenantId, userId)) {
 			return false;
 		}
-		String key = RunIdentityScope.usable(tenantId, userId)
-				? LocalRunKey.of(tenantId, userId, runId)
-				: LocalRunKey.of((TenantUser) null, runId);
-		EmitterEntry entry = this.emitters.get(key);
+		EmitterEntry entry = this.emitters.get(LocalRunKey.of(tenantId, userId, runId));
 		return entry != null && entry.emitter().subscriberCount() > 0;
 	}
 

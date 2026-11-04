@@ -22,6 +22,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -29,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.util.List;
@@ -205,9 +207,23 @@ public class JobService {
             });
         }
 
-        if (!heartbeatRegistry.beginRunner(savedJob.getId())) {
-            // P1-1：Redis 共享键写不进去时绝不能开跑，也不能提交一个 PENDING 作业。
-            // 抛业务冲突让事务回滚；afterCompletion 会清理本地/取消注册。
+        final boolean runnerStarted;
+        try {
+            runnerStarted = heartbeatRegistry.beginRunner(savedJob.getId());
+        } catch (JobHeartbeatRegistry.JobStateUnavailableException ex) {
+            heartbeatRegistry.endRunner(savedJob.getId());
+            if (!synchronizationActive) {
+                cancellationRegistry.unregister(savedJob.getId());
+            }
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), ex);
+        } catch (JobHeartbeatRegistry.JobNotInFlightException ex) {
+            heartbeatRegistry.endRunner(savedJob.getId());
+            if (!synchronizationActive) {
+                cancellationRegistry.unregister(savedJob.getId());
+            }
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_FINAL, ex.getMessage());
+        }
+        if (!runnerStarted) {
             heartbeatRegistry.endRunner(savedJob.getId());
             if (!synchronizationActive) {
                 cancellationRegistry.unregister(savedJob.getId());
@@ -468,9 +484,8 @@ public class JobService {
      * <ul>
      * <li><b>④ 已终态 → 409 JOB_ALREADY_FINAL</b>：不再静默 200；
      *     终态（COMPLETED/FAILED/CANCELLED）作业的取消请求没有语义，返回冲突码让调用方明确失败；</li>
-     * <li><b>③ 取消标志 Redis 共享为准</b>：写 {@code job:cancel:{jobId}}，
-     *     持有作业的实例在分片/事件边界轮询（延迟 ≤1 分片）；进程内直通知仅是加速，
-     *     写 Redis 失败也不视为错误；</li>
+     * <li><b>③ DB 保存权威取消状态与版本</b>：{@code job:cancel:{jobId}} 只镜像该版本，
+     *     执行边界在 Redis 未命中或失败时回查 DB；进程内直通知同样仅是加速。</li>
      * <li><b>⑥ 任务态联动</b>：作业取消 → 任务 CANCELLED。</li>
      * </ul>
      *
@@ -527,7 +542,7 @@ public class JobService {
     }
 
     /**
-     * 取消提交后的同步旁路：先写共享取消标志（Redis 为准），再推 JOB_DONE。
+     * 取消提交后的同步旁路：先写 Redis 加速镜像与心跳 fence，再推 JOB_DONE。
      *
      * <p>I-1：调用点已保证事务模板返回（提交 + 连接/EntityManager 清理完成），
      * 因此这里不再使用 {@code afterCommit}/{@code isSynchronizationActive} 判断；
@@ -545,11 +560,9 @@ public class JobService {
                     false, false, jobId, cancellationRegistry.keyFor(jobId));
         }
         if (!result.redisWritten()) {
-            // 精确口径：Redis 写失败时，只有本实例已登记（正在执行该作业）的加速位立即可见；
-            // 非执行实例没有本地条目，跨实例取消在 Redis 恢复前不可见（作业行终态仍是权威）
-            log.warn("Shared cancel flag not written to Redis, cancel visible only on this instance jobId={}",
-                    jobId);
+            log.warn("Cancel acceleration mirror not written; runner boundaries will recheck DB jobId={}", jobId);
         }
+        heartbeatRegistry.fenceCancelledRunner(jobId);
         try {
             taskSseService.publish(taskId, "JOB_DONE", Map.of(
                     "jobId", jobId, "status", "CANCELLED"));

@@ -2,7 +2,6 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
-import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -25,8 +24,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 
 /**
- * {@link FrameWakeBus} 的 Redis pub/sub 实现：{@code PUBLISH ai:wake:<runId> <上界seq>} +
- * 一个按需启动的 {@link RedisMessageListenerContainer}。
+ * {@link FrameWakeBus} 的 Redis pub/sub 实现：{@code PUBLISH ai:wake:<tenantId>:<userId>:<runId> <上界seq>}
+ * + 一个按需启动的 {@link RedisMessageListenerContainer}。
+ *
+ * <p><b>频道只存在身份形</b>：发布/订阅都要求显式 tenant/user 作用域；没有身份时本拍直接跳过，
+ * 不生成裸 {@code ai:wake:<runId>} 频道。
  *
  * <p>
  * <b>懒启动</b>：容器在第一次 {@link #subscribeHandle} 时才建并启动 —— 没有挂起/重挂连接的进程
@@ -51,12 +53,15 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 
 	private final StringRedisTemplate redis;
 
-	/**
-	 * 无句柄兼容口（{@link #subscribe(String, LongConsumer)}）的当前订阅：该 API 拿不到句柄，
-	 * 只能按频道记住"这一次装的是哪条监听器"以便 {@link #unsubscribe(String)} 摘掉。
-	 * <b>生产路径（{@link FrameWakeListener}）只走 {@link #subscribeHandle}，不经过这里。</b>
-	 */
-	private final Map<String, Subscription> noHandleSubscriptions = new ConcurrentHashMap<>();
+	private final Map<String, PublishState> publishStates = new ConcurrentHashMap<>();
+
+	private static final long PUBLISH_COALESCE_MILLIS = 10L;
+
+	private static final class PublishState {
+		private long pendingSeq;
+		private boolean terminal;
+		private boolean running;
+	}
 
 	private volatile RedisMessageListenerContainer container;
 
@@ -130,25 +135,105 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	}
 
 	@Override
-	public void publish(String runId, long upperBoundSeq) {
-		if (this.closed) {
+	public void publish(String runId, long upperBoundSeq, boolean terminal) {
+		if (this.closed || upperBoundSeq <= 0L) {
 			return;
 		}
+		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null) {
+			log.warn("frame wake publish skipped runId={} seq={} (no explicit tenant/user identity; "
+					+ "never publishing a bare-run channel)", runId, upperBoundSeq);
+			return;
+		}
+		String channel = channel(identity, runId);
+		while (true) {
+			PublishState state = this.publishStates.computeIfAbsent(channel, ignored -> new PublishState());
+			boolean submit = false;
+			synchronized (state) {
+				if (this.publishStates.get(channel) != state) {
+					continue;
+				}
+				state.pendingSeq = Math.max(state.pendingSeq, upperBoundSeq);
+				state.terminal |= terminal;
+				if (!state.running) {
+					state.running = true;
+					submit = true;
+				}
+				if (terminal) {
+					state.notifyAll();
+				}
+			}
+			if (submit) {
+				try {
+					dispatchExecutor().execute(() -> drainPublish(channel, state));
+				}
+				catch (RuntimeException ex) {
+					synchronized (state) {
+						state.running = false;
+						this.publishStates.remove(channel, state);
+					}
+					log.debug("frame wake coalesced publish not dispatched runId={} seq={}: {}", runId, upperBoundSeq,
+							ex.getMessage());
+				}
+			}
+			return;
+		}
+	}
+
+	private void drainPublish(String channel, PublishState state) {
 		try {
-			this.redis.convertAndSend(channel(runId), Long.toString(upperBoundSeq));
+			while (true) {
+				long seq;
+				synchronized (state) {
+					if (state.pendingSeq <= 0L) {
+						state.running = false;
+						this.publishStates.remove(channel, state);
+						return;
+					}
+					if (!this.closed && !state.terminal) {
+						state.wait(PUBLISH_COALESCE_MILLIS);
+					}
+					seq = state.pendingSeq;
+					state.pendingSeq = 0L;
+					state.terminal = false;
+				}
+				publishNow(channel, seq);
+			}
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+		}
+		finally {
+			synchronized (state) {
+				if (state.running) {
+					state.running = false;
+					this.publishStates.remove(channel, state);
+				}
+			}
+		}
+	}
+
+	private void publishNow(String channel, long upperBoundSeq) {
+		try {
+			this.redis.convertAndSend(channel, Long.toString(upperBoundSeq));
 		}
 		catch (Exception ex) {
-			log.debug("frame wake publish failed runId={} seq={} (wake is best-effort; ?lastSeq reconnect is authoritative): {}", runId,
-					upperBoundSeq, ex.getMessage());
+			log.debug("frame wake publish failed channel={} seq={} (wake is best-effort; archive reconcile is authoritative): {}",
+					channel, upperBoundSeq, ex.getMessage());
 		}
 	}
 
 	@Override
 	public Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
-		String channel = channel(runId);
 		// 订阅侧的身份在这一刻固定（调用方是出帧/挂起路径，带着请求或恢复身份）；
 		// 监听回调跑在 Redis 监听线程上，那里没有请求身份 ⇒ 回调内按这份身份 useContext。
 		TenantUser identity = RequestContextUtils.currentOrNull();
+		if (identity == null) {
+			log.warn("frame wake subscribe skipped runId={} (no explicit tenant/user identity; "
+					+ "never subscribing a bare-run channel)", runId);
+			return null;
+		}
+		String channel = channel(identity, runId);
 		MessageListener listener = (Message message, byte[] pattern) -> {
 			long upper = parseUpperBound(message == null ? null : message.getBody());
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
@@ -184,46 +269,17 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 		};
 	}
 
-	@Override
-	public boolean subscribe(String runId, LongConsumer onWake) {
-		Subscription incoming = subscribeHandle(runId, 0L, onWake);
-		if (incoming == null) {
-			return false;
-		}
-		closeQuietly(this.noHandleSubscriptions.put(channel(runId), incoming), runId);
-		return true;
-	}
-
-	@Override
-	public void unsubscribe(String runId) {
-		closeQuietly(this.noHandleSubscriptions.remove(channel(runId)), runId);
-	}
-
 	/**
-	 * 唤醒频道名：{@code ai:wake:<tenantId>:<userId>:<runId>}（无身份上下文 = 旧形 {@code ai:wake:<runId>}）。
+	 * 唤醒频道名：{@code ai:wake:<tenantId>:<userId>:<runId>}。
 	 *
-	 * <p>频道粒度仍是 run，但<b>身份进了频道名</b>：两个租户同 runId 的轮次不会互相唤醒
-	 * （否则 A 的帧会让 B 的重挂者去读自己那边并不存在的差量）。
+	 * <p>身份必须显式给出：不存在 {@code ai:wake:<runId>} 的无身份频道（裸 runId 频道会与
+	 * 身份频道形成两套唤醒面，跨实例补帧静默缺席）。
 	 */
-	public static String channel(String runId) {
-		return CHANNEL_PREFIX + TenantKeyScope.currentSegment() + runId;
-	}
-
-	/** 无句柄兼容口当前的订阅数（诊断/断言用）；句柄订阅由 {@link FrameWakeListener} 自己计数。 */
-	public int subscribedRuns() {
-		return this.noHandleSubscriptions.size();
-	}
-
-	private static void closeQuietly(Subscription subscription, String runId) {
-		if (subscription == null) {
-			return;
+	public static String channel(TenantUser identity, String runId) {
+		if (identity == null) {
+			throw new IllegalArgumentException("frame wake channel requires explicit tenant/user identity");
 		}
-		try {
-			subscription.close();
-		}
-		catch (Exception ex) {
-			log.debug("frame wake compat handle close failed runId={}: {}", runId, ex.getMessage());
-		}
+		return CHANNEL_PREFIX + identity.tenantId() + ":" + identity.userId() + ":" + runId;
 	}
 
 	private RedisMessageListenerContainer container() {
@@ -363,6 +419,11 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			subscription = this.subscriptionExecutor;
 			this.subscriptionExecutor = null;
 		}
+		for (PublishState state : this.publishStates.values()) {
+			synchronized (state) {
+				state.notifyAll();
+			}
+		}
 		if (current != null) {
 			try {
 				current.destroy();
@@ -371,9 +432,9 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				log.debug("frame wake container close failed: {}", ex.getMessage());
 			}
 		}
-		this.noHandleSubscriptions.clear();
 		shutdownBounded(subscription);
 		shutdownBounded(dispatch);
+		this.publishStates.clear();
 	}
 
 	/** 有界停机：先 {@code shutdown()}（不中断在飞任务），2s 内未收尾才 {@code shutdownNow()}。 */

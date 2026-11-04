@@ -61,8 +61,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code ValidationIssue}（ERROR + {@code def_code} 哨兵 {@code "-"}，沿用
  * {@link ExportJobRunner#JOB_LEVEL_DEF_CODE} 口径）→ {@link JobTerminalWriter#complete}
  * （FAILED，看门狗线程无事务 ⇒ 走直接 apply 分支）→ {@link JobCancellationRegistry#cancel}
- * （Redis 权威取消标志 ⇒ 作业线程在<b>下一个分片边界</b>自行止步）→
- * {@link JobHeartbeatRegistry#revokeRunner}（清 runner-active + 共享心跳，删除闸门立即释放，
+ * （DB 取消版本已落，Redis 镜像仅加速 ⇒ 作业线程在<b>下一个分片边界</b>自行止步）→
+ * {@link JobHeartbeatRegistry#revokeRunner}（写 runner-active/beat 撤销 fence，删除闸门立即释放，
  * 不再白等 30m/65m TTL）。<b>不自动重排队</b>（Q6 裁决，对齐
  * {@link StaleJobRecoveryRunner} 已定案口径：重跑由用户显式发起）。
  *
@@ -346,6 +346,25 @@ public class JobWatchdog {
             log.warn("Timeout judgement without lease (Redis), terminal state only and issue skipped jobId={}",
                     job.getId());
         }
+        JobRepository.CancelState current = this.jobRepository.findCancelStateById(job.getId()).orElse(null);
+        if (current == null || !IN_FLIGHT.contains(current.getStatus())) {
+            log.debug("Judgement abandoned after DB recheck jobId={} status={}", job.getId(),
+                    current == null ? "DELETED" : current.getStatus());
+            return;
+        }
+        if (!timeout) {
+            JobHeartbeatRegistry.SharedBeat rechecked = this.heartbeatRegistry.readSharedBeat(job.getId(),
+                    heartbeatInterval().multipliedBy(deadMultiplier()).toMillis());
+            if (rechecked.state() == JobHeartbeatRegistry.SharedBeatState.UNAVAILABLE) {
+                noteFailClosed(job.getId());
+                return;
+            }
+            if (rechecked.state() != JobHeartbeatRegistry.SharedBeatState.STALE) {
+                log.debug("Dead judgement abandoned after heartbeat recheck jobId={} state={}",
+                        job.getId(), rechecked.state());
+                return;
+            }
+        }
         this.judgedJobIds.add(job.getId());
         if (timeout) {
             this.judgedTimeoutTotal.incrementAndGet();
@@ -378,9 +397,7 @@ public class JobWatchdog {
             JobCancellationRegistry.CancelResult cancelResult =
                     this.cancellationRegistry.cancel(job.getId(), "job-watchdog");
             if (!cancelResult.redisWritten()) {
-                // cancel() 把"写 Redis 失败"降级成返回值而不是异常，失败事实必须在这里显式落日志：
-                // 终态已落 FAILED，缺的只是让执行线程在下一分片边界止步的共享标志（跨实例不可见）
-                log.warn("Cancel flag not written to Redis, runner may continue to next shard boundary jobId={}",
+                log.warn("Cancel acceleration mirror not written; runner will recheck DB at next boundary jobId={}",
                         job.getId());
             }
         } catch (RuntimeException e) {
@@ -392,6 +409,7 @@ public class JobWatchdog {
             // 超时不强杀线程：runner 可能仍活着并在长事务里迟到写，删除闸门留给
             // AsyncJobExecutor.finally 的 endRunner 释放（runner 仍活 ⇒ fail-closed 不误放行）。
             this.heartbeatRegistry.clear(job.getId());
+            this.heartbeatRegistry.fenceCancelledRunner(job.getId());
         } else {
             // 心跳判死：runner 已失联，撤销登记并清共享键 ⇒ 删除闸门随 runner 清理立即释放，
             // 不再白等 runner-active 的 30m/65m TTL（本批硬要求）。

@@ -2,12 +2,15 @@ package com.example.configmgr.job.service;
 
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.config.AppProperties;
+import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.repo.JobRepository;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisClusterNode;
+import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.ScanOptions;
@@ -63,14 +66,14 @@ import java.util.regex.Pattern;
  * <li><b>runner 活跃</b>：进程内集合 + 可选 Redis {@code job:runner-active:<jobId>}
  *     （长 TTL = 2×max-execution-time+5m，ticker/分片节拍续期）。删除闸门读共享态，
  *     A 实例 runner 未退出时 B 实例也 409；Redis 不可读时 fail-closed。</li>
- * <li><b>已撤销</b>（{@link #revokeRunner}）：判死后删除共享键并拒绝迟到的 beat。</li>
+ * <li><b>已撤销</b>（{@link #revokeRunner}）：共享 tombstone 与每代 token 共同拒绝迟到 beat/end。</li>
  * </ul>
  *
  * <h2>判死单飞与快速收敛</h2>
  * 判死动作由 {@code SET job:deadjudge:<jobId> <instance> NX PX <lease>} 单飞：只允许一个实例
  * 落 issue / 终态 / 取消标志，重复扫描与多实例并发扫描都不增加重复 issue（多写一次终态也由
  * {@code JobProgressService#finish} 的条件 UPDATE 兜住）。判死<b>成功后</b>
- * {@link #revokeRunner(Long)} 清 runner-active 与共享心跳 ⇒ 删除闸门立即释放，不再白等
+ * {@link #revokeRunner(Long)} 写 runner-active/beat 撤销 fence ⇒ 删除闸门立即释放，不再白等
  * runner-active 的 30m/65m TTL。<b>不自动重排队</b>：FAILED 即终点，重跑由用户显式发起。
  *
  * <h2>失败口径（fail-closed）</h2>
@@ -124,11 +127,54 @@ public class JobHeartbeatRegistry {
             return 1
             """, Long.class);
 
+    private static final String WRITE_GENERATION_LUA = """
+            local current = redis.call('GET', KEYS[1])
+            if current and string.sub(current, 1, string.len(ARGV[1])) ~= ARGV[1] then
+              return 0
+            end
+            redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+            return 1
+            """;
+    private static final String DELETE_GENERATION_LUA = """
+            local current = redis.call('GET', KEYS[1])
+            if not current then
+              return 1
+            end
+            if string.sub(current, 1, string.len(ARGV[1])) ~= ARGV[1] then
+              return 0
+            end
+            redis.call('DEL', KEYS[1])
+            return 1
+            """;
+    private static final RedisScript<Long> WRITE_GENERATION_SCRIPT =
+            new DefaultRedisScript<>(WRITE_GENERATION_LUA, Long.class);
+    private static final RedisScript<Long> DELETE_GENERATION_SCRIPT =
+            new DefaultRedisScript<>(DELETE_GENERATION_LUA, Long.class);
+    private static final RedisScript<Long> WRITE_MONOTONIC_FENCE_SCRIPT = new DefaultRedisScript<>("""
+            local current = redis.call('GET', KEYS[1])
+            if current and string.sub(current, 1, 8) == 'REVOKED|' then
+              local rest = string.sub(current, 9)
+              local sep = string.find(rest, '|', 1, true)
+              if not sep then
+                return 0
+              end
+              local currentVersion = tonumber(string.sub(rest, 1, sep - 1))
+              if not currentVersion or currentVersion > tonumber(ARGV[1]) then
+                return 0
+              end
+            end
+            redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+            return 1
+            """, Long.class);
+    private static final String REVOKED_VALUE_PREFIX = "REVOKED|";
+    private static final int HEARTBEAT_PIPELINE_BATCH = 32;
+
     private static final String LOCAL_HOST = hostName();
     private static final String INSTANCE_ID = "runner-" + LOCAL_HOST + "-pid"
             + ProcessHandle.current().pid() + "-" + UUID.randomUUID().toString().substring(0, 6);
 
     private final ConcurrentMap<Long, Long> lastBeatAtMs = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, String> runnerGenerations = new ConcurrentHashMap<>();
 
     /** 处于「心跳判死豁免」中的作业（R-96 批 B 收口修，红队 M1）：hold 期间<b>本实例</b>看门狗的
      *  心跳失联判据对该作业恒为 false；30min 绝对上限判据不受影响。
@@ -156,51 +202,34 @@ public class JobHeartbeatRegistry {
     /** memory 模式的判死单飞（作业 → 租约到期时刻）；redis 模式走 {@code SET NX PX}。 */
     private final ConcurrentMap<Long, Long> localJudgements = new ConcurrentHashMap<>();
 
+    private static final long AUTHORITY_CACHE_MILLIS = 250L;
+    private static final long UNKNOWN_CACHE_MILLIS = 100L;
+
     private final Clock clock;
     private final StringRedisTemplate redis;
+    private final JobRepository jobRepository;
+    private final JobCancellationRegistry cancellationRegistry;
     private final boolean redisMode;
     private final Duration runnerActiveTtl;
     private final Duration beatTtl;
+    private final AtomicInteger tickCursor = new AtomicInteger();
+    private final ConcurrentMap<Long, AuthorityCache> authorityCache = new ConcurrentHashMap<>();
 
     /** 进程级共享心跳续期器（懒启动；只在 redis 模式且本实例有在跑 runner 时存在）。 */
     private volatile ScheduledExecutorService ticker;
 
-    public JobHeartbeatRegistry() {
-        this(Clock.systemUTC(), null, false, runnerActiveTtlFor(Duration.ofMinutes(30)), DEFAULT_BEAT_TTL);
-    }
-
-    /** Spring 生产构造：默认 redis；测试 classpath 的 application.properties 显式设 memory。 */
     @Autowired
     public JobHeartbeatRegistry(StringRedisTemplate redis,
                                 @Value("${app.job.runner-active-store:redis}") String storeMode,
-                                AppProperties appProperties) {
-        this(Clock.systemUTC(), redis, !"memory".equalsIgnoreCase(storeMode),
-                runnerActiveTtlFor(appProperties.getJob().getMaxExecutionTime()),
-                beatTtlFor(appProperties));
-    }
-
-    JobHeartbeatRegistry(Clock clock) {
-        this(clock, null, false, runnerActiveTtlFor(Duration.ofMinutes(30)), DEFAULT_BEAT_TTL);
-    }
-
-    /** 多实例测试/手工装配用（默认 30m 上限派生的 runner-active TTL、缺省共享心跳 TTL）。 */
-    public JobHeartbeatRegistry(Clock clock, StringRedisTemplate redis, boolean redisMode) {
-        this(clock, redis, redisMode, runnerActiveTtlFor(Duration.ofMinutes(30)), DEFAULT_BEAT_TTL);
-    }
-
-    /** 可注入 max-execution-time 派生的 TTL（配置边界测试）。 */
-    public JobHeartbeatRegistry(Clock clock, StringRedisTemplate redis, boolean redisMode,
-                                Duration runnerActiveTtl) {
-        this(clock, redis, redisMode, runnerActiveTtl, DEFAULT_BEAT_TTL);
-    }
-
-    public JobHeartbeatRegistry(Clock clock, StringRedisTemplate redis, boolean redisMode,
-                                Duration runnerActiveTtl, Duration beatTtl) {
-        this.clock = clock;
+                                AppProperties appProperties, JobRepository jobRepository,
+                                JobCancellationRegistry cancellationRegistry) {
+        this.clock = Clock.systemUTC();
         this.redis = redis;
-        this.redisMode = redisMode;
-        this.runnerActiveTtl = runnerActiveTtl;
-        this.beatTtl = beatTtl;
+        this.redisMode = !"memory".equalsIgnoreCase(storeMode);
+        this.runnerActiveTtl = runnerActiveTtlFor(appProperties.getJob().getMaxExecutionTime());
+        this.beatTtl = beatTtlFor(appProperties);
+        this.jobRepository = jobRepository;
+        this.cancellationRegistry = cancellationRegistry;
     }
 
     /**
@@ -253,11 +282,10 @@ public class JobHeartbeatRegistry {
         return beatTtl;
     }
 
-    /** 分片边界续期一次心跳（幂等覆盖，只保留最新一次），并续期共享 runner 活跃键 + 共享心跳。 */
+    /** 分片边界续期：DB 仍在途才允许本代 token 写共享加速态。 */
     public void beat(Long jobId) {
-        if (revokedJobIds.contains(jobId)) {
-            // 判死后迟到的分片边界节拍：runner 已被判死，重新写回共享键会把删除闸门再挡一个 TTL。
-            log.debug("Late beat ignored, runner already judged dead and revoked jobId={}", jobId);
+        if (revokedJobIds.contains(jobId) || !databaseInFlight(jobId)) {
+            log.debug("Late beat ignored, job terminal or runner revoked jobId={}", jobId);
             return;
         }
         this.lastBeatAtMs.put(jobId, this.clock.millis());
@@ -270,25 +298,25 @@ public class JobHeartbeatRegistry {
         return this.lastBeatAtMs.get(jobId);
     }
 
-    /**
-     * 只清进程内心跳（finish/超时判死用）。<b>不删 Redis runner 活跃键</b>：
-     * 看门狗清心跳时 runner 线程可能仍活着，删键会误放行。
-     */
+    /** 终态清理同时失效心跳与取消的短 TTL 权威缓存。 */
     public void clear(Long jobId) {
         this.lastBeatAtMs.remove(jobId);
-        // 终态/超时判死之后该作业不会再有判定，单飞租约无需保留（避免进程内无界增长）。
         this.localJudgements.remove(jobId);
+        invalidateAuthority(jobId);
     }
 
-    /**
-     * runner 即将开始（作业创建事务内、commit 前）：本地 + Redis 同时登记，写首帧共享心跳，
-     * 并启动进程级 ticker（长作业无分片节拍也不会被对端误判）。
-     *
-     * @return redis 模式下共享键写入成功才 true；false 表示不得启动 runner（调用方收敛 FAILED）。
-     *         memory 模式恒 true。
-     */
+    /** 启动必须 fresh 核 DB；UNKNOWN 与明确终态分别归因，不能冒充 Redis 写失败。 */
     public boolean beginRunner(Long jobId) {
         this.revokedJobIds.remove(jobId);
+        AuthorityState authority = readAuthority(jobId, true);
+        if (authority == AuthorityState.UNKNOWN) {
+            throw new JobStateUnavailableException(jobId);
+        }
+        if (authority == AuthorityState.TERMINAL) {
+            throw new JobNotInFlightException(jobId);
+        }
+        String generation = UUID.randomUUID().toString();
+        this.runnerGenerations.put(jobId, generation);
         if (!redisMode) {
             this.activeRunners.add(jobId);
             this.lastBeatAtMs.put(jobId, this.clock.millis());
@@ -299,14 +327,15 @@ public class JobHeartbeatRegistry {
             return false;
         }
         long now = this.clock.millis();
+        String value = generationValue(jobId, now);
         try {
-            redis.opsForValue().set(key(jobId), anchorValue(), runnerActiveTtl);
-            redis.opsForValue().set(beatKey(jobId), beatValue(now), beatTtl);
+            redis.opsForValue().set(key(jobId), value, runnerActiveTtl);
+            redis.opsForValue().set(beatKey(jobId), value, beatTtl);
         } catch (RuntimeException e) {
-            // 不能 WARN 后继续跑：B 实例看不到共享键会在 runner 活着时放行删除。
             log.error("Runner active key registration failed, job must not run jobId={}", jobId, e);
-            deleteSafely(key(jobId));
-            deleteSafely(beatKey(jobId));
+            deleteIfGeneration(key(jobId), jobId);
+            deleteIfGeneration(beatKey(jobId), jobId);
+            this.runnerGenerations.remove(jobId, generation);
             return false;
         }
         this.lastBeatAtMs.put(jobId, now);
@@ -315,23 +344,17 @@ public class JobHeartbeatRegistry {
         return true;
     }
 
-    /** runner 已退出（{@code AsyncJobExecutor} 的 finally，含异常/取消路径）：本地 + Redis 同时注销。 */
+    /** 迟到 end 只能清自己的 generation，不能删除撤销 tombstone 或继任者状态。 */
     public void endRunner(Long jobId) {
         this.activeRunners.remove(jobId);
         this.revokedJobIds.remove(jobId);
         clearSharedRunnerState(jobId);
+        this.runnerGenerations.remove(jobId);
+        invalidateAuthority(jobId);
         stopTickerIfIdle();
     }
 
-    /**
-     * 看门狗判死成功后的撤销：本地 runner/心跳/held 全清，删除共享 runner-active 与共享心跳，
-     * 并记住"已撤销"以拒绝迟到的 beat。
-     *
-     * <p>这样删除闸门<b>随判死立即释放</b>，不再等 runner-active 的 30m/65m TTL；
-     * 被判死 runner 的迟到写由各写路径的"在途/终态条件 UPDATE"丢弃（{@link JobProgressService}）。
-     * 只用于心跳判死；绝对上限判超时不清 —— 超时作业的 runner 可能仍在正常写，闸门留给
-     * {@code AsyncJobExecutor.finally} 释放。
-     */
+    /** 判死撤销写入共享 tombstone；本代之后即使仍存活也不能重建 beat/anchor。 */
     public void revokeRunner(Long jobId) {
         if (!this.activeRunners.remove(jobId) && !this.revokedJobIds.contains(jobId)) {
             log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
@@ -340,8 +363,16 @@ public class JobHeartbeatRegistry {
         this.heldJobIds.remove(jobId);
         this.localJudgements.remove(jobId);
         this.revokedJobIds.add(jobId);
-        clearSharedRunnerState(jobId);
+        invalidateAuthority(jobId);
+        writeRevocation(jobId, true);
+        this.runnerGenerations.remove(jobId);
         stopTickerIfIdle();
+    }
+
+    /** 用户取消保留 active 锚点直到 runner 退出，但立即围栏后续共享心跳。 */
+    public void fenceCancelledRunner(Long jobId) {
+        invalidateAuthority(jobId);
+        writeRevocation(jobId, false);
     }
 
     /** 当前是否有登记中的 runner（不含“从未启动/已退出”的作业；本地口径）。 */
@@ -353,13 +384,7 @@ public class JobHeartbeatRegistry {
         return this.redisMode;
     }
 
-    /**
-     * 删除闸门口径：本地 runner/心跳，或 Redis 共享活跃键任一存在即视为活着。
-     *
-     * <p>Redis 读取失败抛 {@link RunnerActiveStateUnavailableException}，由调用方 fail-closed（409），
-     * 绝不把“查不到”当成“可删”。已被判死撤销的作业恒返回 false —— 那是判死方的明确结论，
-     * 不是"查不到"。
-     */
+    /** 活跃锚点与撤销 tombstone 都占用同一键；只有非 tombstone 值才代表 runner 仍活。 */
     public boolean isRunnerAlive(Long jobId) {
         if (this.revokedJobIds.contains(jobId)) {
             return false;
@@ -374,13 +399,8 @@ public class JobHeartbeatRegistry {
             throw new RunnerActiveStateUnavailableException(jobId, "Redis 模板未装配");
         }
         try {
-            Boolean present = redis.hasKey(key(jobId));
-            if (present == null) {
-                throw new RunnerActiveStateUnavailableException(jobId, "Redis hasKey 返回 null");
-            }
-            return present;
-        } catch (RunnerActiveStateUnavailableException e) {
-            throw e;
+            String value = redis.opsForValue().get(key(jobId));
+            return value != null && !value.startsWith(REVOKED_VALUE_PREFIX);
         } catch (RuntimeException e) {
             throw new RunnerActiveStateUnavailableException(jobId, e.getMessage());
         }
@@ -395,12 +415,39 @@ public class JobHeartbeatRegistry {
      * 与可控时钟的 TTL 用例无法对齐）。ticker 本身只做 try/catch 后调本方法。
      */
     void tickOnce() {
-        for (Long jobId : this.activeRunners) {
-            if (this.revokedJobIds.contains(jobId)) {
+        List<Long> jobs = new ArrayList<>(this.activeRunners);
+        if (jobs.isEmpty()) {
+            return;
+        }
+        jobs.sort(Long::compareTo);
+        int start = Math.floorMod(this.tickCursor.get(), jobs.size());
+        int examined = 0;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                Math.max(250L, Math.min(5_000L, this.beatTtl.toMillis() / 6)));
+        List<Long> batch = new ArrayList<>(HEARTBEAT_PIPELINE_BATCH);
+        while (examined < jobs.size() && System.nanoTime() < deadline) {
+            Long jobId = jobs.get((start + examined) % jobs.size());
+            examined++;
+            if (this.revokedJobIds.contains(jobId) || !this.activeRunners.contains(jobId)
+                    || !databaseInFlight(jobId)) {
                 continue;
             }
-            renewRunnerActive(jobId);
-            writeSharedBeat(jobId);
+            batch.add(jobId);
+            if (batch.size() >= HEARTBEAT_PIPELINE_BATCH) {
+                if (!writeHeartbeatBatch(batch)) {
+                    batch.clear();
+                    break;
+                }
+                batch = new ArrayList<>(HEARTBEAT_PIPELINE_BATCH);
+            }
+        }
+        if (!batch.isEmpty() && System.nanoTime() < deadline) {
+            writeHeartbeatBatch(batch);
+        }
+        this.tickCursor.set(start + examined);
+        if (examined < jobs.size()) {
+            log.warn("Shared heartbeat tick budget exhausted jobCount={} examined={} nextCursor={}",
+                    jobs.size(), examined, Math.floorMod(start + examined, jobs.size()));
         }
     }
 
@@ -498,14 +545,13 @@ public class JobHeartbeatRegistry {
         }
         try {
             String beat = redis.opsForValue().get(beatKey(jobId));
-            if (beat != null) {
+            if (beat != null && !beat.startsWith(REVOKED_VALUE_PREFIX)) {
                 return new SharedBeat(SharedBeatState.ALIVE, instanceOf(beat));
             }
             String anchor = redis.opsForValue().get(key(jobId));
-            if (anchor == null) {
+            if (anchor == null || anchor.startsWith(REVOKED_VALUE_PREFIX)) {
                 return SharedBeat.absent();
             }
-            // 锚点在、心跳键不在：runner 的 ticker 没续期 ⇒ 真失联，判死候选。
             return new SharedBeat(SharedBeatState.STALE, instanceOf(anchor));
         } catch (RuntimeException e) {
             log.debug("Shared heartbeat read failed, fail-closed this round jobId={} error={}", jobId, e.getMessage());
@@ -569,6 +615,9 @@ public class JobHeartbeatRegistry {
      * 持有者死后对端要等 65m，已被本口径取代。
      */
     public void hold(Long jobId) {
+        if (!databaseInFlight(jobId)) {
+            return;
+        }
         this.heldJobIds.add(jobId);
         renewRunnerActive(jobId);
         writeSharedBeat(jobId);
@@ -577,7 +626,9 @@ public class JobHeartbeatRegistry {
     /** 解除心跳判死豁免（<b>幂等</b>）：未 hold 的作业调用无副作用。 */
     public void release(Long jobId) {
         this.heldJobIds.remove(jobId);
-        writeSharedBeat(jobId);
+        if (databaseInFlight(jobId)) {
+            writeSharedBeat(jobId);
+        }
     }
 
     /** 当前是否处于心跳判死豁免中（本实例看门狗判据消费）。 */
@@ -713,7 +764,11 @@ public class JobHeartbeatRegistry {
             if (value == null) {
                 return false;
             }
-            Matcher matcher = INSTANCE_ID_PATTERN.matcher(value);
+            String instance = instanceOf(value);
+            Matcher matcher = instance == null ? null : INSTANCE_ID_PATTERN.matcher(instance);
+            if (matcher == null) {
+                return false;
+            }
             if (!matcher.matches()) {
                 return false;
             }
@@ -751,52 +806,166 @@ public class JobHeartbeatRegistry {
         return DEAD_JUDGE_PREFIX + jobId;
     }
 
-    /** 值 = {@code 实例标识|写入时刻}（时刻只作诊断，<b>不参与跨实例判定</b>）。 */
-    private String beatValue(long nowMs) {
-        return INSTANCE_ID + "|" + nowMs;
+    private String generationPrefix(Long jobId) {
+        String generation = this.runnerGenerations.get(jobId);
+        return generation == null ? null : INSTANCE_ID + "|" + generation + "|";
+    }
+
+    private String generationValue(Long jobId, long nowMs) {
+        return generationPrefix(jobId) + nowMs;
     }
 
     private static String instanceOf(String raw) {
+        if (raw == null || raw.startsWith(REVOKED_VALUE_PREFIX)) {
+            return null;
+        }
         int sep = raw.indexOf('|');
         return sep <= 0 ? raw : raw.substring(0, sep);
     }
 
-    /**
-     * 普通业务路径：Redis 失败只记日志，不影响创建/执行。
-     *
-     * <p>只在本地 runner 仍登记时续期：避免 runner 已退出后，迟到的 {@code finish/beat}
-     * 又写回一个无人持有的键，把删除永久挡到 TTL。
-     */
+    private boolean databaseInFlight(Long jobId) {
+        return readAuthority(jobId, false) != AuthorityState.TERMINAL;
+    }
+
+    private AuthorityState readAuthority(Long jobId, boolean fresh) {
+        long now = this.clock.millis();
+        if (!fresh) {
+            AuthorityCache cached = this.authorityCache.get(jobId);
+            if (cached != null && cached.expiresAtMs() > now) {
+                return cached.state();
+            }
+        }
+        try {
+            AuthorityState current = this.jobRepository.findCancelStateById(jobId)
+                    .map(state -> state.getStatus() == Job.JobStatus.PENDING
+                            || state.getStatus() == Job.JobStatus.RUNNING
+                            ? AuthorityState.IN_FLIGHT : AuthorityState.TERMINAL)
+                    .orElse(AuthorityState.TERMINAL);
+            this.authorityCache.put(jobId, new AuthorityCache(current, now + AUTHORITY_CACHE_MILLIS));
+            return current;
+        } catch (RuntimeException ex) {
+            log.debug("Authoritative job state read unknown; liveness renewal continues jobId={} error={}",
+                    jobId, ex.getMessage());
+            this.authorityCache.put(jobId, new AuthorityCache(AuthorityState.UNKNOWN, now + UNKNOWN_CACHE_MILLIS));
+            return AuthorityState.UNKNOWN;
+        }
+    }
+
+    private void invalidateAuthority(Long jobId) {
+        this.authorityCache.remove(jobId);
+        this.cancellationRegistry.invalidate(jobId);
+    }
+
+    private Long authoritativeCancelVersion(Long jobId) {
+        try {
+            return this.jobRepository.findCancelStateById(jobId)
+                    .map(JobRepository.CancelState::getCancelVersion).orElse(null);
+        } catch (RuntimeException ex) {
+            log.debug("Cancel version unavailable; existing runner fence preserved jobId={} error={}", jobId, ex.getMessage());
+            return null;
+        }
+    }
+
     private void renewRunnerActive(Long jobId) {
         if (!redisMode || redis == null || !activeRunners.contains(jobId)) {
             return;
         }
-        try {
-            redis.opsForValue().set(key(jobId), anchorValue(), runnerActiveTtl);
-        } catch (RuntimeException e) {
-            log.debug("Runner active key renewal failed, deletes will fail-closed jobId={} error={}", jobId, e.getMessage());
-        }
+        writeGeneration(key(jobId), jobId, runnerActiveTtl);
     }
 
-    /** anchor 值 = 实例标识（心跳值另带 {@code |<写入时刻>}，见 {@link #beatValue}）。 */
-    private String anchorValue() {
-        return INSTANCE_ID;
-    }
-
-    /**
-     * 共享心跳续期（短 TTL，键存在 = 活）。hold <b>不</b>改变 TTL：
-     * 长临界段由 ticker 续期，死掉的 hold 必须能在 ≤ 判死窗内过期。
-     */
     private void writeSharedBeat(Long jobId) {
         if (!redisMode || redis == null || !activeRunners.contains(jobId)
                 || revokedJobIds.contains(jobId)) {
             return;
         }
+        writeGeneration(beatKey(jobId), jobId, beatTtl);
+    }
+
+    private boolean writeGeneration(String redisKey, Long jobId, Duration ttl) {
+        String prefix = generationPrefix(jobId);
+        if (prefix == null) {
+            return false;
+        }
         try {
-            redis.opsForValue().set(beatKey(jobId), beatValue(this.clock.millis()), beatTtl);
-        } catch (RuntimeException e) {
-            log.debug("Shared heartbeat renewal failed, cross-instance judgement will fail-closed jobId={} error={}",
-                    jobId, e.getMessage());
+            Long written = redis.execute(WRITE_GENERATION_SCRIPT, List.of(redisKey), prefix,
+                    generationValue(jobId, this.clock.millis()), Long.toString(ttl.toMillis()));
+            return written != null && written > 0L;
+        } catch (RuntimeException ex) {
+            log.debug("Generation-fenced runner write failed jobId={} error={}", jobId, ex.getMessage());
+            return false;
+        }
+    }
+
+    private boolean writeHeartbeatBatch(List<Long> jobIds) {
+        if (jobIds.isEmpty()) {
+            return true;
+        }
+        long now = this.clock.millis();
+        try {
+            redis.executePipelined((RedisCallback<Object>) connection -> {
+                for (Long jobId : jobIds) {
+                    String prefix = generationPrefix(jobId);
+                    if (prefix == null || !activeRunners.contains(jobId) || revokedJobIds.contains(jobId)) {
+                        continue;
+                    }
+                    byte[] value = bytes(generationValue(jobId, now));
+                    byte[] generation = bytes(prefix);
+                    connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
+                            bytes(key(jobId)), generation, value, bytes(Long.toString(runnerActiveTtl.toMillis())));
+                    connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
+                            bytes(beatKey(jobId)), generation, value, bytes(Long.toString(beatTtl.toMillis())));
+                }
+                return null;
+            });
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Generation-fenced heartbeat pipeline failed, remainder of tick skipped error={}", ex.getMessage());
+            return false;
+        }
+    }
+
+    private void writeRevocation(Long jobId, boolean includeAnchor) {
+        if (!redisMode || redis == null) {
+            return;
+        }
+        Long version = authoritativeCancelVersion(jobId);
+        if (version == null) {
+            log.warn("Shared runner revocation skipped; DB version unknown and existing fence preserved jobId={}", jobId);
+            return;
+        }
+        String tombstone = REVOKED_VALUE_PREFIX + version + "|" + INSTANCE_ID;
+        String ttl = Long.toString(runnerActiveTtl.toMillis());
+        String expectedVersion = Long.toString(version);
+        try {
+            Long beatWritten = redis.execute(WRITE_MONOTONIC_FENCE_SCRIPT, List.of(beatKey(jobId)),
+                    expectedVersion, tombstone, ttl);
+            if (beatWritten == null || beatWritten <= 0L) {
+                log.warn("Shared beat fence preserved at same/newer version jobId={} version={}", jobId, version);
+            }
+            if (includeAnchor) {
+                Long anchorWritten = redis.execute(WRITE_MONOTONIC_FENCE_SCRIPT, List.of(key(jobId)),
+                        expectedVersion, tombstone, ttl);
+                if (anchorWritten == null || anchorWritten <= 0L) {
+                    log.warn("Shared active fence preserved at same/newer version jobId={} version={}", jobId, version);
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn("Shared runner revocation write failed; DB terminal state remains authoritative jobId={} error={}",
+                    jobId, ex.getMessage());
+        }
+    }
+
+    private DeleteOutcome deleteIfGeneration(String redisKey, Long jobId) {
+        String prefix = generationPrefix(jobId);
+        if (prefix == null) {
+            return DeleteOutcome.DELETED;
+        }
+        try {
+            Long deleted = redis.execute(DELETE_GENERATION_SCRIPT, List.of(redisKey), prefix);
+            return deleted != null && deleted > 0L ? DeleteOutcome.DELETED : DeleteOutcome.NOT_OWNER;
+        } catch (RuntimeException ex) {
+            log.warn("Generation-fenced runner delete failed jobId={} error={}", jobId, ex.getMessage());
+            return DeleteOutcome.ERROR;
         }
     }
 
@@ -811,65 +980,28 @@ public class JobHeartbeatRegistry {
                 : new SharedBeat(SharedBeatState.STALE, INSTANCE_ID);
     }
 
-    /**
-     * 清理共享 runner 状态（{@link #endRunner}/{@link #revokeRunner} 共用）：<b>先删 beat、后删 anchor</b>。
-     *
-     * <p>危险形态是"anchor 还在、beat 已删" ⇒ 对端读作 {@code STALE} ⇒ 可能给已完成/已撤销的作业
-     * 留下不可撤销的 ERROR issue 与取消标志。因此：
-     * <ul>
-     * <li><b>beat 删除失败</b> ⇒ <b>不</b>删 anchor：两键都在 = {@code ALIVE}，对端不判死，
-     *     各自 TTL 收敛（短 beat TTL + 长 anchor TTL）；</li>
-     * <li><b>beat 删成功、anchor 删除失败</b> ⇒ 补写一次<b>短 TTL</b> beat，把"anchor-only ⇒
-     *     立刻 STALE"退化为"一个判死窗后才可能判死"（有界延迟），而不是立即误杀；</li>
-     * <li>补写仍是 {@link #beatTtl()}（不引入永久豁免/无限 TTL）。</li>
-     * </ul>
-     */
     private void clearSharedRunnerState(Long jobId) {
         if (!redisMode || redis == null) {
             return;
         }
-        if (!deleteKeySafely(beatKey(jobId))) {
-            log.warn("Shared heartbeat delete failed, runner-active anchor kept jobId={}",
-                    jobId);
+        if (deleteIfGeneration(beatKey(jobId), jobId) == DeleteOutcome.ERROR) {
+            log.warn("Shared heartbeat delete failed, runner-active anchor kept jobId={}", jobId);
             return;
         }
-        if (!deleteKeySafely(key(jobId))) {
+        if (deleteIfGeneration(key(jobId), jobId) == DeleteOutcome.ERROR) {
             rearmSharedBeatForGrace(jobId);
         }
     }
 
-    /**
-     * 单键删除（<b>不要</b>把两个键并成一次 {@code DEL}：{@code job:runner-active:<id>} 与
-     * {@code job:beat:<id>} 在 Cluster 下不同槽，多键命令会 CROSSSLOT）。
-     *
-     * @return true = 命令成功（键是否存在不重要）；false = 命令失败（键保留到 TTL）
-     */
-    private boolean deleteKeySafely(String key) {
-        try {
-            redis.delete(key);
-            return true;
-        } catch (RuntimeException e) {
-            // 删除失败时键保留到 TTL；删除任务会被 fail-closed 挡住，不产生孤儿。
-            log.warn("Shared state key delete failed, waiting for TTL key={} error={}", key, e.getMessage());
-            return false;
-        }
-    }
-
-    /** anchor 删除失败后的兜底：补一次短 TTL 心跳，使对端最坏只"延迟判死"，不会立刻误杀。 */
     private void rearmSharedBeatForGrace(Long jobId) {
-        try {
-            redis.opsForValue().set(beatKey(jobId), beatValue(this.clock.millis()), beatTtl);
+        if (writeGeneration(beatKey(jobId), jobId, beatTtl)) {
             log.warn("runner-active anchor delete failed, short-TTL heartbeat rewritten beatTtl={} jobId={}",
                     beatTtl, jobId);
-        } catch (RuntimeException e) {
-            log.warn("runner-active anchor delete failed and heartbeat rewrite failed, may judge STALE for one window jobId={} error={}",
-                    jobId, e.getMessage());
         }
     }
 
-    /** 启动失败回滚（beginRunner 的 catch）用的尽力清理：两键都删，顺序无关。 */
-    private void deleteSafely(String key) {
-        deleteKeySafely(key);
+    private static byte[] bytes(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
     }
 
     private static String hostName() {
@@ -877,6 +1009,33 @@ public class JobHeartbeatRegistry {
             return InetAddress.getLocalHost().getHostName();
         } catch (Exception e) {
             return "unknown";
+        }
+    }
+
+    private enum DeleteOutcome {
+        DELETED,
+        NOT_OWNER,
+        ERROR
+    }
+
+    private enum AuthorityState {
+        IN_FLIGHT,
+        TERMINAL,
+        UNKNOWN
+    }
+
+    private record AuthorityCache(AuthorityState state, long expiresAtMs) {
+    }
+
+    public static class JobStateUnavailableException extends RuntimeException {
+        public JobStateUnavailableException(Long jobId) {
+            super("无法确认作业 #" + jobId + " 的数据库状态，作业未启动");
+        }
+    }
+
+    public static class JobNotInFlightException extends RuntimeException {
+        public JobNotInFlightException(Long jobId) {
+            super("作业 #" + jobId + " 已终态或不存在，不能启动 runner");
         }
     }
 

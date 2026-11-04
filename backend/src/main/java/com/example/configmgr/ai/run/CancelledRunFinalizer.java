@@ -71,24 +71,10 @@ public class CancelledRunFinalizer {
 	 */
 	public static final String CAUSE_REQUEST = "REQUEST_CANCEL";
 
-	/**
-	 * 延迟重试的调度缝（默认 = 守护线程单线程调度器）。
-	 *
-	 * <p>为什么是接口：用例要断言"这一拍不可确认 ⇒ 排一次重试；恢复后重试成功"，
-	 * 真线程只能 sleep 真实时间（慢且不稳）。生产路径就是
-	 * {@code schedule(task, 2s/4s/…/30s)}（与续跑派发同一个 {@code app.ai.park.*} 口径）。
-	 */
+	/** 延迟重试只负责排期；到点任务必须转投既有 aiResumeTrigger。 */
 	interface Scheduler {
 
 		AutoCloseable schedule(Runnable task, Duration delay);
-
-		/**
-		 * 释放底层线程（默认实现 no-op：用例注入的"手动推进"调度器没有线程）。
-		 *
-		 * <p>默认实现保持接口的函数式形态（唯一抽象方法仍是 {@link #schedule}）。
-		 */
-		default void shutdown() {
-		}
 
 	}
 
@@ -168,47 +154,33 @@ public class CancelledRunFinalizer {
 
 	private final AiProperties properties;
 
-	/**
-	 * 轮次快照读取面（身份来源）：交棒跑在触发池/定时重试线程上，那里没有请求身份。
-	 * {@code null} = 轻装配/旧用例构造（无身份可恢复，作用域为空）。
-	 */
-	private final RunStore store;
-
 	/** 在飞的交棒（同一 run 只允许一次；重试任务通过同一集合自我续命）。 */
 	private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
 	/** 已尝试次数（用尽即停，不无限重排）。 */
 	private final Map<String, AtomicInteger> attempts = new ConcurrentHashMap<>();
 
+	/**
+	 * runId → 该 run 已登记的 {@link LocalRunKey} 集合（清理索引）。
+	 *
+	 * <p>终态收尾可能发生在<b>没有线程身份</b>的调度线程上，{@link #forget(String)} 不能靠当前身份
+	 * 重算 local key；索引让它可以只按 runId 精确清掉本轮所有交棒位。所有增删都在
+	 * {@link #cleanupLock} 内完成，避免 forget 与 handOff/重试互相留下残影。
+	 */
+	private final Map<String, Set<String>> keysByRunId = new java.util.HashMap<>();
+
+	private final Object cleanupLock = new Object();
+
 	/** 应用停机标志：置位后不再派发/重排（重试链随上下文关闭一起收敛）。 */
 	private volatile boolean closed;
 
 	@Autowired
 	public CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider,
-			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties, RunStore store) {
-		this(resumeServiceProvider, executor, properties, store, DEFAULT_SCHEDULER);
-	}
-
-	/** 兼容构造（无快照读取面：身份作用域为空，用于纯交棒行为用例）。 */
-	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
-			AiProperties properties) {
-		this(resumeServiceProvider, executor, properties, null, DEFAULT_SCHEDULER);
-	}
-
-	/** 包内构造（用例注入可手动推进的调度器；不改生产装配形状）。 */
-	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
-			AiProperties properties, Scheduler scheduler) {
-		this(resumeServiceProvider, executor, properties, null, scheduler);
-	}
-
-	/** 包内构造（身份 + 可手动推进的调度器）。 */
-	CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider, Executor executor,
-			AiProperties properties, RunStore store, Scheduler scheduler) {
+			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties) {
 		this.resumeServiceProvider = resumeServiceProvider;
 		this.executor = executor;
 		this.properties = properties;
-		this.store = store;
-		this.scheduler = scheduler == null ? DEFAULT_SCHEDULER : scheduler;
+		this.scheduler = DEFAULT_SCHEDULER;
 		for (int i = 0; i < MONITOR_STRIPES; i++) {
 			this.finalizeMonitors[i] = new Object();
 		}
@@ -220,10 +192,8 @@ public class CancelledRunFinalizer {
 	 */
 	@PostConstruct
 	void registerDefaultSchedulerOwner() {
-		if (this.scheduler == DEFAULT_SCHEDULER) {
-			DEFAULT_SCHEDULER_OWNERS.incrementAndGet();
-			this.ownsDefaultScheduler = true;
-		}
+		DEFAULT_SCHEDULER_OWNERS.incrementAndGet();
+		this.ownsDefaultScheduler = true;
 	}
 
 	/**
@@ -236,34 +206,30 @@ public class CancelledRunFinalizer {
 	@PreDestroy
 	void shutdown() {
 		this.closed = true;
-		if (this.scheduler == DEFAULT_SCHEDULER) {
-			// I5：进程级调度线程只在<b>最后一个 owner</b> 离开时关闭（多上下文不互相打断）。
-			// 只有 @PostConstruct 登记过的实例才递减，直接 new 的窄路径不参与。
-			if (this.ownsDefaultScheduler) {
-				this.ownsDefaultScheduler = false;
-				if (DEFAULT_SCHEDULER_OWNERS.decrementAndGet() <= 0) {
-					DEFAULT_SCHEDULER_OWNERS.set(0);
-					shutdownDefaultRetryExecutor();
-				}
+		if (this.ownsDefaultScheduler) {
+			this.ownsDefaultScheduler = false;
+			if (DEFAULT_SCHEDULER_OWNERS.decrementAndGet() <= 0) {
+				DEFAULT_SCHEDULER_OWNERS.set(0);
+				shutdownDefaultRetryExecutor();
 			}
-		}
-		else {
-			this.scheduler.shutdown();
 		}
 		// I5-minor：停机时被取消的重试任务不会再执行，必须在本地补偿释放去重位与重试计数，
 		// 否则同一实例/后续重入会看到"永久 inFlight"。取消事实仍在 Redis，不会因此漏收尾。
-		this.inFlight.clear();
-		this.attempts.clear();
+		synchronized (this.cleanupLock) {
+			this.inFlight.clear();
+			this.attempts.clear();
+			this.keysByRunId.clear();
+		}
 	}
 
 	/**
-	 * 取消收尾的进程内互斥对象（同一身份 + 同一 run 恒返回同一个）。
+	 * 取消收尾的进程内互斥对象（<b>裸 runId 条带</b>，不是 LocalRunKey 条带）。
 	 *
-	 * <p>条带的键是 {@link LocalRunKey}（身份 + runId）：A、B 的同名轮次落进同一条带只是<b>串行化</b>
-	 * （损失并行度），不会共享任何状态 —— 状态表本身按同一把键分条。
+	 * <p>条带只承担"同 run 串行化"；跨身份同名 runId 落进同一条带只会损失并行度，不共享状态。
+	 * 真正的去重/归属键是 {@link LocalRunKey}（见 {@link #handOff}）。
 	 */
 	public Object finalizeMonitor(String runId) {
-		int hash = runId == null ? 0 : LocalRunKey.of(runId).hashCode();
+		int hash = runId == null ? 0 : runId.hashCode();
 		return this.finalizeMonitors[(hash & 0x7fffffff) % MONITOR_STRIPES];
 	}
 
@@ -282,52 +248,52 @@ public class CancelledRunFinalizer {
 		if (runId == null || runId.isBlank() || this.closed) {
 			return false;
 		}
-		// 身份先定（交棒线程上还有身份 / 快照还没建时用提交线程身份），再拼本地键 —— 键必须与
+		// 身份只取调用线程的显式 tenant/user 作用域（没有就拒绝交棒），再拼本地键 —— 键必须与
 		// 执行体、重试、终态清理用的那把完全一致。
-		TenantUser identity = recordIdentityNow(runId);
-		String key = LocalRunKey.of(identity, runId);
-		if (!this.inFlight.add(key)) {
-			log.debug("cancel finalize already in handoff, not dispatched again runId={} cause={}", runId, cause);
+		TenantUser identity = currentIdentity();
+		if (identity == null) {
+			log.warn("cancel finalize handoff refused runId={}: no explicit tenant/user identity in handoff scope",
+					runId);
 			return false;
 		}
-		this.attempts.put(key, new AtomicInteger());
+		String key = LocalRunKey.of(identity, runId);
+		synchronized (this.cleanupLock) {
+			if (!this.inFlight.add(key)) {
+				log.debug("cancel finalize already in handoff, not dispatched again runId={} cause={}", runId, cause);
+				return false;
+			}
+			this.attempts.put(key, new AtomicInteger());
+			this.keysByRunId.computeIfAbsent(runId, ignored -> new java.util.HashSet<>()).add(key);
+		}
 		submit(runId, key, cause, identity);
 		return true;
 	}
 
 	/**
-	 * <b>交棒时刻</b>抓取这一轮的身份，随任务携带到执行线程。
+	 * 交棒时刻的<b>显式身份</b>：只读调用线程当前的 tenant/user 作用域，随任务携带到执行/重试线程。
 	 *
-	 * <p>为什么不在执行体里现读快照：交棒执行体跑在 {@code aiResumeTrigger} / 重试调度线程上，那里没有
-	 * 请求身份，而快照键由身份拼出 —— "先 {@code store.get} 再 {@code useContext}"在无身份线程上恒读到
-	 * {@code null} ⇒ 空作用域 ⇒ 取消收尾永远看不到这一轮（重试一次都不可用）。
+	 * <p>为什么不读快照：交棒执行体跑在 {@code aiResumeTrigger} / 重试调度线程上，那里没有请求身份，
+	 * 而快照键由身份拼出。调用方（取消请求 / 驱动线程 / 确认门退出）都在各自的身份作用域内；
+	 * 记录里的 0/0 旧字段不是"可继承的归属"，这里既不读它、也不拿它冒充身份。
 	 *
-	 * <p>记录身份优先；快照尚未建立时退回提交线程身份；快照存在但无归属（0/0）⇒ {@code null}，
-	 * 不沿用调用者身份。
+	 * <p>当前线程没有显式身份 ⇒ {@code null}：本轮拒绝交棒（进入下一拍/下一次入口重试）。
+	 * 不伪造默认租户，也不读取记录里的 0/0 旧字段来猜归属。
 	 */
-	private TenantUser recordIdentityNow(String runId) {
+	private TenantUser currentIdentity() {
 		TenantUser current = RequestContextUtils.currentOrNull();
-		if (this.store == null) {
-			return current;
-		}
-		try {
-			RunSnapshot snapshot = this.store.get(runId);
-			if (snapshot != null) {
-				return RunIdentityScope.usable(snapshot.getTenantId(), snapshot.getUserId())
-						? new TenantUser(snapshot.getTenantId(), snapshot.getUserId()) : null;
-			}
-		}
-		catch (RuntimeException ex) {
-			log.debug("snapshot read failed while resolving cancel finalize "
-					+ "identity runId={} (falling back to submitter identity): {}", runId, ex.getMessage());
-		}
-		return current;
+		return current != null && RunIdentityScope.usable(current.tenantId(), current.userId()) ? current : null;
 	}
 
 	private void submit(String runId, String key, String cause, TenantUser identity) {
+		if (absentAfterCleanup(runId, key)) {
+			// 已被 forget（终态收尾）/停机清理：排队的重试任务不再执行，避免重新登记出残影。
+			log.debug("cancel finalize handoff skipped (already forgotten) runId={} cause={}", runId, cause);
+			return;
+		}
+		registerKey(runId, key);
 		if (this.closed) {
 			// 停机中：不再向（可能已关闭的）触发池派发；交棒位立刻释放，取消事实仍留在 Redis。
-			finish(key);
+			finish(runId, key);
 			log.debug("cancel finalize handoff skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
@@ -346,7 +312,7 @@ public class CancelledRunFinalizer {
 		}
 		catch (Error ex) {
 			// 派发阶段就抛 Error（执行器实现异常/OOM）：交棒位必须释放，否则后续交棒永久被去重拒绝。
-			finish(key);
+			finish(runId, key);
 			throw ex;
 		}
 	}
@@ -359,8 +325,12 @@ public class CancelledRunFinalizer {
 	 * 永不释放的去重位（下一次同 runId 交棒被静默拒绝），也留着一条无用的计数。
 	 *
 	 * <p><b>幂等且不改变取消语义</b>：未交棒过 / 已清理 / {@code runId=null} 都不报错；
-	 * 只清这两个进程内表，<b>不碰</b>租约（{@code LeaseService} 的 ended/epoch）、帧册、快照与
+	 * 只清这两个进程内表与 runId 索引，<b>不碰</b>租约（{@code LeaseService} 的 ended/epoch）、帧册、快照与
 	 * {@code ai:cancel:<tenantId>:<userId>:<runId>} 取消事实 —— 清理不等于宣告完成，也不会触发任何交棒或驱动。
+	 *
+	 * <p><b>不要求线程身份</b>：终态可能由无身份的调度线程收尾；本方法只按 runId 查本地索引，
+	 * 不需要重算 {@link LocalRunKey}、不读快照、不伪造默认租户。索引里的每一项都由
+	 * {@link #handOff}/{@link #submit} 登记，{@link #finish(String, String)} 移除。
 	 *
 	 * <p><b>Error 路径也覆盖</b>：{@link #attempt} 在执行体抛 {@link Error} 时会先 {@code finish} 再
 	 * 上抛；本方法则是终态收尾方的兜底入口（终态写成功/失败后都可调用）。
@@ -369,17 +339,29 @@ public class CancelledRunFinalizer {
 		if (runId == null || runId.isBlank()) {
 			return;
 		}
-		finish(LocalRunKey.of(runId));
+		synchronized (this.cleanupLock) {
+			Set<String> keys = this.keysByRunId.remove(runId);
+			if (keys == null) {
+				return;
+			}
+			for (String key : keys) {
+				this.inFlight.remove(key);
+				this.attempts.remove(key);
+			}
+		}
 	}
 
 	private void attempt(String runId, String key, String cause, TenantUser identity) {
+		if (absentAfterCleanup(runId, key)) {
+			return;
+		}
 		try {
 			runAttempt(runId, key, cause, identity);
 		}
 		catch (Error ex) {
 			// Error（OOM/断言失败等）若不释放交棒位，该 run 会永久 inFlight：后续交棒全被静默拒绝，
 			// 重试链也无人重启。先清进程内状态再把 Error 原样上抛（不吞、不改写语义）。
-			finish(key);
+			finish(runId, key);
 			throw ex;
 		}
 	}
@@ -389,12 +371,12 @@ public class CancelledRunFinalizer {
 				: this.resumeServiceProvider.getIfAvailable();
 		if (service == null) {
 			log.info("cancel finalize handoff abandoned runId={} (no resume service: degraded wiring without AI keys)", runId);
-			finish(key);
+			finish(runId, key);
 			return;
 		}
 		ResumeService.CancelFinalize outcome;
 		try {
-			// 身份 = 交棒时刻抓到的<b>记录身份</b>（随任务携带），不在执行线程上现读快照猜身份。
+			// 身份 = 交棒时刻从显式作用域抓到的 tenant/user（随任务携带），不在执行线程上读快照猜归属。
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 				outcome = service.cancelConfirmed(runId);
 			}
@@ -411,7 +393,7 @@ public class CancelledRunFinalizer {
 		switch (outcome) {
 			case FINALIZED, ALREADY_TERMINAL, NO_RUN -> {
 				log.info("cancel finalize handoff completed runId={} outcome={} cause={}", runId, outcome, cause);
-				finish(key);
+				finish(runId, key);
 			}
 			// 租约在别的实例手里：不抢、不覆盖；按租约 TTL 之后再确认一次（holder 死了也能接管）。
 			case LEASE_HELD_ELSEWHERE -> rescheduleOrGiveUp(runId, key, cause, true, identity);
@@ -423,11 +405,17 @@ public class CancelledRunFinalizer {
 
 	private void rescheduleOrGiveUp(String runId, String key, String cause, boolean leaseHeldElsewhere,
 			TenantUser identity) {
-		int attempt = nextAttempt(key);
+		if (absentAfterCleanup(runId, key)) {
+			// forget 已按 runId 清掉本轮交棒位：不再排重试，也不重新登记索引。
+			return;
+		}
+		int attempt = nextAttempt(runId, key);
+		if (attempt < 0) {
+			return;
+		}
 		int max = this.properties.getPark().getMaxDispatchRetries();
 		if (max <= 0 || attempt > max) {
-			this.inFlight.remove(key);
-			this.attempts.remove(key);
+			finish(runId, key);
 			log.error("cancel finalize not settled after {} handoffs runId={} cause={} (cancel "
 					+ "fact still in ai:cancel key; next cancel/resume/startup scan retriggers)", max, runId, cause);
 			return;
@@ -436,34 +424,86 @@ public class CancelledRunFinalizer {
 	}
 
 	private void reschedule(String runId, String key, String cause, Duration delay, TenantUser identity) {
+		if (absentAfterCleanup(runId, key)) {
+			return;
+		}
 		if (this.closed) {
 			// 停机中：重试链在这里收敛（不重排、不留去重位；取消事实仍在 Redis，下次入口重新触发）。
-			finish(key);
+			finish(runId, key);
 			log.debug("cancel finalize retry skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
 		try {
-			this.scheduler.schedule(() -> attempt(runId, key, cause, identity), delay);
+			this.scheduler.schedule(() -> submit(runId, key, cause, identity), delay);
 		}
 		catch (RuntimeException ex) {
-			this.inFlight.remove(key);
-			this.attempts.remove(key);
+			finish(runId, key);
 			log.warn("cancel finalize retry not scheduled runId={}: {}", runId, ex.getMessage());
 		}
 		catch (Error ex) {
-			finish(key);
+			finish(runId, key);
 			throw ex;
 		}
 	}
 
-	private void finish(String key) {
-		this.inFlight.remove(key);
-		this.attempts.remove(key);
+	/** handOff/submit 登记 runId → local key 索引（只登记仍持有交棒位的 key）。 */
+	private void registerKey(String runId, String key) {
+		synchronized (this.cleanupLock) {
+			if (this.inFlight.contains(key)) {
+				this.keysByRunId.computeIfAbsent(runId, ignored -> new java.util.HashSet<>()).add(key);
+			}
+		}
 	}
 
-	private int nextAttempt(String key) {
-		AtomicInteger counter = this.attempts.computeIfAbsent(key, ignored -> new AtomicInteger());
-		return counter.incrementAndGet();
+	/** 释放一个交棒位，并同步从 runId 索引移除（缺项/空集合一并收敛）。 */
+	private void finish(String runId, String key) {
+		synchronized (this.cleanupLock) {
+			finishLocked(runId, key);
+		}
+	}
+
+	/**
+	 * 交棒位已不存在时原子地清理索引并返回 true；仍存在返回 false。
+	 *
+	 * <p>与 handOff 的"加入"共用 {@link #cleanupLock}：要么 handOff 先加入（本方法看到在位，
+	 * 不清），要么本方法先清掉（handOff 随后加入的是新一代交棒，不受影响），避免晚到的旧任务
+	 * 把同名新交棒误清。
+	 */
+	private boolean absentAfterCleanup(String runId, String key) {
+		synchronized (this.cleanupLock) {
+			if (this.inFlight.contains(key)) {
+				return false;
+			}
+			finishLocked(runId, key);
+			return true;
+		}
+	}
+
+	private void finishLocked(String runId, String key) {
+		this.inFlight.remove(key);
+		this.attempts.remove(key);
+		Set<String> keys = this.keysByRunId.get(runId);
+		if (keys != null) {
+			keys.remove(key);
+			if (keys.isEmpty()) {
+				this.keysByRunId.remove(runId);
+			}
+		}
+	}
+
+	private int nextAttempt(String runId, String key) {
+		synchronized (this.cleanupLock) {
+			if (!this.inFlight.contains(key)) {
+				finishLocked(runId, key);
+				return -1;
+			}
+			AtomicInteger counter = this.attempts.get(key);
+			if (counter == null) {
+				finishLocked(runId, key);
+				return -1;
+			}
+			return counter.incrementAndGet();
+		}
 	}
 
 	/**
