@@ -3585,7 +3585,7 @@ function hydrateMermaid(messageId: string, blocks: Array<{ index: number; key: s
   if (registered.length === 0 && slots.length > 0) {
     const message = ai.messages.find((item) => item.id === messageId)
     const text = message?.parts.map((part) => part.kind === 'text' ? part.text : '').join('') ?? ''
-    if (message && !message.streaming && text.length <= DEGRADE_AT_CHARS && !hasUnclosedFence(text)) {
+    if (message && text.length <= DEGRADE_AT_CHARS && !hasUnclosedFence(text)) {
       registered = slots.map((code, index) => ({ index, key: '', source: code.textContent ?? '' }))
     }
   }
