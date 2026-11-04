@@ -4,20 +4,25 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import io.lettuce.core.RedisFuture;
+import io.lettuce.core.SetArgs;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.redis.connection.RedisConnection;
-import org.springframework.data.redis.connection.RedisStringCommands;
-import org.springframework.data.redis.core.types.Expiration;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -70,70 +75,153 @@ class CountingRedisPipelineTest {
 	}
 
 	@Test
-	void queuesEachCommandThroughItsTypedConnectionApi() throws Exception {
-		RecordingConnection connection = new RecordingConnection();
-		queue(connection.connection(), new String[] { "EXISTS", KEY });
-		queue(connection.connection(), new String[] { "SMEMBERS", KEY });
-		queue(connection.connection(), new String[] { "GET", KEY });
-		queue(connection.connection(), new String[] { "DEL", KEY });
-		queue(connection.connection(), new String[] { "SREM", KEY, "run-1", "run-2" });
-		queue(connection.connection(), new String[] { "ZREM", KEY, "run-1" });
-		queue(connection.connection(), new String[] { "SET", KEY, "bg", "EX", "600" });
-
-		assertEquals(List.of("exists", "sMembers", "get", "del", "sRem", "zRem", "set"), connection.names());
-		assertArrayEquals(utf8(KEY), (byte[]) connection.argsOf("get")[0]);
-
-		Object[] existsArgs = connection.argsOf("exists");
-		assertEquals(1, ((byte[][]) existsArgs[0]).length, "EXISTS 必须是单键，才能走普通 async 命令");
-		assertArrayEquals(utf8(KEY), ((byte[][]) existsArgs[0])[0]);
-
-		Object[] sremArgs = connection.argsOf("sRem");
-		assertEquals(2, ((byte[][]) sremArgs[1]).length);
-		assertArrayEquals(new byte[][] { utf8("run-1"), utf8("run-2") }, (byte[][]) sremArgs[1]);
-
-		Object[] setArgs = connection.argsOf("set");
-		Expiration expiration = assertInstanceOf(Expiration.class, setArgs[2]);
-		assertEquals(600L, expiration.getExpirationTimeInSeconds());
-		assertFalse(expiration.isPersistent());
-		assertEquals(RedisStringCommands.SetOption.UPSERT, setArgs[3]);
+	void pipelineWaitIsCappedAtEightHundredMillis() {
+		assertEquals(800L, CountingRedis.pipelineWaitMillis(Duration.ofSeconds(5)));
+		assertEquals(800L, CountingRedis.pipelineWaitMillis(Duration.ofSeconds(30)));
+		assertEquals(250L, CountingRedis.pipelineWaitMillis(Duration.ofMillis(250)));
+		assertTrue(CountingRedis.pipelineWaitMillis(Duration.ofSeconds(60)) < 1_000L);
+		assertThrows(IllegalArgumentException.class, () -> CountingRedis.pipelineWaitMillis(Duration.ZERO));
+		assertThrows(IllegalArgumentException.class, () -> CountingRedis.pipelineWaitMillis(null));
 	}
 
 	@Test
-	void queuesCommandsInCallerOrder() throws Exception {
-		RecordingConnection connection = new RecordingConnection();
-		queue(connection.connection(), new String[] { "GET", KEY });
-		queue(connection.connection(), new String[] { "EXISTS", KEY });
-		queue(connection.connection(), new String[] { "DEL", KEY });
-		assertEquals(List.of("get", "exists", "del"), connection.names());
+	void dispatchesAllCommandsThroughNativeAsyncApiWithoutWaiting() {
+		RecordingAsyncCommands commands = new RecordingAsyncCommands();
+		List<RedisFuture<?>> futures = new ArrayList<>();
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "EXISTS", KEY }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "SMEMBERS", KEY }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "GET", KEY }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "DEL", KEY }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "SREM", KEY, "run-1", "run-2" }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "ZREM", KEY, "run-1" }));
+		futures.add(CountingRedis.dispatch(commands.commands(), new String[] { "SET", KEY, "bg", "EX", "600" }));
+
+		assertEquals(List.of("exists", "smembers", "get", "del", "srem", "zrem", "set"), commands.names());
+		assertEquals(7, futures.size());
+		for (RedisFuture<?> future : futures) {
+			assertNotNull(future);
+			assertTrue(!future.isDone(), "dispatch 只能发出命令，不能在批次内等待");
+		}
+		assertArrayEquals(utf8(KEY), (byte[]) commands.argsOf("get")[0]);
+
+		Object[] existsArgs = commands.argsOf("exists");
+		assertEquals(1, ((byte[][]) existsArgs[0]).length);
+		assertArrayEquals(utf8(KEY), ((byte[][]) existsArgs[0])[0]);
+
+		Object[] sremArgs = commands.argsOf("srem");
+		assertArrayEquals(new byte[][] { utf8("run-1"), utf8("run-2") }, (byte[][]) sremArgs[1]);
+
+		Object[] setArgs = commands.argsOf("set");
+		assertInstanceOf(SetArgs.class, setArgs[2]);
 	}
 
-	private static void queue(RedisConnection connection, String[] command) throws Exception {
-		Method queue = CountingRedis.class.getDeclaredMethod("queuePipelined", RedisConnection.class,
-				String[].class);
-		queue.setAccessible(true);
-		try {
-			queue.invoke(null, connection, command);
-		}
-		catch (java.lang.reflect.InvocationTargetException ex) {
-			throw (Exception) ex.getCause();
-		}
+	@Test
+	void decodesCompletedBatchInCommandOrder() {
+		CountingRedis redis = new CountingRedis(new StringRedisTemplate(), Duration.ofSeconds(5));
+		List<RedisFuture<?>> futures = List.of(
+				completed(1L),
+				completed("payload".getBytes(StandardCharsets.UTF_8)),
+				completed(new LinkedHashSet<>(List.of("run-1".getBytes(StandardCharsets.UTF_8)))),
+				completed(null));
+
+		List<Object> results = redis.awaitPipeline(futures, 100L);
+
+		assertEquals(1L, results.get(0));
+		assertEquals("payload", results.get(1));
+		assertEquals(Set.of("run-1"), results.get(2));
+		assertEquals(null, results.get(3));
+	}
+
+	@Test
+	void cancelsUnfinishedFuturesWhenBatchTimesOut() {
+		CountingRedis redis = new CountingRedis(new StringRedisTemplate(), Duration.ofSeconds(5));
+		AtomicBoolean cancelled = new AtomicBoolean();
+		RedisFuture<?> pending = pending(cancelled);
+
+		IllegalStateException error = assertThrows(IllegalStateException.class,
+				() -> redis.awaitPipeline(List.of(pending), 20L));
+
+		assertTrue(cancelled.get(), "超时后必须取消未完成的 future");
+		assertTrue(error.getMessage().contains("20ms"), error.getMessage());
+		assertTrue(error.getMessage().contains("已取消 1 条"), error.getMessage());
 	}
 
 	private static byte[] utf8(String value) {
 		return value.getBytes(StandardCharsets.UTF_8);
 	}
 
-	/** 只实现 queuePipelined 触达的方法，记录类型化调用；任何 execute 调用都会以名字暴露出来。 */
-	private static final class RecordingConnection implements InvocationHandler {
+	private static RedisFuture<?> completed(Object value) {
+		return fakeFuture(value, true, new AtomicBoolean());
+	}
+
+	private static RedisFuture<?> pending(AtomicBoolean cancelled) {
+		return fakeFuture(null, false, cancelled);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static RedisFuture<?> fakeFuture(Object value, boolean done, AtomicBoolean cancelled) {
+		return (RedisFuture<?>) Proxy.newProxyInstance(RedisFuture.class.getClassLoader(),
+				new Class<?>[] { RedisFuture.class }, (proxy, method, args) -> {
+					switch (method.getName()) {
+						case "get" -> {
+							if (!done) {
+								throw new TimeoutException("fake future not done");
+							}
+							return value;
+						}
+						case "isDone" -> {
+							return done;
+						}
+						case "isCancelled" -> {
+							return cancelled.get();
+						}
+						case "cancel" -> {
+							cancelled.set(true);
+							return true;
+						}
+						case "getError" -> {
+							return null;
+						}
+						case "toString" -> {
+							return "fakeFuture";
+						}
+						case "hashCode" -> {
+							return System.identityHashCode(proxy);
+						}
+						case "equals" -> {
+							return proxy == args[0];
+						}
+						default -> {
+							Class<?> type = method.getReturnType();
+							if (type == boolean.class) {
+								return false;
+							}
+							if (type == long.class) {
+								return 0L;
+							}
+							if (type == int.class) {
+								return 0;
+							}
+							return null;
+						}
+					}
+				});
+	}
+
+	/** 记录原生 async 调用；返回永不完成的 future，确保 dispatch 不会在批次内等待。 */
+	private static final class RecordingAsyncCommands implements InvocationHandler {
 
 		private final List<String> names = new ArrayList<>();
 
 		private final List<Object[]> arguments = new ArrayList<>();
 
-		private final RedisConnection connection = (RedisConnection) proxy(RedisConnection.class);
+		@SuppressWarnings("unchecked")
+		private final RedisClusterAsyncCommands<byte[], byte[]> commands = (RedisClusterAsyncCommands<byte[], byte[]>) Proxy
+				.newProxyInstance(RedisClusterAsyncCommands.class.getClassLoader(),
+						new Class<?>[] { RedisClusterAsyncCommands.class }, this);
 
-		RedisConnection connection() {
-			return this.connection;
+		RedisClusterAsyncCommands<byte[], byte[]> commands() {
+			return this.commands;
 		}
 
 		List<String> names() {
@@ -150,7 +238,7 @@ class CountingRedisPipelineTest {
 		public Object invoke(Object proxy, Method method, Object[] args) {
 			String name = method.getName();
 			if ("toString".equals(name)) {
-				return "RecordingConnection";
+				return "RecordingAsyncCommands";
 			}
 			if ("hashCode".equals(name)) {
 				return System.identityHashCode(proxy);
@@ -158,36 +246,9 @@ class CountingRedisPipelineTest {
 			if ("equals".equals(name)) {
 				return proxy == args[0];
 			}
-			Class<?> returnType = method.getReturnType();
-			if (returnType.isInterface()
-					&& returnType.getName().startsWith("org.springframework.data.redis.connection.")) {
-				return proxy(returnType);
-			}
 			this.names.add(name);
 			this.arguments.add(args == null ? new Object[0] : args);
-			if (returnType == boolean.class) {
-				return false;
-			}
-			if (returnType == Boolean.class) {
-				return Boolean.FALSE;
-			}
-			if (returnType == long.class || returnType == Long.class) {
-				return 0L;
-			}
-			if (returnType == int.class || returnType == Integer.class) {
-				return 0;
-			}
-			if (returnType == byte[].class) {
-				return new byte[0];
-			}
-			if (Set.class.isAssignableFrom(returnType)) {
-				return Set.of();
-			}
-			return null;
-		}
-
-		private Object proxy(Class<?> type) {
-			return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] { type }, this);
+			return pending(new AtomicBoolean());
 		}
 	}
 

@@ -6,25 +6,28 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import io.lettuce.core.LettuceFutures;
+import io.lettuce.core.RedisFuture;
+import io.lettuce.core.SetArgs;
 import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import org.springframework.data.domain.Range;
 import org.springframework.data.domain.Range.Bound;
 import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.connection.RedisConnection;
-import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.connection.stream.ByteRecord;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.data.redis.core.types.Expiration;
 
 /**
  * 带精确命令计数的 Redis 门面。命令数按实际发出的 Redis 命令计；pipeline 批次单独计数。
@@ -33,6 +36,9 @@ import org.springframework.data.redis.core.types.Expiration;
 public final class CountingRedis {
 
 	private static final String FIRST_STREAM_ID = "-";
+
+	/** 整批 pipeline 的硬上限：再大的 commandTimeout 也不允许等到 1 秒。 */
+	private static final long MAX_PIPELINE_WAIT_MILLIS = 800L;
 
 	/** Redis stream ID 的两段都是无符号 64 位（sequence 到 2^64-1 后进位到下一毫秒）。 */
 	private static final BigInteger MAX_STREAM_ID_PART = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
@@ -342,7 +348,7 @@ public final class CountingRedis {
 			RedisClusterAsyncCommands<byte[], byte[]> typed = (RedisClusterAsyncCommands<byte[], byte[]>) commands;
 			return typed;
 		}
-		throw new IllegalStateException("数值命令需要 Lettuce 原生连接来选择输出类型，实际为 "
+		throw new IllegalStateException("pipeline/数值命令需要 Lettuce 原生 async 连接，实际为 "
 				+ nativeConnection.getClass().getName());
 	}
 
@@ -442,19 +448,22 @@ public final class CountingRedis {
 	/**
 	 * 有界原生命令 pipeline（批次内命令数由调用方限制）。
 	 *
-	 * <p>只走类型化 {@link RedisConnection} API，命令在 Lettuce async pipeline 内排队、批次结束一次性发送；
-	 * standalone 与 Cluster 是同一条路径。不要回落到通用 {@code connection.execute}：它在 Cluster 下逐条
-	 * 等待回复，pipeline 退化成串行。不支持的命令在发出任何命令前失败，而不是同步执行。
+	 * <p>整批只借 {@code template.execute} 提供的同一个 Spring 连接：回调内用 Lettuce 原生 async commands
+	 * 把所有命令一次性发出，再统一等待，standalone 与 Cluster 同一条路径。超时上限取
+	 * {@code min(commandTimeout, 800ms)}；未完成的 future 会被取消并抛错，不会逐命令同步等待。
 	 */
 	public List<Object> pipelineRaw(List<String[]> commands) {
 		for (String[] command : commands) {
 			requirePipelineCommand(command);
 		}
-		List<Object> results = this.template.executePipelined((RedisCallback<Object>) connection -> {
+		long waitMillis = pipelineWaitMillis(this.commandTimeout);
+		List<Object> results = this.template.execute((RedisCallback<List<Object>>) connection -> {
+			RedisClusterAsyncCommands<byte[], byte[]> nativeCommands = nativeCommands(connection);
+			List<RedisFuture<?>> futures = new ArrayList<>(commands.size());
 			for (String[] command : commands) {
-				queuePipelined(connection, command);
+				futures.add(dispatch(nativeCommands, command));
 			}
-			return null;
+			return awaitPipeline(futures, waitMillis);
 		});
 		this.commands += commands.size();
 		this.pipelineBatches += 1L;
@@ -463,6 +472,14 @@ public final class CountingRedis {
 		}
 		this.responseBytes += results == null ? 0L : results.toString().length();
 		return results == null ? List.of() : results;
+	}
+
+	/** 整批硬上限：commandTimeout 与 800ms 取小，任何配置下都不会等到秒级以上。 */
+	static long pipelineWaitMillis(Duration commandTimeout) {
+		if (commandTimeout == null || commandTimeout.isNegative() || commandTimeout.isZero()) {
+			throw new IllegalArgumentException("pipeline 整批等待上限必须为正：" + commandTimeout);
+		}
+		return Math.min(commandTimeout.toMillis(), MAX_PIPELINE_WAIT_MILLIS);
 	}
 
 	/** pipelineRaw 实际用到的命令：KEY/STRING/SET/ZSET 的单键类型化调用。 */
@@ -515,21 +532,72 @@ public final class CountingRedis {
 		}
 	}
 
-	private static void queuePipelined(RedisConnection connection, String[] command) {
+	/** 只负责把命令变成已发出的 RedisFuture；调用方在本批全部发出后才统一等待。 */
+	static RedisFuture<?> dispatch(RedisClusterAsyncCommands<byte[], byte[]> commands, String[] command) {
 		String name = pipelineCommandName(command);
 		byte[] key = utf8(command[1]);
-		switch (name) {
-			// 单键 varargs 形式保持 COUNT 语义（Long）；exists(byte[]) 会转成 Boolean，调用方按计数读取。
-			case "EXISTS" -> connection.keyCommands().exists(new byte[][] { key });
-			case "GET" -> connection.stringCommands().get(key);
-			case "SMEMBERS" -> connection.setCommands().sMembers(key);
-			case "DEL" -> connection.keyCommands().del(arguments(command, 1));
-			case "SREM" -> connection.setCommands().sRem(key, arguments(command, 2));
-			case "ZREM" -> connection.zSetCommands().zRem(key, arguments(command, 2));
-			case "SET" -> connection.stringCommands().set(key, utf8(command[2]),
-					Expiration.seconds(setTtlSeconds(command)), RedisStringCommands.SetOption.UPSERT);
+		return switch (name) {
+			// varargs 形式保持 COUNT 语义（Long）；exists(byte[]) 会转成 Boolean，调用方按计数读取。
+			case "EXISTS" -> commands.exists(key);
+			case "GET" -> commands.get(key);
+			case "SMEMBERS" -> commands.smembers(key);
+			case "DEL" -> commands.del(arguments(command, 1));
+			case "SREM" -> commands.srem(key, arguments(command, 2));
+			case "ZREM" -> commands.zrem(key, arguments(command, 2));
+			case "SET" -> commands.set(key, utf8(command[2]), SetArgs.Builder.ex(setTtlSeconds(command)));
 			default -> throw new IllegalArgumentException("pipelineRaw 不支持命令：" + name);
+		};
+	}
+
+	/** 统一等待整批 future；超时取消未完成项并报出批次规模与上限。 */
+	List<Object> awaitPipeline(List<RedisFuture<?>> futures, long waitMillis) {
+		boolean completed = LettuceFutures.awaitAll(waitMillis, TimeUnit.MILLISECONDS,
+				futures.toArray(new Future<?>[0]));
+		if (!completed) {
+			int cancelled = 0;
+			for (RedisFuture<?> future : futures) {
+				if (!future.isDone()) {
+					future.cancel(true);
+					cancelled++;
+				}
+			}
+			throw new IllegalStateException("pipeline 批次 " + futures.size() + " 条在 " + waitMillis
+					+ "ms 内未全部完成，已取消 " + cancelled + " 条未完成命令");
 		}
+		List<Object> results = new ArrayList<>(futures.size());
+		for (RedisFuture<?> future : futures) {
+			results.add(deserializeValue(futureValue(future)));
+		}
+		return results;
+	}
+
+	private static Object futureValue(RedisFuture<?> future) {
+		try {
+			return future.get();
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("pipeline 等待被中断", ex);
+		}
+		catch (ExecutionException ex) {
+			throw new IllegalStateException("pipeline 命令执行失败", ex.getCause());
+		}
+	}
+
+	/** 与 executePipelined 的 valueSerializer 行为对齐：GET → String，SMEMBERS → Set<String>。 */
+	private Object deserializeValue(Object value) {
+		if (value instanceof byte[] bytes) {
+			return this.template.getStringSerializer().deserialize(bytes);
+		}
+		if (value instanceof Set<?> members) {
+			Set<String> out = new LinkedHashSet<>(members.size());
+			for (Object member : members) {
+				out.add(member instanceof byte[] bytes ? this.template.getStringSerializer().deserialize(bytes)
+						: String.valueOf(member));
+			}
+			return out;
+		}
+		return value;
 	}
 
 	private static byte[] utf8(String value) {
