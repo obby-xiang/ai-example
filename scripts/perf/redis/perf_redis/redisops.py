@@ -278,6 +278,9 @@ class RedisOps:
         except Exception:
             return None
 
+    def get_str_strict(self, key: str) -> Optional[str]:
+        return self.client.get(key)
+
     def ttl(self, key: str) -> int:
         try:
             return int(self.client.ttl(key))

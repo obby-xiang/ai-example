@@ -361,9 +361,11 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
 
     staging_count = int(plan.get("staging_count", 0))
     if staging_count > 0:
-        for index in range(staging_count):
-            key = K.memory_staging_key(session_id, M.staging_token(index), t, u)
+        staging_tokens = [M.staging_token(index) for index in range(staging_count)]
+        for index, token in enumerate(staging_tokens):
+            key = K.memory_staging_key(session_id, token, t, u)
             ops.rpush_values(key, [_message_json("USER", "staging %d" % index)], ttl)
+        ops.sadd_members(K.memory_staging_index_key(session_id, t, u), staging_tokens, ttl)
 
     transcript_count = int(plan.get("transcript_entries", 0))
     if transcript_count > 0:

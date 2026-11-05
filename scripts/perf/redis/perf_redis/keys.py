@@ -313,6 +313,10 @@ def memory_staging_prefix(session_id: str, t: int, u: int) -> str:
     return MEMORY_STAGING_PREFIX + segment(t, u) + session_hash_tag(session_id) + ":"
 
 
+def memory_staging_index_key(session_id: str, t: int, u: int) -> str:
+    return MEMORY_STAGING_PREFIX + "idx:" + segment(t, u) + session_hash_tag(session_id)
+
+
 def memory_staging_key(session_id: str, token: str, t: int, u: int) -> str:
     return memory_staging_prefix(session_id, t, u) + token
 

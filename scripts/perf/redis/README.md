@@ -260,7 +260,7 @@ python -m perf_redis all
 
 ## 6. 场景矩阵
 
-`PERF_PROFILE=smoke`（默认）只跑小规模；`full` 增加 10 万背景、50 run、大 staging/archive/transcript/frames、附件、反馈等；`stress` 再增加 100 万背景。大规模/百万均需显式开关。
+`PERF_PROFILE=smoke`（默认）只跑小规模；`full` 增加 10 万背景、50 run、大 staging/transcript/frames、附件、反馈等；`stress` 再增加 100 万背景。大规模/百万均需显式开关。
 
 | 场景 | 证明什么 | smoke | full | stress |
 | --- | --- | --- | --- | --- |
@@ -274,10 +274,10 @@ python -m perf_redis all
 | `runs_gate_busy` | 会话门被另一轮持有；活跃 run 结果允许 deferred 或完成，但不得半删 |  | ✓ | ✓ |
 | `runs_with_frames` | 终态 run + 多 Stream 归档 |  | ✓ | ✓ |
 | `staging_small` / `staging_large` | 记忆 staging 全键空间 SCAN | ✓ /  | ✓ | ✓ |
-| `archive_turnno` | `ctx.turnNo` 推导 ∪ SCAN 并存 | ✓ | ✓ | ✓ |
-| `archive_scan_only` | 无 turnNo，只能靠 SCAN |  | ✓ | ✓ |
-| `archive_large` | 2000 个 legacy archive |  | ✓ | ✓ |
-| `archive_over_turnno` | turnNo > 2000，推导关闭，只能 SCAN |  | ✓ | ✓ |
+| `archive_turnno` | `unsupported_legacy`：已停止写入的旧结构，不生成、不计当前验收 | — | — | — |
+| `archive_scan_only` | `unsupported_legacy`：已停止写入的旧结构，不生成、不计当前验收 | — | — | — |
+| `archive_large` | `unsupported_legacy`：已停止写入的旧结构，不生成、不计当前验收 | — | — | — |
+| `archive_over_turnno` | `unsupported_legacy`：已停止写入的旧结构，不生成、不计当前验收 | — | — | — |
 | `transcript_small` / `transcript_large` | 用户展示历史大小 |  | ✓ | ✓ |
 | `memory_large` | 记忆窗口 + transcript |  | ✓ | ✓ |
 | `frames_terminal_tail` | 活跃 run，终帧在尾部 | ✓ | ✓ | ✓ |
@@ -303,11 +303,14 @@ python -m perf_redis all
 
 ### 6.1 数据形状
 
+功能未上线，不做旧数据或旧协议兼容。`archive_turnno`、`archive_scan_only`、`archive_large`、`archive_over_turnno` 仅保留为 `unsupported_legacy` 标记：默认不生成旧 `ai:ctx:archive` 键、不计当前 PASS/FAIL，显式选择也会被阻止；`ai:xevents` 的当前 Stream 场景继续覆盖。
+
 - 会话号：`p-<namespace>-<scenario>-<copy>`；runId：`<sessionId>-r<i>`。两者都是不透明字符串，删除服务按精确键/转义 glob 处理，支持非数字 id。
 - run 快照：`ai:run:{<t>:<u>:run:<id>}`，JSON 字段与 `RunSnapshot` 一致（`runId/sessionId/tenantId/userId/status/messageJson/...`）；取消键为 `ai:cancel:{<t>:<u>:run:<id>}`。
 - 待决：`ai:pending:{...}` HASH，field=`toolCallId`，value=`PendingToolCall` JSON；`ai:req`/`ai:decided`/`ai:claim` 为 HASH。
 - 索引：所有 run 在 `ai:runs:<t>:<u>` ZSET 中以 `runId` 为 member、`updatedAtMs` 为 score；非终态 run 还在身份 `ai:recovery:due:<t>:<u>` 中以 `runId` 为 member，并可选写入全局 `ai:recovery:due`（member=`t/u/runId`）。score 的 due 延迟采用生产默认 180s；共享全局键不设 TTL。
 - transcript：data HASH 的 field=`entryId`、value=`TranscriptEntry` JSON；`:order` ZSET 的 score 从 1 递增；`:meta` HASH 包含 `bytes/seq/rev/fence:<entryId>`；未发生裁剪时不写 `:truncated`。
+- staging：`chat:mem:staging:<t>:<u>:{<sid>}:<token>` 与 `chat:mem:staging:idx:<t>:<u>:{<sid>}` 同时生成；索引 SET 成员为 token，索引与数据键使用相同 TTL，不能用全库 SCAN 代替索引。
 - Stream：`ai:xevents:{...}`，`XADD <seq>-0 seq <n> frame <json>`；终帧 `{"type":"done"|"error","seq":n,...}`。
 - 附件：**只通过真实上传口** `POST /api/ai/form/attachments` 生成（需要先有 SUSPENDED run + `generative_form` PENDING）。工具随后从登记键读取 `storagePath` 存档。
 - 反馈：**只通过真实** `POST /api/ai/feedback` 生成。
@@ -336,8 +339,10 @@ python -m perf_redis all
 - `complete=true`：本次删除主体完成；**不**表示 guard/pending/gen/ver 立刻消失，也不表示 60s 记忆复核已执行。
 - `complete=false + deferred=[...]`：活跃 run 未终态；该 run 实际生成的键与发现面保留，可重试。
 - `complete=false + errors=[...]`：有键/DB/文件失败；pending/guard 保留。
-- `aborted=true + phase`：`pending`/`enumerate`/`guard`/`database` 阶段中止；Redis 未删或只删了 H2（`database` 阶段 H2 删除失败时 Redis 未动）。
+- `aborted=true + phase`：`pending`/`enumerate`/`guard`/`database` 阶段中止；Redis 未删或只删了 H2（`database` 阶段 H2 删除失败时 Redis 未动）。verify 按 round 保留结局：先 aborted 后 complete 按成功删除验收；只有从未成功删除时才执行 aborted 完整性检查。
 - `503`：Redis 不可用；不等于删除完成。唯一例外是 `GET /api/ai/health` 的 503：它是“AI 不可用”的正常表达，记为 `allowed_http`/`accepted`，不计入失败。
+
+complete 后 verify 以最多 65 秒的有界条件轮询等待 pending/记忆复核完成；超时或 pending 不可读记 `unknown`，不把在飞写回直接判为删除失败。
 
 ### 7.3 失败口径（transport / http / allowed_http）
 
@@ -354,7 +359,7 @@ python -m perf_redis all
 - 对比重点：
   1. `bg_10k / bg_100k / bg_1m` 与 `runs_1_terminal` 的差值 → 全库 SCAN 固定成本；
   2. `runs_1/10/50` → 串行逐 run 成本；
-  3. `staging_*`、`archive_*`、`transcript_*` → 各自枚举/逐键成本；
+  3. `staging_*`、`transcript_*` → 各自枚举/逐键成本；
   4. `frames_terminal_* / frames_gap_large` → 活跃 run 的取消收尾/终帧探测；
   5. standalone vs cluster 同场景 → 逐 master 串行 SCAN 与 RTT 差异。
 
@@ -436,7 +441,7 @@ python -m perf_redis all
 | DELETE 503 | 应用 Redis 不可用；看 `/api/ai/health`、应用日志 |
 | `unsupported`（附件/反馈） | 应用不可达或上传被拒；先 `doctor`，再用 `PERF_SCENARIOS` 只选该场景单独排查 |
 | 附件上传 400 | 需要 SUSPENDED run + `generative_form` PENDING + 表单含 attachment 字段；工具已按此生成，若仍拒绝看应用日志 |
-| 删除耗时远超预期 | 先看 `bg_*` 与 `staging_*`/`archive_*`；两趟全库 SCAN 是固定成本，Cluster 逐 master 串行 |
+| 删除耗时远超预期 | 先看 `bg_*` 与 `staging_*`；staging 的全库 SCAN 是固定成本，Cluster 逐 master 串行 |
 | `complete=false` | 看 `deferred`/`errors`：活跃 run、Redis/DB/文件失败；修好后再次 DELETE 或等 retry runner |
 | verify `unknown` | Redis/HTTP 读失败；先恢复依赖再重跑 verify，不能当通过 |
 | cleanup 仍有 exact 残留 | 读写竞争（retry runner/真实写者）；加 `PERF_VERIFY_SETTLE_SECONDS` 或停写后重跑；必要时 `PERF_KEEP_GUARD` 先保留 guard |

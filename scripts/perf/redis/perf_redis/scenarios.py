@@ -145,23 +145,23 @@ def build_matrix(cfg: Config) -> Dict[str, Dict[str, object]]:
         scale="large")
 
     matrix["archive_turnno"] = _scenario(
-        "legacy archive：ctx.turnNo 推导 0..N 与真实键 0..N+2 并存（推导 ∪ SCAN）",
-        ("smoke",),
-        _plan(runs=_runs(1), archives=int(s["archive_small"]) + 3, ctx_turn_no=int(s["archive_small"]) - 1), True)
+        "unsupported_legacy：已停止写入的旧 archive 结构，不生成、不计当前验收",
+        (), _plan(runs=_runs(1), archives=int(s["archive_small"]) + 3,
+                           ctx_turn_no=int(s["archive_small"]) - 1), True, scale="unsupported_legacy")
 
     matrix["archive_scan_only"] = _scenario(
-        "legacy archive：没有 ctx.turnNo，只能靠全库 SCAN 发现",
-        ("full",), _plan(runs=_runs(1), archives=int(s["archive_small"])), True)
+        "unsupported_legacy：已停止写入的旧 archive 结构，不生成、不计当前验收",
+        (), _plan(runs=_runs(1), archives=int(s["archive_small"])), True, scale="unsupported_legacy")
 
     matrix["archive_large"] = _scenario(
-        "legacy archive 大规模（turnNo 推导 + 扫描）",
-        ("full",), _plan(runs=_runs(1), archives=int(s["archive_large"]),
-                           ctx_turn_no=int(s["archive_large"]) - 1), True, scale="large")
+        "unsupported_legacy：已停止写入的旧 archive 结构，不生成、不计当前验收",
+        (), _plan(runs=_runs(1), archives=int(s["archive_large"]),
+                           ctx_turn_no=int(s["archive_large"]) - 1), True, scale="unsupported_legacy")
 
     matrix["archive_over_turnno"] = _scenario(
-        "turnNo 超过推导上限（2000）：只靠 SCAN；验证真实残留键仍被发现",
-        ("full",), _plan(runs=_runs(1), archives=int(s["archive_large"]),
-                           ctx_turn_no=MAX_DERIVED_ARCHIVE_TURNS + 500), True, scale="large")
+        "unsupported_legacy：已停止写入的旧 archive 结构，不生成、不计当前验收",
+        (), _plan(runs=_runs(1), archives=int(s["archive_large"]),
+                           ctx_turn_no=MAX_DERIVED_ARCHIVE_TURNS + 500), True, scale="unsupported_legacy")
 
     matrix["transcript_small"] = _scenario(
         "用户展示历史（transcript）小规模",
@@ -289,6 +289,8 @@ def resolve_selection(cfg: Config) -> Tuple[List[str], List[Dict[str, str]]]:
         item = matrix[name]
         scale = item["scale"]
         reason = ""
+        if scale == "unsupported_legacy":
+            reason = "legacy archive 已停止写入；当前功能未上线，不做旧数据/旧协议场景"
         if scale == "large" and not cfg.allow_large_scale:
             reason = "大规模场景需显式允许：PERF_ALLOW_LARGE_SCALE=true"
         if scale == "million" and not cfg.allow_background_million:

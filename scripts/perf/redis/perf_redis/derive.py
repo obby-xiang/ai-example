@@ -187,6 +187,8 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
     if memory["data"]:
         expected_absent.append(str(memory["data"]))
     expected_absent.extend(staging)
+    if int(plan.get("staging_count", 0)) > 0:
+        expected_absent.append(K.memory_staging_index_key(sid, t, u))
     expected_absent.extend(misc_keys)
     expected_absent.extend(registrations)
     expected_absent.extend(consumed)

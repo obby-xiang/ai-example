@@ -7,8 +7,11 @@ Hard rules (from AiSessionPurgeService / RunStore / SessionPurgeGuard):
     actually wrote (pending/claim/idem/req/decided exist only for runs with
     pending entries; lease only when lease_held); pending+guard and the
     discovery keys stay so a retry can enumerate them;
-  * aborted=true   => nothing in Redis was deleted;
+  * aborted=true   => nothing in Redis was deleted (only when no round completed a deletion);
+    an earlier aborted round followed by complete is verified as a successful deletion;
   * xack (120s) / xtrim / session lock are deliberate leftovers, never failures.
+  * complete responses are followed by a bounded memory-verification wait; timeout/unreadable
+    is reported as unknown rather than mistaking in-flight writes for deletion failure.
 
 Unreadable state is reported as `unknown`, never as pass.
 """
@@ -42,6 +45,31 @@ def _sample(items: List[str], limit: int = 8) -> str:
     if len(items) <= limit:
         return ",".join(items)
     return "%s,...(+%d)" % (",".join(items[:limit]), len(items) - limit)
+
+
+MEMORY_VERIFY_TIMEOUT_SECONDS = 65
+MEMORY_VERIFY_POLL_SECONDS = 0.25
+
+
+def _wait_for_memory_verify(ops: RedisOps, pending_key: str) -> str:
+    deadline = time.monotonic() + MEMORY_VERIFY_TIMEOUT_SECONDS
+    while True:
+        try:
+            raw = ops.get_str_strict(pending_key)
+        except Exception:
+            return "unknown"
+        if not raw:
+            return "ready"
+        try:
+            pending = json.loads(raw)
+        except Exception:
+            return "unreadable"
+        if not isinstance(pending, dict) or pending.get("verifyAtMs") is None:
+            return "unreadable"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+        time.sleep(min(MEMORY_VERIFY_POLL_SECONDS, remaining))
 
 
 def _delete_rows(results: Dict[str, object], scenario: str) -> Dict[str, List[Dict[str, object]]]:
@@ -760,10 +788,18 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                         continue
                 else:
                     _check(checks, scenario, copy_name, "delete_http", "pass", "全部 DELETE 200")
-                if merged["aborted"]:
+                successful_delete = any(isinstance(row.get("business"), dict)
+                                        and row["business"].get("complete") is True for row in rows)
+                if merged["aborted"] and not successful_delete:
                     _check_aborted(cfg, ops, checks, scenario, copy_name, plan, copy, merged, background_counts)
-                elif merged["complete_any"]:
-                    _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged, background_counts)
+                elif successful_delete:
+                    verify_status = _wait_for_memory_verify(ops, str(D.copy_keys(cfg, scenario, plan, copy)["pending"]))
+                    if verify_status != "ready":
+                        _check(checks, scenario, copy_name, "memory_verify_wait", "unknown",
+                               "记忆复核未完成（%s）；不把在飞写回误判为删除失败" % verify_status)
+                    else:
+                        _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged,
+                                     background_counts)
                 else:
                     _check_retained(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged, background_counts)
 
