@@ -1,7 +1,6 @@
 package com.example.configmgr.perf.production;
 
 import java.net.InetAddress;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -14,6 +13,7 @@ import com.example.configmgr.job.service.JobCancellationRegistry;
 import com.example.configmgr.job.service.JobHeartbeatRegistry;
 import com.example.configmgr.job.service.RunnerActiveKeyCleanupRunner;
 import com.example.configmgr.job.service.StaleJobRecoveryRunner;
+import com.example.configmgr.perf.redis.BackgroundBatchWriter;
 import com.example.configmgr.perf.redis.KeyShapes;
 import com.example.configmgr.perf.redis.Manifest;
 import com.example.configmgr.task.entity.Task;
@@ -50,12 +50,9 @@ final class StartupRunnerActiveScenario implements ProductionScenario {
 		dataset.declaredBackground = background;
 		dataset.backgroundBucket = "startup";
 		dataset.attributes.put("backgroundKeys", background);
-		support.stage(dataset, "startup_background_generate", () -> {
-			for (int i = 0; i < background; i++) {
-				support.direct.set(KeyShapes.backgroundKey(support.cfg.namespace, dataset.backgroundBucket, i),
-						"bg", Duration.ofSeconds(support.cfg.keyTtlSeconds));
-			}
-		});
+		dataset.attributes.put("backgroundWriteBatchSize", BackgroundBatchWriter.BATCH_SIZE);
+		support.stage(dataset, "startup_background_generate", () -> BackgroundBatchWriter.write(support.direct,
+				support.cfg.namespace, dataset.backgroundBucket, background, support.cfg.keyTtlSeconds));
 
 		long localDead = support.jobId(dataset, 1);
 		long remoteDead = support.jobId(dataset, 2);

@@ -357,18 +357,9 @@ public final class DatasetGenerator {
 	}
 
 	private void writeBackground(Manifest.Dataset dataset) {
-		List<String[]> batch = new ArrayList<>();
-		for (int i = 0; i < dataset.background; i++) {
-			String key = KeyShapes.backgroundKey(this.cfg.namespace, dataset.backgroundBucket, i);
-			batch.add(new String[] { "SET", key, "bg", "EX", String.valueOf(this.cfg.keyTtlSeconds) });
-			if (batch.size() >= this.cfg.batchSize) {
-				this.redis.pipelineRaw(batch);
-				batch.clear();
-			}
-		}
-		if (!batch.isEmpty()) {
-			this.redis.pipelineRaw(batch);
-		}
+		dataset.attributes.put("backgroundWriteBatchSize", BackgroundBatchWriter.BATCH_SIZE);
+		BackgroundBatchWriter.write(this.redis, this.cfg.namespace, dataset.backgroundBucket, dataset.background,
+				this.cfg.keyTtlSeconds);
 	}
 
 	private String json(Object value) {
