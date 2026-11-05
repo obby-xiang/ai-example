@@ -52,7 +52,7 @@ final class TaskSlotParser {
 
 	/** 大写候选值（CURRENCY+CNY 这类唯一主键缩写）。 */
 	private static final Pattern UPPER_TOKEN = Pattern
-		.compile("(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{1,63}(?![A-Za-z0-9_])");
+		.compile("(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{1,63}(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
 
 	/**
 	 * 条件文本里允许出现在结构之外的中性词（意图/连接/语气）。
@@ -63,7 +63,7 @@ final class TaskSlotParser {
 	 */
 	private static final Pattern STRUCTURAL_FILLER = Pattern.compile(
 			"(where|导出|导入|筛选|过滤|条件|只要|仅要|仅导出|只导出|限定|选择|勾选|选定|选用|改选|改成|换成|换为"
-					+ "|以及|和|且|与|的|了|中|里|把|给|一下)",
+					+ "|新建|创建|任务|作业|以及|和|且|与|的|了|中|里|把|给|一下)",
 			Pattern.CASE_INSENSITIVE);
 
 	/** 裸大写词里明显不是筛选值的保留词（避免把步骤/层级/算子当值）。 */
@@ -326,7 +326,8 @@ final class TaskSlotParser {
 		}
 		for (String literal : literals) {
 			if (literal != null && !literal.isBlank()) {
-				residual = residual.replace(literal, " ");
+				residual = Pattern.compile(Pattern.quote(literal), Pattern.CASE_INSENSITIVE)
+						.matcher(residual).replaceAll(" ");
 			}
 		}
 		residual = STRUCTURAL_FILLER.matcher(residual).replaceAll(" ");
@@ -385,10 +386,10 @@ final class TaskSlotParser {
 		while (matcher.find()) {
 			String token = matcher.group();
 			String lower = token.toLowerCase(Locale.ROOT);
-			if (excluded.contains(lower) || UPPER_STOP_WORDS.contains(token)) {
+			if (excluded.contains(lower) || UPPER_STOP_WORDS.contains(token.toUpperCase(Locale.ROOT))) {
 				continue;
 			}
-			if (!candidates.contains(token)) {
+			if (candidates.stream().noneMatch(candidate -> candidate.equalsIgnoreCase(token))) {
 				candidates.add(token);
 			}
 		}
@@ -398,13 +399,17 @@ final class TaskSlotParser {
 		if (candidates.size() > 1) {
 			return new ShorthandResult(SlotState.AMBIGUOUS, null, false);
 		}
-		String value = candidates.get(0);
-		if (!key.optionValues().isEmpty() && !key.optionValues().contains(value)) {
+		String candidate = candidates.get(0);
+		String value = key.optionValues().stream().filter(option -> option.equalsIgnoreCase(candidate))
+				.findFirst().orElse(null);
+		if (!key.optionValues().isEmpty() && value == null) {
 			// 有枚举就按枚举校验：不在可选值里不是"筛选"，是另一个词
 			return new ShorthandResult(SlotState.ABSENT, null, false);
 		}
-		boolean verified = !key.optionValues().isEmpty() && key.optionValues().contains(value)
-				&& structuralResidual(text, definition, List.of(), List.of(value)).isEmpty();
+		if (value == null) {
+			value = candidate.toUpperCase(Locale.ROOT);
+		}
+		boolean verified = structuralResidual(text, definition, List.of(), List.of(value, candidate)).isEmpty();
 		return new ShorthandResult(SlotState.DETERMINED,
 				new ConditionSlot(definition.code(), key.code(), value), verified);
 	}

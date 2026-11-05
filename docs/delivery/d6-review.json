@@ -504,6 +504,13 @@
       "reason": "本批仅按当前env合成provider和种子模型精确校验恢复，配置异常统一STATE_UNKNOWN，不新增旧协议或跨DB模型兼容",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:b52a84748501ff64d1886baea2723a7614f55e51ea55455ae6e7893a411ecf97",
+      "status": "synced",
+      "reason": "已同步每run原子载体传递createdTaskId及创建前通用槽位补齐约束，保留结构化宿主推进和禁止提示词硬门",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

@@ -36,6 +36,7 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.resultview.ToolResultViewProvider;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -476,6 +477,13 @@ public class SpToolCallingManager implements ToolCallingManager {
 		this.contextRefresher = refresher;
 	}
 
+	private TaskSlotResolver taskSlotResolver;
+
+	@Autowired(required = false)
+	public void setTaskSlotResolver(TaskSlotResolver resolver) {
+		this.taskSlotResolver = resolver;
+	}
+
 	/**
 	 * confirm_step 的后置条件兜底（数据正确性）：缺失 = 不兜底（轻装配面 / 既有单测行为不变）。
 	 *
@@ -867,7 +875,11 @@ public class SpToolCallingManager implements ToolCallingManager {
 		// 防线③（T1）的判据来源：本轮<b>冻结</b>的工作区上下文（与请求侧披露用的同一份，
 		// 见 RunStore#create 写下的 snapshot.context），因此复查不会因上下文漂移而误判。
 		AiContext context = AiContext.fromMap(snapshot.getContext());
+		String userText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(prompt.getInstructions());
 		for (PendingToolCall pending : pendings) {
+			if (this.taskSlotResolver != null && TOOL_CREATE_TASK.equals(pending.getName())) {
+				pending.setArguments(this.taskSlotResolver.completeCreateTaskArguments(pending.getArguments(), userText));
+			}
 			com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
 		}
 		// ===== C13：本批模型侧写入的剩余窗口 =====
@@ -1567,6 +1579,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	}
 
 	private static Long createdTaskIdOf(Object raw) {
+		if (raw instanceof java.util.concurrent.atomic.AtomicReference<?> holder) {
+			raw = holder.get();
+		}
 		if (raw instanceof Number number) {
 			return number.longValue();
 		}

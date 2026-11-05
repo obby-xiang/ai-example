@@ -6,7 +6,10 @@ import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -20,11 +23,10 @@ import java.util.Map;
 /**
  * 槽位解析器（小型、可测试，不引入新框架）。
  *
- * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：本类<b>不解析用户原话</b>，
- * 不调用 {@link TaskSlotParser}/中文正则。可信事实只有任务条目与工作区页面结构化选择：
- * 配置项来自 {@code selectedDefs}/任务条目，条件来自任务 {@code conditionJson}
- * （由前端结构化 {@code set_condition} / 确认门落库）。自然语言只经既有模型工具调用
- * 变成结构化意图，不再由宿主猜测。
+ * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：任务推进与条件放行不解析用户原话，
+ * 只认任务条目、工作区选择和结构化回灌。唯一例外是
+ * {@link #completeCreateTaskArguments}：模型已发起创建后，才用 {@link TaskSlotParser}
+ * 补齐留空且能完整验证的创建槽位；它不会自行创建任务，也不绕过预检、确认或条件草案链。
  *
  * <p><b>与 {@code ContextBuilder} 同一套两态</b>：页面上报的 {@code selectedDefs} 非空时它是权威值；
  * 显式空列表（任务条目也为空、例如刚建好尚未落条目的新任务）时以本轮结构化
@@ -123,6 +125,70 @@ public class TaskSlotResolver {
 		}
 		return AiContext.of(source.getPage(), source.getTaskType(), source.getStep(), source.getTaskId(),
 				source.getTaskStatus(), extra);
+	}
+
+	/**
+	 * 模型已经发起 create_task 后，只补它留空且用户原话能完整验证的创建槽位。
+	 * 非空模型参数优先；候选仍须经过创建预检，不能替代确认或业务库条件写入。
+	 */
+	public String completeCreateTaskArguments(String argumentsJson, String currentMessage) {
+		if (argumentsJson == null || argumentsJson.isBlank() || currentMessage == null || currentMessage.isBlank()) {
+			return argumentsJson;
+		}
+		try {
+			if (!(this.objectMapper.readTree(argumentsJson) instanceof ObjectNode arguments)) {
+				return argumentsJson;
+			}
+			List<String> targetCodes = new ArrayList<>();
+			if (arguments.get("defCodes") instanceof ArrayNode codes) {
+				for (JsonNode code : codes) {
+					if (code.isTextual() && !code.asText().isBlank()) {
+						targetCodes.add(code.asText());
+					}
+				}
+			}
+			TaskSlotParser.Intent intent = TaskSlotParser.parse(currentMessage, definitions(), targetCodes);
+			if (!arguments.hasNonNull("type") && intent.taskType() != null) {
+				arguments.put("type", intent.taskType());
+			}
+			if (targetCodes.isEmpty() && intent.selection() == TaskSlotParser.SlotState.DETERMINED) {
+				ArrayNode codes = arguments.putArray("defCodes");
+				intent.defCodes().forEach(codes::add);
+				targetCodes = new ArrayList<>(intent.defCodes());
+			}
+			JsonNode existingConditions = arguments.get("conditions");
+			boolean conditionsEmpty = existingConditions == null || existingConditions.isNull()
+					|| existingConditions.isObject() && existingConditions.isEmpty();
+			if (conditionsEmpty && "EXPORT".equalsIgnoreCase(arguments.path("type").asText())
+					&& intent.condition() == TaskSlotParser.SlotState.DETERMINED && targetCodes.size() == 1) {
+				List<ConditionSlot> slots = intent.conditions().stream().filter(ConditionSlot::isComplete).distinct()
+						.toList();
+				boolean verified = !slots.isEmpty();
+				for (ConditionSlot slot : slots) {
+					if (!intent.verifiedConditionDefCodes().contains(slot.defCode())
+							|| !targetCodes.contains(slot.defCode())) {
+						verified = false;
+						break;
+					}
+				}
+				if (verified) {
+					ObjectNode conditions = this.objectMapper.createObjectNode();
+					ArrayNode fields = conditions.putArray("fields");
+					for (ConditionSlot slot : slots) {
+						ObjectNode field = fields.addObject();
+						field.put("fieldCode", slot.fieldCode());
+						field.put("operator", "EQ");
+						field.put("value", slot.value());
+					}
+					arguments.set("conditions", conditions);
+				}
+			}
+			return this.objectMapper.writeValueAsString(arguments);
+		}
+		catch (Exception ex) {
+			log.warn("could not complete create_task slots; original arguments kept error={}", ex.getMessage());
+			return argumentsJson;
+		}
 	}
 
 	/**

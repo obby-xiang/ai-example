@@ -32,6 +32,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -368,7 +369,7 @@ public class AiTools {
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 代替创建。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -400,8 +401,8 @@ public class AiTools {
                     ? taskService.createIdempotent(taskType, effectiveTitle, runId)
                     : taskService.createIdempotent(taskType, effectiveTitle, runId, continuationTaskId);
             Task task = outcome.task();
-            if (context != null) {
-                context.put(PendingToolCall.CREATED_TASK_ID, task.getId());
+            if (context != null && context.get(PendingToolCall.CREATED_TASK_ID) instanceof AtomicReference<?> holder) {
+                ((AtomicReference<Long>) holder).set(task.getId());
             }
             if (outcome.reused()) {
                 return String.format(

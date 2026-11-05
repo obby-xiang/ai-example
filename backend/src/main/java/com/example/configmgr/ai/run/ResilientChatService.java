@@ -1389,6 +1389,7 @@ public class ResilientChatService {
 		Map<String, Object> context = new LinkedHashMap<>();
 		context.put("runId", runId);
 		context.put("sessionId", sessionId);
+		context.put(PendingToolCall.CREATED_TASK_ID, new AtomicReference<Long>());
 		// 回答语言显式传播到工具线程（工具线程不继承请求上下文；与 ConfirmGate#dispatchResume 同口径）
 		context.put(SpToolCallingManager.TOOL_CONTEXT_REPLY_LOCALE, ReplyLanguage.current().tag());
 		// 本轮正文聚合的只读通道：流式工具调用跳的 ChatResponse 不带正文，执行点据此补全。
