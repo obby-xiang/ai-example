@@ -63,7 +63,8 @@ final class ToolCallEndTrace {
 		}
 		// 载荷<b>先于抢位</b>构造：构造失败时"一行都没写、位也没抢" ⇒ 不需要消费/释放占位
 		Object[] payload = pairs(settled, toolCallId, tool, kind, ms, execMs, text);
-		if (!observations.claim(runId, toolCallId)) {
+		SettlementObservationStore.ClaimHandle claim = observations.claim(runId, toolCallId);
+		if (!claim.claimed()) {
 			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} tool={} kind={}", runId, toolCallId,
 					tool, kind);
 			return;
@@ -72,9 +73,8 @@ final class ToolCallEndTrace {
 			AiTrace.eventOn(runId, sessionId, "tool_call_end", payload);
 		}
 		catch (RuntimeException ex) {
-			// 抢到了位却<b>没写出行</b>：把占位放回去，让下一个执行体/下一次结算还能发（宁重不宁缺）。
-			// 不释放的后果是"永久 0 条"——比重记更糟的方向（独立复审 I-1）。
-			observations.release(runId, toolCallId);
+			// 抢到了位却<b>没写出行</b>：只释放本次 token 仍持有的占位。
+			observations.release(claim);
 			throw ex;
 		}
 		// 行<b>已经写出</b>：此后的审计面失败<b>不得</b>释放占位 —— 释放会让下一次结算再发一行
@@ -107,7 +107,8 @@ final class ToolCallEndTrace {
 			payload.run();
 			return;
 		}
-		if (!observations.claim(runId, toolCallId)) {
+		SettlementObservationStore.ClaimHandle claim = observations.claim(runId, toolCallId);
+		if (!claim.claimed()) {
 			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} kind={}", runId, toolCallId, kind);
 			return;
 		}
@@ -115,7 +116,7 @@ final class ToolCallEndTrace {
 			payload.run();
 		}
 		catch (RuntimeException ex) {
-			observations.release(runId, toolCallId);
+			observations.release(claim);
 			throw ex;
 		}
 	}

@@ -69,20 +69,19 @@ public class CreateTaskDraftStore {
 	static final Duration DEFAULT_TTL = Duration.ofHours(24);
 
 	/**
-	 * 写入某任务字段并<b>同批</b>续满 TTL（单键 EVAL：{@code HSET} + {@code PEXPIRE}）。
+	 * 单键 CAS：只有当前字段仍等于调用方读到的旧原文时才写入合并值并续满 TTL。
+	 * 冲突由调用方有界重读合并，避免互补字段被并发写覆盖。
 	 *
-	 * <p>为什么必须是一条命令：{@code HSET} 与 {@code EXPIRE} 分两条发时，两步之间进程被杀 /
-	 * 连接断掉就会留下<b>有值无 TTL</b> 的草案 HASH —— 会话销毁的精确 {@code DEL} 只覆盖已知会话，
-	 * 这类键既枚举不到也永不消失。单键脚本因此同时满足三件事：值与 TTL 原子、Cluster 无
-	 * {@code CROSSSLOT}（只触碰一个键）、不需要扫描或索引。
-	 *
-	 * @param KEYS[1] {@code ai:ctdraft:{<tenantId>:<userId>:session:<escapedSessionId>}}
-	 * @param ARGV[1] 字段（taskId）、ARGV[2] 草案 JSON、ARGV[3] TTL（毫秒）
+	 * @param KEYS[1] 会话草案 HASH
+	 * @param ARGV[1] taskId、ARGV[2] 旧原文（空串 = 期望不存在）、ARGV[3] 合并 JSON、ARGV[4] TTL（毫秒）
 	 */
-	private static final RedisScript<Long> PUT_DRAFT_SCRIPT = new DefaultRedisScript<>("""
-			-- CTDRAFT_PUT
-			redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-			redis.call('PEXPIRE', KEYS[1], ARGV[3])
+	private static final RedisScript<Long> CAS_DRAFT_SCRIPT = new DefaultRedisScript<>("""
+			local current = redis.call('HGET', KEYS[1], ARGV[1])
+			if (not current and ARGV[2] ~= '') or (current and current ~= ARGV[2]) then
+				return 0
+			end
+			redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+			redis.call('PEXPIRE', KEYS[1], ARGV[4])
 			return 1
 			""", Long.class);
 
@@ -158,20 +157,24 @@ public class CreateTaskDraftStore {
 		}
 		String key = sessionKey(sessionId);
 		String field = Long.toString(taskId);
-		Draft merged = mergeWithExisting(redis, key, field, taskId, hasDefCodes ? defCodes : null,
-				hasConditions ? conditions : null);
-		if (merged == null) {
-			return;
+		for (int attempt = 1; attempt <= 3; attempt++) {
+			MergeResult merged = mergeWithExisting(redis, key, field, taskId, hasDefCodes ? defCodes : null,
+					hasConditions ? conditions : null);
+			if (merged == null) {
+				return;
+			}
+			try {
+				Long applied = redis.execute(CAS_DRAFT_SCRIPT, List.of(key), field, merged.expectedRaw(),
+						write(merged.draft()), Long.toString(this.ttl.toMillis()));
+				if (applied != null && applied == 1L) {
+					return;
+				}
+			}
+			catch (RuntimeException ex) {
+				throw new IllegalStateException("写入会话任务草案失败 sessionId=" + sessionId + " taskId=" + taskId, ex);
+			}
 		}
-		try {
-			// 值与 TTL <b>同一条单键命令</b>：先 HSET 再 EXPIRE 的两条写法在两步之间被杀/断连会留下
-			// 无 TTL 的草案 HASH（会话销毁只删已知键，这种键只能等人工清理）。单键 EVAL ⇒ Cluster
-			// 无 CROSSSLOT，也不需要新增任何扫描或索引。
-			redis.execute(PUT_DRAFT_SCRIPT, List.of(key), field, write(merged), Long.toString(this.ttl.toMillis()));
-		}
-		catch (RuntimeException ex) {
-			throw new IllegalStateException("写入会话任务草案失败 sessionId=" + sessionId + " taskId=" + taskId, ex);
-		}
+		throw new IllegalStateException("会话任务草案并发合并冲突 sessionId=" + sessionId + " taskId=" + taskId);
 	}
 
 	/**
@@ -202,37 +205,42 @@ public class CreateTaskDraftStore {
 		return parse(String.valueOf(raw), taskId);
 	}
 
-	/**
-	 * 合并"本次明确给出的项"与已存草案：空项一律取旧值（<b>空 {@code conditions={}} 不覆盖明确候选</b>）。
-	 * 旧值损坏只 WARN 并按"没有旧值"处理 —— 写侧是 best-effort，新给出的明确事实仍然要落地。
-	 */
-	private Draft mergeWithExisting(StringRedisTemplate redis, String key, String field, long taskId,
+	/** 严格读取旧原文后合并；基础设施读失败直接中止，不得按空草案覆盖。 */
+	private MergeResult mergeWithExisting(StringRedisTemplate redis, String key, String field, long taskId,
 			List<String> defCodes, Map<?, ?> conditions) {
-		Draft existing = null;
+		Object raw;
 		try {
-			Object raw = redis.opsForHash().get(key, field);
-			if (raw != null) {
-				existing = parse(String.valueOf(raw), taskId);
-			}
+			raw = redis.opsForHash().get(key, field);
 		}
 		catch (RuntimeException ex) {
-			log.warn("read existing task draft failed (merging without prior value) key={} field={}: {}", key, field, ex.getMessage());
+			throw new IllegalStateException("读取会话任务草案失败，已中止本次写入", ex);
 		}
-		List<String> mergedDefCodes = defCodes != null && !defCodes.isEmpty() ? defCodes
-				: existing == null ? List.of() : existing.defCodes();
+		Draft existing = raw == null ? null : parse(String.valueOf(raw), taskId);
+		java.util.LinkedHashSet<String> mergedDefCodes = new java.util.LinkedHashSet<>();
+		if (existing != null) {
+			mergedDefCodes.addAll(existing.defCodes());
+		}
+		if (defCodes != null) {
+			mergedDefCodes.addAll(defCodes);
+		}
 		Map<String, Object> mergedConditions = new LinkedHashMap<>();
-		if (conditions != null && !conditions.isEmpty()) {
+		if (existing != null) {
+			mergedConditions.putAll(existing.conditions());
+		}
+		if (conditions != null) {
 			for (Map.Entry<?, ?> entry : conditions.entrySet()) {
 				mergedConditions.put(String.valueOf(entry.getKey()), entry.getValue());
 			}
 		}
-		else if (existing != null) {
-			mergedConditions.putAll(existing.conditions());
-		}
 		if (mergedDefCodes.isEmpty() && mergedConditions.isEmpty()) {
 			return null;
 		}
-		return new Draft(mergedDefCodes, mergedConditions, System.currentTimeMillis());
+		String expectedRaw = raw == null ? "" : String.valueOf(raw);
+		return new MergeResult(expectedRaw,
+				new Draft(java.util.List.copyOf(mergedDefCodes), mergedConditions, System.currentTimeMillis()));
+	}
+
+	private record MergeResult(String expectedRaw, Draft draft) {
 	}
 
 	/**

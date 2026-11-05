@@ -546,6 +546,13 @@
       "reason": "本批仅区分导出前置准备超时与下载即发即回，并清理通用下载不良文案；D6工具协议、迁移接口和结果回灌结构不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:806d884c9824fba84290ed0adf5b8e584cfb3e4c71a3ee0d07fd46167cd8215d",
+      "status": "not-affected",
+      "reason": "本批以owner token保护观测位释放，并用单键CAS补齐草案并发合并及读失败中止；D6迁移接口和既有工具事实结构不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

@@ -15,7 +15,7 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h2>键生命周期（复审 C-1 后的口径）</h2>
  * <ul>
  * <li><b>键形</b>：{@code ai:observed:<tenantId>:<userId>:<runId>}（HASH；field = {@code toolCallId}，
- * value = {@code <atMs>|<instanceId>}）。身份段来自 {@code TenantKeyScope#scoped}（与
+ * value = {@code <atMs>|<instanceId>|<randomOwnerToken>}）。身份段来自 {@code TenantKeyScope#scoped}（与
  * {@code ai:beat:} / {@code ai:activity:} 同族）；<b>裸前缀、不带
  * {@code {run:<runId>}} tag</b> —— 只进单键命令/单键脚本（{@code EVAL} 只有一把 KEYS，
  * Cluster 下天然同槽）。无身份上下文时退回<b>旧键形</b> {@code ai:observed:<runId>}（独立
@@ -45,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 销毁方调用 {@link #purge(String)}（或按 {@link #observedKey(String)} 取键一并 DEL），
  * 两个面（Redis + 进程内）同时清；TTL 只是兜底，不是销毁手段；</li>
  * <li><b>迁移</b>：<b>不搬</b> —— 一次性仲裁位，跨世代没有要保留的事实；</li>
- * <li><b>降级</b>：Redis 读写失败 ⇒ {@link #claim} 返回 {@code true}（fail-open）——
+ * <li><b>降级</b>：Redis 读写失败 ⇒ {@link #claim} 返回允许发射的 handle（fail-open）——
  * 观测面宁可极小概率双记，也不能在依赖抖动时整片缺行。每次失败计一次
  * {@link RedisDegradation#O1_OBSERVATION_CLAIM}（否则"仲裁整体失效"在现网零信号）；</li>
  * <li><b>ARGV 类型</b>：脚本参数一律传<b>字符串</b>。{@code StringRedisTemplate} 用
@@ -78,12 +78,22 @@ public class SettlementObservationStore {
 					+ "return claimed",
 			Long.class);
 
+	private static final RedisScript<Long> RELEASE_SCRIPT = new DefaultRedisScript<>("""
+			if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+				return redis.call('HDEL', KEYS[1], ARGV[1])
+			end
+			return 0
+			""", Long.class);
+
+	public record ClaimHandle(boolean claimed, String runId, String toolCallId, String token) {
+	}
+
 	private final StringRedisTemplate redis;
 
 	private final AiProperties properties;
 
-	/** 进程内退化面（无 Redis / 单测）：键名 → 已观测的 toolCallId。 */
-	private final Map<String, Set<String>> observed = new ConcurrentHashMap<>();
+	/** 进程内退化面（无 Redis / 单测）：键名 →（toolCallId → owner token）。 */
+	private final Map<String, Map<String, String>> observed = new ConcurrentHashMap<>();
 
 	@Autowired
 	public SettlementObservationStore(ObjectProvider<StringRedisTemplate> redisProvider, AiProperties properties) {
@@ -107,65 +117,51 @@ public class SettlementObservationStore {
 		return TenantKeyScope.scoped(KEY_PREFIX, runId);
 	}
 
-	/**
-	 * 抢"本次结算的观测位"。
-	 *
-	 * @return {@code true} = 本次是首个观测者（调用方应发结算行 + 记审计）；
-	 *         {@code false} = 已被别的执行体观测过（本次必须不发）
-	 */
-	public boolean claim(String runId, String toolCallId) {
+	/** 抢"本次结算的观测位"，并返回后续失败释放所需的所有权 token。 */
+	public ClaimHandle claim(String runId, String toolCallId) {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
-			// 没有锚点就没有"同一条调用"可仲裁：放行（观测面不该因为没有主键而沉默）
-			return true;
+			return new ClaimHandle(true, runId, toolCallId, null);
 		}
+		String token = System.currentTimeMillis() + "|" + InstanceId.get() + "|" + UUID.randomUUID();
 		if (this.redis == null) {
-			return this.observed.computeIfAbsent(observedKey(runId), ignored -> ConcurrentHashMap.newKeySet())
-				.add(toolCallId);
+			Map<String, String> ids = this.observed.computeIfAbsent(observedKey(runId),
+					ignored -> new ConcurrentHashMap<>());
+			boolean claimed = ids.putIfAbsent(toolCallId, token) == null;
+			return new ClaimHandle(claimed, runId, toolCallId, token);
 		}
 		String key = observedKey(runId);
 		try {
-			// ARGV 一律用字符串：{@code StringRedisTemplate} 的 ARGV 走 valueSerializer
-			// （{@code StringRedisSerializer}），传 {@code Long} 会在发命令前 ClassCastException
-			// 并被下面的 catch 吞成 fail-open ⇒ 仲裁整体失效（复审 R-C-1）。与项目其它 Lua 调用同形。
-			Long claimed = this.redis.execute(OBSERVE_SCRIPT, List.of(key), toolCallId,
-					System.currentTimeMillis() + "|" + InstanceId.get(), String.valueOf(ttlSeconds()));
-			// 自愈（确定性）：旧版本/半途失败可能留下"有键无 TTL"的墓碑，任何一次 claim 都补回来。
+			Long claimed = this.redis.execute(OBSERVE_SCRIPT, List.of(key), toolCallId, token,
+					String.valueOf(ttlSeconds()));
 			ensureTtl(key);
-			return claimed == null || claimed != 0L;
+			return new ClaimHandle(claimed == null || claimed != 0L, runId, toolCallId, token);
 		}
 		catch (RuntimeException ex) {
-			// fail-open：观测面在依赖抖动时宁可双记，也不能整片缺行（缺行比重行更难发现）
-			// 但必须留可观测信号：静默 fail-open 会让"跨实例恰好一次"整体失效而无从发现（R-I-4）。
 			RedisDegradation.record(RedisDegradation.O1_OBSERVATION_CLAIM, ex);
 			log.debug("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={} error={}", runId, toolCallId,
 					ex.getMessage());
-			return true;
+			return new ClaimHandle(true, runId, toolCallId, token);
 		}
 	}
 
-	/**
-	 * 释放占位：发行为失败时用（复审 I-1）。抢到了位却发不出行，会让本可能成功的执行体永远让位 ⇒
-	 * 该条调用永久 0 条 end。释放后下一次结算可以重试（"宁重不宁缺"）。
-	 *
-	 * <p>幂等、绝不抛出：释放失败只 WARN（原始异常优先，不能被清理动作替换）。
-	 */
-	public void release(String runId, String toolCallId) {
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+	/** 仅释放仍属于本次 handle 的占位；旧 owner 不得删除新 owner 的字段。 */
+	public void release(ClaimHandle handle) {
+		if (handle == null || handle.token() == null || handle.token().isBlank()) {
 			return;
 		}
-		String key = observedKey(runId);
+		String key = observedKey(handle.runId());
 		if (this.redis == null) {
-			Set<String> ids = this.observed.get(key);
-			if (ids != null) {
-				ids.remove(toolCallId);
+			Map<String, String> ids = this.observed.get(key);
+			if (ids != null && handle.token().equals(ids.get(handle.toolCallId()))) {
+				ids.remove(handle.toolCallId());
 			}
 			return;
 		}
 		try {
-			this.redis.opsForHash().delete(key, toolCallId);
+			this.redis.execute(RELEASE_SCRIPT, List.of(key), handle.toolCallId(), handle.token());
 		}
 		catch (RuntimeException ex) {
-			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={} error={}", runId, toolCallId,
+			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={} error={}", handle.runId(), handle.toolCallId(),
 					ex.getMessage());
 		}
 	}
