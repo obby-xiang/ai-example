@@ -2090,6 +2090,9 @@ function snapshotExecutionFact(entry: AiRunCurrentEntry | undefined): SnapshotEx
 }
 
 function replaySafeWithoutSnapshotFact(name: string): boolean {
+  if (name === 'navigate_to') {
+    return true
+  }
   if (name === 'download_export_files' || name === 'open_export_file_editor') {
     return false
   }
@@ -12885,8 +12888,11 @@ export const useAiStore = defineStore('ai', {
           // 锁已由他端持有：他端负责执行与回灌，本端只等既有结果帧/恢复通道的权威结局。
           return false
         }
-        // 只有锁能力不可用、确实无法保证有人执行时，才走既定未知活性出口。
-        return await this.settleUncertainRecoveryTool(message, frame, round)
+        // 幂等导航可在锁不可用时安全重放；其它动作维持既定未知活性出口。
+        if (frame.name !== 'navigate_to') {
+          return await this.settleUncertainRecoveryTool(message, frame, round)
+        }
+        return await this.executeFencedFrontendTool(message, frame, round, runId)
       }
       return fenced.value ?? false
     },
@@ -12943,7 +12949,7 @@ export const useAiStore = defineStore('ai', {
           return await this.settleUncertainRecoveryTool(message, frame, round)
         }
       }
-      if (journal?.state === 'claimed') {
+      if (journal?.state === 'claimed' && frame.name !== 'navigate_to') {
         return await this.settleUncertainRecoveryTool(message, frame, round)
       }
       const executionToken = createPageIdToken()

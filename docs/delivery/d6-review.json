@@ -616,6 +616,13 @@
       "reason": "已同步前端写工具零变更失败回执与宿主导航一次接管，并落实KB真实失败、动态历史保留、协议中和及用户摘要边界",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:558b524d31a0c3992c295205a0064a78d79ad56ceafc1c8b5b7cc7895152cc3a",
+      "status": "synced",
+      "reason": "已同步幂等navigate_to在快照缺失、claimed及锁不可用时的安全重放例外，其它前端工具保持未知活性出口",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
