@@ -85,7 +85,9 @@ index_eval,registration_delete,tombstone_set,del,srem,lpush,hget,
 ping,subscribe,zrem,AI_FRAME_APPEND,scan,MEMORY_CLEAR,zrangebyscore,pexpire
 ```
 
-场景子集、关闭故障或故障子集均为显式缩减实验：`coverageStatus=PARTIAL`，最终 verify/exit 为非 PASS，并记录 `coverageReason`。`single_master_targeted` 目前明确属于 `coverageLimit`，不是 COMPLETE 的必需 PASS 项：现有故障代理不能按 slot/master 定向，standalone 也没有 master-slot 语义，不能用普通一次 PING 冒充单 master 故障。场景级 `coverageLimit` 会写入 manifest，并在 generate/measure/verify/all 分阶段命令间保留；只有无限制、43 场景且全部必需 fault 启用时才为 COMPLETE。
+场景子集、关闭故障或故障子集均为显式缩减实验：`coverageStatus=PARTIAL`，最终 verify/exit 为非 PASS，并记录 `coverageReason`。`single_master_targeted` 目前明确属于 `coverageLimit`，不是 COMPLETE 的必需 PASS 项：现有故障代理不能按 slot/master 定向，standalone 也没有 master-slot 语义，不能用普通一次 PING 冒充单 master 故障。场景级 `coverageLimit` 会写入 manifest，并在 generate/measure/verify/all 分阶段命令间保留；只有无限制、43 场景且全部必需 fault 启用、没有场景级 `coverageLimit` 时才为 COMPLETE。
+
+`memory_find_ids_scan` 在 SPI SCAN 前读取 DBSIZE（Cluster 逐 master 求和）；超过 `PERF_MEMORY_FIND_IDS_MAX_KEYSPACE` 或任一节点 DBSIZE 不可知时不执行 SCAN，记录 `coverageLimit` 与 `memorySpiExecution=SKIPPED_LARGE_OR_UNKNOWN_KEYSPACE`，整体只能 PARTIAL。隔离小键空间仍执行真实枚举、排序/反转义、故障降级与恢复断言；该场景使用独立用户命名空间，避免同轮其他场景的记忆键混入精确结果。
 
 `task_event_slow_emitter_saturation` 的前端 `getJob → onSnapshot` 快照轮询补偿需要真实浏览器验证，Java 场景只记录 `snapshotPollingCoverage=PARTIAL`、`coverageLimit=EXTERNAL_BROWSER_REQUIRED`，不生成该路径的 PASS；后续由 DeepSeek 浏览器复核。
 
@@ -98,6 +100,7 @@ ping,subscribe,zrem,AI_FRAME_APPEND,scan,MEMORY_CLEAR,zrangebyscore,pexpire
 - `PERF_STARTUP_BACKGROUND_KEYS`：默认 smoke=2000、full=100000、stress=1000000；超过 10000 需 `PERF_ALLOW_LARGE_SCALE=true`，超过 100000 还需 `PERF_ALLOW_BACKGROUND_MILLION=true`。
 - `PERF_STARTUP_EXTERNAL_ACTIVE_KEY` / `PERF_STARTUP_EXTERNAL_REMOTE_KEY` / `PERF_STARTUP_EXTERNAL_INVALID_KEY`：仅登记已存在的外部控制键，不创建、不删除。
 - `PERF_MEMORY_MESSAGE_BYTES` 默认 16384；`PERF_MEMORY_CONCURRENT_RUNS` 默认 4；`PERF_LEASE_CONCURRENT_OWNERS` 默认 8（2..64）。
+- `PERF_MEMORY_FIND_IDS_MAX_KEYSPACE` 默认 200000；仅限制诊断 SPI 压测是否在执行前继续，不改变生产 `SCAN COUNT`，也不是生产超时或场景成功替代物。
 - `PERF_KB_CORPUS_DOCS` 默认 130（65..256，小样本，不生成一万文档）；`PERF_KB_CORPUS_BODY_BYTES` 默认 256（64..2048）。
 - `PERF_TASK_EVENT_SATURATION_FRAMES` 默认 32（8..256）。
 - `PERF_TASK_REDIS_DELAY_MS` 默认 80（1..2000），用于任务删除边界延迟/失败与恢复验证。

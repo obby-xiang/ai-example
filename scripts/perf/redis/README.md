@@ -151,9 +151,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_REPEAT` `PERF_WARMUP` `PERF_CONCURRENCY` | `2` `1` `1` | 每个破坏性场景每轮一个独立 copy；并发只作用于首个 DELETE；`concurrent_delete` 至少 2 路并发 |
 | `PERF_OUTPUT_DIR` | `./perf-redis-out` | 相对当前目录；跨设备可任意 |
 | `PERF_KEY_TTL_SECONDS` | `43200` | 工具自有生成键的兜底 TTL（12h）；共享全局恢复索引键不设 TTL |
-| `PERF_BATCH_SIZE` `PERF_SCAN_COUNT` | `500` `1000` | pipeline 批量 / SCAN COUNT |
-| `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` | `200` | cleanup 回退 SCAN 的每节点页数上限；超限 `complete=false`/unknown |
-| `PERF_CLEANUP_SCAN_MAX_SECONDS` | `120` | cleanup 回退 SCAN 的共享单调时间预算；超时 `complete=false`/unknown |
+| `PERF_BATCH_SIZE` `PERF_SCAN_COUNT` | `500` `1000` | pipeline 批量 / SCAN COUNT（cleanup 不 SCAN） |
 | `PERF_VERIFY_SETTLE_SECONDS` | `0` | verify 前等待（例如等 60s 记忆复核） |
 | `PERF_KEEP_GUARD` | `false` | cleanup 时保留 guard/pending（有真实写者时用） |
 | `PERF_ENABLE_ATTACHMENTS` / `PERF_ENABLE_KB` | `true` | 关闭后对应场景被跳过 |
@@ -216,7 +214,7 @@ python -m perf_redis all --keep              # 保留数据
 python -m perf_redis all --cleanup-dry-run   # 只打印清理清单
 ```
 
-`verify` 在 cleanup 执行前按删除/延后语义检查键面；在 cleanup 已执行后改用 `cleanup.complete/remaining` 验收，不再重复 `guard_retained`、`memory_tombstones`、`pending_retained`、`background_preserved` 等清理前断言。cleanup 的精确删除清单本来就包含 guard、pending、记忆 tombstone 与背景键（`PERF_KEEP_GUARD=true` 时仅 guard/pending 例外），因此 cleanup 后这些键不存在是正确结果，不是误删。`cleanup.complete=false` 仍按实际残留和扫描预算失败，不能改成通过。
+`verify` 在 cleanup 执行前按删除/延后语义检查键面；在 cleanup 已执行后改用 `cleanup.complete/remaining` 验收，不再重复 `guard_retained`、`memory_tombstones`、`pending_retained`、`background_preserved` 等清理前断言。cleanup 的精确删除清单本来就包含 guard、pending、记忆 tombstone 与背景键（`PERF_KEEP_GUARD=true` 时仅 guard/pending 例外），因此 cleanup 后这些键不存在是正确结果，不是误删。`cleanup.complete=false` 仍按实际残留或精确存在性不可判记录，不能改成通过。
 
 建议顺序与产出：
 
@@ -425,7 +423,7 @@ pending 在记忆复核完成后允许且应该被移除。若首次响应为 de
   - manifest 推导的本命名空间会话/run/上下文/记忆/transcript/附件登记；
   - 本命名空间 `perf:bg:*`：按 manifest 的 bucket/planned 与确定性 key 公式分批删除，**不做背景 SCAN**；每批删除后用精确 EXISTS 复核。manifest 记录 `planned` 与逐批 `written` 进度（旧 manifest 的 `count/written` 兼容）；
   - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:purge:retry:due` 成员，以及全局 `ai:recovery:due`、身份 `ai:recovery:due:<t>:<u>`、列表 `ai:runs:<t>:<u>` 中本工具 run 的 ZSET member；
-  - archive/staging/活跃 run tag 的 app 剩余键：优先用已推导精确键；仍需发现的回退 SCAN 有 `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` 与 `PERF_CLEANUP_SCAN_MAX_SECONDS` 双重预算，超预算记 `complete=false`/unknown，不伪报干净；
+  - archive/staging/run 附加键全部使用 manifest 已登记的确定 token、索引 member 或固定 run 键公式精确删除并复核；cleanup 不做全键空间 SCAN，也不设置扫描预算；
   - 附件文件仅在 `PERF_ALLOW_FILE_DELETE=true` 且路径**严格位于** `PERF_APP_FILE_STORAGE_PATH` 下的普通文件时删除；存储根目录本身、越界路径、目录/符号链接一律拒绝，不进入删除。
   - 反馈行通过真实 `POST /api/ai/feedback`（rating=0）删除。
 - `cleanup` 默认 dry-run，输出精确键数、样本、背景 planned/written 清单、文件、反馈清单；`--execute` 才删除。没有 manifest 时无法确认历史背景键，会明确 `complete=false`（不再用通配 SCAN 冒充清理）。
@@ -445,11 +443,11 @@ pending 在记忆复核完成后允许且应该被移除。若首次响应为 de
 | DELETE 503 | 应用 Redis 不可用；看 `/api/ai/health`、应用日志 |
 | `unsupported`（附件/反馈） | 应用不可达或上传被拒；先 `doctor`，再用 `PERF_SCENARIOS` 只选该场景单独排查 |
 | 附件上传 400 | 需要 SUSPENDED run + `generative_form` PENDING + 表单含 attachment 字段；工具已按此生成，若仍拒绝看应用日志 |
-| 删除耗时远超预期 | 先看 `bg_*` 与 `staging_*`；staging 的全库 SCAN 是固定成本，Cluster 逐 master 串行 |
+| 删除耗时远超预期 | 先看 `bg_*` 与 `staging_*` 的精确键数量、单键命令回包和外部大键空间背景；cleanup 不做全库 SCAN |
 | `complete=false` | 看 `deferred`/`errors`：活跃 run、Redis/DB/文件失败；修好后再次 DELETE 或等 retry runner |
 | verify `unknown` | Redis/HTTP 读失败；先恢复依赖再重跑 verify，不能当通过 |
 | cleanup 仍有 exact 残留 | 读写竞争（retry runner/真实写者）；加 `PERF_VERIFY_SETTLE_SECONDS` 或停写后重跑；必要时 `PERF_KEEP_GUARD` 先保留 guard |
-| cleanup `scanned` 未完成 / 达预算 | 调大 `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` / `PERF_CLEANUP_SCAN_MAX_SECONDS` 后重跑；预算内不会伪报 complete=true |
+| cleanup `complete=false` | 展开 `remaining` 的 exact/index/background/file/feedback 分类；精确存在性不可判或仍有残留时不伪报干净，不用 SCAN 或调大预算绕过 |
 | Windows 终端中文乱码 | 用 UTF-8 终端（`chcp 65001`）或重定向到文件；输出文件本身是 UTF-8 |
 | CROSSSLOT 类错误 | 工具所有多键脚本/DEL 都按同 tag；若出现，检查 runId 是否被改成含 `{`/`}` |
 

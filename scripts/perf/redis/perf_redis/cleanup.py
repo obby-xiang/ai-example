@@ -1,23 +1,22 @@
 """Scoped cleanup: only this namespace's sessions/files, never a global flush.
 
 Default is a dry-run. Execution needs PERF_ISOLATED_ENV=true (same gate as
-generate/measure). The plan is derived from the manifest and from SCAN over
-exact, namespaced prefixes; every scanned key is validated again before delete.
+generate/measure). Every Redis target is derived from manifest ids, deterministic
+key formulas, or registered index members; cleanup never scans the keyspace.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from . import derive as D
 from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps, RedisUnavailable, ScanBudgetExceeded, ScanStats
+from .redisops import RedisOps, RedisUnavailable
 
 
 def _synthetic_copy(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[str, object]) -> Dict[str, object]:
@@ -137,6 +136,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
             runs.extend(list(derived["runs"].keys()))
             for run_id in derived["runs"].keys():
                 exact.append(K.run_scoped(K.XTRIM_PREFIX, run_id, cfg.tenant_id, cfg.user_id))
+                exact.append(K.run_scoped(K.XACK_PREFIX, run_id, cfg.tenant_id, cfg.user_id))
             sessions.append(str(derived["session_id"]))
             for item in filled.get("attachments") or []:
                 if isinstance(item, dict) and item.get("storage_key"):
@@ -258,87 +258,6 @@ def _file_plan(cfg: Config, files: List[Tuple[str, str]]) -> List[Dict[str, obje
         entry["action"] = "delete"
         out.append(entry)
     return out
-
-
-def _delete_scanned(cfg: Config, ops: RedisOps, label: str, pattern: str,
-                    validator, rows: List[Dict[str, object]],
-                    budget: Dict[str, object]) -> Dict[str, object]:
-    """Bounded fallback SCAN for dynamic app leftovers.
-
-    Budget is per-node page count (RedisOps.ScanStats.per_node_pages) plus one
-    monotonic deadline shared by all cleanup scans. Exhausting either returns
-    complete=false / remaining unknown; it never falls back to an unbounded scan.
-    """
-    deleted = 0
-    seen = 0
-    max_pages = int(budget.get("max_pages_per_node") or 0)
-    deadline = float(budget.get("deadline") or 0.0)
-    if max_pages <= 0 or time.monotonic() >= deadline:
-        return {"label": label, "pattern": pattern, "deleted": 0, "scanned": 0,
-                "passes": 0, "remaining": None, "complete": False,
-                "reason": "扫描预算已耗尽（未开始）"}
-
-    for pass_no in range(1, 3):
-        stats = ScanStats()
-        batch: List[str] = []
-        pass_deleted = 0
-        try:
-            for key in ops.iter_scan(pattern, stats, max_pages, deadline):
-                seen += 1
-                if not validator(key):
-                    rows.append({
-                        "kind": label, "key": key, "action": "skip", "status": "info",
-                        "detail": "未通过本工具命名空间校验",
-                    })
-                    continue
-                batch.append(key)
-                if len(batch) >= cfg.batch_size:
-                    result = ops.delete_keys(batch)
-                    pass_deleted += int(result.get("deleted", 0))
-                    deleted += int(result.get("deleted", 0))
-                    for error in result.get("errors", []):
-                        rows.append({"kind": label, "key": "-", "action": "delete",
-                                     "status": "fail", "detail": str(error)})
-                    batch = []
-        except ScanBudgetExceeded as exc:
-            if batch:
-                result = ops.delete_keys(batch)
-                pass_deleted += int(result.get("deleted", 0))
-                deleted += int(result.get("deleted", 0))
-            rows.append({"kind": label, "key": "-", "action": "scan", "status": "unknown",
-                         "detail": "%s（剩余不可知，不伪报干净）" % exc})
-            return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-                    "passes": pass_no, "remaining": None, "complete": False,
-                    "reason": str(exc)}
-        if batch:
-            result = ops.delete_keys(batch)
-            pass_deleted += int(result.get("deleted", 0))
-            deleted += int(result.get("deleted", 0))
-            for error in result.get("errors", []):
-                rows.append({"kind": label, "key": "-", "action": "delete", "status": "fail",
-                             "detail": str(error)})
-        if pass_deleted == 0:
-            return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-                    "passes": pass_no, "remaining": 0, "complete": True}
-    return {"label": label, "pattern": pattern, "deleted": deleted, "scanned": seen,
-            "passes": 2, "remaining": None, "complete": False,
-            "reason": "两趟有界扫描仍有删除，未收敛（不伪报干净）"}
-
-
-def _validator_for(label: str, cfg: Config, tag: str = "", session_id: str = ""):
-    if label == "run_tag":
-        def check(key: str) -> bool:
-            return key.count(tag) == 1 and key.startswith("ai:")
-        return check
-    if label == "archive":
-        def check(key: str) -> bool:
-            return K.archive_key_for_suffix(key, session_id, cfg.tenant_id, cfg.user_id)
-        return check
-    if label == "staging":
-        def check(key: str) -> bool:
-            return K.staging_key_for_prefix(key, session_id, cfg.tenant_id, cfg.user_id)
-        return check
-    return lambda key: False
 
 
 def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int,
@@ -506,40 +425,8 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             background_results.append(_delete_background_exact(cfg, ops, bucket, planned, rows))
         summary["background"] = background_results
 
-        # 4) app-created leftovers inside our run tags / session prefixes
-        scans: List[Dict[str, object]] = []
-        scan_budget = {
-            "max_pages_per_node": cfg.cleanup_scan_max_pages_per_node,
-            "deadline": time.monotonic() + cfg.cleanup_scan_max_seconds,
-        }
-        for scenario, entry in (manifest.get("scenarios") or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            plan = entry.get("plan") or {}
-            for copy in entry.get("copies") or []:
-                if not isinstance(copy, dict):
-                    continue
-                filled = _synthetic_copy(cfg, scenario, plan, copy)
-                session_id = str(filled.get("session_id"))
-                if int(plan.get("archive_count", 0)) > 0:
-                    scans.append(_delete_scanned(
-                        cfg, ops, "archive", K.archive_scan_pattern(session_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("archive", cfg, session_id=session_id), rows, scan_budget))
-                if int(plan.get("staging_count", 0)) > 0:
-                    scans.append(_delete_scanned(
-                        cfg, ops, "staging", K.staging_scan_pattern(session_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("staging", cfg, session_id=session_id), rows, scan_budget))
-                for run in filled.get("runs") or []:
-                    if not isinstance(run, dict):
-                        continue
-                    if str(run.get("status") or "") not in ("RUNNING", "SUSPENDED"):
-                        continue
-                    run_id = str(run.get("run_id"))
-                    tag = K.run_tag(run_id, cfg.tenant_id, cfg.user_id)
-                    scans.append(_delete_scanned(
-                        cfg, ops, "run_tag", K.run_tag_scan_pattern(run_id, cfg.tenant_id, cfg.user_id),
-                        _validator_for("run_tag", cfg, tag=tag), rows, scan_budget))
-        summary["scans"] = scans
+        # 4) archive/staging/run leftovers are already in the exact manifest plan.
+        summary["scans"] = []
 
         # 5) files (only with an explicit allow + a verified storage root)
         for entry in files:
@@ -600,7 +487,6 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
                     remaining_index.append(ref)
             except Exception:
                 unknown_index.append(ref)
-        remaining_scans = [item for item in scans if not item.get("complete")]
         remaining_background = [item for item in background_results if not item.get("complete")]
         summary["remaining"] = {
             "exact": remaining_exact,
@@ -608,7 +494,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             "due": remaining_due,
             "index_members": remaining_index,
             "index_unknown": unknown_index,
-            "scanned": remaining_scans,
+            "scanned": [],
             "background": remaining_background,
             "unknown_background": targets["unknown_background"],
         }
@@ -622,7 +508,6 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             and not remaining_due
             and not remaining_index
             and not unknown_index
-            and not remaining_scans
             and not remaining_background
             and not targets["unknown_background"]
             and not feedback_failed
