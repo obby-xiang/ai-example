@@ -10,6 +10,8 @@ import java.util.Map;
 
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionPurgePendingStore;
+import com.example.configmgr.perf.redis.BackgroundBatchWriter;
+import com.example.configmgr.perf.redis.CountingRedis;
 import com.example.configmgr.perf.redis.HarnessConfig;
 import com.example.configmgr.perf.redis.HarnessMetrics;
 import com.example.configmgr.perf.redis.KeyShapes;
@@ -252,16 +254,24 @@ public final class ProductionHarnessMain {
 			Map<String, Object> row = new LinkedHashMap<>();
 			long deleted = 0L;
 			long unknown = 0L;
+			List<Map<String, Object>> failures = List.of();
 			try {
-				deleted = support.stage(dataset, "cleanup_exact_owned_keys", () -> deleteOwned(support, dataset));
+				KeyCleanup cleaned = support.stage(dataset, "cleanup_exact_owned_keys", () -> deleteOwned(support, dataset));
+				deleted = cleaned.deleted;
+				failures = cleaned.failures;
+				unknown = failures.size();
 				List<String> residue = ownedPresent(support, dataset);
 				boolean retained = retainedPresent(support, dataset);
-				boolean clean = residue.isEmpty() && retained;
+				boolean clean = failures.isEmpty() && residue.isEmpty() && retained;
 				dataset.state = clean ? "cleaned" : "residue";
-				row.put("status", clean ? "ok" : "fail");
+				row.put("status", !failures.isEmpty() ? "unknown" : (clean ? "ok" : "fail"));
 				row.put("residue", residue.stream().limit(20).toList());
 				row.put("retainedPresent", retained);
-				if (!clean) {
+				row.put("failures", failures);
+				if (!failures.isEmpty()) {
+					exit = Math.max(exit, 2);
+				}
+				else if (!clean) {
 					exit = 1;
 				}
 			}
@@ -300,8 +310,12 @@ public final class ProductionHarnessMain {
 		return exit;
 	}
 
-	private static long deleteOwned(ProductionSupport support, Manifest.Dataset dataset) {
+	private record KeyCleanup(long deleted, List<Map<String, Object>> failures) {
+	}
+
+	private static KeyCleanup deleteOwned(ProductionSupport support, Manifest.Dataset dataset) {
 		long deleted = 0L;
+		List<Map<String, Object>> failures = new ArrayList<>();
 		if ("kb_generation_prune_recovery".equals(dataset.scenario)) {
 			deleted += KbGenerationPruneScenario.cleanupSharedState(support, dataset);
 		}
@@ -316,8 +330,10 @@ public final class ProductionHarnessMain {
 				deleted += support.redis.opsForHash().delete(index.getKey(), field);
 			}
 		}
+		KeyCleanup owned = deleteKeysPipelined(support, dataset.keys);
+		deleted += owned.deleted;
+		failures.addAll(owned.failures);
 		for (String key : dataset.keys) {
-			deleted += Boolean.TRUE.equals(support.redis.delete(key)) ? 1L : 0L;
 			if (key.startsWith(SessionPurgePendingStore.PENDING_PREFIX)) {
 				support.redis.opsForZSet().remove(SessionPurgePendingStore.DUE_KEY, key);
 			}
@@ -331,12 +347,42 @@ public final class ProductionHarnessMain {
 					+ support.cfg.tenantId + ":" + support.cfg.userId, runId);
 		}
 		if (!dataset.externalBackground) {
+			List<String> backgroundKeys = new ArrayList<>(dataset.background);
 			for (int i = 0; i < dataset.background; i++) {
-				String key = KeyShapes.backgroundKey(support.cfg.namespace, dataset.backgroundBucket, i);
-				deleted += Boolean.TRUE.equals(support.redis.delete(key)) ? 1L : 0L;
+				backgroundKeys.add(KeyShapes.backgroundKey(support.cfg.namespace, dataset.backgroundBucket, i));
+			}
+			KeyCleanup background = deleteKeysPipelined(support, backgroundKeys);
+			deleted += background.deleted;
+			failures.addAll(background.failures);
+		}
+		return new KeyCleanup(deleted, failures);
+	}
+
+	private static KeyCleanup deleteKeysPipelined(ProductionSupport support, List<String> keys) {
+		long deleted = 0L;
+		List<Map<String, Object>> failures = new ArrayList<>();
+		CountingRedis redis = new CountingRedis(support.redis, support.cfg.commandTimeout);
+		for (List<String> batch : CountingRedis.batch(keys, BackgroundBatchWriter.BATCH_SIZE)) {
+			List<String[]> commands = new ArrayList<>(batch.size());
+			for (String key : batch) {
+				commands.add(new String[] { "DEL", key });
+			}
+			List<Object> replies = redis.pipelineRawAttempts(commands);
+			for (int i = 0; i < batch.size(); i++) {
+				String key = batch.get(i);
+				Object reply = i < replies.size() ? replies.get(i) : null;
+				if (reply instanceof Number number) {
+					deleted += number.longValue();
+					continue;
+				}
+				Map<String, Object> failure = new LinkedHashMap<>();
+				failure.put("key", key);
+				failure.put("error", reply instanceof RuntimeException exception
+						? exception.toString() : "missing or invalid pipeline reply");
+				failures.add(failure);
 			}
 		}
-		return deleted;
+		return new KeyCleanup(deleted, failures);
 	}
 
 	private static boolean ownedAbsent(ProductionSupport support, Manifest.Dataset dataset) {

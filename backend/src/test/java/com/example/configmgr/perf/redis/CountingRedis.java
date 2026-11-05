@@ -474,6 +474,51 @@ public final class CountingRedis {
 		return results == null ? List.of() : results;
 	}
 
+	/** 与 pipelineRaw 同路，但逐条返回结果或异常，供清理继续处理后续键。 */
+	public List<Object> pipelineRawAttempts(List<String[]> commands) {
+		for (String[] command : commands) {
+			requirePipelineCommand(command);
+		}
+		long waitMillis = pipelineWaitMillis(this.commandTimeout);
+		List<Object> results = this.template.execute((RedisCallback<List<Object>>) connection -> {
+			RedisClusterAsyncCommands<byte[], byte[]> nativeCommands = nativeCommands(connection);
+			List<RedisFuture<?>> futures = new ArrayList<>(commands.size());
+			for (String[] command : commands) {
+				futures.add(dispatch(nativeCommands, command));
+			}
+			return awaitPipelineAttempts(futures, waitMillis);
+		});
+		this.commands += commands.size();
+		this.pipelineBatches += 1L;
+		for (String[] command : commands) {
+			this.requestBytes += estimateCommandBytes(command);
+		}
+		this.responseBytes += results == null ? 0L : results.toString().length();
+		return results == null ? List.of() : results;
+	}
+
+	private List<Object> awaitPipelineAttempts(List<RedisFuture<?>> futures, long waitMillis) {
+		boolean completed = LettuceFutures.awaitAll(waitMillis, TimeUnit.MILLISECONDS,
+				futures.toArray(new Future<?>[0]));
+		if (!completed) {
+			for (RedisFuture<?> future : futures) {
+				if (!future.isDone()) {
+					future.cancel(true);
+				}
+			}
+		}
+		List<Object> results = new ArrayList<>(futures.size());
+		for (RedisFuture<?> future : futures) {
+			try {
+				results.add(deserializeValue(futureValue(future)));
+			}
+			catch (RuntimeException ex) {
+				results.add(ex);
+			}
+		}
+		return results;
+	}
+
 	/** 整批硬上限：commandTimeout 与 800ms 取小，任何配置下都不会等到秒级以上。 */
 	static long pipelineWaitMillis(Duration commandTimeout) {
 		if (commandTimeout == null || commandTimeout.isNegative() || commandTimeout.isZero()) {
