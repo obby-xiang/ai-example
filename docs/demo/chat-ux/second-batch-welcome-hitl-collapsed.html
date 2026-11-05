@@ -4,249 +4,128 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>配置助手 · 欢迎区 / HITL / 收起展开</title>
-<!--
-  静态演示：结构与尺寸/配色/边框/字体/图标全部取自当前项目
-  - frontend/src/components/AiPanel/AiPanel.vue（头部 16-35、空态 261-296、输入区 1164-1226、
-    门卡 4098-4150 / 713-775、状态徽标 4219-4246、建议 chip 4576、收起条 2-9）
-  - frontend/src/App.vue（48px 收起 / 420px 展开、左边框 #e4e7ed、宽度过渡 200ms，105-120、38-40）
-  无任何外链依赖；批准/拒绝/停止/新建对话/收起展开均为真实交互。
--->
+<title>配置助手 · 交互演示（欢迎区 / 通用确认卡 / 表单 / 收起展开）</title>
+<script src="https://cdn.tailwindcss.com"></script>
 <style>
-  :root{
-    --ink:#1f2328; --ink-2:#303133; --muted:#57606a; --muted-2:#8b949e;
-    --line:#e3e6ea; --line-2:#eef0f3; --line-3:#ebeef5; --line-4:#e4e7ed;
-    --blue:#2563eb; --blue-soft:#eff4ff; --blue-line:#cddcff;
-    --bg-soft:#f6f7f9; --ok:#1a7f45; --ok-bg:#edf7f0; --ok-line:#bfe3cd;
-    --danger:#c0392b; --danger-bg:#fdf1ef; --warn:#b45309;
-    --panel:420px; --collapsed:48px;
-  }
-  *{box-sizing:border-box}
+  /* 仅放 Tailwind 工具类表达不了的：keyframes、滚动条、呼吸光晕绑定 */
   html,body{height:100%}
-  body{
-    margin:0;color:var(--ink);background:#f5f7fa;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-    font-size:13px;line-height:1.6;
+  .breath-halo{animation:haloPulse 1.8s ease-in-out infinite}
+  @keyframes haloPulse{
+    0%,100%{box-shadow:0 0 0 0 rgba(37,99,235,0)}
+    45%{box-shadow:0 0 0 7px rgba(37,99,235,.10)}
+    65%{box-shadow:0 0 0 3px rgba(37,99,235,.16)}
   }
-  button{font:inherit;cursor:pointer}
-  button:disabled{cursor:default;opacity:.6}
-  :where(button,textarea):focus-visible{outline:none;box-shadow:0 0 0 2px rgba(37,99,235,.35);border-radius:8px}
-  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-
-  /* ── 应用外壳（App.vue:4-67） ── */
-  .shell{height:100%;display:flex;flex-direction:column}
-  .app-head{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:#fff;border-bottom:1px solid #e5e7eb}
-  .app-head .left{display:flex;align-items:center;gap:16px}
-  .app-title{font-size:18px;font-weight:500;line-height:1.6}
-  .app-nav{display:flex;align-items:center;gap:4px;list-style:none;margin:0;padding:0}
-  .app-nav li{padding:0 12px;height:40px;display:flex;align-items:center;color:#303133;border-bottom:2px solid transparent;font-size:14px}
-  .app-nav li.on{color:var(--blue);border-bottom-color:var(--blue)}
-  .head-actions{display:flex;align-items:center;gap:12px}
-  .link-btn{border:0;background:transparent;color:#409eff;padding:0;font-size:13px}
-  .app-main{flex:1;display:flex;min-height:0}
-
-  /* 左侧业务区（只作背景，用真实配色：任务中心表格） */
-  .workspace{flex:1;min-width:0;min-height:0;overflow:auto;padding:24px}
-  .ws-card{background:#fff;border:1px solid #ebeef5;border-radius:8px;padding:16px 18px}
-  .ws-title{font-size:15px;font-weight:600;color:var(--ink-2);margin:0 0 4px}
-  .ws-sub{font-size:12px;color:var(--muted-2);margin:0 0 14px}
-  .ws-table{width:100%;border-collapse:collapse;font-size:12.5px}
-  .ws-table th{color:var(--muted);font-weight:500;text-align:left;background:#fafafa;padding:8px 10px;border-bottom:1px solid var(--line-3)}
-  .ws-table td{padding:9px 10px;border-bottom:1px solid var(--line-3);color:var(--ink-2)}
-  .tag{display:inline-block;font-size:11px;line-height:1.6;padding:0 6px;border-radius:4px;border:1px solid var(--ok-line);background:var(--ok-bg);color:var(--ok)}
-  .tag.run{border-color:#fde68a;background:#fffbeb;color:var(--warn)}
-
-  /* ── AI 栏（App.vue:38-40 + 105-120：48 ⇄ 420，宽度 200ms） ── */
-  .ai-aside{position:relative;flex:none;width:var(--panel);border-left:1px solid var(--line-4);background:#fff;overflow:hidden;transition:width .2s}
-  .ai-aside.collapsed{width:var(--collapsed)}
-  .panel{height:100%;display:flex;flex-direction:column;min-width:0}
-  .panel[hidden]{display:none}
-
-  /* 收起态：48px 竖排条（AiPanel.vue:2-9） */
-  .collapsed-strip{height:100%;display:flex;flex-direction:column;align-items:center;padding-top:16px;gap:8px;cursor:pointer;color:var(--muted);border:0;background:transparent;width:100%}
-  .brand-mark{display:grid;place-items:center;width:30px;height:30px;flex:none;border-radius:8px;background:var(--blue-soft);color:var(--blue)}
-  .brand-mark svg{width:17px;height:17px}
-  .vertical{writing-mode:vertical-rl;font-size:13px;letter-spacing:1px}
-
-  /* 头部（AiPanel.vue:16-35） */
-  .panel-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line-3)}
-  .panel-title{flex:1;min-width:0;font-size:14px;font-weight:600;color:var(--ink-2)}
-  .text-btn{border:0;background:transparent;color:#409eff;font-size:12px;padding:5px 8px;border-radius:6px}
-  .text-btn:hover{background:var(--blue-soft)}
-  .icon-btn{position:relative;display:grid;place-items:center;width:26px;height:26px;flex:none;border:0;border-radius:6px;background:transparent;color:var(--muted)}
-  .icon-btn:hover{background:var(--bg-soft);color:var(--ink)}
-  .icon-btn svg{width:14px;height:14px}
-
-  /* 收起钮的柔和光晕呼吸：仅在“停止按钮显示”时挂 .breathing（停止消失即移除） */
-  .icon-btn.breathing{color:var(--blue);animation:halo 1.8s ease-in-out infinite}
-  @keyframes halo{
-    0%,100%{box-shadow:0 0 0 0 rgba(37,99,235,0);background:transparent}
-    45%{box-shadow:0 0 0 7px rgba(37,99,235,.10);background:rgba(239,244,255,.9)}
-    65%{box-shadow:0 0 0 3px rgba(37,99,235,.16);background:rgba(239,244,255,.6)}
+  .dots i{display:block;width:7px;height:7px;border-radius:50%;background:#2563eb;animation:dotBreathe 1.15s ease-in-out infinite}
+  .dots i:nth-child(2){animation-delay:.18s}
+  .dots i:nth-child(3){animation-delay:.36s}
+  @keyframes dotBreathe{0%,100%{opacity:.28;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}
+  .chat-scroll{scrollbar-width:thin;scrollbar-color:rgba(144,147,153,.4) transparent}
+  .chat-scroll::-webkit-scrollbar{width:6px}
+  .chat-scroll::-webkit-scrollbar-thumb{background:rgba(144,147,153,.4);border-radius:999px}
+  @media (prefers-reduced-motion:reduce){
+    .breath-halo{animation:none;box-shadow:0 0 0 5px rgba(37,99,235,.12)}
+    .dots i{animation:none;opacity:.8}
   }
-  @media (prefers-reduced-motion:reduce){.icon-btn.breathing{animation:none;box-shadow:0 0 0 4px rgba(37,99,235,.10)}}
-
-  /* 消息滚动区（AiPanel.vue:238-247：p-3 + 细滚动条） */
-  .panel-scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px;scrollbar-width:thin;scrollbar-color:rgba(144,147,153,.4) transparent}
-  .panel-scroll::-webkit-scrollbar{width:6px}
-  .panel-scroll::-webkit-scrollbar-thumb{background:rgba(144,147,153,.4);border-radius:999px}
-
-  /* 空态卡（AiPanel.vue:261-296：m-3 + border #e3e6ea + r10 + px14 py16） */
-  .empty-state{margin:12px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 14px}
-  .greeting{font-weight:650;font-size:13.2px;margin-bottom:3px}
-  .welcome{font-size:12.4px;line-height:1.8;color:var(--muted)}
-  .storage-note{margin-top:6px;font-size:11.8px;line-height:1.7;color:var(--muted-2)}
-  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
-  .chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 11px;font-size:12.2px;color:var(--muted);transition:border-color .15s,color .15s}
-  .chip:hover{border-color:var(--blue-line);color:var(--blue)}
-
-  /* 消息（AiPanel.vue:345-400 口径：用户 13.5px 气泡 / 助手 13.8px 全宽） */
-  .turn{margin-bottom:18px}
-  .bubble-user{display:flex;justify-content:flex-end}
-  .bubble-user .body{max-width:86%;background:var(--bg-soft);border:1px solid var(--line-2);border-radius:12px;padding:8px 10px;font-size:13.5px;overflow-wrap:anywhere}
-  .bubble-ai{font-size:13.8px;padding:0 10px;overflow-wrap:anywhere}
-  .meta{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;color:var(--muted-2)}
-  .meta .spacer{flex:1}
-  .meta .mini{display:grid;place-items:center;width:22px;height:22px;border:0;background:transparent;border-radius:5px;color:var(--muted-2)}
-  .meta .mini:hover{background:var(--bg-soft);color:var(--muted)}
-  .meta .mini svg{width:13px;height:13px}
-  .stopped{font-size:11.5px;color:var(--muted-2)}
-  .working{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted-2)}
-  .working i{width:4px;height:4px;border-radius:50%;background:currentColor;display:inline-block;animation:pulse 1.2s infinite}
-  .working i:nth-child(2){animation-delay:.2s}
-  .working i:nth-child(3){animation-delay:.4s}
-  @keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
-
-  /* HITL 卡（AiPanel.vue:4098-4103 / 4128-4135 / 713-775 / 4219-4246） */
-  .card{margin-top:6px;border:1px solid var(--line);border-radius:10px;background:#fff;overflow:hidden;margin-bottom:8px}
-  .card-head{display:flex;width:100%;align-items:center;gap:6px;padding:8px 10px;border:0;background:transparent;text-align:left;font:inherit;white-space:nowrap;transition:background .15s}
-  .card-head:hover{background:var(--bg-soft)}
-  .card-head .ic{display:flex;width:24px;flex:none;align-items:center;justify-content:center;color:var(--muted)}
-  .card-head .ic svg{width:15px;height:15px}
-  .card-title{font-size:12px;line-height:1.7;font-weight:650;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-  .card-sub{font-size:11.5px;line-height:1.6;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-  .status{flex:none;font-size:9.5px;line-height:1.7;padding:0 5px;border-radius:5px;border:1px solid;white-space:nowrap;max-width:104px;overflow:hidden;text-overflow:ellipsis}
-  .status.pending{color:var(--blue);background:var(--blue-soft);border-color:var(--blue-line)}
-  .status.success{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
-  .status.danger{color:var(--danger);background:var(--danger-bg);border-color:var(--line)}
-  .chev{color:var(--muted);font-size:12px;margin-left:auto;transform:rotate(90deg);transition:transform .15s}
-  .card[data-open="0"] .chev{transform:rotate(0deg)}
-  .card-body{padding-bottom:11px}
-  .card[data-open="0"] .card-body{display:none}
-  .rows{margin:9px 11px 0;border:1px solid var(--line-2);border-radius:8px;padding:2px 10px;max-height:min(280px,35vh);overflow-y:auto;background:#fff}
-  .row{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line-2);font-size:13px;line-height:1.5}
-  .row:last-child{border-bottom:0}
-  .row .k{flex:0 1 auto;min-width:0;max-width:40%;color:var(--muted-2);font-size:12.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .row .v{flex:1;min-width:0;overflow-wrap:anywhere}
-  .actions{display:flex;flex-wrap:wrap;align-items:center;gap:9px;padding:11px 11px 0}
-  .actions .group{margin-left:auto;display:flex;align-items:center;gap:8px;white-space:nowrap}
-  .btn{border-radius:8px;padding:5px 13px;font-size:12.6px;white-space:nowrap;transition:all .15s}
-  .btn.reject{border:1px solid var(--line);background:#fff;color:var(--muted);min-width:56px}
-  .btn.reject:hover{border-color:#8b949e;color:var(--ink)}
-  .btn.approve{border:1px solid transparent;background:var(--blue);color:#fff;font-weight:600;min-width:72px}
-  .btn.approve:hover{filter:brightness(1.08)}
-  .receipt{margin:9px 11px 0;border:1px solid var(--line-2);border-radius:8px;background:var(--bg-soft);padding:8px 10px;font-size:12.4px;color:var(--muted);line-height:1.6}
-
-  /* 输入区（AiPanel.vue:1164-1226） */
-  .composer-wrap{border-top:1px solid var(--line-2);background:#fff;padding:10px 14px}
-  .composer{border:1px solid var(--line);border-radius:12px;background:#fff;transition:border-color .15s,box-shadow .15s}
-  .composer:focus-within{border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.35)}
-  .composer textarea{display:block;min-height:40px;max-height:101px;width:100%;resize:none;overflow-y:auto;border:0;border-top-left-radius:12px;border-top-right-radius:12px;background:transparent;padding:11px 11px 7px;font:inherit;font-size:13px;line-height:1.6;color:var(--ink);outline:none;field-sizing:content}
-  .composer textarea::placeholder{color:var(--muted-2)}
-  .composer-foot{position:relative;display:flex;align-items:center;gap:6px;padding:0 9px 7px}
-  .composer-foot .spacer{flex:1}
-  .ctx-ring{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);flex:none;margin-right:2px}
-  .round-btn{margin-left:auto;display:flex;width:28px;height:28px;flex:none;align-items:center;justify-content:center;border-radius:999px;border:0;transition:all .15s}
-  .round-btn.stop{background:#1f2328;color:#fff}
-  .round-btn.stop:hover{filter:brightness(1.15)}
-  .round-btn.stop .sq{display:block;width:9px;height:9px;border-radius:2px;background:#fff}
-  .round-btn.send{background:var(--blue);color:#fff;font-size:13px;line-height:1}
-  .round-btn.send:hover{filter:brightness(1.08)}
-  .round-btn.send:disabled{background:var(--muted-2);color:#fff}
-  .tip{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#303133;color:#fff;font-size:11px;line-height:1.5;padding:3px 7px;border-radius:5px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s}
-  .round-btn:hover .tip,.icon-btn:hover .tip{opacity:1}
 </style>
 </head>
-<body>
-<div class="shell">
-  <header class="app-head">
-    <div class="left">
-      <span class="app-title">配置管理平台</span>
-      <ul class="app-nav">
-        <li class="on">任务中心</li><li>配置定义</li><li>数据浏览</li><li>AI 设置</li><li>AI 反馈</li>
+<body class="m-0 bg-[#f1f2f4] text-[#1f2328] font-sans text-[13px] leading-[1.6] antialiased [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-[#2563eb]/40">
+
+<!-- ───────── 演示场景栏（Demo 工具，不属于产品界面） ───────── -->
+<header class="sticky top-0 z-40 bg-[#1f2328] text-white">
+  <div class="mx-auto flex max-w-[1680px] flex-wrap items-center gap-[10px] px-[18px] py-[9px]">
+    <span class="rounded-[5px] bg-white/15 px-[6px] py-[1px] text-[10.5px] tracking-[.08em]">DEMO</span>
+    <span class="text-[12.5px] text-white/75">演示场景（仅 Demo 导航，不属于产品界面）</span>
+    <nav id="sceneNav" class="flex flex-1 flex-wrap gap-[6px]" aria-label="演示场景">
+      <button type="button" data-scenario="welcome" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="true">1 新对话欢迎</button>
+      <button type="button" data-scenario="generating" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">2 回复中 / 工具执行</button>
+      <button type="button" data-scenario="gate-create" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">3 创建导出确认</button>
+      <button type="button" data-scenario="gate-start" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">4 启动导出确认</button>
+      <button type="button" data-scenario="gate-publish" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">5 发布配置确认</button>
+      <button type="button" data-scenario="form" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">6 条件表单</button>
+      <button type="button" data-scenario="collapsed-generating" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">7 收起后光晕</button>
+      <button type="button" data-scenario="outcomes" class="rounded-[7px] border border-white/20 px-[9px] py-[3px] text-[12px] text-white/80 transition-colors hover:border-white/45 hover:text-white aria-pressed:border-[#2563eb] aria-pressed:bg-[#2563eb] aria-pressed:text-white" aria-pressed="false">8 批准 / 拒绝 / 停止对照</button>
+    </nav>
+  </div>
+</header>
+
+<!-- ───────── 产品界面（对齐 App.vue + AiPanel.vue 的真实形态） ───────── -->
+<div class="flex h-[calc(100vh-42px)] flex-col">
+  <header class="flex items-center justify-between border-b border-[#e5e7eb] bg-white px-[16px] py-[8px]">
+    <div class="flex items-center gap-[16px]">
+      <span class="text-[18px] font-medium leading-[1.6]">配置管理平台</span>
+      <ul class="flex items-center gap-[4px]">
+        <li class="flex h-[40px] items-center border-b-2 border-[#2563eb] px-[12px] text-[14px] text-[#2563eb]">任务中心</li>
+        <li class="flex h-[40px] items-center border-b-2 border-transparent px-[12px] text-[14px] text-[#303133]">配置定义</li>
+        <li class="flex h-[40px] items-center border-b-2 border-transparent px-[12px] text-[14px] text-[#303133]">数据浏览</li>
+        <li class="flex h-[40px] items-center border-b-2 border-transparent px-[12px] text-[14px] text-[#303133]">AI 设置</li>
+        <li class="flex h-[40px] items-center border-b-2 border-transparent px-[12px] text-[14px] text-[#303133]">AI 反馈</li>
       </ul>
     </div>
-    <div class="head-actions">
-      <button class="link-btn" type="button">EN</button>
-      <button class="link-btn" type="button" id="headToggle">隐藏 AI 栏</button>
+    <div class="flex items-center gap-[12px]">
+      <button type="button" class="border-0 bg-transparent p-0 text-[13px] text-[#409eff]">EN</button>
+      <button type="button" id="headToggle" class="border-0 bg-transparent p-0 text-[13px] text-[#409eff]">隐藏 AI 栏</button>
     </div>
   </header>
 
-  <main class="app-main">
-    <section class="workspace">
-      <div class="ws-card">
-        <h2 class="ws-title">任务中心</h2>
-        <p class="ws-sub">导出配置 / 导入配置 任务管理 · 手动刷新 · 数据截至 10:24:00</p>
-        <table class="ws-table">
-          <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>当前步骤</th></tr></thead>
-          <tbody>
-            <tr><td>#12 导出CNY货币字典</td><td>导出配置</td><td><span class="tag">已完成</span></td><td>导出执行</td></tr>
-            <tr><td>#11 导出货币字典</td><td>导出配置</td><td><span class="tag run">进行中</span></td><td>查询条件</td></tr>
-            <tr><td>#10 导入项目参数</td><td>导入配置</td><td><span class="tag">已完成</span></td><td>导入执行</td></tr>
+  <main class="flex min-h-0 flex-1">
+    <section class="min-w-0 flex-1 overflow-auto p-[24px]">
+      <div class="rounded-[8px] border border-[#ebeef5] bg-white px-[18px] py-[16px]">
+        <h2 class="m-0 mb-[4px] text-[15px] font-semibold text-[#303133]">任务中心</h2>
+        <p class="m-0 mb-[14px] text-[12px] text-[#8b949e]">导出配置 / 导入配置 任务管理 · 手动刷新 · 数据截至 10:24:00</p>
+        <table class="w-full border-collapse text-[12.5px]">
+          <thead>
+            <tr class="bg-[#fafafa] text-[#57606a]">
+              <th class="border-b border-[#ebeef5] px-[10px] py-[8px] text-left font-medium">任务</th>
+              <th class="border-b border-[#ebeef5] px-[10px] py-[8px] text-left font-medium">类型</th>
+              <th class="border-b border-[#ebeef5] px-[10px] py-[8px] text-left font-medium">状态</th>
+              <th class="border-b border-[#ebeef5] px-[10px] py-[8px] text-left font-medium">当前步骤</th>
+            </tr>
+          </thead>
+          <tbody class="text-[#303133]">
+            <tr><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">#12 导出CNY货币字典</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导出配置</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]"><span class="inline-block rounded-[4px] border border-[#bfe3cd] bg-[#edf7f0] px-[6px] text-[11px] text-[#1a7f45]">已完成</span></td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导出执行</td></tr>
+            <tr><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">#11 导出货币字典</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导出配置</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]"><span class="inline-block rounded-[4px] border border-[#bfe3cd] bg-[#edf7f0] px-[6px] text-[11px] text-[#1a7f45]">已完成</span></td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导出执行</td></tr>
+            <tr><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">#10 导入项目参数</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导入配置</td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]"><span class="inline-block rounded-[4px] border border-[#bfe3cd] bg-[#edf7f0] px-[6px] text-[11px] text-[#1a7f45]">已完成</span></td><td class="border-b border-[#ebeef5] px-[10px] py-[9px]">导入执行</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <aside class="ai-aside" id="aside">
-      <!-- 收起态：48px 竖排条（AiPanel.vue:2-9） -->
-      <button class="collapsed-strip" id="collapsedStrip" type="button" aria-label="展开 AI 栏" hidden>
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+    <aside id="aside" class="relative flex-none overflow-hidden border-l border-[#e4e7ed] bg-white transition-[width] duration-200 w-[420px]">
+      <!-- 48px 收起条 -->
+      <button id="collapsedStrip" type="button" aria-label="展开 AI 栏" class="hidden h-full w-full flex-col items-center gap-[8px] bg-transparent pt-[16px] text-[#57606a]" style="writing-mode:horizontal-tb">
+        <span id="stripMark" class="grid h-[30px] w-[30px] place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]">
+          <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
         </span>
-        <span class="vertical">配置助手</span>
+        <span class="text-[13px]" style="writing-mode:vertical-rl;letter-spacing:.5px">配置助手</span>
       </button>
 
-      <!-- 展开态 -->
-      <div class="panel" id="panel">
-        <div class="panel-head">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+      <div id="panel" class="flex h-full min-w-0 flex-col">
+        <!-- 头部 -->
+        <div class="flex items-center gap-[10px] border-b border-[#ebeef5] px-[12px] py-[10px]">
+          <span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]" aria-hidden="true">
+            <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
           </span>
-          <div class="panel-title">配置助手</div>
-          <button class="text-btn" id="newChat" type="button" title="新建对话">新建对话</button>
-          <button class="icon-btn" id="collapseBtn" type="button" title="收起" aria-label="收起 AI 栏">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"></path></svg>
-            <span class="tip">收起</span>
+          <div class="min-w-0 flex-1 text-[14px] font-semibold text-[#303133]">配置助手</div>
+          <button id="newChat" type="button" title="新建对话" class="rounded-[6px] border-0 bg-transparent px-[8px] py-[5px] text-[12px] text-[#409eff] hover:bg-[#eff4ff]">新建对话</button>
+          <button id="collapseBtn" type="button" title="收起" aria-label="收起 AI 栏" class="relative grid h-[26px] w-[26px] place-items-center rounded-[6px] border-0 bg-transparent text-[#57606a] hover:bg-[#f6f7f9] hover:text-[#1f2328]">
+            <svg class="h-[15px] w-[15px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg>
           </button>
         </div>
 
-        <div class="panel-scroll" id="scroll" role="log" aria-label="对话记录">
-          <div class="empty-state" id="emptyState">
-            <div class="greeting">您好，我是配置助手</div>
-            <div class="welcome">
-              我可以帮您查询配置项与字段、查看任务，<br>
-              打开导出结果在线编辑器、下载导出文件，<br>
-              并启动导出/预检查/导入/发布作业。
-            </div>
-            <div class="storage-note">对话只留本页签浏览器镜像与服务端 24 小时滑动记忆窗口，刷新可恢复、没有长期归档。</div>
-            <div class="chips" id="chips">
-              <button class="chip" type="button" data-fill="导出cny货币字典（新建任务）">导出cny货币字典</button>
-              <button class="chip" type="button" data-fill="查看任务 #12 的导出结果">查看导出结果</button>
-              <button class="chip" type="button" data-fill="配置发布的流程规范是什么？">配置发布流程规范</button>
-            </div>
-          </div>
+        <div id="chatScroll" class="chat-scroll flex-1 overflow-y-auto overflow-x-hidden p-[12px]" role="log" aria-label="对话记录">
+          <div id="welcome"></div>
           <div id="messages"></div>
         </div>
 
-        <div class="composer-wrap">
-          <div class="composer">
-            <textarea id="input" rows="1" maxlength="8000" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
-            <div class="composer-foot">
-              <span class="spacer"></span>
-              <span class="ctx-ring" title="上下文占用" aria-hidden="true"></span>
-              <button class="round-btn send" id="sendBtn" type="button" aria-label="发送">↑<span class="tip">发送</span></button>
-              <button class="round-btn stop" id="stopBtn" type="button" aria-label="停止" hidden><span class="sq" aria-hidden="true"></span><span class="tip">停止</span></button>
+        <!-- 输入区 -->
+        <div class="border-t border-[#eef0f3] bg-white px-[14px] py-[10px]">
+          <div class="rounded-[12px] border border-[#e3e6ea] bg-white transition-[border-color,box-shadow] duration-150 focus-within:border-[#2563eb] focus-within:ring-2 focus-within:ring-[#2563eb]/40">
+            <textarea id="input" rows="1" maxlength="8000" placeholder="输入消息，Enter 发送，Shift+Enter 换行" class="block max-h-[101px] min-h-[40px] w-full resize-none overflow-y-auto rounded-t-[12px] border-0 bg-transparent px-[11px] pb-[7px] pt-[11px] text-[13px] leading-[1.6] text-[#1f2328] outline-none placeholder:text-[#8b949e]" style="field-sizing:content"></textarea>
+            <div class="relative flex items-center gap-[6px] px-[9px] pb-[7px]">
+              <span class="flex-1"></span>
+              <span class="mr-[2px] h-[16px] w-[16px] flex-none rounded-full border-2 border-[#e3e6ea]" title="上下文占用" aria-hidden="true"></span>
+              <button id="sendBtn" type="button" aria-label="发送" class="ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#2563eb] text-[13px] leading-none text-white transition-all duration-150 hover:brightness-[1.08] disabled:cursor-default disabled:bg-[#8b949e]">↑</button>
+              <button id="stopBtn" type="button" aria-label="停止" hidden class="ml-auto flex h-[28px] w-[28px] flex-none items-center justify-center rounded-full border-0 bg-[#1f2328] transition-all duration-150 hover:brightness-[1.15]"><span class="block h-[9px] w-[9px] rounded-[2px] bg-white" aria-hidden="true"></span></button>
             </div>
           </div>
         </div>
@@ -256,278 +135,475 @@
 </div>
 
 <script>
+/**
+ * 演示状态与函数（可回落映射）
+ *   state.messages / state.streaming / state.collapsed  ⇄ AiPanel store（messages / loading+suspended / expanded）
+ *   send() → streamInto()                                ⇄ send → start/message_start/delta/done
+ *   openGate() / decide()                                ⇄ confirm_request / confirm_decision
+ *   submitForm() / cancelForm()                          ⇄ generative_form 回灌 / FRONTEND_CANCELLED
+ *   stopTurn()                                           ⇄ ai.stop()（段 stopped）
+ *   setCollapsed()                                       ⇄ ai.toggleExpand() + App.vue aside 宽度
+ */
 (function () {
   'use strict'
 
-  var aside = document.getElementById('aside')
-  var panel = document.getElementById('panel')
-  var strip = document.getElementById('collapsedStrip')
-  var collapseBtn = document.getElementById('collapseBtn')
-  var headToggle = document.getElementById('headToggle')
-  var newChatBtn = document.getElementById('newChat')
-  var scrollEl = document.getElementById('scroll')
-  var emptyState = document.getElementById('emptyState')
-  var chips = document.getElementById('chips')
-  var messagesEl = document.getElementById('messages')
-  var input = document.getElementById('input')
-  var sendBtn = document.getElementById('sendBtn')
-  var stopBtn = document.getElementById('stopBtn')
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  var state = { messages: [], loading: false, stopped: false, gate: null, timer: null, seq: 0 }
-
-  function el(tag, cls, text) {
-    var node = document.createElement(tag)
-    if (cls) node.className = cls
-    if (text !== undefined && text !== null) node.textContent = text
-    return node
+  var el = {
+    aside: document.getElementById('aside'),
+    panel: document.getElementById('panel'),
+    strip: document.getElementById('collapsedStrip'),
+    stripMark: document.getElementById('stripMark'),
+    collapseBtn: document.getElementById('collapseBtn'),
+    headToggle: document.getElementById('headToggle'),
+    newChat: document.getElementById('newChat'),
+    scroll: document.getElementById('chatScroll'),
+    welcome: document.getElementById('welcome'),
+    messages: document.getElementById('messages'),
+    input: document.getElementById('input'),
+    send: document.getElementById('sendBtn'),
+    stop: document.getElementById('stopBtn'),
+    nav: document.getElementById('sceneNav')
   }
-  function icon(paths) {
-    var ns = 'http://www.w3.org/2000/svg'
-    var svg = document.createElementNS(ns, 'svg')
-    svg.setAttribute('viewBox', '0 0 24 24')
-    svg.setAttribute('fill', 'none')
-    svg.setAttribute('stroke', 'currentColor')
-    svg.setAttribute('stroke-width', '1.7')
-    svg.setAttribute('stroke-linecap', 'round')
-    svg.setAttribute('stroke-linejoin', 'round')
-    for (var i = 0; i < paths.length; i += 1) {
-      var p = document.createElementNS(ns, 'path')
-      p.setAttribute('d', paths[i])
-      svg.appendChild(p)
+
+  var state = { scenario: 'welcome', messages: [], streaming: false, collapsed: false, seq: 0, timer: null }
+
+  var GATES = {
+    create: {
+      title: '待你确认：创建导出 任务「导出CNY货币字典」',
+      summary: '创建任务',
+      fields: [['操作', '创建导出任务'], ['任务标题', '导出CNY货币字典'], ['影响面', '将创建 1 个导出任务（创建≠执行，不启动作业）']],
+      ok: '任务已创建（任务 #12），配置项与查询条件已写入向导。',
+      no: '已取消创建导出任务，未产生任何任务。'
+    },
+    start: {
+      title: '待你确认：导出 任务 #12『导出CNY货币字典』',
+      summary: '启动导出作业',
+      fields: [['操作', '启动导出作业'], ['任务', '#12 导出CNY货币字典'], ['范围', '全部货币记录（未设置筛选条件）']],
+      ok: '已启动导出作业（作业 #12），进度可在任务中心查看。',
+      no: '已取消启动导出作业，未产生任何作业。'
+    },
+    publish: {
+      title: '待你确认：发布 任务 #10『导入项目参数』',
+      summary: '启动发布作业',
+      fields: [['操作', '启动发布作业'], ['发布范围', '项目参数 · 2 个环境'], ['影响面', '将覆盖范围内 1,248 行数据']],
+      ack: '确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复',
+      ok: '已启动发布作业（作业 #10），执行结果可在任务中心查看。',
+      no: '已拒绝启动发布作业，正式库未做任何变更。'
     }
-    return svg
   }
-  function timeText() {
+
+  var GENERATING_TEXT = '我先确认一下导出范围。货币字典属于 GLOBAL 级配置，包含编码、名称与小数位三个字段；本次按全部货币记录导出，不额外叠加区域条件。正在读取配置定义与字段类型，并核对「code 等于 CNY」的筛选条件是否可写入任务；同时检查任务当前步骤与已有导出结果，避免重复创建同名任务。'
+    + '如果已有同名任务，我会先说明它的步骤与结果，再由您决定是否新建。随后会把创建任务的影响面（配置项数量、是否启动作业）整理给您确认。'
+
+  // ── 基础工具 ──────────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
+    })
+  }
+  function clock() {
     var d = new Date()
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
   }
-
-  // 停止按钮显示 ⇔ 收起图标呼吸光晕（停止消失即停止）
-  function syncActivity() {
-    sendBtn.hidden = state.loading
-    stopBtn.hidden = !state.loading
-    collapseBtn.classList.toggle('breathing', state.loading)
-    if (state.loading) {
-      stopBtn.focus()
-    } else {
-      sendBtn.focus()
-    }
+  function uid(prefix) {
+    state.seq += 1
+    return prefix + '-' + state.seq
+  }
+  function findMessage(id) {
+    return state.messages.filter(function (m) { return m.id === id })[0] || null
+  }
+  function findCard(messageId, cardId) {
+    var m = findMessage(messageId)
+    if (!m) return null
+    return (m.cards || []).filter(function (c) { return c.id === cardId })[0] || null
   }
 
-  function syncEmpty() {
-    emptyState.hidden = state.messages.length > 0
+  // ── 状态同步：停止按钮 ⇄ 收起图标光晕（同一条件，无额外状态源） ─────────────
+  function syncChrome() {
+    el.send.hidden = state.streaming
+    el.stop.hidden = !state.streaming
+    el.send.disabled = state.streaming || el.input.value.trim() === ''
+    el.collapseBtn.classList.toggle('breath-halo', state.streaming)
+    el.stripMark.classList.toggle('breath-halo', state.streaming)
   }
 
-  function renderMessage(message) {
-    var turn = el('div', 'turn')
-    if (message.role === 'user') {
-      var wrap = el('div', 'bubble-user')
-      wrap.appendChild(el('div', 'body', message.text))
-      turn.appendChild(wrap)
-    } else {
-      var body = el('div', 'bubble-ai')
-      var text = el('div', 'ai-text', message.text || '')
-      body.appendChild(text)
-      if (message.card) body.appendChild(renderCard(message.card))
-      var meta = el('div', 'meta')
-      if (message.stopped) meta.appendChild(el('span', 'stopped', '已停止'))
-      if (message.loading) {
-        var working = el('span', 'working')
-        working.appendChild(el('i'))
-        working.appendChild(el('i'))
-        working.appendChild(el('i'))
-        working.appendChild(el('span', '', '工作中…'))
-        meta.appendChild(working)
-      }
-      meta.appendChild(el('span', '', timeText()))
-      meta.appendChild(el('span', 'spacer'))
-      var copy = el('button', 'mini')
-      copy.type = 'button'
-      copy.title = '复制该条消息正文'
-      copy.setAttribute('aria-label', '复制该条消息正文')
-      copy.appendChild(icon(['M9 9h10v10H9z', 'M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1']))
-      meta.appendChild(copy)
-      body.appendChild(meta)
-      turn.appendChild(body)
-    }
-    return turn
+  // ── 视图片段（结构对齐 AiPanel.vue / FormRenderer.vue） ────────────────────
+  function welcomeHtml() {
+    return '' +
+      '<div class="m-[12px] rounded-[10px] border border-[#e3e6ea] bg-white px-[14px] py-[16px]" data-testid="empty-state">' +
+        '<div class="mb-[8px] flex items-center gap-[9px]">' +
+          '<span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]">' +
+            '<svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>' +
+          '</span>' +
+          '<div><div class="text-[13.2px] font-[650]">您好，我是配置助手</div><div class="text-[11.5px] text-[#8b949e]">配置管理平台的 AI 工作台</div></div>' +
+        '</div>' +
+        '<div class="text-[12.4px] leading-[1.8] text-[#57606a]">我可以帮您查询配置项与字段、查看任务，<br>打开导出结果在线编辑器、下载导出文件，<br>并启动导出/预检查/导入/发布作业。</div>' +
+        '<div class="mt-[10px] flex flex-wrap gap-[6px]">' +
+          '<button type="button" data-act="chip" data-text="导出cny货币字典（新建任务）" data-testid="suggestion-chip" class="rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors hover:border-[#cddcff] hover:text-[#2563eb]">导出cny货币字典</button>' +
+          '<button type="button" data-act="chip" data-text="查看任务 #12 的导出结果" data-testid="suggestion-chip" class="rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors hover:border-[#cddcff] hover:text-[#2563eb]">查看导出结果</button>' +
+          '<button type="button" data-act="chip" data-text="配置发布的流程规范是什么？" data-testid="suggestion-chip" class="rounded-full border border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors hover:border-[#cddcff] hover:text-[#2563eb]">配置发布流程规范</button>' +
+        '</div>' +
+        '<div class="mt-[10px] text-[11.4px] leading-[1.7] text-[#8b949e]">对话只留本页签浏览器镜像与服务端 24 小时滑动记忆窗口，刷新可恢复。</div>' +
+      '</div>'
   }
 
-  function statusMeta(card) {
-    if (card.status === 'pending') return { cls: 'pending', label: '待确认' }
-    if (card.status === 'approved') return { cls: 'success', label: '已成功' }
-    return { cls: 'danger', label: '已拒绝' }
+  function statusChip(status) {
+    if (status === 'pending') return '<span data-testid="card-status" class="flex-none rounded-[5px] border border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待确认</span>'
+    if (status === 'success') return '<span data-testid="card-status" class="flex-none rounded-[5px] border border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">已成功</span>'
+    if (status === 'rejected') return '<span data-testid="card-status" class="flex-none rounded-[5px] border border-[#e3e6ea] bg-[#fdf1ef] px-[5px] text-[9.5px] leading-[1.7] text-[#c0392b]">已拒绝</span>'
+    return '<span data-testid="card-status" class="flex-none rounded-[5px] border border-[#e3e6ea] bg-[#f6f7f9] px-[5px] text-[9.5px] leading-[1.7] text-[#57606a]">已取消</span>'
   }
 
-  function renderCard(card) {
-    var shell = el('div', 'card')
-    shell.dataset.open = card.open ? '1' : '0'
+  function rowsHtml(fields, testid) {
+    return '<div class="mx-[11px] mt-[9px] rounded-[8px] border border-[#eef0f3] bg-white px-[10px] py-[2px]" ' + (testid ? 'data-testid="' + testid + '"' : '') + '>' +
+      fields.map(function (pair) {
+        return '<div class="flex gap-[10px] border-b border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0">' +
+          '<span class="max-w-[40%] flex-[0_1_auto] overflow-hidden text-ellipsis whitespace-nowrap text-[12.4px] text-[#8b949e]">' + esc(pair[0]) + '</span>' +
+          '<span class="min-w-0 flex-1 break-words">' + esc(pair[1]) + '</span></div>'
+      }).join('') + '</div>'
+  }
 
-    var head = el('button', 'card-head')
-    head.type = 'button'
-    var ic = el('span', 'ic')
-    ic.appendChild(icon(['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z', 'M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3', 'M12 17h.01']))
-    head.appendChild(ic)
-    var titleWrap = el('span')
-    titleWrap.style.cssText = 'display:flex;min-width:0;flex:1;align-items:center;gap:6px'
-    titleWrap.appendChild(el('span', 'card-title', card.title))
-    titleWrap.appendChild(el('span', 'card-sub', card.summary))
-    head.appendChild(titleWrap)
-    var meta = statusMeta(card)
-    head.appendChild(el('span', 'status ' + meta.cls, meta.label))
-    head.appendChild(el('span', 'chev', '›'))
-    head.addEventListener('click', function () {
-      card.open = !card.open
-      shell.dataset.open = card.open ? '1' : '0'
-    })
-    shell.appendChild(head)
+  function gateHtml(message, card) {
+    var open = card.open ? '1' : '0'
+    var head = '<button type="button" data-act="toggle-card" data-msg="' + message.id + '" data-card="' + card.id + '" aria-expanded="' + (card.open ? 'true' : 'false') + '"' + (card.status === 'pending' ? ' disabled' : '') + ' class="flex min-h-[36px] w-full items-center gap-[6px] border-0 bg-transparent px-[10px] py-[8px] text-left transition-colors hover:bg-[#f6f7f9] disabled:cursor-default">' +
+      '<span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></span>' +
+      '<span class="flex min-w-0 flex-1 items-center gap-[6px]"><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] font-[650] leading-[1.7] text-[#1f2328]">' + esc(card.title) + '</span><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">' + esc(card.summary) + '</span></span>' +
+      statusChip(card.status) +
+      (card.status === 'pending' ? '' : '<span class="ml-auto text-[12px] text-[#57606a]">›</span>') +
+      '</button>'
 
-    var body = el('div', 'card-body')
+    var body = ''
     if (card.status === 'pending') {
-      var rows = el('div', 'rows')
-      for (var i = 0; i < card.rows.length; i += 1) {
-        var row = el('div', 'row')
-        row.appendChild(el('span', 'k', card.rows[i][0]))
-        row.appendChild(el('span', 'v', card.rows[i][1]))
-        rows.appendChild(row)
+      body = rowsHtml(card.fields, 'gate-rows')
+      if (card.ack) {
+        body += '<div class="flex px-[11px] pt-[10px]"><label class="flex cursor-pointer items-start gap-[6px] text-[12.2px] leading-[1.5] text-[#1f2328]">' +
+          '<input type="checkbox" data-act="ack" data-msg="' + message.id + '" data-card="' + card.id + '" class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"' + (card.acked ? ' checked' : '') + '>' +
+          '<span class="min-w-0 break-words">' + esc(card.ack) + '</span></label></div>'
       }
-      body.appendChild(rows)
-      var actions = el('div', 'actions')
-      var group = el('span', 'group')
-      var rejectBtn = el('button', 'btn reject', '拒绝')
-      rejectBtn.type = 'button'
-      var approveBtn = el('button', 'btn approve', '批准')
-      approveBtn.type = 'button'
-      rejectBtn.addEventListener('click', function () { decide('rejected') })
-      approveBtn.addEventListener('click', function () { decide('approved') })
-      group.appendChild(rejectBtn)
-      group.appendChild(approveBtn)
-      actions.appendChild(group)
-      body.appendChild(actions)
+      body += '<div class="flex flex-wrap items-center gap-[9px] px-[11px] pt-[11px]" data-testid="gate-actions">' +
+        '<span class="' + (card.ack && !card.acked ? '' : 'hidden ') + 'text-[12.2px] text-[#b45309]">请先勾选上方确认项</span>' +
+        '<span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">' +
+          '<button type="button" data-act="reject" data-msg="' + message.id + '" data-card="' + card.id + '" class="min-w-[56px] rounded-[8px] border border-[#e3e6ea] bg-white px-[13px] py-[5px] text-[12.6px] text-[#57606a] transition-all hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>' +
+          '<button type="button" data-act="approve" data-msg="' + message.id + '" data-card="' + card.id + '"' + (card.ack && !card.acked ? ' disabled' : '') + ' class="min-w-[72px] rounded-[8px] border border-transparent bg-[#2563eb] px-[13px] py-[5px] text-[12.6px] font-semibold text-white transition-all hover:brightness-[1.08] disabled:bg-[#8b949e] disabled:font-normal">批准</button>' +
+        '</span></div>'
     } else {
-      body.appendChild(el('div', 'receipt', card.receipt))
+      body = '<div class="mx-[11px] mt-[9px] whitespace-pre-wrap rounded-[8px] border border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">' + esc(card.receipt) + '</div>'
     }
-    shell.appendChild(body)
-    return shell
+    return '<div class="mb-[8px] mt-[6px] overflow-hidden rounded-[10px] border border-[#e3e6ea] bg-white" data-open="' + open + '">' + head +
+      '<div class="pb-[11px] ' + (card.open ? '' : 'hidden') + '">' + body + '</div></div>'
+  }
+
+  function toolHtml(card) {
+    return '<div class="mb-[14px] mt-[6px] overflow-hidden rounded-[10px] border border-[#e3e6ea] bg-white">' +
+      '<div class="flex min-h-[36px] items-center gap-[6px] px-[10px] py-[8px]">' +
+        '<span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg></span>' +
+        '<span class="flex min-w-0 flex-1 items-center gap-[6px]"><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px] font-[650] leading-[1.7] text-[#1f2328]">' + esc(card.title) + '</span><span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]">' + esc(card.summary) + '</span></span>' +
+        '<span class="flex-none rounded-[5px] border border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">已成功</span>' +
+      '</div>' +
+      '<div class="pb-[11px]">' + rowsHtml(card.fields) + '</div></div>'
+  }
+
+  function formHtml(message, card) {
+    var status = card.status === 'pending'
+      ? '<span data-testid="card-status" class="ml-auto flex-none rounded-[5px] border border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待填写</span>'
+      : card.status === 'submitted'
+        ? '<span data-testid="card-status" class="ml-auto flex-none rounded-[5px] border border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">已成功</span>'
+        : '<span data-testid="card-status" class="ml-auto flex-none rounded-[5px] border border-[#e3e6ea] bg-[#f6f7f9] px-[5px] text-[9.5px] leading-[1.7] text-[#57606a]">已取消</span>'
+
+    var body = card.status === 'pending'
+      ? '<div class="p-[11px]" data-testid="gf-form">' +
+          '<label class="mb-[4px] block text-[12.2px] text-[#57606a]" for="gf-input-' + card.id + '">筛选条件<span class="text-[#c0392b]" aria-hidden="true"> *</span></label>' +
+          '<input id="gf-input-' + card.id + '" data-act="form-input" data-msg="' + message.id + '" data-card="' + card.id + '" type="text" data-testid="gf-field" value="' + esc(card.value) + '" placeholder="例如：code EQ CNY" class="w-full rounded-[8px] border border-[#e3e6ea] bg-white px-[9px] py-[6px] text-[13px] leading-normal text-[#1f2328] outline-none transition-colors focus:border-[#2563eb]">' +
+          (card.error ? '<span class="mt-[6px] block rounded-[6px] border border-[#f0d5d0] bg-[#fdf1ef] px-[8px] py-[5px] text-[11.8px] leading-[1.5] text-[#c0392b]">' + esc(card.error) + '</span>' : '') +
+          '<div class="mt-[10px] flex flex-wrap items-center justify-end gap-[8px] border-t border-[#eef0f3] pt-[10px]">' +
+            '<button type="button" data-act="form-cancel" data-msg="' + message.id + '" data-card="' + card.id + '" class="min-w-[56px] rounded-[8px] border border-[#e3e6ea] bg-white px-[13px] py-[5px] text-[12.6px] text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>' +
+            '<button type="button" data-act="form-submit" data-msg="' + message.id + '" data-card="' + card.id + '" class="min-w-[56px] rounded-[8px] border border-transparent bg-[#2563eb] px-[13px] py-[5px] text-[12.6px] font-semibold text-white hover:brightness-[1.08]">提交</button>' +
+          '</div></div>'
+      : '<div class="p-[11px]"><div class="whitespace-pre-wrap rounded-[8px] border border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[7px] text-[11.9px] leading-[1.6] text-[#57606a]">' + esc(card.receipt) + '</div></div>'
+
+    return '<div class="mb-[8px] mt-[6px] overflow-hidden rounded-[10px] border border-[#e3e6ea] bg-white">' +
+      '<div class="flex items-center gap-[7px] border-b border-[#eef0f3] bg-[#f6f7f9] px-[11px] py-[9px] text-[12.8px] font-[650]">' +
+        '<span class="flex-none text-[11px] text-[#8b949e]" aria-hidden="true">▤</span>' +
+        '<span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">' + esc(card.title) + '</span>' + status +
+      '</div>' + body + '</div>'
+  }
+
+  function messageHtml(message) {
+    if (message.role === 'user') {
+      return '<div class="mb-[18px] flex flex-col items-end">' +
+        '<div data-testid="msg-bubble" class="max-w-[86%] whitespace-pre-wrap break-words rounded-[12px] border border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[8px] text-[13.5px] leading-[1.7]">' + esc(message.text) + '</div>' +
+        '<div class="mt-[6px] flex flex-row-reverse items-center gap-[8px] text-[12px] text-[#8b949e]"><span>' + clock() + '</span></div></div>'
+    }
+    var cards = (message.cards || []).map(function (card) {
+      if (card.kind === 'gate') return gateHtml(message, card)
+      if (card.kind === 'tool') return toolHtml(card)
+      if (card.kind === 'form') return formHtml(message, card)
+      return ''
+    }).join('')
+    var meta = message.streaming
+      ? '<span class="dots inline-flex items-center gap-[4px]" aria-hidden="true"><i></i><i></i><i></i></span>'
+      : message.stopped
+        ? '<span class="inline-flex items-center gap-[4px] rounded-[6px] border border-[#e3e6ea] bg-[#f6f7f9] px-[6px] py-[1px] text-[10.5px] leading-[1.6] text-[#57606a]"><span class="block h-[6px] w-[6px] rounded-[1px] bg-[#8b949e]"></span>已停止</span>'
+        : '<span>' + clock() + '</span>'
+    return '<div class="mb-[18px]">' +
+      '<div class="px-[10px] text-[13.8px] leading-[1.7] [overflow-wrap:anywhere]"><div data-testid="msg-bubble" class="whitespace-pre-wrap">' + esc(message.text || '') + '</div>' + cards + '</div>' +
+      '<div class="mt-[12px] flex items-center gap-[8px] text-[12px] text-[#8b949e]">' + meta + '</div></div>'
   }
 
   function render() {
-    messagesEl.replaceChildren()
-    for (var i = 0; i < state.messages.length; i += 1) {
-      messagesEl.appendChild(renderMessage(state.messages[i]))
-    }
-    syncEmpty()
-    syncActivity()
-    scrollEl.scrollTop = scrollEl.scrollHeight
+    el.welcome.innerHTML = state.messages.length ? '' : welcomeHtml()
+    el.messages.innerHTML = state.messages.map(messageHtml).join('')
+    syncChrome()
+    el.scroll.scrollTop = el.scroll.scrollHeight
   }
 
-  function decide(status) {
+  // ── 交互 ─────────────────────────────────────────────────────────────────
+  function pushUser(text) {
+    state.messages.push({ id: uid('u'), role: 'user', text: text, cards: [] })
+  }
+  function pushAssistant(text, opts) {
+    var message = { id: uid('a'), role: 'assistant', text: text || '', cards: (opts && opts.cards) || [], streaming: !!(opts && opts.streaming), stopped: false }
+    state.messages.push(message)
+    return message
+  }
+  function openGate(message, gate) {
+    var card = { id: uid('c'), kind: 'gate', status: 'pending', open: true, acked: false, gate: gate, title: gate.title, summary: gate.summary, fields: gate.fields, ack: gate.ack || '', receipt: '' }
+    message.cards.push(card)
+    render()
+  }
+
+  function streamInto(message, fullText, done) {
+    if (reduceMotion) {
+      message.text = fullText
+      message.streaming = false
+      state.streaming = false
+      if (done) done()
+      render()
+      return
+    }
+    state.streaming = true
+    el.input.value = ''
+    render()
+    var i = 0
+    state.timer = window.setInterval(function () {
+      i = Math.min(fullText.length, i + 1)
+      message.text = fullText.slice(0, i)
+      render()
+      if (i >= fullText.length) {
+        window.clearInterval(state.timer)
+        state.timer = null
+        message.streaming = false
+        state.streaming = false
+        if (done) done()
+        render()
+      }
+    }, 26)
+  }
+
+  function stopTurn() {
+    if (!state.streaming) return
+    if (state.timer !== null) { window.clearInterval(state.timer); state.timer = null }
+    state.streaming = false
     var last = state.messages[state.messages.length - 1]
-    if (!last || !last.card || last.card.status !== 'pending') return
-    last.card.status = status
-    last.card.open = false
-    last.card.receipt = status === 'approved'
-      ? '已启动导出作业（作业 #12），进度由页面展示。'
-      : '已拒绝启动导出作业，未产生任何作业。'
+    if (last && last.role === 'assistant') {
+      last.streaming = false
+      last.stopped = true
+      if (!last.text) last.text = '（已停止）'
+    }
+    render()
+  }
+
+  function decide(messageId, cardId, approved) {
+    var message = findMessage(messageId)
+    var card = findCard(messageId, cardId)
+    if (!card || card.status !== 'pending') return
+    if (approved && card.ack && !card.acked) return
+    card.status = approved ? 'success' : 'rejected'
+    card.open = false
+    card.receipt = approved ? card.gate.ok : card.gate.no
+    render()
+    pushAssistant(approved ? card.gate.ok : card.gate.no)
     render()
   }
 
   function send() {
-    var text = input.value.trim()
-    if (!text || state.loading) return
-    state.messages.push({ role: 'user', text: text })
-    input.value = ''
-    state.stopped = false
-    state.loading = true
-    state.seq += 1
-    var current = { role: 'assistant', text: '', card: null, loading: true, stopped: false }
-    state.messages.push(current)
+    var text = el.input.value.trim()
+    if (!text || state.streaming) return
+    pushUser(text)
+    var message = pushAssistant('', { streaming: true })
+    el.input.value = ''
     render()
-    if (state.timer !== null) window.clearTimeout(state.timer)
-    state.timer = window.setTimeout(function () {
-      state.timer = null
-      state.loading = false
-      current.loading = false
-      current.text = '好的，我先为您创建导出任务；目前已进入「导出执行」，需要您确认后才会启动作业。'
-      current.card = {
-        title: '待你确认：导出 任务 #12『导出CNY货币字典』',
-        summary: '启动导出作业',
-        status: 'pending',
-        open: true,
-        rows: [['操作', '启动导出作业'], ['任务', '导出CNY货币字典']],
-        receipt: ''
-      }
-      render()
-    }, 900)
-  }
-
-  function stopRun() {
-    if (!state.loading) return
-    if (state.timer !== null) window.clearTimeout(state.timer)
-    state.timer = null
-    state.loading = false
-    var current = state.messages[state.messages.length - 1]
-    if (current && current.role === 'assistant') {
-      current.loading = false
-      current.stopped = true
-      if (!current.text) current.text = '（已停止，未继续生成）'
-    }
-    render()
+    streamInto(message, GENERATING_TEXT, null)
   }
 
   function newChat() {
-    if (state.timer !== null) window.clearTimeout(state.timer)
-    state.timer = null
+    if (state.timer !== null) { window.clearInterval(state.timer); state.timer = null }
+    state.streaming = false
     state.messages = []
-    state.loading = false
-    state.stopped = false
-    input.value = ''
-    render()
-    input.focus()
+    el.input.value = ''
+    selectScenario('welcome', false)
   }
 
-  function collapse() {
-    aside.classList.add('collapsed')
-    panel.hidden = true
-    strip.hidden = false
-    headToggle.textContent = '显示 AI 栏'
-    strip.focus()
+  function setCollapsed(collapsed) {
+    state.collapsed = collapsed
+    el.aside.classList.toggle('w-[420px]', !collapsed)
+    el.aside.classList.toggle('w-[48px]', collapsed)
+    el.panel.classList.toggle('hidden', collapsed)
+    el.strip.classList.toggle('hidden', !collapsed)
+    el.headToggle.textContent = collapsed ? '显示 AI 栏' : '隐藏 AI 栏'
+    if (collapsed) el.strip.focus(); else el.collapseBtn.focus()
   }
 
-  function expand() {
-    aside.classList.remove('collapsed')
-    panel.hidden = false
-    strip.hidden = true
-    headToggle.textContent = '隐藏 AI 栏'
-    collapseBtn.focus()
+  // ── 场景编排 ─────────────────────────────────────────────────────────────
+  function reset() {
+    if (state.timer !== null) { window.clearInterval(state.timer); state.timer = null }
+    state.streaming = false
+    state.messages = []
+    el.input.value = ''
   }
 
-  // 示例只回填输入框，不自动发送
-  chips.addEventListener('click', function (event) {
-    var btn = event.target.closest('[data-fill]')
-    if (!btn) return
-    input.value = btn.getAttribute('data-fill')
-    input.focus()
-    input.setSelectionRange(input.value.length, input.value.length)
+  var SCENES = {
+    'welcome': function () {
+      reset()
+      setCollapsed(false)
+      render()
+    },
+    'generating': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('导出cny货币字典（新建任务）')
+      var message = pushAssistant('', { streaming: true })
+      message.cards.push({ kind: 'tool', title: '列出配置定义', summary: '读取配置定义与字段', fields: [['结果', '已找到 15 个配置定义']] })
+      render()
+      streamInto(message, GENERATING_TEXT, null)
+    },
+    'gate-create': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('导出cny货币字典（新建任务）')
+      var message = pushAssistant('已确认「货币字典」对应配置项，并写入导出条件（code 等于 CNY）。')
+      render()
+      openGate(message, GATES.create)
+    },
+    'gate-start': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('导出货币字典（新建任务）')
+      var message = pushAssistant('任务已创建，配置项与查询条件已写入向导，当前在「导出执行」步骤。')
+      render()
+      openGate(message, GATES.start)
+    },
+    'gate-publish': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('把这次导入发布到正式库')
+      var message = pushAssistant('导入暂存区数据已通过预检查，下面需要您确认发布。')
+      render()
+      openGate(message, GATES.publish)
+    },
+    'form': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('导出货币字典（新建任务）')
+      var message = pushAssistant('任务已创建，请补充本次导出的筛选条件。')
+      message.cards.push({ id: uid('c'), kind: 'form', status: 'pending', title: '筛选条件（可选）', value: '', error: '', receipt: '' })
+      render()
+    },
+    'collapsed-generating': function () {
+      reset()
+      pushUser('导出cny货币字典（新建任务）')
+      var message = pushAssistant('', { streaming: true })
+      message.cards.push({ kind: 'tool', title: '列出配置定义', summary: '读取配置定义与字段', fields: [['结果', '已找到 15 个配置定义']] })
+      setCollapsed(true)
+      render()
+      streamInto(message, GENERATING_TEXT, null)
+    },
+    'outcomes': function () {
+      reset()
+      setCollapsed(false)
+      pushUser('导出cny货币字典，并检查发布')
+      var m1 = pushAssistant('任务已创建，配置项与查询条件已写入向导。')
+      m1.cards.push({ id: uid('c'), kind: 'gate', status: 'success', open: false, title: '待你确认：导出 任务 #12『导出CNY货币字典』', summary: '启动导出作业', fields: [], receipt: GATES.start.ok })
+      var m2 = pushAssistant('发布前检查已完成，暂存区数据准备就绪。')
+      m2.cards.push({ id: uid('c'), kind: 'gate', status: 'rejected', open: false, title: '待你确认：发布 任务 #10『导入项目参数』', summary: '启动发布作业', fields: [], receipt: GATES.publish.no })
+      var m3 = pushAssistant('我正在整理导出文件的字段说明，已读取配置定义与字段类型，接下来')
+      m3.stopped = true
+      var m4 = pushAssistant('还有一项导出任务需要您确认：')
+      render()
+      openGate(m4, GATES.create)
+    }
+  }
+
+  function selectScenario(name, focus) {
+    if (!SCENES[name]) return
+    state.scenario = name
+    Array.prototype.forEach.call(el.nav.querySelectorAll('[data-scenario]'), function (btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-scenario') === name ? 'true' : 'false')
+    })
+    SCENES[name]()
+    if (focus) {
+      var active = el.nav.querySelector('[data-scenario="' + name + '"]')
+      if (active) active.focus()
+    }
+  }
+
+  // ── 事件（统一委托，便于回落 Vue 的 @click/@change） ─────────────────────
+  el.nav.addEventListener('click', function (event) {
+    var btn = event.target.closest('[data-scenario]')
+    if (btn) selectScenario(btn.getAttribute('data-scenario'), true)
   })
-
-  sendBtn.addEventListener('click', send)
-  stopBtn.addEventListener('click', stopRun)
-  newChatBtn.addEventListener('click', newChat)
-  collapseBtn.addEventListener('click', collapse)
-  strip.addEventListener('click', expand)
-  headToggle.addEventListener('click', function () {
-    if (aside.classList.contains('collapsed')) expand()
-    else collapse()
+  el.messages.addEventListener('click', function (event) {
+    var target = event.target.closest('[data-act]')
+    if (!target) return
+    var act = target.getAttribute('data-act')
+    var msgId = target.getAttribute('data-msg')
+    var cardId = target.getAttribute('data-card')
+    if (act === 'approve') decide(msgId, cardId, true)
+    else if (act === 'reject') decide(msgId, cardId, false)
+    else if (act === 'toggle-card') {
+      var card = findCard(msgId, cardId)
+      if (card && card.status !== 'pending') { card.open = !card.open; render() }
+    } else if (act === 'form-cancel') {
+      var fc = findCard(msgId, cardId)
+      if (fc && fc.status === 'pending') { fc.status = 'cancelled'; fc.receipt = '已取消，填写内容不作记录。'; render(); pushAssistant('已取消填写。'); render() }
+    } else if (act === 'form-submit') {
+      var fs = findCard(msgId, cardId)
+      if (fs && fs.status === 'pending') {
+        if (!String(fs.value || '').trim()) { fs.error = '请填写筛选条件后再提交'; render(); return }
+        fs.status = 'submitted'; fs.receipt = '筛选条件已提交。'; fs.error = ''
+        render(); pushAssistant('已收到筛选条件，继续为您处理。'); render()
+      }
+    }
   })
-  input.addEventListener('keydown', function (event) {
+  el.messages.addEventListener('input', function (event) {
+    var target = event.target.closest('[data-act="form-input"]')
+    if (!target) return
+    var card = findCard(target.getAttribute('data-msg'), target.getAttribute('data-card'))
+    if (card) card.value = target.value
+  })
+  el.messages.addEventListener('change', function (event) {
+    var target = event.target.closest('[data-act="ack"]')
+    if (!target) return
+    var card = findCard(target.getAttribute('data-msg'), target.getAttribute('data-card'))
+    if (card) { card.acked = target.checked; render() }
+  })
+  el.input.addEventListener('input', syncChrome)
+  el.input.addEventListener('keydown', function (event) {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
       send()
     }
   })
+  el.send.addEventListener('click', send)
+  el.stop.addEventListener('click', stopTurn)
+  el.newChat.addEventListener('click', newChat)
+  el.collapseBtn.addEventListener('click', function () { setCollapsed(true) })
+  el.strip.addEventListener('click', function () { setCollapsed(false) })
+  el.headToggle.addEventListener('click', function () { setCollapsed(!state.collapsed) })
 
-  render()
+  // 初始场景
+  selectScenario('welcome', false)
 })()
 </script>
 </body>
