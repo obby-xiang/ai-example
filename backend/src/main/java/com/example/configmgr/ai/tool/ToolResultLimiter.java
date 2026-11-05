@@ -356,7 +356,7 @@ public class ToolResultLimiter {
 	 * <b>两种换行形态都要数</b>：后端工具（当前端）的结果文本经官方
 	 * {@code DefaultToolCallResultConverter} 序列化，换行在字符串里成了**字面两字符** {@code \n}
 	 * （实测：{@code list_config_defs} 的 15 行结果在回填消息里是
-	 * {@code "- CURRENCY…\\n- DOC_TYPE…"}，直接数 {@code '\n'} 会得到"1 行"，
+	 * {@code "- CONFIG_CODE…\\n- DOC_TYPE…"}，直接数 {@code '\n'} 会得到"1 行"，
 	 * 行数上限形同虚设）。既然"行"的语义就是"分隔的行"，两种形态一并计。
 	 */
 	private static int countRows(String text) {

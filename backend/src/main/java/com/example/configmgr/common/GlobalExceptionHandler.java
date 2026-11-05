@@ -69,8 +69,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<?> handleIllegalState(IllegalStateException e, HttpServletRequest request) {
+        String message = e instanceof CodedException ? e.getMessage() : "请求无法完成，请稍后重试。";
         return respond(HttpStatus.BAD_REQUEST, ErrorBodyFactory.codeOf(e, ErrorCodes.ILLEGAL_STATE),
-                e.getMessage(), null, request);
+                message, null, request);
     }
 
     /**

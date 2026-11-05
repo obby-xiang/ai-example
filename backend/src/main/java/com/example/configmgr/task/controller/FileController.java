@@ -98,7 +98,7 @@ public class FileController {
             }
             if (matched.isEmpty()) {
                 throw new IllegalArgumentException(
-                        "压缩包中没有可匹配的文件，请确认文件名包含配置编码（如 CURRENCY.xlsx）。未匹配: " + unmatched);
+                        "压缩包中没有可匹配的文件，请确认文件名包含配置编码（如 CONFIG_CODE.xlsx）。未匹配: " + unmatched);
             }
             return ApiResponse.ok(Map.of(
                     "matchedFiles", matched,
@@ -113,7 +113,7 @@ public class FileController {
         String defCode = matchDefCode(matchCodes, originalName);
         if (defCode == null) {
             throw new IllegalArgumentException(
-                    "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CURRENCY.xlsx），或先下载模板编辑后上传");
+                    "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CONFIG_CODE.xlsx），或先下载模板编辑后上传");
         }
         StoredFile stored = fileStorage.store(file.getInputStream(), originalName);
         // 落库失败之外还有"提交期回滚"（外层事务回滚/提交失败）：新文件不能永久残留。

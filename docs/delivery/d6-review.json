@@ -672,6 +672,13 @@
       "reason": "已同步宿主条件表取消时复用真实CANCELLED终局、禁止模型继续写条件和推进的契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:b8780a7a33a41fd27f59b13cbe4754fd931d6768d7a5ebc5fd6c556e20688d9c",
+      "status": "synced",
+      "reason": "已同步单目标与完整执行收尾、失败用户摘要脱敏、精确术语回退及表单约束，不引入文本意图硬门",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

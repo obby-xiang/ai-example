@@ -165,7 +165,7 @@ public class ToolTargetResolver {
 	 * {@code defCode} 必须属于该任务（{@code task_items.def_code}）。
 	 *
 	 * <p><b>私有预留</b>：没有公开调用面（只由 {@link #check} 在参数带 defCode 时触发），
-	 * 用例用合成入参（{@code {"taskId":7,"defCode":"CURRENCY"}}）驱动这条分支。
+	 * 用例用合成入参（{@code {"taskId":7,"defCode":"CONFIG_CODE"}}）驱动这条分支。
 	 */
 	Verdict checkDefCode(String defCode, Task task) {
 		if (task == null) {

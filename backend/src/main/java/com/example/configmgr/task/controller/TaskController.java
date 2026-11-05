@@ -115,7 +115,7 @@ public class TaskController {
      * <b>为什么不能 {@code toString()}</b>：前端 {@code PUT /tasks/{id}/items/{defCode}/condition}
      * 的 {@code condition} 是<b>对象</b>（{@code frontend/src/api/tasks.ts#setCondition} 直接传
      * 契约事件里的 {@code conditions}），而 {@code Map.toString()} 会产出
-     * {@code {scopeKeys=[XN], fields=[...]}} 这种"看着像 JSON、其实不是"的文本 ——
+     * {@code {scopeKeys=[REGION_CODE], fields=[...]}} 这种"看着像 JSON、其实不是"的文本 ——
      * 落库后所有读侧（导出/导入作业、{@code data/service/QueryCondition}、
      * 前端 {@code parseConditionJson}）解析<b>全部</b>失败，且失败发生在<b>别的</b>请求里
      * （本请求 200 成功），排障成本极高。

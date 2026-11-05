@@ -99,7 +99,7 @@ import java.util.Set;
 @Component
 public class DefinitionSelectionForm extends HostForm {
 
-	/** 表单唯一字段的 key（回灌值形如 {@code {"defCodes":["CURRENCY",...]}}）。 */
+	/** 表单唯一字段的 key（回灌值形如 {@code {"defCodes":["CONFIG_CODE",...]}}）。 */
 	public static final String FIELD_KEY = "defCodes";
 
 	/** 表单标题（与提示词同一语言；模型自发的表单也用同一句式）。 */

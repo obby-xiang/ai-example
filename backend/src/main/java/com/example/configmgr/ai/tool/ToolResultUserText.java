@@ -56,7 +56,15 @@ public final class ToolResultUserText {
 			Map.entry(ErrorCodes.TOOL_TIMEOUT,
 					"这一步没有在时限内完成，结果尚未确认；该操作可能已产生部分变化，请核对后再继续。"),
 			Map.entry(ErrorCodes.TOOL_ALREADY_CLAIMED,
-					"这一步已由其他执行实例接管，本次没有重复执行。"));
+					"这一步已由其他执行实例接管，本次没有重复执行。"),
+			Map.entry(ErrorCodes.TOOL_EXECUTION_FAILED,
+					"操作未能完成，可能已有部分变化；请核对当前状态后再继续，或联系管理员。"),
+			Map.entry(WizardActionGuard.REJECTED_CODE,
+					"参数不符合当前向导操作要求，本次未执行；请核对配置项和筛选条件后重试。"),
+			Map.entry("SHEET_ARGUMENTS_REJECTED",
+					"表格参数不完整或超出允许范围，本次未执行；请调整后重试。"),
+			Map.entry("UI_PRIMITIVE_ARGUMENTS_REJECTED",
+					"界面操作参数不符合要求，本次未执行；请重新获取界面快照后再试。"));
 
 	private ToolResultUserText() {
 	}

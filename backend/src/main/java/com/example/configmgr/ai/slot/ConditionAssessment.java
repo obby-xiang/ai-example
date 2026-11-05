@@ -33,7 +33,7 @@ import java.util.Set;
  * 当成全量。</li>
  * </ul>
  *
- * <p>判据只认结构，不认具体字段名/值/大小写，因此不绑定任何业务配置项（不是写死 CNY/CURRENCY）。
+ * <p>判据只认结构，不认具体字段名/值/大小写，因此不绑定任何业务配置项（不绑定任何具体业务编码或值）。
  */
 public final class ConditionAssessment {
 

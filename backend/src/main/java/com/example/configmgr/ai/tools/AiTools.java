@@ -380,7 +380,7 @@ public class AiTools {
      * —— 因此"AI 建的任务"与"手点建的任务"在库里的形态没有差别（含 {@code currentStep} 初值与任务变更事件）。
      *
      * <p><b>为什么需要它</b>：S44d 的 V2/V3 实测里 AI 只能 {@code list_tasks} 选已有任务，
-     * 空任务中心的"帮我新建一个导出任务并导出 CURRENCY"走不通（当年登记为【待裁决】2）。
+     * 空任务中心的"帮我新建一个导出任务并导出 CONFIG_CODE"走不通（当年登记为【待裁决】2）。
      * 补齐后的链路：{@code create_task} → {@code navigate_to(page, taskId)}
      * → {@code select_definitions} →（{@code set_condition}）→ {@code confirm_step}
      * → {@code start_export}（确认门）。
@@ -399,13 +399,13 @@ public class AiTools {
      * （{@code CREATE_TASK_CONFLICT} / {@code CREATE_TASK_TURN_LIMIT}），模型重试、并发调用、
      * 用户重复确认都收敛到"至多一个任务"。
      *
-     * <p><b>创建≠执行</b>：本工具只建任务，不启动作业；返回值带上任务 id 与下一个动作
-     * （{@code navigate_to} 的目标页面），让模型在同一轮拿到 taskId 后立即打开向导
-     * （与本次调用<b>分批</b>发起，不并批）。
+     * <p><b>创建≠执行</b>：本工具只建任务，不启动作业。只创建且不继续配置时可返回任务 id 收尾；
+     * 原始意图是完整导出/导入时，返回值同时给出 {@code navigate_to} 的目标页面，
+     * 后续分批完成所需配置/条件和启动确认（不与本次创建并批，SUSPENDED 不得提前 DONE）。
      *
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。返回任务 id 后，同一轮立即用 navigate_to(page=..., taskId=...) 打开向导（不要与本次调用并批发起）",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。只创建且不继续配置时可返回任务 id 收尾；原始意图是完整导出/导入时，返回任务 id 后用 navigate_to(page=..., taskId=...) 打开向导并完成所需配置/条件和启动确认（不要与本次调用并批发起），SUSPENDED 不得提前 DONE",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -413,7 +413,7 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
-            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CURRENCY\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
             @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}（表示条件未决定，不是“明确不设”）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             ToolContext toolContext) {
@@ -443,15 +443,18 @@ public class AiTools {
             if (outcome.reused()) {
                 return String.format(
                         "该任务已创建，本次复用任务 #%d（标题：%s，当前步骤：%s）。%s"
-                                + "本次调用只复用任务，未启动作业。下一步：navigate_to(page=\"%s\", taskId=%d) "
-                                + "打开向导，按上述真实步骤、条目与条件继续。",
+                                + "本次调用只复用任务，未启动作业。只创建且不继续配置时可在此收尾；"
+                                + "若原始意图是完整导出/导入，下一步 navigate_to(page=\"%s\", taskId=%d) "
+                                + "打开向导，按上述真实步骤、条目与条件完成所需配置/条件，再经确认启动；挂起等待不是完成。",
                         task.getId(), task.getTitle(), task.getCurrentStep(), reusedTaskFacts(task),
                         export ? "export" : "import", task.getId());
             }
             return String.format(
                     "已创建%s任务 #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
-                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。下一步："
-                            + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项；"
+                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。"
+                            + "只创建且不继续配置时可返回任务号收尾。若原始意图是完整导出/导入，下一步："
+                            + "navigate_to(page=\"%s\", taskId=%d) 打开向导，再用 select_definitions 勾选配置项，"
+                            + "完成所需配置/条件后经确认启动；挂起等待不是完成。"
                             + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
                             + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
                     export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep(),
@@ -463,7 +466,8 @@ public class AiTools {
             throw e;
         }
         catch (Exception e) {
-            throw new CodedIllegalStateException(ErrorCodes.TOOL_EXECUTION_FAILED, "创建任务失败: " + e.getMessage(), e);
+            throw new CodedIllegalStateException(ErrorCodes.TOOL_EXECUTION_FAILED,
+                    "创建任务失败，请核对当前任务状态后再继续，或联系管理员", e);
         }
     }
 
@@ -632,7 +636,7 @@ public class AiTools {
      * 目标页面的合法性由前端动作表白名单（{@code allowPages}）兜底校验。
      */
     @Tool(name = AiToolNames.NAVIGATE_TO, description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导。"
-            + "导航成功不是本轮终点：下一批按最新披露继续页面动作，同一目标页不要重复导航")
+            + "只打开任务时，页面、任务绑定与详情就绪后即可收尾；完整执行时下一批按最新披露继续页面动作，同一目标页不要重复导航")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.U)
@@ -750,7 +754,7 @@ public class AiTools {
      * @param fields    字段级过滤条件（多条之间 AND）；省略表示不按字段过滤
      */
     public record FieldQueryCondition(
-            @ToolParam(description = "范围过滤：地区/项目编码列表，例如 [\"XN\"]（GLOBAL 级配置忽略）；省略表示全部范围", required = false) List<String> scopeKeys,
+            @ToolParam(description = "范围过滤：地区/项目编码列表，例如 [\"REGION_CODE\"]（GLOBAL 级配置忽略）；省略表示全部范围", required = false) List<String> scopeKeys,
             @ToolParam(description = "字段级过滤条件（多条之间 AND），省略表示不按字段过滤", required = false) List<FieldCondition> fields) {
     }
 
@@ -779,7 +783,7 @@ public class AiTools {
      */
     @Tool(name = AiToolNames.CONFIRM_STEP, description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
-            + "推进成功后下一批按最新披露继续，推进失败即停"
+            + "只推进到目标步骤时，目标达成即可收尾；完整执行时下一批按最新披露继续，推进失败即停"
             + "（回执给出明确纠正指引且本次零副作用时，允许一次不同的纠正动作；"
             + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单："
             + "条件未决定时由宿主统一给一次非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
@@ -971,13 +975,13 @@ public class AiTools {
      * @param key    依赖字段键（必须已在表单中声明，且不得是字段自身）
      * @param op     比较操作
      * @param value  op=eq 时的比较值
-     * @param values op=in/notIn（任意长度）/ between（恰 2 个）时的比较值数组
+     * @param values op=in/notIn（至少 1 个）/ between（恰好 2 个）时的比较值数组
      */
     public record FormCondition(
             @ToolParam(description = "依赖字段键（必须是本表单已声明的字段，不得自引用）") String key,
             @ToolParam(description = "比较操作：eq/in/notIn/empty/notEmpty/between") String op,
             @ToolParam(description = "op=eq 时的比较值", required = false) Object value,
-            @ToolParam(description = "op=in/notIn/between 时的比较值数组", required = false) List<Object> values) {
+            @ToolParam(description = "op=in/notIn 时至少 1 个比较值；op=between 时恰好 2 个比较值", required = false) List<Object> values) {
     }
 
     /**

@@ -23,19 +23,23 @@ final class PromptRulePacks {
 					EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
 					IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
 					不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
-					create_task 只创建任务，取得真实 taskId 后不得结束本轮，应按当前披露继续。
+					create_task 只创建任务；只创建且不继续配置时，返回真实 taskId 后即可收尾。
+					原始意图是完整导出/导入时，创建确认后必须继续完成所需配置/条件和启动确认，
+					SUSPENDED 不得提前 DONE。
 					""");
 			if (disclosedTools.contains(AiToolNames.NAVIGATE_TO)) {
 				sb.append("""
-						继续单独调用 navigate_to 打开对应向导，禁止与 create_task 并批，导航前不得勾选或推进。
+						完整执行时继续单独调用 navigate_to 打开对应向导，禁止与 create_task 并批，
+						导航前不得勾选或推进；只创建且不继续配置时不要自动导航。
 						""");
 			}
 		}
 		if (disclosedTools.contains(AiToolNames.NAVIGATE_TO)) {
 			sb.append("""
 
-					navigate_to 只负责打开目标页面或向导，不与同批其他动作混用；导航完成后，
-					下一批只按最新披露和权威页面/步骤继续，不要求用户重复原始意图。
+					navigate_to 只负责打开目标页面或向导，不与同批其他动作混用；只打开任务时，
+					页面、任务绑定与详情就绪后即可收尾。完整执行时下一批按最新披露和权威步骤继续，
+					不要求用户重复原始意图。
 					""");
 		}
 		if (disclosedTools.contains(AiToolNames.SELECT_DEFINITIONS)) {
@@ -47,7 +51,8 @@ final class PromptRulePacks {
 		if (disclosedTools.contains(AiToolNames.CONFIRM_STEP)) {
 			sb.append("""
 
-					confirm_step 必须单独成批，每次只确认当前一步，禁止跳步；完成后按最新披露和权威步骤继续。
+					confirm_step 必须单独成批，每次只确认当前一步，禁止跳步；只推进到目标步骤时，
+					目标达成即可收尾。完整执行时按最新披露和权威步骤继续。
 					""");
 		}
 		if (disclosedTools.contains(AiToolNames.SET_CONDITION)) {

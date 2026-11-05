@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * <li><b>禁键</b>：出现 {@code selector/xpath/html/css/path/filePath/filename/file/dir} 任一键 ⇒ 整条拒绝
  *   （"模型产选择器"与"接受文件路径"是本设计明文不做的两件事）；</li>
  * <li><b>ref</b>：{@code ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){2,}$} —— <b>段字符集含大写与下划线</b>
- *   （裁决 1：真实 defCode 是 {@code CURRENCY} / {@code E2E_TEMP}，旧稿的 {@code [a-z0-9-]+} 会误杀）；</li>
+ *   （裁决 1：真实 defCode 可能是 {@code CONFIG_CODE} / {@code TEST_CODE}，旧稿的 {@code [a-z0-9-]+} 会误杀）；</li>
  * <li><b>epoch</b>：{@code ^[a-z0-9]{6}-\d+$}（`nonce-counter`）；</li>
  * <li><b>长度</b>：{@code value} ≤200、{@code note} ≤60、{@code limit} 1..40、{@code delta} ±2000；</li>
  * <li><b>枚举</b>：{@code block ∈ {start,center,end,nearest}}，{@code kinds ⊆ 六角色+all}；</li>

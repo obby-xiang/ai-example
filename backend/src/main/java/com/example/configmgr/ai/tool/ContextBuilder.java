@@ -241,7 +241,7 @@ public class ContextBuilder {
     /**
      * 任务槽位的数据段（{@link TaskSlots}）：只在有已知值时出现。
      *
-     * <p>文本形态刻意保持"数据行"（{@code - 已确定配置项: CURRENCY}），值逐个过
+     * <p>文本形态刻意保持"数据行"（{@code - 已确定配置项: CONFIG_CODE}），值逐个过
      * {@link #safeDelimitedField}（不可信的用户值 / 定义编码不能提前闭合定界）。
      *
      * <p><b>条件三态（Task 1 第 1/4 项）</b>：已设置（含 EQ 以外的算子与范围键）渲染

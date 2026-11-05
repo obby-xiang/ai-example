@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
  * <li><b>唯一匹配才填</b>：编码或唯一中文名各算一项，<b>多项明确配置是合法多选</b>；
  * 只有同一中文名对应多个编码（且没有编码消歧）、否定、取消才不猜；</li>
  * <li><b>条件必须保守</b>：明确"字段为/=值"，或唯一配置项 + 唯一主键 + 唯一合法大写值；
- * 本轮已明确选定唯一配置时裸值不要求筛选词（"导出CNY货币字典"），多候选仍不造条件。</li>
+ * 本轮已明确选定唯一配置时裸值不要求筛选词（"导出CONFIG_VALUE货币字典"），多候选仍不造条件。</li>
  * </ul>
  */
 final class TaskSlotParser {
@@ -28,7 +28,7 @@ final class TaskSlotParser {
 	/** 选择/导出意图（没有它，出现的配置定义名只是被查询/讨论，不是选择）。 */
 	private static final Pattern SELECT_INTENT = Pattern.compile("(导出|导入|选择|勾选|选定|选用|改选|改成|换成|换为)");
 
-	/** 否定选择（"不要导出 CURRENCY"/"不选它"）：明确撤回，不填槽位、也不沿用历史。 */
+	/** 否定选择（"不要导出 CONFIG_CODE"/"不选它"）：明确撤回，不填槽位、也不沿用历史。 */
 	private static final Pattern NEGATED_SELECT = Pattern
 		.compile("(?:不要|不用|不需要|无需|别|请勿|不)\\s*(?:再)?\\s*(?:导出|导入|选择|勾选|选定|选用)");
 
@@ -44,13 +44,13 @@ final class TaskSlotParser {
 	private static final Pattern FILTER_INTENT = Pattern
 		.compile("(筛选|过滤|条件|只要|仅要|仅导出|只导出|限定|where)", Pattern.CASE_INSENSITIVE);
 
-	/** 字段 → 值：`code = CNY`、`code为CNY`、`货币代码 等于 CNY`。 */
+	/** 字段 → 值：`code = CONFIG_VALUE`、`code为CONFIG_VALUE`、`货币代码 等于 CONFIG_VALUE`。 */
 	private static final String FIELD_VALUE_CONNECTOR = "\\s*(?:=|==|等于|为|是)\\s*";
 
 	/** 等值字面量（口令类字符不参与，遇到空白/标点即止；引号可有可无）。 */
 	private static final String FIELD_VALUE_LITERAL = "[\"'“”]?([^\\s，。；,;、\"'“”]{1,64})[\"'“”]?";
 
-	/** 大写候选值（CURRENCY+CNY 这类唯一主键缩写）。 */
+	/** 大写候选值（CONFIG_CODE+CONFIG_VALUE 这类唯一主键缩写）。 */
 	private static final Pattern UPPER_TOKEN = Pattern
 		.compile("(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{1,63}(?![A-Za-z0-9_])", Pattern.CASE_INSENSITIVE);
 
@@ -150,7 +150,7 @@ final class TaskSlotParser {
 			else if (def != null && (selection == SlotState.DETERMINED
 					|| FILTER_INTENT.matcher(text).find())) {
 				// 裸值缩写：本轮已明确选定唯一配置时不再要求"筛选/只要"等词
-				// （"导出CNY货币字典"）；仍要求唯一主键 + 唯一合法大写候选。
+				// （"导出CONFIG_VALUE货币字典"）；仍要求唯一主键 + 唯一合法大写候选。
 				ShorthandResult shorthand = shorthandCondition(text, def);
 				condition = shorthand.state();
 				conditions = shorthand.slot() == null ? List.of() : List.of(shorthand.slot());
@@ -263,7 +263,7 @@ final class TaskSlotParser {
 				spans.add(new int[] { match.start(), match.end() });
 			}
 			if (distinct.size() > 1) {
-				// 同一字段出现多个不同值（"code = CNY 或 code = USD"）：歧义，不造条件
+				// 同一字段出现多个不同值（"code = CONFIG_VALUE 或 code = USD"）：歧义，不造条件
 				return null;
 			}
 			String value = distinct.iterator().next();
@@ -365,7 +365,7 @@ final class TaskSlotParser {
 	}
 
 	/**
-	 * 唯一主键 + 唯一大写值的确定场景（如"导出 CURRENCY，筛选 CNY"、"导出CNY货币字典"）。
+	 * 唯一主键 + 唯一大写值的确定场景（如"导出 CONFIG_CODE，筛选 CONFIG_VALUE"、"导出CONFIG_VALUE货币字典"）。
 	 * 以下任一不成立即不造条件：主键不唯一、没有候选、值不在可选枚举内；
 	 * <b>多候选</b>是歧义（{@link SlotState#AMBIGUOUS}），无候选则是"没提"（沿用前值）。
 	 */

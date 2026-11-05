@@ -71,7 +71,7 @@ import java.util.Set;
 @Component
 public class ConditionsForm extends HostForm {
 
-	/** 表单唯一字段的 key（回灌值形如 {@code {"conditions":"code = CNY"}}；空串 = 不设条件）。 */
+	/** 表单唯一字段的 key（回灌值形如 {@code {"conditions":"code = CONFIG_VALUE"}}；空串 = 不设条件）。 */
 	public static final String FIELD_KEY = "conditions";
 
 	/** 表单标题（与提示词同一语言）。 */

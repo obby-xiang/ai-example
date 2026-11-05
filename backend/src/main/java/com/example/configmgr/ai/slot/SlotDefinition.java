@@ -17,7 +17,7 @@ public record SlotDefinition(String code, String name, List<SlotField> fields) {
 		fields = fields == null ? List.of() : List.copyOf(fields);
 	}
 
-	/** 主键字段（{@code is_key}）：恰好一个时才允许用于"CURRENCY+CNY"这类唯一主键缩写。 */
+	/** 主键字段（{@code is_key}）：恰好一个时才允许用于"CONFIG_CODE+CONFIG_VALUE"这类唯一主键缩写。 */
 	public List<SlotField> keyFields() {
 		return fields.stream().filter(SlotField::key).toList();
 	}

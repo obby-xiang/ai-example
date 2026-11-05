@@ -101,7 +101,7 @@ public class KbTools {
 
     // ---------------------------------------------------------------- kb_search
 
-    @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/口径/术语类问题先用它）。"
+    @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/口径类问题先用它；精确术语/简称/口头叫法先 kb_lookup_term，未命中再用它）。"
             + "每条返回 doc_id/title/section/snippet/updated_at/match（high/medium/low）；不返回检索分数。"
             + "空结果状态为 no_match（含检索词与近似标题；近似标题只用于换词重查，不是命中，"
             + "不得在答复中列举或引用）或 low_confidence（仅 1–2 条，全部标 low）；"

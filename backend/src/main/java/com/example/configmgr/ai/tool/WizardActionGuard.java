@@ -116,7 +116,7 @@ public class WizardActionGuard implements FrontendToolGuard {
     public Verdict inspectArguments(String argumentsJson) {
         JsonNode root = parse(argumentsJson);
         if (root == null) {
-            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CURRENCY\",\"conditions\":{...}}）。");
+            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CONFIG_CODE\",\"conditions\":{...}}）。");
         }
         String tool = root.has("defCode") || root.has("conditions") ? AiToolNames.SET_CONDITION : AiToolNames.SELECT_DEFINITIONS;
         return decide(tool, root);
@@ -137,7 +137,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         JsonNode root = parse(argumentsJson);
         if (root == null) {
-            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CURRENCY\",\"conditions\":{...}}）。");
+            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CONFIG_CODE\",\"conditions\":{...}}）。");
         }
         return decide(toolName, root);
     }
@@ -198,7 +198,7 @@ public class WizardActionGuard implements FrontendToolGuard {
 
     @Override
     public Verdict inspectResult(String argumentsJson, String resultJson) {
-        // 这两个动作的回灌是自由文本（"已设置查询条件（CURRENCY）"这类），没有可核对的数值口径
+        // 这两个动作的回灌是自由文本（"已设置查询条件（CONFIG_CODE）"这类），没有可核对的数值口径
         // ⇒ 不新增"必须含共 N"之类的形式要求（那只会把一次成功判成失败）。
         return Verdict.accept();
     }
@@ -240,7 +240,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             reasons.add("codes 必填（要勾选的配置定义编码列表，不能为空）。");
         }
         else if (!codesNode.isArray()) {
-            reasons.add("codes 必须是配置定义编码的数组，例如 [\"CURRENCY\"]。");
+            reasons.add("codes 必须是配置定义编码的数组，例如 [\"CONFIG_CODE\"]。");
         }
         else {
             for (JsonNode item : codesNode) {
@@ -339,7 +339,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             return values;
         }
         if (!scopeKeys.isArray()) {
-            reasons.add("conditions.scopeKeys 必须是字符串数组（例如 [\"XN\"]）。");
+            reasons.add("conditions.scopeKeys 必须是字符串数组（例如 [\"REGION_CODE\"]）。");
             return values;
         }
         for (JsonNode item : scopeKeys) {
