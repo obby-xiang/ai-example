@@ -288,7 +288,7 @@ public class AiTools {
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
     @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 50 条，超出时给出总条数",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope({"*", "page:tasks"})
+    @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String listTasks() {
@@ -385,8 +385,8 @@ public class AiTools {
      * → {@code select_definitions} →（{@code set_condition}）→ {@code confirm_step}
      * → {@code start_export}（确认门）。
      *
-     * <p><b>披露范围（{@code page:tasks} + 两类向导页）</b>：任务中心是"没有任务时建任务"的现场；
-     * 向导页一并披露，是为了在已有任务时也能按用户要求再建一条（否则模型得先导航回任务中心）。
+     * <p><b>披露范围（{@code *}）</b>：任务中心、任意业务页面以及没有显式工作区上下文的场景都可创建任务；
+     * 已有任务或已完成任务页面也可按用户要求另建一条，无需先导航回任务中心。
      * 同一批内的披露面在批首冻结，跨页的披露切换由<b>批间</b>的运行上下文刷新完成
      * （{@code create_task} 成功结算后按真实任务号写入快照，下一跳重算披露面）。
      *
@@ -828,18 +828,10 @@ public class AiTools {
      * 本工具与草案都不写业务库；业务数据库由前端在下一步（{@code confirm_step}）/启动作业前
      * {@code persistStepData} 提交。已知条件走 {@code set_condition} 草案时不弹表，留空=明确不设（提交 {@code {}}）。
      *
-     * <h2>披露范围（{@code page:tasks} + {@code task:*}）</h2>
-     * 两个场景的现场都在"任务驱动"这条链路上：
-     * <ul>
-     * <li>场景①的现场是<b>任务中心</b>（AI 面板所在页，用户在这里让 AI 导出/查询）与
-     * <b>导出向导各步骤</b>（{@code task:EXPORT}，含「查询条件」步：条件可以不跳转就在对话里填）；</li>
-     * <li>场景②与任务类型无关（任何任务上下文都可能信息不足），故用 {@code task:*}
-     * （与 {@code check_job_status} 同一标签），顺带覆盖导入向导。</li>
-     * </ul>
-     * 刻意<b>不</b>用 {@code *}（与 {@code navigate_to} 那样的任意页面工具不同）：{@code definitions/data}
-     * 等"只看不改"的页面没有需要收集的条件/澄清动作，而表单一旦下发就会挂起等用户提交（
-     * 与 DC-06⑤ 渐进披露的"最小必要工具集"同向）。若后续实测确有"任意页面都要澄清表单"的需求，
-     * 改这一处注解即可（一行，且披露与防线③同源，不会漂移）。
+     * <h2>披露范围（{@code *}）</h2>
+     * 本工具是通用信息收集能力：两个场景都可用于任务中心、任意业务页面以及没有显式工作区上下文的场景。
+     * 实际是否下发仍由真实信息缺口、purpose、任务槽位与下列后端闸门决定，
+     * 不因全局披露绕过步骤或槽位校验。
      *
      * <h2>四道后端闸门（本工具与其它前端工具的区别）</h2>
      * <ol>

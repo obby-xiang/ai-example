@@ -651,6 +651,13 @@
       "reason": "已同步check_job_status仅在任务中心与任务内披露的渐进范围，保留显式jobId只读查询",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:efbba2bc19a9a7572eaadacd3728052f16423ae4e377d57edfc711975d0f26a6",
+      "status": "not-affected",
+      "reason": "仅同步create_task和generative_form现行scope注释并删除list_tasks冗余标签，D6契约与实际披露行为均不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
