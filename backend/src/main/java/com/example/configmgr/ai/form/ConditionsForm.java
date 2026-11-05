@@ -256,7 +256,8 @@ public class ConditionsForm extends HostForm {
 	 *     {@code set_condition} 通道下发页面草案（逐 defCode、确定性 id、幂等），不弹条件表；</li>
 	 * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
 	 * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
-	 * <li>表单已明确留空/取消/非空回灌：不自动重问，也不代写 {@code "{}"}；</li>
+	 * <li>表单覆盖当前全部 UNDECIDED 的明确留空、取消或非空回灌：不自动重问，也不代写 {@code "{}"}；
+ * 新增配置项未被旧留空覆盖时必须单独收集；</li>
 	 * <li>仍 {@code UNDECIDED}：{@code allowUnknownForm=false}（刚成功推进到 {@code QUERY_COND}
 	 *     的首次交棒）时只置 {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，把"用户已给出的
 	 *     筛选值"交给既有 {@code set_condition} 结构化通道，不抢着弹表；其余交棒挂一次非必填
@@ -363,7 +364,7 @@ public class ConditionsForm extends HostForm {
 	 * 页面草案（不写库、不弹表）；绑定/校验失败走内部失败口径，不转化成再次询问用户；</li>
 	 * <li><b>草案事实</b>：本轮已成功结算的 {@code set_condition} 草案（按 defCode 与任务绑定核对）
 	 * 与任务条目已落库条件一样认可；不要求 {@code conditionJson} 提前存在；</li>
-	 * <li><b>表单回灌</b>：明确留空允许推进（前端 {@code persistStepData} 提交 {@code {}}）；
+	 * <li><b>表单回灌</b>：当前 UNDECIDED 均被覆盖的明确留空才允许推进（前端 {@code persistStepData} 提交 {@code {}}）；
 	 * 非空文本必须已按表单覆盖的 defCode 解析成草案，否则零副作用拒绝并指回 {@code set_condition}；</li>
 	 * <li><b>逐项核对</b>：真正未知的配置项才挂一次可选条件表单；取消过的表单不换卡重问。</li>
 	 * <li><b>收集失败不得 allow（F3）</b>：{@code park} 未启用、挂起写失败、读任务异常、同一缺口的
@@ -1010,7 +1011,8 @@ public class ConditionsForm extends HostForm {
 		}
 		ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
 		List<String> remaining = subtract(plan.undecided(), drafts.settled());
-		// ② 表单明确留空：允许推进；后端<b>不写</b> "{}"，由前端在离开 QUERY_COND 时经 persistStepData 提交。
+		// ② 旧表单明确留空只在其 defCode 覆盖当前全部 UNDECIDED 时允许推进；
+		// 后端<b>不写</b> "{}"，由前端在离开 QUERY_COND 时经 persistStepData 提交。新增项必须重新收集。
 		// 留空也压过 create_task 候选：用户的最新明确回答优先。
 		if (feedback.blank()) {
 			return ConfirmStepDecision.allow();
@@ -1196,7 +1198,10 @@ public class ConditionsForm extends HostForm {
 			return ConditionFeedback.none();
 		}
 		if (text.isBlank()) {
-			return new ConditionFeedback(false, true, false, false);
+			Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
+			boolean coversCurrentUndecided = !asked.isEmpty()
+					&& undecidedDefCodes != null && asked.containsAll(undecidedDefCodes);
+			return new ConditionFeedback(false, coversCurrentUndecided, false, false);
 		}
 		Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
 		return new ConditionFeedback(false, false, true,

@@ -588,6 +588,13 @@
       "reason": "已同步同run一对一历史合并、镜像原序插入、history generation及表单续跑inFlight的恢复契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:25e0a7d06ba324a0810430b589b2e79151f6073d6646f28d09bd30861f460197",
+      "status": "synced",
+      "reason": "已同步历史条件表留空仅在覆盖当前全部UNDECIDED配置项时放行，新增配置单独收集的语义",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
