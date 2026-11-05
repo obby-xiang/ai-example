@@ -3,7 +3,7 @@ package com.example.configmgr.ai.kb;
 import java.util.List;
 
 /**
- * {@code kb_search} 的结果（三态空结果 + fail-open 两态）。
+ * {@code kb_search} 的结果（正常命中/无命中与不可用状态）。
  *
  * <p>状态语义（定稿契约，测试按字面量锁定）：
  * <ul>
@@ -12,9 +12,9 @@ import java.util.List;
  * （"只有一两条"本身就是低置信的强信号，不能让模型当成确定答案）；</li>
  * <li>{@link State#NO_MATCH}：0 条 + 分析后的检索词 + 2–3 个近似标题（<b>仅标题文本</b>，
  * 不带 doc_id、不是命中；只用于换词重查，不是静默空数组）；</li>
- * <li>{@link State#ERROR}：检索异常，消息可行动、不含堆栈（fail-open：不打断整轮）；</li>
- * <li>{@link State#NOT_READY}：索引尚未建好（启动异步建索引），工具回"知识库加载中"；</li>
- * <li>{@link State#DISABLED}：{@code app.ai.kb.enabled=false}；</li>
+ * <li>{@link State#ERROR}：检索异常，原始原因仅供服务端日志，由工具层转为真实失败；</li>
+ * <li>{@link State#NOT_READY}：索引尚未建好，由工具层转为真实不可用结局；</li>
+ * <li>{@link State#DISABLED}：知识库未启用，由工具层转为真实不可用结局；</li>
  * <li>{@link State#INVALID_QUERY}：查询为空/全为停用字符（参数问题，由工具层转成参数异常）。</li>
  * </ul>
  */

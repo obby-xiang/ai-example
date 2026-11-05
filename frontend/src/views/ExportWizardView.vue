@@ -2518,7 +2518,7 @@ function registerHandlers(): void {
   registerPageHandler('export.nextStep', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，不能推进步骤'
+      return { ok: false, reason: '任务已结束，仅供查看，不能推进步骤' }
     }
     // 预算到点 / 本轮已停止 ⇒ 本 handler 一律零写（步骤、工作区都不动）
     if (uiAbandoned(lifetime)) {
@@ -2527,7 +2527,10 @@ function registerHandlers(): void {
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
     const index = target ? STEP_KEYS.indexOf(target as (typeof STEP_KEYS)[number]) : stepIndex.value + 1
     if (index < 0 || index >= STEP_KEYS.length) {
-      return `步骤 ${payload.step ?? index} 不在导出向导范围内（可选：${STEP_KEYS.join('、')}）`
+      return { ok: false, reason: `步骤 ${payload.step ?? index} 不在导出向导范围内（可选：${STEP_KEYS.join('、')}）` }
+    }
+    if (index === stepIndex.value) {
+      return { ok: false, reason: `步骤未改变：当前已在「${stepLabel(STEP_KEYS[index])}」，本次未触发写回。` }
     }
     // W-06 撒谎点本体收口（批3③a D7）：取 goStep 真实结局再回灌 —— persist 失败阻断推进
     // 时必须如实说"未推进"，否则模型会带着假的成功语义继续往下走。
@@ -2556,7 +2559,7 @@ function registerHandlers(): void {
     // 施工卡 §S3e（收口修 F4，复核 minor-2）：只读态不改变所选配置项 —— 与导入侧
     // import.selectDefs 守卫对称（本批 10 处守卫的最后一块拼图）
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未变更所选配置项'
+      return { ok: false, reason: '任务已结束，仅供查看，未变更所选配置项' }
     }
     // 预算到点 / 本轮已停止 ⇒ 选中集与工作区都不得再写（本 handler 全同步，入口判一次即可）
     if (uiAbandoned(lifetime)) {
@@ -2582,7 +2585,7 @@ function registerHandlers(): void {
   registerPageHandler('export.setConditions', (payload, lifetime) => {
     // 施工卡 §S3e（§2.4 零写清单）：只读态拦在写草案之前
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未设置查询条件'
+      return { ok: false, reason: '任务已结束，仅供查看，未设置查询条件' }
     }
     // 预算到点 / 本轮已停止 ⇒ 零写：页面草案、touched 登记与工作区都不动，先给确定性失败
     if (uiAbandoned(lifetime)) {

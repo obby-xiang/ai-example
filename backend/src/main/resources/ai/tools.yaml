@@ -73,7 +73,9 @@
 # 2026-10-27.22 → 2026-10-27.23：AI 精确行数工具下线；REST/UI 的独立计数能力不变。
 # 2026-10-27.23 → 2026-10-27.24（2026-11-05 渐进式披露）：表单默认使用基础 Schema，联动按需披露；
 # 统一 attachment 白名单；新增当前 run 的非 KB 截断结果有界回读工具。
-version: 2026-10-27.24
+# 2026-10-27.24 → 2026-10-27.25：披露时保留完整当前 Schema 和联动能力，修正旧描述。
+# 2026-10-27.25 → 2026-10-27.26：删除 confirm_step 的“第 29 条”编号引用，直接描述零副作用纠正例外。
+version: 2026-10-27.26
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -168,7 +170,7 @@ tools:
       确认并推进向导步骤（前端执行）。默认不传 step，只前进一步；step 仅在用户点名目标步骤或
       明确要求跳过筛选时才传，不要擅自跳步。前置：当前步骤校验通过。推进成功后不要结束本轮，
       下一批按最新披露继续（不要在同一批里连续推进）；推进失败即停，如实说明原因与当前步骤，
-      不要重试推进或跳步（第 29 条窄例外除外：回执给出纠正指引且本次零副作用时，
+      不要重试推进或跳步（回执给出明确纠正指引且本次零副作用时，
       允许一次不同的纠正动作；同参数/同目标仍在禁止之列）。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；
       导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。
       用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。
@@ -189,8 +191,8 @@ tools:
       purpose 必须对应实际用途。TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，
       模型不得自行调用。配置项已明确时直接使用 select_definitions。字段类型统一为
       text/number/boolean/date/enum/multi_select/attachment，禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，
-      不得预填。默认 Schema 只披露基础字段，visibleWhen/requiredWhen/disabledWhen/optionsFrom/defaultFrom
-      仅在当前 Schema 明确披露时使用；高级联动仍受后端白名单与闭集数据源校验。表单只收集值，不推进向导步骤；
+      不得预填。披露时保留完整当前 Schema 和联动能力，高级联动仍受后端白名单与闭集数据源校验。
+      表单只收集值，不推进向导步骤；
       用户提交后的字段值在统一信封 message 中，取消为 outcome=cancelled，schema 不合规则 rejected 且未下发。
   - toolKey: read_tool_result
     title: 读取截断工具结果

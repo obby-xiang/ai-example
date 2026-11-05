@@ -993,7 +993,7 @@ public class KbService {
         if (message == null || message.isBlank()) {
             message = error.getClass().getSimpleName();
         }
-        // 不允许堆栈/内部对象串进入模型可见面；长度收敛到一行
+        // 原始错误只供服务端日志与管理诊断；工具层不得把它转发给模型或用户。
         return message.length() > 300 ? message.substring(0, 300) + "…" : message;
     }
 

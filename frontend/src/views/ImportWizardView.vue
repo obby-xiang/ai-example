@@ -2340,7 +2340,7 @@ function registerHandlers(): void {
   registerPageHandler('import.nextStep', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态拦在 goStep 之前 —— 已结束任务不得借 AI 通道推进步骤（零写）
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，不能推进步骤'
+      return { ok: false, reason: '任务已结束，仅供查看，不能推进步骤' }
     }
     // 预算到点 / 本轮已停止 ⇒ 零写（交回执为确定性失败，不返回字符串）
     if (uiAbandoned(lifetime)) {
@@ -2358,7 +2358,7 @@ function registerHandlers(): void {
     // I-4 / Minor 3：目标就是当前步 ⇒ 在 goStep 之前短路，既不发起无意义的 PUT /step，
     // 也不产生一个会被丢弃的 syncWarning。
     if (index === fromIndex) {
-      return `步骤未改变：当前已在「${stepLabel(STEP_KEYS[index])}」，本次未触发写回。`
+      return { ok: false, reason: `步骤未改变：当前已在「${stepLabel(STEP_KEYS[index])}」，本次未触发写回。` }
     }
     // F2（DC-14）：回灌文本必须与真实结局一致 —— 未推进就如实说"未推进 + 为什么"，
     // 否则模型会基于假的成功语义继续往下走（例如直接 start_import，而用户还停在第一步）。
@@ -2404,7 +2404,7 @@ function registerHandlers(): void {
   registerPageHandler('import.selectDefs', async (payload, lifetime) => {
     // 施工卡 §S3e：只读态不改变所选配置项（含收敛工作区与重载编辑区一并短路）
     if (isReadOnly.value) {
-      return '任务已结束，仅供查看，未变更所选配置项'
+      return { ok: false, reason: '任务已结束，仅供查看，未变更所选配置项' }
     }
     // 预算到点 / 停止 ⇒ 选中集、工作区、编辑区一律不动
     if (uiAbandoned(lifetime)) {
@@ -2430,7 +2430,7 @@ function registerHandlers(): void {
       await selectionSettle
     }
     if (generation !== taskGeneration) {
-      return '任务已切换：本次所选配置项属于原任务，未应用到当前页面的编辑区'
+      return { ok: false, reason: '任务已切换：本次所选配置项属于原任务，未应用到当前页面的编辑区' }
     }
     if (uiAbandoned(lifetime)) {
       // 已作废：选中集与工作区已在作废前同步（那一步发生在超时/停止之前），

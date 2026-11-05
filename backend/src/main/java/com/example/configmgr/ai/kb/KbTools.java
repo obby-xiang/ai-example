@@ -9,6 +9,7 @@ import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.common.ConflictException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,28 +46,13 @@ import java.util.stream.Collectors;
  * 故 {@link #kbReadDoc} 用限流器预算派生每页的行/字符上限，并在回填前按同一份判定复核
  * （不满足就缩小页重读），而不是让限流器去切。
  */
+@Slf4j
 @Component
 public class KbTools {
 
-    /**
-     * 未就绪时的统一回执（fail-open：不抛异常、不阻塞对话）。
-     *
-     * <p>两种"未就绪"必须可区分（批 D · D4 / 问题 7）：
-     * <ul>
-     * <li>{@code lastError} 为空 = 首次建索引还在跑（启动异步建索引的正常窗口）⇒
-     * 「首次建索引进行中」，让模型稍后重试；</li>
-     * <li>{@code lastError} 非空 = 索引<b>真的没建成</b>（目录配错 / manifest 坏 / HTTP 源不可达）⇒
-     * 把原因原样带上，并给出两条可行动的修复路径（检查 {@code app.ai.kb.dir} 或
-     * {@code POST /api/ai/kb/reload}）。</li>
-     * </ul>
-     * 旧文案把两者都说成"加载中，请稍后重试"：配错目录时模型会一直让用户等，
-     * 用户永远等不到，也永远看不到"为什么"。英文句尾供英文提问的会话直接读懂。
-     */
-    static final String NOT_READY_TEXT = "知识库加载中：首次建索引进行中，请稍后重试。"
-            + "若持续超过 1 分钟，请联系管理员检查知识源（manifest/目录/HTTP 服务）。"
-            + " (Knowledge base is still building its first index; please retry shortly.)";
+    private static final String UNAVAILABLE_TEXT = "知识库暂不可用，请联系业务负责人或稍后重试";
 
-    static final String DISABLED_TEXT = "知识库未启用（app.ai.kb.enabled=false），无法检索业务知识。";
+    private static final String INCOMPLETE_TEXT = "知识库检索未完成，请联系业务负责人或稍后重试";
 
     /** 渲染开销预留行数（定界/声明/表头/目录框/正文框/尾行 + 目录行余量）。 */
     private static final int RENDER_ROWS_RESERVE = 12;
@@ -95,17 +81,22 @@ public class KbTools {
         this(kbService, new ToolResultLimiter(new AiProperties()));
     }
 
-    /** 未就绪回执（按 {@code status().lastError()} 区分"建索引中"与"建索引失败"）。 */
-    private String notReadyText() {
-        KbStatus status = this.kbService.status();
-        String reason = status.lastError() == null ? "" : status.lastError().trim();
-        if (reason.isEmpty()) {
-            return NOT_READY_TEXT;
+    /** 未就绪走真实失败结局；原始原因只写服务端日志，模型与用户只得到公开摘要。 */
+    private IllegalStateException notReady() {
+        String reason = this.kbService.status().lastError();
+        if (reason != null && !reason.isBlank()) {
+            log.warn("KB index unavailable: {}", reason);
         }
-        return "知识库索引未建成：" + reason
-                + "。请检查 app.ai.kb.dir 指向的知识目录（或 HTTP 知识源）后调用 POST /api/ai/kb/reload 重建索引。"
-                + " (Knowledge base index is unavailable: " + reason
-                + "; check app.ai.kb.dir or POST /api/ai/kb/reload.)";
+        return new IllegalStateException(UNAVAILABLE_TEXT);
+    }
+
+    private static IllegalStateException disabled() {
+        return new IllegalStateException(UNAVAILABLE_TEXT);
+    }
+
+    private static IllegalStateException incomplete(String operation, String error) {
+        log.error("{} failed: {}", operation, error);
+        return new IllegalStateException(INCOMPLETE_TEXT);
     }
 
     // ---------------------------------------------------------------- kb_search
@@ -128,10 +119,9 @@ public class KbTools {
             throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, result.error());
         }
         return switch (result.state()) {
-            case NOT_READY -> KbText.plain(notReadyText());
-            case DISABLED -> KbText.plain(DISABLED_TEXT);
-            case ERROR -> KbText.plain("知识库检索失败：" + result.error()
-                    + "。可稍后重试；若持续失败，请联系管理员检查知识源（不要把失败当成“没有这条制度”）。");
+            case NOT_READY -> throw notReady();
+            case DISABLED -> throw disabled();
+            case ERROR -> throw incomplete("KB search", result.error());
             default -> KbText.wrap(renderSearch(result, effectiveTopK));
         };
     }
@@ -188,10 +178,9 @@ public class KbTools {
             @ToolParam(description = "本次最多读取的字符数（默认 4000，上限 8000）", required = false) Integer maxChars) {
         KbReadResult result = this.kbService.readDoc(docId, section, offset, maxChars);
         return switch (result.state()) {
-            case NOT_READY -> KbText.plain(notReadyText());
-            case DISABLED -> KbText.plain(DISABLED_TEXT);
-            case ERROR -> KbText.plain("读取知识文档失败：" + result.error()
-                    + "。可稍后重试，或用 kb_search 换一种检索词。");
+            case NOT_READY -> throw notReady();
+            case DISABLED -> throw disabled();
+            case ERROR -> throw incomplete("KB document read", result.error());
             case DOC_NOT_FOUND -> KbText.plain("未找到文档 id=" + docId + "。\n"
                     + candidateLine(result.candidates())
                     + "建议: 用 kb_search 检索主题获取正确的 doc_id。");
@@ -244,7 +233,7 @@ public class KbTools {
             pageChars = nextChars;
             page = this.kbService.readDoc(docId, section, offset, pageChars, pageRows);
             if (page.state() != KbReadResult.State.OK) {
-                return KbText.plain(page.error().isEmpty() ? "读取知识文档失败。" : "读取知识文档失败：" + page.error());
+                throw incomplete("KB document page read", page.error());
             }
             body = renderRead(page, docId);
         }
@@ -314,14 +303,13 @@ public class KbTools {
             @ToolParam(description = "术语（正式叫法或口头叫法，例如“标准费率”“费率表”）") String term) {
         KbLookupResult result = this.kbService.lookup(term);
         if (result.notReady()) {
-            return KbText.plain(notReadyText());
+            throw notReady();
         }
         if (result.disabled()) {
-            return KbText.plain(DISABLED_TEXT);
+            throw disabled();
         }
         if (!result.error().isEmpty()) {
-            return KbText.plain("术语查询失败：" + result.error()
-                    + "。可稍后重试，或改用 kb_search 检索。");
+            throw incomplete("KB term lookup", result.error());
         }
         if (!result.found()) {
             StringBuilder sb = new StringBuilder();

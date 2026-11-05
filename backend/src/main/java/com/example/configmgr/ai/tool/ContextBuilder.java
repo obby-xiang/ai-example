@@ -33,15 +33,11 @@ import java.util.regex.Pattern;
  * </ol>
  *
  * <h2>A3-R1：定界注入收口</h2>
- * {@code <workspace_state>} 只声明"这一段是数据"，挡不住段内文本自带的收口标签：
- * 标题此前只过 {@code safeField}（剥控制字符、不中和标签），{@code extra.selectedDefs}
- * （页面实时勾选）与任务条目回退是原值 {@code String.join}，{@code extra} 值也只截长度 ——
- * 一个 {@code </workspace_state>} 就能提前闭合定界，把后续内容顶到最高信任位。现在标题、步骤、
- * 两条「已选配置项」路径与 {@code renderExtra} 的每个值都先过 {@link #safeDelimitedField}：
- * 剥不可见/控制字符与行/段分隔符（换行、{@code U+2028}/{@code U+2029}）、把非 ASCII 空白
- * 归一为普通空格后，把
- * {@code </workspace_state>}/{@code </tool_result>}/{@code </knowledge>} 中和成全角尖括号形式
- * （正则同时兜住 {@code \s} 与 {@code \p{Z}}）。
+ * {@code <workspace_state>} 只声明"这一段是数据"，段内用户数据不得伪造当前协议标记。
+ * 标题、步骤、两条「已选配置项」路径与 {@code renderExtra} 的每个值都先过
+ * {@link #safeDelimitedField}：剥不可见/控制字符与行/段分隔符（换行、{@code U+2028}/{@code U+2029}）、
+ * 把非 ASCII 空白归一为普通空格，再把当前协议开闭标签的尖括号改成全角。
+ * 覆盖 workspace_state、tool_result、knowledge 与 capability_rules，原文可读且长度不变。
  * 已选配置项另有单项 64 / 单行 2000 字符上限，截断对模型可见。
  */
 @Slf4j
@@ -172,15 +168,11 @@ public class ContextBuilder {
     static final String SELECTED_DEFS_TRUNCATION_MARKER = "…（已截断）";
 
     /**
-     * 可提前闭合定界的收口标签（A3-R1）：{@code </workspace_state>} 是本段的，
-     * {@code </tool_result>}/{@code </knowledge>} 是下游工具结果的 —— 客户端值里出现任意一个，
-     * 都等于在最高信任位留了一个"提前收口、把后续文本顶到定界之外"的写入口。
-     *
-     * <p>标签识别与中和口径收敛在 {@link PromptDelimiters}（与结果信封、{@code KbText} 共用一份实现）；
-     * 本段只声明自己关心的三个闭标签，不改变既有输出形态（{@code ＜/workspace_state＞}）。
+     * 当前协议的开闭标签：客户端值里的同名文本只作普通内容展示，不能形成协议定界。
+     * 标签识别与中和口径收敛在 {@link PromptDelimiters}（与结果信封、{@code KbText} 共用一份实现）。
      */
-    private static final Pattern CLOSING_DELIMITER = PromptDelimiters.closingTags(
-            "workspace_state", "tool_result", "knowledge");
+    private static final Pattern PROTOCOL_DELIMITER = PromptDelimiters.anyTag(
+            "workspace_state", "tool_result", "knowledge", "capability_rules");
 
     private final TaskService taskService;
 
@@ -198,7 +190,7 @@ public class ContextBuilder {
      * <p>
      * <b>G4</b>：任务标题另有值级定界（{@code 标题「…」}）—— 段级定界只说明"这一段是数据"，
      * 值级定界让模型能一眼分清"哪里是标题、哪里是提示词正文"。全局声明（覆盖任务标题 / 工具返回结果 /
-     * 用户上传内容）在主提示里，见 {@code ResilientChatService.SYSTEM_PROMPT} 第 11 条。
+     * 用户上传内容）在主提示的数据安全规则里，见 {@code ResilientChatService.SYSTEM_PROMPT}。
      */
     public String buildContextMessage(AiContext ctx) {
         StringBuilder sb = new StringBuilder();
@@ -524,7 +516,7 @@ public class ContextBuilder {
 
     /**
      * 定界内的单行文本：先剥不可见/控制字符（换行一并压掉，否则可在定界内伪造新行），
-     * 再中和收口标签（A3-R1）。
+     * 再把当前协议开闭标签的尖括号改成全角，保留可读内容但不形成协议标记。
      *
      * <p>顺序不可颠倒：控制字符可能夹在标签中间（{@code </workspace_state\u0000>}），
      * 先剥再中和才不会留下一个"剥完才成形"的标签。
@@ -534,11 +526,11 @@ public class ContextBuilder {
     }
 
     /**
-     * 收口标签中和：改成全角尖括号（模型侧不是标签），长度不变或更短，不吃额外预算。
+     * 当前协议开闭标签中和：只改尖括号，标签名与斜杠保留，原文长度不变。
      *
-     * <p>实现见 {@link PromptDelimiters#neutralizeClosing}（与结果信封、{@code KbText} 同源）。
+     * <p>实现见 {@link PromptDelimiters#neutralizeTagEdges}（与结果信封、{@code KbText} 同源）。
      */
     static String neutralizeClosingDelimiters(String text) {
-        return PromptDelimiters.neutralizeClosing(text, CLOSING_DELIMITER);
+        return PromptDelimiters.neutralizeTagEdges(text, PROTOCOL_DELIMITER);
     }
 }

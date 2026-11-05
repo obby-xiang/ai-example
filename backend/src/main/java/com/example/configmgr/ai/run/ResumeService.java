@@ -452,6 +452,19 @@ public class ResumeService {
 		return discoverRuns(true, limit);
 	}
 
+	/** 从指定 score + member 之后取一页，避免只在前 256 个候选内轮转。 */
+	public List<Map<String, Object>> listRunsForRecoveryAfter(int limit, long afterDueAtMs, String afterMember) {
+		this.store.reconcileRecoveryIndexThrottled();
+		List<Map<String, Object>> out = new ArrayList<>();
+		Set<String> seen = new LinkedHashSet<>();
+		for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecordsAfter(System.currentTimeMillis(),
+				afterDueAtMs, afterMember, limit)) {
+			RunKeyScope.IndexRef ref = candidate.ref();
+			appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
+		}
+		return out;
+	}
+
 	private List<Map<String, Object>> discoverRuns(boolean recovery, int recoveryLimit) {
 		List<Map<String, Object>> out = new ArrayList<>();
 		Set<String> seen = new LinkedHashSet<>();
@@ -588,6 +601,7 @@ public class ResumeService {
 		item.put("userId", snapshot.getUserId());
 		item.put("status", snapshot.getStatus());
 		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
+		item.put("dueAtMs", expectedDueAtMs);
 		item.put("activeAtMs", activeAtMs);
 		item.put("cancelled", cancelState == CancellationRegistry.CancelState.CANCELLED);
 		item.put("zombieRunning", zombieRunning(snapshot, activeAtMs));

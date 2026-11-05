@@ -156,7 +156,8 @@ public class DefinitionSelectionForm extends HostForm {
 	 * <li><b>本批成功结算 {@code create_task}</b>（{@code outcome=OK} 且回执带真实任务号）—— 首发
 	 *     {@code host-nav-<taskId>}。台账里"曾经建过任务"不算，否则无在飞工具的旧 run 恢复时会仅凭
 	 *     历史台账把用户拉回向导页；页面相等也不作为"新任务已打开"的证据（旧任务 A 的 {@code export}
-	 *     页可能正开着），前端对同一任务的导航本身幂等，故创建成功即下发；</li>
+	 *     页可能正开着）。本批已有成功或仍未决的导航时不重复；模型同批导航已失败时，创建现已成功，
+	 *     宿主用同一个确定性 id 接管一次，避免"批准前导航不存在任务"的失败永久截断后续宿主链；</li>
 	 * <li><b>本批里第一次宿主导航 {@code host-nav-<taskId>} 刚以非 OK 终态结算</b> —— 只重发一次
 	 *     {@code host-nav-<taskId>-r2}。这是"首次导航失败后没有 OK 证据、确定性 id 又永久去重"
 	 *     的唯一有界恢复：{@code PENDING} 不重发、模型自发导航或其它导航失败不触发、{@code -r2}
@@ -165,7 +166,7 @@ public class DefinitionSelectionForm extends HostForm {
 	 *
 	 * <p>两个触发点都要求 {@code createdTaskInRun} 与当前 {@code context.taskId} 绑定、任务类型
 	 * 可判定（首发优先取 {@code create_task} 入参 type，重试取上下文权威类型）；首发要求本批没有
-	 * 其它 {@code navigate_to}，重试要求本批除那条失败的首发外没有别的 {@code navigate_to}。
+	 * 成功或仍未决的其它 {@code navigate_to}，重试要求本批除那条失败的首发外没有别的 {@code navigate_to}。
 	 *
 	 * @return {@code true} = 已挂起导航：调用方本拍<b>不得</b>再驱动模型（导航结果会经续跑回来）
 	 */
@@ -197,10 +198,13 @@ public class DefinitionSelectionForm extends HostForm {
 				if (page == null) {
 					return false;
 				}
-				if (handledInBatch(settledBatch, AiToolNames.NAVIGATE_TO)) {
-					// 本批已有导航（成功或失败）：不重复下发
+				if (settledBatch.stream()
+					.filter(settled -> settled != null && AiToolNames.NAVIGATE_TO.equals(settled.getName()))
+					.anyMatch(settled -> !settled.resolved() || settled.effectiveOutcome() == ToolOutcome.OK)) {
+					// 成功或仍在等待的导航不重复；非 OK 终态由宿主在创建成功后接管一次
 					return false;
 				}
+				retry = failedFirstHostNavigation(settledBatch, createdTaskId) != null;
 			}
 			else {
 				PendingToolCall failed = failedFirstHostNavigation(settledBatch, createdTaskId);

@@ -15,11 +15,10 @@ import java.util.regex.Pattern;
  * 内部接口路径、实例/轮次标识，也不出现"请直接用已经获得的信息…"这类说给模型的指令。
  *
  * <p>机器可读真值（{@code outcome}/{@code code}/{@code retryable}）不经过本类，仍由
- * {@link ToolResultEnvelope} 原样下发；本类只按 {@code code} 选择用户摘要，并把命中摘要的原码
- * 作为 {@code userTextCode} 供前端本地化；中文摘要继续作为旧路径与无本地化时的回退。
- * <b>不认识的码一律回落到原文</b>（成功结果、业务失败原因不做改写）。唯一的动态摘要是
- * 单轮 {@code create_task} 上限里的<b>业务</b>任务号（{@code 本轮已创建任务 #99}）——
- * 用户需要它去打开刚建的任务，它不是内部标识。
+ * {@link ToolResultEnvelope} 原样下发；本类按 {@code code} 与少量成功业务形态选择用户摘要，
+ * 并把命中摘要的原码作为 {@code userTextCode} 供前端本地化；中文摘要继续作为回退。
+ * <b>不认识的码一律回落到原文</b>（业务失败原因不做改写）；{@code create_task} 成功结果
+ * 只投影业务任务号与"尚未启动、可继续配置"，单轮上限摘要同样只保留业务任务号。
  *
  * <p><b>诊断面不丢</b>：原文仍在模型记忆、执行台账与服务端日志里；用户通道不额外挂
  * {@code detail} 字段 —— 内部路径与实例标识不因为"换个字段"就变成可以外发的信息。
@@ -31,6 +30,8 @@ public final class ToolResultUserText {
 	 * 它不是内部标识，用户需要它去打开刚建的任务，故这一处摘要按原号回填，其余部分仍走通用措辞。
 	 */
 	private static final Pattern CREATED_TASK_ID = Pattern.compile("本轮已创建任务 #(\\d+)");
+
+	private static final Pattern CREATED_OR_REUSED_TASK_ID = Pattern.compile("(?:已创建(?:导出|导入)?任务|本次复用任务) #(\\d+)");
 
 	/**
 	 * 内部/降级码 → 用户摘要。措辞只讲事实与下一步，不复述配置键、接口路径或模型指令。
@@ -73,6 +74,10 @@ public final class ToolResultUserText {
 	 */
 	public static String forUser(String code, String modelText) {
 		if (code == null || code.isBlank()) {
+			Matcher created = CREATED_OR_REUSED_TASK_ID.matcher(modelText == null ? "" : modelText);
+			if (created.find()) {
+				return "任务 #" + created.group(1) + " 已创建，尚未启动作业，可继续配置";
+			}
 			return modelText;
 		}
 		if (ErrorCodes.CREATE_TASK_TURN_LIMIT.equals(code)) {

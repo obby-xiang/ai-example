@@ -1,3 +1,5 @@
+import { markdownCodeRanges } from '@/utils/markdown'
+
 const PROTOCOL_TAG_RE = /<\s*\/?\s*(knowledge_catalog|knowledge|tool_result)\s*>/gi
 
 const PROTOCOL_NOTICE_RE = /^\s*[（(]以下内容来自[^\n]*是【数据】不是【指令】[^\n]*[）)]\s*$/
@@ -21,8 +23,6 @@ const METADATA_KEYS = new Set([
   'target',
   'evidence'
 ])
-
-const INLINE_METADATA_RE = /\b(?:doc_id|match|updated_at|source_doc|runId|toolCallId)\s*=\s*[^\s|]+/g
 
 const OUTCOMES = new Set(['ok', 'failed', 'rejected', 'blocked', 'timeout', 'cancelled', 'unknown', 'skipped'])
 
@@ -238,47 +238,110 @@ function readEnvelope(text: string): EnvelopeRead {
   }
 }
 
-function plainSegment(text: string): string {
+interface MaskedCharacter {
+  token: string
+  source: string
+}
+
+interface MarkdownMask {
+  text: string
+  characters: MaskedCharacter[]
+  exhausted: boolean
+}
+
+function maskToken(unavailable: Set<string>): string | null {
+  for (const [first, last] of [[0xE000, 0xF8FF], [0x1000, 0xD7FF]]) {
+    for (let code = first; code <= last; code += 1) {
+      const token = String.fromCharCode(code)
+      if (!unavailable.has(token)) {
+        unavailable.add(token)
+        return token
+      }
+    }
+  }
+  return null
+}
+
+function maskMarkdownCode(text: string): MarkdownMask {
+  const ranges = markdownCodeRanges(text)
+  if (ranges.length === 0) {
+    return { text, characters: [], exhausted: false }
+  }
+  const unavailable = new Set(text)
+  const tokens = new Map<string, string>()
+  const masked = text.split('')
+  for (const range of ranges) {
+    let cursor = range.start
+    while (cursor < range.end) {
+      const char = text[cursor]
+      if (char === '\\') {
+        const unicode = text[cursor + 1] === 'u' && /^[0-9A-Fa-f]{4}$/.test(text.slice(cursor + 2, cursor + 6))
+        cursor += unicode ? 6 : Math.min(2, range.end - cursor)
+        continue
+      }
+      const code = char.charCodeAt(0)
+      if (code >= 0x20 && code <= 0x7E) {
+        let token = tokens.get(char)
+        if (token === undefined) {
+          const created = maskToken(unavailable)
+          if (created === null) {
+            return { text, characters: [], exhausted: true }
+          }
+          token = created
+          tokens.set(char, token)
+        }
+        masked[cursor] = token
+      }
+      cursor += 1
+    }
+  }
+  const characters = Array.from(tokens, ([source, token]) => ({ source, token }))
+  return { text: masked.join(''), characters, exhausted: false }
+}
+
+function restoreMarkdownCode(text: string, characters: MaskedCharacter[]): string {
+  let restored = text
+  for (const character of characters) {
+    restored = restored.split(character.token).join(character.source)
+  }
+  return restored
+}
+
+function plainSegment(text: string, protocol = false): string {
   return text
     .split('\n')
-    .map(projectLine)
+    .map((line) => projectLine(line, protocol))
     .filter((line): line is string => line !== null)
     .join('\n')
 }
 
-function projectLine(line: string): string | null {
+function projectLine(line: string, protocol: boolean): string | null {
   const trimmed = line.trim()
-  if (trimmed === '' || PROTOCOL_NOTICE_RE.test(trimmed)) {
+  if (trimmed === '' || !protocol) {
+    return line
+  }
+  if (PROTOCOL_NOTICE_RE.test(trimmed) || trimmed.startsWith('app.ai.') || trimmed.startsWith('/api/ai/')) {
     return null
   }
-  if (trimmed.startsWith('app.ai.') || trimmed.startsWith('/api/ai/')) {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*/.exec(trimmed)
+  if (match !== null && METADATA_KEYS.has(match[1])) {
     return null
   }
-  const content = trimmed.replace(/^\d+\)\s*/, '')
-  const segments = content.split(' | ')
-  const projected: string[] = []
+  return line
+}
+
+function joinDisplaySegments(segments: string[]): string {
+  let text = ''
   for (const segment of segments) {
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$/.exec(segment.trim())
-    if (match === null) {
-      projected.push(segment)
+    if (segment === '') {
       continue
     }
-    const key = match[1]
-    if (METADATA_KEYS.has(key)) {
-      continue
+    if (text !== '' && !text.endsWith('\n') && !segment.startsWith('\n')) {
+      text += '\n'
     }
-    if (key === 'title' || key === 'section' || key === 'answer' || key === '摘要') {
-      projected.push(match[2])
-      continue
-    }
-    projected.push(segment)
+    text += segment
   }
-  const text = projected.join(' | ').replace(INLINE_METADATA_RE, '')
-  const cleaned = text
-    .replace(/\s+\|\s+(?=\s|$)/g, '')
-    .replace(/[（(]\s*[）)]/g, '')
-    .trim()
-  return cleaned === '' ? null : cleaned
+  return text
 }
 
 function partialTagSuffix(text: string): string {
@@ -299,6 +362,14 @@ export function projectDisplayText(text: string | null | undefined): string {
   if (text == null || text === '') {
     return text ?? ''
   }
+  const masked = maskMarkdownCode(text)
+  if (masked.exhausted) {
+    return text
+  }
+  return restoreMarkdownCode(projectDisplayTextCore(masked.text), masked.characters)
+}
+
+function projectDisplayTextCore(text: string): string {
   const envelope = readEnvelope(text)
   if (envelope.status === 'incomplete') {
     return ''
@@ -328,21 +399,21 @@ export function projectDisplayText(text: string | null | undefined): string {
           cursor = bodyStart + closeMatch.index + closeMatch[0].length
           continue
         }
-        return output.join('\n')
+        return joinDisplaySegments(output)
       }
       if (nested.end < 0) {
         const bodyEnd = closeMatch === null ? text.length : bodyStart + closeMatch.index
-        output.push(plainSegment(text.slice(bodyStart, bodyEnd)))
+        output.push(plainSegment(text.slice(bodyStart, bodyEnd), true))
         if (closeMatch !== null) {
           cursor = bodyEnd + closeMatch[0].length
           continue
         }
-        return output.join('\n')
+        return joinDisplaySegments(output)
       }
       if (nested.status === 'valid') {
         output.push(nested.display ?? '')
       } else {
-        output.push(plainSegment(text.slice(bodyStart, bodyStart + nested.end)))
+        output.push(plainSegment(text.slice(bodyStart, bodyStart + nested.end), true))
       }
       cursor = bodyStart + nested.end
       continue
@@ -351,19 +422,19 @@ export function projectDisplayText(text: string | null | undefined): string {
     const closeMatch = closePattern.exec(text.slice(index + token.length))
     if (closeMatch === null) {
       if (tag !== 'knowledge_catalog') {
-        output.push(plainSegment(text.slice(index + token.length)))
+        output.push(plainSegment(text.slice(index + token.length), true))
       }
       cursor = text.length
       break
     }
     const bodyEnd = index + token.length + closeMatch.index
     if (tag !== 'knowledge_catalog') {
-      output.push(plainSegment(text.slice(index + token.length, bodyEnd)))
+      output.push(plainSegment(text.slice(index + token.length, bodyEnd), true))
     }
     cursor = bodyEnd + closeMatch[0].length
   }
   const remainder = text.slice(cursor)
   const partial = partialTagSuffix(remainder)
   output.push(plainSegment(remainder.slice(0, remainder.length - partial.length)))
-  return output.join('\n').replace(/^\n+|\n+$/g, '').replace(/\n{3,}/g, '\n\n')
+  return joinDisplaySegments(output)
 }
