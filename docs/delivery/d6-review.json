@@ -497,6 +497,13 @@
       "reason": "本批仅将无身份purge记录有界隔离并将退役异常纳入候选级失败计数，保留durable台账与D6现有重试契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:871faf63f25018343b31d4e35432b18f4c69bd1f59b4bd542e426a94ee0f82ea",
+      "status": "not-affected",
+      "reason": "本批仅按当前env合成provider和种子模型精确校验恢复，配置异常统一STATE_UNKNOWN，不新增旧协议或跨DB模型兼容",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

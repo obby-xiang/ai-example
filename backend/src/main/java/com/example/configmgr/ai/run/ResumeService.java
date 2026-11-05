@@ -1251,7 +1251,7 @@ public class ResumeService {
 			if (snapshot.getModelId() == null || snapshot.getModelId().isBlank()) {
 				return providerGone(runId, snapshot, "快照没有冻结模型名");
 			}
-			if (this.aiConfigService != null && snapshot.getProviderId() != null) {
+			if (this.aiConfigService != null) {
 				ResolvedIdentity identity = resolveForResume(runId,
 						() -> this.aiConfigService.resolveChatTarget(snapshot.getProviderId(), snapshot.getModelId()),
 						() -> this.aiConfigService.bindingState(snapshot.getProviderId(), snapshot.getModelId()));
@@ -1261,9 +1261,6 @@ public class ResumeService {
 				if (identity.target() == null) {
 					return providerGone(runId, snapshot, "该 provider/模型此刻不可用");
 				}
-			}
-			else if (this.aiConfigService != null) {
-				return providerGone(runId, snapshot, "快照缺少 providerId，不得按模型名跨 provider 猜测");
 			}
 			List<PendingToolCall> unresolved = pendings.stream()
 				.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
@@ -2500,7 +2497,14 @@ public class ResumeService {
 	private ResolvedIdentity resolveForResume(String runId,
 			java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
 			java.util.function.Supplier<AiConfigService.BindingState> binding) {
-		java.util.Optional<AiConfigService.ChatTarget> cached = lookup.get();
+		java.util.Optional<AiConfigService.ChatTarget> cached;
+		try {
+			cached = lookup.get();
+		}
+		catch (RuntimeException ex) {
+			log.warn("resume identity cached config read failed runId={} (treating as unknown): {}", runId, ex.getMessage());
+			return ResolvedIdentity.unknown("配置快照读取失败");
+		}
 		if (cached.isPresent()) {
 			return ResolvedIdentity.present(cached.get());
 		}
@@ -2518,7 +2522,14 @@ public class ResumeService {
 			log.warn("resume identity config reload unsuccessful runId={} (DB unavailable; treating as unknown; no death verdict)", runId);
 			return ResolvedIdentity.unknown("配置快照刷新未成功");
 		}
-		java.util.Optional<AiConfigService.ChatTarget> refreshed = lookup.get();
+		java.util.Optional<AiConfigService.ChatTarget> refreshed;
+		try {
+			refreshed = lookup.get();
+		}
+		catch (RuntimeException ex) {
+			log.warn("resume identity refreshed config read failed runId={} (treating as unknown): {}", runId, ex.getMessage());
+			return ResolvedIdentity.unknown("刷新后配置快照读取失败");
+		}
 		if (refreshed.isPresent()) {
 			return ResolvedIdentity.present(refreshed.get());
 		}

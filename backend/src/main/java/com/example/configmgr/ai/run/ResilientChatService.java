@@ -1304,9 +1304,6 @@ public class ResilientChatService {
 			throw new ProviderGoneException(runId, providerId, modelId,
 					"快照没有冻结模型名（当前协议要求首笔快照完整冻结 provider/model）");
 		}
-		if (providerId == null) {
-			throw new ProviderGoneException(runId, null, modelId, "快照缺少 providerId，不得按模型名跨 provider 猜测");
-		}
 		AiConfigService.ChatTarget target = this.providerRegistry.target(providerId, modelId).orElse(null);
 		if (target == null) {
 			throw new ProviderGoneException(runId, providerId, modelId);

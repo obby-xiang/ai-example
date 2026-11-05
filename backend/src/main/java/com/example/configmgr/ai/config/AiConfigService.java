@@ -643,21 +643,18 @@ public class AiConfigService {
      * 显式模型不满足 ⇒ <b>空</b>，不回落该 provider 的默认模型，也不去别家找同名模型。</li>
      * </ol>
      *
-     * <p>带 provider 身份的解析<b>不做</b>模型名回退：{@code providerId} 缺失时没有可判定的归属
-     * （快照/客户端协议都必须带这一维），直接返回空，不按同名模型猜别家。</p>
+     * <p>带 provider 身份的解析<b>不做</b>模型名回退；{@code providerId=null} 只匹配当前生效的
+     * env 合成行（数据库无 provider 且 env key 存在），不匹配数据库里的任何 provider。</p>
      *
-     * @param providerId provider 主键（必填；{@code null} = 身份缺失 ⇒ 空）
+     * @param providerId provider 主键；{@code null} = 仅限当前 env 合成行
      * @param requestedModelId 本轮模型名；<b>空白</b> = 该 provider 自己的默认模型
      *        （不借用全局 {@code default.modelId}：那个名字属于另一家时会把"绑定"变成"按名字猜"）
      */
     public Optional<ChatTarget> resolveChatTarget(Long providerId, String requestedModelId) {
-        if (providerId == null) {
-            return Optional.empty();
-        }
         ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
             .stream()
-            .filter(provider -> providerId.equals(provider.getId()))
+            .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
             .findFirst()
             .orElse(null);
         if (bound == null) {
@@ -703,17 +700,14 @@ public class AiConfigService {
      * 只看<b>快照</b>，不查库 —— 快照此刻可不可信由调用方用 {@link #reloadWithOutcome()} 的结局判定
      * （读库失败时"没有这一行"不代表库里没有）。
      *
-     * @param providerId provider 主键；{@code null} = 身份缺失（无可判定归属 ⇒ 确定不可用）
+     * @param providerId provider 主键；{@code null} = 仅限当前 env 合成行，其他场景确定不可用
      * @param modelId 快照里的模型名；空白 = 该 provider 自己的默认模型
      */
     public BindingState bindingState(Long providerId, String modelId) {
-        if (providerId == null) {
-            return BindingState.ABSENT;
-        }
         ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
             .stream()
-            .filter(provider -> providerId.equals(provider.getId()))
+            .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
             .findFirst()
             .orElse(null);
         if (bound == null || !bound.isEnabled()) {
