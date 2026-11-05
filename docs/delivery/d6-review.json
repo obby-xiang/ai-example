@@ -462,6 +462,13 @@
       "reason": "本批仅阻止普通BACKEND工具结果误用停止后的HITL结局例外，真实CONFIRM/FRONTEND提交证据与D6契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:592fbf64c4fead1854ff80c343e7993eaa87f39175cec097363e02edab40e316",
+      "status": "not-affected",
+      "reason": "本批仅在SSE、本地写入和历史归并统一冻结停止现场普通工具的成功跃迁，真实历史恢复与D6契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
