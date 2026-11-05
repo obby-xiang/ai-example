@@ -403,13 +403,13 @@ class ToolDefinitionOverridesTest {
         try {
             java.lang.reflect.Method method = com.example.configmgr.ai.tools.AiTools.class
                 .getMethod("createTask", String.class, String.class, String[].class,
-                        com.example.configmgr.ai.tools.AiTools.FieldQueryCondition.class, Boolean.class, ToolContext.class);
+                        com.example.configmgr.ai.tools.AiTools.FieldQueryCondition.class, Boolean.class, Boolean.class, ToolContext.class);
             Tool tool = method.getAnnotation(Tool.class);
             assertNotNull(tool, "AiTools#createTask 必须带 @Tool");
             return tool.description();
         }
         catch (NoSuchMethodException ex) {
-            throw new AssertionError("AiTools#createTask(String,String,String[],FieldQueryCondition,Boolean,ToolContext) 不存在", ex);
+            throw new AssertionError("AiTools#createTask(String,String,String[],FieldQueryCondition,Boolean,Boolean,ToolContext) 不存在", ex);
         }
     }
 

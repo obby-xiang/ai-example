@@ -23,7 +23,8 @@ final class PromptRulePacks {
 					EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
 					IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
 					不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
-					openWizard 省略或传 true 时宿主照旧自动续接；只创建且不继续配置时必须显式传 openWizard=false，
+					“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。
+					只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false，
 					宿主不得自动导航、代选或发配置表单，返回真实 taskId 后即可收尾；以后明确打开/配置仍可继续。
 					原始意图是完整导出/导入时，创建确认后必须继续完成所需配置/条件和启动确认，
 					SUSPENDED 不得提前 DONE。
@@ -31,7 +32,7 @@ final class PromptRulePacks {
 			if (disclosedTools.contains(AiToolNames.NAVIGATE_TO)) {
 				sb.append("""
 						完整执行时继续单独调用 navigate_to 打开对应向导，禁止与 create_task 并批，
-						导航前不得勾选或推进；只创建且不继续配置时不要自动导航。
+						导航前不得勾选或推进；用户明确限定创建后停止时不要自动导航。
 						""");
 			}
 		}

@@ -693,6 +693,13 @@
       "reason": "已同步create_task(openWizard)只创建与完整续接边界、严格归一化及确认指纹",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:1c7bb245e16e290b478f08d56f9cccf4a1ac319bb2386e6c6539ddcae74fddb0",
+      "status": "synced",
+      "reason": "已同步创建任务不等于只创建、默认完整续接及false仅限用户明确限定创建后停止的模型契约",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro施工，Kimi主控代码复核"
     }
   ]
 }

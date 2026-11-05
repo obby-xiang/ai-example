@@ -407,7 +407,7 @@ public class AiTools {
      * @param openWizard 是否让宿主创建后自动打开向导；省略 = true
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。openWizard 省略或 true 时宿主照旧自动续接；只创建且不继续配置时显式传 openWizard=false，宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后用户明确打开/配置仍可继续。原始意图是完整导出/导入时，返回任务 id 后用 navigate_to(page=..., taskId=...) 打开向导并完成所需配置/条件和启动确认（不要与本次调用并批发起），SUSPENDED 不得提前 DONE",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后用户明确打开/配置仍可继续。原始意图是完整导出/导入时，返回任务 id 后用 navigate_to(page=..., taskId=...) 打开向导并完成所需配置/条件和启动确认（不要与本次调用并批发起），SUSPENDED 不得提前 DONE",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -418,7 +418,7 @@ public class AiTools {
             @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
             @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}（表示条件未决定，不是“明确不设”）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
-            @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。完整导出/导入省略或传 true；只创建且不继续配置时传 false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
+            @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
             ToolContext toolContext) {
         Task.TaskType taskType;
         try {
@@ -458,7 +458,7 @@ public class AiTools {
             return String.format(
                     "已创建%s任务 #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
                             + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。"
-                            + "只创建且不继续配置时可返回任务号收尾。" + nextAction
+                            + "用户明确限定创建后停止时可返回任务号收尾。" + nextAction
                             + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
                             + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
                     export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep());
