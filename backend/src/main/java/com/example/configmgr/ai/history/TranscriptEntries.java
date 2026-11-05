@@ -8,6 +8,7 @@ import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -81,9 +82,9 @@ public final class TranscriptEntries {
 	/**
 	 * 一轮终态历史 → 本轮条目（只投影<b>本 run</b>的 assistant/tool，避免把快照里携带的旧轮重复写入）。
 	 *
-	 * <p>判据：工具条目的 toolCallId 必须出现在本 run 的 pending 表；assistant 必须含本 run 的
-	 * 工具调用，或它是历史里最后一条 assistant（成功/取消/失败写点追加的终稿/半截/错误事实）。
-	 * 用户条目由轮首或终态补写点负责。
+	 * <p>判据：工具条目的 toolCallId 必须出现在本 run 的 pending 表；assistant 可以含本 run 的
+	 * 工具调用、实际正文/思考，或它是历史里最后一条 assistant（成功/取消/失败写点追加的终稿/半截/错误事实）。
+	 * 无工具调用的多段正文按历史下标各持独立 entryId，避免互相覆盖。用户条目由轮首或终态补写点负责。
 	 *
 	 * @param includeLastAssistant 是否允许追加最后一条 assistant；失败只有形成本轮失败消息时才传 true
 	 */
@@ -112,6 +113,12 @@ public final class TranscriptEntries {
 		}
 		List<TranscriptEntry> out = new ArrayList<>();
 		long atMs = System.currentTimeMillis();
+		int currentRunStart = -1;
+		for (int i = 0; i < messages.size(); i++) {
+			if (messages.get(i) instanceof UserMessage user && !SyntheticMessages.isSynthetic(user)) {
+				currentRunStart = i;
+			}
+		}
 		for (int i = 0; i < messages.size(); i++) {
 			Message message = messages.get(i);
 			if (message == null || SyntheticMessages.isSynthetic(message)) {
@@ -120,13 +127,21 @@ public final class TranscriptEntries {
 			if (message instanceof AssistantMessage assistant) {
 				boolean hasOwnToolCall = assistant.hasToolCalls() && assistant.getToolCalls().stream()
 					.anyMatch(call -> call.id() != null && pendings.containsKey(call.id()));
-				if (!hasOwnToolCall && !(includeLastAssistant && i == lastAssistant)) {
+				if (i < currentRunStart || assistant.hasToolCalls() && !hasOwnToolCall) {
+					continue;
+				}
+				Map<String, Object> metadata = message.getMetadata();
+				boolean hasVisibleContent = hasText(assistant.getText()) || hasText(stringOf(metadata, REASONING_KEY));
+				boolean hasFailureFacts = hasText(stringOf(metadata, ERROR_CODE_KEY))
+						|| hasText(stringOf(metadata, ERROR_MESSAGE_KEY));
+				if (!hasOwnToolCall && !hasVisibleContent
+						&& !(includeLastAssistant && i == lastAssistant && hasFailureFacts)) {
 					continue;
 				}
 				List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
-				Map<String, Object> metadata = message.getMetadata();
 				Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
-				out.add(new TranscriptEntry(assistantEntryId(runId, calls), "assistant", runId,
+				String entryId = calls.isEmpty() ? entryId(runId, "assistant", "text-" + i) : assistantEntryId(runId, calls);
+				out.add(new TranscriptEntry(entryId, "assistant", runId,
 						turnStartedAtMs, atMs, assistant.getText(), stringOf(metadata, REASONING_KEY),
 						metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
 						metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,

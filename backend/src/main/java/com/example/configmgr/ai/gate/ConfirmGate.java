@@ -21,6 +21,7 @@ import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -2021,8 +2022,8 @@ public class ConfirmGate {
 	/**
 	 * 前端工具结果回灌的<b>唯一生产入口</b>：显式 {@code outcome} + 可选表格元数据 + 可选机器码。
 	 *
-	 * <p>{@code outcome} 是当前协议必填项；缺失或无法识别一律按 {@link ToolOutcome#UNKNOWN}
-	 * 持久化（结局帧 {@code ok=false}、不执行接受侧结算、不推成功）。
+	 * <p>表单通过结构化复核并被受理时，缺省 outcome 按真实受理事实记 {@code OK}（含留空）；
+	 * 其他工具缺失/无法识别仍按 {@link ToolOutcome#UNKNOWN}，显式 UNKNOWN 不改判成功。
 	 * {@code sheetMeta} 只承载白名单元数据，{@code code} 由前端自报（{@code UI_*} 闭集，入口已归一）。
 	 */
 	public Submission submitFrontendResult(String runId, String toolCallId, String result, String source,
@@ -2080,7 +2081,12 @@ public class ConfirmGate {
 		}
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		ToolOutcome declared = ToolOutcome.fromWire(outcome);
-		// 当前唯一协议要求显式 outcome：缺失/未知按 UNKNOWN 失败关闭，绝不推断成成功。
+		// 表单已经通过结构化复核并被本入口受理；空对象与留空提交同样是确定结果。
+		// 其它工具及显式 UNKNOWN 仍不得推断成功。
+		if (declared == null && verdict != null && verdict.accepted()
+				&& AiToolNames.GENERATIVE_FORM.equals(pending.getName())) {
+			declared = ToolOutcome.OK;
+		}
 		boolean outcomeUnknown = declared == null || declared == ToolOutcome.UNKNOWN;
 		if (declared == null) {
 			declared = ToolOutcome.UNKNOWN;

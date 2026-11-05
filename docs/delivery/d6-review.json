@@ -525,6 +525,13 @@
       "reason": "本批仅对暂时Redis异常执行有界幂等重试，接受所有权威终态并保留永久拒绝与UNCONFIRMED语义，D6协议不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:082343dd9dac7e1e7ae96fd3b75e793a490bf21fc823a783be78e529f1480b1b",
+      "status": "not-affected",
+      "reason": "本批仅按真实表单受理事实补齐缺省OK，并按当前run保留多段assistant正文及独立entryId；D6迁移接口、帧协议与恢复契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
