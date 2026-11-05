@@ -9,6 +9,7 @@ import java.util.Properties;
 
 import io.lettuce.core.ClientOptions;
 import io.lettuce.core.SslOptions;
+import io.lettuce.core.event.command.CommandListener;
 import io.lettuce.core.resource.DefaultClientResources;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.springframework.data.redis.core.RedisCallback;
@@ -43,6 +44,10 @@ public final class RedisHarness implements AutoCloseable {
 	}
 
 	public static RedisHarness open(HarnessConfig cfg) {
+		return open(cfg, null);
+	}
+
+	public static RedisHarness open(HarnessConfig cfg, CommandListener commandListener) {
 		DefaultClientResources resources = DefaultClientResources.create();
 		LettuceClientConfiguration.LettuceClientConfigurationBuilder client = LettuceClientConfiguration.builder()
 				.clientResources(resources)
@@ -84,9 +89,16 @@ public final class RedisHarness implements AutoCloseable {
 		}
 		factory.afterPropertiesSet();
 		factory.start();
+		if (commandListener != null) {
+			factory.getRequiredNativeClient().addListener(commandListener);
+		}
 		StringRedisTemplate template = new StringRedisTemplate(factory);
 		template.afterPropertiesSet();
 		return new RedisHarness(factory, template, resources, cfg.commandTimeout);
+	}
+
+	public LettuceConnectionFactory connectionFactory() {
+		return this.factory;
 	}
 
 	public CountingRedis redis() {

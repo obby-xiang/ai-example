@@ -86,6 +86,11 @@ public final class HarnessMetrics {
 		}
 	}
 
+	public void stageExternal(String scenario, int round, String name, long duration,
+			CountingRedis.Snapshot delta, String status, String detail) {
+		record(scenario, round, name, duration, delta, status, detail);
+	}
+
 	private void record(String scenario, int round, String name, long duration, CountingRedis.Snapshot delta,
 			String status, String detail) {
 		this.stages.add(new StageRecord(scenario, round, name, duration, delta.commands(),

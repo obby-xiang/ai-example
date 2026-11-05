@@ -7,7 +7,7 @@ Safety rules enforced here:
     keys that live on other masters;
   * multi-key commands are never issued on cluster (single-key commands are
     routed by redis-py);
-  * all write helpers require an explicit TTL so an interrupted run self-expires.
+  * owned-key writes require a TTL; shared global index writes never expire the key.
 """
 
 from __future__ import annotations
@@ -473,11 +473,12 @@ class RedisOps:
         except Exception:
             return 0
 
-    def zadd_mapping(self, key: str, mapping: Dict[str, float], ttl: int) -> None:
+    def zadd_mapping(self, key: str, mapping: Dict[str, float], ttl: Optional[int]) -> None:
         if not mapping:
             return
         self.client.zadd(key, mapping)
-        self.client.expire(key, max(1, int(ttl)))
+        if ttl is not None:
+            self.client.expire(key, max(1, int(ttl)))
 
     def zrem_members(self, key: str, members: Sequence[str]) -> int:
         if not members:

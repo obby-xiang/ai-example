@@ -112,6 +112,7 @@ def _skipped_entry(scenario: str, copy_name: str, round_no: int, warmup: bool,
 
 READ_OPERATIONS = {
     "history",
+    "history_before",
     "context",
     "runs_current",
     "runs_list",
@@ -149,6 +150,10 @@ def _call(cfg: Config, api: ApiClient, copy: Dict[str, object], operation: str, 
         return api.delete_session(session_id, operation=label, timeout=timeout)
     if operation == "history":
         return api.history(session_id, timeout=timeout)
+    if operation == "history_before":
+        transcript_entries = int(copy.get("transcript_entries", 0))
+        before = max(1, transcript_entries - 20 + 1)
+        return api.history(session_id, before=before, timeout=timeout, operation=operation)
     if operation == "context":
         return api.context(session_id, timeout=timeout)
     if operation == "runs_current":

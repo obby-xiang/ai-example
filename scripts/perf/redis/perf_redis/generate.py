@@ -9,12 +9,12 @@ Every value written here has the shape produced by the real services:
   * ai:seq / ai:xevents              STRING / Stream (seq + frame fields, id=<seq>-0)
   * chat:mem:*                       LIST of MessageJsonCodec JSON + :ver/:gen
   * chat:mem:staging:*               in-flight staging LIST
-  * ai:tx:*                          LIST of TranscriptEntry JSON + :bytes/:ready
+  * ai:tx:*                          HASH entries + :order ZSET + :meta HASH
   * ai:ctx:* + ai:ctx:archive:*      HASH + STRING archives
   * ai:session:* / current / runs / active / lock
   * ai:form:att:*                    created through the real upload endpoint only
 
-Nothing outside PERF_NAMESPACE-derived sessions is touched.
+Only PERF_NAMESPACE-derived session keys and their own run index members are touched.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ def _transcript_entry(session_id: str, run_id: str, index: int, now_ms: int) -> 
     return json.dumps({
         "entryId": "e-%s-%06d" % (session_id, index),
         "kind": kind,
-        "role": kind,
         "runId": run_id,
         "turnStartedAtMs": now_ms - 100000 + index,
         "atMs": now_ms - 100000 + index,
@@ -369,26 +368,37 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
     transcript_count = int(plan.get("transcript_entries", 0))
     if transcript_count > 0:
         first_run = M.run_id_for(cfg, scenario, copy_name, 0)
+        entry_ids = ["e-%s-%06d" % (session_id, index) for index in range(transcript_count)]
         entries = [_transcript_entry(session_id, first_run, index, now_ms) for index in range(transcript_count)]
-        ops.rpush_values(K.transcript_data_key(session_id, t, u), entries, ttl)
         total_bytes = sum(len(entry.encode("utf-8")) for entry in entries)
-        ops.set_values([
-            (K.transcript_bytes_key(session_id, t, u), str(total_bytes), ttl),
-            (K.transcript_ready_key(session_id, t, u), "1", ttl),
-        ])
+        ops.hset_mapping(K.transcript_data_key(session_id, t, u), dict(zip(entry_ids, entries)), ttl)
+        ops.zadd_mapping(K.transcript_order_key(session_id, t, u),
+                         {entry_id: float(index + 1) for index, entry_id in enumerate(entry_ids)}, ttl)
+        meta = {
+            "bytes": str(total_bytes),
+            "seq": str(transcript_count),
+            "rev": str(transcript_count),
+        }
+        meta.update({"fence:" + entry_id: "1" for entry_id in entry_ids})
+        ops.hset_mapping(K.transcript_meta_key(session_id, t, u), meta, ttl)
 
     run_specs = plan.get("runs") or []
     run_ids: List[str] = []
     active_run_ids: List[str] = []
     suspended_run_ids: List[str] = []
+    global_recovery_members: Dict[str, float] = {}
     for index, spec in enumerate(run_specs):
         run_id = M.run_id_for(cfg, scenario, copy_name, index)
         run_ids.append(run_id)
         written = _write_run(ops, cfg, run_id, session_id, spec, t, u, now_ms)
         copy["runs"].append(written)
         status = str(spec.get("status"))
+        ops.zadd_mapping(K.run_list_index_key(t, u), {run_id: float(now_ms)}, ttl)
         if status in ("RUNNING", "SUSPENDED"):
             active_run_ids.append(run_id)
+            due_at = float(now_ms + 180000)
+            ops.zadd_mapping(K.identity_recovery_due_key(t, u), {run_id: due_at}, ttl)
+            global_recovery_members[K.run_index_member(run_id, t, u)] = due_at
         if status == "SUSPENDED":
             suspended_run_ids.append(run_id)
 
@@ -399,12 +409,11 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
                              {run_id: float(now_ms) for run_id in active_run_ids}, ttl)
         if suspended_run_ids:
             ops.set_values([(K.session_current_key(session_id, t, u), suspended_run_ids[0], ttl)])
-        members = [K.run_index_member(run_id, t, u) for run_id in run_ids]
         if cfg.write_global_run_index:
             try:
-                ops.client.sadd(K.RUN_INDEX, *members)
+                ops.zadd_mapping(K.RECOVERY_DUE_INDEX, global_recovery_members, None)
             except Exception as exc:
-                copy["errors"].append("ai:runs SADD failed: %s" % exc)
+                copy["errors"].append("ai:recovery:due ZADD failed: %s" % exc)
         else:
             copy["global_run_index"] = "skipped (PERF_WRITE_GLOBAL_RUN_INDEX=false)"
 

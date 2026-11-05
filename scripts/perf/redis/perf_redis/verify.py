@@ -325,20 +325,26 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
         _check(checks, scenario, copy_name, "session_lock_retained", "info",
                "会话锁由 TTL 收敛（源码有意不删）：TTL=%s" % ttl)
 
-    members = keys["run_index_members"]
+    refs = keys["run_index_refs"]
     still = []
-    for member in members:
+    unknown_index = []
+    for ref in refs:
+        label = "%s member=%s" % (ref["key"], ref["member"])
         try:
-            if ops.client.sismember(K.RUN_INDEX, member):
-                still.append(member)
+            if ops.client.zscore(ref["key"], ref["member"]) is not None:
+                still.append(label)
         except Exception:
-            still.append(member)
+            unknown_index.append(label)
     if still:
         _check(checks, scenario, copy_name, "run_index_members_removed", "fail",
-               "ai:runs 全局索引成员仍在：%s" % _sample(still))
-    else:
+               "恢复/列表 ZSET 成员仍在：%s" % _sample(still))
+    if unknown_index:
+        _check(checks, scenario, copy_name, "run_index_members_unknown", "unknown",
+               "恢复/列表 ZSET 读取失败，不能判定成员已清理：%s" % _sample(unknown_index))
+    if not still and not unknown_index:
         _check(checks, scenario, copy_name, "run_index_members_removed", "pass",
-               "ai:runs 成员不存在（写入开关=%s；SREM 生效或未写入）" % cfg.write_global_run_index)
+               "全局/身份恢复及身份列表 ZSET 的本 run 成员均不存在（全局写入开关=%s）"
+               % cfg.write_global_run_index)
 
     business = merged.get("business") or {}
     memory_business = business.get("memory") if isinstance(business, dict) else None
@@ -604,6 +610,11 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
             _check(checks, scenario, copy_name, "read_data_intact", "pass",
                    "只读接口后数据仍完整")
 
+    history_business = {
+        str(row.get("operation")): (row.get("business") or {})
+        for row in rows
+        if str(row.get("operation")) in ("history", "history_before")
+    }
     for row in rows:
         business = row.get("business") or {}
         if not isinstance(business, dict):
@@ -619,12 +630,50 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
         if operation == "run_detail" and business.get("exists") is not True:
             _check(checks, scenario, copy_name, "run_detail_exists", "fail",
                    "GET /runs/{id} exists=%s" % business.get("exists"))
-        if operation == "history" and keys["transcript"]:
-            total = business.get("total")
-            if total is None or int(total) < 1:
-                _check(checks, scenario, copy_name, "history_non_empty", "fail", "history total=%s" % total)
-            else:
-                _check(checks, scenario, copy_name, "history_non_empty", "pass", "history total=%s" % total)
+        if operation in ("history", "history_before"):
+            continue
+
+    if keys["transcript"]:
+        entry_count = int(copy.get("transcript_entries", 0))
+        session_id = str(copy.get("session_id"))
+        expected_pages = {
+            "history": list(range(max(0, entry_count - 20), entry_count)),
+            "history_before": list(range(max(0, entry_count - 40), max(0, entry_count - 20))),
+        }
+        expected_cursors = {
+            "history": entry_count - 19 if entry_count > 20 else None,
+            "history_before": entry_count - 39 if entry_count > 40 else None,
+        }
+        actual_indexes = {}
+        for operation, expected in expected_pages.items():
+            business = history_business.get(operation) or {}
+            expected_ids = ["e-%s-%06d" % (session_id, index) for index in expected]
+            entry_ids = [str(item) for item in (business.get("entryIds") or [])]
+            entry_indexes = [int(item) for item in (business.get("entryIndexes") or [])]
+            actual_indexes[operation] = entry_indexes if entry_indexes else entry_ids
+            ids_match = entry_ids == expected_ids if entry_ids else entry_indexes == expected
+            expected_cursor = expected_cursors[operation]
+            actual_cursor_raw = business.get("nextCursor")
+            actual_cursor = None if actual_cursor_raw in (None, "") else str(actual_cursor_raw)
+            cursor_match = actual_cursor == (None if expected_cursor is None else str(expected_cursor))
+            has_more_match = business.get("hasMore") is (expected_cursor is not None)
+            page_match = (
+                business.get("total") == entry_count
+                and business.get("count") == len(expected)
+                and ids_match
+                and cursor_match
+                and has_more_match
+            )
+            _check(checks, scenario, copy_name, "%s_entry_range_order_cursor" % operation,
+                   "pass" if page_match else "fail",
+                   "expectedIds=%s actualIds=%s expectedIndexes=%s actualIndexes=%s expectedCursor=%s actualCursor=%s hasMore=%s"
+                   % (expected_ids, entry_ids, expected, entry_indexes, expected_cursor, actual_cursor,
+                      business.get("hasMore")))
+        latest = actual_indexes.get("history") or []
+        before = actual_indexes.get("history_before") or []
+        nonoverlap = not set(latest).intersection(before)
+        _check(checks, scenario, copy_name, "history_pages_nonoverlap", "pass" if nonoverlap else "fail",
+               "latest=%s before=%s" % (latest, before))
 
 
 def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],

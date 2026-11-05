@@ -4,8 +4,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +39,15 @@ public final class Manifest {
 		public List<String> runIds = new ArrayList<>();
 
 		public List<String> keys = new ArrayList<>();
+
+		/** 外部控制样本：不是本场景创建的键；cleanup 不删除，verify 必须确认仍存在。 */
+		public List<String> retainedKeys = new ArrayList<>();
+
+		/** 本场景在共享 HASH 中拥有的 field；按 field 清理，不删除外部控制 member。 */
+		public Map<String, List<String>> ownedHashFields = new LinkedHashMap<>();
+
+		/** 场景输入、生产调用结果、故障点和断言证据。 */
+		public Map<String, Object> attributes = new LinkedHashMap<>();
 
 		/** 实际生成并属于本命名空间、可清理的背景键数量；外部既有键空间必须为 0。 */
 		public int background;

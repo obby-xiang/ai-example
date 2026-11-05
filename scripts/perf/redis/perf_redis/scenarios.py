@@ -19,6 +19,7 @@ from .envcfg import Config
 
 READ_OPS = (
     "history",
+    "history_before",
     "context",
     "runs_current",
     "runs_list",
@@ -232,7 +233,7 @@ def build_matrix(cfg: Config) -> Dict[str, Dict[str, object]]:
                            notes="同一 copy 上并发；源码没有记录级单飞"), True)
 
     matrix["reads_suspended"] = _scenario(
-        "真实 Redis 只读接口：history / context / runs/current / runs/{id} / events probe / cancel / pending",
+        "真实 Redis 只读接口：history latest/before / context / runs/current / runs/{id} / events probe / cancel / pending",
         ("smoke",), _plan(runs=[_run("SUSPENDED", pending=2, frames=int(s["frames_small"]), terminal="none")],
                            memory=int(s["memory_small"]), transcript=int(s["transcript_small"]),
                            ctx_turn_no=2, ops=list(READ_OPS), verify_mode="reads"), False)

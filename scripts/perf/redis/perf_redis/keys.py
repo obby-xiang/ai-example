@@ -16,7 +16,9 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional, Tuple
 
 RUN_PREFIX = "ai:run:"
-RUN_INDEX = "ai:runs"
+RECOVERY_DUE_INDEX = "ai:recovery:due"
+RECOVERY_DUE_IDENTITY_PREFIX = "ai:recovery:due:"
+RUN_LIST_INDEX_PREFIX = "ai:runs:"
 RUN_STATE_PREFIX = "ai:runstate:"
 PENDING_PREFIX = "ai:pending:"
 CLAIM_PREFIX = "ai:claim:"
@@ -57,8 +59,8 @@ MEMORY_GENERATION_SUFFIX = ":gen"
 MEMORY_STAGING_PREFIX = "chat:mem:staging:"
 
 TRANSCRIPT_PREFIX = "ai:tx:"
-TRANSCRIPT_READY_SUFFIX = ":ready"
-TRANSCRIPT_BYTES_SUFFIX = ":bytes"
+TRANSCRIPT_ORDER_SUFFIX = ":order"
+TRANSCRIPT_META_SUFFIX = ":meta"
 TRANSCRIPT_TRUNCATED_SUFFIX = ":truncated"
 
 ATTACHMENT_PREFIX = "ai:form:att:"
@@ -188,7 +190,7 @@ def activity_key(run_id: str, t: int, u: int) -> str:
 
 
 def cancel_key(run_id: str, t: int, u: int) -> str:
-    return scoped(CANCEL_PREFIX, run_id, t, u)
+    return run_scoped(CANCEL_PREFIX, run_id, t, u)
 
 
 def observed_key(run_id: str, t: int, u: int) -> str:
@@ -225,6 +227,22 @@ def run_anchor_keys(run_id: str, t: int, u: int) -> Dict[str, str]:
 
 def run_index_member(run_id: str, t: int, u: int) -> str:
     return "%d/%d/%s" % (int(t), int(u), run_id)
+
+
+def identity_recovery_due_key(t: int, u: int) -> str:
+    return RECOVERY_DUE_IDENTITY_PREFIX + "%d:%d" % (int(t), int(u))
+
+
+def run_list_index_key(t: int, u: int) -> str:
+    return RUN_LIST_INDEX_PREFIX + "%d:%d" % (int(t), int(u))
+
+
+def run_index_refs(run_id: str, t: int, u: int) -> List[Dict[str, str]]:
+    return [
+        {"key": RECOVERY_DUE_INDEX, "member": run_index_member(run_id, t, u)},
+        {"key": identity_recovery_due_key(t, u), "member": run_id},
+        {"key": run_list_index_key(t, u), "member": run_id},
+    ]
 
 
 def session_record_key(session_id: str, t: int, u: int) -> str:
@@ -303,12 +321,12 @@ def transcript_data_key(session_id: str, t: int, u: int) -> str:
     return TRANSCRIPT_PREFIX + segment(t, u) + session_hash_tag(session_id)
 
 
-def transcript_ready_key(session_id: str, t: int, u: int) -> str:
-    return transcript_data_key(session_id, t, u) + TRANSCRIPT_READY_SUFFIX
+def transcript_order_key(session_id: str, t: int, u: int) -> str:
+    return transcript_data_key(session_id, t, u) + TRANSCRIPT_ORDER_SUFFIX
 
 
-def transcript_bytes_key(session_id: str, t: int, u: int) -> str:
-    return transcript_data_key(session_id, t, u) + TRANSCRIPT_BYTES_SUFFIX
+def transcript_meta_key(session_id: str, t: int, u: int) -> str:
+    return transcript_data_key(session_id, t, u) + TRANSCRIPT_META_SUFFIX
 
 
 def transcript_truncated_key(session_id: str, t: int, u: int) -> str:

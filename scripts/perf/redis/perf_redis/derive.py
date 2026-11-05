@@ -94,7 +94,7 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
             "generated_unknown": generated_unknown,
             "generated_source": generated["source"],
             "anchors": K.run_anchor_keys(run_id, t, u),
-            "member": K.run_index_member(run_id, t, u),
+            "index_refs": K.run_index_refs(run_id, t, u),
             "status": str(run.get("status") or ""),
         }
 
@@ -115,8 +115,8 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
     if int(plan.get("transcript_entries", 0)) > 0:
         transcript_keys = [
             K.transcript_data_key(sid, t, u),
-            K.transcript_bytes_key(sid, t, u),
-            K.transcript_ready_key(sid, t, u),
+            K.transcript_order_key(sid, t, u),
+            K.transcript_meta_key(sid, t, u),
             K.transcript_truncated_key(sid, t, u),
         ]
 
@@ -204,7 +204,7 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
         "misc": misc_keys,
         "attachments": attachments,
         "expected_absent_on_clean": K.dedupe(expected_absent),
-        "run_index_members": [item["member"] for item in runs.values()],
+        "run_index_refs": [ref for item in runs.values() for ref in item["index_refs"]],
         "guard": K.purge_guard_key(sid, t, u),
         "pending": K.purge_pending_key(sid, t, u),
         "lock": K.session_lock_key(sid, t, u),

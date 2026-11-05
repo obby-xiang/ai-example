@@ -8,6 +8,7 @@ summary (complete/deferred/errors/found/phase/...).
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -161,14 +162,31 @@ class ApiClient:
                 if isinstance(value, dict):
                     out[key] = value
             return out
-        if operation == "history":
+        if operation in ("history", "history_before"):
             if isinstance(data, dict):
                 out["total"] = data.get("total")
                 out["count"] = data.get("count")
                 out["hasMore"] = data.get("hasMore")
+                out["nextCursor"] = data.get("nextCursor")
+                out["revision"] = data.get("revision")
                 out["truncated"] = data.get("truncated")
                 messages = data.get("messages")
                 out["messages"] = len(messages) if isinstance(messages, list) else None
+                entry_ids: List[str] = []
+                entry_indexes: List[int] = []
+                if isinstance(messages, list):
+                    for item in messages:
+                        if not isinstance(item, dict):
+                            continue
+                        entry_id = item.get("entryId")
+                        if entry_id is not None and str(entry_id):
+                            entry_ids.append(str(entry_id))
+                        text = str(item.get("text") or "")
+                        match = re.match(r"perf transcript entry (\d+) for ", text)
+                        if match:
+                            entry_indexes.append(int(match.group(1)))
+                out["entryIds"] = entry_ids
+                out["entryIndexes"] = entry_indexes
             return out
         if operation == "context":
             if isinstance(data, dict):
@@ -275,10 +293,13 @@ class ApiClient:
         return self._request(operation, "DELETE", "/api/ai/session/" + _quote(session_id),
                              timeout=timeout)
 
-    def history(self, session_id: str, limit: int = 20,
-                timeout: Optional[float] = None) -> Dict[str, object]:
-        return self._request("history", "GET", "/api/ai/history/" + _quote(session_id),
-                             params={"offset": 0, "limit": limit}, timeout=timeout)
+    def history(self, session_id: str, limit: int = 20, before: Optional[int] = None,
+                timeout: Optional[float] = None, operation: str = "history") -> Dict[str, object]:
+        params: Dict[str, object] = {"latest": limit}
+        if before is not None:
+            params["before"] = before
+        return self._request(operation, "GET", "/api/ai/history/" + _quote(session_id),
+                             params=params, timeout=timeout)
 
     def context(self, session_id: str, timeout: Optional[float] = None) -> Dict[str, object]:
         return self._request("context", "GET", "/api/ai/context/" + _quote(session_id),

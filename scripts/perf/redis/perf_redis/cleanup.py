@@ -40,7 +40,7 @@ def _synthetic_copy(cfg: Config, scenario: str, plan: Dict[str, object], copy: D
 def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> Dict[str, object]:
     exact: List[str] = []
     due_members: List[str] = []
-    index_members: List[str] = []
+    index_members: List[Dict[str, str]] = []
     runs: List[str] = []
     sessions: List[str] = []
     files: List[Tuple[str, str]] = []
@@ -121,7 +121,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                     exact.append(K.attachment_form_index_key(form_run_id, form_tool_call_id,
                                                              cfg.tenant_id, cfg.user_id))
             due_members.append(str(derived["pending"]))
-            index_members.extend(derived["run_index_members"])
+            index_members.extend(derived["run_index_refs"])
             runs.extend(list(derived["runs"].keys()))
             for run_id in derived["runs"].keys():
                 exact.append(K.run_scoped(K.XTRIM_PREFIX, run_id, cfg.tenant_id, cfg.user_id))
@@ -469,8 +469,13 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             removed = ops.zrem_members(K.PURGE_DUE_KEY, targets["due_members"])
             summary["due_removed"] = removed
         if targets["index_members"]:
-            removed = ops.srem_members(K.RUN_INDEX, targets["index_members"])
-            summary["index_members_removed"] = removed
+            members_by_key: Dict[str, List[str]] = {}
+            for ref in targets["index_members"]:
+                members_by_key.setdefault(str(ref["key"]), []).append(str(ref["member"]))
+            summary["index_members_removed"] = {
+                key: ops.zrem_members(key, members)
+                for key, members in members_by_key.items()
+            }
 
         # 2) exact session/run keys
         result = ops.delete_keys(exact)
@@ -576,12 +581,13 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
         unknown_exact = [key for key in exact if presence.get(key) is None]
         remaining_due = [member for member in targets["due_members"] if ops.zscore(K.PURGE_DUE_KEY, member) is not None]
         remaining_index = []
-        for member in targets["index_members"]:
+        unknown_index = []
+        for ref in targets["index_members"]:
             try:
-                if ops.client.sismember(K.RUN_INDEX, member):
-                    remaining_index.append(member)
+                if ops.client.zscore(ref["key"], ref["member"]) is not None:
+                    remaining_index.append(ref)
             except Exception:
-                remaining_index.append(member)
+                unknown_index.append(ref)
         remaining_scans = [item for item in scans if not item.get("complete")]
         remaining_background = [item for item in background_results if not item.get("complete")]
         summary["remaining"] = {
@@ -589,6 +595,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             "exact_unknown": unknown_exact,
             "due": remaining_due,
             "index_members": remaining_index,
+            "index_unknown": unknown_index,
             "scanned": remaining_scans,
             "background": remaining_background,
             "unknown_background": targets["unknown_background"],
@@ -602,6 +609,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             and not unknown_exact
             and not remaining_due
             and not remaining_index
+            and not unknown_index
             and not remaining_scans
             and not remaining_background
             and not targets["unknown_background"]

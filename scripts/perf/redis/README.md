@@ -22,11 +22,12 @@
 | 两趟全键空间 SCAN：staging 前缀、legacy archive 前缀；Cluster 逐 master 串行 | `ai/session/AiSessionPurgeService.java`（`stagingKeys`、`scanArchives`）、`ai/session/RedisClusterScanSupport.java` |
 | 归档发现 = SCAN ∪ `ctx.turnNo` 推导（上限 2000） | `AiSessionPurgeService#archiveKeys/archivesFromTurnNo` |
 | run 13 键同槽 DEL | `ai/run/RunStore.java#deleteRunKeys` |
-| run 级键 tag：`{<tenantId>:<userId>:run:<runId>}` | `ai/tenant/RunKeyScope.java`、`RunStore#runTag` |
+| run 级键 tag：`{<tenantId>:<userId>:run:<runId>}`；取消键同样走 `runScopedKey` | `ai/tenant/RunKeyScope.java`、`RunStore#runTag`、`CancellationRegistry#cancelKey` |
 | 快照 JSON 字段与状态：RUNNING/SUSPENDED/DONE/FAILED/CANCELLED | `ai/run/RunSnapshot.java` |
 | 待决 HASH：field=toolCallId，value=PendingToolCall JSON | `ai/run/RunStore.java#saveSuspended/readPendings`、`ai/run/PendingToolCall.java` |
+| 恢复/列表索引：`ai:recovery:due`、身份 due、`ai:runs:<t>:<u>` 均为 ZSET；仅非终态 run 进入恢复索引 | `ai/run/RunStore.java#addRunIndexBestEffort/deleteRunKeys` |
 | 记忆键：`chat:mem:<t>:<u>:{<escapedId>}` + `:ver` / `:gen`；staging：`chat:mem:staging:<t>:<u>:{<escapedId>}:<uuid>` | `ai/memory/RedisChatMemoryRepository.java` |
-| transcript：`ai:tx:<t>:<u>:{<escapedId>}` + `:bytes/:ready/:truncated` | `ai/history/ConversationTranscriptStore.java` |
+| transcript：条目 HASH + `:order` ZSET + `:meta` HASH + `:truncated`；history 使用 `latest/before` | `ai/history/ConversationTranscriptStore.java`、`AiController#history` |
 | 帧 Stream：`ai:xevents:{tag}`，ID=`<seq>-0`，字段 `seq` + `frame` JSON；`ai:seq`、`ai:xack:<token>:<tag>`（120s）、`ai:xtrim:<tag>` | `ai/run/RedisFrameStore.java` |
 | 终帧探测预算 = 6000 + 256 帧，起点 = `lastSeq - 6256` | `ai/run/SseChatEmitter.java#terminalScanStart/scanArchive` |
 | guard / pending / due：`ai:purge:guard:*`、`ai:purge:pending:*`（无 TTL）、`ai:purge:retry:due` | `ai/session/SessionPurgeGuard.java`、`SessionPurgePendingStore.java` |
@@ -149,7 +150,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_SCENARIOS` | 空 | 逗号分隔；显式点名被阻止的场景会直接失败 |
 | `PERF_REPEAT` `PERF_WARMUP` `PERF_CONCURRENCY` | `2` `1` `1` | 每个破坏性场景每轮一个独立 copy；并发只作用于首个 DELETE；`concurrent_delete` 至少 2 路并发 |
 | `PERF_OUTPUT_DIR` | `./perf-redis-out` | 相对当前目录；跨设备可任意 |
-| `PERF_KEY_TTL_SECONDS` | `43200` | 所有生成键的兜底 TTL（12h） |
+| `PERF_KEY_TTL_SECONDS` | `43200` | 工具自有生成键的兜底 TTL（12h）；共享全局恢复索引键不设 TTL |
 | `PERF_BATCH_SIZE` `PERF_SCAN_COUNT` | `500` `1000` | pipeline 批量 / SCAN COUNT |
 | `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` | `200` | cleanup 回退 SCAN 的每节点页数上限；超限 `complete=false`/unknown |
 | `PERF_CLEANUP_SCAN_MAX_SECONDS` | `120` | cleanup 回退 SCAN 的共享单调时间预算；超时 `complete=false`/unknown |
@@ -159,7 +160,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_ENABLE_KB_RELOAD` | `false` | 是否允许 `POST /api/ai/kb/reload` |
 | `PERF_APP_FILE_STORAGE_PATH` | 空 | 应用 `app.file.storage-path` 的绝对路径，用于文件核对/删除 |
 | `PERF_ALLOW_FILE_DELETE` | `false` | true 才真正删生成的文件 |
-| `PERF_WRITE_GLOBAL_RUN_INDEX` | `false` | 是否把合成 run 写入全局 `ai:runs`。默认 false：应用的 startup-resume 会扫该索引，可能用真实模型驱动合成 run |
+| `PERF_WRITE_GLOBAL_RUN_INDEX` | `false` | 是否把非终态合成 run 写入全局 `ai:recovery:due`。默认 false：startup-resume 会扫该索引，可能用真实模型驱动合成 run。身份恢复/列表 ZSET 仍按生产协议生成，但只含本工具 run member |
 | `PERF_ALLOW_LARGE_SCALE` | `false` | 大规模场景开关 |
 | `PERF_ALLOW_BACKGROUND_MILLION` | `false` | 100 万背景键开关（还需 large） |
 
@@ -250,7 +251,7 @@ python -m perf_redis all
 
 ### 5.2 中断后恢复
 
-- 所有生成键都有 TTL（默认 12h）；即使机器断电也会自清。
+- 工具自有的生成键都有 TTL（默认 12h）；即使机器断电也会自清。共享全局恢复索引键不设 TTL，避免误伤其他 member；中断后用 cleanup 只 `ZREM` 本工具 member。
 - `manifest.json` 在**每个 copy 生成前**先写占位（含 `session_id`/场景/计划），中断后 `cleanup` 仍能按计划推导 runId 与键。
 - 直接再跑 `cleanup`（先 dry-run）即可；不要手动 `FLUSHDB`。
 - `generate` 对已生成场景会跳过；要**重新完整测量**，换 `PERF_NAMESPACE`（或换 `PERF_OUTPUT_DIR`）后重新 generate。
@@ -290,7 +291,7 @@ python -m perf_redis all
 | `feedback_rows` | H2 `ai_feedback` 行经真实接口写入/删除 |  | ✓ | ✓ |
 | `repeat_delete` | 同会话连续两次 DELETE 的幂等 | ✓ | ✓ | ✓ |
 | `concurrent_delete` | 同会话并发 DELETE（源码无记录级单飞） | ✓ | ✓ | ✓ |
-| `reads_suspended` | history/context/runs-current/runs 列表/runs/{id}/events-probe/cancel/pending/startup-resume | ✓ | ✓ | ✓ |
+| `reads_suspended` | history latest+before/context/runs-current/runs 列表/runs/{id}/events-probe/cancel/pending/startup-resume | ✓ | ✓ | ✓ |
 | `health_read` | `GET /api/ai/health` | ✓ | ✓ | ✓ |
 | `kb_status_read` | KB 状态只读（KB 缓存不属于会话销毁面） | ✓ | ✓ | ✓ |
 | `kb_reload` | 可选：本地 Lucene 重建（需显式开启） |  | ✓ | ✓ |
@@ -303,12 +304,14 @@ python -m perf_redis all
 ### 6.1 数据形状
 
 - 会话号：`p-<namespace>-<scenario>-<copy>`；runId：`<sessionId>-r<i>`。两者都是不透明字符串，删除服务按精确键/转义 glob 处理，支持非数字 id。
-- run 快照：`ai:run:{<t>:<u>:run:<id>}`，JSON 字段与 `RunSnapshot` 一致（`runId/sessionId/tenantId/userId/status/messageJson/...`）。
+- run 快照：`ai:run:{<t>:<u>:run:<id>}`，JSON 字段与 `RunSnapshot` 一致（`runId/sessionId/tenantId/userId/status/messageJson/...`）；取消键为 `ai:cancel:{<t>:<u>:run:<id>}`。
 - 待决：`ai:pending:{...}` HASH，field=`toolCallId`，value=`PendingToolCall` JSON；`ai:req`/`ai:decided`/`ai:claim` 为 HASH。
+- 索引：所有 run 在 `ai:runs:<t>:<u>` ZSET 中以 `runId` 为 member、`updatedAtMs` 为 score；非终态 run 还在身份 `ai:recovery:due:<t>:<u>` 中以 `runId` 为 member，并可选写入全局 `ai:recovery:due`（member=`t/u/runId`）。score 的 due 延迟采用生产默认 180s；共享全局键不设 TTL。
+- transcript：data HASH 的 field=`entryId`、value=`TranscriptEntry` JSON；`:order` ZSET 的 score 从 1 递增；`:meta` HASH 包含 `bytes/seq/rev/fence:<entryId>`；未发生裁剪时不写 `:truncated`。
 - Stream：`ai:xevents:{...}`，`XADD <seq>-0 seq <n> frame <json>`；终帧 `{"type":"done"|"error","seq":n,...}`。
 - 附件：**只通过真实上传口** `POST /api/ai/form/attachments` 生成（需要先有 SUSPENDED run + `generative_form` PENDING）。工具随后从登记键读取 `storagePath` 存档。
 - 反馈：**只通过真实** `POST /api/ai/feedback` 生成。
-- 其它：`ai:ctx:*`、`ai:tx:*`、`chat:mem:*`、`ai:ctdraft:*`、`ai:creq:*`、`ai:session:*`、`ai:beat/activity/cancel/observed`。
+- 其它：`ai:ctx:*`、`chat:mem:*`、`ai:ctdraft:*`、`ai:creq:*`、`ai:session:*`、`ai:beat/activity/observed`。
 
 ---
 
@@ -379,7 +382,7 @@ python -m perf_redis all
    - pending 若存在：无 TTL、`verifyAtMs` 非空、在 `ai:purge:retry:due`；
    - `gen/ver` 必须存在且 TTL>0（有意 tombstone）；
    - `xack` 若存在 TTL ∈ (0,130]；`xtrim`/`session lock` 仅报告；
-   - `ai:runs` 全局成员必须已 SREM；
+   - 全局/身份恢复及身份列表 ZSET 中本 run 的 member 必须已 `ZREM`；`ZSCORE` 读取失败记 `unknown`，不得当成不存在；
    - 附件登记/索引/文件按响应 `attachments.registrationsDeleted` 与磁盘核对；
    - 反馈行通过 `GET /api/ai/feedback` 按 messageId 核对（列表上限 100；达到上限记 `info`，不伪报 pass）。
 2. `complete=false`
@@ -393,7 +396,7 @@ python -m perf_redis all
 4. 只读场景
    - 每个读接口 HTTP 2xx（health 允许 503）；
    - 读后数据仍完整（不会被读接口删除）；
-   - `runs/current found=true`（有 SUSPENDED 时）、`runs/{id} exists=true`、history 非空。
+   - `runs/current found=true`（有 SUSPENDED 时）、`runs/{id} exists=true`；history latest/before 除总数外，必须按夹具 entryId/文本序号核对预期范围、升序、两页不重叠及 `nextCursor/hasMore`。
    - 因 measure 预算超时未完成的读请求记 `unknown`，不当作该接口通过或失败。
 
 状态含义：`pass` 通过；`fail` 明确违反；`unknown` 读/接口不可达、生成键清单不可知、预算超时，不能当通过；`info` 有意保留或不可判定；`skip` 场景未生成或未测量。
@@ -412,13 +415,13 @@ python -m perf_redis all
 - 清理范围：
   - manifest 推导的本命名空间会话/run/上下文/记忆/transcript/附件登记；
   - 本命名空间 `perf:bg:*`：按 manifest 的 bucket/planned 与确定性 key 公式分批删除，**不做背景 SCAN**；每批删除后用精确 EXISTS 复核。manifest 记录 `planned` 与逐批 `written` 进度（旧 manifest 的 `count/written` 兼容）；
-  - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:purge:retry:due` 成员、`ai:runs` 成员；
+  - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:purge:retry:due` 成员，以及全局 `ai:recovery:due`、身份 `ai:recovery:due:<t>:<u>`、列表 `ai:runs:<t>:<u>` 中本工具 run 的 ZSET member；
   - archive/staging/活跃 run tag 的 app 剩余键：优先用已推导精确键；仍需发现的回退 SCAN 有 `PERF_CLEANUP_SCAN_MAX_PAGES_PER_NODE` 与 `PERF_CLEANUP_SCAN_MAX_SECONDS` 双重预算，超预算记 `complete=false`/unknown，不伪报干净；
   - 附件文件仅在 `PERF_ALLOW_FILE_DELETE=true` 且路径**严格位于** `PERF_APP_FILE_STORAGE_PATH` 下的普通文件时删除；存储根目录本身、越界路径、目录/符号链接一律拒绝，不进入删除。
   - 反馈行通过真实 `POST /api/ai/feedback`（rating=0）删除。
 - `cleanup` 默认 dry-run，输出精确键数、样本、背景 planned/written 清单、文件、反馈清单；`--execute` 才删除。没有 manifest 时无法确认历史背景键，会明确 `complete=false`（不再用通配 SCAN 冒充清理）。
 - 附件场景若未配置 `PERF_APP_FILE_STORAGE_PATH` / `PERF_ALLOW_FILE_DELETE=true`，`verify` 会把文件存在性记为 `unknown`，`cleanup` 会因“文件不可确认/仍存在”报 `complete=false`；这是有意为之，不伪报干净。
-- 不会删除：`ai:runs` / `ai:purge:retry:due` 键本身、其他会话、业务作业/任务/配置、KB 缓存、`ai:lock:task:*`。
+- 不会删除：`ai:recovery:due*` / `ai:runs:*` / `ai:purge:retry:due` 索引键本身、其他 member、其他会话、业务作业/任务/配置、KB 缓存、`ai:lock:task:*`；也不会给共享全局恢复索引设置 TTL。
 
 ---
 
