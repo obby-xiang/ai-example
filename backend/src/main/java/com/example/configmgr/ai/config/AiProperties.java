@@ -616,6 +616,11 @@ public class AiProperties {
 			throw new IllegalStateException("app.ai.kb.refresh-interval 必须 > 0（当前 = " + kb.getRefreshInterval()
 					+ "）：0/负值等于关闭定时刷新，生产 HTTP 源的增量永远不发生");
 		}
+		if (kb.getRefreshWaitBudget() == null || kb.getRefreshWaitBudget().isZero()
+				|| kb.getRefreshWaitBudget().isNegative()) {
+			throw new IllegalStateException("app.ai.kb.refresh-wait-budget 必须 > 0（当前 = "
+					+ kb.getRefreshWaitBudget() + "）：0/负值会使刷新等待与可控阶段检查失去预算");
+		}
 		String source = kb.getSource();
 		if (!"local".equalsIgnoreCase(source) && !"http".equalsIgnoreCase(source)) {
 			throw new IllegalStateException("app.ai.kb.source 只支持 local / http（当前 = " + source + "）");
@@ -1469,6 +1474,9 @@ public class AiProperties {
 		/** 定时刷新间隔（默认 10m；0/负值启动失败，见 {@code verifyKb}）。 */
 		private Duration refreshInterval = Duration.ofMinutes(10);
 
+		/** 单轮刷新的等待预算（默认 30s；不是不可中断底层 I/O 的硬截止）。 */
+		private Duration refreshWaitBudget = Duration.ofSeconds(30);
+
 		/** {@code kb_search} 的默认条数（5）。 */
 		private int topKDefault = 5;
 
@@ -1509,10 +1517,10 @@ public class AiProperties {
 			/** 是否启用缓存层（Redis 不可用时自动降级直连源，见 {@code CachedKbSource}）。 */
 			private boolean enabled = true;
 
-			/** 刷新权锁的 TTL（{@code SET NX PX}，默认 30s；不续租，过期即让位）。 */
+			/** 刷新权锁的 TTL（{@code SET NX PX}，默认 30s；持有者按 TTL/3 以 token 续租，崩溃后过期让位）。 */
 			private Duration lockTtl = Duration.ofSeconds(30);
 
-			/** 版本号轮询间隔（默认 30s）：其它实例 INCR 后，本实例最迟一个轮询周期发现并重建。 */
+			/** 版本号轮询间隔（默认 30s）：其它实例在 manifest HASH 内随 JSON 原子发布 cv3 后，本实例最迟一个周期发现。 */
 			private Duration versionPollInterval = Duration.ofSeconds(30);
 		}
 

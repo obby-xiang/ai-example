@@ -476,6 +476,13 @@
       "reason": "本批以有界缓存共享Markdown分块，并统一停止后仅阻断新动作而保留真实工具结局；D6迁移接口与恢复协议不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:bb4a9f66f251e6dc52f1a79d1dfc7c3aa8da044dccec852d341b397b86b37dd4",
+      "status": "synced",
+      "reason": "已同步完整manifest规范化散列cv3、同一发布字节与ETag，以及刷新等待预算和token续租的真实语义",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

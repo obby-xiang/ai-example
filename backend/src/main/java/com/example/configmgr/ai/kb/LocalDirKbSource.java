@@ -6,10 +6,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -23,8 +19,6 @@ import java.util.List;
  * （{@code ../} 越界一律 {@link KbSourceException}）—— manifest 可能由外部维护，不能当成可信输入。
  */
 public class LocalDirKbSource implements KbSource {
-
-    private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final Path dir;
 
@@ -71,6 +65,9 @@ public class LocalDirKbSource implements KbSource {
         catch (IOException e) {
             throw new KbSourceException("读取 manifest.json 失败：" + e.getMessage(), e);
         }
+        if (budget != null) {
+            budget.check();
+        }
         KbManifest manifest = KbManifest.parse(raw, this.mapper);
         manifest.validate();
         List<KbDocMeta> resolved = new ArrayList<>(manifest.docs().size());
@@ -91,13 +88,16 @@ public class LocalDirKbSource implements KbSource {
             catch (IOException e) {
                 throw new KbSourceException("读取知识文档失败：" + meta.id() + "：" + e.getMessage(), e);
             }
+            if (budget != null) {
+                // 文件读取本身不可硬中断，只能在调用前后检查。
+                budget.check();
+            }
             String content = new String(body, StandardCharsets.UTF_8);
             String actualSha = KbHashing.sha256Text(content);
             if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
                 throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
             }
-            String updatedAt = meta.updatedAt() == null || meta.updatedAt().isBlank()
-                    ? fileDate(file) : meta.updatedAt();
+            String updatedAt = meta.updatedAt() == null ? "" : meta.updatedAt();
             resolved.add(new KbDocMeta(meta.id(), meta.title(), meta.summary(), meta.tags(), meta.aliases(),
                     actualSha, updatedAt, meta.file(), meta.terms(), meta.aliasesEn()));
             contents.put(meta.id(), content);
@@ -138,16 +138,6 @@ public class LocalDirKbSource implements KbSource {
             throw new KbSourceException("知识文档路径越界（必须是知识目录内的相对路径）：" + meta.id());
         }
         return resolved;
-    }
-
-    private static String fileDate(Path file) {
-        try {
-            FileTime time = Files.getLastModifiedTime(file);
-            return DATE.format(Instant.ofEpochMilli(time.toMillis()).atZone(ZoneId.systemDefault()));
-        }
-        catch (IOException e) {
-            return "";
-        }
     }
 
 }

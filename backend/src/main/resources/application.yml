@@ -326,6 +326,8 @@ app:
       index-dir: ./data/kb-index
       # 定时增量刷新（sha 变才重建该篇；http 另用 ETag 短路整份未变）。
       refresh-interval: 10m
+      # 单轮刷新等待预算（必须 > 0；可控阶段检查，不是不可中断底层 I/O 的硬截止）。
+      refresh-wait-budget: 30s
       # top_k 默认 5 / 上限 10：服务端强截，模型给多少都不会超过上限。
       top-k-default: 5
       top-k-max: 10
@@ -343,9 +345,9 @@ app:
       # Redis 不可用时自动降级直连知识源（WARN），单实例功能不受影响。
       cache:
         enabled: true
-        # 刷新权锁 SET NX PX 的 TTL（不续租；过期让位，防崩溃实例永久锁死刷新）。
+        # 刷新权锁 SET NX PX 的 TTL（持有者按 TTL/3 以 token 续租；崩溃后过期让位，防永久锁死刷新）。
         lock-ttl: 30s
-        # 版本号轮询间隔：其它实例 INCR kb:cache:manifest:version 后，本实例最迟一个周期发现并重建。
+        # 版本号轮询间隔：其它实例在 manifest HASH 内随 JSON 原子发布 cv3 后，本实例最迟一个周期发现并重建。
         version-poll-interval: 30s
       # 生产 HTTP 源（source=http 时 base-url 必填，否则启动失败）。
       http:

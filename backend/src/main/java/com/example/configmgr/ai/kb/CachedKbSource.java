@@ -86,7 +86,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
     @Override
     public KbSource.ManifestFetch fetchManifest(String previousEtag, boolean force) throws KbSourceException {
         return fetchManifest(previousEtag, force,
-                KbSource.RefreshBudget.within(Duration.ofSeconds(30)));
+                KbSource.RefreshBudget.within(this.kb.getRefreshWaitBudget()));
     }
 
     @Override
@@ -117,7 +117,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
 
     @Override
     public String fetchContent(KbDocMeta meta) throws KbSourceException {
-        return fetchContent(meta, KbSource.RefreshBudget.within(Duration.ofSeconds(30)));
+        return fetchContent(meta, KbSource.RefreshBudget.within(this.kb.getRefreshWaitBudget()));
     }
 
     @Override
@@ -338,8 +338,10 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             }
         }
 
-        KbManifest effectiveManifest = new KbManifest(sourceManifest.version(), sourceManifest.generatedAt(),
-                effectiveDocs);
+        List<KbDocMeta> canonicalDocs = effectiveDocs.stream()
+                .sorted(java.util.Comparator.comparing(KbDocMeta::id))
+                .toList();
+        KbManifest effectiveManifest = new KbManifest(sourceManifest.version(), "", canonicalDocs);
         String json;
         try {
             json = this.mapper.writeValueAsString(effectiveManifest);
@@ -348,12 +350,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             throw new KbSourceException("知识清单序列化失败：" + e.getMessage(), e);
         }
         String etag = isBlank(sourceEtag) ? KbHashing.sha256Hex(json) : sourceEtag;
-        StringBuilder stableContent = new StringBuilder();
-        effectiveDocs.stream()
-                .map(doc -> doc.id() + ":" + doc.sha() + "\n")
-                .sorted()
-                .forEach(stableContent::append);
-        String corpusVersion = "cv2:" + KbHashing.sha256Hex(stableContent.toString());
+        String corpusVersion = "cv3:" + KbHashing.sha256Hex(json);
         lease.requireValid(budget);
         if (!this.cache.publishManifest(new KbCache.ManifestEntry(etag, corpusVersion, json), generation,
                 lease.token)) {

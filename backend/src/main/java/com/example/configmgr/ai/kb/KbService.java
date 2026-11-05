@@ -274,7 +274,7 @@ public class KbService {
     // ---------------------------------------------------------------- refresh
 
     /**
-     * 单飞刷新；管理端点在既有执行器上提交任务并按总预算有界等待，超时不硬中断执行中的 I/O。
+     * 单飞刷新；管理端点按 refresh-wait-budget 有界等待，工作线程仅在可控点停止，不硬中断底层 I/O。
      *
      * @return true = 本次真的重建了索引；false = 未变化、已有刷新在飞、超时或失败
      */
@@ -286,7 +286,8 @@ public class KbService {
         if (!enabled() || this.stopped || !this.reloadRunning.compareAndSet(false, true)) {
             return false;
         }
-        KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(java.time.Duration.ofSeconds(30));
+        java.time.Duration refreshWaitBudget = this.properties.getKb().getRefreshWaitBudget();
+        KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(refreshWaitBudget);
         if (this.scheduler == null || Thread.currentThread() == this.refreshThread) {
             return performRefresh(force, budget);
         }
@@ -307,7 +308,8 @@ public class KbService {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
-            this.lastError = "KB reload 超过 30 秒总预算；未强制中断执行中的 I/O";
+            this.lastError = "KB reload 等待超过预算 " + refreshWaitBudget.toMillis()
+                    + "ms；未强制中断执行中的 I/O";
             return false;
         }
         catch (InterruptedException e) {
@@ -377,7 +379,8 @@ public class KbService {
                 nextDocs.put(meta.id(), new KbDoc(effectiveMeta, content, sections, chunks));
             }
 
-            if (old != null && sameDocuments(old, nextDocs)) {
+            if (old != null && sameDocuments(old, nextDocs)
+                    && Objects.equals(old.manifest.version(), manifest.version())) {
                 this.lastEtag = fetched.etag();
                 this.consecutiveFailures = 0;
                 this.lastError = "";
@@ -386,7 +389,7 @@ public class KbService {
             }
 
             budget.check();
-            buildDir = newBuildDir();
+            buildDir = newBuildDir(budget);
             Snapshot built = buildSnapshot(manifest, nextDocs, buildDir, budget);
             if (this.stopped) {
                 built.retire();
@@ -417,7 +420,12 @@ public class KbService {
                         this.lastError);
             }
             if (buildDir != null) {
-                deleteRecursively(buildDir);
+                try {
+                    deleteRecursively(buildDir, budget);
+                }
+                catch (KbSourceException cleanupError) {
+                    this.lastError = safeMessage(cleanupError);
+                }
             }
             return false;
         }
@@ -432,20 +440,27 @@ public class KbService {
         }
     }
 
-    private Path newBuildDir() throws IOException {
+    private Path newBuildDir(KbSource.RefreshBudget budget) throws Exception {
         Path indexDir = Path.of(this.properties.getKb().getIndexDir()).toAbsolutePath().normalize();
+        budget.check();
         Files.createDirectories(indexDir);
-        cleanupStaleBuildDirs(indexDir);
+        budget.check();
+        cleanupStaleBuildDirs(indexDir, budget);
+        budget.check();
         return Files.createDirectories(indexDir.resolve("build-" + System.nanoTime()));
     }
 
-    private void cleanupStaleBuildDirs(Path indexDir) {
+    private void cleanupStaleBuildDirs(Path indexDir, KbSource.RefreshBudget budget) throws KbSourceException {
         Path live = this.snapshot == null ? null : this.snapshot.dir;
         try (Stream<Path> children = Files.list(indexDir)) {
-            children.filter(Files::isDirectory)
-                    .filter(path -> path.getFileName().toString().startsWith("build-"))
-                    .filter(path -> live == null || !path.equals(live))
-                    .forEach(KbService::deleteRecursively);
+            for (Path path : (Iterable<Path>) children::iterator) {
+                budget.check();
+                if (Files.isDirectory(path) && path.getFileName().toString().startsWith("build-")
+                        && (live == null || !path.equals(live))) {
+                    deleteRecursively(path, budget);
+                }
+            }
+            budget.check();
         }
         catch (IOException e) {
             log.debug("Failed to clean stale KB build dir: {}", e.getMessage());
@@ -454,9 +469,11 @@ public class KbService {
 
     private Snapshot buildSnapshot(KbManifest manifest, Map<String, KbDoc> docs, Path buildDir,
             KbSource.RefreshBudget budget) throws Exception {
+        budget.check();
         Directory directory = FSDirectory.open(buildDir);
         DirectoryReader reader = null;
         try {
+            budget.check();
             IndexWriterConfig config = new IndexWriterConfig(this.analyzer);
             config.setSimilarity(new BM25Similarity());
             config.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
@@ -482,10 +499,12 @@ public class KbService {
                     }
                 }
                 budget.check();
+                // commit/close 不可硬中断；等待方独立超时，工作线程只在下一可控点停止。
                 writer.commit();
             }
             budget.check();
             reader = DirectoryReader.open(directory);
+            budget.check();
             Map<String, KbTermEntry> terms = buildTermIndex(manifest, docs, budget);
             budget.check();
             return new Snapshot(manifest, docs, reader, directory, buildDir, terms);
@@ -994,6 +1013,32 @@ public class KbService {
         }
         catch (IOException ignored) {
             // 同上
+        }
+    }
+
+    private static void deleteRecursively(Path path, KbSource.RefreshBudget budget) throws KbSourceException {
+        if (path == null) {
+            return;
+        }
+        budget.check();
+        if (!Files.exists(path)) {
+            return;
+        }
+        budget.check();
+        try (Stream<Path> walk = Files.walk(path)) {
+            for (Path item : (Iterable<Path>) walk.sorted(Comparator.reverseOrder())::iterator) {
+                budget.check();
+                try {
+                    Files.deleteIfExists(item);
+                }
+                catch (IOException ignored) {
+                    // 单个文件系统调用不可硬中断；下一可控点再检查预算。
+                }
+            }
+            budget.check();
+        }
+        catch (IOException ignored) {
+            // 与无预算的快照清理一致：占用或删除失败留待后续收口。
         }
     }
 

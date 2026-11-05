@@ -82,7 +82,8 @@ public interface KbSource {
         public java.time.Duration remaining() throws KbSourceException {
             long remaining = this.deadlineNanos - System.nanoTime();
             if (remaining <= 0L) {
-                throw new KbSourceException("KB 刷新超过总预算 " + (this.budgetNanos / 1_000_000L) + "ms");
+                throw new KbSourceException("KB 刷新等待超过预算 " + (this.budgetNanos / 1_000_000L)
+                        + "ms（底层 I/O 可能不可中断）");
             }
             return java.time.Duration.ofNanos(remaining);
         }
