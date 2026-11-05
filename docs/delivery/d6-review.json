@@ -644,6 +644,13 @@
       "reason": "已同步KB禁用时披露与执行同源过滤，以及check_job_status和generative_form通用scope边界",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:4b9500c7ce47dc5b1d1dde680c63b1cd06b38d0e7da4ef883c6c0b2022388391",
+      "status": "synced",
+      "reason": "已同步check_job_status仅在任务中心与任务内披露的渐进范围，保留显式jobId只读查询",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

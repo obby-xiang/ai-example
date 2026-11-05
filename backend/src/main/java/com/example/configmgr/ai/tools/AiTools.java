@@ -338,7 +338,7 @@ public class AiTools {
 
     @Tool(name = AiToolNames.CHECK_JOB_STATUS, description = "查询作业状态和进度",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope("*")
+    @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String checkJobStatus(
